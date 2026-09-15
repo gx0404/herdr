@@ -1,0 +1,3 @@
+# Graphify 索引排除（与 .gitignore 合并语义，作用于本目录起）。生成物不进图：
+# bindgen 产物是数千个 extern 声明，只产生噪声节点。
+ghostty/bindings.rs
