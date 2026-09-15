@@ -119,7 +119,7 @@ pub(crate) fn integration_target_install_layout_available(
     target: crate::api::schema::IntegrationTarget,
 ) -> bool {
     match target {
-        crate::api::schema::IntegrationTarget::Codex => codex_standalone_binary_available(),
+        crate::api::schema::IntegrationTarget::Codex => codex_install_layout_available(),
         crate::api::schema::IntegrationTarget::Hermes => hermes_install_layout_available(),
         _ => false,
     }
@@ -178,6 +178,14 @@ pub(crate) fn executable_file_exists(path: &Path) -> bool {
     }
 }
 
+/// Codex availability must not depend on the server process inheriting an
+/// interactive-shell PATH: detached servers (daemon/GUI launch) miss the
+/// version-manager bin dirs where npm installs land, so both the native
+/// standalone layout and the npm-managed layouts are checked by path.
+pub(crate) fn codex_install_layout_available() -> bool {
+    codex_standalone_binary_available() || codex_npm_managed_binary_available()
+}
+
 pub(crate) fn codex_standalone_binary_available() -> bool {
     let Ok(releases_dir) =
         codex_dir().map(|dir| dir.join("packages").join("standalone").join("releases"))
@@ -191,6 +199,49 @@ pub(crate) fn codex_standalone_binary_available() -> bool {
     entries.filter_map(Result::ok).any(|entry| {
         executable_file_exists(&entry.path().join("bin").join(codex_executable_name()))
     })
+}
+
+fn codex_npm_managed_binary_available() -> bool {
+    let Ok(home) = home_dir() else {
+        return false;
+    };
+
+    codex_nvm_bin_available(&home)
+        || [".volta/bin", ".bun/bin", ".local/share/pnpm"]
+            .iter()
+            .any(|segment| codex_executable_in_dir(&home.join(segment)))
+        || codex_windows_npm_bin_available()
+}
+
+fn codex_nvm_bin_available(home: &Path) -> bool {
+    let Ok(entries) = fs::read_dir(home.join(".nvm").join("versions").join("node")) else {
+        return false;
+    };
+
+    entries
+        .filter_map(Result::ok)
+        .any(|entry| codex_executable_in_dir(&entry.path().join("bin")))
+}
+
+fn codex_executable_in_dir(dir: &Path) -> bool {
+    command_path_candidates(dir, "codex")
+        .into_iter()
+        .any(|path| executable_file_exists(&path))
+}
+
+fn codex_windows_npm_bin_available() -> bool {
+    #[cfg(windows)]
+    {
+        std::env::var_os("APPDATA")
+            .filter(|value| !value.is_empty())
+            .map(|appdata| codex_executable_in_dir(&Path::new(&appdata).join("npm")))
+            .unwrap_or(false)
+    }
+
+    #[cfg(not(windows))]
+    {
+        false
+    }
 }
 
 pub(crate) fn codex_executable_name() -> &'static str {

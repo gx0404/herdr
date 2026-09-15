@@ -465,6 +465,162 @@ fn codex_availability_finds_standalone_binary_under_codex_home() {
 }
 
 #[test]
+fn codex_availability_finds_nvm_managed_npm_binary() {
+    let _lock = integration_env_lock();
+    let base = unique_base();
+    let home = base.join("home");
+    let bin = home.join(".nvm/versions/node/v24.0.0").join("bin");
+    fs::create_dir_all(&bin).unwrap();
+    let binary = bin.join(codex_executable_name());
+    fs::write(&binary, "").unwrap();
+    make_executable(&binary).unwrap();
+    let original_home = std::env::var_os("HOME");
+    let original_path = std::env::var_os("PATH");
+    let original_codex_home = std::env::var_os(CODEX_HOME_ENV_VAR);
+    std::env::set_var("HOME", &home);
+    std::env::set_var("PATH", "");
+    std::env::remove_var(CODEX_HOME_ENV_VAR);
+
+    assert!(integration_target_available(
+        crate::api::schema::IntegrationTarget::Codex
+    ));
+
+    if let Some(home) = original_home {
+        std::env::set_var("HOME", home);
+    } else {
+        std::env::remove_var("HOME");
+    }
+    if let Some(path) = original_path {
+        std::env::set_var("PATH", path);
+    } else {
+        std::env::remove_var("PATH");
+    }
+    if let Some(codex_home) = original_codex_home {
+        std::env::set_var(CODEX_HOME_ENV_VAR, codex_home);
+    } else {
+        std::env::remove_var(CODEX_HOME_ENV_VAR);
+    }
+    let _ = fs::remove_dir_all(base);
+}
+
+#[test]
+fn codex_availability_finds_js_package_manager_global_bins() {
+    let _lock = integration_env_lock();
+    let base = unique_base();
+    let original_home = std::env::var_os("HOME");
+    let original_path = std::env::var_os("PATH");
+    let original_codex_home = std::env::var_os(CODEX_HOME_ENV_VAR);
+    std::env::set_var("PATH", "");
+    std::env::remove_var(CODEX_HOME_ENV_VAR);
+
+    for segment in [".volta/bin", ".bun/bin", ".local/share/pnpm"] {
+        let home = base.join(segment.replace(['/', '.'], "_"));
+        let bin = home.join(segment);
+        fs::create_dir_all(&bin).unwrap();
+        let binary = bin.join(codex_executable_name());
+        fs::write(&binary, "").unwrap();
+        make_executable(&binary).unwrap();
+        std::env::set_var("HOME", &home);
+
+        assert!(
+            integration_target_available(crate::api::schema::IntegrationTarget::Codex),
+            "codex should be available via {segment}"
+        );
+    }
+
+    if let Some(home) = original_home {
+        std::env::set_var("HOME", home);
+    } else {
+        std::env::remove_var("HOME");
+    }
+    if let Some(path) = original_path {
+        std::env::set_var("PATH", path);
+    } else {
+        std::env::remove_var("PATH");
+    }
+    if let Some(codex_home) = original_codex_home {
+        std::env::set_var(CODEX_HOME_ENV_VAR, codex_home);
+    } else {
+        std::env::remove_var(CODEX_HOME_ENV_VAR);
+    }
+    let _ = fs::remove_dir_all(base);
+}
+
+#[test]
+#[cfg(windows)]
+fn codex_availability_finds_windows_npm_global_shim() {
+    let _lock = integration_env_lock();
+    let base = unique_base();
+    let home = base.join("home");
+    let npm_bin = base.join("appdata").join("npm");
+    fs::create_dir_all(&npm_bin).unwrap();
+    fs::write(npm_bin.join("codex.cmd"), "@echo off\r\n").unwrap();
+    let original_home = std::env::var_os("HOME");
+    let original_path = std::env::var_os("PATH");
+    let original_codex_home = std::env::var_os(CODEX_HOME_ENV_VAR);
+    std::env::set_var("HOME", &home);
+    std::env::set_var("PATH", "");
+    std::env::remove_var(CODEX_HOME_ENV_VAR);
+    std::env::set_var("APPDATA", base.join("appdata"));
+
+    assert!(integration_target_available(
+        crate::api::schema::IntegrationTarget::Codex
+    ));
+
+    if let Some(home) = original_home {
+        std::env::set_var("HOME", home);
+    } else {
+        std::env::remove_var("HOME");
+    }
+    if let Some(path) = original_path {
+        std::env::set_var("PATH", path);
+    } else {
+        std::env::remove_var("PATH");
+    }
+    if let Some(codex_home) = original_codex_home {
+        std::env::set_var(CODEX_HOME_ENV_VAR, codex_home);
+    } else {
+        std::env::remove_var(CODEX_HOME_ENV_VAR);
+    }
+    let _ = fs::remove_dir_all(base);
+}
+
+#[test]
+fn codex_availability_stays_false_without_path_or_layout() {
+    let _lock = integration_env_lock();
+    let base = unique_base();
+    let home = base.join("home");
+    fs::create_dir_all(&home).unwrap();
+    let original_home = std::env::var_os("HOME");
+    let original_path = std::env::var_os("PATH");
+    let original_codex_home = std::env::var_os(CODEX_HOME_ENV_VAR);
+    std::env::set_var("HOME", &home);
+    std::env::set_var("PATH", "");
+    std::env::remove_var(CODEX_HOME_ENV_VAR);
+
+    assert!(!integration_target_available(
+        crate::api::schema::IntegrationTarget::Codex
+    ));
+
+    if let Some(home) = original_home {
+        std::env::set_var("HOME", home);
+    } else {
+        std::env::remove_var("HOME");
+    }
+    if let Some(path) = original_path {
+        std::env::set_var("PATH", path);
+    } else {
+        std::env::remove_var("PATH");
+    }
+    if let Some(codex_home) = original_codex_home {
+        std::env::set_var(CODEX_HOME_ENV_VAR, codex_home);
+    } else {
+        std::env::remove_var(CODEX_HOME_ENV_VAR);
+    }
+    let _ = fs::remove_dir_all(base);
+}
+
+#[test]
 fn integration_recommendations_mark_standalone_codex_available() {
     let _lock = integration_env_lock();
     let base = unique_base();
