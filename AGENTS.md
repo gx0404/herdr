@@ -21,7 +21,8 @@ python3 scripts/resolve_agent_rules.py --check                   # 闭集/体积
 
 ## 语言与协作
 
-- 与人类用其使用的语言交流；代码、标识符、commit message 保持英文。
+- 与人类用其使用的语言交流；代码、标识符保持英文；commit message 的描述用
+  中文（`type(scope): 中文描述`，type 前缀保持英文 conventional 格式）。
 - 规则真源唯一：领域规则只维护在 `docs/AGENT_RULES/`；工具适配层与 reviewer
   只引用 resolver，不复制清单。
 - 先读代码再下结论；长期引用写 `模块路径::符号`，不钉行号。
@@ -96,19 +97,20 @@ python3 scripts/resolve_agent_rules.py --check                   # 闭集/体积
 
 ## 提交规范
 
-lowercase conventional commits，无 emoji，无 AI co-author 行；subject 有描述性
-（进入 preview 发布说明）。与 GitHub issue 相关的正常 feature/fix commit 在
-body 加 `refs #<编号>`，不用 `fixes/closes/resolves`（release CI 在发布后关闭
-issue）：
+conventional commit 格式：小写英文 type 前缀（可带 scope），冒号后的描述用中文；
+无 emoji，无 AI co-author 行；subject 有描述性（进入 preview 发布说明）。与
+GitHub issue 相关的正常 feature/fix commit 在 body 加 `refs #<编号>`，不用
+`fixes/closes/resolves`（release CI 在发布后关闭 issue）：
 
 ```text
-fix: handle pane focus
+fix: 修复窗格焦点丢失
 
 refs #82
 ```
 
 `.githooks`（`just install-hooks`）与 CI 用 `scripts/conventional_commits.py`
-强制。提交前先提出 commit message 并对齐；未经对齐不 commit/push。
+强制（格式校验对中文描述兼容）。提交前先提出 commit message 并对齐；未经对齐
+不 commit/push。
 
 ## 领域规则索引
 
