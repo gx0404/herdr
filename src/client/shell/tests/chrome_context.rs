@@ -233,11 +233,15 @@ fn client_owned_sidebar_dividers_resize_live() {
         .iter()
         .map(|cell| cell.symbol.as_str())
         .collect();
+    let compact: String = waiting_text
+        .chars()
+        .filter(|ch| !ch.is_whitespace())
+        .collect();
     assert!(
-        waiting_text.contains(" spaces"),
+        compact.contains("工作区"),
         "local sidebar must keep spaces while resizing: {waiting_text}"
     );
-    assert!(!waiting_text.contains(" machines"));
+    assert!(!compact.contains("机器"));
     assert!(!waiting_text.contains("Select a connected machine"));
     assert!(!waiting_text.contains("LIVE"));
     assert!(waiting_frame.cursor.is_none());
@@ -273,7 +277,11 @@ fn client_owned_sidebar_dividers_resize_live() {
         .iter()
         .map(|cell| cell.symbol.as_str())
         .collect();
-    assert!(recovered_text.contains(" spaces"));
+    let compact: String = recovered_text
+        .chars()
+        .filter(|ch| !ch.is_whitespace())
+        .collect();
+    assert!(compact.contains("工作区"));
     assert!(recovered_text.contains("LIVE"));
     assert!(!state.hits.panes.is_empty());
     let section_divider = state.hits.sidebar_section_divider;
@@ -404,10 +412,11 @@ fn global_menu_opens_from_sidebar_and_routes_client_actions() {
         })
         .collect::<Vec<_>>()
         .join("\n");
-    assert!(text.contains("settings"));
-    assert!(text.contains("keybinds"));
-    assert!(text.contains("reload config"));
-    assert!(text.contains("detach"));
+    let compact: String = text.chars().filter(|ch| !ch.is_whitespace()).collect();
+    assert!(compact.contains("设置"));
+    assert!(compact.contains("快捷键"));
+    assert!(compact.contains("重载配置"));
+    assert!(compact.contains("分离"));
 
     let keybinds = state.hits.global_menu_rows[1].0;
     let help = state.handle_raw_events(vec![RawInputEvent::Mouse(crossterm::event::MouseEvent {
@@ -449,8 +458,9 @@ fn new_tab_overlay_owns_text_cursor_and_submits_public_api_request() {
         })
         .collect::<Vec<_>>()
         .join("\n");
-    assert!(text.contains("new tab"));
-    assert!(text.contains("save"));
+    let compact: String = text.chars().filter(|ch| !ch.is_whitespace()).collect();
+    assert!(compact.contains("新建标签页"));
+    assert!(compact.contains("保存"));
     let restored = frame.to_ratatui_buffer().expect("overlay frame");
     assert!(!restored
         .cell((26, 7))
@@ -510,8 +520,9 @@ fn close_confirmation_error_becomes_client_owned_overlay_and_stable_group_close(
         })
         .collect::<Vec<_>>()
         .join("\n");
-    assert!(text.contains("Close workspace?"));
-    assert!(text.contains("1 pane"));
+    let compact: String = text.chars().filter(|ch| !ch.is_whitespace()).collect();
+    assert!(compact.contains("关闭工作区？"));
+    assert!(compact.contains("1个窗格"));
 
     let confirm = state.handle_input_bytes(b"\r");
     let [ClientShellAction::Endpoint { request, .. }] = &confirm.actions[..] else {

@@ -72,53 +72,54 @@ pub(super) fn render_mode_bar(
     let prefix_rhs = |bindings: &crate::config::ActionKeybinds| {
         bindings
             .prefix_rhs_label()
-            .unwrap_or_else(|| "unset".to_owned())
+            .unwrap_or_else(|| crate::i18n::texts().keybinds.unset.to_owned())
     };
 
+    let mode_bar = &crate::i18n::texts().mode_bar;
     let mut segments = Vec::<(String, Style)>::new();
     if let Some(error) = endpoint_error {
         segments.extend([
-            (" ERROR ".to_owned(), mode_style),
+            (mode_bar.error.to_owned(), mode_style),
             (format!(" {error}"), base),
         ]);
     } else {
         match mode {
             ClientShellMode::Prefix => {
                 segments.extend([
-                    (" PREFIX ".to_owned(), mode_style),
+                    (mode_bar.prefix.to_owned(), mode_style),
                     (" ".to_owned(), base),
                     ("esc".to_owned(), key),
-                    (" cancel  ".to_owned(), base),
+                    (mode_bar.prefix_cancel.to_owned(), base),
                     (prefix, key),
-                    (" send prefix  ".to_owned(), base),
+                    (mode_bar.prefix_send.to_owned(), base),
                     (prefix_rhs(&keybinds.keybinds.workspace_picker), key),
-                    (" workspace nav  ".to_owned(), base),
+                    (mode_bar.prefix_nav.to_owned(), base),
                     (prefix_rhs(&keybinds.keybinds.help), key),
-                    (" keybinds".to_owned(), base),
+                    (mode_bar.prefix_keybinds.to_owned(), base),
                 ]);
             }
             ClientShellMode::Navigate => {
                 segments.extend([
-                    (" NAVIGATE ".to_owned(), mode_style),
-                    (" esc back  ".to_owned(), base),
+                    (mode_bar.navigate.to_owned(), mode_style),
+                    (mode_bar.nav_back.to_owned(), base),
                     ("↑/↓".to_owned(), key),
-                    (" workspace  ".to_owned(), base),
+                    (mode_bar.nav_workspace.to_owned(), base),
                     ("tab".to_owned(), key),
-                    (" pane  ".to_owned(), base),
+                    (mode_bar.nav_pane.to_owned(), base),
                     (prefix_rhs(&keybinds.keybinds.help), key),
-                    (" keybinds".to_owned(), base),
+                    (mode_bar.prefix_keybinds.to_owned(), base),
                 ]);
             }
             ClientShellMode::Resize => {
                 segments.extend([
-                    (" RESIZE ".to_owned(), mode_style),
+                    (mode_bar.resize.to_owned(), mode_style),
                     ("  ".to_owned(), base),
                     ("h/l".to_owned(), key),
-                    (" width  ".to_owned(), base),
+                    (mode_bar.resize_width.to_owned(), base),
                     ("j/k".to_owned(), key),
-                    (" height  ".to_owned(), base),
+                    (mode_bar.resize_height.to_owned(), base),
                     ("esc".to_owned(), key),
-                    (" done".to_owned(), base),
+                    (mode_bar.resize_done.to_owned(), base),
                 ]);
             }
             ClientShellMode::Copy => {
@@ -128,12 +129,18 @@ pub(super) fn render_mode_bar(
                         crate::api::schema::PaneCopySearchDirection::Forward => "/",
                         crate::api::schema::PaneCopySearchDirection::Backward => "?",
                     };
-                    buffer.set_stringn(bar.x, bar.y, " COPY ", usize::from(bar.width), mode_style);
+                    buffer.set_stringn(
+                        bar.x,
+                        bar.y,
+                        mode_bar.copy,
+                        usize::from(bar.width),
+                        mode_style,
+                    );
                     let prefix = 8.min(bar.width);
                     if bar.width >= 8 {
                         buffer.set_string(bar.x + 7, bar.y, marker, key);
                     }
-                    let footer = "  enter search  esc cancel";
+                    let footer = mode_bar.copy_footer;
                     let footer_width = if bar.width >= 50 {
                         footer.len() as u16
                     } else {
@@ -176,7 +183,7 @@ pub(super) fn render_mode_bar(
                             ("esc", " clear  q exit")
                         };
                     segments.extend([
-                        (" COPY ".to_owned(), mode_style),
+                        (mode_bar.copy.to_owned(), mode_style),
                         (" ".to_owned(), base),
                         ("h/j/k/l w/b/e { }".to_owned(), key),
                         (" move  ".to_owned(), base),
@@ -219,7 +226,7 @@ pub(super) fn render_mode_bar(
             buffer,
             area,
             area.y,
-            " update ready",
+            crate::i18n::texts().overlays.release_preview_title,
             Style::default()
                 .fg(palette.accent)
                 .bg(palette.panel_bg)

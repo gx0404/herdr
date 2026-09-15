@@ -88,13 +88,19 @@ pub(crate) fn modal_stack_areas(
 }
 
 /// Modal action buttons are rendered from these exact strings; the matching
-/// `*_button_rect` hit-test rects must stay width-twins with them.
-pub(crate) const MODAL_CLOSE_BUTTON_TEXT: &str = " esc close ";
-pub(crate) const MODAL_CONTINUE_BUTTON_TEXT: &str = " ↵ continue ";
+/// `*_button_rect` hit-test rects must stay width-twins with them. Both sides
+/// read the same i18n entry so translated labels keep the rects in sync.
+pub(crate) fn modal_close_button_text() -> &'static str {
+    crate::i18n::texts().chrome.close_button
+}
+
+pub(crate) fn modal_continue_button_text() -> &'static str {
+    crate::i18n::texts().chrome.continue_button
+}
 
 pub(crate) fn close_button_rect(area: Rect) -> Rect {
     let width = u16::try_from(unicode_width::UnicodeWidthStr::width(
-        MODAL_CLOSE_BUTTON_TEXT,
+        modal_close_button_text(),
     ))
     .unwrap_or(u16::MAX);
     Rect::new(area.x + area.width.saturating_sub(width), area.y, width, 1)
@@ -102,7 +108,7 @@ pub(crate) fn close_button_rect(area: Rect) -> Rect {
 
 pub(crate) fn continue_button_rect(area: Rect) -> Rect {
     let width = u16::try_from(unicode_width::UnicodeWidthStr::width(
-        MODAL_CONTINUE_BUTTON_TEXT,
+        modal_continue_button_text(),
     ))
     .unwrap_or(u16::MAX);
     Rect::new(area.x, area.y, width, 1)

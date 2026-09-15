@@ -46,14 +46,17 @@ pub fn lang() -> Lang {
 }
 
 /// Test helper: switch the language for the guard's lifetime.
+#[cfg(test)]
 pub fn lang_guard(lang: Lang) -> LangGuard {
     let previous = self::lang();
     set_lang(lang);
     LangGuard(previous)
 }
 
+#[cfg(test)]
 pub struct LangGuard(Lang);
 
+#[cfg(test)]
 impl Drop for LangGuard {
     fn drop(&mut self) {
         set_lang(self.0);
@@ -86,10 +89,331 @@ fn peek_config_language() -> Option<Lang> {
 pub struct ChromeTexts {
     pub close_button: &'static str,
     pub continue_button: &'static str,
+    pub copied: &'static str,
+}
+
+pub struct OnboardingTexts {
+    pub subtitle: &'static str,
+    pub description: [&'static str; 3],
+    pub prefix_suffix: &'static str,
+    pub help_suffix: &'static str,
+    pub next: &'static str,
+}
+
+pub struct ContextMenuTexts {
+    pub rename: &'static str,
+    pub close: &'static str,
+    pub close_group: &'static str,
+    pub close_pane: &'static str,
+    pub new_worktree: &'static str,
+    pub open_worktree: &'static str,
+    pub delete_worktree: &'static str,
+    pub expand: &'static str,
+    pub collapse: &'static str,
+    pub new_tab: &'static str,
+    pub rename_pane: &'static str,
+    pub clear_pane_name: &'static str,
+    pub swap_with_focused: &'static str,
+    pub split_right: &'static str,
+    pub split_down: &'static str,
+    pub zoom: &'static str,
+    pub use_herdr_menu: &'static str,
+    pub send_right_clicks: &'static str,
+}
+
+pub struct GlobalMenuTexts {
+    pub settings: &'static str,
+    pub keybinds: &'static str,
+    pub reload_config: &'static str,
+    pub update_ready: &'static str,
+    pub whats_new: &'static str,
+    pub detach: &'static str,
+}
+
+pub struct KeybindTexts {
+    pub group_global: &'static str,
+    pub group_navigation: &'static str,
+    pub group_workspaces_tabs: &'static str,
+    pub group_panes: &'static str,
+    pub group_custom: &'static str,
+    pub unset: &'static str,
+    pub prefix_mode: &'static str,
+    pub keybinds: &'static str,
+    pub settings: &'static str,
+    pub detach: &'static str,
+    pub reload_config: &'static str,
+    pub open_notification_target: &'static str,
+    pub back: &'static str,
+    pub workspace_list: &'static str,
+    pub move_focus: &'static str,
+    pub cycle_pane: &'static str,
+    pub open_workspace: &'static str,
+    pub switch_workspace: &'static str,
+    pub workspace_navigation: &'static str,
+    pub session_navigator: &'static str,
+    pub new_workspace: &'static str,
+    pub new_worktree: &'static str,
+    pub open_worktree: &'static str,
+    pub delete_worktree_checkout: &'static str,
+    pub rename_workspace: &'static str,
+    pub close_workspace: &'static str,
+    pub previous_workspace: &'static str,
+    pub next_workspace: &'static str,
+    pub switch_workspace_1_9: &'static str,
+    pub previous_agent: &'static str,
+    pub next_agent: &'static str,
+    pub focus_agent_1_9: &'static str,
+    pub new_tab: &'static str,
+    pub rename_tab: &'static str,
+    pub previous_tab: &'static str,
+    pub next_tab: &'static str,
+    pub move_tab_left: &'static str,
+    pub move_tab_right: &'static str,
+    pub switch_tab_1_9: &'static str,
+    pub close_tab: &'static str,
+    pub split_vertical: &'static str,
+    pub split_horizontal: &'static str,
+    pub close_pane: &'static str,
+    pub rename_pane: &'static str,
+    pub edit_scrollback: &'static str,
+    pub copy_mode: &'static str,
+    pub zoom_pane: &'static str,
+    pub resize_mode: &'static str,
+    pub resize_pane_left: &'static str,
+    pub resize_pane_down: &'static str,
+    pub resize_pane_up: &'static str,
+    pub resize_pane_right: &'static str,
+    pub toggle_sidebar: &'static str,
+    pub focus_pane_left: &'static str,
+    pub focus_pane_down: &'static str,
+    pub focus_pane_up: &'static str,
+    pub focus_pane_right: &'static str,
+    pub cycle_pane_next: &'static str,
+    pub cycle_pane_previous: &'static str,
+    pub last_pane: &'static str,
+    pub custom_command: &'static str,
+}
+
+pub struct OverlayTexts {
+    pub update_ready: &'static str,
+    pub release_preview_title: &'static str,
+    pub whats_new_in_release: &'static str,
+    pub product_announcement_preview: &'static str,
+    pub product_announcement: &'static str,
+    pub keybinds_title: &'static str,
+    pub footer_scroll: &'static str,
+    pub footer_wheel: &'static str,
+    pub footer_sep: &'static str,
+    pub footer_close: &'static str,
+    pub footer_keys: &'static str,
+    pub save_button: &'static str,
+    pub clear_button: &'static str,
+    pub cancel_button: &'static str,
+    pub confirm_button: &'static str,
+    pub back_button: &'static str,
+    pub filter_blocked: &'static str,
+    pub filter_working: &'static str,
+    pub filter_idle: &'static str,
+    pub filter_done: &'static str,
+    pub search_panes_hint: &'static str,
+    pub navigator_search_footer: &'static str,
+    pub navigator_footer: &'static str,
+    pub help_filter_hint: &'static str,
+    pub edit_footer: &'static str,
+    pub search_footer: &'static str,
+    pub no_matching_keybinds: &'static str,
+}
+
+pub struct DialogTexts {
+    pub new_workspace: &'static str,
+    pub rename_workspace: &'static str,
+    pub new_tab: &'static str,
+    pub rename_tab: &'static str,
+    pub rename_pane: &'static str,
+    pub close_workspace_q: &'static str,
+    pub close_worktree_group_q: &'static str,
+    pub one_pane: &'static str,
+    pub pane_count_fmt: &'static str,
+    pub group_scope_fmt: &'static str,
+}
+
+pub struct WorktreeTexts {
+    pub new_worktree: &'static str,
+    pub open_worktree: &'static str,
+    pub branch_hint: &'static str,
+    pub checkout_hint: &'static str,
+    pub creating: &'static str,
+    pub create_and_open: &'static str,
+    pub filter_worktrees: &'static str,
+    pub checkouts_fmt: &'static str,
+    pub checkouts_filtered_fmt: &'static str,
+    pub no_matching: &'static str,
+    pub opening: &'static str,
+    pub open_button: &'static str,
+    pub delete_title: &'static str,
+    pub removes_folder: &'static str,
+    pub branch_not_deleted: &'static str,
+    pub dirty_warning: &'static str,
+    pub removing: &'static str,
+    pub delete_anyway: &'static str,
+    pub remove: &'static str,
+}
+
+pub struct SettingsTexts {
+    pub title: &'static str,
+    pub section_theme: &'static str,
+    pub section_indicators: &'static str,
+    pub section_sound: &'static str,
+    pub section_toasts: &'static str,
+    pub section_integrations: &'static str,
+    pub indicators: &'static str,
+    pub indicators_hint: &'static str,
+    pub indicator_dots: &'static str,
+    pub indicator_symbols: &'static str,
+    pub sound: &'static str,
+    pub sound_hint: &'static str,
+    pub toasts: &'static str,
+    pub toasts_hint: &'static str,
+    pub sound_on: &'static str,
+    pub sound_off: &'static str,
+    pub toast_off: &'static str,
+    pub toast_herdr: &'static str,
+    pub toast_terminal: &'static str,
+    pub toast_system: &'static str,
+    pub install_button: &'static str,
+    pub apply_button: &'static str,
+    pub footer: &'static str,
+    pub integrations: &'static str,
+    pub integrations_hint: &'static str,
+    pub loading: &'static str,
+    pub no_targets: &'static str,
+    pub state_installed: &'static str,
+    pub state_update_available: &'static str,
+    pub state_available: &'static str,
+    pub state_not_found: &'static str,
+    pub installing: &'static str,
+}
+
+pub struct SidebarTexts {
+    pub spaces: &'static str,
+    pub agents: &'static str,
+    pub new: &'static str,
+    pub machines: &'static str,
+    pub new_endpoint_fmt: &'static str,
+    pub menu: &'static str,
+    pub attention_menu: &'static str,
+    pub local: &'static str,
+    pub wt_open: &'static str,
+    pub wt_detached: &'static str,
+    pub wt_root: &'static str,
+    pub sort_grouped: &'static str,
+    pub sort_priority: &'static str,
+}
+
+pub struct StatusTexts {
+    pub blocked: &'static str,
+    pub done: &'static str,
+    pub working: &'static str,
+    pub idle: &'static str,
+}
+
+pub struct ModeBarTexts {
+    pub error: &'static str,
+    pub prefix: &'static str,
+    pub prefix_cancel: &'static str,
+    pub prefix_send: &'static str,
+    pub prefix_nav: &'static str,
+    pub prefix_keybinds: &'static str,
+    pub navigate: &'static str,
+    pub nav_back: &'static str,
+    pub nav_workspace: &'static str,
+    pub nav_pane: &'static str,
+    pub resize: &'static str,
+    pub resize_width: &'static str,
+    pub resize_height: &'static str,
+    pub resize_done: &'static str,
+    pub copy: &'static str,
+    pub copy_footer: &'static str,
+}
+
+pub struct NotifyTexts {
+    pub agent_waiting_fmt: &'static str,
+    pub agent_done_fmt: &'static str,
+    pub needs_attention: &'static str,
+    pub finished: &'static str,
+    pub updated: &'static str,
+    pub title_fmt: &'static str,
+    pub title_with_context_fmt: &'static str,
+    pub version_available_fmt: &'static str,
+    pub herdr_version_available_fmt: &'static str,
+    pub detection_updated: &'static str,
+}
+
+pub struct MobileTexts {
+    pub no_workspace: &'static str,
+    pub switch: &'static str,
+    pub switch_label: &'static str,
+    pub st_connecting: &'static str,
+    pub st_online: &'static str,
+    pub st_reconnecting: &'static str,
+    pub st_attention: &'static str,
+    pub st_disabled: &'static str,
+    pub tab_label_fmt: &'static str,
+    pub tab_label_pos_fmt: &'static str,
+    pub no_agents: &'static str,
+    pub all_idle: &'static str,
+    pub section_machines: &'static str,
+    pub section_spaces: &'static str,
+    pub section_tabs: &'static str,
+    pub section_menu: &'static str,
+    pub agents_label_fmt: &'static str,
+    pub agents_plain: &'static str,
+    pub no_matching_agents: &'static str,
+    pub new_workspace: &'static str,
+    pub new_tab: &'static str,
+    pub close: &'static str,
+    pub not_ready_fmt: &'static str,
+    pub reconnecting_fmt: &'static str,
+}
+
+pub struct UpdateTexts {
+    pub install_run_fmt: &'static str,
+    pub install_nix: &'static str,
+}
+
+pub struct EndpointTexts {
+    pub local_unavailable: &'static str,
+    pub saved_machines_fmt: &'static str,
 }
 
 pub struct Texts {
     pub chrome: ChromeTexts,
+    pub onboarding: OnboardingTexts,
+    pub context_menu: ContextMenuTexts,
+    pub global_menu: GlobalMenuTexts,
+    pub keybinds: KeybindTexts,
+    pub overlays: OverlayTexts,
+    pub dialogs: DialogTexts,
+    pub worktree: WorktreeTexts,
+    pub settings: SettingsTexts,
+    pub sidebar: SidebarTexts,
+    pub status: StatusTexts,
+    pub mode_bar: ModeBarTexts,
+    pub notify: NotifyTexts,
+    pub mobile: MobileTexts,
+    pub update: UpdateTexts,
+    pub endpoint: EndpointTexts,
+}
+
+/// Runtime placeholder substitution for table-held format templates:
+/// `fill("{n} 个窗格", &[("n", "3")])` -> "3 个窗格". Rust's `format!` only
+/// accepts literal templates, so translated templates are filled manually.
+pub fn fill(template: &str, args: &[(&str, &str)]) -> String {
+    let mut output = template.to_owned();
+    for (name, value) in args {
+        output = output.replace(&format!("{{{name}}}"), value);
+    }
+    output
 }
 
 pub fn texts() -> &'static Texts {

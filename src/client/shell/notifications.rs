@@ -74,16 +74,28 @@ pub(super) fn render_mobile_notification_banner(
     let event = &notification.event;
     let title = match event.kind {
         SemanticNotificationKind::NeedsAttention => event
-            .title
-            .strip_suffix(" needs attention")
-            .map(|agent| format!("{agent} waiting"))
+            .agent
+            .as_ref()
+            .map(|agent| {
+                crate::i18n::fill(
+                    crate::i18n::texts().notify.agent_waiting_fmt,
+                    &[("agent", agent)],
+                )
+            })
             .unwrap_or_else(|| event.title.clone()),
         SemanticNotificationKind::Finished => event
-            .title
-            .strip_suffix(" finished")
-            .map(|agent| format!("{agent} done"))
+            .agent
+            .as_ref()
+            .map(|agent| {
+                crate::i18n::fill(
+                    crate::i18n::texts().notify.agent_done_fmt,
+                    &[("agent", agent)],
+                )
+            })
             .unwrap_or_else(|| event.title.clone()),
-        SemanticNotificationKind::UpdateInstalled => "update ready".to_owned(),
+        SemanticNotificationKind::UpdateInstalled => {
+            crate::i18n::texts().overlays.update_ready.to_owned()
+        }
         SemanticNotificationKind::Custom => event.title.clone(),
     };
     let dot_color = match event.kind {
@@ -232,7 +244,7 @@ mod tests {
         let palette = crate::app::client_palette_from_config(&Config::default());
         let mut notification = notification();
         notification.event.kind = SemanticNotificationKind::NeedsAttention;
-        notification.event.title = "pi needs attention".into();
+        notification.event.agent = Some("pi".into());
         notification.event.body = Some("workspace · tab 1".into());
         let area = Rect::new(0, 0, 44, 20);
         let mut buffer = Buffer::empty(area);
@@ -247,7 +259,11 @@ mod tests {
             .iter()
             .map(|cell| cell.symbol())
             .collect::<String>();
-        assert!(text.contains("pi waiting"));
+        let compact_title = text
+            .chars()
+            .filter(|ch| !ch.is_whitespace())
+            .collect::<String>();
+        assert!(compact_title.contains("pi等待中"));
         assert!(text.contains("workspace · tab 1"));
         assert!(buffer.content[18 * 44..19 * 44]
             .iter()

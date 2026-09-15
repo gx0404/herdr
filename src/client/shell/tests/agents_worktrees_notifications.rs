@@ -980,7 +980,8 @@ fn navigate_mode_selects_workspace_locally_then_focuses_by_stable_id() {
         .collect::<Vec<_>>()
         .join("\n");
     assert!(text.contains("second"));
-    assert!(text.contains("NAVIGATE"));
+    let compact: String = text.chars().filter(|ch| !ch.is_whitespace()).collect();
+    assert!(compact.contains("导航"));
 
     let focus = state.handle_input_bytes(b"\r");
     let [ClientShellAction::Endpoint { request, .. }] = &focus.actions[..] else {
@@ -1029,8 +1030,9 @@ fn worktree_create_previews_the_endpoint_owned_checkout_path() {
         })
         .collect::<Vec<_>>()
         .join("\n");
-    assert!(text.contains("new worktree"));
-    assert!(text.contains("create and open"));
+    let compact: String = text.chars().filter(|ch| !ch.is_whitespace()).collect();
+    assert!(compact.contains("新建工作树"));
+    assert!(compact.contains("创建并打开"));
     assert!(frame.cursor.as_ref().is_some_and(|cursor| cursor.visible));
 
     assert!(state
@@ -1273,8 +1275,9 @@ fn worktree_remove_escalates_recoverable_failure_to_force_confirmation() {
             })
             .collect::<Vec<_>>()
             .join("\n");
-        assert!(text.contains("delete anyway"));
-        assert!(text.contains("permanently deleted"));
+        let compact: String = text.chars().filter(|ch| !ch.is_whitespace()).collect();
+        assert!(compact.contains("仍然删除"));
+        assert!(compact.contains("永久删除"));
         let force = state.handle_input_bytes(b"\r");
         let [ClientShellAction::Endpoint { request, .. }] = &force.actions[..] else {
             panic!("forced worktree remove should use endpoint API");

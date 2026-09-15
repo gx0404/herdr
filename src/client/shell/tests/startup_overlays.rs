@@ -30,7 +30,7 @@ fn endpoint_product_announcement_is_client_rendered_modal_and_dismissed_by_ident
         .collect::<Vec<_>>()
         .join("\n");
     assert!(text.contains("A client-owned announcement"));
-    assert!(text.contains("product announcement · v0.8.2"));
+    assert!(text.replace(' ', "").contains("产品公告·v0.8.2"));
     assert!(!state.hits.product_announcement_scrollbar.is_empty());
 
     let popup_key = state.handle_input_bytes(b"x");
@@ -312,11 +312,12 @@ fn startup_onboarding_is_client_rendered_and_modal() {
         })
         .collect::<Vec<_>>()
         .join("\n");
-    assert!(text.contains("terminal workspace manager for coding agents"));
-    assert!(text.contains("this is a mouse-first terminal"));
-    assert!(text.contains("ctrl+b enters prefix mode"));
-    assert!(text.contains("install optional agent integrations"));
-    assert_eq!(state.hits.overlay_primary.width, 12);
+    let compact = text.replace(' ', "");
+    assert!(compact.contains("面向编码agent的终端工作区管理器"));
+    assert!(compact.contains("这是一个鼠标优先的终端"));
+    assert!(compact.contains("ctrl+b进入前缀模式"));
+    assert!(compact.contains("安装可选的agent集成"));
+    assert_eq!(state.hits.overlay_primary.width, 8);
 
     let ignored = state.handle_input_bytes(b"x");
     assert!(ignored.requests.is_empty());
@@ -656,7 +657,7 @@ fn update_ready_menu_opens_client_owned_release_notes_and_dismisses_by_version()
     state.set_snapshot(Box::new(endpoint_snapshot.clone()));
     state.set_pane_surface(surface());
     let shell = state.compose(106, 30).expect("shell frame");
-    assert_eq!(state.hits.global_launcher.width, 8);
+    assert_eq!(state.hits.global_launcher.width, 6);
     let launcher = state.hits.global_launcher;
     let shell_buffer = shell.to_ratatui_buffer().expect("shell buffer");
     let badge_x = launcher.right().saturating_sub(6);
@@ -684,7 +685,7 @@ fn update_ready_menu_opens_client_owned_release_notes_and_dismisses_by_version()
         .iter()
         .map(|cell| cell.symbol.as_str())
         .collect::<String>();
-    assert!(navigate_text.contains("update ready"));
+    assert!(navigate_text.replace(' ', "").contains("更新就绪"));
     state.mode = ClientShellMode::Prefix;
     let prefix = state
         .compose(106, 30)
@@ -694,7 +695,7 @@ fn update_ready_menu_opens_client_owned_release_notes_and_dismisses_by_version()
         .iter()
         .map(|cell| cell.symbol.as_str())
         .collect::<String>();
-    assert!(!prefix_text.contains("update ready"));
+    assert!(!prefix_text.replace(' ', "").contains("更新就绪"));
     state.mode = ClientShellMode::Navigate;
 
     state.toggle_global_menu();
@@ -709,9 +710,9 @@ fn update_ready_menu_opens_client_owned_release_notes_and_dismisses_by_version()
         })
         .collect::<Vec<_>>()
         .join("\n");
-    assert!(text.contains("● update ready"));
+    assert!(text.replace(' ', "").contains("●更新就绪"));
     let update_row = state.hits.global_menu_rows[3].0;
-    assert_eq!(update_row.width, 16);
+    assert_eq!(update_row.width, 12);
     let menu_buffer = menu.to_ratatui_buffer().expect("menu buffer");
     assert_eq!(
         menu_buffer[(update_row.x + 1, update_row.y)].fg,
@@ -728,7 +729,7 @@ fn update_ready_menu_opens_client_owned_release_notes_and_dismisses_by_version()
         .iter()
         .map(|cell| cell.symbol.as_str())
         .collect::<String>();
-    assert!(!bottom_row.contains("NAVIGATE"));
+    assert!(!bottom_row.replace(' ', "").contains("导航"));
     let text = notes
         .cells
         .chunks(notes.width as usize)
@@ -740,8 +741,12 @@ fn update_ready_menu_opens_client_owned_release_notes_and_dismisses_by_version()
         .collect::<Vec<_>>()
         .join("\n");
     assert!(text.contains("v0.8.3"));
-    assert!(text.contains("update ready"));
-    assert!(text.contains("detach, run herdr update"));
+    let compact = text
+        .chars()
+        .filter(|character| !character.is_whitespace())
+        .collect::<String>();
+    assert!(compact.contains("更新就绪"));
+    assert!(compact.contains("分离后执行herdrupdate"));
     assert!(!state.hits.release_notes_scrollbar.is_empty());
     let outer = crate::ui::centered_popup_rect(
         Rect::new(0, 0, 106, 30),
@@ -871,7 +876,7 @@ fn update_ready_menu_opens_client_owned_release_notes_and_dismisses_by_version()
     installed_surface.projection_revision = 2;
     state.set_pane_surface(installed_surface);
     state.compose(106, 30).expect("installed shell");
-    assert_eq!(state.hits.global_launcher.width, 6);
+    assert_eq!(state.hits.global_launcher.width, 4);
     state.toggle_global_menu();
     let installed = state.compose(106, 30).expect("installed menu");
     let installed_text = installed
@@ -879,8 +884,9 @@ fn update_ready_menu_opens_client_owned_release_notes_and_dismisses_by_version()
         .iter()
         .map(|cell| cell.symbol.as_str())
         .collect::<String>();
-    assert!(installed_text.contains("what's new"));
-    assert!(!installed_text.contains("● what's new"));
+    let installed_compact = installed_text.replace(' ', "");
+    assert!(installed_compact.contains("更新内容"));
+    assert!(!installed_compact.contains("●更新内容"));
 }
 
 #[test]
@@ -1024,13 +1030,13 @@ fn outdated_integration_badges_launcher_settings_and_settings_tab() {
     state.set_snapshot(Box::new(endpoint_snapshot));
     state.set_pane_surface(surface());
     let shell = state.compose(106, 30).expect("integration attention shell");
-    assert_eq!(state.hits.global_launcher.width, 8);
+    assert_eq!(state.hits.global_launcher.width, 6);
     let shell_text = shell
         .cells
         .iter()
         .map(|cell| cell.symbol.as_str())
         .collect::<String>();
-    assert!(shell_text.contains("● menu"));
+    assert!(shell_text.replace(' ', "").contains("●菜单"));
 
     state.toggle_global_menu();
     let menu = state.compose(106, 30).expect("integration attention menu");
@@ -1039,8 +1045,9 @@ fn outdated_integration_badges_launcher_settings_and_settings_tab() {
         .iter()
         .map(|cell| cell.symbol.as_str())
         .collect::<String>();
-    assert!(menu_text.contains("● settings"));
-    assert!(!menu_text.contains("update ready"));
+    let menu_compact = menu_text.replace(' ', "");
+    assert!(menu_compact.contains("●设置"));
+    assert!(!menu_compact.contains("更新就绪"));
 
     state.activate_global_menu_item(0, &mut ClientShellInput::default());
     let settings = state.compose(106, 30).expect("settings integration badge");
@@ -1049,7 +1056,7 @@ fn outdated_integration_badges_launcher_settings_and_settings_tab() {
         .iter()
         .map(|cell| cell.symbol.as_str())
         .collect::<String>();
-    assert!(settings_text.contains("● integrations"));
+    assert!(settings_text.replace(' ', "").contains("●集成"));
     let integrations_tab = state
         .hits
         .settings_tabs
@@ -1083,7 +1090,7 @@ fn combined_update_and_integration_attention_preserves_both_badges() {
     state.set_snapshot(Box::new(endpoint_snapshot));
     state.set_pane_surface(surface());
     state.compose(106, 30).expect("combined attention shell");
-    assert_eq!(state.hits.global_launcher.width, 8);
+    assert_eq!(state.hits.global_launcher.width, 6);
 
     state.toggle_global_menu();
     let menu = state.compose(106, 30).expect("combined attention menu");
@@ -1092,8 +1099,9 @@ fn combined_update_and_integration_attention_preserves_both_badges() {
         .iter()
         .map(|cell| cell.symbol.as_str())
         .collect::<String>();
-    let settings = text.find("● settings").expect("settings badge");
-    let update = text.find("● update ready").expect("update badge");
+    let compact = text.replace(' ', "");
+    let settings = compact.find("●设置").expect("settings badge");
+    let update = compact.find("●更新就绪").expect("update badge");
     assert!(settings < update);
 
     state.overlay = None;
@@ -1104,7 +1112,7 @@ fn combined_update_and_integration_attention_preserves_both_badges() {
         .iter()
         .map(|cell| cell.symbol.as_str())
         .collect::<String>();
-    assert!(navigate_text.contains("update ready"));
+    assert!(navigate_text.replace(' ', "").contains("更新就绪"));
 }
 
 #[test]
@@ -1120,7 +1128,7 @@ fn current_release_notes_use_whats_new_without_attention_badge() {
     state.set_snapshot(Box::new(endpoint_snapshot));
     state.set_pane_surface(surface());
     state.compose(106, 30).expect("shell frame");
-    assert_eq!(state.hits.global_launcher.width, 6);
+    assert_eq!(state.hits.global_launcher.width, 4);
     state.toggle_global_menu();
     let menu = state.compose(106, 30).expect("what's new menu");
     let text = menu
@@ -1128,7 +1136,7 @@ fn current_release_notes_use_whats_new_without_attention_badge() {
         .iter()
         .map(|cell| cell.symbol.as_str())
         .collect::<String>();
-    assert!(text.contains("what's new"));
+    assert!(text.replace(' ', "").contains("更新内容"));
 }
 
 #[test]
@@ -1226,8 +1234,9 @@ fn client_settings_preview_restore_and_endpoint_integrations_are_owned_by_overla
         })
         .collect::<Vec<_>>()
         .join("\n");
-    assert!(text.contains("update available"));
-    assert!(text.contains("not found"));
+    let compact = text.replace(' ', "");
+    assert!(compact.contains("有可用更新"));
+    assert!(compact.contains("未找到"));
     assert!(!text.contains("pane labels"));
 
     let popup = state.hits.settings_popup;

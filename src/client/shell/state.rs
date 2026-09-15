@@ -455,12 +455,13 @@ impl ClientSettingsSection {
     ];
 
     pub(super) fn label(self) -> &'static str {
+        let t = &crate::i18n::texts().settings;
         match self {
-            Self::Theme => "theme",
-            Self::Indicators => "indicators",
-            Self::Sound => "sound",
-            Self::Toast => "toasts",
-            Self::Integrations => "integrations",
+            Self::Theme => t.section_theme,
+            Self::Indicators => t.section_indicators,
+            Self::Sound => t.section_sound,
+            Self::Toast => t.section_toasts,
+            Self::Integrations => t.section_integrations,
         }
     }
 }
@@ -499,14 +500,15 @@ pub(super) struct ClientWorktreeOpenEntry {
 
 impl ClientWorktreeOpenEntry {
     pub(super) fn status_label(&self) -> &'static str {
+        let sidebar = &crate::i18n::texts().sidebar;
         if self.open_workspace_id.is_some() {
-            "open"
+            sidebar.wt_open
         } else if self.branch.is_some() {
             ""
         } else if self.is_detached && self.is_linked_worktree {
-            "detached"
+            sidebar.wt_detached
         } else {
-            "root"
+            sidebar.wt_root
         }
     }
 
@@ -1854,7 +1856,7 @@ impl ClientShellState {
             return false;
         }
         self.copy_feedback = Some(crate::app::state::CopyFeedback {
-            message: "copied to clipboard".to_owned(),
+            message: crate::i18n::texts().chrome.copied.to_owned(),
         });
         self.copy_feedback_deadline = Some(now + std::time::Duration::from_secs(2));
         true

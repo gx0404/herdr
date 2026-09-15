@@ -94,7 +94,7 @@ fn render_header_status(
             area.x,
             area.y,
             area.width,
-            " no workspace",
+            crate::i18n::texts().mobile.no_workspace,
             Style::default().fg(palette.text).bg(palette.panel_bg),
         );
         return;
@@ -168,7 +168,7 @@ fn render_header_button(
         );
     }
     let label_y = if area.height > 1 { area.y + 1 } else { area.y };
-    let label = "switch";
+    let label = crate::i18n::texts().mobile.switch;
     let label_width = display_width(label);
     put_text(
         buffer,
@@ -203,12 +203,13 @@ fn render_header_button(
 }
 
 fn mobile_endpoint_state(status: ClientEndpointStatus) -> &'static str {
+    let texts = &crate::i18n::texts().mobile;
     match status {
-        ClientEndpointStatus::Connecting => "connecting",
-        ClientEndpointStatus::Online => "online",
-        ClientEndpointStatus::Reconnecting => "reconnecting",
-        ClientEndpointStatus::Attention => "attention",
-        ClientEndpointStatus::Disabled => "disabled",
+        ClientEndpointStatus::Connecting => texts.st_connecting,
+        ClientEndpointStatus::Online => texts.st_online,
+        ClientEndpointStatus::Reconnecting => texts.st_reconnecting,
+        ClientEndpointStatus::Attention => texts.st_attention,
+        ClientEndpointStatus::Disabled => texts.st_disabled,
     }
 }
 
@@ -227,9 +228,19 @@ fn compact_tab_status(snapshot: &ClientShellSnapshot, workspace: &ClientShellWor
         .map(|tab| tab.label.as_str())
         .unwrap_or("1");
     if tabs.len() <= 1 {
-        format!("tab {label}")
+        crate::i18n::fill(
+            crate::i18n::texts().mobile.tab_label_fmt,
+            &[("label", label)],
+        )
     } else {
-        format!("tab {label} · {}/{}", active + 1, tabs.len())
+        crate::i18n::fill(
+            crate::i18n::texts().mobile.tab_label_pos_fmt,
+            &[
+                ("label", label),
+                ("active", &(active + 1).to_string()),
+                ("total", &tabs.len().to_string()),
+            ],
+        )
     }
 }
 
@@ -241,10 +252,10 @@ fn render_agent_summary(
 ) {
     use crate::api::schema::AgentStatus;
     let counts = [
-        (AgentStatus::Blocked, "blocked"),
-        (AgentStatus::Done, "done"),
-        (AgentStatus::Working, "working"),
-        (AgentStatus::Idle, "idle"),
+        (AgentStatus::Blocked, crate::i18n::texts().status.blocked),
+        (AgentStatus::Done, crate::i18n::texts().status.done),
+        (AgentStatus::Working, crate::i18n::texts().status.working),
+        (AgentStatus::Idle, crate::i18n::texts().status.idle),
     ]
     .map(|(status, label)| {
         (
@@ -265,7 +276,7 @@ fn render_agent_summary(
             area.x,
             area.y,
             area.width,
-            " no agents",
+            crate::i18n::texts().mobile.no_agents,
             Style::default()
                 .fg(config.palette.overlay1)
                 .bg(config.palette.panel_bg),
@@ -278,7 +289,7 @@ fn render_agent_summary(
             area.x,
             area.y,
             area.width,
-            " all idle",
+            crate::i18n::texts().mobile.all_idle,
             Style::default()
                 .fg(config.palette.overlay1)
                 .bg(config.palette.panel_bg),
@@ -407,7 +418,7 @@ pub(super) fn render_mobile_switcher(
         area.x,
         area.y,
         close.x.saturating_sub(area.x),
-        " switch",
+        crate::i18n::texts().mobile.switch_label,
         Style::default()
             .fg(palette.text)
             .bg(palette.panel_bg)
@@ -542,6 +553,7 @@ fn render_close_button(buffer: &mut Buffer, area: Rect, palette: &Palette) {
         );
     }
     let label_width = 5;
+    let label = crate::i18n::texts().mobile.close;
     let label_x = area
         .x
         .saturating_add(1)
@@ -551,7 +563,7 @@ fn render_close_button(buffer: &mut Buffer, area: Rect, palette: &Palette) {
         label_x,
         area.y,
         area.width.saturating_sub(1),
-        "close",
+        label,
         Style::default()
             .fg(palette.overlay1)
             .bg(palette.surface0)
@@ -583,7 +595,10 @@ fn mobile_items(
     let palette = &config.palette;
     let mut items = Vec::new();
     if endpoints.len() > 1 {
-        items.push(MobileItem::section("machines", palette));
+        items.push(MobileItem::section(
+            crate::i18n::texts().mobile.section_machines,
+            palette,
+        ));
         for endpoint in endpoints {
             let background = palette.panel_bg;
             let (symbol, state, color) = endpoint_status_presentation(endpoint.status, palette);
@@ -618,13 +633,18 @@ fn mobile_items(
     let agent_view_label = snapshot.agent_view_label.as_deref();
     if !agents.is_empty() || agent_view_label.is_some() {
         let title = agent_view_label
-            .map(|label| format!("agents · {label}"))
-            .unwrap_or_else(|| "agents".to_owned());
+            .map(|label| {
+                crate::i18n::fill(
+                    crate::i18n::texts().mobile.agents_label_fmt,
+                    &[("label", label)],
+                )
+            })
+            .unwrap_or_else(|| crate::i18n::texts().mobile.agents_plain.to_owned());
         items.push(MobileItem::section(title, palette));
         if agents.is_empty() {
             items.push(MobileItem {
                 lines: vec![Line::from(Span::styled(
-                    "  no matching agents",
+                    crate::i18n::texts().mobile.no_matching_agents,
                     Style::default()
                         .fg(palette.overlay0)
                         .bg(palette.panel_bg)
@@ -675,7 +695,7 @@ fn mobile_items(
                     .map(|(_, label)| label.clone())
                     .unwrap_or_else(|| {
                         if agent.agent_status == crate::api::schema::AgentStatus::Unknown {
-                            "idle".to_owned()
+                            crate::i18n::texts().status.idle.to_owned()
                         } else {
                             status_key.to_owned()
                         }
@@ -747,9 +767,12 @@ fn mobile_items(
         }
     }
 
-    items.push(MobileItem::section("spaces", palette));
+    items.push(MobileItem::section(
+        crate::i18n::texts().mobile.section_spaces,
+        palette,
+    ));
     items.push(MobileItem::action(
-        "  + new workspace",
+        crate::i18n::texts().mobile.new_workspace,
         ClientMobileTarget::NewWorkspace,
         palette,
     ));
@@ -874,9 +897,12 @@ fn mobile_items(
     }
 
     if let Some(workspace_id) = snapshot.focused_workspace_id.as_deref() {
-        items.push(MobileItem::section("tabs", palette));
+        items.push(MobileItem::section(
+            crate::i18n::texts().mobile.section_tabs,
+            palette,
+        ));
         items.push(MobileItem::action(
-            "  + new tab",
+            crate::i18n::texts().mobile.new_tab,
             ClientMobileTarget::NewTab,
             palette,
         ));
@@ -894,7 +920,10 @@ fn mobile_items(
             let label = if tab.custom_label {
                 format!("{} · {}", index + 1, tab.label)
             } else {
-                format!("tab {}", tab.label)
+                crate::i18n::fill(
+                    crate::i18n::texts().mobile.tab_label_fmt,
+                    &[("label", tab.label.as_str())],
+                )
             };
             let label = format!(
                 "  {}",
@@ -917,7 +946,10 @@ fn mobile_items(
         }
     }
 
-    items.push(MobileItem::section("menu", palette));
+    items.push(MobileItem::section(
+        crate::i18n::texts().mobile.section_menu,
+        palette,
+    ));
     for (index, (label, _)) in super::global_menu::global_menu_items(snapshot)
         .into_iter()
         .enumerate()
@@ -1009,7 +1041,10 @@ impl ClientShellState {
                     });
                 } else {
                     let label = self.endpoint_label(&endpoint_id).to_owned();
-                    self.receive_endpoint_unavailable(format!("{label} is not ready"));
+                    self.receive_endpoint_unavailable(crate::i18n::fill(
+                        crate::i18n::texts().mobile.not_ready_fmt,
+                        &[("label", &label)],
+                    ));
                 }
             }
             Some(ClientMobileTarget::NewWorkspace) => {

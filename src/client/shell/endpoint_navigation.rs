@@ -49,7 +49,10 @@ impl ClientShellState {
             });
         } else {
             let label = self.endpoint_label(&press.endpoint_id).to_owned();
-            self.receive_endpoint_unavailable(format!("{label} is not ready"));
+            self.receive_endpoint_unavailable(crate::i18n::fill(
+                crate::i18n::texts().mobile.not_ready_fmt,
+                &[("label", &label)],
+            ));
             outcome.repaint = true;
         }
     }
@@ -80,7 +83,10 @@ impl ClientShellState {
             });
         } else {
             let label = self.endpoint_label(&endpoint_id).to_owned();
-            self.receive_endpoint_unavailable(format!("{label} is not ready"));
+            self.receive_endpoint_unavailable(crate::i18n::fill(
+                crate::i18n::texts().mobile.not_ready_fmt,
+                &[("label", &label)],
+            ));
             outcome.repaint = true;
         }
         true
@@ -102,7 +108,10 @@ impl ClientShellState {
         };
         if !self.endpoint_is_online(&endpoint_id) {
             let label = self.endpoint_label(&endpoint_id).to_owned();
-            self.receive_endpoint_unavailable(format!("{label} is reconnecting"));
+            self.receive_endpoint_unavailable(crate::i18n::fill(
+                crate::i18n::texts().mobile.reconnecting_fmt,
+                &[("label", &label)],
+            ));
             outcome.repaint = true;
         } else if endpoint_id == self.active_endpoint_id {
             self.push_endpoint_method(
@@ -238,7 +247,10 @@ impl ClientShellState {
     ) -> bool {
         if !self.endpoint_is_online(&endpoint_id) {
             let label = self.endpoint_label(&endpoint_id).to_owned();
-            self.receive_endpoint_unavailable(format!("{label} is not ready"));
+            self.receive_endpoint_unavailable(crate::i18n::fill(
+                crate::i18n::texts().mobile.not_ready_fmt,
+                &[("label", &label)],
+            ));
             outcome.repaint = true;
             return false;
         }
@@ -259,7 +271,10 @@ impl ClientShellState {
     ) -> bool {
         if !self.endpoint_is_online(&endpoint_id) {
             let label = self.endpoint_label(&endpoint_id).to_owned();
-            self.receive_endpoint_unavailable(format!("{label} is not ready"));
+            self.receive_endpoint_unavailable(crate::i18n::fill(
+                crate::i18n::texts().mobile.not_ready_fmt,
+                &[("label", &label)],
+            ));
             outcome.repaint = true;
             return false;
         }

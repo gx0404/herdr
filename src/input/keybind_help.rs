@@ -28,12 +28,14 @@ fn entry(key: impl Into<String>, label: &'static str) -> KeybindHelpEntry {
 }
 
 fn binding_label(bindings: &ActionKeybinds) -> String {
-    bindings.label().unwrap_or_else(|| "unset".to_owned())
+    bindings
+        .label()
+        .unwrap_or_else(|| crate::i18n::texts().keybinds.unset.to_owned())
 }
 
 fn indexed_label(bindings: &[IndexedKeybind]) -> String {
     if bindings.is_empty() {
-        return "unset".to_owned();
+        return crate::i18n::texts().keybinds.unset.to_owned();
     }
     let mut parts = Vec::new();
     let mut index = 0;
@@ -65,32 +67,33 @@ pub(crate) fn keybind_help_groups(
     keybinds: &Keybinds,
     prefix: (crossterm::event::KeyCode, crossterm::event::KeyModifiers),
 ) -> Vec<KeybindHelpGroup> {
+    let t = &crate::i18n::texts().keybinds;
     let mut groups = vec![
         (
-            "global",
+            t.group_global,
             vec![
-                entry(crate::config::format_key_combo(prefix), "prefix mode"),
-                entry(binding_label(&keybinds.help), "keybinds"),
-                entry(binding_label(&keybinds.settings), "settings"),
-                entry(binding_label(&keybinds.detach), "detach"),
-                entry(binding_label(&keybinds.reload_config), "reload config"),
+                entry(crate::config::format_key_combo(prefix), t.prefix_mode),
+                entry(binding_label(&keybinds.help), t.keybinds),
+                entry(binding_label(&keybinds.settings), t.settings),
+                entry(binding_label(&keybinds.detach), t.detach),
+                entry(binding_label(&keybinds.reload_config), t.reload_config),
                 entry(
                     binding_label(&keybinds.open_notification_target),
-                    "open notification target",
+                    t.open_notification_target,
                 ),
             ],
         ),
         (
-            "navigation",
+            t.group_navigation,
             vec![
-                entry("esc", "back"),
+                entry("esc", t.back),
                 entry(
                     format!(
                         "{} / {}",
                         binding_label(&keybinds.navigate.workspace_up),
                         binding_label(&keybinds.navigate.workspace_down)
                     ),
-                    "workspace list",
+                    t.workspace_list,
                 ),
                 entry(
                     format!(
@@ -100,103 +103,103 @@ pub(crate) fn keybind_help_groups(
                         binding_label(&keybinds.navigate.pane_up),
                         binding_label(&keybinds.navigate.pane_right)
                     ),
-                    "move focus",
+                    t.move_focus,
                 ),
-                entry("tab / shift+tab", "cycle pane"),
-                entry("enter", "open workspace"),
-                entry("1..9", "switch workspace"),
+                entry("tab / shift+tab", t.cycle_pane),
+                entry("enter", t.open_workspace),
+                entry("1..9", t.switch_workspace),
             ],
         ),
         (
-            "workspaces / tabs",
+            t.group_workspaces_tabs,
             vec![
                 entry(
                     binding_label(&keybinds.workspace_picker),
-                    "workspace navigation",
+                    t.workspace_navigation,
                 ),
-                entry(binding_label(&keybinds.goto), "session navigator"),
-                entry(binding_label(&keybinds.new_workspace), "new workspace"),
-                entry(binding_label(&keybinds.new_worktree), "new worktree"),
-                entry(binding_label(&keybinds.open_worktree), "open worktree"),
+                entry(binding_label(&keybinds.goto), t.session_navigator),
+                entry(binding_label(&keybinds.new_workspace), t.new_workspace),
+                entry(binding_label(&keybinds.new_worktree), t.new_worktree),
+                entry(binding_label(&keybinds.open_worktree), t.open_worktree),
                 entry(
                     binding_label(&keybinds.remove_worktree),
-                    "delete worktree checkout",
+                    t.delete_worktree_checkout,
                 ),
                 entry(
                     binding_label(&keybinds.rename_workspace),
-                    "rename workspace",
+                    t.rename_workspace,
                 ),
-                entry(binding_label(&keybinds.close_workspace), "close workspace"),
+                entry(binding_label(&keybinds.close_workspace), t.close_workspace),
                 entry(
                     binding_label(&keybinds.previous_workspace),
-                    "previous workspace",
+                    t.previous_workspace,
                 ),
-                entry(binding_label(&keybinds.next_workspace), "next workspace"),
+                entry(binding_label(&keybinds.next_workspace), t.next_workspace),
                 entry(
                     indexed_label(&keybinds.switch_workspace),
-                    "switch workspace 1-9",
+                    t.switch_workspace_1_9,
                 ),
-                entry(binding_label(&keybinds.previous_agent), "previous agent"),
-                entry(binding_label(&keybinds.next_agent), "next agent"),
-                entry(indexed_label(&keybinds.focus_agent), "focus agent 1-9"),
-                entry(binding_label(&keybinds.new_tab), "new tab"),
-                entry(binding_label(&keybinds.rename_tab), "rename tab"),
-                entry(binding_label(&keybinds.previous_tab), "previous tab"),
-                entry(binding_label(&keybinds.next_tab), "next tab"),
-                entry(binding_label(&keybinds.move_tab_previous), "move tab left"),
-                entry(binding_label(&keybinds.move_tab_next), "move tab right"),
-                entry(indexed_label(&keybinds.switch_tab), "switch tab 1-9"),
-                entry(binding_label(&keybinds.close_tab), "close tab"),
+                entry(binding_label(&keybinds.previous_agent), t.previous_agent),
+                entry(binding_label(&keybinds.next_agent), t.next_agent),
+                entry(indexed_label(&keybinds.focus_agent), t.focus_agent_1_9),
+                entry(binding_label(&keybinds.new_tab), t.new_tab),
+                entry(binding_label(&keybinds.rename_tab), t.rename_tab),
+                entry(binding_label(&keybinds.previous_tab), t.previous_tab),
+                entry(binding_label(&keybinds.next_tab), t.next_tab),
+                entry(binding_label(&keybinds.move_tab_previous), t.move_tab_left),
+                entry(binding_label(&keybinds.move_tab_next), t.move_tab_right),
+                entry(indexed_label(&keybinds.switch_tab), t.switch_tab_1_9),
+                entry(binding_label(&keybinds.close_tab), t.close_tab),
             ],
         ),
         (
-            "panes",
+            t.group_panes,
             vec![
-                entry(binding_label(&keybinds.split_vertical), "split vertical"),
+                entry(binding_label(&keybinds.split_vertical), t.split_vertical),
                 entry(
                     binding_label(&keybinds.split_horizontal),
-                    "split horizontal",
+                    t.split_horizontal,
                 ),
-                entry(binding_label(&keybinds.close_pane), "close pane"),
-                entry(binding_label(&keybinds.rename_pane), "rename pane"),
-                entry(binding_label(&keybinds.edit_scrollback), "edit scrollback"),
-                entry(binding_label(&keybinds.copy_mode), "copy mode"),
-                entry(binding_label(&keybinds.zoom), "zoom pane"),
-                entry(binding_label(&keybinds.resize_mode), "resize mode"),
+                entry(binding_label(&keybinds.close_pane), t.close_pane),
+                entry(binding_label(&keybinds.rename_pane), t.rename_pane),
+                entry(binding_label(&keybinds.edit_scrollback), t.edit_scrollback),
+                entry(binding_label(&keybinds.copy_mode), t.copy_mode),
+                entry(binding_label(&keybinds.zoom), t.zoom_pane),
+                entry(binding_label(&keybinds.resize_mode), t.resize_mode),
                 entry(
                     binding_label(&keybinds.resize_pane_left),
-                    "resize pane left",
+                    t.resize_pane_left,
                 ),
                 entry(
                     binding_label(&keybinds.resize_pane_down),
-                    "resize pane down",
+                    t.resize_pane_down,
                 ),
-                entry(binding_label(&keybinds.resize_pane_up), "resize pane up"),
+                entry(binding_label(&keybinds.resize_pane_up), t.resize_pane_up),
                 entry(
                     binding_label(&keybinds.resize_pane_right),
-                    "resize pane right",
+                    t.resize_pane_right,
                 ),
-                entry(binding_label(&keybinds.toggle_sidebar), "toggle sidebar"),
-                entry(binding_label(&keybinds.focus_pane_left), "focus pane left"),
-                entry(binding_label(&keybinds.focus_pane_down), "focus pane down"),
-                entry(binding_label(&keybinds.focus_pane_up), "focus pane up"),
+                entry(binding_label(&keybinds.toggle_sidebar), t.toggle_sidebar),
+                entry(binding_label(&keybinds.focus_pane_left), t.focus_pane_left),
+                entry(binding_label(&keybinds.focus_pane_down), t.focus_pane_down),
+                entry(binding_label(&keybinds.focus_pane_up), t.focus_pane_up),
                 entry(
                     binding_label(&keybinds.focus_pane_right),
-                    "focus pane right",
+                    t.focus_pane_right,
                 ),
-                entry(binding_label(&keybinds.cycle_pane_next), "cycle pane next"),
+                entry(binding_label(&keybinds.cycle_pane_next), t.cycle_pane_next),
                 entry(
                     binding_label(&keybinds.cycle_pane_previous),
-                    "cycle pane previous",
+                    t.cycle_pane_previous,
                 ),
-                entry(binding_label(&keybinds.last_pane), "last pane"),
+                entry(binding_label(&keybinds.last_pane), t.last_pane),
             ],
         ),
     ];
 
     if !keybinds.custom_commands.is_empty() {
         groups.push((
-            "custom",
+            t.group_custom,
             keybinds
                 .custom_commands
                 .iter()
@@ -207,7 +210,7 @@ pub(crate) fn keybind_help_groups(
                             .description
                             .clone()
                             .map(Cow::Owned)
-                            .unwrap_or(Cow::Borrowed("custom command")),
+                            .unwrap_or(Cow::Borrowed(t.custom_command)),
                     )
                 })
                 .collect(),

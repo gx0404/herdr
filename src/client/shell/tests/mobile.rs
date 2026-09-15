@@ -13,16 +13,20 @@ fn navigate_update_status_uses_released_desktop_and_mobile_placement() {
     state.mode = ClientShellMode::Navigate;
 
     let bottom = state.compose(106, 30).expect("bottom-tab update shell");
-    let row_text = |frame: &FrameData, row: u16| {
+    let compact_row = |frame: &FrameData, row: u16| {
         let width = usize::from(frame.width);
         let start = usize::from(row) * width;
-        frame.cells[start..start + width]
+        let joined: String = frame.cells[start..start + width]
             .iter()
             .map(|cell| cell.symbol.as_str())
+            .collect();
+        joined
+            .chars()
+            .filter(|ch| !ch.is_whitespace())
             .collect::<String>()
     };
-    assert!(row_text(&bottom, 29).contains("update ready"));
-    assert!(!row_text(&bottom, 28).contains("update ready"));
+    assert!(compact_row(&bottom, 29).contains("更新就绪"));
+    assert!(!compact_row(&bottom, 28).contains("更新就绪"));
     assert!(state.hits.tabs.is_empty());
     assert!(state.hits.new_tab.is_empty());
     assert!(state.hits.tab_scroll_left.is_empty());
@@ -45,7 +49,7 @@ fn navigate_update_status_uses_released_desktop_and_mobile_placement() {
         deadline: std::time::Instant::now(),
     });
     let top = state.compose(106, 30).expect("top-tab update shell");
-    assert!(row_text(&top, 29).contains("update ready"));
+    assert!(compact_row(&top, 29).contains("更新就绪"));
 
     let mobile = state.compose(44, 30).expect("mobile update shell");
     let mobile_text = mobile
@@ -53,7 +57,11 @@ fn navigate_update_status_uses_released_desktop_and_mobile_placement() {
         .iter()
         .map(|cell| cell.symbol.as_str())
         .collect::<String>();
-    assert!(mobile_text.contains("update ready"));
+    assert!(mobile_text
+        .chars()
+        .filter(|ch| !ch.is_whitespace())
+        .collect::<String>()
+        .contains("更新就绪"));
 }
 
 #[test]
@@ -95,7 +103,11 @@ fn mobile_switcher_can_activate_an_online_saved_machine() {
         .iter()
         .map(|cell| cell.symbol.as_str())
         .collect::<String>();
-    assert!(text.contains("machines"));
+    let compact = text
+        .chars()
+        .filter(|ch| !ch.is_whitespace())
+        .collect::<String>();
+    assert!(compact.contains("机器"), "frame: {text}");
     assert!(text.contains("Build"));
     let machine = state
         .hits
@@ -133,7 +145,11 @@ fn mobile_switcher_can_activate_an_online_saved_machine() {
         .iter()
         .map(|cell| cell.symbol.as_str())
         .collect::<String>();
-    assert!(text.contains("reconnecting"), "frame: {text}");
+    let compact = text
+        .chars()
+        .filter(|ch| !ch.is_whitespace())
+        .collect::<String>();
+    assert!(compact.contains("重连中"), "frame: {text}");
     assert!(text.contains("network lost"), "frame: {text}");
 }
 
@@ -193,10 +209,14 @@ fn mobile_header_and_switcher_render_released_sections_and_stable_targets() {
         .iter()
         .map(|cell| cell.symbol.as_str())
         .collect::<String>();
+    let compact_header = header_text
+        .chars()
+        .filter(|ch| !ch.is_whitespace())
+        .collect::<String>();
     assert!(header_text.contains("client-shell"));
-    assert!(header_text.contains("tab 1"));
-    assert!(header_text.contains("blocked"));
-    assert!(header_text.contains("switch"));
+    assert!(compact_header.contains("标签页1"));
+    assert!(compact_header.contains("已阻塞"));
+    assert!(compact_header.contains("切换"));
     assert_eq!(state.hits.mobile_switch, Rect::new(34, 0, 10, 2));
 
     let click = |rect: Rect| {
@@ -225,19 +245,23 @@ fn mobile_header_and_switcher_render_released_sections_and_stable_targets() {
         !switcher_text.contains('X'),
         "switcher must clear the pane surface"
     );
+    let compact_switcher = switcher_text
+        .chars()
+        .filter(|ch| !ch.is_whitespace())
+        .collect::<String>();
     for expected in [
-        "switch",
-        "close",
-        "agents",
-        "spaces",
-        "+ new workspace",
-        "tabs",
-        "+ new tab",
-        "menu",
-        "settings",
-        "detach",
+        "切换",
+        "关闭",
+        "agent",
+        "工作区",
+        "+新建工作区",
+        "标签页",
+        "+新建标签页",
+        "菜单",
+        "设置",
+        "分离",
     ] {
-        assert!(switcher_text.contains(expected), "missing {expected}");
+        assert!(compact_switcher.contains(expected), "missing {expected}");
     }
     let workspace_hit = state
         .hits
@@ -375,7 +399,11 @@ fn mobile_background_workspace_uses_its_own_active_tab_status() {
         })
         .collect::<Vec<_>>()
         .join("\n");
-    assert!(text.contains("feature · tab two · 2/2"), "{text}");
+    let compact = text
+        .chars()
+        .filter(|ch| !ch.is_whitespace())
+        .collect::<String>();
+    assert!(compact.contains("feature·标签页two·2/2"), "{text}");
     assert!(text.contains("2 · logs"), "{text}");
     assert!(!text.contains("7 · logs"), "{text}");
 }

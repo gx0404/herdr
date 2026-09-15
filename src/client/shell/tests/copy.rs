@@ -214,7 +214,7 @@ fn client_mouse_selection_highlights_and_copies_through_endpoint_extraction() {
             .copy_feedback
             .as_ref()
             .map(|feedback| feedback.message.as_str()),
-        Some("copied to clipboard")
+        Some("已复制到剪贴板")
     );
 }
 
@@ -228,7 +228,7 @@ fn clipboard_feedback_is_client_local_and_respects_config() {
             .copy_feedback
             .as_ref()
             .map(|feedback| feedback.message.as_str()),
-        Some("copied to clipboard")
+        Some("已复制到剪贴板")
     );
     assert_eq!(
         state.copy_feedback_deadline,

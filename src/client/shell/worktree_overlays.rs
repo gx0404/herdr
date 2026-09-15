@@ -12,7 +12,7 @@ pub(super) fn render_worktree_create_overlay(
         inner.x,
         inner.y,
         inner.width,
-        "new worktree",
+        crate::i18n::texts().worktree.new_worktree,
         Style::default()
             .fg(p.text)
             .bg(p.panel_bg)
@@ -23,7 +23,7 @@ pub(super) fn render_worktree_create_overlay(
         inner.x,
         inner.y + 2,
         inner.width,
-        " branch",
+        crate::i18n::texts().worktree.branch_hint,
         Style::default().fg(p.overlay0).bg(p.panel_bg),
     );
     let input = Rect::new(inner.x, inner.y + 3, inner.width, 1);
@@ -39,7 +39,7 @@ pub(super) fn render_worktree_create_overlay(
         inner.x,
         inner.y + 5,
         inner.width,
-        " checkout",
+        crate::i18n::texts().worktree.checkout_hint,
         Style::default().fg(p.overlay0).bg(p.panel_bg),
     );
     put_text(
@@ -56,7 +56,7 @@ pub(super) fn render_worktree_create_overlay(
             inner.x,
             inner.y + 8,
             inner.width,
-            " creating…",
+            crate::i18n::texts().worktree.creating,
             Style::default().fg(p.accent).bg(p.panel_bg),
         );
     } else if let Some(error) = create.error.as_deref() {
@@ -69,14 +69,21 @@ pub(super) fn render_worktree_create_overlay(
             Style::default().fg(p.red).bg(p.panel_bg),
         );
     }
-    let buttons = row(inner, &[20, 12], 2, 9);
+    let create_label = crate::i18n::texts().worktree.create_and_open;
+    let cancel_label = crate::i18n::texts().overlays.cancel_button;
+    let buttons = row(
+        inner,
+        &[display_width(create_label), display_width(cancel_label)],
+        2,
+        9,
+    );
     let [primary, cancel] = buttons.as_slice() else {
         return None;
     };
     button(
         b,
         *primary,
-        " ↵ create and open ",
+        create_label,
         Style::default()
             .fg(contrast(p))
             .bg(p.accent)
@@ -85,7 +92,7 @@ pub(super) fn render_worktree_create_overlay(
     button(
         b,
         *cancel,
-        " esc cancel ",
+        cancel_label,
         Style::default()
             .fg(p.text)
             .bg(p.surface0)
@@ -119,7 +126,7 @@ pub(super) fn render_worktree_open_overlay(
         inner.x,
         inner.y,
         inner.width,
-        "open worktree",
+        crate::i18n::texts().worktree.open_worktree,
         Style::default()
             .fg(p.text)
             .bg(p.panel_bg)
@@ -137,7 +144,7 @@ pub(super) fn render_worktree_open_overlay(
         } else if !open.query.is_empty() {
             format!(" / {}", open.query)
         } else {
-            " / filter worktrees".to_owned()
+            crate::i18n::texts().worktree.filter_worktrees.to_owned()
         },
         Style::default()
             .fg(if open.search_focused {
@@ -148,9 +155,18 @@ pub(super) fn render_worktree_open_overlay(
             .bg(p.panel_bg),
     );
     let count = if filtered.len() == open.entries.len() {
-        format!("{} checkouts", open.entries.len())
+        crate::i18n::fill(
+            crate::i18n::texts().worktree.checkouts_fmt,
+            &[("count", &open.entries.len().to_string())],
+        )
     } else {
-        format!("{}/{} checkouts", filtered.len(), open.entries.len())
+        crate::i18n::fill(
+            crate::i18n::texts().worktree.checkouts_filtered_fmt,
+            &[
+                ("filtered", &filtered.len().to_string()),
+                ("count", &open.entries.len().to_string()),
+            ],
+        )
     };
     let cursor = if open.search_focused {
         text_editor::render(
@@ -245,7 +261,7 @@ pub(super) fn render_worktree_open_overlay(
             body.x,
             body.y,
             body.width,
-            " no matching worktrees",
+            crate::i18n::texts().worktree.no_matching,
             Style::default().fg(p.overlay0).bg(p.panel_bg),
         );
     }
@@ -255,7 +271,7 @@ pub(super) fn render_worktree_open_overlay(
             inner.x,
             inner.bottom() - 3,
             inner.width,
-            " opening…",
+            crate::i18n::texts().worktree.opening,
             Style::default().fg(p.accent).bg(p.panel_bg),
         );
     } else if let Some(error) = open.error.as_deref() {
@@ -268,14 +284,21 @@ pub(super) fn render_worktree_open_overlay(
             Style::default().fg(p.red).bg(p.panel_bg),
         );
     }
-    let buttons = row(inner, &[10, 12], 2, inner.height.saturating_sub(1));
+    let open_label = crate::i18n::texts().worktree.open_button;
+    let cancel_label = crate::i18n::texts().overlays.cancel_button;
+    let buttons = row(
+        inner,
+        &[display_width(open_label), display_width(cancel_label)],
+        2,
+        inner.height.saturating_sub(1),
+    );
     let [primary, cancel] = buttons.as_slice() else {
         return None;
     };
     button(
         b,
         *primary,
-        " ↵ open ",
+        open_label,
         Style::default()
             .fg(contrast(p))
             .bg(p.accent)
@@ -284,7 +307,7 @@ pub(super) fn render_worktree_open_overlay(
     button(
         b,
         *cancel,
-        " esc cancel ",
+        cancel_label,
         Style::default()
             .fg(p.text)
             .bg(p.surface0)
@@ -317,7 +340,7 @@ pub(super) fn render_worktree_remove_overlay(
         inner.x,
         inner.y,
         inner.width,
-        " delete worktree checkout?",
+        crate::i18n::texts().worktree.delete_title,
         Style::default()
             .fg(p.red)
             .bg(p.panel_bg)
@@ -328,7 +351,7 @@ pub(super) fn render_worktree_remove_overlay(
         inner.x,
         inner.y + 1,
         inner.width,
-        " This removes the checkout folder:",
+        crate::i18n::texts().worktree.removes_folder,
         Style::default().fg(p.text).bg(p.panel_bg),
     );
     put_text(
@@ -344,7 +367,7 @@ pub(super) fn render_worktree_remove_overlay(
         inner.x,
         inner.y + 3,
         inner.width,
-        " The branch is not deleted. The Herdr workspace will close.",
+        crate::i18n::texts().worktree.branch_not_deleted,
         Style::default().fg(p.text).bg(p.panel_bg),
     );
     if remove.force_confirmation {
@@ -353,7 +376,7 @@ pub(super) fn render_worktree_remove_overlay(
             inner.x,
             inner.y + 4,
             inner.width,
-            " Dirty or untracked files will be permanently deleted.",
+            crate::i18n::texts().worktree.dirty_warning,
             Style::default().fg(p.red).bg(p.panel_bg),
         );
     }
@@ -363,7 +386,7 @@ pub(super) fn render_worktree_remove_overlay(
             inner.x,
             inner.y + 5,
             inner.width,
-            " removing…",
+            crate::i18n::texts().worktree.removing,
             Style::default().fg(p.accent).bg(p.panel_bg),
         );
     } else if let Some(error) = remove.error.as_deref() {
@@ -376,18 +399,25 @@ pub(super) fn render_worktree_remove_overlay(
             Style::default().fg(p.red).bg(p.panel_bg),
         );
     }
-    let buttons = row(inner, &[18, 12], 2, 7);
+    let primary_label = if remove.force_confirmation {
+        crate::i18n::texts().worktree.delete_anyway
+    } else {
+        crate::i18n::texts().worktree.remove
+    };
+    let cancel_label = crate::i18n::texts().overlays.cancel_button;
+    let buttons = row(
+        inner,
+        &[display_width(primary_label), display_width(cancel_label)],
+        2,
+        7,
+    );
     let [primary, cancel] = buttons.as_slice() else {
         return None;
     };
     button(
         b,
         *primary,
-        if remove.force_confirmation {
-            " ↵ delete anyway "
-        } else {
-            " ↵ remove "
-        },
+        primary_label,
         Style::default()
             .fg(contrast(p))
             .bg(p.red)
@@ -396,7 +426,7 @@ pub(super) fn render_worktree_remove_overlay(
     button(
         b,
         *cancel,
-        " esc cancel ",
+        cancel_label,
         Style::default()
             .fg(p.text)
             .bg(p.surface0)

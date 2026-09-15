@@ -113,14 +113,15 @@ pub(super) fn render_agent_panel_header(
         area.x,
         area.y + 1,
         area.width,
-        " agents",
+        crate::i18n::texts().sidebar.agents,
         Style::default()
             .fg(config.palette.overlay0)
             .add_modifier(Modifier::BOLD),
     );
+    let texts = crate::i18n::texts();
     let sort_label = agent_view_label.unwrap_or(match config.agent_panel_sort {
-        crate::config::AgentPanelSortConfig::Spaces => "grouped",
-        crate::config::AgentPanelSortConfig::Priority => "priority",
+        crate::config::AgentPanelSortConfig::Spaces => texts.sidebar.sort_grouped,
+        crate::config::AgentPanelSortConfig::Priority => texts.sidebar.sort_priority,
     });
     let sort_width = display_width(sort_label).min(area.width as usize) as u16;
     let sort_rect = Rect::new(
@@ -385,10 +386,11 @@ fn display_width(text: &str) -> usize {
 
 fn sidebar_status_text(status: crate::api::schema::AgentStatus) -> &'static str {
     use crate::api::schema::AgentStatus;
+    let texts = &crate::i18n::texts().status;
     match status {
-        AgentStatus::Blocked => "blocked",
-        AgentStatus::Done => "done",
-        AgentStatus::Working => "working",
-        AgentStatus::Idle | AgentStatus::Unknown => "idle",
+        AgentStatus::Blocked => texts.blocked,
+        AgentStatus::Done => texts.done,
+        AgentStatus::Working => texts.working,
+        AgentStatus::Idle | AgentStatus::Unknown => texts.idle,
     }
 }

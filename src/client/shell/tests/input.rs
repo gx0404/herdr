@@ -569,11 +569,12 @@ fn help_overlay_uses_live_keymap_and_owns_filter_state() {
         })
         .collect::<Vec<_>>()
         .join("\n");
-    assert!(text.contains("keybinds"));
-    assert!(text.contains("prefix mode"));
+    let compact = text.replace(' ', "");
+    assert!(compact.contains("快捷键"));
+    assert!(compact.contains("前缀模式"));
 
     assert!(state.handle_input_bytes(b"/").actions.is_empty());
-    assert!(state.handle_input_bytes(b"workspace").actions.is_empty());
+    assert!(state.handle_input_bytes(b"prefix+w").actions.is_empty());
     let filtered = state.compose(106, 30).expect("filtered help");
     let text = filtered
         .cells
@@ -585,8 +586,9 @@ fn help_overlay_uses_live_keymap_and_owns_filter_state() {
         })
         .collect::<Vec<_>>()
         .join("\n");
-    assert!(text.contains("workspace navigation"));
-    assert!(!text.contains("prefix mode"));
+    let compact = text.replace(' ', "");
+    assert!(compact.contains("工作区导航"));
+    assert!(!compact.contains("前缀模式"));
     assert!(filtered
         .cursor
         .as_ref()

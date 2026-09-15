@@ -204,7 +204,7 @@ pub(crate) fn render_sidebar(
         workspace_area.x,
         workspace_area.y,
         workspace_area.width,
-        " spaces",
+        crate::i18n::texts().sidebar.spaces,
         Style::default()
             .fg(palette.overlay0)
             .add_modifier(Modifier::BOLD),
@@ -372,11 +372,18 @@ pub(crate) fn render_sidebar(
             workspace_area.x,
             footer_y,
             workspace_area.width,
-            " new",
+            crate::i18n::texts().sidebar.new,
             Style::default().fg(palette.overlay0),
         );
         let attention = super::super::global_menu::global_menu_attention(snapshot);
-        let launcher_width = if attention { 8 } else { 6 }.min(workspace_area.width);
+        let menu_label = crate::i18n::texts().sidebar.menu;
+        let menu_width = super::render::display_width(menu_label);
+        let launcher_width = if attention {
+            menu_width.saturating_add(2)
+        } else {
+            menu_width
+        }
+        .min(workspace_area.width);
         hits.global_launcher = Rect::new(
             workspace_area.right().saturating_sub(launcher_width),
             footer_y,
@@ -384,7 +391,9 @@ pub(crate) fn render_sidebar(
             1,
         );
         if attention {
-            let start_x = workspace_area.right().saturating_sub(6);
+            let start_x = workspace_area
+                .right()
+                .saturating_sub(menu_width.saturating_add(2));
             put_text(
                 buffer,
                 start_x,
@@ -399,8 +408,8 @@ pub(crate) fn render_sidebar(
                 buffer,
                 start_x.saturating_add(2),
                 footer_y,
-                4,
-                "menu",
+                menu_width,
+                menu_label,
                 Style::default().fg(palette.overlay0),
             );
         } else {
@@ -408,7 +417,7 @@ pub(crate) fn render_sidebar(
                 buffer,
                 workspace_area,
                 footer_y,
-                "menu",
+                menu_label,
                 Style::default().fg(palette.overlay0),
             );
         }

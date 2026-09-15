@@ -11,9 +11,8 @@ mod text;
 mod widgets;
 
 pub(crate) use self::onboarding::{
-    onboarding_welcome_continue_rect, ONBOARDING_DESCRIPTION, ONBOARDING_HELP_LABEL,
-    ONBOARDING_HELP_SUFFIX, ONBOARDING_NEXT, ONBOARDING_PREFIX_LABEL, ONBOARDING_PREFIX_SUFFIX,
-    ONBOARDING_SUBTITLE, ONBOARDING_TITLE,
+    onboarding_welcome_continue_rect, ONBOARDING_HELP_LABEL, ONBOARDING_PREFIX_LABEL,
+    ONBOARDING_TITLE,
 };
 #[cfg(all(test, unix))]
 pub(crate) use self::panes::popup_pane_rects;
@@ -44,7 +43,7 @@ pub(crate) use self::tab_surface::{
 };
 pub(crate) use self::text::truncate_end;
 pub(crate) use self::widgets::{
-    centered_popup_rect, modal_stack_areas, MODAL_CLOSE_BUTTON_TEXT, MODAL_CONTINUE_BUTTON_TEXT,
+    centered_popup_rect, modal_close_button_text, modal_continue_button_text, modal_stack_areas,
 };
 
 use crate::app::AppState;

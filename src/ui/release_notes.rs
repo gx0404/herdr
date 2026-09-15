@@ -156,7 +156,7 @@ fn release_notes_preview_line_entries<'a>(
     let (instruction_width, mut instruction_spans) =
         release_notes_inline_spans(&instruction, text_style, inline_code_style);
     instruction_spans.insert(0, Span::raw(" "));
-    let title = " update ready";
+    let title = crate::i18n::texts().overlays.release_preview_title;
 
     vec![
         (
@@ -306,10 +306,10 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert_eq!(lines.len(), 2);
-        assert_eq!(line_text(&lines[0]), " ● update ready");
+        assert_eq!(line_text(&lines[0]), " ● 更新就绪");
         assert_eq!(
             line_text(&lines[1]),
-            " detach, run herdr update, then run Herdr again to reconnect"
+            " 分离后执行 herdr update，再重新运行 Herdr 以重连"
         );
         assert_eq!(lines[0].spans[1].style.fg, Some(palette.accent));
         assert_eq!(lines[0].spans[2].style.fg, Some(palette.text));
@@ -330,10 +330,10 @@ mod tests {
 
         let lines = release_notes_display_lines(&notes, "herdr update", &palette);
 
-        assert_eq!(line_text(&lines[0].1), " ● update ready");
+        assert_eq!(line_text(&lines[0].1), " ● 更新就绪");
         assert_eq!(
             line_text(&lines[1].1),
-            " detach, run herdr update, then run Herdr again to reconnect"
+            " 分离后执行 herdr update，再重新运行 Herdr 以重连"
         );
         assert_eq!(line_text(&lines[2].1), "");
         assert_eq!(line_text(&lines[3].1), " ADDED");

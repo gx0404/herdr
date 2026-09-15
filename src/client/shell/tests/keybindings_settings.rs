@@ -232,7 +232,7 @@ detach = "prefix+x"
         })
         .collect::<Vec<_>>()
         .join("\n");
-    assert!(text.contains("PREFIX"), "frame: {text:?}");
+    assert!(text.replace(' ', "").contains("前缀"), "frame: {text:?}");
     assert!(text.contains("ctrl+a"), "frame: {text:?}");
 
     let detach = state.handle_input_bytes(b"x");
@@ -725,7 +725,7 @@ fn help_overlay_restores_released_search_scroll_and_custom_binding_behavior() {
         })
         .collect::<Vec<_>>()
         .join("\n");
-    assert!(text.contains("global"));
+    assert!(text.replace(' ', "").contains("全局"));
     assert!(state.hits.help_max_scroll > 0);
     assert_ne!(state.hits.help_scrollbar, Rect::default());
 
@@ -742,7 +742,7 @@ fn help_overlay_restores_released_search_scroll_and_custom_binding_behavior() {
         })
         .collect::<Vec<_>>()
         .join("\n");
-    assert!(text.contains("custom"));
+    assert!(text.replace(' ', "").contains("自定义"));
     assert!(text.contains("run plugin action"));
     state.handle_input_bytes(b"\x1b");
 
@@ -759,7 +759,7 @@ fn help_overlay_restores_released_search_scroll_and_custom_binding_behavior() {
         })
         .collect::<Vec<_>>()
         .join("\n");
-    assert!(text.contains("no matching keybinds"));
+    assert!(text.replace(' ', "").contains("没有匹配的快捷键"));
 
     state.handle_input_bytes(b"\x1b");
     assert!(matches!(

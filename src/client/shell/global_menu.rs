@@ -22,32 +22,33 @@ pub(super) fn global_menu_item_has_badge(
 pub(super) fn global_menu_items(
     snapshot: &ClientShellSnapshot,
 ) -> Vec<(&'static str, ClientGlobalMenuAction)> {
+    let t = &crate::i18n::texts().global_menu;
     let mut items = vec![
         (
-            "settings",
+            t.settings,
             ClientGlobalMenuAction::Binding(crate::input::KeybindAction::Settings),
         ),
         (
-            "keybinds",
+            t.keybinds,
             ClientGlobalMenuAction::Binding(crate::input::KeybindAction::Help),
         ),
         (
-            "reload config",
+            t.reload_config,
             ClientGlobalMenuAction::Binding(crate::input::KeybindAction::ReloadConfig),
         ),
     ];
     if snapshot.update_available.is_some() || snapshot.latest_release_notes_available {
         items.push((
             if snapshot.update_available.is_some() {
-                "update ready"
+                t.update_ready
             } else {
-                "what's new"
+                t.whats_new
             },
             ClientGlobalMenuAction::WhatsNew,
         ));
     }
     items.push((
-        "detach",
+        t.detach,
         ClientGlobalMenuAction::Binding(crate::input::KeybindAction::Detach),
     ));
     items
