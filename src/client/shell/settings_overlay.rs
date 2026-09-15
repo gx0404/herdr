@@ -228,7 +228,7 @@ pub(super) fn render_settings_overlay(
     button(
         buffer,
         close,
-        " esc close ",
+        crate::ui::MODAL_CLOSE_BUTTON_TEXT,
         Style::default()
             .fg(palette.text)
             .bg(palette.surface0)

@@ -87,23 +87,23 @@ pub(crate) fn modal_stack_areas(
     result
 }
 
-fn action_button_width(hint: Option<&str>, label: &str) -> u16 {
-    match hint {
-        Some(hint) => format!(" {hint} {label} ").chars().count() as u16,
-        None => format!(" {label} ").chars().count() as u16,
-    }
-}
+/// Modal action buttons are rendered from these exact strings; the matching
+/// `*_button_rect` hit-test rects must stay width-twins with them.
+pub(crate) const MODAL_CLOSE_BUTTON_TEXT: &str = " esc close ";
+pub(crate) const MODAL_CONTINUE_BUTTON_TEXT: &str = " ↵ continue ";
 
 pub(crate) fn close_button_rect(area: Rect) -> Rect {
-    let width = action_button_width(Some("esc"), "close");
+    let width = u16::try_from(unicode_width::UnicodeWidthStr::width(
+        MODAL_CLOSE_BUTTON_TEXT,
+    ))
+    .unwrap_or(u16::MAX);
     Rect::new(area.x + area.width.saturating_sub(width), area.y, width, 1)
 }
 
 pub(crate) fn continue_button_rect(area: Rect) -> Rect {
-    Rect::new(
-        area.x,
-        area.y,
-        action_button_width(Some("↵"), "continue"),
-        1,
-    )
+    let width = u16::try_from(unicode_width::UnicodeWidthStr::width(
+        MODAL_CONTINUE_BUTTON_TEXT,
+    ))
+    .unwrap_or(u16::MAX);
+    Rect::new(area.x, area.y, width, 1)
 }

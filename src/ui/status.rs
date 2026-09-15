@@ -22,7 +22,11 @@ pub(crate) fn copy_feedback_rect(
         return Rect::default();
     }
 
-    let content_width = feedback.message.len() as u16 + 4;
+    let content_width = u16::try_from(unicode_width::UnicodeWidthStr::width(
+        feedback.message.as_str(),
+    ))
+    .unwrap_or(u16::MAX)
+    .saturating_add(4);
     let width = content_width.min(area.width);
     let height = 3u16.min(area.height);
     let x = match position {
@@ -107,7 +111,9 @@ pub(crate) fn render_config_diagnostic_buffer(
         .enumerate()
     {
         let text = format!(" {line} ");
-        let width = (text.len() as u16).min(area.width);
+        let width = u16::try_from(unicode_width::UnicodeWidthStr::width(text.as_str()))
+            .unwrap_or(u16::MAX)
+            .min(area.width);
         let diagnostic_area = Rect::new(
             area.x + area.width.saturating_sub(width),
             area.y + row as u16,
@@ -145,5 +151,18 @@ mod tests {
             bottom.x,
             area.x + area.width.saturating_sub(bottom.width) / 2
         );
+    }
+
+    #[test]
+    fn copy_feedback_rect_sizes_by_display_width_not_bytes() {
+        let area = Rect::new(0, 0, 100, 10);
+        let feedback = CopyFeedback {
+            message: "已复制到剪贴板".to_owned(),
+        };
+
+        let rect = copy_feedback_rect(area, &feedback, 0, ToastClipboardPosition::TopLeft);
+
+        // Seven CJK chars occupy 14 display cells; byte length would report 21.
+        assert_eq!(rect.width, 14 + 4);
     }
 }

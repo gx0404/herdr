@@ -363,7 +363,7 @@ fn render_release_notes_overlay(
     button(
         b,
         close,
-        " esc close ",
+        crate::ui::MODAL_CLOSE_BUTTON_TEXT,
         Style::default()
             .fg(contrast(p))
             .bg(p.accent)
@@ -479,7 +479,7 @@ fn render_product_announcement_overlay(
     button(
         b,
         close,
-        " esc close ",
+        crate::ui::MODAL_CLOSE_BUTTON_TEXT,
         Style::default()
             .fg(contrast(p))
             .bg(p.accent)
@@ -611,7 +611,7 @@ fn render_onboarding_overlay(b: &mut Buffer, p: &Palette) -> Option<OverlayRende
     button(
         b,
         primary,
-        " ↵ continue ",
+        crate::ui::MODAL_CONTINUE_BUTTON_TEXT,
         Style::default()
             .fg(contrast(p))
             .bg(p.accent)
@@ -968,13 +968,17 @@ fn help_lines(
     );
     let key_width = groups
         .iter()
-        .flat_map(|(_, entries)| entries.iter().map(|(key, _)| key.chars().count()))
+        .flat_map(|(_, entries)| {
+            entries
+                .iter()
+                .map(|(key, _)| usize::from(display_width(key)))
+        })
         .max()
         .unwrap_or(8);
     if groups.is_empty() {
         let message = " no matching keybinds";
         return vec![(
-            message.chars().count(),
+            usize::from(display_width(message)),
             Line::from(Span::styled(
                 message,
                 Style::default().fg(palette.overlay1).bg(palette.panel_bg),
@@ -985,7 +989,7 @@ fn help_lines(
     let mut lines = Vec::new();
     for (group, entries) in groups {
         lines.push((
-            group.len() + 1,
+            usize::from(display_width(group)) + 1,
             Line::from(Span::styled(
                 format!(" {group}"),
                 Style::default()
@@ -996,7 +1000,8 @@ fn help_lines(
         ));
         for (key, label) in entries {
             let padded_key = format!(" {key:<key_width$} ");
-            let width = padded_key.chars().count() + label.chars().count();
+            let width =
+                usize::from(display_width(&padded_key)) + usize::from(display_width(&label));
             lines.push((
                 width,
                 Line::from(vec![
@@ -1050,7 +1055,7 @@ fn render_help_overlay(
         if h.search_focused {
             " esc back "
         } else {
-            " esc close "
+            crate::ui::MODAL_CLOSE_BUTTON_TEXT
         },
         Style::default()
             .fg(contrast(p))

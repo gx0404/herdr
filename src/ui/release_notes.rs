@@ -6,6 +6,7 @@ use ratatui::{
 };
 
 use crate::app::state::{Palette, ProductAnnouncementState, ReleaseNotesState};
+use crate::ui::text::display_width;
 
 pub(crate) const RELEASE_NOTES_MODAL_SIZE: (u16, u16) = (80, 24);
 pub(crate) const PRODUCT_ANNOUNCEMENT_MODAL_SIZE: (u16, u16) = (88, 24);
@@ -22,21 +23,21 @@ fn release_notes_inline_spans<'a>(
     while let Some(start) = remaining.find('`') {
         let (before, after_start) = remaining.split_at(start);
         if !before.is_empty() {
-            width += before.chars().count();
+            width += display_width(before);
             spans.push(Span::styled(before.to_string(), base_style));
         }
 
         let after_start = &after_start[1..];
         let Some(end) = after_start.find('`') else {
             let literal = format!("`{after_start}");
-            width += literal.chars().count();
+            width += display_width(&literal);
             spans.push(Span::styled(literal, base_style));
             remaining = "";
             break;
         };
 
         let (code, after_end) = after_start.split_at(end);
-        width += code.chars().count();
+        width += display_width(code);
         if !code.is_empty() {
             // Keep short config examples together when Paragraph wraps.
             // Snippets like `new_tab = "prefix+c"` read poorly when they
@@ -52,7 +53,7 @@ fn release_notes_inline_spans<'a>(
     }
 
     if !remaining.is_empty() {
-        width += remaining.chars().count();
+        width += display_width(remaining);
         spans.push(Span::styled(remaining.to_string(), base_style));
     }
 
@@ -83,7 +84,7 @@ pub(crate) fn release_notes_lines<'a>(body: &'a str, p: &Palette) -> Vec<(usize,
             let code_bg = p.surface1;
             let gutter_style = Style::default().fg(p.accent).bg(code_bg);
             let code_style = Style::default().fg(p.text).bg(code_bg);
-            let width = 2 + trimmed.chars().count();
+            let width = 2 + display_width(trimmed);
             let mut spans = vec![
                 Span::styled("▏", gutter_style),
                 Span::styled(" ", code_style),
@@ -106,7 +107,7 @@ pub(crate) fn release_notes_lines<'a>(body: &'a str, p: &Palette) -> Vec<(usize,
                 lines.push((0, Line::raw("")));
                 continue;
             }
-            let width = 1 + text.chars().count();
+            let width = 1 + display_width(&text);
             lines.push((
                 width,
                 Line::from(vec![
@@ -155,17 +156,18 @@ fn release_notes_preview_line_entries<'a>(
     let (instruction_width, mut instruction_spans) =
         release_notes_inline_spans(&instruction, text_style, inline_code_style);
     instruction_spans.insert(0, Span::raw(" "));
+    let title = " update ready";
 
     vec![
         (
-            15,
+            2 + display_width(title),
             Line::from(vec![
                 Span::raw(" "),
                 Span::styled(
                     "●",
                     Style::default().fg(p.accent).add_modifier(Modifier::BOLD),
                 ),
-                Span::styled(" update ready", title_style),
+                Span::styled(title, title_style),
             ]),
         ),
         (instruction_width + 1, Line::from(instruction_spans)),
@@ -336,6 +338,19 @@ mod tests {
         assert_eq!(line_text(&lines[2].1), "");
         assert_eq!(line_text(&lines[3].1), " ADDED");
         assert_eq!(line_text(&lines[4].1), " • One");
+    }
+
+    #[test]
+    fn release_notes_line_widths_use_display_width_for_cjk() {
+        let palette = Palette::catppuccin();
+        let lines = release_notes_lines("### 新增功能\n- 修复了窗格布局", &palette);
+
+        assert_eq!(line_text(&lines[0].1), " 新增功能");
+        // Leading space + four CJK chars (2 cells each).
+        assert_eq!(lines[0].0, 1 + 8);
+        assert_eq!(line_text(&lines[1].1), " • 修复了窗格布局");
+        // " • " gutter + seven CJK chars.
+        assert_eq!(lines[1].0, 3 + 14);
     }
 
     #[test]
