@@ -50,11 +50,17 @@ PINS: dict[str, dict[str, str]] = {
     },
 }
 DOWNLOAD_BASE = f"https://ziglang.org/download/{ZIG_VERSION}/"
-# 备用镜像（内容经下方 sha256 钉版校验，来源可信度由哈希保证）。
-# 官方源在部分网络下被限速到 <20KB/s；machengine 镜像覆盖官方 tarball。
+# 下载源顺序：国内教育网/阿里镜像站均未收录 zig（2026-09 核实，TUNA /zig/ 404），
+# 实测可达的快源是 machengine（Cloudflare CDN）；官方源在部分网络被限速到 <20KB/s，
+# 故默认镜像优先、官方后备。所有来源都经下方 sha256 钉版校验，来源可信度由哈希保证；
+# 未来出现更近的镜像时设 HERDR_ZIG_MIRROR=<base> 前置即可。
 MIRROR_BASES = ["https://pkg.machengine.org/zig/"]
+# 初始探测窗（8s 内需 ≥512KB，即 ≥64KB/s）；此后要求持续平均速率 ≥100KB/s，
+# 低于即切换下一个源。不设绝对时限：53MB 在 100KB/s 下 ~9 分钟也允许完成。
 SPEED_FLOOR_BYTES = 512 * 1024
 SPEED_PROBE_SECONDS = 8
+MIN_SUSTAINED_RATE_BYTES_PER_SEC = 100 * 1024
+PROGRESS_INTERVAL_SECONDS = 3
 
 
 class SetupZigError(RuntimeError):
@@ -62,15 +68,15 @@ class SetupZigError(RuntimeError):
 
 
 def download_bases() -> list[str]:
-    """下载源顺序：HERDR_ZIG_MIRROR 自定义源 → 官方 → 内置镜像。"""
+    """下载源顺序：HERDR_ZIG_MIRROR 自定义源 → 内置镜像 → 官方。"""
     bases: list[str] = []
     custom = os.environ.get("HERDR_ZIG_MIRROR", "").rstrip("/")
     if custom:
         if not custom.endswith("/"):
             custom += "/"
         bases.append(custom)
-    bases.append(DOWNLOAD_BASE)
     bases.extend(MIRROR_BASES)
+    bases.append(DOWNLOAD_BASE)
     return bases
 
 
@@ -139,18 +145,38 @@ def _download_one(url: str, destination: Path) -> None:
 
     print(f"[setup-zig] 下载 {url}")
     start = time.monotonic()
+    last_report = start
     downloaded = 0
+    total: int | None = None
     try:
         with urllib.request.urlopen(url, timeout=60) as response, destination.open("wb") as handle:
+            length = response.headers.get("Content-Length")
+            if length and length.isdigit():
+                total = int(length)
             while True:
-                chunk = response.read(1 << 16)
+                chunk = response.read(1 << 14)
                 if not chunk:
                     break
                 handle.write(chunk)
                 downloaded += len(chunk)
-                elapsed = time.monotonic() - start
-                if elapsed > SPEED_PROBE_SECONDS and downloaded < SPEED_FLOOR_BYTES:
-                    raise SetupZigError(f"源速度过低（{downloaded}B/{elapsed:.0f}s），切换下一个源")
+                now = time.monotonic()
+                if now - last_report >= PROGRESS_INTERVAL_SECONDS:
+                    rate = downloaded / 1024 / max(now - start, 0.001)
+                    if total is not None:
+                        print(
+                            f"[setup-zig]   {downloaded / 1048576:.1f}/{total / 1048576:.1f}MB"
+                            f"（{rate:.0f}KB/s）"
+                        )
+                    else:
+                        print(f"[setup-zig]   {downloaded / 1048576:.1f}MB（{rate:.0f}KB/s）")
+                    last_report = now
+                elapsed = now - start
+                if elapsed > SPEED_PROBE_SECONDS and (
+                    downloaded < SPEED_FLOOR_BYTES
+                    or downloaded < MIN_SUSTAINED_RATE_BYTES_PER_SEC * elapsed
+                ):
+                    rate = downloaded / 1024 / max(elapsed, 0.001)
+                    raise SetupZigError(f"源速度过低（{rate:.0f}KB/s），切换下一个源")
     except urllib.error.HTTPError as exc:
         raise SetupZigError(f"HTTP {exc.code}") from exc
     except (urllib.error.URLError, OSError) as exc:

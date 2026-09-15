@@ -36,12 +36,13 @@ class PinTableTests(unittest.TestCase):
         saved = _os.environ.pop("HERDR_ZIG_MIRROR", None)
         try:
             default = setup_zig.download_bases()
-            self.assertEqual(default[0], setup_zig.DOWNLOAD_BASE)
-            self.assertIn("https://pkg.machengine.org/zig/", default)
+            # 镜像优先于官方（国内网络官方被限速；sha256 钉版保证镜像可信）。
+            self.assertEqual(default[0], "https://pkg.machengine.org/zig/")
+            self.assertEqual(default[-1], setup_zig.DOWNLOAD_BASE)
             _os.environ["HERDR_ZIG_MIRROR"] = "https://example.cn/zig"
             custom = setup_zig.download_bases()
             self.assertEqual(
-                ["https://example.cn/zig/", setup_zig.DOWNLOAD_BASE, "https://pkg.machengine.org/zig/"],
+                ["https://example.cn/zig/", "https://pkg.machengine.org/zig/", setup_zig.DOWNLOAD_BASE],
                 custom,
             )
         finally:
