@@ -651,6 +651,328 @@ pub struct CliOutputTexts {
     pub plugin_warning_label: &'static str,
 }
 
+/// User-visible CLI error strings: messages `eprintln!`ed to the operator or
+/// returned as errors that main eventually prints. JSON error-response codes
+/// and payloads stay byte-identical; only the human-readable message text is
+/// localized. `*_fmt` entries are `fill` templates; each documents its
+/// placeholder names in a trailing `// args:` comment.
+pub struct CliErrorTexts {
+    // Shared prefixes and generic parser messages.
+    pub error_prefix: &'static str,
+    pub missing_value_for_fmt: &'static str,   // args: flag
+    pub unknown_option_fmt: &'static str,      // args: option
+    pub unexpected_argument_fmt: &'static str, // args: argument
+    pub invalid_flag_value_fmt: &'static str,  // args: flag, value
+
+    // src/cli.rs
+    pub token_must_use_name_value: &'static str,
+    pub token_name_empty: &'static str,
+    pub env_must_use_key_value: &'static str,
+    pub env_key_empty: &'static str,
+    pub env_nul_bytes: &'static str,
+    pub channel_set_usage: &'static str,
+    pub config_invalid_toml_channel_fmt: &'static str, // args: path, error
+    pub channel_change_invalid_toml_fmt: &'static str, // args: path, error
+    pub update_failed_fmt: &'static str,               // args: error
+    pub update_retry_hint: &'static str,
+    pub config_check_usage: &'static str,
+    pub config_reset_keys_usage: &'static str,
+    pub config_invalid_toml_manual_fix_fmt: &'static str, // args: path, error
+    pub config_top_level_table_fmt: &'static str,         // args: path
+    pub config_keys_remove_unsafe_fmt: &'static str,      // args: path
+    pub config_keys_remove_invalid_toml_fmt: &'static str, // args: path, error
+    pub session_list_usage: &'static str,
+    pub session_attach_usage: &'static str,
+    pub session_stop_usage: &'static str,
+    pub session_delete_usage: &'static str,
+    pub terminal_attach_usage: &'static str,
+    pub unknown_terminal_session_option_fmt: &'static str, // args: command, option
+    pub terminal_dimension_range_fmt: &'static str,        // args: flag, max
+    pub terminal_dimension_positive_fmt: &'static str,     // args: flag
+    pub terminal_title_set_usage: &'static str,
+    pub terminal_title_clear_usage: &'static str,
+    pub terminal_title_help_clear_line: &'static str,
+    pub invalid_split_direction_fmt: &'static str, // args: value
+    pub invalid_read_source_fmt: &'static str,     // args: value
+    pub invalid_read_format_fmt: &'static str,     // args: value
+    pub invalid_agent_status_fmt: &'static str,    // args: value
+    pub invalid_pane_agent_state_fmt: &'static str, // args: value
+    pub server_ping_no_protocol: &'static str,
+
+    // src/cli/protocol_guard.rs
+    pub protocol_newer_fmt: &'static str, // args: client_protocol, server_protocol, restart_guidance
+    pub protocol_older_fmt: &'static str, // args: client_protocol, server_protocol
+
+    // src/cli/server_not_running.rs
+    pub no_server_running_fmt: &'static str, // args: path, command
+
+    // src/cli/target.rs
+    pub machine_specified_twice: &'static str,
+    pub machine_requires_value: &'static str,
+    pub machine_requires_saved_label: &'static str,
+    pub machine_no_other_launch_options: &'static str,
+    pub machine_prefix_usage: &'static str,
+    pub machine_unknown_fmt: &'static str, // args: selector
+    pub machine_label_ambiguous_fmt: &'static str, // args: selector
+    pub machine_disabled_fmt: &'static str, // args: selector
+    pub machine_unsupported_command_fmt: &'static str, // args: command, subcommand
+    pub machine_bridge_error_fmt: &'static str, // args: label, error
+    pub machine_session_error_fmt: &'static str, // args: label, session, error
+    pub machine_restart_guidance_fmt: &'static str, // args: label, session
+
+    // src/cli/machine.rs
+    pub machine_list_usage: &'static str,
+    pub machine_add_usage: &'static str,
+    pub machine_rename_usage: &'static str,
+    pub machine_remove_usage: &'static str,
+    pub machine_set_enabled_usage_fmt: &'static str, // args: action
+    pub machine_add_unknown_option_fmt: &'static str, // args: option
+    pub remote_session_specified_twice: &'static str,
+    pub label_specified_twice: &'static str,
+    pub label_required: &'static str,
+    pub machine_not_saved_fmt: &'static str, // args: error
+    pub machine_prepared_not_saved_fmt: &'static str, // args: error
+    pub machine_profile_not_found_fmt: &'static str, // args: id
+
+    // src/cli/api.rs
+    pub api_schema_usage: &'static str,
+    pub api_snapshot_usage: &'static str,
+
+    // src/cli/agent.rs
+    pub agent_list_usage: &'static str,
+    pub agent_get_usage: &'static str,
+    pub agent_focus_usage: &'static str,
+    pub agent_attach_usage: &'static str,
+    pub agent_wait_usage: &'static str,
+    pub agent_rename_usage: &'static str,
+    pub agent_prompt_usage: &'static str,
+    pub agent_send_keys_usage: &'static str,
+    pub agent_read_usage: &'static str,
+    pub agent_start_usage: &'static str,
+    pub agent_explain_usage: &'static str,
+    pub agent_explain_target_usage: &'static str,
+    pub agent_explain_file_usage: &'static str,
+    pub agent_explain_file_json_usage: &'static str,
+    pub agent_explain_file_requires_agent: &'static str,
+    pub agent_explain_file_read_failed_fmt: &'static str, // args: path, error
+    pub agent_only_with_file: &'static str,
+    pub format_invalid_fmt: &'static str, // args: value
+    pub kind_required: &'static str,
+    pub pane_flag_required: &'static str,
+    pub agent_kind_unsupported_fmt: &'static str, // args: kind
+    pub agent_start_no_terminal_id: &'static str,
+    pub agent_attach_no_terminal_id: &'static str,
+    pub agent_kind_mismatch_fmt: &'static str, // args: expected, detected
+    pub agent_blocked_during_startup_fmt: &'static str, // args: name
+    pub agent_exited_before_interactive: &'static str,
+    pub agent_name_lost_fmt: &'static str, // args: name
+    pub agent_start_timeout: &'static str,
+    pub until_requires_status: &'static str,
+    pub until_requires_wait: &'static str,
+    pub timeout_requires_wait: &'static str,
+    pub agent_prompt_requires_text: &'static str,
+
+    // src/cli/pane.rs
+    pub pane_get_usage: &'static str,
+    pub pane_neighbor_usage: &'static str,
+    pub pane_focus_direction_usage: &'static str,
+    pub pane_resize_usage: &'static str,
+    pub pane_rename_usage: &'static str,
+    pub pane_read_usage: &'static str,
+    pub pane_input_usage: &'static str,
+    pub pane_split_usage: &'static str,
+    pub pane_move_usage: &'static str,
+    pub pane_swap_usage: &'static str,
+    pub pane_close_usage: &'static str,
+    pub pane_send_text_usage: &'static str,
+    pub pane_send_keys_usage: &'static str,
+    pub pane_run_usage: &'static str,
+    pub pane_wait_output_usage: &'static str,
+    pub pane_report_agent_usage: &'static str,
+    pub pane_report_agent_session_usage: &'static str,
+    pub pane_release_agent_usage: &'static str,
+    pub pane_report_metadata_usage: &'static str,
+    pub invalid_amount_fmt: &'static str, // args: value
+    pub invalid_ratio_fmt: &'static str,  // args: value
+    pub zoom_mode_conflict: &'static str,
+    pub pane_selector_conflict: &'static str,
+    pub current_requires_env_pane: &'static str,
+    pub invalid_right_click_target_fmt: &'static str, // args: value
+    pub invalid_split_direction_expected_fmt: &'static str, // args: value
+    pub invalid_pane_direction_fmt: &'static str,     // args: value
+    pub match_regex_exclusive: &'static str,
+    pub match_or_regex_required: &'static str,
+    pub source_required: &'static str,
+    pub agent_flag_required: &'static str,
+    pub state_required: &'static str,
+    pub state_label_format: &'static str,
+    pub unknown_state_label_fmt: &'static str, // args: status
+    pub metadata_set_clear_conflict: &'static str,
+    pub metadata_field_required: &'static str,
+
+    // src/cli/plugin.rs
+    pub plugin_link_usage: &'static str,
+    pub plugin_install_usage: &'static str,
+    pub plugin_install_usage_short: &'static str,
+    pub plugin_install_v1_shorthand_only: &'static str,
+    pub plugin_install_requires_yes: &'static str,
+    pub plugin_install_cancelled: &'static str,
+    pub plugin_config_dir_usage: &'static str,
+    pub plugin_uninstall_usage: &'static str,
+    pub plugin_unlink_usage: &'static str,
+    pub plugin_set_enabled_usage_fmt: &'static str, // args: action
+    pub plugin_not_installed_fmt: &'static str,     // args: target
+    pub plugin_limit_invalid_fmt: &'static str,     // args: value
+    pub plugin_action_invoke_usage: &'static str,
+    pub plugin_required: &'static str,
+    pub entrypoint_required: &'static str,
+    pub plugin_pane_focus_usage: &'static str,
+    pub plugin_pane_close_usage: &'static str,
+    pub plugin_pane_placement_invalid_fmt: &'static str, // args: value
+    pub plugin_remote_path_absolute: &'static str,
+    pub plugin_already_linked_local_fmt: &'static str, // args: plugin
+    pub github_segment_empty_fmt: &'static str,        // args: label
+    pub github_segment_invalid_fmt: &'static str,      // args: label, value
+    pub github_segment_invalid_chars_fmt: &'static str, // args: label, value
+    pub plugin_subdir_invalid_fmt: &'static str,       // args: value
+    pub command_failed_fmt: &'static str,              // args: program, status
+    pub command_failed_stderr_fmt: &'static str,       // args: program, status, stderr
+    pub plugin_build_failed: &'static str,
+    pub plugin_build_start_failed_fmt: &'static str, // args: error
+    pub plugin_build_wait_failed_fmt: &'static str,  // args: error
+    pub plugin_build_status_fmt: &'static str,       // args: status
+    pub build_output_truncated_fmt: &'static str,    // args: label, max
+    pub plugin_not_installed_after_failure: &'static str,
+    pub plugin_build_command_empty: &'static str,
+    pub plugin_build_changed_manifest: &'static str,
+    pub plugin_server_source_metadata_missing: &'static str,
+    pub plugin_registration_undo_failed_fmt: &'static str, // args: error, detail
+    pub plugin_refusing_unmanaged_delete_fmt: &'static str, // args: path
+    pub plugin_checkout_lifecycle_fmt: &'static str,       // args: operation, path, error
+
+    // src/cli/status.rs
+    pub status_server_usage: &'static str,
+    pub status_client_usage: &'static str,
+
+    // src/cli/server.rs
+    pub server_stop_usage: &'static str,
+    pub server_reload_config_usage: &'static str,
+    pub server_agent_manifests_usage: &'static str,
+    pub server_reload_agent_manifests_usage: &'static str,
+    pub server_update_agent_manifests_usage: &'static str,
+    pub server_live_handoff_usage: &'static str,
+    pub manifests_update_failed_fmt: &'static str, // args: error
+
+    // src/cli/completion.rs
+    pub unknown_shell_fmt: &'static str,    // args: shell
+    pub completion_usage_fmt: &'static str, // args: shells
+
+    // src/cli/worktree.rs
+    pub worktree_list_usage: &'static str,
+    pub worktree_create_usage: &'static str,
+    pub worktree_open_usage: &'static str,
+    pub worktree_remove_usage: &'static str,
+    pub remote_worktree_path_absolute: &'static str,
+
+    // src/cli/workspace.rs
+    pub workspace_list_usage: &'static str,
+    pub workspace_get_usage: &'static str,
+    pub workspace_focus_usage: &'static str,
+    pub workspace_rename_usage: &'static str,
+    pub workspace_report_metadata_usage: &'static str,
+    pub workspace_close_usage: &'static str,
+    pub workspace_token_required: &'static str,
+
+    // src/cli/tab.rs
+    pub tab_get_usage: &'static str,
+    pub tab_focus_usage: &'static str,
+    pub tab_rename_usage: &'static str,
+    pub tab_close_usage: &'static str,
+
+    // src/cli/notification.rs
+    pub notification_show_usage: &'static str,
+    pub invalid_position_fmt: &'static str, // args: value
+    pub invalid_sound_fmt: &'static str,    // args: value
+
+    // src/cli/integration.rs
+    pub integration_status_usage: &'static str,
+    pub integration_target_usage_fmt: &'static str, // args: action
+    pub integration_target_unknown_fmt: &'static str, // args: target
+    pub integration_targets_supported: &'static str,
+
+    // src/integration (registry notice + install support check)
+    pub integrations_need_updating_fmt: &'static str, // args: instructions
+    pub integration_instructions_run_fmt: &'static str, // args: command
+    pub integration_instructions_run_list_fmt: &'static str, // args: commands, last
+    pub integration_not_supported_windows_fmt: &'static str, // args: target
+
+    // src/update.rs
+    pub self_update_disabled_homebrew_preview: &'static str,
+    pub self_update_disabled_homebrew: &'static str,
+    pub self_update_disabled_mise_preview: &'static str,
+    pub self_update_disabled_mise: &'static str,
+    pub self_update_disabled_nix_preview: &'static str,
+    pub self_update_disabled_nix: &'static str,
+    pub update_run_outside: &'static str,
+    pub update_usage: &'static str,
+    pub unknown_update_option_fmt: &'static str, // args: option
+    pub preview_rejection_homebrew: &'static str,
+    pub preview_rejection_mise: &'static str,
+    pub preview_rejection_nix: &'static str,
+    pub curl_failed_fmt: &'static str, // args: error
+    pub manifest_fetch_failed: &'static str,
+    pub manifest_parse_failed_fmt: &'static str, // args: error
+    pub manifest_invalid_version_fmt: &'static str, // args: version
+    pub manifest_missing_release_metadata_fmt: &'static str, // args: version
+    pub manifest_notes_empty: &'static str,
+    pub manifest_no_binary_fmt: &'static str, // args: key
+    pub manifest_asset_missing_sha256_fmt: &'static str, // args: key
+    pub preview_channel_invalid_fmt: &'static str, // args: channel
+    pub preview_build_id_empty: &'static str,
+    pub preview_base_version_invalid_fmt: &'static str, // args: version
+    pub preview_notes_empty: &'static str,
+    pub preview_no_binary_fmt: &'static str, // args: key
+    pub manifest_asset_unsupported_format_fmt: &'static str, // args: format
+    pub asset_url_empty: &'static str,
+    pub asset_url_invalid: &'static str,
+    pub homebrew_fetch_failed: &'static str,
+    pub current_binary_not_found_fmt: &'static str, // args: error
+    pub binary_directory_not_found: &'static str,
+    pub install_dir_not_writable_fmt: &'static str, // args: path, error
+    pub download_failed: &'static str,
+    pub download_failed_fmt: &'static str, // args: error
+    pub checksum_failed_fmt: &'static str, // args: error
+    pub chmod_failed_fmt: &'static str,    // args: error
+    pub update_temp_file_missing: &'static str,
+    pub replace_binary_failed_fmt: &'static str, // args: error
+    pub windows_sha256_missing: &'static str,
+    pub windows_installer_run_failed_fmt: &'static str, // args: error
+    pub windows_installer_failed_fmt: &'static str,     // args: status
+    pub localappdata_missing: &'static str,
+    pub target_status_failed_fmt: &'static str, // args: label, path, error, command
+    pub target_status_no_response_fmt: &'static str, // args: label, path, command
+    pub target_client_socket_no_response_fmt: &'static str, // args: label, path, command
+    pub server_listening_status_unavailable_fmt: &'static str, // args: command
+    pub sessions_list_failed_fmt: &'static str, // args: error
+    pub sessions_must_stop_noninteractive: &'static str,
+    pub prompt_flush_failed_fmt: &'static str, // args: error
+    pub prompt_read_failed_fmt: &'static str,  // args: error
+    pub server_connect_failed_fmt: &'static str, // args: error
+    pub server_write_timeout_fmt: &'static str, // args: action, error
+    pub server_read_timeout_fmt: &'static str, // args: action, error
+    pub server_send_failed_fmt: &'static str,  // args: action, error
+    pub server_finish_failed_fmt: &'static str, // args: action, error
+    pub server_flush_failed_fmt: &'static str, // args: action, error
+    pub server_response_read_failed_fmt: &'static str, // args: action, error
+    pub server_response_empty_fmt: &'static str, // args: action
+    pub server_response_invalid_fmt: &'static str, // args: error
+    pub server_action_failed_fmt: &'static str, // args: action, error
+    pub shutdown_confirm_failed_fmt: &'static str, // args: path, error
+    pub server_still_responding_fmt: &'static str, // args: path, seconds
+    pub post_handoff_status_failed_fmt: &'static str, // args: error
+    pub handoff_no_compatible_server_fmt: &'static str, // args: path, seconds
+}
+
 pub struct Texts {
     pub chrome: ChromeTexts,
     pub onboarding: OnboardingTexts,
@@ -670,6 +992,7 @@ pub struct Texts {
     pub endpoint: EndpointTexts,
     pub cli_help: CliHelpTexts,
     pub cli_output: CliOutputTexts,
+    pub cli_errors: CliErrorTexts,
 }
 
 /// Runtime placeholder substitution for table-held format templates:

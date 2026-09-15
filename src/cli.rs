@@ -54,24 +54,26 @@ pub(crate) fn agent_help_footer() -> &'static str {
 }
 
 pub(crate) fn parse_token_assignment(raw: &str) -> Result<(String, Option<String>), String> {
+    let t = &crate::i18n::texts().cli_errors;
     let Some((key, value)) = raw.split_once('=') else {
-        return Err("token must use NAME=VALUE".into());
+        return Err(t.token_must_use_name_value.into());
     };
     if key.is_empty() {
-        return Err("token name must not be empty".into());
+        return Err(t.token_name_empty.into());
     }
     Ok((key.to_string(), Some(value.to_string())))
 }
 
 pub(crate) fn parse_env_assignment(raw: &str) -> Result<(String, String), String> {
+    let t = &crate::i18n::texts().cli_errors;
     let Some((key, value)) = raw.split_once('=') else {
-        return Err("env must use KEY=VALUE".into());
+        return Err(t.env_must_use_key_value.into());
     };
     if key.is_empty() {
-        return Err("env key must not be empty".into());
+        return Err(t.env_key_empty.into());
     }
     if key.contains('\0') || value.contains('\0') {
-        return Err("env must not contain NUL bytes".into());
+        return Err(t.env_nul_bytes.into());
     }
     Ok((key.to_string(), value.to_string()))
 }
@@ -155,7 +157,7 @@ fn run_channel_command(args: &[String]) -> std::io::Result<i32> {
 
 fn channel_set(args: &[String]) -> std::io::Result<i32> {
     let Some(channel) = parse_channel_set_arg(args) else {
-        eprintln!("usage: herdr channel set <stable|preview>");
+        eprintln!("{}", crate::i18n::texts().cli_errors.channel_set_usage);
         return Ok(2);
     };
 
@@ -175,8 +177,16 @@ fn channel_set(args: &[String]) -> std::io::Result<i32> {
     };
     if let Err(err) = content.parse::<toml::Value>() {
         eprintln!(
-            "config file at {} is invalid TOML: {err}. Fix it before changing the update channel.",
-            path.display()
+            "{}",
+            crate::i18n::fill(
+                crate::i18n::texts()
+                    .cli_errors
+                    .config_invalid_toml_channel_fmt,
+                &[
+                    ("path", &path.display().to_string()),
+                    ("error", &err.to_string()),
+                ]
+            )
         );
         return Ok(1);
     }
@@ -189,8 +199,16 @@ fn channel_set(args: &[String]) -> std::io::Result<i32> {
     );
     if let Err(err) = updated.parse::<toml::Value>() {
         eprintln!(
-            "changing the update channel would make {} invalid TOML: {err}; leaving config unchanged",
-            path.display()
+            "{}",
+            crate::i18n::fill(
+                crate::i18n::texts()
+                    .cli_errors
+                    .channel_change_invalid_toml_fmt,
+                &[
+                    ("path", &path.display().to_string()),
+                    ("error", &err.to_string()),
+                ]
+            )
         );
         return Ok(1);
     }
@@ -218,8 +236,14 @@ fn channel_set(args: &[String]) -> std::io::Result<i32> {
 
     crate::platform::end_cli_output();
     if let Err(err) = crate::update::self_update(crate::update::SelfUpdateOptions::default()) {
-        eprintln!("update failed: {err}");
-        eprintln!("Run `herdr update` to retry.");
+        eprintln!(
+            "{}",
+            crate::i18n::fill(
+                crate::i18n::texts().cli_errors.update_failed_fmt,
+                &[("error", &err.to_string())]
+            )
+        );
+        eprintln!("{}", crate::i18n::texts().cli_errors.update_retry_hint);
         return Ok(1);
     }
 
@@ -291,11 +315,11 @@ fn config_check(args: &[String]) -> std::io::Result<i32> {
     match args {
         [] => {}
         [flag] if matches!(flag.as_str(), "help" | "--help" | "-h") => {
-            eprintln!("usage: herdr config check");
+            eprintln!("{}", crate::i18n::texts().cli_errors.config_check_usage);
             return Ok(0);
         }
         _ => {
-            eprintln!("usage: herdr config check");
+            eprintln!("{}", crate::i18n::texts().cli_errors.config_check_usage);
             return Ok(2);
         }
     }
@@ -315,7 +339,10 @@ fn config_check(args: &[String]) -> std::io::Result<i32> {
 
 fn config_reset_keys(args: &[String]) -> std::io::Result<i32> {
     if !args.is_empty() {
-        eprintln!("usage: herdr config reset-keys");
+        eprintln!(
+            "{}",
+            crate::i18n::texts().cli_errors.config_reset_keys_usage
+        );
         return Ok(2);
     }
 
@@ -336,16 +363,27 @@ fn config_reset_keys(args: &[String]) -> std::io::Result<i32> {
         Ok(value) => value,
         Err(err) => {
             eprintln!(
-                "config file at {} is invalid TOML: {err}. Fix it manually or move it aside to use defaults.",
-                path.display()
+                "{}",
+                crate::i18n::fill(
+                    crate::i18n::texts()
+                        .cli_errors
+                        .config_invalid_toml_manual_fix_fmt,
+                    &[
+                        ("path", &path.display().to_string()),
+                        ("error", &err.to_string()),
+                    ]
+                )
             );
             return Ok(1);
         }
     };
     let Some(table) = parsed.as_table() else {
         eprintln!(
-            "config file at {} is invalid TOML: top-level config must be a table.",
-            path.display()
+            "{}",
+            crate::i18n::fill(
+                crate::i18n::texts().cli_errors.config_top_level_table_fmt,
+                &[("path", &path.display().to_string())]
+            )
         );
         return Ok(1);
     };
@@ -364,15 +402,28 @@ fn config_reset_keys(args: &[String]) -> std::io::Result<i32> {
     let (updated, removed) = crate::config::remove_keybinding_config_sections(&content);
     if !removed {
         eprintln!(
-            "could not safely remove keybinding config from {} without rewriting comments; edit the file manually or remove the top-level keys setting.",
-            path.display()
+            "{}",
+            crate::i18n::fill(
+                crate::i18n::texts()
+                    .cli_errors
+                    .config_keys_remove_unsafe_fmt,
+                &[("path", &path.display().to_string())]
+            )
         );
         return Ok(1);
     }
     if let Err(err) = updated.parse::<toml::Value>() {
         eprintln!(
-            "removing keybinding config would make {} invalid TOML: {err}; leaving config unchanged",
-            path.display()
+            "{}",
+            crate::i18n::fill(
+                crate::i18n::texts()
+                    .cli_errors
+                    .config_keys_remove_invalid_toml_fmt,
+                &[
+                    ("path", &path.display().to_string()),
+                    ("error", &err.to_string()),
+                ]
+            )
         );
         return Ok(1);
     }
@@ -467,22 +518,24 @@ fn run_session_command(args: &[String]) -> std::io::Result<i32> {
 }
 
 fn session_attach_help(args: &[String]) -> std::io::Result<i32> {
+    let usage = crate::i18n::texts().cli_errors.session_attach_usage;
     if matches!(
         args.first().map(String::as_str),
         Some("help" | "--help" | "-h")
     ) {
-        eprintln!("usage: herdr session attach <name>");
+        eprintln!("{usage}");
         return Ok(0);
     }
-    eprintln!("usage: herdr session attach <name>");
+    eprintln!("{usage}");
     Ok(2)
 }
 
 fn session_list(args: &[String]) -> std::io::Result<i32> {
-    let json = match parse_session_json_only(args, "usage: herdr session list [--json]") {
-        Ok(json) => json,
-        Err(code) => return Ok(code),
-    };
+    let json =
+        match parse_session_json_only(args, crate::i18n::texts().cli_errors.session_list_usage) {
+            Ok(json) => json,
+            Err(code) => return Ok(code),
+        };
 
     let sessions = crate::session::list_sessions()?;
     if json {
@@ -497,7 +550,8 @@ fn session_list(args: &[String]) -> std::io::Result<i32> {
 
 fn session_stop(args: &[String]) -> std::io::Result<i32> {
     let (name, json) =
-        match parse_session_name_and_json(args, "usage: herdr session stop <name> [--json]") {
+        match parse_session_name_and_json(args, crate::i18n::texts().cli_errors.session_stop_usage)
+        {
             Ok(parsed) => parsed,
             Err(code) => return Ok(code),
         };
@@ -535,11 +589,13 @@ fn session_stop(args: &[String]) -> std::io::Result<i32> {
 }
 
 fn session_delete(args: &[String]) -> std::io::Result<i32> {
-    let (name, json) =
-        match parse_session_name_and_json(args, "usage: herdr session delete <name> [--json]") {
-            Ok(parsed) => parsed,
-            Err(code) => return Ok(code),
-        };
+    let (name, json) = match parse_session_name_and_json(
+        args,
+        crate::i18n::texts().cli_errors.session_delete_usage,
+    ) {
+        Ok(parsed) => parsed,
+        Err(code) => return Ok(code),
+    };
 
     match crate::session::delete_session(&name) {
         Ok(session) => {
@@ -567,13 +623,11 @@ fn session_delete(args: &[String]) -> std::io::Result<i32> {
 }
 
 fn terminal_attach(args: &[String]) -> std::io::Result<i32> {
-    let (terminal_id, takeover) = match parse_attach_target(
-        args,
-        "usage: herdr terminal attach <terminal_id> [--takeover]",
-    ) {
-        Ok(parsed) => parsed,
-        Err(code) => return Ok(code),
-    };
+    let (terminal_id, takeover) =
+        match parse_attach_target(args, crate::i18n::texts().cli_errors.terminal_attach_usage) {
+            Ok(parsed) => parsed,
+            Err(code) => return Ok(code),
+        };
     crate::client::run_terminal_attach(terminal_id, takeover)?;
     Ok(0)
 }
@@ -686,7 +740,15 @@ fn parse_terminal_session_options(
                 return Ok(Err(0));
             }
             other => {
-                eprintln!("unknown terminal session {command} option: {other}");
+                eprintln!(
+                    "{}",
+                    crate::i18n::fill(
+                        crate::i18n::texts()
+                            .cli_errors
+                            .unknown_terminal_session_option_fmt,
+                        &[("command", command), ("option", other)]
+                    )
+                );
                 eprintln!("{usage}");
                 return Ok(Err(2));
             }
@@ -702,26 +764,31 @@ fn parse_terminal_session_options(
 }
 
 fn parse_terminal_dimension(raw: &str, flag: &str) -> std::io::Result<u16> {
+    let t = &crate::i18n::texts().cli_errors;
     let parsed = raw.parse::<u16>().map_err(|_| {
         std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
-            format!("{flag} must be an integer between 1 and {}", u16::MAX),
+            crate::i18n::fill(
+                t.terminal_dimension_range_fmt,
+                &[("flag", flag), ("max", &u16::MAX.to_string())],
+            ),
         )
     })?;
     if parsed == 0 {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
-            format!("{flag} must be greater than 0"),
+            crate::i18n::fill(t.terminal_dimension_positive_fmt, &[("flag", flag)]),
         ));
     }
     Ok(parsed)
 }
 
 fn terminal_title(args: &[String]) -> std::io::Result<i32> {
+    let t = &crate::i18n::texts().cli_errors;
     match args.first().map(|arg| arg.as_str()) {
         Some("set") => {
             if args.len() != 2 {
-                eprintln!("usage: herdr terminal title set <title>");
+                eprintln!("{}", t.terminal_title_set_usage);
                 return Ok(2);
             }
             print_response(&send_request(&Request {
@@ -733,7 +800,7 @@ fn terminal_title(args: &[String]) -> std::io::Result<i32> {
         }
         Some("clear") => {
             if args.len() != 1 {
-                eprintln!("usage: herdr terminal title clear");
+                eprintln!("{}", t.terminal_title_clear_usage);
                 return Ok(2);
             }
             print_response(&send_request(&Request {
@@ -742,13 +809,13 @@ fn terminal_title(args: &[String]) -> std::io::Result<i32> {
             })?)
         }
         Some("help" | "--help" | "-h") => {
-            eprintln!("usage: herdr terminal title set <title>");
-            eprintln!("       herdr terminal title clear");
+            eprintln!("{}", t.terminal_title_set_usage);
+            eprintln!("{}", t.terminal_title_help_clear_line);
             Ok(0)
         }
         _ => {
-            eprintln!("usage: herdr terminal title set <title>");
-            eprintln!("       herdr terminal title clear");
+            eprintln!("{}", t.terminal_title_set_usage);
+            eprintln!("{}", t.terminal_title_help_clear_line);
             Ok(2)
         }
     }
@@ -768,7 +835,13 @@ pub(super) fn parse_attach_target(args: &[String], usage: &str) -> Result<(Strin
                 return Err(0);
             }
             other => {
-                eprintln!("unknown option: {other}");
+                eprintln!(
+                    "{}",
+                    crate::i18n::fill(
+                        crate::i18n::texts().cli_errors.unknown_option_fmt,
+                        &[("option", other)]
+                    )
+                );
                 return Err(2);
             }
         }
@@ -819,9 +892,9 @@ fn ensure_server_protocol_compatible(client: &ApiClient, request_id: &str) -> st
     let status = client
         .status()
         .map_err(|err| map_server_not_running_or_io(err, request_id, client))?;
-    let server_protocol = status
-        .protocol
-        .ok_or_else(|| std::io::Error::other("server ping did not include a protocol version"))?;
+    let server_protocol = status.protocol.ok_or_else(|| {
+        std::io::Error::other(crate::i18n::texts().cli_errors.server_ping_no_protocol)
+    })?;
     let Some(response) =
         protocol_guard::mismatch_response(request_id, server_protocol, &target::restart_guidance())
     else {
@@ -908,8 +981,9 @@ pub(super) fn parse_split_direction(value: &str) -> std::io::Result<SplitDirecti
     match value {
         "right" => Ok(SplitDirection::Right),
         "down" => Ok(SplitDirection::Down),
-        _ => Err(std::io::Error::other(format!(
-            "invalid split direction: {value}"
+        _ => Err(std::io::Error::other(crate::i18n::fill(
+            crate::i18n::texts().cli_errors.invalid_split_direction_fmt,
+            &[("value", value)],
         ))),
     }
 }
@@ -920,8 +994,9 @@ pub(super) fn parse_read_source(value: &str) -> std::io::Result<ReadSource> {
         "recent" => Ok(ReadSource::Recent),
         "recent-unwrapped" | "recent_unwrapped" => Ok(ReadSource::RecentUnwrapped),
         "detection" => Ok(ReadSource::Detection),
-        _ => Err(std::io::Error::other(format!(
-            "invalid read source: {value}"
+        _ => Err(std::io::Error::other(crate::i18n::fill(
+            crate::i18n::texts().cli_errors.invalid_read_source_fmt,
+            &[("value", value)],
         ))),
     }
 }
@@ -930,8 +1005,9 @@ pub(super) fn parse_read_format(value: &str) -> std::io::Result<ReadFormat> {
     match value {
         "text" => Ok(ReadFormat::Text),
         "ansi" => Ok(ReadFormat::Ansi),
-        _ => Err(std::io::Error::other(format!(
-            "invalid read format: {value}"
+        _ => Err(std::io::Error::other(crate::i18n::fill(
+            crate::i18n::texts().cli_errors.invalid_read_format_fmt,
+            &[("value", value)],
         ))),
     }
 }
@@ -943,8 +1019,9 @@ fn parse_agent_status(value: &str) -> std::io::Result<AgentStatus> {
         "blocked" => Ok(AgentStatus::Blocked),
         "done" => Ok(AgentStatus::Done),
         "unknown" => Ok(AgentStatus::Unknown),
-        _ => Err(std::io::Error::other(format!(
-            "invalid agent status: {value} (expected idle, working, blocked, done, or unknown)"
+        _ => Err(std::io::Error::other(crate::i18n::fill(
+            crate::i18n::texts().cli_errors.invalid_agent_status_fmt,
+            &[("value", value)],
         ))),
     }
 }
@@ -955,22 +1032,29 @@ pub(super) fn parse_pane_agent_state(value: &str) -> std::io::Result<PaneAgentSt
         "working" => Ok(PaneAgentState::Working),
         "blocked" => Ok(PaneAgentState::Blocked),
         "unknown" => Ok(PaneAgentState::Unknown),
-        _ => Err(std::io::Error::other(format!(
-            "invalid pane agent state: {value} (expected idle, working, blocked, or unknown)"
+        _ => Err(std::io::Error::other(crate::i18n::fill(
+            crate::i18n::texts().cli_errors.invalid_pane_agent_state_fmt,
+            &[("value", value)],
         ))),
     }
 }
 
 pub(super) fn parse_u32_flag(flag: &str, value: &str) -> std::io::Result<u32> {
-    value
-        .parse::<u32>()
-        .map_err(|_| std::io::Error::other(format!("invalid value for {flag}: {value}")))
+    value.parse::<u32>().map_err(|_| {
+        std::io::Error::other(crate::i18n::fill(
+            crate::i18n::texts().cli_errors.invalid_flag_value_fmt,
+            &[("flag", flag), ("value", value)],
+        ))
+    })
 }
 
 pub(super) fn parse_u64_flag(flag: &str, value: &str) -> std::io::Result<u64> {
-    value
-        .parse::<u64>()
-        .map_err(|_| std::io::Error::other(format!("invalid value for {flag}: {value}")))
+    value.parse::<u64>().map_err(|_| {
+        std::io::Error::other(crate::i18n::fill(
+            crate::i18n::texts().cli_errors.invalid_flag_value_fmt,
+            &[("flag", flag), ("value", value)],
+        ))
+    })
 }
 
 /// Expand `--flag=value` tokens into separate `--flag` and `value` tokens so
@@ -1154,6 +1238,7 @@ mod tests {
 
     #[test]
     fn parse_env_assignment_requires_key_value_separator() {
+        let _guard = crate::i18n::lang_guard(crate::i18n::Lang::En);
         assert_eq!(
             super::parse_env_assignment("HERDR_ROLE").unwrap_err(),
             "env must use KEY=VALUE"

@@ -55,7 +55,7 @@ pub(super) fn maybe_run(args: &[String]) -> Option<io::Result<super::CommandOutc
 }
 
 fn usage_error(error: String) -> io::Result<super::CommandOutcome> {
-    eprintln!("error: {error}");
+    eprintln!("{}{error}", crate::i18n::texts().cli_errors.error_prefix);
     Ok(super::CommandOutcome::Handled(2))
 }
 
@@ -83,7 +83,13 @@ pub(super) fn api_client() -> io::Result<ApiClient> {
                 .map_err(|error| {
                     io::Error::new(
                         error.kind(),
-                        format!("machine '{}': {error}", target.profile.label),
+                        crate::i18n::fill(
+                            crate::i18n::texts().cli_errors.machine_bridge_error_fmt,
+                            &[
+                                ("label", target.profile.label.as_str()),
+                                ("error", &error.to_string()),
+                            ],
+                        ),
                     )
                 })?,
             );
@@ -111,9 +117,13 @@ pub(super) fn remote_error(error: io::Error) -> io::Error {
             .unwrap_or(error);
         io::Error::new(
             error.kind(),
-            format!(
-                "machine '{}' (session {}): {error}",
-                target.profile.label, target.profile.session
+            crate::i18n::fill(
+                crate::i18n::texts().cli_errors.machine_session_error_fmt,
+                &[
+                    ("label", target.profile.label.as_str()),
+                    ("session", target.profile.session.as_str()),
+                    ("error", &error.to_string()),
+                ],
             ),
         )
     })
@@ -121,7 +131,13 @@ pub(super) fn remote_error(error: io::Error) -> io::Error {
 
 pub(super) fn restart_guidance() -> String {
     TARGET.with(|target| match target.borrow().as_ref() {
-        Some(target) => format!("Update Herdr and restart the server on machine '{}' (session {}). Stopping the server exits its pane processes.", target.profile.label, target.profile.session),
+        Some(target) => crate::i18n::fill(
+            crate::i18n::texts().cli_errors.machine_restart_guidance_fmt,
+            &[
+                ("label", target.profile.label.as_str()),
+                ("session", target.profile.session.as_str()),
+            ],
+        ),
         None => crate::session::active_restart_after_update_guidance(),
     })
 }
@@ -164,24 +180,23 @@ pub(super) fn caller_pane_id() -> Option<String> {
 }
 
 fn parse_machine_prefix(args: &[String]) -> Result<Option<(String, Vec<String>)>, String> {
+    let t = &crate::i18n::texts().cli_errors;
     let mut index = 1;
     let mut machine = None;
     let mut other_prefix = false;
     while let Some(arg) = args.get(index) {
         if arg == "--machine" || arg.starts_with("--machine=") {
             if machine.is_some() {
-                return Err("--machine can only be specified once".into());
+                return Err(t.machine_specified_twice.into());
             }
             let value = if let Some(value) = arg.strip_prefix("--machine=") {
                 value.to_owned()
             } else {
                 index += 1;
-                args.get(index)
-                    .cloned()
-                    .ok_or("missing value for --machine")?
+                args.get(index).cloned().ok_or(t.machine_requires_value)?
             };
             if value.trim().is_empty() || value.starts_with('-') {
-                return Err("--machine requires a saved machine label or profile ID".into());
+                return Err(t.machine_requires_saved_label.into());
             }
             machine = Some(value);
         } else if arg.starts_with('-') && arg != "--" {
@@ -201,10 +216,10 @@ fn parse_machine_prefix(args: &[String]) -> Result<Option<(String, Vec<String>)>
         return Ok(None);
     };
     if other_prefix {
-        return Err("--machine cannot be combined with other launch options; it uses the saved machine's session".into());
+        return Err(t.machine_no_other_launch_options.into());
     }
     if index >= args.len() || args[index] == "--" {
-        return Err("usage: herdr --machine <label-or-id> <command>".into());
+        return Err(t.machine_prefix_usage.into());
     }
     let mut cleaned = vec![args[0].clone()];
     cleaned.extend_from_slice(&args[index..]);
@@ -215,6 +230,7 @@ fn resolve_machine<'a>(
     profiles: &'a [SavedSshEndpoint],
     selector: &str,
 ) -> Result<&'a SavedSshEndpoint, String> {
+    let t = &crate::i18n::texts().cli_errors;
     let profile = if let Some(profile) = profiles
         .iter()
         .find(|profile| profile.id.as_str() == selector)
@@ -224,16 +240,20 @@ fn resolve_machine<'a>(
         let mut matches = profiles.iter().filter(|profile| profile.label == selector);
         let profile = matches
             .next()
-            .ok_or_else(|| format!("unknown machine '{selector}'; use `herdr machine list`"))?;
+            .ok_or_else(|| crate::i18n::fill(t.machine_unknown_fmt, &[("selector", selector)]))?;
         if matches.next().is_some() {
-            return Err(format!(
-                "machine label '{selector}' is ambiguous; use its profile ID"
+            return Err(crate::i18n::fill(
+                t.machine_label_ambiguous_fmt,
+                &[("selector", selector)],
             ));
         }
         profile
     };
     if !profile.enabled {
-        return Err(format!("machine '{selector}' is disabled"));
+        return Err(crate::i18n::fill(
+            t.machine_disabled_fmt,
+            &[("selector", selector)],
+        ));
     }
     Ok(profile)
 }
@@ -265,7 +285,12 @@ fn validate_machine_command(args: &[String]) -> Result<(), String> {
     if supported {
         Ok(())
     } else {
-        Err(format!("`{command} {subcommand}` is not an API-backed machine command; --machine does not run local management commands or attach a TUI"))
+        Err(crate::i18n::fill(
+            crate::i18n::texts()
+                .cli_errors
+                .machine_unsupported_command_fmt,
+            &[("command", command), ("subcommand", subcommand)],
+        ))
     }
 }
 

@@ -1,9 +1,10 @@
 //! English wording, kept aligned with the upstream herdr chrome text.
 
 use super::{
-    ChromeTexts, CliHelpTexts, CliOutputTexts, ContextMenuTexts, DialogTexts, EndpointTexts,
-    GlobalMenuTexts, KeybindTexts, MobileTexts, ModeBarTexts, NotifyTexts, OnboardingTexts,
-    OverlayTexts, SettingsTexts, SidebarTexts, StatusTexts, Texts, UpdateTexts, WorktreeTexts,
+    ChromeTexts, CliErrorTexts, CliHelpTexts, CliOutputTexts, ContextMenuTexts, DialogTexts,
+    EndpointTexts, GlobalMenuTexts, KeybindTexts, MobileTexts, ModeBarTexts, NotifyTexts,
+    OnboardingTexts, OverlayTexts, SettingsTexts, SidebarTexts, StatusTexts, Texts, UpdateTexts,
+    WorktreeTexts,
 };
 
 pub const TEXTS: Texts = Texts {
@@ -550,5 +551,378 @@ pub const TEXTS: Texts = Texts {
         plugin_warning_count_fmt: "; {count} warning(s)",
         plugin_config_path_label: "  config: ",
         plugin_warning_label: "  warning: ",
+    },
+    cli_errors: CliErrorTexts {
+        error_prefix: "error: ",
+        missing_value_for_fmt: "missing value for {flag}",
+        unknown_option_fmt: "unknown option: {option}",
+        unexpected_argument_fmt: "unexpected argument: {argument}",
+        invalid_flag_value_fmt: "invalid value for {flag}: {value}",
+
+        token_must_use_name_value: "token must use NAME=VALUE",
+        token_name_empty: "token name must not be empty",
+        env_must_use_key_value: "env must use KEY=VALUE",
+        env_key_empty: "env key must not be empty",
+        env_nul_bytes: "env must not contain NUL bytes",
+        channel_set_usage: "usage: herdr channel set <stable|preview>",
+        config_invalid_toml_channel_fmt:
+            "config file at {path} is invalid TOML: {error}. Fix it before changing the update channel.",
+        channel_change_invalid_toml_fmt:
+            "changing the update channel would make {path} invalid TOML: {error}; leaving config unchanged",
+        update_failed_fmt: "update failed: {error}",
+        update_retry_hint: "Run `herdr update` to retry.",
+        config_check_usage: "usage: herdr config check",
+        config_reset_keys_usage: "usage: herdr config reset-keys",
+        config_invalid_toml_manual_fix_fmt:
+            "config file at {path} is invalid TOML: {error}. Fix it manually or move it aside to use defaults.",
+        config_top_level_table_fmt:
+            "config file at {path} is invalid TOML: top-level config must be a table.",
+        config_keys_remove_unsafe_fmt:
+            "could not safely remove keybinding config from {path} without rewriting comments; edit the file manually or remove the top-level keys setting.",
+        config_keys_remove_invalid_toml_fmt:
+            "removing keybinding config would make {path} invalid TOML: {error}; leaving config unchanged",
+        session_list_usage: "usage: herdr session list [--json]",
+        session_attach_usage: "usage: herdr session attach <name>",
+        session_stop_usage: "usage: herdr session stop <name> [--json]",
+        session_delete_usage: "usage: herdr session delete <name> [--json]",
+        terminal_attach_usage: "usage: herdr terminal attach <terminal_id> [--takeover]",
+        unknown_terminal_session_option_fmt:
+            "unknown terminal session {command} option: {option}",
+        terminal_dimension_range_fmt: "{flag} must be an integer between 1 and {max}",
+        terminal_dimension_positive_fmt: "{flag} must be greater than 0",
+        terminal_title_set_usage: "usage: herdr terminal title set <title>",
+        terminal_title_clear_usage: "usage: herdr terminal title clear",
+        terminal_title_help_clear_line: "       herdr terminal title clear",
+        invalid_split_direction_fmt: "invalid split direction: {value}",
+        invalid_read_source_fmt: "invalid read source: {value}",
+        invalid_read_format_fmt: "invalid read format: {value}",
+        invalid_agent_status_fmt:
+            "invalid agent status: {value} (expected idle, working, blocked, done, or unknown)",
+        invalid_pane_agent_state_fmt:
+            "invalid pane agent state: {value} (expected idle, working, blocked, or unknown)",
+        server_ping_no_protocol: "server ping did not include a protocol version",
+
+        protocol_newer_fmt:
+            "client protocol {client_protocol} is newer than server protocol {server_protocol}; restart the Herdr server before using this command. {restart_guidance}",
+        protocol_older_fmt:
+            "client protocol {client_protocol} is older than server protocol {server_protocol}; upgrade the Herdr client before using this command",
+
+        no_server_running_fmt:
+            "no herdr server is running at {path}; run `{command}` to start or attach it",
+
+        machine_specified_twice: "--machine can only be specified once",
+        machine_requires_value: "missing value for --machine",
+        machine_requires_saved_label: "--machine requires a saved machine label or profile ID",
+        machine_no_other_launch_options:
+            "--machine cannot be combined with other launch options; it uses the saved machine's session",
+        machine_prefix_usage: "usage: herdr --machine <label-or-id> <command>",
+        machine_unknown_fmt: "unknown machine '{selector}'; use `herdr machine list`",
+        machine_label_ambiguous_fmt: "machine label '{selector}' is ambiguous; use its profile ID",
+        machine_disabled_fmt: "machine '{selector}' is disabled",
+        machine_unsupported_command_fmt:
+            "`{command} {subcommand}` is not an API-backed machine command; --machine does not run local management commands or attach a TUI",
+        machine_bridge_error_fmt: "machine '{label}': {error}",
+        machine_session_error_fmt: "machine '{label}' (session {session}): {error}",
+        machine_restart_guidance_fmt:
+            "Update Herdr and restart the server on machine '{label}' (session {session}). Stopping the server exits its pane processes.",
+
+        machine_list_usage: "usage: herdr machine list [--json]",
+        machine_add_usage:
+            "usage: herdr machine add <ssh-target> --label <label> [--remote-session <name>]",
+        machine_rename_usage: "usage: herdr machine rename <profile-id> --label <label>",
+        machine_remove_usage: "usage: herdr machine remove <profile-id>",
+        machine_set_enabled_usage_fmt: "usage: herdr machine {action} <profile-id>",
+        machine_add_unknown_option_fmt: "unknown machine add option: {option}",
+        remote_session_specified_twice: "--remote-session can only be specified once",
+        label_specified_twice: "--label can only be specified once",
+        label_required: "--label is required",
+        machine_not_saved_fmt: "error: {error}; machine was not saved",
+        machine_prepared_not_saved_fmt: "remote prepared, but machine was not saved: {error}",
+        machine_profile_not_found_fmt: "machine profile {id} was not found",
+
+        api_schema_usage: "usage: herdr api schema [--json | --output PATH]",
+        api_snapshot_usage: "usage: herdr api snapshot",
+
+        agent_list_usage: "usage: herdr agent list",
+        agent_get_usage: "usage: herdr agent get <target>",
+        agent_focus_usage: "usage: herdr agent focus <target>",
+        agent_attach_usage: "usage: herdr agent attach <target> [--takeover]",
+        agent_wait_usage: "usage: herdr agent wait <target> [--until STATUS]... [--timeout MS]",
+        agent_rename_usage: "usage: herdr agent rename <target> <name>|--clear",
+        agent_prompt_usage:
+            "usage: herdr agent prompt <target> <text> [--wait] [--until STATUS]... [--timeout MS]",
+        agent_send_keys_usage: "usage: herdr agent send-keys <target> <key> [key ...]",
+        agent_read_usage:
+            "usage: herdr agent read <target> [--source visible|recent|recent-unwrapped] [--lines N] [--format text|ansi] [--ansi]",
+        agent_start_usage:
+            "usage: herdr agent start <name> --kind KIND --pane ID [--timeout MS] [-- <agent-args...>]",
+        agent_explain_usage: "usage: herdr agent explain <target> [--json|--verbose]",
+        agent_explain_target_usage: "usage: herdr agent explain <target> [--json]",
+        agent_explain_file_usage:
+            "usage: herdr agent explain --file PATH --agent LABEL [--json|--verbose]",
+        agent_explain_file_json_usage:
+            "usage: herdr agent explain --file PATH --agent LABEL [--json]",
+        agent_explain_file_requires_agent: "herdr agent explain --file requires --agent LABEL",
+        agent_explain_file_read_failed_fmt:
+            "failed to read agent explain file {path}: {error}",
+        agent_only_with_file: "--agent is only valid with --file",
+        format_invalid_fmt: "invalid --format: {value} (expected text or json)",
+        kind_required: "missing required --kind",
+        pane_flag_required: "missing required --pane",
+        agent_kind_unsupported_fmt: "unsupported interactive agent kind: {kind}",
+        agent_start_no_terminal_id: "agent start response did not include terminal_id",
+        agent_attach_no_terminal_id: "agent attach failed: response did not include terminal_id",
+        agent_kind_mismatch_fmt: "expected {expected}, detected {detected}",
+        agent_blocked_during_startup_fmt:
+            "agent {name} is blocked during startup and is not ready for prompts",
+        agent_exited_before_interactive: "agent process exited before becoming interactive",
+        agent_name_lost_fmt: "named agent {name} no longer owns the target terminal",
+        agent_start_timeout: "timed out waiting for agent startup",
+        until_requires_status: "--until requires at least one status",
+        until_requires_wait: "--until requires --wait",
+        timeout_requires_wait: "--timeout requires --wait",
+        agent_prompt_requires_text: "agent prompt requires text",
+
+        pane_get_usage: "usage: herdr pane get <pane_id>",
+        pane_neighbor_usage:
+            "usage: herdr pane neighbor --direction left|right|up|down [--pane ID|--current]",
+        pane_focus_direction_usage:
+            "usage: herdr pane focus --direction left|right|up|down [--pane ID|--current]",
+        pane_resize_usage:
+            "usage: herdr pane resize --direction left|right|up|down [--amount FLOAT] [--pane ID|--current]",
+        pane_rename_usage: "usage: herdr pane rename <pane_id> <label>|--clear",
+        pane_read_usage:
+            "usage: herdr pane read <pane_id> [--source visible|recent|recent-unwrapped|detection] [--lines N] [--format text|ansi] [--ansi] [--raw]",
+        pane_input_usage:
+            "usage: herdr pane input [<pane_id>|--pane ID|--current] --right-click herdr|pane",
+        pane_split_usage:
+            "usage: herdr pane split [<pane_id>|--pane ID|--current] --direction right|down [--ratio FLOAT] [--cwd PATH] [--env KEY=VALUE] [--right-click herdr|pane] [--focus] [--no-focus]",
+        pane_move_usage:
+            "usage: herdr pane move <pane_id> --tab <tab_id> --split right|down [--target-pane ID] [--ratio FLOAT] [--focus|--no-focus]\n       herdr pane move <pane_id> --new-tab [--workspace ID] [--label TEXT] [--focus|--no-focus]\n       herdr pane move <pane_id> --new-workspace [--label TEXT] [--tab-label TEXT] [--focus|--no-focus]",
+        pane_swap_usage:
+            "usage: herdr pane swap --direction left|right|up|down [--pane ID|--current]\n       herdr pane swap --source-pane ID --target-pane ID",
+        pane_close_usage: "usage: herdr pane close <pane_id>",
+        pane_send_text_usage: "usage: herdr pane send-text <pane_id> <text>",
+        pane_send_keys_usage: "usage: herdr pane send-keys <pane_id> <key> [key ...]",
+        pane_run_usage: "usage: herdr pane run <pane_id> <command>",
+        pane_wait_output_usage:
+            "usage: herdr pane wait-output <pane_id> (--match TEXT | --regex PATTERN) [--source visible|recent|recent-unwrapped] [--lines N] [--timeout MS] [--raw]",
+        pane_report_agent_usage:
+            "usage: herdr pane report-agent <pane_id> --source ID --agent LABEL --state idle|working|blocked|unknown [--message TEXT] [--seq N] [--agent-session-id ID] [--agent-session-path PATH]",
+        pane_report_agent_session_usage:
+            "usage: herdr pane report-agent-session <pane_id> --source ID --agent LABEL [--seq N] [--agent-session-id ID] [--agent-session-path PATH] [--session-start-source SOURCE]",
+        pane_release_agent_usage:
+            "usage: herdr pane release-agent <pane_id> --source ID --agent LABEL [--seq N]",
+        pane_report_metadata_usage:
+            "usage: herdr pane report-metadata <pane_id> --source ID [--agent LABEL] [--applies-to-source ID] [--title TEXT|--clear-title] [--display-agent TEXT|--clear-display-agent] [--state-label STATUS=TEXT] [--clear-state-labels] [--token NAME=VALUE] [--clear-token NAME] [--seq N] [--ttl-ms N]",
+        invalid_amount_fmt: "invalid amount: {value}",
+        invalid_ratio_fmt: "invalid ratio: {value}",
+        zoom_mode_conflict: "provide only one of --toggle, --on, or --off",
+        pane_selector_conflict: "provide only one pane selector",
+        current_requires_env_pane: "--current requires HERDR_PANE_ID",
+        invalid_right_click_target_fmt: "invalid right-click target: {value}",
+        invalid_split_direction_expected_fmt:
+            "invalid split direction: {value} (expected right or down)",
+        invalid_pane_direction_fmt:
+            "invalid pane direction: {value} (expected left, right, up, or down)",
+        match_regex_exclusive: "--match and --regex are mutually exclusive",
+        match_or_regex_required: "missing required --match or --regex",
+        source_required: "missing required --source",
+        agent_flag_required: "missing required --agent",
+        state_required: "missing required --state",
+        state_label_format: "expected --state-label STATUS=TEXT",
+        unknown_state_label_fmt: "unknown state label: {status}",
+        metadata_set_clear_conflict: "cannot set and clear the same metadata field",
+        metadata_field_required: "missing metadata field to set or clear",
+
+        plugin_link_usage: "usage: herdr plugin link <path> [--disabled]",
+        plugin_install_usage:
+            "usage: herdr plugin install <owner>/<repo>[/subdir...] [--ref REF] [--yes]",
+        plugin_install_usage_short: "usage: herdr plugin install <owner>/<repo>[/subdir...]",
+        plugin_install_v1_shorthand_only:
+            "plugin install v1 accepts only owner/repo[/subdir] shorthand",
+        plugin_install_requires_yes:
+            "remote plugin install requires --yes when stdin is not interactive",
+        plugin_install_cancelled: "plugin install cancelled",
+        plugin_config_dir_usage: "usage: herdr plugin config-dir <plugin_id>",
+        plugin_uninstall_usage: "usage: herdr plugin uninstall <plugin_id|owner/repo[/subdir...]>",
+        plugin_unlink_usage: "usage: herdr plugin unlink <plugin_id>",
+        plugin_set_enabled_usage_fmt: "usage: herdr plugin {action} <plugin_id>",
+        plugin_not_installed_fmt: "plugin not installed: {target}",
+        plugin_limit_invalid_fmt: "invalid --limit value: {value}",
+        plugin_action_invoke_usage:
+            "usage: herdr plugin action invoke <action_id> [--plugin ID]",
+        plugin_required: "missing required --plugin",
+        entrypoint_required: "missing required --entrypoint",
+        plugin_pane_focus_usage: "usage: herdr plugin pane focus <pane_id>",
+        plugin_pane_close_usage: "usage: herdr plugin pane close <pane_id>",
+        plugin_pane_placement_invalid_fmt: "invalid pane placement: {value}",
+        plugin_remote_path_absolute: "remote plugin paths must be absolute",
+        plugin_already_linked_local_fmt:
+            "plugin {plugin} is already linked from a local path; uninstall/unlink it before installing from GitHub",
+        github_segment_empty_fmt: "GitHub {label} must not be empty",
+        github_segment_invalid_fmt: "GitHub {label} is invalid: {value}",
+        github_segment_invalid_chars_fmt: "GitHub {label} contains invalid characters: {value}",
+        plugin_subdir_invalid_fmt: "invalid plugin subdir segment: {value}",
+        command_failed_fmt: "{program} failed with status {status}",
+        command_failed_stderr_fmt: "{program} failed with status {status}: {stderr}",
+        plugin_build_failed: "error: plugin build failed",
+        plugin_build_start_failed_fmt: "  error: failed to start: {error}",
+        plugin_build_wait_failed_fmt: "  error: failed to wait for command: {error}",
+        plugin_build_status_fmt: "  status: {status}",
+        build_output_truncated_fmt:
+            "{label}: showing last {max} bytes; earlier output omitted",
+        plugin_not_installed_after_failure: "Plugin was not installed.",
+        plugin_build_command_empty: "build command must not be empty",
+        plugin_build_changed_manifest:
+            "plugin build changed herdr-plugin.toml after install preview; aborting install",
+        plugin_server_source_metadata_missing:
+            "running Herdr server did not persist GitHub plugin source metadata",
+        plugin_registration_undo_failed_fmt:
+            "{error}; failed to undo incompatible plugin registration: {detail}",
+        plugin_refusing_unmanaged_delete_fmt: "refusing to delete unmanaged plugin path: {path}",
+        plugin_checkout_lifecycle_fmt:
+            "failed to {operation} managed plugin checkout at {path}; close any Herdr plugin panes or plugin commands using that checkout, then retry: {error}",
+
+        status_server_usage: "usage: herdr status server [--json]",
+        status_client_usage: "usage: herdr status client [--json]",
+
+        server_stop_usage: "usage: herdr server stop",
+        server_reload_config_usage: "usage: herdr server reload-config",
+        server_agent_manifests_usage: "usage: herdr server agent-manifests [--json]",
+        server_reload_agent_manifests_usage: "usage: herdr server reload-agent-manifests",
+        server_update_agent_manifests_usage: "usage: herdr server update-agent-manifests [--json]",
+        server_live_handoff_usage:
+            "usage: herdr server live-handoff [--import-exe <path>] [--expected-protocol <n>] [--expected-version <version>]",
+        manifests_update_failed_fmt: "failed to update agent detection manifests: {error}",
+
+        unknown_shell_fmt: "unknown shell: {shell}",
+        completion_usage_fmt: "usage: herdr completion <{shells}>",
+
+        worktree_list_usage: "usage: herdr worktree list [--workspace ID | --cwd PATH] [--trust-repository]",
+        worktree_create_usage:
+            "usage: herdr worktree create [--workspace ID | --cwd PATH] [--branch NAME] [--base REF] [--path PATH] [--label TEXT] [--focus] [--no-focus] [--trust-repository]",
+        worktree_open_usage:
+            "usage: herdr worktree open [--workspace ID | --cwd PATH] (--path PATH | --branch NAME) [--label TEXT] [--focus] [--no-focus] [--trust-repository]",
+        worktree_remove_usage:
+            "usage: herdr worktree remove --workspace ID [--force] [--trust-repository]",
+        remote_worktree_path_absolute: "remote worktree paths must be absolute or start with ~/",
+
+        workspace_list_usage: "usage: herdr workspace list",
+        workspace_get_usage: "usage: herdr workspace get <workspace_id>",
+        workspace_focus_usage: "usage: herdr workspace focus <workspace_id>",
+        workspace_rename_usage: "usage: herdr workspace rename <workspace_id> <label>",
+        workspace_report_metadata_usage:
+            "usage: herdr workspace report-metadata <workspace_id> --source ID [--token NAME=VALUE] [--clear-token NAME] [--seq N] [--ttl-ms N]",
+        workspace_close_usage: "usage: herdr workspace close <workspace_id> [--group]",
+        workspace_token_required: "missing token to set or clear",
+
+        tab_get_usage: "usage: herdr tab get <tab_id>",
+        tab_focus_usage: "usage: herdr tab focus <tab_id>",
+        tab_rename_usage: "usage: herdr tab rename <tab_id> <label>",
+        tab_close_usage: "usage: herdr tab close <tab_id>",
+
+        notification_show_usage:
+            "usage: herdr notification show <title> [--body TEXT] [--position top-left|top-right|bottom-left|bottom-right] [--sound none|done|request]",
+        invalid_position_fmt:
+            "invalid position: {value} (expected top-left, top-right, bottom-left, or bottom-right)",
+        invalid_sound_fmt: "invalid sound: {value} (expected none, done, or request)",
+
+        integration_status_usage: "usage: herdr integration status [--outdated-only]",
+        integration_target_usage_fmt:
+            "usage: herdr integration {action} <pi|omp|claude|codex|copilot|devin|droid|kimi|opencode|kilo|hermes|qodercli|qwen|letta|cursor|mastracode|grok>",
+        integration_target_unknown_fmt: "unknown integration target: {target}",
+        integration_targets_supported:
+            "currently supported: pi, omp, claude, codex, copilot, devin, droid, kimi, opencode, kilo, hermes, qodercli, qwen, letta, cursor, mastracode, antigravity-cli, grok",
+
+        integrations_need_updating_fmt: "installed herdr integrations need updating; {instructions}.",
+        integration_instructions_run_fmt: "run {command}",
+        integration_instructions_run_list_fmt: "run {commands} and {last}",
+        integration_not_supported_windows_fmt: "{target} integration is not supported on Windows",
+
+        self_update_disabled_homebrew_preview:
+            "self-update is disabled for Homebrew installs; preview is only available for direct Herdr installs",
+        self_update_disabled_homebrew:
+            "self-update is disabled for Homebrew installs; run `brew update && brew upgrade herdr`",
+        self_update_disabled_mise_preview:
+            "self-update is disabled for mise installs; preview is only available for direct Herdr installs",
+        self_update_disabled_mise:
+            "self-update is disabled for mise installs; run `mise upgrade herdr`",
+        self_update_disabled_nix_preview:
+            "self-update is disabled for Nix installs; preview is only available for direct Herdr installs",
+        self_update_disabled_nix:
+            "self-update is disabled for Nix installs; update with `nix profile upgrade` or update the flake input that provides Herdr",
+        update_run_outside: "run `herdr update` outside herdr after detaching from the session",
+        update_usage: "usage: herdr update [--handoff]",
+        unknown_update_option_fmt: "unknown update option: {option}",
+        preview_rejection_homebrew:
+            "preview channel is only available for direct Herdr installs; Homebrew installs update through `brew update && brew upgrade herdr`",
+        preview_rejection_mise:
+            "preview channel is only available for direct Herdr installs; mise installs update through `mise upgrade herdr`",
+        preview_rejection_nix:
+            "preview channel is only available for direct Herdr installs; Nix installs update through Nix",
+        curl_failed_fmt: "curl failed: {error}",
+        manifest_fetch_failed: "failed to fetch update manifest",
+        manifest_parse_failed_fmt: "failed to parse update manifest JSON: {error}",
+        manifest_invalid_version_fmt: "invalid version in update manifest: {version}",
+        manifest_missing_release_metadata_fmt: "missing release metadata for v{version}",
+        manifest_notes_empty: "update manifest notes are empty",
+        manifest_no_binary_fmt: "no binary for {key} in update manifest",
+        manifest_asset_missing_sha256_fmt:
+            "update manifest asset {key} is missing a SHA-256 checksum",
+        preview_channel_invalid_fmt: "invalid preview manifest channel: {channel}",
+        preview_build_id_empty: "preview manifest build_id is empty",
+        preview_base_version_invalid_fmt: "invalid base_version in preview manifest: {version}",
+        preview_notes_empty: "preview manifest notes are empty",
+        preview_no_binary_fmt: "no binary for {key} in preview manifest",
+        manifest_asset_unsupported_format_fmt:
+            "update manifest asset has unsupported format '{format}'",
+        asset_url_empty: "asset url must not be empty",
+        asset_url_invalid: "asset must be a URL string or object with url",
+        homebrew_fetch_failed: "failed to fetch Homebrew formula JSON",
+        current_binary_not_found_fmt: "can't find current binary: {error}",
+        binary_directory_not_found: "can't find binary directory",
+        install_dir_not_writable_fmt:
+            "install directory not writable: {path} ({error}). Try running with appropriate permissions.",
+        download_failed: "download failed",
+        download_failed_fmt: "download failed: {error}",
+        checksum_failed_fmt: "downloaded update checksum verification failed: {error}",
+        chmod_failed_fmt: "chmod failed: {error}",
+        update_temp_file_missing: "downloaded update temp file is missing",
+        replace_binary_failed_fmt: "failed to replace binary: {error}",
+        windows_sha256_missing: "Windows update asset is missing a SHA-256 checksum",
+        windows_installer_run_failed_fmt: "failed to run Windows installer: {error}",
+        windows_installer_failed_fmt: "Windows installer failed with status {status}",
+        localappdata_missing: "LOCALAPPDATA is not set; cannot locate Herdr install",
+        target_status_failed_fmt:
+            "failed to read status for herdr target {label} at {path}: {error}. stop it with `{command}` and run `herdr update` again",
+        target_status_no_response_fmt:
+            "herdr target {label} looked running, but its status API did not respond at {path}. stop it with `{command}` and run `herdr update` again",
+        target_client_socket_no_response_fmt:
+            "herdr target {label} has a client socket, but its status API did not respond at {path}. stop it with `{command}` and run `herdr update` again",
+        server_listening_status_unavailable_fmt:
+            "a herdr server is listening, but its status API is unavailable; try `{command}`, or stop the old server process manually, then run `herdr update` again",
+        sessions_list_failed_fmt: "failed to list herdr sessions: {error}",
+        sessions_must_stop_noninteractive:
+            "one or more Herdr sessions must stop for this update. Stop running Herdr sessions when ready, then run `herdr update` again from an interactive terminal.",
+        prompt_flush_failed_fmt: "failed to flush prompt: {error}",
+        prompt_read_failed_fmt: "failed to read prompt response: {error}",
+        server_connect_failed_fmt: "failed to connect to running server: {error}",
+        server_write_timeout_fmt: "failed to set {action} write timeout: {error}",
+        server_read_timeout_fmt: "failed to set {action} read timeout: {error}",
+        server_send_failed_fmt: "failed to send {action} request: {error}",
+        server_finish_failed_fmt: "failed to finish {action} request: {error}",
+        server_flush_failed_fmt: "failed to flush {action} request: {error}",
+        server_response_read_failed_fmt: "failed to read {action} response: {error}",
+        server_response_empty_fmt: "empty {action} response",
+        server_response_invalid_fmt: "invalid server response: {error}",
+        server_action_failed_fmt: "{action} failed: {error}",
+        shutdown_confirm_failed_fmt:
+            "failed to confirm whether the old server stopped on {path}: {error}",
+        server_still_responding_fmt:
+            "shutdown was requested, but the old server is still responding on {path} after {seconds} seconds",
+        post_handoff_status_failed_fmt: "failed to read server status after handoff: {error}",
+        handoff_no_compatible_server_fmt:
+            "live handoff was requested, but no compatible server responded on {path} after {seconds} seconds",
     },
 };

@@ -36,7 +36,7 @@ fn list(args: &[String]) -> std::io::Result<i32> {
         [] => false,
         [flag] if flag == "--json" => true,
         _ => {
-            eprintln!("usage: herdr machine list [--json]");
+            eprintln!("{}", crate::i18n::texts().cli_errors.machine_list_usage);
             return Ok(2);
         }
     };
@@ -87,6 +87,7 @@ struct AddArgs {
 }
 
 fn parse_add_args(args: &[String]) -> Result<AddArgs, String> {
+    let t = &crate::i18n::texts().cli_errors;
     let args = super::expand_equals_args(args, &["--label", "--remote-session"]);
     let mut target = None;
     let mut label = None;
@@ -96,7 +97,10 @@ fn parse_add_args(args: &[String]) -> Result<AddArgs, String> {
         let (name, value) = match args[index].as_str() {
             "--label" | "--remote-session" => {
                 let Some(value) = args.get(index + 1) else {
-                    return Err(format!("missing value for {}", args[index]));
+                    return Err(crate::i18n::fill(
+                        t.missing_value_for_fmt,
+                        &[("flag", args[index].as_str())],
+                    ));
                 };
                 index += 2;
                 (args[index - 2].as_str(), value.clone())
@@ -107,25 +111,26 @@ fn parse_add_args(args: &[String]) -> Result<AddArgs, String> {
                 continue;
             }
             unknown => {
-                return Err(format!("unknown machine add option: {unknown}"));
+                return Err(crate::i18n::fill(
+                    t.machine_add_unknown_option_fmt,
+                    &[("option", unknown)],
+                ));
             }
         };
         match name {
             "--label" if label.is_none() => label = Some(value),
             "--remote-session" if session.is_none() => session = Some(value),
             "--remote-session" => {
-                return Err("--remote-session can only be specified once".into());
+                return Err(t.remote_session_specified_twice.into());
             }
             "--label" => {
-                return Err("--label can only be specified once".into());
+                return Err(t.label_specified_twice.into());
             }
             _ => unreachable!("validated machine add option"),
         }
     }
-    let target = target.ok_or_else(|| {
-        "usage: herdr machine add <ssh-target> --label <label> [--remote-session <name>]".to_owned()
-    })?;
-    let label = label.ok_or_else(|| "--label is required".to_owned())?;
+    let target = target.ok_or_else(|| t.machine_add_usage.to_owned())?;
+    let label = label.ok_or_else(|| t.label_required.to_owned())?;
     let session = session.unwrap_or_else(|| crate::session::DEFAULT_SESSION_NAME.to_owned());
     Ok(AddArgs {
         target,
@@ -135,6 +140,7 @@ fn parse_add_args(args: &[String]) -> Result<AddArgs, String> {
 }
 
 fn add(args: &[String]) -> std::io::Result<i32> {
+    let t = &crate::i18n::texts().cli_errors;
     let AddArgs {
         target,
         label,
@@ -150,31 +156,36 @@ fn add(args: &[String]) -> std::io::Result<i32> {
     match catalog.add_ssh(label.clone(), &target, session.clone()) {
         Ok(_) => {}
         Err(error) => {
-            eprintln!("error: {error}");
+            eprintln!("{}{error}", t.error_prefix);
             return Ok(2);
         }
     }
     if let Err(error) = crate::remote::prepare_saved_ssh(&target, &session) {
-        eprintln!("error: {error}; machine was not saved");
+        eprintln!(
+            "{}",
+            crate::i18n::fill(t.machine_not_saved_fmt, &[("error", &error.to_string())])
+        );
         crate::remote::print_saved_ssh_error_hint(&error, &target);
         return Ok(1);
     }
     // Setup can wait for human approval. Do not overwrite catalog edits made meanwhile.
     let mut catalog = load_catalog().map_err(|error| {
-        std::io::Error::other(format!(
-            "remote prepared, but machine was not saved: {error}"
+        std::io::Error::other(crate::i18n::fill(
+            t.machine_prepared_not_saved_fmt,
+            &[("error", &error.to_string())],
         ))
     })?;
     let id = match catalog.add_ssh(label, target, session) {
         Ok(id) => id,
         Err(error) => {
-            eprintln!("error: {error}");
+            eprintln!("{}{error}", t.error_prefix);
             return Ok(2);
         }
     };
     store_catalog(&catalog).map_err(|error| {
-        std::io::Error::other(format!(
-            "remote prepared, but machine was not saved: {error}"
+        std::io::Error::other(crate::i18n::fill(
+            t.machine_prepared_not_saved_fmt,
+            &[("error", &error.to_string())],
         ))
     })?;
     let t = &crate::i18n::texts().cli_output;
@@ -187,19 +198,20 @@ fn add(args: &[String]) -> std::io::Result<i32> {
 }
 
 fn rename(args: &[String]) -> std::io::Result<i32> {
+    let t = &crate::i18n::texts().cli_errors;
     let args = super::expand_equals_args(args, &["--label"]);
     let [raw_id, flag, label] = args.as_slice() else {
-        eprintln!("usage: herdr machine rename <profile-id> --label <label>");
+        eprintln!("{}", t.machine_rename_usage);
         return Ok(2);
     };
     if flag != "--label" {
-        eprintln!("usage: herdr machine rename <profile-id> --label <label>");
+        eprintln!("{}", t.machine_rename_usage);
         return Ok(2);
     }
     let id = match ProfileId::parse(raw_id.clone()) {
         Ok(id) => id,
         Err(error) => {
-            eprintln!("error: {error}");
+            eprintln!("{}{error}", t.error_prefix);
             return Ok(2);
         }
     };
@@ -207,11 +219,14 @@ fn rename(args: &[String]) -> std::io::Result<i32> {
     match catalog.rename_ssh(&id, label) {
         Ok(true) => {}
         Ok(false) => {
-            eprintln!("machine profile {id} was not found");
+            eprintln!(
+                "{}",
+                crate::i18n::fill(t.machine_profile_not_found_fmt, &[("id", id.as_str())])
+            );
             return Ok(1);
         }
         Err(error) => {
-            eprintln!("error: {error}");
+            eprintln!("{}{error}", t.error_prefix);
             return Ok(2);
         }
     }
@@ -227,13 +242,22 @@ fn rename(args: &[String]) -> std::io::Result<i32> {
 }
 
 fn remove(args: &[String]) -> std::io::Result<i32> {
-    let Some(id) = one_profile_id(args, "usage: herdr machine remove <profile-id>")? else {
+    let Some(id) = one_profile_id(args, crate::i18n::texts().cli_errors.machine_remove_usage)?
+    else {
         return Ok(2);
     };
     let mut catalog = load_catalog()?;
     let previous_selection = catalog.selected_profile.clone();
     if !catalog.remove_ssh(&id) {
-        eprintln!("machine profile {id} was not found");
+        eprintln!(
+            "{}",
+            crate::i18n::fill(
+                crate::i18n::texts()
+                    .cli_errors
+                    .machine_profile_not_found_fmt,
+                &[("id", id.as_str())]
+            )
+        );
         return Ok(1);
     }
     store_catalog(&catalog)?;
@@ -252,14 +276,27 @@ fn remove(args: &[String]) -> std::io::Result<i32> {
 
 fn set_enabled(args: &[String], enabled: bool) -> std::io::Result<i32> {
     let action = if enabled { "enable" } else { "disable" };
-    let usage = format!("usage: herdr machine {action} <profile-id>");
+    let usage = crate::i18n::fill(
+        crate::i18n::texts()
+            .cli_errors
+            .machine_set_enabled_usage_fmt,
+        &[("action", action)],
+    );
     let Some(id) = one_profile_id(args, &usage)? else {
         return Ok(2);
     };
     let mut catalog = load_catalog()?;
     let previous_selection = catalog.selected_profile.clone();
     if !catalog.set_enabled(&id, enabled) {
-        eprintln!("machine profile {id} was not found");
+        eprintln!(
+            "{}",
+            crate::i18n::fill(
+                crate::i18n::texts()
+                    .cli_errors
+                    .machine_profile_not_found_fmt,
+                &[("id", id.as_str())]
+            )
+        );
         return Ok(1);
     }
     store_catalog(&catalog)?;
@@ -289,7 +326,7 @@ fn one_profile_id(args: &[String], usage: &str) -> std::io::Result<Option<Profil
     match ProfileId::parse(raw.clone()) {
         Ok(id) => Ok(Some(id)),
         Err(error) => {
-            eprintln!("error: {error}");
+            eprintln!("{}{error}", crate::i18n::texts().cli_errors.error_prefix);
             Ok(None)
         }
     }

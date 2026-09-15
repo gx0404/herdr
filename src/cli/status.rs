@@ -31,15 +31,12 @@ enum StatusScope {
 }
 
 fn parse_status_args(args: &[String]) -> Option<(StatusScope, bool)> {
+    let t = &crate::i18n::texts().cli_errors;
     match args.first().map(|arg| arg.as_str()) {
         None => Some((StatusScope::Full, false)),
         Some("--json") if args.len() == 1 => Some((StatusScope::Full, true)),
-        Some("server") => {
-            parse_status_scope_args(args, StatusScope::Server, "herdr status server [--json]")
-        }
-        Some("client") => {
-            parse_status_scope_args(args, StatusScope::Client, "herdr status client [--json]")
-        }
+        Some("server") => parse_status_scope_args(args, StatusScope::Server, t.status_server_usage),
+        Some("client") => parse_status_scope_args(args, StatusScope::Client, t.status_client_usage),
         Some("help" | "--help" | "-h") => {
             if args.len() > 1 {
                 print_status_help();
@@ -63,7 +60,7 @@ fn parse_status_scope_args(
         None => Some((scope, false)),
         Some("--json") if args.len() == 2 => Some((scope, true)),
         _ => {
-            eprintln!("usage: {usage}");
+            eprintln!("{usage}");
             None
         }
     }

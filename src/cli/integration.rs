@@ -1,5 +1,10 @@
 use crate::api::schema::IntegrationTarget;
 
+/// Localized CLI error templates for this subcommand surface.
+fn errors() -> &'static crate::i18n::CliErrorTexts {
+    &crate::i18n::texts().cli_errors
+}
+
 pub(super) fn run_integration_command(args: &[String]) -> std::io::Result<i32> {
     let Some(subcommand) = args.first().map(|arg| arg.as_str()) else {
         print_integration_help();
@@ -26,7 +31,7 @@ fn integration_status(args: &[String]) -> std::io::Result<i32> {
         [] => false,
         [flag] if flag == "--outdated-only" => true,
         _ => {
-            eprintln!("usage: herdr integration status [--outdated-only]");
+            eprintln!("{}", errors().integration_status_usage);
             return Ok(2);
         }
     };
@@ -161,13 +166,15 @@ fn parse_integration_target(
 ) -> std::io::Result<Option<IntegrationCommandTarget>> {
     let Some(target) = args.first().map(|arg| arg.as_str()) else {
         eprintln!(
-            "usage: herdr integration {action} <pi|omp|claude|codex|copilot|devin|droid|kimi|opencode|kilo|hermes|qodercli|qwen|letta|cursor|mastracode|grok>"
+            "{}",
+            crate::i18n::fill(errors().integration_target_usage_fmt, &[("action", action)])
         );
         return Ok(None);
     };
     if args.len() != 1 {
         eprintln!(
-            "usage: herdr integration {action} <pi|omp|claude|codex|copilot|devin|droid|kimi|opencode|kilo|hermes|qodercli|qwen|letta|cursor|mastracode|grok>"
+            "{}",
+            crate::i18n::fill(errors().integration_target_usage_fmt, &[("action", action)])
         );
         return Ok(None);
     }
@@ -194,10 +201,14 @@ fn parse_integration_target(
         }
         "grok" => IntegrationCommandTarget::Builtin(IntegrationTarget::Grok),
         _ => {
-            eprintln!("unknown integration target: {target}");
             eprintln!(
-                "currently supported: pi, omp, claude, codex, copilot, devin, droid, kimi, opencode, kilo, hermes, qodercli, qwen, letta, cursor, mastracode, antigravity-cli, grok"
+                "{}",
+                crate::i18n::fill(
+                    errors().integration_target_unknown_fmt,
+                    &[("target", target)]
+                )
             );
+            eprintln!("{}", errors().integration_targets_supported);
             return Ok(None);
         }
     };

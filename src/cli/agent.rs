@@ -39,6 +39,7 @@ pub(super) fn run_agent_command(args: &[String]) -> std::io::Result<i32> {
 }
 
 fn agent_explain(args: &[String]) -> std::io::Result<i32> {
+    let t = &crate::i18n::texts().cli_errors;
     let mut file = None;
     let mut agent = None;
     let mut json = false;
@@ -50,7 +51,10 @@ fn agent_explain(args: &[String]) -> std::io::Result<i32> {
         match args[index].as_str() {
             "--file" => {
                 let Some(value) = args.get(index + 1) else {
-                    eprintln!("missing value for --file");
+                    eprintln!(
+                        "{}",
+                        crate::i18n::fill(t.missing_value_for_fmt, &[("flag", "--file")])
+                    );
                     return Ok(2);
                 };
                 file = Some(value.clone());
@@ -58,7 +62,10 @@ fn agent_explain(args: &[String]) -> std::io::Result<i32> {
             }
             "--agent" => {
                 let Some(value) = args.get(index + 1) else {
-                    eprintln!("missing value for --agent");
+                    eprintln!(
+                        "{}",
+                        crate::i18n::fill(t.missing_value_for_fmt, &[("flag", "--agent")])
+                    );
                     return Ok(2);
                 };
                 agent = Some(value.clone());
@@ -70,14 +77,20 @@ fn agent_explain(args: &[String]) -> std::io::Result<i32> {
             }
             "--format" => {
                 let Some(value) = args.get(index + 1) else {
-                    eprintln!("missing value for --format");
+                    eprintln!(
+                        "{}",
+                        crate::i18n::fill(t.missing_value_for_fmt, &[("flag", "--format")])
+                    );
                     return Ok(2);
                 };
                 match value.as_str() {
                     "json" => json = true,
                     "text" => json = false,
                     other => {
-                        eprintln!("invalid --format: {other} (expected text or json)");
+                        eprintln!(
+                            "{}",
+                            crate::i18n::fill(t.format_invalid_fmt, &[("value", other)])
+                        );
                         return Ok(2);
                     }
                 }
@@ -88,19 +101,20 @@ fn agent_explain(args: &[String]) -> std::io::Result<i32> {
                 index += 1;
             }
             "help" | "--help" | "-h" => {
-                eprintln!("usage: herdr agent explain <target> [--json|--verbose]");
-                eprintln!(
-                    "usage: herdr agent explain --file PATH --agent LABEL [--json|--verbose]"
-                );
+                eprintln!("{}", t.agent_explain_usage);
+                eprintln!("{}", t.agent_explain_file_usage);
                 return Ok(0);
             }
             value if value.starts_with('-') => {
-                eprintln!("unknown option: {value}");
+                eprintln!(
+                    "{}",
+                    crate::i18n::fill(t.unknown_option_fmt, &[("option", value)])
+                );
                 return Ok(2);
             }
             value => {
                 if target.is_some() {
-                    eprintln!("usage: herdr agent explain <target> [--json]");
+                    eprintln!("{}", t.agent_explain_target_usage);
                     return Ok(2);
                 }
                 target = Some(value.to_string());
@@ -111,11 +125,11 @@ fn agent_explain(args: &[String]) -> std::io::Result<i32> {
 
     let explain = if let Some(path) = file {
         if target.is_some() {
-            eprintln!("usage: herdr agent explain --file PATH --agent LABEL [--json]");
+            eprintln!("{}", t.agent_explain_file_json_usage);
             return Ok(2);
         }
         let Some(agent_label) = agent else {
-            eprintln!("herdr agent explain --file requires --agent LABEL");
+            eprintln!("{}", t.agent_explain_file_requires_agent);
             return Ok(2);
         };
         let content = match std::fs::read_to_string(&path) {
@@ -125,7 +139,10 @@ fn agent_explain(args: &[String]) -> std::io::Result<i32> {
                     id: "cli:agent:explain".into(),
                     error: ErrorBody {
                         code: "agent_explain_file_read_failed".into(),
-                        message: format!("failed to read agent explain file {path}: {err}"),
+                        message: crate::i18n::fill(
+                            t.agent_explain_file_read_failed_fmt,
+                            &[("path", path.as_str()), ("error", &err.to_string())],
+                        ),
                     },
                 };
                 let response = serde_json::to_string(&response).map_err(std::io::Error::other)?;
@@ -139,12 +156,12 @@ fn agent_explain(args: &[String]) -> std::io::Result<i32> {
         ))
     } else {
         let Some(target) = target else {
-            eprintln!("usage: herdr agent explain <target> [--json]");
-            eprintln!("usage: herdr agent explain --file PATH --agent LABEL [--json]");
+            eprintln!("{}", t.agent_explain_target_usage);
+            eprintln!("{}", t.agent_explain_file_json_usage);
             return Ok(2);
         };
         if agent.is_some() {
-            eprintln!("--agent is only valid with --file");
+            eprintln!("{}", t.agent_only_with_file);
             return Ok(2);
         }
 
@@ -306,8 +323,9 @@ fn matched_rule_region_preview<'a>(
 }
 
 fn agent_start(args: &[String]) -> std::io::Result<i32> {
+    let t = &crate::i18n::texts().cli_errors;
     let Some(name) = args.first() else {
-        eprintln!("usage: herdr agent start <name> --kind KIND --pane ID [--timeout MS] [-- <agent-args...>]");
+        eprintln!("{}", t.agent_start_usage);
         return Ok(2);
     };
     let separator = args
@@ -322,7 +340,10 @@ fn agent_start(args: &[String]) -> std::io::Result<i32> {
         match args[index].as_str() {
             "--kind" => {
                 let Some(value) = args.get(index + 1).filter(|_| index + 1 < separator) else {
-                    eprintln!("missing value for --kind");
+                    eprintln!(
+                        "{}",
+                        crate::i18n::fill(t.missing_value_for_fmt, &[("flag", "--kind")])
+                    );
                     return Ok(2);
                 };
                 kind = Some(value.clone());
@@ -330,7 +351,10 @@ fn agent_start(args: &[String]) -> std::io::Result<i32> {
             }
             "--pane" => {
                 let Some(value) = args.get(index + 1).filter(|_| index + 1 < separator) else {
-                    eprintln!("missing value for --pane");
+                    eprintln!(
+                        "{}",
+                        crate::i18n::fill(t.missing_value_for_fmt, &[("flag", "--pane")])
+                    );
                     return Ok(2);
                 };
                 pane_id = Some(super::normalize_pane_id(value));
@@ -338,7 +362,10 @@ fn agent_start(args: &[String]) -> std::io::Result<i32> {
             }
             "--timeout" => {
                 let Some(value) = args.get(index + 1).filter(|_| index + 1 < separator) else {
-                    eprintln!("missing value for --timeout");
+                    eprintln!(
+                        "{}",
+                        crate::i18n::fill(t.missing_value_for_fmt, &[("flag", "--timeout")])
+                    );
                     return Ok(2);
                 };
                 timeout_ms = match parse_timeout(value) {
@@ -348,21 +375,27 @@ fn agent_start(args: &[String]) -> std::io::Result<i32> {
                 index += 2;
             }
             other => {
-                eprintln!("unknown option: {other}");
+                eprintln!(
+                    "{}",
+                    crate::i18n::fill(t.unknown_option_fmt, &[("option", other)])
+                );
                 return Ok(2);
             }
         }
     }
     let Some(kind) = kind else {
-        eprintln!("missing required --kind");
+        eprintln!("{}", t.kind_required);
         return Ok(2);
     };
     let Some(pane_id) = pane_id else {
-        eprintln!("missing required --pane");
+        eprintln!("{}", t.pane_flag_required);
         return Ok(2);
     };
     let Some(expected_kind) = crate::detect::parse_agent_label(&kind) else {
-        eprintln!("unsupported interactive agent kind: {kind}");
+        eprintln!(
+            "{}",
+            crate::i18n::fill(t.agent_kind_unsupported_fmt, &[("kind", kind.as_str())])
+        );
         return Ok(2);
     };
     let expected_kind = crate::detect::agent_label(expected_kind).to_string();
@@ -426,7 +459,7 @@ fn agent_start(args: &[String]) -> std::io::Result<i32> {
         return super::print_response(&cli_agent_error(
             "cli:agent:start",
             "agent_start_failed",
-            "agent start response did not include terminal_id",
+            crate::i18n::texts().cli_errors.agent_start_no_terminal_id,
         ));
     };
     if pinned_terminal_id
@@ -456,7 +489,7 @@ fn agent_start(args: &[String]) -> std::io::Result<i32> {
 
 fn agent_list(args: &[String]) -> std::io::Result<i32> {
     if !args.is_empty() {
-        eprintln!("usage: herdr agent list");
+        eprintln!("{}", crate::i18n::texts().cli_errors.agent_list_usage);
         return Ok(2);
     }
 
@@ -467,12 +500,13 @@ fn agent_list(args: &[String]) -> std::io::Result<i32> {
 }
 
 fn agent_get(args: &[String]) -> std::io::Result<i32> {
+    let usage = crate::i18n::texts().cli_errors.agent_get_usage;
     let Some(target) = args.first() else {
-        eprintln!("usage: herdr agent get <target>");
+        eprintln!("{usage}");
         return Ok(2);
     };
     if args.len() != 1 {
-        eprintln!("usage: herdr agent get <target>");
+        eprintln!("{usage}");
         return Ok(2);
     }
 
@@ -485,12 +519,13 @@ fn agent_get(args: &[String]) -> std::io::Result<i32> {
 }
 
 fn agent_focus(args: &[String]) -> std::io::Result<i32> {
+    let usage = crate::i18n::texts().cli_errors.agent_focus_usage;
     let Some(target) = args.first() else {
-        eprintln!("usage: herdr agent focus <target>");
+        eprintln!("{usage}");
         return Ok(2);
     };
     if args.len() != 1 {
-        eprintln!("usage: herdr agent focus <target>");
+        eprintln!("{usage}");
         return Ok(2);
     }
 
@@ -503,11 +538,13 @@ fn agent_focus(args: &[String]) -> std::io::Result<i32> {
 }
 
 fn agent_attach(args: &[String]) -> std::io::Result<i32> {
-    let (target, takeover) =
-        match super::parse_attach_target(args, "usage: herdr agent attach <target> [--takeover]") {
-            Ok(parsed) => parsed,
-            Err(code) => return Ok(code),
-        };
+    let (target, takeover) = match super::parse_attach_target(
+        args,
+        crate::i18n::texts().cli_errors.agent_attach_usage,
+    ) {
+        Ok(parsed) => parsed,
+        Err(code) => return Ok(code),
+    };
 
     let response = resolve_agent_target(&target, "cli:agent:attach:resolve")?;
     if response.get("error").is_some() {
@@ -515,7 +552,10 @@ fn agent_attach(args: &[String]) -> std::io::Result<i32> {
         return Ok(1);
     }
     let Some(terminal_id) = response["result"]["agent"]["terminal_id"].as_str() else {
-        eprintln!("agent attach failed: response did not include terminal_id");
+        eprintln!(
+            "{}",
+            crate::i18n::texts().cli_errors.agent_attach_no_terminal_id
+        );
         return Ok(1);
     };
     crate::client::run_terminal_attach(terminal_id.to_owned(), takeover)?;
@@ -523,8 +563,9 @@ fn agent_attach(args: &[String]) -> std::io::Result<i32> {
 }
 
 fn agent_wait(args: &[String]) -> std::io::Result<i32> {
+    let t = &crate::i18n::texts().cli_errors;
     let Some(target) = args.first() else {
-        eprintln!("usage: herdr agent wait <target> [--until STATUS]... [--timeout MS]");
+        eprintln!("{}", t.agent_wait_usage);
         return Ok(2);
     };
     let mut until = Vec::new();
@@ -534,7 +575,7 @@ fn agent_wait(args: &[String]) -> std::io::Result<i32> {
         match args[index].as_str() {
             "--until" => {
                 let Some(value) = args.get(index + 1) else {
-                    eprintln!("--until requires at least one status");
+                    eprintln!("{}", t.until_requires_status);
                     return Ok(2);
                 };
                 let status = match super::parse_agent_status(value) {
@@ -549,7 +590,10 @@ fn agent_wait(args: &[String]) -> std::io::Result<i32> {
             }
             "--timeout" => {
                 let Some(value) = args.get(index + 1) else {
-                    eprintln!("missing value for --timeout");
+                    eprintln!(
+                        "{}",
+                        crate::i18n::fill(t.missing_value_for_fmt, &[("flag", "--timeout")])
+                    );
                     return Ok(2);
                 };
                 timeout_ms = match parse_timeout(value) {
@@ -559,11 +603,14 @@ fn agent_wait(args: &[String]) -> std::io::Result<i32> {
                 index += 2;
             }
             "help" | "--help" | "-h" => {
-                eprintln!("usage: herdr agent wait <target> [--until STATUS]... [--timeout MS]");
+                eprintln!("{}", t.agent_wait_usage);
                 return Ok(0);
             }
             other => {
-                eprintln!("unknown option: {other}");
+                eprintln!(
+                    "{}",
+                    crate::i18n::fill(t.unknown_option_fmt, &[("option", other)])
+                );
                 return Ok(2);
             }
         }
@@ -618,7 +665,10 @@ fn wait_for_named_agent(
             Some(Err(cli_agent_error(
                 "cli:agent:start",
                 "agent_kind_mismatch",
-                format!("expected {expected_kind}, detected {actual}"),
+                crate::i18n::fill(
+                    crate::i18n::texts().cli_errors.agent_kind_mismatch_fmt,
+                    &[("expected", expected_kind), ("detected", actual)],
+                ),
             )))
         } else if agent["name"].as_str() != Some(name) {
             Some(Err(agent_name_lost_error("cli:agent:start", name)))
@@ -627,7 +677,12 @@ fn wait_for_named_agent(
                 Some("blocked") => Some(Err(cli_agent_error(
                     "cli:agent:start",
                     "agent_not_ready",
-                    format!("agent {name} is blocked during startup and is not ready for prompts"),
+                    crate::i18n::fill(
+                        crate::i18n::texts()
+                            .cli_errors
+                            .agent_blocked_during_startup_fmt,
+                        &[("name", name)],
+                    ),
                 ))),
                 Some("working" | "unknown") => None,
                 Some("idle" | "done") if agent["interactive_ready"].as_bool() == Some(true) => {
@@ -637,7 +692,9 @@ fn wait_for_named_agent(
                     Some(Err(cli_agent_error(
                         "cli:agent:start",
                         "agent_start_failed",
-                        "agent process exited before becoming interactive",
+                        crate::i18n::texts()
+                            .cli_errors
+                            .agent_exited_before_interactive,
                     )))
                 }
                 _ => None,
@@ -710,7 +767,10 @@ fn agent_name_lost_error(request_id: &str, expected_name: &str) -> serde_json::V
     cli_agent_error(
         request_id,
         "agent_name_not_found",
-        format!("named agent {expected_name} no longer owns the target terminal"),
+        crate::i18n::fill(
+            crate::i18n::texts().cli_errors.agent_name_lost_fmt,
+            &[("name", expected_name)],
+        ),
     )
 }
 
@@ -736,7 +796,7 @@ fn agent_wait_timeout() -> serde_json::Value {
     cli_agent_error(
         "cli:agent:start",
         "timeout",
-        "timed out waiting for agent startup",
+        crate::i18n::texts().cli_errors.agent_start_timeout,
     )
 }
 
@@ -769,7 +829,7 @@ fn agent_get_request(target: &str, request_id: &str) -> Request {
 
 fn agent_rename(args: &[String]) -> std::io::Result<i32> {
     let [target, value] = args else {
-        eprintln!("usage: herdr agent rename <target> <name>|--clear");
+        eprintln!("{}", crate::i18n::texts().cli_errors.agent_rename_usage);
         return Ok(2);
     };
     let name = if value == "--clear" {
@@ -788,14 +848,13 @@ fn agent_rename(args: &[String]) -> std::io::Result<i32> {
 }
 
 fn agent_prompt(args: &[String]) -> std::io::Result<i32> {
+    let t = &crate::i18n::texts().cli_errors;
     let Some(target) = args.first() else {
-        eprintln!(
-            "usage: herdr agent prompt <target> <text> [--wait] [--until STATUS]... [--timeout MS]"
-        );
+        eprintln!("{}", t.agent_prompt_usage);
         return Ok(2);
     };
     let Some(text) = args.get(1) else {
-        eprintln!("agent prompt requires text");
+        eprintln!("{}", t.agent_prompt_requires_text);
         return Ok(2);
     };
     let mut wait = false;
@@ -810,7 +869,7 @@ fn agent_prompt(args: &[String]) -> std::io::Result<i32> {
             }
             "--until" => {
                 let Some(value) = args.get(index + 1) else {
-                    eprintln!("--until requires at least one status");
+                    eprintln!("{}", t.until_requires_status);
                     return Ok(2);
                 };
                 let status = match super::parse_agent_status(value) {
@@ -825,7 +884,10 @@ fn agent_prompt(args: &[String]) -> std::io::Result<i32> {
             }
             "--timeout" => {
                 let Some(value) = args.get(index + 1) else {
-                    eprintln!("missing value for --timeout");
+                    eprintln!(
+                        "{}",
+                        crate::i18n::fill(t.missing_value_for_fmt, &[("flag", "--timeout")])
+                    );
                     return Ok(2);
                 };
                 timeout_ms = match parse_timeout(value) {
@@ -835,17 +897,20 @@ fn agent_prompt(args: &[String]) -> std::io::Result<i32> {
                 index += 2;
             }
             option => {
-                eprintln!("unknown option: {option}");
+                eprintln!(
+                    "{}",
+                    crate::i18n::fill(t.unknown_option_fmt, &[("option", option)])
+                );
                 return Ok(2);
             }
         }
     }
     if !until.is_empty() && !wait {
-        eprintln!("--until requires --wait");
+        eprintln!("{}", t.until_requires_wait);
         return Ok(2);
     }
     if timeout_ms.is_some() && !wait {
-        eprintln!("--timeout requires --wait");
+        eprintln!("{}", t.timeout_requires_wait);
         return Ok(2);
     }
     let response = super::send_request(&Request {
@@ -865,7 +930,7 @@ fn agent_prompt(args: &[String]) -> std::io::Result<i32> {
 
 fn agent_send_keys(args: &[String]) -> std::io::Result<i32> {
     if args.len() < 2 {
-        eprintln!("usage: herdr agent send-keys <target> <key> [key ...]");
+        eprintln!("{}", crate::i18n::texts().cli_errors.agent_send_keys_usage);
         return Ok(2);
     }
 
@@ -879,8 +944,9 @@ fn agent_send_keys(args: &[String]) -> std::io::Result<i32> {
 }
 
 fn agent_read(args: &[String]) -> std::io::Result<i32> {
+    let t = &crate::i18n::texts().cli_errors;
     let Some(target) = args.first() else {
-        eprintln!("usage: herdr agent read <target> [--source visible|recent|recent-unwrapped] [--lines N] [--format text|ansi] [--ansi]");
+        eprintln!("{}", t.agent_read_usage);
         return Ok(2);
     };
 
@@ -894,7 +960,10 @@ fn agent_read(args: &[String]) -> std::io::Result<i32> {
         match args[index].as_str() {
             "--source" => {
                 let Some(value) = args.get(index + 1) else {
-                    eprintln!("missing value for --source");
+                    eprintln!(
+                        "{}",
+                        crate::i18n::fill(t.missing_value_for_fmt, &[("flag", "--source")])
+                    );
                     return Ok(2);
                 };
                 source = super::parse_read_source(value)?;
@@ -902,7 +971,10 @@ fn agent_read(args: &[String]) -> std::io::Result<i32> {
             }
             "--lines" => {
                 let Some(value) = args.get(index + 1) else {
-                    eprintln!("missing value for --lines");
+                    eprintln!(
+                        "{}",
+                        crate::i18n::fill(t.missing_value_for_fmt, &[("flag", "--lines")])
+                    );
                     return Ok(2);
                 };
                 lines = Some(super::parse_u32_flag("--lines", value)?);
@@ -910,7 +982,10 @@ fn agent_read(args: &[String]) -> std::io::Result<i32> {
             }
             "--format" => {
                 let Some(value) = args.get(index + 1) else {
-                    eprintln!("missing value for --format");
+                    eprintln!(
+                        "{}",
+                        crate::i18n::fill(t.missing_value_for_fmt, &[("flag", "--format")])
+                    );
                     return Ok(2);
                 };
                 format = super::parse_read_format(value)?;
@@ -923,7 +998,10 @@ fn agent_read(args: &[String]) -> std::io::Result<i32> {
                 index += 1;
             }
             other => {
-                eprintln!("unknown option: {other}");
+                eprintln!(
+                    "{}",
+                    crate::i18n::fill(t.unknown_option_fmt, &[("option", other)])
+                );
                 return Ok(2);
             }
         }

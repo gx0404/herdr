@@ -24,12 +24,21 @@ pub(super) fn mismatch_response(
     }
 
     let message = if client_protocol > server_protocol {
-        format!(
-            "client protocol {client_protocol} is newer than server protocol {server_protocol}; restart the Herdr server before using this command. {restart_guidance}"
+        crate::i18n::fill(
+            crate::i18n::texts().cli_errors.protocol_newer_fmt,
+            &[
+                ("client_protocol", &client_protocol.to_string()),
+                ("server_protocol", &server_protocol.to_string()),
+                ("restart_guidance", restart_guidance),
+            ],
         )
     } else {
-        format!(
-            "client protocol {client_protocol} is older than server protocol {server_protocol}; upgrade the Herdr client before using this command"
+        crate::i18n::fill(
+            crate::i18n::texts().cli_errors.protocol_older_fmt,
+            &[
+                ("client_protocol", &client_protocol.to_string()),
+                ("server_protocol", &server_protocol.to_string()),
+            ],
         )
     };
 
@@ -63,6 +72,7 @@ mod tests {
 
     #[test]
     fn older_server_error_preserves_request_id_and_guidance() {
+        let _guard = crate::i18n::lang_guard(crate::i18n::Lang::En);
         let response = mismatch_response(
             "cli:agent:wait",
             crate::protocol::PROTOCOL_VERSION - 1,
@@ -85,6 +95,7 @@ mod tests {
 
     #[test]
     fn newer_server_error_tells_user_to_upgrade_client() {
+        let _guard = crate::i18n::lang_guard(crate::i18n::Lang::En);
         let response = mismatch_response(
             "cli:pane:list",
             crate::protocol::PROTOCOL_VERSION + 1,

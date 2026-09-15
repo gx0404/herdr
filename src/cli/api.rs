@@ -41,14 +41,26 @@ fn api_schema(args: &[String]) -> std::io::Result<i32> {
             );
         }
         [flag] if flag == "--output" => {
-            eprintln!("missing value for --output");
+            eprintln!(
+                "{}",
+                crate::i18n::fill(
+                    crate::i18n::texts().cli_errors.missing_value_for_fmt,
+                    &[("flag", "--output")]
+                )
+            );
             return Ok(2);
         }
         [flag] if matches!(flag.as_str(), "help" | "--help" | "-h") => {
             print_api_schema_help();
         }
         [other] if other.starts_with('-') => {
-            eprintln!("unknown option: {other}");
+            eprintln!(
+                "{}",
+                crate::i18n::fill(
+                    crate::i18n::texts().cli_errors.unknown_option_fmt,
+                    &[("option", other.as_str())]
+                )
+            );
             return Ok(2);
         }
         _ => {
@@ -61,7 +73,7 @@ fn api_schema(args: &[String]) -> std::io::Result<i32> {
 
 fn api_snapshot(args: &[String]) -> std::io::Result<i32> {
     if !args.is_empty() {
-        eprintln!("usage: herdr api snapshot");
+        eprintln!("{}", crate::i18n::texts().cli_errors.api_snapshot_usage);
         return Ok(2);
     }
 
@@ -111,7 +123,7 @@ fn print_api_help() {
 }
 
 fn print_api_schema_help() {
-    eprintln!("usage: herdr api schema [--json | --output PATH]");
+    eprintln!("{}", crate::i18n::texts().cli_errors.api_schema_usage);
 }
 
 #[cfg(test)]

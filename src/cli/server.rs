@@ -26,7 +26,7 @@ pub(super) fn run_server_command(args: &[String]) -> std::io::Result<Option<i32>
 
 fn server_stop(args: &[String]) -> std::io::Result<i32> {
     if !args.is_empty() {
-        eprintln!("usage: herdr server stop");
+        eprintln!("{}", crate::i18n::texts().cli_errors.server_stop_usage);
         return Ok(2);
     }
 
@@ -45,7 +45,10 @@ fn server_stop(args: &[String]) -> std::io::Result<i32> {
 
 fn server_reload_config(args: &[String]) -> std::io::Result<i32> {
     if !args.is_empty() {
-        eprintln!("usage: herdr server reload-config");
+        eprintln!(
+            "{}",
+            crate::i18n::texts().cli_errors.server_reload_config_usage
+        );
         return Ok(2);
     }
 
@@ -60,7 +63,10 @@ fn server_agent_manifests(args: &[String]) -> std::io::Result<i32> {
         [] => false,
         [flag] if flag == "--json" => true,
         _ => {
-            eprintln!("usage: herdr server agent-manifests [--json]");
+            eprintln!(
+                "{}",
+                crate::i18n::texts().cli_errors.server_agent_manifests_usage
+            );
             return Ok(2);
         }
     };
@@ -79,7 +85,12 @@ fn server_agent_manifests(args: &[String]) -> std::io::Result<i32> {
 
 fn server_reload_agent_manifests(args: &[String]) -> std::io::Result<i32> {
     if !args.is_empty() {
-        eprintln!("usage: herdr server reload-agent-manifests");
+        eprintln!(
+            "{}",
+            crate::i18n::texts()
+                .cli_errors
+                .server_reload_agent_manifests_usage
+        );
         return Ok(2);
     }
 
@@ -94,7 +105,12 @@ fn server_update_agent_manifests(args: &[String]) -> std::io::Result<i32> {
         [] => false,
         [flag] if flag == "--json" => true,
         _ => {
-            eprintln!("usage: herdr server update-agent-manifests [--json]");
+            eprintln!(
+                "{}",
+                crate::i18n::texts()
+                    .cli_errors
+                    .server_update_agent_manifests_usage
+            );
             return Ok(2);
         }
     };
@@ -107,7 +123,13 @@ fn server_update_agent_manifests(args: &[String]) -> std::io::Result<i32> {
             if json {
                 return super::print_response(&agent_manifest_update_error_response(&err));
             }
-            eprintln!("failed to update agent detection manifests: {err}");
+            eprintln!(
+                "{}",
+                crate::i18n::fill(
+                    crate::i18n::texts().cli_errors.manifests_update_failed_fmt,
+                    &[("error", err.as_str())]
+                )
+            );
             return Ok(1);
         }
     };
@@ -204,7 +226,8 @@ fn print_agent_manifest_status(response: &serde_json::Value) {
 fn server_live_handoff(args: &[String]) -> std::io::Result<i32> {
     let Some(params) = parse_live_handoff_params(args) else {
         eprintln!(
-            "usage: herdr server live-handoff [--import-exe <path>] [--expected-protocol <n>] [--expected-version <version>]"
+            "{}",
+            crate::i18n::texts().cli_errors.server_live_handoff_usage
         );
         return Ok(2);
     };

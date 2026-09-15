@@ -1,9 +1,10 @@
 //! 简体中文文案表。键集合必须与 `en.rs` 完全一致（由 `Texts` 结构保证）。
 
 use super::{
-    ChromeTexts, CliHelpTexts, CliOutputTexts, ContextMenuTexts, DialogTexts, EndpointTexts,
-    GlobalMenuTexts, KeybindTexts, MobileTexts, ModeBarTexts, NotifyTexts, OnboardingTexts,
-    OverlayTexts, SettingsTexts, SidebarTexts, StatusTexts, Texts, UpdateTexts, WorktreeTexts,
+    ChromeTexts, CliErrorTexts, CliHelpTexts, CliOutputTexts, ContextMenuTexts, DialogTexts,
+    EndpointTexts, GlobalMenuTexts, KeybindTexts, MobileTexts, ModeBarTexts, NotifyTexts,
+    OnboardingTexts, OverlayTexts, SettingsTexts, SidebarTexts, StatusTexts, Texts, UpdateTexts,
+    WorktreeTexts,
 };
 
 pub const TEXTS: Texts = Texts {
@@ -549,5 +550,359 @@ pub const TEXTS: Texts = Texts {
         plugin_warning_count_fmt: "；{count} 条警告",
         plugin_config_path_label: "  配置目录：",
         plugin_warning_label: "  警告：",
+    },
+    cli_errors: CliErrorTexts {
+        error_prefix: "错误：",
+        missing_value_for_fmt: "{flag} 缺少值",
+        unknown_option_fmt: "未知选项：{option}",
+        unexpected_argument_fmt: "多余的参数：{argument}",
+        invalid_flag_value_fmt: "{flag} 的值无效：{value}",
+
+        token_must_use_name_value: "token 必须使用 NAME=VALUE 形式",
+        token_name_empty: "token 名称不能为空",
+        env_must_use_key_value: "env 必须使用 KEY=VALUE 形式",
+        env_key_empty: "env 键不能为空",
+        env_nul_bytes: "env 不能包含 NUL 字节",
+        channel_set_usage: "用法：herdr channel set <stable|preview>",
+        config_invalid_toml_channel_fmt:
+            "{path} 处的配置文件是无效的 TOML：{error}。请先修复它，再更改更新渠道。",
+        channel_change_invalid_toml_fmt:
+            "更改更新渠道会使 {path} 变为无效 TOML：{error}；配置保持不变",
+        update_failed_fmt: "更新失败：{error}",
+        update_retry_hint: "请运行 `herdr update` 重试。",
+        config_check_usage: "用法：herdr config check",
+        config_reset_keys_usage: "用法：herdr config reset-keys",
+        config_invalid_toml_manual_fix_fmt:
+            "{path} 处的配置文件是无效的 TOML：{error}。请手动修复，或将它移开以使用默认配置。",
+        config_top_level_table_fmt:
+            "{path} 处的配置文件是无效的 TOML：顶层配置必须是表。",
+        config_keys_remove_unsafe_fmt:
+            "无法在不重写注释的情况下从 {path} 安全移除快捷键配置；请手动编辑该文件，或移除顶层 keys 设置。",
+        config_keys_remove_invalid_toml_fmt:
+            "移除快捷键配置会使 {path} 变为无效 TOML：{error}；配置保持不变",
+        session_list_usage: "用法：herdr session list [--json]",
+        session_attach_usage: "用法：herdr session attach <name>",
+        session_stop_usage: "用法：herdr session stop <name> [--json]",
+        session_delete_usage: "用法：herdr session delete <name> [--json]",
+        terminal_attach_usage: "用法：herdr terminal attach <terminal_id> [--takeover]",
+        unknown_terminal_session_option_fmt: "未知的 terminal session {command} 选项：{option}",
+        terminal_dimension_range_fmt: "{flag} 必须是 1 到 {max} 之间的整数",
+        terminal_dimension_positive_fmt: "{flag} 必须大于 0",
+        terminal_title_set_usage: "用法：herdr terminal title set <title>",
+        terminal_title_clear_usage: "用法：herdr terminal title clear",
+        terminal_title_help_clear_line: "       herdr terminal title clear",
+        invalid_split_direction_fmt: "无效的分割方向：{value}",
+        invalid_read_source_fmt: "无效的读取来源：{value}",
+        invalid_read_format_fmt: "无效的读取格式：{value}",
+        invalid_agent_status_fmt: "无效的 agent 状态：{value}（应为 idle、working、blocked、done 或 unknown）",
+        invalid_pane_agent_state_fmt: "无效的窗格 agent 状态：{value}（应为 idle、working、blocked 或 unknown）",
+        server_ping_no_protocol: "server ping 未包含协议版本",
+
+        protocol_newer_fmt:
+            "客户端协议 {client_protocol} 比服务器协议 {server_protocol} 新；使用此命令前请先重启 Herdr 服务器。{restart_guidance}",
+        protocol_older_fmt:
+            "客户端协议 {client_protocol} 比服务器协议 {server_protocol} 旧；使用此命令前请先升级 Herdr 客户端",
+
+        no_server_running_fmt: "没有 herdr 服务器运行在 {path}；运行 `{command}` 启动或挂载它",
+
+        machine_specified_twice: "--machine 只能指定一次",
+        machine_requires_value: "--machine 缺少值",
+        machine_requires_saved_label: "--machine 需要已保存的机器标签或 profile ID",
+        machine_no_other_launch_options:
+            "--machine 不能与其他启动选项组合使用；它会使用已保存机器的会话",
+        machine_prefix_usage: "用法：herdr --machine <label-or-id> <command>",
+        machine_unknown_fmt: "未知机器 '{selector}'；请使用 `herdr machine list`",
+        machine_label_ambiguous_fmt: "机器标签 '{selector}' 存在歧义；请使用其 profile ID",
+        machine_disabled_fmt: "机器 '{selector}' 已禁用",
+        machine_unsupported_command_fmt:
+            "`{command} {subcommand}` 不是受 API 支持的机器命令；--machine 不会运行本地管理命令或挂载 TUI",
+        machine_bridge_error_fmt: "机器 '{label}'：{error}",
+        machine_session_error_fmt: "机器 '{label}'（会话 {session}）：{error}",
+        machine_restart_guidance_fmt:
+            "请更新 Herdr 并重启机器 '{label}'（会话 {session}）上的服务器。停止服务器会退出其窗格进程。",
+
+        machine_list_usage: "用法：herdr machine list [--json]",
+        machine_add_usage:
+            "用法：herdr machine add <ssh-target> --label <label> [--remote-session <name>]",
+        machine_rename_usage: "用法：herdr machine rename <profile-id> --label <label>",
+        machine_remove_usage: "用法：herdr machine remove <profile-id>",
+        machine_set_enabled_usage_fmt: "用法：herdr machine {action} <profile-id>",
+        machine_add_unknown_option_fmt: "未知的 machine add 选项：{option}",
+        remote_session_specified_twice: "--remote-session 只能指定一次",
+        label_specified_twice: "--label 只能指定一次",
+        label_required: "必须提供 --label",
+        machine_not_saved_fmt: "错误：{error}；机器未保存",
+        machine_prepared_not_saved_fmt: "远程已就绪，但机器未保存：{error}",
+        machine_profile_not_found_fmt: "未找到机器配置 {id}",
+
+        api_schema_usage: "用法：herdr api schema [--json | --output PATH]",
+        api_snapshot_usage: "用法：herdr api snapshot",
+
+        agent_list_usage: "用法：herdr agent list",
+        agent_get_usage: "用法：herdr agent get <target>",
+        agent_focus_usage: "用法：herdr agent focus <target>",
+        agent_attach_usage: "用法：herdr agent attach <target> [--takeover]",
+        agent_wait_usage: "用法：herdr agent wait <target> [--until STATUS]... [--timeout MS]",
+        agent_rename_usage: "用法：herdr agent rename <target> <name>|--clear",
+        agent_prompt_usage:
+            "用法：herdr agent prompt <target> <text> [--wait] [--until STATUS]... [--timeout MS]",
+        agent_send_keys_usage: "用法：herdr agent send-keys <target> <key> [key ...]",
+        agent_read_usage:
+            "用法：herdr agent read <target> [--source visible|recent|recent-unwrapped] [--lines N] [--format text|ansi] [--ansi]",
+        agent_start_usage:
+            "用法：herdr agent start <name> --kind KIND --pane ID [--timeout MS] [-- <agent-args...>]",
+        agent_explain_usage: "用法：herdr agent explain <target> [--json|--verbose]",
+        agent_explain_target_usage: "用法：herdr agent explain <target> [--json]",
+        agent_explain_file_usage:
+            "用法：herdr agent explain --file PATH --agent LABEL [--json|--verbose]",
+        agent_explain_file_json_usage:
+            "用法：herdr agent explain --file PATH --agent LABEL [--json]",
+        agent_explain_file_requires_agent: "herdr agent explain --file 需要 --agent LABEL",
+        agent_explain_file_read_failed_fmt: "读取 agent explain 文件 {path} 失败：{error}",
+        agent_only_with_file: "--agent 仅在与 --file 一起使用时有效",
+        format_invalid_fmt: "无效的 --format：{value}（应为 text 或 json）",
+        kind_required: "缺少必需的 --kind",
+        pane_flag_required: "缺少必需的 --pane",
+        agent_kind_unsupported_fmt: "不支持的交互式 agent 类型：{kind}",
+        agent_start_no_terminal_id: "agent start 响应未包含 terminal_id",
+        agent_attach_no_terminal_id: "agent attach 失败：响应未包含 terminal_id",
+        agent_kind_mismatch_fmt: "期望 {expected}，检测到 {detected}",
+        agent_blocked_during_startup_fmt: "agent {name} 在启动期间处于 blocked 状态，尚未准备好接收提示",
+        agent_exited_before_interactive: "agent 进程在可交互之前已退出",
+        agent_name_lost_fmt: "名为 {name} 的 agent 已不再持有目标终端",
+        agent_start_timeout: "等待 agent 启动超时",
+        until_requires_status: "--until 至少需要一个状态值",
+        until_requires_wait: "--until 需要配合 --wait 使用",
+        timeout_requires_wait: "--timeout 需要配合 --wait 使用",
+        agent_prompt_requires_text: "agent prompt 需要 text 参数",
+
+        pane_get_usage: "用法：herdr pane get <pane_id>",
+        pane_neighbor_usage:
+            "用法：herdr pane neighbor --direction left|right|up|down [--pane ID|--current]",
+        pane_focus_direction_usage:
+            "用法：herdr pane focus --direction left|right|up|down [--pane ID|--current]",
+        pane_resize_usage:
+            "用法：herdr pane resize --direction left|right|up|down [--amount FLOAT] [--pane ID|--current]",
+        pane_rename_usage: "用法：herdr pane rename <pane_id> <label>|--clear",
+        pane_read_usage:
+            "用法：herdr pane read <pane_id> [--source visible|recent|recent-unwrapped|detection] [--lines N] [--format text|ansi] [--ansi] [--raw]",
+        pane_input_usage:
+            "用法：herdr pane input [<pane_id>|--pane ID|--current] --right-click herdr|pane",
+        pane_split_usage:
+            "用法：herdr pane split [<pane_id>|--pane ID|--current] --direction right|down [--ratio FLOAT] [--cwd PATH] [--env KEY=VALUE] [--right-click herdr|pane] [--focus] [--no-focus]",
+        pane_move_usage:
+            "用法：herdr pane move <pane_id> --tab <tab_id> --split right|down [--target-pane ID] [--ratio FLOAT] [--focus|--no-focus]\n       herdr pane move <pane_id> --new-tab [--workspace ID] [--label TEXT] [--focus|--no-focus]\n       herdr pane move <pane_id> --new-workspace [--label TEXT] [--tab-label TEXT] [--focus|--no-focus]",
+        pane_swap_usage:
+            "用法：herdr pane swap --direction left|right|up|down [--pane ID|--current]\n       herdr pane swap --source-pane ID --target-pane ID",
+        pane_close_usage: "用法：herdr pane close <pane_id>",
+        pane_send_text_usage: "用法：herdr pane send-text <pane_id> <text>",
+        pane_send_keys_usage: "用法：herdr pane send-keys <pane_id> <key> [key ...]",
+        pane_run_usage: "用法：herdr pane run <pane_id> <command>",
+        pane_wait_output_usage:
+            "用法：herdr pane wait-output <pane_id> (--match TEXT | --regex PATTERN) [--source visible|recent|recent-unwrapped] [--lines N] [--timeout MS] [--raw]",
+        pane_report_agent_usage:
+            "用法：herdr pane report-agent <pane_id> --source ID --agent LABEL --state idle|working|blocked|unknown [--message TEXT] [--seq N] [--agent-session-id ID] [--agent-session-path PATH]",
+        pane_report_agent_session_usage:
+            "用法：herdr pane report-agent-session <pane_id> --source ID --agent LABEL [--seq N] [--agent-session-id ID] [--agent-session-path PATH] [--session-start-source SOURCE]",
+        pane_release_agent_usage:
+            "用法：herdr pane release-agent <pane_id> --source ID --agent LABEL [--seq N]",
+        pane_report_metadata_usage:
+            "用法：herdr pane report-metadata <pane_id> --source ID [--agent LABEL] [--applies-to-source ID] [--title TEXT|--clear-title] [--display-agent TEXT|--clear-display-agent] [--state-label STATUS=TEXT] [--clear-state-labels] [--token NAME=VALUE] [--clear-token NAME] [--seq N] [--ttl-ms N]",
+        invalid_amount_fmt: "无效的 amount：{value}",
+        invalid_ratio_fmt: "无效的 ratio：{value}",
+        zoom_mode_conflict: "--toggle、--on、--off 只能提供一个",
+        pane_selector_conflict: "只能提供一个窗格选择器",
+        current_requires_env_pane: "--current 需要环境变量 HERDR_PANE_ID",
+        invalid_right_click_target_fmt: "无效的右键目标：{value}",
+        invalid_split_direction_expected_fmt: "无效的分割方向：{value}（应为 right 或 down）",
+        invalid_pane_direction_fmt: "无效的窗格方向：{value}（应为 left、right、up 或 down）",
+        match_regex_exclusive: "--match 与 --regex 互斥",
+        match_or_regex_required: "缺少必需的 --match 或 --regex",
+        source_required: "缺少必需的 --source",
+        agent_flag_required: "缺少必需的 --agent",
+        state_required: "缺少必需的 --state",
+        state_label_format: "应为 --state-label STATUS=TEXT",
+        unknown_state_label_fmt: "未知的状态标签：{status}",
+        metadata_set_clear_conflict: "不能同时设置和清除同一个元数据字段",
+        metadata_field_required: "缺少要设置或清除的元数据字段",
+
+        plugin_link_usage: "用法：herdr plugin link <path> [--disabled]",
+        plugin_install_usage:
+            "用法：herdr plugin install <owner>/<repo>[/subdir...] [--ref REF] [--yes]",
+        plugin_install_usage_short: "用法：herdr plugin install <owner>/<repo>[/subdir...]",
+        plugin_install_v1_shorthand_only:
+            "plugin install v1 只接受 owner/repo[/subdir] 简写形式",
+        plugin_install_requires_yes: "stdin 非交互时，远程插件安装需要 --yes",
+        plugin_install_cancelled: "已取消插件安装",
+        plugin_config_dir_usage: "用法：herdr plugin config-dir <plugin_id>",
+        plugin_uninstall_usage: "用法：herdr plugin uninstall <plugin_id|owner/repo[/subdir...]>",
+        plugin_unlink_usage: "用法：herdr plugin unlink <plugin_id>",
+        plugin_set_enabled_usage_fmt: "用法：herdr plugin {action} <plugin_id>",
+        plugin_not_installed_fmt: "插件未安装：{target}",
+        plugin_limit_invalid_fmt: "无效的 --limit 值：{value}",
+        plugin_action_invoke_usage: "用法：herdr plugin action invoke <action_id> [--plugin ID]",
+        plugin_required: "缺少必需的 --plugin",
+        entrypoint_required: "缺少必需的 --entrypoint",
+        plugin_pane_focus_usage: "用法：herdr plugin pane focus <pane_id>",
+        plugin_pane_close_usage: "用法：herdr plugin pane close <pane_id>",
+        plugin_pane_placement_invalid_fmt: "无效的窗格摆放方式：{value}",
+        plugin_remote_path_absolute: "远程插件路径必须是绝对路径",
+        plugin_already_linked_local_fmt:
+            "插件 {plugin} 已从本地路径链接；从 GitHub 安装前请先卸载/取消链接",
+        github_segment_empty_fmt: "GitHub {label} 不能为空",
+        github_segment_invalid_fmt: "GitHub {label} 无效：{value}",
+        github_segment_invalid_chars_fmt: "GitHub {label} 包含无效字符：{value}",
+        plugin_subdir_invalid_fmt: "无效的插件子目录段：{value}",
+        command_failed_fmt: "{program} 失败，状态码 {status}",
+        command_failed_stderr_fmt: "{program} 失败，状态码 {status}：{stderr}",
+        plugin_build_failed: "错误：插件构建失败",
+        plugin_build_start_failed_fmt: "  错误：启动失败：{error}",
+        plugin_build_wait_failed_fmt: "  错误：等待命令失败：{error}",
+        plugin_build_status_fmt: "  状态：{status}",
+        build_output_truncated_fmt: "{label}：仅显示最后 {max} 字节；更早的输出已省略",
+        plugin_not_installed_after_failure: "插件未安装。",
+        plugin_build_command_empty: "构建命令不能为空",
+        plugin_build_changed_manifest: "插件构建在安装预览后更改了 herdr-plugin.toml；中止安装",
+        plugin_server_source_metadata_missing: "运行中的 Herdr 服务器未保存 GitHub 插件来源元数据",
+        plugin_registration_undo_failed_fmt: "{error}；撤销不兼容的插件注册失败：{detail}",
+        plugin_refusing_unmanaged_delete_fmt: "拒绝删除非受管的插件路径：{path}",
+        plugin_checkout_lifecycle_fmt:
+            "在 {path} {operation} 受管插件检出失败；请关闭正在使用该检出的 Herdr 插件窗格或插件命令，然后重试：{error}",
+
+        status_server_usage: "用法：herdr status server [--json]",
+        status_client_usage: "用法：herdr status client [--json]",
+
+        server_stop_usage: "用法：herdr server stop",
+        server_reload_config_usage: "用法：herdr server reload-config",
+        server_agent_manifests_usage: "用法：herdr server agent-manifests [--json]",
+        server_reload_agent_manifests_usage: "用法：herdr server reload-agent-manifests",
+        server_update_agent_manifests_usage: "用法：herdr server update-agent-manifests [--json]",
+        server_live_handoff_usage:
+            "用法：herdr server live-handoff [--import-exe <path>] [--expected-protocol <n>] [--expected-version <version>]",
+        manifests_update_failed_fmt: "更新 agent 检测 manifest 失败：{error}",
+
+        unknown_shell_fmt: "未知 shell：{shell}",
+        completion_usage_fmt: "用法：herdr completion <{shells}>",
+
+        worktree_list_usage:
+            "用法：herdr worktree list [--workspace ID | --cwd PATH] [--trust-repository]",
+        worktree_create_usage:
+            "用法：herdr worktree create [--workspace ID | --cwd PATH] [--branch NAME] [--base REF] [--path PATH] [--label TEXT] [--focus] [--no-focus] [--trust-repository]",
+        worktree_open_usage:
+            "用法：herdr worktree open [--workspace ID | --cwd PATH] (--path PATH | --branch NAME) [--label TEXT] [--focus] [--no-focus] [--trust-repository]",
+        worktree_remove_usage:
+            "用法：herdr worktree remove --workspace ID [--force] [--trust-repository]",
+        remote_worktree_path_absolute: "远程工作树路径必须是绝对路径或以 ~/ 开头",
+
+        workspace_list_usage: "用法：herdr workspace list",
+        workspace_get_usage: "用法：herdr workspace get <workspace_id>",
+        workspace_focus_usage: "用法：herdr workspace focus <workspace_id>",
+        workspace_rename_usage: "用法：herdr workspace rename <workspace_id> <label>",
+        workspace_report_metadata_usage:
+            "用法：herdr workspace report-metadata <workspace_id> --source ID [--token NAME=VALUE] [--clear-token NAME] [--seq N] [--ttl-ms N]",
+        workspace_close_usage: "用法：herdr workspace close <workspace_id> [--group]",
+        workspace_token_required: "缺少要设置或清除的 token",
+
+        tab_get_usage: "用法：herdr tab get <tab_id>",
+        tab_focus_usage: "用法：herdr tab focus <tab_id>",
+        tab_rename_usage: "用法：herdr tab rename <tab_id> <label>",
+        tab_close_usage: "用法：herdr tab close <tab_id>",
+
+        notification_show_usage:
+            "用法：herdr notification show <title> [--body TEXT] [--position top-left|top-right|bottom-left|bottom-right] [--sound none|done|request]",
+        invalid_position_fmt: "无效的位置：{value}（应为 top-left、top-right、bottom-left 或 bottom-right）",
+        invalid_sound_fmt: "无效的声音：{value}（应为 none、done 或 request）",
+
+        integration_status_usage: "用法：herdr integration status [--outdated-only]",
+        integration_target_usage_fmt:
+            "用法：herdr integration {action} <pi|omp|claude|codex|copilot|devin|droid|kimi|opencode|kilo|hermes|qodercli|qwen|letta|cursor|mastracode|grok>",
+        integration_target_unknown_fmt: "未知的集成目标：{target}",
+        integration_targets_supported:
+            "当前支持：pi, omp, claude, codex, copilot, devin, droid, kimi, opencode, kilo, hermes, qodercli, qwen, letta, cursor, mastracode, antigravity-cli, grok",
+
+        integrations_need_updating_fmt: "已安装的 herdr 集成需要更新；{instructions}。",
+        integration_instructions_run_fmt: "运行 {command}",
+        integration_instructions_run_list_fmt: "运行 {commands} 与 {last}",
+        integration_not_supported_windows_fmt: "{target} 集成在 Windows 上不受支持",
+
+        self_update_disabled_homebrew_preview:
+            "Homebrew 安装不支持自更新；preview 渠道仅适用于直接安装的 Herdr",
+        self_update_disabled_homebrew:
+            "Homebrew 安装不支持自更新；请运行 `brew update && brew upgrade herdr`",
+        self_update_disabled_mise_preview:
+            "mise 安装不支持自更新；preview 渠道仅适用于直接安装的 Herdr",
+        self_update_disabled_mise: "mise 安装不支持自更新；请运行 `mise upgrade herdr`",
+        self_update_disabled_nix_preview:
+            "Nix 安装不支持自更新；preview 渠道仅适用于直接安装的 Herdr",
+        self_update_disabled_nix:
+            "Nix 安装不支持自更新；请使用 `nix profile upgrade` 更新，或更新提供 Herdr 的 flake input",
+        update_run_outside: "请先脱离会话，然后在 herdr 外部运行 `herdr update`",
+        update_usage: "用法：herdr update [--handoff]",
+        unknown_update_option_fmt: "未知的 update 选项：{option}",
+        preview_rejection_homebrew:
+            "preview 渠道仅适用于直接安装的 Herdr；Homebrew 安装请通过 `brew update && brew upgrade herdr` 更新",
+        preview_rejection_mise:
+            "preview 渠道仅适用于直接安装的 Herdr；mise 安装请通过 `mise upgrade herdr` 更新",
+        preview_rejection_nix: "preview 渠道仅适用于直接安装的 Herdr；Nix 安装请通过 Nix 更新",
+        curl_failed_fmt: "curl 失败：{error}",
+        manifest_fetch_failed: "获取更新 manifest 失败",
+        manifest_parse_failed_fmt: "解析更新 manifest JSON 失败：{error}",
+        manifest_invalid_version_fmt: "更新 manifest 中的版本无效：{version}",
+        manifest_missing_release_metadata_fmt: "缺少 v{version} 的发布元数据",
+        manifest_notes_empty: "更新 manifest 的说明为空",
+        manifest_no_binary_fmt: "更新 manifest 中没有 {key} 的二进制文件",
+        manifest_asset_missing_sha256_fmt: "更新 manifest 资产 {key} 缺少 SHA-256 校验和",
+        preview_channel_invalid_fmt: "无效的 preview manifest 渠道：{channel}",
+        preview_build_id_empty: "preview manifest 的 build_id 为空",
+        preview_base_version_invalid_fmt: "preview manifest 中的 base_version 无效：{version}",
+        preview_notes_empty: "preview manifest 的说明为空",
+        preview_no_binary_fmt: "preview manifest 中没有 {key} 的二进制文件",
+        manifest_asset_unsupported_format_fmt: "更新 manifest 资产的格式不受支持：'{format}'",
+        asset_url_empty: "资产 URL 不能为空",
+        asset_url_invalid: "资产必须是 URL 字符串或包含 url 的对象",
+        homebrew_fetch_failed: "获取 Homebrew formula JSON 失败",
+        current_binary_not_found_fmt: "找不到当前二进制文件：{error}",
+        binary_directory_not_found: "找不到二进制文件所在目录",
+        install_dir_not_writable_fmt:
+            "安装目录不可写：{path}（{error}）。请尝试以适当权限运行。",
+        download_failed: "下载失败",
+        download_failed_fmt: "下载失败：{error}",
+        checksum_failed_fmt: "下载的更新校验和验证失败：{error}",
+        chmod_failed_fmt: "chmod 失败：{error}",
+        update_temp_file_missing: "下载的更新临时文件缺失",
+        replace_binary_failed_fmt: "替换二进制文件失败：{error}",
+        windows_sha256_missing: "Windows 更新资产缺少 SHA-256 校验和",
+        windows_installer_run_failed_fmt: "运行 Windows 安装器失败：{error}",
+        windows_installer_failed_fmt: "Windows 安装器失败，状态码 {status}",
+        localappdata_missing: "未设置 LOCALAPPDATA；无法定位 Herdr 安装位置",
+        target_status_failed_fmt:
+            "读取 {path} 上 herdr 目标 {label} 的状态失败：{error}。请用 `{command}` 停止它，然后再次运行 `herdr update`",
+        target_status_no_response_fmt:
+            "herdr 目标 {label} 看似在运行，但其状态 API 未在 {path} 响应。请用 `{command}` 停止它，然后再次运行 `herdr update`",
+        target_client_socket_no_response_fmt:
+            "herdr 目标 {label} 有客户端 socket，但其状态 API 未在 {path} 响应。请用 `{command}` 停止它，然后再次运行 `herdr update`",
+        server_listening_status_unavailable_fmt:
+            "有 herdr 服务器正在监听，但其状态 API 不可用；请尝试 `{command}`，或手动停止旧的服务器进程，然后再次运行 `herdr update`",
+        sessions_list_failed_fmt: "列出 herdr 会话失败：{error}",
+        sessions_must_stop_noninteractive:
+            "此更新需要停止一个或多个 Herdr 会话。请在就绪后停止正在运行的 Herdr 会话，然后在交互式终端中再次运行 `herdr update`。",
+        prompt_flush_failed_fmt: "刷新提示输出失败：{error}",
+        prompt_read_failed_fmt: "读取提示应答失败：{error}",
+        server_connect_failed_fmt: "连接运行中的服务器失败：{error}",
+        server_write_timeout_fmt: "设置 {action} 写超时失败：{error}",
+        server_read_timeout_fmt: "设置 {action} 读超时失败：{error}",
+        server_send_failed_fmt: "发送 {action} 请求失败：{error}",
+        server_finish_failed_fmt: "结束 {action} 请求失败：{error}",
+        server_flush_failed_fmt: "刷新 {action} 请求失败：{error}",
+        server_response_read_failed_fmt: "读取 {action} 响应失败：{error}",
+        server_response_empty_fmt: "{action} 响应为空",
+        server_response_invalid_fmt: "无效的服务器响应：{error}",
+        server_action_failed_fmt: "{action} 失败：{error}",
+        shutdown_confirm_failed_fmt: "无法确认旧服务器是否已在 {path} 上停止：{error}",
+        server_still_responding_fmt:
+            "已请求关停，但旧服务器在 {seconds} 秒后仍在 {path} 上响应",
+        post_handoff_status_failed_fmt: "handoff 之后读取服务器状态失败：{error}",
+        handoff_no_compatible_server_fmt:
+            "已请求 live handoff，但 {seconds} 秒后仍没有兼容的服务器在 {path} 上响应",
     },
 };

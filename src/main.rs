@@ -587,7 +587,7 @@ fn main() -> io::Result<()> {
         match update::self_update(options) {
             Ok(_) => return Ok(()),
             Err(e) => {
-                if e.starts_with("self-update is disabled") {
+                if self_update_is_disabled(&e) {
                     eprintln!("{e}");
                 } else {
                     eprintln!("update failed: {e}");
@@ -799,6 +799,31 @@ fn main() -> io::Result<()> {
         std::process::exit(1);
     }
     Ok(())
+}
+
+/// Classifies a `update::self_update` error as "self-update is disabled for this
+/// install" so the generic failure wrapper is skipped. Compares against the
+/// stable template prefixes in BOTH languages: `update::self_update` may return
+/// either a localized message or a legacy English string, and every disabled
+/// variant (Homebrew/mise/Nix, stable and preview) shares the same leading
+/// phrase within a language.
+fn self_update_is_disabled(e: &str) -> bool {
+    for lang in [i18n::Lang::En, i18n::Lang::ZhCn] {
+        let t = &i18n::texts_for(lang).cli_errors;
+        for template in [
+            t.self_update_disabled_homebrew,
+            t.self_update_disabled_homebrew_preview,
+            t.self_update_disabled_mise,
+            t.self_update_disabled_mise_preview,
+            t.self_update_disabled_nix,
+            t.self_update_disabled_nix_preview,
+        ] {
+            if e.starts_with(template) {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 #[cfg(test)]

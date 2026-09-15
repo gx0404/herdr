@@ -1,6 +1,15 @@
 use crate::api::schema::{Method, NotificationShowParams, NotificationShowSound, Request};
 use crate::config::ToastHerdrPosition;
 
+/// Localized CLI error templates for this subcommand surface.
+fn errors() -> &'static crate::i18n::CliErrorTexts {
+    &crate::i18n::texts().cli_errors
+}
+
+fn missing_value(flag: &str) -> String {
+    crate::i18n::fill(errors().missing_value_for_fmt, &[("flag", flag)])
+}
+
 pub(super) fn run_notification_command(args: &[String]) -> std::io::Result<i32> {
     let Some(subcommand) = args.first().map(|arg| arg.as_str()) else {
         print_notification_help();
@@ -24,9 +33,7 @@ fn notification_show(args: &[String]) -> std::io::Result<i32> {
     let params = match parse_notification_show_args(args) {
         Ok(params) => params,
         Err(NotificationShowArgError::Usage) => {
-            eprintln!(
-                "usage: herdr notification show <title> [--body TEXT] [--position top-left|top-right|bottom-left|bottom-right] [--sound none|done|request]"
-            );
+            eprintln!("{}", errors().notification_show_usage);
             return Ok(2);
         }
         Err(NotificationShowArgError::Message(message)) => {
@@ -65,34 +72,31 @@ fn parse_notification_show_args(
         match args[index].as_str() {
             "--body" => {
                 let Some(value) = args.get(index + 1) else {
-                    return Err(NotificationShowArgError::Message(
-                        "missing value for --body".into(),
-                    ));
+                    return Err(NotificationShowArgError::Message(missing_value("--body")));
                 };
                 body = Some(value.clone());
                 index += 2;
             }
             "--position" => {
                 let Some(value) = args.get(index + 1) else {
-                    return Err(NotificationShowArgError::Message(
-                        "missing value for --position".into(),
-                    ));
+                    return Err(NotificationShowArgError::Message(missing_value(
+                        "--position",
+                    )));
                 };
                 position = Some(parse_toast_position(value)?);
                 index += 2;
             }
             "--sound" => {
                 let Some(value) = args.get(index + 1) else {
-                    return Err(NotificationShowArgError::Message(
-                        "missing value for --sound".into(),
-                    ));
+                    return Err(NotificationShowArgError::Message(missing_value("--sound")));
                 };
                 sound = parse_notification_sound(value)?;
                 index += 2;
             }
             other => {
-                return Err(NotificationShowArgError::Message(format!(
-                    "unknown option: {other}"
+                return Err(NotificationShowArgError::Message(crate::i18n::fill(
+                    errors().unknown_option_fmt,
+                    &[("option", other)],
                 )));
             }
         }
@@ -112,8 +116,9 @@ fn parse_toast_position(value: &str) -> Result<ToastHerdrPosition, NotificationS
         "top-right" => Ok(ToastHerdrPosition::TopRight),
         "bottom-left" => Ok(ToastHerdrPosition::BottomLeft),
         "bottom-right" => Ok(ToastHerdrPosition::BottomRight),
-        _ => Err(NotificationShowArgError::Message(format!(
-            "invalid position: {value} (expected top-left, top-right, bottom-left, or bottom-right)"
+        _ => Err(NotificationShowArgError::Message(crate::i18n::fill(
+            errors().invalid_position_fmt,
+            &[("value", value)],
         ))),
     }
 }
@@ -125,8 +130,9 @@ fn parse_notification_sound(
         "none" => Ok(NotificationShowSound::None),
         "done" => Ok(NotificationShowSound::Done),
         "request" => Ok(NotificationShowSound::Request),
-        _ => Err(NotificationShowArgError::Message(format!(
-            "invalid sound: {value} (expected none, done, or request)"
+        _ => Err(NotificationShowArgError::Message(crate::i18n::fill(
+            errors().invalid_sound_fmt,
+            &[("value", value)],
         ))),
     }
 }
@@ -172,6 +178,7 @@ mod tests {
 
     #[test]
     fn notification_show_args_reject_invalid_position() {
+        let _guard = crate::i18n::lang_guard(crate::i18n::Lang::En);
         let error =
             parse_notification_show_args(&args(&["build failed", "--position", "top-center"]))
                 .unwrap_err();
@@ -194,6 +201,7 @@ mod tests {
 
     #[test]
     fn notification_show_args_reject_invalid_sound() {
+        let _guard = crate::i18n::lang_guard(crate::i18n::Lang::En);
         let error =
             parse_notification_show_args(&args(&["build failed", "--sound", "loud"])).unwrap_err();
 

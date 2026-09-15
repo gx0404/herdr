@@ -107,6 +107,9 @@ impl Harness {
             )
             .env("HERDR_SESSION", "wrong-inherited-session")
             .env("HERDR_PANE_ID", "wrong-local-pane")
+            // Machine routing and protocol-mismatch messages are localized;
+            // pin English for the stderr assertions below.
+            .env("HERDR_LANG", "en")
             .env_remove("HERDR_CONFIG_PATH")
             .env_remove("HERDR_REMOTE_BINARY");
         command

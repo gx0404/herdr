@@ -238,6 +238,8 @@ fn dead_server_cli_reports_one_session_aware_json_line() {
         .env("XDG_RUNTIME_DIR", &runtime_dir)
         .env("HERDR_SOCKET_PATH", &stale_socket)
         .env("HERDR_SESSION", "unrelated")
+        // The asserted server_not_running message is localized; pin English.
+        .env("HERDR_LANG", "en")
         .env_remove("HERDR_CLIENT_SOCKET_PATH")
         .env_remove("HERDR_ENV")
         .output()
@@ -333,6 +335,8 @@ fn integration_status_outdated_only_prints_action_for_legacy_install() {
         .args(["integration", "status", "--outdated-only"])
         .env("HERDR_SOCKET_PATH", &missing_socket)
         .env("HOME", &home_dir)
+        // Pin English for the localized outdated-integrations notice.
+        .env("HERDR_LANG", "en")
         .output()
         .unwrap();
 

@@ -2,6 +2,15 @@ use crate::api::schema::{
     WorktreeCreateParams, WorktreeListParams, WorktreeOpenParams, WorktreeRemoveParams,
 };
 
+/// Localized CLI error templates for this subcommand surface.
+fn errors() -> &'static crate::i18n::CliErrorTexts {
+    &crate::i18n::texts().cli_errors
+}
+
+fn missing_value(flag: &str) -> String {
+    crate::i18n::fill(errors().missing_value_for_fmt, &[("flag", flag)])
+}
+
 // Worktree output is always JSON. The parsers retain `--json` as a hidden compatibility no-op.
 pub(super) fn run_worktree_command(args: &[String]) -> std::io::Result<i32> {
     let Some(subcommand) = args.first().map(|arg| arg.as_str()) else {
@@ -35,7 +44,7 @@ fn worktree_list(args: &[String]) -> std::io::Result<i32> {
         match args[index].as_str() {
             "--workspace" => {
                 let Some(value) = args.get(index + 1) else {
-                    eprintln!("missing value for --workspace");
+                    eprintln!("{}", missing_value("--workspace"));
                     return Ok(2);
                 };
                 workspace_id = Some(super::normalize_workspace_id(value));
@@ -43,7 +52,7 @@ fn worktree_list(args: &[String]) -> std::io::Result<i32> {
             }
             "--cwd" => {
                 let Some(value) = args.get(index + 1) else {
-                    eprintln!("missing value for --cwd");
+                    eprintln!("{}", missing_value("--cwd"));
                     return Ok(2);
                 };
                 cwd = Some(normalize_path_arg(value)?);
@@ -55,13 +64,16 @@ fn worktree_list(args: &[String]) -> std::io::Result<i32> {
             }
             "--json" => index += 1,
             other => {
-                eprintln!("unknown option: {other}");
+                eprintln!(
+                    "{}",
+                    crate::i18n::fill(errors().unknown_option_fmt, &[("option", other)])
+                );
                 return Ok(2);
             }
         }
     }
     if workspace_id.is_some() && cwd.is_some() {
-        eprintln!("usage: herdr worktree list [--workspace ID | --cwd PATH] [--trust-repository]");
+        eprintln!("{}", errors().worktree_list_usage);
         return Ok(2);
     }
 
@@ -87,7 +99,7 @@ fn worktree_create(args: &[String]) -> std::io::Result<i32> {
         match args[index].as_str() {
             "--workspace" => {
                 let Some(value) = args.get(index + 1) else {
-                    eprintln!("missing value for --workspace");
+                    eprintln!("{}", missing_value("--workspace"));
                     return Ok(2);
                 };
                 workspace_id = Some(super::normalize_workspace_id(value));
@@ -95,7 +107,7 @@ fn worktree_create(args: &[String]) -> std::io::Result<i32> {
             }
             "--cwd" => {
                 let Some(value) = args.get(index + 1) else {
-                    eprintln!("missing value for --cwd");
+                    eprintln!("{}", missing_value("--cwd"));
                     return Ok(2);
                 };
                 cwd = Some(normalize_path_arg(value)?);
@@ -103,7 +115,7 @@ fn worktree_create(args: &[String]) -> std::io::Result<i32> {
             }
             "--branch" => {
                 let Some(value) = args.get(index + 1) else {
-                    eprintln!("missing value for --branch");
+                    eprintln!("{}", missing_value("--branch"));
                     return Ok(2);
                 };
                 branch = Some(value.clone());
@@ -111,7 +123,7 @@ fn worktree_create(args: &[String]) -> std::io::Result<i32> {
             }
             "--base" => {
                 let Some(value) = args.get(index + 1) else {
-                    eprintln!("missing value for --base");
+                    eprintln!("{}", missing_value("--base"));
                     return Ok(2);
                 };
                 base = Some(value.clone());
@@ -119,7 +131,7 @@ fn worktree_create(args: &[String]) -> std::io::Result<i32> {
             }
             "--path" => {
                 let Some(value) = args.get(index + 1) else {
-                    eprintln!("missing value for --path");
+                    eprintln!("{}", missing_value("--path"));
                     return Ok(2);
                 };
                 path = Some(normalize_path_arg(value)?);
@@ -127,7 +139,7 @@ fn worktree_create(args: &[String]) -> std::io::Result<i32> {
             }
             "--label" => {
                 let Some(value) = args.get(index + 1) else {
-                    eprintln!("missing value for --label");
+                    eprintln!("{}", missing_value("--label"));
                     return Ok(2);
                 };
                 label = Some(value.clone());
@@ -147,15 +159,16 @@ fn worktree_create(args: &[String]) -> std::io::Result<i32> {
             }
             "--json" => index += 1,
             other => {
-                eprintln!("unknown option: {other}");
+                eprintln!(
+                    "{}",
+                    crate::i18n::fill(errors().unknown_option_fmt, &[("option", other)])
+                );
                 return Ok(2);
             }
         }
     }
     if workspace_id.is_some() && cwd.is_some() {
-        eprintln!(
-            "usage: herdr worktree create [--workspace ID | --cwd PATH] [--branch NAME] [--base REF] [--path PATH] [--label TEXT] [--focus] [--no-focus] [--trust-repository]"
-        );
+        eprintln!("{}", errors().worktree_create_usage);
         return Ok(2);
     }
 
@@ -185,7 +198,7 @@ fn worktree_open(args: &[String]) -> std::io::Result<i32> {
         match args[index].as_str() {
             "--workspace" => {
                 let Some(value) = args.get(index + 1) else {
-                    eprintln!("missing value for --workspace");
+                    eprintln!("{}", missing_value("--workspace"));
                     return Ok(2);
                 };
                 workspace_id = Some(super::normalize_workspace_id(value));
@@ -193,7 +206,7 @@ fn worktree_open(args: &[String]) -> std::io::Result<i32> {
             }
             "--cwd" => {
                 let Some(value) = args.get(index + 1) else {
-                    eprintln!("missing value for --cwd");
+                    eprintln!("{}", missing_value("--cwd"));
                     return Ok(2);
                 };
                 cwd = Some(normalize_path_arg(value)?);
@@ -201,7 +214,7 @@ fn worktree_open(args: &[String]) -> std::io::Result<i32> {
             }
             "--path" => {
                 let Some(value) = args.get(index + 1) else {
-                    eprintln!("missing value for --path");
+                    eprintln!("{}", missing_value("--path"));
                     return Ok(2);
                 };
                 path = Some(normalize_path_arg(value)?);
@@ -209,7 +222,7 @@ fn worktree_open(args: &[String]) -> std::io::Result<i32> {
             }
             "--branch" => {
                 let Some(value) = args.get(index + 1) else {
-                    eprintln!("missing value for --branch");
+                    eprintln!("{}", missing_value("--branch"));
                     return Ok(2);
                 };
                 branch = Some(value.clone());
@@ -217,7 +230,7 @@ fn worktree_open(args: &[String]) -> std::io::Result<i32> {
             }
             "--label" => {
                 let Some(value) = args.get(index + 1) else {
-                    eprintln!("missing value for --label");
+                    eprintln!("{}", missing_value("--label"));
                     return Ok(2);
                 };
                 label = Some(value.clone());
@@ -237,21 +250,20 @@ fn worktree_open(args: &[String]) -> std::io::Result<i32> {
             }
             "--json" => index += 1,
             other => {
-                eprintln!("unknown option: {other}");
+                eprintln!(
+                    "{}",
+                    crate::i18n::fill(errors().unknown_option_fmt, &[("option", other)])
+                );
                 return Ok(2);
             }
         }
     }
     if workspace_id.is_some() && cwd.is_some() {
-        eprintln!(
-            "usage: herdr worktree open [--workspace ID | --cwd PATH] (--path PATH | --branch NAME) [--label TEXT] [--focus] [--no-focus] [--trust-repository]"
-        );
+        eprintln!("{}", errors().worktree_open_usage);
         return Ok(2);
     }
     if path.is_some() == branch.is_some() {
-        eprintln!(
-            "usage: herdr worktree open [--workspace ID | --cwd PATH] (--path PATH | --branch NAME) [--label TEXT] [--focus] [--no-focus] [--trust-repository]"
-        );
+        eprintln!("{}", errors().worktree_open_usage);
         return Ok(2);
     }
 
@@ -276,7 +288,7 @@ fn worktree_remove(args: &[String]) -> std::io::Result<i32> {
         match args[index].as_str() {
             "--workspace" => {
                 let Some(value) = args.get(index + 1) else {
-                    eprintln!("missing value for --workspace");
+                    eprintln!("{}", missing_value("--workspace"));
                     return Ok(2);
                 };
                 workspace_id = Some(super::normalize_workspace_id(value));
@@ -292,14 +304,17 @@ fn worktree_remove(args: &[String]) -> std::io::Result<i32> {
             }
             "--json" => index += 1,
             other => {
-                eprintln!("unknown option: {other}");
+                eprintln!(
+                    "{}",
+                    crate::i18n::fill(errors().unknown_option_fmt, &[("option", other)])
+                );
                 return Ok(2);
             }
         }
     }
 
     let Some(workspace_id) = workspace_id else {
-        eprintln!("usage: herdr worktree remove --workspace ID [--force] [--trust-repository]");
+        eprintln!("{}", errors().worktree_remove_usage);
         return Ok(2);
     };
 
@@ -330,7 +345,7 @@ fn normalize_path_arg(value: &str) -> std::io::Result<String> {
         }
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
-            "remote worktree paths must be absolute or start with ~/",
+            errors().remote_worktree_path_absolute,
         ));
     }
     let path = crate::worktree::expand_tilde_path(value);

@@ -417,6 +417,7 @@ fn integration_specs() -> [(
 pub(crate) fn integration_update_instructions(
     targets: &[crate::api::schema::IntegrationTarget],
 ) -> String {
+    let errors = &crate::i18n::texts().cli_errors;
     let commands: Vec<String> = targets
         .iter()
         .map(|target| {
@@ -429,8 +430,14 @@ pub(crate) fn integration_update_instructions(
 
     match commands.as_slice() {
         [] => String::new(),
-        [command] => format!("run {command}"),
-        [rest @ .., last] => format!("run {} and {last}", rest.join(", ")),
+        [command] => crate::i18n::fill(
+            errors.integration_instructions_run_fmt,
+            &[("command", command)],
+        ),
+        [rest @ .., last] => crate::i18n::fill(
+            errors.integration_instructions_run_list_fmt,
+            &[("commands", &rest.join(", ")), ("last", last)],
+        ),
     }
 }
 
@@ -445,8 +452,14 @@ pub(crate) fn print_outdated_update_notice() -> bool {
         .map(|integration| integration.target)
         .collect::<Vec<_>>();
     eprintln!(
-        "installed herdr integrations need updating; {}.",
-        integration_update_instructions(&targets).replace('`', "")
+        "{}",
+        crate::i18n::fill(
+            crate::i18n::texts()
+                .cli_errors
+                .integrations_need_updating_fmt,
+            &[("instructions", &integration_update_instructions(&targets))]
+        )
+        .replace('`', "")
     );
     true
 }

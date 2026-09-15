@@ -41,6 +41,69 @@ const SERVER_HANDOFF_REQUEST_TIMEOUT: Duration = Duration::from_secs(240);
 const SERVER_HANDOFF_CONFIRM_TIMEOUT: Duration = Duration::from_secs(30);
 #[cfg(not(windows))]
 const SERVER_SHUTDOWN_POLL_INTERVAL: Duration = Duration::from_millis(100);
+
+/// Localized CLI error templates for the self-update flow.
+fn errors() -> &'static crate::i18n::CliErrorTexts {
+    &crate::i18n::texts().cli_errors
+}
+
+/// The Windows installer/download flow below is `#[cfg(windows)]`; touch its
+/// localized templates on other targets so the shared `cli_errors` table does
+/// not trip `dead_code` under `cargo clippy --all-targets -- -D warnings`.
+#[cfg(not(windows))]
+#[allow(dead_code)] // referenced only to keep the Windows-only fields read
+fn touch_windows_only_error_templates() {
+    let errors = errors();
+    let _ = (
+        errors.manifest_asset_unsupported_format_fmt,
+        errors.windows_sha256_missing,
+        errors.windows_installer_run_failed_fmt,
+        errors.windows_installer_failed_fmt,
+        errors.localappdata_missing,
+    );
+}
+
+/// Mirror of the above: the unix install/replace flow is `#[cfg(not(windows))]`,
+/// so its templates need a touch on Windows targets.
+#[cfg(windows)]
+#[allow(dead_code)] // referenced only to keep the unix-only fields read
+fn touch_unix_only_error_templates() {
+    let errors = errors();
+    let _ = (
+        errors.current_binary_not_found_fmt,
+        errors.binary_directory_not_found,
+        errors.install_dir_not_writable_fmt,
+        errors.download_failed,
+        errors.download_failed_fmt,
+        errors.checksum_failed_fmt,
+        errors.chmod_failed_fmt,
+        errors.update_temp_file_missing,
+        errors.replace_binary_failed_fmt,
+        errors.target_status_failed_fmt,
+        errors.target_status_no_response_fmt,
+        errors.target_client_socket_no_response_fmt,
+        errors.server_listening_status_unavailable_fmt,
+        errors.sessions_list_failed_fmt,
+        errors.sessions_must_stop_noninteractive,
+        errors.prompt_flush_failed_fmt,
+        errors.prompt_read_failed_fmt,
+        errors.server_connect_failed_fmt,
+        errors.server_write_timeout_fmt,
+        errors.server_read_timeout_fmt,
+        errors.server_send_failed_fmt,
+        errors.server_finish_failed_fmt,
+        errors.server_flush_failed_fmt,
+        errors.server_response_read_failed_fmt,
+        errors.server_response_empty_fmt,
+        errors.server_response_invalid_fmt,
+        errors.server_action_failed_fmt,
+        errors.shutdown_confirm_failed_fmt,
+        errors.server_still_responding_fmt,
+        errors.post_handoff_status_failed_fmt,
+        errors.handoff_no_compatible_server_fmt,
+    );
+}
+
 fn fake_release_notes_body(version: &str) -> String {
     let notes_version = env::var(FAKE_UPDATE_NOTES_VERSION_ENV)
         .ok()
@@ -154,7 +217,7 @@ impl<'de> Deserialize<'de> for AssetRef {
                     .remove("format")
                     .and_then(|value| value.as_str().map(str::to_string));
                 if url.trim().is_empty() {
-                    return Err(serde::de::Error::custom("asset url must not be empty"));
+                    return Err(serde::de::Error::custom(errors().asset_url_empty));
                 }
                 Ok(Self {
                     url: url.trim().to_string(),
@@ -163,9 +226,7 @@ impl<'de> Deserialize<'de> for AssetRef {
                     format: format.filter(|value| !value.trim().is_empty()),
                 })
             }
-            _ => Err(serde::de::Error::custom(
-                "asset must be a URL string or object with url",
-            )),
+            _ => Err(serde::de::Error::custom(errors().asset_url_invalid)),
         }
     }
 }
@@ -187,8 +248,9 @@ impl AssetRef {
             .to_ascii_lowercase();
         match format.as_str() {
             "zip" | "exe" => Ok(format),
-            _ => Err(format!(
-                "update manifest asset has unsupported format '{format}'"
+            _ => Err(crate::i18n::fill(
+                errors().manifest_asset_unsupported_format_fmt,
+                &[("format", format.as_str())],
             )),
         }
     }
@@ -349,14 +411,18 @@ where
             url,
         ])
         .output()
-        .map_err(|e| format!("curl failed: {e}"))?;
+        .map_err(|e| crate::i18n::fill(errors().curl_failed_fmt, &[("error", &e.to_string())]))?;
 
     if !output.status.success() {
-        return Err("failed to fetch update manifest".into());
+        return Err(errors().manifest_fetch_failed.into());
     }
 
-    serde_json::from_slice(&output.stdout)
-        .map_err(|e| format!("failed to parse update manifest JSON: {e}"))
+    serde_json::from_slice(&output.stdout).map_err(|e| {
+        crate::i18n::fill(
+            errors().manifest_parse_failed_fmt,
+            &[("error", &e.to_string())],
+        )
+    })
 }
 
 fn handle_manifest_announcement(version: &str, value: Option<&serde_json::Value>) {
@@ -383,34 +449,43 @@ fn handle_manifest_announcement(version: &str, value: Option<&serde_json::Value>
 
 fn release_info_from_manifest(manifest: &UpdateManifest) -> Result<Option<ReleaseInfo>, String> {
     let current = Version::current();
-    let latest = Version::parse(&manifest.version)
-        .ok_or_else(|| format!("invalid version in update manifest: {}", manifest.version))?;
+    let latest = Version::parse(&manifest.version).ok_or_else(|| {
+        crate::i18n::fill(
+            errors().manifest_invalid_version_fmt,
+            &[("version", manifest.version.as_str())],
+        )
+    })?;
 
     if !stable_channel_should_install(&latest, &current, crate::build_info::is_preview()) {
         return Ok(None); // up to date
     }
 
-    let metadata = manifest
-        .metadata_for_version(&latest)
-        .ok_or_else(|| format!("missing release metadata for v{latest}"))?;
+    let metadata = manifest.metadata_for_version(&latest).ok_or_else(|| {
+        crate::i18n::fill(
+            errors().manifest_missing_release_metadata_fmt,
+            &[("version", &latest.to_string())],
+        )
+    })?;
     let notes_body = metadata.notes_body();
     if notes_body.is_empty() {
-        return Err("update manifest notes are empty".into());
+        return Err(errors().manifest_notes_empty.into());
     }
 
     let (os, arch) = platform_target();
     let asset_key = format!("{os}-{arch}");
-    let asset = manifest
-        .assets
-        .get(&asset_key)
-        .ok_or_else(|| format!("no binary for {asset_key} in update manifest"))?;
+    let asset = manifest.assets.get(&asset_key).ok_or_else(|| {
+        crate::i18n::fill(errors().manifest_no_binary_fmt, &[("key", &asset_key)])
+    })?;
     let download_url = asset.url.clone();
     let sha256 = asset
         .sha256
         .clone()
         .or_else(|| manifest.sha256.get(&asset_key).cloned())
         .ok_or_else(|| {
-            format!("update manifest asset {asset_key} is missing a SHA-256 checksum")
+            crate::i18n::fill(
+                errors().manifest_asset_missing_sha256_fmt,
+                &[("key", &asset_key)],
+            )
         })?;
 
     Ok(Some(ReleaseInfo {
@@ -451,14 +526,14 @@ fn release_info_from_preview_manifest(
     manifest: &PreviewManifest,
 ) -> Result<Option<ReleaseInfo>, String> {
     if manifest.channel != "preview" {
-        return Err(format!(
-            "invalid preview manifest channel: {}",
-            manifest.channel
+        return Err(crate::i18n::fill(
+            errors().preview_channel_invalid_fmt,
+            &[("channel", manifest.channel.as_str())],
         ));
     }
     let build_id = manifest.build_id.trim();
     if build_id.is_empty() {
-        return Err("preview manifest build_id is empty".into());
+        return Err(errors().preview_build_id_empty.into());
     }
     if crate::build_info::is_preview()
         && crate::build_info::build_id().is_some_and(|current| current == build_id)
@@ -467,14 +542,14 @@ fn release_info_from_preview_manifest(
     }
 
     let version = Version::parse(&manifest.base_version).ok_or_else(|| {
-        format!(
-            "invalid base_version in preview manifest: {}",
-            manifest.base_version
+        crate::i18n::fill(
+            errors().preview_base_version_invalid_fmt,
+            &[("version", manifest.base_version.as_str())],
         )
     })?;
     let notes_body = manifest.notes.trim().to_string();
     if notes_body.is_empty() {
-        return Err("preview manifest notes are empty".into());
+        return Err(errors().preview_notes_empty.into());
     }
     let (os, arch) = platform_target();
     let asset_key = format!("{os}-{arch}");
@@ -500,7 +575,7 @@ fn release_info_from_preview_manifest(
                 .get(build_id)
                 .and_then(|build| build.assets.get(&asset_key))
         })
-        .ok_or_else(|| format!("no binary for {asset_key} in preview manifest"))?;
+        .ok_or_else(|| crate::i18n::fill(errors().preview_no_binary_fmt, &[("key", &asset_key)]))?;
     let download_url = asset.url.clone();
 
     Ok(Some(ReleaseInfo {
@@ -591,10 +666,10 @@ fn check_homebrew_latest() -> Result<Option<Version>, String> {
             HOMEBREW_FORMULA_API_URL,
         ])
         .output()
-        .map_err(|e| format!("curl failed: {e}"))?;
+        .map_err(|e| crate::i18n::fill(errors().curl_failed_fmt, &[("error", &e.to_string())]))?;
 
     if !output.status.success() {
-        return Err("failed to fetch Homebrew formula JSON".into());
+        return Err(errors().homebrew_fetch_failed.into());
     }
 
     homebrew_update_from_formula_json(&output.stdout, &current)
@@ -622,18 +697,27 @@ impl Drop for DownloadedUpdate {
 /// Download a release to a prepared executable temp file without touching the running server.
 #[cfg(not(windows))]
 fn download_update(release: &ReleaseInfo) -> Result<DownloadedUpdate, String> {
-    let current_exe = env::current_exe().map_err(|e| format!("can't find current binary: {e}"))?;
+    let current_exe = env::current_exe().map_err(|e| {
+        crate::i18n::fill(
+            errors().current_binary_not_found_fmt,
+            &[("error", &e.to_string())],
+        )
+    })?;
 
-    let parent = current_exe.parent().ok_or("can't find binary directory")?;
+    let parent = current_exe
+        .parent()
+        .ok_or_else(|| errors().binary_directory_not_found.to_string())?;
 
     // Check write permissions early
     let test_path = parent.join(".herdr-write-test");
     if let Err(e) = fs::write(&test_path, b"") {
         let _ = fs::remove_file(&test_path);
-        return Err(format!(
-            "install directory not writable: {} ({}). Try running with appropriate permissions.",
-            parent.display(),
-            e
+        return Err(crate::i18n::fill(
+            errors().install_dir_not_writable_fmt,
+            &[
+                ("path", &parent.display().to_string()),
+                ("error", &e.to_string()),
+            ],
         ));
     }
     let _ = fs::remove_file(&test_path);
@@ -647,18 +731,21 @@ fn download_update(release: &ReleaseInfo) -> Result<DownloadedUpdate, String> {
         .arg(&tmp_path)
         .arg(&release.download_url)
         .status()
-        .map_err(|e| format!("download failed: {e}"))?;
+        .map_err(|e| {
+            crate::i18n::fill(errors().download_failed_fmt, &[("error", &e.to_string())])
+        })?;
 
     if !status.success() {
         let _ = fs::remove_file(&tmp_path);
-        return Err("download failed".into());
+        return Err(errors().download_failed.into());
     }
 
     if let Some(expected) = &release.sha256 {
         if let Err(e) = crate::checksum::verify_sha256(&tmp_path, expected) {
             let _ = fs::remove_file(&tmp_path);
-            return Err(format!(
-                "downloaded update checksum verification failed: {e}"
+            return Err(crate::i18n::fill(
+                errors().checksum_failed_fmt,
+                &[("error", &e.to_string())],
             ));
         }
         tracing::info!(sha256 = %expected, "downloaded update checksum verified");
@@ -670,7 +757,10 @@ fn download_update(release: &ReleaseInfo) -> Result<DownloadedUpdate, String> {
         use std::os::unix::fs::PermissionsExt;
         if let Err(e) = fs::set_permissions(&tmp_path, fs::Permissions::from_mode(0o755)) {
             let _ = fs::remove_file(&tmp_path);
-            return Err(format!("chmod failed: {e}"));
+            return Err(crate::i18n::fill(
+                errors().chmod_failed_fmt,
+                &[("error", &e.to_string())],
+            ));
         }
     }
 
@@ -685,14 +775,17 @@ fn install_downloaded_update(mut update: DownloadedUpdate) -> Result<(), String>
     let tmp_path = update
         .tmp_path
         .take()
-        .ok_or("downloaded update temp file is missing")?;
+        .ok_or_else(|| errors().update_temp_file_missing.to_string())?;
 
     // Atomic replace — rename over the current binary.
     // On Linux, the running process keeps its fd to the old inode.
     // Next launch picks up the new file.
     if let Err(e) = fs::rename(&tmp_path, &update.current_exe) {
         let _ = fs::remove_file(&tmp_path);
-        return Err(format!("failed to replace binary: {e}"));
+        return Err(crate::i18n::fill(
+            errors().replace_binary_failed_fmt,
+            &[("error", &e.to_string())],
+        ));
     }
 
     Ok(())
@@ -719,7 +812,7 @@ fn download_windows_update(release: &ReleaseInfo) -> Result<DownloadedWindowsUpd
     let expected_sha256 = release
         .sha256
         .as_deref()
-        .ok_or("Windows update asset is missing a SHA-256 checksum")?;
+        .ok_or_else(|| errors().windows_sha256_missing.to_string())?;
     let stem = format!("herdr-update-{}", std::process::id());
     let update = DownloadedWindowsUpdate {
         package_path: env::temp_dir().join(format!("{stem}.{}", release.package_format)),
@@ -733,12 +826,15 @@ fn download_windows_update(release: &ReleaseInfo) -> Result<DownloadedWindowsUpd
         .arg(&update.package_path)
         .arg(&release.download_url)
         .status()
-        .map_err(|err| format!("download failed: {err}"))?;
+        .map_err(|err| {
+            crate::i18n::fill(errors().download_failed_fmt, &[("error", &err.to_string())])
+        })?;
     if !status.success() {
-        return Err("download failed".into());
+        return Err(errors().download_failed.into());
     }
-    crate::checksum::verify_sha256(&update.package_path, expected_sha256)
-        .map_err(|err| format!("downloaded update checksum verification failed: {err}"))?;
+    crate::checksum::verify_sha256(&update.package_path, expected_sha256).map_err(|err| {
+        crate::i18n::fill(errors().checksum_failed_fmt, &[("error", &err.to_string())])
+    })?;
     tracing::info!(sha256 = %expected_sha256, "downloaded update checksum verified");
 
     Ok(update)
@@ -752,7 +848,7 @@ fn install_windows_update_with_installer(
     let expected_sha256 = release
         .sha256
         .as_deref()
-        .ok_or("Windows update asset is missing a SHA-256 checksum")?;
+        .ok_or_else(|| errors().windows_sha256_missing.to_string())?;
     let mut command = Command::new("powershell");
     command
         .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-File"])
@@ -773,12 +869,18 @@ fn install_windows_update_with_installer(
         // Get-FileHash. Removing it lets 5.1 compute its own default path.
         // See PowerShell/PowerShell#8635.
         .env_remove("PSModulePath");
-    let status = command
-        .status()
-        .map_err(|err| format!("failed to run Windows installer: {err}"))?;
+    let status = command.status().map_err(|err| {
+        crate::i18n::fill(
+            errors().windows_installer_run_failed_fmt,
+            &[("error", &err.to_string())],
+        )
+    })?;
 
     if !status.success() {
-        return Err(format!("Windows installer failed with status {status}"));
+        return Err(crate::i18n::fill(
+            errors().windows_installer_failed_fmt,
+            &[("status", &status.to_string())],
+        ));
     }
 
     Ok(())
@@ -790,8 +892,8 @@ fn windows_installed_herdr_exe_path() -> Result<PathBuf, String> {
         return Ok(PathBuf::from(install_dir).join("herdr.exe"));
     }
 
-    let local_app_data = env::var_os("LOCALAPPDATA")
-        .ok_or("LOCALAPPDATA is not set; cannot locate Herdr install")?;
+    let local_app_data =
+        env::var_os("LOCALAPPDATA").ok_or_else(|| errors().localappdata_missing.to_string())?;
     Ok(PathBuf::from(local_app_data)
         .join("Programs")
         .join("Herdr")
@@ -960,28 +1062,35 @@ fn plan_running_server_updates(
             SERVER_STOP_RESPONSE_TIMEOUT,
         )
         .map_err(|err| {
-            format!(
-                "failed to read status for herdr target {} at {}: {err}. stop it with `{}` and run `herdr update` again",
-                target.label,
-                target.socket_path.display(),
-                target.stop_command
+            crate::i18n::fill(
+                errors().target_status_failed_fmt,
+                &[
+                    ("label", target.label.as_str()),
+                    ("path", &target.socket_path.display().to_string()),
+                    ("error", &err.to_string()),
+                    ("command", target.stop_command.as_str()),
+                ],
             )
         })? {
             Some(server) => server,
             None if target.must_be_running => {
-                return Err(format!(
-                        "herdr target {} looked running, but its status API did not respond at {}. stop it with `{}` and run `herdr update` again",
-                    target.label,
-                    target.socket_path.display(),
-                    target.stop_command
+                return Err(crate::i18n::fill(
+                    errors().target_status_no_response_fmt,
+                    &[
+                        ("label", target.label.as_str()),
+                        ("path", &target.socket_path.display().to_string()),
+                        ("command", target.stop_command.as_str()),
+                    ],
                 ));
             }
             None if client_protocol_server_is_running_at(&target.client_socket_path) => {
-                return Err(format!(
-                    "herdr target {} has a client socket, but its status API did not respond at {}. stop it with `{}` and run `herdr update` again",
-                    target.label,
-                    target.socket_path.display(),
-                    target.stop_command
+                return Err(crate::i18n::fill(
+                    errors().target_client_socket_no_response_fmt,
+                    &[
+                        ("label", target.label.as_str()),
+                        ("path", &target.socket_path.display().to_string()),
+                        ("command", target.stop_command.as_str()),
+                    ],
                 ));
             }
             None => continue,
@@ -995,9 +1104,9 @@ fn plan_running_server_updates(
     }
 
     if plans.is_empty() && target_client_protocol_server_is_running()? {
-        return Err(format!(
-            "a herdr server is listening, but its status API is unavailable; try `{}`, or stop the old server process manually, then run `herdr update` again",
-            crate::session::local_stop_command()
+        return Err(crate::i18n::fill(
+            errors().server_listening_status_unavailable_fmt,
+            &[("command", &crate::session::local_stop_command())],
         ));
     }
 
@@ -1051,8 +1160,12 @@ fn running_update_targets() -> Result<Vec<RunningUpdateTarget>, String> {
         }]);
     }
 
-    let sessions = crate::session::list_sessions()
-        .map_err(|err| format!("failed to list herdr sessions: {err}"))?;
+    let sessions = crate::session::list_sessions().map_err(|err| {
+        crate::i18n::fill(
+            errors().sessions_list_failed_fmt,
+            &[("error", &err.to_string())],
+        )
+    })?;
     Ok(sessions
         .into_iter()
         .map(|session| RunningUpdateTarget {
@@ -1091,8 +1204,12 @@ fn target_client_protocol_server_is_running() -> Result<bool, String> {
         return Ok(client_protocol_server_is_running());
     }
 
-    let sessions = crate::session::list_sessions()
-        .map_err(|err| format!("failed to list herdr sessions: {err}"))?;
+    let sessions = crate::session::list_sessions().map_err(|err| {
+        crate::i18n::fill(
+            errors().sessions_list_failed_fmt,
+            &[("error", &err.to_string())],
+        )
+    })?;
     Ok(sessions.into_iter().any(|session| {
         let client_socket = crate::session::client_socket_path_for(if session.default {
             None
@@ -1114,9 +1231,14 @@ pub(crate) fn parse_self_update_args(args: &[String]) -> Result<SelfUpdateOption
         match arg.as_str() {
             "--handoff" => options.live_handoff = true,
             "--help" | "-h" => {
-                return Err("usage: herdr update [--handoff]".to_string());
+                return Err(errors().update_usage.to_string());
             }
-            _ => return Err(format!("unknown update option: {arg}")),
+            _ => {
+                return Err(crate::i18n::fill(
+                    errors().unknown_update_option_fmt,
+                    &[("option", arg)],
+                ))
+            }
         }
     }
     Ok(options)
@@ -1128,10 +1250,7 @@ fn prompt_to_stop_old_servers_before_update(
     release: &ReleaseInfo,
 ) -> Result<bool, String> {
     if !io::stdin().is_terminal() {
-        return Err(
-            "one or more Herdr sessions must stop for this update. Stop running Herdr sessions when ready, then run `herdr update` again from an interactive terminal."
-                .to_string(),
-        );
+        return Err(errors().sessions_must_stop_noninteractive.to_string());
     }
 
     eprintln!(
@@ -1151,14 +1270,20 @@ fn prompt_to_stop_old_servers_before_update(
 
     loop {
         eprint!("stop after installing? [y/N] ");
-        io::stderr()
-            .flush()
-            .map_err(|e| format!("failed to flush prompt: {e}"))?;
+        io::stderr().flush().map_err(|e| {
+            crate::i18n::fill(
+                errors().prompt_flush_failed_fmt,
+                &[("error", &e.to_string())],
+            )
+        })?;
 
         let mut input = String::new();
-        let read = io::stdin()
-            .read_line(&mut input)
-            .map_err(|e| format!("failed to read prompt response: {e}"))?;
+        let read = io::stdin().read_line(&mut input).map_err(|e| {
+            crate::i18n::fill(
+                errors().prompt_read_failed_fmt,
+                &[("error", &e.to_string())],
+            )
+        })?;
         if read == 0 {
             return Ok(false);
         }
@@ -1280,14 +1405,20 @@ fn prompt_to_complete_plain_update(
             noun,
             release.label()
         );
-        io::stderr()
-            .flush()
-            .map_err(|e| format!("failed to flush prompt: {e}"))?;
+        io::stderr().flush().map_err(|e| {
+            crate::i18n::fill(
+                errors().prompt_flush_failed_fmt,
+                &[("error", &e.to_string())],
+            )
+        })?;
 
         let mut input = String::new();
-        let read = io::stdin()
-            .read_line(&mut input)
-            .map_err(|e| format!("failed to read prompt response: {e}"))?;
+        let read = io::stdin().read_line(&mut input).map_err(|e| {
+            crate::i18n::fill(
+                errors().prompt_read_failed_fmt,
+                &[("error", &e.to_string())],
+            )
+        })?;
         if read == 0 {
             return Ok(false);
         }
@@ -1420,14 +1551,20 @@ fn prompt_to_stop_old_server_after_failed_handoff(
 
     loop {
         eprint!("stop the old server now? [y/N] ");
-        io::stderr()
-            .flush()
-            .map_err(|e| format!("failed to flush prompt: {e}"))?;
+        io::stderr().flush().map_err(|e| {
+            crate::i18n::fill(
+                errors().prompt_flush_failed_fmt,
+                &[("error", &e.to_string())],
+            )
+        })?;
 
         let mut input = String::new();
-        let read = io::stdin()
-            .read_line(&mut input)
-            .map_err(|e| format!("failed to read prompt response: {e}"))?;
+        let read = io::stdin().read_line(&mut input).map_err(|e| {
+            crate::i18n::fill(
+                errors().prompt_read_failed_fmt,
+                &[("error", &e.to_string())],
+            )
+        })?;
         if read == 0 {
             return Ok(false);
         }
@@ -1540,40 +1677,74 @@ fn send_server_update_method_at(
         method,
     };
 
-    let mut stream = crate::ipc::connect_local_stream(socket_path)
-        .map_err(|e| format!("failed to connect to running server: {e}"))?;
-    stream
-        .set_send_timeout(Some(timeout))
-        .map_err(|e| format!("failed to set {error_prefix} write timeout: {e}"))?;
-    stream
-        .set_recv_timeout(Some(timeout))
-        .map_err(|e| format!("failed to set {error_prefix} read timeout: {e}"))?;
+    let mut stream = crate::ipc::connect_local_stream(socket_path).map_err(|e| {
+        crate::i18n::fill(
+            errors().server_connect_failed_fmt,
+            &[("error", &e.to_string())],
+        )
+    })?;
+    stream.set_send_timeout(Some(timeout)).map_err(|e| {
+        crate::i18n::fill(
+            errors().server_write_timeout_fmt,
+            &[("action", error_prefix), ("error", &e.to_string())],
+        )
+    })?;
+    stream.set_recv_timeout(Some(timeout)).map_err(|e| {
+        crate::i18n::fill(
+            errors().server_read_timeout_fmt,
+            &[("action", error_prefix), ("error", &e.to_string())],
+        )
+    })?;
     stream
         .write_all(
             serde_json::to_string(&request)
                 .map_err(|e| e.to_string())?
                 .as_bytes(),
         )
-        .map_err(|e| format!("failed to send {error_prefix} request: {e}"))?;
-    stream
-        .write_all(b"\n")
-        .map_err(|e| format!("failed to finish {error_prefix} request: {e}"))?;
-    stream
-        .flush()
-        .map_err(|e| format!("failed to flush {error_prefix} request: {e}"))?;
+        .map_err(|e| {
+            crate::i18n::fill(
+                errors().server_send_failed_fmt,
+                &[("action", error_prefix), ("error", &e.to_string())],
+            )
+        })?;
+    stream.write_all(b"\n").map_err(|e| {
+        crate::i18n::fill(
+            errors().server_finish_failed_fmt,
+            &[("action", error_prefix), ("error", &e.to_string())],
+        )
+    })?;
+    stream.flush().map_err(|e| {
+        crate::i18n::fill(
+            errors().server_flush_failed_fmt,
+            &[("action", error_prefix), ("error", &e.to_string())],
+        )
+    })?;
 
     let mut reader = BufReader::new(stream);
     let mut line = String::new();
-    let read = reader
-        .read_line(&mut line)
-        .map_err(|e| format!("failed to read {error_prefix} response: {e}"))?;
+    let read = reader.read_line(&mut line).map_err(|e| {
+        crate::i18n::fill(
+            errors().server_response_read_failed_fmt,
+            &[("action", error_prefix), ("error", &e.to_string())],
+        )
+    })?;
     if read == 0 || line.trim().is_empty() {
-        return Err(format!("empty {error_prefix} response"));
+        return Err(crate::i18n::fill(
+            errors().server_response_empty_fmt,
+            &[("action", error_prefix)],
+        ));
     }
-    let response: serde_json::Value =
-        serde_json::from_str(&line).map_err(|e| format!("invalid server response: {e}"))?;
+    let response: serde_json::Value = serde_json::from_str(&line).map_err(|e| {
+        crate::i18n::fill(
+            errors().server_response_invalid_fmt,
+            &[("error", &e.to_string())],
+        )
+    })?;
     if let Some(error) = response.get("error") {
-        return Err(format!("{error_prefix} failed: {error}"));
+        return Err(crate::i18n::fill(
+            errors().server_action_failed_fmt,
+            &[("action", error_prefix), ("error", &error.to_string())],
+        ));
     }
 
     Ok(())
@@ -1650,9 +1821,12 @@ fn server_shutdown_confirmed_at(socket_path: &Path) -> Result<bool, String> {
         {
             Ok(true)
         }
-        Err(err) => Err(format!(
-            "failed to confirm whether the old server stopped on {}: {err}",
-            socket_path.display()
+        Err(err) => Err(crate::i18n::fill(
+            errors().shutdown_confirm_failed_fmt,
+            &[
+                ("path", &socket_path.display().to_string()),
+                ("error", &err.to_string()),
+            ],
         )),
     }
 }
@@ -1665,10 +1839,12 @@ fn wait_for_server_shutdown_at(socket_path: &Path, timeout: Duration) -> Result<
             return Ok(());
         }
         if Instant::now() >= deadline {
-            return Err(format!(
-                "shutdown was requested, but the old server is still responding on {} after {} seconds",
-                socket_path.display(),
-                timeout.as_secs()
+            return Err(crate::i18n::fill(
+                errors().server_still_responding_fmt,
+                &[
+                    ("path", &socket_path.display().to_string()),
+                    ("seconds", &timeout.as_secs().to_string()),
+                ],
             ));
         }
         std::thread::sleep(SERVER_SHUTDOWN_POLL_INTERVAL);
@@ -1707,8 +1883,14 @@ fn wait_for_running_server_protocol_at(
     let deadline = Instant::now() + timeout;
     loop {
         if let Some(status) =
-            crate::api::read_runtime_status_at(socket_path, SERVER_STOP_RESPONSE_TIMEOUT)
-                .map_err(|e| format!("failed to read server status after handoff: {e}"))?
+            crate::api::read_runtime_status_at(socket_path, SERVER_STOP_RESPONSE_TIMEOUT).map_err(
+                |e| {
+                    crate::i18n::fill(
+                        errors().post_handoff_status_failed_fmt,
+                        &[("error", &e.to_string())],
+                    )
+                },
+            )?
         {
             let protocol_matches =
                 expected_protocol.is_none_or(|protocol| status.protocol == Some(protocol));
@@ -1719,10 +1901,12 @@ fn wait_for_running_server_protocol_at(
             }
         }
         if Instant::now() >= deadline {
-            return Err(format!(
-                "live handoff was requested, but no compatible server responded on {} after {} seconds",
-                socket_path.display(),
-                timeout.as_secs()
+            return Err(crate::i18n::fill(
+                errors().handoff_no_compatible_server_fmt,
+                &[
+                    ("path", &socket_path.display().to_string()),
+                    ("seconds", &timeout.as_secs().to_string()),
+                ],
             ));
         }
         std::thread::sleep(SERVER_SHUTDOWN_POLL_INTERVAL);
@@ -1950,16 +2134,13 @@ pub(crate) fn package_manager_channel_update_guidance_for_current_install() -> O
 }
 
 fn preview_channel_rejection_for_exe_path(path: &Path) -> Option<&'static str> {
+    let errors = errors();
     if is_homebrew_managed_exe_path_following_links(path) {
-        Some(
-            "preview channel is only available for direct Herdr installs; Homebrew installs update through `brew update && brew upgrade herdr`",
-        )
+        Some(errors.preview_rejection_homebrew)
     } else if is_mise_managed_exe_path_following_links(path) {
-        Some(
-            "preview channel is only available for direct Herdr installs; mise installs update through `mise upgrade herdr`",
-        )
+        Some(errors.preview_rejection_mise)
     } else if is_nix_store_exe_path_following_links(path) {
-        Some("preview channel is only available for direct Herdr installs; Nix installs update through Nix")
+        Some(errors.preview_rejection_nix)
     } else {
         None
     }
@@ -2103,39 +2284,27 @@ pub fn self_update(options: SelfUpdateOptions) -> Result<Version, String> {
 
     if is_homebrew_managed_install() {
         if channel == UpdateChannel::Preview {
-            return Err(
-                "self-update is disabled for Homebrew installs; preview is only available for direct Herdr installs".into(),
-            );
+            return Err(errors().self_update_disabled_homebrew_preview.into());
         }
-        return Err(format!(
-            "self-update is disabled for Homebrew installs; run `{HOMEBREW_UPDATE_COMMAND}`"
-        ));
+        return Err(errors().self_update_disabled_homebrew.into());
     }
 
     if is_mise_managed_install() {
         if channel == UpdateChannel::Preview {
-            return Err(
-                "self-update is disabled for mise installs; preview is only available for direct Herdr installs".into(),
-            );
+            return Err(errors().self_update_disabled_mise_preview.into());
         }
-        return Err(format!(
-            "self-update is disabled for mise installs; run `{MISE_UPDATE_COMMAND}`"
-        ));
+        return Err(errors().self_update_disabled_mise.into());
     }
 
     if is_nix_managed_install() {
         if channel == UpdateChannel::Preview {
-            return Err(
-                "self-update is disabled for Nix installs; preview is only available for direct Herdr installs".into(),
-            );
+            return Err(errors().self_update_disabled_nix_preview.into());
         }
-        return Err(
-            "self-update is disabled for Nix installs; update with `nix profile upgrade` or update the flake input that provides Herdr".into(),
-        );
+        return Err(errors().self_update_disabled_nix.into());
     }
 
     if running_inside_herdr() {
-        return Err("run `herdr update` outside herdr after detaching from the session".into());
+        return Err(errors().update_run_outside.into());
     }
 
     eprintln!("checking {} channel for updates...", channel.as_str());
@@ -2788,6 +2957,7 @@ mod tests {
 
     #[test]
     fn self_update_args_gate_live_handoff() {
+        let _guard = crate::i18n::lang_guard(crate::i18n::Lang::En);
         assert_eq!(
             parse_self_update_args(&[]).unwrap(),
             SelfUpdateOptions {
@@ -3021,6 +3191,7 @@ mod tests {
     #[test]
     fn plain_update_errors_when_named_session_has_client_socket_without_status_api() {
         let _guard = env_lock().lock().unwrap();
+        let _lang = crate::i18n::lang_guard(crate::i18n::Lang::En);
         let config_home = set_test_config_home("client-only-session");
         std::env::remove_var(crate::api::SOCKET_PATH_ENV_VAR);
         std::env::remove_var(crate::session::SESSION_ENV_VAR);
@@ -3317,6 +3488,7 @@ mod tests {
 
     #[test]
     fn stop_server_via_api_times_out_when_server_never_replies() {
+        let _lang = crate::i18n::lang_guard(crate::i18n::Lang::En);
         let socket_path = unique_test_socket_path("stop-timeout");
         let listener = UnixListener::bind(&socket_path).unwrap();
         let handle = thread::spawn(move || {
@@ -3354,6 +3526,7 @@ mod tests {
 
     #[test]
     fn wait_for_server_shutdown_times_out_while_socket_keeps_responding() {
+        let _lang = crate::i18n::lang_guard(crate::i18n::Lang::En);
         let socket_path = unique_test_socket_path("shutdown-timeout");
         let (running, handle) = spawn_accept_loop(&socket_path);
 
@@ -3556,6 +3729,7 @@ mod tests {
 
     #[test]
     fn stable_update_requires_asset_checksum() {
+        let _guard = crate::i18n::lang_guard(crate::i18n::Lang::En);
         let (os, arch) = platform_target();
         let asset_key = format!("{os}-{arch}");
         let json = format!(

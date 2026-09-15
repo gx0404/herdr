@@ -119,6 +119,8 @@ fn setup_with_strict_host_key_failure(
     command.env("XDG_CONFIG_HOME", root.join("config"));
     command.env("XDG_STATE_HOME", root.join("state"));
     command.env("XDG_RUNTIME_DIR", &root);
+    // The "machine was not saved" error text is localized; pin English.
+    command.env("HERDR_LANG", "en");
     command.env("FAKE_ROOT", &root);
     command.env("FAKE_INSTALLED", installed);
     command.env(
@@ -235,6 +237,8 @@ fn machine_add_accepts_help_argument_order() {
     command.env("XDG_CONFIG_HOME", root.join("config"));
     command.env("XDG_STATE_HOME", root.join("state"));
     command.env("XDG_RUNTIME_DIR", &root);
+    // The "machine was not saved" error text is localized; pin English.
+    command.env("HERDR_LANG", "en");
     for name in [
         "HERDR_ENV",
         "HERDR_SESSION",

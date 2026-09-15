@@ -2,6 +2,15 @@ use std::collections::HashMap;
 
 use crate::api::schema::{TabCreateParams, TabListParams, TabRenameParams};
 
+/// Localized CLI error templates for this subcommand surface.
+fn errors() -> &'static crate::i18n::CliErrorTexts {
+    &crate::i18n::texts().cli_errors
+}
+
+fn missing_value(flag: &str) -> String {
+    crate::i18n::fill(errors().missing_value_for_fmt, &[("flag", flag)])
+}
+
 pub(super) fn run_tab_command(args: &[String]) -> std::io::Result<i32> {
     let Some(subcommand) = args.first().map(|arg| arg.as_str()) else {
         print_tab_help();
@@ -34,14 +43,17 @@ fn tab_list(args: &[String]) -> std::io::Result<i32> {
         match args[index].as_str() {
             "--workspace" => {
                 let Some(value) = args.get(index + 1) else {
-                    eprintln!("missing value for --workspace");
+                    eprintln!("{}", missing_value("--workspace"));
                     return Ok(2);
                 };
                 workspace_id = Some(super::normalize_workspace_id(value));
                 index += 2;
             }
             other => {
-                eprintln!("unknown option: {other}");
+                eprintln!(
+                    "{}",
+                    crate::i18n::fill(errors().unknown_option_fmt, &[("option", other)])
+                );
                 return Ok(2);
             }
         }
@@ -62,7 +74,7 @@ fn tab_create(args: &[String]) -> std::io::Result<i32> {
         match args[index].as_str() {
             "--workspace" => {
                 let Some(value) = args.get(index + 1) else {
-                    eprintln!("missing value for --workspace");
+                    eprintln!("{}", missing_value("--workspace"));
                     return Ok(2);
                 };
                 workspace_id = Some(super::normalize_workspace_id(value));
@@ -70,7 +82,7 @@ fn tab_create(args: &[String]) -> std::io::Result<i32> {
             }
             "--cwd" => {
                 let Some(value) = args.get(index + 1) else {
-                    eprintln!("missing value for --cwd");
+                    eprintln!("{}", missing_value("--cwd"));
                     return Ok(2);
                 };
                 cwd = Some(value.clone());
@@ -78,7 +90,7 @@ fn tab_create(args: &[String]) -> std::io::Result<i32> {
             }
             "--label" => {
                 let Some(value) = args.get(index + 1) else {
-                    eprintln!("missing value for --label");
+                    eprintln!("{}", missing_value("--label"));
                     return Ok(2);
                 };
                 label = Some(value.clone());
@@ -94,7 +106,7 @@ fn tab_create(args: &[String]) -> std::io::Result<i32> {
             }
             "--env" => {
                 let Some(value) = args.get(index + 1) else {
-                    eprintln!("missing value for --env");
+                    eprintln!("{}", missing_value("--env"));
                     return Ok(2);
                 };
                 let (key, value) = match super::parse_env_assignment(value) {
@@ -108,7 +120,10 @@ fn tab_create(args: &[String]) -> std::io::Result<i32> {
                 index += 2;
             }
             other => {
-                eprintln!("unknown option: {other}");
+                eprintln!(
+                    "{}",
+                    crate::i18n::fill(errors().unknown_option_fmt, &[("option", other)])
+                );
                 return Ok(2);
             }
         }
@@ -125,11 +140,11 @@ fn tab_create(args: &[String]) -> std::io::Result<i32> {
 
 fn tab_get(args: &[String]) -> std::io::Result<i32> {
     let Some(raw_tab_id) = args.first() else {
-        eprintln!("usage: herdr tab get <tab_id>");
+        eprintln!("{}", errors().tab_get_usage);
         return Ok(2);
     };
     if args.len() != 1 {
-        eprintln!("usage: herdr tab get <tab_id>");
+        eprintln!("{}", errors().tab_get_usage);
         return Ok(2);
     }
 
@@ -138,11 +153,11 @@ fn tab_get(args: &[String]) -> std::io::Result<i32> {
 
 fn tab_focus(args: &[String]) -> std::io::Result<i32> {
     let Some(raw_tab_id) = args.first() else {
-        eprintln!("usage: herdr tab focus <tab_id>");
+        eprintln!("{}", errors().tab_focus_usage);
         return Ok(2);
     };
     if args.len() != 1 {
-        eprintln!("usage: herdr tab focus <tab_id>");
+        eprintln!("{}", errors().tab_focus_usage);
         return Ok(2);
     }
 
@@ -151,7 +166,7 @@ fn tab_focus(args: &[String]) -> std::io::Result<i32> {
 
 fn tab_rename(args: &[String]) -> std::io::Result<i32> {
     if args.len() < 2 {
-        eprintln!("usage: herdr tab rename <tab_id> <label>");
+        eprintln!("{}", errors().tab_rename_usage);
         return Ok(2);
     }
 
@@ -163,11 +178,11 @@ fn tab_rename(args: &[String]) -> std::io::Result<i32> {
 
 fn tab_close(args: &[String]) -> std::io::Result<i32> {
     let Some(raw_tab_id) = args.first() else {
-        eprintln!("usage: herdr tab close <tab_id>");
+        eprintln!("{}", errors().tab_close_usage);
         return Ok(2);
     };
     if args.len() != 1 {
-        eprintln!("usage: herdr tab close <tab_id>");
+        eprintln!("{}", errors().tab_close_usage);
         return Ok(2);
     }
 

@@ -77,9 +77,11 @@ pub(crate) fn uninstall_experimental_letta() -> io::Result<Vec<String>> {
 
 fn install_target_inner(target: crate::api::schema::IntegrationTarget) -> io::Result<Vec<String>> {
     if !integration_target_supported(target) {
-        return Err(io::Error::other(format!(
-            "{} integration is not supported on Windows",
-            integration_target_label(target)
+        return Err(io::Error::other(crate::i18n::fill(
+            crate::i18n::texts()
+                .cli_errors
+                .integration_not_supported_windows_fmt,
+            &[("target", integration_target_label(target))],
         )));
     }
 
