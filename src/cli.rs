@@ -41,19 +41,17 @@ mod target;
 mod workspace;
 mod worktree;
 
-const TERMINAL_SESSION_OBSERVE_USAGE: &str =
-    "usage: herdr terminal session observe <target> [--cols N] [--rows N]";
-const TERMINAL_SESSION_CONTROL_USAGE: &str =
-    "usage: herdr terminal session control <target> [--takeover] [--cols N] [--rows N]";
-pub(crate) const AGENT_HELP_FOOTER: &str = concat!(
-    "Are you an AI? Use these resources ONLY IF your task specifically asks you to:\n",
-    "  Help a human understand or set up Herdr for the first time:\n",
-    "    https://herdr.dev/agent-guide.md\n",
-    "  Debug or investigate a problem with Herdr:\n",
-    "    https://herdr.dev/llms.txt\n",
-    "  Control Herdr panes, agents, or workspaces:\n",
-    "    SKIP if a Herdr skill is already in your context. Otherwise run: herdr --skill",
-);
+fn terminal_session_observe_usage() -> &'static str {
+    crate::i18n::texts().cli_help.terminal_session_observe_usage
+}
+
+fn terminal_session_control_usage() -> &'static str {
+    crate::i18n::texts().cli_help.terminal_session_control_usage
+}
+
+pub(crate) fn agent_help_footer() -> &'static str {
+    crate::i18n::texts().cli_help.agent_help_footer
+}
 
 pub(crate) fn parse_token_assignment(raw: &str) -> Result<(String, Option<String>), String> {
     let Some((key, value)) = raw.split_once('=') else {
@@ -201,8 +199,11 @@ fn channel_set(args: &[String]) -> std::io::Result<i32> {
     }
     std::fs::write(&path, updated)?;
     println!(
-        "Herdr update channel set to {channel} in {}.",
-        path.display()
+        "{}",
+        crate::i18n::fill(
+            crate::i18n::texts().cli_output.channel_set_fmt,
+            &[("channel", channel), ("path", &path.display().to_string())]
+        )
     );
 
     match channel_set_install_action(
@@ -301,9 +302,9 @@ fn config_check(args: &[String]) -> std::io::Result<i32> {
 
     let diagnostics = crate::config::Config::load().diagnostics;
     if diagnostics.is_empty() {
-        println!("config: ok");
+        println!("{}", crate::i18n::texts().cli_output.config_ok);
     } else {
-        println!("config: issues found");
+        println!("{}", crate::i18n::texts().cli_output.config_issues_found);
         for diagnostic in &diagnostics {
             println!("{diagnostic}");
         }
@@ -321,8 +322,11 @@ fn config_reset_keys(args: &[String]) -> std::io::Result<i32> {
     let path = crate::config::config_path();
     if !path.exists() {
         println!(
-            "No config file found at {}. Built-in v2 keybindings already apply.",
-            path.display()
+            "{}",
+            crate::i18n::fill(
+                crate::i18n::texts().cli_output.config_reset_no_file_fmt,
+                &[("path", &path.display().to_string())]
+            )
         );
         return Ok(0);
     }
@@ -348,8 +352,11 @@ fn config_reset_keys(args: &[String]) -> std::io::Result<i32> {
 
     if !table.contains_key("keys") {
         println!(
-            "No [keys] config found in {}. Built-in v2 keybindings already apply.",
-            path.display()
+            "{}",
+            crate::i18n::fill(
+                crate::i18n::texts().cli_output.config_reset_no_keys_fmt,
+                &[("path", &path.display().to_string())]
+            )
         );
         return Ok(0);
     }
@@ -374,17 +381,32 @@ fn config_reset_keys(args: &[String]) -> std::io::Result<i32> {
     std::fs::copy(&path, &backup_path)?;
     std::fs::write(&path, updated)?;
 
-    println!("Created backup: {}", backup_path.display());
+    let t = &crate::i18n::texts().cli_output;
     println!(
-        "Removed [keys], [keys.indexed], and [[keys.command]] from {}.",
-        path.display()
+        "{}",
+        crate::i18n::fill(
+            t.config_reset_backup_fmt,
+            &[("path", &backup_path.display().to_string())]
+        )
     );
-    println!("Built-in v2 keybindings will apply after Herdr restarts or reloads config.");
-    println!("If a Herdr server is running, run `herdr server reload-config` to apply this now.");
     println!(
-        "To restore: cp {} {}",
-        backup_path.display(),
-        path.display()
+        "{}",
+        crate::i18n::fill(
+            t.config_reset_removed_fmt,
+            &[("path", &path.display().to_string())]
+        )
+    );
+    println!("{}", t.config_reset_v2_note);
+    println!("{}", t.config_reset_reload_note);
+    println!(
+        "{}",
+        crate::i18n::fill(
+            t.config_reset_restore_fmt,
+            &[
+                ("backup", &backup_path.display().to_string()),
+                ("path", &path.display().to_string())
+            ]
+        )
     );
     Ok(0)
 }
@@ -495,7 +517,13 @@ fn session_stop(args: &[String]) -> std::io::Result<i32> {
                     "session": session,
                 }));
             } else {
-                println!("stopped session {}", session.name);
+                println!(
+                    "{}",
+                    crate::i18n::fill(
+                        crate::i18n::texts().cli_output.session_stopped_fmt,
+                        &[("name", session.name.as_str())]
+                    )
+                );
             }
             Ok(0)
         }
@@ -521,7 +549,13 @@ fn session_delete(args: &[String]) -> std::io::Result<i32> {
                     "session": session,
                 }));
             } else {
-                println!("deleted session {}", session.name);
+                println!(
+                    "{}",
+                    crate::i18n::fill(
+                        crate::i18n::texts().cli_output.session_deleted_fmt,
+                        &[("name", session.name.as_str())]
+                    )
+                );
             }
             Ok(0)
         }
@@ -549,13 +583,13 @@ fn terminal_session(args: &[String]) -> std::io::Result<i32> {
         Some("control") => terminal_session_control(&args[1..]),
         Some("observe") => terminal_session_observe(&args[1..]),
         Some("help" | "--help" | "-h") => {
-            eprintln!("{TERMINAL_SESSION_CONTROL_USAGE}");
-            eprintln!("{TERMINAL_SESSION_OBSERVE_USAGE}");
+            eprintln!("{}", terminal_session_control_usage());
+            eprintln!("{}", terminal_session_observe_usage());
             Ok(0)
         }
         _ => {
-            eprintln!("{TERMINAL_SESSION_CONTROL_USAGE}");
-            eprintln!("{TERMINAL_SESSION_OBSERVE_USAGE}");
+            eprintln!("{}", terminal_session_control_usage());
+            eprintln!("{}", terminal_session_observe_usage());
             Ok(2)
         }
     }
@@ -564,7 +598,7 @@ fn terminal_session(args: &[String]) -> std::io::Result<i32> {
 fn terminal_session_control(args: &[String]) -> std::io::Result<i32> {
     let options = match parse_terminal_session_options(
         args,
-        TERMINAL_SESSION_CONTROL_USAGE,
+        terminal_session_control_usage(),
         "control",
         true,
     )? {
@@ -584,7 +618,7 @@ fn terminal_session_control(args: &[String]) -> std::io::Result<i32> {
 fn terminal_session_observe(args: &[String]) -> std::io::Result<i32> {
     let options = match parse_terminal_session_options(
         args,
-        TERMINAL_SESSION_OBSERVE_USAGE,
+        terminal_session_observe_usage(),
         "observe",
         false,
     )? {
@@ -994,15 +1028,19 @@ fn parse_session_name_and_json(args: &[String], usage: &str) -> Result<(String, 
 }
 
 fn print_session_table(sessions: &[crate::session::SessionInfo]) {
-    println!("{:<20} {:<8} {:<48} socket", "name", "status", "directory");
+    let t = &crate::i18n::texts().cli_output;
+    println!(
+        "{:<20} {:<8} {:<48} {}",
+        t.session_col_name, t.session_col_status, t.session_col_directory, t.session_col_socket
+    );
     for session in sessions {
         println!(
             "{:<20} {:<8} {:<48} {}",
             session.name,
             if session.running {
-                "running"
+                t.session_state_running
             } else {
-                "stopped"
+                t.session_state_stopped
             },
             session.session_dir,
             session.socket_path

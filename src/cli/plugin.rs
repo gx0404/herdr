@@ -249,9 +249,20 @@ fn plugin_install(args: &[String]) -> std::io::Result<i32> {
             }
             Err(InstallFailure::KeepCheckout(err)) => return Err(err),
         };
-        println!("Installed {} from {}.", plugin.plugin_id, source.display());
+        let t = &crate::i18n::texts().cli_output;
         println!(
-            "Config: {}",
+            "{}",
+            crate::i18n::fill(
+                t.plugin_installed_fmt,
+                &[
+                    ("plugin", plugin.plugin_id.as_str()),
+                    ("source", &source.display().to_string())
+                ]
+            )
+        );
+        println!(
+            "{}{}",
+            t.plugin_config_label,
             crate::plugin_paths::plugin_config_dir(&plugin.plugin_id).display()
         );
         Ok(0)
@@ -321,7 +332,13 @@ fn plugin_uninstall(args: &[String]) -> std::io::Result<i32> {
     if let Some(plugin) = existing.as_ref() {
         remove_managed_plugin_files(plugin)?;
     }
-    println!("Uninstalled {plugin_id}.");
+    println!(
+        "{}",
+        crate::i18n::fill(
+            crate::i18n::texts().cli_output.plugin_uninstalled_fmt,
+            &[("plugin", plugin_id.as_str())]
+        )
+    );
     Ok(0)
 }
 
@@ -1147,24 +1164,33 @@ fn print_plugin_list_human(response: &serde_json::Value) -> std::io::Result<i32>
         return super::print_response(response);
     };
     if plugins.is_empty() {
-        println!("No plugins installed.");
+        println!("{}", crate::i18n::texts().cli_output.plugin_none_installed);
         return Ok(0);
     }
+    let t = &crate::i18n::texts().cli_output;
     println!(
-        "{} plugin{} installed:",
-        plugins.len(),
-        if plugins.len() == 1 { "" } else { "s" }
+        "{}",
+        crate::i18n::fill(
+            t.plugin_list_count_fmt,
+            &[
+                ("count", &plugins.len().to_string()),
+                ("plural", if plugins.len() == 1 { "" } else { "s" })
+            ]
+        )
     );
     for plugin in plugins {
         let enabled = if plugin.enabled {
-            "enabled"
+            t.state_enabled
         } else {
-            "disabled"
+            t.state_disabled
         };
         let warning = if plugin.warnings.is_empty() {
             String::new()
         } else {
-            format!("; {} warning(s)", plugin.warnings.len())
+            crate::i18n::fill(
+                t.plugin_warning_count_fmt,
+                &[("count", &plugin.warnings.len().to_string())],
+            )
         };
         println!(
             "- {} ({}) {} [{}{}]",
@@ -1175,11 +1201,12 @@ fn print_plugin_list_human(response: &serde_json::Value) -> std::io::Result<i32>
             warning
         );
         println!(
-            "  config: {}",
+            "{}{}",
+            t.plugin_config_path_label,
             crate::plugin_paths::plugin_config_dir(&plugin.plugin_id).display()
         );
         for warning in plugin.warnings {
-            println!("  warning: {warning}");
+            println!("{}{warning}", t.plugin_warning_label);
         }
     }
     Ok(0)

@@ -289,6 +289,7 @@ fn integration_commands_run_locally_when_server_is_missing() {
         .args(["integration", "status"])
         .env("HERDR_SOCKET_PATH", &missing_socket)
         .env("HOME", &home_dir)
+        .env("HERDR_LANG", "en")
         .output()
         .unwrap();
     assert_eq!(integration_status.status.code(), Some(0));

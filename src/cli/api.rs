@@ -32,7 +32,13 @@ fn api_schema(args: &[String]) -> std::io::Result<i32> {
         }
         [flag, path] if flag == "--output" => {
             write_schema_file(std::path::Path::new(path))?;
-            println!("wrote API schema to {path}");
+            println!(
+                "{}",
+                crate::i18n::fill(
+                    crate::i18n::texts().cli_output.api_schema_written_fmt,
+                    &[("path", path.as_str())]
+                )
+            );
         }
         [flag] if flag == "--output" => {
             eprintln!("missing value for --output");
@@ -88,11 +94,13 @@ fn schema_summary_text() -> std::io::Result<String> {
         .collect();
     schemas.sort();
 
-    Ok(format!(
-        "Herdr API schema\nprotocol: {}\nschema_version: {}\nschemas: {}\n\nUse `herdr api schema --json` to print the full schema.\nUse `herdr api schema --output PATH` to write it to a file.\n",
-        protocol,
-        schema_version,
-        schemas.join(", ")
+    Ok(crate::i18n::fill(
+        crate::i18n::texts().cli_output.api_schema_summary_fmt,
+        &[
+            ("protocol", &protocol.to_string()),
+            ("schema_version", &schema_version.to_string()),
+            ("schemas", &schemas.join(", ")),
+        ],
     ))
 }
 
@@ -110,6 +118,7 @@ fn print_api_schema_help() {
 mod tests {
     #[test]
     fn schema_summary_text_stays_human_sized() {
+        let _guard = crate::i18n::lang_guard(crate::i18n::Lang::En);
         let text = super::schema_summary_text().unwrap();
         assert!(text.contains("Herdr API schema"));
         assert!(text.contains("Use `herdr api schema --json`"));

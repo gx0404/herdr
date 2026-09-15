@@ -36,6 +36,7 @@ fn integration_status(args: &[String]) -> std::io::Result<i32> {
         return Ok(0);
     }
 
+    let t = &crate::i18n::texts().cli_output;
     for status in crate::integration::installed_integration_statuses() {
         let target = crate::integration::integration_target_label(status.target);
         let state = describe_integration_state(
@@ -53,8 +54,9 @@ fn integration_status(args: &[String]) -> std::io::Result<i32> {
             status.expected_version,
         );
         println!(
-            "{} (experimental): {state} ({})",
+            "{}{}{state} ({})",
             status.label,
+            t.integration_experimental_label,
             status.path.display()
         );
     }
@@ -67,21 +69,33 @@ fn describe_integration_state(
     installed_version: Option<u32>,
     expected_version: u32,
 ) -> String {
+    let t = &crate::i18n::texts().cli_output;
     let version = match installed_version {
         Some(version) => format!("v{version}"),
-        None => "legacy".to_string(),
+        None => t.integration_legacy.to_string(),
     };
     match state {
-        crate::integration::IntegrationStatusKind::NotInstalled => "not installed".to_string(),
-        crate::integration::IntegrationStatusKind::Current => format!("current ({version})"),
+        crate::integration::IntegrationStatusKind::NotInstalled => {
+            t.integration_not_installed.to_string()
+        }
+        crate::integration::IntegrationStatusKind::Current => {
+            crate::i18n::fill(t.integration_current_fmt, &[("version", version.as_str())])
+        }
         crate::integration::IntegrationStatusKind::Outdated
             if installed_version.is_some_and(|installed| installed >= expected_version) =>
         {
-            format!("needs repair ({version})")
+            crate::i18n::fill(
+                t.integration_needs_repair_fmt,
+                &[("version", version.as_str())],
+            )
         }
-        crate::integration::IntegrationStatusKind::Outdated => {
-            format!("outdated ({version} < v{expected_version})")
-        }
+        crate::integration::IntegrationStatusKind::Outdated => crate::i18n::fill(
+            t.integration_outdated_fmt,
+            &[
+                ("version", version.as_str()),
+                ("expected", &format!("v{expected_version}")),
+            ],
+        ),
     }
 }
 

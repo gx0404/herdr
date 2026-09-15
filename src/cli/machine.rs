@@ -2,21 +2,6 @@ use serde::Serialize;
 
 use crate::client::endpoint::{EndpointCatalog, ProfileId};
 
-const HELP: &str = "Usage:
-  herdr machine list [--json]
-  herdr machine add <ssh-target> --label <label> [--remote-session <name>]
-  herdr machine rename <profile-id> --label <label>
-  herdr machine remove <profile-id>
-  herdr machine enable <profile-id>
-  herdr machine disable <profile-id>
-
-Add prepares the remote Herdr installation and starts its server before saving.
-Missing or incompatible installations require approval in an interactive terminal.
-Changes apply automatically to open local Herdr clients.
-Removing or disabling a machine leaves its remote sessions running.
-Saved machines contain only a label, SSH target, explicit Herdr session, and enabled state.
-SSH credentials and key material remain owned by OpenSSH.";
-
 #[derive(Serialize)]
 struct MachineListRow<'a> {
     id: &'a str,
@@ -36,11 +21,11 @@ pub(super) fn run_machine_command(args: &[String]) -> std::io::Result<i32> {
         Some("enable") => set_enabled(&args[1..], true),
         Some("disable") => set_enabled(&args[1..], false),
         Some("help" | "--help" | "-h") => {
-            println!("{HELP}");
+            println!("{}", crate::i18n::texts().cli_output.machine_help);
             Ok(0)
         }
         _ => {
-            eprintln!("{HELP}");
+            eprintln!("{}", crate::i18n::texts().cli_output.machine_help);
             Ok(2)
         }
     }
@@ -75,12 +60,17 @@ fn list(args: &[String]) -> std::io::Result<i32> {
         );
         return Ok(0);
     }
+    let t = &crate::i18n::texts().cli_output;
     if rows.is_empty() {
-        println!("No saved SSH machines.");
+        println!("{}", t.machine_none_saved);
         return Ok(0);
     }
     for row in rows {
-        let state = if row.enabled { "enabled" } else { "disabled" };
+        let state = if row.enabled {
+            t.state_enabled
+        } else {
+            t.state_disabled
+        };
         println!(
             "{}\t{}\t{}\t{}\t{}",
             row.id, row.label, row.target, row.session, state
@@ -187,8 +177,12 @@ fn add(args: &[String]) -> std::io::Result<i32> {
             "remote prepared, but machine was not saved: {error}"
         ))
     })?;
-    println!("Saved SSH machine {id}. Remote server is ready.");
-    println!("Open Herdr clients connect automatically.");
+    let t = &crate::i18n::texts().cli_output;
+    println!(
+        "{}",
+        crate::i18n::fill(t.machine_saved_fmt, &[("id", id.as_str())])
+    );
+    println!("{}", t.machine_clients_connect);
     Ok(0)
 }
 
@@ -222,7 +216,13 @@ fn rename(args: &[String]) -> std::io::Result<i32> {
         }
     }
     store_catalog(&catalog)?;
-    println!("Renamed SSH machine {id}.");
+    println!(
+        "{}",
+        crate::i18n::fill(
+            crate::i18n::texts().cli_output.machine_renamed_fmt,
+            &[("id", id.as_str())]
+        )
+    );
     Ok(0)
 }
 
@@ -240,7 +240,13 @@ fn remove(args: &[String]) -> std::io::Result<i32> {
     if catalog.selected_profile != previous_selection {
         catalog.store_selection().map_err(std::io::Error::other)?;
     }
-    println!("Removed SSH machine {id}.");
+    println!(
+        "{}",
+        crate::i18n::fill(
+            crate::i18n::texts().cli_output.machine_removed_fmt,
+            &[("id", id.as_str())]
+        )
+    );
     Ok(0)
 }
 
@@ -260,9 +266,17 @@ fn set_enabled(args: &[String], enabled: bool) -> std::io::Result<i32> {
     if catalog.selected_profile != previous_selection {
         catalog.store_selection().map_err(std::io::Error::other)?;
     }
+    let t = &crate::i18n::texts().cli_output;
     println!(
-        "{} SSH machine {id}.",
-        if enabled { "Enabled" } else { "Disabled" }
+        "{}",
+        crate::i18n::fill(
+            if enabled {
+                t.machine_enabled_fmt
+            } else {
+                t.machine_disabled_fmt
+            },
+            &[("id", id.as_str())]
+        )
     );
     Ok(0)
 }

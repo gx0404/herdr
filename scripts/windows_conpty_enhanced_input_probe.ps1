@@ -167,6 +167,7 @@ $script:ProbeExe = Join-Path $workDir "probe.exe"
 $oldSession = $env:HERDR_SESSION
 $oldSocket = $env:HERDR_SOCKET_PATH
 $oldClientSocket = $env:HERDR_CLIENT_SOCKET_PATH
+$oldLang = $env:HERDR_LANG
 $server = $null
 $report = [ordered]@{}
 $failed = $false
@@ -360,6 +361,8 @@ fn main() {
     Invoke-Checked rustc @("--edition", "2021", $probeSource, "-o", $script:ProbeExe)
 
     $env:HERDR_SESSION = $Session
+    # The readiness check matches the localized human status output; pin English.
+    $env:HERDR_LANG = "en"
     Remove-Item Env:HERDR_SOCKET_PATH -ErrorAction SilentlyContinue
     Remove-Item Env:HERDR_CLIENT_SOCKET_PATH -ErrorAction SilentlyContinue
 
@@ -519,6 +522,11 @@ fn main() {
         Remove-Item Env:HERDR_CLIENT_SOCKET_PATH -ErrorAction SilentlyContinue
     } else {
         $env:HERDR_CLIENT_SOCKET_PATH = $oldClientSocket
+    }
+    if ($null -eq $oldLang) {
+        Remove-Item Env:HERDR_LANG -ErrorAction SilentlyContinue
+    } else {
+        $env:HERDR_LANG = $oldLang
     }
 
     $json = $report | ConvertTo-Json -Depth 8

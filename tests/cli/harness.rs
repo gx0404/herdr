@@ -229,6 +229,10 @@ pub(super) fn run_named_cli_with_env_and_socket_override(
         .args(args)
         .env("XDG_CONFIG_HOME", config_home)
         .env("XDG_RUNTIME_DIR", runtime_dir)
+        // Human-readable CLI stdout is localized (zh-CN default); pin English
+        // so assertions on non-JSON output stay stable. JSON output is
+        // byte-identical across languages.
+        .env("HERDR_LANG", "en")
         .env_remove("HERDR_CLIENT_SOCKET_PATH")
         .env_remove("HERDR_ENV");
     for (key, value) in envs {
@@ -323,6 +327,9 @@ pub(super) fn run_cli(socket_path: &Path, args: &[&str]) -> std::process::Output
     let mut command = Command::new(env!("CARGO_BIN_EXE_herdr"));
     command.args(args);
     command.env("HERDR_SOCKET_PATH", socket_path);
+    // See run_named_cli_with_env_and_socket_override: pin English for the
+    // localized human-readable output path.
+    command.env("HERDR_LANG", "en");
     command.output().unwrap()
 }
 
@@ -335,6 +342,7 @@ pub(super) fn run_cli_in_dir(
     command.args(args);
     command.current_dir(current_dir);
     command.env("HERDR_SOCKET_PATH", socket_path);
+    command.env("HERDR_LANG", "en");
     command.output().unwrap()
 }
 

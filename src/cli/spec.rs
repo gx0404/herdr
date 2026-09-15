@@ -6,28 +6,29 @@ mod completion;
 mod machine;
 
 pub(super) fn command() -> Command {
+    let t = &crate::i18n::texts().cli_help;
     let command = Command::new("herdr")
-        .about("terminal workspace manager for AI coding agents")
+        .about(t.about)
         .disable_help_flag(true)
         .disable_version_flag(true)
         .arg(help_flag())
-        .arg(option("session", "NAME").help("Use or create a named persistent session"))
-        .arg(option("machine", "LABEL-OR-ID").help("Run an API command on a saved SSH machine"))
-        .arg(option("remote", "TARGET").help("Attach through SSH to a remote Herdr server"))
+        .arg(option("session", "NAME").help(t.session_help))
+        .arg(option("machine", "LABEL-OR-ID").help(t.machine_help))
+        .arg(option("remote", "TARGET").help(t.remote_help))
         .arg(
             option("remote-keybindings", "MODE")
                 .value_parser(["local", "server"])
-                .help("Choose local or server keybindings for remote attach"),
+                .help(t.remote_keybindings_help),
         )
-        .arg(flag("handoff").help("Opt into live handoff for update or remote attach"))
-        .arg(flag("default-config").help("Print default configuration and exit"))
-        .arg(flag("skill").help("Print the agent skill file and exit"))
+        .arg(flag("handoff").help(t.handoff_help))
+        .arg(flag("default-config").help(t.default_config_help))
+        .arg(flag("skill").help(t.skill_help))
         .arg(
             Arg::new("version")
                 .short('V')
                 .long("version")
                 .action(ArgAction::SetTrue)
-                .help("Print version and exit"),
+                .help(t.version_help),
         )
         .subcommand(completion::command())
         .subcommand(update_command())
@@ -57,7 +58,7 @@ fn configure_help(command: Command, depth: usize) -> Command {
         command.disable_help_flag(false)
     };
     let command = if depth == 1 && command.has_subcommands() {
-        command.after_help(super::AGENT_HELP_FOOTER)
+        command.after_help(super::agent_help_footer())
     } else {
         command
     };
@@ -114,40 +115,44 @@ fn write_requested_help(
 }
 
 fn update_command() -> Command {
+    let t = &crate::i18n::texts().cli_help;
     Command::new("update")
-        .about("Download and install the latest version")
-        .arg(flag("handoff").help("Try live handoff after installing"))
+        .about(t.update_about)
+        .arg(flag("handoff").help(t.update_handoff_help))
 }
 
 fn status_command() -> Command {
+    let t = &crate::i18n::texts().cli_help;
     Command::new("status")
-        .about("Show local client and running server status")
+        .about(t.status_about)
         .arg(json_flag())
         .subcommand(
             Command::new("server")
-                .about("Show running server status")
+                .about(t.status_server_about)
                 .arg(json_flag()),
         )
         .subcommand(
             Command::new("client")
-                .about("Show local client status")
+                .about(t.status_client_about)
                 .arg(json_flag()),
         )
 }
 
 fn config_command() -> Command {
+    let t = &crate::i18n::texts().cli_help;
     Command::new("config")
-        .about("Manage local configuration")
-        .subcommand(Command::new("check").about("Validate config.toml and print diagnostics"))
-        .subcommand(Command::new("reset-keys").about("Reset custom keybindings"))
+        .about(t.config_about)
+        .subcommand(Command::new("check").about(t.config_check_about))
+        .subcommand(Command::new("reset-keys").about(t.config_reset_keys_about))
 }
 
 fn channel_command() -> Command {
+    let t = &crate::i18n::texts().cli_help;
     Command::new("channel")
-        .about("Manage stable and preview update channels")
-        .subcommand(Command::new("show").about("Print the configured update channel"))
+        .about(t.channel_about)
+        .subcommand(Command::new("show").about(t.channel_show_about))
         .subcommand(
-            Command::new("set").about("Choose the update channel").arg(
+            Command::new("set").about(t.channel_set_about).arg(
                 Arg::new("channel")
                     .value_name("CHANNEL")
                     .required(true)
@@ -157,62 +162,64 @@ fn channel_command() -> Command {
 }
 
 fn server_command() -> Command {
+    let t = &crate::i18n::texts().cli_help;
     Command::new("server")
-        .about("Run or control the headless server")
-        .subcommand(Command::new("stop").about("Stop the running server"))
-        .subcommand(Command::new("reload-config").about("Reload config in the running server"))
+        .about(t.server_about)
+        .subcommand(Command::new("stop").about(t.server_stop_about))
+        .subcommand(Command::new("reload-config").about(t.server_reload_config_about))
         .subcommand(
             Command::new("agent-manifests")
-                .about("Show active agent detection manifests")
+                .about(t.server_agent_manifests_about)
                 .arg(json_flag()),
         )
         .subcommand(
             Command::new("update-agent-manifests")
-                .about("Fetch and reload agent detection manifests")
+                .about(t.server_update_agent_manifests_about)
                 .arg(json_flag()),
         )
         .subcommand(
-            Command::new("reload-agent-manifests")
-                .about("Reload local agent detection manifest overrides"),
+            Command::new("reload-agent-manifests").about(t.server_reload_agent_manifests_about),
         )
 }
 
 fn api_command() -> Command {
+    let t = &crate::i18n::texts().cli_help;
     Command::new("api")
-        .about("Inspect socket API metadata and live runtime state")
-        .subcommand(Command::new("snapshot").about("Print the live session snapshot"))
+        .about(t.api_about)
+        .subcommand(Command::new("snapshot").about(t.api_snapshot_about))
         .subcommand(
             Command::new("schema")
-                .about("Print or write the bundled API schema")
+                .about(t.api_schema_about)
                 .arg(json_flag())
                 .arg(path_option("output", "PATH")),
         )
 }
 
 fn workspace_command() -> Command {
+    let t = &crate::i18n::texts().cli_help;
     Command::new("workspace")
-        .about("Manage workspaces over the socket API")
-        .subcommand(Command::new("list").about("List workspaces"))
+        .about(t.workspace_about)
+        .subcommand(Command::new("list").about(t.workspace_list_about))
         .subcommand(
             Command::new("create")
-                .about("Create a workspace")
+                .about(t.workspace_create_about)
                 .arg(path_option("cwd", "PATH"))
                 .arg(option("label", "TEXT"))
                 .arg(env_option())
                 .arg(flag("focus"))
                 .arg(flag("no-focus")),
         )
-        .subcommand(id_command("get", "workspace_id", "Show a workspace"))
-        .subcommand(id_command("focus", "workspace_id", "Focus a workspace"))
+        .subcommand(id_command("get", "workspace_id", t.workspace_get_about))
+        .subcommand(id_command("focus", "workspace_id", t.workspace_focus_about))
         .subcommand(
             Command::new("rename")
-                .about("Rename a workspace")
+                .about(t.workspace_rename_about)
                 .arg(required("workspace_id", "WORKSPACE_ID"))
                 .arg(required("label", "LABEL").num_args(1..)),
         )
         .subcommand(
             Command::new("report-metadata")
-                .about("Report display-only workspace metadata")
+                .about(t.workspace_report_metadata_about)
                 .arg(required("workspace_id", "WORKSPACE_ID"))
                 .arg(option("source", "ID").required(true))
                 .arg(repeatable_option("token", "NAME=VALUE"))
@@ -220,22 +227,23 @@ fn workspace_command() -> Command {
                 .arg(option("seq", "N"))
                 .arg(option("ttl-ms", "N")),
         )
-        .subcommand(id_command("close", "workspace_id", "Close a workspace"))
+        .subcommand(id_command("close", "workspace_id", t.workspace_close_about))
 }
 
 fn worktree_command() -> Command {
+    let t = &crate::i18n::texts().cli_help;
     Command::new("worktree")
-        .about("Manage Git worktree-backed workspaces")
+        .about(t.worktree_about)
         .subcommand(
             Command::new("list")
-                .about("List worktree workspaces")
+                .about(t.worktree_list_about)
                 .arg(option("workspace", "ID"))
                 .arg(path_option("cwd", "PATH"))
                 .arg(flag("trust-repository")),
         )
         .subcommand(
             Command::new("create")
-                .about("Create and open a Git worktree")
+                .about(t.worktree_create_about)
                 .arg(option("workspace", "ID"))
                 .arg(path_option("cwd", "PATH"))
                 .arg(option("branch", "NAME"))
@@ -248,7 +256,7 @@ fn worktree_command() -> Command {
         )
         .subcommand(
             Command::new("open")
-                .about("Open an existing Git worktree")
+                .about(t.worktree_open_about)
                 .arg(option("workspace", "ID"))
                 .arg(path_option("cwd", "PATH"))
                 .arg(path_option("path", "PATH"))
@@ -260,7 +268,7 @@ fn worktree_command() -> Command {
         )
         .subcommand(
             Command::new("remove")
-                .about("Remove a worktree checkout")
+                .about(t.worktree_remove_about)
                 .arg(option("workspace", "ID"))
                 .arg(flag("force"))
                 .arg(flag("trust-repository")),
@@ -268,16 +276,17 @@ fn worktree_command() -> Command {
 }
 
 fn tab_command() -> Command {
+    let t = &crate::i18n::texts().cli_help;
     Command::new("tab")
-        .about("Manage tabs over the socket API")
+        .about(t.tab_about)
         .subcommand(
             Command::new("list")
-                .about("List tabs")
+                .about(t.tab_list_about)
                 .arg(option("workspace", "WORKSPACE_ID")),
         )
         .subcommand(
             Command::new("create")
-                .about("Create a tab")
+                .about(t.tab_create_about)
                 .arg(option("workspace", "WORKSPACE_ID"))
                 .arg(path_option("cwd", "PATH"))
                 .arg(option("label", "TEXT"))
@@ -285,23 +294,24 @@ fn tab_command() -> Command {
                 .arg(flag("focus"))
                 .arg(flag("no-focus")),
         )
-        .subcommand(id_command("get", "tab_id", "Show a tab"))
-        .subcommand(id_command("focus", "tab_id", "Focus a tab"))
+        .subcommand(id_command("get", "tab_id", t.tab_get_about))
+        .subcommand(id_command("focus", "tab_id", t.tab_focus_about))
         .subcommand(
             Command::new("rename")
-                .about("Rename a tab")
+                .about(t.tab_rename_about)
                 .arg(required("tab_id", "TAB_ID"))
                 .arg(required("label", "LABEL").num_args(1..)),
         )
-        .subcommand(id_command("close", "tab_id", "Close a tab"))
+        .subcommand(id_command("close", "tab_id", t.tab_close_about))
 }
 
 fn notification_command() -> Command {
+    let t = &crate::i18n::texts().cli_help;
     Command::new("notification")
-        .about("Show Herdr notifications")
+        .about(t.notification_about)
         .subcommand(
             Command::new("show")
-                .about("Show a notification")
+                .about(t.notification_show_about)
                 .arg(required("title", "TITLE"))
                 .arg(option("body", "TEXT"))
                 .arg(option("position", "POSITION").value_parser([
@@ -315,13 +325,14 @@ fn notification_command() -> Command {
 }
 
 fn agent_command() -> Command {
+    let t = &crate::i18n::texts().cli_help;
     Command::new("agent")
-        .about("Control and inspect agent panes")
-        .subcommand(Command::new("list").about("List agents"))
-        .subcommand(id_command("get", "target", "Show an agent"))
+        .about(t.agent_about)
+        .subcommand(Command::new("list").about(t.agent_list_about))
+        .subcommand(id_command("get", "target", t.agent_get_about))
         .subcommand(
             Command::new("read")
-                .about("Read agent terminal output")
+                .about(t.agent_read_about)
                 .override_usage("herdr agent read <TARGET> [OPTIONS]")
                 .arg(required("target", "TARGET"))
                 .arg(read_source_option(true))
@@ -331,40 +342,35 @@ fn agent_command() -> Command {
         )
         .subcommand(
             Command::new("send-keys")
-                .about("Send key presses to an agent")
+                .about(t.agent_send_keys_about)
                 .arg(required("target", "TARGET"))
                 .arg(required("key", "KEY").num_args(1..))
-                .after_help("Use esc as the canonical Escape key name; escape is also accepted."),
+                .after_help(t.send_keys_after_help),
         )
         .subcommand(
             Command::new("prompt")
-                .about("Submit a prompt to an agent")
+                .about(t.agent_prompt_about)
                 .override_usage("herdr agent prompt <TARGET> <TEXT> [OPTIONS]")
                 .arg(required("target", "TARGET"))
                 .arg(required("text", "TEXT"))
-                .arg(
-                    flag("wait")
-                        .help("Wait for the first matching state observed after submission"),
-                )
+                .arg(flag("wait").help(t.agent_prompt_wait_help))
                 .arg(
                     option("until", "STATUS")
                         .action(ArgAction::Append)
                         .requires("wait")
                         .value_parser(["idle", "working", "blocked", "done", "unknown"])
-                        .help("State to match after --wait; repeat for more than one state"),
+                        .help(t.agent_prompt_until_help),
                 )
                 .arg(
                     option("timeout", "MS")
                         .requires("wait")
-                        .help("Fail after this many milliseconds"),
+                        .help(t.timeout_ms_help),
                 )
-                .after_help(
-                    "If the agent is already blocked, submission is rejected with agent_blocked before any input is sent. When an accepted submission starts from another non-working state, --wait requires an observed working or blocked state within 5000ms; otherwise it returns agent_prompt_stalled. A caller timeout that expires first returns timeout. It then matches idle, done, or blocked by default, or any exact --until state. It does not track turns: if the agent is already working, that active turn's completion may match.",
-                ),
+                .after_help(t.agent_prompt_after_help),
         )
         .subcommand(
             Command::new("rename")
-                .about("Rename an agent")
+                .about(t.agent_rename_about)
                 .override_usage("herdr agent rename <TARGET> <NAME>|--clear")
                 .arg(required("target", "TARGET"))
                 .arg(Arg::new("name").value_name("NAME"))
@@ -375,33 +381,31 @@ fn agent_command() -> Command {
                         .required(true),
                 ),
         )
-        .subcommand(id_command("focus", "target", "Focus an agent"))
+        .subcommand(id_command("focus", "target", t.agent_focus_about))
         .subcommand(
             Command::new("wait")
-                .about("Wait until an agent reaches one of the requested states")
+                .about(t.agent_wait_about)
                 .override_usage("herdr agent wait <TARGET> [OPTIONS]")
                 .arg(required("target", "TARGET"))
                 .arg(
                     option("until", "STATUS")
                         .action(ArgAction::Append)
                         .value_parser(["idle", "working", "blocked", "done", "unknown"])
-                        .help("State to match; repeat for more than one state"),
+                        .help(t.agent_wait_until_help),
                 )
-                .arg(option("timeout", "MS").help("Fail after this many milliseconds"))
-                .after_help(
-                    "Without --until, matches idle, done, or blocked. Use --until unknown explicitly when needed. Without --timeout, waits indefinitely.",
-                ),
+                .arg(option("timeout", "MS").help(t.timeout_ms_help))
+                .after_help(t.agent_wait_after_help),
         )
         .subcommand(
             Command::new("attach")
-                .about("Attach directly to an agent terminal")
+                .about(t.agent_attach_about)
                 .override_usage("herdr agent attach <TARGET> [OPTIONS]")
                 .arg(required("target", "TARGET"))
                 .arg(flag("takeover")),
         )
         .subcommand(
             Command::new("start")
-                .about("Start a supported interactive agent in an existing pane")
+                .about(t.agent_start_about)
                 .override_usage(
                     "herdr agent start <NAME> --kind <KIND> --pane <ID> [OPTIONS] [-- [AGENT_ARG]...]",
                 )
@@ -410,30 +414,25 @@ fn agent_command() -> Command {
                     option("kind", "KIND")
                         .required(true)
                         .value_parser(agent_kind_values())
-                        .help("Supported agent kind and canonical executable"),
+                        .help(t.agent_start_kind_help),
                 )
                 .arg(
                     option("pane", "ID")
                         .required(true)
-                        .help("Existing pane at an interactive shell prompt"),
+                        .help(t.agent_start_pane_help),
                 )
-                .arg(
-                    option("timeout", "MS")
-                        .help("Wait for interactive readiness (default: 30000; max: 300000)"),
-                )
+                .arg(option("timeout", "MS").help(t.agent_start_timeout_help))
                 .arg(
                     Arg::new("agent_args")
                         .value_name("AGENT_ARG")
                         .num_args(0..)
                         .last(true),
                 )
-                .after_help(
-                    "The pane must be at its interactive shell prompt. Success means the expected agent was detected in the same terminal and is ready for input.\n\nnext: herdr agent prompt <TARGET> <TEXT> --wait",
-                ),
+                .after_help(t.agent_start_after_help),
         )
         .subcommand(
             Command::new("explain")
-                .about("Explain agent detection state")
+                .about(t.agent_explain_about)
                 .arg(Arg::new("target").value_name("TARGET"))
                 .arg(path_option("file", "PATH"))
                 .arg(option("agent", "LABEL"))
@@ -456,56 +455,57 @@ pub(super) fn agent_kind_values() -> Vec<&'static str> {
 }
 
 fn pane_command() -> Command {
+    let t = &crate::i18n::texts().cli_help;
     Command::new("pane")
-        .about("Control terminal panes")
+        .about(t.pane_about)
         .subcommand(
             Command::new("list")
-                .about("List panes")
+                .about(t.pane_list_about)
                 .arg(option("workspace", "WORKSPACE_ID")),
         )
         .subcommand(
             Command::new("current")
-                .about("Show the current pane")
+                .about(t.pane_current_about)
                 .args(current_pane_args()),
         )
-        .subcommand(id_command("get", "pane_id", "Show a pane"))
+        .subcommand(id_command("get", "pane_id", t.pane_get_about))
         .subcommand(
             Command::new("layout")
-                .about("Show pane layout information")
+                .about(t.pane_layout_about)
                 .args(current_pane_args()),
         )
         .subcommand(
             Command::new("process-info")
-                .about("Show pane process information")
+                .about(t.pane_process_info_about)
                 .args(current_pane_args()),
         )
         .subcommand(
             Command::new("neighbor")
-                .about("Find a pane neighbor")
+                .about(t.pane_neighbor_about)
                 .arg(required_direction_option())
                 .args(current_pane_args()),
         )
         .subcommand(
             Command::new("edges")
-                .about("Show pane edge information")
+                .about(t.pane_edges_about)
                 .args(current_pane_args()),
         )
         .subcommand(
             Command::new("focus")
-                .about("Focus a neighboring pane")
+                .about(t.pane_focus_about)
                 .arg(required_direction_option())
                 .args(current_pane_args()),
         )
         .subcommand(
             Command::new("resize")
-                .about("Resize a pane split")
+                .about(t.pane_resize_about)
                 .arg(required_direction_option())
                 .arg(option("amount", "FLOAT"))
                 .args(current_pane_args()),
         )
         .subcommand(
             Command::new("zoom")
-                .about("Toggle or set pane zoom")
+                .about(t.pane_zoom_about)
                 .arg(Arg::new("pane_id").value_name("PANE_ID"))
                 .args(current_pane_args())
                 .arg(flag("toggle"))
@@ -514,7 +514,7 @@ fn pane_command() -> Command {
         )
         .subcommand(
             Command::new("read")
-                .about("Read pane terminal output")
+                .about(t.pane_read_about)
                 .arg(required("pane_id", "PANE_ID"))
                 .arg(read_source_option(true))
                 .arg(option("lines", "N"))
@@ -524,14 +524,14 @@ fn pane_command() -> Command {
         )
         .subcommand(
             Command::new("rename")
-                .about("Rename a pane")
+                .about(t.pane_rename_about)
                 .arg(required("pane_id", "PANE_ID"))
                 .arg(Arg::new("label").value_name("LABEL").num_args(1..))
                 .arg(flag("clear")),
         )
         .subcommand(
             Command::new("input")
-                .about("Set pane input routing")
+                .about(t.pane_input_about)
                 .arg(Arg::new("pane_id").value_name("PANE_ID"))
                 .args(current_pane_args())
                 .arg(
@@ -542,7 +542,7 @@ fn pane_command() -> Command {
         )
         .subcommand(
             Command::new("split")
-                .about("Split a pane")
+                .about(t.pane_split_about)
                 .arg(Arg::new("pane_id").value_name("PANE_ID"))
                 .args(current_pane_args())
                 .arg(split_direction_option())
@@ -555,7 +555,7 @@ fn pane_command() -> Command {
         )
         .subcommand(
             Command::new("swap")
-                .about("Swap panes")
+                .about(t.pane_swap_about)
                 .arg(direction_option())
                 .args(current_pane_args())
                 .arg(option("source-pane", "ID"))
@@ -563,7 +563,7 @@ fn pane_command() -> Command {
         )
         .subcommand(
             Command::new("move")
-                .about("Move a pane")
+                .about(t.pane_move_about)
                 .arg(required("pane_id", "PANE_ID"))
                 .arg(option("tab", "TAB_ID"))
                 .arg(option("split", "DIRECTION").value_parser(["right", "down"]))
@@ -577,55 +577,51 @@ fn pane_command() -> Command {
                 .arg(flag("focus"))
                 .arg(flag("no-focus")),
         )
-        .subcommand(id_command("close", "pane_id", "Close a pane"))
+        .subcommand(id_command("close", "pane_id", t.pane_close_about))
         .subcommand(
             Command::new("send-text")
-                .about("Send literal text to a pane")
+                .about(t.pane_send_text_about)
                 .arg(required("pane_id", "PANE_ID"))
                 .arg(required("text", "TEXT"))
-                .after_help(
-                    "next: herdr pane run <PANE_ID> <COMMAND> sends text and Enter in one call",
-                ),
+                .after_help(t.pane_send_text_after_help),
         )
         .subcommand(
             Command::new("send-keys")
-                .about("Send key presses to a pane")
+                .about(t.pane_send_keys_about)
                 .arg(required("pane_id", "PANE_ID"))
                 .arg(required("key", "KEY").num_args(1..))
-                .after_help("Use esc as the canonical Escape key name; escape is also accepted."),
+                .after_help(t.send_keys_after_help),
         )
         .subcommand(
             Command::new("wait-output")
-                .about("Wait for matching pane output")
+                .about(t.pane_wait_output_about)
                 .arg(required("pane_id", "PANE_ID"))
                 .arg(
                     option("match", "TEXT")
                         .conflicts_with("regex")
                         .required_unless_present("regex")
-                        .help("Match a literal substring"),
+                        .help(t.pane_wait_output_match_help),
                 )
                 .arg(
                     option("regex", "PATTERN")
                         .conflicts_with("match")
                         .required_unless_present("match")
-                        .help("Match a Rust regular expression"),
+                        .help(t.pane_wait_output_regex_help),
                 )
                 .arg(read_source_option(false))
-                .arg(option("lines", "N").help("Restrict the searched snapshot to N lines"))
-                .arg(option("timeout", "MS").help("Fail after this many milliseconds"))
-                .arg(flag("raw").help("Keep ANSI escape sequences while matching"))
+                .arg(option("lines", "N").help(t.pane_wait_output_lines_help))
+                .arg(option("timeout", "MS").help(t.timeout_ms_help))
+                .arg(flag("raw").help(t.pane_wait_output_raw_help))
                 .group(
                     ArgGroup::new("matcher")
                         .args(["match", "regex"])
                         .required(true),
                 )
-                .after_help(
-                    "The selected snapshot is searched immediately, including existing output, then polled. Without --timeout, this waits indefinitely.",
-                ),
+                .after_help(t.pane_wait_output_after_help),
         )
         .subcommand(
             Command::new("run")
-                .about("Run a command in a pane")
+                .about(t.pane_run_about)
                 .arg(required("pane_id", "PANE_ID"))
                 .arg(required("command", "COMMAND").num_args(1..)),
         )
@@ -636,8 +632,9 @@ fn pane_command() -> Command {
 }
 
 fn report_agent_command() -> Command {
+    let t = &crate::i18n::texts().cli_help;
     Command::new("report-agent")
-        .about("Report pane agent lifecycle state")
+        .about(t.pane_report_agent_about)
         .arg(required("pane_id", "PANE_ID"))
         .arg(option("source", "ID").required(true))
         .arg(option("agent", "LABEL").required(true))
@@ -649,8 +646,9 @@ fn report_agent_command() -> Command {
 }
 
 fn report_agent_session_command() -> Command {
+    let t = &crate::i18n::texts().cli_help;
     Command::new("report-agent-session")
-        .about("Report pane agent session identity")
+        .about(t.pane_report_agent_session_about)
         .arg(required("pane_id", "PANE_ID"))
         .arg(option("source", "ID").required(true))
         .arg(option("agent", "LABEL").required(true))
@@ -661,8 +659,9 @@ fn report_agent_session_command() -> Command {
 }
 
 fn release_agent_command() -> Command {
+    let t = &crate::i18n::texts().cli_help;
     Command::new("release-agent")
-        .about("Release pane agent lifecycle authority")
+        .about(t.pane_release_agent_about)
         .arg(required("pane_id", "PANE_ID"))
         .arg(option("source", "ID").required(true))
         .arg(option("agent", "LABEL").required(true))
@@ -670,8 +669,9 @@ fn release_agent_command() -> Command {
 }
 
 fn report_metadata_command() -> Command {
+    let t = &crate::i18n::texts().cli_help;
     Command::new("report-metadata")
-        .about("Report display-only pane metadata")
+        .about(t.pane_report_metadata_about)
         .arg(required("pane_id", "PANE_ID"))
         .arg(option("source", "ID").required(true))
         .arg(option("agent", "LABEL"))
@@ -689,20 +689,21 @@ fn report_metadata_command() -> Command {
 }
 
 fn terminal_command() -> Command {
+    let t = &crate::i18n::texts().cli_help;
     Command::new("terminal")
-        .about("Attach to or observe raw terminal streams")
+        .about(t.terminal_about)
         .subcommand(
             Command::new("attach")
-                .about("Attach directly to a terminal stream")
+                .about(t.terminal_attach_about)
                 .arg(required("terminal_id", "TERMINAL_ID"))
                 .arg(flag("takeover")),
         )
         .subcommand(
             Command::new("session")
-                .about("Work with terminal sessions")
+                .about(t.terminal_session_about)
                 .subcommand(
                     Command::new("control")
-                        .about("Control a terminal stream")
+                        .about(t.terminal_session_control_about)
                         .arg(required("target", "TARGET"))
                         .arg(flag("takeover"))
                         .arg(option("cols", "N"))
@@ -710,7 +711,7 @@ fn terminal_command() -> Command {
                 )
                 .subcommand(
                     Command::new("observe")
-                        .about("Observe a terminal stream")
+                        .about(t.terminal_session_observe_about)
                         .arg(required("target", "TARGET"))
                         .arg(option("cols", "N"))
                         .arg(option("rows", "N")),
@@ -718,65 +719,72 @@ fn terminal_command() -> Command {
         )
         .subcommand(
             Command::new("title")
-                .about("Manage the outer terminal title")
+                .about(t.terminal_title_about)
                 .subcommand(
                     Command::new("set")
-                        .about("Set the outer terminal title")
+                        .about(t.terminal_title_set_about)
                         .arg(required("title", "TITLE")),
                 )
-                .subcommand(Command::new("clear").about("Clear the outer terminal title")),
+                .subcommand(Command::new("clear").about(t.terminal_title_clear_about)),
         )
 }
 
 fn session_command() -> Command {
+    let t = &crate::i18n::texts().cli_help;
     Command::new("session")
-        .about("Manage named persistent sessions")
-        .subcommand(Command::new("list").about("List sessions").arg(json_flag()))
+        .about(t.session_about)
+        .subcommand(
+            Command::new("list")
+                .about(t.session_list_about)
+                .arg(json_flag()),
+        )
         .subcommand(
             Command::new("attach")
-                .about("Attach to a session")
+                .about(t.session_attach_about)
                 .arg(required("name", "NAME")),
         )
         .subcommand(
             Command::new("stop")
-                .about("Stop a session")
+                .about(t.session_stop_about)
                 .arg(required("name", "NAME"))
                 .arg(json_flag()),
         )
         .subcommand(
             Command::new("delete")
-                .about("Delete a stopped session")
+                .about(t.session_delete_about)
                 .arg(required("name", "NAME"))
                 .arg(json_flag()),
         )
 }
 
 fn integration_command() -> Command {
+    let t = &crate::i18n::texts().cli_help;
     Command::new("integration")
-        .about("Manage built-in agent integrations")
+        .about(t.integration_about)
         .subcommand(
             Command::new("install")
-                .about("Install an integration")
+                .about(t.integration_install_about)
                 .arg(integration_target_arg()),
         )
         .subcommand(
             Command::new("uninstall")
-                .about("Uninstall an integration")
+                .about(t.integration_uninstall_about)
                 .arg(integration_target_arg()),
         )
         .subcommand(
             Command::new("status")
-                .about("Show integration status")
+                .about(t.integration_status_about)
                 .arg(flag("outdated-only")),
         )
 }
 
 fn plugin_command() -> Command {
+    let t = &crate::i18n::texts().cli_help;
     Command::new("plugin")
-        .about("Install and run workflow plugins")
+        .about(t.plugin_about)
         .subcommand(
             Command::new("install")
-                .about("Install a plugin from GitHub")
+                .about(t.plugin_install_about)
                 .arg(required("source", "OWNER/REPO[/SUBDIR]"))
                 .arg(option("ref", "REF"))
                 .arg(
@@ -788,74 +796,74 @@ fn plugin_command() -> Command {
         )
         .subcommand(
             Command::new("uninstall")
-                .about("Uninstall a plugin")
+                .about(t.plugin_uninstall_about)
                 .arg(required("plugin", "PLUGIN")),
         )
         .subcommand(
             Command::new("link")
-                .about("Link a local plugin")
+                .about(t.plugin_link_about)
                 .arg(path_arg("path", "PATH"))
                 .arg(flag("disabled"))
                 .arg(flag("enabled")),
         )
         .subcommand(
             Command::new("unlink")
-                .about("Unlink a local plugin")
+                .about(t.plugin_unlink_about)
                 .arg(required("plugin_id", "PLUGIN_ID")),
         )
         .subcommand(
             Command::new("enable")
-                .about("Enable a plugin")
+                .about(t.plugin_enable_about)
                 .arg(required("plugin_id", "PLUGIN_ID")),
         )
         .subcommand(
             Command::new("disable")
-                .about("Disable a plugin")
+                .about(t.plugin_disable_about)
                 .arg(required("plugin_id", "PLUGIN_ID")),
         )
         .subcommand(
             Command::new("list")
-                .about("List installed plugins")
+                .about(t.plugin_list_about)
                 .arg(option("plugin", "ID"))
                 .arg(json_flag()),
         )
         .subcommand(
             Command::new("config-dir")
-                .about("Print a plugin config directory")
+                .about(t.plugin_config_dir_about)
                 .arg(required("plugin_id", "PLUGIN_ID")),
         )
         .subcommand(
             Command::new("action")
-                .about("List or invoke plugin actions")
+                .about(t.plugin_action_about)
                 .subcommand(
                     Command::new("list")
-                        .about("List plugin actions")
+                        .about(t.plugin_action_list_about)
                         .arg(option("plugin", "ID")),
                 )
                 .subcommand(
                     Command::new("invoke")
-                        .about("Invoke a plugin action")
+                        .about(t.plugin_action_invoke_about)
                         .arg(required("action_id", "ACTION_ID"))
                         .arg(option("plugin", "ID")),
                 ),
         )
         .subcommand(
             Command::new("log")
-                .about("Inspect plugin command logs")
+                .about(t.plugin_log_about)
                 .visible_alias("logs")
                 .subcommand(
                     Command::new("list")
-                        .about("List plugin command logs")
+                        .about(t.plugin_log_list_about)
                         .arg(option("plugin", "ID"))
                         .arg(option("limit", "N")),
                 ),
         )
         .subcommand(
             Command::new("pane")
-                .about("Manage plugin-owned panes")
+                .about(t.plugin_pane_about)
                 .subcommand(
                     Command::new("open")
-                        .about("Open a plugin pane")
+                        .about(t.plugin_pane_open_about)
                         .arg(option("plugin", "ID"))
                         .arg(option("entrypoint", "ID"))
                         .arg(
@@ -872,12 +880,12 @@ fn plugin_command() -> Command {
                 )
                 .subcommand(
                     Command::new("focus")
-                        .about("Focus a plugin pane")
+                        .about(t.plugin_pane_focus_about)
                         .arg(required("pane_id", "PANE_ID")),
                 )
                 .subcommand(
                     Command::new("close")
-                        .about("Close a plugin pane")
+                        .about(t.plugin_pane_close_about)
                         .arg(required("pane_id", "PANE_ID")),
                 ),
         )
@@ -933,7 +941,7 @@ fn read_source_option(include_detection: bool) -> Arg {
     };
     option("source", "SOURCE")
         .value_parser(values)
-        .help("Terminal snapshot source (default: recent)")
+        .help(crate::i18n::texts().cli_help.source_help)
 }
 
 fn text_ansi_format_option() -> Arg {
@@ -953,13 +961,13 @@ fn help_flag() -> Arg {
         .short('h')
         .long("help")
         .action(ArgAction::SetTrue)
-        .help("Show help")
+        .help(crate::i18n::texts().cli_help.help_flag_help)
 }
 
 fn env_option() -> Arg {
     option("env", "KEY=VALUE")
         .action(ArgAction::Append)
-        .help("Set an environment variable for the launched process")
+        .help(crate::i18n::texts().cli_help.env_help)
 }
 
 fn flag(name: &'static str) -> Arg {
@@ -1326,20 +1334,21 @@ mod tests {
         for group in ["agent", "pane", "workspace", "terminal"] {
             let help = long_help(&[group]);
             assert!(
-                help.contains(super::super::AGENT_HELP_FOOTER),
+                help.contains(super::super::agent_help_footer()),
                 "herdr {group} is missing agent resources: {help}"
             );
         }
 
         let leaf = long_help(&["agent", "wait"]);
         assert!(
-            !leaf.contains(super::super::AGENT_HELP_FOOTER),
+            !leaf.contains(super::super::agent_help_footer()),
             "leaf help should stay focused: {leaf}"
         );
     }
 
     #[test]
     fn next_step_hints_render_without_replacing_existing_after_help() {
+        let _guard = crate::i18n::lang_guard(crate::i18n::Lang::En);
         let agent_start = long_help(&["agent", "start"]);
         assert!(
             agent_start.contains("The pane must be at its interactive shell prompt."),

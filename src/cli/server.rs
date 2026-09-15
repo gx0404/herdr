@@ -153,14 +153,17 @@ fn agent_manifest_update_error_response(err: &str) -> serde_json::Value {
 }
 
 fn print_agent_manifest_status(response: &serde_json::Value) {
+    let t = &crate::i18n::texts().cli_output;
     let result = &response["result"];
     let last_check = result["last_check_unix"]
         .as_u64()
         .map(|value| value.to_string())
-        .unwrap_or_else(|| "never".to_string());
-    let last_result = result["last_result"].as_str().unwrap_or("not checked");
-    println!("last check: {last_check}");
-    println!("result: {last_result}");
+        .unwrap_or_else(|| t.manifests_never.to_string());
+    let last_result = result["last_result"]
+        .as_str()
+        .unwrap_or(t.manifests_not_checked);
+    println!("{}{last_check}", t.manifests_last_check_label);
+    println!("{}{last_result}", t.manifests_result_label);
     println!();
 
     let Some(manifests) = result["manifests"].as_array() else {
@@ -173,7 +176,7 @@ fn print_agent_manifest_status(response: &serde_json::Value) {
         let remote_version = manifest["cached_remote_version"].as_str().unwrap_or("-");
         let remote_result = manifest["remote_update_result"]
             .as_str()
-            .unwrap_or("not checked");
+            .unwrap_or(t.manifests_not_checked);
         let local_override_shadowing_remote = manifest["local_override_shadowing_remote"]
             .as_bool()
             .unwrap_or(false);
@@ -185,12 +188,13 @@ fn print_agent_manifest_status(response: &serde_json::Value) {
             " "
         };
         println!(
-            "{marker} {agent:<9} {source:<14} active {active_version:<14} remote {remote_version:<14} {remote_result}"
+            "{marker} {agent:<9} {source:<14} {} {active_version:<14} {} {remote_version:<14} {remote_result}",
+            t.manifests_row_active, t.manifests_row_remote
         );
         if let Some(error) = manifest["remote_update_error"].as_str() {
             println!("  {error}");
         } else if local_override_shadowing_remote {
-            println!("  local override shadows cached remote rules");
+            println!("{}", t.manifests_local_override_note);
         } else if let Some(warning) = manifest["warning"].as_str() {
             println!("  {warning}");
         }

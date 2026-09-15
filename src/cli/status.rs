@@ -91,25 +91,37 @@ fn print_full_status(json: bool) -> std::io::Result<i32> {
         return Ok(0);
     }
 
-    println!("client:");
-    println!("  version: {}", crate::build_info::version());
+    let t = &crate::i18n::texts().cli_output;
+    println!("{}", t.status_client_header);
+    println!("  {}{}", t.label_version, crate::build_info::version());
     println!(
-        "  channel: {}",
+        "  {}{}",
+        t.label_channel,
         crate::config::Config::load().config.update.channel.as_str()
     );
-    println!("  protocol: {}", crate::protocol::PROTOCOL_VERSION);
     println!(
-        "  endpoint_protocol_generation: {}",
+        "  {}{}",
+        t.label_protocol,
+        crate::protocol::PROTOCOL_VERSION
+    );
+    println!(
+        "  {}{}",
+        t.label_endpoint_generation,
         crate::protocol::endpoint::ENDPOINT_PROTOCOL_GENERATION
     );
     println!();
-    println!("server:");
+    println!("{}", t.status_server_header);
     print_server_status_body(&server, "  ");
     println!();
-    println!("update:");
-    println!("  restart_needed: {}", restart_needed_label(&server));
+    println!("{}", t.status_update_header);
     println!(
-        "  server_binary_stale: {}",
+        "  {}{}",
+        t.label_restart_needed,
+        restart_needed_label(&server)
+    );
+    println!(
+        "  {}{}",
+        t.label_server_binary_stale,
         server_binary_stale_label(&server)
     );
 
@@ -132,43 +144,65 @@ fn print_client_status(json: bool) -> std::io::Result<()> {
         return Ok(());
     }
 
-    println!("version: {}", crate::build_info::version());
+    let t = &crate::i18n::texts().cli_output;
+    println!("{}{}", t.label_version, crate::build_info::version());
     println!(
-        "channel: {}",
+        "{}{}",
+        t.label_channel,
         crate::config::Config::load().config.update.channel.as_str()
     );
-    println!("protocol: {}", crate::protocol::PROTOCOL_VERSION);
+    println!("{}{}", t.label_protocol, crate::protocol::PROTOCOL_VERSION);
     println!(
-        "endpoint_protocol_generation: {}",
+        "{}{}",
+        t.label_endpoint_generation,
         crate::protocol::endpoint::ENDPOINT_PROTOCOL_GENERATION
     );
-    println!("binary: {}", current_exe_label());
+    println!("{}{}", t.label_binary, current_exe_label());
     Ok(())
 }
 
 fn print_server_status_body(server: &ServerRuntimeStatus, indent: &str) {
+    let t = &crate::i18n::texts().cli_output;
     match server {
         ServerRuntimeStatus::Running {
             version,
             protocol,
             capabilities,
         } => {
-            println!("{indent}status: running");
-            println!("{indent}version: {}", option_label(version.as_deref()));
+            println!("{indent}{}{}", t.status_label, t.status_running);
             println!(
-                "{indent}endpoint_compatible: {}",
+                "{indent}{}{}",
+                t.label_version,
+                option_label(version.as_deref())
+            );
+            println!(
+                "{indent}{}{}",
+                t.label_endpoint_compatible,
                 endpoint_compatibility_label(capabilities.as_ref())
             );
-            println!("{indent}private_protocol: {}", protocol_label(*protocol));
             println!(
-                "{indent}private_protocol_compatible: {}",
+                "{indent}{}{}",
+                t.label_private_protocol,
+                protocol_label(*protocol)
+            );
+            println!(
+                "{indent}{}{}",
+                t.label_private_protocol_compatible,
                 compatibility_label(*protocol)
             );
-            println!("{indent}socket: {}", super::target::socket_label());
+            println!(
+                "{indent}{}{}",
+                t.label_socket,
+                super::target::socket_label()
+            );
         }
         ServerRuntimeStatus::NotRunning => {
-            println!("{indent}status: not running");
-            println!("{indent}socket: {}", super::target::socket_label());
+            println!("{indent}{}{}", t.status_label, t.status_not_running);
+            println!(
+                "{indent}{}{}",
+                t.label_socket,
+                super::target::socket_label()
+            );
         }
     }
 }
@@ -191,50 +225,54 @@ fn read_server_runtime_status() -> std::io::Result<ServerRuntimeStatus> {
 }
 
 fn option_label(value: Option<&str>) -> &str {
-    value.unwrap_or("unknown")
+    value.unwrap_or(crate::i18n::texts().cli_output.value_unknown)
 }
 
 fn protocol_label(protocol: Option<u32>) -> String {
     protocol
         .map(|value| value.to_string())
-        .unwrap_or_else(|| "unknown".to_string())
+        .unwrap_or_else(|| crate::i18n::texts().cli_output.value_unknown.to_string())
 }
 
 fn compatibility_label(protocol: Option<u32>) -> &'static str {
+    let t = &crate::i18n::texts().cli_output;
     match protocol {
-        Some(protocol) if protocol == crate::protocol::PROTOCOL_VERSION => "yes",
-        Some(_) => "no",
-        None => "unknown",
+        Some(protocol) if protocol == crate::protocol::PROTOCOL_VERSION => t.value_yes,
+        Some(_) => t.value_no,
+        None => t.value_unknown,
     }
 }
 
 fn endpoint_compatibility_label(
     capabilities: Option<&crate::api::schema::ServerCapabilities>,
 ) -> &'static str {
+    let t = &crate::i18n::texts().cli_output;
     match capabilities.and_then(|value| value.endpoint_protocol_generation) {
         Some(generation)
             if generation == crate::protocol::endpoint::ENDPOINT_PROTOCOL_GENERATION =>
         {
-            "yes"
+            t.value_yes
         }
-        Some(_) => "no",
-        None => "unknown",
+        Some(_) => t.value_no,
+        None => t.value_unknown,
     }
 }
 
 fn restart_needed_label(server: &ServerRuntimeStatus) -> &'static str {
+    let t = &crate::i18n::texts().cli_output;
     match restart_needed_bool(server) {
-        Some(true) => "yes",
-        Some(false) => "no",
-        None => "unknown",
+        Some(true) => t.value_yes,
+        Some(false) => t.value_no,
+        None => t.value_unknown,
     }
 }
 
 fn server_binary_stale_label(server: &ServerRuntimeStatus) -> &'static str {
+    let t = &crate::i18n::texts().cli_output;
     match server_binary_stale_bool(server) {
-        Some(true) => "yes",
-        Some(false) => "no",
-        None => "unknown",
+        Some(true) => t.value_yes,
+        Some(false) => t.value_no,
+        None => t.value_unknown,
     }
 }
 

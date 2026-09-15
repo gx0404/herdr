@@ -278,6 +278,7 @@ fn root_and_command_group_help_point_agents_to_plain_text_docs() {
     for args in [&["--help"][..], &["agent", "--help"][..]] {
         let output = Command::new(env!("CARGO_BIN_EXE_herdr"))
             .args(args)
+            .env("HERDR_LANG", "en")
             .env_remove("HERDR_SOCKET_PATH")
             .env_remove("HERDR_CLIENT_SOCKET_PATH")
             .env_remove("HERDR_ENV")
@@ -326,6 +327,7 @@ fn subcommand_help_explains_automation_semantics_without_a_server() {
     for (args, expected) in cases {
         let output = Command::new(env!("CARGO_BIN_EXE_herdr"))
             .args(*args)
+            .env("HERDR_LANG", "en")
             .env_remove("HERDR_SOCKET_PATH")
             .env_remove("HERDR_CLIENT_SOCKET_PATH")
             .env_remove("HERDR_ENV")
@@ -485,6 +487,7 @@ fn root_help_advertises_api_schema_command_group() {
 fn api_schema_default_output_is_a_short_summary() {
     let output = Command::new(env!("CARGO_BIN_EXE_herdr"))
         .args(["api", "schema"])
+        .env("HERDR_LANG", "en")
         .output()
         .unwrap();
 
@@ -567,6 +570,7 @@ fn api_schema_output_writes_bundled_schema_to_file() {
     let output = Command::new(env!("CARGO_BIN_EXE_herdr"))
         .args(["api", "schema", "--output"])
         .arg(&schema_path)
+        .env("HERDR_LANG", "en")
         .output()
         .unwrap();
 

@@ -599,9 +599,10 @@ fn main() -> io::Result<()> {
 
     if args.iter().any(|a| a == "--help" || a == "-h") {
         platform::begin_cli_output();
-        println!("herdr — terminal workspace manager for AI coding agents");
+        let t = &i18n::texts().cli_help;
+        println!("{}", t.main_tagline);
         println!();
-        println!("Usage: herdr [options]");
+        println!("{}", t.main_usage_line);
         println!("       herdr --session <name> [options]");
         println!("       herdr --machine <label-or-id> <command>");
         println!("       herdr --remote <ssh-target> [--session <name>]");
@@ -712,7 +713,7 @@ fn main() -> io::Result<()> {
         println!("Env:    HERDR_CONFIG_PATH overrides config file path");
         println!("Home:   https://herdr.dev");
         println!();
-        println!("{}", cli::AGENT_HELP_FOOTER);
+        println!("{}", cli::agent_help_footer());
         return Ok(());
     }
 

@@ -61,8 +61,11 @@ $oldPath = $env:PATH
 $oldSession = $env:HERDR_SESSION
 $oldSocket = $env:HERDR_SOCKET_PATH
 $oldClientSocket = $env:HERDR_CLIENT_SOCKET_PATH
+$oldLang = $env:HERDR_LANG
 $env:PATH = "$fakeDir;$oldPath"
 $env:HERDR_SESSION = $Session
+# The readiness check matches the localized human status output; pin English.
+$env:HERDR_LANG = "en"
 Remove-Item Env:HERDR_SOCKET_PATH, Env:HERDR_CLIENT_SOCKET_PATH -ErrorAction SilentlyContinue
 
 $server = $null
@@ -157,6 +160,11 @@ try {
         Remove-Item Env:HERDR_CLIENT_SOCKET_PATH -ErrorAction SilentlyContinue
     } else {
         $env:HERDR_CLIENT_SOCKET_PATH = $oldClientSocket
+    }
+    if ($null -eq $oldLang) {
+        Remove-Item Env:HERDR_LANG -ErrorAction SilentlyContinue
+    } else {
+        $env:HERDR_LANG = $oldLang
     }
     Remove-Item -Recurse -Force $fakeDir -ErrorAction SilentlyContinue
 }
