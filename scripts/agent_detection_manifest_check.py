@@ -7,8 +7,12 @@ import argparse
 import hashlib
 import re
 import sys
-import tomllib
 from pathlib import Path
+
+try:
+    import tomllib
+except ModuleNotFoundError:  # Python 3.10 开发机兼容；CI 运行时为 3.11+
+    import tomli as tomllib  # type: ignore[no-redef]
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
