@@ -253,10 +253,15 @@ tasks = []
 id = "terminal-core"
 doc = "docs/AGENT_RULES/terminal-core.md"
 paths = [
+  # Windows VT 输入与 kitty keyboard 是输入域的 Windows/宿主特化，与 platform、
+  # protocol-api/app-render 域并集（见各域文档交叉引用）。
+  "src/client/input/windows_vti.rs",
   "src/ghostty/**",
   "src/input/**",
   "src/kitty_graphics.rs",
   "src/kitty_graphics/**",
+  "src/pane/kitty_keyboard.rs",
+  "src/pane/terminal/windows_recent_fallback.rs",
   "src/pty/**",
   "src/raw_input.rs",
   "src/terminal/**",
