@@ -13,7 +13,38 @@ test:
 
 # Run repository maintenance contract tests
 maintenance-test:
-    {{python}} -m unittest scripts.test_agent_detection_manifest_check scripts.test_changelog scripts.test_config_reference_check scripts.test_docs_translation_parity scripts.test_hermes_integration_asset scripts.test_package_windows_conpty scripts.test_preview scripts.test_unix_installer scripts.test_vendor_libghostty_vt scripts.test_vendor_portable_pty scripts.test_windows_cross
+    {{python}} -m unittest scripts.test_agent_detection_manifest_check scripts.test_agent_kb scripts.test_ai_tool_hooks scripts.test_changelog scripts.test_config_reference_check scripts.test_docs_translation_parity scripts.test_hermes_integration_asset scripts.test_package_windows_conpty scripts.test_preview scripts.test_resolve_agent_rules scripts.test_unix_installer scripts.test_vendor_libghostty_vt scripts.test_vendor_portable_pty scripts.test_windows_cross
+
+# Resolve required AI domain rules for the paths you will touch (usage: just agent-rules src/detect src/app)
+agent-rules *paths:
+    @if [ -z "{{paths}}" ]; then echo "usage: just agent-rules <paths...>  (e.g. just agent-rules src/detect)"; exit 2; fi
+    {{python}} scripts/resolve_agent_rules.py {{paths}}
+
+# Validate the AI rule routing closed set and size budgets
+agent-rules-check:
+    {{python}} scripts/resolve_agent_rules.py --check
+
+# Rebuild the agent knowledge base (write mode; review the diff)
+kb:
+    {{python}} scripts/build_agent_kb.py --confirm
+
+# Knowledge base freshness check (read-only)
+kb-check:
+    {{python}} scripts/build_agent_kb.py
+
+# Rebuild the code knowledge graph (src only, full rebuild; local artifacts under graphify-out/)
+graph:
+    bash scripts/graphify.sh rebuild
+
+# Graph fingerprint and report mirror consistency check
+graph-check:
+    bash scripts/graphify.sh check
+
+# Aggregate framework gate: rule routing closed set + hook probes + KB/graph freshness
+framework-check: agent-rules-check
+    {{python}} -m unittest scripts.test_resolve_agent_rules scripts.test_ai_tool_hooks scripts.test_agent_kb
+    just kb-check
+    just graph-check
 
 # Run one nextest filter, e.g. `just test-one codex_stale_working`
 test-one filter:
