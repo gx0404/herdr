@@ -15,8 +15,34 @@ __pycache__/
 !/docs/preview/**
 !/docs/versions/
 !/docs/versions/**
+!/docs/*.md
+!/docs/AGENT_RULES/
+!/docs/AGENT_RULES/**
+!/docs/graphify/
+!/docs/graphify/**
+!/docs/kb/
+!/docs/kb/**
 /.local/
 /backlog
+
+# AI 工具面：共享配置入库，个人状态本机维护
+/.claude/settings.local.json
+/.claude/review/
+/.claude/sessions/
+/.claude/live-edits.log
+/.codex/state/
+/.codex/sessions/
+/.codex/auth.json
+/.zcode/plans/
+/.zcode/tmp/
+
+# Graphify：报告/标签/指纹入库，图与视图本机重建
+/graphify-out/*
+!/graphify-out/GRAPH_REPORT.md
+!/graphify-out/.graphify_labels.json
+!/graphify-out/.graphify_labels.json.sig
+!/graphify-out/source-fingerprint.json
+/.graphify-memory/
 
 /.pi/todos
 /.pi/issues

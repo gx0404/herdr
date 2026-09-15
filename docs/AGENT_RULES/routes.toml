@@ -1,0 +1,290 @@
+# herdr AI 领域规则路由 —— 唯一机器真源。
+# 语义：paths 为排序 glob（* 不跨目录，** 跨目录，`dir/**` 额外匹配目录自身）；
+# 多条规则命中同一文件时取并集（有意为之，注释说明原因）；tasks 触发任务级规则。
+# 闭集约束：每个 Git 可见文件必须命中至少一条规则或 root_only；root_only 当前为空。
+# 维护流程见 docs/AGENT_RULES/README.md。
+
+version = 2
+root_max_bytes = 16384
+root_only = []
+
+[[rules]]
+id = "ai-tooling"
+doc = "docs/AGENT_RULES/ai-tooling.md"
+paths = [
+  ".agents/**",
+  ".claude/**",
+  ".codex/**",
+  ".pi/**",
+  ".zcode/**",
+  ".zed/**",
+  "AGENTS.md",
+  "CLAUDE.md",
+  "docs/AGENT_RULES/**",
+  "docs/AI_TOOLS.md",
+  "docs/graphify/**",
+  "docs/kb/**",
+  "graphify-out/**",
+  "scripts/agent_kb.py",
+  "scripts/build_agent_kb.py",
+  "scripts/graphify.sh",
+  "scripts/graphify_fingerprint.py",
+  "scripts/resolve_agent_rules.py",
+  "scripts/test_agent_kb.py",
+  "scripts/test_ai_tool_hooks.py",
+  "scripts/test_resolve_agent_rules.py",
+  "src/.graphifyignore",
+]
+tasks = []
+
+[[rules]]
+id = "app-render"
+doc = "docs/AGENT_RULES/app-render.md"
+paths = [
+  "scripts/test_ui_hot_path_architecture.py",
+  "src/agent_view_eval.rs",
+  "src/app/**",
+  "src/copy_mode.rs",
+  "src/layout.rs",
+  "src/pane.rs",
+  "src/pane/**",
+  "src/popup_size.rs",
+  "src/selection.rs",
+  "src/terminal_effects.rs",
+  "src/terminal_theme.rs",
+  "src/ui.rs",
+  "src/ui/**",
+]
+tasks = []
+
+[[rules]]
+id = "code-review"
+doc = "docs/AGENT_RULES/code-review.md"
+paths = []
+tasks = ["review"]
+
+[[rules]]
+id = "detection"
+doc = "docs/AGENT_RULES/detection.md"
+paths = [
+  "distribution/agent-detection/**",
+  "scripts/agent_detection_manifest_check.py",
+  "scripts/capture_agent_screen.py",
+  "scripts/test_agent_detection_manifest_check.py",
+  "src/detect/**",
+  # 检测的运行时消费点与领域实现共用不变量，取并集。
+  "src/pane/agent_detection.rs",
+  "src/server/autodetect.rs",
+  "tests/auto_detect.rs",
+]
+tasks = []
+
+[[rules]]
+id = "docs-pipeline"
+doc = "docs/AGENT_RULES/docs-pipeline.md"
+paths = [
+  "README.md",
+  "README.zh-CN.md",
+  "docs/**",
+  "scripts/config_reference_check.py",
+  "scripts/docs/**",
+  "scripts/docs_translation_parity.py",
+  "scripts/test_config_reference_check.py",
+  "scripts/test_docs_translation_parity.py",
+]
+tasks = []
+
+[[rules]]
+id = "governance"
+doc = "docs/AGENT_RULES/governance.md"
+paths = [
+  ".githooks/**",
+  ".github/**",
+  "CONTRIBUTING.md",
+  "LICENSE",
+  "SPONSORS.md",
+  "scripts/conventional_commits.py",
+]
+tasks = []
+
+[[rules]]
+id = "integration-assets"
+doc = "docs/AGENT_RULES/integration-assets.md"
+paths = [
+  "scripts/test_hermes_integration_asset.py",
+  "src/integration/**",
+]
+tasks = []
+
+[[rules]]
+id = "persistence-session"
+doc = "docs/AGENT_RULES/persistence-session.md"
+paths = [
+  "src/agent_resume.rs",
+  "src/persist.rs",
+  "src/persist/**",
+  "src/session.rs",
+  "src/workspace.rs",
+  "src/workspace/**",
+  "src/worktree.rs",
+  "tests/live_handoff.rs",
+]
+tasks = []
+
+[[rules]]
+id = "platform"
+doc = "docs/AGENT_RULES/platform.md"
+paths = [
+  "scripts/package_windows_conpty.ps1",
+  "scripts/package_windows_conpty.py",
+  "scripts/test_package_windows_conpty.py",
+  "scripts/test_windows_cross.py",
+  "scripts/windows_arm64_installer_test.ps1",
+  "scripts/windows_check.ps1",
+  "scripts/windows_conpty_enhanced_input_probe.ps1",
+  "scripts/windows_cross.py",
+  "scripts/windows_install_conpty_package_test.ps1",
+  "scripts/windows_smoke_conpty_path.ps1",
+  # Windows 专属实现同时受平台隔离与所属领域约束，取并集。
+  "src/client/input/windows_vti.rs",
+  "src/pane/terminal/windows_recent_fallback.rs",
+  "src/platform/**",
+]
+tasks = []
+
+[[rules]]
+id = "product-agent-skill"
+doc = "docs/AGENT_RULES/product-agent-skill.md"
+paths = [
+  "distribution/agent-guide.md",
+  "skills/**",
+]
+tasks = []
+
+[[rules]]
+id = "project-infra"
+doc = "docs/AGENT_RULES/project-infra.md"
+paths = [
+  ".cargo/**",
+  ".gitattributes",
+  ".gitignore",
+  "Cargo.lock",
+  "Cargo.toml",
+  "assets/**",
+  "build.rs",
+  "clippy.toml",
+  "justfile",
+  "rust-toolchain.toml",
+  "scripts/__init__.py",
+  "scripts/capture_key_matrix.py",
+  "scripts/capture_keys.py",
+  "scripts/seed_navigator_demo.sh",
+  "src/build_info.rs",
+  "src/checksum.rs",
+  "src/config.rs",
+  "src/config/**",
+  "src/logging.rs",
+  "src/metadata_tokens.rs",
+  "src/plugin_command.rs",
+  "src/plugin_paths.rs",
+  "src/product_announcements.rs",
+  "src/release_notes.rs",
+  "src/render_prof.rs",
+  "src/render_signal.rs",
+  "src/sound.rs",
+  "src/update.rs",
+]
+tasks = []
+
+[[rules]]
+id = "protocol-api"
+doc = "docs/AGENT_RULES/protocol-api.md"
+paths = [
+  "docs/next/api/**",
+  "src/api/**",
+  "src/cli.rs",
+  "src/cli/**",
+  "src/client/**",
+  "src/events.rs",
+  "src/handoff_runtime.rs",
+  "src/ipc.rs",
+  "src/main.rs",
+  "src/noninteractive_process.rs",
+  "src/pane_graphics_files.rs",
+  "src/protocol/**",
+  "src/remote.rs",
+  "src/remote/**",
+  "src/server/**",
+  "tests/fixtures/endpoint-method-shapes-v1.json",
+]
+tasks = []
+
+[[rules]]
+id = "release-channels"
+doc = "docs/AGENT_RULES/release-channels.md"
+paths = [
+  ".github/workflows/build-artifacts-manual.yml",
+  ".github/workflows/distribution.yml",
+  ".github/workflows/label-next-release-issues.yml",
+  ".github/workflows/nix.yml",
+  ".github/workflows/preview.yml",
+  ".github/workflows/release.yml",
+  ".github/workflows/website-deploy.yml",
+  ".github/workflows/windows-arm64.yml",
+  "CHANGELOG.md",
+  "distribution/**",
+  "flake.lock",
+  "flake.nix",
+  "nix/**",
+  "packaging/**",
+  "scripts/changelog.py",
+  "scripts/preview.py",
+  "scripts/release_perf_case.sh",
+  "scripts/release_perf_producer.pl",
+  "scripts/release_perf_smoke.sh",
+  "scripts/test_changelog.py",
+  "scripts/test_preview.py",
+  "scripts/test_unix_installer.py",
+  "scripts/verify_suspicious_keys.py",
+]
+tasks = []
+
+[[rules]]
+id = "terminal-core"
+doc = "docs/AGENT_RULES/terminal-core.md"
+paths = [
+  "src/ghostty/**",
+  "src/input/**",
+  "src/kitty_graphics.rs",
+  "src/kitty_graphics/**",
+  "src/pty/**",
+  "src/raw_input.rs",
+  "src/terminal/**",
+  "src/terminal_modes.rs",
+  "src/terminal_notify.rs",
+]
+tasks = []
+
+[[rules]]
+id = "testing"
+doc = "docs/AGENT_RULES/testing.md"
+paths = [
+  "scripts/smoke_live_handoff_sessions.sh",
+  # 所有脚本自测与领域规则取并集：新增 scripts/test_*.py 自动被测试纪律覆盖。
+  "scripts/test_*.py",
+  "tests/**",
+]
+tasks = []
+
+[[rules]]
+id = "vendored-libghostty-vt"
+doc = "docs/AGENT_RULES/vendored-libghostty-vt.md"
+paths = [
+  "scripts/build_vendored_libghostty_vt.sh",
+  "scripts/generate_libghostty_bindings.sh",
+  "scripts/test_vendor_libghostty_vt.py",
+  "scripts/test_vendor_portable_pty.py",
+  "scripts/vendor_libghostty_vt.py",
+  "vendor/**",
+]
+tasks = []
