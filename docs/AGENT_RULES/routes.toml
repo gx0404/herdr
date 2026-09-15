@@ -185,6 +185,8 @@ paths = [
   "src/checksum.rs",
   "src/config.rs",
   "src/config/**",
+  "src/i18n.rs",
+  "src/i18n/**",
   "src/logging.rs",
   "src/metadata_tokens.rs",
   "src/plugin_command.rs",

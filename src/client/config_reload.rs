@@ -101,6 +101,7 @@ pub(super) fn reload_local_client_config(
 ) {
     match crate::config::load_live_config() {
         Ok(loaded) => {
+            crate::i18n::set_lang(loaded.config.language);
             let invalid_section = |section: &str| {
                 loaded
                     .invalid_sections

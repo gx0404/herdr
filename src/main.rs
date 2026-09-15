@@ -25,6 +25,7 @@ mod detect;
 mod events;
 mod ghostty;
 mod handoff_runtime;
+mod i18n;
 mod input;
 mod integration;
 mod ipc;
@@ -64,6 +65,10 @@ mod worktree;
 
 const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # Place this file at ~/.config/herdr/config.toml
+
+# Language for TUI and CLI messages: "zh-CN" or "en".
+# HERDR_LANG=en overrides this for one run.
+# language = "zh-CN"
 
 # Show first-run notification setup on startup.
 # Missing also shows onboarding; set false after you've chosen.
@@ -501,6 +506,7 @@ fn finish_cli(outcome: io::Result<cli::CommandOutcome>) -> io::Result<()> {
 }
 
 fn main() -> io::Result<()> {
+    i18n::init_early();
     let raw_args: Vec<String> = match args_as_utf8(std::env::args_os()) {
         Ok(args) => args,
         Err(err) => {

@@ -1,5 +1,5 @@
 {
-  "chunk_count": 828,
+  "chunk_count": 831,
   "chunks": [
     {
       "anchor": "herdr",
@@ -4665,6 +4665,27 @@
     },
     {
       "anchor": "structure",
+      "doc": "src/i18n/en.rs",
+      "id": "src-i18n-en-rs-structure",
+      "source_sha256": "3361f170befeb14775db10c759a8a484d569b3661959c31b13585a197f0aeda9",
+      "text": "模块文档：English wording, kept aligned with the upstream herdr chrome text.\n公开项：\npub const TEXTS: Texts = Texts {"
+    },
+    {
+      "anchor": "structure",
+      "doc": "src/i18n.rs",
+      "id": "src-i18n-rs-structure",
+      "source_sha256": "cdd1112d5fe4a63ffbb777deddd59fee4e8b4615e6afaaf140b4b4817b9465fe",
+      "text": "模块文档：Bilingual UI string tables and the process-wide language selection.  The default is `zh-CN`; `en` keeps the upstream wording. The language is chosen once at process start from `HERDR_LANG` (wins) or the `language` key in config.toml, and is re-applied on client config reload. All user-visible chrome text goes through the `Texts` tables so both languages stay complete by construction.\n公开项：\npub mod en;\npub mod zh_cn;\npub const LANG_ENV_VAR: &str = \"HERDR_LANG\";\npub enum Lang {\nimpl Lang {\npub fn parse(value: &str) -> Option<Self> {\npub fn set_lang(lang: Lang) {\npub fn lang() -> Lang {\npub fn lang_guard(lang: Lang) -> LangGuard { — Test helper: switch the language for the guard's lifetime.\npub struct LangGuard(Lang);\nimpl Drop for LangGuard {\npub fn init_early() { — Resolve the language before any user-visible output: `HERDR_LANG` wins so a broken config cannot pin the wrong language, then a minimal peek at config.toml's `language` key (full config load happens later, with\npub struct ChromeTexts {\npub struct Texts {\npub fn texts() -> &'static Texts {\npub fn texts_for(lang: Lang) -> &'static Texts {"
+    },
+    {
+      "anchor": "structure",
+      "doc": "src/i18n/zh_cn.rs",
+      "id": "src-i18n-zh-cn-rs-structure",
+      "source_sha256": "3c14150ad50820311fa6799b5522caf53f3e5cb87cfaf2e128cf6d569b867f65",
+      "text": "模块文档：简体中文文案表。键集合必须与 `en.rs` 完全一致（由 `Texts` 结构保证）。\n公开项：\npub const TEXTS: Texts = Texts {"
+    },
+    {
+      "anchor": "structure",
       "doc": "src/input/encode.rs",
       "id": "src-input-encode-rs-structure",
       "source_sha256": "4023a9dd8db655d866b6338f6f5e23cad9d172b9f98663cc50906fb778e7bf06",
@@ -4793,8 +4814,8 @@
       "anchor": "structure",
       "doc": "src/integration/registry.rs",
       "id": "src-integration-registry-rs-structure",
-      "source_sha256": "b1398187cbdcd696feb25a95aec69878312533dea0c169c75c1df4276f4a90cd",
-      "text": "公开项：\npub(crate) fn integration_target_label(\npub(crate) fn integration_target_command(\npub(crate) fn integration_target_command_names(\npub(crate) fn cursor_command_names() -> &'static [&'static str] {\npub(crate) fn integration_target_supported(target: crate::api::schema::IntegrationTarget) -> bool {\npub(crate) fn integration_target_available(target: crate::api::schema::IntegrationTarget) -> bool {\npub(crate) fn qodercli_command_names() -> &'static [&'static str] {\npub(crate) fn qodercli_command_names() -> &'static [&'static str] {\npub(crate) fn integration_target_install_layout_available(\npub(crate) fn command_available(command: &str) -> bool {\npub(crate) fn command_path_candidates(dir: &Path, command: &str) -> Vec<PathBuf> {\npub(crate) fn executable_file_exists(path: &Path) -> bool {\npub(crate) fn codex_standalone_binary_available() -> bool {\npub(crate) fn codex_executable_name() -> &'static str {\npub(crate) fn hermes_install_layout_available() -> bool {\npub(crate) fn installed_integration_statuses() -> Vec<super::IntegrationStatus> {\npub(crate) fn integration_recommendations() -> Vec<super::IntegrationRecommendation> {\npub(crate) fn outdated_installed_integrations() -> Vec<super::IntegrationStatus> {\npub(crate) fn integration_update_instructions(\npub(crate) fn print_outdated_update_notice() -> bool {\npub(crate) fn integration_status_at(\npub(crate) fn experimental_letta_integration_status() -> Option<super::ExperimentalIntegrationStatus> — Letta is intentionally kept out of the frozen client endpoint `IntegrationTarget` enum so published generation-1 clients never receive an unknown variant. It is installable and reportable as an experimental\npub(crate) fn parse_integration_version(content: &str) -> Option<u32> {"
+      "source_sha256": "f1cbb1770c08911a23c144da4337354d4e1858b48f05e65a1538dfb023104d72",
+      "text": "公开项：\npub(crate) fn integration_target_label(\npub(crate) fn integration_target_command(\npub(crate) fn integration_target_command_names(\npub(crate) fn cursor_command_names() -> &'static [&'static str] {\npub(crate) fn integration_target_supported(target: crate::api::schema::IntegrationTarget) -> bool {\npub(crate) fn integration_target_available(target: crate::api::schema::IntegrationTarget) -> bool {\npub(crate) fn qodercli_command_names() -> &'static [&'static str] {\npub(crate) fn qodercli_command_names() -> &'static [&'static str] {\npub(crate) fn integration_target_install_layout_available(\npub(crate) fn command_available(command: &str) -> bool {\npub(crate) fn command_path_candidates(dir: &Path, command: &str) -> Vec<PathBuf> {\npub(crate) fn executable_file_exists(path: &Path) -> bool {\npub(crate) fn codex_install_layout_available() -> bool { — Codex availability must not depend on the server process inheriting an interactive-shell PATH: detached servers (daemon/GUI launch) miss the version-manager bin dirs where npm installs land, so both the native\npub(crate) fn codex_standalone_binary_available() -> bool {\npub(crate) fn codex_executable_name() -> &'static str {\npub(crate) fn hermes_install_layout_available() -> bool {\npub(crate) fn installed_integration_statuses() -> Vec<super::IntegrationStatus> {\npub(crate) fn integration_recommendations() -> Vec<super::IntegrationRecommendation> {\npub(crate) fn outdated_installed_integrations() -> Vec<super::IntegrationStatus> {\npub(crate) fn integration_update_instructions(\npub(crate) fn print_outdated_update_notice() -> bool {\npub(crate) fn integration_status_at(\npub(crate) fn experimental_letta_integration_status() -> Option<super::ExperimentalIntegrationStatus> — Letta is intentionally kept out of the frozen client endpoint `IntegrationTarget` enum so published generation-1 clients never receive an unknown variant. It is installable and reportable as an experimental\npub(crate) fn parse_integration_version(content: &str) -> Option<u32> {"
     },
     {
       "anchor": "structure",
@@ -5717,8 +5738,8 @@
       "anchor": "structure",
       "doc": "src/ui/widgets.rs",
       "id": "src-ui-widgets-rs-structure",
-      "source_sha256": "e1002937470fd1225da4e4a9319cfdd50af7bca961b1953692df1ebe1565a01d",
-      "text": "公开项：\npub(super) fn panel_contrast_fg(palette: &Palette) -> Color {\npub(crate) fn centered_popup_rect(area: Rect, popup_width: u16, popup_height: u16) -> Option<Rect> {\npub(crate) struct ModalStackAreas {\npub(crate) fn modal_stack_areas(\npub(crate) fn close_button_rect(area: Rect) -> Rect {\npub(crate) fn continue_button_rect(area: Rect) -> Rect {"
+      "source_sha256": "a91fab2d4659c86f22f903679e44ab7707bf9d24e40a4b078dd231337cb82829",
+      "text": "公开项：\npub(super) fn panel_contrast_fg(palette: &Palette) -> Color {\npub(crate) fn centered_popup_rect(area: Rect, popup_width: u16, popup_height: u16) -> Option<Rect> {\npub(crate) struct ModalStackAreas {\npub(crate) fn modal_stack_areas(\npub(crate) const MODAL_CLOSE_BUTTON_TEXT: &str = \" esc close \"; — Modal action buttons are rendered from these exact strings; the matching `*_button_rect` hit-test rects must stay width-twins with them.\npub(crate) const MODAL_CONTINUE_BUTTON_TEXT: &str = \" ↵ continue \";\npub(crate) fn close_button_rect(area: Rect) -> Rect {\npub(crate) fn continue_button_rect(area: Rect) -> Rect {"
     },
     {
       "anchor": "structure",

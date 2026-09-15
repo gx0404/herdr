@@ -9,6 +9,13 @@
           "type": "boolean",
           "default": "unset",
           "description": "Show first-run setup on startup. Missing or true shows onboarding; continuing from onboarding writes onboarding = false."
+        },
+        {
+          "key": "language",
+          "type": "string",
+          "default": "zh-CN",
+          "values": ["zh-CN", "en"],
+          "description": "Language for TUI and CLI messages. Allowed values: \"zh-CN\" or \"en\". The HERDR_LANG environment variable overrides this for a single run; client config reloads apply changes without restarting."
         }
       ]
     },
