@@ -25,7 +25,8 @@
 - `scripts/build_vendored_libghostty_vt.sh` 构建源码分发包；`scripts/
   generate_libghostty_bindings.sh`（`just libghostty-bindings`，bindgen-cli
   0.72.1）再生成 C API 绑定。顺序不可颠倒，绑定产物入库。
-- Zig 版本是构建输入（当前要求 0.16.0；Windows VM 场景见 `governance.md`）；
+- Zig 版本是构建输入（当前要求 0.16.0；钉版安装与 PATH 注入见
+  `project-infra.md` 的 `just setup-zig`，Windows VM 场景见 `governance.md`）；
   绑定层使用纪律见 `terminal-core.md`。
 - `vendor/portable-pty` 经 `[patch.crates-io]` 指向；其测试
   （`scripts/test_vendor_portable_pty.py`）随 maintenance-test 运行。

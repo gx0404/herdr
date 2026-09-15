@@ -13,7 +13,7 @@ test:
 
 # Run repository maintenance contract tests
 maintenance-test:
-    {{python}} -m unittest scripts.test_agent_detection_manifest_check scripts.test_agent_kb scripts.test_ai_tool_hooks scripts.test_changelog scripts.test_config_reference_check scripts.test_docs_translation_parity scripts.test_hermes_integration_asset scripts.test_package_windows_conpty scripts.test_preview scripts.test_resolve_agent_rules scripts.test_unix_installer scripts.test_vendor_libghostty_vt scripts.test_vendor_portable_pty scripts.test_windows_cross
+    {{python}} -m unittest scripts.test_agent_detection_manifest_check scripts.test_agent_kb scripts.test_ai_tool_hooks scripts.test_changelog scripts.test_config_reference_check scripts.test_docs_translation_parity scripts.test_hermes_integration_asset scripts.test_package_windows_conpty scripts.test_preview scripts.test_resolve_agent_rules scripts.test_setup_zig scripts.test_unix_installer scripts.test_vendor_libghostty_vt scripts.test_vendor_portable_pty scripts.test_windows_cross
 
 # Resolve required AI domain rules for the paths you will touch (usage: just agent-rules src/detect src/app)
 agent-rules *paths:
@@ -80,6 +80,15 @@ ci-tests filter='all()':
 [unix]
 setup-windows-cross *args:
     {{python}} scripts/windows_cross.py setup {{args}}
+
+# Provision or check the pinned Zig 0.16.0 toolchain for the vendored libghostty-vt build (use --install / --force)
+# 安装到仓库内 .local/toolchains/（gitignored）；build.rs 自动探测，$ZIG 仍可覆盖。CI 自带 zig。
+setup-zig *args:
+    {{python}} scripts/setup_zig.py {{args}}
+
+# One-shot environment setup: check required toolchains and install the project-local pinned Zig (--check for read-only doctor)
+setup-env *args:
+    bash scripts/setup_env.sh {{args}}
 
 # Run Windows target lint from Unix/macOS to catch cfg(windows) compile and clippy failures before CI
 [unix]

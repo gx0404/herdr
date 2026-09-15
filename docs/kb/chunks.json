@@ -1,5 +1,5 @@
 {
-  "chunk_count": 827,
+  "chunk_count": 828,
   "chunks": [
     {
       "anchor": "herdr",
@@ -523,8 +523,8 @@
       "anchor": "project-infra（构建、配置模型与仓库基础） > 构建与命令面",
       "doc": "docs/AGENT_RULES/project-infra.md",
       "id": "docs-agent-rules-project-infra-md-project-infra-构建-配置模型与仓库基础-构建与命令面",
-      "source_sha256": "d8352e3b4160ddb2b86697ab60a818a7288c27bc5f8cb1a3c0838748de56eeff",
-      "text": "## 构建与命令面\n\n- 任务入口是 `just`（无 Makefile）；语义与新增 recipe 见 `docs/MAKE_COMMANDS.md`。\n  修改 recipe 后必须同步该文档与 CI 调用面（`.github/workflows/ci.yml` 等，\n  归 `governance.md`/`release-channels.md`）。\n- `Cargo.toml` 是版本唯一真源（当前语义见 `release-channels.md`）；`Cargo.lock`\n  直接被 `nix/package.nix` 以 `cargoLock.lockFile` 引入，release 版本 bump 不需\n  要单独更新 Nix cargo hash；若日后加入 Cargo git 依赖，必须随该变更补\n  `cargoLock.outputHashes`。\n- `build.rs` 与 vendored 绑定生成（bindgen/libghostty）流程见\n  `vendored-libghostty-vt.md`；改构建脚本后跑 `just build` 验证两种平台路径。"
+      "source_sha256": "f9d042098614784645c8d6f532865ed9ebfad53006c8f20ddca1c5930ab483cb",
+      "text": "## 构建与命令面\n\n- 任务入口是 `just`（无 Makefile）；语义与新增 recipe 见 `docs/MAKE_COMMANDS.md`。\n  修改 recipe 后必须同步该文档与 CI 调用面（`.github/workflows/ci.yml` 等，\n  归 `governance.md`/`release-channels.md`）。\n- **Zig 工具链是钉版受控的**：vendored libghostty-vt 需要 Zig 0.16.0。仓库自包含\n  方案：`scripts/setup_env.sh`（总入口）与 `scripts/setup_zig.py` 把官方 tarball\n  （sha256 钉死）装进 `<repo>/.local/toolchains/zig/`；`build.rs::resolve_zig` 按\n  `$ZIG` > 项目内钉版 > PATH 解析，装完即可裸 `cargo build`。CI 由 workflow 的\n  setup-zig 步骤提供。多 worktree 共享一份时设 `HERDR_ZIG_HOME`。升级 Zig =\n  同步 `setup_zig.py` 钉版表、`build.rs::resolve_zig` 目录名与\n  `vendored-libghostty-vt.md` 版本要求，重跑 `just setup-zig --install --force`。\n- `Cargo.toml` 是版本唯一真源（当前语义见 `release-channels.md`）；`Cargo.lock`\n  直接被 `nix/package.nix` 以 `cargoLock.lockFile` 引入，release 版本 bump 不需\n  要单独更新 Nix cargo hash；若日后加入 Cargo git 依赖，必须随该变更补\n  `cargoLock.outputHashes`。\n- `build.rs` 与 vendored 绑定生成（bindgen/libghostty）流程见\n  `vendored-libghostty-vt.md`；改构建脚本后跑 `just build` 验证两种平台路径。"
     },
     {
       "anchor": "project-infra（构建、配置模型与仓库基础） > 配置模型（src/config）",
@@ -740,8 +740,8 @@
       "anchor": "vendored-libghostty-vt（vendored 终端内核与补丁） > 绑定与构建",
       "doc": "docs/AGENT_RULES/vendored-libghostty-vt.md",
       "id": "docs-agent-rules-vendored-libghostty-vt-md-vendored-libghostty-vt-vendored-终端内核与补丁-绑定与构建",
-      "source_sha256": "70960d995e58fed74db656e98b73de05f8caa0813b6148e8e07c7b136534b5a3",
-      "text": "## 绑定与构建\n\n- `scripts/build_vendored_libghostty_vt.sh` 构建源码分发包；`scripts/\n  generate_libghostty_bindings.sh`（`just libghostty-bindings`，bindgen-cli\n  0.72.1）再生成 C API 绑定。顺序不可颠倒，绑定产物入库。\n- Zig 版本是构建输入（当前要求 0.16.0；Windows VM 场景见 `governance.md`）；\n  绑定层使用纪律见 `terminal-core.md`。\n- `vendor/portable-pty` 经 `[patch.crates-io]` 指向；其测试\n  （`scripts/test_vendor_portable_pty.py`）随 maintenance-test 运行。"
+      "source_sha256": "022e0cc67209437c3cd6b0ffb847bf8d783af164098971bf7a68b3df4c0c662a",
+      "text": "## 绑定与构建\n\n- `scripts/build_vendored_libghostty_vt.sh` 构建源码分发包；`scripts/\n  generate_libghostty_bindings.sh`（`just libghostty-bindings`，bindgen-cli\n  0.72.1）再生成 C API 绑定。顺序不可颠倒，绑定产物入库。\n- Zig 版本是构建输入（当前要求 0.16.0；钉版安装与 PATH 注入见\n  `project-infra.md` 的 `just setup-zig`，Windows VM 场景见 `governance.md`）；\n  绑定层使用纪律见 `terminal-core.md`。\n- `vendor/portable-pty` 经 `[patch.crates-io]` 指向；其测试\n  （`scripts/test_vendor_portable_pty.py`）随 maintenance-test 运行。"
     },
     {
       "anchor": "AI 工具接入与验证账",
@@ -852,8 +852,8 @@
       "anchor": "herdr 开发闭环 > 环境准备",
       "doc": "docs/DEVELOPMENT.md",
       "id": "docs-development-md-herdr-开发闭环-环境准备",
-      "source_sha256": "39b0431781543df24d2e88b383f01360631baf8d21c602cdce92f40dd1a671cf",
-      "text": "## 环境准备\n\n- Rust：`rust-toolchain.toml` 锁定（当前 1.96.1，含 clippy/rustfmt）。\n- `just`：命令入口（全表见 `MAKE_COMMANDS.md`）。\n- Python 3：维护脚本与其 unittest（建议 ≥3.11；3.10 需 `tomli`，仓库脚本已带\n  回退）。\n- Bun：docs 契约与集成资产测试（`just docs-contract-test`、`integration-assets-test`）。\n- Zig 0.16.0：仅构建 vendored libghostty-vt 时需要；日常 `cargo build` 使用预生成分发。\n- Windows 交叉验证：`cargo install xwin --locked` + `just setup-windows-cross`\n  （一次性，详见 `AGENT_RULES/platform.md`）。\n- `just install-hooks` 安装 conventional-commit 守门钩子。"
+      "source_sha256": "6e49e2e173c97c2f972d3dec4614b8105a53afcd582e91a232c199620b71b70d",
+      "text": "## 环境准备\n\n- Rust：`rust-toolchain.toml` 锁定（当前 1.96.1，含 clippy/rustfmt）。\n- `just`：命令入口（全表见 `MAKE_COMMANDS.md`）。\n- Python 3：维护脚本与其 unittest（建议 ≥3.11；3.10 需 `tomli`，仓库脚本已带\n  回退）。\n- Bun：docs 契约与集成资产测试（`just docs-contract-test`、`integration-assets-test`）。\n- 一键环境：`scripts/setup_env.sh`（`just setup-env`）——检查 cargo/just/python3/bun，\n  并把 sha256 钉版 Zig 0.16.0 安装到**仓库内** `.local/toolchains/zig/`\n  （gitignored，不写用户全局状态）。安装后裸 `cargo build` 与 `just` 直接可用：\n  build.rs 自动探测项目内钉版（优先级 `$ZIG` > 项目内钉版 > PATH）；CI 由\n  workflow 的 setup-zig 步骤提供。`--check` 为只读诊断。\n- Windows 交叉验证：`cargo install xwin --locked` + `just setup-windows-cross`\n  （一次性，详见 `AGENT_RULES/platform.md`）。\n- `just install-hooks` 安装 conventional-commit 守门钩子。"
     },
     {
       "anchor": "just 命令手册",
@@ -886,9 +886,16 @@
     {
       "anchor": "just 命令手册 > 日常开发",
       "doc": "docs/MAKE_COMMANDS.md",
-      "id": "docs-make-commands-md-just-命令手册-日常开发",
-      "source_sha256": "3e1ec49e76e646b2f7aa52e871f14260fedffc2fae7e5f7c7731ede5dc5eabc3",
-      "text": "## 日常开发\n\n| 命令 | 用途 | 前置 | 副作用 | 证据 |\n|---|---|---|---|---|\n| `just test` | 全量验证：nextest + maintenance + 热路径架构 + 资产 + docs 契约 | Rust/Python/Bun 工具链 | 编译产物、临时目录 | 退出码 0；各子命令输出 |\n| `just test-one <filter>` | 单个 nextest 过滤器 | 同上 | 同上 | 退出码 0 |\n| `just maintenance-test` | 维护脚本 unittest 清单（新脚本测试须登记进清单） | Python3（3.10 需 tomli） | 无 | `unittest` OK |\n| `just ui-hot-path-architecture-test` | UI 热路径架构边界（确定性） | Python3 | 无 | `unittest` OK |\n| `just lint` | fmt --check + clippy -D warnings | Rust | 无 | 退出码 0 |\n| `just ci [filter]` / `just ci-tests [filter]` | PR CI 等效链（ci 含 lint） | 同上 | 编译产物 | 退出码 0 |\n| `just check` | ci + windows-lint + docs 契约 + 提醒（unix）；Windows 走 `windows_check.ps1 -Mode check` | 同上 + Windows SDK（交叉） | 编译产物 | 退出码 0 |\n| `just windows-lint` | Windows 目标编译/clippy（Unix 交叉） | `just setup-windows-cross` 一次 | 下载 SDK 到 `~/.local/share/herdr/windows-cross/` | 退出码 0 |\n| `just setup-windows-cross [-- --accept-license]` | 下载 Windows SDK（xwin） | `cargo install xwin --locked` | 下载（仅显式运行） | 脚本成功输出 |\n| `just install-hooks` | 安装 `.githooks`（conventional commits） | git | `core.hooksPath` 配置 | 提示安装完成 |\n| `just build` | release 构建 | Rust（vendored vt 需 Zig 或用预生成） | `target/` | 构建成功 |\n| `just default-config` | 打印默认配置 | 同上 | 无 | stdout |"
+      "id": "docs-make-commands-md-just-命令手册-日常开发-part1",
+      "source_sha256": "91fed7b07b3cb676231f89843f3b50b4db898fca5a7683773417e6154a8b049d",
+      "text": "## 日常开发\n\n| 命令 | 用途 | 前置 | 副作用 | 证据 |\n|---|---|---|---|---|\n| `just test` | 全量验证：nextest + maintenance + 热路径架构 + 资产 + docs 契约 | Rust/Python/Bun 工具链 | 编译产物、临时目录 | 退出码 0；各子命令输出 |\n| `just test-one <filter>` | 单个 nextest 过滤器 | 同上 | 同上 | 退出码 0 |\n| `just maintenance-test` | 维护脚本 unittest 清单（新脚本测试须登记进清单） | Python3（3.10 需 tomli） | 无 | `unittest` OK |\n| `just ui-hot-path-architecture-test` | UI 热路径架构边界（确定性） | Python3 | 无 | `unittest` OK |\n| `just lint` | fmt --check + clippy -D warnings | Rust | 无 | 退出码 0 |\n| `just ci [filter]` / `just ci-tests [filter]` | PR CI 等效链（ci 含 lint） | 同上 | 编译产物 | 退出码 0 |\n| `just check` | ci + windows-lint + docs 契约 + 提醒（unix）；Windows 走 `windows_check.ps1 -Mode check` | 同上 + Windows SDK（交叉） | 编译产物 | 退出码 0 |\n| `just windows-lint` | Windows 目标编译/clippy（Unix 交叉） | `just setup-windows-cross` 一次 | 下载 SDK 到 `~/.local/share/herdr/windows-cross/` | 退出码 0 |\n| `just setup-env [-- --check]` | 一键环境安装/诊断：检查 cargo/just/python3/bun，安装项目内钉版 Zig | `--install` 联网下载 | 写仓库内 `.local/toolchains/`（gitignored） | sha256 校验 + `zig version` 0.16.0 |\n| `just setup-zig [-- --install/--force]` | 钉版 Zig 0.16.0 工具链安装/诊断（vendored libghostty-vt 构建必需） | 无（--install 联网下载） | 写仓库内 `.local/toolchains/zig/`；build.rs 自动探测 | sha256 校验通过 + `zig version` 输出 0.16.0 |\n| `just setup-windows-cross [-- --accept-license]` | 下载 Windows SDK（xwin） | `cargo install xwin --locked` | 下载（仅显式运行） | 脚本成功输出 |\n| `just install-hooks` | 安装 `.githooks`（conventional commits） | git | `core.hooksPath` 配置 | 提示安装完成 |"
+    },
+    {
+      "anchor": "just 命令手册 > 日常开发",
+      "doc": "docs/MAKE_COMMANDS.md",
+      "id": "docs-make-commands-md-just-命令手册-日常开发-part2",
+      "source_sha256": "91fed7b07b3cb676231f89843f3b50b4db898fca5a7683773417e6154a8b049d",
+      "text": "| `just build` | release 构建 | Rust（vendored vt 需 Zig 或用预生成） | `target/` | 构建成功 |\n| `just default-config` | 打印默认配置 | 同上 | 无 | stdout |"
     },
     {
       "anchor": "just 命令手册 > 构建辅助",

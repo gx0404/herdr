@@ -29,6 +29,32 @@ fn env_bool(name: &str) -> Option<bool> {
     }
 }
 
+/// Resolve the zig binary for the vendored libghostty-vt build.
+///
+/// Precedence: explicit `ZIG` env var, then the project-local pinned toolchain
+/// installed by `scripts/setup_env.sh` / `just setup-zig` under
+/// `.local/toolchains/`, then whatever `zig` is on `PATH` (the upstream/CI
+/// behavior). Keeping the project-local install inside the checkout makes a
+/// fresh clone buildable after running the setup script without touching any
+/// user-global state.
+fn resolve_zig(manifest_dir: &std::path::Path) -> String {
+    if let Ok(zig) = env::var("ZIG") {
+        return zig;
+    }
+    let local_zig = manifest_dir
+        .join(".local/toolchains/zig/zig-0.16.0/zig")
+        .canonicalize()
+        .ok();
+    if let Some(zig) = local_zig {
+        println!(
+            "cargo:warning=using project-local zig toolchain: {}",
+            zig.display()
+        );
+        return zig.display().to_string();
+    }
+    "zig".to_string()
+}
+
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-changed=vendor/libghostty-vt.vendor.json");
@@ -61,7 +87,7 @@ fn main() {
         .trim()
         .to_string();
 
-    let zig = env::var("ZIG").unwrap_or_else(|_| "zig".into());
+    let zig = resolve_zig(&manifest_dir);
     let mut command = Command::new(&zig);
     command
         .arg("build")

@@ -179,6 +179,8 @@ paths = [
   "scripts/capture_key_matrix.py",
   "scripts/capture_keys.py",
   "scripts/seed_navigator_demo.sh",
+  "scripts/setup_env.sh",
+  "scripts/setup_zig.py",
   "src/build_info.rs",
   "src/checksum.rs",
   "src/config.rs",

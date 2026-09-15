@@ -15,6 +15,13 @@ update/release_notes/product_announcements/plugins/render_prof 等）与采集�
 - 任务入口是 `just`（无 Makefile）；语义与新增 recipe 见 `docs/MAKE_COMMANDS.md`。
   修改 recipe 后必须同步该文档与 CI 调用面（`.github/workflows/ci.yml` 等，
   归 `governance.md`/`release-channels.md`）。
+- **Zig 工具链是钉版受控的**：vendored libghostty-vt 需要 Zig 0.16.0。仓库自包含
+  方案：`scripts/setup_env.sh`（总入口）与 `scripts/setup_zig.py` 把官方 tarball
+  （sha256 钉死）装进 `<repo>/.local/toolchains/zig/`；`build.rs::resolve_zig` 按
+  `$ZIG` > 项目内钉版 > PATH 解析，装完即可裸 `cargo build`。CI 由 workflow 的
+  setup-zig 步骤提供。多 worktree 共享一份时设 `HERDR_ZIG_HOME`。升级 Zig =
+  同步 `setup_zig.py` 钉版表、`build.rs::resolve_zig` 目录名与
+  `vendored-libghostty-vt.md` 版本要求，重跑 `just setup-zig --install --force`。
 - `Cargo.toml` 是版本唯一真源（当前语义见 `release-channels.md`）；`Cargo.lock`
   直接被 `nix/package.nix` 以 `cargoLock.lockFile` 引入，release 版本 bump 不需
   要单独更新 Nix cargo hash；若日后加入 Cargo git 依赖，必须随该变更补

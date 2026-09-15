@@ -7,7 +7,11 @@
 - Python 3：维护脚本与其 unittest（建议 ≥3.11；3.10 需 `tomli`，仓库脚本已带
   回退）。
 - Bun：docs 契约与集成资产测试（`just docs-contract-test`、`integration-assets-test`）。
-- Zig 0.16.0：仅构建 vendored libghostty-vt 时需要；日常 `cargo build` 使用预生成分发。
+- 一键环境：`scripts/setup_env.sh`（`just setup-env`）——检查 cargo/just/python3/bun，
+  并把 sha256 钉版 Zig 0.16.0 安装到**仓库内** `.local/toolchains/zig/`
+  （gitignored，不写用户全局状态）。安装后裸 `cargo build` 与 `just` 直接可用：
+  build.rs 自动探测项目内钉版（优先级 `$ZIG` > 项目内钉版 > PATH）；CI 由
+  workflow 的 setup-zig 步骤提供。`--check` 为只读诊断。
 - Windows 交叉验证：`cargo install xwin --locked` + `just setup-windows-cross`
   （一次性，详见 `AGENT_RULES/platform.md`）。
 - `just install-hooks` 安装 conventional-commit 守门钩子。
