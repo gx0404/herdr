@@ -1,16 +1,57 @@
-# Codex 项目面。审批与沙箱基线；hooks 与 Claude 共享同一策略真源。
+# herdr project-local Codex configuration.
+# 用户级 model/provider/auth 仍在 ~/.codex/config.toml。
+# hooks 语法以真实 Codex CLI（v0.154）为准：事件键是数组表，命令嵌套在 .hooks 数组。
+
 approval_policy = "on-request"
 sandbox_mode = "workspace-write"
+# 根 AGENTS.md 是短入口；领域规则由 resolver 按路径显式读取。
 project_doc_max_bytes = 32768
 
-[hooks.PreToolUse]
+[agents]
+enabled = true
+max_concurrent_threads_per_session = 4
+
+[agents.herdr_reviewer]
+description = "herdr 领域只读评审员，按显式 scope 经 resolver 加载协议、渲染、检测、平台与发布规则。"
+config_file = "agents/herdr_reviewer.toml"
+nickname_candidates = ["Herdr Reviewer", "Herdr Auditor"]
+
+[sandbox_workspace_write]
+network_access = true
+
+[shell_environment_policy]
+inherit = "all"
+exclude = [
+  "*KEY*",
+  "*SECRET*",
+  "*TOKEN*",
+  "*PASSWORD*",
+  "OPENAI_API_KEY",
+  "ANTHROPIC_API_KEY",
+]
+
+# 危险模式判定经 .codex/hooks/pre_tool_use_policy.py 复用 .claude 的策略真源；
+# FILE 段在 Codex 侧只覆盖 Bash 面（apply_patch 无 file_path 字段），
+# 敏感文件的重定向写入已由 SHELL 段模式拦截。
+[[hooks.PreToolUse]]
+matcher = "^Bash$"
+
+[[hooks.PreToolUse.hooks]]
+type = "command"
 command = 'python3 "$(git rev-parse --show-toplevel)/.codex/hooks/pre_tool_use_policy.py"'
 timeout = 30
 
-[hooks.Stop]
-command = 'bash "$(git rev-parse --show-toplevel)/.claude/hooks/notify_review.sh"'
+[[hooks.PostToolUse]]
+matcher = "^Bash$|^apply_patch$|^Edit$|^Write$"
+
+[[hooks.PostToolUse.hooks]]
+type = "command"
+command = 'bash "$(git rev-parse --show-toplevel)/.claude/hooks/record_edit.sh"'
 timeout = 15
 
-# 复审 agent：只读；先读根 AGENTS.md，再对 diff 范围跑 resolver --task review。
-[agents.herdr_reviewer]
-path = "agents/herdr_reviewer.toml"
+[[hooks.Stop]]
+
+[[hooks.Stop.hooks]]
+type = "command"
+command = 'bash "$(git rev-parse --show-toplevel)/.claude/hooks/notify_review.sh"'
+timeout = 15

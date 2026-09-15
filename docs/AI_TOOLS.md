@@ -18,12 +18,12 @@ herdr 的 AI 协作面是「共享真源 + 薄适配器」：规则真源在 `do
 
 | 检查 | ZCode | Claude Code | Codex |
 |---|---|---|---|
-| 配置文件可解析 | PASS（JSON 探针加载） | PASS（settings.json JSON 语法） | PASS（config.toml 结构探针） |
+| 配置文件可解析 | PASS（JSON 探针加载） | PASS（settings.json JSON 语法） | PASS（2026-09 实测 codex v0.154.0 启动解析；hooks 为数组表语法，`scripts.test_ai_tool_hooks.CodexConfigShapeTests` 锁定形状） |
 | 规则加载（新会话读 AGENTS.md） | PASS（本会话即按其执行） | PENDING | PENDING |
 | PreToolUse 拒绝（`gh pr merge` 等） | PASS（探针 + bash wrapper 实测） | PASS（同一 wrapper） | PASS（codex 适配器实测） |
 | PreToolUse 放行（常规命令/编辑） | PASS（探针矩阵） | PASS（同上） | PASS |
 | PostToolUse 记录 / Stop 信号 | PASS（临时仓库实测） | PASS（同脚本） | PASS |
-| 真实客户端会话内 hook 触发 | PENDING：下次 ZCode 会话执行 `gh pr merge` 类命令观察拒绝 | PENDING | PENDING |
+| 真实客户端会话内 hook 触发 | PENDING：下次 ZCode 会话执行 `gh pr merge` 类命令观察拒绝 | PENDING | PENDING：配置解析已实测通过（v0.154.0），TUI 会话内探针命令待跑 |
 
 PENDING 补验方式：在对应工具的真实会话中尝试探针命令
 （`gh pr merge 1`、编辑 `distribution/latest.json`），确认被拒并显示理由；

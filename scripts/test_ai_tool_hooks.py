@@ -197,6 +197,44 @@ class PreToolUseGateTests(unittest.TestCase):
         self.assertEqual(0, result.returncode)
 
 
+class CodexConfigShapeTests(unittest.TestCase):
+    """锁定真实 Codex CLI 的 config.toml 形状（v0.154 实测）。
+
+    事件键必须是数组表（[[hooks.PreToolUse]]），命令嵌套在其 .hooks 数组；
+    写成 [hooks.PreToolUse] 单表会让 Codex 启动即报
+    `invalid type: map, expected a sequence` 并闪退。
+    """
+
+    def _load(self) -> dict:
+        import tomli
+
+        payload = tomli.loads((PROJECT_ROOT / ".codex" / "config.toml").read_text(encoding="utf-8"))
+        return payload
+
+    def test_hook_events_are_arrays_with_nested_command_arrays(self) -> None:
+        payload = self._load()
+        hooks = payload["hooks"]
+        for event in ("PreToolUse", "PostToolUse", "Stop"):
+            self.assertIsInstance(hooks[event], list, event)
+            for entry in hooks[event]:
+                if event != "Stop":
+                    # Stop 是会话结束事件，无工具可过滤，不需要 matcher。
+                    self.assertIn("matcher", entry)
+                self.assertIsInstance(entry["hooks"], list)
+                command = entry["hooks"][0]
+                self.assertEqual("command", command["type"])
+                self.assertIn("command", command)
+                self.assertIn("timeout", command)
+
+    def test_agents_registration_uses_config_file(self) -> None:
+        payload = self._load()
+        reviewer = payload["agents"]["herdr_reviewer"]
+        self.assertEqual("agents/herdr_reviewer.toml", reviewer["config_file"])
+        self.assertIn("description", reviewer)
+        agent_path = PROJECT_ROOT / ".codex" / "agents" / "herdr_reviewer.toml"
+        self.assertTrue(agent_path.is_file())
+
+
 class SignalHookTests(unittest.TestCase):
     def setUp(self) -> None:
         self._tmp = tempfile.TemporaryDirectory()

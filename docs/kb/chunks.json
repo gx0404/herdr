@@ -768,8 +768,8 @@
       "anchor": "AI 工具接入与验证账 > 验证账（按会话逐项记账，未运行不写 PASS）",
       "doc": "docs/AI_TOOLS.md",
       "id": "docs-ai-tools-md-ai-工具接入与验证账-验证账-按会话逐项记账-未运行不写-pass",
-      "source_sha256": "44aae526af74e6b5a1607abe7497a4bb88e70097f6ef9106b50e2b55bbf9d893",
-      "text": "## 验证账（按会话逐项记账，未运行不写 PASS）\n\n| 检查 | ZCode | Claude Code | Codex |\n|---|---|---|---|\n| 配置文件可解析 | PASS（JSON 探针加载） | PASS（settings.json JSON 语法） | PASS（config.toml 结构探针） |\n| 规则加载（新会话读 AGENTS.md） | PASS（本会话即按其执行） | PENDING | PENDING |\n| PreToolUse 拒绝（`gh pr merge` 等） | PASS（探针 + bash wrapper 实测） | PASS（同一 wrapper） | PASS（codex 适配器实测） |\n| PreToolUse 放行（常规命令/编辑） | PASS（探针矩阵） | PASS（同上） | PASS |\n| PostToolUse 记录 / Stop 信号 | PASS（临时仓库实测） | PASS（同脚本） | PASS |\n| 真实客户端会话内 hook 触发 | PENDING：下次 ZCode 会话执行 `gh pr merge` 类命令观察拒绝 | PENDING | PENDING |\n\nPENDING 补验方式：在对应工具的真实会话中尝试探针命令\n（`gh pr merge 1`、编辑 `distribution/latest.json`），确认被拒并显示理由；\n完成后把上行改为 PASS 并注明日期。"
+      "source_sha256": "7ee611fef84b7a0237188ace322c0fe56243305448fb3be81bcf77b37050ed34",
+      "text": "## 验证账（按会话逐项记账，未运行不写 PASS）\n\n| 检查 | ZCode | Claude Code | Codex |\n|---|---|---|---|\n| 配置文件可解析 | PASS（JSON 探针加载） | PASS（settings.json JSON 语法） | PASS（2026-09 实测 codex v0.154.0 启动解析；hooks 为数组表语法，`scripts.test_ai_tool_hooks.CodexConfigShapeTests` 锁定形状） |\n| 规则加载（新会话读 AGENTS.md） | PASS（本会话即按其执行） | PENDING | PENDING |\n| PreToolUse 拒绝（`gh pr merge` 等） | PASS（探针 + bash wrapper 实测） | PASS（同一 wrapper） | PASS（codex 适配器实测） |\n| PreToolUse 放行（常规命令/编辑） | PASS（探针矩阵） | PASS（同上） | PASS |\n| PostToolUse 记录 / Stop 信号 | PASS（临时仓库实测） | PASS（同脚本） | PASS |\n| 真实客户端会话内 hook 触发 | PENDING：下次 ZCode 会话执行 `gh pr merge` 类命令观察拒绝 | PENDING | PENDING：配置解析已实测通过（v0.154.0），TUI 会话内探针命令待跑 |\n\nPENDING 补验方式：在对应工具的真实会话中尝试探针命令\n（`gh pr merge 1`、编辑 `distribution/latest.json`），确认被拒并显示理由；\n完成后把上行改为 PASS 并注明日期。"
     },
     {
       "anchor": "herdr 架构地图",
