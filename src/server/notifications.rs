@@ -46,22 +46,24 @@ pub(crate) fn toast_message_from_state_change(
                     Some(agent_label),
                 )?;
                 let workspace_label = ws.display_name_from(&state.terminals, terminal_runtimes);
-                Some(format!(
-                    "{} {}: {}",
-                    agent_label,
-                    toast_event_text(kind),
-                    app::actions::notification_context(ws, &workspace_label, ws_idx, pane_id)
+                Some(crate::i18n::fill(
+                    crate::i18n::texts().notify.title_with_context_fmt,
+                    &[
+                        ("agent", agent_label),
+                        ("event", app::actions::toast_event_text(kind)),
+                        (
+                            "context",
+                            &app::actions::notification_context(
+                                ws,
+                                &workspace_label,
+                                ws_idx,
+                                pane_id,
+                            ),
+                        ),
+                    ],
                 ))
             })
         })
-}
-
-fn toast_event_text(kind: app::state::ToastKind) -> &'static str {
-    match kind {
-        app::state::ToastKind::NeedsAttention => "needs attention",
-        app::state::ToastKind::Finished => "finished",
-        app::state::ToastKind::UpdateInstalled => "updated",
-    }
 }
 
 #[cfg(test)]
@@ -147,7 +149,7 @@ mod tests {
 
         assert_eq!(
             message.as_deref(),
-            Some("codex finished: __herdr_projects__ · 1")
+            Some("codex 已完成：__herdr_projects__ · 1")
         );
 
         for (_, runtime) in terminal_runtimes.drain() {

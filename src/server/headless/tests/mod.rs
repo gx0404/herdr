@@ -6418,10 +6418,10 @@ fn update_notification_is_semantic_for_system_delivery() {
                 notification.kind,
                 protocol::SemanticNotificationKind::UpdateInstalled
             );
-            assert_eq!(notification.title, "Herdr v9.9.9 available");
+            assert_eq!(notification.title, "Herdr v9.9.9 可用");
             assert_eq!(
                 notification.body.as_deref(),
-                Some("detach, run `herdr update`, then run Herdr again to reconnect")
+                Some("分离后执行 `herdr update`，再重新运行 Herdr 以重连")
             );
         }
         other => panic!("expected semantic update notification, got {other:?}"),

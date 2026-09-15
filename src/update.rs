@@ -1897,21 +1897,10 @@ pub(crate) fn update_install_command() -> &'static str {
 }
 
 pub(crate) fn update_install_instruction(install_command: &str) -> String {
+    let update = &crate::i18n::texts().update;
     match install_command {
-        HERDR_UPDATE_COMMAND => {
-            "detach, run `herdr update`, then run Herdr again to reconnect".to_string()
-        }
-        HOMEBREW_UPDATE_COMMAND => {
-            "detach, run `brew update && brew upgrade herdr`, then run Herdr again to reconnect"
-                .to_string()
-        }
-        MISE_UPDATE_COMMAND => {
-            "detach, run `mise upgrade herdr`, then run Herdr again to reconnect".to_string()
-        }
-        NIX_UPDATE_COMMAND => {
-            "detach, update through Nix, then run Herdr again to reconnect".to_string()
-        }
-        command => format!("detach, run `{command}`, then run Herdr again to reconnect"),
+        NIX_UPDATE_COMMAND => update.install_nix.to_string(),
+        command => crate::i18n::fill(update.install_run_fmt, &[("command", command)]),
     }
 }
 
@@ -2755,15 +2744,15 @@ mod tests {
     fn update_install_instruction_distinguishes_install_from_restart() {
         assert_eq!(
             update_install_instruction(HERDR_UPDATE_COMMAND),
-            "detach, run `herdr update`, then run Herdr again to reconnect"
+            "分离后执行 `herdr update`，再重新运行 Herdr 以重连"
         );
         assert_eq!(
             update_install_instruction(HOMEBREW_UPDATE_COMMAND),
-            "detach, run `brew update && brew upgrade herdr`, then run Herdr again to reconnect"
+            "分离后执行 `brew update && brew upgrade herdr`，再重新运行 Herdr 以重连"
         );
         assert_eq!(
             update_install_instruction(MISE_UPDATE_COMMAND),
-            "detach, run `mise upgrade herdr`, then run Herdr again to reconnect"
+            "分离后执行 `mise upgrade herdr`，再重新运行 Herdr 以重连"
         );
     }
 

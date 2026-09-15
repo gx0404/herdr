@@ -654,7 +654,7 @@ async fn run_client_loop(
                             } else {
                                 present_handoff_unavailable(
                                     &mut state,
-                                    "Local is unavailable; reconnecting".into(),
+                                    crate::i18n::texts().endpoint.local_unavailable.into(),
                                 );
                             }
                         }
@@ -662,8 +662,9 @@ async fn run_client_loop(
                     Err(error) => {
                         warn!(%error, "saved machines could not be reloaded; keeping current connections");
                         if let Some(shell) = state.shell.as_mut() {
-                            shell.receive_endpoint_unavailable(format!(
-                                "Saved machines could not be reloaded; keeping current connections: {error}"
+                            shell.receive_endpoint_unavailable(crate::i18n::fill(
+                                crate::i18n::texts().endpoint.saved_machines_fmt,
+                                &[("error", &error.to_string())],
                             ));
                         }
                     }

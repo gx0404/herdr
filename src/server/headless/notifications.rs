@@ -174,11 +174,7 @@ impl HeadlessServer {
         let Some(agent_label) = update.agent_label.as_deref() else {
             return;
         };
-        let event_text = match kind {
-            crate::app::state::ToastKind::NeedsAttention => "needs attention",
-            crate::app::state::ToastKind::Finished => "finished",
-            crate::app::state::ToastKind::UpdateInstalled => "updated",
-        };
+        let event_text = crate::app::actions::toast_event_text(kind);
         let workspace_label =
             ws.display_name_from(&self.app.state.terminals, &self.app.terminal_runtimes);
         let context = crate::app::actions::notification_context(
@@ -190,7 +186,10 @@ impl HeadlessServer {
         self.send_notify_to_foreground_client(
             toast_notify_kind(self.app.state.toast_config.delivery)
                 .expect("toast forwarding requires a client notification kind"),
-            format!("{agent_label} {event_text}"),
+            crate::i18n::fill(
+                crate::i18n::texts().notify.title_fmt,
+                &[("agent", agent_label), ("event", event_text)],
+            ),
             non_empty_body(&context),
         );
     }
@@ -566,7 +565,10 @@ impl HeadlessServer {
                 self.send_to_client_shells(ServerMessage::SemanticNotification(
                     protocol::SemanticNotification {
                         kind: protocol::SemanticNotificationKind::UpdateInstalled,
-                        title: format!("Herdr v{version} available"),
+                        title: crate::i18n::fill(
+                            crate::i18n::texts().notify.herdr_version_available_fmt,
+                            &[("version", &version.to_string())],
+                        ),
                         body: Some(crate::update::update_install_instruction(&install_command)),
                         sound: None,
                         agent: None,
