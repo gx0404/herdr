@@ -203,7 +203,16 @@ def install(force: bool) -> int:
     pin = PINS[key]
     target_dir = install_dir()
     if target_dir.exists() and not force:
-        raise SetupZigError(f"已存在 {target_dir}；覆盖请加 --force")
+        # 幂等：已装且 zig version 匹配则跳过；只有损坏的安装才要求 --force。
+        if zig_binary().is_file():
+            version = _run_zig_version(zig_binary())
+            if version == ZIG_VERSION:
+                print(f"[setup-zig] 已安装且有效，跳过：{zig_binary()} (zig version: {version})；覆盖请加 --force")
+                return 0
+            raise SetupZigError(
+                f"已存在 {target_dir} 但无效（zig version: {version!r}）；覆盖请加 --force"
+            )
+        raise SetupZigError(f"已存在 {target_dir} 但缺少 zig 可执行文件；覆盖请加 --force")
     target_dir.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(dir=str(target_dir.parent)) as tmp_name:
         tmp_root = Path(tmp_name)

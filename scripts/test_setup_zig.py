@@ -91,9 +91,19 @@ class CheckModeTests(unittest.TestCase):
     def test_install_refuses_existing_dir_without_force(self) -> None:
         zig_dir = self.root / "zig-home" / setup_zig.INSTALL_DIR_NAME
         zig_dir.mkdir(parents=True)
+        # 目录存在但无有效 zig（损坏安装）→ 必须报错并提示 --force。
         result = self._run("--install")
         self.assertEqual(2, result.returncode)
         self.assertIn(b"--force", result.stderr)
+
+    def test_install_is_idempotent_when_valid(self) -> None:
+        zig_dir = self.root / "zig-home" / setup_zig.INSTALL_DIR_NAME
+        zig_dir.mkdir(parents=True)
+        (zig_dir / "zig").write_text("#!/bin/sh\necho 0.16.0\n")
+        (zig_dir / "zig").chmod(0o755)
+        result = self._run("--install")
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertIn("跳过", result.stdout.decode("utf-8"))
 
     def test_platform_key_maps_machine_aliases(self) -> None:
         self.assertEqual(setup_zig.PINS.get(setup_zig.platform_key()) is not None, True)
