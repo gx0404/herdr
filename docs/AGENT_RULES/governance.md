@@ -14,7 +14,8 @@
 - **Can 本机工作流**：仅在 Can 自己的工作站/Windows VM（如 `/home/can/Projects/
   herdr`、`HERDR_ENV=1`、`windows-wirt` SSH 别名存在）且账号为 `ogulcancelik`
   时适用；其他维护者跳过本节。Windows VM 只做最终手动验证：连接 `windows-wirt`，
-  复用 `C:\work\repo` 单一检出（不新建克隆/worktree，不用 WSL）；验证前同步
+  复用 `C:\work\repo` 单一检出（不新建克隆/worktree，不用 WSL；Windows 账户已
+  名为 `herdr`，避免 `C:\Users\herdr\herdr` 这类路径）；验证前同步
   Linux 工作树改动进去，复用 `C:\Users\herdr\.cargo` 与 `.rustup` 缓存；Cargo
   构建 vendored libghostty-vt 前设置 `$env:ZIG = "C:\Users\herdr\zig-0.16.0\
   zig.exe"`（VM PATH 上可能有更新的 Zig，herdr 当前要求 0.16.0）。验证后清理
@@ -23,7 +24,8 @@
 
 ## 维护者工作流（上游 Maintainer Workflow）
 
-- 只读调查可在共享检出进行；大特性用独立 worktree：
+- 只读调查可在共享检出进行；小改动或小任务也可在默认主 worktree 做——但若发现
+  主 worktree 已有无关的在途实现改动，改用独立 worktree。大特性用独立 worktree：
   `../herdr-worktrees/<task-slug>` + 分支 `issue/<id>-<slug>`（有 issue 时）；
   若当前会话已在独立 worktree 内则继续用，不嵌套。实现/测试/提交都在 worktree
   内完成。

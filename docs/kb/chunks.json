@@ -348,8 +348,8 @@
       "anchor": "docs-pipeline（文档快照与发布管线） > 变更范围纪律（上游补充条款）",
       "doc": "docs/AGENT_RULES/docs-pipeline.md",
       "id": "docs-agent-rules-docs-pipeline-md-docs-pipeline-文档快照与发布管线-变更范围纪律-上游补充条款",
-      "source_sha256": "38bfe86cf0881e211b32773e35635f16611a759a726793bcedaaf03d9fd80cb4",
-      "text": "## 变更范围纪律（上游补充条款）\n\n- 刷新较旧的 pull request 时，先移除其 changelog-only diff（`docs/next/\n  CHANGELOG.md` 的历史冲突源头）；该文件不由分支长期维护。commit subject 与\n  `refs #` 盘点要求见 `release-channels.md`。"
+      "source_sha256": "9b450751abbeb3b1cf4ae91942e2daac5c24764af4715cf71c8f23c5fb874a8b",
+      "text": "## 变更范围纪律（上游补充条款）\n\n- 本地 PRD、规划笔记与探索性 spec 放 `.local/prd/`；`.local/` 整体被 gitignore，\n  由本地自行管理，不入仓。\n- 刷新较旧的 pull request 时，先移除其 changelog-only diff（`docs/next/\n  CHANGELOG.md` 的历史冲突源头）；该文件不由分支长期维护。commit subject 与\n  `refs #` 盘点要求见 `release-channels.md`。"
     },
     {
       "anchor": "docs-pipeline（文档快照与发布管线） > 校验入口",
@@ -397,15 +397,15 @@
       "anchor": "governance（角色分层、维护者工作流与贡献守门） > 维护者工作流（上游 Maintainer Workflow）",
       "doc": "docs/AGENT_RULES/governance.md",
       "id": "docs-agent-rules-governance-md-governance-角色分层-维护者工作流与贡献守门-维护者工作流-上游-maintainer-workflow",
-      "source_sha256": "bdccfdfa223d2e060e77c88b805560808a1dff76149fddf47bc291044223093c",
-      "text": "## 维护者工作流（上游 Maintainer Workflow）\n\n- 只读调查可在共享检出进行；大特性用独立 worktree：\n  `../herdr-worktrees/<task-slug>` + 分支 `issue/<id>-<slug>`（有 issue 时）；\n  若当前会话已在独立 worktree 内则继续用，不嵌套。实现/测试/提交都在 worktree\n  内完成。\n- 实质性 feature 与 bugfix 默认开 PR，不直接推 master；小而低风险的改动与纯文档\n  可走轻流程。开 PR 前基于当前 `origin/master` rebase 并重跑相关验证；评审中\n  master 前进则更新分支并重复检查与 bot 评审。\n- 开/更新 PR 后用 `gh pr checks --watch` 盯完所有检查；Greptile 与 CodeRabbit\n  属于 CI 的一部分——等待两者都评审最新推送提交。逐条评估可行动发现：同意的\n  修复并回复；不同意的以简洁技术理由内联回复；修复后在新 head 上再等 CI 与\n  两个 bot。检查全绿且两 bot 评审完成后报告就绪并停止；**永不合并 PR**，merge\n  由 Can 执行。集成确认后更新共享检出、删除任务 worktree 与本地/远端任务分支。\n- 提交前提出 commit message 并对齐。"
+      "source_sha256": "64f846684340ee7912fa056d99ca3905b2db0b755eac4d429e786358e32b57fd",
+      "text": "## 维护者工作流（上游 Maintainer Workflow）\n\n- 只读调查可在共享检出进行；小改动或小任务也可在默认主 worktree 做——但若发现\n  主 worktree 已有无关的在途实现改动，改用独立 worktree。大特性用独立 worktree：\n  `../herdr-worktrees/<task-slug>` + 分支 `issue/<id>-<slug>`（有 issue 时）；\n  若当前会话已在独立 worktree 内则继续用，不嵌套。实现/测试/提交都在 worktree\n  内完成。\n- 实质性 feature 与 bugfix 默认开 PR，不直接推 master；小而低风险的改动与纯文档\n  可走轻流程。开 PR 前基于当前 `origin/master` rebase 并重跑相关验证；评审中\n  master 前进则更新分支并重复检查与 bot 评审。\n- 开/更新 PR 后用 `gh pr checks --watch` 盯完所有检查；Greptile 与 CodeRabbit\n  属于 CI 的一部分——等待两者都评审最新推送提交。逐条评估可行动发现：同意的\n  修复并回复；不同意的以简洁技术理由内联回复；修复后在新 head 上再等 CI 与\n  两个 bot。检查全绿且两 bot 评审完成后报告就绪并停止；**永不合并 PR**，merge\n  由 Can 执行。集成确认后更新共享检出、删除任务 worktree 与本地/远端任务分支。\n- 提交前提出 commit message 并对齐。"
     },
     {
       "anchor": "governance（角色分层、维护者工作流与贡献守门） > 角色与授权分层（上游 Scope and Audience）",
       "doc": "docs/AGENT_RULES/governance.md",
       "id": "docs-agent-rules-governance-md-governance-角色分层-维护者工作流与贡献守门-角色与授权分层-上游-scope-and-audience",
-      "source_sha256": "1c8e8a2f3408609d93f0096192b4b69ae57dd82e9a3efe5d18cf3fe60126f74b",
-      "text": "## 角色与授权分层（上游 Scope and Audience）\n\n指令是分层的；不满足对应条件时跳过该层，落到外部贡献者守门：\n\n- 通用项目规则适用于所有在此仓库工作的 agent，包括 fork。\n- **维护者**：仅当账号列于 `.github/MAINTAINERS`、配置远端是权威\n  `herdrdev/herdr` 仓库、且认证账号对该仓库有写权限时，才按维护者工作流行动；\n  任一条件无法核实即跳过，走外部贡献者守门。\n- **Can 本机工作流**：仅在 Can 自己的工作站/Windows VM（如 `/home/can/Projects/\n  herdr`、`HERDR_ENV=1`、`windows-wirt` SSH 别名存在）且账号为 `ogulcancelik`\n  时适用；其他维护者跳过本节。Windows VM 只做最终手动验证：连接 `windows-wirt`，\n  复用 `C:\\work\\repo` 单一检出（不新建克隆/worktree，不用 WSL）；验证前同步\n  Linux 工作树改动进去，复用 `C:\\Users\\herdr\\.cargo` 与 `.rustup` 缓存；Cargo\n  构建 vendored libghostty-vt 前设置 `$env:ZIG = \"C:\\Users\\herdr\\zig-0.16.0\\\n  zig.exe\"`（VM PATH 上可能有更新的 Zig，herdr 当前要求 0.16.0）。验证后清理\n  `C:\\work\\repo`（磁盘紧张可删 `target`，保留共享缓存），除非明确要求保留补丁树，\n  否则恢复干净检出。"
+      "source_sha256": "9ad5e30df609bf940283b640e6a2a9d9f081a62a5ecfd796e27106b688b1ed9a",
+      "text": "## 角色与授权分层（上游 Scope and Audience）\n\n指令是分层的；不满足对应条件时跳过该层，落到外部贡献者守门：\n\n- 通用项目规则适用于所有在此仓库工作的 agent，包括 fork。\n- **维护者**：仅当账号列于 `.github/MAINTAINERS`、配置远端是权威\n  `herdrdev/herdr` 仓库、且认证账号对该仓库有写权限时，才按维护者工作流行动；\n  任一条件无法核实即跳过，走外部贡献者守门。\n- **Can 本机工作流**：仅在 Can 自己的工作站/Windows VM（如 `/home/can/Projects/\n  herdr`、`HERDR_ENV=1`、`windows-wirt` SSH 别名存在）且账号为 `ogulcancelik`\n  时适用；其他维护者跳过本节。Windows VM 只做最终手动验证：连接 `windows-wirt`，\n  复用 `C:\\work\\repo` 单一检出（不新建克隆/worktree，不用 WSL；Windows 账户已\n  名为 `herdr`，避免 `C:\\Users\\herdr\\herdr` 这类路径）；验证前同步\n  Linux 工作树改动进去，复用 `C:\\Users\\herdr\\.cargo` 与 `.rustup` 缓存；Cargo\n  构建 vendored libghostty-vt 前设置 `$env:ZIG = \"C:\\Users\\herdr\\zig-0.16.0\\\n  zig.exe\"`（VM PATH 上可能有更新的 Zig，herdr 当前要求 0.16.0）。验证后清理\n  `C:\\work\\repo`（磁盘紧张可删 `target`，保留共享缓存），除非明确要求保留补丁树，\n  否则恢复干净检出。"
     },
     {
       "anchor": "integration-assets（agent 集成资产）",

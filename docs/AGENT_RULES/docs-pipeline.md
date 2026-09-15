@@ -39,6 +39,8 @@ config-reference 校验脚本。框架自身文档（AGENT_RULES、AI_TOOLS、kb
 
 ## 变更范围纪律（上游补充条款）
 
+- 本地 PRD、规划笔记与探索性 spec 放 `.local/prd/`；`.local/` 整体被 gitignore，
+  由本地自行管理，不入仓。
 - 刷新较旧的 pull request 时，先移除其 changelog-only diff（`docs/next/
   CHANGELOG.md` 的历史冲突源头）；该文件不由分支长期维护。commit subject 与
   `refs #` 盘点要求见 `release-channels.md`。
