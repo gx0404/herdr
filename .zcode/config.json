@@ -1,0 +1,44 @@
+{
+  "hooks": {
+    "enabled": true,
+    "timeoutMs": 30000,
+    "maxOutputBytes": 32768,
+    "events": {
+      "PreToolUse": [
+        {
+          "matcher": "Bash|Edit|Write|MultiEdit",
+          "hooks": [
+            {
+              "type": "command",
+              "command": "bash \"$(git rev-parse --show-toplevel)/.claude/hooks/block_dangerous.sh\"",
+              "timeoutMs": 30000
+            }
+          ]
+        }
+      ],
+      "PostToolUse": [
+        {
+          "matcher": "Edit|Write|MultiEdit",
+          "hooks": [
+            {
+              "type": "command",
+              "command": "bash \"$(git rev-parse --show-toplevel)/.claude/hooks/record_edit.sh\"",
+              "timeoutMs": 15000
+            }
+          ]
+        }
+      ],
+      "Stop": [
+        {
+          "hooks": [
+            {
+              "type": "command",
+              "command": "bash \"$(git rev-parse --show-toplevel)/.claude/hooks/notify_review.sh\"",
+              "timeoutMs": 15000
+            }
+          ]
+        }
+      ]
+    }
+  }
+}

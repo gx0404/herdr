@@ -1,0 +1,80 @@
+{
+  "permissions": {
+    "allow": [
+      "Read(./**)",
+      "Glob",
+      "Grep",
+      "Bash(git status:*)",
+      "Bash(git diff:*)",
+      "Bash(git log:*)",
+      "Bash(git show:*)",
+      "Bash(git ls-files:*)",
+      "Bash(git check-ignore:*)",
+      "Bash(python3 scripts/resolve_agent_rules.py:*)",
+      "Bash(python3 -m unittest scripts.*)",
+      "Bash(just lint)",
+      "Bash(just test)",
+      "Bash(just check)",
+      "Bash(just maintenance-test)",
+      "Bash(just docs-contract-test)",
+      "Bash(just integration-assets-test)",
+      "Bash(just framework-check)",
+      "Bash(just agent-rules:*)",
+      "Bash(just graph-check)",
+      "Bash(just kb-check)",
+      "Bash(cargo nextest run:*)",
+      "Bash(cargo fmt --check)",
+      "Bash(cargo clippy:*)"
+    ],
+    "ask": [
+      "Bash(git push:*)",
+      "Bash(just release*:*)",
+      "Bash(just bench*:*)",
+      "Bash(cargo run:*)",
+      "Bash(rm:*)"
+    ],
+    "deny": [
+      "Read(./.env)",
+      "Read(./**/.env)",
+      "Read(./**/*.pem)",
+      "Read(./.git/**)"
+    ]
+  },
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash|Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"$(git rev-parse --show-toplevel)/.claude/hooks/block_dangerous.sh\"",
+            "timeout": 30
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"$(git rev-parse --show-toplevel)/.claude/hooks/record_edit.sh\"",
+            "timeout": 15
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"$(git rev-parse --show-toplevel)/.claude/hooks/notify_review.sh\"",
+            "timeout": 15
+          }
+        ]
+      }
+    ]
+  }
+}

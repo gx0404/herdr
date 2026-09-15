@@ -1,0 +1,16 @@
+# Codex 项目面。审批与沙箱基线；hooks 与 Claude 共享同一策略真源。
+approval_policy = "on-request"
+sandbox_mode = "workspace-write"
+project_doc_max_bytes = 32768
+
+[hooks.PreToolUse]
+command = 'python3 "$(git rev-parse --show-toplevel)/.codex/hooks/pre_tool_use_policy.py"'
+timeout = 30
+
+[hooks.Stop]
+command = 'bash "$(git rev-parse --show-toplevel)/.claude/hooks/notify_review.sh"'
+timeout = 15
+
+# 复审 agent：只读；先读根 AGENTS.md，再对 diff 范围跑 resolver --task review。
+[agents.herdr_reviewer]
+path = "agents/herdr_reviewer.toml"
