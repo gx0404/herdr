@@ -919,6 +919,18 @@ pub(crate) struct StatusCommandGuard {
 
 impl StatusCommandGuard {
     pub(crate) fn new(child: &tokio::process::Child) -> std::io::Result<Self> {
+        Self::for_process(child.raw_handle(), child.id())
+    }
+
+    pub(crate) fn from_std_child(child: &std::process::Child) -> std::io::Result<Self> {
+        use std::os::windows::io::AsRawHandle;
+        Self::for_process(Some(child.as_raw_handle()), Some(child.id()))
+    }
+
+    fn for_process(
+        process: Option<std::os::windows::io::RawHandle>,
+        process_id: Option<u32>,
+    ) -> std::io::Result<Self> {
         let job = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };
         if job.is_null() {
             return Err(std::io::Error::last_os_error());
@@ -951,7 +963,7 @@ impl StatusCommandGuard {
             return Err(error);
         }
 
-        let Some(process) = child.raw_handle() else {
+        let Some(process) = process else {
             unsafe {
                 CloseHandle(job);
             }
@@ -966,7 +978,7 @@ impl StatusCommandGuard {
             }
             return Err(error);
         }
-        if let Err(error) = resume_suspended_process(child.id()) {
+        if let Err(error) = resume_suspended_process(process_id) {
             unsafe {
                 CloseHandle(job);
             }

@@ -5,6 +5,7 @@ pub mod commands;
 pub mod common;
 pub mod events;
 pub mod integrations;
+pub mod observability;
 pub mod panes;
 pub mod plugins;
 pub mod response;
@@ -19,6 +20,7 @@ pub use commands::*;
 pub use common::*;
 pub use events::*;
 pub use integrations::*;
+pub use observability::*;
 pub use panes::*;
 pub use plugins::*;
 pub use response::*;
@@ -45,6 +47,36 @@ pub struct Request {
 // the simple serde shape and avoids boxing churn across every caller.
 #[allow(clippy::large_enum_variant)]
 pub enum Method {
+    #[serde(rename = "system.metrics.get")]
+    SystemMetricsGet(SystemMetricsParams),
+    #[serde(rename = "system.metrics.subscribe")]
+    SystemMetricsSubscribe(SystemMetricsParams),
+    #[serde(rename = "system.metrics.unsubscribe")]
+    SystemMetricsUnsubscribe(ObservationSubscriptionParams),
+    #[serde(rename = "system.process.list")]
+    SystemProcessList(ProcessListParams),
+    #[serde(rename = "system.process.get")]
+    SystemProcessGet(ProcessGetParams),
+    #[serde(rename = "system.process.terminate")]
+    SystemProcessTerminate(ProcessTerminateParams),
+    #[serde(rename = "account.usage.providers")]
+    AccountUsageProviders(EmptyParams),
+    #[serde(rename = "account.usage.get")]
+    AccountUsageGet(UsageParams),
+    #[serde(rename = "account.usage.integration")]
+    AccountUsageIntegration(UsageIntegrationParams),
+    #[serde(rename = "account.usage.refresh")]
+    AccountUsageRefresh(UsageParams),
+    #[serde(rename = "account.usage.subscribe")]
+    AccountUsageSubscribe(UsageParams),
+    #[serde(rename = "account.usage.unsubscribe")]
+    AccountUsageUnsubscribe(ObservationSubscriptionParams),
+    #[serde(rename = "account.usage.report")]
+    AccountUsageReport(UsageReportParams),
+    #[serde(rename = "account.binding.set")]
+    AccountBindingSet(AccountBindingParams),
+    #[serde(rename = "client.views.set")]
+    ClientViewsSet(ClientViewsSetParams),
     #[serde(rename = "ping")]
     Ping(PingParams),
     #[serde(rename = "server.stop")]

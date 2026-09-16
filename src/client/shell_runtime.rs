@@ -18,7 +18,10 @@ pub(super) fn dispatch_client_shell_actions(
                 request,
             } => {
                 if let Some(connection) = endpoints.connection(&endpoint_id).filter(|_| {
-                    endpoints.active_id() == &endpoint_id && endpoints.active_surface_available()
+                    crate::api::api_method_name(&request.method).starts_with("account.")
+                        || crate::api::api_method_name(&request.method).starts_with("system.")
+                        || (endpoints.active_id() == &endpoint_id
+                            && endpoints.active_surface_available())
                 }) {
                     endpoint_commands.enqueue(endpoint_id, connection.generation, boot_id, request);
                 } else if let Some(shell) = shell.as_deref_mut() {
@@ -349,6 +352,9 @@ pub(super) fn complete_endpoint_activation(
     }
 
     let _ = pending.take();
+    if let Some(shell) = &mut state.shell {
+        shell.renew_workbench_surface();
+    }
     endpoints.unfreeze_input();
     let successor = match completion {
         endpoint::ActivationCompletion::RestoredSource {
@@ -678,6 +684,14 @@ pub(super) fn finish_client_shell_input(
         .is_none_or(|shell| shell.endpoint_is_online(endpoints.active_id()))
         && endpoints.active_surface_available();
     for request in outcome.requests {
+        let request = if let Some(shell) = &state.shell {
+            let Some(request) = shell.view_request(request) else {
+                continue;
+            };
+            request
+        } else {
+            request
+        };
         if let ClientMessage::ClientShellHostTheme { update } = &request {
             state.record_host_theme_update(update);
             if let Some(activation) = pending_activation.as_mut() {

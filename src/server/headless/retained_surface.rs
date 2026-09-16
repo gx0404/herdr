@@ -181,8 +181,17 @@ fn retained_cursor(
         })
 }
 
+#[derive(Clone)]
+struct ViewIdentity {
+    index: usize,
+    revision: u64,
+    id: String,
+    tab: String,
+}
+
 struct RetainedRecipient<'a> {
     client_id: u64,
+    view: Option<ViewIdentity>,
     surface: &'a protocol::PaneSurfaceFrame,
 }
 
@@ -199,6 +208,7 @@ struct CollectedPanePatch {
 
 struct RetainedRecipientUpdate {
     client_id: u64,
+    view: Option<ViewIdentity>,
     patch: protocol::PaneSurfacePatch,
     graphics: Option<(
         protocol::PaneSurfaceFrame,
@@ -265,23 +275,48 @@ impl HeadlessServer {
                 crate::render_prof::event("retained_surface.recipient_deferred");
                 continue;
             }
-            let Some(surface) = client.render_state.last_pane_surface() else {
-                fallback!("no_baseline");
+            let surfaces = if let Some(views) = &client.views {
+                let mut surfaces = Vec::new();
+                for (index, view) in views.views.iter().enumerate() {
+                    let Some(surface) = view.render_state.last_pane_surface() else {
+                        fallback!("no_view_baseline");
+                    };
+                    surfaces.push((
+                        Some(ViewIdentity {
+                            index,
+                            revision: views.revision,
+                            id: view.spec.view_id.clone(),
+                            tab: view.spec.tab_id.clone(),
+                        }),
+                        surface,
+                        view.spec.cols,
+                        view.spec.rows,
+                    ));
+                }
+                surfaces
+            } else {
+                let Some(surface) = client.render_state.last_pane_surface() else {
+                    fallback!("no_baseline");
+                };
+                vec![(None, surface, *cols, *rows)]
             };
-            if surface.boot_id != self.client_shell_boot_id
-                || surface.projection_revision != client.shell_projection_revision
-                || surface.frame.width != *cols
-                || surface.frame.height != *rows
-                || surface.popup.is_some()
-                || !surface.graphics.assets.is_empty()
-                || !surface.frame.graphics.is_empty()
-            {
-                fallback!("baseline_mismatch");
+            for (view, surface, cols, rows) in surfaces {
+                if surface.boot_id != self.client_shell_boot_id
+                    || surface.projection_revision != client.shell_projection_revision
+                    || surface.frame.width != cols
+                    || surface.frame.height != rows
+                    || surface.popup.is_some()
+                    || !surface.graphics.assets.is_empty()
+                    || !surface.frame.graphics.is_empty()
+                {
+                    fallback!("baseline_mismatch");
+                }
+                recipients.push(RetainedRecipient {
+                    client_id: *client_id,
+                    view,
+                    surface,
+                });
             }
-            recipients.push(RetainedRecipient {
-                client_id: *client_id,
-                surface,
-            });
         }
         if recipients.is_empty() {
             success!("all_recipients_deferred");
@@ -420,7 +455,16 @@ impl HeadlessServer {
             };
             let mut graphics_changed = false;
             let graphics = if refresh_graphics {
-                let Some(target) = self.shell_target_for_client(client_id) else {
+                let target = recipient
+                    .view
+                    .as_ref()
+                    .and_then(|view| self.app.parse_tab_id(&view.tab))
+                    .map(|(workspace_index, tab_index)| crate::ui::TabSurfaceTarget {
+                        workspace_index,
+                        tab_index,
+                    })
+                    .or_else(|| self.shell_target_for_client(client_id));
+                let Some(target) = target else {
                     fallback!("graphics_target");
                 };
                 let client = &self.clients[&client_id];
@@ -432,7 +476,12 @@ impl HeadlessServer {
                         &next_surface,
                         target,
                         client.cell_size,
-                        &client.shell_graphics_delivery,
+                        recipient
+                            .view
+                            .as_ref()
+                            .and_then(|identity| client.views.as_ref()?.views.get(identity.index))
+                            .map(|view| &view.graphics_delivery)
+                            .unwrap_or(&client.shell_graphics_delivery),
                         client_id,
                     )
                 else {
@@ -449,6 +498,7 @@ impl HeadlessServer {
             }
             updates.push(RetainedRecipientUpdate {
                 client_id,
+                view: recipient.view,
                 patch,
                 graphics,
             });
@@ -460,12 +510,11 @@ impl HeadlessServer {
         let mut sent = 0u64;
         let mut deferred = 0u64;
         let mut disconnected = Vec::new();
+        let mut grouped = HashMap::<u64, Vec<RetainedRecipientUpdate>>::new();
         for update in updates {
-            let RetainedRecipientUpdate {
-                client_id,
-                patch,
-                graphics,
-            } = update;
+            grouped.entry(update.client_id).or_default().push(update);
+        }
+        for (client_id, updates) in grouped {
             let Some(client) = self.clients.get_mut(&client_id) else {
                 continue;
             };
@@ -474,64 +523,112 @@ impl HeadlessServer {
                 deferred += 1;
                 continue;
             };
-            // The published row patch cannot carry images. Reuse the retained text/layout
-            // in a graphics-capable surface message rather than invoking the full renderer.
-            let (prepared, graphics_delivery) = if let Some((surface, delivery)) = graphics {
-                (
-                    client.render_state.prepare_pane_surface(surface),
-                    Some(delivery),
-                )
-            } else {
-                (client.render_state.prepare_pane_surface_patch(patch), None)
-            };
-            let Some(prepared) = prepared else {
-                client.defer_full_render();
-                deferred += 1;
-                continue;
-            };
-            let max_frame_size = if graphics_delivery.is_some() {
-                MAX_GRAPHICS_FRAME_SIZE
-            } else {
-                protocol::MAX_FRAME_SIZE
-            };
-            let serialized =
-                match Self::frame_server_message_with_max(prepared.message(), max_frame_size) {
-                    Ok(serialized) => serialized,
-                    Err(error) => {
-                        warn!(
-                            client_id,
-                            %error,
-                            "failed to serialize retained pane surface patch"
-                        );
-                        client.defer_full_render();
-                        deferred += 1;
-                        continue;
-                    }
+            let mut batch = Vec::new();
+            let mut commits = Vec::new();
+            let mut needs_retry = false;
+            for update in updates {
+                let state = if let Some(identity) = &update.view {
+                    client
+                        .views
+                        .as_mut()
+                        .filter(|views| views.revision == identity.revision)
+                        .and_then(|views| views.views.get_mut(identity.index))
+                        .map(|view| &mut view.render_state)
+                } else {
+                    Some(&mut client.render_state)
                 };
-            crate::render_prof::counter("retained_surface.bytes", serialized.len() as u64);
-            match writer.render.try_send(serialized) {
+                let Some(state) = state else {
+                    needs_retry = true;
+                    continue;
+                };
+                let (prepared, delivery) = if let Some((surface, delivery)) = update.graphics {
+                    (state.prepare_pane_surface(surface), Some(delivery))
+                } else {
+                    (state.prepare_pane_surface_patch(update.patch), None)
+                };
+                let Some(prepared) = prepared else {
+                    needs_retry = true;
+                    continue;
+                };
+                let serialized = if let Some(identity) = &update.view {
+                    protocol::views::message(
+                        &self.client_shell_boot_id,
+                        identity.revision,
+                        &identity.id,
+                        &identity.tab,
+                        prepared.message(),
+                    )
+                    .map_err(io::Error::other)
+                    .and_then(|message| {
+                        Self::frame_server_message_with_max(&message, MAX_GRAPHICS_FRAME_SIZE)
+                            .map_err(io::Error::other)
+                    })
+                } else {
+                    Self::frame_server_message_with_max(
+                        prepared.message(),
+                        if delivery.is_some() {
+                            MAX_GRAPHICS_FRAME_SIZE
+                        } else {
+                            protocol::MAX_FRAME_SIZE
+                        },
+                    )
+                    .map_err(io::Error::other)
+                };
+                let Ok(serialized) = serialized else {
+                    needs_retry = true;
+                    continue;
+                };
+                if batch.len().saturating_add(serialized.len()) > MAX_GRAPHICS_FRAME_SIZE {
+                    needs_retry = true;
+                    continue;
+                }
+                batch.extend_from_slice(&serialized);
+                commits.push((update.view, prepared, delivery));
+            }
+            crate::render_prof::counter("retained_surface.bytes", batch.len() as u64);
+            if batch.is_empty() {
+                if needs_retry {
+                    client.defer_full_render();
+                    deferred += 1;
+                }
+                continue;
+            }
+            match writer.render.try_send(batch) {
                 Ok(()) => {
-                    let graphics_pending = graphics_delivery
-                        .as_ref()
-                        .is_some_and(crate::kitty_graphics::surface::DeliveryCache::has_pending);
-                    if let Some(delivery) = graphics_delivery {
-                        client.shell_graphics_delivery = delivery;
+                    for (identity, prepared, delivery) in commits {
+                        needs_retry |= delivery.as_ref().is_some_and(
+                            crate::kitty_graphics::surface::DeliveryCache::has_pending,
+                        );
+                        if let Some(identity) = identity {
+                            if let Some(view) = client
+                                .views
+                                .as_mut()
+                                .and_then(|views| views.views.get_mut(identity.index))
+                            {
+                                view.render_state.commit_sent_frame(prepared);
+                                if let Some(delivery) = delivery {
+                                    view.graphics_delivery = delivery;
+                                }
+                            }
+                        } else {
+                            client.render_state.commit_sent_frame(prepared);
+                            if let Some(delivery) = delivery {
+                                client.shell_graphics_delivery = delivery;
+                            }
+                        }
+                        sent += 1;
                     }
-                    if graphics_pending {
+                    if needs_retry {
                         client.defer_full_render();
                     } else {
                         client.clear_deferred_render();
                     }
-                    client.render_state.commit_sent_frame(prepared);
-                    sent += 1;
                 }
                 Err(std::sync::mpsc::TrySendError::Full(_)) => {
                     client.defer_full_render();
                     deferred += 1;
                 }
-                Err(std::sync::mpsc::TrySendError::Disconnected(_)) => {
-                    disconnected.push(client_id);
-                }
+                Err(std::sync::mpsc::TrySendError::Disconnected(_)) => disconnected.push(client_id),
             }
         }
         for client_id in disconnected {

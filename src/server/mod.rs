@@ -14,6 +14,7 @@ pub(crate) mod handoff;
 pub mod headless;
 pub(crate) mod keybindings;
 pub(crate) mod notifications;
+pub(crate) mod observability;
 pub(crate) mod pane_input;
 #[cfg(test)]
 mod render_scale_benchmark;

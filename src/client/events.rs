@@ -2,6 +2,11 @@ use super::*;
 
 /// Internal events for the client event loop.
 pub(super) enum ClientLoopEvent {
+    ViewSurface {
+        endpoint_id: endpoint::ClientEndpointId,
+        generation: u64,
+        view: Box<crate::protocol::views::DecodedView>,
+    },
     #[cfg(unix)]
     StdinInput(Vec<u8>),
     #[cfg(unix)]

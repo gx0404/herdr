@@ -138,13 +138,19 @@ impl ClientShellState {
             self.reveal_mobile_workspace = true;
         }
         self.last_composed_size = Some((cols, rows));
+        if self.workbench.enabled {
+            return self.compose_workbench(cols, rows);
+        }
         let valid_navigation_target = self.mode == ClientShellMode::Navigate
             && self
                 .navigate_workspace_id
                 .as_ref()
                 .is_some_and(|target| self.navigation_target_valid(target));
         if self.snapshot.is_none() || self.pane_surface.is_none() {
-            return Some(self.compose_unavailable(cols, rows));
+            let mut frame = self.compose_unavailable(cols, rows);
+            let area = self.layout(cols, rows).pane_surface;
+            self.paint_observability(&mut frame, area);
+            return Some(frame);
         }
         let snapshot = self.snapshot.as_deref()?;
         // Do not compose a retained surface while waiting for its matching snapshot or
@@ -250,6 +256,7 @@ impl ClientShellState {
             .splits
             .iter()
             .map(|split| PaneSplitHit {
+                tab_id: snapshot.focused_tab_id.clone(),
                 direction: split.direction,
                 pos: match split.direction {
                     crate::protocol::PaneSurfaceSplitDirection::Horizontal => {
@@ -317,110 +324,7 @@ impl ClientShellState {
         blit_pane_surface(&mut frame, &surface.frame, layout.pane_surface);
         restore_mode_bar(&mut frame, mode_bar, mode_bar_cells.as_deref());
         let mut occlusion = crate::kitty_graphics::surface::Occlusion::default();
-        let has_selection = self
-            .selection
-            .as_ref()
-            .is_some_and(|selection| selection.is_visible());
-        let has_search = self
-            .copy_mode
-            .as_ref()
-            .is_some_and(|copy_mode| !copy_mode.search_matches.is_empty());
-        if has_selection || has_search {
-            let cursor = frame.cursor.clone();
-            let mut composed = frame.to_ratatui_buffer()?;
-            for hit in &self.hits.panes {
-                let copy_surface_coherent =
-                    client_copy_surface_coherent(self.copy_mode.as_ref(), hit);
-                if copy_surface_coherent {
-                    render_client_copy_search_highlights(
-                        &mut composed,
-                        self.copy_mode.as_ref(),
-                        hit,
-                        &self.config.palette,
-                        false,
-                        &mut occlusion,
-                    );
-                }
-                let selection_is_stale_copy_projection = !copy_surface_coherent
-                    && self.copy_mode.as_ref().is_some_and(|copy_mode| {
-                        copy_mode.pane_id == hit.pane_id
-                            && self
-                                .selection
-                                .as_ref()
-                                .is_some_and(|selection| selection.pane_id == hit.pane_id)
-                    });
-                if !selection_is_stale_copy_projection {
-                    if let Some(selection) =
-                        self.selection.as_ref().filter(|s| s.pane_id == hit.pane_id)
-                    {
-                        for rect in selection.visible_rects(hit.inner_rect, hit.scroll) {
-                            occlusion.cover(rect);
-                        }
-                    }
-                    crate::ui::render_selection_highlight(
-                        self.selection.as_ref(),
-                        &mut composed,
-                        &hit.pane_id,
-                        hit.inner_rect,
-                        hit.scroll,
-                        &self.config.palette,
-                        crate::terminal_theme::TerminalTheme {
-                            background: self.host_background,
-                            ..Default::default()
-                        },
-                    );
-                }
-                if copy_surface_coherent {
-                    render_client_copy_search_highlights(
-                        &mut composed,
-                        self.copy_mode.as_ref(),
-                        hit,
-                        &self.config.palette,
-                        true,
-                        &mut occlusion,
-                    );
-                }
-            }
-            frame.replace_from_ratatui_buffer_preserving_effects(&composed, cursor);
-        }
-        self.render_link_hover(&mut frame, &mut occlusion);
-        if self.mode == ClientShellMode::Copy {
-            frame.cursor = None;
-            if let Some(copy_mode) = self.copy_mode.as_ref() {
-                if let Some(hit) = self.hits.panes.iter().find(|hit| {
-                    hit.pane_id == copy_mode.pane_id
-                        && client_copy_surface_coherent(Some(copy_mode), hit)
-                }) {
-                    let viewport_top = copy_mode
-                        .max_offset_from_bottom
-                        .saturating_sub(copy_mode.offset_from_bottom)
-                        .min(u32::MAX as usize) as u32;
-                    let viewport_row = copy_mode.cursor.row.saturating_sub(viewport_top);
-                    let x = hit.inner_rect.x.saturating_add(copy_mode.cursor.col);
-                    let y = hit.inner_rect.y.saturating_add(viewport_row as u16);
-                    if viewport_row < u32::from(hit.inner_rect.height)
-                        && copy_mode.cursor.col < hit.inner_rect.width
-                        && x < frame.width
-                        && y < frame.height
-                    {
-                        let mut composed = frame.to_ratatui_buffer()?;
-                        occlusion.cover(Rect::new(x, y, 1, 1));
-                        composed[(x, y)].set_style(
-                            Style::default()
-                                .fg(match self.config.palette.panel_bg {
-                                    ratatui::style::Color::Reset => self.config.palette.surface_dim,
-                                    color => color,
-                                })
-                                .bg(self.config.palette.accent)
-                                .add_modifier(Modifier::BOLD),
-                        );
-                        frame.replace_from_ratatui_buffer_preserving_effects(&composed, None);
-                    } else {
-                        frame.cursor = None;
-                    }
-                }
-            }
-        }
+        self.paint_shell_copy(&mut frame, &mut occlusion)?;
         restore_mode_bar(&mut frame, mode_bar, mode_bar_cells.as_deref());
         self.hits.notification_toast = Rect::default();
         let has_config_diagnostic = self.config_diagnostic.is_some();
@@ -529,6 +433,16 @@ impl ClientShellState {
             ));
             frame.replace_from_ratatui_buffer_preserving_effects(&composed, cursor);
         }
+        if let Some(covered) =
+            self.observability
+                .paint(&mut frame, layout.pane_surface, &self.config.palette)
+        {
+            occlusion.cover(covered);
+            if self.observability.page.is_some() {
+                self.hits.panes.clear();
+                self.hits.pane_splits.clear();
+            }
+        }
         self.hits.popup = None;
         if let Some(popup) = surface.popup.as_deref() {
             let width = popup.width.map(client_popup_size);
@@ -613,6 +527,134 @@ impl ClientShellState {
         if let Some(bar) = mode_bar {
             occlusion.cover(bar);
         }
+        self.paint_shell_overlays(&mut frame, &mut occlusion)?;
+        if self.endpoint_status(&self.active_endpoint_id) != Some(ClientEndpointStatus::Online) {
+            frame.cursor = None;
+            self.hits.panes.clear();
+            self.hits.pane_splits.clear();
+            self.hits.popup = None;
+        }
+        self.compose_graphics(&mut frame, layout, &occlusion);
+        Some(frame)
+    }
+    pub(super) fn paint_shell_copy(
+        &self,
+        frame: &mut FrameData,
+        occlusion: &mut crate::kitty_graphics::surface::Occlusion,
+    ) -> Option<()> {
+        let has_selection = self
+            .selection
+            .as_ref()
+            .is_some_and(|selection| selection.is_visible());
+        let has_search = self
+            .copy_mode
+            .as_ref()
+            .is_some_and(|copy_mode| !copy_mode.search_matches.is_empty());
+        if has_selection || has_search {
+            let cursor = frame.cursor.clone();
+            let mut composed = frame.to_ratatui_buffer()?;
+            for hit in &self.hits.panes {
+                let copy_surface_coherent =
+                    client_copy_surface_coherent(self.copy_mode.as_ref(), hit);
+                if copy_surface_coherent {
+                    render_client_copy_search_highlights(
+                        &mut composed,
+                        self.copy_mode.as_ref(),
+                        hit,
+                        &self.config.palette,
+                        false,
+                        occlusion,
+                    );
+                }
+                let selection_is_stale_copy_projection = !copy_surface_coherent
+                    && self.copy_mode.as_ref().is_some_and(|copy_mode| {
+                        copy_mode.pane_id == hit.pane_id
+                            && self
+                                .selection
+                                .as_ref()
+                                .is_some_and(|selection| selection.pane_id == hit.pane_id)
+                    });
+                if !selection_is_stale_copy_projection {
+                    if let Some(selection) =
+                        self.selection.as_ref().filter(|s| s.pane_id == hit.pane_id)
+                    {
+                        for rect in selection.visible_rects(hit.inner_rect, hit.scroll) {
+                            occlusion.cover(rect);
+                        }
+                    }
+                    crate::ui::render_selection_highlight(
+                        self.selection.as_ref(),
+                        &mut composed,
+                        &hit.pane_id,
+                        hit.inner_rect,
+                        hit.scroll,
+                        &self.config.palette,
+                        crate::terminal_theme::TerminalTheme {
+                            background: self.host_background,
+                            ..Default::default()
+                        },
+                    );
+                }
+                if copy_surface_coherent {
+                    render_client_copy_search_highlights(
+                        &mut composed,
+                        self.copy_mode.as_ref(),
+                        hit,
+                        &self.config.palette,
+                        true,
+                        occlusion,
+                    );
+                }
+            }
+            frame.replace_from_ratatui_buffer_preserving_effects(&composed, cursor);
+        }
+        self.render_link_hover(frame, occlusion);
+        if self.mode == ClientShellMode::Copy {
+            frame.cursor = None;
+            if let Some(copy_mode) = self.copy_mode.as_ref() {
+                if let Some(hit) = self.hits.panes.iter().find(|hit| {
+                    hit.pane_id == copy_mode.pane_id
+                        && client_copy_surface_coherent(Some(copy_mode), hit)
+                }) {
+                    let viewport_top = copy_mode
+                        .max_offset_from_bottom
+                        .saturating_sub(copy_mode.offset_from_bottom)
+                        .min(u32::MAX as usize) as u32;
+                    let viewport_row = copy_mode.cursor.row.saturating_sub(viewport_top);
+                    let x = hit.inner_rect.x.saturating_add(copy_mode.cursor.col);
+                    let y = hit.inner_rect.y.saturating_add(viewport_row as u16);
+                    if viewport_row < u32::from(hit.inner_rect.height)
+                        && copy_mode.cursor.col < hit.inner_rect.width
+                        && x < frame.width
+                        && y < frame.height
+                    {
+                        let mut composed = frame.to_ratatui_buffer()?;
+                        occlusion.cover(Rect::new(x, y, 1, 1));
+                        composed[(x, y)].set_style(
+                            Style::default()
+                                .fg(match self.config.palette.panel_bg {
+                                    ratatui::style::Color::Reset => self.config.palette.surface_dim,
+                                    color => color,
+                                })
+                                .bg(self.config.palette.accent)
+                                .add_modifier(Modifier::BOLD),
+                        );
+                        frame.replace_from_ratatui_buffer_preserving_effects(&composed, None);
+                    } else {
+                        frame.cursor = None;
+                    }
+                }
+            }
+        }
+        Some(())
+    }
+
+    pub(super) fn paint_shell_overlays(
+        &mut self,
+        frame: &mut FrameData,
+        occlusion: &mut crate::kitty_graphics::surface::Occlusion,
+    ) -> Option<()> {
+        let snapshot = self.snapshot.as_deref()?;
         if let Some(overlay) = self.overlay.as_ref() {
             let mut composed = frame.to_ratatui_buffer()?;
             let cursor = if let ClientShellOverlay::ContextMenu(menu) = overlay {
@@ -683,14 +725,7 @@ impl ClientShellState {
                 .scroll
                 .min(u16::try_from(self.hits.release_notes_max_scroll).unwrap_or(u16::MAX));
         }
-        if self.endpoint_status(&self.active_endpoint_id) != Some(ClientEndpointStatus::Online) {
-            frame.cursor = None;
-            self.hits.panes.clear();
-            self.hits.pane_splits.clear();
-            self.hits.popup = None;
-        }
-        self.compose_graphics(&mut frame, layout, &occlusion);
-        Some(frame)
+        Some(())
     }
 }
 
@@ -772,7 +807,9 @@ fn render_client_copy_search_highlights(
     }
 }
 
-fn client_popup_size(size: crate::protocol::ClientShellPopupSize) -> crate::popup_size::PopupSize {
+pub(super) fn client_popup_size(
+    size: crate::protocol::ClientShellPopupSize,
+) -> crate::popup_size::PopupSize {
     match size {
         crate::protocol::ClientShellPopupSize::Cells(cells) => {
             crate::popup_size::PopupSize::Cells(cells)

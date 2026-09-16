@@ -174,8 +174,8 @@ class PreToolUseGateTests(unittest.TestCase):
             check=False,
         )
         payload = json.loads(result.stdout.decode("utf-8"))
-        self.assertEqual("deny", payload["permissionDecision"])
-        self.assertIn("reason", payload)
+        self.assertEqual("deny", payload["hookSpecificOutput"]["permissionDecision"])
+        self.assertIn("permissionDecisionReason", payload["hookSpecificOutput"])
 
     def test_codex_adapter_blocks_in_repo(self) -> None:
         stdin = json.dumps({"tool_name": "Bash", "tool_input": {"command": "git push --force"}})
@@ -188,7 +188,22 @@ class PreToolUseGateTests(unittest.TestCase):
         )
         self.assertEqual(0, result.returncode)
         payload = json.loads(result.stdout.decode("utf-8"))
-        self.assertEqual("deny", payload["permissionDecision"])
+        self.assertEqual("deny", payload["hookSpecificOutput"]["permissionDecision"])
+
+    def test_codex_never_emits_unsupported_ask_decision(self) -> None:
+        stdin = json.dumps({"tool_name": "Bash", "tool_input": {"command": "git push --force-with-lease"}})
+        result = subprocess.run([sys.executable, str(GATE), "--protocol", "codex"], input=stdin.encode(), capture_output=True, check=False)
+        self.assertEqual(0, result.returncode)
+        decision = json.loads(result.stdout)["hookSpecificOutput"]
+        self.assertEqual("deny", decision["permissionDecision"])
+        self.assertIn("不支持 ask", decision["permissionDecisionReason"])
+
+    def test_codex_regular_validation_does_not_trigger_hook_approval(self) -> None:
+        for command in ["mkdir -p /var/tmp/herdr-repro", "cargo nextest run --locked", "python3 .local/repro/validate.py capture monitor"]:
+            stdin = json.dumps({"tool_name": "Bash", "tool_input": {"command": command}})
+            result = subprocess.run([sys.executable, str(GATE), "--protocol", "codex"], input=stdin.encode(), capture_output=True, check=False)
+            self.assertEqual(0, result.returncode)
+            self.assertEqual(b"", result.stdout)
 
     def test_malformed_input_does_not_crash(self) -> None:
         result = subprocess.run(

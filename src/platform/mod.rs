@@ -3,6 +3,24 @@
 //! Centralizes OS-dependent behavior behind a clean boundary so core
 //! modules don't scatter `#[cfg]` branches through product logic.
 
+#[cfg(target_os = "linux")]
+#[path = "linux/monitoring.rs"]
+mod monitoring;
+#[cfg(windows)]
+#[path = "windows/monitoring.rs"]
+mod monitoring;
+#[cfg(not(any(target_os = "linux", windows)))]
+#[path = "monitoring_fallback.rs"]
+mod monitoring;
+pub(crate) use monitoring::monitor_cpu_inventory;
+pub(crate) use monitoring::terminate_usage_pty;
+pub(crate) use monitoring::usage_probe_needs_job_helper;
+pub(crate) use monitoring::usage_statusline_command;
+pub(crate) use monitoring::MonitoredProcess;
+pub(crate) use monitoring::{configure_usage_probe_command, terminate_usage_probe};
+pub(crate) use monitoring::{monitor_environment, process_instance_token, NativeGpuCollector};
+pub(crate) use monitoring::{usage_probe_exit, UsageProbeGuard};
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ForegroundProcess {
     pub pid: u32,

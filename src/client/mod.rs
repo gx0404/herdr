@@ -1259,6 +1259,34 @@ async fn run_client_loop(
                     &event_tx,
                 )?;
             }
+            ClientLoopEvent::ViewSurface {
+                endpoint_id,
+                generation,
+                view,
+            } => {
+                if !write_stream.accepts(&endpoint_id, generation)
+                    || write_stream.active_id() != &endpoint_id
+                    || state.presentation_frozen
+                    || pending_activation.is_some()
+                    || !write_stream
+                        .connection(&endpoint_id)
+                        .is_some_and(|connection| connection.surface_active)
+                {
+                    continue;
+                }
+                write_stream.received(&endpoint_id, generation, now);
+                if state
+                    .shell
+                    .as_mut()
+                    .is_some_and(|shell| shell.receive_view(generation, *view))
+                {
+                    if let Some(frame) = state.shell.as_mut().and_then(|shell| {
+                        shell.compose(state.reported_size.0, state.reported_size.1)
+                    }) {
+                        state.present_frame(frame);
+                    }
+                }
+            }
             ClientLoopEvent::ServerMessage {
                 endpoint_id,
                 generation,
@@ -1709,7 +1737,8 @@ async fn run_client_loop(
                             || (false, Vec::new()),
                             |shell| {
                                 if completed.generation == generation
-                                    && shell.endpoint_is_active(&completed.endpoint_id)
+                                    && (shell.endpoint_is_active(&completed.endpoint_id)
+                                        || shell.is_observation_request(&completed.request_id))
                                 {
                                     shell.handle_endpoint_result(
                                         &completed.boot_id,
@@ -2075,6 +2104,10 @@ async fn run_client_loop(
                     let (effects, outcome, frame) = {
                         let shell = state.shell.as_mut().expect("checked shell mode");
                         let mut outcome = shell.tick_selection_autoscroll(now);
+                        if pending_activation.is_none() && !state.presentation_frozen {
+                            shell.tick_workbench(now, &mut outcome);
+                        }
+                        shell.tick_observability(now, &mut outcome);
                         for expired in expired_endpoints {
                             if !shell.endpoint_is_active(&expired.endpoint_id) {
                                 continue;

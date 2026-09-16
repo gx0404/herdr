@@ -2,7 +2,7 @@
 # 用户级 model/provider/auth 仍在 ~/.codex/config.toml。
 # hooks 语法以真实 Codex CLI（v0.154）为准：事件键是数组表，命令嵌套在 .hooks 数组。
 
-approval_policy = "on-request"
+approval_policy = "never"
 sandbox_mode = "workspace-write"
 # 根 AGENTS.md 是短入口；领域规则由 resolver 按路径显式读取。
 project_doc_max_bytes = 32768

@@ -16,6 +16,22 @@ pub(super) struct ClientRemoteCollapsedGroups {
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub(super) struct ClientChromePreferences {
+    #[serde(
+        default,
+        deserialize_with = "read_layouts",
+        skip_serializing_if = "std::collections::HashMap::is_empty"
+    )]
+    pub(super) layouts: std::collections::HashMap<String, super::dock::DockLayout>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) monitor: Option<crate::config::MonitorConfig>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) usage_enabled: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) usage_format: Option<crate::config::UsageDisplayFormat>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) usage_position: Option<crate::config::UsageDisplayPosition>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) usage_disabled_providers: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(super) sidebar_width: Option<u16>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -28,6 +44,22 @@ pub(super) struct ClientChromePreferences {
     pub(super) collapsed_groups: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub(super) remote_collapsed_groups: Vec<ClientRemoteCollapsedGroups>,
+}
+
+fn read_layouts<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<std::collections::HashMap<String, super::dock::DockLayout>, D::Error> {
+    let raw = serde_json::Value::deserialize(deserializer)?;
+    Ok(raw
+        .as_object()
+        .into_iter()
+        .flatten()
+        .take(128)
+        .filter_map(|(id, value)| {
+            let layout: super::dock::DockLayout = serde_json::from_value(value.clone()).ok()?;
+            (id.len() <= 512 && layout.valid()).then(|| (id.clone(), layout))
+        })
+        .collect())
 }
 
 pub(super) fn path_for_local_endpoint(socket_path: &Path) -> PathBuf {
@@ -63,7 +95,7 @@ pub(super) fn store(path: &Path, preferences: ClientChromePreferences) -> Result
     let temp_path = parent.join(temp_name);
     std::fs::write(&temp_path, content)
         .map_err(|error| format!("failed to write client shell state: {error}"))?;
-    std::fs::rename(&temp_path, path).map_err(|error| {
+    crate::platform::replace_file(&temp_path, path).map_err(|error| {
         let _ = std::fs::remove_file(&temp_path);
         format!("failed to replace client shell state: {error}")
     })

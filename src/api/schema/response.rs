@@ -42,6 +42,39 @@ pub struct ErrorBody {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ResponseResult {
+    SystemMetrics {
+        snapshot: Box<super::SystemMetricsSnapshot>,
+    },
+    SystemProcesses {
+        sampled_at_ms: u64,
+        total: usize,
+        processes: Vec<super::ProcessMetric>,
+    },
+    SystemProcess {
+        process: super::ProcessMetric,
+    },
+    SystemProcessTerminated {
+        identity: super::ProcessIdentity,
+        force: bool,
+    },
+    AccountUsageProviders {
+        providers: Vec<super::UsageProviderInfo>,
+    },
+    AccountUsage {
+        accounts: Vec<super::AccountUsageSnapshot>,
+    },
+    AccountBinding {
+        pane_id: String,
+        account_id: String,
+    },
+    ObservationSubscription {
+        subscription_id: String,
+        active: bool,
+    },
+    ClientViewsSet {
+        revision: u64,
+        views: Vec<super::ClientViewSpec>,
+    },
     Pong {
         version: String,
         protocol: u32,

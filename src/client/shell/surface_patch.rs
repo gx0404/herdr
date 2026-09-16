@@ -30,7 +30,7 @@ fn apply_row(row: &crate::protocol::PaneSurfacePatchRow, frame: &mut FrameData) 
     true
 }
 
-fn apply_patch_to_surface(
+pub(super) fn apply_patch_to_surface(
     surface: &mut crate::protocol::PaneSurfaceFrame,
     patch: &crate::protocol::PaneSurfacePatch,
 ) -> bool {

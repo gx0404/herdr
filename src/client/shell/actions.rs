@@ -13,6 +13,9 @@ impl ClientShellState {
             crate::input::KeybindMatch::Action(crate::input::KeybindAction::ToggleSidebar) => {
                 self.sidebar_collapsed = !self.sidebar_collapsed;
                 self.sidebar_collapsed_manual = true;
+                if self.workbench.enabled {
+                    self.workbench_sidebar(self.sidebar_collapsed);
+                }
                 self.reveal_navigation_workspace = true;
                 self.invalidate_pane_surface();
                 outcome.repaint = true;
@@ -234,9 +237,9 @@ impl ClientShellState {
                     .flatten();
                 let params = crate::api::schema::CommandInvokeParams {
                     command_id,
-                    workspace_id: snapshot.focused_workspace_id.clone(),
-                    tab_id: snapshot.focused_tab_id.clone(),
-                    pane_id: snapshot.focused_pane_id.clone(),
+                    workspace_id: self.focused_workspace_id(),
+                    tab_id: self.focused_tab_id(),
+                    pane_id: self.focused_pane_id(),
                     selection,
                 };
                 if action == crate::protocol::ClientShellCommandAction::Popup {
@@ -475,6 +478,23 @@ impl ClientShellState {
         let Some(pending) = self.pending_requests.remove(request_id) else {
             return (false, Vec::new());
         };
+        if let PendingEndpointKind::Observation {
+            epoch,
+            endpoint_id,
+            purpose,
+        } = pending.kind
+        {
+            let current_boot = self
+                .endpoints
+                .iter()
+                .find(|endpoint| endpoint.endpoint_id == endpoint_id)
+                .and_then(|endpoint| endpoint.snapshot.as_ref())
+                .map(|snapshot| snapshot.boot_id.as_str());
+            if pending.boot_id != boot_id || current_boot != Some(boot_id) {
+                return (false, Vec::new());
+            }
+            return (self.receive_observation(epoch, purpose, result), Vec::new());
+        }
         if pending.boot_id != boot_id
             || self
                 .snapshot
@@ -485,6 +505,18 @@ impl ClientShellState {
         }
         if let PendingEndpointKind::PaneLinkResolve { target } = pending.kind {
             return self.complete_link_hover(target, result);
+        }
+        if let PendingEndpointKind::Views { revision } = pending.kind {
+            if revision == self.workbench.revision {
+                self.workbench.pending = false;
+                if result.is_ok() {
+                    self.workbench.acknowledged = revision;
+                } else {
+                    self.workbench.requested.clear();
+                    self.set_endpoint_error("标签视图更新失败，请重试");
+                }
+            }
+            return (true, Vec::new());
         }
         if result.is_ok() {
             let timeout_key = ClientEndpointNoticeKey {
@@ -530,6 +562,9 @@ impl ClientShellState {
             }
         }
         match pending.kind {
+            PendingEndpointKind::Observation { .. } | PendingEndpointKind::Views { .. } => {
+                unreachable!("后台响应已提前处理")
+            }
             PendingEndpointKind::Generic => {}
             PendingEndpointKind::PaneLinkResolve { .. } => unreachable!("handled above"),
             PendingEndpointKind::ProductAnnouncementDismiss { version, id } => {
@@ -828,9 +863,9 @@ impl ClientShellState {
         use crate::input::KeybindAction;
 
         let snapshot = self.snapshot.as_deref()?;
-        let focused_workspace = snapshot.focused_workspace_id.clone()?;
-        let focused_tab = snapshot.focused_tab_id.clone();
-        let focused_pane = snapshot.focused_pane_id.clone();
+        let focused_workspace = self.focused_workspace_id()?;
+        let focused_tab = self.focused_tab_id();
+        let focused_pane = self.focused_pane_id();
         let direction = |action| match action {
             KeybindAction::FocusPaneLeft
             | KeybindAction::SwapPaneLeft

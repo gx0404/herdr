@@ -130,7 +130,19 @@ impl ClientShellLocation {
 }
 
 /// A connected client tracked by the server.
+pub(crate) struct ClientView {
+    pub(crate) spec: crate::api::schema::ClientViewSpec,
+    pub(crate) render_state: ClientRenderState,
+    pub(crate) graphics_delivery: crate::kitty_graphics::surface::DeliveryCache,
+}
+
+pub(crate) struct MultiViewState {
+    pub(crate) revision: u64,
+    pub(crate) views: Vec<ClientView>,
+}
+
 pub(crate) struct ClientConnection {
+    pub(crate) views: Option<MultiViewState>,
     /// Whether this connection owns the Herdr shell or one direct terminal stream.
     pub(crate) mode: ClientConnectionMode,
     /// The client's terminal size after clamping.
@@ -224,6 +236,7 @@ impl ClientConnection {
     ) -> Self {
         Self {
             mode,
+            views: None,
             terminal_size,
             cell_size,
             last_activity,
@@ -259,6 +272,11 @@ impl ClientConnection {
 
     pub(crate) fn request_repaint(&mut self) {
         self.render_state.request_repaint();
+        if let Some(views) = &mut self.views {
+            for view in &mut views.views {
+                view.render_state.request_repaint();
+            }
+        }
     }
 
     pub(crate) fn track_shell_input(
@@ -366,6 +384,25 @@ impl ClientConnection {
             .drain()
             .map(|(_, held)| held)
             .collect()
+    }
+
+    pub(crate) fn owns_shell_release(&self, pane: &str, event: &ClientPaneInputEvent) -> bool {
+        let id = match event {
+            ClientPaneInputEvent::Key {
+                code,
+                kind: ClientKeyKind::Release,
+                physical_key_id,
+                ..
+            } => client_shell_key_press_id(code, *physical_key_id),
+            ClientPaneInputEvent::Mouse {
+                kind: ClientMouseKind::Up(button),
+                ..
+            } => ClientShellPressId::Mouse(*button),
+            _ => return false,
+        };
+        self.shell_held_inputs.get(&id).is_some_and(
+            |held| matches!(&held.target, ClientShellInputTarget::Pane(target) if target == pane),
+        )
     }
 
     pub(crate) fn update_host_theme(

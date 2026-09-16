@@ -892,6 +892,27 @@ impl App {
         };
 
         let response = match request.method {
+            Method::SystemMetricsGet(_)
+            | Method::SystemMetricsSubscribe(_)
+            | Method::SystemMetricsUnsubscribe(_)
+            | Method::SystemProcessList(_)
+            | Method::SystemProcessGet(_)
+            | Method::SystemProcessTerminate(_)
+            | Method::AccountUsageProviders(_)
+            | Method::AccountUsageGet(_)
+            | Method::AccountUsageIntegration(_)
+            | Method::AccountUsageRefresh(_)
+            | Method::AccountUsageSubscribe(_)
+            | Method::AccountUsageUnsubscribe(_)
+            | Method::AccountUsageReport(_)
+            | Method::AccountBindingSet(_)
+            | Method::ClientViewsSet(_) => {
+                return responses::encode_error(
+                    request.id,
+                    "server_context_required",
+                    "此操作需要 server 或客户端连接上下文",
+                );
+            }
             Method::ServerStop(_) => {
                 self.state.should_quit = true;
                 SuccessResponse {

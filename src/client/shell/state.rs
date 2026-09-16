@@ -70,6 +70,8 @@ pub(crate) enum ClientShellKeybindingSource {
 }
 
 pub(crate) struct ClientShellConfig {
+    pub(super) monitor: crate::config::MonitorConfig,
+    pub(super) account_usage: crate::config::AccountUsageConfig,
     pub(super) sidebar_width: u16,
     pub(super) sidebar_min_width: u16,
     pub(super) sidebar_max_width: u16,
@@ -211,6 +213,7 @@ pub(super) struct PaneHit {
 
 #[derive(Clone)]
 pub(super) struct PaneSplitHit {
+    pub(super) tab_id: Option<String>,
     pub(super) direction: crate::protocol::PaneSurfaceSplitDirection,
     pub(super) pos: u16,
     pub(super) area: Rect,
@@ -668,6 +671,14 @@ impl ClientShellOverlay {
 
 #[derive(Debug)]
 pub(super) enum PendingEndpointKind {
+    Views {
+        revision: u64,
+    },
+    Observation {
+        epoch: u64,
+        endpoint_id: ClientEndpointId,
+        purpose: super::observability::Purpose,
+    },
     Generic,
     ProductAnnouncementDismiss {
         version: String,
@@ -896,6 +907,8 @@ pub(super) struct ClientCopyModeState {
 }
 
 pub(crate) struct ClientShellState {
+    pub(super) workbench: super::workbench::State,
+    pub(super) observability: super::observability::State,
     pub(super) config: ClientShellConfig,
     pub(super) snapshot: Option<Box<ClientShellSnapshot>>,
     pub(super) active_snapshot_generation: Option<u64>,
@@ -1021,6 +1034,8 @@ pub(super) struct WorkspaceEntry {
 
 impl ClientShellState {
     pub(crate) fn new(mut config: ClientShellConfig) -> Self {
+        let workbench = super::workbench::State::new(&config);
+        let observability = super::observability::State::new(&config);
         let preferences = config.preferences.clone();
         let local_config_diagnostic = config.startup_config_diagnostic.take();
         let overlay = config
@@ -1057,6 +1072,8 @@ impl ClientShellState {
                 .extend(saved.collapsed_groups);
         }
         Self {
+            workbench,
+            observability,
             config,
             snapshot: None,
             active_snapshot_generation: None,
@@ -1240,6 +1257,9 @@ impl ClientShellState {
     }
 
     pub(super) fn layout(&self, cols: u16, rows: u16) -> ClientShellLayout {
+        if self.workbench.enabled {
+            return self.workbench.layout(cols, rows);
+        }
         self.config.layout(
             cols,
             rows,
@@ -1258,6 +1278,7 @@ impl ClientShellState {
     }
 
     pub(super) fn reset_endpoint_projection(&mut self) {
+        self.workbench.disconnect();
         self.hits = ShellHitMap::default();
         self.pane_surface = None;
         self.pending_pane_surface = None;

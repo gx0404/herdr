@@ -66,6 +66,7 @@ impl EndpointCommandLane {
 #[derive(Default)]
 pub(super) struct EndpointCommands {
     lanes: HashMap<ClientEndpointId, EndpointCommandLane>,
+    background: HashMap<ClientEndpointId, EndpointCommandLane>,
 }
 
 impl EndpointCommands {
@@ -76,7 +77,16 @@ impl EndpointCommands {
         boot_id: String,
         request: Box<Request>,
     ) {
-        self.lanes
+        let name = crate::api::api_method_name(&request.method);
+        let lanes = if name.starts_with("system.")
+            || name.starts_with("account.")
+            || name == "client.views.set"
+        {
+            &mut self.background
+        } else {
+            &mut self.lanes
+        };
+        lanes
             .entry(endpoint_id)
             .or_default()
             .queued
@@ -92,7 +102,21 @@ impl EndpointCommands {
         endpoint_id: &ClientEndpointId,
         endpoints: &mut EndpointRegistry,
     ) -> Vec<String> {
-        let lane = self.lanes.entry(endpoint_id.clone()).or_default();
+        let mut cancelled = Self::send_lane(&mut self.lanes, endpoint_id, endpoints);
+        cancelled.extend(Self::send_lane(
+            &mut self.background,
+            endpoint_id,
+            endpoints,
+        ));
+        cancelled
+    }
+
+    fn send_lane(
+        lanes: &mut HashMap<ClientEndpointId, EndpointCommandLane>,
+        endpoint_id: &ClientEndpointId,
+        endpoints: &mut EndpointRegistry,
+    ) -> Vec<String> {
+        let lane = lanes.entry(endpoint_id.clone()).or_default();
         let mut cancelled = Vec::new();
         if lane.in_flight.is_some() {
             return cancelled;
@@ -138,39 +162,49 @@ impl EndpointCommands {
         response_boot_id: &str,
         response_request_id: &str,
     ) -> bool {
-        self.lanes
-            .get(endpoint_id)
-            .and_then(|lane| lane.in_flight.as_ref())
-            .is_some_and(|command| {
-                command.generation == response_generation
-                    && command.boot_id == response_boot_id
-                    && command.request_id == response_request_id
-            })
+        [
+            self.lanes.get(endpoint_id),
+            self.background.get(endpoint_id),
+        ]
+        .into_iter()
+        .flatten()
+        .filter_map(|lane| lane.in_flight.as_ref())
+        .any(|command| {
+            command.generation == response_generation
+                && command.boot_id == response_boot_id
+                && command.request_id == response_request_id
+        })
     }
 
     /// Retire the complete source lane at source-off. The in-flight request is tombstoned for a
     /// late endpoint-local response; every queued request is cancelled before it can run in a
     /// later presentation epoch. Other endpoint lanes are deliberately untouched.
     pub(super) fn retire_lane(&mut self, endpoint_id: &ClientEndpointId) -> Vec<String> {
-        let Some(lane) = self.lanes.get_mut(endpoint_id) else {
-            return Vec::new();
-        };
         let mut request_ids = Vec::new();
-        if let Some(command) = lane.in_flight.take() {
-            lane.retire((
-                command.generation,
-                command.boot_id,
-                command.request_id.clone(),
-            ));
-            request_ids.push(command.request_id);
+        for lane in [
+            self.lanes.get_mut(endpoint_id),
+            self.background.get_mut(endpoint_id),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            if let Some(command) = lane.in_flight.take() {
+                lane.retire((
+                    command.generation,
+                    command.boot_id,
+                    command.request_id.clone(),
+                ));
+                request_ids.push(command.request_id);
+            }
+            request_ids.extend(lane.queued.drain(..).map(|command| command.request.id));
         }
-        request_ids.extend(lane.queued.drain(..).map(|command| command.request.id));
         request_ids
     }
 
     pub(super) fn expire(&mut self, now: Instant) -> Vec<EndpointCommandResult> {
         self.lanes
             .iter_mut()
+            .chain(self.background.iter_mut())
             .filter_map(|(endpoint_id, lane)| {
                 let command = lane.in_flight.as_ref()?;
                 if now.saturating_duration_since(command.sent_at) < ENDPOINT_COMMAND_TIMEOUT {
@@ -205,7 +239,21 @@ impl EndpointCommands {
         final_chunk: bool,
         data: Vec<u8>,
     ) -> io::Result<Option<EndpointCommandResult>> {
-        let Some(lane) = self.lanes.get_mut(endpoint_id) else {
+        let background = self.background.get(endpoint_id).is_some_and(|lane| {
+            lane.in_flight
+                .as_ref()
+                .is_some_and(|command| command.request_id == response_request_id)
+                || lane
+                    .retired
+                    .iter()
+                    .any(|(_, _, id)| id == response_request_id)
+        });
+        let lanes = if background {
+            &mut self.background
+        } else {
+            &mut self.lanes
+        };
+        let Some(lane) = lanes.get_mut(endpoint_id) else {
             return Ok(None);
         };
         let retired = (
@@ -244,16 +292,23 @@ impl EndpointCommands {
     /// Disconnecting an endpoint also cancels its shell-pending requests. Connection generation
     /// rejection handles any late wire response after the lane itself is removed.
     pub(super) fn disconnect(&mut self, endpoint_id: &ClientEndpointId) -> Vec<String> {
-        let Some(lane) = self.lanes.remove(endpoint_id) else {
-            return Vec::new();
-        };
-        let mut request_ids = lane
-            .queued
-            .into_iter()
-            .map(|command| command.request.id)
-            .collect::<Vec<_>>();
-        if let Some(command) = lane.in_flight {
-            request_ids.push(command.request_id);
+        let mut request_ids = Vec::new();
+        for lane in [
+            self.lanes.remove(endpoint_id),
+            self.background.remove(endpoint_id),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            request_ids.extend(
+                lane.queued
+                    .into_iter()
+                    .map(|command| command.request.id)
+                    .collect::<Vec<_>>(),
+            );
+            if let Some(command) = lane.in_flight {
+                request_ids.push(command.request_id);
+            }
         }
         request_ids
     }
@@ -307,6 +362,7 @@ mod tests {
 
     fn commands_with_in_flight() -> EndpointCommands {
         EndpointCommands {
+            background: HashMap::new(),
             lanes: HashMap::from([(
                 endpoint(),
                 EndpointCommandLane {

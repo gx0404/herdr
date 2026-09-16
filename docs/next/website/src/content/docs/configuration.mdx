@@ -3,6 +3,9 @@ title: Configuration
 description: Configure Herdr keybindings, themes, sidebar behavior, notifications, and advanced options.
 ---
 
+See [Monitoring, account usage and docking](/docs/monitoring/) for host metrics, provider account bindings, and movable terminal groups.
+
+
 Herdr works without a config file. Add one when you want custom keys, themes, sidebar layouts, notifications, or advanced behavior.
 
 The [Config reference](/docs/config-reference/) lists every setting and keybinding, with types, defaults, and allowed values. This page covers setup, common recipes, and configuration structures that need more explanation than a reference row.
@@ -62,7 +65,7 @@ headless_cols = 160
 headless_rows = 50
 ```
 
-With one attached client, all tabs follow its size. With multiple clients, each viewed tab follows the client that most recently focused, selected, or interacted with it. When all but one client detach, all tabs immediately return to the remaining client's size. When no clients remain, existing pane PTYs retain their last size and new headless layout uses the configured fallback.
+With docked terminal groups, each visible tab has its own view size. Legacy single-view clients keep the following behavior: with one attached client, all tabs follow its size. With multiple clients, each viewed tab follows the client that most recently focused, selected, or interacted with it. When all but one client detach, all tabs immediately return to the remaining client's size. When no clients remain, existing pane PTYs retain their last size and new headless layout uses the configured fallback.
 
 ## Terminal defaults
 

@@ -49,6 +49,34 @@ impl ClientShellState {
             .collect::<Vec<_>>();
         remote_collapsed_groups.sort_by(|left, right| left.profile_id.cmp(&right.profile_id));
         let preferences = preferences::ClientChromePreferences {
+            layouts: self.workbench.saved_layouts(),
+            monitor: self
+                .config
+                .preferences
+                .monitor
+                .as_ref()
+                .map(|_| self.observability.monitor.clone()),
+            usage_enabled: self
+                .config
+                .preferences
+                .usage_enabled
+                .map(|_| self.observability.usage.enabled),
+            usage_format: self
+                .config
+                .preferences
+                .usage_format
+                .map(|_| self.observability.usage.format),
+            usage_position: self
+                .config
+                .preferences
+                .usage_position
+                .map(|_| self.observability.usage.position),
+            usage_disabled_providers: self
+                .config
+                .preferences
+                .usage_disabled_providers
+                .as_ref()
+                .map(|_| self.observability.usage.disabled_providers.clone()),
             sidebar_width: self.sidebar_width_manual.then_some(self.sidebar_width),
             sidebar_section_split: self
                 .sidebar_section_split_manual
@@ -62,10 +90,11 @@ impl ClientShellState {
             collapsed_groups,
             remote_collapsed_groups,
         };
-        if let Err(error) = preferences::store(path, preferences) {
+        if let Err(error) = preferences::store(path, preferences.clone()) {
             self.set_endpoint_error(error);
             outcome.repaint = true;
         }
+        self.config.preferences = preferences;
     }
 
     pub(crate) fn reload_client_config(&mut self) {
@@ -77,6 +106,7 @@ impl ClientShellState {
                     &loaded.diagnostics,
                     &loaded.invalid_sections,
                 );
+                self.observability.reload_preferences(&self.config);
                 if let Some(appearance) = self.host_appearance {
                     self.config.palette = crate::app::client_palette_for_appearance(
                         &self.config.theme_runtime,
@@ -113,6 +143,8 @@ impl ClientShellConfig {
     pub(crate) fn from_config(config: &Config) -> Self {
         let theme_runtime = crate::app::client_theme_runtime_from_config(config);
         Self {
+            monitor: config.monitor.clone(),
+            account_usage: config.account_usage.clone(),
             sidebar_width: config.ui.sidebar_width,
             sidebar_min_width: config.ui.sidebar_min_width,
             sidebar_max_width: config.ui.sidebar_max_width,

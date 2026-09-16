@@ -20,6 +20,10 @@ impl HeadlessServer {
             }
             let changed = client.shell_surface_active != active;
             if active {
+                // 重连/端点激活沿用 v1 的首帧握手；前端提交布局后再启用多视图。
+                client.views = None;
+            }
+            if active {
                 client.shell_projection_revision =
                     client.shell_projection_revision.saturating_add(1);
                 // Force the next control snapshot to carry this new floor instead of reusing a

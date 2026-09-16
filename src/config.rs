@@ -3,6 +3,7 @@ use crossterm::event::{KeyCode, KeyModifiers};
 mod io;
 mod keybinds;
 mod model;
+mod observability;
 mod sidebar;
 mod sound;
 mod tab_bar;
@@ -49,6 +50,9 @@ pub(crate) use self::{
     },
     theme::canonical_theme_name,
     window_title::{sanitize_window_title_text, window_title_diagnostics},
+};
+pub use observability::{
+    AccountUsageConfig, MonitorConfig, UsageAccountConfig, UsageDisplayFormat, UsageDisplayPosition,
 };
 
 pub(crate) use self::{keybinds::CommandKeybindType, model::KeysConfig};
@@ -118,6 +122,10 @@ impl Config {
             .chain(keybind_diags)
             .chain(self.remote_image_paste_key().err())
             .chain(self.theme.diagnostics())
+            .chain(observability::diagnostics(
+                &self.monitor,
+                &self.account_usage,
+            ))
             .chain(self.ui.sound.diagnostics())
             .chain(tab_bar_right_diagnostics(&self.ui.tab_bar_right))
             .chain(window_title_diagnostics(&self.ui.window_title))

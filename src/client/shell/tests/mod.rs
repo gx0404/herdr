@@ -6,6 +6,7 @@ use crate::protocol::{
 };
 use crossterm::event::MouseEvent;
 mod text_editing;
+mod workbench;
 
 pub(super) fn snapshot() -> ClientShellSnapshot {
     ClientShellSnapshot {

@@ -129,6 +129,15 @@ impl ClientShellState {
     }
 
     fn prepare_committed_text(&mut self, text: &str, outcome: &mut ClientShellInput) -> bool {
+        if self.observability.filtering_processes {
+            let remaining =
+                256usize.saturating_sub(self.observability.process_filter.chars().count());
+            self.observability
+                .process_filter
+                .extend(text.chars().filter(|ch| !ch.is_control()).take(remaining));
+            outcome.repaint = true;
+            return true;
+        }
         if !(self.mode == ClientShellMode::Navigate && self.workspace_preview_action_blocked())
             && self.insert_copy_search_text(text)
         {
@@ -571,6 +580,9 @@ impl ClientShellState {
                     outcome.repaint = true;
                     return None;
                 }
+                if self.workbench_key(key, outcome) || self.observation_key(key, outcome) {
+                    return None;
+                }
                 self.focused_pane_id().map(ClientInputTarget::Pane)
             }
             ClientShellMode::Prefix => {
@@ -965,6 +977,16 @@ impl ClientShellState {
     }
 
     pub(super) fn focused_pane_id(&self) -> Option<String> {
+        if self.workbench.enabled {
+            let view = self.workbench.focused_view()?;
+            return view
+                .surface
+                .panes
+                .iter()
+                .find(|pane| pane.focused)
+                .or_else(|| view.surface.panes.first())
+                .map(|pane| pane.pane_id.clone());
+        }
         self.snapshot
             .as_deref()
             .and_then(|snapshot| snapshot.focused_pane_id.clone())

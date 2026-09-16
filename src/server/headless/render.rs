@@ -229,26 +229,25 @@ impl HeadlessServer {
                 if !client.is_active_shell_client() || client.writer.is_none() {
                     continue;
                 }
-                let Some(target) = self.shell_target_for_client(client_id) else {
-                    continue;
-                };
-                let Some(tab) = self
-                    .app
-                    .state
-                    .workspaces
-                    .get(target.workspace_index)
-                    .and_then(|workspace| workspace.tabs.get(target.tab_index))
-                else {
-                    continue;
-                };
-                if tab.zoomed {
-                    pane_ids.insert(tab.layout.focused());
-                } else {
-                    pane_ids.extend(tab.layout.pane_ids());
-                }
-                if self.popup_owner_tab_id == self.shell_tab_id_for_client(client_id) {
-                    if let Some(popup) = &self.app.state.popup_pane {
-                        pane_ids.insert(popup.pane_id);
+                for target in self.client_view_targets(client_id) {
+                    let Some(tab) = self
+                        .app
+                        .state
+                        .workspaces
+                        .get(target.workspace_index)
+                        .and_then(|workspace| workspace.tabs.get(target.tab_index))
+                    else {
+                        continue;
+                    };
+                    if tab.zoomed {
+                        pane_ids.insert(tab.layout.focused());
+                    } else {
+                        pane_ids.extend(tab.layout.pane_ids());
+                    }
+                    if self.popup_owner_tab_id == self.shell_tab_id_for_client(client_id) {
+                        if let Some(popup) = &self.app.state.popup_pane {
+                            pane_ids.insert(popup.pane_id);
+                        }
                     }
                 }
             }
@@ -356,19 +355,21 @@ impl HeadlessServer {
             {
                 return self.popup_owner_tab_id == self.shell_tab_id_for_client(client_id);
             }
-            let Some(target) = self.shell_target_for_client(client_id) else {
-                return false;
-            };
-            let Some(tab) = self
-                .app
-                .state
-                .workspaces
-                .get(target.workspace_index)
-                .and_then(|workspace| workspace.tabs.get(target.tab_index))
-            else {
-                return false;
-            };
-            tab.panes.contains_key(&pane_id) && (!tab.zoomed || tab.layout.focused() == pane_id)
+            self.client_view_targets(client_id)
+                .into_iter()
+                .any(|target| {
+                    let Some(tab) = self
+                        .app
+                        .state
+                        .workspaces
+                        .get(target.workspace_index)
+                        .and_then(|workspace| workspace.tabs.get(target.tab_index))
+                    else {
+                        return false;
+                    };
+                    tab.panes.contains_key(&pane_id)
+                        && (!tab.zoomed || tab.layout.focused() == pane_id)
+                })
         })
     }
 
@@ -405,6 +406,14 @@ impl HeadlessServer {
         // Resize from the controlling client's geometry before drawing any observer.
         // Retained updates fall back here when a pane changes alternate screens.
         for (client_id, (cols, rows), cell_size, _, _) in &render_targets {
+            if self
+                .clients
+                .get(client_id)
+                .is_some_and(|client| client.views.is_some())
+            {
+                self.resize_changed_view_geometry(*client_id);
+                continue;
+            }
             let Some(client) = self.clients.get(client_id) else {
                 continue;
             };
@@ -567,6 +576,16 @@ impl HeadlessServer {
                     client.clear_deferred_render();
                     continue;
                 }
+            }
+            if self
+                .clients
+                .get(&client_id)
+                .is_some_and(|client| client.views.is_some())
+            {
+                if !self.render_client_views(client_id) {
+                    broken_clients.push(client_id);
+                }
+                continue;
             }
             let shell_graphics_delivery = self
                 .clients

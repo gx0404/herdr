@@ -31,6 +31,18 @@ PENDING 补验方式：在对应工具的真实会话中尝试探针命令
 
 ## 维护
 
+Codex 审批策略以实际会话配置为准。当前仓库设置 `approval_policy = "never"`；
+用户级配置和启动参数仍须一致，已经启动的会话可能保留旧快照。`never` 控制
+是否询问，不扩大 `sandbox_mode = "workspace-write"` 的访问范围。
+参见[官方配置参考](https://learn.chatgpt.com/docs/config-file/config-reference)。
+
+Codex 的 PreToolUse 响应采用 `hookSpecificOutput.permissionDecision`。
+当前官方协议不支持 `ask`，因此共享策略里的 ask 模式在 Codex 适配中转为
+带原因的拒绝，防止无效响应被忽略后继续执行；Claude/ZCode 仍保持原协议。
+常规测试、建临时目录和读取画面不触发此门。协议探针为 PASS，真实客户端
+重新加载后的权限状态仍需单独核验，不能把静态配置当成已生效的运行时。
+参见[官方 hooks 协议](https://learn.chatgpt.com/docs/hooks)。
+
 - 改危险模式：编辑 `.claude/hooks/dangerous_patterns.conf`（TSV 四列），跑
   `python3 -m unittest scripts.test_ai_tool_hooks`，并在真实会话演练允许与拒绝
   两侧；PostToolUse 不得静默改源码。

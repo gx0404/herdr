@@ -547,7 +547,7 @@ fn parse_value(content: &str, settings_path: &Path) -> io::Result<Value> {
     })
 }
 
-fn reject_duplicate_keys(node: &CstNode, settings_path: &Path) -> io::Result<()> {
+pub(super) fn reject_duplicate_keys(node: &CstNode, settings_path: &Path) -> io::Result<()> {
     if let Some(object) = node.as_object() {
         let mut names = HashSet::new();
         for property in object.properties() {

@@ -428,6 +428,20 @@ impl ClientShellState {
 
     fn pane_split_target_is_current(&self, hit: &PaneSplitHit, tab_id: &str) -> Option<bool> {
         let snapshot = self.snapshot.as_deref()?;
+        if self.workbench.enabled {
+            let view = self
+                .workbench
+                .views
+                .values()
+                .find(|view| view.tab == tab_id)?;
+            if view.surface.projection_revision != snapshot.revision {
+                return None;
+            }
+            return Some(
+                hit.tab_id.as_deref() == Some(tab_id)
+                    && pane_surface_topology_signature(&view.surface) == hit.topology_signature,
+            );
+        }
         let surface = self.pane_surface.as_ref()?;
         if snapshot.revision != surface.projection_revision {
             return None;
@@ -652,6 +666,12 @@ impl ClientShellState {
     }
 
     pub(super) fn handle_mouse(&mut self, mouse: MouseEvent, outcome: &mut ClientShellInput) {
+        if self.workbench_mouse(mouse, outcome) {
+            return;
+        }
+        if self.observation_mouse(mouse, outcome) {
+            return;
+        }
         self.update_link_hover(mouse, outcome);
         let point = (mouse.column, mouse.row);
         if self.mode == ClientShellMode::Navigate
@@ -2155,11 +2175,7 @@ impl ClientShellState {
                     .find(|hit| super::contains(hit.hit_rect, point))
                     .cloned();
                 if let Some(hit) = split_hit {
-                    let Some(tab_id) = self
-                        .snapshot
-                        .as_deref()
-                        .and_then(|snapshot| snapshot.focused_tab_id.clone())
-                    else {
+                    let Some(tab_id) = hit.tab_id.clone() else {
                         return;
                     };
                     let pointer = match hit.direction {

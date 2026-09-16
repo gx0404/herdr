@@ -4,6 +4,7 @@ use super::*;
 pub(super) enum ClientGlobalMenuAction {
     Binding(crate::input::KeybindAction),
     WhatsNew,
+    Observation(super::observability::Page),
 }
 
 pub(super) fn global_menu_attention(snapshot: &ClientShellSnapshot) -> bool {
@@ -51,6 +52,20 @@ pub(super) fn global_menu_items(
         t.detach,
         ClientGlobalMenuAction::Binding(crate::input::KeybindAction::Detach),
     ));
+    items.extend([
+        (
+            super::observability::tr("System monitor", "系统监控"),
+            ClientGlobalMenuAction::Observation(super::observability::Page::Monitor),
+        ),
+        (
+            super::observability::tr("Account usage", "账号用量"),
+            ClientGlobalMenuAction::Observation(super::observability::Page::Accounts),
+        ),
+        (
+            super::observability::tr("Monitor settings", "监控设置"),
+            ClientGlobalMenuAction::Observation(super::observability::Page::Settings),
+        ),
+    ]);
     items
 }
 
@@ -101,6 +116,7 @@ impl ClientShellState {
         }
         self.overlay = None;
         match action {
+            ClientGlobalMenuAction::Observation(page) => self.open_observation_page(page, outcome),
             ClientGlobalMenuAction::Binding(binding) => {
                 self.record_binding(crate::input::KeybindMatch::Action(binding), outcome)
             }

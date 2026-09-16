@@ -188,6 +188,18 @@ pub(crate) fn render_sidebar(
     state: &mut ShellRenderState<'_>,
     hits: &mut ShellHitMap,
 ) {
+    render_sidebar_regions(buffer, area, snapshot, config, state, hits, None);
+}
+
+pub(crate) fn render_sidebar_regions(
+    buffer: &mut Buffer,
+    area: Rect,
+    snapshot: &ClientShellSnapshot,
+    config: &ClientShellConfig,
+    state: &mut ShellRenderState<'_>,
+    hits: &mut ShellHitMap,
+    regions: Option<(Rect, Rect)>,
+) {
     let palette = &config.palette;
     render_sidebar_background(buffer, area, palette);
     hits.sidebar_divider = if area.is_empty() {
@@ -195,8 +207,8 @@ pub(crate) fn render_sidebar(
     } else {
         Rect::new(area.right().saturating_sub(1), area.y, 1, area.height)
     };
-    let (workspace_area, detail_area) =
-        crate::ui::expanded_sidebar_sections(area, state.sidebar_section_split);
+    let (workspace_area, detail_area) = regions
+        .unwrap_or_else(|| crate::ui::expanded_sidebar_sections(area, state.sidebar_section_split));
     hits.sidebar_section_divider =
         crate::ui::sidebar_section_divider_rect(area, state.sidebar_section_split);
     put_text(

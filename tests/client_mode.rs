@@ -1003,11 +1003,13 @@ fn federated_client_starts_without_local_and_survives_its_restart() {
         .to_string(),
     );
     assert_eq!(created["result"]["type"], "workspace_created");
-    assert!(wait_until(
-        Duration::from_secs(10),
-        Duration::from_millis(20),
-        || screen_text().contains("local-online")
-    ));
+    assert!(
+        wait_until(Duration::from_secs(10), Duration::from_millis(20), || {
+            screen_text().contains("local-online")
+        }),
+        "本地主机上线后应显示工作区：{}",
+        screen_text()
+    );
 
     local.child.kill().unwrap();
     local.close_master();

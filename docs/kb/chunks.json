@@ -1,5 +1,5 @@
 {
-  "chunk_count": 831,
+  "chunk_count": 867,
   "chunks": [
     {
       "anchor": "herdr",
@@ -761,8 +761,8 @@
       "anchor": "AI 工具接入与验证账 > 维护",
       "doc": "docs/AI_TOOLS.md",
       "id": "docs-ai-tools-md-ai-工具接入与验证账-维护",
-      "source_sha256": "1f786d925d0674fad0a55f65d0c9257ad5e2ecd15a16c996307384bdbbe8d372",
-      "text": "## 维护\n\n- 改危险模式：编辑 `.claude/hooks/dangerous_patterns.conf`（TSV 四列），跑\n  `python3 -m unittest scripts.test_ai_tool_hooks`，并在真实会话演练允许与拒绝\n  两侧；PostToolUse 不得静默改源码。\n- 改规则/路由：见 `docs/AGENT_RULES/README.md` 维护节；工具面零改动。\n- 个人状态（`settings.local.json`、`review/`、`sessions/`、`.codex/state/`、\n  `.zcode/plans/`）不入库；共享文件保持无凭据。\n- hooks 是第二道安全门，不是规则加载器；权限白名单在 `.claude/settings.json`，\n  两者语义不得互相替代。"
+      "source_sha256": "4a91b0b3535720a012ccd6d8a9d20cb60b79cd67fe35a6fd3dc7ab7293765cb5",
+      "text": "## 维护\n\nCodex 审批策略以实际会话配置为准。当前仓库设置 `approval_policy = \"never\"`；\n用户级配置和启动参数仍须一致，已经启动的会话可能保留旧快照。`never` 控制\n是否询问，不扩大 `sandbox_mode = \"workspace-write\"` 的访问范围。\n参见[官方配置参考](https://learn.chatgpt.com/docs/config-file/config-reference)。\n\nCodex 的 PreToolUse 响应采用 `hookSpecificOutput.permissionDecision`。\n当前官方协议不支持 `ask`，因此共享策略里的 ask 模式在 Codex 适配中转为\n带原因的拒绝，防止无效响应被忽略后继续执行；Claude/ZCode 仍保持原协议。\n常规测试、建临时目录和读取画面不触发此门。协议探针为 PASS，真实客户端\n重新加载后的权限状态仍需单独核验，不能把静态配置当成已生效的运行时。\n参见[官方 hooks 协议](https://learn.chatgpt.com/docs/hooks)。\n\n- 改危险模式：编辑 `.claude/hooks/dangerous_patterns.conf`（TSV 四列），跑\n  `python3 -m unittest scripts.test_ai_tool_hooks`，并在真实会话演练允许与拒绝\n  两侧；PostToolUse 不得静默改源码。\n- 改规则/路由：见 `docs/AGENT_RULES/README.md` 维护节；工具面零改动。\n- 个人状态（`settings.local.json`、`review/`、`sessions/`、`.codex/state/`、\n  `.zcode/plans/`）不入库；共享文件保持无凭据。\n- hooks 是第二道安全门，不是规则加载器；权限白名单在 `.claude/settings.json`，\n  两者语义不得互相替代。"
     },
     {
       "anchor": "AI 工具接入与验证账 > 验证账（按会话逐项记账，未运行不写 PASS）",
@@ -1475,8 +1475,8 @@
       "anchor": "Config file > Headless terminal size",
       "doc": "docs/next/website/src/content/docs/configuration.mdx",
       "id": "docs-next-website-src-content-docs-configuration-mdx-config-file-headless-terminal-size",
-      "source_sha256": "705dd42e1320537e3ac6ddcbaeb247a93bd4451535c7dd24fde4a1987b5b7d00",
-      "text": "## Headless terminal size\n\nWhen no client is attached, the server uses a 120×40 virtual terminal for layout and newly created panes. Change that fallback for headless orchestration with:\n\n```toml\n[server]\nheadless_cols = 160\nheadless_rows = 50\n```\n\nWith one attached client, all tabs follow its size. With multiple clients, each viewed tab follows the client that most recently focused, selected, or interacted with it. When all but one client detach, all tabs immediately return to the remaining client's size. When no clients remain, existing pane PTYs retain their last size and new headless layout uses the configured fallback."
+      "source_sha256": "6372be37773ee6e656787a12dfa1cf5cadb8d7f8dd91386268b95bcc2aae045a",
+      "text": "## Headless terminal size\n\nWhen no client is attached, the server uses a 120×40 virtual terminal for layout and newly created panes. Change that fallback for headless orchestration with:\n\n```toml\n[server]\nheadless_cols = 160\nheadless_rows = 50\n```\n\nWith docked terminal groups, each visible tab has its own view size. Legacy single-view clients keep the following behavior: with one attached client, all tabs follow its size. With multiple clients, each viewed tab follows the client that most recently focused, selected, or interacted with it. When all but one client detach, all tabs immediately return to the remaining client's size. When no clients remain, existing pane PTYs retain their last size and new headless layout uses the configured fallback."
     },
     {
       "anchor": "Config file > IME cursor tracking",
@@ -1650,8 +1650,8 @@
       "anchor": "_top",
       "doc": "docs/next/website/src/content/docs/configuration.mdx",
       "id": "docs-next-website-src-content-docs-configuration-mdx-top",
-      "source_sha256": "d014961f032e231ae594ae6c2badf12c6ddfc26023360a37743dc220cb049730",
-      "text": "---\ntitle: Configuration\ndescription: Configure Herdr keybindings, themes, sidebar behavior, notifications, and advanced options.\n---\n\nHerdr works without a config file. Add one when you want custom keys, themes, sidebar layouts, notifications, or advanced behavior.\n\nThe [Config reference](/docs/config-reference/) lists every setting and keybinding, with types, defaults, and allowed values. This page covers setup, common recipes, and configuration structures that need more explanation than a reference row."
+      "source_sha256": "b7142c9fac60a0a1eb30500cf5ca469e36a05b5f960cb2aa1a014c914dd90f14",
+      "text": "---\ntitle: Configuration\ndescription: Configure Herdr keybindings, themes, sidebar behavior, notifications, and advanced options.\n---\n\nSee [Monitoring, account usage and docking](/docs/monitoring/) for host metrics, provider account bindings, and movable terminal groups.\n\n\nHerdr works without a config file. Add one when you want custom keys, themes, sidebar layouts, notifications, or advanced behavior.\n\nThe [Config reference](/docs/config-reference/) lists every setting and keybinding, with types, defaults, and allowed values. This page covers setup, common recipes, and configuration structures that need more explanation than a reference row."
     },
     {
       "anchor": "Before you connect",
@@ -2063,8 +2063,8 @@
       "anchor": "_top",
       "doc": "docs/next/website/src/content/docs/integrations.mdx",
       "id": "docs-next-website-src-content-docs-integrations-mdx-top",
-      "source_sha256": "7e3fdcafcf0775f6185c976b62169ca2c7a0a590c78cdd880c0ce363e06a83ed",
-      "text": "---\ntitle: Integrations\ndescription: Install Herdr integrations for Pi, OMP, Claude Code, Codex, GitHub Copilot CLI, Devin CLI, Droid, Kimi Code CLI, OpenCode, Kilo Code CLI, Hermes Agent, Qoder CLI, Qwen Code, Letta Code, Cursor Agent CLI, MastraCode, Antigravity CLI, and Grok CLI.\n---\n\nHerdr detects supported agents automatically. Install official integrations when you want native agent session restore, direct lifecycle reports, or both. See [Agents](/docs/agents/) for the full status authority model."
+      "source_sha256": "aff73d2b2c5b9ed4028849bcc4c662b479cd3cc862add2527f4d526caf22e570",
+      "text": "---\ntitle: Integrations\ndescription: Install Herdr integrations for Pi, OMP, Claude Code, Codex, GitHub Copilot CLI, Devin CLI, Droid, Kimi Code CLI, OpenCode, Kilo Code CLI, Hermes Agent, Qoder CLI, Qwen Code, Letta Code, Cursor Agent CLI, MastraCode, Antigravity CLI, and Grok CLI.\n---\n\nSee [Monitoring, account usage and docking](/docs/monitoring/) for host metrics, provider account bindings, and movable terminal groups.\n\n\nHerdr detects supported agents automatically. Install official integrations when you want native agent session restore, direct lifecycle reports, or both. See [Agents](/docs/agents/) for the full status authority model."
     },
     {
       "anchor": "_top",
@@ -2156,6 +2156,69 @@
       "id": "docs-next-website-src-content-docs-marketplace-mdx-top",
       "source_sha256": "dc7caa6d5f044dc3d66cef062cb0c29d8e544e40abfd73c6341735e272e1586e",
       "text": "---\ntitle: Marketplace\ndescription: Discover community Herdr plugins on GitHub, and get your own plugin listed.\n---\n\nThe Herdr plugin marketplace indexes community plugins. Browse it at\n[herdr.dev/plugins](/plugins/). The index covers public GitHub repositories; it\nis not a reviewed catalog."
+    },
+    {
+      "anchor": "Docking",
+      "doc": "docs/next/website/src/content/docs/monitoring.mdx",
+      "id": "docs-next-website-src-content-docs-monitoring-mdx-docking",
+      "source_sha256": "6341e151e0112dbdf296d09f25e986ac13bcb26a197ad51e89ec6161bb7bcbfb",
+      "text": "## Docking\n\nDrag a panel's `⠿` title handle to another panel's edge. The drop preview shows the destination. Drag dividers to resize, tabs to reorder or create another terminal group, and pane handles to swap panes or move them between tabs without restarting their processes. Borderless panes show their handles only in Layout mode, keeping normal terminal text unobstructed. Right-click tab menus remain available.\n\n`□` maximizes/restores a panel. In Layout mode, `Tab` / `Shift+Tab` selects a panel, arrows resize, `Shift+arrows` move, `Enter` maximizes, and `Esc` finishes. Lock prevents accidental rearrangement; Reset restores the default layout. Layouts persist per client and endpoint. Small terminals project the focused panel without discarding the saved layout. Older servers retain the previous single-view UI."
+    },
+    {
+      "anchor": "Docking > Account binding",
+      "doc": "docs/next/website/src/content/docs/monitoring.mdx",
+      "id": "docs-next-website-src-content-docs-monitoring-mdx-docking-account-binding-part1",
+      "source_sha256": "4e2010d5d81b97be212133264398c7c82e64f17f5f6d32156194452a4218d0f0",
+      "text": "## Account binding\n\nHover an agent row or CLI title to inspect usage. Choose dashboard/table and hover/page/both in settings. Select and explicitly bind the account to the pane. A shared vendor name does not identify an account.\n\nBoth formats support wheel scrolling; the account page also supports the arrow keys for quota windows below the viewport. The usage popover can appear over a focused monitor panel and captures its own input without activating background cards or process rows.\n\nSubscription windows, key budgets, organization billing and local session statistics keep their own scopes and units. Results show reset times, source and sample age. Temporary errors retain the last successful sample with a cached status and bounded retry intervals.\n\nConfigure accounts on the server running the agent. `credential_env` names an environment variable; do not place the credential itself in TOML. Herdr does not copy CLI OAuth credentials to clients. CLI profiles use the vendor's documented directory selector. New Kimi Code uses `KIMI_CODE_HOME`; legacy Python Kimi uses a separate login store.\n\n```toml\n[account_usage]\nenabled = true\nformat = \"dashboard\" # dashboard / table\nposition = \"both\" # hover / page / both\nhover_delay_ms = 400\napi_refresh_seconds = 60\ncli_refresh_seconds = 300\nprobe_timeout_seconds = 20\ndisabled_providers = []\n\n[[account_usage.accounts]]\nid = \"work-codex\"\nlabel = \"Work\"\nagent = \"codex\"\nprovider = \"codex\"\nauth_mode = \"cli\"\nprofile_dir = \"/path/to/profile\"\n"
+    },
+    {
+      "anchor": "Docking > Account binding",
+      "doc": "docs/next/website/src/content/docs/monitoring.mdx",
+      "id": "docs-next-website-src-content-docs-monitoring-mdx-docking-account-binding-part2",
+      "source_sha256": "4e2010d5d81b97be212133264398c7c82e64f17f5f6d32156194452a4218d0f0",
+      "text": "[[account_usage.accounts]]\nid = \"team-api\"\nlabel = \"Organization API\"\nagent = \"claude\"\nprovider = \"anthropic\"\nauth_mode = \"api\"\ncredential_env = \"ANTHROPIC_ADMIN_KEY\"\n```\n\nUse `organization` and `account_user` for the exact identity required by the selected API. Set `billing_scope = \"enterprise\"` and an enterprise slug in `organization` for GitHub Enterprise. OpenRouter uses a management key with `billing_scope = \"account\"`; its default scope is the current API key. OMP's multiple-account output requires a provider/account selection. `base_url` only accepts registered official hosts; Kimi's local API is restricted to loopback."
+    },
+    {
+      "anchor": "Docking > API",
+      "doc": "docs/next/website/src/content/docs/monitoring.mdx",
+      "id": "docs-next-website-src-content-docs-monitoring-mdx-docking-api",
+      "source_sha256": "a5940504e3f9509cf8a66a3437ce56f968648a34ebbc97aedd8a8a3a4772f85f",
+      "text": "## API\n\nPublic JSON methods include `system.metrics.get/subscribe/unsubscribe`, `system.process.list/get/terminate`, `account.usage.providers/get/refresh/subscribe/unsubscribe/report/integration`, and `account.binding.set`. Slow subscribers retain the newest sample.\n\n`client.views.set` and named view-frame/input extensions require a negotiated TUI connection. Generation 1 encoding stays unchanged. Pane dragging reuses `pane.move` and `pane.swap`. Use `herdr api schema --json` for the precise contracts."
+    },
+    {
+      "anchor": "Docking > Host resources",
+      "doc": "docs/next/website/src/content/docs/monitoring.mdx",
+      "id": "docs-next-website-src-content-docs-monitoring-mdx-docking-host-resources-part1",
+      "source_sha256": "51544fce500893dfa914900ef6968bbfb09a83a34d05b0d9724e328595f446d5",
+      "text": "## Host resources\n\nChoose total/per-core CPU, RAM/swap, GPUs, disks, network interfaces, temperatures and processes. Sampling supports 500, 1000, 2000 and 5000 ms. Slow collectors run independently. Initial differential samples, unavailable drivers and permission failures display a status or `—`, rather than zero.\n\nNVIDIA uses NVML. Other Linux GPUs use driver-exposed DRM/sysfs fields; Windows uses DXGI and native GPU performance counters. Temperature, power and utilization availability depends on the driver. Containers and WSL report resources visible in that environment.\n\nScroll inside a card to inspect additional devices, CPU cores or processes. Click a core to select its history. Card arrows change order; settings control height and hidden devices. History is client-local, covers 1–60 minutes and has a 16 MiB budget. Pause stops history recording while live sampling and alerts continue.\n\nProcess details pin the process instance. Termination requires confirmation; force is a separate choice. Expired confirmations, reused PIDs and protected processes are rejected. Windows termination requires the force option and appropriate permission.\n\nAlerts default to off and operate only while a TUI is connected. Configure threshold, duration and cooldown; alerts never kill processes.\n\n```toml\n[monitor]\ninterval_ms = 1000\nhistory_minutes = 15\nvisible = [\"cpu\", \"cores\", \"memory\", \"gpu\", \"network\", \"processes\"]\ncard_height = 10\nhidden_devices = []\nalerts_enabled = true\n"
+    },
+    {
+      "anchor": "Docking > Host resources",
+      "doc": "docs/next/website/src/content/docs/monitoring.mdx",
+      "id": "docs-next-website-src-content-docs-monitoring-mdx-docking-host-resources-part2",
+      "source_sha256": "51544fce500893dfa914900ef6968bbfb09a83a34d05b0d9724e328595f446d5",
+      "text": "[[monitor.alerts]]\nmetric = \"cpu\" # cpu / memory / gpu / disk\nthreshold = 90\nduration_seconds = 30\ncooldown_seconds = 60\n```"
+    },
+    {
+      "anchor": "Docking > Official callbacks",
+      "doc": "docs/next/website/src/content/docs/monitoring.mdx",
+      "id": "docs-next-website-src-content-docs-monitoring-mdx-docking-official-callbacks",
+      "source_sha256": "4fb8b2e721adc672587560407dc46cb9df0b2a1bfa2f1adff7a9a99de14761a5",
+      "text": "## Official callbacks\n\nClaude and Antigravity account panels can enable/remove the official statusline callback. An existing renderer is retained at the end of a passthrough pipeline. Claude's quota fields require a supporting CLI version and normally appear after the first ordinary API response. Herdr never sends a model prompt to obtain usage.\n\nOther integrations can send supported official JSON to stdin of `herdr api usage-report --agent <agent>`. The command uses the binding for `HERDR_PANE_ID`, or explicit `--account <id>`. Bind first. Raw reports and conversation contents are not persisted. `--passthrough` preserves input for an existing statusline renderer."
+    },
+    {
+      "anchor": "Docking > Provider capabilities",
+      "doc": "docs/next/website/src/content/docs/monitoring.mdx",
+      "id": "docs-next-website-src-content-docs-monitoring-mdx-docking-provider-capabilities",
+      "source_sha256": "14e2a80927c635cb755c784a292e38e93461fda30d230442182e39e2dca1dd46",
+      "text": "## Provider capabilities\n\nThe registry covers 23 agents, excluding Muse. Official sources were checked on 2026-09-16. Subscription access and administrator billing access differ. Unsupported versions, absent APIs or missing permissions produce an explicit availability message. Session statistics never imply an account quota.\n\nSee the [provider source matrix](/zh-cn/docs/monitoring/#厂商能力与官方依据) for every official reference. Codex uses App Server; Kimi uses its authenticated local Server API; Claude and Antigravity support statusline quotas. Letta has a dedicated usage command; Kiro supports non-interactive `/usage`. Cursor, Devin, Cline, Copilot and Factory use their separately authorized reporting APIs. OMP, Amp and OpenCode have distinct CLI formats. Gemini, Grok and Hermes use guarded official CLI commands. Qoder currently has no verified automatic input-readiness contract. Mastra Code, Qwen, Maki and Pi provide session statistics and can bind their actual billing provider.\n\nFactory daily reports end no later than yesterday UTC. Cursor overage spend is separate from subscription-inclusive spend. Amp BYOK list-price estimates are not billed usage. Letta's quota bucket labels remain categorical. OpenRouter key budgets are distinct from account totals."
+    },
+    {
+      "anchor": "_top",
+      "doc": "docs/next/website/src/content/docs/monitoring.mdx",
+      "id": "docs-next-website-src-content-docs-monitoring-mdx-top",
+      "source_sha256": "8120aef1b35f03d8c4566a4c56b6b6580bd272b7ab3ad5adc9f292e8108830c9",
+      "text": "---\ntitle: Monitoring, account usage and docking\ndescription: Arrange terminal groups and inspect host resources and official provider usage.\n---\n\nOpen **Monitor** or **Accounts** from the top bar. The global menu includes monitoring and usage settings. Hardware metrics belong to the connected host; hovering a remote agent queries its own host."
     },
     {
       "anchor": "Detach and reattach",
@@ -2770,8 +2833,8 @@
       "anchor": "_top",
       "doc": "docs/next/website/src/content/docs/socket-api.mdx",
       "id": "docs-next-website-src-content-docs-socket-api-mdx-top",
-      "source_sha256": "5f652d003c4eb340327d86f194ae750001322f400bb68bef08fb1d99a76b4fec",
-      "text": "---\ntitle: Socket API\ndescription: Control a running Herdr server from scripts, tools, and coding agents.\n---\n\nHerdr exposes a local socket API for scripts and agents that need to inspect or control a running session.\n\nMost automation should start with the CLI wrappers. Use the raw socket API only when you need direct request/response control or long-lived event subscriptions."
+      "source_sha256": "906b5e8ed352ac9362533ea15b31cbf9e6d9fe4d2b6b124bf36964c3ba2be1ec",
+      "text": "---\ntitle: Socket API\ndescription: Control a running Herdr server from scripts, tools, and coding agents.\n---\n\nSee [Monitoring, account usage and docking](/docs/monitoring/) for host metrics, provider account bindings, and movable terminal groups.\n\n\nHerdr exposes a local socket API for scripts and agents that need to inspect or control a running session.\n\nMost automation should start with the CLI wrappers. Use the raw socket API only when you need direct request/response control or long-lived event subscriptions."
     },
     {
       "anchor": "The CJK IME window is misplaced or the cursor flickers on Windows",
@@ -3160,6 +3223,13 @@
     },
     {
       "anchor": "structure",
+      "doc": "src/api/schema/observability.rs",
+      "id": "src-api-schema-observability-rs-structure",
+      "source_sha256": "39b674fc6087818cd863f00140e74d3662a60dc1ae8764259972e2dfd7be16de",
+      "text": "模块文档：系统监控与账号用量的公开 JSON 类型；不进入冻结的终端帧 codec。\n公开项：\npub enum ObservationStatus {\npub struct CpuCoreMetric {\npub struct MemoryMetric {\npub struct GpuMetric {\npub struct DiskMetric {\npub struct NetworkMetric {\npub struct SensorMetric {\npub struct ProcessIdentity {\npub struct ProcessMetric {\npub struct SystemMetricsSnapshot {\npub struct SystemMetricsParams {\nimpl Default for SystemMetricsParams {\npub enum ProcessSort {\npub struct ProcessListParams {\nimpl Default for ProcessListParams {\npub struct ProcessGetParams {\npub struct ProcessTerminateParams {\npub struct UsageParams {\npub struct AccountBindingParams {\npub struct UsageIntegrationParams {\npub struct UsageReportParams {\npub struct UsageMetric {\npub struct AccountUsageSnapshot {\npub struct UsageProviderInfo {\npub struct ObservationSubscriptionParams {\npub struct ClientViewSpec {\npub struct ClientViewsSetParams {"
+    },
+    {
+      "anchor": "structure",
       "doc": "src/api/schema/panes.rs",
       "id": "src-api-schema-panes-rs-structure",
       "source_sha256": "fd5b7c4608bdc585d252c98584253b96de3b75af00f037e285c34dd0c185a9eb",
@@ -3183,8 +3253,8 @@
       "anchor": "structure",
       "doc": "src/api/schema.rs",
       "id": "src-api-schema-rs-structure",
-      "source_sha256": "5f730327b7b42a7a18ef35c908c251c16a03219fb121e64acd17232efafc4819",
-      "text": "公开项：\npub mod agents;\npub mod commands;\npub mod common;\npub mod events;\npub mod integrations;\npub mod panes;\npub mod plugins;\npub mod response;\npub mod server;\npub mod session;\npub mod tabs;\npub mod workspaces;\npub mod worktrees;\npub struct Request {\npub enum Method {"
+      "source_sha256": "20f26b9babfc3af5d5e52a15e1e42ca585692bde289dac852788c9d35fb6adb8",
+      "text": "公开项：\npub mod agents;\npub mod commands;\npub mod common;\npub mod events;\npub mod integrations;\npub mod observability;\npub mod panes;\npub mod plugins;\npub mod response;\npub mod server;\npub mod session;\npub mod tabs;\npub mod workspaces;\npub mod worktrees;\npub struct Request {\npub enum Method {"
     },
     {
       "anchor": "structure",
@@ -3239,8 +3309,8 @@
       "anchor": "structure",
       "doc": "src/api/server.rs",
       "id": "src-api-server-rs-structure",
-      "source_sha256": "dfabde619ede477dd9fe81403305064ddd6bdeed95dbd99dee8ec7794590aeb5",
-      "text": "公开项：\npub(super) const CONNECTION_POLL_INTERVAL: Duration = Duration::from_millis(100);\npub(super) const APP_RESPONSE_TIMEOUT: Duration = Duration::from_secs(5);\npub struct ServerHandle {\nimpl Drop for ServerHandle {\nimpl ServerHandle {\npub(crate) fn remove_socket_file_if_owned(&self) -> std::io::Result<()> {\npub(crate) fn start_server_with_stop_control(\npub(crate) fn api_method_name(method: &Method) -> &'static str {\npub(super) fn should_stop_connection(\npub(super) fn dispatch_to_app_with_timeout(\npub(super) fn dispatch_to_app_with_caller_timeout(\npub(super) fn dispatch_stream_open(\npub(super) fn dispatch_stream_frame("
+      "source_sha256": "8b470d64433b90e89700a23fa08648c2f1a42fef3c1a9467ade43f9087954139",
+      "text": "公开项：\npub(super) const CONNECTION_POLL_INTERVAL: Duration = Duration::from_millis(100);\npub(super) const APP_RESPONSE_TIMEOUT: Duration = Duration::from_secs(5);\npub struct ServerHandle {\nimpl Drop for ServerHandle {\nimpl ServerHandle {\npub(crate) fn remove_socket_file_if_owned(&self) -> std::io::Result<()> {\npub(crate) fn start_server_with_stop_control(\npub(crate) fn api_method_name(method: &Method) -> &'static str {\nimpl Drop for ActiveGuard {\npub(super) fn should_stop_connection(\npub(super) fn dispatch_to_app_with_timeout(\npub(super) fn dispatch_to_app_with_caller_timeout(\npub(super) fn dispatch_stream_open(\npub(super) fn dispatch_stream_frame("
     },
     {
       "anchor": "structure",
@@ -3932,8 +4002,8 @@
       "anchor": "structure",
       "doc": "src/client/shell/composition.rs",
       "id": "src-client-shell-composition-rs-structure",
-      "source_sha256": "8d45ec4d4b8e03b164be578e72acf95a50a78a57847920c7f166978b4b0e38b2",
-      "text": "公开项：\nimpl ClientShellState {\npub(crate) fn compose(&mut self, cols: u16, rows: u16) -> Option<FrameData> {"
+      "source_sha256": "8432463b82b060bada2af6b4c4865db0d315788330a503db9312f583fd0f4e5d",
+      "text": "公开项：\nimpl ClientShellState {\npub(crate) fn compose(&mut self, cols: u16, rows: u16) -> Option<FrameData> {\npub(super) fn paint_shell_copy(\npub(super) fn paint_shell_overlays(\npub(super) fn client_popup_size("
     },
     {
       "anchor": "structure",
@@ -3955,6 +4025,13 @@
       "id": "src-client-shell-copy-mode-rs-structure",
       "source_sha256": "aae4156efbf3e302480b59938bdca54c951e2ffb2d52cb2bec834b531077648b",
       "text": "公开项：\nimpl ClientShellState {\npub(super) fn reset_copy_pipeline(&mut self) {\npub(super) fn enter_copy_mode(&mut self, outcome: &mut ClientShellInput) -> bool {\npub(super) fn route_copy_mode_key(\npub(super) fn insert_copy_search_text(&mut self, text: &str) -> bool {\npub(super) fn apply_copy_search_result(\npub(super) fn complete_copy_operation(\npub(super) fn cancel_deferred_copy_after_search(&mut self, generation: u64) {\npub(super) fn sync_copy_selection(&mut self) {\npub(super) fn dispatch_next_copy_operation(&mut self, outcome: &mut ClientShellInput) {\npub(super) fn apply_copy_motion_target(\npub(super) fn exit_copy_mode(&mut self, copy: bool, outcome: &mut ClientShellInput) {"
+    },
+    {
+      "anchor": "structure",
+      "doc": "src/client/shell/dock.rs",
+      "id": "src-client-shell-dock-rs-structure",
+      "source_sha256": "c671a565472c6f5e03658d2c6efa4a2247a3f13a06634abd1d988976022ce59e",
+      "text": "模块文档：客户端停靠布局：只计算几何和标签归属，不拥有终端运行时。\n公开项：\npub(super) enum PanelId {\npub(super) enum Axis {\npub(super) enum Edge {\npub(super) enum DockNode {\npub(super) struct TabGroup {\npub(super) struct DockLayout {\npub(super) struct Divider {\npub(super) struct Geometry {\nimpl DockNode {\npub fn contains(&self, target: &PanelId) -> bool {\nimpl Default for DockLayout {\nimpl DockLayout {\npub fn from_sidebar(width_ratio: f32, section_ratio: f32) -> Self {\npub fn valid(&self) -> bool {\npub fn geometry(&self, area: Rect) -> Geometry {\npub fn dock(&mut self, panel: PanelId, target: &PanelId, edge: Edge) -> bool {\npub fn resize(&mut self, path: &[bool], ratio: f32) -> bool {\npub fn close_panel(&mut self, panel: &PanelId) -> bool {\npub fn reconcile_tabs(&mut self, tabs: &[String], active: Option<&str>) -> bool {\npub fn move_tab(&mut self, tab: &str, target: u64, index: usize, edge: Option<Edge>) -> bool {"
     },
     {
       "anchor": "structure",
@@ -3988,8 +4065,8 @@
       "anchor": "structure",
       "doc": "src/client/shell/endpoint_sidebar.rs",
       "id": "src-client-shell-endpoint-sidebar-rs-structure",
-      "source_sha256": "53da58fdc1e2ae658fbb1d449701459acb310066abc130513a0eb8821f2ecee1",
-      "text": "公开项：\npub(super) fn render_collapsed(\npub(super) fn render_expanded("
+      "source_sha256": "dde98636a175a6c8fe07ce7f080324cbf0a148c5b03a59d94831123fcdb1c575",
+      "text": "公开项：\npub(super) fn render_collapsed(\npub(super) fn render_expanded(\npub(super) fn render_expanded_regions("
     },
     {
       "anchor": "structure",
@@ -4063,6 +4140,20 @@
     },
     {
       "anchor": "structure",
+      "doc": "src/client/shell/observability/render.rs",
+      "id": "src-client-shell-observability-render-rs-structure",
+      "source_sha256": "7f5986a269e56a15286bb10254db96488cb9f0ee1e70a23bd043e0396a53199f",
+      "text": "公开项：\npub(super) fn status(status: ObservationStatus) -> &'static str {\npub(super) fn paint(\npub(super) fn account_rows(state: &State) -> usize {"
+    },
+    {
+      "anchor": "structure",
+      "doc": "src/client/shell/observability.rs",
+      "id": "src-client-shell-observability-rs-structure",
+      "source_sha256": "fe87b5f711fc628b40627764e003bf83a76b92926b3553fae267b0df5808cec1",
+      "text": "模块文档：监控与账号界面的客户端状态；网络和设备访问均通过公开 API。\n公开项：\npub(super) fn tr(en: &'static str, zh: &'static str) -> &'static str {\npub(super) enum Page {\npub(super) enum Purpose {\nimpl Purpose {\npub(super) enum Action {\npub(super) struct HistoryPoint {\npub(super) struct Hover {\npub(super) struct ProcessDialog {\npub(super) struct State {\nimpl State {\npub(super) fn reload_preferences(&mut self, config: &ClientShellConfig) {\npub fn new(config: &ClientShellConfig) -> Self {\npub(super) fn paint(\nimpl ClientShellState {\npub(super) fn open_observation_page(&mut self, page: Page, outcome: &mut ClientShellInput) {\npub(crate) fn is_observation_request(&self, id: &str) -> bool {\npub(crate) fn tick_observability(&mut self, now: Instant, outcome: &mut ClientShellInput) {\npub(super) fn receive_observation(\npub(super) fn observation_action(&mut self, action: Action, outcome: &mut ClientShellInput) {\npub(super) fn observation_mouse(\npub(super) fn observation_key(\npub(super) fn paint_observability("
+    },
+    {
+      "anchor": "structure",
       "doc": "src/client/shell/overlay_input.rs",
       "id": "src-client-shell-overlay-input-rs-structure",
       "source_sha256": "8bd659419351637f6409622340a65df95da1600b7c4c5cb5dd8a072196c4659b",
@@ -4128,8 +4219,8 @@
       "anchor": "structure",
       "doc": "src/client/shell/sidebar.rs",
       "id": "src-client-shell-sidebar-rs-structure",
-      "source_sha256": "863661de47c0567010bae432b8fad33792a1155dacc094587b5e1d03e055c095",
-      "text": "公开项：\npub(in crate::client::shell) fn collapsed_sidebar_sections(\npub(crate) fn render_collapsed_sidebar(\npub(crate) fn render_sidebar(\npub(crate) fn workspace_entries(\npub(in crate::client::shell) fn render_parent_group_toggle(\npub(in crate::client::shell) fn displayed_workspace_status(\npub(in crate::client::shell) fn workspace_rows(\npub(in crate::client::shell) fn render_workspace_rows("
+      "source_sha256": "1ad61d6d1c02007ae86ed1fb1c0065844fdbd5ecfd20e26d2e2dba368b538b33",
+      "text": "公开项：\npub(in crate::client::shell) fn collapsed_sidebar_sections(\npub(crate) fn render_collapsed_sidebar(\npub(crate) fn render_sidebar(\npub(crate) fn render_sidebar_regions(\npub(crate) fn workspace_entries(\npub(in crate::client::shell) fn render_parent_group_toggle(\npub(in crate::client::shell) fn displayed_workspace_status(\npub(in crate::client::shell) fn workspace_rows(\npub(in crate::client::shell) fn render_workspace_rows("
     },
     {
       "anchor": "structure",
@@ -4149,8 +4240,8 @@
       "anchor": "structure",
       "doc": "src/client/shell/surface_patch.rs",
       "id": "src-client-shell-surface-patch-rs-structure",
-      "source_sha256": "bc05fb67dc0249891c813bcfe3c025927e0beb6529cf5be2f576b4b95af5775d",
-      "text": "公开项：\npub(crate) struct ClientComposedSurfacePatch {\npub(crate) enum ClientPaneSurfacePatchOutcome {\nimpl ClientShellState {\npub(crate) fn apply_pane_surface_patch(\npub(crate) fn apply_composed_surface_patch("
+      "source_sha256": "01d2c0aa93a638888cbc9d15a453c44d21640cb79ebe12e8ba645fab2e719302",
+      "text": "公开项：\npub(crate) struct ClientComposedSurfacePatch {\npub(crate) enum ClientPaneSurfacePatchOutcome {\npub(super) fn apply_patch_to_surface(\nimpl ClientShellState {\npub(crate) fn apply_pane_surface_patch(\npub(crate) fn apply_composed_surface_patch("
     },
     {
       "anchor": "structure",
@@ -4266,6 +4357,13 @@
     },
     {
       "anchor": "structure",
+      "doc": "src/client/shell/tests/workbench.rs",
+      "id": "src-client-shell-tests-workbench-rs-structure",
+      "source_sha256": "3aab41b0fe8a56eb9ab4597664b0c045ce707006ae7f5e37ae3566dce1bd2e23",
+      "text": "公开项："
+    },
+    {
+      "anchor": "structure",
       "doc": "src/client/shell/tests/workspace_navigation.rs",
       "id": "src-client-shell-tests-workspace-navigation-rs-structure",
       "source_sha256": "3aab41b0fe8a56eb9ab4597664b0c045ce707006ae7f5e37ae3566dce1bd2e23",
@@ -4284,6 +4382,27 @@
       "id": "src-client-shell-word-selection-rs-structure",
       "source_sha256": "499d8d6dedb70b60425e8209f79946af30e731b2d6c9d628f5d9a168c8b9e29a",
       "text": "公开项：\npub(super) struct ClientWordSelection {\nimpl ClientShellState {\npub(super) fn request_word_selection(\npub(super) fn drag_word_selection(\npub(super) fn finish_word_selection(&mut self, outcome: &mut ClientShellInput) {\npub(super) fn complete_word_selection_row("
+    },
+    {
+      "anchor": "structure",
+      "doc": "src/client/shell/workbench/interaction.rs",
+      "id": "src-client-shell-workbench-interaction-rs-structure",
+      "source_sha256": "ad55086f514df59fbca555db4f0fd666c2580009f2175bbdf9f729bbcf45f4a9",
+      "text": "公开项：\npub(super) enum Action {\npub(super) enum Drag {\npub(super) fn preview(area: Rect, edge: Option<Edge>) -> Rect {\nimpl Drag {\npub fn drop_target(&self, geometry: &Geometry) -> Option<(PanelId, Option<Edge>)> {\nimpl ClientShellState {\npub(in crate::client::shell) fn sync_workbench_surface(&mut self) {\npub(in crate::client::shell) fn workbench_mouse(\npub(in crate::client::shell) fn workbench_key("
+    },
+    {
+      "anchor": "structure",
+      "doc": "src/client/shell/workbench/render.rs",
+      "id": "src-client-shell-workbench-render-rs-structure",
+      "source_sha256": "56185de39390629ccc194ee272e849a2503fb47a2cc6e0f6ee7c0090ddf8b307",
+      "text": "公开项：\npub(super) fn pane_hit(pane: &crate::protocol::PaneSurfacePane, area: Rect) -> PaneHit {\nimpl ClientShellState {\npub(in crate::client::shell) fn compose_workbench("
+    },
+    {
+      "anchor": "structure",
+      "doc": "src/client/shell/workbench.rs",
+      "id": "src-client-shell-workbench-rs-structure",
+      "source_sha256": "71eef2ad73b98d0d2210cd20861cf7ad8b40c633e00229b6c4d447ebfdaeb643",
+      "text": "模块文档：停靠工作台只管理客户端几何；每个可见标签由服务端独立投影。\n公开项：\npub(super) struct View {\npub(super) struct State {\npub(super) fn body(area: Rect, panel: &PanelId) -> Rect {\nimpl State {\npub fn new(config: &ClientShellConfig) -> Self {\npub fn saved_layouts(&self) -> HashMap<String, DockLayout> {\npub fn disconnect(&mut self) {\npub fn layout(&self, cols: u16, rows: u16) -> ClientShellLayout {\npub fn visible(&self, target: &PanelId) -> bool {\npub fn focused_view(&self) -> Option<&View> {\nimpl ClientShellState {\npub(super) fn default_dock(&self) -> DockLayout {\npub(super) fn workbench_sidebar(&mut self, collapsed: bool) {\npub(super) fn focused_tab_id(&self) -> Option<String> {\npub(super) fn focused_workspace_id(&self) -> Option<String> {\npub(crate) fn renew_workbench_surface(&mut self) {\npub(crate) fn tick_workbench(&mut self, now: Instant, outcome: &mut ClientShellInput) {\npub(crate) fn receive_view(\npub(crate) fn view_request(&self, request: ClientMessage) -> Option<ClientMessage> {\npub(super) fn workbench_open(&mut self, panel: PanelId) {"
     },
     {
       "anchor": "structure",
@@ -4382,6 +4501,13 @@
       "id": "src-config-model-rs-structure",
       "source_sha256": "a520eb3be2f276c3968f06522b43744a395dc513e905aa47caa7459e050fe110",
       "text": "公开项：\npub const MAX_TOAST_DELAY_SECONDS: u64 = 3600;\npub enum UpdateChannelConfig {\nimpl UpdateChannelConfig {\npub fn as_str(self) -> &'static str {\npub struct UpdateConfig {\nimpl Default for UpdateConfig {\npub enum ToastDelivery {\npub enum ToastHerdrPosition {\npub enum ToastClipboardPosition {\npub enum AgentPanelSortConfig {\npub enum StatusIndicatorStyle {\nimpl StatusIndicatorStyle {\npub fn as_str(self) -> &'static str {\npub enum HostCursorModeConfig {\npub enum SidebarCollapsedModeConfig {\npub struct RightClickPassthroughModifierConfig(Option<KeyModifiers>);\nimpl RightClickPassthroughModifierConfig {\npub fn modifiers(self) -> Option<KeyModifiers> {\nimpl<'de> Deserialize<'de> for RightClickPassthroughModifierConfig {\npub struct ToastConfig {\npub struct HerdrToastConfig {\npub struct ClipboardToastConfig {\npub enum NewTerminalCwdConfig {\nimpl<'de> Deserialize<'de> for NewTerminalCwdConfig {\npub enum ShellModeConfig {\npub struct TerminalConfig {\npub struct SessionConfig {\nimpl Default for SessionConfig {\npub enum ConfigReloadStatus {\npub struct ConfigReloadReport {\npub fn validated_sidebar_bounds(min: u16, max: u16) -> Option<(u16, u16)> { — Validate `[ui]` sidebar bound configuration.  Returns `Some((min, max))` when `min <= max`, `None` otherwise. The two\npub struct Config {\npub struct LoadedConfig {\npub struct KeysConfig {\npub(crate) struct KeysConfigOverlay {\nimpl KeysConfigOverlay {\npub(crate) fn set_prefix(&mut self, prefix: String) {\nimpl<'de> Deserialize<'de> for KeysConfig {\nimpl KeysConfig {\npub(crate) fn key_field_is_user_configured(&self, field: &str) -> bool {\npub(crate) fn local_profile(&self, keybinds: &Keybinds) -> KeysConfigOverlay {\npub struct IndexedKeysConfig {\npub struct WorktreesConfig {\npub enum TabBarPositionConfig {\npub enum PaneBordersConfig {\nimpl PaneBordersConfig {\npub fn draws_borders(self) -> bool {\npub fn shows_borders(self, multi_pane: bool) -> bool {\nimpl<'de> Deserialize<'de> for PaneBordersConfig {\nimpl<'de> de::Visitor<'de> for PaneBordersVisitor {\npub struct UiConfig {\npub enum ImeCursorShape {\nimpl ImeCursorShape {\npub fn to_decscusr(self) -> u8 { — Convert to DECSCUSR parameter (1–6).\npub struct ServerConfig {\npub struct AdvancedConfig {\npub struct RemoteConfig {\nimpl Default for RemoteConfig {\npub struct ExperimentalConfig {\nimpl Default for KeysConfig {\nimpl Default for WorktreesConfig {\nimpl Default for UiConfig {\nimpl UiConfig {\npub fn mouse_scroll_lines(&self) -> usize {\npub fn right_click_passthrough_modifiers(&self) -> Option<KeyModifiers> {\nimpl Default for ToastConfig {\nimpl Default for HerdrToastConfig {\nimpl Default for ClipboardToastConfig {\nimpl<'de> Deserialize<'de> for ToastConfig {\nimpl Default for ServerConfig {\nimpl Default for AdvancedConfig {"
+    },
+    {
+      "anchor": "structure",
+      "doc": "src/config/observability.rs",
+      "id": "src-config-observability-rs-structure",
+      "source_sha256": "71f3e9286079600807dd86d900d8858ab73c4642cf92af5a3c760124bc83b276",
+      "text": "模块文档：监控和厂商用量配置：只保存凭据引用，不保存令牌。\n公开项：\npub struct MonitorConfig {\nimpl Default for MonitorConfig {\npub struct MonitorAlertRule {\nimpl MonitorAlertRule {\nimpl Default for MonitorAlertRule {\npub enum UsageDisplayFormat {\npub enum UsageDisplayPosition {\npub struct AccountUsageConfig {\nimpl Default for AccountUsageConfig {\npub struct UsageAccountConfig {\npub(crate) fn diagnostics(monitor: &MonitorConfig, usage: &AccountUsageConfig) -> Vec<String> {"
     },
     {
       "anchor": "structure",
@@ -4751,8 +4877,8 @@
       "anchor": "structure",
       "doc": "src/integration/claude_settings.rs",
       "id": "src-integration-claude-settings-rs-structure",
-      "source_sha256": "3df5f3f9f762659aa33a0b059e9d48d6d3e44a9e4ccd5f0e1ba07be2d6c053c9",
-      "text": "公开项：\npub(crate) fn install(content: &str, settings_path: &Path, hook_path: &Path) -> io::Result<String> {\npub(crate) fn uninstall("
+      "source_sha256": "969c194fb6c7bffe777a15c6baf1948c6c0c313338ad092db48f3db1c3b589d2",
+      "text": "公开项：\npub(crate) fn install(content: &str, settings_path: &Path, hook_path: &Path) -> io::Result<String> {\npub(crate) fn uninstall(\npub(super) fn reject_duplicate_keys(node: &CstNode, settings_path: &Path) -> io::Result<()> {"
     },
     {
       "anchor": "structure",
@@ -4837,6 +4963,13 @@
       "id": "src-integration-types-rs-structure",
       "source_sha256": "bb0c23beb47f0ead6bead1b70511b5ba64ace844e62c26ab0ca19ebe9bba472f",
       "text": "公开项：\npub(crate) struct ClaudeInstallPaths {\npub(crate) struct CodexInstallPaths {\npub(crate) struct KimiInstallPaths {\npub(crate) struct CopilotInstallPaths {\npub(crate) struct DevinInstallPaths {\npub(crate) struct DroidInstallPaths {\npub(crate) struct OpenCodeInstallPaths {\npub(crate) struct KiloInstallPaths {\npub(crate) struct OmpInstallPaths {\npub(crate) struct HermesInstallPaths {\npub(crate) struct QodercliInstallPaths {\npub(crate) struct QwenInstallPaths {\npub(crate) struct LettaInstallPaths {\npub(crate) struct CursorInstallPaths {\npub(crate) struct CursorUninstallResult {\npub(crate) struct MastracodeInstallPaths {\npub(crate) struct MastracodeUninstallResult {\npub(crate) struct GrokInstallPaths {\npub(crate) struct GrokUninstallResult {\npub(crate) struct QodercliUninstallResult {\npub(crate) struct QwenUninstallResult {\npub(crate) struct LettaUninstallResult {\npub(crate) struct IntegrationStatus {\npub(crate) enum IntegrationStatusKind {\npub(crate) struct ExperimentalIntegrationStatus {\npub(crate) struct IntegrationRecommendation {\nimpl IntegrationRecommendation {\npub fn needs_install(&self) -> bool {\npub(crate) struct PiUninstallResult {\npub(crate) struct OmpUninstallResult {\npub(crate) struct ClaudeUninstallResult {\npub(crate) struct CodexUninstallResult {\npub(crate) struct KimiUninstallResult {\npub(crate) struct CopilotUninstallResult {\npub(crate) struct DevinUninstallResult {\npub(crate) struct DroidUninstallResult {\npub(crate) struct OpenCodeUninstallResult {\npub(crate) struct KiloUninstallResult {\npub(crate) struct HermesUninstallResult {\npub(crate) struct AntigravityCliInstallPaths {\npub(crate) struct AntigravityCliUninstallResult {"
+    },
+    {
+      "anchor": "structure",
+      "doc": "src/integration/usage.rs",
+      "id": "src-integration-usage-rs-structure",
+      "source_sha256": "28dd39753c844e92507e5afd0cc5fe1bdc59577de30c8252a956ed270b497330",
+      "text": "模块文档：用量 statusline 按显式菜单操作启用；已有渲染命令保留在管道末端。\n公开项：\npub(crate) fn configure("
     },
     {
       "anchor": "structure",
@@ -5057,6 +5190,13 @@
     },
     {
       "anchor": "structure",
+      "doc": "src/platform/linux/monitoring.rs",
+      "id": "src-platform-linux-monitoring-rs-structure",
+      "source_sha256": "5379c13661bc59407a2753b6189ba4aaaef0a5bc36ad351981e5c7afdda30fd1",
+      "text": "公开项：\npub(crate) struct NativeGpuCollector;\nimpl NativeGpuCollector {\npub(crate) fn sample(&mut self, nvidia: Vec<GpuMetric>) -> Vec<GpuMetric> {\npub(crate) fn monitor_environment() -> String {\npub(crate) fn configure_usage_probe_command(command: &mut std::process::Command) {\npub(crate) fn terminate_usage_probe(child: &mut std::process::Child) {\npub(crate) struct UsageProbeGuard;\nimpl UsageProbeGuard {\npub(crate) fn new(_child: &std::process::Child) -> io::Result<Self> {\npub(crate) fn terminate(&mut self) {}\npub(crate) fn usage_probe_exit(child: &mut std::process::Child) -> io::Result<Option<bool>> {\npub(crate) fn terminate_usage_pty(child: &mut dyn portable_pty::Child) {\npub(crate) fn process_instance_token(pid: u32) -> io::Result<String> {\npub(crate) struct MonitoredProcess {\nimpl MonitoredProcess {\npub(crate) fn open(pid: u32) -> io::Result<Self> {\npub(crate) fn terminate(&self, force: bool) -> io::Result<()> {\npub(crate) fn terminate_monitored_process(pid: u32, expected: &str, force: bool) -> io::Result<()> {\npub(crate) fn usage_probe_needs_job_helper() -> bool {\npub(crate) fn monitor_cpu_inventory() -> Option<String> {\npub(crate) fn usage_statusline_command(agent: &str, passthrough: bool) -> String {"
+    },
+    {
+      "anchor": "structure",
       "doc": "src/platform/linux.rs",
       "id": "src-platform-linux-rs-structure",
       "source_sha256": "ba0115996d9238e383fec50c5d26b6fcf1b706cd1ea1e59ece1151abf39a2f4f",
@@ -5082,6 +5222,13 @@
       "id": "src-platform-mod-rs-structure",
       "source_sha256": "41330778f95e0f685a49c13e73579905f60640e9dbee92329e8d87df2089457a",
       "text": "模块文档：Platform-specific process and filesystem operations.  Centralizes OS-dependent behavior behind a clean boundary so core modules don't scatter `#[cfg]` branches through product logic.\n公开项：\npub struct ForegroundProcess {\npub struct ForegroundJob {\npub enum Signal {\npub enum ChildExitReason {\nimpl ChildExitReason {\npub(crate) fn requires_session_checkpoint(self) -> bool {\npub(crate) fn classify_child_exit(_status: &portable_pty::ExitStatus) -> ChildExitReason {\npub(crate) fn launch_executable() -> std::io::Result<std::path::PathBuf> {\npub(crate) fn detached_custom_command_process(command: &str) -> std::process::Command {\npub(crate) fn pane_custom_command_pty_builder(command: &str) -> portable_pty::CommandBuilder {\npub(crate) fn apply_pane_runtime_marker(command: &mut portable_pty::CommandBuilder) {\npub(crate) fn prepare_paste_text_for_pty(text: String) -> String {\npub(crate) fn plugin_runtime_path(path: &std::path::Path) -> std::path::PathBuf {\npub(crate) fn terminal_title_for_presentation(title: &str) -> &str {\npub(crate) fn configure_background_command(command: &mut std::process::Command) {\npub(crate) struct PlatformCapabilities {\npub(crate) const fn capabilities() -> PlatformCapabilities {\npub(crate) fn terminal_grid_size() -> std::io::Result<(u16, u16)> {\npub fn launch_server_daemon_command(command: &mut std::process::Command) -> std::io::Result<u32> {\npub fn detach_server_daemon_command(command: &mut std::process::Command) {\npub fn current_process_is_detached_server_daemon() -> bool {\npub(crate) fn watch_terminal_resize_signal() {\npub(crate) fn watch_terminal_resize_signal() {}\npub(crate) fn take_terminal_resize_signal() -> bool {\npub(crate) fn take_terminal_resize_signal() -> bool {\npub struct ClipboardCommand {\npub struct ClipboardImage {\npub(crate) enum LimitedRead {\npub(crate) fn read_limited_reader(\npub(crate) struct RemoteSshConfigPaths {\npub(crate) const REMOTE_BRIDGE_IDLE_TIMEOUT_SUPPORTED: bool =\npub(crate) fn begin_cli_output() {}\npub(crate) fn end_cli_output() {}\npub(crate) fn available_pane_shell_from_job(child_pid: u32, job: ForegroundJob) -> Option<String> {\npub(crate) fn is_powershell_process_name(name: &str) -> bool {\npub(crate) fn interactive_unix_shell_command(\npub(crate) fn quote_powershell_arg(value: &str) -> String {\npub(crate) fn quote_windows_command_line_arg(value: &str) -> String {\npub(crate) fn is_pane_shell_process_name(name: &str) -> bool {\npub fn process_agent_hint(_pid: u32) -> Option<crate::detect::Agent> {\npub(crate) fn parse_agent_env_hint(environ: &[u8]) -> Option<crate::detect::Agent> {\npub(crate) struct InputSourceRestore;\npub(crate) fn switch_to_ascii_input_source() -> Option<InputSourceRestore> {\npub(crate) fn pump_input_source_runloop() {}\npub(crate) trait PrefixInputSource { — Switches the host keyboard input source while prefix mode is active.  `App` drives this through a trait so the prefix-mode transitions can be\npub(crate) struct RealPrefixInputSource {\nimpl PrefixInputSource for RealPrefixInputSource {\nimpl std::io::Read for InterruptedOnce {"
+    },
+    {
+      "anchor": "structure",
+      "doc": "src/platform/monitoring_fallback.rs",
+      "id": "src-platform-monitoring-fallback-rs-structure",
+      "source_sha256": "6d0c36dd8e760fb7fadc0bde431c5c2155b3be4a03d5a5305cd642cf45c4ad5f",
+      "text": "公开项：\npub(crate) struct NativeGpuCollector;\nimpl NativeGpuCollector {\npub(crate) fn sample(&mut self, nvidia: Vec<GpuMetric>) -> Vec<GpuMetric> {\npub(crate) fn monitor_environment() -> String {\npub(crate) fn configure_usage_probe_command(command: &mut std::process::Command) {\npub(crate) struct UsageProbeGuard;\nimpl UsageProbeGuard {\npub(crate) fn new(_child: &std::process::Child) -> std::io::Result<Self> {\npub(crate) fn terminate(&mut self) {}\npub(crate) fn usage_probe_exit(child: &mut std::process::Child) -> std::io::Result<Option<bool>> {\npub(crate) fn terminate_usage_probe(child: &mut std::process::Child) {\npub(crate) fn terminate_usage_pty(child: &mut dyn portable_pty::Child) {\npub(crate) fn process_instance_token(_pid: u32) -> std::io::Result<String> {\npub(crate) struct MonitoredProcess {\nimpl MonitoredProcess {\npub(crate) fn open(_pid: u32) -> std::io::Result<Self> {\npub(crate) fn terminate(&self, _force: bool) -> std::io::Result<()> {\npub(crate) fn terminate_monitored_process(\npub(crate) fn usage_probe_needs_job_helper() -> bool {\npub(crate) fn monitor_cpu_inventory() -> Option<String> {\npub(crate) fn usage_statusline_command(agent: &str, passthrough: bool) -> String {"
     },
     {
       "anchor": "structure",
@@ -5127,17 +5274,24 @@
     },
     {
       "anchor": "structure",
+      "doc": "src/platform/windows/monitoring.rs",
+      "id": "src-platform-windows-monitoring-rs-structure",
+      "source_sha256": "fee63ca2a839fec8ef89b7cd264424b276d2e56061a7ae545c6564e240a011eb",
+      "text": "模块文档：Windows 原生 GPU 计数器和持有进程句柄的安全终止。\n公开项：\npub(crate) struct NativeGpuCollector {\nimpl Default for NativeGpuCollector {\nimpl Drop for NativeGpuCollector {\nimpl NativeGpuCollector {\npub(crate) fn sample(&mut self, nvidia: Vec<GpuMetric>) -> Vec<GpuMetric> {\npub(crate) fn monitor_environment() -> String {\npub(crate) fn configure_usage_probe_command(command: &mut std::process::Command) {\npub(crate) struct UsageProbeGuard(super::StatusCommandGuard);\nimpl UsageProbeGuard {\npub(crate) fn new(child: &std::process::Child) -> io::Result<Self> {\npub(crate) fn terminate(&mut self) {\npub(crate) fn usage_probe_exit(child: &mut std::process::Child) -> io::Result<Option<bool>> {\npub(crate) fn terminate_usage_probe(child: &mut std::process::Child) {\npub(crate) fn terminate_usage_pty(child: &mut dyn portable_pty::Child) {\nimpl Drop for ProcessHandle {\npub(crate) fn process_instance_token(pid: u32) -> io::Result<String> {\npub(crate) struct MonitoredProcess {\nimpl MonitoredProcess {\npub(crate) fn open(pid: u32) -> io::Result<Self> {\npub(crate) fn terminate(&self, force: bool) -> io::Result<()> {\npub(crate) fn terminate_monitored_process(pid: u32, expected: &str, force: bool) -> io::Result<()> {\npub(crate) fn usage_probe_needs_job_helper() -> bool {\npub(crate) fn monitor_cpu_inventory() -> Option<String> {\npub(crate) fn usage_statusline_command(agent: &str, passthrough: bool) -> String {"
+    },
+    {
+      "anchor": "structure",
       "doc": "src/platform/windows.rs",
       "id": "src-platform-windows-rs-structure-part1",
-      "source_sha256": "8e800d160a99c227e573b603bf048ac63c06ca2c18fd669f3bd6f00febe9f3ad",
-      "text": "公开项：\npub(crate) fn classify_child_exit(status: &portable_pty::ExitStatus) -> super::ChildExitReason {\npub(crate) struct RemoteBridgeWake;\nimpl RemoteBridgeWake {\npub(crate) fn new() -> std::io::Result<Self> {\npub(crate) fn cancel(&self) -> std::io::Result<()> {\npub(crate) fn wait(&self, _stream: &crate::ipc::LocalStream) -> std::io::Result<()> {\npub(crate) fn wait_client_stream_readable(\npub(crate) fn forward_remote_bridge_stdio(\npub(super) fn read_terminal_grid_size() -> std::io::Result<(u16, u16)> {\npub(crate) fn replace_file(\npub(crate) fn config_file_link_count(path: &std::path::Path) -> std::io::Result<u64> {\npub(crate) fn create_config_temporary(\npub(crate) fn write_config_temporary(\npub(crate) fn check_config_write_target(target: &std::path::Path) -> std::io::Result<()> {\npub(crate) fn write_existing_config(\npub(crate) fn set_default_plugin_pane_pwd(\npub(crate) fn terminal_title_for_presentation(title: &str) -> &str {\npub(crate) fn prepare_paste_text_for_pty_platform(text: String) -> String {\npub(crate) fn plugin_runtime_path_platform(path: &std::path::Path) -> PathBuf {\npub(crate) fn resolve_base_printable_key(vk: u16, scan: u16) -> Option<char> { — Resolves against the current foreground layout because asynchronous console records do not retain the layout that was active when the key was pressed.\npub(crate) fn remote_ssh_config_paths() -> super::RemoteSshConfigPaths {\npub(crate) fn create_remote_ssh_config_dir(_control_socket_name: &str) -> std::io::Result<PathBuf> {\npub(crate) fn create_remote_ssh_config_file(\npub(crate) fn create_remote_private_dir(path: &std::path::Path) -> std::io::Result<()> {\npub(crate) fn remote_private_temp_base() -> PathBuf {\npub(crate) fn remote_bridge_endpoint_path(_readable_name: &str, short_name: &str) -> PathBuf {\npub(crate) fn remote_reattach_program(program: &str) -> String {\npub(crate) fn remote_reattach_argument(value: &str) -> String {\npub(crate) fn encode_windows_conpty_fallback(key: &crate::input::TerminalKey) -> Option<Vec<u8>> { — Encode native or targeted semantic Win32 input for a compatible ConPTY destination.\nimpl ProcessSignature {\nimpl ProcessIdentity {\npub(crate) fn should_draw_host_cursor_by_default() -> bool {\npub(crate) fn should_query_host_terminal_palette() -> bool {\npub(crate) fn hostname() -> Option<String> { — The machine's node name, as shown by tmux's `#h`.\npub(crate) fn local_datetime() -> Option<time::PrimitiveDateTime> {\nimpl WindowsProcessEntry {\nimpl ProcessSnapshot {\npub fn raise_server_nofile_limit() {}\npub(crate) fn apply_pane_runtime_marker_platform(command: &mut portable_pty::CommandBuilder) {\npub(crate) fn interactive_shell_command(argv: &[String], shell_name: &str) -> Option<String> {\npub(crate) fn detached_custom_command_process_platform(command: &str) -> std::process::Command {\npub(crate) fn status_commands_supported() -> bool {\npub(crate) fn configure_status_command(process: &mut std::process::Command) {\npub(crate) struct StatusCommandGuard {\nimpl StatusCommandGuard {\npub(crate) fn new(child: &tokio::process::Child) -> std::io::Result<Self> {\nimpl StatusCommandGuard {\npub(crate) fn terminate(&mut self) {\nimpl Drop for StatusCommandGuard {\npub(crate) fn pane_custom_command_pty_builder_platform(\npub(crate) fn scrollback_editor_argv(path: &std::path::Path) -> std::io::Result<Vec<String>> {\npub(crate) fn configure_background_command_platform(command: &mut std::process::Command) {\npub fn launch_server_daemon_command(command: &mut std::process::Command) -> std::io::Result<u32> {\npub fn detach_server_daemon_command(command: &mut std::process::Command) {\npub fn current_process_is_detached_server_daemon() -> bool {\npub fn foreground_job(child_pid: u32) -> Option<ForegroundJob> {\npub(crate) fn available_pane_shell(child_pid: u32) -> Option<String> {\npub fn foreground_group_leader_job(process_group_id: u32) -> Option<ForegroundJob> {\npub fn foreground_process_group_id(child_pid: u32) -> Option<u32> {\npub fn process_cwd(pid: u32) -> Option<PathBuf> {"
+      "source_sha256": "b94b8c54eb3fdac11fe119a38934b963dcca547916841b181d3d5450f37b18a5",
+      "text": "公开项：\npub(crate) fn classify_child_exit(status: &portable_pty::ExitStatus) -> super::ChildExitReason {\npub(crate) struct RemoteBridgeWake;\nimpl RemoteBridgeWake {\npub(crate) fn new() -> std::io::Result<Self> {\npub(crate) fn cancel(&self) -> std::io::Result<()> {\npub(crate) fn wait(&self, _stream: &crate::ipc::LocalStream) -> std::io::Result<()> {\npub(crate) fn wait_client_stream_readable(\npub(crate) fn forward_remote_bridge_stdio(\npub(super) fn read_terminal_grid_size() -> std::io::Result<(u16, u16)> {\npub(crate) fn replace_file(\npub(crate) fn config_file_link_count(path: &std::path::Path) -> std::io::Result<u64> {\npub(crate) fn create_config_temporary(\npub(crate) fn write_config_temporary(\npub(crate) fn check_config_write_target(target: &std::path::Path) -> std::io::Result<()> {\npub(crate) fn write_existing_config(\npub(crate) fn set_default_plugin_pane_pwd(\npub(crate) fn terminal_title_for_presentation(title: &str) -> &str {\npub(crate) fn prepare_paste_text_for_pty_platform(text: String) -> String {\npub(crate) fn plugin_runtime_path_platform(path: &std::path::Path) -> PathBuf {\npub(crate) fn resolve_base_printable_key(vk: u16, scan: u16) -> Option<char> { — Resolves against the current foreground layout because asynchronous console records do not retain the layout that was active when the key was pressed.\npub(crate) fn remote_ssh_config_paths() -> super::RemoteSshConfigPaths {\npub(crate) fn create_remote_ssh_config_dir(_control_socket_name: &str) -> std::io::Result<PathBuf> {\npub(crate) fn create_remote_ssh_config_file(\npub(crate) fn create_remote_private_dir(path: &std::path::Path) -> std::io::Result<()> {\npub(crate) fn remote_private_temp_base() -> PathBuf {\npub(crate) fn remote_bridge_endpoint_path(_readable_name: &str, short_name: &str) -> PathBuf {\npub(crate) fn remote_reattach_program(program: &str) -> String {\npub(crate) fn remote_reattach_argument(value: &str) -> String {\npub(crate) fn encode_windows_conpty_fallback(key: &crate::input::TerminalKey) -> Option<Vec<u8>> { — Encode native or targeted semantic Win32 input for a compatible ConPTY destination.\nimpl ProcessSignature {\nimpl ProcessIdentity {\npub(crate) fn should_draw_host_cursor_by_default() -> bool {\npub(crate) fn should_query_host_terminal_palette() -> bool {\npub(crate) fn hostname() -> Option<String> { — The machine's node name, as shown by tmux's `#h`.\npub(crate) fn local_datetime() -> Option<time::PrimitiveDateTime> {\nimpl WindowsProcessEntry {\nimpl ProcessSnapshot {\npub fn raise_server_nofile_limit() {}\npub(crate) fn apply_pane_runtime_marker_platform(command: &mut portable_pty::CommandBuilder) {\npub(crate) fn interactive_shell_command(argv: &[String], shell_name: &str) -> Option<String> {\npub(crate) fn detached_custom_command_process_platform(command: &str) -> std::process::Command {\npub(crate) fn status_commands_supported() -> bool {\npub(crate) fn configure_status_command(process: &mut std::process::Command) {\npub(crate) struct StatusCommandGuard {\nimpl StatusCommandGuard {\npub(crate) fn new(child: &tokio::process::Child) -> std::io::Result<Self> {\npub(crate) fn from_std_child(child: &std::process::Child) -> std::io::Result<Self> {\nimpl StatusCommandGuard {\npub(crate) fn terminate(&mut self) {\nimpl Drop for StatusCommandGuard {\npub(crate) fn pane_custom_command_pty_builder_platform(\npub(crate) fn scrollback_editor_argv(path: &std::path::Path) -> std::io::Result<Vec<String>> {\npub(crate) fn configure_background_command_platform(command: &mut std::process::Command) {\npub fn launch_server_daemon_command(command: &mut std::process::Command) -> std::io::Result<u32> {\npub fn detach_server_daemon_command(command: &mut std::process::Command) {\npub fn current_process_is_detached_server_daemon() -> bool {\npub fn foreground_job(child_pid: u32) -> Option<ForegroundJob> {\npub(crate) fn available_pane_shell(child_pid: u32) -> Option<String> {\npub fn foreground_group_leader_job(process_group_id: u32) -> Option<ForegroundJob> {"
     },
     {
       "anchor": "structure",
       "doc": "src/platform/windows.rs",
       "id": "src-platform-windows-rs-structure-part2",
-      "source_sha256": "8e800d160a99c227e573b603bf048ac63c06ca2c18fd669f3bd6f00febe9f3ad",
-      "text": "impl CachedForegroundSelection {\nimpl ForegroundSelectionCache {\nimpl ProcessSnapshotCache {\nimpl WindowsProcessCommand {\npub fn session_processes(child_pid: u32) -> Vec<u32> {\npub fn signal_processes(pids: &[u32], signal: Signal) {\npub fn process_exists(pid: u32) -> bool {\npub fn write_clipboard(bytes: &[u8]) -> bool {\npub fn read_clipboard_text() -> Option<String> {\npub fn open_url(url: &str) -> std::io::Result<Option<std::process::Child>> {\npub fn read_clipboard_image() -> Option<ClipboardImage> {\npub fn show_desktop_notification(title: &str, body: Option<&str>) -> std::io::Result<bool> {\nimpl Drop for ClipboardGuard {\nimpl ProcessHandle {\nimpl Drop for ProcessHandle {\npub(crate) fn pump_input_source_runloop() {}\npub(crate) fn switch_to_ascii_input_source() -> Option<InputSourceRestore> { — Switch the foreground window's IME to ASCII-capable input for prefix mode.  Returns `None` (nothing to restore) when there is no foreground IME, the\npub(crate) struct InputSourceRestore {\nimpl Drop for InputSourceRestore {"
+      "source_sha256": "b94b8c54eb3fdac11fe119a38934b963dcca547916841b181d3d5450f37b18a5",
+      "text": "pub fn foreground_process_group_id(child_pid: u32) -> Option<u32> {\npub fn process_cwd(pid: u32) -> Option<PathBuf> {\nimpl CachedForegroundSelection {\nimpl ForegroundSelectionCache {\nimpl ProcessSnapshotCache {\nimpl WindowsProcessCommand {\npub fn session_processes(child_pid: u32) -> Vec<u32> {\npub fn signal_processes(pids: &[u32], signal: Signal) {\npub fn process_exists(pid: u32) -> bool {\npub fn write_clipboard(bytes: &[u8]) -> bool {\npub fn read_clipboard_text() -> Option<String> {\npub fn open_url(url: &str) -> std::io::Result<Option<std::process::Child>> {\npub fn read_clipboard_image() -> Option<ClipboardImage> {\npub fn show_desktop_notification(title: &str, body: Option<&str>) -> std::io::Result<bool> {\nimpl Drop for ClipboardGuard {\nimpl ProcessHandle {\nimpl Drop for ProcessHandle {\npub(crate) fn pump_input_source_runloop() {}\npub(crate) fn switch_to_ascii_input_source() -> Option<InputSourceRestore> { — Switch the foreground window's IME to ASCII-capable input for prefix mode.  Returns `None` (nothing to restore) when there is no foreground IME, the\npub(crate) struct InputSourceRestore {\nimpl Drop for InputSourceRestore {"
     },
     {
       "anchor": "structure",
@@ -5178,8 +5332,8 @@
       "anchor": "structure",
       "doc": "src/protocol/mod.rs",
       "id": "src-protocol-mod-rs-structure",
-      "source_sha256": "cbac78afc6e17bb3486810676e2e96b2e4db006a272c0c5c76dd2020dc6f81f4",
-      "text": "模块文档：Shared wire protocol and presentation encoding code.\n公开项：\npub mod endpoint;\npub(crate) mod render_ansi;\npub(crate) mod surface_reuse;"
+      "source_sha256": "db11899e2c52cf0507aa628aadf7805c5bfdf40fdc9833114b74de72a0839fea",
+      "text": "模块文档：Shared wire protocol and presentation encoding code.\n公开项：\npub mod endpoint;\npub(crate) mod render_ansi;\npub(crate) mod surface_reuse;\npub(crate) mod views;"
     },
     {
       "anchor": "structure",
@@ -5194,6 +5348,13 @@
       "id": "src-protocol-surface-reuse-rs-structure",
       "source_sha256": "dc0ffa16f78b0391b9f800254446d25fe1b5aaf4a6efc23886c7b4d46d56dd70",
       "text": "模块文档：Optional endpoint encoding that retains unchanged terminal cells across projections.\n公开项：\npub(crate) const CAPABILITY: &str = \"surface_reuse\";\npub(crate) const MESSAGE_KIND: &str = \"endpoint.surface-reuse.v1\";\npub(crate) fn message(\npub(crate) struct Decoder {\nimpl Decoder {\npub(crate) fn decode(&mut self, message: ServerMessage) -> Result<ServerMessage, String> {"
+    },
+    {
+      "anchor": "structure",
+      "doc": "src/protocol/views.rs",
+      "id": "src-protocol-views-rs-structure",
+      "source_sha256": "3b0ad74e0afd0f6dade49dfb88ecdd9594117699bb9f120bb731a8eb1955bc15",
+      "text": "模块文档：多视图采用可选命名扩展，内部复用不可变的 generation 1 帧。\n公开项：\npub(crate) const CAPABILITY: &str = \"multi_view\";\npub(crate) const SURFACE_KIND: &str = \"endpoint.view-surface.v1\";\npub(crate) const INPUT_KIND: &str = \"endpoint.view-input.v1\";\npub(crate) struct ViewSurface {\npub(crate) struct ViewInput {\npub(crate) struct DecodedView {\npub(crate) fn message(\npub(crate) struct Decoder {\nimpl Decoder {\npub(crate) fn decode(&mut self, data: &str) -> Result<Option<DecodedView>, String> {"
     },
     {
       "anchor": "structure",
@@ -5395,8 +5556,8 @@
       "anchor": "structure",
       "doc": "src/server/clients.rs",
       "id": "src-server-clients-rs-structure",
-      "source_sha256": "8d026b9ba07f96e3ee7330d2d7b3a7ef2e2bc1a04bff07b0d70d89574d8046c8",
-      "text": "公开项：\npub(crate) enum ClientConnectionMode {\npub(crate) type RenderTarget = (\npub(crate) enum ClientShellInputTarget {\npub(crate) struct ClientShellHeldInput {\npub(crate) enum DeferredRender {\npub(crate) struct ClientShellLocation {\npub(crate) struct ClientShellTopology {\nimpl ClientShellLocation {\npub(crate) fn from_snapshot(snapshot: &crate::protocol::ClientShellSnapshot) -> Self {\npub(crate) fn focused_tab_id(&self) -> Option<&str> {\npub(crate) fn focus_workspace(&mut self, workspace_id: String) {\npub(crate) fn focus_tab(&mut self, workspace_id: String, tab_id: String) {\npub(crate) fn reconcile(&mut self, topology: &ClientShellTopology) {\npub(crate) struct ClientConnection { — A connected client tracked by the server.\nimpl ClientConnection {\npub(crate) fn new(\npub(crate) fn new_with_mode(\npub(crate) fn request_repaint(&mut self) {\npub(crate) fn track_shell_input(\npub(crate) fn drain_shell_held_inputs(&mut self) -> Vec<ClientShellHeldInput> {\npub(crate) fn update_host_theme(\npub(crate) fn deferred_render(&self) -> DeferredRender {\npub(crate) fn clear_deferred_render(&mut self) {\npub(crate) fn defer_full_render(&mut self) {\npub(crate) fn take_deferred_render(&mut self) -> DeferredRender {\npub(crate) fn is_shell_client(&self) -> bool {\npub(crate) fn is_active_shell_client(&self) -> bool {\npub(crate) fn latest_shell_client(clients: &HashMap<u64, ClientConnection>) -> Option<u64> {\npub(crate) fn terminal_stream_client_ids(\npub(crate) fn render_targets("
+      "source_sha256": "8cc9f420ff6568e84252c484df97134d1bd39407d618fa1657daa4d12cf55288",
+      "text": "公开项：\npub(crate) enum ClientConnectionMode {\npub(crate) type RenderTarget = (\npub(crate) enum ClientShellInputTarget {\npub(crate) struct ClientShellHeldInput {\npub(crate) enum DeferredRender {\npub(crate) struct ClientShellLocation {\npub(crate) struct ClientShellTopology {\nimpl ClientShellLocation {\npub(crate) fn from_snapshot(snapshot: &crate::protocol::ClientShellSnapshot) -> Self {\npub(crate) fn focused_tab_id(&self) -> Option<&str> {\npub(crate) fn focus_workspace(&mut self, workspace_id: String) {\npub(crate) fn focus_tab(&mut self, workspace_id: String, tab_id: String) {\npub(crate) fn reconcile(&mut self, topology: &ClientShellTopology) {\npub(crate) struct ClientView { — A connected client tracked by the server.\npub(crate) struct MultiViewState {\npub(crate) struct ClientConnection {\nimpl ClientConnection {\npub(crate) fn new(\npub(crate) fn new_with_mode(\npub(crate) fn request_repaint(&mut self) {\npub(crate) fn track_shell_input(\npub(crate) fn drain_shell_held_inputs(&mut self) -> Vec<ClientShellHeldInput> {\npub(crate) fn owns_shell_release(&self, pane: &str, event: &ClientPaneInputEvent) -> bool {\npub(crate) fn update_host_theme(\npub(crate) fn deferred_render(&self) -> DeferredRender {\npub(crate) fn clear_deferred_render(&mut self) {\npub(crate) fn defer_full_render(&mut self) {\npub(crate) fn take_deferred_render(&mut self) -> DeferredRender {\npub(crate) fn is_shell_client(&self) -> bool {\npub(crate) fn is_active_shell_client(&self) -> bool {\npub(crate) fn latest_shell_client(clients: &HashMap<u64, ClientConnection>) -> Option<u64> {\npub(crate) fn terminal_stream_client_ids(\npub(crate) fn render_targets("
     },
     {
       "anchor": "structure",
@@ -5430,8 +5591,8 @@
       "anchor": "structure",
       "doc": "src/server/headless/endpoint_requests.rs",
       "id": "src-server-headless-endpoint-requests-rs-structure",
-      "source_sha256": "4f8da0886ccfb0ffd4af5186a20b7c729971c77b2f55fce5adc0b510cc533e86",
-      "text": "公开项：\nimpl HeadlessServer {\npub(super) fn handle_client_shell_endpoint_request("
+      "source_sha256": "2d5039356e39256a85ede0c646fad45663ba98d697e38a40320c9d07b1cf6fa9",
+      "text": "公开项：\nimpl HeadlessServer {\npub(super) fn submit_observation(\npub(super) fn handle_client_shell_endpoint_request("
     },
     {
       "anchor": "structure",
@@ -5439,6 +5600,13 @@
       "id": "src-server-headless-lifecycle-rs-structure",
       "source_sha256": "0ef5339bfc0daae07456d426c2c0a0bf0cecd9b0c32b244c38670993d478339e",
       "text": "公开项：\npub(super) fn wait_for_live_handoff_response_write(\nimpl HeadlessServer {\npub(super) fn perform_live_handoff(\npub(super) fn finish_live_handoff_shutdown(&mut self) {\npub(super) fn perform_live_handoff(\npub(super) fn nudge_handoff_panes_on_first_client_attach(&mut self) {\npub(super) fn nudge_handoff_panes_on_first_client_attach(&mut self) {}\npub(super) fn initiate_shutdown(&mut self) { — Initiates graceful shutdown.\npub(super) async fn complete_shutdown(&mut self) -> io::Result<()> { — Completes the shutdown sequence: send ServerShutdown to clients, close client connections, remove socket files, and clean up.\npub(super) fn cleanup_sockets(&self) -> io::Result<()> { — Removes socket files created by the server.\npub(super) fn wait_for_old_public_sockets_to_close(timeout: Duration) -> io::Result<()> {"
+    },
+    {
+      "anchor": "structure",
+      "doc": "src/server/headless/multi_view.rs",
+      "id": "src-server-headless-multi-view-rs-structure",
+      "source_sha256": "9ec6d151e86cd7da81bc80b81c2d35e6796d89df5df3e4142a4cde21595b465d",
+      "text": "公开项：\nimpl HeadlessServer {\npub(super) fn set_client_views(\npub(super) fn resize_client_views(&mut self, client_id: u64) {\npub(super) fn resize_changed_view_geometry(&mut self, client_id: u64) {\npub(super) fn client_view_targets(&self, client_id: u64) -> Vec<crate::ui::TabSurfaceTarget> {\npub(super) fn render_client_views(&mut self, client_id: u64) -> bool {\npub(super) fn handle_view_input(\npub(super) fn client_views_result(&self, client_id: u64) -> ResponseResult {"
     },
     {
       "anchor": "structure",
@@ -5491,6 +5659,13 @@
     },
     {
       "anchor": "structure",
+      "doc": "src/server/headless/tests/multi_view.rs",
+      "id": "src-server-headless-tests-multi-view-rs-structure",
+      "source_sha256": "3aab41b0fe8a56eb9ab4597664b0c045ce707006ae7f5e37ae3566dce1bd2e23",
+      "text": "公开项："
+    },
+    {
+      "anchor": "structure",
       "doc": "src/server/headless/tests/pane_graphics.rs",
       "id": "src-server-headless-tests-pane-graphics-rs-structure",
       "source_sha256": "3aab41b0fe8a56eb9ab4597664b0c045ce707006ae7f5e37ae3566dce1bd2e23",
@@ -5514,8 +5689,8 @@
       "anchor": "structure",
       "doc": "src/server/mod.rs",
       "id": "src-server-mod-rs-structure",
-      "source_sha256": "f566576f5ac472cf19e74798e09be75ca6c8ccfa757486f35e29eba778c5923b",
-      "text": "公开项：\npub mod autodetect;\npub(crate) mod client_accept;\npub(crate) mod client_commands;\npub(crate) mod client_shell;\npub(crate) mod client_shell_graphics;\npub(crate) mod client_transport;\npub(crate) mod clients;\npub(crate) mod clipboard_image;\npub(crate) mod handoff;\npub mod headless;\npub(crate) mod keybindings;\npub(crate) mod notifications;\npub(crate) mod pane_input;\npub(crate) mod render_stream;\npub mod socket_paths;\npub(crate) mod terminal_attach;"
+      "source_sha256": "250e1b988305d96d61602cbdbc4e1f148672d0aaeb4fe6b777ee0dfa42a17d1a",
+      "text": "公开项：\npub mod autodetect;\npub(crate) mod client_accept;\npub(crate) mod client_commands;\npub(crate) mod client_shell;\npub(crate) mod client_shell_graphics;\npub(crate) mod client_transport;\npub(crate) mod clients;\npub(crate) mod clipboard_image;\npub(crate) mod handoff;\npub mod headless;\npub(crate) mod keybindings;\npub(crate) mod notifications;\npub(crate) mod observability;\npub(crate) mod pane_input;\npub(crate) mod render_stream;\npub mod socket_paths;\npub(crate) mod terminal_attach;"
     },
     {
       "anchor": "structure",
@@ -5523,6 +5698,83 @@
       "id": "src-server-notifications-rs-structure",
       "source_sha256": "c11eadccb034a0ce30888e5237b82dc2523e78d9dd28ae3c7cd1dbc438e6197f",
       "text": "公开项：\npub(crate) fn should_forward_toast_to_clients(delivery: config::ToastDelivery) -> bool {\npub(crate) fn toast_notify_kind(delivery: config::ToastDelivery) -> Option<protocol::NotifyKind> {\npub(crate) fn toast_message_from_state_change("
+    },
+    {
+      "anchor": "structure",
+      "doc": "src/server/observability/accounts/http.rs",
+      "id": "src-server-observability-accounts-http-rs-structure",
+      "source_sha256": "dfedf022b9b7a2ff857bbc4e8ee181ac45553af76ca53a19d617ea3615c38aed",
+      "text": "模块文档：仅调用已登记的官方只读接口；认证只在所属主机内组装。\n公开项：\npub(super) fn query("
+    },
+    {
+      "anchor": "structure",
+      "doc": "src/server/observability/accounts/mod.rs",
+      "id": "src-server-observability-accounts-mod-rs-structure",
+      "source_sha256": "e00cf13c2bea7f1a723987868884e2520ff3d83d5fdbbae5648b1755ca833070",
+      "text": "公开项：\npub(super) struct Service {\nimpl Service {\npub fn start() -> std::io::Result<Self> {\npub fn submit(&self, request: Request, reply: Reply) {\npub fn release(&self, client_id: u64) {"
+    },
+    {
+      "anchor": "structure",
+      "doc": "src/server/observability/accounts/parse.rs",
+      "id": "src-server-observability-accounts-parse-rs-structure",
+      "source_sha256": "9a4c4dae0555fa8391f128bf16ab9c7413f46e2fbb7aeb2ad63fca54e3c69d8d",
+      "text": "模块文档：解析厂商公开结果。没有确切含义的数字不作为账号额度显示。\n公开项：\npub(super) fn codex(value: &Value) -> Vec<UsageMetric> {\npub(super) fn claude(value: &Value) -> Vec<UsageMetric> {\npub(super) fn antigravity(value: &Value) -> Vec<UsageMetric> {\npub(super) fn omp(\npub(super) fn letta(text: &str) -> Vec<UsageMetric> {\npub(super) fn kimi(value: &Value) -> Vec<UsageMetric> {\npub(super) fn moonshot_balance(value: &Value, currency: &str) -> Vec<UsageMetric> {\npub(super) fn openrouter(value: &Value) -> Vec<UsageMetric> {\npub(super) fn structured(value: &Value, scope: &str) -> Vec<UsageMetric> {\npub(super) fn decimal(value: &Value) -> String {\npub(super) fn screen(text: &str, scope: &str) -> Vec<UsageMetric> {\npub(super) fn validate(metrics: &[UsageMetric]) -> bool {"
+    },
+    {
+      "anchor": "structure",
+      "doc": "src/server/observability/accounts/persistence.rs",
+      "id": "src-server-observability-accounts-persistence-rs-structure",
+      "source_sha256": "01a8099ded061e33096254b9276c8c9558cafac2bb3d55f620886f5855beec6d",
+      "text": "模块文档：只持久化账号引用、公开身份与 pane 绑定，禁止写入凭据或用量报文。\n公开项：\npub(super) struct Saved {\npub(super) fn load() -> Saved {\npub(super) fn store(saved: &Saved) {"
+    },
+    {
+      "anchor": "structure",
+      "doc": "src/server/observability/accounts/registry.rs",
+      "id": "src-server-observability-accounts-registry-rs-structure",
+      "source_sha256": "0c3ba7396714027c57f1c2992028ed37a569c6ae97ac394b5da3a70cf3af5db6",
+      "text": "模块文档：官方来源清单。Agent 身份与实际计费 provider 分开处理。\n公开项：\npub(super) enum Query {\npub(super) struct Provider {\npub(super) const PROVIDERS: &[Provider] = &[\npub(super) fn provider(agent: &str) -> Option<&'static Provider> {"
+    },
+    {
+      "anchor": "structure",
+      "doc": "src/server/observability/accounts/transport.rs",
+      "id": "src-server-observability-accounts-transport-rs-structure",
+      "source_sha256": "3fb1d9436361bc96ce4d690fa5a0a8f35a833250c610962cafb297c365dd0937",
+      "text": "模块文档：有界官方 CLI 查询。辅助进程没有工作 pane 身份，也不会发送模型任务。\n公开项：\npub(super) type QueryError = (ObservationStatus, String);\nimpl ChildGuard {\nimpl Drop for ChildGuard {\nimpl ProbeDirectory {\nimpl Drop for ProbeDirectory {\npub(super) fn capture(\npub(super) fn capture_query(\nimpl Rpc {\npub(super) fn codex(\npub(crate) fn run_probe_helper() -> io::Result<()> {\npub(super) fn interactive(\npub(super) fn kimi("
+    },
+    {
+      "anchor": "structure",
+      "doc": "src/server/observability/gpu.rs",
+      "id": "src-server-observability-gpu-rs-structure",
+      "source_sha256": "3ebec6dabe4d59d92a237fee0dc83d9de8df396260660f3e10609ff34689e869",
+      "text": "模块文档：驱动查询独立于 CPU 采样；最多保留一个待处理请求。\n公开项：\npub(super) struct GpuWorker {\nimpl GpuWorker {\npub fn start() -> std::io::Result<Self> {\npub fn request_and_read(&self) -> (u64, Vec<GpuMetric>) {"
+    },
+    {
+      "anchor": "structure",
+      "doc": "src/server/observability/mod.rs",
+      "id": "src-server-observability-mod-rs-structure",
+      "source_sha256": "41d8b90e4e24a42d29dfecf23510f79648a664dbe7cafd4a8b29d92c7c36545f",
+      "text": "模块文档：server 拥有的后台观测服务。请求、采集及订阅不占用终端焦点通道。\n公开项：\npub(crate) fn now_ms() -> u64 {\npub(crate) fn is_background_method(method: &Method) -> bool {\npub(crate) enum Reply {\nimpl Reply {\npub(super) fn response(&self, id: &str, result: Result<ResponseResult, (&str, String)>) {\npub(super) fn event(&self, topic: &str, data: serde_json::Value) -> bool {\npub(crate) struct Runtime {\nimpl Runtime {\npub(crate) fn start(boot_id: String) -> std::io::Result<Self> {\npub(crate) fn submit(&self, request: Request, reply: Reply) {\npub(crate) fn release(&self, client_id: u64) {"
+    },
+    {
+      "anchor": "structure",
+      "doc": "src/server/observability/system/peripherals.rs",
+      "id": "src-server-observability-system-peripherals-rs-structure",
+      "source_sha256": "38293ef1d9d7434dfc77a140f098bf0b39f767a70f4c30e97d2318c813af2937",
+      "text": "公开项：\nimpl<T: Clone + Default + Send + 'static> Worker<T> {\npub(super) struct Workers {\npub(super) fn mark(snapshot: &mut SystemMetricsSnapshot, name: &str, sampled: u64) {\nimpl Workers {\npub fn start() -> Self {\npub fn read(&self, params: &SystemMetricsParams, snapshot: &mut SystemMetricsSnapshot) {"
+    },
+    {
+      "anchor": "structure",
+      "doc": "src/server/observability/system/processes.rs",
+      "id": "src-server-observability-system-processes-rs-structure",
+      "source_sha256": "6c91c9609d2ccadbd0c36468f3b3983c71a406c45d570bbdff5ccde4c6ff961e",
+      "text": "模块文档：进程采样和实例句柄授权独立于 CPU、磁盘和显卡查询。\n公开项：\npub(in crate::server::observability) struct ProcessWorker {\nimpl ProcessWorker {\npub fn start(boot_id: String) -> std::io::Result<Self> {\npub fn request_and_read(&self) -> (u64, Vec<ProcessMetric>) {\npub fn submit(&self, request: Request, reply: Reply) {\nimpl ProcessSampler {\npub fn process(\npub fn terminate("
+    },
+    {
+      "anchor": "structure",
+      "doc": "src/server/observability/system.rs",
+      "id": "src-server-observability-system-rs-structure",
+      "source_sha256": "687d5e7926507ec21899940ff057ab5a1ebf08063faab31d0ecc227bb9507d16",
+      "text": "模块文档：CPU、内存与窄缓存投影；可能阻塞的后端在各自有界线程内采集。\n公开项：\npub(super) struct Sampler {\npub(super) fn counter_rate(previous: Option<u64>, current: u64, elapsed: f64) -> Option<f64> {\nimpl Sampler {\npub fn new(boot_id: String, processes: ProcessWorker) -> Self {\npub fn refresh(&mut self, params: &SystemMetricsParams, now: Instant) {\npub(super) fn protected_process(pid: u32, name: &str) -> bool {\npub(super) fn process_page("
     },
     {
       "anchor": "structure",
