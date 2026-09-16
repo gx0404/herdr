@@ -8,6 +8,7 @@ const KNOWN_TOP_LEVEL_CONFIG_KEYS: &[&str] = &[
     "advanced",
     "experimental",
     "keys",
+    "language",
     "onboarding",
     "remote",
     "server",
@@ -774,6 +775,17 @@ mod tests {
             parsed.get("language").and_then(|v| v.as_str()),
             Some("zh-CN")
         );
+    }
+
+    #[test]
+    fn language_top_level_key_is_not_flagged_unknown() {
+        let content = "language = \"zh-CN\"\n[theme]\nname = \"catppuccin\"\n";
+        let loaded = super::load_live_config_from_str(content).expect("config loads");
+        let unknown = loaded
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.contains("unknown config key"));
+        assert!(!unknown, "diagnostics: {:?}", loaded.diagnostics);
     }
 
     #[test]
