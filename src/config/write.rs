@@ -1,6 +1,7 @@
 #[derive(Clone, Copy)]
 pub(crate) enum ConfigEdit<'a> {
     Theme(&'a str),
+    Language(crate::i18n::Lang),
     StatusIndicators(super::StatusIndicatorStyle),
     Sound(bool),
     ToastDelivery(super::ToastDelivery),
@@ -10,6 +11,7 @@ impl ConfigEdit<'_> {
     pub(crate) fn description(self) -> &'static str {
         match self {
             Self::Theme(_) => "theme",
+            Self::Language(_) => "language setting",
             Self::StatusIndicators(_) => "status indicators",
             Self::Sound(_) => "sound setting",
             Self::ToastDelivery(_) => "toast setting",
@@ -23,6 +25,11 @@ impl ConfigEdit<'_> {
                     super::upsert_section_value(content, "theme", "name", &format!("\"{name}\""));
                 super::upsert_section_bool(&content, "theme", "auto_switch", false)
             }
+            Self::Language(lang) => super::upsert_top_level_value(
+                content,
+                "language",
+                &format!("\"{}\"", lang.as_str()),
+            ),
             Self::StatusIndicators(style) => super::upsert_section_value(
                 content,
                 "ui",

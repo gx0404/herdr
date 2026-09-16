@@ -23,6 +23,13 @@ pub enum Lang {
 }
 
 impl Lang {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Lang::ZhCn => "zh-CN",
+            Lang::En => "en",
+        }
+    }
+
     pub fn parse(value: &str) -> Option<Self> {
         match value.trim() {
             "zh-CN" => Some(Lang::ZhCn),
@@ -261,11 +268,16 @@ pub struct WorktreeTexts {
 
 pub struct SettingsTexts {
     pub title: &'static str,
+    pub section_language: &'static str,
     pub section_theme: &'static str,
     pub section_indicators: &'static str,
     pub section_sound: &'static str,
     pub section_toasts: &'static str,
     pub section_integrations: &'static str,
+    pub language: &'static str,
+    pub language_hint: &'static str,
+    pub lang_zh: &'static str,
+    pub lang_en: &'static str,
     pub indicators: &'static str,
     pub indicators_hint: &'static str,
     pub indicator_dots: &'static str,
@@ -1004,6 +1016,27 @@ pub fn fill(template: &str, args: &[(&str, &str)]) -> String {
         output = output.replace(&format!("{{{name}}}"), value);
     }
     output
+}
+
+/// Display name for a canonical theme value. English shows the canonical
+/// value; zh-CN maps to a friendly name and falls back to the value.
+pub fn theme_display_name(canonical: &str) -> &'static str {
+    if lang() == Lang::En {
+        return canonical_theme_fallback(canonical);
+    }
+    zh_cn::THEME_DISPLAY
+        .iter()
+        .find(|(value, _)| *value == canonical)
+        .map(|(_, display)| *display)
+        .unwrap_or_else(|| canonical_theme_fallback(canonical))
+}
+
+fn canonical_theme_fallback(canonical: &str) -> &'static str {
+    crate::config::THEME_NAMES
+        .iter()
+        .find(|name| **name == canonical)
+        .copied()
+        .unwrap_or("")
 }
 
 pub fn texts() -> &'static Texts {

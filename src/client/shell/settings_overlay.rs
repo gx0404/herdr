@@ -129,6 +129,18 @@ pub(super) fn render_settings_overlay(
     );
     let mut choice_hits = Vec::new();
     match settings.section {
+        ClientSettingsSection::Language => {
+            render_choice_section(
+                buffer,
+                content,
+                t.language,
+                t.language_hint,
+                &[t.lang_zh, t.lang_en],
+                settings.selected,
+                palette,
+                &mut choice_hits,
+            );
+        }
         ClientSettingsSection::Theme => {
             let visible = usize::from(content.height);
             let scroll = settings.selected.saturating_sub(visible.saturating_sub(1));
@@ -148,7 +160,7 @@ pub(super) fn render_settings_overlay(
                 draw_choice(
                     buffer,
                     rect,
-                    name,
+                    crate::i18n::theme_display_name(name),
                     index == settings.selected,
                     super::super::settings::normalized_theme_name(name)
                         == super::super::settings::normalized_theme_name(

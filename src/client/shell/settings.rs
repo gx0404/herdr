@@ -47,6 +47,9 @@ impl ClientShellState {
 
     fn selected_index_for_settings_section(&self, section: ClientSettingsSection) -> usize {
         match section {
+            ClientSettingsSection::Language => {
+                usize::from(crate::i18n::lang() == crate::i18n::Lang::En)
+            }
             ClientSettingsSection::Theme => theme_index(&self.config.theme_name),
             ClientSettingsSection::Indicators => indicator_index(self.config.status_indicators),
             ClientSettingsSection::Sound => usize::from(!self.config.sound_enabled),
@@ -96,6 +99,7 @@ impl ClientShellState {
     fn settings_choice_count(&self) -> usize {
         match self.overlay.as_ref() {
             Some(ClientShellOverlay::Settings(settings)) => match settings.section {
+                ClientSettingsSection::Language => 2,
                 ClientSettingsSection::Theme => crate::config::THEME_NAMES.len(),
                 ClientSettingsSection::Indicators | ClientSettingsSection::Sound => 2,
                 ClientSettingsSection::Toast => 4,
@@ -188,6 +192,15 @@ impl ClientShellState {
         let section = settings.section;
         let selected = settings.selected;
         match section {
+            ClientSettingsSection::Language => {
+                let lang = if selected == 0 {
+                    crate::i18n::Lang::ZhCn
+                } else {
+                    crate::i18n::Lang::En
+                };
+                crate::i18n::set_lang(lang);
+                self.save_settings_edit(crate::config::ConfigEdit::Language(lang), outcome);
+            }
             ClientSettingsSection::Theme => {
                 let Some(name) = crate::config::THEME_NAMES.get(selected).copied() else {
                     return;

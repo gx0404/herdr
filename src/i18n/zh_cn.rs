@@ -7,6 +7,28 @@ use super::{
     WorktreeTexts,
 };
 
+/// 主题显示名（canonical → 中文）；未列出的主题回退到 canonical 值。
+pub const THEME_DISPLAY: &[(&str, &str)] = &[
+    ("catppuccin", "Catppuccin 柔彩"),
+    ("catppuccin-latte", "Catppuccin 拿铁"),
+    ("terminal", "跟随终端"),
+    ("tokyo-night", "东京夜"),
+    ("tokyo-night-day", "东京夜·昼"),
+    ("dracula", "Dracula 暗夜"),
+    ("nord", "Nord 极地"),
+    ("gruvbox", "Gruvbox 暖褐"),
+    ("gruvbox-light", "Gruvbox 暖褐·亮"),
+    ("one-dark", "One Dark"),
+    ("one-light", "One Light"),
+    ("solarized", "Solarized 夜"),
+    ("solarized-light", "Solarized 日"),
+    ("kanagawa", "神奈川"),
+    ("kanagawa-lotus", "神奈川·莲"),
+    ("rose-pine", "玫瑰松"),
+    ("rose-pine-dawn", "玫瑰松·晨"),
+    ("vesper", "Vesper 静夜"),
+];
+
 pub const TEXTS: Texts = Texts {
     chrome: ChromeTexts {
         close_button: " esc 关闭 ",
@@ -180,7 +202,12 @@ pub const TEXTS: Texts = Texts {
     },
     settings: SettingsTexts {
         title: " 设置",
+        section_language: "语言",
         section_theme: "主题",
+        language: "界面语言",
+        language_hint: "切换 TUI 与 CLI 的显示语言",
+        lang_zh: "中文",
+        lang_en: "English",
         section_indicators: "指示器",
         section_sound: "声音",
         section_toasts: "通知",

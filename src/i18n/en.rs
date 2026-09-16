@@ -180,7 +180,12 @@ pub const TEXTS: Texts = Texts {
     },
     settings: SettingsTexts {
         title: " settings",
+        section_language: "language",
         section_theme: "theme",
+        language: "interface language",
+        language_hint: "switch the display language for the TUI and CLI",
+        lang_zh: "中文",
+        lang_en: "English",
         section_indicators: "indicators",
         section_sound: "sound",
         section_toasts: "toasts",

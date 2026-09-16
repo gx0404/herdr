@@ -438,6 +438,7 @@ pub(super) struct ClientGlobalMenuOverlay {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum ClientSettingsSection {
+    Language,
     Theme,
     Indicators,
     Sound,
@@ -447,6 +448,7 @@ pub(super) enum ClientSettingsSection {
 
 impl ClientSettingsSection {
     pub(super) const ALL: &[Self] = &[
+        Self::Language,
         Self::Theme,
         Self::Indicators,
         Self::Sound,
@@ -457,6 +459,7 @@ impl ClientSettingsSection {
     pub(super) fn label(self) -> &'static str {
         let t = &crate::i18n::texts().settings;
         match self {
+            Self::Language => t.section_language,
             Self::Theme => t.section_theme,
             Self::Indicators => t.section_indicators,
             Self::Sound => t.section_sound,
