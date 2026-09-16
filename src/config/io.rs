@@ -764,6 +764,28 @@ mod tests {
     }
 
     #[test]
+    fn upsert_top_level_value_prepends_missing_key_before_sections() {
+        let content = "# herdr configuration\n[theme]\nname = \"catppuccin\"\n";
+        let updated = upsert_top_level_value(content, "language", "\"zh-CN\"");
+        assert!(updated.starts_with("language = \"zh-CN\"\n"));
+        assert!(updated.contains("[theme]"));
+        let parsed = updated.parse::<toml::Value>().unwrap();
+        assert_eq!(
+            parsed.get("language").and_then(|v| v.as_str()),
+            Some("zh-CN")
+        );
+    }
+
+    #[test]
+    fn upsert_top_level_value_replaces_existing_and_keeps_sections() {
+        let content = "language = \"en\"\n[theme]\nname = \"catppuccin\"\n";
+        let updated = upsert_top_level_value(content, "language", "\"zh-CN\"");
+        assert!(updated.contains("language = \"zh-CN\""));
+        assert!(!updated.contains("language = \"en\""));
+        assert!(updated.contains("[theme]"));
+    }
+
+    #[test]
     fn upsert_section_bool_adds_missing_section() {
         let updated = upsert_section_bool("", "ui.toast", "enabled", true);
         assert!(updated.contains("[ui.toast]"));

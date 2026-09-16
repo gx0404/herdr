@@ -757,12 +757,17 @@ impl App {
         self.config_reloaded_from_disk = true;
         let previous_toast = self.state.toast.clone();
         let report = match crate::config::load_live_config() {
-            Ok(loaded) => self.apply_live_config(
-                &loaded.config,
-                &loaded.diagnostics,
-                &loaded.invalid_sections,
-                notify_success,
-            ),
+            Ok(loaded) => {
+                // Keep server-built texts (toasts, update notices) in sync with
+                // the language the client just persisted.
+                crate::i18n::apply_config_language(loaded.config.language);
+                self.apply_live_config(
+                    &loaded.config,
+                    &loaded.diagnostics,
+                    &loaded.invalid_sections,
+                    notify_success,
+                )
+            }
             Err(diagnostics) => {
                 self.state.toast = None;
                 self.state.config_diagnostic =

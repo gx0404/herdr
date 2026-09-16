@@ -1140,6 +1140,50 @@ fn current_release_notes_use_whats_new_without_attention_badge() {
 }
 
 #[test]
+fn settings_language_choice_switches_live_and_persists_to_config() {
+    let _guard = crate::i18n::lang_guard(crate::i18n::Lang::ZhCn);
+    let base = std::env::temp_dir().join(format!("herdr-lang-settings-{}", std::process::id()));
+    std::fs::create_dir_all(&base).expect("temp dir");
+    let config_path = base.join("config.toml");
+    std::fs::write(&config_path, "[theme]\nname = \"catppuccin\"\n").expect("seed config");
+    let original_config_path = std::env::var_os(crate::config::CONFIG_PATH_ENV_VAR);
+    std::env::set_var(crate::config::CONFIG_PATH_ENV_VAR, &config_path);
+
+    let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
+    state.open_settings_overlay();
+    let mut outcome = ClientShellInput::default();
+    state.select_settings_section(ClientSettingsSection::Language, &mut outcome);
+    state.select_settings_choice(1);
+    state.apply_settings_choice(&mut outcome);
+
+    assert_eq!(crate::i18n::lang(), crate::i18n::Lang::En);
+    assert_eq!(
+        crate::i18n::texts().settings.section_language,
+        "language",
+        "labels must switch after the choice"
+    );
+    let persisted = std::fs::read_to_string(&config_path).expect("config written");
+    assert!(
+        persisted.contains("language = \"en\""),
+        "persisted: {persisted}"
+    );
+    assert!(
+        persisted.contains("[theme]"),
+        "existing sections survive: {persisted}"
+    );
+    assert!(
+        state.overlay.is_some(),
+        "language apply keeps the settings overlay open"
+    );
+
+    match original_config_path {
+        Some(value) => std::env::set_var(crate::config::CONFIG_PATH_ENV_VAR, value),
+        None => std::env::remove_var(crate::config::CONFIG_PATH_ENV_VAR),
+    }
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+#[test]
 fn client_settings_preview_restore_and_endpoint_integrations_are_owned_by_overlay() {
     let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
     state.set_snapshot(Box::new(snapshot()));

@@ -13,13 +13,25 @@ pub mod zh_cn;
 
 pub const LANG_ENV_VAR: &str = "HERDR_LANG";
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize)]
 pub enum Lang {
     #[default]
     #[serde(rename = "zh-CN")]
     ZhCn,
     #[serde(rename = "en")]
     En,
+}
+
+/// Tolerant deserialization: a mistyped `language` value falls back to the
+/// default instead of rejecting the whole config file.
+impl<'de> serde::Deserialize<'de> for Lang {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        Ok(Lang::parse(&value).unwrap_or_default())
+    }
 }
 
 impl Lang {
@@ -40,6 +52,16 @@ impl Lang {
 }
 
 static LANG: AtomicU8 = AtomicU8::new(Lang::ZhCn as u8);
+
+/// Apply a config-file language change. An explicit `HERDR_LANG` pin wins so
+/// reloading the config (e.g. saving an unrelated setting) cannot flip the
+/// language away from what the operator forced for this run.
+pub fn apply_config_language(lang: Lang) {
+    let env_pinned = std::env::var_os(LANG_ENV_VAR).is_some_and(|value| !value.is_empty());
+    if !env_pinned {
+        set_lang(lang);
+    }
+}
 
 pub fn set_lang(lang: Lang) {
     LANG.store(lang as u8, Ordering::Relaxed);
@@ -1053,6 +1075,17 @@ pub fn texts_for(lang: Lang) -> &'static Texts {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn lang_deserialize_falls_back_to_default_on_unknown_value() {
+        let loaded: crate::config::Config =
+            toml::from_str("language = \"fr\"").expect("unknown language must not fail config");
+        assert_eq!(loaded.language, Lang::ZhCn);
+
+        let loaded: crate::config::Config =
+            toml::from_str("language = \"en\"").expect("known language parses");
+        assert_eq!(loaded.language, Lang::En);
+    }
 
     #[test]
     fn lang_parses_config_values_and_rejects_others() {
