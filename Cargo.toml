@@ -51,6 +51,11 @@ schemars = { version = "1.2.1", features = ["derive"] }
 [patch.crates-io]
 portable-pty = { path = "vendor/portable-pty" }
 
+# 与 CI 的 CARGO_PROFILE_DEV_DEBUG=1/CARGO_PROFILE_TEST_DEBUG=1 同值：
+# line-tables-only 显著缩短测试目标的增量链接时间，代价是调试器少变量类型信息。
+[profile.dev]
+debug = "line-tables-only"
+
 [target.'cfg(windows)'.dependencies]
 # UTF-16 SDDL input for interprocess security descriptors.
 widestring = "1.2"

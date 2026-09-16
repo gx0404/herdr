@@ -23,6 +23,24 @@ pub(super) fn unique_test_dir() -> PathBuf {
     PathBuf::from(format!("/tmp/hcli-{}-{nanos}", std::process::id()))
 }
 
+/// 写 insteadOf 离线重定向配置并返回 GIT_CONFIG_GLOBAL 路径。
+/// git >= 2.32 读 GIT_CONFIG_GLOBAL；更老的 git（如 Ubuntu 20.04 的 2.25）忽略该
+/// 变量、改读 HOME/.gitconfig，因此同内容双写，调用方须把 HOME 指向测试目录。
+pub(super) fn write_offline_git_config(
+    base: &Path,
+    source_repo: &Path,
+    remote_url: &str,
+) -> PathBuf {
+    let content = format!(
+        "[url \"file://{}\"]\n    insteadOf = {remote_url}\n",
+        source_repo.display()
+    );
+    let git_config = base.join("gitconfig");
+    fs::write(&git_config, &content).unwrap();
+    fs::write(base.join(".gitconfig"), &content).unwrap();
+    git_config
+}
+
 pub(super) fn managed_github_plugin_dir(config_home: &Path) -> PathBuf {
     config_home.join("herdr-dev").join("plugins").join("github")
 }

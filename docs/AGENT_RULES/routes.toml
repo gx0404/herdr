@@ -278,6 +278,8 @@ tasks = []
 id = "testing"
 doc = "docs/AGENT_RULES/testing.md"
 paths = [
+  ".config/nextest.toml",
+  "scripts/run_test_suite.py",
   "scripts/smoke_live_handoff_sessions.sh",
   # 所有脚本自测与领域规则取并集：新增 scripts/test_*.py 自动被测试纪律覆盖。
   "scripts/test_*.py",

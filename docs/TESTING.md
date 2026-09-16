@@ -5,7 +5,7 @@
 | 层 | 入口 | 证明 / 不证明 |
 |---|---|---|
 | 格式与静态 | `just lint`（fmt + clippy -D warnings）、`just windows-lint` | 格式与静态契约 / 真实行为 |
-| Rust 单测（贴代码） | `cargo nextest`（`just test`、`just test-one <filter>`） | 边界与纯状态逻辑（`AppState::test_new()` 等）/ 真实装配 |
+| Rust 单测（贴代码） | `cargo nextest`（`just test` 并行编排、`just nextest-all`、`just test-one <filter>`） | 边界与纯状态逻辑（`AppState::test_new()` 等）/ 真实装配 |
 | 集成（`tests/`） | `just test`（api_ping、client_mode、live_handoff、detach_reattach、cross_area、multi_client、remote_attach、machine_api…） | 入口、生命周期、多客户端交接 / 真实外部机器 |
 | 维护脚本契约 | `just maintenance-test`（`python3 -m unittest scripts.test_*` 清单） | changelog/preview/manifest/翻译/打包脚本行为 |
 | UI 热路径架构 | `just ui-hot-path-architecture-test` | 渲染热路径边界（确定性）/ 运行时性能 |

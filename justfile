@@ -3,17 +3,17 @@ set windows-shell := ["cmd.exe", "/d", "/s", "/c"]
 
 python := if os() == "windows" { "python" } else { "python3" }
 
-# Run tests
+# Run tests (all phases in parallel via the orchestrator; logs under target/test-suite-logs/)
 test:
+    {{python}} scripts/run_test_suite.py
+
+# Full nextest run (command source of the test orchestrator's nextest phase)
+nextest-all:
     cargo nextest run --locked --status-level fail --final-status-level fail --failure-output final --success-output never
-    just maintenance-test
-    just ui-hot-path-architecture-test
-    just integration-assets-test
-    just docs-contract-test
 
 # Run repository maintenance contract tests
 maintenance-test:
-    {{python}} -m unittest scripts.test_agent_detection_manifest_check scripts.test_agent_kb scripts.test_ai_tool_hooks scripts.test_changelog scripts.test_config_reference_check scripts.test_docs_translation_parity scripts.test_hermes_integration_asset scripts.test_package_windows_conpty scripts.test_preview scripts.test_resolve_agent_rules scripts.test_setup_zig scripts.test_unix_installer scripts.test_vendor_libghostty_vt scripts.test_vendor_portable_pty scripts.test_windows_cross
+    {{python}} -m unittest scripts.test_agent_detection_manifest_check scripts.test_agent_kb scripts.test_ai_tool_hooks scripts.test_changelog scripts.test_config_reference_check scripts.test_docs_translation_parity scripts.test_hermes_integration_asset scripts.test_package_windows_conpty scripts.test_preview scripts.test_resolve_agent_rules scripts.test_run_test_suite scripts.test_setup_zig scripts.test_unix_installer scripts.test_vendor_libghostty_vt scripts.test_vendor_portable_pty scripts.test_windows_cross
 
 # Resolve required AI domain rules for the paths you will touch (usage: just agent-rules src/detect src/app)
 agent-rules *paths:

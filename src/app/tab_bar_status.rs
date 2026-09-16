@@ -589,12 +589,12 @@ mod tests {
             7,
             3,
             command,
-            Duration::from_secs(1),
+            Duration::from_millis(50),
             Vec::new(),
             None,
         );
 
-        std::thread::sleep(Duration::from_millis(1100));
+        std::thread::sleep(Duration::from_millis(80));
         let event = tokio::time::timeout(Duration::from_secs(1), event_rx.recv())
             .await
             .expect("status command timed out")
@@ -606,7 +606,7 @@ mod tests {
             AppEvent::TabBarCommandFinished {
                 result: Err(ref error),
                 ..
-            } if error == "timed out after 1s"
+            } if error == "timed out after 0s"
         ));
         assert!(!command_ran, "status command ran after its deadline");
     }

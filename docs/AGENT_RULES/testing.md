@@ -1,6 +1,7 @@
 # testing（测试分层与验证纪律）
 
 范围：`tests/**`、`scripts/test_*.py`（与各领域并集）、`scripts/
+run_test_suite.py`、`.config/nextest.toml`、`scripts/
 smoke_live_handoff_sessions.sh`。
 
 ## 命令入口（上游 Testing 全文语义）

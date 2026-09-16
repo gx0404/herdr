@@ -191,15 +191,11 @@ platforms = ["linux", "macos", "windows"]
     run_git(&source_repo, &["add", "global-plugin/herdr-plugin.toml"]);
     run_git(&source_repo, &["commit", "--quiet", "-m", "add plugin"]);
 
-    let git_config = base.join("gitconfig");
-    fs::write(
-        &git_config,
-        format!(
-            "[url \"file://{}\"]\n    insteadOf = https://github.com/example/plugins.git\n",
-            source_repo.display()
-        ),
-    )
-    .unwrap();
+    let git_config = write_offline_git_config(
+        &base,
+        &source_repo,
+        "https://github.com/example/plugins.git",
+    );
 
     let alpha = spawn_named_server(&config_home, &runtime_dir, "alpha");
     wait_for_socket(
@@ -217,7 +213,7 @@ platforms = ["linux", "macos", "windows"]
             "example/plugins/global-plugin",
             "--yes",
         ],
-        &[("GIT_CONFIG_GLOBAL", &git_config)],
+        &[("GIT_CONFIG_GLOBAL", &git_config), ("HOME", &base)],
     );
     assert!(
         install.status.success(),
@@ -423,15 +419,11 @@ command = ["sh", "-c", "echo bootstrap"]
 
     fs::create_dir_all(&config_home).unwrap();
     fs::create_dir_all(&runtime_dir).unwrap();
-    let git_config = base.join("gitconfig");
-    fs::write(
-        &git_config,
-        format!(
-            "[url \"file://{}\"]\n    insteadOf = https://github.com/ogulcancelik/herdr-plugin-examples.git\n",
-            source_repo.display()
-        ),
-    )
-    .unwrap();
+    let git_config = write_offline_git_config(
+        &base,
+        &source_repo,
+        "https://github.com/ogulcancelik/herdr-plugin-examples.git",
+    );
 
     let install = run_named_cli_with_env(
         &config_home,
@@ -446,6 +438,7 @@ command = ["sh", "-c", "echo bootstrap"]
         ],
         &[
             ("GIT_CONFIG_GLOBAL", &git_config),
+            ("HOME", &base),
             ("HERDR_SESSION", Path::new("leaked-session")),
         ],
     );
@@ -554,15 +547,11 @@ command = ["sh", "-c", "echo should-not-install"]
 
     fs::create_dir_all(&config_home).unwrap();
     fs::create_dir_all(&runtime_dir).unwrap();
-    let git_config = base.join("gitconfig");
-    fs::write(
-        &git_config,
-        format!(
-            "[url \"file://{}\"]\n    insteadOf = https://github.com/ogulcancelik/herdr-plugin-examples.git\n",
-            source_repo.display()
-        ),
-    )
-    .unwrap();
+    let git_config = write_offline_git_config(
+        &base,
+        &source_repo,
+        "https://github.com/ogulcancelik/herdr-plugin-examples.git",
+    );
 
     let install = run_named_cli_with_env(
         &config_home,
@@ -575,7 +564,7 @@ command = ["sh", "-c", "echo should-not-install"]
             "ogulcancelik/herdr-plugin-examples/build-fail",
             "--yes",
         ],
-        &[("GIT_CONFIG_GLOBAL", &git_config)],
+        &[("GIT_CONFIG_GLOBAL", &git_config), ("HOME", &base)],
     );
     assert!(
         !install.status.success(),
@@ -648,15 +637,11 @@ command = ["sh", "-c", "echo should-not-install"]
 
     fs::create_dir_all(&config_home).unwrap();
     fs::create_dir_all(&runtime_dir).unwrap();
-    let git_config = base.join("gitconfig");
-    fs::write(
-        &git_config,
-        format!(
-            "[url \"file://{}\"]\n    insteadOf = https://github.com/ogulcancelik/herdr-plugin-examples.git\n",
-            source_repo.display()
-        ),
-    )
-    .unwrap();
+    let git_config = write_offline_git_config(
+        &base,
+        &source_repo,
+        "https://github.com/ogulcancelik/herdr-plugin-examples.git",
+    );
 
     let install = run_named_cli_with_env(
         &config_home,
@@ -669,7 +654,7 @@ command = ["sh", "-c", "echo should-not-install"]
             "ogulcancelik/herdr-plugin-examples/missing-tool",
             "--yes",
         ],
-        &[("GIT_CONFIG_GLOBAL", &git_config)],
+        &[("GIT_CONFIG_GLOBAL", &git_config), ("HOME", &base)],
     );
     assert!(
         !install.status.success(),
@@ -757,15 +742,11 @@ EOF
 
     fs::create_dir_all(&config_home).unwrap();
     fs::create_dir_all(&runtime_dir).unwrap();
-    let git_config = base.join("gitconfig");
-    fs::write(
-        &git_config,
-        format!(
-            "[url \"file://{}\"]\n    insteadOf = https://github.com/ogulcancelik/herdr-plugin-examples.git\n",
-            source_repo.display()
-        ),
-    )
-    .unwrap();
+    let git_config = write_offline_git_config(
+        &base,
+        &source_repo,
+        "https://github.com/ogulcancelik/herdr-plugin-examples.git",
+    );
 
     let install = run_named_cli_with_env(
         &config_home,
@@ -778,7 +759,7 @@ EOF
             "ogulcancelik/herdr-plugin-examples/manifest-mutator",
             "--yes",
         ],
-        &[("GIT_CONFIG_GLOBAL", &git_config)],
+        &[("GIT_CONFIG_GLOBAL", &git_config), ("HOME", &base)],
     );
     assert!(
         !install.status.success(),
@@ -847,15 +828,11 @@ command = ["sh", "-c", "echo new"]
     fs::create_dir_all(&managed_checkout).unwrap();
     fs::write(managed_checkout.join("old-marker"), "old checkout\n").unwrap();
 
-    let git_config = base.join("gitconfig");
-    fs::write(
-        &git_config,
-        format!(
-            "[url \"file://{}\"]\n    insteadOf = https://github.com/ogulcancelik/herdr-plugin-examples.git\n",
-            source_repo.display()
-        ),
-    )
-    .unwrap();
+    let git_config = write_offline_git_config(
+        &base,
+        &source_repo,
+        "https://github.com/ogulcancelik/herdr-plugin-examples.git",
+    );
 
     let listener = UnixListener::bind(&socket_path).unwrap();
     let managed_checkout_for_server = managed_checkout.clone();
@@ -915,7 +892,7 @@ command = ["sh", "-c", "echo new"]
             "ogulcancelik/herdr-plugin-examples/worktree-bootstrap",
             "--yes",
         ],
-        &[("GIT_CONFIG_GLOBAL", &git_config)],
+        &[("GIT_CONFIG_GLOBAL", &git_config), ("HOME", &base)],
         Some(&socket_path),
     );
     assert!(
@@ -970,15 +947,11 @@ command = ["sh", "-c", "echo install"]
         .join("plugins")
         .join("github")
         .join(WORKTREE_BOOTSTRAP_MANAGED_COMPONENT);
-    let git_config = base.join("gitconfig");
-    fs::write(
-        &git_config,
-        format!(
-            "[url \"file://{}\"]\n    insteadOf = https://github.com/ogulcancelik/herdr-plugin-examples.git\n",
-            source_repo.display()
-        ),
-    )
-    .unwrap();
+    let git_config = write_offline_git_config(
+        &base,
+        &source_repo,
+        "https://github.com/ogulcancelik/herdr-plugin-examples.git",
+    );
 
     let listener = UnixListener::bind(&socket_path).unwrap();
     let managed_checkout_for_server = managed_checkout.clone();
@@ -1043,7 +1016,7 @@ command = ["sh", "-c", "echo install"]
             "ogulcancelik/herdr-plugin-examples/worktree-bootstrap",
             "--yes",
         ],
-        &[("GIT_CONFIG_GLOBAL", &git_config)],
+        &[("GIT_CONFIG_GLOBAL", &git_config), ("HOME", &base)],
         Some(&socket_path),
     );
     assert!(
@@ -1098,15 +1071,11 @@ command = ["sh", "-c", "echo install"]
         .join("plugins")
         .join("github")
         .join(WORKTREE_BOOTSTRAP_MANAGED_COMPONENT);
-    let git_config = base.join("gitconfig");
-    fs::write(
-        &git_config,
-        format!(
-            "[url \"file://{}\"]\n    insteadOf = https://github.com/ogulcancelik/herdr-plugin-examples.git\n",
-            source_repo.display()
-        ),
-    )
-    .unwrap();
+    let git_config = write_offline_git_config(
+        &base,
+        &source_repo,
+        "https://github.com/ogulcancelik/herdr-plugin-examples.git",
+    );
 
     let listener = UnixListener::bind(&socket_path).unwrap();
     let managed_checkout_for_server = managed_checkout.clone();
@@ -1163,7 +1132,7 @@ command = ["sh", "-c", "echo install"]
             "ogulcancelik/herdr-plugin-examples/worktree-bootstrap",
             "--yes",
         ],
-        &[("GIT_CONFIG_GLOBAL", &git_config)],
+        &[("GIT_CONFIG_GLOBAL", &git_config), ("HOME", &base)],
         Some(&socket_path),
     );
     assert!(

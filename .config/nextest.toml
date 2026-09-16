@@ -1,0 +1,4 @@
+# nextest 配置：默认 profile 保持工具默认值，不改变 `just test` 行为。
+# timing profile 仅用于本地耗时分析：JUnit 相对路径锚定在 target/nextest/timing/。
+[profile.timing]
+junit.path = "junit.xml"

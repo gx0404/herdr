@@ -86,7 +86,9 @@ def acquire_package(package: dict[str, Any], package_path: Path) -> None:
             except urllib.error.HTTPError as error:
                 if error.code < 500 or attempt == 2:
                     raise
-                error.close()
+                # fp=None 的 HTTPError（如单测构造）在 Python 3.10 上 close() 会 KeyError
+                if error.fp is not None:
+                    error.close()
                 time.sleep(2**attempt)
     actual = sha256_file(package_path)
     if actual != package["sha256"]:

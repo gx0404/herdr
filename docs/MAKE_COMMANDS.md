@@ -7,7 +7,8 @@
 
 | 命令 | 用途 | 前置 | 副作用 | 证据 |
 |---|---|---|---|---|
-| `just test` | 全量验证：nextest + maintenance + 热路径架构 + 资产 + docs 契约 | Rust/Python/Bun 工具链 | 编译产物、临时目录 | 退出码 0；各子命令输出 |
+| `just test` | 全量验证：编排器并行跑 nextest + maintenance + 热路径架构 + 资产 + docs 契约（阶段日志在 `target/test-suite-logs/`） | Rust/Python/Bun 工具链 | 编译产物、临时目录 | 退出码 0；阶段汇总各子命令状态 |
+| `just nextest-all` | 单独跑全量 nextest（编排器 nextest 阶段的命令真源） | Rust | 编译产物 | 退出码 0 |
 | `just test-one <filter>` | 单个 nextest 过滤器 | 同上 | 同上 | 退出码 0 |
 | `just maintenance-test` | 维护脚本 unittest 清单（新脚本测试须登记进清单） | Python3（3.10 需 tomli） | 无 | `unittest` OK |
 | `just ui-hot-path-architecture-test` | UI 热路径架构边界（确定性） | Python3 | 无 | `unittest` OK |
