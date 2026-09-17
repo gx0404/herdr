@@ -102,7 +102,11 @@ def evaluate(
 def _decision_payload(level: str, reason: str, protocol: str) -> dict:
     decision = "ask" if level == "ask" else "deny"
     if protocol == "codex":
-        return {"permissionDecision": decision, "reason": reason}
+        # Codex PreToolUse 不支持 ask；返回不支持的决策会报错后继续执行。
+        # 需要人工介入的危险模式在这一协议上阻止执行，不能退化为静默放行。
+        if decision == "ask":
+            reason += "（Codex PreToolUse 不支持 ask，本次按仓库规则阻止执行）"
+        decision = "deny"
     return {
         "hookSpecificOutput": {
             "hookEventName": "PreToolUse",

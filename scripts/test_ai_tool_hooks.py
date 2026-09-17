@@ -174,8 +174,8 @@ class PreToolUseGateTests(unittest.TestCase):
             check=False,
         )
         payload = json.loads(result.stdout.decode("utf-8"))
-        self.assertEqual("deny", payload["permissionDecision"])
-        self.assertIn("reason", payload)
+        self.assertEqual("deny", payload["hookSpecificOutput"]["permissionDecision"])
+        self.assertIn("permissionDecisionReason", payload["hookSpecificOutput"])
 
     def test_codex_adapter_blocks_in_repo(self) -> None:
         stdin = json.dumps({"tool_name": "Bash", "tool_input": {"command": "git push --force"}})
@@ -188,7 +188,7 @@ class PreToolUseGateTests(unittest.TestCase):
         )
         self.assertEqual(0, result.returncode)
         payload = json.loads(result.stdout.decode("utf-8"))
-        self.assertEqual("deny", payload["permissionDecision"])
+        self.assertEqual("deny", payload["hookSpecificOutput"]["permissionDecision"])
 
     def test_malformed_input_does_not_crash(self) -> None:
         result = subprocess.run(
