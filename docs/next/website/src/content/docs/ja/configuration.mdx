@@ -142,7 +142,7 @@ navigate_pane_down = "ctrl+j"
 split_horizontal = "prefix+minus"
 ```
 
-デフォルトのキーマップはプレフィックス優先なので、Herdr がシェル、エディタ、tmux、ターミナルアプリから入力を奪うことはありません。[設定リファレンス](/docs/config-reference/)で `keys.` を検索すると、すべてのアクションとデフォルトのバインドを確認できます。`prefix+?` で開くアプリ内ヘルプパネルには、現在有効なバインドが表示されます。
+デフォルトのキーマップはプレフィックス優先なので、Herdr がシェル、エディタ、tmux、ターミナルアプリから入力を奪うことはありません。[設定リファレンス](/docs/config-reference/)で `keys.` を検索すると、すべてのアクションとデフォルトのバインドを確認できます。`prefix+?` で開くアプリ内ヘルプパネルには、現在有効なバインドが表示されます。プレフィックスモードが有効な間、which-key ポップアップが利用可能なプレフィックスバインドを一覧表示します（`ui.which_key = false` で無効化）。`prefix+u` でリンクヒントモードに入ります: ペインのビューポートに見える URL に 2 文字のマーカーが付き、そのマーカーを打つとリンクが開きます。
 
 1 つのアクションに複数のショートカットが必要な場合、バインドを配列にすることもできます:
 
@@ -292,11 +292,29 @@ text = "#cdd6f4"
 
 有効なパレットには、組み込みテーマ、`[theme.custom]`、`[theme.custom.light]` または `[theme.custom.dark]` の順で適用されます。モード別のサブテーブルを省略すると、既存の共有上書きの挙動が維持されます。
 
+コンポーネントレベルのトークンは、解決済みパレットの上で個々の UI 要素を微調整します。未設定のフィールドは対応するセマンティックトークンにフォールバックします:
+
+```toml
+[theme.components]
+pane_border_focused = "#89b4fa"
+scrollbar_thumb = "#7f849c"
+toast_border_error = "#f38ba8"
+selection_mix_ratio = 0.35
+```
+
+未設定のフィールドはセマンティックなフォールバックを保持します: ペインの境界線は `accent`/`overlay0`、スクロールバーのつまみは `overlay1`（フォーカス時）または `overlay0`、トラックは `overlay0`（フォーカス時）または `surface_dim`、トーストの境界線は `green`/`blue`/`red`、モードバーは `accent` を使います。`selection_mix_ratio`（0.0–1.0、デフォルト 0.28）は、選択背景をホストの背景色から白または黒へどの程度混ぜるかを制御します。選択されたテキストの太字・斜体・下線は保持され、セルの色だけが変わります。全フィールドの一覧は[設定リファレンス](/docs/config-reference/)で `theme.components` を検索してください。
+
 ## UI とサイドバー
 
 サイドバーは Herdr のメインダッシュボードです。サイズ、折りたたみモード、Agent パネルの並び順、マウスの挙動、ペインの境界線、その他の表示設定については、[設定リファレンス](/docs/config-reference/)で `ui.` を検索してください。
 
 `ui.pane_borders` は `"auto"`（デフォルト。分割ペインだけに境界線を表示）、`"always"`（単独ペインにも枠を表示）、`"off"` を受け付けます。単独ペインの辺はすべて外側の辺なので、枠を表示するには `ui.pane_outer_borders = true` も必要です。従来の真偽値も有効で、`true` は `"auto"`、`false` は `"off"` に対応します。
+
+`ui.border_style` はペイン境界線のグリフを `"single"`（デフォルト）、`"rounded"`、`"double"`、`"thick"` から選びます。
+
+`ui.color_depth` は Herdr 自身の UI 色の出力色深度を制御します: `"auto"`（デフォルト）はホストターミナルに従い、truecolor の証拠がない `256color` 系の TERM（SSH や tmux で一般的）では、テーマの RGB 色が自動的に最も近い xterm-256 パレットエントリにマッピングされます。`"truecolor"` で 24 ビット出力を強制し、`"256"` でダウングレードを強制します。
+
+マウス操作のタイミングは調整できます: `ui.double_click_ms`（デフォルト `350`）はダブルクリックの語選択・トリプルクリックの行選択に使う時間窓、`ui.drag_throttle_ms`（デフォルト `33`）はペインのスクロールバーと分割バーのドラッグ更新を間引き、`ui.selection_autoscroll_interval_ms` / `ui.selection_autoscroll_min_lines` / `ui.selection_autoscroll_max_lines`（デフォルト `30` / `3` / `15`）はペイン端を越えてドラッグしたときの選択範囲の自動スクロールを制御します。
 
 `[ui]` の `tab_bar_position = "bottom"` を設定すると、デスクトップのタブ行をターミナルペインの下に配置できます。Prefix、Navigate、Copy、Resize の各モードバーは、表示中だけ下部のタブ行を置き換えます。デフォルトは `"top"` です。
 

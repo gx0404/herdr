@@ -50,15 +50,27 @@ herdr api schema --output herdr-api.schema.json
 ```bash
 herdr machine list
 herdr machine add workbox --label "Build machine"
+herdr machine add --from-config workbox
+herdr machine import [--file PATH] [--host PATTERN]... [--yes] [--group NAME] [--include-wildcards]
 herdr machine rename <profile-id> --label "New name"
 herdr machine disable <profile-id>
 herdr machine enable <profile-id>
 herdr machine remove <profile-id>
+herdr machine status <profile> [--json]
+herdr machine exec <profile> -- <command> [args...]
 ```
 
 `machine add` はリモートのデフォルトセッションを使います。名前付きセッションを使う場合だけ `--remote-session <name>` を追加します。スクリプトでは `machine list` に `--json` を追加できます。詳しくは[マシンへの接続](/ja/docs/connecting-machines/)を参照してください。
 
+`machine status` は 1 台のマシンを 1 つのビューで報告します。プロファイルの各フィールド、マシンの SSH API ブリッジ経由のライブ接続プローブ（`online`、`disabled`、または構造化された失敗種別とメッセージ付きの `unreachable`）、プローブ成功時のリモートサーバーバージョンとプロトコル互換性、保存済みポートフォワードルール、セッションログ設定です。セレクタはラベルまたはプロファイル ID を受け付け、無効なマシンも指定できます。
+
+`machine exec` は `machine fs` と同じ管理 ssh チャネルでリモートコマンドを 1 回だけ実行します。セレクタは有効なマシンである必要があり、`--` 以降はそのまま渡され、stdin/stdout/stderr はターミナルにそのまま流れ、終了ステータスはリモートコマンドのものになります（転送失敗時は 255）。タイムアウトはなく、プロンプトも出ません。
+
 `machine add` はリモート側の Herdr が必要な機能を備えているか確認し、必要な場合だけ承認を得てインストールまたは更新します。指定したセッションのバックグラウンドサーバーを起動してからプロファイルを保存します。互換性があればリリースバージョンは一致しなくてもかまいません。インストールや再起動の承認が必要な場合は、対話型ターミナルで実行してください。セットアップが失敗またはキャンセルされた場合、プロファイルは保存されません。実行中サーバーの置き換えには明示的な承認が必要で、デフォルトの回答は No です。停止するとペインのプロセスも終了します。`machine add` は実験的なハンドオフを暗黙に有効にしません。
+
+`machine add --from-config <host>` は SSH 設定（デフォルト `~/.ssh/config`）からホストのエイリアスを解決し、そこに書かれたすべてのディレクティブ（ホスト名、ユーザー、ポート、 identity ファイル、プロキシジャンプ、キープアライブなど）で登録してから、通常の `machine add` と同じリモートセットアップを実行します。接続オプションのフラグとは組み合わせられません。`--label`（デフォルトはエイリアス）、`--remote-session`、`--group`、`--tag`、`--color` は引き続き使えます。
+
+`machine import` は SSH 設定のすべての `Host` を一括で登録します。`--yes` なしでは検出したホストを一覧表示して取り込むものを尋ねるため、対話型ターミナルが必要です。スクリプトでは `--yes` を付けてすべて取り込みます。`--host` はバッチを一致するエイリアスや `*`/`?` パターンに限定し、`--group` はインポートした全マシンに同じグループを設定します。`*.internal` のようなワイルドカードホストは `--include-wildcards` を付けない限りスキップします。同じバッチでインポートされたホストを指す `ProxyJump` ホップは `profile:<id>` 参照になります。保存済みマシンのラベルやターゲットと重複するホストはスキップされ、ホストごとに報告されるため、再実行は安全です。インポートは OpenSSH の first-value-wins セマンティクスで SSH 設定（`Include` されたファイルを含む）を読み取り、変更はしません。`machine add` とは異なり、リモートサーバーのインストールや更新は行わないため、セットアップが必要なマシンはスタンドアロンの修復コマンドとともに Attention を表示します。完全なセマンティクスは[マシンへの接続](/ja/docs/connecting-machines/#ssh-設定からマシンをインポートする)を参照してください。
 
 変更は、開いているローカルの Herdr クライアントに通常 1 秒以内に自動反映されます。追加または有効化したマシンにはバックグラウンドで接続し、名前の変更では再接続しません。削除または無効化すると、そのマシンだけが切断され、リモートセッションは動き続けます。表示中のマシンを削除すると Local に戻ります。Local に接続できない場合は、再接続するまで利用不可と表示します。各プロファイルは、不透明な ID、ラベル、SSH 接続先、明示的なリモートセッション名、有効状態をクライアントの状態ファイルに保存します。パスワード、秘密鍵、その他の SSH 認証情報は保存しません。
 
@@ -80,6 +92,75 @@ herdr --machine "Build machine" worktree create --cwd /srv/project --branch revi
 JSON API を非対話 SSH で転送します。API の内容を SSH のシェルコマンドに埋め込むことはありません。開いた TUI は不要で、サーバーのインストール・起動・再起動も自動では行いません。ローカル CLI とリモート Herdr を更新し、実行中サーバーの API プロトコルとの互換性を保ってください。認証、接続、互換性のエラーで Local にフォールバックしたり、要求を自動再送したりすることはありません。
 
 呼び出し元のローカルペイン ID は継承しません。リモート ID を明示してください。`--current` でローカルペインを指定することはできません。リモート worktree パスには絶対パス、`~`、または `~/` で始まるパスを指定します（サーバー側で展開）。プラグインの link パスは絶対パスが必要です。対象は 1 台ずつで、一覧の統合や別の TUI の接続を使った転送は含みません。
+
+保存済みマシンには SSH ポートフォワードのルールを持たせることもできます。接続と一緒に開始され、再接続時に再構築されます。
+
+```bash
+herdr machine forward list <profile-id> [--json]
+herdr machine forward add <profile-id> --kind local|remote|dynamic --listen-port N [--bind-address ADDR] [--target-host HOST] [--target-port N]
+herdr machine forward remove <profile-id> <rule-number>
+```
+
+`local`（`ssh -L`）はローカルで待ち受け、マシン経由で `--target-host:--target-port` に転送します。`remote`（`ssh -R`）はマシン上で待ち受けて転送し、`dynamic`（`ssh -D`）はターゲットを持たないローカル SOCKS プロキシを開きます。ルールは接続と同じ生成 SSH 設定を使う非対話の `ssh -N` 子プロセスとして動作し、起動中のクライアントには再接続なしで変更が反映されます。詳しくは [マシンの接続](/docs/connecting-machines/#port-forwarding) を参照してください。
+
+保存済みマシンは、同じ管理 SSH チャネル（`sftp` バッチモード）経由でファイルシステムも公開します:
+
+```bash
+herdr machine fs <profile> ls <path> [--json]
+herdr machine fs <profile> stat <path> [--json]
+herdr machine fs <profile> cat <path>
+herdr machine fs <profile> get <remote-path> <local-path>
+herdr machine fs <profile> put <local-path> <remote-path>
+herdr machine fs <profile> mkdir <path> [--parents]
+herdr machine fs <profile> mv <from> <to>
+herdr machine fs <profile> rm <path> [--recursive]
+```
+
+`<profile>` は保存済みマシンのラベルまたはプロファイル ID で、解決規則は `--machine` と同じです。リモートパスは sftp サーバーのログインディレクトリからの相対で解決され（`~` は展開されません）、`-` で始まってはいけません。また `\` や `"` を含んではいけません。転送は 1 ファイル 1 MiB までで、`get` は `0600` 権限でアトミックに書き込み、`put` はアップロード後にターゲットへアトミックに rename し、以前のパーミッションビットを復元します。ディレクトリの `rm` には `--recursive` が必要で、シンボリックリンクは辿りません。詳しくは [マシンの接続](/docs/connecting-machines/#remote-files) を参照してください。
+
+セッションログは、スナップショット間隔でマシンのペインをローカルファイルにミラーします:
+
+```bash
+herdr machine log <profile-id> show [--json]
+herdr machine log <profile-id> on [--path TEMPLATE] [--max-bytes N] [--interval SECS]
+herdr machine log <profile-id> off
+herdr machine log <profile-id> dump
+```
+
+パステンプレートは `{date}`、`{machine}`、`{machine-id}`、`{pane}`、`{session}` を使えます。相対テンプレートは `<state dir>/session-logs/` 以下に解決され（デフォルト `{machine}/{date}-{pane}.log`）、ファイルは `--max-bytes`（デフォルト 16 MiB）で `<file>.1` にローテーションされ、クライアントをブロックしないバックグラウンドキュー経由で追記されます。スナップショットはペインのリビジョンが変わったときに最近のテキストを最大 200 行記録します。周期的なビューであり、連続したバイトストリームではありません。`dump` は検証用に 1 サイクルを即時実行します。詳しくは [マシンの接続](/docs/connecting-machines/#session-logs) を参照してください。
+
+## 入力ブロードキャスト
+
+```bash
+herdr broadcast status [--json]
+herdr broadcast enable
+herdr broadcast disable
+herdr broadcast add [--machine <label-or-id>] --pane w1:p1
+herdr broadcast remove <target-number>
+herdr broadcast clear
+herdr broadcast send <text> [--no-enter] [--json]
+```
+
+ブロードキャストは、同じ入力をエンドポイント（Local または保存済みマシン）ごとに登録された 1 つのペインへ送信します。ターゲット集合はクライアントローカルの状態（endpoint catalog の隣の `broadcast.json`）で、安全のため二重にゲートされています。初期状態は空かつ無効で、`send` は `status` を確認して `enable` するまで実行を拒否します。各エンドポイントは最大 1 回しか登録できません。別のペインを登録するには先にターゲットを削除してください。
+
+`send` は既存のエンドポイントごとの JSON API チャネル（`pane.send-input`、`--no-enter` がない限り Enter を送信。Local のペインはローカルの API ソケット、マシンのペインは保存済みマシンの SSH ブリッジ経由）を再利用し、ターゲットを 1 つずつ送信して結果を個別に報告します。いずれかが失敗した場合の終了コードは 1 です。集合は再起動をまたいで保持されるため、スクリプトで一度準備して繰り返し駆動できます。
+
+同じ集合が UI 内のブロードキャストも駆動します。マシンページで `b`、またはコマンドパレットの「broadcast input…」から開き、`g` で切り替え、`a` でオンラインマシンからペインを追加します。ブロードキャスト中は mode bar に `⇄ ブロードキャスト ×N` バッジが常駐し、フォーカス中のペインへの入力はすべて登録ペインに扇出されます（そのペイン自身は除外。マウス入力は扇出されません）。詳しくは[マシンへの接続](/ja/docs/connecting-machines/#入力ブロードキャスト)を参照してください。
+
+## スニペット
+
+```bash
+herdr snippet list [--json]
+herdr snippet add --label "Restart api" --command "kubectl -n {{ns}} rollout restart deploy/api" --variable ns
+herdr snippet remove <id-or-label>
+herdr snippet run <id-or-label> --pane w1:p1 [--machine "Build machine" --pane w2:p1]... [--var ns=staging] [--no-enter] [--json]
+```
+
+スニペットはクライアントローカルの状態に保存されるコマンドテンプレートです（endpoint カタログと同じ場所にあるバージョン付き `snippets.json`）。実行するまでどこにも送信されません。コマンド内の `{{name}}` プレースホルダーは実行時に `--var name=value` で埋めます。未解決のプレースホルダーはエラーで、値に制御文字は含められないため、レンダリング結果は常に 1 行です。
+
+`run` はレンダリングしたコマンドを JSON API 経由で各ターゲットペインに送信します（`herdr pane run` と同じ仕組み）。`--no-enter` を付けない限り Enter も送られます。`--machine` がなければローカルサーバーが対象で、`--machine <label-or-id>` はグローバルの `--machine` プレフィックスと同じ規則で保存済み SSH マシンを解決し、`--local` はローカルを明示します。各ターゲットはそれぞれ `--pane` を取り、`--machine`/`--local` + `--pane` の組を繰り返すと 1 つのスニペットを複数マシンに展開できます。送信は 1 件ずつで成否は独立しており、失敗はターゲットごとに報告され、いずれかが失敗すると終了コードは 1 になります。ライブラリには履歴として直近 100 件の実行（スニペット、ターゲット、時刻、結果）が保持されます。
+
+同じライブラリが UI も駆動します。コマンドパレットの「スニペット」「スニペットを実行…」でスニペットオーバーレイを開くと、ライブラリの管理（新規/編集/削除）と、ターゲット選択（現在のペイン、オンラインのマシンの任意のペイン、または選択した各マシンのフォーカス中ペイン）→宣言済み変数の入力→レンダリング結果の確認という実行フローを辿れます。実行は接続済みエンドポイントのセッション経由で送られ（追加の SSH ブリッジは不要）、ターゲットごとの結果はトーストに集約され（すべてのターゲットが受け付けた場合は ✓ 成功スタイル）、同じ履歴に書き込まれます（オーバーレイの履歴ページで確認できます）。
 
 ## シェル補完
 

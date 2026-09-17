@@ -142,7 +142,7 @@ navigate_pane_down = "ctrl+j"
 split_horizontal = "prefix+minus"
 ```
 
-默认键位以前缀为主，因此 Herdr 不会抢占 shell、编辑器、tmux 或终端应用的输入。在[配置参考](/docs/config-reference/)中搜索 `keys.` 可查看每个动作及其默认绑定。应用内帮助面板可通过 `prefix+?` 打开，其中会显示当前生效的绑定。
+默认键位以前缀为主，因此 Herdr 不会抢占 shell、编辑器、tmux 或终端应用的输入。在[配置参考](/docs/config-reference/)中搜索 `keys.` 可查看每个动作及其默认绑定。应用内帮助面板可通过 `prefix+?` 打开，其中会显示当前生效的绑定。前缀模式激活时会弹出 which-key 面板列出可用的前缀绑定（可用 `ui.which_key = false` 关闭）。`prefix+u` 进入链接提示模式：窗格视口中可见的 URL 会显示两字母标记，输入标记即可打开链接。
 
 当一个动作需要多个快捷键时，绑定也可以是数组：
 
@@ -292,11 +292,29 @@ text = "#cdd6f4"
 
 有效调色板按以下顺序应用：内置主题、`[theme.custom]`，然后是 `[theme.custom.light]` 或 `[theme.custom.dark]`。省略模式子表时，会保留现有的共享覆盖行为。
 
+组件级 token 在已解析的调色板之上微调单个 UI 元素，未设置的字段会回落到对应的语义 token：
+
+```toml
+[theme.components]
+pane_border_focused = "#89b4fa"
+scrollbar_thumb = "#7f849c"
+toast_border_error = "#f38ba8"
+selection_mix_ratio = 0.35
+```
+
+未设置的字段保留语义回落：窗格边框使用 `accent`/`overlay0`，滚动条滑块使用 `overlay1`（聚焦）或 `overlay0`，滚动条轨道使用 `overlay0`（聚焦）或 `surface_dim`，toast 边框使用 `green`/`blue`/`red`，模式栏使用 `accent`。`selection_mix_ratio`（0.0–1.0，默认 0.28）控制选区背景向白色或黑色混合宿主背景色的强度；被选文本的粗体、斜体和下划线样式会保留，只有单元格颜色改变。完整字段列表请在[配置参考](/docs/config-reference/)中搜索 `theme.components`。
+
 ## UI 与侧边栏
 
 侧边栏是 Herdr 的主仪表盘。在[配置参考](/docs/config-reference/)中搜索 `ui.`，可查看尺寸、折叠模式、Agent 面板排序、鼠标行为、窗格边框和其他显示设置。
 
 `ui.pane_borders` 接受 `"auto"`（默认值，仅为分割窗格显示边框）、`"always"`（也为单个窗格显示边框）或 `"off"`。单窗格的所有边都是外边，因此还需要 `ui.pane_outer_borders = true` 才会显示边框。旧的布尔值仍然有效：`true` 对应 `"auto"`，`false` 对应 `"off"`。
+
+`ui.border_style` 可在 `"single"`（默认）、`"rounded"`、`"double"`、`"thick"` 之间切换窗格边框字形。
+
+`ui.color_depth` 控制 Herdr 自身 UI 颜色的输出色深：`"auto"`（默认）跟随宿主终端——当 TERM 为 `256color` 且没有 truecolor 证据时（SSH 或 tmux 中常见），主题 RGB 颜色会自动映射到最近的 xterm-256 调色板条目。使用 `"truecolor"` 强制 24 位输出，或使用 `"256"` 强制降级。
+
+鼠标交互时序可调：`ui.double_click_ms`（默认 `350`）是双击选词、三击选整行的时间窗；`ui.drag_throttle_ms`（默认 `33`）节流窗格滚动条与分割条的拖拽更新；`ui.selection_autoscroll_interval_ms` / `ui.selection_autoscroll_min_lines` / `ui.selection_autoscroll_max_lines`（默认 `30` / `3` / `15`）控制拖过窗格边缘时的选区自动滚动。
 
 在 `[ui]` 下设置 `tab_bar_position = "bottom"`，可将桌面标签栏放到终端窗格下方。Prefix、Navigate、Copy 和 Resize 模式栏会在显示期间临时替换底部标签栏。默认值为 `"top"`。
 

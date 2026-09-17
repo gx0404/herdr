@@ -35,13 +35,65 @@ To use a named session instead, add the optional `--remote-session` flag:
 herdr machine add workbox --label "Build machine" --remote-session agents
 ```
 
+Machines that need explicit SSH settings can carry them in the profile:
+
+```bash
+herdr machine add server.example.com --label "Build machine" --user dev --port 2222 \
+  --identity-file ~/.ssh/build --identities-only --proxy-jump bastion --color blue --group prod
+```
+
+The connection flags are `--port`, `--user`, `--identity-file` (repeatable), `--identities-only`, `--identity-agent`, `--strict-host-key-checking ask|accept-new|yes`, `--proxy-jump` (repeatable; either a target such as `user@host:port` or `profile:<id>` to hop through another saved machine), `--forward-agent`, `--server-alive-interval`, `--server-alive-count-max`, `--control-persist`, and `--remote-command`. `--group`, `--tag` (repeatable), and `--color` (hex or named color) are organization metadata for list output and the sidebar. All flags are optional; a machine without them connects exactly as before. Profile connection settings are written into Herdr's generated SSH config after your own SSH config is included, so per-option, settings from your `~/.ssh/config` win and the profile only fills gaps. Background connections still never prompt; authentication behavior is unchanged. `--remote-command` overrides the command SSH executes and therefore does not work with Herdr's bridge startup.
+
+The host-key policy deserves a note of its own, because background connections cannot ask you anything. Without a profile setting, saved machines keep the historical behavior: `StrictHostKeyChecking=yes`, so the host key must already be in your `known_hosts` (first connections to an unknown host fail with Attention). A profile's policy is passed to background SSH on the command line, so it takes effect even when your SSH config says something different:
+
+- `accept-new` records a previously unknown host key on first connect (trust on first use) and keeps rejecting changed keys afterwards. This is the convenient choice for a new machine you already trust by other means.
+- `ask` behaves as `yes` in the background: there is no terminal to answer the prompt, so unknown keys are still refused.
+- `yes` keeps strict checking against your existing `known_hosts`.
+
+To pre-seed or repair `known_hosts` yourself (for example before switching a profile from `accept-new` back to `yes`), use the standard OpenSSH tools:
+
+```bash
+ssh-keyscan server.example.com >> ~/.ssh/known_hosts   # record current keys
+ssh-keygen -F server.example.com                        # show recorded fingerprints
+ssh-keygen -R server.example.com                        # forget recorded keys (e.g. after a reimage)
+```
+
 Herdr checks both the installed binary and the running server. It starts the requested background server before saving the profile. Compatible client and server versions do not have to match. Missing or incompatible installations go through an approval-based setup. When the running server needs replacement, setup asks before stopping it and its pane processes, then starts the compatible server. The default answer is No. If installation and replacement are both needed, one confirmation covers them. `machine add` does not use experimental live handoff. Cancelling or failing setup leaves the profile unsaved.
 
 Run `herdr` to open the UI. If a local client is already open, added and enabled machines normally appear within a second and connect in the background without changing your selection. An in-progress machine switch finishes before profile changes are applied. The remote server keeps running after setup exits.
 
+You can also add a machine without leaving the UI: open the machines page from the global menu or with `prefix+m`, then press `a`. The wizard walks through target and label, connection fields (user, port, identity files, proxy jumps, host-key policy, and more), session and organization (group, tags, color), and a confirm page. The confirm page pre-authorizes the same installation, update, or required server restart that `machine add` would ask about in a terminal, and the wizard then shows each setup step as it runs: platform detection, install or update, server start, and endpoint verification. SSH still runs non-interactively inside the UI, so key-based authentication must already work, and the host key must already be accepted unless the profile's policy is `accept-new`; a failed step names the failing phase, prints the standalone command (for example `herdr --remote workbox`) that completes the setup in an interactive terminal, and offers two in-UI recovery entries: a host-key review that scans and records the presented key after your confirmation, and an approved interactive authentication attempt that verifies credentials through the askpass channel before you retry the setup. A machine is only saved after setup succeeds.
+
+## Import machines from your SSH config
+
+If your `~/.ssh/config` already describes your hosts, import them instead of retyping every setting:
+
+```bash
+herdr machine import                     # review the detected hosts and pick which to import
+herdr machine import --yes               # import everything (required when stdin is not a terminal)
+herdr machine import --host 'db-*' --group prod
+herdr machine import --file ~/work/ssh_config
+```
+
+The import reads your SSH config, including `Include`d files, with OpenSSH semantics: the first value of each directive wins, `Host *` supplies the fallback, and host matching is case-insensitive with `*`/`?` wildcards and `!` negation. `Match` blocks cannot be evaluated statically and are skipped. Your SSH config is only read, never modified.
+
+Each `Host` becomes a machine profile: the alias is the label, the resolved `HostName` the target, and `User`, `Port`, `IdentityFile`, `IdentitiesOnly`, `IdentityAgent`, `ProxyJump`, `ForwardAgent`, `ServerAliveInterval`, `ServerAliveCountMax`, `ControlPersist`, `RemoteCommand`, and `StrictHostKeyChecking` become profile fields — the same fields `machine add` accepts as flags. A `ProxyJump` hop that names another host imported in the same batch becomes a `profile:<id>` reference to it; other hops stay literal targets. Wildcard patterns such as `*.internal` are skipped unless you pass `--include-wildcards`; an imported wildcard profile is a template you edit before use. Hosts duplicating a saved machine's label or target — or each other — are skipped and reported per host, so re-running an import is safe.
+
+The same import runs inside the UI: on the machines page press `i` (or use the command palette's "import machines from SSH config") to open a wizard that lists the detected hosts with the ones it will skip and why, lets you check the hosts to import (space toggles, `a` selects all or none, and a group field assigns one group to the batch), and reports each host as imported, skipped, or failed with its reason. Imported machines connect in the background exactly like the CLI path; remote server setup stays an explicit step.
+
+Import only registers profiles; it never installs, updates, or restarts a remote server. Imported machines connect in the background afterwards, and a machine that needs setup shows Attention with its standalone setup command. To register a single host with the same preparation `machine add` performs, use:
+
+```bash
+herdr machine add --from-config web
+```
+
+This resolves `web` in your SSH config, registers it with the full directives found there, and runs the usual remote setup before saving. Connection-option flags cannot be combined with `--from-config`; `--label`, `--remote-session`, `--group`, `--tag`, and `--color` still apply.
+
 ## Switch between machines
 
 Choose a machine or one of its workspaces in the sidebar. The selected machine receives your pane input and terminal size, and supplies the visible terminal content and graphics. Other connected machines keep updating their workspace information, agent states, and notifications without streaming their pane screens.
+
+Machines with a `group` in their profile are listed under that group in the sidebar; ungrouped machines keep their saved order. Each machine row carries a color tag on the left — the profile's `color` when set, otherwise a stable color derived from its label. In the compact (collapsed) sidebar the row is four cells wide, so the tag moves onto the machine's first letter, which takes the same color.
 
 Click the arrow beside any machine to collapse or expand its workspace list without switching away from your current workspace. This also works while that machine is reconnecting.
 
@@ -52,6 +104,8 @@ When highlighting a workspace on another machine, press Enter before using other
 Local opens immediately on startup without waiting for SSH connections. A stalled machine cannot hold up another machine's input. Multiple Herdr clients can also view different tabs on the same server independently; see [Client and server](/docs/concepts/#client-and-server) for shared-tab sizing.
 
 When a connection is lost, the last workspace and agent state remains visible but dimmed. That is cached information, not live state. Input and navigation into those cached panes stay disabled until a fresh connection and matching screen arrive. Reconnecting never takes selection away from the machine you are using.
+
+This lockout is deliberate. While the link is down the client cannot verify the session's state, so typed input could land in the wrong context — a shell that has moved on, a different prompt, an agent mid-task. Disabling pane input and dimming the cached screen makes that boundary explicit instead of letting keystrokes drift into an uncertain session. Nothing is lost on the other side: the remote Herdr server keeps the session, its agents, and its pane processes intact while the link is down, and the workspace resumes as it was once a fresh connection arrives. If you do not want to wait for the automatic backoff, the reconnect banner on the affected machine offers two actions: **retry now** runs an immediate attempt, and **give up** disables the machine (re-enable it from the machines page).
 
 ## Rename, disable, or remove
 
@@ -69,17 +123,113 @@ For scripts, add `--json` to `machine list`.
 
 Renaming changes the displayed label without reconnecting. Disabling keeps the profile for later; removing forgets it. Both disconnect only that machine from the client and leave its remote sessions and agents running, even if the host is unreachable.
 
+The same operations are available in the UI. Open the machines page from the global menu or with `prefix+m` to see every saved machine with its live status, target, group, and server version. Press Enter for the detail card, which lists the full profile (including all connection fields), the machine's port forward rules with their live status, and, after a failed connection, a structured failure reason with the suggested next step and a review entry when the failure has an in-UI recovery (see [Connection problems](#connection-problems)). From the list or the card you can rename, edit the profile (group, tags, color, session, and the connection fields), enable or disable, remove after a confirmation, and trigger an immediate reconnect. Right-clicking a machine in the sidebar offers the same actions plus a "copy fix command" entry that puts the machine's standalone setup command on the clipboard. Editing a machine's session or connection fields reconnects only that machine. The list also offers **import** (`i`, the import button, or the command palette's "import machines from SSH config"), which opens the same SSH config import as `machine import` as a three-step wizard, and the card's **forwards** entry (`f`) manages port forward rules with their live status.
+
 Removing or disabling the machine you are viewing returns you to Local. If Local is unavailable, Herdr shows that and retries its connection instead of selecting a different remote machine. With enabled saved machines, the client can remain usable even if Local fails or restarts.
+
+## Scene snapshots
+
+A scene snapshot captures the current working scene so you can restore it later with one action: the enabled machine set, the active machine with its workspace and tab (recorded per machine where the client has a cached view), and the sidebar chrome (width, collapsed state, and collapsed groups). Open the snapshots page from the command palette ("save scene…" / "restore scene") and press `s` to save the current scene under a name with an optional note. Up to 32 scenes are kept in a versioned `scene-snapshots.json` next to the endpoint catalog.
+
+Restoring a scene enables the machines it recorded and — while the "disable machines outside the scene" toggle is on (`x`) — disables every other machine, exactly as if you toggled them on the machines page; the catalog watcher then connects and retires them. The recorded active machine and its workspace become the selection when they are online, and online background machines get their recorded workspace focused as well. A machine the snapshot names but the catalog no longer has does not fail the restore; it is skipped and listed in the result toast. Scenes can be renamed and deleted from the same page.
+
+## Port forwarding
+
+A saved machine can carry SSH port forward rules that start with its connection and restart when it reconnects. Manage the rules through the CLI, or in the UI from the machine's detail card (`f` or the **forwards** button): the card lists the rules with their live status, and the rules page adds and removes them. Running clients pick up rule changes within about a second without reconnecting:
+
+```bash
+herdr machine forward list <profile-id>
+herdr machine forward add <profile-id> --kind local --listen-port 8080 --target-host 127.0.0.1 --target-port 80
+herdr machine forward add <profile-id> --kind remote --listen-port 9000 --target-host 127.0.0.1 --target-port 3000
+herdr machine forward add <profile-id> --kind dynamic --listen-port 1080
+herdr machine forward remove <profile-id> <rule-number>
+```
+
+The three kinds match `ssh -L`, `-R`, and `-D`:
+
+- `local` listens on this machine (default bind `localhost`; override with `--bind-address`) and forwards through the SSH machine to `--target-host:--target-port`.
+- `remote` listens on the SSH machine and forwards back to the target, which is reached from this machine.
+- `dynamic` opens a local SOCKS proxy through the SSH machine and has no fixed target.
+
+Each rule runs as its own non-interactive `ssh -N` child process over the same generated SSH config as the connection itself, so your `~/.ssh/config` still wins per option and forwarding never prompts. A rule that cannot start — for example because the local listen port is already taken — fails only that rule; the reason is recorded with it, shown next to the rule on the machine's detail card and rules page, and the connection and other rules are unaffected. A machine accepts up to 16 rules.
+
+## Remote files
+
+Every saved machine also exposes its filesystem through the same managed SSH channel, using the OpenSSH `sftp` client in batch mode. This is meant for small files — configs, scripts, notes — not bulk transfer:
+
+```bash
+herdr machine fs build ls /srv/app
+herdr machine fs build stat /srv/app/config.toml
+herdr machine fs build cat /srv/app/config.toml
+herdr machine fs build get /srv/app/config.toml ./config.toml
+herdr machine fs build put ./notes.txt /srv/app/notes.txt
+herdr machine fs build mkdir /srv/app/logs --parents
+herdr machine fs build mv /srv/app/notes.txt /srv/app/notes-old.txt
+herdr machine fs build rm /srv/app/notes-old.txt
+herdr machine fs build rm /srv/app/old-logs --recursive
+```
+
+The profile selector accepts a label or profile id, exactly like the global `--machine` prefix. Operations reuse the profile's generated SSH config, connection multiplexing, and non-interactive option family, so your `~/.ssh/config` keeps winning per option and nothing ever prompts. Remote paths are resolved by the sftp server relative to the login directory (`~` is not expanded); paths that start with `-` are rejected so they cannot be read as flags, and paths containing `\` or `"` are rejected because batch quoting for them is inconsistent across OpenSSH versions. `ls` and `stat` accept `--json`.
+
+Transfers are capped at 1 MiB per file. `get` writes the local file atomically with `0600` permissions and never replaces through a symlink; `put` uploads to a sibling temporary name and renames it over the target atomically, restoring the previous permission bits when the target already existed. `mkdir --parents` creates intermediate directories; `rm` on a directory requires `--recursive`, never follows symlinks, and refuses the remote root. A changed SSH transport (auth, host key, DNS, timeout) surfaces through the same structured failure kinds as the connection itself, so a broken machine reports Attention in the UI instead of hanging the command.
+
+The same channel drives the in-UI file browser: from a machine's detail card press `o` (or the **files** button) to open it. The browser lists the remote directory with kind, size, and modified time; Enter descends into a directory or opens a file in the read-only viewer (small files up to 1 MiB), Backspace goes up, `r` refreshes, and `/` filters the listing. `d` downloads the selected file to a local path you confirm, `u` uploads a local file into the current directory, `m` creates a directory, `R` renames, and `x` deletes after a confirmation (directories delete recursively). Operations run on background workers and report errors inline, so the UI never blocks on SSH.
+
+## Session logs
+
+A machine profile can mirror its panes into local log files — useful for audit trails or reviewing what an agent did while you were elsewhere:
+
+```bash
+herdr machine log <profile-id> on
+herdr machine log <profile-id> on --path "{machine}/{date}-{pane}.log" --max-bytes 16777216 --interval 30
+herdr machine log <profile-id> show
+herdr machine log <profile-id> dump
+herdr machine log <profile-id> off
+```
+
+The mechanism is snapshot-based, by design. A client-side worker polls the machine's panes through its JSON API bridge on the configured interval (default 30 seconds) and appends a snapshot whenever a pane's revision changes — a separator line with the UTC timestamp, machine, pane, and revision, followed by up to 200 lines of the pane's recent text. This is not a continuous byte stream: rapid output between two polls is represented by its latest state, like a periodic `pane read`. The worker keeps its own bridge, so logging does not depend on which machine you are viewing, and it restarts with the machine's connection lifecycle.
+
+Paths come from a template with `{date}` (UTC day), `{machine}` (label slug), `{machine-id}`, `{pane}`, and `{session}` variables; relative templates resolve under `<state dir>/session-logs/`. The default is `{machine}/{date}-{pane}.log`. Files are created with private permissions and rotate to `<file>.1` at the size cap (default 16 MiB). All writes go through a single background queue — a slow disk or a flooding pane never blocks the client; snapshots that would overflow the queue are dropped and counted rather than back-pressuring the UI. Toggling logging edits only the profile's `session_log` field, so it never reconnects the machine. `dump` runs exactly one snapshot cycle immediately and reports how many snapshots were appended, which is the fastest way to verify a template.
+
+The same preferences are editable in the UI: the machines page edit form ends with the session log fields — an on/off/default choice plus the path template, size cap, and interval (empty keeps the defaults). Leaving the choice at **default** preserves the saved value untouched, so editing other fields never drops an existing configuration. The machine's detail card shows the effective template, cap, and interval, and, while logging is on, the writer queue's dropped-snapshot counter when it is non-zero.
+
+## Input broadcast
+
+Broadcasting sends what you type into one pane to a registered set of panes — one per endpoint (Local or a saved machine) — so the same command runs everywhere at once. Because mistyped input would fan out too, the mechanism is gated twice: the set starts empty and disabled, and nothing is sent until the set is non-empty and explicitly enabled.
+
+Manage the set in the UI from the machines page (`b` on the list or the detail card, or the command palette's "broadcast input…"): `g` toggles broadcasting on and off, `a` walks through picking a machine and then one of its online panes, `x` removes the selected target, and `c` clears the set. The set persists in `broadcast.json` next to the endpoint catalog and is shared with the CLI (`herdr broadcast status/enable/disable/add/remove/clear/send`; see [CLI reference](/docs/cli-reference/#input-broadcast)).
+
+While broadcasting is live, the mode bar carries a permanent `⇄ BROADCAST ×N` badge — even in plain terminal mode — so you never type into a fan-out unknowingly. Typed text and key presses go to every registered pane through the per-endpoint API channels; the pane you are typing into is excluded (it already has the input), pastes keep the target's own bracketed-paste handling, and mouse input is never broadcast. A target that rejects input reports once in a toast and re-arms after the next success; offline targets are skipped. Turn it off from the same overlay (`g` again) or with `herdr broadcast disable`.
+
+## Inspect and run one-off commands
+
+Two CLI commands cover quick checks without opening the UI:
+
+```bash
+herdr machine status "Build machine" [--json]
+herdr machine exec "Build machine" -- systemctl --user status herdr
+```
+
+`machine status` resolves a label or profile id (disabled machines included) and reports the profile, a live connection probe with its structured failure kind when the machine is unreachable, the remote server version and protocol compatibility when online, the saved port forward rules, and the session-log preferences. `machine exec` runs a single remote command over the same managed SSH channel as the file operations: stdio passes through to your terminal and the remote exit status becomes the command's, with no prompting and no timeout. Everything after the `--` separator is the remote command verbatim.
+
+## Why not mosh
+
+mosh is built for interactive terminal sessions: it synchronizes screen state and keystrokes over UDP using its own terminal emulator on the server side. Herdr's remote transport is something else entirely — an SSH stdio pipe that carries Herdr's binary wire protocol (length-prefixed structured messages: requests, responses, events, and frames) between the client and a resident remote Herdr server. mosh cannot carry that: it offers no general byte-stream channel, only screen synchronization, and its server component only starts terminal sessions.
+
+More importantly, the resilience mosh provides is already built into Herdr at a different layer. A remote Herdr server owns the session state — panes, agents, workspaces — and keeps running when the network drops. The client supervisor detects a broken transport (application-level health checks, not just TCP), reconnects with backoff, and reuses SSH connection multiplexing so reconnects are cheap; wake-from-sleep and network changes are just another reconnect. Nothing about the session depends on the transport staying up, which is exactly the property mosh adds to a plain shell. Adding UDP-based mosh underneath would instead weaken the model: it requires a `mosh-server` binary on the host and open UDP, neither of which SSH-only environments provide. The transport therefore stays plain SSH everywhere, including for the JSON API channel used by remote automation.
 
 ## Connection problems
 
-- **Reconnecting:** Herdr retries automatically after a network interruption, sleep, or SSH failure. Repeated failures increase the delay up to two minutes; brief successful connections do not reset it. A connection must remain healthy for a minute before the next interruption gets a fast retry. SSH connections are checked for application-level activity and probed when quiet, so a broken connection does not stay Online indefinitely. Local detects native connection closure or failure instead of using remote health probes.
-- **Attention:** The target needs an action that cannot be completed in the background, such as host-key approval, authentication, or a compatible server. Other machines remain usable.
+- **Reconnecting:** Herdr retries automatically after a network interruption, sleep, or SSH failure. Repeated failures increase the delay up to two minutes; brief successful connections do not reset it. A connection must remain healthy for a minute before the next interruption gets a fast retry. The banner on the affected machine shows the reconnect attempt count and the estimated next attempt, with clickable actions: **retry now** schedules an immediate attempt, and **give up** disables the machine (re-enable it from the machines page). SSH connections are checked for application-level activity and probed when quiet, so a broken connection does not stay Online indefinitely. Local detects native connection closure or failure instead of using remote health probes.
+- **Attention:** The target needs an action that cannot be completed in the background, such as host-key approval, authentication, or a compatible server. Other machines remain usable. The attention marker stays on the machine's sidebar row; clicking it opens that machine's detail card with a structured failure reason (DNS, timeout, unknown or changed host key, authentication, remote install, protocol), the suggested next step, the standalone fix command, and a reconnect action. Failures that have an in-UI recovery path also show a **review** button:
+  - *Unknown host key* opens a trust-on-first-use dialog showing the host, key type, and SHA256 fingerprint (scanned first when the failure did not capture one). Compare the fingerprint out of band, then choose **trust & remember** (records the key into `known_hosts` and reconnects), **this time only** (reconnects once with a process-local `accept-new` override that is never written to the catalog), or **abort**.
+  - *Changed host key* opens a hard-blocking dialog that separates the reimage case from a possible man-in-the-middle. Only after your out-of-band verification, **remove old key & retry** forgets the recorded key with `ssh-keygen -R` and reconnects, which then surfaces the new key through the unknown-key dialog.
+  - *Authentication required* opens a guide listing the server-offered methods and the configured identity file. Approving **interactive auth** runs one interactive attempt through Herdr's in-memory askpass channel: SSH password and passphrase prompts surface as masked TUI input dialogs, answers travel only to the prompt responder and are never logged, stored, or persisted. A passphrase prompt also reminds you that `ssh-add` loads the key into the agent for future non-interactive connections. Alternatives on the same dialog pre-collect the host key or copy the standalone fix command. The wizard's failed setup offers the same interactive-auth and host-key review entries.
 - **Saved-machine file error:** An unreadable or invalid catalog leaves current connections unchanged. Herdr shows a notice and automatically retries reading it.
 
 When both installations support bridge idle cleanup, saved-machine connections to Linux and macOS also close their remote bridge after a minute without traffic in either direction. Sleep counts toward that deadline, which is checked when the host wakes. Quiet healthy connections exchange health checks; watching continuous output does not require typing. Cleanup leaves the remote Herdr server, sessions, and pane processes running. Older installations remain compatible without this optional cleanup.
 
-Background connections never answer prompts or install, update, restart, or hand off a server. For Attention, run the standalone setup command shown by Herdr in an interactive terminal, for example:
+Background connections never answer prompts or install, update, restart, or hand off a server. Interactive SSH authentication only ever runs after an explicit in-UI approval; the default path stays fully non-interactive and fails fast instead of prompting. For anything the in-UI recovery does not cover, run the standalone setup command shown by Herdr in an interactive terminal, for example:
 
 ```bash
 herdr --remote workbox
@@ -99,7 +249,7 @@ Workspace, tab, pane IDs, and agent names are scoped to one server. Two machines
 
 ## Updates and saved data
 
-Saved profiles contain only an opaque ID, label, SSH target, explicit remote session, and enabled state. Herdr does not store passwords, private keys, agent tickets, or SSH control sockets in the catalog. Authentication stays with OpenSSH.
+Saved profiles contain an opaque ID, label, SSH target, explicit remote session, and enabled state, plus any optional organization metadata (group, tags, color), SSH connection options (port, user, identity files, proxy jumps, and similar) set at `machine add` time, port forward rules, and session-log preferences. Herdr does not store passwords, private keys, agent tickets, or SSH control sockets in the catalog. Authentication stays with OpenSSH. The catalog file is versioned; this release upgrades it from version 1 to version 2 automatically on first load, and older Herdr versions cannot read a version 2 catalog.
 
 The client and server negotiate compatibility rather than requiring identical versions. Saved-machine connections additionally need the server's `surface_interest` and `health_check` capabilities. Older servers without those capabilities show Attention until explicitly updated, even if a standalone attach works. Other missing server methods disable only their corresponding actions.
 

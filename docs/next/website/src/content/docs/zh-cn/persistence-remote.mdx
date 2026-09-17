@@ -37,7 +37,7 @@ herdr session delete side-project --json
 
 ## 已保存的 SSH 机器
 
-要在一个 Herdr 窗口中使用 Local 和多台 SSH 机器，请参阅[连接机器](/zh-cn/docs/connecting-machines/)。该指南涵盖设置、切换、重连、配置和远程自动化。移除已保存的机器只会断开客户端，不会停止远程会话。
+要在一个 Herdr 窗口中使用 Local 和多台 SSH 机器，请参阅[连接机器](/zh-cn/docs/connecting-machines/)。该指南涵盖设置、切换、重连、配置和远程自动化。移除已保存的机器只会断开客户端，不会停止远程会话。传输在任何场景下都保持纯 SSH——包括不稳定的网络：常驻的远程 server 持有会话状态，客户端带退避自动重连，这正是 Herdr 不使用 mosh 的原因（见[连接机器](/zh-cn/docs/connecting-machines/)的「为什么不用 mosh」一节）。
 
 ## 通过 SSH 远程连接
 
@@ -79,6 +79,8 @@ herdr --remote workbox
 ```
 
 认证失败时，先通过 `ssh workbox` 确认普通 SSH 连接正常。
+
+在 TUI 中，由主机密钥或认证导致的 Attention 失败可以在机器详情卡里使用引导式恢复（见[连接机器 — 连接问题](/zh-cn/docs/connecting-machines/)）：先展示 SHA256 指纹再记录的首次信任确认、针对密钥变更的强阻断对话框，以及显式批准的交互认证路径。批准交互后，SSH 提示会经 Herdr 自带的 askpass 助手（由 `HERDR_SSH_ASKPASS_SOCKET` 环境变量标记的重启动 `herdr` 进程）路由到掩码输入框；回答只存在于进程内存中，绝不记录或持久化。未经批准时，所有连接保持完全非交互，与之前完全一致。
 
 仅有版本差异不会替换或重启运行中的远程服务器。缺少必要兼容性或独立后台运行支持的服务器，会在停止前询问。已保存机器还需要画面传输和健康探测能力，详见[连接机器](/zh-cn/docs/connecting-machines/)。默认回答为 No；停止服务器会结束窗格进程。进行这次一次性升级时，可对受支持的服务器加上 `--handoff`，通过实验性实时交接保留窗格进程：
 

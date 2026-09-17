@@ -142,7 +142,7 @@ navigate_pane_down = "ctrl+j"
 split_horizontal = "prefix+minus"
 ```
 
-The default keymap is prefix-first so Herdr does not steal input from shells, editors, tmux, or terminal apps. Search `keys.` in the [Config reference](/docs/config-reference/) to see every action and default binding. The in-app help panel at `prefix+?` shows the active bindings.
+The default keymap is prefix-first so Herdr does not steal input from shells, editors, tmux, or terminal apps. Search `keys.` in the [Config reference](/docs/config-reference/) to see every action and default binding. The in-app help panel at `prefix+?` shows the active bindings. While prefix mode is active, a which-key popup lists the available prefix bindings (disable with `ui.which_key = false`). `prefix+u` enters link hints mode: URLs visible in the pane viewport get two-letter markers, and typing a marker opens the link.
 
 A binding may also be an array when one action needs multiple shortcuts:
 
@@ -296,11 +296,29 @@ text = "#cdd6f4"
 
 The active palette is applied in this order: built-in theme, `[theme.custom]`, then `[theme.custom.light]` or `[theme.custom.dark]`. Omitting the mode subtables preserves the existing shared override behavior.
 
+Component-level tokens fine-tune individual UI elements on top of the resolved palette without replacing the semantic tokens they fall back to:
+
+```toml
+[theme.components]
+pane_border_focused = "#89b4fa"
+scrollbar_thumb = "#7f849c"
+toast_border_error = "#f38ba8"
+selection_mix_ratio = 0.35
+```
+
+Unset fields keep their semantic fallback: pane borders use `accent`/`overlay0`, the scrollbar thumb uses `overlay1` (focused) or `overlay0`, the scrollbar track uses `overlay0` (focused) or `surface_dim`, toast borders use `green`/`blue`/`red`, and the mode bar uses `accent`. `selection_mix_ratio` (0.0–1.0, default 0.28) controls how strongly the selection background mixes the host background toward white or black. Selected text keeps its bold, italic, and underline styling; only the cell colors change. Search `theme.components` in the [Config reference](/docs/config-reference/) for the full list.
+
 ## UI and sidebar
 
 The sidebar is the main Herdr dashboard. Search `ui.` in the [Config reference](/docs/config-reference/) for sizing, collapsed mode, Agent panel ordering, mouse behavior, pane borders, and other presentation settings.
 
 `ui.pane_borders` accepts `"auto"` (the default, borders only for split panes), `"always"` (also frame a single pane), or `"off"`. A single-pane frame requires `ui.pane_outer_borders = true`, because all its edges are outer edges. Existing boolean values remain valid: `true` means `"auto"` and `false` means `"off"`.
+
+`ui.border_style` switches the pane border glyphs between `"single"` (the default), `"rounded"`, `"double"`, and `"thick"`.
+
+`ui.color_depth` controls the color depth of Herdr's own UI colors: `"auto"` (the default) follows the host terminal — a `256color` TERM without truecolor evidence, common over SSH or tmux, automatically maps theme RGB colors to the nearest xterm-256 palette entry. Use `"truecolor"` to force 24-bit output or `"256"` to force the downgrade.
+
+Mouse interaction timings are tunable: `ui.double_click_ms` (default `350`) is the window in which repeated pane clicks become double-click word selection or triple-click line selection, `ui.drag_throttle_ms` (default `33`) throttles pane scrollbar and split divider drag updates, and `ui.selection_autoscroll_interval_ms` / `ui.selection_autoscroll_min_lines` / `ui.selection_autoscroll_max_lines` (defaults `30` / `3` / `15`) control selection auto-scroll while dragging past a pane edge.
 
 Set `tab_bar_position = "bottom"` under `[ui]` to place the desktop tab row below the terminal panes. Prefix, Navigate, Copy, and Resize mode bars temporarily replace the bottom tab row while active. The default is `"top"`.
 

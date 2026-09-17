@@ -406,6 +406,60 @@
           "type": "color",
           "default": "unset",
           "description": "Override the peach color token when auto_switch selects a dark appearance. Applied after theme.custom. Accepts hex, named colors, rgb(r,g,b), or reset aliases."
+        },
+        {
+          "key": "theme.components.pane_border_focused",
+          "type": "color",
+          "default": "unset",
+          "description": "Border color of the focused pane. Falls back to the accent token. Accepts hex, named colors, rgb(r,g,b), or reset aliases."
+        },
+        {
+          "key": "theme.components.pane_border_unfocused",
+          "type": "color",
+          "default": "unset",
+          "description": "Border color of unfocused panes. Falls back to the overlay0 token. Accepts hex, named colors, rgb(r,g,b), or reset aliases."
+        },
+        {
+          "key": "theme.components.scrollbar_thumb",
+          "type": "color",
+          "default": "unset",
+          "description": "Scrollbar thumb color for both focus states. Falls back to overlay1 when the pane is focused and overlay0 otherwise. Accepts hex, named colors, rgb(r,g,b), or reset aliases."
+        },
+        {
+          "key": "theme.components.scrollbar_track",
+          "type": "color",
+          "default": "unset",
+          "description": "Scrollbar track color for both focus states. Falls back to overlay0 when the pane is focused and surface_dim otherwise. Accepts hex, named colors, rgb(r,g,b), or reset aliases."
+        },
+        {
+          "key": "theme.components.mode_bar_accent",
+          "type": "color",
+          "default": "unset",
+          "description": "Mode bar accent color. Falls back to the accent token. Accepts hex, named colors, rgb(r,g,b), or reset aliases."
+        },
+        {
+          "key": "theme.components.toast_border_success",
+          "type": "color",
+          "default": "unset",
+          "description": "Success toast border color. Falls back to the green token. Accepts hex, named colors, rgb(r,g,b), or reset aliases."
+        },
+        {
+          "key": "theme.components.toast_border_info",
+          "type": "color",
+          "default": "unset",
+          "description": "Info toast border color. Falls back to the blue token. Accepts hex, named colors, rgb(r,g,b), or reset aliases."
+        },
+        {
+          "key": "theme.components.toast_border_error",
+          "type": "color",
+          "default": "unset",
+          "description": "Error toast border color. Falls back to the red token. Accepts hex, named colors, rgb(r,g,b), or reset aliases."
+        },
+        {
+          "key": "theme.components.selection_mix_ratio",
+          "type": "number",
+          "default": "0.28",
+          "description": "Selection background mix ratio toward white/black, between 0.0 and 1.0. Raise for a stronger highlight, lower for a subtler one. Out-of-range values fall back to the default."
         }
       ]
     },
@@ -499,6 +553,12 @@
           "type": "keybinding",
           "default": "\"prefix+s\"",
           "description": "Open settings."
+        },
+        {
+          "key": "keys.manage_machines",
+          "type": "keybinding",
+          "default": "\"prefix+m\"",
+          "description": "Open the machines overlay."
         },
         {
           "key": "keys.new_workspace",
@@ -601,6 +661,12 @@
           "type": "keybinding",
           "default": "\"prefix+o\"",
           "description": "Focus the currently visible notification target."
+        },
+        {
+          "key": "keys.link_hints",
+          "type": "keybinding",
+          "default": "\"prefix+u\"",
+          "description": "Enter link hints mode: visible pane URLs get two-letter markers; typing a marker opens the link."
         },
         {
           "key": "keys.previous_workspace",
@@ -942,10 +1008,70 @@
           "description": "Lines to scroll per mouse wheel notch."
         },
         {
+          "key": "ui.which_key",
+          "type": "boolean",
+          "default": "true",
+          "description": "Show the which-key popup of available bindings while prefix mode is active."
+        },
+        {
+          "key": "ui.double_click_ms",
+          "type": "integer",
+          "default": "350",
+          "description": "Time window in milliseconds within which repeated pane clicks count as double/triple clicks."
+        },
+        {
+          "key": "ui.drag_throttle_ms",
+          "type": "integer",
+          "default": "33",
+          "description": "Minimum milliseconds between drag updates forwarded to the endpoint (pane scrollbar, split divider)."
+        },
+        {
+          "key": "ui.selection_autoscroll_interval_ms",
+          "type": "integer",
+          "default": "30",
+          "description": "Milliseconds between selection auto-scroll steps while dragging past a pane edge."
+        },
+        {
+          "key": "ui.selection_autoscroll_min_lines",
+          "type": "integer",
+          "default": "3",
+          "description": "Lines scrolled per auto-scroll step at the pane edge (also the multiplier per row beyond the edge)."
+        },
+        {
+          "key": "ui.selection_autoscroll_max_lines",
+          "type": "integer",
+          "default": "15",
+          "description": "Maximum lines scrolled per auto-scroll step far past the pane edge."
+        },
+        {
           "key": "ui.confirm_close",
           "type": "boolean",
           "default": "true",
           "description": "Ask for confirmation before closing a workspace."
+        },
+        {
+          "key": "ui.hover_effects",
+          "type": "boolean",
+          "default": "true",
+          "description": "Highlight interactive chrome (sidebar rows, buttons) under the mouse pointer."
+        },
+        {
+          "key": "ui.spinner",
+          "type": "boolean",
+          "default": "true",
+          "description": "Show spinner glyphs while work is in progress (connecting machines, remote setups). When disabled, a static glyph is shown and the animation clock stops."
+        },
+        {
+          "key": "ui.animations",
+          "type": "boolean",
+          "default": "true",
+          "description": "Animate spinner frames and overlay/toast entrance fades. Set false for a fully static UI."
+        },
+        {
+          "key": "ui.visual_bell",
+          "type": "boolean",
+          "default": "true",
+          "description": "Briefly highlight pane borders when a pane terminal rings the bell."
         },
         {
           "key": "ui.prompt_new_tab_name",
@@ -987,6 +1113,29 @@
           "type": "boolean",
           "default": "true",
           "description": "Keep split panes visually separated instead of sharing divider borders."
+        },
+        {
+          "key": "ui.border_style",
+          "type": "enum",
+          "default": "\"single\"",
+          "description": "Pane border glyph style. Applies to borders Herdr draws around split panes.",
+          "values": [
+            "single",
+            "rounded",
+            "double",
+            "thick"
+          ]
+        },
+        {
+          "key": "ui.color_depth",
+          "type": "enum",
+          "default": "\"auto\"",
+          "description": "Output color depth for Herdr's own UI colors. auto detects the host terminal capability from COLORTERM/TERM: a 256color TERM without truecolor evidence (common over SSH/tmux) downgrades theme RGB colors to the nearest xterm-256 palette entry. truecolor forces 24-bit output; 256 forces the downgrade.",
+          "values": [
+            "auto",
+            "truecolor",
+            "256"
+          ]
         },
         {
           "key": "ui.show_agent_labels_on_pane_borders",

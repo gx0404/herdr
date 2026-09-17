@@ -52,17 +52,31 @@ with the installed binary. Use `--json` for the full JSON Schema document, or
 ```bash
 herdr machine list
 herdr machine add workbox --label "Build machine"
+herdr machine add --from-config workbox
+herdr machine import [--file PATH] [--host PATTERN]... [--yes] [--group NAME] [--include-wildcards]
 herdr machine rename <profile-id> --label "New name"
 herdr machine disable <profile-id>
 herdr machine enable <profile-id>
 herdr machine remove <profile-id>
+herdr machine status <profile> [--json]
+herdr machine exec <profile> -- <command> [args...]
 ```
 
-By default, `machine add` uses the remote default session. Add `--remote-session <name>` only for a named session. `machine list` accepts optional `--json` for scripts. See [Connecting machines](/docs/connecting-machines/) for the full setup and connection guide.
+By default, `machine add` uses the remote default session. Add `--remote-session <name>` only for a named session. `machine list` accepts optional `--json` for scripts. Every `machine add` flag is described in `herdr machine add --help`. See [Connecting machines](/docs/connecting-machines/) for the full setup and connection guide. Machines can also be added and managed inside the UI: open the machines page from the global menu or with `prefix+m` for the list, detail cards, the add wizard, rename and edit forms, enable/disable, removal, and immediate reconnect.
+
+`machine status` reports one machine in a single view: the profile fields, a live connection probe through the machine's SSH API bridge (`online`, `disabled`, or `unreachable` with the structured failure kind and message), the remote server version and protocol compatibility when the probe succeeds, the saved port forward rules, and the session-log preferences. The selector accepts a label or profile id, including disabled machines.
+
+`machine exec` runs one remote command over the same managed ssh channel as `machine fs`: the profile selector must be an enabled machine, everything after `--` is passed verbatim, stdin/stdout/stderr stream through to your terminal, and the exit status is the remote command's (255 on a transport failure). There is no timeout and nothing ever prompts.
+
+`machine add` also accepts optional per-machine SSH settings: `--port`, `--user`, `--identity-file` (repeatable), `--identities-only`, `--identity-agent`, `--strict-host-key-checking ask|accept-new|yes`, `--proxy-jump` (repeatable; a target or `profile:<id>` of another saved machine), `--forward-agent`, `--server-alive-interval`, `--server-alive-count-max`, `--control-persist`, and `--remote-command`, plus organization metadata `--group`, `--tag` (repeatable), and `--color` (hex or named color). Connection settings are applied through Herdr's generated SSH config below your own `~/.ssh/config`, so a value you set in your SSH config still wins; a profile only fills in what you have not configured. `--remote-command` replaces the command SSH runs, so it is incompatible with Herdr's bridge startup and intended for profiles used with direct `ssh`-style access.
 
 `machine add` checks the remote installation's capabilities, installs or updates with approval only when needed, and starts the requested session's background server before saving. Compatible release versions do not need to match. Run setup in an interactive terminal when installation or restart approval is required; failed or cancelled setup does not save a profile. Replacing a running server requires explicit approval with a default answer of No, and stops its pane processes. `machine add` never enables experimental handoff implicitly.
 
-Changes apply automatically to open local Herdr clients, normally within a second. Added or enabled machines connect in the background; renaming does not reconnect. Removing or disabling disconnects only that machine and leaves its remote sessions running. Removing the machine you are viewing returns to Local, or shows Local as unavailable until it reconnects. Each profile stores an opaque ID, label, SSH target, explicit remote session, and enabled state in client state. Herdr does not store passwords, private keys, or other SSH credentials.
+`machine add --from-config <host>` resolves a host alias in your SSH config (default `~/.ssh/config`) and registers it with the full directives found there — hostname, user, port, identity files, proxy jumps, keepalives, and the rest — before running the same remote setup as a normal `machine add`. It cannot be combined with the connection-option flags; `--label` (defaults to the alias), `--remote-session`, `--group`, `--tag`, and `--color` still apply.
+
+`machine import` registers every `Host` from your SSH config in one batch. Without `--yes` it lists the detected hosts and asks which to import, so it needs an interactive terminal; scripts pass `--yes` to import everything. `--host` limits the batch to matching aliases or `*`/`?` patterns, `--group` assigns one group to all imported machines, and wildcard hosts such as `*.internal` are skipped unless `--include-wildcards` is given. A `ProxyJump` hop naming another imported host becomes a `profile:<id>` reference. Hosts duplicating a saved machine's label or target are skipped and reported per host, so re-running is safe. Import reads the SSH config (including `Include`d files) with OpenSSH first-value-wins semantics and never modifies it; unlike `machine add` it does not install or update remote servers, so machines that still need setup show Attention with their standalone fix command. See [Connecting machines](/docs/connecting-machines/#import-machines-from-your-ssh-config) for the full semantics.
+
+Changes apply automatically to open local Herdr clients, normally within a second. Added or enabled machines connect in the background; renaming does not reconnect. Removing or disabling disconnects only that machine and leaves its remote sessions running. Removing the machine you are viewing returns to Local, or shows Local as unavailable until it reconnects. Each profile stores an opaque ID, label, SSH target, explicit remote session, enabled state, and any optional organization and connection fields listed above in client state. Herdr does not store passwords, private keys, or other SSH credentials.
 
 Automatic connections and reconnects are non-interactive. If a host key, password, key passphrase, MFA step, install, update, or restart needs approval, the machine shows Attention instead of opening a hidden prompt. Run the standalone command printed by Herdr, such as `herdr --remote workbox`, to complete that setup in the foreground, then restart the client. Include `--session <name>` only when the profile targets a named session.
 
@@ -82,6 +96,75 @@ Supported commands are `workspace`, `worktree`, `tab`, `pane`, `notification`, `
 Requests and responses travel through the JSON API over non-interactive SSH; API payloads are not interpolated into the SSH shell command. No open TUI is required, and the bridge never installs, starts, or restarts a server. Update the local CLI and remote Herdr installation to support machine forwarding, and keep the running remote server's API protocol compatible. Authentication, unavailable machines, and incompatible versions fail without falling back to Local. Requests are not automatically retried after connection failure.
 
 Local pane IDs are not inherited by remote commands. Use explicit remote IDs; `--current` cannot refer to the caller's local pane. Remote worktree paths must be absolute, `~`, or start with `~/` (expanded on the server); plugin link paths must be absolute. The prefix targets one machine at a time; combined listings and routing through another TUI's connections are not included.
+
+Saved machines can also carry SSH port forward rules that start with the connection and restart on reconnect:
+
+```bash
+herdr machine forward list <profile-id> [--json]
+herdr machine forward add <profile-id> --kind local|remote|dynamic --listen-port N [--bind-address ADDR] [--target-host HOST] [--target-port N]
+herdr machine forward remove <profile-id> <rule-number>
+```
+
+`local` (`ssh -L`) listens locally and forwards to `--target-host:--target-port` through the machine, `remote` (`ssh -R`) listens on the machine and forwards back, and `dynamic` (`ssh -D`) opens a local SOCKS proxy with no target. Rules run as non-interactive `ssh -N` children over the same generated SSH config as the connection, and open clients apply rule edits live without reconnecting. See [Connecting machines](/docs/connecting-machines/#port-forwarding) for details.
+
+Saved machines expose their filesystem over the same managed SSH channel (`sftp` batch mode):
+
+```bash
+herdr machine fs <profile> ls <path> [--json]
+herdr machine fs <profile> stat <path> [--json]
+herdr machine fs <profile> cat <path>
+herdr machine fs <profile> get <remote-path> <local-path>
+herdr machine fs <profile> put <local-path> <remote-path>
+herdr machine fs <profile> mkdir <path> [--parents]
+herdr machine fs <profile> mv <from> <to>
+herdr machine fs <profile> rm <path> [--recursive]
+```
+
+`<profile>` is a saved machine label or profile id with the same resolution rules as `--machine`. Remote paths resolve against the sftp server's login directory (`~` is not expanded), must not start with `-`, and must not contain `\` or `"`. Transfers are capped at 1 MiB per file; `get` writes atomically with `0600` permissions, `put` uploads then renames over the target atomically and restores previous permission bits. `rm` on a directory requires `--recursive` and never follows symlinks. See [Connecting machines](/docs/connecting-machines/#remote-files).
+
+Session logging mirrors a machine's panes into local files on a snapshot interval:
+
+```bash
+herdr machine log <profile-id> show [--json]
+herdr machine log <profile-id> on [--path TEMPLATE] [--max-bytes N] [--interval SECS]
+herdr machine log <profile-id> off
+herdr machine log <profile-id> dump
+```
+
+The path template supports `{date}`, `{machine}`, `{machine-id}`, `{pane}`, and `{session}`; relative templates resolve under `<state dir>/session-logs/` (default `{machine}/{date}-{pane}.log`). Files rotate to `<file>.1` at `--max-bytes` (default 16 MiB) and are appended through a background queue that never blocks the client. Snapshots capture up to 200 lines of recent pane text whenever the pane revision changes — a periodic view, not a continuous byte stream. `dump` runs one cycle immediately for verification. See [Connecting machines](/docs/connecting-machines/#session-logs).
+
+## Input broadcast
+
+```bash
+herdr broadcast status [--json]
+herdr broadcast enable
+herdr broadcast disable
+herdr broadcast add [--machine <label-or-id>] --pane w1:p1
+herdr broadcast remove <target-number>
+herdr broadcast clear
+herdr broadcast send <text> [--no-enter] [--json]
+```
+
+Broadcasting sends the same input to one registered pane per endpoint (Local or a saved machine). The target set is client-local state (`broadcast.json` next to the endpoint catalog) and is gated twice for safety: it starts empty and disabled, and `send` refuses to run until you `enable` it after reviewing `status`. Each endpoint appears at most once — remove its target before registering a different pane for it.
+
+`send` reuses the existing per-endpoint JSON API channels (`pane.send-input`, pressing Enter unless `--no-enter`; local panes go through the local API socket, machine panes through a saved-machine SSH bridge), sends targets one at a time, and reports per-target outcomes; the exit code is 1 if any target failed. The set persists across restarts, so scripts can prepare it once and drive it repeatedly.
+
+The same set drives the in-UI broadcast: open it from the machines page (`b`) or the command palette's "broadcast input…", toggle with `g`, and add panes from online machines with `a`. While broadcasting is on, the mode bar shows a permanent `⇄ BROADCAST ×N` badge and everything you type into the focused pane fans out to the registered panes (the typed pane itself excluded; mouse input never fans out). See [Connecting machines](/docs/connecting-machines/#input-broadcast).
+
+## Snippets
+
+```bash
+herdr snippet list [--json]
+herdr snippet add --label "Restart api" --command "kubectl -n {{ns}} rollout restart deploy/api" --variable ns
+herdr snippet remove <id-or-label>
+herdr snippet run <id-or-label> --pane w1:p1 [--machine "Build machine" --pane w2:p1]... [--var ns=staging] [--no-enter] [--json]
+```
+
+Snippets are command templates stored in client-local state (a versioned `snippets.json` next to the endpoint catalog); nothing is sent anywhere until you run one. Declare placeholders as `{{name}}` in the command and fill them with `--var name=value` at run time; an unresolved placeholder is an error, and values never contain control characters, so a rendered snippet is always a single line.
+
+`run` sends the rendered command to each target pane through the JSON API — the same mechanism as `herdr pane run` — pressing Enter unless `--no-enter` is given. Without `--machine`, the target pane is on the local server; `--machine <label-or-id>` selects a saved SSH machine with the same resolution rules as the global `--machine` prefix, and `--local` names the local server explicitly. Every target takes its own `--pane`: repeat `--machine`/`--local` + `--pane` pairs to fan one snippet out to several machines at once. Targets are sent one at a time and succeed or fail independently; failures are reported per target and the exit code is 1 if any target failed. The library keeps the last 100 executions (snippet, target, time, outcome) as history.
+
+The same library drives the UI: the command palette's "snippets" and "run snippet…" open the snippets overlay, which manages the library (new/edit/delete) and walks a run through picking the target (the current pane, any pane of an online machine, or the focused pane of each selected machine), filling declared variables, and confirming the rendered command. Runs go out through the connected endpoint sessions — no extra SSH bridge — report per-target outcomes in a toast (a ✓ success summary when every target accepted the snippet), and land in the same history, which the overlay's history page lists.
 
 ## Shell completions
 
