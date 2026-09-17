@@ -30,10 +30,19 @@ pub(crate) fn render_collapsed_sidebar(
     snapshot: &ClientShellSnapshot,
     config: &ClientShellConfig,
     selected_workspace_id: Option<&str>,
+    chrome_hover: Option<&super::feedback::ChromeHover>,
     hits: &mut ShellHitMap,
 ) {
     let palette = &config.palette;
-    render_sidebar_background(buffer, area, palette);
+    render_sidebar_background(
+        buffer,
+        area,
+        palette,
+        matches!(
+            chrome_hover,
+            Some(super::feedback::ChromeHover::SidebarDivider)
+        ),
+    );
     let (workspace_area, divider_y, detail_area) = collapsed_sidebar_sections(area);
     for (index, workspace) in snapshot
         .workspaces
@@ -48,6 +57,13 @@ pub(crate) fn render_collapsed_sidebar(
             1,
         );
         let selected = selected_workspace_id == Some(workspace.workspace_id.as_str());
+        let hovered = matches!(
+            chrome_hover,
+            Some(super::feedback::ChromeHover::WorkspaceRow {
+                endpoint_id,
+                workspace_id,
+            }) if endpoint_id.is_local() && workspace_id == &workspace.workspace_id
+        );
         let selection_background =
             if workspace.focused && palette.selection_bg == ratatui::style::Color::Reset {
                 palette.active_row_bg
@@ -58,6 +74,8 @@ pub(crate) fn render_collapsed_sidebar(
             buffer.set_style(rect, Style::default().bg(selection_background));
         } else if workspace.focused {
             buffer.set_style(rect, Style::default().bg(palette.active_row_bg));
+        } else if hovered {
+            buffer.set_style(rect, Style::default().bg(palette.surface0));
         }
         let number_style = if selected {
             Style::default()
@@ -129,8 +147,14 @@ pub(crate) fn render_collapsed_sidebar(
             detail_content.width,
             1,
         );
+        let hovered = matches!(
+            chrome_hover,
+            Some(super::feedback::ChromeHover::AgentRow(id)) if id == &pane_id
+        );
         if agent.focused {
             buffer.set_style(rect, Style::default().bg(palette.active_row_bg));
+        } else if hovered {
+            buffer.set_style(rect, Style::default().bg(palette.surface0));
         }
         put_text(
             buffer,
@@ -175,7 +199,16 @@ pub(crate) fn render_collapsed_sidebar(
                 .fg(palette.accent)
                 .add_modifier(Modifier::BOLD)
         } else {
-            Style::default().fg(palette.overlay0)
+            Style::default().fg(
+                if matches!(
+                    chrome_hover,
+                    Some(super::feedback::ChromeHover::SidebarToggle)
+                ) {
+                    palette.text
+                } else {
+                    palette.overlay0
+                },
+            )
         },
     );
 }
@@ -189,7 +222,15 @@ pub(crate) fn render_sidebar(
     hits: &mut ShellHitMap,
 ) {
     let palette = &config.palette;
-    render_sidebar_background(buffer, area, palette);
+    render_sidebar_background(
+        buffer,
+        area,
+        palette,
+        matches!(
+            state.chrome_hover,
+            Some(super::feedback::ChromeHover::SidebarDivider)
+        ),
+    );
     hits.sidebar_divider = if area.is_empty() {
         Rect::default()
     } else {
@@ -298,6 +339,13 @@ pub(crate) fn render_sidebar(
             target.matches(state.active_endpoint_id, &workspace.workspace_id)
         });
         let dragged = state.dragged_workspace_id == Some(workspace.workspace_id.as_str());
+        let hovered = matches!(
+            state.chrome_hover,
+            Some(super::feedback::ChromeHover::WorkspaceRow {
+                endpoint_id,
+                workspace_id,
+            }) if endpoint_id.is_local() && workspace_id == &workspace.workspace_id
+        );
         if selected {
             buffer.set_style(rect, Style::default().bg(palette.selection_bg));
         } else if dragged {
@@ -316,6 +364,7 @@ pub(crate) fn render_sidebar(
             true,
             selected,
             dragged,
+            hovered,
             palette,
         );
         let group_toggle = render_parent_group_toggle(
@@ -342,7 +391,11 @@ pub(crate) fn render_sidebar(
     if show_scrollbar {
         let track = Rect::new(body.right().saturating_sub(1), body.y, 1, body.height);
         hits.workspace_scrollbar = track;
-        super::scroll::render_list_scrollbar(buffer, track, metrics, palette);
+        let thumb_hovered = matches!(
+            state.chrome_hover,
+            Some(super::feedback::ChromeHover::WorkspaceScrollbarThumb)
+        );
+        super::scroll::render_list_scrollbar(buffer, track, metrics, palette, thumb_hovered);
     }
 
     if let Some(row) = state.workspace_drop_indicator_row.filter(|row| {
@@ -390,6 +443,10 @@ pub(crate) fn render_sidebar(
             launcher_width,
             1,
         );
+        let launcher_hovered = matches!(
+            state.chrome_hover,
+            Some(super::feedback::ChromeHover::GlobalLauncher)
+        );
         if attention {
             let start_x = workspace_area
                 .right()
@@ -410,7 +467,11 @@ pub(crate) fn render_sidebar(
                 footer_y,
                 menu_width,
                 menu_label,
-                Style::default().fg(palette.overlay0),
+                Style::default().fg(if launcher_hovered {
+                    palette.text
+                } else {
+                    palette.overlay0
+                }),
             );
         } else {
             put_right_text(
@@ -418,7 +479,11 @@ pub(crate) fn render_sidebar(
                 workspace_area,
                 footer_y,
                 menu_label,
-                Style::default().fg(palette.overlay0),
+                Style::default().fg(if launcher_hovered {
+                    palette.text
+                } else {
+                    palette.overlay0
+                }),
             );
         }
     }
@@ -429,6 +494,7 @@ pub(crate) fn render_sidebar(
         snapshot,
         config,
         state.agent_scroll,
+        state.chrome_hover,
         hits,
     );
 
@@ -444,7 +510,16 @@ pub(crate) fn render_sidebar(
         hits.sidebar_toggle.y,
         hits.sidebar_toggle.width,
         "«",
-        Style::default().fg(palette.overlay0),
+        Style::default().fg(
+            if matches!(
+                state.chrome_hover,
+                Some(super::feedback::ChromeHover::SidebarToggle)
+            ) {
+                palette.text
+            } else {
+                palette.overlay0
+            },
+        ),
     );
 }
 
@@ -645,6 +720,9 @@ pub(in crate::client::shell) fn workspace_rows(
     )
 }
 
+// Row chrome flags stay positional like the other sidebar row renderers;
+// bundling them would touch every call site for no readability gain.
+#[allow(clippy::too_many_arguments)]
 pub(in crate::client::shell) fn render_workspace_rows(
     buffer: &mut Buffer,
     area: Rect,
@@ -656,6 +734,7 @@ pub(in crate::client::shell) fn render_workspace_rows(
     endpoint_active: bool,
     selected: bool,
     dragged: bool,
+    hovered: bool,
     palette: &Palette,
 ) {
     for (row_index, row) in rows.iter().enumerate() {
@@ -731,6 +810,8 @@ pub(in crate::client::shell) fn render_workspace_rows(
         Some(palette.surface1)
     } else if endpoint_active && workspace.focused {
         Some(palette.active_row_bg)
+    } else if hovered {
+        Some(palette.surface0)
     } else {
         None
     };

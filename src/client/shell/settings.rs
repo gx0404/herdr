@@ -38,6 +38,7 @@ impl ClientShellState {
             selected: theme_index(&self.config.theme_name),
             original_theme_name: self.config.theme_name.clone(),
             original_palette: self.config.palette.clone(),
+            original_components: self.config.components.clone(),
             integrations: Vec::new(),
             integration_messages: Vec::new(),
             loading_integrations: false,
@@ -150,9 +151,16 @@ impl ClientShellState {
         let Some(name) = crate::config::THEME_NAMES.get(settings.selected) else {
             return;
         };
+        // Preview through the same resolution seam as startup: manual name,
+        // host-detected depth, and component tokens all follow the candidate.
+        let mut runtime = self.config.theme_runtime.clone();
+        runtime.manual_name = (*name).to_owned();
+        runtime.auto_switch = false;
+        let resolved =
+            crate::app::client_resolved_theme(&runtime, None, self.config.host_color_depth);
         self.config.theme_name = (*name).to_owned();
-        self.config.palette =
-            crate::app::client_palette_for_theme(&self.config.theme_runtime, name);
+        self.config.palette = resolved.palette;
+        self.config.components = resolved.components;
     }
 
     pub(super) fn cancel_settings_overlay(&mut self) {
@@ -161,6 +169,7 @@ impl ClientShellState {
         };
         self.config.theme_name = settings.original_theme_name;
         self.config.palette = settings.original_palette;
+        self.config.components = settings.original_components;
     }
 
     fn save_settings_edit(
@@ -317,7 +326,7 @@ impl ClientShellState {
                         }
                         Ok(_) => {
                             self.set_endpoint_error(
-                                "endpoint returned an unexpected integration list result",
+                                crate::i18n::texts().settings.unexpected_list_result,
                             );
                         }
                         Err(_) => {}
@@ -337,9 +346,12 @@ impl ClientShellState {
                             details,
                             ..
                         }) => settings.integration_messages.extend(details.messages),
-                        Ok(_) => settings
-                            .integration_messages
-                            .push("endpoint returned an unexpected integration result".into()),
+                        Ok(_) => settings.integration_messages.push(
+                            crate::i18n::texts()
+                                .settings
+                                .unexpected_install_result
+                                .into(),
+                        ),
                         Err(error) => settings.integration_messages.push(error.message),
                     }
                     settings.installing_integrations = self.pending_integration_installs > 0;

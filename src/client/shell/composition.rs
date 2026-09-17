@@ -48,8 +48,10 @@ impl ClientShellState {
                 && self.endpoint_status(&self.active_endpoint_id)
                     == Some(ClientEndpointStatus::Online)
         });
+        let spinner = self.spinner_glyph();
         let mut render_state = render::ShellRenderState {
             endpoints: &self.endpoints,
+            machine_chrome: &self.machine_chrome,
             active_endpoint_id: &self.active_endpoint_id,
             collapsed_endpoints: &self.collapsed_endpoints,
             collapsed_groups: &self.collapsed_groups,
@@ -69,6 +71,8 @@ impl ClientShellState {
             reveal_navigation_workspace: &mut self.reveal_navigation_workspace,
             dragged_workspace_id: None,
             workspace_drop_indicator_row: None,
+            chrome_hover: self.hover.as_ref(),
+            spinner,
         };
         if let Some(snapshot) = local_snapshot {
             render::render_sidebar(
@@ -96,10 +100,14 @@ impl ClientShellState {
             let status = self
                 .endpoint_status(&self.active_endpoint_id)
                 .unwrap_or(ClientEndpointStatus::Connecting);
-            let (_, label, _) = endpoint_status_presentation(status, &self.config.palette);
-            format!(
-                "{}: {label}. Select a connected machine.",
-                self.active_endpoint_label()
+            let (_, status_label, _) =
+                endpoint_status_presentation(status, &self.config.palette, self.spinner_glyph());
+            crate::i18n::fill(
+                crate::i18n::texts().endpoint.offline_hint_fmt,
+                &[
+                    ("label", self.active_endpoint_label()),
+                    ("status", status_label),
+                ],
             )
         });
         let message_area = if layout.sidebar.width > 0 {
@@ -124,14 +132,17 @@ impl ClientShellState {
             None,
             self.endpoint_error.as_deref(),
             false,
+            self.broadcast_indicator_count(),
             &self.config.keybinds,
             &self.config.palette,
+            &self.config.components,
         );
         FrameData::from_ratatui_buffer_with_hyperlinks(&buffer, None, &[])
     }
 
     pub(crate) fn compose(&mut self, cols: u16, rows: u16) -> Option<FrameData> {
-        self.last_composed_at = Some(std::time::Instant::now());
+        let compose_now = std::time::Instant::now();
+        self.last_composed_at = Some(compose_now);
         self.selection_repaint_deadline = None;
         if self.last_composed_size != Some((cols, rows)) && self.mode == ClientShellMode::Navigate {
             self.reveal_navigation_workspace = true;
@@ -177,6 +188,31 @@ impl ClientShellState {
             ),
             _ => (None, None),
         };
+        // Entrance-fade clocks: overlay kind transitions and toast arrivals
+        // start a one-frame dim; the settle repaint comes from the timer.
+        let overlay_kind = self.overlay.as_ref().map(ClientShellOverlay::kind);
+        if overlay_kind != self.last_overlay_kind {
+            if overlay_kind.is_some() && self.config.feedback.animations {
+                self.overlay_since = Some(compose_now);
+            }
+            self.last_overlay_kind = overlay_kind;
+        }
+        let has_toast =
+            self.visible_notification.is_some() || self.visible_endpoint_notice.is_some();
+        if has_toast && !self.had_toast && self.config.feedback.animations {
+            self.toast_since = Some(compose_now);
+        }
+        self.had_toast = has_toast;
+        let visual_bell = self.visual_bell_active();
+        let spinner = self.spinner_glyph();
+        let cx = super::feedback::ChromeContext {
+            palette: &self.config.palette,
+            components: &self.config.components,
+            glyphs: self.config.border_glyphs,
+            hover: self.hover.as_ref(),
+            spinner,
+            now: compose_now,
+        };
         let mut buffer = Buffer::empty(Rect::new(0, 0, cols, rows));
         self.hits = render::render_shell(
             &mut buffer,
@@ -185,6 +221,7 @@ impl ClientShellState {
             &self.config,
             render::ShellRenderState {
                 endpoints: &self.endpoints,
+                machine_chrome: &self.machine_chrome,
                 active_endpoint_id: &self.active_endpoint_id,
                 collapsed_endpoints: &self.collapsed_endpoints,
                 collapsed_groups: &self.collapsed_groups,
@@ -204,7 +241,10 @@ impl ClientShellState {
                 reveal_navigation_workspace: &mut self.reveal_navigation_workspace,
                 dragged_workspace_id,
                 workspace_drop_indicator_row,
+                chrome_hover: self.hover.as_ref(),
+                spinner,
             },
+            visual_bell,
         );
         self.hits.panes = surface
             .panes
@@ -299,8 +339,10 @@ impl ClientShellState {
                 self.copy_mode.as_ref(),
                 self.endpoint_error.as_deref(),
                 snapshot.update_available.is_some(),
+                self.broadcast_indicator_count(),
                 &self.config.keybinds,
                 &self.config.palette,
+                &self.config.components,
             )
         };
         if mode_bar == Some(layout.tab_bar) {
@@ -315,6 +357,22 @@ impl ClientShellState {
             frame.cells[start..start + usize::from(bar.width)].to_vec()
         });
         blit_pane_surface(&mut frame, &surface.frame, layout.pane_surface);
+        if visual_bell {
+            if let Some(focused_pane_id) = snapshot.focused_pane_id.as_deref() {
+                if let Some(hit) = self
+                    .hits
+                    .panes
+                    .iter()
+                    .find(|hit| hit.pane_id == focused_pane_id)
+                    .cloned()
+                {
+                    let cursor = frame.cursor.clone();
+                    let mut composed = frame.to_ratatui_buffer()?;
+                    emphasize_pane_border(&mut composed, &hit, self.config.palette.yellow);
+                    frame.replace_from_ratatui_buffer_preserving_effects(&composed, cursor);
+                }
+            }
+        }
         restore_mode_bar(&mut frame, mode_bar, mode_bar_cells.as_deref());
         let mut occlusion = crate::kitty_graphics::surface::Occlusion::default();
         let has_selection = self
@@ -357,13 +415,14 @@ impl ClientShellState {
                             occlusion.cover(rect);
                         }
                     }
-                    crate::ui::render_selection_highlight(
+                    crate::ui::render_selection_highlight_styled(
                         self.selection.as_ref(),
                         &mut composed,
                         &hit.pane_id,
                         hit.inner_rect,
                         hit.scroll,
                         &self.config.palette,
+                        &self.config.components,
                         crate::terminal_theme::TerminalTheme {
                             background: self.host_background,
                             ..Default::default()
@@ -384,6 +443,12 @@ impl ClientShellState {
             frame.replace_from_ratatui_buffer_preserving_effects(&composed, cursor);
         }
         self.render_link_hover(&mut frame, &mut occlusion);
+        if self.link_hints.is_some() {
+            let mut composed = frame.to_ratatui_buffer()?;
+            self.render_link_hints(&mut composed, &mut occlusion);
+            frame.cursor = None;
+            frame.replace_from_ratatui_buffer_preserving_effects(&composed, None);
+        }
         if self.mode == ClientShellMode::Copy {
             frame.cursor = None;
             if let Some(copy_mode) = self.copy_mode.as_ref() {
@@ -423,13 +488,34 @@ impl ClientShellState {
         }
         restore_mode_bar(&mut frame, mode_bar, mode_bar_cells.as_deref());
         self.hits.notification_toast = Rect::default();
+        self.hits.machine_auth_actions = Vec::new();
+        self.hits.lifecycle_banner_retry = Rect::default();
+        self.hits.lifecycle_banner_give_up = Rect::default();
         let has_config_diagnostic = self.config_diagnostic.is_some();
         let active_lifecycle = self
             .endpoints
             .iter()
             .find(|endpoint| endpoint.endpoint_id == self.active_endpoint_id)
             .filter(|endpoint| endpoint.status != ClientEndpointStatus::Online)
-            .map(|endpoint| (endpoint.label.clone(), endpoint.status));
+            .map(|endpoint| {
+                let progress =
+                    self.endpoint_reconnect_progress(&endpoint.endpoint_id)
+                        .map(|progress| {
+                            (
+                                progress.attempts,
+                                progress
+                                    .next_attempt_at
+                                    .saturating_duration_since(compose_now)
+                                    .as_secs(),
+                            )
+                        });
+                (
+                    endpoint.endpoint_id.clone(),
+                    endpoint.label.clone(),
+                    endpoint.status,
+                    progress,
+                )
+            });
         if has_config_diagnostic
             || active_lifecycle.is_some()
             || self.visible_endpoint_notice.is_some()
@@ -451,17 +537,27 @@ impl ClientShellState {
                     |rect| occlusion.cover(rect),
                 );
             }
-            let lifecycle_offset = active_lifecycle.as_ref().map_or(0, |(label, status)| {
-                occlusion.cover(endpoint_notices::render_lifecycle_banner(
-                    &mut composed,
-                    Rect::new(0, 0, cols, rows),
-                    label,
-                    *status,
-                    u16::from(has_config_diagnostic) + layout.mobile_header.height,
-                    &self.config.palette,
-                ));
-                1
-            });
+            let (lifecycle_offset, lifecycle_banner) = active_lifecycle.as_ref().map_or(
+                (0, None),
+                |(endpoint_id, label, status, progress)| {
+                    let banner = endpoint_notices::render_lifecycle_banner(
+                        &mut composed,
+                        Rect::new(0, 0, cols, rows),
+                        label,
+                        *status,
+                        *progress,
+                        !endpoint_id.is_local(),
+                        u16::from(has_config_diagnostic) + layout.mobile_header.height,
+                        &cx,
+                    );
+                    occlusion.cover(banner.rect);
+                    (1, Some(banner))
+                },
+            );
+            if let Some(banner) = lifecycle_banner {
+                self.hits.lifecycle_banner_retry = banner.retry;
+                self.hits.lifecycle_banner_give_up = banner.give_up;
+            }
             if let Some(notice) = self.visible_endpoint_notice.as_ref() {
                 self.hits.notification_toast = if layout.mobile_header.is_empty() {
                     endpoint_notices::render_notice(
@@ -469,7 +565,7 @@ impl ClientShellState {
                         Rect::new(0, 0, cols, rows),
                         notice,
                         u16::from(has_config_diagnostic) + lifecycle_offset,
-                        &self.config.palette,
+                        &cx,
                     )
                 } else {
                     endpoint_notices::render_mobile_banner(
@@ -478,6 +574,7 @@ impl ClientShellState {
                         notice,
                         has_config_diagnostic || lifecycle_offset > 0,
                         &self.config.palette,
+                        &self.config.components,
                     )
                 };
             } else if let Some(notification) = self.visible_notification.as_ref() {
@@ -488,7 +585,7 @@ impl ClientShellState {
                         notification,
                         self.config.toast_position,
                         u16::from(has_config_diagnostic) + lifecycle_offset,
-                        &self.config.palette,
+                        &cx,
                     )
                 } else {
                     notifications::render_mobile_notification_banner(
@@ -497,10 +594,20 @@ impl ClientShellState {
                         notification,
                         has_config_diagnostic || lifecycle_offset > 0,
                         &self.config.palette,
+                        &self.config.components,
                     )
                 };
             }
             occlusion.cover(self.hits.notification_toast);
+            if self.toast_since.is_some_and(|since| {
+                compose_now.duration_since(since) < super::feedback::ENTRANCE_DURATION
+            }) && !self.hits.notification_toast.is_empty()
+            {
+                composed.set_style(
+                    self.hits.notification_toast,
+                    Style::default().add_modifier(Modifier::DIM),
+                );
+            }
             frame.replace_from_ratatui_buffer_preserving_effects(&composed, cursor);
         }
         if let Some(feedback) = self.copy_feedback.as_ref() {
@@ -519,13 +626,14 @@ impl ClientShellState {
                 self.config.clipboard_toast_position,
                 self.hits.notification_toast,
             );
-            occlusion.cover(crate::ui::render_copy_feedback_buffer(
+            occlusion.cover(crate::ui::render_copy_feedback_buffer_styled(
                 &mut composed,
                 feedback_area,
                 feedback,
                 offset,
                 self.config.clipboard_toast_position,
                 &self.config.palette,
+                &self.config.components,
             ));
             frame.replace_from_ratatui_buffer_preserving_effects(&composed, cursor);
         }
@@ -540,6 +648,7 @@ impl ClientShellState {
                 let mut composed = frame.to_ratatui_buffer()?;
                 let block = ratatui::widgets::Block::default()
                     .borders(ratatui::widgets::Borders::ALL)
+                    .border_set(self.config.border_glyphs.border_set())
                     .border_style(ratatui::style::Style::default().fg(self.config.palette.accent))
                     .title(popup.title.clone())
                     .style(ratatui::style::Style::default().bg(self.config.palette.panel_bg));
@@ -585,14 +694,16 @@ impl ClientShellState {
                 &mut self.reveal_mobile_workspace,
                 &mut self.hits,
             );
-            if let Some((label, status)) = active_lifecycle.as_ref() {
+            if let Some((_, label, status, progress)) = active_lifecycle.as_ref() {
                 let _ = endpoint_notices::render_lifecycle_banner(
                     &mut composed,
                     Rect::new(0, 0, cols, rows),
                     label,
                     *status,
+                    *progress,
+                    false,
                     2,
-                    &self.config.palette,
+                    &cx,
                 );
             }
             if let Some(notice) = self.visible_endpoint_notice.as_ref() {
@@ -602,6 +713,7 @@ impl ClientShellState {
                     notice,
                     active_lifecycle.is_some(),
                     &self.config.palette,
+                    &self.config.components,
                 );
             }
             frame.replace_from_ratatui_buffer_preserving_effects(&composed, None);
@@ -613,24 +725,34 @@ impl ClientShellState {
         if let Some(bar) = mode_bar {
             occlusion.cover(bar);
         }
+        if self.mode == ClientShellMode::Prefix && self.config.which_key && self.overlay.is_none() {
+            let cursor = frame.cursor.clone();
+            let mut composed = frame.to_ratatui_buffer()?;
+            super::which_key::render_which_key(
+                &mut composed,
+                Rect::new(
+                    layout.pane_surface.x,
+                    layout.pane_surface.y,
+                    layout.pane_surface.width,
+                    layout
+                        .pane_surface
+                        .height
+                        .saturating_sub(u16::from(mode_bar.is_some())),
+                ),
+                &self.config.keybinds,
+                &cx,
+                &mut occlusion,
+            );
+            frame.replace_from_ratatui_buffer_preserving_effects(&composed, cursor);
+        }
         if let Some(overlay) = self.overlay.as_ref() {
             let mut composed = frame.to_ratatui_buffer()?;
+            let entrance_area: Rect;
             let cursor = if let ClientShellOverlay::ContextMenu(menu) = overlay {
-                let rendered =
-                    render::render_context_menu(&mut composed, menu, &self.config.palette)?;
+                let rendered = render::render_context_menu(&mut composed, menu, &cx)?;
+                entrance_area = rendered.area;
                 occlusion.cover(rendered.area);
                 self.hits.context_menu_rows = rendered.menu_rows;
-                None
-            } else if let ClientShellOverlay::GlobalMenu(menu) = overlay {
-                let rendered = render::render_global_menu(
-                    &mut composed,
-                    self.hits.global_launcher,
-                    menu,
-                    snapshot,
-                    &self.config.palette,
-                )?;
-                occlusion.cover(rendered.area);
-                self.hits.global_menu_rows = rendered.menu_rows;
                 None
             } else {
                 let rendered = render::render_client_overlay(
@@ -638,14 +760,22 @@ impl ClientShellState {
                     overlay,
                     snapshot,
                     &self.endpoints,
+                    &self.saved_profiles,
+                    &self.broadcast,
+                    &self.endpoint_connection_errors,
+                    &self.endpoint_port_forwards,
+                    &self.session_log_dropped,
                     &self.active_endpoint_id,
                     &self.config.keybinds,
-                    &self.config.palette,
+                    &self.notification_history,
+                    &cx,
                 )?;
+                entrance_area = rendered.area;
                 occlusion.cover(rendered.area);
                 self.hits.overlay_primary = rendered.primary;
                 self.hits.overlay_clear = rendered.clear;
                 self.hits.overlay_cancel = rendered.cancel;
+                self.hits.global_menu_rows = rendered.menu_rows;
                 self.hits.navigator_popup = rendered.navigator_popup;
                 self.hits.navigator_search = rendered.navigator_search;
                 self.hits.navigator_rows = rendered.navigator_rows;
@@ -658,6 +788,32 @@ impl ClientShellState {
                 self.hits.settings_popup = rendered.settings_popup;
                 self.hits.settings_tabs = rendered.settings_tabs;
                 self.hits.settings_choices = rendered.settings_choices;
+                self.hits.machines_popup = rendered.machines_popup;
+                self.hits.machines_search = rendered.machines_search;
+                self.hits.machines_rows = rendered.machines_rows;
+                self.hits.machines_actions = rendered.machines_actions;
+                self.hits.machines_fields = rendered.machines_fields;
+                self.hits.machines_wizard_rows = rendered.machines_wizard_rows;
+                self.hits.machines_wizard_fields = rendered.machines_wizard_fields;
+                self.hits.machines_max_scroll = rendered.machines_max_scroll;
+                self.hits.machine_auth_actions = rendered.machine_auth_actions;
+                self.hits.broadcast_popup = rendered.broadcast_popup;
+                self.hits.broadcast_rows = rendered.broadcast_rows;
+                self.hits.broadcast_actions = rendered.broadcast_actions;
+                self.hits.machine_files_popup = rendered.machine_files_popup;
+                self.hits.machine_files_search = rendered.machine_files_search;
+                self.hits.machine_files_rows = rendered.machine_files_rows;
+                self.hits.machine_files_actions = rendered.machine_files_actions;
+                self.hits.snippet_popup = rendered.snippet_popup;
+                self.hits.snippet_search = rendered.snippet_search;
+                self.hits.snippet_rows = rendered.snippet_rows;
+                self.hits.snippet_fields = rendered.snippet_fields;
+                self.hits.snippet_actions = rendered.snippet_actions;
+                self.hits.scenes_popup = rendered.scenes_popup;
+                self.hits.scenes_rows = rendered.scenes_rows;
+                self.hits.scenes_fields = rendered.scenes_fields;
+                self.hits.scenes_actions = rendered.scenes_actions;
+                self.hits.notification_history_rows = rendered.notification_history_rows;
                 self.hits.product_announcement_scrollbar = rendered.product_announcement_scrollbar;
                 self.hits.product_announcement_scroll_metrics =
                     rendered.product_announcement_scroll_metrics;
@@ -668,6 +824,12 @@ impl ClientShellState {
                 self.hits.release_notes_max_scroll = rendered.release_notes_max_scroll;
                 rendered.cursor
             };
+            if self.overlay_since.is_some_and(|since| {
+                compose_now.duration_since(since) < super::feedback::ENTRANCE_DURATION
+            }) && !entrance_area.is_empty()
+            {
+                composed.set_style(entrance_area, Style::default().add_modifier(Modifier::DIM));
+            }
             frame.replace_from_ratatui_buffer_preserving_effects(&composed, cursor);
         }
         if let Some(ClientShellOverlay::Help(help)) = self.overlay.as_mut() {
@@ -779,6 +941,23 @@ fn client_popup_size(size: crate::protocol::ClientShellPopupSize) -> crate::popu
         }
         crate::protocol::ClientShellPopupSize::Percent(percent) => {
             crate::popup_size::PopupSize::Percent(percent)
+        }
+    }
+}
+
+/// Visual bell: repaint the focused pane's border frame with a brief
+/// emphasis color. Only cells in `rect` outside `inner_rect` are touched,
+/// so terminal content is preserved byte-for-byte.
+fn emphasize_pane_border(buffer: &mut Buffer, hit: &PaneHit, color: ratatui::style::Color) {
+    let inner = hit.inner_rect;
+    let area = hit.rect.intersection(buffer.area);
+    for y in area.y..area.bottom() {
+        for x in area.x..area.right() {
+            if x >= inner.x && x < inner.right() && y >= inner.y && y < inner.bottom() {
+                continue;
+            }
+            let cell = &mut buffer[(x, y)];
+            cell.set_style(cell.style().fg(color).add_modifier(Modifier::BOLD));
         }
     }
 }

@@ -92,6 +92,8 @@ fn shell_and_registry_with_source_failure(source_fail_after_write: bool) -> Test
         target: "dev@example.com".into(),
         session: "main".into(),
         enabled: true,
+        ..super::super::SavedSshEndpoint::new("base", "base", "default")
+            .expect("valid base profile")
     };
     let target = ClientEndpointId::Ssh(profile.id.clone());
     shell.set_endpoint_catalog(&[profile]);

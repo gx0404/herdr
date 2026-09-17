@@ -11,7 +11,7 @@ use super::scrollbar::{render_pane_scrollbar, should_show_scrollbar};
 use super::text::display_width;
 use super::text::truncate_end;
 use super::widgets::panel_contrast_fg;
-use crate::app::state::Palette;
+use crate::app::state::{ComponentStyles, Palette};
 use crate::app::AppState;
 use crate::layout::PaneInfo;
 use crate::popup_size::resolve_popup_geometry;
@@ -481,16 +481,18 @@ fn render_pane_borders(
         let focused = pane_infos
             .iter()
             .any(|info| info.is_focused && line_touches_pane(x, y, info, app.pane_gaps));
-        let symbol = line_cell_symbol(line);
+        let symbol = app
+            .border_glyphs
+            .line_symbol(line.up, line.down, line.left, line.right);
         if symbol.is_empty() {
             continue;
         }
         let cell = &mut buf[(x, y)];
         cell.set_symbol(symbol);
         let color = if focused {
-            app.palette.accent
+            app.components.pane_border_focused
         } else {
-            app.palette.overlay0
+            app.components.pane_border_unfocused
         };
         cell.set_style(Style::default().fg(color));
     }
@@ -655,9 +657,9 @@ fn render_pane_border_titles(
             continue;
         }
         let color = if info.is_focused {
-            app.palette.accent
+            app.components.pane_border_focused
         } else {
-            app.palette.overlay0
+            app.components.pane_border_unfocused
         };
         let mut style = Style::default().fg(color);
         if info.is_focused {
@@ -673,34 +675,20 @@ fn render_pane_border_titles(
     }
 }
 
-fn line_cell_symbol(line: LineCell) -> &'static str {
-    match (line.up, line.down, line.left, line.right) {
-        (true, true, true, true) => "┼",
-        (true, true, true, false) => "┤",
-        (true, true, false, true) => "├",
-        (true, false, true, true) => "┴",
-        (false, true, true, true) => "┬",
-        (true, true, false, false) | (true, false, false, false) | (false, true, false, false) => {
-            "│"
-        }
-        (false, false, true, true) | (false, false, true, false) | (false, false, false, true) => {
-            "─"
-        }
-        (false, true, false, true) => "┌",
-        (false, true, true, false) => "┐",
-        (true, false, false, true) => "└",
-        (true, false, true, false) => "┘",
-        _ => "",
-    }
-}
-
-pub(crate) fn render_selection_highlight<P: PartialEq>(
+/// Selection highlight driven by resolved component styles: the mix ratio and
+/// color depth come from `[theme.components]`/`ui.color_depth` resolution.
+///
+/// The highlight only overrides cell colors — bold/italic/underline and other
+/// cell modifiers (and the parallel hyperlink tracks) survive selection.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn render_selection_highlight_styled<P: PartialEq>(
     selection: Option<&crate::selection::Selection<P>>,
     buffer: &mut Buffer,
     pane_id: &P,
     inner: Rect,
     scroll_metrics: Option<crate::pane::ScrollMetrics>,
     p: &Palette,
+    components: &ComponentStyles,
     host_theme: crate::terminal_theme::TerminalTheme,
 ) {
     let Some(selection) =
@@ -708,11 +696,13 @@ pub(crate) fn render_selection_highlight<P: PartialEq>(
     else {
         return;
     };
-    let style = automatic_selection_style(p, host_theme);
+    let (fg, bg) = automatic_selection_colors(p, components, host_theme);
     for y in 0..inner.height {
         for x in 0..inner.width {
             if selection.contains(y, x, scroll_metrics) {
-                buffer[(inner.x + x, inner.y + y)].set_style(style);
+                let cell = &mut buffer[(inner.x + x, inner.y + y)];
+                cell.set_fg(fg);
+                cell.set_bg(bg);
             }
         }
     }
@@ -720,15 +710,45 @@ pub(crate) fn render_selection_highlight<P: PartialEq>(
 
 type Rgb = (u8, u8, u8);
 
+#[cfg(test)]
 fn automatic_selection_style(
     p: &Palette,
     host_theme: crate::terminal_theme::TerminalTheme,
 ) -> Style {
-    let bg = automatic_selection_bg(p, host_theme);
-    Style::reset().fg(selection_fg_for_bg(bg, p)).bg(bg)
+    let (fg, bg) = automatic_selection_colors(p, &ComponentStyles::from_palette(p), host_theme);
+    Style::default().fg(fg).bg(bg)
 }
 
+/// Uniform (fg, bg) for one selection render. The background mixes the host
+/// (or palette) background toward white/black by `selection_mix_ratio`; the
+/// foreground picks black or white by WCAG relative-luminance contrast.
+fn automatic_selection_colors(
+    p: &Palette,
+    components: &ComponentStyles,
+    host_theme: crate::terminal_theme::TerminalTheme,
+) -> (Color, Color) {
+    let bg = automatic_selection_bg_with(p, host_theme, components.selection_mix_ratio);
+    let fg = selection_fg_for_bg(bg, p);
+    if components.color_depth.is_low_color() {
+        (
+            crate::config::degrade_color_to_256(fg),
+            crate::config::degrade_color_to_256(bg),
+        )
+    } else {
+        (fg, bg)
+    }
+}
+
+#[cfg(test)]
 fn automatic_selection_bg(p: &Palette, host_theme: crate::terminal_theme::TerminalTheme) -> Color {
+    automatic_selection_bg_with(p, host_theme, crate::config::DEFAULT_SELECTION_MIX_RATIO)
+}
+
+fn automatic_selection_bg_with(
+    p: &Palette,
+    host_theme: crate::terminal_theme::TerminalTheme,
+    mix_ratio: f32,
+) -> Color {
     let fallback = selection_palette_background(p);
     let Some(background) = host_theme
         .background
@@ -746,7 +766,7 @@ fn automatic_selection_bg(p: &Palette, host_theme: crate::terminal_theme::Termin
     } else {
         (0, 0, 0)
     };
-    let selected = mix_rgb(background, target, 0.28);
+    let selected = mix_rgb(background, target, mix_ratio);
     Color::Rgb(selected.0, selected.1, selected.2)
 }
 
@@ -1375,7 +1395,7 @@ mod tests {
     }
 
     #[test]
-    fn selection_highlight_uses_one_uniform_style() {
+    fn selection_highlight_keeps_uniform_colors_and_preserves_text_modifiers() {
         let palette = Palette::catppuccin();
         let host_theme = crate::terminal_theme::TerminalTheme {
             foreground: None,
@@ -1409,14 +1429,20 @@ mod tests {
                         .bg(Color::DarkGray)
                         .add_modifier(Modifier::BOLD),
                 );
-                buf[(2, 0)].set_style(Style::default().fg(Color::Blue).bg(Color::Reset));
-                render_selection_highlight(
+                buf[(2, 0)].set_style(
+                    Style::default()
+                        .fg(Color::Blue)
+                        .bg(Color::Reset)
+                        .add_modifier(Modifier::UNDERLINED | Modifier::ITALIC),
+                );
+                render_selection_highlight_styled(
                     selection.as_ref(),
                     frame.buffer_mut(),
                     &PaneId::from_raw(1),
                     Rect::new(0, 0, 4, 1),
                     None,
                     &palette,
+                    &ComponentStyles::from_palette(&palette),
                     host_theme,
                 );
             })
@@ -1427,16 +1453,69 @@ mod tests {
         let second = buffer[(1, 0)].style();
         let third = buffer[(2, 0)].style();
 
+        // Colors are uniform across the selection...
         assert_eq!(first.fg, expected_style.fg);
         assert_eq!(second.fg, expected_style.fg);
         assert_eq!(third.fg, expected_style.fg);
         assert_eq!(first.bg, expected_style.bg);
         assert_eq!(second.bg, expected_style.bg);
         assert_eq!(third.bg, expected_style.bg);
-        assert_eq!(first.add_modifier, expected_style.add_modifier);
-        assert_eq!(second.add_modifier, expected_style.add_modifier);
-        assert_eq!(third.add_modifier, expected_style.add_modifier);
-        assert!(!second.add_modifier.contains(Modifier::BOLD));
+        // ...but text modifiers survive instead of being reset.
+        assert_eq!(first.add_modifier, Modifier::empty());
+        assert_eq!(second.add_modifier, Modifier::BOLD);
+        assert_eq!(third.add_modifier, Modifier::UNDERLINED | Modifier::ITALIC);
+    }
+
+    #[test]
+    fn styled_selection_highlight_honors_mix_ratio_and_color_depth() {
+        let palette = Palette::catppuccin();
+        let host_theme = crate::terminal_theme::TerminalTheme {
+            background: Some(crate::terminal_theme::RgbColor {
+                r: 12,
+                g: 14,
+                b: 16,
+            }),
+            ..Default::default()
+        };
+
+        let subtle = ComponentStyles::resolve(
+            &palette,
+            Some(&crate::config::ThemeComponentsConfig {
+                selection_mix_ratio: Some(0.1),
+                ..Default::default()
+            }),
+            crate::config::ColorDepth::Truecolor,
+        );
+        let strong = ComponentStyles::resolve(
+            &palette,
+            Some(&crate::config::ThemeComponentsConfig {
+                selection_mix_ratio: Some(0.9),
+                ..Default::default()
+            }),
+            crate::config::ColorDepth::Truecolor,
+        );
+        let (_, subtle_bg) = automatic_selection_colors(&palette, &subtle, host_theme);
+        let (_, strong_bg) = automatic_selection_colors(&palette, &strong, host_theme);
+        let (Color::Rgb(_, _, subtle_b), Color::Rgb(_, _, strong_b)) = (subtle_bg, strong_bg)
+        else {
+            panic!("mixed selection backgrounds should stay RGB under truecolor");
+        };
+        assert!(
+            subtle_b < strong_b,
+            "higher mix ratio should brighten a dark background further: {subtle_b} vs {strong_b}"
+        );
+
+        let low_color =
+            ComponentStyles::resolve(&palette, None, crate::config::ColorDepth::Color256);
+        let (fg, bg) = automatic_selection_colors(&palette, &low_color, host_theme);
+        assert!(
+            matches!(fg, Color::Indexed(_)),
+            "256-color depth should index the selection fg, got {fg:?}"
+        );
+        assert!(
+            matches!(bg, Color::Indexed(_)),
+            "256-color depth should index the selection bg, got {bg:?}"
+        );
     }
 
     #[test]
@@ -1474,7 +1553,7 @@ mod tests {
             let mut palette = Palette::catppuccin();
             let (r, g, b) = background;
             palette.panel_bg = Color::Rgb(r, g, b);
-            let expected = Style::reset()
+            let expected = Style::default()
                 .bg(Color::Rgb(selected_bg.0, selected_bg.1, selected_bg.2))
                 .fg(Color::Rgb(selected_fg.0, selected_fg.1, selected_fg.2));
 
@@ -1500,7 +1579,7 @@ mod tests {
         let mut palette = Palette::terminal();
         assert_eq!(
             automatic_selection_style(&palette, Default::default()),
-            Style::reset().fg(Color::White).bg(Color::DarkGray)
+            Style::default().fg(Color::White).bg(Color::DarkGray)
         );
         for fallback in [Color::Blue, Color::White, Color::Indexed(42), Color::Reset] {
             palette.surface_dim = fallback;

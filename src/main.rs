@@ -106,6 +106,23 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # panel_bg = "#1e1e2e"
 # text = "#cdd6f4"
 
+# Component-level color tokens on top of the resolved palette.
+# Unset fields fall back to semantic tokens: pane borders use accent/overlay0,
+# scrollbar thumb uses overlay1, scrollbar track uses overlay0, toast borders
+# use green/blue/red, and the mode bar uses accent.
+# [theme.components]
+# pane_border_focused = "#89b4fa"
+# pane_border_unfocused = "#585b70"
+# scrollbar_thumb = "#7f849c"
+# scrollbar_track = "#313244"
+# mode_bar_accent = "#89b4fa"
+# toast_border_success = "#a6e3a1"
+# toast_border_info = "#89b4fa"
+# toast_border_error = "#f38ba8"
+# Selection background mixes the host background toward white/black by this
+# ratio (0.0-1.0). Raise for a stronger highlight, lower for a subtler one.
+# selection_mix_ratio = 0.28
+
 [terminal]
 # Executable used for new interactive panes.
 # Empty means $SHELL, then /bin/sh.
@@ -149,9 +166,11 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # Prefix-mode actions
 # help = "prefix+?"
 # settings = "prefix+s"
+# manage_machines = "prefix+m"
 # detach = "prefix+q"
 # reload_config = "prefix+shift+r"
 # open_notification_target = "prefix+o"
+# link_hints = "prefix+u"   # two-letter markers over visible pane URLs; type a marker to open it
 # workspace_picker = "prefix+w"
 # goto = "prefix+g"
 # new_workspace = "prefix+shift+n"
@@ -280,8 +299,38 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # Pane scrollback lines to scroll per mouse wheel notch.
 # mouse_scroll_lines = 3
 
+# Show the which-key popup listing available bindings while prefix mode is active.
+# which_key = true
+
+# Time window (milliseconds) in which repeated pane clicks count as
+# double/triple clicks (word / line selection).
+# double_click_ms = 350
+
+# Minimum milliseconds between drag updates forwarded to the server
+# (pane scrollbar and split divider drags).
+# drag_throttle_ms = 33
+
+# Selection auto-scroll while dragging past a pane edge: step interval (ms),
+# lines per step right at the edge, and the cap for larger overshoots.
+# selection_autoscroll_interval_ms = 30
+# selection_autoscroll_min_lines = 3
+# selection_autoscroll_max_lines = 15
+
 # Ask for confirmation before closing a workspace
 # confirm_close = true
+
+# Highlight interactive chrome (sidebar rows, buttons) under the mouse pointer.
+# hover_effects = true
+
+# Show spinner glyphs while work is in progress (connecting machines, remote setups).
+# spinner = true
+
+# Animate spinner frames and overlay/toast entrance fades.
+# Set false for a fully static UI.
+# animations = true
+
+# Briefly highlight pane borders when a pane terminal rings the bell.
+# visual_bell = true
 
 # Ask for a tab name before creating a new tab.
 # Set false to create tabs immediately with generated names.
@@ -306,6 +355,16 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 
 # Keep split panes visually separated instead of sharing divider borders.
 # pane_gaps = true
+
+# Pane border line style: "single", "rounded", "double", or "thick".
+# Applies to borders Herdr draws around split panes.
+# border_style = "single"
+
+# Output color depth for Herdr's own UI colors: "auto", "truecolor", or "256".
+# "auto" follows the host terminal capability detected from COLORTERM/TERM;
+# a 256color TERM without truecolor evidence (common over SSH/tmux) maps
+# theme RGB colors to the nearest xterm-256 palette entry automatically.
+# color_depth = "auto"
 
 # Show detected/reported agent labels in split pane borders when no manual pane name is set.
 # show_agent_labels_on_pane_borders = false
@@ -505,7 +564,22 @@ fn finish_cli(outcome: io::Result<cli::CommandOutcome>) -> io::Result<()> {
     }
 }
 
+/// Prompt arguments for a re-executed SSH_ASKPASS helper: every argument
+/// after argv[0], lossy-decoded (ssh prompt text is best-effort UTF-8).
+fn ssh_askpass_prompt_args(args: impl IntoIterator<Item = std::ffi::OsString>) -> Vec<String> {
+    args.into_iter()
+        .skip(1)
+        .map(|arg| arg.to_string_lossy().into_owned())
+        .collect()
+}
+
 fn main() -> io::Result<()> {
+    // ssh re-executes this binary as its SSH_ASKPASS helper for approved
+    // interactive machine authentication; route to the helper before any
+    // ordinary CLI parsing.
+    if std::env::var_os(remote::SSH_ASKPASS_SOCKET_ENV_VAR).is_some() {
+        return remote::run_ssh_askpass_helper(&ssh_askpass_prompt_args(std::env::args_os()));
+    }
     i18n::init_early();
     let raw_args: Vec<String> = match args_as_utf8(std::env::args_os()) {
         Ok(args) => args,
@@ -839,6 +913,27 @@ mod tests {
         let sidebar = DEFAULT_CONFIG.find("# [ui.sidebar.agents]").unwrap();
 
         assert!(accent < sidebar);
+    }
+
+    #[test]
+    fn askpass_prompt_args_skip_argv0_and_lossy_decode() {
+        let args = [
+            std::ffi::OsString::from("herdr"),
+            std::ffi::OsString::from("user@host's password:"),
+        ];
+        assert_eq!(
+            ssh_askpass_prompt_args(args),
+            ["user@host's password:".to_string()]
+        );
+        assert!(ssh_askpass_prompt_args([std::ffi::OsString::from("herdr")]).is_empty());
+    }
+
+    #[test]
+    fn askpass_env_var_name_matches_the_remote_channel() {
+        assert_eq!(
+            remote::SSH_ASKPASS_SOCKET_ENV_VAR,
+            "HERDR_SSH_ASKPASS_SOCKET"
+        );
     }
 
     #[test]

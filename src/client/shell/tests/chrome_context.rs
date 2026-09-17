@@ -416,9 +416,25 @@ fn global_menu_opens_from_sidebar_and_routes_client_actions() {
     assert!(compact.contains("设置"));
     assert!(compact.contains("快捷键"));
     assert!(compact.contains("重载配置"));
-    assert!(compact.contains("分离"));
+    // The palette viewport clips long lists; the full action set is in the index.
+    let titles: Vec<&str> = palette_overlay(&state)
+        .items
+        .iter()
+        .map(|item| item.title.as_str())
+        .collect();
+    assert!(
+        titles.contains(&"分离"),
+        "detach action indexed: {titles:?}"
+    );
 
-    let keybinds = state.hits.global_menu_rows[1].0;
+    let keybinds_index = palette_row_index(&state, "binding:Help");
+    let keybinds = state
+        .hits
+        .global_menu_rows
+        .iter()
+        .find(|(_, index)| *index == keybinds_index)
+        .expect("keybinds row hit")
+        .0;
     let help = state.handle_raw_events(vec![RawInputEvent::Mouse(crossterm::event::MouseEvent {
         kind: MouseEventKind::Down(MouseButton::Left),
         column: keybinds.x,
@@ -428,9 +444,8 @@ fn global_menu_opens_from_sidebar_and_routes_client_actions() {
     assert!(help.actions.is_empty());
     assert!(matches!(state.overlay, Some(ClientShellOverlay::Help(_))));
 
-    state.overlay = Some(ClientShellOverlay::GlobalMenu(ClientGlobalMenuOverlay {
-        highlighted: 3,
-    }));
+    state.toggle_global_menu();
+    palette_select(&mut state, "binding:Detach");
     let detach = state.handle_input_bytes(b"\r");
     assert!(detach.detach);
     assert!(state.overlay.is_none());
@@ -447,7 +462,13 @@ fn new_tab_overlay_owns_text_cursor_and_submits_public_api_request() {
         &mut open,
     );
     assert!(open.actions.is_empty());
-    let frame = state.compose(106, 20).expect("new tab overlay");
+    state.compose(106, 20).expect("new tab overlay");
+    // The entrance fade dims a freshly opened overlay for one beat; settle it
+    // so modifier assertions below see the steady state.
+    assert!(state.tick_chrome_feedback(
+        std::time::Instant::now() + super::super::feedback::ENTRANCE_DURATION
+    ));
+    let frame = state.compose(106, 20).expect("settled new tab overlay");
     let text = frame
         .cells
         .chunks(frame.width as usize)

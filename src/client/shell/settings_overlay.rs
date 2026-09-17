@@ -3,7 +3,7 @@ use super::*;
 fn choice_style(selected: bool, palette: &Palette) -> Style {
     if selected {
         Style::default()
-            .fg(contrast(palette))
+            .fg(panel_contrast_fg(palette))
             .bg(palette.accent)
             .add_modifier(Modifier::BOLD)
     } else {
@@ -37,8 +37,9 @@ pub(super) fn render_settings_overlay(
     buffer: &mut Buffer,
     settings: &ClientSettingsOverlay,
     integration_updates_available: bool,
-    palette: &Palette,
+    cx: &super::feedback::ChromeContext<'_>,
 ) -> Option<OverlayRender> {
+    let palette = cx.palette;
     let integration_height = 14u16
         .saturating_add(settings.integrations.len().max(1) as u16)
         .saturating_add(settings.integration_messages.len().min(6) as u16);
@@ -48,17 +49,22 @@ pub(super) fn render_settings_overlay(
         22
     };
     let t = &crate::i18n::texts().settings;
-    let popup = popup(buffer.area, 76, height)?;
-    let inner = panel(buffer, popup, palette.accent, palette.panel_bg)?;
+    let (popup, inner) = modal_panel(
+        buffer,
+        crate::ui::ModalSize::Large.with_height(height),
+        palette.accent,
+        cx,
+    )?;
     if inner.width < 20 || inner.height < 8 {
         return None;
     }
+    let stack = crate::ui::modal_stack_areas(inner, 2, 1, 1, 1);
 
     put_text(
         buffer,
-        inner.x,
-        inner.y,
-        inner.width,
+        stack.header.x,
+        stack.header.y,
+        stack.header.width,
         t.title,
         Style::default()
             .fg(palette.text)
@@ -81,11 +87,11 @@ pub(super) fn render_settings_overlay(
             format!(" {} ", section.label())
         };
         let width = display_width(&label).min(inner.right().saturating_sub(tab_x));
-        let rect = Rect::new(tab_x, inner.y + 1, width, 1);
+        let rect = Rect::new(tab_x, stack.header.y + 1, width, 1);
         let active = *section == settings.section;
         let style = if active {
             Style::default()
-                .fg(contrast(palette))
+                .fg(panel_contrast_fg(palette))
                 .bg(palette.accent)
                 .add_modifier(Modifier::BOLD)
         } else {
@@ -115,18 +121,13 @@ pub(super) fn render_settings_overlay(
     put_text(
         buffer,
         inner.x,
-        inner.y + 2,
+        stack.header.bottom(),
         inner.width,
         &"─".repeat(inner.width as usize),
         Style::default().fg(palette.surface0).bg(palette.panel_bg),
     );
 
-    let content = Rect::new(
-        inner.x,
-        inner.y + 4,
-        inner.width,
-        inner.height.saturating_sub(7),
-    );
+    let content = stack.content;
     let mut choice_hits = Vec::new();
     match settings.section {
         ClientSettingsSection::Language => {
@@ -208,7 +209,7 @@ pub(super) fn render_settings_overlay(
             );
         }
         ClientSettingsSection::Integrations => {
-            render_integrations(buffer, content, settings, palette);
+            render_integrations(buffer, content, settings, cx);
         }
     }
 
@@ -222,45 +223,52 @@ pub(super) fn render_settings_overlay(
     } else {
         t.apply_button
     };
-    let primary_width = display_width(primary_label).max(10);
-    let labels = if show_primary {
-        vec![primary_width, 12]
+    let close_label = crate::ui::modal_close_button_text();
+    let labels: Vec<&str> = if show_primary {
+        vec![primary_label, close_label]
     } else {
-        vec![12]
+        vec![close_label]
     };
-    let buttons = row(inner, &labels, 2, inner.height.saturating_sub(1));
-    let (primary, close) = if show_primary {
-        let primary = buttons[0];
-        button(
+    let buttons = modal_button_row(stack.actions.unwrap_or_default(), &labels, 2);
+    let (primary, close) = match buttons.as_slice() {
+        [primary, close] => (*primary, *close),
+        [close] => (Rect::default(), *close),
+        _ => return None,
+    };
+    if show_primary {
+        modal_button(
             buffer,
             primary,
             primary_label,
-            Style::default()
-                .fg(contrast(palette))
-                .bg(palette.accent)
-                .add_modifier(Modifier::BOLD),
+            crate::ui::ModalButtonTone::Primary,
+            cx.button_state(
+                &super::feedback::ChromeHover::OverlayPrimary,
+                crate::ui::ModalButtonState::Focused,
+            ),
+            palette,
         );
-        (primary, buttons[1])
-    } else {
-        (Rect::default(), buttons[0])
-    };
-    button(
+    }
+    modal_button(
         buffer,
         close,
-        crate::ui::modal_close_button_text(),
-        Style::default()
-            .fg(palette.text)
-            .bg(palette.surface0)
-            .add_modifier(Modifier::BOLD),
+        close_label,
+        crate::ui::ModalButtonTone::Secondary,
+        cx.button_state(
+            &super::feedback::ChromeHover::OverlayCancel,
+            crate::ui::ModalButtonState::Normal,
+        ),
+        palette,
     );
-    put_text(
-        buffer,
-        inner.x,
-        inner.bottom().saturating_sub(2),
-        inner.width,
-        t.footer,
-        Style::default().fg(palette.overlay1).bg(palette.panel_bg),
-    );
+    if let Some(footer) = stack.footer {
+        put_text(
+            buffer,
+            footer.x,
+            footer.y,
+            footer.width,
+            t.footer,
+            Style::default().fg(palette.overlay1).bg(palette.panel_bg),
+        );
+    }
 
     Some(OverlayRender {
         area: popup,
@@ -318,8 +326,9 @@ fn render_integrations(
     buffer: &mut Buffer,
     area: Rect,
     settings: &ClientSettingsOverlay,
-    palette: &Palette,
+    cx: &super::feedback::ChromeContext<'_>,
 ) {
+    let palette = cx.palette;
     let t = &crate::i18n::texts().settings;
     put_text(
         buffer,
@@ -346,7 +355,7 @@ fn render_integrations(
             area.x,
             area.y + 3,
             area.width,
-            t.loading,
+            &format!("{} {}", cx.spinner, t.loading),
             Style::default().fg(palette.overlay1).bg(palette.panel_bg),
         );
         return;
@@ -430,7 +439,7 @@ fn render_integrations(
             area.x,
             message_y,
             area.width,
-            t.installing,
+            &format!("{} {}", cx.spinner, t.installing),
             Style::default().fg(palette.overlay1).bg(palette.panel_bg),
         );
     }

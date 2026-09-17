@@ -81,6 +81,7 @@ pub(super) fn render_list_scrollbar(
     track: Rect,
     metrics: crate::pane::ScrollMetrics,
     palette: &Palette,
+    thumb_hovered: bool,
 ) {
     let Some(thumb) = crate::ui::scrollbar_thumb(metrics, track) else {
         return;
@@ -91,10 +92,15 @@ pub(super) fn render_list_scrollbar(
                 .set_style(Style::default().fg(palette.surface_dim));
         }
     }
+    let thumb_color = if thumb_hovered {
+        palette.subtext0
+    } else {
+        palette.overlay0
+    };
     for row in thumb.top..thumb.top.saturating_add(thumb.len) {
         if let Some(cell) = buffer.cell_mut((track.x, row)) {
             cell.set_symbol("▕")
-                .set_style(Style::default().fg(palette.overlay0));
+                .set_style(Style::default().fg(thumb_color));
         }
     }
 }

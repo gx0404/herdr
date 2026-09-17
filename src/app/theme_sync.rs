@@ -30,15 +30,20 @@ impl App {
     }
 
     pub(super) fn refresh_effective_app_theme(&mut self) -> bool {
-        let (palette, theme_name) = super::resolve_effective_theme(
+        let resolved = super::resolve_effective_theme(
             &self.state.theme_runtime,
             self.state.host_terminal_appearance,
+            self.state.host_color_depth,
         );
-        if self.state.theme_name == theme_name && self.state.palette == palette {
+        if self.state.theme_name == resolved.name
+            && self.state.palette == resolved.palette
+            && self.state.components == resolved.components
+        {
             return false;
         }
-        self.state.theme_name = theme_name;
-        self.state.palette = palette;
+        self.state.theme_name = resolved.name;
+        self.state.palette = resolved.palette;
+        self.state.components = resolved.components;
         self.render_dirty.request_generic();
         self.render_notify.notify_one();
         true

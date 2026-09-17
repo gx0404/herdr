@@ -267,6 +267,8 @@ fn theme_runtime_config(
                 .and_then(|c| c.accent.as_ref())
                 .is_none())
         .then(|| config.ui.accent.clone()),
+        components: config.theme.components.clone(),
+        color_depth: config.ui.color_depth,
     }
 }
 
@@ -301,7 +303,8 @@ fn resolve_palette_for_theme_name(
 fn resolve_effective_theme(
     runtime: &state::ThemeRuntimeConfig,
     appearance: Option<crate::terminal_theme::HostAppearance>,
-) -> (state::Palette, String) {
+    host_depth: crate::config::ColorDepth,
+) -> state::ResolvedTheme {
     let (name, fallback, mode_custom) = if runtime.auto_switch {
         match appearance.unwrap_or(crate::terminal_theme::HostAppearance::Dark) {
             crate::terminal_theme::HostAppearance::Dark => (
@@ -324,33 +327,67 @@ fn resolve_effective_theme(
     } else {
         (&runtime.manual_name, "catppuccin", None)
     };
-    (
-        resolve_palette_for_theme_name(name, fallback, runtime, mode_custom),
-        name.clone(),
-    )
+    let palette = resolve_palette_for_theme_name(name, fallback, runtime, mode_custom)
+        .with_color_depth(host_depth);
+    let components =
+        state::ComponentStyles::resolve(&palette, runtime.components.as_ref(), host_depth);
+    state::ResolvedTheme {
+        palette,
+        components,
+        name: name.clone(),
+    }
+}
+
+/// Color depth used by client entry points that predate host detection.
+/// Explicit `256` is honored; `auto` stays truecolor here so their chrome
+/// output is byte-identical. The client shell itself resolves the host depth
+/// and goes through [`client_resolved_theme`].
+fn legacy_client_color_depth(runtime: &state::ThemeRuntimeConfig) -> crate::config::ColorDepth {
+    match runtime.color_depth.depth() {
+        crate::config::ColorDepth::Auto => crate::config::ColorDepth::Truecolor,
+        explicit => explicit,
+    }
 }
 
 pub(crate) fn client_theme_runtime_from_config(config: &Config) -> state::ThemeRuntimeConfig {
     theme_runtime_config(config, true)
 }
 
-pub(crate) fn client_palette_for_theme(
-    runtime: &state::ThemeRuntimeConfig,
-    name: &str,
-) -> state::Palette {
-    resolve_palette_for_theme_name(name, "catppuccin", runtime, None)
-}
-
+#[cfg(test)]
 pub(crate) fn client_palette_from_config(config: &Config) -> state::Palette {
     let runtime = client_theme_runtime_from_config(config);
-    resolve_effective_theme(&runtime, None).0
+    resolve_effective_theme(&runtime, None, legacy_client_color_depth(&runtime)).palette
 }
 
 pub(crate) fn client_palette_for_appearance(
     runtime: &state::ThemeRuntimeConfig,
     appearance: crate::terminal_theme::HostAppearance,
 ) -> state::Palette {
-    resolve_effective_theme(runtime, Some(appearance)).0
+    resolve_effective_theme(
+        runtime,
+        Some(appearance),
+        legacy_client_color_depth(runtime),
+    )
+    .palette
+}
+
+/// Resolved component styles for client chrome under the legacy depth rule.
+#[allow(dead_code)] // wired into client/shell during the chrome phase
+pub(crate) fn client_component_styles_from_config(config: &Config) -> state::ComponentStyles {
+    let runtime = client_theme_runtime_from_config(config);
+    resolve_effective_theme(&runtime, None, legacy_client_color_depth(&runtime)).components
+}
+
+/// Full theme resolution entry point for client chrome with an explicitly
+/// detected host color depth. This is the seam the client shell uses to wire
+/// `ui.color_depth = "auto"` detection, component tokens, and
+/// `crate::ui::BorderGlyphs` into its own renderers.
+pub(crate) fn client_resolved_theme(
+    runtime: &state::ThemeRuntimeConfig,
+    appearance: Option<crate::terminal_theme::HostAppearance>,
+    host_depth: crate::config::ColorDepth,
+) -> state::ResolvedTheme {
+    resolve_effective_theme(runtime, appearance, host_depth)
 }
 
 impl App {
@@ -439,7 +476,8 @@ impl App {
         #[cfg(test)]
         let agent_manifest_summaries = Vec::new();
         let theme_runtime = theme_runtime_config(config, true);
-        let (theme_palette, theme_name) = resolve_effective_theme(&theme_runtime, None);
+        let host_color_depth = crate::config::resolve_color_depth(config.ui.color_depth);
+        let resolved_theme = resolve_effective_theme(&theme_runtime, None, host_color_depth);
 
         let mut state = AppState {
             terminals: std::collections::HashMap::new(),
@@ -490,6 +528,8 @@ impl App {
             pane_outer_borders: config.ui.pane_outer_borders,
             pane_scrollbars: config.ui.pane_scrollbars,
             pane_gaps: config.ui.pane_gaps,
+            border_glyphs: crate::ui::BorderGlyphs::for_style(config.ui.border_style),
+            host_color_depth,
             show_agent_labels_on_pane_borders: config.ui.show_agent_labels_on_pane_borders,
             tab_bar_right: Vec::new(),
             tab_bar_right_separator: String::new(),
@@ -505,8 +545,9 @@ impl App {
             sound: config.ui.sound.clone(),
             toast_config: config.ui.toast.clone(),
             keybinds: config.keybinds(),
-            palette: theme_palette,
-            theme_name,
+            palette: resolved_theme.palette,
+            components: resolved_theme.components,
+            theme_name: resolved_theme.name,
             theme_runtime,
             host_terminal_appearance: None,
             host_terminal_appearance_explicit: false,
@@ -835,6 +876,10 @@ impl App {
                 diagnostics.extend(crate::config::window_title_diagnostics(
                     &config.ui.window_title,
                 ));
+                diagnostics.extend(crate::config::unknown_color_diagnostic(
+                    "ui.accent",
+                    &config.ui.accent,
+                ));
 
                 self.loaded_host_cursor = config.ui.host_cursor;
                 self.state.confirm_close = config.ui.confirm_close;
@@ -842,6 +887,10 @@ impl App {
                 self.state.pane_outer_borders = config.ui.pane_outer_borders;
                 self.state.pane_scrollbars = config.ui.pane_scrollbars;
                 self.state.pane_gaps = config.ui.pane_gaps;
+                self.state.border_glyphs =
+                    crate::ui::BorderGlyphs::for_style(config.ui.border_style);
+                self.state.host_color_depth =
+                    crate::config::resolve_color_depth(config.ui.color_depth);
                 self.state.show_agent_labels_on_pane_borders =
                     config.ui.show_agent_labels_on_pane_borders;
                 self.configure_tab_bar_status(
@@ -1350,6 +1399,7 @@ mod tests {
     #[test]
     fn theme_auto_switch_is_opt_in_and_preserves_manual_default() {
         let mut config = Config::default();
+        config.ui.color_depth = crate::config::ColorDepth::Truecolor.into();
         config.theme.name = Some("tokyo-night".to_string());
         config.theme.custom = Some(crate::config::CustomThemeColors {
             light: Some(crate::config::ModeThemeColors {
@@ -1380,6 +1430,7 @@ mod tests {
     #[test]
     fn theme_auto_switch_uses_sibling_map_and_explicit_appearance() {
         let mut config = Config::default();
+        config.ui.color_depth = crate::config::ColorDepth::Truecolor.into();
         config.theme.name = Some("tokyo-night".to_string());
         config.theme.auto_switch = true;
         let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -1404,6 +1455,7 @@ mod tests {
     #[test]
     fn theme_auto_switch_applies_custom_overrides_after_active_base() {
         let mut config = Config::default();
+        config.ui.color_depth = crate::config::ColorDepth::Truecolor.into();
         config.theme.name = Some("gruvbox".to_string());
         config.theme.auto_switch = true;
         config.theme.custom = Some(crate::config::CustomThemeColors {
@@ -1434,6 +1486,7 @@ mod tests {
     #[test]
     fn theme_auto_switch_layers_active_mode_overrides_last() {
         let mut config = Config::default();
+        config.ui.color_depth = crate::config::ColorDepth::Truecolor.into();
         config.theme.name = Some("gruvbox".to_string());
         config.theme.auto_switch = true;
         config.theme.custom = Some(crate::config::CustomThemeColors {
@@ -1487,6 +1540,130 @@ mod tests {
             ratatui::style::Color::Rgb(7, 8, 9)
         );
         assert_eq!(app.state.palette.text, ratatui::style::Color::Rgb(4, 5, 6));
+    }
+
+    #[test]
+    fn startup_applies_component_tokens_border_style_and_color_depth() {
+        let config: Config = toml::from_str(
+            r##"
+[ui]
+border_style = "rounded"
+color_depth = "256"
+
+[theme.components]
+pane_border_focused = "#010203"
+toast_border_success = "#a6e3a1"
+selection_mix_ratio = 0.5
+"##,
+        )
+        .unwrap();
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+
+        let app = App::new(
+            &config,
+            crate::app::AppPolicy::TEST,
+            None,
+            api_rx,
+            crate::api::EventHub::default(),
+        );
+
+        assert_eq!(app.state.border_glyphs, crate::ui::BorderGlyphs::ROUNDED);
+        assert_eq!(
+            app.state.host_color_depth,
+            crate::config::ColorDepth::Color256
+        );
+        assert_eq!(app.state.host_color_depth, app.state.components.color_depth);
+        // Palette and component overrides degrade through the same mapping.
+        assert_eq!(
+            app.state.palette.accent,
+            ratatui::style::Color::Indexed(crate::config::rgb_to_xterm256(137, 180, 250))
+        );
+        assert_eq!(
+            app.state.components.pane_border_focused,
+            ratatui::style::Color::Indexed(crate::config::rgb_to_xterm256(1, 2, 3))
+        );
+        assert_eq!(
+            app.state.components.toast_border_success,
+            ratatui::style::Color::Indexed(crate::config::rgb_to_xterm256(0xa6, 0xe3, 0xa1))
+        );
+        // Unset component tokens fall back to the (degraded) semantic tokens.
+        assert_eq!(
+            app.state.components.pane_border_unfocused,
+            app.state.palette.overlay0
+        );
+        assert_eq!(app.state.components.selection_mix_ratio, 0.5);
+    }
+
+    #[test]
+    fn reload_config_applies_component_tokens_and_border_style() {
+        let _guard = config_env_lock().lock().unwrap();
+        let path = temp_config_path("reload-config-theme-components");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &path,
+            "[ui]\nborder_style = \"double\"\ncolor_depth = \"truecolor\"\n\n[theme.components]\nscrollbar_thumb = \"#010203\"\n",
+        )
+        .unwrap();
+        std::env::set_var(crate::config::CONFIG_PATH_ENV_VAR, &path);
+
+        let mut app = test_app();
+        assert_eq!(app.state.border_glyphs, crate::ui::BorderGlyphs::SINGLE);
+
+        let report = app.reload_config();
+
+        assert_eq!(report.status, crate::config::ConfigReloadStatus::Applied);
+        assert_eq!(app.state.border_glyphs, crate::ui::BorderGlyphs::DOUBLE);
+        assert_eq!(
+            app.state.components.scrollbar_thumb_focused,
+            ratatui::style::Color::Rgb(1, 2, 3)
+        );
+        assert_eq!(
+            app.state.components.scrollbar_thumb_unfocused,
+            ratatui::style::Color::Rgb(1, 2, 3)
+        );
+
+        std::env::remove_var(crate::config::CONFIG_PATH_ENV_VAR);
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn reload_config_reports_unknown_component_and_accent_colors() {
+        let _guard = config_env_lock().lock().unwrap();
+        let path = temp_config_path("reload-config-unknown-colors");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &path,
+            "[ui]\naccent = \"puce\"\n\n[theme.components]\nscrollbar_thumb = \"octarine\"\n",
+        )
+        .unwrap();
+        std::env::set_var(crate::config::CONFIG_PATH_ENV_VAR, &path);
+
+        let mut app = test_app();
+        let report = app.reload_config();
+
+        assert_eq!(report.status, crate::config::ConfigReloadStatus::Partial);
+        assert!(
+            report
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.contains("unknown color ui.accent = \"puce\"")),
+            "diagnostics: {:?}",
+            report.diagnostics
+        );
+        assert!(
+            report.diagnostics.iter().any(|diagnostic| diagnostic
+                .contains("unknown color theme.components.scrollbar_thumb = \"octarine\"")),
+            "diagnostics: {:?}",
+            report.diagnostics
+        );
+        // Fallback behavior stays compatible: unknown colors keep rendering cyan.
+        assert_eq!(
+            app.state.components.scrollbar_thumb_focused,
+            ratatui::style::Color::Cyan
+        );
+
+        std::env::remove_var(crate::config::CONFIG_PATH_ENV_VAR);
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 
     #[test]

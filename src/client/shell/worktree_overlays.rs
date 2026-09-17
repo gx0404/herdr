@@ -3,30 +3,40 @@ use super::*;
 pub(super) fn render_worktree_create_overlay(
     b: &mut Buffer,
     create: &ClientWorktreeCreateOverlay,
-    p: &Palette,
+    cx: &super::feedback::ChromeContext<'_>,
 ) -> Option<OverlayRender> {
-    let popup = popup(b.area, 68, 12)?;
-    let inner = panel(b, popup, p.accent, p.panel_bg)?;
+    let p = cx.palette;
+    let (popup, inner) = modal_panel(
+        b,
+        crate::ui::ModalSize::Content {
+            width: 68,
+            height: 12,
+        },
+        p.accent,
+        cx,
+    )?;
+    let stack = crate::ui::modal_stack_areas(inner, 1, 0, 1, 1);
     put_text(
         b,
-        inner.x,
-        inner.y,
-        inner.width,
+        stack.header.x,
+        stack.header.y,
+        stack.header.width,
         crate::i18n::texts().worktree.new_worktree,
         Style::default()
             .fg(p.text)
             .bg(p.panel_bg)
             .add_modifier(Modifier::BOLD),
     );
+    let content = stack.content;
     put_text(
         b,
-        inner.x,
-        inner.y + 2,
-        inner.width,
+        content.x,
+        content.y,
+        content.width,
         crate::i18n::texts().worktree.branch_hint,
         Style::default().fg(p.overlay0).bg(p.panel_bg),
     );
-    let input = Rect::new(inner.x, inner.y + 3, inner.width, 1);
+    let input = Rect::new(content.x, content.y + 1, content.width, 1);
     b.set_style(input, Style::default().fg(p.text).bg(p.surface0));
     let cursor = text_editor::render(
         b,
@@ -36,67 +46,78 @@ pub(super) fn render_worktree_create_overlay(
     );
     put_text(
         b,
-        inner.x,
-        inner.y + 5,
-        inner.width,
+        content.x,
+        content.y + 3,
+        content.width,
         crate::i18n::texts().worktree.checkout_hint,
         Style::default().fg(p.overlay0).bg(p.panel_bg),
     );
     put_text(
         b,
-        inner.x,
-        inner.y + 6,
-        inner.width,
+        content.x,
+        content.y + 4,
+        content.width,
         &format!(" {}", create.checkout_path),
         Style::default().fg(p.subtext0).bg(p.panel_bg),
     );
+    let status_y = stack
+        .actions
+        .map(|actions| actions.y.saturating_sub(1))
+        .unwrap_or(content.bottom());
     if create.creating {
         put_text(
             b,
-            inner.x,
-            inner.y + 8,
-            inner.width,
-            crate::i18n::texts().worktree.creating,
+            content.x,
+            status_y,
+            content.width,
+            &format!("{} {}", cx.spinner, crate::i18n::texts().worktree.creating),
             Style::default().fg(p.accent).bg(p.panel_bg),
         );
     } else if let Some(error) = create.error.as_deref() {
         put_text(
             b,
-            inner.x,
-            inner.y + 8,
-            inner.width,
+            content.x,
+            status_y,
+            content.width,
             &format!(" {error}"),
             Style::default().fg(p.red).bg(p.panel_bg),
         );
     }
     let create_label = crate::i18n::texts().worktree.create_and_open;
     let cancel_label = crate::i18n::texts().overlays.cancel_button;
-    let buttons = row(
-        inner,
-        &[display_width(create_label), display_width(cancel_label)],
+    let buttons = modal_button_row(
+        stack.actions.unwrap_or_default(),
+        &[create_label, cancel_label],
         2,
-        9,
     );
     let [primary, cancel] = buttons.as_slice() else {
         return None;
     };
-    button(
+    modal_button(
         b,
         *primary,
         create_label,
-        Style::default()
-            .fg(contrast(p))
-            .bg(p.accent)
-            .add_modifier(Modifier::BOLD),
+        crate::ui::ModalButtonTone::Primary,
+        if create.creating {
+            crate::ui::ModalButtonState::Disabled
+        } else {
+            cx.button_state(
+                &super::feedback::ChromeHover::OverlayPrimary,
+                crate::ui::ModalButtonState::Focused,
+            )
+        },
+        p,
     );
-    button(
+    modal_button(
         b,
         *cancel,
         cancel_label,
-        Style::default()
-            .fg(p.text)
-            .bg(p.surface0)
-            .add_modifier(Modifier::BOLD),
+        crate::ui::ModalButtonTone::Secondary,
+        cx.button_state(
+            &super::feedback::ChromeHover::OverlayCancel,
+            crate::ui::ModalButtonState::Normal,
+        ),
+        p,
     );
     Some(OverlayRender {
         area: popup,
@@ -116,44 +137,33 @@ pub(super) fn render_worktree_create_overlay(
 pub(super) fn render_worktree_open_overlay(
     b: &mut Buffer,
     open: &ClientWorktreeOpenOverlay,
-    p: &Palette,
+    cx: &super::feedback::ChromeContext<'_>,
 ) -> Option<OverlayRender> {
+    let p = cx.palette;
     let popup_height = (open.entries.len().saturating_mul(2) + 7).clamp(12, 26) as u16;
-    let popup = popup(b.area, 96, popup_height)?;
-    let inner = panel(b, popup, p.accent, p.panel_bg)?;
+    let (popup, inner) = modal_panel(
+        b,
+        crate::ui::ModalSize::Content {
+            width: 96,
+            height: popup_height,
+        },
+        p.accent,
+        cx,
+    )?;
+    let stack = crate::ui::modal_stack_areas(inner, 2, 1, 1, 1);
     put_text(
         b,
-        inner.x,
-        inner.y,
-        inner.width,
+        stack.header.x,
+        stack.header.y,
+        stack.header.width,
         crate::i18n::texts().worktree.open_worktree,
         Style::default()
             .fg(p.text)
             .bg(p.panel_bg)
             .add_modifier(Modifier::BOLD),
     );
-    let search = Rect::new(inner.x, inner.y + 1, inner.width, 1);
+    let search = Rect::new(stack.header.x, stack.header.y + 1, stack.header.width, 1);
     let filtered = open.filtered_indices();
-    put_text(
-        b,
-        search.x,
-        search.y,
-        search.width,
-        &if open.search_focused {
-            " / ".to_owned()
-        } else if !open.query.is_empty() {
-            format!(" / {}", open.query)
-        } else {
-            crate::i18n::texts().worktree.filter_worktrees.to_owned()
-        },
-        Style::default()
-            .fg(if open.search_focused {
-                p.text
-            } else {
-                p.overlay0
-            })
-            .bg(p.panel_bg),
-    );
     let count = if filtered.len() == open.entries.len() {
         crate::i18n::fill(
             crate::i18n::texts().worktree.checkouts_fmt,
@@ -168,42 +178,28 @@ pub(super) fn render_worktree_open_overlay(
             ],
         )
     };
-    let cursor = if open.search_focused {
-        text_editor::render(
-            b,
-            Rect::new(
-                search.x + 3,
-                search.y,
-                search.width.saturating_sub(4 + display_width(&count)),
-                1,
-            ),
-            &open.query,
-            Style::default().fg(p.text).bg(p.panel_bg),
-        )
-    } else {
-        None
-    };
-    put_right_text(
+    let cursor = render_search_bar(
         b,
         search,
-        search.y,
-        &count,
-        Style::default().fg(p.overlay0).bg(p.panel_bg),
+        &SearchBar {
+            focused: open.search_focused,
+            query: &open.query,
+            hint: crate::i18n::texts().worktree.filter_worktrees,
+            status: None,
+            echo_query: true,
+            count: Some(count),
+        },
+        p,
     );
     put_text(
         b,
         inner.x,
-        inner.y + 2,
+        stack.header.bottom(),
         inner.width,
         &"─".repeat(inner.width as usize),
         Style::default().fg(p.surface1).bg(p.panel_bg),
     );
-    let body = Rect::new(
-        inner.x,
-        inner.y + 3,
-        inner.width,
-        inner.height.saturating_sub(6),
-    );
+    let body = stack.content;
     let visible_count = (body.height / 2).max(1) as usize;
     let selected_position = filtered
         .iter()
@@ -225,7 +221,7 @@ pub(super) fn render_worktree_open_overlay(
         row_hits.push((rect, entry_index));
         let selected = entry_index == open.selected;
         let style = if selected {
-            Style::default().fg(contrast(p)).bg(p.accent)
+            Style::default().fg(panel_contrast_fg(p)).bg(p.accent)
         } else {
             Style::default().fg(p.text).bg(p.panel_bg)
         };
@@ -265,20 +261,21 @@ pub(super) fn render_worktree_open_overlay(
             Style::default().fg(p.overlay0).bg(p.panel_bg),
         );
     }
+    let status_y = stack.footer.map(|footer| footer.y).unwrap_or(body.bottom());
     if open.opening {
         put_text(
             b,
             inner.x,
-            inner.bottom() - 3,
+            status_y,
             inner.width,
-            crate::i18n::texts().worktree.opening,
+            &format!("{} {}", cx.spinner, crate::i18n::texts().worktree.opening),
             Style::default().fg(p.accent).bg(p.panel_bg),
         );
     } else if let Some(error) = open.error.as_deref() {
         put_text(
             b,
             inner.x,
-            inner.bottom() - 3,
+            status_y,
             inner.width,
             &format!(" {error}"),
             Style::default().fg(p.red).bg(p.panel_bg),
@@ -286,32 +283,39 @@ pub(super) fn render_worktree_open_overlay(
     }
     let open_label = crate::i18n::texts().worktree.open_button;
     let cancel_label = crate::i18n::texts().overlays.cancel_button;
-    let buttons = row(
-        inner,
-        &[display_width(open_label), display_width(cancel_label)],
+    let buttons = modal_button_row(
+        stack.actions.unwrap_or_default(),
+        &[open_label, cancel_label],
         2,
-        inner.height.saturating_sub(1),
     );
     let [primary, cancel] = buttons.as_slice() else {
         return None;
     };
-    button(
+    modal_button(
         b,
         *primary,
         open_label,
-        Style::default()
-            .fg(contrast(p))
-            .bg(p.accent)
-            .add_modifier(Modifier::BOLD),
+        crate::ui::ModalButtonTone::Primary,
+        if open.opening {
+            crate::ui::ModalButtonState::Disabled
+        } else {
+            cx.button_state(
+                &super::feedback::ChromeHover::OverlayPrimary,
+                crate::ui::ModalButtonState::Focused,
+            )
+        },
+        p,
     );
-    button(
+    modal_button(
         b,
         *cancel,
         cancel_label,
-        Style::default()
-            .fg(p.text)
-            .bg(p.surface0)
-            .add_modifier(Modifier::BOLD),
+        crate::ui::ModalButtonTone::Secondary,
+        cx.button_state(
+            &super::feedback::ChromeHover::OverlayCancel,
+            crate::ui::ModalButtonState::Normal,
+        ),
+        p,
     );
     Some(OverlayRender {
         area: popup,
@@ -331,15 +335,25 @@ pub(super) fn render_worktree_open_overlay(
 pub(super) fn render_worktree_remove_overlay(
     b: &mut Buffer,
     remove: &ClientWorktreeRemoveOverlay,
-    p: &Palette,
+    cx: &super::feedback::ChromeContext<'_>,
 ) -> Option<OverlayRender> {
-    let popup = popup(b.area, 72, 10)?;
-    let inner = panel(b, popup, p.red, p.panel_bg)?;
+    let p = cx.palette;
+    let (popup, inner) = modal_panel(
+        b,
+        crate::ui::ModalSize::Content {
+            width: 72,
+            height: 10,
+        },
+        p.red,
+        cx,
+    )?;
+    let stack = crate::ui::modal_stack_areas(inner, 1, 0, 1, 0);
+    let content = stack.content;
     put_text(
         b,
-        inner.x,
-        inner.y,
-        inner.width,
+        stack.header.x,
+        stack.header.y,
+        stack.header.width,
         crate::i18n::texts().worktree.delete_title,
         Style::default()
             .fg(p.red)
@@ -348,34 +362,34 @@ pub(super) fn render_worktree_remove_overlay(
     );
     put_text(
         b,
-        inner.x,
-        inner.y + 1,
-        inner.width,
+        content.x,
+        content.y,
+        content.width,
         crate::i18n::texts().worktree.removes_folder,
         Style::default().fg(p.text).bg(p.panel_bg),
     );
     put_text(
         b,
-        inner.x,
-        inner.y + 2,
-        inner.width,
+        content.x,
+        content.y + 1,
+        content.width,
         &format!(" {}", remove.path),
         Style::default().fg(p.subtext0).bg(p.panel_bg),
     );
     put_text(
         b,
-        inner.x,
-        inner.y + 3,
-        inner.width,
+        content.x,
+        content.y + 2,
+        content.width,
         crate::i18n::texts().worktree.branch_not_deleted,
         Style::default().fg(p.text).bg(p.panel_bg),
     );
     if remove.force_confirmation {
         put_text(
             b,
-            inner.x,
-            inner.y + 4,
-            inner.width,
+            content.x,
+            content.y + 3,
+            content.width,
             crate::i18n::texts().worktree.dirty_warning,
             Style::default().fg(p.red).bg(p.panel_bg),
         );
@@ -383,18 +397,18 @@ pub(super) fn render_worktree_remove_overlay(
     if remove.removing {
         put_text(
             b,
-            inner.x,
-            inner.y + 5,
-            inner.width,
-            crate::i18n::texts().worktree.removing,
+            content.x,
+            content.y + 4,
+            content.width,
+            &format!("{} {}", cx.spinner, crate::i18n::texts().worktree.removing),
             Style::default().fg(p.accent).bg(p.panel_bg),
         );
     } else if let Some(error) = remove.error.as_deref() {
         put_text(
             b,
-            inner.x,
-            inner.y + 5,
-            inner.width,
+            content.x,
+            content.y + 4,
+            content.width,
             &format!(" {error}"),
             Style::default().fg(p.red).bg(p.panel_bg),
         );
@@ -405,32 +419,39 @@ pub(super) fn render_worktree_remove_overlay(
         crate::i18n::texts().worktree.remove
     };
     let cancel_label = crate::i18n::texts().overlays.cancel_button;
-    let buttons = row(
-        inner,
-        &[display_width(primary_label), display_width(cancel_label)],
+    let buttons = modal_button_row(
+        stack.actions.unwrap_or_default(),
+        &[primary_label, cancel_label],
         2,
-        7,
     );
     let [primary, cancel] = buttons.as_slice() else {
         return None;
     };
-    button(
+    modal_button(
         b,
         *primary,
         primary_label,
-        Style::default()
-            .fg(contrast(p))
-            .bg(p.red)
-            .add_modifier(Modifier::BOLD),
+        crate::ui::ModalButtonTone::Danger,
+        if remove.removing {
+            crate::ui::ModalButtonState::Disabled
+        } else {
+            cx.button_state(
+                &super::feedback::ChromeHover::OverlayPrimary,
+                crate::ui::ModalButtonState::Focused,
+            )
+        },
+        p,
     );
-    button(
+    modal_button(
         b,
         *cancel,
         cancel_label,
-        Style::default()
-            .fg(p.text)
-            .bg(p.surface0)
-            .add_modifier(Modifier::BOLD),
+        crate::ui::ModalButtonTone::Secondary,
+        cx.button_state(
+            &super::feedback::ChromeHover::OverlayCancel,
+            crate::ui::ModalButtonState::Normal,
+        ),
+        p,
     );
     Some(OverlayRender {
         area: popup,

@@ -152,13 +152,14 @@ fn notifications_and_clipboard_feedback_only_cover_their_drawn_corners() {
                 Rect::new(0, 0, cols, rows)
             };
             let mut buffer = Buffer::empty(Rect::new(0, 0, cols, rows));
-            let rect = crate::ui::render_copy_feedback_buffer(
+            let rect = crate::ui::render_copy_feedback_buffer_styled(
                 &mut buffer,
                 area,
                 state.copy_feedback.as_ref().unwrap(),
                 0,
                 position,
                 &state.config.palette,
+                &state.config.components,
             );
             assert_graphics_cover(&mut state, rect, cols, rows);
         }
@@ -190,7 +191,9 @@ fn endpoint_notice_and_multiline_diagnostic_cover_the_actual_rows() {
 
 #[test]
 fn every_dialog_and_menu_occludes_its_panel_not_the_whole_screen() {
-    let palette = ClientShellConfig::from_config(&Config::default()).palette;
+    let default_config = ClientShellConfig::from_config(&Config::default());
+    let palette = default_config.palette.clone();
+    let components = default_config.components.clone();
     let overlays = vec![
         ClientShellOverlay::Onboarding,
         ClientShellOverlay::ProductAnnouncement(crate::app::state::ProductAnnouncementState {
@@ -265,12 +268,19 @@ fn every_dialog_and_menu_occludes_its_panel_not_the_whole_screen() {
             y: 8,
             highlighted: 0,
         }),
-        ClientShellOverlay::GlobalMenu(ClientGlobalMenuOverlay { highlighted: 0 }),
+        ClientShellOverlay::CommandPalette(super::command_palette::ClientCommandPaletteOverlay {
+            query: TextEditor::default(),
+            selected: 0,
+            scroll: 0,
+            items: Vec::new(),
+            recent_ids: Vec::new(),
+        }),
         ClientShellOverlay::Settings(ClientSettingsOverlay {
             section: ClientSettingsSection::Theme,
             selected: 0,
             original_theme_name: String::new(),
             original_palette: palette,
+            original_components: components,
             integrations: Vec::new(),
             integration_messages: Vec::new(),
             loading_integrations: false,
@@ -285,25 +295,32 @@ fn every_dialog_and_menu_occludes_its_panel_not_the_whole_screen() {
         let layout = state.layout(106, 40);
         let mut buffer = Buffer::empty(Rect::new(0, 0, 106, 40));
         let snapshot = state.snapshot.as_deref().unwrap();
+        let cx = super::super::feedback::ChromeContext {
+            palette: &state.config.palette,
+            components: &state.config.components,
+            glyphs: state.config.border_glyphs,
+            hover: None,
+            spinner: "◐",
+            now: std::time::Instant::now(),
+        };
         let rendered = match &overlay {
             ClientShellOverlay::ContextMenu(menu) => {
-                render::render_context_menu(&mut buffer, menu, &state.config.palette)
+                render::render_context_menu(&mut buffer, menu, &cx)
             }
-            ClientShellOverlay::GlobalMenu(menu) => render::render_global_menu(
-                &mut buffer,
-                state.hits.global_launcher,
-                menu,
-                snapshot,
-                &state.config.palette,
-            ),
             _ => render::render_client_overlay(
                 &mut buffer,
                 &overlay,
                 snapshot,
                 &state.endpoints,
+                &state.saved_profiles,
+                &state.broadcast,
+                &state.endpoint_connection_errors,
+                &state.endpoint_port_forwards,
+                &state.session_log_dropped,
                 &state.active_endpoint_id,
                 &state.config.keybinds,
-                &state.config.palette,
+                &state.notification_history,
+                &cx,
             ),
         }
         .unwrap();

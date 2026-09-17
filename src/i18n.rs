@@ -119,6 +119,7 @@ pub struct ChromeTexts {
     pub close_button: &'static str,
     pub continue_button: &'static str,
     pub copied: &'static str,
+    pub popup_title: &'static str,
 }
 
 pub struct OnboardingTexts {
@@ -148,15 +149,53 @@ pub struct ContextMenuTexts {
     pub zoom: &'static str,
     pub use_herdr_menu: &'static str,
     pub send_right_clicks: &'static str,
+    pub manage_machines: &'static str,
+    pub edit_machine: &'static str,
+    pub reconnect_machine: &'static str,
+    pub enable_machine: &'static str,
+    pub disable_machine: &'static str,
+    pub remove_machine: &'static str,
+    pub copy_machine_fix_command: &'static str,
 }
 
 pub struct GlobalMenuTexts {
     pub settings: &'static str,
+    pub machines: &'static str,
+    pub notifications: &'static str,
     pub keybinds: &'static str,
     pub reload_config: &'static str,
     pub update_ready: &'static str,
     pub whats_new: &'static str,
     pub detach: &'static str,
+    // Command palette (fuzzy search over every available action).
+    pub search_hint: &'static str,
+    pub recent: &'static str,
+    pub no_matches: &'static str,
+    pub footer_run: &'static str,
+    pub footer_select: &'static str,
+    pub footer_close: &'static str,
+    pub machine_connect_fmt: &'static str, // args: label
+    pub machine_switch_fmt: &'static str,  // args: label
+    pub machine_edit_fmt: &'static str,    // args: label
+    pub machine_enable_fmt: &'static str,  // args: label
+    pub machine_disable_fmt: &'static str, // args: label
+    pub machine_import: &'static str,
+    pub snippets: &'static str,
+    pub snippet_run: &'static str,
+    pub scene_save: &'static str,
+    pub scene_restore: &'static str,
+    pub broadcast: &'static str,
+}
+
+/// Notification history overlay (global menu → notifications).
+pub struct HistoryTexts {
+    pub title: &'static str,
+    pub empty: &'static str,
+    pub footer: &'static str,
+    pub just_now: &'static str,
+    pub minutes_ago_fmt: &'static str, // args: n
+    pub hours_ago_fmt: &'static str,   // args: n
+    pub days_ago_fmt: &'static str,    // args: n
 }
 
 pub struct KeybindTexts {
@@ -169,6 +208,7 @@ pub struct KeybindTexts {
     pub prefix_mode: &'static str,
     pub keybinds: &'static str,
     pub settings: &'static str,
+    pub manage_machines: &'static str,
     pub detach: &'static str,
     pub reload_config: &'static str,
     pub open_notification_target: &'static str,
@@ -220,6 +260,7 @@ pub struct KeybindTexts {
     pub cycle_pane_next: &'static str,
     pub cycle_pane_previous: &'static str,
     pub last_pane: &'static str,
+    pub link_hints: &'static str,
     pub custom_command: &'static str,
 }
 
@@ -230,11 +271,8 @@ pub struct OverlayTexts {
     pub product_announcement_preview: &'static str,
     pub product_announcement: &'static str,
     pub keybinds_title: &'static str,
-    pub footer_scroll: &'static str,
-    pub footer_wheel: &'static str,
-    pub footer_sep: &'static str,
+    pub hint_scroll: &'static str,
     pub footer_close: &'static str,
-    pub footer_keys: &'static str,
     pub save_button: &'static str,
     pub clear_button: &'static str,
     pub cancel_button: &'static str,
@@ -251,6 +289,7 @@ pub struct OverlayTexts {
     pub edit_footer: &'static str,
     pub search_footer: &'static str,
     pub no_matching_keybinds: &'static str,
+    pub link_hints_no_links: &'static str,
 }
 
 pub struct DialogTexts {
@@ -286,6 +325,11 @@ pub struct WorktreeTexts {
     pub removing: &'static str,
     pub delete_anyway: &'static str,
     pub remove: &'static str,
+    pub branch_required: &'static str,
+    pub start_from_parent: &'static str,
+    pub not_a_worktree_checkout: &'static str,
+    pub no_worktrees_found: &'static str,
+    pub unexpected_result: &'static str,
 }
 
 pub struct SettingsTexts {
@@ -326,6 +370,8 @@ pub struct SettingsTexts {
     pub state_available: &'static str,
     pub state_not_found: &'static str,
     pub installing: &'static str,
+    pub unexpected_list_result: &'static str,
+    pub unexpected_install_result: &'static str,
 }
 
 pub struct SidebarTexts {
@@ -342,6 +388,7 @@ pub struct SidebarTexts {
     pub wt_root: &'static str,
     pub sort_grouped: &'static str,
     pub sort_priority: &'static str,
+    pub no_matching_agents: &'static str,
 }
 
 pub struct StatusTexts {
@@ -368,6 +415,7 @@ pub struct ModeBarTexts {
     pub resize_done: &'static str,
     pub copy: &'static str,
     pub copy_footer: &'static str,
+    pub broadcast_fmt: &'static str, // args: count
 }
 
 pub struct NotifyTexts {
@@ -387,11 +435,6 @@ pub struct MobileTexts {
     pub no_workspace: &'static str,
     pub switch: &'static str,
     pub switch_label: &'static str,
-    pub st_connecting: &'static str,
-    pub st_online: &'static str,
-    pub st_reconnecting: &'static str,
-    pub st_attention: &'static str,
-    pub st_disabled: &'static str,
     pub tab_label_fmt: &'static str,
     pub tab_label_pos_fmt: &'static str,
     pub no_agents: &'static str,
@@ -402,7 +445,6 @@ pub struct MobileTexts {
     pub section_menu: &'static str,
     pub agents_label_fmt: &'static str,
     pub agents_plain: &'static str,
-    pub no_matching_agents: &'static str,
     pub new_workspace: &'static str,
     pub new_tab: &'static str,
     pub close: &'static str,
@@ -417,7 +459,477 @@ pub struct UpdateTexts {
 
 pub struct EndpointTexts {
     pub local_unavailable: &'static str,
-    pub saved_machines_fmt: &'static str,
+    pub saved_machines_fmt: &'static str, // args: error
+    pub st_connecting: &'static str,
+    pub st_online: &'static str,
+    pub st_reconnecting: &'static str,
+    pub st_attention: &'static str,
+    pub st_disabled: &'static str,
+    pub unknown_endpoint: &'static str,
+    pub offline_hint_fmt: &'static str, // args: label, status
+    pub workspace_unavailable_hint: &'static str,
+    pub custom_command_unavailable: &'static str,
+    pub notice_server_timed_out: &'static str,
+    pub notice_timeout_body_fmt: &'static str, // args: method
+    pub notice_action_interrupted: &'static str,
+    pub notice_server_unavailable: &'static str,
+    pub notice_action_rejected: &'static str,
+    pub notice_action_unavailable: &'static str,
+    pub notice_action_not_applicable: &'static str,
+    pub notice_unsupported_method_fmt: &'static str, // args: method
+    pub notice_paste_rejected: &'static str,
+    pub notice_endpoint_unavailable: &'static str,
+    pub notice_cancelled_body: &'static str,
+    pub unexpected_selection_result: &'static str,
+    pub unexpected_link_result: &'static str,
+    pub unexpected_copy_motion_result: &'static str,
+    pub unexpected_copy_search_result: &'static str,
+    pub unexpected_config_reload_result: &'static str,
+}
+
+/// Texts for the in-TUI machine manager: the machines overlay (list, detail,
+/// add/edit form), its bootstrap progress, and the sidebar affordances.
+/// `*_fmt` entries are `fill` templates; placeholders are documented inline.
+pub struct MachinesTexts {
+    pub title: &'static str,
+    pub search_hint: &'static str,
+    pub count_fmt: &'static str, // args: count
+    pub empty: &'static str,
+    pub empty_hint: &'static str,
+    // Footer hint labels (rendered as key caps by `render_key_hints`).
+    pub hint_select: &'static str,
+    pub hint_details: &'static str,
+    pub hint_add: &'static str,
+    pub hint_import: &'static str,
+    pub hint_filter: &'static str,
+    pub hint_close: &'static str,
+    pub hint_back: &'static str,
+    pub hint_edit: &'static str,
+    pub hint_rename: &'static str,
+    pub hint_reconnect: &'static str,
+    pub hint_review: &'static str,
+    pub hint_toggle_enabled: &'static str,
+    pub hint_remove: &'static str,
+    pub hint_forwards: &'static str,
+    pub hint_fields: &'static str,
+    pub hint_change: &'static str,
+    pub hint_next: &'static str,
+    pub hint_confirm: &'static str,
+    pub hint_toggle: &'static str,
+    pub hint_all_none: &'static str,
+    pub hint_continue: &'static str,
+    // Detail field labels.
+    pub detail_id: &'static str,
+    pub detail_target: &'static str,
+    pub detail_session: &'static str,
+    pub detail_status: &'static str,
+    pub detail_server_version: &'static str,
+    pub detail_enabled: &'static str,
+    pub detail_group: &'static str,
+    pub detail_tags: &'static str,
+    pub detail_color: &'static str,
+    pub detail_port: &'static str,
+    pub detail_user: &'static str,
+    pub detail_identity_files: &'static str,
+    pub detail_identities_only: &'static str,
+    pub detail_identity_agent: &'static str,
+    pub detail_strict_host_key: &'static str,
+    pub detail_proxy_jump: &'static str,
+    pub detail_forward_agent: &'static str,
+    pub detail_server_alive_interval: &'static str,
+    pub detail_server_alive_count_max: &'static str,
+    pub detail_control_persist: &'static str,
+    pub detail_remote_command: &'static str,
+    pub detail_last_error: &'static str,
+    pub value_not_set: &'static str,
+    pub fix_hint: &'static str,
+    // Detail action buttons.
+    pub add_button: &'static str,
+    pub edit_button: &'static str,
+    pub reconnect_button: &'static str,
+    pub enable_button: &'static str,
+    pub disable_button: &'static str,
+    pub remove_button: &'static str,
+    pub copy_fix_button: &'static str,
+    pub copied_fix_command: &'static str,
+    // Remove confirmation.
+    pub remove_title_fmt: &'static str, // args: label
+    pub remove_detail: &'static str,
+    // Add/edit form.
+    pub add_title: &'static str,
+    pub edit_title: &'static str,
+    pub step_target: &'static str,
+    pub step_connection: &'static str,
+    pub step_session: &'static str,
+    pub step_confirm: &'static str,
+    pub field_label: &'static str,
+    pub hint_identity_files: &'static str,
+    pub hint_proxy_jump: &'static str,
+    pub hint_color: &'static str,
+    pub choice_default: &'static str,
+    pub choice_yes: &'static str,
+    pub choice_no: &'static str,
+    pub next_button: &'static str,
+    pub start_setup_button: &'static str,
+    pub save_button: &'static str,
+    pub confirm_install_note: &'static str,
+    pub confirm_auth_note: &'static str,
+    // Remote bootstrap progress.
+    pub progress_detect: &'static str,
+    pub progress_install: &'static str,
+    pub progress_start: &'static str,
+    pub progress_verify: &'static str,
+    pub progress_done_fmt: &'static str,   // args: label
+    pub progress_failed_fmt: &'static str, // args: error
+    // Port forwards: detail section and the rules editor page.
+    pub detail_port_forwards: &'static str,
+    pub forward_status_active: &'static str,
+    pub forward_status_failed: &'static str,
+    pub forward_waiting: &'static str,
+    pub forwards_title_fmt: &'static str, // args: label
+    pub forward_none: &'static str,
+    pub forward_none_hint: &'static str,
+    pub forward_add_title: &'static str,
+    pub forward_field_kind: &'static str,
+    pub forward_field_listen_port: &'static str,
+    pub forward_field_bind_address: &'static str,
+    pub forward_field_target_host: &'static str,
+    pub forward_field_target_port: &'static str,
+    pub forward_saved: &'static str,
+    pub forward_removed: &'static str,
+    pub forwards_button: &'static str,
+    // SSH config import wizard.
+    pub import_button: &'static str,
+    pub import_title: &'static str,
+    pub import_step_discover: &'static str,
+    pub import_step_select: &'static str,
+    pub import_step_done: &'static str,
+    pub import_no_config: &'static str,
+    pub import_read_failed_fmt: &'static str, // args: error
+    pub import_no_hosts_fmt: &'static str,    // args: path
+    pub import_warnings_fmt: &'static str,    // args: count
+    pub import_skip_header: &'static str,
+    pub import_ready_header: &'static str,
+    pub import_notes_fmt: &'static str, // args: count
+    pub import_include_wildcards: &'static str,
+    pub import_group_label: &'static str,
+    pub import_selected_fmt: &'static str, // args: selected, total
+    pub import_run_button: &'static str,
+    pub import_result_imported: &'static str,
+    pub import_result_skipped: &'static str,
+    pub import_result_failed: &'static str,
+    pub import_failed_hint: &'static str,
+    pub import_summary_fmt: &'static str, // args: imported, skipped, failed
+    pub import_connect_note: &'static str,
+    // Session log: detail-card block and the edit-form fields.
+    pub detail_session_log: &'static str,
+    pub session_log_dropped_fmt: &'static str, // args: count
+    pub field_session_log_enabled: &'static str,
+    pub field_session_log_path: &'static str,
+    pub field_session_log_max_bytes: &'static str,
+    pub field_session_log_interval: &'static str,
+    pub hint_session_log_path: &'static str,
+    // Detail entries into the broadcast set manager and the file browser.
+    pub hint_broadcast: &'static str,
+    pub broadcast_button: &'static str,
+    pub hint_browse_files: &'static str,
+    pub browse_files_button: &'static str,
+}
+
+/// Texts for the broadcast target-set manager: the overlay listing the
+/// registered panes, the machine/pane pickers, and the gate toggle. The
+/// persisted set and its validation live in `endpoint::broadcast`; the
+/// always-on input indicator is `ModeBarTexts::broadcast_fmt`.
+/// `*_fmt` entries are `fill` templates; placeholders are documented inline.
+pub struct BroadcastTexts {
+    pub title: &'static str,
+    pub gate_enabled: &'static str,
+    pub gate_disabled: &'static str,
+    pub count_fmt: &'static str, // args: count
+    pub empty: &'static str,
+    pub empty_hint: &'static str,
+    pub enable_button: &'static str,
+    pub disable_button: &'static str,
+    pub add_button: &'static str,
+    pub remove_button: &'static str,
+    pub clear_button: &'static str,
+    pub enabled_message: &'static str,
+    pub disabled_message: &'static str,
+    pub cleared_message: &'static str,
+    pub added_fmt: &'static str,     // args: machine, pane
+    pub removed_fmt: &'static str,   // args: machine, pane
+    pub duplicate_fmt: &'static str, // args: machine
+    pub pick_machine_title: &'static str,
+    pub pick_pane_title_fmt: &'static str, // args: label
+    pub picker_offline_fmt: &'static str,  // args: label
+    pub picker_no_panes_fmt: &'static str, // args: label
+    pub notice_failed_fmt: &'static str,   // args: label, error
+    // Footer hint labels (rendered as key caps by `render_key_hints`).
+    pub hint_select: &'static str,
+    pub hint_gate: &'static str,
+    pub hint_add: &'static str,
+    pub hint_remove: &'static str,
+    pub hint_clear: &'static str,
+    pub hint_close: &'static str,
+    pub hint_back: &'static str,
+}
+
+/// Texts for the remote file browser of one saved machine: directory
+/// listing, read-only small-file viewer, and the download/upload/mkdir/
+/// rename/delete operations. Operations run on worker threads through
+/// `remote::RemoteFs`; results arrive as client loop events.
+/// `*_fmt` entries are `fill` templates; placeholders are documented inline.
+pub struct MachineFilesTexts {
+    pub title_fmt: &'static str, // args: label
+    pub search_hint: &'static str,
+    pub count_fmt: &'static str, // args: count
+    pub loading: &'static str,
+    pub empty: &'static str,
+    pub error_fmt: &'static str, // args: error
+    pub kind_directory: &'static str,
+    pub kind_file: &'static str,
+    pub kind_symlink: &'static str,
+    pub kind_other: &'static str,
+    pub downloaded_fmt: &'static str,     // args: path
+    pub uploaded_fmt: &'static str,       // args: path
+    pub created_fmt: &'static str,        // args: path
+    pub renamed_fmt: &'static str,        // args: path
+    pub deleted_fmt: &'static str,        // args: path
+    pub confirm_delete_fmt: &'static str, // args: path
+    pub confirm_delete_recursive: &'static str,
+    pub prompt_download_fmt: &'static str, // args: name
+    pub prompt_upload: &'static str,
+    pub prompt_mkdir: &'static str,
+    pub prompt_rename_fmt: &'static str, // args: name
+    pub viewer_title_fmt: &'static str,  // args: path
+    // Action buttons.
+    pub up_button: &'static str,
+    pub refresh_button: &'static str,
+    pub download_button: &'static str,
+    pub upload_button: &'static str,
+    pub mkdir_button: &'static str,
+    pub rename_button: &'static str,
+    pub delete_button: &'static str,
+    // Footer hint labels (rendered as key caps by `render_key_hints`).
+    pub hint_select: &'static str,
+    pub hint_open: &'static str,
+    pub hint_up: &'static str,
+    pub hint_filter: &'static str,
+    pub hint_confirm: &'static str,
+    pub hint_back: &'static str,
+    pub hint_scroll: &'static str,
+}
+
+/// Texts for the SSH connection recovery dialogs: the host-key trust (TOFU)
+/// confirmation, the host-key-changed blocker, the authentication guide, the
+/// askpass password prompt, the reconnect banner, and the machine detail
+/// card's structured failure classification. `*_fmt` entries are `fill`
+/// templates; placeholders are documented inline. Secrets never appear here:
+/// prompt text comes from ssh and answers are never templated into strings.
+pub struct MachineAuthTexts {
+    // Shared dialog lines.
+    pub host_fmt: &'static str,        // args: host
+    pub key_type_fmt: &'static str,    // args: type
+    pub fingerprint_fmt: &'static str, // args: fingerprint
+    pub fingerprint_unavailable: &'static str,
+    pub working: &'static str,
+    pub failed_fmt: &'static str, // args: error
+    pub close_button: &'static str,
+    // Unknown host key (trust on first use).
+    pub tofu_title: &'static str,
+    pub tofu_question: &'static str,
+    pub tofu_verify_hint: &'static str,
+    pub trust_remember_button: &'static str,
+    pub trust_once_button: &'static str,
+    pub abort_button: &'static str,
+    pub trusted_fmt: &'static str, // args: count
+    // Changed host key (hard blocker).
+    pub changed_title: &'static str,
+    pub changed_warning: &'static str,
+    pub changed_reinstall_hint: &'static str,
+    pub changed_mitm_hint: &'static str,
+    pub remove_retry_button: &'static str,
+    pub removed: &'static str,
+    // Authentication guide.
+    pub auth_title: &'static str,
+    pub auth_methods_fmt: &'static str,  // args: methods
+    pub auth_identity_fmt: &'static str, // args: path
+    pub auth_no_identity: &'static str,
+    pub auth_hint: &'static str,
+    pub auth_interactive_button: &'static str,
+    pub auth_precollect_button: &'static str,
+    pub auth_copy_fix_button: &'static str,
+    pub auth_copied_fix: &'static str,
+    pub precollected_fmt: &'static str, // args: count
+    // Askpass password/passphrase prompt.
+    pub password_title: &'static str,
+    pub password_submit_button: &'static str,
+    pub password_cancel_button: &'static str,
+    pub password_hidden_note: &'static str,
+    pub passphrase_agent_hint: &'static str,
+    pub auth_success: &'static str,
+    pub auth_success_wizard: &'static str,
+    pub auth_failed_fmt: &'static str, // args: error
+    pub copy_ssh_add_button: &'static str,
+    pub copied_ssh_add: &'static str,
+    // Reconnect banner.
+    pub banner_reconnecting_fmt: &'static str, // args: label, attempt, seconds
+    pub banner_retry_button: &'static str,
+    pub banner_give_up_button: &'static str,
+    // Detail card failure classification and next-step guidance.
+    pub detail_failure: &'static str,
+    pub kind_dns: &'static str,
+    pub kind_timeout: &'static str,
+    pub kind_auth_denied: &'static str,
+    pub kind_host_key_unknown: &'static str,
+    pub kind_host_key_changed: &'static str,
+    pub kind_auth_required: &'static str,
+    pub kind_remote_install_required: &'static str,
+    pub kind_remote_install_failed: &'static str,
+    pub kind_protocol: &'static str,
+    pub kind_other: &'static str,
+    pub next_host_key_unknown: &'static str,
+    pub next_host_key_changed: &'static str,
+    pub next_auth_required: &'static str,
+    pub next_auth_denied: &'static str,
+    pub next_install: &'static str,
+    pub next_protocol: &'static str,
+    pub next_retry: &'static str,
+    pub review_button: &'static str,
+    // Dialog keyboard footers (rendered as key caps by `render_key_hints`).
+    pub hint_trust: &'static str,
+    pub hint_trust_once: &'static str,
+    pub hint_abort: &'static str,
+    pub hint_remove_retry: &'static str,
+    pub hint_interactive: &'static str,
+    pub hint_precollect: &'static str,
+    pub hint_copy_fix: &'static str,
+    pub hint_close: &'static str,
+}
+
+/// Texts for the snippet overlay: the library list, the edit form, the run
+/// flow (target picker, variable form, confirmation), and the history view.
+/// `*_fmt` entries are `fill` templates; placeholders are documented inline.
+pub struct SnippetsTexts {
+    pub title: &'static str,
+    pub run_pick_title: &'static str,
+    pub search_hint: &'static str,
+    pub count_fmt: &'static str, // args: count
+    pub empty: &'static str,
+    pub empty_hint: &'static str,
+    // List action buttons.
+    pub new_button: &'static str,
+    pub run_button: &'static str,
+    pub edit_button: &'static str,
+    pub delete_button: &'static str,
+    pub history_button: &'static str,
+    // New/edit form.
+    pub new_title: &'static str,
+    pub edit_title: &'static str,
+    pub field_label: &'static str,
+    pub field_command: &'static str,
+    pub field_description: &'static str,
+    pub field_variables: &'static str,
+    pub field_tags: &'static str,
+    pub hint_variables: &'static str,
+    pub hint_tags: &'static str,
+    pub saved_message: &'static str,
+    pub removed_message: &'static str,
+    pub delete_title_fmt: &'static str, // args: label
+    pub delete_detail: &'static str,
+    // Run flow.
+    pub run_title_fmt: &'static str, // args: label
+    pub target_title: &'static str,
+    pub target_current_fmt: &'static str, // args: pane
+    pub target_pick_pane: &'static str,
+    pub target_machines: &'static str,
+    pub pane_picker_title: &'static str,
+    pub picker_empty: &'static str,
+    pub machines_picker_title: &'static str,
+    pub variables_title: &'static str,
+    pub confirm_title: &'static str,
+    pub confirm_command: &'static str,
+    pub confirm_targets_fmt: &'static str, // args: count
+    pub confirm_press_enter: &'static str,
+    pub run_now_button: &'static str,
+    // Per-target outcomes and the completion toast.
+    pub target_offline_fmt: &'static str,  // args: label
+    pub target_no_pane_fmt: &'static str,  // args: label
+    pub run_summary_fmt: &'static str,     // args: label, ok, total
+    pub run_failed_body_fmt: &'static str, // args: failures
+    pub run_ok_body: &'static str,
+    // History view.
+    pub history_title: &'static str,
+    pub history_empty: &'static str,
+    pub history_sent: &'static str,
+    pub history_failed: &'static str,
+    // Footer hint labels (rendered as key caps by `render_key_hints`).
+    pub hint_select: &'static str,
+    pub hint_run: &'static str,
+    pub hint_new: &'static str,
+    pub hint_edit: &'static str,
+    pub hint_delete: &'static str,
+    pub hint_history: &'static str,
+    pub hint_close: &'static str,
+    pub hint_back: &'static str,
+    pub hint_toggle: &'static str,
+    pub hint_all_none: &'static str,
+    pub hint_continue: &'static str,
+    pub hint_fields: &'static str,
+    pub hint_confirm: &'static str,
+}
+
+/// Scene snapshots overlay: named captures of the current working scene
+/// (enabled machine set, active machine/workspace, sidebar chrome), stored
+/// in a client-local `scene-snapshots.json` next to the endpoint catalog.
+/// `*_fmt` entries are `fill` templates; placeholders are documented inline.
+pub struct ScenesTexts {
+    pub title: &'static str,
+    pub count_fmt: &'static str, // args: count
+    pub empty: &'static str,
+    pub empty_hint: &'static str,
+    pub machines_count_fmt: &'static str, // args: count
+    // List action buttons.
+    pub save_button: &'static str,
+    pub restore_button: &'static str,
+    pub rename_button: &'static str,
+    pub delete_button: &'static str,
+    pub confirm_save_button: &'static str,
+    pub confirm_delete_button: &'static str,
+    pub cancel_button: &'static str,
+    // Restore option toggle (checkbox row in the list view).
+    pub toggle_disable_others: &'static str,
+    // Save / rename forms.
+    pub save_title: &'static str,
+    pub rename_title: &'static str,
+    pub field_name: &'static str,
+    pub field_note: &'static str,
+    pub default_name_fmt: &'static str, // args: n
+    pub name_required: &'static str,
+    pub name_too_long: &'static str,
+    // Delete confirmation.
+    pub delete_title_fmt: &'static str, // args: name
+    pub delete_detail: &'static str,
+    // Footer hint labels (rendered as key caps by `render_key_hints`).
+    pub hint_select: &'static str,
+    pub hint_restore: &'static str,
+    pub hint_save: &'static str,
+    pub hint_rename: &'static str,
+    pub hint_delete: &'static str,
+    pub hint_toggle: &'static str,
+    pub hint_close: &'static str,
+    pub hint_back: &'static str,
+    pub hint_confirm: &'static str,
+    pub hint_fields: &'static str,
+    // Completion toasts and degraded-restore details.
+    pub notice_saved_fmt: &'static str,    // args: name
+    pub notice_restored_fmt: &'static str, // args: name
+    pub notice_renamed_fmt: &'static str,  // args: name
+    pub notice_deleted_fmt: &'static str,  // args: name
+    pub restore_ok_body: &'static str,
+    pub restore_missing_fmt: &'static str, // args: names
+    pub restore_offline_fmt: &'static str, // args: label
+    pub load_failed_fmt: &'static str,     // args: error
 }
 
 /// Help/about strings for the clap CLI surface. Option and subcommand
@@ -575,10 +1087,64 @@ pub struct CliHelpTexts {
     pub machine_add_about: &'static str,
     pub machine_label_help: &'static str,
     pub machine_remote_session_help: &'static str,
+    pub machine_group_help: &'static str,
+    pub machine_tag_help: &'static str,
+    pub machine_color_help: &'static str,
+    pub machine_port_help: &'static str,
+    pub machine_user_help: &'static str,
+    pub machine_identity_file_help: &'static str,
+    pub machine_identities_only_help: &'static str,
+    pub machine_identity_agent_help: &'static str,
+    pub machine_strict_host_key_checking_help: &'static str,
+    pub machine_proxy_jump_help: &'static str,
+    pub machine_forward_agent_help: &'static str,
+    pub machine_server_alive_interval_help: &'static str,
+    pub machine_server_alive_count_max_help: &'static str,
+    pub machine_control_persist_help: &'static str,
+    pub machine_remote_command_help: &'static str,
     pub machine_rename_about: &'static str,
     pub machine_remove_about: &'static str,
     pub machine_enable_about: &'static str,
     pub machine_disable_about: &'static str,
+    pub machine_from_config_help: &'static str,
+    pub machine_import_about: &'static str,
+    pub machine_import_file_help: &'static str,
+    pub machine_import_host_help: &'static str,
+    pub machine_import_yes_help: &'static str,
+    pub machine_import_group_help: &'static str,
+    pub machine_import_include_wildcards_help: &'static str,
+    pub machine_forward_about: &'static str,
+    pub machine_forward_list_about: &'static str,
+    pub machine_forward_add_about: &'static str,
+    pub machine_forward_kind_help: &'static str,
+    pub machine_forward_listen_port_help: &'static str,
+    pub machine_forward_bind_address_help: &'static str,
+    pub machine_forward_target_host_help: &'static str,
+    pub machine_forward_target_port_help: &'static str,
+    pub machine_forward_remove_about: &'static str,
+    pub machine_fs_about: &'static str,
+    pub machine_fs_profile_help: &'static str,
+    pub machine_fs_operation_help: &'static str,
+    pub machine_fs_args_help: &'static str,
+    pub machine_log_about: &'static str,
+    pub machine_log_action_help: &'static str,
+    pub machine_log_args_help: &'static str,
+    pub machine_status_about: &'static str,
+    pub machine_exec_about: &'static str,
+    pub machine_exec_command_help: &'static str,
+    pub broadcast_about: &'static str,
+    pub broadcast_status_about: &'static str,
+    pub broadcast_enable_about: &'static str,
+    pub broadcast_disable_about: &'static str,
+    pub broadcast_add_about: &'static str,
+    pub broadcast_remove_about: &'static str,
+    pub broadcast_clear_about: &'static str,
+    pub broadcast_send_about: &'static str,
+    pub snippet_about: &'static str,
+    pub snippet_list_about: &'static str,
+    pub snippet_add_about: &'static str,
+    pub snippet_remove_about: &'static str,
+    pub snippet_run_about: &'static str,
     pub terminal_session_observe_usage: &'static str,
     pub terminal_session_control_usage: &'static str,
     pub agent_help_footer: &'static str,
@@ -601,6 +1167,32 @@ pub struct CliOutputTexts {
     pub machine_removed_fmt: &'static str,
     pub machine_enabled_fmt: &'static str,
     pub machine_disabled_fmt: &'static str,
+    pub machine_forward_none: &'static str,
+    pub machine_forward_added_fmt: &'static str, // args: kind, rule, id
+    pub machine_forward_updated_fmt: &'static str, // args: id
+    pub machine_forward_removed_fmt: &'static str, // args: kind, rule, id
+    pub machine_import_found_fmt: &'static str,  // args: count, path
+    pub machine_import_prompt: &'static str,
+    pub machine_import_skipped_fmt: &'static str, // args: label, reason
+    pub machine_imported_fmt: &'static str,       // args: label, id
+    pub machine_import_note_fmt: &'static str,    // args: note
+    pub machine_import_summary_fmt: &'static str, // args: imported, skipped, failed
+    pub machine_import_connect_note: &'static str,
+    pub machine_log_enabled_fmt: &'static str,  // args: id
+    pub machine_log_disabled_fmt: &'static str, // args: id
+    pub machine_log_dumped_fmt: &'static str,   // args: count
+    pub broadcast_enabled: &'static str,
+    pub broadcast_disabled: &'static str,
+    pub broadcast_registered_fmt: &'static str, // args: machine, pane
+    pub broadcast_removed_fmt: &'static str,    // args: number, pane
+    pub broadcast_cleared: &'static str,
+    pub broadcast_no_targets: &'static str,
+    pub broadcast_sent_fmt: &'static str, // args: machine, pane
+    pub broadcast_failed_fmt: &'static str, // args: machine, pane, error
+    pub snippet_none_saved: &'static str,
+    pub snippet_saved_fmt: &'static str,    // args: id
+    pub snippet_removed_fmt: &'static str,  // args: id
+    pub snippet_run_sent_fmt: &'static str, // args: machine, pane
     pub state_enabled: &'static str,
     pub state_disabled: &'static str,
     pub status_client_header: &'static str,
@@ -761,12 +1353,75 @@ pub struct CliErrorTexts {
     pub machine_remove_usage: &'static str,
     pub machine_set_enabled_usage_fmt: &'static str, // args: action
     pub machine_add_unknown_option_fmt: &'static str, // args: option
+    pub machine_option_specified_twice_fmt: &'static str, // args: option
+    pub unknown_option_or_argument_fmt: &'static str, // args: option
     pub remote_session_specified_twice: &'static str,
     pub label_specified_twice: &'static str,
     pub label_required: &'static str,
     pub machine_not_saved_fmt: &'static str, // args: error
     pub machine_prepared_not_saved_fmt: &'static str, // args: error
     pub machine_profile_not_found_fmt: &'static str, // args: id
+    // src/cli/machine.rs — `machine add --from-config`
+    pub machine_add_from_config_no_config: &'static str,
+    pub machine_add_from_config_not_found_fmt: &'static str, // args: alias, path
+    pub machine_add_from_config_wildcard_fmt: &'static str,  // args: label
+    pub machine_add_from_config_with_target: &'static str,
+    pub machine_add_from_config_with_options: &'static str,
+    pub machine_config_note_fmt: &'static str, // args: note
+    // src/cli/machine.rs — `machine import`
+    pub machine_import_usage: &'static str,
+    pub machine_import_no_config_path: &'static str,
+    pub machine_import_config_not_found_fmt: &'static str, // args: path
+    pub machine_import_config_read_failed_fmt: &'static str, // args: path, error
+    pub machine_import_config_warning_fmt: &'static str,   // args: origin, line, message
+    pub machine_import_no_matching_hosts_fmt: &'static str, // args: path
+    pub machine_import_no_hosts_fmt: &'static str,         // args: path
+    pub machine_import_cancelled: &'static str,
+    pub machine_import_not_a_terminal: &'static str,
+    pub machine_import_failed_fmt: &'static str, // args: label, error
+    pub machine_import_selection_empty: &'static str,
+    pub machine_import_selection_reversed_fmt: &'static str, // args: part
+    pub machine_import_selection_range_fmt: &'static str,    // args: part, count
+    // src/remote/ssh_config.rs — batch import skip reasons
+    pub import_skip_wildcard: &'static str,
+    pub import_skip_label_exists: &'static str,
+    pub import_skip_target_exists_fmt: &'static str, // args: target
+    pub import_skip_batch_label: &'static str,
+    pub import_skip_batch_target_fmt: &'static str, // args: target
+    // src/cli/machine.rs — `machine forward`
+    pub machine_forward_usage: &'static str,
+    pub machine_forward_kind_invalid_fmt: &'static str, // args: value
+    pub machine_forward_kind_required: &'static str,
+    pub machine_forward_listen_port_required: &'static str,
+    pub machine_forward_invalid_profile_fmt: &'static str, // args: error
+    pub machine_forward_rule_number_invalid_fmt: &'static str, // args: number
+    pub machine_forward_rule_number_unknown_fmt: &'static str, // args: id, count, number
+    // src/cli/machine_fs.rs / machine_log.rs / machine_status.rs / machine_exec.rs
+    pub machine_fs_usage: &'static str,
+    pub machine_fs_local_not_file_fmt: &'static str, // args: path
+    pub machine_fs_too_large_fmt: &'static str,      // args: size, limit
+    pub machine_log_usage: &'static str,
+    pub machine_status_usage: &'static str,
+    pub machine_exec_usage: &'static str,
+    pub machine_exec_command_required: &'static str,
+    // src/cli/broadcast.rs
+    pub broadcast_usage: &'static str,
+    pub broadcast_gate_disabled: &'static str,
+    pub broadcast_gate_empty: &'static str,
+    pub broadcast_invalid_number_fmt: &'static str, // args: value
+    // src/cli/snippet.rs
+    pub snippet_usage: &'static str,
+    pub snippet_label_required: &'static str,
+    pub snippet_command_required: &'static str,
+    pub snippet_not_found_fmt: &'static str, // args: selector
+    pub snippet_run_pane_twice: &'static str,
+    pub snippet_run_target_required: &'static str,
+    pub snippet_run_pane_required_fmt: &'static str, // args: machine
+    pub snippet_run_protocol_mismatch: &'static str,
+    pub snippet_run_server_not_running: &'static str,
+    pub snippet_run_request_failed: &'static str,
+    pub snippet_run_failed_fmt: &'static str, // args: machine, pane, error
+    pub snippet_history_store_failed_fmt: &'static str, // args: error
 
     // src/cli/api.rs
     pub api_schema_usage: &'static str,
@@ -1021,9 +1676,16 @@ pub struct Texts {
     pub status: StatusTexts,
     pub mode_bar: ModeBarTexts,
     pub notify: NotifyTexts,
+    pub history: HistoryTexts,
     pub mobile: MobileTexts,
     pub update: UpdateTexts,
     pub endpoint: EndpointTexts,
+    pub machines: MachinesTexts,
+    pub machine_auth: MachineAuthTexts,
+    pub snippets: SnippetsTexts,
+    pub scenes: ScenesTexts,
+    pub broadcast: BroadcastTexts,
+    pub machine_files: MachineFilesTexts,
     pub cli_help: CliHelpTexts,
     pub cli_output: CliOutputTexts,
     pub cli_errors: CliErrorTexts,

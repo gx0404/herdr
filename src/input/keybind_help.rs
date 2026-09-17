@@ -75,6 +75,7 @@ pub(crate) fn keybind_help_groups(
                 entry(crate::config::format_key_combo(prefix), t.prefix_mode),
                 entry(binding_label(&keybinds.help), t.keybinds),
                 entry(binding_label(&keybinds.settings), t.settings),
+                entry(binding_label(&keybinds.manage_machines), t.manage_machines),
                 entry(binding_label(&keybinds.detach), t.detach),
                 entry(binding_label(&keybinds.reload_config), t.reload_config),
                 entry(
@@ -164,6 +165,7 @@ pub(crate) fn keybind_help_groups(
                 entry(binding_label(&keybinds.rename_pane), t.rename_pane),
                 entry(binding_label(&keybinds.edit_scrollback), t.edit_scrollback),
                 entry(binding_label(&keybinds.copy_mode), t.copy_mode),
+                entry(binding_label(&keybinds.link_hints), t.link_hints),
                 entry(binding_label(&keybinds.zoom), t.zoom_pane),
                 entry(binding_label(&keybinds.resize_mode), t.resize_mode),
                 entry(

@@ -97,6 +97,8 @@ fn add_remote(state: &mut ClientShellState) -> ClientEndpointId {
         target: "dev@build.example".into(),
         session: "agents".into(),
         enabled: true,
+        ..crate::client::endpoint::SavedSshEndpoint::new("base", "base", "default")
+            .expect("valid base profile")
     };
     let remote = ClientEndpointId::Ssh(profile.id.clone());
     state.set_endpoint_catalog(&[profile]);
@@ -292,7 +294,9 @@ fn dispatcher_cancels_worktree_requests_on_frozen_surface_or_failed_send() {
         assert!(state
             .visible_endpoint_notice
             .as_ref()
-            .is_some_and(|notice| { notice.title == "Action interrupted" }));
+            .is_some_and(|notice| {
+                notice.title == crate::i18n::texts().endpoint.notice_action_interrupted
+            }));
         assert!(commands.disconnect(&ClientEndpointId::Local).is_empty());
     }
 }

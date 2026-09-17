@@ -4,19 +4,25 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 
 mod activation;
+mod broadcast;
 mod catalog;
 mod control;
 mod health;
 mod message_policy;
 mod registry;
+mod session_log;
+mod snippets;
 mod supervisor;
 mod writer;
 
 pub(crate) use activation::*;
+pub(crate) use broadcast::*;
 pub(crate) use catalog::*;
 pub(crate) use control::*;
 pub(crate) use message_policy::*;
 pub(crate) use registry::*;
+pub(crate) use session_log::*;
+pub(crate) use snippets::*;
 pub(crate) use supervisor::*;
 pub(crate) use writer::NativeEndpointTransport;
 

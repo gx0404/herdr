@@ -12,7 +12,8 @@ pub(super) fn render_mobile_notice_banner(
     area: Rect,
     title: &str,
     body: Option<&str>,
-    dot_color: Color,
+    icon: &str,
+    icon_color: Color,
     offset_for_warning: bool,
     palette: &Palette,
 ) -> Rect {
@@ -31,7 +32,7 @@ pub(super) fn render_mobile_notice_banner(
     let mut x = rect.x;
     for (text, style) in [
         (" ", Style::default().bg(background)),
-        ("●", Style::default().fg(dot_color).bg(background)),
+        (icon, Style::default().fg(icon_color).bg(background)),
         (" ", Style::default().bg(background)),
         (
             title,
@@ -70,6 +71,7 @@ pub(super) fn render_mobile_notification_banner(
     notification: &ClientVisibleNotification,
     offset_for_warning: bool,
     palette: &Palette,
+    components: &crate::app::state::ComponentStyles,
 ) -> Rect {
     let event = &notification.event;
     let title = match event.kind {
@@ -98,24 +100,20 @@ pub(super) fn render_mobile_notification_banner(
         }
         SemanticNotificationKind::Custom => event.title.clone(),
     };
-    let dot_color = match event.kind {
-        SemanticNotificationKind::NeedsAttention => palette.red,
-        SemanticNotificationKind::Finished => palette.blue,
-        SemanticNotificationKind::UpdateInstalled | SemanticNotificationKind::Custom => {
-            palette.accent
-        }
-    };
+    let level = super::feedback::ClientToastLevel::from_notification_kind(event.kind);
     render_mobile_notice_banner(
         buffer,
         area,
         &title,
         event.body.as_deref(),
-        dot_color,
+        level.icon(),
+        level.color(components),
         offset_for_warning,
         palette,
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn render_notification_card(
     buffer: &mut Buffer,
     area: Rect,
@@ -123,9 +121,10 @@ pub(super) fn render_notification_card(
     body: &str,
     position: crate::config::ToastHerdrPosition,
     top_offset: u16,
-    dot_color: Color,
-    palette: &Palette,
+    level: super::feedback::ClientToastLevel,
+    cx: &super::feedback::ChromeContext<'_>,
 ) -> Rect {
+    let palette = cx.palette;
     if area.is_empty() {
         return Rect::default();
     }
@@ -153,15 +152,21 @@ pub(super) fn render_notification_card(
     }
     .clamp(area.y, max_y);
     let rect = Rect::new(x, y, width, height);
+    let level_color = level.color(cx.components);
+    let mut border_style = Style::default().fg(level_color);
+    if cx.hovered(&super::feedback::ChromeHover::NotificationToast) {
+        border_style = border_style.add_modifier(Modifier::BOLD);
+    }
     Clear.render(rect, buffer);
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(palette.overlay0))
+        .border_set(cx.glyphs.border_set())
+        .border_style(border_style)
         .style(Style::default().bg(palette.panel_bg));
     let inner = block.inner(rect);
     block.render(rect, buffer);
     Paragraph::new(Line::from(vec![
-        Span::styled("●", Style::default().fg(dot_color)),
+        Span::styled(level.icon(), Style::default().fg(level_color)),
         Span::raw(" "),
         Span::styled(
             title,
@@ -195,16 +200,9 @@ pub(super) fn render_visible_notification(
     notification: &ClientVisibleNotification,
     default_position: crate::config::ToastHerdrPosition,
     top_offset: u16,
-    palette: &Palette,
+    cx: &super::feedback::ChromeContext<'_>,
 ) -> Rect {
     let event = &notification.event;
-    let dot_color = match event.kind {
-        SemanticNotificationKind::NeedsAttention => palette.red,
-        SemanticNotificationKind::Finished => palette.blue,
-        SemanticNotificationKind::UpdateInstalled | SemanticNotificationKind::Custom => {
-            palette.accent
-        }
-    };
     render_notification_card(
         buffer,
         area,
@@ -212,14 +210,28 @@ pub(super) fn render_visible_notification(
         event.body.as_deref().unwrap_or_default(),
         event.position.unwrap_or(default_position),
         top_offset,
-        dot_color,
-        palette,
+        super::feedback::ClientToastLevel::from_notification_kind(event.kind),
+        cx,
     )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn test_chrome_context<'a>(
+        palette: &'a Palette,
+        components: &'a crate::app::state::ComponentStyles,
+    ) -> super::super::feedback::ChromeContext<'a> {
+        super::super::feedback::ChromeContext {
+            palette,
+            components,
+            glyphs: crate::ui::BorderGlyphs::SINGLE,
+            hover: None,
+            spinner: "◐",
+            now: std::time::Instant::now(),
+        }
+    }
 
     fn notification() -> ClientVisibleNotification {
         ClientVisibleNotification {
@@ -242,6 +254,7 @@ mod tests {
     #[test]
     fn mobile_notification_is_a_bottom_banner_with_released_title() {
         let palette = crate::app::client_palette_from_config(&Config::default());
+        let components = crate::app::state::ComponentStyles::from_palette(&palette);
         let mut notification = notification();
         notification.event.kind = SemanticNotificationKind::NeedsAttention;
         notification.event.agent = Some("pi".into());
@@ -251,8 +264,14 @@ mod tests {
         for cell in &mut buffer.content {
             cell.set_symbol("X");
         }
-        let rect =
-            render_mobile_notification_banner(&mut buffer, area, &notification, true, &palette);
+        let rect = render_mobile_notification_banner(
+            &mut buffer,
+            area,
+            &notification,
+            true,
+            &palette,
+            &components,
+        );
         assert_eq!(rect, Rect::new(0, 18, 44, 1));
         let text = buffer
             .content
@@ -472,6 +491,8 @@ mod tests {
     #[test]
     fn notification_rect_stays_inside_short_nonzero_area() {
         let palette = crate::app::client_palette_from_config(&Config::default());
+        let components = crate::app::state::ComponentStyles::from_palette(&palette);
+        let cx = test_chrome_context(&palette, &components);
         for height in [1, 2] {
             let area = Rect::new(3, 4, 8, height);
             for position in [
@@ -485,7 +506,7 @@ mod tests {
                     &notification(),
                     position,
                     1,
-                    &palette,
+                    &cx,
                 );
                 assert!(rect.y >= area.y);
                 assert!(rect.bottom() <= area.bottom());

@@ -55,6 +55,7 @@ pub(super) fn render_agent_panel(
     snapshot: &ClientShellSnapshot,
     config: &ClientShellConfig,
     agent_scroll: &mut usize,
+    chrome_hover: Option<&super::feedback::ChromeHover>,
     hits: &mut ShellHitMap,
 ) {
     if !render_agent_panel_header(
@@ -62,6 +63,7 @@ pub(super) fn render_agent_panel(
         area,
         snapshot.agent_view_label.as_deref(),
         config,
+        chrome_hover,
         hits,
     ) {
         return;
@@ -75,14 +77,22 @@ pub(super) fn render_agent_panel(
         snapshot
             .agent_view_label
             .as_ref()
-            .map(|_| " no matching agents"),
+            .map(|_| crate::i18n::texts().sidebar.no_matching_agents),
         config,
         agent_scroll,
+        matches!(
+            chrome_hover,
+            Some(super::feedback::ChromeHover::AgentScrollbarThumb)
+        ),
         hits,
         |row| row.rows.len(),
         |buffer, rect, row, hits| {
             hits.agents.push((rect, row.pane_id.clone()));
-            render_agent_row(buffer, rect, row, config);
+            let hovered = matches!(
+                chrome_hover,
+                Some(super::feedback::ChromeHover::AgentRow(id)) if id == &row.pane_id
+            );
+            render_agent_row(buffer, rect, row, config, hovered);
         },
     );
 }
@@ -92,18 +102,27 @@ pub(super) fn render_agent_panel_header(
     area: Rect,
     agent_view_label: Option<&str>,
     config: &ClientShellConfig,
+    chrome_hover: Option<&super::feedback::ChromeHover>,
     hits: &mut ShellHitMap,
 ) -> bool {
     if area.height == 0 {
         return false;
     }
+    let section_divider_hovered = matches!(
+        chrome_hover,
+        Some(super::feedback::ChromeHover::SidebarSectionDivider)
+    );
     put_text(
         buffer,
         area.x,
         area.y,
         area.width,
         &"─".repeat(area.width as usize),
-        Style::default().fg(config.palette.surface_dim),
+        Style::default().fg(if section_divider_hovered {
+            config.palette.overlay1
+        } else {
+            config.palette.surface_dim
+        }),
     );
     if area.height < 2 {
         return false;
@@ -135,6 +154,10 @@ pub(super) fn render_agent_panel_header(
     } else {
         Rect::default()
     };
+    let sort_hovered = matches!(
+        chrome_hover,
+        Some(super::feedback::ChromeHover::AgentSortToggle)
+    );
     put_text(
         buffer,
         sort_rect.x,
@@ -144,6 +167,8 @@ pub(super) fn render_agent_panel_header(
         Style::default()
             .fg(if agent_view_label.is_some() {
                 config.palette.accent
+            } else if sort_hovered {
+                config.palette.text
             } else {
                 config.palette.overlay0
             })
@@ -152,6 +177,7 @@ pub(super) fn render_agent_panel_header(
     true
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn render_agent_list<T>(
     buffer: &mut Buffer,
     area: Rect,
@@ -159,6 +185,7 @@ pub(super) fn render_agent_list<T>(
     empty_message: Option<&str>,
     config: &ClientShellConfig,
     agent_scroll: &mut usize,
+    thumb_hovered: bool,
     hits: &mut ShellHitMap,
     row_lines: impl Fn(&T) -> usize,
     mut render_row: impl FnMut(&mut Buffer, Rect, &T, &mut ShellHitMap),
@@ -231,7 +258,13 @@ pub(super) fn render_agent_list<T>(
     if show_scrollbar {
         let track = Rect::new(body.right().saturating_sub(1), body.y, 1, body.height);
         hits.agent_scrollbar = track;
-        super::scroll::render_list_scrollbar(buffer, track, metrics, &config.palette);
+        super::scroll::render_list_scrollbar(
+            buffer,
+            track,
+            metrics,
+            &config.palette,
+            thumb_hovered,
+        );
     }
 }
 
@@ -324,10 +357,13 @@ pub(super) fn render_agent_row(
     rect: Rect,
     row: &AgentRow,
     config: &ClientShellConfig,
+    hovered: bool,
 ) {
     let palette = &config.palette;
     let row_style = if row.focused {
         Style::default().bg(palette.active_row_bg)
+    } else if hovered {
+        Style::default().bg(palette.surface0)
     } else {
         Style::default()
     };

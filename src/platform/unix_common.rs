@@ -248,6 +248,12 @@ pub(crate) fn remote_ssh_config_paths() -> super::RemoteSshConfigPaths {
     }
 }
 
+pub(crate) fn default_known_hosts_path() -> Option<PathBuf> {
+    std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .map(|home| home.join(".ssh").join("known_hosts"))
+}
+
 pub(crate) fn create_remote_ssh_config_dir(control_socket_name: &str) -> std::io::Result<PathBuf> {
     use std::os::unix::fs::DirBuilderExt;
 

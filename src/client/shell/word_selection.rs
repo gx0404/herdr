@@ -115,6 +115,70 @@ impl ClientShellState {
         self.update_word_selection(outcome);
     }
 
+    /// Triple-click line selection: anchor at column 0 through the last
+    /// non-blank cell of the row, read from the displayed frame so no server
+    /// round-trip is needed.
+    pub(super) fn select_line_at(
+        &mut self,
+        hit: &PaneHit,
+        viewport_row: u16,
+        outcome: &mut ClientShellInput,
+    ) {
+        let row = crate::selection::absolute_row_for_viewport(viewport_row, hit.scroll);
+        let end_col = self.line_end_col(hit, viewport_row);
+        let mut selection = crate::selection::Selection::absolute_range(
+            hit.pane_id.clone(),
+            (row, 0),
+            (row, end_col),
+        );
+        selection.finish();
+        self.selection = Some(selection);
+        if self.config.copy_on_select {
+            self.request_selection_copy(outcome, false);
+            self.selection_highlight_clear_deadline =
+                Some(std::time::Instant::now() + std::time::Duration::from_millis(500));
+        }
+        outcome.repaint = true;
+    }
+
+    /// Display column of the last non-blank cell of a viewport row (a wide
+    /// glyph counts both of its cells), or 0 for a blank row.
+    fn line_end_col(&self, hit: &PaneHit, viewport_row: u16) -> u16 {
+        let fallback = hit.inner_rect.width.saturating_sub(1);
+        let Some(pane) = self.pane_surface.as_ref().and_then(|surface| {
+            surface
+                .panes
+                .iter()
+                .find(|pane| pane.pane_id == hit.pane_id)
+        }) else {
+            return fallback;
+        };
+        let Some(surface) = self.pane_surface.as_ref() else {
+            return fallback;
+        };
+        let frame_row = usize::from(pane.inner_rect.y) + usize::from(viewport_row);
+        if frame_row >= usize::from(surface.frame.height) {
+            return fallback;
+        }
+        let start = frame_row * usize::from(surface.frame.width) + usize::from(pane.inner_rect.x);
+        let Some(cells) = surface
+            .frame
+            .cells
+            .get(start..start + usize::from(pane.inner_rect.width))
+        else {
+            return fallback;
+        };
+        let mut end = None;
+        for (col, cell) in cells.iter().enumerate() {
+            if cell.symbol.trim().is_empty() {
+                continue;
+            }
+            let wide = u16::from(unicode_width::UnicodeWidthStr::width(cell.symbol.as_str()) == 2);
+            end = Some((col as u16).saturating_add(wide));
+        }
+        end.map(|col| col.min(fallback)).unwrap_or(0)
+    }
+
     fn update_word_selection(&mut self, outcome: &mut ClientShellInput) {
         let Some(gesture) = self.word_selection_gesture.as_ref() else {
             return;

@@ -244,17 +244,66 @@ fn surface_with_popup() -> PaneSurfaceFrame {
     surface
 }
 
+/// Index of the dynamic "what's new" entry in the mobile menu's fixed item
+/// list; tests must not pin menu positions as entries come and go.
+pub(super) fn whats_new_menu_index(snapshot: &ClientShellSnapshot) -> usize {
+    super::global_menu::global_menu_items(snapshot)
+        .iter()
+        .position(|(_, action)| {
+            matches!(action, super::global_menu::ClientGlobalMenuAction::WhatsNew)
+        })
+        .expect("what's new entry")
+}
+
+/// Row index of a palette item by its stable id; tests must not pin menu
+/// positions as entries come and go.
+pub(super) fn palette_row_index(state: &ClientShellState, id: &str) -> usize {
+    let Some(ClientShellOverlay::CommandPalette(palette)) = state.overlay.as_ref() else {
+        panic!("command palette overlay");
+    };
+    super::command_palette::palette_rows(palette)
+        .iter()
+        .position(|row| row.item.id == id)
+        .expect("palette row")
+}
+
+/// Select a palette row by id (keyboard Enter activates `selected`).
+pub(super) fn palette_select(state: &mut ClientShellState, id: &str) {
+    let selected = palette_row_index(state, id);
+    let Some(ClientShellOverlay::CommandPalette(palette)) = state.overlay.as_mut() else {
+        panic!("command palette overlay");
+    };
+    palette.selected = selected;
+}
+
+pub(super) fn palette_overlay(
+    state: &ClientShellState,
+) -> &super::command_palette::ClientCommandPaletteOverlay {
+    let Some(ClientShellOverlay::CommandPalette(palette)) = state.overlay.as_ref() else {
+        panic!("command palette overlay");
+    };
+    palette
+}
+
 mod agents_worktrees_notifications;
+mod broadcast;
 mod chrome_context;
 mod copy;
 mod endpoint_requests;
 mod endpoints;
+mod feedback;
 mod graphics;
 #[path = "input.rs"]
 mod input_domain;
+mod interaction;
 mod keybindings_settings;
 mod link_hover;
+mod machine_auth;
+mod machine_files;
+mod machines;
 mod mobile;
 mod mouse_selection;
 mod popup_focus_projection;
+mod scenes;
+mod snippets;
 mod startup_overlays;

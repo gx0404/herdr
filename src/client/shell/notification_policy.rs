@@ -194,6 +194,15 @@ impl ClientShellState {
             let target_active =
                 self.notification_target_is_active(&pending.endpoint_id, &pending.event);
             let suppress_external = target_active && self.outer_focused != Some(false);
+            self.record_notification(
+                super::feedback::ClientToastLevel::from_notification_kind(pending.event.kind),
+                pending.event.title.clone(),
+                pending.event.body.clone(),
+                Some(super::feedback::ClientNotificationTarget {
+                    endpoint_id: pending.endpoint_id.clone(),
+                    pane_id: pending.event.pane_id.clone(),
+                }),
+            );
             if let Some(sound) = pending.event.sound {
                 let suppress_sound =
                     pending.event.kind == SemanticNotificationKind::Finished && suppress_external;

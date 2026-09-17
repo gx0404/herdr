@@ -3,20 +3,12 @@ use super::*;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum ClientGlobalMenuAction {
     Binding(crate::input::KeybindAction),
+    Notifications,
     WhatsNew,
 }
 
 pub(super) fn global_menu_attention(snapshot: &ClientShellSnapshot) -> bool {
     snapshot.update_available.is_some() || snapshot.integration_updates_available
-}
-
-pub(super) fn global_menu_item_has_badge(
-    snapshot: &ClientShellSnapshot,
-    action: ClientGlobalMenuAction,
-) -> bool {
-    (action == ClientGlobalMenuAction::WhatsNew && snapshot.update_available.is_some())
-        || (action == ClientGlobalMenuAction::Binding(crate::input::KeybindAction::Settings)
-            && snapshot.integration_updates_available)
 }
 
 pub(super) fn global_menu_items(
@@ -28,6 +20,11 @@ pub(super) fn global_menu_items(
             t.settings,
             ClientGlobalMenuAction::Binding(crate::input::KeybindAction::Settings),
         ),
+        (
+            t.machines,
+            ClientGlobalMenuAction::Binding(crate::input::KeybindAction::ManageMachines),
+        ),
+        (t.notifications, ClientGlobalMenuAction::Notifications),
         (
             t.keybinds,
             ClientGlobalMenuAction::Binding(crate::input::KeybindAction::Help),
@@ -55,29 +52,6 @@ pub(super) fn global_menu_items(
 }
 
 impl ClientShellState {
-    pub(super) fn toggle_global_menu(&mut self) {
-        if matches!(self.overlay, Some(ClientShellOverlay::GlobalMenu(_))) {
-            self.overlay = None;
-        } else {
-            self.overlay = Some(ClientShellOverlay::GlobalMenu(ClientGlobalMenuOverlay {
-                highlighted: 0,
-            }));
-        }
-    }
-
-    pub(super) fn move_global_menu_selection(&mut self, delta: isize) {
-        let item_count = self
-            .snapshot
-            .as_deref()
-            .map(global_menu_items)
-            .map_or(0, |items| items.len());
-        let Some(ClientShellOverlay::GlobalMenu(menu)) = self.overlay.as_mut() else {
-            return;
-        };
-        menu.highlighted = (menu.highlighted as isize + delta)
-            .clamp(0, item_count.saturating_sub(1) as isize) as usize;
-    }
-
     pub(super) fn activate_global_menu_item(
         &mut self,
         index: usize,
@@ -104,6 +78,7 @@ impl ClientShellState {
             ClientGlobalMenuAction::Binding(binding) => {
                 self.record_binding(crate::input::KeybindMatch::Action(binding), outcome)
             }
+            ClientGlobalMenuAction::Notifications => self.open_notification_history(),
             ClientGlobalMenuAction::WhatsNew => self.open_release_notes(),
         }
         outcome.repaint = true;

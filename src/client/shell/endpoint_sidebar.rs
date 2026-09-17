@@ -12,6 +12,72 @@ fn collapsed_groups_for_endpoint<'a>(
     }
 }
 
+/// Sidebar grouping for one endpoint: the catalog `group` of its saved
+/// profile. Local and ungrouped machines return `None` and stay flat.
+fn machine_sidebar_group<'a>(
+    machine_chrome: &'a HashMap<crate::client::endpoint::ProfileId, MachineChrome>,
+    endpoint_id: &ClientEndpointId,
+) -> Option<&'a str> {
+    let ClientEndpointId::Ssh(profile_id) = endpoint_id else {
+        return None;
+    };
+    machine_chrome
+        .get(profile_id)
+        .and_then(|chrome| chrome.group.as_deref())
+}
+
+fn machine_sidebar_tag(
+    machine_chrome: &HashMap<crate::client::endpoint::ProfileId, MachineChrome>,
+    endpoint: &ClientShellEndpoint,
+    palette: &Palette,
+) -> Option<ratatui::style::Color> {
+    let ClientEndpointId::Ssh(profile_id) = &endpoint.endpoint_id else {
+        return None;
+    };
+    let color = machine_chrome
+        .get(profile_id)
+        .and_then(|chrome| chrome.color);
+    Some(
+        color.unwrap_or_else(|| {
+            super::machines_overlay::machine_hash_color(&endpoint.label, palette)
+        }),
+    )
+}
+
+enum Row {
+    GroupHeader(String),
+    Endpoint(usize),
+    Workspace {
+        endpoint: usize,
+        entry: WorkspaceEntry,
+    },
+}
+
+fn push_endpoint_rows(
+    state: &ShellRenderState<'_>,
+    empty_collapsed_groups: &HashSet<String>,
+    rows: &mut Vec<Row>,
+    endpoint_index: usize,
+) {
+    rows.push(Row::Endpoint(endpoint_index));
+    let endpoint = &state.endpoints[endpoint_index];
+    if state.collapsed_endpoints.contains(&endpoint.endpoint_id) {
+        return;
+    }
+    if let Some(snapshot) = endpoint.snapshot.as_deref() {
+        let collapsed_groups = collapsed_groups_for_endpoint(state, &endpoint.endpoint_id)
+            .unwrap_or(empty_collapsed_groups);
+        rows.extend(
+            super::sidebar::workspace_entries(snapshot, collapsed_groups)
+                .into_iter()
+                .map(|entry| Row::Workspace {
+                    endpoint: endpoint_index,
+                    entry,
+                }),
+        );
+    }
+}
+
 pub(super) fn render_collapsed(
     buffer: &mut Buffer,
     area: Rect,
@@ -20,7 +86,15 @@ pub(super) fn render_collapsed(
     hits: &mut ShellHitMap,
 ) {
     let palette = &config.palette;
-    super::render::render_sidebar_background(buffer, area, palette);
+    super::render::render_sidebar_background(
+        buffer,
+        area,
+        palette,
+        matches!(
+            state.chrome_hover,
+            Some(super::feedback::ChromeHover::SidebarDivider)
+        ),
+    );
     let (workspace_area, divider_y, detail_area) = super::sidebar::collapsed_sidebar_sections(area);
     let mut total_rows = 0usize;
     let mut selected_row = None;
@@ -71,27 +145,53 @@ pub(super) fn render_collapsed(
         } else {
             if active && collapsed {
                 buffer.set_style(rect, Style::default().bg(palette.active_row_bg));
+            } else if matches!(
+                state.chrome_hover,
+                Some(super::feedback::ChromeHover::MachineRow(id))
+                    if id == &endpoint.endpoint_id
+            ) {
+                buffer.set_style(rect, Style::default().bg(palette.surface0));
             }
-            let label = if endpoint.endpoint_id.is_local() {
-                "L".to_owned()
-            } else {
-                (index + 1).to_string()
-            };
             let marker = if collapsed { "▸" } else { "▾" };
-            put_text(
-                buffer,
-                rect.x,
-                rect.y,
-                rect.width.saturating_sub(1),
-                &format!("{marker}{label}"),
-                Style::default().fg(if endpoint.status == ClientEndpointStatus::Online {
-                    palette.text
-                } else {
-                    palette.overlay0
-                }),
-            );
+            let plain = Style::default().fg(if endpoint.status == ClientEndpointStatus::Online {
+                palette.text
+            } else {
+                palette.overlay0
+            });
+            put_text(buffer, rect.x, rect.y, 1, marker, plain);
+            if endpoint.endpoint_id.is_local() {
+                put_text(
+                    buffer,
+                    rect.x.saturating_add(1),
+                    rect.y,
+                    rect.width.saturating_sub(2),
+                    "L",
+                    plain,
+                );
+            } else {
+                // Four columns leave no room for a tag cell, so the machine's
+                // first letter carries the tag color (the expanded row's
+                // `machine_chrome` lookup) as its identity mark.
+                let letter = endpoint
+                    .label
+                    .chars()
+                    .next()
+                    .map(|ch| ch.to_uppercase().collect::<String>())
+                    .unwrap_or_else(|| (index + 1).to_string());
+                let tag = machine_sidebar_tag(state.machine_chrome, endpoint, palette)
+                    .unwrap_or(palette.overlay0);
+                put_text(
+                    buffer,
+                    rect.x.saturating_add(1),
+                    rect.y,
+                    rect.width.saturating_sub(2),
+                    &letter,
+                    Style::default().fg(tag).add_modifier(Modifier::BOLD),
+                );
+            }
             if !endpoint.endpoint_id.is_local() {
-                let (glyph, _, color) = endpoint_status_presentation(endpoint.status, palette);
+                let (glyph, _, color) =
+                    endpoint_status_presentation(endpoint.status, palette, state.spinner);
                 put_right_text(buffer, rect, rect.y, glyph, Style::default().fg(color));
             }
             hits.machines.push(MachineHit {
@@ -129,6 +229,15 @@ pub(super) fn render_collapsed(
                 buffer.set_style(rect, Style::default().bg(selection_background));
             } else if focused {
                 buffer.set_style(rect, Style::default().bg(palette.active_row_bg));
+            } else if matches!(
+                state.chrome_hover,
+                Some(super::feedback::ChromeHover::WorkspaceRow {
+                    endpoint_id,
+                    workspace_id,
+                }) if endpoint_id == &endpoint.endpoint_id
+                    && workspace_id == &workspace.workspace_id
+            ) {
+                buffer.set_style(rect, Style::default().bg(palette.surface0));
             }
             let stale = endpoint.status != ClientEndpointStatus::Online;
             let number = format!(" {}", workspace.number);
@@ -192,6 +301,7 @@ pub(super) fn render_collapsed(
         state.endpoints,
         state.active_endpoint_id,
         config,
+        state.chrome_hover,
         hits,
     );
     hits.sidebar_toggle = if area.is_empty() || workspace_area.width == 0 {
@@ -210,7 +320,16 @@ pub(super) fn render_collapsed(
         hits.sidebar_toggle.y,
         hits.sidebar_toggle.width,
         "»",
-        Style::default().fg(palette.overlay0),
+        Style::default().fg(
+            if matches!(
+                state.chrome_hover,
+                Some(super::feedback::ChromeHover::SidebarToggle)
+            ) {
+                palette.text
+            } else {
+                palette.overlay0
+            },
+        ),
     );
 }
 
@@ -223,7 +342,15 @@ pub(super) fn render_expanded(
     hits: &mut ShellHitMap,
 ) {
     let palette = &config.palette;
-    super::render::render_sidebar_background(buffer, area, palette);
+    super::render::render_sidebar_background(
+        buffer,
+        area,
+        palette,
+        matches!(
+            state.chrome_hover,
+            Some(super::feedback::ChromeHover::SidebarDivider)
+        ),
+    );
     hits.sidebar_divider = if area.is_empty() {
         Rect::default()
     } else {
@@ -246,30 +373,25 @@ pub(super) fn render_expanded(
 
     let empty_collapsed_groups = HashSet::new();
 
-    enum Row {
-        Endpoint(usize),
-        Workspace {
-            endpoint: usize,
-            entry: WorkspaceEntry,
-        },
-    }
     let mut rows = Vec::new();
-    for (endpoint_index, endpoint) in state.endpoints.iter().enumerate() {
-        rows.push(Row::Endpoint(endpoint_index));
-        if state.collapsed_endpoints.contains(&endpoint.endpoint_id) {
-            continue;
-        }
-        if let Some(snapshot) = endpoint.snapshot.as_deref() {
-            let collapsed_groups = collapsed_groups_for_endpoint(state, &endpoint.endpoint_id)
-                .unwrap_or(&empty_collapsed_groups);
-            rows.extend(
-                super::sidebar::workspace_entries(snapshot, collapsed_groups)
-                    .into_iter()
-                    .map(|entry| Row::Workspace {
-                        endpoint: endpoint_index,
-                        entry,
-                    }),
-            );
+    let mut emitted_groups: Vec<String> = Vec::new();
+    for endpoint_index in 0..state.endpoints.len() {
+        let endpoint = &state.endpoints[endpoint_index];
+        let group = machine_sidebar_group(state.machine_chrome, &endpoint.endpoint_id);
+        if let Some(group) = group {
+            if emitted_groups.iter().any(|emitted| emitted == group) {
+                continue;
+            }
+            emitted_groups.push(group.to_owned());
+            rows.push(Row::GroupHeader(group.to_owned()));
+            for member_index in 0..state.endpoints.len() {
+                let member = &state.endpoints[member_index];
+                if machine_sidebar_group(state.machine_chrome, &member.endpoint_id) == Some(group) {
+                    push_endpoint_rows(state, &empty_collapsed_groups, &mut rows, member_index);
+                }
+            }
+        } else {
+            push_endpoint_rows(state, &empty_collapsed_groups, &mut rows, endpoint_index);
         }
     }
     let body = Rect::new(
@@ -284,7 +406,7 @@ pub(super) fn render_expanded(
     let row_heights = rows
         .iter()
         .map(|row| match row {
-            Row::Endpoint(_) => 1,
+            Row::GroupHeader(_) | Row::Endpoint(_) => 1,
             Row::Workspace { endpoint, entry } => {
                 let endpoint = &state.endpoints[*endpoint];
                 let collapsed_groups = collapsed_groups_for_endpoint(state, &endpoint.endpoint_id)
@@ -342,7 +464,7 @@ pub(super) fn render_expanded(
                         })
                     })
             }
-            Row::Endpoint(_) => false,
+            Row::GroupHeader(_) | Row::Endpoint(_) => false,
         });
         if let Some(selected_row) = selected_row {
             *state.workspace_scroll = super::scroll::list_scroll_start_to_reveal(
@@ -370,6 +492,25 @@ pub(super) fn render_expanded(
     let mut y = body.y;
     for (row_index, row) in rows.iter().enumerate().skip(*state.workspace_scroll) {
         match row {
+            Row::GroupHeader(group) => {
+                if y >= body.bottom() {
+                    break;
+                }
+                let rect = Rect::new(body.x, y, content_width, 1);
+                put_text(
+                    buffer,
+                    rect.x,
+                    rect.y,
+                    rect.width,
+                    &format!(" {group}"),
+                    Style::default()
+                        .fg(palette.overlay0)
+                        .add_modifier(Modifier::BOLD | Modifier::DIM),
+                );
+                y = y
+                    .saturating_add(1)
+                    .saturating_add(gaps.get(row_index).copied().unwrap_or(0));
+            }
             Row::Endpoint(index) => {
                 if y >= body.bottom() {
                     break;
@@ -378,18 +519,27 @@ pub(super) fn render_expanded(
                 let rect = Rect::new(body.x, y, content_width, 1);
                 let collapsed = state.collapsed_endpoints.contains(&endpoint.endpoint_id);
                 let marker = if collapsed { "▸" } else { "▾" };
+                let tag = machine_sidebar_tag(state.machine_chrome, endpoint, palette);
+                let hovered = matches!(
+                    state.chrome_hover,
+                    Some(super::feedback::ChromeHover::MachineRow(id))
+                        if id == &endpoint.endpoint_id
+                );
                 render_endpoint_row(
                     buffer,
                     rect,
                     marker,
                     endpoint,
                     collapsed && &endpoint.endpoint_id == state.active_endpoint_id,
+                    hovered,
                     palette,
+                    tag,
+                    state.spinner,
                 );
                 hits.machines.push(MachineHit {
                     rect,
                     collapse_toggle: Rect::new(
-                        rect.x.saturating_add(1),
+                        rect.x.saturating_add(u16::from(tag.is_some()) + 1),
                         rect.y,
                         u16::from(rect.width > 1),
                         1,
@@ -436,6 +586,14 @@ pub(super) fn render_expanded(
                 let selected = state.selected_workspace_id.is_some_and(|target| {
                     target.matches(&endpoint.endpoint_id, &workspace.workspace_id)
                 });
+                let hovered = matches!(
+                    state.chrome_hover,
+                    Some(super::feedback::ChromeHover::WorkspaceRow {
+                        endpoint_id,
+                        workspace_id,
+                    }) if endpoint_id == &endpoint.endpoint_id
+                        && workspace_id == &workspace.workspace_id
+                );
                 super::sidebar::render_workspace_rows(
                     buffer,
                     nested,
@@ -447,6 +605,7 @@ pub(super) fn render_expanded(
                     endpoint_active,
                     selected,
                     false,
+                    hovered,
                     palette,
                 );
                 if selected && palette.selection_bg == ratatui::style::Color::Reset {
@@ -484,7 +643,11 @@ pub(super) fn render_expanded(
     if show_scrollbar {
         let track = Rect::new(body.right().saturating_sub(1), body.y, 1, body.height);
         hits.workspace_scrollbar = track;
-        super::scroll::render_list_scrollbar(buffer, track, metrics, palette);
+        let thumb_hovered = matches!(
+            state.chrome_hover,
+            Some(super::feedback::ChromeHover::WorkspaceScrollbarThumb)
+        );
+        super::scroll::render_list_scrollbar(buffer, track, metrics, palette, thumb_hovered);
     }
 
     let footer_y = workspace_area.bottom().saturating_sub(1);
@@ -527,6 +690,11 @@ pub(super) fn render_expanded(
             menu_label,
             Style::default().fg(if attention {
                 palette.accent
+            } else if matches!(
+                state.chrome_hover,
+                Some(super::feedback::ChromeHover::GlobalLauncher)
+            ) {
+                palette.text
             } else {
                 palette.overlay0
             }),
@@ -540,6 +708,7 @@ pub(super) fn render_expanded(
         state.active_endpoint_id,
         config,
         state.agent_scroll,
+        state.chrome_hover,
         hits,
     );
     hits.sidebar_toggle = Rect::new(
@@ -554,7 +723,16 @@ pub(super) fn render_expanded(
         hits.sidebar_toggle.y,
         hits.sidebar_toggle.width,
         "«",
-        Style::default().fg(palette.overlay0),
+        Style::default().fg(
+            if matches!(
+                state.chrome_hover,
+                Some(super::feedback::ChromeHover::SidebarToggle)
+            ) {
+                palette.text
+            } else {
+                palette.overlay0
+            },
+        ),
     );
 }
 
@@ -574,12 +752,17 @@ fn render_endpoint_row(
     marker: &str,
     endpoint: &ClientShellEndpoint,
     highlighted: bool,
+    hovered: bool,
     palette: &Palette,
+    tag: Option<ratatui::style::Color>,
+    spinner: &str,
 ) {
     if highlighted {
         buffer.set_style(rect, Style::default().bg(palette.active_row_bg));
+    } else if hovered {
+        buffer.set_style(rect, Style::default().bg(palette.surface0));
     }
-    let (glyph, state, color) = endpoint_status_presentation(endpoint.status, palette);
+    let (glyph, state, color) = endpoint_status_presentation(endpoint.status, palette, spinner);
     let state = if endpoint.status == ClientEndpointStatus::Online {
         ""
     } else {
@@ -593,11 +776,28 @@ fn render_endpoint_row(
         format!("{glyph} {state}")
     };
     let signal_width = display_width(&signal).min(rect.width);
+    let text_x = if let Some(tag) = tag {
+        put_text(
+            buffer,
+            rect.x,
+            rect.y,
+            1,
+            "▪",
+            Style::default().fg(tag).add_modifier(Modifier::BOLD),
+        );
+        rect.x.saturating_add(1)
+    } else {
+        rect.x
+    };
+    let text_width = rect
+        .width
+        .saturating_sub(text_x - rect.x)
+        .saturating_sub(signal_width.saturating_add(1));
     put_text(
         buffer,
-        rect.x,
+        text_x,
         rect.y,
-        rect.width.saturating_sub(signal_width.saturating_add(1)),
+        text_width,
         &format!(" {marker} {}", endpoint.label),
         Style::default()
             .fg(

@@ -14,6 +14,7 @@ fn remote_profile() -> SavedSshEndpoint {
         target: "dev@build.example".into(),
         session: "agents".into(),
         enabled: true,
+        ..SavedSshEndpoint::new("base", "base", "default").expect("valid base profile")
     }
 }
 
@@ -383,6 +384,52 @@ fn sidebar_renders_local_and_saved_ssh_endpoints_with_status() {
     let buffer = frame.to_ratatui_buffer().expect("frame should reconstruct");
     assert_ne!(buffer[(local.right() - 1, local.y)].symbol(), "●");
     assert_eq!(buffer[(remote.right() - 1, remote.y)].symbol(), "●");
+}
+
+#[test]
+fn collapsed_sidebar_marks_remote_machine_with_color_tag_letter() {
+    let (mut state, remote) = state_with_remote();
+    state.sidebar_collapsed = true;
+    let frame = state.compose(100, 28).expect("collapsed endpoint frame");
+    let buffer = frame.to_ratatui_buffer().expect("frame should reconstruct");
+    let local = state
+        .hits
+        .machines
+        .iter()
+        .find(|hit| hit.endpoint_id.is_local())
+        .expect("collapsed local machine row")
+        .rect;
+    assert_eq!(buffer[(local.x + 1, local.y)].symbol(), "L");
+    let remote_rect = state
+        .hits
+        .machines
+        .iter()
+        .find(|hit| hit.endpoint_id == remote)
+        .expect("collapsed remote machine row")
+        .rect;
+    // No explicit profile color: the letter takes the stable hash color.
+    let cell = &buffer[(remote_rect.x + 1, remote_rect.y)];
+    assert_eq!(cell.symbol(), "B");
+    let expected =
+        super::super::machines_overlay::machine_hash_color("Build", &state.config.palette);
+    assert_eq!(cell.fg, expected);
+
+    // An explicit profile color wins over the hash color.
+    let mut profiles = state.saved_profiles.clone();
+    profiles[0].color = Some("#ff0000".into());
+    state.mirror_saved_profiles(profiles);
+    let frame = state.compose(100, 28).expect("collapsed endpoint frame");
+    let buffer = frame.to_ratatui_buffer().expect("frame should reconstruct");
+    let remote_rect = state
+        .hits
+        .machines
+        .iter()
+        .find(|hit| hit.endpoint_id == remote)
+        .expect("collapsed remote machine row")
+        .rect;
+    let cell = &buffer[(remote_rect.x + 1, remote_rect.y)];
+    assert_eq!(cell.symbol(), "B");
+    assert_eq!(cell.fg, ratatui::style::Color::from_u32(0x00ff0000));
 }
 
 #[test]
@@ -1356,8 +1403,10 @@ fn machine_arrow_toggles_inactive_machine_without_switching() {
                     .find(|hit| hit.endpoint_id == remote_id)
                     .expect("remote machine")
                     .rect;
-                let column = machine.x + u16::from(!sidebar_collapsed);
                 let buffer = frame.to_ratatui_buffer().expect("frame buffer");
+                let column = (machine.x..machine.x.saturating_add(machine.width))
+                    .find(|x| matches!(buffer[(*x, machine.y)].symbol(), "▾" | "▸"))
+                    .expect("collapse marker in the machine row");
                 assert_eq!(
                     buffer[(column, machine.y)].symbol(),
                     if collapsed { "▾" } else { "▸" }
@@ -1640,7 +1689,9 @@ fn disconnected_active_endpoint_freezes_surface_and_marks_cached_ui_stale() {
         state.endpoint_status(&endpoint_id),
         Some(ClientEndpointStatus::Reconnecting)
     );
-    assert!(text.contains("◐ reconnecting"), "frame: {text}");
+    let reconnecting_label = format!("◐{}", crate::i18n::texts().endpoint.st_reconnecting);
+    let compact: String = text.chars().filter(|ch| !ch.is_whitespace()).collect();
+    assert!(compact.contains(&reconnecting_label), "frame: {text}");
     assert!(text.contains("Build · remote agent"), "frame: {text}");
     assert!(
         text.contains("LIVE"),

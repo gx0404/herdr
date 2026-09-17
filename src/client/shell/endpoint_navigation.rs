@@ -81,6 +81,15 @@ impl ClientShellState {
                 endpoint_id,
                 target: None,
             });
+        } else if self.endpoint_status(&endpoint_id) == Some(ClientEndpointStatus::Attention) {
+            // Attention rows are the persistent repair entry: open the machine
+            // detail (failure reason, fix command, reconnect) instead of a
+            // transient toast.
+            if let ClientEndpointId::Ssh(profile_id) = &endpoint_id {
+                let profile_id = profile_id.clone();
+                self.open_machines_overlay_for(&profile_id);
+            }
+            outcome.repaint = true;
         } else {
             let label = self.endpoint_label(&endpoint_id).to_owned();
             self.receive_endpoint_unavailable(crate::i18n::fill(

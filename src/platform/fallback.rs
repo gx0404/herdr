@@ -47,6 +47,12 @@ pub(crate) fn remote_ssh_config_paths() -> super::RemoteSshConfigPaths {
     }
 }
 
+pub(crate) fn default_known_hosts_path() -> Option<PathBuf> {
+    std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .map(|home| home.join(".ssh").join("known_hosts"))
+}
+
 pub(crate) fn create_remote_ssh_config_dir(_control_socket_name: &str) -> std::io::Result<PathBuf> {
     for attempt in 0..100 {
         let dir = std::env::temp_dir().join(format!("herdr-ssh-{}-{attempt}", std::process::id()));

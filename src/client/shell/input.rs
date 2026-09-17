@@ -177,7 +177,8 @@ impl ClientShellState {
                                 | ClientShellOverlay::ProductAnnouncement(_)
                                 | ClientShellOverlay::ReleaseNotes(_)
                         )
-                    ) {
+                    ) || (self.link_hints.is_some() && self.overlay.is_none())
+                    {
                         self.reconcile_input_source();
                         continue;
                     }
@@ -210,7 +211,8 @@ impl ClientShellState {
                                 | ClientShellOverlay::ProductAnnouncement(_)
                                 | ClientShellOverlay::ReleaseNotes(_)
                         )
-                    ) {
+                    ) || (self.link_hints.is_some() && self.overlay.is_none())
+                    {
                         self.reconcile_input_source();
                         continue;
                     }
@@ -457,6 +459,7 @@ impl ClientShellState {
         matches!(
             self.overlay.as_ref(),
             Some(ClientShellOverlay::Rename(_))
+                | Some(ClientShellOverlay::CommandPalette(_))
                 | Some(ClientShellOverlay::WorktreeCreate(
                     ClientWorktreeCreateOverlay {
                         creating: false,
@@ -478,6 +481,26 @@ impl ClientShellState {
                     search_focused: true,
                     ..
                 }))
+                | Some(ClientShellOverlay::Snippets(
+                    super::snippets_overlay::ClientSnippetsOverlay {
+                        view: super::snippets_overlay::ClientSnippetsView::Form(_)
+                            | super::snippets_overlay::ClientSnippetsView::RunVariables(_),
+                        ..
+                    }
+                ))
+                | Some(ClientShellOverlay::Snippets(
+                    super::snippets_overlay::ClientSnippetsOverlay {
+                        search_focused: true,
+                        ..
+                    }
+                ))
+                | Some(ClientShellOverlay::Scenes(
+                    super::scenes_overlay::ClientScenesOverlay {
+                        view: super::scenes_overlay::ClientScenesView::Save(_)
+                            | super::scenes_overlay::ClientScenesView::Rename { .. },
+                        ..
+                    }
+                ))
         )
     }
 
@@ -523,6 +546,10 @@ impl ClientShellState {
             return Some(target);
         }
         if self.popup_pending {
+            return None;
+        }
+        if self.link_hints.is_some() && self.overlay.is_none() {
+            self.route_link_hints_key(key, outcome);
             return None;
         }
         if self.overlay.is_some() {
@@ -1009,19 +1036,37 @@ impl ClientShellState {
     }
 
     fn push_pane_key(
-        &self,
+        &mut self,
         target: ClientInputTarget,
         key: crate::input::TerminalKey,
         outcome: &mut ClientShellInput,
     ) {
-        if let Some(event) = ClientPaneInputEvent::from_terminal_key(key) {
-            super::push_target_event(target, event, outcome);
+        if let Some(event) = ClientPaneInputEvent::from_terminal_key(key.clone()) {
+            super::push_target_event(target.clone(), event, outcome);
+        }
+        // The broadcast fan-out only follows pane keys; popup input and mouse
+        // events never leave the focused surface.
+        if matches!(target, ClientInputTarget::Pane(_)) {
+            self.broadcast_key(&key, outcome);
         }
     }
 
-    fn push_focused_pane_event(&self, event: ClientPaneInputEvent, outcome: &mut ClientShellInput) {
+    fn push_focused_pane_event(
+        &mut self,
+        event: ClientPaneInputEvent,
+        outcome: &mut ClientShellInput,
+    ) {
         if let Some(pane_id) = self.focused_pane_id() {
-            super::push_target_event(ClientInputTarget::Pane(pane_id), event, outcome);
+            super::push_target_event(ClientInputTarget::Pane(pane_id), event.clone(), outcome);
+            match &event {
+                ClientPaneInputEvent::TextCommit(text) => {
+                    self.broadcast_text(text, false, outcome);
+                }
+                ClientPaneInputEvent::Paste(text) => {
+                    self.broadcast_text(text, true, outcome);
+                }
+                ClientPaneInputEvent::Key { .. } | ClientPaneInputEvent::Mouse { .. } => {}
+            }
         }
     }
 }

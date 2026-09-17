@@ -44,7 +44,7 @@ pub(crate) enum EndpointSupervisorEvent {
 #[derive(Clone)]
 enum ConnectTarget {
     Local(PathBuf),
-    Ssh(super::SavedSshEndpoint),
+    Ssh(Box<super::SavedSshEndpoint>),
 }
 
 struct ReconnectState {
@@ -73,6 +73,18 @@ pub(crate) struct EndpointSupervisors {
     endpoints: HashMap<ClientEndpointId, ReconnectState>,
     next_generation: u64,
     shutdown: Arc<AtomicBool>,
+    /// Latest structured connection-failure kind per endpoint, recorded
+    /// alongside the status event so detail views can react to the kind
+    /// (e.g. host-key or auth prompts) instead of parsing message text.
+    error_kinds:
+        Arc<std::sync::Mutex<HashMap<ClientEndpointId, crate::remote::ConnectionErrorKind>>>,
+    /// Running SSH port forwards per endpoint: rebuilt after every successful
+    /// connect and reconciled in place when catalog rules change underneath a
+    /// healthy connection.
+    forwards: Arc<std::sync::Mutex<crate::remote::PortForwardManager>>,
+    /// Snapshot workers for profiles with session logging enabled; follows
+    /// the same profile lifecycle as the connections themselves.
+    session_logs: super::session_log::SessionLogManager,
 }
 
 impl EndpointSupervisors {
@@ -83,14 +95,21 @@ impl EndpointSupervisors {
             .map(|profile| {
                 (
                     ClientEndpointId::Ssh(profile.id.clone()),
-                    ReconnectState::new(ConnectTarget::Ssh(profile.clone()), now),
+                    ReconnectState::new(ConnectTarget::Ssh(Box::new(profile.clone())), now),
                 )
             })
             .collect();
+        let mut session_logs = super::session_log::SessionLogManager::new();
+        session_logs.sync(profiles);
         Self {
             endpoints,
             next_generation: 2,
             shutdown: Arc::new(AtomicBool::new(false)),
+            error_kinds: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            forwards: Arc::new(std::sync::Mutex::new(
+                crate::remote::PortForwardManager::new(),
+            )),
+            session_logs,
         }
     }
 
@@ -124,14 +143,47 @@ impl EndpointSupervisors {
             }
             keep
         });
+        {
+            let mut error_kinds = lock_error_kinds(&self.error_kinds);
+            let mut forwards = lock_forwards(&self.forwards);
+            for endpoint_id in &retired {
+                error_kinds.remove(endpoint_id);
+                if let ClientEndpointId::Ssh(profile_id) = endpoint_id {
+                    forwards.stop(profile_id);
+                }
+            }
+        }
         for profile in profiles.iter().filter(|profile| profile.enabled) {
             let state = self
                 .endpoints
                 .entry(ClientEndpointId::Ssh(profile.id.clone()))
-                .or_insert_with(|| ReconnectState::new(ConnectTarget::Ssh(profile.clone()), now));
-            state.target = ConnectTarget::Ssh(profile.clone());
+                .or_insert_with(|| {
+                    ReconnectState::new(ConnectTarget::Ssh(Box::new(profile.clone())), now)
+                });
+            let rules_changed = match &state.target {
+                ConnectTarget::Ssh(previous) => previous.port_forwards != profile.port_forwards,
+                ConnectTarget::Local(_) => false,
+            };
+            state.target = ConnectTarget::Ssh(Box::new(profile.clone()));
+            // Forward rules follow the live connection: only apply edits while
+            // online. Everything else is picked up by the rebuild on the next
+            // successful connect.
+            if rules_changed && state.online_since.is_some() {
+                lock_forwards(&self.forwards).reconcile(profile);
+            }
         }
+        // Session-log workers track the profile set independently of the
+        // connection state: logging is a client-local background concern and
+        // must not force or block a reconnect.
+        self.session_logs.sync(profiles);
         retired
+    }
+
+    /// Snapshots dropped by the shared session-log writer queue for one
+    /// profile; polled by the client on the forward-status cadence while
+    /// that machine's detail card showing it is open.
+    pub(crate) fn session_log_dropped(&self, profile_id: &super::ProfileId) -> u64 {
+        self.session_logs.dropped_for(profile_id)
     }
 
     pub(crate) fn spawn_due(
@@ -151,29 +203,50 @@ impl EndpointSupervisors {
             self.next_generation = self.next_generation.saturating_add(1);
             let endpoint_id = endpoint_id.clone();
             let target = state.target.clone();
+            let forward_profile = match &target {
+                ConnectTarget::Ssh(profile) => Some((**profile).clone()),
+                ConnectTarget::Local(_) => None,
+            };
             let event_tx = event_tx.clone();
             let shutdown = self.shutdown.clone();
+            let error_kinds = self.error_kinds.clone();
+            let forwards = self.forwards.clone();
             tokio::spawn(async move {
                 if shutdown.load(Ordering::Acquire) {
                     return;
                 }
                 let task_endpoint_id = endpoint_id.clone();
                 let result = tokio::task::spawn_blocking(move || {
-                    connect_once(&target, options, endpoint_id, generation)
+                    let event = connect_once(&target, options, endpoint_id, generation)?;
+                    // The link is up: (re)start this profile's port forwards
+                    // before the Online event publishes the endpoint.
+                    if let Some(profile) = &forward_profile {
+                        lock_forwards(&forwards).rebuild(profile);
+                    }
+                    Ok(event)
                 })
                 .await;
                 let event = match result {
-                    Ok(Ok(event)) => event,
-                    Ok(Err(error)) => EndpointSupervisorEvent::Status {
-                        endpoint_id: task_endpoint_id,
-                        generation,
-                        status: if failure_needs_attention(&error) {
-                            ClientEndpointStatus::Attention
-                        } else {
-                            ClientEndpointStatus::Reconnecting
-                        },
-                        message: error.to_string(),
-                    },
+                    Ok(Ok(event)) => {
+                        lock_error_kinds(&error_kinds).remove(&task_endpoint_id);
+                        event
+                    }
+                    Ok(Err(error)) => {
+                        lock_error_kinds(&error_kinds).insert(
+                            task_endpoint_id.clone(),
+                            crate::remote::classify_connection_error(&error),
+                        );
+                        EndpointSupervisorEvent::Status {
+                            endpoint_id: task_endpoint_id,
+                            generation,
+                            status: if failure_needs_attention(&error) {
+                                ClientEndpointStatus::Attention
+                            } else {
+                                ClientEndpointStatus::Reconnecting
+                            },
+                            message: error.to_string(),
+                        }
+                    }
                     Err(error) => EndpointSupervisorEvent::Status {
                         endpoint_id: task_endpoint_id,
                         generation,
@@ -185,6 +258,32 @@ impl EndpointSupervisors {
                     let _ = event_tx.send(event).await;
                 }
             });
+        }
+    }
+
+    /// The structured kind of the endpoint's latest connection failure, when
+    /// one has been recorded since the last successful connect. Cleared on
+    /// `Online`; kept for `Attention` so the detail view can offer the
+    /// matching remedy (approve host key, answer an auth prompt, ...).
+    pub(crate) fn connection_error_kind(
+        &self,
+        endpoint_id: &ClientEndpointId,
+    ) -> Option<crate::remote::ConnectionErrorKind> {
+        lock_error_kinds(&self.error_kinds)
+            .get(endpoint_id)
+            .cloned()
+    }
+
+    /// Latest per-rule port-forward status for an SSH endpoint (empty for
+    /// Local or when nothing is tracked). Failed rules carry the recorded
+    /// reason so the detail view can show it without parsing process output.
+    pub(crate) fn port_forward_status(
+        &self,
+        endpoint_id: &ClientEndpointId,
+    ) -> Vec<crate::remote::PortForwardStatus> {
+        match endpoint_id {
+            ClientEndpointId::Ssh(profile_id) => lock_forwards(&self.forwards).status(profile_id),
+            ClientEndpointId::Local => Vec::new(),
         }
     }
 
@@ -209,6 +308,7 @@ impl EndpointSupervisors {
                 }
                 state.online_since.get_or_insert(now);
                 state.next_attempt = None;
+                lock_error_kinds(&self.error_kinds).remove(endpoint_id);
             }
             ClientEndpointStatus::Attention | ClientEndpointStatus::Disabled => {
                 state.online_since = None;
@@ -235,6 +335,20 @@ impl EndpointSupervisors {
         true
     }
 
+    /// Manual reconnect request: schedule an immediate attempt with a fresh
+    /// backoff ladder. An attempt already in flight is left alone.
+    pub(crate) fn reconnect_now(&mut self, endpoint_id: &ClientEndpointId, now: Instant) -> bool {
+        let Some(state) = self.endpoints.get_mut(endpoint_id) else {
+            return false;
+        };
+        if state.in_flight {
+            return true;
+        }
+        state.attempts = 0;
+        state.next_attempt = Some(now);
+        true
+    }
+
     pub(crate) fn disconnected(
         &mut self,
         endpoint_id: &ClientEndpointId,
@@ -253,6 +367,8 @@ impl EndpointSupervisors {
 impl Drop for EndpointSupervisors {
     fn drop(&mut self) {
         self.shutdown.store(true, Ordering::Release);
+        lock_forwards(&self.forwards).stop_all();
+        self.session_logs.stop_all();
     }
 }
 
@@ -278,9 +394,13 @@ fn connect_once(
             (stream, Box::new(()))
         }
         ConnectTarget::Ssh(profile) => {
-            let connected = crate::remote::connect_saved_ssh(profile.id.as_str(), &profile.target, &profile.session).map_err(|error| {
+            let connected = crate::remote::connect_saved_ssh(profile).map_err(|error| {
                 if failure_needs_attention(&error) {
-                    std::io::Error::new(error.kind(), format!("{error}. Run `{}` interactively to approve setup, then restart this client", crate::remote::saved_ssh_bootstrap_command(&profile.target, &profile.session)))
+                    // Extend the message with the standalone fix command while
+                    // keeping the structured classification attached.
+                    let kind = crate::remote::classify_connection_error(&error);
+                    let wrapped = std::io::Error::new(error.kind(), format!("{error}. Run `{}` interactively to approve setup, then restart this client", crate::remote::saved_ssh_bootstrap_command(&profile.target, &profile.session)));
+                    crate::remote::wrap_classified(wrapped, kind)
                 } else { error }
             })?;
             (connected.stream, Box::new(connected.bridge))
@@ -308,7 +428,8 @@ fn connect_once(
     let negotiation = EndpointNegotiation::new(
         handshake.endpoint_methods.unwrap_or_default(),
         handshake.endpoint_capabilities.unwrap_or_default(),
-    );
+    )
+    .with_server_version(handshake.server_version);
     if !negotiation.supports_surface_interest()
         || (!endpoint_id.is_local() && !negotiation.supports_health_check())
     {
@@ -330,6 +451,22 @@ fn connect_once(
 
 fn failure_needs_attention(error: &std::io::Error) -> bool {
     crate::remote::saved_ssh_failure_needs_attention(error)
+}
+
+fn lock_error_kinds(
+    error_kinds: &std::sync::Mutex<HashMap<ClientEndpointId, crate::remote::ConnectionErrorKind>>,
+) -> std::sync::MutexGuard<'_, HashMap<ClientEndpointId, crate::remote::ConnectionErrorKind>> {
+    error_kinds
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+fn lock_forwards(
+    forwards: &std::sync::Mutex<crate::remote::PortForwardManager>,
+) -> std::sync::MutexGuard<'_, crate::remote::PortForwardManager> {
+    forwards
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 fn handshake_error(error: crate::client::ClientError) -> std::io::Error {
@@ -373,6 +510,8 @@ mod tests {
             target: "build".into(),
             session: "agents".into(),
             enabled: true,
+            ..super::super::SavedSshEndpoint::new("base", "base", "default")
+                .expect("valid base profile")
         }
     }
 
@@ -474,9 +613,73 @@ mod tests {
     }
 
     #[test]
+    fn reconnect_now_reschedules_an_immediate_attempt_with_fresh_backoff() {
+        let now = Instant::now();
+        let profile = profile();
+        let endpoint_id = ClientEndpointId::Ssh(profile.id.clone());
+        let mut supervisors = EndpointSupervisors::new(&[profile], now);
+        let state = supervisors.endpoints.get_mut(&endpoint_id).unwrap();
+        state.generation = Some(3);
+        state.attempts = 5;
+        state.next_attempt = Some(now + Duration::from_secs(60));
+        assert!(supervisors.reconnect_now(&endpoint_id, now));
+        let state = &supervisors.endpoints[&endpoint_id];
+        assert_eq!(state.attempts, 0);
+        assert_eq!(state.next_attempt, Some(now));
+
+        // Attention stops retries entirely; a manual reconnect resumes them.
+        assert!(supervisors.record_status(&endpoint_id, 3, ClientEndpointStatus::Attention, now));
+        assert!(supervisors.endpoints[&endpoint_id].next_attempt.is_none());
+        assert!(supervisors.reconnect_now(&endpoint_id, now));
+        assert_eq!(supervisors.endpoints[&endpoint_id].next_attempt, Some(now));
+
+        // An in-flight attempt is left alone; unknown endpoints are rejected.
+        supervisors
+            .endpoints
+            .get_mut(&endpoint_id)
+            .unwrap()
+            .in_flight = true;
+        let scheduled = supervisors.endpoints[&endpoint_id].generation;
+        assert!(supervisors.reconnect_now(&endpoint_id, now));
+        assert_eq!(supervisors.endpoints[&endpoint_id].generation, scheduled);
+        assert!(!supervisors.reconnect_now(&ClientEndpointId::Local, now));
+    }
+
+    #[test]
     fn retry_backoff_is_bounded() {
         assert_eq!(retry_delay(1), INITIAL_RETRY_DELAY);
         assert_eq!(retry_delay(100), MAX_RETRY_DELAY);
+    }
+
+    #[test]
+    fn connection_error_kind_is_exposed_until_online_or_retired() {
+        let now = Instant::now();
+        let profile = profile();
+        let endpoint_id = ClientEndpointId::Ssh(profile.id.clone());
+        let mut supervisors = EndpointSupervisors::new(&[profile], now);
+        assert!(supervisors.connection_error_kind(&endpoint_id).is_none());
+
+        let kind = crate::remote::ConnectionErrorKind::HostKeyUnknown { fingerprint: None };
+        lock_error_kinds(&supervisors.error_kinds).insert(endpoint_id.clone(), kind.clone());
+        assert_eq!(
+            supervisors.connection_error_kind(&endpoint_id),
+            Some(kind.clone())
+        );
+
+        supervisors
+            .endpoints
+            .get_mut(&endpoint_id)
+            .unwrap()
+            .generation = Some(2);
+        assert!(supervisors.record_status(&endpoint_id, 2, ClientEndpointStatus::Online, now));
+        assert!(supervisors.connection_error_kind(&endpoint_id).is_none());
+
+        lock_error_kinds(&supervisors.error_kinds).insert(endpoint_id.clone(), kind);
+        assert_eq!(
+            supervisors.reconcile_profiles(&[], now),
+            vec![endpoint_id.clone()]
+        );
+        assert!(supervisors.connection_error_kind(&endpoint_id).is_none());
     }
 
     #[test]

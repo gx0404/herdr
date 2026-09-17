@@ -161,17 +161,27 @@ pub(crate) fn render_scrollbar_buffer(
     }
 }
 
-pub(crate) fn render_pane_scrollbar_buffer(
+/// Scrollbar colors come from the resolved component styles: with no
+/// `[theme.components]` overrides they match the palette-derived defaults.
+pub(crate) fn render_pane_scrollbar_buffer_styled(
     buffer: &mut Buffer,
     metrics: crate::pane::ScrollMetrics,
     track: Rect,
-    palette: &crate::app::state::Palette,
+    components: &crate::app::state::ComponentStyles,
     focused: bool,
 ) {
     let (track_color, thumb_color, thumb_symbol) = if focused {
-        (palette.overlay0, palette.overlay1, "▐")
+        (
+            components.scrollbar_track_focused,
+            components.scrollbar_thumb_focused,
+            "▐",
+        )
     } else {
-        (palette.surface_dim, palette.overlay0, "▕")
+        (
+            components.scrollbar_track_unfocused,
+            components.scrollbar_thumb_unfocused,
+            "▕",
+        )
     };
     render_scrollbar_buffer(
         buffer,
@@ -195,11 +205,95 @@ pub(super) fn render_pane_scrollbar(
     let Some(track) = pane_scrollbar_rect(info) else {
         return;
     };
-    render_pane_scrollbar_buffer(
+    render_pane_scrollbar_buffer_styled(
         frame.buffer_mut(),
         metrics,
         track,
-        &app.palette,
+        &app.components,
         info.is_focused,
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app::state::{ComponentStyles, Palette};
+    use crate::pane::ScrollMetrics;
+
+    fn scroll_metrics() -> ScrollMetrics {
+        // Scrolled all the way back: the thumb sits at the top of the track.
+        ScrollMetrics {
+            offset_from_bottom: 8,
+            max_offset_from_bottom: 8,
+            viewport_rows: 4,
+        }
+    }
+
+    #[test]
+    fn palette_default_components_preserve_the_legacy_focus_colors() {
+        let palette = Palette::catppuccin();
+        let components = ComponentStyles::from_palette(&palette);
+        let track = Rect::new(0, 0, 1, 8);
+
+        let mut focused = Buffer::empty(track);
+        render_pane_scrollbar_buffer_styled(
+            &mut focused,
+            scroll_metrics(),
+            track,
+            &components,
+            true,
+        );
+        let mut unfocused = Buffer::empty(track);
+        render_pane_scrollbar_buffer_styled(
+            &mut unfocused,
+            scroll_metrics(),
+            track,
+            &components,
+            false,
+        );
+
+        // Focused: track = overlay0, thumb = overlay1; unfocused: track =
+        // surface_dim, thumb = overlay0. The thumb occupies the top rows for a
+        // scrolled-back pane.
+        assert_eq!(focused[(0, 7)].style().fg, Some(palette.overlay0));
+        assert_eq!(focused[(0, 0)].style().fg, Some(palette.overlay1));
+        assert_eq!(unfocused[(0, 7)].style().fg, Some(palette.surface_dim));
+        assert_eq!(unfocused[(0, 0)].style().fg, Some(palette.overlay0));
+    }
+
+    #[test]
+    fn styled_scrollbar_uses_component_tokens_for_both_focus_states() {
+        let palette = Palette::catppuccin();
+        let components = ComponentStyles::resolve(
+            &palette,
+            Some(&crate::config::ThemeComponentsConfig {
+                scrollbar_thumb: Some("#010203".to_string()),
+                scrollbar_track: Some("#040506".to_string()),
+                ..Default::default()
+            }),
+            crate::config::ColorDepth::Truecolor,
+        );
+        let track = Rect::new(0, 0, 1, 8);
+
+        for focused in [true, false] {
+            let mut buffer = Buffer::empty(track);
+            render_pane_scrollbar_buffer_styled(
+                &mut buffer,
+                scroll_metrics(),
+                track,
+                &components,
+                focused,
+            );
+            assert_eq!(
+                buffer[(0, 0)].style().fg,
+                Some(Color::Rgb(1, 2, 3)),
+                "focused: {focused}"
+            );
+            assert_eq!(
+                buffer[(0, 7)].style().fg,
+                Some(Color::Rgb(4, 5, 6)),
+                "focused: {focused}"
+            );
+        }
+    }
 }

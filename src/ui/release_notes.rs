@@ -9,7 +9,6 @@ use crate::app::state::{Palette, ProductAnnouncementState, ReleaseNotesState};
 use crate::ui::text::display_width;
 
 pub(crate) const RELEASE_NOTES_MODAL_SIZE: (u16, u16) = (80, 24);
-pub(crate) const PRODUCT_ANNOUNCEMENT_MODAL_SIZE: (u16, u16) = (88, 24);
 
 fn release_notes_inline_spans<'a>(
     text: &str,
@@ -195,7 +194,7 @@ pub(crate) fn product_announcement_display_lines<'a>(
     release_notes_lines(announcement.body.as_str(), p)
 }
 
-fn display_lines_scroll_metrics(
+pub(crate) fn display_lines_scroll_metrics(
     lines: &[(usize, Line<'_>)],
     scroll: u16,
     body: Rect,
@@ -226,18 +225,6 @@ pub(crate) fn release_notes_scroll_metrics(
     display_lines_scroll_metrics(
         &release_notes_display_lines(notes, install_command, p),
         notes.scroll,
-        body,
-    )
-}
-
-pub(crate) fn product_announcement_scroll_metrics(
-    announcement: &ProductAnnouncementState,
-    body: Rect,
-    p: &Palette,
-) -> crate::pane::ScrollMetrics {
-    display_lines_scroll_metrics(
-        &product_announcement_display_lines(announcement, p),
-        announcement.scroll,
         body,
     )
 }

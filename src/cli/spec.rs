@@ -36,6 +36,8 @@ pub(super) fn command() -> Command {
         .subcommand(config_command())
         .subcommand(channel_command())
         .subcommand(machine::command())
+        .subcommand(broadcast_command())
+        .subcommand(snippet_command())
         .subcommand(server_command())
         .subcommand(api_command())
         .subcommand(workspace_command())
@@ -158,6 +160,74 @@ fn channel_command() -> Command {
                     .required(true)
                     .value_parser(["stable", "preview"]),
             ),
+        )
+}
+
+fn broadcast_command() -> Command {
+    let t = &crate::i18n::texts().cli_help;
+    Command::new("broadcast")
+        .about(t.broadcast_about)
+        .subcommand(
+            Command::new("status")
+                .about(t.broadcast_status_about)
+                .arg(json_flag()),
+        )
+        .subcommand(Command::new("enable").about(t.broadcast_enable_about))
+        .subcommand(Command::new("disable").about(t.broadcast_disable_about))
+        .subcommand(
+            Command::new("add")
+                .about(t.broadcast_add_about)
+                .arg(option("machine", "LABEL-OR-ID"))
+                .arg(option("pane", "PANE_ID").required(true)),
+        )
+        .subcommand(
+            Command::new("remove")
+                .about(t.broadcast_remove_about)
+                .arg(required("target-number", "NUMBER")),
+        )
+        .subcommand(Command::new("clear").about(t.broadcast_clear_about))
+        .subcommand(
+            Command::new("send")
+                .about(t.broadcast_send_about)
+                .arg(required("text", "TEXT"))
+                .arg(flag("no-enter"))
+                .arg(json_flag()),
+        )
+}
+
+fn snippet_command() -> Command {
+    let t = &crate::i18n::texts().cli_help;
+    Command::new("snippet")
+        .about(t.snippet_about)
+        .subcommand(
+            Command::new("list")
+                .about(t.snippet_list_about)
+                .arg(json_flag()),
+        )
+        .subcommand(
+            Command::new("add")
+                .about(t.snippet_add_about)
+                .arg(option("label", "TEXT").required(true))
+                .arg(option("command", "COMMAND").required(true))
+                .arg(option("description", "TEXT"))
+                .arg(repeatable_option("variable", "NAME"))
+                .arg(repeatable_option("tag", "TAG")),
+        )
+        .subcommand(
+            Command::new("remove")
+                .about(t.snippet_remove_about)
+                .arg(required("snippet", "ID_OR_LABEL")),
+        )
+        .subcommand(
+            Command::new("run")
+                .about(t.snippet_run_about)
+                .arg(required("snippet", "ID_OR_LABEL"))
+                .arg(repeatable_option("machine", "LABEL-OR-ID"))
+                .arg(flag("local"))
+                .arg(repeatable_option("pane", "PANE_ID").required(true))
+                .arg(repeatable_option("var", "NAME=VALUE"))
+                .arg(flag("no-enter"))
+                .arg(json_flag()),
         )
 }
 

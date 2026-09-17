@@ -76,6 +76,35 @@ impl ClientContextMenuOverlay {
                 ]);
                 items
             }
+            ClientContextMenuTarget::Machine {
+                endpoint_id,
+                enabled,
+                online,
+            } => {
+                let mut items = vec![item(t.manage_machines, Action::ManageMachines)];
+                if endpoint_id.is_local() {
+                    return items;
+                }
+                items.push(item(t.rename, Action::RenameMachine));
+                items.push(item(t.edit_machine, Action::EditMachine));
+                if *enabled && !*online {
+                    items.push(item(t.reconnect_machine, Action::ReconnectMachine));
+                }
+                items.push(item(
+                    if *enabled {
+                        t.disable_machine
+                    } else {
+                        t.enable_machine
+                    },
+                    Action::ToggleMachineEnabled,
+                ));
+                items.push(item(t.remove_machine, Action::RemoveMachine));
+                items.push(item(
+                    t.copy_machine_fix_command,
+                    Action::CopyMachineFixCommand,
+                ));
+                items
+            }
         }
     }
 }
@@ -167,6 +196,42 @@ impl ClientShellState {
         }));
     }
 
+    pub(super) fn open_machine_context_menu(
+        &mut self,
+        endpoint_id: &ClientEndpointId,
+        x: u16,
+        y: u16,
+    ) {
+        let (enabled, online) = match endpoint_id {
+            ClientEndpointId::Local => (true, true),
+            ClientEndpointId::Ssh(profile_id) => {
+                let enabled = self
+                    .saved_profiles
+                    .iter()
+                    .any(|profile| &profile.id == profile_id && profile.enabled);
+                if !enabled
+                    && !self
+                        .saved_profiles
+                        .iter()
+                        .any(|profile| &profile.id == profile_id)
+                {
+                    return;
+                }
+                (enabled, self.endpoint_is_online(endpoint_id))
+            }
+        };
+        self.overlay = Some(ClientShellOverlay::ContextMenu(ClientContextMenuOverlay {
+            target: ClientContextMenuTarget::Machine {
+                endpoint_id: endpoint_id.clone(),
+                enabled,
+                online,
+            },
+            x,
+            y,
+            highlighted: 0,
+        }));
+    }
+
     pub(super) fn move_context_menu_selection(&mut self, delta: isize) {
         let Some(ClientShellOverlay::ContextMenu(menu)) = self.overlay.as_mut() else {
             return;
@@ -213,8 +278,77 @@ impl ClientShellState {
                 action,
                 outcome,
             ),
+            ClientContextMenuTarget::Machine { endpoint_id, .. } => {
+                self.activate_machine_context_action(&endpoint_id, action, outcome)
+            }
         }
         outcome.repaint = true;
+    }
+
+    fn activate_machine_context_action(
+        &mut self,
+        endpoint_id: &ClientEndpointId,
+        action: ClientContextMenuAction,
+        outcome: &mut ClientShellInput,
+    ) {
+        use ClientContextMenuAction as Action;
+        match action {
+            Action::ManageMachines => self.open_machines_overlay(),
+            Action::RenameMachine
+            | Action::EditMachine
+            | Action::ReconnectMachine
+            | Action::ToggleMachineEnabled
+            | Action::RemoveMachine
+            | Action::CopyMachineFixCommand => {
+                let ClientEndpointId::Ssh(profile_id) = endpoint_id else {
+                    return;
+                };
+                let profile_id = profile_id.clone();
+                match action {
+                    Action::RenameMachine => {
+                        let label = self
+                            .saved_profiles
+                            .iter()
+                            .find(|profile| profile.id == profile_id)
+                            .map(|profile| profile.label.clone());
+                        if let Some(label) = label {
+                            self.overlay = Some(ClientShellOverlay::Rename(ClientRenameOverlay {
+                                title: crate::i18n::texts().machines.edit_title,
+                                input: TextEditor::new(&label, false),
+                                target: ClientRenameTarget::Machine { profile_id },
+                            }));
+                        }
+                    }
+                    Action::EditMachine => self.open_machine_edit_form(&profile_id),
+                    Action::ReconnectMachine => self.machine_reconnect(&profile_id, outcome),
+                    Action::ToggleMachineEnabled => {
+                        let enabled = self
+                            .saved_profiles
+                            .iter()
+                            .any(|profile| profile.id == profile_id && profile.enabled);
+                        self.machine_set_enabled(&profile_id, !enabled);
+                    }
+                    Action::RemoveMachine => self.open_machine_remove_confirm(&profile_id),
+                    Action::CopyMachineFixCommand => {
+                        if let Some(profile) = self
+                            .saved_profiles
+                            .iter()
+                            .find(|profile| profile.id == profile_id)
+                        {
+                            let command = crate::remote::saved_ssh_bootstrap_command(
+                                &profile.target,
+                                &profile.session,
+                            );
+                            outcome
+                                .actions
+                                .push(ClientShellAction::ClipboardWrite(command.into_bytes()));
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            _ => {}
+        }
     }
 
     fn activate_workspace_context_action(

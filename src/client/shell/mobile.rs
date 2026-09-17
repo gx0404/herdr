@@ -202,17 +202,6 @@ fn render_header_button(
     }
 }
 
-fn mobile_endpoint_state(status: ClientEndpointStatus) -> &'static str {
-    let texts = &crate::i18n::texts().mobile;
-    match status {
-        ClientEndpointStatus::Connecting => texts.st_connecting,
-        ClientEndpointStatus::Online => texts.st_online,
-        ClientEndpointStatus::Reconnecting => texts.st_reconnecting,
-        ClientEndpointStatus::Attention => texts.st_attention,
-        ClientEndpointStatus::Disabled => texts.st_disabled,
-    }
-}
-
 fn compact_tab_status(snapshot: &ClientShellSnapshot, workspace: &ClientShellWorkspace) -> String {
     let tabs = snapshot
         .tabs
@@ -601,7 +590,10 @@ fn mobile_items(
         ));
         for endpoint in endpoints {
             let background = palette.panel_bg;
-            let (symbol, state, color) = endpoint_status_presentation(endpoint.status, palette);
+            // The mobile switcher is a static browsing surface: keep the
+            // first spinner frame rather than plumbing animation state in.
+            let (symbol, state, color) =
+                endpoint_status_presentation(endpoint.status, palette, "◐");
             items.push(MobileItem {
                 lines: vec![
                     Line::from(vec![
@@ -644,7 +636,7 @@ fn mobile_items(
         if agents.is_empty() {
             items.push(MobileItem {
                 lines: vec![Line::from(Span::styled(
-                    crate::i18n::texts().mobile.no_matching_agents,
+                    crate::i18n::texts().sidebar.no_matching_agents,
                     Style::default()
                         .fg(palette.overlay0)
                         .bg(palette.panel_bg)
@@ -694,16 +686,20 @@ fn mobile_items(
                     .find(|(key, _)| key == status_key)
                     .map(|(_, label)| label.clone())
                     .unwrap_or_else(|| {
-                        if agent.agent_status == crate::api::schema::AgentStatus::Unknown {
-                            crate::i18n::texts().status.idle.to_owned()
-                        } else {
-                            status_key.to_owned()
+                        let status_texts = &crate::i18n::texts().status;
+                        match agent.agent_status {
+                            crate::api::schema::AgentStatus::Working => status_texts.working,
+                            crate::api::schema::AgentStatus::Blocked => status_texts.blocked,
+                            crate::api::schema::AgentStatus::Done => status_texts.done,
+                            crate::api::schema::AgentStatus::Idle
+                            | crate::api::schema::AgentStatus::Unknown => status_texts.idle,
                         }
+                        .to_owned()
                     }),
             );
             detail.push(agent_label.to_owned());
             if endpoint.stale() {
-                detail.push(mobile_endpoint_state(endpoint.status).to_owned());
+                detail.push(endpoint_status_label(endpoint.status).to_owned());
             }
             let background = if endpoint.endpoint_id == active_endpoint_id && agent.focused {
                 palette.surface_dim
@@ -839,7 +835,7 @@ fn mobile_items(
                 status_color(workspace.agent_status, palette)
             };
             let stale_detail = if endpoint.stale() {
-                format!(" · {}", mobile_endpoint_state(endpoint.status))
+                format!(" · {}", endpoint_status_label(endpoint.status))
             } else {
                 String::new()
             };

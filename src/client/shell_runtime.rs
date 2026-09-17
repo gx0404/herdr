@@ -25,6 +25,27 @@ pub(super) fn dispatch_client_shell_actions(
                     repaint |= shell.cancel_endpoint_request(&request.id);
                 }
             }
+            shell::ClientShellAction::EndpointRequest {
+                endpoint_id,
+                boot_id,
+                request,
+            } => {
+                // Cross-endpoint fire (snippet runs): the target lane is
+                // drained immediately; generation fencing in `send_next`
+                // rejects stale connections.
+                if let Some(connection) = endpoints.connection(&endpoint_id) {
+                    let generation = connection.generation;
+                    endpoint_commands.enqueue(endpoint_id.clone(), generation, boot_id, request);
+                    let cancelled = endpoint_commands.send_next(&endpoint_id, endpoints);
+                    if let Some(shell) = shell.as_deref_mut() {
+                        for request_id in cancelled {
+                            repaint |= shell.cancel_endpoint_request(&request_id);
+                        }
+                    }
+                } else if let Some(shell) = shell.as_deref_mut() {
+                    repaint |= shell.cancel_endpoint_request(&request.id);
+                }
+            }
             shell::ClientShellAction::ClipboardWrite(bytes) => {
                 crate::selection::write_osc52_bytes(&bytes);
             }
@@ -38,6 +59,116 @@ pub(super) fn dispatch_client_shell_actions(
                     force: false,
                 });
             }
+            shell::ClientShellAction::ReconnectEndpoint { endpoint_id } => {
+                let _ = event_tx.try_send(ClientLoopEvent::ReconnectEndpoint { endpoint_id });
+            }
+            shell::ClientShellAction::ConnectEndpointTrustOnce { endpoint_id } => {
+                let _ =
+                    event_tx.try_send(ClientLoopEvent::ConnectEndpointTrustOnce { endpoint_id });
+            }
+            shell::ClientShellAction::MachineHostKeyOp {
+                ticket,
+                op,
+                host,
+                port,
+            } => {
+                let op_tx = event_tx.clone();
+                std::thread::spawn(move || {
+                    let result = match op {
+                        shell::MachineHostKeyOp::Scan => crate::remote::scan_host_keys(&host, port)
+                            .map(|keys| {
+                                shell::MachineHostKeyOutcome::Scanned(
+                                    keys.into_iter()
+                                        .map(|key| (key.key_type, key.fingerprint.fingerprint))
+                                        .collect(),
+                                )
+                            }),
+                        shell::MachineHostKeyOp::Precollect => {
+                            crate::remote::precollect_host_keys(&host, port)
+                                .map(|keys| shell::MachineHostKeyOutcome::Precollected(keys.len()))
+                        }
+                        shell::MachineHostKeyOp::Remove => {
+                            crate::remote::remove_host_key(&host, port)
+                                .map(|_| shell::MachineHostKeyOutcome::Removed)
+                        }
+                    }
+                    .map_err(|error| error.to_string());
+                    let _ = op_tx.blocking_send(ClientLoopEvent::MachineAuth {
+                        update: shell::MachineAuthUpdate::HostKeyOpFinished { ticket, op, result },
+                    });
+                });
+            }
+            shell::ClientShellAction::StartMachineInteractiveAuth { ticket, profile } => {
+                let auth_tx = event_tx.clone();
+                std::thread::spawn(move || {
+                    let run = || -> io::Result<()> {
+                        let (channel, prompts) = crate::remote::start_interactive_auth_channel(
+                            crate::remote::SshAuthApproval::Approved,
+                        )?;
+                        let prompt_tx = auth_tx.clone();
+                        std::thread::spawn(move || {
+                            while let Some(prompt) = prompts.recv() {
+                                // A dropped prompt declines itself, so a dead
+                                // loop fails the ssh attempt fast.
+                                if prompt_tx
+                                    .blocking_send(ClientLoopEvent::MachineAuthPrompt {
+                                        ticket,
+                                        prompt: Box::new(prompt),
+                                    })
+                                    .is_err()
+                                {
+                                    break;
+                                }
+                            }
+                        });
+                        crate::remote::connect_saved_ssh_interactive(&profile, channel).map(drop)
+                    };
+                    let result = run().map_err(|error| error.to_string());
+                    let _ = auth_tx.blocking_send(ClientLoopEvent::MachineAuth {
+                        update: shell::MachineAuthUpdate::InteractiveFinished { ticket, result },
+                    });
+                });
+            }
+            shell::ClientShellAction::AnswerMachineAuthPrompt { ticket, answer } => {
+                let _ = event_tx.try_send(ClientLoopEvent::MachineAuthAnswer { ticket, answer });
+            }
+            shell::ClientShellAction::CancelMachineInteractiveAuth { ticket } => {
+                let _ = event_tx.try_send(ClientLoopEvent::MachineAuthCancel { ticket });
+            }
+            shell::ClientShellAction::BootstrapMachine {
+                ticket,
+                target,
+                session,
+                options,
+            } => {
+                let bootstrap_tx = event_tx.clone();
+                std::thread::spawn(move || {
+                    let send = |update: shell::MachineBootstrapUpdate| {
+                        let _ = bootstrap_tx
+                            .blocking_send(ClientLoopEvent::MachineBootstrap { ticket, update });
+                    };
+                    let result = crate::remote::prepare_saved_ssh_unattended(
+                        &target,
+                        &session,
+                        options.as_ref(),
+                        &|step| send(shell::MachineBootstrapUpdate::Step(step)),
+                    );
+                    send(shell::MachineBootstrapUpdate::Finished(
+                        result.map_err(|error| error.to_string()),
+                    ));
+                });
+            }
+            shell::ClientShellAction::MachineFsOp {
+                ticket,
+                profile,
+                op,
+            } => {
+                let fs_tx = event_tx.clone();
+                std::thread::spawn(move || {
+                    let result = run_machine_fs_op(&profile, op);
+                    let _ = fs_tx.blocking_send(ClientLoopEvent::MachineFs { ticket, result });
+                });
+            }
             shell::ClientShellAction::OpenSafeWebUrl(url) => {
                 if crate::app::actions::safe_web_url(&url).is_some() {
                     match crate::platform::open_url(&url) {
@@ -48,12 +179,6 @@ pub(super) fn dispatch_client_shell_actions(
                 }
             }
             shell::ClientShellAction::ReplayMouse(events) => replay_mouse.extend(events),
-            shell::ClientShellAction::Keybind(action) => {
-                debug!(
-                    ?action,
-                    "client shell action awaits its presentation family"
-                );
-            }
         }
     }
     // A source-off-first handoff leaves the registry's committed identity pointing at a
@@ -69,6 +194,87 @@ pub(super) fn dispatch_client_shell_actions(
         }
     }
     Ok((replay_mouse, repaint))
+}
+
+/// Executes one file-browser operation on the worker thread: connect the
+/// profile's sftp channel, run the operation, and map the outcome. Uploads
+/// read the local file here (with the small-file cap) so the UI never does
+/// blocking disk I/O either.
+fn run_machine_fs_op(
+    profile: &crate::client::endpoint::SavedSshEndpoint,
+    op: shell::MachineFsOp,
+) -> Result<shell::MachineFsOutcome, String> {
+    let fs = crate::remote::RemoteFs::connect(profile).map_err(|error| error.to_string())?;
+    match op {
+        shell::MachineFsOp::List { path } => fs
+            .list_dir(&path)
+            .map(|entries| shell::MachineFsOutcome::Entries { entries })
+            .map_err(|error| error.to_string()),
+        shell::MachineFsOp::Read { path } => fs
+            .read_small_file(&path)
+            .map(|content| shell::MachineFsOutcome::FileContent { content })
+            .map_err(|error| error.to_string()),
+        shell::MachineFsOp::Download {
+            remote,
+            local,
+            message,
+        } => {
+            let data = fs
+                .read_small_file(&remote)
+                .map_err(|error| error.to_string())?;
+            // Atomic with private permissions, like `machine fs get`.
+            crate::client::endpoint::store_private_json(
+                std::path::Path::new(&local),
+                &data,
+                "downloaded file",
+            )?;
+            Ok(shell::MachineFsOutcome::Changed { message })
+        }
+        shell::MachineFsOp::Upload {
+            local,
+            remote,
+            message,
+        } => {
+            let metadata = std::fs::metadata(&local).map_err(|error| error.to_string())?;
+            if !metadata.is_file() {
+                return Err(crate::i18n::fill(
+                    crate::i18n::texts()
+                        .cli_errors
+                        .machine_fs_local_not_file_fmt,
+                    &[("path", &local)],
+                ));
+            }
+            if metadata.len() > crate::remote::MAX_SMALL_FILE_BYTES {
+                return Err(crate::i18n::fill(
+                    crate::i18n::texts().cli_errors.machine_fs_too_large_fmt,
+                    &[
+                        ("size", &metadata.len().to_string()),
+                        ("limit", &crate::remote::MAX_SMALL_FILE_BYTES.to_string()),
+                    ],
+                ));
+            }
+            let data = std::fs::read(&local).map_err(|error| error.to_string())?;
+            fs.write_small_file(&remote, &data)
+                .map_err(|error| error.to_string())?;
+            Ok(shell::MachineFsOutcome::Changed { message })
+        }
+        shell::MachineFsOp::Mkdir { path, message } => fs
+            .mkdir(&path, true)
+            .map(|()| shell::MachineFsOutcome::Changed { message })
+            .map_err(|error| error.to_string()),
+        shell::MachineFsOp::Rename { from, to, message } => fs
+            .rename(&from, &to)
+            .map(|()| shell::MachineFsOutcome::Changed { message })
+            .map_err(|error| error.to_string()),
+        shell::MachineFsOp::Delete {
+            path,
+            recursive,
+            message,
+        } => fs
+            .delete(&path, recursive)
+            .map(|()| shell::MachineFsOutcome::Changed { message })
+            .map_err(|error| error.to_string()),
+    }
 }
 
 pub(super) fn client_shell_resize_message(
@@ -473,6 +679,7 @@ pub(super) fn handle_endpoint_disconnect(
             shell.cancel_endpoint_request(&request_id);
         }
         shell.mark_endpoint_disconnected(endpoint_id);
+        shell.note_endpoint_reconnect_attempt(endpoint_id, now);
         endpoint_was_active.then(|| format!("{} {notice}", shell.endpoint_label(endpoint_id)))
     });
     if let Some(message) = unavailable {

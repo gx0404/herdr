@@ -92,6 +92,15 @@ pub(crate) struct ClientShellConfig {
     pub(super) theme_name: String,
     pub(super) theme_runtime: crate::app::state::ThemeRuntimeConfig,
     pub(super) palette: Palette,
+    /// Component tokens from the same theme pass as `palette`
+    /// (`client_resolved_theme` with the locally detected host color depth).
+    pub(super) components: crate::app::state::ComponentStyles,
+    /// Host color depth resolved once from `ui.color_depth` at client start.
+    pub(super) host_color_depth: crate::config::ColorDepth,
+    /// Border glyph table resolved from `ui.border_style`.
+    pub(super) border_glyphs: crate::ui::BorderGlyphs,
+    /// Presentation feedback toggles (hover, spinner, animations, bell).
+    pub(super) feedback: super::feedback::ClientFeedbackToggles,
     pub(super) keybinds: LiveKeybindConfig,
     pub(super) local_keys: crate::config::KeysConfig,
     pub(super) keybinding_source: ClientShellKeybindingSource,
@@ -100,6 +109,18 @@ pub(crate) struct ClientShellConfig {
     pub(super) confirm_close: bool,
     pub(super) mouse_capture: bool,
     pub(super) mouse_scroll_lines: usize,
+    /// Prefix-mode which-key popup switch resolved from `ui.which_key`.
+    pub(super) which_key: bool,
+    /// Double/triple-click streak window resolved from `ui.double_click_ms`.
+    pub(super) double_click_window: std::time::Duration,
+    /// Drag update throttle resolved from `ui.drag_throttle_ms`.
+    pub(super) drag_throttle: std::time::Duration,
+    /// Selection auto-scroll cadence resolved from `ui.selection_autoscroll_interval_ms`.
+    pub(super) selection_autoscroll_interval: std::time::Duration,
+    /// Selection auto-scroll edge step resolved from `ui.selection_autoscroll_min_lines`.
+    pub(super) selection_autoscroll_min_lines: usize,
+    /// Selection auto-scroll far-edge cap resolved from `ui.selection_autoscroll_max_lines`.
+    pub(super) selection_autoscroll_max_lines: usize,
     pub(super) right_click_passthrough_modifiers: Option<crossterm::event::KeyModifiers>,
     pub(super) redraw_on_focus_gained: bool,
     pub(super) switch_ascii_input_source_in_prefix: bool,
@@ -172,6 +193,7 @@ pub(super) struct ShellHitMap {
     pub(super) notification_toast: Rect,
     pub(super) global_menu_rows: Vec<(Rect, usize)>,
     pub(super) context_menu_rows: Vec<(Rect, usize)>,
+    pub(super) notification_history_rows: Vec<(Rect, usize)>,
     pub(super) overlay_primary: Rect,
     pub(super) overlay_clear: Rect,
     pub(super) overlay_cancel: Rect,
@@ -187,6 +209,34 @@ pub(super) struct ShellHitMap {
     pub(super) settings_popup: Rect,
     pub(super) settings_tabs: Vec<(Rect, ClientSettingsSection)>,
     pub(super) settings_choices: Vec<(Rect, usize)>,
+    pub(super) machines_popup: Rect,
+    pub(super) machines_search: Rect,
+    pub(super) machines_rows: Vec<(Rect, crate::client::endpoint::ProfileId)>,
+    pub(super) machines_actions: Vec<(Rect, super::machines_overlay::MachineOverlayButton)>,
+    pub(super) machines_fields: Vec<(Rect, super::machines_overlay::MachineField)>,
+    pub(super) machines_wizard_rows: Vec<(Rect, usize)>,
+    pub(super) machines_wizard_fields: Vec<(Rect, usize)>,
+    pub(super) machines_max_scroll: usize,
+    pub(super) machine_auth_actions: Vec<(Rect, super::machine_auth_overlay::MachineAuthButton)>,
+    pub(super) broadcast_popup: Rect,
+    pub(super) broadcast_rows: Vec<(Rect, usize)>,
+    pub(super) broadcast_actions: Vec<(Rect, super::broadcast::BroadcastButton)>,
+    pub(super) machine_files_popup: Rect,
+    pub(super) machine_files_search: Rect,
+    pub(super) machine_files_rows: Vec<(Rect, usize)>,
+    pub(super) machine_files_actions: Vec<(Rect, super::machine_files_overlay::MachineFilesButton)>,
+    pub(super) snippet_popup: Rect,
+    pub(super) snippet_search: Rect,
+    pub(super) snippet_rows: Vec<(Rect, usize)>,
+    pub(super) snippet_fields: Vec<(Rect, usize)>,
+    pub(super) snippet_actions: Vec<(Rect, super::snippets_overlay::SnippetOverlayButton)>,
+    pub(super) scenes_popup: Rect,
+    pub(super) scenes_rows: Vec<(Rect, usize)>,
+    pub(super) scenes_fields: Vec<(Rect, usize)>,
+    pub(super) scenes_actions: Vec<(Rect, super::scenes_overlay::SceneOverlayButton)>,
+    /// Clickable regions of the reconnect lifecycle banner (no overlay open).
+    pub(super) lifecycle_banner_retry: Rect,
+    pub(super) lifecycle_banner_give_up: Rect,
     pub(super) product_announcement_scrollbar: Rect,
     pub(super) product_announcement_scroll_metrics: Option<crate::pane::ScrollMetrics>,
     pub(super) product_announcement_max_scroll: usize,
@@ -291,6 +341,14 @@ pub(super) struct WorkspaceHit {
     pub(super) group_toggle: Option<(Rect, String)>,
 }
 
+/// Best-effort reconnect progress for one endpoint: how many attempts the
+/// current outage has seen and when the next one is estimated to run.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct ClientReconnectProgress {
+    pub(super) attempts: u32,
+    pub(super) next_attempt_at: std::time::Instant,
+}
+
 #[derive(Debug)]
 pub(crate) enum ClientShellAction {
     Endpoint {
@@ -304,8 +362,164 @@ pub(crate) enum ClientShellAction {
         endpoint_id: ClientEndpointId,
         target: Option<ClientEndpointFocusTarget>,
     },
+    /// Ask the supervisor for an immediate reconnect attempt on a saved machine.
+    ReconnectEndpoint {
+        endpoint_id: ClientEndpointId,
+    },
+    /// Trust this machine's host key for this process only: reconnect with an
+    /// in-memory `accept-new` override that is never written to the catalog
+    /// (the next catalog reload restores the saved profile).
+    ConnectEndpointTrustOnce {
+        endpoint_id: ClientEndpointId,
+    },
+    /// Run one approved known_hosts operation for a machine target on a
+    /// worker thread (scan for display, pre-collect after trust, or remove a
+    /// stale record).
+    MachineHostKeyOp {
+        ticket: u64,
+        op: MachineHostKeyOp,
+        host: String,
+        port: Option<u16>,
+    },
+    /// Start an approved interactive authentication attempt for a machine:
+    /// ssh runs with the askpass channel attached and its prompts surface as
+    /// TUI dialogs. Only ever constructed after explicit user approval.
+    StartMachineInteractiveAuth {
+        ticket: u64,
+        profile: Box<SavedSshEndpoint>,
+    },
+    /// Answer the pending askpass prompt of an interactive auth attempt;
+    /// `None` declines it. The answer travels straight to the prompt
+    /// responder — it is never logged, persisted, or rendered.
+    AnswerMachineAuthPrompt {
+        ticket: u64,
+        answer: Option<String>,
+    },
+    /// Cancel a running interactive auth attempt: pending prompts are
+    /// declined and late results are ignored.
+    CancelMachineInteractiveAuth {
+        ticket: u64,
+    },
+    /// Run the non-interactive remote bootstrap for a wizard-approved machine.
+    BootstrapMachine {
+        ticket: u64,
+        target: String,
+        session: String,
+        options: Option<crate::remote::ProfileSshOptions>,
+    },
+    /// Fire one API request at a specific (possibly non-active) endpoint. The
+    /// snippet runner uses it to fan one run out to several machines without
+    /// switching the user's active surface; responses route back to the
+    /// pending request by id regardless of which endpoint is active.
+    EndpointRequest {
+        endpoint_id: ClientEndpointId,
+        boot_id: String,
+        request: Box<crate::api::schema::Request>,
+    },
+    /// Run one remote filesystem operation for the machine file browser on a
+    /// worker thread; the result returns as `ClientLoopEvent::MachineFs`.
+    MachineFsOp {
+        ticket: u64,
+        profile: Box<SavedSshEndpoint>,
+        op: MachineFsOp,
+    },
     ReplayMouse(Vec<crossterm::event::MouseEvent>),
-    Keybind(crate::input::KeybindAction),
+}
+
+/// One remote filesystem operation of the machine file browser, executed by
+/// a worker thread through `remote::RemoteFs`. `message` on the mutating
+/// operations is the localized success line shown after the follow-up
+/// listing refresh.
+#[derive(Debug)]
+pub(crate) enum MachineFsOp {
+    List {
+        path: String,
+    },
+    Read {
+        path: String,
+    },
+    Download {
+        remote: String,
+        local: String,
+        message: String,
+    },
+    Upload {
+        local: String,
+        remote: String,
+        message: String,
+    },
+    Mkdir {
+        path: String,
+        message: String,
+    },
+    Rename {
+        from: String,
+        to: String,
+        message: String,
+    },
+    Delete {
+        path: String,
+        recursive: bool,
+        message: String,
+    },
+}
+
+/// Worker result of a [`MachineFsOp`].
+#[derive(Debug)]
+pub(crate) enum MachineFsOutcome {
+    Entries {
+        entries: Vec<crate::remote::RemoteDirEntry>,
+    },
+    FileContent {
+        content: Vec<u8>,
+    },
+    /// A mutating operation succeeded; the overlay re-lists the directory.
+    Changed {
+        message: String,
+    },
+}
+
+/// known_hosts operation approved from the machine auth dialogs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum MachineHostKeyOp {
+    /// Read-only scan used to display the presented fingerprints.
+    Scan,
+    /// Record the scanned keys after the user trusted them.
+    Precollect,
+    /// Remove every recorded key for the host (host-key-changed recovery).
+    Remove,
+}
+
+/// Progress of one approved machine-connection recovery worker.
+#[derive(Debug)]
+pub(crate) enum MachineAuthUpdate {
+    HostKeyOpFinished {
+        ticket: u64,
+        op: MachineHostKeyOp,
+        result: Result<MachineHostKeyOutcome, String>,
+    },
+    InteractiveFinished {
+        ticket: u64,
+        result: Result<(), String>,
+    },
+}
+
+/// Result payload of a finished [`MachineHostKeyOp`].
+#[derive(Debug)]
+pub(crate) enum MachineHostKeyOutcome {
+    /// Presented keys as `(key type, SHA256 fingerprint)` pairs.
+    Scanned(Vec<(String, String)>),
+    /// How many keys were recorded into known_hosts.
+    Precollected(usize),
+    /// The host's records were removed (or were already absent).
+    Removed,
+}
+
+/// Progress of one wizard-driven remote bootstrap running on a worker thread.
+#[derive(Debug)]
+pub(crate) enum MachineBootstrapUpdate {
+    Step(crate::remote::SavedSshBootstrapStep),
+    Finished(Result<(), String>),
 }
 
 #[derive(Default)]
@@ -341,8 +555,15 @@ pub(super) enum ClientShellOverlayKind {
     WorktreeOpen,
     WorktreeRemove,
     ContextMenu,
-    GlobalMenu,
+    CommandPalette,
     Settings,
+    Machines,
+    MachineAuth,
+    NotificationHistory,
+    Snippets,
+    Scenes,
+    Broadcast,
+    MachineFiles,
 }
 
 #[derive(Debug)]
@@ -366,6 +587,9 @@ pub(super) enum ClientRenameTarget {
     },
     Pane {
         pane_id: String,
+    },
+    Machine {
+        profile_id: crate::client::endpoint::ProfileId,
     },
 }
 
@@ -431,11 +655,6 @@ pub(super) struct ClientHelpOverlay {
     pub(super) scroll: usize,
 }
 
-#[derive(Debug)]
-pub(super) struct ClientGlobalMenuOverlay {
-    pub(super) highlighted: usize,
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum ClientSettingsSection {
     Language,
@@ -475,6 +694,7 @@ pub(super) struct ClientSettingsOverlay {
     pub(super) selected: usize,
     pub(super) original_theme_name: String,
     pub(super) original_palette: Palette,
+    pub(super) original_components: crate::app::state::ComponentStyles,
     pub(super) integrations: Vec<crate::api::schema::IntegrationInfo>,
     pub(super) integration_messages: Vec<String>,
     pub(super) loading_integrations: bool,
@@ -585,6 +805,13 @@ pub(super) enum ClientContextMenuAction {
     Zoom,
     ToggleRightClickPassthrough,
     ClosePane,
+    ManageMachines,
+    RenameMachine,
+    EditMachine,
+    ReconnectMachine,
+    ToggleMachineEnabled,
+    RemoveMachine,
+    CopyMachineFixCommand,
 }
 
 #[derive(Debug)]
@@ -606,6 +833,11 @@ pub(super) enum ClientContextMenuTarget {
         source_pane_id: Option<String>,
         has_manual_label: bool,
         right_click_passthrough: bool,
+    },
+    Machine {
+        endpoint_id: ClientEndpointId,
+        enabled: bool,
+        online: bool,
     },
 }
 
@@ -642,8 +874,15 @@ pub(super) enum ClientShellOverlay {
     WorktreeOpen(ClientWorktreeOpenOverlay),
     WorktreeRemove(ClientWorktreeRemoveOverlay),
     ContextMenu(ClientContextMenuOverlay),
-    GlobalMenu(ClientGlobalMenuOverlay),
+    CommandPalette(super::command_palette::ClientCommandPaletteOverlay),
     Settings(ClientSettingsOverlay),
+    Machines(super::machines_overlay::ClientMachinesOverlay),
+    MachineAuth(super::machine_auth_overlay::ClientMachineAuthOverlay),
+    NotificationHistory(super::feedback::ClientNotificationHistoryOverlay),
+    Snippets(super::snippets_overlay::ClientSnippetsOverlay),
+    Scenes(super::scenes_overlay::ClientScenesOverlay),
+    Broadcast(super::broadcast::ClientBroadcastOverlay),
+    MachineFiles(super::machine_files_overlay::ClientMachineFilesOverlay),
 }
 
 impl ClientShellOverlay {
@@ -660,10 +899,23 @@ impl ClientShellOverlay {
             Self::WorktreeOpen(_) => ClientShellOverlayKind::WorktreeOpen,
             Self::WorktreeRemove(_) => ClientShellOverlayKind::WorktreeRemove,
             Self::ContextMenu(_) => ClientShellOverlayKind::ContextMenu,
-            Self::GlobalMenu(_) => ClientShellOverlayKind::GlobalMenu,
+            Self::CommandPalette(_) => ClientShellOverlayKind::CommandPalette,
             Self::Settings(_) => ClientShellOverlayKind::Settings,
+            Self::Machines(_) => ClientShellOverlayKind::Machines,
+            Self::MachineAuth(_) => ClientShellOverlayKind::MachineAuth,
+            Self::NotificationHistory(_) => ClientShellOverlayKind::NotificationHistory,
+            Self::Snippets(_) => ClientShellOverlayKind::Snippets,
+            Self::Scenes(_) => ClientShellOverlayKind::Scenes,
+            Self::Broadcast(_) => ClientShellOverlayKind::Broadcast,
+            Self::MachineFiles(_) => ClientShellOverlayKind::MachineFiles,
         }
     }
+}
+
+#[derive(Debug, Clone, Default)]
+pub(super) struct MachineChrome {
+    pub(super) group: Option<String>,
+    pub(super) color: Option<ratatui::style::Color>,
 }
 
 #[derive(Debug)]
@@ -724,6 +976,17 @@ pub(super) enum PendingEndpointKind {
         generation: u64,
         session_generation: u64,
     },
+    /// One target of a snippet run: the pane input request in flight to a
+    /// (possibly non-active) endpoint. `machine` is the display/history name.
+    SnippetRun {
+        machine: String,
+        pane_id: String,
+    },
+    /// One target of a live broadcast fan-out keystroke; resolves like a
+    /// snippet run but reports through the throttled broadcast notice.
+    BroadcastSend {
+        machine: String,
+    },
 }
 
 pub(super) struct PendingEndpointRequest {
@@ -739,6 +1002,8 @@ pub(super) enum ClientEndpointNoticeKind {
     Rejected,
     Timeout,
     Unavailable,
+    /// Client-local success feedback (snippet run summaries, scene actions).
+    Success,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -812,12 +1077,15 @@ pub(super) struct ClientPaneClick {
     pub(super) viewport_row: u16,
     pub(super) col: u16,
     pub(super) at: std::time::Instant,
+    /// Position in the click streak: 1 single, 2 double, 3 triple.
+    pub(super) streak: u8,
 }
 
 impl ClientPaneClick {
-    pub(super) fn is_double_click_for(&self, next: &Self) -> bool {
+    /// Same-spot follow-up click inside the configured streak window.
+    pub(super) fn continues_streak(&self, next: &Self, window: std::time::Duration) -> bool {
         self.pane_id == next.pane_id
-            && next.at.duration_since(self.at) <= std::time::Duration::from_millis(350)
+            && next.at.duration_since(self.at) <= window
             && self.viewport_row.abs_diff(next.viewport_row) <= 1
             && self.col.abs_diff(next.col) <= 1
     }
@@ -934,6 +1202,47 @@ pub(crate) struct ClientShellState {
     pub(super) selection_repaint_deadline: Option<std::time::Instant>,
     pub(super) hits: ShellHitMap,
     pub(super) endpoints: Vec<ClientShellEndpoint>,
+    /// Local catalog mirror for the machines overlay and sidebar grouping;
+    /// refreshed by `set_endpoint_catalog` on load and every watcher reload.
+    pub(super) saved_profiles: Vec<SavedSshEndpoint>,
+    /// Per-profile sidebar presentation lookup rebuilt with the catalog, so
+    /// per-frame sidebar rendering never scans or reparses profiles.
+    pub(super) machine_chrome: HashMap<crate::client::endpoint::ProfileId, MachineChrome>,
+    pub(super) next_machine_bootstrap_ticket: u64,
+    /// Latest structured connection-failure kind per endpoint, mirrored from
+    /// the supervisor so detail views and recovery dialogs react to the kind
+    /// instead of parsing message text.
+    pub(super) endpoint_connection_errors:
+        HashMap<ClientEndpointId, crate::remote::ConnectionErrorKind>,
+    /// Latest per-rule port-forward status per endpoint, mirrored from the
+    /// supervisor: refreshed on connect/disconnect events and polled at a low
+    /// cadence while a machine detail card showing it is open.
+    pub(super) endpoint_port_forwards:
+        HashMap<ClientEndpointId, Vec<crate::remote::PortForwardStatus>>,
+    /// Session-log writer drop counters per profile, mirrored from the
+    /// supervisor on the same low cadence as the forward poll (they have no
+    /// event of their own). Each machine's detail card reads only its own
+    /// entry; zero-count profiles are absent.
+    pub(super) session_log_dropped: HashMap<crate::client::endpoint::ProfileId, u64>,
+    /// When the detail card polls the supervisor again (forward failures are
+    /// recorded by monitor threads without an event).
+    pub(super) port_forward_polled_at: Option<std::time::Instant>,
+    /// In-flight snippet run: per-target outcomes collect here until every
+    /// request resolves, then history is written and the summary toast shows.
+    pub(super) snippet_run: Option<super::snippets_overlay::ClientSnippetRunState>,
+    /// In-memory mirror of the persisted broadcast target set
+    /// (`endpoint::broadcast`): the per-keystroke fan-out reads only this
+    /// copy, refreshed on overlay open, after every mutation, and when the
+    /// client-level watcher reports an external `broadcast.json` change.
+    pub(super) broadcast: crate::client::endpoint::BroadcastSet,
+    /// Machine file browser: ticket of the latest issued fs operation and
+    /// the id allocator. Results for superseded tickets drop on arrival.
+    pub(super) machine_files_ticket: Option<u64>,
+    pub(super) next_machine_files_ticket: u64,
+    /// Best-effort reconnect progress per endpoint (attempt count and the
+    /// estimated next-attempt time) backing the lifecycle banner.
+    pub(super) reconnect_progress: HashMap<ClientEndpointId, ClientReconnectProgress>,
+    pub(super) next_machine_auth_ticket: u64,
     pub(super) active_endpoint_id: ClientEndpointId,
     pub(super) collapsed_endpoints: HashSet<ClientEndpointId>,
     pub(super) mode: ClientShellMode,
@@ -943,6 +1252,8 @@ pub(crate) struct ClientShellState {
     pub(super) previous_pane_id: Option<String>,
     pub(super) pane_mouse_gesture: Option<ClientPaneMouseGesture>,
     pub(super) link_hover: Option<super::link_hover::LinkHover>,
+    /// Active link hints session (two-letter URL markers over the viewport).
+    pub(super) link_hints: Option<super::link_hints::ClientLinkHints>,
     pub(super) url_click_consumes_until_up: bool,
     pub(super) replaying_url_click: bool,
     pub(super) selection: Option<crate::selection::Selection<String>>,
@@ -975,6 +1286,21 @@ pub(crate) struct ClientShellState {
     pub(super) queued_notifications: VecDeque<ClientVisibleNotification>,
     pub(super) endpoint_notice_seen: HashSet<ClientEndpointNoticeKey>,
     pub(super) visible_endpoint_notice: Option<ClientVisibleEndpointNotice>,
+    /// Recent notification history ring backing the history overlay.
+    pub(super) notification_history: VecDeque<super::feedback::ClientNotificationRecord>,
+    /// Most-recently-used command palette ids (newest first), persisted to
+    /// the client chrome preferences file.
+    pub(super) palette_recent: Vec<String>,
+    /// Current chrome hover identity (previous frame's hit map).
+    pub(super) hover: Option<super::feedback::ChromeHover>,
+    pub(super) spinner_tick: u64,
+    pub(super) spinner_advanced_at: Option<std::time::Instant>,
+    pub(super) visual_bell_deadline: Option<std::time::Instant>,
+    /// Entrance-fade clocks: set when an overlay/toast first appears.
+    pub(super) overlay_since: Option<std::time::Instant>,
+    pub(super) toast_since: Option<std::time::Instant>,
+    pub(super) had_toast: bool,
+    pub(super) last_overlay_kind: Option<ClientShellOverlayKind>,
     pub(super) outer_focused: Option<bool>,
     pub(super) ascii_input_source_active: bool,
     pub(super) pending_input_source_changes: Vec<bool>,
@@ -1096,6 +1422,19 @@ impl ClientShellState {
             selection_repaint_deadline: None,
             hits: ShellHitMap::default(),
             endpoints: vec![local_endpoint()],
+            saved_profiles: Vec::new(),
+            machine_chrome: HashMap::new(),
+            next_machine_bootstrap_ticket: 1,
+            endpoint_connection_errors: HashMap::new(),
+            endpoint_port_forwards: HashMap::new(),
+            session_log_dropped: HashMap::new(),
+            port_forward_polled_at: None,
+            snippet_run: None,
+            broadcast: crate::client::endpoint::BroadcastSet::load().unwrap_or_default(),
+            machine_files_ticket: None,
+            next_machine_files_ticket: 1,
+            reconnect_progress: HashMap::new(),
+            next_machine_auth_ticket: 1,
             active_endpoint_id: ClientEndpointId::Local,
             collapsed_endpoints: HashSet::new(),
             mode: ClientShellMode::Terminal,
@@ -1105,6 +1444,7 @@ impl ClientShellState {
             previous_pane_id: None,
             pane_mouse_gesture: None,
             link_hover: None,
+            link_hints: None,
             url_click_consumes_until_up: false,
             replaying_url_click: false,
             selection: None,
@@ -1137,6 +1477,21 @@ impl ClientShellState {
             queued_notifications: VecDeque::new(),
             endpoint_notice_seen: HashSet::new(),
             visible_endpoint_notice: None,
+            notification_history: VecDeque::new(),
+            palette_recent: preferences
+                .palette_recent
+                .iter()
+                .take(super::command_palette::PALETTE_RECENT_LIMIT)
+                .cloned()
+                .collect(),
+            hover: None,
+            spinner_tick: 0,
+            spinner_advanced_at: None,
+            visual_bell_deadline: None,
+            overlay_since: None,
+            toast_since: None,
+            had_toast: false,
+            last_overlay_kind: None,
             outer_focused: None,
             ascii_input_source_active: false,
             pending_input_source_changes: Vec::new(),
@@ -1297,6 +1652,7 @@ impl ClientShellState {
         self.previous_pane_id = None;
         self.pane_mouse_gesture = None;
         self.link_hover = None;
+        self.link_hints = None;
         self.url_click_consumes_until_up = false;
         self.replaying_url_click = false;
         self.selection = None;
@@ -1840,6 +2196,8 @@ impl ClientShellState {
         self.pane_surface = Some(surface);
         self.pane_surface_generation = self.active_snapshot_generation;
         self.invalidate_link_hover();
+        // Hint markers index into the old frame; a fresh surface moves them.
+        self.link_hints = None;
         self.resume_mobile_switcher_if_ready();
         self.reconcile_input_source();
     }
@@ -1858,9 +2216,14 @@ impl ClientShellState {
         if !self.config.clipboard_toast_enabled {
             return false;
         }
-        self.copy_feedback = Some(crate::app::state::CopyFeedback {
-            message: crate::i18n::texts().chrome.copied.to_owned(),
-        });
+        let message = crate::i18n::texts().chrome.copied.to_owned();
+        self.record_notification(
+            super::feedback::ClientToastLevel::Success,
+            message.clone(),
+            None,
+            None,
+        );
+        self.copy_feedback = Some(crate::app::state::CopyFeedback { message });
         self.copy_feedback_deadline = Some(now + std::time::Duration::from_secs(2));
         true
     }
@@ -1891,7 +2254,14 @@ impl ClientShellState {
     /// Every assignment must go through this setter so a repeated identical
     /// message gets a fresh deadline instead of inheriting the previous one.
     pub(super) fn set_endpoint_error(&mut self, message: impl Into<String>) {
-        self.endpoint_error = Some(message.into());
+        let message = message.into();
+        self.record_notification(
+            super::feedback::ClientToastLevel::Error,
+            message.clone(),
+            None,
+            None,
+        );
+        self.endpoint_error = Some(message);
         self.endpoint_error_deadline = Some(
             std::time::Instant::now() + std::time::Duration::from_secs(ENDPOINT_ERROR_TIMEOUT_SECS),
         );
@@ -1918,6 +2288,7 @@ impl ClientShellState {
         self.selection_autoscroll_deadline
             .into_iter()
             .chain(self.selection_repaint_deadline)
+            .chain(self.chrome_feedback_deadline())
             .min()
             .map(|deadline| deadline.saturating_duration_since(now).min(default))
             .unwrap_or(default)

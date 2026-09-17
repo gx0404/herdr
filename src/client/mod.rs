@@ -121,7 +121,6 @@ use notifications::{handle_notify_with_notifiers, sound_from_notify_message};
 #[cfg(test)]
 use terminal_sessions::terminal_control_command_from_json;
 
-#[cfg(unix)]
 use std::collections::HashMap;
 use std::io::{self, Write as _};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -580,8 +579,13 @@ async fn run_client_loop(
     let mut pending_activation: Option<endpoint::PendingEndpointActivation> = None;
     let mut scheduled_activation = None;
     let mut pending_catalog: Option<Result<Vec<endpoint::SavedSshEndpoint>, String>> = None;
+    // Askpass prompts parked per interactive-auth ticket until the TUI
+    // answers. Answers are secrets: they only travel to the responder.
+    let mut pending_auth_prompts: HashMap<u64, Vec<crate::remote::SshAskpassPrompt>> =
+        HashMap::new();
     if state.shell.is_some() && !is_remote_client && state.attach_escape.is_none() {
         catalog_reload::watch_profiles(event_tx.clone(), should_quit.clone());
+        catalog_reload::watch_broadcast_set(event_tx.clone(), should_quit.clone());
     }
 
     // This (foreground) client owns the prefix ASCII input-source switch
@@ -742,6 +746,19 @@ async fn run_client_loop(
 
         match event {
             ClientLoopEvent::EndpointCatalog(reload) => pending_catalog = Some(reload),
+            ClientLoopEvent::BroadcastSetChanged => {
+                let mirror_changed = state
+                    .shell
+                    .as_mut()
+                    .is_some_and(|shell| shell.refresh_broadcast_mirror());
+                if mirror_changed {
+                    if let Some(frame) = state.shell.as_mut().and_then(|shell| {
+                        shell.compose(state.reported_size.0, state.reported_size.1)
+                    }) {
+                        state.present_frame(frame);
+                    }
+                }
+            }
             #[cfg(unix)]
             ClientLoopEvent::StdinInput(data) => {
                 let image_bridge_active = endpoint_accepts_local_images(
@@ -1168,8 +1185,31 @@ async fn run_client_loop(
                     if status == endpoint::ClientEndpointStatus::Attention {
                         warn!(endpoint = %endpoint_id.storage_key(), generation, error = %message, "endpoint needs attention");
                     }
+                    let error_kind = supervisors.connection_error_kind(&endpoint_id);
+                    // Forwards die with the link and are rebuilt on the next
+                    // connect; until then the mirror shows nothing live.
+                    let forward_status = if status == endpoint::ClientEndpointStatus::Online {
+                        None
+                    } else {
+                        Some(Vec::new())
+                    };
                     let unavailable = state.shell.as_mut().and_then(|shell| {
                         shell.set_endpoint_status(&endpoint_id, status);
+                        shell.set_endpoint_status_detail(
+                            &endpoint_id,
+                            (status != endpoint::ClientEndpointStatus::Online)
+                                .then(|| message.clone()),
+                        );
+                        shell.set_endpoint_connection_error_kind(&endpoint_id, error_kind);
+                        if let Some(forward_status) = forward_status {
+                            shell.set_endpoint_port_forward_status(&endpoint_id, forward_status);
+                        }
+                        match status {
+                            endpoint::ClientEndpointStatus::Reconnecting => {
+                                shell.note_endpoint_reconnect_attempt(&endpoint_id, now);
+                            }
+                            _ => shell.clear_endpoint_reconnect_progress(&endpoint_id),
+                        }
                         (status == endpoint::ClientEndpointStatus::Attention
                             && shell.endpoint_is_active(&endpoint_id))
                         .then(|| format!("{}: {message}", shell.endpoint_label(&endpoint_id)))
@@ -1202,8 +1242,18 @@ async fn run_client_loop(
                     let agent_view_projection_supported = negotiation.supports_capability(
                         crate::protocol::endpoint::AGENT_VIEW_PROJECTION_CAPABILITY,
                     );
+                    // The forwards rebuild completed before this event was
+                    // queued; mirror the fresh per-rule status.
+                    let forward_status = supervisors.port_forward_status(&endpoint_id);
                     let frame = state.shell.as_mut().and_then(|shell| {
                         shell.set_endpoint_methods_for(&endpoint_id, Some(negotiation.methods()));
+                        shell.set_endpoint_server_version(
+                            &endpoint_id,
+                            negotiation.server_version().map(str::to_owned),
+                        );
+                        shell.set_endpoint_connection_error_kind(&endpoint_id, None);
+                        shell.set_endpoint_port_forward_status(&endpoint_id, forward_status);
+                        shell.clear_endpoint_reconnect_progress(&endpoint_id);
                         shell.set_endpoint_agent_view_projection_supported(
                             &endpoint_id,
                             agent_view_projection_supported,
@@ -1235,6 +1285,184 @@ async fn run_client_loop(
                     });
                 }
             },
+            ClientLoopEvent::ReconnectEndpoint { endpoint_id } => {
+                if endpoint_id.is_local() {
+                    continue;
+                }
+                let already_online = state
+                    .shell
+                    .as_ref()
+                    .is_some_and(|shell| shell.endpoint_is_online(&endpoint_id));
+                if !already_online && supervisors.reconnect_now(&endpoint_id, now) {
+                    if let Some(shell) = state.shell.as_mut() {
+                        shell.set_endpoint_status(
+                            &endpoint_id,
+                            endpoint::ClientEndpointStatus::Connecting,
+                        );
+                    }
+                    if let Some(frame) = state.shell.as_mut().and_then(|shell| {
+                        shell.compose(state.reported_size.0, state.reported_size.1)
+                    }) {
+                        state.present_frame(frame);
+                    }
+                }
+            }
+            ClientLoopEvent::ConnectEndpointTrustOnce { endpoint_id } => {
+                // Process-local trust override: the catalog file stays
+                // untouched, so the next watcher reload restores the saved
+                // profile and its host-key policy.
+                let endpoint::ClientEndpointId::Ssh(profile_id) = &endpoint_id else {
+                    continue;
+                };
+                let mut profiles = endpoint_catalog.ssh.clone();
+                let Some(profile) = profiles
+                    .iter_mut()
+                    .find(|profile| &profile.id == profile_id)
+                else {
+                    continue;
+                };
+                profile.strict_host_key_checking = Some(endpoint::StrictHostKeyChecking::AcceptNew);
+                supervisors.reconcile_profiles(&profiles, now);
+                if supervisors.reconnect_now(&endpoint_id, now) {
+                    if let Some(shell) = state.shell.as_mut() {
+                        shell.set_endpoint_status(
+                            &endpoint_id,
+                            endpoint::ClientEndpointStatus::Connecting,
+                        );
+                    }
+                    if let Some(frame) = state.shell.as_mut().and_then(|shell| {
+                        shell.compose(state.reported_size.0, state.reported_size.1)
+                    }) {
+                        state.present_frame(frame);
+                    }
+                }
+            }
+            ClientLoopEvent::MachineAuth { update } => {
+                // A finished interactive attempt declines any prompts still
+                // parked for its ticket.
+                if let shell::MachineAuthUpdate::InteractiveFinished { ticket, .. } = &update {
+                    if let Some(queue) = pending_auth_prompts.remove(ticket) {
+                        for prompt in queue {
+                            prompt.respond(None);
+                        }
+                    }
+                }
+                let outcome = state.shell.as_mut().map(|shell| {
+                    let mut outcome = shell::ClientShellInput::default();
+                    shell.handle_machine_auth_update(update, &mut outcome);
+                    outcome
+                });
+                if let Some(outcome) = outcome {
+                    let needs_compose = outcome.repaint;
+                    let (_, dispatch_repaint) = dispatch_client_shell_actions(
+                        outcome.actions,
+                        &mut endpoint_commands,
+                        &mut write_stream,
+                        state.shell.as_mut(),
+                        &mut state.detached_process_children,
+                        &event_tx,
+                    )?;
+                    if needs_compose || dispatch_repaint {
+                        if let Some(frame) = state.shell.as_mut().and_then(|shell| {
+                            shell.compose(state.reported_size.0, state.reported_size.1)
+                        }) {
+                            state.present_frame(frame);
+                        }
+                    }
+                }
+            }
+            ClientLoopEvent::MachineAuthPrompt { ticket, prompt } => {
+                let queue = pending_auth_prompts.entry(ticket).or_default();
+                queue.push(*prompt);
+                if queue.len() == 1 {
+                    let shown = state.shell.as_mut().is_some_and(|shell| {
+                        shell.show_machine_auth_prompt(ticket, queue[0].prompt())
+                    });
+                    if shown {
+                        if let Some(frame) = state.shell.as_mut().and_then(|shell| {
+                            shell.compose(state.reported_size.0, state.reported_size.1)
+                        }) {
+                            state.present_frame(frame);
+                        }
+                    } else {
+                        // No live dialog claims the session: decline so ssh
+                        // fails fast instead of hanging on a hidden prompt.
+                        queue.remove(0).respond(None);
+                    }
+                }
+            }
+            ClientLoopEvent::MachineAuthAnswer { ticket, answer } => {
+                let answered = if let Some(queue) = pending_auth_prompts.get_mut(&ticket) {
+                    if queue.is_empty() {
+                        false
+                    } else {
+                        queue.remove(0).respond(answer);
+                        true
+                    }
+                } else {
+                    false
+                };
+                if answered {
+                    // Surface the next queued prompt for this session, if any.
+                    let next_prompt = pending_auth_prompts
+                        .get(&ticket)
+                        .and_then(|queue| queue.first().map(|prompt| prompt.prompt().to_owned()));
+                    if let Some(next_prompt) = next_prompt {
+                        if let Some(shell) = state.shell.as_mut() {
+                            shell.show_machine_auth_prompt(ticket, &next_prompt);
+                        }
+                        if let Some(frame) = state.shell.as_mut().and_then(|shell| {
+                            shell.compose(state.reported_size.0, state.reported_size.1)
+                        }) {
+                            state.present_frame(frame);
+                        }
+                    }
+                }
+            }
+            ClientLoopEvent::MachineAuthCancel { ticket } => {
+                if let Some(queue) = pending_auth_prompts.remove(&ticket) {
+                    for prompt in queue {
+                        prompt.respond(None);
+                    }
+                }
+            }
+            ClientLoopEvent::MachineBootstrap { ticket, update } => {
+                if let Some(shell) = state.shell.as_mut() {
+                    shell.handle_machine_bootstrap_update(ticket, update);
+                }
+                if let Some(frame) = state
+                    .shell
+                    .as_mut()
+                    .and_then(|shell| shell.compose(state.reported_size.0, state.reported_size.1))
+                {
+                    state.present_frame(frame);
+                }
+            }
+            ClientLoopEvent::MachineFs { ticket, result } => {
+                let outcome = state.shell.as_mut().map(|shell| {
+                    let mut outcome = shell::ClientShellInput::default();
+                    shell.handle_machine_fs_result(ticket, result, &mut outcome);
+                    outcome
+                });
+                if let Some(outcome) = outcome {
+                    let needs_compose = outcome.repaint;
+                    let (_, dispatch_repaint) = dispatch_client_shell_actions(
+                        outcome.actions,
+                        &mut endpoint_commands,
+                        &mut write_stream,
+                        state.shell.as_mut(),
+                        &mut state.detached_process_children,
+                        &event_tx,
+                    )?;
+                    if needs_compose || dispatch_repaint {
+                        if let Some(frame) = state.shell.as_mut().and_then(|shell| {
+                            shell.compose(state.reported_size.0, state.reported_size.1)
+                        }) {
+                            state.present_frame(frame);
+                        }
+                    }
+                }
+            }
             ClientLoopEvent::ActivateEndpoint {
                 endpoint_id,
                 target,
@@ -1433,6 +1661,17 @@ async fn run_client_loop(
                             crate::terminal_effects::write_terminal_bells(&mut io::stdout(), count)
                         {
                             warn!(err = %err, "failed to emit terminal bell");
+                        }
+                        let bell_frame = state.shell.as_mut().and_then(|shell| {
+                            shell
+                                .record_terminal_bell(std::time::Instant::now())
+                                .then(|| {
+                                    shell.compose(state.reported_size.0, state.reported_size.1)
+                                })
+                                .flatten()
+                        });
+                        if let Some(frame) = bell_frame {
+                            state.present_frame(frame);
                         }
                     }
                     ServerMessage::GraphicsFile {
@@ -1709,7 +1948,10 @@ async fn run_client_loop(
                             || (false, Vec::new()),
                             |shell| {
                                 if completed.generation == generation
-                                    && shell.endpoint_is_active(&completed.endpoint_id)
+                                    && (shell.endpoint_is_active(&completed.endpoint_id)
+                                        || shell.pending_request_allows_inactive_endpoint(
+                                            &completed.request_id,
+                                        ))
                                 {
                                     shell.handle_endpoint_result(
                                         &completed.boot_id,
@@ -1724,6 +1966,18 @@ async fn run_client_loop(
                                 }
                             },
                         );
+                        // Drain the completed lane so queued cross-endpoint
+                        // requests (e.g. a snippet fan-out) advance without
+                        // waiting for a dispatch on the active endpoint.
+                        let lane_cancelled =
+                            endpoint_commands.send_next(&completed.endpoint_id, &mut write_stream);
+                        let repaint = lane_cancelled.into_iter().fold(repaint, |repaint, id| {
+                            repaint
+                                || state
+                                    .shell
+                                    .as_mut()
+                                    .is_some_and(|shell| shell.cancel_endpoint_request(&id))
+                        });
                         if let Some(shell) = state.shell.as_mut() {
                             shell.reconcile_input_source();
                         }
@@ -2076,7 +2330,10 @@ async fn run_client_loop(
                         let shell = state.shell.as_mut().expect("checked shell mode");
                         let mut outcome = shell.tick_selection_autoscroll(now);
                         for expired in expired_endpoints {
-                            if !shell.endpoint_is_active(&expired.endpoint_id) {
+                            if !shell.endpoint_is_active(&expired.endpoint_id)
+                                && !shell
+                                    .pending_request_allows_inactive_endpoint(&expired.request_id)
+                            {
                                 continue;
                             }
                             let (repaint, actions) = shell.handle_endpoint_result(
@@ -2090,7 +2347,22 @@ async fn run_client_loop(
                         let (effects, notification_repaint) = shell.tick_notifications(now);
                         outcome.repaint |= notification_repaint
                             | shell.tick_copy_feedback(now)
-                            | shell.tick_endpoint_error(now);
+                            | shell.tick_endpoint_error(now)
+                            | shell.tick_chrome_feedback(now);
+                        // Live forward status has no events of its own: poll
+                        // at a low cadence while a card showing it is open.
+                        // The session-log drop counter rides the same poll,
+                        // split per profile so each card shows its own loss.
+                        if let Some(endpoint_id) = shell.port_forward_poll_due(now) {
+                            let status = supervisors.port_forward_status(&endpoint_id);
+                            outcome.repaint |=
+                                shell.set_endpoint_port_forward_status(&endpoint_id, status);
+                            if let endpoint::ClientEndpointId::Ssh(profile_id) = &endpoint_id {
+                                let dropped = supervisors.session_log_dropped(profile_id);
+                                outcome.repaint |=
+                                    shell.set_session_log_dropped(profile_id, dropped);
+                            }
+                        }
                         let frame = outcome
                             .repaint
                             .then(|| shell.compose(state.reported_size.0, state.reported_size.1))

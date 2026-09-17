@@ -1,8 +1,8 @@
+use super::feedback::{relative_time_ago, ChromeContext, ChromeHover, ClientNotificationRecord};
 use super::*;
 
 mod settings_overlay;
 mod worktree_overlays;
-
 #[derive(Default)]
 pub(crate) struct OverlayRender {
     pub(crate) area: Rect,
@@ -22,6 +22,36 @@ pub(crate) struct OverlayRender {
     pub(crate) settings_popup: Rect,
     pub(crate) settings_tabs: Vec<(Rect, ClientSettingsSection)>,
     pub(crate) settings_choices: Vec<(Rect, usize)>,
+    pub(crate) machines_popup: Rect,
+    pub(crate) machines_search: Rect,
+    pub(crate) machines_rows: Vec<(Rect, crate::client::endpoint::ProfileId)>,
+    pub(crate) machines_actions: Vec<(Rect, super::machines_overlay::MachineOverlayButton)>,
+    pub(crate) machines_fields: Vec<(Rect, super::machines_overlay::MachineField)>,
+    /// Index-keyed rows shared by the import wizard (candidate/toggle rows)
+    /// and the forward rules editor (rule rows).
+    pub(crate) machines_wizard_rows: Vec<(Rect, usize)>,
+    /// Index-keyed input fields of the import wizard group editor and the
+    /// forward add form.
+    pub(crate) machines_wizard_fields: Vec<(Rect, usize)>,
+    pub(crate) machines_max_scroll: usize,
+    pub(crate) machine_auth_actions: Vec<(Rect, super::machine_auth_overlay::MachineAuthButton)>,
+    pub(crate) broadcast_popup: Rect,
+    pub(crate) broadcast_rows: Vec<(Rect, usize)>,
+    pub(crate) broadcast_actions: Vec<(Rect, super::broadcast::BroadcastButton)>,
+    pub(crate) machine_files_popup: Rect,
+    pub(crate) machine_files_search: Rect,
+    pub(crate) machine_files_rows: Vec<(Rect, usize)>,
+    pub(crate) machine_files_actions: Vec<(Rect, super::machine_files_overlay::MachineFilesButton)>,
+    pub(crate) snippet_popup: Rect,
+    pub(crate) snippet_search: Rect,
+    pub(crate) snippet_rows: Vec<(Rect, usize)>,
+    pub(crate) snippet_fields: Vec<(Rect, usize)>,
+    pub(crate) snippet_actions: Vec<(Rect, super::snippets_overlay::SnippetOverlayButton)>,
+    pub(crate) scenes_popup: Rect,
+    pub(crate) scenes_rows: Vec<(Rect, usize)>,
+    pub(crate) scenes_fields: Vec<(Rect, usize)>,
+    pub(crate) scenes_actions: Vec<(Rect, super::scenes_overlay::SceneOverlayButton)>,
+    pub(crate) notification_history_rows: Vec<(Rect, usize)>,
     pub(crate) product_announcement_scrollbar: Rect,
     pub(crate) product_announcement_scroll_metrics: Option<crate::pane::ScrollMetrics>,
     pub(crate) product_announcement_max_scroll: usize,
@@ -31,20 +61,31 @@ pub(crate) struct OverlayRender {
     pub(crate) cursor: Option<crate::protocol::CursorState>,
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn render_client_overlay(
     b: &mut Buffer,
     o: &ClientShellOverlay,
     s: &ClientShellSnapshot,
     endpoints: &[ClientShellEndpoint],
+    saved_profiles: &[SavedSshEndpoint],
+    broadcast: &crate::client::endpoint::BroadcastSet,
+    connection_errors: &std::collections::HashMap<
+        ClientEndpointId,
+        crate::remote::ConnectionErrorKind,
+    >,
+    port_forwards: &std::collections::HashMap<
+        ClientEndpointId,
+        Vec<crate::remote::PortForwardStatus>,
+    >,
+    session_log_dropped: &std::collections::HashMap<crate::client::endpoint::ProfileId, u64>,
     active_endpoint_id: &ClientEndpointId,
     k: &LiveKeybindConfig,
-    p: &Palette,
+    history: &std::collections::VecDeque<ClientNotificationRecord>,
+    cx: &ChromeContext<'_>,
 ) -> Option<OverlayRender> {
     if !matches!(
         o,
-        ClientShellOverlay::Navigator(_)
-            | ClientShellOverlay::ContextMenu(_)
-            | ClientShellOverlay::GlobalMenu(_)
+        ClientShellOverlay::Navigator(_) | ClientShellOverlay::ContextMenu(_)
     ) {
         for y in b.area.y..b.area.bottom() {
             for x in b.area.x..b.area.right() {
@@ -54,117 +95,115 @@ pub(crate) fn render_client_overlay(
         }
     }
     match o {
-        ClientShellOverlay::Onboarding => render_onboarding_overlay(b, p),
-        ClientShellOverlay::ProductAnnouncement(v) => render_product_announcement_overlay(b, v, p),
+        ClientShellOverlay::Onboarding => render_onboarding_overlay(b, cx),
+        ClientShellOverlay::ProductAnnouncement(v) => render_product_announcement_overlay(b, v, cx),
         ClientShellOverlay::ReleaseNotes(v) => {
-            render_release_notes_overlay(b, v, &s.update_install_command, p)
+            render_release_notes_overlay(b, v, &s.update_install_command, cx)
         }
-        ClientShellOverlay::Rename(v) => render_rename_overlay(b, v, p),
-        ClientShellOverlay::ConfirmClose(v) => render_confirm_close_overlay(b, v, p),
-        ClientShellOverlay::Help(v) => render_help_overlay(b, v, k, p),
+        ClientShellOverlay::Rename(v) => render_rename_overlay(b, v, cx),
+        ClientShellOverlay::ConfirmClose(v) => render_confirm_close_overlay(b, v, cx),
+        ClientShellOverlay::Help(v) => render_help_overlay(b, v, k, cx),
         ClientShellOverlay::Navigator(v) => {
-            render_navigator_overlay(b, v, endpoints, active_endpoint_id, p)
+            render_navigator_overlay(b, v, endpoints, active_endpoint_id, cx)
         }
         ClientShellOverlay::Settings(v) => {
-            settings_overlay::render_settings_overlay(b, v, s.integration_updates_available, p)
+            settings_overlay::render_settings_overlay(b, v, s.integration_updates_available, cx)
+        }
+        ClientShellOverlay::Machines(v) => super::machines_overlay::render_machines_overlay(
+            b,
+            v,
+            endpoints,
+            saved_profiles,
+            connection_errors,
+            port_forwards,
+            session_log_dropped,
+            cx,
+        ),
+        ClientShellOverlay::MachineAuth(v) => {
+            super::machine_auth_overlay::render_machine_auth_overlay(b, v, cx)
+        }
+        ClientShellOverlay::Snippets(v) => {
+            super::snippets_overlay::render_snippets_overlay(b, v, endpoints, saved_profiles, cx)
+        }
+        ClientShellOverlay::Scenes(v) => super::scenes_overlay::render_scenes_overlay(b, v, cx),
+        ClientShellOverlay::Broadcast(v) => {
+            let rows =
+                super::broadcast::broadcast_target_rows(broadcast, endpoints, saved_profiles);
+            let candidates = super::broadcast::broadcast_machine_candidates(
+                broadcast,
+                endpoints,
+                saved_profiles,
+            );
+            let (pick_label, panes) = match &v.view {
+                super::broadcast::ClientBroadcastView::PickPane { endpoint_id } => (
+                    endpoints
+                        .iter()
+                        .find(|endpoint| &endpoint.endpoint_id == endpoint_id)
+                        .map(|endpoint| endpoint.label.clone())
+                        .unwrap_or_else(|| crate::i18n::texts().sidebar.local.to_owned()),
+                    super::broadcast::broadcast_pane_candidates(endpoints, endpoint_id),
+                ),
+                _ => (String::new(), Vec::new()),
+            };
+            super::broadcast::render_broadcast_overlay(
+                b,
+                v,
+                broadcast,
+                &rows,
+                &candidates,
+                &pick_label,
+                &panes,
+                cx,
+            )
+        }
+        ClientShellOverlay::MachineFiles(v) => {
+            let machine_label = saved_profiles
+                .iter()
+                .find(|profile| profile.id == v.profile_id)
+                .map(|profile| profile.label.clone())
+                .unwrap_or_else(|| v.profile_id.to_string());
+            let query = v.query.trim().to_lowercase();
+            let entries: Vec<crate::remote::RemoteDirEntry> = v
+                .entries
+                .as_deref()
+                .unwrap_or_default()
+                .iter()
+                .filter(|entry| query.is_empty() || entry.name.to_lowercase().contains(&query))
+                .cloned()
+                .collect();
+            super::machine_files_overlay::render_machine_files_overlay(
+                b,
+                v,
+                &machine_label,
+                &entries,
+                cx,
+            )
         }
         ClientShellOverlay::WorktreeCreate(v) => {
-            worktree_overlays::render_worktree_create_overlay(b, v, p)
+            worktree_overlays::render_worktree_create_overlay(b, v, cx)
         }
         ClientShellOverlay::WorktreeOpen(v) => {
-            worktree_overlays::render_worktree_open_overlay(b, v, p)
+            worktree_overlays::render_worktree_open_overlay(b, v, cx)
         }
         ClientShellOverlay::WorktreeRemove(v) => {
-            worktree_overlays::render_worktree_remove_overlay(b, v, p)
+            worktree_overlays::render_worktree_remove_overlay(b, v, cx)
         }
-        ClientShellOverlay::ContextMenu(_) | ClientShellOverlay::GlobalMenu(_) => None,
+        ClientShellOverlay::NotificationHistory(v) => {
+            render_notification_history_overlay(b, v, history, cx)
+        }
+        ClientShellOverlay::CommandPalette(v) => {
+            super::command_palette::render_command_palette(b, v, cx)
+        }
+        ClientShellOverlay::ContextMenu(_) => None,
     }
-}
-
-pub(crate) fn render_global_menu(
-    buffer: &mut Buffer,
-    launcher: Rect,
-    menu: &ClientGlobalMenuOverlay,
-    snapshot: &ClientShellSnapshot,
-    palette: &Palette,
-) -> Option<OverlayRender> {
-    let items = super::super::global_menu::global_menu_items(snapshot);
-    let screen = buffer.area;
-    let width = items
-        .iter()
-        .map(|(label, action)| {
-            display_width(label)
-                + u16::from(super::super::global_menu::global_menu_item_has_badge(
-                    snapshot, *action,
-                )) * 2
-        })
-        .max()
-        .unwrap_or(8)
-        .saturating_add(4)
-        .min(screen.width.max(1));
-    let height = (items.len() as u16)
-        .saturating_add(2)
-        .min(screen.height.max(1));
-    let x = launcher
-        .right()
-        .saturating_sub(width)
-        .min(screen.right().saturating_sub(width));
-    let y = launcher.y.saturating_sub(height).max(screen.y);
-    let rect = Rect::new(x, y, width, height);
-    let inner = panel(buffer, rect, palette.accent, palette.panel_bg)?;
-    let mut rows = Vec::new();
-    for (index, (label, action)) in items.iter().enumerate() {
-        let row_y = inner.y.saturating_add(index as u16);
-        if row_y >= inner.bottom() {
-            break;
-        }
-        let row = Rect::new(inner.x, row_y, inner.width, 1);
-        let highlighted = index == menu.highlighted;
-        let style = if highlighted {
-            Style::default()
-                .fg(panel_contrast_fg(palette))
-                .bg(palette.accent)
-                .add_modifier(Modifier::BOLD)
-        } else {
-            Style::default().fg(palette.text).bg(palette.panel_bg)
-        };
-        buffer.set_style(row, style);
-        let has_badge = super::super::global_menu::global_menu_item_has_badge(snapshot, *action);
-        if has_badge {
-            let badge_style = if highlighted {
-                style
-            } else {
-                Style::default()
-                    .fg(palette.accent)
-                    .bg(palette.panel_bg)
-                    .add_modifier(Modifier::BOLD)
-            };
-            put_text(buffer, row.x, row.y, row.width.min(2), " ●", badge_style);
-            put_text(
-                buffer,
-                row.x.saturating_add(2),
-                row.y,
-                row.width.saturating_sub(2),
-                &format!(" {label}"),
-                style,
-            );
-        } else {
-            put_text(buffer, row.x, row.y, row.width, &format!(" {label}"), style);
-        }
-        rows.push((row, index));
-    }
-    Some(OverlayRender {
-        area: rect,
-        menu_rows: rows,
-        ..OverlayRender::default()
-    })
 }
 
 pub(crate) fn render_context_menu(
     buffer: &mut Buffer,
     menu: &ClientContextMenuOverlay,
-    palette: &Palette,
+    cx: &ChromeContext<'_>,
 ) -> Option<OverlayRender> {
+    let palette = cx.palette;
     let items = menu.items();
     let screen = buffer.area;
     let max_item_width = items
@@ -188,7 +227,7 @@ pub(crate) fn render_context_menu(
             .saturating_add(screen.height.saturating_sub(height)),
     );
     let rect = Rect::new(x, y, width, height);
-    let inner = panel(buffer, rect, palette.accent, palette.panel_bg)?;
+    let inner = panel(buffer, rect, palette.accent, palette.panel_bg, cx.glyphs)?;
     let mut rows = Vec::new();
     for (index, item) in items.iter().enumerate() {
         let row_y = inner.y.saturating_add(index as u16);
@@ -216,11 +255,12 @@ pub(crate) fn render_context_menu(
     })
 }
 
-fn panel(
+pub(in crate::client::shell) fn panel(
     b: &mut Buffer,
     a: Rect,
     c: ratatui::style::Color,
     bg: ratatui::style::Color,
+    glyphs: crate::ui::BorderGlyphs,
 ) -> Option<Rect> {
     if a.width < 2 || a.height < 2 {
         return None;
@@ -235,57 +275,81 @@ fn panel(
     for x in a.x..a.right() {
         b[(x, a.y)]
             .set_symbol(if x == a.x {
-                "┌"
+                glyphs.top_left
             } else if x + 1 == a.right() {
-                "┐"
+                glyphs.top_right
             } else {
-                "─"
+                glyphs.horizontal
             })
             .set_style(border);
         let y = a.bottom() - 1;
         b[(x, y)]
             .set_symbol(if x == a.x {
-                "└"
+                glyphs.bottom_left
             } else if x + 1 == a.right() {
-                "┘"
+                glyphs.bottom_right
             } else {
-                "─"
+                glyphs.horizontal
             })
             .set_style(border);
     }
     for y in a.y + 1..a.bottom() - 1 {
-        b[(a.x, y)].set_symbol("│").set_style(border);
-        b[(a.right() - 1, y)].set_symbol("│").set_style(border);
+        b[(a.x, y)].set_symbol(glyphs.vertical).set_style(border);
+        b[(a.right() - 1, y)]
+            .set_symbol(glyphs.vertical)
+            .set_style(border);
     }
     Some(Rect::new(a.x + 1, a.y + 1, a.width - 2, a.height - 2))
 }
-fn popup(a: Rect, w: u16, h: u16) -> Option<Rect> {
-    let w = w.min(a.width.saturating_sub(4));
-    let h = h.min(a.height.saturating_sub(2));
-    if w < 4 || h < 4 {
-        return None;
-    }
-    Some(Rect::new(
-        a.x + (a.width - w) / 2,
-        a.y + (a.height - h) / 2,
-        w,
-        h,
-    ))
+/// Centered modal of a size tier plus its painted panel: the shared frame
+/// every overlay starts from.
+pub(in crate::client::shell) fn modal_panel(
+    b: &mut Buffer,
+    size: crate::ui::ModalSize,
+    border: ratatui::style::Color,
+    cx: &ChromeContext<'_>,
+) -> Option<(Rect, Rect)> {
+    let outer = crate::ui::modal_rect(b.area, size)?;
+    let inner = panel(b, outer, border, cx.palette.panel_bg, cx.glyphs)?;
+    Some((outer, inner))
 }
-fn button(b: &mut Buffer, r: Rect, t: &str, s: Style) {
-    b.set_style(r, s);
-    let w = display_width(t).min(r.width);
-    put_text(b, r.x + (r.width - w) / 2, r.y, w, t, s)
+
+/// Modal action button: rect width always matches the i18n label display
+/// width (CJK safe), style comes from the shared tone/state table.
+pub(in crate::client::shell) fn modal_button(
+    b: &mut Buffer,
+    r: Rect,
+    label: &str,
+    tone: crate::ui::ModalButtonTone,
+    state: crate::ui::ModalButtonState,
+    p: &Palette,
+) {
+    let style = crate::ui::modal_button_style(p, tone, state);
+    b.set_style(r, style);
+    let w = display_width(label).min(r.width);
+    put_text(b, r.x + (r.width - w) / 2, r.y, w, label, style)
 }
-fn row(i: Rect, ws: &[u16], gap: u16, off: u16) -> Vec<Rect> {
-    let total = ws.iter().sum::<u16>() + gap * (ws.len().saturating_sub(1) as u16);
-    let mut x = i.x + i.width.saturating_sub(total) / 2;
-    ws.iter()
+
+/// Centered row of action buttons on the given row rect; widths derive from
+/// the labels so translations never overflow a hardcoded cell count.
+pub(in crate::client::shell) fn modal_button_row(
+    area: Rect,
+    labels: &[&str],
+    gap: u16,
+) -> Vec<Rect> {
+    let widths = labels
+        .iter()
+        .map(|label| crate::ui::modal_button_width(label))
+        .collect::<Vec<_>>();
+    let total = widths.iter().sum::<u16>() + gap * (widths.len().saturating_sub(1) as u16);
+    let mut x = area.x + area.width.saturating_sub(total) / 2;
+    widths
+        .iter()
         .map(|w| {
             let r = Rect::new(
                 x,
-                i.y + off.min(i.height.saturating_sub(1)),
-                (*w).min(i.width.saturating_sub(x - i.x)),
+                area.y,
+                (*w).min(area.width.saturating_sub(x - area.x)),
                 1,
             );
             x += *w + gap;
@@ -293,32 +357,112 @@ fn row(i: Rect, ws: &[u16], gap: u16, off: u16) -> Vec<Rect> {
         })
         .collect()
 }
-fn contrast(p: &Palette) -> ratatui::style::Color {
-    match p.panel_bg {
-        ratatui::style::Color::Reset => p.surface_dim,
-        c => c,
-    }
+
+/// Shared modal search bar: ` / ` prompt while focused, hint or query echo
+/// otherwise, optional status override (navigator filter) and right-aligned
+/// counter. Returns the text cursor while focused.
+pub(in crate::client::shell) struct SearchBar<'a> {
+    pub focused: bool,
+    pub query: &'a TextEditor,
+    pub hint: &'a str,
+    pub status: Option<String>,
+    pub echo_query: bool,
+    pub count: Option<String>,
 }
-fn render_release_notes_overlay(
+
+pub(in crate::client::shell) fn render_search_bar(
     b: &mut Buffer,
-    notes: &crate::app::state::ReleaseNotesState,
-    install_command: &str,
+    area: Rect,
+    bar: &SearchBar<'_>,
     p: &Palette,
-) -> Option<OverlayRender> {
-    let outer = popup(
-        b.area,
-        crate::ui::RELEASE_NOTES_MODAL_SIZE.0,
-        crate::ui::RELEASE_NOTES_MODAL_SIZE.1,
-    )?;
-    let inner = panel(b, outer, p.accent, p.panel_bg)?;
+) -> Option<crate::protocol::CursorState> {
+    let text = if bar.focused {
+        " / ".to_owned()
+    } else if let Some(status) = bar.status.as_deref() {
+        format!(" / {status}")
+    } else if bar.echo_query && !bar.query.as_str().is_empty() {
+        format!(" / {}", bar.query.as_str())
+    } else {
+        bar.hint.to_owned()
+    };
+    put_text(
+        b,
+        area.x,
+        area.y,
+        area.width,
+        &text,
+        Style::default()
+            .fg(if bar.focused { p.text } else { p.overlay0 })
+            .bg(p.panel_bg),
+    );
+    let count_width = bar.count.as_deref().map(display_width).unwrap_or(0);
+    let cursor = if bar.focused {
+        text_editor::render(
+            b,
+            Rect::new(
+                area.x + 3,
+                area.y,
+                area.width
+                    .saturating_sub(3 + count_width + u16::from(bar.count.is_some())),
+                1,
+            ),
+            bar.query,
+            Style::default().fg(p.text).bg(p.panel_bg),
+        )
+    } else {
+        None
+    };
+    if let Some(count) = bar.count.as_deref() {
+        put_right_text(
+            b,
+            area,
+            area.y,
+            count,
+            Style::default().fg(p.overlay0).bg(p.panel_bg),
+        );
+    }
+    cursor
+}
+
+/// Shared scrollable modal body with a scrollbar track on the right edge:
+/// display lines, wrap-aware metrics, clamped scroll, optional track.
+struct ScrollbackOverlayRender {
+    area: Rect,
+    close: Rect,
+    track: Option<Rect>,
+    metrics: Option<crate::pane::ScrollMetrics>,
+    max_scroll: usize,
+}
+
+/// Title/subtitle/close header plus scrollable body and scroll-hint footer;
+/// release notes and product announcement share this frame.
+#[allow(clippy::too_many_arguments)]
+fn render_scrollback_overlay(
+    b: &mut Buffer,
+    size: crate::ui::ModalSize,
+    title: &str,
+    subtitle: &str,
+    lines: Vec<(usize, ratatui::text::Line<'_>)>,
+    scroll: u16,
+    thumb_hover: &ChromeHover,
+    cx: &ChromeContext<'_>,
+) -> Option<ScrollbackOverlayRender> {
+    let p = cx.palette;
+    let (outer, inner) = modal_panel(b, size, p.accent, cx)?;
     if inner.height < 8 || inner.width < 20 {
-        return Some(OverlayRender {
+        return Some(ScrollbackOverlayRender {
             area: outer,
-            ..OverlayRender::default()
+            close: Rect::default(),
+            track: None,
+            metrics: None,
+            max_scroll: 0,
         });
     }
 
     let stack = crate::ui::modal_stack_areas(inner, 2, 1, 0, 1);
+    let base = Style::default()
+        .bg(p.panel_bg)
+        .remove_modifier(Modifier::DIM);
     let title_area = Rect::new(
         stack.header.x.saturating_add(1),
         stack.header.y,
@@ -331,15 +475,12 @@ fn render_release_notes_overlay(
         stack.header.width.saturating_sub(2),
         1,
     );
-    let base = Style::default()
-        .bg(p.panel_bg)
-        .remove_modifier(Modifier::DIM);
     put_text(
         b,
         title_area.x,
         title_area.y,
         title_area.width,
-        &format!("v{}", notes.version),
+        title,
         base.fg(p.text).add_modifier(Modifier::BOLD),
     );
     put_text(
@@ -347,11 +488,7 @@ fn render_release_notes_overlay(
         subtitle_area.x,
         subtitle_area.y,
         subtitle_area.width,
-        if notes.preview {
-            crate::i18n::texts().overlays.update_ready
-        } else {
-            crate::i18n::texts().overlays.whats_new_in_release
-        },
+        subtitle,
         base.fg(p.overlay1),
     );
     let close = crate::ui::release_notes_close_button_rect(Rect::new(
@@ -360,22 +497,22 @@ fn render_release_notes_overlay(
         stack.header.width,
         1,
     ));
-    button(
+    modal_button(
         b,
         close,
         crate::ui::modal_close_button_text(),
-        Style::default()
-            .fg(contrast(p))
-            .bg(p.accent)
-            .add_modifier(Modifier::BOLD)
-            .remove_modifier(Modifier::DIM),
+        crate::ui::ModalButtonTone::Primary,
+        cx.button_state(
+            &ChromeHover::OverlayPrimary,
+            crate::ui::ModalButtonState::Focused,
+        ),
+        p,
     );
 
     let body = stack.content;
-    let lines = crate::ui::release_notes_display_lines(notes, install_command, p);
-    let metrics = crate::ui::release_notes_scroll_metrics(notes, install_command, body, p);
+    let metrics = crate::ui::display_lines_scroll_metrics(&lines, scroll, body);
     let max_scroll = metrics.max_offset_from_bottom;
-    let scroll = usize::from(notes.scroll).min(max_scroll);
+    let scroll = usize::from(scroll).min(max_scroll);
     let track = crate::ui::release_notes_scrollbar_rect(body, metrics);
     let text_area = track
         .map(|_| Rect::new(body.x, body.y, body.width.saturating_sub(1), body.height))
@@ -387,42 +524,63 @@ fn render_release_notes_overlay(
     .scroll((u16::try_from(scroll).unwrap_or(u16::MAX), 0));
     ratatui::widgets::Widget::render(paragraph, text_area, b);
     if let Some(track) = track {
-        crate::ui::render_scrollbar_buffer(b, metrics, track, p.overlay0, p.overlay1, "▐");
+        let thumb = cx.thumb_color(thumb_hover, p.overlay1);
+        crate::ui::render_scrollbar_buffer(b, metrics, track, p.overlay0, thumb, "▐");
     }
 
     if let Some(footer_area) = stack.footer {
-        let footer_line = ratatui::text::Line::from(vec![
-            ratatui::text::Span::styled(
-                crate::i18n::texts().overlays.footer_scroll,
-                base.fg(p.overlay0),
-            ),
-            ratatui::text::Span::styled(
-                crate::i18n::texts().overlays.footer_wheel,
-                base.fg(p.text),
-            ),
-            ratatui::text::Span::styled(
-                crate::i18n::texts().overlays.footer_sep,
-                base.fg(p.overlay0),
-            ),
-            ratatui::text::Span::styled(
-                crate::i18n::texts().overlays.footer_close,
-                base.fg(p.overlay0),
-            ),
-            ratatui::text::Span::styled(crate::i18n::texts().overlays.footer_keys, base.fg(p.text)),
-        ]);
-        ratatui::widgets::Widget::render(
-            ratatui::widgets::Paragraph::new(footer_line),
-            footer_area,
+        let t = &crate::i18n::texts().overlays;
+        super::render_key_hints(
             b,
+            footer_area,
+            &[
+                ("wheel ↑↓".to_owned(), t.hint_scroll.to_owned()),
+                ("esc / enter".to_owned(), t.footer_close.to_owned()),
+            ],
+            p,
+            cx.components,
         );
     }
 
-    Some(OverlayRender {
+    Some(ScrollbackOverlayRender {
         area: outer,
-        primary: close,
-        release_notes_scrollbar: track.unwrap_or_default(),
-        release_notes_scroll_metrics: Some(metrics),
-        release_notes_max_scroll: max_scroll,
+        close,
+        track,
+        metrics: Some(metrics),
+        max_scroll,
+    })
+}
+fn render_release_notes_overlay(
+    b: &mut Buffer,
+    notes: &crate::app::state::ReleaseNotesState,
+    install_command: &str,
+    cx: &ChromeContext<'_>,
+) -> Option<OverlayRender> {
+    let subtitle = if notes.preview {
+        crate::i18n::texts().overlays.update_ready
+    } else {
+        crate::i18n::texts().overlays.whats_new_in_release
+    };
+    let lines = crate::ui::release_notes_display_lines(notes, install_command, cx.palette);
+    let rendered = render_scrollback_overlay(
+        b,
+        crate::ui::ModalSize::Content {
+            width: crate::ui::RELEASE_NOTES_MODAL_SIZE.0,
+            height: crate::ui::RELEASE_NOTES_MODAL_SIZE.1,
+        },
+        &format!("v{}", notes.version),
+        subtitle,
+        lines,
+        notes.scroll,
+        &ChromeHover::ReleaseNotesScrollbarThumb,
+        cx,
+    )?;
+    Some(OverlayRender {
+        area: rendered.area,
+        primary: rendered.close,
+        release_notes_scrollbar: rendered.track.unwrap_or_default(),
+        release_notes_scroll_metrics: rendered.metrics,
+        release_notes_max_scroll: rendered.max_scroll,
         ..OverlayRender::default()
     })
 }
@@ -430,134 +588,38 @@ fn render_release_notes_overlay(
 fn render_product_announcement_overlay(
     b: &mut Buffer,
     announcement: &crate::app::state::ProductAnnouncementState,
-    p: &Palette,
+    cx: &ChromeContext<'_>,
 ) -> Option<OverlayRender> {
-    let outer = popup(
-        b.area,
-        crate::ui::PRODUCT_ANNOUNCEMENT_MODAL_SIZE.0,
-        crate::ui::PRODUCT_ANNOUNCEMENT_MODAL_SIZE.1,
-    )?;
-    let inner = panel(b, outer, p.accent, p.panel_bg)?;
-    if inner.height < 8 || inner.width < 20 {
-        return Some(OverlayRender {
-            area: outer,
-            ..OverlayRender::default()
-        });
-    }
-
-    let stack = crate::ui::modal_stack_areas(inner, 2, 1, 0, 1);
-    let title_area = Rect::new(
-        stack.header.x.saturating_add(1),
-        stack.header.y,
-        stack.header.width.saturating_sub(2),
-        1,
-    );
-    let subtitle_area = Rect::new(
-        stack.header.x.saturating_add(1),
-        stack.header.y.saturating_add(1),
-        stack.header.width.saturating_sub(2),
-        1,
-    );
-    let base = Style::default()
-        .bg(p.panel_bg)
-        .remove_modifier(Modifier::DIM);
-    put_text(
-        b,
-        title_area.x,
-        title_area.y,
-        title_area.width,
-        &announcement.title,
-        base.fg(p.text).add_modifier(Modifier::BOLD),
-    );
     let subtitle = if announcement.preview {
         crate::i18n::texts().overlays.product_announcement_preview
     } else {
         crate::i18n::texts().overlays.product_announcement
     };
-    put_text(
+    let subtitle = format!("{subtitle} · v{}", announcement.version);
+    let lines = crate::ui::product_announcement_display_lines(announcement, cx.palette);
+    let rendered = render_scrollback_overlay(
         b,
-        subtitle_area.x,
-        subtitle_area.y,
-        subtitle_area.width,
-        &format!("{subtitle} · v{}", announcement.version),
-        base.fg(p.overlay1),
-    );
-    let close = crate::ui::release_notes_close_button_rect(Rect::new(
-        stack.header.x,
-        stack.header.y,
-        stack.header.width,
-        1,
-    ));
-    button(
-        b,
-        close,
-        crate::ui::modal_close_button_text(),
-        Style::default()
-            .fg(contrast(p))
-            .bg(p.accent)
-            .add_modifier(Modifier::BOLD)
-            .remove_modifier(Modifier::DIM),
-    );
-
-    let body = stack.content;
-    let lines = crate::ui::product_announcement_display_lines(announcement, p);
-    let metrics = crate::ui::product_announcement_scroll_metrics(announcement, body, p);
-    let max_scroll = metrics.max_offset_from_bottom;
-    let scroll = usize::from(announcement.scroll).min(max_scroll);
-    let track = crate::ui::release_notes_scrollbar_rect(body, metrics);
-    let text_area = track
-        .map(|_| Rect::new(body.x, body.y, body.width.saturating_sub(1), body.height))
-        .unwrap_or(body);
-    let paragraph = ratatui::widgets::Paragraph::new(
-        lines.into_iter().map(|(_, line)| line).collect::<Vec<_>>(),
-    )
-    .wrap(ratatui::widgets::Wrap { trim: false })
-    .scroll((u16::try_from(scroll).unwrap_or(u16::MAX), 0));
-    ratatui::widgets::Widget::render(paragraph, text_area, b);
-    if let Some(track) = track {
-        crate::ui::render_scrollbar_buffer(b, metrics, track, p.overlay0, p.overlay1, "▐");
-    }
-
-    if let Some(footer_area) = stack.footer {
-        let footer_line = ratatui::text::Line::from(vec![
-            ratatui::text::Span::styled(
-                crate::i18n::texts().overlays.footer_scroll,
-                base.fg(p.overlay0),
-            ),
-            ratatui::text::Span::styled(
-                crate::i18n::texts().overlays.footer_wheel,
-                base.fg(p.text),
-            ),
-            ratatui::text::Span::styled(
-                crate::i18n::texts().overlays.footer_sep,
-                base.fg(p.overlay0),
-            ),
-            ratatui::text::Span::styled(
-                crate::i18n::texts().overlays.footer_close,
-                base.fg(p.overlay0),
-            ),
-            ratatui::text::Span::styled(crate::i18n::texts().overlays.footer_keys, base.fg(p.text)),
-        ]);
-        ratatui::widgets::Widget::render(
-            ratatui::widgets::Paragraph::new(footer_line),
-            footer_area,
-            b,
-        );
-    }
-
+        crate::ui::ModalSize::XLarge,
+        &announcement.title,
+        &subtitle,
+        lines,
+        announcement.scroll,
+        &ChromeHover::ProductAnnouncementScrollbarThumb,
+        cx,
+    )?;
     Some(OverlayRender {
-        area: outer,
-        primary: close,
-        product_announcement_scrollbar: track.unwrap_or_default(),
-        product_announcement_scroll_metrics: Some(metrics),
-        product_announcement_max_scroll: max_scroll,
+        area: rendered.area,
+        primary: rendered.close,
+        product_announcement_scrollbar: rendered.track.unwrap_or_default(),
+        product_announcement_scroll_metrics: rendered.metrics,
+        product_announcement_max_scroll: rendered.max_scroll,
         ..OverlayRender::default()
     })
 }
 
-fn render_onboarding_overlay(b: &mut Buffer, p: &Palette) -> Option<OverlayRender> {
-    let outer = popup(b.area, 64, 16)?;
-    let inner = panel(b, outer, p.accent, p.panel_bg)?;
+fn render_onboarding_overlay(b: &mut Buffer, cx: &ChromeContext<'_>) -> Option<OverlayRender> {
+    let p = cx.palette;
+    let (outer, inner) = modal_panel(b, crate::ui::ModalSize::Medium, p.accent, cx)?;
     if inner.height < 11 {
         return Some(OverlayRender {
             area: outer,
@@ -637,15 +699,16 @@ fn render_onboarding_overlay(b: &mut Buffer, p: &Palette) -> Option<OverlayRende
     );
 
     let primary = crate::ui::onboarding_welcome_continue_rect(stack.actions.unwrap_or_default());
-    button(
+    modal_button(
         b,
         primary,
         crate::ui::modal_continue_button_text(),
-        Style::default()
-            .fg(contrast(p))
-            .bg(p.accent)
-            .add_modifier(Modifier::BOLD)
-            .remove_modifier(Modifier::DIM),
+        crate::ui::ModalButtonTone::Primary,
+        cx.button_state(
+            &ChromeHover::OverlayPrimary,
+            crate::ui::ModalButtonState::Focused,
+        ),
+        p,
     );
     Some(OverlayRender {
         area: outer,
@@ -657,22 +720,23 @@ fn render_onboarding_overlay(b: &mut Buffer, p: &Palette) -> Option<OverlayRende
 fn render_rename_overlay(
     b: &mut Buffer,
     v: &ClientRenameOverlay,
-    p: &Palette,
+    cx: &ChromeContext<'_>,
 ) -> Option<OverlayRender> {
-    let q = popup(b.area, 56, 7)?;
-    let i = panel(b, q, p.accent, p.panel_bg)?;
+    let p = cx.palette;
+    let (q, i) = modal_panel(b, crate::ui::ModalSize::Small, p.accent, cx)?;
+    let stack = crate::ui::modal_stack_areas(i, 1, 0, 1, 1);
     put_text(
         b,
-        i.x,
-        i.y,
-        i.width,
+        stack.header.x,
+        stack.header.y,
+        stack.header.width,
         v.title,
         Style::default()
             .fg(p.text)
             .bg(p.panel_bg)
             .add_modifier(Modifier::BOLD),
     );
-    let input = Rect::new(i.x, i.y + 2, i.width, 1);
+    let input = Rect::new(stack.content.x, stack.content.y, stack.content.width, 1);
     b.set_style(input, Style::default().fg(p.text).bg(p.surface0));
     let cursor = text_editor::render(
         b,
@@ -680,25 +744,51 @@ fn render_rename_overlay(
         &v.input,
         Style::default().fg(p.text).bg(p.surface0),
     );
-    let rs = row(i, &[8, 10, 12], 2, 3);
+    let rs = modal_button_row(
+        stack.actions.unwrap_or_default(),
+        &[
+            crate::i18n::texts().overlays.save_button,
+            crate::i18n::texts().overlays.clear_button,
+            crate::i18n::texts().overlays.cancel_button,
+        ],
+        2,
+    );
     let [save, clear, cancel] = rs.as_slice() else {
         return None;
     };
-    button(
+    modal_button(
         b,
         *save,
         crate::i18n::texts().overlays.save_button,
-        Style::default()
-            .fg(contrast(p))
-            .bg(p.accent)
-            .add_modifier(Modifier::BOLD),
+        crate::ui::ModalButtonTone::Primary,
+        cx.button_state(
+            &ChromeHover::OverlayPrimary,
+            crate::ui::ModalButtonState::Focused,
+        ),
+        p,
     );
-    let n = Style::default()
-        .fg(p.text)
-        .bg(p.surface0)
-        .add_modifier(Modifier::BOLD);
-    button(b, *clear, crate::i18n::texts().overlays.clear_button, n);
-    button(b, *cancel, crate::i18n::texts().overlays.cancel_button, n);
+    modal_button(
+        b,
+        *clear,
+        crate::i18n::texts().overlays.clear_button,
+        crate::ui::ModalButtonTone::Secondary,
+        cx.button_state(
+            &ChromeHover::OverlayClear,
+            crate::ui::ModalButtonState::Normal,
+        ),
+        p,
+    );
+    modal_button(
+        b,
+        *cancel,
+        crate::i18n::texts().overlays.cancel_button,
+        crate::ui::ModalButtonTone::Secondary,
+        cx.button_state(
+            &ChromeHover::OverlayCancel,
+            crate::ui::ModalButtonState::Normal,
+        ),
+        p,
+    );
     Some(OverlayRender {
         area: q,
         primary: *save,
@@ -737,8 +827,9 @@ fn render_navigator_overlay(
     n: &ClientNavigatorOverlay,
     endpoints: &[ClientShellEndpoint],
     active_endpoint_id: &ClientEndpointId,
-    p: &Palette,
+    cx: &ChromeContext<'_>,
 ) -> Option<OverlayRender> {
+    let p = cx.palette;
     let a = b.area;
     let mx = (a.width / 16).max(2);
     let my = (a.height / 10).max(1);
@@ -749,62 +840,35 @@ fn render_navigator_overlay(
         a.height.saturating_sub(my * 2).max(4),
     )
     .intersection(a);
-    let i = panel(b, q, p.accent, p.panel_bg)?;
+    let i = panel(b, q, p.accent, p.panel_bg, cx.glyphs)?;
     let rows = super::aggregate_navigation::navigator_rows(endpoints, active_endpoint_id, n);
-    let search = if n.search_focused {
-        " / ".to_owned()
-    } else if let Some(f) = n.filter {
-        format!(
-            " / {}",
-            match f {
-                ClientNavigatorFilter::Blocked => crate::i18n::texts().overlays.filter_blocked,
-                ClientNavigatorFilter::Working => crate::i18n::texts().overlays.filter_working,
-                ClientNavigatorFilter::Idle => crate::i18n::texts().overlays.filter_idle,
-                ClientNavigatorFilter::Done => crate::i18n::texts().overlays.filter_done,
-            }
-        )
-    } else if n.query.is_empty() {
-        crate::i18n::texts().overlays.search_panes_hint.to_owned()
-    } else {
-        format!(" / {}", n.query)
-    };
-    put_text(
-        b,
-        i.x,
-        i.y,
-        i.width,
-        &search,
-        Style::default()
-            .fg(if n.search_focused { p.text } else { p.overlay0 })
-            .bg(p.panel_bg),
-    );
     let count = format!(
         "{} panes",
         rows.iter()
             .filter(|row| matches!(row.target, ClientNavigatorTarget::Pane { .. }))
             .count()
     );
-    let cursor = if n.search_focused {
-        text_editor::render(
-            b,
-            Rect::new(
-                i.x + 3,
-                i.y,
-                i.width.saturating_sub(4 + display_width(&count)),
-                1,
-            ),
-            &n.query,
-            Style::default().fg(p.text).bg(p.panel_bg),
-        )
-    } else {
-        None
-    };
-    put_right_text(
+    let filter_label = n.filter.map(|f| {
+        match f {
+            ClientNavigatorFilter::Blocked => crate::i18n::texts().overlays.filter_blocked,
+            ClientNavigatorFilter::Working => crate::i18n::texts().overlays.filter_working,
+            ClientNavigatorFilter::Idle => crate::i18n::texts().overlays.filter_idle,
+            ClientNavigatorFilter::Done => crate::i18n::texts().overlays.filter_done,
+        }
+        .to_owned()
+    });
+    let cursor = render_search_bar(
         b,
-        i,
-        i.y,
-        &count,
-        Style::default().fg(p.overlay0).bg(p.panel_bg),
+        Rect::new(i.x, i.y, i.width, 1),
+        &SearchBar {
+            focused: n.search_focused,
+            query: &n.query,
+            hint: crate::i18n::texts().overlays.search_panes_hint,
+            status: filter_label,
+            echo_query: true,
+            count: Some(count),
+        },
+        p,
     );
     put_text(
         b,
@@ -845,7 +909,7 @@ fn render_navigator_overlay(
                 .add_modifier(Modifier::DIM)
         } else if ix == selected {
             Style::default()
-                .fg(contrast(p))
+                .fg(panel_contrast_fg(p))
                 .bg(p.accent)
                 .add_modifier(Modifier::BOLD)
         } else {
@@ -916,7 +980,7 @@ fn render_navigator_overlay(
             _ => None,
         };
         if let Some(status) = machine_status {
-            let (glyph, state, color) = endpoint_status_presentation(status, p);
+            let (glyph, state, color) = endpoint_status_presentation(status, p, cx.spinner);
             let signal = if status == ClientEndpointStatus::Online {
                 glyph.to_owned()
             } else {
@@ -1057,67 +1121,65 @@ fn render_help_overlay(
     b: &mut Buffer,
     h: &ClientHelpOverlay,
     k: &LiveKeybindConfig,
-    p: &Palette,
+    cx: &ChromeContext<'_>,
 ) -> Option<OverlayRender> {
     use ratatui::widgets::{Paragraph, Widget, Wrap};
 
-    let q = popup(b.area, 76, 22)?;
-    let i = panel(b, q, p.accent, p.panel_bg)?;
+    let p = cx.palette;
+    let (q, i) = modal_panel(b, crate::ui::ModalSize::Large, p.accent, cx)?;
     if i.width < 20 || i.height < 6 {
         return None;
     }
+    let stack = crate::ui::modal_stack_areas(i, 2, 1, 0, 1);
     put_text(
         b,
-        i.x,
-        i.y,
-        i.width,
+        stack.header.x,
+        stack.header.y,
+        stack.header.width,
         crate::i18n::texts().overlays.keybinds_title,
         Style::default()
             .fg(p.text)
             .bg(p.panel_bg)
             .add_modifier(Modifier::BOLD),
     );
-    let close = Rect::new(i.right() - 13, i.y, 13, 1);
-    button(
+    let close_label = if h.search_focused {
+        crate::i18n::texts().overlays.back_button
+    } else {
+        crate::ui::modal_close_button_text()
+    };
+    let close_width = crate::ui::modal_button_width(close_label);
+    let close = Rect::new(
+        stack.header.right().saturating_sub(close_width),
+        stack.header.y,
+        close_width,
+        1,
+    );
+    modal_button(
         b,
         close,
-        if h.search_focused {
-            crate::i18n::texts().overlays.back_button
-        } else {
-            crate::ui::modal_close_button_text()
-        },
-        Style::default()
-            .fg(contrast(p))
-            .bg(p.accent)
-            .add_modifier(Modifier::BOLD),
+        close_label,
+        crate::ui::ModalButtonTone::Primary,
+        cx.button_state(
+            &ChromeHover::OverlayCancel,
+            crate::ui::ModalButtonState::Focused,
+        ),
+        p,
     );
-    let sy = i.y + 1;
-    put_text(
+    let cursor = render_search_bar(
         b,
-        i.x,
-        sy,
-        i.width,
-        &if h.search_focused {
-            " / ".to_owned()
-        } else {
-            crate::i18n::texts().overlays.help_filter_hint.to_owned()
+        Rect::new(i.x, stack.header.y + 1, i.width, 1),
+        &SearchBar {
+            focused: h.search_focused,
+            query: &h.query,
+            hint: crate::i18n::texts().overlays.help_filter_hint,
+            status: None,
+            echo_query: false,
+            count: None,
         },
-        Style::default()
-            .fg(if h.search_focused { p.text } else { p.overlay0 })
-            .bg(p.panel_bg),
+        p,
     );
-    let cursor = if h.search_focused {
-        text_editor::render(
-            b,
-            Rect::new(i.x + 3, sy, i.width.saturating_sub(3), 1),
-            &h.query,
-            Style::default().fg(p.text).bg(p.panel_bg),
-        )
-    } else {
-        None
-    };
 
-    let body = Rect::new(i.x, i.y + 3, i.width, i.height.saturating_sub(5));
+    let body = stack.content;
     let lines = help_lines(k, &h.query, p);
     let viewport_rows = usize::from(body.height.max(1));
     let wrapped_rows = |width: u16| {
@@ -1141,12 +1203,7 @@ fn render_help_overlay(
         max_offset_from_bottom: max_scroll,
         viewport_rows,
     };
-    let scrollbar = needs_scrollbar.then_some(Rect::new(
-        body.right().saturating_sub(1),
-        body.y,
-        1,
-        body.height,
-    ));
+    let scrollbar = crate::ui::release_notes_scrollbar_rect(body, metrics);
     Widget::render(
         Paragraph::new(lines.into_iter().map(|(_, line)| line).collect::<Vec<_>>())
             .wrap(Wrap { trim: false })
@@ -1155,32 +1212,24 @@ fn render_help_overlay(
         b,
     );
     if let Some(track) = scrollbar {
-        if let Some(thumb) = crate::ui::scrollbar_thumb(metrics, track) {
-            for y in track.y..track.bottom() {
-                b[(track.x, y)]
-                    .set_symbol("▐")
-                    .set_style(Style::default().fg(p.overlay0).bg(p.panel_bg));
-            }
-            for y in thumb.top..thumb.top.saturating_add(thumb.len) {
-                b[(track.x, y)]
-                    .set_symbol("▐")
-                    .set_style(Style::default().fg(p.overlay1).bg(p.panel_bg));
-            }
-        }
+        let thumb = cx.thumb_color(&ChromeHover::HelpScrollbarThumb, p.overlay1);
+        crate::ui::render_scrollbar_buffer(b, metrics, track, p.overlay0, thumb, "▐");
     }
 
-    put_text(
-        b,
-        i.x,
-        i.bottom() - 1,
-        i.width,
-        if h.search_focused {
-            crate::i18n::texts().overlays.edit_footer
-        } else {
-            crate::i18n::texts().overlays.search_footer
-        },
-        Style::default().fg(p.overlay0).bg(p.panel_bg),
-    );
+    if let Some(footer) = stack.footer {
+        put_text(
+            b,
+            footer.x,
+            footer.y,
+            footer.width,
+            if h.search_focused {
+                crate::i18n::texts().overlays.edit_footer
+            } else {
+                crate::i18n::texts().overlays.search_footer
+            },
+            Style::default().fg(p.overlay0).bg(p.panel_bg),
+        );
+    }
     Some(OverlayRender {
         area: q,
         cancel: close,
@@ -1195,15 +1244,16 @@ fn render_help_overlay(
 fn render_confirm_close_overlay(
     b: &mut Buffer,
     c: &ClientConfirmCloseOverlay,
-    p: &Palette,
+    cx: &ChromeContext<'_>,
 ) -> Option<OverlayRender> {
-    let q = popup(b.area, 64, 6)?;
-    let i = panel(b, q, p.red, p.panel_bg)?;
+    let p = cx.palette;
+    let (q, i) = modal_panel(b, crate::ui::ModalSize::Medium.with_height(6), p.red, cx)?;
+    let stack = crate::ui::modal_stack_areas(i, 2, 0, 1, 0);
     put_text(
         b,
-        i.x,
-        i.y,
-        i.width,
+        stack.header.x,
+        stack.header.y,
+        stack.header.width,
         &format!(" {}", c.title),
         Style::default()
             .fg(p.red)
@@ -1212,33 +1262,44 @@ fn render_confirm_close_overlay(
     );
     put_text(
         b,
-        i.x,
-        i.y + 1,
-        i.width,
+        stack.header.x,
+        stack.header.y + 1,
+        stack.header.width,
         &format!(" {}", c.detail),
         Style::default().fg(p.text).bg(p.panel_bg),
     );
-    let rs = row(i, &[13, 12], 2, 3);
+    let rs = modal_button_row(
+        stack.actions.unwrap_or_default(),
+        &[
+            crate::i18n::texts().overlays.confirm_button,
+            crate::i18n::texts().overlays.cancel_button,
+        ],
+        2,
+    );
     let [ok, cancel] = rs.as_slice() else {
         return None;
     };
-    button(
+    modal_button(
         b,
         *ok,
         crate::i18n::texts().overlays.confirm_button,
-        Style::default()
-            .fg(contrast(p))
-            .bg(p.red)
-            .add_modifier(Modifier::BOLD),
+        crate::ui::ModalButtonTone::Danger,
+        cx.button_state(
+            &ChromeHover::OverlayPrimary,
+            crate::ui::ModalButtonState::Focused,
+        ),
+        p,
     );
-    button(
+    modal_button(
         b,
         *cancel,
         crate::i18n::texts().overlays.cancel_button,
-        Style::default()
-            .fg(p.text)
-            .bg(p.surface0)
-            .add_modifier(Modifier::BOLD),
+        crate::ui::ModalButtonTone::Secondary,
+        cx.button_state(
+            &ChromeHover::OverlayCancel,
+            crate::ui::ModalButtonState::Normal,
+        ),
+        p,
     );
     Some(OverlayRender {
         area: q,
@@ -1253,4 +1314,283 @@ fn render_confirm_close_overlay(
         cursor: None,
         ..OverlayRender::default()
     })
+}
+
+/// Notification history modal: one row per ring entry (oldest on top, the
+/// selection auto-followed into view), level icon + title + relative time.
+fn render_notification_history_overlay(
+    b: &mut Buffer,
+    o: &super::feedback::ClientNotificationHistoryOverlay,
+    history: &std::collections::VecDeque<ClientNotificationRecord>,
+    cx: &ChromeContext<'_>,
+) -> Option<OverlayRender> {
+    let p = cx.palette;
+    let t = &crate::i18n::texts().history;
+    let (q, i) = modal_panel(b, crate::ui::ModalSize::Large, p.accent, cx)?;
+    let stack = crate::ui::modal_stack_areas(i, 1, 1, 0, 1);
+    let base = Style::default()
+        .bg(p.panel_bg)
+        .remove_modifier(Modifier::DIM);
+    put_text(
+        b,
+        stack.header.x,
+        stack.header.y,
+        stack.header.width,
+        t.title,
+        base.fg(p.text).add_modifier(Modifier::BOLD),
+    );
+    let body = stack.content;
+    let mut rows = Vec::new();
+    let count = history.len();
+    if count == 0 {
+        if !body.is_empty() {
+            put_text(b, body.x, body.y, body.width, t.empty, base.fg(p.overlay0));
+        }
+    } else {
+        let viewport = usize::from(body.height.max(1));
+        let selected = o.selected.min(count.saturating_sub(1));
+        let max_scroll = count.saturating_sub(viewport);
+        // Auto-follow the selection: reveal it at the bottom edge at most.
+        let scroll = selected
+            .saturating_add(1)
+            .saturating_sub(viewport)
+            .min(selected)
+            .min(max_scroll);
+        for (row_offset, ix) in (scroll..count).take(viewport).enumerate() {
+            let Some(record) = history.get(ix) else {
+                break;
+            };
+            let rect = Rect::new(
+                body.x,
+                body.y.saturating_add(row_offset as u16),
+                body.width,
+                1,
+            );
+            let is_selected = ix == selected;
+            let row_style = if is_selected {
+                base.fg(panel_contrast_fg(p))
+                    .bg(p.accent)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                base.fg(p.text)
+            };
+            b.set_style(rect, row_style);
+            let level_color = if is_selected {
+                row_style.fg.unwrap_or(p.text)
+            } else {
+                record.level.color(cx.components)
+            };
+            put_text(
+                b,
+                rect.x,
+                rect.y,
+                2,
+                &format!(" {}", record.level.icon()),
+                if is_selected {
+                    row_style
+                } else {
+                    base.fg(level_color)
+                },
+            );
+            let time = relative_time_ago(record.received_at, cx.now);
+            let time_width = display_width(&time).saturating_add(1);
+            let text_width = rect.width.saturating_sub(2 + time_width);
+            let title_style = if is_selected {
+                row_style
+            } else {
+                base.fg(p.subtext0)
+            };
+            match record.body.as_deref().filter(|body| !body.is_empty()) {
+                Some(body) => {
+                    let combined = format!("{} · {}", record.title, body);
+                    put_text(
+                        b,
+                        rect.x.saturating_add(2),
+                        rect.y,
+                        text_width,
+                        &combined,
+                        title_style,
+                    );
+                }
+                None => {
+                    put_text(
+                        b,
+                        rect.x.saturating_add(2),
+                        rect.y,
+                        text_width,
+                        &record.title,
+                        title_style,
+                    );
+                }
+            }
+            put_right_text(
+                b,
+                rect,
+                rect.y,
+                &time,
+                if is_selected {
+                    row_style
+                } else {
+                    base.fg(p.overlay0)
+                },
+            );
+            rows.push((rect, ix));
+        }
+    }
+    if let Some(footer) = stack.footer {
+        put_text(
+            b,
+            footer.x,
+            footer.y,
+            footer.width,
+            t.footer,
+            base.fg(p.overlay0),
+        );
+    }
+    Some(OverlayRender {
+        area: q,
+        notification_history_rows: rows,
+        ..OverlayRender::default()
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn buffer_text(buffer: &Buffer, row: u16) -> String {
+        (buffer.area.x..buffer.area.right())
+            .map(|x| buffer[(x, row)].symbol().to_string())
+            .collect()
+    }
+
+    fn test_cx<'a>(
+        palette: &'a Palette,
+        components: &'a crate::app::state::ComponentStyles,
+    ) -> ChromeContext<'a> {
+        ChromeContext {
+            palette,
+            components,
+            glyphs: crate::ui::BorderGlyphs::SINGLE,
+            hover: None,
+            spinner: "◐",
+            now: std::time::Instant::now(),
+        }
+    }
+
+    #[test]
+    fn modal_button_row_centers_buttons_sized_by_label_display_width() {
+        // CJK labels: " 确定 " is 6 display cells, " esc 取消 " is 10.
+        let rects = modal_button_row(Rect::new(0, 5, 40, 1), &[" 确定 ", " esc 取消 "], 2);
+        assert_eq!(rects.len(), 2);
+        assert_eq!(rects[0].width, 6);
+        assert_eq!(rects[1].width, 10);
+        let total = 6 + 2 + 10;
+        assert_eq!(rects[0].x, (40 - total) / 2);
+        assert_eq!(rects[1].x, rects[0].x + 6 + 2);
+        assert_eq!(rects[0].y, 5);
+    }
+
+    #[test]
+    fn modal_panel_centers_tier_and_hides_below_minimum() {
+        let palette = Palette::catppuccin();
+        let components = crate::app::state::ComponentStyles::from_palette(&palette);
+        let cx = test_cx(&palette, &components);
+        let mut buffer = Buffer::empty(Rect::new(0, 0, 106, 30));
+        let (outer, inner) = modal_panel(
+            &mut buffer,
+            crate::ui::ModalSize::Medium,
+            palette.accent,
+            &cx,
+        )
+        .expect("medium modal");
+        assert_eq!(outer, Rect::new(21, 7, 64, 16));
+        assert_eq!(inner, Rect::new(22, 8, 62, 14));
+        assert_eq!(buffer[(21, 7)].symbol(), "┌");
+
+        let mut tiny = Buffer::empty(Rect::new(0, 0, 8, 5));
+        assert!(modal_panel(&mut tiny, crate::ui::ModalSize::Small, palette.accent, &cx).is_none());
+    }
+
+    #[test]
+    fn search_bar_shows_hint_echo_prompt_and_count() {
+        let palette = Palette::catppuccin();
+        let area = Rect::new(0, 0, 40, 1);
+
+        let mut buffer = Buffer::empty(area);
+        let query = TextEditor::new("", false);
+        let cursor = render_search_bar(
+            &mut buffer,
+            area,
+            &SearchBar {
+                focused: false,
+                query: &query,
+                hint: "filter panes",
+                status: None,
+                echo_query: true,
+                count: Some("3 panes".to_owned()),
+            },
+            &palette,
+        );
+        assert!(cursor.is_none());
+        let text = buffer_text(&buffer, 0);
+        assert!(text.starts_with("filter panes"));
+        assert!(text.trim_end().ends_with("3 panes"));
+
+        let mut buffer = Buffer::empty(area);
+        let query = TextEditor::new("web", false);
+        render_search_bar(
+            &mut buffer,
+            area,
+            &SearchBar {
+                focused: false,
+                query: &query,
+                hint: "filter panes",
+                status: None,
+                echo_query: true,
+                count: None,
+            },
+            &palette,
+        );
+        assert!(buffer_text(&buffer, 0).starts_with(" / web"));
+
+        let mut buffer = Buffer::empty(area);
+        let query = TextEditor::new("web", false);
+        let cursor = render_search_bar(
+            &mut buffer,
+            area,
+            &SearchBar {
+                focused: true,
+                query: &query,
+                hint: "filter panes",
+                status: Some("working".to_owned()),
+                echo_query: true,
+                count: Some("3 panes".to_owned()),
+            },
+            &palette,
+        );
+        let text = buffer_text(&buffer, 0);
+        assert!(text.starts_with(" / web"));
+        assert!(text.trim_end().ends_with("3 panes"));
+        let cursor = cursor.expect("focused search cursor");
+        assert!(cursor.visible);
+        assert_eq!(cursor.y, 0);
+
+        // Status wins over the query echo when not focused.
+        let mut buffer = Buffer::empty(area);
+        render_search_bar(
+            &mut buffer,
+            area,
+            &SearchBar {
+                focused: false,
+                query: &query,
+                hint: "filter panes",
+                status: Some("working".to_owned()),
+                echo_query: true,
+                count: None,
+            },
+            &palette,
+        );
+        assert!(buffer_text(&buffer, 0).starts_with(" / working"));
+    }
 }

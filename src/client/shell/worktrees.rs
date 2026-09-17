@@ -195,9 +195,7 @@ impl ClientShellState {
             .is_some_and(|worktree| worktree.is_linked_worktree);
         let kind = match action {
             KeybindAction::NewWorktree | KeybindAction::OpenWorktree if linked => {
-                self.set_endpoint_error(
-                    "New and open worktree actions start from the repo parent workspace.",
-                );
+                self.set_endpoint_error(crate::i18n::texts().worktree.start_from_parent);
                 outcome.repaint = true;
                 return;
             }
@@ -208,7 +206,7 @@ impl ClientShellState {
                 workspace_id: workspace_id.clone(),
             },
             KeybindAction::RemoveWorktree if !linked => {
-                self.set_endpoint_error("This workspace is not a Herdr-managed worktree checkout.");
+                self.set_endpoint_error(crate::i18n::texts().worktree.not_a_worktree_checkout);
                 outcome.repaint = true;
                 return;
             }
@@ -252,7 +250,7 @@ impl ClientShellState {
         }
         let branch = create.branch.trim().to_owned();
         if branch.is_empty() {
-            create.error = Some("branch is required".to_owned());
+            create.error = Some(crate::i18n::texts().worktree.branch_required.to_owned());
             outcome.repaint = true;
             return;
         }
@@ -420,7 +418,7 @@ impl ClientShellState {
                     })
                     .collect::<Vec<_>>();
                 if entries.is_empty() {
-                    self.set_endpoint_error("No Git worktrees found for this repo.");
+                    self.set_endpoint_error(crate::i18n::texts().worktree.no_worktrees_found);
                 } else {
                     self.overlay = Some(ClientShellOverlay::WorktreeOpen(
                         ClientWorktreeOpenOverlay {
@@ -455,9 +453,7 @@ impl ClientShellState {
                         },
                     ));
                 } else {
-                    self.set_endpoint_error(
-                        "This workspace is not a Herdr-managed worktree checkout.",
-                    );
+                    self.set_endpoint_error(crate::i18n::texts().worktree.not_a_worktree_checkout);
                 }
                 true
             }
@@ -522,7 +518,7 @@ impl ClientShellState {
                 Err(_),
             ) => true,
             (_, Ok(_)) => {
-                self.set_endpoint_error("endpoint returned an unexpected worktree result");
+                self.set_endpoint_error(crate::i18n::texts().worktree.unexpected_result);
                 true
             }
             (
@@ -542,6 +538,9 @@ impl ClientShellState {
                 | PendingEndpointKind::CopySearch { .. },
                 Err(_),
             ) => true,
+            // Snippet runs resolve in `handle_endpoint_result` before this.
+            (PendingEndpointKind::SnippetRun { .. }, _) => false,
+            (PendingEndpointKind::BroadcastSend { .. }, _) => false,
         }
     }
 }

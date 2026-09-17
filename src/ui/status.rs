@@ -51,23 +51,28 @@ pub(crate) fn copy_feedback_rect(
     Rect::new(x, y, width, height)
 }
 
-pub(crate) fn render_copy_feedback_buffer(
+/// Copy feedback toast with resolved component styles: the border and marker
+/// use the `toast_border_success` component token (fallback: palette green).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn render_copy_feedback_buffer_styled(
     buffer: &mut Buffer,
     area: Rect,
     feedback: &CopyFeedback,
     offset_rows: u16,
     position: ToastClipboardPosition,
     palette: &Palette,
+    components: &crate::app::state::ComponentStyles,
 ) -> Rect {
     let feedback_area = copy_feedback_rect(area, feedback, offset_rows, position);
     if feedback_area.is_empty() {
         return feedback_area;
     }
 
+    let success = components.toast_border_success;
     Clear.render(feedback_area, buffer);
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(palette.green))
+        .border_style(Style::default().fg(success))
         .style(Style::default().bg(palette.panel_bg));
     let inner = block.inner(feedback_area);
     block.render(feedback_area, buffer);
@@ -77,7 +82,7 @@ pub(crate) fn render_copy_feedback_buffer(
     }
 
     let text = Line::from(vec![
-        Span::styled("●", Style::default().fg(palette.green).bg(palette.panel_bg)),
+        Span::styled("●", Style::default().fg(success).bg(palette.panel_bg)),
         Span::raw(" "),
         Span::styled(
             &feedback.message,
@@ -164,5 +169,50 @@ mod tests {
 
         // Seven CJK chars occupy 14 display cells; byte length would report 21.
         assert_eq!(rect.width, 14 + 4);
+    }
+
+    #[test]
+    fn styled_copy_feedback_uses_toast_border_success_token() {
+        use ratatui::style::Color;
+
+        let palette = Palette::catppuccin();
+        let feedback = CopyFeedback {
+            message: "copied".to_owned(),
+        };
+        let area = Rect::new(0, 0, 20, 5);
+
+        let defaults = crate::app::state::ComponentStyles::from_palette(&palette);
+        let mut legacy = Buffer::empty(area);
+        render_copy_feedback_buffer_styled(
+            &mut legacy,
+            area,
+            &feedback,
+            0,
+            ToastClipboardPosition::TopLeft,
+            &palette,
+            &defaults,
+        );
+        // Default components keep the historical green border.
+        assert_eq!(legacy[(0, 0)].style().fg, Some(palette.green));
+
+        let components = crate::app::state::ComponentStyles::resolve(
+            &palette,
+            Some(&crate::config::ThemeComponentsConfig {
+                toast_border_success: Some("#010203".to_string()),
+                ..Default::default()
+            }),
+            crate::config::ColorDepth::Truecolor,
+        );
+        let mut styled = Buffer::empty(area);
+        render_copy_feedback_buffer_styled(
+            &mut styled,
+            area,
+            &feedback,
+            0,
+            ToastClipboardPosition::TopLeft,
+            &palette,
+            &components,
+        );
+        assert_eq!(styled[(0, 0)].style().fg, Some(Color::Rgb(1, 2, 3)));
     }
 }

@@ -65,10 +65,12 @@ pub(crate) enum KeybindAction {
     LastPane,
     Help,
     Settings,
+    ManageMachines,
     ReloadConfig,
     OpenNotificationTarget,
     Detach,
     OpenNavigator,
+    LinkHints,
 }
 
 pub(crate) fn resolve_direct_binding(
@@ -97,6 +99,7 @@ pub(crate) fn resolve_non_indexed_action(
     for (bindings, action) in [
         (&keybinds.help, KeybindAction::Help),
         (&keybinds.settings, KeybindAction::Settings),
+        (&keybinds.manage_machines, KeybindAction::ManageMachines),
         (&keybinds.workspace_picker, KeybindAction::WorkspacePicker),
         (&keybinds.new_workspace, KeybindAction::NewWorkspace),
         (&keybinds.new_worktree, KeybindAction::NewWorktree),
@@ -152,6 +155,7 @@ pub(crate) fn resolve_non_indexed_action(
         ),
         (&keybinds.detach, KeybindAction::Detach),
         (&keybinds.goto, KeybindAction::OpenNavigator),
+        (&keybinds.link_hints, KeybindAction::LinkHints),
     ] {
         if action_matches(bindings, key, dispatch) {
             return Some(action);

@@ -1,5 +1,6 @@
 use ratatui::layout::Rect;
 
+mod borders;
 mod onboarding;
 mod panes;
 mod release_notes;
@@ -10,6 +11,8 @@ mod tab_surface;
 mod text;
 mod widgets;
 
+pub(crate) use self::borders::BorderGlyphs;
+
 pub(crate) use self::onboarding::{
     onboarding_welcome_continue_rect, ONBOARDING_HELP_LABEL, ONBOARDING_PREFIX_LABEL,
     ONBOARDING_TITLE,
@@ -18,15 +21,15 @@ pub(crate) use self::onboarding::{
 pub(crate) use self::panes::popup_pane_rects;
 use self::panes::resize_popup_pane;
 pub(crate) use self::panes::{
-    apply_pane_chrome, pane_inner_rect, pane_is_scrolled_back, render_selection_highlight,
+    apply_pane_chrome, pane_inner_rect, pane_is_scrolled_back, render_selection_highlight_styled,
 };
 pub(crate) use self::release_notes::{
-    product_announcement_display_lines, product_announcement_scroll_metrics,
+    display_lines_scroll_metrics, product_announcement_display_lines,
     release_notes_close_button_rect, release_notes_display_lines, release_notes_scroll_metrics,
-    PRODUCT_ANNOUNCEMENT_MODAL_SIZE, RELEASE_NOTES_MODAL_SIZE,
+    RELEASE_NOTES_MODAL_SIZE,
 };
 pub(crate) use self::scrollbar::{
-    release_notes_scrollbar_rect, render_pane_scrollbar_buffer, render_scrollbar_buffer,
+    release_notes_scrollbar_rect, render_pane_scrollbar_buffer_styled, render_scrollbar_buffer,
     scrollbar_offset_from_drag_row, scrollbar_offset_from_row, scrollbar_thumb,
     scrollbar_thumb_grab_offset,
 };
@@ -36,14 +39,18 @@ pub(crate) use self::sidebar::{
     ResolvedToken, ResolvedTokenKind, SpaceTokenContext,
 };
 use self::status::copy_feedback_rect;
-pub(crate) use self::status::{render_config_diagnostic_buffer, render_copy_feedback_buffer};
+pub(crate) use self::status::{
+    render_config_diagnostic_buffer, render_copy_feedback_buffer_styled,
+};
 pub(crate) use self::tab_surface::{
     compute_tab_surface, compute_tab_surface_for, render_tab_surface, resize_tab_surface,
     tab_surface_cursor, tab_surface_hyperlinks, TabSurfaceLayout, TabSurfaceTarget, TabSurfaceView,
 };
 pub(crate) use self::text::truncate_end;
 pub(crate) use self::widgets::{
-    centered_popup_rect, modal_close_button_text, modal_continue_button_text, modal_stack_areas,
+    centered_popup_rect, modal_button_style, modal_button_width, modal_close_button_text,
+    modal_continue_button_text, modal_rect, modal_stack_areas, ModalButtonState, ModalButtonTone,
+    ModalSize,
 };
 
 use crate::app::AppState;

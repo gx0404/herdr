@@ -24,6 +24,7 @@ pub(crate) trait EndpointTransport: Send {
 pub(crate) struct EndpointNegotiation {
     methods: HashSet<String>,
     capabilities: HashSet<String>,
+    server_version: Option<String>,
 }
 
 impl EndpointNegotiation {
@@ -31,7 +32,18 @@ impl EndpointNegotiation {
         Self {
             methods: methods.into_iter().collect(),
             capabilities: capabilities.into_iter().collect(),
+            server_version: None,
         }
+    }
+
+    /// The server-reported Herdr version from the endpoint welcome, when offered.
+    pub(crate) fn with_server_version(mut self, server_version: Option<String>) -> Self {
+        self.server_version = server_version.filter(|version| !version.is_empty());
+        self
+    }
+
+    pub(crate) fn server_version(&self) -> Option<&str> {
+        self.server_version.as_deref()
     }
 
     pub(crate) fn methods(&self) -> Vec<String> {

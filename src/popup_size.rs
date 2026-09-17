@@ -47,6 +47,56 @@ pub(crate) struct PopupResolvedGeometry {
     pub inner: Rect,
 }
 
+/// Centering rule for a rect inside a host area: how much margin the host
+/// keeps around the rect and the smallest rect still worth showing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct CenteredRectRule {
+    pub margin_x: u16,
+    pub margin_y: u16,
+    pub min_width: u16,
+    pub min_height: u16,
+}
+
+/// Modal overlays keep a 2-cell horizontal and 1-cell vertical margin from
+/// the host edges and disappear below 4x4.
+pub(crate) const MODAL_CENTER_RULE: CenteredRectRule = CenteredRectRule {
+    margin_x: 4,
+    margin_y: 2,
+    min_width: 4,
+    min_height: 4,
+};
+
+/// Popup panes may fill the host area edge to edge but need at least 6x4
+/// cells for a usable inner terminal.
+pub(crate) const POPUP_PANE_CENTER_RULE: CenteredRectRule = CenteredRectRule {
+    margin_x: 0,
+    margin_y: 0,
+    min_width: 6,
+    min_height: 4,
+};
+
+/// Single centering primitive behind every centered rect in the app: clamp
+/// the requested size to the host minus the rule margins, refuse to show
+/// below the rule minimum, otherwise center.
+pub(crate) fn centered_rect(
+    area: Rect,
+    width: u16,
+    height: u16,
+    rule: CenteredRectRule,
+) -> Option<Rect> {
+    let width = width.min(area.width.saturating_sub(rule.margin_x));
+    let height = height.min(area.height.saturating_sub(rule.margin_y));
+    if width < rule.min_width || height < rule.min_height {
+        return None;
+    }
+    Some(Rect::new(
+        area.x + area.width.saturating_sub(width) / 2,
+        area.y + area.height.saturating_sub(height) / 2,
+        width,
+        height,
+    ))
+}
+
 pub(crate) fn resolve_popup_geometry(
     width: Option<PopupSize>,
     height: Option<PopupSize>,
@@ -64,12 +114,12 @@ pub(crate) fn resolve_popup_geometry(
         .unwrap_or(default_height)
         .max(4)
         .min(area.height);
-    if outer_width < 6 || outer_height < 4 {
-        return None;
-    }
+    let outer = centered_rect(area, outer_width, outer_height, POPUP_PANE_CENTER_RULE)?;
 
-    let outer_x = area.x + (area.width.saturating_sub(outer_width)) / 2;
-    let outer_y = area.y + (area.height.saturating_sub(outer_height)) / 2;
+    let outer_x = outer.x;
+    let outer_y = outer.y;
+    let outer_width = outer.width;
+    let outer_height = outer.height;
     let pane_inner_width = outer_width.saturating_sub(2);
     let pane_inner_height = outer_height.saturating_sub(2);
     let terminal_cols = if pane_inner_width <= 4 {
@@ -248,5 +298,47 @@ mod tests {
             super::resolve_popup_geometry(None, None, ratatui::layout::Rect::new(0, 0, 5, 24),)
                 .is_none()
         );
+    }
+
+    #[test]
+    fn centered_rect_clamps_to_rule_margins_and_centers() {
+        use ratatui::layout::Rect;
+
+        let centered =
+            super::centered_rect(Rect::new(0, 0, 106, 30), 80, 24, super::MODAL_CENTER_RULE)
+                .unwrap();
+        assert_eq!(centered, Rect::new(13, 3, 80, 24));
+
+        // Oversized requests shrink to the host minus margins.
+        let clamped =
+            super::centered_rect(Rect::new(2, 1, 40, 12), 80, 24, super::MODAL_CENTER_RULE)
+                .unwrap();
+        assert_eq!(clamped, Rect::new(4, 2, 36, 10));
+
+        // Below the rule minimum the rect is not shown.
+        assert!(
+            super::centered_rect(Rect::new(0, 0, 10, 10), 3, 24, super::MODAL_CENTER_RULE)
+                .is_none()
+        );
+        assert!(
+            super::centered_rect(Rect::new(0, 0, 6, 5), 80, 24, super::MODAL_CENTER_RULE).is_none()
+        );
+
+        // Popup panes keep no margin and require 6x4.
+        assert!(super::centered_rect(
+            Rect::new(0, 0, 5, 24),
+            80,
+            12,
+            super::POPUP_PANE_CENTER_RULE
+        )
+        .is_none());
+        let pane = super::centered_rect(
+            Rect::new(4, 2, 100, 30),
+            100,
+            30,
+            super::POPUP_PANE_CENTER_RULE,
+        )
+        .unwrap();
+        assert_eq!(pane, Rect::new(4, 2, 100, 30));
     }
 }

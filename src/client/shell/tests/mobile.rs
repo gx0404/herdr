@@ -86,6 +86,8 @@ fn mobile_switcher_can_activate_an_online_saved_machine() {
         target: "build".into(),
         session: "agents".into(),
         enabled: true,
+        ..crate::client::endpoint::SavedSshEndpoint::new("base", "base", "default")
+            .expect("valid base profile")
     };
     let endpoint_id = ClientEndpointId::Ssh(profile.id.clone());
     state.set_endpoint_catalog(&[profile]);
@@ -511,7 +513,7 @@ fn mobile_menu_keeps_inert_notes_open_and_cancel_without_workspace_in_navigate()
         .hits
         .mobile_targets
         .iter()
-        .find_map(|(rect, target)| matches!(target, ClientMobileTarget::Menu(3)).then_some(*rect))
+        .find_map(|(rect, target)| matches!(target, ClientMobileTarget::Menu(index) if *index == whats_new_menu_index(state.snapshot.as_deref().expect("snapshot"))).then_some(*rect))
         .expect("what's new row");
     state.handle_raw_events(vec![RawInputEvent::Mouse(crossterm::event::MouseEvent {
         kind: MouseEventKind::Down(MouseButton::Left),

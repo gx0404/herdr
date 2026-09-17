@@ -28,7 +28,9 @@ impl ClientShellState {
                     )
                 {
                     self.receive_endpoint_unavailable(
-                        "Select an available workspace and press Enter before renaming or closing it"
+                        crate::i18n::texts()
+                            .endpoint
+                            .workspace_unavailable_hint
                             .into(),
                     );
                     outcome.repaint = true;
@@ -59,6 +61,11 @@ impl ClientShellState {
                 }
                 if action == crate::input::KeybindAction::Settings {
                     self.open_settings_overlay();
+                    outcome.repaint = true;
+                    return;
+                }
+                if action == crate::input::KeybindAction::ManageMachines {
+                    self.open_machines_overlay();
                     outcome.repaint = true;
                     return;
                 }
@@ -160,6 +167,10 @@ impl ClientShellState {
                     }
                     return;
                 }
+                if action == crate::input::KeybindAction::LinkHints {
+                    self.enter_link_hints(outcome);
+                    return;
+                }
                 if self.handle_endpoint_navigation(action, outcome) {
                     return;
                 }
@@ -167,7 +178,15 @@ impl ClientShellState {
                     self.push_endpoint_method(method, outcome);
                     return;
                 }
-                outcome.actions.push(ClientShellAction::Keybind(action));
+                // The action has no live target right now (no focused
+                // workspace, missing indexed target, empty agent list...).
+                // Surface a notice instead of dropping it silently.
+                outcome.repaint |= self.push_endpoint_notice(
+                    ClientEndpointNoticeKind::Rejected,
+                    format!("action_not_applicable:{action:?}"),
+                    crate::i18n::texts().endpoint.notice_action_unavailable,
+                    crate::i18n::texts().endpoint.notice_action_not_applicable,
+                );
             }
             crate::input::KeybindMatch::Command(command) => {
                 let action = command.action.into();
@@ -193,7 +212,7 @@ impl ClientShellState {
                 });
                 let Some(command_id) = command_id else {
                     self.set_endpoint_error(
-                        "custom command is not available on this endpoint; reload configuration",
+                        crate::i18n::texts().endpoint.custom_command_unavailable,
                     );
                     outcome.repaint = true;
                     return;
@@ -318,7 +337,14 @@ impl ClientShellState {
             code: code.into(),
         };
         let body = body.into();
-        if kind == ClientEndpointNoticeKind::Rejected {
+        // Rejected and Success are direct answers to a user action: they
+        // re-present on every occurrence instead of deduping into the seen
+        // set (a repeated identical notice restarts its lifetime).
+        let transient = matches!(
+            kind,
+            ClientEndpointNoticeKind::Rejected | ClientEndpointNoticeKind::Success
+        );
+        if transient {
             if self
                 .visible_endpoint_notice
                 .as_ref()
@@ -329,14 +355,21 @@ impl ClientShellState {
         } else if !self.endpoint_notice_seen.insert(key.clone()) {
             return false;
         }
-        let duration_seconds = if kind == ClientEndpointNoticeKind::Rejected {
-            3
-        } else {
-            8
+        let duration_seconds = match kind {
+            ClientEndpointNoticeKind::Rejected => 3,
+            ClientEndpointNoticeKind::Success => 4,
+            _ => 8,
         };
+        let title = title.into();
+        self.record_notification(
+            super::feedback::ClientToastLevel::from_notice_kind(kind),
+            title.clone(),
+            Some(body.clone()),
+            None,
+        );
         self.visible_endpoint_notice = Some(ClientVisibleEndpointNotice {
             key,
-            title: title.into(),
+            title,
             body,
             deadline: std::time::Instant::now() + std::time::Duration::from_secs(duration_seconds),
         });
@@ -351,7 +384,10 @@ impl ClientShellState {
     ) -> bool {
         if !self.endpoint_is_online(&self.active_endpoint_id) {
             let label = self.active_endpoint_label().to_owned();
-            outcome.repaint |= self.receive_endpoint_unavailable(format!("{label} is not ready"));
+            outcome.repaint |= self.receive_endpoint_unavailable(crate::i18n::fill(
+                crate::i18n::texts().mobile.not_ready_fmt,
+                &[("label", &label)],
+            ));
             return false;
         }
         let method_name = crate::api::api_method_name(&method).to_owned();
@@ -359,9 +395,10 @@ impl ClientShellState {
             outcome.repaint |= self.push_endpoint_notice(
                 ClientEndpointNoticeKind::Unsupported,
                 method_name.clone(),
-                "Action unavailable",
-                format!(
-                    "This server does not support {method_name} yet. Update and restart it to enable this action."
+                crate::i18n::texts().endpoint.notice_action_unavailable,
+                crate::i18n::fill(
+                    crate::i18n::texts().endpoint.notice_unsupported_method_fmt,
+                    &[("method", &method_name)],
                 ),
             );
             return false;
@@ -405,11 +442,68 @@ impl ClientShellState {
         true
     }
 
+    /// Fires one API method at a specific online endpoint, which does not
+    /// have to be the active one. Responses are fenced by that endpoint's own
+    /// boot id; the request id lands in the shared pending map.
+    pub(super) fn push_endpoint_method_for(
+        &mut self,
+        endpoint_id: &ClientEndpointId,
+        method: crate::api::schema::Method,
+        kind: PendingEndpointKind,
+        outcome: &mut ClientShellInput,
+    ) -> bool {
+        if !self.endpoint_is_online(endpoint_id) {
+            return false;
+        }
+        if !self.supports_endpoint_method_for(endpoint_id, &method) {
+            return false;
+        }
+        let Some(boot_id) = self.endpoint_boot_id(endpoint_id).map(str::to_owned) else {
+            return false;
+        };
+        let request_id = self.next_request_id;
+        self.next_request_id = self.next_request_id.saturating_add(1);
+        let request_id = format!("client-shell:{request_id}");
+        self.pending_requests.insert(
+            request_id.clone(),
+            PendingEndpointRequest {
+                boot_id: boot_id.clone(),
+                method_name: crate::api::api_method_name(&method).to_owned(),
+                confirmation_workspace_id: None,
+                kind,
+            },
+        );
+        outcome.actions.push(ClientShellAction::EndpointRequest {
+            endpoint_id: endpoint_id.clone(),
+            boot_id,
+            request: Box::new(crate::api::schema::Request {
+                id: request_id,
+                method,
+            }),
+        });
+        true
+    }
+
+    /// Whether a pending request is allowed to resolve while its endpoint is
+    /// not the active one (snippet runs and broadcast fan-out fire without
+    /// switching surfaces).
+    pub(crate) fn pending_request_allows_inactive_endpoint(&self, request_id: &str) -> bool {
+        self.pending_requests
+            .get(request_id)
+            .is_some_and(|pending| {
+                matches!(
+                    pending.kind,
+                    PendingEndpointKind::SnippetRun { .. }
+                        | PendingEndpointKind::BroadcastSend { .. }
+                )
+            })
+    }
+
     pub(crate) fn receive_endpoint_error(&mut self, message: String) -> bool {
         self.push_endpoint_notice(
             ClientEndpointNoticeKind::Rejected,
             "paste_rejected",
-            "Paste rejected",
+            crate::i18n::texts().endpoint.notice_paste_rejected,
             message,
         )
     }
@@ -418,7 +512,7 @@ impl ClientShellState {
         self.push_endpoint_notice(
             ClientEndpointNoticeKind::Unavailable,
             message.clone(),
-            "Endpoint unavailable",
+            crate::i18n::texts().endpoint.notice_endpoint_unavailable,
             message,
         )
     }
@@ -455,8 +549,10 @@ impl ClientShellState {
             request_id,
             Err(ClientShellEndpointError {
                 code: Some("endpoint_cancelled".into()),
-                message: "This server action was interrupted. Check its state before retrying."
-                    .into(),
+                message: crate::i18n::texts()
+                    .endpoint
+                    .notice_cancelled_body
+                    .to_owned(),
             }),
         );
         debug_assert!(
@@ -475,13 +571,35 @@ impl ClientShellState {
         let Some(pending) = self.pending_requests.remove(request_id) else {
             return (false, Vec::new());
         };
+        // Cross-endpoint requests (snippet runs, broadcast fan-out) carry
+        // their target endpoint's boot id; the active-snapshot comparison
+        // only applies to requests fired at the active endpoint.
+        let cross_endpoint = matches!(
+            pending.kind,
+            PendingEndpointKind::SnippetRun { .. } | PendingEndpointKind::BroadcastSend { .. }
+        );
         if pending.boot_id != boot_id
-            || self
-                .snapshot
-                .as_deref()
-                .is_none_or(|snapshot| snapshot.boot_id != boot_id)
+            || (!cross_endpoint
+                && self
+                    .snapshot
+                    .as_deref()
+                    .is_none_or(|snapshot| snapshot.boot_id != boot_id))
         {
             return (false, Vec::new());
+        }
+        if let PendingEndpointKind::SnippetRun { machine, pane_id } = &pending.kind {
+            let error = result.err().map(|error| error.message);
+            return (
+                self.complete_snippet_run_target(machine, pane_id, error),
+                Vec::new(),
+            );
+        }
+        if let PendingEndpointKind::BroadcastSend { machine, .. } = &pending.kind {
+            let machine = machine.clone();
+            return (
+                self.complete_broadcast_send(boot_id, &machine, result.err()),
+                Vec::new(),
+            );
         }
         if let PendingEndpointKind::PaneLinkResolve { target } = pending.kind {
             return self.complete_link_hover(target, result);
@@ -500,29 +618,33 @@ impl ClientShellState {
                 code,
                 "confirmation_required" | "stale_content" | "stale_target"
             ) {
+                let endpoint_texts = &crate::i18n::texts().endpoint;
                 let (kind, notice_code, title, body) = match code {
                     "endpoint_timeout" => (
                         ClientEndpointNoticeKind::Timeout,
                         pending.method_name.clone(),
-                        "Server timed out",
-                        format!("This server did not respond to {}.", pending.method_name),
+                        endpoint_texts.notice_server_timed_out.to_owned(),
+                        crate::i18n::fill(
+                            endpoint_texts.notice_timeout_body_fmt,
+                            &[("method", &pending.method_name)],
+                        ),
                     ),
                     "endpoint_cancelled" => (
                         ClientEndpointNoticeKind::Unavailable,
                         "cancelled".to_owned(),
-                        "Action interrupted",
+                        endpoint_texts.notice_action_interrupted.to_owned(),
                         error.message.clone(),
                     ),
                     "server_unavailable" => (
                         ClientEndpointNoticeKind::Unavailable,
                         "server".to_owned(),
-                        "Server unavailable",
+                        endpoint_texts.notice_server_unavailable.to_owned(),
                         error.message.clone(),
                     ),
                     _ => (
                         ClientEndpointNoticeKind::Rejected,
                         format!("{}:{code}", pending.method_name),
-                        "Action rejected",
+                        endpoint_texts.notice_action_rejected.to_owned(),
                         error.message.clone(),
                     ),
                 };
@@ -531,7 +653,10 @@ impl ClientShellState {
         }
         match pending.kind {
             PendingEndpointKind::Generic => {}
-            PendingEndpointKind::PaneLinkResolve { .. } => unreachable!("handled above"),
+            PendingEndpointKind::PaneLinkResolve { .. }
+            | PendingEndpointKind::SnippetRun { .. } => {
+                unreachable!("handled above")
+            }
             PendingEndpointKind::ProductAnnouncementDismiss { version, id } => {
                 return match result {
                     Ok(_) => (false, Vec::new()),
@@ -611,7 +736,9 @@ impl ClientShellState {
                         (false, Vec::new())
                     }
                     Ok(_) => {
-                        self.set_endpoint_error("endpoint returned an unexpected selection result");
+                        self.set_endpoint_error(
+                            crate::i18n::texts().endpoint.unexpected_selection_result,
+                        );
                         (true, Vec::new())
                     }
                     Err(_) => (true, Vec::new()),
@@ -669,7 +796,9 @@ impl ClientShellState {
                         (false, replay_action(replay))
                     }
                     Ok(_) => {
-                        self.set_endpoint_error("endpoint returned an unexpected link result");
+                        self.set_endpoint_error(
+                            crate::i18n::texts().endpoint.unexpected_link_result,
+                        );
                         (true, replay_action(replay))
                     }
                     Err(error)
@@ -708,7 +837,7 @@ impl ClientShellState {
                     Ok(crate::api::schema::ResponseResult::PaneCopyMotion { .. }) => (false, false),
                     Ok(_) => {
                         self.set_endpoint_error(
-                            "endpoint returned an unexpected copy-motion result",
+                            crate::i18n::texts().endpoint.unexpected_copy_motion_result,
                         );
                         (true, false)
                     }
@@ -764,7 +893,7 @@ impl ClientShellState {
                     Ok(_) => {
                         self.cancel_deferred_copy_after_search(generation);
                         self.set_endpoint_error(
-                            "endpoint returned an unexpected copy-search result",
+                            crate::i18n::texts().endpoint.unexpected_copy_search_result,
                         );
                         (true, false)
                     }
@@ -781,7 +910,9 @@ impl ClientShellState {
                     Ok(crate::api::schema::ResponseResult::ConfigReload { .. }) => false,
                     Ok(_) => {
                         self.set_endpoint_error(
-                            "endpoint returned an unexpected config reload result",
+                            crate::i18n::texts()
+                                .endpoint
+                                .unexpected_config_reload_result,
                         );
                         true
                     }

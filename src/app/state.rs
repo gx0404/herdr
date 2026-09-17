@@ -673,6 +673,39 @@ impl Palette {
         }
         self
     }
+
+    /// Map RGB tokens to the xterm-256 palette for low-color output.
+    /// Symbolic (named/indexed/reset) tokens pass through; the mapping is
+    /// idempotent, so applying it to an already degraded palette is a no-op.
+    pub fn with_color_depth(mut self, depth: crate::config::ColorDepth) -> Self {
+        if !depth.is_low_color() {
+            return self;
+        }
+        for token in [
+            &mut self.accent,
+            &mut self.panel_bg,
+            &mut self.sidebar_bg,
+            &mut self.active_row_bg,
+            &mut self.selection_bg,
+            &mut self.surface0,
+            &mut self.surface1,
+            &mut self.surface_dim,
+            &mut self.overlay0,
+            &mut self.overlay1,
+            &mut self.text,
+            &mut self.subtext0,
+            &mut self.mauve,
+            &mut self.green,
+            &mut self.yellow,
+            &mut self.red,
+            &mut self.blue,
+            &mut self.teal,
+            &mut self.peach,
+        ] {
+            *token = crate::config::degrade_color_to_256(*token);
+        }
+        self
+    }
 }
 
 /// Geometry for the server-rendered active-tab pane surface.
@@ -702,6 +735,118 @@ pub struct ThemeRuntimeConfig {
     pub auto_switch: bool,
     pub custom: Option<crate::config::CustomThemeColors>,
     pub legacy_accent: Option<String>,
+    /// Component-level token overrides from `[theme.components]`.
+    pub components: Option<crate::config::ThemeComponentsConfig>,
+    /// Raw `ui.color_depth` selection; `auto` resolves against the host
+    /// environment once at the app/client boundary, not in renderers.
+    pub color_depth: crate::config::ColorDepthConfig,
+}
+
+/// Resolved component-level styles. Computed once per theme resolution from
+/// the (already depth-adjusted) palette plus `[theme.components]`; renderers
+/// read these fields directly and never consult config in the render loop.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ComponentStyles {
+    /// Border color of the focused pane. Fallback: accent.
+    pub pane_border_focused: Color,
+    /// Border color of unfocused panes. Fallback: overlay0.
+    pub pane_border_unfocused: Color,
+    /// Scrollbar thumb on the focused pane. Fallback: overlay1.
+    pub scrollbar_thumb_focused: Color,
+    /// Scrollbar thumb on unfocused panes. Fallback: overlay0.
+    pub scrollbar_thumb_unfocused: Color,
+    /// Scrollbar track on the focused pane. Fallback: overlay0.
+    pub scrollbar_track_focused: Color,
+    /// Scrollbar track on unfocused panes. Fallback: surface_dim.
+    pub scrollbar_track_unfocused: Color,
+    /// Mode bar accent. Fallback: accent.
+    pub mode_bar_accent: Color,
+    /// Success toast border. Fallback: green.
+    pub toast_border_success: Color,
+    /// Info toast border. Fallback: blue.
+    pub toast_border_info: Color,
+    /// Error toast border. Fallback: red.
+    pub toast_border_error: Color,
+    /// Selection background mix ratio toward white/black, within 0.0..=1.0.
+    pub selection_mix_ratio: f32,
+    /// Effective output color depth after `auto` resolution.
+    pub color_depth: crate::config::ColorDepth,
+}
+
+impl ComponentStyles {
+    /// Resolve component tokens on top of `palette`. The palette is expected
+    /// to be depth-adjusted already; explicit component overrides are mapped
+    /// through the same depth so fallback and override colors stay consistent.
+    pub fn resolve(
+        palette: &Palette,
+        components: Option<&crate::config::ThemeComponentsConfig>,
+        color_depth: crate::config::ColorDepth,
+    ) -> Self {
+        let overridden = |value: Option<&String>, fallback: Color| match value {
+            Some(raw) => {
+                let parsed = crate::config::parse_color(raw);
+                if color_depth.is_low_color() {
+                    crate::config::degrade_color_to_256(parsed)
+                } else {
+                    parsed
+                }
+            }
+            None => fallback,
+        };
+        let component = |pick: fn(&crate::config::ThemeComponentsConfig) -> &Option<String>| {
+            components.and_then(|components| pick(components).as_ref())
+        };
+
+        let selection_mix_ratio = components
+            .and_then(|components| components.selection_mix_ratio)
+            .filter(|ratio| (0.0..=1.0).contains(ratio))
+            .unwrap_or(crate::config::DEFAULT_SELECTION_MIX_RATIO);
+
+        Self {
+            pane_border_focused: overridden(component(|c| &c.pane_border_focused), palette.accent),
+            pane_border_unfocused: overridden(
+                component(|c| &c.pane_border_unfocused),
+                palette.overlay0,
+            ),
+            scrollbar_thumb_focused: overridden(
+                component(|c| &c.scrollbar_thumb),
+                palette.overlay1,
+            ),
+            scrollbar_thumb_unfocused: overridden(
+                component(|c| &c.scrollbar_thumb),
+                palette.overlay0,
+            ),
+            scrollbar_track_focused: overridden(
+                component(|c| &c.scrollbar_track),
+                palette.overlay0,
+            ),
+            scrollbar_track_unfocused: overridden(
+                component(|c| &c.scrollbar_track),
+                palette.surface_dim,
+            ),
+            mode_bar_accent: overridden(component(|c| &c.mode_bar_accent), palette.accent),
+            toast_border_success: overridden(component(|c| &c.toast_border_success), palette.green),
+            toast_border_info: overridden(component(|c| &c.toast_border_info), palette.blue),
+            toast_border_error: overridden(component(|c| &c.toast_border_error), palette.red),
+            selection_mix_ratio,
+            color_depth,
+        }
+    }
+
+    /// Test-only convenience: defaults derived from the palette alone — no
+    /// component overrides and truecolor output.
+    #[cfg(test)]
+    pub fn from_palette(palette: &Palette) -> Self {
+        Self::resolve(palette, None, crate::config::ColorDepth::Truecolor)
+    }
+}
+
+/// One theme resolution pass: semantic palette plus component tokens.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ResolvedTheme {
+    pub palette: Palette,
+    pub components: ComponentStyles,
+    pub name: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -835,6 +980,11 @@ pub struct AppState {
     pub pane_outer_borders: bool,
     pub pane_scrollbars: bool,
     pub pane_gaps: bool,
+    /// Pane border glyph table resolved from `ui.border_style`.
+    pub border_glyphs: crate::ui::BorderGlyphs,
+    /// Effective output color depth for Herdr's own UI colors;
+    /// `ui.color_depth = "auto"` is already resolved against the host here.
+    pub host_color_depth: crate::config::ColorDepth,
     pub show_agent_labels_on_pane_borders: bool,
     pub tab_bar_right: Vec<TabBarStatusSegment>,
     pub tab_bar_right_separator: String,
@@ -857,6 +1007,9 @@ pub struct AppState {
     pub keybinds: Keybinds,
     /// UI color palette — all sidebar/UI colors centralized for theming.
     pub palette: Palette,
+    /// Component-level styles resolved from `[theme.components]` on top of
+    /// `palette`; recomputed together with the palette, read by renderers.
+    pub components: ComponentStyles,
     /// Currently applied theme name (for settings UI).
     pub theme_name: String,
     /// Runtime theme configuration used to resolve manual and auto-switch palettes.
@@ -1062,6 +1215,8 @@ impl AppState {
             pane_outer_borders: true,
             pane_scrollbars: true,
             pane_gaps: false,
+            border_glyphs: crate::ui::BorderGlyphs::SINGLE,
+            host_color_depth: crate::config::ColorDepth::Truecolor,
             show_agent_labels_on_pane_borders: false,
             tab_bar_right: Vec::new(),
             tab_bar_right_separator: " ".into(),
@@ -1081,6 +1236,7 @@ impl AppState {
             toast_config: ToastConfig::default(),
             keybinds: Keybinds::default(),
             palette: Palette::catppuccin(),
+            components: ComponentStyles::from_palette(&Palette::catppuccin()),
             theme_name: "catppuccin".to_string(),
             theme_runtime: ThemeRuntimeConfig {
                 manual_name: "catppuccin".to_string(),
@@ -1089,6 +1245,8 @@ impl AppState {
                 auto_switch: false,
                 custom: None,
                 legacy_accent: None,
+                components: None,
+                color_depth: crate::config::ColorDepthConfig::default(),
             },
             host_terminal_appearance: None,
             host_terminal_appearance_explicit: false,
@@ -1500,5 +1658,122 @@ mod tests {
             KeyCode::Char('b'),
             KeyModifiers::SHIFT,
         ));
+    }
+
+    #[test]
+    fn component_styles_fall_back_to_semantic_palette_tokens() {
+        let palette = Palette::catppuccin();
+        let components =
+            ComponentStyles::resolve(&palette, None, crate::config::ColorDepth::Truecolor);
+
+        assert_eq!(components.pane_border_focused, palette.accent);
+        assert_eq!(components.pane_border_unfocused, palette.overlay0);
+        assert_eq!(components.scrollbar_thumb_focused, palette.overlay1);
+        assert_eq!(components.scrollbar_thumb_unfocused, palette.overlay0);
+        assert_eq!(components.scrollbar_track_focused, palette.overlay0);
+        assert_eq!(components.scrollbar_track_unfocused, palette.surface_dim);
+        assert_eq!(components.mode_bar_accent, palette.accent);
+        assert_eq!(components.toast_border_success, palette.green);
+        assert_eq!(components.toast_border_info, palette.blue);
+        assert_eq!(components.toast_border_error, palette.red);
+        assert_eq!(
+            components.selection_mix_ratio,
+            crate::config::DEFAULT_SELECTION_MIX_RATIO
+        );
+        assert_eq!(components.color_depth, crate::config::ColorDepth::Truecolor);
+        assert_eq!(components, ComponentStyles::from_palette(&palette));
+    }
+
+    #[test]
+    fn component_styles_apply_explicit_overrides() {
+        let palette = Palette::catppuccin();
+        let components = ComponentStyles::resolve(
+            &palette,
+            Some(&crate::config::ThemeComponentsConfig {
+                pane_border_focused: Some("#010203".to_string()),
+                scrollbar_thumb: Some("red".to_string()),
+                scrollbar_track: Some("#040506".to_string()),
+                toast_border_error: Some("#070809".to_string()),
+                selection_mix_ratio: Some(0.5),
+                ..Default::default()
+            }),
+            crate::config::ColorDepth::Truecolor,
+        );
+
+        assert_eq!(components.pane_border_focused, Color::Rgb(1, 2, 3));
+        assert_eq!(components.pane_border_unfocused, palette.overlay0);
+        // One scrollbar override covers both focus states.
+        assert_eq!(components.scrollbar_thumb_focused, Color::Red);
+        assert_eq!(components.scrollbar_thumb_unfocused, Color::Red);
+        assert_eq!(components.scrollbar_track_focused, Color::Rgb(4, 5, 6));
+        assert_eq!(components.scrollbar_track_unfocused, Color::Rgb(4, 5, 6));
+        assert_eq!(components.toast_border_error, Color::Rgb(7, 8, 9));
+        assert_eq!(components.toast_border_info, palette.blue);
+        assert_eq!(components.selection_mix_ratio, 0.5);
+    }
+
+    #[test]
+    fn component_styles_out_of_range_ratio_falls_back_to_default() {
+        let palette = Palette::catppuccin();
+        for ratio in [-0.5, 1.5, f32::NAN] {
+            let components = ComponentStyles::resolve(
+                &palette,
+                Some(&crate::config::ThemeComponentsConfig {
+                    selection_mix_ratio: Some(ratio),
+                    ..Default::default()
+                }),
+                crate::config::ColorDepth::Truecolor,
+            );
+            assert_eq!(
+                components.selection_mix_ratio,
+                crate::config::DEFAULT_SELECTION_MIX_RATIO,
+                "ratio: {ratio}"
+            );
+        }
+    }
+
+    #[test]
+    fn palette_and_components_degrade_to_256_together() {
+        let palette = Palette::catppuccin();
+        let degraded = palette
+            .clone()
+            .with_color_depth(crate::config::ColorDepth::Color256);
+
+        assert_eq!(
+            degraded.accent,
+            Color::Indexed(crate::config::rgb_to_xterm256(137, 180, 250))
+        );
+        // Symbolic tokens pass through unchanged.
+        assert_eq!(degraded.sidebar_bg, Color::Reset);
+        // Degradation is idempotent.
+        assert_eq!(
+            degraded
+                .clone()
+                .with_color_depth(crate::config::ColorDepth::Color256),
+            degraded
+        );
+        // Truecolor and auto-pass-through leave the palette untouched.
+        assert_eq!(
+            palette
+                .clone()
+                .with_color_depth(crate::config::ColorDepth::Truecolor),
+            palette
+        );
+
+        let components = ComponentStyles::resolve(
+            &degraded,
+            Some(&crate::config::ThemeComponentsConfig {
+                toast_border_success: Some("#a6e3a1".to_string()),
+                ..Default::default()
+            }),
+            crate::config::ColorDepth::Color256,
+        );
+        // Fallbacks inherit the degraded palette tokens.
+        assert_eq!(components.pane_border_focused, degraded.accent);
+        // Explicit overrides degrade through the same mapping.
+        assert_eq!(
+            components.toast_border_success,
+            Color::Indexed(crate::config::rgb_to_xterm256(0xa6, 0xe3, 0xa1))
+        );
     }
 }

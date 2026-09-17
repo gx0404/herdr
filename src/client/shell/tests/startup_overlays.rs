@@ -699,6 +699,8 @@ fn update_ready_menu_opens_client_owned_release_notes_and_dismisses_by_version()
     state.mode = ClientShellMode::Navigate;
 
     state.toggle_global_menu();
+    // Move the selection off the update row so its badge keeps accent color.
+    state.move_palette_selection(1);
     let menu = state.compose(106, 30).expect("update menu");
     let text = menu
         .cells
@@ -710,19 +712,26 @@ fn update_ready_menu_opens_client_owned_release_notes_and_dismisses_by_version()
         })
         .collect::<Vec<_>>()
         .join("\n");
-    assert!(text.replace(' ', "").contains("●更新就绪"));
-    let update_row = state.hits.global_menu_rows[3].0;
-    assert_eq!(update_row.width, 12);
+    assert!(text.replace(' ', "").contains("更新就绪●"));
+    let update_index = palette_row_index(&state, "whats_new");
+    let update_row = state
+        .hits
+        .global_menu_rows
+        .iter()
+        .find(|(_, index)| *index == update_index)
+        .expect("update row hit")
+        .0;
     let menu_buffer = menu.to_ratatui_buffer().expect("menu buffer");
+    assert_eq!(menu_buffer[(update_row.x + 2, update_row.y)].symbol(), "更");
     assert_eq!(
-        menu_buffer[(update_row.x + 1, update_row.y)].fg,
+        menu_buffer[(update_row.right() - 1, update_row.y)].symbol(),
+        "●"
+    );
+    assert_eq!(
+        menu_buffer[(update_row.right() - 1, update_row.y)].fg,
         state.config.palette.accent
     );
-    assert_eq!(
-        menu_buffer[(update_row.x + 3, update_row.y)].fg,
-        state.config.palette.text
-    );
-    state.activate_global_menu_item(3, &mut ClientShellInput::default());
+    state.activate_palette_item(update_index, &mut ClientShellInput::default());
     let notes = state.compose(106, 30).expect("release notes");
     let bottom_row_start = usize::from(notes.width) * usize::from(notes.height - 1);
     let bottom_row = notes.cells[bottom_row_start..]
@@ -886,7 +895,7 @@ fn update_ready_menu_opens_client_owned_release_notes_and_dismisses_by_version()
         .collect::<String>();
     let installed_compact = installed_text.replace(' ', "");
     assert!(installed_compact.contains("更新内容"));
-    assert!(!installed_compact.contains("●更新内容"));
+    assert!(!installed_compact.contains("更新内容●"));
 }
 
 #[test]
@@ -906,9 +915,8 @@ fn coalesced_release_notes_open_and_scroll_uses_current_geometry() {
     state.set_snapshot(Box::new(endpoint_snapshot));
     state.set_pane_surface(surface());
     state.compose(106, 30).expect("initial shell");
-    state.overlay = Some(ClientShellOverlay::GlobalMenu(ClientGlobalMenuOverlay {
-        highlighted: 3,
-    }));
+    state.toggle_global_menu();
+    palette_select(&mut state, "whats_new");
 
     state.handle_raw_events(vec![
         RawInputEvent::Key(crate::input::TerminalKey::new(
@@ -977,9 +985,8 @@ fn coalesced_release_notes_open_and_mouse_uses_current_geometry() {
         1,
     ));
 
-    state.overlay = Some(ClientShellOverlay::GlobalMenu(ClientGlobalMenuOverlay {
-        highlighted: 3,
-    }));
+    state.toggle_global_menu();
+    palette_select(&mut state, "whats_new");
     state.handle_raw_events(vec![
         RawInputEvent::Key(crate::input::TerminalKey::new(
             KeyCode::Enter,
@@ -999,9 +1006,8 @@ fn coalesced_release_notes_open_and_mouse_uses_current_geometry() {
         )) if scroll > 0
     ));
 
-    state.overlay = Some(ClientShellOverlay::GlobalMenu(ClientGlobalMenuOverlay {
-        highlighted: 3,
-    }));
+    state.toggle_global_menu();
+    palette_select(&mut state, "whats_new");
     let closed = state.handle_raw_events(vec![
         RawInputEvent::Key(crate::input::TerminalKey::new(
             KeyCode::Enter,
@@ -1039,6 +1045,8 @@ fn outdated_integration_badges_launcher_settings_and_settings_tab() {
     assert!(shell_text.replace(' ', "").contains("●菜单"));
 
     state.toggle_global_menu();
+    // Move the selection off the settings row so its badge keeps accent color.
+    state.move_palette_selection(1);
     let menu = state.compose(106, 30).expect("integration attention menu");
     let menu_text = menu
         .cells
@@ -1046,10 +1054,28 @@ fn outdated_integration_badges_launcher_settings_and_settings_tab() {
         .map(|cell| cell.symbol.as_str())
         .collect::<String>();
     let menu_compact = menu_text.replace(' ', "");
-    assert!(menu_compact.contains("●设置"));
+    assert!(menu_compact.contains("设置"));
     assert!(!menu_compact.contains("更新就绪"));
 
-    state.activate_global_menu_item(0, &mut ClientShellInput::default());
+    let settings_index = palette_row_index(&state, "binding:Settings");
+    let settings_row = state
+        .hits
+        .global_menu_rows
+        .iter()
+        .find(|(_, index)| *index == settings_index)
+        .expect("settings row hit")
+        .0;
+    let menu_buffer = menu.to_ratatui_buffer().expect("menu buffer");
+    assert_eq!(
+        menu_buffer[(settings_row.right() - 1, settings_row.y)].symbol(),
+        "●"
+    );
+    assert_eq!(
+        menu_buffer[(settings_row.right() - 1, settings_row.y)].fg,
+        state.config.palette.accent
+    );
+
+    state.activate_palette_item(settings_index, &mut ClientShellInput::default());
     let settings = state.compose(106, 30).expect("settings integration badge");
     let settings_text = settings
         .cells
@@ -1093,6 +1119,8 @@ fn combined_update_and_integration_attention_preserves_both_badges() {
     assert_eq!(state.hits.global_launcher.width, 6);
 
     state.toggle_global_menu();
+    // Move the selection away so both badges keep accent color.
+    state.move_palette_selection(2);
     let menu = state.compose(106, 30).expect("combined attention menu");
     let text = menu
         .cells
@@ -1100,9 +1128,10 @@ fn combined_update_and_integration_attention_preserves_both_badges() {
         .map(|cell| cell.symbol.as_str())
         .collect::<String>();
     let compact = text.replace(' ', "");
-    let settings = compact.find("●设置").expect("settings badge");
-    let update = compact.find("●更新就绪").expect("update badge");
-    assert!(settings < update);
+    // Attention items lead the palette: the update row sits above settings.
+    let update = compact.find("更新就绪●").expect("update badge");
+    let settings = compact.find("设置prefix+s●").expect("settings badge");
+    assert!(update < settings);
 
     state.overlay = None;
     state.mode = ClientShellMode::Navigate;
@@ -1188,9 +1217,8 @@ fn client_settings_preview_restore_and_endpoint_integrations_are_owned_by_overla
     let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
     state.set_snapshot(Box::new(snapshot()));
     state.set_pane_surface(surface());
-    state.overlay = Some(ClientShellOverlay::GlobalMenu(ClientGlobalMenuOverlay {
-        highlighted: 0,
-    }));
+    state.toggle_global_menu();
+    palette_select(&mut state, "binding:Settings");
     let open = state.handle_input_bytes(b"\r");
     assert!(open.actions.is_empty());
     assert!(matches!(

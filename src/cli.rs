@@ -24,9 +24,14 @@ macro_rules! println {
 
 mod agent;
 mod api;
+mod broadcast;
 mod completion;
 mod integration;
 mod machine;
+mod machine_exec;
+mod machine_fs;
+mod machine_log;
+mod machine_status;
 mod notification;
 mod pane;
 mod plugin;
@@ -34,6 +39,7 @@ mod protocol_guard;
 mod runtime;
 mod server;
 mod server_not_running;
+mod snippet;
 mod spec;
 mod status;
 mod tab;
@@ -120,6 +126,8 @@ pub fn maybe_run(args: &[String]) -> std::io::Result<CommandOutcome> {
         "config" => run_config_command(&args[2..])?,
         "channel" => run_channel_command(&args[2..])?,
         "machine" => machine::run_machine_command(&args[2..])?,
+        "broadcast" => broadcast::run_broadcast_command(&args[2..])?,
+        "snippet" => snippet::run_snippet_command(&args[2..])?,
         "workspace" => workspace::run_workspace_command(&args[2..])?,
         "worktree" => worktree::run_worktree_command(&args[2..])?,
         "tab" => tab::run_tab_command(&args[2..])?,
@@ -888,7 +896,10 @@ pub(super) fn send_request_unchecked(request: &Request) -> std::io::Result<serde
         .map_err(|err| map_server_not_running_or_io(err, &request.id, &client))
 }
 
-fn ensure_server_protocol_compatible(client: &ApiClient, request_id: &str) -> std::io::Result<()> {
+pub(super) fn ensure_server_protocol_compatible(
+    client: &ApiClient,
+    request_id: &str,
+) -> std::io::Result<()> {
     let status = client
         .status()
         .map_err(|err| map_server_not_running_or_io(err, request_id, client))?;

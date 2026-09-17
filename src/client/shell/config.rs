@@ -61,6 +61,7 @@ impl ClientShellState {
                 .then_some(self.config.agent_panel_sort),
             collapsed_groups,
             remote_collapsed_groups,
+            palette_recent: self.palette_recent.clone(),
         };
         if let Err(error) = preferences::store(path, preferences) {
             self.set_endpoint_error(error);
@@ -78,10 +79,13 @@ impl ClientShellState {
                     &loaded.invalid_sections,
                 );
                 if let Some(appearance) = self.host_appearance {
-                    self.config.palette = crate::app::client_palette_for_appearance(
+                    let resolved = crate::app::client_resolved_theme(
                         &self.config.theme_runtime,
-                        appearance,
+                        Some(appearance),
+                        self.config.host_color_depth,
                     );
+                    self.config.palette = resolved.palette;
+                    self.config.components = resolved.components;
                 }
                 if !self.sidebar_width_manual {
                     self.sidebar_width = self.config.sidebar_width;
@@ -112,6 +116,8 @@ impl ClientShellState {
 impl ClientShellConfig {
     pub(crate) fn from_config(config: &Config) -> Self {
         let theme_runtime = crate::app::client_theme_runtime_from_config(config);
+        let host_color_depth = crate::config::resolve_color_depth(config.ui.color_depth);
+        let resolved = crate::app::client_resolved_theme(&theme_runtime, None, host_color_depth);
         Self {
             sidebar_width: config.ui.sidebar_width,
             sidebar_min_width: config.ui.sidebar_min_width,
@@ -134,7 +140,11 @@ impl ClientShellConfig {
             clipboard_toast_position: config.ui.toast.clipboard.position,
             theme_name: theme_runtime.manual_name.clone(),
             theme_runtime,
-            palette: crate::app::client_palette_from_config(config),
+            palette: resolved.palette,
+            components: resolved.components,
+            host_color_depth,
+            border_glyphs: crate::ui::BorderGlyphs::for_style(config.ui.border_style),
+            feedback: feedback::ClientFeedbackToggles::from_config(config),
             keybinds: config
                 .live_keybinds_with_diagnostics()
                 .map(|(keybinds, _diagnostics)| keybinds)
@@ -149,6 +159,15 @@ impl ClientShellConfig {
             confirm_close: config.ui.confirm_close,
             mouse_capture: config.ui.mouse_capture,
             mouse_scroll_lines: config.ui.mouse_scroll_lines(),
+            which_key: config.ui.which_key,
+            double_click_window: config.ui.double_click_window(),
+            drag_throttle: config.ui.drag_throttle(),
+            selection_autoscroll_interval: config.ui.selection_autoscroll_interval(),
+            selection_autoscroll_min_lines: config.ui.selection_autoscroll_min_lines.max(1),
+            selection_autoscroll_max_lines: config
+                .ui
+                .selection_autoscroll_max_lines
+                .max(config.ui.selection_autoscroll_min_lines.max(1)),
             right_click_passthrough_modifiers: config.ui.right_click_passthrough_modifiers(),
             redraw_on_focus_gained: config.ui.redraw_on_focus_gained,
             switch_ascii_input_source_in_prefix: config
@@ -339,15 +358,30 @@ impl ClientShellConfig {
                 self.confirm_close = ui.confirm_close;
                 self.mouse_capture = ui.mouse_capture;
                 self.mouse_scroll_lines = ui.mouse_scroll_lines();
+                self.which_key = ui.which_key;
+                self.double_click_window = ui.double_click_window();
+                self.drag_throttle = ui.drag_throttle();
+                self.selection_autoscroll_interval = ui.selection_autoscroll_interval();
+                self.selection_autoscroll_min_lines = ui.selection_autoscroll_min_lines.max(1);
+                self.selection_autoscroll_max_lines = ui
+                    .selection_autoscroll_max_lines
+                    .max(self.selection_autoscroll_min_lines);
                 self.right_click_passthrough_modifiers = ui.right_click_passthrough_modifiers();
                 self.redraw_on_focus_gained = ui.redraw_on_focus_gained;
+                self.border_glyphs = crate::ui::BorderGlyphs::for_style(ui.border_style);
+                self.feedback = feedback::ClientFeedbackToggles::from_config(config);
             }
         }
 
         if !invalid_section("theme") {
             self.theme_runtime = crate::app::client_theme_runtime_from_config(config);
             self.theme_name = self.theme_runtime.manual_name.clone();
-            self.palette = crate::app::client_palette_from_config(config);
+            self.host_color_depth =
+                crate::config::resolve_color_depth(self.theme_runtime.color_depth);
+            let resolved =
+                crate::app::client_resolved_theme(&self.theme_runtime, None, self.host_color_depth);
+            self.palette = resolved.palette;
+            self.components = resolved.components;
         }
         if !invalid_section("experimental") {
             self.switch_ascii_input_source_in_prefix =

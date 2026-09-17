@@ -430,7 +430,7 @@ fn render_popup_surface(
         .terminals
         .get(&popup.terminal_id)
         .and_then(|terminal| terminal.manual_label.clone())
-        .unwrap_or_else(|| "popup".to_owned());
+        .unwrap_or_else(|| crate::i18n::texts().chrome.popup_title.to_owned());
     let (pixel_width, pixel_height) = if cell_size.is_known() {
         (
             u32::from(content_area.width) * cell_size.width_px,

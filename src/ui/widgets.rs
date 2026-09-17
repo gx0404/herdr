@@ -1,6 +1,6 @@
 use ratatui::{
     layout::{Constraint, Layout, Rect},
-    style::Color,
+    style::{Color, Modifier, Style},
 };
 
 use crate::app::state::Palette;
@@ -12,19 +12,55 @@ pub(super) fn panel_contrast_fg(palette: &Palette) -> Color {
     }
 }
 
-pub(crate) fn centered_popup_rect(area: Rect, popup_width: u16, popup_height: u16) -> Option<Rect> {
-    let popup_width = popup_width.min(area.width.saturating_sub(4));
-    let popup_height = popup_height.min(area.height.saturating_sub(2));
-    if popup_width < 4 || popup_height < 4 {
-        return None;
+/// Named modal size tiers. Overlays pick a tier instead of hardcoding cell
+/// sizes; `Content` carries genuinely content-derived dimensions (dynamic
+/// heights, exported constants mirrored by the input side).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ModalSize {
+    /// Compact prompt dialogs (rename).
+    Small,
+    /// Mid-size info dialogs (onboarding).
+    Medium,
+    /// Large browsing dialogs (help, settings).
+    Large,
+    /// Widest reading dialogs (product announcement).
+    XLarge,
+    /// Explicit cell size for content-shaped dialogs.
+    Content { width: u16, height: u16 },
+}
+
+impl ModalSize {
+    pub(crate) const fn cells(self) -> (u16, u16) {
+        match self {
+            Self::Small => (56, 7),
+            Self::Medium => (64, 16),
+            Self::Large => (76, 22),
+            Self::XLarge => (88, 24),
+            Self::Content { width, height } => (width, height),
+        }
     }
 
-    Some(Rect::new(
-        area.x + area.width.saturating_sub(popup_width) / 2,
-        area.y + area.height.saturating_sub(popup_height) / 2,
+    /// Same tier width with a content-derived height.
+    pub(crate) const fn with_height(self, height: u16) -> Self {
+        let (width, _) = self.cells();
+        Self::Content { width, height }
+    }
+}
+
+/// The one modal geometry entry point: center `size` inside `area` with the
+/// shared modal margin/minimum rule (`None` below 4x4).
+pub(crate) fn modal_rect(area: Rect, size: ModalSize) -> Option<Rect> {
+    let (width, height) = size.cells();
+    centered_popup_rect(area, width, height)
+}
+
+pub(crate) fn centered_popup_rect(area: Rect, popup_width: u16, popup_height: u16) -> Option<Rect> {
+    crate::popup_size::centered_rect(
+        area,
         popup_width,
         popup_height,
-    ))
+        crate::popup_size::MODAL_CENTER_RULE,
+    )
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -87,6 +123,68 @@ pub(crate) fn modal_stack_areas(
     result
 }
 
+/// Button color role: accent primary, destructive primary, or neutral
+/// secondary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ModalButtonTone {
+    Primary,
+    Danger,
+    Secondary,
+}
+
+/// Interaction state of a modal button. Renderers that cannot observe hover
+/// pass `Focused` for the primary action and `Normal` otherwise.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ModalButtonState {
+    Focused,
+    Hovered,
+    Normal,
+    Disabled,
+}
+
+/// Three-state modal button style: focused/hovered actions carry the tone
+/// color, normal secondaries sit on `surface0`, disabled buttons dim down.
+/// The DIM removal keeps buttons readable over the dimmed backdrop that
+/// modal overlays paint first.
+pub(crate) fn modal_button_style(
+    palette: &Palette,
+    tone: ModalButtonTone,
+    state: ModalButtonState,
+) -> Style {
+    let base = Style::default().remove_modifier(Modifier::DIM);
+    match state {
+        ModalButtonState::Focused | ModalButtonState::Hovered => {
+            let bg = match tone {
+                ModalButtonTone::Primary => palette.accent,
+                ModalButtonTone::Danger => palette.red,
+                ModalButtonTone::Secondary => palette.accent,
+            };
+            base.fg(panel_contrast_fg(palette))
+                .bg(bg)
+                .add_modifier(Modifier::BOLD)
+        }
+        ModalButtonState::Normal => {
+            let fg = match tone {
+                ModalButtonTone::Secondary => palette.text,
+                ModalButtonTone::Primary | ModalButtonTone::Danger => panel_contrast_fg(palette),
+            };
+            let bg = match tone {
+                ModalButtonTone::Secondary => palette.surface0,
+                ModalButtonTone::Primary => palette.accent,
+                ModalButtonTone::Danger => palette.red,
+            };
+            base.fg(fg).bg(bg).add_modifier(Modifier::BOLD)
+        }
+        ModalButtonState::Disabled => base.fg(palette.overlay0).bg(palette.surface0),
+    }
+}
+
+/// Button width follows the i18n label display width (CJK safe); labels
+/// carry their own padding so the rect hugs the text exactly.
+pub(crate) fn modal_button_width(label: &str) -> u16 {
+    u16::try_from(unicode_width::UnicodeWidthStr::width(label)).unwrap_or(u16::MAX)
+}
+
 /// Modal action buttons are rendered from these exact strings; the matching
 /// `*_button_rect` hit-test rects must stay width-twins with them. Both sides
 /// read the same i18n entry so translated labels keep the rects in sync.
@@ -99,17 +197,87 @@ pub(crate) fn modal_continue_button_text() -> &'static str {
 }
 
 pub(crate) fn close_button_rect(area: Rect) -> Rect {
-    let width = u16::try_from(unicode_width::UnicodeWidthStr::width(
-        modal_close_button_text(),
-    ))
-    .unwrap_or(u16::MAX);
+    let width = modal_button_width(modal_close_button_text());
     Rect::new(area.x + area.width.saturating_sub(width), area.y, width, 1)
 }
 
 pub(crate) fn continue_button_rect(area: Rect) -> Rect {
-    let width = u16::try_from(unicode_width::UnicodeWidthStr::width(
-        modal_continue_button_text(),
-    ))
-    .unwrap_or(u16::MAX);
+    let width = modal_button_width(modal_continue_button_text());
     Rect::new(area.x, area.y, width, 1)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn modal_size_tiers_resolve_to_cells() {
+        assert_eq!(ModalSize::Small.cells(), (56, 7));
+        assert_eq!(ModalSize::Medium.cells(), (64, 16));
+        assert_eq!(ModalSize::Large.cells(), (76, 22));
+        assert_eq!(ModalSize::XLarge.cells(), (88, 24));
+        assert_eq!(
+            ModalSize::Content {
+                width: 80,
+                height: 24
+            }
+            .cells(),
+            (80, 24)
+        );
+        assert_eq!(ModalSize::Large.with_height(30).cells(), (76, 30));
+    }
+
+    #[test]
+    fn modal_rect_centers_with_modal_rule() {
+        let rect = modal_rect(Rect::new(0, 0, 106, 30), ModalSize::Medium).unwrap();
+        assert_eq!(rect, Rect::new(21, 7, 64, 16));
+        assert!(modal_rect(Rect::new(0, 0, 8, 5), ModalSize::Small).is_none());
+    }
+
+    #[test]
+    fn modal_button_width_uses_display_width_for_cjk() {
+        assert_eq!(modal_button_width(" esc close "), 11);
+        // " ↵ 确认 ": 1 + 1 + 1 + 4 + 1 display cells.
+        assert_eq!(modal_button_width(" ↵ 确认 "), 8);
+    }
+
+    #[test]
+    fn modal_button_style_maps_tone_and_state() {
+        let palette = Palette::catppuccin();
+        let focused = modal_button_style(
+            &palette,
+            ModalButtonTone::Primary,
+            ModalButtonState::Focused,
+        );
+        assert_eq!(focused.bg, Some(palette.accent));
+        assert!(focused.add_modifier.contains(Modifier::BOLD));
+        let danger =
+            modal_button_style(&palette, ModalButtonTone::Danger, ModalButtonState::Hovered);
+        assert_eq!(danger.bg, Some(palette.red));
+        let normal = modal_button_style(
+            &palette,
+            ModalButtonTone::Secondary,
+            ModalButtonState::Normal,
+        );
+        assert_eq!(normal.fg, Some(palette.text));
+        assert_eq!(normal.bg, Some(palette.surface0));
+        let disabled = modal_button_style(
+            &palette,
+            ModalButtonTone::Primary,
+            ModalButtonState::Disabled,
+        );
+        assert_eq!(disabled.fg, Some(palette.overlay0));
+        assert!(!disabled.add_modifier.contains(Modifier::BOLD));
+    }
+
+    #[test]
+    fn close_and_continue_rects_track_label_width() {
+        let area = Rect::new(10, 5, 40, 1);
+        let close = close_button_rect(area);
+        assert_eq!(close.width, modal_button_width(modal_close_button_text()));
+        assert_eq!(close.right(), area.right());
+        let cont = continue_button_rect(area);
+        assert_eq!(cont.x, area.x);
+        assert_eq!(cont.width, modal_button_width(modal_continue_button_text()));
+    }
 }

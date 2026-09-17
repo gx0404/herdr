@@ -445,9 +445,31 @@ impl ClientShellState {
         if self.insert_worktree_overlay_text(text) {
             return true;
         }
+        if self.insert_machines_overlay_text(text) {
+            return true;
+        }
+        if self.insert_machine_auth_text(text) {
+            return true;
+        }
+        if self.insert_snippets_overlay_text(text) {
+            return true;
+        }
+        if self.insert_scenes_overlay_text(text) {
+            return true;
+        }
+        if self.insert_machine_files_text(text) {
+            return true;
+        }
         match self.overlay.as_mut() {
             Some(ClientShellOverlay::Rename(rename)) => {
                 rename.input.insert(text);
+                true
+            }
+            Some(ClientShellOverlay::CommandPalette(palette)) => {
+                if palette.query.insert(text) {
+                    palette.selected = 0;
+                    palette.scroll = 0;
+                }
                 true
             }
             Some(ClientShellOverlay::Help(help)) if help.search_focused => {
@@ -566,26 +588,79 @@ impl ClientShellState {
             return;
         }
 
-        if matches!(self.overlay, Some(ClientShellOverlay::GlobalMenu(_))) {
+        if matches!(self.overlay, Some(ClientShellOverlay::CommandPalette(_))) {
+            let (code, modifiers) = crate::config::normalize_key_combo((key.code, key.modifiers));
+            match code {
+                KeyCode::Esc => {
+                    self.overlay = None;
+                    outcome.repaint = true;
+                }
+                KeyCode::Up => {
+                    self.move_palette_selection(-1);
+                    outcome.repaint = true;
+                }
+                KeyCode::Down => {
+                    self.move_palette_selection(1);
+                    outcome.repaint = true;
+                }
+                KeyCode::Char('p') if modifiers == KeyModifiers::CONTROL => {
+                    self.move_palette_selection(-1);
+                    outcome.repaint = true;
+                }
+                KeyCode::Char('n') if modifiers == KeyModifiers::CONTROL => {
+                    self.move_palette_selection(1);
+                    outcome.repaint = true;
+                }
+                KeyCode::PageUp => {
+                    self.move_palette_selection(-8);
+                    outcome.repaint = true;
+                }
+                KeyCode::PageDown => {
+                    self.move_palette_selection(8);
+                    outcome.repaint = true;
+                }
+                KeyCode::Enter => {
+                    let selected = match self.overlay.as_ref() {
+                        Some(ClientShellOverlay::CommandPalette(palette)) => palette.selected,
+                        _ => return,
+                    };
+                    self.activate_palette_item(selected, outcome);
+                }
+                _ => {
+                    if let Some(ClientShellOverlay::CommandPalette(palette)) = self.overlay.as_mut()
+                    {
+                        if let Some(content_changed) = palette.query.handle_key(key) {
+                            if content_changed {
+                                palette.selected = 0;
+                                palette.scroll = 0;
+                            }
+                            outcome.repaint = true;
+                        }
+                    }
+                }
+            }
+            return;
+        }
+
+        if matches!(
+            self.overlay,
+            Some(ClientShellOverlay::NotificationHistory(_))
+        ) {
             match key.code {
                 KeyCode::Esc => {
                     self.overlay = None;
                     outcome.repaint = true;
                 }
                 KeyCode::Up | KeyCode::Char('k') => {
-                    self.move_global_menu_selection(-1);
+                    self.move_notification_history_selection(-1);
                     outcome.repaint = true;
                 }
                 KeyCode::Down | KeyCode::Char('j') => {
-                    self.move_global_menu_selection(1);
+                    self.move_notification_history_selection(1);
                     outcome.repaint = true;
                 }
                 KeyCode::Enter => {
-                    let highlighted = match self.overlay.as_ref() {
-                        Some(ClientShellOverlay::GlobalMenu(menu)) => menu.highlighted,
-                        _ => return,
-                    };
-                    self.activate_global_menu_item(highlighted, outcome);
+                    self.focus_notification_history_target(outcome);
                 }
                 _ => {}
             }
@@ -593,6 +668,30 @@ impl ClientShellState {
         }
 
         if self.route_settings_key(key, outcome) {
+            return;
+        }
+
+        if self.route_machine_auth_key(key, outcome) {
+            return;
+        }
+
+        if self.route_snippets_key(key, outcome) {
+            return;
+        }
+
+        if self.route_scenes_key(key, outcome) {
+            return;
+        }
+
+        if self.route_broadcast_key(key, outcome) {
+            return;
+        }
+
+        if self.route_machine_files_key(key, outcome) {
+            return;
+        }
+
+        if self.route_machines_key(key, outcome) {
             return;
         }
 
@@ -989,6 +1088,10 @@ impl ClientShellState {
                     label: Some(trimmed.to_owned()),
                 },
             )),
+            ClientRenameTarget::Machine { profile_id } => {
+                self.machine_rename(&profile_id, trimmed);
+                None
+            }
         };
         if let Some(method) = method {
             self.push_endpoint_method(method, outcome);

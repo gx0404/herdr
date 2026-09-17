@@ -320,6 +320,9 @@ pub struct Keybinds {
     pub navigate: NavigateKeybinds,
     pub help: ActionKeybinds,
     pub settings: ActionKeybinds,
+    /// Machines-overlay shortcut (`keys.manage_machines`, `prefix+m` by
+    /// default); user bindings displace the default like any other action.
+    pub manage_machines: ActionKeybinds,
     pub new_workspace: ActionKeybinds,
     pub new_worktree: ActionKeybinds,
     pub open_worktree: ActionKeybinds,
@@ -331,6 +334,8 @@ pub struct Keybinds {
     pub detach: ActionKeybinds,
     pub reload_config: ActionKeybinds,
     pub open_notification_target: ActionKeybinds,
+    /// Link hints mode shortcut (`keys.link_hints`, `prefix+u` by default).
+    pub link_hints: ActionKeybinds,
     pub previous_workspace: ActionKeybinds,
     pub next_workspace: ActionKeybinds,
     pub previous_agent: ActionKeybinds,
@@ -488,6 +493,7 @@ impl Config {
             },
             help: empty_action!(),
             settings: empty_action!(),
+            manage_machines: empty_action!(),
             new_workspace: empty_action!(),
             new_worktree: empty_action!(),
             open_worktree: empty_action!(),
@@ -499,6 +505,7 @@ impl Config {
             detach: empty_action!(),
             reload_config: empty_action!(),
             open_notification_target: empty_action!(),
+            link_hints: empty_action!(),
             previous_workspace: empty_action!(),
             next_workspace: empty_action!(),
             previous_agent: empty_action!(),
@@ -616,6 +623,7 @@ impl Config {
             apply_navigate!(keybinds.navigate.pane_right, navigate_pane_right, source);
             apply_action!(keybinds.help, help, source);
             apply_action!(keybinds.settings, settings, source);
+            apply_action!(keybinds.manage_machines, manage_machines, source);
             apply_action!(keybinds.new_workspace, new_workspace, source);
             apply_action!(keybinds.new_worktree, new_worktree, source);
             apply_action!(keybinds.open_worktree, open_worktree, source);
@@ -631,6 +639,7 @@ impl Config {
                 open_notification_target,
                 source
             );
+            apply_action!(keybinds.link_hints, link_hints, source);
             apply_action!(keybinds.previous_workspace, previous_workspace, source);
             apply_action!(keybinds.next_workspace, next_workspace, source);
             apply_action!(keybinds.previous_agent, previous_agent, source);
@@ -1607,6 +1616,37 @@ next_tab = "prefix+n"
         let kb = Config::default().keybinds();
         assert!(kb.open_worktree.bindings.is_empty());
         assert!(kb.remove_worktree.bindings.is_empty());
+    }
+
+    #[test]
+    fn manage_machines_defaults_to_prefix_m() {
+        let kb = Config::default().keybinds();
+        assert_eq!(
+            binding_triggers(&kb.manage_machines),
+            vec![BindingTrigger::Prefix((
+                KeyCode::Char('m'),
+                KeyModifiers::empty()
+            ))]
+        );
+    }
+
+    #[test]
+    fn manage_machines_user_binding_displaces_the_default() {
+        let config: Config = toml::from_str(
+            r#"
+[keys]
+manage_machines = "ctrl+alt+m"
+"#,
+        )
+        .unwrap();
+        let kb = config.keybinds();
+        assert_eq!(
+            binding_triggers(&kb.manage_machines),
+            vec![BindingTrigger::Direct((
+                KeyCode::Char('m'),
+                KeyModifiers::CONTROL | KeyModifiers::ALT
+            ))]
+        );
     }
 
     #[test]

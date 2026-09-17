@@ -7,13 +7,21 @@ pub(super) fn render_collapsed(
     endpoints: &[ClientShellEndpoint],
     active_endpoint_id: &ClientEndpointId,
     config: &ClientShellConfig,
+    chrome_hover: Option<&super::feedback::ChromeHover>,
     hits: &mut ShellHitMap,
 ) {
     let rows = agent_rows(endpoints, active_endpoint_id, config);
     for (index, row) in rows.into_iter().take(area.height as usize).enumerate() {
         let rect = Rect::new(area.x, area.y + index as u16, area.width, 1);
+        let hovered = matches!(
+            chrome_hover,
+            Some(super::feedback::ChromeHover::EndpointAgentRow(endpoint_id, pane_id))
+                if endpoint_id == &row.endpoint_id && pane_id == &row.agent.pane_id
+        );
         if row.agent.focused {
             buffer.set_style(rect, Style::default().bg(config.palette.active_row_bg));
+        } else if hovered {
+            buffer.set_style(rect, Style::default().bg(config.palette.surface0));
         }
         let initial = row.machine_label.chars().next().unwrap_or('?');
         put_text(
@@ -50,6 +58,7 @@ pub(super) fn render_expanded(
     active_endpoint_id: &ClientEndpointId,
     config: &ClientShellConfig,
     agent_scroll: &mut usize,
+    chrome_hover: Option<&super::feedback::ChromeHover>,
     hits: &mut ShellHitMap,
 ) {
     if !super::agent_sidebar::render_agent_panel_header(
@@ -57,6 +66,7 @@ pub(super) fn render_expanded(
         area,
         agent_view_label,
         config,
+        chrome_hover,
         hits,
     ) {
         return;
@@ -66,13 +76,22 @@ pub(super) fn render_expanded(
         buffer,
         area,
         &rows,
-        agent_view_label.map(|_| " no matching agents"),
+        agent_view_label.map(|_| crate::i18n::texts().sidebar.no_matching_agents),
         config,
         agent_scroll,
+        matches!(
+            chrome_hover,
+            Some(super::feedback::ChromeHover::AgentScrollbarThumb)
+        ),
         hits,
         |row| row.agent.rows.len(),
         |buffer, rect, row, hits| {
-            super::agent_sidebar::render_agent_row(buffer, rect, &row.agent, config);
+            let hovered = matches!(
+                chrome_hover,
+                Some(super::feedback::ChromeHover::EndpointAgentRow(endpoint_id, pane_id))
+                    if endpoint_id == &row.endpoint_id && pane_id == &row.agent.pane_id
+            );
+            super::agent_sidebar::render_agent_row(buffer, rect, &row.agent, config, hovered);
             if row.stale {
                 buffer.set_style(
                     rect,

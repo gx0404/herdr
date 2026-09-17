@@ -22,11 +22,11 @@ pub use self::{
         IndexedKeybind, Keybinds, LiveKeybindConfig,
     },
     model::{
-        validated_sidebar_bounds, AgentPanelSortConfig, Config, ConfigReloadReport,
-        ConfigReloadStatus, HostCursorModeConfig, NewTerminalCwdConfig, PaneBordersConfig,
-        ShellModeConfig, SidebarCollapsedModeConfig, StatusIndicatorStyle, TabBarPositionConfig,
-        ToastClipboardPosition, ToastConfig, ToastDelivery, ToastHerdrPosition,
-        UpdateChannelConfig, MAX_TOAST_DELAY_SECONDS,
+        validated_sidebar_bounds, AgentPanelSortConfig, BorderStyleConfig, ColorDepth,
+        ColorDepthConfig, Config, ConfigReloadReport, ConfigReloadStatus, HostCursorModeConfig,
+        NewTerminalCwdConfig, PaneBordersConfig, ShellModeConfig, SidebarCollapsedModeConfig,
+        StatusIndicatorStyle, TabBarPositionConfig, ToastClipboardPosition, ToastConfig,
+        ToastDelivery, ToastHerdrPosition, UpdateChannelConfig, MAX_TOAST_DELAY_SECONDS,
     },
     sidebar::{
         AgentSidebarToken, AgentsSidebarConfig, SidebarConfig, SidebarTokenStyle,
@@ -34,7 +34,11 @@ pub use self::{
     },
     sound::SoundConfig,
     tab_bar::TabBarRightEntryConfig,
-    theme::{parse_color, CustomThemeColors, ModeThemeColors, ThemeConfig, THEME_NAMES},
+    theme::{
+        degrade_color_to_256, parse_color, resolve_color_depth, try_parse_color, CustomThemeColors,
+        ModeThemeColors, ThemeComponentsConfig, ThemeConfig, DEFAULT_SELECTION_MIX_RATIO,
+        THEME_NAMES,
+    },
     window_title::{WindowTitlePart, WindowTitleTemplate, WindowTitleToken},
 };
 
@@ -47,7 +51,7 @@ pub(crate) use self::{
         MAX_TAB_BAR_COMMAND_INTERVAL_SECONDS, MAX_TAB_BAR_COMMAND_TIMEOUT_SECONDS,
         MAX_TAB_BAR_RIGHT_ENTRIES,
     },
-    theme::canonical_theme_name,
+    theme::{canonical_theme_name, unknown_color_diagnostic},
     window_title::{sanitize_window_title_text, window_title_diagnostics},
 };
 
@@ -85,6 +89,9 @@ pub(crate) fn app_dir_name() -> &'static str {
 }
 
 #[cfg(test)]
+pub(crate) use self::theme::rgb_to_xterm256;
+
+#[cfg(test)]
 pub(crate) fn test_config_env_lock() -> &'static std::sync::Mutex<()> {
     static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
     LOCK.get_or_init(|| std::sync::Mutex::new(()))
@@ -118,6 +125,7 @@ impl Config {
             .chain(keybind_diags)
             .chain(self.remote_image_paste_key().err())
             .chain(self.theme.diagnostics())
+            .chain(unknown_color_diagnostic("ui.accent", &self.ui.accent))
             .chain(self.ui.sound.diagnostics())
             .chain(tab_bar_right_diagnostics(&self.ui.tab_bar_right))
             .chain(window_title_diagnostics(&self.ui.window_title))

@@ -22,6 +22,10 @@ pub(crate) struct ClientShellEndpoint {
     pending_agent_view_projection: Option<ClientEndpointAgentViewProjection>,
     pub(crate) agent_view_projection_supported: bool,
     pub(crate) methods: Option<HashSet<String>>,
+    /// Version reported by the endpoint welcome; display-only.
+    pub(crate) server_version: Option<String>,
+    /// Last supervisor status message (typically the failure reason); display-only.
+    pub(crate) status_detail: Option<String>,
 }
 
 pub(super) struct MachineHit {
@@ -38,7 +42,29 @@ pub(crate) enum ClientEndpointFocusTarget {
 }
 
 impl ClientShellState {
+    /// Mirrors the local catalog into render state and rebuilds the sidebar
+    /// presentation lookup in one pass.
+    pub(super) fn mirror_saved_profiles(&mut self, profiles: Vec<SavedSshEndpoint>) {
+        self.machine_chrome = profiles
+            .iter()
+            .map(|profile| {
+                (
+                    profile.id.clone(),
+                    MachineChrome {
+                        group: profile.group.clone(),
+                        color: profile
+                            .color
+                            .as_deref()
+                            .and_then(crate::config::try_parse_color),
+                    },
+                )
+            })
+            .collect();
+        self.saved_profiles = profiles;
+    }
+
     pub(crate) fn set_endpoint_catalog(&mut self, profiles: &[SavedSshEndpoint]) {
+        self.mirror_saved_profiles(profiles.to_vec());
         let mut next = Vec::with_capacity(profiles.len().saturating_add(1));
         let local = self
             .endpoints
@@ -82,6 +108,8 @@ impl ClientShellState {
                 agent_view_projection_supported: previous
                     .is_some_and(|endpoint| endpoint.agent_view_projection_supported),
                 methods: previous.and_then(|endpoint| endpoint.methods.clone()),
+                server_version: previous.and_then(|endpoint| endpoint.server_version.clone()),
+                status_detail: previous.and_then(|endpoint| endpoint.status_detail.clone()),
             });
         }
 
@@ -109,6 +137,9 @@ impl ClientShellState {
 
     pub(crate) fn retire_endpoint(&mut self, endpoint_id: &ClientEndpointId) {
         self.retire_endpoint_notifications(endpoint_id);
+        self.endpoint_connection_errors.remove(endpoint_id);
+        self.endpoint_port_forwards.remove(endpoint_id);
+        self.reconnect_progress.remove(endpoint_id);
         if let Some(endpoint) = self
             .endpoints
             .iter_mut()
@@ -123,6 +154,8 @@ impl ClientShellState {
             endpoint.agent_view_projection = None;
             endpoint.pending_agent_view_projection = None;
             endpoint.agent_view_projection_supported = false;
+            endpoint.server_version = None;
+            endpoint.status_detail = None;
         }
     }
 
@@ -137,6 +170,164 @@ impl ClientShellState {
             .find(|endpoint| &endpoint.endpoint_id == endpoint_id)
         {
             endpoint.status = status;
+            if status == ClientEndpointStatus::Online {
+                endpoint.status_detail = None;
+            }
+        }
+    }
+
+    pub(crate) fn set_endpoint_status_detail(
+        &mut self,
+        endpoint_id: &ClientEndpointId,
+        detail: Option<String>,
+    ) {
+        if let Some(endpoint) = self
+            .endpoints
+            .iter_mut()
+            .find(|endpoint| &endpoint.endpoint_id == endpoint_id)
+        {
+            endpoint.status_detail = detail.filter(|detail| !detail.is_empty());
+        }
+    }
+
+    /// Mirrors the supervisor's structured connection-failure kind into the
+    /// render state; `None` clears it (on connect or when the endpoint is
+    /// retired).
+    pub(crate) fn set_endpoint_connection_error_kind(
+        &mut self,
+        endpoint_id: &ClientEndpointId,
+        kind: Option<crate::remote::ConnectionErrorKind>,
+    ) {
+        match kind {
+            Some(kind) => {
+                self.endpoint_connection_errors
+                    .insert(endpoint_id.clone(), kind);
+            }
+            None => {
+                self.endpoint_connection_errors.remove(endpoint_id);
+            }
+        }
+    }
+
+    pub(super) fn endpoint_connection_error_kind(
+        &self,
+        endpoint_id: &ClientEndpointId,
+    ) -> Option<&crate::remote::ConnectionErrorKind> {
+        self.endpoint_connection_errors.get(endpoint_id)
+    }
+
+    /// Session-log writer drop counter for one profile. Zero clears the
+    /// entry (the card only shows non-zero counts). Returns true when the
+    /// mirror changed (a repaint is worthwhile).
+    pub(crate) fn set_session_log_dropped(
+        &mut self,
+        profile_id: &crate::client::endpoint::ProfileId,
+        dropped: u64,
+    ) -> bool {
+        if dropped == 0 {
+            return self.session_log_dropped.remove(profile_id).is_some();
+        }
+        if self.session_log_dropped.get(profile_id) == Some(&dropped) {
+            return false;
+        }
+        self.session_log_dropped.insert(profile_id.clone(), dropped);
+        true
+    }
+
+    /// Mirrors the supervisor's per-rule port-forward status into the render
+    /// state. Returns true when the mirror changed (a repaint is worthwhile).
+    pub(crate) fn set_endpoint_port_forward_status(
+        &mut self,
+        endpoint_id: &ClientEndpointId,
+        status: Vec<crate::remote::PortForwardStatus>,
+    ) -> bool {
+        if status.is_empty() {
+            return self.endpoint_port_forwards.remove(endpoint_id).is_some();
+        }
+        if self.endpoint_port_forwards.get(endpoint_id) == Some(&status) {
+            return false;
+        }
+        self.endpoint_port_forwards
+            .insert(endpoint_id.clone(), status);
+        true
+    }
+
+    /// The endpoint whose detail card is showing live forward status and is
+    /// due for a refresh; `None` while no detail card is open. The cadence is
+    /// deliberately slow: monitor-thread failures have no event, so the poll
+    /// only runs while the card that displays them is on screen.
+    pub(crate) fn port_forward_poll_due(
+        &mut self,
+        now: std::time::Instant,
+    ) -> Option<ClientEndpointId> {
+        const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(500);
+        let endpoint_id = match self.overlay.as_ref() {
+            Some(ClientShellOverlay::Machines(overlay)) => match &overlay.view {
+                super::machines_overlay::ClientMachinesView::Detail(profile_id) => {
+                    ClientEndpointId::Ssh(profile_id.clone())
+                }
+                super::machines_overlay::ClientMachinesView::Forwards(view) => {
+                    ClientEndpointId::Ssh(view.profile_id.clone())
+                }
+                _ => return None,
+            },
+            _ => return None,
+        };
+        if self
+            .port_forward_polled_at
+            .is_some_and(|polled| now.duration_since(polled) < POLL_INTERVAL)
+        {
+            return None;
+        }
+        self.port_forward_polled_at = Some(now);
+        Some(endpoint_id)
+    }
+
+    /// Counts one more reconnect attempt for the banner and estimates when
+    /// the next one runs. The supervisor owns the real backoff; this mirrors
+    /// its delay ladder for presentation only.
+    pub(crate) fn note_endpoint_reconnect_attempt(
+        &mut self,
+        endpoint_id: &ClientEndpointId,
+        now: std::time::Instant,
+    ) {
+        let attempts = self
+            .reconnect_progress
+            .get(endpoint_id)
+            .map_or(0, |progress| progress.attempts)
+            .saturating_add(1);
+        let next_attempt_at = now + estimated_retry_delay(attempts, endpoint_id.is_local());
+        self.reconnect_progress.insert(
+            endpoint_id.clone(),
+            ClientReconnectProgress {
+                attempts,
+                next_attempt_at,
+            },
+        );
+    }
+
+    pub(crate) fn clear_endpoint_reconnect_progress(&mut self, endpoint_id: &ClientEndpointId) {
+        self.reconnect_progress.remove(endpoint_id);
+    }
+
+    pub(crate) fn endpoint_reconnect_progress(
+        &self,
+        endpoint_id: &ClientEndpointId,
+    ) -> Option<ClientReconnectProgress> {
+        self.reconnect_progress.get(endpoint_id).copied()
+    }
+
+    pub(crate) fn set_endpoint_server_version(
+        &mut self,
+        endpoint_id: &ClientEndpointId,
+        server_version: Option<String>,
+    ) {
+        if let Some(endpoint) = self
+            .endpoints
+            .iter_mut()
+            .find(|endpoint| &endpoint.endpoint_id == endpoint_id)
+        {
+            endpoint.server_version = server_version;
         }
     }
 
@@ -420,7 +611,9 @@ impl ClientShellState {
         self.endpoints
             .iter()
             .find(|endpoint| &endpoint.endpoint_id == endpoint_id)
-            .map_or("Unknown endpoint", |endpoint| endpoint.label.as_str())
+            .map_or(crate::i18n::texts().endpoint.unknown_endpoint, |endpoint| {
+                endpoint.label.as_str()
+            })
     }
 
     pub(crate) fn active_endpoint_label(&self) -> &str {
@@ -448,9 +641,17 @@ impl ClientShellState {
     }
 
     pub(super) fn supports_endpoint_method(&self, method: &crate::api::schema::Method) -> bool {
+        self.supports_endpoint_method_for(&self.active_endpoint_id.clone(), method)
+    }
+
+    pub(super) fn supports_endpoint_method_for(
+        &self,
+        endpoint_id: &ClientEndpointId,
+        method: &crate::api::schema::Method,
+    ) -> bool {
         self.endpoints
             .iter()
-            .find(|endpoint| endpoint.endpoint_id == self.active_endpoint_id)
+            .find(|endpoint| &endpoint.endpoint_id == endpoint_id)
             .and_then(|endpoint| endpoint.methods.as_ref())
             .is_none_or(|methods| methods.contains(crate::api::api_method_name(method)))
     }
@@ -673,16 +874,53 @@ impl ClientShellState {
     }
 }
 
-pub(super) fn endpoint_status_presentation(
+/// Best-effort mirror of the supervisor reconnect backoff
+/// (`src/client/endpoint/supervisor.rs`): 500ms doubling, capped at 120s
+/// (30s for the local endpoint). Presentation-only; the supervisor's own
+/// schedule is authoritative.
+pub(super) fn estimated_retry_delay(attempts: u32, local: bool) -> std::time::Duration {
+    const INITIAL: std::time::Duration = std::time::Duration::from_millis(500);
+    const MAX: std::time::Duration = std::time::Duration::from_secs(120);
+    const MAX_LOCAL: std::time::Duration = std::time::Duration::from_secs(30);
+    let delay = INITIAL
+        .saturating_mul(
+            1_u32
+                .checked_shl(attempts.saturating_sub(1).min(8))
+                .unwrap_or(u32::MAX),
+        )
+        .min(MAX);
+    if local {
+        delay.min(MAX_LOCAL)
+    } else {
+        delay
+    }
+}
+
+pub(super) fn endpoint_status_label(status: ClientEndpointStatus) -> &'static str {
+    let texts = &crate::i18n::texts().endpoint;
+    match status {
+        ClientEndpointStatus::Connecting => texts.st_connecting,
+        ClientEndpointStatus::Online => texts.st_online,
+        ClientEndpointStatus::Reconnecting => texts.st_reconnecting,
+        ClientEndpointStatus::Attention => texts.st_attention,
+        ClientEndpointStatus::Disabled => texts.st_disabled,
+    }
+}
+
+/// The glyph borrows the caller's spinner frame for connecting states and
+/// stays a static literal otherwise — no allocation in sidebar rows.
+pub(super) fn endpoint_status_presentation<'a>(
     status: ClientEndpointStatus,
     palette: &Palette,
-) -> (&'static str, &'static str, ratatui::style::Color) {
+    spinner: &'a str,
+) -> (&'a str, &'static str, ratatui::style::Color) {
+    let label = endpoint_status_label(status);
     match status {
-        ClientEndpointStatus::Connecting => ("◐", "connecting", palette.yellow),
-        ClientEndpointStatus::Online => ("●", "online", palette.green),
-        ClientEndpointStatus::Reconnecting => ("◐", "reconnecting", palette.yellow),
-        ClientEndpointStatus::Attention => ("!", "attention", palette.red),
-        ClientEndpointStatus::Disabled => ("·", "disabled", palette.overlay0),
+        ClientEndpointStatus::Connecting => (spinner, label, palette.yellow),
+        ClientEndpointStatus::Online => ("●", label, palette.green),
+        ClientEndpointStatus::Reconnecting => (spinner, label, palette.yellow),
+        ClientEndpointStatus::Attention => ("!", label, palette.red),
+        ClientEndpointStatus::Disabled => ("·", label, palette.overlay0),
     }
 }
 
@@ -699,5 +937,7 @@ pub(super) fn local_endpoint() -> ClientShellEndpoint {
         pending_agent_view_projection: None,
         agent_view_projection_supported: false,
         methods: None,
+        server_version: None,
+        status_detail: None,
     }
 }

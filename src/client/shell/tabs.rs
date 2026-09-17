@@ -12,6 +12,8 @@ pub(crate) fn render_tab_bar(
     tab_scroll: &mut usize,
     reveal_focused_tab: &mut bool,
     tab_drag_insert_index: Option<usize>,
+    chrome_hover: Option<&super::feedback::ChromeHover>,
+    visual_bell: bool,
     hits: &mut ShellHitMap,
 ) {
     let palette = &config.palette;
@@ -79,7 +81,16 @@ pub(crate) fn render_tab_bar(
                 } else {
                     palette.overlay0
                 })
-                .bg(palette.surface0),
+                .bg(
+                    if matches!(
+                        chrome_hover,
+                        Some(super::feedback::ChromeHover::TabScrollLeft)
+                    ) {
+                        palette.surface1
+                    } else {
+                        palette.surface0
+                    },
+                ),
         );
         x = hits.tab_scroll_left.right();
         content
@@ -100,6 +111,10 @@ pub(crate) fn render_tab_bar(
             break;
         }
         let rect = Rect::new(x, area.y, width, 1);
+        let hovered = matches!(
+            chrome_hover,
+            Some(super::feedback::ChromeHover::Tab(id)) if id == &tab.tab_id
+        );
         let style = if tab.focused {
             let base = Style::default()
                 .fg(panel_contrast_fg(palette))
@@ -110,9 +125,17 @@ pub(crate) fn render_tab_bar(
                 base
             }
         } else if tab.custom_label {
-            Style::default().fg(palette.overlay1).bg(palette.surface0)
+            Style::default().fg(palette.overlay1).bg(if hovered {
+                palette.surface1
+            } else {
+                palette.surface0
+            })
         } else {
-            Style::default().fg(palette.overlay0).bg(palette.surface0)
+            Style::default().fg(palette.overlay0).bg(if hovered {
+                palette.surface1
+            } else {
+                palette.surface0
+            })
         };
         let padding = width.saturating_sub(display_width(&name));
         let left = padding / 2;
@@ -123,6 +146,16 @@ pub(crate) fn render_tab_bar(
             right_padding = padding.saturating_sub(left) as usize,
         );
         put_text(buffer, rect.x, rect.y, rect.width, &text, style);
+        if visual_bell && tab.focused && rect.width > 2 {
+            put_text(
+                buffer,
+                rect.right().saturating_sub(2),
+                rect.y,
+                1,
+                "!",
+                style.fg(palette.yellow).add_modifier(Modifier::BOLD),
+            );
+        }
         hits.tabs.push((rect, tab.tab_id.clone()));
         first_visible.get_or_insert(index);
         last_visible = Some(index);
@@ -147,7 +180,16 @@ pub(crate) fn render_tab_bar(
                 } else {
                     palette.overlay0
                 })
-                .bg(palette.surface0),
+                .bg(
+                    if matches!(
+                        chrome_hover,
+                        Some(super::feedback::ChromeHover::TabScrollRight)
+                    ) {
+                        palette.surface1
+                    } else {
+                        palette.surface0
+                    },
+                ),
         );
         hits.new_tab = Rect::new(
             hits.tab_scroll_right.right(),
@@ -173,7 +215,21 @@ pub(crate) fn render_tab_bar(
             area.y,
             hits.new_tab.width,
             " + ",
-            Style::default().fg(palette.overlay1).bg(palette.panel_bg),
+            Style::default()
+                .fg(
+                    if matches!(chrome_hover, Some(super::feedback::ChromeHover::NewTab)) {
+                        palette.text
+                    } else {
+                        palette.overlay1
+                    },
+                )
+                .bg(
+                    if matches!(chrome_hover, Some(super::feedback::ChromeHover::NewTab)) {
+                        palette.surface0
+                    } else {
+                        palette.panel_bg
+                    },
+                ),
         );
     }
 

@@ -1,10 +1,18 @@
 use super::*;
 use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
 
-const SELECTION_AUTOSCROLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(30);
 const SELECTION_REPAINT_INTERVAL: std::time::Duration = std::time::Duration::from_millis(16);
 
 impl ClientShellState {
+    fn selection_autoscroll_interval(&self) -> std::time::Duration {
+        self.config.selection_autoscroll_interval
+    }
+
+    fn selection_edge_scroll_lines(&self, distance: u16) -> usize {
+        let min = self.config.selection_autoscroll_min_lines.max(1);
+        let max = self.config.selection_autoscroll_max_lines.max(min);
+        usize::from(distance).saturating_mul(min).clamp(min, max)
+    }
     fn set_sidebar_width_from_column(&mut self, column: u16, outcome: &mut ClientShellInput) {
         let (min, max) = crate::config::validated_sidebar_bounds(
             self.config.sidebar_min_width,
@@ -143,10 +151,6 @@ impl ClientShellState {
         self.selection_autoscroll_deadline = None;
     }
 
-    fn selection_edge_scroll_lines(distance: u16) -> usize {
-        usize::from(distance).saturating_mul(3).clamp(3, 15)
-    }
-
     fn selection_scroll_metrics(&self, hit: &PaneHit) -> Option<crate::pane::ScrollMetrics> {
         let metrics = hit.scroll?;
         Some(
@@ -246,12 +250,12 @@ impl ClientShellState {
         let (direction, immediate_lines) = if row < top {
             (
                 ClientSelectionAutoscrollDirection::Up,
-                Self::selection_edge_scroll_lines(top - row),
+                self.selection_edge_scroll_lines(top - row),
             )
         } else if row > bottom {
             (
                 ClientSelectionAutoscrollDirection::Down,
-                Self::selection_edge_scroll_lines(row - bottom),
+                self.selection_edge_scroll_lines(row - bottom),
             )
         } else if row == top {
             (ClientSelectionAutoscrollDirection::Up, 0)
@@ -289,7 +293,7 @@ impl ClientShellState {
             max_offset_from_bottom: metrics.max_offset_from_bottom,
         });
         self.selection_autoscroll_deadline =
-            Some(std::time::Instant::now() + SELECTION_AUTOSCROLL_INTERVAL);
+            Some(std::time::Instant::now() + self.selection_autoscroll_interval());
     }
 
     fn scroll_in_progress_selection(
@@ -421,7 +425,7 @@ impl ClientShellState {
         );
         self.push_pane_scroll_offset(autoscroll.pane_id.clone(), next_offset, &mut outcome);
         self.selection_autoscroll = Some(autoscroll);
-        self.selection_autoscroll_deadline = Some(now + SELECTION_AUTOSCROLL_INTERVAL);
+        self.selection_autoscroll_deadline = Some(now + self.selection_autoscroll_interval());
         outcome.repaint = true;
         outcome
     }
@@ -653,7 +657,14 @@ impl ClientShellState {
 
     pub(super) fn handle_mouse(&mut self, mouse: MouseEvent, outcome: &mut ClientShellInput) {
         self.update_link_hover(mouse, outcome);
+        // Any pointer activity ends link hints mode (it is keyboard-driven).
+        if self.link_hints.take().is_some() {
+            outcome.repaint = true;
+        }
         let point = (mouse.column, mouse.row);
+        if mouse.kind == MouseEventKind::Moved {
+            self.update_chrome_hover(point, outcome);
+        }
         if self.mode == ClientShellMode::Navigate
             && self.workspace_preview_action_blocked()
             && self.overlay.is_none()
@@ -967,6 +978,27 @@ impl ClientShellState {
                 return;
             }
         }
+        if self.overlay.is_none() && mouse.kind == MouseEventKind::Down(MouseButton::Left) {
+            if super::contains(self.hits.lifecycle_banner_retry, point) {
+                let endpoint_id = self.active_endpoint_id.clone();
+                if !endpoint_id.is_local() {
+                    outcome
+                        .actions
+                        .push(ClientShellAction::ReconnectEndpoint { endpoint_id });
+                    outcome.repaint = true;
+                }
+                return;
+            }
+            if super::contains(self.hits.lifecycle_banner_give_up, point) {
+                // Give up on the reconnect loop by disabling the machine; it
+                // can be re-enabled from the machines overlay.
+                if let ClientEndpointId::Ssh(profile_id) = self.active_endpoint_id.clone() {
+                    self.machine_set_enabled(&profile_id, false);
+                    outcome.repaint = true;
+                }
+                return;
+            }
+        }
         if self.visible_endpoint_notice.is_some()
             && mouse.kind == MouseEventKind::Down(MouseButton::Left)
             && super::contains(self.hits.notification_toast, point)
@@ -1081,7 +1113,7 @@ impl ClientShellState {
                     let now = std::time::Instant::now();
                     let should_send = *last_sent_offset != Some(offset)
                         && last_sent_at.is_none_or(|last| {
-                            now.duration_since(last) >= std::time::Duration::from_millis(33)
+                            now.duration_since(last) >= self.config.drag_throttle
                         });
                     if should_send {
                         if let Some(ClientChromeDrag::PaneScrollbar {
@@ -1117,9 +1149,8 @@ impl ClientShellState {
                     }
                     let ratio = Self::pane_split_ratio(&hit, grab_offset, point);
                     let now = std::time::Instant::now();
-                    let should_send = last_sent_at.is_none_or(|last| {
-                        now.duration_since(last) >= std::time::Duration::from_millis(33)
-                    });
+                    let should_send = last_sent_at
+                        .is_none_or(|last| now.duration_since(last) >= self.config.drag_throttle);
                     if let Some(ClientChromeDrag::PaneSplit {
                         last_sent_ratio,
                         last_sent_at,
@@ -1336,7 +1367,7 @@ impl ClientShellState {
                 return;
             }
         }
-        if matches!(self.overlay, Some(ClientShellOverlay::GlobalMenu(_))) {
+        if matches!(self.overlay, Some(ClientShellOverlay::CommandPalette(_))) {
             let row_hit = self
                 .hits
                 .global_menu_rows
@@ -1345,19 +1376,24 @@ impl ClientShellState {
                 .copied();
             match mouse.kind {
                 MouseEventKind::Moved => {
-                    if let (Some((_, index)), Some(ClientShellOverlay::GlobalMenu(menu))) =
-                        (row_hit, self.overlay.as_mut())
-                    {
-                        menu.highlighted = index;
-                        outcome.repaint = true;
+                    if let Some((_, index)) = row_hit {
+                        outcome.repaint |= self.set_palette_selection(index);
                     }
+                }
+                MouseEventKind::ScrollUp => {
+                    self.scroll_palette(-1);
+                    outcome.repaint = true;
+                }
+                MouseEventKind::ScrollDown => {
+                    self.scroll_palette(1);
+                    outcome.repaint = true;
                 }
                 MouseEventKind::Down(MouseButton::Left) => {
                     if super::contains(self.hits.global_launcher, point) {
                         self.toggle_global_menu();
                         outcome.repaint = true;
                     } else if let Some((_, index)) = row_hit {
-                        self.activate_global_menu_item(index, outcome);
+                        self.activate_palette_item(index, outcome);
                     } else {
                         self.overlay = None;
                         outcome.repaint = true;
@@ -1651,6 +1687,449 @@ impl ClientShellState {
             }
             return;
         }
+        if matches!(self.overlay, Some(ClientShellOverlay::MachineAuth(_))) {
+            if mouse.kind == MouseEventKind::Down(MouseButton::Left) {
+                if let Some((_, button)) = self
+                    .hits
+                    .machine_auth_actions
+                    .iter()
+                    .find(|(rect, _)| super::contains(*rect, point))
+                    .copied()
+                {
+                    self.activate_machine_auth_button(button, outcome);
+                }
+                // Clicks outside the dialog are intentionally ignored:
+                // auth recovery stays modal until an explicit choice.
+            }
+            return;
+        }
+        if matches!(self.overlay, Some(ClientShellOverlay::Machines(_))) {
+            match mouse.kind {
+                MouseEventKind::Moved => {
+                    if let Some((_, profile_id)) = self
+                        .hits
+                        .machines_rows
+                        .iter()
+                        .find(|(rect, _)| super::contains(*rect, point))
+                        .cloned()
+                    {
+                        self.hover_machine_row(&profile_id);
+                        outcome.repaint = true;
+                    }
+                }
+                MouseEventKind::ScrollUp if super::contains(self.hits.machines_popup, point) => {
+                    self.scroll_machines_overlay(-3);
+                    outcome.repaint = true;
+                }
+                MouseEventKind::ScrollDown if super::contains(self.hits.machines_popup, point) => {
+                    self.scroll_machines_overlay(3);
+                    outcome.repaint = true;
+                }
+                MouseEventKind::Down(MouseButton::Left) => {
+                    // Import wizard / forwards editor rows are index-keyed.
+                    let wizard_view = matches!(
+                        self.overlay,
+                        Some(ClientShellOverlay::Machines(
+                            super::machines_overlay::ClientMachinesOverlay {
+                                view: super::machines_overlay::ClientMachinesView::Import(_)
+                                    | super::machines_overlay::ClientMachinesView::Forwards(_),
+                                ..
+                            }
+                        ))
+                    );
+                    if wizard_view {
+                        if let Some((_, button)) = self
+                            .hits
+                            .machines_actions
+                            .iter()
+                            .find(|(rect, _)| super::contains(*rect, point))
+                            .copied()
+                        {
+                            self.activate_machine_button(button, outcome);
+                            outcome.repaint = true;
+                        } else if let Some((_, field)) = self
+                            .hits
+                            .machines_wizard_fields
+                            .iter()
+                            .find(|(rect, _)| super::contains(*rect, point))
+                            .copied()
+                        {
+                            self.focus_machine_forward_field(field);
+                            outcome.repaint = true;
+                        } else if let Some((_, row)) = self
+                            .hits
+                            .machines_wizard_rows
+                            .iter()
+                            .find(|(rect, _)| super::contains(*rect, point))
+                            .copied()
+                        {
+                            self.click_machine_wizard_row(row, outcome);
+                        } else if !super::contains(self.hits.machines_popup, point) {
+                            self.overlay = None;
+                            outcome.repaint = true;
+                        }
+                        return;
+                    }
+                    if super::contains(self.hits.machines_search, point) {
+                        if let Some(ClientShellOverlay::Machines(overlay)) = self.overlay.as_mut() {
+                            overlay.search_focused = true;
+                            overlay.message = None;
+                        }
+                        outcome.repaint = true;
+                    } else if let Some((_, profile_id)) = self
+                        .hits
+                        .machines_rows
+                        .iter()
+                        .find(|(rect, _)| super::contains(*rect, point))
+                        .cloned()
+                    {
+                        self.hover_machine_row(&profile_id);
+                        self.open_machine_detail(&profile_id);
+                        outcome.repaint = true;
+                    } else if let Some((_, button)) = self
+                        .hits
+                        .machines_actions
+                        .iter()
+                        .find(|(rect, _)| super::contains(*rect, point))
+                        .copied()
+                    {
+                        self.activate_machine_button(button, outcome);
+                    } else if let Some((_, field)) = self
+                        .hits
+                        .machines_fields
+                        .iter()
+                        .find(|(rect, _)| super::contains(*rect, point))
+                        .copied()
+                    {
+                        self.focus_machine_form_field(field);
+                        outcome.repaint = true;
+                    } else if !super::contains(self.hits.machines_popup, point) {
+                        let running = matches!(
+                            self.overlay,
+                            Some(ClientShellOverlay::Machines(
+                                super::machines_overlay::ClientMachinesOverlay {
+                                    view:
+                                        super::machines_overlay::ClientMachinesView::Form(ref form),
+                                    ..
+                                }
+                            )) if form.bootstrap.is_some()
+                        );
+                        if !running {
+                            self.overlay = None;
+                            outcome.repaint = true;
+                        }
+                    }
+                }
+                _ => {}
+            }
+            return;
+        }
+        if matches!(self.overlay, Some(ClientShellOverlay::Snippets(_))) {
+            match mouse.kind {
+                MouseEventKind::Moved => {
+                    if let Some((_, index)) = self
+                        .hits
+                        .snippet_rows
+                        .iter()
+                        .find(|(rect, _)| super::contains(*rect, point))
+                        .copied()
+                    {
+                        // Hover selects the row without activating it.
+                        outcome.repaint |= self.hover_snippet_row(index);
+                    }
+                }
+                MouseEventKind::ScrollUp if super::contains(self.hits.snippet_popup, point) => {
+                    self.scroll_snippets_overlay(-3);
+                    outcome.repaint = true;
+                }
+                MouseEventKind::ScrollDown if super::contains(self.hits.snippet_popup, point) => {
+                    self.scroll_snippets_overlay(3);
+                    outcome.repaint = true;
+                }
+                MouseEventKind::Down(MouseButton::Left) => {
+                    if super::contains(self.hits.snippet_search, point) {
+                        if let Some(ClientShellOverlay::Snippets(overlay)) = self.overlay.as_mut() {
+                            overlay.search_focused = true;
+                            overlay.message = None;
+                        }
+                        outcome.repaint = true;
+                    } else if let Some((_, button)) = self
+                        .hits
+                        .snippet_actions
+                        .iter()
+                        .find(|(rect, _)| super::contains(*rect, point))
+                        .copied()
+                    {
+                        self.activate_snippet_button(button, outcome);
+                    } else if let Some((_, field)) = self
+                        .hits
+                        .snippet_fields
+                        .iter()
+                        .find(|(rect, _)| super::contains(*rect, point))
+                        .copied()
+                    {
+                        if let Some(ClientShellOverlay::Snippets(overlay)) = self.overlay.as_mut() {
+                            match &mut overlay.view {
+                                super::snippets_overlay::ClientSnippetsView::Form(form) => {
+                                    form.focused = field;
+                                }
+                                super::snippets_overlay::ClientSnippetsView::RunVariables(
+                                    draft,
+                                ) => {
+                                    draft.variable_focused = field;
+                                }
+                                _ => {}
+                            }
+                        }
+                        outcome.repaint = true;
+                    } else if let Some((_, row)) = self
+                        .hits
+                        .snippet_rows
+                        .iter()
+                        .find(|(rect, _)| super::contains(*rect, point))
+                        .copied()
+                    {
+                        // The confirm view's single row is the press-enter toggle.
+                        let is_confirm_toggle = matches!(
+                            self.overlay,
+                            Some(ClientShellOverlay::Snippets(
+                                super::snippets_overlay::ClientSnippetsOverlay {
+                                    view: super::snippets_overlay::ClientSnippetsView::RunConfirm(
+                                        _
+                                    ),
+                                    ..
+                                }
+                            ))
+                        );
+                        if is_confirm_toggle {
+                            if let Some(ClientShellOverlay::Snippets(overlay)) =
+                                self.overlay.as_mut()
+                            {
+                                if let super::snippets_overlay::ClientSnippetsView::RunConfirm(
+                                    draft,
+                                ) = &mut overlay.view
+                                {
+                                    draft.press_enter = !draft.press_enter;
+                                }
+                            }
+                            outcome.repaint = true;
+                        } else {
+                            self.click_snippet_row(row, outcome);
+                        }
+                    } else if !super::contains(self.hits.snippet_popup, point) {
+                        self.overlay = None;
+                        outcome.repaint = true;
+                    }
+                }
+                _ => {}
+            }
+            return;
+        }
+        if matches!(self.overlay, Some(ClientShellOverlay::Scenes(_))) {
+            let list_view = matches!(
+                self.overlay,
+                Some(ClientShellOverlay::Scenes(
+                    super::scenes_overlay::ClientScenesOverlay {
+                        view: super::scenes_overlay::ClientScenesView::List,
+                        ..
+                    }
+                ))
+            );
+            match mouse.kind {
+                MouseEventKind::Moved => {
+                    if let Some((_, index)) = self
+                        .hits
+                        .scenes_rows
+                        .iter()
+                        .find(|(rect, _)| super::contains(*rect, point))
+                        .copied()
+                    {
+                        if self.set_scenes_selection(index) {
+                            outcome.repaint = true;
+                        }
+                    }
+                }
+                MouseEventKind::ScrollUp if super::contains(self.hits.scenes_popup, point) => {
+                    self.move_scenes_selection(-3);
+                    outcome.repaint = true;
+                }
+                MouseEventKind::ScrollDown if super::contains(self.hits.scenes_popup, point) => {
+                    self.move_scenes_selection(3);
+                    outcome.repaint = true;
+                }
+                MouseEventKind::Down(MouseButton::Left) => {
+                    if super::contains(self.hits.overlay_primary, point) && !list_view {
+                        self.activate_scene_primary(outcome);
+                    } else if super::contains(self.hits.overlay_cancel, point) && !list_view {
+                        self.scenes_back();
+                        outcome.repaint = true;
+                    } else if list_view {
+                        if let Some((_, button)) = self
+                            .hits
+                            .scenes_actions
+                            .iter()
+                            .find(|(rect, _)| super::contains(*rect, point))
+                            .copied()
+                        {
+                            self.activate_scene_button(button, outcome);
+                        } else if let Some((_, index)) = self
+                            .hits
+                            .scenes_rows
+                            .iter()
+                            .find(|(rect, _)| super::contains(*rect, point))
+                            .copied()
+                        {
+                            // One-click restore: the row is the scene's whole
+                            // affordance, so a press selects and applies it.
+                            self.set_scenes_selection(index);
+                            self.restore_selected_scene(outcome);
+                        } else if !super::contains(self.hits.scenes_popup, point) {
+                            self.overlay = None;
+                            outcome.repaint = true;
+                        }
+                    } else if let Some((_, field)) = self
+                        .hits
+                        .scenes_fields
+                        .iter()
+                        .find(|(rect, _)| super::contains(*rect, point))
+                        .copied()
+                    {
+                        self.focus_scene_form_field(field);
+                        outcome.repaint = true;
+                    } else if !super::contains(self.hits.scenes_popup, point) {
+                        // Form views treat an outside click like Esc: back to
+                        // the list rather than dropping the overlay.
+                        self.scenes_back();
+                        outcome.repaint = true;
+                    }
+                }
+                _ => {}
+            }
+            return;
+        }
+        if matches!(self.overlay, Some(ClientShellOverlay::MachineFiles(_))) {
+            match mouse.kind {
+                MouseEventKind::ScrollUp
+                    if super::contains(self.hits.machine_files_popup, point) =>
+                {
+                    self.scroll_machine_files_overlay(-3);
+                    outcome.repaint = true;
+                }
+                MouseEventKind::ScrollDown
+                    if super::contains(self.hits.machine_files_popup, point) =>
+                {
+                    self.scroll_machine_files_overlay(3);
+                    outcome.repaint = true;
+                }
+                MouseEventKind::Down(MouseButton::Left) => {
+                    if super::contains(self.hits.machine_files_search, point) {
+                        if let Some(ClientShellOverlay::MachineFiles(overlay)) =
+                            self.overlay.as_mut()
+                        {
+                            overlay.search_focused = true;
+                            overlay.message = None;
+                        }
+                        outcome.repaint = true;
+                    } else if let Some((_, button)) = self
+                        .hits
+                        .machine_files_actions
+                        .iter()
+                        .find(|(rect, _)| super::contains(*rect, point))
+                        .copied()
+                    {
+                        self.activate_machine_files_button(button, outcome);
+                    } else if let Some((_, row)) = self
+                        .hits
+                        .machine_files_rows
+                        .iter()
+                        .find(|(rect, _)| super::contains(*rect, point))
+                        .copied()
+                    {
+                        self.click_machine_files_row(row, outcome);
+                    } else if !super::contains(self.hits.machine_files_popup, point) {
+                        self.overlay = None;
+                        outcome.repaint = true;
+                    }
+                }
+                _ => {}
+            }
+            return;
+        }
+        if matches!(self.overlay, Some(ClientShellOverlay::Broadcast(_))) {
+            match mouse.kind {
+                MouseEventKind::ScrollUp if super::contains(self.hits.broadcast_popup, point) => {
+                    self.scroll_broadcast_overlay(-3);
+                    outcome.repaint = true;
+                }
+                MouseEventKind::ScrollDown if super::contains(self.hits.broadcast_popup, point) => {
+                    self.scroll_broadcast_overlay(3);
+                    outcome.repaint = true;
+                }
+                MouseEventKind::Down(MouseButton::Left) => {
+                    if let Some((_, button)) = self
+                        .hits
+                        .broadcast_actions
+                        .iter()
+                        .find(|(rect, _)| super::contains(*rect, point))
+                        .copied()
+                    {
+                        self.activate_broadcast_button(button, outcome);
+                    } else if let Some((_, row)) = self
+                        .hits
+                        .broadcast_rows
+                        .iter()
+                        .find(|(rect, _)| super::contains(*rect, point))
+                        .copied()
+                    {
+                        self.click_broadcast_row(row, outcome);
+                    } else if !super::contains(self.hits.broadcast_popup, point) {
+                        self.overlay = None;
+                        outcome.repaint = true;
+                    }
+                }
+                _ => {}
+            }
+            return;
+        }
+        if matches!(
+            self.overlay,
+            Some(ClientShellOverlay::NotificationHistory(_))
+        ) {
+            let row_hit = self
+                .hits
+                .notification_history_rows
+                .iter()
+                .find(|(rect, _)| super::contains(*rect, point))
+                .copied();
+            match mouse.kind {
+                MouseEventKind::Moved => {
+                    if let Some((_, index)) = row_hit {
+                        if self.set_notification_history_selection(index) {
+                            outcome.repaint = true;
+                        }
+                    }
+                }
+                MouseEventKind::ScrollUp => {
+                    self.move_notification_history_selection(-3);
+                    outcome.repaint = true;
+                }
+                MouseEventKind::ScrollDown => {
+                    self.move_notification_history_selection(3);
+                    outcome.repaint = true;
+                }
+                MouseEventKind::Down(MouseButton::Left) => {
+                    if let Some((_, index)) = row_hit {
+                        self.set_notification_history_selection(index);
+                        self.focus_notification_history_target(outcome);
+                    } else {
+                        self.overlay = None;
+                        outcome.repaint = true;
+                    }
+                }
+                _ => {}
+            }
+            return;
+        }
         if self.overlay.is_some() {
             if mouse.kind != MouseEventKind::Down(MouseButton::Left) {
                 return;
@@ -1793,6 +2272,17 @@ impl ClientShellState {
                     outcome.repaint = true;
                     return;
                 }
+                let machine_endpoint = self
+                    .hits
+                    .machines
+                    .iter()
+                    .find(|hit| super::contains(hit.rect, point))
+                    .map(|hit| hit.endpoint_id.clone());
+                if let Some(endpoint_id) = machine_endpoint {
+                    self.open_machine_context_menu(&endpoint_id, mouse.column, mouse.row);
+                    outcome.repaint = true;
+                    return;
+                }
                 let tab_id = self
                     .hits
                     .tabs
@@ -1895,7 +2385,7 @@ impl ClientShellState {
                 {
                     let now = std::time::Instant::now();
                     let double_click = self.last_sidebar_divider_click.is_some_and(|last| {
-                        now.duration_since(last) <= std::time::Duration::from_millis(350)
+                        now.duration_since(last) <= self.config.double_click_window
                     });
                     self.last_sidebar_divider_click = Some(now);
                     if double_click {
@@ -2197,12 +2687,28 @@ impl ClientShellState {
                             viewport_row: mouse.row.saturating_sub(hit.inner_rect.y),
                             col: mouse.column.saturating_sub(hit.inner_rect.x),
                             at: std::time::Instant::now(),
+                            streak: 1,
                         };
-                        if mouse.modifiers.is_empty()
-                            && previous_pane_click
+                        let streak = if mouse.modifiers.is_empty() {
+                            previous_pane_click
                                 .as_ref()
-                                .is_some_and(|previous| previous.is_double_click_for(&click))
-                        {
+                                .filter(|previous| {
+                                    previous
+                                        .continues_streak(&click, self.config.double_click_window)
+                                })
+                                .map_or(1, |previous| previous.streak.saturating_add(1).min(3))
+                        } else {
+                            1
+                        };
+                        let click = ClientPaneClick { streak, ..click };
+                        if streak >= 3 {
+                            // Triple-click selects the whole line and restarts
+                            // the streak so a fourth click is a fresh anchor.
+                            self.last_pane_click = None;
+                            self.select_line_at(&hit, click.viewport_row, outcome);
+                        } else if streak == 2 {
+                            // Keep the streak alive so a third click can escalate.
+                            self.last_pane_click = Some(click.clone());
                             self.request_word_selection(
                                 &hit,
                                 click.viewport_row,

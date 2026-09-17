@@ -121,11 +121,11 @@ fn retained_scrollbar_patch(
     let track = Rect::new(0, 0, 1, rect.height);
     let mut buffer = ratatui::buffer::Buffer::empty(track);
     if let (Some(metrics), Some(_)) = (metrics, next_rect) {
-        crate::ui::render_pane_scrollbar_buffer(
+        crate::ui::render_pane_scrollbar_buffer_styled(
             &mut buffer,
             metrics,
             track,
-            &app.state.palette,
+            &app.state.components,
             pane.focused,
         );
     }

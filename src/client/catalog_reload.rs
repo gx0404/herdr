@@ -23,6 +23,32 @@ pub(super) fn watch_profiles(
     });
 }
 
+/// Raw-bytes watcher for `broadcast.json`, the same 1s cadence as
+/// [`watch_profiles`]. Comparing bytes (not the parsed set) keeps this
+/// thread free of validation failures: any content change notifies once and
+/// the loop decides whether the new file loads.
+pub(super) fn watch_broadcast_set(
+    event_tx: tokio::sync::mpsc::Sender<ClientLoopEvent>,
+    should_quit: Arc<AtomicBool>,
+) {
+    std::thread::spawn(move || {
+        let mut previous = None;
+        while !should_quit.load(Ordering::Acquire) {
+            let current = std::fs::read(endpoint::broadcast_path()).unwrap_or_default();
+            if previous.as_ref() != Some(&current) {
+                previous = Some(current);
+                if event_tx
+                    .blocking_send(ClientLoopEvent::BroadcastSetChanged)
+                    .is_err()
+                {
+                    break;
+                }
+            }
+            std::thread::sleep(Duration::from_secs(1));
+        }
+    });
+}
+
 // Only called between surface handoffs: removing a source must not invalidate an in-flight
 // rollback. Connection attempts are independent and fenced by supervisor generations.
 pub(super) fn apply_profiles(
@@ -97,6 +123,53 @@ mod tests {
     use endpoint::{ClientEndpointId, EndpointCatalog, EndpointRegistry, EndpointSupervisors};
     use std::sync::atomic::AtomicUsize;
     use std::time::Instant;
+
+    #[test]
+    fn broadcast_watcher_notifies_on_external_change_only() {
+        let dir =
+            std::env::temp_dir().join(format!("herdr-broadcast-watch-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("temp state home");
+        // Safety: nextest isolates every test in its own process, so mutating
+        // the process environment here cannot race other tests.
+        unsafe { std::env::set_var("XDG_STATE_HOME", &dir) };
+        let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+        let quit = Arc::new(AtomicBool::new(false));
+        watch_broadcast_set(tx, quit.clone());
+
+        let recv = |rx: &mut tokio::sync::mpsc::Receiver<ClientLoopEvent>| {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                match rx.try_recv() {
+                    Ok(event) => return event,
+                    Err(_) if Instant::now() < deadline => {
+                        std::thread::sleep(Duration::from_millis(20));
+                    }
+                    Err(error) => panic!("watcher event never arrived: {error}"),
+                }
+            }
+        };
+
+        // The first poll reports the initial (missing) file exactly once.
+        assert!(matches!(
+            recv(&mut rx),
+            ClientLoopEvent::BroadcastSetChanged
+        ));
+        assert!(rx.try_recv().is_err());
+
+        // An external write notifies again.
+        let path = endpoint::broadcast_path();
+        std::fs::create_dir_all(path.parent().expect("client dir")).expect("mkdir");
+        std::fs::write(&path, br#"{"version":1,"enabled":true}"#).expect("write");
+        assert!(matches!(
+            recv(&mut rx),
+            ClientLoopEvent::BroadcastSetChanged
+        ));
+        assert!(rx.try_recv().is_err());
+
+        quit.store(true, Ordering::Release);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     struct Transport(Arc<AtomicUsize>);
 

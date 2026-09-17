@@ -28,6 +28,9 @@ pub(super) struct ClientChromePreferences {
     pub(super) collapsed_groups: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub(super) remote_collapsed_groups: Vec<ClientRemoteCollapsedGroups>,
+    /// Command palette MRU ids (newest first), capped on write.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(super) palette_recent: Vec<String>,
 }
 
 pub(super) fn path_for_local_endpoint(socket_path: &Path) -> PathBuf {
@@ -47,13 +50,20 @@ pub(super) fn load(path: &Path) -> Option<ClientChromePreferences> {
 }
 
 pub(super) fn store(path: &Path, preferences: ClientChromePreferences) -> Result<(), String> {
+    let content = serde_json::to_vec_pretty(&preferences)
+        .map_err(|error| format!("failed to encode client shell state: {error}"))?;
+    store_bytes(path, &content)
+}
+
+/// Atomic temp-file + rename write shared by the client-shell JSON state
+/// files (chrome preferences, scene snapshots): a crash mid-write can never
+/// leave a truncated document behind.
+pub(super) fn store_bytes(path: &Path, content: &[u8]) -> Result<(), String> {
     let parent = path
         .parent()
         .ok_or_else(|| format!("invalid client shell state path: {}", path.display()))?;
     std::fs::create_dir_all(parent)
         .map_err(|error| format!("failed to create client shell state directory: {error}"))?;
-    let content = serde_json::to_vec_pretty(&preferences)
-        .map_err(|error| format!("failed to encode client shell state: {error}"))?;
     let sequence = NEXT_TEMP_FILE.fetch_add(1, Ordering::Relaxed);
     let mut temp_name = path
         .file_name()

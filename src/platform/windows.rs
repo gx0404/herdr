@@ -468,6 +468,12 @@ pub(crate) fn remote_ssh_config_paths() -> super::RemoteSshConfigPaths {
     }
 }
 
+pub(crate) fn default_known_hosts_path() -> Option<PathBuf> {
+    std::env::var_os("USERPROFILE")
+        .map(PathBuf::from)
+        .map(|home| home.join(".ssh").join("known_hosts"))
+}
+
 pub(crate) fn create_remote_ssh_config_dir(_control_socket_name: &str) -> std::io::Result<PathBuf> {
     let base = remote_private_temp_base();
     std::fs::create_dir_all(&base)?;

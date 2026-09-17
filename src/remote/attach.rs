@@ -1,6 +1,15 @@
 //! Remote thin-client launcher over SSH command stdio.
 
-use super::{args::*, process::wait_with_output_timeout, restart_policy::*, shell_quote};
+use super::{
+    args::*,
+    askpass::{AskpassEnvironment, ASKPASS_SSH_COMMAND_TIMEOUT},
+    error,
+    process::wait_with_output_timeout,
+    profile::ProfileSshOptions,
+    restart_policy::*,
+    shell_quote,
+};
+use crate::client::endpoint::StrictHostKeyChecking;
 use base64::Engine as _;
 use std::collections::BTreeMap;
 use std::fs::{self, File};
@@ -72,6 +81,7 @@ pub(crate) fn run_remote(remote: RemoteLaunch) -> io::Result<()> {
         prepared_remote.stop_after_install_approved,
         remote.live_handoff,
         require_surface_interest,
+        PrepareContext::INTERACTIVE,
     )?;
 
     let _bridge = SshStdioBridge::start(
@@ -81,12 +91,59 @@ pub(crate) fn run_remote(remote: RemoteLaunch) -> io::Result<()> {
         session_name,
         remote_ssh.options(),
         false,
+        None,
     )?;
 
     run_client_process(&local_socket, &reattach_command, remote.keybindings)
 }
 
-pub(crate) fn prepare_saved_ssh(target: &str, session_name: &str) -> io::Result<()> {
+/// How install/update/restart prompts are answered while preparing a remote.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum InstallApproval {
+    /// Read [y/N] answers from the interactive terminal (default CLI behavior).
+    Interactive,
+    /// The caller already obtained approval, so installs and required server
+    /// restarts proceed without reading the terminal. Optional restarts keep
+    /// the existing non-interactive skip behavior.
+    PreApproved,
+}
+
+/// Coarse remote bootstrap phases, surfaced as checklist rows by the TUI
+/// add-machine wizard.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum SavedSshBootstrapStep {
+    DetectPlatform,
+    Install,
+    StartServer,
+    Verify,
+}
+
+#[derive(Clone, Copy)]
+struct PrepareContext<'a> {
+    approval: InstallApproval,
+    progress: Option<&'a dyn Fn(SavedSshBootstrapStep)>,
+}
+
+impl PrepareContext<'static> {
+    const INTERACTIVE: Self = Self {
+        approval: InstallApproval::Interactive,
+        progress: None,
+    };
+}
+
+impl PrepareContext<'_> {
+    fn step(&self, step: SavedSshBootstrapStep) {
+        if let Some(progress) = self.progress {
+            progress(step);
+        }
+    }
+}
+
+pub(crate) fn prepare_saved_ssh(
+    target: &str,
+    session_name: &str,
+    profile_options: Option<&ProfileSshOptions>,
+) -> io::Result<()> {
     super::validate_remote_target(target)
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
     crate::session::validate_name(session_name)
@@ -95,18 +152,69 @@ pub(crate) fn prepare_saved_ssh(target: &str, session_name: &str) -> io::Result<
         .config
         .remote
         .manage_ssh_config;
-    let ssh = RemoteSsh::new(
+    let ssh = RemoteSsh::new_with_profile_options(
         target.to_owned(),
         manage_ssh_config,
         session_name.to_owned(),
+        profile_options.cloned(),
     );
-    let prepared = prepare_remote_herdr(&ssh, false, true)?;
-    ensure_remote_server_ready(
+    prepare_saved_ssh_with(&ssh, session_name, PrepareContext::INTERACTIVE)
+}
+
+/// Non-interactive variant for the in-TUI add-machine wizard. The wizard's
+/// confirm page pre-authorizes installing, updating, or restarting the remote
+/// server; SSH itself runs exactly like saved background connections
+/// (BatchMode, no prompts), so authentication behavior is unchanged.
+/// `progress` observes each bootstrap phase as it begins.
+///
+/// Failures are classified into `ConnectionErrorKind` (see
+/// `classify_connection_error`) while keeping their original `Display` text.
+pub(crate) fn prepare_saved_ssh_unattended(
+    target: &str,
+    session_name: &str,
+    profile_options: Option<&ProfileSshOptions>,
+    progress: &dyn Fn(SavedSshBootstrapStep),
+) -> io::Result<()> {
+    super::validate_remote_target(target)
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
+    crate::session::validate_name(session_name)
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
+    let ssh = RemoteSsh::new_saved(
+        target.to_owned(),
+        session_name.to_owned(),
+        profile_options.cloned(),
+    );
+    prepare_saved_ssh_with(
         &ssh,
+        session_name,
+        PrepareContext {
+            approval: InstallApproval::PreApproved,
+            progress: Some(progress),
+        },
+    )
+    .map_err(|error| {
+        error::classify_and_wrap(
+            error,
+            target,
+            profile_options.and_then(|options| options.identity_file.first().cloned()),
+        )
+    })
+}
+
+fn prepare_saved_ssh_with(
+    ssh: &RemoteSsh,
+    session_name: &str,
+    ctx: PrepareContext<'_>,
+) -> io::Result<()> {
+    let prepared = prepare_remote_herdr_ctx(ssh, false, true, ctx)?;
+    ctx.step(SavedSshBootstrapStep::StartServer);
+    ensure_remote_server_ready(
+        ssh,
         &prepared.remote_herdr,
         prepared.stop_after_install_approved,
         false,
         true,
+        ctx,
     )?;
 
     // The bridge already owns daemon startup. EOF closes only this temporary attachment,
@@ -119,7 +227,8 @@ pub(crate) fn prepare_saved_ssh(target: &str, session_name: &str) -> io::Result<
     if !output.status.success() {
         return Err(command_failed("remote server startup failed", &output));
     }
-    match remote_server_status(&ssh, &prepared.remote_herdr, true)? {
+    ctx.step(SavedSshBootstrapStep::Verify);
+    match remote_server_status(ssh, &prepared.remote_herdr, true)? {
         RemoteServerStatus::Running {
             endpoint_protocol_generation,
             surface_interest,
@@ -527,19 +636,41 @@ pub(super) struct PreparedRemoteHerdr {
 #[derive(Clone)]
 pub(super) struct ManagedSshOptions {
     config_path: PathBuf,
-    control_path: Option<PathBuf>,
+    /// Multiplexing control socket of the managed config. Callers with
+    /// long-lived independent children (saved bridges, port forwards) clear
+    /// it so their processes never share a control master.
+    pub(super) control_path: Option<PathBuf>,
+    /// Keeps the managed config directory alive for every clone: bridge
+    /// threads and port-forward children outlive the `ManagedSshConfig` (and
+    /// the `RemoteSsh`) the options were borrowed from, so ownership of the
+    /// directory is shared and only the last drop removes it.
+    // Never read by value: held purely for its `Drop` side effect.
+    #[allow(dead_code)]
+    config_dir: Option<Arc<ManagedSshConfigDir>>,
+    /// Profile keepalive overrides for noninteractive bridge commands, which
+    /// pass ServerAlive* on the command line instead of reading the config.
+    pub(super) server_alive_interval: Option<u16>,
+    pub(super) server_alive_count_max: Option<u16>,
+    /// Profile host-key policy, mapped onto command-line `-o` for
+    /// noninteractive commands (which win over the config fallback).
+    pub(super) strict_host_key_checking: Option<StrictHostKeyChecking>,
 }
 
-struct ManagedSshConfig {
-    options: ManagedSshOptions,
+/// Shared owner of the managed ssh config directory; the last drop removes
+/// the directory (and with it the control socket path).
+#[derive(Debug)]
+struct ManagedSshConfigDir {
+    path: PathBuf,
 }
 
-impl Drop for ManagedSshConfig {
+impl Drop for ManagedSshConfigDir {
     fn drop(&mut self) {
-        if let Some(dir) = self.options.config_path.parent() {
-            let _ = fs::remove_dir_all(dir);
-        }
+        let _ = fs::remove_dir_all(&self.path);
     }
+}
+
+pub(super) struct ManagedSshConfig {
+    pub(super) options: ManagedSshOptions,
 }
 
 pub(super) struct RemoteSsh {
@@ -547,12 +678,27 @@ pub(super) struct RemoteSsh {
     session_name: String,
     managed_config: Option<ManagedSshConfig>,
     noninteractive: bool,
+    profile_options: Option<ProfileSshOptions>,
+    /// Approved askpass channel environment. When set, BatchMode is dropped
+    /// so ssh password/passphrase prompts reach the channel instead.
+    askpass: Option<AskpassEnvironment>,
 }
 
 impl RemoteSsh {
     fn new(target: String, manage_ssh_config: bool, session_name: String) -> Self {
-        let managed_config = if manage_ssh_config {
-            write_managed_ssh_config()
+        Self::new_with_profile_options(target, manage_ssh_config, session_name, None)
+    }
+
+    fn new_with_profile_options(
+        target: String,
+        manage_ssh_config: bool,
+        session_name: String,
+        profile_options: Option<ProfileSshOptions>,
+    ) -> Self {
+        // Profile connection options need the managed config to reach ssh
+        // while keeping user settings first, so they force it on.
+        let managed_config = if manage_ssh_config || profile_options.is_some() {
+            write_managed_ssh_config(profile_options.as_ref())
                 .inspect_err(|err| {
                     tracing::debug!(%err, "could not write managed ssh config; using plain ssh");
                 })
@@ -566,16 +712,58 @@ impl RemoteSsh {
             session_name,
             managed_config,
             noninteractive: false,
+            profile_options,
+            askpass: None,
         }
     }
 
+    #[cfg(test)]
     pub(super) fn new_noninteractive(target: String) -> Self {
+        Self::new_saved(target, crate::session::DEFAULT_SESSION_NAME.into(), None)
+    }
+
+    /// Saved background connections stay non-interactive. Profiles without
+    /// connection options use plain ssh exactly as before; profiles with
+    /// options get a managed config (without multiplexing) so the options
+    /// supplement — never override — the user's own ssh config.
+    pub(super) fn new_saved(
+        target: String,
+        session_name: String,
+        profile_options: Option<ProfileSshOptions>,
+    ) -> Self {
+        let managed_config = profile_options.as_ref().and_then(|options| {
+            write_managed_ssh_config(Some(options))
+                .inspect_err(|err| {
+                    tracing::debug!(%err, "could not write managed ssh config; using plain ssh");
+                })
+                .ok()
+                .map(|mut config| {
+                    config.options.control_path = None;
+                    config
+                })
+        });
         Self {
             target,
-            session_name: crate::session::DEFAULT_SESSION_NAME.into(),
-            managed_config: None,
+            session_name,
+            managed_config,
             noninteractive: true,
+            profile_options,
+            askpass: None,
         }
+    }
+
+    /// Approved interactive retry of a saved connection: identical to
+    /// `new_saved` except BatchMode is dropped and the askpass channel
+    /// environment is attached, so ssh prompts reach `askpass`.
+    pub(super) fn new_saved_with_askpass(
+        target: String,
+        session_name: String,
+        profile_options: Option<ProfileSshOptions>,
+        askpass: AskpassEnvironment,
+    ) -> Self {
+        let mut ssh = Self::new_saved(target, session_name, profile_options);
+        ssh.askpass = Some(askpass);
+        ssh
     }
 
     fn target(&self) -> &str {
@@ -593,10 +781,47 @@ impl RemoteSsh {
     fn command(&self) -> Command {
         let mut command = self.base_command();
         if self.noninteractive {
-            apply_noninteractive_ssh_options(&mut command);
+            let server_alive_interval = self
+                .profile_options
+                .as_ref()
+                .and_then(|options| options.server_alive_interval);
+            let server_alive_count_max = self
+                .profile_options
+                .as_ref()
+                .and_then(|options| options.server_alive_count_max);
+            let strict_host_key_checking = self
+                .profile_options
+                .as_ref()
+                .and_then(|options| options.strict_host_key_checking);
+            match &self.askpass {
+                Some(askpass) => {
+                    apply_probe_ssh_options(
+                        &mut command,
+                        server_alive_interval,
+                        server_alive_count_max,
+                        strict_host_key_checking,
+                        false,
+                    );
+                    askpass.apply(&mut command);
+                }
+                None => apply_noninteractive_ssh_options(
+                    &mut command,
+                    server_alive_interval,
+                    server_alive_count_max,
+                    strict_host_key_checking,
+                ),
+            }
         }
         command.arg("-T").arg(&self.target);
         command
+    }
+
+    fn probe_timeout(&self) -> Duration {
+        if self.askpass.is_some() {
+            ASKPASS_SSH_COMMAND_TIMEOUT
+        } else {
+            NONINTERACTIVE_SSH_COMMAND_TIMEOUT
+        }
     }
 
     fn base_command(&self) -> Command {
@@ -607,7 +832,7 @@ impl RemoteSsh {
 
     fn scp_command(&self) -> Command {
         let mut command = Command::new("scp");
-        apply_managed_scp_options(&mut command, self.options());
+        apply_managed_channel_options(&mut command, self.options());
         command
     }
 
@@ -636,7 +861,7 @@ impl RemoteSsh {
                 "ssh bootstrap stdin missing",
             ))
         };
-        let output = wait_with_output_timeout(child, NONINTERACTIVE_SSH_COMMAND_TIMEOUT)?;
+        let output = wait_with_output_timeout(child, self.probe_timeout())?;
         write_result?;
         normalize_remote_output(output)
     }
@@ -651,7 +876,7 @@ impl RemoteSsh {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
         let output = if self.noninteractive {
-            wait_with_output_timeout(command.spawn()?, NONINTERACTIVE_SSH_COMMAND_TIMEOUT)
+            wait_with_output_timeout(command.spawn()?, self.probe_timeout())
         } else {
             output_with_forwarded_stderr(command.spawn()?, None)
         }?;
@@ -1000,25 +1225,66 @@ impl Drop for RemoteSsh {
     }
 }
 
-fn apply_noninteractive_ssh_options(command: &mut Command) {
+pub(super) fn apply_noninteractive_ssh_options(
+    command: &mut Command,
+    server_alive_interval: Option<u16>,
+    server_alive_count_max: Option<u16>,
+    strict_host_key_checking: Option<StrictHostKeyChecking>,
+) {
+    apply_probe_ssh_options(
+        command,
+        server_alive_interval,
+        server_alive_count_max,
+        strict_host_key_checking,
+        true,
+    );
+}
+
+/// SSH options shared by background probes and approved askpass retries.
+/// `batch_mode` adds the non-interactive authentication guards; the askpass
+/// path omits them so password/passphrase prompts reach the channel. The
+/// host-key policy comes from the profile, mapped through
+/// `as_noninteractive_ssh_value` (`ask` cannot prompt in a background
+/// context and therefore behaves as `yes`; `accept-new` records new keys).
+fn apply_probe_ssh_options(
+    command: &mut Command,
+    server_alive_interval: Option<u16>,
+    server_alive_count_max: Option<u16>,
+    strict_host_key_checking: Option<StrictHostKeyChecking>,
+    batch_mode: bool,
+) {
+    // Keepalive defaults stay on the command line for saved connections; a
+    // profile only replaces the values it explicitly sets. BatchMode is
+    // authentication behavior: only the approved askpass retry drops it.
+    let server_alive_interval = server_alive_interval.unwrap_or(15);
+    let server_alive_count_max = server_alive_count_max.unwrap_or(4);
+    let host_key_policy = strict_host_key_checking
+        .map(StrictHostKeyChecking::as_noninteractive_ssh_value)
+        .unwrap_or("yes");
+    if batch_mode {
+        command
+            .arg("-o")
+            .arg("BatchMode=yes")
+            .arg("-o")
+            .arg("NumberOfPasswordPrompts=0");
+    }
     command
         .arg("-o")
-        .arg("BatchMode=yes")
-        .arg("-o")
-        .arg("NumberOfPasswordPrompts=0")
-        .arg("-o")
-        .arg("StrictHostKeyChecking=yes")
+        .arg(format!("StrictHostKeyChecking={host_key_policy}"))
         .arg("-o")
         .arg("ConnectTimeout=10")
         .arg("-o")
         .arg("ConnectionAttempts=1")
         .arg("-o")
-        .arg("ServerAliveInterval=15")
+        .arg(format!("ServerAliveInterval={server_alive_interval}"))
         .arg("-o")
-        .arg("ServerAliveCountMax=4");
+        .arg(format!("ServerAliveCountMax={server_alive_count_max}"));
 }
 
-fn apply_managed_ssh_options(command: &mut Command, options: Option<&ManagedSshOptions>) {
+pub(super) fn apply_managed_ssh_options(
+    command: &mut Command,
+    options: Option<&ManagedSshOptions>,
+) {
     let Some(options) = options else {
         return;
     };
@@ -1035,7 +1301,12 @@ fn apply_managed_ssh_options(command: &mut Command, options: Option<&ManagedSshO
     }
 }
 
-fn apply_managed_scp_options(command: &mut Command, options: Option<&ManagedSshOptions>) {
+/// Managed-config application for scp/sftp-style channels: their `-S` means
+/// "ssh program", unlike ssh's ControlPath, so multiplexing goes through `-o`.
+pub(super) fn apply_managed_channel_options(
+    command: &mut Command,
+    options: Option<&ManagedSshOptions>,
+) {
     let Some(options) = options else {
         return;
     };
@@ -1082,6 +1353,21 @@ pub(super) fn prepare_remote_herdr(
     live_handoff_enabled: bool,
     require_surface_interest: bool,
 ) -> io::Result<PreparedRemoteHerdr> {
+    prepare_remote_herdr_ctx(
+        ssh,
+        live_handoff_enabled,
+        require_surface_interest,
+        PrepareContext::INTERACTIVE,
+    )
+}
+
+fn prepare_remote_herdr_ctx(
+    ssh: &RemoteSsh,
+    live_handoff_enabled: bool,
+    require_surface_interest: bool,
+    ctx: PrepareContext<'_>,
+) -> io::Result<PreparedRemoteHerdr> {
+    ctx.step(SavedSshBootstrapStep::DetectPlatform);
     let platform = detect_remote_platform(ssh)?;
     let remote_herdr = RemoteHerdr::for_platform(platform);
     if remote_herdr.platform.is_windows() {
@@ -1090,6 +1376,7 @@ pub(super) fn prepare_remote_herdr(
             remote_herdr,
             live_handoff_enabled,
             require_surface_interest,
+            ctx,
         );
     }
     let override_binary = remote_binary_override_path()?;
@@ -1129,6 +1416,7 @@ pub(super) fn prepare_remote_herdr(
             status_probe_herdr,
             live_handoff_enabled,
             require_surface_interest,
+            ctx.approval,
         )?;
     }
     if !stop_after_install_approved {
@@ -1136,8 +1424,10 @@ pub(super) fn prepare_remote_herdr(
             &ssh.destination(),
             &remote_herdr,
             &install_source_description(&remote_herdr.platform, override_binary.as_deref()),
+            ctx.approval,
         )?;
     }
+    ctx.step(SavedSshBootstrapStep::Install);
     let source = resolve_install_source(&remote_herdr.platform, override_binary)?;
     let install_result = ssh.install_herdr(&remote_herdr, &source.path);
     source.cleanup();
@@ -1184,6 +1474,7 @@ fn prepare_windows_remote_herdr(
     remote_herdr: RemoteHerdr,
     live_handoff_enabled: bool,
     require_surface_interest: bool,
+    ctx: PrepareContext<'_>,
 ) -> io::Result<PreparedRemoteHerdr> {
     let override_package = remote_binary_override_path()?;
     let custom_package = override_package.is_some();
@@ -1209,6 +1500,7 @@ fn prepare_windows_remote_herdr(
             candidate,
             live_handoff_enabled,
             require_surface_interest,
+            ctx.approval,
         )?
     } else {
         false
@@ -1218,8 +1510,10 @@ fn prepare_windows_remote_herdr(
             &ssh.destination(),
             &remote_herdr,
             &install_source_description(&remote_herdr.platform, override_package.as_deref()),
+            ctx.approval,
         )?;
     }
+    ctx.step(SavedSshBootstrapStep::Install);
     // Windows needs the complete package, including its app-local ConPTY runtime.
     let source = match override_package {
         Some(path) => InstallSource::persistent(path),
@@ -1691,6 +1985,7 @@ fn ensure_remote_server_ready(
     stop_after_install_approved: bool,
     live_handoff_enabled: bool,
     require_surface_interest: bool,
+    ctx: PrepareContext<'_>,
 ) -> io::Result<()> {
     let status = remote_server_status(ssh, remote_herdr, require_surface_interest)?;
     let RemoteServerStatus::Running {
@@ -1730,7 +2025,7 @@ fn ensure_remote_server_ready(
         return Ok(());
     }
 
-    if confirm_remote_server_stop(&ssh.destination(), version.as_deref(), reason)? {
+    if confirm_remote_server_stop(&ssh.destination(), version.as_deref(), reason, ctx.approval)? {
         stop_remote_server(ssh, remote_herdr)?;
     }
     Ok(())
@@ -1741,11 +2036,15 @@ fn confirm_remote_install_with_running_server(
     remote_herdr: &RemoteHerdr,
     live_handoff_enabled: bool,
     require_surface_interest: bool,
+    approval: InstallApproval,
 ) -> io::Result<bool> {
     let target = ssh.destination();
     let status = match remote_server_status(ssh, remote_herdr, require_surface_interest) {
         Ok(status) => status,
         Err(err) => {
+            if approval == InstallApproval::PreApproved {
+                return Ok(false);
+            }
             if !io::stdin().is_terminal() {
                 return Err(io::Error::other(format!(
                     "could not inspect the running remote herdr server on {target} before installing: {err}; run from an interactive terminal to approve updating the remote binary"
@@ -1791,7 +2090,7 @@ fn confirm_remote_install_with_running_server(
     );
 
     if plan == RemoteInstallRunningServerPlan::KeepRunning {
-        if io::stdin().is_terminal() {
+        if approval == InstallApproval::Interactive && io::stdin().is_terminal() {
             eprintln!("remote herdr server on {target} is already compatible:");
             eprintln!("  server: v{}", version_label(version.as_deref()));
             eprintln!(
@@ -1800,6 +2099,17 @@ fn confirm_remote_install_with_running_server(
             );
         }
         return Ok(false);
+    }
+
+    if approval == InstallApproval::PreApproved {
+        return Ok(match plan {
+            // The wizard's confirm page covers installing and stopping a
+            // running server when the update requires it. Live handoff stays
+            // opt-in and is never chosen implicitly.
+            RemoteInstallRunningServerPlan::StopRequired(_) => true,
+            RemoteInstallRunningServerPlan::LiveHandoff
+            | RemoteInstallRunningServerPlan::KeepRunning => false,
+        });
     }
 
     if !io::stdin().is_terminal() {
@@ -1897,8 +2207,13 @@ fn probe_remote_endpoint(
         remote_herdr.clone(),
         path.clone(),
         ssh.session_name.clone(),
-        None,
+        // The negotiation bridge must reuse the profile's managed ssh
+        // options exactly like the endpoint bridge itself: machines that
+        // need a custom port, user, or identity file are unreachable with
+        // plain `ssh <target>`.
+        ssh.options(),
         true,
+        None,
     )?;
     let mut stream = crate::ipc::connect_local_stream(&path)?;
     // Use the saved client's noninteractive path. This metadata-only attachment never
@@ -2019,6 +2334,7 @@ fn confirm_remote_server_stop(
     target: &str,
     version: Option<&str>,
     reason: RemoteServerRestartReason,
+    approval: InstallApproval,
 ) -> io::Result<bool> {
     let required_upgrade = matches!(
         reason,
@@ -2026,6 +2342,11 @@ fn confirm_remote_server_stop(
             | RemoteServerRestartReason::SurfaceInterest
             | RemoteServerRestartReason::HealthCheck
     );
+    if approval == InstallApproval::PreApproved {
+        // Pre-authorization covers restarts the connection strictly requires;
+        // optional restarts keep the non-interactive skip behavior.
+        return Ok(required_upgrade);
+    }
     if !io::stdin().is_terminal() {
         if required_upgrade {
             return Err(io::Error::other(format!(
@@ -2352,7 +2673,11 @@ fn confirm_remote_install(
     target: &str,
     remote_herdr: &RemoteHerdr,
     source_description: &str,
+    approval: InstallApproval,
 ) -> io::Result<()> {
+    if approval == InstallApproval::PreApproved {
+        return Ok(());
+    }
     if !io::stdin().is_terminal() {
         return Err(io::Error::other(format!(
             "matching remote herdr {} is not installed at {}; run from an interactive terminal to approve installation",
@@ -2451,6 +2776,7 @@ impl SshStdioBridge {
         session_name: String,
         ssh_options: Option<&ManagedSshOptions>,
         noninteractive: bool,
+        askpass: Option<&AskpassEnvironment>,
     ) -> io::Result<Self> {
         Self::start_command(
             target,
@@ -2464,6 +2790,7 @@ impl SshStdioBridge {
             local_socket,
             ssh_options,
             noninteractive,
+            askpass,
         )
     }
 
@@ -2473,6 +2800,7 @@ impl SshStdioBridge {
         local_socket: PathBuf,
         ssh_options: Option<&ManagedSshOptions>,
         noninteractive: bool,
+        askpass: Option<&AskpassEnvironment>,
     ) -> io::Result<Self> {
         crate::ipc::prepare_socket_path(&local_socket, |path| {
             format!("remote bridge is already listening at {}", path.display())
@@ -2493,6 +2821,7 @@ impl SshStdioBridge {
         let should_stop = Arc::new(AtomicBool::new(false));
         let thread_stop = Arc::clone(&should_stop);
         let thread_ssh_options = ssh_options.cloned();
+        let thread_askpass = askpass.cloned();
         let (failure_tx, failure_rx) = mpsc::sync_channel(1);
         let thread = thread::spawn(move || {
             while !thread_stop.load(Ordering::Acquire) {
@@ -2514,6 +2843,7 @@ impl SshStdioBridge {
                             &remote_command,
                             thread_ssh_options.as_ref(),
                             noninteractive,
+                            thread_askpass.as_ref(),
                             &thread_stop,
                         ) {
                             let _ =
@@ -2576,7 +2906,7 @@ impl Drop for SshStdioBridge {
     }
 }
 
-fn ssh_config_quote(path: &str) -> String {
+pub(super) fn ssh_config_quote(path: &str) -> String {
     format!("\"{path}\"")
 }
 
@@ -2612,7 +2942,11 @@ fn ssh_user_config_include(path: Option<&Path>) -> Option<String> {
 
 /// Builds a temporary ssh config that includes the user's settings first, so
 /// OpenSSH's first-value-wins behavior preserves explicit user keepalives.
-fn write_managed_ssh_config() -> io::Result<ManagedSshConfig> {
+/// Saved-profile connection options land in the `Host *` fallback block, so
+/// they supplement — never override — settings from the user's own config.
+pub(super) fn write_managed_ssh_config(
+    profile: Option<&ProfileSshOptions>,
+) -> io::Result<ManagedSshConfig> {
     let paths = crate::platform::remote_ssh_config_paths();
     let dir = crate::platform::create_remote_ssh_config_dir(SSH_CONTROL_SOCKET_NAME)?;
     let path = dir.join("config");
@@ -2631,8 +2965,17 @@ fn write_managed_ssh_config() -> io::Result<ManagedSshConfig> {
         ));
     }
     contents.push_str("Host *\n");
-    contents.push_str("  ServerAliveInterval 15\n");
-    contents.push_str("  ServerAliveCountMax 4\n");
+    if let Some(profile) = profile {
+        for directive in profile.config_directives() {
+            contents.push_str("  ");
+            contents.push_str(&directive);
+            contents.push('\n');
+        }
+    }
+    let server_alive_interval = profile.and_then(|p| p.server_alive_interval).unwrap_or(15);
+    let server_alive_count_max = profile.and_then(|p| p.server_alive_count_max).unwrap_or(4);
+    contents.push_str(&format!("  ServerAliveInterval {server_alive_interval}\n"));
+    contents.push_str(&format!("  ServerAliveCountMax {server_alive_count_max}\n"));
 
     let write_result = (|| {
         let mut file = crate::platform::create_remote_ssh_config_file(&path)?;
@@ -2646,6 +2989,10 @@ fn write_managed_ssh_config() -> io::Result<ManagedSshConfig> {
         options: ManagedSshOptions {
             config_path: path,
             control_path,
+            config_dir: Some(Arc::new(ManagedSshConfigDir { path: dir })),
+            server_alive_interval: profile.and_then(|p| p.server_alive_interval),
+            server_alive_count_max: profile.and_then(|p| p.server_alive_count_max),
+            strict_host_key_checking: profile.and_then(|p| p.strict_host_key_checking),
         },
     })
 }
@@ -2713,13 +3060,31 @@ fn bridge_connection(
     remote_command: &str,
     ssh_options: Option<&ManagedSshOptions>,
     noninteractive: bool,
+    askpass: Option<&AskpassEnvironment>,
     bridge_stop: &Arc<AtomicBool>,
 ) -> io::Result<()> {
     let upload_stop = Arc::new(BridgeUploadStop::new()?);
     let mut command = Command::new("ssh");
     apply_managed_ssh_options(&mut command, ssh_options);
     if noninteractive {
-        apply_noninteractive_ssh_options(&mut command);
+        match askpass {
+            Some(askpass) => {
+                apply_probe_ssh_options(
+                    &mut command,
+                    ssh_options.and_then(|options| options.server_alive_interval),
+                    ssh_options.and_then(|options| options.server_alive_count_max),
+                    ssh_options.and_then(|options| options.strict_host_key_checking),
+                    false,
+                );
+                askpass.apply(&mut command);
+            }
+            None => apply_noninteractive_ssh_options(
+                &mut command,
+                ssh_options.and_then(|options| options.server_alive_interval),
+                ssh_options.and_then(|options| options.server_alive_count_max),
+                ssh_options.and_then(|options| options.strict_host_key_checking),
+            ),
+        }
     }
     command
         .arg("-T")
@@ -3284,6 +3649,7 @@ mod tests {
             "default".to_string(),
             None,
             false,
+            None,
         )
         .expect("start bridge listener");
 
@@ -3405,6 +3771,7 @@ mod tests {
             "default".to_string(),
             None,
             false,
+            None,
         )
         .expect("start bridge listener");
         let started = Instant::now();
@@ -3420,7 +3787,7 @@ mod tests {
     fn managed_ssh_config_includes_user_config_then_fallback() {
         use std::os::unix::fs::PermissionsExt;
 
-        let managed_config = write_managed_ssh_config().expect("write managed config");
+        let managed_config = write_managed_ssh_config(None).expect("write managed config");
         let path = managed_config.options.config_path.clone();
         let control_path = managed_config
             .options
@@ -3491,7 +3858,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn remote_ssh_command_uses_managed_config_when_present() {
-        let mut managed_config = write_managed_ssh_config().expect("write managed config");
+        let mut managed_config = write_managed_ssh_config(None).expect("write managed config");
         managed_config.options.control_path = Some(PathBuf::from("/tmp/herdr test/control"));
         let config_path = managed_config.options.config_path.clone();
         let control_path = managed_config
@@ -3504,6 +3871,8 @@ mod tests {
             session_name: crate::session::DEFAULT_SESSION_NAME.into(),
             managed_config: Some(managed_config),
             noninteractive: false,
+            profile_options: None,
+            askpass: None,
         };
 
         let command = ssh.command();
@@ -3551,7 +3920,7 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn windows_managed_ssh_config_uses_keepalives_without_control_socket() {
-        let managed_config = write_managed_ssh_config().expect("write managed config");
+        let managed_config = write_managed_ssh_config(None).expect("write managed config");
         let config_path = managed_config.options.config_path.clone();
         assert!(managed_config.options.control_path.is_none());
         let contents = std::fs::read_to_string(&config_path).expect("read managed config");
@@ -3573,6 +3942,7 @@ mod tests {
             session_name: crate::session::DEFAULT_SESSION_NAME.into(),
             managed_config: Some(managed_config),
             noninteractive: false,
+            profile_options: None,
         };
         let args = ssh
             .command()
@@ -3651,6 +4021,209 @@ mod tests {
         }
         assert!(!args.iter().any(|arg| arg == "-F"));
         assert!(ssh.options().is_none());
+    }
+
+    fn full_profile_options() -> ProfileSshOptions {
+        ProfileSshOptions {
+            port: Some(2222),
+            user: Some("dev".into()),
+            identity_file: vec!["~/.ssh/build key".into(), "~/.ssh/fallback".into()],
+            identities_only: Some(true),
+            identity_agent: Some("~/.ssh/agent.sock".into()),
+            strict_host_key_checking: Some(
+                crate::client::endpoint::StrictHostKeyChecking::AcceptNew,
+            ),
+            proxy_jump: vec!["bastion".into(), "dev@jump.example:2222".into()],
+            forward_agent: Some(true),
+            server_alive_interval: Some(30),
+            server_alive_count_max: Some(2),
+            control_persist: Some("10m".into()),
+            remote_command: Some("tmux attach".into()),
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn managed_ssh_config_renders_profile_options_as_fallback_directives() {
+        let options = full_profile_options();
+        let managed_config =
+            write_managed_ssh_config(Some(&options)).expect("write managed config");
+        let contents =
+            std::fs::read_to_string(&managed_config.options.config_path).expect("read config");
+
+        let fallback_at = contents.find("Host *").expect("fallback present");
+        if let Some(include_at) = contents.find("Include ") {
+            assert!(
+                include_at < fallback_at,
+                "user config must be Included before herdr's fallback: {contents}"
+            );
+        }
+        let fallback = &contents[fallback_at..];
+        for directive in [
+            "Port 2222",
+            "User dev",
+            "IdentityFile \"~/.ssh/build key\"",
+            "IdentityFile \"~/.ssh/fallback\"",
+            "IdentitiesOnly yes",
+            "IdentityAgent \"~/.ssh/agent.sock\"",
+            "StrictHostKeyChecking accept-new",
+            "ProxyJump \"bastion,dev@jump.example:2222\"",
+            "ForwardAgent yes",
+            "ControlPersist 10m",
+            "RemoteCommand \"tmux attach\"",
+            "RequestTTY yes",
+            "ServerAliveInterval 30",
+            "ServerAliveCountMax 2",
+        ] {
+            assert!(
+                fallback.contains(directive),
+                "missing {directive}: {contents}"
+            );
+        }
+        assert!(!fallback.contains("ServerAliveInterval 15"));
+
+        drop(managed_config);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn saved_ssh_command_with_profile_options_uses_managed_config_without_multiplexing() {
+        let options = full_profile_options();
+        let ssh = RemoteSsh::new_saved(
+            "example".into(),
+            crate::session::DEFAULT_SESSION_NAME.into(),
+            Some(options),
+        );
+        let managed = ssh.options().expect("profile options force managed config");
+        assert!(managed.control_path.is_none());
+
+        let args = ssh
+            .command()
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        assert!(args.iter().any(|arg| arg == "-F"), "missing -F: {args:?}");
+        assert!(args.iter().any(|arg| arg == "BatchMode=yes"));
+        assert!(
+            args.iter()
+                .any(|arg| arg == "StrictHostKeyChecking=accept-new"),
+            "profile accept-new policy must reach the command line: {args:?}"
+        );
+        assert!(
+            args.iter().any(|arg| arg == "ServerAliveInterval=30"),
+            "profile keepalive must replace the noninteractive default: {args:?}"
+        );
+        assert!(args.iter().any(|arg| arg == "ServerAliveCountMax=2"));
+        assert!(!args.iter().any(|arg| arg == "ServerAliveInterval=15"));
+        assert!(!args.iter().any(|arg| arg == "-S"));
+    }
+
+    #[test]
+    fn saved_ssh_command_maps_profile_host_key_policy_for_background_use() {
+        for (policy, expected) in [
+            (
+                crate::client::endpoint::StrictHostKeyChecking::AcceptNew,
+                "StrictHostKeyChecking=accept-new",
+            ),
+            (
+                crate::client::endpoint::StrictHostKeyChecking::Ask,
+                "StrictHostKeyChecking=yes",
+            ),
+            (
+                crate::client::endpoint::StrictHostKeyChecking::Yes,
+                "StrictHostKeyChecking=yes",
+            ),
+        ] {
+            let options = ProfileSshOptions {
+                strict_host_key_checking: Some(policy),
+                ..ProfileSshOptions::default()
+            };
+            let ssh = RemoteSsh::new_saved(
+                "example".into(),
+                crate::session::DEFAULT_SESSION_NAME.into(),
+                Some(options),
+            );
+            let args = ssh
+                .command()
+                .get_args()
+                .map(|arg| arg.to_string_lossy().into_owned())
+                .collect::<Vec<_>>();
+            assert!(
+                args.iter().any(|arg| arg == expected),
+                "missing {expected}: {args:?}"
+            );
+            assert!(
+                !args.iter().any(|arg| arg == "StrictHostKeyChecking=ask"),
+                "background connections never ask: {args:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn askpass_retry_drops_batch_mode_and_attaches_the_channel() {
+        let options = ProfileSshOptions {
+            server_alive_interval: Some(30),
+            ..ProfileSshOptions::default()
+        };
+        let ssh = RemoteSsh::new_saved_with_askpass(
+            "example".into(),
+            crate::session::DEFAULT_SESSION_NAME.into(),
+            Some(options),
+            AskpassEnvironment::for_test(
+                "/usr/local/bin/herdr".into(),
+                "/tmp/herdr-askpass-test.sock".into(),
+            ),
+        );
+        let command = ssh.command();
+        let args = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        assert!(
+            !args.iter().any(|arg| arg.starts_with("BatchMode")),
+            "approved interactive retry must allow prompts: {args:?}"
+        );
+        assert!(
+            !args
+                .iter()
+                .any(|arg| arg.starts_with("NumberOfPasswordPrompts")),
+            "{args:?}"
+        );
+        for required in [
+            "StrictHostKeyChecking=yes",
+            "ConnectTimeout=10",
+            "ServerAliveInterval=30",
+        ] {
+            assert!(args.iter().any(|arg| arg == required), "missing {required}");
+        }
+        let envs = command
+            .get_envs()
+            .map(|(key, _value)| key.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        for expected in ["SSH_ASKPASS", "SSH_ASKPASS_REQUIRE"] {
+            assert!(
+                envs.iter().any(|key| key == expected),
+                "missing env {expected}"
+            );
+        }
+    }
+
+    #[test]
+    fn saved_ssh_command_without_profile_options_stays_plain() {
+        let ssh = RemoteSsh::new_saved(
+            "example".into(),
+            crate::session::DEFAULT_SESSION_NAME.into(),
+            None,
+        );
+        assert!(ssh.options().is_none());
+        let args = ssh
+            .command()
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        assert!(!args.iter().any(|arg| arg == "-F"));
+        assert!(args.iter().any(|arg| arg == "ServerAliveInterval=15"));
+        assert!(args.iter().any(|arg| arg == "ServerAliveCountMax=4"));
     }
 
     #[test]
@@ -3740,6 +4313,8 @@ mod tests {
             session_name: crate::session::DEFAULT_SESSION_NAME.into(),
             managed_config: None,
             noninteractive: false,
+            profile_options: None,
+            askpass: None,
         };
 
         let command = ssh.command();

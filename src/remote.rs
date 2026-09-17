@@ -1,14 +1,35 @@
 mod args;
+mod askpass;
 mod attach;
+mod error;
+mod exec;
+mod forward;
+mod fs;
 mod host;
+mod known_hosts;
 mod process;
+mod profile;
 mod restart_policy;
 mod saved;
+mod ssh_config;
 
 pub(crate) use args::*;
+// Re-exported as the mechanism surface for the next stage (TUI auth/host-key
+// prompts); currently only consumed inside `remote`.
+#[allow(unused_imports)]
+pub(crate) use askpass::*;
 pub(crate) use attach::*;
+pub(crate) use error::*;
+pub(crate) use exec::*;
+pub(crate) use forward::*;
+pub(crate) use fs::*;
 pub(crate) use host::run_remote_client_bridge;
+// See askpass above.
+#[allow(unused_imports)]
+pub(crate) use known_hosts::*;
+pub(crate) use profile::*;
 pub(crate) use saved::*;
+pub(crate) use ssh_config::*;
 
 pub(crate) fn run_remote_api_bridge(args: &[String]) -> std::io::Result<()> {
     match args {
@@ -59,9 +80,10 @@ pub(crate) fn print_remote_error_hint(err: &std::io::Error, target: &str) {
 }
 
 fn is_remote_host_key_error(err: &std::io::Error) -> bool {
-    let message = err.to_string().to_ascii_lowercase();
-    message.contains("host key verification failed")
-        || message.contains("remote host identification has changed")
+    matches!(
+        classify_connection_error(err),
+        ConnectionErrorKind::HostKeyUnknown { .. } | ConnectionErrorKind::HostKeyChanged
+    )
 }
 
 fn is_remote_auth_error(err: &std::io::Error) -> bool {

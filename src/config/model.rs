@@ -338,6 +338,8 @@ pub struct KeysConfig {
     pub help: BindingConfig,
     /// Open settings. Default: "prefix+s"
     pub settings: BindingConfig,
+    /// Open the machines overlay. Default: "prefix+m"
+    pub manage_machines: BindingConfig,
     /// Create a new workspace. Default: "prefix+shift+n"
     pub new_workspace: BindingConfig,
     /// Create a Git worktree from the selected workspace. Default: "prefix+shift+g"
@@ -372,6 +374,9 @@ pub struct KeysConfig {
     pub reload_config: BindingConfig,
     /// Focus the currently visible notification target. Default: "prefix+o".
     pub open_notification_target: BindingConfig,
+    /// Enter link hints mode: visible pane URLs get two-letter markers opened by
+    /// typing them. Default: "prefix+u".
+    pub link_hints: BindingConfig,
     /// Select the previous workspace. Unset by default.
     pub previous_workspace: BindingConfig,
     /// Select the next workspace. Unset by default.
@@ -470,6 +475,8 @@ pub(crate) struct KeysConfigOverlay {
     #[serde(skip_serializing_if = "Option::is_none")]
     settings: Option<BindingConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    manage_machines: Option<BindingConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     new_workspace: Option<BindingConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
     new_worktree: Option<BindingConfig>,
@@ -503,6 +510,8 @@ pub(crate) struct KeysConfigOverlay {
     reload_config: Option<BindingConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
     open_notification_target: Option<BindingConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    link_hints: Option<BindingConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
     previous_workspace: Option<BindingConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -613,6 +622,7 @@ impl<'de> Deserialize<'de> for KeysConfig {
         apply_field!(prefix);
         apply_field!(help);
         apply_field!(settings);
+        apply_field!(manage_machines);
         apply_field!(new_workspace);
         apply_field!(new_worktree);
         apply_field!(open_worktree);
@@ -630,6 +640,7 @@ impl<'de> Deserialize<'de> for KeysConfig {
         apply_field!(detach);
         apply_field!(reload_config);
         apply_field!(open_notification_target);
+        apply_field!(link_hints);
         apply_field!(previous_workspace);
         apply_field!(next_workspace);
         apply_field!(previous_agent);
@@ -734,6 +745,7 @@ impl KeysConfig {
         copy_effective_action_field!(detach, keybinds.detach);
         copy_effective_action_field!(reload_config, keybinds.reload_config);
         copy_effective_action_field!(open_notification_target, keybinds.open_notification_target);
+        copy_effective_action_field!(link_hints, keybinds.link_hints);
         copy_effective_action_field!(previous_workspace, keybinds.previous_workspace);
         copy_effective_action_field!(next_workspace, keybinds.next_workspace);
         copy_effective_action_field!(previous_agent, keybinds.previous_agent);
@@ -853,6 +865,75 @@ pub enum PaneBordersConfig {
     Off,
 }
 
+/// Pane border glyph style selected with `ui.border_style`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum BorderStyleConfig {
+    #[default]
+    Single,
+    Rounded,
+    Double,
+    Thick,
+}
+
+/// Host color capability tier behind `ui.color_depth`.
+///
+/// Resolved values (`Truecolor`/`Color256`) are stored on state after `Auto`
+/// is detected once from the host environment; `Auto` never reaches renderers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ColorDepth {
+    /// Follow the host terminal's advertised capability.
+    #[default]
+    Auto,
+    /// 24-bit RGB output.
+    Truecolor,
+    /// xterm-256 output; RGB theme colors map to the nearest palette index.
+    Color256,
+}
+
+impl ColorDepth {
+    pub fn is_low_color(self) -> bool {
+        matches!(self, Self::Color256)
+    }
+}
+
+/// Parsed `ui.color_depth` value: "auto", "truecolor", or "256".
+///
+/// Newtype wrapper (not a serde enum) so the accepted "256" spelling can
+/// carry a digit; the docs walker treats it as a leaf, and the website
+/// reference documents the three values on the entry itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ColorDepthConfig(ColorDepth);
+
+impl ColorDepthConfig {
+    pub fn depth(self) -> ColorDepth {
+        self.0
+    }
+}
+
+impl From<ColorDepth> for ColorDepthConfig {
+    fn from(depth: ColorDepth) -> Self {
+        Self(depth)
+    }
+}
+
+impl<'de> Deserialize<'de> for ColorDepthConfig {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        match value.trim().to_ascii_lowercase().as_str() {
+            "auto" => Ok(Self(ColorDepth::Auto)),
+            "truecolor" => Ok(Self(ColorDepth::Truecolor)),
+            "256" => Ok(Self(ColorDepth::Color256)),
+            _ => Err(de::Error::custom(
+                "ui.color_depth must be \"auto\", \"truecolor\", or \"256\"",
+            )),
+        }
+    }
+}
+
 impl PaneBordersConfig {
     pub fn draws_borders(self) -> bool {
         !matches!(self, Self::Off)
@@ -925,8 +1006,32 @@ pub struct UiConfig {
     pub redraw_on_focus_gained: bool,
     /// Lines to scroll per mouse wheel notch. Default: 3.
     pub mouse_scroll_lines: Option<NonZeroUsize>,
+    /// Show the which-key popup of available bindings while prefix mode is active. Default: true.
+    pub which_key: bool,
+    /// Time window in milliseconds within which repeated pane clicks count as
+    /// double/triple clicks. Default: 350.
+    pub double_click_ms: u64,
+    /// Minimum milliseconds between drag updates forwarded to the endpoint
+    /// (pane scrollbar, split divider). Default: 33.
+    pub drag_throttle_ms: u64,
+    /// Milliseconds between selection auto-scroll steps while dragging past a
+    /// pane edge. Default: 30.
+    pub selection_autoscroll_interval_ms: u64,
+    /// Lines scrolled per auto-scroll step at the pane edge (also the multiplier
+    /// per row beyond the edge). Default: 3.
+    pub selection_autoscroll_min_lines: usize,
+    /// Maximum lines scrolled per auto-scroll step far past the pane edge. Default: 15.
+    pub selection_autoscroll_max_lines: usize,
     /// Ask for confirmation before closing a workspace. Default: true.
     pub confirm_close: bool,
+    /// Highlight interactive chrome (rows, buttons) under the mouse pointer. Default: true.
+    pub hover_effects: bool,
+    /// Show spinner glyphs while work is in progress (connecting machines, setups). Default: true.
+    pub spinner: bool,
+    /// Animate spinner frames and overlay/toast entrance fades. Default: true.
+    pub animations: bool,
+    /// Briefly highlight pane borders when a pane terminal rings the bell. Default: true.
+    pub visual_bell: bool,
     /// Ask for a tab name before creating a new tab. Default: true.
     pub prompt_new_tab_name: bool,
     /// Ask for a workspace name before interactive creation. Default: false.
@@ -943,6 +1048,11 @@ pub struct UiConfig {
     pub pane_scrollbars: bool,
     /// Keep split panes visually separated instead of sharing divider borders. Default: true.
     pub pane_gaps: bool,
+    /// Pane border glyph style: "single", "rounded", "double", or "thick". Default: single.
+    pub border_style: BorderStyleConfig,
+    /// Output color depth for Herdr's own UI colors: "auto", "truecolor", or "256".
+    /// "auto" detects the host terminal capability from COLORTERM/TERM. Default: auto.
+    pub color_depth: ColorDepthConfig,
     /// Show agent labels in split pane borders when no manual pane label is set. Default: false.
     pub show_agent_labels_on_pane_borders: bool,
     /// Hide the tab row when the workspace has one tab. Default: false.
@@ -1085,6 +1195,7 @@ impl Default for KeysConfig {
             prefix: "ctrl+b".into(),
             help: BindingConfig::one("prefix+?"),
             settings: BindingConfig::one("prefix+s"),
+            manage_machines: BindingConfig::one("prefix+m"),
             new_workspace: BindingConfig::one("prefix+shift+n"),
             new_worktree: BindingConfig::one("prefix+shift+g"),
             open_worktree: BindingConfig::empty(),
@@ -1102,6 +1213,7 @@ impl Default for KeysConfig {
             detach: BindingConfig::one("prefix+q"),
             reload_config: BindingConfig::one("prefix+shift+r"),
             open_notification_target: BindingConfig::one("prefix+o"),
+            link_hints: BindingConfig::one("prefix+u"),
             previous_workspace: BindingConfig::empty(),
             next_workspace: BindingConfig::empty(),
             previous_agent: BindingConfig::empty(),
@@ -1171,13 +1283,25 @@ impl Default for UiConfig {
             right_click_passthrough_modifier: RightClickPassthroughModifierConfig::default(),
             redraw_on_focus_gained: true,
             mouse_scroll_lines: None,
+            which_key: true,
+            double_click_ms: 350,
+            drag_throttle_ms: 33,
+            selection_autoscroll_interval_ms: 30,
+            selection_autoscroll_min_lines: 3,
+            selection_autoscroll_max_lines: 15,
             confirm_close: true,
+            hover_effects: true,
+            spinner: true,
+            animations: true,
+            visual_bell: true,
             prompt_new_tab_name: true,
             prompt_new_workspace_name: false,
             pane_borders: PaneBordersConfig::Auto,
             pane_outer_borders: true,
             pane_scrollbars: true,
             pane_gaps: true,
+            border_style: BorderStyleConfig::Single,
+            color_depth: ColorDepthConfig::default(),
             show_agent_labels_on_pane_borders: false,
             hide_tab_bar_when_single_tab: false,
             tab_bar_position: TabBarPositionConfig::Top,
@@ -1200,6 +1324,18 @@ impl UiConfig {
         self.mouse_scroll_lines
             .map(NonZeroUsize::get)
             .unwrap_or(DEFAULT_MOUSE_SCROLL_LINES)
+    }
+
+    pub fn double_click_window(&self) -> std::time::Duration {
+        std::time::Duration::from_millis(self.double_click_ms)
+    }
+
+    pub fn drag_throttle(&self) -> std::time::Duration {
+        std::time::Duration::from_millis(self.drag_throttle_ms)
+    }
+
+    pub fn selection_autoscroll_interval(&self) -> std::time::Duration {
+        std::time::Duration::from_millis(self.selection_autoscroll_interval_ms)
     }
 
     pub fn right_click_passthrough_modifiers(&self) -> Option<KeyModifiers> {
@@ -1432,6 +1568,24 @@ agent_panel_scope = "current"
     }
 
     #[test]
+    fn feedback_toggles_default_on_and_parse_off() {
+        let default_config = Config::default();
+        assert!(default_config.ui.hover_effects);
+        assert!(default_config.ui.spinner);
+        assert!(default_config.ui.animations);
+        assert!(default_config.ui.visual_bell);
+
+        let config: Config = toml::from_str(
+            "[ui]\nhover_effects = false\nspinner = false\nanimations = false\nvisual_bell = false\n",
+        )
+        .unwrap();
+        assert!(!config.ui.hover_effects);
+        assert!(!config.ui.spinner);
+        assert!(!config.ui.animations);
+        assert!(!config.ui.visual_bell);
+    }
+
+    #[test]
     fn status_indicator_style_defaults_to_dots_and_parses_symbols() {
         assert_eq!(
             Config::default().ui.status_indicators,
@@ -1521,6 +1675,61 @@ tab_bar_right_separator = " · "
             TabBarRightEntryConfig::Hostname
         ));
         assert_eq!(config.ui.tab_bar_right_separator, " · ");
+    }
+
+    #[test]
+    fn border_style_defaults_single_and_parses_variants() {
+        let default_config = Config::default();
+        assert_eq!(default_config.ui.border_style, BorderStyleConfig::Single);
+
+        for (value, expected) in [
+            ("single", BorderStyleConfig::Single),
+            ("rounded", BorderStyleConfig::Rounded),
+            ("double", BorderStyleConfig::Double),
+            ("thick", BorderStyleConfig::Thick),
+        ] {
+            let config: Config =
+                toml::from_str(&format!("[ui]\nborder_style = \"{value}\"")).unwrap();
+            assert_eq!(config.ui.border_style, expected, "value: {value}");
+        }
+
+        let unknown = toml::from_str::<Config>("[ui]\nborder_style = \"dotted\"")
+            .unwrap_err()
+            .to_string();
+        assert!(unknown.contains("border_style") || unknown.contains("unknown variant"));
+    }
+
+    #[test]
+    fn color_depth_defaults_auto_and_parses_variants() {
+        let default_config = Config::default();
+        assert_eq!(default_config.ui.color_depth.depth(), ColorDepth::Auto);
+
+        for (value, expected) in [
+            ("auto", ColorDepth::Auto),
+            ("truecolor", ColorDepth::Truecolor),
+            ("256", ColorDepth::Color256),
+        ] {
+            let config: Config =
+                toml::from_str(&format!("[ui]\ncolor_depth = \"{value}\"")).unwrap();
+            assert_eq!(config.ui.color_depth.depth(), expected, "value: {value}");
+        }
+
+        for value in ["16", "256color", "rgb"] {
+            assert!(
+                toml::from_str::<Config>(&format!("[ui]\ncolor_depth = \"{value}\"")).is_err(),
+                "value {value:?} should be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn color_depth_wrapper_is_a_leaf_for_docs_walk() {
+        // ColorDepthConfig is a newtype, not a serde enum: keep it that way so
+        // the "256" spelling survives and the docs walker treats it as a leaf.
+        let depth = ColorDepthConfig::from(ColorDepth::Color256);
+        assert!(depth.depth().is_low_color());
+        assert!(!ColorDepth::Truecolor.is_low_color());
+        assert!(!ColorDepth::Auto.is_low_color());
     }
 
     #[test]

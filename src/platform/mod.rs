@@ -158,6 +158,28 @@ pub fn detach_server_daemon_command(command: &mut std::process::Command) {
     }
 }
 
+/// Detaches a child from the controlling terminal so OpenSSH cannot read
+/// prompts from `/dev/tty` and must use its `SSH_ASKPASS` helper. Older
+/// OpenSSH releases without `SSH_ASKPASS_REQUIRE` only consult the helper
+/// when no controlling terminal exists; releases that honor `force` are
+/// unaffected. Windows OpenSSH has no `/dev/tty` concept and needs nothing.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(crate) fn detach_child_from_controlling_terminal(command: &mut std::process::Command) {
+    use std::os::unix::process::CommandExt;
+
+    unsafe {
+        command.pre_exec(|| {
+            if libc::setsid() < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+pub(crate) fn detach_child_from_controlling_terminal(_command: &mut std::process::Command) {}
+
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub fn current_process_is_detached_server_daemon() -> bool {
     unsafe { libc::getsid(0) == libc::getpid() }
@@ -266,6 +288,29 @@ pub(crate) struct RemoteSshConfigPaths {
     pub(crate) multiplexing: bool,
 }
 
+/// Home directory used to expand a leading `~` in SSH client config paths
+/// (`Include`, `IdentityFile`). Matches the per-OS home source already used by
+/// `remote_ssh_config_paths`; only the variable selection is OS-specific, so a
+/// pure strategy constant keeps both branches compiling on every target.
+pub(crate) fn ssh_config_home_dir() -> Option<std::path::PathBuf> {
+    let non_empty = |key: &str| std::env::var_os(key).filter(|value| !value.is_empty());
+    if cfg!(windows) {
+        non_empty("USERPROFILE")
+            .or_else(|| match (non_empty("HOMEDRIVE"), non_empty("HOMEPATH")) {
+                (Some(drive), Some(path)) => {
+                    let mut home = std::path::PathBuf::from(drive);
+                    home.push(path);
+                    Some(home.into_os_string())
+                }
+                _ => None,
+            })
+            .or_else(|| non_empty("HOME"))
+            .map(std::path::PathBuf::from)
+    } else {
+        non_empty("HOME").map(std::path::PathBuf::from)
+    }
+}
+
 pub(crate) const REMOTE_BRIDGE_IDLE_TIMEOUT_SUPPORTED: bool =
     cfg!(any(target_os = "linux", target_os = "macos"));
 
@@ -277,7 +322,8 @@ mod remote_bridge_tests;
 mod unix_common;
 #[cfg(unix)]
 pub(crate) use unix_common::{
-    begin_cli_output, end_cli_output, forward_remote_bridge_stdio, RemoteBridgeWake,
+    begin_cli_output, default_known_hosts_path, end_cli_output, forward_remote_bridge_stdio,
+    RemoteBridgeWake,
 };
 
 mod client_state;

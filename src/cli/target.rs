@@ -75,12 +75,7 @@ pub(super) fn api_client() -> io::Result<ApiClient> {
         }
         if target.bridge.is_none() {
             target.bridge = Some(
-                crate::remote::SavedSshApiBridge::start(
-                    target.profile.id.as_str(),
-                    &target.profile.target,
-                    &target.profile.session,
-                )
-                .map_err(|error| {
+                crate::remote::SavedSshApiBridge::start(&target.profile).map_err(|error| {
                     io::Error::new(
                         error.kind(),
                         crate::i18n::fill(
@@ -226,7 +221,7 @@ fn parse_machine_prefix(args: &[String]) -> Result<Option<(String, Vec<String>)>
     Ok(Some((machine, cleaned)))
 }
 
-fn resolve_machine<'a>(
+pub(super) fn resolve_machine<'a>(
     profiles: &'a [SavedSshEndpoint],
     selector: &str,
 ) -> Result<&'a SavedSshEndpoint, String> {
