@@ -75,6 +75,7 @@ mod bootstrap;
 mod client_views;
 mod endpoint_requests;
 mod lifecycle;
+mod multi_view;
 mod notifications;
 mod pane_graphics;
 mod render;
@@ -193,7 +194,10 @@ enum AltScreenReadConflict {
 
 /// The headless server — runs the herdr event loop without a real terminal.
 pub struct HeadlessServer {
-    app: app::App,
+    pub(super) text_snapshots: super::text_snapshots::Store,
+    pub(super) app: app::App,
+    observability: Option<crate::server::observability::Runtime>,
+    observation_liveness: HashMap<u64, Arc<AtomicBool>>,
     #[cfg(unix)]
     api_tx: Option<api::ApiRequestSender>,
     // Kept on every platform so dropping HeadlessServer owns API server shutdown.
@@ -213,7 +217,7 @@ pub struct HeadlessServer {
     /// Stable tab id whose viewers may see and interact with the one terminal popup.
     popup_owner_tab_id: Option<String>,
     /// Process-local identity used to reject shell replacements from an earlier server boot.
-    client_shell_boot_id: String,
+    pub(super) client_shell_boot_id: String,
     /// Outer window title last pushed, paired with the client that received it.
     /// Keying on the client means a newly attached terminal is written to even
     /// when the title itself has not changed, without every code path that
@@ -340,6 +344,9 @@ impl HeadlessServer {
         let _ = api_tx;
         Ok(Self {
             app,
+            observability: None,
+            text_snapshots: super::text_snapshots::Store::default(),
+            observation_liveness: HashMap::new(),
             #[cfg(unix)]
             api_tx,
             api_server,
@@ -503,6 +510,7 @@ impl HeadlessServer {
 
             // 6. Handle scheduled tasks.
             let now = Instant::now();
+            self.text_snapshots.expire(now);
             if self.handle_scheduled_tasks_headless(now, needs_render) {
                 needs_render = true;
                 needs_full_render = true;
@@ -993,6 +1001,13 @@ impl HeadlessServer {
     }
 
     fn remove_client(&mut self, client_id: u64) -> bool {
+        self.text_snapshots.release_owner(client_id);
+        if let Some(active) = self.observation_liveness.remove(&client_id) {
+            active.store(false, Ordering::Release);
+        }
+        if let Some(runtime) = &self.observability {
+            runtime.release(client_id);
+        }
         self.retire_direct_graphics_for_client(client_id);
         let disconnected_focus = self
             .clients
@@ -2396,6 +2411,9 @@ impl HeadlessServer {
                     },
                 )
             }
+            ServerEvent::ClientViewInput { client_id, input } => {
+                self.handle_view_input(client_id, input)
+            }
             ServerEvent::ClientShellPaneInput {
                 client_id,
                 pane_id,
@@ -2654,13 +2672,29 @@ impl HeadlessServer {
                 );
                 navigation_changed | geometry_changed
             }
+            ServerEvent::ObservationResponse {
+                client_id,
+                boot_id,
+                message,
+            } => {
+                if boot_id == self.client_shell_boot_id && self.clients.contains_key(&client_id) {
+                    self.send_to_client(client_id, message);
+                }
+                false
+            }
             ServerEvent::ClientDetach { client_id } => {
+                if let Some(runtime) = &self.observability {
+                    runtime.release(client_id);
+                }
                 info!(client_id, "client detached");
                 self.send_terminal_stream_detach_shutdown(client_id);
                 self.remove_client_and_resize_if_needed(client_id);
                 true
             }
             ServerEvent::ClientDisconnected { client_id } => {
+                if let Some(runtime) = &self.observability {
+                    runtime.release(client_id);
+                }
                 info!(client_id, "client disconnected");
                 self.remove_client_and_resize_if_needed(client_id);
                 true
@@ -2953,6 +2987,39 @@ impl HeadlessServer {
                     .to_string()
             });
             let _ = msg.respond_to.send(response);
+            return false;
+        }
+
+        if super::text_snapshots::handles(&msg.request.method) {
+            let response = match self.text_snapshot_request(&msg.request.method, None) {
+                Ok(result) => serde_json::to_string(&api::schema::SuccessResponse {
+                    id: msg.request.id.clone(),
+                    result,
+                })
+                .unwrap_or_else(|error| {
+                    super::client_commands::error_response(
+                        msg.request.id.clone(),
+                        "serialization_error",
+                        error.to_string(),
+                    )
+                }),
+                Err((code, message)) => {
+                    super::client_commands::error_response(msg.request.id.clone(), code, message)
+                }
+            };
+            let _ = msg.respond_to.send(response);
+            return false;
+        }
+
+        if crate::server::observability::is_background_method(&msg.request.method) {
+            self.submit_observation(
+                msg.request,
+                crate::server::observability::Reply::Api {
+                    sender: msg.respond_to,
+                    active: msg.stream_active,
+                    latest: msg.observation_events,
+                },
+            );
             return false;
         }
 

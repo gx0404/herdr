@@ -269,6 +269,10 @@ fn every_dialog_and_menu_occludes_its_panel_not_the_whole_screen() {
             highlighted: 0,
         }),
         ClientShellOverlay::CommandPalette(super::command_palette::ClientCommandPaletteOverlay {
+            view: super::command_palette::BrowserView::Search,
+            focus: super::page::PageFocus::Search,
+            reveal: true,
+            aliases: HashMap::new(),
             query: TextEditor::default(),
             selected: 0,
             scroll: 0,
@@ -276,6 +280,10 @@ fn every_dialog_and_menu_occludes_its_panel_not_the_whole_screen() {
             recent_ids: Vec::new(),
         }),
         ClientShellOverlay::Settings(ClientSettingsOverlay {
+            focus: super::page::PageFocus::Content,
+            current: 0,
+            scroll: 0,
+            reveal: true,
             section: ClientSettingsSection::Theme,
             selected: 0,
             original_theme_name: String::new(),
@@ -296,6 +304,7 @@ fn every_dialog_and_menu_occludes_its_panel_not_the_whole_screen() {
         let mut buffer = Buffer::empty(Rect::new(0, 0, 106, 40));
         let snapshot = state.snapshot.as_deref().unwrap();
         let cx = super::super::feedback::ChromeContext {
+            page_bounds: None,
             palette: &state.config.palette,
             components: &state.config.components,
             glyphs: state.config.border_glyphs,
@@ -310,7 +319,7 @@ fn every_dialog_and_menu_occludes_its_panel_not_the_whole_screen() {
             _ => render::render_client_overlay(
                 &mut buffer,
                 &overlay,
-                snapshot,
+                Some(snapshot),
                 &state.endpoints,
                 &state.saved_profiles,
                 &state.broadcast,

@@ -545,7 +545,7 @@ mod tests {
             .duration_since(std::time::UNIX_EPOCH)
             .expect("system clock after epoch")
             .as_nanos();
-        std::path::PathBuf::from("/var/tmp").join(format!(
+        std::env::temp_dir().join(format!(
             "herdr-tab-status-{name}-{}-{stamp}",
             std::process::id()
         ))

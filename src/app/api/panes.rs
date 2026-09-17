@@ -206,6 +206,22 @@ impl App {
         }
     }
 
+    pub(crate) fn capture_pane_text_snapshot(
+        &self,
+        target: &str,
+    ) -> Result<crate::terminal::text_snapshot::FrozenText, (&'static str, String)> {
+        let (ws_idx, pane_id) = self
+            .parse_pane_id(target)
+            .ok_or(("pane_not_found", "窗格已不存在".into()))?;
+        self.state
+            .runtime_for_pane_in_workspace(&self.terminal_runtimes, ws_idx, pane_id)
+            .and_then(|runtime| runtime.capture_text_snapshot())
+            .ok_or((
+                "snapshot_unavailable",
+                "无法固定当前画面，或画面超过阅读容量限制".into(),
+            ))
+    }
+
     pub(crate) fn pane_selection_text(
         &self,
         params: &PaneSelectionReadParams,

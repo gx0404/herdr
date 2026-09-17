@@ -1,6 +1,43 @@
 use super::*;
 
 impl HeadlessServer {
+    pub(super) fn submit_observation(
+        &mut self,
+        request: api::schema::Request,
+        reply: crate::server::observability::Reply,
+    ) {
+        let pane = match &request.method {
+            api::schema::Method::AccountBindingSet(params) => Some(params.pane_id.as_str()),
+            api::schema::Method::AccountUsageReport(params) => params.pane_id.as_deref(),
+            api::schema::Method::AccountUsageGet(params)
+            | api::schema::Method::AccountUsageRefresh(params)
+            | api::schema::Method::AccountUsageSubscribe(params) => params.pane_id.as_deref(),
+            _ => None,
+        };
+        if pane.is_some_and(|pane| self.app.parse_pane_id(pane).is_none()) {
+            reply.response(
+                &request.id,
+                Err(("pane_not_found", "账号查询目标窗格已不存在".into())),
+            );
+            return;
+        }
+        if self.observability.is_none() {
+            match crate::server::observability::Runtime::start(self.client_shell_boot_id.clone()) {
+                Ok(runtime) => self.observability = Some(runtime),
+                Err(error) => {
+                    reply.response(
+                        &request.id,
+                        Err(("server_unavailable", format!("无法启动观测服务：{error}"))),
+                    );
+                    return;
+                }
+            }
+        }
+        if let Some(runtime) = &self.observability {
+            runtime.submit(request, reply);
+        }
+    }
+
     pub(super) fn handle_client_shell_endpoint_request(
         &mut self,
         client_id: u64,
@@ -33,6 +70,72 @@ impl HeadlessServer {
                 "endpoint command targeted an earlier server boot",
             );
             self.send_to_client(client_id, message);
+            return false;
+        }
+        if crate::server::text_snapshots::handles(&request.method) {
+            let response = match self.text_snapshot_request(&request.method, Some(client_id)) {
+                Ok(result) => serde_json::to_string(&api::schema::SuccessResponse {
+                    id: request_id.clone(),
+                    result,
+                })
+                .unwrap_or_else(|error| {
+                    crate::server::client_commands::error_response(
+                        request_id.clone(),
+                        "serialization_error",
+                        error.to_string(),
+                    )
+                }),
+                Err((code, message)) => crate::server::client_commands::error_response(
+                    request_id.clone(),
+                    code,
+                    message,
+                ),
+            };
+            let chunks = response.as_bytes().chunks(512 * 1024);
+            let count = chunks.len();
+            for (index, data) in chunks.enumerate() {
+                self.send_to_client(
+                    client_id,
+                    crate::protocol::ServerMessage::ClientShellEndpointResponseChunk {
+                        boot_id: boot_id.clone(),
+                        request_id: request_id.clone(),
+                        final_chunk: index + 1 == count,
+                        data: data.to_vec(),
+                    },
+                );
+            }
+            return false;
+        }
+        if let api::schema::Method::ClientViewsSet(params) = &request.method {
+            let result = self.set_client_views(client_id, params.clone());
+            let message = match &result {
+                Ok(_) => crate::server::client_commands::success_message_with_result(
+                    boot_id,
+                    request_id,
+                    self.client_views_result(client_id),
+                ),
+                Err(message) => crate::server::client_commands::error_message(
+                    boot_id,
+                    request_id,
+                    "invalid_views",
+                    message,
+                ),
+            };
+            self.send_to_client(client_id, message);
+            return result.unwrap_or(false);
+        }
+        if crate::server::observability::is_background_method(&request.method) {
+            let reply = crate::server::observability::Reply::Endpoint {
+                client_id,
+                boot_id,
+                events: self.server_event_tx.clone(),
+                active: self
+                    .observation_liveness
+                    .entry(client_id)
+                    .or_insert_with(|| Arc::new(AtomicBool::new(true)))
+                    .clone(),
+            };
+            self.submit_observation(*request, reply);
             return false;
         }
         let surface_active = client.shell_surface_active;
@@ -123,6 +226,7 @@ impl HeadlessServer {
                     request: *request,
                     respond_to,
                     response_write_complete: None,
+                    observation_events: None,
                     stream_active: None,
                 },
             )

@@ -224,6 +224,7 @@ mod tests {
         components: &'a crate::app::state::ComponentStyles,
     ) -> super::super::feedback::ChromeContext<'a> {
         super::super::feedback::ChromeContext {
+            page_bounds: None,
             palette,
             components,
             glyphs: crate::ui::BorderGlyphs::SINGLE,

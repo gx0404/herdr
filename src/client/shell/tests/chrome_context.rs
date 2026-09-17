@@ -414,8 +414,8 @@ fn global_menu_opens_from_sidebar_and_routes_client_actions() {
         .join("\n");
     let compact: String = text.chars().filter(|ch| !ch.is_whitespace()).collect();
     assert!(compact.contains("设置"));
-    assert!(compact.contains("快捷键"));
-    assert!(compact.contains("重载配置"));
+    assert!(compact.contains("帮助与通知"));
+    assert!(compact.contains("机器与SSH"));
     // The palette viewport clips long lists; the full action set is in the index.
     let titles: Vec<&str> = palette_overlay(&state)
         .items
@@ -427,6 +427,9 @@ fn global_menu_opens_from_sidebar_and_routes_client_actions() {
         "detach action indexed: {titles:?}"
     );
 
+    let category_index = palette_row_index(&state, "category:6");
+    state.activate_palette_item(category_index, &mut ClientShellInput::default());
+    state.compose(106, 30).expect("帮助分类");
     let keybinds_index = palette_row_index(&state, "binding:Help");
     let keybinds = state
         .hits
@@ -444,7 +447,7 @@ fn global_menu_opens_from_sidebar_and_routes_client_actions() {
     assert!(help.actions.is_empty());
     assert!(matches!(state.overlay, Some(ClientShellOverlay::Help(_))));
 
-    state.toggle_global_menu();
+    state.open_command_search();
     palette_select(&mut state, "binding:Detach");
     let detach = state.handle_input_bytes(b"\r");
     assert!(detach.detach);

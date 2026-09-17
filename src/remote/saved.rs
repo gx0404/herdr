@@ -20,7 +20,7 @@ pub(crate) struct SavedSshStream {
 }
 
 pub(crate) fn connect_saved_ssh(profile: &SavedSshEndpoint) -> io::Result<SavedSshStream> {
-    connect_saved_ssh_with(profile, None)
+    connect_saved_ssh_with(profile, None, None, None)
 }
 
 /// Approved interactive retry after a BatchMode probe classified the failure
@@ -55,18 +55,46 @@ pub(crate) fn connect_saved_ssh_interactive(
     profile: &SavedSshEndpoint,
     channel: SshAskpassChannel,
 ) -> io::Result<SavedSshStream> {
-    connect_saved_ssh_with(profile, Some(channel))
+    connect_saved_ssh_with(profile, Some(channel), None, None)
+}
+
+pub(crate) fn connect_saved_ssh_authenticated(
+    profile: &SavedSshEndpoint,
+    channel: SshAskpassChannel,
+    prepare: bool,
+    pin: Option<&(
+        super::known_hosts::EffectiveHostKeyTarget,
+        super::known_hosts::KnownHostKey,
+    )>,
+    progress: &dyn Fn(super::attach::SavedSshBootstrapStep),
+) -> io::Result<SavedSshStream> {
+    connect_saved_ssh_with(profile, Some(channel), prepare.then_some(progress), pin)
 }
 
 fn connect_saved_ssh_with(
     profile: &SavedSshEndpoint,
     askpass: Option<SshAskpassChannel>,
+    prepare: Option<&dyn Fn(super::attach::SavedSshBootstrapStep)>,
+    pin: Option<&(
+        super::known_hosts::EffectiveHostKeyTarget,
+        super::known_hosts::KnownHostKey,
+    )>,
 ) -> io::Result<SavedSshStream> {
     let result = (|| {
         let askpass_environment = askpass
             .as_ref()
             .map(|channel| channel.environment().clone());
-        let ssh = validated_saved_ssh(profile, askpass_environment)?;
+        let mut ssh = validated_saved_ssh(profile, askpass_environment)?;
+        if let Some((target, key)) = pin {
+            if super::known_hosts::effective_host_key_target(profile)? != *target {
+                return Err(io::Error::other("SSH 配置已变化，请重新确认主机指纹"));
+            }
+            ssh.pin_host_key(target, key)?;
+        }
+        if let Some(progress) = prepare {
+            super::attach::prepare_approved_saved_ssh(&ssh, &profile.session, progress)?;
+        }
+        super::process::check_cancelled()?;
         let remote_herdr = find_installed_remote_herdr(&ssh)?;
         let path = saved_bridge_path(profile.id.as_str());
         let bridge = SshStdioBridge::start(

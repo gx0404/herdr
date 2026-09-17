@@ -177,6 +177,7 @@ pub(super) enum ChromeHover {
 /// growing parallel parameter lists.
 #[derive(Clone, Copy)]
 pub(super) struct ChromeContext<'a> {
+    pub(super) page_bounds: Option<Rect>,
     pub(super) palette: &'a Palette,
     pub(super) components: &'a crate::app::state::ComponentStyles,
     pub(super) glyphs: crate::ui::BorderGlyphs,

@@ -13,7 +13,7 @@ const MAX_RETRY_DELAY: Duration = Duration::from_secs(120);
 const MAX_LOCAL_RETRY_DELAY: Duration = Duration::from_secs(30);
 const STABLE_CONNECTION_PERIOD: Duration = Duration::from_secs(60);
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub(crate) struct EndpointConnectOptions {
     pub(crate) cols: u16,
     pub(crate) rows: u16,
@@ -23,6 +23,26 @@ pub(crate) struct EndpointConnectOptions {
     pub(crate) surface_size: ClientSurfaceSize,
     pub(crate) endpoint_keybindings: bool,
     pub(crate) mouse_capture: bool,
+}
+
+pub(crate) struct PreparedEndpointConnection {
+    reader: crate::ipc::LocalStream,
+    writer: NativeEndpointTransport,
+    negotiation: EndpointNegotiation,
+}
+
+pub(crate) fn prepare_interactive_connection(
+    connected: crate::remote::SavedSshStream,
+    options: EndpointConnectOptions,
+    cancel: &crate::remote::TaskCancellation,
+) -> std::io::Result<PreparedEndpointConnection> {
+    prepare_endpoint_connection(
+        connected.stream,
+        Box::new(connected.bridge),
+        options,
+        true,
+        Some(cancel),
+    )
 }
 
 pub(crate) enum EndpointSupervisorEvent {
@@ -113,6 +133,35 @@ impl EndpointSupervisors {
         }
     }
 
+    pub(crate) fn adopt_interactive(
+        &mut self,
+        profile: super::SavedSshEndpoint,
+        prepared: PreparedEndpointConnection,
+        now: Instant,
+        event_tx: &tokio::sync::mpsc::Sender<EndpointSupervisorEvent>,
+    ) {
+        let endpoint_id = ClientEndpointId::Ssh(profile.id.clone());
+        let generation = self.next_generation;
+        self.next_generation = self.next_generation.saturating_add(1);
+        let mut state = ReconnectState::new(ConnectTarget::Ssh(Box::new(profile.clone())), now);
+        state.generation = Some(generation);
+        state.next_attempt = None;
+        state.in_flight = true;
+        self.endpoints.insert(endpoint_id.clone(), state);
+        let forwards = self.forwards.clone();
+        let event_tx = event_tx.clone();
+        std::thread::spawn(move || {
+            lock_forwards(&forwards).rebuild(&profile);
+            let _ = event_tx.blocking_send(EndpointSupervisorEvent::Connected {
+                endpoint_id,
+                generation,
+                reader: prepared.reader,
+                writer: prepared.writer,
+                negotiation: prepared.negotiation,
+            });
+        });
+    }
+
     pub(crate) fn add_local(&mut self, path: PathBuf, generation: Option<u64>, now: Instant) {
         let mut state = ReconnectState::new(ConnectTarget::Local(path), now);
         state.generation = generation;
@@ -133,10 +182,7 @@ impl EndpointSupervisors {
                 return true;
             };
             let keep = profiles.iter().any(|profile| {
-                profile.id == previous.id
-                    && profile.enabled
-                    && profile.target == previous.target
-                    && profile.session == previous.session
+                profile.id == previous.id && profile.enabled && profile.same_connection(previous)
             });
             if !keep {
                 retired.push(endpoint_id.clone());
@@ -378,7 +424,7 @@ fn connect_once(
     endpoint_id: ClientEndpointId,
     generation: u64,
 ) -> Result<EndpointSupervisorEvent, std::io::Error> {
-    let (mut stream, lifetime): (_, Box<dyn Send>) = match target {
+    let (stream, lifetime): (_, Box<dyn Send>) = match target {
         ConnectTarget::Local(path) => {
             let stream = crate::ipc::connect_local_stream(path).map_err(|error| {
                 // An absent Local socket is transient, unlike a missing SSH install.
@@ -406,6 +452,24 @@ fn connect_once(
             (connected.stream, Box::new(connected.bridge))
         }
     };
+    let prepared =
+        prepare_endpoint_connection(stream, lifetime, options, !endpoint_id.is_local(), None)?;
+    Ok(EndpointSupervisorEvent::Connected {
+        endpoint_id,
+        generation,
+        reader: prepared.reader,
+        writer: prepared.writer,
+        negotiation: prepared.negotiation,
+    })
+}
+
+fn prepare_endpoint_connection(
+    mut stream: crate::ipc::LocalStream,
+    lifetime: Box<dyn Send>,
+    options: EndpointConnectOptions,
+    remote: bool,
+    cancel: Option<&crate::remote::TaskCancellation>,
+) -> std::io::Result<PreparedEndpointConnection> {
     let handshake = super::super::do_handshake(
         &mut stream,
         options.cols,
@@ -417,6 +481,7 @@ fn connect_once(
         options.endpoint_keybindings,
         options.mouse_capture,
         false,
+        cancel,
     )
     .map_err(handshake_error)?;
     if handshake.encoding != RenderEncoding::SemanticFrame {
@@ -430,8 +495,7 @@ fn connect_once(
         handshake.endpoint_capabilities.unwrap_or_default(),
     )
     .with_server_version(handshake.server_version);
-    if !negotiation.supports_surface_interest()
-        || (!endpoint_id.is_local() && !negotiation.supports_health_check())
+    if !negotiation.supports_surface_interest() || (remote && !negotiation.supports_health_check())
     {
         return Err(std::io::Error::new(
             std::io::ErrorKind::Unsupported,
@@ -440,9 +504,7 @@ fn connect_once(
     }
     let reader = stream.try_clone()?;
     let writer = NativeEndpointTransport::with_lifetime(stream, lifetime)?;
-    Ok(EndpointSupervisorEvent::Connected {
-        endpoint_id,
-        generation,
+    Ok(PreparedEndpointConnection {
         reader,
         writer,
         negotiation,

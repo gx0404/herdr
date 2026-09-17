@@ -18,7 +18,10 @@ pub(super) fn dispatch_client_shell_actions(
                 request,
             } => {
                 if let Some(connection) = endpoints.connection(&endpoint_id).filter(|_| {
-                    endpoints.active_id() == &endpoint_id && endpoints.active_surface_available()
+                    crate::api::api_method_name(&request.method).starts_with("account.")
+                        || crate::api::api_method_name(&request.method).starts_with("system.")
+                        || (endpoints.active_id() == &endpoint_id
+                            && endpoints.active_surface_available())
                 }) {
                     endpoint_commands.enqueue(endpoint_id, connection.generation, boot_id, request);
                 } else if let Some(shell) = shell.as_deref_mut() {
@@ -62,46 +65,52 @@ pub(super) fn dispatch_client_shell_actions(
             shell::ClientShellAction::ReconnectEndpoint { endpoint_id } => {
                 let _ = event_tx.try_send(ClientLoopEvent::ReconnectEndpoint { endpoint_id });
             }
-            shell::ClientShellAction::ConnectEndpointTrustOnce { endpoint_id } => {
-                let _ =
-                    event_tx.try_send(ClientLoopEvent::ConnectEndpointTrustOnce { endpoint_id });
-            }
             shell::ClientShellAction::MachineHostKeyOp {
+                cancel,
                 ticket,
                 op,
-                host,
-                port,
+                profile,
+                reviewed,
             } => {
                 let op_tx = event_tx.clone();
                 std::thread::spawn(move || {
-                    let result = match op {
-                        shell::MachineHostKeyOp::Scan => crate::remote::scan_host_keys(&host, port)
-                            .map(|keys| {
-                                shell::MachineHostKeyOutcome::Scanned(
-                                    keys.into_iter()
-                                        .map(|key| (key.key_type, key.fingerprint.fingerprint))
-                                        .collect(),
-                                )
-                            }),
-                        shell::MachineHostKeyOp::Precollect => {
-                            crate::remote::precollect_host_keys(&host, port)
-                                .map(|keys| shell::MachineHostKeyOutcome::Precollected(keys.len()))
-                        }
-                        shell::MachineHostKeyOp::Remove => {
-                            crate::remote::remove_host_key(&host, port)
-                                .map(|_| shell::MachineHostKeyOutcome::Removed)
-                        }
-                    }
-                    .map_err(|error| error.to_string());
+                    let result = cancel
+                        .run(|| match op {
+                            shell::MachineHostKeyOp::Scan => {
+                                crate::remote::review_profile_host_key(&profile)
+                                    .map(shell::MachineHostKeyOutcome::Scanned)
+                            }
+                            shell::MachineHostKeyOp::Precollect => {
+                                let (target, key) = reviewed
+                                    .as_ref()
+                                    .ok_or_else(|| io::Error::other("请先查看并确认主机指纹"))?;
+                                crate::remote::remember_reviewed_host_key(&profile, target, key)
+                                    .map(shell::MachineHostKeyOutcome::Precollected)
+                            }
+                            shell::MachineHostKeyOp::Remove => {
+                                crate::remote::remove_profile_host_key(&profile)
+                                    .map(|_| shell::MachineHostKeyOutcome::Removed)
+                            }
+                        })
+                        .map_err(|error| error.to_string());
                     let _ = op_tx.blocking_send(ClientLoopEvent::MachineAuth {
                         update: shell::MachineAuthUpdate::HostKeyOpFinished { ticket, op, result },
                     });
                 });
             }
-            shell::ClientShellAction::StartMachineInteractiveAuth { ticket, profile } => {
+            shell::ClientShellAction::StartMachineInteractiveAuth {
+                bootstrap,
+                pin,
+                ticket,
+                profile,
+                cancel,
+            } => {
+                let options = shell
+                    .as_ref()
+                    .and_then(|shell| shell.endpoint_connect_options);
                 let auth_tx = event_tx.clone();
                 std::thread::spawn(move || {
-                    let run = || -> io::Result<()> {
+                    let run = || -> io::Result<endpoint::PreparedEndpointConnection> {
                         let (channel, prompts) = crate::remote::start_interactive_auth_channel(
                             crate::remote::SshAuthApproval::Approved,
                         )?;
@@ -121,12 +130,47 @@ pub(super) fn dispatch_client_shell_actions(
                                 }
                             }
                         });
-                        crate::remote::connect_saved_ssh_interactive(&profile, channel).map(drop)
+                        let connected = crate::remote::connect_saved_ssh_authenticated(
+                            &profile,
+                            channel,
+                            bootstrap,
+                            pin.as_ref(),
+                            &|step| {
+                                let _ = auth_tx.blocking_send(ClientLoopEvent::MachineAuth {
+                                    update: shell::MachineAuthUpdate::InteractiveStep {
+                                        ticket,
+                                        step,
+                                    },
+                                });
+                            },
+                        )?;
+                        endpoint::prepare_interactive_connection(
+                            connected,
+                            options.ok_or_else(|| {
+                                io::Error::other("终端尺寸尚未准备好，请重试连接")
+                            })?,
+                            &cancel,
+                        )
                     };
-                    let result = run().map_err(|error| error.to_string());
-                    let _ = auth_tx.blocking_send(ClientLoopEvent::MachineAuth {
-                        update: shell::MachineAuthUpdate::InteractiveFinished { ticket, result },
-                    });
+                    match cancel.run(run) {
+                        Ok(connection) if !cancel.is_cancelled() => {
+                            cancel.complete();
+                            let _ =
+                                auth_tx.blocking_send(ClientLoopEvent::MachineInteractiveReady {
+                                    ticket,
+                                    connection: Box::new(connection),
+                                });
+                        }
+                        Ok(_) => {}
+                        Err(error) => {
+                            let _ = auth_tx.blocking_send(ClientLoopEvent::MachineAuth {
+                                update: shell::MachineAuthUpdate::InteractiveFinished {
+                                    ticket,
+                                    result: Err(error.to_string()),
+                                },
+                            });
+                        }
+                    }
                 });
             }
             shell::ClientShellAction::AnswerMachineAuthPrompt { ticket, answer } => {
@@ -136,6 +180,7 @@ pub(super) fn dispatch_client_shell_actions(
                 let _ = event_tx.try_send(ClientLoopEvent::MachineAuthCancel { ticket });
             }
             shell::ClientShellAction::BootstrapMachine {
+                cancel,
                 ticket,
                 target,
                 session,
@@ -147,25 +192,30 @@ pub(super) fn dispatch_client_shell_actions(
                         let _ = bootstrap_tx
                             .blocking_send(ClientLoopEvent::MachineBootstrap { ticket, update });
                     };
-                    let result = crate::remote::prepare_saved_ssh_unattended(
-                        &target,
-                        &session,
-                        options.as_ref(),
-                        &|step| send(shell::MachineBootstrapUpdate::Step(step)),
-                    );
+                    let result = cancel.run(|| {
+                        crate::remote::prepare_saved_ssh_unattended(
+                            &target,
+                            &session,
+                            options.as_ref(),
+                            &|step| send(shell::MachineBootstrapUpdate::Step(step)),
+                        )
+                    });
                     send(shell::MachineBootstrapUpdate::Finished(
                         result.map_err(|error| error.to_string()),
                     ));
                 });
             }
             shell::ClientShellAction::MachineFsOp {
+                cancel,
                 ticket,
                 profile,
                 op,
             } => {
                 let fs_tx = event_tx.clone();
                 std::thread::spawn(move || {
-                    let result = run_machine_fs_op(&profile, op);
+                    let result = cancel
+                        .run(|| run_machine_fs_op(&profile, op).map_err(io::Error::other))
+                        .map_err(|error| error.to_string());
                     let _ = fs_tx.blocking_send(ClientLoopEvent::MachineFs { ticket, result });
                 });
             }
@@ -555,6 +605,9 @@ pub(super) fn complete_endpoint_activation(
     }
 
     let _ = pending.take();
+    if let Some(shell) = &mut state.shell {
+        shell.renew_workbench_surface();
+    }
     endpoints.unfreeze_input();
     let successor = match completion {
         endpoint::ActivationCompletion::RestoredSource {
@@ -885,6 +938,14 @@ pub(super) fn finish_client_shell_input(
         .is_none_or(|shell| shell.endpoint_is_online(endpoints.active_id()))
         && endpoints.active_surface_available();
     for request in outcome.requests {
+        let request = if let Some(shell) = &state.shell {
+            let Some(request) = shell.view_request(request) else {
+                continue;
+            };
+            request
+        } else {
+            request
+        };
         if let ClientMessage::ClientShellHostTheme { update } = &request {
             state.record_host_theme_update(update);
             if let Some(activation) = pending_activation.as_mut() {

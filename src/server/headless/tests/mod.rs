@@ -1,5 +1,6 @@
 use super::*;
 
+mod multi_view;
 #[path = "pane_graphics.rs"]
 mod pane_graphics_tests;
 #[path = "surface_interest.rs"]
@@ -65,6 +66,9 @@ fn test_headless_server_with_event_hub(event_hub: api::EventHub) -> HeadlessServ
     let headless_size = app.state.headless_size;
 
     HeadlessServer {
+        text_snapshots: crate::server::text_snapshots::Store::default(),
+        observability: None,
+        observation_liveness: HashMap::new(),
         app,
         #[cfg(unix)]
         api_tx: None,
@@ -216,6 +220,7 @@ fn headless_pane_list(server: &mut HeadlessServer) -> Vec<api::schema::PaneInfo>
         },
         respond_to,
         response_write_complete: None,
+        observation_events: None,
         stream_active: None,
     });
     let response: api::schema::SuccessResponse =
@@ -274,6 +279,7 @@ fn headless_api_request_drains_all_pending_internal_events_before_reading_state(
             },
             respond_to,
             response_write_complete: None,
+            observation_events: None,
             stream_active: None,
         })
     );
@@ -1851,6 +1857,7 @@ async fn client_local_navigation_does_not_emit_global_focus_transitions() {
             },
             respond_to,
             response_write_complete: None,
+            observation_events: None,
             stream_active: None,
         },
     );
@@ -1942,6 +1949,7 @@ async fn client_local_navigation_emits_pane_focused_only_when_that_client_moves(
                 },
                 respond_to,
                 response_write_complete: None,
+                observation_events: None,
                 stream_active: None,
             },
         );
@@ -2074,6 +2082,7 @@ async fn repeated_layout_action_reapplies_controller_geometry() {
             },
             respond_to,
             response_write_complete: None,
+            observation_events: None,
             stream_active: None,
         },
     ));
@@ -2119,6 +2128,7 @@ async fn public_close_reapplies_controller_geometry() {
             },
             respond_to,
             response_write_complete: None,
+            observation_events: None,
             stream_active: None,
         })
     );
@@ -2323,6 +2333,7 @@ async fn public_background_tab_create_preserves_client_locations() {
         },
         respond_to,
         response_write_complete: None,
+        observation_events: None,
         stream_active: None,
     });
 
@@ -2371,6 +2382,7 @@ async fn public_workspace_focus_preserves_each_clients_remembered_tabs() {
         },
         respond_to,
         response_write_complete: None,
+        observation_events: None,
         stream_active: None,
     });
 
@@ -2454,6 +2466,7 @@ async fn public_agent_focus_replaces_a_diverged_client_shell_projection() {
         },
         respond_to,
         response_write_complete: None,
+        observation_events: None,
         stream_active: None,
     });
     let response: crate::api::schema::SuccessResponse =
@@ -2533,6 +2546,7 @@ async fn public_api_focus_replaces_every_client_shell_projection() {
         },
         respond_to,
         response_write_complete: None,
+        observation_events: None,
         stream_active: None,
     });
     assert_eq!(server.app.state.active, Some(1));
@@ -6459,6 +6473,7 @@ fn notification_show_api_forwards_one_semantic_client_notification() {
         },
         respond_to,
         response_write_complete: None,
+        observation_events: None,
         stream_active: None,
     });
 
@@ -6522,6 +6537,7 @@ fn notification_show_api_preserves_colon_in_forwarded_title() {
         },
         respond_to,
         response_write_complete: None,
+        observation_events: None,
         stream_active: None,
     });
 
@@ -6568,6 +6584,7 @@ fn notification_show_api_validates_empty_title_before_disabled_delivery() {
         },
         respond_to,
         response_write_complete: None,
+        observation_events: None,
         stream_active: None,
     });
 
@@ -6599,6 +6616,7 @@ fn notification_show_api_reports_no_foreground_client() {
         },
         respond_to,
         response_write_complete: None,
+        observation_events: None,
         stream_active: None,
     });
 
@@ -6650,6 +6668,7 @@ fn notification_show_api_includes_sound_in_semantic_event() {
             },
             respond_to,
             response_write_complete: None,
+            observation_events: None,
             stream_active: None,
         })
     );
@@ -6828,6 +6847,7 @@ fn stale_api_agent_report_does_not_forward_done_sound() {
         },
         respond_to,
         response_write_complete: None,
+        observation_events: None,
         stream_active: None,
     });
 

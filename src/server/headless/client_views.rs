@@ -233,6 +233,7 @@ impl HeadlessServer {
                 | Method::PaneClose(_)
                 | Method::PaneEditScrollback(_)
                 | Method::PaneSplit(_)
+                | Method::PaneMove(_)
                 | Method::TabClose(_)
                 | Method::TabCreate(_)
                 | Method::WorkspaceClose(_)
@@ -265,6 +266,7 @@ impl HeadlessServer {
                 | Method::PaneScroll(_)
                 | Method::PaneSplit(_)
                 | Method::PaneSwap(_)
+                | Method::PaneMove(_)
                 | Method::PaneZoom(_)
                 | Method::TabClose(_)
                 | Method::TabCreate(_)
@@ -298,6 +300,7 @@ impl HeadlessServer {
                 | Method::PaneResize(_)
                 | Method::PaneSplit(_)
                 | Method::PaneSwap(_)
+                | Method::PaneMove(_)
                 | Method::PaneZoom(_)
                 | Method::TabClose(_)
                 | Method::TabCreate(_)
@@ -493,26 +496,27 @@ impl HeadlessServer {
         workspace_index: usize,
         pane_id: crate::layout::PaneId,
     ) -> bool {
-        let Some(target) = self.shell_target_for_client(client_id) else {
-            return false;
-        };
-        if target.workspace_index != workspace_index {
-            return false;
-        }
-        let Some(tab) = self
-            .app
-            .state
-            .workspaces
-            .get(workspace_index)
-            .and_then(|workspace| workspace.tabs.get(target.tab_index))
-        else {
-            return false;
-        };
-        if tab.zoomed {
-            tab.layout.focused() == pane_id
-        } else {
-            tab.layout.pane_ids().contains(&pane_id)
-        }
+        self.client_view_targets(client_id)
+            .into_iter()
+            .any(|target| {
+                if target.workspace_index != workspace_index {
+                    return false;
+                }
+                let Some(tab) = self
+                    .app
+                    .state
+                    .workspaces
+                    .get(workspace_index)
+                    .and_then(|workspace| workspace.tabs.get(target.tab_index))
+                else {
+                    return false;
+                };
+                if tab.zoomed {
+                    tab.layout.focused() == pane_id
+                } else {
+                    tab.layout.pane_ids().contains(&pane_id)
+                }
+            })
     }
 
     fn finish_shell_tab_geometry_change(&mut self, start_pending_agent_resumes: bool) {
@@ -564,6 +568,39 @@ impl HeadlessServer {
         client_id: u64,
         target: crate::ui::TabSurfaceTarget,
     ) -> bool {
+        if self
+            .clients
+            .get(&client_id)
+            .is_some_and(|client| client.views.is_some())
+        {
+            let Some(client) = self.clients.get(&client_id) else {
+                return false;
+            };
+            let Some(view) = client.views.as_ref().and_then(|views| {
+                views.views.iter().find(|view| {
+                    self.app.parse_tab_id(&view.spec.tab_id)
+                        == Some((target.workspace_index, target.tab_index))
+                })
+            }) else {
+                return false;
+            };
+            crate::ui::resize_tab_surface(
+                &self.app.state,
+                &self.app.terminal_runtimes,
+                target.workspace_index,
+                target.tab_index,
+                Rect::new(0, 0, view.spec.cols, view.spec.rows),
+                client.cell_size,
+            );
+            if self.popup_owner_tab_id.as_deref() == Some(view.spec.tab_id.as_str()) {
+                let _ = resize_popup_runtime(
+                    &self.app,
+                    Rect::new(0, 0, view.spec.cols, view.spec.rows),
+                    client.cell_size,
+                );
+            }
+            return true;
+        }
         let Some(client) = self.clients.get(&client_id) else {
             return false;
         };
@@ -624,6 +661,15 @@ impl HeadlessServer {
         }) else {
             return false;
         };
+        if self
+            .clients
+            .get(&client_id)
+            .is_some_and(|client| client.views.is_some())
+        {
+            self.resize_client_views(client_id);
+            self.finish_shell_tab_geometry_change(start_pending_agent_resumes);
+            return true;
+        }
         self.apply_shell_tab_geometry(client_id, start_pending_agent_resumes)
     }
 
@@ -634,6 +680,15 @@ impl HeadlessServer {
         let mut viewed_tabs = HashMap::<String, Vec<u64>>::new();
         for (&client_id, client) in &self.clients {
             if !client.is_active_shell_client() || client.writer.is_none() {
+                continue;
+            }
+            if let Some(views) = &client.views {
+                for view in &views.views {
+                    viewed_tabs
+                        .entry(view.spec.tab_id.clone())
+                        .or_default()
+                        .push(client_id);
+                }
                 continue;
             }
             let Some(tab_id) = self.shell_tab_id_for_client(client_id) else {
@@ -890,7 +945,8 @@ impl HeadlessServer {
         }
         let geometry_changed =
             method_claims_geometry && self.reapply_controlled_shell_tab_geometry(false);
-        changed | geometry_changed
+        // 多视图的客户端焦点可以不同于默认目标；即使默认目标未变也要推送新投影。
+        changed | geometry_changed | public_focus_succeeded
     }
 
     pub(super) fn handle_client_shell_api_request(

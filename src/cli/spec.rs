@@ -256,6 +256,13 @@ fn api_command() -> Command {
     let t = &crate::i18n::texts().cli_help;
     Command::new("api")
         .about(t.api_about)
+        .subcommand(
+            Command::new("usage-report")
+                .about("提交官方 CLI 用量回调 JSON")
+                .arg(option("agent", "AGENT"))
+                .arg(option("account", "ID"))
+                .arg(flag("passthrough")),
+        )
         .subcommand(Command::new("snapshot").about(t.api_snapshot_about))
         .subcommand(
             Command::new("schema")

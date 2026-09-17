@@ -1815,7 +1815,7 @@ command = ["sh", "-c", '"$HERDR_BIN_PATH" --list >/dev/null; printf "%s\n" "$?" 
             return;
         }
 
-        let root = std::path::PathBuf::from("/var/tmp").join(format!(
+        let root = std::env::temp_dir().join(format!(
             "herdr-plugin-update-{}-{}",
             std::process::id(),
             SystemTime::now()

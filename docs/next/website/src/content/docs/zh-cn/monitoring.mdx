@@ -1,0 +1,136 @@
+---
+title: 监控、账号用量与停靠布局
+description: 在终端工作台查看主机资源和官方账号用量，拖动面板与标签安排工作空间。
+---
+
+顶部的「监控」「用量」打开独立面板，全局菜单中的「监控设置」同时管理硬件监控和账号用量显示。硬件数据属于当前连接的主机；悬浮远程 Agent 时，用量查询在该 Agent 所在的主机执行。
+
+## 菜单、页面与稳定选字
+
+`prefix+Space` 打开分类主菜单，`prefix+/` 打开独立命令搜索（默认 prefix 是 `Ctrl+B`）。菜单按工作区、标签窗格、SSH、监控、工具、设置和帮助分组；最近使用最多显示五项。搜索支持中文、英文动作名称、分类及机器地址。鼠标滚轮只滚动列表，方向键把选中项带回可视区域。
+
+全局页面的上边框可以拖动，左右和下边框可以缩放；位置与尺寸保存在客户端偏好中，窗口变小时自动限制在屏幕内。停靠布局锁定时也禁止拖动页面。菜单关闭后恢复原页面的输入和选择；设置页选择后按 Enter 或保存按钮生效，主题可预览，Esc 取消预览。
+
+拖选终端文字时，Herdr 固定目标窗格的文字快照，后台进程和其他窗格继续运行。松开后自动复制并恢复实时显示；关闭 `copy_on_select` 时，选区保留到 Ctrl+C 复制或取消。冻结期间的滚动浏览固定历史，不移动实时终端。捕获前画面已经更新且鼠标已松开时，会提示确认固定选区后再按 Ctrl+C，避免复制未看到的新内容。
+
+快照最多保留 65,536 格、2048 行和 8 MiB；历史超出边界时停止滚动。服务端总预算为 64 MiB、32 份，每个客户端同时一份。尺寸变化、切换目标、关闭页面或断线会回收快照；未确认的捕获有 60 秒租约。旧 server 不支持快照 API 时沿用原复制行为。
+
+WezTerm 建议使用 `Ctrl+Shift+Space` 作为宿主前缀，保留 `Ctrl+B` 给 Herdr。普通拖选交给 Herdr，Shift+拖选使用 WezTerm 选区；终端主题不影响这两个入口。
+
+## 安排工作台
+
+拖动面板标题的 `⠿` 到其他面板的左、右、上、下边缘可以停靠，落点会显示边框。拖动分隔线调整大小。终端组可以同时展示多个标签；拖动标签到组内可以重排，拖到内容边缘可以拆为新组。窗格标题上的把手支持组内交换、跨标签移动，终端进程继续运行。无边框窗格的把手仅在「布局」模式显示，平时不会遮住终端正文。
+
+`□` 最大化当前面板，再次点击恢复。布局模式中，`Tab` / `Shift+Tab` 切换面板，方向键调整分隔线，`Shift+方向键` 移动面板，`Enter` 最大化，`Esc` 完成。锁定布局可以防止误拖；「复位」恢复默认分栏。右键标签仍可使用原有菜单。
+
+布局按客户端和主机保存。终端变小时，只投影当前面板；放大后恢复布局树。旧 server 未声明多视图能力时继续使用原来的单视图界面。
+
+## 主机监控
+
+可选择 CPU 总量、逐逻辑核、内存与 swap、GPU、磁盘、网络、温度和进程。采样周期为 500、1000、2000 或 5000 毫秒。首次差分采样、缺少驱动、权限不足或设备不提供某个字段时显示状态或 `—`，不会显示虚假的零值。
+
+NVIDIA 使用 NVML；Linux 的其他显卡读取驱动公开的 DRM/sysfs 指标；Windows 使用 DXGI 和系统 GPU 性能计数器。不同驱动提供的温度、功耗、共享显存和利用率不同。WSL、容器和远程连接显示当前环境可见的资源。
+
+卡片内滚轮浏览所有 CPU 核、设备或进程；点击逻辑核可以切换其历史曲线。卡片标题的箭头调整顺序，设置中可以调整卡片高度和隐藏设备。历史保存在客户端内存，支持 1–60 分钟范围，总预算为 16 MiB。暂停按钮暂停历史记录，实时采样与告警继续运行。
+
+进程支持排序、名称筛选、详情和结束操作。详情固定进程实例；结束需要再次确认，强制结束单独选择。过期确认、PID 重用和受保护进程会被拒绝。Windows 使用强制结束，需要相应权限。
+
+告警默认关闭。可设置阈值、持续时间和冷却时间；只有客户端连接期间生效，不会自动结束进程。
+
+```toml
+[monitor]
+interval_ms = 1000
+history_minutes = 15
+visible = ["cpu", "cores", "memory", "gpu", "network", "processes"]
+card_height = 10
+hidden_devices = []
+alerts_enabled = true
+
+[[monitor.alerts]]
+metric = "cpu" # cpu / memory / gpu / disk
+threshold = 90
+duration_seconds = 30
+cooldown_seconds = 60
+```
+
+## 账号绑定与展示
+
+鼠标停留在 Agent 行或 CLI 标题上，可以打开账号用量浮层。设置支持仪表盘或表格，以及悬浮、页面或两者同时显示。浮层中的「确认账号绑定」将当前窗格与选定账号关联。品牌相同不代表账号相同，未绑定时不会猜测账号。
+
+仪表盘和表格都支持滚轮浏览；在账号页也可使用上下键翻看超出视口的额度窗口。悬浮层可与监控面板同时显示，操作浮层不会触发下面的卡片或进程行。
+
+查询结果保留套餐窗口、重置时间、余额单位、采样时间和数据来源。套餐额度、API 密钥预算、组织账单和本机会话 token 各自标注范围。暂时网络失败保留旧样本并显示缓存状态，遵守最短刷新周期和服务端重试间隔。
+
+账号配置属于运行 Agent 的 server。只填写凭据环境变量名称；令牌不会保存到 Herdr 配置、偏好或远程客户端。CLI 登录由官方工具管理。
+
+```toml
+[account_usage]
+enabled = true
+format = "dashboard" # dashboard / table
+position = "both" # hover / page / both
+hover_delay_ms = 400
+api_refresh_seconds = 60
+cli_refresh_seconds = 300
+probe_timeout_seconds = 20
+disabled_providers = []
+
+[[account_usage.accounts]]
+id = "work-codex"
+label = "工作账号"
+agent = "codex"
+provider = "codex"
+auth_mode = "cli"
+profile_dir = "/path/to/codex-profile"
+
+[[account_usage.accounts]]
+id = "team-api"
+label = "组织 API"
+agent = "claude"
+provider = "anthropic"
+auth_mode = "api"
+credential_env = "ANTHROPIC_ADMIN_KEY"
+```
+
+`organization`、`account_user` 按对应官方接口设置组织、团队、用户 ID 或明确要求的邮箱。GitHub Enterprise 使用 `billing_scope = "enterprise"` 并把 enterprise slug 填入 `organization`；OpenRouter 的 `billing_scope = "account"` 使用管理密钥查询账号总额，默认仅查询当前 API key。OMP 多账号查询必须指定实际 provider 和账号身份。`base_url` 只接受已登记的官方地址；Kimi 本地 API 只允许 loopback。
+
+## 官方回调
+
+Claude 与 Antigravity 的账号页可启用或移除官方状态栏回调。已有状态栏命令通过管道保留；输入报文原样交给原渲染器，Herdr 只抽取用量字段。Claude 的 `rate_limits` 需要支持该字段的 CLI 版本，并且通常在首次正常 API 响应后出现；Herdr 不会为取额度发送模型任务。
+
+其他官方集成可以将受支持的 JSON 通过 `herdr api usage-report --agent <agent>` 写入 stdin。默认使用 `HERDR_PANE_ID` 对应的绑定，也可明确指定 `--account <id>`。先绑定账号；原始 JSON 和会话内容不会写入持久化文件。`--passthrough` 用于已有状态栏管道。
+
+## 厂商能力与官方依据
+
+按 2026-09-16 的官方文档登记 23 个 Agent，Muse 不在本功能范围内。官方未公开个人额度 API、权限不足或 CLI 输出变化时，显示可用性说明和官方入口。表中的会话统计不代表账号剩余额度。
+
+| Agent | 官方查询与范围 |
+| --- | --- |
+| Codex | [App Server](https://learn.chatgpt.com/docs/app-server) 的账号、速率窗口和附加用量；API 计费另用管理员报表。 |
+| Claude Code | [statusline JSON](https://code.claude.com/docs/en/statusline) 的 `rate_limits`，以及官方 `/usage`。API 组织用量与费用独立。 |
+| Kimi Code | [本地 Server API](https://www.kimi.com/code/docs/en/kimi-code-cli/reference/server-api.html) 的 userinfo、usage 和额外钱包；Moonshot API 余额另查。 |
+| Gemini CLI | [内置统计命令](https://geminicli.com/docs/cli/commands/)；通过 CLI 查询，不复用其 OAuth 凭据调用第三方客户端。 |
+| Cursor | [Admin API](https://cursor.com/docs/account/teams/admin-api) 按精确用户过滤；按量费用与包含套餐的消费分开。 |
+| Devin | [Enterprise consumption](https://docs.devin.ai/api-reference/v3/consumption/consumption-daily-users)，单位 ACU；个人套餐可能无权限。 |
+| Antigravity | [statusline quota](https://antigravity.google/docs/cli/statusline/) 的剩余比例和重置时间。 |
+| Cline | [账号/组织余额接口](https://docs.cline.bot/enterprise-solutions/api-reference)。 |
+| OMP | [omp usage --json](https://github.com/can1357/oh-my-pi/blob/main/packages/coding-agent/src/commands/usage.ts)，按真实账号和 provider 选择。 |
+| Mastra Code | [/cost](https://code.mastra.ai/) 为会话统计，账号额度由实际计费 provider 提供。 |
+| OpenCode | [stats --json](https://opencode.ai/v2/docs/cli/commands/) 为本地统计，账号计费另绑定 provider。 |
+| GitHub Copilot | [Billing Usage API](https://docs.github.com/en/rest/billing/usage)，按实际付款用户或组织查询。 |
+| Kiro | [非交互 /usage](https://kiro.dev/docs/reference/slash-commands/)；裸 `/help` 不是额度查询。 |
+| Factory Droid | [Analytics API](https://docs.factory.ai/api-reference/analytics)，仅查询昨天 UTC 或更早的 FSC 日报。 |
+| Amp | [amp usage](https://ampcode.com/docs/pricing)；工作区费用另用 [External API](https://ampcode.com/api/external)，不把 BYOK 估价视作账单。 |
+| Grok | [官方 /usage](https://docs.x.ai/build/modes-and-commands)；xAI API 预付余额使用独立 Management API。 |
+| Hermes | [/usage](https://hermes-agent.nousresearch.com/docs/reference/slash-commands) 的账号限制与会话统计分别识别。 |
+| Kilo | [CLI profile/余额视图](https://kilo.ai/docs/code-with-ai/platforms/cli)；未取得可验证额度字段时明确不可用。 |
+| Qoder | [官方 /usage](https://docs.qoder.com/cli/usage)；目前没有可验证的自动输入就绪契约，不自动注入命令。 |
+| Qwen Code | [/stats](https://qwenlm.github.io/qwen-code-docs/en/users/features/commands/) 为会话数据，账号用量绑定实际 provider。 |
+| Letta | [letta usage](https://github.com/letta-ai/letta-code/blob/main/src/cli/subcommands/usage.ts) 返回余额和档位；档位不换算成百分比。 |
+| Maki | [/usage](https://maki.sh/docs/token-economy/) 为会话统计，账号额度另查实际 provider。 |
+| Pi | [get_session_stats](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/rpc.md) 为会话数据，账号额度另查实际 provider。 |
+
+## API
+
+公开 JSON 方法包括 `system.metrics.get/subscribe/unsubscribe`、`system.process.list/get/terminate`、`account.usage.providers/get/refresh/subscribe/unsubscribe/report/integration` 和 `account.binding.set`。订阅事件有独立采样时间，慢消费者只保留最新样本。
+
+多视图的 `client.views.set` 及具名帧/输入扩展仅用于协商后的 TUI 连接，不修改 generation 1 的消息编码。工作台移动窗格复用既有 `pane.move` 与 `pane.swap`。完整参数以 `herdr api schema --json` 为准。

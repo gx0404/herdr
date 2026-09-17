@@ -256,3 +256,13 @@ The client and server negotiate compatibility rather than requiring identical ve
 Updating a compatible client does not replace the running remote server or stop its agents. When you need new server-side behavior, update that server explicitly. Normal replacement asks before stopping the server and its pane processes.
 
 Live handoff is experimental and opt-in. For a supported server that needs replacement during standalone setup, you can explicitly add `--handoff` to `herdr --remote`; it is not needed for normal connections or authentication fixes. See [Update](/docs/install/#update) for restart and handoff choices, and [Session state and restore](/docs/session-state/) for what survives each operation.
+
+## Pages and authentication recovery
+
+Wide terminals show machines and details side by side; narrow terminals open details from the list. The wizard preserves target, identity files, port, jump hosts, session, and display settings when returning from authentication. Review all settings by scrolling the confirmation page.
+
+Approved interactive authentication uses an in-memory askpass channel through probing, installation, verification, and connection handover. Passwords are never persisted. Trust once pins the displayed key in a temporary known_hosts file owned by the connection. Permanent trust writes only the displayed key. `ssh -G` resolves the actual port, alias, and known_hosts paths. Proxy connections use OpenSSH's interactive verification over the same route when direct scanning is unavailable.
+
+Canceling setup, authentication, or the file page terminates its local SSH/SCP/SFTP task. Completed remote writes are not rolled back. Stale directory reads are ignored while every request is settled, preventing stuck loading indicators.
+
+Run `powershell -File scripts/windows_tui_compat.ps1 -ExePath target/debug/herdr.exe -Shell powershell` for PowerShell 5.1, or use `-Shell pwsh` for PowerShell 7. Add `-Interactive` inside WezTerm to check selection, IME, and 60×16, 80×24, 120×40, 160×50 layouts. In WSL, build and run Linux Herdr with the distribution's default user and login shell. CI checks ConPTY; desktop mouse and IME acceptance remain separate.

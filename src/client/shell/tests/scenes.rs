@@ -340,7 +340,7 @@ fn scene_rename_flow_updates_store() {
 fn palette_offers_scene_actions() {
     let _dir = with_temp_state_home("palette");
     let mut state = state_with_profiles(&[]);
-    state.toggle_global_menu();
+    state.open_command_search();
     let row = {
         let Some(ClientShellOverlay::CommandPalette(palette)) = state.overlay.as_ref() else {
             panic!("palette");

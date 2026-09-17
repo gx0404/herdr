@@ -76,8 +76,8 @@ fn setup_with_strict_host_key_failure(
     handoff: bool,
     strict_host_key_failure: bool,
 ) -> SetupResult {
-    let root = std::path::PathBuf::from(format!(
-        "/var/tmp/herdr-machine-setup-{}-{}-{}-{}-{}",
+    let root = std::env::temp_dir().join(format!(
+        "herdr-machine-setup-{}-{}-{}-{}-{}",
         std::process::id(),
         installed,
         answer.trim().is_empty(),

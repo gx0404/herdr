@@ -2,18 +2,108 @@ use super::*;
 use crate::input::{KeybindAction, KeybindMatch};
 
 #[test]
+fn main_menu_and_search_have_distinct_shortcuts_and_restore_the_page() {
+    use super::super::command_palette::BrowserView;
+    let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
+    state.set_snapshot(Box::new(snapshot()));
+    state.set_pane_surface(surface());
+    state.handle_input_bytes(b"\x02 ");
+    assert_eq!(palette_overlay(&state).view, BrowserView::Menu(None));
+    assert_eq!(
+        super::command_palette::palette_rows(palette_overlay(&state)).len(),
+        8
+    );
+    let group = palette_row_index(&state, "category:2");
+    state.activate_palette_item(group, &mut ClientShellInput::default());
+    assert_eq!(palette_overlay(&state).view, BrowserView::Menu(Some(2)));
+    state.handle_input_bytes(b"\x1b");
+    assert_eq!(palette_overlay(&state).view, BrowserView::Menu(None));
+    state.handle_input_bytes(b"\x1b");
+    state.handle_input_bytes(b"\x02/");
+    assert_eq!(palette_overlay(&state).view, BrowserView::Search);
+    state.close_command_browser();
+    state.open_settings_overlay();
+    state.move_settings_selection(1);
+    let selected = match state.overlay.as_ref().unwrap() {
+        ClientShellOverlay::Settings(settings) => settings.selected,
+        _ => unreachable!(),
+    };
+    state.open_command_search();
+    state.handle_input_bytes(b"\x1b");
+    assert!(
+        matches!(state.overlay, Some(ClientShellOverlay::Settings(ref settings)) if settings.selected == selected)
+    );
+}
+
+#[test]
+fn search_click_and_wheel_preserve_the_browser_and_unicode_matches() {
+    let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
+    state.set_snapshot(Box::new(snapshot()));
+    state.set_pane_surface(surface());
+    state.open_command_search();
+    state.compose(80, 24).unwrap();
+    let search = state.hits.menu_search;
+    state.handle_raw_events(vec![RawInputEvent::Mouse(MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: search.x + 4,
+        row: search.y,
+        modifiers: KeyModifiers::NONE,
+    })]);
+    assert!(matches!(
+        state.overlay,
+        Some(ClientShellOverlay::CommandPalette(_))
+    ));
+    state.scroll_palette(6);
+    state.compose(80, 24).unwrap();
+    assert_eq!(palette_overlay(&state).scroll, 6);
+    state.move_palette_selection(1);
+    state.compose(80, 24).unwrap();
+    assert!(palette_overlay(&state).scroll <= 1);
+    let (_, indices) = super::command_palette::fuzzy_match("b", "İİB").unwrap();
+    assert_eq!(indices, vec![2]);
+    assert!(state.insert_overlay_text("settings"));
+    let rows = super::command_palette::palette_rows(palette_overlay(&state));
+    assert!(rows.iter().any(|row| row.item.id == "binding:Settings"));
+}
+
+#[test]
+fn offline_pages_and_narrow_settings_keep_every_category_accessible() {
+    let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
+    state.open_command_search();
+    state.compose(80, 24).unwrap();
+    assert!(!state.hits.menu_popup.is_empty());
+    state.close_command_browser();
+    state.open_settings_overlay();
+    for size in [(60, 16), (80, 24), (120, 40), (160, 50)] {
+        state.compose(size.0, size.1).unwrap();
+        assert_eq!(
+            state.hits.settings_tabs.len(),
+            ClientSettingsSection::ALL.len()
+        );
+        for (rect, _) in &state.hits.settings_tabs {
+            assert!(!rect.is_empty());
+            assert!(state.hits.settings_popup.contains((rect.x, rect.y).into()));
+            assert!(rect.bottom() <= state.hits.settings_popup.bottom());
+        }
+    }
+}
+
+#[test]
 fn command_palette_fuzzy_filters_and_activates_with_highlight_data() {
     let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
     state.set_snapshot(Box::new(snapshot()));
     state.set_pane_surface(surface());
-    state.toggle_global_menu();
+    state.open_command_search();
     let item_count = palette_overlay(&state).items.len();
     assert!(item_count > 30, "all actions are indexed: {item_count}");
 
     assert!(state.insert_overlay_text("设置"));
     let rows = super::command_palette::palette_rows(palette_overlay(&state));
     let ids: Vec<&str> = rows.iter().map(|row| row.item.id.as_str()).collect();
-    assert_eq!(rows.len(), 1, "fuzzy filter narrows to settings: {ids:?}");
+    assert!(
+        ids.contains(&"observation:settings"),
+        "搜索包含新增的监控设置：{ids:?}"
+    );
     assert_eq!(rows[0].item.id, "binding:Settings");
     assert!(
         !rows[0].match_indices.is_empty(),
@@ -39,13 +129,13 @@ fn command_palette_recent_commands_lead_and_persist() {
     state.set_snapshot(Box::new(snapshot()));
     state.set_pane_surface(surface());
 
-    state.toggle_global_menu();
+    state.open_command_search();
     let help_index = palette_row_index(&state, "binding:Help");
     state.activate_palette_item(help_index, &mut ClientShellInput::default());
     assert!(matches!(state.overlay, Some(ClientShellOverlay::Help(_))));
     state.overlay = None;
 
-    state.toggle_global_menu();
+    state.open_command_search();
     let rows = super::command_palette::palette_rows(palette_overlay(&state));
     assert_eq!(rows[0].item.id, "binding:Help", "most recent leads");
     assert!(rows[0].recent);
@@ -92,7 +182,7 @@ fn command_palette_lists_machine_actions_and_runs_them() {
     state.set_snapshot(Box::new(snapshot()));
     state.set_pane_surface(surface());
 
-    state.toggle_global_menu();
+    state.open_command_search();
     assert!(state.insert_overlay_text("prod"));
     let rows = super::command_palette::palette_rows(palette_overlay(&state));
     let ids: Vec<&str> = rows.iter().map(|row| row.item.id.as_str()).collect();
@@ -135,7 +225,7 @@ fn command_palette_mouse_click_runs_the_row() {
     state.set_snapshot(Box::new(snapshot()));
     state.set_pane_surface(surface());
     state.compose(106, 30).expect("shell frame");
-    state.toggle_global_menu();
+    state.open_command_search();
     state.compose(106, 30).expect("palette frame");
     let help_index = palette_row_index(&state, "binding:Help");
     let (row, _) = state

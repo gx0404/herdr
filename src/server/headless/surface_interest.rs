@@ -11,6 +11,9 @@ impl HeadlessServer {
         client_id: u64,
         active: bool,
     ) -> Option<(bool, u64)> {
+        if !active {
+            self.text_snapshots.release_owner(client_id);
+        }
         let focus_before = self.shell_focus_targets();
         let focused_tabs_before = self.focused_shell_tabs();
         let (changed, projection_revision) = {
@@ -19,6 +22,10 @@ impl HeadlessServer {
                 return None;
             }
             let changed = client.shell_surface_active != active;
+            if active {
+                // 重连/端点激活沿用 v1 的首帧握手；前端提交布局后再启用多视图。
+                client.views = None;
+            }
             if active {
                 client.shell_projection_revision =
                     client.shell_projection_revision.saturating_add(1);

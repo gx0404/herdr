@@ -197,6 +197,24 @@ fn handle_connection_with_stop(
     crate::logging::api_request_started(&request_id, method, changes_ui);
 
     match request.method {
+        Method::SystemMetricsSubscribe(params) => stream_observations(
+            stream,
+            Request {
+                id: request_id,
+                method: Method::SystemMetricsSubscribe(params),
+            },
+            api_tx,
+            running,
+        ),
+        Method::AccountUsageSubscribe(params) => stream_observations(
+            stream,
+            Request {
+                id: request_id,
+                method: Method::AccountUsageSubscribe(params),
+            },
+            api_tx,
+            running,
+        ),
         Method::PaneGraphicsStream(params) => {
             let result =
                 pane_graphics_stream::serve(stream, request_id.clone(), params, api_tx, running);
@@ -384,6 +402,21 @@ fn handle_request(
 
 pub(crate) fn api_method_name(method: &Method) -> &'static str {
     match method {
+        Method::SystemMetricsGet(_) => "system.metrics.get",
+        Method::SystemMetricsSubscribe(_) => "system.metrics.subscribe",
+        Method::SystemMetricsUnsubscribe(_) => "system.metrics.unsubscribe",
+        Method::SystemProcessList(_) => "system.process.list",
+        Method::SystemProcessGet(_) => "system.process.get",
+        Method::SystemProcessTerminate(_) => "system.process.terminate",
+        Method::AccountUsageProviders(_) => "account.usage.providers",
+        Method::AccountUsageGet(_) => "account.usage.get",
+        Method::AccountUsageIntegration(_) => "account.usage.integration",
+        Method::AccountUsageRefresh(_) => "account.usage.refresh",
+        Method::AccountUsageSubscribe(_) => "account.usage.subscribe",
+        Method::AccountUsageUnsubscribe(_) => "account.usage.unsubscribe",
+        Method::AccountUsageReport(_) => "account.usage.report",
+        Method::AccountBindingSet(_) => "account.binding.set",
+        Method::ClientViewsSet(_) => "client.views.set",
         Method::Ping(_) => "ping",
         Method::ServerStop(_) => "server.stop",
         Method::ServerLiveHandoff(_) => "server.live_handoff",
@@ -445,6 +478,11 @@ pub(crate) fn api_method_name(method: &Method) -> &'static str {
         Method::PaneResize(_) => "pane.resize",
         Method::PaneScroll(_) => "pane.scroll",
         Method::PaneEditScrollback(_) => "pane.edit_scrollback",
+        Method::PaneTextSnapshotCapture(_) => "pane.text_snapshot.capture",
+        Method::PaneTextSnapshotRead(_) => "pane.text_snapshot.read",
+        Method::PaneTextSnapshotSelection(_) => "pane.text_snapshot.selection",
+        Method::PaneTextSnapshotRetain(_) => "pane.text_snapshot.retain",
+        Method::PaneTextSnapshotRelease(_) => "pane.text_snapshot.release",
         Method::PaneSelectionRead(_) => "pane.selection.read",
         Method::PaneCopyMotion(_) => "pane.copy_motion",
         Method::PaneCopySearch(_) => "pane.copy_search",
@@ -763,6 +801,64 @@ fn stream_subscriptions(
     }
 }
 
+fn stream_observations(
+    mut stream: LocalStream,
+    request: Request,
+    api_tx: &ApiRequestSender,
+    running: &Arc<AtomicBool>,
+) -> std::io::Result<()> {
+    struct ActiveGuard(Arc<AtomicBool>);
+    impl Drop for ActiveGuard {
+        fn drop(&mut self) {
+            self.0.store(false, Ordering::Release);
+        }
+    }
+    let active = ActiveGuard(Arc::new(AtomicBool::new(true)));
+    let latest = Arc::new(std::sync::Mutex::new(None::<String>));
+    let (sender, receiver) = std::sync::mpsc::channel();
+    api_tx
+        .send(crate::api::ApiRequestMessage {
+            request,
+            respond_to: sender,
+            response_write_complete: None,
+            stream_active: Some(active.0.clone()),
+            observation_events: Some(latest.clone()),
+        })
+        .map_err(|_| std::io::Error::other("观测服务已停止"))?;
+    let mut initial = false;
+    loop {
+        if should_stop_connection(&mut stream, running)? {
+            return Ok(());
+        }
+        if !initial {
+            match receiver.recv_timeout(CONNECTION_POLL_INTERVAL) {
+                Ok(response) => {
+                    write_text_line_allow_disconnect(&mut stream, &response)?;
+                    if serde_json::from_str::<serde_json::Value>(&response)
+                        .ok()
+                        .is_some_and(|v| v.get("error").is_some())
+                    {
+                        return Ok(());
+                    }
+                    initial = true;
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return Ok(()),
+            }
+        }
+        let event = latest.lock().ok().and_then(|mut slot| slot.take());
+        if let Some(event) = event {
+            if let Err(error) = write_text_line(&mut stream, &event) {
+                if is_connection_closed_error(&error) {
+                    return Ok(());
+                }
+                return Err(error);
+            }
+        }
+        std::thread::sleep(CONNECTION_POLL_INTERVAL);
+    }
+}
+
 fn write_text_line(stream: &mut LocalStream, value: &str) -> std::io::Result<()> {
     stream.write_all(value.as_bytes())?;
     stream.write_all(b"\n")?;
@@ -868,6 +964,7 @@ fn dispatch_to_app(
         respond_to,
         response_write_complete,
         stream_active,
+        observation_events: None,
     }) {
         if let Some(active) = request_active {
             active.store(false, Ordering::Release);

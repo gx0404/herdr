@@ -8,11 +8,16 @@ impl ClientShellState {
     ) {
         match binding {
             crate::input::KeybindMatch::Action(crate::input::KeybindAction::Detach) => {
+                self.overlay = None;
+                self.browser_return = None;
                 outcome.detach = true;
             }
             crate::input::KeybindMatch::Action(crate::input::KeybindAction::ToggleSidebar) => {
                 self.sidebar_collapsed = !self.sidebar_collapsed;
                 self.sidebar_collapsed_manual = true;
+                if self.workbench.enabled {
+                    self.workbench_sidebar(self.sidebar_collapsed);
+                }
                 self.reveal_navigation_workspace = true;
                 self.invalidate_pane_surface();
                 outcome.repaint = true;
@@ -61,6 +66,16 @@ impl ClientShellState {
                 }
                 if action == crate::input::KeybindAction::Settings {
                     self.open_settings_overlay();
+                    outcome.repaint = true;
+                    return;
+                }
+                if action == crate::input::KeybindAction::MainMenu {
+                    self.toggle_global_menu();
+                    outcome.repaint = true;
+                    return;
+                }
+                if action == crate::input::KeybindAction::CommandSearch {
+                    self.open_command_search();
                     outcome.repaint = true;
                     return;
                 }
@@ -253,9 +268,9 @@ impl ClientShellState {
                     .flatten();
                 let params = crate::api::schema::CommandInvokeParams {
                     command_id,
-                    workspace_id: snapshot.focused_workspace_id.clone(),
-                    tab_id: snapshot.focused_tab_id.clone(),
-                    pane_id: snapshot.focused_pane_id.clone(),
+                    workspace_id: self.focused_workspace_id(),
+                    tab_id: self.focused_tab_id(),
+                    pane_id: self.focused_pane_id(),
                     selection,
                 };
                 if action == crate::protocol::ClientShellCommandAction::Popup {
@@ -279,6 +294,9 @@ impl ClientShellState {
     }
 
     pub(super) fn request_selection_copy(&mut self, outcome: &mut ClientShellInput, live: bool) {
+        if self.copy_frozen_selection(outcome) {
+            return;
+        }
         let Some(selection) = self.selection.as_ref() else {
             return;
         };
@@ -493,8 +511,11 @@ impl ClientShellState {
             .is_some_and(|pending| {
                 matches!(
                     pending.kind,
-                    PendingEndpointKind::SnippetRun { .. }
+                    PendingEndpointKind::TextCapture { .. }
+                        | PendingEndpointKind::TextRelease
+                        | PendingEndpointKind::SnippetRun { .. }
                         | PendingEndpointKind::BroadcastSend { .. }
+                        | PendingEndpointKind::Observation { .. }
                 )
             })
     }
@@ -571,6 +592,36 @@ impl ClientShellState {
         let Some(pending) = self.pending_requests.remove(request_id) else {
             return (false, Vec::new());
         };
+        match &pending.kind {
+            PendingEndpointKind::TextCapture { epoch, endpoint } => {
+                return self.receive_text_capture(*epoch, endpoint.clone(), boot_id, result);
+            }
+            PendingEndpointKind::TextWindow { epoch } => {
+                return self.receive_text_window(*epoch, result);
+            }
+            PendingEndpointKind::TextCopy { epoch } => {
+                return self.receive_text_copy(*epoch, result);
+            }
+            PendingEndpointKind::TextRelease => return (false, Vec::new()),
+            _ => {}
+        }
+        if let PendingEndpointKind::Observation {
+            epoch,
+            endpoint_id,
+            purpose,
+        } = pending.kind
+        {
+            let current_boot = self
+                .endpoints
+                .iter()
+                .find(|endpoint| endpoint.endpoint_id == endpoint_id)
+                .and_then(|endpoint| endpoint.snapshot.as_ref())
+                .map(|snapshot| snapshot.boot_id.as_str());
+            if pending.boot_id != boot_id || current_boot != Some(boot_id) {
+                return (false, Vec::new());
+            }
+            return (self.receive_observation(epoch, purpose, result), Vec::new());
+        }
         // Cross-endpoint requests (snippet runs, broadcast fan-out) carry
         // their target endpoint's boot id; the active-snapshot comparison
         // only applies to requests fired at the active endpoint.
@@ -603,6 +654,18 @@ impl ClientShellState {
         }
         if let PendingEndpointKind::PaneLinkResolve { target } = pending.kind {
             return self.complete_link_hover(target, result);
+        }
+        if let PendingEndpointKind::Views { revision } = pending.kind {
+            if revision == self.workbench.revision {
+                self.workbench.pending = false;
+                if result.is_ok() {
+                    self.workbench.acknowledged = revision;
+                } else {
+                    self.workbench.requested.clear();
+                    self.set_endpoint_error("标签视图更新失败，请重试");
+                }
+            }
+            return (true, Vec::new());
         }
         if result.is_ok() {
             let timeout_key = ClientEndpointNoticeKey {
@@ -652,6 +715,14 @@ impl ClientShellState {
             }
         }
         match pending.kind {
+            PendingEndpointKind::TextCapture { .. }
+            | PendingEndpointKind::TextWindow { .. }
+            | PendingEndpointKind::TextCopy { .. }
+            | PendingEndpointKind::TextRelease
+            | PendingEndpointKind::Observation { .. }
+            | PendingEndpointKind::Views { .. } => {
+                unreachable!("后台响应已提前处理")
+            }
             PendingEndpointKind::Generic => {}
             PendingEndpointKind::PaneLinkResolve { .. }
             | PendingEndpointKind::SnippetRun { .. } => {
@@ -959,9 +1030,9 @@ impl ClientShellState {
         use crate::input::KeybindAction;
 
         let snapshot = self.snapshot.as_deref()?;
-        let focused_workspace = snapshot.focused_workspace_id.clone()?;
-        let focused_tab = snapshot.focused_tab_id.clone();
-        let focused_pane = snapshot.focused_pane_id.clone();
+        let focused_workspace = self.focused_workspace_id()?;
+        let focused_tab = self.focused_tab_id();
+        let focused_pane = self.focused_pane_id();
         let direction = |action| match action {
             KeybindAction::FocusPaneLeft
             | KeybindAction::SwapPaneLeft

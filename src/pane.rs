@@ -3137,6 +3137,22 @@ impl PaneRuntime {
         self.terminal.render(frame, area, show_cursor);
     }
 
+    pub(crate) fn capture_text_snapshot(
+        &self,
+    ) -> Option<crate::terminal::text_snapshot::FrozenText> {
+        let _content_guard = self
+            .content_write_lock
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let revision = self.content_seq();
+        if !revision.is_multiple_of(2) {
+            return None;
+        }
+        let mut snapshot = self.terminal.capture_text_snapshot()?;
+        snapshot.content_revision = revision;
+        Some(snapshot)
+    }
+
     pub(crate) fn collect_dirty_patch_snapshot(
         &self,
         area_width: u16,

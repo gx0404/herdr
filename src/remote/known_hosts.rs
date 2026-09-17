@@ -33,6 +33,246 @@ pub(crate) struct KnownHostKey {
     pub(crate) key_line: String,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct EffectiveHostKeyTarget {
+    pub(crate) host: String,
+    pub(crate) port: u16,
+    pub(crate) lookup: String,
+    pub(crate) files: Vec<std::path::PathBuf>,
+    pub(crate) proxied: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct HostKeyReview {
+    pub(crate) target: EffectiveHostKeyTarget,
+    pub(crate) keys: Vec<KnownHostKey>,
+}
+
+/// 使用与连接相同的 -F 配置，让 OpenSSH 处理 Host/Match/Include 和覆盖顺序。
+pub(crate) fn effective_host_key_target(
+    profile: &crate::client::endpoint::SavedSshEndpoint,
+) -> io::Result<EffectiveHostKeyTarget> {
+    let options = super::saved::saved_profile_ssh_options(profile)?;
+    let config = super::attach::write_managed_ssh_config(options.as_ref())?;
+    let mut command = Command::new("ssh");
+    super::attach::apply_managed_channel_options(&mut command, Some(&config.options));
+    command
+        .args(["-G", "-T", "--"])
+        .arg(&profile.target)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let child = super::process::spawn(&mut command)?;
+    let output = wait_with_output_timeout_bounded(
+        child,
+        KNOWN_HOSTS_COMMAND_TIMEOUT,
+        KNOWN_HOSTS_STDOUT_LIMIT,
+        KNOWN_HOSTS_STDERR_LIMIT,
+    )?;
+    if !output.status.success() {
+        return Err(tool_failed("无法解析 SSH 配置", &output));
+    }
+    parse_effective_target(&String::from_utf8_lossy(&output.stdout), &profile.target)
+}
+
+fn parse_effective_target(output: &str, original: &str) -> io::Result<EffectiveHostKeyTarget> {
+    let fields = output
+        .lines()
+        .filter_map(|line| line.split_once(' '))
+        .map(|(name, value)| (name.to_ascii_lowercase(), value.trim()))
+        .collect::<std::collections::HashMap<_, _>>();
+    let field = |name: &str| {
+        fields
+            .get(name)
+            .copied()
+            .filter(|value| !value.is_empty() && *value != "none")
+    };
+    let invalid = |message: &str| io::Error::new(io::ErrorKind::Unsupported, message);
+    let host = field("hostname")
+        .ok_or_else(|| invalid("SSH 配置缺少 HostName"))?
+        .to_owned();
+    let port = field("port")
+        .and_then(|value| value.parse::<u16>().ok())
+        .filter(|port| *port > 0)
+        .ok_or_else(|| invalid("SSH 配置端口无效"))?;
+    let original_host = parse_ssh_host_port(original)
+        .map(|(host, _)| host)
+        .ok_or_else(|| invalid("无法解析原始 SSH 主机名"))?;
+    let alias = field("hostkeyalias");
+    let lookup = alias.map(str::to_owned).unwrap_or_else(|| {
+        if port == 22 {
+            host.clone()
+        } else {
+            format!("[{host}]:{port}")
+        }
+    });
+    if host.starts_with('-')
+        || host.chars().any(|ch| ch.is_control() || ch.is_whitespace())
+        || lookup
+            .chars()
+            .any(|ch| ch.is_control() || ch.is_whitespace() || matches!(ch, '*' | '?' | ',' | '!'))
+    {
+        return Err(invalid(
+            "主机名或 HostKeyAlias 无法作为单一主机记录，请使用交互认证",
+        ));
+    }
+    let home =
+        crate::platform::ssh_config_home_dir().ok_or_else(|| invalid("无法定位 SSH 用户目录"))?;
+    let home = home.to_string_lossy();
+    let user = field("user").unwrap_or_default();
+    let local_user = std::env::var("USER")
+        .or_else(|_| std::env::var("USERNAME"))
+        .unwrap_or_default();
+    let mut files = Vec::new();
+    // ssh -G 不保留含空格路径的引号。无法无歧义还原时拒绝自动写入，交由交互 SSH 处理。
+    for raw in field("userknownhostsfile")
+        .unwrap_or_default()
+        .split_whitespace()
+    {
+        if !(raw.starts_with('/') || raw.starts_with("~/") || raw.as_bytes().get(1) == Some(&b':'))
+        {
+            return Err(invalid(
+                "known_hosts 路径存在歧义，请使用交互认证确认主机密钥",
+            ));
+        }
+        let mut expanded = String::new();
+        let mut chars = raw.chars();
+        while let Some(ch) = chars.next() {
+            if ch != '%' {
+                expanded.push(ch);
+                continue;
+            }
+            let value = match chars.next() {
+                Some('%') => "%",
+                Some('d') => home.as_ref(),
+                Some('h') => host.as_str(),
+                Some('p') => {
+                    expanded.push_str(&port.to_string());
+                    continue;
+                }
+                Some('r') => user,
+                Some('u') => &local_user,
+                Some('n') => original_host.as_str(),
+                Some('k') => alias.unwrap_or(&original_host),
+                _ => {
+                    return Err(invalid(
+                        "known_hosts 路径包含未支持的替换符，请使用交互认证",
+                    ))
+                }
+            };
+            expanded.push_str(value);
+        }
+        if let Some(relative) = expanded.strip_prefix("~/") {
+            expanded = format!("{home}/{relative}");
+        }
+        files.push(std::path::PathBuf::from(expanded));
+    }
+    if files.is_empty() {
+        return Err(invalid(
+            "此 SSH 配置未启用用户 known_hosts 文件，请使用交互认证",
+        ));
+    }
+    Ok(EffectiveHostKeyTarget {
+        host,
+        port,
+        lookup,
+        files,
+        proxied: field("proxyjump").is_some() || field("proxycommand").is_some(),
+    })
+}
+
+pub(crate) fn review_profile_host_key(
+    profile: &crate::client::endpoint::SavedSshEndpoint,
+) -> io::Result<HostKeyReview> {
+    let target = effective_host_key_target(profile)?;
+    if target.proxied {
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "此连接经过跳板机或代理，请使用交互认证确认指纹；不会绕过代理直接扫描",
+        ));
+    }
+    let keys = scan_host_keys(&target.host, Some(target.port))?;
+    Ok(HostKeyReview { target, keys })
+}
+
+pub(crate) fn remember_reviewed_host_key(
+    profile: &crate::client::endpoint::SavedSshEndpoint,
+    target: &EffectiveHostKeyTarget,
+    key: &KnownHostKey,
+) -> io::Result<usize> {
+    if effective_host_key_target(profile)? != *target {
+        return Err(io::Error::other("SSH 配置已变化，请重新查看并确认指纹"));
+    }
+    append_reviewed_key(target, key)
+}
+
+pub(super) fn append_reviewed_key(
+    target: &EffectiveHostKeyTarget,
+    key: &KnownHostKey,
+) -> io::Result<usize> {
+    let parts = key.key_line.split_whitespace().collect::<Vec<_>>();
+    if parts.len() != 2 || key_line_to_known_host_key(parts[0], parts[1]).as_ref() != Some(key) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "主机密钥与已展示的指纹不一致",
+        ));
+    }
+    let path = target
+        .files
+        .first()
+        .ok_or_else(|| io::Error::other("没有可写入的 known_hosts 路径"))?;
+    if path.is_file() {
+        let existing = run_tool(
+            "ssh-keygen",
+            &[
+                "-F".into(),
+                target.lookup.clone(),
+                "-f".into(),
+                path.to_string_lossy().into_owned(),
+            ],
+        )?;
+        if parse_key_lines(&String::from_utf8_lossy(&existing.stdout))
+            .iter()
+            .any(|known| known == key)
+        {
+            return Ok(0);
+        }
+    }
+    super::process::check_cancelled()?;
+    if let Some(parent) = path.parent().filter(|parent| !parent.exists()) {
+        crate::platform::create_remote_private_dir(parent)?;
+    }
+    let mut file = std::fs::OpenOptions::new()
+        .append(true)
+        .create(true)
+        .open(path)?;
+    // 只写入本次界面已经展示的公钥，确认后不重新扫描网络。
+    writeln!(file, "{} {}", target.lookup, key.key_line)?;
+    Ok(1)
+}
+
+pub(crate) fn remove_profile_host_key(
+    profile: &crate::client::endpoint::SavedSshEndpoint,
+) -> io::Result<()> {
+    let target = effective_host_key_target(profile)?;
+    for path in target.files.iter().filter(|path| path.is_file()) {
+        super::process::check_cancelled()?;
+        let output = run_tool(
+            "ssh-keygen",
+            &[
+                "-R".into(),
+                target.lookup.clone(),
+                "-f".into(),
+                path.to_string_lossy().into_owned(),
+            ],
+        )?;
+        if !output.status.success() {
+            return Err(tool_failed("清理该主机的旧密钥失败", &output));
+        }
+    }
+    Ok(())
+}
+
 /// Parses an SSH target (`user@host`, `host:port`, `ssh://user@host:port`,
 /// `[v6]::1:2222`) into host and optional explicit port. Returns `None` for
 /// empty authorities. Targets without a port scan the SSH default (22);
@@ -54,6 +294,9 @@ pub(crate) fn parse_ssh_host_port(target: &str) -> Option<(String, Option<u16>)>
             .strip_prefix(':')
             .and_then(|port| port.parse::<u16>().ok());
         return Some((host.to_string(), port));
+    }
+    if host_port.matches(':').count() > 1 {
+        return Some((host_port.to_owned(), None));
     }
     match host_port.rsplit_once(':') {
         Some((host, port)) if !host.is_empty() => match port.parse::<u16>() {
@@ -117,22 +360,22 @@ fn ssh_keyscan_args(host: &str, port: Option<u16>) -> Vec<String> {
 }
 
 fn run_tool(program: &str, args: &[String]) -> io::Result<std::process::Output> {
-    let child = Command::new(program)
+    let mut command = Command::new(program);
+    command
         .args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|error| {
-            if error.kind() == io::ErrorKind::NotFound {
-                io::Error::new(
-                    io::ErrorKind::Unsupported,
-                    format!("{program} is not available on this system: {error}"),
-                )
-            } else {
-                error
-            }
-        })?;
+        .stderr(Stdio::piped());
+    let child = super::process::spawn(&mut command).map_err(|error| {
+        if error.kind() == io::ErrorKind::NotFound {
+            io::Error::new(
+                io::ErrorKind::Unsupported,
+                format!("{program} is not available on this system: {error}"),
+            )
+        } else {
+            error
+        }
+    })?;
     wait_with_output_timeout_bounded(
         child,
         KNOWN_HOSTS_COMMAND_TIMEOUT,
@@ -271,6 +514,70 @@ pub(crate) fn precollect_host_keys(host: &str, port: Option<u16>) -> io::Result<
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn effective_host_key_target_uses_resolved_port_alias_and_path() {
+        let target = parse_effective_target("hostname internal.example\nport 2207\nuser deploy\nhostkeyalias build-key\nuserknownhostsfile /tmp/known-%h-%p-%r\nproxyjump jump.example\n", "build").unwrap();
+        assert_eq!(target.host, "internal.example");
+        assert_eq!(target.port, 2207);
+        assert_eq!(target.lookup, "build-key");
+        assert_eq!(
+            target.files,
+            vec![std::path::PathBuf::from(
+                "/tmp/known-internal.example-2207-deploy"
+            )]
+        );
+        assert!(target.proxied);
+        let without_alias = parse_effective_target(
+            "hostname host.example\nport 2222\nuserknownhostsfile /tmp/known\n",
+            "build",
+        )
+        .unwrap();
+        assert_eq!(without_alias.lookup, "[host.example]:2222");
+        for original in ["user@2001:db8::1", "ssh://user@[2001:db8::1]:2222"] {
+            let ipv6 = parse_effective_target(
+                "hostname 2001:db8::1\nport 2222\nuserknownhostsfile /tmp/%k-%n\n",
+                original,
+            )
+            .unwrap();
+            assert_eq!(
+                ipv6.files,
+                vec![std::path::PathBuf::from("/tmp/2001:db8::1-2001:db8::1")]
+            );
+        }
+    }
+
+    #[test]
+    fn ambiguous_or_expanding_host_records_are_rejected_before_write() {
+        for fields in [
+            "userknownhostsfile /tmp/with space\n",
+            "hostkeyalias *\nuserknownhostsfile /tmp/known\n",
+            "userknownhostsfile /tmp/%x\n",
+        ] {
+            assert!(parse_effective_target(
+                &format!("hostname host.example\nport 22\n{fields}"),
+                "build"
+            )
+            .is_err());
+        }
+    }
+
+    #[test]
+    fn reviewed_key_cannot_be_replaced_after_confirmation() {
+        let target = EffectiveHostKeyTarget {
+            host: "example.com".into(),
+            port: 22,
+            lookup: "example.com".into(),
+            files: vec![],
+            proxied: false,
+        };
+        let mut key = key_line_to_known_host_key("ssh-ed25519", "AQID").unwrap();
+        key.key_line = "ssh-ed25519 BAUG".into();
+        assert_eq!(
+            append_reviewed_key(&target, &key).unwrap_err().kind(),
+            io::ErrorKind::InvalidData
+        );
+    }
 
     #[test]
     fn parses_targets_into_host_and_port() {

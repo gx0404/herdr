@@ -376,6 +376,10 @@ impl ClientWriterQueue {
 /// Internal event sent from client transport threads to the main event loop.
 #[derive(Debug)]
 pub(crate) enum ServerEvent {
+    ClientViewInput {
+        client_id: u64,
+        input: crate::protocol::views::ViewInput,
+    },
     /// A new client completed the handshake.
     ClientConnected {
         client_id: u64,
@@ -523,6 +527,12 @@ pub(crate) enum ServerEvent {
         request_id: String,
         final_chunk: bool,
         data: Vec<u8>,
+    },
+    /// 后台观测结果不参与终端命令的焦点和 in-flight 状态。
+    ObservationResponse {
+        client_id: u64,
+        boot_id: String,
+        message: ServerMessage,
     },
     /// A client detached gracefully.
     ClientDetach { client_id: u64 },
@@ -1311,6 +1321,23 @@ fn client_read_loop_with_endpoint_controls(
                         message,
                     },
                 }
+            }
+            ClientMessage::EndpointControl { kind, data }
+                if kind == crate::protocol::views::INPUT_KIND =>
+            {
+                let Ok(input) = serde_json::from_str::<crate::protocol::views::ViewInput>(&data)
+                else {
+                    continue;
+                };
+                if data.len() > MAX_INPUT_PAYLOAD
+                    || !matches!(
+                        pane_input_event_limit(&input.events),
+                        InputEventLimit::WithinLimits
+                    )
+                {
+                    continue;
+                }
+                ServerEvent::ClientViewInput { client_id, input }
             }
             ClientMessage::EndpointControl { kind, data }
                 if kind == crate::protocol::endpoint::PRESENTATION_EFFECTS_SYNC_KIND =>

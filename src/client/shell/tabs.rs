@@ -16,13 +16,60 @@ pub(crate) fn render_tab_bar(
     visual_bell: bool,
     hits: &mut ShellHitMap,
 ) {
-    let palette = &config.palette;
-    buffer.set_style(area, Style::default().bg(palette.panel_bg));
     let tabs = snapshot
         .tabs
         .iter()
         .filter(|tab| Some(tab.workspace_id.as_str()) == snapshot.focused_workspace_id.as_deref())
         .collect::<Vec<_>>();
+    render_tab_strip(
+        buffer,
+        area,
+        config,
+        tab_scroll,
+        reveal_focused_tab,
+        TabStripContext {
+            tabs: &tabs,
+            focused: snapshot.focused_tab_id.as_deref(),
+            status: Some(snapshot),
+            hover: chrome_hover,
+            visual_bell,
+            insert_index: tab_drag_insert_index,
+        },
+        hits,
+    );
+}
+
+pub(crate) struct TabStripContext<'a> {
+    pub tabs: &'a [&'a ClientShellTab],
+    pub focused: Option<&'a str>,
+    pub status: Option<&'a ClientShellSnapshot>,
+    pub hover: Option<&'a super::feedback::ChromeHover>,
+    pub visual_bell: bool,
+    pub insert_index: Option<usize>,
+}
+
+pub(crate) fn render_tab_strip(
+    buffer: &mut Buffer,
+    area: Rect,
+    config: &ClientShellConfig,
+    tab_scroll: &mut usize,
+    reveal_focused_tab: &mut bool,
+    context: TabStripContext<'_>,
+    hits: &mut ShellHitMap,
+) {
+    if area.is_empty() {
+        return;
+    }
+    let TabStripContext {
+        tabs,
+        focused,
+        status,
+        hover: chrome_hover,
+        visual_bell,
+        insert_index: tab_drag_insert_index,
+    } = context;
+    let palette = &config.palette;
+    buffer.set_style(area, Style::default().bg(palette.panel_bg));
     let desired_widths = tabs
         .iter()
         .map(|tab| {
@@ -30,7 +77,7 @@ pub(crate) fn render_tab_bar(
             display_width(&label).saturating_add(4).max(MIN_TAB_WIDTH)
         })
         .collect::<Vec<_>>();
-    let content = tab_bar_content_area(snapshot, area);
+    let content = status.map_or(area, |snapshot| tab_bar_content_area(snapshot, area));
     let mouse_chrome = config.mouse_capture;
     let new_tab_width = if mouse_chrome { NEW_TAB_WIDTH } else { 0 };
     let desired_total = desired_widths
@@ -53,7 +100,10 @@ pub(crate) fn render_tab_bar(
     if !overflow {
         *tab_scroll = 0;
     } else if *reveal_focused_tab {
-        if let Some(focused) = tabs.iter().position(|tab| tab.focused) {
+        if let Some(focused) = tabs
+            .iter()
+            .position(|tab| focused == Some(tab.tab_id.as_str()))
+        {
             *tab_scroll = centered_tab_scroll(focused, &desired_widths, available).min(max_scroll);
         }
     } else {
@@ -115,7 +165,7 @@ pub(crate) fn render_tab_bar(
             chrome_hover,
             Some(super::feedback::ChromeHover::Tab(id)) if id == &tab.tab_id
         );
-        let style = if tab.focused {
+        let style = if focused == Some(tab.tab_id.as_str()) {
             let base = Style::default()
                 .fg(panel_contrast_fg(palette))
                 .bg(palette.accent);
@@ -146,7 +196,7 @@ pub(crate) fn render_tab_bar(
             right_padding = padding.saturating_sub(left) as usize,
         );
         put_text(buffer, rect.x, rect.y, rect.width, &text, style);
-        if visual_bell && tab.focused && rect.width > 2 {
+        if visual_bell && focused == Some(tab.tab_id.as_str()) && rect.width > 2 {
             put_text(
                 buffer,
                 rect.right().saturating_sub(2),
@@ -265,7 +315,7 @@ pub(crate) fn render_tab_bar(
     }
 
     if let Some(insert_index) = tab_drag_insert_index {
-        if let Some(indicator_x) = tab_drop_indicator_x(hits, &tabs, insert_index) {
+        if let Some(indicator_x) = tab_drop_indicator_x(hits, tabs, insert_index) {
             put_text(
                 buffer,
                 indicator_x.min(content.right().saturating_sub(1)),
@@ -276,7 +326,9 @@ pub(crate) fn render_tab_bar(
             );
         }
     }
-    render_tab_bar_status(buffer, area, snapshot, palette);
+    if let Some(snapshot) = status {
+        render_tab_bar_status(buffer, area, snapshot, palette);
+    }
 }
 
 pub(crate) fn tab_bar_status_width(snapshot: &ClientShellSnapshot) -> u16 {

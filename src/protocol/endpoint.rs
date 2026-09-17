@@ -142,6 +142,7 @@ impl EndpointServerWelcome {
             blob_codec: BLOB_CODEC_V1.into(),
             methods,
             capabilities: vec![
+                super::views::CAPABILITY.into(),
                 super::surface_reuse::CAPABILITY.into(),
                 SURFACE_INTEREST_CAPABILITY.into(),
                 PRESENTATION_EFFECTS_FENCE_CAPABILITY.into(),
@@ -344,6 +345,7 @@ mod tests {
         assert_eq!(
             welcome.capabilities,
             vec![
+                super::super::views::CAPABILITY.to_string(),
                 super::super::surface_reuse::CAPABILITY.to_string(),
                 SURFACE_INTEREST_CAPABILITY.to_string(),
                 PRESENTATION_EFFECTS_FENCE_CAPABILITY.to_string(),

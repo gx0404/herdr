@@ -47,8 +47,8 @@ struct Harness {
 impl Harness {
     fn new() -> Self {
         static NEXT: AtomicU64 = AtomicU64::new(0);
-        let root = PathBuf::from(format!(
-            "/var/tmp/hma-{}-{}",
+        let root = std::env::temp_dir().join(format!(
+            "hma-{}-{}",
             std::process::id(),
             NEXT.fetch_add(1, Ordering::Relaxed)
         ));

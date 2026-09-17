@@ -2,6 +2,11 @@ use super::*;
 
 /// Internal events for the client event loop.
 pub(super) enum ClientLoopEvent {
+    ViewSurface {
+        endpoint_id: endpoint::ClientEndpointId,
+        generation: u64,
+        view: Box<crate::protocol::views::DecodedView>,
+    },
     #[cfg(unix)]
     StdinInput(Vec<u8>),
     #[cfg(unix)]
@@ -31,11 +36,6 @@ pub(super) enum ClientLoopEvent {
     ReconnectEndpoint {
         endpoint_id: endpoint::ClientEndpointId,
     },
-    /// Reconnect with an in-memory `accept-new` host-key override (the
-    /// "this time only" trust choice; never written to the catalog).
-    ConnectEndpointTrustOnce {
-        endpoint_id: endpoint::ClientEndpointId,
-    },
     /// Progress of one wizard-driven remote bootstrap worker.
     MachineBootstrap {
         ticket: u64,
@@ -48,6 +48,10 @@ pub(super) enum ClientLoopEvent {
     },
     /// Progress of one approved machine recovery worker (known_hosts ops and
     /// interactive auth outcomes).
+    MachineInteractiveReady {
+        ticket: u64,
+        connection: Box<endpoint::PreparedEndpointConnection>,
+    },
     MachineAuth {
         update: shell::MachineAuthUpdate,
     },

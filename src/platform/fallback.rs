@@ -150,6 +150,13 @@ pub(crate) fn configure_status_command(_process: &mut std::process::Command) {}
 pub(crate) struct StatusCommandGuard;
 
 impl StatusCommandGuard {
+    pub(crate) fn from_std_child(_child: &std::process::Child) -> std::io::Result<Self> {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "此平台不支持后台任务进程组",
+        ))
+    }
+
     pub(crate) fn new(_child: &tokio::process::Child) -> std::io::Result<Self> {
         Ok(Self)
     }

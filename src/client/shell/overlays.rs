@@ -6,6 +6,9 @@ mod worktree_overlays;
 #[derive(Default)]
 pub(crate) struct OverlayRender {
     pub(crate) area: Rect,
+    pub(crate) menu_popup: Rect,
+    pub(crate) menu_search: Rect,
+    pub(crate) menu_scroll: usize,
     pub(crate) menu_rows: Vec<(Rect, usize)>,
     pub(crate) primary: Rect,
     pub(crate) clear: Rect,
@@ -20,9 +23,12 @@ pub(crate) struct OverlayRender {
     pub(crate) help_scroll_metrics: Option<crate::pane::ScrollMetrics>,
     pub(crate) help_max_scroll: usize,
     pub(crate) settings_popup: Rect,
+    pub(crate) settings_scroll: usize,
     pub(crate) settings_tabs: Vec<(Rect, ClientSettingsSection)>,
     pub(crate) settings_choices: Vec<(Rect, usize)>,
     pub(crate) machines_popup: Rect,
+    pub(crate) machines_detail_area: Rect,
+    pub(crate) machines_scroll: usize,
     pub(crate) machines_search: Rect,
     pub(crate) machines_rows: Vec<(Rect, crate::client::endpoint::ProfileId)>,
     pub(crate) machines_actions: Vec<(Rect, super::machines_overlay::MachineOverlayButton)>,
@@ -34,6 +40,7 @@ pub(crate) struct OverlayRender {
     /// forward add form.
     pub(crate) machines_wizard_fields: Vec<(Rect, usize)>,
     pub(crate) machines_max_scroll: usize,
+    pub(crate) machine_auth_max_scroll: usize,
     pub(crate) machine_auth_actions: Vec<(Rect, super::machine_auth_overlay::MachineAuthButton)>,
     pub(crate) broadcast_popup: Rect,
     pub(crate) broadcast_rows: Vec<(Rect, usize)>,
@@ -65,7 +72,7 @@ pub(crate) struct OverlayRender {
 pub(crate) fn render_client_overlay(
     b: &mut Buffer,
     o: &ClientShellOverlay,
-    s: &ClientShellSnapshot,
+    s: Option<&ClientShellSnapshot>,
     endpoints: &[ClientShellEndpoint],
     saved_profiles: &[SavedSshEndpoint],
     broadcast: &crate::client::endpoint::BroadcastSet,
@@ -97,18 +104,25 @@ pub(crate) fn render_client_overlay(
     match o {
         ClientShellOverlay::Onboarding => render_onboarding_overlay(b, cx),
         ClientShellOverlay::ProductAnnouncement(v) => render_product_announcement_overlay(b, v, cx),
-        ClientShellOverlay::ReleaseNotes(v) => {
-            render_release_notes_overlay(b, v, &s.update_install_command, cx)
-        }
+        ClientShellOverlay::ReleaseNotes(v) => render_release_notes_overlay(
+            b,
+            v,
+            s.map(|snapshot| snapshot.update_install_command.as_str())
+                .unwrap_or_default(),
+            cx,
+        ),
         ClientShellOverlay::Rename(v) => render_rename_overlay(b, v, cx),
         ClientShellOverlay::ConfirmClose(v) => render_confirm_close_overlay(b, v, cx),
         ClientShellOverlay::Help(v) => render_help_overlay(b, v, k, cx),
         ClientShellOverlay::Navigator(v) => {
             render_navigator_overlay(b, v, endpoints, active_endpoint_id, cx)
         }
-        ClientShellOverlay::Settings(v) => {
-            settings_overlay::render_settings_overlay(b, v, s.integration_updates_available, cx)
-        }
+        ClientShellOverlay::Settings(v) => settings_overlay::render_settings_overlay(
+            b,
+            v,
+            s.is_some_and(|snapshot| snapshot.integration_updates_available),
+            cx,
+        ),
         ClientShellOverlay::Machines(v) => super::machines_overlay::render_machines_overlay(
             b,
             v,
@@ -195,6 +209,27 @@ pub(crate) fn render_client_overlay(
             super::command_palette::render_command_palette(b, v, cx)
         }
         ClientShellOverlay::ContextMenu(_) => None,
+    }
+}
+
+pub(crate) fn render_minimum_overlay(b: &mut Buffer, cx: &ChromeContext<'_>) -> OverlayRender {
+    if !b.area.is_empty() {
+        b.set_style(
+            b.area,
+            Style::default().fg(cx.palette.text).bg(cx.palette.panel_bg),
+        );
+        put_text(
+            b,
+            b.area.x,
+            b.area.y,
+            b.area.width,
+            crate::i18n::texts().global_menu.resize_hint,
+            Style::default().fg(cx.palette.accent),
+        );
+    }
+    OverlayRender {
+        area: b.area,
+        ..OverlayRender::default()
     }
 }
 
@@ -309,7 +344,10 @@ pub(in crate::client::shell) fn modal_panel(
     border: ratatui::style::Color,
     cx: &ChromeContext<'_>,
 ) -> Option<(Rect, Rect)> {
-    let outer = crate::ui::modal_rect(b.area, size)?;
+    let outer = cx
+        .page_bounds
+        .map(|rect| rect.intersection(b.area))
+        .or_else(|| crate::ui::modal_rect(b.area, size))?;
     let inner = panel(b, outer, border, cx.palette.panel_bg, cx.glyphs)?;
     Some((outer, inner))
 }
@@ -1469,6 +1507,7 @@ mod tests {
         components: &'a crate::app::state::ComponentStyles,
     ) -> ChromeContext<'a> {
         ChromeContext {
+            page_bounds: None,
             palette,
             components,
             glyphs: crate::ui::BorderGlyphs::SINGLE,

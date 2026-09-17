@@ -354,6 +354,7 @@ impl ClientShellState {
         now: std::time::Instant,
     ) -> ClientShellInput {
         let mut outcome = ClientShellInput::default();
+        self.tick_frozen_selection(now, &mut outcome);
         if self
             .selection_repaint_deadline
             .is_some_and(|deadline| now >= deadline)
@@ -432,6 +433,20 @@ impl ClientShellState {
 
     fn pane_split_target_is_current(&self, hit: &PaneSplitHit, tab_id: &str) -> Option<bool> {
         let snapshot = self.snapshot.as_deref()?;
+        if self.workbench.enabled {
+            let view = self
+                .workbench
+                .views
+                .values()
+                .find(|view| view.tab == tab_id)?;
+            if view.surface.projection_revision != snapshot.revision {
+                return None;
+            }
+            return Some(
+                hit.tab_id.as_deref() == Some(tab_id)
+                    && pane_surface_topology_signature(&view.surface) == hit.topology_signature,
+            );
+        }
         let surface = self.pane_surface.as_ref()?;
         if snapshot.revision != surface.projection_revision {
             return None;
@@ -656,6 +671,42 @@ impl ClientShellState {
     }
 
     pub(super) fn handle_mouse(&mut self, mouse: MouseEvent, outcome: &mut ClientShellInput) {
+        if self.frozen_selection_mouse(mouse, outcome) {
+            return;
+        }
+        if self.floating_page_mouse(mouse, outcome) {
+            return;
+        }
+        let point = (mouse.column, mouse.row);
+        if self.config.mouse_capture
+            && mouse.kind == MouseEventKind::Down(MouseButton::Left)
+            && !contains(self.observability.hover_rect, point)
+            && self.observability.process_dialog.is_none()
+            && contains(self.hits.global_launcher, point)
+            && !contains(self.hits.overlay_bounds, point)
+            && !matches!(
+                self.overlay,
+                Some(
+                    ClientShellOverlay::MachineAuth(_)
+                        | ClientShellOverlay::ConfirmClose(_)
+                        | ClientShellOverlay::Onboarding
+                        | ClientShellOverlay::ProductAnnouncement(_)
+                )
+            )
+            && !contains(self.hits.notification_toast, point)
+            && !contains(self.hits.lifecycle_banner_retry, point)
+            && !contains(self.hits.lifecycle_banner_give_up, point)
+        {
+            self.toggle_global_menu();
+            outcome.repaint = true;
+            return;
+        }
+        if self.workbench_mouse(mouse, outcome) {
+            return;
+        }
+        if self.observation_mouse(mouse, outcome) {
+            return;
+        }
         self.update_link_hover(mouse, outcome);
         // Any pointer activity ends link hints mode (it is keyboard-driven).
         if self.link_hints.take().is_some() {
@@ -892,10 +943,10 @@ impl ClientShellState {
                 return;
             }
         }
-        if self.popup_pending {
+        if self.popup_pending && self.overlay.is_none() {
             return;
         }
-        if let Some(hit) = self.hits.popup.clone() {
+        if let Some(hit) = self.hits.popup.clone().filter(|_| self.overlay.is_none()) {
             if super::contains(hit.inner_rect, point) {
                 match mouse.kind {
                     MouseEventKind::Down(button) => {
@@ -924,7 +975,7 @@ impl ClientShellState {
             }
             return;
         }
-        if self.popup_terminal_id.is_some() {
+        if self.popup_terminal_id.is_some() && self.overlay.is_none() {
             return;
         }
         if !self.replaying_url_click
@@ -1394,8 +1445,8 @@ impl ClientShellState {
                         outcome.repaint = true;
                     } else if let Some((_, index)) = row_hit {
                         self.activate_palette_item(index, outcome);
-                    } else {
-                        self.overlay = None;
+                    } else if !super::contains(self.hits.menu_popup, point) {
+                        self.close_command_browser();
                         outcome.repaint = true;
                     }
                 }
@@ -1509,6 +1560,18 @@ impl ClientShellState {
             return;
         }
         if matches!(self.overlay, Some(ClientShellOverlay::Settings(_))) {
+            if matches!(
+                mouse.kind,
+                MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
+            ) {
+                self.scroll_settings(if mouse.kind == MouseEventKind::ScrollUp {
+                    -3
+                } else {
+                    3
+                });
+                outcome.repaint = true;
+                return;
+            }
             if mouse.kind == MouseEventKind::Down(MouseButton::Left) {
                 if let Some((_, section)) = self
                     .hits
@@ -1526,18 +1589,6 @@ impl ClientShellState {
                     .copied()
                 {
                     self.select_settings_choice(index);
-                    let immediate = matches!(
-                        self.overlay,
-                        Some(ClientShellOverlay::Settings(ClientSettingsOverlay {
-                            section: ClientSettingsSection::Indicators
-                                | ClientSettingsSection::Sound
-                                | ClientSettingsSection::Toast,
-                            ..
-                        }))
-                    );
-                    if immediate {
-                        self.apply_settings_choice(outcome);
-                    }
                     outcome.repaint = true;
                 } else if super::contains(self.hits.overlay_primary, point) {
                     self.apply_settings_choice(outcome);
@@ -1688,6 +1739,18 @@ impl ClientShellState {
             return;
         }
         if matches!(self.overlay, Some(ClientShellOverlay::MachineAuth(_))) {
+            if matches!(
+                mouse.kind,
+                MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
+            ) {
+                self.scroll_machine_auth(if mouse.kind == MouseEventKind::ScrollUp {
+                    -3
+                } else {
+                    3
+                });
+                outcome.repaint = true;
+                return;
+            }
             if mouse.kind == MouseEventKind::Down(MouseButton::Left) {
                 if let Some((_, button)) = self
                     .hits
@@ -1705,7 +1768,7 @@ impl ClientShellState {
         }
         if matches!(self.overlay, Some(ClientShellOverlay::Machines(_))) {
             match mouse.kind {
-                MouseEventKind::Moved => {
+                MouseEventKind::Moved if self.hits.machines_detail_area.is_empty() => {
                     if let Some((_, profile_id)) = self
                         .hits
                         .machines_rows
@@ -1718,11 +1781,19 @@ impl ClientShellState {
                     }
                 }
                 MouseEventKind::ScrollUp if super::contains(self.hits.machines_popup, point) => {
-                    self.scroll_machines_overlay(-3);
+                    if super::contains(self.hits.machines_detail_area, point) {
+                        self.scroll_machine_details(-3);
+                    } else {
+                        self.scroll_machines_overlay(-3);
+                    }
                     outcome.repaint = true;
                 }
                 MouseEventKind::ScrollDown if super::contains(self.hits.machines_popup, point) => {
-                    self.scroll_machines_overlay(3);
+                    if super::contains(self.hits.machines_detail_area, point) {
+                        self.scroll_machine_details(3);
+                    } else {
+                        self.scroll_machines_overlay(3);
+                    }
                     outcome.repaint = true;
                 }
                 MouseEventKind::Down(MouseButton::Left) => {
@@ -1784,7 +1855,9 @@ impl ClientShellState {
                         .cloned()
                     {
                         self.hover_machine_row(&profile_id);
-                        self.open_machine_detail(&profile_id);
+                        if self.hits.machines_detail_area.is_empty() {
+                            self.open_machine_detail(&profile_id);
+                        }
                         outcome.repaint = true;
                     } else if let Some((_, button)) = self
                         .hits
@@ -2645,11 +2718,7 @@ impl ClientShellState {
                     .find(|hit| super::contains(hit.hit_rect, point))
                     .cloned();
                 if let Some(hit) = split_hit {
-                    let Some(tab_id) = self
-                        .snapshot
-                        .as_deref()
-                        .and_then(|snapshot| snapshot.focused_tab_id.clone())
-                    else {
+                    let Some(tab_id) = hit.tab_id.clone() else {
                         return;
                     };
                     let pointer = match hit.direction {
@@ -2701,7 +2770,9 @@ impl ClientShellState {
                             1
                         };
                         let click = ClientPaneClick { streak, ..click };
-                        if streak >= 3 {
+                        if self.begin_frozen_selection(&hit, mouse, streak, outcome) {
+                            self.last_pane_click = (streak < 3).then_some(click);
+                        } else if streak >= 3 {
                             // Triple-click selects the whole line and restarts
                             // the streak so a fourth click is a fresh anchor.
                             self.last_pane_click = None;

@@ -1223,3 +1223,69 @@ fn retained_surface_patch_rejects_stale_base_without_mutating_surface() {
     assert!(matches!(outcome, ClientPaneSurfacePatchOutcome::Rejected));
     assert_eq!(state.pane_surface, before);
 }
+
+#[test]
+fn shell_pages_own_keyboard_paste_and_mouse_above_terminal_popup() {
+    let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
+    state.set_snapshot(Box::new(snapshot()));
+    state.set_pane_surface(surface_with_popup());
+    state.compose(106, 30).unwrap();
+    let popup = state.hits.popup.clone().unwrap();
+    state.open_command_search();
+    state.compose(106, 30).unwrap();
+    let key = state.handle_input_bytes(b"a");
+    assert!(key.requests.is_empty());
+    let text = state.handle_raw_events(vec![
+        RawInputEvent::Text(crate::input::TextCommit::new("b")),
+        RawInputEvent::Paste("c".into()),
+    ]);
+    assert!(text.requests.is_empty());
+    assert!(
+        matches!(&state.overlay, Some(ClientShellOverlay::CommandPalette(palette)) if palette.query.as_str() == "abc")
+    );
+    assert_eq!(state.clipboard_image_target(), None);
+    let mouse = state.handle_raw_events(vec![RawInputEvent::Mouse(MouseEvent {
+        kind: MouseEventKind::ScrollDown,
+        column: popup.inner_rect.x + 1,
+        row: popup.inner_rect.y + 1,
+        modifiers: KeyModifiers::NONE,
+    })]);
+    assert!(mouse.requests.is_empty());
+    state.open_settings_overlay();
+    state.compose(106, 30).unwrap();
+    assert!(state.handle_input_bytes(b"\x1b[B").requests.is_empty());
+    let mouse = state.handle_raw_events(vec![RawInputEvent::Mouse(MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: popup.inner_rect.x + 1,
+        row: popup.inner_rect.y + 1,
+        modifiers: KeyModifiers::NONE,
+    })]);
+    assert!(mouse.requests.is_empty());
+}
+
+#[test]
+fn overlay_blocks_held_popup_repeats_but_delivers_original_release() {
+    use crossterm::event::KeyEventKind;
+    let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
+    state.set_snapshot(Box::new(snapshot()));
+    state.set_pane_surface(surface_with_popup());
+    let key = crate::input::TerminalKey::new(KeyCode::Down, KeyModifiers::NONE);
+    let press = state.handle_raw_events(vec![RawInputEvent::Key(key.clone())]);
+    assert!(matches!(
+        &press.requests[..],
+        [ClientMessage::ClientShellPopupInput { .. }]
+    ));
+    state.open_command_search();
+    let repeat = state.handle_raw_events(vec![RawInputEvent::Key(
+        key.clone().with_kind(KeyEventKind::Repeat),
+    )]);
+    assert!(repeat.requests.is_empty());
+    let released = state.handle_raw_events(vec![RawInputEvent::Key(
+        key.with_kind(KeyEventKind::Release),
+    )]);
+    assert!(
+        matches!(&released.requests[..], [ClientMessage::ClientShellPopupInput { events, .. }]
+        if matches!(&events[..], [ClientPaneInputEvent::Key { kind: crate::protocol::ClientKeyKind::Release, .. }]))
+    );
+    assert!(state.input_leases.is_empty());
+}

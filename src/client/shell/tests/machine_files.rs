@@ -52,6 +52,71 @@ fn files_overlay(
 }
 
 #[test]
+fn superseded_reads_settle_every_ticket_without_replacing_latest_entries() {
+    use super::super::machine_files_overlay::MachineFilesButton;
+    let build = profile("Build", "build.example", "51");
+    let mut state = state_with_profiles(std::slice::from_ref(&build));
+    let first = open_files(&mut state, &build);
+    let ClientShellAction::MachineFsOp { ticket: first, .. } = first.actions[0] else {
+        panic!()
+    };
+    let mut second = ClientShellInput::default();
+    state.activate_machine_files_button(MachineFilesButton::Refresh, &mut second);
+    let ClientShellAction::MachineFsOp { ticket: second, .. } = second.actions[0] else {
+        panic!()
+    };
+    assert_eq!(files_overlay(&mut state).pending, 2);
+    state.handle_machine_fs_result(
+        second,
+        Ok(MachineFsOutcome::Entries {
+            entries: vec![entry("new", RemoteEntryKind::File)],
+        }),
+        &mut ClientShellInput::default(),
+    );
+    state.handle_machine_fs_result(
+        first,
+        Ok(MachineFsOutcome::Entries {
+            entries: vec![entry("old", RemoteEntryKind::File)],
+        }),
+        &mut ClientShellInput::default(),
+    );
+    assert_eq!(files_overlay(&mut state).pending, 0);
+    assert_eq!(
+        files_overlay(&mut state).entries.as_ref().unwrap()[0].name,
+        "new"
+    );
+    state.handle_machine_fs_result(
+        first,
+        Err("重复响应".into()),
+        &mut ClientShellInput::default(),
+    );
+    assert!(files_overlay(&mut state).error.is_none());
+}
+
+#[test]
+fn closing_files_cancels_owned_worker_and_reopening_rejects_old_result() {
+    use super::super::machine_files_overlay::MachineFilesButton;
+    let build = profile("Build", "build.example", "52");
+    let mut state = state_with_profiles(std::slice::from_ref(&build));
+    let first = open_files(&mut state, &build);
+    let ClientShellAction::MachineFsOp { ticket, cancel, .. } = &first.actions[0] else {
+        panic!()
+    };
+    state.activate_machine_files_button(MachineFilesButton::Back, &mut ClientShellInput::default());
+    assert!(cancel.is_cancelled());
+    open_files(&mut state, &build);
+    state.handle_machine_fs_result(
+        *ticket,
+        Ok(MachineFsOutcome::Entries {
+            entries: vec![entry("old", RemoteEntryKind::File)],
+        }),
+        &mut ClientShellInput::default(),
+    );
+    assert!(files_overlay(&mut state).entries.is_none());
+    assert_eq!(files_overlay(&mut state).pending, 1);
+}
+
+#[test]
 fn remote_join_and_parent_navigation() {
     use super::super::machine_files_overlay::{remote_join, remote_parent};
     assert_eq!(remote_join(".", "etc"), "etc");
@@ -221,6 +286,24 @@ fn prompts_build_the_right_operations() {
             .expect("fs op")
     }
 
+    fn finish_write(state: &mut ClientShellState, result: &ClientShellInput) {
+        let ticket = result
+            .actions
+            .iter()
+            .find_map(|action| match action {
+                ClientShellAction::MachineFsOp { ticket, .. } => Some(*ticket),
+                _ => None,
+            })
+            .unwrap();
+        state.handle_machine_fs_result(
+            ticket,
+            Ok(MachineFsOutcome::Changed {
+                message: "完成".into(),
+            }),
+            &mut ClientShellInput::default(),
+        );
+    }
+
     // Download with an empty input falls back to the entry name.
     files_overlay(&mut state).selected = 1;
     state.handle_raw_events(vec![RawInputEvent::Key(crossterm_key(KeyCode::Char('d')))]);
@@ -230,6 +313,8 @@ fn prompts_build_the_right_operations() {
         super::super::state::MachineFsOp::Download { remote, local, .. }
             if remote == "notes.txt" && local == "notes.txt"
     ));
+
+    finish_write(&mut state, &outcome);
 
     // Mkdir joins the current directory.
     state.handle_raw_events(vec![RawInputEvent::Key(crossterm_key(KeyCode::Char('m')))]);
@@ -241,6 +326,8 @@ fn prompts_build_the_right_operations() {
         fs_op(&outcome),
         super::super::state::MachineFsOp::Mkdir { path, .. } if path == "out"
     ));
+
+    finish_write(&mut state, &outcome);
 
     // Delete on a directory asks for a recursive confirmation.
     files_overlay(&mut state).selected = 0;

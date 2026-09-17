@@ -4,9 +4,9 @@ use crossterm::event::KeyModifiers;
 use serde::{de, Deserialize, Deserializer, Serialize};
 
 use super::{
-    ActionKeybinds, BindingConfig, CommandKeybindConfig, IndexedKeybind, Keybinds, SidebarConfig,
-    SoundConfig, TabBarRightEntryConfig, ThemeConfig, DEFAULT_MOBILE_WIDTH_THRESHOLD,
-    DEFAULT_MOUSE_SCROLL_LINES, DEFAULT_SCROLLBACK_LIMIT_BYTES,
+    AccountUsageConfig, ActionKeybinds, BindingConfig, CommandKeybindConfig, IndexedKeybind,
+    Keybinds, MonitorConfig, SidebarConfig, SoundConfig, TabBarRightEntryConfig, ThemeConfig,
+    DEFAULT_MOBILE_WIDTH_THRESHOLD, DEFAULT_MOUSE_SCROLL_LINES, DEFAULT_SCROLLBACK_LIMIT_BYTES,
 };
 
 pub const MAX_TOAST_DELAY_SECONDS: u64 = 3600;
@@ -308,6 +308,8 @@ pub fn validated_sidebar_bounds(min: u16, max: u16) -> Option<(u16, u16)> {
 #[derive(Debug, Default, Deserialize)]
 #[serde(default)]
 pub struct Config {
+    pub monitor: MonitorConfig,
+    pub account_usage: AccountUsageConfig,
     pub language: crate::i18n::Lang,
     pub onboarding: Option<bool>,
     pub theme: ThemeConfig,
@@ -340,6 +342,10 @@ pub struct KeysConfig {
     pub settings: BindingConfig,
     /// Open the machines overlay. Default: "prefix+m"
     pub manage_machines: BindingConfig,
+    /// 打开分类主菜单，默认 prefix+space。
+    pub main_menu: BindingConfig,
+    /// 打开命令搜索，默认 prefix+/。
+    pub command_search: BindingConfig,
     /// Create a new workspace. Default: "prefix+shift+n"
     pub new_workspace: BindingConfig,
     /// Create a Git worktree from the selected workspace. Default: "prefix+shift+g"
@@ -476,6 +482,10 @@ pub(crate) struct KeysConfigOverlay {
     settings: Option<BindingConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
     manage_machines: Option<BindingConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    main_menu: Option<BindingConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    command_search: Option<BindingConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
     new_workspace: Option<BindingConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -623,6 +633,8 @@ impl<'de> Deserialize<'de> for KeysConfig {
         apply_field!(help);
         apply_field!(settings);
         apply_field!(manage_machines);
+        apply_field!(main_menu);
+        apply_field!(command_search);
         apply_field!(new_workspace);
         apply_field!(new_worktree);
         apply_field!(open_worktree);
@@ -728,6 +740,9 @@ impl KeysConfig {
         profile.prefix = Some(self.prefix.clone());
         copy_effective_action_field!(help, keybinds.help);
         copy_effective_action_field!(settings, keybinds.settings);
+        copy_effective_action_field!(manage_machines, keybinds.manage_machines);
+        copy_effective_action_field!(main_menu, keybinds.main_menu);
+        copy_effective_action_field!(command_search, keybinds.command_search);
         copy_effective_action_field!(new_workspace, keybinds.new_workspace);
         copy_effective_action_field!(new_worktree, keybinds.new_worktree);
         copy_effective_action_field!(open_worktree, keybinds.open_worktree);
@@ -1196,6 +1211,8 @@ impl Default for KeysConfig {
             help: BindingConfig::one("prefix+?"),
             settings: BindingConfig::one("prefix+s"),
             manage_machines: BindingConfig::one("prefix+m"),
+            main_menu: BindingConfig::one("prefix+space"),
+            command_search: BindingConfig::one("prefix+/"),
             new_workspace: BindingConfig::one("prefix+shift+n"),
             new_worktree: BindingConfig::one("prefix+shift+g"),
             open_worktree: BindingConfig::empty(),

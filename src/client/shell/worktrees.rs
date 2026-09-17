@@ -372,6 +372,9 @@ impl ClientShellState {
         use crate::api::schema::ResponseResult;
 
         match (kind, result) {
+            (PendingEndpointKind::Observation { .. } | PendingEndpointKind::Views { .. }, _) => {
+                false
+            }
             (
                 PendingEndpointKind::PrepareWorktreeCreate { workspace_id },
                 Ok(ResponseResult::WorktreeList { source, .. }),
@@ -522,7 +525,11 @@ impl ClientShellState {
                 true
             }
             (
-                PendingEndpointKind::Generic
+                PendingEndpointKind::TextCapture { .. }
+                | PendingEndpointKind::TextWindow { .. }
+                | PendingEndpointKind::TextCopy { .. }
+                | PendingEndpointKind::TextRelease
+                | PendingEndpointKind::Generic
                 | PendingEndpointKind::ProductAnnouncementDismiss { .. }
                 | PendingEndpointKind::ReleaseNotesDismiss
                 | PendingEndpointKind::PopupCommand

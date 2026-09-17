@@ -13,6 +13,15 @@ pub(crate) const MAX_ENDPOINT_REQUEST_ID_BYTES: usize = 128;
 const ENDPOINT_RESPONSE_CHUNK_BYTES: usize = 512 * 1024;
 
 const CLIENT_SHELL_METHODS: &[&str] = &[
+    "account.binding.set",
+    "account.usage.get",
+    "account.usage.integration",
+    "account.usage.providers",
+    "account.usage.refresh",
+    "account.usage.report",
+    "account.usage.subscribe",
+    "account.usage.unsubscribe",
+    "client.views.set",
     "client_shell.surface.set",
     "command.invoke",
     "integration.install",
@@ -27,16 +36,28 @@ const CLIENT_SHELL_METHODS: &[&str] = &[
     "pane.input.set",
     "pane.link.activate",
     "pane.link.resolve",
+    "pane.move",
     "pane.rename",
     "pane.resize",
     "pane.scroll",
     "pane.selection.read",
     "pane.split",
     "pane.swap",
+    "pane.text_snapshot.capture",
+    "pane.text_snapshot.read",
+    "pane.text_snapshot.release",
+    "pane.text_snapshot.retain",
+    "pane.text_snapshot.selection",
     "pane.zoom",
     "product_announcement.dismiss",
     "release_notes.dismiss",
     "server.reload_config",
+    "system.metrics.get",
+    "system.metrics.subscribe",
+    "system.metrics.unsubscribe",
+    "system.process.get",
+    "system.process.list",
+    "system.process.terminate",
     "tab.close",
     "tab.create",
     "tab.focus",
@@ -287,10 +308,52 @@ mod tests {
         )))
         .expect("endpoint method shape fixture");
         let mut actual = endpoint_method_shape_digests();
+        let snapshot_names = actual
+            .keys()
+            .filter(|name| name.starts_with("pane.text_snapshot."))
+            .cloned()
+            .collect::<Vec<_>>();
+        let snapshot_shapes = snapshot_names
+            .into_iter()
+            .map(|name| {
+                let digest = actual.remove(&name).expect("快照方法存在");
+                (name, digest)
+            })
+            .collect::<BTreeMap<_, _>>();
+        let expected_snapshots: BTreeMap<String, String> =
+            serde_json::from_str(include_str!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/tests/fixtures/endpoint-text-snapshot-shapes-v1.json"
+            )))
+            .expect("独立冻结的文字快照契约");
+        assert_eq!(snapshot_shapes, expected_snapshots);
         // Freeze the additive method separately without rewriting the published fixture.
         assert_eq!(
             actual.remove("pane.link.resolve").as_deref(),
             Some("f5e4a3e01453ae7b188f127ce951c12c20e0bebcc17cc364eeb6d1a01fd5bf81")
+        );
+        let additive = actual
+            .keys()
+            .filter(|name| {
+                name.starts_with("system.")
+                    || name.starts_with("account.")
+                    || name.as_str() == "client.views.set"
+                    || name.as_str() == "pane.move"
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        let added = additive
+            .into_iter()
+            .filter_map(|name| actual.remove(&name).map(|digest| (name, digest)))
+            .collect::<BTreeMap<_, _>>();
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/endpoint-observability-shapes-v1.json");
+        let expected_additions: BTreeMap<String, String> =
+            serde_json::from_str(&std::fs::read_to_string(path).expect("新增能力独立契约"))
+                .unwrap();
+        assert_eq!(
+            added, expected_additions,
+            "新增接口也独立冻结，不能影响已发布 v1 fixture"
         );
 
         assert_eq!(

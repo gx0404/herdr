@@ -63,6 +63,48 @@ fn fingerprint() -> HostKeyFingerprint {
     }
 }
 
+fn reviewed_key(host: &str, port: u16, keys: &[(&str, &str)]) -> crate::remote::HostKeyReview {
+    crate::remote::HostKeyReview {
+        target: crate::remote::EffectiveHostKeyTarget {
+            host: host.into(),
+            port,
+            lookup: if port == 22 {
+                host.into()
+            } else {
+                format!("[{host}]:{port}")
+            },
+            files: vec![std::path::PathBuf::from("/tmp/known_hosts-test")],
+            proxied: false,
+        },
+        keys: keys
+            .iter()
+            .map(|(kind, fingerprint)| crate::remote::KnownHostKey {
+                key_type: (*kind).into(),
+                key_line: format!("{kind} AQID"),
+                fingerprint: HostKeyFingerprint {
+                    key_type: (*kind).into(),
+                    fingerprint: (*fingerprint).into(),
+                },
+            })
+            .collect(),
+    }
+}
+
+fn finish_scan(state: &mut ClientShellState, host: &str, port: u16) {
+    state.handle_machine_auth_update(
+        MachineAuthUpdate::HostKeyOpFinished {
+            ticket: 1,
+            op: MachineHostKeyOp::Scan,
+            result: Ok(MachineHostKeyOutcome::Scanned(reviewed_key(
+                host,
+                port,
+                &[("ssh-ed25519", "SHA256:abc123")],
+            ))),
+        },
+        &mut ClientShellInput::default(),
+    );
+}
+
 fn auth_overlay(state: &ClientShellState) -> &ClientMachineAuthOverlay {
     let Some(ClientShellOverlay::MachineAuth(overlay)) = state.overlay.as_ref() else {
         panic!("expected machine auth overlay, got {:?}", state.overlay);
@@ -85,8 +127,15 @@ fn unknown_host_key_kind_opens_tofu_dialog_with_fingerprint() {
     let mut outcome = ClientShellInput::default();
     assert!(state.open_machine_auth_for_endpoint(&machine.id, &mut outcome));
 
-    // The fingerprint came with the classification, so no rescan is needed.
-    assert!(outcome.actions.is_empty());
+    // 获取与实际 profile 绑定的公钥，确认后只保存这份记录。
+    assert!(outcome.actions.iter().any(|action| matches!(
+        action,
+        ClientShellAction::MachineHostKeyOp {
+            op: MachineHostKeyOp::Scan,
+            ..
+        }
+    )));
+    finish_scan(&mut state, "build.example", 22);
     let text = frame_text(&mut state, 90, 30);
     assert!(text.contains("SHA256:abc123"), "frame: {text}");
     assert!(text.contains("ssh-ed25519"), "frame: {text}");
@@ -99,10 +148,8 @@ fn unknown_host_key_kind_opens_tofu_dialog_with_fingerprint() {
         action,
         ClientShellAction::MachineHostKeyOp {
             op: MachineHostKeyOp::Precollect,
-            host,
-            port: None,
-            ..
-        } if host == "build.example"
+            profile, reviewed: Some((target, key)), ..
+        } if profile.target == "dev@build.example" && target.port == 22 && key.fingerprint.fingerprint == "SHA256:abc123"
     )));
 }
 
@@ -120,15 +167,19 @@ fn trust_once_uses_the_process_local_override_and_closes() {
     let mut outcome = ClientShellInput::default();
     assert!(state.open_machine_auth_for_endpoint(&machine.id, &mut outcome));
 
+    finish_scan(&mut state, "build.example", 22);
     let mut outcome = ClientShellInput::default();
     state.activate_machine_auth_button(MachineAuthButton::TrustOnce, &mut outcome);
     assert!(outcome.actions.iter().any(|action| matches!(
         action,
-        ClientShellAction::ConnectEndpointTrustOnce { endpoint_id: id }
-            if id == &endpoint_id
+        ClientShellAction::StartMachineInteractiveAuth { profile, pin: Some((target, key)), .. }
+            if profile.id == machine.id && target.host == "build.example" && key.fingerprint.fingerprint == "SHA256:abc123"
     )));
-    // Trust-once closes the dialog: the connection proceeds in the background.
-    assert!(state.overlay.is_none());
+    // 仅为本次连接使用临时公钥文件，允许后续密码提示继续由页面服务。
+    assert!(matches!(
+        state.overlay,
+        Some(ClientShellOverlay::MachineAuth(_))
+    ));
 }
 
 #[test]
@@ -146,10 +197,8 @@ fn missing_fingerprint_scans_before_trusting() {
         action,
         ClientShellAction::MachineHostKeyOp {
             op: MachineHostKeyOp::Scan,
-            host,
-            port: Some(2222),
-            ..
-        } if host == "build.example"
+            profile, ..
+        } if profile.target == "dev@build.example:2222"
     )));
 
     // The scan result fills the fingerprint rows.
@@ -158,10 +207,11 @@ fn missing_fingerprint_scans_before_trusting() {
         MachineAuthUpdate::HostKeyOpFinished {
             ticket: 1,
             op: MachineHostKeyOp::Scan,
-            result: Ok(MachineHostKeyOutcome::Scanned(vec![
-                ("ssh-rsa".into(), "SHA256:rsa".into()),
-                ("ssh-ed25519".into(), "SHA256:ed".into()),
-            ])),
+            result: Ok(MachineHostKeyOutcome::Scanned(reviewed_key(
+                "build.example",
+                2222,
+                &[("ssh-rsa", "SHA256:rsa"), ("ssh-ed25519", "SHA256:ed")],
+            ))),
         },
         &mut outcome,
     );
@@ -218,9 +268,8 @@ fn changed_host_key_dialog_is_a_hard_blocker_with_mitm_wording() {
         action,
         ClientShellAction::MachineHostKeyOp {
             op: MachineHostKeyOp::Remove,
-            host,
-            ..
-        } if host == "build.example"
+            profile, ..
+        } if profile.target == "dev@build.example"
     )));
 }
 
@@ -248,7 +297,7 @@ fn auth_guide_starts_interactive_auth_only_on_approval() {
     state.activate_machine_auth_button(MachineAuthButton::InteractiveAuth, &mut outcome);
     assert!(outcome.actions.iter().any(|action| matches!(
         action,
-        ClientShellAction::StartMachineInteractiveAuth { ticket: 1, profile }
+        ClientShellAction::StartMachineInteractiveAuth { ticket: 1, profile, .. }
             if profile.target == "dev@build.example"
     )));
 
@@ -375,14 +424,16 @@ fn declining_a_password_cancels_the_session() {
 fn wizard_host_key_review_scans_and_skips_trust_once() {
     let mut state = state_with_profiles(&[]);
     let mut outcome = ClientShellInput::default();
-    state.open_machine_host_key_review("stage.example", &mut outcome);
+    state.open_machine_host_key_review(
+        Box::new(profile("Stage", "stage.example", "3")),
+        &mut outcome,
+    );
     assert!(outcome.actions.iter().any(|action| matches!(
         action,
         ClientShellAction::MachineHostKeyOp {
             op: MachineHostKeyOp::Scan,
-            host,
-            ..
-        } if host == "stage.example"
+            profile, ..
+        } if profile.target == "stage.example"
     )));
 
     // Without a saved profile there is no endpoint to trust once: the button
@@ -420,6 +471,7 @@ fn wizard_bootstrap_failure_offers_recovery_entries() {
     };
     form.target = crate::client::shell::TextEditor::new("dev@build.example", false);
     form.bootstrap = Some(ClientMachineBootstrap {
+        cancel: crate::remote::TaskCancellation::default(),
         ticket: 1,
         step: None,
         failure: Some("Permission denied (publickey)".into()),

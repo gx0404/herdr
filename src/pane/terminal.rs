@@ -460,6 +460,121 @@ impl PaneTerminal {
         self.ghostty.wheel_routing()
     }
 
+    pub(crate) fn capture_text_snapshot(
+        &self,
+    ) -> Option<crate::terminal::text_snapshot::FrozenText> {
+        use crate::terminal::text_snapshot::{
+            FrozenCell, FrozenRow, FrozenText, MAX_SNAPSHOT_BYTES, MAX_SNAPSHOT_CELLS,
+        };
+        let core = self.ghostty.core.lock().ok()?;
+        let terminal = &core.terminal;
+        let cols = terminal.cols().ok()?;
+        let viewport_rows = terminal.rows().ok()?;
+        let scroll = terminal.scrollbar().ok()?;
+        let count = (MAX_SNAPSHOT_CELLS / usize::from(cols.max(1))).min(2048);
+        if count < usize::from(viewport_rows) {
+            return None;
+        }
+        let end = scroll
+            .offset
+            .saturating_add(scroll.len)
+            .saturating_add(count.saturating_sub(scroll.len) / 4)
+            .min(scroll.total);
+        let start = end.saturating_sub(count);
+        let colors = terminal.screen_colors().ok()?;
+        let default_fg = ghostty_default_fg(
+            colors.foreground,
+            core.host_terminal_theme,
+            core.initial_default_foreground,
+        );
+        let default_bg = ghostty_default_bg(
+            colors.background,
+            core.host_terminal_theme,
+            core.initial_default_background,
+        );
+        let overrides = PaletteOverrides::new(&colors.palette, &terminal.default_palette().ok()?);
+        let mut snapshot = FrozenText {
+            cols,
+            viewport_rows,
+            viewport_start: u32::try_from(scroll.offset).ok()?,
+            row_origin: u32::try_from(start).ok()?,
+            range_start: u32::try_from(start).ok()?,
+            range_end: u32::try_from(end).ok()?,
+            total_rows: u32::try_from(scroll.total).ok()?,
+            alternate_screen: terminal.active_screen().ok()?
+                == crate::ghostty::ActiveScreen::Alternate,
+            content_revision: 0,
+            truncated: start > 0 || end < scroll.total,
+            rows: Vec::with_capacity(end - start),
+        };
+        let mut bytes = 0usize;
+        for y in start..end {
+            let row = terminal.screen_styled_row(u32::try_from(y).ok()?).ok()?;
+            let mut cells = Vec::with_capacity(usize::from(cols));
+            for cell in row.cells {
+                let mut style = cell.style;
+                style.bg_color = cell.content_bg.or(style.bg_color);
+                let fg = style
+                    .fg_color
+                    .map(|color| ghostty_cell_color(color, overrides.as_ref()))
+                    .or(default_fg);
+                let bg = style
+                    .bg_color
+                    .map(|color| ghostty_cell_color(color, overrides.as_ref()))
+                    .or(default_bg);
+                let rendered = ghostty_resolved_cell_style(
+                    &style,
+                    fg,
+                    bg,
+                    default_bg,
+                    Some(ghostty_color(colors.foreground)),
+                    Some(ghostty_color(colors.background)),
+                    overrides.as_ref(),
+                );
+                let text = if cell.text.graphemes.is_empty()
+                    || cell.text.graphemes.first()
+                        == Some(&crate::ghostty::KITTY_UNICODE_PLACEHOLDER)
+                {
+                    " ".into()
+                } else {
+                    cell.text
+                        .graphemes
+                        .into_iter()
+                        .map(|codepoint| {
+                            char::from_u32(codepoint).unwrap_or(char::REPLACEMENT_CHARACTER)
+                        })
+                        .collect::<String>()
+                };
+                bytes = bytes.saturating_add(
+                    std::mem::size_of::<FrozenCell>()
+                        + text.len()
+                        + cell.hyperlink.as_ref().map_or(0, String::len),
+                );
+                if bytes > MAX_SNAPSHOT_BYTES {
+                    return None;
+                }
+                cells.push(FrozenCell {
+                    text,
+                    fg: crate::protocol::color_to_u32(rendered.fg.unwrap_or(Color::Reset)),
+                    bg: crate::protocol::color_to_u32(rendered.bg.unwrap_or(Color::Reset)),
+                    modifier: crate::protocol::modifier_to_u16(rendered.add_modifier),
+                    width: match cell.text.wide {
+                        crate::ghostty::CellWide::Wide => 2,
+                        crate::ghostty::CellWide::Narrow => 1,
+                        crate::ghostty::CellWide::SpacerHead => 3,
+                        crate::ghostty::CellWide::SpacerTail => 0,
+                    },
+                    hyperlink: cell.hyperlink,
+                });
+            }
+            snapshot.rows.push(FrozenRow {
+                cells,
+                soft_wrapped: row.soft_wrapped,
+            });
+        }
+        (snapshot.bytes() <= MAX_SNAPSHOT_BYTES).then_some(snapshot)
+    }
+
     pub(crate) fn screen_text_snapshot(
         &self,
     ) -> Option<(
@@ -3204,13 +3319,13 @@ fn ghostty_cell_style(
     resolved_bg: Option<Color>,
     palette_overrides: Option<&PaletteOverrides>,
 ) -> Style {
-    let mut fg = basic
+    let fg = basic
         .style
         .fg_color
         .map(|color| ghostty_cell_color(color, palette_overrides))
         .or_else(|| cells.fg_color().ok().flatten().map(ghostty_color))
         .or(default_fg);
-    let mut bg = cells
+    let bg = cells
         .content_bg_color()
         .ok()
         .flatten()
@@ -3218,10 +3333,31 @@ fn ghostty_cell_style(
         .map(|color| ghostty_cell_color(color, palette_overrides))
         .or_else(|| cells.bg_color().ok().flatten().map(ghostty_color))
         .or(default_bg);
-    if basic.style.invisible {
+    ghostty_resolved_cell_style(
+        &basic.style,
+        fg,
+        bg,
+        default_bg,
+        resolved_fg,
+        resolved_bg,
+        palette_overrides,
+    )
+}
+
+// 实时渲染与冻结快照使用同一颜色/属性转换，避免反色或透明背景漂移。
+fn ghostty_resolved_cell_style(
+    source: &crate::ghostty::CellStyle,
+    mut fg: Option<Color>,
+    mut bg: Option<Color>,
+    default_bg: Option<Color>,
+    resolved_fg: Option<Color>,
+    resolved_bg: Option<Color>,
+    palette_overrides: Option<&PaletteOverrides>,
+) -> Style {
+    if source.invisible {
         fg = bg.or(default_bg);
     }
-    if basic.style.inverse {
+    if source.inverse {
         // When the background is transparent (None), resolve it to the
         // actual terminal background color before swapping.  Otherwise
         // the swapped fg becomes None (Color::Reset) which the host
@@ -3237,33 +3373,32 @@ fn ghostty_cell_style(
     }
 
     let mut style = ghostty_default_style(fg, bg);
-    if let Some(underline_color) = basic
-        .style
+    if let Some(underline_color) = source
         .underline_color
         .map(|color| ghostty_cell_color(color, palette_overrides))
     {
         style = style.underline_color(underline_color);
     }
     let mut modifiers = Modifier::empty();
-    if basic.style.bold {
+    if source.bold {
         modifiers |= Modifier::BOLD;
     }
-    if basic.style.italic {
+    if source.italic {
         modifiers |= Modifier::ITALIC;
     }
-    if basic.style.faint {
+    if source.faint {
         modifiers |= Modifier::DIM;
     }
-    if basic.style.blink {
+    if source.blink {
         modifiers |= Modifier::SLOW_BLINK;
     }
-    if basic.style.underlined {
+    if source.underlined {
         modifiers |= Modifier::UNDERLINED;
     }
-    if basic.style.strikethrough {
+    if source.strikethrough {
         modifiers |= Modifier::CROSSED_OUT;
     }
-    modifiers = crate::protocol::modifier_with_underline_style(modifiers, basic.style.underline);
+    modifiers = crate::protocol::modifier_with_underline_style(modifiers, source.underline);
     style.add_modifier(modifiers)
 }
 
@@ -3565,6 +3700,61 @@ mod tests {
     use super::*;
     use ratatui::{layout::Rect, style::Color};
     use tokio::sync::mpsc;
+
+    #[test]
+    fn frozen_text_matches_ghostty_formatter_and_survives_output() {
+        for bytes in [
+            "ab  cdEF\r\n中e\u{301}",
+            "12345中X\r\nlast",
+            "a  b\r\n\r\nnext",
+        ] {
+            let (tx, _rx) = mpsc::channel(4);
+            let mut terminal = crate::ghostty::Terminal::new(6, 5, 4096).unwrap();
+            terminal.write(bytes.as_bytes());
+            let pane = PaneTerminal::new(GhosttyPaneTerminal::new(terminal, tx).unwrap());
+            let snapshot = pane.capture_text_snapshot().unwrap();
+            for (start, end) in [((0, 0), (2, 5)), ((0, 1), (1, 3)), ((1, 1), (1, 2))] {
+                let expected = pane
+                    .ghostty
+                    .core
+                    .lock()
+                    .unwrap()
+                    .terminal
+                    .read_text_screen((start.1, start.0), (end.1, end.0), false)
+                    .unwrap();
+                assert_eq!(
+                    snapshot.selection(start, end).unwrap(),
+                    expected,
+                    "{bytes:?}, {start:?}..{end:?}"
+                );
+                assert_eq!(snapshot.selection(end, start).unwrap(), expected);
+            }
+            let before = snapshot.clone();
+            pane.ghostty
+                .core
+                .lock()
+                .unwrap()
+                .terminal
+                .write(b"\x1b[2Jnew output");
+            assert_eq!(snapshot, before);
+        }
+    }
+
+    #[test]
+    fn frozen_text_preserves_cell_style_hyperlinks_and_dirty_rows() {
+        let (tx, _rx) = mpsc::channel(4);
+        let mut terminal = crate::ghostty::Terminal::new(10, 3, 4096).unwrap();
+        terminal.write(b"\x1b[1;31m\x1b]8;;https://example.com\x1b\\link\x1b]8;;\x1b\\\x1b[0m");
+        let pane = PaneTerminal::new(GhosttyPaneTerminal::new(terminal, tx).unwrap());
+        let snapshot = pane.capture_text_snapshot().unwrap();
+        assert_eq!(
+            snapshot.rows[0].cells[0].hyperlink.as_deref(),
+            Some("https://example.com")
+        );
+        assert_ne!(snapshot.rows[0].cells[0].modifier, 0);
+        let patch = pane.collect_dirty_patch(10, 3);
+        assert!(!matches!(patch, TerminalDirtyPatchOutcome::Clean));
+    }
 
     #[test]
     fn plain_page_keys_host_scroll_for_shell_like_decckm_with_bracketed_paste() {

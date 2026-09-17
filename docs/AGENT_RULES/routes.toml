@@ -145,6 +145,7 @@ paths = [
   "scripts/windows_cross.py",
   "scripts/windows_install_conpty_package_test.ps1",
   "scripts/windows_smoke_conpty_path.ps1",
+  "scripts/windows_tui_compat.ps1",
   # Windows 专属实现同时受平台隔离与所属领域约束，取并集。
   "src/client/input/windows_vti.rs",
   "src/pane/terminal/windows_recent_fallback.rs",

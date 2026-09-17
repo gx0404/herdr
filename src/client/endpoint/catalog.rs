@@ -336,6 +336,23 @@ impl SavedSshEndpoint {
         Ok(profile)
     }
 
+    pub(crate) fn same_connection(&self, other: &Self) -> bool {
+        self.target == other.target
+            && self.session == other.session
+            && self.port == other.port
+            && self.user == other.user
+            && self.identity_file == other.identity_file
+            && self.proxy_jump == other.proxy_jump
+            && self.strict_host_key_checking == other.strict_host_key_checking
+            && self.identities_only == other.identities_only
+            && self.identity_agent == other.identity_agent
+            && self.forward_agent == other.forward_agent
+            && self.server_alive_interval == other.server_alive_interval
+            && self.server_alive_count_max == other.server_alive_count_max
+            && self.control_persist == other.control_persist
+            && self.remote_command == other.remote_command
+    }
+
     /// Whether any field that changes how the SSH connection is built is set.
     /// Presentation metadata (group, tags, color) is excluded on purpose.
     pub(crate) fn has_connection_options(&self) -> bool {

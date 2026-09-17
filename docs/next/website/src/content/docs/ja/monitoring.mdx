@@ -1,0 +1,80 @@
+---
+title: 監視・アカウント使用量・ドック配置
+description: ホストのリソースと公式使用量を確認し、端末グループを配置します。
+---
+
+上部の Monitor / Accounts またはグローバルメニューから開きます。ハードウェア情報は接続先ホストのものです。リモート Agent にホバーすると、その Agent のホストで使用量を照会します。
+
+## メニュー、ページと安定した選択
+
+`prefix+Space` は分類メニュー、`prefix+/` はコマンド検索を開きます（既定の prefix は `Ctrl+B`）。ワークスペース、タブとペイン、SSH、監視、ツール、設定、ヘルプを分類し、最近使った操作は最大5件です。表示名、英語の操作名、分類、接続先で検索できます。ホイールは選択とは独立してスクロールし、キーボード操作は選択項目を表示します。
+
+ページの上枠をドラッグして移動し、左右と下枠でサイズを変更できます。位置はクライアントに保存され、小さな画面内に収まります。レイアウトのロックはページ移動にも適用されます。メニューを閉じると元のページに戻ります。設定は Enter または保存で反映し、テーマのプレビューは Esc で取り消せます。
+
+文字選択中は対象ペインの文字スナップショットを固定し、プロセスと他のペインは更新を続けます。マウスを離すとコピーしてライブ表示に戻ります。`copy_on_select` が無効なら Ctrl+C でコピーします。スクロールは固定履歴だけを移動します。取得前に画面が変わり、すでにマウスを離した場合は、固定された選択を確認して Ctrl+C を押します。
+
+1件の上限は65,536セル、2048行、8 MiBです。サーバー全体は64 MiB、32件、クライアントごとに1件です。サイズ変更、対象変更、取消、切断で解放します。未確認の取得は60秒で期限切れになります。古いサーバーでは従来の選択動作を使用します。
+
+WezTerm の leader は `Ctrl+Shift+Space`、Herdr は `Ctrl+B` を推奨します。通常のドラッグは Herdr、Shift+ドラッグは WezTerm の選択を使います。
+
+## ドック配置
+
+タイトルの `⠿` を別パネルの端へドラッグするとドックできます。境界をドラッグしてサイズを変更し、タブをグループ内で並べ替えるか別グループへ分割できます。ペインのハンドルで交換・別タブへの移動ができ、実行中プロセスは維持されます。枠のないペインでは Layout モード時だけハンドルを表示し、通常のターミナル本文を遮りません。
+
+`□` は最大化と復元です。Layout モードでは `Tab` / `Shift+Tab` でパネル選択、矢印でサイズ変更、`Shift+矢印` で移動、`Enter` で最大化、`Esc` で終了します。Lock は誤操作を防ぎ、Reset は既定の配置に戻します。配置はクライアントとホストごとに保存されます。狭い画面では選択パネルだけを表示し、保存した配置は維持します。旧 server は従来の単一ビューを使います。
+
+## リソース監視
+
+CPU 全体・論理コア、RAM/swap、GPU、ディスク、ネットワーク、温度、プロセスを選択できます。間隔は 500 / 1000 / 2000 / 5000 ms。遅い取得処理は独立して実行します。初回の差分、権限不足、非対応項目には状態または `—` を表示します。
+
+NVIDIA は NVML、Linux の他の GPU は公開された DRM/sysfs、Windows は DXGI と GPU パフォーマンスカウンターを使用します。温度・電力などはドライバーによって異なります。WSL とコンテナーはその環境で見えるリソースを表示します。
+
+カード内のスクロールで追加のコア・デバイス・プロセスを表示します。コアのクリックで履歴を選択できます。カード順、高さ、非表示デバイスは変更可能です。履歴は 1–60 分、クライアントのメモリ上限は 16 MiB。Pause は履歴記録を停止し、現在値と通知は継続します。
+
+プロセスの終了は詳細画面で再確認します。PID の再利用や期限切れの確認は拒否します。強制終了は別操作で、Windows では必要です。通知は既定で無効です。有効時は接続中のみ、閾値・継続時間・クールダウンを評価し、自動でプロセスを終了しません。
+
+## 設定とアカウント
+
+`monitor` の `interval_ms`、`history_minutes`、`visible`、`card_height`、`hidden_devices`、`alerts_enabled` を設定できます。`[[monitor.alerts]]` は `metric`（cpu / memory / gpu / disk）、`threshold`、`duration_seconds`、`cooldown_seconds` を持ちます。
+
+`account_usage` の `format` は `dashboard` / `table`、`position` は `hover` / `page` / `both` です。API は最低 60 秒、隔離 CLI は最低 300 秒の間隔で照会します。Agent 行でアカウントを選び、ペインへ明示的に関連付けてください。同じブランドからアカウントを推測しません。
+
+ダッシュボードと表はマウスホイールでスクロールでき、アカウントページでは上下キーも使えます。使用量ポップアップは監視パネルと同時に表示でき、背後のカードやプロセス行へ入力が抜けることはありません。
+
+```toml
+[account_usage]
+enabled = true
+format = "dashboard"
+position = "both"
+hover_delay_ms = 400
+api_refresh_seconds = 60
+cli_refresh_seconds = 300
+probe_timeout_seconds = 20
+disabled_providers = []
+
+[[account_usage.accounts]]
+id = "work"
+label = "Work"
+agent = "codex"
+provider = "codex"
+auth_mode = "cli"
+profile_dir = "/path/to/profile"
+```
+
+API 用アカウントは `auth_mode = "api"` と環境変数名の `credential_env` を指定します。必要に応じて `organization` と `account_user` を設定します。GitHub Enterprise は `billing_scope = "enterprise"` と `organization` の enterprise slug、OpenRouter 全体の残高は管理キーと `billing_scope = "account"` を使います。資格情報を TOML に書かないでください。設定は Agent が実行される server に置きます。`base_url` は登録済み公式ホストのみ、Kimi のローカル API は loopback のみです。
+
+## 公式回調
+
+Claude / Antigravity は Accounts 画面から公式 statusline 回調を有効化・解除できます。既存の描画コマンドはパイプラインで維持します。対応 JSON は `herdr api usage-report --agent <agent>` の stdin からも送れます。`HERDR_PANE_ID` の関連付け、または `--account <id>` が必要です。`--passthrough` は既存 statusline 用です。
+
+Claude の quota フィールドは対応 CLI と通常の最初の API 応答が必要です。使用量取得のためにモデルへプロンプトを送信しません。生 JSON や会話内容を保存しません。
+
+## 対応範囲と公式資料
+
+2026-09-16 の公式情報に基づき、Muse を除く 23 Agent を登録しています。[全公式リンクと取得方式](/zh-cn/docs/monitoring/#厂商能力与官方依据)を参照してください。契約枠、API キー予算、組織請求、ローカル会話統計は分けて表示します。Qoder の自動入力準備状態は未検証で、自動コマンド注入を行いません。非対応版・未公開 API・権限不足は明示します。
+
+Factory は昨日 UTC 以前の日報、Cursor は超過費用と契約内消費を分離します。Amp の BYOK 定価見積もりは請求額ではありません。Letta の quota bucket は分類値のままで、百分率を推定しません。
+
+## API
+
+`system.metrics.*`、`system.process.*`、`account.usage.*`、`account.binding.set` を公開しています。`client.views.set` とビューの具名拡張は協商済み TUI 接続専用です。generation 1 のエンコードは維持します。ペイン移動は既存の `pane.move` / `pane.swap` を使います。詳細は `herdr api schema --json` を参照してください。

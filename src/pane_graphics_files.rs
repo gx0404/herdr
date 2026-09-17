@@ -369,8 +369,8 @@ mod tests {
     static NEXT: AtomicU64 = AtomicU64::new(1);
 
     fn store() -> (FileStore, PathBuf) {
-        let base = PathBuf::from(format!(
-            "/var/tmp/herdr-graphics-test-{}-{}",
+        let base = std::env::temp_dir().join(format!(
+            "herdr-graphics-test-{}-{}",
             std::process::id(),
             NEXT.fetch_add(1, Ordering::Relaxed)
         ));

@@ -1,11 +1,9 @@
 use std::io;
 #[cfg(unix)]
 use std::io::IsTerminal as _;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use interprocess::local_socket::traits::Stream as _;
-#[cfg(windows)]
-use tracing::debug;
 use tracing::info;
 
 use crate::ipc::LocalStream;
@@ -90,33 +88,6 @@ fn direct_graphics_profile_allowed() -> bool {
     false
 }
 
-#[cfg(windows)]
-fn set_handshake_recv_timeout(
-    stream: &LocalStream,
-    timeout: Option<Duration>,
-    context: &'static str,
-) -> Result<(), ClientError> {
-    match stream.set_recv_timeout(timeout) {
-        Ok(()) => Ok(()),
-        Err(err) if err.kind() == io::ErrorKind::Unsupported => {
-            debug!(err = %err, context, "client socket receive timeout unavailable");
-            Ok(())
-        }
-        Err(err) => Err(ClientError::ConnectionFailed(err)),
-    }
-}
-
-#[cfg(not(windows))]
-fn set_handshake_recv_timeout(
-    stream: &LocalStream,
-    timeout: Option<Duration>,
-    _context: &'static str,
-) -> Result<(), ClientError> {
-    stream
-        .set_recv_timeout(timeout)
-        .map_err(ClientError::ConnectionFailed)
-}
-
 #[derive(Debug)]
 pub(super) struct HandshakeResult {
     pub(super) encoding: RenderEncoding,
@@ -140,6 +111,7 @@ pub(crate) fn probe_endpoint_negotiation(
         false,
         false,
         false,
+        None,
     )
     .map_err(io::Error::other)?;
     Ok(super::endpoint::EndpointNegotiation::new(
@@ -164,6 +136,7 @@ pub(super) fn do_handshake(
     endpoint_keybindings: bool,
     mouse_capture: bool,
     surface_active: bool,
+    cancel: Option<&crate::remote::TaskCancellation>,
 ) -> Result<HandshakeResult, ClientError> {
     stream
         .set_nonblocking(false)
@@ -214,17 +187,7 @@ pub(super) fn do_handshake(
     } else {
         handshake_read_timeout()
     };
-    set_handshake_recv_timeout(
-        stream,
-        Some(read_timeout),
-        "client handshake read timeout unavailable",
-    )?;
-    let welcome: ServerMessage = protocol::read_message(stream, MAX_FRAME_SIZE)?;
-    set_handshake_recv_timeout(
-        stream,
-        None,
-        "failed to clear client handshake read timeout",
-    )?;
+    let welcome = read_handshake_welcome(stream, read_timeout, cancel)?;
 
     if endpoint_shell {
         let ServerMessage::EndpointControl { kind, data } = welcome else {
@@ -296,5 +259,113 @@ pub(super) fn do_handshake(
         _ => Err(ClientError::Protocol(protocol::FramingError::Io(
             io::Error::new(io::ErrorKind::InvalidData, "expected Welcome message"),
         ))),
+    }
+}
+
+// 逐段轮询同时保留 framing 的读取进度；Windows 同步 pipe 不支持接收超时。
+fn read_handshake_welcome(
+    stream: &mut LocalStream,
+    timeout: Duration,
+    cancel: Option<&crate::remote::TaskCancellation>,
+) -> Result<ServerMessage, ClientError> {
+    struct Reader<'a> {
+        stream: &'a mut LocalStream,
+        deadline: Instant,
+        cancel: Option<&'a crate::remote::TaskCancellation>,
+    }
+    impl io::Read for Reader<'_> {
+        fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+            loop {
+                if self
+                    .cancel
+                    .is_some_and(crate::remote::TaskCancellation::is_cancelled)
+                {
+                    return Err(io::Error::new(
+                        io::ErrorKind::ConnectionAborted,
+                        "连接任务已取消",
+                    ));
+                }
+                if Instant::now() >= self.deadline {
+                    return Err(io::Error::new(io::ErrorKind::TimedOut, "连接握手超时"));
+                }
+                match crate::ipc::poll_local_stream_read_count(self.stream, buffer)? {
+                    crate::ipc::LocalStreamReadCount::Data(count) => return Ok(count),
+                    crate::ipc::LocalStreamReadCount::Closed => return Ok(0),
+                    crate::ipc::LocalStreamReadCount::Pending => {
+                        std::thread::sleep(Duration::from_millis(2));
+                    }
+                }
+            }
+        }
+    }
+    stream
+        .set_nonblocking(true)
+        .map_err(ClientError::ConnectionFailed)?;
+    let welcome = protocol::read_message(
+        &mut Reader {
+            stream,
+            deadline: Instant::now() + timeout,
+            cancel,
+        },
+        MAX_FRAME_SIZE,
+    );
+    let restored = stream.set_nonblocking(false);
+    let welcome = welcome?;
+    restored.map_err(ClientError::ConnectionFailed)?;
+    Ok(welcome)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use interprocess::local_socket::traits::Listener as _;
+    use std::io::Write as _;
+
+    fn pair() -> (LocalStream, LocalStream, std::path::PathBuf) {
+        let name = std::env::temp_dir().join(format!(
+            "herdr-handshake-{}-{}.sock",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let listener = crate::ipc::bind_local_listener(&name).unwrap();
+        let connecting = name.clone();
+        let client =
+            std::thread::spawn(move || crate::ipc::connect_local_stream(&connecting).unwrap());
+        let server = listener.accept().unwrap();
+        (client.join().unwrap(), server, name)
+    }
+
+    #[test]
+    fn cancelled_fragmented_handshake_returns_without_waiting_for_peer() {
+        let (mut client, mut server, path) = pair();
+        // 只有帧头的一部分到达；取消不能丢失进度后重新阻塞。
+        server.write_all(&[1, 0]).unwrap();
+        let cancel = crate::remote::TaskCancellation::default();
+        let worker_cancel = cancel.clone();
+        let worker = std::thread::spawn(move || {
+            read_handshake_welcome(&mut client, Duration::from_secs(60), Some(&worker_cancel))
+        });
+        std::thread::sleep(Duration::from_millis(10));
+        cancel.cancel();
+        let started = Instant::now();
+        assert!(
+            matches!(worker.join().unwrap(), Err(ClientError::ConnectionLost(error)) if error.kind() == io::ErrorKind::ConnectionAborted)
+        );
+        assert!(started.elapsed() < Duration::from_secs(1));
+        drop(server);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn idle_handshake_obeys_deadline_without_platform_socket_timeouts() {
+        let (mut client, server, path) = pair();
+        assert!(
+            matches!(read_handshake_welcome(&mut client, Duration::from_millis(10), None), Err(ClientError::ConnectionLost(error)) if error.kind() == io::ErrorKind::TimedOut)
+        );
+        drop((client, server));
+        let _ = std::fs::remove_file(path);
     }
 }

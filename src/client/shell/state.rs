@@ -70,6 +70,8 @@ pub(crate) enum ClientShellKeybindingSource {
 }
 
 pub(crate) struct ClientShellConfig {
+    pub(super) monitor: crate::config::MonitorConfig,
+    pub(super) account_usage: crate::config::AccountUsageConfig,
     pub(super) sidebar_width: u16,
     pub(super) sidebar_min_width: u16,
     pub(super) sidebar_max_width: u16,
@@ -161,6 +163,7 @@ pub(super) enum ClientMobileTarget {
 
 #[derive(Default)]
 pub(super) struct ShellHitMap {
+    pub(super) overlay_bounds: Rect,
     pub(super) machines: Vec<MachineHit>,
     pub(super) workspaces: Vec<WorkspaceHit>,
     pub(super) workspace_body: Rect,
@@ -191,6 +194,9 @@ pub(super) struct ShellHitMap {
     pub(super) mobile_max_scroll: usize,
     pub(super) global_launcher: Rect,
     pub(super) notification_toast: Rect,
+    pub(super) menu_popup: Rect,
+    pub(super) menu_search: Rect,
+    pub(super) menu_scroll: usize,
     pub(super) global_menu_rows: Vec<(Rect, usize)>,
     pub(super) context_menu_rows: Vec<(Rect, usize)>,
     pub(super) notification_history_rows: Vec<(Rect, usize)>,
@@ -207,9 +213,12 @@ pub(super) struct ShellHitMap {
     pub(super) help_scroll_metrics: Option<crate::pane::ScrollMetrics>,
     pub(super) help_max_scroll: usize,
     pub(super) settings_popup: Rect,
+    pub(super) settings_scroll: usize,
     pub(super) settings_tabs: Vec<(Rect, ClientSettingsSection)>,
     pub(super) settings_choices: Vec<(Rect, usize)>,
     pub(super) machines_popup: Rect,
+    pub(super) machines_detail_area: Rect,
+    pub(super) machines_scroll: usize,
     pub(super) machines_search: Rect,
     pub(super) machines_rows: Vec<(Rect, crate::client::endpoint::ProfileId)>,
     pub(super) machines_actions: Vec<(Rect, super::machines_overlay::MachineOverlayButton)>,
@@ -217,6 +226,7 @@ pub(super) struct ShellHitMap {
     pub(super) machines_wizard_rows: Vec<(Rect, usize)>,
     pub(super) machines_wizard_fields: Vec<(Rect, usize)>,
     pub(super) machines_max_scroll: usize,
+    pub(super) machine_auth_max_scroll: usize,
     pub(super) machine_auth_actions: Vec<(Rect, super::machine_auth_overlay::MachineAuthButton)>,
     pub(super) broadcast_popup: Rect,
     pub(super) broadcast_rows: Vec<(Rect, usize)>,
@@ -261,6 +271,7 @@ pub(super) struct PaneHit {
 
 #[derive(Clone)]
 pub(super) struct PaneSplitHit {
+    pub(super) tab_id: Option<String>,
     pub(super) direction: crate::protocol::PaneSurfaceSplitDirection,
     pub(super) pos: u16,
     pub(super) area: Rect,
@@ -366,25 +377,29 @@ pub(crate) enum ClientShellAction {
     ReconnectEndpoint {
         endpoint_id: ClientEndpointId,
     },
-    /// Trust this machine's host key for this process only: reconnect with an
-    /// in-memory `accept-new` override that is never written to the catalog
-    /// (the next catalog reload restores the saved profile).
-    ConnectEndpointTrustOnce {
-        endpoint_id: ClientEndpointId,
-    },
     /// Run one approved known_hosts operation for a machine target on a
     /// worker thread (scan for display, pre-collect after trust, or remove a
     /// stale record).
     MachineHostKeyOp {
+        cancel: crate::remote::TaskCancellation,
         ticket: u64,
         op: MachineHostKeyOp,
-        host: String,
-        port: Option<u16>,
+        profile: Box<SavedSshEndpoint>,
+        reviewed: Option<(
+            crate::remote::EffectiveHostKeyTarget,
+            crate::remote::KnownHostKey,
+        )>,
     },
     /// Start an approved interactive authentication attempt for a machine:
     /// ssh runs with the askpass channel attached and its prompts surface as
     /// TUI dialogs. Only ever constructed after explicit user approval.
     StartMachineInteractiveAuth {
+        bootstrap: bool,
+        pin: Option<(
+            crate::remote::EffectiveHostKeyTarget,
+            crate::remote::KnownHostKey,
+        )>,
+        cancel: crate::remote::TaskCancellation,
         ticket: u64,
         profile: Box<SavedSshEndpoint>,
     },
@@ -402,6 +417,7 @@ pub(crate) enum ClientShellAction {
     },
     /// Run the non-interactive remote bootstrap for a wizard-approved machine.
     BootstrapMachine {
+        cancel: crate::remote::TaskCancellation,
         ticket: u64,
         target: String,
         session: String,
@@ -419,6 +435,7 @@ pub(crate) enum ClientShellAction {
     /// Run one remote filesystem operation for the machine file browser on a
     /// worker thread; the result returns as `ClientLoopEvent::MachineFs`.
     MachineFsOp {
+        cancel: crate::remote::TaskCancellation,
         ticket: u64,
         profile: Box<SavedSshEndpoint>,
         op: MachineFsOp,
@@ -493,6 +510,10 @@ pub(crate) enum MachineHostKeyOp {
 /// Progress of one approved machine-connection recovery worker.
 #[derive(Debug)]
 pub(crate) enum MachineAuthUpdate {
+    InteractiveStep {
+        ticket: u64,
+        step: crate::remote::SavedSshBootstrapStep,
+    },
     HostKeyOpFinished {
         ticket: u64,
         op: MachineHostKeyOp,
@@ -508,7 +529,7 @@ pub(crate) enum MachineAuthUpdate {
 #[derive(Debug)]
 pub(crate) enum MachineHostKeyOutcome {
     /// Presented keys as `(key type, SHA256 fingerprint)` pairs.
-    Scanned(Vec<(String, String)>),
+    Scanned(crate::remote::HostKeyReview),
     /// How many keys were recorded into known_hosts.
     Precollected(usize),
     /// The host's records were removed (or were already absent).
@@ -690,6 +711,10 @@ impl ClientSettingsSection {
 
 #[derive(Debug)]
 pub(super) struct ClientSettingsOverlay {
+    pub(super) focus: super::page::PageFocus,
+    pub(super) current: usize,
+    pub(super) scroll: usize,
+    pub(super) reveal: bool,
     pub(super) section: ClientSettingsSection,
     pub(super) selected: usize,
     pub(super) original_theme_name: String,
@@ -920,6 +945,25 @@ pub(super) struct MachineChrome {
 
 #[derive(Debug)]
 pub(super) enum PendingEndpointKind {
+    TextCapture {
+        epoch: u64,
+        endpoint: ClientEndpointId,
+    },
+    TextWindow {
+        epoch: u64,
+    },
+    TextCopy {
+        epoch: u64,
+    },
+    TextRelease,
+    Views {
+        revision: u64,
+    },
+    Observation {
+        epoch: u64,
+        endpoint_id: ClientEndpointId,
+        purpose: super::observability::Purpose,
+    },
     Generic,
     ProductAnnouncementDismiss {
         version: String,
@@ -1164,6 +1208,9 @@ pub(super) struct ClientCopyModeState {
 }
 
 pub(crate) struct ClientShellState {
+    pub(crate) endpoint_connect_options: Option<crate::client::endpoint::EndpointConnectOptions>,
+    pub(super) workbench: super::workbench::State,
+    pub(super) observability: super::observability::State,
     pub(super) config: ClientShellConfig,
     pub(super) snapshot: Option<Box<ClientShellSnapshot>>,
     pub(super) active_snapshot_generation: Option<u64>,
@@ -1249,6 +1296,9 @@ pub(crate) struct ClientShellState {
     pub(super) navigate_workspace_id: Option<WorkspaceNavigationTarget>,
     pub(super) reveal_navigation_workspace: bool,
     pub(super) overlay: Option<ClientShellOverlay>,
+    pub(super) browser_return: Option<Box<ClientShellOverlay>>,
+    pub(super) page_windows: HashMap<String, super::floating_pages::Window>,
+    pub(super) page_drag: Option<super::floating_pages::Drag>,
     pub(super) previous_pane_id: Option<String>,
     pub(super) pane_mouse_gesture: Option<ClientPaneMouseGesture>,
     pub(super) link_hover: Option<super::link_hover::LinkHover>,
@@ -1257,6 +1307,9 @@ pub(crate) struct ClientShellState {
     pub(super) url_click_consumes_until_up: bool,
     pub(super) replaying_url_click: bool,
     pub(super) selection: Option<crate::selection::Selection<String>>,
+    pub(super) selection_capture: Option<super::frozen_selection::Capture>,
+    pub(super) selection_epoch: u64,
+    pub(super) selection_releases: Vec<super::frozen_selection::Release>,
     pub(super) last_pane_click: Option<ClientPaneClick>,
     pub(super) selection_autoscroll: Option<ClientSelectionAutoscroll>,
     pub(super) selection_autoscroll_deadline: Option<std::time::Instant>,
@@ -1347,6 +1400,8 @@ pub(super) struct WorkspaceEntry {
 
 impl ClientShellState {
     pub(crate) fn new(mut config: ClientShellConfig) -> Self {
+        let workbench = super::workbench::State::new(&config);
+        let observability = super::observability::State::new(&config);
         let preferences = config.preferences.clone();
         let local_config_diagnostic = config.startup_config_diagnostic.take();
         let overlay = config
@@ -1383,6 +1438,9 @@ impl ClientShellState {
                 .extend(saved.collapsed_groups);
         }
         Self {
+            endpoint_connect_options: None,
+            workbench,
+            observability,
             config,
             snapshot: None,
             active_snapshot_generation: None,
@@ -1441,6 +1499,9 @@ impl ClientShellState {
             navigate_workspace_id: None,
             reveal_navigation_workspace: false,
             overlay,
+            browser_return: None,
+            page_windows: preferences.pages.clone(),
+            page_drag: None,
             previous_pane_id: None,
             pane_mouse_gesture: None,
             link_hover: None,
@@ -1448,6 +1509,9 @@ impl ClientShellState {
             url_click_consumes_until_up: false,
             replaying_url_click: false,
             selection: None,
+            selection_capture: None,
+            selection_epoch: 0,
+            selection_releases: Vec::new(),
             last_pane_click: None,
             selection_autoscroll: None,
             selection_autoscroll_deadline: None,
@@ -1595,6 +1659,9 @@ impl ClientShellState {
     }
 
     pub(super) fn layout(&self, cols: u16, rows: u16) -> ClientShellLayout {
+        if self.workbench.enabled {
+            return self.workbench.layout(cols, rows);
+        }
         self.config.layout(
             cols,
             rows,
@@ -1613,6 +1680,10 @@ impl ClientShellState {
     }
 
     pub(super) fn reset_endpoint_projection(&mut self) {
+        self.browser_return = None;
+        self.page_drag = None;
+        self.cancel_frozen_selection();
+        self.workbench.disconnect();
         self.hits = ShellHitMap::default();
         self.pane_surface = None;
         self.pending_pane_surface = None;
@@ -1633,7 +1704,12 @@ impl ClientShellState {
         self.last_composed_size = None;
         self.last_composed_at = None;
         self.selection_repaint_deadline = None;
-        self.pending_requests.clear();
+        self.pending_requests.retain(|_, pending| {
+            matches!(
+                pending.kind,
+                PendingEndpointKind::TextCapture { .. } | PendingEndpointKind::TextRelease
+            )
+        });
         self.pane_scroll_in_flight.clear();
         self.pane_scroll_queued.clear();
         self.pane_scroll_targets.clear();
@@ -1815,7 +1891,16 @@ impl ClientShellState {
         {
             self.reveal_focused_tab = true;
         }
-        let selection_focus_lost = if let Some(gesture) = self.word_selection_gesture.as_mut() {
+        let selection_focus_lost = if let Some(capture) = self.selection_capture.as_mut() {
+            let focused = snapshot.focused_pane_id.as_deref();
+            capture.focus_confirmed |= focused == Some(capture.hit.pane_id.as_str());
+            !snapshot
+                .panes
+                .iter()
+                .any(|pane| pane.pane_id == capture.hit.pane_id)
+                || (capture.focus_confirmed
+                    && focused.is_some_and(|pane| pane != capture.hit.pane_id))
+        } else if let Some(gesture) = self.word_selection_gesture.as_mut() {
             let focused_pane = snapshot.focused_pane_id.as_deref();
             // Remember confirmed focus across intermediate snapshots with no
             // focused pane, without rejecting the gesture's in-flight focus request.
@@ -1836,6 +1921,7 @@ impl ClientShellState {
             })
         };
         if selection_focus_lost {
+            self.cancel_frozen_selection();
             self.selection = None;
             self.selection_autoscroll = None;
             self.selection_autoscroll_deadline = None;
@@ -2043,6 +2129,7 @@ impl ClientShellState {
             .as_deref()
             .map(|popup| popup.terminal_id.clone());
         if previous_popup != next_popup {
+            self.cancel_frozen_selection();
             if next_popup.is_some() && matches!(self.overlay, Some(ClientShellOverlay::Settings(_)))
             {
                 self.cancel_settings_overlay();
@@ -2090,45 +2177,46 @@ impl ClientShellState {
             Some(gesture) => Some(&gesture.pane_id),
             None => self.selection.as_ref().map(|selection| &selection.pane_id),
         };
-        let selection_content_changed = selection_pane.is_some_and(|pane_id| {
-            let Some(previous_surface) = self.pane_surface.as_ref() else {
-                return false;
-            };
-            let previous = previous_surface
-                .panes
-                .iter()
-                .find(|pane| &pane.pane_id == pane_id);
-            let next = surface.panes.iter().find(|pane| &pane.pane_id == pane_id);
-            let (Some(previous), Some(next)) = (previous, next) else {
-                return false;
-            };
-            if previous.inner_rect.width != next.inner_rect.width
-                || previous.inner_rect.height != next.inner_rect.height
-                || previous.alternate_screen_active != next.alternate_screen_active
-            {
-                return true;
-            }
-            if previous.content_revision == next.content_revision {
-                return false;
-            }
-            match (&self.word_selection_gesture, &self.selection) {
-                // Word gestures cache boundaries outside the selected cells too.
-                (Some(_), _) => true,
-                (None, Some(selection)) => {
-                    self.config.copy_on_select
-                        && (!previous.content_revision.is_multiple_of(2)
-                            || !next.content_revision.is_multiple_of(2)
-                            || !selection_cells_unchanged(
-                                selection,
-                                previous_surface,
-                                previous,
-                                &surface,
-                                next,
-                            ))
+        let selection_content_changed = self.selection_capture.is_none()
+            && selection_pane.is_some_and(|pane_id| {
+                let Some(previous_surface) = self.pane_surface.as_ref() else {
+                    return false;
+                };
+                let previous = previous_surface
+                    .panes
+                    .iter()
+                    .find(|pane| &pane.pane_id == pane_id);
+                let next = surface.panes.iter().find(|pane| &pane.pane_id == pane_id);
+                let (Some(previous), Some(next)) = (previous, next) else {
+                    return false;
+                };
+                if previous.inner_rect.width != next.inner_rect.width
+                    || previous.inner_rect.height != next.inner_rect.height
+                    || previous.alternate_screen_active != next.alternate_screen_active
+                {
+                    return true;
                 }
-                (None, None) => false,
-            }
-        });
+                if previous.content_revision == next.content_revision {
+                    return false;
+                }
+                match (&self.word_selection_gesture, &self.selection) {
+                    // Word gestures cache boundaries outside the selected cells too.
+                    (Some(_), _) => true,
+                    (None, Some(selection)) => {
+                        self.config.copy_on_select
+                            && (!previous.content_revision.is_multiple_of(2)
+                                || !next.content_revision.is_multiple_of(2)
+                                || !selection_cells_unchanged(
+                                    selection,
+                                    previous_surface,
+                                    previous,
+                                    &surface,
+                                    next,
+                                ))
+                    }
+                    (None, None) => false,
+                }
+            });
         if selection_content_changed {
             self.word_selection_gesture = None;
             self.selection = None;

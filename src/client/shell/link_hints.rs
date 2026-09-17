@@ -114,11 +114,18 @@ impl ClientShellState {
     /// explicit OSC 8 hyperlink runs first, then plain-text http(s) URLs.
     /// Runs once when hints mode opens; capped and viewport-limited.
     fn collect_visible_link_hints(&self) -> Vec<ClientLinkHint> {
-        let Some(surface) = self.pane_surface.as_ref() else {
-            return Vec::new();
-        };
         let mut spans: Vec<(String, u16, u16, String)> = Vec::new();
-        for pane in &surface.panes {
+        for hit in &self.hits.panes {
+            let Some(surface) = self.visible_surface_for_pane(&hit.pane_id) else {
+                continue;
+            };
+            let Some(pane) = surface
+                .panes
+                .iter()
+                .find(|pane| pane.pane_id == hit.pane_id)
+            else {
+                continue;
+            };
             if spans.len() >= LINK_HINT_CAP {
                 break;
             }

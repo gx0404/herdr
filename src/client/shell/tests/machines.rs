@@ -349,6 +349,7 @@ fn bootstrap_success_persists_profile_and_returns_to_list() {
     let ticket = {
         let form = add_form_overlay(&mut state, "build.example", "Build");
         form.bootstrap = Some(super::super::machines_overlay::ClientMachineBootstrap {
+            cancel: crate::remote::TaskCancellation::default(),
             ticket: 41,
             step: None,
             failure: None,
@@ -382,6 +383,7 @@ fn bootstrap_failure_keeps_form_with_structured_error() {
     let ticket = {
         let form = add_form_overlay(&mut state, "build.example", "Build");
         form.bootstrap = Some(super::super::machines_overlay::ClientMachineBootstrap {
+            cancel: crate::remote::TaskCancellation::default(),
             ticket: 42,
             step: Some(crate::remote::SavedSshBootstrapStep::Install),
             failure: None,

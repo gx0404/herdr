@@ -1,0 +1,18 @@
+{
+  "account.binding.set": "192a795c69da829748eeb57d3a771dada2e579e8ba90234a9cb4b04fed1bdf1c",
+  "account.usage.get": "8d73934dad0df101422adcd6a6203e57303c4eed302e87dc1a5185187ac87c25",
+  "account.usage.integration": "a356f35353790b36d710aa0f52d09c6ffe6aa10f23e4175fa91982853caa4613",
+  "account.usage.providers": "ab29f0222fed3c3824fa6515c745a3ddb51209317dcc321c8139873d445fa242",
+  "account.usage.refresh": "f2cc8a050999e8b49c429fa9a838ccc0021e275b1ccd38fa7fba0e9b1871a653",
+  "account.usage.report": "010fe2f190fcddf066ae6af11f6d33c7ac4a530c29f3d0139d007e7ef77e9286",
+  "account.usage.subscribe": "9b26b949d43194e64e4c27d731a7dbf32cb65f7f46655b4438da81aaa6852229",
+  "account.usage.unsubscribe": "5016b541af997eaf58c7390d356d069b261f64c5d22368fbb1d83666faaff1bb",
+  "client.views.set": "493f2c53254c70c47acd8626e9b82d0eeab1cc64e1a3e128a66d2cc5d3eb34e2",
+  "pane.move": "eaed63cf205db2dc043ecce9e1a79cdca7f6e2521b364226bbf3121affadce7c",
+  "system.metrics.get": "8c35f7707c02f38aec6a4cc1f2cff8e070231d9e4e3d001727275ddbc7d32278",
+  "system.metrics.subscribe": "0a872b1b82367bc97b36637d30339ed783b149fb26889e3e1dce2816cf9018c2",
+  "system.metrics.unsubscribe": "7da87d1c02d9f7feb206667e177f32c083f5b0cf69211f012a595fc14487de76",
+  "system.process.get": "c6913070d37aea5a7cff0194763ff73e878aa4814b0d4aeaef65217d3b368136",
+  "system.process.list": "80b6fcfeb0e9b0830f6c1c175243450dfb0c35566cd306635dd7488b5088ac35",
+  "system.process.terminate": "6a69210defa7a312737c2d859e0a2828141f84767de1d070c0cb26e5fe9a15ea"
+}

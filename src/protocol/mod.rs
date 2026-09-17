@@ -3,6 +3,7 @@
 pub mod endpoint;
 pub(crate) mod render_ansi;
 pub(crate) mod surface_reuse;
+pub(crate) mod views;
 mod wire;
 
 pub use wire::*;

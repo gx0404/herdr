@@ -468,6 +468,18 @@ pub(crate) struct ScreenTextRow {
     pub wrap_continuation: bool,
 }
 
+pub(crate) struct ScreenStyledCell {
+    pub text: ScreenTextCell,
+    pub style: CellStyle,
+    pub content_bg: Option<CellColor>,
+    pub hyperlink: Option<String>,
+}
+
+pub(crate) struct ScreenStyledRow {
+    pub cells: Vec<ScreenStyledCell>,
+    pub soft_wrapped: bool,
+}
+
 impl CellWide {
     fn from_raw(value: ffi::GhosttyCellWide) -> Self {
         match value {
@@ -1257,6 +1269,65 @@ impl Terminal {
             });
         }
         Ok(rows)
+    }
+
+    pub(crate) fn screen_styled_row(&self, y: u32) -> Result<ScreenStyledRow, Error> {
+        let mut grid_ref = self.grid_ref(ghostty_screen_point(0, y))?;
+        let (soft_wrapped, _) = grid_ref_wrap_state(&grid_ref)?;
+        let cols = self.cols()?;
+        let mut cells = Vec::with_capacity(usize::from(cols));
+        for x in 0..cols {
+            grid_ref.x = x;
+            let mut style = ffi::GhosttyStyle {
+                size: mem::size_of::<ffi::GhosttyStyle>(),
+                ..Default::default()
+            };
+            let mut raw = ffi::GhosttyCell::default();
+            // SAFETY: grid_ref 来自当前锁内的 terminal，输出指针类型与 C API 一致。
+            unsafe {
+                ffi::ghostty_grid_ref_style(&grid_ref, &mut style).into_result()?;
+                ffi::ghostty_grid_ref_cell(&grid_ref, &mut raw).into_result()?;
+            }
+            cells.push(ScreenStyledCell {
+                text: ScreenTextCell {
+                    wide: grid_ref_wide(&grid_ref)?,
+                    graphemes: grid_ref_graphemes(&grid_ref)?,
+                },
+                style: style.into(),
+                content_bg: cell_content_bg_color(raw)?,
+                hyperlink: grid_ref_hyperlink_uri(&grid_ref)?,
+            });
+        }
+        Ok(ScreenStyledRow {
+            cells,
+            soft_wrapped,
+        })
+    }
+
+    pub(crate) fn screen_colors(&self) -> Result<RenderColors, Error> {
+        let mut palette = [ffi::GhosttyColorRgb::default(); 256];
+        // SAFETY: 有效 terminal，palette 是接口要求的 256 项数组。
+        unsafe {
+            ffi::ghostty_terminal_get(
+                self.raw,
+                ffi::GhosttyTerminalData_GHOSTTY_TERMINAL_DATA_COLOR_PALETTE,
+                palette.as_mut_ptr().cast(),
+            )
+            .into_result()?;
+        }
+        Ok(RenderColors {
+            foreground: self.effective_foreground_color()?.unwrap_or(RgbColor {
+                r: 255,
+                g: 255,
+                b: 255,
+            }),
+            background: self
+                .get_optional_rgb_color(
+                    ffi::GhosttyTerminalData_GHOSTTY_TERMINAL_DATA_COLOR_BACKGROUND,
+                )?
+                .unwrap_or(RgbColor { r: 0, g: 0, b: 0 }),
+            palette: palette.map(Into::into),
+        })
     }
 
     fn viewport_graphemes_and_style(&self, x: u16, y: u32) -> Result<(Vec<u32>, CellStyle), Error> {
@@ -2183,6 +2254,46 @@ fn grid_ref_graphemes(grid_ref: &ffi::GhosttyGridRef) -> Result<Vec<u32>, Error>
     }
     buffer.truncate(required);
     Ok(buffer)
+}
+
+fn cell_content_bg_color(raw: ffi::GhosttyCell) -> Result<Option<CellColor>, Error> {
+    let mut tag = ffi::GhosttyCellContentTag_GHOSTTY_CELL_CONTENT_CODEPOINT;
+    unsafe {
+        ffi::ghostty_cell_get(
+            raw,
+            ffi::GhosttyCellData_GHOSTTY_CELL_DATA_CONTENT_TAG,
+            (&mut tag as *mut ffi::GhosttyCellContentTag).cast(),
+        )
+        .into_result()?;
+    }
+
+    match tag {
+        ffi::GhosttyCellContentTag_GHOSTTY_CELL_CONTENT_BG_COLOR_PALETTE => {
+            let mut index = 0u8;
+            unsafe {
+                ffi::ghostty_cell_get(
+                    raw,
+                    ffi::GhosttyCellData_GHOSTTY_CELL_DATA_COLOR_PALETTE,
+                    (&mut index as *mut u8).cast(),
+                )
+                .into_result()?;
+            }
+            Ok(Some(CellColor::Palette(index)))
+        }
+        ffi::GhosttyCellContentTag_GHOSTTY_CELL_CONTENT_BG_COLOR_RGB => {
+            let mut color = ffi::GhosttyColorRgb::default();
+            unsafe {
+                ffi::ghostty_cell_get(
+                    raw,
+                    ffi::GhosttyCellData_GHOSTTY_CELL_DATA_COLOR_RGB,
+                    (&mut color as *mut ffi::GhosttyColorRgb).cast(),
+                )
+                .into_result()?;
+            }
+            Ok(Some(CellColor::Rgb(color.into())))
+        }
+        _ => Ok(None),
+    }
 }
 
 fn grid_ref_wide(grid_ref: &ffi::GhosttyGridRef) -> Result<CellWide, Error> {
@@ -3329,44 +3440,7 @@ impl<'a> RowCellIter<'a> {
     }
 
     pub fn content_bg_color(&self) -> Result<Option<CellColor>, Error> {
-        let raw = self.raw_cell()?;
-        let mut tag = ffi::GhosttyCellContentTag_GHOSTTY_CELL_CONTENT_CODEPOINT;
-        unsafe {
-            ffi::ghostty_cell_get(
-                raw,
-                ffi::GhosttyCellData_GHOSTTY_CELL_DATA_CONTENT_TAG,
-                (&mut tag as *mut ffi::GhosttyCellContentTag).cast(),
-            )
-            .into_result()?;
-        }
-
-        match tag {
-            ffi::GhosttyCellContentTag_GHOSTTY_CELL_CONTENT_BG_COLOR_PALETTE => {
-                let mut index = 0u8;
-                unsafe {
-                    ffi::ghostty_cell_get(
-                        raw,
-                        ffi::GhosttyCellData_GHOSTTY_CELL_DATA_COLOR_PALETTE,
-                        (&mut index as *mut u8).cast(),
-                    )
-                    .into_result()?;
-                }
-                Ok(Some(CellColor::Palette(index)))
-            }
-            ffi::GhosttyCellContentTag_GHOSTTY_CELL_CONTENT_BG_COLOR_RGB => {
-                let mut color = ffi::GhosttyColorRgb::default();
-                unsafe {
-                    ffi::ghostty_cell_get(
-                        raw,
-                        ffi::GhosttyCellData_GHOSTTY_CELL_DATA_COLOR_RGB,
-                        (&mut color as *mut ffi::GhosttyColorRgb).cast(),
-                    )
-                    .into_result()?;
-                }
-                Ok(Some(CellColor::Rgb(color.into())))
-            }
-            _ => Ok(None),
-        }
+        cell_content_bg_color(self.raw_cell()?)
     }
 
     pub fn fg_color(&self) -> Result<Option<RgbColor>, Error> {

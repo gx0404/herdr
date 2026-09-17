@@ -79,6 +79,7 @@ fn modal_button_state_prefers_the_pointer_over_the_keyboard_base_state() {
     let config = ClientShellConfig::from_config(&Config::default());
     let primary = ChromeHover::OverlayPrimary;
     let cx = super::super::feedback::ChromeContext {
+        page_bounds: None,
         palette: &config.palette,
         components: &config.components,
         glyphs: config.border_glyphs,

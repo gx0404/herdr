@@ -73,6 +73,14 @@ pub(crate) fn keybind_help_groups(
             t.group_global,
             vec![
                 entry(crate::config::format_key_combo(prefix), t.prefix_mode),
+                entry(
+                    binding_label(&keybinds.main_menu),
+                    crate::i18n::texts().global_menu.main_menu,
+                ),
+                entry(
+                    binding_label(&keybinds.command_search),
+                    crate::i18n::texts().global_menu.command_search,
+                ),
                 entry(binding_label(&keybinds.help), t.keybinds),
                 entry(binding_label(&keybinds.settings), t.settings),
                 entry(binding_label(&keybinds.manage_machines), t.manage_machines),

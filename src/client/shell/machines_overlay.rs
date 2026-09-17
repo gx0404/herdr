@@ -4,6 +4,7 @@
 //! socket behavior is added here.
 
 use super::*;
+mod dashboard;
 use crate::client::endpoint::{
     EndpointCatalog, PortForwardKind, PortForwardRule, ProfileId, ProxyJumpHop, SessionLogProfile,
     SshProfileOptions, StrictHostKeyChecking,
@@ -23,6 +24,7 @@ pub(super) struct ClientMachinesOverlay {
     pub(super) search_focused: bool,
     pub(super) selected: usize,
     pub(super) scroll: usize,
+    pub(super) reveal: bool,
     pub(super) detail_scroll: usize,
     /// One-shot feedback line shown in the list view (e.g. copied command).
     pub(super) message: Option<String>,
@@ -36,6 +38,7 @@ impl ClientMachinesOverlay {
             search_focused: false,
             selected: 0,
             scroll: 0,
+            reveal: true,
             detail_scroll: 0,
             message: None,
         }
@@ -407,9 +410,16 @@ pub(super) struct ClientMachineForm {
 
 #[derive(Debug)]
 pub(super) struct ClientMachineBootstrap {
+    pub(super) cancel: crate::remote::TaskCancellation,
     pub(super) ticket: u64,
     pub(super) step: Option<SavedSshBootstrapStep>,
     pub(super) failure: Option<String>,
+}
+
+impl Drop for ClientMachineBootstrap {
+    fn drop(&mut self) {
+        self.cancel.cancel();
+    }
 }
 
 const STRICT_HOST_KEY_CHOICES: [Option<StrictHostKeyChecking>; 4] = [
@@ -843,6 +853,9 @@ pub(super) enum MachineOverlayButton {
 
 impl ClientShellState {
     pub(super) fn open_machines_overlay(&mut self) {
+        if matches!(self.overlay, Some(ClientShellOverlay::Machines(_))) {
+            return;
+        }
         self.chrome_drag = None;
         self.overlay = Some(ClientShellOverlay::Machines(ClientMachinesOverlay::blank()));
     }
@@ -1022,19 +1035,21 @@ impl ClientShellState {
             overlay.scroll = 0;
             return;
         }
+        overlay.reveal = true;
+        overlay.detail_scroll = 0;
         overlay.selected =
             (overlay.selected as isize + delta).clamp(0, count.saturating_sub(1) as isize) as usize;
     }
 
     fn select_machine_row(&mut self, profile_id: &ProfileId) {
-        let Some(ClientShellOverlay::Machines(overlay)) = self.overlay.as_ref() else {
+        let Some(ClientShellOverlay::Machines(overlay)) = self.content_page() else {
             return;
         };
         let rows = self.filtered_machine_rows(overlay.query.as_str());
         let Some(index) = rows.iter().position(|row| &row.id == profile_id) else {
             return;
         };
-        if let Some(ClientShellOverlay::Machines(overlay)) = self.overlay.as_mut() {
+        if let Some(ClientShellOverlay::Machines(overlay)) = self.content_page_mut() {
             overlay.selected = index;
         }
     }
@@ -1043,7 +1058,7 @@ impl ClientShellState {
         if self.saved_profile(profile_id).is_none() {
             return;
         }
-        if let Some(ClientShellOverlay::Machines(overlay)) = self.overlay.as_mut() {
+        if let Some(ClientShellOverlay::Machines(overlay)) = self.content_page_mut() {
             overlay.view = ClientMachinesView::Detail(profile_id.clone());
             overlay.detail_scroll = 0;
         }
@@ -1087,13 +1102,8 @@ impl ClientShellState {
                 },
                 ClientMachinesView::Form(form) => {
                     if let Some(bootstrap) = form.bootstrap.as_ref() {
-                        // A failed bootstrap returns to editing; a running one
-                        // keeps the page read-only until it finishes.
-                        if bootstrap.failure.is_some() {
-                            Back::FormEdit
-                        } else {
-                            return;
-                        }
+                        bootstrap.cancel.cancel();
+                        Back::FormEdit
                     } else if form.editing.is_some() {
                         match &form.editing {
                             Some(id) if self.saved_profile(id).is_some() => {
@@ -1312,12 +1322,15 @@ impl ClientShellState {
         let ticket = self.next_machine_bootstrap_ticket;
         self.next_machine_bootstrap_ticket = self.next_machine_bootstrap_ticket.saturating_add(1);
         form.error = None;
+        let cancel = crate::remote::TaskCancellation::default();
         form.bootstrap = Some(ClientMachineBootstrap {
+            cancel: cancel.clone(),
             ticket,
             step: None,
             failure: None,
         });
         outcome.actions.push(ClientShellAction::BootstrapMachine {
+            cancel,
             ticket,
             target,
             session,
@@ -1336,7 +1349,7 @@ impl ClientShellState {
             Save(Box<(SshProfileOptions, String, String, String)>),
         }
         let prepared = {
-            let Some(ClientShellOverlay::Machines(overlay)) = self.overlay.as_mut() else {
+            let Some(ClientShellOverlay::Machines(overlay)) = self.content_page_mut() else {
                 return;
             };
             let ClientMachinesView::Form(form) = &mut overlay.view else {
@@ -1384,7 +1397,7 @@ impl ClientShellState {
         let (options, label, target, session) = *pending;
         match self.persist_bootstrapped_machine(options, &label, &target, &session) {
             Ok(profile_id) => {
-                if let Some(ClientShellOverlay::Machines(overlay)) = self.overlay.as_mut() {
+                if let Some(ClientShellOverlay::Machines(overlay)) = self.content_page_mut() {
                     overlay.view = ClientMachinesView::List;
                     overlay.message = Some(crate::i18n::fill(
                         crate::i18n::texts().machines.progress_done_fmt,
@@ -1394,7 +1407,7 @@ impl ClientShellState {
                 self.select_machine_row(&profile_id);
             }
             Err(error) => {
-                if let Some(ClientShellOverlay::Machines(overlay)) = self.overlay.as_mut() {
+                if let Some(ClientShellOverlay::Machines(overlay)) = self.content_page_mut() {
                     if let ClientMachinesView::Form(form) = &mut overlay.view {
                         if let Some(bootstrap) = form.bootstrap.as_mut() {
                             bootstrap.failure = Some(error);
@@ -1403,6 +1416,36 @@ impl ClientShellState {
                 }
             }
         }
+    }
+
+    pub(super) fn persist_authenticated_wizard(
+        &mut self,
+        profile: &SavedSshEndpoint,
+    ) -> Result<ProfileId, String> {
+        let options = crate::client::endpoint::SshProfileOptions {
+            group: profile.group.clone(),
+            tags: profile.tags.clone(),
+            color: profile.color.clone(),
+            port: profile.port,
+            user: profile.user.clone(),
+            identity_file: profile.identity_file.clone(),
+            proxy_jump: profile.proxy_jump.clone(),
+            strict_host_key_checking: profile.strict_host_key_checking,
+            identities_only: profile.identities_only,
+            identity_agent: profile.identity_agent.clone(),
+            forward_agent: profile.forward_agent,
+            server_alive_interval: profile.server_alive_interval,
+            server_alive_count_max: profile.server_alive_count_max,
+            control_persist: profile.control_persist.clone(),
+            remote_command: profile.remote_command.clone(),
+            session_log: profile.session_log.clone(),
+        };
+        self.persist_bootstrapped_machine(
+            options,
+            &profile.label,
+            &profile.target,
+            &profile.session,
+        )
     }
 
     fn persist_bootstrapped_machine(
@@ -2344,6 +2387,10 @@ impl ClientShellState {
             // until it succeeds (returns to the list) or fails (Esc re-enters
             // editing). A failure also offers the recovery dialogs.
             if !failed {
+                if code == KeyCode::Esc {
+                    self.machines_back();
+                    outcome.repaint = true;
+                }
                 return;
             }
             match code {
@@ -2372,6 +2419,27 @@ impl ClientShellState {
             self.machines_back();
             outcome.repaint = true;
             return;
+        }
+        if matches!(
+            code,
+            KeyCode::Up | KeyCode::Down | KeyCode::PageUp | KeyCode::PageDown
+        ) {
+            let max = self.hits.machines_max_scroll;
+            if let Some(ClientShellOverlay::Machines(page)) = self.overlay.as_mut() {
+                if let ClientMachinesView::Form(form) = &mut page.view {
+                    if form.step == MachineFormStep::Confirm && form.editing.is_none() {
+                        let delta: isize = match code {
+                            KeyCode::Up => -1,
+                            KeyCode::PageUp => -5,
+                            KeyCode::PageDown => 5,
+                            _ => 1,
+                        };
+                        form.scroll = form.scroll.saturating_add_signed(delta).min(max);
+                        outcome.repaint = true;
+                        return;
+                    }
+                }
+            }
         }
         if code == KeyCode::Enter {
             self.advance_machine_form(outcome);
@@ -2451,6 +2519,7 @@ impl ClientShellState {
                     ClientMachinesView::Detail(id) | ClientMachinesView::ConfirmRemove(id) => {
                         Some(id.clone())
                     }
+                    ClientMachinesView::List => self.selected_machine_id(),
                     _ => None,
                 },
                 matches!(
@@ -2589,15 +2658,14 @@ impl ClientShellState {
                                 .as_ref()
                                 .is_some_and(|bootstrap| bootstrap.failure.is_some()) =>
                         {
-                            let target = form.target.trim().to_owned();
-                            (!target.is_empty()).then_some(target)
+                            Self::wizard_temp_profile(form).ok()
                         }
                         _ => None,
                     },
                     _ => None,
                 };
                 if let Some(target) = target {
-                    self.open_machine_host_key_review(&target, outcome);
+                    self.open_machine_host_key_review(Box::new(target), outcome);
                 }
             }
         }
@@ -2634,6 +2702,15 @@ impl ClientShellState {
 
     /// Mouse-wheel scrolling routed per view: list moves the selection,
     /// detail scrolls the field card, the form moves the focused field.
+    pub(super) fn scroll_machine_details(&mut self, delta: isize) {
+        if let Some(ClientShellOverlay::Machines(overlay)) = self.overlay.as_mut() {
+            overlay.detail_scroll = overlay
+                .detail_scroll
+                .saturating_add_signed(delta)
+                .min(self.hits.machines_max_scroll);
+        }
+    }
+
     pub(super) fn scroll_machines_overlay(&mut self, delta: isize) {
         enum ScrollTarget {
             List,
@@ -2655,7 +2732,12 @@ impl ClientShellState {
             _ => ScrollTarget::None,
         };
         match target {
-            ScrollTarget::List => self.move_machines_selection(delta),
+            ScrollTarget::List => {
+                if let Some(ClientShellOverlay::Machines(overlay)) = self.overlay.as_mut() {
+                    overlay.scroll = overlay.scroll.saturating_add_signed(delta);
+                    overlay.reveal = false;
+                }
+            }
             ScrollTarget::Detail => {
                 let max_scroll = self.hits.machines_max_scroll;
                 if let Some(ClientShellOverlay::Machines(overlay)) = self.overlay.as_mut() {
@@ -2668,8 +2750,13 @@ impl ClientShellState {
                 }
             }
             ScrollTarget::Form => {
+                let max = self.hits.machines_max_scroll;
                 if let Some(ClientShellOverlay::Machines(overlay)) = self.overlay.as_mut() {
                     if let ClientMachinesView::Form(form) = &mut overlay.view {
+                        if form.step == MachineFormStep::Confirm && form.editing.is_none() {
+                            form.scroll = form.scroll.saturating_add_signed(delta).min(max);
+                            return;
+                        }
                         let count = form.fields().len();
                         if count > 0 {
                             form.focused = (form.focused as isize + delta)
@@ -2725,6 +2812,20 @@ pub(super) fn render_machines_overlay(
     session_log_dropped: &HashMap<ProfileId, u64>,
     cx: &super::feedback::ChromeContext<'_>,
 ) -> Option<OverlayRender> {
+    if matches!(overlay.view, ClientMachinesView::List)
+        && cx.page_bounds.unwrap_or(b.area).width >= 96
+    {
+        return dashboard::render_dashboard(
+            b,
+            overlay,
+            endpoints,
+            saved_profiles,
+            connection_errors,
+            port_forwards,
+            session_log_dropped,
+            cx,
+        );
+    }
     match &overlay.view {
         ClientMachinesView::List => render_machine_list(b, overlay, endpoints, saved_profiles, cx),
         ClientMachinesView::Detail(id) => {
@@ -2818,12 +2919,13 @@ fn render_machine_list(
     } else {
         overlay.selected.min(rows.len() - 1)
     };
-    let max_scroll = rows.len().saturating_sub(visible);
-    let scroll = overlay
-        .scroll
-        .max(selected.saturating_sub(visible.saturating_sub(1)))
-        .min(selected)
-        .min(max_scroll);
+    let scroll = super::page::list_start(
+        overlay.scroll,
+        selected,
+        rows.len(),
+        visible,
+        overlay.reveal,
+    );
     let mut row_hits = Vec::new();
     for (index, row) in rows.iter().enumerate().skip(scroll).take(visible) {
         let y = body.y + ((index - scroll) * row_height) as u16;
@@ -2977,10 +3079,11 @@ fn render_machine_list(
     Some(OverlayRender {
         area: popup,
         machines_popup: popup,
+        machines_scroll: scroll,
         machines_search: Rect::new(stack.header.x, stack.header.y + 1, stack.header.width, 1),
         machines_rows: row_hits,
         machines_actions: action_hits,
-        machines_max_scroll: max_scroll,
+        machines_max_scroll: rows.len().saturating_sub(visible),
         cursor,
         ..OverlayRender::default()
     })
@@ -3190,7 +3293,46 @@ fn render_machine_detail(
             ..OverlayRender::default()
         });
     }
-    let stack = crate::ui::modal_stack_areas(inner, 1, 1, 1, 1);
+    let has_review = error_kind.is_some_and(super::machine_auth_overlay::failure_kind_has_review);
+    let mut labels: Vec<&str> = vec![t.reconnect_button, t.edit_button];
+    labels.push(if profile.enabled {
+        t.disable_button
+    } else {
+        t.enable_button
+    });
+    labels.push(t.forwards_button);
+    labels.push(t.browse_files_button);
+    labels.push(t.broadcast_button);
+    labels.push(t.remove_button);
+    if status == ClientEndpointStatus::Attention && has_review {
+        labels.push(crate::i18n::texts().machine_auth.review_button);
+    }
+    if status == ClientEndpointStatus::Attention {
+        labels.push(t.copy_fix_button);
+    }
+    labels.push(crate::ui::modal_close_button_text());
+    let mut buttons: Vec<MachineOverlayButton> = vec![
+        MachineOverlayButton::Reconnect,
+        MachineOverlayButton::Edit,
+        MachineOverlayButton::ToggleEnabled,
+        MachineOverlayButton::Forwards,
+        MachineOverlayButton::BrowseFiles,
+        MachineOverlayButton::Broadcast,
+        MachineOverlayButton::Remove,
+    ];
+    if status == ClientEndpointStatus::Attention && has_review {
+        buttons.push(MachineOverlayButton::ReviewIssue);
+    }
+    if status == ClientEndpointStatus::Attention {
+        buttons.push(MachineOverlayButton::CopyFix);
+    }
+    buttons.push(MachineOverlayButton::Close);
+    let stack = super::page::PageLayout::with_action_rows(
+        inner,
+        0,
+        false,
+        super::page::action_row_count(inner.width, &labels),
+    );
     let base = Style::default()
         .bg(p.panel_bg)
         .remove_modifier(Modifier::DIM);
@@ -3292,7 +3434,8 @@ fn render_machine_detail(
         );
     }
 
-    if let Some(footer) = stack.footer {
+    {
+        let footer = stack.footer;
         let mut hints: Vec<(String, String)> = vec![
             ("e".to_owned(), t.hint_edit.to_owned()),
             ("R".to_owned(), t.hint_rename.to_owned()),
@@ -3312,41 +3455,7 @@ fn render_machine_detail(
         render_key_hints(b, footer, &hints, p, cx.components);
     }
 
-    let has_review = error_kind.is_some_and(super::machine_auth_overlay::failure_kind_has_review);
-    let mut labels: Vec<&str> = vec![t.reconnect_button, t.edit_button];
-    labels.push(if profile.enabled {
-        t.disable_button
-    } else {
-        t.enable_button
-    });
-    labels.push(t.forwards_button);
-    labels.push(t.browse_files_button);
-    labels.push(t.broadcast_button);
-    labels.push(t.remove_button);
-    if attention && has_review {
-        labels.push(crate::i18n::texts().machine_auth.review_button);
-    }
-    if attention {
-        labels.push(t.copy_fix_button);
-    }
-    labels.push(crate::ui::modal_close_button_text());
-    let mut buttons: Vec<MachineOverlayButton> = vec![
-        MachineOverlayButton::Reconnect,
-        MachineOverlayButton::Edit,
-        MachineOverlayButton::ToggleEnabled,
-        MachineOverlayButton::Forwards,
-        MachineOverlayButton::BrowseFiles,
-        MachineOverlayButton::Broadcast,
-        MachineOverlayButton::Remove,
-    ];
-    if attention && has_review {
-        buttons.push(MachineOverlayButton::ReviewIssue);
-    }
-    if attention {
-        buttons.push(MachineOverlayButton::CopyFix);
-    }
-    buttons.push(MachineOverlayButton::Close);
-    let rects = modal_button_row(stack.actions.unwrap_or_default(), &labels, 2);
+    let rects = super::page::action_grid(stack.actions, &labels);
     if rects.len() == labels.len() {
         for (index, rect) in rects.iter().enumerate() {
             let button = buttons[index];
@@ -3475,7 +3584,7 @@ const BOOTSTRAP_STEPS: [SavedSshBootstrapStep; 4] = [
     SavedSshBootstrapStep::Verify,
 ];
 
-fn bootstrap_step_label(step: SavedSshBootstrapStep) -> &'static str {
+pub(super) fn bootstrap_step_label(step: SavedSshBootstrapStep) -> &'static str {
     let t = &crate::i18n::texts().machines;
     match step {
         SavedSshBootstrapStep::DetectPlatform => t.progress_detect,
@@ -3522,7 +3631,7 @@ fn render_machine_form(
             } else {
                 base.fg(p.overlay0)
             };
-            let width = display_width(&label);
+            let width = display_width(&label).min(stack.header.right().saturating_sub(x));
             put_text(b, x, stack.header.y + 1, width, &label, style);
             x = x.saturating_add(width);
         }
@@ -3531,10 +3640,11 @@ fn render_machine_form(
     let body = stack.content;
     let mut field_hits = Vec::new();
     let mut cursor = None;
+    let mut max_scroll = 0;
     if let Some(bootstrap) = form.bootstrap.as_ref() {
         render_bootstrap_progress(b, body, form, bootstrap, base, cx);
     } else if form.step == MachineFormStep::Confirm && !editing {
-        render_form_confirm(b, body, form, base, p);
+        max_scroll = render_form_confirm(b, body, form, base, p);
     } else {
         let fields = form.fields();
         let visible = usize::from(body.height).max(1);
@@ -3549,8 +3659,14 @@ fn render_machine_form(
             let rect = Rect::new(body.x, y, body.width, 1);
             field_hits.push((rect, *field));
             let is_focused = index == focused;
-            let label = format!(" {:<22}", field.label());
-            let label_width = 24u16.min(body.width);
+            let label = format!(" {}", field.label());
+            let label_width = fields
+                .iter()
+                .map(|field| display_width(field.label()) + 2)
+                .max()
+                .unwrap_or(12)
+                .min(body.width / 2)
+                .max(8.min(body.width));
             put_text(
                 b,
                 rect.x,
@@ -3670,7 +3786,7 @@ fn render_machine_form(
         buttons.push((
             back_label,
             MachineOverlayButton::Back,
-            false,
+            true,
             crate::ui::ModalButtonTone::Secondary,
         ));
     } else if failed {
@@ -3750,6 +3866,7 @@ fn render_machine_form(
         area: popup,
         machines_popup: popup,
         machines_fields: field_hits,
+        machines_max_scroll: max_scroll,
         machines_actions: action_hits,
         cursor,
         ..OverlayRender::default()
@@ -3762,42 +3879,45 @@ fn render_form_confirm(
     form: &ClientMachineForm,
     base: Style,
     p: &Palette,
-) {
+) -> usize {
+    use ratatui::text::{Line, Span};
+    use ratatui::widgets::{Paragraph, Widget, Wrap};
     let t = &crate::i18n::texts().machines;
-    let rows = [
-        (t.detail_target, form.target.trim().to_owned()),
-        (t.field_label, form.effective_label()),
-        (t.detail_session, form.effective_session()),
+    let mut lines = vec![
+        Line::styled(t.confirm_install_note, base.fg(p.yellow)),
+        Line::styled(t.confirm_auth_note, base.fg(p.overlay0)),
+        Line::default(),
     ];
-    for (offset, (label, value)) in rows.iter().enumerate() {
-        let y = area.y + offset as u16;
-        put_text(b, area.x, y, 24, &format!(" {label}"), base.fg(p.overlay0));
-        put_text(
-            b,
-            area.x + 24,
-            y,
-            area.width.saturating_sub(24),
-            value,
-            base.fg(p.text),
-        );
+    for field in std::iter::once(&MachineField::Target).chain(EDIT_FIELDS.iter()) {
+        let value = if field.is_choice() {
+            form.choice_label(*field).to_owned()
+        } else {
+            form.editor(*field)
+                .map(|editor| editor.as_str().to_owned())
+                .unwrap_or_default()
+        };
+        if !value.is_empty() {
+            lines.push(Line::from(vec![
+                Span::styled(format!("{}  ", field.label()), base.fg(p.overlay0)),
+                Span::styled(value, base.fg(p.text)),
+            ]));
+        }
     }
-    let note_y = area.y + 4;
-    put_text(
-        b,
-        area.x,
-        note_y,
-        area.width,
-        t.confirm_install_note,
-        base.fg(p.overlay1),
+    let measured = lines
+        .iter()
+        .cloned()
+        .map(|line| (line.width(), line))
+        .collect::<Vec<_>>();
+    let metrics = crate::ui::display_lines_scroll_metrics(
+        &measured,
+        form.scroll.min(u16::MAX as usize) as u16,
+        area,
     );
-    put_text(
-        b,
-        area.x,
-        note_y + 1,
-        area.width,
-        t.confirm_auth_note,
-        base.fg(p.overlay1),
-    );
+    Paragraph::new(lines)
+        .wrap(Wrap { trim: false })
+        .scroll((form.scroll.min(metrics.max_offset_from_bottom) as u16, 0))
+        .render(area, b);
+    metrics.max_offset_from_bottom
 }
 
 fn render_bootstrap_progress(

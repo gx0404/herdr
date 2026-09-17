@@ -33,7 +33,14 @@ pub(super) fn integration_needs_install(info: &crate::api::schema::IntegrationIn
 
 impl ClientShellState {
     pub(super) fn open_settings_overlay(&mut self) {
+        if matches!(self.overlay, Some(ClientShellOverlay::Settings(_))) {
+            return;
+        }
         self.overlay = Some(ClientShellOverlay::Settings(ClientSettingsOverlay {
+            focus: super::page::PageFocus::Content,
+            current: theme_index(&self.config.theme_name),
+            scroll: 0,
+            reveal: true,
             section: ClientSettingsSection::Theme,
             selected: theme_index(&self.config.theme_name),
             original_theme_name: self.config.theme_name.clone(),
@@ -75,8 +82,19 @@ impl ClientShellState {
                 }))
             );
         if let Some(ClientShellOverlay::Settings(settings)) = self.overlay.as_mut() {
+            if settings.section == ClientSettingsSection::Theme {
+                self.config
+                    .theme_name
+                    .clone_from(&settings.original_theme_name);
+                self.config.palette = settings.original_palette.clone();
+                self.config.components = settings.original_components.clone();
+            }
             settings.section = section;
             settings.selected = selected;
+            settings.current = selected;
+            settings.scroll = 0;
+            settings.reveal = true;
+            settings.focus = super::page::PageFocus::Navigation;
         }
         if request_integrations {
             self.queue_integration_list(outcome, true);
@@ -104,7 +122,9 @@ impl ClientShellState {
                 ClientSettingsSection::Theme => crate::config::THEME_NAMES.len(),
                 ClientSettingsSection::Indicators | ClientSettingsSection::Sound => 2,
                 ClientSettingsSection::Toast => 4,
-                ClientSettingsSection::Integrations => settings.integrations.len(),
+                ClientSettingsSection::Integrations => {
+                    settings.integrations.len() + settings.integration_messages.len()
+                }
             },
             _ => 0,
         }
@@ -119,6 +139,8 @@ impl ClientShellState {
             settings.selected = 0;
             return;
         }
+        settings.focus = super::page::PageFocus::Content;
+        settings.reveal = true;
         settings.selected = (settings.selected as isize + delta)
             .clamp(0, count.saturating_sub(1) as isize) as usize;
         if settings.section == ClientSettingsSection::Theme {
@@ -129,6 +151,8 @@ impl ClientShellState {
     pub(super) fn select_settings_choice(&mut self, index: usize) {
         let count = self.settings_choice_count();
         if let Some(ClientShellOverlay::Settings(settings)) = self.overlay.as_mut() {
+            settings.reveal = true;
+            settings.focus = super::page::PageFocus::Content;
             if count > 0 {
                 settings.selected = index.min(count - 1);
             }
@@ -183,6 +207,9 @@ impl ClientShellState {
             return false;
         }
         self.reload_client_config();
+        if let Some(ClientShellOverlay::Settings(settings)) = self.overlay.as_mut() {
+            settings.current = settings.selected;
+        }
         self.push_endpoint_method_with_kind(
             crate::api::schema::Method::ServerReloadConfig(
                 crate::api::schema::EmptyParams::default(),
@@ -249,7 +276,7 @@ impl ClientShellState {
     }
 
     fn queue_integration_list(&mut self, outcome: &mut ClientShellInput, clear_messages: bool) {
-        if let Some(ClientShellOverlay::Settings(settings)) = self.overlay.as_mut() {
+        if let Some(ClientShellOverlay::Settings(settings)) = self.content_page_mut() {
             settings.loading_integrations = true;
             if clear_messages {
                 settings.integration_messages.clear();
@@ -260,7 +287,7 @@ impl ClientShellState {
             PendingEndpointKind::IntegrationList,
             outcome,
         ) {
-            if let Some(ClientShellOverlay::Settings(settings)) = self.overlay.as_mut() {
+            if let Some(ClientShellOverlay::Settings(settings)) = self.content_page_mut() {
                 settings.loading_integrations = false;
             }
         }
@@ -270,7 +297,7 @@ impl ClientShellState {
         if self.pending_integration_installs > 0 {
             return;
         }
-        let targets = match self.overlay.as_ref() {
+        let targets = match self.content_page() {
             Some(ClientShellOverlay::Settings(settings)) => settings
                 .integrations
                 .iter()
@@ -282,7 +309,7 @@ impl ClientShellState {
         if targets.is_empty() {
             return;
         }
-        if let Some(ClientShellOverlay::Settings(settings)) = self.overlay.as_mut() {
+        if let Some(ClientShellOverlay::Settings(settings)) = self.content_page_mut() {
             settings.installing_integrations = true;
             settings.integration_messages.clear();
         }
@@ -299,7 +326,7 @@ impl ClientShellState {
             }
         }
         if self.pending_integration_installs == 0 {
-            if let Some(ClientShellOverlay::Settings(settings)) = self.overlay.as_mut() {
+            if let Some(ClientShellOverlay::Settings(settings)) = self.content_page_mut() {
                 settings.installing_integrations = false;
             }
         }
@@ -313,7 +340,7 @@ impl ClientShellState {
     ) -> (bool, Vec<ClientShellAction>) {
         match kind {
             PendingEndpointKind::IntegrationList => {
-                if let Some(ClientShellOverlay::Settings(settings)) = self.overlay.as_mut() {
+                if let Some(ClientShellOverlay::Settings(settings)) = self.content_page_mut() {
                     settings.loading_integrations = false;
                     match result {
                         Ok(crate::api::schema::ResponseResult::IntegrationList {
@@ -340,7 +367,8 @@ impl ClientShellState {
                     .is_err_and(|error| error.code.as_deref() == Some("endpoint_cancelled"));
                 self.pending_integration_installs =
                     self.pending_integration_installs.saturating_sub(1);
-                if let Some(ClientShellOverlay::Settings(settings)) = self.overlay.as_mut() {
+                let installing = self.pending_integration_installs > 0;
+                if let Some(ClientShellOverlay::Settings(settings)) = self.content_page_mut() {
                     match result {
                         Ok(crate::api::schema::ResponseResult::IntegrationInstall {
                             details,
@@ -354,11 +382,11 @@ impl ClientShellState {
                         ),
                         Err(error) => settings.integration_messages.push(error.message),
                     }
-                    settings.installing_integrations = self.pending_integration_installs > 0;
+                    settings.installing_integrations = installing;
                 }
                 let actions = if !cancelled
                     && self.pending_integration_installs == 0
-                    && matches!(self.overlay, Some(ClientShellOverlay::Settings(_)))
+                    && matches!(self.content_page(), Some(ClientShellOverlay::Settings(_)))
                 {
                     let mut deferred = ClientShellInput::default();
                     self.queue_integration_list(&mut deferred, false);
@@ -369,6 +397,13 @@ impl ClientShellState {
                 (true, actions)
             }
             _ => (false, Vec::new()),
+        }
+    }
+
+    pub(super) fn scroll_settings(&mut self, delta: isize) {
+        if let Some(ClientShellOverlay::Settings(settings)) = self.content_page_mut() {
+            settings.scroll = settings.scroll.saturating_add_signed(delta);
+            settings.reveal = false;
         }
     }
 
@@ -416,7 +451,15 @@ impl ClientShellState {
             outcome.repaint = true;
             return true;
         }
+        if matches!(code, KeyCode::PageUp | KeyCode::PageDown) {
+            self.move_settings_selection(if code == KeyCode::PageUp { -8 } else { 8 });
+            outcome.repaint = true;
+            return true;
+        }
         if matches!(code, KeyCode::Enter | KeyCode::Char(' ')) && modifiers.is_empty() {
+            if let Some(ClientShellOverlay::Settings(settings)) = self.overlay.as_mut() {
+                settings.focus = super::page::PageFocus::Actions;
+            }
             self.apply_settings_choice(outcome);
             return true;
         }

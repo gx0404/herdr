@@ -30,7 +30,7 @@ fn apply_row(row: &crate::protocol::PaneSurfacePatchRow, frame: &mut FrameData) 
     true
 }
 
-fn apply_patch_to_surface(
+pub(super) fn apply_patch_to_surface(
     surface: &mut crate::protocol::PaneSurfaceFrame,
     patch: &crate::protocol::PaneSurfacePatch,
 ) -> bool {
@@ -74,7 +74,7 @@ fn fast_path_blocker(
         Some("client_surface_patch.fallback.copy_feedback")
     } else if state.link_hover_blocks_patch(patch) {
         Some("client_surface_patch.fallback.link_hover")
-    } else if state.selection.is_some() {
+    } else if state.selection.is_some() || state.selection_capture.is_some() {
         Some("client_surface_patch.fallback.selection")
     } else if state.copy_mode.is_some() {
         Some("client_surface_patch.fallback.copy_mode")

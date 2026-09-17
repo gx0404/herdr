@@ -555,6 +555,18 @@
           "description": "Open settings."
         },
         {
+          "key": "keys.main_menu",
+          "type": "keybinding",
+          "default": "\"prefix+space\"",
+          "description": "Open the categorized main menu. Recent commands are limited to five entries."
+        },
+        {
+          "key": "keys.command_search",
+          "type": "keybinding",
+          "default": "\"prefix+/\"",
+          "description": "Search commands by localized title, English alias, category or machine target."
+        },
+        {
           "key": "keys.manage_machines",
           "type": "keybinding",
           "default": "\"prefix+m\"",
@@ -1671,6 +1683,111 @@
           "type": "boolean",
           "default": "false",
           "description": "While prefix mode is active, temporarily switch the host input source to an ASCII-capable mode so prefix commands are read as ASCII even when an IME is active, then restore the previous input source when prefix mode exits. On macOS this selects the ASCII-capable keyboard layout; on Windows it switches the IME to English (ASCII) input. Windows support is currently limited to the Korean IME; with an IME for any other language, the input source is left unchanged. macOS and Windows only; a no-op elsewhere and a best-effort no-op if the switch fails."
+        }
+      ]
+    },
+    {
+      "id": "monitor",
+      "title": "System monitor",
+      "keys": [
+        {
+          "key": "monitor.interval_ms",
+          "type": "integer",
+          "default": "1000",
+          "description": "Sampling period: 500, 1000, 2000 or 5000 ms. Slow collectors run independently."
+        },
+        {
+          "key": "monitor.history_minutes",
+          "type": "integer",
+          "default": "15",
+          "description": "Client history and chart range: 1–60 minutes within a 16 MiB budget."
+        },
+        {
+          "key": "monitor.visible",
+          "type": "array",
+          "default": "[\"cpu\", \"cores\", \"memory\", \"gpu\", \"disks\", \"network\", \"sensors\", \"processes\"]",
+          "description": "Visible metric cards in display order."
+        },
+        {
+          "key": "monitor.card_height",
+          "type": "integer",
+          "default": "10",
+          "description": "Metric card height, clamped to 7–24 terminal rows."
+        },
+        {
+          "key": "monitor.hidden_devices",
+          "type": "array",
+          "default": "[]",
+          "description": "Hidden device IDs; sensors use the sensor: prefix."
+        },
+        {
+          "key": "monitor.alerts_enabled",
+          "type": "boolean",
+          "default": "false",
+          "description": "Resource alerts while a TUI is connected. See monitoring for the monitor.alerts array."
+        }
+      ]
+    },
+    {
+      "id": "account_usage",
+      "title": "Provider account usage",
+      "keys": [
+        {
+          "key": "account_usage.enabled",
+          "type": "boolean",
+          "default": "true",
+          "description": "Enable account usage queries and display."
+        },
+        {
+          "key": "account_usage.format",
+          "type": "string",
+          "default": "\"dashboard\"",
+          "description": "Dashboard gauges or a usage table.",
+          "values": [
+            "dashboard",
+            "table"
+          ]
+        },
+        {
+          "key": "account_usage.position",
+          "type": "string",
+          "default": "\"hover\"",
+          "description": "Hover popover, account page, or both.",
+          "values": [
+            "hover",
+            "page",
+            "both"
+          ]
+        },
+        {
+          "key": "account_usage.hover_delay_ms",
+          "type": "integer",
+          "default": "400",
+          "description": "Hover delay, clamped to 200–2000 ms."
+        },
+        {
+          "key": "account_usage.api_refresh_seconds",
+          "type": "integer",
+          "default": "60",
+          "description": "Minimum API refresh interval, at least 60 seconds."
+        },
+        {
+          "key": "account_usage.cli_refresh_seconds",
+          "type": "integer",
+          "default": "300",
+          "description": "Minimum isolated CLI refresh interval, at least 300 seconds."
+        },
+        {
+          "key": "account_usage.probe_timeout_seconds",
+          "type": "integer",
+          "default": "20",
+          "description": "Total query deadline, clamped to 5–30 seconds."
+        },
+        {
+          "key": "account_usage.disabled_providers",
+          "type": "array",
+          "default": "[]",
+          "description": "Agent IDs disabled for automatic queries. See monitoring for the account_usage.accounts array."
         }
       ]
     }

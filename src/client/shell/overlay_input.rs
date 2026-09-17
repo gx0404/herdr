@@ -467,6 +467,8 @@ impl ClientShellState {
             }
             Some(ClientShellOverlay::CommandPalette(palette)) => {
                 if palette.query.insert(text) {
+                    palette.view = super::command_palette::BrowserView::Search;
+                    palette.reveal = true;
                     palette.selected = 0;
                     palette.scroll = 0;
                 }
@@ -592,7 +594,7 @@ impl ClientShellState {
             let (code, modifiers) = crate::config::normalize_key_combo((key.code, key.modifiers));
             match code {
                 KeyCode::Esc => {
-                    self.overlay = None;
+                    self.browser_back();
                     outcome.repaint = true;
                 }
                 KeyCode::Up => {
@@ -619,6 +621,11 @@ impl ClientShellState {
                     self.move_palette_selection(8);
                     outcome.repaint = true;
                 }
+                KeyCode::Char('/') if matches!(self.overlay, Some(ClientShellOverlay::CommandPalette(ref palette)) if palette.view != super::command_palette::BrowserView::Search) =>
+                {
+                    self.open_command_search();
+                    outcome.repaint = true;
+                }
                 KeyCode::Enter => {
                     let selected = match self.overlay.as_ref() {
                         Some(ClientShellOverlay::CommandPalette(palette)) => palette.selected,
@@ -631,6 +638,8 @@ impl ClientShellState {
                     {
                         if let Some(content_changed) = palette.query.handle_key(key) {
                             if content_changed {
+                                palette.view = super::command_palette::BrowserView::Search;
+                                palette.reveal = true;
                                 palette.selected = 0;
                                 palette.scroll = 0;
                             }

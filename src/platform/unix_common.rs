@@ -406,6 +406,14 @@ pub(crate) struct StatusCommandGuard {
 }
 
 impl StatusCommandGuard {
+    pub(crate) fn from_std_child(child: &std::process::Child) -> std::io::Result<Self> {
+        let process_group_id =
+            i32::try_from(child.id()).map_err(|_| std::io::Error::other("任务进程 ID 超出范围"))?;
+        Ok(Self {
+            process_group_id: Some(process_group_id),
+        })
+    }
+
     pub(crate) fn new(child: &tokio::process::Child) -> std::io::Result<Self> {
         let process_id = child
             .id()

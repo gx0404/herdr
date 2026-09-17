@@ -242,6 +242,7 @@ fn run_client_with_mode(
                 endpoint_keybindings,
                 loop_config.mouse_capture_active,
                 true,
+                None,
             )
             .map_err(|error| io::Error::other(error.to_string()))?;
             if federated
@@ -687,21 +688,19 @@ async fn run_client_loop(
                 }
             }
         }
-        if let Some(shell) = state.shell.as_ref() {
-            supervisors.spawn_due(
-                std::time::Instant::now(),
-                endpoint::EndpointConnectOptions {
-                    cols: state.reported_size.0,
-                    rows: state.reported_size.1,
-                    cell_width_px: state.reported_cell_size.0,
-                    cell_height_px: state.reported_cell_size.1,
-                    pixel_geometry_exact: state.pixel_geometry_exact,
-                    surface_size: shell.surface_size(state.reported_size.0, state.reported_size.1),
-                    endpoint_keybindings: config.endpoint_keybindings,
-                    mouse_capture: state.shell_mouse_capture_preference,
-                },
-                &supervisor_tx,
-            );
+        if let Some(shell) = state.shell.as_mut() {
+            let options = endpoint::EndpointConnectOptions {
+                cols: state.reported_size.0,
+                rows: state.reported_size.1,
+                cell_width_px: state.reported_cell_size.0,
+                cell_height_px: state.reported_cell_size.1,
+                pixel_geometry_exact: state.pixel_geometry_exact,
+                surface_size: shell.surface_size(state.reported_size.0, state.reported_size.1),
+                endpoint_keybindings: config.endpoint_keybindings,
+                mouse_capture: state.shell_mouse_capture_preference,
+            };
+            shell.endpoint_connect_options = Some(options);
+            supervisors.spawn_due(std::time::Instant::now(), options, &supervisor_tx);
         }
         let timer_delay = state
             .shell
@@ -1307,34 +1306,34 @@ async fn run_client_loop(
                     }
                 }
             }
-            ClientLoopEvent::ConnectEndpointTrustOnce { endpoint_id } => {
-                // Process-local trust override: the catalog file stays
-                // untouched, so the next watcher reload restores the saved
-                // profile and its host-key policy.
-                let endpoint::ClientEndpointId::Ssh(profile_id) = &endpoint_id else {
-                    continue;
-                };
-                let mut profiles = endpoint_catalog.ssh.clone();
-                let Some(profile) = profiles
-                    .iter_mut()
-                    .find(|profile| &profile.id == profile_id)
-                else {
-                    continue;
-                };
-                profile.strict_host_key_checking = Some(endpoint::StrictHostKeyChecking::AcceptNew);
-                supervisors.reconcile_profiles(&profiles, now);
-                if supervisors.reconnect_now(&endpoint_id, now) {
-                    if let Some(shell) = state.shell.as_mut() {
-                        shell.set_endpoint_status(
-                            &endpoint_id,
-                            endpoint::ClientEndpointStatus::Connecting,
-                        );
+            ClientLoopEvent::MachineInteractiveReady { ticket, connection } => {
+                if let Some(queue) = pending_auth_prompts.remove(&ticket) {
+                    for prompt in queue {
+                        prompt.respond(None);
                     }
-                    if let Some(frame) = state.shell.as_mut().and_then(|shell| {
-                        shell.compose(state.reported_size.0, state.reported_size.1)
-                    }) {
-                        state.present_frame(frame);
+                }
+                let profile = state
+                    .shell
+                    .as_mut()
+                    .and_then(|shell| shell.complete_interactive_connection(ticket));
+                if let Some(profile) = profile {
+                    if let Some(current) = endpoint_catalog
+                        .ssh
+                        .iter_mut()
+                        .find(|current| current.id == profile.id)
+                    {
+                        *current = profile.clone();
+                    } else {
+                        endpoint_catalog.ssh.push(profile.clone());
                     }
+                    supervisors.adopt_interactive(profile, *connection, now, &supervisor_tx);
+                }
+                if let Some(frame) = state
+                    .shell
+                    .as_mut()
+                    .and_then(|shell| shell.compose(state.reported_size.0, state.reported_size.1))
+                {
+                    state.present_frame(frame);
                 }
             }
             ClientLoopEvent::MachineAuth { update } => {
@@ -1486,6 +1485,34 @@ async fn run_client_loop(
                     now,
                     &event_tx,
                 )?;
+            }
+            ClientLoopEvent::ViewSurface {
+                endpoint_id,
+                generation,
+                view,
+            } => {
+                if !write_stream.accepts(&endpoint_id, generation)
+                    || write_stream.active_id() != &endpoint_id
+                    || state.presentation_frozen
+                    || pending_activation.is_some()
+                    || !write_stream
+                        .connection(&endpoint_id)
+                        .is_some_and(|connection| connection.surface_active)
+                {
+                    continue;
+                }
+                write_stream.received(&endpoint_id, generation, now);
+                if state
+                    .shell
+                    .as_mut()
+                    .is_some_and(|shell| shell.receive_view(generation, *view))
+                {
+                    if let Some(frame) = state.shell.as_mut().and_then(|shell| {
+                        shell.compose(state.reported_size.0, state.reported_size.1)
+                    }) {
+                        state.present_frame(frame);
+                    }
+                }
             }
             ClientLoopEvent::ServerMessage {
                 endpoint_id,
@@ -1951,7 +1978,8 @@ async fn run_client_loop(
                                     && (shell.endpoint_is_active(&completed.endpoint_id)
                                         || shell.pending_request_allows_inactive_endpoint(
                                             &completed.request_id,
-                                        ))
+                                        )
+                                        || shell.is_observation_request(&completed.request_id))
                                 {
                                     shell.handle_endpoint_result(
                                         &completed.boot_id,
@@ -2329,6 +2357,10 @@ async fn run_client_loop(
                     let (effects, outcome, frame) = {
                         let shell = state.shell.as_mut().expect("checked shell mode");
                         let mut outcome = shell.tick_selection_autoscroll(now);
+                        if pending_activation.is_none() && !state.presentation_frozen {
+                            shell.tick_workbench(now, &mut outcome);
+                        }
+                        shell.tick_observability(now, &mut outcome);
                         for expired in expired_endpoints {
                             if !shell.endpoint_is_active(&expired.endpoint_id)
                                 && !shell

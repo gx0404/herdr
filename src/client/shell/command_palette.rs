@@ -6,7 +6,7 @@ use super::render::{
 use super::*;
 
 /// Cap on the persisted most-recently-used command list.
-pub(super) const PALETTE_RECENT_LIMIT: usize = 8;
+pub(super) const PALETTE_RECENT_LIMIT: usize = 5;
 
 /// One executable row of the command palette.
 #[derive(Debug, Clone)]
@@ -24,7 +24,12 @@ pub(super) struct ClientPaletteItem {
 #[derive(Debug, Clone)]
 pub(super) enum ClientPaletteAction {
     Binding(crate::input::KeybindAction),
-    CustomCommand(usize),
+    CustomCommand(crate::config::CustomCommandKeybind),
+    Category(usize),
+    Search,
+    Back,
+    Observation(super::observability::Page),
+    Arrange,
     Notifications,
     WhatsNew,
     MachineConnect(crate::client::endpoint::ProfileId),
@@ -39,15 +44,77 @@ pub(super) enum ClientPaletteAction {
     Broadcast,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum BrowserView {
+    Menu(Option<usize>),
+    Search,
+}
+
+fn category(item: &ClientPaletteItem) -> usize {
+    let id = item.id.as_str();
+    if id.starts_with("machine:") || id == "binding:ManageMachines" {
+        2
+    } else if id.starts_with("observation:") {
+        3
+    } else if id.starts_with("command:")
+        || id.starts_with("snippets:")
+        || id.starts_with("scene:")
+        || id == "broadcast"
+    {
+        4
+    } else if id.contains("Workspace")
+        || id.contains("Worktree")
+        || id.contains("Agent")
+        || id == "binding:OpenNavigator"
+    {
+        0
+    } else if id.contains("Pane")
+        || id.contains("Tab")
+        || [
+            "binding:CopyMode",
+            "binding:EditScrollback",
+            "binding:Zoom",
+            "binding:SplitVertical",
+            "binding:SplitHorizontal",
+            "binding:EnterResizeMode",
+            "layout",
+        ]
+        .contains(&id)
+    {
+        1
+    } else if [
+        "binding:Settings",
+        "binding:ReloadConfig",
+        "binding:ToggleSidebar",
+    ]
+    .contains(&id)
+    {
+        5
+    } else {
+        6
+    }
+}
+
+fn navigation(item: &ClientPaletteItem) -> bool {
+    matches!(
+        item.action,
+        ClientPaletteAction::Category(_) | ClientPaletteAction::Search | ClientPaletteAction::Back
+    )
+}
+
 /// Command palette overlay state: the item index is built once at open and
 /// `recent_ids` snapshots the MRU so ordering stays stable while open.
 #[derive(Debug)]
 pub(super) struct ClientCommandPaletteOverlay {
+    pub(super) view: BrowserView,
+    pub(super) reveal: bool,
+    pub(super) focus: super::page::PageFocus,
     pub(super) query: TextEditor,
     pub(super) selected: usize,
     pub(super) scroll: usize,
     pub(super) items: Vec<ClientPaletteItem>,
     pub(super) recent_ids: Vec<String>,
+    pub(super) aliases: HashMap<String, String>,
 }
 
 /// One filtered row: the item plus fuzzy-match character positions in its
@@ -67,16 +134,22 @@ pub(super) fn fuzzy_match(query: &str, text: &str) -> Option<(i64, Vec<usize>)> 
         return Some((0, Vec::new()));
     }
     let text_chars: Vec<char> = text.chars().collect();
-    let lowered: Vec<char> = text_chars.iter().flat_map(|c| c.to_lowercase()).collect();
+    let lowered: Vec<(usize, char)> = text_chars
+        .iter()
+        .enumerate()
+        .flat_map(|(index, c)| c.to_lowercase().map(move |ch| (index, ch)))
+        .collect();
     let mut query_index = 0;
     let mut indices = Vec::with_capacity(query_chars.len());
     let mut score = 0i64;
     let mut previous_match = None;
-    for (text_index, ch) in lowered.iter().enumerate() {
-        if query_index >= query_chars.len() || *ch != query_chars[query_index] {
+    for &(text_index, ch) in &lowered {
+        if query_index >= query_chars.len() || ch != query_chars[query_index] {
             continue;
         }
-        indices.push(text_index);
+        if indices.last() != Some(&text_index) {
+            indices.push(text_index);
+        }
         score += 1;
         if previous_match == text_index.checked_sub(1) {
             score += 8;
@@ -99,21 +172,38 @@ pub(super) fn fuzzy_match(query: &str, text: &str) -> Option<(i64, Vec<usize>)> 
 pub(super) fn palette_rows(palette: &ClientCommandPaletteOverlay) -> Vec<ClientPaletteRow<'_>> {
     let query = palette.query.as_str().trim();
     if query.is_empty() {
-        let mut rows = Vec::with_capacity(palette.items.len());
+        let mut rows = Vec::new();
         let mut seen = std::collections::HashSet::new();
-        for id in &palette.recent_ids {
-            if let Some(item) = palette.items.iter().find(|item| &item.id == id) {
-                if seen.insert(item.id.as_str()) {
-                    rows.push(ClientPaletteRow {
-                        item,
-                        match_indices: Vec::new(),
-                        recent: true,
-                    });
+        if !matches!(palette.view, BrowserView::Menu(Some(_))) {
+            for id in palette.recent_ids.iter().take(PALETTE_RECENT_LIMIT) {
+                if let Some(item) = palette
+                    .items
+                    .iter()
+                    .find(|item| &item.id == id && !navigation(item))
+                {
+                    if seen.insert(item.id.as_str()) {
+                        rows.push(ClientPaletteRow {
+                            item,
+                            match_indices: Vec::new(),
+                            recent: true,
+                        });
+                    }
                 }
             }
         }
         for item in &palette.items {
-            if seen.insert(item.id.as_str()) {
+            let show = match palette.view {
+                BrowserView::Search => !navigation(item),
+                BrowserView::Menu(None) => matches!(
+                    item.action,
+                    ClientPaletteAction::Category(_) | ClientPaletteAction::Search
+                ),
+                BrowserView::Menu(Some(group)) => {
+                    (!navigation(item) && category(item) == group)
+                        || matches!(item.action, ClientPaletteAction::Back)
+                }
+            };
+            if show && seen.insert(item.id.as_str()) {
                 rows.push(ClientPaletteRow {
                     item,
                     match_indices: Vec::new(),
@@ -128,17 +218,35 @@ pub(super) fn palette_rows(palette: &ClientCommandPaletteOverlay) -> Vec<ClientP
         .iter()
         .enumerate()
         .filter_map(|(index, item)| {
-            fuzzy_match(query, &item.title).map(|(score, indices)| {
-                (
-                    score,
-                    index,
-                    ClientPaletteRow {
-                        item,
-                        match_indices: indices,
-                        recent: false,
-                    },
-                )
-            })
+            if navigation(item) {
+                return None;
+            }
+            let aliases = format!(
+                "{} {} {} {} {}",
+                item.id,
+                item.subtitle,
+                palette
+                    .aliases
+                    .get(&item.id)
+                    .map(String::as_str)
+                    .unwrap_or_default(),
+                crate::i18n::en::TEXTS.global_menu.categories[category(item)],
+                crate::i18n::zh_cn::TEXTS.global_menu.categories[category(item)]
+            );
+            fuzzy_match(query, &item.title)
+                .map(|(score, indices)| (score + 50, indices))
+                .or_else(|| fuzzy_match(query, &aliases).map(|(score, _)| (score, Vec::new())))
+                .map(|(score, indices)| {
+                    (
+                        score,
+                        index,
+                        ClientPaletteRow {
+                            item,
+                            match_indices: indices,
+                            recent: false,
+                        },
+                    )
+                })
         })
         .collect::<Vec<_>>();
     scored.sort_by(
@@ -154,9 +262,12 @@ pub(super) fn palette_rows(palette: &ClientCommandPaletteOverlay) -> Vec<ClientP
         .collect::<Vec<_>>()
 }
 
-fn palette_binding_items(items: &mut Vec<ClientPaletteItem>, keybinds: &crate::config::Keybinds) {
+fn palette_binding_items(
+    items: &mut Vec<ClientPaletteItem>,
+    keybinds: &crate::config::Keybinds,
+    t: &crate::i18n::Texts,
+) {
     use crate::input::KeybindAction;
-    let t = &crate::i18n::texts();
     let global_menu = &t.global_menu;
     let keybind_texts = &t.keybinds;
     fn push(
@@ -490,7 +601,11 @@ impl ClientShellState {
                 });
             }
         }
-        palette_binding_items(&mut items, &self.config.keybinds.keybinds);
+        palette_binding_items(
+            &mut items,
+            &self.config.keybinds.keybinds,
+            crate::i18n::texts(),
+        );
         if let Some(snapshot) = self.snapshot.as_deref() {
             if snapshot.integration_updates_available {
                 if let Some(item) = items.iter_mut().find(|item| item.id == "binding:Settings") {
@@ -498,14 +613,7 @@ impl ClientShellState {
                 }
             }
         }
-        for (index, command) in self
-            .config
-            .keybinds
-            .keybinds
-            .custom_commands
-            .iter()
-            .enumerate()
-        {
+        for command in self.config.keybinds.keybinds.custom_commands.iter() {
             items.push(ClientPaletteItem {
                 id: format!("command:{}", command.command),
                 title: command
@@ -514,7 +622,7 @@ impl ClientShellState {
                     .unwrap_or_else(|| command.command.clone()),
                 subtitle: command.label.clone(),
                 badge: false,
-                action: ClientPaletteAction::CustomCommand(index),
+                action: ClientPaletteAction::CustomCommand(command.clone()),
             });
         }
         let global_menu = &crate::i18n::texts().global_menu;
@@ -602,25 +710,141 @@ impl ClientShellState {
                 action: ClientPaletteAction::MachineEdit(profile.id.clone()),
             });
         }
+        for (id, title, page) in [
+            (
+                "monitor",
+                super::observability::tr("System monitor", "系统监控"),
+                super::observability::Page::Monitor,
+            ),
+            (
+                "accounts",
+                super::observability::tr("Account usage", "账号用量"),
+                super::observability::Page::Accounts,
+            ),
+            (
+                "settings",
+                super::observability::tr("Monitor settings", "监控设置"),
+                super::observability::Page::Settings,
+            ),
+        ] {
+            items.push(ClientPaletteItem {
+                id: format!("observation:{id}"),
+                title: title.into(),
+                subtitle: String::new(),
+                badge: false,
+                action: ClientPaletteAction::Observation(page),
+            });
+        }
+        items.push(ClientPaletteItem {
+            id: "layout".into(),
+            title: super::observability::tr("Arrange panels", "调整面板布局").into(),
+            subtitle: String::new(),
+            badge: false,
+            action: ClientPaletteAction::Arrange,
+        });
+        for (index, title) in global_menu.categories.iter().enumerate() {
+            let count = items.iter().filter(|item| category(item) == index).count();
+            let badge = items
+                .iter()
+                .any(|item| category(item) == index && item.badge);
+            items.push(ClientPaletteItem {
+                id: format!("category:{index}"),
+                title: title.to_string(),
+                subtitle: format!("{count}  ›"),
+                badge,
+                action: ClientPaletteAction::Category(index),
+            });
+        }
+        for (id, title, action) in [
+            (
+                "search",
+                global_menu.command_search,
+                ClientPaletteAction::Search,
+            ),
+            ("back", global_menu.back, ClientPaletteAction::Back),
+        ] {
+            items.push(ClientPaletteItem {
+                id: id.into(),
+                title: title.into(),
+                subtitle: if id == "search" {
+                    self.config
+                        .keybinds
+                        .keybinds
+                        .command_search
+                        .label()
+                        .unwrap_or_default()
+                } else {
+                    String::new()
+                },
+                badge: false,
+                action,
+            });
+        }
         items
     }
 
     pub(super) fn toggle_global_menu(&mut self) {
         if matches!(self.overlay, Some(ClientShellOverlay::CommandPalette(_))) {
-            self.overlay = None;
+            self.close_command_browser();
         } else {
-            let items = self.build_palette_items();
-            let recent_ids = self.palette_recent.clone();
-            self.overlay = Some(ClientShellOverlay::CommandPalette(
-                ClientCommandPaletteOverlay {
-                    query: TextEditor::default(),
-                    selected: 0,
-                    scroll: 0,
-                    items,
-                    recent_ids,
-                },
-            ));
+            self.open_command_browser(BrowserView::Menu(None));
         }
+    }
+
+    pub(super) fn open_command_search(&mut self) {
+        self.open_command_browser(BrowserView::Search);
+    }
+
+    fn open_command_browser(&mut self, view: BrowserView) {
+        self.cancel_frozen_selection();
+        if !matches!(self.overlay, Some(ClientShellOverlay::CommandPalette(_))) {
+            self.browser_return = self.overlay.take().map(Box::new);
+        }
+        let mut aliases = HashMap::<String, String>::new();
+        for texts in [&crate::i18n::en::TEXTS, &crate::i18n::zh_cn::TEXTS] {
+            let mut translated = Vec::new();
+            palette_binding_items(&mut translated, &self.config.keybinds.keybinds, texts);
+            for item in translated {
+                let entry = aliases.entry(item.id).or_default();
+                entry.push(' ');
+                entry.push_str(&item.title);
+            }
+        }
+        self.overlay = Some(ClientShellOverlay::CommandPalette(
+            ClientCommandPaletteOverlay {
+                focus: if view == BrowserView::Search {
+                    super::page::PageFocus::Search
+                } else {
+                    super::page::PageFocus::Navigation
+                },
+                view,
+                aliases,
+                reveal: true,
+                query: TextEditor::default(),
+                selected: 0,
+                scroll: 0,
+                items: self.build_palette_items(),
+                recent_ids: self.palette_recent.clone(),
+            },
+        ));
+    }
+
+    pub(super) fn close_command_browser(&mut self) {
+        self.overlay = self.browser_return.take().map(|page| *page);
+    }
+
+    pub(super) fn browser_back(&mut self) {
+        if let Some(ClientShellOverlay::CommandPalette(palette)) = self.overlay.as_mut() {
+            if matches!(palette.view, BrowserView::Menu(Some(_))) {
+                palette.view = BrowserView::Menu(None);
+                palette.query = TextEditor::default();
+                palette.selected = 0;
+                palette.scroll = 0;
+                palette.reveal = true;
+                return;
+            }
+        }
+        self.close_command_browser();
     }
 
     pub(super) fn move_palette_selection(&mut self, delta: isize) {
@@ -636,6 +860,7 @@ impl ClientShellState {
             palette.scroll = 0;
             return;
         }
+        palette.reveal = true;
         palette.selected =
             (palette.selected as isize + delta).clamp(0, count.saturating_sub(1) as isize) as usize;
     }
@@ -653,6 +878,7 @@ impl ClientShellState {
         let Some(ClientShellOverlay::CommandPalette(palette)) = self.overlay.as_mut() else {
             return;
         };
+        palette.reveal = false;
         palette.scroll = palette.scroll.saturating_add_signed(delta);
     }
 
@@ -667,7 +893,24 @@ impl ClientShellState {
             };
             (row.item.id.clone(), row.item.action.clone())
         };
-        self.overlay = None;
+        if let Some(ClientShellOverlay::CommandPalette(palette)) = self.overlay.as_mut() {
+            let next = match action {
+                ClientPaletteAction::Category(index) => Some(BrowserView::Menu(Some(index))),
+                ClientPaletteAction::Search => Some(BrowserView::Search),
+                ClientPaletteAction::Back => Some(BrowserView::Menu(None)),
+                _ => None,
+            };
+            if let Some(view) = next {
+                palette.view = view;
+                palette.selected = 0;
+                palette.scroll = 0;
+                palette.reveal = true;
+                palette.query = TextEditor::default();
+                outcome.repaint = true;
+                return;
+            }
+        }
+        self.close_command_browser();
         self.palette_recent.retain(|entry| entry != &id);
         self.palette_recent.insert(0, id);
         self.palette_recent.truncate(PALETTE_RECENT_LIMIT);
@@ -676,18 +919,16 @@ impl ClientShellState {
             ClientPaletteAction::Binding(action) => {
                 self.record_binding(crate::input::KeybindMatch::Action(action), outcome)
             }
-            ClientPaletteAction::CustomCommand(index) => {
-                if let Some(command) = self
-                    .config
-                    .keybinds
-                    .keybinds
-                    .custom_commands
-                    .get(index)
-                    .cloned()
-                {
-                    self.record_binding(crate::input::KeybindMatch::Command(command), outcome);
-                }
+            ClientPaletteAction::CustomCommand(command) => {
+                self.record_binding(crate::input::KeybindMatch::Command(command), outcome);
             }
+            ClientPaletteAction::Observation(page) => self.open_observation_page(page, outcome),
+            ClientPaletteAction::Arrange => {
+                self.workbench.arranging = true;
+            }
+            ClientPaletteAction::Category(_)
+            | ClientPaletteAction::Search
+            | ClientPaletteAction::Back => {}
             ClientPaletteAction::Notifications => self.open_notification_history(),
             ClientPaletteAction::WhatsNew => self.open_release_notes(),
             ClientPaletteAction::MachineConnect(profile_id) => {
@@ -718,183 +959,230 @@ pub(crate) fn render_command_palette(
     palette: &ClientCommandPaletteOverlay,
     cx: &ChromeContext<'_>,
 ) -> Option<OverlayRender> {
+    use super::page::{list_start, PageLayout};
     let p = cx.palette;
     let t = &crate::i18n::texts().global_menu;
-    let (outer, inner) = modal_panel(b, crate::ui::ModalSize::Large, p.accent, cx)?;
-    if inner.width < 16 || inner.height < 6 {
-        return Some(OverlayRender {
-            area: outer,
-            ..OverlayRender::default()
-        });
-    }
     let rows = palette_rows(palette);
-    let cursor = render_search_bar(
+    let menu_height = match palette.view {
+        BrowserView::Menu(_) if palette.query.as_str().is_empty() => {
+            (rows.len().saturating_add(6).min(22)) as u16
+        }
+        _ => 22,
+    };
+    let (outer, inner) = modal_panel(
         b,
-        Rect::new(inner.x, inner.y, inner.width, 1),
-        &SearchBar {
-            focused: true,
-            query: &palette.query,
-            hint: t.search_hint,
-            status: None,
-            echo_query: false,
-            count: Some(format!("{}", rows.len())),
-        },
-        p,
-    );
+        crate::ui::ModalSize::Large.with_height(menu_height),
+        p.accent,
+        cx,
+    )?;
+    let searching = palette.view == BrowserView::Search || !palette.query.as_str().is_empty();
+    let layout = PageLayout::new(inner, 0, searching, false);
+    let title = match palette.view {
+        BrowserView::Search => t.command_search,
+        BrowserView::Menu(None) => t.main_menu,
+        BrowserView::Menu(Some(group)) => t.categories[group],
+    };
     put_text(
         b,
-        inner.x,
-        inner.y.saturating_add(1),
-        inner.width,
-        &"─".repeat(usize::from(inner.width)),
-        Style::default().fg(p.surface1).bg(p.panel_bg),
+        layout.header.x,
+        layout.header.y,
+        layout.header.width,
+        title,
+        Style::default().fg(p.accent).add_modifier(Modifier::BOLD),
     );
-    let body = Rect::new(
-        inner.x,
-        inner.y.saturating_add(2),
-        inner.width,
-        inner.height.saturating_sub(3),
+    let cursor = if searching {
+        render_search_bar(
+            b,
+            layout.search,
+            &SearchBar {
+                focused: palette.focus == super::page::PageFocus::Search || searching,
+                query: &palette.query,
+                hint: t.search_hint,
+                status: None,
+                echo_query: false,
+                count: Some(rows.len().to_string()),
+            },
+            p,
+        )
+    } else {
+        None
+    };
+    let body = layout.content;
+    let mut visual = Vec::new();
+    let has_recent = rows.first().is_some_and(|row| row.recent);
+    for (index, row) in rows.iter().enumerate() {
+        if (index == 0 && row.recent) || (index > 0 && rows[index - 1].recent && !row.recent) {
+            visual.push(None);
+        }
+        visual.push(Some(index));
+    }
+    let selected = palette.selected.min(rows.len().saturating_sub(1));
+    let selected_line = visual
+        .iter()
+        .position(|entry| *entry == Some(selected))
+        .unwrap_or(0);
+    let scroll = list_start(
+        palette.scroll,
+        selected_line,
+        visual.len(),
+        usize::from(body.height),
+        palette.reveal,
     );
     let mut row_hits = Vec::new();
     if rows.is_empty() {
-        if !body.is_empty() {
-            put_text(
-                b,
-                body.x,
-                body.y,
-                body.width,
-                t.no_matches,
-                Style::default().fg(p.overlay0).bg(p.panel_bg),
-            );
-        }
-    } else {
-        let viewport = usize::from(body.height.max(1));
-        let selected = palette.selected.min(rows.len().saturating_sub(1));
-        let max_scroll = rows.len().saturating_sub(viewport);
-        let scroll = palette
-            .scroll
-            .max(selected.saturating_sub(viewport.saturating_sub(1)))
-            .min(selected)
-            .min(max_scroll);
-        let recent_marker = format!("{} ", t.recent);
-        for (row_offset, index) in (scroll..rows.len()).take(viewport).enumerate() {
-            let Some(row) = rows.get(index) else {
-                break;
-            };
-            let rect = Rect::new(
-                body.x,
-                body.y.saturating_add(row_offset as u16),
-                body.width,
-                1,
-            );
-            let is_selected = index == selected;
-            let style = if is_selected {
-                Style::default()
-                    .fg(panel_contrast_fg(p))
-                    .bg(p.accent)
-                    .add_modifier(Modifier::BOLD)
-            } else {
-                Style::default().fg(p.text).bg(p.panel_bg)
-            };
-            b.set_style(rect, style);
-            let marker = if row.recent {
-                recent_marker.as_str()
-            } else {
-                "  "
-            };
-            let marker_width = display_width(marker);
+        put_text(
+            b,
+            body.x,
+            body.y,
+            body.width,
+            t.no_matches,
+            Style::default().fg(p.overlay0),
+        );
+    }
+    for (offset, visual_index) in (scroll..visual.len())
+        .take(usize::from(body.height))
+        .enumerate()
+    {
+        let rect = Rect::new(
+            body.x,
+            body.y + offset as u16,
+            body.width.saturating_sub(1),
+            1,
+        );
+        let Some(index) = visual[visual_index] else {
             put_text(
                 b,
                 rect.x,
                 rect.y,
-                marker_width.min(rect.width),
-                marker,
-                style,
+                rect.width,
+                if visual_index == 0 && has_recent {
+                    t.recent
+                } else {
+                    title
+                },
+                Style::default().fg(p.overlay0).add_modifier(Modifier::BOLD),
             );
-            let title_x = rect.x.saturating_add(marker_width);
-            let subtitle_width = if row.item.subtitle.is_empty() {
-                0
+            continue;
+        };
+        let row = &rows[index];
+        let chosen = index == selected;
+        let style = if chosen {
+            Style::default()
+                .fg(panel_contrast_fg(p))
+                .bg(p.accent)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(p.text).bg(p.panel_bg)
+        };
+        b.set_style(rect, style);
+        let marker_width = 2.min(rect.width);
+        put_text(
+            b,
+            rect.x,
+            rect.y,
+            marker_width,
+            if chosen { "› " } else { "  " },
+            style,
+        );
+        let badge_width = if row.item.badge { 2 } else { 0 };
+        let available = rect.width.saturating_sub(marker_width + badge_width);
+        let subtitle_width = if available < 28 || row.item.subtitle.is_empty() {
+            0
+        } else {
+            display_width(&row.item.subtitle)
+                .saturating_add(1)
+                .min(available / 2)
+        };
+        let title_width = available.saturating_sub(subtitle_width);
+        let mut x = rect.x + marker_width;
+        let mut used = 0;
+        use unicode_segmentation::UnicodeSegmentation;
+        let mut char_index = 0;
+        for grapheme in row.item.title.graphemes(true) {
+            let width = display_width(grapheme);
+            if used + width > title_width {
+                break;
+            }
+            let end = char_index + grapheme.chars().count();
+            let matched = row
+                .match_indices
+                .iter()
+                .any(|index| *index >= char_index && *index < end);
+            let emphasis = if !chosen && matched {
+                style.fg(p.mauve).add_modifier(Modifier::BOLD)
             } else {
-                display_width(&row.item.subtitle).saturating_add(2)
+                style
             };
-            let badge_width = u16::from(row.item.badge) * 2;
-            let title_width = rect
-                .width
-                .saturating_sub(marker_width + subtitle_width + badge_width);
-            let mut title_used = 0u16;
-            let mut title_x = title_x;
-            for (char_index, ch) in row.item.title.chars().enumerate() {
-                let ch_width =
-                    u16::try_from(unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0))
-                        .unwrap_or(u16::MAX);
-                if title_used.saturating_add(ch_width) > title_width {
-                    break;
-                }
-                let matched = row.match_indices.contains(&char_index);
-                let ch_style = if matched && !is_selected {
-                    style.fg(p.mauve).add_modifier(Modifier::BOLD)
-                } else {
-                    style
-                };
-                put_text(b, title_x, rect.y, ch_width, &ch.to_string(), ch_style);
-                title_x = title_x.saturating_add(ch_width);
-                title_used = title_used.saturating_add(ch_width);
-            }
-            if row.item.badge {
-                let badge_style = if is_selected {
-                    style
-                } else {
-                    Style::default()
-                        .fg(p.accent)
-                        .bg(p.panel_bg)
-                        .add_modifier(Modifier::BOLD)
-                };
-                put_text(
-                    b,
-                    rect.right().saturating_sub(badge_width),
-                    rect.y,
-                    badge_width,
-                    " ●",
-                    badge_style,
-                );
-            }
-            if subtitle_width > 0 {
-                let subtitle_rect = Rect::new(
-                    rect.right()
-                        .saturating_sub(subtitle_width.saturating_add(badge_width)),
-                    rect.y,
-                    subtitle_width,
-                    1,
-                );
-                put_right_text(
-                    b,
-                    subtitle_rect,
-                    rect.y,
-                    &row.item.subtitle,
-                    if is_selected {
-                        style
-                    } else {
-                        Style::default().fg(p.overlay0).bg(p.panel_bg)
-                    },
-                );
-            }
-            row_hits.push((rect, index));
+            put_text(b, x, rect.y, width, grapheme, emphasis);
+            char_index = end;
+            x += width;
+            used += width;
         }
+        if subtitle_width > 0 {
+            let subtitle = Rect::new(
+                rect.right() - badge_width - subtitle_width,
+                rect.y,
+                subtitle_width,
+                1,
+            );
+            put_right_text(
+                b,
+                subtitle,
+                rect.y,
+                &row.item.subtitle,
+                if chosen { style } else { style.fg(p.overlay0) },
+            );
+        }
+        if row.item.badge {
+            put_text(
+                b,
+                rect.right().saturating_sub(2),
+                rect.y,
+                2,
+                " ●",
+                if chosen { style } else { style.fg(p.accent) },
+            );
+        }
+        row_hits.push((rect, index));
     }
-    let footer = Rect::new(inner.x, inner.bottom().saturating_sub(1), inner.width, 1);
+    if visual.len() > usize::from(body.height) && body.width > 0 && body.height > 0 {
+        let y = body.y
+            + ((scroll * usize::from(body.height)) / visual.len()).min(usize::from(body.height - 1))
+                as u16;
+        put_text(
+            b,
+            body.right() - 1,
+            y,
+            1,
+            "┃",
+            Style::default().fg(p.accent),
+        );
+    }
     render_key_hints(
         b,
-        footer,
+        layout.footer,
         &[
-            ("enter".to_owned(), t.footer_run.to_owned()),
-            ("↑↓".to_owned(), t.footer_select.to_owned()),
-            ("esc".to_owned(), t.footer_close.to_owned()),
+            ("enter".into(), t.footer_run.into()),
+            ("↑↓".into(), t.footer_select.into()),
+            ("/".into(), t.command_search.into()),
+            (
+                "esc".into(),
+                if matches!(palette.view, BrowserView::Menu(Some(_))) {
+                    t.back
+                } else {
+                    t.footer_close
+                }
+                .into(),
+            ),
         ],
         p,
         cx.components,
     );
     Some(OverlayRender {
         area: outer,
+        menu_popup: outer,
+        menu_search: layout.search,
+        menu_scroll: scroll,
         menu_rows: row_hits,
         cursor,
         ..OverlayRender::default()

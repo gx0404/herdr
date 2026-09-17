@@ -8,6 +8,7 @@ mod fs;
 mod host;
 mod known_hosts;
 mod process;
+pub(crate) use process::TaskCancellation;
 mod profile;
 mod restart_policy;
 mod saved;

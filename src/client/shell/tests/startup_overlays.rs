@@ -698,7 +698,7 @@ fn update_ready_menu_opens_client_owned_release_notes_and_dismisses_by_version()
     assert!(!prefix_text.replace(' ', "").contains("更新就绪"));
     state.mode = ClientShellMode::Navigate;
 
-    state.toggle_global_menu();
+    state.open_command_search();
     // Move the selection off the update row so its badge keeps accent color.
     state.move_palette_selection(1);
     let menu = state.compose(106, 30).expect("update menu");
@@ -886,7 +886,7 @@ fn update_ready_menu_opens_client_owned_release_notes_and_dismisses_by_version()
     state.set_pane_surface(installed_surface);
     state.compose(106, 30).expect("installed shell");
     assert_eq!(state.hits.global_launcher.width, 4);
-    state.toggle_global_menu();
+    state.open_command_search();
     let installed = state.compose(106, 30).expect("installed menu");
     let installed_text = installed
         .cells
@@ -915,7 +915,7 @@ fn coalesced_release_notes_open_and_scroll_uses_current_geometry() {
     state.set_snapshot(Box::new(endpoint_snapshot));
     state.set_pane_surface(surface());
     state.compose(106, 30).expect("initial shell");
-    state.toggle_global_menu();
+    state.open_command_search();
     palette_select(&mut state, "whats_new");
 
     state.handle_raw_events(vec![
@@ -985,7 +985,7 @@ fn coalesced_release_notes_open_and_mouse_uses_current_geometry() {
         1,
     ));
 
-    state.toggle_global_menu();
+    state.open_command_search();
     palette_select(&mut state, "whats_new");
     state.handle_raw_events(vec![
         RawInputEvent::Key(crate::input::TerminalKey::new(
@@ -1006,7 +1006,7 @@ fn coalesced_release_notes_open_and_mouse_uses_current_geometry() {
         )) if scroll > 0
     ));
 
-    state.toggle_global_menu();
+    state.open_command_search();
     palette_select(&mut state, "whats_new");
     let closed = state.handle_raw_events(vec![
         RawInputEvent::Key(crate::input::TerminalKey::new(
@@ -1044,7 +1044,7 @@ fn outdated_integration_badges_launcher_settings_and_settings_tab() {
         .collect::<String>();
     assert!(shell_text.replace(' ', "").contains("●菜单"));
 
-    state.toggle_global_menu();
+    state.open_command_search();
     // Move the selection off the settings row so its badge keeps accent color.
     state.move_palette_selection(1);
     let menu = state.compose(106, 30).expect("integration attention menu");
@@ -1118,7 +1118,7 @@ fn combined_update_and_integration_attention_preserves_both_badges() {
     state.compose(106, 30).expect("combined attention shell");
     assert_eq!(state.hits.global_launcher.width, 6);
 
-    state.toggle_global_menu();
+    state.open_command_search();
     // Move the selection away so both badges keep accent color.
     state.move_palette_selection(2);
     let menu = state.compose(106, 30).expect("combined attention menu");
@@ -1158,7 +1158,7 @@ fn current_release_notes_use_whats_new_without_attention_badge() {
     state.set_pane_surface(surface());
     state.compose(106, 30).expect("shell frame");
     assert_eq!(state.hits.global_launcher.width, 4);
-    state.toggle_global_menu();
+    state.open_command_search();
     let menu = state.compose(106, 30).expect("what's new menu");
     let text = menu
         .cells
@@ -1217,7 +1217,7 @@ fn client_settings_preview_restore_and_endpoint_integrations_are_owned_by_overla
     let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
     state.set_snapshot(Box::new(snapshot()));
     state.set_pane_surface(surface());
-    state.toggle_global_menu();
+    state.open_command_search();
     palette_select(&mut state, "binding:Settings");
     let open = state.handle_input_bytes(b"\r");
     assert!(open.actions.is_empty());

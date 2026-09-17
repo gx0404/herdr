@@ -15,7 +15,7 @@ use std::collections::BTreeMap;
 use std::fs::{self, File};
 use std::io::{self, IsTerminal, Read as _, Write as _};
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Output, Stdio};
+use std::process::{Command, Output, Stdio};
 
 use interprocess::local_socket::traits::Listener as _;
 #[cfg(all(test, unix))]
@@ -199,6 +199,22 @@ pub(crate) fn prepare_saved_ssh_unattended(
             profile_options.and_then(|options| options.identity_file.first().cloned()),
         )
     })
+}
+
+pub(super) fn prepare_approved_saved_ssh(
+    ssh: &RemoteSsh,
+    session: &str,
+    progress: &dyn Fn(SavedSshBootstrapStep),
+) -> io::Result<()> {
+    super::process::check_cancelled()?;
+    prepare_saved_ssh_with(
+        ssh,
+        session,
+        PrepareContext {
+            approval: InstallApproval::PreApproved,
+            progress: Some(progress),
+        },
+    )
 }
 
 fn prepare_saved_ssh_with(
@@ -636,6 +652,7 @@ pub(super) struct PreparedRemoteHerdr {
 #[derive(Clone)]
 pub(super) struct ManagedSshOptions {
     config_path: PathBuf,
+    pinned_known_hosts: Option<PathBuf>,
     /// Multiplexing control socket of the managed config. Callers with
     /// long-lived independent children (saved bridges, port forwards) clear
     /// it so their processes never share a control master.
@@ -766,6 +783,36 @@ impl RemoteSsh {
         ssh
     }
 
+    pub(super) fn pin_host_key(
+        &mut self,
+        target: &super::known_hosts::EffectiveHostKeyTarget,
+        key: &super::known_hosts::KnownHostKey,
+    ) -> io::Result<()> {
+        if self.managed_config.is_none() {
+            self.managed_config = Some(write_managed_ssh_config(self.profile_options.as_ref())?);
+        }
+        let config = self
+            .managed_config
+            .as_mut()
+            .ok_or_else(|| io::Error::other("无法创建临时信任配置"))?;
+        let path = config
+            .options
+            .config_path
+            .parent()
+            .ok_or_else(|| io::Error::other("临时配置缺少目录"))?
+            .join("known_hosts");
+        let mut pinned = target.clone();
+        pinned.files = vec![path.clone()];
+        super::known_hosts::append_reviewed_key(&pinned, key)?;
+        config.options.pinned_known_hosts = Some(path);
+        config.options.control_path = None;
+        config.options.strict_host_key_checking = Some(StrictHostKeyChecking::Yes);
+        self.profile_options
+            .get_or_insert_with(ProfileSshOptions::default)
+            .strict_host_key_checking = Some(StrictHostKeyChecking::Yes);
+        Ok(())
+    }
+
     fn target(&self) -> &str {
         &self.target
     }
@@ -833,36 +880,42 @@ impl RemoteSsh {
     fn scp_command(&self) -> Command {
         let mut command = Command::new("scp");
         apply_managed_channel_options(&mut command, self.options());
+        if self.noninteractive {
+            let options = self.options();
+            apply_probe_ssh_options(
+                &mut command,
+                options.and_then(|options| options.server_alive_interval),
+                options.and_then(|options| options.server_alive_count_max),
+                self.profile_options
+                    .as_ref()
+                    .and_then(|options| options.strict_host_key_checking),
+                self.askpass.is_none(),
+            );
+            if let Some(askpass) = &self.askpass {
+                askpass.apply(&mut command);
+            }
+        }
         command
     }
 
     fn sh_output(&self, script: &str) -> io::Result<Output> {
         let script = posix_remote_output_command(script);
-        let mut child = self
-            .command()
+        let mut command = self.command();
+        command
             .arg("/bin/sh -s")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()?;
-
-        if !self.noninteractive {
-            return normalize_remote_output(output_with_forwarded_stderr(
+            .stderr(Stdio::piped());
+        let child = super::process::spawn(&mut command)?;
+        let output = if self.noninteractive {
+            super::process::copy_input(
                 child,
-                Some(script.as_bytes()),
-            )?);
-        }
-
-        let write_result = if let Some(mut stdin) = child.stdin.take() {
-            stdin.write_all(script.as_bytes())
+                io::Cursor::new(script.into_bytes()),
+                self.probe_timeout(),
+            )?
         } else {
-            Err(io::Error::new(
-                io::ErrorKind::BrokenPipe,
-                "ssh bootstrap stdin missing",
-            ))
+            output_with_forwarded_stderr(child, Some(script.as_bytes()))?
         };
-        let output = wait_with_output_timeout(child, self.probe_timeout())?;
-        write_result?;
         normalize_remote_output(output)
     }
 
@@ -876,9 +929,9 @@ impl RemoteSsh {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
         let output = if self.noninteractive {
-            wait_with_output_timeout(command.spawn()?, self.probe_timeout())
+            wait_with_output_timeout(super::process::spawn(&mut command)?, self.probe_timeout())
         } else {
-            output_with_forwarded_stderr(command.spawn()?, None)
+            output_with_forwarded_stderr(super::process::spawn(&mut command)?, None)
         }?;
         normalize_remote_output(output)
     }
@@ -902,30 +955,20 @@ impl RemoteSsh {
         }
         let (tmp_path, dest_path) = parse_remote_install_paths(&output.stdout)?;
 
-        let mut child = self
-            .command()
+        let mut command = self.command();
+        command
             .arg(remote_install_stream_command(&tmp_path))
             .stdin(Stdio::piped())
-            .stdout(Stdio::null())
-            .stderr(Stdio::inherit())
-            .spawn()
-            .map_err(|err| {
-                io::Error::new(err.kind(), format!("failed to start ssh install: {err}"))
-            })?;
-
-        let mut source = File::open(source_path)?;
-        let copy_result = if let Some(mut stdin) = child.stdin.take() {
-            io::copy(&mut source, &mut stdin).map(|_| ())
-        } else {
-            Err(io::Error::new(
-                io::ErrorKind::BrokenPipe,
-                "ssh install stdin missing",
-            ))
-        };
-        let status = child.wait()?;
-        copy_result?;
-
-        if status.success() {
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let source = File::open(source_path)?;
+        let output = super::process::copy_input(
+            super::process::spawn(&mut command)?,
+            source,
+            Duration::from_secs(300),
+        )?;
+        if output.status.success() {
+            super::process::check_cancelled()?;
             let output = self.sh_output(&remote_install_commit_script(&tmp_path, &dest_path))?;
             if output.status.success() {
                 Ok(())
@@ -933,23 +976,26 @@ impl RemoteSsh {
                 Err(command_failed("remote install commit failed", &output))
             }
         } else {
-            Err(io::Error::other(format!(
-                "remote install exited with {status}"
-            )))
+            Err(command_failed("远端安装上传失败", &output))
         }
     }
 
     fn copy_windows_file(&self, source_path: &Path, remote_path: &str) -> io::Result<()> {
-        let status = self
-            .scp_command()
+        let mut command = self.scp_command();
+        command
             .arg(source_path)
             .arg(windows_scp_target(&self.target, remote_path))
-            .status()
-            .map_err(|err| io::Error::new(err.kind(), format!("failed to start scp: {err}")))?;
-        if status.success() {
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let output = wait_with_output_timeout(
+            super::process::spawn(&mut command)?,
+            Duration::from_secs(300),
+        )?;
+        if output.status.success() {
             Ok(())
         } else {
-            Err(io::Error::other(format!("scp exited with {status}")))
+            Err(command_failed("SCP 上传失败", &output))
         }
     }
 
@@ -1022,7 +1068,10 @@ impl RemoteSsh {
 
 // Only interactive setup uses this relay. Background probes retain their
 // capture-only timeout path so SSH diagnostics cannot overwrite the active TUI.
-fn output_with_forwarded_stderr(mut child: Child, stdin: Option<&[u8]>) -> io::Result<Output> {
+fn output_with_forwarded_stderr(
+    mut child: super::process::TaskChild,
+    stdin: Option<&[u8]>,
+) -> io::Result<Output> {
     let mut child_stderr = child
         .stderr
         .take()
@@ -1058,7 +1107,7 @@ fn output_with_forwarded_stderr(mut child: Child, stdin: Option<&[u8]>) -> io::R
     } else {
         Ok(())
     };
-    let output_result = child.wait_with_output();
+    let output_result = wait_with_output_timeout(child, Duration::from_secs(300));
     let stderr_result = stderr_relay
         .join()
         .map_err(|_| io::Error::other("ssh stderr relay panicked"))?;
@@ -1258,9 +1307,15 @@ fn apply_probe_ssh_options(
     // authentication behavior: only the approved askpass retry drops it.
     let server_alive_interval = server_alive_interval.unwrap_or(15);
     let server_alive_count_max = server_alive_count_max.unwrap_or(4);
-    let host_key_policy = strict_host_key_checking
-        .map(StrictHostKeyChecking::as_noninteractive_ssh_value)
-        .unwrap_or("yes");
+    let host_key_policy = if batch_mode {
+        Some(
+            strict_host_key_checking
+                .map(StrictHostKeyChecking::as_noninteractive_ssh_value)
+                .unwrap_or("yes"),
+        )
+    } else {
+        strict_host_key_checking.map(StrictHostKeyChecking::as_ssh_value)
+    };
     if batch_mode {
         command
             .arg("-o")
@@ -1268,9 +1323,12 @@ fn apply_probe_ssh_options(
             .arg("-o")
             .arg("NumberOfPasswordPrompts=0");
     }
+    if let Some(policy) = host_key_policy {
+        command
+            .arg("-o")
+            .arg(format!("StrictHostKeyChecking={policy}"));
+    }
     command
-        .arg("-o")
-        .arg(format!("StrictHostKeyChecking={host_key_policy}"))
         .arg("-o")
         .arg("ConnectTimeout=10")
         .arg("-o")
@@ -1279,6 +1337,37 @@ fn apply_probe_ssh_options(
         .arg(format!("ServerAliveInterval={server_alive_interval}"))
         .arg("-o")
         .arg(format!("ServerAliveCountMax={server_alive_count_max}"));
+}
+
+fn apply_pinned_host_options(command: &mut Command, options: &ManagedSshOptions) {
+    if let Some(path) = &options.pinned_known_hosts {
+        command
+            .arg("-o")
+            .arg(format!(
+                "UserKnownHostsFile={}",
+                ssh_config_quote(&path.to_string_lossy())
+            ))
+            .args([
+                "-o",
+                "IgnoreUnknown=KnownHostsCommand",
+                "-o",
+                "GlobalKnownHostsFile=none",
+                "-o",
+                "StrictHostKeyChecking=yes",
+                "-o",
+                "ControlMaster=no",
+                "-o",
+                "ControlPath=none",
+                "-o",
+                "ControlPersist=no",
+                "-o",
+                "KnownHostsCommand=none",
+                "-o",
+                "VerifyHostKeyDNS=no",
+                "-o",
+                "UpdateHostKeys=no",
+            ]);
+    }
 }
 
 pub(super) fn apply_managed_ssh_options(
@@ -1290,6 +1379,7 @@ pub(super) fn apply_managed_ssh_options(
     };
 
     command.arg("-F").arg(&options.config_path);
+    apply_pinned_host_options(command, options);
     if let Some(control_path) = &options.control_path {
         command
             .arg("-S")
@@ -1312,6 +1402,7 @@ pub(super) fn apply_managed_channel_options(
     };
 
     command.arg("-F").arg(&options.config_path);
+    apply_pinned_host_options(command, options);
     if let Some(control_path) = &options.control_path {
         command
             .arg("-o")
@@ -2823,8 +2914,13 @@ impl SshStdioBridge {
         let thread_ssh_options = ssh_options.cloned();
         let thread_askpass = askpass.cloned();
         let (failure_tx, failure_rx) = mpsc::sync_channel(1);
+        let task_cancel = super::process::current_task();
         let thread = thread::spawn(move || {
-            while !thread_stop.load(Ordering::Acquire) {
+            while !thread_stop.load(Ordering::Acquire)
+                && !task_cancel
+                    .as_ref()
+                    .is_some_and(|cancel| cancel.is_cancelled())
+            {
                 match listener.accept() {
                     Ok(stream) => {
                         let stream = match prepare_remote_bridge_stream(stream) {
@@ -2837,15 +2933,23 @@ impl SshStdioBridge {
                                 continue;
                             }
                         };
-                        if let Err(err) = bridge_connection(
-                            stream,
-                            &target,
-                            &remote_command,
-                            thread_ssh_options.as_ref(),
-                            noninteractive,
-                            thread_askpass.as_ref(),
-                            &thread_stop,
-                        ) {
+                        let connect = || {
+                            bridge_connection(
+                                stream,
+                                &target,
+                                &remote_command,
+                                thread_ssh_options.as_ref(),
+                                noninteractive,
+                                thread_askpass.as_ref(),
+                                &thread_stop,
+                            )
+                        };
+                        let result = if let Some(cancel) = &task_cancel {
+                            cancel.run(connect)
+                        } else {
+                            connect()
+                        };
+                        if let Err(err) = result {
                             let _ =
                                 failure_tx.try_send(io::Error::new(err.kind(), err.to_string()));
                             if noninteractive {
@@ -2988,6 +3092,7 @@ pub(super) fn write_managed_ssh_config(
     Ok(ManagedSshConfig {
         options: ManagedSshOptions {
             config_path: path,
+            pinned_known_hosts: None,
             control_path,
             config_dir: Some(Arc::new(ManagedSshConfigDir { path: dir })),
             server_alive_interval: profile.and_then(|p| p.server_alive_interval),
@@ -3098,8 +3203,7 @@ fn bridge_connection(
             Stdio::inherit()
         });
 
-    let mut child = command
-        .spawn()
+    let mut child = super::process::spawn_owned(&mut command)
         .map_err(|err| io::Error::new(err.kind(), format!("failed to start ssh bridge: {err}")))?;
     let mut child_stdin = match child.stdin.take() {
         Some(stdin) => stdin,
@@ -3186,7 +3290,7 @@ fn bridge_connection(
                 break (Err(err), false);
             }
         }
-        if bridge_stop.load(Ordering::Acquire) {
+        if bridge_stop.load(Ordering::Acquire) || super::process::check_cancelled().is_err() {
             connection_stop.store(true, Ordering::Release);
             upload_stop.cancel();
             let _ = child.kill();
@@ -3210,6 +3314,7 @@ fn bridge_connection(
     if !child_exited {
         connection_stop.store(true, Ordering::Release);
     }
+    child.terminate();
     let upload_result = upload
         .join()
         .map_err(|_| io::Error::other("remote bridge upload worker panicked"))?;
@@ -3312,7 +3417,10 @@ fn discard_remote_output_preamble(reader: &mut impl io::BufRead) -> io::Result<(
     }
 }
 
-fn terminate_bridge_child(mut child: std::process::Child, message: &'static str) -> io::Result<()> {
+fn terminate_bridge_child(
+    mut child: super::process::TaskChild,
+    message: &'static str,
+) -> io::Result<()> {
     let _ = child.kill();
     let _ = child.wait();
     Err(io::Error::new(io::ErrorKind::BrokenPipe, message))
@@ -4189,13 +4297,15 @@ mod tests {
                 .any(|arg| arg.starts_with("NumberOfPasswordPrompts")),
             "{args:?}"
         );
-        for required in [
-            "StrictHostKeyChecking=yes",
-            "ConnectTimeout=10",
-            "ServerAliveInterval=30",
-        ] {
+        for required in ["ConnectTimeout=10", "ServerAliveInterval=30"] {
             assert!(args.iter().any(|arg| arg == required), "missing {required}");
         }
+        assert!(
+            !args
+                .iter()
+                .any(|arg| arg.starts_with("StrictHostKeyChecking=")),
+            "未指定交互策略时沿用用户 SSH 配置"
+        );
         let envs = command
             .get_envs()
             .map(|(key, _value)| key.to_string_lossy().into_owned())
@@ -4205,6 +4315,83 @@ mod tests {
                 envs.iter().any(|key| key == expected),
                 "missing env {expected}"
             );
+        }
+    }
+
+    #[test]
+    fn interactive_ssh_and_scp_share_host_policy_and_askpass() {
+        for (policy, expected) in [
+            (None, None),
+            (
+                Some(StrictHostKeyChecking::Ask),
+                Some("StrictHostKeyChecking=ask"),
+            ),
+            (
+                Some(StrictHostKeyChecking::Yes),
+                Some("StrictHostKeyChecking=yes"),
+            ),
+        ] {
+            let ssh = RemoteSsh::new_saved_with_askpass(
+                "example".into(),
+                "default".into(),
+                Some(ProfileSshOptions {
+                    strict_host_key_checking: policy,
+                    ..Default::default()
+                }),
+                AskpassEnvironment::for_test("/tmp/herdr".into(), "/tmp/askpass.sock".into()),
+            );
+            for command in [ssh.command(), ssh.scp_command()] {
+                let args = command
+                    .get_args()
+                    .map(|arg| arg.to_string_lossy().into_owned())
+                    .collect::<Vec<_>>();
+                assert_eq!(
+                    args.iter()
+                        .find(|arg| arg.starts_with("StrictHostKeyChecking="))
+                        .map(String::as_str),
+                    expected
+                );
+                assert!(!args.iter().any(|arg| arg == "BatchMode=yes"));
+                assert!(command
+                    .get_envs()
+                    .any(|(key, _)| key == "SSH_ASKPASS_REQUIRE"));
+            }
+        }
+    }
+
+    #[test]
+    fn pinned_host_options_apply_to_both_ssh_and_scp() {
+        let mut config = write_managed_ssh_config(None).unwrap();
+        config.options.pinned_known_hosts =
+            Some(config.options.config_path.with_file_name("reviewed_hosts"));
+        config.options.control_path = None;
+        for channel in [false, true] {
+            let mut command = Command::new(if channel { "scp" } else { "ssh" });
+            if channel {
+                apply_managed_channel_options(&mut command, Some(&config.options));
+            } else {
+                apply_managed_ssh_options(&mut command, Some(&config.options));
+            }
+            let args = command
+                .get_args()
+                .map(|arg| arg.to_string_lossy().into_owned())
+                .collect::<Vec<_>>();
+            for expected in [
+                "StrictHostKeyChecking=yes",
+                "ControlMaster=no",
+                "ControlPath=none",
+                "ControlPersist=no",
+                "IgnoreUnknown=KnownHostsCommand",
+                "KnownHostsCommand=none",
+                "VerifyHostKeyDNS=no",
+                "UpdateHostKeys=no",
+                "GlobalKnownHostsFile=none",
+            ] {
+                assert!(args.iter().any(|arg| arg == expected), "{args:?}");
+            }
+            assert!(args
+                .iter()
+                .any(|arg| arg.starts_with("UserKnownHostsFile=")));
         }
     }
 

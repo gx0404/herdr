@@ -44,22 +44,25 @@ impl ClientShellState {
             && self.outer_focused != Some(false)
             && self.chrome_drag.is_none()
             && self.pane_mouse_gesture.is_none()
+            && self.selection_capture.is_none()
     }
 
     fn link_hover_target_current(&self, target: &LinkHoverTarget) -> bool {
         self.link_hover_allowed()
-            && self.pane_surface.as_ref().is_some_and(|surface| {
-                self.snapshot.as_ref().is_some_and(|snapshot| {
-                    surface.boot_id == snapshot.boot_id
-                        && surface.projection_revision == snapshot.revision
-                }) && surface.panes.iter().any(|pane| {
-                    pane.pane_id == target.pane_id
-                        && pane.inner_rect == target.source_rect
-                        && pane.content_revision == target.content_revision
-                        && pane.scroll.map(|scroll| scroll.offset_from_bottom)
-                            == target.offset_from_bottom
+            && self
+                .visible_surface_for_pane(&target.pane_id)
+                .is_some_and(|surface| {
+                    self.snapshot.as_ref().is_some_and(|snapshot| {
+                        surface.boot_id == snapshot.boot_id
+                            && surface.projection_revision == snapshot.revision
+                    }) && surface.panes.iter().any(|pane| {
+                        pane.pane_id == target.pane_id
+                            && pane.inner_rect == target.source_rect
+                            && pane.content_revision == target.content_revision
+                            && pane.scroll.map(|scroll| scroll.offset_from_bottom)
+                                == target.offset_from_bottom
+                    })
                 })
-            })
             && self
                 .hits
                 .panes
@@ -94,12 +97,15 @@ impl ClientShellState {
             outcome.repaint |= self.clear_link_hover();
             return;
         };
-        let Some(pane) = self.pane_surface.as_ref().and_then(|surface| {
-            surface
-                .panes
-                .iter()
-                .find(|pane| pane.pane_id == hit.pane_id)
-        }) else {
+        let Some(pane) = self
+            .visible_surface_for_pane(&hit.pane_id)
+            .and_then(|surface| {
+                surface
+                    .panes
+                    .iter()
+                    .find(|pane| pane.pane_id == hit.pane_id)
+            })
+        else {
             outcome.repaint |= self.clear_link_hover();
             return;
         };

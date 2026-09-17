@@ -348,7 +348,7 @@ impl RemoteFs {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
-        let mut child = command.spawn().map_err(|error| {
+        let mut child = super::process::spawn(&mut command).map_err(|error| {
             io::Error::new(
                 error.kind(),
                 format!("failed to start the sftp client: {error}"),

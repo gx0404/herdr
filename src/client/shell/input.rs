@@ -129,6 +129,15 @@ impl ClientShellState {
     }
 
     fn prepare_committed_text(&mut self, text: &str, outcome: &mut ClientShellInput) -> bool {
+        if self.observability.filtering_processes {
+            let remaining =
+                256usize.saturating_sub(self.observability.process_filter.chars().count());
+            self.observability
+                .process_filter
+                .extend(text.chars().filter(|ch| !ch.is_control()).take(remaining));
+            outcome.repaint = true;
+            return true;
+        }
         if !(self.mode == ClientShellMode::Navigate && self.workspace_preview_action_blocked())
             && self.insert_copy_search_text(text)
         {
@@ -136,6 +145,7 @@ impl ClientShellState {
             return true;
         }
         self.word_selection_gesture = None;
+        self.cancel_frozen_selection();
         if self.copy_or_terminal_mode() != ClientShellMode::Copy && self.selection.take().is_some()
         {
             self.stop_selection_autoscroll();
@@ -192,7 +202,7 @@ impl ClientShellState {
                             ClientPaneInputEvent::TextCommit(text),
                             &mut outcome,
                         );
-                    } else if !self.popup_pending {
+                    } else if self.overlay.is_some() || !self.popup_pending {
                         if self.insert_overlay_text(&text) {
                             outcome.repaint = true;
                         } else if self.overlay.is_none() && self.mode == ClientShellMode::Terminal {
@@ -226,7 +236,7 @@ impl ClientShellState {
                             ClientPaneInputEvent::Paste(text),
                             &mut outcome,
                         );
-                    } else if !self.popup_pending {
+                    } else if self.overlay.is_some() || !self.popup_pending {
                         if self.insert_overlay_text(&text) {
                             outcome.repaint = true;
                         } else if self.overlay.is_none() && self.mode == ClientShellMode::Terminal {
@@ -406,7 +416,7 @@ impl ClientShellState {
             crate::input::RepeatPlan::Forwarded(target) => {
                 let pane_blocked_by_popup = matches!(&target, ClientInputTarget::Pane(_))
                     && (self.popup_pending || self.popup_terminal_id.is_some());
-                if !pane_blocked_by_popup {
+                if self.overlay.is_none() && !pane_blocked_by_popup {
                     self.push_pane_key(target, key, outcome);
                 }
             }
@@ -545,7 +555,7 @@ impl ClientShellState {
         if let Some(target) = self.popup_input_target() {
             return Some(target);
         }
-        if self.popup_pending {
+        if self.popup_pending && self.overlay.is_none() {
             return None;
         }
         if self.link_hints.is_some() && self.overlay.is_none() {
@@ -558,6 +568,18 @@ impl ClientShellState {
         }
         if matches!(key.code, KeyCode::Modifier(_)) {
             return None;
+        }
+        if self.selection_capture.is_some() {
+            if is_retained_selection_copy_key(key) {
+                self.copy_frozen_selection(outcome);
+                outcome.repaint = true;
+                return None;
+            }
+            self.cancel_frozen_selection();
+            outcome.repaint = true;
+            if key.code == KeyCode::Esc {
+                return None;
+            }
         }
         self.word_selection_gesture = None;
         if self.mode != ClientShellMode::Copy
@@ -596,6 +618,9 @@ impl ClientShellState {
                 if crate::config::terminal_key_matches_combo(key, self.config.keybinds.prefix) {
                     self.mode = ClientShellMode::Prefix;
                     outcome.repaint = true;
+                    return None;
+                }
+                if self.workbench_key(key, outcome) || self.observation_key(key, outcome) {
                     return None;
                 }
                 self.focused_pane_id().map(ClientInputTarget::Pane)
@@ -992,6 +1017,16 @@ impl ClientShellState {
     }
 
     pub(super) fn focused_pane_id(&self) -> Option<String> {
+        if self.workbench.enabled {
+            let view = self.workbench.focused_view()?;
+            return view
+                .surface
+                .panes
+                .iter()
+                .find(|pane| pane.focused)
+                .or_else(|| view.surface.panes.first())
+                .map(|pane| pane.pane_id.clone());
+        }
         self.snapshot
             .as_deref()
             .and_then(|snapshot| snapshot.focused_pane_id.clone())
@@ -1030,6 +1065,9 @@ impl ClientShellState {
     }
 
     fn popup_input_target(&self) -> Option<ClientInputTarget> {
+        if self.overlay.is_some() {
+            return None;
+        }
         self.popup_terminal_id
             .as_ref()
             .map(|terminal_id| ClientInputTarget::Popup(terminal_id.clone()))

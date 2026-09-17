@@ -27,10 +27,25 @@ pub(super) struct ClientMachineFilesOverlay {
     /// In-flight operations (drives the loading line); the ticket of the
     /// latest one, so stale results are dropped.
     pub(super) pending: u64,
-    /// Remote path a `Read` result belongs to.
-    pub(super) pending_viewer_path: Option<String>,
+    requests: HashMap<u64, (FileRequest, crate::remote::TaskCancellation)>,
+    latest_read: Option<u64>,
     pub(super) message: Option<String>,
     pub(super) error: Option<String>,
+}
+
+impl Drop for ClientMachineFilesOverlay {
+    fn drop(&mut self) {
+        for (_, cancel) in self.requests.values() {
+            cancel.cancel();
+        }
+    }
+}
+
+#[derive(Debug)]
+enum FileRequest {
+    List { path: String },
+    Read { path: String },
+    Mutation,
 }
 
 #[derive(Debug)]
@@ -138,7 +153,8 @@ impl ClientShellState {
             search_focused: false,
             view: ClientMachineFilesView::List,
             pending: 0,
-            pending_viewer_path: None,
+            requests: HashMap::new(),
+            latest_read: None,
             message: None,
             error: None,
         };
@@ -149,6 +165,10 @@ impl ClientShellState {
     fn machine_files_overlay(&self) -> Option<&ClientMachineFilesOverlay> {
         match self.overlay.as_ref() {
             Some(ClientShellOverlay::MachineFiles(overlay)) => Some(overlay),
+            Some(ClientShellOverlay::CommandPalette(_)) => match self.browser_return.as_deref() {
+                Some(ClientShellOverlay::MachineFiles(overlay)) => Some(overlay),
+                _ => None,
+            },
             _ => None,
         }
     }
@@ -156,6 +176,11 @@ impl ClientShellState {
     fn machine_files_overlay_mut(&mut self) -> Option<&mut ClientMachineFilesOverlay> {
         match self.overlay.as_mut() {
             Some(ClientShellOverlay::MachineFiles(overlay)) => Some(overlay),
+            Some(ClientShellOverlay::CommandPalette(_)) => match self.browser_return.as_deref_mut()
+            {
+                Some(ClientShellOverlay::MachineFiles(overlay)) => Some(overlay),
+                _ => None,
+            },
             _ => None,
         }
     }
@@ -174,13 +199,48 @@ impl ClientShellState {
         else {
             return;
         };
+        if let Some(page) = self.machine_files_overlay_mut() {
+            let reading = matches!(op, MachineFsOp::List { .. } | MachineFsOp::Read { .. });
+            if !reading
+                && page
+                    .requests
+                    .values()
+                    .any(|(request, _)| matches!(request, FileRequest::Mutation))
+            {
+                return;
+            }
+            if reading {
+                for (request, cancel) in page.requests.values() {
+                    if !matches!(request, FileRequest::Mutation) {
+                        cancel.cancel();
+                    }
+                }
+            }
+        }
+        let cancel = crate::remote::TaskCancellation::default();
         let ticket = self.next_machine_files_ticket;
         self.next_machine_files_ticket = self.next_machine_files_ticket.saturating_add(1);
         if let Some(overlay) = self.machine_files_overlay_mut() {
-            overlay.pending = overlay.pending.saturating_add(1);
+            let request = match &op {
+                MachineFsOp::List { path } => {
+                    overlay.latest_read = Some(ticket);
+                    FileRequest::List { path: path.clone() }
+                }
+                MachineFsOp::Read { path } => {
+                    overlay.latest_read = Some(ticket);
+                    FileRequest::Read { path: path.clone() }
+                }
+                _ => {
+                    overlay.latest_read = None;
+                    FileRequest::Mutation
+                }
+            };
+            overlay.requests.insert(ticket, (request, cancel.clone()));
+            overlay.pending = overlay.requests.len() as u64;
         }
         self.machine_files_ticket = Some(ticket);
         outcome.actions.push(ClientShellAction::MachineFsOp {
+            cancel,
             ticket,
             profile: Box::new(profile),
             op,
@@ -245,7 +305,6 @@ impl ClientShellState {
             RemoteEntryKind::Directory => self.machine_files_cd(path, outcome),
             RemoteEntryKind::File => {
                 if let Some(overlay) = self.machine_files_overlay_mut() {
-                    overlay.pending_viewer_path = Some(path.clone());
                     overlay.error = None;
                 }
                 self.push_machine_files_op(MachineFsOp::Read { path }, outcome);
@@ -332,7 +391,19 @@ impl ClientShellState {
         }
     }
 
+    fn machine_files_write_pending(&self) -> bool {
+        self.machine_files_overlay().is_some_and(|page| {
+            page.requests
+                .values()
+                .any(|(request, _)| matches!(request, FileRequest::Mutation))
+        })
+    }
+
     fn machine_files_submit_prompt(&mut self, outcome: &mut ClientShellInput) {
+        if self.machine_files_write_pending() {
+            outcome.repaint = true;
+            return;
+        }
         let (kind, value, context) = {
             let Some(overlay) = self.machine_files_overlay_mut() else {
                 return;
@@ -444,6 +515,10 @@ impl ClientShellState {
     }
 
     fn machine_files_confirm_delete(&mut self, outcome: &mut ClientShellInput) {
+        if self.machine_files_write_pending() {
+            outcome.repaint = true;
+            return;
+        }
         let (path, recursive) = match self.machine_files_overlay() {
             Some(ClientMachineFilesOverlay {
                 view: ClientMachineFilesView::ConfirmDelete { path, recursive },
@@ -476,16 +551,25 @@ impl ClientShellState {
         result: Result<MachineFsOutcome, String>,
         outcome: &mut ClientShellInput,
     ) {
-        if self.machine_files_ticket != Some(ticket) {
-            return;
-        }
-        // A mutating operation changed the remote directory: after the state
-        // update the listing refreshes (becoming the new pending ticket).
-        let refresh_after = matches!(result, Ok(MachineFsOutcome::Changed { .. }));
         let Some(overlay) = self.machine_files_overlay_mut() else {
             return;
         };
-        overlay.pending = overlay.pending.saturating_sub(1);
+        let Some((request, _cancel)) = overlay.requests.remove(&ticket) else {
+            return;
+        };
+        overlay.pending = overlay.requests.len() as u64;
+        outcome.repaint = true;
+        let stale_read = match &request {
+            FileRequest::List { path } => {
+                overlay.latest_read != Some(ticket) || &overlay.cwd != path
+            }
+            FileRequest::Read { .. } => overlay.latest_read != Some(ticket),
+            FileRequest::Mutation => false,
+        };
+        if stale_read {
+            return;
+        }
+        let refresh_after = matches!(result, Ok(MachineFsOutcome::Changed { .. }));
         match result {
             Ok(MachineFsOutcome::Entries { entries }) => {
                 overlay.entries = Some(entries);
@@ -496,7 +580,9 @@ impl ClientShellState {
                 }
             }
             Ok(MachineFsOutcome::FileContent { content }) => {
-                let path = overlay.pending_viewer_path.take().unwrap_or_default();
+                let FileRequest::Read { path } = request else {
+                    return;
+                };
                 overlay.view = ClientMachineFilesView::Viewer {
                     path,
                     content: String::from_utf8_lossy(&content).into_owned(),

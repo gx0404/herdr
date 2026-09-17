@@ -500,6 +500,27 @@ pane_history = false
 # Maximum scrollback buffer size in bytes retained per pane terminal.
 # Matches Ghostty's default scrollback-limit behavior.
 # scrollback_limit_bytes = 10000000
+# Hardware monitoring; client menu changes are saved as client preferences.
+[monitor]
+interval_ms = 1000
+history_minutes = 15
+visible = ["cpu", "cores", "memory", "gpu", "disks", "network", "sensors", "processes"]
+card_height = 10
+hidden_devices = []
+alerts_enabled = false
+
+# Account references belong to the server running the corresponding agent.
+# Store only environment variable names in credential_env, never the credential.
+[account_usage]
+enabled = true
+format = "dashboard"
+position = "hover"
+hover_delay_ms = 400
+api_refresh_seconds = 60
+cli_refresh_seconds = 300
+probe_timeout_seconds = 20
+disabled_providers = []
+
 "##;
 
 // Bundled at build time so the printed skill always matches this binary's release.
@@ -589,6 +610,12 @@ fn main() -> io::Result<()> {
             std::process::exit(2);
         }
     };
+    if raw_args
+        .get(1)
+        .is_some_and(|arg| arg == "--internal-usage-probe")
+    {
+        return server::observability::run_probe_helper();
+    }
     if let Some(outcome) = cli::maybe_run_machine(&raw_args) {
         return finish_cli(outcome);
     }

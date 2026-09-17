@@ -12,9 +12,9 @@ pub(super) use super::aggregate_navigation::navigator_rows as client_navigator_r
 pub(in crate::client::shell) use overlays::{
     modal_button, modal_button_row, modal_panel, panel, render_search_bar, OverlayRender, SearchBar,
 };
-pub(super) use overlays::{render_client_overlay, render_context_menu};
+pub(super) use overlays::{render_client_overlay, render_context_menu, render_minimum_overlay};
 pub(super) use sidebar::{render_collapsed_sidebar, render_sidebar, workspace_entries};
-pub(super) use tabs::{render_tab_bar, tab_bar_status_width};
+pub(super) use tabs::{render_tab_bar, render_tab_strip, tab_bar_status_width, TabStripContext};
 
 pub(in crate::client::shell) fn render_sidebar_background(
     buffer: &mut Buffer,

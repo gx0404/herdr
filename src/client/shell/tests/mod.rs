@@ -6,6 +6,7 @@ use crate::protocol::{
 };
 use crossterm::event::MouseEvent;
 mod text_editing;
+mod workbench;
 
 pub(super) fn snapshot() -> ClientShellSnapshot {
     ClientShellSnapshot {
@@ -292,6 +293,8 @@ mod copy;
 mod endpoint_requests;
 mod endpoints;
 mod feedback;
+mod floating_pages;
+mod frozen_selection;
 mod graphics;
 #[path = "input.rs"]
 mod input_domain;

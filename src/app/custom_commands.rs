@@ -732,8 +732,8 @@ mod tests {
     #[test]
     fn shell_command_invocation_executes_endpoint_owned_definition() {
         let mut app = test_app();
-        let path = std::path::PathBuf::from(format!(
-            "/var/tmp/herdr-command-invoke-{}-{}",
+        let path = std::env::temp_dir().join(format!(
+            "herdr-command-invoke-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)

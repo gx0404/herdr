@@ -1222,6 +1222,92 @@
     },
     "request": {
       "$defs": {
+        "AccountBindingParams": {
+          "properties": {
+            "account_id": {
+              "type": "string"
+            },
+            "pane_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "pane_id",
+            "account_id"
+          ],
+          "type": "object"
+        },
+        "AccountUsageSnapshot": {
+          "properties": {
+            "account_id": {
+              "type": "string"
+            },
+            "account_identity": {
+              "description": "官方返回的非凭据账号标识，用于识别 profile 切换登录。",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "account_label": {
+              "type": "string"
+            },
+            "agent": {
+              "type": "string"
+            },
+            "auth_mode": {
+              "type": "string"
+            },
+            "message": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "metrics": {
+              "items": {
+                "$ref": "#/schemas/request/$defs/UsageMetric"
+              },
+              "type": "array"
+            },
+            "observed_at_ms": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "plan": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "provider": {
+              "type": "string"
+            },
+            "source": {
+              "type": "string"
+            },
+            "source_url": {
+              "type": "string"
+            },
+            "status": {
+              "$ref": "#/schemas/request/$defs/ObservationStatus"
+            }
+          },
+          "required": [
+            "account_id",
+            "account_label",
+            "agent",
+            "provider",
+            "auth_mode",
+            "status",
+            "source",
+            "source_url",
+            "observed_at_ms",
+            "metrics"
+          ],
+          "type": "object"
+        },
         "AgentPromptParams": {
           "properties": {
             "target": {
@@ -1698,6 +1784,59 @@
           },
           "required": [
             "active"
+          ],
+          "type": "object"
+        },
+        "ClientViewSpec": {
+          "properties": {
+            "cols": {
+              "format": "uint16",
+              "maximum": 65535,
+              "minimum": 0,
+              "type": "integer"
+            },
+            "focused": {
+              "default": false,
+              "type": "boolean"
+            },
+            "rows": {
+              "format": "uint16",
+              "maximum": 65535,
+              "minimum": 0,
+              "type": "integer"
+            },
+            "tab_id": {
+              "type": "string"
+            },
+            "view_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "view_id",
+            "tab_id",
+            "cols",
+            "rows"
+          ],
+          "type": "object"
+        },
+        "ClientViewsSetParams": {
+          "properties": {
+            "revision": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "views": {
+              "items": {
+                "$ref": "#/schemas/request/$defs/ClientViewSpec"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "revision",
+            "views"
           ],
           "type": "object"
         },
@@ -2385,6 +2524,42 @@
             "request"
           ],
           "type": "string"
+        },
+        "ObservationStatus": {
+          "enum": [
+            "ready",
+            "warming",
+            "unsupported",
+            "permission_denied",
+            "not_authenticated",
+            "needs_binding",
+            "unavailable",
+            "stale",
+            "error",
+            "unknown"
+          ],
+          "type": "string"
+        },
+        "ObservationSubscriptionParams": {
+          "properties": {
+            "interval_ms": {
+              "default": null,
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "subscription_id": {
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "type": "object"
         },
         "OutputMatch": {
           "oneOf": [
@@ -3892,6 +4067,106 @@
             }
           ]
         },
+        "ProcessGetParams": {
+          "properties": {
+            "identity": {
+              "$ref": "#/schemas/request/$defs/ProcessIdentity"
+            }
+          },
+          "required": [
+            "identity"
+          ],
+          "type": "object"
+        },
+        "ProcessIdentity": {
+          "properties": {
+            "boot_id": {
+              "type": "string"
+            },
+            "instance_token": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "pid": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "started_at": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "pid",
+            "started_at",
+            "boot_id"
+          ],
+          "type": "object"
+        },
+        "ProcessListParams": {
+          "properties": {
+            "descending": {
+              "default": true,
+              "type": "boolean"
+            },
+            "filter": {
+              "default": "",
+              "type": "string"
+            },
+            "limit": {
+              "default": 100,
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "offset": {
+              "default": 0,
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "sort": {
+              "$ref": "#/schemas/request/$defs/ProcessSort",
+              "default": "cpu"
+            }
+          },
+          "type": "object"
+        },
+        "ProcessSort": {
+          "enum": [
+            "cpu",
+            "memory",
+            "name",
+            "pid"
+          ],
+          "type": "string"
+        },
+        "ProcessTerminateParams": {
+          "properties": {
+            "action_token": {
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "force": {
+              "default": false,
+              "type": "boolean"
+            },
+            "identity": {
+              "$ref": "#/schemas/request/$defs/ProcessIdentity"
+            }
+          },
+          "required": [
+            "identity"
+          ],
+          "type": "object"
+        },
         "ProductAnnouncementDismissParams": {
           "properties": {
             "id": {
@@ -4336,6 +4611,28 @@
             }
           ]
         },
+        "SystemMetricsParams": {
+          "properties": {
+            "groups": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "include_processes": {
+              "default": false,
+              "type": "boolean"
+            },
+            "interval_ms": {
+              "default": 1000,
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "type": "object"
+        },
         "TabCreateParams": {
           "properties": {
             "cwd": {
@@ -4423,6 +4720,71 @@
           ],
           "type": "object"
         },
+        "TextSnapshotCaptureParams": {
+          "properties": {
+            "pane_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "pane_id"
+          ],
+          "type": "object"
+        },
+        "TextSnapshotReadParams": {
+          "properties": {
+            "rows": {
+              "format": "uint16",
+              "maximum": 65535,
+              "minimum": 0,
+              "type": "integer"
+            },
+            "snapshot_id": {
+              "type": "string"
+            },
+            "start_row": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "snapshot_id",
+            "start_row",
+            "rows"
+          ],
+          "type": "object"
+        },
+        "TextSnapshotSelectionParams": {
+          "properties": {
+            "anchor": {
+              "$ref": "#/schemas/request/$defs/PaneTextPoint"
+            },
+            "cursor": {
+              "$ref": "#/schemas/request/$defs/PaneTextPoint"
+            },
+            "snapshot_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "snapshot_id",
+            "anchor",
+            "cursor"
+          ],
+          "type": "object"
+        },
+        "TextSnapshotTarget": {
+          "properties": {
+            "snapshot_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "snapshot_id"
+          ],
+          "type": "object"
+        },
         "ToastHerdrPosition": {
           "enum": [
             "top-left",
@@ -4431,6 +4793,167 @@
             "bottom-right"
           ],
           "type": "string"
+        },
+        "UsageIntegrationParams": {
+          "properties": {
+            "account_id": {
+              "type": "string"
+            },
+            "enabled": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "account_id",
+            "enabled"
+          ],
+          "type": "object"
+        },
+        "UsageMetric": {
+          "properties": {
+            "amount_decimal": {
+              "description": "金额保留厂商十进制表示，不由请求次数推算。",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "id": {
+              "type": "string"
+            },
+            "label": {
+              "type": "string"
+            },
+            "limit": {
+              "format": "double",
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "remaining": {
+              "format": "double",
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "resets_at": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "scope": {
+              "type": "string"
+            },
+            "text_value": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "unit": {
+              "type": "string"
+            },
+            "used": {
+              "format": "double",
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "used_percent": {
+              "format": "double",
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "window_seconds": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "id",
+            "label",
+            "unit",
+            "scope"
+          ],
+          "type": "object"
+        },
+        "UsageParams": {
+          "properties": {
+            "account_id": {
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "agent": {
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "pane_id": {
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "type": "object"
+        },
+        "UsageReportParams": {
+          "properties": {
+            "account_id": {
+              "default": "",
+              "type": "string"
+            },
+            "agent": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "official_payload": true,
+            "pane_id": {
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "snapshot": {
+              "$ref": "#/schemas/request/$defs/AccountUsageSnapshot",
+              "default": {
+                "account_id": "",
+                "account_label": "",
+                "agent": "",
+                "auth_mode": "",
+                "message": null,
+                "metrics": [],
+                "observed_at_ms": 0,
+                "plan": null,
+                "provider": "",
+                "source": "",
+                "source_url": "",
+                "status": "warming"
+              }
+            }
+          },
+          "type": "object"
         },
         "WorkspaceCloseParams": {
           "properties": {
@@ -4747,6 +5270,246 @@
       },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "oneOf": [
+        {
+          "properties": {
+            "method": {
+              "const": "system.metrics.get",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/SystemMetricsParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "system.metrics.subscribe",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/SystemMetricsParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "system.metrics.unsubscribe",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/ObservationSubscriptionParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "system.process.list",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/ProcessListParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "system.process.get",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/ProcessGetParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "system.process.terminate",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/ProcessTerminateParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "account.usage.providers",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/EmptyParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "account.usage.get",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/UsageParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "account.usage.integration",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/UsageIntegrationParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "account.usage.refresh",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/UsageParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "account.usage.subscribe",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/UsageParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "account.usage.unsubscribe",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/ObservationSubscriptionParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "account.usage.report",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/UsageReportParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "account.binding.set",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/AccountBindingParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "client.views.set",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/ClientViewsSetParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
         {
           "properties": {
             "method": {
@@ -5726,6 +6489,86 @@
         {
           "properties": {
             "method": {
+              "const": "pane.text_snapshot.capture",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/TextSnapshotCaptureParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "pane.text_snapshot.read",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/TextSnapshotReadParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "pane.text_snapshot.selection",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/TextSnapshotSelectionParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "pane.text_snapshot.retain",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/TextSnapshotTarget"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "pane.text_snapshot.release",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/TextSnapshotTarget"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
               "const": "pane.selection.read",
               "type": "string"
             },
@@ -6622,6 +7465,77 @@
     },
     "success_response": {
       "$defs": {
+        "AccountUsageSnapshot": {
+          "properties": {
+            "account_id": {
+              "type": "string"
+            },
+            "account_identity": {
+              "description": "官方返回的非凭据账号标识，用于识别 profile 切换登录。",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "account_label": {
+              "type": "string"
+            },
+            "agent": {
+              "type": "string"
+            },
+            "auth_mode": {
+              "type": "string"
+            },
+            "message": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "metrics": {
+              "items": {
+                "$ref": "#/schemas/success_response/$defs/UsageMetric"
+              },
+              "type": "array"
+            },
+            "observed_at_ms": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "plan": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "provider": {
+              "type": "string"
+            },
+            "source": {
+              "type": "string"
+            },
+            "source_url": {
+              "type": "string"
+            },
+            "status": {
+              "$ref": "#/schemas/success_response/$defs/ObservationStatus"
+            }
+          },
+          "required": [
+            "account_id",
+            "account_label",
+            "agent",
+            "provider",
+            "auth_mode",
+            "status",
+            "source",
+            "source_url",
+            "observed_at_ms",
+            "metrics"
+          ],
+          "type": "object"
+        },
         "AgentInfo": {
           "properties": {
             "agent": {
@@ -6849,6 +7763,39 @@
           ],
           "type": "string"
         },
+        "ClientViewSpec": {
+          "properties": {
+            "cols": {
+              "format": "uint16",
+              "maximum": 65535,
+              "minimum": 0,
+              "type": "integer"
+            },
+            "focused": {
+              "default": false,
+              "type": "boolean"
+            },
+            "rows": {
+              "format": "uint16",
+              "maximum": 65535,
+              "minimum": 0,
+              "type": "integer"
+            },
+            "tab_id": {
+              "type": "string"
+            },
+            "view_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "view_id",
+            "tab_id",
+            "cols",
+            "rows"
+          ],
+          "type": "object"
+        },
         "ClientWindowTitleReason": {
           "enum": [
             "set",
@@ -6864,6 +7811,83 @@
             "failed"
           ],
           "type": "string"
+        },
+        "CpuCoreMetric": {
+          "properties": {
+            "frequency_mhz": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "id": {
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "name": {
+              "type": "string"
+            },
+            "usage_percent": {
+              "format": "float",
+              "type": [
+                "number",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "id",
+            "name"
+          ],
+          "type": "object"
+        },
+        "DiskMetric": {
+          "properties": {
+            "available_bytes": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "id": {
+              "type": "string"
+            },
+            "mount_point": {
+              "type": "string"
+            },
+            "name": {
+              "type": "string"
+            },
+            "read_bytes_per_second": {
+              "format": "double",
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "total_bytes": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "written_bytes_per_second": {
+              "format": "double",
+              "type": [
+                "number",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "id",
+            "name",
+            "mount_point",
+            "total_bytes",
+            "available_bytes"
+          ],
+          "type": "object"
         },
         "EventData": {
           "oneOf": [
@@ -7558,6 +8582,218 @@
           ],
           "type": "string"
         },
+        "FrozenCell": {
+          "properties": {
+            "bg": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "fg": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "hyperlink": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "modifier": {
+              "format": "uint16",
+              "maximum": 65535,
+              "minimum": 0,
+              "type": "integer"
+            },
+            "text": {
+              "type": "string"
+            },
+            "width": {
+              "description": "0：宽字符尾格，1：普通字符，2：宽字符首格，3：软换行前的空白占位。",
+              "format": "uint8",
+              "maximum": 255,
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "text",
+            "fg",
+            "bg",
+            "modifier",
+            "width"
+          ],
+          "type": "object"
+        },
+        "FrozenRow": {
+          "properties": {
+            "cells": {
+              "items": {
+                "$ref": "#/schemas/success_response/$defs/FrozenCell"
+              },
+              "type": "array"
+            },
+            "soft_wrapped": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "cells",
+            "soft_wrapped"
+          ],
+          "type": "object"
+        },
+        "FrozenText": {
+          "properties": {
+            "alternate_screen": {
+              "type": "boolean"
+            },
+            "cols": {
+              "format": "uint16",
+              "maximum": 65535,
+              "minimum": 0,
+              "type": "integer"
+            },
+            "content_revision": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "range_end": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "range_start": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "row_origin": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "rows": {
+              "items": {
+                "$ref": "#/schemas/success_response/$defs/FrozenRow"
+              },
+              "type": "array"
+            },
+            "total_rows": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "truncated": {
+              "type": "boolean"
+            },
+            "viewport_rows": {
+              "format": "uint16",
+              "maximum": 65535,
+              "minimum": 0,
+              "type": "integer"
+            },
+            "viewport_start": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "cols",
+            "viewport_rows",
+            "viewport_start",
+            "row_origin",
+            "range_start",
+            "range_end",
+            "total_rows",
+            "alternate_screen",
+            "content_revision",
+            "truncated",
+            "rows"
+          ],
+          "type": "object"
+        },
+        "GpuMetric": {
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "memory_total_bytes": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "memory_used_bytes": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "message": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "name": {
+              "type": "string"
+            },
+            "power_watts": {
+              "format": "float",
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "shared_memory_used_bytes": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "source": {
+              "type": "string"
+            },
+            "status": {
+              "$ref": "#/schemas/success_response/$defs/ObservationStatus"
+            },
+            "temperature_celsius": {
+              "format": "float",
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "usage_percent": {
+              "format": "float",
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "vendor": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "name",
+            "vendor",
+            "status",
+            "source"
+          ],
+          "type": "object"
+        },
         "InstalledPluginInfo": {
           "properties": {
             "actions": {
@@ -7847,6 +9083,80 @@
             }
           ]
         },
+        "MemoryMetric": {
+          "properties": {
+            "available_bytes": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "swap_total_bytes": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "swap_used_bytes": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "total_bytes": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "used_bytes": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "total_bytes",
+            "used_bytes",
+            "available_bytes",
+            "swap_total_bytes",
+            "swap_used_bytes"
+          ],
+          "type": "object"
+        },
+        "NetworkMetric": {
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "received_bytes_per_second": {
+              "format": "double",
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "total_received_bytes": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "total_transmitted_bytes": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "transmitted_bytes_per_second": {
+              "format": "double",
+              "type": [
+                "number",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "id",
+            "total_received_bytes",
+            "total_transmitted_bytes"
+          ],
+          "type": "object"
+        },
         "NotificationShowReason": {
           "enum": [
             "shown",
@@ -7854,6 +9164,21 @@
             "rate_limited",
             "no_foreground_client",
             "busy"
+          ],
+          "type": "string"
+        },
+        "ObservationStatus": {
+          "enum": [
+            "ready",
+            "warming",
+            "unsupported",
+            "permission_denied",
+            "not_authenticated",
+            "needs_binding",
+            "unavailable",
+            "stale",
+            "error",
+            "unknown"
           ],
           "type": "string"
         },
@@ -9216,6 +10541,97 @@
             }
           ]
         },
+        "ProcessIdentity": {
+          "properties": {
+            "boot_id": {
+              "type": "string"
+            },
+            "instance_token": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "pid": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "started_at": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "pid",
+            "started_at",
+            "boot_id"
+          ],
+          "type": "object"
+        },
+        "ProcessMetric": {
+          "properties": {
+            "action_token": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "cpu_percent": {
+              "format": "float",
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "executable": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "identity": {
+              "$ref": "#/schemas/success_response/$defs/ProcessIdentity"
+            },
+            "memory_bytes": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "name": {
+              "type": "string"
+            },
+            "parent_pid": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "protected": {
+              "type": "boolean"
+            },
+            "status": {
+              "type": "string"
+            },
+            "user": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "identity",
+            "name",
+            "memory_bytes",
+            "status",
+            "protected"
+          ],
+          "type": "object"
+        },
         "ReadFormat": {
           "enum": [
             "text",
@@ -9234,6 +10650,272 @@
         },
         "ResponseResult": {
           "oneOf": [
+            {
+              "properties": {
+                "boot_id": {
+                  "type": "string"
+                },
+                "pane_id": {
+                  "type": "string"
+                },
+                "snapshot_id": {
+                  "type": "string"
+                },
+                "text": {
+                  "$ref": "#/schemas/success_response/$defs/FrozenText"
+                },
+                "type": {
+                  "const": "pane_text_snapshot",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "snapshot_id",
+                "pane_id",
+                "boot_id",
+                "text"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "snapshot_id": {
+                  "type": "string"
+                },
+                "text": {
+                  "type": "string"
+                },
+                "type": {
+                  "const": "pane_text_snapshot_selection",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "snapshot_id",
+                "text"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "snapshot_id": {
+                  "type": "string"
+                },
+                "type": {
+                  "const": "pane_text_snapshot_retained",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "snapshot_id"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "snapshot_id": {
+                  "type": "string"
+                },
+                "type": {
+                  "const": "pane_text_snapshot_released",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "snapshot_id"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "snapshot": {
+                  "$ref": "#/schemas/success_response/$defs/SystemMetricsSnapshot"
+                },
+                "type": {
+                  "const": "system_metrics",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "snapshot"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "processes": {
+                  "items": {
+                    "$ref": "#/schemas/success_response/$defs/ProcessMetric"
+                  },
+                  "type": "array"
+                },
+                "sampled_at_ms": {
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "total": {
+                  "format": "uint",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "type": {
+                  "const": "system_processes",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "sampled_at_ms",
+                "total",
+                "processes"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "process": {
+                  "$ref": "#/schemas/success_response/$defs/ProcessMetric"
+                },
+                "type": {
+                  "const": "system_process",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "process"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "force": {
+                  "type": "boolean"
+                },
+                "identity": {
+                  "$ref": "#/schemas/success_response/$defs/ProcessIdentity"
+                },
+                "type": {
+                  "const": "system_process_terminated",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "identity",
+                "force"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "providers": {
+                  "items": {
+                    "$ref": "#/schemas/success_response/$defs/UsageProviderInfo"
+                  },
+                  "type": "array"
+                },
+                "type": {
+                  "const": "account_usage_providers",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "providers"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "accounts": {
+                  "items": {
+                    "$ref": "#/schemas/success_response/$defs/AccountUsageSnapshot"
+                  },
+                  "type": "array"
+                },
+                "type": {
+                  "const": "account_usage",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "accounts"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "account_id": {
+                  "type": "string"
+                },
+                "pane_id": {
+                  "type": "string"
+                },
+                "type": {
+                  "const": "account_binding",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "pane_id",
+                "account_id"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "active": {
+                  "type": "boolean"
+                },
+                "subscription_id": {
+                  "type": "string"
+                },
+                "type": {
+                  "const": "observation_subscription",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "subscription_id",
+                "active"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "revision": {
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "type": {
+                  "const": "client_views_set",
+                  "type": "string"
+                },
+                "views": {
+                  "items": {
+                    "$ref": "#/schemas/success_response/$defs/ClientViewSpec"
+                  },
+                  "type": "array"
+                }
+              },
+              "required": [
+                "type",
+                "revision",
+                "views"
+              ],
+              "type": "object"
+            },
             {
               "properties": {
                 "capabilities": {
@@ -10587,6 +12269,31 @@
             }
           ]
         },
+        "SensorMetric": {
+          "properties": {
+            "critical_celsius": {
+              "format": "float",
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "name": {
+              "type": "string"
+            },
+            "temperature_celsius": {
+              "format": "float",
+              "type": [
+                "number",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "name"
+          ],
+          "type": "object"
+        },
         "ServerCapabilities": {
           "properties": {
             "detached_server_daemon": {
@@ -10698,6 +12405,145 @@
           ],
           "type": "string"
         },
+        "SystemMetricsSnapshot": {
+          "properties": {
+            "boot_id": {
+              "type": "string"
+            },
+            "cores": {
+              "items": {
+                "$ref": "#/schemas/success_response/$defs/CpuCoreMetric"
+              },
+              "type": "array"
+            },
+            "cpu_brand": {
+              "type": "string"
+            },
+            "cpu_percent": {
+              "format": "float",
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "disks": {
+              "items": {
+                "$ref": "#/schemas/success_response/$defs/DiskMetric"
+              },
+              "type": "array"
+            },
+            "environment": {
+              "type": "string"
+            },
+            "gpus": {
+              "items": {
+                "$ref": "#/schemas/success_response/$defs/GpuMetric"
+              },
+              "type": "array"
+            },
+            "group_sampled_at_ms": {
+              "additionalProperties": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "default": {},
+              "type": "object"
+            },
+            "group_status": {
+              "additionalProperties": {
+                "$ref": "#/schemas/success_response/$defs/ObservationStatus"
+              },
+              "default": {},
+              "type": "object"
+            },
+            "hostname": {
+              "type": "string"
+            },
+            "interval_ms": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "memory": {
+              "$ref": "#/schemas/success_response/$defs/MemoryMetric"
+            },
+            "messages": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "networks": {
+              "items": {
+                "$ref": "#/schemas/success_response/$defs/NetworkMetric"
+              },
+              "type": "array"
+            },
+            "operating_system": {
+              "type": "string"
+            },
+            "physical_core_count": {
+              "format": "uint",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "processes": {
+              "items": {
+                "$ref": "#/schemas/success_response/$defs/ProcessMetric"
+              },
+              "type": "array"
+            },
+            "sampled_at_ms": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "sensors": {
+              "items": {
+                "$ref": "#/schemas/success_response/$defs/SensorMetric"
+              },
+              "type": "array"
+            },
+            "sequence": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "status": {
+              "$ref": "#/schemas/success_response/$defs/ObservationStatus"
+            },
+            "uptime_seconds": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "boot_id",
+            "sequence",
+            "sampled_at_ms",
+            "interval_ms",
+            "hostname",
+            "operating_system",
+            "environment",
+            "uptime_seconds",
+            "status",
+            "cpu_brand",
+            "cores",
+            "memory",
+            "gpus",
+            "disks",
+            "networks",
+            "sensors",
+            "processes",
+            "messages"
+          ],
+          "type": "object"
+        },
         "TabInfo": {
           "properties": {
             "agent_status": {
@@ -10734,6 +12580,126 @@
             "focused",
             "pane_count",
             "agent_status"
+          ],
+          "type": "object"
+        },
+        "UsageMetric": {
+          "properties": {
+            "amount_decimal": {
+              "description": "金额保留厂商十进制表示，不由请求次数推算。",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "id": {
+              "type": "string"
+            },
+            "label": {
+              "type": "string"
+            },
+            "limit": {
+              "format": "double",
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "remaining": {
+              "format": "double",
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "resets_at": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "scope": {
+              "type": "string"
+            },
+            "text_value": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "unit": {
+              "type": "string"
+            },
+            "used": {
+              "format": "double",
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "used_percent": {
+              "format": "double",
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "window_seconds": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "id",
+            "label",
+            "unit",
+            "scope"
+          ],
+          "type": "object"
+        },
+        "UsageProviderInfo": {
+          "properties": {
+            "account_scope": {
+              "type": "string"
+            },
+            "agent": {
+              "type": "string"
+            },
+            "configured_accounts": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "label": {
+              "type": "string"
+            },
+            "method": {
+              "type": "string"
+            },
+            "minimum_interval_seconds": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "source_url": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "agent",
+            "label",
+            "source_url",
+            "method",
+            "account_scope",
+            "minimum_interval_seconds",
+            "configured_accounts"
           ],
           "type": "object"
         },

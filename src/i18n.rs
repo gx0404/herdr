@@ -159,6 +159,11 @@ pub struct ContextMenuTexts {
 }
 
 pub struct GlobalMenuTexts {
+    pub resize_hint: &'static str,
+    pub main_menu: &'static str,
+    pub command_search: &'static str,
+    pub categories: [&'static str; 7],
+    pub back: &'static str,
     pub settings: &'static str,
     pub machines: &'static str,
     pub notifications: &'static str,

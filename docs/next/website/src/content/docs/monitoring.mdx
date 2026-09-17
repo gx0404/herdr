@@ -1,0 +1,112 @@
+---
+title: Monitoring, account usage and docking
+description: Arrange terminal groups and inspect host resources and official provider usage.
+---
+
+Open **Monitor** or **Accounts** from the top bar. The global menu includes monitoring and usage settings. Hardware metrics belong to the connected host; hovering a remote agent queries its own host.
+
+## Menus, pages, and stable selection
+
+`prefix+Space` opens the categorized main menu; `prefix+/` opens command search (the default prefix is `Ctrl+B`). Categories cover workspaces, tabs and panes, SSH, monitoring, tools, settings, and help. Recent commands are limited to five. Search accepts localized titles, English action aliases, categories, and machine addresses. The wheel scrolls independently; keyboard navigation reveals the selected item.
+
+Drag a page's top border to move it, or its side and bottom borders to resize it. Client preferences retain geometry and constrain it to smaller terminals. Layout locking also disables page dragging. Closing the menu restores the previous page. Settings apply on Enter or the save button; theme selection previews and Escape cancels the preview.
+
+Selecting terminal text freezes a text snapshot of that pane while processes and other panes keep updating. Release copies and resumes live output. With `copy_on_select` disabled, Ctrl+C copies the retained selection. Scrolling reads captured history without scrolling the live terminal. If output changed before capture and the mouse was already released, confirm the captured selection with Ctrl+C instead of automatically copying unseen content.
+
+Each snapshot is bounded to 65,536 cells, 2048 rows, and 8 MiB; scrolling stops at the captured boundary. Server limits are 64 MiB, 32 snapshots, and one per client. Resize, target changes, cancellation, and disconnect release the snapshot. Unacknowledged captures expire after 60 seconds. Older servers retain the legacy selection path.
+
+Use `Ctrl+Shift+Space` as the WezTerm leader and keep `Ctrl+B` for Herdr. Ordinary dragging selects within Herdr; Shift+drag uses WezTerm's selection.
+
+## Docking
+
+Drag a panel's `⠿` title handle to another panel's edge. The drop preview shows the destination. Drag dividers to resize, tabs to reorder or create another terminal group, and pane handles to swap panes or move them between tabs without restarting their processes. Borderless panes show their handles only in Layout mode, keeping normal terminal text unobstructed. Right-click tab menus remain available.
+
+`□` maximizes/restores a panel. In Layout mode, `Tab` / `Shift+Tab` selects a panel, arrows resize, `Shift+arrows` move, `Enter` maximizes, and `Esc` finishes. Lock prevents accidental rearrangement; Reset restores the default layout. Layouts persist per client and endpoint. Small terminals project the focused panel without discarding the saved layout. Older servers retain the previous single-view UI.
+
+## Host resources
+
+Choose total/per-core CPU, RAM/swap, GPUs, disks, network interfaces, temperatures and processes. Sampling supports 500, 1000, 2000 and 5000 ms. Slow collectors run independently. Initial differential samples, unavailable drivers and permission failures display a status or `—`, rather than zero.
+
+NVIDIA uses NVML. Other Linux GPUs use driver-exposed DRM/sysfs fields; Windows uses DXGI and native GPU performance counters. Temperature, power and utilization availability depends on the driver. Containers and WSL report resources visible in that environment.
+
+Scroll inside a card to inspect additional devices, CPU cores or processes. Click a core to select its history. Card arrows change order; settings control height and hidden devices. History is client-local, covers 1–60 minutes and has a 16 MiB budget. Pause stops history recording while live sampling and alerts continue.
+
+Process details pin the process instance. Termination requires confirmation; force is a separate choice. Expired confirmations, reused PIDs and protected processes are rejected. Windows termination requires the force option and appropriate permission.
+
+Alerts default to off and operate only while a TUI is connected. Configure threshold, duration and cooldown; alerts never kill processes.
+
+```toml
+[monitor]
+interval_ms = 1000
+history_minutes = 15
+visible = ["cpu", "cores", "memory", "gpu", "network", "processes"]
+card_height = 10
+hidden_devices = []
+alerts_enabled = true
+
+[[monitor.alerts]]
+metric = "cpu" # cpu / memory / gpu / disk
+threshold = 90
+duration_seconds = 30
+cooldown_seconds = 60
+```
+
+## Account binding
+
+Hover an agent row or CLI title to inspect usage. Choose dashboard/table and hover/page/both in settings. Select and explicitly bind the account to the pane. A shared vendor name does not identify an account.
+
+Both formats support wheel scrolling; the account page also supports the arrow keys for quota windows below the viewport. The usage popover can appear over a focused monitor panel and captures its own input without activating background cards or process rows.
+
+Subscription windows, key budgets, organization billing and local session statistics keep their own scopes and units. Results show reset times, source and sample age. Temporary errors retain the last successful sample with a cached status and bounded retry intervals.
+
+Configure accounts on the server running the agent. `credential_env` names an environment variable; do not place the credential itself in TOML. Herdr does not copy CLI OAuth credentials to clients. CLI profiles use the vendor's documented directory selector. New Kimi Code uses `KIMI_CODE_HOME`; legacy Python Kimi uses a separate login store.
+
+```toml
+[account_usage]
+enabled = true
+format = "dashboard" # dashboard / table
+position = "both" # hover / page / both
+hover_delay_ms = 400
+api_refresh_seconds = 60
+cli_refresh_seconds = 300
+probe_timeout_seconds = 20
+disabled_providers = []
+
+[[account_usage.accounts]]
+id = "work-codex"
+label = "Work"
+agent = "codex"
+provider = "codex"
+auth_mode = "cli"
+profile_dir = "/path/to/profile"
+
+[[account_usage.accounts]]
+id = "team-api"
+label = "Organization API"
+agent = "claude"
+provider = "anthropic"
+auth_mode = "api"
+credential_env = "ANTHROPIC_ADMIN_KEY"
+```
+
+Use `organization` and `account_user` for the exact identity required by the selected API. Set `billing_scope = "enterprise"` and an enterprise slug in `organization` for GitHub Enterprise. OpenRouter uses a management key with `billing_scope = "account"`; its default scope is the current API key. OMP's multiple-account output requires a provider/account selection. `base_url` only accepts registered official hosts; Kimi's local API is restricted to loopback.
+
+## Official callbacks
+
+Claude and Antigravity account panels can enable/remove the official statusline callback. An existing renderer is retained at the end of a passthrough pipeline. Claude's quota fields require a supporting CLI version and normally appear after the first ordinary API response. Herdr never sends a model prompt to obtain usage.
+
+Other integrations can send supported official JSON to stdin of `herdr api usage-report --agent <agent>`. The command uses the binding for `HERDR_PANE_ID`, or explicit `--account <id>`. Bind first. Raw reports and conversation contents are not persisted. `--passthrough` preserves input for an existing statusline renderer.
+
+## Provider capabilities
+
+The registry covers 23 agents, excluding Muse. Official sources were checked on 2026-09-16. Subscription access and administrator billing access differ. Unsupported versions, absent APIs or missing permissions produce an explicit availability message. Session statistics never imply an account quota.
+
+See the [provider source matrix](/zh-cn/docs/monitoring/#厂商能力与官方依据) for every official reference. Codex uses App Server; Kimi uses its authenticated local Server API; Claude and Antigravity support statusline quotas. Letta has a dedicated usage command; Kiro supports non-interactive `/usage`. Cursor, Devin, Cline, Copilot and Factory use their separately authorized reporting APIs. OMP, Amp and OpenCode have distinct CLI formats. Gemini, Grok and Hermes use guarded official CLI commands. Qoder currently has no verified automatic input-readiness contract. Mastra Code, Qwen, Maki and Pi provide session statistics and can bind their actual billing provider.
+
+Factory daily reports end no later than yesterday UTC. Cursor overage spend is separate from subscription-inclusive spend. Amp BYOK list-price estimates are not billed usage. Letta's quota bucket labels remain categorical. OpenRouter key budgets are distinct from account totals.
+
+## API
+
+Public JSON methods include `system.metrics.get/subscribe/unsubscribe`, `system.process.list/get/terminate`, `account.usage.providers/get/refresh/subscribe/unsubscribe/report/integration`, and `account.binding.set`. Slow subscribers retain the newest sample.
+
+`client.views.set` and named view-frame/input extensions require a negotiated TUI connection. Generation 1 encoding stays unchanged. Pane dragging reuses `pane.move` and `pane.swap`. Use `herdr api schema --json` for the precise contracts.

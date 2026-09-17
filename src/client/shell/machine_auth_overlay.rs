@@ -31,14 +31,28 @@ fn preferred_scanned_key(keys: &[(String, String)]) -> Option<(String, String)> 
 
 #[derive(Debug)]
 pub(super) struct ClientMachineAuthOverlay {
+    pub(super) scroll: u16,
+    cancel: crate::remote::TaskCancellation,
+    return_to: Option<Box<super::machines_overlay::ClientMachinesOverlay>>,
     /// `None` only transiently while a view is being moved between states;
     /// rendering tolerates it defensively.
     pub(super) view: Option<ClientMachineAuthView>,
 }
 
+impl Drop for ClientMachineAuthOverlay {
+    fn drop(&mut self) {
+        self.cancel.cancel();
+    }
+}
+
 impl ClientMachineAuthOverlay {
     fn new(view: ClientMachineAuthView) -> Self {
-        Self { view: Some(view) }
+        Self {
+            view: Some(view),
+            scroll: 0,
+            cancel: crate::remote::TaskCancellation::default(),
+            return_to: None,
+        }
     }
 
     /// A worker (known_hosts op or interactive auth) is in flight: drives
@@ -76,6 +90,11 @@ pub(super) enum ClientMachineAuthView {
 
 #[derive(Debug)]
 pub(super) struct ClientHostKeyView {
+    pub(super) profile: Box<SavedSshEndpoint>,
+    pub(super) reviewed: Option<(
+        crate::remote::EffectiveHostKeyTarget,
+        crate::remote::KnownHostKey,
+    )>,
     /// Saved profile this recovery applies to; `None` on the wizard path
     /// (the machine is not persisted yet, so reconnect-style follow-ups and
     /// the process-local trust-once override are unavailable).
@@ -96,6 +115,10 @@ pub(super) struct ClientHostKeyView {
 
 #[derive(Debug)]
 pub(super) struct ClientAuthGuideView {
+    pub(super) pin: Option<(
+        crate::remote::EffectiveHostKeyTarget,
+        crate::remote::KnownHostKey,
+    )>,
     /// Profile the interactive attempt runs against; a throwaway profile on
     /// the wizard path (never persisted).
     pub(super) profile: Box<SavedSshEndpoint>,
@@ -105,8 +128,6 @@ pub(super) struct ClientAuthGuideView {
     pub(super) wizard: bool,
     pub(super) methods: Vec<String>,
     pub(super) identity_file: Option<String>,
-    pub(super) host: String,
-    pub(super) port: Option<u16>,
     pub(super) ticket: u64,
     pub(super) busy: bool,
     pub(super) verified: bool,
@@ -122,6 +143,7 @@ pub(super) struct ClientPasswordView {
     pub(super) prompt: String,
     pub(super) input: TextEditor,
     pub(super) is_passphrase: bool,
+    pub(super) is_host_key: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -151,6 +173,24 @@ fn host_display(host: &str, port: Option<u16>) -> String {
 }
 
 impl ClientShellState {
+    fn replace_machine_auth_overlay(&mut self, mut next: ClientMachineAuthOverlay) {
+        next.return_to = match self.overlay.take() {
+            Some(ClientShellOverlay::Machines(page)) => Some(Box::new(page)),
+            Some(ClientShellOverlay::MachineAuth(mut previous)) => previous.return_to.take(),
+            _ => None,
+        };
+        self.overlay = Some(ClientShellOverlay::MachineAuth(next));
+    }
+
+    fn return_from_machine_auth(&mut self) {
+        if let Some(ClientShellOverlay::MachineAuth(mut auth)) = self.overlay.take() {
+            self.overlay = auth
+                .return_to
+                .take()
+                .map(|page| ClientShellOverlay::Machines(*page));
+        }
+    }
+
     fn next_machine_auth_ticket(&mut self) -> u64 {
         let ticket = self.next_machine_auth_ticket;
         self.next_machine_auth_ticket = self.next_machine_auth_ticket.saturating_add(1);
@@ -178,12 +218,14 @@ impl ClientShellState {
         };
         let ticket = self.next_machine_auth_ticket();
         let (host, port) = parse_host_port(&profile.target);
+        let port = profile.port.or(port);
         match kind {
             crate::remote::ConnectionErrorKind::HostKeyUnknown { fingerprint } => {
                 let fingerprint =
                     fingerprint.map(|fingerprint| (fingerprint.key_type, fingerprint.fingerprint));
                 self.open_host_key_unknown_view(
                     Some(profile_id.clone()),
+                    Box::new(profile.clone()),
                     host,
                     port,
                     fingerprint,
@@ -193,21 +235,21 @@ impl ClientShellState {
                 true
             }
             crate::remote::ConnectionErrorKind::HostKeyChanged => {
-                self.overlay = Some(ClientShellOverlay::MachineAuth(
-                    ClientMachineAuthOverlay::new(ClientMachineAuthView::HostKeyChanged(
-                        ClientHostKeyView {
-                            profile_id: Some(profile_id.clone()),
-                            host_display: host_display(&host, port),
-                            host,
-                            port,
-                            fingerprint: None,
-                            ticket,
-                            busy: false,
-                            error: None,
-                            message: None,
-                            completed: false,
-                        },
-                    )),
+                self.replace_machine_auth_overlay(ClientMachineAuthOverlay::new(
+                    ClientMachineAuthView::HostKeyChanged(ClientHostKeyView {
+                        profile_id: Some(profile_id.clone()),
+                        profile: Box::new(profile.clone()),
+                        reviewed: None,
+                        host_display: host_display(&host, port),
+                        host,
+                        port,
+                        fingerprint: None,
+                        ticket,
+                        busy: false,
+                        error: None,
+                        message: None,
+                        completed: false,
+                    }),
                 ));
                 outcome.repaint = true;
                 true
@@ -234,12 +276,18 @@ impl ClientShellState {
     /// before retrying (the fingerprint is scanned for display first).
     pub(super) fn open_machine_host_key_review(
         &mut self,
-        target: &str,
+        profile: Box<SavedSshEndpoint>,
         outcome: &mut ClientShellInput,
     ) {
         let ticket = self.next_machine_auth_ticket();
-        let (host, port) = parse_host_port(target);
-        self.open_host_key_unknown_view(None, host, port, None, ticket, outcome);
+        let (host, port) = parse_host_port(&profile.target);
+        let port = profile.port.or(port);
+        let id = self
+            .saved_profiles
+            .iter()
+            .any(|current| current.id == profile.id)
+            .then(|| profile.id.clone());
+        self.open_host_key_unknown_view(id, profile, host, port, None, ticket, outcome);
     }
 
     /// Wizard entry after a failed setup: guide an approved interactive
@@ -263,22 +311,20 @@ impl ClientShellState {
         ticket: u64,
         outcome: &mut ClientShellInput,
     ) {
-        let (host, port) = parse_host_port(&profile.target);
-        self.overlay = Some(ClientShellOverlay::MachineAuth(
-            ClientMachineAuthOverlay::new(ClientMachineAuthView::AuthGuide(ClientAuthGuideView {
+        self.replace_machine_auth_overlay(ClientMachineAuthOverlay::new(
+            ClientMachineAuthView::AuthGuide(ClientAuthGuideView {
+                pin: None,
                 profile: Box::new(profile),
                 profile_id: profile_id.clone(),
                 wizard: profile_id.is_none(),
                 methods,
                 identity_file,
-                host,
-                port,
                 ticket,
                 busy: false,
                 verified: false,
                 error: None,
                 message: None,
-            })),
+            }),
         ));
         outcome.repaint = true;
     }
@@ -286,6 +332,7 @@ impl ClientShellState {
     fn open_host_key_unknown_view(
         &mut self,
         profile_id: Option<ProfileId>,
+        profile: Box<SavedSshEndpoint>,
         host: String,
         port: Option<u16>,
         fingerprint: Option<(String, String)>,
@@ -295,31 +342,35 @@ impl ClientShellState {
         // Without a fingerprint from the failure classification, scan the
         // presented key for display first: trust decisions need the
         // fingerprint on screen.
-        let busy = fingerprint.is_none();
-        if busy {
-            outcome.actions.push(ClientShellAction::MachineHostKeyOp {
-                ticket,
-                op: MachineHostKeyOp::Scan,
+        let busy = true;
+        self.replace_machine_auth_overlay(ClientMachineAuthOverlay::new(
+            ClientMachineAuthView::HostKeyUnknown(ClientHostKeyView {
+                profile: profile.clone(),
+                reviewed: None,
+                profile_id,
+                host_display: host_display(&host, port),
                 host: host.clone(),
                 port,
+                fingerprint,
+                ticket,
+                busy,
+                error: None,
+                message: None,
+                completed: false,
+            }),
+        ));
+        if busy {
+            outcome.actions.push(ClientShellAction::MachineHostKeyOp {
+                cancel: match self.overlay.as_ref() {
+                    Some(ClientShellOverlay::MachineAuth(auth)) => auth.cancel.clone(),
+                    _ => return,
+                },
+                ticket,
+                op: MachineHostKeyOp::Scan,
+                profile,
+                reviewed: None,
             });
         }
-        self.overlay = Some(ClientShellOverlay::MachineAuth(
-            ClientMachineAuthOverlay::new(ClientMachineAuthView::HostKeyUnknown(
-                ClientHostKeyView {
-                    profile_id,
-                    host_display: host_display(&host, port),
-                    host,
-                    port,
-                    fingerprint,
-                    ticket,
-                    busy,
-                    error: None,
-                    message: None,
-                    completed: false,
-                },
-            )),
-        ));
         outcome.repaint = true;
     }
 
@@ -333,7 +384,10 @@ impl ClientShellState {
         if overlay.interactive_ticket() != Some(ticket) {
             return false;
         }
-        let is_passphrase = prompt.to_ascii_lowercase().contains("passphrase");
+        let lowered = prompt.to_ascii_lowercase();
+        let is_passphrase = lowered.contains("passphrase");
+        let is_host_key = lowered.contains("yes/no") && lowered.contains("fingerprint");
+        overlay.scroll = 0;
         let Some(view) = overlay.view.take() else {
             return false;
         };
@@ -345,12 +399,14 @@ impl ClientShellState {
                     prompt: prompt.to_owned(),
                     input: TextEditor::default(),
                     is_passphrase,
+                    is_host_key,
                 }));
                 true
             }
             ClientMachineAuthView::Password(mut password) => {
                 password.prompt = prompt.to_owned();
                 password.is_passphrase = is_passphrase;
+                password.is_host_key = is_host_key;
                 password.input.clear();
                 overlay.view = Some(ClientMachineAuthView::Password(password));
                 true
@@ -369,6 +425,23 @@ impl ClientShellState {
         outcome: &mut ClientShellInput,
     ) {
         match update {
+            MachineAuthUpdate::InteractiveStep { ticket, step } => {
+                if let Some(ClientShellOverlay::MachineAuth(overlay)) = self.overlay.as_mut() {
+                    let guide = match overlay.view.as_mut() {
+                        Some(ClientMachineAuthView::AuthGuide(guide)) => Some(guide),
+                        Some(ClientMachineAuthView::Password(password)) => {
+                            Some(password.guide.as_mut())
+                        }
+                        _ => None,
+                    };
+                    if let Some(guide) = guide.filter(|guide| guide.ticket == ticket && guide.busy)
+                    {
+                        guide.message =
+                            Some(super::machines_overlay::bootstrap_step_label(step).into());
+                        outcome.repaint = true;
+                    }
+                }
+            }
             MachineAuthUpdate::HostKeyOpFinished { ticket, op, result } => {
                 self.handle_host_key_op_finished(ticket, op, result, outcome)
             }
@@ -396,8 +469,27 @@ impl ClientShellState {
             {
                 view.busy = false;
                 match (op, result) {
-                    (MachineHostKeyOp::Scan, Ok(MachineHostKeyOutcome::Scanned(keys))) => {
-                        view.fingerprint = preferred_scanned_key(&keys);
+                    (MachineHostKeyOp::Scan, Ok(MachineHostKeyOutcome::Scanned(review))) => {
+                        let fingerprints = review
+                            .keys
+                            .iter()
+                            .map(|key| (key.key_type.clone(), key.fingerprint.fingerprint.clone()))
+                            .collect::<Vec<_>>();
+                        view.fingerprint = preferred_scanned_key(&fingerprints);
+                        view.reviewed = view
+                            .fingerprint
+                            .as_ref()
+                            .and_then(|(kind, fingerprint)| {
+                                review.keys.iter().find(|key| {
+                                    &key.key_type == kind
+                                        && &key.fingerprint.fingerprint == fingerprint
+                                })
+                            })
+                            .map(|key| (review.target.clone(), key.clone()));
+                        view.host = review.target.host.clone();
+                        view.port = Some(review.target.port);
+                        view.host_display =
+                            host_display(&review.target.host, Some(review.target.port));
                         if view.fingerprint.is_none() {
                             view.error = Some(t.fingerprint_unavailable.to_owned());
                         }
@@ -453,6 +545,56 @@ impl ClientShellState {
         }
     }
 
+    pub(crate) fn complete_interactive_connection(
+        &mut self,
+        ticket: u64,
+    ) -> Option<SavedSshEndpoint> {
+        let (profile, wizard) = match self.overlay.as_ref() {
+            Some(ClientShellOverlay::MachineAuth(overlay)) if !overlay.cancel.is_cancelled() => {
+                match overlay.view.as_ref() {
+                    Some(ClientMachineAuthView::AuthGuide(guide))
+                        if guide.ticket == ticket && guide.busy =>
+                    {
+                        ((*guide.profile).clone(), guide.wizard)
+                    }
+                    Some(ClientMachineAuthView::Password(password))
+                        if password.ticket == ticket =>
+                    {
+                        ((*password.guide.profile).clone(), password.guide.wizard)
+                    }
+                    _ => return None,
+                }
+            }
+            _ => return None,
+        };
+        let profile = if wizard {
+            let id = match self.persist_authenticated_wizard(&profile) {
+                Ok(id) => id,
+                Err(error) => {
+                    self.set_endpoint_error(error);
+                    return None;
+                }
+            };
+            self.saved_profiles
+                .iter()
+                .find(|profile| profile.id == id)?
+                .clone()
+        } else {
+            let current = self
+                .saved_profiles
+                .iter()
+                .find(|current| current.id == profile.id && current.enabled)?;
+            if !current.same_connection(&profile) {
+                self.set_endpoint_error("连接设置已变化，请重新连接");
+                return None;
+            }
+            current.clone()
+        };
+        self.return_from_machine_auth();
+        self.open_machines_overlay_for(&profile.id);
+        Some(profile)
+    }
+
     fn handle_interactive_auth_finished(
         &mut self,
         ticket: u64,
@@ -463,6 +605,9 @@ impl ClientShellState {
         let Some(ClientShellOverlay::MachineAuth(overlay)) = self.overlay.as_mut() else {
             return;
         };
+        if overlay.cancel.is_cancelled() {
+            return;
+        }
         // Restore the guide view if the dialog still sits on the password
         // prompt (ssh gave up before an answer arrived).
         if matches!(overlay.view.as_ref(), Some(ClientMachineAuthView::Password(view)) if view.ticket == ticket)
@@ -506,6 +651,7 @@ impl ClientShellState {
     }
 
     fn start_interactive_auth(&mut self, outcome: &mut ClientShellInput) {
+        let ticket = self.next_machine_auth_ticket();
         let Some(ClientShellOverlay::MachineAuth(overlay)) = self.overlay.as_mut() else {
             return;
         };
@@ -515,38 +661,38 @@ impl ClientShellState {
         if guide.busy {
             return;
         }
+        if overlay.cancel.is_cancelled() || guide.error.is_some() {
+            guide.ticket = ticket;
+        }
+        overlay.cancel = crate::remote::TaskCancellation::default();
         guide.busy = true;
         guide.error = None;
         guide.message = None;
         outcome
             .actions
             .push(ClientShellAction::StartMachineInteractiveAuth {
+                bootstrap: guide.wizard,
+                pin: guide.pin.clone(),
+                cancel: overlay.cancel.clone(),
                 ticket: guide.ticket,
                 profile: guide.profile.clone(),
             });
         outcome.repaint = true;
     }
 
-    fn start_guide_host_key_op(&mut self, op: MachineHostKeyOp, outcome: &mut ClientShellInput) {
-        let Some(ClientShellOverlay::MachineAuth(overlay)) = self.overlay.as_mut() else {
-            return;
+    fn start_guide_host_key_op(&mut self, _op: MachineHostKeyOp, outcome: &mut ClientShellInput) {
+        let profile = match self.overlay.as_ref() {
+            Some(ClientShellOverlay::MachineAuth(overlay)) => match overlay.view.as_ref() {
+                Some(ClientMachineAuthView::AuthGuide(guide)) if !guide.busy => {
+                    Some(guide.profile.clone())
+                }
+                _ => None,
+            },
+            _ => None,
         };
-        let Some(ClientMachineAuthView::AuthGuide(guide)) = overlay.view.as_mut() else {
-            return;
-        };
-        if guide.busy {
-            return;
+        if let Some(profile) = profile {
+            self.open_machine_host_key_review(profile, outcome);
         }
-        guide.busy = true;
-        guide.error = None;
-        guide.message = None;
-        outcome.actions.push(ClientShellAction::MachineHostKeyOp {
-            ticket: guide.ticket,
-            op,
-            host: guide.host.clone(),
-            port: guide.port,
-        });
-        outcome.repaint = true;
     }
 
     /// Moves the password view back to its guide and returns the session
@@ -573,7 +719,11 @@ impl ClientShellState {
         let answer = match self.overlay.as_mut() {
             Some(ClientShellOverlay::MachineAuth(overlay)) => match overlay.view.as_mut() {
                 Some(ClientMachineAuthView::Password(view)) => {
-                    let answer = view.input.as_str().to_owned();
+                    let answer = if view.is_host_key {
+                        "yes".to_owned()
+                    } else {
+                        view.input.as_str().to_owned()
+                    };
                     view.input.clear();
                     Some(answer)
                 }
@@ -602,6 +752,12 @@ impl ClientShellState {
         let Some(ticket) = self.fold_password_into_guide() else {
             return;
         };
+        if let Some(ClientShellOverlay::MachineAuth(overlay)) = self.overlay.as_mut() {
+            overlay.cancel.cancel();
+            if let Some(ClientMachineAuthView::AuthGuide(guide)) = overlay.view.as_mut() {
+                guide.busy = false;
+            }
+        }
         outcome
             .actions
             .push(ClientShellAction::AnswerMachineAuthPrompt {
@@ -629,7 +785,7 @@ impl ClientShellState {
                 .actions
                 .push(ClientShellAction::CancelMachineInteractiveAuth { ticket });
         }
-        self.overlay = None;
+        self.return_from_machine_auth();
         outcome.repaint = true;
     }
 
@@ -682,40 +838,56 @@ impl ClientShellState {
         if view.busy || view.completed {
             return;
         }
+        if op == MachineHostKeyOp::Precollect && view.reviewed.is_none() {
+            view.error = Some(
+                crate::i18n::texts()
+                    .machine_auth
+                    .fingerprint_unavailable
+                    .into(),
+            );
+            outcome.repaint = true;
+            return;
+        }
         view.busy = true;
         view.error = None;
         view.message = None;
         outcome.actions.push(ClientShellAction::MachineHostKeyOp {
+            cancel: overlay.cancel.clone(),
             ticket: view.ticket,
             op,
-            host: view.host.clone(),
-            port: view.port,
+            profile: view.profile.clone(),
+            reviewed: view.reviewed.clone(),
         });
         outcome.repaint = true;
     }
 
     fn trust_host_key_once(&mut self, outcome: &mut ClientShellInput) {
-        let profile_id = match self.overlay.as_ref() {
+        let prepared = match self.overlay.as_ref() {
             Some(ClientShellOverlay::MachineAuth(overlay)) => match overlay.view.as_ref() {
                 Some(ClientMachineAuthView::HostKeyUnknown(view))
                     if !view.busy && !view.completed =>
                 {
-                    view.profile_id.clone()
+                    view.reviewed
+                        .clone()
+                        .zip(view.profile_id.clone())
+                        .map(|(pin, id)| ((*view.profile).clone(), pin, id))
                 }
                 _ => None,
             },
             _ => None,
         };
-        let Some(profile_id) = profile_id else {
+        let Some((profile, pin, id)) = prepared else {
             return;
         };
-        outcome
-            .actions
-            .push(ClientShellAction::ConnectEndpointTrustOnce {
-                endpoint_id: ClientEndpointId::Ssh(profile_id),
-            });
-        self.overlay = None;
-        outcome.repaint = true;
+        let identity = profile.identity_file.first().cloned();
+        let ticket = self.next_machine_auth_ticket();
+        self.open_auth_guide_view(profile, Some(id), Vec::new(), identity, ticket, outcome);
+        if let Some(ClientShellOverlay::MachineAuth(overlay)) = self.overlay.as_mut() {
+            if let Some(ClientMachineAuthView::AuthGuide(guide)) = overlay.view.as_mut() {
+                guide.pin = Some(pin);
+            }
+        }
+        self.start_interactive_auth(outcome);
     }
 
     /// Mouse activation for one rendered machine-auth dialog button.
@@ -730,13 +902,29 @@ impl ClientShellState {
             }
             MachineAuthButton::TrustOnce => self.trust_host_key_once(outcome),
             MachineAuthButton::Abort => {
-                self.overlay = None;
+                self.return_from_machine_auth();
                 outcome.repaint = true;
             }
             MachineAuthButton::RemoveRetry => {
                 self.start_host_key_op(MachineHostKeyOp::Remove, outcome)
             }
-            MachineAuthButton::InteractiveAuth => self.start_interactive_auth(outcome),
+            MachineAuthButton::InteractiveAuth => {
+                let prepared = match self.overlay.as_ref() {
+                    Some(ClientShellOverlay::MachineAuth(overlay)) => match overlay.view.as_ref() {
+                        Some(ClientMachineAuthView::HostKeyUnknown(view)) if !view.busy => {
+                            Some(((*view.profile).clone(), view.profile_id.clone()))
+                        }
+                        _ => None,
+                    },
+                    _ => None,
+                };
+                if let Some((profile, id)) = prepared {
+                    let identity = profile.identity_file.first().cloned();
+                    let ticket = self.next_machine_auth_ticket();
+                    self.open_auth_guide_view(profile, id, Vec::new(), identity, ticket, outcome);
+                }
+                self.start_interactive_auth(outcome);
+            }
             MachineAuthButton::Precollect => {
                 self.start_guide_host_key_op(MachineHostKeyOp::Precollect, outcome)
             }
@@ -753,8 +941,23 @@ impl ClientShellState {
             return false;
         };
         match overlay.view.as_mut() {
-            Some(ClientMachineAuthView::Password(view)) => view.input.insert(text),
+            Some(ClientMachineAuthView::Password(view)) => {
+                if view.is_host_key {
+                    true
+                } else {
+                    view.input.insert(text)
+                }
+            }
             _ => false,
+        }
+    }
+
+    pub(super) fn scroll_machine_auth(&mut self, delta: i16) {
+        if let Some(ClientShellOverlay::MachineAuth(overlay)) = self.overlay.as_mut() {
+            overlay.scroll = overlay
+                .scroll
+                .saturating_add_signed(delta)
+                .min(self.hits.machine_auth_max_scroll.min(u16::MAX as usize) as u16);
         }
     }
 
@@ -764,6 +967,13 @@ impl ClientShellState {
         key: &crate::input::TerminalKey,
         outcome: &mut ClientShellInput,
     ) -> bool {
+        if matches!(self.overlay, Some(ClientShellOverlay::MachineAuth(_)))
+            && matches!(key.code, KeyCode::PageUp | KeyCode::PageDown)
+        {
+            self.scroll_machine_auth(if key.code == KeyCode::PageUp { -5 } else { 5 });
+            outcome.repaint = true;
+            return true;
+        }
         enum ViewKind {
             HostKeyUnknown {
                 locked: bool,
@@ -806,9 +1016,13 @@ impl ClientShellState {
                 once_available,
             } => {
                 if code == KeyCode::Esc {
-                    self.overlay = None;
+                    self.return_from_machine_auth();
                 } else if !locked && plain {
                     match code {
+                        KeyCode::Char('i') => self.activate_machine_auth_button(
+                            MachineAuthButton::InteractiveAuth,
+                            outcome,
+                        ),
                         KeyCode::Char('t') => {
                             self.start_host_key_op(MachineHostKeyOp::Precollect, outcome);
                         }
@@ -821,7 +1035,7 @@ impl ClientShellState {
             }
             ViewKind::HostKeyChanged { locked } => {
                 if code == KeyCode::Esc {
-                    self.overlay = None;
+                    self.return_from_machine_auth();
                 } else if !locked && plain && code == KeyCode::Char('r') {
                     self.start_host_key_op(MachineHostKeyOp::Remove, outcome);
                 }
@@ -890,7 +1104,9 @@ pub(super) fn render_machine_auth_overlay(
         Some(ClientMachineAuthView::HostKeyUnknown(view)) => render_host_key_unknown(b, view, cx),
         Some(ClientMachineAuthView::HostKeyChanged(view)) => render_host_key_changed(b, view, cx),
         Some(ClientMachineAuthView::AuthGuide(view)) => render_auth_guide(b, view, cx),
-        Some(ClientMachineAuthView::Password(view)) => render_password_prompt(b, view, cx),
+        Some(ClientMachineAuthView::Password(view)) => {
+            render_password_prompt(b, view, overlay.scroll, cx)
+        }
         None => None,
     }
 }
@@ -1032,6 +1248,11 @@ fn render_host_key_unknown(
     let locked = view.busy || view.completed;
     let (labels, buttons): (Vec<&str>, Vec<MachineAuthButton>) = if view.completed {
         (vec![t.close_button], vec![MachineAuthButton::Abort])
+    } else if view.reviewed.is_none() && !view.busy {
+        (
+            vec![t.auth_interactive_button, t.abort_button],
+            vec![MachineAuthButton::InteractiveAuth, MachineAuthButton::Abort],
+        )
     } else if view.profile_id.is_some() {
         (
             vec![t.trust_remember_button, t.trust_once_button, t.abort_button],
@@ -1369,11 +1590,96 @@ fn render_auth_guide(
     })
 }
 
+fn render_ssh_host_prompt(
+    b: &mut Buffer,
+    view: &ClientPasswordView,
+    scroll: u16,
+    cx: &super::feedback::ChromeContext<'_>,
+) -> Option<OverlayRender> {
+    use ratatui::widgets::{Paragraph, Widget, Wrap};
+    let p = cx.palette;
+    let t = &crate::i18n::texts().machine_auth;
+    let (popup, inner) = modal_panel(b, crate::ui::ModalSize::Large, p.accent, cx)?;
+    let layout = super::page::PageLayout::new(inner, 0, false, true);
+    put_text(
+        b,
+        layout.header.x,
+        layout.header.y,
+        layout.header.width,
+        t.tofu_title,
+        Style::default().fg(p.accent).add_modifier(Modifier::BOLD),
+    );
+    let clean = view
+        .prompt
+        .chars()
+        .filter(|ch| !ch.is_control() || *ch == '\n')
+        .collect::<String>();
+    let lines = clean
+        .lines()
+        .map(|line| (line.width(), ratatui::text::Line::from(line.to_owned())))
+        .collect::<Vec<_>>();
+    let metrics = crate::ui::display_lines_scroll_metrics(&lines, scroll, layout.content);
+    Paragraph::new(lines.into_iter().map(|(_, line)| line).collect::<Vec<_>>())
+        .style(Style::default().fg(p.teal))
+        .wrap(Wrap { trim: false })
+        .scroll((
+            usize::from(scroll).min(metrics.max_offset_from_bottom) as u16,
+            0,
+        ))
+        .render(layout.content, b);
+    let labels = [t.trust_remember_button, t.abort_button];
+    let buttons = [
+        MachineAuthButton::PasswordSubmit,
+        MachineAuthButton::PasswordCancel,
+    ];
+    let rects = modal_button_row(layout.actions, &labels, 2);
+    let mut hits = Vec::new();
+    for ((rect, label), button) in rects.iter().zip(labels).zip(buttons) {
+        modal_button(
+            b,
+            *rect,
+            label,
+            if button == MachineAuthButton::PasswordSubmit {
+                crate::ui::ModalButtonTone::Primary
+            } else {
+                crate::ui::ModalButtonTone::Secondary
+            },
+            crate::ui::ModalButtonState::Normal,
+            p,
+        );
+        hits.push((*rect, button));
+    }
+    render_key_hints(
+        b,
+        layout.footer,
+        &[
+            ("Enter".into(), t.hint_trust.into()),
+            (
+                "PgUp/PgDn".into(),
+                crate::i18n::texts().global_menu.footer_select.into(),
+            ),
+            ("Esc".into(), t.hint_abort.into()),
+        ],
+        p,
+        cx.components,
+    );
+    Some(OverlayRender {
+        area: popup,
+        machine_auth_actions: hits,
+        machine_auth_max_scroll: metrics.max_offset_from_bottom,
+        ..OverlayRender::default()
+    })
+}
+
 fn render_password_prompt(
     b: &mut Buffer,
     view: &ClientPasswordView,
+    scroll: u16,
     cx: &super::feedback::ChromeContext<'_>,
 ) -> Option<OverlayRender> {
+    if view.is_host_key {
+        return render_ssh_host_prompt(b, view, scroll, cx);
+    }
     let p = cx.palette;
     let t = &crate::i18n::texts().machine_auth;
     let (popup, inner) = modal_panel(

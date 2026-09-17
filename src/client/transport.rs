@@ -54,6 +54,7 @@ pub(super) fn server_reader_thread(
         stopped: should_quit,
     };
     let mut surface_decoder = surface_reuse.then(protocol::surface_reuse::Decoder::default);
+    let mut view_decoder = protocol::views::Decoder::default();
     loop {
         if should_quit.load(Ordering::Acquire) {
             break;
@@ -69,6 +70,27 @@ pub(super) fn server_reader_thread(
         });
         match message {
             Ok(msg) => {
+                if let ServerMessage::EndpointControl { kind, data } = &msg {
+                    if kind == protocol::views::SURFACE_KIND {
+                        match view_decoder.decode(data) {
+                            Ok(Some(view)) => {
+                                if event_tx
+                                    .blocking_send(ClientLoopEvent::ViewSurface {
+                                        endpoint_id: endpoint_id.clone(),
+                                        generation,
+                                        view: Box::new(view),
+                                    })
+                                    .is_err()
+                                {
+                                    break;
+                                }
+                            }
+                            Ok(None) => {}
+                            Err(error) => tracing::warn!(%error, "忽略无效的可选视图帧"),
+                        }
+                        continue;
+                    }
+                }
                 if event_tx
                     .blocking_send(ClientLoopEvent::ServerMessage {
                         endpoint_id: endpoint_id.clone(),

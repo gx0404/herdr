@@ -343,7 +343,7 @@ fn snippet_run_multi_machine_fans_out_per_endpoint() {
 #[test]
 fn palette_lists_snippet_and_import_actions() {
     let mut state = state();
-    state.toggle_global_menu();
+    state.open_command_search();
     let run_row = palette_row_index(&state, "snippets:run");
     let mut outcome = ClientShellInput::default();
     state.activate_palette_item(run_row, &mut outcome);

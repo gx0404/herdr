@@ -485,6 +485,12 @@ impl TerminalRuntime {
         self.0.wheel_routing()
     }
 
+    pub(crate) fn capture_text_snapshot(
+        &self,
+    ) -> Option<crate::terminal::text_snapshot::FrozenText> {
+        self.0.capture_text_snapshot()
+    }
+
     pub(crate) fn screen_text_snapshot(
         &self,
     ) -> Option<(

@@ -3,6 +3,7 @@ mod id;
 mod runtime;
 mod runtime_registry;
 pub mod state;
+pub(crate) mod text_snapshot;
 mod title;
 
 pub(crate) use history_read::{merge_scrolled_up, snapshot_text, ScreenSnapshot, UpwardMerge};
