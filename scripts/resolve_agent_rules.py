@@ -170,7 +170,15 @@ def resolve_rules(root: Path, paths: Sequence[str], tasks: Sequence[str] = ()) -
                 f"scope 同时命中领域路由与 root_only：{path}; rules={[route.id for route in path_routes]}"
             )
         if not path_routes and not root_only:
-            raise RuleManifestError(f"scope 路径未声明领域路由或 root_only：{path}")
+            message = f"scope 路径未声明领域路由或 root_only：{path}"
+            candidate = resolved_root / path
+            if not candidate.exists():
+                message = f"scope 路径不存在且未声明领域路由或 root_only：{path}"
+                sibling_directory = candidate.with_suffix("")
+                if candidate.suffix and sibling_directory.is_dir():
+                    directory = sibling_directory.relative_to(resolved_root).as_posix()
+                    message += f"；同名目录存在，请检查是否应使用 {directory}/"
+            raise RuleManifestError(message)
         matched_ids.update(route.id for route in path_routes)
     matched_ids.update(route.id for route in routes.rules if any(task in route.tasks for task in normalized_tasks))
     return tuple(sorted((route for route in routes.rules if route.id in matched_ids), key=lambda route: route.id))
