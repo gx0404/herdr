@@ -23,7 +23,7 @@ pub(crate) use env::{
 };
 pub(crate) use registry::{
     codex_layout_binary_path, command_available, experimental_letta_integration_status,
-    hermes_install_layout_available, installed_integration_statuses, integration_recommendations,
+    installed_integration_statuses, integration_recommendations, integration_target_available,
     integration_target_label, print_outdated_update_notice,
 };
 pub(crate) use types::{

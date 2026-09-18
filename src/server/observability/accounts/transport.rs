@@ -75,6 +75,17 @@ fn profile_variable(agent: &str) -> Option<&'static str> {
     }
 }
 
+/// Layout binaries are npm shims (`#!/usr/bin/env node`); prepending the
+/// layout's bin dir lets the shebang interpreter resolve even when the
+/// detached server PATH cannot see the version-manager directory.
+fn prepend_layout_path(
+    existing: &std::ffi::OsStr,
+    dir: &std::path::Path,
+) -> Option<std::ffi::OsString> {
+    std::env::join_paths(std::iter::once(dir.to_path_buf()).chain(std::env::split_paths(existing)))
+        .ok()
+}
+
 fn command(
     provider: &Provider,
     account: &UsageAccountConfig,
@@ -88,15 +99,25 @@ fn command(
     }
     // Detached servers may not inherit version-manager PATHs; fall back to
     // the layout-resolved binary for CLIs installed outside PATH.
-    let program = if crate::integration::command_available(provider.command) {
-        std::borrow::Cow::Borrowed(provider.command)
-    } else {
+    let layout_fallback = if crate::integration::command_available(provider.command) {
+        None
+    } else if provider.command == "codex" {
         crate::integration::codex_layout_binary_path()
-            .filter(|_| provider.command == "codex")
-            .map(|path| std::borrow::Cow::Owned(path.to_string_lossy().into_owned()))
-            .unwrap_or_else(|| std::borrow::Cow::Borrowed(provider.command))
+    } else {
+        None
+    };
+    let program = match &layout_fallback {
+        Some(path) => std::borrow::Cow::Owned(path.to_string_lossy().into_owned()),
+        None => std::borrow::Cow::Borrowed(provider.command),
     };
     let mut command = crate::noninteractive_process::command(program.as_ref());
+    if let Some(dir) = layout_fallback.as_ref().and_then(|path| path.parent()) {
+        if let Some(prefixed) =
+            prepend_layout_path(&std::env::var_os("PATH").unwrap_or_default(), dir)
+        {
+            command.env("PATH", prefixed);
+        }
+    }
     crate::platform::configure_usage_probe_command(&mut command);
     command
         .current_dir(&directory.0)
@@ -856,4 +877,24 @@ pub(super) fn kimi(
     let identity = read("/api/v1/oauth/userinfo")?;
     let usage = read("/api/v1/oauth/usage")?;
     Ok((identity, usage))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn layout_fallback_prefixes_its_bin_dir_onto_the_child_path() {
+        let existing = std::env::join_paths(["/usr/bin", "/bin"]).expect("join fixture path");
+        let dir = std::path::PathBuf::from("/home/x/.nvm/versions/node/v24/bin");
+        let prefixed = prepend_layout_path(&existing, &dir).expect("prepend layout path");
+        let split: Vec<_> = std::env::split_paths(&prefixed).collect();
+        assert_eq!(
+            split.first(),
+            Some(&dir),
+            "the layout bin dir must come first so `#!/usr/bin/env node` resolves"
+        );
+        assert_eq!(split[1], std::path::Path::new("/usr/bin"));
+        assert_eq!(split[2], std::path::Path::new("/bin"));
+    }
 }

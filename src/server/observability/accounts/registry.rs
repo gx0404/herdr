@@ -71,6 +71,33 @@ fn availability_cache() -> &'static Mutex<HashMap<&'static str, (Instant, bool)>
     CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+/// Providers that share a client-facing integration target reuse the
+/// settings-page detection (multi-alias PATH scan plus layout fallbacks) so
+/// both surfaces agree on what "installed" means.
+fn integration_target_for(agent: &str) -> Option<crate::api::schema::IntegrationTarget> {
+    use crate::api::schema::IntegrationTarget;
+    match agent {
+        "codex" => Some(IntegrationTarget::Codex),
+        "claude" => Some(IntegrationTarget::Claude),
+        "kimi" => Some(IntegrationTarget::Kimi),
+        "opencode" => Some(IntegrationTarget::Opencode),
+        "github-copilot" => Some(IntegrationTarget::Copilot),
+        "devin" => Some(IntegrationTarget::Devin),
+        "droid" => Some(IntegrationTarget::Droid),
+        "kilo" => Some(IntegrationTarget::Kilo),
+        "hermes" => Some(IntegrationTarget::Hermes),
+        "qodercli" => Some(IntegrationTarget::Qodercli),
+        "qwen" => Some(IntegrationTarget::Qwen),
+        "cursor" => Some(IntegrationTarget::Cursor),
+        "mastracode" => Some(IntegrationTarget::Mastracode),
+        "antigravity" => Some(IntegrationTarget::AntigravityCli),
+        "grok" => Some(IntegrationTarget::Grok),
+        "omp" => Some(IntegrationTarget::Omp),
+        "pi" => Some(IntegrationTarget::Pi),
+        _ => None,
+    }
+}
+
 /// Whether the provider's official CLI is installed locally. PATH lookups
 /// hit the filesystem, so results are cached briefly and reused across the
 /// provider-list polling cadence.
@@ -85,12 +112,10 @@ pub(super) fn provider_installed(provider: &Provider) -> bool {
     }
     // Version-manager installs (nvm/volta/standalone) are invisible to a
     // detached server's PATH; the integration layout checks cover them.
-    let value = crate::integration::command_available(provider.command)
-        || match provider.command {
-            "codex" => crate::integration::codex_layout_binary_path().is_some(),
-            "hermes" => crate::integration::hermes_install_layout_available(),
-            _ => false,
-        };
+    let value = match integration_target_for(provider.agent) {
+        Some(target) => crate::integration::integration_target_available(target),
+        None => crate::integration::command_available(provider.command),
+    };
     if let Ok(mut cache) = availability_cache().lock() {
         cache.insert(provider.agent, (now, value));
     }
@@ -118,5 +143,32 @@ mod tests {
             .collect::<std::collections::HashSet<_>>();
         assert_eq!(unique.len(), PROVIDERS.len());
         assert!(PROVIDERS.iter().all(|p| p.source.starts_with("https://")));
+    }
+
+    #[test]
+    fn integration_detection_covers_shared_targets_and_only_them() {
+        // Providers outside the frozen integration enum must not invent a
+        // mapping; the shared ones must match the settings-page detection.
+        let unmapped = PROVIDERS
+            .iter()
+            .map(|p| p.agent)
+            .filter(|agent| integration_target_for(agent).is_none())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            unmapped,
+            vec!["gemini", "cline", "kiro", "amp", "letta", "maki"],
+            "providers without an integration target must stay single-command"
+        );
+        for provider in PROVIDERS {
+            if let Some(target) = integration_target_for(provider.agent) {
+                assert_eq!(
+                    crate::integration::integration_target_label(target),
+                    provider
+                        .agent
+                        .replace("github-copilot", "copilot")
+                        .replace("antigravity", "antigravity-cli")
+                );
+            }
+        }
     }
 }
