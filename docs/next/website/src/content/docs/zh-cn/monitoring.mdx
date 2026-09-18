@@ -57,7 +57,9 @@ cooldown_seconds = 60
 
 ## 账号绑定与展示
 
-账号页只列出本机已安装官方 CLI 的厂商——通过 server PATH 及受支持的安装布局（codex 的 standalone/nvm/volta/bun、Hermes 布局）解析。`account.usage.providers` 为每个厂商返回 `installed` 标记；旧版 server 缺少该字段时仍显示完整注册表。已安装厂商会在总览按 `cli_refresh_seconds` 自动查询并带退避；手动刷新始终重试。
+账号页只列出本机已安装官方 CLI 的厂商——检测与设置页的集成检测同源（多别名 PATH 扫描 + codex 的 standalone/nvm/volta/bun、Hermes 等安装布局），两处结论一致；显式配置了账号的厂商始终保留。`account.usage.providers` 为每个厂商返回 `installed` 标记；旧版 server 缺少该字段时仍显示完整注册表。已安装厂商会在总览按 `cli_refresh_seconds` 自动查询并带退避；手动刷新始终重试。codex 通过安装布局定位时，探测子进程会把该布局的 bin 目录前置到 `PATH`，使 npm shim 脚本能解析到自身的 node 解释器。
+
+Agents 面板头部的「用量」按钮与命令搜索还能打开浮动用量仪表盘：以可拖动、可缩放的窗口展示跨账号总览，`Esc` 关闭，打开期间自动刷新。
 
 鼠标停留在 Agent 行或 CLI 标题上，可以打开账号用量浮层。设置支持仪表盘或表格，以及悬浮、页面或两者同时显示。浮层中的「确认账号绑定」将当前窗格与选定账号关联。品牌相同不代表账号相同，未绑定时不会猜测账号。
 

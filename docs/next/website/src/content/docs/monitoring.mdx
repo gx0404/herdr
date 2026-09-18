@@ -57,7 +57,9 @@ cooldown_seconds = 60
 
 Hover an agent row or CLI title to inspect usage. Choose dashboard/table and hover/page/both in settings. Select and explicitly bind the account to the pane. A shared vendor name does not identify an account.
 
-The accounts page lists only providers whose official CLI is installed on the connected host — resolved through the server PATH plus supported install layouts (codex standalone/nvm/volta/bun, Hermes). `account.usage.providers` reports an `installed` flag per provider; older servers omit the field and keep listing the full registry. Installed providers are queried automatically on the overview at the configured `cli_refresh_seconds` with bounded backoff; manual refresh always retries.
+The agents panel's usage button and command search also open a floating usage dashboard: the cross-account overview in a movable, resizable window. Drag its borders like other pages; `Esc` closes it, and it refreshes automatically while open.
+
+The accounts page lists only providers whose official CLI is installed on the connected host — resolved with the same multi-alias PATH and install-layout detection as the integrations settings page (codex standalone/nvm/volta/bun, Hermes), so both surfaces agree. Providers with an explicitly configured account stay listed. `account.usage.providers` reports an `installed` flag per provider; older servers omit the field and keep listing the full registry. Installed providers are queried automatically on the overview at the configured `cli_refresh_seconds` with bounded backoff; manual refresh always retries. When a codex CLI is found through an install layout, the probe runs it with that layout's bin directory first on `PATH` so npm-shim CLIs resolve their interpreter.
 
 Both formats support wheel scrolling; the account page also supports the arrow keys for quota windows below the viewport. The usage popover can appear over a focused monitor panel and captures its own input without activating background cards or process rows.
 

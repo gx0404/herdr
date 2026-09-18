@@ -37,7 +37,9 @@ NVIDIA は NVML、Linux の他の GPU は公開された DRM/sysfs、Windows は
 
 ## 設定とアカウント
 
-アカウントページは、接続先ホストに公式 CLI がインストールされているプロバイダーのみ表示します（server の PATH と、codex の standalone/nvm/volta/bun など対応レイアウトで判定）。`account.usage.providers` はプロバイダーごとに `installed` フラグを返し、旧 server ではこのフィールドが省略され、レジストリ全体が表示されます。インストール済みプロバイダーは `cli_refresh_seconds` 間隔で自動照会され、手動更新は常に再試行します。
+アカウントページは、接続先ホストに公式 CLI がインストールされているプロバイダーのみ表示します。判定は統合設定ページと同じ多别名 PATH スキャンとインストールレイアウト確認（codex の standalone/nvm/volta/bun、Hermes など）を使い、両画面の結果が一致します。アカウントを明示設定したプロバイダーは常に表示されます。`account.usage.providers` はプロバイダーごとに `installed` フラグを返し、旧 server ではこのフィールドが省略され、レジストリ全体が表示されます。インストール済みプロバイダーは `cli_refresh_seconds` 間隔で自動照会され、手動更新は常に再試行します。インストールレイアウト経由で codex CLI を見つけた場合、プローブはその bin ディレクトリを `PATH` 先頭に付与して実行し、npm shim のインタープリター解決を保証します。
+
+Agents パネルの「usage」ボタンとコマンド検索からは、フローティングの使用量ダッシュボードを開けます。ドラッグ・リサイズ可能なウィンドウでアカウント横断の概要を表示し、`Esc` で閉じ、開いている間は自動更新されます。
 
 `monitor` の `interval_ms`、`history_minutes`、`visible`、`card_height`、`hidden_devices`、`alerts_enabled` を設定できます。`[[monitor.alerts]]` は `metric`（cpu / memory / gpu / disk）、`threshold`、`duration_seconds`、`cooldown_seconds` を持ちます。
 
