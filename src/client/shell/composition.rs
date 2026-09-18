@@ -894,6 +894,7 @@ impl ClientShellState {
                     &self.active_endpoint_id,
                     &self.config.keybinds,
                     &self.notification_history,
+                    &self.observability,
                     &cx,
                 )
                 .unwrap_or_else(|| render::render_minimum_overlay(&mut composed, &cx));

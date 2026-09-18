@@ -91,7 +91,7 @@ pub(super) fn render_expanded(
                 Some(super::feedback::ChromeHover::EndpointAgentRow(endpoint_id, pane_id))
                     if endpoint_id == &row.endpoint_id && pane_id == &row.agent.pane_id
             );
-            super::agent_sidebar::render_agent_row(buffer, rect, &row.agent, config, hovered);
+            super::agent_sidebar::render_agent_row(buffer, rect, &row.agent, config, hovered, None);
             if row.stale {
                 buffer.set_style(
                     rect,

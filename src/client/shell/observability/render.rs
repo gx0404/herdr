@@ -1154,7 +1154,7 @@ fn metric_value(metric: &UsageMetric, now_ms: u64, compact: bool) -> String {
     }
 }
 
-fn usage_table(
+pub(super) fn usage_table(
     buffer: &mut Buffer,
     area: Rect,
     state: &State,

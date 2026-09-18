@@ -294,6 +294,7 @@ pub const TEXTS: Texts = Texts {
         sort_grouped: "按工作区分组",
         sort_priority: "按优先级",
         no_matching_agents: "  没有匹配的 agent",
+        agent_usage: "用量",
     },
     status: StatusTexts {
         blocked: "已阻塞",

@@ -88,6 +88,7 @@ pub(crate) fn render_client_overlay(
     active_endpoint_id: &ClientEndpointId,
     k: &LiveKeybindConfig,
     history: &std::collections::VecDeque<ClientNotificationRecord>,
+    usage: &super::observability::State,
     cx: &ChromeContext<'_>,
 ) -> Option<OverlayRender> {
     if !matches!(
@@ -208,8 +209,81 @@ pub(crate) fn render_client_overlay(
         ClientShellOverlay::CommandPalette(v) => {
             super::command_palette::render_command_palette(b, v, cx)
         }
+        ClientShellOverlay::UsageDashboard => render_usage_dashboard_overlay(b, usage, cx),
         ClientShellOverlay::ContextMenu(_) => None,
     }
+}
+
+/// Floating usage dashboard: the accounts overview table inside the shared
+/// modal frame, so it supports the same drag-to-float window behavior as
+/// settings and the command palette. Display-only; data refreshes through
+/// the observability polling loop while the overlay is open.
+fn render_usage_dashboard_overlay(
+    b: &mut Buffer,
+    usage: &super::observability::State,
+    cx: &ChromeContext<'_>,
+) -> Option<OverlayRender> {
+    let (outer, inner) = modal_panel(b, crate::ui::ModalSize::Large, cx.palette.accent, cx)?;
+    let tr = super::observability::tr;
+    put_text(
+        b,
+        inner.x,
+        inner.y,
+        inner.width,
+        tr("Usage dashboard", "用量仪表盘"),
+        Style::default()
+            .fg(cx.palette.text)
+            .add_modifier(Modifier::BOLD),
+    );
+    if inner.height > 2 {
+        let body = Rect::new(
+            inner.x,
+            inner.y + 1,
+            inner.width,
+            inner.height.saturating_sub(2),
+        );
+        if !usage.usage.enabled {
+            put_text(
+                b,
+                body.x,
+                body.y,
+                body.width,
+                tr(
+                    "Account usage is disabled in settings.",
+                    "账号用量已在设置中关闭。",
+                ),
+                Style::default().fg(cx.palette.overlay0),
+            );
+        } else if usage.accounts.is_empty() {
+            put_text(
+                b,
+                body.x,
+                body.y,
+                body.width,
+                tr("Waiting for account usage data…", "等待账号用量数据…"),
+                Style::default().fg(cx.palette.overlay0),
+            );
+        } else {
+            super::observability::render_usage_table(b, body, usage, cx.palette);
+        }
+    }
+    if inner.height > 1 {
+        put_text(
+            b,
+            inner.x,
+            inner.y + inner.height.saturating_sub(1),
+            inner.width,
+            tr(
+                "esc close · drag edges to resize",
+                "esc 关闭 · 拖动边缘缩放",
+            ),
+            Style::default().fg(cx.palette.overlay0),
+        );
+    }
+    Some(OverlayRender {
+        area: outer,
+        ..OverlayRender::default()
+    })
 }
 
 pub(crate) fn render_minimum_overlay(b: &mut Buffer, cx: &ChromeContext<'_>) -> OverlayRender {

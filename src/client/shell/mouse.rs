@@ -2658,6 +2658,24 @@ impl ClientShellState {
                 if self.handle_endpoint_agent_click(point, outcome) {
                     return;
                 }
+                if let Some((_, key)) = self
+                    .hits
+                    .agent_group_toggles
+                    .iter()
+                    .find(|(rect, _)| super::contains(*rect, point))
+                {
+                    let endpoint_id = self.active_endpoint_id.clone();
+                    let key = key.clone();
+                    self.toggle_collapsed_group(&endpoint_id, key);
+                    self.agent_scroll = 0;
+                    outcome.repaint = true;
+                    self.persist_chrome_preferences(outcome);
+                    return;
+                }
+                if super::contains(self.hits.agent_usage_toggle, point) {
+                    self.toggle_usage_dashboard(outcome);
+                    return;
+                }
                 let agent_pane_id = self
                     .hits
                     .agents

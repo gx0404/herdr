@@ -49,11 +49,131 @@ pub(super) fn ordered_agent_pane_ids(
         .collect()
 }
 
+/// One rendered line of the agents panel: a collapsible workspace header or
+/// an agent row nested under its workspace.
+pub(super) enum AgentPanelEntry {
+    Workspace {
+        key: String,
+        label: String,
+        agent_count: usize,
+        status: crate::api::schema::AgentStatus,
+        collapsed: bool,
+    },
+    Agent {
+        row: AgentRow,
+        /// `Some(last_child)` in the grouped view for tree prefixes.
+        tree: Option<bool>,
+    },
+}
+
+pub(super) fn agent_group_key(workspace_id: &str) -> String {
+    format!("agent-panel:{workspace_id}")
+}
+
+fn workspace_agent_pane_ids(
+    snapshot: &ClientShellSnapshot,
+    workspace_id: &str,
+    sort: crate::config::AgentPanelSortConfig,
+) -> Vec<String> {
+    let agents = snapshot
+        .agents
+        .iter()
+        .filter(|agent| agent.workspace_id == workspace_id)
+        .collect::<Vec<_>>();
+    match sort {
+        // Server already groups snapshot.agents by workspace; keep that
+        // order instead of agent_order, which only drives the filtered view.
+        crate::config::AgentPanelSortConfig::Spaces => agents
+            .into_iter()
+            .map(|agent| agent.pane_id.clone())
+            .collect(),
+        crate::config::AgentPanelSortConfig::Priority => {
+            let mut sorted = agents;
+            sorted.sort_by_key(|agent| {
+                (
+                    std::cmp::Reverse(status_priority(agent.agent_status)),
+                    std::cmp::Reverse(agent.state_change_seq),
+                )
+            });
+            sorted
+                .into_iter()
+                .map(|agent| agent.pane_id.clone())
+                .collect()
+        }
+    }
+}
+
+/// Workspace-grouped entries for the unfiltered view; a status-filtered
+/// view (`agent_view_label`) stays flat because the grouping dimension is
+/// already the filter's purpose.
+pub(super) fn agent_panel_entries(
+    snapshot: &ClientShellSnapshot,
+    config: &ClientShellConfig,
+    collapsed_groups: &std::collections::HashSet<String>,
+) -> Vec<AgentPanelEntry> {
+    if snapshot.agent_view_label.is_some() {
+        return agent_rows(snapshot, config, None)
+            .into_iter()
+            .map(|row| AgentPanelEntry::Agent { row, tree: None })
+            .collect();
+    }
+    let mut entries = Vec::new();
+    for workspace in &snapshot.workspaces {
+        let rows: Vec<AgentRow> = workspace_agent_pane_ids(
+            snapshot,
+            workspace.workspace_id.as_str(),
+            config.agent_panel_sort,
+        )
+        .into_iter()
+        .filter_map(|pane_id| {
+            let mut row = agent_row(snapshot, &pane_id, config, None)?;
+            // The workspace header already carries the workspace identity;
+            // drop the now-redundant token so children stay readable.
+            for line in &mut row.rows {
+                line.retain(|token| {
+                    !matches!(token.kind, crate::ui::ResolvedTokenKind::Workspace(_))
+                });
+            }
+            row.rows.retain(|line| !line.is_empty());
+            Some(row)
+        })
+        .collect();
+        if rows.is_empty() {
+            continue;
+        }
+        let key = agent_group_key(&workspace.workspace_id);
+        let collapsed = collapsed_groups.contains(&key);
+        entries.push(AgentPanelEntry::Workspace {
+            key,
+            label: workspace.label.clone(),
+            agent_count: rows.len(),
+            status: rows
+                .iter()
+                .map(|row| row.status)
+                .max_by_key(|status| status_priority(*status))
+                .unwrap_or(crate::api::schema::AgentStatus::Idle),
+            collapsed,
+        });
+        if collapsed {
+            continue;
+        }
+        let last = rows.len().saturating_sub(1);
+        for (index, row) in rows.into_iter().enumerate() {
+            entries.push(AgentPanelEntry::Agent {
+                row,
+                tree: Some(index == last),
+            });
+        }
+    }
+    entries
+}
+
 pub(super) fn render_agent_panel(
     buffer: &mut Buffer,
     area: Rect,
     snapshot: &ClientShellSnapshot,
     config: &ClientShellConfig,
+    collapsed_groups: &std::collections::HashSet<String>,
     agent_scroll: &mut usize,
     chrome_hover: Option<&super::feedback::ChromeHover>,
     hits: &mut ShellHitMap,
@@ -69,11 +189,20 @@ pub(super) fn render_agent_panel(
         return;
     }
 
-    let rows = agent_rows(snapshot, config, None);
+    let mut entries = agent_panel_entries(snapshot, config, collapsed_groups);
+    // Degraded mode for very short panels: without room for a workspace
+    // header plus at least one agent row, fall back to the flat list so
+    // agents stay visible and clickable.
+    if area.height.saturating_sub(3) < 3 {
+        entries = agent_rows(snapshot, config, None)
+            .into_iter()
+            .map(|row| AgentPanelEntry::Agent { row, tree: None })
+            .collect();
+    }
     render_agent_list(
         buffer,
         area,
-        &rows,
+        &entries,
         snapshot
             .agent_view_label
             .as_ref()
@@ -85,15 +214,98 @@ pub(super) fn render_agent_panel(
             Some(super::feedback::ChromeHover::AgentScrollbarThumb)
         ),
         hits,
-        |row| row.rows.len(),
-        |buffer, rect, row, hits| {
-            hits.agents.push((rect, row.pane_id.clone()));
-            let hovered = matches!(
-                chrome_hover,
-                Some(super::feedback::ChromeHover::AgentRow(id)) if id == &row.pane_id
-            );
-            render_agent_row(buffer, rect, row, config, hovered);
+        |entry| match entry {
+            AgentPanelEntry::Workspace { .. } => 1,
+            AgentPanelEntry::Agent { row, .. } => row.rows.len(),
         },
+        |buffer, rect, entry, hits| match entry {
+            AgentPanelEntry::Workspace {
+                key,
+                label,
+                agent_count,
+                status,
+                collapsed,
+            } => {
+                let hovered = matches!(
+                    chrome_hover,
+                    Some(super::feedback::ChromeHover::AgentGroupRow(id)) if id == key
+                );
+                render_agent_group_header(
+                    buffer,
+                    rect,
+                    label,
+                    *agent_count,
+                    *status,
+                    *collapsed,
+                    config,
+                    hovered,
+                );
+                hits.agent_group_toggles.push((rect, key.clone()));
+            }
+            AgentPanelEntry::Agent { row, tree } => {
+                hits.agents.push((rect, row.pane_id.clone()));
+                let hovered = matches!(
+                    chrome_hover,
+                    Some(super::feedback::ChromeHover::AgentRow(id)) if id == &row.pane_id
+                );
+                render_agent_row(buffer, rect, row, config, hovered, *tree);
+            }
+        },
+    );
+}
+
+fn render_agent_group_header(
+    buffer: &mut Buffer,
+    rect: Rect,
+    label: &str,
+    agent_count: usize,
+    status: crate::api::schema::AgentStatus,
+    collapsed: bool,
+    config: &ClientShellConfig,
+    hovered: bool,
+) {
+    let palette = &config.palette;
+    if hovered {
+        buffer.set_style(rect, Style::default().bg(palette.surface0));
+    }
+    put_text(
+        buffer,
+        rect.x + 1,
+        rect.y,
+        1,
+        status_icon(status, config.status_indicators),
+        Style::default().fg(status_color(status, palette)),
+    );
+    let count = format!("· {agent_count}");
+    let chevron_x = rect.right().saturating_sub(1);
+    let count_width = display_width(&count).min(rect.width as usize) as u16;
+    let count_x = chevron_x.saturating_sub(count_width + 1);
+    let label_width = count_x.saturating_sub(rect.x + 3);
+    put_text(
+        buffer,
+        rect.x + 3,
+        rect.y,
+        label_width,
+        label,
+        Style::default()
+            .fg(palette.text)
+            .add_modifier(Modifier::BOLD),
+    );
+    put_text(
+        buffer,
+        count_x,
+        rect.y,
+        count_width,
+        &count,
+        Style::default().fg(palette.overlay0),
+    );
+    put_text(
+        buffer,
+        chevron_x,
+        rect.y,
+        1,
+        if collapsed { "▸" } else { "▾" },
+        Style::default().fg(palette.accent),
     );
 }
 
@@ -174,6 +386,42 @@ pub(super) fn render_agent_panel_header(
             })
             .add_modifier(Modifier::BOLD),
     );
+    // Usage-dashboard launcher sits left of the sort label; dropped when the
+    // header is too narrow to keep both readable.
+    let usage_label = texts.sidebar.agent_usage;
+    let usage_width = display_width(usage_label) as u16;
+    let usage_rect = Rect::new(
+        sort_rect.x.saturating_sub(usage_width + 1),
+        area.y + 1,
+        usage_width,
+        1,
+    );
+    let usage_fits = usage_rect.x > area.x + display_width(texts.sidebar.agents) as u16 + 2;
+    hits.agent_usage_toggle = if config.mouse_capture && usage_fits {
+        usage_rect
+    } else {
+        Rect::default()
+    };
+    if usage_fits {
+        let usage_hovered = matches!(
+            chrome_hover,
+            Some(super::feedback::ChromeHover::AgentUsageToggle)
+        );
+        put_text(
+            buffer,
+            usage_rect.x,
+            usage_rect.y,
+            usage_rect.width,
+            usage_label,
+            Style::default()
+                .fg(if usage_hovered {
+                    config.palette.text
+                } else {
+                    config.palette.overlay0
+                })
+                .add_modifier(Modifier::BOLD),
+        );
+    }
     true
 }
 
@@ -358,6 +606,7 @@ pub(super) fn render_agent_row(
     row: &AgentRow,
     config: &ClientShellConfig,
     hovered: bool,
+    tree_last_child: Option<bool>,
 ) {
     let palette = &config.palette;
     let row_style = if row.focused {
@@ -391,8 +640,30 @@ pub(super) fn render_agent_row(
         row.rows.clone()
     };
     for (index, tokens) in rows.iter().take(rect.height as usize).enumerate() {
-        let indent = if index == 0 { 1 } else { 3 };
+        let (indent, prefix) = match tree_last_child {
+            Some(last_child) => (
+                0,
+                if index == 0 {
+                    if last_child {
+                        "   └─ "
+                    } else {
+                        "   ├─ "
+                    }
+                } else if last_child {
+                    "        "
+                } else {
+                    "   │    "
+                },
+            ),
+            None => (if index == 0 { 1 } else { 3 }, ""),
+        };
         let mut spans = vec![ratatui::text::Span::raw(" ".repeat(indent))];
+        if !prefix.is_empty() {
+            spans.push(ratatui::text::Span::styled(
+                prefix,
+                Style::default().fg(palette.overlay0),
+            ));
+        }
         spans.extend(crate::ui::resolved_token_spans(
             tokens,
             icon,
@@ -401,7 +672,8 @@ pub(super) fn render_agent_row(
             secondary,
             secondary,
             palette,
-            rect.width.saturating_sub(indent as u16) as usize,
+            rect.width
+                .saturating_sub((indent + display_width(prefix)) as u16) as usize,
         ));
         Paragraph::new(Line::from(spans)).style(row_style).render(
             Rect::new(rect.x, rect.y + index as u16, rect.width, 1),

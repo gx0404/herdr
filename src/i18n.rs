@@ -394,6 +394,7 @@ pub struct SidebarTexts {
     pub sort_grouped: &'static str,
     pub sort_priority: &'static str,
     pub no_matching_agents: &'static str,
+    pub agent_usage: &'static str,
 }
 
 pub struct StatusTexts {

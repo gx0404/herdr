@@ -272,6 +272,7 @@ pub const TEXTS: Texts = Texts {
         sort_grouped: "grouped",
         sort_priority: "priority",
         no_matching_agents: "  no matching agents",
+        agent_usage: "usage",
     },
     status: StatusTexts {
         blocked: "blocked",

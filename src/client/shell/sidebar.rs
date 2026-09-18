@@ -505,6 +505,7 @@ pub(crate) fn render_sidebar_regions(
         detail_area,
         snapshot,
         config,
+        state.collapsed_groups,
         state.agent_scroll,
         state.chrome_hover,
         hits,

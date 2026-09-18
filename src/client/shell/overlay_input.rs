@@ -676,6 +676,16 @@ impl ClientShellState {
             return;
         }
 
+        // Display-only floating dashboard: any other key keeps it open so a
+        // stray terminal keystroke cannot dismiss it mid-glance.
+        if matches!(self.overlay, Some(ClientShellOverlay::UsageDashboard)) {
+            if key.code == KeyCode::Esc {
+                self.overlay = None;
+                outcome.repaint = true;
+            }
+            return;
+        }
+
         if self.route_settings_key(key, outcome) {
             return;
         }

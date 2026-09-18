@@ -181,6 +181,8 @@ pub(super) struct ShellHitMap {
     pub(super) agent_scroll_metrics: Option<crate::pane::ScrollMetrics>,
     pub(super) agent_max_scroll: usize,
     pub(super) agent_sort_toggle: Rect,
+    pub(super) agent_group_toggles: Vec<(Rect, String)>,
+    pub(super) agent_usage_toggle: Rect,
     pub(super) sidebar_divider: Rect,
     pub(super) sidebar_section_divider: Rect,
     pub(super) sidebar_toggle: Rect,
@@ -585,6 +587,7 @@ pub(super) enum ClientShellOverlayKind {
     Scenes,
     Broadcast,
     MachineFiles,
+    UsageDashboard,
 }
 
 #[derive(Debug)]
@@ -908,6 +911,7 @@ pub(super) enum ClientShellOverlay {
     Scenes(super::scenes_overlay::ClientScenesOverlay),
     Broadcast(super::broadcast::ClientBroadcastOverlay),
     MachineFiles(super::machine_files_overlay::ClientMachineFilesOverlay),
+    UsageDashboard,
 }
 
 impl ClientShellOverlay {
@@ -933,6 +937,7 @@ impl ClientShellOverlay {
             Self::Scenes(_) => ClientShellOverlayKind::Scenes,
             Self::Broadcast(_) => ClientShellOverlayKind::Broadcast,
             Self::MachineFiles(_) => ClientShellOverlayKind::MachineFiles,
+            Self::UsageDashboard => ClientShellOverlayKind::UsageDashboard,
         }
     }
 }

@@ -29,6 +29,7 @@ pub(super) enum ClientPaletteAction {
     Search,
     Back,
     Observation(super::observability::Page),
+    UsageDashboard,
     Arrange,
     Notifications,
     WhatsNew,
@@ -722,6 +723,13 @@ impl ClientShellState {
             action: ClientPaletteAction::Observation(super::observability::Page::Monitor),
         });
         items.push(ClientPaletteItem {
+            id: "observation:usage-dashboard".into(),
+            title: super::observability::tr("Usage dashboard", "用量仪表盘").into(),
+            subtitle: String::new(),
+            badge: false,
+            action: ClientPaletteAction::UsageDashboard,
+        });
+        items.push(ClientPaletteItem {
             id: "layout".into(),
             title: super::observability::tr("Arrange panels", "调整面板布局").into(),
             subtitle: String::new(),
@@ -909,6 +917,7 @@ impl ClientShellState {
                 self.record_binding(crate::input::KeybindMatch::Command(command), outcome);
             }
             ClientPaletteAction::Observation(page) => self.open_observation_page(page, outcome),
+            ClientPaletteAction::UsageDashboard => self.toggle_usage_dashboard(outcome),
             ClientPaletteAction::Arrange => {
                 self.workbench.arranging = true;
             }

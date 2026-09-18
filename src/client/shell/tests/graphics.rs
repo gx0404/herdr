@@ -294,6 +294,7 @@ fn every_dialog_and_menu_occludes_its_panel_not_the_whole_screen() {
             loading_integrations: false,
             installing_integrations: false,
         }),
+        ClientShellOverlay::UsageDashboard,
     ];
     for overlay in overlays {
         let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
@@ -329,6 +330,7 @@ fn every_dialog_and_menu_occludes_its_panel_not_the_whole_screen() {
                 &state.active_endpoint_id,
                 &state.config.keybinds,
                 &state.notification_history,
+                &state.observability,
                 &cx,
             ),
         }

@@ -23,6 +23,17 @@ pub(super) fn provider_listed(provider: &UsageProviderInfo) -> bool {
     provider.installed != Some(false) || !provider.configured_accounts.is_empty()
 }
 
+/// Accounts overview table reused by the floating usage dashboard overlay;
+/// display-only, so row actions are discarded.
+pub(super) fn render_usage_table(
+    buffer: &mut Buffer,
+    area: Rect,
+    state: &State,
+    palette: &Palette,
+) {
+    render::usage_table(buffer, area, state, palette, &mut Vec::new());
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Page {
     Monitor,
@@ -432,6 +443,21 @@ impl State {
 }
 
 impl ClientShellState {
+    pub(super) fn toggle_usage_dashboard(&mut self, outcome: &mut ClientShellInput) {
+        if matches!(self.overlay, Some(ClientShellOverlay::UsageDashboard)) {
+            self.overlay = None;
+        } else {
+            self.overlay = Some(ClientShellOverlay::UsageDashboard);
+            // The dashboard is the cross-provider overview; drop any
+            // hover-driven provider selection so it opens on the overview.
+            self.observability.selected_provider = None;
+            self.observability.selected_account = None;
+            self.observability.selected_pane = None;
+            self.observability.next_usage = Instant::now();
+        }
+        outcome.repaint = true;
+    }
+
     pub(super) fn open_observation_page(&mut self, page: Page, outcome: &mut ClientShellInput) {
         // One dock panel hosts system, accounts, and settings pages; the
         // requested page becomes the active tab inside it.
@@ -581,6 +607,7 @@ impl ClientShellState {
         }
         let usage_visible = self.observability.page == Some(Page::Accounts)
             || self.workbench.visible(&dock::PanelId::Accounts)
+            || matches!(self.overlay, Some(ClientShellOverlay::UsageDashboard))
             || self
                 .observability
                 .hover

@@ -504,7 +504,12 @@ fn agent_sidebar_honors_priority_symbols_tokens_and_stable_hits() {
         .join("\n");
     assert!(text.contains("× needs input"), "frame: {text}");
     assert!(text.contains("pi two"), "frame: {text}");
-    assert!(text.contains("waiting for"), "frame: {text}");
+    // Tree prefixes consume row width, so the custom summary truncates.
+    assert!(text.contains("waiting"), "frame: {text}");
+    // Workspace headers nest agents as a collapsible hierarchy.
+    assert!(text.contains("client-shell"), "frame: {text}");
+    assert!(text.contains("· 2 ▾"), "frame: {text}");
+    assert!(text.contains("├─") && text.contains("└─"), "frame: {text}");
     assert_eq!(
         state
             .hits
@@ -599,7 +604,11 @@ fn muted_agent_sidebar_rows_do_not_stack_terminal_faint() {
     let row = state.hits.agents.first().expect("agent row hit").0;
     let buffer = frame.to_ratatui_buffer().expect("agent sidebar buffer");
 
-    for (label, needle) in [("tab", "second"), ("agent", "reviewer"), ("separator", "·")] {
+    for (label, needle) in [
+        ("tab", "second"),
+        ("agent", "reviewer"),
+        ("tree prefix", "└"),
+    ] {
         let (x, y) = cell_symbol_position(&frame, row, needle);
         let cell = buffer.cell((x, y)).expect("muted sidebar cell");
         assert!(
@@ -1464,4 +1473,143 @@ fn semantic_notifications_use_client_policy_and_stable_navigation_targets() {
     assert!(repaint);
     assert!(state.visible_notification.is_none());
     assert_eq!(state.pending_notifications.len(), 1);
+}
+
+fn panel_agent(
+    pane_id: &str,
+    workspace_id: &str,
+    name: &str,
+    status: AgentStatus,
+    seq: u64,
+) -> ClientShellAgent {
+    ClientShellAgent {
+        pane_id: pane_id.into(),
+        workspace_id: workspace_id.into(),
+        tab_id: "tab_1".into(),
+        name: Some(name.into()),
+        display_agent: None,
+        agent: Some("pi".into()),
+        title: None,
+        terminal_title: None,
+        terminal_title_stripped: None,
+        agent_status: status,
+        state_change_seq: seq,
+        state_labels: Vec::new(),
+        tokens: Vec::new(),
+        focused: false,
+    }
+}
+
+#[test]
+fn agent_panel_entries_group_by_workspace_with_collapsible_headers() {
+    use crate::client::shell::agent_sidebar::{
+        agent_group_key, agent_panel_entries, AgentPanelEntry,
+    };
+    let mut projected = snapshot();
+    let mut second_workspace = projected.workspaces[0].clone();
+    second_workspace.workspace_id = "ws_2".into();
+    second_workspace.label = "herdr".into();
+    second_workspace.focused = false;
+    projected.workspaces.push(second_workspace);
+    projected.agents = vec![
+        panel_agent("pane_1", "ws_1", "one", AgentStatus::Idle, 10),
+        panel_agent("pane_2", "ws_1", "two", AgentStatus::Blocked, 20),
+        panel_agent("pane_3", "ws_2", "three", AgentStatus::Done, 30),
+    ];
+    let config = ClientShellConfig::from_config(&Config::default());
+
+    let entries = agent_panel_entries(&projected, &config, &std::collections::HashSet::new());
+    assert_eq!(entries.len(), 5, "two headers plus three agents");
+    match &entries[0] {
+        AgentPanelEntry::Workspace {
+            key,
+            label,
+            agent_count,
+            status,
+            collapsed,
+        } => {
+            assert_eq!(key, &agent_group_key("ws_1"));
+            assert_eq!(label, "client-shell");
+            assert_eq!(*agent_count, 2);
+            assert_eq!(*status, AgentStatus::Blocked, "header aggregates status");
+            assert!(!collapsed);
+        }
+        _ => panic!("expected workspace header"),
+    }
+    let child = match &entries[1] {
+        AgentPanelEntry::Agent { row, tree } => (row, tree),
+        _ => panic!("expected agent child"),
+    };
+    assert_eq!(
+        child.0.pane_id, "pane_1",
+        "spaces sort keeps snapshot order within the workspace"
+    );
+    assert_eq!(child.1, &Some(false), "first child is not last");
+    assert!(
+        child
+            .0
+            .rows
+            .iter()
+            .flatten()
+            .all(|token| !matches!(token.kind, crate::ui::ResolvedTokenKind::Workspace(_))),
+        "children drop the redundant workspace token"
+    );
+
+    let mut collapsed_groups = std::collections::HashSet::new();
+    collapsed_groups.insert(agent_group_key("ws_1"));
+    let entries = agent_panel_entries(&projected, &config, &collapsed_groups);
+    assert_eq!(
+        entries
+            .iter()
+            .filter(|entry| matches!(entry, AgentPanelEntry::Agent { .. }))
+            .count(),
+        1,
+        "collapsed workspace hides its children"
+    );
+    assert!(matches!(
+        &entries[0],
+        AgentPanelEntry::Workspace {
+            collapsed: true,
+            ..
+        }
+    ));
+
+    projected.agent_view_label = Some("blocked".into());
+    let entries = agent_panel_entries(&projected, &config, &collapsed_groups);
+    assert!(
+        entries
+            .iter()
+            .all(|entry| matches!(entry, AgentPanelEntry::Agent { tree: None, .. })),
+        "filtered views stay flat"
+    );
+}
+
+#[test]
+fn clicking_workspace_header_collapses_agent_group() {
+    let mut projected = snapshot();
+    projected.agents = vec![panel_agent("pane_1", "ws_1", "one", AgentStatus::Idle, 10)];
+    let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
+    state.set_snapshot(Box::new(projected));
+    state.set_pane_surface(surface());
+    state.compose(106, 30).expect("agent panel frame");
+    assert_eq!(state.hits.agents.len(), 1);
+    let (header, key) = state
+        .hits
+        .agent_group_toggles
+        .first()
+        .cloned()
+        .expect("workspace header hit");
+    state.handle_raw_events(vec![RawInputEvent::Mouse(crossterm::event::MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: header.x,
+        row: header.y,
+        modifiers: KeyModifiers::empty(),
+    })]);
+    assert!(state.group_is_collapsed(&state.active_endpoint_id, &key));
+    state.compose(106, 30).expect("collapsed agent panel frame");
+    assert_eq!(state.hits.agent_group_toggles.len(), 1);
+    assert!(
+        state.hits.agents.is_empty(),
+        "collapsed group keeps the header but hides agent rows"
+    );
 }
