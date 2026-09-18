@@ -116,6 +116,19 @@ impl Workers {
                     }
                 })
                 .collect::<Vec<_>>();
+            // Bind mounts repeat one device under several paths with the same
+            // capacities; report each device once, preferring the shortest
+            // mount point as the canonical path.
+            result.sort_by(|a, b| {
+                a.mount_point
+                    .len()
+                    .cmp(&b.mount_point.len())
+                    .then(a.id.cmp(&b.id))
+            });
+            let mut seen_devices = std::collections::HashSet::new();
+            result.retain(|disk| {
+                seen_devices.insert((disk.name.clone(), disk.total_bytes, disk.available_bytes))
+            });
             result.sort_by(|a, b| a.id.cmp(&b.id));
             disk_totals = totals;
             disk_last = Some(now);

@@ -1,5 +1,9 @@
 //! 官方来源清单。Agent 身份与实际计费 provider 分开处理。
 
+use std::collections::HashMap;
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
+
 #[derive(Clone, Copy)]
 pub(super) enum Query {
     Codex,
@@ -58,6 +62,39 @@ pub(super) fn provider(agent: &str) -> Option<&'static Provider> {
         other => other,
     };
     PROVIDERS.iter().find(|entry| entry.agent == canonical)
+}
+
+const AVAILABILITY_TTL: Duration = Duration::from_secs(30);
+
+fn availability_cache() -> &'static Mutex<HashMap<&'static str, (Instant, bool)>> {
+    static CACHE: OnceLock<Mutex<HashMap<&'static str, (Instant, bool)>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Whether the provider's official CLI is installed locally. PATH lookups
+/// hit the filesystem, so results are cached briefly and reused across the
+/// provider-list polling cadence.
+pub(super) fn provider_installed(provider: &Provider) -> bool {
+    let now = Instant::now();
+    if let Ok(cache) = availability_cache().lock() {
+        if let Some((at, value)) = cache.get(&provider.agent) {
+            if now.duration_since(*at) < AVAILABILITY_TTL {
+                return *value;
+            }
+        }
+    }
+    // Version-manager installs (nvm/volta/standalone) are invisible to a
+    // detached server's PATH; the integration layout checks cover them.
+    let value = crate::integration::command_available(provider.command)
+        || match provider.command {
+            "codex" => crate::integration::codex_layout_binary_path().is_some(),
+            "hermes" => crate::integration::hermes_install_layout_available(),
+            _ => false,
+        };
+    if let Ok(mut cache) = availability_cache().lock() {
+        cache.insert(provider.agent, (now, value));
+    }
+    value
 }
 
 #[cfg(test)]

@@ -3,7 +3,7 @@ title: Monitoring, account usage and docking
 description: Arrange terminal groups and inspect host resources and official provider usage.
 ---
 
-Open **Monitor** or **Accounts** from the top bar. The global menu includes monitoring and usage settings. Hardware metrics belong to the connected host; hovering a remote agent queries its own host.
+Open **Monitor** from the top bar, the global menu, or command search. A single panel hosts three pages — System, Accounts and Settings — switched with the in-panel tabs or `1`/`2`/`3`; `r` refreshes, `Space` pauses history, and `Esc` closes. Hardware metrics belong to the connected host; hovering a remote agent queries its own host.
 
 ## Menus, pages, and stable selection
 
@@ -20,6 +20,8 @@ Use `Ctrl+Shift+Space` as the WezTerm leader and keep `Ctrl+B` for Herdr. Ordina
 ## Docking
 
 Drag a panel's `⠿` title handle to another panel's edge. The drop preview shows the destination. Drag dividers to resize, tabs to reorder or create another terminal group, and pane handles to swap panes or move them between tabs without restarting their processes. Borderless panes show their handles only in Layout mode, keeping normal terminal text unobstructed. Right-click tab menus remain available.
+
+The primary terminal page belongs to the focused workspace: clicking a workspace in the sidebar swaps both the tab strip and the terminal content to that workspace's tabs, numbered from 1 per workspace. Tabs dragged into their own panel stay visible regardless of workspace focus.
 
 `□` maximizes/restores a panel. In Layout mode, `Tab` / `Shift+Tab` selects a panel, arrows resize, `Shift+arrows` move, `Enter` maximizes, and `Esc` finishes. Lock prevents accidental rearrangement; Reset restores the default layout. Layouts persist per client and endpoint. Small terminals project the focused panel without discarding the saved layout. Older servers retain the previous single-view UI.
 
@@ -54,6 +56,8 @@ cooldown_seconds = 60
 ## Account binding
 
 Hover an agent row or CLI title to inspect usage. Choose dashboard/table and hover/page/both in settings. Select and explicitly bind the account to the pane. A shared vendor name does not identify an account.
+
+The accounts page lists only providers whose official CLI is installed on the connected host — resolved through the server PATH plus supported install layouts (codex standalone/nvm/volta/bun, Hermes). `account.usage.providers` reports an `installed` flag per provider; older servers omit the field and keep listing the full registry. Installed providers are queried automatically on the overview at the configured `cli_refresh_seconds` with bounded backoff; manual refresh always retries.
 
 Both formats support wheel scrolling; the account page also supports the arrow keys for quota windows below the viewport. The usage popover can appear over a focused monitor panel and captures its own input without activating background cards or process rows.
 
@@ -103,7 +107,7 @@ The registry covers 23 agents, excluding Muse. Official sources were checked on 
 
 See the [provider source matrix](/zh-cn/docs/monitoring/#厂商能力与官方依据) for every official reference. Codex uses App Server; Kimi uses its authenticated local Server API; Claude and Antigravity support statusline quotas. Letta has a dedicated usage command; Kiro supports non-interactive `/usage`. Cursor, Devin, Cline, Copilot and Factory use their separately authorized reporting APIs. OMP, Amp and OpenCode have distinct CLI formats. Gemini, Grok and Hermes use guarded official CLI commands. Qoder currently has no verified automatic input-readiness contract. Mastra Code, Qwen, Maki and Pi provide session statistics and can bind their actual billing provider.
 
-Factory daily reports end no later than yesterday UTC. Cursor overage spend is separate from subscription-inclusive spend. Amp BYOK list-price estimates are not billed usage. Letta's quota bucket labels remain categorical. OpenRouter key budgets are distinct from account totals.
+Factory daily reports end no later than yesterday UTC. Cursor overage spend is separate from subscription-inclusive spend. Amp BYOK list-price estimates are not billed usage. Letta's quota bucket labels remain categorical. OpenRouter key budgets are distinct from account totals. Kimi 2.x `quota.usages` windows and legacy fields are both parsed. OpenCode usage requires a CLI version whose `stats` command supports JSON output; older builds report an explicit upgrade hint.
 
 ## API
 

@@ -183,67 +183,88 @@ pub(crate) fn executable_file_exists(path: &Path) -> bool {
 /// version-manager bin dirs where npm installs land, so both the native
 /// standalone layout and the npm-managed layouts are checked by path.
 pub(crate) fn codex_install_layout_available() -> bool {
-    codex_standalone_binary_available() || codex_npm_managed_binary_available()
+    codex_layout_binary_path().is_some()
 }
 
-pub(crate) fn codex_standalone_binary_available() -> bool {
-    let Ok(releases_dir) =
-        codex_dir().map(|dir| dir.join("packages").join("standalone").join("releases"))
-    else {
-        return false;
-    };
-    let Ok(entries) = fs::read_dir(releases_dir) else {
-        return false;
-    };
+/// Absolute path to a codex binary found outside PATH (standalone release or
+/// version-manager layout), preferring the newest version directory. Usage
+/// probes spawn this path directly when the server PATH cannot see codex.
+pub(crate) fn codex_layout_binary_path() -> Option<PathBuf> {
+    codex_standalone_binary_path()
+        .or_else(codex_nvm_binary_path)
+        .or_else(|| {
+            let home = home_dir().ok()?;
+            [".volta/bin", ".bun/bin", ".local/share/pnpm"]
+                .iter()
+                .find_map(|segment| codex_binary_in_dir(&home.join(segment)))
+        })
+        .or_else(codex_windows_npm_binary_path)
+}
 
-    entries.filter_map(Result::ok).any(|entry| {
-        executable_file_exists(&entry.path().join("bin").join(codex_executable_name()))
+fn codex_standalone_binary_path() -> Option<PathBuf> {
+    let releases_dir = codex_dir()
+        .ok()?
+        .join("packages")
+        .join("standalone")
+        .join("releases");
+    newest_versioned_binary(&releases_dir, |dir| codex_binary_in_dir(&dir.join("bin")))
+}
+
+fn codex_nvm_binary_path() -> Option<PathBuf> {
+    let home = home_dir().ok()?;
+    newest_versioned_binary(&home.join(".nvm").join("versions").join("node"), |dir| {
+        codex_binary_in_dir(&dir.join("bin"))
     })
 }
 
-fn codex_npm_managed_binary_available() -> bool {
-    let Ok(home) = home_dir() else {
-        return false;
-    };
-
-    codex_nvm_bin_available(&home)
-        || [".volta/bin", ".bun/bin", ".local/share/pnpm"]
-            .iter()
-            .any(|segment| codex_executable_in_dir(&home.join(segment)))
-        || codex_windows_npm_bin_available()
+/// Picks the codex binary from the highest-versioned entry directory that
+/// contains one (`v24.18.0` beats `v24.9.0` numerically, not lexically).
+fn newest_versioned_binary(
+    entries_dir: &Path,
+    binary: impl Fn(&Path) -> Option<PathBuf>,
+) -> Option<PathBuf> {
+    let entries = fs::read_dir(entries_dir).ok()?;
+    let mut best: Option<(Vec<u64>, PathBuf)> = None;
+    for entry in entries.filter_map(Result::ok) {
+        let Some(path) = binary(&entry.path()) else {
+            continue;
+        };
+        let version = version_sort_key(&entry.file_name().to_string_lossy());
+        if best.as_ref().is_none_or(|(key, _)| version > *key) {
+            best = Some((version, path));
+        }
+    }
+    best.map(|(_, path)| path)
 }
 
-fn codex_nvm_bin_available(home: &Path) -> bool {
-    let Ok(entries) = fs::read_dir(home.join(".nvm").join("versions").join("node")) else {
-        return false;
-    };
-
-    entries
-        .filter_map(Result::ok)
-        .any(|entry| codex_executable_in_dir(&entry.path().join("bin")))
+fn version_sort_key(name: &str) -> Vec<u64> {
+    name.chars()
+        .map(|ch| if ch.is_ascii_digit() { ch } else { ' ' })
+        .collect::<String>()
+        .split_whitespace()
+        .filter_map(|part| part.parse().ok())
+        .collect()
 }
 
-fn codex_executable_in_dir(dir: &Path) -> bool {
+fn codex_binary_in_dir(dir: &Path) -> Option<PathBuf> {
     command_path_candidates(dir, "codex")
         .into_iter()
-        .any(|path| executable_file_exists(&path))
+        .find(|path| executable_file_exists(path))
 }
 
-fn codex_windows_npm_bin_available() -> bool {
-    #[cfg(windows)]
-    {
-        std::env::var_os("APPDATA")
-            .filter(|value| !value.is_empty())
-            .map(|appdata| codex_executable_in_dir(&Path::new(&appdata).join("npm")))
-            .unwrap_or(false)
-    }
-
-    #[cfg(not(windows))]
-    {
-        false
-    }
+#[cfg(windows)]
+fn codex_windows_npm_binary_path() -> Option<PathBuf> {
+    std::env::var_os("APPDATA")
+        .filter(|value| !value.is_empty())
+        .and_then(|appdata| codex_binary_in_dir(&Path::new(&appdata).join("npm")))
 }
 
+#[cfg(not(windows))]
+fn codex_windows_npm_binary_path() -> Option<PathBuf> {
+    None
+}
+
+#[cfg(test)]
 pub(crate) fn codex_executable_name() -> &'static str {
     if cfg!(windows) {
         "codex.exe"

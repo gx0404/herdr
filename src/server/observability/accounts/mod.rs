@@ -212,6 +212,7 @@ impl Service {
                                             .filter(|a| a.agent == p.agent)
                                             .map(|a| a.id.clone())
                                             .collect(),
+                                        installed: Some(registry::provider_installed(p)),
                                     })
                                     .collect(),
                             })
@@ -491,14 +492,20 @@ fn configured_accounts(config: &AccountUsageConfig) -> Vec<UsageAccountConfig> {
             account.agent = provider.agent.into();
         }
     }
+    // Only installed CLIs get an implicit default account, so the usage page
+    // reflects what this host can actually query instead of the full
+    // registry. User-configured accounts are always kept.
     for provider in registry::PROVIDERS {
+        if !registry::provider_installed(provider) {
+            continue;
+        }
         if !accounts
             .iter()
             .any(|account| account.agent == provider.agent)
         {
             accounts.push(UsageAccountConfig {
                 id: format!("{}:default", provider.agent),
-                label: format!("{} 默认登录", provider.label),
+                label: provider.label.into(),
                 agent: provider.agent.into(),
                 provider: provider.agent.into(),
                 auth_mode: "cli".into(),
@@ -579,10 +586,8 @@ fn request_accounts(
     if !config.enabled {
         return;
     }
-    // 默认总览只读缓存；用户选定厂商/账号后再发起查询，避免批量启动 CLI。
-    if params.agent.is_none() && params.account_id.is_none() && params.pane_id.is_none() {
-        return;
-    }
+    // 总览（未选定厂商/账号）也发起自动查询：账号清单已只含本机已安装厂商，
+    // 查询频率由下方 requested_at/退避控制，用户显式选择仍可立即查询。
     if params.pane_id.is_some()
         && params.account_id.is_none()
         && !params
@@ -945,12 +950,16 @@ mod tests {
 
     #[test]
     fn callback_reports_are_not_overwritten_by_placeholder_queries() {
-        let config = AccountUsageConfig::default();
-        let accounts = configured_accounts(&config);
-        let account = accounts
-            .iter()
-            .find(|account| account.agent == "pi")
-            .unwrap();
+        // Hermetic account fixture: implicit defaults now only cover
+        // installed CLIs, which must not decide this test's outcome.
+        let account = UsageAccountConfig {
+            id: "pi:default".into(),
+            label: "Pi".into(),
+            agent: "pi".into(),
+            provider: "pi".into(),
+            auth_mode: "cli".into(),
+            ..Default::default()
+        };
         let mut cache = HashMap::from([(
             account.id.clone(),
             CacheEntry {
@@ -960,7 +969,7 @@ mod tests {
                         ..Default::default()
                     }],
                     observed_at_ms: super::super::now_ms(),
-                    ..empty_snapshot(account)
+                    ..empty_snapshot(&account)
                 },
                 requested_at: None,
                 in_flight: false,
@@ -971,6 +980,8 @@ mod tests {
             },
         )]);
         let (tasks, input) = mpsc::sync_channel(1);
+        let config = AccountUsageConfig::default();
+        let accounts = vec![account.clone()];
         request_accounts(
             &UsageParams {
                 account_id: Some(account.id.clone()),

@@ -42,7 +42,11 @@ fn window(id: String, label: String, value: &Value, scope: &str) -> Option<Usage
             "used_percent",
             "utilization",
         ],
-    );
+    )
+    .or_else(|| {
+        // Kimi 2.x reports `usedRatio` on a 0–1 scale.
+        first_number(value, &["usedRatio"]).map(|ratio| ratio.clamp(0.0, 1.0) * 100.0)
+    });
     let used = first_number(value, &["used", "used_amount", "usage", "consumed"]);
     let limit = first_number(value, &["limit", "total", "total_amount"]);
     let remaining = first_number(value, &["remaining", "remaining_amount", "limit_remaining"]);
@@ -70,7 +74,7 @@ fn window(id: String, label: String, value: &Value, scope: &str) -> Option<Usage
         limit,
         remaining,
         used_percent: percentage,
-        resets_at: ["resetsAt", "resets_at", "reset_time", "reset_at"]
+        resets_at: ["resetsAt", "resets_at", "resetAt", "reset_time", "reset_at"]
             .iter()
             .find_map(|key| timestamp(value.get(*key))),
         window_seconds: value
@@ -306,6 +310,19 @@ pub(super) fn kimi(value: &Value) -> Vec<UsageMetric> {
         "account",
     ) {
         metrics.push(metric);
+    }
+    // Kimi 2.x packs quota windows under `quota.usages` keyed by window id.
+    if let Some(usages) = value.pointer("/quota/usages").and_then(Value::as_object) {
+        for (key, window_value) in usages {
+            let label = match key.as_str() {
+                "limit5h" => "5 小时额度",
+                "limit7d" => "7 天额度",
+                other => other,
+            };
+            if let Some(metric) = window(key.clone(), label.into(), window_value, "account") {
+                metrics.push(metric);
+            }
+        }
     }
     if let Some(limits) = value.get("limits").and_then(Value::as_array) {
         for (index, limit) in limits.iter().enumerate() {
@@ -733,5 +750,34 @@ mod tests {
         assert_eq!(values[0].used_percent, Some(25.0));
         assert!(values[0].resets_at.is_some());
         assert!(antigravity(&json!({"quota":{"broken":{"remaining_fraction":2}}})).is_empty());
+    }
+
+    #[test]
+    fn kimi_v2_quota_usages_windows_become_percent_metrics() {
+        let values = kimi(&json!({
+            "code": 0,
+            "data": {
+                "kind": "ok",
+                "quota": {
+                    "usages": {
+                        "limit5h": {"usedRatio": 0.25, "resetAt": "2026-09-18T10:50:54Z"},
+                        "limit7d": {"usedRatio": 0.665726, "resetAt": "2026-09-23T13:50:55Z"}
+                    },
+                    "extraUsage": null
+                }
+            }
+        }));
+        assert_eq!(values.len(), 2);
+        let five_hours = values
+            .iter()
+            .find(|metric| metric.id == "limit5h")
+            .expect("5h window");
+        assert_eq!(five_hours.used_percent, Some(25.0));
+        assert!(five_hours.resets_at.is_some());
+        let seven_days = values
+            .iter()
+            .find(|metric| metric.id == "limit7d")
+            .expect("7d window");
+        assert!((seven_days.used_percent.unwrap() - 66.5726).abs() < 0.01);
     }
 }

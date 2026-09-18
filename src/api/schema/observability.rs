@@ -299,6 +299,11 @@ pub struct UsageProviderInfo {
     pub account_scope: String,
     pub minimum_interval_seconds: u64,
     pub configured_accounts: Vec<String>,
+    /// Whether the provider's official CLI is installed on this host.
+    /// Absent on older servers; clients must treat `None` as unknown and
+    /// keep listing the provider.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub installed: Option<bool>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]

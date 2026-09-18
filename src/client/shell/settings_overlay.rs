@@ -357,6 +357,20 @@ fn render_choice_section(
     }
 }
 
+fn installed_count(settings: &ClientSettingsOverlay) -> usize {
+    settings
+        .integrations
+        .iter()
+        .filter(|integration| {
+            matches!(
+                integration.state,
+                crate::api::schema::IntegrationState::Current
+                    | crate::api::schema::IntegrationState::Outdated
+            )
+        })
+        .count()
+}
+
 fn render_integrations(
     buffer: &mut Buffer,
     area: Rect,
@@ -386,7 +400,13 @@ fn render_integrations(
             area.x,
             area.y,
             area.width,
-            &format!("{} · {}", t.integrations, t.integrations_hint),
+            &format!(
+                "{} · ✓ {}/{} · {}",
+                t.integrations,
+                installed_count(settings),
+                settings.integrations.len(),
+                t.integrations_hint
+            ),
             Style::default().fg(p.overlay0),
         );
         Rect::new(area.x, area.y + 1, area.width, area.height - 1)
@@ -394,6 +414,15 @@ fn render_integrations(
         area
     };
     let count = settings.integrations.len() + settings.integration_messages.len();
+    // Fixed status column: labels longer than the old hard-coded 12 columns
+    // (antigravity-cli) otherwise pushed their status out of alignment.
+    let label_width = settings
+        .integrations
+        .iter()
+        .map(|integration| UnicodeWidthStr::width(integration.label.as_str()))
+        .max()
+        .unwrap_or(12)
+        .clamp(10, 18);
     let scroll = super::super::page::list_start(
         settings.scroll,
         settings.selected,
@@ -425,7 +454,11 @@ fn render_integrations(
                 rect.x,
                 rect.y,
                 rect.width,
-                &format!(" {marker} {:<12}  {status}", integration.label),
+                &format!(
+                    " {marker} {:<width$}  {status}",
+                    integration.label,
+                    width = label_width
+                ),
                 style,
             );
         } else if let Some(message) = settings

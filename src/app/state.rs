@@ -79,7 +79,10 @@ impl Palette {
         Self {
             accent: Color::Rgb(137, 180, 250), // blue
             panel_bg: Color::Rgb(24, 24, 37),
-            sidebar_bg: Color::Reset,
+            // Solid sidebar background: hosts that paint a wallpaper behind
+            // the terminal otherwise bleed it through every Reset cell and
+            // the sidebar reads as artifacts instead of a panel.
+            sidebar_bg: Color::Rgb(24, 24, 37),
             active_row_bg: Color::Rgb(30, 30, 46),
             selection_bg: Color::Rgb(49, 50, 68),
             surface0: Color::Rgb(49, 50, 68),
@@ -1597,14 +1600,20 @@ mod tests {
     }
 
     #[test]
-    fn built_in_themes_leave_sidebar_background_unset() {
+    fn built_in_themes_leave_sidebar_background_unset_except_the_default() {
         for name in crate::config::THEME_NAMES {
             let palette = Palette::from_name(name).unwrap();
-            assert_eq!(
-                palette.sidebar_bg,
-                Color::Reset,
-                "built-in theme changed the sidebar background: {name}"
-            );
+            if *name == "catppuccin" {
+                // The default theme paints a solid sidebar so hosts with a
+                // wallpaper behind the terminal do not bleed it through.
+                assert_eq!(palette.sidebar_bg, palette.panel_bg);
+            } else {
+                assert_eq!(
+                    palette.sidebar_bg,
+                    Color::Reset,
+                    "built-in theme changed the sidebar background: {name}"
+                );
+            }
         }
     }
 
@@ -1743,8 +1752,19 @@ mod tests {
             degraded.accent,
             Color::Indexed(crate::config::rgb_to_xterm256(137, 180, 250))
         );
-        // Symbolic tokens pass through unchanged.
-        assert_eq!(degraded.sidebar_bg, Color::Reset);
+        // The default sidebar is solid and degrades like every RGB token.
+        assert_eq!(
+            degraded.sidebar_bg,
+            Color::Indexed(crate::config::rgb_to_xterm256(24, 24, 37))
+        );
+        // Symbolic tokens still pass through unchanged on themes that keep
+        // a transparent sidebar.
+        assert_eq!(
+            Palette::tokyo_night()
+                .with_color_depth(crate::config::ColorDepth::Color256)
+                .sidebar_bg,
+            Color::Reset
+        );
         // Degradation is idempotent.
         assert_eq!(
             degraded

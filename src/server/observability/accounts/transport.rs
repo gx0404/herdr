@@ -86,7 +86,17 @@ fn command(
             "此 CLI 未配置经过验证的独立 profile 选择方式".into(),
         ));
     }
-    let mut command = crate::noninteractive_process::command(provider.command);
+    // Detached servers may not inherit version-manager PATHs; fall back to
+    // the layout-resolved binary for CLIs installed outside PATH.
+    let program = if crate::integration::command_available(provider.command) {
+        std::borrow::Cow::Borrowed(provider.command)
+    } else {
+        crate::integration::codex_layout_binary_path()
+            .filter(|_| provider.command == "codex")
+            .map(|path| std::borrow::Cow::Owned(path.to_string_lossy().into_owned()))
+            .unwrap_or_else(|| std::borrow::Cow::Borrowed(provider.command))
+    };
+    let mut command = crate::noninteractive_process::command(program.as_ref());
     crate::platform::configure_usage_probe_command(&mut command);
     command
         .current_dir(&directory.0)
@@ -131,14 +141,26 @@ pub(super) fn capture(
     args: &[&str],
     timeout: Duration,
 ) -> Result<String, QueryError> {
+    capture_output(provider, account, args, timeout, false)
+}
+
+/// `merge_stderr` also collects stderr into the output — yargs-family CLIs
+/// (opencode) print `--help` to stderr, so only the subcommand precheck
+/// uses it; the real query keeps stderr out of the parsed payload.
+pub(super) fn capture_output(
+    provider: &Provider,
+    account: &UsageAccountConfig,
+    args: &[&str],
+    timeout: Duration,
+    merge_stderr: bool,
+) -> Result<String, QueryError> {
     let deadline = Instant::now() + timeout;
     let directory = ProbeDirectory::new()?;
-    let mut child = ChildGuard::new(
-        command(provider, account, &directory)?
-            .args(args)
-            .spawn()
-            .map_err(spawn_error)?,
-    )?;
+    let mut configured = command(provider, account, &directory)?;
+    if merge_stderr {
+        configured.stderr(Stdio::piped());
+    }
+    let mut child = ChildGuard::new(configured.args(args).spawn().map_err(spawn_error)?)?;
     let stdout = child
         .child
         .stdout
@@ -154,7 +176,7 @@ pub(super) fn capture(
         let _ = sender.send(result);
     });
     child.readers.push(reader);
-    let output = receiver
+    let mut output = receiver
         .recv_timeout(deadline.saturating_duration_since(Instant::now()))
         .map_err(|_| (ObservationStatus::Error, "官方 CLI 查询超时".into()))?
         .map_err(|_| (ObservationStatus::Error, "无法读取官方 CLI 输出".into()))?;
@@ -175,7 +197,24 @@ pub(super) fn capture(
         }
         std::thread::sleep(Duration::from_millis(10));
     };
+    if merge_stderr {
+        // Help output is tiny; the child has already exited, so a bounded
+        // synchronous drain cannot block.
+        if let Some(stderr) = child.child.stderr.take() {
+            let mut extra = Vec::new();
+            let _ = stderr
+                .take((MAX_OUTPUT + 1) as u64)
+                .read_to_end(&mut extra)
+                .map(|_| output.append(&mut extra));
+        }
+    }
     if !status {
+        if output.iter().all(|byte| byte.is_ascii_whitespace()) {
+            return Err((
+                ObservationStatus::Unsupported,
+                "此版本官方 CLI 未提供机器可读的用量输出，请升级 CLI 或查看官方页面".into(),
+            ));
+        }
         return Err((
             ObservationStatus::NotAuthenticated,
             "官方 CLI 查询失败，请检查登录状态或查询权限".into(),
@@ -191,11 +230,12 @@ pub(super) fn capture_query(
     timeout: Duration,
 ) -> Result<String, QueryError> {
     let started = Instant::now();
-    let help = capture(
+    let help = capture_output(
         provider,
         account,
         &["--help"],
         timeout.min(Duration::from_secs(3)),
+        true,
     )?;
     let Some(command) = args.first() else {
         return Err((ObservationStatus::Unsupported, "未配置官方子命令".into()));
@@ -621,7 +661,11 @@ fn interactive_direct(
             {
                 return Err((
                     ObservationStatus::NotAuthenticated,
-                    "官方 CLI 需要登录或信任确认，请先在正常会话完成设置".into(),
+                    if matches!(provider.agent, "claude" | "antigravity") {
+                        "官方 CLI 需要登录或信任确认；也可在 监控 → 设置 启用官方 statusline 上报获取用量".into()
+                    } else {
+                        "官方 CLI 需要登录或信任确认，请先在正常会话完成设置".into()
+                    },
                 ));
             }
             let detection = crate::detect::detect_agent(agent, &screen);

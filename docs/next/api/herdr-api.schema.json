@@ -12677,6 +12677,13 @@
               },
               "type": "array"
             },
+            "installed": {
+              "description": "Whether the provider's official CLI is installed on this host.\nAbsent on older servers; clients must treat `None` as unknown and\nkeep listing the provider.",
+              "type": [
+                "boolean",
+                "null"
+              ]
+            },
             "label": {
               "type": "string"
             },
