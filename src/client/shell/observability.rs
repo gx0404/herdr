@@ -15,6 +15,14 @@ pub(super) fn tr(en: &'static str, zh: &'static str) -> &'static str {
     }
 }
 
+/// Whether the accounts surface lists a provider: hidden only when the
+/// server explicitly reports the CLI missing and no account is explicitly
+/// configured for it. `None` (older server) counts as unknown and stays
+/// listed per the generation-1 endpoint contract.
+pub(super) fn provider_listed(provider: &UsageProviderInfo) -> bool {
+    provider.installed != Some(false) || !provider.configured_accounts.is_empty()
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Page {
     Monitor,

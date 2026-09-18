@@ -1012,6 +1012,11 @@ fn accounts(
         );
         return;
     }
+    let listed = state
+        .providers
+        .iter()
+        .filter(|provider| provider_listed(provider))
+        .collect::<Vec<_>>();
     let sidebar_width = if area.width >= 70 { 22 } else { 0 };
     if sidebar_width > 0 {
         let side = block(
@@ -1020,10 +1025,21 @@ fn accounts(
             tr(" PROVIDERS ", " 厂商 "),
             palette,
         );
-        for (index, provider) in state
-            .providers
+        if listed.is_empty() {
+            text(
+                buffer,
+                side,
+                0,
+                tr(
+                    "No installed agent CLI detected.",
+                    "未检测到已安装的 agent CLI。",
+                ),
+                Style::default().fg(palette.overlay0),
+            );
+        }
+        for (index, provider) in listed
             .iter()
-            .skip(state.scroll.min(state.providers.len().saturating_sub(1)))
+            .skip(state.scroll.min(listed.len().saturating_sub(1)))
             .take(side.height as usize)
             .enumerate()
         {
@@ -1049,17 +1065,15 @@ fn accounts(
             hits.push((rect, Action::Provider(provider.agent.clone())));
         }
     }
-    let picker_height = u16::from(sidebar_width == 0 && !state.providers.is_empty()) * 2;
+    let picker_height = u16::from(sidebar_width == 0 && !listed.is_empty()) * 2;
     if picker_height > 0 && !area.is_empty() {
-        let index = state
-            .providers
+        let index = listed
             .iter()
             .position(|provider| Some(&provider.agent) == state.selected_provider.as_ref())
             .unwrap_or(0);
-        let provider = &state.providers[index];
-        let previous =
-            &state.providers[(index + state.providers.len() - 1) % state.providers.len()];
-        let next = &state.providers[(index + 1) % state.providers.len()];
+        let provider = listed[index];
+        let previous = listed[(index + listed.len() - 1) % listed.len()];
+        let next = listed[(index + 1) % listed.len()];
         button(
             buffer,
             Rect::new(area.x, area.y, 3.min(area.width), 1),
@@ -1587,7 +1601,11 @@ fn settings(
             Action::AlertCooldown(index),
         ));
     }
-    for provider in &state.providers {
+    for provider in state
+        .providers
+        .iter()
+        .filter(|provider| provider_listed(provider))
+    {
         rows.push((
             format!(
                 "[{}] {}",

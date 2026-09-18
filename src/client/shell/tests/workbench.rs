@@ -589,3 +589,70 @@ fn focusing_another_workspace_swaps_the_primary_terminal_strip() {
         "另一工作区的标签不再出现在终端条"
     );
 }
+
+fn frame_text(frame: &crate::protocol::FrameData) -> String {
+    frame
+        .cells
+        .chunks(frame.width as usize)
+        .map(|row| {
+            row.iter()
+                .map(|cell| cell.symbol.as_str())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn usage_provider(
+    agent: &str,
+    label: &str,
+    installed: Option<bool>,
+    configured_accounts: Vec<String>,
+) -> crate::api::schema::UsageProviderInfo {
+    crate::api::schema::UsageProviderInfo {
+        agent: agent.into(),
+        label: label.into(),
+        source_url: "https://example.com".into(),
+        method: "usage".into(),
+        account_scope: "account".into(),
+        minimum_interval_seconds: 300,
+        configured_accounts,
+        installed,
+    }
+}
+
+#[test]
+fn accounts_page_lists_only_installed_or_configured_providers() {
+    use crate::client::shell::observability::Page;
+    let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
+    state.set_snapshot(Box::new(snapshot()));
+    state.set_pane_surface(surface());
+    // Non-workbench mode paints the accounts page across the full surface so
+    // the provider sidebar (>=70 cols) lists every provider.
+    state.observability.page = Some(Page::Accounts);
+    state.observability.providers = vec![
+        usage_provider("codex", "Codex", Some(true), Vec::new()),
+        usage_provider("kimi", "Kimi Code", Some(false), Vec::new()),
+        usage_provider("grok", "Grok", Some(false), vec!["grok-main".into()]),
+        usage_provider("letta", "Letta", None, Vec::new()),
+    ];
+    let frame = state.compose(120, 40).expect("账号页");
+    let text = frame_text(&frame);
+    let compact: String = text.chars().filter(|ch| !ch.is_whitespace()).collect();
+    assert!(
+        compact.contains("Codex"),
+        "installed provider listed: {text}"
+    );
+    assert!(
+        compact.contains("Grok"),
+        "explicitly configured account keeps the provider listed: {text}"
+    );
+    assert!(
+        compact.contains("Letta"),
+        "unknown availability (older server) stays listed: {text}"
+    );
+    assert!(
+        !compact.contains("Kimi"),
+        "missing CLI without configured accounts is hidden: {text}"
+    );
+}
