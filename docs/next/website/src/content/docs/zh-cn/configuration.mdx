@@ -555,12 +555,13 @@ resume_agents_on_restore = true
 
 ## IME 光标跟踪
 
-在 macOS 上，隐藏硬件光标的 AI 智能体 TUI 可能导致原生输入法候选窗口无法跟随聚焦窗格。使用以下设置可为这些窗格显示光标锚点：
+隐藏硬件光标的 AI 智能体 TUI 会让宿主终端失去光标锚点：输入法候选窗口不再跟随聚焦窗格，打字插入符也会中途消失。因此 Herdr 默认显示一个闪烁竖条锚点；可按需关闭或收窄：
 
 ```toml
 [experimental]
-reveal_hidden_cursor_for_cjk_ime = true
-cjk_ime_agents = ["claude", "pi", "codex"]
+reveal_hidden_cursor_for_cjk_ime = true # 默认开启
+cjk_ime_cursor_shape = "bar"            # 默认闪烁竖条
+cjk_ime_agents = []                     # 留空 = 任意聚焦窗格
 ```
 
 限制 `cjk_ime_agents` 可以避免在无关应用中额外显示硬件光标。在[配置参考](/docs/config-reference/)中搜索这些键，可查看接受的智能体名称和光标形状。

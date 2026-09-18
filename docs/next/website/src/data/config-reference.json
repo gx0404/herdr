@@ -1655,8 +1655,8 @@
         {
           "key": "experimental.reveal_hidden_cursor_for_cjk_ime",
           "type": "boolean",
-          "default": "false",
-          "description": "Expose the focused pane's cursor anchor to the outer terminal even when the pane requested `?25l`, so macOS native input methods keep tracking the candidate window when TUIs paint their own cursor (Claude Code, pi, codex, etc.). Default: false.  When the pane reports no cursor position, falls back to the pane's top-left so a stable IME anchor is always available.  Trade-off when enabled: an extra hardware cursor will be visible in the outer terminal for apps that hide the cursor without painting a replacement (vim normal mode, etc.). See #149."
+          "default": "true",
+          "description": "Expose the focused pane's cursor anchor to the outer terminal even when the pane requested `?25l`, so native input methods keep tracking the candidate window when TUIs paint their own cursor (Claude Code, pi, codex, etc.). Default: true. Without a positioned hardware cursor the host anchors the IME candidate window at the screen origin instead of the caret, and the caret itself is invisible while the pane app paints its own.  When the pane reports no cursor position, falls back to the pane's top-left so a stable IME anchor is always available.  Trade-off when enabled: an extra hardware cursor will be visible in the outer terminal for apps that hide the cursor without painting a replacement (vim normal mode, etc.). See #149."
         },
         {
           "key": "experimental.cjk_ime_agents",
@@ -1667,8 +1667,8 @@
         {
           "key": "experimental.cjk_ime_cursor_shape",
           "type": "enum",
-          "default": "\"steady_block\"",
-          "description": "Cursor shape rendered for the IME anchor when `reveal_hidden_cursor_for_cjk_ime` is enabled.",
+          "default": "\"bar\"",
+          "description": "Cursor shape rendered for the IME anchor when `reveal_hidden_cursor_for_cjk_ime` is enabled. Default: \"bar\" (blinking bar — the conventional text-input caret).",
           "values": [
             "block",
             "steady_block",

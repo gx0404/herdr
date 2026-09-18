@@ -1220,10 +1220,10 @@ impl AppState {
             show_agent_labels_on_pane_borders: false,
             tab_bar_right: Vec::new(),
             tab_bar_right_separator: " ".into(),
-            reveal_hidden_cursor_for_cjk_ime: false,
+            reveal_hidden_cursor_for_cjk_ime: true,
             cjk_ime_agent_filter_configured: false,
             cjk_ime_agents: Vec::new(),
-            cjk_ime_cursor_shape: 2, // steady_block
+            cjk_ime_cursor_shape: 5, // bar
             kitty_graphics_enabled: false,
             default_shell: String::new(),
             shell_mode: crate::config::ShellModeConfig::Auto,

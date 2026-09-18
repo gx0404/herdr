@@ -553,12 +553,13 @@ resume_agents_on_restore = true
 
 ## IME カーソルトラッキング
 
-macOS では、ハードウェアカーソルを隠す AI Agent TUI によって、ネイティブ入力メソッドの変換候補ウィンドウがフォーカス中のペインを追跡できなくなることがあります。これらのペインでカーソルアンカーを表示するには、次のように設定します:
+ハードウェアカーソルを隠す AI Agent TUI は、ホスト端末からカーソルアンカーを奪います。その結果、変換候補ウィンドウがフォーカス中のペインを追跡しなくなり、入力キャレットも途中で見えなくなります。Herdr は既定で点滅バーのアンカーを表示します。無効化や範囲の絞り込みは次で行います:
 
 ```toml
 [experimental]
-reveal_hidden_cursor_for_cjk_ime = true
-cjk_ime_agents = ["claude", "pi", "codex"]
+reveal_hidden_cursor_for_cjk_ime = true # 既定で有効
+cjk_ime_cursor_shape = "bar"            # 既定は点滅バー
+cjk_ime_agents = []                     # 空欄 = 任意のフォーカスペイン
 ```
 
 `cjk_ime_agents` で対象を限定すると、関係のないアプリケーションに余分なハードウェアカーソルが表示されるのを避けられます。使用できる Agent 名とカーソル形状については、[設定リファレンス](/docs/config-reference/)でこれらのキーを検索してください。

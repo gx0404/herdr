@@ -373,3 +373,34 @@ async fn render_scale_profile_text_snapshot() {
         eprintln!("snapshot panes={count} capture_median_us={} capture_p95_us={} page_median_us={} retained_median_us={} retained_p95_us={} first_window_bytes={bytes}", captures[20], captures[38], reads[20], retained[20], retained[38]);
     }
 }
+
+#[tokio::test]
+async fn retained_patch_keeps_a_visible_ime_anchor_when_the_pane_hides_its_cursor() {
+    let (mut server, _, output, pane) = retained_test_server_with_control(b"first");
+    let tabs = vec![server.app.public_tab_id(0, 0).unwrap()];
+    set_views(&mut server, 1, &tabs);
+    server.render_and_stream();
+    let mut decoder = protocol::views::Decoder::default();
+    let _ = decode_batch(output.recv().unwrap(), &mut decoder);
+    let runtime = server
+        .app
+        .state
+        .runtime_for_pane_in_workspace(&server.app.terminal_runtimes, 0, pane)
+        .unwrap();
+    runtime.test_process_pty_bytes(b"\x1b[?25lupdated");
+    assert!(server.render_retained_pane_surface_and_stream(&HashSet::from([pane])));
+    let updated = decode_batch(output.recv().unwrap(), &mut decoder);
+    let patch = updated
+        .iter()
+        .find_map(|view| match &view.message {
+            ServerMessage::PaneSurfacePatch(patch) => Some(patch),
+            _ => None,
+        })
+        .expect("retained patch");
+    let cursor = patch
+        .cursor
+        .as_ref()
+        .expect("ime anchor cursor survives the retained fast path");
+    assert!(cursor.visible, "reveal keeps the anchor visible after ?25l");
+    assert_eq!(cursor.shape, 5, "anchor uses the blinking-bar shape");
+}

@@ -480,11 +480,11 @@ pane_history = false
 # a Korean IME between Hangul and English (other IME languages are left
 # unchanged). macOS and Windows only; best-effort. Default: false.
 # switch_ascii_input_source_in_prefix = false
-# Expose the focused pane's cursor to the outer terminal so macOS input
+# Expose the focused pane's cursor to the outer terminal so native input
 # methods keep tracking the candidate window when TUIs paint their own
 # cursor (Claude Code, pi, codex). Trade-off: extra cursor visible for
 # apps that hide it without painting a replacement (vim normal mode, etc.).
-# reveal_hidden_cursor_for_cjk_ime = false
+# reveal_hidden_cursor_for_cjk_ime = true
 # Optional allow-list: only reveal for focused panes whose detected agent
 # matches one of these names. Empty means apply to any focused pane.
 # If the list contains no valid names, the reveal does not apply.
@@ -493,8 +493,8 @@ pane_history = false
 # qwen-code, letta, letta-code, maki.
 # cjk_ime_agents = []
 # Cursor shape rendered when reveal_hidden_cursor_for_cjk_ime is true.
-# Values: block, steady_block (default), underline, steady_underline, bar, steady_bar.
-# cjk_ime_cursor_shape = "steady_block"
+# Values: block, steady_block, underline, steady_underline, bar (default), steady_bar.
+# cjk_ime_cursor_shape = "bar"
 
 [advanced]
 # Maximum scrollback buffer size in bytes retained per pane terminal.

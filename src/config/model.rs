@@ -1104,10 +1104,10 @@ pub struct UiConfig {
 #[serde(rename_all = "snake_case")]
 pub enum ImeCursorShape {
     Block,
-    #[default]
     SteadyBlock,
     Underline,
     SteadyUnderline,
+    #[default]
     Bar,
     SteadyBar,
 }
@@ -1159,7 +1159,7 @@ impl Default for RemoteConfig {
     }
 }
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Deserialize)]
 #[serde(default)]
 pub struct ExperimentalConfig {
     /// Allow launching herdr inside an existing herdr pane. Default: false.
@@ -1169,9 +1169,12 @@ pub struct ExperimentalConfig {
     /// Persist pane screen history to session-history.json. Default: false.
     pub pane_history: bool,
     /// Expose the focused pane's cursor anchor to the outer terminal even when
-    /// the pane requested `?25l`, so macOS native input methods keep tracking
-    /// the candidate window when TUIs paint their own cursor (Claude Code, pi,
-    /// codex, etc.). Default: false.
+    /// the pane requested `?25l`, so native input methods keep tracking the
+    /// candidate window when TUIs paint their own cursor (Claude Code, pi,
+    /// codex, etc.). Default: true. Without a positioned hardware cursor the
+    /// host anchors the IME candidate window at the screen origin instead of
+    /// the caret, and the caret itself is invisible while the pane app paints
+    /// its own.
     ///
     /// When the pane reports no cursor position, falls back to the pane's
     /// top-left so a stable IME anchor is always available.
@@ -1190,7 +1193,8 @@ pub struct ExperimentalConfig {
     /// Default: empty.
     pub cjk_ime_agents: Vec<String>,
     /// Cursor shape rendered for the IME anchor when
-    /// `reveal_hidden_cursor_for_cjk_ime` is enabled. Default: "steady_block".
+    /// `reveal_hidden_cursor_for_cjk_ime` is enabled. Default: "bar"
+    /// (blinking bar — the conventional text-input caret).
     pub cjk_ime_cursor_shape: ImeCursorShape,
     /// While prefix mode is active, temporarily switch the host input source
     /// to an ASCII-capable mode so prefix commands are read as ASCII even when
@@ -1202,6 +1206,20 @@ pub struct ExperimentalConfig {
     /// elsewhere and a best-effort no-op if the switch fails.
     /// Default: false.
     pub switch_ascii_input_source_in_prefix: bool,
+}
+
+impl Default for ExperimentalConfig {
+    fn default() -> Self {
+        Self {
+            allow_nested: false,
+            kitty_graphics: None,
+            pane_history: false,
+            reveal_hidden_cursor_for_cjk_ime: true,
+            cjk_ime_agents: Vec::new(),
+            cjk_ime_cursor_shape: ImeCursorShape::Bar,
+            switch_ascii_input_source_in_prefix: false,
+        }
+    }
 }
 
 impl Default for KeysConfig {
@@ -1789,16 +1807,16 @@ prompt_new_workspace_name = true
     }
 
     #[test]
-    fn reveal_hidden_cursor_for_cjk_ime_default_off_and_parse() {
+    fn reveal_hidden_cursor_for_cjk_ime_default_on_and_parse() {
         let default_config = Config::default();
-        assert!(!default_config.experimental.reveal_hidden_cursor_for_cjk_ime);
+        assert!(default_config.experimental.reveal_hidden_cursor_for_cjk_ime);
 
         let toml = r#"
 [experimental]
-reveal_hidden_cursor_for_cjk_ime = true
+reveal_hidden_cursor_for_cjk_ime = false
 "#;
         let config: Config = toml::from_str(toml).unwrap();
-        assert!(config.experimental.reveal_hidden_cursor_for_cjk_ime);
+        assert!(!config.experimental.reveal_hidden_cursor_for_cjk_ime);
     }
 
     #[test]
@@ -1819,21 +1837,21 @@ switch_ascii_input_source_in_prefix = true
     }
 
     #[test]
-    fn cjk_ime_cursor_shape_default_steady_block_and_parse() {
+    fn cjk_ime_cursor_shape_default_bar_and_parse() {
         let default_config = Config::default();
         assert_eq!(
             default_config.experimental.cjk_ime_cursor_shape,
-            ImeCursorShape::SteadyBlock
+            ImeCursorShape::Bar
         );
 
         let toml = r#"
 [experimental]
-cjk_ime_cursor_shape = "bar"
+cjk_ime_cursor_shape = "steady_block"
 "#;
         let config: Config = toml::from_str(toml).unwrap();
         assert_eq!(
             config.experimental.cjk_ime_cursor_shape,
-            ImeCursorShape::Bar
+            ImeCursorShape::SteadyBlock
         );
     }
 

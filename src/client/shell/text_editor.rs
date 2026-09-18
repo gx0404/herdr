@@ -283,7 +283,9 @@ pub(super) fn render(
         x: area.x + cursor,
         y: area.y,
         visible: true,
-        shape: 0,
+        // Blinking bar: the conventional text-input caret. Hosts with a
+        // cursor blink rate animate it for free; others show a steady bar.
+        shape: 5,
     })
 }
 

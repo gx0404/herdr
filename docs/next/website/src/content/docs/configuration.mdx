@@ -559,12 +559,13 @@ Only panes with a valid native session reference from an official integration ca
 
 ## IME cursor tracking
 
-On macOS, AI Agent TUIs that hide the hardware cursor can prevent native input-method candidate windows from following the focused pane. Reveal a cursor anchor for those panes with:
+AI Agent TUIs that hide the hardware cursor leave the host terminal without a cursor anchor, so input-method candidate windows stop following the focused pane and the typing caret disappears mid-edit. Herdr therefore reveals a blinking-bar anchor by default; opt out or narrow it with:
 
 ```toml
 [experimental]
-reveal_hidden_cursor_for_cjk_ime = true
-cjk_ime_agents = ["claude", "pi", "codex"]
+reveal_hidden_cursor_for_cjk_ime = true # default
+cjk_ime_cursor_shape = "bar"            # default
+cjk_ime_agents = []                     # empty = any focused pane
 ```
 
 Restricting `cjk_ime_agents` avoids showing an extra hardware cursor in unrelated applications. Search these keys in the [Config reference](/docs/config-reference/) for accepted Agent names and cursor shapes.

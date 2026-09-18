@@ -171,13 +171,47 @@ fn retained_cursor(
         pane.inner_rect.width,
         pane.inner_rect.height,
     );
+    // Mirror `tab_surface_cursor`'s IME reveal semantics so the retained fast
+    // path emits the same host cursor as the complete renderer and the fast
+    // path does not need a blanket fallback when the reveal is enabled.
+    let scrolled_back = crate::ui::pane_is_scrolled_back(runtime);
+    let reveal = app.state.reveal_hidden_cursor_for_cjk_ime
+        && (!app.state.cjk_ime_agent_filter_configured || {
+            let detected = app
+                .state
+                .workspaces
+                .get(workspace_index)
+                .and_then(|ws| ws.terminal_id(pane_id))
+                .and_then(|terminal_id| app.state.terminals.get(terminal_id))
+                .and_then(|terminal| terminal.detected_agent);
+            detected.is_some_and(|agent| app.state.cjk_ime_agents.contains(&agent))
+        });
     runtime
         .cursor_state(area, true)
-        .map(|cursor| protocol::CursorState {
-            x: cursor.x,
-            y: cursor.y,
-            visible: cursor.visible && !crate::ui::pane_is_scrolled_back(runtime),
-            shape: cursor.shape,
+        .map(|cursor| {
+            let visible = if reveal {
+                !scrolled_back
+            } else {
+                cursor.visible && !scrolled_back
+            };
+            protocol::CursorState {
+                x: cursor.x,
+                y: cursor.y,
+                visible,
+                shape: if reveal && visible {
+                    app.state.cjk_ime_cursor_shape
+                } else {
+                    cursor.shape
+                },
+            }
+        })
+        .or_else(|| {
+            (reveal && !scrolled_back).then_some(protocol::CursorState {
+                x: pane.inner_rect.x,
+                y: pane.inner_rect.y,
+                visible: true,
+                shape: app.state.cjk_ime_cursor_shape,
+            })
         })
 }
 
@@ -244,7 +278,6 @@ impl HeadlessServer {
         if pty_sources.is_empty()
             || self.app.full_redraw_pending
             || self.app.state.popup_pane.is_some()
-            || self.app.state.reveal_hidden_cursor_for_cjk_ime
         {
             fallback!("unsafe_state");
         }
