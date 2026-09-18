@@ -59,8 +59,11 @@ impl State {
                 .preferences
                 .layouts
                 .iter()
-                .filter(|(_, layout)| layout.valid())
-                .map(|(key, layout)| (key.clone(), layout.clone()))
+                .filter_map(|(key, layout)| {
+                    let mut layout = layout.clone();
+                    layout.discard_accounts_panel();
+                    layout.valid().then(|| (key.clone(), layout))
+                })
                 .collect(),
             source: String::new(),
             boot: String::new(),
@@ -263,9 +266,24 @@ impl ClientShellState {
             .iter()
             .map(|tab| tab.tab_id.clone())
             .collect::<Vec<_>>();
+        // The primary terminal strip mirrors the focused workspace only, so
+        // each workspace keeps an independent terminal page and clicking a
+        // workspace swaps both the strip and its terminal content.
+        let focused_workspace_tabs = match snapshot.focused_workspace_id.as_deref() {
+            Some(workspace) => snapshot
+                .tabs
+                .iter()
+                .filter(|tab| tab.workspace_id == workspace)
+                .map(|tab| tab.tab_id.clone())
+                .collect::<Vec<_>>(),
+            None => tabs.clone(),
+        };
         let changed_focus = self.workbench.last_focus != snapshot.focused_tab_id;
-        outcome.repaint |= self.workbench.dock.reconcile_tabs(
+        outcome.repaint |= self.workbench.dock.reconcile_workspace_tabs(
+            &focused_workspace_tabs,
             &tabs,
+            // Re-anchor the active tab only when the server focus actually
+            // moved, so a local tab click stays ahead of server confirmation.
             changed_focus
                 .then_some(snapshot.focused_tab_id.as_deref())
                 .flatten(),

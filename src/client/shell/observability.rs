@@ -425,11 +425,9 @@ impl State {
 
 impl ClientShellState {
     pub(super) fn open_observation_page(&mut self, page: Page, outcome: &mut ClientShellInput) {
-        self.workbench_open(if page == Page::Accounts {
-            dock::PanelId::Accounts
-        } else {
-            dock::PanelId::Monitor
-        });
+        // One dock panel hosts system, accounts, and settings pages; the
+        // requested page becomes the active tab inside it.
+        self.workbench_open(dock::PanelId::Monitor);
         self.observability.page = Some(page);
         self.observability.hover = None;
         self.observability.scroll = 0;
@@ -1338,8 +1336,10 @@ impl ClientShellState {
                 Some(Action::CancelProcess)
             }
             KeyCode::Esc => Some(Action::Close),
+            KeyCode::Char('1') => Some(Action::Page(Page::Monitor)),
+            KeyCode::Char('2') => Some(Action::Page(Page::Accounts)),
+            KeyCode::Char('3') | KeyCode::Char('s') => Some(Action::Configure),
             KeyCode::Char('r') => Some(Action::Refresh),
-            KeyCode::Char('s') => Some(Action::Configure),
             KeyCode::Char(' ') if self.observability.page == Some(Page::Monitor) => {
                 Some(Action::Pause)
             }

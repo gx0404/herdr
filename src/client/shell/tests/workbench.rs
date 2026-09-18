@@ -330,10 +330,11 @@ fn releases_remain_routable_while_layout_waits_for_new_frames() {
 #[test]
 fn detached_tabs_and_host_layouts_survive_preference_roundtrip() {
     let mut state = ready();
-    state
-        .workbench
-        .dock
-        .reconcile_tabs(&["tab_1".into(), "tab_2".into()], None);
+    state.workbench.dock.reconcile_workspace_tabs(
+        &["tab_1".into(), "tab_2".into()],
+        &["tab_1".into(), "tab_2".into()],
+        None,
+    );
     assert!(state
         .workbench
         .dock
@@ -410,10 +411,11 @@ fn dragging_an_inactive_groups_inner_split_targets_its_own_tab() {
         "client.views.set".into(),
         "layout.set_split_ratio".into(),
     ]));
-    state
-        .workbench
-        .dock
-        .reconcile_tabs(&["tab_1".into(), "tab_2".into()], None);
+    state.workbench.dock.reconcile_workspace_tabs(
+        &["tab_1".into(), "tab_2".into()],
+        &["tab_1".into(), "tab_2".into()],
+        None,
+    );
     state
         .workbench
         .dock
@@ -534,4 +536,56 @@ fn copy_search_prompt_and_cursor_are_visible_in_docked_terminal() {
     let frame = state.compose(120, 40).unwrap();
     assert!(frame_rows(&frame).join("\n").contains("needle"));
     assert!(frame.cursor.is_none());
+}
+
+#[test]
+fn focusing_another_workspace_swaps_the_primary_terminal_strip() {
+    let mut state = ready();
+    assert_eq!(
+        state.workbench.dock.groups[0].tabs,
+        vec!["tab_1".to_owned()],
+        "初始只显示聚焦工作区的标签"
+    );
+
+    let mut switched = snapshot();
+    switched.workspaces[0].focused = false;
+    let mut workspace = switched.workspaces[0].clone();
+    workspace.workspace_id = "ws_2".into();
+    workspace.active_tab_id = "tab_2".into();
+    workspace.number = 2;
+    workspace.label = "other-shell".into();
+    workspace.focused = true;
+    switched.workspaces.push(workspace);
+    let mut tab = switched.tabs[0].clone();
+    tab.tab_id = "tab_2".into();
+    tab.workspace_id = "ws_2".into();
+    switched.tabs.push(tab);
+    switched.focused_workspace_id = Some("ws_2".into());
+    switched.focused_tab_id = Some("tab_2".into());
+    state.set_snapshot(Box::new(switched));
+    state.workbench.pending = false;
+
+    let mut outcome = ClientShellInput::default();
+    state.tick_workbench(
+        std::time::Instant::now() + std::time::Duration::from_secs(1),
+        &mut outcome,
+    );
+    assert!(outcome.repaint, "切换工作区必须触发重绘");
+    let group = &state.workbench.dock.groups[0];
+    assert_eq!(
+        group.tabs,
+        vec!["tab_2".to_owned()],
+        "主终端组整体换成新工作区的标签"
+    );
+    assert_eq!(group.active.as_deref(), Some("tab_2"));
+    assert!(outcome.actions.iter().any(|action| matches!(action,
+        ClientShellAction::Endpoint { request, .. } if matches!(&request.method,
+            Method::ClientViewsSet(params) if params.views.iter().any(|view| view.tab_id == "tab_2")))),
+        "服务端视图必须投影新工作区的活动标签");
+    state.compose(120, 40).expect("切换后可组合画面");
+    assert!(state.hits.tabs.iter().any(|(_, id)| id == "tab_2"));
+    assert!(
+        !state.hits.tabs.iter().any(|(_, id)| id == "tab_1"),
+        "另一工作区的标签不再出现在终端条"
+    );
 }

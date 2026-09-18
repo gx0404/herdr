@@ -101,8 +101,8 @@ fn command_palette_fuzzy_filters_and_activates_with_highlight_data() {
     let rows = super::command_palette::palette_rows(palette_overlay(&state));
     let ids: Vec<&str> = rows.iter().map(|row| row.item.id.as_str()).collect();
     assert!(
-        ids.contains(&"observation:settings"),
-        "搜索包含新增的监控设置：{ids:?}"
+        ids.contains(&"observation:monitor"),
+        "监控单入口包含设置页签：{ids:?}"
     );
     assert_eq!(rows[0].item.id, "binding:Settings");
     assert!(

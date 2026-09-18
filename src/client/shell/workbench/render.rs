@@ -65,7 +65,6 @@ impl ClientShellState {
         for (label, action) in [
             (" herdr ≡ ", Action::Menu),
             (tr(" Monitor ", " 监控 "), Action::Open(PanelId::Monitor)),
-            (tr(" Accounts ", " 用量 "), Action::Open(PanelId::Accounts)),
             (tr(" Layout ", " 布局 "), Action::Arrange),
             (
                 if self.workbench.dock.locked {
@@ -162,9 +161,43 @@ impl ClientShellState {
             let label = match panel {
                 PanelId::Workspaces => tr("⠿ WORKSPACES", "⠿ 工作区").to_string(),
                 PanelId::Agents => "⠿ Agents".into(),
-                PanelId::Monitor => tr("⠿ SYSTEM", "⠿ 系统监控").to_string(),
+                PanelId::Monitor => tr("⠿ MONITOR", "⠿ 监控").to_string(),
                 PanelId::Accounts => tr("⠿ ACCOUNTS", "⠿ 账号用量").to_string(),
-                PanelId::Terminal(id) => format!("⠿ {} {id}", tr("TERMINALS", "终端组")),
+                PanelId::Terminal(id) => {
+                    // The strip holds one workspace's tabs; name the panel
+                    // after that workspace so each terminal page is
+                    // identifiable. Same-named workspaces get their number.
+                    let workspace = self
+                        .workbench
+                        .dock
+                        .groups
+                        .iter()
+                        .find(|group| group.id == *id)
+                        .and_then(|group| group.tabs.first())
+                        .and_then(|tab| snapshot.tabs.iter().find(|entry| &entry.tab_id == tab))
+                        .and_then(|tab| {
+                            snapshot
+                                .workspaces
+                                .iter()
+                                .find(|ws| ws.workspace_id == tab.workspace_id)
+                        });
+                    match workspace {
+                        Some(ws) => {
+                            let duplicated = snapshot
+                                .workspaces
+                                .iter()
+                                .filter(|other| other.label == ws.label)
+                                .count()
+                                > 1;
+                            if duplicated {
+                                format!("⠿ {} #{}", ws.label, ws.number)
+                            } else {
+                                format!("⠿ {}", ws.label)
+                            }
+                        }
+                        None => format!("⠿ {} {id}", tr("TERMINALS", "终端组")),
+                    }
+                }
             };
             let header = Rect::new(area.x, area.y, area.width, 1);
             buffer.set_style(header, Style::default().bg(palette.surface0));
@@ -344,12 +377,13 @@ impl ClientShellState {
                         topology_signature: signature,
                     }));
             } else if matches!(panel, PanelId::Monitor | PanelId::Accounts) {
+                // The monitor panel hosts all observation pages; the saved
+                // page is whichever tab the user last selected. Legacy
+                // accounts panels keep rendering the accounts page.
                 self.observability.page = Some(if *panel == PanelId::Accounts {
                     Page::Accounts
-                } else if saved_page == Some(Page::Settings) {
-                    Page::Settings
                 } else {
-                    Page::Monitor
+                    saved_page.unwrap_or(Page::Monitor)
                 });
                 let previous_hits = std::mem::take(&mut self.observability.hits);
                 if let Some(covered) = self.observability.paint(&mut frame, area, palette) {
@@ -359,11 +393,7 @@ impl ClientShellState {
             }
         }
         self.observability.page = match self.workbench.dock.focused {
-            PanelId::Monitor => Some(if saved_page == Some(Page::Settings) {
-                Page::Settings
-            } else {
-                Page::Monitor
-            }),
+            PanelId::Monitor => Some(saved_page.unwrap_or(Page::Monitor)),
             PanelId::Accounts => Some(Page::Accounts),
             _ => None,
         };

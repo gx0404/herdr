@@ -710,31 +710,17 @@ impl ClientShellState {
                 action: ClientPaletteAction::MachineEdit(profile.id.clone()),
             });
         }
-        for (id, title, page) in [
-            (
-                "monitor",
-                super::observability::tr("System monitor", "系统监控"),
-                super::observability::Page::Monitor,
-            ),
-            (
-                "accounts",
-                super::observability::tr("Account usage", "账号用量"),
-                super::observability::Page::Accounts,
-            ),
-            (
-                "settings",
-                super::observability::tr("Monitor settings", "监控设置"),
-                super::observability::Page::Settings,
-            ),
-        ] {
-            items.push(ClientPaletteItem {
-                id: format!("observation:{id}"),
-                title: title.into(),
-                subtitle: String::new(),
-                badge: false,
-                action: ClientPaletteAction::Observation(page),
-            });
-        }
+        items.push(ClientPaletteItem {
+            id: "observation:monitor".into(),
+            title: super::observability::tr(
+                "Monitor (system · accounts · settings)",
+                "监控（系统 · 账号 · 设置）",
+            )
+            .into(),
+            subtitle: String::new(),
+            badge: false,
+            action: ClientPaletteAction::Observation(super::observability::Page::Monitor),
+        });
         items.push(ClientPaletteItem {
             id: "layout".into(),
             title: super::observability::tr("Arrange panels", "调整面板布局").into(),

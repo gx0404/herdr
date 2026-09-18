@@ -1,5 +1,6 @@
 use super::*;
 use ratatui::widgets::{Block, BorderType, Borders, Row, Sparkline, Table, Widget};
+use unicode_segmentation::UnicodeSegmentation;
 
 fn text(buffer: &mut Buffer, rect: Rect, row: u16, value: &str, style: Style) {
     if row >= rect.height || rect.width == 0 {
@@ -9,6 +10,24 @@ fn text(buffer: &mut Buffer, rect: Rect, row: u16, value: &str, style: Style) {
         .chars()
         .filter(|c| !c.is_control())
         .collect::<String>();
+    // Clip with an ellipsis instead of a hard cut so panel edges never
+    // swallow the tail of a long status message.
+    let value = if UnicodeWidthStr::width(value.as_str()) > usize::from(rect.width) {
+        let mut cut = String::new();
+        let mut used = 0_usize;
+        for grapheme in value.graphemes(true) {
+            let width = grapheme.width();
+            if used + width > usize::from(rect.width).saturating_sub(1) {
+                break;
+            }
+            cut.push_str(grapheme);
+            used += width;
+        }
+        cut.push('…');
+        cut
+    } else {
+        value
+    };
     buffer.set_stringn(rect.x, rect.y + row, value, rect.width as usize, style);
 }
 
@@ -51,6 +70,36 @@ fn button(
             .fg(palette.text)
             .add_modifier(Modifier::BOLD),
     );
+    if !rect.is_empty() {
+        hits.push((rect, action));
+    }
+}
+
+/// Page tab with an unambiguous active state: the selected page inverts into
+/// the accent color so it can never be confused with idle tabs.
+fn page_tab(
+    buffer: &mut Buffer,
+    rect: Rect,
+    label: &str,
+    active: bool,
+    action: Action,
+    palette: &Palette,
+    hits: &mut Vec<(Rect, Action)>,
+) {
+    let width = (UnicodeWidthStr::width(label) as u16)
+        .saturating_add(2)
+        .min(rect.width);
+    let rect = Rect::new(rect.x, rect.y, width, rect.height.min(1));
+    let style = if active {
+        Style::default()
+            .fg(palette.panel_bg)
+            .bg(palette.accent)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(palette.text).bg(palette.surface0)
+    };
+    buffer.set_style(rect, style);
+    text(buffer, rect, 0, &format!(" {label} "), style);
     if !rect.is_empty() {
         hits.push((rect, action));
     }
@@ -158,6 +207,31 @@ pub(super) fn status(status: ObservationStatus) -> &'static str {
     }
 }
 
+/// Health grading so a glance separates fine / busy / action-needed rows.
+pub(super) fn status_color(status: ObservationStatus, palette: &Palette) -> ratatui::style::Color {
+    match status {
+        ObservationStatus::Ready => palette.green,
+        ObservationStatus::Warming => palette.blue,
+        ObservationStatus::NotAuthenticated | ObservationStatus::NeedsBinding => palette.yellow,
+        ObservationStatus::Unavailable
+        | ObservationStatus::Unsupported
+        | ObservationStatus::PermissionDenied
+        | ObservationStatus::Error => palette.red,
+        ObservationStatus::Stale | ObservationStatus::Unknown => palette.overlay1,
+    }
+}
+
+fn updated_ago(now_ms: u64, observed_at_ms: u64) -> String {
+    let seconds = now_ms.saturating_sub(observed_at_ms) / 1000;
+    if seconds < 60 {
+        format!("{seconds}s")
+    } else if seconds < 3600 {
+        format!("{}m", seconds / 60)
+    } else {
+        format!("{}h{}m", seconds / 3600, seconds % 3600 / 60)
+    }
+}
+
 pub(super) fn paint(
     buffer: &mut Buffer,
     area: Rect,
@@ -174,44 +248,48 @@ pub(super) fn paint(
                 buffer[(x, y)].set_symbol(" ");
             }
         }
-        let inner = block(
-            buffer,
-            area,
-            match page {
-                Page::Monitor => tr(" SYSTEM MONITOR ", " 系统监控 "),
-                Page::Accounts => tr(" ACCOUNT USAGE ", " 账号用量 "),
-                Page::Settings => tr(" MONITOR & USAGE SETTINGS ", " 监控与用量设置 "),
-            },
-            palette,
-        );
+        let inner = block(buffer, area, tr(" MONITOR ", " 监控 "), palette);
+        // Single navigation level: page tabs only. Refresh/pause/close live
+        // on keyboard shortcuts (see footer) so the row never mixes
+        // navigation with actions.
         let mut x = inner.x;
-        for (label, action) in [
-            (tr("System", "系统"), Action::Page(Page::Monitor)),
-            (tr("Accounts", "账号"), Action::Page(Page::Accounts)),
-            (tr("Settings", "设置"), Action::Configure),
-            (tr("Refresh", "刷新"), Action::Refresh),
-            (
-                if state.paused {
-                    tr("Resume", "继续")
-                } else {
-                    tr("Pause", "暂停")
-                },
-                Action::Pause,
-            ),
-            (tr("Close", "关闭"), Action::Close),
+        for (label, tab) in [
+            (tr("System", "系统"), Page::Monitor),
+            (tr("Accounts", "账号"), Page::Accounts),
+            (tr("Settings", "设置"), Page::Settings),
         ] {
             if x >= inner.right() {
                 break;
             }
-            button(
+            page_tab(
                 buffer,
                 Rect::new(x, inner.y, inner.right() - x, 1),
                 label,
-                action,
+                page == tab,
+                Action::Page(tab),
                 palette,
                 &mut hits,
             );
             x = x.saturating_add(UnicodeWidthStr::width(label) as u16 + 3);
+        }
+        if state.paused {
+            let label = tr(" ‖ paused ", " ‖ 已暂停 ");
+            let width = UnicodeWidthStr::width(label) as u16;
+            let rect = Rect::new(
+                inner.right().saturating_sub(width).max(x),
+                inner.y,
+                width.min(inner.right().saturating_sub(x.max(inner.x))),
+                1,
+            );
+            text(
+                buffer,
+                rect,
+                0,
+                label,
+                Style::default()
+                    .fg(palette.yellow)
+                    .add_modifier(Modifier::BOLD),
+            );
         }
         let body = Rect::new(
             inner.x,
@@ -225,8 +303,8 @@ pub(super) fn paint(
             Page::Settings => settings(buffer, body, state, palette, &mut hits),
         }
         let footer = state.message.as_deref().unwrap_or(tr(
-            "Scroll · r refresh · s settings · Esc close",
-            "滚轮滚动 · r 刷新 · s 设置 · Esc 关闭",
+            "1/2/3 pages · r refresh · Space pause · Esc close",
+            "1/2/3 切页 · r 刷新 · 空格 暂停 · Esc 关闭",
         ));
         text(
             buffer,
@@ -673,12 +751,22 @@ fn monitor(
                     Style::default().fg(palette.overlay1),
                 );
                 if inner.height > 4 {
+                    bar(
+                        buffer,
+                        Rect::new(inner.x, inner.y + 4, inner.width, 1),
+                        (memory.swap_total_bytes > 0).then(|| {
+                            memory.swap_used_bytes as f32 / memory.swap_total_bytes as f32 * 100.0
+                        }),
+                        palette,
+                    );
+                }
+                if inner.height > 6 {
                     Sparkline::default()
                         .data(history(state, inner.width, |point| point.memory))
                         .max(100)
                         .style(Style::default().fg(palette.mauve))
                         .render(
-                            Rect::new(inner.x, inner.y + 4, inner.width, inner.height - 4),
+                            Rect::new(inner.x, inner.y + 6, inner.width, inner.height - 6),
                             buffer,
                         );
                 }
@@ -707,7 +795,13 @@ fn monitor(
                         inner,
                         row,
                         &format!("{}  {}", gpu.name, percent(gpu.usage_percent)),
-                        Style::default().fg(palette.teal),
+                        Style::default().fg(if gpu.usage_percent.is_some_and(|v| v >= 90.0) {
+                            palette.red
+                        } else if gpu.usage_percent.is_some_and(|v| v >= 75.0) {
+                            palette.yellow
+                        } else {
+                            palette.teal
+                        }),
                     );
                     text(
                         buffer,
@@ -748,17 +842,26 @@ fn monitor(
                     .enumerate()
                 {
                     let used = disk.total_bytes.saturating_sub(disk.available_bytes);
+                    let usage_pct = (disk.total_bytes > 0)
+                        .then(|| used as f32 / disk.total_bytes as f32 * 100.0);
                     text(
                         buffer,
                         inner,
                         index as u16,
                         &format!(
-                            "{}  {} / {}",
+                            "{}  {} / {}  {}",
                             disk.mount_point,
                             bytes(used),
-                            bytes(disk.total_bytes)
+                            bytes(disk.total_bytes),
+                            percent(usage_pct)
                         ),
-                        Style::default().fg(palette.text),
+                        Style::default().fg(if usage_pct.is_some_and(|value| value >= 90.0) {
+                            palette.red
+                        } else if usage_pct.is_some_and(|value| value >= 75.0) {
+                            palette.yellow
+                        } else {
+                            palette.text
+                        }),
                     );
                 }
             }
@@ -1168,18 +1271,38 @@ fn usage_dashboard(
         }
         if let Some(header) = viewport_row(row) {
             let selected = state.selected_account.as_deref() == Some(account.account_id.as_str());
+            let label = format!(
+                "{}{}",
+                if selected { "› " } else { "  " },
+                account.account_label
+            );
             text(
                 buffer,
                 header,
                 0,
-                &format!(
-                    "{}{} · {}",
-                    if selected { "› " } else { "  " },
-                    account.account_label,
-                    status(account.status)
-                ),
+                &label,
                 Style::default()
-                    .fg(palette.accent)
+                    .fg(if selected {
+                        palette.accent
+                    } else {
+                        palette.text
+                    })
+                    .add_modifier(Modifier::BOLD),
+            );
+            let offset = UnicodeWidthStr::width(label.as_str()) as u16;
+            let tail = Rect::new(
+                header.x.saturating_add(offset),
+                header.y,
+                header.width.saturating_sub(offset),
+                1,
+            );
+            text(
+                buffer,
+                tail,
+                0,
+                &format!(" · {}", status(account.status)),
+                Style::default()
+                    .fg(status_color(account.status, palette))
                     .add_modifier(Modifier::BOLD),
             );
             hits.push((header, Action::Account(account.account_id.clone())));
@@ -1228,16 +1351,19 @@ fn usage_dashboard(
         }
         if account.observed_at_ms > 0 {
             if let Some(rect) = viewport_row(row) {
+                let mut line = format!(
+                    "{} {}",
+                    tr("Updated", "更新于"),
+                    updated_ago(state.now_ms, account.observed_at_ms)
+                );
+                if !account.source.is_empty() {
+                    line.push_str(&format!(" · {}", account.source));
+                }
                 text(
                     buffer,
                     rect,
                     0,
-                    &format!(
-                        "{} {}s · {}",
-                        tr("Updated", "更新于"),
-                        state.now_ms.saturating_sub(account.observed_at_ms) / 1000,
-                        account.source
-                    ),
+                    &line,
                     Style::default().fg(palette.overlay0),
                 );
             }

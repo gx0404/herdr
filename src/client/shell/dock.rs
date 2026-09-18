@@ -379,14 +379,45 @@ impl DockLayout {
         true
     }
 
-    pub fn reconcile_tabs(&mut self, tabs: &[String], active: Option<&str>) -> bool {
+    /// One-way preference migration: the accounts page merged into the
+    /// monitor panel, so legacy layouts drop their standalone accounts panel
+    /// and keep only the geometry that still applies.
+    pub fn discard_accounts_panel(&mut self) {
+        while self.root.contains(&PanelId::Accounts) {
+            let Some(root) = self.root.clone().without(&PanelId::Accounts) else {
+                break;
+            };
+            self.root = root;
+        }
+        if self.maximized.as_ref() == Some(&PanelId::Accounts) {
+            self.maximized = None;
+        }
+        if self.focused == PanelId::Accounts {
+            self.focused = PanelId::Terminal(self.groups.first().map_or(1, |group| group.id));
+        }
+    }
+
+    /// Reconcile tab membership against the server snapshot.
+    ///
+    /// The first group is the primary terminal strip and mirrors the focused
+    /// workspace's tabs only, so each workspace owns an independent terminal
+    /// page and switching workspaces swaps the strip wholesale. Tabs dragged
+    /// into secondary groups keep their explicit membership (deduped against
+    /// `existing_tabs`) and stay visible even when their workspace is not
+    /// focused. `active` re-anchors the primary strip's selected tab.
+    pub fn reconcile_workspace_tabs(
+        &mut self,
+        focused_tabs: &[String],
+        existing_tabs: &[String],
+        active: Option<&str>,
+    ) -> bool {
         let mut changed = false;
         let mut seen = std::collections::HashSet::new();
-        for group in &mut self.groups {
+        for group in self.groups.iter_mut().skip(1) {
             let previous_len = group.tabs.len();
             group
                 .tabs
-                .retain(|tab| tabs.contains(tab) && seen.insert(tab.clone()));
+                .retain(|tab| existing_tabs.contains(tab) && seen.insert(tab.clone()));
             changed |= previous_len != group.tabs.len();
             if group
                 .active
@@ -398,26 +429,27 @@ impl DockLayout {
                 group.active = next;
             }
         }
-        if let Some(first) = self.groups.first_mut() {
-            let previous_len = first.tabs.len();
-            first
-                .tabs
-                .extend(tabs.iter().filter(|tab| !seen.contains(*tab)).cloned());
-            changed |= previous_len != first.tabs.len();
-            if first.active.is_none() {
-                first.active = first.tabs.first().cloned();
-                changed |= first.active.is_some();
-            }
-        }
-        if let Some(tab) = active {
-            if let Some(group) = self
-                .groups
-                .iter_mut()
-                .find(|g| g.tabs.iter().any(|id| id == tab))
-            {
-                changed |= group.active.as_deref() != Some(tab);
-                group.active = Some(tab.to_owned());
-            }
+        if let Some(primary) = self.groups.first_mut() {
+            let previous = std::mem::take(&mut primary.tabs);
+            primary.tabs = focused_tabs
+                .iter()
+                .filter(|tab| !seen.contains(*tab))
+                .cloned()
+                .collect();
+            changed |= previous != primary.tabs;
+            let next = match active {
+                Some(tab) if primary.tabs.iter().any(|id| id == tab) => Some(tab.to_owned()),
+                // Without a server focus change, keep a local tab selection
+                // that is still a member of the strip.
+                _ => primary
+                    .active
+                    .as_ref()
+                    .filter(|tab| primary.tabs.contains(*tab))
+                    .cloned()
+                    .or_else(|| primary.tabs.first().cloned()),
+            };
+            changed |= primary.active != next;
+            primary.active = next;
         }
         let previous_groups = self.groups.len();
         self.remove_empty_groups();
@@ -549,13 +581,37 @@ mod tests {
     fn splitting_and_merging_groups_retains_tabs_exactly_once() {
         let mut layout = DockLayout::default();
         let tabs = vec!["a".into(), "b".into(), "c".into()];
-        layout.reconcile_tabs(&tabs, Some("a"));
+        layout.reconcile_workspace_tabs(&tabs, &tabs, Some("a"));
         assert!(layout.move_tab("b", 1, 0, Some(Edge::Right)));
         assert_eq!(layout.groups.len(), 2);
         assert!(layout.valid());
         assert!(layout.move_tab("b", 1, 1, None));
         assert_eq!(layout.groups.len(), 1);
         assert_eq!(layout.groups[0].tabs, tabs);
+        assert!(layout.valid());
+    }
+
+    #[test]
+    fn primary_strip_mirrors_the_focused_workspace_only() {
+        let mut layout = DockLayout::default();
+        let ws_one = vec!["t1".to_owned(), "t2".to_owned()];
+        let ws_two = vec!["t3".to_owned()];
+        let all = [ws_one.clone(), ws_two.clone()].concat();
+        layout.reconcile_workspace_tabs(&ws_one, &all, Some("t2"));
+        assert_eq!(layout.groups[0].tabs, ws_one);
+        assert_eq!(layout.groups[0].active.as_deref(), Some("t2"));
+        // A tab dragged into a secondary group stays there even while its
+        // workspace is not focused, and is not duplicated in the primary.
+        assert!(layout.move_tab("t2", 1, 0, Some(Edge::Right)));
+        // Switching the focused workspace swaps the primary strip wholesale.
+        layout.reconcile_workspace_tabs(&ws_two, &all, Some("t3"));
+        assert_eq!(layout.groups[0].tabs, ws_two);
+        assert_eq!(layout.groups[0].active.as_deref(), Some("t3"));
+        assert_eq!(layout.groups[1].tabs, vec!["t2".to_owned()]);
+        layout.reconcile_workspace_tabs(&ws_one, &all, Some("t1"));
+        assert_eq!(layout.groups[0].tabs, vec!["t1".to_owned()]);
+        assert_eq!(layout.groups[1].tabs, vec!["t2".to_owned()]);
+        assert_eq!(layout.groups[1].active.as_deref(), Some("t2"));
         assert!(layout.valid());
     }
 

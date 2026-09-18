@@ -383,10 +383,11 @@ fn local_workbench_focus_waits_for_server_confirmation_during_selection() {
     old.panes.push(other);
     state.set_snapshot(Box::new(old.clone()));
     state.workbench.enabled = true;
-    state
-        .workbench
-        .dock
-        .reconcile_tabs(&["tab_1".into()], Some("tab_1"));
+    state.workbench.dock.reconcile_workspace_tabs(
+        &["tab_1".into()],
+        &["tab_1".into()],
+        Some("tab_1"),
+    );
     let mut other = surface();
     other.panes[0].pane_id = "pane_2".into();
     state.workbench.views.insert(
