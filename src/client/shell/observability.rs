@@ -7,12 +7,36 @@ use crate::config::{AccountUsageConfig, MonitorConfig, UsageDisplayFormat, Usage
 use crossterm::event::{KeyCode, MouseButton, MouseEvent, MouseEventKind};
 use std::time::{Duration, Instant};
 
-pub(super) fn tr(en: &'static str, zh: &'static str) -> &'static str {
-    if crate::i18n::lang().as_str().starts_with("zh") {
-        zh
+/// 订阅生效期间的低频兜底轮询：事件通道是合并丢帧语义，偶发丢帧靠它补齐。
+const SUBSCRIBED_POLL: Duration = Duration::from_secs(30);
+/// 订阅被拒 / 不可用后的退避：到期前只走自适应轮询。
+const SUBSCRIBE_RETRY: Duration = Duration::from_secs(30);
+/// 退订请求失败（超时 / 传输错误）后的重试间隔；重试次数有上界。
+const UNSUBSCRIBE_RETRY: Duration = Duration::from_secs(2);
+/// 同一订阅的退订最多尝试次数：超过即放弃（服务端会在连接断开时释放）。
+const MAX_UNSUBSCRIBE_ATTEMPTS: u8 = 3;
+/// 服务端探测在途时的轮询间隔（旧 server 不带刷新状态时保持 2 秒）。
+const IN_FLIGHT_POLL: Duration = Duration::from_millis(500);
+const IDLE_POLL: Duration = Duration::from_secs(2);
+/// 「N 秒后可刷新」的可信上限：端点时钟与本机偏差超过它时当作未知，不锁按钮。
+const MAX_REFRESH_WAIT_SECS: u64 = 60;
+
+pub(super) fn zh() -> bool {
+    crate::i18n::lang().as_str().starts_with("zh")
+}
+
+pub(super) fn tr(en: &'static str, zh_text: &'static str) -> &'static str {
+    if zh() {
+        zh_text
     } else {
         en
     }
+}
+
+/// 可作为绑定候选 / 悬浮目标的 agent：排除 herdr 自身的 agent（muse）。悬浮层
+/// 判据与账号页 pane 选择器共用同一处，避免两个入口漂移。
+pub(super) fn is_bindable_agent(name: &str) -> bool {
+    !name.eq_ignore_ascii_case("muse")
 }
 
 /// Whether the accounts surface lists a provider: hidden only when the
@@ -60,9 +84,18 @@ pub(super) enum Purpose {
     Binding,
     /// 悬浮层发起的绑定：发往 hover 的端点，回流只刷新悬浮层。
     HoverBinding,
-    Integration,
+    /// 官方回调开关；`bind_after` 是启用成功后顺手绑定的 (pane, account)。
+    Integration {
+        bind_after: Option<(String, String)>,
+    },
     /// 悬浮层发起的官方回调开关：发往 hover 的端点。
-    HoverIntegration,
+    HoverIntegration {
+        bind_after: Option<(String, String)>,
+    },
+    /// 页面作用域的 `account.usage.subscribe` / `unsubscribe`：不绑定页面代际
+    /// （订阅按参数与 (端点, boot) 归属，由 tick 对账），只受 boot 校验。
+    Subscribe,
+    Unsubscribe,
     Process,
     Terminate,
 }
@@ -76,8 +109,10 @@ impl Purpose {
             Self::HoverUsage => "hover_usage",
             Self::Binding => "binding",
             Self::HoverBinding => "hover_binding",
-            Self::Integration => "integration",
-            Self::HoverIntegration => "hover_integration",
+            Self::Integration { .. } => "integration",
+            Self::HoverIntegration { .. } => "hover_integration",
+            Self::Subscribe => "subscribe",
+            Self::Unsubscribe => "unsubscribe",
             Self::Process => "process",
             Self::Terminate => "terminate",
         }
@@ -87,11 +122,24 @@ impl Purpose {
     fn is_hover(&self) -> bool {
         matches!(
             self,
-            Self::HoverUsage | Self::HoverBinding | Self::HoverIntegration
+            Self::HoverUsage | Self::HoverBinding | Self::HoverIntegration { .. }
         )
     }
 
+    /// 随页面代际作废的请求：既不是悬浮层作用域，也不是订阅生命周期。
+    fn page_scoped(&self) -> bool {
+        !self.is_hover() && !matches!(self, Self::Subscribe | Self::Unsubscribe)
+    }
+
     const HOVER_KEYS: [&'static str; 3] = ["hover_usage", "hover_binding", "hover_integration"];
+    /// 不随页面代际作废的请求键：悬浮层作用域 + 订阅生命周期。
+    const PAGE_INDEPENDENT_KEYS: [&'static str; 5] = [
+        "hover_usage",
+        "hover_binding",
+        "hover_integration",
+        "subscribe",
+        "unsubscribe",
+    ];
 }
 
 /// `observation_request` 的结局：调用方据此决定强意图刷新标志的去留。
@@ -122,6 +170,12 @@ pub(super) enum Action {
     Account(String),
     CycleAccount,
     Bind,
+    /// 把当前聚焦的 pane（须运行所选厂商的 agent）绑定到作用域内的账号。
+    BindFocused,
+    /// 账号页 pane 选择器：在运行所选厂商 agent 的 pane 之间前后切换。
+    CyclePane(isize),
+    /// 一键绑定：服务端 `pending_binding` 给出的 (pane, account)。
+    BindTo(String, String),
     Source,
     UsageIntegration(bool),
     Process(ProcessIdentity),
@@ -169,6 +223,8 @@ pub(super) struct HoverScope {
     pub pane: Option<String>,
     pub endpoint: Option<ClientEndpointId>,
     pub accounts: Vec<AccountUsageSnapshot>,
+    /// 与 `accounts` 按 `account_id` 对齐的服务端刷新状态（旧 server 为空）。
+    pub refresh_states: Vec<UsageRefreshState>,
     /// 悬浮层请求的代际：作用域复位即推进，旧响应按此丢弃。
     pub epoch: u64,
     /// 排队中的强意图刷新（悬浮层首次可见 / 点「刷新」/ 绑定回流）；请求真正
@@ -180,6 +236,8 @@ pub(super) struct HoverScope {
     pub scroll: usize,
     /// 悬浮层下一次轮询时刻，与页面的 `next_usage` 各自独立。
     next_usage: Instant,
+    /// 悬浮层最近一次用量请求的发出时刻：响应说探测在途时以它为基准收紧轮询。
+    sent_at: Option<Instant>,
 }
 
 impl Default for HoverScope {
@@ -189,13 +247,116 @@ impl Default for HoverScope {
             pane: None,
             endpoint: None,
             accounts: Vec::new(),
+            refresh_states: Vec::new(),
             epoch: 0,
             refresh: false,
             manual_in_flight: false,
             scroll: 0,
             next_usage: Instant::now(),
+            sent_at: None,
         }
     }
+}
+
+/// 服务端确认的页面订阅：id、参数与创建它的 (端点, boot)。退订必须发回同一
+/// 端点——订阅 id 只在创建它的 server 上有意义。
+pub(super) struct ActiveSubscription {
+    pub id: String,
+    pub params: UsageParams,
+    pub endpoint: ClientEndpointId,
+    pub boot_id: String,
+}
+
+/// 待退订的旧订阅：定向发往创建它的端点；失败有界重试，端点离线 / boot 变化
+/// 时服务端已随连接释放，直接放弃。
+struct RetiringSubscription {
+    id: String,
+    endpoint: ClientEndpointId,
+    boot_id: String,
+    attempts: u8,
+}
+
+/// 页面作用域订阅（`account.usage.subscribe`）的生命周期；悬浮层不订阅。
+/// 订阅归属于创建它的 (端点, boot) 与连接：活动端点 / boot 变化时旧订阅进入
+/// 退订队列（发回旧端点），连接断开时服务端已释放、直接丢弃。
+#[derive(Default)]
+pub(super) struct UsageSubscription {
+    /// 服务端确认的订阅；`None` = 未订阅。
+    pub active: Option<ActiveSubscription>,
+    /// 已发出、等待确认的订阅：参数与目标端点（boot 由响应路径按端点校验）。
+    requested: Option<(UsageParams, ClientEndpointId)>,
+    /// 待退订的旧订阅（作用域变化 / 页面隐藏 / 端点切换后），一次退一个，
+    /// 收到 `active:false` 确认才出队。
+    retire: VecDeque<RetiringSubscription>,
+    /// 订阅被拒 / 端点不可用后的退避截止：到期前只走自适应轮询。
+    retry_at: Option<Instant>,
+    /// 退订失败后的重试时刻。
+    unsubscribe_retry_at: Option<Instant>,
+}
+
+impl UsageSubscription {
+    /// 参数是否覆盖页面当前的 (厂商, 账号) 选择。
+    fn covers(params: &UsageParams, provider: Option<&str>, account: Option<&str>) -> bool {
+        params.agent.as_deref() == provider && params.account_id.as_deref() == account
+    }
+
+    /// 把已确认的订阅移入退订队列（保留其归属端点）。
+    fn retire_active(&mut self) {
+        if let Some(active) = self.active.take() {
+            self.retire.push_back(RetiringSubscription {
+                id: active.id,
+                endpoint: active.endpoint,
+                boot_id: active.boot_id,
+                attempts: 0,
+            });
+        }
+    }
+
+    /// 页面作用域换了 (端点, boot)：已确认的订阅排队退订（发回旧端点），等待
+    /// 确认的订阅在响应到达时再排队退订；退避复位。退订队列原样保留。
+    fn detach(&mut self) {
+        self.retire_active();
+        self.requested = None;
+        self.retry_at = None;
+    }
+
+    /// 某端点的连接断开：服务端已随连接释放该端点上的订阅，本地相应条目直接
+    /// 丢弃（不再退订）。返回是否丢掉了在途的订阅 / 退订请求。
+    fn endpoint_disconnected(&mut self, endpoint: &ClientEndpointId) -> (bool, bool) {
+        let subscribe_in_flight = self
+            .requested
+            .as_ref()
+            .is_some_and(|(_, owner)| owner == endpoint);
+        let unsubscribe_in_flight = self
+            .retire
+            .front()
+            .is_some_and(|entry| &entry.endpoint == endpoint);
+        if self
+            .active
+            .as_ref()
+            .is_some_and(|active| &active.endpoint == endpoint)
+        {
+            self.active = None;
+        }
+        if subscribe_in_flight {
+            self.requested = None;
+        }
+        self.retire.retain(|entry| &entry.endpoint != endpoint);
+        if unsubscribe_in_flight {
+            self.unsubscribe_retry_at = None;
+        }
+        (subscribe_in_flight, unsubscribe_in_flight)
+    }
+}
+
+/// 排队待发的绑定（官方回调启用成功后顺手绑定）：响应处理期无法发请求，由
+/// 下一次 tick 发出。`endpoint` 是应答回调的主机——pane id 只在它上面有意义，
+/// 派发时目标主机已变则放弃。
+struct QueuedBinding {
+    pane_id: String,
+    account_id: String,
+    hover: bool,
+    endpoint: ClientEndpointId,
 }
 
 impl HoverScope {
@@ -251,15 +412,27 @@ pub(super) struct State {
     pub accounts: Vec<AccountUsageSnapshot>,
     pub selected_provider: Option<String>,
     pub selected_account: Option<String>,
-    /// 页面作用域里待绑定的 pane：只供 `Action::Bind` 使用，页面轮询不带它。
-    ///
-    /// 悬浮层不再写它，因此在 B-3 的 pane 选择器 /「绑定到聚焦 pane」入口接入
-    /// 之前没有 `Some` 写入点：账号页底行的「确认账号绑定」按钮与
-    /// `Action::Bind` 的页面分支是 B-3 的待接入点，悬浮层仍是唯一绑定入口。
+    /// 页面作用域里待绑定的 pane：由 pane 选择器（`Action::CyclePane`）、「绑定到
+    /// 聚焦 pane」（`Action::BindFocused`）与一键绑定（`Action::BindTo`）写入，只供
+    /// `Action::Bind` 使用，页面轮询不带它；悬浮层从不写它。
     pub selected_pane: Option<String>,
+    /// `selected_pane` 在绑定行里的显示名（agent 名 · pane id）。
+    pub selected_pane_label: Option<String>,
+    /// 与页面 `accounts` 按 `account_id` 对齐的服务端刷新状态（旧 server 为空）：
+    /// 探测在途 / 防抖截止 / 目录信任 / 推断绑定 / 待办绑定。
+    pub refresh_states: Vec<UsageRefreshState>,
+    /// 页面作用域的用量订阅，见 `UsageSubscription`。
+    pub subscription: UsageSubscription,
     pub hover: Option<Hover>,
     /// 悬浮层作用域，见 `HoverScope`。
     pub hover_scope: HoverScope,
+    /// 官方回调启用成功后排队的绑定，下一次 tick 发出。
+    queued_binding: Option<QueuedBinding>,
+    /// 订阅推送在呈现面可见时到达：下一次 tick 重绘一次（事件不逐帧 compose）。
+    event_repaint: bool,
+    /// 上一 tick 页面作用域（账号页 / 浮动仪表盘）是否可见：由不可见变可见时
+    /// 冷启动一次 get，不等订阅期间的低频兜底轮询。
+    page_seen: bool,
     /// 页面作用域的 `account.usage.refresh` 在途；响应到达即清除。与
     /// `refresh_usage`（排队）一起构成 `refreshing()`。
     manual_in_flight: bool,
@@ -289,6 +462,8 @@ pub(super) struct State {
     next_metrics: Instant,
     /// 页面作用域下一次轮询时刻；悬浮层用 `hover_scope.next_usage`。
     next_usage: Instant,
+    /// 页面最近一次用量请求的发出时刻：响应说探测在途时以它为基准收紧轮询。
+    usage_sent_at: Option<Instant>,
     /// 厂商列表的低频重拉时刻：页面打开时立即，之后每 5 分钟（OBS-14）。
     next_providers: Instant,
     /// 页面作用域排队中的强意图刷新：请求真正发出后才清除，被在途请求挡下时
@@ -317,12 +492,12 @@ impl State {
     /// 滚动账号列表；`hover` 为真时按悬浮层作用域的账号数夹取并写悬浮层自己的
     /// 滚动位置，否则按页面。
     fn scroll_accounts(&mut self, delta: isize, hover: bool) {
-        let accounts = if hover {
-            &self.hover_scope.accounts
+        let (accounts, refresh_states) = if hover {
+            (&self.hover_scope.accounts, &self.hover_scope.refresh_states)
         } else {
-            &self.accounts
+            (&self.accounts, &self.refresh_states)
         };
-        let limit = render::account_rows(self, accounts).saturating_sub(1);
+        let limit = render::account_rows(self, accounts, refresh_states).saturating_sub(1);
         let scroll = if hover {
             &mut self.hover_scope.scroll
         } else {
@@ -331,11 +506,159 @@ impl State {
         *scroll = scroll.saturating_add_signed(delta).min(limit);
     }
 
-    /// 页面作用域换代：作废所有在途页面请求（悬浮层的请求不受影响）。
+    /// 页面当前的 (厂商, 账号) 选择是否已由订阅覆盖（已确认或等待确认）。
+    fn subscribed(&self) -> bool {
+        let subscription = &self.subscription;
+        subscription
+            .active
+            .as_ref()
+            .map(|active| &active.params)
+            .or(subscription.requested.as_ref().map(|(params, _)| params))
+            .is_some_and(|params| {
+                UsageSubscription::covers(
+                    params,
+                    self.selected_provider.as_deref(),
+                    self.selected_account.as_deref(),
+                )
+            })
+    }
+
+    /// 请求的代际：悬浮层请求按悬浮层代际，页面请求按页面代际，订阅生命周期不绑代际。
+    fn epoch_for(&self, purpose: &Purpose) -> u64 {
+        if purpose.is_hover() {
+            self.hover_scope.epoch
+        } else if purpose.page_scoped() {
+            self.epoch
+        } else {
+            0
+        }
+    }
+
+    /// 把一条事件里的刷新状态合并进某作用域：事件里 `binding_inferred` /
+    /// `pending_binding` 按请求才有意义、保持缺省，因此沿用已有条目的值。
+    fn merge_refresh_state(&mut self, hover: bool, incoming: UsageRefreshState) {
+        let states = if hover {
+            &mut self.hover_scope.refresh_states
+        } else {
+            &mut self.refresh_states
+        };
+        if let Some(existing) = states
+            .iter_mut()
+            .find(|state| state.account_id == incoming.account_id)
+        {
+            let binding_inferred = existing.binding_inferred;
+            let pending_binding = existing.pending_binding.take();
+            *existing = incoming;
+            existing.binding_inferred = binding_inferred;
+            existing.pending_binding = pending_binding;
+        } else {
+            states.push(incoming);
+        }
+    }
+
+    /// 页面作用域是否接受某账号：只按用户当前的厂商 / 账号选择过滤（服务端已按
+    /// 订阅参数过滤，这里挡住切换作用域后旧订阅的尾巴）。
+    fn page_scope_accepts(&self, account: &AccountUsageSnapshot) -> bool {
+        self.selected_provider
+            .as_deref()
+            .is_none_or(|agent| agent == account.agent)
+            && self
+                .selected_account
+                .as_deref()
+                .is_none_or(|id| id == account.account_id)
+    }
+
+    /// 按账号 id 判定页面作用域是否接受：先从页面快照、再从厂商列表解析该账号
+    /// 所属厂商，解析不出即不接受（切换作用域后旧订阅的尾巴、未知账号都挡在外面）。
+    fn page_scope_accepts_id(&self, account_id: &str) -> bool {
+        let agent = self
+            .accounts
+            .iter()
+            .find(|account| account.account_id == account_id)
+            .map(|account| account.agent.as_str())
+            .or_else(|| {
+                self.providers
+                    .iter()
+                    .find(|provider| {
+                        provider
+                            .configured_accounts
+                            .iter()
+                            .any(|id| id == account_id)
+                    })
+                    .map(|provider| provider.agent.as_str())
+            });
+        let Some(agent) = agent else {
+            return false;
+        };
+        self.selected_provider
+            .as_deref()
+            .is_none_or(|selected| selected == agent)
+            && self
+                .selected_account
+                .as_deref()
+                .is_none_or(|selected| selected == account_id)
+    }
+
+    /// 某 pane 的绑定已落地（本端或别的客户端 / CLI 完成）：两个作用域里挂在该
+    /// pane 上的待办绑定立即清掉，不等下一次整体替换。
+    fn clear_pending_binding(&mut self, pane_id: &str) {
+        for states in [
+            &mut self.refresh_states,
+            &mut self.hover_scope.refresh_states,
+        ] {
+            for state in states.iter_mut() {
+                if state
+                    .pending_binding
+                    .as_ref()
+                    .is_some_and(|pending| pending.pane_id == pane_id)
+                {
+                    state.pending_binding = None;
+                }
+            }
+        }
+    }
+
+    /// `account.usage.updated`：按 `account_id` 合并进页面账号；随附的刷新状态一并
+    /// 合并，缺失时表示探测已完成，清掉在途标记。
+    fn merge_page_account(
+        &mut self,
+        account: AccountUsageSnapshot,
+        refresh: Option<UsageRefreshState>,
+    ) {
+        let account_id = account.account_id.clone();
+        if let Some(slot) = self
+            .accounts
+            .iter_mut()
+            .find(|existing| existing.account_id == account_id)
+        {
+            *slot = account;
+        } else {
+            self.accounts.push(account);
+        }
+        match refresh {
+            Some(refresh) => self.merge_refresh_state(false, refresh),
+            None => {
+                if let Some(state) = self
+                    .refresh_states
+                    .iter_mut()
+                    .find(|state| state.account_id == account_id)
+                {
+                    state.in_flight = false;
+                    state.queued = false;
+                }
+            }
+        }
+    }
+
+    /// 页面作用域换代：作废所有在途页面请求（悬浮层的请求与订阅生命周期不受影响）。
+    /// 旧账号快照保留到新数据到达（渲染期变暗），但旧刷新状态（防抖截止、待办绑定）
+    /// 属于旧作用域，一并清掉。
     fn bump_page_epoch(&mut self) {
         self.epoch = self.epoch.saturating_add(1);
-        self.pending.retain(|key| Purpose::HOVER_KEYS.contains(key));
+        self.pending
+            .retain(|key| Purpose::PAGE_INDEPENDENT_KEYS.contains(key));
         self.manual_in_flight = false;
+        self.refresh_states.clear();
     }
 
     /// 页面作用域的强意图刷新：下一次 tick 立即发 `account.usage.refresh`。
@@ -452,8 +775,14 @@ impl State {
             selected_provider: None,
             selected_account: None,
             selected_pane: None,
+            selected_pane_label: None,
+            refresh_states: Vec::new(),
+            subscription: UsageSubscription::default(),
             hover: None,
             hover_scope: HoverScope::default(),
+            queued_binding: None,
+            event_repaint: false,
+            page_seen: false,
             manual_in_flight: false,
             hover_rect: Rect::default(),
             hover_hits: Vec::new(),
@@ -477,6 +806,7 @@ impl State {
             usage_source: None,
             next_metrics: Instant::now(),
             next_usage: Instant::now(),
+            usage_sent_at: None,
             next_providers: Instant::now(),
             refresh_usage: false,
             auto_select_provider: false,
@@ -716,6 +1046,7 @@ impl ClientShellState {
             self.observability.selected_provider = None;
             self.observability.selected_account = None;
             self.observability.selected_pane = None;
+            self.observability.selected_pane_label = None;
             self.observability.request_refresh();
             self.observability.next_providers = Instant::now();
         }
@@ -730,6 +1061,7 @@ impl ClientShellState {
         self.observability.selected_provider = Some(agent);
         self.observability.selected_account = None;
         self.observability.selected_pane = None;
+        self.observability.selected_pane_label = None;
         self.observability.request_refresh();
     }
 
@@ -823,16 +1155,33 @@ impl ClientShellState {
         purpose: Purpose,
         outcome: &mut ClientShellInput,
     ) -> RequestOutcome {
+        self.observation_request_at(None, method, purpose, outcome)
+    }
+
+    /// 同 `observation_request`，但 `target` 有值时严格发往该端点：不回退到活动
+    /// 端点、不在页脚说明，端点不在线即 `Unavailable`。绑定（pane id 只在其所在
+    /// 主机有意义）与退订（订阅 id 只在创建它的 server 上有意义）必须用严格目标。
+    fn observation_request_at(
+        &mut self,
+        target: Option<ClientEndpointId>,
+        method: Method,
+        purpose: Purpose,
+        outcome: &mut ClientShellInput,
+    ) -> RequestOutcome {
         let key = purpose.key();
         if self.observability.pending.contains(key) {
             return RequestOutcome::Busy;
         }
-        let preferred = if purpose.is_hover() {
-            self.observability.hover_scope.endpoint.clone()
-        } else {
-            None
-        }
-        .unwrap_or_else(|| self.active_endpoint_id.clone());
+        let strict = target.is_some();
+        let preferred = target
+            .or_else(|| {
+                if purpose.is_hover() {
+                    self.observability.hover_scope.endpoint.clone()
+                } else {
+                    None
+                }
+            })
+            .unwrap_or_else(|| self.active_endpoint_id.clone());
         let online = |endpoints: &[ClientShellEndpoint], id: &ClientEndpointId| {
             endpoints.iter().any(|endpoint| {
                 &endpoint.endpoint_id == id && endpoint.status == ClientEndpointStatus::Online
@@ -844,6 +1193,8 @@ impl ClientShellState {
                 self.observability.fallback_noted = None;
             }
             preferred
+        } else if strict {
+            return RequestOutcome::Unavailable;
         } else if preferred != self.active_endpoint_id
             && online(&self.endpoints, &self.active_endpoint_id)
         {
@@ -888,11 +1239,7 @@ impl ClientShellState {
         let request_id = format!("client-shell:{}", self.next_request_id);
         self.next_request_id = self.next_request_id.saturating_add(1);
         let boot_id = snapshot.boot_id.clone();
-        let epoch = if purpose.is_hover() {
-            self.observability.hover_scope.epoch
-        } else {
-            self.observability.epoch
-        };
+        let epoch = self.observability.epoch_for(&purpose);
         self.pending_requests.insert(
             request_id.clone(),
             PendingEndpointRequest {
@@ -989,6 +1336,11 @@ impl ClientShellState {
             self.observability.clear_hover();
             self.observability.refresh_usage = false;
             self.observability.manual_in_flight = false;
+            self.observability.refresh_states.clear();
+            // 订阅归属于旧 (端点, boot)：已确认的进入退订队列（发回旧端点），
+            // 在途的订阅请求在响应到达时再排队退订。
+            self.observability.subscription.detach();
+            self.observability.queued_binding = None;
             self.observability.fallback_noted = None;
             self.observability.process_dialog = None;
             self.observability.next_metrics = now;
@@ -1090,14 +1442,76 @@ impl ClientShellState {
             self.observability.bump_page_epoch();
             self.observability.accounts.clear();
             self.observability.providers.clear();
+            // 订阅归属于旧 (端点, boot)：已确认的进入退订队列（发回旧端点），
+            // 在途的订阅请求响应到达时再排队退订；订阅键立即释放，好按新作用域重订。
+            self.observability.subscription.detach();
+            self.observability
+                .pending
+                .retain(|key| !matches!(*key, "subscribe" | "unsubscribe"));
+            self.observability.queued_binding = None;
             self.observability.next_usage = now;
             self.observability.next_providers = now;
         }
+        // 页面作用域由不可见变可见（订阅期间兜底轮询可能还有几十秒才到期）：
+        // 冷启动一次 get，先把当前快照拿到手，再靠事件保持实时。
+        if page_visible && !self.observability.page_seen {
+            self.observability.next_usage = now;
+        }
+        self.observability.page_seen = page_visible;
         if usage_visible || self.observation_surface_visible() {
             outcome.repaint |= previous_second != self.observability.now_ms / 1000;
         }
+        outcome.repaint |= std::mem::take(&mut self.observability.event_repaint);
         if !self.endpoint_is_online(&self.active_endpoint_id) {
             return;
+        }
+        // 官方回调启用成功后排队的绑定：被在途绑定请求挡下时保留到下一次 tick。
+        // pane id 只在应答回调的主机上有意义：派发时该作用域的目标主机已变
+        // （悬浮层移到别的主机、活动端点切换、悬浮层结束）就放弃并说明，绝不发往
+        // 新主机——PaneId 是每 server 自增的小整数，跨主机必然撞号。
+        if let Some(binding) = self.observability.queued_binding.take() {
+            let current = if binding.hover {
+                self.observability.hover_scope.endpoint.clone()
+            } else {
+                Some(self.active_endpoint_id.clone())
+            };
+            if current.as_ref() == Some(&binding.endpoint) {
+                let purpose = if binding.hover {
+                    Purpose::HoverBinding
+                } else {
+                    Purpose::Binding
+                };
+                let params = AccountBindingParams {
+                    pane_id: binding.pane_id.clone(),
+                    account_id: binding.account_id.clone(),
+                };
+                match self.observation_request_at(
+                    Some(binding.endpoint.clone()),
+                    Method::AccountBindingSet(params),
+                    purpose,
+                    outcome,
+                ) {
+                    RequestOutcome::Busy => self.observability.queued_binding = Some(binding),
+                    RequestOutcome::Sent => {}
+                    RequestOutcome::Unavailable => {
+                        self.observability.message = Some(
+                            tr(
+                                "The pane's host is offline; the pane was not bound. Bind it from the accounts page later.",
+                                "pane 所在主机不在线，未绑定；稍后可在账号页手动绑定。",
+                            )
+                            .into(),
+                        );
+                    }
+                }
+            } else {
+                self.observability.message = Some(
+                    tr(
+                        "The target host changed before binding; the pane was not bound. Bind it from the accounts page.",
+                        "绑定目标所在主机已变化，未绑定；请在账号页手动绑定。",
+                    )
+                    .into(),
+                );
+            }
         }
         if (self.observability.page == Some(Page::Monitor)
             || self.workbench.visible(&dock::PanelId::Monitor)
@@ -1115,6 +1529,20 @@ impl ClientShellState {
             self.observation_request(Method::SystemMetricsGet(params), Purpose::Metrics, outcome);
         }
         let settings_open = self.observability.page == Some(Page::Settings);
+        // 页面作用域的订阅：账号页 / 浮动仪表盘可见、厂商未关闭且端点宣告了订阅
+        // 方法时按当前 (厂商, 账号) 订阅；不可见即退订。订阅覆盖期间轮询降为低频兜底。
+        let provider_disabled = |state: &State, agent: Option<&String>| {
+            agent.is_some_and(|agent| state.usage.disabled_providers.contains(agent))
+        };
+        let subscription_wanted = page_visible
+            && self.observability.usage.enabled
+            && !provider_disabled(
+                &self.observability,
+                self.observability.selected_provider.as_ref(),
+            )
+            && self.active_endpoint_advertises("account.usage.subscribe")
+            && self.active_endpoint_advertises("account.usage.unsubscribe");
+        let subscribed = self.sync_usage_subscription(subscription_wanted, now, outcome);
         // 页面与悬浮层各有自己的轮询时刻：悬浮层出现 / 点「刷新」只唤醒悬浮层，
         // 页面的 2 秒节流不受影响；反之亦然。
         let page_due = (page_visible || settings_open) && now >= self.observability.next_usage;
@@ -1130,11 +1558,16 @@ impl ClientShellState {
             {
                 self.observability.next_providers = now + Duration::from_secs(300);
             }
-            let cadence = |retry_soon: bool| {
+            // 轮询节奏：强意图被挡下 200 ms 重试；订阅覆盖时只留低频兜底；否则 2 秒。
+            // 服务端报告探测在途时的 500 ms 收紧在响应到达处按发送时刻计算
+            // （`receive_observation`），旧 server 不带刷新状态即恒为 2 秒。
+            let cadence = |retry_soon: bool, subscribed: bool| {
                 now + if retry_soon {
                     Duration::from_millis(200)
+                } else if subscribed {
+                    SUBSCRIBED_POLL
                 } else {
-                    Duration::from_secs(2)
+                    IDLE_POLL
                 }
             };
             if page_due {
@@ -1170,6 +1603,7 @@ impl ClientShellState {
                     match sent {
                         RequestOutcome::Sent => {
                             // 只在请求真正发出后清除强意图；发出的是 refresh 时进入在途。
+                            self.observability.usage_sent_at = Some(now);
                             if std::mem::take(&mut self.observability.refresh_usage) {
                                 self.observability.manual_in_flight = true;
                             }
@@ -1179,7 +1613,7 @@ impl ClientShellState {
                         RequestOutcome::Unavailable => {}
                     }
                 }
-                self.observability.next_usage = cadence(retry_soon);
+                self.observability.next_usage = cadence(retry_soon, subscribed);
             }
             if hover_due {
                 let disabled = self
@@ -1202,6 +1636,7 @@ impl ClientShellState {
                     }
                     match sent {
                         RequestOutcome::Sent => {
+                            self.observability.hover_scope.sent_at = Some(now);
                             if std::mem::take(&mut self.observability.hover_scope.refresh) {
                                 self.observability.hover_scope.manual_in_flight = true;
                             }
@@ -1210,7 +1645,7 @@ impl ClientShellState {
                         RequestOutcome::Unavailable => {}
                     }
                 }
-                self.observability.hover_scope.next_usage = cadence(retry_soon);
+                self.observability.hover_scope.next_usage = cadence(retry_soon, false);
             }
         }
         if let Some(body) = self.observability.alert() {
@@ -1223,19 +1658,30 @@ impl ClientShellState {
         }
     }
 
+    /// 活动端点应答的观测响应（测试便捷入口）；真实路径见 `receive_observation_from`。
+    #[cfg(test)]
     pub(super) fn receive_observation(
         &mut self,
         epoch: u64,
         purpose: Purpose,
         result: Result<ResponseResult, ClientShellEndpointError>,
     ) -> bool {
-        // 悬浮层请求按悬浮层作用域的代际判旧，其余按页面代际。
-        let expected = if purpose.is_hover() {
-            self.observability.hover_scope.epoch
-        } else {
-            self.observability.epoch
-        };
-        if epoch != expected {
+        let endpoint_id = self.active_endpoint_id.clone();
+        self.receive_observation_from(&endpoint_id, epoch, purpose, result)
+    }
+
+    /// `endpoint_id` 应答的观测响应（`handle_endpoint_result` 已按 boot 校验）。
+    /// 订阅生命周期与排队绑定需要知道应答的端点：订阅 id / pane id 只在它上面有意义。
+    pub(super) fn receive_observation_from(
+        &mut self,
+        endpoint_id: &ClientEndpointId,
+        epoch: u64,
+        purpose: Purpose,
+        result: Result<ResponseResult, ClientShellEndpointError>,
+    ) -> bool {
+        // 悬浮层请求按悬浮层作用域的代际判旧，页面请求按页面代际，订阅生命周期
+        // 不绑代际（由 tick 按参数与 boot 对账）。
+        if epoch != self.observability.epoch_for(&purpose) {
             return false;
         }
         self.observability.pending.remove(purpose.key());
@@ -1254,16 +1700,89 @@ impl ClientShellState {
                 self.observability.providers = providers;
                 self.auto_select_usage_provider();
             }
-            Ok(ResponseResult::AccountUsage { accounts, .. }) => {
-                // 响应只写自己的作用域，且不反写用户选择的厂商。
+            Ok(ResponseResult::AccountUsage { accounts, refresh }) => {
+                // 响应只写自己的作用域，且不反写用户选择的厂商；刷新状态整体替换
+                // （get / refresh 响应是权威快照，旧 server 不带即为空）。服务端说探测
+                // 在途时把该作用域的下一次轮询收紧到 500 ms（页面已由订阅覆盖时靠事件
+                // 收尾，不提前轮询）。
+                let refresh = refresh.unwrap_or_default();
+                let in_flight = refresh.iter().any(|state| state.in_flight);
                 if matches!(purpose, Purpose::HoverUsage) {
-                    self.observability.hover_scope.accounts = accounts;
+                    let scope = &mut self.observability.hover_scope;
+                    scope.accounts = accounts;
+                    scope.refresh_states = refresh;
+                    if in_flight {
+                        let soon = scope.sent_at.unwrap_or_else(Instant::now) + IN_FLIGHT_POLL;
+                        scope.next_usage = scope.next_usage.min(soon);
+                    }
                 } else {
                     self.observability.accounts = accounts;
+                    self.observability.refresh_states = refresh;
+                    if in_flight && !self.observability.subscribed() {
+                        let soon = self
+                            .observability
+                            .usage_sent_at
+                            .unwrap_or_else(Instant::now)
+                            + IN_FLIGHT_POLL;
+                        self.observability.next_usage = self.observability.next_usage.min(soon);
+                    }
                 }
             }
-            Ok(ResponseResult::AccountBinding { account_id, .. }) => {
-                self.observability.message = None;
+            Ok(ResponseResult::ObservationSubscription {
+                subscription_id,
+                active,
+            }) => match purpose {
+                Purpose::Subscribe => {
+                    let boot_id = self
+                        .endpoint_boot_id(endpoint_id)
+                        .map(str::to_owned)
+                        .unwrap_or_default();
+                    let subscription = &mut self.observability.subscription;
+                    match subscription.requested.take() {
+                        Some((params, owner)) if active && &owner == endpoint_id => {
+                            subscription.active = Some(ActiveSubscription {
+                                id: subscription_id,
+                                params,
+                                endpoint: owner,
+                                boot_id,
+                            });
+                        }
+                        // 已不再等这份订阅（页面已隐藏 / 端点或 boot 变化后 detach）：
+                        // 服务端仍持有它，排队退订（发回应答的端点），免得它持续驱动
+                        // 后台探测。
+                        _ if active => subscription.retire.push_back(RetiringSubscription {
+                            id: subscription_id,
+                            endpoint: endpoint_id.clone(),
+                            boot_id,
+                            attempts: 0,
+                        }),
+                        _ => {
+                            subscription.retry_at = Some(Instant::now() + SUBSCRIBE_RETRY);
+                            self.observability.next_usage = Instant::now();
+                        }
+                    }
+                }
+                // 只有明确的 `active:false` 才把 id 移出退订队列（服务端对未知 id
+                // 也回 active:false，语义同样是「已不存在」）。
+                Purpose::Unsubscribe if !active => {
+                    let subscription = &mut self.observability.subscription;
+                    subscription
+                        .retire
+                        .retain(|entry| entry.id != subscription_id);
+                    subscription.unsubscribe_retry_at = None;
+                }
+                _ => {}
+            },
+            Ok(ResponseResult::AccountBinding {
+                account_id,
+                pane_id,
+            }) => {
+                self.observability.message = Some(if zh() {
+                    format!("已将 {pane_id} 绑定到 {account_id}。")
+                } else {
+                    format!("Bound {pane_id} to {account_id}.")
+                });
+                self.observability.clear_pending_binding(&pane_id);
                 if matches!(purpose, Purpose::HoverBinding) {
                     // 悬浮层发起的绑定只刷新悬浮层：页面的厂商 / 账号选择不动，
                     // 否则会出现「页面厂商 claude + 账号 codex:default」这种服务端
@@ -1313,11 +1832,81 @@ impl ClientShellState {
                 );
             }
             Ok(ResponseResult::Ok {})
-                if matches!(purpose, Purpose::Integration | Purpose::HoverIntegration) =>
+                if matches!(
+                    purpose,
+                    Purpose::Integration { .. } | Purpose::HoverIntegration { .. }
+                ) =>
             {
-                self.observability.message = Some(tr("Official statusline integration updated. The CLI publishes data on its next status update.", "官方状态栏回调已更新，等待 CLI 下一次状态更新。" ).into());
+                // 启用成功后顺手把当前活动 pane 绑到该账号（零 wire 变更）：
+                // 响应处理期不能发请求，排队到下一次 tick。
+                let bind_after = match purpose {
+                    Purpose::Integration { bind_after } => {
+                        bind_after.map(|(pane_id, account_id)| QueuedBinding {
+                            pane_id,
+                            account_id,
+                            hover: false,
+                            endpoint: endpoint_id.clone(),
+                        })
+                    }
+                    Purpose::HoverIntegration { bind_after } => {
+                        bind_after.map(|(pane_id, account_id)| QueuedBinding {
+                            pane_id,
+                            account_id,
+                            hover: true,
+                            endpoint: endpoint_id.clone(),
+                        })
+                    }
+                    _ => None,
+                };
+                self.observability.message = Some(
+                    if bind_after.is_some() {
+                        tr(
+                            "Official statusline integration updated; binding the active pane to this account.",
+                            "官方状态栏回调已更新，正在把当前 pane 绑定到该账号。",
+                        )
+                    } else {
+                        tr(
+                            "Official statusline integration updated. The CLI publishes data on its next status update.",
+                            "官方状态栏回调已更新，等待 CLI 下一次状态更新。",
+                        )
+                    }
+                    .into(),
+                );
+                if bind_after.is_some() {
+                    self.observability.queued_binding = bind_after;
+                }
             }
             Ok(_) => {}
+            Err(error) if matches!(purpose, Purpose::Subscribe | Purpose::Unsubscribe) => {
+                // 订阅是可选增强：被拒（配额、旧 server）只回退到自适应轮询并稍后重试，
+                // 不在页脚报错。
+                tracing::debug!(
+                    subsystem = "client_shell",
+                    purpose = purpose.key(),
+                    code = error.code.as_deref().unwrap_or("unknown"),
+                    "用量订阅请求失败，回退到轮询"
+                );
+                let subscription = &mut self.observability.subscription;
+                if matches!(purpose, Purpose::Subscribe) {
+                    subscription.requested = None;
+                    subscription.retry_at = Some(Instant::now() + SUBSCRIBE_RETRY);
+                    self.observability.next_usage = Instant::now();
+                } else {
+                    // 退订失败（超时 / 传输错误）：id 留在队首，退避后重试，有上界；
+                    // 否则服务端订阅者继续存活并驱动后台探测。
+                    let exhausted = subscription.retire.front_mut().is_some_and(|entry| {
+                        entry.attempts = entry.attempts.saturating_add(1);
+                        entry.attempts >= MAX_UNSUBSCRIBE_ATTEMPTS
+                    });
+                    if exhausted {
+                        subscription.retire.pop_front();
+                        subscription.unsubscribe_retry_at = None;
+                    } else {
+                        subscription.unsubscribe_retry_at =
+                            Some(Instant::now() + UNSUBSCRIBE_RETRY);
+                    }
+                }
+            }
             Err(error) => {
                 self.observability.message = Some(error.message);
                 if let Some(dialog) = &mut self.observability.process_dialog {
@@ -1327,6 +1916,321 @@ impl ClientShellState {
             }
         }
         self.observation_surface_visible()
+    }
+
+    /// 活动端点是否宣告了某个 API 方法（未知 = 未宣告：订阅是可选增强，缺失只回退轮询）。
+    fn active_endpoint_advertises(&self, method: &str) -> bool {
+        self.endpoints
+            .iter()
+            .find(|endpoint| endpoint.endpoint_id == self.active_endpoint_id)
+            .and_then(|endpoint| endpoint.methods.as_ref())
+            .is_some_and(|methods| methods.contains(method))
+    }
+
+    /// 对账页面作用域的订阅：`wanted` 时按当前 (厂商, 账号) 订阅，作用域变化先退旧
+    /// 订阅再订新的，不 `wanted` 即退订。返回页面此刻是否已由订阅覆盖（含等待确认），
+    /// 覆盖期间轮询降为低频兜底；被拒 / 不可用时退避 `SUBSCRIBE_RETRY` 后再试。
+    ///
+    /// 退订定向发往创建订阅的端点，收到 `active:false` 才出队；失败有界重试；
+    /// 端点离线 / boot 变化 / 未宣告方法时服务端已随连接释放，直接放弃。
+    fn sync_usage_subscription(
+        &mut self,
+        wanted: bool,
+        now: Instant,
+        outcome: &mut ClientShellInput,
+    ) -> bool {
+        // 现有订阅不再匹配（页面隐藏 / 作用域变化）：进入退订队列。每 tick 都走到
+        // 这里，判定只借用、不分配。
+        let stale = {
+            let state = &self.observability;
+            state.subscription.active.as_ref().is_some_and(|active| {
+                !wanted
+                    || !UsageSubscription::covers(
+                        &active.params,
+                        state.selected_provider.as_deref(),
+                        state.selected_account.as_deref(),
+                    )
+            })
+        };
+        if stale {
+            self.observability.subscription.retire_active();
+        }
+        let retry_due = self
+            .observability
+            .subscription
+            .unsubscribe_retry_at
+            .is_none_or(|at| now >= at);
+        let front = self
+            .observability
+            .subscription
+            .retire
+            .front()
+            .filter(|_| retry_due)
+            .map(|entry| {
+                (
+                    entry.id.clone(),
+                    entry.endpoint.clone(),
+                    entry.boot_id.clone(),
+                )
+            });
+        if let Some((subscription_id, endpoint, boot_id)) = front {
+            if self.endpoint_boot_id(&endpoint) != Some(boot_id.as_str()) {
+                // server 已重启 / 端点已无快照：订阅随旧连接消亡，无需退订。
+                self.observability.subscription.retire.pop_front();
+            } else {
+                let params = ObservationSubscriptionParams {
+                    subscription_id: Some(subscription_id),
+                    interval_ms: None,
+                };
+                match self.observation_request_at(
+                    Some(endpoint),
+                    Method::AccountUsageUnsubscribe(params),
+                    Purpose::Unsubscribe,
+                    outcome,
+                ) {
+                    // 发出后留在队首等确认；在途时不重复发。
+                    RequestOutcome::Sent | RequestOutcome::Busy => {}
+                    // 端点离线 / 未宣告退订：服务端会在连接断开时释放，放弃。
+                    RequestOutcome::Unavailable => {
+                        self.observability.subscription.retire.pop_front();
+                    }
+                }
+            }
+        }
+        if !wanted {
+            return false;
+        }
+        if self.observability.subscribed() {
+            return true;
+        }
+        let subscription = &self.observability.subscription;
+        if subscription.requested.is_some() || subscription.retry_at.is_some_and(|at| now < at) {
+            return false;
+        }
+        let params = UsageParams {
+            agent: self.observability.selected_provider.clone(),
+            account_id: self.observability.selected_account.clone(),
+            pane_id: None,
+        };
+        let endpoint = self.active_endpoint_id.clone();
+        match self.observation_request_at(
+            Some(endpoint.clone()),
+            Method::AccountUsageSubscribe(params.clone()),
+            Purpose::Subscribe,
+            outcome,
+        ) {
+            RequestOutcome::Sent => {
+                self.observability.subscription.requested = Some((params, endpoint));
+                true
+            }
+            RequestOutcome::Busy => false,
+            RequestOutcome::Unavailable => {
+                self.observability.subscription.retry_at = Some(now + SUBSCRIBE_RETRY);
+                false
+            }
+        }
+    }
+
+    /// 端点推来的 `endpoint.observation.v1` 事件：只接受页面作用域所在 (端点, boot)
+    /// 的推送，按 `account_id` 合并到页面账号与刷新状态；悬浮层不订阅，不受影响。
+    /// 返回呈现面是否可见（可见时下一次 tick 重绘）。
+    pub(crate) fn receive_endpoint_observation_event(
+        &mut self,
+        endpoint_id: &ClientEndpointId,
+        generation: u64,
+        frame: crate::protocol::endpoint::EndpointObservationEvent,
+    ) -> bool {
+        let boot_matches = self.endpoints.iter().any(|endpoint| {
+            &endpoint.endpoint_id == endpoint_id
+                && endpoint
+                    .snapshot_generation
+                    .is_none_or(|snapshot_generation| snapshot_generation == generation)
+                && endpoint
+                    .snapshot
+                    .as_deref()
+                    .is_some_and(|snapshot| snapshot.boot_id == frame.boot_id)
+        });
+        let source_matches = self
+            .observability
+            .usage_source
+            .as_ref()
+            .is_some_and(|(source, boot_id)| source == endpoint_id && *boot_id == frame.boot_id);
+        if !boot_matches || !source_matches {
+            return false;
+        }
+        match frame.event {
+            ObservationEventEnvelope::AccountUsageUpdated(event) => {
+                let mut refresh = event.refresh.unwrap_or_default();
+                for account in event.accounts {
+                    if !self.observability.page_scope_accepts(&account) {
+                        continue;
+                    }
+                    let state = refresh
+                        .iter()
+                        .position(|state| state.account_id == account.account_id)
+                        .map(|index| refresh.swap_remove(index));
+                    self.observability.merge_page_account(account, state);
+                }
+            }
+            ObservationEventEnvelope::AccountUsageRefreshing(event) => {
+                for state in event.refresh {
+                    // 与 updated 事件同一套作用域判定：只认解析得出厂商且属于当前
+                    // (厂商, 账号) 选择的账号，挡住切换作用域后旧订阅的尾巴。
+                    if self.observability.page_scope_accepts_id(&state.account_id) {
+                        self.observability.merge_refresh_state(false, state);
+                    }
+                }
+            }
+            ObservationEventEnvelope::SystemMetricsUpdated(event) => {
+                self.observability.apply_metrics(event.snapshot);
+            }
+        }
+        let visible = self.observation_surface_visible();
+        self.observability.event_repaint |= visible;
+        visible
+    }
+
+    /// 活动端点快照里正在运行 agent 的 pane（可绑定候选），`provider` 有值时只要
+    /// 运行该厂商 agent 的 pane。
+    fn agent_panes<'a>(
+        &'a self,
+        provider: Option<&'a str>,
+    ) -> impl Iterator<Item = &'a crate::protocol::ClientShellAgent> + 'a {
+        self.snapshot
+            .as_deref()
+            .into_iter()
+            .flat_map(|snapshot| snapshot.agents.iter())
+            .filter(move |agent| {
+                agent.agent.as_deref().is_some_and(|name| {
+                    is_bindable_agent(name)
+                        && provider.is_none_or(|provider| name.eq_ignore_ascii_case(provider))
+                })
+            })
+    }
+
+    /// 某端点快照里 `pane_id` 正在运行的（可绑定）agent 名；pane 不存在或没有
+    /// 运行 agent 时为 `None`。
+    fn endpoint_pane_agent(&self, endpoint_id: &ClientEndpointId, pane_id: &str) -> Option<String> {
+        self.endpoints
+            .iter()
+            .find(|endpoint| &endpoint.endpoint_id == endpoint_id)?
+            .snapshot
+            .as_deref()?
+            .agents
+            .iter()
+            .find(|agent| agent.pane_id == pane_id)?
+            .agent
+            .clone()
+            .filter(|name| is_bindable_agent(name))
+    }
+
+    /// 绑定行里 pane 的显示名：agent 显示名 · pane id。
+    fn bind_candidate_label(agent: &crate::protocol::ClientShellAgent) -> String {
+        let name = agent
+            .name
+            .as_deref()
+            .or(agent.display_agent.as_deref())
+            .or(agent.agent.as_deref())
+            .unwrap_or("agent");
+        format!("{name} · {}", agent.pane_id)
+    }
+
+    /// 账号所属厂商：先看厂商列表的已配置账号，再看作用域内的快照，最后看该
+    /// 作用域里服务端给出的待办绑定候选；都解析不出即 `None`。
+    fn account_agent(&self, account_id: &str, hover: bool) -> Option<String> {
+        let (accounts, refresh_states) = if hover {
+            (
+                &self.observability.hover_scope.accounts,
+                &self.observability.hover_scope.refresh_states,
+            )
+        } else {
+            (
+                &self.observability.accounts,
+                &self.observability.refresh_states,
+            )
+        };
+        self.observability
+            .providers
+            .iter()
+            .find(|provider| {
+                provider
+                    .configured_accounts
+                    .iter()
+                    .any(|id| id == account_id)
+            })
+            .map(|provider| provider.agent.clone())
+            .or_else(|| {
+                accounts
+                    .iter()
+                    .find(|account| account.account_id == account_id)
+                    .map(|account| account.agent.clone())
+            })
+            .or_else(|| {
+                refresh_states
+                    .iter()
+                    .filter_map(|state| state.pending_binding.as_ref())
+                    .find(|pending| pending.candidates.iter().any(|id| id == account_id))
+                    .map(|pending| pending.agent.clone())
+            })
+    }
+
+    /// 当前聚焦的 pane（停靠工作台下焦点在面板时回退到快照记录的聚焦 pane），且它
+    /// 正在运行 `account_id` 所属厂商的 agent；厂商解析不出（端点 / boot 变化后的
+    /// 空窗）视为没有候选，否则 `None`。
+    fn focused_pane_for_account(
+        &self,
+        account_id: &str,
+    ) -> Option<&crate::protocol::ClientShellAgent> {
+        let focused = self
+            .focused_pane_id()
+            .or_else(|| self.snapshot.as_deref()?.focused_pane_id.clone())?;
+        let agent = self.account_agent(account_id, false)?;
+        self.agent_panes(None).find(|pane| {
+            pane.pane_id == focused
+                && pane
+                    .agent
+                    .as_deref()
+                    .is_some_and(|name| name.eq_ignore_ascii_case(&agent))
+        })
+    }
+
+    /// 页面作用域「启用官方回调」成功后顺手绑定的目标 pane：已选中的 pane，否则
+    /// 运行该账号厂商 agent 的聚焦 pane。
+    fn page_binding_target(&self, account_id: &str) -> Option<String> {
+        self.observability.selected_pane.clone().or_else(|| {
+            self.focused_pane_for_account(account_id)
+                .map(|pane| pane.pane_id.clone())
+        })
+    }
+
+    /// 某端点的连接断开（`mark_endpoint_disconnected`）：服务端随连接释放了该端点
+    /// 上的订阅，本地订阅生命周期不能停在「已订阅」——否则同 boot 重连后既收不到
+    /// 推送也只剩 30 s 兜底轮询。相应的在途订阅 / 退订键、退避与排队绑定一并
+    /// 清掉；断开的是活动端点时把页面轮询提前到重连后的第一个 tick（冷启动 get +
+    /// 重新订阅）。
+    pub(crate) fn observation_endpoint_disconnected(&mut self, endpoint_id: &ClientEndpointId) {
+        let (subscribe_in_flight, unsubscribe_in_flight) = self
+            .observability
+            .subscription
+            .endpoint_disconnected(endpoint_id);
+        if subscribe_in_flight {
+            self.observability.pending.remove("subscribe");
+        }
+        if unsubscribe_in_flight {
+            self.observability.pending.remove("unsubscribe");
+        }
+        if self
+            .observability
+            .queued_binding
+            .as_ref()
+            .is_some_and(|binding| &binding.endpoint == endpoint_id)
+        {
+            self.observability.queued_binding = None;
+        }
+        if endpoint_id == &self.active_endpoint_id {
+            self.observability.subscription.retry_at = None;
+            self.observability.next_usage = Instant::now();
+        }
     }
 
     /// 监控 / 账号数据当前是否有可见的呈现面：页面、悬浮层、停靠的监控或
@@ -1407,11 +2311,21 @@ impl ClientShellState {
             }
             Action::UsageIntegration(enabled) => {
                 if let Some(account_id) = self.observability.scoped_account(from_hover) {
+                    // 启用成功后顺手绑定的 pane：悬浮层是 hover 的 pane，页面是已选中的
+                    // pane 或运行该厂商 agent 的聚焦 pane；移除回调不绑定。
+                    let target = if !enabled {
+                        None
+                    } else if from_hover {
+                        self.observability.hover_scope.pane.clone()
+                    } else {
+                        self.page_binding_target(&account_id)
+                    };
+                    let bind_after = target.map(|pane_id| (pane_id, account_id.clone()));
                     // 悬浮层发起的请求发往 hover 的端点（可能是远端主机）。
                     let purpose = if from_hover {
-                        Purpose::HoverIntegration
+                        Purpose::HoverIntegration { bind_after }
                     } else {
-                        Purpose::Integration
+                        Purpose::Integration { bind_after }
                     };
                     self.observation_request(
                         Method::AccountUsageIntegration(UsageIntegrationParams {
@@ -1577,40 +2491,125 @@ impl ClientShellState {
                 self.observability.request_refresh();
             }
             Action::Bind => {
-                // 页面分支的 `selected_pane` 在 B-3 接入 pane 选择器前没有写入点，
-                // 恒走下面的提示；悬浮层分支是当前唯一可达的绑定入口。
+                // 页面分支的 pane 来自 pane 选择器 /「绑定到聚焦 pane」；悬浮层分支
+                // 是 hover 的 pane。缺 pane / 账号时写 message 而不是静默。
                 let pane_id = if from_hover {
                     self.observability.hover_scope.pane.clone()
                 } else {
                     self.observability.selected_pane.clone()
                 };
-                match (pane_id, self.observability.scoped_account(from_hover)) {
-                    (Some(pane_id), Some(account_id)) => {
-                        // 悬浮层发起的绑定发往 hover 的端点，回流只刷新悬浮层。
-                        let purpose = if from_hover {
-                            Purpose::HoverBinding
-                        } else {
-                            Purpose::Binding
-                        };
-                        self.observation_request(
-                            Method::AccountBindingSet(AccountBindingParams {
-                                pane_id,
-                                account_id,
-                            }),
-                            purpose,
-                            outcome,
+                let endpoint = if from_hover {
+                    self.observability.hover_scope.endpoint.clone()
+                } else {
+                    Some(self.active_endpoint_id.clone())
+                };
+                match (
+                    pane_id.zip(endpoint),
+                    self.observability.scoped_account(from_hover),
+                ) {
+                    (Some((pane_id, endpoint)), Some(account_id)) => {
+                        self.bind_pane_to_account(
+                            endpoint, pane_id, account_id, from_hover, outcome,
                         );
                     }
-                    _ => {
+                    (None, _) => {
                         self.observability.message = Some(
                             tr(
-                                "Pick a pane and an account before binding.",
-                                "请先选择要绑定的 pane 与账号。",
+                                "Pick a pane before binding: use the pane picker or \"Bind focused pane\".",
+                                "请先选择要绑定的 pane：用 pane 选择器或「绑定到聚焦 pane」。",
+                            )
+                            .into(),
+                        );
+                    }
+                    (Some(_), None) => {
+                        self.observability.message = Some(
+                            tr(
+                                "Select the account to bind first.",
+                                "请先选择要绑定到的账号。",
                             )
                             .into(),
                         );
                     }
                 }
+            }
+            Action::BindFocused => {
+                // 聚焦 pane 须运行所选账号厂商的 agent，否则给出指引而不是绑错。
+                match self.observability.scoped_account(false) {
+                    Some(account_id) => match self
+                        .focused_pane_for_account(&account_id)
+                        .map(|pane| (pane.pane_id.clone(), Self::bind_candidate_label(pane)))
+                    {
+                        Some((pane_id, label)) => {
+                            self.observability.selected_pane = Some(pane_id.clone());
+                            self.observability.selected_pane_label = Some(label);
+                            let endpoint = self.active_endpoint_id.clone();
+                            self.bind_pane_to_account(
+                                endpoint, pane_id, account_id, false, outcome,
+                            );
+                        }
+                        None => {
+                            self.observability.message = Some(
+                                tr(
+                                    "The focused pane is not running this provider's agent; use the pane picker.",
+                                    "当前聚焦的 pane 没有运行该厂商的 agent，请用 pane 选择器。",
+                                )
+                                .into(),
+                            );
+                        }
+                    },
+                    None => {
+                        self.observability.message = Some(
+                            tr(
+                                "Select the account to bind first.",
+                                "请先选择要绑定到的账号。",
+                            )
+                            .into(),
+                        );
+                    }
+                }
+            }
+            Action::CyclePane(delta) => {
+                // 候选按所选厂商过滤；总览态（未选厂商）按将要绑定到的账号所属
+                // 厂商过滤，选择器本身不给出跨厂商候选。
+                let provider = self.observability.selected_provider.clone().or_else(|| {
+                    self.observability
+                        .scoped_account(false)
+                        .and_then(|account_id| self.account_agent(&account_id, false))
+                });
+                let candidates = self
+                    .agent_panes(provider.as_deref())
+                    .map(|pane| (pane.pane_id.clone(), Self::bind_candidate_label(pane)))
+                    .collect::<Vec<_>>();
+                if candidates.is_empty() {
+                    self.observability.message = Some(
+                        tr(
+                            "No running agent pane to bind for this provider.",
+                            "没有正在运行该厂商 agent 的 pane 可供绑定。",
+                        )
+                        .into(),
+                    );
+                } else {
+                    let current = candidates.iter().position(|(pane_id, _)| {
+                        Some(pane_id) == self.observability.selected_pane.as_ref()
+                    });
+                    let len = candidates.len() as isize;
+                    let next = current.map_or(if delta < 0 { len - 1 } else { 0 }, |index| {
+                        (index as isize + delta).rem_euclid(len)
+                    });
+                    let (pane_id, label) = candidates[next as usize].clone();
+                    self.observability.selected_pane = Some(pane_id);
+                    self.observability.selected_pane_label = Some(label);
+                }
+            }
+            Action::BindTo(pane_id, account_id) => {
+                let label = self
+                    .agent_panes(None)
+                    .find(|pane| pane.pane_id == pane_id)
+                    .map_or_else(|| pane_id.clone(), Self::bind_candidate_label);
+                self.observability.selected_pane = Some(pane_id.clone());
+                self.observability.selected_pane_label = Some(label);
+                let endpoint = self.active_endpoint_id.clone();
+                self.bind_pane_to_account(endpoint, pane_id, account_id, false, outcome);
             }
             Action::Refresh => {
                 // 各自只唤醒自己的作用域：悬浮层的「刷新」不提前触发页面轮询。
@@ -1694,6 +2693,69 @@ impl ClientShellState {
             self.persist_chrome_preferences(outcome);
         }
         outcome.repaint = true;
+    }
+
+    /// 发一次 `account.binding.set`，严格发往 `endpoint`（pane id 只在其所在主机
+    /// 有意义）：悬浮层发起的绑定发往 hover 的端点，回流只刷新悬浮层；页面发起的
+    /// 回流是页面强意图刷新。所有入口共用的厂商校验：pane 必须正在运行该账号
+    /// 所属厂商的 agent，解析不出或不一致时写指引、不发请求（服务端不校验 agent，
+    /// 错绑会被持久化）。
+    fn bind_pane_to_account(
+        &mut self,
+        endpoint: ClientEndpointId,
+        pane_id: String,
+        account_id: String,
+        from_hover: bool,
+        outcome: &mut ClientShellInput,
+    ) {
+        let pane_agent = self.endpoint_pane_agent(&endpoint, &pane_id);
+        let account_agent = self.account_agent(&account_id, from_hover);
+        let consistent = match (pane_agent.as_deref(), account_agent.as_deref()) {
+            (Some(pane_agent), Some(account_agent)) => {
+                pane_agent.eq_ignore_ascii_case(account_agent)
+            }
+            _ => false,
+        };
+        if !consistent {
+            self.observability.message = Some(match account_agent {
+                Some(agent) => {
+                    if zh() {
+                        format!("{pane_id} 没有运行 {agent} 的 agent，未绑定；请选择运行该厂商 agent 的 pane。")
+                    } else {
+                        format!("{pane_id} is not running a {agent} agent; pick a pane running that provider's agent.")
+                    }
+                }
+                None => tr(
+                    "Cannot tell which provider this account belongs to yet; wait for the account list and try again.",
+                    "暂时无法确认该账号所属厂商，未绑定；等账号列表刷新后再试。",
+                )
+                .into(),
+            });
+            return;
+        }
+        let purpose = if from_hover {
+            Purpose::HoverBinding
+        } else {
+            Purpose::Binding
+        };
+        if self.observation_request_at(
+            Some(endpoint),
+            Method::AccountBindingSet(AccountBindingParams {
+                pane_id,
+                account_id,
+            }),
+            purpose,
+            outcome,
+        ) == RequestOutcome::Unavailable
+        {
+            self.observability.message = Some(
+                tr(
+                    "The pane's host is offline; the pane was not bound.",
+                    "pane 所在主机不在线，未绑定。",
+                )
+                .into(),
+            );
+        }
     }
 
     pub(super) fn observation_mouse(
@@ -1886,7 +2948,7 @@ impl ClientShellState {
                         agent
                             .agent
                             .clone()
-                            .filter(|agent| !agent.eq_ignore_ascii_case("muse"))
+                            .filter(|agent| is_bindable_agent(agent))
                             .map(|agent| (rect, endpoint, pane, agent))
                     })
             });

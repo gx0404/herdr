@@ -10,6 +10,8 @@ pub(crate) enum EndpointControlMessage {
     HealthPong,
     AgentViewProjection(DecodedAgentViewProjection),
     Snapshot(Box<crate::protocol::ClientShellSnapshot>),
+    /// 后台观测订阅推送的 `endpoint.observation.v1` 事件（账号用量 / 系统指标）。
+    Observation(Box<crate::protocol::endpoint::EndpointObservationEvent>),
     Ignored,
 }
 
@@ -46,6 +48,15 @@ pub(crate) fn decode_endpoint_control(
                 view,
             },
         ));
+    }
+    if kind == crate::protocol::endpoint::OBSERVATION_EVENT_KIND {
+        // 可选控制帧：新 server 推来本版本不认识的事件种类时整帧解码失败，按未知
+        // 可选控制忽略，不能因此断开端点。
+        return Ok(
+            serde_json::from_str(data).map_or(EndpointControlMessage::Ignored, |event| {
+                EndpointControlMessage::Observation(Box::new(event))
+            }),
+        );
     }
     if kind == crate::protocol::endpoint::ENDPOINT_SNAPSHOT_KIND {
         let snapshot = serde_json::from_str(data)
@@ -132,6 +143,43 @@ mod tests {
             .unwrap(),
             EndpointControlMessage::Ignored
         ));
+    }
+
+    #[test]
+    fn observation_events_decode_into_typed_frames_and_unknown_kinds_are_ignored() {
+        use crate::api::schema::{
+            AccountUsageRefreshingEvent, ObservationEventEnvelope, UsageRefreshState,
+        };
+        let frame = crate::protocol::endpoint::EndpointObservationEvent {
+            boot_id: "boot".into(),
+            event: ObservationEventEnvelope::AccountUsageRefreshing(AccountUsageRefreshingEvent {
+                refresh: vec![UsageRefreshState {
+                    account_id: "claude:default".into(),
+                    in_flight: true,
+                    ..Default::default()
+                }],
+            }),
+        };
+        let decoded = decode_endpoint_control(
+            crate::protocol::endpoint::OBSERVATION_EVENT_KIND,
+            &serde_json::to_string(&frame).unwrap(),
+        )
+        .unwrap();
+        let EndpointControlMessage::Observation(decoded) = decoded else {
+            panic!("decoded observation event");
+        };
+        assert_eq!(*decoded, frame);
+        // 未来的事件种类与坏载荷都按可选控制忽略，不拒绝端点。
+        for data in [
+            r#"{"boot_id":"boot","event":"account.usage.future","data":{}}"#,
+            "not json",
+        ] {
+            assert!(matches!(
+                decode_endpoint_control(crate::protocol::endpoint::OBSERVATION_EVENT_KIND, data)
+                    .unwrap(),
+                EndpointControlMessage::Ignored
+            ));
+        }
     }
 
     #[test]

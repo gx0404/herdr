@@ -2173,6 +2173,19 @@ async fn run_client_loop(
                                 }
                                 continue;
                             }
+                            Ok(endpoint::EndpointControlMessage::Observation(event)) => {
+                                // 订阅推送只更新客户端观测状态；呈现面可见时由 shell 记下
+                                // 重绘需求，下一轮 tick（≤100 ms）合并输出——事件是合并
+                                // 丢帧语义，不逐帧 compose。
+                                if let Some(shell) = state.shell.as_mut() {
+                                    shell.receive_endpoint_observation_event(
+                                        &endpoint_id,
+                                        generation,
+                                        *event,
+                                    );
+                                }
+                                continue;
+                            }
                             Ok(endpoint::EndpointControlMessage::Ignored) => {
                                 debug!(%kind, "ignoring unknown endpoint control message");
                                 continue;

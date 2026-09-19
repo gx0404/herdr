@@ -342,6 +342,9 @@ impl ClientShellState {
             self.pane_scroll_in_flight.clear();
             self.pane_scroll_queued.clear();
         }
+        // 在途请求已按取消结局处理；订阅生命周期随连接一起复位（放最后，覆盖
+        // 取消路径写下的退避）。
+        self.observation_endpoint_disconnected(endpoint_id);
     }
 
     pub(crate) fn set_endpoint_agent_view_projection_supported(

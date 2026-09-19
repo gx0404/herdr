@@ -844,6 +844,8 @@ Worktree event subscriptions include `worktree.created`, `worktree.opened`, and 
 
 Use `events.subscribe` for lifecycle events. Dedicated wait helpers are documented separately when a one-shot wait is supported.
 
+Observation data uses dedicated methods instead of `events.subscribe`: `account.usage.subscribe` takes the same params as `account.usage.get`, answers with a `subscription_id`, and then pushes `account.usage.updated` (changed account snapshots plus their `refresh` states) and `account.usage.refreshing` (refresh states only, as a probe starts) to that connection until `account.usage.unsubscribe`; `system.metrics.subscribe` pushes `system.metrics.updated` the same way. Subscribers keep the server probing in the background, so unsubscribe when the data is no longer shown. Subscriptions die with the connection and must be created again after a reconnect. The generation-1 client endpoint receives these pushes as `endpoint.observation.v1` control frames carrying the server `boot_id` and the event; unknown event kinds are ignored rather than rejected.
+
 ## Reading panes
 
 Use `pane.read` through the CLI unless you are writing a protocol client.

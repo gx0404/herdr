@@ -647,6 +647,8 @@ Worktree 事件订阅包括 `worktree.created`、`worktree.opened` 和 `worktree
 
 生命周期事件用 `events.subscribe`。支持一次性等待时,专门的等待辅助命令会单独在文档中说明。
 
+观测数据走专用方法而不是 `events.subscribe`：`account.usage.subscribe` 的参数与 `account.usage.get` 相同，响应返回 `subscription_id`，之后向该连接推送 `account.usage.updated`（变化的账号快照及其 `refresh` 状态）和 `account.usage.refreshing`（探测刚派发时只推刷新状态），直到 `account.usage.unsubscribe`；`system.metrics.subscribe` 同样推送 `system.metrics.updated`。订阅者会驱动服务端在后台持续探测，数据不再展示时请退订。订阅随连接消亡，重连后需要重新订阅。generation-1 客户端端点以 `endpoint.observation.v1` 控制帧接收这些推送，帧内带 server 的 `boot_id` 与事件；未知事件种类会被忽略而不是拒绝。
+
 ## 读取窗格
 
 除非你在编写协议客户端,否则通过 CLI 使用 `pane.read`。
