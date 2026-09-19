@@ -241,10 +241,13 @@ impl UsageProbeGuard {
         self.0.terminate();
     }
 }
-pub(crate) fn usage_probe_exit(child: &mut std::process::Child) -> io::Result<Option<bool>> {
+/// Windows 没有信号语义：只有退出码（`from_status` 在非 Unix 上不会填 `signal`）。
+pub(crate) fn usage_probe_exit(
+    child: &mut std::process::Child,
+) -> io::Result<Option<crate::platform::UsageProbeExit>> {
     child
         .try_wait()
-        .map(|status| status.map(|status| status.success()))
+        .map(|status| status.map(crate::platform::UsageProbeExit::from_status))
 }
 
 pub(crate) fn terminate_usage_probe(child: &mut std::process::Child) {

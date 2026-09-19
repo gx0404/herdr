@@ -310,11 +310,9 @@ pub(super) fn apply_report(
         };
         params.snapshot.message = None;
         if provider.is_some_and(|provider| provider.agent == "antigravity") {
-            params.snapshot.account_identity = payload
-                .get("email")
-                .and_then(serde_json::Value::as_str)
-                .filter(|id| !id.is_empty() && id.len() <= 256 && !id.chars().any(char::is_control))
-                .map(|id| id.to_ascii_lowercase());
+            params.snapshot.account_identity =
+                parse::sanitize_identity(payload.get("email").and_then(serde_json::Value::as_str))
+                    .map(|id| id.to_ascii_lowercase());
             params.snapshot.plan = payload
                 .get("plan_tier")
                 .and_then(serde_json::Value::as_str)
@@ -340,10 +338,22 @@ pub(super) fn apply_report(
             .pane_id
             .as_ref()
             .is_some_and(|pane| bindings.get(pane) != Some(&params.account_id));
-    if !cache.contains_key(&params.account_id)
-        || !parse::validate(&params.snapshot.metrics)
-        || bound_elsewhere
-    {
+    // 过滤语义：不合规的单条指标只丢它自己，其余照常接受；报文里有指标但没有一条合规才是
+    // 无效上报（整份拒收会让主路径的合法额度因一条脏 label 全部丢失）。
+    let had_metrics = !params.snapshot.metrics.is_empty();
+    let dropped = parse::retain_valid(&mut params.snapshot.metrics);
+    if dropped > 0 {
+        tracing::debug!(
+            event = "account.report.metrics_dropped",
+            subsystem = "account_usage",
+            outcome = "dropped",
+            account = %params.account_id,
+            dropped,
+            "丢弃回调上报里不合规的用量指标"
+        );
+    }
+    let all_invalid = had_metrics && params.snapshot.metrics.is_empty();
+    if !cache.contains_key(&params.account_id) || all_invalid || bound_elsewhere {
         return Err(rejections.reject(
             &origin,
             "invalid_usage_report",
@@ -657,6 +667,44 @@ mod tests {
         assert_eq!(rejected.code, "usage_binding_required");
         assert_eq!(rejected.message, BINDING_REQUIRED_MESSAGE);
         assert!(fixture.bindings.is_empty());
+    }
+
+    #[test]
+    fn one_invalid_metric_is_dropped_and_the_rest_of_the_report_is_accepted() {
+        let mut fixture = Fixture::new(vec![account("claude:default", "claude")]);
+        fixture
+            .bindings
+            .insert("pane-1".into(), "claude:default".into());
+        let mut params = report(Some("pane-1"), "");
+        // seven_day 的 unit 超长（不合规），five_hour 合规：只丢前者，不整份拒收。
+        params.official_payload = Some(json!({
+            "rate_limits": {
+                "five_hour": {"used_percentage": 42},
+                "seven_day": {"used_percentage": 10, "unit": "x".repeat(65)}
+            }
+        }));
+        let result = fixture.apply(params);
+        assert_eq!(code(&result), "ok");
+        let entry = &fixture.cache["claude:default"];
+        assert_eq!(
+            entry.snapshot.metrics.len(),
+            1,
+            "{:#?}",
+            entry.snapshot.metrics
+        );
+        assert_eq!(entry.snapshot.metrics[0].id, "five_hour");
+        assert!(entry.callback_latched());
+        // 厂商 JSON 里带制表符的 unit 会在解析时清洗，而不是被拒。
+        let mut params = report(Some("pane-1"), "");
+        params.official_payload = Some(json!({
+            "rate_limits": {"five_hour": {"used_percentage": 42, "unit": "req\tuests"}}
+        }));
+        let result = fixture.apply(params);
+        assert_eq!(code(&result), "ok");
+        assert_eq!(
+            fixture.cache["claude:default"].snapshot.metrics[0].unit,
+            "req uests"
+        );
     }
 
     #[test]

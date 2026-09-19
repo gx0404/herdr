@@ -1548,6 +1548,17 @@ fn claude_probe(
     Err((ObservationStatus::NeedsBinding, message))
 }
 
+/// 非交互查询回退到备用参数形态时的来源说明：`local` 作用域的厂商（opencode）标明是
+/// 本地会话统计，与账号额度分区。
+fn json_fallback_source(provider: &registry::Provider, args: &[&str]) -> String {
+    let command = format!("{} {}", provider.command, args.join(" "));
+    if provider.scope == "local" {
+        format!("{command} · 本地会话统计")
+    } else {
+        command
+    }
+}
+
 fn query(account: &UsageAccountConfig, timeout: Duration, options: ProbeOptions) -> ProbeOutcome {
     let mut snapshot = empty_snapshot(account);
     let mut flags = ClaudeProbeFlags::default();
@@ -1559,12 +1570,12 @@ fn query(account: &UsageAccountConfig, timeout: Duration, options: ProbeOptions)
             registry::Query::Codex => {
                 snapshot.source = "Codex App Server".into();
                 transport::codex(provider, account, timeout).map(|(identity, value)| {
-                    snapshot.account_identity = identity
-                        .pointer("/account/id")
-                        .or_else(|| identity.pointer("/account/email"))
-                        .and_then(serde_json::Value::as_str)
-                        .filter(|value| value.len() <= 256)
-                        .map(str::to_owned);
+                    snapshot.account_identity = parse::sanitize_identity(
+                        identity
+                            .pointer("/account/id")
+                            .or_else(|| identity.pointer("/account/email"))
+                            .and_then(serde_json::Value::as_str),
+                    );
                     snapshot.plan = identity
                         .pointer("/account/planType")
                         .and_then(serde_json::Value::as_str)
@@ -1575,10 +1586,11 @@ fn query(account: &UsageAccountConfig, timeout: Duration, options: ProbeOptions)
             registry::Query::Kimi => {
                 snapshot.source = "Kimi 官方本地 Server API".into();
                 transport::kimi(provider, account, timeout).map(|(identity, usage)| {
-                    snapshot.account_identity = identity
-                        .pointer("/data/userInfo/userId")
-                        .and_then(serde_json::Value::as_str)
-                        .map(str::to_owned);
+                    snapshot.account_identity = parse::sanitize_identity(
+                        identity
+                            .pointer("/data/userInfo/userId")
+                            .and_then(serde_json::Value::as_str),
+                    );
                     snapshot.plan = identity
                         .pointer("/data/userInfo/userLevelName")
                         .and_then(serde_json::Value::as_str)
@@ -1586,13 +1598,22 @@ fn query(account: &UsageAccountConfig, timeout: Duration, options: ProbeOptions)
                     parse::kimi(&usage)
                 })
             }
-            registry::Query::Json(args) => {
+            registry::Query::Json { args, fallback_args } => {
                 snapshot.source = provider.method.into();
-                transport::capture_query(provider, account, args, timeout).and_then(|text| {
-                    if provider.agent == "letta" { return Ok(parse::letta(&text)); }
-                    if let Ok(value) = serde_json::from_str(&text) {
+                transport::capture_query(provider, account, args, fallback_args, timeout, |text, _| {
+                    if provider.agent == "letta" { return Ok(parse::letta(text)); }
+                    if let Ok(value) = serde_json::from_str::<serde_json::Value>(text) {
                         if provider.agent == "omp" { parse::omp(&value, account) } else { Ok(parse::structured(&value, provider.scope)) }
-                    } else { Ok(parse::screen(&text, provider.scope)) }
+                    } else if provider.agent == "opencode" {
+                        // 无 `--json` 的回退形态：框线表是本地会话统计，不是账号额度。
+                        Ok(parse::opencode_stats(text))
+                    } else { Ok(parse::screen(text, provider.scope)) }
+                })
+                .map(|outcome| {
+                    if outcome.args != args {
+                        snapshot.source = json_fallback_source(provider, outcome.args);
+                    }
+                    outcome.metrics
                 })
             }
             registry::Query::Interactive(command) => {
@@ -1630,14 +1651,27 @@ fn query(account: &UsageAccountConfig, timeout: Duration, options: ProbeOptions)
         ))
     };
     match result {
-        Ok(metrics) if !metrics.is_empty() && parse::validate(&metrics) => {
-            snapshot.metrics = metrics;
-            snapshot.status = ObservationStatus::Ready;
-            snapshot.message = None;
-        }
-        Ok(_) => {
-            snapshot.status = ObservationStatus::Unsupported;
-            snapshot.message = Some("官方输出没有已验证的用量字段；未推算账号剩余额度".into());
+        Ok(mut metrics) => {
+            // 过滤语义：单条不合规的指标只丢它自己，不把整份结果推进 Unsupported 终态。
+            let dropped = parse::retain_valid(&mut metrics);
+            if dropped > 0 {
+                tracing::debug!(
+                    event = "account.probe.metrics_dropped",
+                    subsystem = "account_usage",
+                    outcome = "dropped",
+                    agent = %account.agent,
+                    dropped,
+                    "丢弃不合规的用量指标"
+                );
+            }
+            if metrics.is_empty() {
+                snapshot.status = ObservationStatus::Unsupported;
+                snapshot.message = Some("官方输出没有已验证的用量字段；未推算账号剩余额度".into());
+            } else {
+                snapshot.metrics = metrics;
+                snapshot.status = ObservationStatus::Ready;
+                snapshot.message = None;
+            }
         }
         Err((status, message)) => {
             snapshot.status = status;
@@ -1829,6 +1863,22 @@ mod tests {
             *entry = restored;
         }
         input.try_recv().is_ok()
+    }
+
+    #[test]
+    fn json_fallback_source_marks_local_scope_vendors_only() {
+        let opencode = registry::provider("opencode").expect("opencode 已登记");
+        assert_eq!(
+            json_fallback_source(opencode, &["stats"]),
+            "opencode stats · 本地会话统计",
+            "opencode 的回退形态是本地会话统计，来源说明给人看；客户端分区以 metric.scope 为准"
+        );
+        let omp = registry::provider("omp").expect("omp 已登记");
+        assert_eq!(json_fallback_source(omp, &["usage"]), "omp usage");
+        assert_eq!(
+            json_fallback_source(omp, &["usage", "--plain"]),
+            "omp usage --plain"
+        );
     }
 
     #[test]

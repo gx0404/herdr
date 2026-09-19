@@ -34,6 +34,10 @@ fn first_number(value: &Value, names: &[&str]) -> Option<f64> {
 }
 
 fn window(id: String, label: String, value: &Value, scope: &str) -> Option<UsageMetric> {
+    // id / label 可能由厂商 JSON 的键或 `label` 字段拼出，unit 直接取自 JSON：进入指标前统一
+    // 清洗控制字符，让单条脏字段不至于在 `retain_valid` 处被丢弃。
+    let id = clean_field(&id);
+    let label = clean_field(&label);
     let percent = first_number(
         value,
         &[
@@ -53,13 +57,18 @@ fn window(id: String, label: String, value: &Value, scope: &str) -> Option<Usage
     if percent.is_none() && used.is_none() && limit.is_none() && remaining.is_none() {
         return None;
     }
-    let unit = value.get("unit").and_then(Value::as_str).unwrap_or(
-        if percent.is_some() && used.is_none() {
-            "%"
-        } else {
-            "额度单位"
-        },
-    );
+    let unit = value
+        .get("unit")
+        .and_then(Value::as_str)
+        .map(clean_field)
+        .filter(|unit| !unit.is_empty())
+        .unwrap_or_else(|| {
+            if percent.is_some() && used.is_none() {
+                "%".into()
+            } else {
+                "额度单位".into()
+            }
+        });
     let percentage = percent.or_else(|| {
         used.zip(limit)
             .filter(|(_, total)| *total > 0.0)
@@ -69,7 +78,7 @@ fn window(id: String, label: String, value: &Value, scope: &str) -> Option<Usage
         id,
         label,
         scope: scope.into(),
-        unit: unit.into(),
+        unit,
         used,
         limit,
         remaining,
@@ -120,7 +129,7 @@ pub(super) fn codex(value: &Value) -> Vec<UsageMetric> {
             .filter(|v| v.is_string() || v.is_number())
         {
             metrics.push(UsageMetric {
-                id: format!("{id}/credits"),
+                id: clean_field(&format!("{id}/credits")),
                 label: "额外余额".into(),
                 unit: "credits".into(),
                 scope: "account".into(),
@@ -153,9 +162,11 @@ pub(super) fn antigravity(value: &Value) -> Vec<UsageMetric> {
         .filter_map(|(id, quota)| {
             let remaining =
                 finite(quota.get("remaining_fraction")).filter(|value| *value <= 1.0)?;
+            // 键名来自官方 statusline JSON：清洗后再作 id / label。
+            let id = clean_field(id);
             Some(UsageMetric {
-                id: id.clone(),
                 label: id.clone(),
+                id,
                 unit: "%".into(),
                 scope: "account".into(),
                 used_percent: Some((1.0 - remaining) * 100.0),
@@ -222,13 +233,14 @@ pub(super) fn omp(
                 "account",
             )
             .unwrap_or_else(|| UsageMetric {
-                id: format!("{provider}/{id}"),
-                label: format!("{provider} · {label}"),
+                id: clean_field(&format!("{provider}/{id}")),
+                label: clean_field(&format!("{provider} · {label}")),
                 unit: amount
                     .get("unit")
                     .and_then(Value::as_str)
-                    .unwrap_or("额度单位")
-                    .into(),
+                    .map(clean_field)
+                    .filter(|unit| !unit.is_empty())
+                    .unwrap_or_else(|| "额度单位".into()),
                 scope: "account".into(),
                 ..Default::default()
             });
@@ -284,7 +296,7 @@ pub(super) fn letta(text: &str) -> Vec<UsageMetric> {
                 label: "letta/* quota".into(),
                 unit: "state".into(),
                 scope: "account".into(),
-                text_value: Some(value.chars().take(120).collect()),
+                text_value: Some(clean_field(value).chars().take(120).collect()),
                 ..Default::default()
             });
         }
@@ -381,7 +393,7 @@ pub(super) fn kimi(value: &Value) -> Vec<UsageMetric> {
                         id: key.into(),
                         label: label.into(),
                         scope: "account".into(),
-                        unit: format!("{currency} cents"),
+                        unit: clean_field(&format!("{currency} cents")),
                         amount_decimal: Some(decimal(amount)),
                         ..Default::default()
                     });
@@ -490,8 +502,8 @@ fn visit_structured(
             {
                 if let Some(count) = finite(Some(child)) {
                     output.push(UsageMetric {
-                        id: format!("{path}/{key}"),
-                        label: key.clone(),
+                        id: clean_field(&format!("{path}/{key}")),
+                        label: clean_field(key),
                         unit: "tokens".into(),
                         scope: scope.into(),
                         used: Some(count),
@@ -506,8 +518,8 @@ fn visit_structured(
             ) && finite(Some(child)).is_some()
             {
                 output.push(UsageMetric {
-                    id: format!("{path}/{key}"),
-                    label: key.clone(),
+                    id: clean_field(&format!("{path}/{key}")),
+                    label: clean_field(key),
                     unit: if key == "balance" {
                         "厂商余额单位"
                     } else {
@@ -532,20 +544,39 @@ pub(super) fn decimal(value: &Value) -> String {
         .unwrap_or_else(|| value.to_string())
 }
 
+/// `screen` 的两条正则：每次探测都会调用，编译一次即可。
+fn screen_patterns() -> Option<&'static (regex::Regex, regex::Regex)> {
+    static PATTERNS: std::sync::OnceLock<Option<(regex::Regex, regex::Regex)>> =
+        std::sync::OnceLock::new();
+    PATTERNS
+        .get_or_init(|| {
+            let percent = regex::Regex::new(
+                r"(?i)(\d+(?:\.\d+)?)\s*%\s*(used|remaining|left|已用|剩余)?",
+            )
+            .ok()?;
+            let credits = regex::Regex::new(
+                r"(?i)(\d+(?:\.\d+)?)\s*/\s*(\d+(?:\.\d+)?)\s*(credits?|tokens?|requests?|额度|积分)",
+            )
+            .ok()?;
+            Some((percent, credits))
+        })
+        .as_ref()
+}
+
 pub(super) fn screen(text: &str, scope: &str) -> Vec<UsageMetric> {
-    let Ok(percent) =
-        regex::Regex::new(r"(?i)(\d+(?:\.\d+)?)\s*%\s*(used|remaining|left|已用|剩余)?")
-    else {
-        return Vec::new();
-    };
-    let Ok(credits) = regex::Regex::new(
-        r"(?i)(\d+(?:\.\d+)?)\s*/\s*(\d+(?:\.\d+)?)\s*(credits?|tokens?|requests?|额度|积分)",
-    ) else {
+    let Some((percent, credits)) = screen_patterns() else {
         return Vec::new();
     };
     let mut metrics = Vec::new();
     let mut seen = std::collections::HashSet::new();
-    for line in text.lines().map(str::trim).filter(|line| !line.is_empty()) {
+    // 屏幕 / CLI 行先去掉 ANSI 与控制字符（NO_COLOR 未必被尊重、对齐用的制表符很常见），
+    // 关键字判定、数字匹配与 label 都用清洗后的行。
+    for line in text
+        .lines()
+        .map(clean_field)
+        .filter(|line| !line.is_empty())
+    {
+        let line = line.as_str();
         let lower = line.to_lowercase();
         // 会话上下文百分比不是账号额度，绝不放进账号仪表。
         if lower.contains("context") || lower.contains("上下文") || lower.contains("loading") {
@@ -618,32 +649,252 @@ pub(super) fn screen(text: &str, scope: &str) -> Vec<UsageMetric> {
     metrics
 }
 
-pub(super) fn validate(metrics: &[UsageMetric]) -> bool {
-    metrics.len() <= 128
-        && metrics.iter().all(|metric| {
-            metric.id.len() <= 256
-                && metric
-                    .text_value
-                    .as_ref()
-                    .is_none_or(|value| value.len() <= 512 && !value.chars().any(char::is_control))
-                && metric.label.len() <= 512
-                && metric.unit.len() <= 64
-                && [
-                    metric.used,
-                    metric.limit,
-                    metric.remaining,
-                    metric.used_percent,
-                ]
-                .into_iter()
-                .flatten()
-                .all(|v| v.is_finite() && v >= 0.0)
-                && metric.amount_decimal.as_ref().is_none_or(|v| {
-                    v.len() <= 128
-                        && v.bytes().all(|c| {
-                            c.is_ascii_digit() || matches!(c, b'.' | b'-' | b'+' | b'e' | b'E')
-                        })
-                })
+/// 文本字段是否干净：无控制字符（含制表符与 ANSI 转义的 ESC），进入事件与持久化的文本
+/// 不能携带终端画面里的排版控制。
+fn clean_text(text: &str) -> bool {
+    !text.chars().any(char::is_control)
+}
+
+/// 生产者侧的文本清洗：去 ANSI 序列、去控制字符（制表符等空白控制折叠为空格）、折叠连续
+/// 空白、去首尾空白。所有由 CLI 行或厂商 JSON 拼出的 id / label / unit / text_value 都先经
+/// 这里，再进 `retain_valid`——脏字段是清洗对象，不是否决整份快照的理由。
+pub(super) fn clean_field(text: &str) -> String {
+    let stripped = match super::transport::ansi_pattern() {
+        Some(pattern) => pattern.replace_all(text, ""),
+        None => std::borrow::Cow::Borrowed(text),
+    };
+    stripped
+        .chars()
+        .filter(|ch| ch.is_whitespace() || !ch.is_control())
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// 指标数量上限：超出的部分被截掉。
+const MAX_METRICS: usize = 128;
+
+/// 单条指标是否合规：文本字段长度与控制字符、数值有限非负、金额文本只含数字字符。
+fn metric_valid(metric: &UsageMetric) -> bool {
+    metric.id.len() <= 256
+        && clean_text(&metric.id)
+        && metric
+            .text_value
+            .as_ref()
+            .is_none_or(|value| value.len() <= 512 && clean_text(value))
+        && metric.label.len() <= 512
+        && clean_text(&metric.label)
+        && metric.unit.len() <= 64
+        && clean_text(&metric.unit)
+        && metric.scope.len() <= 64
+        && clean_text(&metric.scope)
+        && [
+            metric.used,
+            metric.limit,
+            metric.remaining,
+            metric.used_percent,
+        ]
+        .into_iter()
+        .flatten()
+        .all(|v| v.is_finite() && v >= 0.0)
+        && metric.amount_decimal.as_ref().is_none_or(|v| {
+            v.len() <= 128
+                && v.bytes()
+                    .all(|c| c.is_ascii_digit() || matches!(c, b'.' | b'-' | b'+' | b'e' | b'E'))
         })
+}
+
+/// 过滤语义的校验：丢弃不合规的单条指标、截到 `MAX_METRICS` 条，返回丢弃的条数。一条脏
+/// 指标只丢它自己，不连带否决整份探测结果或回调上报（否则 CLI 路径会把账号推进
+/// `Unsupported` 终态、回调路径会整份拒收）。
+pub(super) fn retain_valid(metrics: &mut Vec<UsageMetric>) -> usize {
+    let before = metrics.len();
+    metrics.retain(metric_valid);
+    metrics.truncate(MAX_METRICS);
+    before - metrics.len()
+}
+
+/// 全部合规且不超上限：测试断言用；生产路径一律走过滤语义的 `retain_valid`。
+#[cfg(test)]
+pub(super) fn validate(metrics: &[UsageMetric]) -> bool {
+    metrics.len() <= MAX_METRICS && metrics.iter().all(metric_valid)
+}
+
+/// 公开账号身份（邮箱 / 用户 id）进入快照、事件与持久化前的统一清洗：去首尾空白、非空、
+/// ≤ 256 字节、无控制字符。所有厂商探测与回调上报共用这一条规则（`persistence::store`
+/// 的加载守门与之一致）。
+pub(super) fn sanitize_identity(value: Option<&str>) -> Option<String> {
+    value
+        .map(str::trim)
+        .filter(|text| !text.is_empty() && text.len() <= 256 && clean_text(text))
+        .map(str::to_owned)
+}
+
+/// 非交互输出是否是一份命令行帮助（yargs / commander 族在 flag 不受支持时直接打印用法，
+/// 未必带 `unknown option` 字样）。判据：出现 `Options:` / `Commands:` / `Flags:` 这类
+/// 选项列表标题行；或 `Usage:` 标题行**同时**伴有 flag 列表行（以 `-x` / `--flag` 开头的
+/// 行）。`Usage:` 单独不成立——`amp usage` / `kilo profile` 之类的真实用量输出也可能用
+/// `Usage:` 作小标题。只认标题行，不认 `--help` 子串——错误提示里的「run … --help」不是
+/// 帮助文本。
+pub(super) fn cli_help_output(text: &str) -> bool {
+    let mut usage_heading = false;
+    let mut flag_line = false;
+    for line in text.lines() {
+        let trimmed = line.trim();
+        let lower = trimmed.to_lowercase();
+        if [
+            "options:",
+            "commands:",
+            "positionals:",
+            "arguments:",
+            "flags:",
+        ]
+        .iter()
+        .any(|heading| lower.starts_with(heading))
+        {
+            return true;
+        }
+        usage_heading |= lower.starts_with("usage:");
+        flag_line |= is_flag_line(trimmed);
+    }
+    usage_heading && flag_line
+}
+
+/// 行是否以 `-x` / `--flag` 开头（帮助文本的 flag 列表行）；`- 项目` 之类的列表符号不算。
+pub(super) fn is_flag_line(trimmed: &str) -> bool {
+    let mut chars = trimmed.chars();
+    chars.next() == Some('-')
+        && chars
+            .next()
+            .is_some_and(|ch| ch == '-' || ch.is_ascii_alphabetic())
+}
+
+/// `opencode stats` 人类可读输出（1.17.x）里一行统计的定义。
+struct StatsRow {
+    /// CLI 打印的行名（精确匹配）。
+    name: &'static str,
+    /// 指标 id。
+    id: &'static str,
+    /// 中文标签。
+    label: &'static str,
+    /// 单位；`USD` 的行是金额，其余是计数。
+    unit: &'static str,
+}
+
+const fn stats_row(
+    name: &'static str,
+    id: &'static str,
+    label: &'static str,
+    unit: &'static str,
+) -> StatsRow {
+    StatsRow {
+        name,
+        id,
+        label,
+        unit,
+    }
+}
+
+/// `opencode stats` 已知行：只认 `OVERVIEW` 与 `COST & TOKENS` 两张表；工具用量表
+/// （`TOOL USAGE`）不是用量指标，不解析。
+const OPENCODE_STATS_ROWS: &[StatsRow] = &[
+    stats_row("Sessions", "sessions", "会话数", "sessions"),
+    stats_row("Messages", "messages", "消息数", "messages"),
+    stats_row("Days", "days", "统计天数", "days"),
+    stats_row("Total Cost", "total_cost", "累计费用", "USD"),
+    stats_row("Avg Cost/Day", "avg_cost_per_day", "日均费用", "USD"),
+    stats_row(
+        "Avg Tokens/Session",
+        "avg_tokens_per_session",
+        "每会话平均 token",
+        "tokens",
+    ),
+    stats_row(
+        "Median Tokens/Session",
+        "median_tokens_per_session",
+        "每会话中位 token",
+        "tokens",
+    ),
+    stats_row("Input", "input_tokens", "输入 token", "tokens"),
+    stats_row("Output", "output_tokens", "输出 token", "tokens"),
+    stats_row(
+        "Cache Read",
+        "cache_read_tokens",
+        "缓存读取 token",
+        "tokens",
+    ),
+    stats_row(
+        "Cache Write",
+        "cache_write_tokens",
+        "缓存写入 token",
+        "tokens",
+    ),
+];
+
+/// 解析 `1,323` / `3.6M` / `690.3K` / `$0.88` 这类展示数字：千分位逗号、`K/M/B` 后缀与
+/// 货币符号。返回 `(数值, 原始小数文本)`：没有倍率后缀时原样保留展示精度的文本（金额不经
+/// 浮点往返）；带 `K/M/B` 后缀时文本是 `None`——剥掉后缀的数字串不是真实数值，不能当金额。
+fn display_number(text: &str) -> Option<(f64, Option<String>)> {
+    let text = text.trim().trim_start_matches('$').replace(',', "");
+    let (digits, multiplier) = match text.chars().last()? {
+        'K' | 'k' => (&text[..text.len() - 1], 1_000.0),
+        'M' | 'm' => (&text[..text.len() - 1], 1_000_000.0),
+        'B' | 'b' => (&text[..text.len() - 1], 1_000_000_000.0),
+        _ => (text.as_str(), 1.0),
+    };
+    if digits.is_empty()
+        || !digits
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || byte == b'.')
+    {
+        return None;
+    }
+    let value = digits.parse::<f64>().ok()?;
+    if !value.is_finite() || value < 0.0 {
+        return None;
+    }
+    let literal = (multiplier == 1.0).then(|| digits.to_owned());
+    Some((value * multiplier, literal))
+}
+
+/// `opencode stats`（无 `--json` 的回退形态）框线表解析。输出是本地会话的累计统计，不是
+/// 账号额度：`scope` 固定为 `local`，客户端按 `scope` 分区显示（分区标题由客户端渲染，
+/// label 只保留指标本体）。只认识 `OVERVIEW` 与 `COST & TOKENS` 两张表里的已知行；未知
+/// 行与 `TOOL USAGE` 跳过。金额行带 `K/M/B` 后缀时按乘算后的数值格式化（两位小数）。
+pub(super) fn opencode_stats(text: &str) -> Vec<UsageMetric> {
+    let mut metrics = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for line in text.lines().map(clean_field) {
+        let body = line.trim_matches(|ch: char| ch.is_whitespace() || "│┃|".contains(ch));
+        let Some((name, value)) = body.rsplit_once(char::is_whitespace) else {
+            continue;
+        };
+        let name = name.trim();
+        let Some(row) = OPENCODE_STATS_ROWS.iter().find(|row| row.name == name) else {
+            continue;
+        };
+        let Some((number, literal)) = display_number(value) else {
+            continue;
+        };
+        if !seen.insert(row.id) {
+            continue;
+        }
+        let mut metric = UsageMetric {
+            id: row.id.into(),
+            label: row.label.into(),
+            unit: row.unit.into(),
+            scope: "local".into(),
+            ..Default::default()
+        };
+        if row.unit == "USD" {
+            metric.amount_decimal = Some(literal.unwrap_or_else(|| format!("{number:.2}")));
+        } else {
+            metric.used = Some(number);
+        }
+        metrics.push(metric);
+    }
+    metrics
 }
 
 /// `claude auth status --json` 的非交互登录预检结果。只取登录判定与公开身份，不含令牌。
@@ -849,6 +1100,8 @@ pub(super) fn cli_usage_error(text: &str) -> bool {
         "unknown command",
         "unknown option",
         "unknown argument",
+        // clap 4：`error: unexpected argument '--json' found`。
+        "unexpected argument",
         "unrecognized",
         "too many arguments",
         "invalid option",
@@ -1096,8 +1349,301 @@ Done.
         assert!(cli_usage_error("error: unknown command 'status'"));
         assert!(cli_usage_error("error: unknown option '--json'"));
         assert!(cli_usage_error("Unrecognized arguments: --json"));
+        assert!(
+            cli_usage_error("error: unexpected argument '--json' found"),
+            "clap 4 措辞"
+        );
         assert!(!cli_usage_error("Not logged in"));
         assert!(!cli_usage_error(""));
+    }
+
+    #[test]
+    fn producers_strip_control_characters_so_dirty_lines_still_validate() {
+        // 屏幕 / CLI 行：制表符对齐 + 未被尊重的 NO_COLOR（ANSI）。
+        let screen_text = "\x1b[1mWeekly\x1b[0m\t20% used\nCredits used\t30/100 credits\n";
+        let metrics = screen(screen_text, "account");
+        assert_eq!(metrics.len(), 2, "{metrics:#?}");
+        assert!(validate(&metrics), "清洗后整份通过：{metrics:#?}");
+        assert_eq!(metrics[0].label, "Weekly 20% used");
+        assert_eq!(metrics[0].used_percent, Some(20.0));
+        assert_eq!(metrics[1].label, "Credits used 30/100 credits");
+        assert_eq!(metrics[1].limit, Some(100.0));
+        // 厂商 JSON：label 与对象键带制表符 / 转义。
+        let value = json!({
+            "buckets": {"week\tly": {"label": "Week\x1bly\tquota", "usedPercent": 40, "unit": "%\t"}},
+            "input\tTokens": 12,
+            "totalCost": "1.5"
+        });
+        let metrics = structured(&value, "session");
+        assert!(validate(&metrics), "{metrics:#?}");
+        assert!(metrics.iter().all(|metric| !metric.id.contains('\t')
+            && !metric.label.contains('\t')
+            && !metric.unit.contains('\t')));
+        let bucket = metrics
+            .iter()
+            .find(|metric| metric.used_percent == Some(40.0))
+            .expect("窗口指标");
+        assert_eq!(bucket.label, "Weekly quota");
+        assert_eq!(bucket.id, "/buckets/week ly");
+        assert_eq!(bucket.unit, "%");
+        // codex 的 limitName、antigravity 的键名同样来自 JSON。
+        let codex_metrics = codex(
+            &json!({"rateLimitsByLimitId": {"co\tdex": {"limitName": "Co\x07dex", "primary": {"usedPercent": 5}, "credits": {"balance": "1.0"}}}}),
+        );
+        assert!(validate(&codex_metrics), "{codex_metrics:#?}");
+        assert_eq!(codex_metrics[0].label, "Codex · 主要额度");
+        assert_eq!(codex_metrics[1].id, "co dex/credits");
+        let agy = antigravity(&json!({"quota": {"gem\tini": {"remaining_fraction": 0.5}}}));
+        assert!(validate(&agy));
+        assert_eq!(agy[0].id, "gem ini");
+        // opencode 框线表带 ANSI。
+        let stats = opencode_stats("│\x1b[1mSessions\x1b[0m\t\t41 │\n");
+        assert_eq!(stats.len(), 1);
+        assert_eq!(stats[0].used, Some(41.0));
+        assert!(validate(&stats));
+        // letta 的文本值。
+        let letta_metrics =
+            letta("# Letta usage overview\n* Bucket (full/high/medium/low/empty): hi\tgh\x1b[0m\n");
+        assert_eq!(letta_metrics[0].text_value.as_deref(), Some("hi gh"));
+        assert_eq!(clean_field("  a \t\x1b[31m b\r\n c  "), "a b c");
+        assert_eq!(clean_field("\t"), "");
+    }
+
+    #[test]
+    fn retain_valid_drops_only_the_dirty_metrics() {
+        let clean = UsageMetric {
+            id: "cli-0".into(),
+            label: "Weekly 20% used".into(),
+            unit: "%".into(),
+            scope: "account".into(),
+            used_percent: Some(20.0),
+            ..Default::default()
+        };
+        let mut dirty = clean.clone();
+        dirty.id = "cli-1".into();
+        dirty.label = "Daily\t50%".into();
+        let mut nan = clean.clone();
+        nan.id = "cli-2".into();
+        nan.used_percent = Some(f64::NAN);
+        let mut metrics = vec![clean.clone(), dirty, nan];
+        assert_eq!(retain_valid(&mut metrics), 2, "只丢两条脏指标");
+        assert_eq!(metrics, vec![clean.clone()]);
+        // 全部合规时不动；超过上限时截断并计入丢弃数。
+        let mut metrics = vec![clean.clone(); 3];
+        assert_eq!(retain_valid(&mut metrics), 0);
+        assert_eq!(metrics.len(), 3);
+        let mut metrics = vec![clean; MAX_METRICS + 5];
+        assert_eq!(retain_valid(&mut metrics), 5);
+        assert_eq!(metrics.len(), MAX_METRICS);
+        assert!(validate(&metrics));
+        // 全脏 → 空。
+        let mut metrics = vec![UsageMetric {
+            unit: "x".repeat(65),
+            ..Default::default()
+        }];
+        assert_eq!(retain_valid(&mut metrics), 1);
+        assert!(metrics.is_empty());
+    }
+
+    /// opencode 1.17.20 `stats`（无 `--json`）的真实输出节选（NO_COLOR=1）。
+    const OPENCODE_STATS_SCREEN: &str = "\
+┌────────────────────────────────────────────────────────┐
+│                       OVERVIEW                         │
+├────────────────────────────────────────────────────────┤
+│Sessions                                             41 │
+│Messages                                          1,323 │
+│Days                                                100 │
+└────────────────────────────────────────────────────────┘
+
+┌────────────────────────────────────────────────────────┐
+│                    COST & TOKENS                       │
+├────────────────────────────────────────────────────────┤
+│Total Cost                                        $0.88 │
+│Avg Cost/Day                                      $0.01 │
+│Avg Tokens/Session                                 3.6M │
+│Median Tokens/Session                            690.3K │
+│Input                                             11.9M │
+│Output                                           631.5K │
+│Cache Read                                       132.9M │
+│Cache Write                                      267.9K │
+└────────────────────────────────────────────────────────┘
+
+
+┌────────────────────────────────────────────────────────┐
+│                      TOOL USAGE                        │
+├────────────────────────────────────────────────────────┤
+│ bash               ████████████████████ 1308 (58.8%)   │
+│ read               ██████               435 (19.6%)    │
+│ filesystem_edit_.. █                     19 ( 0.9%)    │
+└────────────────────────────────────────────────────────┘
+";
+
+    #[test]
+    fn opencode_stats_table_becomes_local_session_metrics() {
+        let metrics = opencode_stats(OPENCODE_STATS_SCREEN);
+        assert_eq!(metrics.len(), 11, "{metrics:#?}");
+        assert!(validate(&metrics));
+        assert!(
+            metrics.iter().all(|metric| metric.scope == "local"),
+            "本地会话统计不是账号额度：分区信号是结构化的 scope"
+        );
+        assert!(
+            metrics
+                .iter()
+                .all(|metric| !metric.label.contains("本地会话统计")),
+            "label 只留指标本体，分区标题由客户端按 scope 渲染"
+        );
+        let by_id = |id: &str| {
+            metrics
+                .iter()
+                .find(|metric| metric.id == id)
+                .unwrap_or_else(|| panic!("缺 {id}"))
+        };
+        assert_eq!(by_id("sessions").used, Some(41.0));
+        assert_eq!(by_id("sessions").label, "会话数");
+        assert_eq!(by_id("messages").used, Some(1323.0), "千分位逗号");
+        assert_eq!(by_id("days").used, Some(100.0));
+        let cost = by_id("total_cost");
+        assert_eq!(cost.amount_decimal.as_deref(), Some("0.88"), "金额保留文本");
+        assert_eq!(cost.unit, "USD");
+        assert_eq!(cost.used, None);
+        assert_eq!(
+            by_id("avg_cost_per_day").amount_decimal.as_deref(),
+            Some("0.01")
+        );
+        assert_eq!(
+            by_id("avg_tokens_per_session").used,
+            Some(3_600_000.0),
+            "M 后缀"
+        );
+        assert_eq!(
+            by_id("median_tokens_per_session").used,
+            Some(690_300.0),
+            "K 后缀"
+        );
+        assert_eq!(by_id("input_tokens").used, Some(11_900_000.0));
+        assert_eq!(by_id("output_tokens").used, Some(631_500.0));
+        assert_eq!(by_id("cache_read_tokens").used, Some(132_900_000.0));
+        assert_eq!(by_id("cache_write_tokens").used, Some(267_900.0));
+        assert_eq!(by_id("input_tokens").unit, "tokens");
+        // 工具用量表与百分比不是用量指标；通用画面解析也不应从中臆造账号额度。
+        assert!(metrics.iter().all(|metric| !metric.id.contains("bash")));
+        assert!(screen(OPENCODE_STATS_SCREEN, "local").is_empty());
+        // 空输出 / 帮助文本 / 无关文本 → 空。
+        assert!(opencode_stats("").is_empty());
+        assert!(opencode_stats("Options:\n  -h, --help  show help\n").is_empty());
+        assert!(
+            opencode_stats("│Total Cost      n/a │").is_empty(),
+            "非数字不臆造"
+        );
+        // 同名行只取第一次出现。
+        let twice = "│Sessions   1 │\n│Sessions   2 │\n";
+        let metrics = opencode_stats(twice);
+        assert_eq!(metrics.len(), 1);
+        assert_eq!(metrics[0].used, Some(1.0));
+        // 金额行用紧凑记数：按乘算后的数值格式化，不能把剥掉后缀的 `1.2` 当成金额。
+        let compact = "│Total Cost      $1.2K │\n│Avg Cost/Day   $1.3M │\n";
+        let metrics = opencode_stats(compact);
+        assert_eq!(metrics.len(), 2);
+        assert_eq!(metrics[0].amount_decimal.as_deref(), Some("1200.00"));
+        assert_eq!(metrics[1].amount_decimal.as_deref(), Some("1300000.00"));
+        assert!(validate(&metrics));
+    }
+
+    #[test]
+    fn display_numbers_accept_separators_suffixes_and_currency() {
+        assert_eq!(display_number("1,323"), Some((1323.0, Some("1323".into()))));
+        assert_eq!(display_number("$0.88"), Some((0.88, Some("0.88".into()))));
+        assert_eq!(display_number("41"), Some((41.0, Some("41".into()))));
+        // 带倍率后缀：数值已乘算，原始文本不再提供（`3.6` 不是 3.6M 的金额）。
+        assert_eq!(display_number("3.6M"), Some((3_600_000.0, None)));
+        assert_eq!(display_number("690.3K"), Some((690_300.0, None)));
+        assert_eq!(display_number("2B"), Some((2_000_000_000.0, None)));
+        assert_eq!(display_number("$1.2K"), Some((1200.0, None)));
+        for bad in ["", "$", "M", "n/a", "-1", "1.2.3M", "1e5", "--"] {
+            assert_eq!(display_number(bad), None, "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn identity_sanitizer_and_help_detector_share_one_rule() {
+        assert_eq!(
+            sanitize_identity(Some("  Me@Example.test ")),
+            Some("Me@Example.test".into()),
+            "只去首尾空白，不改大小写（厂商 id 大小写有意义）"
+        );
+        assert_eq!(sanitize_identity(None), None);
+        assert_eq!(sanitize_identity(Some("   ")), None);
+        assert_eq!(sanitize_identity(Some("a\u{7}b")), None, "控制字符");
+        assert_eq!(sanitize_identity(Some("a\tb")), None, "制表符也是控制字符");
+        assert_eq!(
+            sanitize_identity(Some(&"x".repeat(256))).map(|v| v.len()),
+            Some(256)
+        );
+        assert_eq!(sanitize_identity(Some(&"x".repeat(257))), None);
+
+        // yargs 在 flag 不受支持时只打印用法，没有 `unknown option` 字样。
+        let yargs = "opencode stats\n\nshow token usage and cost statistics\n\nOptions:\n  -h, --help  show help  [boolean]\n";
+        assert!(cli_help_output(yargs));
+        assert!(cli_help_output(
+            "Usage: kilo profile [options]\n\n  -h, --help  display help\n"
+        ));
+        assert!(cli_help_output("Commands:\n  kilo profile  show profile\n"));
+        assert!(
+            cli_help_output(
+                "Error: unknown flag\nUsage:\n  kilo profile [flags]\n\nFlags:\n  -h, --help\n"
+            ),
+            "cobra 形态"
+        );
+        assert!(!cli_help_output("Not logged in\n"));
+        assert!(
+            !cli_help_output("Unauthorized. Run `foo auth login --help` for details\n"),
+            "错误提示里的 --help 不是帮助文本"
+        );
+        // `Usage:` 单独不成立：真实用量输出也会用它作小标题。
+        assert!(!cli_help_output("Usage: 1,234 / 10,000 credits\n"));
+        assert!(
+            !cli_help_output("Usage:\n- 5h window: 20%\n- weekly: 40%\n"),
+            "列表符号 `- ` 不是 flag 行"
+        );
+        assert!(
+            !cli_help_output("Usage: kilo profile [options]\n"),
+            "无 flag 行"
+        );
+        assert!(!cli_help_output(OPENCODE_STATS_SCREEN), "框线表不是帮助");
+        assert!(!cli_help_output(""));
+    }
+
+    #[test]
+    fn validate_rejects_control_characters_in_every_text_field() {
+        let clean = UsageMetric {
+            id: "cli-0".into(),
+            label: "Weekly 20% used".into(),
+            unit: "%".into(),
+            scope: "account".into(),
+            used_percent: Some(20.0),
+            ..Default::default()
+        };
+        assert!(validate(std::slice::from_ref(&clean)));
+        for (field, value) in [
+            ("id", "cli\u{1b}[0m"),
+            ("label", "Weekly\u{7}20%"),
+            ("unit", "%\r"),
+            ("scope", "acc\u{0}ount"),
+        ] {
+            let mut metric = clean.clone();
+            match field {
+                "id" => metric.id = value.into(),
+                "label" => metric.label = value.into(),
+                "unit" => metric.unit = value.into(),
+                _ => metric.scope = value.into(),
+            }
+            assert!(!validate(&[metric]), "{field} 含控制字符必须被拒");
+        }
+        // 制表符也是控制字符：终端画面里的对齐空白不能进入 label。
+        let mut tab = clean.clone();
+        tab.label = "Weekly\t20%".into();
+        assert!(!validate(&[tab]));
     }
 
     #[test]

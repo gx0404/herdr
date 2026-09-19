@@ -244,12 +244,7 @@ fn read_json(
         .map_err(|_| (ObservationStatus::Error, "官方接口连接失败或超时".into()))?;
     let status = response.status();
     if !status.is_success() {
-        let kind = match status.as_u16() {
-            401 => ObservationStatus::NotAuthenticated,
-            403 => ObservationStatus::PermissionDenied,
-            404 => ObservationStatus::Unsupported,
-            _ => ObservationStatus::Error,
-        };
+        let kind = status_kind(status.as_u16());
         let retry = response
             .headers()
             .get("retry-after")
@@ -285,6 +280,18 @@ fn read_json(
         )
     })?;
     Ok(value)
+}
+
+/// 官方 HTTP 接口非 2xx 状态 → 观测状态：401 未登录、403 无权限、404 接口不存在（终态），
+/// 其余（429 / 5xx / 网关错误）是可重试的瞬时错误。CLI 本地服务（kimi web）与远程 API
+/// 共用这一张表。
+pub(super) fn status_kind(status: u16) -> ObservationStatus {
+    match status {
+        401 => ObservationStatus::NotAuthenticated,
+        403 => ObservationStatus::PermissionDenied,
+        404 => ObservationStatus::Unsupported,
+        _ => ObservationStatus::Error,
+    }
 }
 
 fn validate_base(provider: &str, base: &str) -> Result<(), QueryError> {
@@ -625,6 +632,20 @@ mod tests {
         assert!(validate_base("kimi", "http://127.0.0.1:58627").is_ok());
         assert!(validate_base("kimi", "http://192.168.1.2:58627").is_err());
         assert!(validate_base("openai", "https://secret@api.openai.com").is_err());
+    }
+
+    #[test]
+    fn http_status_mapping_separates_terminal_from_transient() {
+        assert_eq!(status_kind(401), ObservationStatus::NotAuthenticated);
+        assert_eq!(status_kind(403), ObservationStatus::PermissionDenied);
+        assert_eq!(status_kind(404), ObservationStatus::Unsupported);
+        for transient in [400, 408, 429, 500, 502, 503] {
+            assert_eq!(
+                status_kind(transient),
+                ObservationStatus::Error,
+                "{transient}"
+            );
+        }
     }
 
     #[test]

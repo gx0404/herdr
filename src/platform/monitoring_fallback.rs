@@ -24,10 +24,12 @@ impl UsageProbeGuard {
     }
     pub(crate) fn terminate(&mut self) {}
 }
-pub(crate) fn usage_probe_exit(child: &mut std::process::Child) -> std::io::Result<Option<bool>> {
+pub(crate) fn usage_probe_exit(
+    child: &mut std::process::Child,
+) -> std::io::Result<Option<crate::platform::UsageProbeExit>> {
     child
         .try_wait()
-        .map(|status| status.map(|status| status.success()))
+        .map(|status| status.map(crate::platform::UsageProbeExit::from_status))
 }
 
 pub(crate) fn terminate_usage_probe(child: &mut std::process::Child) {

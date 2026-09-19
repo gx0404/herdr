@@ -11,10 +11,24 @@ use crate::config::{AccountUsageConfig, UsageAccountConfig};
 pub(super) enum Query {
     Codex,
     Kimi,
-    Json(&'static [&'static str]),
+    /// 非交互子命令查询。`args` 是首选形态；`fallback_args` 在子命令级 `--help` 预检确认首选
+    /// flag 不受支持、或首选形态以用法错误失败时回退一次（见 `transport::capture_query`）。
+    /// 目前只有 opencode：1.17.x 的 `stats` 没有 `--json`，回退到人类可读的框线表。
+    Json {
+        args: &'static [&'static str],
+        fallback_args: Option<&'static [&'static str]>,
+    },
     Interactive(&'static str),
     Callback,
     Portal,
+}
+
+/// 只有首选形态、没有回退的非交互查询。
+const fn json(args: &'static [&'static str]) -> Query {
+    Query::Json {
+        args,
+        fallback_args: None,
+    }
 }
 
 pub(super) struct Provider {
@@ -38,19 +52,19 @@ pub(super) const PROVIDERS: &[Provider] = &[
     Provider { agent: "devin", label: "Devin", command: "devin", source: "https://docs.devin.ai/api-reference/v3/consumption/consumption-daily-users", method: "Consumption API", scope: "organization", query: Query::Portal },
     Provider { agent: "antigravity", label: "Antigravity", command: "agy", source: "https://antigravity.google/docs/cli/commands/usage", method: "statusline JSON quota；/usage", scope: "account", query: Query::Callback },
     Provider { agent: "cline", label: "Cline", command: "cline", source: "https://docs.cline.bot/enterprise-solutions/api-reference", method: "GET /api/v1/users/{id}/balance; usages", scope: "account", query: Query::Portal },
-    Provider { agent: "omp", label: "Oh My Pi", command: "omp", source: "https://github.com/can1357/oh-my-pi/blob/main/packages/coding-agent/src/commands/usage.ts", method: "omp usage --json", scope: "account", query: Query::Json(&["usage", "--json"]) },
+    Provider { agent: "omp", label: "Oh My Pi", command: "omp", source: "https://github.com/can1357/oh-my-pi/blob/main/packages/coding-agent/src/commands/usage.ts", method: "omp usage --json", scope: "account", query: json(&["usage", "--json"]) },
     Provider { agent: "mastracode", label: "Mastra Code", command: "mastracode", source: "https://code.mastra.ai/", method: "/cost；实际 provider 的官方接口", scope: "session", query: Query::Callback },
-    Provider { agent: "opencode", label: "OpenCode", command: "opencode", source: "https://opencode.ai/v2/docs/cli/commands/", method: "opencode stats --json", scope: "local", query: Query::Json(&["stats", "--json"]) },
+    Provider { agent: "opencode", label: "OpenCode", command: "opencode", source: "https://opencode.ai/v2/docs/cli/commands/", method: "opencode stats --json", scope: "local", query: Query::Json { args: &["stats", "--json"], fallback_args: Some(&["stats"]) } },
     Provider { agent: "github-copilot", label: "GitHub Copilot", command: "copilot", source: "https://docs.github.com/en/rest/billing/usage", method: "Billing Usage API", scope: "billing_account", query: Query::Portal },
-    Provider { agent: "kiro", label: "Kiro", command: "kiro-cli", source: "https://kiro.dev/docs/cli/reference/slash-commands/", method: "kiro-cli chat --no-interactive /usage", scope: "account", query: Query::Json(&["chat", "--no-interactive", "/usage"]) },
+    Provider { agent: "kiro", label: "Kiro", command: "kiro-cli", source: "https://kiro.dev/docs/cli/reference/slash-commands/", method: "kiro-cli chat --no-interactive /usage", scope: "account", query: json(&["chat", "--no-interactive", "/usage"]) },
     Provider { agent: "droid", label: "Factory Droid", command: "droid", source: "https://docs.factory.ai/api-reference/analytics", method: "GET /api/v1/analytics/cost/me/query", scope: "account", query: Query::Portal },
-    Provider { agent: "amp", label: "Amp", command: "amp", source: "https://ampcode.com/docs/pricing", method: "amp usage", scope: "account", query: Query::Json(&["usage"]) },
+    Provider { agent: "amp", label: "Amp", command: "amp", source: "https://ampcode.com/docs/pricing", method: "amp usage", scope: "account", query: json(&["usage"]) },
     Provider { agent: "grok", label: "Grok", command: "grok", source: "https://x.ai/build/changelog", method: "/usage；xAI Management API", scope: "account", query: Query::Interactive("/usage") },
     Provider { agent: "hermes", label: "Hermes", command: "hermes", source: "https://hermes-agent.nousresearch.com/docs/reference/slash-commands", method: "/usage Account limits", scope: "account", query: Query::Interactive("/usage") },
-    Provider { agent: "kilo", label: "Kilo", command: "kilo", source: "https://kilo.ai/docs/code-with-ai/platforms/cli", method: "kilo profile；余额视图", scope: "account", query: Query::Json(&["profile"]) },
+    Provider { agent: "kilo", label: "Kilo", command: "kilo", source: "https://kilo.ai/docs/code-with-ai/platforms/cli", method: "kilo profile；余额视图", scope: "account", query: json(&["profile"]) },
     Provider { agent: "qodercli", label: "Qoder CLI", command: "qodercli", source: "https://docs.qoder.com/cli/usage", method: "/usage", scope: "account", query: Query::Interactive("/usage") },
     Provider { agent: "qwen", label: "Qwen Code", command: "qwen", source: "https://qwenlm.github.io/qwen-code-docs/en/users/features/commands/", method: "/stats；实际 provider 的官方接口", scope: "session", query: Query::Callback },
-    Provider { agent: "letta", label: "Letta", command: "letta", source: "https://docs.letta.com/platform/cli/slash-commands", method: "letta usage", scope: "account", query: Query::Json(&["usage"]) },
+    Provider { agent: "letta", label: "Letta", command: "letta", source: "https://docs.letta.com/platform/cli/slash-commands", method: "letta usage", scope: "account", query: json(&["usage"]) },
     Provider { agent: "maki", label: "Maki", command: "maki", source: "https://maki.sh/docs/token-economy/", method: "/usage；实际 provider 的官方接口", scope: "session", query: Query::Callback },
     Provider { agent: "pi", label: "Pi", command: "pi", source: "https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/rpc.md", method: "get_session_stats；实际 provider 的官方接口", scope: "session", query: Query::Callback },
 ];
@@ -215,6 +229,11 @@ pub(super) fn command_path(command: &str) -> Option<PathBuf> {
     value
 }
 
+/// 官方 CLI 可执行文件的身份戳（路径 + mtime + 大小）：帮助文本缓存以它为失效判据。
+pub(super) fn command_stamp(command: &str) -> Option<FileStamp> {
+    command_path(command).as_deref().and_then(file_stamp)
+}
+
 fn command_path_uncached(command: &str) -> Option<PathBuf> {
     let from_path = std::env::var_os("PATH").and_then(|paths| {
         std::env::split_paths(&paths).find_map(|dir| {
@@ -371,6 +390,38 @@ mod tests {
             .collect::<std::collections::HashSet<_>>();
         assert_eq!(unique.len(), PROVIDERS.len());
         assert!(PROVIDERS.iter().all(|p| p.source.starts_with("https://")));
+    }
+
+    #[test]
+    fn opencode_stats_has_a_plain_fallback_and_other_json_queries_do_not() {
+        let opencode = provider("opencode").unwrap();
+        let Query::Json {
+            args,
+            fallback_args,
+        } = opencode.query
+        else {
+            panic!("opencode 是非交互子命令查询");
+        };
+        assert_eq!(args, &["stats", "--json"]);
+        assert_eq!(
+            fallback_args,
+            Some(&["stats"][..]),
+            "1.17.x 没有 --json：回退到框线表"
+        );
+        assert_eq!(opencode.scope, "local", "会话统计不是账号额度");
+        for agent in ["omp", "kiro", "amp", "kilo", "letta"] {
+            let entry = provider(agent).unwrap();
+            assert!(
+                matches!(
+                    entry.query,
+                    Query::Json {
+                        fallback_args: None,
+                        ..
+                    }
+                ),
+                "{agent} 没有回退形态"
+            );
+        }
     }
 
     #[test]

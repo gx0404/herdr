@@ -21,6 +21,44 @@ pub(crate) use monitoring::{configure_usage_probe_command, terminate_usage_probe
 pub(crate) use monitoring::{monitor_environment, process_instance_token, NativeGpuCollector};
 pub(crate) use monitoring::{usage_probe_exit, UsageProbeGuard};
 
+/// 用量探测子进程的退出形态。平台差异（Unix 的信号终止、Windows 只有退出码）在
+/// `usage_probe_exit` 里收敛，核心模块只看两个事实：正常退出的退出码，或终止它的信号。
+/// 被信号终止（OOM、外部 kill、崩溃）不是 CLI 的结论，调用方应归为可重试的瞬时错误。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct UsageProbeExit {
+    /// 正常退出时的退出码；被信号终止时为 `None`。
+    pub code: Option<i32>,
+    /// 终止信号编号（仅 Unix 有意义）；正常退出时为 `None`。
+    pub signal: Option<i32>,
+}
+
+impl UsageProbeExit {
+    /// 退出码 0 才算成功；被信号终止不算。
+    pub(crate) fn success(self) -> bool {
+        self.code == Some(0)
+    }
+
+    /// 由 `std::process::ExitStatus` 换算：非 Linux 平台的 `try_wait` 路径共用（Linux 用
+    /// `waitid` 的 siginfo 直接构造）。
+    #[cfg(not(target_os = "linux"))]
+    pub(crate) fn from_status(status: std::process::ExitStatus) -> Self {
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::ExitStatusExt;
+            if let Some(signal) = status.signal() {
+                return Self {
+                    code: None,
+                    signal: Some(signal),
+                };
+            }
+        }
+        Self {
+            code: status.code(),
+            signal: None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ForegroundProcess {
     pub pid: u32,
