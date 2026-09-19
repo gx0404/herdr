@@ -402,13 +402,21 @@ impl ServiceState {
             }
         }
         if let Some(entry) = self.cache.get(&account_id) {
-            notify_subscribers(subscribers, &entry.snapshot, &self.bindings);
+            notify_subscribers(subscribers, entry, &self.accounts, &self.bindings);
         }
         true
     }
 
-    fn request(&mut self, params: &UsageParams, manual: bool, tasks: &mpsc::SyncSender<Task>) {
-        request_accounts(
+    /// 按请求派发探测；真正派发的账号立即以 `account.usage.refreshing` 推给匹配的订阅者，
+    /// 订阅者不必等下一轮拉取就能显示「正在读取」。
+    fn request(
+        &mut self,
+        params: &UsageParams,
+        manual: bool,
+        tasks: &mpsc::SyncSender<Task>,
+        subscribers: &mut Subscribers,
+    ) {
+        let dispatched = request_accounts(
             params,
             manual,
             &self.accounts,
@@ -418,6 +426,9 @@ impl ServiceState {
             tasks,
             &mut self.next_query,
         );
+        if !dispatched.is_empty() {
+            notify_refreshing(subscribers, self, &dispatched);
+        }
     }
 
     /// 解析请求目标：读路径（`usage`）与订阅落库共用，保证同一请求在两条通道看到同一
@@ -459,11 +470,12 @@ impl ServiceState {
         params: &UsageParams,
         manual: bool,
         tasks: &mpsc::SyncSender<Task>,
+        subscribers: &mut Subscribers,
     ) -> ResponseResult {
         let selection = self.select(params);
         let now_ms = super::now_ms();
         self.age_out_callbacks(now_ms);
-        self.request(&selection.request, manual, tasks);
+        self.request(&selection.request, manual, tasks, subscribers);
         let now = Instant::now();
         let mut values = self
             .accounts
@@ -565,7 +577,12 @@ impl Service {
                     // 处理之前，读路径与事件通道看到的是同一次改写。
                     for id in state.age_out_callbacks(super::now_ms()) {
                         if let Some(entry) = state.cache.get(&id) {
-                            notify_subscribers(&mut subscribers, &entry.snapshot, &state.bindings);
+                            notify_subscribers(
+                                &mut subscribers,
+                                entry,
+                                &state.accounts,
+                                &state.bindings,
+                            );
                         }
                     }
                     let command = match input.recv_timeout(Duration::from_millis(100)) {
@@ -577,7 +594,7 @@ impl Service {
                                 .map(|(_, params, _)| params.clone())
                                 .collect::<Vec<_>>();
                             for params in &wanted {
-                                state.request(params, false, &tasks);
+                                state.request(params, false, &tasks, &mut subscribers);
                             }
                             continue;
                         }
@@ -621,7 +638,7 @@ impl Service {
                         Method::AccountUsageGet(params) | Method::AccountUsageRefresh(params) => {
                             // 连续悬浮与显式刷新都复用同账号的进行中任务；显式刷新只受
                             // 短防抖与厂商退避约束。
-                            Ok(state.usage(&params, manual_refresh, &tasks))
+                            Ok(state.usage(&params, manual_refresh, &tasks, &mut subscribers))
                         }
                         Method::AccountBindingSet(params) => apply::bind_pane(
                             &params.pane_id,
@@ -655,11 +672,17 @@ impl Service {
                                 subscription_id.clone(),
                                 (reply.owner(), params.clone(), reply.clone()),
                             );
-                            state.request(&params, false, &tasks);
-                            Ok(ResponseResult::ObservationSubscription {
-                                subscription_id,
-                                active: true,
-                            })
+                            // 先确认订阅再派发：新订阅者拿到 subscription_id 之后才收到
+                            // 首个 `account.usage.refreshing`。
+                            reply.response(
+                                &id,
+                                Ok(ResponseResult::ObservationSubscription {
+                                    subscription_id,
+                                    active: true,
+                                }),
+                            );
+                            state.request(&params, false, &tasks, &mut subscribers);
+                            continue;
                         }
                         Method::AccountUsageUnsubscribe(params) => {
                             let subscription_id = params.subscription_id.unwrap_or_default();
@@ -717,6 +740,7 @@ impl Service {
                                         && commit_accepted(
                                             &accepted,
                                             &state.cache,
+                                            &state.accounts,
                                             &state.bindings,
                                             &mut state.saved,
                                             &mut subscribers,
@@ -787,20 +811,57 @@ impl Service {
     }
 }
 
-/// 把一份快照推送给匹配的订阅者；断开的订阅者顺手清掉。探测完成、回调接受与闩锁到期
-/// 三条路径共用，事件通道与读路径对同一账号给出同一份数据。
+/// 把一份快照及其刷新状态以 `account.usage.updated` 推送给匹配的订阅者；断开的订阅者顺手
+/// 清掉。探测完成、回调接受与闩锁到期三条路径共用，事件通道与读路径对同一账号给出同一份
+/// 数据。`binding_inferred` / `pending_binding` 按请求才有意义，事件里保持缺省。
 fn notify_subscribers(
     subscribers: &mut Subscribers,
-    value: &AccountUsageSnapshot,
+    entry: &CacheEntry,
+    accounts: &[UsageAccountConfig],
     bindings: &HashMap<String, String>,
 ) {
+    let value = &entry.snapshot;
+    let now = Instant::now();
+    let now_ms = super::now_ms();
+    let refresh = accounts
+        .iter()
+        .find(|account| account.id == value.account_id)
+        .map(|account| vec![refresh_state(entry, account, now, now_ms)]);
+    let event = ObservationEventEnvelope::AccountUsageUpdated(AccountUsageUpdatedEvent {
+        accounts: vec![value.clone()],
+        refresh,
+    });
     subscribers.retain(|_, (_, params, reply)| {
-        reply.alive()
-            && (!matches_account(params, value, bindings)
-                || reply.event(
-                    "account.usage.updated",
-                    serde_json::json!({"accounts":[value]}),
-                ))
+        reply.alive() && (!matches_account(params, value, bindings) || reply.event(&event))
+    });
+}
+
+/// 探测派发后把刚派发账号的刷新状态以 `account.usage.refreshing` 推给匹配的订阅者。每个
+/// 订阅者只收到自己筛选范围内的账号；一个都不匹配时不发空事件。
+fn notify_refreshing(subscribers: &mut Subscribers, state: &ServiceState, dispatched: &[String]) {
+    let now = Instant::now();
+    let now_ms = super::now_ms();
+    let refreshing = dispatched
+        .iter()
+        .filter_map(|id| {
+            let entry = state.cache.get(id)?;
+            let account = state.accounts.iter().find(|account| account.id == *id)?;
+            Some((entry, refresh_state(entry, account, now, now_ms)))
+        })
+        .collect::<Vec<_>>();
+    subscribers.retain(|_, (_, params, reply)| {
+        if !reply.alive() {
+            return false;
+        }
+        let refresh = refreshing
+            .iter()
+            .filter(|(entry, _)| matches_account(params, &entry.snapshot, &state.bindings))
+            .map(|(_, refresh)| refresh.clone())
+            .collect::<Vec<_>>();
+        refresh.is_empty()
+            || reply.event(&ObservationEventEnvelope::AccountUsageRefreshing(
+                AccountUsageRefreshingEvent { refresh },
+            ))
     });
 }
 
@@ -809,6 +870,7 @@ fn notify_subscribers(
 fn commit_accepted(
     accepted: &apply::Accepted,
     cache: &HashMap<String, CacheEntry>,
+    accounts: &[UsageAccountConfig],
     bindings: &HashMap<String, String>,
     saved: &mut persistence::Saved,
     subscribers: &mut Subscribers,
@@ -831,7 +893,7 @@ fn commit_accepted(
         metrics = entry.snapshot.metrics.len(),
         "官方回调已写入账号用量"
     );
-    notify_subscribers(subscribers, &entry.snapshot, bindings);
+    notify_subscribers(subscribers, entry, accounts, bindings);
     true
 }
 
@@ -1114,6 +1176,8 @@ fn refresh_state(
     }
 }
 
+/// 按请求过闸门并派发探测；返回本次真正入队的账号 id（按账号清单顺序），供调用方推送
+/// 「探测开始」事件。
 fn request_accounts(
     params: &UsageParams,
     manual: bool,
@@ -1123,7 +1187,8 @@ fn request_accounts(
     cache: &mut HashMap<String, CacheEntry>,
     tasks: &mpsc::SyncSender<Task>,
     next_query: &mut u64,
-) {
+) -> Vec<String> {
+    let mut dispatched = Vec::new();
     // 总览（未选定厂商/账号）也发起自动查询：账号清单已只含本机已安装厂商，
     // 查询频率由下方 requested_at/退避控制，用户显式选择仍可立即查询。
     if params.pane_id.is_some()
@@ -1135,7 +1200,7 @@ fn request_accounts(
     {
         // 未绑定 pane 不对应任何账号，显式刷新也无处登记：响应以 NeedsBinding 占位说明。
         probe_skipped(None, "unbound_pane", manual);
-        return;
+        return dispatched;
     }
     let now = Instant::now();
     let now_ms = super::now_ms();
@@ -1238,7 +1303,9 @@ fn request_accounts(
             entry.queued = true;
             entry.requested_at = Some(now);
             entry.attempted_at_ms = now_ms;
-            // 派发不改 status/message：「正在读取」由响应侧的 in_flight 表达。
+            dispatched.push(account.id.clone());
+            // 派发不改 status/message：「正在读取」由响应侧的 in_flight 与
+            // `account.usage.refreshing` 事件表达。
             tracing::debug!(
                 event = "account.probe.dispatch",
                 subsystem = "account_usage",
@@ -1253,6 +1320,7 @@ fn request_accounts(
             probe_skipped(Some(&account.id), "queue_full", manual);
         }
     }
+    dispatched
 }
 
 /// 闸门跳过只记 trace：订阅者驱动的空转 tick 每 100 ms 走一遍这些分支。
@@ -2080,6 +2148,7 @@ mod tests {
             },
             false,
             &tasks,
+            &mut Subscribers::new(),
         );
         let ResponseResult::AccountUsage { accounts, refresh } = result else {
             panic!("not account_usage");
@@ -2102,6 +2171,7 @@ mod tests {
             },
             false,
             &tasks,
+            &mut Subscribers::new(),
         );
         let ResponseResult::AccountUsage { accounts, refresh } = result else {
             panic!("not account_usage");
@@ -2126,6 +2196,7 @@ mod tests {
             },
             false,
             &tasks,
+            &mut Subscribers::new(),
         );
         let ResponseResult::AccountUsage { refresh, .. } = result else {
             panic!("not account_usage");
@@ -2381,6 +2452,7 @@ mod tests {
             },
             false,
             &tasks,
+            &mut Subscribers::new(),
         ) else {
             panic!("not account_usage");
         };
@@ -2935,6 +3007,7 @@ mod tests {
         assert!(commit_accepted(
             &accepted,
             &cache,
+            &accounts,
             &bindings,
             &mut saved,
             &mut subscribers
@@ -2954,6 +3027,9 @@ mod tests {
         assert_eq!(event["event"], "account.usage.updated");
         assert_eq!(event["data"]["accounts"][0]["account_id"], "claude:default");
         assert_eq!(event["data"]["accounts"][0]["status"], "ready");
+        // 事件与 get 响应一样带并行刷新状态，客户端按 account_id 合并即可清掉「正在读取」。
+        assert_eq!(event["data"]["refresh"][0]["account_id"], "claude:default");
+        assert_eq!(event["data"]["refresh"][0]["in_flight"], false);
         assert!(other_receiver.try_recv().is_err(), "不匹配的订阅者不收事件");
         assert_eq!(subscribers.len(), 2);
 
@@ -2966,10 +3042,107 @@ mod tests {
         assert!(!commit_accepted(
             &missing,
             &cache,
+            &accounts,
             &bindings,
             &mut saved,
             &mut subscribers
         ));
+    }
+
+    #[test]
+    fn dispatching_a_probe_pushes_refreshing_events_to_matching_subscribers() {
+        let (tasks, input) = mpsc::sync_channel(4);
+        let account = claude_account();
+        let kimi = UsageAccountConfig {
+            id: "kimi:default".into(),
+            agent: "kimi".into(),
+            ..Default::default()
+        };
+        let mut state = test_state(AccountUsageConfig::default(), vec![account.clone(), kimi]);
+        let (claude_sender, claude_receiver) = mpsc::channel();
+        let (kimi_sender, kimi_receiver) = mpsc::channel();
+        let mut subscribers = HashMap::from([
+            (
+                "usage-1".to_string(),
+                (
+                    None,
+                    UsageParams {
+                        agent: Some("claude".into()),
+                        ..Default::default()
+                    },
+                    Reply::Api {
+                        sender: claude_sender,
+                        active: None,
+                        latest: None,
+                    },
+                ),
+            ),
+            (
+                "usage-2".to_string(),
+                (
+                    None,
+                    UsageParams {
+                        agent: Some("kimi".into()),
+                        ..Default::default()
+                    },
+                    Reply::Api {
+                        sender: kimi_sender,
+                        active: None,
+                        latest: None,
+                    },
+                ),
+            ),
+        ]);
+        let claude_only = UsageParams {
+            agent: Some("claude".into()),
+            ..Default::default()
+        };
+        state.request(&claude_only, false, &tasks, &mut subscribers);
+        assert!(input.try_recv().is_ok(), "探测已派发");
+        let text = claude_receiver
+            .try_recv()
+            .expect("匹配的订阅者立即收到探测开始事件");
+        let event: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(event["event"], "account.usage.refreshing");
+        assert_eq!(event["data"]["refresh"][0]["account_id"], "claude:default");
+        assert_eq!(event["data"]["refresh"][0]["in_flight"], true);
+        assert_eq!(event["data"]["refresh"][0]["queued"], true);
+        assert!(
+            event["data"].get("accounts").is_none(),
+            "探测开始只带刷新状态，不带快照"
+        );
+        assert!(kimi_receiver.try_recv().is_err(), "不匹配的订阅者不收事件");
+        assert_eq!(subscribers.len(), 2);
+
+        // in_flight 期间再次请求：闸门拦下，不派发也不重复推送。
+        state.request(&claude_only, false, &tasks, &mut subscribers);
+        assert!(input.try_recv().is_err());
+        assert!(claude_receiver.try_recv().is_err());
+
+        // 读路径（get）派发的探测同样推送给订阅者，与订阅驱动的派发同一口径。
+        {
+            let entry = state.cache.get_mut(&account.id).expect("缓存条目");
+            entry.in_flight = false;
+            entry.queued = false;
+            entry.requested_at = None;
+        }
+        let result = state.usage(
+            &UsageParams {
+                account_id: Some(account.id.clone()),
+                ..Default::default()
+            },
+            false,
+            &tasks,
+            &mut subscribers,
+        );
+        assert!(matches!(result, ResponseResult::AccountUsage { .. }));
+        assert!(input.try_recv().is_ok(), "get 触发派发");
+        let text = claude_receiver.try_recv().expect("get 触发的派发同样推送");
+        let event: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(event["event"], "account.usage.refreshing");
+        assert_eq!(event["data"]["refresh"][0]["in_flight"], true);
+        assert!(kimi_receiver.try_recv().is_err());
+        cleanup(&state);
     }
 
     #[test]

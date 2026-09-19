@@ -29,6 +29,8 @@ pub const HEALTH_PING_KIND: &str = "endpoint.health.ping.v1";
 pub const HEALTH_PONG_KIND: &str = "endpoint.health.pong.v1";
 pub const AGENT_VIEW_PROJECTION_CAPABILITY: &str = "agent_view_projection";
 pub const AGENT_VIEW_PROJECTION_KIND: &str = "endpoint.agent-view.v1";
+/// 后台观测事件（账号用量 / 系统指标订阅推送）的可选控制帧；客户端不认识时忽略。
+pub const OBSERVATION_EVENT_KIND: &str = "endpoint.observation.v1";
 
 fn default_true() -> bool {
     true
@@ -73,6 +75,15 @@ pub struct EndpointAgentViewProjection {
     pub revision: u64,
     #[serde(default)]
     pub view: Option<serde_json::Value>,
+}
+
+/// `endpoint.observation.v1` 控制帧的载荷：观测事件信封（`event` + `data`）外再带
+/// `boot_id`，客户端据此丢弃早于当前 server 启动的推送。事件本身是合并丢帧语义。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EndpointObservationEvent {
+    pub boot_id: String,
+    #[serde(flatten)]
+    pub event: crate::api::schema::ObservationEventEnvelope,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -174,6 +185,37 @@ impl EndpointServerWelcome {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn observation_event_frames_flatten_the_envelope_next_to_boot_id() {
+        use crate::api::schema::{
+            AccountUsageRefreshingEvent, ObservationEventEnvelope, UsageRefreshState,
+        };
+        let frame = EndpointObservationEvent {
+            boot_id: "boot".into(),
+            event: ObservationEventEnvelope::AccountUsageRefreshing(AccountUsageRefreshingEvent {
+                refresh: vec![UsageRefreshState {
+                    account_id: "claude:default".into(),
+                    in_flight: true,
+                    ..Default::default()
+                }],
+            }),
+        };
+        let text = serde_json::to_string(&frame).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&text).unwrap();
+        // 与 generation 1 之前的裸 JSON 同形：boot_id / event / data 三个顶层键。
+        assert_eq!(value["boot_id"], "boot");
+        assert_eq!(value["event"], "account.usage.refreshing");
+        assert_eq!(value["data"]["refresh"][0]["account_id"], "claude:default");
+        assert_eq!(value.as_object().map(|object| object.len()), Some(3));
+        let restored: EndpointObservationEvent = serde_json::from_str(&text).unwrap();
+        assert_eq!(restored, frame);
+        // 未知事件种类整帧解码失败，客户端按可选控制帧忽略。
+        assert!(serde_json::from_str::<EndpointObservationEvent>(
+            r#"{"boot_id":"boot","event":"account.usage.future","data":{}}"#
+        )
+        .is_err());
+    }
 
     fn hello() -> EndpointClientHello {
         EndpointClientHello {

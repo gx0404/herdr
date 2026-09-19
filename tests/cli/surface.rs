@@ -522,7 +522,7 @@ fn api_schema_json_prints_bundled_schema() {
             .get("schemas")
             .and_then(serde_json::Value::as_object)
             .map(serde_json::Map::len),
-        Some(5)
+        Some(6)
     );
 }
 

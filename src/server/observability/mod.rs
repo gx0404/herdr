@@ -111,16 +111,17 @@ impl Reply {
         }
     }
 
-    pub(super) fn event(&self, topic: &str, data: serde_json::Value) -> bool {
-        let payload = serde_json::json!({"event": topic, "data": data});
-        let Ok(text) = serde_json::to_string(&payload) else {
-            return false;
-        };
+    /// 推送一条观测事件。返回订阅是否仍然存活：JSON API 侧发送失败或流已结束为假；
+    /// 端点侧只有通道关闭才为假，队列满时按合并丢帧语义丢弃这一帧但保留订阅。
+    pub(super) fn event(&self, event: &ObservationEventEnvelope) -> bool {
         match self {
             Self::Api { sender, latest, .. } => {
                 if !self.alive() {
                     return false;
                 }
+                let Ok(text) = serde_json::to_string(event) else {
+                    return false;
+                };
                 if let Some(latest) = latest {
                     if let Ok(mut slot) = latest.lock() {
                         *slot = Some(text);
@@ -138,13 +139,30 @@ impl Reply {
                 events,
                 ..
             } => {
+                let frame = crate::protocol::endpoint::EndpointObservationEvent {
+                    boot_id: boot_id.clone(),
+                    event: event.clone(),
+                };
+                let Ok(data) = serde_json::to_string(&frame) else {
+                    return false;
+                };
                 let result = events.try_send(ServerEvent::ObservationResponse {
-                    client_id: *client_id, boot_id: boot_id.clone(),
+                    client_id: *client_id,
+                    boot_id: boot_id.clone(),
                     message: crate::protocol::ServerMessage::EndpointControl {
-                        kind: "endpoint.observation.v1".into(),
-                        data: serde_json::json!({"boot_id": boot_id, "event": topic, "data": payload["data"]}).to_string(),
+                        kind: crate::protocol::endpoint::OBSERVATION_EVENT_KIND.into(),
+                        data,
                     },
                 });
+                if matches!(result, Err(tokio::sync::mpsc::error::TrySendError::Full(_))) {
+                    tracing::trace!(
+                        event = "observation.event.drop",
+                        subsystem = "observability",
+                        client_id,
+                        kind = event.kind().dot_name(),
+                        "端点事件队列已满，丢弃这一帧"
+                    );
+                }
                 !matches!(
                     result,
                     Err(tokio::sync::mpsc::error::TrySendError::Closed(_))
@@ -328,10 +346,12 @@ impl Runtime {
                                 if !sub.params.include_processes {
                                     snapshot.processes.clear();
                                 }
-                                sub.reply.event(
-                                    "system.metrics.updated",
-                                    serde_json::json!({"snapshot": snapshot}),
-                                )
+                                sub.reply
+                                    .event(&ObservationEventEnvelope::SystemMetricsUpdated(
+                                        SystemMetricsUpdatedEvent {
+                                            snapshot: Box::new(snapshot),
+                                        },
+                                    ))
                             });
                         }
                     }
@@ -483,6 +503,111 @@ mod tests {
         assert!(!demand.include_processes);
         assert_eq!(demand.groups, ["cpu", "network"]);
         assert_eq!(aggregate_demand([&cpu].into_iter()), cpu);
+    }
+
+    fn metrics_event(sequence: u64) -> ObservationEventEnvelope {
+        ObservationEventEnvelope::SystemMetricsUpdated(SystemMetricsUpdatedEvent {
+            snapshot: Box::new(SystemMetricsSnapshot {
+                sequence,
+                ..Default::default()
+            }),
+        })
+    }
+
+    #[tokio::test]
+    async fn endpoint_replies_forward_observation_events_as_boot_scoped_control_frames() {
+        let (events, mut receiver) = tokio::sync::mpsc::channel(4);
+        let reply = Reply::Endpoint {
+            client_id: 7,
+            boot_id: "boot".into(),
+            events,
+            active: Arc::new(AtomicBool::new(true)),
+        };
+        let event = metrics_event(3);
+        assert!(reply.event(&event));
+        let Some(ServerEvent::ObservationResponse {
+            client_id,
+            boot_id,
+            message,
+        }) = receiver.recv().await
+        else {
+            panic!("端点事件应包成 ObservationResponse");
+        };
+        assert_eq!(client_id, 7);
+        assert_eq!(boot_id, "boot");
+        let crate::protocol::ServerMessage::EndpointControl { kind, data } = message else {
+            panic!("端点事件应是 EndpointControl 控制帧");
+        };
+        assert_eq!(kind, crate::protocol::endpoint::OBSERVATION_EVENT_KIND);
+        // 控制帧载荷：boot_id + 与 JSON API 完全相同的 event/data 信封。
+        let value: serde_json::Value = serde_json::from_str(&data).unwrap();
+        assert_eq!(value["boot_id"], "boot");
+        assert_eq!(value["event"], "system.metrics.updated");
+        assert_eq!(value["data"]["snapshot"]["sequence"], 3);
+        assert_eq!(value.as_object().map(|object| object.len()), Some(3));
+        let frame: crate::protocol::endpoint::EndpointObservationEvent =
+            serde_json::from_str(&data).unwrap();
+        assert_eq!(frame.boot_id, "boot");
+        assert_eq!(frame.event, event);
+
+        // 队列满：按合并丢帧语义丢弃这一帧，订阅仍存活；通道关闭才判死。
+        let (events, receiver) = tokio::sync::mpsc::channel(1);
+        let reply = Reply::Endpoint {
+            client_id: 7,
+            boot_id: "boot".into(),
+            events,
+            active: Arc::new(AtomicBool::new(true)),
+        };
+        assert!(reply.event(&event));
+        assert!(reply.event(&event), "队列满时丢帧但不判死");
+        drop(receiver);
+        assert!(!reply.event(&event), "通道关闭后判死");
+    }
+
+    #[test]
+    fn api_replies_serialize_events_and_the_latest_slot_coalesces() {
+        let (sender, receiver) = mpsc::channel();
+        let reply = Reply::Api {
+            sender,
+            active: None,
+            latest: None,
+        };
+        let event = ObservationEventEnvelope::AccountUsageUpdated(AccountUsageUpdatedEvent {
+            accounts: vec![AccountUsageSnapshot {
+                account_id: "claude:default".into(),
+                ..Default::default()
+            }],
+            refresh: None,
+        });
+        assert!(reply.event(&event));
+        let text = receiver.try_recv().unwrap();
+        let value: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(value["event"], "account.usage.updated");
+        assert_eq!(value["data"]["accounts"][0]["account_id"], "claude:default");
+        assert_eq!(value.as_object().map(|object| object.len()), Some(2));
+
+        // 有 latest 槽的流式订阅：只保留最后一帧，不经 sender。
+        let slot = Arc::new(std::sync::Mutex::new(None));
+        let (sender, receiver) = mpsc::channel();
+        let reply = Reply::Api {
+            sender,
+            active: Some(Arc::new(AtomicBool::new(true))),
+            latest: Some(slot.clone()),
+        };
+        assert!(reply.event(&metrics_event(1)));
+        assert!(reply.event(&metrics_event(2)));
+        let latest = slot.lock().unwrap().take().unwrap();
+        assert!(latest.contains("\"sequence\":2"));
+        assert!(receiver.try_recv().is_err(), "有 latest 槽时不走 sender");
+
+        // 流已结束：不再推送。
+        let (sender, _receiver) = mpsc::channel();
+        let reply = Reply::Api {
+            sender,
+            active: Some(Arc::new(AtomicBool::new(false))),
+            latest: None,
+        };
+        assert!(!reply.event(&event));
     }
 
     #[tokio::test]

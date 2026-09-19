@@ -1220,6 +1220,877 @@
       "title": "EventEnvelope",
       "type": "object"
     },
+    "observation_event": {
+      "$defs": {
+        "AccountUsageRefreshingEvent": {
+          "description": "`account.usage.refreshing` 的负载：刚派发探测的账号的刷新状态（`in_flight` 为真）。\n订阅者据此立即显示「正在读取」，不必等下一轮拉取；探测完成由 `account.usage.updated`\n收尾。",
+          "properties": {
+            "refresh": {
+              "items": {
+                "$ref": "#/schemas/observation_event/$defs/UsageRefreshState"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "refresh"
+          ],
+          "type": "object"
+        },
+        "AccountUsageSnapshot": {
+          "properties": {
+            "account_id": {
+              "type": "string"
+            },
+            "account_identity": {
+              "description": "官方返回的非凭据账号标识，用于识别 profile 切换登录。",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "account_label": {
+              "type": "string"
+            },
+            "agent": {
+              "type": "string"
+            },
+            "auth_mode": {
+              "type": "string"
+            },
+            "message": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "metrics": {
+              "items": {
+                "$ref": "#/schemas/observation_event/$defs/UsageMetric"
+              },
+              "type": "array"
+            },
+            "observed_at_ms": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "plan": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "provider": {
+              "type": "string"
+            },
+            "source": {
+              "type": "string"
+            },
+            "source_url": {
+              "type": "string"
+            },
+            "status": {
+              "$ref": "#/schemas/observation_event/$defs/ObservationStatus"
+            }
+          },
+          "required": [
+            "account_id",
+            "account_label",
+            "agent",
+            "provider",
+            "auth_mode",
+            "status",
+            "source",
+            "source_url",
+            "observed_at_ms",
+            "metrics"
+          ],
+          "type": "object"
+        },
+        "AccountUsageUpdatedEvent": {
+          "description": "`account.usage.updated` 的负载：变化后的账号快照，及与之按 `account_id` 对齐的刷新\n状态（旧 server 省略）。`binding_inferred` / `pending_binding` 是按请求填的字段，事件里\n保持缺省，以 `account.usage.get` 响应为准。",
+          "properties": {
+            "accounts": {
+              "items": {
+                "$ref": "#/schemas/observation_event/$defs/AccountUsageSnapshot"
+              },
+              "type": "array"
+            },
+            "refresh": {
+              "items": {
+                "$ref": "#/schemas/observation_event/$defs/UsageRefreshState"
+              },
+              "type": [
+                "array",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "accounts"
+          ],
+          "type": "object"
+        },
+        "CpuCoreMetric": {
+          "properties": {
+            "frequency_mhz": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "id": {
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "name": {
+              "type": "string"
+            },
+            "usage_percent": {
+              "format": "float",
+              "type": [
+                "number",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "id",
+            "name"
+          ],
+          "type": "object"
+        },
+        "DiskMetric": {
+          "properties": {
+            "available_bytes": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "id": {
+              "type": "string"
+            },
+            "mount_point": {
+              "type": "string"
+            },
+            "name": {
+              "type": "string"
+            },
+            "read_bytes_per_second": {
+              "format": "double",
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "total_bytes": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "written_bytes_per_second": {
+              "format": "double",
+              "type": [
+                "number",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "id",
+            "name",
+            "mount_point",
+            "total_bytes",
+            "available_bytes"
+          ],
+          "type": "object"
+        },
+        "GpuMetric": {
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "memory_total_bytes": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "memory_used_bytes": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "message": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "name": {
+              "type": "string"
+            },
+            "power_watts": {
+              "format": "float",
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "shared_memory_used_bytes": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "source": {
+              "type": "string"
+            },
+            "status": {
+              "$ref": "#/schemas/observation_event/$defs/ObservationStatus"
+            },
+            "temperature_celsius": {
+              "format": "float",
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "usage_percent": {
+              "format": "float",
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "vendor": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "name",
+            "vendor",
+            "status",
+            "source"
+          ],
+          "type": "object"
+        },
+        "MemoryMetric": {
+          "properties": {
+            "available_bytes": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "swap_total_bytes": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "swap_used_bytes": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "total_bytes": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "used_bytes": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "total_bytes",
+            "used_bytes",
+            "available_bytes",
+            "swap_total_bytes",
+            "swap_used_bytes"
+          ],
+          "type": "object"
+        },
+        "NetworkMetric": {
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "received_bytes_per_second": {
+              "format": "double",
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "total_received_bytes": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "total_transmitted_bytes": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "transmitted_bytes_per_second": {
+              "format": "double",
+              "type": [
+                "number",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "id",
+            "total_received_bytes",
+            "total_transmitted_bytes"
+          ],
+          "type": "object"
+        },
+        "ObservationStatus": {
+          "enum": [
+            "ready",
+            "warming",
+            "unsupported",
+            "permission_denied",
+            "not_authenticated",
+            "needs_binding",
+            "unavailable",
+            "stale",
+            "error",
+            "unknown"
+          ],
+          "type": "string"
+        },
+        "ProcessIdentity": {
+          "properties": {
+            "boot_id": {
+              "type": "string"
+            },
+            "instance_token": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "pid": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "started_at": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "pid",
+            "started_at",
+            "boot_id"
+          ],
+          "type": "object"
+        },
+        "ProcessMetric": {
+          "properties": {
+            "action_token": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "cpu_percent": {
+              "format": "float",
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "executable": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "identity": {
+              "$ref": "#/schemas/observation_event/$defs/ProcessIdentity"
+            },
+            "memory_bytes": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "name": {
+              "type": "string"
+            },
+            "parent_pid": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "protected": {
+              "type": "boolean"
+            },
+            "status": {
+              "type": "string"
+            },
+            "user": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "identity",
+            "name",
+            "memory_bytes",
+            "status",
+            "protected"
+          ],
+          "type": "object"
+        },
+        "SensorMetric": {
+          "properties": {
+            "critical_celsius": {
+              "format": "float",
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "name": {
+              "type": "string"
+            },
+            "temperature_celsius": {
+              "format": "float",
+              "type": [
+                "number",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "name"
+          ],
+          "type": "object"
+        },
+        "SystemMetricsSnapshot": {
+          "properties": {
+            "boot_id": {
+              "type": "string"
+            },
+            "cores": {
+              "items": {
+                "$ref": "#/schemas/observation_event/$defs/CpuCoreMetric"
+              },
+              "type": "array"
+            },
+            "cpu_brand": {
+              "type": "string"
+            },
+            "cpu_percent": {
+              "format": "float",
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "disks": {
+              "items": {
+                "$ref": "#/schemas/observation_event/$defs/DiskMetric"
+              },
+              "type": "array"
+            },
+            "environment": {
+              "type": "string"
+            },
+            "gpus": {
+              "items": {
+                "$ref": "#/schemas/observation_event/$defs/GpuMetric"
+              },
+              "type": "array"
+            },
+            "group_sampled_at_ms": {
+              "additionalProperties": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "default": {},
+              "type": "object"
+            },
+            "group_status": {
+              "additionalProperties": {
+                "$ref": "#/schemas/observation_event/$defs/ObservationStatus"
+              },
+              "default": {},
+              "type": "object"
+            },
+            "hostname": {
+              "type": "string"
+            },
+            "interval_ms": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "memory": {
+              "$ref": "#/schemas/observation_event/$defs/MemoryMetric"
+            },
+            "messages": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "networks": {
+              "items": {
+                "$ref": "#/schemas/observation_event/$defs/NetworkMetric"
+              },
+              "type": "array"
+            },
+            "operating_system": {
+              "type": "string"
+            },
+            "physical_core_count": {
+              "format": "uint",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "processes": {
+              "items": {
+                "$ref": "#/schemas/observation_event/$defs/ProcessMetric"
+              },
+              "type": "array"
+            },
+            "sampled_at_ms": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "sensors": {
+              "items": {
+                "$ref": "#/schemas/observation_event/$defs/SensorMetric"
+              },
+              "type": "array"
+            },
+            "sequence": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "status": {
+              "$ref": "#/schemas/observation_event/$defs/ObservationStatus"
+            },
+            "uptime_seconds": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "boot_id",
+            "sequence",
+            "sampled_at_ms",
+            "interval_ms",
+            "hostname",
+            "operating_system",
+            "environment",
+            "uptime_seconds",
+            "status",
+            "cpu_brand",
+            "cores",
+            "memory",
+            "gpus",
+            "disks",
+            "networks",
+            "sensors",
+            "processes",
+            "messages"
+          ],
+          "type": "object"
+        },
+        "SystemMetricsUpdatedEvent": {
+          "description": "`system.metrics.updated` 的负载。",
+          "properties": {
+            "snapshot": {
+              "$ref": "#/schemas/observation_event/$defs/SystemMetricsSnapshot"
+            }
+          },
+          "required": [
+            "snapshot"
+          ],
+          "type": "object"
+        },
+        "UsageMetric": {
+          "properties": {
+            "amount_decimal": {
+              "description": "金额保留厂商十进制表示，不由请求次数推算。",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "id": {
+              "type": "string"
+            },
+            "label": {
+              "type": "string"
+            },
+            "limit": {
+              "format": "double",
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "remaining": {
+              "format": "double",
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "resets_at": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "scope": {
+              "type": "string"
+            },
+            "text_value": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "unit": {
+              "type": "string"
+            },
+            "used": {
+              "format": "double",
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "used_percent": {
+              "format": "double",
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "window_seconds": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "id",
+            "label",
+            "unit",
+            "scope"
+          ],
+          "type": "object"
+        },
+        "UsagePendingBinding": {
+          "description": "未绑定 pane 的官方回调被拒后留下的待办：供客户端一键绑定。",
+          "properties": {
+            "agent": {
+              "type": "string"
+            },
+            "candidates": {
+              "description": "该 agent 下可绑定的账号；为空表示该 agent 没有配置账号。",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "pane_id": {
+              "type": "string"
+            },
+            "rejected_at_ms": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "pane_id",
+            "agent",
+            "rejected_at_ms"
+          ],
+          "type": "object"
+        },
+        "UsageRefreshState": {
+          "description": "与 `AccountUsageSnapshot` 并行的刷新状态：快照类型进入冻结摘要，不能再加字段，\n所以探测进度、防抖与推断绑定都放在这里，按 `account_id` 对齐。旧 server 不返回。",
+          "properties": {
+            "account_id": {
+              "type": "string"
+            },
+            "attempted_at_ms": {
+              "description": "最近一次真正派发探测的时间；`observed_at_ms` 只在成功时更新。",
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "binding_inferred": {
+              "default": false,
+              "description": "请求带了未绑定 pane，但该 agent 只有一个账号：数据按唯一候选返回，绑定并未写入。",
+              "type": "boolean"
+            },
+            "callback_only": {
+              "default": false,
+              "description": "该厂商只接受官方回调（statusline 等），没有可回落的探测：显式刷新不会产生新数据，\n客户端可据此禁用刷新动作并说明原因。",
+              "type": "boolean"
+            },
+            "in_flight": {
+              "default": false,
+              "description": "探测已派发且尚未完成（含排队中）。",
+              "type": "boolean"
+            },
+            "next_allowed_at_ms": {
+              "description": "下一次显式刷新会被接受的最早时间；缺省表示现在即可。",
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "pending_binding": {
+              "anyOf": [
+                {
+                  "$ref": "#/schemas/observation_event/$defs/UsagePendingBinding"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "与该账号同 agent 的待办绑定（请求带 pane 时只看该 pane）。"
+            },
+            "queued": {
+              "default": false,
+              "description": "探测已入队但查询线程还没开始执行。",
+              "type": "boolean"
+            },
+            "requested_at_ms": {
+              "description": "最近一次显式刷新（`account.usage.refresh`）到达的时间，含被防抖的请求。",
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "retry_after_ms": {
+              "description": "厂商要求的退避截止时间（HTTP 429），显式刷新也不豁免。",
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "trust_required": {
+              "default": false,
+              "description": "官方 CLI 在等待用户确认目录信任，探测暂时拿不到额度。\n当前版本恒为 false：Claude 交互探测的登录/信任分类落地后才会置位，客户端在此之前\n不应依赖它出现。",
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "account_id"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "观测事件信封：线上形状为 `{\"event\": \"<kind>\", \"data\": {...}}`，与 `EventEnvelope` /\n`SubscriptionEventEnvelope` 同形，字段名与类型化之前完全一致。用 serde 邻接标签让\n`event` 直接判别 `data` 的类型，不做 untagged 的按序试探。",
+      "oneOf": [
+        {
+          "properties": {
+            "data": {
+              "$ref": "#/schemas/observation_event/$defs/AccountUsageUpdatedEvent"
+            },
+            "event": {
+              "const": "account.usage.updated",
+              "type": "string"
+            }
+          },
+          "required": [
+            "event",
+            "data"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "data": {
+              "$ref": "#/schemas/observation_event/$defs/AccountUsageRefreshingEvent"
+            },
+            "event": {
+              "const": "account.usage.refreshing",
+              "type": "string"
+            }
+          },
+          "required": [
+            "event",
+            "data"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "data": {
+              "$ref": "#/schemas/observation_event/$defs/SystemMetricsUpdatedEvent"
+            },
+            "event": {
+              "const": "system.metrics.updated",
+              "type": "string"
+            }
+          },
+          "required": [
+            "event",
+            "data"
+          ],
+          "type": "object"
+        }
+      ],
+      "title": "ObservationEventEnvelope"
+    },
     "request": {
       "$defs": {
         "AccountBindingParams": {

@@ -380,3 +380,82 @@ pub struct ClientViewsSetParams {
     pub revision: u64,
     pub views: Vec<ClientViewSpec>,
 }
+
+/// 观测事件的种类：后台观测服务（`account.usage.subscribe` / `system.metrics.subscribe`）
+/// 推送的 `event` 字段。与 `events.subscribe` 的 `EventKind` 平行，不共用同一张表——观测
+/// 事件是合并丢帧语义（订阅者只保证拿到最新一帧），不进事件回放缓冲。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub enum ObservationEventKind {
+    /// 账号快照已变化：探测完成、官方回调被接受或回调闩锁到期。
+    #[serde(rename = "account.usage.updated")]
+    AccountUsageUpdated,
+    /// 探测已派发（`in_flight` 由假变真）；快照本身不变，只推刷新状态。
+    #[serde(rename = "account.usage.refreshing")]
+    AccountUsageRefreshing,
+    /// 系统指标采样已更新。
+    #[serde(rename = "system.metrics.updated")]
+    SystemMetricsUpdated,
+    /// 新 server 推送了本版本不认识的事件种类；客户端应忽略。不进生成的 schema。
+    #[serde(other, rename = "unknown")]
+    #[schemars(skip)]
+    Unknown,
+}
+
+impl ObservationEventKind {
+    pub fn dot_name(self) -> &'static str {
+        match self {
+            Self::AccountUsageUpdated => "account.usage.updated",
+            Self::AccountUsageRefreshing => "account.usage.refreshing",
+            Self::SystemMetricsUpdated => "system.metrics.updated",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
+/// `account.usage.updated` 的负载：变化后的账号快照，及与之按 `account_id` 对齐的刷新
+/// 状态（旧 server 省略）。`binding_inferred` / `pending_binding` 是按请求填的字段，事件里
+/// 保持缺省，以 `account.usage.get` 响应为准。
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct AccountUsageUpdatedEvent {
+    pub accounts: Vec<AccountUsageSnapshot>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refresh: Option<Vec<UsageRefreshState>>,
+}
+
+/// `account.usage.refreshing` 的负载：刚派发探测的账号的刷新状态（`in_flight` 为真）。
+/// 订阅者据此立即显示「正在读取」，不必等下一轮拉取；探测完成由 `account.usage.updated`
+/// 收尾。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct AccountUsageRefreshingEvent {
+    pub refresh: Vec<UsageRefreshState>,
+}
+
+/// `system.metrics.updated` 的负载。
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct SystemMetricsUpdatedEvent {
+    pub snapshot: Box<SystemMetricsSnapshot>,
+}
+
+/// 观测事件信封：线上形状为 `{"event": "<kind>", "data": {...}}`，与 `EventEnvelope` /
+/// `SubscriptionEventEnvelope` 同形，字段名与类型化之前完全一致。用 serde 邻接标签让
+/// `event` 直接判别 `data` 的类型，不做 untagged 的按序试探。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(tag = "event", content = "data")]
+pub enum ObservationEventEnvelope {
+    #[serde(rename = "account.usage.updated")]
+    AccountUsageUpdated(AccountUsageUpdatedEvent),
+    #[serde(rename = "account.usage.refreshing")]
+    AccountUsageRefreshing(AccountUsageRefreshingEvent),
+    #[serde(rename = "system.metrics.updated")]
+    SystemMetricsUpdated(SystemMetricsUpdatedEvent),
+}
+
+impl ObservationEventEnvelope {
+    pub fn kind(&self) -> ObservationEventKind {
+        match self {
+            Self::AccountUsageUpdated(_) => ObservationEventKind::AccountUsageUpdated,
+            Self::AccountUsageRefreshing(_) => ObservationEventKind::AccountUsageRefreshing,
+            Self::SystemMetricsUpdated(_) => ObservationEventKind::SystemMetricsUpdated,
+        }
+    }
+}
