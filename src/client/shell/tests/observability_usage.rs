@@ -275,7 +275,8 @@ fn usage_response_repaints_a_docked_legacy_accounts_panel() {
             epoch,
             Purpose::Usage,
             Ok(crate::api::schema::ResponseResult::AccountUsage {
-                accounts: Vec::new()
+                accounts: Vec::new(),
+                refresh: None,
             }),
         ),
         "停靠的账号面板可见时用量响应触发即时重绘"
@@ -563,7 +564,10 @@ fn deliver_usage(state: &mut ClientShellState, accounts: Vec<AccountUsageSnapsho
     state.receive_observation(
         epoch,
         Purpose::Usage,
-        Ok(ResponseResult::AccountUsage { accounts }),
+        Ok(ResponseResult::AccountUsage {
+            accounts,
+            refresh: None,
+        }),
     )
 }
 
@@ -653,6 +657,7 @@ fn switching_provider_invalidates_inflight_usage_and_requests_again() {
         Purpose::Usage,
         Ok(ResponseResult::AccountUsage {
             accounts: vec![account("claude", "claude:default")],
+            refresh: None,
         }),
     ));
     assert!(
@@ -863,6 +868,7 @@ fn hover_usage_response_lands_in_the_hover_scope_only() {
         Purpose::HoverUsage,
         Ok(ResponseResult::AccountUsage {
             accounts: vec![account("claude", "claude:default")],
+            refresh: None,
         }),
     ));
     assert_eq!(state.observability.hover_scope.accounts.len(), 1);
@@ -1330,7 +1336,10 @@ fn deliver_hover_usage(state: &mut ClientShellState, accounts: Vec<AccountUsageS
     state.receive_observation(
         epoch,
         Purpose::HoverUsage,
-        Ok(ResponseResult::AccountUsage { accounts }),
+        Ok(ResponseResult::AccountUsage {
+            accounts,
+            refresh: None,
+        }),
     )
 }
 
@@ -1820,6 +1829,7 @@ fn clicking_outside_the_hover_resets_its_scope_too() {
             Purpose::HoverUsage,
             Ok(ResponseResult::AccountUsage {
                 accounts: vec![account("claude", "claude:default")],
+                refresh: None,
             }),
         ),
         "旧代际的悬浮层响应被丢弃"
