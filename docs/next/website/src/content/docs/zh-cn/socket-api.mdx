@@ -109,6 +109,7 @@ herdr pane read w1:p2 --source recent --lines 50
 | 事件 | `events.subscribe`、`events.wait` |
 | 集成 | `integration.install`、`integration.uninstall` |
 | 插件 | `plugin.link`、`plugin.list`、`plugin.unlink`、`plugin.enable`、`plugin.disable`、`plugin.action.list`、`plugin.action.invoke`、`plugin.log.list`、`plugin.pane.open`、`plugin.pane.focus`、`plugin.pane.close` |
+| 观测 | `system.metrics.get`、`system.metrics.subscribe`、`system.metrics.unsubscribe`、`system.process.list`、`system.process.get`、`system.process.terminate`、`account.usage.providers`、`account.usage.get`、`account.usage.refresh`、`account.usage.subscribe`、`account.usage.unsubscribe`、`account.usage.report`、`account.usage.integration`、`account.binding.set` |
 
 `agent.wait` 由服务器拥有并由事件驱动。它会固定到已解析的窗格占用者,因此替换后的智能体不能满足该等待。`agent.prompt` 接受可选的 `wait` 对象,其中包含 `until` 和 `timeout_ms`;这样可在一个请求中提交提示并开始等待,避免两个独立调用之间的竞态。如果解析出的智能体已经是 `blocked`,`agent.prompt` 不会发送输入或开始等待,而是返回 `agent_blocked`。
 
@@ -648,6 +649,8 @@ Worktree 事件订阅包括 `worktree.created`、`worktree.opened` 和 `worktree
 生命周期事件用 `events.subscribe`。支持一次性等待时,专门的等待辅助命令会单独在文档中说明。
 
 观测数据走专用方法而不是 `events.subscribe`：`account.usage.subscribe` 的参数与 `account.usage.get` 相同，响应返回 `subscription_id`，之后向该连接推送 `account.usage.updated`（变化的账号快照及其 `refresh` 状态）和 `account.usage.refreshing`（探测刚派发时只推刷新状态），直到 `account.usage.unsubscribe`；`system.metrics.subscribe` 同样推送 `system.metrics.updated`。订阅者会驱动服务端在后台持续探测，数据不再展示时请退订。订阅随连接消亡，重连后需要重新订阅。generation-1 客户端端点以 `endpoint.observation.v1` 控制帧接收这些推送，帧内带 server 的 `boot_id` 与事件；未知事件种类会被忽略而不是拒绝。
+
+观测推送使用与 `events.subscribe` 相同的 `{"event": "<名称>", "data": {...}}` 信封。`account.usage.updated` 携带 `accounts`（变化的 `AccountUsageSnapshot` 条目）和可选的 `refresh` 列表；`account.usage.refreshing` 只携带 `refresh`；`system.metrics.updated` 携带 `snapshot`。`refresh` 条目（`UsageRefreshState`）同样出现在 `account.usage.get` 与 `account.usage.refresh` 的响应里，按 `account_id` 与 `accounts` 对齐；旧版 server 省略该列表。字段含义：`in_flight` 与 `queued`（探测已派发 / 仍在等待查询线程）；`requested_at_ms` 与 `attempted_at_ms`（最近一次显式刷新——含被防抖的——与最近一次真正启动的探测）；`next_allowed_at_ms`（下一次显式刷新会被接受的最早时间，缺省表示现在即可）；`retry_after_ms`（HTTP 429 等厂商退避，显式刷新也不豁免）；`binding_inferred`（请求带了未绑定窗格，数据按该厂商唯一配置的账号返回，绑定并未写入）；`trust_required`（交互探测停在了 CLI 的目录信任对话上，快照 `message` 给出目录）；`callback_only`（额度样本只来自官方回调）；`pending_binding`（未绑定窗格的回调被拒后留下的 `pane_id`、`agent`、`candidates`、`rejected_at_ms`）；`callback_enabled`（官方回调是否已接入 herdr，未知时缺省）。`binding_inferred` 与 `pending_binding` 按请求填写，事件里保持缺省，以 `account.usage.get` 的响应为准。
 
 ## 读取窗格
 

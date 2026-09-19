@@ -57,7 +57,7 @@ cooldown_seconds = 60
 
 ## 账号绑定与展示
 
-账号页只列出本机已安装官方 CLI 的厂商——检测与设置页的集成检测同源（多别名 PATH 扫描 + codex 的 standalone/nvm/volta/bun、Hermes 等安装布局），两处结论一致；显式配置了账号的厂商始终保留。`account.usage.providers` 为每个厂商返回 `installed` 标记；旧版 server 缺少该字段时仍显示完整注册表。已安装厂商会在总览按 `cli_refresh_seconds` 自动查询并带退避。codex 通过安装布局定位时，探测子进程会把该布局的 bin 目录前置到 `PATH`，使 npm shim 脚本能解析到自身的 node 解释器。
+账号页只列出本机已安装官方 CLI 的厂商——检测与设置页的集成检测同源（多别名 PATH 扫描 + codex 的 standalone/nvm/volta/bun、Hermes 等安装布局），两处结论一致；显式配置了账号的厂商始终保留。`account.usage.providers` 为每个厂商返回 `installed` 标记；旧版 server 缺少该字段时仍显示完整注册表。自动刷新由服务端在有客户端展示数据期间执行：API 与门户账号按 `api_refresh_seconds`（不低于 60 s），CLI 探测按 `cli_refresh_seconds`（不低于 300 s；`account.usage.providers` 以 `minimum_interval_seconds` 播报实际生效值），失败后带上限的退避。只接受官方回调的厂商不播报轮询间隔，由回调驱动刷新。账号页打开时若尚未选厂商，按聚焦窗格正在运行的 agent 选，否则选第一个已列出的厂商。切换厂商或账号时旧快照保留并变暗，直到新数据到达；当前作用域配置的账号不足两个时「切换账号」为禁用态；在设置里关闭的厂商会同时离开厂商标签、切换候选和总览。codex 通过安装布局定位时，探测子进程会把该布局的 bin 目录前置到 `PATH`，使 npm shim 脚本能解析到自身的 node 解释器。
 
 扫过 Agents 面板头部的「用量」按钮（停留满 `hover_delay_ms`，默认 400 ms）会在按钮下方弹出紧凑的跨厂商总览：每个账号一行头部加最多三行带进度条的额度，下方放不下时上翻到按钮上方。指针移开 250 ms 后自动关闭；点击按钮即钉住，之后只有 `Esc`、再次点击按钮或在浮层外点击才会关闭。点击浮层本体打开账号页。总览有自己的作用域，不会改写账号页的选择；钉住的总览只在按钮因面板过窄而消失时才自行关闭。面板很窄时按钮先缩成 1 列的 `%`，再截断排序标签；按钮需要开启鼠标捕获。
 
@@ -65,7 +65,7 @@ cooldown_seconds = 60
 
 客户端偏好逐字段读取：某个值无法解析（例如未知的 `usage_format`）时只丢弃该字段并给出一次诊断，其余保留。偏好键 `usage_hover_dashboard`（默认 `true`）关闭后扫过按钮不再弹总览，点击仍可钉住；与其它 `usage_*` 键一样，只有显式设置过才会回写。
 
-鼠标停留在 Agent 行或 CLI 标题上，可以打开账号用量浮层。设置支持仪表盘或表格，以及悬浮、页面或两者同时显示。浮层中的「确认账号绑定」将当前窗格与选定账号关联。品牌相同不代表账号相同：未绑定窗格收到官方回调时，若该厂商只配置了一个账号，服务端会自动绑定并持久化，快照标注「已按唯一账号自动绑定」；配置了多个账号时回调被拒绝并列出候选，需要显式绑定。自动绑定要求 `account_usage.enabled` 开启且回调含额度字段。
+鼠标停留在 Agent 行或 CLI 标题上，可以打开账号用量浮层。`format` 决定仪表盘还是表格；`position` 决定这个按窗格的浮层放在哪里：`hover` 与 `both` 都保留 Agent 行和 CLI 标题上的浮层，`page` 则关闭该浮层，只留账号页作为按窗格的入口（选中它时设置页会常驻提示）。账号页、用量按钮的总览和浮动仪表盘在任一取值下都可用。在 监控→设置 里做的修改保存为客户端偏好，在本机覆盖 `enabled`、`format`、`position`、`hover_delay_ms` 与关闭的厂商，直到在那里点「恢复配置文件值」。浮层中的「确认账号绑定」将当前窗格与选定账号关联。品牌相同不代表账号相同：未绑定窗格收到官方回调时，若该厂商只配置了一个账号，服务端会自动绑定并持久化，快照标注「已按唯一账号自动绑定」；配置了多个账号时回调被拒绝并列出候选，需要显式绑定。自动绑定要求 `account_usage.enabled` 开启且回调含额度字段。
 
 显式刷新（`account.usage.refresh`、账号页的刷新动作、切换厂商或账号）按账号做 10 s 防抖，且不豁免厂商退避（HTTP 429）；被防抖时响应带 `next_allowed_at_ms`。终态结果（需要登录、不支持、无权限）按慢周期自动重试——10 分钟起、每次翻倍、1 小时封顶、最多 6 次；CLI 可执行文件或凭据文件一有变化就解除保持，登录后无需重启即可自愈；显式刷新始终重试终态。没有额度字段的官方回调不会覆盖缓存样本。超过 15 分钟没有回调时快照显示为缓存数据，可能回落探测，但只有探测成功或下一次回调才会替换它。只接受官方回调的厂商在刷新状态里标 `callback_only`：显式刷新对它们产生不了新的额度样本，但仍可能刷新登录或绑定占位。
 
@@ -83,7 +83,7 @@ Claude Code 以回调为主路径：额度来自官方 statusline 回调，探�
 [account_usage]
 enabled = true
 format = "dashboard" # dashboard / table
-position = "both" # hover / page / both
+position = "hover" # hover / page / both；page 关闭 Agent 行浮层
 hover_delay_ms = 400
 api_refresh_seconds = 60
 cli_refresh_seconds = 300
@@ -151,5 +151,7 @@ Claude 与 Antigravity 的账号页可启用或移除官方状态栏回调。已
 ## API
 
 公开 JSON 方法包括 `system.metrics.get/subscribe/unsubscribe`、`system.process.list/get/terminate`、`account.usage.providers/get/refresh/subscribe/unsubscribe/report/integration` 和 `account.binding.set`。订阅事件有独立采样时间，慢消费者只保留最新样本。
+
+`account.usage.get` / `account.usage.refresh` 的响应与 `account.usage.updated` 事件在快照旁带一份 `refresh` 列表（`UsageRefreshState`，按 `account_id` 与 `accounts` 对齐；旧版 server 省略）：探测进度（`in_flight`、`queued`）、显式刷新防抖（`requested_at_ms`、`next_allowed_at_ms`）、厂商退避（`retry_after_ms`）、`binding_inferred`、`trust_required`、`callback_only`、`pending_binding` 与 `callback_enabled`。`account.usage.refreshing` 在探测派发时只推送这份列表。字段含义与事件信封见 [事件订阅](/zh-cn/docs/socket-api/#事件订阅)。
 
 多视图的 `client.views.set` 及具名帧/输入扩展仅用于协商后的 TUI 连接，不修改 generation 1 的消息编码。工作台移动窗格复用既有 `pane.move` 与 `pane.swap`。完整参数以 `herdr api schema --json` 为准。

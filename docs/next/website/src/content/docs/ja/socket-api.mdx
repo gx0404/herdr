@@ -109,6 +109,7 @@ herdr pane read w1:p2 --source recent --lines 50
 | イベント | `events.subscribe`、`events.wait` |
 | インテグレーション | `integration.install`、`integration.uninstall` |
 | プラグイン | `plugin.link`、`plugin.list`、`plugin.unlink`、`plugin.enable`、`plugin.disable`、`plugin.action.list`、`plugin.action.invoke`、`plugin.log.list`、`plugin.pane.open`、`plugin.pane.focus`、`plugin.pane.close` |
+| 観測 | `system.metrics.get`、`system.metrics.subscribe`、`system.metrics.unsubscribe`、`system.process.list`、`system.process.get`、`system.process.terminate`、`account.usage.providers`、`account.usage.get`、`account.usage.refresh`、`account.usage.subscribe`、`account.usage.unsubscribe`、`account.usage.report`、`account.usage.integration`、`account.binding.set` |
 
 `agent.wait` はサーバー所有でイベント駆動です。解決したペイン占有者に固定されるため、置換されたエージェントが待機を満たすことはありません。`agent.prompt` は `until` と `timeout_ms` を持つ省略可能な `wait` オブジェクトを受け付けます。これにより、プロンプト送信と待機開始を 1 つのリクエストで行い、別々の呼び出し間の競合を避けられます。解決したエージェントがすでに `blocked` の場合、`agent.prompt` は入力を送信せず、待機も開始せずに `agent_blocked` を返します。
 
@@ -652,6 +653,8 @@ worktree のイベント購読には `worktree.created`、`worktree.opened`、`w
 ライフサイクルイベントには `events.subscribe` を使ってください。ワンショットの wait がサポートされる場合、専用の wait ヘルパーが別途ドキュメント化されます。
 
 観測データは `events.subscribe` ではなく専用メソッドを使います。`account.usage.subscribe` は `account.usage.get` と同じパラメーターを取り、`subscription_id` を返した後、その接続に `account.usage.updated`（変化したアカウントスナップショットとその `refresh` 状態）と `account.usage.refreshing`（プローブ開始時の更新状態のみ）を `account.usage.unsubscribe` までプッシュします。`system.metrics.subscribe` も同様に `system.metrics.updated` をプッシュします。購読者がいる間は server がバックグラウンドでプローブを続けるため、データを表示しなくなったら購読を解除してください。購読は接続とともに終了し、再接続後は作り直す必要があります。generation-1 のクライアントエンドポイントはこれらのプッシュを、server の `boot_id` とイベントを含む `endpoint.observation.v1` 制御フレームとして受け取り、未知のイベント種別は拒否せず無視します。
+
+観測のプッシュは `events.subscribe` と同じ `{"event": "<名前>", "data": {...}}` エンベロープを使います。`account.usage.updated` は `accounts`（変化した `AccountUsageSnapshot` エントリ）と省略可能な `refresh` リストを、`account.usage.refreshing` は `refresh` だけを、`system.metrics.updated` は `snapshot` を運びます。`refresh` エントリ（`UsageRefreshState`）は `account.usage.get` と `account.usage.refresh` の応答にも含まれ、`account_id` で `accounts` と対応します。旧 server はこのリストを省略します。フィールドの意味: `in_flight` と `queued`（プローブが派遣済み / まだプローブスレッド待ち）、`requested_at_ms` と `attempted_at_ms`（デバウンスされたものを含む最後の明示的な更新と、実際に開始された最後のプローブ）、`next_allowed_at_ms`（次の明示的な更新が受け付けられる最も早い時刻。省略時は今すぐ可）、`retry_after_ms`（HTTP 429 などのベンダーバックオフ。明示的な更新でも回避しません）、`binding_inferred`（リクエストが未関連付けのペインを指定し、そのベンダーの唯一の設定済みアカウントからデータを返したが、関連付けは書き込んでいない）、`trust_required`（対話式プローブが CLI のディレクトリ信頼ダイアログで停止し、スナップショットの `message` にディレクトリが入る）、`callback_only`（クォータサンプルは公式コールバックからのみ届く）、`pending_binding`（未関連付けペインのコールバックが拒否された後の `pane_id`、`agent`、`candidates`、`rejected_at_ms`）、`callback_enabled`（公式コールバックが herdr に接続済みか。不明なら省略）。`binding_inferred` と `pending_binding` はリクエスト単位で埋められ、イベントでは既定値のままなので、`account.usage.get` の応答から読み取ってください。
 
 ## ペインの読み取り
 

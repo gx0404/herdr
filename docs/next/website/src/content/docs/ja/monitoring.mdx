@@ -37,7 +37,7 @@ NVIDIA は NVML、Linux の他の GPU は公開された DRM/sysfs、Windows は
 
 ## 設定とアカウント
 
-アカウントページは、接続先ホストに公式 CLI がインストールされているプロバイダーのみ表示します。判定は統合設定ページと同じ多别名 PATH スキャンとインストールレイアウト確認（codex の standalone/nvm/volta/bun、Hermes など）を使い、両画面の結果が一致します。アカウントを明示設定したプロバイダーは常に表示されます。`account.usage.providers` はプロバイダーごとに `installed` フラグを返し、旧 server ではこのフィールドが省略され、レジストリ全体が表示されます。インストール済みプロバイダーは `cli_refresh_seconds` 間隔で自動照会され、再試行間隔には上限があります。インストールレイアウト経由で codex CLI を見つけた場合、プローブはその bin ディレクトリを `PATH` 先頭に付与して実行し、npm shim のインタープリター解決を保証します。
+アカウントページは、接続先ホストに公式 CLI がインストールされているプロバイダーのみ表示します。判定は統合設定ページと同じ多别名 PATH スキャンとインストールレイアウト確認（codex の standalone/nvm/volta/bun、Hermes など）を使い、両画面の結果が一致します。アカウントを明示設定したプロバイダーは常に表示されます。`account.usage.providers` はプロバイダーごとに `installed` フラグを返し、旧 server ではこのフィールドが省略され、レジストリ全体が表示されます。自動更新はクライアントがデータを表示している間、server 側で実行されます。API とポータルのアカウントは `api_refresh_seconds`（最低 60 秒）、CLI プローブは `cli_refresh_seconds`（最低 300 秒。実効値は `account.usage.providers` の `minimum_interval_seconds` として告知）で照会し、失敗後は上限付きのバックオフがかかります。公式コールバックのみのベンダーはポーリング間隔を告知せず、コールバックで更新されます。アカウントページをプロバイダー未選択で開くと、フォーカス中のペインで実行中のエージェントを選び、なければ最初に表示されているプロバイダーを選びます。プロバイダーやアカウントを切り替えると、新しいデータが届くまで以前のスナップショットを薄く表示したまま保持します。現在のスコープに設定済みアカウントが 2 つ未満なら「アカウント切り替え」は無効になり、設定で無効化したプロバイダーはプロバイダーのチップ、切り替え候補、概要から同時に消えます。インストールレイアウト経由で codex CLI を見つけた場合、プローブはその bin ディレクトリを `PATH` 先頭に付与して実行し、npm shim のインタープリター解決を保証します。
 
 Agents パネルの「usage」ボタンにポインターを置く（`hover_delay_ms`、既定 400 ms）と、ボタンの下にコンパクトなプロバイダー横断の概要が開きます。アカウントごとに見出し 1 行と進捗バー付きのクォータ最大 3 行を表示し、下に収まらなければボタンの上に反転します。ポインターを離すと 250 ms 後に閉じ、ボタンをクリックするとピン留めされて `Esc`、ボタンの再クリック、または外側のクリックまで残ります。概要自体をクリックするとアカウントページが開きます。概要は独自のスコープを持ち、アカウントページの選択を書き換えません。ピン留めした概要が自動で閉じるのは、パネルが狭すぎてボタンが消えたときだけです。狭いパネルではソートラベルを切り詰める前にボタンが 1 桁の `%` に縮み、ボタンにはマウスキャプチャが必要です。
 
@@ -47,7 +47,7 @@ Agents パネルの「usage」ボタンにポインターを置く（`hover_dela
 
 `monitor` の `interval_ms`、`history_minutes`、`visible`、`card_height`、`hidden_devices`、`alerts_enabled` を設定できます。`[[monitor.alerts]]` は `metric`（cpu / memory / gpu / disk）、`threshold`、`duration_seconds`、`cooldown_seconds` を持ちます。
 
-`account_usage` の `format` は `dashboard` / `table`、`position` は `hover` / `page` / `both` です。API は最低 60 秒、隔離 CLI は最低 300 秒の間隔で照会します。Agent 行でアカウントを選び、ペインへ関連付けてください。同じブランドというだけではアカウントを特定しません。未関連付けのペインから公式コールバックが届いた場合、そのブランドに設定済みアカウントが 1 つだけならサーバーが自動的に関連付けて保存し、スナップショットに自動関連付けと表示します。複数ある場合は候補を添えて拒否され、明示的な関連付けが必要です。自動関連付けには `account_usage.enabled` と、クォータ項目を含むコールバックが必要です。
+`account_usage` の `format` は `dashboard` / `table` です。`position` はペインごとのポップオーバーの置き場所を決めます。`hover` と `both` は Agent 行と CLI タイトル上のポップオーバーを保ち、`page` はそのポップオーバーを無効にしてアカウントページだけをペインごとの入口にします（選択中は設定ページにヒントが表示されます）。アカウントページ、usage ボタンの概要、フローティングダッシュボードはどの値でも利用できます。Monitor → Settings で行った変更はクライアント設定として保存され、そのマシンでは「設定ファイルの値に戻す」を使うまで `enabled`、`format`、`position`、`hover_delay_ms`、無効化したプロバイダーを上書きします。Agent 行でアカウントを選び、ペインへ関連付けてください。同じブランドというだけではアカウントを特定しません。未関連付けのペインから公式コールバックが届いた場合、そのブランドに設定済みアカウントが 1 つだけならサーバーが自動的に関連付けて保存し、スナップショットに自動関連付けと表示します。複数ある場合は候補を添えて拒否され、明示的な関連付けが必要です。自動関連付けには `account_usage.enabled` と、クォータ項目を含むコールバックが必要です。
 
 明示的な更新（`account.usage.refresh`、アカウントページの更新操作、プロバイダーやアカウントの切り替え）はアカウントごとに 10 秒のデバウンスがかかり、ベンダーのバックオフ（HTTP 429）も適用されます。デバウンス中の応答には `next_allowed_at_ms` が含まれます。終端結果（未ログイン、未対応、権限なし）は 10 分から始まり倍増して最大 1 時間、最大 6 回まで低頻度で自動再試行され、CLI 本体や資格情報ファイルが変わると保留は即座に解除されるため、ログイン後は再起動なしで回復します。明示的な更新は終端状態でも常に再試行します。クォータ項目のない公式コールバックはキャッシュ済みサンプルを上書きしません。15 分間コールバックがない場合はスナップショットがキャッシュ表示になり、プローブにフォールバックすることがありますが、置き換えるのは成功したプローブか次のコールバックだけです。公式コールバックのみのベンダーは更新状態に `callback_only` を報告します。明示的な更新では新しいクォータサンプルは得られませんが、ログインや関連付けのプレースホルダーは更新されることがあります。
 
@@ -61,7 +61,7 @@ Claude Code はコールバック優先です。クォータは公式 statusline
 [account_usage]
 enabled = true
 format = "dashboard"
-position = "both"
+position = "hover" # hover / page / both。page は Agent 行のポップオーバーを無効にします
 hover_delay_ms = 400
 api_refresh_seconds = 60
 cli_refresh_seconds = 300
@@ -94,4 +94,6 @@ Factory は昨日 UTC 以前の日報、Cursor は超過費用と契約内消費
 
 ## API
 
-`system.metrics.*`、`system.process.*`、`account.usage.*`、`account.binding.set` を公開しています。`client.views.set` とビューの具名拡張は協商済み TUI 接続専用です。generation 1 のエンコードは維持します。ペイン移動は既存の `pane.move` / `pane.swap` を使います。詳細は `herdr api schema --json` を参照してください。
+`system.metrics.*`、`system.process.*`、`account.usage.*`、`account.binding.set` を公開しています。
+
+`account.usage.get` / `account.usage.refresh` の応答と `account.usage.updated` イベントは、スナップショットと並べて `refresh` リスト（`UsageRefreshState`。`account_id` で `accounts` と対応し、旧 server では省略）を返します。プローブの進行（`in_flight`、`queued`）、明示的な更新のデバウンス（`requested_at_ms`、`next_allowed_at_ms`）、ベンダーのバックオフ（`retry_after_ms`）、`binding_inferred`、`trust_required`、`callback_only`、`pending_binding`、`callback_enabled` を含みます。`account.usage.refreshing` はプローブ開始時にこのリストだけをプッシュします。フィールドの意味とイベントのエンベロープは[イベント購読](/ja/docs/socket-api/#イベント購読)を参照してください。`client.views.set` とビューの具名拡張は協商済み TUI 接続専用です。generation 1 のエンコードは維持します。ペイン移動は既存の `pane.move` / `pane.swap` を使います。詳細は `herdr api schema --json` を参照してください。

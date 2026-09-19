@@ -24,7 +24,7 @@
 | 产物 | 输入 | 生成器 | 消费者 | 检查 |
 |---|---|---|---|---|
 | `docs/next/website/src/data/config-reference.json` | `src/config` 模型 | 内部生成 | 网站 config-reference 页 | `python3 scripts/config_reference_check.py`（release-docs-check 内） |
-| `docs/next/api/herdr-api.schema.json` | `src/api/schema`（schemars） | cargo 测试/构建期 | socket API 文档与客户端 | `just test`（schema 测试） |
+| `docs/next/api/herdr-api.schema.json` | `src/api/schema`（schemars） | `HERDR_UPDATE_API_SCHEMA=1 just test-one generated_protocol_schema_artifact_is_current`（默认只比对不写入） | socket API 文档与客户端 | `just test`（`generated_protocol_schema_artifact_is_current`，陈旧即红） |
 | `distribution/agent-detection/*.toml` | `src/detect/manifests/*.toml` | 复制 + index | 稳定客户端运行时下载 | `python3 scripts/agent_detection_manifest_check.py`（maintenance-test） |
 | `src/ghostty/bindings.rs` | vendored C API | `just libghostty-bindings`（bindgen-cli 0.72.1） | `src/ghostty` | 编译本身 + `test_vendor_libghostty_vt` |
 | `docs/kb/chunks.json` | 上述文档、manifest、config 契约、`src/**/*.rs` 结构 | `scripts/build_agent_kb.py` | `scripts/agent_kb.py` 检索 | `just kb-check` + `scripts/test_agent_kb.py` golden |

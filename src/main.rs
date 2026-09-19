@@ -969,6 +969,21 @@ mod tests {
     }
 
     #[test]
+    fn default_config_template_parses_to_config_default() {
+        // 模板里未注释的键（`[monitor]`、`[account_usage]`）必须与代码默认值一致，
+        // 否则 `herdr --default-config` 打印出来的文件一落盘就改变行为。`Config` 没有
+        // 派生 `PartialEq`（子配置有手写反序列化），所以用 Debug 输出整体比对，
+        // 不给整棵配置树加派生。
+        let parsed: config::Config =
+            toml::from_str(DEFAULT_CONFIG).expect("default config template must parse");
+        assert_eq!(
+            format!("{parsed:#?}"),
+            format!("{:#?}", config::Config::default()),
+            "DEFAULT_CONFIG 与 Config::default() 不一致"
+        );
+    }
+
+    #[test]
     fn askpass_prompt_args_skip_argv0_and_lossy_decode() {
         let args = [
             std::ffi::OsString::from("herdr"),
