@@ -162,57 +162,23 @@ fn retained_cursor(
         workspace_index,
         pane_id,
     )?;
-    if runtime.synchronized_output_active() {
-        return None;
-    }
-    let area = Rect::new(
-        pane.inner_rect.x,
-        pane.inner_rect.y,
-        pane.inner_rect.width,
-        pane.inner_rect.height,
-    );
-    // Mirror `tab_surface_cursor`'s IME reveal semantics so the retained fast
-    // path emits the same host cursor as the complete renderer and the fast
-    // path does not need a blanket fallback when the reveal is enabled.
-    let scrolled_back = crate::ui::pane_is_scrolled_back(runtime);
-    let reveal = app.state.reveal_hidden_cursor_for_cjk_ime
-        && (!app.state.cjk_ime_agent_filter_configured || {
-            let detected = app
-                .state
-                .workspaces
-                .get(workspace_index)
-                .and_then(|ws| ws.terminal_id(pane_id))
-                .and_then(|terminal_id| app.state.terminals.get(terminal_id))
-                .and_then(|terminal| terminal.detected_agent);
-            detected.is_some_and(|agent| app.state.cjk_ime_agents.contains(&agent))
-        });
-    runtime
-        .cursor_state(area, true)
-        .map(|cursor| {
-            let visible = if reveal {
-                !scrolled_back
-            } else {
-                cursor.visible && !scrolled_back
-            };
-            protocol::CursorState {
-                x: cursor.x,
-                y: cursor.y,
-                visible,
-                shape: if reveal && visible {
-                    app.state.cjk_ime_cursor_shape
-                } else {
-                    cursor.shape
-                },
-            }
-        })
-        .or_else(|| {
-            (reveal && !scrolled_back).then_some(protocol::CursorState {
-                x: pane.inner_rect.x,
-                y: pane.inner_rect.y,
-                visible: true,
-                shape: app.state.cjk_ime_cursor_shape,
-            })
-        })
+    // 与完整渲染器 `ui::tab_surface_cursor` 共用同一个纯函数（含 IME 揭示与
+    // DECSET 2026 批次内沿用批次前光标的语义），retained 快路径对同一 pane
+    // 输出同一宿主光标，不需要单独的整帧回退。
+    crate::ui::pane_host_cursor(
+        runtime,
+        crate::ui::PaneHostCursorInputs {
+            area: Rect::new(
+                pane.inner_rect.x,
+                pane.inner_rect.y,
+                pane.inner_rect.width,
+                pane.inner_rect.height,
+            ),
+            reveal: crate::ui::cjk_ime_reveal(&app.state, workspace_index, pane_id),
+            scrolled_back: crate::ui::pane_is_scrolled_back(runtime),
+            reveal_shape: app.state.cjk_ime_cursor_shape,
+        },
+    )
 }
 
 #[derive(Clone)]

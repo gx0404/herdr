@@ -42,7 +42,7 @@ use self::agent_detection::{
 };
 #[cfg(unix)]
 pub use self::terminal::InputState;
-use self::terminal::{GhosttyPaneTerminal, PaneTerminal};
+use self::terminal::{GhosttyPaneTerminal, PaneTerminal, SynchronizedOutputBackstop};
 pub(crate) use self::terminal::{
     TerminalCompressionStep, TerminalDirtyPatch, TerminalDirtyPatchOutcome, TerminalReadSnapshot,
     TerminalSearchDirection, TerminalSearchWindow, TerminalTextPoint, TerminalWordMotion,
@@ -1813,6 +1813,38 @@ fn usable_reported_cwd(cwd: std::path::PathBuf) -> Option<std::path::PathBuf> {
     (cwd.is_absolute() && cwd.is_dir()).then_some(cwd)
 }
 
+/// DECSET 2026 看门狗兜底：每 pane 至多一个待决定时器（由 pane 层的
+/// `synchronized_output_backstop` 保证），到期时按 pane 层判定续期 / 重绘 /
+/// 放弃。批次频繁开合（Claude fullscreen 每帧一对 `?2026h/l`）时不会每批次
+/// spawn 一个定时器，也不会在批次正常结束后把干净的 pane 再标脏一次。
+fn spawn_synchronized_output_backstop(
+    rt: &tokio::runtime::Handle,
+    delay: std::time::Duration,
+    terminal: Arc<PaneTerminal>,
+    pane_id: PaneId,
+    render_dirty: Arc<RenderSignal>,
+    render_notify: Arc<Notify>,
+) {
+    rt.spawn(async move {
+        let mut delay = delay;
+        loop {
+            tokio::time::sleep(delay).await;
+            match terminal.poll_synchronized_output_backstop() {
+                SynchronizedOutputBackstop::Reschedule(remaining) => {
+                    delay = remaining.max(std::time::Duration::from_millis(1));
+                }
+                SynchronizedOutputBackstop::Redraw => {
+                    if render_dirty.request_pty(pane_id) {
+                        render_notify.notify_one();
+                    }
+                    break;
+                }
+                SynchronizedOutputBackstop::Idle => break,
+            }
+        }
+    });
+}
+
 fn publish_terminal_bells(pane_id: PaneId, count: u16, events: &mpsc::Sender<AppEvent>) {
     if count == 0 {
         return;
@@ -2226,6 +2258,16 @@ impl PaneRuntime {
                         }
                     });
                 }
+                if let Some(delay) = result.synchronized_output_backstop {
+                    spawn_synchronized_output_backstop(
+                        &delay_rt,
+                        delay,
+                        terminal.clone(),
+                        pane_id,
+                        render_dirty.clone(),
+                        render_notify.clone(),
+                    );
+                }
                 if let Some(cwd) = result.reported_cwd.clone() {
                     publish_reported_cwd(pane_id, cwd, &reported_cwd, &read_events);
                 }
@@ -2421,6 +2463,16 @@ impl PaneRuntime {
                             render_notify.notify_one();
                         }
                     });
+                }
+                if let Some(delay) = result.synchronized_output_backstop {
+                    spawn_synchronized_output_backstop(
+                        &rt,
+                        delay,
+                        terminal.clone(),
+                        pane_id,
+                        render_dirty.clone(),
+                        render_notify.clone(),
+                    );
                 }
                 if let Some(cwd) = result.reported_cwd.clone() {
                     publish_reported_cwd(pane_id, cwd, &reported_cwd, &events);
@@ -3484,6 +3536,11 @@ impl PaneRuntime {
             announced
         });
         (release_tx, writer)
+    }
+
+    /// 测试用：把当前 2026 批次的置位时刻往前拨，模拟看门狗超时。
+    pub(crate) fn test_backdate_synchronized_output(&self, by: std::time::Duration) {
+        self.terminal.test_backdate_synchronized_output(by);
     }
 
     pub(crate) fn test_process_pty_bytes(&self, bytes: &[u8]) {

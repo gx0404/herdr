@@ -1172,6 +1172,35 @@ mod tests {
         assert!(!cells_equal(&a, &b));
     }
 
+    /// 契约：帧没有光标时宿主光标隐藏；位置沿用上一次可见位置（夹到帧内），
+    /// 没有历史时落在右下角；形状回到终端默认。
+    #[test]
+    fn resolve_host_cursor_state_without_cursor_hides_at_last_visible_position() {
+        let frame = make_frame(10, 4, vec![make_cell(" ", 0, 0, 0); 40]);
+        let mut last_visible_cursor = None;
+        let fresh = resolve_host_cursor_state(&frame, &mut last_visible_cursor);
+        assert!(!fresh.visible);
+        assert_eq!(fresh.position, (9, 3));
+        assert_eq!(fresh.shape, 0);
+        assert_eq!(last_visible_cursor, None);
+
+        let mut last_visible_cursor = Some((30, 30));
+        let remembered = resolve_host_cursor_state(&frame, &mut last_visible_cursor);
+        assert!(!remembered.visible);
+        assert_eq!(remembered.position, (9, 3), "历史位置夹到帧内");
+        assert_eq!(remembered.shape, 0);
+        assert_eq!(
+            last_visible_cursor,
+            Some((30, 30)),
+            "隐藏帧不改写上一次可见位置"
+        );
+
+        let mut last_visible_cursor = Some((2, 1));
+        let inside = resolve_host_cursor_state(&frame, &mut last_visible_cursor);
+        assert!(!inside.visible);
+        assert_eq!(inside.position, (2, 1));
+    }
+
     #[test]
     fn blit_frame_hides_cursor_before_full_redraw_writes() {
         let frame = make_frame(

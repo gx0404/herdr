@@ -42,6 +42,9 @@ use super::{
 
 const DEFAULT_DETECTION_ROWS: usize = 24;
 const KITTY_GRAPHICS_REDRAW_SETTLE: Duration = Duration::from_millis(20);
+/// DECSET 2026 看门狗：置位超过该时长未复位视为失效（对齐上游 ghostty 的
+/// `sync_reset_ms = 1000`），避免 pane 内应用忘记 `?2026l` 时永久抑制重绘与光标。
+const SYNCHRONIZED_OUTPUT_TIMEOUT: Duration = Duration::from_secs(1);
 const CURSOR_POSITION_SETTLE_ENABLED: bool = cfg!(windows);
 const MODE_MOUSE_X10: u16 = 9;
 const MODE_MOUSE_PRESS_RELEASE: u16 = 1000;
@@ -165,6 +168,9 @@ impl InputState {
 pub(crate) struct ProcessBytesResult {
     pub request_render: bool,
     pub render_delay: Option<Duration>,
+    /// DECSET 2026 批次开始且该 pane 尚无待决兜底定时器：读循环在该时长后调用
+    /// `poll_synchronized_output_backstop` 决定续期 / 重绘 / 放弃。
+    pub synchronized_output_backstop: Option<Duration>,
     pub terminal_title_changed: bool,
     pub terminal_bells: u16,
     pub clipboard_writes: Vec<Vec<u8>>,
@@ -213,6 +219,86 @@ pub(crate) struct GhosttyPaneCore {
     decscusr_tracker: DecscusrTracker,
     cursor_settle_state: CursorPositionSettleState,
     windows_powershell_prompt_cwd_reporting: bool,
+    /// 当前 DECSET 2026 批次的置位时刻；`None` 表示不在批次中。只在写入路径
+    /// （`process_pty_bytes` / `resize`）维护，渲染期访问器只读。
+    synchronized_output_since: Option<Instant>,
+    /// 批次开始前最后一块输出写入之前的终端光标：批次进行中渲染方沿用它，
+    /// 宿主不会收到一次 `?25l` 闪断。在写入路径快照，渲染期不写。
+    synchronized_output_cursor: Option<TerminalCursorState>,
+    /// 是否已有一个待决的看门狗兜底定时器（每 pane 至多一个，避免批次频繁
+    /// 开合时堆积 spawn 与定时器）。
+    synchronized_output_backstop_armed: bool,
+}
+
+/// 写入路径上一次同步输出观察的结果。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SynchronizedOutputState {
+    /// 批次进行中且未超时：抑制重绘、沿用批次前光标。
+    active: bool,
+    /// 首次观察到批次开始且当前没有待决兜底：调用方安排一次超时后的重绘。
+    arm_backstop: bool,
+}
+
+/// 只读判定：当前是否处于未超时的同步输出批次。计时锚点只在写入路径维护，
+/// 渲染期（`cursor_state` / `synchronized_output_active`）调用它不改任何状态。
+fn synchronized_output_active(core: &GhosttyPaneCore, now: Instant) -> bool {
+    core.synchronized_output_since
+        .is_some_and(|since| now.saturating_duration_since(since) < SYNCHRONIZED_OUTPUT_TIMEOUT)
+}
+
+/// 写入路径上的看门狗：写入完成后按 2026 模式维护批次计时——模式复位即清零，
+/// 置位时起表——并判定本块输出是否仍在未超时批次内（不改 vendored VT）。
+fn observe_synchronized_output(
+    core: &mut GhosttyPaneCore,
+    now: Instant,
+) -> SynchronizedOutputState {
+    let mode = core
+        .terminal
+        .mode_get(crate::ghostty::MODE_SYNCHRONIZED_OUTPUT)
+        .unwrap_or(false);
+    if !mode {
+        core.synchronized_output_since = None;
+        return SynchronizedOutputState {
+            active: false,
+            arm_backstop: false,
+        };
+    }
+    let began = core.synchronized_output_since.is_none();
+    if began {
+        core.synchronized_output_since = Some(now);
+    }
+    let arm_backstop = began && !core.synchronized_output_backstop_armed;
+    if arm_backstop {
+        core.synchronized_output_backstop_armed = true;
+    }
+    SynchronizedOutputState {
+        active: synchronized_output_active(core, now),
+        arm_backstop,
+    }
+}
+
+/// 不经 render state 直接读终端级光标，供批次前快照使用：只读 3 个终端字段
+/// 与本层的 DECSCUSR 跟踪器，不触发 `RenderState::update`，隐藏 pane 的输出不会
+/// 因此产生呈现工作。位置是活动屏坐标；回看历史时渲染方本就隐藏光标。
+fn terminal_cursor_snapshot(core: &GhosttyPaneCore) -> Option<TerminalCursorState> {
+    let terminal = &core.terminal;
+    Some(TerminalCursorState {
+        x: terminal.cursor_x().ok()?,
+        y: terminal.cursor_y().ok()?,
+        visible: terminal.cursor_visible().ok()?,
+        shape: core.decscusr_tracker.cursor_shape(),
+    })
+}
+
+/// 看门狗兜底定时器到期时 pane 层给出的处置。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SynchronizedOutputBackstop {
+    /// 批次仍在进行且未超时（可能是后来开始的新批次）：过 `remaining` 再来。
+    Reschedule(Duration),
+    /// 批次超时仍未复位：兜底重绘一次，恢复画面与光标。
+    Redraw,
+    /// 批次已正常结束（复位那一块输出已请求过重绘）：无需重绘。
+    Idle,
 }
 
 pub(crate) struct PaneTerminal {
@@ -591,6 +677,15 @@ impl PaneTerminal {
 
     pub fn synchronized_output_active(&self) -> bool {
         self.ghostty.synchronized_output_active()
+    }
+
+    pub fn poll_synchronized_output_backstop(&self) -> SynchronizedOutputBackstop {
+        self.ghostty.poll_synchronized_output_backstop()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_backdate_synchronized_output(&self, by: Duration) {
+        self.ghostty.test_backdate_synchronized_output(by);
     }
 
     pub fn visible_text(&self) -> String {
@@ -1296,6 +1391,9 @@ impl GhosttyPaneTerminal {
                 decscusr_tracker: DecscusrTracker::default(),
                 cursor_settle_state: CursorPositionSettleState::default(),
                 windows_powershell_prompt_cwd_reporting: false,
+                synchronized_output_since: None,
+                synchronized_output_cursor: None,
+                synchronized_output_backstop_armed: false,
             }),
             key_encoder: Mutex::new(key_encoder),
             pending_pty_responses,
@@ -1455,6 +1553,7 @@ impl GhosttyPaneTerminal {
             return ProcessBytesResult {
                 request_render: false,
                 render_delay: None,
+                synchronized_output_backstop: None,
                 terminal_title_changed: false,
                 terminal_bells: 0,
                 clipboard_writes: Vec::new(),
@@ -1514,6 +1613,13 @@ impl GhosttyPaneTerminal {
             );
         }
 
+        let now = Instant::now();
+        // 不在（未超时的）同步输出批次内时，先于写入快照终端级光标：若本块输出
+        // 开启了一个批次，渲染方在批次进行中沿用这份「批次前光标」。只读 3 个
+        // 终端字段，不触发 render state 更新。
+        if !synchronized_output_active(&core, now) {
+            core.synchronized_output_cursor = terminal_cursor_snapshot(&core);
+        }
         core.kitty_keyboard.observe(filtered_bytes.as_ref());
         let mut terminal_responses = Vec::new();
         core.default_color_event_tracker
@@ -1552,10 +1658,8 @@ impl GhosttyPaneTerminal {
         if let Ok(mut key_encoder) = self.key_encoder.lock() {
             key_encoder.set_from_terminal(&core.terminal);
         }
-        let synchronized_output = core
-            .terminal
-            .mode_get(crate::ghostty::MODE_SYNCHRONIZED_OUTPUT)
-            .unwrap_or(false);
+        let synchronized = observe_synchronized_output(&mut core, now);
+        let synchronized_output = synchronized.active;
         if CURSOR_POSITION_SETTLE_ENABLED {
             let cursor_started = crate::render_prof::timer();
             let cursor_after_write = current_cursor_state(&mut core);
@@ -1571,12 +1675,17 @@ impl GhosttyPaneTerminal {
         };
 
         let request_render = !synchronized_output;
-        let render_delay = render_delay_after_pty_write(
+        let render_delay = render_delay_after_pty_write(RenderDelayInputs {
             synchronized_output,
             has_kitty_graphics_sequence,
-            cursor_position_settle_pending(&core),
-            CURSOR_POSITION_SETTLE_ENABLED,
-        );
+            cursor_position_settle_pending: cursor_position_settle_pending(&core),
+            cursor_position_settle_enabled: CURSOR_POSITION_SETTLE_ENABLED,
+        });
+        // 批次开始且尚无待决兜底：读循环安排一次超时后的重绘，即使应用此后
+        // 再无输出、也不复位 2026，看门狗到期后画面与光标仍会恢复。
+        let synchronized_output_backstop = synchronized
+            .arm_backstop
+            .then_some(SYNCHRONIZED_OUTPUT_TIMEOUT);
         if request_render {
             crate::render_prof::event("pty.request_render");
         }
@@ -1589,6 +1698,7 @@ impl GhosttyPaneTerminal {
         ProcessBytesResult {
             request_render,
             render_delay,
+            synchronized_output_backstop,
             terminal_title_changed,
             terminal_bells,
             clipboard_writes,
@@ -1833,6 +1943,10 @@ impl GhosttyPaneTerminal {
             let _ = core
                 .terminal
                 .resize(cols, rows, cell_width_px, cell_height_px);
+            // vendored VT 在 resize 里无条件复位 2026，这条路径不经过
+            // `process_pty_bytes`，批次锚点在这里一并清零，避免下一个批次带着
+            // 过期锚点被误判为已失效。
+            core.synchronized_output_since = None;
             let terminal_responses = self.drain_pending_pty_responses();
 
             let bottom_is_blank = ghostty_detection_text(&mut core)
@@ -2073,22 +2187,63 @@ impl GhosttyPaneTerminal {
         })
     }
 
+    /// 渲染方读取的光标（不改 pane 状态）：同步输出批次进行中（未超时）沿用
+    /// 写入路径在批次前快照的光标；批次外或没有快照时读当前光标。
+    /// `tab_surface_cursor`、`retained_cursor` 与 `render_terminal_virtual`
+    /// 三条宿主光标出口都依赖这一语义，不再各自整帧抑制。
     pub fn cursor_state(&self) -> Option<TerminalCursorState> {
         let mut core = self.core.lock().ok()?;
+        if synchronized_output_active(&core, Instant::now()) {
+            if let Some(cursor) = core.synchronized_output_cursor {
+                return Some(cursor);
+            }
+        }
         let current = current_cursor_state(&mut core);
         effective_cursor_state(&mut core, current)
     }
 
+    /// 只读：是否处于未超时的 DECSET 2026 批次。
     pub fn synchronized_output_active(&self) -> bool {
         self.core
             .lock()
             .ok()
-            .and_then(|core| {
-                core.terminal
-                    .mode_get(crate::ghostty::MODE_SYNCHRONIZED_OUTPUT)
-                    .ok()
-            })
-            .unwrap_or(false)
+            .is_some_and(|core| synchronized_output_active(&core, Instant::now()))
+    }
+
+    /// 看门狗兜底定时器到期时由读循环调用：批次仍活跃则续期，超时未复位则
+    /// 解除待决标记并要求重绘，已正常结束则解除标记且不重绘。与
+    /// `process_pty_bytes` 在同一把 core 锁下判定，批次开始与到期不会交错漏掉。
+    pub fn poll_synchronized_output_backstop(&self) -> SynchronizedOutputBackstop {
+        let Ok(mut core) = self.core.lock() else {
+            return SynchronizedOutputBackstop::Idle;
+        };
+        let now = Instant::now();
+        match core.synchronized_output_since {
+            Some(since) => {
+                let elapsed = now.saturating_duration_since(since);
+                if elapsed < SYNCHRONIZED_OUTPUT_TIMEOUT {
+                    return SynchronizedOutputBackstop::Reschedule(
+                        SYNCHRONIZED_OUTPUT_TIMEOUT - elapsed,
+                    );
+                }
+                core.synchronized_output_backstop_armed = false;
+                SynchronizedOutputBackstop::Redraw
+            }
+            None => {
+                core.synchronized_output_backstop_armed = false;
+                SynchronizedOutputBackstop::Idle
+            }
+        }
+    }
+
+    /// 测试用：把当前批次的置位时刻往前拨，模拟批次超时而不真等。
+    #[cfg(test)]
+    pub(crate) fn test_backdate_synchronized_output(&self, by: Duration) {
+        if let Ok(mut core) = self.core.lock() {
+            if let Some(since) = core.synchronized_output_since.as_mut() {
+                *since = since.checked_sub(by).unwrap_or(*since);
+            }
+        }
     }
 
     pub fn encode_terminal_key(
@@ -2587,17 +2742,23 @@ fn effective_cursor_state(
         .reported_cursor(current, Instant::now())
 }
 
-fn render_delay_after_pty_write(
+/// `render_delay_after_pty_write` 的输入，按字段名构造，避免多个裸 bool 位置
+/// 参数错位后静默改变行为。
+#[derive(Debug, Clone, Copy, Default)]
+struct RenderDelayInputs {
+    /// 处于未超时的同步输出批次：延迟重绘一律等批次结束（或看门狗兜底）。
     synchronized_output: bool,
     has_kitty_graphics_sequence: bool,
     cursor_position_settle_pending: bool,
     cursor_position_settle_enabled: bool,
-) -> Option<Duration> {
-    if synchronized_output {
+}
+
+fn render_delay_after_pty_write(inputs: RenderDelayInputs) -> Option<Duration> {
+    if inputs.synchronized_output {
         None
-    } else if has_kitty_graphics_sequence {
+    } else if inputs.has_kitty_graphics_sequence {
         Some(KITTY_GRAPHICS_REDRAW_SETTLE)
-    } else if cursor_position_settle_enabled && cursor_position_settle_pending {
+    } else if inputs.cursor_position_settle_enabled && inputs.cursor_position_settle_pending {
         Some(CURSOR_POSITION_SETTLE)
     } else {
         None
@@ -4575,18 +4736,38 @@ mod tests {
     #[test]
     fn cursor_settle_policy_controls_render_delay() {
         assert_eq!(
-            render_delay_after_pty_write(false, false, true, true),
+            render_delay_after_pty_write(RenderDelayInputs {
+                cursor_position_settle_pending: true,
+                cursor_position_settle_enabled: true,
+                ..RenderDelayInputs::default()
+            }),
             Some(CURSOR_POSITION_SETTLE)
         );
         assert_eq!(
-            render_delay_after_pty_write(false, false, true, false),
+            render_delay_after_pty_write(RenderDelayInputs {
+                cursor_position_settle_pending: true,
+                ..RenderDelayInputs::default()
+            }),
             None
         );
         assert_eq!(
-            render_delay_after_pty_write(false, true, true, false),
+            render_delay_after_pty_write(RenderDelayInputs {
+                has_kitty_graphics_sequence: true,
+                cursor_position_settle_pending: true,
+                ..RenderDelayInputs::default()
+            }),
             Some(KITTY_GRAPHICS_REDRAW_SETTLE)
         );
-        assert_eq!(render_delay_after_pty_write(true, false, true, true), None);
+        // 未超时的同步输出批次内一切延迟重绘都等批次结束（或看门狗兜底）。
+        assert_eq!(
+            render_delay_after_pty_write(RenderDelayInputs {
+                synchronized_output: true,
+                has_kitty_graphics_sequence: true,
+                cursor_position_settle_pending: true,
+                cursor_position_settle_enabled: true,
+            }),
+            None
+        );
     }
 
     #[test]
@@ -6046,12 +6227,199 @@ mod tests {
 
         let begin = pane_terminal.process_pty_bytes(pane_id, 0, b"\x1b[?2026h", &tx);
         assert!(!begin.request_render);
+        assert_eq!(begin.render_delay, None);
+        assert_eq!(
+            begin.synchronized_output_backstop,
+            Some(SYNCHRONIZED_OUTPUT_TIMEOUT),
+            "批次开始安排一次超时兜底重绘"
+        );
+        assert!(pane_terminal.synchronized_output_active());
 
         let body = pane_terminal.process_pty_bytes(pane_id, 0, b"hello", &tx);
         assert!(!body.request_render);
+        assert_eq!(
+            body.synchronized_output_backstop, None,
+            "批次内后续输出不重复安排兜底"
+        );
 
         let end = pane_terminal.process_pty_bytes(pane_id, 0, b"\x1b[?2026l", &tx);
         assert!(end.request_render);
+        assert!(!pane_terminal.synchronized_output_active());
+        assert_eq!(
+            pane_terminal.poll_synchronized_output_backstop(),
+            SynchronizedOutputBackstop::Idle,
+            "批次正常结束：兜底到期时无需重绘"
+        );
+        // 兜底解除后，下一个批次才会再次安排定时器。
+        let again = pane_terminal.process_pty_bytes(pane_id, 0, b"\x1b[?2026h", &tx);
+        assert_eq!(
+            again.synchronized_output_backstop,
+            Some(SYNCHRONIZED_OUTPUT_TIMEOUT)
+        );
+    }
+
+    /// 批次频繁开合时每 pane 至多一个待决兜底：定时器未到期前的新批次不再
+    /// 安排新的定时器，到期时若已进入新批次则按剩余时间续期。
+    #[test]
+    fn synchronized_output_backstop_is_armed_at_most_once_per_pane() {
+        let (tx, _rx) = mpsc::channel(4);
+        let terminal = crate::ghostty::Terminal::new(80, 24, 0).unwrap();
+        let pane_terminal = GhosttyPaneTerminal::new(terminal, tx.clone()).unwrap();
+        let pane_id = PaneId::from_raw(1);
+
+        let first = pane_terminal.process_pty_bytes(pane_id, 0, b"\x1b[?2026h", &tx);
+        assert_eq!(
+            first.synchronized_output_backstop,
+            Some(SYNCHRONIZED_OUTPUT_TIMEOUT)
+        );
+        for _ in 0..3 {
+            pane_terminal.process_pty_bytes(pane_id, 0, b"\x1b[?2026l", &tx);
+            let next = pane_terminal.process_pty_bytes(pane_id, 0, b"\x1b[?2026h", &tx);
+            assert_eq!(
+                next.synchronized_output_backstop, None,
+                "已有待决兜底时不再 spawn 新定时器"
+            );
+        }
+        match pane_terminal.poll_synchronized_output_backstop() {
+            SynchronizedOutputBackstop::Reschedule(remaining) => {
+                assert!(remaining <= SYNCHRONIZED_OUTPUT_TIMEOUT, "按剩余时间续期");
+            }
+            other => panic!("批次进行中应续期，得到 {other:?}"),
+        }
+        pane_terminal.test_backdate_synchronized_output(SYNCHRONIZED_OUTPUT_TIMEOUT);
+        assert_eq!(
+            pane_terminal.poll_synchronized_output_backstop(),
+            SynchronizedOutputBackstop::Redraw,
+            "超时未复位：兜底重绘并解除待决标记"
+        );
+        pane_terminal.process_pty_bytes(pane_id, 0, b"\x1b[?2026l", &tx);
+        let rearmed = pane_terminal.process_pty_bytes(pane_id, 0, b"\x1b[?2026h", &tx);
+        assert_eq!(
+            rearmed.synchronized_output_backstop,
+            Some(SYNCHRONIZED_OUTPUT_TIMEOUT),
+            "待决标记解除后新批次重新安排兜底"
+        );
+    }
+
+    /// vendored VT 在 resize 里无条件复位 2026；pane 层批次锚点随之清零，
+    /// 后台 pane 被 resize 后的下一个批次不会带着过期锚点被误判为已失效。
+    #[test]
+    fn resize_clears_the_synchronized_output_batch() {
+        let (tx, _rx) = mpsc::channel(4);
+        let terminal = crate::ghostty::Terminal::new(80, 24, 0).unwrap();
+        let pane_terminal = GhosttyPaneTerminal::new(terminal, tx.clone()).unwrap();
+        let pane_id = PaneId::from_raw(1);
+
+        pane_terminal.process_pty_bytes(pane_id, 0, b"\x1b[?2026h", &tx);
+        assert!(pane_terminal.synchronized_output_active());
+        pane_terminal.test_backdate_synchronized_output(SYNCHRONIZED_OUTPUT_TIMEOUT);
+        pane_terminal.resize(24, 100, 0, 0);
+        assert!(!pane_terminal.synchronized_output_active());
+        assert_eq!(
+            pane_terminal.poll_synchronized_output_backstop(),
+            SynchronizedOutputBackstop::Idle
+        );
+        // resize 后应用重新开启批次：从零计时，仍受同步输出保护。
+        let again = pane_terminal.process_pty_bytes(pane_id, 0, b"\x1b[?2026h", &tx);
+        assert!(!again.request_render, "新批次未超时，抑制重绘");
+        assert!(pane_terminal.synchronized_output_active());
+    }
+
+    #[test]
+    fn synchronized_output_expires_after_the_watchdog_timeout() {
+        let (tx, _rx) = mpsc::channel(4);
+        let terminal = crate::ghostty::Terminal::new(80, 24, 0).unwrap();
+        let pane_terminal = GhosttyPaneTerminal::new(terminal, tx.clone()).unwrap();
+        let pane_id = PaneId::from_raw(1);
+
+        pane_terminal.process_pty_bytes(pane_id, 0, b"\x1b[?2026h", &tx);
+        assert!(pane_terminal.synchronized_output_active());
+        pane_terminal.test_backdate_synchronized_output(SYNCHRONIZED_OUTPUT_TIMEOUT);
+        assert!(
+            !pane_terminal.synchronized_output_active(),
+            "置位超过 1 s 未复位视为失效"
+        );
+        let late = pane_terminal.process_pty_bytes(pane_id, 0, b"still going", &tx);
+        assert!(late.request_render, "失效后恢复正常重绘请求");
+        assert_eq!(late.render_delay, None);
+        assert_eq!(
+            late.synchronized_output_backstop, None,
+            "失效批次内的输出不重新安排兜底"
+        );
+
+        // 应用复位后再次置位，重新计时；上一个兜底到期解除后才会再安排。
+        pane_terminal.process_pty_bytes(pane_id, 0, b"\x1b[?2026l", &tx);
+        assert_eq!(
+            pane_terminal.poll_synchronized_output_backstop(),
+            SynchronizedOutputBackstop::Idle
+        );
+        let again = pane_terminal.process_pty_bytes(pane_id, 0, b"\x1b[?2026h", &tx);
+        assert!(!again.request_render);
+        assert_eq!(
+            again.synchronized_output_backstop,
+            Some(SYNCHRONIZED_OUTPUT_TIMEOUT)
+        );
+        assert!(pane_terminal.synchronized_output_active());
+    }
+
+    #[test]
+    fn cursor_state_reuses_the_previous_cursor_during_synchronized_output() {
+        let (tx, _rx) = mpsc::channel(4);
+        let terminal = crate::ghostty::Terminal::new(80, 24, 0).unwrap();
+        let pane_terminal = GhosttyPaneTerminal::new(terminal, tx.clone()).unwrap();
+        let pane_id = PaneId::from_raw(1);
+
+        pane_terminal.process_pty_bytes(pane_id, 0, b"\x1b[2;4H", &tx);
+        let before = pane_terminal.cursor_state().expect("批次前光标");
+        assert_eq!((before.x, before.y), (3, 1));
+
+        pane_terminal.process_pty_bytes(pane_id, 0, b"\x1b[?2026h\x1b[10;10H\x1b[?25l", &tx);
+        assert_eq!(
+            pane_terminal.cursor_state(),
+            Some(before),
+            "批次内沿用上一帧光标，隐藏与移动都等批次结束"
+        );
+
+        pane_terminal.test_backdate_synchronized_output(SYNCHRONIZED_OUTPUT_TIMEOUT);
+        let expired = pane_terminal
+            .cursor_state()
+            .expect("看门狗到期后读当前光标");
+        assert_eq!((expired.x, expired.y), (9, 9));
+        assert!(!expired.visible);
+
+        pane_terminal.process_pty_bytes(pane_id, 0, b"\x1b[?2026l\x1b[?25h", &tx);
+        let after = pane_terminal.cursor_state().expect("批次结束后光标");
+        assert!(after.visible);
+        assert_eq!((after.x, after.y), (9, 9));
+    }
+
+    /// 从未被渲染过的 pane（刚 attach / 从未聚焦）在批次进行中首次被读光标：
+    /// 得到写入路径在批次前快照的光标，而不是 None 或批次内的隐藏光标。
+    #[test]
+    fn first_cursor_read_during_synchronized_output_uses_the_pre_batch_snapshot() {
+        let (tx, _rx) = mpsc::channel(4);
+        let terminal = crate::ghostty::Terminal::new(80, 24, 0).unwrap();
+        let pane_terminal = GhosttyPaneTerminal::new(terminal, tx.clone()).unwrap();
+        let pane_id = PaneId::from_raw(1);
+
+        pane_terminal.process_pty_bytes(pane_id, 0, b"\x1b[2;4H\x1b[5 q", &tx);
+        // 同一块输出里开启批次并立即隐藏、移动光标（Claude fullscreen 的形态）。
+        pane_terminal.process_pty_bytes(pane_id, 0, b"\x1b[?2026h\x1b[?25l\x1b[10;10H", &tx);
+        let during = pane_terminal
+            .cursor_state()
+            .expect("批次内首次读取也有光标");
+        assert_eq!((during.x, during.y), (3, 1), "沿用批次开始前的位置");
+        assert!(during.visible, "批次内的 ?25l 不会泄漏到宿主");
+        assert_eq!(during.shape, 5, "DECSCUSR 形状随快照保留");
+
+        // 批次分多块到达：中间块不刷新快照。
+        pane_terminal.process_pty_bytes(pane_id, 0, b"\x1b[12;12H", &tx);
+        assert_eq!(pane_terminal.cursor_state(), Some(during));
+
+        pane_terminal.process_pty_bytes(pane_id, 0, b"\x1b[?2026l\x1b[?25h", &tx);
+        let after = pane_terminal.cursor_state().expect("批次结束后光标");
+        assert_eq!((after.x, after.y), (11, 11));
+        assert!(after.visible);
     }
 
     #[test]

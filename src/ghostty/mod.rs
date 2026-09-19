@@ -1731,8 +1731,17 @@ impl Terminal {
         self.get_u16(ffi::GhosttyTerminalData_GHOSTTY_TERMINAL_DATA_ROWS)
     }
 
+    pub fn cursor_x(&self) -> Result<u16, Error> {
+        self.get_u16(ffi::GhosttyTerminalData_GHOSTTY_TERMINAL_DATA_CURSOR_X)
+    }
+
     pub fn cursor_y(&self) -> Result<u16, Error> {
         self.get_u16(ffi::GhosttyTerminalData_GHOSTTY_TERMINAL_DATA_CURSOR_Y)
+    }
+
+    /// DECTCEM（mode 25）：终端级光标可见位，不经 render state 直接读取。
+    pub fn cursor_visible(&self) -> Result<bool, Error> {
+        self.get_bool(ffi::GhosttyTerminalData_GHOSTTY_TERMINAL_DATA_CURSOR_VISIBLE)
     }
 
     pub fn effective_foreground_color(&self) -> Result<Option<RgbColor>, Error> {

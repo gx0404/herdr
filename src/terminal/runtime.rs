@@ -619,6 +619,10 @@ impl TerminalRuntime {
         self.0.test_process_pty_bytes(bytes);
     }
 
+    pub(crate) fn test_backdate_synchronized_output(&self, by: std::time::Duration) {
+        self.0.test_backdate_synchronized_output(by);
+    }
+
     pub(crate) fn test_with_scrollback_bytes(
         cols: u16,
         rows: u16,

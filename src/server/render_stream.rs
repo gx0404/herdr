@@ -458,7 +458,6 @@ pub(crate) fn render_terminal_virtual(
     runtime: &crate::terminal::TerminalRuntime,
     area: Rect,
 ) -> (ratatui::buffer::Buffer, Option<CursorState>) {
-    let suppress_cursor = runtime.synchronized_output_active();
     let backend = CursorTrackingBackend::new(area.width, area.height);
     let mut terminal = ratatui::Terminal::new(backend).expect("TestBackend::new should never fail");
 
@@ -469,20 +468,19 @@ pub(crate) fn render_terminal_virtual(
         .expect("render to TestBackend should never fail");
 
     let buffer = terminal.backend().buffer().clone();
-    let cursor = (!suppress_cursor)
-        .then(|| runtime.cursor_state(area, true))
-        .flatten()
+    // DECSET 2026 批次进行中不再整帧抑制光标：`runtime.cursor_state` 沿用批次前
+    // 快照的光标（pane 层看门狗，超时自动失效），attach 客户端不会收到一次
+    // `?25l` 闪断。与 `ui::tab_surface_cursor` / headless `retained_cursor`
+    // （两者共用 `ui::pane_host_cursor`）是同一判据；本路径无 IME 揭示。
+    let cursor = runtime
+        .cursor_state(area, true)
         .map(|cursor| CursorState {
             x: cursor.x,
             y: cursor.y,
             visible: cursor.visible && !crate::ui::pane_is_scrolled_back(runtime),
             shape: cursor.shape,
         })
-        .or_else(|| {
-            (!suppress_cursor)
-                .then(|| terminal.backend().rendered_cursor())
-                .flatten()
-        });
+        .or_else(|| terminal.backend().rendered_cursor());
 
     (buffer, cursor)
 }
@@ -515,6 +513,29 @@ mod tests {
             })),
             graphics: crate::protocol::SurfaceGraphicsScene::default(),
         }
+    }
+
+    /// attach 直渲路径：DECSET 2026 批次进行中沿用批次前光标而不是整帧关掉宿主
+    /// 光标，批次结束后恢复当前光标。
+    #[tokio::test]
+    async fn render_terminal_virtual_keeps_the_cursor_during_synchronized_output() {
+        let runtime = crate::terminal::TerminalRuntime::test_with_screen_bytes(20, 8, b"READY");
+        let area = Rect::new(0, 0, 20, 8);
+        let (_, before) = render_terminal_virtual(&runtime, area);
+        let before = before.expect("批次前有光标");
+        assert!(before.visible);
+        assert_eq!((before.x, before.y), (5, 0));
+
+        runtime.test_process_pty_bytes(b"\x1b[?2026h\x1b[?25l\x1b[3;3H");
+        assert!(runtime.synchronized_output_active());
+        let (_, during) = render_terminal_virtual(&runtime, area);
+        assert_eq!(during, Some(before), "批次内沿用批次前光标，不发 ?25l");
+
+        runtime.test_process_pty_bytes(b"\x1b[?2026l\x1b[?25h");
+        let (_, after) = render_terminal_virtual(&runtime, area);
+        let after = after.expect("批次结束后有光标");
+        assert!(after.visible);
+        assert_eq!((after.x, after.y), (2, 2));
     }
 
     #[test]

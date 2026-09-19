@@ -9,6 +9,9 @@ const CURSOR_POSITION_MAX_HOLD: Duration = Duration::from_millis(100);
 pub(crate) struct DecscusrTracker {
     state: DecscusrParseState,
     cursor_shape_overridden: bool,
+    /// 最近一次 DECSCUSR 参数（0 = 终端默认），供不经 render state 的光标
+    /// 快照直接复用；与渲染路径按视觉样式 + 闪烁反推的取值一致。
+    cursor_shape: u8,
 }
 
 #[derive(Debug, Default)]
@@ -70,6 +73,7 @@ impl DecscusrTracker {
                         let param = first_param.unwrap_or(0);
                         if param <= 6 {
                             self.cursor_shape_overridden = param != 0;
+                            self.cursor_shape = param as u8;
                         }
                     }
                     self.state = DecscusrParseState::Ground;
@@ -82,6 +86,11 @@ impl DecscusrTracker {
 
     pub(crate) fn cursor_shape_overridden(&self) -> bool {
         self.cursor_shape_overridden
+    }
+
+    /// 最近一次 DECSCUSR 参数（0 = 终端默认）。
+    pub(crate) fn cursor_shape(&self) -> u8 {
+        self.cursor_shape
     }
 }
 

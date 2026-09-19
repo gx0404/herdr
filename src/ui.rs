@@ -43,8 +43,9 @@ pub(crate) use self::status::{
     render_config_diagnostic_buffer, render_copy_feedback_buffer_styled,
 };
 pub(crate) use self::tab_surface::{
-    compute_tab_surface, compute_tab_surface_for, render_tab_surface, resize_tab_surface,
-    tab_surface_cursor, tab_surface_hyperlinks, TabSurfaceLayout, TabSurfaceTarget, TabSurfaceView,
+    cjk_ime_reveal, compute_tab_surface, compute_tab_surface_for, pane_host_cursor,
+    render_tab_surface, resize_tab_surface, tab_surface_cursor, tab_surface_hyperlinks,
+    PaneHostCursorInputs, TabSurfaceLayout, TabSurfaceTarget, TabSurfaceView,
 };
 pub(crate) use self::text::truncate_end;
 pub(crate) use self::widgets::{
