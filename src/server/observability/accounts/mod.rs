@@ -45,16 +45,39 @@ struct Task {
     generation: u64,
     account: UsageAccountConfig,
     timeout: Duration,
+    /// 由显式刷新派发：交互探测（若已开启）只在此时允许。
+    manual: bool,
+    /// 派发时的 `account_usage.interactive_probe`。
+    interactive_probe: bool,
 }
 
-/// 查询线程回报：开始执行（清 `queued`）与完成。快照装箱，避免枚举随其体积膨胀。
+/// 传给查询线程的探测选项：显式刷新 + 已开启交互探测才允许起隔离 PTY。
+#[derive(Debug, Clone, Copy, Default)]
+struct ProbeOptions {
+    manual: bool,
+    interactive_probe: bool,
+}
+
+/// 一次探测的结果：快照之外还带「停在目录信任对话」的判定与「稳定占位」标记（快照类型
+/// 进入冻结摘要，不能加字段）。
+#[derive(Debug, Clone, PartialEq, Default)]
+struct ProbeOutcome {
+    snapshot: AccountUsageSnapshot,
+    trust_required: bool,
+    /// 结果是稳定的占位态（claude 已登录、等待官方回调）：自动轮询按终态的慢 TTL 退避，
+    /// 不必每个周期都起一次真实 CLI；显式刷新、凭据 / CLI 变化与回调到达照常穿透。
+    slow_poll: bool,
+}
+
+/// 查询线程回报：开始执行（清 `queued`）与完成。结果装箱，避免枚举随其体积膨胀。
 enum Outcome {
     Started(u64),
-    Completed(u64, Box<AccountUsageSnapshot>),
+    Completed(u64, Box<ProbeOutcome>),
 }
 
 /// 终态保持：慢 TTL 与进入终态时的探测指纹。它是缓存事实，与展示用的快照状态解耦——
 /// 回调闩锁下的回落探测失败时快照仍显示回调数据，但保持照样推进并管住自动重试。
+/// 稳定占位态（`ProbeOutcome::slow_poll`）复用同一套慢 TTL：登录预检不必每个周期都起进程。
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct TerminalHold {
     /// 连续终态次数，决定 TTL 的指数。
@@ -83,9 +106,9 @@ struct CacheEntry {
     attempted_at_ms: u64,
     /// 最近一次显式刷新到达的墙钟时间，含被防抖的请求。
     manual_requested_at_ms: Option<u64>,
-    /// 官方 CLI 在等待用户确认目录信任。
-    /// TODO(Claude 探测分类)：目前没有写点、恒为 false；Claude 交互探测把 trust/permission
-    /// 关键字拆成可重试态时在 `complete` 里按探测结果填入。
+    /// 最近一次交互探测停在了官方 CLI 的目录信任对话上。只在探测结果真正并入快照时由
+    /// `complete` 写入（回调闩锁下被保留的回调快照不会挂上它）；探测成功或得到其它结果、
+    /// 以及官方回调被接受时清掉。
     trust_required: bool,
 }
 
@@ -348,7 +371,7 @@ impl ServiceState {
     /// 处理一次查询线程回报；返回是否并入了新结果（调用方据此决定是否落盘）。
     /// 这里不做 I/O 以外的持久化，落盘由循环统一按脏检查执行。
     fn complete(&mut self, outcome: Outcome, subscribers: &mut Subscribers) -> bool {
-        let (generation, mut snapshot) = match outcome {
+        let (generation, probe) = match outcome {
             Outcome::Started(generation) => {
                 for entry in self.cache.values_mut() {
                     if entry.in_flight && entry.generation == generation {
@@ -357,8 +380,13 @@ impl ServiceState {
                 }
                 return false;
             }
-            Outcome::Completed(generation, snapshot) => (generation, *snapshot),
+            Outcome::Completed(generation, probe) => (generation, *probe),
         };
+        let ProbeOutcome {
+            mut snapshot,
+            trust_required,
+            slow_poll,
+        } = probe;
         let account_id = snapshot.account_id.clone();
         {
             let Some(entry) = self.cache.get_mut(&account_id) else {
@@ -384,7 +412,16 @@ impl ServiceState {
                 // 绑定已整体撤销，回调快照随之作废，避免闩锁把账号钉死。
                 entry.callback_until_ms = None;
             }
-            merge_result(entry, snapshot, Instant::now());
+            let now = Instant::now();
+            let previous_hold = entry.terminal.clone();
+            // 只有真正并入快照的结果才更新 trust_required / 慢轮询：回调闩锁下被保留的回调
+            // 快照不能挂上「需确认目录信任」，否则客户端会在正常额度数据上显示矛盾横幅。
+            if merge_result(entry, snapshot, now) {
+                entry.trust_required = trust_required;
+                if slow_poll {
+                    entry.terminal = Some(next_terminal_hold(previous_hold.as_ref(), now));
+                }
+            }
             if let Some(hold) = &mut entry.terminal {
                 hold.fingerprint = self
                     .accounts
@@ -402,7 +439,13 @@ impl ServiceState {
             }
         }
         if let Some(entry) = self.cache.get(&account_id) {
-            notify_subscribers(subscribers, entry, &self.accounts, &self.bindings);
+            notify_subscribers(
+                subscribers,
+                entry,
+                &self.accounts,
+                &self.config,
+                &self.bindings,
+            );
         }
         true
     }
@@ -485,7 +528,7 @@ impl ServiceState {
                 if !matches_account(&selection.matching, &entry.snapshot, &self.bindings) {
                     return None;
                 }
-                let mut refresh = refresh_state(entry, account, now, now_ms);
+                let mut refresh = refresh_state(entry, account, &self.config, now, now_ms);
                 refresh.binding_inferred = selection.inferred;
                 refresh.pending_binding = self
                     .rejections
@@ -538,9 +581,16 @@ impl Service {
                     if output.send(Outcome::Started(task.generation)).is_err() {
                         break;
                     }
-                    let snapshot = query(&task.account, task.timeout);
+                    let outcome = query(
+                        &task.account,
+                        task.timeout,
+                        ProbeOptions {
+                            manual: task.manual,
+                            interactive_probe: task.interactive_probe,
+                        },
+                    );
                     if output
-                        .send(Outcome::Completed(task.generation, Box::new(snapshot)))
+                        .send(Outcome::Completed(task.generation, Box::new(outcome)))
                         .is_err()
                     {
                         break;
@@ -581,6 +631,7 @@ impl Service {
                                 &mut subscribers,
                                 entry,
                                 &state.accounts,
+                                &state.config,
                                 &state.bindings,
                             );
                         }
@@ -741,6 +792,7 @@ impl Service {
                                             &accepted,
                                             &state.cache,
                                             &state.accounts,
+                                            &state.config,
                                             &state.bindings,
                                             &mut state.saved,
                                             &mut subscribers,
@@ -818,6 +870,7 @@ fn notify_subscribers(
     subscribers: &mut Subscribers,
     entry: &CacheEntry,
     accounts: &[UsageAccountConfig],
+    config: &AccountUsageConfig,
     bindings: &HashMap<String, String>,
 ) {
     let value = &entry.snapshot;
@@ -826,7 +879,7 @@ fn notify_subscribers(
     let refresh = accounts
         .iter()
         .find(|account| account.id == value.account_id)
-        .map(|account| vec![refresh_state(entry, account, now, now_ms)]);
+        .map(|account| vec![refresh_state(entry, account, config, now, now_ms)]);
     let event = ObservationEventEnvelope::AccountUsageUpdated(AccountUsageUpdatedEvent {
         accounts: vec![value.clone()],
         refresh,
@@ -846,7 +899,10 @@ fn notify_refreshing(subscribers: &mut Subscribers, state: &ServiceState, dispat
         .filter_map(|id| {
             let entry = state.cache.get(id)?;
             let account = state.accounts.iter().find(|account| account.id == *id)?;
-            Some((entry, refresh_state(entry, account, now, now_ms)))
+            Some((
+                entry,
+                refresh_state(entry, account, &state.config, now, now_ms),
+            ))
         })
         .collect::<Vec<_>>();
     subscribers.retain(|_, (_, params, reply)| {
@@ -871,6 +927,7 @@ fn commit_accepted(
     accepted: &apply::Accepted,
     cache: &HashMap<String, CacheEntry>,
     accounts: &[UsageAccountConfig],
+    config: &AccountUsageConfig,
     bindings: &HashMap<String, String>,
     saved: &mut persistence::Saved,
     subscribers: &mut Subscribers,
@@ -893,7 +950,7 @@ fn commit_accepted(
         metrics = entry.snapshot.metrics.len(),
         "官方回调已写入账号用量"
     );
-    notify_subscribers(subscribers, entry, accounts, bindings);
+    notify_subscribers(subscribers, entry, accounts, config, bindings);
     true
 }
 
@@ -1150,6 +1207,7 @@ fn wall_clock_ms(now: Instant, now_ms: u64, at: Instant) -> u64 {
 fn refresh_state(
     entry: &CacheEntry,
     account: &UsageAccountConfig,
+    config: &AccountUsageConfig,
     now: Instant,
     now_ms: u64,
 ) -> UsageRefreshState {
@@ -1171,7 +1229,7 @@ fn refresh_state(
         binding_inferred: false,
         trust_required: entry.trust_required,
         callback_only: registry::provider(&account.agent)
-            .is_some_and(|provider| matches!(provider.query, registry::Query::Callback)),
+            .is_some_and(|provider| registry::callback_only(provider, config)),
         pending_binding: None,
     }
 }
@@ -1231,8 +1289,7 @@ fn request_accounts(
         if entry.callback_latched() {
             // 回调型厂商没有可回落的探测（只会得到占位）；其余厂商在闩锁新鲜时不回落，
             // 显式刷新可穿透；到期后允许回落，但只有 Ready 结果能覆盖（见 merge_result）。
-            let callback_only =
-                provider.is_some_and(|p| matches!(p.query, registry::Query::Callback));
+            let callback_only = provider.is_some_and(|p| registry::callback_only(p, config));
             let fresh = entry.callback_until_ms.is_some_and(|until| now_ms < until);
             if callback_only || (fresh && !manual) {
                 probe_skipped(Some(&account.id), "callback", manual);
@@ -1295,6 +1352,8 @@ fn request_accounts(
             generation,
             account: account.clone(),
             timeout: Duration::from_secs(config.probe_timeout_seconds.clamp(5, 30)),
+            manual,
+            interactive_probe: config.interactive_probe,
         };
         if tasks.try_send(task).is_ok() {
             *next_query = next_query.saturating_add(1);
@@ -1345,8 +1404,153 @@ fn probe_skipped(account_id: Option<&str>, gate: &'static str, manual: bool) {
     }
 }
 
-fn query(account: &UsageAccountConfig, timeout: Duration) -> AccountUsageSnapshot {
+/// claude 探测对进程与文件系统的全部依赖，抽成 trait 以便对
+/// `(manual, interactive_probe) × (logged_in, statusline_enabled)` 做表驱动测试。
+trait ClaudeProbeTransport {
+    /// 非交互登录预检；`Ok(None)` 表示登录态未知（输出不可解析）。
+    fn auth_status(
+        &self,
+        provider: &registry::Provider,
+        account: &UsageAccountConfig,
+        timeout: Duration,
+    ) -> Result<Option<parse::ClaudeAuthStatus>, transport::QueryError>;
+    /// 在稳定探测目录里起隔离 PTY 输入 `command`。
+    fn interactive(
+        &self,
+        provider: &registry::Provider,
+        account: &UsageAccountConfig,
+        command: &str,
+        timeout: Duration,
+        probe_dir: &std::path::Path,
+    ) -> Result<String, transport::InteractiveError>;
+    fn statusline_enabled(&self, account: &UsageAccountConfig) -> Option<bool>;
+    fn probe_dir(&self, account: &UsageAccountConfig) -> PathBuf;
+}
+
+struct RealClaudeTransport;
+
+impl ClaudeProbeTransport for RealClaudeTransport {
+    fn auth_status(
+        &self,
+        provider: &registry::Provider,
+        account: &UsageAccountConfig,
+        timeout: Duration,
+    ) -> Result<Option<parse::ClaudeAuthStatus>, transport::QueryError> {
+        transport::claude_auth_status(provider, account, timeout)
+    }
+
+    fn interactive(
+        &self,
+        provider: &registry::Provider,
+        account: &UsageAccountConfig,
+        command: &str,
+        timeout: Duration,
+        probe_dir: &std::path::Path,
+    ) -> Result<String, transport::InteractiveError> {
+        transport::interactive(provider, account, command, timeout, Some(probe_dir))
+    }
+
+    fn statusline_enabled(&self, account: &UsageAccountConfig) -> Option<bool> {
+        registry::claude_statusline_enabled(account)
+    }
+
+    fn probe_dir(&self, account: &UsageAccountConfig) -> PathBuf {
+        transport::stable_probe_dir(account)
+    }
+}
+
+/// claude 探测在快照之外的旁路结论。
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct ClaudeProbeFlags {
+    trust_required: bool,
+    slow_poll: bool,
+}
+
+/// 「已登录、等待回调」占位文案：回调已接入与否给不同的下一步指引。
+fn claude_waiting_message(statusline_enabled: Option<bool>, login_known: bool) -> String {
+    let login = if login_known {
+        "已登录"
+    } else {
+        "登录态未知（claude auth status 输出无法解析）"
+    };
+    match statusline_enabled {
+        Some(true) => format!(
+            "{login}，官方 statusline 回调已启用；在 Claude Code 会话中产生一次输出后即可看到用量"
+        ),
+        _ => format!("{login}，等待官方 statusline 回调（去 监控 → 设置 启用）"),
+    }
+}
+
+/// claude 的占位探测：主路径是官方 statusline 回调。显式刷新且 `interactive_probe` 开启时
+/// 先在稳定探测目录里起隔离 PTY 输入 `/usage`；交互探测失败（典型是尚未信任该目录）不作
+/// 最终结论，而是落回非交互 `claude auth status --json` 预检——未登录才是
+/// `NotAuthenticated`，已登录（或登录态未知）以 `NeedsBinding` 占位说明「等待回调」，交互
+/// 探测的失败原因作为附加说明、`trust_required` 作为旁路标记保留。
+fn claude_probe(
+    transport: &dyn ClaudeProbeTransport,
+    provider: &registry::Provider,
+    account: &UsageAccountConfig,
+    timeout: Duration,
+    options: ProbeOptions,
+    snapshot: &mut AccountUsageSnapshot,
+    flags: &mut ClaudeProbeFlags,
+) -> Result<Vec<UsageMetric>, transport::QueryError> {
+    let mut interactive_failure = None;
+    if options.interactive_probe && options.manual {
+        if let Some(command) = registry::interactive_fallback(provider) {
+            let probe_dir = transport.probe_dir(account);
+            match transport.interactive(provider, account, command, timeout, &probe_dir) {
+                Ok(text) => {
+                    snapshot.source = format!("官方 CLI {command}");
+                    return Ok(parse::screen(&text, provider.scope));
+                }
+                // 登录对话是终态，与预检结论一致，直接返回。
+                Err(error) if error.status == ObservationStatus::NotAuthenticated => {
+                    snapshot.source = format!("官方 CLI {command}");
+                    return Err((error.status, error.message));
+                }
+                Err(error) => interactive_failure = Some(error),
+            }
+        }
+    }
+    snapshot.source = "官方 statusline 回调；登录态来自 claude auth status".into();
+    let status = match transport.auth_status(provider, account, timeout) {
+        Ok(status) => status,
+        // 预检也失败：交互探测的失败原因更具体，优先返回它。
+        Err(error) => {
+            return Err(match interactive_failure {
+                Some(failure) => {
+                    flags.trust_required = failure.trust_required;
+                    (failure.status, failure.message)
+                }
+                None => error,
+            });
+        }
+    };
+    if let Some(status) = &status {
+        snapshot.account_identity = status.email.clone();
+        snapshot.plan = status.subscription.clone();
+        if !status.logged_in {
+            return Err((
+                ObservationStatus::NotAuthenticated,
+                "Claude Code 未登录；请在 CLI 中运行 /login（或 claude auth login）后再刷新".into(),
+            ));
+        }
+    }
+    let mut message =
+        claude_waiting_message(transport.statusline_enabled(account), status.is_some());
+    if let Some(failure) = interactive_failure {
+        flags.trust_required = failure.trust_required;
+        message.push_str("。交互探测未取得额度：");
+        message.push_str(&failure.message);
+    }
+    flags.slow_poll = true;
+    Err((ObservationStatus::NeedsBinding, message))
+}
+
+fn query(account: &UsageAccountConfig, timeout: Duration, options: ProbeOptions) -> ProbeOutcome {
     let mut snapshot = empty_snapshot(account);
+    let mut flags = ClaudeProbeFlags::default();
     let result = if account.auth_mode == "api" || account.credential_env.is_some() {
         snapshot.source = "官方 API".into();
         http::query(account, timeout)
@@ -1393,9 +1597,22 @@ fn query(account: &UsageAccountConfig, timeout: Duration) -> AccountUsageSnapsho
             }
             registry::Query::Interactive(command) => {
                 snapshot.source = format!("官方 CLI {command}");
-                transport::interactive(provider, account, command, timeout)
+                transport::interactive(provider, account, command, timeout, None)
                     .map(|text| parse::screen(&text, provider.scope))
+                    .map_err(|error| {
+                        flags.trust_required = error.trust_required;
+                        (error.status, error.message)
+                    })
             }
+            registry::Query::Callback if provider.agent == "claude" => claude_probe(
+                &RealClaudeTransport,
+                provider,
+                account,
+                timeout,
+                options,
+                &mut snapshot,
+                &mut flags,
+            ),
             registry::Query::Callback if provider.agent == "antigravity" => Err((ObservationStatus::NeedsBinding, "请将官方 statusline JSON 接入 herdr api usage-report --agent antigravity；等待 quota 字段".into())),
             registry::Query::Callback => Err((
                 ObservationStatus::NeedsBinding,
@@ -1428,7 +1645,11 @@ fn query(account: &UsageAccountConfig, timeout: Duration) -> AccountUsageSnapsho
         }
     }
     snapshot.observed_at_ms = super::now_ms();
-    snapshot
+    ProbeOutcome {
+        snapshot,
+        trust_required: flags.trust_required,
+        slow_poll: flags.slow_poll,
+    }
 }
 
 fn invalidate_changed_identity(
@@ -1452,8 +1673,9 @@ fn invalidate_changed_identity(
 }
 
 /// 把一次探测结果并入缓存。`observed_at_ms` 只在拿到真实额度（Ready）时更新；
-/// 失败只推进 failures / 终态保持，并保留已有样本或回调快照。
-fn merge_result(entry: &mut CacheEntry, snapshot: AccountUsageSnapshot, now: Instant) {
+/// 失败只推进 failures / 终态保持，并保留已有样本或回调快照。返回本次结果是否真正并入了
+/// 可见快照（回调闩锁下被保留的回调快照返回 false，调用方据此不更新旁路标记）。
+fn merge_result(entry: &mut CacheEntry, snapshot: AccountUsageSnapshot, now: Instant) -> bool {
     entry.retry_after = snapshot
         .message
         .as_deref()
@@ -1465,7 +1687,7 @@ fn merge_result(entry: &mut CacheEntry, snapshot: AccountUsageSnapshot, now: Ins
         // 探测拿到了真实额度：回调闩锁让位，直到下一次官方回调再接管。
         entry.callback_until_ms = None;
         entry.snapshot = snapshot;
-        return;
+        return true;
     }
     entry.failures = if snapshot.status == ObservationStatus::Error {
         entry.failures.saturating_add(1)
@@ -1476,18 +1698,19 @@ fn merge_result(entry: &mut CacheEntry, snapshot: AccountUsageSnapshot, now: Ins
         is_terminal(snapshot.status).then(|| next_terminal_hold(entry.terminal.as_ref(), now));
     if entry.callback_latched() {
         // 回落探测没有拿到额度：官方回调的快照更可信，只记录这次尝试。
-        return;
+        return false;
     }
     if snapshot.status == ObservationStatus::Error && !entry.snapshot.metrics.is_empty() {
         entry.snapshot.status = ObservationStatus::Stale;
         entry.snapshot.message = snapshot.message;
-        return;
+        return true;
     }
     let observed_at_ms = entry.snapshot.observed_at_ms;
     entry.snapshot = AccountUsageSnapshot {
         observed_at_ms,
         ..snapshot
     };
+    true
 }
 
 #[cfg(test)]
@@ -1529,6 +1752,15 @@ mod tests {
             }],
             ..snapshot(ObservationStatus::Ready)
         }
+    }
+
+    /// 查询线程回报的完成结果。
+    fn probed(snapshot: AccountUsageSnapshot, trust_required: bool) -> Box<ProbeOutcome> {
+        Box::new(ProbeOutcome {
+            snapshot,
+            trust_required,
+            slow_poll: false,
+        })
     }
 
     /// 测试用的服务状态：账号清单、冷缓存与临时持久化路径；不依赖本机 PATH 与配置文件。
@@ -1574,6 +1806,12 @@ mod tests {
             std::mem::replace(entry, fresh_entry(&account)),
         )]);
         let (tasks, input) = mpsc::sync_channel(1);
+        // claude 默认是纯回调厂商；这里验证的是通用闸门，按「有可回落探测」的形态跑
+        // （纯回调闸门本身由 request_accounts 表驱动用例覆盖）。
+        let config = AccountUsageConfig {
+            interactive_probe: true,
+            ..Default::default()
+        };
         request_accounts(
             &UsageParams {
                 account_id: Some(account.id.clone()),
@@ -1581,7 +1819,7 @@ mod tests {
             },
             manual,
             std::slice::from_ref(&account),
-            &AccountUsageConfig::default(),
+            &config,
             &HashMap::new(),
             &mut cache,
             &tasks,
@@ -1886,8 +2124,11 @@ mod tests {
         let claude = registry::provider("claude");
         let cursor = registry::provider("cursor");
         let pi = registry::provider("pi");
-        // 播报值：交互/JSON 探测按 CLI 周期，报表接口按 API 周期，回调型为 0。
-        assert_eq!(minimum_interval_seconds(claude, false, &config), 300);
+        // 播报值：交互/JSON 探测按 CLI 周期，报表接口按 API 周期，回调型为 0
+        // （claude 主路径已改为官方 statusline 回调）。
+        let gemini = registry::provider("gemini");
+        assert_eq!(minimum_interval_seconds(gemini, false, &config), 300);
+        assert_eq!(minimum_interval_seconds(claude, false, &config), 0);
         assert_eq!(minimum_interval_seconds(cursor, false, &config), 60);
         assert_eq!(minimum_interval_seconds(pi, false, &config), 0);
         assert_eq!(minimum_interval_seconds(claude, true, &config), 60);
@@ -1901,6 +2142,7 @@ mod tests {
         assert_eq!(refresh_interval(&account("pi", "cli"), &config), 300);
         assert_eq!(refresh_interval(&account("claude", "api"), &config), 60);
         assert_eq!(refresh_interval(&claude_account(), &config), 300);
+        assert_eq!(refresh_interval(&account("gemini", "cli"), &config), 300);
         // 显式刷新防抖是固定 10 s，与厂商间隔无关。
         assert_eq!(MANUAL_DEBOUNCE, Duration::from_secs(10));
     }
@@ -1932,7 +2174,13 @@ mod tests {
         entry.requested_at = Some(now - Duration::from_secs(5));
         assert!(!dispatch(&mut entry, true), "5 s 前刚探测：显式刷新被防抖");
         assert!(entry.manual_requested_at_ms.is_some(), "被防抖的请求也登记");
-        let state = refresh_state(&entry, &claude_account(), now, 1_000_000);
+        let state = refresh_state(
+            &entry,
+            &claude_account(),
+            &AccountUsageConfig::default(),
+            now,
+            1_000_000,
+        );
         let next = state.next_allowed_at_ms.expect("被防抖时给出下次允许时间");
         assert!(
             (1_004_000..=1_005_100).contains(&next),
@@ -2050,13 +2298,16 @@ mod tests {
     #[test]
     fn refresh_state_exposes_progress_debounce_and_retry_after() {
         let now = Instant::now();
+        let config = AccountUsageConfig::default();
         let account = claude_account();
         let cold = fresh_entry(&account);
-        let state = refresh_state(&cold, &account, now, 1_000);
+        let state = refresh_state(&cold, &account, &config, now, 1_000);
         assert_eq!(
             state,
             UsageRefreshState {
                 account_id: "claude:default".into(),
+                // claude 主路径是官方回调，默认关闭交互探测。
+                callback_only: true,
                 ..Default::default()
             }
         );
@@ -2069,7 +2320,7 @@ mod tests {
         entry.manual_requested_at_ms = Some(950);
         entry.retry_after = Some(now + Duration::from_secs(60));
         entry.trust_required = true;
-        let state = refresh_state(&entry, &account, now, 1_000);
+        let state = refresh_state(&entry, &account, &config, now, 1_000);
         assert!(state.in_flight && state.queued && state.trust_required);
         assert_eq!(state.attempted_at_ms, Some(900));
         assert_eq!(state.requested_at_ms, Some(950));
@@ -2077,11 +2328,31 @@ mod tests {
         // 防抖 10 s 与退避 60 s 取更晚者。
         assert_eq!(state.next_allowed_at_ms, Some(61_000));
         entry.retry_after = Some(now - Duration::from_secs(1));
-        let state = refresh_state(&entry, &account, now, 1_000);
+        let state = refresh_state(&entry, &account, &config, now, 1_000);
         assert_eq!(state.retry_after_ms, None, "已过期的退避不再暴露");
         assert_eq!(state.next_allowed_at_ms, Some(11_000));
         assert!(!state.binding_inferred && state.pending_binding.is_none());
-        assert!(!state.callback_only, "claude 有可回落的探测");
+        assert!(
+            state.callback_only,
+            "claude 默认只走官方回调：显式刷新只做登录预检，不产生新数据"
+        );
+        let opted_in = AccountUsageConfig {
+            interactive_probe: true,
+            ..Default::default()
+        };
+        assert!(
+            !refresh_state(&entry, &account, &opted_in, now, 1_000).callback_only,
+            "开启交互探测后显式刷新可回落到 /usage"
+        );
+        let gemini = UsageAccountConfig {
+            id: "gemini:default".into(),
+            agent: "gemini".into(),
+            ..Default::default()
+        };
+        assert!(
+            !refresh_state(&fresh_entry(&gemini), &gemini, &config, now, 1_000).callback_only,
+            "交互型厂商有可回落的探测"
+        );
 
         // 回调型厂商：显式刷新不会产生新数据，客户端据此禁用刷新动作。
         let pi = UsageAccountConfig {
@@ -2089,7 +2360,7 @@ mod tests {
             agent: "pi".into(),
             ..Default::default()
         };
-        let state = refresh_state(&fresh_entry(&pi), &pi, now, 1_000);
+        let state = refresh_state(&fresh_entry(&pi), &pi, &config, now, 1_000);
         assert!(state.callback_only);
     }
 
@@ -2442,7 +2713,14 @@ mod tests {
         );
 
         // 读路径看到的也是缓存态，且闩锁过期允许回落探测；回落成功后恢复 Ready。
-        let mut state = test_state(AccountUsageConfig::default(), vec![account.clone()]);
+        // claude 默认纯回调，这里开启交互探测以验证通用的回落语义。
+        let mut state = test_state(
+            AccountUsageConfig {
+                interactive_probe: true,
+                ..Default::default()
+            },
+            vec![account.clone()],
+        );
         state.cache = cache;
         let (tasks, input) = mpsc::sync_channel(4);
         let ResponseResult::AccountUsage { accounts, .. } = state.usage(
@@ -2534,6 +2812,8 @@ mod tests {
         bindings: Vec<(&'static str, &'static str)>,
         enabled: bool,
         disabled_providers: Vec<&'static str>,
+        /// `account_usage.interactive_probe`：开启后 claude 有可回落的探测（不再是纯回调）。
+        interactive_probe: bool,
         prepare: fn(&mut CacheEntry),
         /// 预先塞满任务通道，模拟 `queue_full` 闸门。
         queue_full: bool,
@@ -2555,6 +2835,7 @@ mod tests {
             bindings: Vec::new(),
             enabled: true,
             disabled_providers: Vec::new(),
+            interactive_probe: false,
             prepare: |_| {},
             queue_full: false,
             enqueued: true,
@@ -2652,6 +2933,7 @@ mod tests {
                 ..gate("新鲜回调不回落探测")
             },
             Gate {
+                interactive_probe: true,
                 prepare: |entry| {
                     entry.callback_until_ms = Some(super::super::now_ms().saturating_sub(1));
                     entry.snapshot.status = ObservationStatus::Ready;
@@ -2659,7 +2941,30 @@ mod tests {
                 },
                 status: Some(ObservationStatus::Ready),
                 message: None,
-                ..gate("过期回调回落探测且不改状态")
+                ..gate("过期回调回落探测且不改状态（有可回落探测的厂商）")
+            },
+            Gate {
+                manual: true,
+                interactive_probe: true,
+                prepare: |entry| {
+                    entry.callback_until_ms = Some(super::super::now_ms() + CALLBACK_LATCH_MS);
+                    entry.snapshot.status = ObservationStatus::Ready;
+                    entry.snapshot.message = None;
+                },
+                status: Some(ObservationStatus::Ready),
+                message: None,
+                ..gate("对照：显式刷新穿透新鲜回调闩锁（有可回落探测的厂商）")
+            },
+            Gate {
+                prepare: |entry| {
+                    entry.callback_until_ms = Some(super::super::now_ms().saturating_sub(1));
+                    entry.snapshot.status = ObservationStatus::Ready;
+                    entry.snapshot.message = None;
+                },
+                enqueued: false,
+                status: Some(ObservationStatus::Ready),
+                message: None,
+                ..gate("claude 默认纯回调：闩锁过期也不回落（登录预检拿不到额度）")
             },
             Gate {
                 manual: true,
@@ -2668,9 +2973,10 @@ mod tests {
                     entry.snapshot.status = ObservationStatus::Ready;
                     entry.snapshot.message = None;
                 },
+                enqueued: false,
                 status: Some(ObservationStatus::Ready),
                 message: None,
-                ..gate("对照：显式刷新穿透新鲜回调闩锁")
+                ..gate("claude 默认纯回调：显式刷新也不穿透闩锁")
             },
             Gate {
                 prepare: |entry| {
@@ -2690,6 +2996,7 @@ mod tests {
             },
             Gate {
                 manual: true,
+                interactive_probe: true,
                 prepare: |entry| {
                     entry.callback_until_ms = Some(super::super::now_ms().saturating_sub(1));
                     entry.snapshot.status = ObservationStatus::Ready;
@@ -2852,6 +3159,7 @@ mod tests {
                     .iter()
                     .map(|agent| agent.to_string())
                     .collect(),
+                interactive_probe: case.interactive_probe,
                 ..Default::default()
             };
             let bindings = case
@@ -2868,6 +3176,8 @@ mod tests {
                     generation: 0,
                     account: account.clone(),
                     timeout: Duration::from_secs(5),
+                    manual: false,
+                    interactive_probe: false,
                 };
                 assert!(tasks.try_send(placeholder).is_ok(), "{}: 预填", case.name);
             }
@@ -2905,6 +3215,12 @@ mod tests {
                 let task = task.unwrap_or_else(|| panic!("{}: 缺少任务", case.name));
                 assert_eq!(task.generation, 5, "{}: generation", case.name);
                 assert_eq!(task.account.id, account.id, "{}: 账号", case.name);
+                assert_eq!(task.manual, case.manual, "{}: 任务携带 manual", case.name);
+                assert_eq!(
+                    task.interactive_probe, config.interactive_probe,
+                    "{}: 任务携带 interactive_probe",
+                    case.name
+                );
                 assert_eq!(next_query, 6, "{}: next_query", case.name);
                 assert!(entry.in_flight, "{}: in_flight", case.name);
                 assert!(entry.queued, "{}: queued", case.name);
@@ -3008,6 +3324,7 @@ mod tests {
             &accepted,
             &cache,
             &accounts,
+            &AccountUsageConfig::default(),
             &bindings,
             &mut saved,
             &mut subscribers
@@ -3043,6 +3360,7 @@ mod tests {
             &missing,
             &cache,
             &accounts,
+            &AccountUsageConfig::default(),
             &bindings,
             &mut saved,
             &mut subscribers
@@ -3146,6 +3464,526 @@ mod tests {
     }
 
     #[test]
+    fn completion_records_trust_required_from_the_probe_and_clears_it_afterwards() {
+        let account = claude_account();
+        let mut state = test_state(AccountUsageConfig::default(), vec![account.clone()]);
+        let mut subscribers = Subscribers::new();
+        let dispatch = |state: &mut ServiceState, generation: u64| {
+            if let Some(entry) = state.cache.get_mut(&account.id) {
+                entry.in_flight = true;
+                entry.generation = generation;
+            }
+        };
+        // 探测停在目录信任对话：transient Error + trust_required，不进终态保持。
+        dispatch(&mut state, 1);
+        state.complete(
+            Outcome::Completed(
+                1,
+                probed(
+                    AccountUsageSnapshot {
+                        message: Some("需在 CLI 中确认目录信任".into()),
+                        ..snapshot(ObservationStatus::Error)
+                    },
+                    true,
+                ),
+            ),
+            &mut subscribers,
+        );
+        let entry = &state.cache[&account.id];
+        assert!(entry.trust_required);
+        assert_eq!(entry.snapshot.status, ObservationStatus::Error);
+        assert!(entry.terminal.is_none(), "信任态不是终态");
+        assert_eq!(entry.failures, 1, "按 transient 退避");
+        let refresh = refresh_state(
+            entry,
+            &account,
+            &AccountUsageConfig::default(),
+            Instant::now(),
+            1_000,
+        );
+        assert!(refresh.trust_required, "刷新状态暴露 trust_required");
+
+        // 用户确认后拿到额度：清位。
+        dispatch(&mut state, 2);
+        state.complete(
+            Outcome::Completed(2, probed(ready_snapshot(3.0, 3), false)),
+            &mut subscribers,
+        );
+        let entry = &state.cache[&account.id];
+        assert!(!entry.trust_required);
+        assert_eq!(entry.snapshot.status, ObservationStatus::Ready);
+
+        // 未登录才是终态，且不带 trust_required。
+        dispatch(&mut state, 3);
+        state.complete(
+            Outcome::Completed(
+                3,
+                probed(snapshot(ObservationStatus::NotAuthenticated), false),
+            ),
+            &mut subscribers,
+        );
+        let entry = &state.cache[&account.id];
+        assert!(!entry.trust_required);
+        assert!(entry.terminal.is_some());
+        cleanup(&state);
+    }
+
+    #[test]
+    fn trust_required_is_not_written_onto_a_latched_callback_snapshot() {
+        let account = claude_account();
+        let mut state = test_state(
+            AccountUsageConfig {
+                interactive_probe: true,
+                ..Default::default()
+            },
+            vec![account.clone()],
+        );
+        let now_ms = super::super::now_ms();
+        {
+            let entry = state.cache.get_mut(&account.id).expect("缓存条目");
+            entry.snapshot = ready_snapshot(12.0, now_ms);
+            entry.callback_until_ms = Some(now_ms + CALLBACK_LATCH_MS);
+            entry.in_flight = true;
+            entry.generation = 1;
+        }
+        // 已收到回调、显式刷新回落的交互探测停在信任对话：回调快照被保留，trust_required
+        // 也不得挂上去（否则客户端在正常额度数据上显示「需确认目录信任」）。
+        state.complete(
+            Outcome::Completed(
+                1,
+                probed(
+                    AccountUsageSnapshot {
+                        message: Some("需在 CLI 中确认目录信任".into()),
+                        ..snapshot(ObservationStatus::NeedsBinding)
+                    },
+                    true,
+                ),
+            ),
+            &mut Subscribers::new(),
+        );
+        let entry = &state.cache[&account.id];
+        assert_eq!(
+            entry.snapshot.status,
+            ObservationStatus::Ready,
+            "回调快照保留"
+        );
+        assert_eq!(entry.snapshot.metrics[0].used, Some(12.0));
+        assert!(!entry.trust_required, "未并入的结果不更新 trust_required");
+        assert!(!entry.in_flight);
+        cleanup(&state);
+    }
+
+    #[test]
+    fn stable_placeholder_results_back_off_automatic_polling_like_terminal_states() {
+        let account = claude_account();
+        let mut state = test_state(AccountUsageConfig::default(), vec![account.clone()]);
+        let complete_placeholder = |state: &mut ServiceState, generation: u64| {
+            if let Some(entry) = state.cache.get_mut(&account.id) {
+                entry.in_flight = true;
+                entry.generation = generation;
+            }
+            state.complete(
+                Outcome::Completed(
+                    generation,
+                    Box::new(ProbeOutcome {
+                        snapshot: AccountUsageSnapshot {
+                            message: Some("已登录，等待官方 statusline 回调".into()),
+                            ..snapshot(ObservationStatus::NeedsBinding)
+                        },
+                        trust_required: false,
+                        slow_poll: true,
+                    }),
+                ),
+                &mut Subscribers::new(),
+            );
+        };
+        complete_placeholder(&mut state, 1);
+        let entry = &state.cache[&account.id];
+        assert_eq!(entry.snapshot.status, ObservationStatus::NeedsBinding);
+        assert_eq!(entry.failures, 0, "占位不是失败");
+        let hold = entry.terminal.as_ref().expect("稳定占位进入慢 TTL");
+        assert_eq!(hold.streak, 1);
+        assert!(hold.until.is_some());
+        // 同样的占位再来一次：streak 推进（TTL 翻倍），而不是每次从头开始。
+        complete_placeholder(&mut state, 2);
+        assert_eq!(
+            state.cache[&account.id]
+                .terminal
+                .as_ref()
+                .map(|hold| hold.streak),
+            Some(2)
+        );
+        // 自动轮询被慢 TTL 挡住；显式刷新穿透。
+        let (tasks, input) = mpsc::sync_channel(2);
+        for (manual, expected) in [(false, false), (true, true)] {
+            if let Some(entry) = state.cache.get_mut(&account.id) {
+                entry.requested_at = None;
+            }
+            request_accounts(
+                &UsageParams {
+                    account_id: Some(account.id.clone()),
+                    ..Default::default()
+                },
+                manual,
+                std::slice::from_ref(&account),
+                &state.config,
+                &HashMap::new(),
+                &mut state.cache,
+                &tasks,
+                &mut 10,
+            );
+            assert_eq!(input.try_recv().is_ok(), expected, "manual={manual}");
+        }
+        // 官方回调到达：慢 TTL 与 trust_required 一起清掉。
+        let generation = 3;
+        if let Some(entry) = state.cache.get_mut(&account.id) {
+            entry.in_flight = true;
+            entry.generation = generation;
+            entry.trust_required = true;
+        }
+        let accepted = apply::apply_report(
+            UsageReportParams {
+                account_id: account.id.clone(),
+                snapshot: ready_snapshot(1.0, 5),
+                ..Default::default()
+            },
+            apply::Context {
+                accounts: &state.accounts,
+                enabled: true,
+                now_ms: 5,
+            },
+            &mut state.bindings,
+            &mut state.cache,
+            &mut state.rejections,
+            &mut state.next_query,
+        );
+        assert!(accepted.is_ok(), "{:?}", accepted.err().map(|r| r.code));
+        let entry = &state.cache[&account.id];
+        assert!(entry.terminal.is_none(), "回调接管后不再退避");
+        assert!(!entry.trust_required, "回调成功即不再被信任对话阻塞");
+        cleanup(&state);
+    }
+
+    /// 记录调用的假 transport：按用例给定登录态 / 回调接入 / 交互探测结果。
+    struct FakeClaudeTransport {
+        auth: Result<Option<parse::ClaudeAuthStatus>, transport::QueryError>,
+        statusline_enabled: Option<bool>,
+        interactive: Result<String, transport::InteractiveError>,
+        calls: std::cell::RefCell<Vec<&'static str>>,
+    }
+
+    impl ClaudeProbeTransport for FakeClaudeTransport {
+        fn auth_status(
+            &self,
+            _: &registry::Provider,
+            _: &UsageAccountConfig,
+            _: Duration,
+        ) -> Result<Option<parse::ClaudeAuthStatus>, transport::QueryError> {
+            self.calls.borrow_mut().push("auth_status");
+            self.auth.clone()
+        }
+        fn interactive(
+            &self,
+            _: &registry::Provider,
+            _: &UsageAccountConfig,
+            command: &str,
+            _: Duration,
+            probe_dir: &std::path::Path,
+        ) -> Result<String, transport::InteractiveError> {
+            assert_eq!(command, "/usage");
+            assert!(
+                probe_dir.ends_with("claude-default"),
+                "稳定探测目录按账号 id"
+            );
+            self.calls.borrow_mut().push("interactive");
+            self.interactive.clone()
+        }
+        fn statusline_enabled(&self, _: &UsageAccountConfig) -> Option<bool> {
+            self.calls.borrow_mut().push("statusline_enabled");
+            self.statusline_enabled
+        }
+        fn probe_dir(&self, account: &UsageAccountConfig) -> PathBuf {
+            PathBuf::from("/state/probe").join(account.id.replace(':', "-"))
+        }
+    }
+
+    #[test]
+    fn claude_probe_only_opens_a_pty_on_manual_refresh_with_the_opt_in_and_falls_back_to_auth_status(
+    ) {
+        let provider = registry::provider("claude").expect("claude 已登记");
+        let account = claude_account();
+        let logged_in = || {
+            Ok(Some(parse::ClaudeAuthStatus {
+                logged_in: true,
+                email: Some("me@example.test".into()),
+                subscription: Some("max".into()),
+            }))
+        };
+        let logged_out = || {
+            Ok(Some(parse::ClaudeAuthStatus {
+                logged_in: false,
+                email: None,
+                subscription: None,
+            }))
+        };
+        let trust_blocked = || {
+            Err(transport::InteractiveError {
+                status: ObservationStatus::Error,
+                message:
+                    "需在 CLI 中确认目录信任：在终端运行 `cd /state/probe/claude-default && claude`"
+                        .into(),
+                trust_required: true,
+            })
+        };
+        struct Case {
+            name: &'static str,
+            manual: bool,
+            interactive_probe: bool,
+            auth: Result<Option<parse::ClaudeAuthStatus>, transport::QueryError>,
+            statusline_enabled: Option<bool>,
+            interactive: Result<String, transport::InteractiveError>,
+            expect_calls: Vec<&'static str>,
+            expect_status: ObservationStatus,
+            expect_message_contains: &'static str,
+            expect_flags: ClaudeProbeFlags,
+            expect_identity: Option<&'static str>,
+        }
+        let placeholder = ClaudeProbeFlags {
+            trust_required: false,
+            slow_poll: true,
+        };
+        let cases = vec![
+            Case {
+                name: "自动轮询 + 已登录 + 回调未接入：只做预检，等待回调",
+                manual: false,
+                interactive_probe: false,
+                auth: logged_in(),
+                statusline_enabled: Some(false),
+                interactive: trust_blocked(),
+                expect_calls: vec!["auth_status", "statusline_enabled"],
+                expect_status: ObservationStatus::NeedsBinding,
+                expect_message_contains: "已登录，等待官方 statusline 回调（去 监控 → 设置 启用）",
+                expect_flags: placeholder,
+                expect_identity: Some("me@example.test"),
+            },
+            Case {
+                name: "自动轮询 + 已登录 + 回调已接入：等待一次输出",
+                manual: false,
+                interactive_probe: false,
+                auth: logged_in(),
+                statusline_enabled: Some(true),
+                interactive: trust_blocked(),
+                expect_calls: vec!["auth_status", "statusline_enabled"],
+                expect_status: ObservationStatus::NeedsBinding,
+                expect_message_contains:
+                    "回调已启用；在 Claude Code 会话中产生一次输出后即可看到用量",
+                expect_flags: placeholder,
+                expect_identity: Some("me@example.test"),
+            },
+            Case {
+                name: "自动轮询 + 未登录：终态 NotAuthenticated",
+                manual: false,
+                interactive_probe: false,
+                auth: logged_out(),
+                statusline_enabled: Some(true),
+                interactive: trust_blocked(),
+                expect_calls: vec!["auth_status"],
+                expect_status: ObservationStatus::NotAuthenticated,
+                expect_message_contains: "Claude Code 未登录",
+                expect_flags: ClaudeProbeFlags::default(),
+                expect_identity: None,
+            },
+            Case {
+                name: "自动轮询 + 已开启交互探测：绝不起 PTY",
+                manual: false,
+                interactive_probe: true,
+                auth: logged_in(),
+                statusline_enabled: Some(false),
+                interactive: Ok("Weekly 20% used".into()),
+                expect_calls: vec!["auth_status", "statusline_enabled"],
+                expect_status: ObservationStatus::NeedsBinding,
+                expect_message_contains: "等待官方 statusline 回调",
+                expect_flags: placeholder,
+                expect_identity: Some("me@example.test"),
+            },
+            Case {
+                name: "显式刷新 + 未开启交互探测：仍只做预检",
+                manual: true,
+                interactive_probe: false,
+                auth: logged_in(),
+                statusline_enabled: None,
+                interactive: Ok("Weekly 20% used".into()),
+                expect_calls: vec!["auth_status", "statusline_enabled"],
+                expect_status: ObservationStatus::NeedsBinding,
+                expect_message_contains: "等待官方 statusline 回调",
+                expect_flags: placeholder,
+                expect_identity: Some("me@example.test"),
+            },
+            Case {
+                name: "显式刷新 + 已开启 + 交互停在信任对话：落回预检，信任提示作为附加说明",
+                manual: true,
+                interactive_probe: true,
+                auth: logged_in(),
+                statusline_enabled: Some(false),
+                interactive: trust_blocked(),
+                expect_calls: vec!["interactive", "auth_status", "statusline_enabled"],
+                expect_status: ObservationStatus::NeedsBinding,
+                expect_message_contains: "cd /state/probe/claude-default && claude",
+                expect_flags: ClaudeProbeFlags {
+                    trust_required: true,
+                    slow_poll: true,
+                },
+                expect_identity: Some("me@example.test"),
+            },
+            Case {
+                name: "显式刷新 + 已开启 + 交互停在信任对话 + 未登录：终态 NotAuthenticated",
+                manual: true,
+                interactive_probe: true,
+                auth: logged_out(),
+                statusline_enabled: Some(false),
+                interactive: trust_blocked(),
+                expect_calls: vec!["interactive", "auth_status"],
+                expect_status: ObservationStatus::NotAuthenticated,
+                expect_message_contains: "Claude Code 未登录",
+                expect_flags: ClaudeProbeFlags::default(),
+                expect_identity: None,
+            },
+            Case {
+                name: "显式刷新 + 已开启 + 交互超时 + 预检也失败：返回交互探测的原因",
+                manual: true,
+                interactive_probe: true,
+                auth: Err((ObservationStatus::Error, "官方 CLI 查询超时".into())),
+                statusline_enabled: Some(false),
+                interactive: Err(transport::InteractiveError {
+                    status: ObservationStatus::Error,
+                    message: "官方用量查询超时；未发送模型任务".into(),
+                    trust_required: false,
+                }),
+                expect_calls: vec!["interactive", "auth_status"],
+                expect_status: ObservationStatus::Error,
+                expect_message_contains: "官方用量查询超时",
+                expect_flags: ClaudeProbeFlags::default(),
+                expect_identity: None,
+            },
+            Case {
+                name: "显式刷新 + 已开启 + 登录对话：终态，不再预检",
+                manual: true,
+                interactive_probe: true,
+                auth: logged_in(),
+                statusline_enabled: Some(false),
+                interactive: Err(transport::InteractiveError {
+                    status: ObservationStatus::NotAuthenticated,
+                    message: "官方 CLI 需要登录".into(),
+                    trust_required: false,
+                }),
+                expect_calls: vec!["interactive"],
+                expect_status: ObservationStatus::NotAuthenticated,
+                expect_message_contains: "官方 CLI 需要登录",
+                expect_flags: ClaudeProbeFlags::default(),
+                expect_identity: None,
+            },
+            Case {
+                name: "自动轮询 + 预检输出不可解析：登录态未知，仍是等待回调的占位而非终态",
+                manual: false,
+                interactive_probe: false,
+                auth: Ok(None),
+                statusline_enabled: Some(false),
+                interactive: trust_blocked(),
+                expect_calls: vec!["auth_status", "statusline_enabled"],
+                expect_status: ObservationStatus::NeedsBinding,
+                expect_message_contains: "登录态未知",
+                expect_flags: placeholder,
+                expect_identity: None,
+            },
+            Case {
+                name: "自动轮询 + 旧版 CLI 没有 auth status：终态 Unsupported 原样返回",
+                manual: false,
+                interactive_probe: false,
+                auth: Err((
+                    ObservationStatus::Unsupported,
+                    "此版本 Claude Code 没有 auth status --json".into(),
+                )),
+                statusline_enabled: Some(false),
+                interactive: trust_blocked(),
+                expect_calls: vec!["auth_status"],
+                expect_status: ObservationStatus::Unsupported,
+                expect_message_contains: "auth status",
+                expect_flags: ClaudeProbeFlags::default(),
+                expect_identity: None,
+            },
+        ];
+        for case in cases {
+            let fake = FakeClaudeTransport {
+                auth: case.auth,
+                statusline_enabled: case.statusline_enabled,
+                interactive: case.interactive,
+                calls: std::cell::RefCell::new(Vec::new()),
+            };
+            let mut snapshot = empty_snapshot(&account);
+            let mut flags = ClaudeProbeFlags::default();
+            let result = claude_probe(
+                &fake,
+                provider,
+                &account,
+                Duration::from_secs(5),
+                ProbeOptions {
+                    manual: case.manual,
+                    interactive_probe: case.interactive_probe,
+                },
+                &mut snapshot,
+                &mut flags,
+            );
+            assert_eq!(
+                *fake.calls.borrow(),
+                case.expect_calls,
+                "{}: 调用序列",
+                case.name
+            );
+            let (status, message) = result.expect_err("本表全部是非 Ready 结局");
+            assert_eq!(status, case.expect_status, "{}: status", case.name);
+            assert!(
+                message.contains(case.expect_message_contains),
+                "{}: 文案 {message}",
+                case.name
+            );
+            assert_eq!(flags, case.expect_flags, "{}: 旁路标记", case.name);
+            assert_eq!(
+                snapshot.account_identity.as_deref(),
+                case.expect_identity,
+                "{}: 身份",
+                case.name
+            );
+        }
+
+        // 对照：交互探测成功时直接产出额度，不再预检。
+        let fake = FakeClaudeTransport {
+            auth: logged_in(),
+            statusline_enabled: Some(false),
+            interactive: Ok("Weekly 20% used\n".into()),
+            calls: std::cell::RefCell::new(Vec::new()),
+        };
+        let mut snapshot = empty_snapshot(&account);
+        let mut flags = ClaudeProbeFlags::default();
+        let metrics = claude_probe(
+            &fake,
+            provider,
+            &account,
+            Duration::from_secs(5),
+            ProbeOptions {
+                manual: true,
+                interactive_probe: true,
+            },
+            &mut snapshot,
+            &mut flags,
+        )
+        .expect("交互探测成功");
+        assert_eq!(metrics.len(), 1);
+        assert_eq!(*fake.calls.borrow(), vec!["interactive"]);
+        assert_eq!(snapshot.source, "官方 CLI /usage");
+        assert_eq!(flags, ClaudeProbeFlags::default());
+    }
+
+    #[test]
     fn worker_start_clears_queued_and_completion_persists_identity() {
         let account = claude_account();
         let mut entry = fresh_entry(&account);
@@ -3166,17 +4004,20 @@ mod tests {
         assert!(state.cache[&account.id].in_flight);
         // 旧 generation 的完成同样被忽略。
         state.complete(
-            Outcome::Completed(2, Box::new(ready_snapshot(1.0, 1))),
+            Outcome::Completed(2, probed(ready_snapshot(1.0, 1), false)),
             &mut subscribers,
         );
         assert!(state.cache[&account.id].in_flight);
         state.complete(
             Outcome::Completed(
                 3,
-                Box::new(AccountUsageSnapshot {
-                    account_identity: Some("me@example.test".into()),
-                    ..ready_snapshot(2.0, 2)
-                }),
+                probed(
+                    AccountUsageSnapshot {
+                        account_identity: Some("me@example.test".into()),
+                        ..ready_snapshot(2.0, 2)
+                    },
+                    false,
+                ),
             ),
             &mut subscribers,
         );

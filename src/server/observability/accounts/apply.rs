@@ -413,10 +413,12 @@ pub(super) fn apply_report(
     *next_query = next_query.saturating_add(1);
     entry.in_flight = false;
     entry.queued = false;
-    // 官方回调接管该账号：一个闩锁周期内不回落探测，成功一次即清零失败与终态。
+    // 官方回调接管该账号：一个闩锁周期内不回落探测，成功一次即清零失败与终态；回调能到
+    // 说明不再被交互探测的目录信任对话阻塞，旁路标记一并清掉。
     entry.callback_until_ms = Some(now_ms.saturating_add(super::CALLBACK_LATCH_MS));
     entry.failures = 0;
     entry.terminal = None;
+    entry.trust_required = false;
     entry.snapshot = snapshot;
     Ok(Accepted {
         account_id: params.account_id,
@@ -591,6 +593,27 @@ mod tests {
         assert_eq!(entry.snapshot.agent, "claude");
         assert_eq!(entry.snapshot.message, None);
         assert!(fixture.pending_panes().is_empty());
+    }
+
+    #[test]
+    fn accepted_report_clears_the_trust_required_flag_left_by_a_probe() {
+        let mut fixture = Fixture::new(vec![account("claude:default", "claude")]);
+        fixture
+            .bindings
+            .insert("pane-1".into(), "claude:default".into());
+        if let Some(entry) = fixture.cache.get_mut("claude:default") {
+            entry.trust_required = true;
+            entry.failures = 3;
+        }
+        let result = fixture.apply(report(Some("pane-1"), ""));
+        assert!(result.is_ok(), "{}", code(&result));
+        let entry = &fixture.cache["claude:default"];
+        assert!(
+            !entry.trust_required,
+            "官方回调成功即证明不再被信任对话阻塞"
+        );
+        assert_eq!(entry.failures, 0);
+        assert!(entry.terminal.is_none());
     }
 
     #[test]

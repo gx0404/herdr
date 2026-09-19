@@ -646,10 +646,459 @@ pub(super) fn validate(metrics: &[UsageMetric]) -> bool {
         })
 }
 
+/// `claude auth status --json` 的非交互登录预检结果。只取登录判定与公开身份，不含令牌。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct ClaudeAuthStatus {
+    pub logged_in: bool,
+    /// 登录邮箱（小写、≤256、无控制字符）；用作账号身份，切换账号时触发绑定失效。
+    pub email: Option<String>,
+    /// `subscriptionType`（team / pro / max …），作为套餐展示。
+    pub subscription: Option<String>,
+}
+
+/// 解析 `claude auth status --json` 的 stdout。未登录时 CLI 以退出码 1 结束但 JSON 仍
+/// 合法，所以调用方必须先解析 stdout 再看退出码。2.1.x 经 Ink 渲染输出，非 TTY 下按 80 列
+/// 换行可能把长路径行折断、前后也可能夹杂非 JSON 行：整段解析失败时退回到「首个 `{` 到
+/// 末个 `}` 之间去掉换行与缩进」再解析，仍失败则只按键提取需要的三个字段。缺少 `loggedIn`
+/// 布尔值时视为不可解析。
+pub(super) fn claude_auth_status(text: &str) -> Option<ClaudeAuthStatus> {
+    let value = lenient_json_object(text)?;
+    let logged_in = value.get("loggedIn")?.as_bool()?;
+    let text_field = |name: &str, limit: usize| {
+        value
+            .get(name)
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty() && s.len() <= limit && !s.chars().any(char::is_control))
+            .map(str::to_owned)
+    };
+    Some(ClaudeAuthStatus {
+        logged_in,
+        email: text_field("email", 256).map(|email| email.to_ascii_lowercase()),
+        subscription: text_field("subscriptionType", 64),
+    })
+}
+
+/// 宽松地从 CLI 输出里取出一个 JSON 对象：整段 → 去掉行结构的 `{…}` 片段 → 逐键提取。
+fn lenient_json_object(text: &str) -> Option<Value> {
+    let trimmed = text.trim();
+    if let Ok(value) = serde_json::from_str::<Value>(trimmed) {
+        if value.is_object() {
+            return Some(value);
+        }
+    }
+    let start = trimmed.find('{')?;
+    let end = trimmed.rfind('}')?;
+    if end <= start {
+        return None;
+    }
+    let body = &trimmed[start..=end];
+    // JSON 词法上行间空白无意义；被折断的字符串值去掉换行与缩进后重新接上。
+    let joined = body.lines().map(str::trim).collect::<Vec<_>>().concat();
+    if let Ok(value) = serde_json::from_str::<Value>(&joined) {
+        if value.is_object() {
+            return Some(value);
+        }
+    }
+    let mut object = serde_json::Map::new();
+    let logged_in = regex::Regex::new(r#""loggedIn"\s*:\s*(true|false)"#).ok()?;
+    let flag = logged_in.captures(&joined)?.get(1)?.as_str() == "true";
+    object.insert("loggedIn".into(), Value::Bool(flag));
+    for key in ["email", "subscriptionType"] {
+        let pattern = regex::Regex::new(&format!(r#""{key}"\s*:\s*"([^"]*)""#)).ok()?;
+        if let Some(found) = pattern.captures(&joined).and_then(|c| c.get(1)) {
+            object.insert(key.into(), Value::String(found.as_str().to_owned()));
+        }
+    }
+    Some(Value::Object(object))
+}
+
+/// 交互探测画面上阻塞探测的官方对话框分类。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ProbeBlocker {
+    /// 登录 / 选择登录方式：账号未登录，属于终态。
+    SignIn,
+    /// 目录信任确认：需用户在 CLI 中确认一次，探测可重试。
+    Trust,
+}
+
+/// 登录组关键字（小写、行首词边界锚定）。前半是各厂商登录画面的标题 / 提示行（claude 2.x、
+/// Gemini CLI 认证对话），后半是通用措辞，覆盖 gemini / grok / hermes 等共用本判定的厂商。
+/// 以 `/` 开头的斜杠命令行（`/login  Sign in with …`）在判定前被整行跳过，所以这里可以
+/// 保留 `sign in` / `log in` 这类短语而不误判 `/help` 列表。
+const SIGN_IN_LINE_PREFIXES: &[&str] = &[
+    "select login method",
+    "how do you want to sign in",
+    "how would you like to authenticate",
+    "log in to claude",
+    "sign in to claude",
+    "please run /login",
+    "run /login",
+    "sign in",
+    "log in",
+    "log into",
+    "login",
+    "please sign in",
+    "please log in",
+    "you must sign in",
+    "you must log in",
+    "you need to sign in",
+    "you need to log in",
+    "not logged in",
+    "not authenticated",
+    "login required",
+    "authentication required",
+    "session expired",
+    "your session has expired",
+    "选择登录",
+    "请登录",
+    "未登录",
+];
+
+/// 信任组关键字（小写、行首词边界锚定），只锚定信任对话专属文案：Claude Code 2.x 的
+/// `Quick safety check` / `Yes, I trust this folder` / `Yes, trust it`，以及 Gemini CLI 的
+/// 目录信任对话标题。`Accessing workspace:` 是工作区横幅、`permission required` 是通用措辞，
+/// 都不能单独作为判据。
+const TRUST_LINE_PREFIXES: &[&str] = &[
+    "quick safety check",
+    "yes, i trust this folder",
+    "yes, trust it",
+    "do you trust this folder",
+];
+
+/// 去掉一行前面的边框、项目符号、单选标记、光标与 `1.` / `2)` 之类的选项序号，只保留文案本体。
+fn strip_line_decoration(line: &str) -> &str {
+    let line =
+        line.trim_start_matches(|ch: char| ch.is_whitespace() || "│┃├└─•*>❯●○◉◯".contains(ch));
+    let digits = line.chars().take_while(char::is_ascii_digit).count();
+    if digits > 0 && digits <= 2 {
+        if let Some(rest) = line[digits..]
+            .strip_prefix('.')
+            .or_else(|| line[digits..].strip_prefix(')'))
+        {
+            return rest.trim_start();
+        }
+    }
+    line
+}
+
+/// 行首词边界匹配：`prefix` 之后必须是行尾或非字母数字（`log in` 不命中 `log into`，
+/// `login` 不命中 `logins`）；中文短语没有词边界概念，命中即算。
+fn starts_with_phrase(line: &str, prefix: &str) -> bool {
+    let Some(rest) = line.strip_prefix(prefix) else {
+        return false;
+    };
+    if !prefix.ends_with(|ch: char| ch.is_ascii_alphanumeric()) {
+        return true;
+    }
+    rest.chars().next().is_none_or(|ch| !ch.is_alphanumeric())
+}
+
+/// 逐行判定画面是否停在登录或信任对话框上：行级词边界前缀匹配，斜杠命令行整行跳过，
+/// 两组同时出现时以信任为准（信任对话可重试、不会把账号钉进「需要登录」终态）。返回
+/// `None` 表示没有阻塞对话。
+pub(super) fn interactive_blocker(screen: &str) -> Option<ProbeBlocker> {
+    let mut verdict = None;
+    for line in screen.lines() {
+        let plain = strip_line_decoration(line).to_lowercase();
+        if plain.is_empty() || plain.starts_with('/') {
+            continue;
+        }
+        if TRUST_LINE_PREFIXES
+            .iter()
+            .any(|prefix| starts_with_phrase(&plain, prefix))
+        {
+            return Some(ProbeBlocker::Trust);
+        }
+        if verdict.is_none()
+            && SIGN_IN_LINE_PREFIXES
+                .iter()
+                .any(|prefix| starts_with_phrase(&plain, prefix))
+        {
+            verdict = Some(ProbeBlocker::SignIn);
+        }
+    }
+    verdict
+}
+
+/// 非交互输出（stderr / stdout）里是否有登录失败证据：短错误文本，子串匹配即可。
+pub(super) fn auth_evidence(text: &str) -> bool {
+    let lower = text.to_lowercase();
+    [
+        "not logged in",
+        "login required",
+        "please log in",
+        "not authenticated",
+        "authentication required",
+        "unauthorized",
+        "invalid api key",
+        "run /login",
+        "auth login",
+        "请登录",
+        "未登录",
+    ]
+    .iter()
+    .any(|needle| lower.contains(needle))
+}
+
+/// 非交互输出里是否是命令行用法错误（旧版 CLI 缺子命令或 flag）：commander / yargs 族的
+/// `unknown command` / `unknown option` / `unrecognized` 等措辞。
+pub(super) fn cli_usage_error(text: &str) -> bool {
+    let lower = text.to_lowercase();
+    [
+        "unknown command",
+        "unknown option",
+        "unknown argument",
+        "unrecognized",
+        "too many arguments",
+        "invalid option",
+    ]
+    .iter()
+    .any(|needle| lower.contains(needle))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// Claude Code 2.1.x 在未信任目录启动时的画面（文案取自二进制字符串）。
+    const CLAUDE_TRUST_SCREEN: &str = "\
+ ╭──────────────────────────────────────────────────────────────╮
+ │ Accessing workspace: /tmp/herdr-usage-4242-1-1                 │
+ │                                                                │
+ │ Quick safety check: Is this a project you created or one you   │
+ │ trust? (Like your own code, a well-known open source project,  │
+ │ or work from your team). If not, take a moment to review what  │
+ │ is in this folder.                                             │
+ │                                                                │
+ │ ❯ 1. Yes, I trust this folder                                  │
+ │   2. No, exit                                                  │
+ ╰──────────────────────────────────────────────────────────────╯
+";
+
+    /// 未登录时的欢迎画面。
+    const CLAUDE_SIGN_IN_SCREEN: &str = "\
+ Welcome to Claude Code
+
+ Select login method:
+
+ ❯ 1. Claude account with subscription
+   2. Anthropic Console account
+";
+
+    /// `/help` 列表：命令说明里带 `Sign in` 字样，不是登录对话。
+    const CLAUDE_HELP_SCREEN: &str = "\
+ /login    Sign in with your Anthropic account
+ /logout   Sign out from your Anthropic account
+ /usage    Show plan usage limits
+
+ ❯
+";
+
+    /// Gemini CLI 首次启动的认证对话（文案按官方文档 geminicli.com/docs/get-started/
+    /// authentication 编写；待真机快照校正）。
+    const GEMINI_AUTH_SCREEN: &str = "\
+ ╭───────────────────────────────────────────────────────╮
+ │ How would you like to authenticate for this project?  │
+ │                                                       │
+ │ ● 1. Login with Google                                │
+ │   2. Use Gemini API Key                               │
+ │   3. Vertex AI                                        │
+ │                                                       │
+ │ (Use Enter to select)                                 │
+ ╰───────────────────────────────────────────────────────╯
+";
+
+    /// Gemini CLI 的目录信任对话（文案按官方文档 trusted-folders 编写；待真机快照校正）。
+    const GEMINI_TRUST_SCREEN: &str = "\
+ ╭───────────────────────────────────────────────────────╮
+ │ Do you trust this folder?                             │
+ │ Trusting a folder allows Gemini to execute commands.  │
+ │ ● 1. Trust folder                                     │
+ │   2. Trust parent folder                              │
+ │   3. Don't trust                                      │
+ ╰───────────────────────────────────────────────────────╯
+";
+
+    /// Grok CLI 未登录提示（通用措辞，待真机快照校正）。
+    const GROK_SIGN_IN_SCREEN: &str = "\
+ You must log in first.
+ Run /login to authenticate with your xAI account.
+ ❯
+";
+
+    /// Hermes 未登录提示（通用措辞，待真机快照校正）。
+    const HERMES_SIGN_IN_SCREEN: &str = "\
+ Not authenticated. Run `hermes auth login` to continue.
+";
+
+    #[test]
+    fn claude_auth_status_parses_signed_in_and_signed_out_json() {
+        let signed_in = claude_auth_status(
+            "{\"loggedIn\":true,\"authMethod\":\"claude.ai\",\"email\":\"Me@Example.test\",\"orgId\":\"o\",\"subscriptionType\":\"team\"}\n",
+        )
+        .expect("已登录 JSON");
+        assert!(signed_in.logged_in);
+        assert_eq!(signed_in.email.as_deref(), Some("me@example.test"));
+        assert_eq!(signed_in.subscription.as_deref(), Some("team"));
+
+        // 未登录：CLI 退出码为 1，但 stdout 仍是合法 JSON，必须先解析。
+        let signed_out = claude_auth_status("{\"loggedIn\":false,\"authMethod\":\"none\"}")
+            .expect("未登录 JSON");
+        assert!(!signed_out.logged_in);
+        assert_eq!(signed_out.email, None);
+        assert_eq!(signed_out.subscription, None);
+
+        assert_eq!(claude_auth_status(""), None);
+        assert_eq!(claude_auth_status("Not logged in"), None);
+        assert_eq!(
+            claude_auth_status("{\"email\":\"x\"}"),
+            None,
+            "缺 loggedIn 视为不可解析"
+        );
+        let control = claude_auth_status("{\"loggedIn\":true,\"email\":\"a\\u0007b\"}").unwrap();
+        assert_eq!(control.email, None, "控制字符不作为身份");
+    }
+
+    #[test]
+    fn claude_auth_status_survives_ink_wrapping_and_surrounding_lines() {
+        // Ink 非 TTY 渲染：多行缩进 JSON、长路径行按 80 列折断、前后夹杂提示行。
+        let wrapped = "\
+Checking auth status...
+{
+  \"loggedIn\": true,
+  \"authMethod\": \"claude.ai\",
+  \"apiProvider\": \"firstParty\",
+  \"configDirectory\": \"/home/someone-with-a-really-long-user-name/.config/claude-code-profil
+es/work/.claude\",
+  \"email\": \"Me@Example.test\",
+  \"subscriptionType\": \"max\"
+}
+Done.
+";
+        let status = claude_auth_status(wrapped).expect("折行 JSON 仍可解析");
+        assert!(status.logged_in);
+        assert_eq!(status.email.as_deref(), Some("me@example.test"));
+        assert_eq!(status.subscription.as_deref(), Some("max"));
+        // 折断落在结构位置（引号被拆开）时按键提取仍能拿到登录判定。
+        let broken = "{\n  \"loggedIn\": false,\n  \"configDirectory\": \"/x\n\"y\",\n  \"email\": \"a@b.test\"\n}";
+        let status = claude_auth_status(broken).expect("逐键提取");
+        assert!(!status.logged_in);
+        assert_eq!(status.email.as_deref(), Some("a@b.test"));
+        assert_eq!(claude_auth_status("prefix { not json } suffix"), None);
+    }
+
+    #[test]
+    fn trust_dialog_is_retryable_and_sign_in_dialog_is_terminal() {
+        assert_eq!(
+            interactive_blocker(CLAUDE_TRUST_SCREEN),
+            Some(ProbeBlocker::Trust)
+        );
+        assert_eq!(
+            interactive_blocker(CLAUDE_SIGN_IN_SCREEN),
+            Some(ProbeBlocker::SignIn)
+        );
+        // 只剩选项行（对话头部已滚出视口）也能识别，且序号与光标不影响判定。
+        assert_eq!(
+            interactive_blocker("   2) Yes, trust it\n"),
+            Some(ProbeBlocker::Trust)
+        );
+        // 两组同时可见时以可重试的信任态为准。
+        let both = format!("{CLAUDE_SIGN_IN_SCREEN}\n{CLAUDE_TRUST_SCREEN}");
+        assert_eq!(interactive_blocker(&both), Some(ProbeBlocker::Trust));
+        // 工作区横幅单独出现不算信任对话（已信任目录的正常启动也可能打印它）。
+        assert_eq!(
+            interactive_blocker(" Accessing workspace: /home/me/project\n ❯\n"),
+            None
+        );
+        // 通用「permission required」不是目录信任对话。
+        assert_eq!(
+            interactive_blocker(" Permission required: allow tool Bash?\n"),
+            None
+        );
+    }
+
+    #[test]
+    fn login_screens_of_other_interactive_vendors_are_recognized() {
+        assert_eq!(
+            interactive_blocker(GEMINI_AUTH_SCREEN),
+            Some(ProbeBlocker::SignIn),
+            "gemini 认证对话"
+        );
+        assert_eq!(
+            interactive_blocker(GEMINI_TRUST_SCREEN),
+            Some(ProbeBlocker::Trust),
+            "gemini 目录信任对话"
+        );
+        assert_eq!(
+            interactive_blocker(GROK_SIGN_IN_SCREEN),
+            Some(ProbeBlocker::SignIn),
+            "grok 登录提示"
+        );
+        assert_eq!(
+            interactive_blocker(HERMES_SIGN_IN_SCREEN),
+            Some(ProbeBlocker::SignIn),
+            "hermes 登录提示"
+        );
+        for line in [
+            "Please sign in to continue",
+            "You need to sign in",
+            "Authentication required",
+            "You must log in first",
+            "Sign in with Google to get started",
+            "Login required: run `grok auth`",
+            "Log in to your account",
+        ] {
+            assert_eq!(
+                interactive_blocker(line),
+                Some(ProbeBlocker::SignIn),
+                "{line}"
+            );
+        }
+    }
+
+    #[test]
+    fn help_listing_and_idle_prompt_are_not_mistaken_for_login_dialogs() {
+        assert_eq!(interactive_blocker(CLAUDE_HELP_SCREEN), None);
+        assert_eq!(interactive_blocker(""), None);
+        assert_eq!(interactive_blocker(" ❯ \n"), None);
+        // 行中间出现的裸子串不算：只有行首锚定才命中。
+        assert_eq!(
+            interactive_blocker("Tip: run /login to sign in with another account\n"),
+            None
+        );
+        assert_eq!(
+            interactive_blocker("Some text about trust this folder later in a sentence\n"),
+            None
+        );
+        // 词边界：已登录状态行与相近单词不命中。
+        for line in [
+            "Logged in as me@example.test",
+            "Logins today: 3",
+            "Logbook: 3 entries",
+            "Signing in… please wait",
+            "> Type your message or @path/to/file",
+        ] {
+            assert_eq!(interactive_blocker(line), None, "{line}");
+        }
+    }
+
+    #[test]
+    fn auth_evidence_matches_login_errors_only() {
+        assert!(auth_evidence(
+            "Error: Not logged in. Run claude auth login to authenticate."
+        ));
+        assert!(auth_evidence("HTTP 401 Unauthorized"));
+        assert!(!auth_evidence("Unknown argument: --json"));
+        assert!(!auth_evidence(""));
+        // 用法错误：旧版 CLI 缺子命令 / flag。
+        assert!(cli_usage_error("error: unknown command 'status'"));
+        assert!(cli_usage_error("error: unknown option '--json'"));
+        assert!(cli_usage_error("Unrecognized arguments: --json"));
+        assert!(!cli_usage_error("Not logged in"));
+        assert!(!cli_usage_error(""));
+    }
 
     #[test]
     fn codex_uses_named_buckets_once_and_preserves_reset_windows() {

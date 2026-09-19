@@ -1974,7 +1974,7 @@
             },
             "callback_only": {
               "default": false,
-              "description": "该厂商只接受官方回调（statusline 等），没有可回落的探测：显式刷新不会产生新数据，\n客户端可据此禁用刷新动作并说明原因。",
+              "description": "该厂商只能靠官方回调（statusline 等）得到额度样本：显式刷新不会产生新的额度样本，\n但仍可能刷新登录 / 绑定占位（如 Claude 的非交互登录预检），所以它不是「刷新按钮无用」\n的一刀切依据；客户端可据此说明「额度只来自回调」。",
               "type": "boolean"
             },
             "in_flight": {
@@ -2027,7 +2027,7 @@
             },
             "trust_required": {
               "default": false,
-              "description": "官方 CLI 在等待用户确认目录信任，探测暂时拿不到额度。\n当前版本恒为 false：Claude 交互探测的登录/信任分类落地后才会置位，客户端在此之前\n不应依赖它出现。",
+              "description": "最近一次交互探测（显式刷新 + `account_usage.interactive_probe`）停在了官方 CLI 的\n目录信任对话上，需要用户在自己的 CLI 中对快照 `message` 里给出的稳定探测目录确认一次\n信任；herdr 不会代为应答。快照状态仍由登录预检决定（未登录 → `not_authenticated`，\n已登录 → `needs_binding` 等待回调），探测成功、得到其它结果或官方回调被接受时清位。\n回调闩锁下被保留的回调快照不会挂上它。",
               "type": "boolean"
             }
           },
@@ -13642,7 +13642,7 @@
             },
             "callback_only": {
               "default": false,
-              "description": "该厂商只接受官方回调（statusline 等），没有可回落的探测：显式刷新不会产生新数据，\n客户端可据此禁用刷新动作并说明原因。",
+              "description": "该厂商只能靠官方回调（statusline 等）得到额度样本：显式刷新不会产生新的额度样本，\n但仍可能刷新登录 / 绑定占位（如 Claude 的非交互登录预检），所以它不是「刷新按钮无用」\n的一刀切依据；客户端可据此说明「额度只来自回调」。",
               "type": "boolean"
             },
             "in_flight": {
@@ -13695,7 +13695,7 @@
             },
             "trust_required": {
               "default": false,
-              "description": "官方 CLI 在等待用户确认目录信任，探测暂时拿不到额度。\n当前版本恒为 false：Claude 交互探测的登录/信任分类落地后才会置位，客户端在此之前\n不应依赖它出现。",
+              "description": "最近一次交互探测（显式刷新 + `account_usage.interactive_probe`）停在了官方 CLI 的\n目录信任对话上，需要用户在自己的 CLI 中对快照 `message` 里给出的稳定探测目录确认一次\n信任；herdr 不会代为应答。快照状态仍由登录预检决定（未登录 → `not_authenticated`，\n已登录 → `needs_binding` 等待回调），探测成功、得到其它结果或官方回调被接受时清位。\n回调闩锁下被保留的回调快照不会挂上它。",
               "type": "boolean"
             }
           },

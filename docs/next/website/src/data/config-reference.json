@@ -1784,6 +1784,12 @@
           "description": "Total query deadline, clamped to 5–30 seconds."
         },
         {
+          "key": "account_usage.interactive_probe",
+          "type": "boolean",
+          "default": "false",
+          "description": "Allow the isolated interactive CLI probe (typing /usage in a hidden PTY) on explicit refresh; Claude runs it in a stable probe directory that you must trust once in the CLI. Off by default: it reuses the real login state and can rotate credentials; automatic polling never opens a PTY. Independent of this switch, Claude's non-interactive `claude auth status --json` precheck stays on, reads the real login store read-only and backs off on the slow terminal schedule while waiting for the callback."
+        },
+        {
           "key": "account_usage.disabled_providers",
           "type": "array",
           "default": "[]",

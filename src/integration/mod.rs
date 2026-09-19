@@ -12,6 +12,7 @@ mod types;
 mod usage;
 mod version;
 pub(crate) use usage::configure as configure_usage;
+pub(crate) use usage::statusline_enabled as usage_statusline_enabled;
 
 pub(crate) use actions::{
     install_experimental_letta, install_target, uninstall_experimental_letta, uninstall_target,

@@ -327,13 +327,16 @@ pub struct UsageRefreshState {
     /// 请求带了未绑定 pane，但该 agent 只有一个账号：数据按唯一候选返回，绑定并未写入。
     #[serde(default)]
     pub binding_inferred: bool,
-    /// 官方 CLI 在等待用户确认目录信任，探测暂时拿不到额度。
-    /// 当前版本恒为 false：Claude 交互探测的登录/信任分类落地后才会置位，客户端在此之前
-    /// 不应依赖它出现。
+    /// 最近一次交互探测（显式刷新 + `account_usage.interactive_probe`）停在了官方 CLI 的
+    /// 目录信任对话上，需要用户在自己的 CLI 中对快照 `message` 里给出的稳定探测目录确认一次
+    /// 信任；herdr 不会代为应答。快照状态仍由登录预检决定（未登录 → `not_authenticated`，
+    /// 已登录 → `needs_binding` 等待回调），探测成功、得到其它结果或官方回调被接受时清位。
+    /// 回调闩锁下被保留的回调快照不会挂上它。
     #[serde(default)]
     pub trust_required: bool,
-    /// 该厂商只接受官方回调（statusline 等），没有可回落的探测：显式刷新不会产生新数据，
-    /// 客户端可据此禁用刷新动作并说明原因。
+    /// 该厂商只能靠官方回调（statusline 等）得到额度样本：显式刷新不会产生新的额度样本，
+    /// 但仍可能刷新登录 / 绑定占位（如 Claude 的非交互登录预检），所以它不是「刷新按钮无用」
+    /// 的一刀切依据；客户端可据此说明「额度只来自回调」。
     #[serde(default)]
     pub callback_only: bool,
     /// 与该账号同 agent 的待办绑定（请求带 pane 时只看该 pane）。

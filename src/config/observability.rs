@@ -98,6 +98,13 @@ pub struct AccountUsageConfig {
     pub api_refresh_seconds: u64,
     pub cli_refresh_seconds: u64,
     pub probe_timeout_seconds: u64,
+    /// 交互探测：显式刷新时在隔离 PTY 里启动官方 CLI 并输入 `/usage`（claude 用固定的
+    /// `<state_dir>/account-usage/probe/<账号>` 目录，需用户在 CLI 中确认一次目录信任）。
+    /// 默认关闭——它复用真实登录态，并发启动可能触发凭据轮换；开启后也只在显式刷新时
+    /// 触发，自动轮询不会起 PTY。与之独立的是 claude 的非交互登录预检
+    /// `claude auth status --json`：默认开启、只读地复用真实登录态，在等待回调期间按终态的
+    /// 慢周期（10 min 起翻倍）运行，不受本开关控制。
+    pub interactive_probe: bool,
     pub disabled_providers: Vec<String>,
     pub accounts: Vec<UsageAccountConfig>,
 }
@@ -112,6 +119,7 @@ impl Default for AccountUsageConfig {
             api_refresh_seconds: 60,
             cli_refresh_seconds: 300,
             probe_timeout_seconds: 20,
+            interactive_probe: false,
             disabled_providers: Vec::new(),
             accounts: Vec::new(),
         }
@@ -167,6 +175,11 @@ mod tests {
         assert_eq!(config.cli_refresh_seconds, 300);
         assert!(config.accounts.is_empty());
         assert!(!MonitorConfig::default().alerts_enabled);
+        // 交互探测会复用真实登录态，旧配置与默认配置都必须保持关闭。
+        assert!(!config.interactive_probe);
+        assert!(!AccountUsageConfig::default().interactive_probe);
+        let opted_in: AccountUsageConfig = toml::from_str("interactive_probe = true").unwrap();
+        assert!(opted_in.interactive_probe);
     }
 
     #[test]

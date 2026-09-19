@@ -519,6 +519,10 @@ hover_delay_ms = 400
 api_refresh_seconds = 60
 cli_refresh_seconds = 300
 probe_timeout_seconds = 20
+# Interactive CLI probe (typing /usage in a hidden PTY) reuses the real login
+# state and may rotate credentials; off by default, explicit refresh only.
+# Claude's read-only `claude auth status --json` precheck runs regardless.
+interactive_probe = false
 disabled_providers = []
 
 "##;

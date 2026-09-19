@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime};
 
-use crate::config::UsageAccountConfig;
+use crate::config::{AccountUsageConfig, UsageAccountConfig};
 
 #[derive(Clone, Copy)]
 pub(super) enum Query {
@@ -29,7 +29,9 @@ pub(super) struct Provider {
 
 pub(super) const PROVIDERS: &[Provider] = &[
     Provider { agent: "codex", label: "Codex", command: "codex", source: "https://learn.chatgpt.com/docs/app-server", method: "account/rateLimits/read; account/usage/read", scope: "account", query: Query::Codex },
-    Provider { agent: "claude", label: "Claude Code", command: "claude", source: "https://code.claude.com/docs/en/statusline", method: "statusline JSON rate_limits；/usage", scope: "account", query: Query::Interactive("/usage") },
+    // claude 主路径是官方 statusline 回调；`/usage` 交互探测只在 `interactive_probe` 开启且
+    // 显式刷新时作为兜底（见 `interactive_fallback`），登录态由非交互 `auth status` 预检。
+    Provider { agent: "claude", label: "Claude Code", command: "claude", source: "https://code.claude.com/docs/en/statusline", method: "statusline JSON rate_limits；/usage", scope: "account", query: Query::Callback },
     Provider { agent: "kimi", label: "Kimi Code", command: "kimi", source: "https://www.kimi.com/code/docs/en/kimi-code-cli/reference/server-api.html", method: "GET /api/v1/oauth/usage；/usage", scope: "account", query: Query::Kimi },
     Provider { agent: "gemini", label: "Gemini CLI", command: "gemini", source: "https://geminicli.com/docs/get-started/", method: "/stats（刷新官方配额）", scope: "account", query: Query::Interactive("/stats") },
     Provider { agent: "cursor", label: "Cursor", command: "cursor-agent", source: "https://cursor.com/docs/account/teams/admin-api", method: "Admin API /teams/spend", scope: "organization", query: Query::Portal },
@@ -65,6 +67,36 @@ pub(super) fn provider(agent: &str) -> Option<&'static Provider> {
         other => other,
     };
     PROVIDERS.iter().find(|entry| entry.agent == canonical)
+}
+
+/// 交互探测使用的斜杠命令：交互型厂商取登记值；claude 的主路径已是官方回调，`/usage` 只在
+/// 显式刷新且 `interactive_probe` 开启时作为兜底。
+pub(super) fn interactive_fallback(provider: &Provider) -> Option<&'static str> {
+    match provider.query {
+        Query::Interactive(command) => Some(command),
+        Query::Callback if provider.agent == "claude" => Some("/usage"),
+        _ => None,
+    }
+}
+
+/// 该厂商是否只能靠官方回调拿到额度样本：显式刷新不会产生新的额度样本，但仍可能刷新
+/// 登录 / 绑定占位（claude 的登录预检就是这样）。claude 开启 `interactive_probe` 后有可回落
+/// 的 `/usage` 探测（在稳定探测目录里，需用户信任一次），不再是纯回调。
+pub(super) fn callback_only(provider: &Provider, config: &AccountUsageConfig) -> bool {
+    matches!(provider.query, Query::Callback)
+        && !(provider.agent == "claude" && config.interactive_probe)
+}
+
+/// claude 官方 `settings.json` 的 statusLine 是否已接入 herdr 用量回调；文件缺失或无法解析
+/// 时为 `None`。判据与 `integration::usage` 的启用逻辑同源（按本平台命令形态比对，不匹配
+/// 明文子串）；目录推导与 `credential_paths` 同源：`profile_dir` 优先于默认目录。
+pub(super) fn claude_statusline_enabled(account: &UsageAccountConfig) -> Option<bool> {
+    let dir = account
+        .profile_dir
+        .clone()
+        .or_else(|| crate::integration::claude_dir().ok())?;
+    let settings = std::fs::read_to_string(dir.join("settings.json")).ok()?;
+    crate::integration::usage_statusline_enabled(&settings, "claude")
 }
 
 /// PATH / 安装布局扫描结果的缓存时长；服务循环里依赖这些扫描的周期都与它对齐。
@@ -339,6 +371,84 @@ mod tests {
             .collect::<std::collections::HashSet<_>>();
         assert_eq!(unique.len(), PROVIDERS.len());
         assert!(PROVIDERS.iter().all(|p| p.source.starts_with("https://")));
+    }
+
+    #[test]
+    fn claude_uses_the_callback_path_with_an_opt_in_interactive_fallback() {
+        let claude = provider("claude").unwrap();
+        assert!(
+            matches!(claude.query, Query::Callback),
+            "claude 主路径是官方回调"
+        );
+        assert_eq!(interactive_fallback(claude), Some("/usage"));
+        assert_eq!(
+            interactive_fallback(provider("gemini").unwrap()),
+            Some("/stats")
+        );
+        assert_eq!(interactive_fallback(provider("pi").unwrap()), None);
+        assert_eq!(interactive_fallback(provider("antigravity").unwrap()), None);
+
+        let mut config = AccountUsageConfig::default();
+        assert!(
+            callback_only(claude, &config),
+            "默认关闭交互探测：显式刷新拿不到新数据"
+        );
+        assert!(callback_only(provider("pi").unwrap(), &config));
+        assert!(!callback_only(provider("gemini").unwrap(), &config));
+        config.interactive_probe = true;
+        assert!(
+            !callback_only(claude, &config),
+            "开启后显式刷新可回落到稳定探测目录里的 /usage（需用户信任该目录一次）"
+        );
+        assert!(
+            callback_only(provider("pi").unwrap(), &config),
+            "其它回调型厂商不受影响"
+        );
+    }
+
+    #[test]
+    fn claude_statusline_detection_follows_the_configured_profile() {
+        let base = std::env::temp_dir().join(format!(
+            "herdr-claude-statusline-{}-{}",
+            std::process::id(),
+            crate::server::observability::now_ms()
+        ));
+        std::fs::create_dir_all(&base).unwrap();
+        let account = UsageAccountConfig {
+            id: "claude:work".into(),
+            agent: "claude".into(),
+            profile_dir: Some(base.clone()),
+            ..Default::default()
+        };
+        assert_eq!(
+            claude_statusline_enabled(&account),
+            None,
+            "无 settings.json"
+        );
+        std::fs::write(
+            base.join("settings.json"),
+            format!(
+                "{{\"statusLine\":{{\"type\":\"command\",\"command\":{}}}}}",
+                serde_json::Value::String(crate::platform::usage_statusline_command(
+                    "claude", false
+                ))
+            ),
+        )
+        .unwrap();
+        assert_eq!(
+            claude_statusline_enabled(&account),
+            Some(true),
+            "判据按本平台命令形态比对（Windows 是 -EncodedCommand 形态）"
+        );
+        std::fs::write(
+            base.join("settings.json"),
+            "{\"statusLine\":{\"type\":\"command\",\"command\":\"python custom.py\"}}",
+        )
+        .unwrap();
+        assert_eq!(claude_statusline_enabled(&account), Some(false));
+        std::fs::write(base.join("settings.json"), "{").unwrap();
+        assert_eq!(claude_statusline_enabled(&account), None, "无法解析");
+        let _ = std::fs::remove_dir_all(base);
     }
 
     #[test]
