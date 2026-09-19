@@ -65,6 +65,8 @@ pub(crate) struct OverlayRender {
     pub(crate) release_notes_scrollbar: Rect,
     pub(crate) release_notes_scroll_metrics: Option<crate::pane::ScrollMetrics>,
     pub(crate) release_notes_max_scroll: usize,
+    /// 浮动用量仪表盘内的账号行 / 按钮命中区（非模态，浮层内点击派发）。
+    pub(in crate::client::shell) usage_dashboard_actions: Vec<(Rect, super::observability::Action)>,
     pub(crate) cursor: Option<crate::protocol::CursorState>,
 }
 
@@ -91,9 +93,13 @@ pub(crate) fn render_client_overlay(
     usage: &super::observability::State,
     cx: &ChromeContext<'_>,
 ) -> Option<OverlayRender> {
+    // 非模态的浮层不压暗整屏：导航器、上下文菜单与浮动用量仪表盘（按键透传到
+    // 聚焦终端，正在打字的终端内容不能是暗的）。
     if !matches!(
         o,
-        ClientShellOverlay::Navigator(_) | ClientShellOverlay::ContextMenu(_)
+        ClientShellOverlay::Navigator(_)
+            | ClientShellOverlay::ContextMenu(_)
+            | ClientShellOverlay::UsageDashboard
     ) {
         for y in b.area.y..b.area.bottom() {
             for x in b.area.x..b.area.right() {
@@ -214,10 +220,11 @@ pub(crate) fn render_client_overlay(
     }
 }
 
-/// Floating usage dashboard: the accounts overview table inside the shared
-/// modal frame, so it supports the same drag-to-float window behavior as
-/// settings and the command palette. Display-only; data refreshes through
-/// the observability polling loop while the overlay is open.
+/// Floating usage dashboard: the accounts overview inside the shared frame,
+/// so it supports the same drag-to-float window behavior as settings and the
+/// command palette. Non-modal: it respects `usage.format`, its account rows
+/// come back as `usage_dashboard_actions` for in-overlay clicks, and data
+/// refreshes through the observability polling loop while it is open.
 ///
 /// `cursor: None` 只表示浮层不拥有光标；组合层按浮层矩形是否覆盖终端光标
 /// 决定是否保留终端插入点，仪表盘打开时未被盖住的光标仍然可见。
@@ -228,6 +235,7 @@ fn render_usage_dashboard_overlay(
 ) -> Option<OverlayRender> {
     let (outer, inner) = modal_panel(b, crate::ui::ModalSize::Large, cx.palette.accent, cx)?;
     let tr = super::observability::tr;
+    let mut actions = Vec::new();
     put_text(
         b,
         inner.x,
@@ -263,11 +271,15 @@ fn render_usage_dashboard_overlay(
                 body.x,
                 body.y,
                 body.width,
-                tr("Waiting for account usage data…", "等待账号用量数据…"),
+                if usage.refreshing() {
+                    tr("Refreshing…", "刷新中…")
+                } else {
+                    tr("Waiting for account usage data…", "等待账号用量数据…")
+                },
                 Style::default().fg(cx.palette.overlay0),
             );
         } else {
-            super::observability::render_usage_table(b, body, usage, cx.palette);
+            super::observability::render_usage_body(b, body, usage, cx.palette, &mut actions);
         }
     }
     if inner.height > 1 {
@@ -277,14 +289,15 @@ fn render_usage_dashboard_overlay(
             inner.y + inner.height.saturating_sub(1),
             inner.width,
             tr(
-                "esc close · drag edges to resize",
-                "esc 关闭 · 拖动边缘缩放",
+                "esc close · click a row to select · scroll · drag edges to resize",
+                "esc 关闭 · 点击账号行选中 · 滚轮滚动 · 拖动边缘缩放",
             ),
             Style::default().fg(cx.palette.overlay0),
         );
     }
     Some(OverlayRender {
         area: outer,
+        usage_dashboard_actions: actions,
         ..OverlayRender::default()
     })
 }

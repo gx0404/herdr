@@ -163,6 +163,11 @@ pub(super) enum ClientMobileTarget {
 
 #[derive(Default)]
 pub(super) struct ShellHitMap {
+    /// 本表由一次完整 compose 产生（经典布局或停靠工作台），而不是
+    /// `invalidate_pane_surface` / 快照换代 / 未配对 surface 留下的空表。tick 里
+    /// 依赖命中区几何做判断（如总览浮层的孤儿防护）只在为真时进行：空表只说明
+    /// 还没重绘，不代表锚点丢失。
+    pub(super) composed: bool,
     pub(super) overlay_bounds: Rect,
     pub(super) machines: Vec<MachineHit>,
     pub(super) workspaces: Vec<WorkspaceHit>,
@@ -183,6 +188,8 @@ pub(super) struct ShellHitMap {
     pub(super) agent_sort_toggle: Rect,
     pub(super) agent_group_toggles: Vec<(Rect, String)>,
     pub(super) agent_usage_toggle: Rect,
+    /// 浮动用量仪表盘（非模态 overlay）内的账号行 / 按钮命中区。
+    pub(super) usage_dashboard_actions: Vec<(Rect, super::observability::Action)>,
     pub(super) sidebar_divider: Rect,
     pub(super) sidebar_section_divider: Rect,
     pub(super) sidebar_toggle: Rect,

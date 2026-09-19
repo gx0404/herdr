@@ -395,11 +395,14 @@ impl ClientShellState {
                 } else {
                     self.observability.monitor_tab
                 };
+                // 面板 pass 不画悬浮层：悬浮层由下方的全局 pass 画一次。
                 if let Some(painted) =
                     self.observability
-                        .paint(&mut frame, area, palette, Some(tab))
+                        .paint(&mut frame, area, palette, Some(tab), false)
                 {
-                    occlusion.cover(painted.covered);
+                    for rect in painted.covered {
+                        occlusion.cover(rect);
+                    }
                     self.observability.commit_paint(painted);
                 }
             }
@@ -554,8 +557,13 @@ impl ClientShellState {
                 .is_some_and(|hover| hover.visible)
         {
             // 全局浮层在终端内容、把手与选择高亮之后绘制，保持视觉与输入层级一致。
-            if let Some(painted) = self.observability.paint(&mut frame, full, palette, None) {
-                occlusion.cover(painted.covered);
+            if let Some(painted) = self
+                .observability
+                .paint(&mut frame, full, palette, None, true)
+            {
+                for rect in painted.covered {
+                    occlusion.cover(rect);
+                }
                 self.observability.commit_paint(painted);
             }
         }
@@ -601,6 +609,7 @@ impl ClientShellState {
             ));
         }
         frame.graphics = graphics;
+        self.hits.composed = true;
         Some(frame)
     }
 }

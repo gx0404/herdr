@@ -13,7 +13,7 @@ use crate::api::schema::{
     AccountUsageSnapshot, Method, ResponseResult, UsageParams, UsageProviderInfo,
 };
 use crate::client::shell::dock::{Edge, PanelId};
-use crate::client::shell::observability::{Action, Hover, Page, Purpose};
+use crate::client::shell::observability::{Action, Hover, HoverTarget, Page, Purpose};
 use crate::client::shell::workbench::{body, View};
 use crate::protocol::ClientShellAgent;
 use crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
@@ -178,13 +178,16 @@ fn account_hover_covering_the_terminal_cursor_hides_it() {
     let cursor = before.cursor.clone().expect("终端光标");
     // 锚点放在光标左侧，悬浮层从锚点右侧展开即覆盖光标坐标。
     state.observability.hover = Some(Hover {
-        endpoint_id: state.active_endpoint_id.clone(),
-        pane: "pane_1".into(),
-        agent: "claude".into(),
+        target: HoverTarget::Agent {
+            endpoint_id: state.active_endpoint_id.clone(),
+            pane: "pane_1".into(),
+            agent: "claude".into(),
+        },
         anchor: Rect::new(cursor.x.saturating_sub(2), cursor.y, 1, 1),
         since: std::time::Instant::now(),
         visible: true,
         leave_at: None,
+        pinned: false,
     });
     let frame = state.compose(120, 40).expect("悬浮层覆盖终端光标");
     assert!(
@@ -338,6 +341,7 @@ fn observability_paint_keeps_the_pane_cursor_outside_the_page_rect() {
             Rect::new(60, 1, 60, 38),
             &config.palette,
             Some(Page::Monitor),
+            false,
         )
         .expect("页面已绘制");
     assert_eq!(painted.page_rect, Rect::new(60, 1, 60, 38));
@@ -354,6 +358,7 @@ fn observability_paint_keeps_the_pane_cursor_outside_the_page_rect() {
             Rect::new(0, 1, 120, 38),
             &config.palette,
             Some(Page::Monitor),
+            false,
         )
         .expect("页面已绘制");
     assert!(covering.cursor.is_none(), "页面矩形覆盖光标时置空");
@@ -855,13 +860,16 @@ fn hover_usage_response_lands_in_the_hover_scope_only() {
     let page_accounts = vec![account("codex", "codex:default")];
     state.observability.accounts.clone_from(&page_accounts);
     state.observability.hover = Some(Hover {
-        endpoint_id: state.active_endpoint_id.clone(),
-        pane: "pane_1".into(),
-        agent: "claude".into(),
+        target: HoverTarget::Agent {
+            endpoint_id: state.active_endpoint_id.clone(),
+            pane: "pane_1".into(),
+            agent: "claude".into(),
+        },
         anchor: Rect::new(0, 20, 24, 2),
         since: Instant::now() - Duration::from_secs(1),
         visible: false,
         leave_at: None,
+        pinned: false,
     });
     let outcome = tick(&mut state, Instant::now() + Duration::from_secs(1));
     let hover_call = usage_calls(&outcome)
@@ -891,13 +899,16 @@ fn hover_scope_targeting_an_offline_endpoint_falls_back_to_the_active_one() {
     let mut state = usage_ready();
     let ghost = ClientEndpointId::Ssh(crate::client::endpoint::ProfileId::generate());
     state.observability.hover = Some(Hover {
-        endpoint_id: ghost.clone(),
-        pane: "pane_1".into(),
-        agent: "claude".into(),
+        target: HoverTarget::Agent {
+            endpoint_id: ghost.clone(),
+            pane: "pane_1".into(),
+            agent: "claude".into(),
+        },
         anchor: Rect::new(0, 20, 24, 2),
         since: Instant::now() - Duration::from_secs(1),
         visible: false,
         leave_at: None,
+        pinned: false,
     });
     let outcome = tick(&mut state, Instant::now() + Duration::from_secs(1));
     let targets = outcome
@@ -1228,13 +1239,16 @@ fn providers_are_refetched_on_page_open_and_every_five_minutes() {
 fn opening_the_usage_dashboard_resets_hover_scope_and_forces_a_refresh() {
     let mut state = usage_ready();
     state.observability.hover = Some(Hover {
-        endpoint_id: state.active_endpoint_id.clone(),
-        pane: "pane_1".into(),
-        agent: "claude".into(),
+        target: HoverTarget::Agent {
+            endpoint_id: state.active_endpoint_id.clone(),
+            pane: "pane_1".into(),
+            agent: "claude".into(),
+        },
         anchor: Rect::new(0, 20, 24, 2),
         since: Instant::now() - Duration::from_secs(1),
         visible: false,
         leave_at: None,
+        pinned: false,
     });
     let t0 = Instant::now() + Duration::from_secs(1);
     tick(&mut state, t0);
@@ -1329,13 +1343,16 @@ fn hover_on(
 ) {
     let endpoint_id = endpoint_id.unwrap_or_else(|| state.active_endpoint_id.clone());
     state.observability.hover = Some(Hover {
-        endpoint_id,
-        pane: pane.into(),
-        agent: agent.into(),
+        target: HoverTarget::Agent {
+            endpoint_id,
+            pane: pane.into(),
+            agent: agent.into(),
+        },
         anchor: Rect::new(0, 20, 24, 2),
         since: Instant::now() - Duration::from_secs(1),
         visible: false,
         leave_at: None,
+        pinned: false,
     });
 }
 
@@ -3220,5 +3237,900 @@ fn refresh_wait_follows_the_selected_account_or_the_earliest_one() {
         frame_has(&frame, "退避") || frame_has(&frame, "backoff"),
         "超长退避在账号行说明: {:?}",
         (0..40).map(|y| frame_row(&frame, y)).collect::<Vec<_>>()
+    );
+}
+
+// ---------------------------------------------------------------------------
+// (C) 用量按钮悬浮显示跨厂商总览并可钉住（计划 1.0 C 用例 + 1.4 U-5/U-6/F-4/F-5）
+// ---------------------------------------------------------------------------
+
+/// 一个带百分比指标的账号快照：仪表盘 / 总览浮层会为它画进度条。
+fn account_with_percent(agent: &str, id: &str, percent: f64) -> AccountUsageSnapshot {
+    let mut snapshot = account(agent, id);
+    snapshot.metrics.push(crate::api::schema::UsageMetric {
+        id: "session".into(),
+        label: "5h".into(),
+        unit: "%".into(),
+        scope: "session".into(),
+        text_value: None,
+        used: None,
+        limit: None,
+        remaining: None,
+        used_percent: Some(percent),
+        amount_decimal: None,
+        resets_at: None,
+        window_seconds: None,
+    });
+    snapshot
+}
+
+/// 浮层作用域的 hover 快照：`(visible, pinned)`，None = 没有 hover。
+fn overview_hover(state: &ClientShellState) -> Option<(bool, bool)> {
+    state.observability.hover.as_ref().and_then(|hover| {
+        matches!(hover.target, HoverTarget::UsageOverview).then_some((hover.visible, hover.pinned))
+    })
+}
+
+fn press_key(state: &mut ClientShellState, code: crossterm::event::KeyCode) -> ClientShellInput {
+    state.handle_raw_events(vec![RawInputEvent::Key(crate::input::TerminalKey::new(
+        code,
+        KeyModifiers::empty(),
+    ))])
+}
+
+/// 终端正文里一处既不在悬浮层矩形内、也不在任何 agent 行上的点。
+fn away_point(state: &ClientShellState) -> (u16, u16) {
+    let terminal = terminal_body(state);
+    let point = (
+        terminal.right().saturating_sub(2),
+        terminal.bottom().saturating_sub(2),
+    );
+    assert!(
+        !contains(state.observability.hover_rect, point),
+        "离开点 {point:?} 不应落在悬浮层 {:?} 内",
+        state.observability.hover_rect
+    );
+    point
+}
+
+#[test]
+fn usage_toggle_is_visible_at_default_zh_sidebar_width() {
+    let _lang = crate::i18n::lang_guard(crate::i18n::Lang::ZhCn);
+    // 经典布局：默认 sidebar_width=26，扣分隔线后内容只有 25 列；两种排序标签
+    // 下按钮都必须有命中区（不足时缩成 1 列图标），不能随排序模式闪烁。
+    let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
+    assert_eq!(state.config.sidebar_width, 26);
+    state.set_snapshot(Box::new(snapshot()));
+    state.set_pane_surface(surface());
+    for sort in [
+        crate::config::AgentPanelSortConfig::Spaces,
+        crate::config::AgentPanelSortConfig::Priority,
+    ] {
+        state.config.agent_panel_sort = sort;
+        let frame = state.compose(120, 40).expect("经典布局");
+        assert!(
+            !state.hits.agent_usage_toggle.is_empty(),
+            "中文默认宽度下「用量」按钮必须可见（排序 {sort:?}）"
+        );
+        assert_usage_button_matches_label(&frame, state.hits.agent_usage_toggle);
+    }
+    // 停靠工作台：Agents 面板宽度由 dock 几何决定，同样必须可见。
+    let mut state = usage_ready();
+    for sort in [
+        crate::config::AgentPanelSortConfig::Spaces,
+        crate::config::AgentPanelSortConfig::Priority,
+    ] {
+        state.config.agent_panel_sort = sort;
+        let frame = state.compose(120, 40).expect("停靠工作台");
+        assert!(
+            !state.hits.agent_usage_toggle.is_empty(),
+            "停靠工作台 120 列下「用量」按钮必须可见（排序 {sort:?}）"
+        );
+        assert_usage_button_matches_label(&frame, state.hits.agent_usage_toggle);
+    }
+    // 极窄面板：按钮缩成图标仍保留命中区。
+    let frame = state.compose(80, 30).expect("窄工作台");
+    assert!(
+        !state.hits.agent_usage_toggle.is_empty(),
+        "窄面板下按钮缩为图标但命中区仍在"
+    );
+    assert_usage_button_matches_label(&frame, state.hits.agent_usage_toggle);
+}
+
+/// 命中区矩形内渲染出的文本（去掉宽字符占位与间距空格）。
+fn cells_text(frame: &FrameData, rect: Rect) -> String {
+    (rect.x..rect.right())
+        .map(|x| {
+            let index = usize::from(rect.y) * usize::from(frame.width) + usize::from(x);
+            frame.cells[index].symbol.as_str()
+        })
+        .collect::<String>()
+        .replace(' ', "")
+}
+
+/// 「用量」按钮的命中区宽度必须等于实际渲染文本的显示宽度：整词或 1 列图标，
+/// 图标必须是 East Asian Narrow 字形（Ambiguous 字形在 CJK 终端按 2 列渲染）。
+fn assert_usage_button_matches_label(frame: &FrameData, button: Rect) {
+    use crate::client::shell::agent_sidebar::USAGE_ICON;
+    let label = cells_text(frame, button);
+    let full = crate::i18n::texts().sidebar.agent_usage;
+    assert!(
+        label == full || label == USAGE_ICON,
+        "按钮文本应为整词或图标: {label:?}"
+    );
+    assert_eq!(
+        unicode_width::UnicodeWidthStr::width(label.as_str()) as u16,
+        button.width,
+        "命中区宽度等于渲染文本宽度: {label:?} {button:?}"
+    );
+    assert!(
+        USAGE_ICON.chars().all(|ch| ch.is_ascii_graphic()),
+        "缩略图标必须是 ASCII 窄字形: {USAGE_ICON:?}"
+    );
+}
+
+#[test]
+fn usage_button_survives_extremely_narrow_headers_by_dropping_the_sort_label() {
+    use crate::client::shell::agent_sidebar::{render_agent_panel_header, USAGE_ICON};
+    let _lang = crate::i18n::lang_guard(crate::i18n::Lang::ZhCn);
+    let config = ClientShellConfig::from_config(&Config::default());
+    assert!(config.mouse_capture);
+    let texts = crate::i18n::texts();
+    let agents_width = unicode_width::UnicodeWidthStr::width(texts.sidebar.agents) as u16;
+    let icon_width = unicode_width::UnicodeWidthStr::width(USAGE_ICON) as u16;
+    assert_eq!(icon_width, 1, "缩略入口是 1 列窄字形");
+    let header = |width: u16| {
+        let area = Rect::new(0, 0, width, 3);
+        let mut buffer = ratatui::buffer::Buffer::empty(area);
+        let mut hits = crate::client::shell::state::ShellHitMap::default();
+        assert!(render_agent_panel_header(
+            &mut buffer,
+            area,
+            None,
+            &config,
+            None,
+            &mut hits
+        ));
+        (buffer, hits)
+    };
+    // 内容宽 = agents 标签 + 3 列间距 + 图标：排序标签整个放弃，图标靠右且有命中区。
+    let (buffer, hits) = header(agents_width + 3 + icon_width);
+    let button = hits.agent_usage_toggle;
+    assert_eq!(
+        button,
+        Rect::new(agents_width + 3, 1, icon_width, 1),
+        "极窄时按钮靠右对齐并保住命中区"
+    );
+    assert_eq!(buffer[(button.x, button.y)].symbol(), USAGE_ICON);
+    assert!(hits.agent_sort_toggle.is_empty(), "排序标签被放弃");
+    // 再窄 1 列才没有按钮：这是入口存在的下限（内容宽 ≥ agents 标签 + 3 + 图标）。
+    let (_, hits) = header(agents_width + 2 + icon_width);
+    assert!(hits.agent_usage_toggle.is_empty());
+    // 排序标签剩 1 列时：按钮与它之间留 1 列间距。
+    let (_, hits) = header(agents_width + 3 + icon_width + 2);
+    let button = hits.agent_usage_toggle;
+    assert_eq!(button.width, icon_width);
+    assert_eq!(hits.agent_sort_toggle.width, 1);
+    assert_eq!(button.right() + 1, hits.agent_sort_toggle.x);
+}
+
+#[test]
+fn hovering_the_agents_usage_button_opens_overview_and_leaving_closes_it() {
+    let mut state = usage_ready();
+    deliver_providers(
+        &mut state,
+        vec![
+            provider("claude", &["claude:default"]),
+            provider("codex", &["codex:default"]),
+        ],
+    );
+    // 页面作用域基线：总览浮层出现 / 消失都不能碰它。
+    state.observability.selected_provider = Some("codex".into());
+    state.observability.accounts = vec![account("codex", "codex:default")];
+    let epoch_before = state.observability.epoch;
+    state.compose(120, 40).expect("工作台");
+    let button = state.hits.agent_usage_toggle;
+    assert!(!button.is_empty(), "用量按钮有命中区");
+    let t0 = Instant::now();
+    moved(&mut state, button.x, button.y);
+    assert_eq!(
+        overview_hover(&state),
+        Some((false, false)),
+        "扫过用量按钮先进入延时状态"
+    );
+    let shown = tick(&mut state, t0 + Duration::from_millis(450));
+    assert_eq!(overview_hover(&state), Some((true, false)), "400ms 后可见");
+    let calls = usage_calls(&shown);
+    assert_eq!(calls.len(), 1, "可见即发悬浮层自己的请求: {calls:?}");
+    assert_eq!(calls[0].1.agent, None, "总览不带厂商");
+    assert_eq!(calls[0].1.pane_id, None, "总览不带 pane");
+    assert_eq!(
+        state.observability.hover_scope.provider, None,
+        "总览作用域不选厂商"
+    );
+    assert_eq!(
+        state.observability.selected_provider.as_deref(),
+        Some("codex"),
+        "总览浮层不改写页面选择"
+    );
+    assert_eq!(
+        state.observability.accounts.len(),
+        1,
+        "总览浮层不清页面账号"
+    );
+    assert_eq!(state.observability.epoch, epoch_before);
+    // 首帧：数据未到时显示「查询中」占位而不是空框。
+    let frame = state.compose(120, 40).expect("总览浮层");
+    assert!(
+        frame_has(&frame, "查询中") || frame_has(&frame, "Loading"),
+        "loading 态占位: {:?}",
+        (0..40).map(|y| frame_row(&frame, y)).collect::<Vec<_>>()
+    );
+    assert!(deliver_hover_usage(
+        &mut state,
+        vec![
+            account_with_percent("claude", "claude:default", 42.0),
+            account("codex", "codex:default"),
+        ]
+    ));
+    let frame = state.compose(120, 40).expect("总览浮层");
+    let rect = state.observability.hover_rect;
+    assert!(!rect.is_empty(), "浮层有矩形");
+    assert!(
+        rect.y == button.bottom() || rect.bottom() == button.y,
+        "浮层锚在按钮下方（或空间不足时上翻）: button={button:?} rect={rect:?}"
+    );
+    assert_eq!(rect.x, button.x, "浮层与按钮左对齐");
+    assert!(
+        (34..=56).contains(&rect.width),
+        "紧凑版宽度 34..=56: {rect:?}"
+    );
+    assert!(
+        (5..=14).contains(&rect.height),
+        "紧凑版高度 5..=14: {rect:?}"
+    );
+    assert!(
+        frame_has(&frame, "用量总览") || frame_has(&frame, "Usage overview"),
+        "标题「用量总览」"
+    );
+    assert!(frame_has(&frame, "claude:default") && frame_has(&frame, "codex:default"));
+    assert!(frame_has(&frame, "━"), "百分比指标画进度条");
+    let cursor = frame.cursor.as_ref().expect("终端光标仍在");
+    assert!(cursor.visible);
+    assert!(
+        state
+            .observability
+            .hover_hits
+            .iter()
+            .any(
+                |(hit, action)| matches!(action, Action::Page(Page::Accounts))
+                    && hit.width >= rect.width.saturating_sub(2)
+            ),
+        "整块命中区打开账号页: {:?}",
+        state.observability.hover_hits
+    );
+    // 移开：进入 250ms 离开宽限；宽限内移回不关。
+    let away = away_point(&state);
+    moved(&mut state, away.0, away.1);
+    assert!(state
+        .observability
+        .hover
+        .as_ref()
+        .is_some_and(|hover| hover.leave_at.is_some()));
+    moved(&mut state, button.x, button.y);
+    assert!(state
+        .observability
+        .hover
+        .as_ref()
+        .is_some_and(|hover| hover.leave_at.is_none()));
+    moved(&mut state, away.0, away.1);
+    let t1 = Instant::now();
+    tick(&mut state, t1 + Duration::from_millis(100));
+    assert_eq!(overview_hover(&state), Some((true, false)), "宽限内仍可见");
+    tick(&mut state, t1 + Duration::from_millis(300));
+    assert!(state.observability.hover.is_none(), "离开 250ms 后关闭");
+    assert!(state.observability.hover_scope.accounts.is_empty());
+    assert_eq!(
+        state.observability.selected_provider.as_deref(),
+        Some("codex")
+    );
+    assert_eq!(state.observability.epoch, epoch_before);
+}
+
+#[test]
+fn hover_becomes_visible_only_after_hover_delay_ms() {
+    let mut state = usage_ready();
+    state.compose(120, 40).expect("工作台");
+    let button = state.hits.agent_usage_toggle;
+    let t0 = Instant::now();
+    moved(&mut state, button.x, button.y);
+    let early = tick(&mut state, t0 + Duration::from_millis(200));
+    assert_eq!(
+        overview_hover(&state),
+        Some((false, false)),
+        "未满延时不可见"
+    );
+    assert!(usage_calls(&early).is_empty(), "不可见就不发请求");
+    tick(&mut state, t0 + Duration::from_millis(450));
+    assert_eq!(overview_hover(&state), Some((true, false)));
+
+    // 自定义延时同样生效。
+    state.observability.clear_hover();
+    state.observability.usage.hover_delay_ms = 1000;
+    let t1 = Instant::now();
+    moved(&mut state, button.x, button.y);
+    tick(&mut state, t1 + Duration::from_millis(450));
+    assert_eq!(
+        overview_hover(&state),
+        Some((false, false)),
+        "1000ms 延时未到"
+    );
+    tick(&mut state, t1 + Duration::from_millis(1100));
+    assert_eq!(overview_hover(&state), Some((true, false)));
+}
+
+#[test]
+fn clicking_the_usage_button_pins_the_overview_without_clearing_the_page() {
+    let mut state = usage_ready();
+    state.open_observation_page(Page::Monitor, &mut ClientShellInput::default());
+    assert_eq!(state.observability.page, Some(Page::Monitor));
+    state.compose(120, 40).expect("监控面板");
+    let button = state.hits.agent_usage_toggle;
+    assert!(!button.is_empty());
+    // 悬浮中点击 = 钉住：hover 不清、page 不清、焦点不动。
+    let t0 = Instant::now();
+    moved(&mut state, button.x, button.y);
+    tick(&mut state, t0 + Duration::from_millis(450));
+    assert_eq!(overview_hover(&state), Some((true, false)));
+    click(&mut state, button.x, button.y);
+    assert_eq!(
+        overview_hover(&state),
+        Some((true, true)),
+        "点击用量按钮不清 hover 而是钉住"
+    );
+    assert_eq!(
+        state.observability.page,
+        Some(Page::Monitor),
+        "点击用量按钮不清 page"
+    );
+    assert_eq!(state.workbench.dock.focused, PanelId::Monitor);
+    assert!(
+        !matches!(state.overlay, Some(ClientShellOverlay::UsageDashboard)),
+        "钉住不走模态 overlay"
+    );
+    // 钉住后离开不再关闭。
+    state.compose(120, 40).expect("钉住的浮层");
+    let away = away_point(&state);
+    moved(&mut state, away.0, away.1);
+    let t1 = Instant::now();
+    tick(&mut state, t1 + Duration::from_secs(2));
+    assert_eq!(overview_hover(&state), Some((true, true)), "钉住后离开不关");
+    // 钉住后扫过 agent 行也不被替换。
+    let row = state
+        .hits
+        .endpoint_agents
+        .iter()
+        .find(|(_, _, pane)| pane == "pane_1")
+        .map(|(rect, _, _)| *rect)
+        .expect("Agents 面板列出 pane_1");
+    moved(&mut state, row.x, row.y);
+    assert_eq!(overview_hover(&state), Some((true, true)));
+    // Esc 关闭钉住的浮层，page 仍在。
+    press_key(&mut state, crossterm::event::KeyCode::Esc);
+    assert!(state.observability.hover.is_none(), "Esc 关闭钉住的浮层");
+    assert_eq!(state.observability.page, Some(Page::Monitor));
+    // 未悬浮直接点击 → 立即显示并钉住，下一次 tick 发总览请求。
+    state.compose(120, 40).expect("重绘");
+    click(&mut state, button.x, button.y);
+    assert_eq!(
+        overview_hover(&state),
+        Some((true, true)),
+        "点击即显示并钉住"
+    );
+    let calls = usage_calls(&tick(
+        &mut state,
+        Instant::now() + Duration::from_millis(10),
+    ));
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].1.agent, None);
+    // 再点一次 → 关闭（幂等 show/hide）。
+    state.compose(120, 40).expect("重绘");
+    click(&mut state, button.x, button.y);
+    assert!(state.observability.hover.is_none(), "再次点击关闭");
+    assert_eq!(state.observability.page, Some(Page::Monitor));
+    // 钉住后在浮层外点击 → 关闭。
+    click(&mut state, button.x, button.y);
+    assert_eq!(overview_hover(&state), Some((true, true)));
+    state.compose(120, 40).expect("重绘");
+    let away = away_point(&state);
+    click(&mut state, away.0, away.1);
+    assert!(state.observability.hover.is_none(), "浮层外点击关闭");
+}
+
+#[test]
+fn narrowing_the_panel_dismisses_the_overview_hover() {
+    let mut state = usage_ready();
+    state.compose(120, 40).expect("工作台");
+    let button = state.hits.agent_usage_toggle;
+    let t0 = Instant::now();
+    moved(&mut state, button.x, button.y);
+    tick(&mut state, t0 + Duration::from_millis(450));
+    assert_eq!(overview_hover(&state), Some((true, false)));
+    // 面板变窄：按钮命中区消失或移位，下一次 tick 清掉孤儿 hover。
+    state.compose(30, 40).expect("极窄工作台");
+    assert_ne!(state.hits.agent_usage_toggle, button, "变窄后按钮不在原位");
+    tick(&mut state, t0 + Duration::from_millis(500));
+    assert!(state.observability.hover.is_none(), "锚点丢失即关闭浮层");
+    assert_eq!(state.observability.hover_scope.provider, None);
+}
+
+#[test]
+fn usage_dashboard_is_non_modal_and_dispatches_clicks_inside() {
+    let mut state = usage_ready();
+    deliver_providers(
+        &mut state,
+        vec![
+            provider("claude", &["claude:default"]),
+            provider("codex", &["codex:default"]),
+        ],
+    );
+    state.toggle_usage_dashboard(&mut ClientShellInput::default());
+    assert!(matches!(
+        state.overlay,
+        Some(ClientShellOverlay::UsageDashboard)
+    ));
+    assert_eq!(
+        state.observability.usage.format,
+        crate::config::UsageDisplayFormat::Dashboard
+    );
+    tick(&mut state, Instant::now() + Duration::from_millis(10));
+    assert!(deliver_usage(
+        &mut state,
+        vec![
+            account_with_percent("claude", "claude:default", 42.0),
+            account("codex", "codex:default"),
+        ]
+    ));
+    let frame = state.compose(120, 40).expect("仪表盘");
+    assert!(frame_has(&frame, "━"), "format=Dashboard 时出现进度条字符");
+    let cursor = frame.cursor.as_ref();
+    assert!(
+        cursor.is_none_or(|cursor| !contains(state.hits.overlay_bounds, (cursor.x, cursor.y))),
+        "浮层只抹掉被它盖住的光标"
+    );
+    // 非模态 = 不压暗整屏：仪表盘之外的终端单元格不带 DIM（计划 F-5）。
+    let bounds = state.hits.overlay_bounds;
+    let terminal = terminal_body(&state);
+    let outside = (terminal.y..terminal.bottom())
+        .flat_map(|y| (terminal.x..terminal.right()).map(move |x| (x, y)))
+        .find(|point| !contains(bounds, *point))
+        .expect("终端有单元格在仪表盘之外");
+    assert!(
+        !cell_dimmed(&frame, outside.0, outside.1),
+        "仪表盘打开时终端单元格 {outside:?} 不该被压暗"
+    );
+    // 浮层内点击账号行 → 选中账号，浮层不关。
+    let row = state
+        .hits
+        .usage_dashboard_actions
+        .iter()
+        .find(|(_, action)| matches!(action, Action::Account(id) if id == "codex:default"))
+        .map(|(rect, _)| *rect)
+        .unwrap_or_else(|| panic!("仪表盘命中区接回: {:?}", state.hits.usage_dashboard_actions));
+    click(&mut state, row.x, row.y);
+    assert!(
+        matches!(state.overlay, Some(ClientShellOverlay::UsageDashboard)),
+        "浮层内点击不关闭"
+    );
+    assert_eq!(
+        state.observability.selected_account.as_deref(),
+        Some("codex:default")
+    );
+    // 浮层内空白（标题行）点击也不关闭。
+    let bounds = state.hits.overlay_bounds;
+    click(&mut state, bounds.x + 1, bounds.y + 1);
+    assert!(matches!(
+        state.overlay,
+        Some(ClientShellOverlay::UsageDashboard)
+    ));
+    // 滚轮驱动页面作用域的 account_scroll。
+    state.observability.accounts = (0..12)
+        .map(|index| account_with_percent("claude", &format!("claude:{index}"), 10.0))
+        .collect();
+    state.compose(120, 40).expect("仪表盘");
+    let mut outcome = ClientShellInput::default();
+    state.handle_mouse(
+        MouseEvent {
+            kind: MouseEventKind::ScrollDown,
+            column: bounds.x + 2,
+            row: bounds.y + 2,
+            modifiers: KeyModifiers::NONE,
+        },
+        &mut outcome,
+    );
+    assert_eq!(state.observability.account_scroll, 1, "滚轮滚动仪表盘");
+    // 普通键透传到终端，浮层不吞键、不关闭。
+    let typed = press_key(&mut state, crossterm::event::KeyCode::Char('a'));
+    assert!(
+        typed
+            .requests
+            .iter()
+            .any(|message| matches!(message, ClientMessage::ClientShellPaneInput { .. })),
+        "普通键透传到聚焦终端: {:?}",
+        typed.requests.len()
+    );
+    assert!(matches!(
+        state.overlay,
+        Some(ClientShellOverlay::UsageDashboard)
+    ));
+    // Esc 关闭；重开后点外关闭。
+    press_key(&mut state, crossterm::event::KeyCode::Esc);
+    assert!(state.overlay.is_none(), "Esc 关闭仪表盘");
+    state.toggle_usage_dashboard(&mut ClientShellInput::default());
+    state.compose(120, 40).expect("仪表盘");
+    let bounds = state.hits.overlay_bounds;
+    let outside = if bounds.x > 2 {
+        (1, bounds.y)
+    } else {
+        (bounds.right() + 1, bounds.y)
+    };
+    assert!(!contains(bounds, outside));
+    click(&mut state, outside.0, outside.1);
+    assert!(state.overlay.is_none(), "点外关闭");
+}
+
+#[test]
+fn keyboard_navigation_never_activates_the_pinned_overview() {
+    let mut state = usage_ready();
+    state.open_observation_page(Page::Monitor, &mut ClientShellInput::default());
+    state.compose(120, 40).expect("监控面板");
+    let button = state.hits.agent_usage_toggle;
+    click(&mut state, button.x, button.y);
+    assert_eq!(overview_hover(&state), Some((true, true)));
+    state.compose(120, 40).expect("页面 + 钉住的总览同帧");
+    let hover_rect = state.observability.hover_rect;
+    assert!(!hover_rect.is_empty());
+    let inside = |rect: Rect| contains(hover_rect, (rect.x, rect.y));
+    let page_hits = state
+        .observability
+        .hits
+        .iter()
+        .filter(|(rect, _)| !inside(*rect))
+        .count();
+    assert!(page_hits > 0, "页面有可 Tab 的控件");
+    assert!(
+        state.observability.hits.len() > page_hits,
+        "总表仍列举浮层命中区（既有契约）"
+    );
+    let highlighted = |state: &ClientShellState| {
+        state
+            .observability
+            .hits
+            .get(state.observability.selected_hit)
+            .map(|(rect, _)| *rect)
+            .expect("高亮项存在")
+    };
+    // Tab 走完一整圈：高亮始终落在页面控件上，从不落进浮层。
+    for step in 1..=page_hits {
+        press_key(&mut state, crossterm::event::KeyCode::Tab);
+        let rect = highlighted(&state);
+        assert!(!inside(rect), "第 {step} 次 Tab 落进浮层: {rect:?}");
+    }
+    // 走完一圈后 Enter 激活的是页面控件，不是浮层的「打开账号页」。
+    press_key(&mut state, crossterm::event::KeyCode::Enter);
+    assert_ne!(
+        state.observability.page,
+        Some(Page::Accounts),
+        "Enter 不能激活浮层命中区"
+    );
+    // 反向同样不进浮层。
+    state.compose(120, 40).expect("重绘");
+    if overview_hover(&state).is_none() {
+        click(&mut state, button.x, button.y);
+        state.compose(120, 40).expect("重新钉住");
+    }
+    press_key(&mut state, crossterm::event::KeyCode::BackTab);
+    let rect = highlighted(&state);
+    assert!(!inside(rect), "BackTab 落进浮层: {rect:?}");
+}
+
+#[test]
+fn hover_preference_off_still_pins_on_click_and_keeps_the_leave_grace() {
+    let mut state = usage_ready();
+    state.observability.usage_hover_dashboard = false;
+    state.compose(120, 40).expect("工作台");
+    let button = state.hits.agent_usage_toggle;
+    assert!(!button.is_empty());
+    let t0 = Instant::now();
+    moved(&mut state, button.x, button.y);
+    assert!(
+        state.observability.hover.is_none(),
+        "偏好关闭：扫过不进入延时状态"
+    );
+    tick(&mut state, t0 + Duration::from_millis(450));
+    assert!(
+        state.observability.hover.is_none(),
+        "偏好关闭：停留也不弹总览"
+    );
+    click(&mut state, button.x, button.y);
+    assert_eq!(
+        overview_hover(&state),
+        Some((true, true)),
+        "偏好关闭：点击仍可钉住"
+    );
+    press_key(&mut state, crossterm::event::KeyCode::Esc);
+    assert!(state.observability.hover.is_none());
+    // agent 行悬浮 → 指针移到按钮上停住：偏好关闭时不换成总览，但 agent 悬浮
+    // 要进入 250 ms 离开宽限，而不是无限期挂着。
+    state.compose(120, 40).expect("重绘");
+    let row = state
+        .hits
+        .endpoint_agents
+        .iter()
+        .find(|(_, _, pane)| pane == "pane_1")
+        .map(|(rect, _, _)| *rect)
+        .expect("Agents 面板列出 pane_1");
+    moved(&mut state, row.x, row.y);
+    assert!(
+        matches!(
+            state
+                .observability
+                .hover
+                .as_ref()
+                .map(|hover| &hover.target),
+            Some(HoverTarget::Agent { .. })
+        ),
+        "扫过 agent 行进入 agent 悬浮"
+    );
+    moved(&mut state, button.x, button.y);
+    let hover = state
+        .observability
+        .hover
+        .as_ref()
+        .expect("agent 悬浮不会被按钮清掉");
+    assert!(
+        matches!(hover.target, HoverTarget::Agent { .. }),
+        "偏好关闭时不换成总览"
+    );
+    assert!(hover.leave_at.is_some(), "指针停在按钮上视为离开 agent 行");
+    let t1 = Instant::now();
+    tick(&mut state, t1 + Duration::from_millis(300));
+    assert!(
+        state.observability.hover.is_none(),
+        "250 ms 宽限后 agent 悬浮自动关闭"
+    );
+}
+
+#[test]
+fn clicking_inside_the_overview_opens_the_accounts_page() {
+    let mut state = usage_ready();
+    deliver_providers(
+        &mut state,
+        vec![
+            provider("claude", &["claude:default"]),
+            provider("codex", &["codex:default"]),
+        ],
+    );
+    state.compose(120, 40).expect("工作台");
+    let button = state.hits.agent_usage_toggle;
+    let t0 = Instant::now();
+    moved(&mut state, button.x, button.y);
+    tick(&mut state, t0 + Duration::from_millis(450));
+    assert_eq!(overview_hover(&state), Some((true, false)));
+    assert!(deliver_hover_usage(
+        &mut state,
+        vec![account_with_percent("claude", "claude:default", 42.0)]
+    ));
+    state.compose(120, 40).expect("总览浮层");
+    let rect = state.observability.hover_rect;
+    assert!(!rect.is_empty());
+    assert!(
+        !state.observability.hover_scope.accounts.is_empty(),
+        "悬浮层作用域已有数据"
+    );
+    let scope_epoch = state.observability.hover_scope.epoch;
+    click(&mut state, rect.x + 2, rect.y + 2);
+    assert_eq!(
+        state.observability.page,
+        Some(Page::Accounts),
+        "浮层本体点击打开账号页"
+    );
+    assert!(state.observability.hover.is_none(), "打开页面即关闭浮层");
+    assert!(
+        state.observability.hover_scope.accounts.is_empty(),
+        "浮层作用域不残留数据"
+    );
+    assert_eq!(state.observability.hover_scope.provider, None);
+    assert_eq!(state.observability.hover_scope.endpoint, None);
+    assert!(
+        state.observability.hover_scope.epoch > scope_epoch,
+        "作用域换代，在途悬浮层响应作废"
+    );
+    // 钉住态同样：点浮层本体 → 账号页并关闭浮层。
+    state.compose(120, 40).expect("账号页");
+    let button = state.hits.agent_usage_toggle;
+    click(&mut state, button.x, button.y);
+    assert_eq!(overview_hover(&state), Some((true, true)));
+    state.compose(120, 40).expect("钉住的浮层");
+    let rect = state.observability.hover_rect;
+    assert!(!rect.is_empty());
+    click(&mut state, rect.x + 2, rect.y + 2);
+    assert_eq!(state.observability.page, Some(Page::Accounts));
+    assert!(state.observability.hover.is_none());
+}
+
+#[test]
+fn usage_button_with_usage_disabled_ignores_hover_but_explains_on_click() {
+    let mut state = usage_ready();
+    state.observability.usage.enabled = false;
+    state.compose(120, 40).expect("工作台");
+    let button = state.hits.agent_usage_toggle;
+    assert!(!button.is_empty(), "按钮仍在（入口不随开关闪烁）");
+    let t0 = Instant::now();
+    moved(&mut state, button.x, button.y);
+    tick(&mut state, t0 + Duration::from_millis(450));
+    assert!(
+        state.observability.hover.is_none(),
+        "用量关闭时扫过按钮不弹浮层"
+    );
+    click(&mut state, button.x, button.y);
+    assert_eq!(
+        overview_hover(&state),
+        Some((true, true)),
+        "显式点击仍打开浮层，给出反馈而不是静默失败"
+    );
+    let frame = state.compose(120, 40).expect("浮层");
+    assert!(
+        frame_has(&frame, "已在设置中关闭") || frame_has(&frame, "disabled"),
+        "浮层说明用量已关闭并指向设置页"
+    );
+}
+
+#[test]
+fn pinned_overview_survives_hit_map_resets_until_the_next_compose() {
+    let mut state = usage_ready();
+    state.compose(120, 40).expect("工作台");
+    let button = state.hits.agent_usage_toggle;
+    click(&mut state, button.x, button.y);
+    assert_eq!(overview_hover(&state), Some((true, true)));
+    // 终端 resize / 配置重载：命中区整体重置但不立即重绘，钉住的浮层不能被当成孤儿。
+    state.invalidate_pane_surface();
+    assert!(state.hits.agent_usage_toggle.is_empty());
+    tick(&mut state, Instant::now() + Duration::from_secs(1));
+    assert_eq!(
+        overview_hover(&state),
+        Some((true, true)),
+        "命中区未重绘时不判定锚点丢失"
+    );
+    state.set_pane_surface(surface());
+    state.compose(120, 40).expect("重绘");
+    assert_eq!(state.hits.agent_usage_toggle, button, "重绘后按钮回到原位");
+    tick(&mut state, Instant::now() + Duration::from_secs(1));
+    assert_eq!(overview_hover(&state), Some((true, true)));
+    // 未配对的 surface（revision 领先快照）同样只清空命中区、不产生新帧。
+    let mut future = surface();
+    future.projection_revision = state.snapshot.as_deref().expect("快照").revision + 1;
+    state.set_pane_surface(future);
+    assert!(
+        state.hits.agent_usage_toggle.is_empty(),
+        "未配对 surface 清空命中区"
+    );
+    tick(&mut state, Instant::now() + Duration::from_secs(1));
+    assert_eq!(overview_hover(&state), Some((true, true)));
+    // 真正变窄（重绘后按钮移位）才关闭。
+    state.compose(30, 40).expect("极窄工作台");
+    assert_ne!(state.hits.agent_usage_toggle, button);
+    tick(&mut state, Instant::now() + Duration::from_secs(1));
+    assert!(
+        state.observability.hover.is_none(),
+        "重绘后锚点真的丢失才关闭"
+    );
+}
+
+#[test]
+fn overview_never_covers_the_usage_button_when_space_is_short() {
+    let pinned_at = |anchor: Rect| Hover {
+        target: HoverTarget::UsageOverview,
+        anchor,
+        since: Instant::now(),
+        visible: true,
+        leave_at: None,
+        pinned: true,
+    };
+    // 下方放不下、上方放得下：上翻，浮层底边贴着按钮上沿。
+    let mut state = usage_ready();
+    let anchor = Rect::new(2, 36, 4, 1);
+    state.observability.hover = Some(pinned_at(anchor));
+    state.compose(120, 40).expect("上翻");
+    let rect = state.observability.hover_rect;
+    assert!(!rect.is_empty());
+    assert_eq!(rect.bottom(), anchor.y, "上翻后底边贴按钮上沿: {rect:?}");
+    assert_eq!(rect.x, anchor.x);
+    // 两侧都放不下：取空间更大的一侧并收缩高度，仍不与按钮相交。
+    let anchor = Rect::new(2, 3, 4, 1);
+    state.observability.hover = Some(pinned_at(anchor));
+    state.compose(120, 7).expect("矮终端");
+    let rect = state.observability.hover_rect;
+    assert!(!rect.is_empty(), "矮终端仍画浮层");
+    assert!(
+        !rect.intersects(anchor),
+        "浮层不盖按钮: {rect:?} vs {anchor:?}"
+    );
+    assert!(rect.bottom() <= 7);
+    // 真实按钮 + 矮终端（13 行是停靠工作台还画得出 Agents 面板头部的最矮高度，
+    // 按钮下方只剩 3 行）：浮层上翻到按钮上方，按钮仍在浮层之外，再点按钮是
+    // 取消钉住而不是落进浮层的「打开账号页」。
+    let mut state = usage_ready();
+    state.compose(120, 13).expect("矮终端");
+    let button = state.hits.agent_usage_toggle;
+    assert!(!button.is_empty(), "矮终端仍有用量按钮");
+    assert!(
+        13 - button.bottom() < 5,
+        "按钮下方放不下最矮的浮层: {button:?}"
+    );
+    click(&mut state, button.x, button.y);
+    assert_eq!(overview_hover(&state), Some((true, true)));
+    state.compose(120, 13).expect("矮终端 + 浮层");
+    let rect = state.observability.hover_rect;
+    assert!(!rect.is_empty());
+    assert_eq!(
+        rect.bottom(),
+        button.y,
+        "上翻到按钮上方: {rect:?} vs {button:?}"
+    );
+    assert!(
+        !rect.intersects(button),
+        "浮层不盖按钮: {rect:?} vs {button:?}"
+    );
+    click(&mut state, button.x, button.y);
+    assert!(state.observability.hover.is_none(), "再点按钮 = 取消钉住");
+    assert_eq!(state.observability.page, None, "不是打开账号页");
+}
+
+#[test]
+fn observability_paint_reports_page_and_overview_covers_separately() {
+    let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
+    state.set_snapshot(Box::new(snapshot()));
+    state.set_pane_surface(surface());
+    state.compose(120, 40).expect("经典布局");
+    assert!(!state.workbench.enabled);
+    let button = state.hits.agent_usage_toggle;
+    assert!(!button.is_empty());
+    state.observability.page = Some(Page::Monitor);
+    state.observability.hover = Some(Hover {
+        target: HoverTarget::UsageOverview,
+        anchor: button,
+        since: Instant::now(),
+        visible: true,
+        leave_at: None,
+        pinned: true,
+    });
+    let mut frame = state.compose(120, 40).expect("页面 + 总览同帧");
+    let area = state.observability.page_rect;
+    assert!(!area.is_empty(), "经典布局页面铺满 pane 区");
+    let hover_rect = state.observability.hover_rect;
+    assert!(!hover_rect.is_empty());
+    state.observability.begin_paint();
+    let painted = state
+        .observability
+        .paint(
+            &mut frame,
+            area,
+            &state.config.palette,
+            Some(Page::Monitor),
+            true,
+        )
+        .expect("绘制");
+    assert_eq!(painted.page_rect, area);
+    assert_eq!(painted.hover_rect, hover_rect);
+    assert_eq!(painted.covered, [area, hover_rect], "覆盖区按块给出");
+    let bounding = area.union(hover_rect);
+    assert_ne!(
+        bounding, area,
+        "两块不是包含关系，外接矩形会多盖出未被覆盖的区域"
+    );
+    assert!(
+        !painted.covered.contains(&bounding),
+        "不能把外接矩形当覆盖区"
     );
 }

@@ -491,6 +491,13 @@ impl ClientShellState {
         }
     }
 
+    /// 非模态的浮动用量仪表盘不吞输入：除 Esc（关闭）外的按键、文本提交、粘贴
+    /// 与剪贴板图片照常落到聚焦终端。`key` 为 `None` 表示非按键输入。
+    pub(super) fn overlay_passes_input(&self, key: Option<&crate::input::TerminalKey>) -> bool {
+        matches!(self.overlay, Some(ClientShellOverlay::UsageDashboard))
+            && key.is_none_or(|key| key.code != KeyCode::Esc)
+    }
+
     pub(super) fn route_overlay_key(
         &mut self,
         key: &crate::input::TerminalKey,
@@ -676,8 +683,8 @@ impl ClientShellState {
             return;
         }
 
-        // Display-only floating dashboard: any other key keeps it open so a
-        // stray terminal keystroke cannot dismiss it mid-glance.
+        // 非模态浮动仪表盘：只有 Esc 到得了这里（其它按键由 `overlay_passes_input`
+        // 放行到终端），Esc 关闭。
         if matches!(self.overlay, Some(ClientShellOverlay::UsageDashboard)) {
             if key.code == KeyCode::Esc {
                 self.overlay = None;

@@ -400,7 +400,9 @@ impl ClientShellState {
         restore_mode_bar(&mut frame, mode_bar, mode_bar_cells.as_deref());
         self.paint_shell_feedback(&mut frame, layout, &mut occlusion)?;
         if let Some(covered) = self.paint_observability(&mut frame, layout.pane_surface) {
-            occlusion.cover(covered);
+            for rect in covered {
+                occlusion.cover(rect);
+            }
         }
         let snapshot = self.snapshot.as_deref()?;
         let surface = self.pane_surface.as_ref()?;
@@ -533,6 +535,7 @@ impl ClientShellState {
             self.hits.popup = None;
         }
         self.compose_graphics(&mut frame, layout, &occlusion);
+        self.hits.composed = true;
         Some(frame)
     }
     pub(super) fn paint_shell_feedback(
@@ -897,6 +900,7 @@ impl ClientShellState {
                 self.hits.overlay_primary = rendered.primary;
                 self.hits.overlay_clear = rendered.clear;
                 self.hits.overlay_cancel = rendered.cancel;
+                self.hits.usage_dashboard_actions = rendered.usage_dashboard_actions;
                 self.hits.menu_popup = rendered.menu_popup;
                 self.hits.menu_search = rendered.menu_search;
                 self.hits.menu_scroll = rendered.menu_scroll;

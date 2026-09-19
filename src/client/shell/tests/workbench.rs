@@ -39,17 +39,20 @@ fn compact_projection_preserves_dock_tree_and_every_size_is_safe() {
 
 #[test]
 fn account_hover_remains_visible_over_a_focused_monitor_panel() {
-    use crate::client::shell::observability::{Hover, Page};
+    use crate::client::shell::observability::{Hover, HoverTarget, Page};
     let mut state = ready();
     state.workbench_open(PanelId::Monitor);
     state.observability.hover = Some(Hover {
-        endpoint_id: state.active_endpoint_id.clone(),
-        pane: "pane_1".into(),
-        agent: "claude".into(),
+        target: HoverTarget::Agent {
+            endpoint_id: state.active_endpoint_id.clone(),
+            pane: "pane_1".into(),
+            agent: "claude".into(),
+        },
         anchor: Rect::new(0, 20, 24, 2),
         since: std::time::Instant::now(),
         visible: true,
         leave_at: None,
+        pinned: false,
     });
     state.compose(120, 40).expect("监控与悬浮层可同时显示");
     // 聚焦的监控面板拥有键盘并画出用户选中的 tab（默认系统页）；渲染期不改写。
@@ -96,7 +99,7 @@ fn account_hover_remains_visible_over_a_focused_monitor_panel() {
 
 #[test]
 fn hover_blank_space_and_wheel_cannot_reach_background_processes_or_cards() {
-    use crate::client::shell::observability::{Action, Hover};
+    use crate::client::shell::observability::{Action, Hover, HoverTarget};
     let mut state = ready();
     state.set_endpoint_methods(Some(vec![
         "client.views.set".into(),
@@ -107,13 +110,16 @@ fn hover_blank_space_and_wheel_cannot_reach_background_processes_or_cards() {
         vec![crate::api::schema::AccountUsageSnapshot::default()];
     state.workbench_open(PanelId::Monitor);
     state.observability.hover = Some(Hover {
-        endpoint_id: state.active_endpoint_id.clone(),
-        pane: "pane_1".into(),
-        agent: "claude".into(),
+        target: HoverTarget::Agent {
+            endpoint_id: state.active_endpoint_id.clone(),
+            pane: "pane_1".into(),
+            agent: "claude".into(),
+        },
         anchor: Rect::new(0, 20, 24, 2),
         since: std::time::Instant::now(),
         visible: true,
         leave_at: None,
+        pinned: false,
     });
     state.compose(120, 40).unwrap();
     let hover = state.observability.hover_rect;

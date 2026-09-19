@@ -205,7 +205,9 @@ impl ClientShellState {
                     } else if self.overlay.is_some() || !self.popup_pending {
                         if self.insert_overlay_text(&text) {
                             outcome.repaint = true;
-                        } else if self.overlay.is_none() && self.mode == ClientShellMode::Terminal {
+                        } else if (self.overlay.is_none() || self.overlay_passes_input(None))
+                            && self.mode == ClientShellMode::Terminal
+                        {
                             self.push_focused_pane_event(
                                 ClientPaneInputEvent::TextCommit(text),
                                 &mut outcome,
@@ -239,7 +241,9 @@ impl ClientShellState {
                     } else if self.overlay.is_some() || !self.popup_pending {
                         if self.insert_overlay_text(&text) {
                             outcome.repaint = true;
-                        } else if self.overlay.is_none() && self.mode == ClientShellMode::Terminal {
+                        } else if (self.overlay.is_none() || self.overlay_passes_input(None))
+                            && self.mode == ClientShellMode::Terminal
+                        {
                             self.push_focused_pane_event(
                                 ClientPaneInputEvent::Paste(text),
                                 &mut outcome,
@@ -562,7 +566,7 @@ impl ClientShellState {
             self.route_link_hints_key(key, outcome);
             return None;
         }
-        if self.overlay.is_some() {
+        if self.overlay.is_some() && !self.overlay_passes_input(Some(key)) {
             self.route_overlay_key(key, outcome);
             return None;
         }
@@ -1057,7 +1061,10 @@ impl ClientShellState {
                 terminal_id,
             ));
         }
-        if self.popup_pending || self.overlay.is_some() || self.mode != ClientShellMode::Terminal {
+        if self.popup_pending
+            || (self.overlay.is_some() && !self.overlay_passes_input(None))
+            || self.mode != ClientShellMode::Terminal
+        {
             return None;
         }
         self.focused_pane_id()

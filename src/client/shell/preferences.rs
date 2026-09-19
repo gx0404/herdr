@@ -28,16 +28,35 @@ pub(super) struct ClientChromePreferences {
         skip_serializing_if = "std::collections::HashMap::is_empty"
     )]
     pub(super) layouts: std::collections::HashMap<String, super::dock::DockLayout>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// 监控卡片配置；结构不合法（旧版本 / 手改）时按未设置处理，不让整份偏好失效。
+    #[serde(
+        default,
+        deserialize_with = "read_lenient",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub(super) monitor: Option<crate::config::MonitorConfig>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(super) usage_enabled: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// 未知枚举值 → None（枚举本体不加 `#[serde(other)]`，config.toml 的拼写错误
+    /// 仍由配置诊断报出）。
+    #[serde(
+        default,
+        deserialize_with = "read_lenient",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub(super) usage_format: Option<crate::config::UsageDisplayFormat>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "read_lenient",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub(super) usage_position: Option<crate::config::UsageDisplayPosition>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(super) usage_disabled_providers: Option<Vec<String>>,
+    /// 扫过 Agents 面板头部「用量」按钮是否弹出跨厂商总览浮层（默认开；关掉后
+    /// 点击仍可钉住）。独立 bool 键，不给 `usage_position` 加枚举变体。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) usage_hover_dashboard: Option<bool>,
     /// 监控面板里用户选中的 tab；未知值按未设置处理，不让整份偏好失效。
     #[serde(
         default,
@@ -51,7 +70,11 @@ pub(super) struct ClientChromePreferences {
     pub(super) sidebar_section_split: Option<f32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(super) sidebar_collapsed: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "read_lenient",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub(super) agent_panel_sort: Option<crate::config::AgentPanelSortConfig>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub(super) collapsed_groups: Vec<String>,
@@ -82,6 +105,14 @@ fn read_pages<'de, D: serde::Deserializer<'de>>(
 fn read_monitor_tab<'de, D: serde::Deserializer<'de>>(
     deserializer: D,
 ) -> Result<Option<super::observability::Page>, D::Error> {
+    read_lenient(deserializer)
+}
+
+/// 单字段容错：值解析失败（未知枚举值、结构不合法）时按未设置处理，只丢这一个
+/// 字段，其余偏好照常生效。
+fn read_lenient<'de, D: serde::Deserializer<'de>, T: serde::de::DeserializeOwned>(
+    deserializer: D,
+) -> Result<Option<T>, D::Error> {
     let value = serde_json::Value::deserialize(deserializer)?;
     Ok(serde_json::from_value(value).ok())
 }
@@ -113,9 +144,49 @@ pub(super) fn path_for_local_endpoint(socket_path: &Path) -> PathBuf {
         .join(format!("local-{hash:016x}.json"))
 }
 
+/// 读取偏好文件：逐字段容错——任一字段解析失败（类型不对、未知值）只丢该字段
+/// 并记一次诊断，其余字段照常恢复；整个文件不是 JSON 对象才视为不可用。
 pub(super) fn load(path: &Path) -> Option<ClientChromePreferences> {
     let content = std::fs::read_to_string(path).ok()?;
-    serde_json::from_str(&content).ok()
+    let document = match serde_json::from_str::<serde_json::Value>(&content) {
+        Ok(document) => document,
+        Err(error) => {
+            tracing::warn!(
+                path = %path.display(),
+                %error,
+                "client shell preferences are not valid JSON; using defaults"
+            );
+            return None;
+        }
+    };
+    let serde_json::Value::Object(fields) = document else {
+        tracing::warn!(
+            path = %path.display(),
+            "client shell preferences are not a JSON object; using defaults"
+        );
+        return None;
+    };
+    let mut kept = serde_json::Map::with_capacity(fields.len());
+    let mut dropped = Vec::new();
+    for (key, value) in fields {
+        let mut probe = serde_json::Map::with_capacity(1);
+        probe.insert(key.clone(), value.clone());
+        if serde_json::from_value::<ClientChromePreferences>(serde_json::Value::Object(probe))
+            .is_ok()
+        {
+            kept.insert(key, value);
+        } else {
+            dropped.push(key);
+        }
+    }
+    if !dropped.is_empty() {
+        tracing::warn!(
+            path = %path.display(),
+            fields = ?dropped,
+            "ignoring unreadable client shell preference fields"
+        );
+    }
+    serde_json::from_value(serde_json::Value::Object(kept)).ok()
 }
 
 pub(super) fn store(path: &Path, preferences: ClientChromePreferences) -> Result<(), String> {
@@ -174,6 +245,47 @@ mod tests {
             preferences.monitor_tab,
             Some(super::super::observability::Page::Accounts)
         );
+    }
+
+    #[test]
+    fn bad_enum_values_only_drop_their_own_field() {
+        let preferences: ClientChromePreferences = serde_json::from_str(
+            r#"{"usage_format":"weird","usage_position":"hover","agent_panel_sort":"nope","monitor":{"interval_ms":"fast"},"usage_hover_dashboard":false,"sidebar_width":30}"#,
+        )
+        .expect("坏枚举值不应让整份偏好失效");
+        assert_eq!(preferences.usage_format, None);
+        assert_eq!(
+            preferences.usage_position,
+            Some(crate::config::UsageDisplayPosition::Hover)
+        );
+        assert_eq!(preferences.agent_panel_sort, None);
+        assert!(preferences.monitor.is_none());
+        assert_eq!(preferences.usage_hover_dashboard, Some(false));
+        assert_eq!(preferences.sidebar_width, Some(30));
+    }
+
+    #[test]
+    fn load_drops_unreadable_fields_instead_of_the_whole_file() {
+        let path = std::env::temp_dir().join(format!(
+            "herdr-shell-lenient-preferences-{}.json",
+            std::process::id()
+        ));
+        std::fs::write(
+            &path,
+            r#"{"sidebar_width":"wide","sidebar_collapsed":true,"monitor_tab":"accounts","palette_recent":["a"]}"#,
+        )
+        .expect("write preferences");
+        let loaded = load(&path).expect("坏字段只丢自己，文件仍可用");
+        assert_eq!(loaded.sidebar_width, None, "类型不对的字段被丢弃");
+        assert_eq!(loaded.sidebar_collapsed, Some(true));
+        assert_eq!(
+            loaded.monitor_tab,
+            Some(super::super::observability::Page::Accounts)
+        );
+        assert_eq!(loaded.palette_recent, ["a"]);
+        std::fs::write(&path, "[1,2,3]").expect("write preferences");
+        assert!(load(&path).is_none(), "不是对象的文件视为不可用");
+        std::fs::remove_file(path).expect("remove preferences");
     }
 
     #[test]

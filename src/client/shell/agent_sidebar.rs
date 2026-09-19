@@ -309,6 +309,11 @@ fn render_agent_group_header(
     );
 }
 
+/// 头部放不下「用量」整词时的 1 列入口。必须是 East Asian Width 为 Narrow 的
+/// 字形：Ambiguous 字符（如 `◱`）在 CJK 终端里常按 2 列渲染，会压掉与排序标签
+/// 之间的间距、命中区也与视觉宽度不符。
+pub(super) const USAGE_ICON: &str = "%";
+
 pub(super) fn render_agent_panel_header(
     buffer: &mut Buffer,
     area: Rect,
@@ -354,13 +359,45 @@ pub(super) fn render_agent_panel_header(
         crate::config::AgentPanelSortConfig::Spaces => texts.sidebar.sort_grouped,
         crate::config::AgentPanelSortConfig::Priority => texts.sidebar.sort_priority,
     });
-    let sort_width = display_width(sort_label).min(area.width as usize) as u16;
+    // 宽度预算先保证用量入口：「用量」按钮放在排序标签左侧；放不下整词就缩成
+    // 1 列图标，仍放不下则截断排序标签。这样中文默认宽度（内容 25 列）与
+    // 两种排序标签下按钮都在，不会随排序模式闪烁（UD-07）。
+    let agents_width = display_width(texts.sidebar.agents) as u16;
+    // 按钮最左可起点：Agents 标题右侧留 2 列间距。
+    let min_usage_x = area.x.saturating_add(agents_width).saturating_add(3);
+    let sort_full = display_width(sort_label).min(area.width as usize) as u16;
+    let usage_full = display_width(texts.sidebar.agent_usage) as u16;
+    // 图标宽度与整词同一口径（`display_width`），预算与实际绘制不会静默错位。
+    let icon_width = display_width(USAGE_ICON) as u16;
+    // 排序标签右对齐，按钮在其左侧留 1 列间距；`fits` 判断按钮起点是否不早于
+    // `min_usage_x`。
+    let fits = |usage_width: u16, sort_width: u16| {
+        area.right()
+            .checked_sub(sort_width.saturating_add(usage_width).saturating_add(1))
+            .is_some_and(|usage_x| usage_x >= min_usage_x)
+    };
+    let (usage_label, usage_width, sort_width) = if fits(usage_full, sort_full) {
+        (texts.sidebar.agent_usage, usage_full, sort_full)
+    } else if fits(icon_width, sort_full) {
+        (USAGE_ICON, icon_width, sort_full)
+    } else {
+        // 截断排序标签：给图标留 `icon_width` 列 + 1 列间距；排序标签被挤到 0 列
+        // 时整个放弃它，图标直接靠右对齐，命中区仍保住。因此只要内容宽
+        // ≥ `agents_width + 3 + icon_width` 按钮就存在。
+        let sort_width = area
+            .right()
+            .saturating_sub(min_usage_x.saturating_add(icon_width).saturating_add(1))
+            .min(sort_full);
+        (USAGE_ICON, icon_width, sort_width)
+    };
     let sort_rect = Rect::new(
         area.right().saturating_sub(sort_width),
         area.y + 1,
         sort_width,
         1,
     );
+    // 排序标签存在时按钮与其留 1 列间距；标签被放弃时按钮直接靠右。
+    let usage_gap = u16::from(sort_width > 0);
     hits.agent_sort_toggle = if config.mouse_capture && agent_view_label.is_none() {
         sort_rect
     } else {
@@ -386,17 +423,17 @@ pub(super) fn render_agent_panel_header(
             })
             .add_modifier(Modifier::BOLD),
     );
-    // Usage-dashboard launcher sits left of the sort label; dropped when the
-    // header is too narrow to keep both readable.
-    let usage_label = texts.sidebar.agent_usage;
-    let usage_width = display_width(usage_label) as u16;
     let usage_rect = Rect::new(
-        sort_rect.x.saturating_sub(usage_width + 1),
+        sort_rect
+            .x
+            .saturating_sub(usage_width.saturating_add(usage_gap)),
         area.y + 1,
         usage_width,
         1,
     );
-    let usage_fits = usage_rect.x > area.x + display_width(texts.sidebar.agents) as u16 + 2;
+    let usage_fits = usage_rect.x >= min_usage_x;
+    // `!mouse_capture` 下按钮只绘制不产生命中区；键位 / which-key 兜底（U-6）
+    // 尚未落地，届时总览由 `toggle_usage_dashboard` 的默认键位承接。
     hits.agent_usage_toggle = if config.mouse_capture && usage_fits {
         usage_rect
     } else {
