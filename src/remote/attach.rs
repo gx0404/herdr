@@ -4051,6 +4051,7 @@ mod tests {
             managed_config: Some(managed_config),
             noninteractive: false,
             profile_options: None,
+            askpass: None,
         };
         let args = ssh
             .command()
@@ -4131,6 +4132,8 @@ mod tests {
         assert!(ssh.options().is_none());
     }
 
+    /// 只被 `#[cfg(unix)]` 的 ssh 参数测试使用；Windows 测试目标下同样门控，避免 dead_code。
+    #[cfg(unix)]
     fn full_profile_options() -> ProfileSshOptions {
         ProfileSshOptions {
             port: Some(2222),
