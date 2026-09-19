@@ -170,6 +170,10 @@ pub(super) enum Action {
     UsageEnabled,
     UsageFormat,
     UsagePosition,
+    /// 悬浮延时档位循环（200 / 400 / 800 / 1200 / 2000 ms），持久化为客户端偏好。
+    HoverDelay,
+    /// 回到跨厂商总览（账号页首个 chip / 再点已选厂商 chip）。
+    Overview,
     Provider(String),
     Account(String),
     CycleAccount,
@@ -280,6 +284,9 @@ impl Default for HoverScope {
         }
     }
 }
+
+/// 「悬浮延时」设置行的档位（毫秒），`Action::HoverDelay` 按表循环。
+const HOVER_DELAY_STEPS: [u64; 5] = [200, 400, 800, 1200, 2000];
 
 /// 服务端确认的页面订阅：id、参数与创建它的 (端点, boot)。退订必须发回同一
 /// 端点——订阅 id 只在创建它的 server 上有意义。
@@ -483,7 +490,12 @@ pub(super) struct State {
     pub selected_core: Option<usize>,
     pub card_scroll: HashMap<String, usize>,
     pub account_scroll: usize,
+    /// 系统页卡片列表的滚动位置；设置页用 `settings_scroll`，两页互不泄漏。
     pub scroll: usize,
+    /// 设置页行列表的滚动位置。
+    pub settings_scroll: usize,
+    /// 面板边框 / 分隔线的字形表（尊重 `ui.border_style`），随配置重载刷新。
+    pub glyphs: crate::ui::BorderGlyphs,
     pub paused: bool,
     pub process_dialog: Option<ProcessDialog>,
     pub process_filter: String,
@@ -548,6 +560,16 @@ impl State {
             &mut self.account_scroll
         };
         *scroll = scroll.saturating_add_signed(delta).min(limit);
+    }
+
+    /// 滚动当前页面自己的列表：系统页滚卡片、设置页滚设置行（账号页走
+    /// `scroll_accounts`）。两个滚动位置分离，切页不互相泄漏。
+    pub(super) fn scroll_page(&mut self, delta: isize) {
+        let scroll = match self.page {
+            Some(Page::Settings) => &mut self.settings_scroll,
+            _ => &mut self.scroll,
+        };
+        *scroll = scroll.saturating_add_signed(delta);
     }
 
     /// 页面当前的 (厂商, 账号) 选择是否已由订阅覆盖（已确认或等待确认）。
@@ -792,10 +814,14 @@ impl State {
         if let Some(value) = &config.preferences.usage_disabled_providers {
             self.usage.disabled_providers.clone_from(value);
         }
+        if let Some(value) = config.preferences.usage_hover_delay_ms {
+            self.usage.hover_delay_ms = value;
+        }
         if let Some(value) = config.preferences.monitor_tab {
             self.monitor_tab = value;
         }
         self.usage_hover_dashboard = config.preferences.usage_hover_dashboard.unwrap_or(true);
+        self.glyphs = config.border_glyphs;
         self.next_metrics = Instant::now();
         self.next_usage = Instant::now();
     }
@@ -812,6 +838,9 @@ impl State {
         }
         if let Some(value) = &config.preferences.usage_disabled_providers {
             usage.disabled_providers.clone_from(value);
+        }
+        if let Some(value) = config.preferences.usage_hover_delay_ms {
+            usage.hover_delay_ms = value;
         }
         Self {
             page: None,
@@ -850,6 +879,8 @@ impl State {
             card_scroll: HashMap::new(),
             account_scroll: 0,
             scroll: 0,
+            settings_scroll: 0,
+            glyphs: config.border_glyphs,
             paused: false,
             process_dialog: None,
             process_filter: String::new(),
@@ -1120,6 +1151,19 @@ impl ClientShellState {
         outcome.repaint = true;
     }
 
+    /// 回到跨厂商总览（`Action::Overview`）：与选厂商同样是显式选择——页面作用域
+    /// 换代、强意图刷新，旧快照保留到新数据到达；自动选中不再抢回厂商。
+    fn select_usage_overview(&mut self) {
+        self.observability.auto_select_provider = false;
+        self.observability.account_scroll = 0;
+        self.observability.bump_page_epoch();
+        self.observability.selected_provider = None;
+        self.observability.selected_account = None;
+        self.observability.selected_pane = None;
+        self.observability.selected_pane_label = None;
+        self.observability.request_refresh();
+    }
+
     /// 显式选择厂商（用户点击或账号页打开时的自动选中）：页面作用域换代、
     /// 强意图刷新；旧账号快照保留到新数据到达（渲染期变暗）。
     fn select_usage_provider(&mut self, agent: String) {
@@ -1194,7 +1238,12 @@ impl ClientShellState {
             self.persist_chrome_preferences(outcome);
         }
         self.observability.clear_hover();
-        self.observability.scroll = 0;
+        // 滚动位置按页分离：打开哪页只复位哪页，设置页的滚动不再泄漏到系统页。
+        match page {
+            Page::Monitor => self.observability.scroll = 0,
+            Page::Settings => self.observability.settings_scroll = 0,
+            Page::Accounts => {}
+        }
         self.observability.next_metrics = Instant::now();
         self.observability.next_usage = Instant::now();
         self.observability.next_providers = Instant::now();
@@ -1927,6 +1976,7 @@ impl ClientShellState {
             {
                 // 启用成功后顺手把当前活动 pane 绑到该账号（零 wire 变更）：
                 // 响应处理期不能发请求，排队到下一次 tick。
+                let hover = matches!(purpose, Purpose::HoverIntegration { .. });
                 let bind_after = match purpose {
                     Purpose::Integration { bind_after } => {
                         bind_after.map(|(pane_id, account_id)| QueuedBinding {
@@ -1960,6 +2010,14 @@ impl ClientShellState {
                     }
                     .into(),
                 );
+                // 开关的显示态来自作用域账号的 `UsageRefreshState.callback_enabled`：服务端已
+                // 改写 settings.json，让该作用域下一个 tick 立即重拉用量（响应处理期不能发
+                // 请求），否则开关最长要等到下一轮轮询才翻转、再点一次会重发同一个值。
+                if hover {
+                    self.observability.hover_scope.next_usage = Instant::now();
+                } else {
+                    self.observability.next_usage = Instant::now();
+                }
                 if bind_after.is_some() {
                     self.observability.queued_binding = bind_after;
                 }
@@ -2358,6 +2416,8 @@ impl ClientShellState {
                 | Action::AlertDuration(_)
                 | Action::AlertCooldown(_)
         );
+        // 偏好按键上锁：`usage_changed` 只覆盖四个 usage_* 键，悬浮延时单独判定，
+        // 否则只点「悬浮延时」也会把从未改过的 usage_* 键写成偏好影子值。
         let usage_changed = matches!(
             &action,
             Action::UsageEnabled
@@ -2365,6 +2425,7 @@ impl ClientShellState {
                 | Action::UsagePosition
                 | Action::ProviderEnabled(_)
         );
+        let hover_delay_changed = matches!(&action, Action::HoverDelay);
         match action {
             Action::CycleAccount => {
                 // 候选来自厂商的已配置账号（总览态为全部已列出厂商）；不足两个
@@ -2398,32 +2459,37 @@ impl ClientShellState {
                 }
             }
             Action::UsageIntegration(enabled) => {
-                if let Some(account_id) = self.observability.scoped_account(from_hover) {
-                    // 启用成功后顺手绑定的 pane：悬浮层是 hover 的 pane，页面是已选中的
-                    // pane 或运行该厂商 agent 的聚焦 pane；移除回调不绑定。
-                    let target = if !enabled {
-                        None
-                    } else if from_hover {
-                        self.observability.hover_scope.pane.clone()
-                    } else {
-                        self.page_binding_target(&account_id)
-                    };
-                    let bind_after = target.map(|pane_id| (pane_id, account_id.clone()));
-                    // 悬浮层发起的请求发往 hover 的端点（可能是远端主机）。
-                    let purpose = if from_hover {
-                        Purpose::HoverIntegration { bind_after }
-                    } else {
-                        Purpose::Integration { bind_after }
-                    };
-                    self.observation_request(
-                        Method::AccountUsageIntegration(UsageIntegrationParams {
-                            account_id,
-                            enabled,
-                        }),
-                        purpose,
-                        outcome,
-                    );
-                }
+                let Some(account_id) = self.observability.scoped_account(from_hover) else {
+                    // 多账号且未选：开关没有作用对象。渲染侧已是禁用态，这里兜底不静默。
+                    self.observability.message =
+                        Some(crate::i18n::texts().monitor.select_account_first.to_owned());
+                    outcome.repaint = true;
+                    return;
+                };
+                // 启用成功后顺手绑定的 pane：悬浮层是 hover 的 pane，页面是已选中的
+                // pane 或运行该厂商 agent 的聚焦 pane；移除回调不绑定。
+                let target = if !enabled {
+                    None
+                } else if from_hover {
+                    self.observability.hover_scope.pane.clone()
+                } else {
+                    self.page_binding_target(&account_id)
+                };
+                let bind_after = target.map(|pane_id| (pane_id, account_id.clone()));
+                // 悬浮层发起的请求发往 hover 的端点（可能是远端主机）。
+                let purpose = if from_hover {
+                    Purpose::HoverIntegration { bind_after }
+                } else {
+                    Purpose::Integration { bind_after }
+                };
+                self.observation_request(
+                    Method::AccountUsageIntegration(UsageIntegrationParams {
+                        account_id,
+                        enabled,
+                    }),
+                    purpose,
+                    outcome,
+                );
             }
             Action::Card(card) => self.observability.selected_card = Some(card),
             Action::Core(core) => {
@@ -2567,8 +2633,24 @@ impl ClientShellState {
                     UsageDisplayPosition::Hover => UsageDisplayPosition::Page,
                     UsageDisplayPosition::Page => UsageDisplayPosition::Both,
                     UsageDisplayPosition::Both => UsageDisplayPosition::Hover,
+                };
+                // 切到「页面」= agent 行悬浮层关闭：页脚说明一次，设置行也常驻提示。
+                if self.observability.usage.position == UsageDisplayPosition::Page {
+                    self.observability.message =
+                        Some(crate::i18n::texts().monitor.hover_closed_hint.to_owned());
                 }
             }
+            Action::HoverDelay => {
+                // 在固定档位表里取「大于当前值的下一档」，末档回到首档：配置文件里的
+                // 非档位值（如 300）第一次点击落到 400，不跳档。
+                let current = self.observability.usage.hover_delay_ms;
+                self.observability.usage.hover_delay_ms = HOVER_DELAY_STEPS
+                    .iter()
+                    .copied()
+                    .find(|step| *step > current)
+                    .unwrap_or(HOVER_DELAY_STEPS[0]);
+            }
+            Action::Overview => self.select_usage_overview(),
             Action::Provider(agent) => self.select_usage_provider(agent),
             Action::Account(account) => {
                 // 显式选账号 = 强意图刷新；旧快照保留到新数据到达（变暗）。
@@ -2709,13 +2791,17 @@ impl ClientShellState {
                 }
             }
             Action::Source => {
+                // 选中账号优先（ACC-09），否则回退作用域内第一个账号。
                 let accounts = if from_hover {
                     &self.observability.hover_scope.accounts
                 } else {
                     &self.observability.accounts
                 };
+                let selected = self.observability.scoped_account(from_hover);
                 if let Some(url) = accounts
-                    .first()
+                    .iter()
+                    .find(|account| Some(&account.account_id) == selected.as_ref())
+                    .or_else(|| accounts.first())
                     .map(|account| account.source_url.clone())
                     .filter(|url| crate::app::actions::safe_web_url(url).is_some())
                 {
@@ -2777,7 +2863,11 @@ impl ClientShellState {
             self.config.preferences.usage_disabled_providers =
                 Some(self.observability.usage.disabled_providers.clone());
         }
-        if monitor_changed || usage_changed {
+        if hover_delay_changed {
+            self.config.preferences.usage_hover_delay_ms =
+                Some(self.observability.usage.hover_delay_ms);
+        }
+        if monitor_changed || usage_changed || hover_delay_changed {
             self.persist_chrome_preferences(outcome);
         }
         outcome.repaint = true;
@@ -2976,12 +3066,8 @@ impl ClientShellState {
         }
         if self.observability.page.is_some() && contains(self.observability.page_rect, point) {
             match mouse.kind {
-                MouseEventKind::ScrollDown => {
-                    self.observability.scroll = self.observability.scroll.saturating_add(3)
-                }
-                MouseEventKind::ScrollUp => {
-                    self.observability.scroll = self.observability.scroll.saturating_sub(3)
-                }
+                MouseEventKind::ScrollDown => self.observability.scroll_page(3),
+                MouseEventKind::ScrollUp => self.observability.scroll_page(-3),
                 _ => {}
             }
             outcome.repaint = true;
@@ -3288,11 +3374,11 @@ impl ClientShellState {
                 None
             }
             KeyCode::Down | KeyCode::PageDown => {
-                self.observability.scroll = self.observability.scroll.saturating_add(3);
+                self.observability.scroll_page(3);
                 None
             }
             KeyCode::Up | KeyCode::PageUp => {
-                self.observability.scroll = self.observability.scroll.saturating_sub(3);
+                self.observability.scroll_page(-3);
                 None
             }
             _ => None,

@@ -166,7 +166,8 @@ fn dashboard_can_scroll_to_quota_windows_below_the_viewport() {
     state.workbench.dock.maximized = Some(PanelId::Accounts);
     state.observability.accounts = vec![crate::api::schema::AccountUsageSnapshot {
         account_label: "account".into(),
-        metrics: (0..10)
+        // 仪表盘每指标一行（额度条内联），30 个指标才会超出 24 行的视口。
+        metrics: (0..30)
             .map(|index| crate::api::schema::UsageMetric {
                 label: format!("metric-{index:02}"),
                 scope: "account".into(),
@@ -177,12 +178,12 @@ fn dashboard_can_scroll_to_quota_windows_below_the_viewport() {
         ..Default::default()
     }];
     let before = state.compose(120, 24).unwrap();
-    assert!(!frame_rows(&before).join("\n").contains("metric-09"));
+    assert!(!frame_rows(&before).join("\n").contains("metric-29"));
     for _ in 0..12 {
         state.handle_input_bytes(b"\x1b[6~");
     }
     let after = state.compose(120, 24).unwrap();
-    assert!(frame_rows(&after).join("\n").contains("metric-09"));
+    assert!(frame_rows(&after).join("\n").contains("metric-29"));
 }
 
 #[test]
@@ -633,6 +634,7 @@ fn usage_provider(
         minimum_interval_seconds: 300,
         configured_accounts,
         installed,
+        supports_callback: false,
     }
 }
 
@@ -642,8 +644,7 @@ fn accounts_page_lists_only_installed_or_configured_providers() {
     let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
     state.set_snapshot(Box::new(snapshot()));
     state.set_pane_surface(surface());
-    // Non-workbench mode paints the accounts page across the full surface so
-    // the provider sidebar (>=70 cols) lists every provider.
+    // 经典布局下账号页铺满整个 pane 区：工具栏 chip 行（≥60 列）列出每个厂商。
     state.observability.page = Some(Page::Accounts);
     state.observability.providers = vec![
         usage_provider("codex", "Codex", Some(true), Vec::new()),
@@ -669,6 +670,27 @@ fn accounts_page_lists_only_installed_or_configured_providers() {
     assert!(
         !compact.contains("Kimi"),
         "missing CLI without configured accounts is hidden: {text}"
+    );
+    let chips = state
+        .observability
+        .hits
+        .iter()
+        .filter_map(|(_, action)| match action {
+            crate::client::shell::observability::Action::Provider(agent) => Some(agent.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        chips,
+        vec!["codex", "grok", "letta"],
+        "chip 行按厂商顺序给出选中动作，隐藏的厂商没有 chip"
+    );
+    assert!(
+        state.observability.hits.iter().any(|(_, action)| matches!(
+            action,
+            crate::client::shell::observability::Action::Overview
+        )),
+        "首个 chip「全部厂商」回到总览"
     );
 }
 

@@ -379,6 +379,61 @@ pub struct SettingsTexts {
     pub unexpected_install_result: &'static str,
 }
 
+/// 监控 → 账号 / 设置页（本批新增文案；存量 `tr()` 的迁移留批次四）。
+pub struct MonitorTexts {
+    /// 账号页工具栏首个 chip：回到跨厂商总览。
+    pub all_providers: &'static str,
+    /// 折叠标记后的说明：还有 N 个厂商放不下。
+    pub more_fmt: &'static str, // args: n
+    pub callback_toggle: &'static str,
+    pub settings_button: &'static str,
+    pub format_dashboard: &'static str,
+    pub format_table: &'static str,
+    pub position_hover: &'static str,
+    pub position_page: &'static str,
+    pub position_both: &'static str,
+    pub scope_api_key: &'static str,
+    pub updated_ago_fmt: &'static str, // args: age
+    pub never_updated: &'static str,
+    pub resets_in_fmt: &'static str, // args: span
+    /// 汇总行账号数（n ≥ 2）；单账号用 `account_one`，避免英文「1 accounts」。
+    pub accounts_fmt: &'static str, // args: n
+    pub account_one: &'static str,
+    pub summary_ready_fmt: &'static str,     // args: n
+    pub summary_loading_fmt: &'static str,   // args: n
+    pub summary_attention_fmt: &'static str, // args: n
+    pub summary_failed_fmt: &'static str,    // args: n
+    pub col_reset: &'static str,
+    pub col_freshness: &'static str,
+    pub col_usage: &'static str,
+    pub detail_title: &'static str,
+    pub detail_auth: &'static str,
+    pub detail_provider: &'static str,
+    pub detail_source: &'static str,
+    pub detail_window: &'static str,
+    pub detail_updated: &'static str,
+    pub detail_docs: &'static str,
+    pub detail_none: &'static str,
+    pub section_monitor: &'static str,
+    pub section_usage: &'static str,
+    pub section_cards: &'static str,
+    pub section_alerts: &'static str,
+    pub section_providers: &'static str,
+    pub section_devices: &'static str,
+    pub hover_delay: &'static str,
+    pub api_refresh: &'static str,
+    pub cli_refresh: &'static str,
+    pub interactive_probe: &'static str,
+    /// 设置页只读行的来源标注：这些值来自本机 config.toml，连远端 endpoint 时与实际
+    /// 生效值无关，文案必须说明「本机」。
+    pub config_value_hint: &'static str,
+    pub hover_closed_hint: &'static str,
+    /// 官方回调开关没有作用对象（多账号且未选）时的禁用态标注与动作提示。
+    pub select_account_first: &'static str,
+    pub on: &'static str,
+    pub off: &'static str,
+}
+
 pub struct SidebarTexts {
     pub spaces: &'static str,
     pub agents: &'static str,
@@ -1678,6 +1733,7 @@ pub struct Texts {
     pub dialogs: DialogTexts,
     pub worktree: WorktreeTexts,
     pub settings: SettingsTexts,
+    pub monitor: MonitorTexts,
     pub sidebar: SidebarTexts,
     pub status: StatusTexts,
     pub mode_bar: ModeBarTexts,

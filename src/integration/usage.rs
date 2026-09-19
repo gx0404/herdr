@@ -2,29 +2,33 @@
 use jsonc_parser::cst::{CstInputValue, CstRootNode};
 use std::{io, path::PathBuf};
 
+/// 支持 herdr 用量 statusline 回调的厂商：名单唯一真源。`configure` / `edit` 按它拒绝其它
+/// 厂商，server 端 registry 也据此宣告 `UsageProviderInfo.supports_callback`；新增厂商只改
+/// 这里（以及 `settings_path` 的目录推导与 `src/platform` 的管道形态）。
+pub(crate) fn supports_statusline(agent: &str) -> bool {
+    matches!(agent, "claude" | "antigravity")
+}
+
+/// 账号的官方 `settings.json` 路径：`profile_dir` 优先于厂商默认目录。写入（`configure`）与
+/// 只读检测（server 端 registry）共用，两边不会指向不同的文件。不支持回调的厂商报错。
+pub(crate) fn settings_path(account: &crate::config::UsageAccountConfig) -> io::Result<PathBuf> {
+    let default_dir = match account.agent.as_str() {
+        "claude" => super::env::claude_dir(),
+        "antigravity" => super::env::antigravity_runtime_dir(),
+        _ => return Err(io::Error::other("此厂商未提供受支持的 statusline 配额回调")),
+    };
+    let dir = match account.profile_dir.as_ref() {
+        Some(dir) => PathBuf::from(dir),
+        None => default_dir?,
+    };
+    Ok(dir.join("settings.json"))
+}
+
 pub(crate) fn configure(
     account: &crate::config::UsageAccountConfig,
     enabled: bool,
 ) -> io::Result<()> {
-    let path = match account.agent.as_str() {
-        "claude" => account
-            .profile_dir
-            .as_ref()
-            .map(PathBuf::from)
-            .unwrap_or(super::env::claude_dir()?)
-            .join("settings.json"),
-        "antigravity" => account
-            .profile_dir
-            .as_ref()
-            .map(PathBuf::from)
-            .unwrap_or(
-                super::env::home_dir()?
-                    .join(".gemini")
-                    .join("antigravity-cli"),
-            )
-            .join("settings.json"),
-        _ => return Err(io::Error::other("此厂商未提供受支持的 statusline 配额回调")),
-    };
+    let path = settings_path(account)?;
     super::config_file::check_config_target(&path)?;
     let content = match std::fs::read_to_string(&path) {
         Ok(content) => content,
@@ -69,7 +73,7 @@ pub(crate) fn statusline_enabled(content: &str, agent: &str) -> Option<bool> {
 }
 
 fn edit(content: &str, agent: &str, enabled: bool) -> io::Result<String> {
-    if !matches!(agent, "claude" | "antigravity") {
+    if !supports_statusline(agent) {
         return Err(io::Error::other("不支持的 statusline 厂商"));
     }
     let root = CstRootNode::parse(content, &jsonc_parser::ParseOptions::default())

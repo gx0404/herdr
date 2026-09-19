@@ -226,6 +226,14 @@ pub(crate) fn antigravity_cli_dir() -> io::Result<PathBuf> {
     config_dir_from_env_or_home(ANTIGRAVITY_CLI_CONFIG_DIR_ENV_VAR, &[".gemini", "config"])
 }
 
+/// Antigravity CLI 的运行时数据目录（`~/.gemini/antigravity-cli`）：官方 `settings.json`
+/// （statusline 回调所在）在这里，与承载 hooks 的 `antigravity_cli_dir()` 不是同一个目录。
+/// 用量回调的写入（`usage::configure`）与检测（server 端 registry）都经 `usage::settings_path`
+/// 走这一处推导。
+pub(crate) fn antigravity_runtime_dir() -> io::Result<PathBuf> {
+    Ok(home_dir()?.join(".gemini").join("antigravity-cli"))
+}
+
 pub(crate) fn grok_dir() -> io::Result<PathBuf> {
     // GROK_CONFIG_DIR is a herdr-level override only (primarily a test
     // seam); the grok CLI does not honor it, so it stays first and explicit.

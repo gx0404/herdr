@@ -801,6 +801,7 @@ fn account_usage_response_round_trips_with_optional_refresh_state() {
                     candidates: vec!["claude:work".into(), "claude:home".into()],
                     rejected_at_ms: 7,
                 }),
+                callback_enabled: Some(true),
             }]),
         },
     };
@@ -820,6 +821,8 @@ fn account_usage_response_round_trips_with_optional_refresh_state() {
     );
     // 旧 server 不带 callback_only：缺省 false 表示「显式刷新可用」，不会误禁用按钮。
     assert!(!minimal.callback_only);
+    // 旧 server 不带账号级回调态：缺省 None = 未知，客户端仍提供「启用」入口。
+    assert_eq!(minimal.callback_enabled, None);
 }
 
 #[test]

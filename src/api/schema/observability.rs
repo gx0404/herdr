@@ -342,6 +342,11 @@ pub struct UsageRefreshState {
     /// 与该账号同 agent 的待办绑定（请求带 pane 时只看该 pane）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_binding: Option<UsagePendingBinding>,
+    /// 该账号的官方回调（statusline 等）当前是否已接入 herdr：服务端读该账号的官方
+    /// `settings.json` 判定，与 `account.usage.integration` 作用于同一个账号。厂商不支持
+    /// 回调、文件无法解析或旧 server 时缺省，客户端把 `None` 当作未知（仍提供「启用」）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub callback_enabled: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
@@ -358,6 +363,11 @@ pub struct UsageProviderInfo {
     /// keep listing the provider.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub installed: Option<bool>,
+    /// 服务端宣告该厂商支持官方回调开关（`account.usage.integration` 能改写其官方
+    /// `settings.json`）。能力由服务端声明：旧 server 缺省为 `false`，客户端据此只隐藏
+    /// 开关，不自行维护厂商名单。各账号的当前接入态在 `UsageRefreshState.callback_enabled`。
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub supports_callback: bool,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]

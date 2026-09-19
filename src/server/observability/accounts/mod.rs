@@ -175,6 +175,21 @@ struct ServiceState {
     missing_since: HashMap<String, Instant>,
     /// 上次按已安装厂商重算账号清单的时刻。
     scanned_at: Option<Instant>,
+    /// 账号级官方回调接入态的判定（生产走 `registry::statusline_enabled`，带文件戳缓存；
+    /// 测试注入，不读本机 settings.json）。读路径与事件扇出都经它填
+    /// `UsageRefreshState.callback_enabled`。
+    callback_probe: CallbackProbe,
+}
+
+/// 按账号判定官方回调是否已接入：`Some(true/false)` 明确，`None` 判不出。
+type CallbackProbe = fn(&UsageAccountConfig) -> Option<bool>;
+
+/// 账号级官方回调当前态：只有支持回调开关的厂商（`registry::supports_callback`）才判定，
+/// 其余为 `None`，与 `UsageProviderInfo.supports_callback` 的宣告一致。
+fn callback_state(probe: CallbackProbe, account: &UsageAccountConfig) -> Option<bool> {
+    registry::provider(&account.agent)
+        .filter(|provider| registry::supports_callback(provider))
+        .and_then(|_| probe(account))
 }
 
 impl ServiceState {
@@ -212,6 +227,7 @@ impl ServiceState {
             next_query: 1,
             missing_since: HashMap::new(),
             scanned_at: Some(Instant::now()),
+            callback_probe: registry::statusline_enabled,
         }
     }
 
@@ -445,6 +461,7 @@ impl ServiceState {
                 &self.accounts,
                 &self.config,
                 &self.bindings,
+                self.callback_probe,
             );
         }
         true
@@ -529,6 +546,7 @@ impl ServiceState {
                     return None;
                 }
                 let mut refresh = refresh_state(entry, account, &self.config, now, now_ms);
+                refresh.callback_enabled = callback_state(self.callback_probe, account);
                 refresh.binding_inferred = selection.inferred;
                 refresh.pending_binding = self
                     .rejections
@@ -633,6 +651,7 @@ impl Service {
                                 &state.accounts,
                                 &state.config,
                                 &state.bindings,
+                                state.callback_probe,
                             );
                         }
                     }
@@ -682,6 +701,7 @@ impl Service {
                                             .map(|a| a.id.clone())
                                             .collect(),
                                         installed: Some(registry::provider_installed(p)),
+                                        supports_callback: registry::supports_callback(p),
                                     })
                                     .collect(),
                             })
@@ -796,6 +816,7 @@ impl Service {
                                             &state.bindings,
                                             &mut state.saved,
                                             &mut subscribers,
+                                            state.callback_probe,
                                         )
                                     {
                                         state.persist();
@@ -872,6 +893,7 @@ fn notify_subscribers(
     accounts: &[UsageAccountConfig],
     config: &AccountUsageConfig,
     bindings: &HashMap<String, String>,
+    probe: CallbackProbe,
 ) {
     let value = &entry.snapshot;
     let now = Instant::now();
@@ -879,7 +901,11 @@ fn notify_subscribers(
     let refresh = accounts
         .iter()
         .find(|account| account.id == value.account_id)
-        .map(|account| vec![refresh_state(entry, account, config, now, now_ms)]);
+        .map(|account| {
+            let mut refresh = refresh_state(entry, account, config, now, now_ms);
+            refresh.callback_enabled = callback_state(probe, account);
+            vec![refresh]
+        });
     let event = ObservationEventEnvelope::AccountUsageUpdated(AccountUsageUpdatedEvent {
         accounts: vec![value.clone()],
         refresh,
@@ -899,10 +925,9 @@ fn notify_refreshing(subscribers: &mut Subscribers, state: &ServiceState, dispat
         .filter_map(|id| {
             let entry = state.cache.get(id)?;
             let account = state.accounts.iter().find(|account| account.id == *id)?;
-            Some((
-                entry,
-                refresh_state(entry, account, &state.config, now, now_ms),
-            ))
+            let mut refresh = refresh_state(entry, account, &state.config, now, now_ms);
+            refresh.callback_enabled = callback_state(state.callback_probe, account);
+            Some((entry, refresh))
         })
         .collect::<Vec<_>>();
     subscribers.retain(|_, (_, params, reply)| {
@@ -931,6 +956,7 @@ fn commit_accepted(
     bindings: &HashMap<String, String>,
     saved: &mut persistence::Saved,
     subscribers: &mut Subscribers,
+    probe: CallbackProbe,
 ) -> bool {
     let Some(entry) = cache.get(&accepted.account_id) else {
         return false;
@@ -950,7 +976,7 @@ fn commit_accepted(
         metrics = entry.snapshot.metrics.len(),
         "官方回调已写入账号用量"
     );
-    notify_subscribers(subscribers, entry, accounts, config, bindings);
+    notify_subscribers(subscribers, entry, accounts, config, bindings, probe);
     true
 }
 
@@ -1231,6 +1257,8 @@ fn refresh_state(
         callback_only: registry::provider(&account.agent)
             .is_some_and(|provider| registry::callback_only(provider, config)),
         pending_binding: None,
+        // 账号级官方回调态由调用方经 `callback_state` 补齐（读路径与事件扇出都要带）。
+        callback_enabled: None,
     }
 }
 
@@ -1451,7 +1479,7 @@ impl ClaudeProbeTransport for RealClaudeTransport {
     }
 
     fn statusline_enabled(&self, account: &UsageAccountConfig) -> Option<bool> {
-        registry::claude_statusline_enabled(account)
+        registry::statusline_enabled(account)
     }
 
     fn probe_dir(&self, account: &UsageAccountConfig) -> PathBuf {
@@ -1756,6 +1784,54 @@ fn merge_result(entry: &mut CacheEntry, snapshot: AccountUsageSnapshot, now: Ins
 mod tests {
     use super::*;
 
+    /// 账号级官方回调态：读路径按账号经 `callback_probe` 判定，只有支持回调开关的厂商才有
+    /// 值；同厂商两个账号各自独立，不做厂商级聚合。
+    #[test]
+    fn usage_refresh_state_carries_per_account_callback_state() {
+        let (tasks, _input) = mpsc::sync_channel(8);
+        let account = |id: &str, agent: &str| UsageAccountConfig {
+            id: id.into(),
+            agent: agent.into(),
+            ..Default::default()
+        };
+        let mut state = test_state(
+            AccountUsageConfig::default(),
+            vec![
+                account("claude:default", "claude"),
+                account("claude:work", "claude"),
+                account("codex:default", "codex"),
+            ],
+        );
+        // 探针对 claude:work 说已接入、claude:default 未接入、codex 也说已接入（应被忽略）。
+        state.callback_probe =
+            |account| Some(account.id == "claude:work" || account.agent == "codex");
+        let result = state.usage(
+            &UsageParams::default(),
+            false,
+            &tasks,
+            &mut Subscribers::new(),
+        );
+        let ResponseResult::AccountUsage { refresh, .. } = result else {
+            panic!("not account_usage");
+        };
+        let refresh = refresh.expect("响应带并行结构");
+        let state_of = |id: &str| {
+            refresh
+                .iter()
+                .find(|state| state.account_id == id)
+                .map(|state| state.callback_enabled)
+                .expect("账号在响应里")
+        };
+        assert_eq!(state_of("claude:default"), Some(false));
+        assert_eq!(state_of("claude:work"), Some(true), "同厂商账号各自判定");
+        assert_eq!(
+            state_of("codex:default"),
+            None,
+            "不支持回调的厂商没有当前态"
+        );
+        cleanup(&state);
+    }
+
     fn claude_account() -> UsageAccountConfig {
         UsageAccountConfig {
             id: "claude:default".into(),
@@ -1828,6 +1904,7 @@ mod tests {
             next_query: 1,
             missing_since: HashMap::new(),
             scanned_at: None,
+            callback_probe: |_| None,
         }
     }
 
@@ -3382,7 +3459,8 @@ mod tests {
             &AccountUsageConfig::default(),
             &bindings,
             &mut saved,
-            &mut subscribers
+            &mut subscribers,
+            |_| Some(true),
         ));
         // 自动写入的绑定与公开身份进入待持久化状态。
         assert_eq!(
@@ -3402,6 +3480,8 @@ mod tests {
         // 事件与 get 响应一样带并行刷新状态，客户端按 account_id 合并即可清掉「正在读取」。
         assert_eq!(event["data"]["refresh"][0]["account_id"], "claude:default");
         assert_eq!(event["data"]["refresh"][0]["in_flight"], false);
+        // 事件与读路径一样带账号级官方回调态，客户端整份替换刷新状态后开关不会回退成未知。
+        assert_eq!(event["data"]["refresh"][0]["callback_enabled"], true);
         assert!(other_receiver.try_recv().is_err(), "不匹配的订阅者不收事件");
         assert_eq!(subscribers.len(), 2);
 
@@ -3418,7 +3498,8 @@ mod tests {
             &AccountUsageConfig::default(),
             &bindings,
             &mut saved,
-            &mut subscribers
+            &mut subscribers,
+            |_| Some(true),
         ));
     }
 

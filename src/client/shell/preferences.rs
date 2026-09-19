@@ -57,6 +57,10 @@ pub(super) struct ClientChromePreferences {
     /// 点击仍可钉住）。独立 bool 键，不给 `usage_position` 加枚举变体。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(super) usage_hover_dashboard: Option<bool>,
+    /// 监控 → 设置 里改过的悬浮延时（ms）；未改过时沿用 config.toml 的
+    /// `account_usage.hover_delay_ms`。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) usage_hover_delay_ms: Option<u64>,
     /// 监控面板里用户选中的 tab；未知值按未设置处理，不让整份偏好失效。
     #[serde(
         default,

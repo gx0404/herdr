@@ -84,6 +84,11 @@ impl ClientShellState {
                 .preferences
                 .usage_hover_dashboard
                 .map(|_| self.observability.usage_hover_dashboard),
+            usage_hover_delay_ms: self
+                .config
+                .preferences
+                .usage_hover_delay_ms
+                .map(|_| self.observability.usage.hover_delay_ms),
             monitor_tab: self
                 .config
                 .preferences

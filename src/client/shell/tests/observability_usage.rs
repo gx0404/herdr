@@ -521,6 +521,8 @@ fn provider(agent: &str, accounts: &[&str]) -> UsageProviderInfo {
         minimum_interval_seconds: 300,
         configured_accounts: accounts.iter().map(|id| (*id).to_string()).collect(),
         installed: Some(true),
+        // 测试里 claude / antigravity 视为服务端宣告支持回调开关。
+        supports_callback: matches!(agent, "claude" | "antigravity"),
     }
 }
 
@@ -1410,6 +1412,8 @@ fn click_hover_action(
 #[test]
 fn hover_binding_on_a_remote_endpoint_targets_that_endpoint() {
     let mut state = usage_ready();
+    // 官方回调开关只按服务端宣告的能力显示（`supports_callback`），先投递厂商列表。
+    deliver_providers(&mut state, vec![provider("claude", &["claude:default"])]);
     let remote = add_remote_usage_endpoint(&mut state);
     assert_ne!(remote, state.active_endpoint_id);
     hover_on(&mut state, Some(remote.clone()), "pane_1", "claude");
@@ -2577,15 +2581,21 @@ fn enabling_the_official_callback_binds_the_active_pane_afterwards() {
             .expect("官方回调请求在途");
     let epoch = state.observability.epoch;
     state.receive_observation(epoch, purpose, Ok(ResponseResult::Ok {}));
-    let calls = binding_calls(&tick(&mut state, t0 + Duration::from_millis(10)));
+    let outcome = tick(&mut state, t0 + Duration::from_millis(10));
     assert_eq!(
-        calls,
+        binding_calls(&outcome),
         vec![(
             state.active_endpoint_id.clone(),
             "pane_1".to_owned(),
             "claude:default".to_owned()
         )],
         "启用官方回调成功后顺手绑定当前活动 pane"
+    );
+    // 开关显示态来自账号的刷新状态：成功后不等 2 秒节流，下一个 tick 立即重拉用量。
+    assert_eq!(
+        usage_calls(&outcome).len(),
+        1,
+        "官方回调改写成功后立即重拉页面作用域的用量以刷新开关"
     );
 
     // 移除回调不触发绑定。
@@ -2604,6 +2614,180 @@ fn enabling_the_official_callback_binds_the_active_pane_afterwards() {
             .expect("移除回调请求在途");
     state.receive_observation(epoch, purpose, Ok(ResponseResult::Ok {}));
     assert!(binding_calls(&tick(&mut state, t0 + Duration::from_millis(20))).is_empty());
+}
+
+/// 同厂商两个账号、未选账号：开关没有作用对象，页面上是禁用态、直接派发也只写提示；
+/// 选中账号后开关按该账号的服务端接入态显示，点击作用于同一个账号。
+#[test]
+fn callback_toggle_targets_the_selected_account_of_a_multi_account_provider() {
+    let mut state = subscribing_ready();
+    deliver_providers(
+        &mut state,
+        vec![provider("claude", &["claude:default", "claude:work"])],
+    );
+    state.open_observation_page(Page::Accounts, &mut ClientShellInput::default());
+    let t0 = Instant::now() + Duration::from_secs(1);
+    tick(&mut state, t0);
+    let mut enabled = refresh_state("claude:default");
+    enabled.callback_enabled = Some(true);
+    let mut disabled = refresh_state("claude:work");
+    disabled.callback_enabled = Some(false);
+    assert!(deliver_usage_with_refresh(
+        &mut state,
+        vec![
+            account("claude", "claude:default"),
+            account("claude", "claude:work"),
+        ],
+        vec![enabled, disabled],
+    ));
+    let texts = &crate::i18n::texts().monitor;
+    let frame = state.compose(120, 40).expect("账号页");
+    assert!(
+        page_hit(&state, |action| matches!(
+            action,
+            Action::UsageIntegration(_)
+        ))
+        .is_none(),
+        "未选账号时开关没有作用对象，不给命中区"
+    );
+    assert!(
+        frame_has(&frame, texts.select_account_first),
+        "禁用态标注先选账号"
+    );
+    let mut outcome = ClientShellInput::default();
+    state.observation_action(Action::UsageIntegration(true), &mut outcome);
+    assert!(
+        integration_calls(&outcome).is_empty(),
+        "没有作用对象不发请求"
+    );
+    assert_eq!(
+        state.observability.message.as_deref(),
+        Some(texts.select_account_first),
+        "直接派发也不静默"
+    );
+
+    // 选中账号 = 页面换代，刷新状态随之清空（旧快照保留变暗）：在新响应到达前开关是
+    // 未知态；这里按真实流程投递选中后的响应。
+    let reselect = |state: &mut ClientShellState, account_id: &str, at: Instant| {
+        state.observation_action(
+            Action::Account(account_id.into()),
+            &mut ClientShellInput::default(),
+        );
+        state.compose(120, 40).expect("账号页");
+        assert!(
+            page_hit(state, |action| matches!(
+                action,
+                Action::UsageIntegration(true)
+            ))
+            .is_some(),
+            "新数据到达前状态未知，提供「启用」"
+        );
+        tick(state, at);
+        let mut enabled = refresh_state("claude:default");
+        enabled.callback_enabled = Some(true);
+        let mut disabled = refresh_state("claude:work");
+        disabled.callback_enabled = Some(false);
+        assert!(deliver_usage_with_refresh(
+            state,
+            vec![
+                account("claude", "claude:default"),
+                account("claude", "claude:work"),
+            ],
+            vec![enabled, disabled],
+        ));
+        state.compose(120, 40).expect("账号页");
+    };
+    // 选中未接入的账号：开关提供「启用」，点击作用于该账号。
+    reselect(&mut state, "claude:work", t0 + Duration::from_secs(3));
+    let rect = page_hit(&state, |action| {
+        matches!(action, Action::UsageIntegration(true))
+    })
+    .expect("未接入账号提供启用");
+    assert!(page_hit(&state, |action| matches!(
+        action,
+        Action::UsageIntegration(false)
+    ))
+    .is_none());
+    let outcome = click(&mut state, rect.x, rect.y);
+    assert_eq!(
+        integration_calls(&outcome),
+        vec![("claude:work".to_owned(), true)]
+    );
+
+    // 选中已接入的账号：同一个开关变成「移除」。
+    reselect(&mut state, "claude:default", t0 + Duration::from_secs(6));
+    assert!(page_hit(&state, |action| matches!(
+        action,
+        Action::UsageIntegration(false)
+    ))
+    .is_some());
+    assert!(page_hit(&state, |action| matches!(
+        action,
+        Action::UsageIntegration(true)
+    ))
+    .is_none());
+}
+
+/// 「悬浮延时」按固定档位循环，只回写自己的偏好键：其它 usage_* 键保持未设置。
+#[test]
+fn hover_delay_cycles_fixed_steps_and_persists_only_its_own_key() {
+    let path = std::env::temp_dir().join(format!(
+        "herdr-shell-hover-delay-{}.json",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_file(&path);
+    let mut state = ClientShellState::new(
+        ClientShellConfig::from_config(&Config::default()).with_preferences_path(path.clone()),
+    );
+    state.set_snapshot(Box::new(snapshot()));
+    state.set_pane_surface(surface());
+    assert_eq!(state.config.preferences.usage_hover_delay_ms, None);
+    assert_eq!(state.observability.usage.hover_delay_ms, 400, "配置默认值");
+    let mut seen = Vec::new();
+    for _ in 0..5 {
+        state.observation_action(Action::HoverDelay, &mut ClientShellInput::default());
+        seen.push(state.observability.usage.hover_delay_ms);
+    }
+    assert_eq!(seen, vec![800, 1200, 2000, 200, 400], "档位循环回到起点");
+    let preferences = &state.config.preferences;
+    assert_eq!(preferences.usage_hover_delay_ms, Some(400));
+    assert_eq!(preferences.usage_enabled, None, "未改过的键不写影子值");
+    assert_eq!(preferences.usage_format, None);
+    assert_eq!(preferences.usage_position, None);
+    assert_eq!(preferences.usage_disabled_providers, None);
+    let saved = preferences::load(&path).expect("偏好已写入");
+    assert_eq!(saved.usage_hover_delay_ms, Some(400));
+    assert_eq!(saved.usage_format, None);
+    // 配置文件里的非档位值：第一次点击落到下一档，不跳档。
+    state.observability.usage.hover_delay_ms = 300;
+    state.observation_action(Action::HoverDelay, &mut ClientShellInput::default());
+    assert_eq!(state.observability.usage.hover_delay_ms, 400);
+    std::fs::remove_file(path).expect("remove preferences");
+}
+
+/// 回到总览是显式选择：之后的 tick 不再按聚焦 pane / 首个厂商自动选回。
+#[test]
+fn returning_to_the_overview_is_not_undone_by_auto_selection() {
+    let mut state = usage_ready();
+    deliver_providers(&mut state, vec![provider("claude", &["claude:default"])]);
+    state.open_observation_page(Page::Accounts, &mut ClientShellInput::default());
+    let t0 = Instant::now() + Duration::from_secs(1);
+    tick(&mut state, t0);
+    assert_eq!(
+        state.observability.selected_provider.as_deref(),
+        Some("claude"),
+        "打开账号页按聚焦 pane 自动选中"
+    );
+    state.observation_action(Action::Overview, &mut ClientShellInput::default());
+    assert_eq!(state.observability.selected_provider, None);
+    let outcome = tick(&mut state, t0 + Duration::from_secs(3));
+    assert_eq!(
+        state.observability.selected_provider, None,
+        "自动选中不抢回"
+    );
+    let calls = usage_calls(&outcome);
+    assert_eq!(calls.len(), 1, "总览态仍按不带厂商的参数轮询");
+    assert_eq!(calls[0].1.agent, None);
 }
 
 #[test]
@@ -2898,6 +3082,7 @@ fn reconnecting_the_active_endpoint_resubscribes_and_polls_again() {
 #[test]
 fn queued_binding_is_dropped_when_the_hover_moves_to_another_host() {
     let mut state = usage_ready();
+    deliver_providers(&mut state, vec![provider("claude", &["claude:default"])]);
     let remote = add_remote_usage_endpoint(&mut state);
     hover_on(&mut state, Some(remote.clone()), "pane_1", "claude");
     let t0 = Instant::now() + Duration::from_secs(1);
@@ -2937,6 +3122,7 @@ fn queued_binding_is_dropped_when_the_hover_moves_to_another_host() {
 #[test]
 fn queued_binding_targets_the_host_that_answered_the_callback() {
     let mut state = usage_ready();
+    deliver_providers(&mut state, vec![provider("claude", &["claude:default"])]);
     let remote = add_remote_usage_endpoint(&mut state);
     hover_on(&mut state, Some(remote.clone()), "pane_1", "claude");
     let t0 = Instant::now() + Duration::from_secs(1);

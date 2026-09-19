@@ -101,21 +101,52 @@ pub(super) fn callback_only(provider: &Provider, config: &AccountUsageConfig) ->
         && !(provider.agent == "claude" && config.interactive_probe)
 }
 
-/// claude 官方 `settings.json` 的 statusLine 是否已接入 herdr 用量回调；文件不存在（全新
-/// 安装）算未接入，读不了 / 无法解析 / 含无法识别的 herdr 回调时为 `None`。判据与
-/// `integration::usage` 的启用逻辑同源（按本平台命令形态比对，不匹配明文子串）；目录推导与
-/// `credential_paths` 同源：`profile_dir` 优先于默认目录。
-pub(super) fn claude_statusline_enabled(account: &UsageAccountConfig) -> Option<bool> {
-    let dir = account
-        .profile_dir
-        .clone()
-        .or_else(|| crate::integration::claude_dir().ok())?;
-    let settings = match std::fs::read_to_string(dir.join("settings.json")) {
-        Ok(settings) => settings,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Some(false),
-        Err(_) => return None,
+/// 该厂商是否支持官方 statusline 回调开关（`account.usage.integration`）：回调型查询且
+/// `integration::usage` 能改写其官方 `settings.json`。厂商名单的唯一真源在
+/// `integration::usage::supports_statusline`，这里只把它与查询方式合成一条谓词，供
+/// `UsageProviderInfo.supports_callback` 宣告与账号级回调态判定共用。
+pub(super) fn supports_callback(provider: &Provider) -> bool {
+    matches!(provider.query, Query::Callback)
+        && crate::integration::usage_supports_statusline(provider.agent)
+}
+
+/// 支持官方 statusline 回调的厂商的账号：其官方 `settings.json` 是否已接入 herdr 用量回调；
+/// 文件不存在（全新安装）算未接入，读不了 / 无法解析 / 含无法识别的 herdr 回调时为 `None`。
+/// 判据与 `integration::usage` 的启用逻辑同源（按本平台命令形态比对，不匹配明文子串）；
+/// 路径推导直接复用 `integration::usage::settings_path`（写入与检测指向同一个文件）。
+/// 不支持回调的厂商为 `None`。
+///
+/// 结果按文件戳（mtime + 大小）缓存：读路径每 2 秒轮询、事件扇出与 providers 都会调用，
+/// 不能在服务循环里每次同步读文件；戳未变且未超 `AVAILABILITY_TTL` 时直接复用
+/// （mtime 粗粒度，同尺寸连续改写可能戳相同，TTL 兜底）。
+pub(super) fn statusline_enabled(account: &UsageAccountConfig) -> Option<bool> {
+    let path = crate::integration::usage_settings_path(account).ok()?;
+    let stamp = file_stamp(&path);
+    let now = Instant::now();
+    if let Ok(cache) = statusline_cache().lock() {
+        if let Some((cached, at, verdict)) = cache.get(&path) {
+            if *cached == stamp && now.duration_since(*at) < AVAILABILITY_TTL {
+                return *verdict;
+            }
+        }
+    }
+    let verdict = match std::fs::read_to_string(&path) {
+        Ok(settings) => crate::integration::usage_statusline_enabled(&settings, &account.agent),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Some(false),
+        Err(_) => None,
     };
-    crate::integration::usage_statusline_enabled(&settings, "claude")
+    if let Ok(mut cache) = statusline_cache().lock() {
+        cache.insert(path, (stamp, now, verdict));
+    }
+    verdict
+}
+
+/// `statusline_enabled` 的按路径缓存：文件戳 + 采样时刻 + 判定。
+type StatuslineCache = HashMap<PathBuf, (Option<FileStamp>, Instant, Option<bool>)>;
+
+fn statusline_cache() -> &'static Mutex<StatuslineCache> {
+    static CACHE: OnceLock<Mutex<StatuslineCache>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
 /// PATH / 安装布局扫描结果的缓存时长；服务循环里依赖这些扫描的周期都与它对齐。
@@ -477,7 +508,7 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(
-            claude_statusline_enabled(&account),
+            statusline_enabled(&account),
             Some(false),
             "无 settings.json：全新安装算未接入，不是「无法判定」"
         );
@@ -492,7 +523,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            claude_statusline_enabled(&account),
+            statusline_enabled(&account),
             Some(true),
             "判据按本平台命令形态比对（Windows 是 -EncodedCommand 形态）"
         );
@@ -501,9 +532,69 @@ mod tests {
             "{\"statusLine\":{\"type\":\"command\",\"command\":\"python custom.py\"}}",
         )
         .unwrap();
-        assert_eq!(claude_statusline_enabled(&account), Some(false));
+        assert_eq!(statusline_enabled(&account), Some(false));
         std::fs::write(base.join("settings.json"), "{").unwrap();
-        assert_eq!(claude_statusline_enabled(&account), None, "无法解析");
+        assert_eq!(statusline_enabled(&account), None, "无法解析");
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    /// 回调开关能力与检测共用一份厂商名单与路径推导：antigravity 的 `profile_dir` 与
+    /// claude 走同一条检测路径；不支持回调的厂商既不宣告能力也没有当前态。
+    #[test]
+    fn statusline_detection_shares_the_integration_path_and_provider_list() {
+        let claude = provider("claude").unwrap();
+        let antigravity = provider("antigravity").unwrap();
+        assert!(supports_callback(claude));
+        assert!(supports_callback(antigravity));
+        assert!(
+            !supports_callback(provider("pi").unwrap()),
+            "回调型但 integration 无法改写其 settings 的厂商不宣告能力"
+        );
+        assert!(!supports_callback(provider("codex").unwrap()));
+        let base = std::env::temp_dir().join(format!(
+            "herdr-agy-statusline-{}-{}",
+            std::process::id(),
+            crate::server::observability::now_ms()
+        ));
+        std::fs::create_dir_all(&base).unwrap();
+        let account = UsageAccountConfig {
+            id: "antigravity:work".into(),
+            agent: "antigravity".into(),
+            profile_dir: Some(base.clone()),
+            ..Default::default()
+        };
+        assert_eq!(
+            crate::integration::usage_settings_path(&account).unwrap(),
+            base.join("settings.json"),
+            "检测与写入指向同一个文件"
+        );
+        assert_eq!(statusline_enabled(&account), Some(false));
+        std::fs::write(
+            base.join("settings.json"),
+            format!(
+                "{{\"statusLine\":{{\"type\":\"command\",\"command\":{}}}}}",
+                serde_json::Value::String(
+                    crate::platform::usage_statusline_pipeline("antigravity", "").unwrap()
+                )
+            ),
+        )
+        .unwrap();
+        assert_eq!(
+            statusline_enabled(&account),
+            Some(true),
+            "文件戳变化即重读，不被缓存挡住"
+        );
+        let codex = UsageAccountConfig {
+            id: "codex:default".into(),
+            agent: "codex".into(),
+            profile_dir: Some(base.clone()),
+            ..Default::default()
+        };
+        assert_eq!(
+            statusline_enabled(&codex),
+            None,
+            "不支持回调的厂商没有当前态"
+        );
         let _ = std::fs::remove_dir_all(base);
     }
 
