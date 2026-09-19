@@ -232,16 +232,28 @@ fn updated_ago(now_ms: u64, observed_at_ms: u64) -> String {
     }
 }
 
+/// 一次绘制产生的矩形与命中区；未绘制的部分保持 `Rect::default()`。
+pub(super) struct PaintOutput {
+    pub hits: Vec<(Rect, Action)>,
+    /// 页面铺满的矩形（本次传入 `page` 时等于 `area`）。
+    pub page_rect: Rect,
+    pub hover_rect: Rect,
+    pub dialog_rect: Rect,
+}
+
+/// 渲染纯函数：`page` 是本次要画的页面（停靠面板由调用方决定画哪个 tab），
+/// 状态只读；悬浮层只在没有页面时绘制，进程对话框总是最后覆盖。
 pub(super) fn paint(
     buffer: &mut Buffer,
     area: Rect,
     state: &State,
     palette: &Palette,
-) -> (Rect, Vec<(Rect, Action)>, Rect) {
+    page: Option<Page>,
+) -> PaintOutput {
     let mut hits = Vec::new();
-    let mut covered = Rect::default();
-    if let Some(page) = state.page {
-        covered = area;
+    let mut page_rect = Rect::default();
+    if let Some(page) = page {
+        page_rect = area;
         buffer.set_style(area, Style::default().fg(palette.text).bg(palette.panel_bg));
         for y in area.y..area.bottom() {
             for x in area.x..area.right() {
@@ -315,7 +327,7 @@ pub(super) fn paint(
         );
     }
     let mut hover_rect = Rect::default();
-    if state.page.is_none() {
+    if page.is_none() {
         if let Some(hover) = state.hover.as_ref().filter(|hover| hover.visible) {
             let width = buffer.area.width.saturating_sub(2).min(68);
             let height = buffer.area.height.saturating_sub(2).min(17);
@@ -329,7 +341,6 @@ pub(super) fn paint(
                 .y
                 .min(buffer.area.bottom().saturating_sub(height));
             hover_rect = Rect::new(x, y, width, height);
-            covered = hover_rect;
             for row in hover_rect.y..hover_rect.bottom() {
                 for col in hover_rect.x..hover_rect.right() {
                     buffer[(col, row)].set_symbol(" ");
@@ -377,11 +388,12 @@ pub(super) fn paint(
             );
         }
     }
+    let mut dialog_rect = Rect::default();
     if let Some(dialog) = &state.process_dialog {
         hover_rect = Rect::default();
         hits.clear();
         let rect = crate::ui::centered_popup_rect(buffer.area, 66, 12).unwrap_or(buffer.area);
-        covered = rect;
+        dialog_rect = rect;
         for y in rect.y..rect.bottom() {
             for x in rect.x..rect.right() {
                 buffer[(x, y)].set_symbol(" ");
@@ -510,7 +522,12 @@ pub(super) fn paint(
             );
         }
     }
-    (covered, hits, hover_rect)
+    PaintOutput {
+        hits,
+        page_rect,
+        hover_rect,
+        dialog_rect,
+    }
 }
 
 fn monitor(

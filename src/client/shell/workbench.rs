@@ -189,6 +189,7 @@ impl ClientShellState {
 
     pub(super) fn workbench_sidebar(&mut self, collapsed: bool) {
         set_sidebar(&mut self.workbench.dock, collapsed);
+        self.sync_observation_page_with_focus();
     }
 
     pub(super) fn focused_tab_id(&self) -> Option<String> {
@@ -245,7 +246,9 @@ impl ClientShellState {
             return;
         };
         let source = self.active_endpoint_id.storage_key();
-        if self.workbench.source != source || self.workbench.boot != snapshot.boot_id {
+        let restored = self.workbench.source != source || self.workbench.boot != snapshot.boot_id;
+        if restored {
+            // `disconnect` 会清掉 enabled；布局恢复完成后在下方统一置位。
             self.workbench.disconnect();
             self.workbench.dock = self
                 .workbench
@@ -261,6 +264,11 @@ impl ClientShellState {
             }
         }
         self.workbench.enabled = true;
+        if restored {
+            // 恢复的布局可能以监控面板为焦点；页面归属随之同步（必须在置位
+            // enabled 之后，`sync_observation_page` 在工作台未启用时早退）。
+            interaction::sync_observation_page(&self.workbench, &mut self.observability);
+        }
         let tabs = snapshot
             .tabs
             .iter()
@@ -499,5 +507,6 @@ impl ClientShellState {
         }
         self.workbench.dock.focused = panel;
         self.workbench.dock.maximized = None;
+        self.sync_observation_page_with_focus();
     }
 }

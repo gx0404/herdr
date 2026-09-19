@@ -78,6 +78,11 @@ impl ClientShellState {
                 .usage_disabled_providers
                 .as_ref()
                 .map(|_| self.observability.usage.disabled_providers.clone()),
+            monitor_tab: self
+                .config
+                .preferences
+                .monitor_tab
+                .map(|_| self.observability.monitor_tab),
             sidebar_width: self.sidebar_width_manual.then_some(self.sidebar_width),
             sidebar_section_split: self
                 .sidebar_section_split_manual

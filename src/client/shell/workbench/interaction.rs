@@ -6,6 +6,7 @@ use dock::{Axis, Divider, Edge};
 pub(super) enum Action {
     Menu,
     Open(PanelId),
+    Close(PanelId),
     Arrange,
     Lock,
     Reset,
@@ -84,6 +85,22 @@ impl Drag {
     }
 }
 
+/// `sync_observation_page_with_focus` 的字段级实现，供持有 `snapshot` 借用的
+/// tick 路径调用。
+pub(super) fn sync_observation_page(
+    workbench: &super::State,
+    observability: &mut super::super::observability::State,
+) {
+    if !workbench.enabled {
+        return;
+    }
+    observability.page = match workbench.dock.focused {
+        PanelId::Monitor => Some(observability.monitor_tab),
+        PanelId::Accounts => Some(super::super::observability::Page::Accounts),
+        _ => None,
+    };
+}
+
 impl ClientShellState {
     fn publish_workbench_focus(
         &mut self,
@@ -105,16 +122,76 @@ impl ClientShellState {
         if self.workbench.dock.focused == panel {
             return;
         }
-        self.workbench.dock.focused = panel.clone();
+        self.workbench.dock.focused = panel;
         self.cancel_frozen_selection();
         self.selection = None;
         self.clear_link_hover();
-        self.observability.page = match panel {
-            PanelId::Monitor => Some(super::super::observability::Page::Monitor),
-            PanelId::Accounts => Some(super::super::observability::Page::Accounts),
-            _ => None,
-        };
+        // 焦点离开监控面板只是键盘归终端；用户选中的 tab（monitor_tab）保留，
+        // 面板继续画同一页并继续轮询。
+        self.sync_observation_page_with_focus();
         self.sync_workbench_surface();
+    }
+
+    /// 停靠工作台下 `observability.page` 与 `dock.focused` 同步：监控 / 账号面板
+    /// 聚焦时页面拥有键盘，否则键盘归终端。所有改写 `dock.focused` 的入口在
+    /// 输入 / tick 阶段调用，渲染期不再改写。
+    pub(in crate::client::shell) fn sync_observation_page_with_focus(&mut self) {
+        sync_observation_page(&self.workbench, &mut self.observability);
+    }
+
+    /// 关闭一个停靠面板（Esc / 命令面板的关闭动作）。锁定布局时不关闭，而是
+    /// 在监控页脚给出反馈；成功后焦点回到终端、上报一次焦点并持久化布局。
+    /// 面板头 × 走 `workbench_mouse`，由该命中派发块统一收尾，调用的是
+    /// `close_workbench_panel_state`，避免同一次关闭重复上报焦点与写偏好。
+    pub(in crate::client::shell) fn close_workbench_panel(
+        &mut self,
+        panel: PanelId,
+        outcome: &mut ClientShellInput,
+    ) -> bool {
+        let previous_tab = self.focused_tab_id();
+        if !self.close_workbench_panel_state(panel, outcome) {
+            return false;
+        }
+        self.publish_workbench_focus(previous_tab, outcome);
+        self.persist_chrome_preferences(outcome);
+        true
+    }
+
+    /// `close_workbench_panel` 的只改状态部分：不上报焦点、不写偏好，由调用方
+    /// 统一收尾。
+    fn close_workbench_panel_state(
+        &mut self,
+        panel: PanelId,
+        outcome: &mut ClientShellInput,
+    ) -> bool {
+        if !self.workbench.enabled {
+            return false;
+        }
+        if self.workbench.dock.locked {
+            self.observability.message = Some(
+                super::super::observability::tr(
+                    "Layout is locked; unlock it to close this panel.",
+                    "布局已锁定，解锁后才能关闭面板。",
+                )
+                .into(),
+            );
+            outcome.repaint = true;
+            return false;
+        }
+        if !self.workbench.dock.close_panel(&panel) {
+            return false;
+        }
+        if matches!(panel, PanelId::Monitor | PanelId::Accounts) {
+            self.observability.hover = None;
+            self.observability.process_dialog = None;
+        }
+        self.cancel_frozen_selection();
+        self.selection = None;
+        self.clear_link_hover();
+        self.sync_observation_page_with_focus();
+        self.sync_workbench_surface();
+        outcome.repaint = true;
+        true
     }
 
     pub(in crate::client::shell) fn sync_workbench_surface(&mut self) {
@@ -246,6 +323,7 @@ impl ClientShellState {
                     self.workbench.drag = Some(drag);
                 }
             }
+            self.sync_observation_page_with_focus();
             self.publish_workbench_focus(previous_tab, outcome);
             outcome.repaint = true;
             return true;
@@ -308,6 +386,10 @@ impl ClientShellState {
                     *scroll = scroll.saturating_add_signed(delta);
                 }
                 Action::Menu => self.toggle_global_menu(),
+                Action::Close(panel) => {
+                    // 焦点上报与偏好持久化由本派发块末尾统一完成。
+                    self.close_workbench_panel_state(panel, outcome);
+                }
                 Action::Open(panel) => self.open_observation_page(
                     if panel == PanelId::Monitor {
                         super::super::observability::Page::Monitor
@@ -398,6 +480,7 @@ impl ClientShellState {
                     );
                 }
             }
+            self.sync_observation_page_with_focus();
             if !creates_tab {
                 self.publish_workbench_focus(previous_tab, outcome);
             }
@@ -586,6 +669,7 @@ impl ClientShellState {
             }
             _ => {}
         }
+        self.sync_observation_page_with_focus();
         self.publish_workbench_focus(previous_tab, outcome);
         self.persist_chrome_preferences(outcome);
         outcome.repaint = true;

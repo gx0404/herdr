@@ -218,6 +218,9 @@ pub(crate) fn render_client_overlay(
 /// modal frame, so it supports the same drag-to-float window behavior as
 /// settings and the command palette. Display-only; data refreshes through
 /// the observability polling loop while the overlay is open.
+///
+/// `cursor: None` 只表示浮层不拥有光标；组合层按浮层矩形是否覆盖终端光标
+/// 决定是否保留终端插入点，仪表盘打开时未被盖住的光标仍然可见。
 fn render_usage_dashboard_overlay(
     b: &mut Buffer,
     usage: &super::observability::State,

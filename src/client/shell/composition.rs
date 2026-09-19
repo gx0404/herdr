@@ -10,10 +10,11 @@ fn restore_mode_bar(
     };
     let start = usize::from(bar.y) * usize::from(frame.width) + usize::from(bar.x);
     frame.cells[start..start + usize::from(bar.width)].clone_from_slice(cells);
+    // 只有模式条真正覆盖了光标所在的列区间才抹掉光标；同一行其它列仍归终端。
     if frame
         .cursor
         .as_ref()
-        .is_some_and(|cursor| cursor.y == bar.y)
+        .is_some_and(|cursor| contains(bar, (cursor.x, cursor.y)))
     {
         frame.cursor = None;
     }
@@ -398,18 +399,11 @@ impl ClientShellState {
         self.paint_shell_copy(&mut frame, &mut occlusion)?;
         restore_mode_bar(&mut frame, mode_bar, mode_bar_cells.as_deref());
         self.paint_shell_feedback(&mut frame, layout, &mut occlusion)?;
+        if let Some(covered) = self.paint_observability(&mut frame, layout.pane_surface) {
+            occlusion.cover(covered);
+        }
         let snapshot = self.snapshot.as_deref()?;
         let surface = self.pane_surface.as_ref()?;
-        if let Some(covered) =
-            self.observability
-                .paint(&mut frame, layout.pane_surface, &self.config.palette)
-        {
-            occlusion.cover(covered);
-            if self.observability.page.is_some() {
-                self.hits.panes.clear();
-                self.hits.pane_splits.clear();
-            }
-        }
         self.hits.popup = None;
         if let Some(popup) = surface.popup.as_deref() {
             let width = popup.width.map(client_popup_size);
@@ -957,7 +951,14 @@ impl ClientShellState {
                 self.hits.release_notes_scrollbar = rendered.release_notes_scrollbar;
                 self.hits.release_notes_scroll_metrics = rendered.release_notes_scroll_metrics;
                 self.hits.release_notes_max_scroll = rendered.release_notes_max_scroll;
-                rendered.cursor
+                // 浮层自带光标（文本输入）时归浮层；否则只有浮层矩形真正盖住
+                // 终端光标才把它抹掉，未覆盖的终端插入点保留（用量仪表盘等）。
+                rendered.cursor.or_else(|| {
+                    frame
+                        .cursor
+                        .clone()
+                        .filter(|cursor| !contains(rendered.area, (cursor.x, cursor.y)))
+                })
             };
             self.hits.overlay_bounds = entrance_area;
             if self.overlay_since.is_some_and(|since| {
@@ -1115,5 +1116,39 @@ pub(super) fn emphasize_pane_border(
             let cell = &mut buffer[(x, y)];
             cell.set_style(cell.style().fg(color).add_modifier(Modifier::BOLD));
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn frame_with_cursor(x: u16, y: u16) -> FrameData {
+        let buffer = Buffer::empty(Rect::new(0, 0, 20, 4));
+        FrameData::from_ratatui_buffer_with_hyperlinks(
+            &buffer,
+            Some(crate::protocol::CursorState {
+                x,
+                y,
+                visible: true,
+                shape: 0,
+            }),
+            &[],
+        )
+    }
+
+    #[test]
+    fn restore_mode_bar_only_hides_a_cursor_inside_the_bar_columns() {
+        let bar = Rect::new(10, 3, 5, 1);
+        let cells = frame_with_cursor(0, 0).cells[..5].to_vec();
+        let mut covered = frame_with_cursor(12, 3);
+        restore_mode_bar(&mut covered, Some(bar), Some(&cells));
+        assert!(covered.cursor.is_none(), "模式条列区间内的光标被抹掉");
+        let mut beside = frame_with_cursor(2, 3);
+        restore_mode_bar(&mut beside, Some(bar), Some(&cells));
+        assert!(
+            beside.cursor.is_some(),
+            "同一行但不在模式条列区间内的光标保留"
+        );
     }
 }

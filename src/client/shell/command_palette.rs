@@ -30,6 +30,7 @@ pub(super) enum ClientPaletteAction {
     Back,
     Observation(super::observability::Page),
     UsageDashboard,
+    CloseMonitor,
     Arrange,
     Notifications,
     WhatsNew,
@@ -729,6 +730,22 @@ impl ClientShellState {
             badge: false,
             action: ClientPaletteAction::UsageDashboard,
         });
+        if self.workbench.enabled
+            && self
+                .workbench
+                .dock
+                .root
+                .contains(&super::dock::PanelId::Monitor)
+        {
+            // 终端聚焦时 Esc 进终端，命令面板提供显式关闭停靠监控面板的入口。
+            items.push(ClientPaletteItem {
+                id: "observation:close-monitor".into(),
+                title: super::observability::tr("Close monitor panel", "关闭监控面板").into(),
+                subtitle: String::new(),
+                badge: false,
+                action: ClientPaletteAction::CloseMonitor,
+            });
+        }
         items.push(ClientPaletteItem {
             id: "layout".into(),
             title: super::observability::tr("Arrange panels", "调整面板布局").into(),
@@ -918,6 +935,9 @@ impl ClientShellState {
             }
             ClientPaletteAction::Observation(page) => self.open_observation_page(page, outcome),
             ClientPaletteAction::UsageDashboard => self.toggle_usage_dashboard(outcome),
+            ClientPaletteAction::CloseMonitor => {
+                self.close_workbench_panel(super::dock::PanelId::Monitor, outcome);
+            }
             ClientPaletteAction::Arrange => {
                 self.workbench.arranging = true;
             }

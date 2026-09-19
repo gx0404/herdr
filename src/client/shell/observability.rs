@@ -34,7 +34,9 @@ pub(super) fn render_usage_table(
     render::usage_table(buffer, area, state, palette, &mut Vec::new());
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// 监控面板内的页面（tab）；可持久化为客户端偏好，因此 wire 名固定为 snake_case。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub(super) enum Page {
     Monitor,
     Accounts,
@@ -135,8 +137,22 @@ struct AlertState {
     armed: bool,
 }
 
+/// `State::paint` 一次绘制的结果；hits/rect 由调用方通过 `commit_paint` 写回。
+pub(super) struct Painted {
+    /// 供 kitty 图片 occlusion 使用的覆盖区（进程对话框 > 悬浮层 > 页面）。
+    pub covered: Rect,
+    pub hits: Vec<(Rect, Action)>,
+    pub page_rect: Rect,
+    pub hover_rect: Rect,
+    pub dialog: bool,
+}
+
 pub(super) struct State {
+    /// 当前拥有键盘输入的页面：经典布局下即打开的页面；停靠工作台下仅当
+    /// 监控 / 账号面板聚焦时为 `Some`，与 `dock.focused` 同步（不在渲染期改写）。
     pub page: Option<Page>,
+    /// 用户在监控面板里选中的 tab；焦点回到终端后面板仍画这个 tab，并持久化。
+    pub monitor_tab: Page,
     pub monitor: MonitorConfig,
     pub usage: AccountUsageConfig,
     pub metrics: Option<Box<SystemMetricsSnapshot>>,
@@ -202,6 +218,9 @@ impl State {
         if let Some(value) = &config.preferences.usage_disabled_providers {
             self.usage.disabled_providers.clone_from(value);
         }
+        if let Some(value) = config.preferences.monitor_tab {
+            self.monitor_tab = value;
+        }
         self.next_metrics = Instant::now();
         self.next_usage = Instant::now();
     }
@@ -221,6 +240,7 @@ impl State {
         }
         Self {
             page: None,
+            monitor_tab: config.preferences.monitor_tab.unwrap_or(Page::Monitor),
             monitor: config
                 .preferences
                 .monitor
@@ -264,32 +284,39 @@ impl State {
         }
     }
 
+    /// 每帧绘制前复位上一帧的命中区与矩形；之后每次 `paint` 的结果经
+    /// `commit_paint` 累加写回。
+    pub(super) fn begin_paint(&mut self) {
+        self.hits.clear();
+        self.hover_hits.clear();
+        self.hover_rect = Rect::default();
+        self.page_rect = Rect::default();
+    }
+
+    /// 渲染纯函数：把 `painting_page`（停靠面板传该面板的 tab，全局浮层传 `None`）、
+    /// 可见的悬浮层与进程对话框画进 `frame` 的 `area`，状态只读。
+    ///
+    /// 光标归属按覆盖区判定：只有页面矩形、悬浮层矩形或对话框矩形真正包含
+    /// `frame.cursor` 坐标时才把整帧光标置空；停靠在旁边的监控面板不能抹掉
+    /// 聚焦终端的插入点（经典布局下页面铺满 pane 区域，行为不变）。
     pub(super) fn paint(
-        &mut self,
+        &self,
         frame: &mut FrameData,
         area: Rect,
         palette: &Palette,
-    ) -> Option<Rect> {
-        let visible = self.page.is_some()
+        painting_page: Option<Page>,
+    ) -> Option<Painted> {
+        let visible = painting_page.is_some()
             || self.process_dialog.is_some()
             || self.hover.as_ref().is_some_and(|hover| hover.visible);
         if !visible {
-            self.hits.clear();
-            self.hover_rect = Rect::default();
-            self.hover_hits.clear();
             return None;
         }
         let mut buffer = frame.to_ratatui_buffer()?;
-        let (covered, hits, hover_rect) = render::paint(&mut buffer, area, self, palette);
-        self.hover_hits = if hover_rect.is_empty() {
-            Vec::new()
-        } else {
-            hits.clone()
-        };
-        self.hits = hits;
-        self.selected_hit = self.selected_hit.min(self.hits.len().saturating_sub(1));
-        if self.page.is_some() {
-            if let Some((rect, _)) = self.hits.get(self.selected_hit) {
+        let output = render::paint(&mut buffer, area, self, palette, painting_page);
+        if painting_page.is_some() {
+            let selected = self.selected_hit.min(output.hits.len().saturating_sub(1));
+            if let Some((rect, _)) = output.hits.get(selected) {
                 buffer.set_style(
                     *rect,
                     Style::default()
@@ -298,19 +325,48 @@ impl State {
                 );
             }
         }
-        self.page_rect = if self.page.is_some() {
-            area
-        } else {
-            Rect::default()
-        };
-        self.hover_rect = hover_rect;
-        let cursor = if self.page.is_some() {
-            None
-        } else {
-            frame.cursor.clone()
-        };
+        let cursor = frame.cursor.clone().filter(|cursor| {
+            let point = (cursor.x, cursor.y);
+            !(contains(output.page_rect, point)
+                || contains(output.hover_rect, point)
+                || contains(output.dialog_rect, point))
+        });
         frame.replace_from_ratatui_buffer_preserving_effects(&buffer, cursor);
-        Some(covered)
+        let dialog = !output.dialog_rect.is_empty();
+        let covered = if dialog {
+            output.dialog_rect
+        } else if !output.hover_rect.is_empty() {
+            output.hover_rect
+        } else {
+            output.page_rect
+        };
+        Some(Painted {
+            covered,
+            hits: output.hits,
+            page_rect: output.page_rect,
+            hover_rect: output.hover_rect,
+            dialog,
+        })
+    }
+
+    /// 把一次绘制的命中区写回：页面命中区累加（多个停靠面板依次绘制），
+    /// 悬浮层命中区单独记录以便浮层独占输入，进程对话框出现时独占全部命中区。
+    pub(super) fn commit_paint(&mut self, painted: Painted) {
+        if painted.dialog {
+            self.hits = painted.hits;
+            self.hover_rect = Rect::default();
+            self.hover_hits.clear();
+        } else {
+            if !painted.hover_rect.is_empty() {
+                self.hover_hits = painted.hits.clone();
+                self.hover_rect = painted.hover_rect;
+            }
+            self.hits.extend(painted.hits);
+        }
+        if !painted.page_rect.is_empty() {
+            self.page_rect = painted.page_rect;
+        }
+        self.selected_hit = self.selected_hit.min(self.hits.len().saturating_sub(1));
     }
 
     fn apply_metrics(&mut self, snapshot: Box<SystemMetricsSnapshot>) {
@@ -460,9 +516,16 @@ impl ClientShellState {
 
     pub(super) fn open_observation_page(&mut self, page: Page, outcome: &mut ClientShellInput) {
         // One dock panel hosts system, accounts, and settings pages; the
-        // requested page becomes the active tab inside it.
+        // requested page becomes the active tab inside it and is remembered
+        // across focus changes (persisted as a client preference).
+        let tab_changed = self.config.preferences.monitor_tab != Some(page);
+        self.observability.monitor_tab = page;
         self.workbench_open(dock::PanelId::Monitor);
         self.observability.page = Some(page);
+        if tab_changed {
+            self.config.preferences.monitor_tab = Some(page);
+            self.persist_chrome_preferences(outcome);
+        }
         self.observability.hover = None;
         self.observability.scroll = 0;
         self.observability.next_metrics = Instant::now();
@@ -606,6 +669,8 @@ impl ClientShellState {
             }
         }
         let usage_visible = self.observability.page == Some(Page::Accounts)
+            || (self.workbench.visible(&dock::PanelId::Monitor)
+                && self.observability.monitor_tab == Page::Accounts)
             || self.workbench.visible(&dock::PanelId::Accounts)
             || matches!(self.overlay, Some(ClientShellOverlay::UsageDashboard))
             || self
@@ -633,7 +698,7 @@ impl ClientShellState {
             self.observability.pending.clear();
             self.observability.next_usage = now;
         }
-        if self.observability.page.is_some() || usage_visible {
+        if usage_visible || self.observation_surface_visible() {
             outcome.repaint |= previous_second != self.observability.now_ms / 1000;
         }
         if !self.endpoint_is_online(&self.active_endpoint_id) {
@@ -758,7 +823,18 @@ impl ClientShellState {
                 }
             }
         }
-        self.observability.page.is_some() || self.observability.hover.is_some()
+        self.observation_surface_visible()
+    }
+
+    /// 监控 / 账号数据当前是否有可见的呈现面：页面、悬浮层、停靠的监控或
+    /// legacy 账号面板、浮动用量仪表盘。新响应到达时据此立即重绘，每秒 tick
+    /// 据此刷新时间显示；与 `usage_visible` 的面板判据保持同一套。
+    fn observation_surface_visible(&self) -> bool {
+        self.observability.page.is_some()
+            || self.observability.hover.is_some()
+            || self.workbench.visible(&dock::PanelId::Monitor)
+            || self.workbench.visible(&dock::PanelId::Accounts)
+            || matches!(self.overlay, Some(ClientShellOverlay::UsageDashboard))
     }
 
     pub(super) fn observation_action(&mut self, action: Action, outcome: &mut ClientShellInput) {
@@ -907,14 +983,20 @@ impl ClientShellState {
             }
             Action::Page(page) => self.open_observation_page(page, outcome),
             Action::Close => {
-                if self.workbench.enabled {
-                    self.workbench
-                        .dock
-                        .close_panel(&self.workbench.dock.focused.clone());
-                }
-                self.observability.page = None;
                 self.observability.hover = None;
                 self.observability.process_dialog = None;
+                if self.workbench.enabled {
+                    // 关闭的是承载页面的面板（而非当前聚焦面板）：终端聚焦时
+                    // 也能从命令面板关掉监控面板；锁定布局时给出反馈。
+                    let panel = if self.workbench.dock.focused == dock::PanelId::Accounts {
+                        dock::PanelId::Accounts
+                    } else {
+                        dock::PanelId::Monitor
+                    };
+                    self.close_workbench_panel(panel, outcome);
+                } else {
+                    self.observability.page = None;
+                }
             }
             Action::Configure => self.open_observation_page(Page::Settings, outcome),
             Action::Pause => self.observability.paused = !self.observability.paused,
@@ -1408,14 +1490,19 @@ impl ClientShellState {
         true
     }
 
+    /// 经典布局：页面、悬浮层与进程对话框一次画进 pane 区域；页面打开时
+    /// pane 命中区整体让位给页面。
     pub(super) fn paint_observability(
         &mut self,
         frame: &mut FrameData,
         area: Rect,
     ) -> Option<Rect> {
-        let covered = self
-            .observability
-            .paint(frame, area, &self.config.palette)?;
+        self.observability.begin_paint();
+        let painted =
+            self.observability
+                .paint(frame, area, &self.config.palette, self.observability.page)?;
+        let covered = painted.covered;
+        self.observability.commit_paint(painted);
         if self.observability.page.is_some() {
             self.hits.panes.clear();
             self.hits.pane_splits.clear();

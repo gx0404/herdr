@@ -283,12 +283,18 @@ fn blit_pane_surface(target: &mut FrameData, source: &FrameData, area: Rect) {
         }
     }
 
+    // 尺寸不匹配（resize 首帧仍在等新尺寸的 surface）时真实光标在可见区外：
+    // 把它夹回目标区域边缘但标记不可见，IME 锚点留在 pane 内而宿主不会把
+    // 边缘当成真实插入点；区域内的光标原样透传。
     target.cursor = source.cursor.as_ref().and_then(|cursor| {
-        (cursor.x < copy_width && cursor.y < copy_height).then(|| crate::protocol::CursorState {
-            x: area.x + cursor.x,
-            y: area.y + cursor.y,
-            visible: cursor.visible,
-            shape: cursor.shape,
+        (copy_width > 0 && copy_height > 0).then(|| {
+            let in_range = cursor.x < copy_width && cursor.y < copy_height;
+            crate::protocol::CursorState {
+                x: area.x + cursor.x.min(copy_width - 1),
+                y: area.y + cursor.y.min(copy_height - 1),
+                visible: cursor.visible && in_range,
+                shape: cursor.shape,
+            }
         })
     });
     target.graphics.clear();

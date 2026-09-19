@@ -52,7 +52,12 @@ fn account_hover_remains_visible_over_a_focused_monitor_panel() {
         leave_at: None,
     });
     state.compose(120, 40).expect("监控与悬浮层可同时显示");
-    assert_eq!(state.observability.page, Some(Page::Monitor));
+    // 聚焦的监控面板拥有键盘并画出用户选中的 tab（默认系统页）；渲染期不改写。
+    assert_eq!(state.observability.monitor_tab, Page::Monitor);
+    assert_eq!(
+        state.observability.page,
+        Some(state.observability.monitor_tab)
+    );
     assert!(!state.observability.page_rect.is_empty());
     assert!(!state.observability.hover_rect.is_empty());
     assert!(state.observability.hits.iter().any(|(rect, action)| {

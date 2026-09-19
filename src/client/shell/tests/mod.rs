@@ -306,6 +306,7 @@ mod machine_files;
 mod machines;
 mod mobile;
 mod mouse_selection;
+mod observability_usage;
 mod popup_focus_projection;
 mod scenes;
 mod snippets;

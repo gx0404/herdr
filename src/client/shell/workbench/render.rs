@@ -201,9 +201,13 @@ impl ClientShellState {
             };
             let header = Rect::new(area.x, area.y, area.width, 1);
             buffer.set_style(header, Style::default().bg(palette.surface0));
+            // 监控 / 账号面板头部带显式关闭按钮：终端聚焦时 Esc 进终端，
+            // 用户仍能一键关掉停靠面板。
+            let closable = matches!(panel, PanelId::Monitor | PanelId::Accounts);
+            let controls = if closable { 6 } else { 3 };
             put(
                 &mut buffer,
-                Rect::new(area.x, area.y, area.width.saturating_sub(3), 1),
+                Rect::new(area.x, area.y, area.width.saturating_sub(controls), 1),
                 &label,
                 Style::default()
                     .fg(color)
@@ -232,6 +236,13 @@ impl ClientShellState {
             self.workbench
                 .hits
                 .push((toggle, Action::Maximize(panel.clone())));
+            if closable && area.width > 6 {
+                let close = Rect::new(toggle.x.saturating_sub(3).max(area.x), area.y, 3, 1);
+                put(&mut buffer, close, " × ", Style::default().fg(color));
+                self.workbench
+                    .hits
+                    .push((close, Action::Close(panel.clone())));
+            }
             if let PanelId::Terminal(id) = panel {
                 let Some(group) = self
                     .workbench
@@ -324,9 +335,7 @@ impl ClientShellState {
         );
         let mut frame = FrameData::from_ratatui_buffer_with_hyperlinks(&buffer, None, &[]);
         let mut occlusion = crate::kitty_graphics::surface::Occlusion::default();
-        self.observability.hits.clear();
-        self.observability.page_rect = Rect::default();
-        let saved_page = self.observability.page;
+        self.observability.begin_paint();
         for (panel, rect) in &self.workbench.geometry.panels {
             let area = body(*rect, panel);
             if let PanelId::Terminal(id) = panel {
@@ -377,26 +386,24 @@ impl ClientShellState {
                         topology_signature: signature,
                     }));
             } else if matches!(panel, PanelId::Monitor | PanelId::Accounts) {
-                // The monitor panel hosts all observation pages; the saved
-                // page is whichever tab the user last selected. Legacy
+                // The monitor panel hosts all observation pages and always
+                // paints the tab the user last selected, whether or not the
+                // panel is focused; rendering never rewrites `page`. Legacy
                 // accounts panels keep rendering the accounts page.
-                self.observability.page = Some(if *panel == PanelId::Accounts {
+                let tab = if *panel == PanelId::Accounts {
                     Page::Accounts
                 } else {
-                    saved_page.unwrap_or(Page::Monitor)
-                });
-                let previous_hits = std::mem::take(&mut self.observability.hits);
-                if let Some(covered) = self.observability.paint(&mut frame, area, palette) {
-                    occlusion.cover(covered);
+                    self.observability.monitor_tab
+                };
+                if let Some(painted) =
+                    self.observability
+                        .paint(&mut frame, area, palette, Some(tab))
+                {
+                    occlusion.cover(painted.covered);
+                    self.observability.commit_paint(painted);
                 }
-                self.observability.hits.splice(0..0, previous_hits);
             }
         }
-        self.observability.page = match self.workbench.dock.focused {
-            PanelId::Monitor => Some(saved_page.unwrap_or(Page::Monitor)),
-            PanelId::Accounts => Some(Page::Accounts),
-            _ => None,
-        };
         if let Some(mut composed) = frame.to_ratatui_buffer() {
             for hit in &self.hits.panes {
                 if hit.rect.width > 4
@@ -539,8 +546,7 @@ impl ClientShellState {
                 });
             }
         }
-        if self.observability.page.is_none()
-            || self.observability.process_dialog.is_some()
+        if self.observability.process_dialog.is_some()
             || self
                 .observability
                 .hover
@@ -548,16 +554,9 @@ impl ClientShellState {
                 .is_some_and(|hover| hover.visible)
         {
             // 全局浮层在终端内容、把手与选择高亮之后绘制，保持视觉与输入层级一致。
-            let page = self.observability.page.take();
-            let page_rect = self.observability.page_rect;
-            let hits = std::mem::take(&mut self.observability.hits);
-            if let Some(covered) = self.observability.paint(&mut frame, full, palette) {
-                occlusion.cover(covered);
-            }
-            self.observability.page = page;
-            self.observability.page_rect = page_rect;
-            if self.observability.process_dialog.is_none() {
-                self.observability.hits.splice(0..0, hits);
+            if let Some(painted) = self.observability.paint(&mut frame, full, palette, None) {
+                occlusion.cover(painted.covered);
+                self.observability.commit_paint(painted);
             }
         }
         self.paint_shell_feedback(

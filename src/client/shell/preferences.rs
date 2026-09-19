@@ -38,6 +38,13 @@ pub(super) struct ClientChromePreferences {
     pub(super) usage_position: Option<crate::config::UsageDisplayPosition>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(super) usage_disabled_providers: Option<Vec<String>>,
+    /// 监控面板里用户选中的 tab；未知值按未设置处理，不让整份偏好失效。
+    #[serde(
+        default,
+        deserialize_with = "read_monitor_tab",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub(super) monitor_tab: Option<super::observability::Page>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(super) sidebar_width: Option<u16>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -70,6 +77,13 @@ fn read_pages<'de, D: serde::Deserializer<'de>>(
             (key.len() <= 64 && window.valid()).then(|| (key.clone(), window))
         })
         .collect())
+}
+
+fn read_monitor_tab<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<super::observability::Page>, D::Error> {
+    let value = serde_json::Value::deserialize(deserializer)?;
+    Ok(serde_json::from_value(value).ok())
 }
 
 fn read_layouts<'de, D: serde::Deserializer<'de>>(
@@ -145,6 +159,21 @@ mod tests {
         let second = path_for_local_endpoint(Path::new("/run/herdr/two.sock"));
         assert_eq!(first, again);
         assert_ne!(first, second);
+    }
+
+    #[test]
+    fn unknown_monitor_tab_is_ignored_instead_of_failing_the_whole_file() {
+        let preferences: ClientChromePreferences =
+            serde_json::from_str(r#"{"monitor_tab":"nonsense","sidebar_width":30}"#)
+                .expect("未知 tab 值不应让整份偏好失效");
+        assert_eq!(preferences.monitor_tab, None);
+        assert_eq!(preferences.sidebar_width, Some(30));
+        let preferences: ClientChromePreferences =
+            serde_json::from_str(r#"{"monitor_tab":"accounts"}"#).expect("已知 tab 值");
+        assert_eq!(
+            preferences.monitor_tab,
+            Some(super::super::observability::Page::Accounts)
+        );
     }
 
     #[test]
