@@ -1,3 +1,4 @@
+mod apply;
 mod http;
 mod parse;
 mod persistence;
@@ -90,6 +91,7 @@ impl Service {
                     })
                     .collect::<HashMap<_, _>>();
                 let mut bindings = std::mem::take(&mut saved.bindings);
+                let mut rejections = apply::Rejections::default();
                 let mut subscribers = HashMap::<String, (Option<u64>, UsageParams, Reply)>::new();
                 let mut next_subscription = 1_u64;
                 let mut next_query = 1_u64;
@@ -120,6 +122,8 @@ impl Service {
                             }
                             cache.retain(|id, _| updated.iter().any(|account| &account.id == id));
                             bindings.retain(|_, id| cache.contains_key(id));
+                            // 待办里的候选账号与限速键都可能已失效，随账号清单一起重来。
+                            rejections = apply::Rejections::default();
                             accounts = updated;
                             config = loaded;
                         }
@@ -130,6 +134,16 @@ impl Service {
                                 continue;
                             }
                             entry.in_flight = false;
+                            tracing::debug!(
+                                event = "account.probe.complete",
+                                subsystem = "account_usage",
+                                outcome = "completed",
+                                account_id = %snapshot.account_id,
+                                status = ?snapshot.status,
+                                metrics = snapshot.metrics.len(),
+                                generation,
+                                "账号用量探测完成"
+                            );
                             if invalidate_changed_identity(
                                 &entry.snapshot,
                                 &mut snapshot,
@@ -250,31 +264,28 @@ impl Service {
                                     value.status = ObservationStatus::NeedsBinding;
                                     value.metrics.clear();
                                     value.message = Some(
-                                        "请先确认此 Agent 使用的账号；不会按厂商品牌猜测账号"
+                                        "请先确认此 Agent 使用的账号；该厂商只有一个账号时会在收到官方回调时自动绑定，多个账号请手动选择"
                                             .into(),
                                     );
                                 }
                             }
                             Ok(ResponseResult::AccountUsage { accounts: values })
                         }
-                        Method::AccountBindingSet(params) => {
-                            if !accounts
-                                .iter()
-                                .any(|account| account.id == params.account_id)
-                            {
-                                Err(("unknown_account", "未找到配置的账号".into()))
-                            } else if bindings.len() >= 1024 || params.pane_id.len() > 256 {
-                                Err(("invalid_binding", "账号绑定超出限制".into()))
-                            } else {
-                                bindings.insert(params.pane_id.clone(), params.account_id.clone());
-                                saved.bindings.clone_from(&bindings);
-                                persistence::store(&saved);
-                                Ok(ResponseResult::AccountBinding {
-                                    pane_id: params.pane_id,
-                                    account_id: params.account_id,
-                                })
+                        Method::AccountBindingSet(params) => apply::bind_pane(
+                            &params.pane_id,
+                            &params.account_id,
+                            &accounts,
+                            &mut bindings,
+                            &mut rejections,
+                        )
+                        .map(|()| {
+                            saved.bindings.clone_from(&bindings);
+                            persistence::store(&saved);
+                            ResponseResult::AccountBinding {
+                                pane_id: params.pane_id,
+                                account_id: params.account_id,
                             }
-                        }
+                        }),
                         Method::AccountUsageSubscribe(params) => {
                             subscribers.retain(|_, (_, _, reply)| reply.alive());
                             if subscribers.len() >= 256 {
@@ -332,127 +343,70 @@ impl Service {
                                 Err(("unknown_account", "未找到配置的账号".into()))
                             }
                         }
-                        Method::AccountUsageReport(mut params) => {
-                            if params.account_id.is_empty() {
-                                params.account_id = params
-                                    .pane_id
-                                    .as_ref()
-                                    .and_then(|pane| bindings.get(pane))
-                                    .cloned()
-                                    .unwrap_or_default();
-                            }
-                            if let Some(payload) = params.official_payload.take() {
-                                let agent = params.agent.as_deref().and_then(registry::provider);
-                                if agent.is_none()
-                                    || !accounts.iter().any(|account| {
-                                        account.id == params.account_id
-                                            && agent
-                                                .is_some_and(|agent| account.agent == agent.agent)
-                                    })
-                                {
-                                    reply.response(
-                                        &id,
-                                        Err((
-                                            "usage_binding_required",
-                                            "请先在账号用量页面为此窗格绑定对应厂商账号".into(),
-                                        )),
-                                    );
-                                    continue;
-                                }
-                                params.snapshot.metrics = match agent.map(|provider| provider.agent)
-                                {
-                                    Some("claude") => parse::claude(&payload),
-                                    Some("antigravity") => parse::antigravity(&payload),
-                                    Some("kimi") => parse::kimi(&payload),
-                                    Some("codex") => parse::codex(&payload),
-                                    Some(
-                                        "pi" | "qwen" | "maki" | "mastracode" | "opencode" | "omp",
-                                    ) => parse::structured(&payload, "session"),
-                                    _ => Vec::new(),
-                                };
-                                params.snapshot.message = None;
-                                if agent.is_some_and(|provider| provider.agent == "antigravity") {
-                                    params.snapshot.account_identity = payload
-                                        .get("email")
-                                        .and_then(serde_json::Value::as_str)
-                                        .filter(|id| {
-                                            !id.is_empty()
-                                                && id.len() <= 256
-                                                && !id.chars().any(char::is_control)
-                                        })
-                                        .map(|id| id.to_ascii_lowercase());
-                                    params.snapshot.plan = payload
-                                        .get("plan_tier")
-                                        .and_then(serde_json::Value::as_str)
-                                        .map(str::to_owned);
-                                }
-                            }
-                            if !cache.contains_key(&params.account_id)
-                                || !parse::validate(&params.snapshot.metrics)
-                                || params.pane_id.as_ref().is_some_and(|pane| {
-                                    bindings.get(pane) != Some(&params.account_id)
-                                })
-                            {
-                                Err(("invalid_usage_report", "账号用量报告无效".into()))
-                            } else {
-                                let mut snapshot = params.snapshot;
-                                snapshot.account_id = params.account_id.clone();
-                                snapshot.observed_at_ms = super::now_ms();
-                                if let Some(account) =
-                                    accounts.iter().find(|a| a.id == params.account_id)
-                                {
-                                    snapshot.agent = account.agent.clone();
-                                    snapshot.provider = account.provider.clone();
-                                    snapshot.auth_mode = account.auth_mode.clone();
-                                    snapshot.account_label = account.label.clone();
-                                    snapshot.source_url = registry::provider(&account.agent)
-                                        .map(|p| p.source)
-                                        .unwrap_or_default()
-                                        .into();
-                                }
-                                snapshot.source = "官方 CLI 回调".into();
-                                snapshot.status = if snapshot.metrics.is_empty() {
-                                    ObservationStatus::Unavailable
-                                } else {
-                                    ObservationStatus::Ready
-                                };
-                                if snapshot.account_identity.is_none() {
-                                    snapshot.account_identity = cache
-                                        .get(&params.account_id)
-                                        .and_then(|entry| entry.snapshot.account_identity.clone());
-                                }
-                                if let Some(entry) = cache.get_mut(&params.account_id) {
-                                    invalidate_changed_identity(
-                                        &entry.snapshot,
-                                        &mut snapshot,
-                                        &mut bindings,
-                                    );
-                                    if let Some(identity) = &snapshot.account_identity {
-                                        saved
-                                            .identities
-                                            .insert(params.account_id.clone(), identity.clone());
+                        Method::AccountUsageReport(params) => {
+                            match apply::apply_report(
+                                params,
+                                apply::Context {
+                                    accounts: &accounts,
+                                    enabled: config.enabled,
+                                    now_ms: super::now_ms(),
+                                },
+                                &mut bindings,
+                                &mut cache,
+                                &mut rejections,
+                                &mut next_query,
+                            ) {
+                                Ok(accepted) => {
+                                    if let Some(pane) = &accepted.auto_bound_pane {
+                                        tracing::info!(
+                                            event = "account.report.auto_bind",
+                                            subsystem = "account_usage",
+                                            outcome = "ok",
+                                            pane_id = %pane,
+                                            account_id = %accepted.account_id,
+                                            "未绑定窗格按唯一账号自动绑定"
+                                        );
                                     }
-                                    saved.bindings.clone_from(&bindings);
-                                    persistence::store(&saved);
-                                    entry.generation = next_query;
-                                    next_query = next_query.saturating_add(1);
-                                    entry.in_flight = false;
-                                    entry.callback = true;
-                                    entry.failures = 0;
-                                    entry.snapshot = snapshot;
-                                    subscribers.retain(|_, (_, params, reply)| {
-                                        reply.alive()
-                                            && (!matches_account(
-                                                params,
-                                                &entry.snapshot,
-                                                &bindings,
-                                            ) || reply.event(
-                                                "account.usage.updated",
-                                                serde_json::json!({"accounts":[&entry.snapshot]}),
-                                            ))
-                                    });
+                                    if commit_accepted(
+                                        &accepted,
+                                        &cache,
+                                        &bindings,
+                                        &mut saved,
+                                        &mut subscribers,
+                                    ) {
+                                        persistence::store(&saved);
+                                    }
+                                    Ok(ResponseResult::Ok {})
                                 }
-                                Ok(ResponseResult::Ok {})
+                                Err(rejected) => {
+                                    // 只记错误码与定位字段（pane 截断、agent 规范化），不落
+                                    // message 与原始报文；同一 (pane, agent, code) 的重复拒绝
+                                    // 降级为 debug。
+                                    if rejected.repeated {
+                                        tracing::debug!(
+                                            event = "account.report.reject",
+                                            subsystem = "account_usage",
+                                            outcome = "error",
+                                            error_code = rejected.code,
+                                            pane_id = %rejected.pane_id,
+                                            agent = %rejected.agent,
+                                            repeated = true,
+                                            "官方回调被拒绝"
+                                        );
+                                    } else {
+                                        tracing::info!(
+                                            event = "account.report.reject",
+                                            subsystem = "account_usage",
+                                            outcome = "error",
+                                            error_code = rejected.code,
+                                            pane_id = %rejected.pane_id,
+                                            agent = %rejected.agent,
+                                            repeated = false,
+                                            "官方回调被拒绝"
+                                        );
+                                    }
+                                    Err((rejected.code, rejected.message))
+                                }
                             }
                         }
                         _ => Err(("unsupported_method", "不支持的账号请求".into())),
@@ -483,6 +437,45 @@ impl Service {
     pub fn release(&self, client_id: u64) {
         let _ = self.commands.try_send(Command::Release(client_id));
     }
+}
+
+/// 报告被接受后的调用方职责：记住公开身份、同步绑定快照并推送给匹配的订阅者。
+/// 返回是否有内容需要持久化（缓存里找不到该账号时为 false）。
+fn commit_accepted(
+    accepted: &apply::Accepted,
+    cache: &HashMap<String, CacheEntry>,
+    bindings: &HashMap<String, String>,
+    saved: &mut persistence::Saved,
+    subscribers: &mut HashMap<String, (Option<u64>, UsageParams, Reply)>,
+) -> bool {
+    let Some(entry) = cache.get(&accepted.account_id) else {
+        return false;
+    };
+    if let Some(identity) = &entry.snapshot.account_identity {
+        saved
+            .identities
+            .insert(accepted.account_id.clone(), identity.clone());
+    }
+    saved.bindings.clone_from(bindings);
+    tracing::debug!(
+        event = "account.report.accept",
+        subsystem = "account_usage",
+        outcome = "ok",
+        account_id = %accepted.account_id,
+        status = ?entry.snapshot.status,
+        metrics = entry.snapshot.metrics.len(),
+        "官方回调已写入账号用量"
+    );
+    let value = &entry.snapshot;
+    subscribers.retain(|_, (_, params, reply)| {
+        reply.alive()
+            && (!matches_account(params, value, bindings)
+                || reply.event(
+                    "account.usage.updated",
+                    serde_json::json!({"accounts":[value]}),
+                ))
+    });
+    true
 }
 
 fn configured_accounts(config: &AccountUsageConfig) -> Vec<UsageAccountConfig> {
@@ -584,6 +577,7 @@ fn request_accounts(
     next_query: &mut u64,
 ) {
     if !config.enabled {
+        probe_skipped(None, "disabled", manual);
         return;
     }
     // 总览（未选定厂商/账号）也发起自动查询：账号清单已只含本机已安装厂商，
@@ -595,19 +589,25 @@ fn request_accounts(
             .as_ref()
             .is_some_and(|pane| bindings.contains_key(pane))
     {
+        probe_skipped(None, "unbound_pane", manual);
         return;
     }
     for account in accounts {
         let Some(entry) = cache.get_mut(&account.id) else {
             continue;
         };
-        if !matches_account(params, &entry.snapshot, bindings) || entry.in_flight {
+        if !matches_account(params, &entry.snapshot, bindings) {
+            continue;
+        }
+        if entry.in_flight {
+            probe_skipped(Some(&account.id), "in_flight", manual);
             continue;
         }
         if entry
             .retry_after
             .is_some_and(|until| Instant::now() < until)
         {
+            probe_skipped(Some(&account.id), "retry_after", manual);
             continue;
         }
         if entry.callback {
@@ -615,6 +615,7 @@ fn request_accounts(
                 entry.snapshot.status = ObservationStatus::Stale;
                 entry.snapshot.message = Some("等待官方 CLI 下一次回调".into());
             }
+            probe_skipped(Some(&account.id), "callback", manual);
             continue;
         }
         if config
@@ -624,6 +625,7 @@ fn request_accounts(
         {
             entry.snapshot.status = ObservationStatus::Unavailable;
             entry.snapshot.message = Some("已在设置中关闭此厂商".into());
+            probe_skipped(Some(&account.id), "disabled_provider", manual);
             continue;
         }
         let seconds = if account.auth_mode == "api" || account.credential_env.is_some() {
@@ -637,6 +639,7 @@ fn request_accounts(
         if entry.requested_at.is_some_and(|at| {
             at.elapsed() < Duration::from_secs(if manual { seconds } else { backoff })
         }) {
+            probe_skipped(Some(&account.id), "interval", manual);
             continue;
         }
         if !manual
@@ -647,16 +650,18 @@ fn request_accounts(
                     | ObservationStatus::Unsupported
             )
         {
+            probe_skipped(Some(&account.id), "terminal_status", manual);
             continue;
         }
+        // generation 只在任务真正入队后消耗，队列满时缓存条目与计数都保持不变。
         let generation = *next_query;
-        *next_query = next_query.saturating_add(1);
         let task = Task {
             generation,
             account: account.clone(),
             timeout: Duration::from_secs(config.probe_timeout_seconds.clamp(5, 30)),
         };
         if tasks.try_send(task).is_ok() {
+            *next_query = next_query.saturating_add(1);
             entry.generation = generation;
             entry.in_flight = true;
             entry.requested_at = Some(Instant::now());
@@ -666,7 +671,41 @@ fn request_accounts(
                 ObservationStatus::Stale
             };
             entry.snapshot.message = Some("正在读取官方用量".into());
+            tracing::debug!(
+                event = "account.probe.dispatch",
+                subsystem = "account_usage",
+                outcome = "started",
+                account_id = %account.id,
+                agent = %account.agent,
+                generation,
+                manual,
+                "派发账号用量探测"
+            );
+        } else {
+            probe_skipped(Some(&account.id), "queue_full", manual);
         }
+    }
+}
+
+/// 闸门跳过只记 trace：订阅者驱动的空转 tick 每 100 ms 走一遍这些分支。
+/// 全局闸门（disabled / unbound_pane）不针对具体账号，不带 `account_id` 字段。
+fn probe_skipped(account_id: Option<&str>, gate: &'static str, manual: bool) {
+    let event = "account.probe.skip";
+    let subsystem = "account_usage";
+    let outcome = "skipped";
+    let message = "账号用量探测被闸门跳过";
+    if let Some(account_id) = account_id {
+        tracing::trace!(
+            event,
+            subsystem,
+            outcome,
+            account_id,
+            gate,
+            manual,
+            "{message}"
+        );
+    } else {
+        tracing::trace!(event, subsystem, outcome, gate, manual, "{message}");
     }
 }
 
@@ -997,5 +1036,409 @@ mod tests {
         );
         assert!(input.try_recv().is_err());
         assert_eq!(cache[&account.id].snapshot.metrics[0].used, Some(12.0));
+    }
+
+    /// `request_accounts` 一道闸门的表驱动用例：只描述输入差异与期望结局。
+    struct Gate {
+        name: &'static str,
+        manual: bool,
+        params: UsageParams,
+        bindings: Vec<(&'static str, &'static str)>,
+        enabled: bool,
+        disabled_providers: Vec<&'static str>,
+        prepare: fn(&mut CacheEntry),
+        /// 预先塞满任务通道，模拟 `queue_full` 闸门。
+        queue_full: bool,
+        enqueued: bool,
+        status: Option<ObservationStatus>,
+        message: Option<&'static str>,
+    }
+
+    fn gate(name: &'static str) -> Gate {
+        Gate {
+            name,
+            manual: false,
+            params: UsageParams {
+                account_id: Some("claude:default".into()),
+                ..Default::default()
+            },
+            bindings: Vec::new(),
+            enabled: true,
+            disabled_providers: Vec::new(),
+            prepare: |_| {},
+            queue_full: false,
+            enqueued: true,
+            status: Some(ObservationStatus::Warming),
+            message: Some("正在读取官方用量"),
+        }
+    }
+
+    fn fresh_entry(account: &UsageAccountConfig) -> CacheEntry {
+        CacheEntry {
+            snapshot: empty_snapshot(account),
+            requested_at: None,
+            in_flight: false,
+            generation: 0,
+            failures: 0,
+            callback: false,
+            retry_after: None,
+        }
+    }
+
+    #[test]
+    fn request_accounts_gates_are_each_covered_by_a_contrasting_case() {
+        let account = UsageAccountConfig {
+            id: "claude:default".into(),
+            label: "Claude Code".into(),
+            agent: "claude".into(),
+            provider: "claude".into(),
+            auth_mode: "cli".into(),
+            ..Default::default()
+        };
+        let cases = vec![
+            gate("合法输入被接受"),
+            Gate {
+                enabled: false,
+                enqueued: false,
+                message: Some("尚未查询"),
+                ..gate("account_usage.enabled=false 时一个探测都不发")
+            },
+            Gate {
+                params: UsageParams {
+                    pane_id: Some("pane-1".into()),
+                    ..Default::default()
+                },
+                enqueued: false,
+                message: Some("尚未查询"),
+                ..gate("未绑定 pane 且未指定账号时早退")
+            },
+            Gate {
+                params: UsageParams {
+                    pane_id: Some("pane-1".into()),
+                    ..Default::default()
+                },
+                bindings: vec![("pane-1", "claude:default")],
+                ..gate("对照：已绑定 pane 正常派发")
+            },
+            Gate {
+                params: UsageParams {
+                    agent: Some("kimi".into()),
+                    ..Default::default()
+                },
+                enqueued: false,
+                message: Some("尚未查询"),
+                ..gate("厂商不匹配的账号被过滤")
+            },
+            Gate {
+                prepare: |entry| entry.in_flight = true,
+                enqueued: false,
+                message: Some("尚未查询"),
+                ..gate("进行中的探测不重复派发")
+            },
+            Gate {
+                prepare: |entry| entry.retry_after = Some(Instant::now() + Duration::from_secs(60)),
+                enqueued: false,
+                message: Some("尚未查询"),
+                ..gate("retry_after 未到不派发")
+            },
+            Gate {
+                manual: true,
+                prepare: |entry| entry.retry_after = Some(Instant::now() + Duration::from_secs(60)),
+                enqueued: false,
+                message: Some("尚未查询"),
+                ..gate("retry_after 未到即使手动也不派发")
+            },
+            Gate {
+                prepare: |entry| {
+                    entry.callback = true;
+                    entry.snapshot.status = ObservationStatus::Ready;
+                    entry.snapshot.message = None;
+                    entry.snapshot.observed_at_ms = super::super::now_ms();
+                },
+                enqueued: false,
+                status: Some(ObservationStatus::Ready),
+                message: None,
+                ..gate("新鲜回调不回落探测")
+            },
+            Gate {
+                prepare: |entry| {
+                    entry.callback = true;
+                    entry.snapshot.status = ObservationStatus::Ready;
+                    entry.snapshot.observed_at_ms = super::super::now_ms().saturating_sub(400_000);
+                },
+                enqueued: false,
+                status: Some(ObservationStatus::Stale),
+                message: Some("等待官方 CLI 下一次回调"),
+                ..gate("过期回调改标 Stale 但仍不探测")
+            },
+            Gate {
+                manual: true,
+                prepare: |entry| {
+                    entry.callback = true;
+                    entry.snapshot.status = ObservationStatus::Ready;
+                    entry.snapshot.message = None;
+                    entry.snapshot.observed_at_ms = super::super::now_ms();
+                },
+                enqueued: false,
+                status: Some(ObservationStatus::Ready),
+                message: None,
+                ..gate("对照：回调闩锁连手动刷新也拦")
+            },
+            Gate {
+                queue_full: true,
+                enqueued: false,
+                message: Some("尚未查询"),
+                ..gate("任务队列满时不派发、不消耗 generation、不置 in_flight")
+            },
+            Gate {
+                disabled_providers: vec!["claude"],
+                enqueued: false,
+                status: Some(ObservationStatus::Unavailable),
+                message: Some("已在设置中关闭此厂商"),
+                ..gate("设置里关闭的厂商不派发")
+            },
+            Gate {
+                prepare: |entry| entry.requested_at = Some(Instant::now()),
+                enqueued: false,
+                message: Some("尚未查询"),
+                ..gate("requested_at 刚刷新过时不派发")
+            },
+            Gate {
+                manual: true,
+                prepare: |entry| entry.requested_at = Some(Instant::now()),
+                enqueued: false,
+                message: Some("尚未查询"),
+                ..gate("手动刷新也遵守最短间隔")
+            },
+            Gate {
+                prepare: |entry| entry.snapshot.status = ObservationStatus::NotAuthenticated,
+                enqueued: false,
+                status: Some(ObservationStatus::NotAuthenticated),
+                message: Some("尚未查询"),
+                ..gate("NotAuthenticated 终态非手动永不入队")
+            },
+            Gate {
+                prepare: |entry| entry.snapshot.status = ObservationStatus::PermissionDenied,
+                enqueued: false,
+                status: Some(ObservationStatus::PermissionDenied),
+                message: Some("尚未查询"),
+                ..gate("PermissionDenied 终态非手动永不入队")
+            },
+            Gate {
+                prepare: |entry| entry.snapshot.status = ObservationStatus::Unsupported,
+                enqueued: false,
+                status: Some(ObservationStatus::Unsupported),
+                message: Some("尚未查询"),
+                ..gate("Unsupported 终态非手动永不入队")
+            },
+            Gate {
+                manual: true,
+                prepare: |entry| entry.snapshot.status = ObservationStatus::NotAuthenticated,
+                ..gate("对照：手动刷新穿透终态")
+            },
+            Gate {
+                prepare: |entry| {
+                    entry.snapshot.metrics = vec![UsageMetric {
+                        used: Some(1.0),
+                        ..Default::default()
+                    }];
+                },
+                status: Some(ObservationStatus::Stale),
+                ..gate("已有样本时派发中标 Stale 而非 Warming")
+            },
+        ];
+        for case in cases {
+            let accounts = vec![account.clone()];
+            let config = AccountUsageConfig {
+                enabled: case.enabled,
+                disabled_providers: case
+                    .disabled_providers
+                    .iter()
+                    .map(|agent| agent.to_string())
+                    .collect(),
+                ..Default::default()
+            };
+            let bindings = case
+                .bindings
+                .iter()
+                .map(|(pane, id)| (pane.to_string(), id.to_string()))
+                .collect::<HashMap<_, _>>();
+            let mut entry = fresh_entry(&account);
+            (case.prepare)(&mut entry);
+            let mut cache = HashMap::from([(account.id.clone(), entry)]);
+            let (tasks, input) = mpsc::sync_channel(1);
+            if case.queue_full {
+                let placeholder = Task {
+                    generation: 0,
+                    account: account.clone(),
+                    timeout: Duration::from_secs(5),
+                };
+                assert!(tasks.try_send(placeholder).is_ok(), "{}: 预填", case.name);
+            }
+            let mut next_query = 5;
+            request_accounts(
+                &case.params,
+                case.manual,
+                &accounts,
+                &config,
+                &bindings,
+                &mut cache,
+                &tasks,
+                &mut next_query,
+            );
+            let entry = &cache[&account.id];
+            if case.queue_full {
+                let placeholder = input.try_recv().ok();
+                assert_eq!(
+                    placeholder.map(|task| task.generation),
+                    Some(0),
+                    "{}: 先取出预填任务",
+                    case.name
+                );
+                assert!(!entry.in_flight, "{}: 队列满不置 in_flight", case.name);
+                assert!(
+                    entry.requested_at.is_none(),
+                    "{}: 队列满不记 requested_at",
+                    case.name
+                );
+            }
+            let task = input.try_recv().ok();
+            assert_eq!(task.is_some(), case.enqueued, "{}: 入队", case.name);
+            if case.enqueued {
+                let task = task.unwrap_or_else(|| panic!("{}: 缺少任务", case.name));
+                assert_eq!(task.generation, 5, "{}: generation", case.name);
+                assert_eq!(task.account.id, account.id, "{}: 账号", case.name);
+                assert_eq!(next_query, 6, "{}: next_query", case.name);
+                assert!(entry.in_flight, "{}: in_flight", case.name);
+                assert!(entry.requested_at.is_some(), "{}: requested_at", case.name);
+                assert_eq!(entry.generation, 5, "{}: 缓存 generation", case.name);
+            } else {
+                assert_eq!(next_query, 5, "{}: next_query 不变", case.name);
+                assert_eq!(entry.generation, 0, "{}: 未入队不改 generation", case.name);
+            }
+            if let Some(status) = case.status {
+                assert_eq!(entry.snapshot.status, status, "{}: status", case.name);
+            }
+            assert_eq!(
+                entry.snapshot.message.as_deref(),
+                case.message,
+                "{}: message",
+                case.name
+            );
+        }
+    }
+
+    #[test]
+    fn accepted_reports_are_committed_to_saved_state_and_pushed_to_subscribers() {
+        let account = UsageAccountConfig {
+            id: "claude:default".into(),
+            label: "Claude Code".into(),
+            agent: "claude".into(),
+            provider: "claude".into(),
+            auth_mode: "cli".into(),
+            ..Default::default()
+        };
+        let accounts = vec![account.clone()];
+        let mut entry = fresh_entry(&account);
+        entry.snapshot.account_identity = Some("me@example.test".into());
+        let mut cache = HashMap::from([(account.id.clone(), entry)]);
+        let mut bindings = HashMap::new();
+        let mut rejections = apply::Rejections::default();
+        let mut next_query = 1;
+        let accepted = apply::apply_report(
+            UsageReportParams {
+                account_id: String::new(),
+                pane_id: Some("wT:p9".into()),
+                agent: Some("claude".into()),
+                official_payload: Some(
+                    serde_json::json!({"rate_limits": {"five_hour": {"used_percentage": 42}}}),
+                ),
+                snapshot: Default::default(),
+            },
+            apply::Context {
+                accounts: &accounts,
+                enabled: true,
+                now_ms: super::super::now_ms(),
+            },
+            &mut bindings,
+            &mut cache,
+            &mut rejections,
+            &mut next_query,
+        )
+        .unwrap_or_else(|rejected| panic!("被拒: {}", rejected.code));
+        assert_eq!(accepted.auto_bound_pane.as_deref(), Some("wT:p9"));
+
+        let (bound_sender, bound_receiver) = mpsc::channel();
+        let (other_sender, other_receiver) = mpsc::channel();
+        let mut subscribers = HashMap::from([
+            (
+                "usage-1".to_string(),
+                (
+                    None,
+                    UsageParams {
+                        pane_id: Some("wT:p9".into()),
+                        ..Default::default()
+                    },
+                    Reply::Api {
+                        sender: bound_sender,
+                        active: None,
+                        latest: None,
+                    },
+                ),
+            ),
+            (
+                "usage-2".to_string(),
+                (
+                    None,
+                    UsageParams {
+                        agent: Some("kimi".into()),
+                        ..Default::default()
+                    },
+                    Reply::Api {
+                        sender: other_sender,
+                        active: None,
+                        latest: None,
+                    },
+                ),
+            ),
+        ]);
+        let mut saved = persistence::Saved::default();
+        assert!(commit_accepted(
+            &accepted,
+            &cache,
+            &bindings,
+            &mut saved,
+            &mut subscribers
+        ));
+        // 自动写入的绑定与公开身份进入待持久化状态。
+        assert_eq!(
+            saved.bindings.get("wT:p9").map(String::as_str),
+            Some("claude:default")
+        );
+        assert_eq!(
+            saved.identities.get("claude:default").map(String::as_str),
+            Some("me@example.test")
+        );
+        // 只有匹配该 pane 的订阅者收到事件，订阅本身都保留。
+        let text = bound_receiver.try_recv().unwrap_or_default();
+        let event: serde_json::Value = serde_json::from_str(&text).unwrap_or_default();
+        assert_eq!(event["event"], "account.usage.updated");
+        assert_eq!(event["data"]["accounts"][0]["account_id"], "claude:default");
+        assert_eq!(event["data"]["accounts"][0]["status"], "ready");
+        assert!(other_receiver.try_recv().is_err(), "不匹配的订阅者不收事件");
+        assert_eq!(subscribers.len(), 2);
+
+        // 缓存里没有该账号时不落盘。
+        let missing = apply::Accepted {
+            account_id: "nope".into(),
+            auto_bound_pane: None,
+        };
+        assert!(!commit_accepted(
+            &missing,
+            &cache,
+            &bindings,
+            &mut saved,
+            &mut subscribers
+        ));
     }
 }

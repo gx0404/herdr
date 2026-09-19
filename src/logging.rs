@@ -86,17 +86,31 @@ pub(crate) fn api_request_started(request_id: &str, method: &'static str, change
     }
 }
 
+/// 记录一次 API 请求的结局；`error_code` 只带错误码，不记 message 或原始报文。
 pub(crate) fn api_request_completed(
     request_id: &str,
     method: &'static str,
     outcome: &'static str,
+    error_code: Option<&str>,
     changes_ui: bool,
 ) {
     let event = "api.request.complete";
     let subsystem = "api";
     let message = "api request completed";
     if outcome != "ok" || (changes_ui && !is_routine_api_method(method)) {
-        tracing::info!(event, subsystem, outcome, request_id, method, "{message}");
+        if let Some(error_code) = error_code {
+            tracing::info!(
+                event,
+                subsystem,
+                outcome,
+                error_code,
+                request_id,
+                method,
+                "{message}"
+            );
+        } else {
+            tracing::info!(event, subsystem, outcome, request_id, method, "{message}");
+        }
     } else {
         tracing::debug!(event, subsystem, outcome, request_id, method, "{message}");
     }

@@ -223,6 +223,7 @@ fn handle_connection_with_stop(
                     &request_id,
                     method,
                     "stream_closed",
+                    None,
                     changes_ui,
                 ),
                 Err(err) => {
@@ -245,6 +246,7 @@ fn handle_connection_with_stop(
                     &request_id,
                     method,
                     "stream_closed",
+                    None,
                     changes_ui,
                 ),
                 Err(err) => {
@@ -306,12 +308,16 @@ fn handle_connection_with_stop(
             let result = write_text_line_allow_disconnect(&mut stream, &response);
             let _ = response_write_tx.send(());
             match &result {
-                Ok(()) => crate::logging::api_request_completed(
-                    &request_id,
-                    method,
-                    api_response_outcome(&response),
-                    changes_ui,
-                ),
+                Ok(()) => {
+                    let outcome = api_response_details(&response);
+                    crate::logging::api_request_completed(
+                        &request_id,
+                        method,
+                        outcome.outcome,
+                        outcome.error_code.as_deref(),
+                        changes_ui,
+                    )
+                }
                 Err(err) => {
                     crate::logging::api_request_failed(&request_id, method, &err.to_string())
                 }
@@ -333,18 +339,23 @@ fn finish_wait_response(
             request_id,
             method,
             "client_disconnected",
+            None,
             changes_ui,
         );
         return Ok(());
     };
     let result = write_text_line_allow_disconnect(stream, &response);
     match &result {
-        Ok(()) => crate::logging::api_request_completed(
-            request_id,
-            method,
-            api_response_outcome(&response),
-            changes_ui,
-        ),
+        Ok(()) => {
+            let outcome = api_response_details(&response);
+            crate::logging::api_request_completed(
+                request_id,
+                method,
+                outcome.outcome,
+                outcome.error_code.as_deref(),
+                changes_ui,
+            )
+        }
         Err(err) => crate::logging::api_request_failed(request_id, method, &err.to_string()),
     }
     result
@@ -533,20 +544,38 @@ pub(crate) fn api_method_name(method: &Method) -> &'static str {
     }
 }
 
-fn api_response_outcome(response: &str) -> &'static str {
+/// 响应文本的日志结局：`outcome` 是固定枚举，`error_code` 只在错误响应时出现。
+struct ApiResponseOutcome {
+    outcome: &'static str,
+    error_code: Option<String>,
+}
+
+fn api_response_details(response: &str) -> ApiResponseOutcome {
     let Ok(value) = serde_json::from_str::<serde_json::Value>(response) else {
-        return "error";
+        return ApiResponseOutcome {
+            outcome: "error",
+            error_code: None,
+        };
     };
 
-    match value
+    let code = value
         .get("error")
         .and_then(|error| error.get("code"))
         .and_then(|code| code.as_str())
-    {
-        Some("timeout") => "timeout",
-        Some(_) => "error",
-        None => "ok",
+        // 错误码是短标识；截断只防御畸形响应，正常响应不会触及。
+        .map(|code| code.chars().take(64).collect::<String>());
+    ApiResponseOutcome {
+        outcome: match code.as_deref() {
+            Some("timeout") => "timeout",
+            Some(_) => "error",
+            None => "ok",
+        },
+        error_code: code,
     }
+}
+
+fn api_response_outcome(response: &str) -> &'static str {
+    api_response_details(response).outcome
 }
 
 fn read_initial_request_line(stream: &mut LocalStream) -> std::io::Result<Option<String>> {
@@ -1220,14 +1249,40 @@ mod tests {
     #[test]
     fn api_response_outcome_uses_top_level_error_shape() {
         let ok_with_error_text = r#"{"id":"req","result":{"read":{"text":"user said \"error\": \"timeout\"","revision":1}}}"#;
-        assert_eq!(api_response_outcome(ok_with_error_text), "ok");
+        let outcome = api_response_details(ok_with_error_text);
+        assert_eq!(outcome.outcome, "ok");
+        assert_eq!(outcome.error_code, None);
 
         let timeout = r#"{"id":"req","error":{"code":"timeout","message":"timed out waiting for output match"}}"#;
-        assert_eq!(api_response_outcome(timeout), "timeout");
+        let outcome = api_response_details(timeout);
+        assert_eq!(outcome.outcome, "timeout");
+        assert_eq!(outcome.error_code.as_deref(), Some("timeout"));
 
         let generic_error =
             r#"{"id":"req","error":{"code":"server_unavailable","message":"boom"}}"#;
+        let outcome = api_response_details(generic_error);
+        assert_eq!(outcome.outcome, "error");
+        assert_eq!(outcome.error_code.as_deref(), Some("server_unavailable"));
+
+        let unparsable = "not json";
+        let outcome = api_response_details(unparsable);
+        assert_eq!(outcome.outcome, "error");
+        assert_eq!(outcome.error_code, None);
+
+        assert_eq!(api_response_outcome(ok_with_error_text), "ok");
+        assert_eq!(api_response_outcome(timeout), "timeout");
         assert_eq!(api_response_outcome(generic_error), "error");
+    }
+
+    #[test]
+    fn api_response_outcome_keeps_the_error_code_but_never_the_message() {
+        let rejected = r#"{"id":"usage-report","error":{"code":"usage_binding_required","message":"请先在账号用量页面为此窗格绑定对应厂商账号"}}"#;
+        let outcome = api_response_details(rejected);
+        assert_eq!(outcome.outcome, "error");
+        assert_eq!(
+            outcome.error_code.as_deref(),
+            Some("usage_binding_required")
+        );
     }
 
     #[test]

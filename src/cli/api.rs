@@ -44,7 +44,7 @@ fn usage_report(args: &[String]) -> std::io::Result<i32> {
                 index += 1;
             }
             "--help" | "-h" => {
-                println!("herdr api usage-report --agent <AGENT> [--account <ID>] [--passthrough]\n从 stdin 接收官方用量 JSON。默认通过 HERDR_PANE_ID 选择已绑定账号；不会保存原始报文。");
+                println!("herdr api usage-report --agent <AGENT> [--account <ID>] [--passthrough]\n从 stdin 接收官方用量 JSON。默认通过 HERDR_PANE_ID 选择已绑定账号；未绑定时仅在该厂商只有一个账号时自动绑定；不会保存原始报文。");
                 return Ok(0);
             }
             _ => return Ok(2),

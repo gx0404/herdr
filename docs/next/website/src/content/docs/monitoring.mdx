@@ -55,7 +55,7 @@ cooldown_seconds = 60
 
 ## Account binding
 
-Hover an agent row or CLI title to inspect usage. Choose dashboard/table and hover/page/both in settings. Select and explicitly bind the account to the pane. A shared vendor name does not identify an account.
+Hover an agent row or CLI title to inspect usage. Choose dashboard/table and hover/page/both in settings. Select and bind the account to the pane. A shared vendor name does not identify an account by itself: when an official callback arrives from an unbound pane and that vendor has exactly one configured account, the server binds the pane to it, persists the binding and marks the snapshot as auto-bound; with several accounts for the vendor the callback is rejected with the candidate list and the pane must be bound explicitly. Auto-binding requires `account_usage.enabled` and a callback that carries quota fields.
 
 The agents panel's usage button and command search also open a floating usage dashboard: the cross-account overview in a movable, resizable window. Drag its borders like other pages; `Esc` closes it, and it refreshes automatically while open.
 
@@ -101,7 +101,7 @@ Use `organization` and `account_user` for the exact identity required by the sel
 
 Claude and Antigravity account panels can enable/remove the official statusline callback. An existing renderer is retained at the end of a passthrough pipeline. Claude's quota fields require a supporting CLI version and normally appear after the first ordinary API response. Herdr never sends a model prompt to obtain usage.
 
-Other integrations can send supported official JSON to stdin of `herdr api usage-report --agent <agent>`. The command uses the binding for `HERDR_PANE_ID`, or explicit `--account <id>`. Bind first. Raw reports and conversation contents are not persisted. `--passthrough` preserves input for an existing statusline renderer.
+Other integrations can send supported official JSON to stdin of `herdr api usage-report --agent <agent>`. The command uses the binding for `HERDR_PANE_ID`, or explicit `--account <id>`. An unbound pane is bound automatically only when the vendor has a single configured account; otherwise bind first. Raw reports and conversation contents are not persisted. `--passthrough` preserves input for an existing statusline renderer.
 
 ## Provider capabilities
 
