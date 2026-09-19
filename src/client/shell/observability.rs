@@ -1254,7 +1254,7 @@ impl ClientShellState {
                 self.observability.providers = providers;
                 self.auto_select_usage_provider();
             }
-            Ok(ResponseResult::AccountUsage { accounts }) => {
+            Ok(ResponseResult::AccountUsage { accounts, .. }) => {
                 // 响应只写自己的作用域，且不反写用户选择的厂商。
                 if matches!(purpose, Purpose::HoverUsage) {
                     self.observability.hover_scope.accounts = accounts;

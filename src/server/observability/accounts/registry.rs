@@ -1,8 +1,11 @@
 //! 官方来源清单。Agent 身份与实际计费 provider 分开处理。
 
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
+
+use crate::config::UsageAccountConfig;
 
 #[derive(Clone, Copy)]
 pub(super) enum Query {
@@ -64,10 +67,29 @@ pub(super) fn provider(agent: &str) -> Option<&'static Provider> {
     PROVIDERS.iter().find(|entry| entry.agent == canonical)
 }
 
-const AVAILABILITY_TTL: Duration = Duration::from_secs(30);
+/// PATH / 安装布局扫描结果的缓存时长；服务循环里依赖这些扫描的周期都与它对齐。
+pub(super) const AVAILABILITY_TTL: Duration = Duration::from_secs(30);
 
 fn availability_cache() -> &'static Mutex<HashMap<&'static str, (Instant, bool)>> {
     static CACHE: OnceLock<Mutex<HashMap<&'static str, (Instant, bool)>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// `command_path` 的按命令缓存：与 `availability_cache` 同源的 TTL，避免每次指纹计算都
+/// 完整遍历 PATH。
+type CommandPathCache = HashMap<String, (Instant, Option<PathBuf>)>;
+
+fn command_path_cache() -> &'static Mutex<CommandPathCache> {
+    static CACHE: OnceLock<Mutex<CommandPathCache>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// 大型可变状态文件里登录子树的摘要缓存：文件戳未变且未超过 TTL 就不重新解析
+/// （文件系统 mtime 是粗粒度的，同尺寸的连续改写可能戳相同，所以 TTL 兜底）。
+type LoginDigestCache = HashMap<PathBuf, (FileStamp, Instant, Option<String>)>;
+
+fn login_digest_cache() -> &'static Mutex<LoginDigestCache> {
+    static CACHE: OnceLock<Mutex<LoginDigestCache>> = OnceLock::new();
     CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
@@ -122,6 +144,180 @@ pub(super) fn provider_installed(provider: &Provider) -> bool {
     value
 }
 
+/// 一个文件的身份戳：路径 + 修改时间 + 大小。文件不存在时整体为 `None`，
+/// 这样「从无到有」（首次登录）同样算变化。
+pub(super) type FileStamp = (PathBuf, Option<SystemTime>, u64);
+
+/// 终态自愈的判据：官方 CLI 可执行文件（路径 + 版本指纹）、只承载登录态的凭据文件的
+/// 身份戳，以及大型可变状态文件里登录子树的内容摘要。任一变化都意味着
+/// 「未登录 / 不支持 / 无权限」的结论可能已过时；与登录无关的文件改动不得计入，否则指纹
+/// 抖动等价于无限重试。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(super) struct ProbeFingerprint {
+    pub cli: Option<FileStamp>,
+    pub credentials: Vec<Option<FileStamp>>,
+    /// 登录子树的摘要（如 claude `.claude.json` 的 `oauthAccount`）；文件或子树缺失为 `None`。
+    pub login_digest: Option<String>,
+}
+
+fn file_stamp(path: &Path) -> Option<FileStamp> {
+    let metadata = std::fs::metadata(path).ok()?;
+    Some((path.to_path_buf(), metadata.modified().ok(), metadata.len()))
+}
+
+/// PATH 上第一个可执行的 `command`；找不到时回退到布局解析（目前只有 codex）。
+/// 结果按 `AVAILABILITY_TTL` 缓存：指纹计算按周期对全部终态账号调用，不能每次都遍历 PATH。
+pub(super) fn command_path(command: &str) -> Option<PathBuf> {
+    let now = Instant::now();
+    if let Ok(cache) = command_path_cache().lock() {
+        if let Some((at, value)) = cache.get(command) {
+            if now.duration_since(*at) < AVAILABILITY_TTL {
+                return value.clone();
+            }
+        }
+    }
+    let value = command_path_uncached(command);
+    if let Ok(mut cache) = command_path_cache().lock() {
+        cache.insert(command.to_owned(), (now, value.clone()));
+    }
+    value
+}
+
+fn command_path_uncached(command: &str) -> Option<PathBuf> {
+    let from_path = std::env::var_os("PATH").and_then(|paths| {
+        std::env::split_paths(&paths).find_map(|dir| {
+            crate::integration::command_path_candidates(&dir, command)
+                .into_iter()
+                .find(|path| crate::integration::executable_file_exists(path))
+        })
+    });
+    from_path.or_else(|| {
+        if command == "codex" {
+            crate::integration::codex_layout_binary_path()
+        } else {
+            None
+        }
+    })
+}
+
+/// 各厂商登录状态落在哪些文件：只列本仓库已核实的路径，未知厂商只看 CLI 指纹。
+/// 目录推导全部走 `integration::env`（环境覆盖、`~` 展开与平台分支的唯一真源）；
+/// `profile_dir` 配置优先于环境变量与默认目录。
+fn credential_paths(provider: &Provider, account: &UsageAccountConfig) -> Vec<PathBuf> {
+    let profile = account.profile_dir.clone();
+    let dir = |fallback: std::io::Result<PathBuf>| profile.clone().or_else(|| fallback.ok());
+    let mut paths = Vec::new();
+    match provider.agent {
+        "claude" => {
+            // 只取 OAuth 凭据文件；`.claude.json` 是高频重写的通用状态文件，整文件戳不能
+            // 当登录判据，其登录子树走 `login_digest`。
+            if let Some(dir) = dir(crate::integration::claude_dir()) {
+                paths.push(dir.join(".credentials.json"));
+            }
+        }
+        "codex" => {
+            if let Some(dir) = dir(crate::integration::codex_dir()) {
+                paths.push(dir.join("auth.json"));
+            }
+        }
+        "kimi" => {
+            // TODO: `credentials` 文件名来自 Kimi Code CLI 的本地登录存储，尚未在多个版本上
+            // 核实；不存在时戳恒为 None，自愈退化为只看 CLI 指纹。
+            if let Some(dir) = dir(crate::integration::kimi_dir()) {
+                paths.push(dir.join("credentials"));
+            }
+        }
+        "gemini" => {
+            if let Some(dir) = dir(crate::integration::gemini_dir()) {
+                paths.push(dir.join("oauth_creds.json"));
+                paths.push(dir.join("google_accounts.json"));
+            }
+        }
+        "opencode" => {
+            if let Some(dir) = dir(crate::integration::opencode_data_dir()) {
+                paths.push(dir.join("auth.json"));
+            }
+        }
+        "grok" => {
+            if let Some(dir) = dir(crate::integration::grok_dir()) {
+                paths.push(dir.join("auth.json"));
+            }
+        }
+        _ => {}
+    }
+    paths
+}
+
+/// 承载登录子树的大型状态文件：`(路径, JSON 指针)`。目前只有 claude 的 `.claude.json`
+/// （`oauthAccount`：账号 uuid/邮箱/组织），`profile_dir` 即 `CLAUDE_CONFIG_DIR` 时文件在其中。
+fn login_subtree(
+    provider: &Provider,
+    account: &UsageAccountConfig,
+) -> Option<(PathBuf, &'static str)> {
+    match provider.agent {
+        "claude" => {
+            let file = match &account.profile_dir {
+                Some(dir) => dir.join(".claude.json"),
+                None => crate::integration::claude_state_file().ok()?,
+            };
+            Some((file, "/oauthAccount"))
+        }
+        _ => None,
+    }
+}
+
+/// 状态文件过大时不解析（正常 `.claude.json` 在几百 KiB 量级）。
+const MAX_LOGIN_STATE_BYTES: u64 = 16 * 1024 * 1024;
+
+/// 读取登录子树并求摘要：文件戳未变时直接复用缓存，避免每个周期都解析整份 JSON。
+/// 文件不存在、过大、不是 JSON 或没有该子树 ⇒ `None`（登出后 `oauthAccount` 被移除也算变化）。
+fn login_digest(path: &Path, pointer: &str) -> Option<String> {
+    let stamp = file_stamp(path)?;
+    if stamp.2 > MAX_LOGIN_STATE_BYTES {
+        return None;
+    }
+    let now = Instant::now();
+    if let Ok(cache) = login_digest_cache().lock() {
+        if let Some((cached, at, digest)) = cache.get(path) {
+            if *cached == stamp && now.duration_since(*at) < AVAILABILITY_TTL {
+                return digest.clone();
+            }
+        }
+    }
+    let digest = std::fs::read(path)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+        .and_then(|value| value.pointer(pointer).cloned())
+        .map(|subtree| {
+            use sha2::{Digest, Sha256};
+            let canonical = subtree.to_string();
+            format!("{:x}", Sha256::digest(canonical.as_bytes()))
+        });
+    if let Ok(mut cache) = login_digest_cache().lock() {
+        cache.insert(path.to_path_buf(), (stamp, now, digest.clone()));
+    }
+    digest
+}
+
+/// 计算当前指纹：几次 `stat` 加缓存的 PATH 解析，由服务循环按 `AVAILABILITY_TTL` 周期对
+/// 终态条目调用，探测完成时也调用一次记录基线。
+pub(super) fn probe_fingerprint(
+    provider: &Provider,
+    account: &UsageAccountConfig,
+) -> ProbeFingerprint {
+    ProbeFingerprint {
+        cli: command_path(provider.command)
+            .as_deref()
+            .and_then(file_stamp),
+        credentials: credential_paths(provider, account)
+            .iter()
+            .map(|path| file_stamp(path))
+            .collect(),
+        login_digest: login_subtree(provider, account)
+            .and_then(|(path, pointer)| login_digest(&path, pointer)),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -170,5 +366,142 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn probe_fingerprint_tracks_the_credential_file_of_the_configured_profile() {
+        let base = std::env::temp_dir().join(format!(
+            "herdr-fingerprint-{}-{}",
+            std::process::id(),
+            crate::server::observability::now_ms()
+        ));
+        std::fs::create_dir_all(&base).unwrap();
+        let provider = provider("codex").unwrap();
+        let account = UsageAccountConfig {
+            id: "codex:work".into(),
+            agent: "codex".into(),
+            profile_dir: Some(base.clone()),
+            ..Default::default()
+        };
+        // 文件尚不存在：凭据戳为 None，但仍占一个位置。
+        let before = probe_fingerprint(provider, &account);
+        assert_eq!(before.credentials, vec![None]);
+        assert_eq!(before, before.clone());
+
+        std::fs::write(base.join("auth.json"), b"{\"tokens\":{}}").unwrap();
+        let after = probe_fingerprint(provider, &account);
+        assert_ne!(before, after, "首次登录（文件从无到有）必须算变化");
+        let stamp = after.credentials[0].as_ref().expect("凭据文件已存在");
+        assert_eq!(stamp.0, base.join("auth.json"));
+        assert_eq!(stamp.2, 13);
+        // 内容不变时指纹稳定；CLI 指纹与凭据无关。
+        assert_eq!(after, probe_fingerprint(provider, &account));
+        assert_eq!(after.cli, before.cli);
+
+        std::fs::write(base.join("auth.json"), b"{\"tokens\":{\"a\":1}}").unwrap();
+        assert_ne!(
+            after,
+            probe_fingerprint(provider, &account),
+            "改写凭据必须算变化"
+        );
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn claude_fingerprint_ignores_unrelated_state_churn_and_tracks_the_login_subtree() {
+        let base = std::env::temp_dir().join(format!(
+            "herdr-claude-fingerprint-{}-{}",
+            std::process::id(),
+            crate::server::observability::now_ms()
+        ));
+        std::fs::create_dir_all(&base).unwrap();
+        let provider = provider("claude").unwrap();
+        let account = UsageAccountConfig {
+            id: "claude:work".into(),
+            agent: "claude".into(),
+            profile_dir: Some(base.clone()),
+            ..Default::default()
+        };
+        let state = base.join(".claude.json");
+        let write_state = |starts: u64, account_json: Option<&str>| {
+            let oauth = account_json
+                .map(|json| format!(",\"oauthAccount\":{json}"))
+                .unwrap_or_default();
+            std::fs::write(
+                &state,
+                format!("{{\"numStartups\":{starts},\"projects\":{{}}{oauth}}}"),
+            )
+            .unwrap();
+        };
+        // 未登录：无凭据文件、无 oauthAccount。
+        write_state(1, None);
+        let signed_out = probe_fingerprint(provider, &account);
+        assert_eq!(signed_out.credentials, vec![None]);
+        assert_eq!(signed_out.login_digest, None);
+
+        // claude 正常使用中反复重写 .claude.json（启动计数、项目历史）：登录态未变 ⇒ 指纹不变。
+        write_state(2, None);
+        std::fs::write(
+            &state,
+            format!("{}{}", std::fs::read_to_string(&state).unwrap(), "  "),
+        )
+        .unwrap();
+        assert_eq!(
+            probe_fingerprint(provider, &account),
+            signed_out,
+            "无关字段抖动不算变化"
+        );
+
+        // 登录：凭据文件出现 + oauthAccount 写入。
+        std::fs::write(base.join(".credentials.json"), b"{\"claudeAiOauth\":{}}").unwrap();
+        write_state(
+            3,
+            Some("{\"accountUuid\":\"a\",\"emailAddress\":\"a@example.test\"}"),
+        );
+        let signed_in = probe_fingerprint(provider, &account);
+        assert_ne!(signed_in, signed_out, "登录必须算变化");
+        assert!(signed_in.login_digest.is_some());
+        // 同一账号再抖动一次通用字段：仍稳定。
+        write_state(
+            4,
+            Some("{\"accountUuid\":\"a\",\"emailAddress\":\"a@example.test\"}"),
+        );
+        assert_eq!(probe_fingerprint(provider, &account), signed_in);
+        // 切换账号：只有子树变了。文件系统 mtime 粗粒度（毫秒级），先等一拍让戳变化，
+        // 否则摘要缓存会命中（生产里由 TTL 兜底）。
+        std::thread::sleep(Duration::from_millis(50));
+        write_state(
+            4,
+            Some("{\"accountUuid\":\"b\",\"emailAddress\":\"b@example.test\"}"),
+        );
+        let switched = probe_fingerprint(provider, &account);
+        assert_ne!(
+            switched.login_digest, signed_in.login_digest,
+            "账号切换必须算变化"
+        );
+        assert_eq!(switched.credentials, signed_in.credentials);
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn command_path_is_cached_per_command() {
+        let first = command_path("herdr-no-such-command-for-tests");
+        assert_eq!(first, None);
+        let cached = command_path_cache()
+            .lock()
+            .map(|cache| cache.contains_key("herdr-no-such-command-for-tests"))
+            .unwrap_or(false);
+        assert!(cached, "结果进入缓存");
+    }
+
+    #[test]
+    fn unknown_providers_only_fingerprint_the_cli() {
+        let provider = provider("amp").unwrap();
+        let account = UsageAccountConfig {
+            id: "amp:default".into(),
+            agent: "amp".into(),
+            ..Default::default()
+        };
+        assert!(probe_fingerprint(provider, &account).credentials.is_empty());
     }
 }

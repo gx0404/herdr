@@ -290,6 +290,57 @@ pub struct AccountUsageSnapshot {
     pub message: Option<String>,
 }
 
+/// 未绑定 pane 的官方回调被拒后留下的待办：供客户端一键绑定。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct UsagePendingBinding {
+    pub pane_id: String,
+    pub agent: String,
+    /// 该 agent 下可绑定的账号；为空表示该 agent 没有配置账号。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub candidates: Vec<String>,
+    pub rejected_at_ms: u64,
+}
+
+/// 与 `AccountUsageSnapshot` 并行的刷新状态：快照类型进入冻结摘要，不能再加字段，
+/// 所以探测进度、防抖与推断绑定都放在这里，按 `account_id` 对齐。旧 server 不返回。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct UsageRefreshState {
+    pub account_id: String,
+    /// 探测已派发且尚未完成（含排队中）。
+    #[serde(default)]
+    pub in_flight: bool,
+    /// 探测已入队但查询线程还没开始执行。
+    #[serde(default)]
+    pub queued: bool,
+    /// 最近一次显式刷新（`account.usage.refresh`）到达的时间，含被防抖的请求。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requested_at_ms: Option<u64>,
+    /// 最近一次真正派发探测的时间；`observed_at_ms` 只在成功时更新。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attempted_at_ms: Option<u64>,
+    /// 下一次显式刷新会被接受的最早时间；缺省表示现在即可。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_allowed_at_ms: Option<u64>,
+    /// 厂商要求的退避截止时间（HTTP 429），显式刷新也不豁免。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry_after_ms: Option<u64>,
+    /// 请求带了未绑定 pane，但该 agent 只有一个账号：数据按唯一候选返回，绑定并未写入。
+    #[serde(default)]
+    pub binding_inferred: bool,
+    /// 官方 CLI 在等待用户确认目录信任，探测暂时拿不到额度。
+    /// 当前版本恒为 false：Claude 交互探测的登录/信任分类落地后才会置位，客户端在此之前
+    /// 不应依赖它出现。
+    #[serde(default)]
+    pub trust_required: bool,
+    /// 该厂商只接受官方回调（statusline 等），没有可回落的探测：显式刷新不会产生新数据，
+    /// 客户端可据此禁用刷新动作并说明原因。
+    #[serde(default)]
+    pub callback_only: bool,
+    /// 与该账号同 agent 的待办绑定（请求带 pane 时只看该 pane）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_binding: Option<UsagePendingBinding>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct UsageProviderInfo {
     pub agent: String,

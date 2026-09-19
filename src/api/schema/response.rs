@@ -78,6 +78,9 @@ pub enum ResponseResult {
     },
     AccountUsage {
         accounts: Vec<super::AccountUsageSnapshot>,
+        /// 与 `accounts` 按 `account_id` 对齐的刷新状态；旧 server 省略。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        refresh: Option<Vec<super::UsageRefreshState>>,
     },
     AccountBinding {
         pane_id: String,

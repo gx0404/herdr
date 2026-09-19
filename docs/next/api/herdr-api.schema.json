@@ -10840,6 +10840,16 @@
                   },
                   "type": "array"
                 },
+                "refresh": {
+                  "description": "与 `accounts` 按 `account_id` 对齐的刷新状态；旧 server 省略。",
+                  "items": {
+                    "$ref": "#/schemas/success_response/$defs/UsageRefreshState"
+                  },
+                  "type": [
+                    "array",
+                    "null"
+                  ]
+                },
                 "type": {
                   "const": "account_usage",
                   "type": "string"
@@ -12663,6 +12673,35 @@
           ],
           "type": "object"
         },
+        "UsagePendingBinding": {
+          "description": "未绑定 pane 的官方回调被拒后留下的待办：供客户端一键绑定。",
+          "properties": {
+            "agent": {
+              "type": "string"
+            },
+            "candidates": {
+              "description": "该 agent 下可绑定的账号；为空表示该 agent 没有配置账号。",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "pane_id": {
+              "type": "string"
+            },
+            "rejected_at_ms": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "pane_id",
+            "agent",
+            "rejected_at_ms"
+          ],
+          "type": "object"
+        },
         "UsageProviderInfo": {
           "properties": {
             "account_scope": {
@@ -12707,6 +12746,90 @@
             "account_scope",
             "minimum_interval_seconds",
             "configured_accounts"
+          ],
+          "type": "object"
+        },
+        "UsageRefreshState": {
+          "description": "与 `AccountUsageSnapshot` 并行的刷新状态：快照类型进入冻结摘要，不能再加字段，\n所以探测进度、防抖与推断绑定都放在这里，按 `account_id` 对齐。旧 server 不返回。",
+          "properties": {
+            "account_id": {
+              "type": "string"
+            },
+            "attempted_at_ms": {
+              "description": "最近一次真正派发探测的时间；`observed_at_ms` 只在成功时更新。",
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "binding_inferred": {
+              "default": false,
+              "description": "请求带了未绑定 pane，但该 agent 只有一个账号：数据按唯一候选返回，绑定并未写入。",
+              "type": "boolean"
+            },
+            "callback_only": {
+              "default": false,
+              "description": "该厂商只接受官方回调（statusline 等），没有可回落的探测：显式刷新不会产生新数据，\n客户端可据此禁用刷新动作并说明原因。",
+              "type": "boolean"
+            },
+            "in_flight": {
+              "default": false,
+              "description": "探测已派发且尚未完成（含排队中）。",
+              "type": "boolean"
+            },
+            "next_allowed_at_ms": {
+              "description": "下一次显式刷新会被接受的最早时间；缺省表示现在即可。",
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "pending_binding": {
+              "anyOf": [
+                {
+                  "$ref": "#/schemas/success_response/$defs/UsagePendingBinding"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "与该账号同 agent 的待办绑定（请求带 pane 时只看该 pane）。"
+            },
+            "queued": {
+              "default": false,
+              "description": "探测已入队但查询线程还没开始执行。",
+              "type": "boolean"
+            },
+            "requested_at_ms": {
+              "description": "最近一次显式刷新（`account.usage.refresh`）到达的时间，含被防抖的请求。",
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "retry_after_ms": {
+              "description": "厂商要求的退避截止时间（HTTP 429），显式刷新也不豁免。",
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "trust_required": {
+              "default": false,
+              "description": "官方 CLI 在等待用户确认目录信任，探测暂时拿不到额度。\n当前版本恒为 false：Claude 交互探测的登录/信任分类落地后才会置位，客户端在此之前\n不应依赖它出现。",
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "account_id"
           ],
           "type": "object"
         },

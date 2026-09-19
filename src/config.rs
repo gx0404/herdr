@@ -63,9 +63,14 @@ pub(crate) use self::{keybinds::CommandKeybindType, model::KeysConfig};
 
 pub const CONFIG_PATH_ENV_VAR: &str = "HERDR_CONFIG_PATH";
 
+/// `Config::load` 读取或解析失败时回退默认值并留下这两种前缀的诊断（真源是 `io.rs` 的
+/// `Config::load`）。消费方据此区分「用户改了配置」与「配置暂时不可用」，不得自行嗅探字符串。
+pub(crate) fn is_config_load_failure(diagnostic: &str) -> bool {
+    diagnostic.starts_with("config parse error:") || diagnostic.starts_with("config read error:")
+}
+
 pub(crate) fn is_keybinding_config_diagnostic(diagnostic: &str) -> bool {
-    if diagnostic.starts_with("config parse error:") || diagnostic.starts_with("config read error:")
-    {
+    if is_config_load_failure(diagnostic) {
         return false;
     }
     diagnostic.contains("keybinding") || diagnostic.contains("keys.")

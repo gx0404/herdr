@@ -19,12 +19,14 @@ pub(crate) use actions::{
 #[cfg(test)]
 pub(crate) use env::integration_env_lock;
 pub(crate) use env::{
-    apply_pane_base_env, HERDR_PANE_ID_ENV_VAR, HERDR_TAB_ID_ENV_VAR, HERDR_WORKSPACE_ID_ENV_VAR,
+    apply_pane_base_env, claude_dir, claude_state_file, codex_dir, gemini_dir, grok_dir, kimi_dir,
+    opencode_data_dir, HERDR_PANE_ID_ENV_VAR, HERDR_TAB_ID_ENV_VAR, HERDR_WORKSPACE_ID_ENV_VAR,
 };
 pub(crate) use registry::{
-    codex_layout_binary_path, command_available, experimental_letta_integration_status,
-    installed_integration_statuses, integration_recommendations, integration_target_available,
-    integration_target_label, print_outdated_update_notice,
+    codex_layout_binary_path, command_available, command_path_candidates, executable_file_exists,
+    experimental_letta_integration_status, installed_integration_statuses,
+    integration_recommendations, integration_target_available, integration_target_label,
+    print_outdated_update_notice,
 };
 pub(crate) use types::{
     ExperimentalIntegrationStatus, IntegrationRecommendation, IntegrationStatus,

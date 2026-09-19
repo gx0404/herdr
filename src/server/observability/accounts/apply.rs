@@ -25,6 +25,8 @@ const MAX_AGENT_LOG_LEN: usize = 64;
 const BINDING_REQUIRED_MESSAGE: &str = "请先在账号用量页面为此窗格绑定对应厂商账号";
 const INVALID_REPORT_MESSAGE: &str = "账号用量报告无效";
 const AUTO_BOUND_MESSAGE: &str = "已按唯一账号自动绑定";
+const NO_QUOTA_MESSAGE: &str =
+    "官方回调暂无额度字段（statusline 未提供 rate_limits），等待下一次回调或探测";
 
 /// `apply_report` 的只读输入。
 #[derive(Clone, Copy)]
@@ -59,9 +61,26 @@ pub(super) struct Rejections {
     logged: VecDeque<LoggedRejection>,
 }
 
+impl From<&PendingBinding> for UsagePendingBinding {
+    fn from(pending: &PendingBinding) -> Self {
+        Self {
+            pane_id: pending.pane_id.clone(),
+            agent: pending.agent.clone(),
+            candidates: pending.candidates.clone(),
+            rejected_at_ms: pending.rejected_at_ms,
+        }
+    }
+}
+
 impl Rejections {
     /// 记一条待办：按 (pane, agent) 去重，按容量与时长淘汰。
-    fn record_pending(&mut self, pane_id: &str, agent: &str, candidates: Vec<String>, now_ms: u64) {
+    pub(super) fn record_pending(
+        &mut self,
+        pane_id: &str,
+        agent: &str,
+        candidates: Vec<String>,
+        now_ms: u64,
+    ) {
         if pane_id.len() > MAX_PANE_ID_LEN {
             // 这样的 pane 永远绑不上（`bind_pane` 同样拒绝），不值得占队列。
             return;
@@ -84,6 +103,20 @@ impl Rejections {
     /// 绑定落地后移除该 pane 的待办条目。
     pub(super) fn forget_pane(&mut self, pane_id: &str) {
         self.pending.retain(|item| item.pane_id != pane_id);
+    }
+
+    /// 供响应侧取用的待办：指定 pane 时只看该 pane，否则取该 agent 最近一条；过期条目不算。
+    pub(super) fn pending_for(
+        &self,
+        pane_id: Option<&str>,
+        agent: &str,
+        now_ms: u64,
+    ) -> Option<&PendingBinding> {
+        self.pending.iter().rev().find(|item| {
+            item.agent == agent
+                && pane_id.is_none_or(|pane| item.pane_id == pane)
+                && now_ms.saturating_sub(item.rejected_at_ms) < PENDING_TTL_MS
+        })
     }
 
     /// 同一 (pane, agent, 错误码) 在限速窗口内只按 info 记一次；返回本次是否该记 info。
@@ -167,6 +200,8 @@ pub(super) struct Accepted {
     pub account_id: String,
     /// 本次按唯一候选自动写入绑定的 pane。
     pub auto_bound_pane: Option<String>,
+    /// 缓存是否真的被改写；报文合法但没有额度字段时为 false，调用方不推送不落盘。
+    pub updated: bool,
 }
 
 /// 报告被拒绝：`code` 直接作为 API 错误码返回。
@@ -316,6 +351,23 @@ pub(super) fn apply_report(
             now_ms,
         ));
     }
+    if params.snapshot.metrics.is_empty() {
+        // 报文合法但没有额度字段（如旧版 statusline 无 rate_limits）：不覆盖缓存、不置回调
+        // 闩锁——否则账号会被钉在 Unavailable 且不再探测。只在账号还没有任何结论（Warming
+        // 且无样本）时留一句说明；终态/错误的诊断信息不被替换，避免 status 与 message 矛盾。
+        if let Some(entry) = cache.get_mut(&params.account_id) {
+            if entry.snapshot.status == ObservationStatus::Warming
+                && entry.snapshot.metrics.is_empty()
+            {
+                entry.snapshot.message = Some(NO_QUOTA_MESSAGE.into());
+            }
+        }
+        return Ok(Accepted {
+            account_id: params.account_id,
+            auto_bound_pane: None,
+            updated: false,
+        });
+    }
     let mut snapshot = params.snapshot;
     snapshot.account_id = params.account_id.clone();
     snapshot.observed_at_ms = now_ms;
@@ -330,11 +382,7 @@ pub(super) fn apply_report(
             .into();
     }
     snapshot.source = "官方 CLI 回调".into();
-    snapshot.status = if snapshot.metrics.is_empty() {
-        ObservationStatus::Unavailable
-    } else {
-        ObservationStatus::Ready
-    };
+    snapshot.status = ObservationStatus::Ready;
     if snapshot.account_identity.is_none() {
         snapshot.account_identity = cache
             .get(&params.account_id)
@@ -364,12 +412,16 @@ pub(super) fn apply_report(
     entry.generation = *next_query;
     *next_query = next_query.saturating_add(1);
     entry.in_flight = false;
-    entry.callback = true;
+    entry.queued = false;
+    // 官方回调接管该账号：一个闩锁周期内不回落探测，成功一次即清零失败与终态。
+    entry.callback_until_ms = Some(now_ms.saturating_add(super::CALLBACK_LATCH_MS));
     entry.failures = 0;
+    entry.terminal = None;
     entry.snapshot = snapshot;
     Ok(Accepted {
         account_id: params.account_id,
         auto_bound_pane,
+        updated: true,
     })
 }
 
@@ -414,20 +466,7 @@ mod tests {
     fn cache_for(accounts: &[UsageAccountConfig]) -> HashMap<String, CacheEntry> {
         accounts
             .iter()
-            .map(|account| {
-                (
-                    account.id.clone(),
-                    CacheEntry {
-                        snapshot: empty_snapshot(account),
-                        requested_at: None,
-                        in_flight: false,
-                        generation: 0,
-                        failures: 0,
-                        callback: false,
-                        retry_after: None,
-                    },
-                )
-            })
+            .map(|account| (account.id.clone(), CacheEntry::new(empty_snapshot(account))))
             .collect()
     }
 
@@ -535,7 +574,11 @@ mod tests {
         assert_eq!(accepted.account_id, "claude:default");
         assert!(accepted.auto_bound_pane.is_none());
         let entry = &fixture.cache["claude:default"];
-        assert!(entry.callback);
+        assert!(entry.callback_latched());
+        assert_eq!(
+            entry.callback_until_ms,
+            Some(NOW_MS + super::super::CALLBACK_LATCH_MS)
+        );
         assert!(!entry.in_flight);
         assert_eq!(entry.failures, 0);
         assert_eq!(entry.generation, 7);
@@ -561,8 +604,8 @@ mod tests {
             .insert("pane-1".into(), "claude:home".into());
         let result = fixture.apply(report(Some("pane-1"), "claude:work"));
         assert_eq!(code(&result), "invalid_usage_report");
-        assert!(!fixture.cache["claude:work"].callback);
-        assert!(!fixture.cache["claude:home"].callback);
+        assert!(!fixture.cache["claude:work"].callback_latched());
+        assert!(!fixture.cache["claude:home"].callback_latched());
         assert_eq!(fixture.bindings["pane-1"], "claude:home");
     }
 
@@ -577,7 +620,7 @@ mod tests {
             .insert("pane-1".into(), "kimi:default".into());
         let result = fixture.apply(report(Some("pane-1"), ""));
         assert_eq!(code(&result), "usage_binding_required");
-        assert!(!fixture.cache["kimi:default"].callback);
+        assert!(!fixture.cache["kimi:default"].callback_latched());
     }
 
     #[test]
@@ -604,7 +647,7 @@ mod tests {
             "rate_limits": {"five_hour": {"used_percentage": 42, "unit": "x".repeat(65)}}
         }));
         assert_eq!(code(&fixture.apply(params)), "invalid_usage_report");
-        assert!(!fixture.cache["claude:default"].callback);
+        assert!(!fixture.cache["claude:default"].callback_latched());
     }
 
     #[test]
@@ -613,20 +656,52 @@ mod tests {
         let result = fixture.apply(report(None, "claude:default"));
         assert_eq!(code(&result), "ok");
         assert!(fixture.bindings.is_empty());
-        assert!(fixture.cache["claude:default"].callback);
+        assert!(fixture.cache["claude:default"].callback_latched());
     }
 
     #[test]
-    fn empty_payload_report_is_unavailable_but_still_a_callback() {
-        // 显式指定账号时沿用旧语义（B-6 再收敛）；自动绑定路径另有更严格的门槛。
+    fn empty_payload_report_keeps_the_cached_snapshot_and_does_not_latch_callback() {
+        // B-6：报文没有 rate_limits 时接受但不改写缓存；没有样本时只留一句说明。
         let mut fixture = Fixture::new(vec![account("claude:default", "claude")]);
+        let mut params = report(None, "claude:default");
+        params.official_payload = Some(json!({"cost": {"total_cost_usd": 1.5}}));
+        let accepted = fixture
+            .apply(params.clone())
+            .unwrap_or_else(|rejected| panic!("被拒: {}", rejected.code));
+        assert!(!accepted.updated);
+        let entry = &fixture.cache["claude:default"];
+        assert!(!entry.callback_latched());
+        assert!(entry.snapshot.metrics.is_empty());
+        assert_eq!(entry.snapshot.status, ObservationStatus::Warming);
+        assert_eq!(entry.snapshot.message.as_deref(), Some(NO_QUOTA_MESSAGE));
+        assert_eq!(fixture.next_query, 7, "未改写缓存不消耗 generation");
+
+        // 已有真实额度时，空报文连 message 都不碰。
+        assert_eq!(code(&fixture.apply(report(None, "claude:default"))), "ok");
+        assert_eq!(code(&fixture.apply(params)), "ok");
+        let entry = &fixture.cache["claude:default"];
+        assert!(entry.callback_latched());
+        assert_eq!(entry.snapshot.status, ObservationStatus::Ready);
+        assert_eq!(entry.snapshot.metrics.len(), 2);
+        assert_eq!(entry.snapshot.message, None);
+    }
+
+    #[test]
+    fn empty_payload_report_never_rewrites_a_terminal_diagnostic() {
+        // 已处于「需要登录」等终态的账号收到无额度字段的回调：status 与 message 都不动，
+        // 否则会出现「需要登录 + 官方回调暂无额度字段」互相矛盾的一行。
+        let mut fixture = Fixture::new(vec![account("claude:default", "claude")]);
+        if let Some(entry) = fixture.cache.get_mut("claude:default") {
+            entry.snapshot.status = ObservationStatus::NotAuthenticated;
+            entry.snapshot.message = Some("需要登录".into());
+        }
         let mut params = report(None, "claude:default");
         params.official_payload = Some(json!({"cost": {"total_cost_usd": 1.5}}));
         assert_eq!(code(&fixture.apply(params)), "ok");
         let entry = &fixture.cache["claude:default"];
-        assert!(entry.callback);
-        assert!(entry.snapshot.metrics.is_empty());
-        assert_eq!(entry.snapshot.status, ObservationStatus::Unavailable);
+        assert_eq!(entry.snapshot.status, ObservationStatus::NotAuthenticated);
+        assert_eq!(entry.snapshot.message.as_deref(), Some("需要登录"));
+        assert!(!entry.callback_latched());
     }
 
     // ---- 唯一候选自动绑定 ----
@@ -643,11 +718,11 @@ mod tests {
         assert_eq!(accepted.auto_bound_pane.as_deref(), Some("wT:p9"));
         assert_eq!(fixture.bindings["wT:p9"], "claude:default");
         let entry = &fixture.cache["claude:default"];
-        assert!(entry.callback);
+        assert!(entry.callback_latched());
         assert_eq!(entry.snapshot.status, ObservationStatus::Ready);
         assert_eq!(entry.snapshot.metrics.len(), 2);
         assert_eq!(entry.snapshot.message.as_deref(), Some(AUTO_BOUND_MESSAGE));
-        assert!(!fixture.cache["kimi:default"].callback);
+        assert!(!fixture.cache["kimi:default"].callback_latched());
         assert!(fixture.pending_panes().is_empty());
 
         // 下一次回调已能直接命中绑定，不再标自动绑定。
@@ -682,8 +757,8 @@ mod tests {
         );
         assert!(!rejected.repeated);
         assert!(fixture.bindings.is_empty());
-        assert!(!fixture.cache["claude:work"].callback);
-        assert!(!fixture.cache["claude:home"].callback);
+        assert!(!fixture.cache["claude:work"].callback_latched());
+        assert!(!fixture.cache["claude:home"].callback_latched());
         let pending = fixture.rejections.pending().collect::<Vec<_>>();
         assert_eq!(pending.len(), 1);
         assert_eq!(pending[0].pane_id, "wT:p9");
@@ -752,7 +827,7 @@ mod tests {
         let rejected = rejected(fixture.apply(params));
         assert_eq!(rejected.code, "usage_binding_required");
         assert!(fixture.bindings.is_empty());
-        assert!(!fixture.cache["claude:default"].callback);
+        assert!(!fixture.cache["claude:default"].callback_latched());
         assert_eq!(fixture.pending_panes(), vec!["wT:p9"]);
     }
 
@@ -772,7 +847,7 @@ mod tests {
         );
         assert!(fixture.bindings.is_empty());
         let entry = &fixture.cache["claude:default"];
-        assert!(!entry.callback);
+        assert!(!entry.callback_latched());
         assert_eq!(entry.snapshot.status, ObservationStatus::Warming);
         let pending = fixture.rejections.pending().collect::<Vec<_>>();
         assert_eq!(pending.len(), 1);
@@ -789,7 +864,7 @@ mod tests {
         }));
         assert_eq!(code(&fixture.apply(params)), "invalid_usage_report");
         assert!(fixture.bindings.is_empty());
-        assert!(!fixture.cache["claude:default"].callback);
+        assert!(!fixture.cache["claude:default"].callback_latched());
     }
 
     #[test]

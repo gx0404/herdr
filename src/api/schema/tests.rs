@@ -736,6 +736,92 @@ fn success_response_round_trips() {
 }
 
 #[test]
+fn account_usage_response_round_trips_with_optional_refresh_state() {
+    // 旧 server 不带 refresh：字段缺省为 None，快照本体不受影响。
+    let legacy = serde_json::json!({
+        "id": "req_1",
+        "result": {
+            "type": "account_usage",
+            "accounts": [{
+                "account_id": "claude:default",
+                "account_label": "Claude Code",
+                "agent": "claude",
+                "provider": "claude",
+                "auth_mode": "cli",
+                "plan": null,
+                "status": "ready",
+                "source": "官方 CLI 回调",
+                "source_url": "https://example.test",
+                "observed_at_ms": 5,
+                "metrics": [],
+                "message": null
+            }]
+        }
+    });
+    let restored: SuccessResponse = serde_json::from_value(legacy).unwrap();
+    let ResponseResult::AccountUsage { accounts, refresh } = restored.result else {
+        panic!("not an account_usage result");
+    };
+    assert_eq!(accounts.len(), 1);
+    assert_eq!(refresh, None);
+
+    // None 时序列化省略字段；Some 时并行结构随快照往返，可选字段各自缺省。
+    let bare = SuccessResponse {
+        id: "req_2".into(),
+        result: ResponseResult::AccountUsage {
+            accounts: Vec::new(),
+            refresh: None,
+        },
+    };
+    let json = serde_json::to_value(&bare).unwrap();
+    assert!(json["result"].get("refresh").is_none());
+
+    let response = SuccessResponse {
+        id: "req_3".into(),
+        result: ResponseResult::AccountUsage {
+            accounts: vec![AccountUsageSnapshot {
+                account_id: "claude:default".into(),
+                ..Default::default()
+            }],
+            refresh: Some(vec![UsageRefreshState {
+                account_id: "claude:default".into(),
+                in_flight: true,
+                queued: false,
+                requested_at_ms: Some(10),
+                attempted_at_ms: Some(9),
+                next_allowed_at_ms: Some(40_009),
+                retry_after_ms: None,
+                binding_inferred: true,
+                trust_required: false,
+                callback_only: true,
+                pending_binding: Some(UsagePendingBinding {
+                    pane_id: "wT:p9".into(),
+                    agent: "claude".into(),
+                    candidates: vec!["claude:work".into(), "claude:home".into()],
+                    rejected_at_ms: 7,
+                }),
+            }]),
+        },
+    };
+    let json = serde_json::to_string(&response).unwrap();
+    assert!(!json.contains("retry_after_ms"), "None 字段应省略: {json}");
+    let restored: SuccessResponse = serde_json::from_str(&json).unwrap();
+    assert_eq!(restored, response);
+
+    let minimal: UsageRefreshState =
+        serde_json::from_value(serde_json::json!({"account_id": "x"})).unwrap();
+    assert_eq!(
+        minimal,
+        UsageRefreshState {
+            account_id: "x".into(),
+            ..Default::default()
+        }
+    );
+    // 旧 server 不带 callback_only：缺省 false 表示「显式刷新可用」，不会误禁用按钮。
+    assert!(!minimal.callback_only);
+}
+
+#[test]
 fn session_snapshot_request_and_response_round_trip() {
     let request = Request {
         id: "req_snapshot".into(),
