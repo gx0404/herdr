@@ -511,6 +511,9 @@ alerts_enabled = false
 
 # Account references belong to the server running the corresponding agent.
 # Store only environment variable names in credential_env, never the credential.
+# Changes made in Monitor -> Settings are saved as client preferences and
+# override enabled / format / position / hover_delay_ms / disabled_providers on
+# this machine; "Restore config file values" there drops those overrides.
 [account_usage]
 enabled = true
 format = "dashboard"
@@ -523,6 +526,11 @@ probe_timeout_seconds = 20
 # state and may rotate credentials; off by default, explicit refresh only.
 # Claude's read-only `claude auth status --json` precheck runs regardless.
 interactive_probe = false
+# Providers the server never probes (server-side baseline). Providers turned
+# off in Monitor -> Settings are a client preference layered on top: that
+# client stops requesting and displaying them, but the server may still
+# refresh them while that client's overview subscription is active; use this
+# key to stop probing entirely.
 disabled_providers = []
 
 "##;

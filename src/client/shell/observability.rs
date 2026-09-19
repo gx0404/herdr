@@ -20,6 +20,14 @@ const IN_FLIGHT_POLL: Duration = Duration::from_millis(500);
 const IDLE_POLL: Duration = Duration::from_secs(2);
 /// 「N 秒后可刷新」的可信上限：端点时钟与本机偏差超过它时当作未知，不锁按钮。
 const MAX_REFRESH_WAIT_SECS: u64 = 60;
+/// 总览逐厂商扇出的厂商数上限：超过即回落一次整体请求（响应侧仍按本机关闭
+/// 过滤），逐厂商请求数不随注册表规模线性增长（乘法性能路径：频率 × 基数）。
+const MAX_USAGE_FAN_OUT: usize = 8;
+/// 总览等待厂商列表的上限：列表请求发出超过它仍未到达（响应丢失 / 连接未断）
+/// 即回落整体请求，用量轮询不因列表停摆。
+const PROVIDERS_WAIT: Duration = Duration::from_secs(1);
+/// 厂商列表请求失败后的重试间隔（正常节流为 5 分钟），失败不每 tick 重发。
+const PROVIDERS_RETRY: Duration = Duration::from_secs(10);
 
 pub(super) fn zh() -> bool {
     crate::i18n::lang().as_str().starts_with("zh")
@@ -82,9 +90,16 @@ pub(super) enum Page {
 pub(super) enum Purpose {
     Metrics,
     Providers,
-    Usage,
-    /// 悬浮层自己的用量请求：带 hover 的 pane，落到 `hover_scope`，永不写页面。
-    HoverUsage,
+    /// 页面作用域的用量请求；`agent` 是请求带的厂商：总览逐厂商请求时为
+    /// `Some(x)`（响应只替换该厂商的账号），`None` 是整体请求（响应整体替换）。
+    Usage {
+        agent: Option<String>,
+    },
+    /// 悬浮层自己的用量请求：带 hover 的 pane，落到 `hover_scope`，永不写页面；
+    /// `agent` 语义同 `Usage`。
+    HoverUsage {
+        agent: Option<String>,
+    },
     Binding,
     /// 悬浮层发起的绑定：发往 hover 的端点，回流只刷新悬浮层。
     HoverBinding,
@@ -105,28 +120,58 @@ pub(super) enum Purpose {
 }
 
 impl Purpose {
-    fn key(&self) -> &'static str {
+    /// 在途去重键：同键请求在途时不重复发。逐厂商的用量请求带厂商后缀
+    /// （`usage:<agent>` / `hover_usage:<agent>`），各厂商互不阻塞。
+    fn key(&self) -> std::borrow::Cow<'static, str> {
+        use std::borrow::Cow;
         match self {
-            Self::Metrics => "metrics",
-            Self::Providers => "providers",
-            Self::Usage => "usage",
-            Self::HoverUsage => "hover_usage",
-            Self::Binding => "binding",
-            Self::HoverBinding => "hover_binding",
-            Self::Integration { .. } => "integration",
-            Self::HoverIntegration { .. } => "hover_integration",
-            Self::Subscribe => "subscribe",
-            Self::Unsubscribe => "unsubscribe",
-            Self::Process => "process",
-            Self::Terminate => "terminate",
+            Self::Metrics => Cow::Borrowed("metrics"),
+            Self::Providers => Cow::Borrowed("providers"),
+            Self::Usage { agent: None } => Cow::Borrowed(Self::USAGE_KEY),
+            Self::Usage { agent: Some(agent) } => {
+                Cow::Owned(format!("{}:{agent}", Self::USAGE_KEY))
+            }
+            Self::HoverUsage { agent: None } => Cow::Borrowed(Self::HOVER_USAGE_KEY),
+            Self::HoverUsage { agent: Some(agent) } => {
+                Cow::Owned(format!("{}:{agent}", Self::HOVER_USAGE_KEY))
+            }
+            Self::Binding => Cow::Borrowed("binding"),
+            Self::HoverBinding => Cow::Borrowed("hover_binding"),
+            Self::Integration { .. } => Cow::Borrowed("integration"),
+            Self::HoverIntegration { .. } => Cow::Borrowed("hover_integration"),
+            Self::Subscribe => Cow::Borrowed("subscribe"),
+            Self::Unsubscribe => Cow::Borrowed("unsubscribe"),
+            Self::Process => Cow::Borrowed("process"),
+            Self::Terminate => Cow::Borrowed("terminate"),
         }
+    }
+
+    const USAGE_KEY: &'static str = "usage";
+    const HOVER_USAGE_KEY: &'static str = "hover_usage";
+
+    /// 某作用域用量请求的键前缀：页面 `usage`、悬浮层 `hover_usage`。
+    fn usage_key_prefix(hover: bool) -> &'static str {
+        if hover {
+            Self::HOVER_USAGE_KEY
+        } else {
+            Self::USAGE_KEY
+        }
+    }
+
+    /// `key` 是否是某作用域的用量请求键（整体请求或任一厂商的逐厂商请求）。
+    fn is_usage_key(key: &str, hover: bool) -> bool {
+        let prefix = Self::usage_key_prefix(hover);
+        key == prefix
+            || key
+                .strip_prefix(prefix)
+                .is_some_and(|rest| rest.starts_with(':'))
     }
 
     /// 悬浮层作用域的请求：目标端点与代际都取自 `hover_scope`。
     fn is_hover(&self) -> bool {
         matches!(
             self,
-            Self::HoverUsage | Self::HoverBinding | Self::HoverIntegration { .. }
+            Self::HoverUsage { .. } | Self::HoverBinding | Self::HoverIntegration { .. }
         )
     }
 
@@ -135,15 +180,103 @@ impl Purpose {
         !self.is_hover() && !matches!(self, Self::Subscribe | Self::Unsubscribe)
     }
 
-    const HOVER_KEYS: [&'static str; 3] = ["hover_usage", "hover_binding", "hover_integration"];
-    /// 不随页面代际作废的请求键：悬浮层作用域 + 订阅生命周期。
-    const PAGE_INDEPENDENT_KEYS: [&'static str; 5] = [
-        "hover_usage",
-        "hover_binding",
-        "hover_integration",
-        "subscribe",
-        "unsubscribe",
-    ];
+    /// 键的主体：逐厂商后缀（`:<agent>`）之前的部分。
+    fn key_stem(key: &str) -> &str {
+        key.split_once(':').map_or(key, |(stem, _)| stem)
+    }
+
+    /// 悬浮层作用域的请求键（含逐厂商的 `hover_usage:<agent>`）。按闭集显式匹配，
+    /// 与 `is_hover` 的变体集合一一对应（`key_scope_flags_match_the_variants` 守门），
+    /// 不按前缀猜：误判会让在途请求不被作废、响应落进错误作用域。
+    fn is_hover_key(key: &str) -> bool {
+        matches!(
+            Self::key_stem(key),
+            Self::HOVER_USAGE_KEY | "hover_binding" | "hover_integration"
+        )
+    }
+
+    /// 不随页面代际作废的请求键：悬浮层作用域 + 订阅生命周期（与 `page_scoped`
+    /// 的补集一一对应）。
+    fn is_page_independent_key(key: &str) -> bool {
+        Self::is_hover_key(key) || matches!(Self::key_stem(key), "subscribe" | "unsubscribe")
+    }
+}
+
+#[cfg(test)]
+mod key_tests {
+    use super::Purpose;
+
+    /// 每个变体的样本：新增变体时这里的穷举 match 会编译失败，提醒同步键判定。
+    fn samples() -> Vec<Purpose> {
+        let variants = [
+            Purpose::Metrics,
+            Purpose::Providers,
+            Purpose::Usage { agent: None },
+            Purpose::Usage {
+                agent: Some("claude".into()),
+            },
+            Purpose::HoverUsage { agent: None },
+            Purpose::HoverUsage {
+                agent: Some("codex".into()),
+            },
+            Purpose::Binding,
+            Purpose::HoverBinding,
+            Purpose::Integration { bind_after: None },
+            Purpose::HoverIntegration { bind_after: None },
+            Purpose::Subscribe,
+            Purpose::Unsubscribe,
+            Purpose::Process,
+            Purpose::Terminate,
+        ];
+        for variant in &variants {
+            match variant {
+                Purpose::Metrics
+                | Purpose::Providers
+                | Purpose::Usage { .. }
+                | Purpose::HoverUsage { .. }
+                | Purpose::Binding
+                | Purpose::HoverBinding
+                | Purpose::Integration { .. }
+                | Purpose::HoverIntegration { .. }
+                | Purpose::Subscribe
+                | Purpose::Unsubscribe
+                | Purpose::Process
+                | Purpose::Terminate => {}
+            }
+        }
+        variants.into()
+    }
+
+    /// 字符串键的作用域判定必须与枚举侧的 `is_hover` / `page_scoped` 一致。
+    #[test]
+    fn key_scope_flags_match_the_variants() {
+        for purpose in samples() {
+            let key = purpose.key();
+            assert_eq!(
+                Purpose::is_hover_key(&key),
+                purpose.is_hover(),
+                "{key}: 悬浮层键判定与变体不一致"
+            );
+            assert_eq!(
+                Purpose::is_page_independent_key(&key),
+                !purpose.page_scoped(),
+                "{key}: 页面代际判定与变体不一致"
+            );
+            let hover = purpose.is_hover();
+            assert_eq!(
+                Purpose::is_usage_key(&key, hover),
+                matches!(purpose, Purpose::Usage { .. } | Purpose::HoverUsage { .. }),
+                "{key}: 用量键判定与变体不一致"
+            );
+        }
+        assert!(
+            !Purpose::is_hover_key("hover_something_new"),
+            "未知前缀不算悬浮层"
+        );
+        assert!(!Purpose::is_usage_key("usage_extra", false));
+        assert!(Purpose::is_usage_key("usage:claude", false));
+        assert!(!Purpose::is_usage_key("usage:claude", true));
+    }
 }
 
 /// `observation_request` 的结局：调用方据此决定强意图刷新标志的去留。
@@ -155,6 +288,71 @@ enum RequestOutcome {
     Busy,
     /// 端点离线 / 未宣告该方法 / 无快照：该动作当前不可用，标志应清除。
     Unavailable,
+}
+
+/// `scope_usage_requests` 一轮扇出的结局：三个标志互不排斥（一部分厂商发出、
+/// 另一部分被在途请求挡下是常态），调用方据此决定强意图刷新的去留。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct FanOut {
+    /// 至少一个厂商的请求已发出。
+    sent: bool,
+    /// 至少一个厂商被同键在途请求挡下：强意图须保留并稍后只补发它们。
+    busy: bool,
+    /// 端点级不可用（离线 / 未宣告方法 / 无快照），对所有厂商一样。
+    unavailable: bool,
+}
+
+/// `usage_targets` 的结果：某作用域这一轮向哪些厂商发用量请求。
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum UsageTargets {
+    /// 逐个发请求的厂商；`None` 是整体请求（服务端按它自己的 TOML 过滤）。
+    Agents(Vec<Option<String>>),
+    /// 选中的厂商（或总览里所有已列出的厂商）已在本机设置关闭：不发请求。
+    Disabled,
+    /// 总览态但厂商列表里没有任何已列出的厂商（此主机既没装受支持的 agent CLI
+    /// 也没配置账号）：不发请求；与 `Disabled` 分开，文案不能把用户指去设置页。
+    NoProviders,
+    /// 总览态且厂商列表刚发出、仍在途：等列表到达再逐厂商发（到达即唤醒）。
+    AwaitProviders,
+}
+
+/// 设置页动作触到的偏好键：只回写用户改动的那一个键，其余键保持 None（继续跟随
+/// config.toml）。否则勾掉一个厂商会把四个 usage_* 键一次性固化成影子值，之后
+/// config.toml 的修改就再也照不进来（F05/F06）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PreferenceKey {
+    Monitor,
+    UsageEnabled,
+    UsageFormat,
+    UsagePosition,
+    DisabledProviders,
+    HoverDelay,
+    /// 「恢复配置文件值」：不写任何键，只把已清空的偏好落盘。
+    RestoreUsage,
+}
+
+impl PreferenceKey {
+    fn for_action(action: &Action) -> Option<Self> {
+        Some(match action {
+            Action::Interval
+            | Action::Metric(_)
+            | Action::CardMove(..)
+            | Action::CardSize
+            | Action::HistoryRange
+            | Action::Device(_)
+            | Action::ToggleAlerts
+            | Action::AlertThreshold(_)
+            | Action::AlertDuration(_)
+            | Action::AlertCooldown(_) => Self::Monitor,
+            Action::UsageEnabled => Self::UsageEnabled,
+            Action::UsageFormat => Self::UsageFormat,
+            Action::UsagePosition => Self::UsagePosition,
+            Action::ProviderEnabled(_) => Self::DisabledProviders,
+            Action::HoverDelay => Self::HoverDelay,
+            Action::RestoreUsagePreferences => Self::RestoreUsage,
+            _ => return None,
+        })
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -172,6 +370,8 @@ pub(super) enum Action {
     UsagePosition,
     /// 悬浮延时档位循环（200 / 400 / 800 / 1200 / 2000 ms），持久化为客户端偏好。
     HoverDelay,
+    /// 设置页「恢复配置文件值」：清掉 usage_* 的本机覆盖，重新跟随 config.toml。
+    RestoreUsagePreferences,
     /// 回到跨厂商总览（账号页首个 chip / 再点已选厂商 chip）。
     Overview,
     Provider(String),
@@ -259,6 +459,8 @@ pub(super) struct HoverScope {
     pub refresh: bool,
     /// 悬浮层的 `account.usage.refresh` 在途；响应到达即清除。
     manual_in_flight: bool,
+    /// 本轮强意图刷新已发出 `refresh` 的厂商（语义同 `State::manual_sent`）。
+    manual_sent: Vec<Option<String>>,
     /// 悬浮层自己的账号列表滚动位置。
     pub scroll: usize,
     /// 悬浮层下一次轮询时刻，与页面的 `next_usage` 各自独立。
@@ -278,6 +480,7 @@ impl Default for HoverScope {
             epoch: 0,
             refresh: false,
             manual_in_flight: false,
+            manual_sent: Vec::new(),
             scroll: 0,
             next_usage: Instant::now(),
             sent_at: None,
@@ -397,7 +600,7 @@ impl HoverScope {
     }
 
     /// 悬浮层的强意图刷新：下一次 tick 立即发 `account.usage.refresh`。
-    fn request_refresh(&mut self) {
+    pub(super) fn request_refresh(&mut self) {
         self.refresh = true;
         self.next_usage = Instant::now();
     }
@@ -465,6 +668,9 @@ pub(super) struct State {
     /// 客户端偏好 `usage_hover_dashboard`：扫过「用量」按钮是否弹出跨厂商总览
     /// （默认开）。关掉后点击仍可钉住总览。
     pub usage_hover_dashboard: bool,
+    /// usage_* 偏好键里是否有本机覆盖（`ClientChromePreferences::usage_overridden`
+    /// 的镜像，供设置页「恢复配置文件值」决定是否可点）；随偏好写入 / 重载刷新。
+    pub usage_overridden: bool,
     /// 官方回调启用成功后排队的绑定，下一次 tick 发出。
     queued_binding: Option<QueuedBinding>,
     /// 订阅推送在呈现面可见时到达：下一次 tick 重绘一次（事件不逐帧 compose）。
@@ -516,9 +722,17 @@ pub(super) struct State {
     usage_sent_at: Option<Instant>,
     /// 厂商列表的低频重拉时刻：页面打开时立即，之后每 5 分钟（OBS-14）。
     next_providers: Instant,
-    /// 页面作用域排队中的强意图刷新：请求真正发出后才清除，被在途请求挡下时
-    /// 保留并在 200 ms 后重试；端点不支持 / 厂商已关闭时清除（回落到普通 get）。
+    /// 页面作用域排队中的强意图刷新：每个目标厂商的 `refresh` 都真正发出后才
+    /// 清除，被在途请求挡下的厂商保留并在 200 ms 后补发；端点不支持 / 厂商已
+    /// 关闭时清除（回落到普通 get）。
     refresh_usage: bool,
+    /// 本轮强意图刷新（`refresh_usage`）已发出 `refresh` 的厂商：200 ms 补发只发
+    /// 被挡下的厂商，不给已发出的厂商重复发（服务端 10 秒防抖会把重复发的当成
+    /// 「N 秒后可刷新」）；强意图消费或页面换代时清空。
+    manual_sent: Vec<Option<String>>,
+    /// 厂商列表请求最近一次发出的时刻：总览只在列表刚发出（`PROVIDERS_WAIT`
+    /// 内）时等它，超时即回落整体请求。
+    providers_sent_at: Option<Instant>,
     /// 账号页打开时尚无厂商列表：列表到达后按聚焦 pane 的 agent / 首个已安装
     /// 厂商补选一次。
     auto_select_provider: bool,
@@ -528,7 +742,8 @@ pub(super) struct State {
     /// 已在页脚说明过「所选主机不在线」的目标端点：回退目标不变时不重写页脚，
     /// 避免每 2 秒刷掉其它一次性提示。
     fallback_noted: Option<ClientEndpointId>,
-    pending: HashSet<&'static str>,
+    /// 在途观测请求的去重键（`Purpose::key`）。
+    pending: HashSet<String>,
     alerts: HashMap<String, AlertState>,
 }
 
@@ -622,12 +837,15 @@ impl State {
         }
     }
 
-    /// 页面作用域是否接受某账号：只按用户当前的厂商 / 账号选择过滤（服务端已按
-    /// 订阅参数过滤，这里挡住切换作用域后旧订阅的尾巴）。
+    /// 页面作用域是否接受某账号：按用户当前的厂商 / 账号选择过滤（服务端已按
+    /// 订阅参数过滤，这里挡住切换作用域后旧订阅的尾巴），本机关闭的厂商一律不收
+    /// （服务端只按它自己的 TOML 过滤）。
     fn page_scope_accepts(&self, account: &AccountUsageSnapshot) -> bool {
-        self.selected_provider
-            .as_deref()
-            .is_none_or(|agent| agent == account.agent)
+        !self.usage.disabled_providers.contains(&account.agent)
+            && self
+                .selected_provider
+                .as_deref()
+                .is_none_or(|agent| agent == account.agent)
             && self
                 .selected_account
                 .as_deref()
@@ -656,9 +874,11 @@ impl State {
         let Some(agent) = agent else {
             return false;
         };
-        self.selected_provider
-            .as_deref()
-            .is_none_or(|selected| selected == agent)
+        !self.usage.disabled_providers.iter().any(|d| d == agent)
+            && self
+                .selected_provider
+                .as_deref()
+                .is_none_or(|selected| selected == agent)
             && self
                 .selected_account
                 .as_deref()
@@ -716,14 +936,152 @@ impl State {
         }
     }
 
+    /// 某作用域是否还有用量请求在途（整体请求或任一厂商的逐厂商请求）。
+    fn usage_in_flight(&self, hover: bool) -> bool {
+        self.pending
+            .iter()
+            .any(|key| Purpose::is_usage_key(key, hover))
+    }
+
+    /// 响应到达：只释放该请求自己的在途键。整体请求（`agent=None`）与逐厂商请求
+    /// 可能交叠（列表迟到后回落整体请求、随后列表到达又逐厂商扇出），各释放各的，
+    /// 「刷新中」等全部在途响应到齐才结束；成批作废由 `bump_page_epoch` /
+    /// `reset_hover_scope` 负责。
+    fn settle_pending(&mut self, purpose: &Purpose) {
+        self.pending.remove(purpose.key().as_ref());
+    }
+
+    /// 某作用域本轮强意图刷新已发出 `refresh` 的厂商。
+    fn manual_sent(&mut self, hover: bool) -> &mut Vec<Option<String>> {
+        if hover {
+            &mut self.hover_scope.manual_sent
+        } else {
+            &mut self.manual_sent
+        }
+    }
+
+    /// 用量响应落入作用域：先按本机关闭的厂商过滤（服务端只按它自己的 TOML
+    /// 过滤，旧 server / 整体请求仍会带回本机关闭的厂商），再按请求带的厂商合并——
+    /// `agent=Some(x)` 只替换 x 的账号与刷新状态，其它厂商保留，并按厂商列表顺序
+    /// 稳定排列；`agent=None` 整体替换。
+    fn merge_usage_response(
+        &mut self,
+        hover: bool,
+        agent: Option<&str>,
+        accounts: Vec<AccountUsageSnapshot>,
+        refresh: Vec<UsageRefreshState>,
+    ) {
+        let disabled = &self.usage.disabled_providers;
+        let (accounts, dropped): (Vec<_>, Vec<_>) = accounts
+            .into_iter()
+            .partition(|account| !disabled.contains(&account.agent));
+        let refresh = refresh
+            .into_iter()
+            .filter(|state| {
+                !dropped
+                    .iter()
+                    .any(|account| account.account_id == state.account_id)
+            })
+            .collect::<Vec<_>>();
+        let providers = &self.providers;
+        let provider_order = |agent: &str| {
+            providers
+                .iter()
+                .position(|provider| provider.agent == agent)
+                .unwrap_or(usize::MAX)
+        };
+        // 作用域已选中厂商时，该厂商的响应就是整个作用域的权威快照：切换厂商后
+        // 保留到此刻的旧厂商账号（渲染期变暗）随之替换掉，不会与新厂商并存。
+        let scope_provider = if hover {
+            self.hover_scope.provider.as_deref()
+        } else {
+            self.selected_provider.as_deref()
+        };
+        let agent = agent.filter(|_| scope_provider.is_none());
+        let (scope_accounts, scope_refresh) = if hover {
+            (
+                &mut self.hover_scope.accounts,
+                &mut self.hover_scope.refresh_states,
+            )
+        } else {
+            (&mut self.accounts, &mut self.refresh_states)
+        };
+        match agent {
+            None => {
+                *scope_accounts = accounts;
+                *scope_refresh = refresh;
+            }
+            Some(agent) => {
+                // 该厂商的旧刷新状态一律让位给本次权威响应。归属按厂商解析（本次
+                // 响应里的账号 → 作用域快照 → 厂商列表的已配置账号），不按「作用域
+                // 里已有的账号 id」：只经 refreshing 事件写入、尚未出现在快照里的
+                // 状态否则永远清不掉，还会与本次响应里的同 id 条目重复。
+                let owned = |account_id: &str| {
+                    accounts
+                        .iter()
+                        .any(|account| account.account_id == account_id)
+                        || refresh.iter().any(|state| state.account_id == account_id)
+                        || scope_accounts.iter().any(|account| {
+                            account.account_id == account_id && account.agent == agent
+                        })
+                        || providers.iter().any(|provider| {
+                            provider.agent == agent
+                                && provider
+                                    .configured_accounts
+                                    .iter()
+                                    .any(|id| id == account_id)
+                        })
+                };
+                let stale = scope_refresh
+                    .iter()
+                    .filter(|state| owned(&state.account_id))
+                    .map(|state| state.account_id.clone())
+                    .collect::<Vec<_>>();
+                scope_refresh.retain(|state| !stale.contains(&state.account_id));
+                scope_accounts.retain(|account| account.agent != agent);
+                scope_accounts.extend(accounts);
+                scope_refresh.extend(refresh);
+                scope_accounts.sort_by_key(|account| provider_order(&account.agent));
+            }
+        }
+    }
+
+    /// 本机关闭的厂商集合变了：两个作用域里它们的账号与刷新状态立即离开，并唤醒
+    /// 两个作用域的轮询（重新启用的厂商下一次 tick 即补查）。
+    fn apply_disabled_providers(&mut self) {
+        let disabled = &self.usage.disabled_providers;
+        for (accounts, refresh_states) in [
+            (&mut self.accounts, &mut self.refresh_states),
+            (
+                &mut self.hover_scope.accounts,
+                &mut self.hover_scope.refresh_states,
+            ),
+        ] {
+            let stale = accounts
+                .iter()
+                .filter(|account| disabled.contains(&account.agent))
+                .map(|account| account.account_id.clone())
+                .collect::<Vec<_>>();
+            if stale.is_empty() {
+                continue;
+            }
+            accounts.retain(|account| !stale.contains(&account.account_id));
+            refresh_states.retain(|state| !stale.contains(&state.account_id));
+        }
+        let now = Instant::now();
+        self.next_usage = now;
+        self.hover_scope.next_usage = now;
+    }
+
     /// 页面作用域换代：作废所有在途页面请求（悬浮层的请求与订阅生命周期不受影响）。
     /// 旧账号快照保留到新数据到达（渲染期变暗），但旧刷新状态（防抖截止、待办绑定）
     /// 属于旧作用域，一并清掉。
     fn bump_page_epoch(&mut self) {
         self.epoch = self.epoch.saturating_add(1);
         self.pending
-            .retain(|key| Purpose::PAGE_INDEPENDENT_KEYS.contains(key));
+            .retain(|key| Purpose::is_page_independent_key(key));
         self.manual_in_flight = false;
+        self.manual_sent.clear();
         self.refresh_states.clear();
     }
 
@@ -734,8 +1092,10 @@ impl State {
     }
 
     /// 打开跨厂商总览的悬浮层作用域：复位并换代，不选厂商 / pane（请求带
-    /// `agent=None, pane_id=None`），定向到 `endpoint`，出现本身视为强意图刷新。
-    /// 页面作用域（`selected_*` / `accounts` / `epoch` / `account_scroll`）不动。
+    /// `pane_id=None`；总览按本机启用厂商逐个发 `agent=Some(x)`，定向到非活动
+    /// 主机或厂商列表不可用时回落 `agent=None`，见 `usage_targets`），定向到
+    /// `endpoint`，出现本身视为强意图刷新。页面作用域（`selected_*` / `accounts`
+    /// / `epoch` / `account_scroll`）不动。
     fn open_overview_scope(&mut self, endpoint: ClientEndpointId) {
         self.reset_hover_scope();
         self.hover_scope.endpoint = Some(endpoint);
@@ -749,8 +1109,7 @@ impl State {
             epoch,
             ..HoverScope::default()
         };
-        self.pending
-            .retain(|key| !Purpose::HOVER_KEYS.contains(key));
+        self.pending.retain(|key| !Purpose::is_hover_key(key));
     }
 
     /// 结束悬浮层：hover 本身与悬浮层作用域一并复位，页面作用域
@@ -821,9 +1180,10 @@ impl State {
             self.monitor_tab = value;
         }
         self.usage_hover_dashboard = config.preferences.usage_hover_dashboard.unwrap_or(true);
+        self.usage_overridden = config.preferences.usage_overridden();
         self.glyphs = config.border_glyphs;
         self.next_metrics = Instant::now();
-        self.next_usage = Instant::now();
+        self.apply_disabled_providers();
     }
     pub fn new(config: &ClientShellConfig) -> Self {
         let mut usage = config.account_usage.clone();
@@ -864,6 +1224,7 @@ impl State {
             hover: None,
             hover_scope: HoverScope::default(),
             usage_hover_dashboard: config.preferences.usage_hover_dashboard.unwrap_or(true),
+            usage_overridden: config.preferences.usage_overridden(),
             queued_binding: None,
             event_repaint: false,
             page_seen: false,
@@ -896,6 +1257,8 @@ impl State {
             usage_sent_at: None,
             next_providers: Instant::now(),
             refresh_usage: false,
+            manual_sent: Vec::new(),
+            providers_sent_at: None,
             auto_select_provider: false,
             accounts_page_seen: false,
             fallback_noted: None,
@@ -1285,7 +1648,7 @@ impl ClientShellState {
         outcome: &mut ClientShellInput,
     ) -> RequestOutcome {
         let key = purpose.key();
-        if self.observability.pending.contains(key) {
+        if self.observability.pending.contains(key.as_ref()) {
             return RequestOutcome::Busy;
         }
         let strict = target.is_some();
@@ -1377,47 +1740,147 @@ impl ClientShellState {
                 method,
             }),
         });
-        self.observability.pending.insert(key);
+        self.observability.pending.insert(key.into_owned());
         RequestOutcome::Sent
     }
 
-    /// 发一次页面作用域的用量请求：`manual` 为真时走 `account.usage.refresh`。
-    fn page_usage_request(
-        &mut self,
-        manual: bool,
-        outcome: &mut ClientShellInput,
-    ) -> RequestOutcome {
-        // 页面轮询永不带 pane_id：pane 只属于 `Action::Bind`。
-        let params = UsageParams {
-            agent: self.observability.selected_provider.clone(),
-            account_id: self.observability.selected_account.clone(),
-            pane_id: None,
-        };
-        let method = if manual {
-            Method::AccountUsageRefresh(params)
+    /// 某作用域这一轮该向哪些厂商发用量请求。`disabled_providers` 是双真源：
+    /// 服务端 TOML 是它自己的底线（不为任何客户端探测），本机偏好是本机覆盖——
+    /// 因此总览不发 `agent=None` 让服务端探测本机关闭的厂商，而是按本机关闭
+    /// 过滤后逐厂商发 `agent=Some(x)`；响应侧按厂商合并。
+    ///
+    /// 扇出只在服务端给出可判定信息时展开：列表里任一厂商缺 `installed`（旧
+    /// server 不宣告该字段，`provider_listed` 按未知保持列出）就回落整体请求，
+    /// 否则注册表的几十个厂商会被全部请求一遍；已列出厂商超过
+    /// `MAX_USAGE_FAN_OUT` 同样回落。列表请求刚发出（`PROVIDERS_WAIT` 内）才
+    /// 等它，丢失 / 报错后回落整体请求，轮询不停摆。
+    fn usage_targets(&self, hover: bool, now: Instant) -> UsageTargets {
+        let state = &self.observability;
+        let provider = if hover {
+            state.hover_scope.provider.as_deref()
         } else {
-            Method::AccountUsageGet(params)
+            state.selected_provider.as_deref()
         };
-        self.observation_request(method, Purpose::Usage, outcome)
+        if let Some(provider) = provider {
+            return if state.usage.disabled_providers.iter().any(|d| d == provider) {
+                UsageTargets::Disabled
+            } else {
+                UsageTargets::Agents(vec![Some(provider.to_owned())])
+            };
+        }
+        // 总览态。悬浮层定向到别的主机时本地缓存的厂商列表不属于它，回落到整体请求。
+        let remote_hover = hover
+            && state
+                .hover_scope
+                .endpoint
+                .as_ref()
+                .is_some_and(|endpoint| endpoint != &self.active_endpoint_id);
+        if remote_hover {
+            return UsageTargets::Agents(vec![None]);
+        }
+        if state.providers.is_empty() {
+            // 列表刚发出、仍在途：等它到达再逐厂商发（到达即唤醒轮询）。端点不支持
+            // 列表方法 / 列表为空 / 列表迟迟不到时只能整体请求，响应侧再按本机关闭过滤。
+            let awaiting = state.pending.contains(Purpose::Providers.key().as_ref())
+                && state
+                    .providers_sent_at
+                    .is_some_and(|sent_at| now.saturating_duration_since(sent_at) < PROVIDERS_WAIT);
+            return if awaiting {
+                UsageTargets::AwaitProviders
+            } else {
+                UsageTargets::Agents(vec![None])
+            };
+        }
+        if state
+            .providers
+            .iter()
+            .any(|provider| provider.installed.is_none())
+        {
+            return UsageTargets::Agents(vec![None]);
+        }
+        let listed = state
+            .providers
+            .iter()
+            .filter(|provider| provider_listed(provider))
+            .collect::<Vec<_>>();
+        if listed.is_empty() {
+            return UsageTargets::NoProviders;
+        }
+        let agents = listed
+            .iter()
+            .filter(|provider| !state.usage.disabled_providers.contains(&provider.agent))
+            .map(|provider| Some(provider.agent.clone()))
+            .collect::<Vec<_>>();
+        if agents.is_empty() {
+            UsageTargets::Disabled
+        } else if agents.len() > MAX_USAGE_FAN_OUT {
+            UsageTargets::Agents(vec![None])
+        } else {
+            UsageTargets::Agents(agents)
+        }
     }
 
-    /// 发一次悬浮层作用域的用量请求（带 hover 的 pane）。
-    fn hover_usage_request(
+    /// 向 `agents` 逐个发某作用域的用量请求；`manual` 为真时走 `account.usage.refresh`，
+    /// 且跳过本轮已发出 `refresh` 的厂商（`manual_sent`）、把新发出的记进去——
+    /// 被在途请求挡下的厂商由调用方保留强意图、200 ms 后再来补发。
+    /// 页面轮询永不带 pane_id（pane 只属于 `Action::Bind`），悬浮层带 hover 的 pane。
+    /// 端点级不可用对所有厂商一样，直接返回。
+    fn scope_usage_requests(
         &mut self,
+        hover: bool,
         manual: bool,
+        agents: &[Option<String>],
         outcome: &mut ClientShellInput,
-    ) -> RequestOutcome {
-        let params = UsageParams {
-            agent: self.observability.hover_scope.provider.clone(),
-            account_id: None,
-            pane_id: self.observability.hover_scope.pane.clone(),
-        };
-        let method = if manual {
-            Method::AccountUsageRefresh(params)
-        } else {
-            Method::AccountUsageGet(params)
-        };
-        self.observation_request(method, Purpose::HoverUsage, outcome)
+    ) -> FanOut {
+        let mut fan_out = FanOut::default();
+        for agent in agents {
+            if manual && self.observability.manual_sent(hover).contains(agent) {
+                continue;
+            }
+            let agent = agent.clone();
+            let params = if hover {
+                UsageParams {
+                    agent: agent.clone(),
+                    account_id: None,
+                    pane_id: self.observability.hover_scope.pane.clone(),
+                }
+            } else {
+                UsageParams {
+                    agent: agent.clone(),
+                    account_id: self.observability.selected_account.clone(),
+                    pane_id: None,
+                }
+            };
+            let method = if manual {
+                Method::AccountUsageRefresh(params)
+            } else {
+                Method::AccountUsageGet(params)
+            };
+            let purpose = if hover {
+                Purpose::HoverUsage {
+                    agent: agent.clone(),
+                }
+            } else {
+                Purpose::Usage {
+                    agent: agent.clone(),
+                }
+            };
+            match self.observation_request(method, purpose, outcome) {
+                RequestOutcome::Sent => {
+                    fan_out.sent = true;
+                    if manual {
+                        self.observability.manual_sent(hover).push(agent);
+                    }
+                }
+                RequestOutcome::Busy => fan_out.busy = true,
+                // 端点离线 / 未宣告方法 / 无快照对所有厂商一样：不必再试其余厂商。
+                RequestOutcome::Unavailable => {
+                    fan_out.unavailable = true;
+                    return fan_out;
+                }
+            }
+        }
+        fan_out
     }
 
     pub(crate) fn is_observation_request(&self, id: &str) -> bool {
@@ -1584,7 +2047,7 @@ impl ClientShellState {
             self.observability.subscription.detach();
             self.observability
                 .pending
-                .retain(|key| !matches!(*key, "subscribe" | "unsubscribe"));
+                .retain(|key| !matches!(key.as_str(), "subscribe" | "unsubscribe"));
             self.observability.queued_binding = None;
             self.observability.next_usage = now;
             self.observability.next_providers = now;
@@ -1685,8 +2148,10 @@ impl ClientShellState {
         let page_due = (page_visible || settings_open) && now >= self.observability.next_usage;
         let hover_due = hover_visible && now >= self.observability.hover_scope.next_usage;
         if self.observability.usage.enabled && (page_due || hover_due) {
-            // 厂商列表：首次、页面打开时与每 5 分钟低频重拉（OBS-14）。
-            if (self.observability.providers.is_empty() || now >= self.observability.next_providers)
+            // 厂商列表：页面打开时立即、之后每 5 分钟低频重拉（OBS-14）；失败按
+            // `PROVIDERS_RETRY` 退避。节流不看列表是否为空——否则列表拿不到时每
+            // tick 都重发一次。
+            if now >= self.observability.next_providers
                 && self.observation_request(
                     Method::AccountUsageProviders(EmptyParams::default()),
                     Purpose::Providers,
@@ -1694,6 +2159,7 @@ impl ClientShellState {
                 ) == RequestOutcome::Sent
             {
                 self.observability.next_providers = now + Duration::from_secs(300);
+                self.observability.providers_sent_at = Some(now);
             }
             // 轮询节奏：强意图被挡下 200 ms 重试；订阅覆盖时只留低频兜底；否则 2 秒。
             // 服务端报告探测在途时的 500 ms 收紧在响应到达处按发送时刻计算
@@ -1708,78 +2174,99 @@ impl ClientShellState {
                 }
             };
             if page_due {
-                let disabled = self
-                    .observability
-                    .selected_provider
-                    .as_ref()
-                    .is_some_and(|agent| {
-                        self.observability.usage.disabled_providers.contains(agent)
-                    });
                 let mut retry_soon = false;
-                if disabled {
-                    // 设置里关掉的厂商不发请求；排队中的强意图刷新必须消费掉，
-                    // 否则页面永远停在「刷新中…」且「刷新」按钮失去命中区。
-                    if std::mem::take(&mut self.observability.refresh_usage) {
-                        self.observability.message = Some(
-                            tr(
-                                "This provider is disabled in settings.",
-                                "此厂商已在设置中关闭，可在设置页重新启用。",
-                            )
-                            .into(),
-                        );
+                match self.usage_targets(false, now) {
+                    targets @ (UsageTargets::Disabled | UsageTargets::NoProviders) => {
+                        // 不发请求；排队中的强意图刷新必须消费掉，否则页面永远停在
+                        // 「刷新中…」且「刷新」按钮失去命中区。两种空集分开说明：本机
+                        // 关闭才指向设置页，没有已列出厂商时说明此主机没装 agent CLI。
+                        if std::mem::take(&mut self.observability.refresh_usage) {
+                            self.observability.manual_sent.clear();
+                            self.observability.message = Some(
+                                if targets == UsageTargets::NoProviders {
+                                    tr(
+                                        "No installed agent CLI or configured account detected on this host.",
+                                        "此主机未检测到已安装的 agent CLI，也没有配置账号。",
+                                    )
+                                } else if self.observability.selected_provider.is_some() {
+                                    tr(
+                                        "This provider is disabled in settings.",
+                                        "此厂商已在设置中关闭，可在设置页重新启用。",
+                                    )
+                                } else {
+                                    tr(
+                                        "All providers are disabled in settings.",
+                                        "所有厂商已在设置中关闭，可在设置页重新启用。",
+                                    )
+                                }
+                                .into(),
+                            );
+                        }
                     }
-                } else {
-                    let manual = self.observability.refresh_usage;
-                    let mut sent = self.page_usage_request(manual, outcome);
-                    if manual && sent == RequestOutcome::Unavailable {
-                        // 端点未宣告 account.usage.refresh（或此刻不可用）：只禁用
-                        // 手动刷新，同一轮回落到普通 get，轮询不停摆。
-                        self.observability.refresh_usage = false;
-                        sent = self.page_usage_request(false, outcome);
-                    }
-                    match sent {
-                        RequestOutcome::Sent => {
-                            // 只在请求真正发出后清除强意图；发出的是 refresh 时进入在途。
+                    // 厂商列表刚发出：保留强意图，列表到达（或失败）即唤醒；不压到
+                    // 200 ms 忙等，列表丢失时下一轮按 `usage_targets` 回落整体请求。
+                    UsageTargets::AwaitProviders => {}
+                    UsageTargets::Agents(agents) => {
+                        let manual = self.observability.refresh_usage;
+                        let mut fan_out =
+                            self.scope_usage_requests(false, manual, &agents, outcome);
+                        if manual && fan_out.unavailable {
+                            // 端点未宣告 account.usage.refresh（或此刻不可用）：只禁用
+                            // 手动刷新，同一轮回落到普通 get，轮询不停摆。
+                            self.observability.refresh_usage = false;
+                            self.observability.manual_sent.clear();
+                            fan_out = self.scope_usage_requests(false, false, &agents, outcome);
+                        }
+                        if fan_out.sent {
                             self.observability.usage_sent_at = Some(now);
-                            if std::mem::take(&mut self.observability.refresh_usage) {
-                                self.observability.manual_in_flight = true;
+                        }
+                        if self.observability.refresh_usage {
+                            if fan_out.busy {
+                                // 一部分厂商被在途请求挡下：强意图不能丢（否则它们只拿到
+                                // 吃 300 s 缓存的 get），保留并 200 ms 后只补发它们。
+                                retry_soon = true;
+                            } else {
+                                // 每个目标厂商的 refresh 都已发出：消费强意图，进入在途，
+                                // 全部响应到齐才结束「刷新中」（都已到齐则立即结束）。
+                                self.observability.refresh_usage = false;
+                                self.observability.manual_sent.clear();
+                                self.observability.manual_in_flight =
+                                    self.observability.usage_in_flight(false);
                             }
                         }
-                        // 被在途请求挡下的强意图刷新不能丢：保留标志并 200 ms 后重试。
-                        RequestOutcome::Busy => retry_soon = self.observability.refresh_usage,
-                        RequestOutcome::Unavailable => {}
                     }
                 }
                 self.observability.next_usage = cadence(retry_soon, subscribed);
             }
             if hover_due {
-                let disabled = self
-                    .observability
-                    .hover_scope
-                    .provider
-                    .as_ref()
-                    .is_some_and(|agent| {
-                        self.observability.usage.disabled_providers.contains(agent)
-                    });
                 let mut retry_soon = false;
-                if disabled {
-                    self.observability.hover_scope.refresh = false;
-                } else {
-                    let manual = self.observability.hover_scope.refresh;
-                    let mut sent = self.hover_usage_request(manual, outcome);
-                    if manual && sent == RequestOutcome::Unavailable {
+                match self.usage_targets(true, now) {
+                    UsageTargets::Disabled | UsageTargets::NoProviders => {
                         self.observability.hover_scope.refresh = false;
-                        sent = self.hover_usage_request(false, outcome);
+                        self.observability.hover_scope.manual_sent.clear();
                     }
-                    match sent {
-                        RequestOutcome::Sent => {
+                    UsageTargets::AwaitProviders => {}
+                    UsageTargets::Agents(agents) => {
+                        let manual = self.observability.hover_scope.refresh;
+                        let mut fan_out = self.scope_usage_requests(true, manual, &agents, outcome);
+                        if manual && fan_out.unavailable {
+                            self.observability.hover_scope.refresh = false;
+                            self.observability.hover_scope.manual_sent.clear();
+                            fan_out = self.scope_usage_requests(true, false, &agents, outcome);
+                        }
+                        if fan_out.sent {
                             self.observability.hover_scope.sent_at = Some(now);
-                            if std::mem::take(&mut self.observability.hover_scope.refresh) {
-                                self.observability.hover_scope.manual_in_flight = true;
+                        }
+                        if self.observability.hover_scope.refresh {
+                            if fan_out.busy {
+                                retry_soon = true;
+                            } else {
+                                self.observability.hover_scope.refresh = false;
+                                self.observability.hover_scope.manual_sent.clear();
+                                self.observability.hover_scope.manual_in_flight =
+                                    self.observability.usage_in_flight(true);
                             }
                         }
-                        RequestOutcome::Busy => retry_soon = self.observability.hover_scope.refresh,
-                        RequestOutcome::Unavailable => {}
                     }
                 }
                 self.observability.hover_scope.next_usage = cadence(retry_soon, false);
@@ -1821,12 +2308,17 @@ impl ClientShellState {
         if epoch != self.observability.epoch_for(&purpose) {
             return false;
         }
-        self.observability.pending.remove(purpose.key());
-        // 用量响应（成功或失败）到达即结束该作用域的在途手动刷新；排队中的下一次
-        // 强意图（`refresh_usage` / `hover_scope.refresh`）不受影响，仍显示刷新中。
+        self.observability.settle_pending(&purpose);
+        // 该作用域最后一条在途用量响应（成功或失败）到达即结束在途手动刷新；逐厂商
+        // 请求要等全部厂商到齐。排队中的下一次强意图（`refresh_usage` /
+        // `hover_scope.refresh`）不受影响，仍显示刷新中。
         match purpose {
-            Purpose::Usage => self.observability.manual_in_flight = false,
-            Purpose::HoverUsage => self.observability.hover_scope.manual_in_flight = false,
+            Purpose::Usage { .. } if !self.observability.usage_in_flight(false) => {
+                self.observability.manual_in_flight = false;
+            }
+            Purpose::HoverUsage { .. } if !self.observability.usage_in_flight(true) => {
+                self.observability.hover_scope.manual_in_flight = false;
+            }
             _ => {}
         }
         match result {
@@ -1836,33 +2328,40 @@ impl ClientShellState {
             Ok(ResponseResult::AccountUsageProviders { providers }) => {
                 self.observability.providers = providers;
                 self.auto_select_usage_provider();
+                // 总览态等着这份列表才能逐厂商发请求：立刻唤醒两个作用域的轮询。
+                let now = Instant::now();
+                self.observability.next_usage = self.observability.next_usage.min(now);
+                self.observability.hover_scope.next_usage =
+                    self.observability.hover_scope.next_usage.min(now);
             }
             Ok(ResponseResult::AccountUsage { accounts, refresh }) => {
-                // 响应只写自己的作用域，且不反写用户选择的厂商；刷新状态整体替换
-                // （get / refresh 响应是权威快照，旧 server 不带即为空）。服务端说探测
-                // 在途时把该作用域的下一次轮询收紧到 500 ms（页面已由订阅覆盖时靠事件
-                // 收尾，不提前轮询）。
+                // 响应只写自己的作用域，且不反写用户选择的厂商；按请求带的厂商合并
+                // （逐厂商请求只替换该厂商，整体请求整体替换；get / refresh 响应是
+                // 权威快照，旧 server 不带刷新状态即为空）。服务端说探测在途时把该
+                // 作用域的下一次轮询收紧到 500 ms（页面已由订阅覆盖时靠事件收尾，
+                // 不提前轮询）。
                 let refresh = refresh.unwrap_or_default();
                 let in_flight = refresh.iter().any(|state| state.in_flight);
-                if matches!(purpose, Purpose::HoverUsage) {
+                let (hover, agent) = match &purpose {
+                    Purpose::HoverUsage { agent } => (true, agent.as_deref()),
+                    Purpose::Usage { agent } => (false, agent.as_deref()),
+                    _ => (false, None),
+                };
+                self.observability
+                    .merge_usage_response(hover, agent, accounts, refresh);
+                if !in_flight {
+                    // 无在途探测：不收紧轮询。
+                } else if hover {
                     let scope = &mut self.observability.hover_scope;
-                    scope.accounts = accounts;
-                    scope.refresh_states = refresh;
-                    if in_flight {
-                        let soon = scope.sent_at.unwrap_or_else(Instant::now) + IN_FLIGHT_POLL;
-                        scope.next_usage = scope.next_usage.min(soon);
-                    }
-                } else {
-                    self.observability.accounts = accounts;
-                    self.observability.refresh_states = refresh;
-                    if in_flight && !self.observability.subscribed() {
-                        let soon = self
-                            .observability
-                            .usage_sent_at
-                            .unwrap_or_else(Instant::now)
-                            + IN_FLIGHT_POLL;
-                        self.observability.next_usage = self.observability.next_usage.min(soon);
-                    }
+                    let soon = scope.sent_at.unwrap_or_else(Instant::now) + IN_FLIGHT_POLL;
+                    scope.next_usage = scope.next_usage.min(soon);
+                } else if !self.observability.subscribed() {
+                    let soon = self
+                        .observability
+                        .usage_sent_at
+                        .unwrap_or_else(Instant::now)
+                        + IN_FLIGHT_POLL;
+                    self.observability.next_usage = self.observability.next_usage.min(soon);
                 }
             }
             Ok(ResponseResult::ObservationSubscription {
@@ -2028,7 +2527,7 @@ impl ClientShellState {
                 // 不在页脚报错。
                 tracing::debug!(
                     subsystem = "client_shell",
-                    purpose = purpose.key(),
+                    purpose = %purpose.key(),
                     code = error.code.as_deref().unwrap_or("unknown"),
                     "用量订阅请求失败，回退到轮询"
                 );
@@ -2054,6 +2553,15 @@ impl ClientShellState {
                 }
             }
             Err(error) => {
+                if matches!(purpose, Purpose::Providers) {
+                    // 列表拿不到（旧 server 的 server_context_required 等）：退避后再
+                    // 拉，期间总览回落整体请求；立刻唤醒两个作用域，不等下一轮。
+                    let now = Instant::now();
+                    self.observability.next_providers = now + PROVIDERS_RETRY;
+                    self.observability.next_usage = self.observability.next_usage.min(now);
+                    self.observability.hover_scope.next_usage =
+                        self.observability.hover_scope.next_usage.min(now);
+                }
                 self.observability.message = Some(error.message);
                 if let Some(dialog) = &mut self.observability.process_dialog {
                     dialog.pending = false;
@@ -2403,29 +2911,8 @@ impl ClientShellState {
         from_hover: bool,
         outcome: &mut ClientShellInput,
     ) {
-        let monitor_changed = matches!(
-            &action,
-            Action::Interval
-                | Action::Metric(_)
-                | Action::CardMove(..)
-                | Action::CardSize
-                | Action::HistoryRange
-                | Action::Device(_)
-                | Action::ToggleAlerts
-                | Action::AlertThreshold(_)
-                | Action::AlertDuration(_)
-                | Action::AlertCooldown(_)
-        );
-        // 偏好按键上锁：`usage_changed` 只覆盖四个 usage_* 键，悬浮延时单独判定，
-        // 否则只点「悬浮延时」也会把从未改过的 usage_* 键写成偏好影子值。
-        let usage_changed = matches!(
-            &action,
-            Action::UsageEnabled
-                | Action::UsageFormat
-                | Action::UsagePosition
-                | Action::ProviderEnabled(_)
-        );
-        let hover_delay_changed = matches!(&action, Action::HoverDelay);
+        // 偏好按键上锁：动作只回写它自己触到的那一个键（见 `PreferenceKey`）。
+        let preference = PreferenceKey::for_action(&action);
         match action {
             Action::CycleAccount => {
                 // 候选来自厂商的已配置账号（总览态为全部已列出厂商）；不足两个
@@ -2548,6 +3035,12 @@ impl ClientShellState {
                 } else {
                     disabled.push(agent);
                 }
+                self.observability.apply_disabled_providers();
+            }
+            Action::RestoreUsagePreferences => {
+                // 置 None 后按 config.toml 重载：效果与删掉偏好文件里这几个键一致。
+                self.config.preferences.clear_usage_overrides();
+                self.observability.reload_preferences(&self.config);
             }
             Action::AlertThreshold(index) => {
                 if let Some(rule) = self.observability.monitor.alerts.get_mut(index) {
@@ -2853,22 +3346,29 @@ impl ClientShellState {
                 self.observability.filtering_processes = !self.observability.filtering_processes
             }
         }
-        if monitor_changed {
-            self.config.preferences.monitor = Some(self.observability.monitor.clone());
+        let preferences = &mut self.config.preferences;
+        let usage = &self.observability.usage;
+        match preference {
+            Some(PreferenceKey::Monitor) => {
+                preferences.monitor = Some(self.observability.monitor.clone());
+            }
+            Some(PreferenceKey::UsageEnabled) => preferences.usage_enabled = Some(usage.enabled),
+            Some(PreferenceKey::UsageFormat) => preferences.usage_format = Some(usage.format),
+            Some(PreferenceKey::UsagePosition) => {
+                preferences.usage_position = Some(usage.position);
+            }
+            Some(PreferenceKey::DisabledProviders) => {
+                preferences.usage_disabled_providers = Some(usage.disabled_providers.clone());
+            }
+            Some(PreferenceKey::HoverDelay) => {
+                preferences.usage_hover_delay_ms = Some(usage.hover_delay_ms);
+            }
+            // 恢复已在动作分支里把键置 None，这里只需落盘。
+            Some(PreferenceKey::RestoreUsage) | None => {}
         }
-        if usage_changed {
-            self.config.preferences.usage_enabled = Some(self.observability.usage.enabled);
-            self.config.preferences.usage_format = Some(self.observability.usage.format);
-            self.config.preferences.usage_position = Some(self.observability.usage.position);
-            self.config.preferences.usage_disabled_providers =
-                Some(self.observability.usage.disabled_providers.clone());
-        }
-        if hover_delay_changed {
-            self.config.preferences.usage_hover_delay_ms =
-                Some(self.observability.usage.hover_delay_ms);
-        }
-        if monitor_changed || usage_changed || hover_delay_changed {
+        if preference.is_some() {
             self.persist_chrome_preferences(outcome);
+            self.observability.usage_overridden = self.config.preferences.usage_overridden();
         }
         outcome.repaint = true;
     }

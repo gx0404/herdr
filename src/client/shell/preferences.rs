@@ -89,6 +89,29 @@ pub(super) struct ClientChromePreferences {
     pub(super) palette_recent: Vec<String>,
 }
 
+impl ClientChromePreferences {
+    /// usage_* 影子键里是否有本机覆盖：这些键分别遮住 config.toml `[account_usage]`
+    /// 的 enabled / format / position / disabled_providers / hover_delay_ms，任一为
+    /// Some 即该键不再跟随配置文件。
+    pub(super) fn usage_overridden(&self) -> bool {
+        self.usage_enabled.is_some()
+            || self.usage_format.is_some()
+            || self.usage_position.is_some()
+            || self.usage_disabled_providers.is_some()
+            || self.usage_hover_delay_ms.is_some()
+    }
+
+    /// 「恢复配置文件值」：整组清空 usage_* 影子键，让它们重新跟随 config.toml。
+    /// `usage_hover_dashboard` 没有配置文件对应项，不在此列。
+    pub(super) fn clear_usage_overrides(&mut self) {
+        self.usage_enabled = None;
+        self.usage_format = None;
+        self.usage_position = None;
+        self.usage_disabled_providers = None;
+        self.usage_hover_delay_ms = None;
+    }
+}
+
 fn read_pages<'de, D: serde::Deserializer<'de>>(
     deserializer: D,
 ) -> Result<std::collections::HashMap<String, super::floating_pages::Window>, D::Error> {
@@ -289,6 +312,49 @@ mod tests {
         assert_eq!(loaded.palette_recent, ["a"]);
         std::fs::write(&path, "[1,2,3]").expect("write preferences");
         assert!(load(&path).is_none(), "不是对象的文件视为不可用");
+        std::fs::remove_file(path).expect("remove preferences");
+    }
+
+    /// usage_* 键是 config.toml `[account_usage]` 的本机影子：任一为 Some 即「有本机
+    /// 覆盖」；「恢复配置文件值」整组清空，非 usage 键不动。
+    #[test]
+    fn usage_overrides_are_detected_and_cleared_as_a_group() {
+        let mut preferences = ClientChromePreferences {
+            usage_format: Some(crate::config::UsageDisplayFormat::Table),
+            sidebar_width: Some(30),
+            ..ClientChromePreferences::default()
+        };
+        assert!(preferences.usage_overridden());
+        preferences.clear_usage_overrides();
+        assert!(!preferences.usage_overridden());
+        assert_eq!(preferences.usage_format, None);
+        assert_eq!(preferences.sidebar_width, Some(30), "非 usage 键不动");
+        preferences.usage_disabled_providers = Some(Vec::new());
+        assert!(preferences.usage_overridden(), "空列表也是显式覆盖");
+        preferences.clear_usage_overrides();
+        preferences.usage_hover_delay_ms = Some(800);
+        assert!(preferences.usage_overridden(), "悬浮延时同属影子键");
+    }
+
+    /// 类型不对的 `usage_disabled_providers` 只丢自己，同文件里的其它 usage 键照常恢复。
+    #[test]
+    fn bad_disabled_providers_value_only_drops_its_own_field() {
+        let path = std::env::temp_dir().join(format!(
+            "herdr-shell-bad-disabled-providers-{}.json",
+            std::process::id()
+        ));
+        std::fs::write(
+            &path,
+            r#"{"usage_disabled_providers":"claude","usage_position":"page","usage_enabled":true}"#,
+        )
+        .expect("write preferences");
+        let loaded = load(&path).expect("坏字段只丢自己");
+        assert_eq!(loaded.usage_disabled_providers, None);
+        assert_eq!(
+            loaded.usage_position,
+            Some(crate::config::UsageDisplayPosition::Page)
+        );
+        assert_eq!(loaded.usage_enabled, Some(true));
         std::fs::remove_file(path).expect("remove preferences");
     }
 

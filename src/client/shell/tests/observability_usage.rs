@@ -276,7 +276,7 @@ fn usage_response_repaints_a_docked_legacy_accounts_panel() {
     assert!(
         state.receive_observation(
             epoch,
-            Purpose::Usage,
+            Purpose::Usage { agent: None },
             Ok(crate::api::schema::ResponseResult::AccountUsage {
                 accounts: Vec::new(),
                 refresh: None,
@@ -374,6 +374,8 @@ fn selected_monitor_tab_survives_terminal_focus_and_keeps_usage_polling() {
         "account.usage.get".into(),
         "account.usage.providers".into(),
     ]));
+    // 总览态要等厂商列表到达才逐厂商轮询：先把列表喂进来。
+    deliver_providers(&mut state, vec![provider("claude", &["claude:default"])]);
     state.open_observation_page(Page::Accounts, &mut ClientShellInput::default());
     assert_eq!(state.observability.page, Some(Page::Accounts));
     state.compose(120, 40).expect("账号页停靠");
@@ -574,11 +576,15 @@ fn deliver_providers(state: &mut ClientShellState, providers: Vec<UsageProviderI
     );
 }
 
+/// 投递页面作用域的用量响应。响应的 purpose 与请求一致：页面已选厂商时请求是
+/// `usage:<agent>`（该厂商的响应即整个作用域的权威快照），总览态的整体请求是
+/// `agent=None`；逐厂商的总览响应用 `deliver_usage_for`。
 fn deliver_usage(state: &mut ClientShellState, accounts: Vec<AccountUsageSnapshot>) -> bool {
     let epoch = state.observability.epoch;
+    let agent = state.observability.selected_provider.clone();
     state.receive_observation(
         epoch,
-        Purpose::Usage,
+        Purpose::Usage { agent },
         Ok(ResponseResult::AccountUsage {
             accounts,
             refresh: None,
@@ -669,7 +675,7 @@ fn switching_provider_invalidates_inflight_usage_and_requests_again() {
     // 旧 epoch 的响应到达：丢弃，不污染新厂商的页面。
     assert!(!state.receive_observation(
         old_epoch,
-        Purpose::Usage,
+        Purpose::Usage { agent: None },
         Ok(ResponseResult::AccountUsage {
             accounts: vec![account("claude", "claude:default")],
             refresh: None,
@@ -883,7 +889,7 @@ fn hover_usage_response_lands_in_the_hover_scope_only() {
     let hover_epoch = state.observability.hover_scope.epoch;
     assert!(state.receive_observation(
         hover_epoch,
-        Purpose::HoverUsage,
+        Purpose::HoverUsage { agent: None },
         Ok(ResponseResult::AccountUsage {
             accounts: vec![account("claude", "claude:default")],
             refresh: None,
@@ -1240,6 +1246,7 @@ fn providers_are_refetched_on_page_open_and_every_five_minutes() {
 #[test]
 fn opening_the_usage_dashboard_resets_hover_scope_and_forces_a_refresh() {
     let mut state = usage_ready();
+    deliver_providers(&mut state, vec![provider("claude", &["claude:default"])]);
     state.observability.hover = Some(Hover {
         target: HoverTarget::Agent {
             endpoint_id: state.active_endpoint_id.clone(),
@@ -1263,11 +1270,19 @@ fn opening_the_usage_dashboard_resets_hover_scope_and_forces_a_refresh() {
     assert_eq!(state.observability.hover_scope.pane, None);
     assert_eq!(state.observability.hover_scope.provider, None);
     assert_eq!(state.observability.hover_scope.endpoint, None);
+    assert_eq!(
+        state.observability.selected_provider, None,
+        "仪表盘是跨厂商总览"
+    );
     let calls = usage_calls(&tick(&mut state, t0 + Duration::from_millis(10)));
     assert_eq!(calls.len(), 1);
     assert!(calls[0].0, "打开仪表盘 = 强意图刷新");
     assert_eq!(calls[0].1.pane_id, None);
-    assert_eq!(calls[0].1.agent, None, "仪表盘是跨厂商总览");
+    assert_eq!(
+        calls[0].1.agent.as_deref(),
+        Some("claude"),
+        "总览按本机启用的厂商逐个请求"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -1358,11 +1373,14 @@ fn hover_on(
     });
 }
 
+/// 投递悬浮层作用域的用量响应（purpose 与请求一致：悬浮层已选厂商时是
+/// `hover_usage:<agent>`，总览浮层的整体请求是 `agent=None`）。
 fn deliver_hover_usage(state: &mut ClientShellState, accounts: Vec<AccountUsageSnapshot>) -> bool {
     let epoch = state.observability.hover_scope.epoch;
+    let agent = state.observability.hover_scope.provider.clone();
     state.receive_observation(
         epoch,
-        Purpose::HoverUsage,
+        Purpose::HoverUsage { agent },
         Ok(ResponseResult::AccountUsage {
             accounts,
             refresh: None,
@@ -1856,7 +1874,7 @@ fn clicking_outside_the_hover_resets_its_scope_too() {
     assert!(
         !state.receive_observation(
             hover_epoch,
-            Purpose::HoverUsage,
+            Purpose::HoverUsage { agent: None },
             Ok(ResponseResult::AccountUsage {
                 accounts: vec![account("claude", "claude:default")],
                 refresh: None,
@@ -1891,9 +1909,10 @@ fn deliver_usage_with_refresh(
     refresh: Vec<UsageRefreshState>,
 ) -> bool {
     let epoch = state.observability.epoch;
+    let agent = state.observability.selected_provider.clone();
     state.receive_observation(
         epoch,
-        Purpose::Usage,
+        Purpose::Usage { agent },
         Ok(ResponseResult::AccountUsage {
             accounts,
             refresh: Some(refresh),
@@ -2078,9 +2097,12 @@ fn hover_polling_also_follows_the_in_flight_refresh_state() {
     let mut in_flight = refresh_state("claude:default");
     in_flight.in_flight = true;
     let hover_epoch = state.observability.hover_scope.epoch;
+    // 响应的 purpose 与请求一致：悬浮层已选 claude，请求键是 hover_usage:claude。
     assert!(state.receive_observation(
         hover_epoch,
-        Purpose::HoverUsage,
+        Purpose::HoverUsage {
+            agent: Some("claude".into()),
+        },
         Ok(ResponseResult::AccountUsage {
             accounts: vec![account("claude", "claude:default")],
             refresh: Some(vec![in_flight]),
@@ -2786,8 +2808,8 @@ fn returning_to_the_overview_is_not_undone_by_auto_selection() {
         "自动选中不抢回"
     );
     let calls = usage_calls(&outcome);
-    assert_eq!(calls.len(), 1, "总览态仍按不带厂商的参数轮询");
-    assert_eq!(calls[0].1.agent, None);
+    assert_eq!(calls.len(), 1, "总览态按本机启用的厂商逐个轮询");
+    assert_eq!(calls[0].1.agent.as_deref(), Some("claude"));
 }
 
 #[test]
@@ -3627,9 +3649,15 @@ fn hovering_the_agents_usage_button_opens_overview_and_leaving_closes_it() {
     let shown = tick(&mut state, t0 + Duration::from_millis(450));
     assert_eq!(overview_hover(&state), Some((true, false)), "400ms 后可见");
     let calls = usage_calls(&shown);
-    assert_eq!(calls.len(), 1, "可见即发悬浮层自己的请求: {calls:?}");
-    assert_eq!(calls[0].1.agent, None, "总览不带厂商");
-    assert_eq!(calls[0].1.pane_id, None, "总览不带 pane");
+    assert_eq!(
+        sorted_agents(&calls),
+        [Some("claude".to_owned()), Some("codex".to_owned())],
+        "可见即按本机启用的厂商逐个发悬浮层自己的请求: {calls:?}"
+    );
+    assert!(
+        calls.iter().all(|(_, params)| params.pane_id.is_none()),
+        "总览不带 pane"
+    );
     assert_eq!(
         state.observability.hover_scope.provider, None,
         "总览作用域不选厂商"
@@ -3758,6 +3786,13 @@ fn hover_becomes_visible_only_after_hover_delay_ms() {
 #[test]
 fn clicking_the_usage_button_pins_the_overview_without_clearing_the_page() {
     let mut state = usage_ready();
+    deliver_providers(
+        &mut state,
+        vec![
+            provider("claude", &["claude:default"]),
+            provider("codex", &["codex:default"]),
+        ],
+    );
     state.open_observation_page(Page::Monitor, &mut ClientShellInput::default());
     assert_eq!(state.observability.page, Some(Page::Monitor));
     state.compose(120, 40).expect("监控面板");
@@ -3817,8 +3852,11 @@ fn clicking_the_usage_button_pins_the_overview_without_clearing_the_page() {
         &mut state,
         Instant::now() + Duration::from_millis(10),
     ));
-    assert_eq!(calls.len(), 1);
-    assert_eq!(calls[0].1.agent, None);
+    assert_eq!(
+        sorted_agents(&calls),
+        [Some("claude".to_owned()), Some("codex".to_owned())],
+        "总览按本机启用的厂商逐个请求: {calls:?}"
+    );
     // 再点一次 → 关闭（幂等 show/hide）。
     state.compose(120, 40).expect("重绘");
     click(&mut state, button.x, button.y);
@@ -4318,5 +4356,980 @@ fn observability_paint_reports_page_and_overview_covers_separately() {
     assert!(
         !painted.covered.contains(&bounding),
         "不能把外接矩形当覆盖区"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// C-2 偏好影子真源：偏好按键上锁、「恢复配置文件值」、disabled_providers 双真源
+// （TOML = 服务端底线，客户端偏好 = 本机覆盖，总览逐厂商轮询并按厂商合并）
+// ---------------------------------------------------------------------------
+
+/// 页面作用域某一厂商的用量响应（对应 `agent=Some(x)` 的逐厂商请求）。
+fn deliver_usage_for(
+    state: &mut ClientShellState,
+    agent: &str,
+    accounts: Vec<AccountUsageSnapshot>,
+) -> bool {
+    let epoch = state.observability.epoch;
+    state.receive_observation(
+        epoch,
+        Purpose::Usage {
+            agent: Some(agent.into()),
+        },
+        Ok(ResponseResult::AccountUsage {
+            accounts,
+            refresh: None,
+        }),
+    )
+}
+
+fn sorted_agents(calls: &[(bool, UsageParams)]) -> Vec<Option<String>> {
+    let mut agents = calls
+        .iter()
+        .map(|(_, params)| params.agent.clone())
+        .collect::<Vec<_>>();
+    agents.sort();
+    agents
+}
+
+fn account_ids(accounts: &[AccountUsageSnapshot]) -> Vec<&str> {
+    accounts
+        .iter()
+        .map(|account| account.account_id.as_str())
+        .collect()
+}
+
+/// 设置页每个动作只回写自己的偏好键：勾掉一个厂商不能把 enabled / format /
+/// position 从 None 一次性固化成当前值（否则 config.toml 的后续修改被影子值遮住）。
+#[test]
+fn settings_actions_persist_only_their_own_usage_key() {
+    let path = std::env::temp_dir().join(format!(
+        "herdr-shell-usage-key-lock-{}.json",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_file(&path);
+    let mut state = ClientShellState::new(
+        ClientShellConfig::from_config(&Config::default()).with_preferences_path(path.clone()),
+    );
+    state.set_snapshot(Box::new(snapshot()));
+    state.set_pane_surface(surface());
+    state.observation_action(
+        Action::ProviderEnabled("codex".into()),
+        &mut ClientShellInput::default(),
+    );
+    let preferences = &state.config.preferences;
+    assert_eq!(
+        preferences.usage_disabled_providers.as_deref(),
+        Some(&["codex".to_owned()][..])
+    );
+    assert_eq!(preferences.usage_enabled, None, "未改过的键不写影子值");
+    assert_eq!(preferences.usage_format, None);
+    assert_eq!(preferences.usage_position, None);
+    assert_eq!(preferences.usage_hover_delay_ms, None);
+    assert!(state.observability.usage_overridden, "已有本机覆盖");
+
+    state.observation_action(Action::UsageFormat, &mut ClientShellInput::default());
+    let preferences = &state.config.preferences;
+    assert_eq!(
+        preferences.usage_format,
+        Some(crate::config::UsageDisplayFormat::Table)
+    );
+    assert_eq!(preferences.usage_enabled, None);
+    assert_eq!(preferences.usage_position, None);
+    let saved = preferences::load(&path).expect("偏好已写入");
+    assert_eq!(saved.usage_enabled, None);
+    assert_eq!(saved.usage_position, None);
+    assert_eq!(
+        saved.usage_format,
+        Some(crate::config::UsageDisplayFormat::Table)
+    );
+    assert_eq!(
+        saved.usage_disabled_providers,
+        Some(vec!["codex".to_owned()])
+    );
+    std::fs::remove_file(path).expect("remove preferences");
+}
+
+/// 设置页「恢复配置文件值」：清掉全部 usage_* 本机覆盖并按 config.toml 重载；
+/// 没有本机覆盖时该行只是说明、没有命中区。
+#[test]
+fn restore_config_values_clears_usage_overrides_and_reloads_the_config_file() {
+    let path = std::env::temp_dir().join(format!(
+        "herdr-shell-usage-restore-{}.json",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_file(&path);
+    let mut state = usage_ready();
+    state.config.account_usage.format = crate::config::UsageDisplayFormat::Table;
+    state.config.account_usage.disabled_providers = vec!["kimi".into()];
+    state.observability.reload_preferences(&state.config);
+    state.config.preferences_path = Some(path.clone());
+    state.open_observation_page(Page::Settings, &mut ClientShellInput::default());
+    state.compose(120, 40).expect("设置页");
+    assert!(
+        page_hit(&state, |action| matches!(
+            action,
+            Action::RestoreUsagePreferences
+        ))
+        .is_none(),
+        "无本机覆盖时「恢复配置文件值」不可点"
+    );
+
+    state.observation_action(Action::UsageFormat, &mut ClientShellInput::default());
+    state.observation_action(
+        Action::ProviderEnabled("codex".into()),
+        &mut ClientShellInput::default(),
+    );
+    state.observation_action(Action::HoverDelay, &mut ClientShellInput::default());
+    assert_eq!(
+        state.observability.usage.format,
+        crate::config::UsageDisplayFormat::Dashboard
+    );
+    assert_eq!(
+        state.observability.usage.disabled_providers,
+        ["kimi", "codex"]
+    );
+    assert_eq!(state.observability.usage.hover_delay_ms, 800);
+    assert!(state.observability.usage_overridden);
+    state.compose(120, 40).expect("设置页");
+    let restore = page_hit(&state, |action| {
+        matches!(action, Action::RestoreUsagePreferences)
+    })
+    .expect("有本机覆盖时「恢复配置文件值」可点");
+    let outcome = click(&mut state, restore.x + 1, restore.y);
+    assert!(outcome.repaint);
+
+    assert_eq!(
+        state.observability.usage.format,
+        crate::config::UsageDisplayFormat::Table,
+        "回到 config.toml 的值而不是内置默认"
+    );
+    assert_eq!(state.observability.usage.disabled_providers, ["kimi"]);
+    assert_eq!(state.observability.usage.hover_delay_ms, 400);
+    assert!(!state.observability.usage_overridden);
+    let preferences = &state.config.preferences;
+    assert_eq!(preferences.usage_enabled, None);
+    assert_eq!(preferences.usage_format, None);
+    assert_eq!(preferences.usage_position, None);
+    assert_eq!(preferences.usage_disabled_providers, None);
+    assert_eq!(preferences.usage_hover_delay_ms, None);
+    let saved = preferences::load(&path).expect("偏好已重写");
+    assert_eq!(saved.usage_format, None);
+    assert_eq!(saved.usage_disabled_providers, None);
+    assert_eq!(saved.usage_hover_delay_ms, None);
+    state.compose(120, 40).expect("设置页");
+    assert!(
+        page_hit(&state, |action| matches!(
+            action,
+            Action::RestoreUsagePreferences
+        ))
+        .is_none(),
+        "恢复后该行回到说明态"
+    );
+    std::fs::remove_file(path).expect("remove preferences");
+}
+
+/// 跨厂商总览按本机 disabled 过滤后逐厂商请求（`agent=Some(x)`），响应按厂商合并：
+/// 一个厂商的新数据不冲掉其它厂商，顺序按厂商列表稳定；服务端（TOML 未关闭）仍
+/// 返回的本机已关闭厂商在响应侧丢弃。
+#[test]
+fn overview_polls_each_enabled_provider_separately_and_merges_by_agent() {
+    let mut state = usage_ready();
+    state.observability.usage.disabled_providers = vec!["kimi".into()];
+    deliver_providers(
+        &mut state,
+        vec![
+            provider("claude", &["claude:default"]),
+            provider("codex", &["codex:default"]),
+            provider("kimi", &["kimi:default"]),
+        ],
+    );
+    state.toggle_usage_dashboard(&mut ClientShellInput::default());
+    let t0 = Instant::now() + Duration::from_secs(1);
+    let calls = usage_calls(&tick(&mut state, t0));
+    assert!(
+        calls.iter().all(|(manual, _)| *manual),
+        "打开仪表盘 = 强意图刷新"
+    );
+    assert!(calls.iter().all(|(_, params)| params.pane_id.is_none()));
+    assert_eq!(
+        sorted_agents(&calls),
+        [Some("claude".to_owned()), Some("codex".to_owned())],
+        "逐厂商请求，本机关闭的 kimi 不发: {calls:?}"
+    );
+    assert!(state.observability.refreshing());
+    assert!(deliver_usage_for(
+        &mut state,
+        "codex",
+        vec![account("codex", "codex:default")]
+    ));
+    assert!(state.observability.refreshing(), "另一厂商的刷新仍在途");
+    assert!(deliver_usage_for(
+        &mut state,
+        "claude",
+        vec![account_with_percent("claude", "claude:default", 10.0)]
+    ));
+    assert!(
+        !state.observability.refreshing(),
+        "全部厂商到齐才结束刷新中"
+    );
+    assert_eq!(
+        account_ids(&state.observability.accounts),
+        ["claude:default", "codex:default"],
+        "合并后按厂商列表顺序排列，不受响应到达顺序影响"
+    );
+
+    // 下一轮：只到一个厂商的新数据，其它厂商保留。
+    let calls = usage_calls(&tick(&mut state, t0 + Duration::from_secs(2)));
+    assert_eq!(calls.len(), 2, "普通轮询同样逐厂商: {calls:?}");
+    assert!(calls.iter().all(|(manual, _)| !*manual));
+    assert!(deliver_usage_for(
+        &mut state,
+        "claude",
+        vec![account_with_percent("claude", "claude:default", 20.0)]
+    ));
+    assert_eq!(
+        account_ids(&state.observability.accounts),
+        ["claude:default", "codex:default"]
+    );
+    assert_eq!(
+        state.observability.accounts[0].metrics[0].used_percent,
+        Some(20.0),
+        "同厂商按响应整体替换"
+    );
+
+    // 服务端 TOML 没关 kimi 时仍会返回它：本机关闭的厂商不落入作用域。
+    assert!(deliver_usage_for(
+        &mut state,
+        "kimi",
+        vec![account("kimi", "kimi:default")]
+    ));
+    assert_eq!(
+        account_ids(&state.observability.accounts),
+        ["claude:default", "codex:default"]
+    );
+}
+
+/// 厂商列表尚未到达时总览不发 `agent=None` 的整体请求（那会让服务端探测本机
+/// 关闭的厂商）：等列表到达后立刻逐厂商发出，强意图刷新不丢。
+#[test]
+fn overview_waits_for_the_provider_list_before_fanning_out() {
+    let mut state = usage_ready();
+    state.toggle_usage_dashboard(&mut ClientShellInput::default());
+    let t0 = Instant::now() + Duration::from_secs(1);
+    let opened = tick(&mut state, t0);
+    assert_eq!(providers_calls(&opened), 1, "先拉厂商列表");
+    assert!(
+        usage_calls(&opened).is_empty(),
+        "列表在途时不发整体请求: {:?}",
+        usage_calls(&opened)
+    );
+    assert!(state.observability.refreshing(), "强意图刷新保留");
+    deliver_providers(
+        &mut state,
+        vec![
+            provider("claude", &["claude:default"]),
+            provider("codex", &["codex:default"]),
+        ],
+    );
+    let calls = usage_calls(&tick(&mut state, t0 + Duration::from_millis(50)));
+    assert_eq!(
+        sorted_agents(&calls),
+        [Some("claude".to_owned()), Some("codex".to_owned())],
+        "列表到达后立刻逐厂商发出: {calls:?}"
+    );
+    assert!(calls.iter().all(|(manual, _)| *manual), "仍是强意图刷新");
+}
+
+/// 端点不宣告厂商列表方法（旧 server）：总览回落到一次 `agent=None` 的整体请求，
+/// 响应侧仍按本机关闭过滤。
+#[test]
+fn overview_falls_back_to_a_single_request_without_a_provider_list_method() {
+    let mut state = usage_ready();
+    state.set_endpoint_methods(Some(vec![
+        "client.views.set".into(),
+        "tab.focus".into(),
+        "account.usage.get".into(),
+        "account.usage.refresh".into(),
+    ]));
+    state.observability.usage.disabled_providers = vec!["kimi".into()];
+    state.toggle_usage_dashboard(&mut ClientShellInput::default());
+    let t0 = Instant::now() + Duration::from_secs(1);
+    let calls = usage_calls(&tick(&mut state, t0));
+    assert_eq!(calls.len(), 1, "{calls:?}");
+    assert_eq!(calls[0].1.agent, None);
+    assert!(deliver_usage(
+        &mut state,
+        vec![
+            account("claude", "claude:default"),
+            account("kimi", "kimi:default"),
+        ]
+    ));
+    assert_eq!(
+        account_ids(&state.observability.accounts),
+        ["claude:default"],
+        "整体响应也按本机关闭过滤"
+    );
+}
+
+/// 设置里关掉一个厂商：两个作用域里它的账号立即消失、不再向它发请求；重新
+/// 启用即刻补查它。
+#[test]
+fn disabling_a_provider_drops_its_accounts_and_enabling_polls_it_again() {
+    let mut state = usage_ready();
+    deliver_providers(
+        &mut state,
+        vec![
+            provider("claude", &["claude:default"]),
+            provider("codex", &["codex:default"]),
+        ],
+    );
+    state.toggle_usage_dashboard(&mut ClientShellInput::default());
+    let t0 = Instant::now() + Duration::from_secs(1);
+    assert_eq!(usage_calls(&tick(&mut state, t0)).len(), 2);
+    assert!(deliver_usage_for(
+        &mut state,
+        "claude",
+        vec![account("claude", "claude:default")]
+    ));
+    assert!(deliver_usage_for(
+        &mut state,
+        "codex",
+        vec![account("codex", "codex:default")]
+    ));
+    assert_eq!(state.observability.accounts.len(), 2);
+
+    state.observation_action(
+        Action::ProviderEnabled("codex".into()),
+        &mut ClientShellInput::default(),
+    );
+    assert_eq!(
+        account_ids(&state.observability.accounts),
+        ["claude:default"],
+        "关掉的厂商账号立即离开页面作用域"
+    );
+    let calls = usage_calls(&tick(&mut state, t0 + Duration::from_secs(2)));
+    assert_eq!(sorted_agents(&calls), [Some("claude".to_owned())]);
+
+    state.observation_action(
+        Action::ProviderEnabled("codex".into()),
+        &mut ClientShellInput::default(),
+    );
+    let calls = usage_calls(&tick(&mut state, t0 + Duration::from_millis(2_010)));
+    assert_eq!(
+        sorted_agents(&calls),
+        [Some("codex".to_owned())],
+        "重新启用立刻补查该厂商（claude 仍在途）: {calls:?}"
+    );
+}
+
+/// 订阅推送（服务端按 TOML 过滤）里本机关闭的厂商不合并进页面。
+#[test]
+fn usage_events_for_a_client_disabled_provider_are_ignored() {
+    let mut state = subscribing_ready();
+    state.observability.usage.disabled_providers = vec!["codex".into()];
+    deliver_providers(
+        &mut state,
+        vec![
+            provider("claude", &["claude:default"]),
+            provider("codex", &["codex:default"]),
+        ],
+    );
+    state.toggle_usage_dashboard(&mut ClientShellInput::default());
+    let t0 = Instant::now() + Duration::from_secs(1);
+    let opened = tick(&mut state, t0);
+    assert_eq!(subscribe_calls(&opened).len(), 1, "总览态订阅");
+    assert!(deliver_subscription(&mut state, "usage-1", true));
+    assert!(push_event(
+        &mut state,
+        "boot-1",
+        updated_event(
+            vec![
+                account("claude", "claude:default"),
+                account("codex", "codex:default"),
+            ],
+            vec![
+                refresh_state("claude:default"),
+                refresh_state("codex:default"),
+            ],
+        ),
+    ));
+    assert_eq!(
+        account_ids(&state.observability.accounts),
+        ["claude:default"],
+        "本机关闭的厂商事件被丢弃"
+    );
+    assert!(
+        state
+            .observability
+            .refresh_states
+            .iter()
+            .all(|refresh| refresh.account_id != "codex:default"),
+        "刷新状态同样不合并"
+    );
+}
+
+fn deliver_usage_for_with_refresh(
+    state: &mut ClientShellState,
+    agent: &str,
+    accounts: Vec<AccountUsageSnapshot>,
+    refresh: Vec<UsageRefreshState>,
+) -> bool {
+    let epoch = state.observability.epoch;
+    state.receive_observation(
+        epoch,
+        Purpose::Usage {
+            agent: Some(agent.into()),
+        },
+        Ok(ResponseResult::AccountUsage {
+            accounts,
+            refresh: Some(refresh),
+        }),
+    )
+}
+
+fn deliver_hover_usage_for(
+    state: &mut ClientShellState,
+    agent: &str,
+    accounts: Vec<AccountUsageSnapshot>,
+) -> bool {
+    let epoch = state.observability.hover_scope.epoch;
+    state.receive_observation(
+        epoch,
+        Purpose::HoverUsage {
+            agent: Some(agent.into()),
+        },
+        Ok(ResponseResult::AccountUsage {
+            accounts,
+            refresh: None,
+        }),
+    )
+}
+
+/// 投递厂商列表请求的失败结局。
+fn fail_providers(state: &mut ClientShellState) {
+    let epoch = state.observability.epoch;
+    state.receive_observation(
+        epoch,
+        Purpose::Providers,
+        Err(ClientShellEndpointError {
+            code: Some("server_context_required".into()),
+            message: "server context required".into(),
+        }),
+    );
+}
+
+/// 打开总览浮层（扫过用量按钮并等满悬浮延时），返回可见那一次 tick 的结果。
+fn open_overview_hover(state: &mut ClientShellState, now: Instant) -> ClientShellInput {
+    state.compose(120, 40).expect("工作台");
+    let button = state.hits.agent_usage_toggle;
+    assert!(!button.is_empty(), "用量按钮有命中区");
+    moved(state, button.x, button.y);
+    let shown = tick(state, now + Duration::from_millis(450));
+    assert_eq!(overview_hover(state), Some((true, false)), "悬浮延时后可见");
+    shown
+}
+
+/// 总览扇出里一部分厂商被在途请求挡下时，显式刷新不能只对已发出的厂商生效：
+/// 被挡下的厂商保留强意图并在 200 ms 重试时仍发 `refresh`，已发出的不重复发；
+/// 全部目标都发出后才结束「刷新中」。
+#[test]
+fn partial_fan_out_keeps_the_manual_refresh_for_blocked_providers() {
+    let mut state = usage_ready();
+    deliver_providers(
+        &mut state,
+        vec![
+            provider("claude", &["claude:default"]),
+            provider("codex", &["codex:default"]),
+        ],
+    );
+    state.toggle_usage_dashboard(&mut ClientShellInput::default());
+    let t0 = Instant::now() + Duration::from_secs(1);
+    let calls = usage_calls(&tick(&mut state, t0));
+    assert_eq!(calls.len(), 2, "打开仪表盘逐厂商发 refresh: {calls:?}");
+    // 只有 codex 结算，claude 的请求仍在途；此时用户点「刷新」。
+    assert!(deliver_usage_for(
+        &mut state,
+        "codex",
+        vec![account("codex", "codex:default")]
+    ));
+    assert!(deliver_usage_for(
+        &mut state,
+        "claude",
+        vec![account("claude", "claude:default")]
+    ));
+    assert!(!state.observability.refreshing(), "第一轮已收尾");
+    let t1 = t0 + Duration::from_secs(2);
+    let calls = usage_calls(&tick(&mut state, t1));
+    assert_eq!(calls.len(), 2, "普通轮询逐厂商 get: {calls:?}");
+    assert!(deliver_usage_for(
+        &mut state,
+        "codex",
+        vec![account("codex", "codex:default")]
+    ));
+    state.observation_action(Action::Refresh, &mut ClientShellInput::default());
+    assert!(state.observability.refreshing());
+    let calls = usage_calls(&tick(&mut state, t1 + Duration::from_millis(10)));
+    assert_eq!(
+        calls,
+        vec![(
+            true,
+            UsageParams {
+                agent: Some("codex".into()),
+                account_id: None,
+                pane_id: None,
+            }
+        )],
+        "空闲的 codex 立即发 refresh，claude 被在途 get 挡下: {calls:?}"
+    );
+    assert!(
+        state.observability.refreshing(),
+        "claude 的强意图未发出，仍是刷新中"
+    );
+    // claude 的旧 get 结算后 200 ms 重试：只补发 claude，且必须仍是 refresh。
+    assert!(deliver_usage_for(
+        &mut state,
+        "claude",
+        vec![account("claude", "claude:default")]
+    ));
+    assert!(
+        state.observability.refreshing(),
+        "已发出的 codex 响应未到，仍刷新中"
+    );
+    let calls = usage_calls(&tick(&mut state, t1 + Duration::from_millis(230)));
+    assert_eq!(
+        calls,
+        vec![(
+            true,
+            UsageParams {
+                agent: Some("claude".into()),
+                account_id: None,
+                pane_id: None,
+            }
+        )],
+        "被挡下的厂商补发 refresh（不是 get），已发出的 codex 不重复: {calls:?}"
+    );
+    assert!(state.observability.refreshing());
+    assert!(deliver_usage_for(
+        &mut state,
+        "codex",
+        vec![account("codex", "codex:default")]
+    ));
+    assert!(state.observability.refreshing(), "claude 的 refresh 仍在途");
+    assert!(deliver_usage_for(
+        &mut state,
+        "claude",
+        vec![account("claude", "claude:default")]
+    ));
+    assert!(
+        !state.observability.refreshing(),
+        "全部厂商到齐才结束刷新中"
+    );
+    let calls = usage_calls(&tick(&mut state, t1 + Duration::from_millis(2_300)));
+    assert!(
+        calls.iter().all(|(manual, _)| !*manual),
+        "强意图已消费，下一轮回到普通 get: {calls:?}"
+    );
+}
+
+/// 悬浮总览同样按厂商补发被挡下的强意图刷新。
+#[test]
+fn hover_overview_partial_fan_out_keeps_the_manual_refresh() {
+    let mut state = usage_ready();
+    deliver_providers(
+        &mut state,
+        vec![
+            provider("claude", &["claude:default"]),
+            provider("codex", &["codex:default"]),
+        ],
+    );
+    let t0 = Instant::now();
+    let shown = open_overview_hover(&mut state, t0);
+    assert_eq!(usage_calls(&shown).len(), 2);
+    assert!(deliver_hover_usage_for(
+        &mut state,
+        "codex",
+        vec![account("codex", "codex:default")]
+    ));
+    assert!(
+        state.observability.hover_scope.refreshing(),
+        "claude 的 refresh 仍在途"
+    );
+    // 用户在浮层里点「刷新」：codex 立即补发，claude 被挡下后保留。
+    state.observability.hover_scope.request_refresh();
+    let calls = usage_calls(&tick(&mut state, t0 + Duration::from_millis(500)));
+    assert_eq!(sorted_agents(&calls), [Some("codex".to_owned())]);
+    assert!(calls.iter().all(|(manual, _)| *manual));
+    assert!(deliver_hover_usage_for(
+        &mut state,
+        "claude",
+        vec![account("claude", "claude:default")]
+    ));
+    let calls = usage_calls(&tick(&mut state, t0 + Duration::from_millis(720)));
+    assert_eq!(
+        sorted_agents(&calls),
+        [Some("claude".to_owned())],
+        "补发被挡下的 claude: {calls:?}"
+    );
+    assert!(calls.iter().all(|(manual, _)| *manual), "仍是 refresh");
+    assert!(state.observability.hover_scope.refreshing());
+    assert!(deliver_hover_usage_for(
+        &mut state,
+        "codex",
+        vec![account("codex", "codex:default")]
+    ));
+    assert!(deliver_hover_usage_for(
+        &mut state,
+        "claude",
+        vec![account("claude", "claude:default")]
+    ));
+    assert!(!state.observability.hover_scope.refreshing());
+}
+
+/// 扇出的基数只在服务端给出可判定信息时展开：`installed` 缺省（旧 server）
+/// 一律回落一次 `agent=None`；已安装厂商超过上限也回落；请求数不随注册表规模
+/// 线性增长。
+#[test]
+fn overview_fan_out_is_bounded_and_falls_back_when_installed_is_unknown() {
+    let mut state = usage_ready();
+    let unknown = (0..23)
+        .map(|index| {
+            let mut info = provider(&format!("vendor{index}"), &[]);
+            info.installed = None;
+            info
+        })
+        .collect::<Vec<_>>();
+    deliver_providers(&mut state, unknown);
+    state.toggle_usage_dashboard(&mut ClientShellInput::default());
+    let t0 = Instant::now() + Duration::from_secs(1);
+    let calls = usage_calls(&tick(&mut state, t0));
+    assert_eq!(
+        sorted_agents(&calls),
+        [None],
+        "旧 server 不宣告 installed：只发一次整体请求: {calls:?}"
+    );
+    assert!(deliver_usage(
+        &mut state,
+        vec![account("claude", "claude:default")]
+    ));
+
+    // 服务端宣告了 installed：只有已安装（或已配置账号）的厂商参与扇出。
+    let mut listed = (0..20)
+        .map(|index| {
+            let mut info = provider(&format!("vendor{index}"), &[]);
+            info.installed = Some(false);
+            info
+        })
+        .collect::<Vec<_>>();
+    listed.push(provider("claude", &["claude:default"]));
+    listed.push(provider("codex", &[]));
+    let mut configured_only = provider("kimi", &["kimi:work"]);
+    configured_only.installed = Some(false);
+    listed.push(configured_only);
+    deliver_providers(&mut state, listed);
+    let calls = usage_calls(&tick(&mut state, t0 + Duration::from_secs(2)));
+    assert_eq!(
+        sorted_agents(&calls),
+        [
+            Some("claude".to_owned()),
+            Some("codex".to_owned()),
+            Some("kimi".to_owned())
+        ],
+        "23 个厂商里只有 3 个可判定为已列出: {calls:?}"
+    );
+    for call in &calls {
+        assert!(deliver_usage_for(
+            &mut state,
+            call.1.agent.as_deref().expect("逐厂商请求"),
+            Vec::new()
+        ));
+    }
+
+    // 已安装厂商超过扇出上限：回落整体请求，响应侧仍按本机关闭过滤。
+    let many = (0..12)
+        .map(|index| provider(&format!("vendor{index}"), &[]))
+        .collect::<Vec<_>>();
+    deliver_providers(&mut state, many);
+    let calls = usage_calls(&tick(&mut state, t0 + Duration::from_secs(4)));
+    assert_eq!(
+        sorted_agents(&calls),
+        [None],
+        "超过上限不逐厂商扇出: {calls:?}"
+    );
+}
+
+/// 厂商列表报错或迟迟不到时总览不能停摆：失败即回落整体请求并按退避重拉列表，
+/// 等待期间不把轮询压到 200 ms，也不每 tick 重发列表请求。
+#[test]
+fn overview_polls_without_a_provider_list_after_it_fails_or_stalls() {
+    let mut state = usage_ready();
+    state.toggle_usage_dashboard(&mut ClientShellInput::default());
+    let t0 = Instant::now() + Duration::from_secs(1);
+    let opened = tick(&mut state, t0);
+    assert_eq!(providers_calls(&opened), 1);
+    assert!(usage_calls(&opened).is_empty(), "列表刚发出：先等一等");
+    let soon = tick(&mut state, t0 + Duration::from_millis(300));
+    assert_eq!(providers_calls(&soon), 0, "等待期间不重发列表");
+    assert!(
+        usage_calls(&soon).is_empty(),
+        "等待期间不压到 200 ms 轮询: {:?}",
+        usage_calls(&soon)
+    );
+    fail_providers(&mut state);
+    let after_failure = tick(&mut state, t0 + Duration::from_millis(400));
+    assert_eq!(
+        sorted_agents(&usage_calls(&after_failure)),
+        [None],
+        "列表失败：立即回落整体请求，强意图不丢: {:?}",
+        usage_calls(&after_failure)
+    );
+    assert!(
+        usage_calls(&after_failure)
+            .iter()
+            .all(|(manual, _)| *manual),
+        "仍是强意图刷新"
+    );
+    assert_eq!(
+        providers_calls(&after_failure),
+        0,
+        "失败后按退避重拉，不每 tick 重发"
+    );
+    assert!(deliver_usage(
+        &mut state,
+        vec![account("claude", "claude:default")]
+    ));
+    let later = tick(&mut state, t0 + Duration::from_secs(3));
+    assert_eq!(providers_calls(&later), 0, "退避未到期");
+    assert_eq!(sorted_agents(&usage_calls(&later)), [None]);
+    assert!(deliver_usage(
+        &mut state,
+        vec![account("claude", "claude:default")]
+    ));
+    let retried = tick(&mut state, t0 + Duration::from_secs(12));
+    assert_eq!(providers_calls(&retried), 1, "退避到期后重拉列表");
+
+    // 列表请求发出后响应一直不到（连接未断、pending 键不释放）：超过等待上限
+    // 即回落整体请求，正常 2 秒节奏。
+    let mut stalled = usage_ready();
+    stalled.toggle_usage_dashboard(&mut ClientShellInput::default());
+    let t1 = Instant::now() + Duration::from_secs(1);
+    let opened = tick(&mut stalled, t1);
+    assert_eq!(providers_calls(&opened), 1);
+    assert!(usage_calls(&opened).is_empty());
+    let fallback = tick(&mut stalled, t1 + Duration::from_secs(2));
+    assert_eq!(
+        sorted_agents(&usage_calls(&fallback)),
+        [None],
+        "列表丢失：等待超限后回落整体请求: {:?}",
+        usage_calls(&fallback)
+    );
+    assert_eq!(providers_calls(&fallback), 0, "列表键仍在途，不重发");
+}
+
+/// 「一个厂商都没列出」与「所有已列出厂商被本机关闭」是两回事：前者说明此主机
+/// 没有受支持的 agent CLI，不能把用户指去设置页「重新启用」。
+#[test]
+fn overview_without_listed_providers_explains_instead_of_blaming_settings() {
+    let mut state = usage_ready();
+    let mut missing = provider("claude", &[]);
+    missing.installed = Some(false);
+    deliver_providers(&mut state, vec![missing]);
+    state.toggle_usage_dashboard(&mut ClientShellInput::default());
+    let t0 = Instant::now() + Duration::from_secs(1);
+    let calls = usage_calls(&tick(&mut state, t0));
+    assert!(calls.is_empty(), "没有已列出的厂商：不发请求: {calls:?}");
+    assert!(!state.observability.refreshing(), "强意图已消费");
+    let message = state.observability.message.clone().unwrap_or_default();
+    assert!(
+        message.contains("未检测到") || message.contains("No installed"),
+        "文案说明未检测到 agent CLI，而不是指向设置页: {message}"
+    );
+
+    // 悬浮总览：同样不发请求、不停在刷新中。
+    state.toggle_usage_dashboard(&mut ClientShellInput::default());
+    let shown = open_overview_hover(&mut state, t0);
+    assert!(usage_calls(&shown).is_empty());
+    assert!(!state.observability.hover_scope.refreshing());
+    state.observability.clear_hover();
+
+    // 对照：已列出但全部被本机关闭，才是「已在设置中关闭」。
+    deliver_providers(&mut state, vec![provider("claude", &["claude:default"])]);
+    state.observability.usage.disabled_providers = vec!["claude".into()];
+    state.observability.message = None;
+    state.toggle_usage_dashboard(&mut ClientShellInput::default());
+    let calls = usage_calls(&tick(&mut state, t0 + Duration::from_secs(2)));
+    assert!(calls.is_empty());
+    let message = state.observability.message.clone().unwrap_or_default();
+    assert!(
+        message.contains("设置") || message.contains("settings"),
+        "本机关闭才指向设置页: {message}"
+    );
+}
+
+/// 悬浮总览的逐厂商响应只写悬浮层作用域并按厂商合并、按厂商列表排序；页面作用域
+/// 的账号与刷新状态完全不动；悬浮层已选厂商时 `agent=Some(x)` 退化为整体替换。
+#[test]
+fn hover_overview_merges_per_provider_responses_into_the_hover_scope_only() {
+    let mut state = usage_ready();
+    deliver_providers(
+        &mut state,
+        vec![
+            provider("claude", &["claude:default"]),
+            provider("codex", &["codex:default"]),
+        ],
+    );
+    state.observability.accounts = vec![account("claude", "claude:page")];
+    state.observability.refresh_states = vec![refresh_state("claude:page")];
+    let t0 = Instant::now();
+    let shown = open_overview_hover(&mut state, t0);
+    assert_eq!(usage_calls(&shown).len(), 2);
+    assert!(deliver_hover_usage_for(
+        &mut state,
+        "codex",
+        vec![account("codex", "codex:default")]
+    ));
+    assert_eq!(
+        account_ids(&state.observability.hover_scope.accounts),
+        ["codex:default"]
+    );
+    assert!(
+        state.observability.hover_scope.refreshing(),
+        "claude 未到齐仍刷新中"
+    );
+    assert!(deliver_hover_usage_for(
+        &mut state,
+        "claude",
+        vec![account_with_percent("claude", "claude:default", 30.0)]
+    ));
+    assert_eq!(
+        account_ids(&state.observability.hover_scope.accounts),
+        ["claude:default", "codex:default"],
+        "按厂商合并且按厂商列表顺序"
+    );
+    assert!(!state.observability.hover_scope.refreshing());
+    assert!(deliver_hover_usage_for(
+        &mut state,
+        "claude",
+        vec![account_with_percent("claude", "claude:default", 60.0)]
+    ));
+    assert_eq!(
+        account_ids(&state.observability.hover_scope.accounts),
+        ["claude:default", "codex:default"],
+        "同厂商替换不冲掉其它厂商"
+    );
+    assert_eq!(
+        state.observability.hover_scope.accounts[0].metrics[0].used_percent,
+        Some(60.0)
+    );
+    assert_eq!(
+        account_ids(&state.observability.accounts),
+        ["claude:page"],
+        "页面作用域账号不动"
+    );
+    assert_eq!(
+        state.observability.refresh_states.len(),
+        1,
+        "页面作用域刷新状态不动"
+    );
+    assert_eq!(
+        state.observability.refresh_states[0].account_id,
+        "claude:page"
+    );
+
+    // 悬浮层已选厂商（pane 悬浮）：该厂商的响应就是整个作用域，旧的别家账号让位。
+    state.observability.clear_hover();
+    hover_on(&mut state, None, "pane_1", "claude");
+    tick(&mut state, t0 + Duration::from_secs(1));
+    assert_eq!(
+        state.observability.hover_scope.provider.as_deref(),
+        Some("claude")
+    );
+    state.observability.hover_scope.accounts = vec![account("codex", "codex:default")];
+    assert!(deliver_hover_usage_for(
+        &mut state,
+        "claude",
+        vec![account("claude", "claude:default")]
+    ));
+    assert_eq!(
+        account_ids(&state.observability.hover_scope.accounts),
+        ["claude:default"],
+        "已选厂商时整体替换"
+    );
+    assert_eq!(account_ids(&state.observability.accounts), ["claude:page"]);
+}
+
+/// 逐厂商响应按厂商清理旧刷新状态：只经 refreshing 事件写入、尚未出现在快照里
+/// 的账号状态也被本次权威响应替换，不残留、不重复。
+#[test]
+fn per_provider_response_replaces_orphaned_refresh_states_of_that_provider() {
+    let mut state = subscribing_ready();
+    deliver_providers(
+        &mut state,
+        vec![
+            provider("claude", &["claude:default", "claude:work"]),
+            provider("codex", &["codex:default"]),
+        ],
+    );
+    state.toggle_usage_dashboard(&mut ClientShellInput::default());
+    let t0 = Instant::now() + Duration::from_secs(1);
+    tick(&mut state, t0);
+    assert!(deliver_usage_for_with_refresh(
+        &mut state,
+        "claude",
+        vec![account("claude", "claude:default")],
+        vec![refresh_state("claude:default")],
+    ));
+    assert!(deliver_usage_for_with_refresh(
+        &mut state,
+        "codex",
+        vec![account("codex", "codex:default")],
+        vec![refresh_state("codex:default")],
+    ));
+    // 服务端新增了 claude:work，先推 refreshing 事件（账号尚未进快照）。
+    let mut orphan = refresh_state("claude:work");
+    orphan.in_flight = true;
+    assert!(push_event(
+        &mut state,
+        "boot-1",
+        ObservationEventEnvelope::AccountUsageRefreshing(AccountUsageRefreshingEvent {
+            refresh: vec![orphan],
+        }),
+    ));
+    assert!(state
+        .observability
+        .refresh_states
+        .iter()
+        .any(|refresh| refresh.account_id == "claude:work" && refresh.in_flight));
+    // claude 的权威响应：work 账号探测已完成、default 状态更新一次。
+    let mut settled = refresh_state("claude:work");
+    settled.in_flight = false;
+    assert!(deliver_usage_for_with_refresh(
+        &mut state,
+        "claude",
+        vec![
+            account("claude", "claude:default"),
+            account("claude", "claude:work"),
+        ],
+        vec![refresh_state("claude:default"), settled],
+    ));
+    let mut ids = state
+        .observability
+        .refresh_states
+        .iter()
+        .map(|refresh| refresh.account_id.as_str())
+        .collect::<Vec<_>>();
+    ids.sort_unstable();
+    assert_eq!(
+        ids,
+        ["claude:default", "claude:work", "codex:default"],
+        "同一账号只有一条，别家厂商的状态保留"
+    );
+    assert!(
+        state
+            .observability
+            .refresh_states
+            .iter()
+            .all(|refresh| !refresh.in_flight),
+        "孤儿状态被权威响应替换而不是残留旧的 in_flight"
     );
 }

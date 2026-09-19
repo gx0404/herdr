@@ -2659,7 +2659,8 @@ pub(super) fn usage_hover(
             Style::default().fg(palette.overlay0),
         );
     } else if scope.accounts.is_empty() {
-        let loading = scope.refreshing || state.pending.contains("hover_usage");
+        // 在途判定含逐厂商的 `hover_usage:<agent>` 键，不只看整体请求的键。
+        let loading = scope.refreshing || state.usage_in_flight(true);
         text(
             buffer,
             content,
@@ -3120,6 +3121,11 @@ enum SettingsRow<'a> {
     /// 用量位置为「页面」时的常驻提示行（无动作）。
     PositionHint,
     HoverDelay,
+    /// 「恢复配置文件值」：有本机覆盖（usage_* 偏好键任一为 Some）时可点，否则只是
+    /// 说明行。
+    RestoreUsage {
+        overridden: bool,
+    },
     ApiRefresh,
     CliRefresh,
     InteractiveProbe,
@@ -3142,7 +3148,9 @@ impl SettingsRow<'_> {
             | Self::PositionHint
             | Self::ApiRefresh
             | Self::CliRefresh
-            | Self::InteractiveProbe => return None,
+            | Self::InteractiveProbe
+            | Self::RestoreUsage { overridden: false } => return None,
+            Self::RestoreUsage { overridden: true } => Action::RestoreUsagePreferences,
             Self::Interval => Action::Interval,
             Self::CardHeight => Action::CardSize,
             Self::History => Action::HistoryRange,
@@ -3203,6 +3211,15 @@ impl SettingsRow<'_> {
             ),
             Self::PositionHint => format!("    ↳ {}", texts.hover_closed_hint),
             Self::HoverDelay => format!("{}: {} ms", texts.hover_delay, state.usage.hover_delay_ms),
+            Self::RestoreUsage { overridden } => format!(
+                "{} ({})",
+                tr("Restore config file values", "恢复配置文件值"),
+                if *overridden {
+                    tr("clear local overrides", "清除本机覆盖")
+                } else {
+                    tr("no local overrides", "无本机覆盖")
+                }
+            ),
             Self::ApiRefresh => format!(
                 "{}: {} s ({})",
                 texts.api_refresh, state.usage.api_refresh_seconds, texts.config_value_hint
@@ -3325,6 +3342,9 @@ fn settings(
     }
     rows.extend([
         SettingsRow::HoverDelay,
+        SettingsRow::RestoreUsage {
+            overridden: state.usage_overridden,
+        },
         SettingsRow::ApiRefresh,
         SettingsRow::CliRefresh,
         SettingsRow::InteractiveProbe,

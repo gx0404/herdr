@@ -1736,13 +1736,13 @@
           "key": "account_usage.enabled",
           "type": "boolean",
           "default": "true",
-          "description": "Enable account usage queries and display."
+          "description": "Enable account usage queries and display. Changes made in Monitor → Settings are saved as a client preference that overrides this key on that machine until \"Restore config file values\" is used."
         },
         {
           "key": "account_usage.format",
           "type": "string",
           "default": "\"dashboard\"",
-          "description": "Dashboard gauges or a usage table.",
+          "description": "Dashboard gauges or a usage table. Changes made in Monitor → Settings are saved as a client preference that overrides this key on that machine.",
           "values": [
             "dashboard",
             "table"
@@ -1752,7 +1752,7 @@
           "key": "account_usage.position",
           "type": "string",
           "default": "\"hover\"",
-          "description": "Hover popover, account page, or both.",
+          "description": "Hover popover, account page, or both. Changes made in Monitor → Settings are saved as a client preference that overrides this key on that machine.",
           "values": [
             "hover",
             "page",
@@ -1763,7 +1763,7 @@
           "key": "account_usage.hover_delay_ms",
           "type": "integer",
           "default": "400",
-          "description": "Hover delay, clamped to 200–2000 ms."
+          "description": "Hover delay, clamped to 200–2000 ms. Changes made in Monitor → Settings are saved as a client preference that overrides this key on that machine."
         },
         {
           "key": "account_usage.api_refresh_seconds",
@@ -1793,7 +1793,7 @@
           "key": "account_usage.disabled_providers",
           "type": "array",
           "default": "[]",
-          "description": "Agent IDs disabled for automatic queries. See monitoring for the account_usage.accounts array."
+          "description": "Agent IDs the server never probes: the server-side baseline for every client. Providers turned off in Monitor → Settings are saved as a client preference layered on top: that client stops requesting and displaying them, but the server may still refresh them while that client's overview subscription is active — use this key to stop probing entirely. \"Restore config file values\" drops the override. See monitoring for the account_usage.accounts array."
         }
       ]
     }
