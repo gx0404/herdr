@@ -102,7 +102,9 @@ fn hover_blank_space_and_wheel_cannot_reach_background_processes_or_cards() {
         "client.views.set".into(),
         "system.process.get".into(),
     ]));
-    state.observability.accounts = vec![crate::api::schema::AccountUsageSnapshot::default()];
+    // 悬浮层滚动按悬浮层作用域的账号数夹取，数据注入 hover_scope 而非页面。
+    state.observability.hover_scope.accounts =
+        vec![crate::api::schema::AccountUsageSnapshot::default()];
     state.workbench_open(PanelId::Monitor);
     state.observability.hover = Some(Hover {
         endpoint_id: state.active_endpoint_id.clone(),
@@ -146,7 +148,9 @@ fn hover_blank_space_and_wheel_cannot_reach_background_processes_or_cards() {
     }
     assert!(outcome.actions.is_empty(), "浮层空白不能请求底层进程详情");
     assert!(state.observability.card_scroll.is_empty());
-    assert_eq!(state.observability.account_scroll, 1);
+    // 悬浮层滚轮写悬浮层自己的滚动位置，页面的 account_scroll 不动。
+    assert_eq!(state.observability.hover_scope.scroll, 1);
+    assert_eq!(state.observability.account_scroll, 0);
 }
 
 #[test]

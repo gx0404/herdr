@@ -361,6 +361,7 @@ pub(super) fn paint(
                     inner.height.saturating_sub(2),
                 ),
                 state,
+                &hover_scope(state),
                 palette,
                 &mut hits,
             );
@@ -1029,10 +1030,12 @@ fn accounts(
         );
         return;
     }
+    // 设置里关掉的厂商不进侧栏 / ‹› 选择器：选中它只会得到一个永不发请求的页面。
     let listed = state
         .providers
         .iter()
         .filter(|provider| provider_listed(provider))
+        .filter(|provider| !state.usage.disabled_providers.contains(&provider.agent))
         .collect::<Vec<_>>();
     let sidebar_width = if area.width >= 70 { 22 } else { 0 };
     if sidebar_width > 0 {
@@ -1129,7 +1132,7 @@ fn accounts(
             .saturating_sub(sidebar_width + u16::from(sidebar_width > 0)),
         area.height.saturating_sub(picker_height),
     );
-    accounts_body(buffer, body, state, palette, hits);
+    accounts_body(buffer, body, state, &page_scope(state), palette, hits);
 }
 
 fn metric_scope(scope: &str) -> &str {
@@ -1171,16 +1174,125 @@ fn metric_value(metric: &UsageMetric, now_ms: u64, compact: bool) -> String {
     }
 }
 
+/// 账号正文的作用域视图：页面与悬浮层各自传入自己的数据，正文本身不区分来源。
+pub(super) struct AccountsScope<'a> {
+    pub accounts: &'a [AccountUsageSnapshot],
+    pub provider: Option<&'a str>,
+    pub account: Option<&'a str>,
+    /// 本作用域可绑定的 pane；有值时才画「绑定账号」按钮（页面作用域在 B-3
+    /// 接入 pane 选择器前恒为 `None`，按钮只在悬浮层出现）。
+    pub pane: Option<&'a str>,
+    /// 本作用域有强意图刷新排队或在途：旧数据变暗，空态显示「刷新中…」。
+    pub refreshing: bool,
+    /// 本作用域的账号列表滚动位置。
+    pub scroll: usize,
+}
+
+/// 账号页 / 浮动仪表盘使用的页面作用域。
+pub(super) fn page_scope(state: &State) -> AccountsScope<'_> {
+    AccountsScope {
+        accounts: &state.accounts,
+        provider: state.selected_provider.as_deref(),
+        account: state.selected_account.as_deref(),
+        pane: state.selected_pane.as_deref(),
+        refreshing: state.refreshing(),
+        scroll: state.account_scroll,
+    }
+}
+
+/// 悬浮层作用域：账号与 pane 都来自 `hover_scope`，选中账号沿用页面的高亮
+/// （仅当它在悬浮层的账号里）。
+pub(super) fn hover_scope(state: &State) -> AccountsScope<'_> {
+    let account = state.selected_account.as_deref().filter(|selected| {
+        state
+            .hover_scope
+            .accounts
+            .iter()
+            .any(|account| account.account_id == *selected)
+    });
+    AccountsScope {
+        accounts: &state.hover_scope.accounts,
+        provider: state.hover_scope.provider.as_deref(),
+        account,
+        pane: state.hover_scope.pane.as_deref(),
+        refreshing: state.hover_scope.refreshing(),
+        scroll: state.hover_scope.scroll,
+    }
+}
+
+/// 禁用态按钮：灰色、不回填命中区；返回实际占用宽度。
+fn disabled_button(buffer: &mut Buffer, rect: Rect, label: &str, palette: &Palette) -> u16 {
+    let width = (UnicodeWidthStr::width(label) as u16)
+        .saturating_add(2)
+        .min(rect.width);
+    let rect = Rect::new(rect.x, rect.y, width, rect.height.min(1));
+    buffer.set_style(rect, Style::default().bg(palette.surface0));
+    text(
+        buffer,
+        rect,
+        0,
+        &format!(" {label} "),
+        Style::default().fg(palette.overlay0),
+    );
+    width
+}
+
+/// 一行内从左到右依次摆放的按钮：放下后把 `x` 推进到下一个起点（含 1 列间距），
+/// 窄面板上后面的按钮自然截断而不是整个消失。
+fn flow_button(
+    buffer: &mut Buffer,
+    x: &mut u16,
+    row: Rect,
+    label: &str,
+    action: Action,
+    palette: &Palette,
+    hits: &mut Vec<(Rect, Action)>,
+) {
+    let rect = Rect::new(*x, row.y, row.right().saturating_sub(*x), 1);
+    let width = (UnicodeWidthStr::width(label) as u16)
+        .saturating_add(2)
+        .min(rect.width);
+    button(buffer, rect, label, action, palette, hits);
+    *x = x.saturating_add(width).saturating_add(1);
+}
+
+/// 「刷新」按钮，刷新在途时原位变成「刷新中…」状态提示（不回填命中区）。
+fn refresh_button(
+    buffer: &mut Buffer,
+    x: &mut u16,
+    row: Rect,
+    refreshing: bool,
+    palette: &Palette,
+    hits: &mut Vec<(Rect, Action)>,
+) {
+    if refreshing {
+        let rect = Rect::new(*x, row.y, row.right().saturating_sub(*x), 1);
+        let width = disabled_button(buffer, rect, tr("Refreshing…", "刷新中…"), palette);
+        *x = x.saturating_add(width).saturating_add(1);
+    } else {
+        flow_button(
+            buffer,
+            x,
+            row,
+            tr("Refresh", "刷新"),
+            Action::Refresh,
+            palette,
+            hits,
+        );
+    }
+}
+
 pub(super) fn usage_table(
     buffer: &mut Buffer,
     area: Rect,
     state: &State,
+    scope: &AccountsScope<'_>,
     palette: &Palette,
     hits: &mut Vec<(Rect, Action)>,
 ) {
     use ratatui::layout::Constraint;
     let mut entries = Vec::new();
-    for account in &state.accounts {
+    for account in scope.accounts {
         if account.metrics.is_empty() {
             entries.push((
                 account,
@@ -1205,7 +1317,7 @@ pub(super) fn usage_table(
             }
         }
     }
-    let start = state.account_scroll.min(entries.len().saturating_sub(1));
+    let start = scope.scroll.min(entries.len().saturating_sub(1));
     let rows = entries
         .iter()
         .skip(start)
@@ -1218,13 +1330,11 @@ pub(super) fn usage_table(
             ));
             Row::new(columns.clone()).style(
                 Style::default()
-                    .fg(
-                        if state.selected_account.as_deref() == Some(account.account_id.as_str()) {
-                            palette.accent
-                        } else {
-                            palette.text
-                        },
-                    )
+                    .fg(if scope.account == Some(account.account_id.as_str()) {
+                        palette.accent
+                    } else {
+                        palette.text
+                    })
                     .bg(if index % 2 == 0 {
                         palette.surface0
                     } else {
@@ -1259,9 +1369,8 @@ pub(super) fn usage_table(
     .render(area, buffer);
 }
 
-pub(super) fn account_rows(state: &State) -> usize {
-    state
-        .accounts
+pub(super) fn account_rows(state: &State, accounts: &[AccountUsageSnapshot]) -> usize {
+    accounts
         .iter()
         .map(|account| {
             if state.usage.format == UsageDisplayFormat::Table {
@@ -1284,24 +1393,25 @@ fn usage_dashboard(
     buffer: &mut Buffer,
     area: Rect,
     state: &State,
+    scope: &AccountsScope<'_>,
     palette: &Palette,
     hits: &mut Vec<(Rect, Action)>,
 ) {
-    let start = state
-        .account_scroll
-        .min(account_rows(state).saturating_sub(area.height.max(1) as usize));
+    let start = scope
+        .scroll
+        .min(account_rows(state, scope.accounts).saturating_sub(area.height.max(1) as usize));
     let viewport_row = |row: usize| {
         row.checked_sub(start)
             .filter(|row| *row < area.height as usize)
             .map(|row| Rect::new(area.x, area.y + row as u16, area.width, 1))
     };
     let mut row = 0;
-    for account in &state.accounts {
+    for account in scope.accounts {
         if row >= start + area.height as usize {
             break;
         }
         if let Some(header) = viewport_row(row) {
-            let selected = state.selected_account.as_deref() == Some(account.account_id.as_str());
+            let selected = scope.account == Some(account.account_id.as_str());
             let label = format!(
                 "{}{}",
                 if selected { "› " } else { "  " },
@@ -1408,32 +1518,46 @@ fn accounts_body(
     buffer: &mut Buffer,
     area: Rect,
     state: &State,
+    scope: &AccountsScope<'_>,
     palette: &Palette,
     hits: &mut Vec<(Rect, Action)>,
 ) {
-    if state.accounts.is_empty() {
+    if scope.accounts.is_empty() {
+        // 强意图刷新在途时显示「刷新中…」，而不是退回「请选择厂商」。
         text(
             buffer,
             area,
             0,
-            tr(
-                "Select a provider to inspect its official usage source.",
-                "请选择厂商以查询对应的官方用量。",
-            ),
+            if scope.refreshing {
+                tr("Refreshing…", "刷新中…")
+            } else {
+                tr(
+                    "Select a provider to inspect its official usage source.",
+                    "请选择厂商以查询对应的官方用量。",
+                )
+            },
             Style::default().fg(palette.overlay0),
         );
+        if area.height > 1 {
+            let row = Rect::new(area.x, area.bottom() - 1, area.width, 1);
+            let mut x = row.x;
+            refresh_button(buffer, &mut x, row, scope.refreshing, palette, hits);
+        }
         return;
     }
     let content = Rect::new(area.x, area.y, area.width, area.height.saturating_sub(3));
     if state.usage.format == UsageDisplayFormat::Table {
-        usage_table(buffer, content, state, palette, hits);
+        usage_table(buffer, content, state, scope, palette, hits);
     } else {
-        usage_dashboard(buffer, content, state, palette, hits);
+        usage_dashboard(buffer, content, state, scope, palette, hits);
+    }
+    if scope.refreshing {
+        // 切换厂商 / 账号后旧快照保留但变暗，直到新数据到达。
+        buffer.set_style(content, Style::default().add_modifier(Modifier::DIM));
     }
     if area.height > 3
-        && state
-            .selected_provider
-            .as_deref()
+        && scope
+            .provider
             .is_some_and(|agent| matches!(agent, "claude" | "antigravity"))
     {
         button(
@@ -1459,14 +1583,22 @@ fn accounts_body(
         );
     }
     if area.height > 3 {
-        button(
-            buffer,
-            Rect::new(area.x, area.bottom() - 3, area.width.min(25), 1),
-            tr("Switch account", "切换账号"),
-            Action::CycleAccount,
-            palette,
-            hits,
-        );
+        // 少于两个候选账号时「切换账号」是禁用态：不回填命中区。只探第二个
+        // 候选是否存在，渲染期不分配。
+        let switch = Rect::new(area.x, area.bottom() - 3, area.width.min(25), 1);
+        let switch_label = tr("Switch account", "切换账号");
+        if state.cycle_candidates(scope.provider).nth(1).is_some() {
+            button(
+                buffer,
+                switch,
+                switch_label,
+                Action::CycleAccount,
+                palette,
+                hits,
+            );
+        } else {
+            disabled_button(buffer, switch, switch_label, palette);
+        }
         button(
             buffer,
             Rect::new(
@@ -1482,23 +1614,24 @@ fn accounts_body(
         );
     }
     if area.height > 1 {
-        button(
+        // 底行流式排布：刷新（或「刷新中…」）· 官方来源 · 绑定（有 pane 时）。
+        let row = Rect::new(area.x, area.bottom() - 1, area.width, 1);
+        let mut x = row.x;
+        refresh_button(buffer, &mut x, row, scope.refreshing, palette, hits);
+        flow_button(
             buffer,
-            Rect::new(area.x, area.bottom() - 1, area.width.min(25), 1),
+            &mut x,
+            row,
             tr("Official source", "官方查询说明"),
             Action::Source,
             palette,
             hits,
         );
-        if state.selected_pane.is_some() {
-            button(
+        if scope.pane.is_some() {
+            flow_button(
                 buffer,
-                Rect::new(
-                    area.x + 26,
-                    area.bottom() - 1,
-                    area.width.saturating_sub(26),
-                    1,
-                ),
+                &mut x,
+                row,
                 tr("Bind account", "确认账号绑定"),
                 Action::Bind,
                 palette,

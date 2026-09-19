@@ -182,7 +182,9 @@ impl ClientShellState {
             return false;
         }
         if matches!(panel, PanelId::Monitor | PanelId::Accounts) {
-            self.observability.hover = None;
+            // hover 与悬浮层作用域同生共死：统一走 clear_hover，不留残留数据与
+            // 在途请求。
+            self.observability.clear_hover();
             self.observability.process_dialog = None;
         }
         self.cancel_frozen_selection();
@@ -332,7 +334,7 @@ impl ClientShellState {
             return false;
         }
         if matches!(mouse.kind, MouseEventKind::Down(_)) {
-            self.observability.hover = None;
+            self.observability.clear_hover();
             self.observability.hover_rect = Rect::default();
             self.observability.hover_hits.clear();
         }
