@@ -74,6 +74,19 @@ impl ApiClient {
         read_json_line(&mut reader)
     }
 
+    /// 只写不读：请求送达 server 后立刻返回，不等响应。给 statusline 回调这类
+    /// fire-and-forget 上报用——调用方随即退出，不能为一个不会消费的响应多持有管道写端。
+    /// server 在客户端断开后照常处理请求，响应写失败只记日志（`write_text_line_allow_disconnect`）。
+    pub fn send_request_without_reply(
+        &self,
+        request: &Request,
+        timeout: Duration,
+    ) -> Result<(), ApiClientError> {
+        let mut stream = self.connect()?;
+        set_timeout_best_effort(&stream, TimeoutKind::Send, timeout)?;
+        write_request(&mut stream, request)
+    }
+
     pub fn status(&self) -> Result<crate::api::RuntimeStatus, ApiClientError> {
         let response = self.request(Request {
             id: "api-client:status".into(),

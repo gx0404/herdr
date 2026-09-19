@@ -605,7 +605,6 @@ fn main() -> io::Result<()> {
     if std::env::var_os(remote::SSH_ASKPASS_SOCKET_ENV_VAR).is_some() {
         return remote::run_ssh_askpass_helper(&ssh_askpass_prompt_args(std::env::args_os()));
     }
-    i18n::init_early();
     let raw_args: Vec<String> = match args_as_utf8(std::env::args_os()) {
         Ok(args) => args,
         Err(err) => {
@@ -614,6 +613,21 @@ fn main() -> io::Result<()> {
             std::process::exit(2);
         }
     };
+    // statusline 回调（`api usage-report --passthrough`）每次刷新都会跑：不读配置文件做
+    // 语言初始化、不解析远程参数，直接派发，尽快把 stdin 交还给原渲染器。会话参数解析只读
+    // env 与 args（`HERDR_SESSION` 的校验与默认 socket 归属），与完整路径保持一致。
+    if cli::is_usage_report_passthrough(&raw_args) {
+        let args = match session::configure_from_args(&raw_args) {
+            Ok(args) => args,
+            Err(err) => {
+                eprintln!("error: {err}");
+                eprintln!("run 'herdr --help' for usage");
+                std::process::exit(2);
+            }
+        };
+        return finish_cli(cli::maybe_run(&args));
+    }
+    i18n::init_early();
     if raw_args
         .get(1)
         .is_some_and(|arg| arg == "--internal-usage-probe")

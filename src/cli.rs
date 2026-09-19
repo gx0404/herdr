@@ -100,6 +100,8 @@ pub(super) fn print_read_response(response: &serde_json::Value) -> std::io::Resu
     Ok(0)
 }
 
+pub(crate) use api::is_usage_report_passthrough;
+
 pub(crate) fn maybe_run_machine(args: &[String]) -> Option<std::io::Result<CommandOutcome>> {
     target::maybe_run(args)
 }

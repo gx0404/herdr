@@ -101,15 +101,20 @@ pub(super) fn callback_only(provider: &Provider, config: &AccountUsageConfig) ->
         && !(provider.agent == "claude" && config.interactive_probe)
 }
 
-/// claude 官方 `settings.json` 的 statusLine 是否已接入 herdr 用量回调；文件缺失或无法解析
-/// 时为 `None`。判据与 `integration::usage` 的启用逻辑同源（按本平台命令形态比对，不匹配
-/// 明文子串）；目录推导与 `credential_paths` 同源：`profile_dir` 优先于默认目录。
+/// claude 官方 `settings.json` 的 statusLine 是否已接入 herdr 用量回调；文件不存在（全新
+/// 安装）算未接入，读不了 / 无法解析 / 含无法识别的 herdr 回调时为 `None`。判据与
+/// `integration::usage` 的启用逻辑同源（按本平台命令形态比对，不匹配明文子串）；目录推导与
+/// `credential_paths` 同源：`profile_dir` 优先于默认目录。
 pub(super) fn claude_statusline_enabled(account: &UsageAccountConfig) -> Option<bool> {
     let dir = account
         .profile_dir
         .clone()
         .or_else(|| crate::integration::claude_dir().ok())?;
-    let settings = std::fs::read_to_string(dir.join("settings.json")).ok()?;
+    let settings = match std::fs::read_to_string(dir.join("settings.json")) {
+        Ok(settings) => settings,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Some(false),
+        Err(_) => return None,
+    };
     crate::integration::usage_statusline_enabled(&settings, "claude")
 }
 
@@ -473,16 +478,16 @@ mod tests {
         };
         assert_eq!(
             claude_statusline_enabled(&account),
-            None,
-            "无 settings.json"
+            Some(false),
+            "无 settings.json：全新安装算未接入，不是「无法判定」"
         );
         std::fs::write(
             base.join("settings.json"),
             format!(
                 "{{\"statusLine\":{{\"type\":\"command\",\"command\":{}}}}}",
-                serde_json::Value::String(crate::platform::usage_statusline_command(
-                    "claude", false
-                ))
+                serde_json::Value::String(
+                    crate::platform::usage_statusline_pipeline("claude", "").unwrap()
+                )
             ),
         )
         .unwrap();

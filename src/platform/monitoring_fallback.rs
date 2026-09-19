@@ -91,8 +91,27 @@ pub(crate) fn monitor_cpu_inventory() -> Option<String> {
         .ok()
         .map(|count| count.to_string())
 }
-pub(crate) fn usage_statusline_command(agent: &str, passthrough: bool) -> String {
-    let args = if passthrough { " --passthrough" } else { "" };
-    let otherwise = if passthrough { "cat" } else { ":" };
-    format!("(if [ \"${{HERDR_ENV:-}}\" = 1 ] && [ -n \"${{HERDR_BIN_PATH:-}}\" ]; then \"$HERDR_BIN_PATH\" api usage-report --agent {agent}{args}; else {otherwise}; fi)")
+
+/// unix 回退平台（macOS 等）的 statusline 包装与 Linux 共用 POSIX sh 实现；其它平台尚无
+/// 可靠的 shell 形态，拼装返回 `Unsupported`，剥离只做保守判断。
+#[cfg(unix)]
+pub(crate) use crate::platform::unix_common::{strip_usage_statusline, usage_statusline_pipeline};
+
+#[cfg(not(unix))]
+pub(crate) fn usage_statusline_pipeline(_agent: &str, _original: &str) -> std::io::Result<String> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "本平台尚未提供 statusline 用量回调的包装形态",
+    ))
+}
+
+#[cfg(not(unix))]
+pub(crate) fn strip_usage_statusline(
+    _agent: &str,
+    command: &str,
+) -> std::io::Result<Option<String>> {
+    if crate::platform::looks_like_usage_wrapper(command) {
+        return Err(crate::platform::unrecognized_usage_statusline_error());
+    }
+    Ok(None)
 }

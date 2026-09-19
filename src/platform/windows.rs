@@ -16,6 +16,26 @@ use std::{
 mod clipboard_image;
 mod config_backup;
 
+/// 让出 stdout：把标准输出句柄换成 `NUL` 并关闭原句柄（管道写端）。statusline 回调回放完
+/// stdin 后调用，之后本进程再等上报也不会拖住管道另一端读 EOF。Rust 的 `std::io::stdout()`
+/// 每次写都重新取标准句柄，换掉后写入落到 `NUL`。
+pub(crate) fn detach_stdout() -> std::io::Result<()> {
+    use std::os::windows::io::IntoRawHandle as _;
+    use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::System::Console::{GetStdHandle, SetStdHandle, STD_OUTPUT_HANDLE};
+
+    let null = std::fs::OpenOptions::new().write(true).open("NUL")?;
+    let previous = unsafe { GetStdHandle(STD_OUTPUT_HANDLE) };
+    // 新句柄成为进程的标准输出，随进程退出释放。
+    if unsafe { SetStdHandle(STD_OUTPUT_HANDLE, null.into_raw_handle()) } == 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    if !previous.is_null() && previous != INVALID_HANDLE_VALUE {
+        unsafe { CloseHandle(previous) };
+    }
+    Ok(())
+}
+
 pub(crate) fn classify_child_exit(status: &portable_pty::ExitStatus) -> super::ChildExitReason {
     // STATUS_CONTROL_C_EXIT is reported without a Unix signal by portable-pty.
     if status.exit_code() == 0xC000013A {

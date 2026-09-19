@@ -238,6 +238,18 @@ pub(crate) fn end_cli_output() {
     set_sigpipe_disposition(libc::SIG_IGN);
 }
 
+/// 让出 stdout：把 fd 1 换成 `/dev/null`。statusline 回调回放完 stdin 后调用——本进程是管道
+/// 写端的最后持有者（包装串已 `exec` 掉子 shell），换掉 fd 1 后原渲染器立刻读到 EOF，本进程
+/// 再等上报也不会拖住它。之后经 `std::io::stdout()` 的写入落到 `/dev/null`。
+pub(crate) fn detach_stdout() -> std::io::Result<()> {
+    use std::os::fd::AsRawFd as _;
+    let null = std::fs::OpenOptions::new().write(true).open("/dev/null")?;
+    if unsafe { libc::dup2(null.as_raw_fd(), libc::STDOUT_FILENO) } < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
+}
+
 pub(crate) fn remote_ssh_config_paths() -> super::RemoteSshConfigPaths {
     super::RemoteSshConfigPaths {
         user_config: std::env::var_os("HOME")
@@ -487,5 +499,220 @@ mod tests {
     fn remote_ssh_config_dir_rejects_overlong_control_socket_name() {
         let err = create_remote_ssh_config_dir(&"x".repeat(200)).unwrap_err();
         assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+    }
+}
+
+/// POSIX sh 形态的 statusline 包装（Linux 与 unix 回退平台共用）：首行是标记注释；第二行
+/// 的子 shell 在 herdr 环境里 `exec` 成 `herdr api usage-report`，环境外 `exec cat` 原样
+/// 透传——`exec` 让子 shell 不再持有管道写端，回调进程回放完就能让出它（`detach_stdout`），
+/// 原渲染命令立刻读到 EOF；`original` 非空时接在管道末端并用子 shell 分组，使多条命令的
+/// 渲染脚本整体读到同一份 stdin。`original` 为空时只留回调本身：同样走 `--passthrough`
+/// （热路径、fire-and-forget、静默），回放丢到 `/dev/null`，statusline 不显示任何内容。
+pub(crate) fn usage_statusline_pipeline(agent: &str, original: &str) -> std::io::Result<String> {
+    let marker = super::USAGE_STATUSLINE_MARKER;
+    if original.is_empty() {
+        Ok(format!(
+            "{marker}\n{}",
+            usage_callback_command(agent, false)
+        ))
+    } else {
+        Ok(format!(
+            "{marker}\n{}{STATUSLINE_PIPE_OPEN}{original}{STATUSLINE_PIPE_CLOSE}",
+            usage_callback_command(agent, true)
+        ))
+    }
+}
+
+/// 从 statusline 命令里剥离 herdr 用量回调，返回原渲染命令（可能为空串）；`Ok(None)` 表示
+/// 命令不是 herdr 包装（自定义渲染器、用户手写的 `herdr api usage-report …` 或空）。识别
+/// 顺序：标记形态 → 标记之前的旧模板（按整串比对）→ 带 herdr 包装特征却都不匹配（其它
+/// 平台 / 版本 / 厂商的形态、手工改过的包装）时报可识别错误。
+pub(crate) fn strip_usage_statusline(
+    agent: &str,
+    command: &str,
+) -> std::io::Result<Option<String>> {
+    if let Some(body) = command
+        .strip_prefix(super::USAGE_STATUSLINE_MARKER)
+        .and_then(|rest| rest.strip_prefix('\n'))
+    {
+        return strip_marked_usage_statusline(agent, body).map(Some);
+    }
+    if command == legacy_usage_callback_command(agent, false) {
+        return Ok(Some(String::new()));
+    }
+    let legacy_pipe = format!(
+        "{}{STATUSLINE_PIPE_OPEN}",
+        legacy_usage_callback_command(agent, true)
+    );
+    if let Some(original) = command
+        .strip_prefix(legacy_pipe.as_str())
+        .and_then(|rest| rest.strip_suffix(STATUSLINE_PIPE_CLOSE))
+    {
+        return Ok(Some(original.to_owned()));
+    }
+    if super::looks_like_usage_wrapper(command) {
+        return Err(super::unrecognized_usage_statusline_error());
+    }
+    Ok(None)
+}
+
+const STATUSLINE_PIPE_OPEN: &str = " | (\n";
+const STATUSLINE_PIPE_CLOSE: &str = "\n)";
+
+/// 标记之后的正文：首行是回调子 shell；带渲染命令时首行以 ` | (` 收尾、其余是渲染命令、
+/// 最后一行是 `)`。首行里的厂商名必须与 `agent` 一致，否则是别的厂商的回调。
+fn strip_marked_usage_statusline(agent: &str, body: &str) -> std::io::Result<String> {
+    let (callback, original) = match body.split_once('\n') {
+        Some((first, rest)) => {
+            let callback = first
+                .strip_suffix(STATUSLINE_PIPE_OPEN.trim_end_matches('\n'))
+                .ok_or_else(super::unrecognized_usage_statusline_error)?;
+            let original = rest
+                .strip_suffix(STATUSLINE_PIPE_CLOSE)
+                .ok_or_else(super::unrecognized_usage_statusline_error)?;
+            (callback, original)
+        }
+        None => (body, ""),
+    };
+    if super::usage_statusline_agent(callback) != Some(agent) {
+        return Err(super::unrecognized_usage_statusline_error());
+    }
+    Ok(original.to_owned())
+}
+
+/// 回调子 shell：`piped` 为 true 时 herdr 回放 stdin 给管道末端的渲染命令、herdr 之外
+/// `exec cat` 直通；为 false（独立形态）时回放丢弃、herdr 之外什么都不做。
+fn usage_callback_command(agent: &str, piped: bool) -> String {
+    let (redirect, otherwise) = if piped {
+        ("", "exec cat")
+    } else {
+        (" >/dev/null", ":")
+    };
+    format!("(if [ \"${{HERDR_ENV:-}}\" = 1 ] && [ -n \"${{HERDR_BIN_PATH:-}}\" ]; then exec \"$HERDR_BIN_PATH\" api usage-report --agent {agent} --passthrough{redirect}; else {otherwise}; fi)")
+}
+
+/// 标记之前的旧模板（不带标记、不 `exec`）：只用于识别与解除既有 settings，不再生成。
+fn legacy_usage_callback_command(agent: &str, passthrough: bool) -> String {
+    let args = if passthrough { " --passthrough" } else { "" };
+    let otherwise = if passthrough { "cat" } else { ":" };
+    format!("(if [ \"${{HERDR_ENV:-}}\" = 1 ] && [ -n \"${{HERDR_BIN_PATH:-}}\" ]; then \"$HERDR_BIN_PATH\" api usage-report --agent {agent}{args}; else {otherwise}; fi)")
+}
+
+#[cfg(test)]
+mod usage_statusline_tests {
+    use super::*;
+
+    /// 旧二进制写进用户 settings.json 的模板（逐字保留），新二进制必须仍能识别与解除。
+    const LEGACY_PIPELINE: &str = "(if [ \"${HERDR_ENV:-}\" = 1 ] && [ -n \"${HERDR_BIN_PATH:-}\" ]; then \"$HERDR_BIN_PATH\" api usage-report --agent claude --passthrough; else cat; fi) | (\nbash /home/xyz/.claude/statusline-command.sh\n)";
+    const LEGACY_STANDALONE: &str = "(if [ \"${HERDR_ENV:-}\" = 1 ] && [ -n \"${HERDR_BIN_PATH:-}\" ]; then \"$HERDR_BIN_PATH\" api usage-report --agent claude; else :; fi)";
+
+    /// 写进用户 settings.json 的形态逐字钉住（`tests/cli/usage_report.rs` 用同一字面量交给
+    /// 真实 bash 验证 EOF 时机与透传）：两处形态必须一起改。
+    #[test]
+    fn usage_statusline_pipeline_embeds_marker_and_execs_the_callback() {
+        let standalone = usage_statusline_pipeline("claude", "").unwrap();
+        assert_eq!(
+            standalone,
+            "# herdr-usage v1\n(if [ \"${HERDR_ENV:-}\" = 1 ] && [ -n \"${HERDR_BIN_PATH:-}\" ]; then exec \"$HERDR_BIN_PATH\" api usage-report --agent claude --passthrough >/dev/null; else :; fi)",
+            "独立形态也走 --passthrough（热路径 + fire-and-forget + 静默），回放丢弃"
+        );
+
+        let piped = usage_statusline_pipeline("claude", "bash ~/.claude/statusline.sh").unwrap();
+        assert_eq!(
+            piped,
+            "# herdr-usage v1\n(if [ \"${HERDR_ENV:-}\" = 1 ] && [ -n \"${HERDR_BIN_PATH:-}\" ]; then exec \"$HERDR_BIN_PATH\" api usage-report --agent claude --passthrough; else exec cat; fi) | (\nbash ~/.claude/statusline.sh\n)"
+        );
+        assert_eq!(
+            piped.lines().count(),
+            4,
+            "标记行、回调行、渲染命令行、收尾括号行"
+        );
+    }
+
+    #[test]
+    fn strip_usage_statusline_round_trips_marked_pipelines() {
+        for original in ["", "bash ~/.claude/statusline.sh", "a; b\nc | d\n)\n(e)"] {
+            let wrapped = usage_statusline_pipeline("claude", original).unwrap();
+            assert_eq!(
+                strip_usage_statusline("claude", &wrapped)
+                    .unwrap()
+                    .as_deref(),
+                Some(original),
+                "{original:?}"
+            );
+        }
+        let wrapped = usage_statusline_pipeline("antigravity", "python custom.py").unwrap();
+        assert_eq!(
+            strip_usage_statusline("antigravity", &wrapped)
+                .unwrap()
+                .as_deref(),
+            Some("python custom.py")
+        );
+        assert_eq!(
+            strip_usage_statusline("claude", &wrapped)
+                .unwrap_err()
+                .to_string(),
+            crate::platform::UNRECOGNIZED_USAGE_STATUSLINE,
+            "别的厂商的回调是可识别错误，不能当成自定义渲染器再包一层"
+        );
+    }
+
+    #[test]
+    fn strip_usage_statusline_still_recognizes_legacy_templates() {
+        assert_eq!(
+            strip_usage_statusline("claude", LEGACY_PIPELINE)
+                .unwrap()
+                .as_deref(),
+            Some("bash /home/xyz/.claude/statusline-command.sh")
+        );
+        assert_eq!(
+            strip_usage_statusline("claude", LEGACY_STANDALONE)
+                .unwrap()
+                .as_deref(),
+            Some("")
+        );
+        assert_eq!(
+            strip_usage_statusline("antigravity", LEGACY_PIPELINE)
+                .unwrap_err()
+                .kind(),
+            std::io::ErrorKind::InvalidData,
+            "旧模板按整串比对，厂商不同不算本厂商的包装"
+        );
+    }
+
+    #[test]
+    fn strip_usage_statusline_reports_unrecognized_callbacks_and_ignores_custom_commands() {
+        assert_eq!(strip_usage_statusline("claude", "").unwrap(), None);
+        assert_eq!(
+            strip_usage_statusline("claude", "python custom.py").unwrap(),
+            None
+        );
+        // 文档推荐的手写集成没有 herdr 包装特征：按自定义渲染器处理，启用 / 解除都不报错。
+        for hand_written in [
+            "herdr api usage-report --agent claude",
+            "tee >(herdr api usage-report --agent claude) | bash status.sh",
+        ] {
+            assert_eq!(
+                strip_usage_statusline("claude", hand_written).unwrap(),
+                None,
+                "{hand_written:?}"
+            );
+        }
+        // 从 Windows 同步来的 herdr 包装、手工改过的 POSIX 包装：带特征却剥不下来，可识别错误。
+        let windows = "powershell.exe -NoLogo -NoProfile -NonInteractive -EncodedCommand AAAA";
+        assert_eq!(
+            strip_usage_statusline("claude", windows)
+                .unwrap_err()
+                .to_string(),
+            crate::platform::UNRECOGNIZED_USAGE_STATUSLINE
+        );
+        let edited = "(if [ \"${HERDR_ENV:-}\" = 1 ]; then \"$HERDR_BIN_PATH\" api usage-report --agent claude --passthrough; else cat; fi) | (\nbash x.sh\n)";
+        assert_eq!(
+            strip_usage_statusline("claude", edited).unwrap_err().kind(),
+            std::io::ErrorKind::InvalidData
+        );
+        // 标记在但正文被手工改坏：同样是可识别错误，而不是静默按自定义命令处理。
+        let broken = "# herdr-usage v1\n(if true; then exec herdr api usage-report --agent claude --passthrough; fi) | (\nbash x.sh";
+        assert!(strip_usage_statusline("claude", broken).is_err());
     }
 }

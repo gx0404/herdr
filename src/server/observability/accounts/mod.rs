@@ -1477,7 +1477,12 @@ fn claude_waiting_message(statusline_enabled: Option<bool>, login_known: bool) -
         Some(true) => format!(
             "{login}，官方 statusline 回调已启用；在 Claude Code 会话中产生一次输出后即可看到用量"
         ),
-        _ => format!("{login}，等待官方 statusline 回调（去 监控 → 设置 启用）"),
+        Some(false) => format!("{login}，等待官方 statusline 回调（去 监控 → 设置 启用）"),
+        // settings.json 读不了 / 解析不了，或 statusLine 含无法识别的 herdr 回调：启用开关必然
+        // 失败，先请用户手动检查，而不是引导去点它。
+        None => format!(
+            "{login}，无法判定官方 statusline 回调状态（settings.json 无法解析，或 statusLine 含无法识别的 herdr 回调）；请手动检查后再到 监控 → 设置 启用"
+        ),
     }
 }
 
@@ -3857,7 +3862,7 @@ mod tests {
                 expect_identity: Some("me@example.test"),
             },
             Case {
-                name: "显式刷新 + 未开启交互探测：仍只做预检",
+                name: "显式刷新 + 未开启交互探测：仍只做预检；回调状态无法判定时提示手动检查",
                 manual: true,
                 interactive_probe: false,
                 auth: logged_in(),
@@ -3865,7 +3870,7 @@ mod tests {
                 interactive: Ok("Weekly 20% used".into()),
                 expect_calls: vec!["auth_status", "statusline_enabled"],
                 expect_status: ObservationStatus::NeedsBinding,
-                expect_message_contains: "等待官方 statusline 回调",
+                expect_message_contains: "无法判定官方 statusline 回调状态",
                 expect_flags: placeholder,
                 expect_identity: Some("me@example.test"),
             },

@@ -15,11 +15,64 @@ mod monitoring;
 pub(crate) use monitoring::monitor_cpu_inventory;
 pub(crate) use monitoring::terminate_usage_pty;
 pub(crate) use monitoring::usage_probe_needs_job_helper;
-pub(crate) use monitoring::usage_statusline_command;
 pub(crate) use monitoring::MonitoredProcess;
 pub(crate) use monitoring::{configure_usage_probe_command, terminate_usage_probe};
 pub(crate) use monitoring::{monitor_environment, process_instance_token, NativeGpuCollector};
+pub(crate) use monitoring::{strip_usage_statusline, usage_statusline_pipeline};
 pub(crate) use monitoring::{usage_probe_exit, UsageProbeGuard};
+
+/// statusline 包装串里的不变标记。各平台的包装形态都嵌入它（POSIX sh 是首行注释，Windows
+/// 在 `-EncodedCommand` 脚本首行），识别与剥离按标记而不是按整串相等比对：包装形态升级后
+/// 旧版本写下的包装仍能被识别与解除。`v1` 是标记版本，形态不兼容时新增标记并保留旧标记
+/// 的解析。
+pub(crate) const USAGE_STATUSLINE_MARKER: &str = "# herdr-usage v1";
+
+/// herdr 用量回调在包装串里的调用片段；各平台从它后面取厂商名。
+pub(crate) const USAGE_REPORT_INVOCATION: &str = "api usage-report";
+
+/// herdr 写下的 Windows 包装串前缀（`-EncodedCommand` 形态）。POSIX 平台上遇到它说明 settings
+/// 是从 Windows 同步来的：按「无法识别的 herdr 回调」处理，而不是当成自定义渲染器再包一层。
+pub(crate) const POWERSHELL_ENCODED_COMMAND_PREFIX: &str =
+    "powershell.exe -NoLogo -NoProfile -NonInteractive -EncodedCommand ";
+
+/// 文本（包装串或其解码后的脚本）是否带 herdr 包装的特征：标记行、herdr 的 Windows 编码前缀，
+/// 或回调调用与 `HERDR_ENV` / `HERDR_BIN_PATH` 环境判定同时出现。用户按文档手写的
+/// `herdr api usage-report --agent <agent>` 没有这些特征，按自定义渲染器处理（启用时接在
+/// 管道末端、解除时不动）。带特征却剥不出包装的命令才是「无法识别的 herdr 回调」。
+pub(crate) fn looks_like_usage_wrapper(text: &str) -> bool {
+    text.starts_with(USAGE_STATUSLINE_MARKER)
+        || text.starts_with(POWERSHELL_ENCODED_COMMAND_PREFIX)
+        || (text.contains(USAGE_REPORT_INVOCATION)
+            && (text.contains(crate::HERDR_ENV_VAR) || text.contains("HERDR_BIN_PATH")))
+}
+
+/// `unrecognized_usage_statusline_error` 的固定文案，调用方与测试按它识别这类错误。
+pub(crate) const UNRECOGNIZED_USAGE_STATUSLINE: &str =
+    "statusLine 已含无法识别的 herdr 用量回调（其它平台或版本的形态），请手动清理后重试";
+
+/// 命令含 `api usage-report` 却不是本平台可识别的 herdr 包装（其它平台或更早版本的形态、
+/// 手工改过的包装、别的厂商的回调）时的错误：调用方据此提示手动清理，不再盲目再包一层或
+/// 静默放过。
+pub(crate) fn unrecognized_usage_statusline_error() -> std::io::Error {
+    std::io::Error::new(
+        std::io::ErrorKind::InvalidData,
+        UNRECOGNIZED_USAGE_STATUSLINE,
+    )
+}
+
+/// 从包装串（或其解码后的脚本）里取出 `api usage-report --agent <agent>` 的厂商名；`None`
+/// 表示不含 herdr 回调调用。厂商名到空白或 shell / PowerShell 分隔符为止，各平台共用。
+pub(crate) fn usage_statusline_agent(text: &str) -> Option<&str> {
+    let rest = text
+        .split_once(USAGE_REPORT_INVOCATION)?
+        .1
+        .strip_prefix(" --agent ")?;
+    let end = rest
+        .find(|c: char| c.is_whitespace() || matches!(c, ';' | ')' | '}' | '|' | '"' | '\'' | '&'))
+        .unwrap_or(rest.len());
+    let agent = &rest[..end];
+    (!agent.is_empty()).then_some(agent)
+}
 
 /// 用量探测子进程的退出形态。平台差异（Unix 的信号终止、Windows 只有退出码）在
 /// `usage_probe_exit` 里收敛，核心模块只看两个事实：正常退出的退出码，或终止它的信号。
@@ -378,8 +431,8 @@ mod remote_bridge_tests;
 mod unix_common;
 #[cfg(unix)]
 pub(crate) use unix_common::{
-    begin_cli_output, default_known_hosts_path, end_cli_output, forward_remote_bridge_stdio,
-    RemoteBridgeWake,
+    begin_cli_output, default_known_hosts_path, detach_stdout, end_cli_output,
+    forward_remote_bridge_stdio, RemoteBridgeWake,
 };
 
 mod client_state;
@@ -390,6 +443,12 @@ pub(crate) fn begin_cli_output() {}
 
 #[cfg(not(unix))]
 pub(crate) fn end_cli_output() {}
+
+/// 没有 stdout 句柄语义的平台：让不出去，调用方退回到等待上报结束。
+#[cfg(not(any(unix, windows)))]
+pub(crate) fn detach_stdout() -> std::io::Result<()> {
+    Ok(())
+}
 
 #[cfg(target_os = "linux")]
 mod linux;
@@ -762,5 +821,68 @@ mod tests {
             read_limited_reader(input, 16).expect("limited read"),
             LimitedRead::Complete(b"image".to_vec())
         );
+    }
+
+    /// 厂商名解析是各平台包装串识别的共同判据：到空白或 shell / PowerShell 分隔符为止，
+    /// 没有 `--agent` 或厂商名为空都视为不含回调。
+    #[test]
+    fn usage_statusline_agent_stops_at_shell_delimiters() {
+        assert_eq!(
+            usage_statusline_agent(
+                "exec \"$HERDR_BIN_PATH\" api usage-report --agent claude --passthrough; else"
+            ),
+            Some("claude")
+        );
+        assert_eq!(
+            usage_statusline_agent(
+                "\"$HERDR_BIN_PATH\" api usage-report --agent antigravity; else :; fi)"
+            ),
+            Some("antigravity")
+        );
+        assert_eq!(
+            usage_statusline_agent("& $env:HERDR_BIN_PATH api usage-report --agent claude}else{}"),
+            Some("claude")
+        );
+        assert_eq!(
+            usage_statusline_agent("herdr api usage-report --agent codex"),
+            Some("codex")
+        );
+        assert_eq!(
+            usage_statusline_agent("herdr api usage-report --passthrough"),
+            None
+        );
+        assert_eq!(
+            usage_statusline_agent("herdr api usage-report --agent "),
+            None
+        );
+        assert_eq!(usage_statusline_agent("python custom.py"), None);
+    }
+
+    #[test]
+    fn usage_wrapper_features_distinguish_herdr_wrappers_from_hand_written_commands() {
+        assert!(looks_like_usage_wrapper(
+            "# herdr-usage v1\n(if true; then :; fi)"
+        ));
+        assert!(looks_like_usage_wrapper(
+            "powershell.exe -NoLogo -NoProfile -NonInteractive -EncodedCommand AAAA"
+        ));
+        assert!(looks_like_usage_wrapper(
+            "(if [ \"${HERDR_ENV:-}\" = 1 ]; then \"$HERDR_BIN_PATH\" api usage-report --agent claude; fi)"
+        ));
+        assert!(looks_like_usage_wrapper(
+            "if($env:HERDR_ENV -eq '1'){& $env:HERDR_BIN_PATH api usage-report --agent claude}"
+        ));
+        // 文档推荐的手写集成：不是 herdr 写下的包装，按自定义渲染器处理。
+        assert!(!looks_like_usage_wrapper(
+            "herdr api usage-report --agent claude"
+        ));
+        assert!(!looks_like_usage_wrapper(
+            "cat | herdr api usage-report --agent claude --passthrough | bash status.sh"
+        ));
+        assert!(!looks_like_usage_wrapper(
+            "powershell.exe -NoLogo -EncodedCommand AAAA api usage-report --agent claude"
+        ));
+        assert!(!looks_like_usage_wrapper("python custom.py"));
+        assert!(!looks_like_usage_wrapper(""));
     }
 }

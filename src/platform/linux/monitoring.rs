@@ -274,11 +274,8 @@ pub(crate) fn monitor_cpu_inventory() -> Option<String> {
     std::fs::read_to_string("/sys/devices/system/cpu/online").ok()
 }
 
-pub(crate) fn usage_statusline_command(agent: &str, passthrough: bool) -> String {
-    let args = if passthrough { " --passthrough" } else { "" };
-    let otherwise = if passthrough { "cat" } else { ":" };
-    format!("(if [ \"${{HERDR_ENV:-}}\" = 1 ] && [ -n \"${{HERDR_BIN_PATH:-}}\" ]; then \"$HERDR_BIN_PATH\" api usage-report --agent {agent}{args}; else {otherwise}; fi)")
-}
+/// statusline 包装串是 POSIX sh 形态，与 unix 回退平台共用同一实现。
+pub(crate) use crate::platform::unix_common::{strip_usage_statusline, usage_statusline_pipeline};
 
 #[cfg(test)]
 mod tests {
