@@ -30,8 +30,7 @@
       "Bash(git push:*)",
       "Bash(just release*:*)",
       "Bash(just bench*:*)",
-      "Bash(cargo run:*)",
-      "Bash(rm:*)"
+      "Bash(cargo run:*)"
     ],
     "deny": [
       "Read(./.env)",
