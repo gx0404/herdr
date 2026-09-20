@@ -215,6 +215,8 @@ pub const TEXTS: Texts = Texts {
         not_a_worktree_checkout: "This workspace is not a Herdr-managed worktree checkout.",
         no_worktrees_found: "No Git worktrees found for this repo.",
         unexpected_result: "endpoint returned an unexpected worktree result",
+        prunable_cannot_open:
+            "This checkout folder is missing on disk. Run `git worktree prune` to clear it.",
     },
     settings: SettingsTexts {
         title: " settings",
@@ -316,6 +318,7 @@ pub const TEXTS: Texts = Texts {
         wt_open: "open",
         wt_detached: "detached",
         wt_root: "root",
+        wt_prunable: "prunable",
         sort_grouped: "grouped",
         sort_priority: "priority",
         no_matching_agents: "  no matching agents",

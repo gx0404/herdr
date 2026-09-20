@@ -756,15 +756,25 @@ pub(super) struct ClientWorktreeOpenEntry {
     pub(super) branch: Option<String>,
     pub(super) is_linked_worktree: bool,
     pub(super) is_detached: bool,
+    /// 服务端判定的「目录已缺失但仍在 git 登记」状态；列表显式标出而不是隐藏。
+    pub(super) is_prunable: bool,
     pub(super) open_workspace_id: Option<String>,
     pub(super) label: String,
 }
 
 impl ClientWorktreeOpenEntry {
+    /// 选中后是否发 `worktree.open`：目录已缺失（prunable）的检出无法新开工作区，但它若仍
+    /// 在 herdr 中打开着，服务端只做聚焦、不要求目录存在，所以「已打开」优先于「待清理」。
+    pub(super) fn can_open(&self) -> bool {
+        self.open_workspace_id.is_some() || !self.is_prunable
+    }
+
     pub(super) fn status_label(&self) -> &'static str {
         let sidebar = &crate::i18n::texts().sidebar;
         if self.open_workspace_id.is_some() {
             sidebar.wt_open
+        } else if self.is_prunable {
+            sidebar.wt_prunable
         } else if self.branch.is_some() {
             ""
         } else if self.is_detached && self.is_linked_worktree {

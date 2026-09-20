@@ -1210,6 +1210,206 @@ fn worktree_open_filters_and_clicks_a_stable_public_entry() {
 }
 
 #[test]
+fn worktree_open_labels_prunable_checkouts_and_refuses_to_open_them() {
+    let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
+    state.set_snapshot(Box::new(snapshot()));
+    state.set_pane_surface(surface());
+    let mut prepare = ClientShellInput::default();
+    state.record_binding(
+        crate::input::KeybindMatch::Action(crate::input::KeybindAction::OpenWorktree),
+        &mut prepare,
+    );
+    let [ClientShellAction::Endpoint { request, .. }] = &prepare.actions[..] else {
+        panic!("open worktree should prepare through worktree.list");
+    };
+    let request_id = request.id.clone();
+    let mut result = worktree_list_result(None);
+    let crate::api::schema::ResponseResult::WorktreeList { worktrees, .. } = &mut result else {
+        panic!("fixture should be a worktree list");
+    };
+    // 目录已删除但仍在 git 登记的检出排在最前，验证默认选中会跳过它。
+    worktrees.insert(
+        0,
+        crate::api::schema::WorktreeInfo {
+            path: "/repo-stale".into(),
+            branch: Some("stale".into()),
+            is_bare: false,
+            is_detached: false,
+            is_prunable: true,
+            is_linked_worktree: true,
+            open_workspace_id: None,
+            label: "repo".into(),
+        },
+    );
+    state.handle_endpoint_result("boot-1", &request_id, Ok(result));
+
+    let frame = state.compose(106, 30).expect("open worktree modal");
+    let Some(ClientShellOverlay::WorktreeOpen(open)) = state.overlay.as_ref() else {
+        panic!("open worktree overlay should be shown");
+    };
+    assert_eq!(open.entries.len(), 2, "prunable checkout stays listed");
+    assert_eq!(open.selected, 1, "default selection skips prunable entries");
+    assert!(frame_rows(&frame).join("\n").contains("feature"));
+
+    // 向上移动到 prunable 条目：它带显式状态标签渲染，并进入 hits。
+    let moved = state.handle_raw_events(vec![RawInputEvent::Key(crate::input::TerminalKey::new(
+        KeyCode::Up,
+        KeyModifiers::empty(),
+    ))]);
+    assert!(moved.actions.is_empty());
+    let frame = state
+        .compose(106, 30)
+        .expect("open worktree modal on prunable entry");
+    let text = frame_rows(&frame).join("\n");
+    // 宽字符占两格，第二格为空白：比较前去掉空白。
+    let compact = |value: &str| value.split_whitespace().collect::<String>();
+    let prunable_label = crate::i18n::texts().sidebar.wt_prunable;
+    assert!(
+        text.contains("stale") && compact(&text).contains(&compact(prunable_label)),
+        "prunable checkout should render with an explicit status label:\n{text}"
+    );
+    let stale_row = state
+        .hits
+        .worktree_rows
+        .iter()
+        .find(|(_, index)| *index == 0)
+        .map(|(rect, _)| *rect)
+        .expect("prunable entry should be clickable");
+
+    // 点击 prunable 行：不发 worktree.open 请求，而是就地提示。
+    let refused =
+        state.handle_raw_events(vec![RawInputEvent::Mouse(crossterm::event::MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: stale_row.x + 2,
+            row: stale_row.y,
+            modifiers: KeyModifiers::empty(),
+        })]);
+    assert!(
+        refused.actions.is_empty(),
+        "prunable checkout must not be sent to worktree.open"
+    );
+    let message = crate::i18n::texts().worktree.prunable_cannot_open;
+    let Some(ClientShellOverlay::WorktreeOpen(open)) = state.overlay.as_ref() else {
+        panic!("overlay should stay open after refusal");
+    };
+    assert_eq!(open.error.as_deref(), Some(message));
+    assert!(!open.opening);
+    let frame = state
+        .compose(106, 30)
+        .expect("open worktree modal after refusal");
+    let text = frame_rows(&frame).join("\n");
+    let message_head: String = compact(message).chars().take(8).collect();
+    assert!(
+        compact(&text).contains(&message_head),
+        "refusal message should be rendered:\n{text}"
+    );
+
+    // Enter 同样被拒绝，且不会把 overlay 置为 opening。
+    let refused_by_key = state.handle_raw_events(vec![RawInputEvent::Key(
+        crate::input::TerminalKey::new(KeyCode::Enter, KeyModifiers::empty()),
+    )]);
+    assert!(refused_by_key.actions.is_empty());
+
+    // 回到正常条目仍然可以打开。
+    state.handle_raw_events(vec![RawInputEvent::Key(crate::input::TerminalKey::new(
+        KeyCode::Down,
+        KeyModifiers::empty(),
+    ))]);
+    state
+        .compose(106, 30)
+        .expect("open worktree modal on openable entry");
+    let feature_row = state
+        .hits
+        .worktree_rows
+        .iter()
+        .find(|(_, index)| *index == 1)
+        .map(|(rect, _)| *rect)
+        .expect("openable entry should be clickable");
+    let opened =
+        state.handle_raw_events(vec![RawInputEvent::Mouse(crossterm::event::MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: feature_row.x + 2,
+            row: feature_row.y,
+            modifiers: KeyModifiers::empty(),
+        })]);
+    let [ClientShellAction::Endpoint { request, .. }] = &opened.actions[..] else {
+        panic!("openable row should open through endpoint API");
+    };
+    assert!(matches!(
+        &request.method,
+        crate::api::schema::Method::WorktreeOpen(params)
+            if params.path.as_deref() == Some("/repo-feature")
+    ));
+}
+
+#[test]
+fn worktree_open_still_focuses_already_open_checkout_when_prunable() {
+    let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
+    state.set_snapshot(Box::new(snapshot()));
+    state.set_pane_surface(surface());
+    let mut prepare = ClientShellInput::default();
+    state.record_binding(
+        crate::input::KeybindMatch::Action(crate::input::KeybindAction::OpenWorktree),
+        &mut prepare,
+    );
+    let [ClientShellAction::Endpoint { request, .. }] = &prepare.actions[..] else {
+        panic!("open worktree should prepare through worktree.list");
+    };
+    let request_id = request.id.clone();
+    let mut result = worktree_list_result(None);
+    let crate::api::schema::ResponseResult::WorktreeList { worktrees, .. } = &mut result else {
+        panic!("fixture should be a worktree list");
+    };
+    // 目录已缺失但仍在 herdr 中打开着的检出排在最前：默认选中不跳过它，标签显示「已打开」。
+    worktrees.insert(
+        0,
+        crate::api::schema::WorktreeInfo {
+            path: "/repo-gone".into(),
+            branch: Some("gone".into()),
+            is_bare: false,
+            is_detached: false,
+            is_prunable: true,
+            is_linked_worktree: true,
+            open_workspace_id: Some("ws_2".into()),
+            label: "repo".into(),
+        },
+    );
+    state.handle_endpoint_result("boot-1", &request_id, Ok(result));
+    state.compose(106, 30).expect("open worktree modal");
+    let Some(ClientShellOverlay::WorktreeOpen(open)) = state.overlay.as_ref() else {
+        panic!("open worktree overlay should be shown");
+    };
+    assert_eq!(
+        open.selected, 0,
+        "an open checkout stays selectable when prunable"
+    );
+    assert_eq!(
+        open.entries[0].status_label(),
+        crate::i18n::texts().sidebar.wt_open,
+        "open takes precedence over prunable in the status label"
+    );
+
+    // Enter 照旧发 worktree.open：服务端 already_open 分支只聚焦，不要求目录存在。
+    let opened = state.handle_raw_events(vec![RawInputEvent::Key(crate::input::TerminalKey::new(
+        KeyCode::Enter,
+        KeyModifiers::empty(),
+    ))]);
+    let [ClientShellAction::Endpoint { request, .. }] = &opened.actions[..] else {
+        panic!("already-open checkout should still be sent to worktree.open");
+    };
+    assert!(matches!(
+        &request.method,
+        crate::api::schema::Method::WorktreeOpen(params)
+            if params.path.as_deref() == Some("/repo-gone")
+    ));
+    let Some(ClientShellOverlay::WorktreeOpen(open)) = state.overlay.as_ref() else {
+        panic!("overlay should stay open while the request is in flight");
+    };
+    assert!(open.opening);
+    assert_eq!(open.error, None);
+}
+
+#[test]
 fn worktree_remove_escalates_recoverable_failure_to_force_confirmation() {
     for (code, message, expect_force) in [
         ("dirty_worktree_requires_force", "dirty worktree", true),

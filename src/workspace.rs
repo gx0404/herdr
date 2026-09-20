@@ -20,6 +20,8 @@ mod git;
 mod tab;
 
 use self::git::git_status_cache_key_for_space;
+#[cfg(test)]
+pub(crate) use self::git::test_support as git_test_support;
 pub(crate) use self::{git::git_status_snapshot_for_cwd_with_demand, tab::MovedPane};
 pub use self::{
     git::{
@@ -1583,14 +1585,7 @@ mod tests {
 
     #[test]
     fn display_name_reads_cached_identity_without_rechecking_filesystem() {
-        let stamp = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .expect("clock should be after unix epoch")
-            .as_nanos();
-        let root = std::env::temp_dir().join(format!(
-            "herdr-workspace-label-cache-{}-{stamp}",
-            std::process::id()
-        ));
+        let root = super::git_test_support::temp_test_dir("workspace-label-cache");
         let cwd = root.join("deep/nested");
         std::fs::create_dir_all(&cwd).expect("create nested cwd");
 

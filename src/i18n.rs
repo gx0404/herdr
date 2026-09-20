@@ -335,6 +335,7 @@ pub struct WorktreeTexts {
     pub not_a_worktree_checkout: &'static str,
     pub no_worktrees_found: &'static str,
     pub unexpected_result: &'static str,
+    pub prunable_cannot_open: &'static str,
 }
 
 pub struct SettingsTexts {
@@ -443,9 +444,12 @@ pub struct SidebarTexts {
     pub menu: &'static str,
     pub attention_menu: &'static str,
     pub local: &'static str,
+    /// `wt_*` 是「打开 worktree」浮层（`client::shell::state::ClientWorktreeOpenEntry::
+    /// status_label`）的一组状态标签，历史上归在侧栏文案下；侧栏 worktree 行并不显示它们。
     pub wt_open: &'static str,
     pub wt_detached: &'static str,
     pub wt_root: &'static str,
+    pub wt_prunable: &'static str,
     pub sort_grouped: &'static str,
     pub sort_priority: &'static str,
     pub no_matching_agents: &'static str,

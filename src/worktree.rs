@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
@@ -16,6 +17,9 @@ pub(crate) struct ExistingWorktree {
     pub is_bare: bool,
     pub is_detached: bool,
     pub is_prunable: bool,
+    /// porcelain 的 `locked` 行（git 2.31 起随 `prunable` 一同输出）：git 对加锁的 worktree
+    /// 从不判定 prunable，回退判据优先采信它。
+    pub is_locked: bool,
 }
 
 pub(crate) fn generated_branch_slug(seed: u64) -> String {
@@ -421,70 +425,47 @@ fn git_common_worktrees_dir(repo_root: &Path, trust_repository: bool) -> Option<
 
 pub(crate) fn parse_worktree_list_porcelain(output: &str) -> Vec<ExistingWorktree> {
     let mut entries = Vec::new();
-    let mut path: Option<PathBuf> = None;
-    let mut branch = None;
-    let mut is_bare = false;
-    let mut is_detached = false;
-    let mut is_prunable = false;
-
-    let finish = |entries: &mut Vec<ExistingWorktree>,
-                  path: &mut Option<PathBuf>,
-                  branch: &mut Option<String>,
-                  is_bare: &mut bool,
-                  is_detached: &mut bool,
-                  is_prunable: &mut bool| {
-        if let Some(path) = path.take() {
-            entries.push(ExistingWorktree {
-                path,
-                branch: branch.take(),
-                is_bare: *is_bare,
-                is_detached: *is_detached,
-                is_prunable: *is_prunable,
-            });
-        }
-        *is_bare = false;
-        *is_detached = false;
-        *is_prunable = false;
-    };
+    let mut current: Option<ExistingWorktree> = None;
 
     for line in output.lines() {
         if line.trim().is_empty() {
-            finish(
-                &mut entries,
-                &mut path,
-                &mut branch,
-                &mut is_bare,
-                &mut is_detached,
-                &mut is_prunable,
-            );
+            entries.extend(current.take());
             continue;
         }
         if let Some(value) = line.strip_prefix("worktree ") {
-            path = Some(PathBuf::from(value));
-        } else if let Some(value) = line.strip_prefix("branch ") {
-            branch = Some(
+            entries.extend(current.take());
+            current = Some(ExistingWorktree {
+                path: PathBuf::from(value),
+                branch: None,
+                is_bare: false,
+                is_detached: false,
+                is_prunable: false,
+                is_locked: false,
+            });
+            continue;
+        }
+        let Some(entry) = current.as_mut() else {
+            continue;
+        };
+        if let Some(value) = line.strip_prefix("branch ") {
+            entry.branch = Some(
                 value
                     .strip_prefix("refs/heads/")
                     .unwrap_or(value)
                     .to_string(),
             );
         } else if line == "detached" {
-            is_detached = true;
+            entry.is_detached = true;
         } else if line == "bare" {
-            is_bare = true;
-        } else if line.starts_with("prunable") {
-            is_prunable = true;
+            entry.is_bare = true;
+        } else if line == "prunable" || line.starts_with("prunable ") {
+            entry.is_prunable = true;
+        } else if line == "locked" || line.starts_with("locked ") {
+            entry.is_locked = true;
         }
     }
 
-    finish(
-        &mut entries,
-        &mut path,
-        &mut branch,
-        &mut is_bare,
-        &mut is_detached,
-        &mut is_prunable,
-    );
+    entries.extend(current.take());
     entries
 }
 
@@ -499,7 +480,9 @@ pub(crate) fn list_existing_worktrees(
 
     if output.status.success() {
         let stdout = String::from_utf8_lossy(&output.stdout);
-        return Ok(parse_worktree_list_porcelain(&stdout));
+        let mut entries = parse_worktree_list_porcelain(&stdout);
+        mark_missing_linked_checkouts_prunable(&mut entries, repo_root, trust_repository);
+        return Ok(entries);
     }
 
     let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
@@ -508,6 +491,109 @@ pub(crate) fn list_existing_worktrees(
     } else {
         stderr
     })
+}
+
+/// git 2.31 之前的 `worktree list --porcelain` 没有 `prunable`/`locked` 行。按 git 自身
+/// `should_prune_worktree` 的判据回退：linked worktree 的 `.git` gitdir 文件已不存在且该
+/// worktree 未加锁，即视为 prunable。
+///
+/// 回退只补充、不覆盖 git 的结论：porcelain 已标 `prunable` 的条目保持不变；已标 `locked` 的
+/// 条目直接跳过；只有 porcelain 两者都没标、且 `.git` 确实缺失的条目才去扫 admin 目录确认
+/// 未加锁。在带注解的 git 版本上，这样的条目 git 自己也会判定 prunable，因此两者一致。
+fn mark_missing_linked_checkouts_prunable(
+    entries: &mut [ExistingWorktree],
+    repo_root: &Path,
+    trust_repository: bool,
+) {
+    let mut locked_targets: Option<HashSet<PathBuf>> = None;
+    // git 总是先列出主 worktree，只有其后的 linked worktree 会被 prune。
+    for entry in entries.iter_mut().skip(1) {
+        if entry.is_bare || entry.is_prunable || entry.is_locked {
+            continue;
+        }
+        let git_file = entry.path.join(".git");
+        if !checkout_git_file_is_missing(&git_file) {
+            continue;
+        }
+        let locked = locked_targets
+            .get_or_insert_with(|| locked_worktree_gitdir_targets(repo_root, trust_repository));
+        if locked.contains(&forgiving_real_path(&git_file)) {
+            continue;
+        }
+        entry.is_prunable = true;
+    }
+}
+
+/// 只把「不存在」视为缺失；权限等错误保守地当作仍然存在，避免把可用检出标成 prunable。
+fn checkout_git_file_is_missing(git_file: &Path) -> bool {
+    matches!(
+        std::fs::symlink_metadata(git_file),
+        Err(error)
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+            )
+    )
+}
+
+/// 已加锁 worktree 的 gitdir 目标（`<common>/worktrees/<id>/gitdir` 的内容）集合：
+/// git 对加锁的 worktree 从不判定 prunable。
+fn locked_worktree_gitdir_targets(repo_root: &Path, trust_repository: bool) -> HashSet<PathBuf> {
+    let Some(worktrees_dir) = git_common_worktrees_dir(repo_root, trust_repository) else {
+        return HashSet::new();
+    };
+    locked_gitdir_targets_in_admin_dir(&worktrees_dir)
+}
+
+/// 扫描 `<common>/worktrees/*`：带 `locked` 标记的 admin 目录，其 `gitdir` 内容即目标。
+/// git 2.48 起（`worktree.useRelativePaths` / `--relative-paths`）该内容可能是相对于
+/// admin 目录的相对路径，与检出侧 `.git` 文件的处理一致：相对则以所在目录为基准解析。
+fn locked_gitdir_targets_in_admin_dir(worktrees_dir: &Path) -> HashSet<PathBuf> {
+    let mut targets = HashSet::new();
+    let Ok(admin_dirs) = std::fs::read_dir(worktrees_dir) else {
+        return targets;
+    };
+    for admin_dir in admin_dirs.flatten().map(|entry| entry.path()) {
+        if std::fs::symlink_metadata(admin_dir.join("locked")).is_err() {
+            continue;
+        }
+        let Ok(gitdir) = std::fs::read_to_string(admin_dir.join("gitdir")) else {
+            continue;
+        };
+        let gitdir = Path::new(gitdir.trim());
+        if gitdir.as_os_str().is_empty() {
+            continue;
+        }
+        let gitdir = if gitdir.is_absolute() {
+            gitdir.to_path_buf()
+        } else {
+            admin_dir.join(gitdir)
+        };
+        targets.insert(forgiving_real_path(&gitdir));
+    }
+    targets
+}
+
+/// 同 git `strbuf_realpath_forgiving`：解析最深的存在祖先的真实路径，其余组件按字面追加。
+/// 目标缺失（这正是 prunable 判据关心的情形）时，绝对与相对写法仍能规范到同一路径比较。
+fn forgiving_real_path(path: &Path) -> PathBuf {
+    let mut missing = Vec::new();
+    let mut current = path.to_path_buf();
+    loop {
+        if let Ok(real) = std::fs::canonicalize(&current) {
+            return missing.into_iter().rev().fold(real, |mut acc, name| {
+                acc.push(name);
+                acc
+            });
+        }
+        match (current.parent(), current.file_name()) {
+            (Some(parent), Some(name)) => {
+                missing.push(name.to_os_string());
+                current = parent.to_path_buf();
+            }
+            _ => return path.to_path_buf(),
+        }
+    }
 }
 
 fn worktree_list_contains_path(
@@ -525,13 +611,9 @@ fn worktree_list_contains_path(
 mod tests {
     use super::*;
 
-    fn unique_temp_path(name: &str) -> PathBuf {
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0);
-        std::env::temp_dir().join(format!("herdr-{name}-{}-{nanos}", std::process::id()))
-    }
+    // 临时路径统一经共享辅助创建：测试构建下仓库发现以临时根为上界（见
+    // `workspace::git::discovery::discovery_ceilings`），宿主机上层 `.git` 不会干扰。
+    use crate::workspace::git_test_support::unique_temp_path;
 
     fn run_git(repo: &Path, args: &[&str]) {
         let status = std::process::Command::new("git")
@@ -588,6 +670,7 @@ branch refs/heads/main
 worktree /repo/issue
 HEAD def
 branch refs/heads/worktree/issue
+locked on removable media
 
 worktree /repo/detached
 HEAD fed
@@ -605,6 +688,7 @@ prunable stale
                     is_bare: false,
                     is_detached: false,
                     is_prunable: false,
+                    is_locked: false,
                 },
                 ExistingWorktree {
                     path: PathBuf::from("/repo/issue"),
@@ -612,6 +696,7 @@ prunable stale
                     is_bare: false,
                     is_detached: false,
                     is_prunable: false,
+                    is_locked: true,
                 },
                 ExistingWorktree {
                     path: PathBuf::from("/repo/detached"),
@@ -619,6 +704,7 @@ prunable stale
                     is_bare: false,
                     is_detached: true,
                     is_prunable: true,
+                    is_locked: false,
                 },
             ]
         );
@@ -899,6 +985,270 @@ prunable stale
         let remove = build_worktree_remove_command(&repo, &checkout, false, false);
         run_worktree_command(&remove).unwrap();
         assert!(!checkout.exists());
+
+        let _ = std::fs::remove_dir_all(repo);
+    }
+
+    fn raw_worktree_list_porcelain(repo: &Path) -> String {
+        let output = std::process::Command::new("git")
+            .arg("-C")
+            .arg(repo)
+            .args(["worktree", "list", "--porcelain"])
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        String::from_utf8(output.stdout).unwrap()
+    }
+
+    #[test]
+    fn missing_linked_checkout_is_prunable_on_every_git_version() {
+        use crate::workspace::git_test_support::git_at_least;
+
+        let repo = create_committed_repo("worktree-prunable-fallback-repo");
+        let checkout = unique_temp_path("worktree-prunable-fallback-checkout");
+        let branch = "worktree/prunable-fallback";
+        run_git(
+            &repo,
+            &[
+                "worktree",
+                "add",
+                "--quiet",
+                "-b",
+                branch,
+                checkout.to_str().unwrap(),
+                "HEAD",
+            ],
+        );
+        std::fs::remove_dir_all(&checkout).unwrap();
+
+        let raw = raw_worktree_list_porcelain(&repo);
+        let porcelain_only = parse_worktree_list_porcelain(&raw);
+        let porcelain_stale = porcelain_only
+            .iter()
+            .find(|entry| entry.branch.as_deref() == Some(branch))
+            .unwrap();
+        let listed = list_existing_worktrees(&repo, false).unwrap();
+        let listed_stale = listed
+            .iter()
+            .find(|entry| entry.branch.as_deref() == Some(branch))
+            .unwrap();
+
+        // 无论 git 版本，最终列表都把目录已删除的 linked worktree 标为 prunable。
+        assert!(listed_stale.is_prunable, "porcelain output:\n{raw}");
+        assert!(
+            !listed[0].is_prunable,
+            "main worktree must never be prunable"
+        );
+        if git_at_least(2, 31) {
+            // git >= 2.31 自带 `prunable` 行；回退判据与之并存且一致。
+            assert!(
+                porcelain_stale.is_prunable,
+                "git >= 2.31 porcelain should carry the prunable line:\n{raw}"
+            );
+        } else if !porcelain_stale.is_prunable {
+            // 更早版本（或探测失败）通常没有 `prunable` 行，只能靠回退判据；发行版回移
+            // 注解不算缺陷，因此不对旧版本作反向断言，只记录本次走的是回退路径。
+            eprintln!("git < 2.31: prunable derived by fallback (no porcelain annotation)");
+        }
+
+        run_git(&repo, &["worktree", "prune"]);
+        let _ = std::fs::remove_dir_all(repo);
+    }
+
+    #[test]
+    fn present_linked_checkout_is_not_prunable() {
+        let repo = create_committed_repo("worktree-present-repo");
+        let checkout = unique_temp_path("worktree-present-checkout");
+        let branch = "worktree/present";
+        run_git(
+            &repo,
+            &[
+                "worktree",
+                "add",
+                "--quiet",
+                "-b",
+                branch,
+                checkout.to_str().unwrap(),
+                "HEAD",
+            ],
+        );
+
+        let listed = list_existing_worktrees(&repo, false).unwrap();
+
+        assert!(listed.iter().all(|entry| !entry.is_prunable));
+        assert!(listed
+            .iter()
+            .any(|entry| entry.branch.as_deref() == Some(branch)));
+
+        let remove = build_worktree_remove_command(&repo, &checkout, true, false);
+        run_worktree_command(&remove).unwrap();
+        let _ = std::fs::remove_dir_all(repo);
+    }
+
+    #[test]
+    fn locked_missing_checkout_is_not_prunable() {
+        let repo = create_committed_repo("worktree-locked-repo");
+        let checkout = unique_temp_path("worktree-locked-checkout");
+        let branch = "worktree/locked";
+        run_git(
+            &repo,
+            &[
+                "worktree",
+                "add",
+                "--quiet",
+                "-b",
+                branch,
+                checkout.to_str().unwrap(),
+                "HEAD",
+            ],
+        );
+        run_git(&repo, &["worktree", "lock", checkout.to_str().unwrap()]);
+        std::fs::remove_dir_all(&checkout).unwrap();
+
+        let listed = list_existing_worktrees(&repo, false).unwrap();
+        let locked = listed
+            .iter()
+            .find(|entry| entry.branch.as_deref() == Some(branch))
+            .unwrap();
+
+        // git 对加锁的 worktree 从不判定 prunable（例如位于可移动介质上），回退判据同样如此。
+        assert!(!locked.is_prunable);
+
+        let _ = std::fs::remove_dir_all(repo);
+    }
+
+    #[test]
+    fn locked_relative_gitdir_targets_resolve_against_admin_dir() {
+        // 不依赖 git 版本：手工铺设 `<common>/worktrees/<id>/{locked,gitdir}`，gitdir 用
+        // git 2.48 `--relative-paths` 的相对写法，且检出目录已缺失（canonicalize 必然失败）。
+        let base = unique_temp_path("worktree-relative-gitdir");
+        let admin_dir = base.join("repo/.git/worktrees/wt");
+        std::fs::create_dir_all(&admin_dir).unwrap();
+        std::fs::write(admin_dir.join("locked"), "").unwrap();
+        std::fs::write(admin_dir.join("gitdir"), "../../../checkout/.git\n").unwrap();
+        let unlocked_dir = base.join("repo/.git/worktrees/other");
+        std::fs::create_dir_all(&unlocked_dir).unwrap();
+        std::fs::write(unlocked_dir.join("gitdir"), "../../../other/.git\n").unwrap();
+        let missing_checkout = base.join("repo/checkout");
+        assert!(!missing_checkout.exists());
+
+        let targets = locked_gitdir_targets_in_admin_dir(&base.join("repo/.git/worktrees"));
+
+        // 相对写法规范到与检出侧 `<path>/.git` 相同的路径，回退判据据此把它当作已加锁。
+        assert_eq!(
+            targets,
+            HashSet::from([forgiving_real_path(&missing_checkout.join(".git"))])
+        );
+
+        let mut entries = vec![
+            ExistingWorktree {
+                path: base.join("repo"),
+                branch: Some("main".into()),
+                is_bare: false,
+                is_detached: false,
+                is_prunable: false,
+                is_locked: false,
+            },
+            ExistingWorktree {
+                path: missing_checkout.clone(),
+                branch: Some("locked".into()),
+                is_bare: false,
+                is_detached: false,
+                is_prunable: false,
+                is_locked: false,
+            },
+            ExistingWorktree {
+                path: base.join("repo/other"),
+                branch: Some("other".into()),
+                is_bare: false,
+                is_detached: false,
+                is_prunable: false,
+                is_locked: false,
+            },
+        ];
+        crate::workspace::git_test_support::run_git(&base.join("repo"), &["init", "--quiet"]);
+        mark_missing_linked_checkouts_prunable(&mut entries, &base.join("repo"), false);
+
+        assert!(
+            !entries[1].is_prunable,
+            "locked worktree must not be prunable"
+        );
+        assert!(
+            entries[2].is_prunable,
+            "unlocked missing worktree is prunable"
+        );
+
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn porcelain_locked_line_takes_precedence_over_admin_dir_scan() {
+        // repo_root 不存在：若回退判据无视 porcelain 的 `locked` 行去扫 admin 目录，扫描
+        // 得到空集，条目会被错误地标成 prunable。
+        let base = unique_temp_path("worktree-porcelain-locked");
+        let mut entries = vec![
+            ExistingWorktree {
+                path: base.join("repo"),
+                branch: Some("main".into()),
+                is_bare: false,
+                is_detached: false,
+                is_prunable: false,
+                is_locked: false,
+            },
+            ExistingWorktree {
+                path: base.join("missing"),
+                branch: Some("locked".into()),
+                is_bare: false,
+                is_detached: false,
+                is_prunable: false,
+                is_locked: true,
+            },
+        ];
+
+        mark_missing_linked_checkouts_prunable(&mut entries, &base.join("repo"), false);
+
+        assert!(!entries[1].is_prunable);
+    }
+
+    #[test]
+    fn locked_missing_relative_paths_checkout_is_not_prunable() {
+        use crate::workspace::git_test_support::git_at_least;
+
+        if !git_at_least(2, 48) {
+            // `worktree.useRelativePaths` / `--relative-paths` 自 git 2.48 起可用；更早版本由
+            // `locked_relative_gitdir_targets_resolve_against_admin_dir` 用手工布局覆盖。
+            eprintln!("skipping: git < 2.48 has no relative worktree paths");
+            return;
+        }
+        let repo = create_committed_repo("worktree-relative-locked-repo");
+        let checkout = unique_temp_path("worktree-relative-locked-checkout");
+        let branch = "worktree/relative-locked";
+        run_git(
+            &repo,
+            &[
+                "-c",
+                "worktree.useRelativePaths=true",
+                "worktree",
+                "add",
+                "--quiet",
+                "--relative-paths",
+                "-b",
+                branch,
+                checkout.to_str().unwrap(),
+                "HEAD",
+            ],
+        );
+        run_git(&repo, &["worktree", "lock", checkout.to_str().unwrap()]);
+        std::fs::remove_dir_all(&checkout).unwrap();
+
+        let listed = list_existing_worktrees(&repo, false).unwrap();
+        let locked = listed
+            .iter()
+            .find(|entry| entry.branch.as_deref() == Some(branch))
+            .unwrap();
+
+        assert!(locked.is_locked);
+        assert!(!locked.is_prunable);
 
         let _ = std::fs::remove_dir_all(repo);
     }

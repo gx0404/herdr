@@ -1,5 +1,7 @@
+use std::ffi::OsStr;
 use std::io::Read;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
+use std::sync::OnceLock;
 
 const MAX_GIT_REF_FILE_BYTES: usize = 64 * 1024;
 
@@ -308,23 +310,128 @@ fn git_trimmed_stdout(repo_root: &Path, args: &[&str]) -> Option<String> {
     (!stdout.is_empty()).then(|| stdout.to_string())
 }
 
+/// 向上查找仓库根，遵守 git 的 `GIT_CEILING_DIRECTORIES` 语义：上界目录本身及其祖先不再
+/// 被视为仓库根，与 git 子进程对同一目录的判断保持一致。
 pub(super) fn git_repo_root(start: &Path) -> Option<PathBuf> {
+    git_repo_root_below_ceilings(start, discovery_ceilings())
+}
+
+const GIT_CEILING_DIRECTORIES_ENV: &str = "GIT_CEILING_DIRECTORIES";
+
+/// 进程内只解析一次：环境变量在进程生命周期内视为只读，状态路径上每个 workspace 每次
+/// 刷新都会发现多次，不重复切分与 canonicalize。
+///
+/// 测试构建无条件把临时根追加为上界，让临时目录之上的 `.git`（例如宿主机 `/.git`）不会被
+/// 误认为测试目录的仓库；这与调用顺序、是否用过某个测试辅助无关，`cargo test` 同进程多线程
+/// 与 nextest 每测试独立进程下行为一致，且不改环境变量（无 `set_var` 竞态）。
+fn discovery_ceilings() -> &'static [PathBuf] {
+    static CEILINGS: OnceLock<Vec<PathBuf>> = OnceLock::new();
+    CEILINGS.get_or_init(|| {
+        let mut ceilings =
+            parse_git_ceiling_directories(std::env::var_os(GIT_CEILING_DIRECTORIES_ENV).as_deref());
+        if cfg!(test) {
+            ceilings.push(canonicalize_best_effort_path(&std::env::temp_dir()));
+        }
+        ceilings
+    })
+}
+
+/// 解析 `GIT_CEILING_DIRECTORIES`（同 git `canonicalize_ceiling_entry`）：按平台路径分隔符
+/// 切分；相对路径条目忽略；条目默认解析为真实路径（解析失败则丢弃），列表中出现空条目后，
+/// 其后的条目按字面值保留。
+pub(super) fn parse_git_ceiling_directories(value: Option<&OsStr>) -> Vec<PathBuf> {
+    let Some(value) = value else {
+        return Vec::new();
+    };
+    let mut resolve_real_path = true;
+    let mut ceilings = Vec::new();
+    for entry in std::env::split_paths(value) {
+        if entry.as_os_str().is_empty() {
+            resolve_real_path = false;
+            continue;
+        }
+        if !entry.is_absolute() {
+            continue;
+        }
+        if resolve_real_path {
+            ceilings.extend(real_path_allowing_missing_leaf(&entry));
+        } else {
+            ceilings.push(entry);
+        }
+    }
+    ceilings
+}
+
+/// git 的 `real_path` 允许最后一级不存在；其余错误视为无效条目。
+fn real_path_allowing_missing_leaf(path: &Path) -> Option<PathBuf> {
+    match std::fs::canonicalize(path) {
+        Ok(real) => Some(real),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            let parent = std::fs::canonicalize(path.parent()?).ok()?;
+            Some(parent.join(path.file_name()?))
+        }
+        Err(_) => None,
+    }
+}
+
+fn is_strict_ancestor(ancestor: &Path, path: &Path) -> bool {
+    path.strip_prefix(ancestor)
+        .is_ok_and(|rest| !rest.as_os_str().is_empty())
+}
+
+fn git_repo_root_below_ceilings(start: &Path, ceilings: &[PathBuf]) -> Option<PathBuf> {
     let mut current = if start.is_dir() {
         start.to_path_buf()
     } else {
         start.parent()?.to_path_buf()
     };
+    // 上界只在起点（真实路径）严格位于其下时生效，多条命中取最深者（同 git
+    // `longest_ancestor_length`）。比较沿真实路径链进行——git 在已解析符号链接的 cwd 上按
+    // 偏移比较——一旦当前目录的真实路径不再严格位于上界之下就停止，符号链接把目录挂到上界
+    // 子树之外时也不会越过上界继续上溯。返回值仍沿用调用方给出的路径形态，避免符号链接
+    // 检出的标签随之改变。
+    let mut canonical_current =
+        (!ceilings.is_empty()).then(|| canonicalize_best_effort_path(&current));
+    let ceiling = canonical_current.as_deref().and_then(|canonical_start| {
+        ceilings
+            .iter()
+            .filter(|ceiling| is_strict_ancestor(ceiling, canonical_start))
+            .max_by_key(|ceiling| ceiling.components().count())
+    });
 
     loop {
+        if let (Some(ceiling), Some(canonical)) = (ceiling, canonical_current.as_deref()) {
+            if !is_strict_ancestor(ceiling, canonical) {
+                return None;
+            }
+        }
         if git_dir_for_repo_root(&current)
             .map(|git_dir| git_dir.join("HEAD").is_file())
             .unwrap_or(false)
         {
             return Some(current);
         }
-        if !current.pop() {
-            return None;
+        let parent = current.parent()?.to_path_buf();
+        if ceiling.is_some() {
+            canonical_current = Some(canonical_parent(
+                &current,
+                &parent,
+                canonical_current.as_deref(),
+            ));
         }
+        current = parent;
+    }
+}
+
+/// 真实路径链随原路径链同步上溯：当前目录末级是普通组件且自身不是符号链接时，其真实路径的
+/// 父目录就是父目录的真实路径，省去每级一次 realpath；否则（符号链接、`..`/`.` 末级或路径
+/// 不存在）两条链不再对齐，重新解析父目录。
+fn canonical_parent(current: &Path, parent: &Path, canonical_current: Option<&Path>) -> PathBuf {
+    let aligned = matches!(current.components().next_back(), Some(Component::Normal(_)))
+        && std::fs::symlink_metadata(current).is_ok_and(|meta| !meta.file_type().is_symlink());
+    match canonical_current.and_then(Path::parent) {
+        Some(canonical) if aligned => canonical.to_path_buf(),
+        _ => canonicalize_best_effort_path(parent),
     }
 }
 
@@ -367,25 +474,9 @@ pub(super) fn read_ref_oid(common_dir: &Path, full_ref: &str) -> Option<String> 
 #[cfg(test)]
 mod tests {
     use std::path::{Path, PathBuf};
-    use std::time::{SystemTime, UNIX_EPOCH};
 
     use super::*;
-    use crate::workspace::git::test_support::run_git;
-
-    fn temp_test_dir(name: &str) -> PathBuf {
-        let unique = format!(
-            "herdr-workspace-tests-{}-{}-{}",
-            name,
-            std::process::id(),
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        );
-        let path = std::env::temp_dir().join(unique);
-        std::fs::create_dir_all(&path).unwrap();
-        path
-    }
+    use crate::workspace::git::test_support::{run_git, temp_test_dir};
 
     #[test]
     fn git_branch_reads_head_from_standard_repo() {
@@ -631,6 +722,187 @@ mod tests {
         assert_eq!(git_branch(&root).as_deref(), Some("main"));
 
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn ceiling_directories_parse_like_git() {
+        let base = temp_test_dir("ceiling-parse");
+        let resolved = base.join("resolved");
+        std::fs::create_dir_all(&resolved).unwrap();
+        let verbatim = base.join("./verbatim");
+        let value = std::env::join_paths([
+            resolved.as_os_str(),
+            std::ffi::OsStr::new("relative/entry"),
+            std::ffi::OsStr::new(""),
+            verbatim.as_os_str(),
+        ])
+        .unwrap();
+
+        let ceilings = parse_git_ceiling_directories(Some(value.as_os_str()));
+
+        // 相对条目被忽略；空条目之前的条目解析为真实路径，之后的按字面值保留。
+        assert_eq!(
+            ceilings,
+            vec![std::fs::canonicalize(&resolved).unwrap(), verbatim]
+        );
+        assert_eq!(parse_git_ceiling_directories(None), Vec::<PathBuf>::new());
+
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn git_repo_root_stops_below_ceiling_directory() {
+        let base = temp_test_dir("ceiling-stop");
+        let repo = base.join("repo");
+        let nested = repo.join("src/deep");
+        crate::workspace::git::test_support::write_fake_tracked_repo(&repo);
+        std::fs::create_dir_all(&nested).unwrap();
+        let canonical = |path: &Path| std::fs::canonicalize(path).unwrap();
+
+        assert_eq!(
+            git_repo_root_below_ceilings(&nested, &[]),
+            Some(repo.clone())
+        );
+        // 上界目录本身不再被视为仓库根。
+        assert_eq!(
+            git_repo_root_below_ceilings(&nested, &[canonical(&repo)]),
+            None
+        );
+        // 上界位于仓库根之下时，查找在到达上界前就停止。
+        assert_eq!(
+            git_repo_root_below_ceilings(&nested, &[canonical(&repo.join("src"))]),
+            None
+        );
+        // 起点必须严格位于上界之下，上界才生效（同 git `longest_ancestor_length`）。
+        assert_eq!(
+            git_repo_root_below_ceilings(&nested, &[canonical(&nested)]),
+            Some(repo.clone())
+        );
+        // 与起点无祖先关系的上界不影响查找。
+        assert_eq!(
+            git_repo_root_below_ceilings(&nested, &[base.join("elsewhere")]),
+            Some(repo.clone())
+        );
+
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn git_branch_reads_default_branch_from_real_repo_under_ceiling() {
+        let root = temp_test_dir("real-repo-default-branch");
+        crate::workspace::git::test_support::init_repo_on_branch(&root, "main");
+
+        assert_eq!(git_repo_root(&root), Some(root.clone()));
+        assert_eq!(git_branch(&root).as_deref(), Some("main"));
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    // 符号链接仅在 unix 上无需特权即可创建；Windows 的等价形态由真实路径链逻辑本身覆盖。
+    #[cfg(unix)]
+    #[test]
+    fn git_repo_root_ceiling_holds_when_start_enters_it_through_symlink() {
+        let base = temp_test_dir("ceiling-symlink");
+        // 符号链接放在与上界无祖先关系的子树 `elsewhere` 里，且 `elsewhere` 自身是仓库：
+        // 上溯若按原路径链逐级比较，离开上界子树后会误命中它（git 在真实路径上会停在上界）。
+        let real = base.join("real");
+        let target = real.join("x");
+        std::fs::create_dir_all(target.join("repo/src")).unwrap();
+        let elsewhere = base.join("elsewhere");
+        crate::workspace::git::test_support::write_fake_tracked_repo(&elsewhere);
+        let link = elsewhere.join("link");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        let start = link.join("repo/src");
+        let ceiling = std::fs::canonicalize(&real).unwrap();
+
+        // 无上界：沿原路径上溯到 `elsewhere`，返回值保持调用方路径形态。
+        assert_eq!(
+            git_repo_root_below_ceilings(&start, &[]),
+            Some(elsewhere.clone())
+        );
+        // 上界 `real`：起点真实路径位于其下；上溯经符号链接离开上界子树时停止，不会扫到
+        // `elsewhere`。
+        assert_eq!(
+            git_repo_root_below_ceilings(&start, std::slice::from_ref(&ceiling)),
+            None
+        );
+        // 上界之下经符号链接可达的仓库仍能发现，且返回符号链接形态的路径。
+        crate::workspace::git::test_support::write_fake_tracked_repo(&target.join("repo"));
+        assert_eq!(
+            git_repo_root_below_ceilings(&start, std::slice::from_ref(&ceiling)),
+            Some(link.join("repo"))
+        );
+
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn git_repo_root_ceiling_holds_across_dot_dot_components() {
+        let base = temp_test_dir("ceiling-dot-dot");
+        let repo = base.join("repo");
+        crate::workspace::git::test_support::write_fake_tracked_repo(&repo);
+        std::fs::create_dir_all(repo.join("src/deep")).unwrap();
+        let start = repo.join("src/../src/deep");
+        let canonical = |path: &Path| std::fs::canonicalize(path).unwrap();
+
+        assert_eq!(
+            git_repo_root_below_ceilings(&start, &[]).map(|root| canonical(&root)),
+            Some(canonical(&repo))
+        );
+        assert_eq!(
+            git_repo_root_below_ceilings(&start, &[canonical(&repo)]),
+            None
+        );
+        assert_eq!(
+            git_repo_root_below_ceilings(&start, &[canonical(&repo.join("src"))]),
+            None
+        );
+
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    /// 环境变量接线（`GIT_CEILING_DIRECTORIES` → `discovery_ceilings` → `git_repo_root`）只能
+    /// 在启动时就带着该变量的进程里验证：本测试在子进程里重跑自身（同
+    /// `platform::remote_bridge_tests` 的做法），父进程不改环境变量。
+    #[test]
+    fn git_repo_root_honors_ceiling_directories_from_environment() {
+        const CHILD_REPO_ENV: &str = "HERDR_TEST_CEILING_CHILD_REPO";
+        // 子进程用标记证明断言确实执行过：`--exact` 名字不匹配时子进程会跑 0 个测试仍退出 0。
+        const CHILD_MARKER: &str = "herdr-ceiling-env-child-asserted";
+        if let Some(repo) = std::env::var_os(CHILD_REPO_ENV) {
+            let repo = PathBuf::from(repo);
+            // 子进程：上界 `repo/src` 来自真实环境变量；其下的起点发现不到仓库，仓库根自身
+            // 不在上界之下，仍可发现。
+            assert_eq!(git_repo_root(&repo.join("src/deep")), None);
+            assert_eq!(git_repo_root(&repo), Some(repo.clone()));
+            println!("{CHILD_MARKER}");
+            return;
+        }
+        let base = temp_test_dir("ceiling-env");
+        let repo = base.join("repo");
+        crate::workspace::git::test_support::write_fake_tracked_repo(&repo);
+        std::fs::create_dir_all(repo.join("src/deep")).unwrap();
+        // 父进程未设置该变量：同一起点能发现仓库。
+        assert_eq!(git_repo_root(&repo.join("src/deep")), Some(repo.clone()));
+
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "workspace::git::discovery::tests::git_repo_root_honors_ceiling_directories_from_environment",
+                "--nocapture",
+            ])
+            .env(CHILD_REPO_ENV, &repo)
+            .env(GIT_CEILING_DIRECTORIES_ENV, repo.join("src"))
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            output.status.success() && stdout.contains(CHILD_MARKER),
+            "child process failed:\nstdout: {stdout}\nstderr: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        std::fs::remove_dir_all(base).unwrap();
     }
 
     #[test]

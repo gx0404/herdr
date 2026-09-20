@@ -107,7 +107,7 @@ directory = "~/.herdr/worktrees"
 
 Herdr 会在 `<directory>/<repo>/<branch-slug>` 下创建检出。若要使用同级目录风格的检出，请将其设置为 `~/Projects/herdr-worktrees` 这样的目录。应用配置时，相对路径会解析为绝对路径。
 
-Git 工作区行提供 worktree 操作。`New worktree` 会创建检出：如果输入的分支已存在，则检出该本地分支，否则创建该分支；随后将其作为新的 Herdr 工作区打开，并归组到来源工作区下。`Open worktree...` 会列出该仓库现有的 Git worktree 检出；选择已打开的检出会聚焦它，选择尚未打开的检出会在同一组中打开它。
+Git 工作区行提供 worktree 操作。`New worktree` 会创建检出：如果输入的分支已存在，则检出该本地分支，否则创建该分支；随后将其作为新的 Herdr 工作区打开，并归组到来源工作区下。`Open worktree...` 会列出该仓库现有的 Git worktree 检出；选择已打开的检出会聚焦它，选择尚未打开的检出会在同一组中打开它。目录已删除但 Git 仍登记的检出会保留在列表中并标注「待清理」；选择它时会提示运行 `git worktree prune`，而不会尝试打开；若该检出仍作为 Herdr 工作区打开着，选择它仍会聚焦该工作区。
 
 归组的 worktree 仍像普通 Herdr 工作区一样工作：可以聚焦、重命名和关闭，也可以拥有自己的标签页和窗格。父行是原始工作区。关闭父行会关闭整个 Herdr 组，但不会删除检出目录或分支。
 
@@ -601,6 +601,7 @@ switch_ascii_input_source_in_prefix = true
 | `HERDR_SOCKET_PATH` | 覆盖底层 socket 路径。 |
 | `HERDR_LOG` | 设置日志过滤，例如 `HERDR_LOG=herdr=debug`。 |
 | `HERDR_DISABLE_SOUND` | 即使 `[ui.sound] enabled = true` 也禁用声音播放。 |
+| `GIT_CEILING_DIRECTORIES` | 与 Git 语义一致：工作区标签、分支标记和 worktree 操作所用的仓库发现，在列出的目录之下停止向上查找。 |
 
 ## 日志
 

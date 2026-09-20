@@ -311,6 +311,18 @@ impl ClientShellState {
         let Some(entry) = open.entries.get(index) else {
             return;
         };
+        if !entry.can_open() {
+            // 目录已缺失且未在 herdr 中打开的检出无法打开：就地提示，不发 worktree.open 请求。
+            open.selected = index;
+            open.error = Some(
+                crate::i18n::texts()
+                    .worktree
+                    .prunable_cannot_open
+                    .to_owned(),
+            );
+            outcome.repaint = true;
+            return;
+        }
         let workspace_id = open.source_workspace_id.clone();
         let path = entry.path.clone();
         open.selected = index;
@@ -405,9 +417,10 @@ impl ClientShellState {
                 PendingEndpointKind::PrepareWorktreeOpen { workspace_id },
                 Ok(ResponseResult::WorktreeList { worktrees, .. }),
             ) => {
+                // prunable（目录已缺失）的检出保留在列表里并显式标注，不再静默隐藏。
                 let entries = worktrees
                     .into_iter()
-                    .filter(|entry| !entry.is_bare && !entry.is_prunable)
+                    .filter(|entry| !entry.is_bare)
                     .map(|entry| {
                         let label = entry.branch.clone().unwrap_or_else(|| entry.label.clone());
                         ClientWorktreeOpenEntry {
@@ -415,6 +428,7 @@ impl ClientShellState {
                             branch: entry.branch,
                             is_linked_worktree: entry.is_linked_worktree,
                             is_detached: entry.is_detached,
+                            is_prunable: entry.is_prunable,
                             open_workspace_id: entry.open_workspace_id,
                             label,
                         }
@@ -423,11 +437,15 @@ impl ClientShellState {
                 if entries.is_empty() {
                     self.set_endpoint_error(crate::i18n::texts().worktree.no_worktrees_found);
                 } else {
+                    let selected = entries
+                        .iter()
+                        .position(ClientWorktreeOpenEntry::can_open)
+                        .unwrap_or(0);
                     self.overlay = Some(ClientShellOverlay::WorktreeOpen(
                         ClientWorktreeOpenOverlay {
                             source_workspace_id: workspace_id,
                             entries,
-                            selected: 0,
+                            selected,
                             query: TextEditor::default(),
                             search_focused: false,
                             error: None,

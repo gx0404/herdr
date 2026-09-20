@@ -104,13 +104,15 @@ impl App {
             Ok(entry) => entry,
             Err(err) => return encode_error(id, err.code, err.message),
         };
-        if entry.is_bare || entry.is_prunable {
-            return encode_error(id, "worktree_not_found", "worktree cannot be opened");
-        }
         let canonical_path = crate::worktree::canonical_or_original(&entry.path);
         let canonical_source = crate::worktree::canonical_or_original(&source.source_checkout_path);
         let target_is_source = canonical_path == canonical_source;
         let already_open = self.open_workspace_idx_for_checkout(&canonical_path);
+        // 目录已缺失（prunable）的检出无法新开工作区；但它若仍作为工作区打开着，下面的
+        // already_open 分支只做聚焦、不要求目录存在，因此仅在需要真正新建时拒绝。
+        if entry.is_bare || (entry.is_prunable && already_open.is_none()) {
+            return encode_error(id, "worktree_not_found", "worktree cannot be opened");
+        }
         let defer_source_created_event = target_is_source && already_open.is_none();
         let created_source_workspace =
             match self.ensure_source_parent_membership(&mut source, !defer_source_created_event) {
@@ -1485,6 +1487,95 @@ mod tests {
     }
 
     #[test]
+    fn api_worktree_open_focuses_already_open_checkout_whose_folder_is_missing() {
+        let repo = create_committed_repo("api-worktree-open-missing-repo");
+        let checkout = unique_temp_path("api-worktree-open-missing-checkout");
+        let branch = "worktree/api-open-missing";
+        run_git(
+            &repo,
+            &[
+                "worktree",
+                "add",
+                "--quiet",
+                "-b",
+                branch,
+                checkout.to_str().unwrap(),
+                "HEAD",
+            ],
+        );
+        let mut app = app_with_parent(&repo);
+        let mut child = Workspace::test_new("child");
+        child.identity_cwd = checkout.clone();
+        app.state.workspaces.push(child);
+        app.state.ensure_test_terminals();
+        let source_workspace_id = app.state.workspaces[0].id.clone();
+
+        // 先在目录存在时打开一次：标记 worktree 成员关系，得到服务端报告的检出路径。
+        let response = app.handle_api_request(Request {
+            id: "open-present".into(),
+            method: crate::api::schema::Method::WorktreeOpen(WorktreeOpenParams {
+                workspace_id: Some(source_workspace_id.clone()),
+                branch: Some(branch.into()),
+                focus: false,
+                ..WorktreeOpenParams::default()
+            }),
+        });
+        let success: SuccessResponse = serde_json::from_str(&response).unwrap();
+        let ResponseResult::WorktreeOpened { worktree, .. } = success.result else {
+            panic!("expected worktree_opened response: {response}");
+        };
+        let path = worktree.path;
+
+        // 检出目录被外部删除：列表把它标为 prunable，但仍报告已打开的工作区。
+        std::fs::remove_dir_all(&checkout).unwrap();
+        let response = app.handle_api_request(Request {
+            id: "list".into(),
+            method: crate::api::schema::Method::WorktreeList(WorktreeListParams {
+                workspace_id: Some(source_workspace_id.clone()),
+                cwd: None,
+                trust_repository: false,
+            }),
+        });
+        let success: SuccessResponse = serde_json::from_str(&response).unwrap();
+        let ResponseResult::WorktreeList { worktrees, .. } = success.result else {
+            panic!("expected worktree_list response");
+        };
+        let listed = worktrees
+            .iter()
+            .find(|entry| entry.branch.as_deref() == Some(branch))
+            .unwrap();
+        assert!(listed.is_prunable);
+        assert!(listed.open_workspace_id.is_some());
+
+        // 按路径打开：已打开的工作区只做聚焦，不因目录缺失而拒绝。
+        let response = app.handle_api_request(Request {
+            id: "open-missing".into(),
+            method: crate::api::schema::Method::WorktreeOpen(WorktreeOpenParams {
+                workspace_id: Some(source_workspace_id),
+                path: Some(path),
+                focus: true,
+                ..WorktreeOpenParams::default()
+            }),
+        });
+        let success: SuccessResponse = serde_json::from_str(&response).unwrap();
+        let ResponseResult::WorktreeOpened {
+            workspace,
+            already_open,
+            ..
+        } = success.result
+        else {
+            panic!("expected worktree_opened response: {response}");
+        };
+        assert!(already_open);
+        assert_eq!(app.state.workspaces.len(), 2);
+        assert_eq!(app.state.active, Some(1));
+        assert_eq!(workspace.workspace_id, app.state.workspaces[1].id);
+
+        run_git(&repo, &["worktree", "prune"]);
+        let _ = std::fs::remove_dir_all(repo);
+    }
+
+    #[test]
     fn api_worktree_open_label_on_already_open_checkout_emits_rename_event() {
         let repo = create_committed_repo("api-worktree-open-label-repo");
         let checkout = unique_temp_path("api-worktree-open-label-checkout");
@@ -1764,6 +1855,8 @@ mod tests {
             .iter()
             .find(|entry| entry.branch.as_deref() == Some("worktree/api-list-prunable"))
             .unwrap();
+        // API 输出只断言 herdr 的可观察行为：无论 git 版本是否输出 porcelain `prunable`
+        // 行（porcelain 与版本的对应关系由 `worktree::tests` 覆盖）。
         assert!(entry.is_prunable);
         assert!(entry.is_linked_worktree);
 

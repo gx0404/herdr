@@ -237,6 +237,7 @@ pub const TEXTS: Texts = Texts {
         not_a_worktree_checkout: "此工作区不是 Herdr 管理的工作树检出。",
         no_worktrees_found: "此仓库没有找到 Git 工作树。",
         unexpected_result: "端点返回了意外的工作树结果",
+        prunable_cannot_open: "该检出目录已不存在，请运行 git worktree prune 清理。",
     },
     settings: SettingsTexts {
         title: " 设置",
@@ -338,6 +339,7 @@ pub const TEXTS: Texts = Texts {
         wt_open: "已打开",
         wt_detached: "已分离",
         wt_root: "主检出",
+        wt_prunable: "待清理",
         sort_grouped: "按工作区分组",
         sort_priority: "按优先级",
         no_matching_agents: "  没有匹配的 agent",
