@@ -559,6 +559,42 @@ struct ScrollbackOverlayRender {
     max_scroll: usize,
 }
 
+/// `render_scrollback_overlay` 的版式推导结果：header / content / footer 三段与
+/// 关闭按钮。
+pub(in crate::client::shell) struct ScrollbackOverlayLayout {
+    pub stack: crate::ui::ModalStackAreas,
+    pub close: Rect,
+}
+
+/// 滚动式浮窗（发行说明 / 产品公告）的版式唯一真源：外框 → 内框 → 三段栈 →
+/// 关闭按钮。渲染与 `ClientShellState::projected_release_notes_geometry` 的首帧
+/// 回退几何都调用它，两边不再各留一份副本（OV-01 的漂移机制）。
+pub(in crate::client::shell) fn scrollback_overlay_layout(
+    outer: Rect,
+) -> Option<ScrollbackOverlayLayout> {
+    if outer.width < 2 || outer.height < 2 {
+        return None;
+    }
+    // 与 `panel()` 返回的内框同构：四边各让出一格边框。
+    let inner = Rect::new(
+        outer.x.saturating_add(1),
+        outer.y.saturating_add(1),
+        outer.width.saturating_sub(2),
+        outer.height.saturating_sub(2),
+    );
+    if inner.height < 8 || inner.width < 20 {
+        return None;
+    }
+    let stack = crate::ui::modal_stack_areas(inner, 2, 1, 0, 1);
+    let close = crate::ui::release_notes_close_button_rect(Rect::new(
+        stack.header.x,
+        stack.header.y,
+        stack.header.width,
+        1,
+    ));
+    Some(ScrollbackOverlayLayout { stack, close })
+}
+
 /// Title/subtitle/close header plus scrollable body and scroll-hint footer;
 /// release notes and product announcement share this frame.
 #[allow(clippy::too_many_arguments)]
@@ -573,8 +609,8 @@ fn render_scrollback_overlay(
     cx: &ChromeContext<'_>,
 ) -> Option<ScrollbackOverlayRender> {
     let p = cx.palette;
-    let (outer, inner) = modal_panel(b, size, p.accent, cx)?;
-    if inner.height < 8 || inner.width < 20 {
+    let (outer, _inner) = modal_panel(b, size, p.accent, cx)?;
+    let Some(layout) = scrollback_overlay_layout(outer) else {
         return Some(ScrollbackOverlayRender {
             area: outer,
             close: Rect::default(),
@@ -582,9 +618,9 @@ fn render_scrollback_overlay(
             metrics: None,
             max_scroll: 0,
         });
-    }
+    };
 
-    let stack = crate::ui::modal_stack_areas(inner, 2, 1, 0, 1);
+    let stack = layout.stack;
     let base = Style::default()
         .bg(p.panel_bg)
         .remove_modifier(Modifier::DIM);
@@ -616,12 +652,7 @@ fn render_scrollback_overlay(
         subtitle,
         base.fg(p.overlay1),
     );
-    let close = crate::ui::release_notes_close_button_rect(Rect::new(
-        stack.header.x,
-        stack.header.y,
-        stack.header.width,
-        1,
-    ));
+    let close = layout.close;
     modal_button(
         b,
         close,

@@ -51,7 +51,7 @@ pub(crate) use self::text::truncate_end;
 pub(crate) use self::widgets::{
     centered_popup_rect, modal_button_style, modal_button_width, modal_close_button_text,
     modal_continue_button_text, modal_rect, modal_stack_areas, ModalButtonState, ModalButtonTone,
-    ModalSize,
+    ModalSize, ModalStackAreas,
 };
 
 use crate::app::AppState;

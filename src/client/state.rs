@@ -54,6 +54,12 @@ pub(super) struct ClientState {
 
 impl Drop for ClientState {
     fn drop(&mut self) {
+        // 退出路径统一收口：`run_client_loop` 还有 `ServerShutdown` /
+        // `ConnectionLost` / `?` 传播等不经过显式 flush 的返回，延迟落盘的最后
+        // 一次布局变更不能在那里静默丢掉。已 flush 过时脏标记为空，这里是空操作。
+        if let Some(shell) = self.shell.as_mut() {
+            shell.flush_chrome_preferences(&mut shell::ClientShellInput::default());
+        }
         if self.attach_escape.is_some() {
             let _ = crate::terminal_modes::set_direct_host_keyboard_protocol(
                 &mut io::stdout(),
@@ -276,6 +282,47 @@ fn merge_presentation_graphics<'frame>(
     let mut graphics = std::mem::take(pending);
     graphics.extend_from_slice(frame_graphics);
     Cow::Owned(graphics)
+}
+
+#[cfg(test)]
+pub(super) fn test_client_state() -> ClientState {
+    ClientState {
+        blit_encoder: render_ansi::BlitEncoder::new(),
+        mouse_capture_active: false,
+        endpoint_mouse_capture_requested: false,
+        endpoint_sgr_pixels_requested: false,
+        host_theme_updates: Vec::new(),
+        direct_mouse_capture_preference: false,
+        shell_mouse_capture_preference: false,
+        direct_keyboard_protocol: Default::default(),
+        pane_keyboard_report_all: false,
+        keyboard_report_all_active: false,
+        reported_size: (100, 30),
+        reported_cell_size: (0, 0),
+        sound_config: Default::default(),
+        kitty_graphics_enabled: false,
+        pixel_geometry_enabled: false,
+        pixel_geometry_exact: false,
+        #[cfg(unix)]
+        direct_graphics_response: Default::default(),
+        #[cfg(unix)]
+        retired_direct_graphics: None,
+        #[cfg(unix)]
+        pending_surface_graphics: HashMap::new(),
+        attach_escape: None,
+        #[cfg(unix)]
+        mouse_scroll_lines: 3,
+        remote_image_paste_key: None,
+        redraw_on_focus_gained: false,
+        repaint_pending: false,
+        presentation_frozen: false,
+        draw_host_cursor: false,
+        detached_process_children: Vec::new(),
+        shell: Some(shell::ClientShellState::new(
+            shell::ClientShellConfig::from_config(&crate::config::Config::default()),
+        )),
+        pending_graphics: Vec::new(),
+    }
 }
 
 #[cfg(test)]

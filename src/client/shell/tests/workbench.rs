@@ -728,3 +728,375 @@ fn usage_dashboard_overlays_the_shell_and_closes_on_escape() {
         "toggling the launcher button twice closes the dashboard"
     );
 }
+
+/// Layout 模式下最大化后仍要能用键盘轮转面板：几何取自去最大化投影，
+/// 最大化目标跟随新焦点。
+#[test]
+fn maximized_layout_keyboard_rotates_panels_and_moves_the_maximized_target() {
+    let mut state = ready();
+    state.workbench_open(PanelId::Monitor);
+    state.workbench.arranging = true;
+    let focused = state.workbench.dock.focused.clone();
+    state.workbench.dock.maximized = Some(focused.clone());
+
+    let mut outcome = ClientShellInput::default();
+    assert!(state.workbench_key(
+        &crate::input::TerminalKey::new(crossterm::event::KeyCode::Tab, KeyModifiers::empty()),
+        &mut outcome,
+    ));
+    let next = state.workbench.dock.focused.clone();
+    assert_ne!(next, focused, "最大化后 Tab 仍要轮转面板");
+    assert_eq!(
+        state.workbench.dock.maximized.as_ref(),
+        Some(&next),
+        "最大化跟随新焦点"
+    );
+
+    // Shift+方向键在最大化状态下仍能停靠到另一个面板。
+    let before = state.workbench.dock.revision;
+    let mut outcome = ClientShellInput::default();
+    assert!(state.workbench_key(
+        &crate::input::TerminalKey::new(crossterm::event::KeyCode::Right, KeyModifiers::SHIFT),
+        &mut outcome,
+    ));
+    assert!(
+        state.workbench.dock.revision > before,
+        "最大化后 Shift+→ 仍要重排布局"
+    );
+    assert!(
+        state.workbench.dock.maximized.is_none(),
+        "Shift+方向键走 `DockLayout::dock`，按既有语义顺带退出最大化"
+    );
+}
+
+fn preferences_path(name: &str) -> std::path::PathBuf {
+    let path = std::env::temp_dir().join(format!(
+        "herdr-workbench-preferences-{name}-{}.json",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_file(&path);
+    path
+}
+
+/// Layout 模式按键落盘去抖：未处理按键不标脏，处理过的按键 500 ms 静默后
+/// 合并落盘，退出路径必须 flush。
+#[test]
+fn layout_keys_debounce_preference_writes_and_flush_before_exit() {
+    let path = preferences_path("debounce");
+    let mut state = ready();
+    state.config.preferences_path = Some(path.clone());
+    state.workbench.arranging = true;
+
+    // 未处理按键：不写盘、不标脏。
+    let mut outcome = ClientShellInput::default();
+    assert!(state.workbench_key(
+        &crate::input::TerminalKey::new(
+            crossterm::event::KeyCode::Char('q'),
+            KeyModifiers::empty(),
+        ),
+        &mut outcome,
+    ));
+    assert!(
+        state.preferences_dirty_since.is_none(),
+        "未处理按键不触发偏好落盘"
+    );
+    assert_eq!(state.preferences_writes, 0, "未处理按键不写偏好文件");
+
+    // 处理过的按键：只标脏，去抖窗口内不写盘。
+    let start = std::time::Instant::now();
+    let mut outcome = ClientShellInput::default();
+    assert!(state.workbench_key(
+        &crate::input::TerminalKey::new(crossterm::event::KeyCode::Right, KeyModifiers::empty()),
+        &mut outcome,
+    ));
+    assert!(state.preferences_dirty_since.is_some(), "布局变更标脏");
+    assert_eq!(state.preferences_writes, 0, "去抖窗口内不落盘");
+    assert!(!state.tick_chrome_preferences(start + std::time::Duration::from_millis(100)));
+    assert_eq!(state.preferences_writes, 0, "100 ms 时仍在去抖窗口内");
+
+    // 静默 500 ms 后合并写一次。
+    state.tick_chrome_preferences(start + std::time::Duration::from_millis(600));
+    assert_eq!(state.preferences_writes, 1, "静默 500 ms 后只落盘一次");
+    assert!(path.exists(), "静默 500 ms 后落盘");
+    assert!(state.preferences_dirty_since.is_none());
+    assert!(state.preferences_dirty_first.is_none());
+
+    // 退出前 flush：未到期的脏状态也必须落盘。
+    let mut outcome = ClientShellInput::default();
+    assert!(state.workbench_key(
+        &crate::input::TerminalKey::new(crossterm::event::KeyCode::Left, KeyModifiers::empty()),
+        &mut outcome,
+    ));
+    assert!(state.preferences_dirty_since.is_some());
+    state.flush_chrome_preferences(&mut outcome);
+    assert_eq!(
+        state.preferences_writes, 2,
+        "退出路径 flush 掉最后一次布局变更"
+    );
+    assert!(state.preferences_dirty_since.is_none());
+    let _ = std::fs::remove_file(&path);
+}
+
+/// 去抖是 trailing edge：窗口内再次标脏必须把计时整个推后，否则「按住方向键」
+/// 会退化成每 500 ms 落一次盘的节流（C-13）。
+#[test]
+fn preference_debounce_restarts_on_every_dirty_event() {
+    let path = preferences_path("restart");
+    let mut state = ready();
+    state.config.preferences_path = Some(path.clone());
+    let start = std::time::Instant::now();
+    let at = |ms: u64| start + std::time::Duration::from_millis(ms);
+
+    state.schedule_chrome_preferences(at(0));
+    assert!(!state.tick_chrome_preferences(at(400)));
+    assert_eq!(state.preferences_writes, 0, "400 ms 时仍在去抖窗口内");
+
+    // 窗口内的第二次输入把到期时刻推到 900 ms。
+    state.schedule_chrome_preferences(at(400));
+    assert!(!state.tick_chrome_preferences(at(600)));
+    assert_eq!(
+        state.preferences_writes, 0,
+        "去抖必须重置计时：600 ms 还不该落盘"
+    );
+    state.tick_chrome_preferences(at(900));
+    assert_eq!(state.preferences_writes, 1, "静默满 500 ms 才合并写一次");
+
+    state.tick_chrome_preferences(at(2_000));
+    assert_eq!(state.preferences_writes, 1, "没有新脏事件就不再写");
+    let _ = std::fs::remove_file(&path);
+}
+
+/// C-13 的验收指标：按住方向键 5 秒（≈30 键/s）落盘次数 ≤2；防饿死上限保证
+/// 长按也不会永远不写。
+#[test]
+fn held_layout_keys_collapse_into_at_most_two_preference_writes() {
+    let path = preferences_path("held");
+    let mut state = ready();
+    state.config.preferences_path = Some(path.clone());
+    let start = std::time::Instant::now();
+    let at = |ms: u64| start + std::time::Duration::from_millis(ms);
+
+    // 5 秒按住：每 33 ms 一次脏事件（≈30 键/s），主循环 100 ms 节拍照常 tick。
+    let mut next_press = 0u64;
+    let mut next_tick = 0u64;
+    for millis in 0..5_000u64 {
+        if millis >= next_press {
+            state.schedule_chrome_preferences(at(millis));
+            next_press += 33;
+        }
+        if millis >= next_tick {
+            state.tick_chrome_preferences(at(millis));
+            next_tick += 100;
+        }
+    }
+    assert!(
+        state.preferences_writes <= 1,
+        "按住期间最多只有防饿死上限那一次写，实际 {}",
+        state.preferences_writes
+    );
+
+    // 松手后静默一个去抖窗口，合并写收尾。
+    state.tick_chrome_preferences(at(5_600));
+    assert!(
+        state.preferences_writes <= 2,
+        "5 秒窗口内落盘次数必须 ≤2，实际 {}",
+        state.preferences_writes
+    );
+    assert!(state.preferences_dirty_since.is_none(), "收尾后脏标记清空");
+    assert!(path.exists(), "最后一次布局变更必须落盘");
+    let _ = std::fs::remove_file(&path);
+}
+
+/// 只有一个面板时 Tab 轮转是彻底的空操作：不得标脏，更不得落盘（C-13）。
+#[test]
+fn single_panel_layout_tab_never_marks_preferences_dirty() {
+    let path = preferences_path("single-tab");
+    let mut state = ready();
+    state.config.preferences_path = Some(path.clone());
+    state.workbench.arranging = true;
+    // 收成单面板布局：Tab 轮转在这里必然回到自己。
+    let focused = state.workbench.dock.focused.clone();
+    state.workbench.dock.root = crate::client::shell::dock::DockNode::Panel {
+        panel: focused.clone(),
+    };
+    let panels = state
+        .workbench
+        .dock
+        .layout_geometry(Rect::new(0, 0, 4096, 4096))
+        .panels
+        .len();
+    assert_eq!(panels, 1, "布局已收成一个面板");
+
+    let mut outcome = ClientShellInput::default();
+    assert!(state.workbench_key(
+        &crate::input::TerminalKey::new(crossterm::event::KeyCode::Tab, KeyModifiers::empty()),
+        &mut outcome,
+    ));
+    assert_eq!(state.workbench.dock.focused, focused, "单面板 Tab 不换焦点");
+    assert!(
+        state.preferences_dirty_since.is_none(),
+        "无效果的 Tab 不得标脏"
+    );
+    assert_eq!(state.preferences_writes, 0);
+    let _ = std::fs::remove_file(&path);
+}
+
+/// 最大化状态下的方向键：先退出最大化再 resize（与 `DockLayout::dock` 一致），
+/// 不留「无声不可见改动」；Shift+方向键同样以 `maximized = None` 收尾。
+#[test]
+fn maximized_layout_arrow_keys_leave_maximize_before_resizing() {
+    let path = preferences_path("maximized-arrow");
+    let mut state = ready();
+    state.config.preferences_path = Some(path.clone());
+    state.workbench_open(PanelId::Monitor);
+    state.workbench.arranging = true;
+    let focused = state.workbench.dock.focused.clone();
+    state.workbench.dock.maximized = Some(focused);
+
+    let before = state.workbench.dock.revision;
+    let mut outcome = ClientShellInput::default();
+    assert!(state.workbench_key(
+        &crate::input::TerminalKey::new(crossterm::event::KeyCode::Right, KeyModifiers::empty()),
+        &mut outcome,
+    ));
+    assert!(
+        state.workbench.dock.maximized.is_none(),
+        "最大化下的方向键先退出最大化，改动才看得见"
+    );
+    assert!(
+        state.workbench.dock.revision > before,
+        "退出最大化后的 resize 必须真的改写布局"
+    );
+    assert!(state.preferences_dirty_since.is_some(), "布局改动要标脏");
+    let _ = std::fs::remove_file(&path);
+}
+
+/// 分隔线已经顶到 clamp 边界后继续按方向键不是改动：不得标脏、不得落盘。
+#[test]
+fn layout_arrow_keys_stop_marking_dirty_at_the_resize_clamp() {
+    let path = preferences_path("clamp");
+    let mut state = ready();
+    state.workbench_open(PanelId::Monitor);
+    state.config.preferences_path = Some(path.clone());
+    state.workbench.arranging = true;
+
+    // 一直推到 clamp 边界。
+    for _ in 0..80 {
+        let mut outcome = ClientShellInput::default();
+        state.workbench_key(
+            &crate::input::TerminalKey::new(crossterm::event::KeyCode::Left, KeyModifiers::empty()),
+            &mut outcome,
+        );
+    }
+    state.preferences_dirty_since = None;
+    state.preferences_dirty_first = None;
+
+    let mut outcome = ClientShellInput::default();
+    assert!(state.workbench_key(
+        &crate::input::TerminalKey::new(crossterm::event::KeyCode::Left, KeyModifiers::empty()),
+        &mut outcome,
+    ));
+    assert!(
+        state.preferences_dirty_since.is_none(),
+        "贴边后的方向键没有改动，不得标脏"
+    );
+    assert_eq!(state.preferences_writes, 0);
+    let _ = std::fs::remove_file(&path);
+}
+
+/// `workbench_mouse` 的非脏集合：标签滚动、全局菜单与 `arranging` 开关都不写
+/// `ClientChromePreferences`，命中后不得标脏、不得落盘（C-13）。
+#[test]
+fn presentation_only_workbench_clicks_never_mark_preferences_dirty() {
+    use crate::client::shell::workbench::interaction::Action;
+    use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+
+    // 每个动作都用全新状态：全局菜单会打开 overlay，复用状态会让后续点击被
+    // `workbench_mouse` 的 overlay 守卫直接吞掉。
+    let click = |name: &str, wanted: fn(&Action) -> bool| {
+        let path = preferences_path(name);
+        let mut state = ready();
+        state.config.mouse_capture = true;
+        state.workbench_open(PanelId::Monitor);
+        state.compose(120, 40).expect("布局命中图");
+        state.config.preferences_path = Some(path.clone());
+        let rect = state
+            .workbench
+            .hits
+            .iter()
+            .find(|(_, action)| wanted(action))
+            .map(|(rect, _)| *rect)
+            .unwrap_or_else(|| panic!("工作台应当有 {name} 命中区"));
+        let mut outcome = ClientShellInput::default();
+        assert!(
+            state.workbench_mouse(
+                MouseEvent {
+                    kind: MouseEventKind::Down(MouseButton::Left),
+                    column: rect.x + rect.width / 2,
+                    row: rect.y,
+                    modifiers: KeyModifiers::empty(),
+                },
+                &mut outcome,
+            ),
+            "{name} 命中区应当被工作台消费"
+        );
+        assert!(
+            state.preferences_dirty_since.is_none(),
+            "{name} 只是呈现状态，不得标脏"
+        );
+        assert_eq!(state.preferences_writes, 0, "{name} 不得落盘");
+        let _ = std::fs::remove_file(&path);
+    };
+
+    click("menu", |action| matches!(action, Action::Menu));
+    click("arrange", |action| matches!(action, Action::Arrange));
+}
+
+/// 延迟落盘新增的数据丢失面：`run_client_loop` 还有 `ServerShutdown` /
+/// `ConnectionLost` / `?` 传播等不经过显式 flush 的返回。`ClientState` 的 Drop
+/// 是统一收口，删掉它这条测试必须变红。
+#[test]
+fn dropping_the_client_state_flushes_deferred_chrome_preferences() {
+    let path = preferences_path("client-drop");
+    let mut client = crate::client::state::test_client_state();
+    let shell = client.shell.as_mut().expect("shell 模式");
+    shell.config.preferences_path = Some(path.clone());
+    shell.schedule_chrome_preferences(std::time::Instant::now());
+    assert!(!path.exists(), "去抖窗口内不落盘");
+
+    drop(client);
+    assert!(path.exists(), "异常退出路径也必须落盘最后一次布局变更");
+    let _ = std::fs::remove_file(&path);
+}
+
+/// 写失败不得吞掉整个合并批次：脏标记必须保留，下一个去抖周期或退出前的
+/// flush 自动重试（否则最多 500 ms 的布局变更会永久丢失）。
+#[test]
+fn failed_preference_write_keeps_the_batch_dirty_for_the_next_retry() {
+    // 让父路径是一个普通文件，`create_dir_all` 必然失败。
+    let blocker = preferences_path("write-failure");
+    std::fs::write(&blocker, b"not a directory").expect("准备不可写父路径");
+    let path = blocker.join("preferences.json");
+
+    let mut state = ready();
+    state.config.preferences_path = Some(path);
+    let start = std::time::Instant::now();
+    state.schedule_chrome_preferences(start);
+
+    let mut outcome = ClientShellInput::default();
+    state.flush_chrome_preferences(&mut outcome);
+    assert_eq!(state.preferences_writes, 1, "尝试写过一次");
+    assert!(
+        state.preferences_dirty_since.is_some(),
+        "写失败必须保留脏标记以便重试"
+    );
+    assert!(outcome.repaint, "写失败要提示用户");
+
+    // 修好路径后下一次 flush 真的补上。
+    std::fs::remove_file(&blocker).expect("清理阻塞文件");
+    let mut outcome = ClientShellInput::default();
+    state.flush_chrome_preferences(&mut outcome);
+    assert_eq!(state.preferences_writes, 2);
+    assert!(state.preferences_dirty_since.is_none(), "重试成功后清脏");
+    let _ = std::fs::remove_dir_all(&blocker);
+}

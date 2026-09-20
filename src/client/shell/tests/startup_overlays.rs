@@ -1375,3 +1375,193 @@ fn client_settings_preview_restore_and_endpoint_integrations_are_owned_by_overla
         })) if integration_messages == &["installed codex"]
     ));
 }
+
+/// 拖动过发行说明浮窗后，关闭按钮与滚动条命中区必须跟着窗口走：输入侧
+/// 统一信任渲染回填的 hits，不再用居中默认几何。
+#[test]
+fn dragged_release_notes_window_keeps_its_close_button_and_scrollbar_hits() {
+    let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
+    let mut endpoint_snapshot = snapshot();
+    endpoint_snapshot.update_available = Some("0.8.3".into());
+    endpoint_snapshot.latest_release_notes_available = true;
+    endpoint_snapshot.release_notes = Some(crate::protocol::ClientShellReleaseNotes {
+        version: "0.8.3".into(),
+        body: (0..40)
+            .map(|index| format!("- release line {index}"))
+            .collect::<Vec<_>>()
+            .join("\n"),
+        preview: true,
+    });
+    state.set_snapshot(Box::new(endpoint_snapshot));
+    state.set_pane_surface(surface());
+    state.compose(106, 30).expect("initial shell");
+    state.open_command_search();
+    palette_select(&mut state, "whats_new");
+    state.handle_raw_events(vec![RawInputEvent::Key(crate::input::TerminalKey::new(
+        KeyCode::Enter,
+        KeyModifiers::empty(),
+    ))]);
+    state.compose(106, 30).expect("release notes");
+
+    let original = state.hits.overlay_bounds;
+    assert!(!original.is_empty());
+    let centered_close = state.hits.overlay_primary;
+    for (kind, x, y) in [
+        (
+            MouseEventKind::Down(MouseButton::Left),
+            original.x + 5,
+            original.y,
+        ),
+        (
+            MouseEventKind::Drag(MouseButton::Left),
+            original.x + 5,
+            original.y + 3,
+        ),
+        (
+            MouseEventKind::Up(MouseButton::Left),
+            original.x + 5,
+            original.y + 3,
+        ),
+    ] {
+        state.handle_raw_events(vec![RawInputEvent::Mouse(crossterm::event::MouseEvent {
+            kind,
+            column: x,
+            row: y,
+            modifiers: KeyModifiers::NONE,
+        })]);
+    }
+    state.compose(106, 30).expect("dragged release notes");
+    let moved = state.hits.overlay_bounds;
+    assert_eq!(moved.y, original.y + 3, "浮窗已被拖动");
+    let close = state.hits.overlay_primary;
+    assert_ne!(close, centered_close, "关闭按钮跟着窗口走");
+
+    // 原居中位置的「关闭按钮」现在只是普通内容，点它不得关闭浮窗。
+    state.handle_raw_events(vec![RawInputEvent::Mouse(crossterm::event::MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: centered_close.x,
+        row: centered_close.y,
+        modifiers: KeyModifiers::NONE,
+    })]);
+    assert!(
+        matches!(state.overlay, Some(ClientShellOverlay::ReleaseNotes(_))),
+        "旧居中位置不再是关闭按钮"
+    );
+
+    // 滚动条命中区同样跟随窗口。
+    let track = state.hits.release_notes_scrollbar;
+    assert!(!track.is_empty());
+    assert!(track.x >= moved.x && track.bottom() <= moved.bottom());
+    state.handle_raw_events(vec![RawInputEvent::Mouse(crossterm::event::MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: track.x,
+        row: track.bottom().saturating_sub(1),
+        modifiers: KeyModifiers::NONE,
+    })]);
+    assert!(
+        matches!(
+            state.overlay,
+            Some(ClientShellOverlay::ReleaseNotes(
+                crate::app::state::ReleaseNotesState { scroll, .. }
+            )) if scroll > 0
+        ),
+        "拖动后滚动条仍可用"
+    );
+
+    // 真正的关闭按钮生效。
+    let closed =
+        state.handle_raw_events(vec![RawInputEvent::Mouse(crossterm::event::MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: close.x,
+            row: close.y,
+            modifiers: KeyModifiers::NONE,
+        })]);
+    assert!(state.overlay.is_none(), "拖动后点关闭按钮生效");
+    assert!(matches!(
+        &closed.actions[..],
+        [ClientShellAction::Endpoint { request, .. }]
+            if matches!(request.method, crate::api::schema::Method::ReleaseNotesDismiss(_))
+    ));
+}
+
+/// 漂移护栏：输入侧的首帧回退几何与渲染回填的 hits 必须逐字段相等。两边共用
+/// `overlays::scrollback_overlay_layout`，改了版式却只改一边时这条必须变红
+/// （OV-01 最初的漂移机制）。
+#[test]
+fn projected_release_notes_geometry_matches_the_rendered_hits() {
+    let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
+    let mut endpoint_snapshot = snapshot();
+    endpoint_snapshot.update_available = Some("0.8.3".into());
+    endpoint_snapshot.latest_release_notes_available = true;
+    endpoint_snapshot.release_notes = Some(crate::protocol::ClientShellReleaseNotes {
+        version: "0.8.3".into(),
+        body: (0..40)
+            .map(|index| format!("- release line {index}"))
+            .collect::<Vec<_>>()
+            .join("\n"),
+        preview: true,
+    });
+    state.set_snapshot(Box::new(endpoint_snapshot));
+    state.set_pane_surface(surface());
+    state.compose(106, 30).expect("initial shell");
+    state.open_command_search();
+    palette_select(&mut state, "whats_new");
+    state.handle_raw_events(vec![RawInputEvent::Key(crate::input::TerminalKey::new(
+        KeyCode::Enter,
+        KeyModifiers::empty(),
+    ))]);
+    state.compose(106, 30).expect("release notes");
+
+    let projected = state
+        .projected_release_notes_geometry()
+        .expect("首帧回退几何");
+    assert_eq!(
+        projected.0, state.hits.overlay_primary,
+        "关闭按钮：回退几何与渲染真源必须一致"
+    );
+    assert_eq!(
+        projected.1.unwrap_or_default(),
+        state.hits.release_notes_scrollbar,
+        "滚动条轨道：回退几何与渲染真源必须一致"
+    );
+    assert_eq!(
+        projected.2.max_offset_from_bottom, state.hits.release_notes_max_scroll,
+        "滚动上限：回退几何与渲染真源必须一致"
+    );
+
+    // 拖动浮窗后两边仍要一致（回退几何同样尊重 `floating_page_rect`）。
+    let bounds = state.hits.overlay_bounds;
+    for (kind, x, y) in [
+        (
+            MouseEventKind::Down(MouseButton::Left),
+            bounds.x + 5,
+            bounds.y,
+        ),
+        (
+            MouseEventKind::Drag(MouseButton::Left),
+            bounds.x + 5,
+            bounds.y + 3,
+        ),
+        (
+            MouseEventKind::Up(MouseButton::Left),
+            bounds.x + 5,
+            bounds.y + 3,
+        ),
+    ] {
+        state.handle_raw_events(vec![RawInputEvent::Mouse(crossterm::event::MouseEvent {
+            kind,
+            column: x,
+            row: y,
+            modifiers: KeyModifiers::NONE,
+        })]);
+    }
+    state.compose(106, 30).expect("dragged release notes");
+    let projected = state
+        .projected_release_notes_geometry()
+        .expect("拖动后的回退几何");
+    assert_eq!(projected.0, state.hits.overlay_primary);
+    assert_eq!(
+        projected.1.unwrap_or_default(),
+        state.hits.release_notes_scrollbar
+    );
+}

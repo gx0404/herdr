@@ -314,10 +314,21 @@ impl DockLayout {
     }
 
     pub fn geometry(&self, area: Rect) -> Geometry {
+        self.projected_geometry(area, self.maximized.as_ref())
+    }
+
+    /// 去最大化投影的几何：最大化只是呈现选择，面板轮转与分隔线调整必须看到
+    /// 完整布局树，否则 `geometry` 只返回一个面板、零分隔线，键盘动作全部成为
+    /// 无声空操作。窄屏 compact 是真实约束，此处仍然保留。
+    pub fn layout_geometry(&self, area: Rect) -> Geometry {
+        self.projected_geometry(area, None)
+    }
+
+    fn projected_geometry(&self, area: Rect, maximized: Option<&PanelId>) -> Geometry {
         let mut geometry = Geometry::default();
         let minimum = self.root.minimum();
         let compact = area.width < minimum.0 || area.height < minimum.1;
-        if let Some(panel) = self.maximized.as_ref().or(compact.then_some(&self.focused)) {
+        if let Some(panel) = maximized.or(compact.then_some(&self.focused)) {
             geometry.panels.push((panel.clone(), area));
             geometry.compact = compact;
         } else {
@@ -360,7 +371,15 @@ impl DockLayout {
         let DockNode::Split { ratio: current, .. } = node else {
             return false;
         };
-        *current = ratio.clamp(0.05, 0.95);
+        let clamped = ratio.clamp(0.05, 0.95);
+        // 比较旧值：分隔线已经贴在 0.05 / 0.95 边界后继续按方向键不是改动，
+        // 否则每个去抖周期都会换来一次无效落盘（PERF-01）。
+        if (*current - clamped).abs() <= f32::EPSILON {
+            return false;
+        }
+        *current = clamped;
+        // 与 `dock` / `move_tab` 的约定一致：改写布局就推进 revision。
+        self.revision = self.revision.saturating_add(1);
         true
     }
 
@@ -623,6 +642,30 @@ mod tests {
         assert!(!layout.resize(&[true, false], 0.4));
         assert!(!layout.resize(&[], f32::NAN));
         assert_eq!(layout, before);
+    }
+
+    #[test]
+    fn layout_geometry_ignores_maximized_but_keeps_the_compact_projection() {
+        let mut layout = DockLayout::default();
+        let area = Rect::new(0, 0, 140, 50);
+        let full = layout.geometry(area);
+        assert_eq!(full.panels.len(), 3);
+        assert!(!full.dividers.is_empty());
+
+        layout.maximized = Some(PanelId::Terminal(1));
+        // 最大化只是呈现投影：键盘几何仍要看到完整布局树与分隔线。
+        assert_eq!(layout.geometry(area).panels.len(), 1);
+        assert!(layout.geometry(area).dividers.is_empty());
+        let projected = layout.layout_geometry(area);
+        assert_eq!(projected.panels, full.panels);
+        assert_eq!(projected.dividers.len(), full.dividers.len());
+        assert!(!projected.compact);
+
+        // 窄屏 compact 是真实约束，去最大化投影不得绕过它。
+        let narrow = Rect::new(0, 0, 20, 4);
+        let compact = layout.layout_geometry(narrow);
+        assert!(compact.compact);
+        assert_eq!(compact.panels, vec![(PanelId::Terminal(1), narrow)]);
     }
 
     #[test]

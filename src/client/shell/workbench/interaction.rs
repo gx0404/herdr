@@ -2,8 +2,10 @@ use super::*;
 use crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use dock::{Axis, Divider, Edge};
 
+// 可见性放宽到 shell 层：`tests::workbench` 需要按动作类型定位命中矩形，才能
+// 为「哪些点击会落盘」写回归护栏（PERF-01）。
 #[derive(Clone)]
-pub(super) enum Action {
+pub(in crate::client::shell) enum Action {
     Menu,
     Open(PanelId),
     Close(PanelId),
@@ -153,6 +155,8 @@ impl ClientShellState {
             return false;
         }
         self.publish_workbench_focus(previous_tab, outcome);
+        // 每次手势最多一次写：保持即时落盘，写失败时经 `outcome` 上报错误并
+        // 重绘（去抖路径拿不到这份反馈）。
         self.persist_chrome_preferences(outcome);
         true
     }
@@ -319,6 +323,7 @@ impl ClientShellState {
                                 .dock(panel, &target, edge.unwrap_or(Edge::Right));
                         }
                     }
+                    // 拖拽释放每次手势只写一次，保持即时语义与错误反馈。
                     self.persist_chrome_preferences(outcome);
                 }
                 _ => {
@@ -387,6 +392,14 @@ impl ClientShellState {
             .map(|(_, action)| action.clone());
         if let Some(action) = action {
             let creates_tab = matches!(&action, Action::NewTab(_));
+            // 判据是「是否会写入 `ClientChromePreferences`」而不是「是否呈现
+            // 状态」：标签滚动、全局菜单、`arranging` 开关与开始拖 pane 都不进
+            // `DockLayout` / `saved_layouts()`，标脏只会换来一次无效全量写
+            // （PERF-01）。
+            let dirty = !matches!(
+                action,
+                Action::ScrollTabs(..) | Action::Menu | Action::Arrange | Action::Pane(_)
+            );
             match action {
                 Action::ScrollTabs(group, delta) => {
                     let scroll = self.workbench.tab_scroll.entry(group).or_default();
@@ -491,7 +504,9 @@ impl ClientShellState {
             if !creates_tab {
                 self.publish_workbench_focus(previous_tab, outcome);
             }
-            self.persist_chrome_preferences(outcome);
+            if dirty {
+                self.schedule_chrome_preferences(std::time::Instant::now());
+            }
             outcome.repaint = true;
             return true;
         }
@@ -593,7 +608,15 @@ impl ClientShellState {
             return false;
         }
         let previous_tab = self.focused_tab_id();
-        let geometry = self.workbench.dock.geometry(Rect::new(0, 0, 4096, 4096));
+        // 去最大化投影：最大化时 `geometry` 只有一个面板、零分隔线，Tab /
+        // 方向键会静默失效（WB-01）。
+        let geometry = self
+            .workbench
+            .dock
+            .layout_geometry(Rect::new(0, 0, 4096, 4096));
+        // 只有真正改写了布局的按键才标脏落盘：未处理按键与 Esc（`arranging`
+        // 不入偏好）保持零磁盘写（PERF-01）。
+        let mut dirty = false;
         match key.code {
             KeyCode::Esc => self.workbench.arranging = false,
             KeyCode::Tab | KeyCode::BackTab => {
@@ -613,9 +636,15 @@ impl ClientShellState {
                     } else {
                         (index + 1) % panels.len()
                     };
-                    self.focus_workbench_panel(panels[next].clone());
-                    if self.workbench.dock.maximized.is_some() {
-                        self.workbench.dock.maximized = Some(panels[next].clone());
+                    // 只有一个面板时 `next == index`，轮转是彻底的空操作：
+                    // 不改焦点也不改最大化目标，就不能标脏（PERF-01）。
+                    if next != index {
+                        self.focus_workbench_panel(panels[next].clone());
+                        if self.workbench.dock.maximized.is_some() {
+                            // 最大化跟随焦点，否则轮转后看到的还是旧面板。
+                            self.workbench.dock.maximized = Some(panels[next].clone());
+                        }
+                        dirty = true;
                     }
                 }
             }
@@ -625,6 +654,7 @@ impl ClientShellState {
                 } else {
                     Some(self.workbench.dock.focused.clone())
                 };
+                dirty = true;
             }
             KeyCode::Left | KeyCode::Right | KeyCode::Up | KeyCode::Down => {
                 let edge = match key.code {
@@ -639,11 +669,21 @@ impl ClientShellState {
                         .iter()
                         .find(|(panel, _)| panel != &self.workbench.dock.focused)
                     {
-                        self.workbench
-                            .dock
-                            .dock(self.workbench.dock.focused.clone(), target, edge);
+                        dirty |= self.workbench.dock.dock(
+                            self.workbench.dock.focused.clone(),
+                            target,
+                            edge,
+                        );
                     }
                 } else {
+                    // 最大化时屏幕上只有一个铺满的面板，分隔线全被挡住：先退出
+                    // 最大化（与 `DockLayout::dock` 内 `maximized = None` 的既有
+                    // 语义一致），resize 才是用户看得见的改动，而不是「无声不可
+                    // 见改动 + 落盘」（WB-01）。
+                    if !self.workbench.dock.locked && self.workbench.dock.maximized.take().is_some()
+                    {
+                        dirty = true;
+                    }
                     let horizontal = matches!(edge, Edge::Left | Edge::Right);
                     if let Some((_, focused)) = geometry
                         .panels
@@ -661,7 +701,7 @@ impl ClientShellState {
                                 f32::from(divider.handle.y - divider.area.y)
                                     / f32::from(divider.area.height.max(1))
                             };
-                            self.workbench.dock.resize(
+                            dirty |= self.workbench.dock.resize(
                                 &divider.path,
                                 ratio
                                     + if matches!(edge, Edge::Left | Edge::Top) {
@@ -678,7 +718,9 @@ impl ClientShellState {
         }
         self.sync_observation_page_with_focus();
         self.publish_workbench_focus(previous_tab, outcome);
-        self.persist_chrome_preferences(outcome);
+        if dirty {
+            self.schedule_chrome_preferences(std::time::Instant::now());
+        }
         outcome.repaint = true;
         true
     }

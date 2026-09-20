@@ -898,6 +898,14 @@ pub(super) fn install_client_shell_snapshot(
     Ok(())
 }
 
+/// 退出 / detach 前把去抖中的 chrome 偏好写掉：否则最后 500 ms 内的布局
+/// 变更（Layout 模式按键、拖动分隔线）会丢失。
+pub(super) fn flush_client_chrome_preferences(state: &mut ClientState) {
+    if let Some(shell) = state.shell.as_mut() {
+        shell.flush_chrome_preferences(&mut shell::ClientShellInput::default());
+    }
+}
+
 pub(super) fn finish_client_shell_input(
     state: &mut ClientState,
     outcome: shell::ClientShellInput,
@@ -910,6 +918,7 @@ pub(super) fn finish_client_shell_input(
 ) -> Result<bool, ClientError> {
     apply_client_shell_input_source_changes(state, prefix_input_source);
     if outcome.detach {
+        flush_client_chrome_preferences(state);
         let _ = write_to_server(endpoints, &ClientMessage::Detach);
         return Ok(true);
     }

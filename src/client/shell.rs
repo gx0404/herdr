@@ -18,7 +18,7 @@ mod endpoint_navigation;
 mod endpoint_notices;
 mod endpoint_sidebar;
 mod endpoints;
-mod workbench;
+pub(in crate::client::shell) mod workbench;
 pub(super) use endpoints::*;
 mod feedback;
 mod floating_pages;

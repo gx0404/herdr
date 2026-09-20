@@ -101,35 +101,52 @@ impl ClientShellState {
         outcome.repaint = true;
     }
 
+    /// 发行说明浮窗的输入几何。渲染回填的 hits 是唯一真源——浮窗可以被拖动
+    /// 与缩放，只有它跟着窗口走；仅当浮窗刚打开、本帧还没合成过时，才回退到
+    /// 与 `overlays::modal_panel` 同构的几何推导（同样尊重浮窗位置）。
     pub(super) fn current_release_notes_input_geometry(
         &self,
-    ) -> Option<(Rect, Option<Rect>, crate::pane::ScrollMetrics)> {
-        let notes = match self.overlay.as_ref()? {
-            ClientShellOverlay::ReleaseNotes(notes) => notes,
-            _ => return None,
-        };
-        let (cols, rows) = self.last_composed_size?;
-        let outer = crate::ui::centered_popup_rect(
-            Rect::new(0, 0, cols, rows),
-            crate::ui::RELEASE_NOTES_MODAL_SIZE.0,
-            crate::ui::RELEASE_NOTES_MODAL_SIZE.1,
-        )?;
-        let inner = Rect::new(
-            outer.x.saturating_add(1),
-            outer.y.saturating_add(1),
-            outer.width.saturating_sub(2),
-            outer.height.saturating_sub(2),
-        );
-        if inner.height < 8 || inner.width < 20 {
+    ) -> Option<(Rect, Option<Rect>, Option<crate::pane::ScrollMetrics>)> {
+        if !matches!(self.overlay.as_ref()?, ClientShellOverlay::ReleaseNotes(_)) {
             return None;
         }
-        let stack = crate::ui::modal_stack_areas(inner, 2, 1, 0, 1);
-        let close = crate::ui::release_notes_close_button_rect(Rect::new(
-            stack.header.x,
-            stack.header.y,
-            stack.header.width,
-            1,
-        ));
+        if self.hits.overlay_kind == Some(ClientShellOverlayKind::ReleaseNotes) {
+            return Some((
+                self.hits.overlay_primary,
+                (!self.hits.release_notes_scrollbar.is_empty())
+                    .then_some(self.hits.release_notes_scrollbar),
+                self.hits.release_notes_scroll_metrics,
+            ));
+        }
+        self.projected_release_notes_geometry()
+            .map(|(close, track, metrics)| (close, track, Some(metrics)))
+    }
+
+    /// 首帧回退几何：与渲染同一条路径（浮窗矩形优先，否则居中模态）。
+    pub(super) fn projected_release_notes_geometry(
+        &self,
+    ) -> Option<(Rect, Option<Rect>, crate::pane::ScrollMetrics)> {
+        let ClientShellOverlay::ReleaseNotes(notes) = self.overlay.as_ref()? else {
+            return None;
+        };
+        let (cols, rows) = self.last_composed_size?;
+        let screen = Rect::new(0, 0, cols, rows);
+        let outer = self
+            .floating_page_rect(cols, rows)
+            .map(|rect| rect.intersection(screen))
+            .or_else(|| {
+                crate::ui::modal_rect(
+                    screen,
+                    crate::ui::ModalSize::Content {
+                        width: crate::ui::RELEASE_NOTES_MODAL_SIZE.0,
+                        height: crate::ui::RELEASE_NOTES_MODAL_SIZE.1,
+                    },
+                )
+            })?;
+        // 版式推导与渲染共用同一个纯函数，杜绝两份副本漂移（OV-01）。
+        let layout = super::render::scrollback_overlay_layout(outer)?;
+        let stack = layout.stack;
+        let close = layout.close;
         let install_command = self
             .snapshot
             .as_deref()
@@ -147,7 +164,8 @@ impl ClientShellState {
 
     fn current_release_notes_max_scroll(&self) -> usize {
         self.current_release_notes_input_geometry()
-            .map(|(_, _, metrics)| metrics.max_offset_from_bottom)
+            .and_then(|(_, _, metrics)| metrics)
+            .map(|metrics| metrics.max_offset_from_bottom)
             .unwrap_or(self.hits.release_notes_max_scroll)
     }
 

@@ -855,15 +855,11 @@ impl ClientShellState {
             return;
         }
         if matches!(self.overlay, Some(ClientShellOverlay::ReleaseNotes(_))) {
-            let (close, track, metrics) = self
-                .current_release_notes_input_geometry()
-                .map(|(close, track, metrics)| (close, track, Some(metrics)))
-                .unwrap_or((
-                    self.hits.overlay_primary,
-                    (!self.hits.release_notes_scrollbar.is_empty())
-                        .then_some(self.hits.release_notes_scrollbar),
-                    self.hits.release_notes_scroll_metrics,
-                ));
+            let (close, track, metrics) = self.current_release_notes_input_geometry().unwrap_or((
+                Rect::default(),
+                None,
+                None,
+            ));
             match mouse.kind {
                 MouseEventKind::Down(MouseButton::Left) if super::contains(close, point) => {
                     self.dismiss_release_notes(outcome);

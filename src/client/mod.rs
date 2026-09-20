@@ -1134,6 +1134,7 @@ async fn run_client_loop(
             }
             ClientLoopEvent::TerminalUnavailable(err) => {
                 info!(err = %err, "client terminal unavailable; detaching");
+                flush_client_chrome_preferences(&mut state);
                 let _ = write_to_server(&mut write_stream, &ClientMessage::Detach);
                 return Ok(());
             }
@@ -2415,7 +2416,8 @@ async fn run_client_loop(
                         outcome.repaint |= notification_repaint
                             | shell.tick_copy_feedback(now)
                             | shell.tick_endpoint_error(now)
-                            | shell.tick_chrome_feedback(now);
+                            | shell.tick_chrome_feedback(now)
+                            | shell.tick_chrome_preferences(now);
                         // Live forward status has no events of its own: poll
                         // at a low cadence while a card showing it is open.
                         // The session-log drop counter rides the same poll,
@@ -2454,7 +2456,9 @@ async fn run_client_loop(
         }
     }
 
-    // Clean exit (Ctrl+C). Send Detach before closing.
+    // Clean exit (Ctrl+C / SIGTERM). Flush deferred chrome preferences first so
+    // the last 500 ms of layout edits are not lost, then send Detach.
+    flush_client_chrome_preferences(&mut state);
     let detach = ClientMessage::Detach;
     let _ = write_to_server(&mut write_stream, &detach);
     let _ = io::stdout().flush();

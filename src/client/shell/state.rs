@@ -169,6 +169,9 @@ pub(super) struct ShellHitMap {
     /// 还没重绘，不代表锚点丢失。
     pub(super) composed: bool,
     pub(super) overlay_bounds: Rect,
+    /// 本帧真正绘制的浮层种类：输入侧据此判断浮层命中区是否属于当前浮层
+    /// （浮层刚打开、还没合成时为 `None`，此时才允许回退到几何推导）。
+    pub(super) overlay_kind: Option<ClientShellOverlayKind>,
     pub(super) machines: Vec<MachineHit>,
     pub(super) workspaces: Vec<WorkspaceHit>,
     pub(super) workspace_body: Rect,
@@ -1433,6 +1436,16 @@ pub(crate) struct ClientShellState {
     /// Most-recently-used command palette ids (newest first), persisted to
     /// the client chrome preferences file.
     pub(super) palette_recent: Vec<String>,
+    /// 偏好落盘去抖：高频输入（Layout 模式按键）只标脏，由
+    /// `tick_chrome_preferences` 在真正静默 500 ms 后合并写一次；detach / 退出
+    /// 路径必须 `flush_chrome_preferences`，否则丢最后一次布局变更。
+    /// 每次标脏都重置为当前时刻（trailing edge）。
+    pub(super) preferences_dirty_since: Option<std::time::Instant>,
+    /// 本轮合并批次里第一次标脏的时刻：`PREFERENCES_FLUSH_MAX_DELAY` 的起算点，
+    /// 防止「按住方向键不松手」永远等不到静默窗口。
+    pub(super) preferences_dirty_first: Option<std::time::Instant>,
+    /// 偏好文件的落盘尝试次数（C-13 的验收指标），测试与诊断的可断言真源。
+    pub(super) preferences_writes: u64,
     /// Current chrome hover identity (previous frame's hit map).
     pub(super) hover: Option<super::feedback::ChromeHover>,
     pub(super) spinner_tick: u64,
@@ -1637,6 +1650,9 @@ impl ClientShellState {
                 .take(super::command_palette::PALETTE_RECENT_LIMIT)
                 .cloned()
                 .collect(),
+            preferences_dirty_since: None,
+            preferences_dirty_first: None,
+            preferences_writes: 0,
             hover: None,
             spinner_tick: 0,
             spinner_advanced_at: None,
@@ -2466,6 +2482,7 @@ impl ClientShellState {
             .into_iter()
             .chain(self.selection_repaint_deadline)
             .chain(self.chrome_feedback_deadline())
+            .chain(self.preferences_flush_deadline())
             .min()
             .map(|deadline| deadline.saturating_duration_since(now).min(default))
             .unwrap_or(default)

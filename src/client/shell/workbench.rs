@@ -1,6 +1,6 @@
 //! 停靠工作台只管理客户端几何；每个可见标签由服务端独立投影。
 
-mod interaction;
+pub(in crate::client::shell) mod interaction;
 mod render;
 
 use super::dock::{DockLayout, Geometry, PanelId};
@@ -25,7 +25,7 @@ pub(super) struct State {
     pub requested: Vec<ClientViewSpec>,
     pub views: HashMap<String, View>,
     pub geometry: Geometry,
-    hits: Vec<(Rect, interaction::Action)>,
+    pub(in crate::client::shell) hits: Vec<(Rect, interaction::Action)>,
     drag: Option<interaction::Drag>,
     pub arranging: bool,
     pub tab_scroll: HashMap<u64, usize>,

@@ -15,6 +15,16 @@ pub(super) fn merged_config_diagnostic(
     }
 }
 
+/// 偏好落盘去抖窗口（trailing edge）：每次标脏都重置计时，输入真正静默这么久
+/// 之后才写一次磁盘。
+pub(super) const PREFERENCES_FLUSH_DEBOUNCE: std::time::Duration =
+    std::time::Duration::from_millis(500);
+
+/// 去抖的防饿死上限：从第一次标脏起最多拖这么久必须落一次盘，否则「按住方向键
+/// 不松手」会永远等不到静默。取 5 s 与验收基线（5 秒窗口内 ≤2 次 rename）对齐。
+pub(super) const PREFERENCES_FLUSH_MAX_DELAY: std::time::Duration =
+    std::time::Duration::from_secs(5);
+
 impl ClientShellState {
     pub(super) fn set_local_config_diagnostic(&mut self, diagnostic: Option<String>) {
         self.local_config_diagnostic = diagnostic;
@@ -26,8 +36,64 @@ impl ClientShellState {
         );
     }
 
+    /// 高频输入路径只标脏：真正的写盘交给 `tick_chrome_preferences` 的去抖，
+    /// 或 detach / 退出路径的 `flush_chrome_preferences`。
+    ///
+    /// 语义是 trailing-edge 去抖 —— 每次标脏都把 `preferences_dirty_since` 重置
+    /// 到 `now`，所以连续输入（按住方向键 ≈30 键/s）在松手前一次也不落盘；
+    /// `preferences_dirty_first` 记住第一次标脏的时刻，作为
+    /// `PREFERENCES_FLUSH_MAX_DELAY` 的防饿死上限。`now` 由调用方给出，去抖策略
+    /// 因此可以被确定性地测试。
+    pub(super) fn schedule_chrome_preferences(&mut self, now: std::time::Instant) {
+        if self.config.preferences_path.is_none() {
+            return;
+        }
+        self.preferences_dirty_since = Some(now);
+        self.preferences_dirty_first.get_or_insert(now);
+    }
+
+    /// 待落盘偏好的到期时刻：去抖边界与防饿死上限取较早者。它参与
+    /// `timer_delay` 的截止时刻集合，但当前默认节拍（100 ms）比去抖窗口短得多，
+    /// 实际唤醒由该节拍驱动，落盘最迟晚一拍。
+    pub(super) fn preferences_flush_deadline(&self) -> Option<std::time::Instant> {
+        let debounced = self
+            .preferences_dirty_since
+            .map(|since| since + PREFERENCES_FLUSH_DEBOUNCE)?;
+        let capped = self
+            .preferences_dirty_first
+            .map(|first| first + PREFERENCES_FLUSH_MAX_DELAY);
+        Some(capped.map_or(debounced, |capped| debounced.min(capped)))
+    }
+
+    /// 去抖到期后合并写一次；返回是否需要重绘（写失败会提示错误）。
+    pub(crate) fn tick_chrome_preferences(&mut self, now: std::time::Instant) -> bool {
+        if self
+            .preferences_flush_deadline()
+            .is_none_or(|deadline| now < deadline)
+        {
+            return false;
+        }
+        let mut outcome = ClientShellInput::default();
+        self.flush_chrome_preferences(&mut outcome);
+        outcome.repaint
+    }
+
+    /// detach / 退出 / 信号路径：立刻写掉还没到期的偏好，否则丢最后一次
+    /// 布局变更。
+    pub(crate) fn flush_chrome_preferences(&mut self, outcome: &mut ClientShellInput) {
+        if self.preferences_dirty_since.is_none() {
+            return;
+        }
+        self.persist_chrome_preferences(outcome);
+    }
+
     pub(super) fn persist_chrome_preferences(&mut self, outcome: &mut ClientShellInput) {
-        let Some(path) = self.config.preferences_path.as_deref() else {
+        // 克隆路径避免与下面的 `&mut self` 写入冲突；去抖后该函数每次手势最多
+        // 调用一次，不在乘法性能路径上。
+        let Some(path) = self.config.preferences_path.clone() else {
+            // 没有偏好文件时脏标记没有意义，直接吸收掉避免每拍重试。
+            self.preferences_dirty_since = None;
+            self.preferences_dirty_first = None;
             return;
         };
         let mut collapsed_groups = self.collapsed_groups.iter().cloned().collect::<Vec<_>>();
@@ -108,9 +174,29 @@ impl ClientShellState {
             remote_collapsed_groups,
             palette_recent: self.palette_recent.clone(),
         };
-        if let Err(error) = preferences::store(path, preferences.clone()) {
-            self.set_endpoint_error(error);
-            outcome.repaint = true;
+        // 落盘尝试计数：C-13 的验收指标是写入次数，测试与诊断都以它为真源。
+        self.preferences_writes = self.preferences_writes.saturating_add(1);
+        match preferences::store(&path, preferences.clone()) {
+            Ok(()) => {
+                // 只有写成功才吸收脏标记，否则一次瞬时失败会把整个合并批次
+                // 永久丢掉。
+                self.preferences_dirty_since = None;
+                self.preferences_dirty_first = None;
+            }
+            Err(error) => {
+                tracing::warn!(
+                    path = %path.display(),
+                    error = %error,
+                    "failed to persist chrome preferences"
+                );
+                // 保留脏标记但重新起算，让下一个去抖周期或退出前的 flush 重试，
+                // 同时避免磁盘故障时每拍重试打爆磁盘。
+                let now = std::time::Instant::now();
+                self.preferences_dirty_since = Some(now);
+                self.preferences_dirty_first = Some(now);
+                self.set_endpoint_error(error);
+                outcome.repaint = true;
+            }
         }
         self.config.preferences = preferences;
     }

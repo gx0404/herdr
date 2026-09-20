@@ -866,6 +866,7 @@ impl ClientShellState {
             frame.replace_from_ratatui_buffer_preserving_effects(&composed, cursor);
         }
         self.hits.overlay_bounds = Rect::default();
+        self.hits.overlay_kind = None;
         let snapshot = self.snapshot.as_deref();
         if let Some(overlay) = self.overlay.as_ref() {
             let mut composed = frame.to_ratatui_buffer()?;
@@ -955,6 +956,7 @@ impl ClientShellState {
                 self.hits.release_notes_scrollbar = rendered.release_notes_scrollbar;
                 self.hits.release_notes_scroll_metrics = rendered.release_notes_scroll_metrics;
                 self.hits.release_notes_max_scroll = rendered.release_notes_max_scroll;
+                self.hits.overlay_kind = Some(overlay.kind());
                 // 浮层自带光标（文本输入）时归浮层；否则只有浮层矩形真正盖住
                 // 终端光标才把它抹掉，未覆盖的终端插入点保留（用量仪表盘等）。
                 rendered.cursor.or_else(|| {
