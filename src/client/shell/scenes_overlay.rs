@@ -216,7 +216,12 @@ pub(super) struct ClientScenesOverlay {
     /// Load failure of the snapshot file (list stays empty but usable).
     pub(super) load_error: Option<String>,
     /// Restore option: disable every machine that is not part of the scene.
+    /// Off by default: a restore must never silently drop live SSH endpoints
+    /// (TOOL-02); turning it on additionally routes through a confirmation.
     pub(super) restore_disable_others: bool,
+    /// 列表视图的点击痕迹（现场名 + 时刻）：单击只选中，同一条现场的二次
+    /// 点击才执行恢复。记名称而非行号，列表重排后痕迹自然失效。
+    pub(super) last_click: Option<(String, std::time::Instant)>,
 }
 
 impl ClientScenesOverlay {
@@ -227,7 +232,8 @@ impl ClientScenesOverlay {
             selected: 0,
             message: None,
             load_error: None,
-            restore_disable_others: true,
+            restore_disable_others: false,
+            last_click: None,
         }
     }
 }
@@ -242,6 +248,34 @@ pub(super) enum ClientScenesView {
         error: Option<String>,
     },
     ConfirmDelete(usize),
+    /// Restore would disable machines outside the scene: name them and wait
+    /// for an explicit confirmation before writing the endpoint catalog.
+    ConfirmRestore {
+        index: usize,
+        /// Machines the confirmation named, frozen at the moment the page
+        /// opened. The confirmed restore may only disable these: the page
+        /// blocks for an arbitrary time and snapshot events keep updating
+        /// `saved_profiles`, so a freshly enabled machine must never be
+        /// switched off without having been shown (TOOL-02).
+        disable: Vec<ProfileId>,
+        /// Display labels of `disable`, in the same order.
+        labels: Vec<String>,
+    },
+}
+
+impl ClientScenesView {
+    /// 步进指纹，喂给 `ClientInputContext::overlay_step`：列表的 Enter 是
+    /// 破坏性恢复，确认页的 Enter 是同一个键的下一步，两者必须不同值，
+    /// 否则自动重复的 Repeat 会替用户按完确认。
+    pub(super) fn step(&self) -> u32 {
+        match self {
+            Self::List => 0,
+            Self::Save(_) => 1,
+            Self::Rename { .. } => 2,
+            Self::ConfirmDelete(_) => 3,
+            Self::ConfirmRestore { .. } => 4,
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -480,6 +514,7 @@ impl ClientShellState {
             error: None,
         }));
         overlay.message = None;
+        overlay.last_click = None;
     }
 
     pub(super) fn open_scenes_overlay_saving(&mut self) {
@@ -502,6 +537,7 @@ impl ClientShellState {
             error: None,
         };
         overlay.message = None;
+        overlay.last_click = None;
     }
 
     fn open_scene_delete_confirm(&mut self) {
@@ -514,12 +550,16 @@ impl ClientShellState {
         let index = overlay.selected;
         overlay.view = ClientScenesView::ConfirmDelete(index);
         overlay.message = None;
+        overlay.last_click = None;
     }
 
     pub(super) fn scenes_back(&mut self) {
         if let Some(ClientShellOverlay::Scenes(overlay)) = self.overlay.as_mut() {
             overlay.view = ClientScenesView::List;
             overlay.message = None;
+            // 离开子视图就清点击痕迹：否则「点一行 → r 改名 → Esc 回列表 →
+            // 再点同一行」会在双击窗口内被判成二次点击并直接恢复。
+            overlay.last_click = None;
         }
     }
 
@@ -547,6 +587,33 @@ impl ClientShellState {
         let changed = overlay.selected != next;
         overlay.selected = next;
         changed
+    }
+
+    /// 记录列表点击痕迹并判定这次是否是同一条现场在双击窗口内的二次点击。
+    /// 痕迹记现场名而非行号：筛选、删除、重命名导致的重排不会让上一次点击
+    /// 落到别的现场上（片段库同构）。身份取 `set_scenes_selection` clamp 之后
+    /// 的 `selected`，与选中行永远是同一条现场。
+    pub(super) fn scenes_row_click_is_second(&mut self) -> bool {
+        let window = self.config.double_click_window;
+        let Some(ClientShellOverlay::Scenes(overlay)) = self.overlay.as_mut() else {
+            return false;
+        };
+        let Some(name) = overlay
+            .scenes
+            .get(overlay.selected)
+            .map(|scene| scene.name.clone())
+        else {
+            overlay.last_click = None;
+            return false;
+        };
+        let now = std::time::Instant::now();
+        let second = overlay
+            .last_click
+            .as_ref()
+            .is_some_and(|(last, at)| last == &name && now.duration_since(*at) <= window);
+        // 恢复后清痕迹，第三次点击重新从「只选中」开始。
+        overlay.last_click = if second { None } else { Some((name, now)) };
+        second
     }
 
     pub(super) fn toggle_scene_disable_others(&mut self) {
@@ -661,13 +728,24 @@ impl ClientShellState {
                 return;
             }
         };
-        let scene = self.capture_scene(name.clone(), note);
-        let machine_count = scene.machines.len();
         let mut scenes = match self.overlay.as_ref() {
             Some(ClientShellOverlay::Scenes(overlay)) => overlay.scenes.clone(),
             _ => Vec::new(),
         };
-        scenes.retain(|existing| existing.name != name);
+        // 撞名不覆盖（TOOL-03）：保存与改名语义一致，旧快照（机器集合、焦点、
+        // 侧栏布局）绝不静默消失。这条拒绝同时是「现场名唯一」的来源，
+        // `ClientScenesOverlay::last_click` 用名称当点击身份正是依赖它。
+        if scenes.iter().any(|existing| existing.name == name) {
+            if let Some(ClientShellOverlay::Scenes(overlay)) = self.overlay.as_mut() {
+                if let ClientScenesView::Save(form) = &mut overlay.view {
+                    form.error = Some(crate::i18n::texts().scenes.name_duplicate.to_owned());
+                }
+            }
+            outcome.repaint = true;
+            return;
+        }
+        let scene = self.capture_scene(name.clone(), note);
+        let machine_count = scene.machines.len();
         scenes.insert(0, scene);
         scenes.truncate(SCENE_SNAPSHOT_LIMIT);
         let t = &crate::i18n::texts().scenes;
@@ -721,17 +799,22 @@ impl ClientShellState {
             self.scenes_back();
             return;
         }
-        scenes[index].name = name.clone();
-        // Renaming must not fork the list onto a duplicate entry.
+        let t = &crate::i18n::texts().scenes;
+        // 撞名既不覆盖别人也不删除自己（TOOL-03）：留在表单里报错，两条现场
+        // 都原样留在盘上，用户自己决定改哪个名字。
         let duplicate = scenes
             .iter()
             .enumerate()
-            .any(|(other, scene)| other != index && scene.name == scenes[index].name);
+            .any(|(other, scene)| other != index && scene.name == name);
         if duplicate {
-            scenes.remove(index);
+            if let ClientScenesView::Rename { error: slot, .. } = &mut overlay.view {
+                *slot = Some(t.name_duplicate.to_owned());
+            }
+            outcome.repaint = true;
+            return;
         }
+        scenes[index].name = name.clone();
         let new_name = name;
-        let t = &crate::i18n::texts().scenes;
         if let Err(error) = self.persist_scenes(scenes) {
             if let Some(ClientShellOverlay::Scenes(overlay)) = self.overlay.as_mut() {
                 if let ClientScenesView::Rename { error: slot, .. } = &mut overlay.view {
@@ -872,18 +955,87 @@ impl ClientShellState {
         let Some(scene) = overlay.scenes.get(overlay.selected).cloned() else {
             return;
         };
+        let index = overlay.selected;
         let disable_others = overlay.restore_disable_others;
+        // 会断开现场之外的机器时先进确认页：恢复写的是端点目录，watcher 随后
+        // 真的会断掉 live SSH 连接（TOOL-02）。没有任何机器要停用时不插确认页
+        // ——空名单的确认只是噪音。
+        if disable_others {
+            let targets = self.scene_restore_disable_targets(&scene);
+            if !targets.is_empty() {
+                let (disable, labels) = targets.into_iter().unzip();
+                if let Some(ClientShellOverlay::Scenes(overlay)) = self.overlay.as_mut() {
+                    overlay.view = ClientScenesView::ConfirmRestore {
+                        index,
+                        disable,
+                        labels,
+                    };
+                    overlay.message = None;
+                    overlay.last_click = None;
+                }
+                outcome.repaint = true;
+                return;
+            }
+        }
         self.overlay = None;
-        self.apply_scene_restore(&scene, disable_others, outcome);
+        self.apply_scene_restore(&scene, disable_others, None, outcome);
+    }
+
+    /// Machines a `disable_others` restore of this scene would switch off,
+    /// with the label to show for each (empty when it disconnects nothing).
+    fn scene_restore_disable_targets(
+        &self,
+        scene: &ClientSceneSnapshot,
+    ) -> Vec<(ProfileId, String)> {
+        let plan = plan_scene_restore(scene, &self.saved_profiles, &self.endpoints, true);
+        plan.disable
+            .into_iter()
+            .map(|id| {
+                let label = self
+                    .saved_profiles
+                    .iter()
+                    .find(|profile| profile.id == id)
+                    .map(|profile| profile.label.clone())
+                    .unwrap_or_else(|| id.as_str().to_owned());
+                (id, label)
+            })
+            .collect()
+    }
+
+    /// Confirmed restore from `ClientScenesView::ConfirmRestore`.
+    pub(super) fn confirm_scene_restore(&mut self, outcome: &mut ClientShellInput) {
+        let Some(ClientShellOverlay::Scenes(overlay)) = self.overlay.as_ref() else {
+            return;
+        };
+        let ClientScenesView::ConfirmRestore { index, disable, .. } = &overlay.view else {
+            return;
+        };
+        let index = *index;
+        // 确认页摊开过的那一批 id 就是允许停用的全部：确认那一刻重算的计划里
+        // 若冒出新机器，它没被展示过，不许被断开。
+        let confirmed = disable.clone();
+        let disable_others = overlay.restore_disable_others;
+        let Some(scene) = overlay.scenes.get(index).cloned() else {
+            self.scenes_back();
+            outcome.repaint = true;
+            return;
+        };
+        self.overlay = None;
+        self.apply_scene_restore(&scene, disable_others, Some(&confirmed), outcome);
     }
 
     fn apply_scene_restore(
         &mut self,
         scene: &ClientSceneSnapshot,
         disable_others: bool,
+        confirmed_disable: Option<&[ProfileId]>,
         outcome: &mut ClientShellInput,
     ) {
-        let plan = plan_scene_restore(scene, &self.saved_profiles, &self.endpoints, disable_others);
+        let mut plan =
+            plan_scene_restore(scene, &self.saved_profiles, &self.endpoints, disable_others);
+        if let Some(confirmed) = confirmed_disable {
+            plan.disable.retain(|id| confirmed.contains(id));
+        }
         if let Err(error) = self.apply_scene_catalog_changes(&plan.enable, &plan.disable) {
             self.set_endpoint_error(error);
             outcome.repaint = true;
@@ -971,6 +1123,10 @@ impl ClientShellState {
                 view: ClientScenesView::ConfirmDelete(_),
                 ..
             })) => self.delete_confirmed_scene(outcome),
+            Some(ClientShellOverlay::Scenes(ClientScenesOverlay {
+                view: ClientScenesView::ConfirmRestore { .. },
+                ..
+            })) => self.confirm_scene_restore(outcome),
             _ => {}
         }
     }
@@ -1034,10 +1190,37 @@ impl ClientShellState {
                 ..
             }))
         );
+        let confirm_restore = matches!(
+            self.overlay,
+            Some(ClientShellOverlay::Scenes(ClientScenesOverlay {
+                view: ClientScenesView::ConfirmRestore { .. },
+                ..
+            }))
+        );
 
         if confirm_delete {
             match code {
                 KeyCode::Enter => self.delete_confirmed_scene(outcome),
+                KeyCode::Esc => {
+                    self.scenes_back();
+                    outcome.repaint = true;
+                }
+                _ => {}
+            }
+            return true;
+        }
+
+        if confirm_restore {
+            match code {
+                // 与 worktree 强制删除同构：确认键换成 y / ctrl+↵，列表里的
+                // 回车到这一步就成了空操作。换键与「重复是否可辨识」解耦——
+                // 宿主不支持 kitty 事件类型时自动重复只发普通 Press，
+                // `overlay_step` 的步进指纹拦不住，但换键后长按或连点回车都
+                // 到不了「真的恢复」。
+                KeyCode::Enter if modifiers.contains(KeyModifiers::CONTROL) => {
+                    self.confirm_scene_restore(outcome)
+                }
+                KeyCode::Char('y' | 'Y') => self.confirm_scene_restore(outcome),
                 KeyCode::Esc => {
                     self.scenes_back();
                     outcome.repaint = true;
@@ -1149,7 +1332,175 @@ pub(super) fn render_scenes_overlay(
         ClientScenesView::ConfirmDelete(index) => {
             render_scene_delete_confirm(b, overlay, *index, cx)
         }
+        ClientScenesView::ConfirmRestore { index, labels, .. } => {
+            render_scene_restore_confirm(b, overlay, *index, labels, cx)
+        }
     }
+}
+
+/// Restore confirmation: names the scene and every machine the restore will
+/// disable, so the disconnect is never a surprise (TOOL-02). The modal grows
+/// with the list and, when it still does not fit, says how many machines it
+/// could not show instead of silently dropping them.
+fn render_scene_restore_confirm(
+    b: &mut Buffer,
+    overlay: &ClientScenesOverlay,
+    index: usize,
+    labels: &[String],
+    cx: &super::feedback::ChromeContext<'_>,
+) -> Option<OverlayRender> {
+    /// 名单最多撑到这么高的弹窗（含边框），再多走「还有 N 台」。
+    const MAX_CONFIRM_HEIGHT: u16 = 24;
+    const MIN_CONFIRM_HEIGHT: u16 = 12;
+
+    let p = cx.palette;
+    let t = &crate::i18n::texts().scenes;
+    // 内容高度 = 引导行 + 每台机器一行；弹窗再加 header/footer/actions 与边框。
+    let content_rows = u16::try_from(labels.len())
+        .unwrap_or(u16::MAX)
+        .saturating_add(1);
+    let height = content_rows
+        .saturating_add(8)
+        .clamp(MIN_CONFIRM_HEIGHT, MAX_CONFIRM_HEIGHT);
+    let (popup, inner) = modal_panel(
+        b,
+        crate::ui::ModalSize::Medium.with_height(height),
+        p.accent,
+        cx,
+    )?;
+    if inner.width < 20 || inner.height < 8 {
+        return Some(OverlayRender {
+            area: popup,
+            scenes_popup: popup,
+            ..OverlayRender::default()
+        });
+    }
+    let stack = crate::ui::modal_stack_areas(inner, 1, 1, 1, 1);
+    let base = Style::default()
+        .bg(p.panel_bg)
+        .remove_modifier(Modifier::DIM);
+    let name = overlay
+        .scenes
+        .get(index)
+        .map(|scene| scene.name.as_str())
+        .unwrap_or_default();
+    put_text(
+        b,
+        stack.header.x,
+        stack.header.y,
+        stack.header.width,
+        &format!(
+            " {}",
+            crate::i18n::fill(t.restore_confirm_title_fmt, &[("name", name)])
+        ),
+        base.fg(p.text).add_modifier(Modifier::BOLD),
+    );
+
+    let width = usize::from(stack.content.width);
+    let available = usize::from(stack.content.height);
+    let mut lines: Vec<(String, Style)> = Vec::new();
+    if available > 0 {
+        lines.push((
+            crate::ui::truncate_end(t.restore_confirm_detail, width),
+            base.fg(p.text),
+        ));
+    }
+    // 名单放不下时留最后一行给「还有 N 台」：机器名逐条成行并按显示宽度截断，
+    // 不从中间把名字切成两半。
+    let capacity = available.saturating_sub(lines.len());
+    let shown = if labels.len() > capacity {
+        capacity.saturating_sub(1)
+    } else {
+        labels.len()
+    };
+    for label in labels.iter().take(shown) {
+        lines.push((
+            format!(
+                " · {}",
+                crate::ui::truncate_end(label, width.saturating_sub(3))
+            ),
+            base.fg(p.yellow),
+        ));
+    }
+    let hidden = labels.len().saturating_sub(shown);
+    if hidden > 0 && lines.len() < available {
+        lines.push((
+            crate::ui::truncate_end(
+                &crate::i18n::fill(
+                    t.restore_confirm_more_fmt,
+                    &[("count", &hidden.to_string())],
+                ),
+                width,
+            ),
+            base.fg(p.yellow),
+        ));
+    }
+    for (offset, (text, style)) in lines.iter().take(available).enumerate() {
+        put_text(
+            b,
+            stack.content.x,
+            stack.content.y.saturating_add(offset as u16),
+            stack.content.width,
+            text,
+            *style,
+        );
+    }
+
+    // 确认键换了，必须写在浮层里，否则回车「没反应」像是卡住。
+    if let Some(footer) = stack.footer {
+        put_text(
+            b,
+            footer.x,
+            footer.y,
+            footer.width,
+            t.restore_confirm_hint,
+            base.fg(p.subtext0),
+        );
+    }
+
+    let restore_label = t.confirm_restore_button;
+    let cancel_label = t.cancel_button;
+    let buttons = modal_button_row(
+        stack.actions.unwrap_or_default(),
+        &[restore_label, cancel_label],
+        2,
+    );
+    let mut primary = Rect::default();
+    let mut cancel = Rect::default();
+    if let [restore_rect, cancel_rect] = buttons.as_slice() {
+        primary = *restore_rect;
+        cancel = *cancel_rect;
+        modal_button(
+            b,
+            *restore_rect,
+            restore_label,
+            crate::ui::ModalButtonTone::Danger,
+            cx.button_state(
+                &super::feedback::ChromeHover::OverlayPrimary,
+                // 断连确认不把默认强调留给「继续」：这一步要用户明确瞄准。
+                crate::ui::ModalButtonState::Normal,
+            ),
+            p,
+        );
+        modal_button(
+            b,
+            *cancel_rect,
+            cancel_label,
+            crate::ui::ModalButtonTone::Secondary,
+            cx.button_state(
+                &super::feedback::ChromeHover::OverlayCancel,
+                crate::ui::ModalButtonState::Focused,
+            ),
+            p,
+        );
+    }
+    Some(OverlayRender {
+        area: popup,
+        scenes_popup: popup,
+        primary,
+        cancel,
+        ..OverlayRender::default()
+    })
 }
 
 fn render_scene_list(

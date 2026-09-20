@@ -2053,10 +2053,14 @@ impl ClientShellState {
                             .find(|(rect, _)| super::contains(*rect, point))
                             .copied()
                         {
-                            // One-click restore: the row is the scene's whole
-                            // affordance, so a press selects and applies it.
+                            // 单击只选中（TOOL-02）：恢复会写端点目录并断开
+                            // 现场之外的 live SSH 连接，必须走「恢复」按钮 /
+                            // Enter / 同一条现场的二次点击。
                             self.set_scenes_selection(index);
-                            self.restore_selected_scene(outcome);
+                            if self.scenes_row_click_is_second() {
+                                self.restore_selected_scene(outcome);
+                            }
+                            outcome.repaint = true;
                         } else if !super::contains(self.hits.scenes_popup, point) {
                             self.overlay = None;
                             outcome.repaint = true;

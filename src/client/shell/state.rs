@@ -735,7 +735,13 @@ pub(super) struct ClientSettingsOverlay {
     pub(super) original_palette: Palette,
     pub(super) original_components: crate::app::state::ComponentStyles,
     pub(super) integrations: Vec<crate::api::schema::IntegrationInfo>,
+    /// Install report returned by the endpoint; lives until the next install
+    /// or list refresh replaces it.
     pub(super) integration_messages: Vec<String>,
+    /// One-shot client-side hint (e.g. "selected row needs no install").
+    /// Kept apart from `integration_messages` so a hint never wipes the
+    /// endpoint's report out from under the reader (TOOL-04).
+    pub(super) integration_notice: Option<String>,
     pub(super) loading_integrations: bool,
     pub(super) installing_integrations: bool,
 }
@@ -971,6 +977,18 @@ impl ClientShellOverlay {
             Self::WorktreeRemove(remove) => u32::from(remove.force_confirmation),
             // 片段库的运行流水线：列表 → 目标 → 变量 → 确认，每步各算一步。
             Self::Snippets(overlay) => overlay.view.step(),
+            // 现场快照：列表的 Enter 就是破坏性恢复，确认页是同键的下一步。
+            Self::Scenes(overlay) => overlay.view.step(),
+            // 机器与机器文件：删除确认与列表必须是不同步，否则将来把确认键
+            // 改回 Enter 会静默回归成「长按删完」。
+            Self::Machines(overlay) => u32::from(matches!(
+                overlay.view,
+                super::machines_overlay::ClientMachinesView::ConfirmRemove(_)
+            )),
+            Self::MachineFiles(overlay) => u32::from(matches!(
+                overlay.view,
+                super::machine_files_overlay::ClientMachineFilesView::ConfirmDelete { .. }
+            )),
             Self::Onboarding
             | Self::ProductAnnouncement(_)
             | Self::ReleaseNotes(_)
@@ -983,12 +1001,9 @@ impl ClientShellOverlay {
             | Self::ContextMenu(_)
             | Self::CommandPalette(_)
             | Self::Settings(_)
-            | Self::Machines(_)
             | Self::MachineAuth(_)
             | Self::NotificationHistory(_)
-            | Self::Scenes(_)
             | Self::Broadcast(_)
-            | Self::MachineFiles(_)
             | Self::UsageDashboard => 0,
         }
     }

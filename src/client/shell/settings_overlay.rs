@@ -231,11 +231,15 @@ pub(super) fn render_settings_overlay(
         }
     }
 
-    let installable = settings
+    // 主按钮的作用域是「安装选中」，可点性就取选中行的判据（TOOL-04）：
+    // 别的行待装不该让一个按下去注定无效的主按钮维持可点状态。
+    let selected_installable = settings
         .integrations
-        .iter()
-        .any(super::super::settings::integration_needs_install);
-    let show_primary = settings.section != ClientSettingsSection::Integrations || installable;
+        .get(settings.selected)
+        .is_some_and(super::super::settings::integration_needs_install);
+    let show_primary = settings.section != ClientSettingsSection::Integrations
+        || settings.installing_integrations
+        || selected_installable;
     let primary_label = if settings.installing_integrations {
         t.installing
     } else if settings.section == ClientSettingsSection::Integrations {
@@ -281,12 +285,19 @@ pub(super) fn render_settings_overlay(
     );
     {
         let footer = stack.footer;
+        // `a` 是无确认的批量安装键，只在 Integrations 分区生效，也只在那里
+        // 进键位提示。
+        let line = if settings.section == ClientSettingsSection::Integrations {
+            format!("{}{}", t.footer, t.footer_install_all)
+        } else {
+            t.footer.to_owned()
+        };
         put_text(
             buffer,
             footer.x,
             footer.y,
             footer.width,
-            t.footer,
+            &line,
             Style::default().fg(palette.overlay1).bg(palette.panel_bg),
         );
     }
@@ -395,20 +406,22 @@ fn render_integrations(
         return 0;
     }
     let area = if area.height >= 4 {
-        put_text(
-            buffer,
-            area.x,
-            area.y,
-            area.width,
-            &format!(
-                "{} · ✓ {}/{} · {}",
-                t.integrations,
-                installed_count(settings),
-                settings.integrations.len(),
-                t.integrations_hint
+        // 一次性提示（「选中的集成无需安装」）占用说明行，不挤掉下方承载
+        // 服务端安装结果的消息区。
+        let (line, style) = match settings.integration_notice.as_deref() {
+            Some(notice) => (notice.to_owned(), Style::default().fg(p.yellow)),
+            None => (
+                format!(
+                    "{} · ✓ {}/{} · {}",
+                    t.integrations,
+                    installed_count(settings),
+                    settings.integrations.len(),
+                    t.integrations_hint
+                ),
+                Style::default().fg(p.overlay0),
             ),
-            Style::default().fg(p.overlay0),
-        );
+        };
+        put_text(buffer, area.x, area.y, area.width, &line, style);
         Rect::new(area.x, area.y + 1, area.width, area.height - 1)
     } else {
         area

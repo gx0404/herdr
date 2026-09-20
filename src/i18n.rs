@@ -368,6 +368,9 @@ pub struct SettingsTexts {
     pub install_button: &'static str,
     pub apply_button: &'static str,
     pub footer: &'static str,
+    /// Appended to the footer in the Integrations section: `a` installs every
+    /// pending target without a confirmation, so it belongs in the key hints.
+    pub footer_install_all: &'static str,
     pub integrations: &'static str,
     pub integrations_hint: &'static str,
     pub loading: &'static str,
@@ -377,6 +380,10 @@ pub struct SettingsTexts {
     pub state_available: &'static str,
     pub state_not_found: &'static str,
     pub installing: &'static str,
+    /// One-shot feedback when the selected integration row needs no install.
+    /// Kept apart from `integration_messages`, which carries the endpoint's
+    /// install report and must survive this hint.
+    pub nothing_to_install: &'static str,
     pub unexpected_list_result: &'static str,
     pub unexpected_install_result: &'static str,
 }
@@ -973,9 +980,20 @@ pub struct ScenesTexts {
     pub default_name_fmt: &'static str, // args: n
     pub name_required: &'static str,
     pub name_too_long: &'static str,
+    /// Rename collision: another scene already carries the new name.
+    pub name_duplicate: &'static str,
     // Delete confirmation.
     pub delete_title_fmt: &'static str, // args: name
     pub delete_detail: &'static str,
+    // Restore confirmation (only shown when the restore would disable machines).
+    pub restore_confirm_title_fmt: &'static str, // args: name
+    /// Lead-in above the per-machine list of the restore confirmation.
+    pub restore_confirm_detail: &'static str,
+    /// Overflow line when the list does not fit the modal.
+    pub restore_confirm_more_fmt: &'static str, // args: count
+    /// The confirmation key differs from the list's restore key on purpose.
+    pub restore_confirm_hint: &'static str,
+    pub confirm_restore_button: &'static str,
     // Footer hint labels (rendered as key caps by `render_key_hints`).
     pub hint_select: &'static str,
     pub hint_restore: &'static str,

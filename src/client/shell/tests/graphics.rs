@@ -291,6 +291,7 @@ fn every_dialog_and_menu_occludes_its_panel_not_the_whole_screen() {
             original_components: components,
             integrations: Vec::new(),
             integration_messages: Vec::new(),
+            integration_notice: None,
             loading_integrations: false,
             installing_integrations: false,
         }),

@@ -826,3 +826,232 @@ fn resize_mode_reuses_endpoint_resize_and_stays_active_until_done() {
     assert!(state.handle_input_bytes(b"\r").actions.is_empty());
     assert_eq!(state.mode, ClientShellMode::Terminal);
 }
+
+/// TOOL-04：设置页 Integrations 分区的 Enter 只安装当前选中行；一次性安装全部
+/// 待装项改由显式的 `a` 键承担。
+#[test]
+fn settings_integrations_enter_installs_only_the_selected_row() {
+    use crate::api::schema::{IntegrationState, IntegrationTarget};
+
+    let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
+    state.set_snapshot(Box::new(snapshot()));
+    state.set_pane_surface(surface());
+    state.open_settings_overlay();
+    let mut outcome = ClientShellInput::default();
+    state.select_settings_section(ClientSettingsSection::Integrations, &mut outcome);
+
+    let integration =
+        |target, label: &str, integration_state| crate::api::schema::IntegrationInfo {
+            target,
+            label: label.into(),
+            command: label.into(),
+            available: true,
+            state: integration_state,
+        };
+    let Some(ClientShellOverlay::Settings(settings)) = state.overlay.as_mut() else {
+        panic!("settings overlay");
+    };
+    settings.loading_integrations = false;
+    settings.integrations = vec![
+        integration(
+            IntegrationTarget::Codex,
+            "codex",
+            IntegrationState::Outdated,
+        ),
+        integration(
+            IntegrationTarget::Claude,
+            "claude",
+            IntegrationState::NotInstalled,
+        ),
+        integration(
+            IntegrationTarget::Copilot,
+            "copilot",
+            IntegrationState::NotInstalled,
+        ),
+    ];
+    settings.selected = 1;
+
+    let install_targets = |outcome: &ClientShellInput| {
+        outcome
+            .actions
+            .iter()
+            .filter_map(|action| match action {
+                ClientShellAction::Endpoint { request, .. } => match &request.method {
+                    crate::api::schema::Method::IntegrationInstall(params) => Some(params.target),
+                    _ => None,
+                },
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    };
+
+    let single = state.handle_input_bytes(b"\r");
+    assert_eq!(
+        install_targets(&single),
+        vec![IntegrationTarget::Claude],
+        "Enter 只安装选中行"
+    );
+
+    // 清掉本测试自己制造的在途安装，再验证显式的「全部安装」键。
+    state.pending_integration_installs = 0;
+    if let Some(ClientShellOverlay::Settings(settings)) = state.overlay.as_mut() {
+        settings.installing_integrations = false;
+    }
+    let all = state.handle_input_bytes(b"a");
+    assert_eq!(
+        install_targets(&all),
+        vec![
+            IntegrationTarget::Codex,
+            IntegrationTarget::Claude,
+            IntegrationTarget::Copilot,
+        ],
+        "a 才安装全部待装项"
+    );
+}
+
+/// TOOL-04：选中行无需安装时给出可见反馈，而不是静默批量安装。
+#[test]
+fn settings_integrations_enter_on_installed_row_reports_nothing_to_do() {
+    use crate::api::schema::{IntegrationState, IntegrationTarget};
+
+    let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
+    state.set_snapshot(Box::new(snapshot()));
+    state.set_pane_surface(surface());
+    state.open_settings_overlay();
+    let mut outcome = ClientShellInput::default();
+    state.select_settings_section(ClientSettingsSection::Integrations, &mut outcome);
+    let Some(ClientShellOverlay::Settings(settings)) = state.overlay.as_mut() else {
+        panic!("settings overlay");
+    };
+    settings.loading_integrations = false;
+    settings.integrations = vec![
+        crate::api::schema::IntegrationInfo {
+            target: IntegrationTarget::Codex,
+            label: "codex".into(),
+            command: "codex".into(),
+            available: true,
+            state: IntegrationState::Current,
+        },
+        crate::api::schema::IntegrationInfo {
+            target: IntegrationTarget::Claude,
+            label: "claude".into(),
+            command: "claude".into(),
+            available: true,
+            state: IntegrationState::NotInstalled,
+        },
+    ];
+    settings.selected = 0;
+
+    // 上一次安装由服务端返回的结果消息正摆在消息区。
+    if let Some(ClientShellOverlay::Settings(settings)) = state.overlay.as_mut() {
+        settings.integration_messages = vec!["codex updated".to_owned()];
+    }
+
+    let noop = state.handle_input_bytes(b"\r");
+    assert!(
+        noop.actions.is_empty(),
+        "已安装的选中行不得触发任何安装请求"
+    );
+    let Some(ClientShellOverlay::Settings(settings)) = state.overlay.as_ref() else {
+        panic!("settings overlay");
+    };
+    assert_eq!(
+        settings.integration_notice.as_deref(),
+        Some(crate::i18n::texts().settings.nothing_to_install),
+        "应给出一行反馈"
+    );
+    assert_eq!(
+        settings.integration_messages,
+        vec!["codex updated".to_owned()],
+        "反馈不得抹掉服务端返回的安装结果"
+    );
+}
+
+/// TOOL-04：主按钮的作用域是选中行，可点性判据必须同源——别的行待装
+/// 不能让一个按下去注定无效的主按钮维持可点状态。
+#[test]
+fn settings_primary_button_follows_the_selected_integration_row() {
+    use crate::api::schema::{IntegrationState, IntegrationTarget};
+
+    let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
+    state.set_snapshot(Box::new(snapshot()));
+    state.set_pane_surface(surface());
+    state.open_settings_overlay();
+    let mut outcome = ClientShellInput::default();
+    state.select_settings_section(ClientSettingsSection::Integrations, &mut outcome);
+    let Some(ClientShellOverlay::Settings(settings)) = state.overlay.as_mut() else {
+        panic!("settings overlay");
+    };
+    settings.loading_integrations = false;
+    settings.integrations = vec![
+        crate::api::schema::IntegrationInfo {
+            target: IntegrationTarget::Codex,
+            label: "codex".into(),
+            command: "codex".into(),
+            available: true,
+            state: IntegrationState::Current,
+        },
+        crate::api::schema::IntegrationInfo {
+            target: IntegrationTarget::Claude,
+            label: "claude".into(),
+            command: "claude".into(),
+            available: true,
+            state: IntegrationState::NotInstalled,
+        },
+    ];
+    settings.selected = 0;
+
+    state.compose(106, 32).expect("settings frame");
+    assert_eq!(
+        state.hits.overlay_primary,
+        ratatui::layout::Rect::default(),
+        "选中行无需安装时不绘制「安装选中」主按钮"
+    );
+
+    if let Some(ClientShellOverlay::Settings(settings)) = state.overlay.as_mut() {
+        settings.selected = 1;
+    }
+    state.compose(106, 32).expect("settings frame");
+    assert_ne!(
+        state.hits.overlay_primary,
+        ratatui::layout::Rect::default(),
+        "选中行待安装时主按钮可点"
+    );
+}
+
+/// TOOL-04：`a` 是无确认的批量安装键，必须出现在设置页真正的键位提示里，
+/// 而不是只混在一段描述性 hint 中。
+#[test]
+fn settings_footer_announces_install_all_in_the_integrations_section() {
+    let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
+    state.set_snapshot(Box::new(snapshot()));
+    state.set_pane_surface(surface());
+    state.open_settings_overlay();
+    let mut outcome = ClientShellInput::default();
+    state.select_settings_section(ClientSettingsSection::Theme, &mut outcome);
+
+    let frame_text = |state: &mut ClientShellState| {
+        let frame = state.compose(106, 32).expect("settings frame");
+        frame
+            .cells
+            .chunks(frame.width as usize)
+            .map(|row| row.iter().map(|cell| cell.symbol.as_str()).collect())
+            .collect::<Vec<String>>()
+            .join("\n")
+    };
+    // 宽字符在帧里带补位空格，比较时两边都去空格。
+    let squeeze = |value: &str| value.replace(' ', "");
+    let hint = squeeze(crate::i18n::texts().settings.footer_install_all);
+    assert!(!hint.is_empty(), "批量安装提示文案不得为空");
+    assert!(
+        !squeeze(&frame_text(&mut state)).contains(&hint),
+        "其它分区没有批量安装键，不应出现该提示"
+    );
+
+    state.select_settings_section(ClientSettingsSection::Integrations, &mut outcome);
+    let text = frame_text(&mut state);
+    assert!(
+        squeeze(&text).contains(&hint),
+        "Integrations 分区页脚必须提示 a: {text}"
+    );
+}

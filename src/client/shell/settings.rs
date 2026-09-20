@@ -48,6 +48,7 @@ impl ClientShellState {
             original_components: self.config.components.clone(),
             integrations: Vec::new(),
             integration_messages: Vec::new(),
+            integration_notice: None,
             loading_integrations: false,
             installing_integrations: false,
         }));
@@ -271,13 +272,15 @@ impl ClientShellState {
                     outcome,
                 );
             }
-            ClientSettingsSection::Integrations => self.install_recommended_integrations(outcome),
+            // TOOL-04：Enter 只安装当前选中行；批量安装走显式的 `a` 键。
+            ClientSettingsSection::Integrations => self.install_selected_integration(outcome),
         }
     }
 
     fn queue_integration_list(&mut self, outcome: &mut ClientShellInput, clear_messages: bool) {
         if let Some(ClientShellOverlay::Settings(settings)) = self.content_page_mut() {
             settings.loading_integrations = true;
+            settings.integration_notice = None;
             if clear_messages {
                 settings.integration_messages.clear();
             }
@@ -293,6 +296,34 @@ impl ClientShellState {
         }
     }
 
+    /// Enter / 主按钮：只安装选中行。批量安装会写多个 agent 的宿主配置文件，
+    /// 不能由逐行选中语义的同一个键顺带触发（TOOL-04）。
+    fn install_selected_integration(&mut self, outcome: &mut ClientShellInput) {
+        if self.pending_integration_installs > 0 {
+            return;
+        }
+        let target = match self.content_page() {
+            Some(ClientShellOverlay::Settings(settings)) => settings
+                .integrations
+                .get(settings.selected)
+                .filter(|integration| integration_needs_install(integration))
+                .map(|integration| integration.target),
+            _ => return,
+        };
+        let Some(target) = target else {
+            // 选中的是已安装行、不可用行，或落在消息区：给一行反馈，
+            // 绝不退化成「安装全部」。反馈写独立的提示字段——`integration_messages`
+            // 装的是上一次安装由服务端返回的结果，用户可能正在读它。
+            if let Some(ClientShellOverlay::Settings(settings)) = self.content_page_mut() {
+                settings.integration_notice =
+                    Some(crate::i18n::texts().settings.nothing_to_install.to_owned());
+            }
+            outcome.repaint = true;
+            return;
+        };
+        self.install_integration_targets(vec![target], outcome);
+    }
+
     fn install_recommended_integrations(&mut self, outcome: &mut ClientShellInput) {
         if self.pending_integration_installs > 0 {
             return;
@@ -306,12 +337,22 @@ impl ClientShellState {
                 .collect::<Vec<_>>(),
             _ => return,
         };
+        self.install_integration_targets(targets, outcome);
+    }
+
+    /// 共享派发：把一批目标排进 `integration.install`，并维护在途计数。
+    fn install_integration_targets(
+        &mut self,
+        targets: Vec<crate::api::schema::IntegrationTarget>,
+        outcome: &mut ClientShellInput,
+    ) {
         if targets.is_empty() {
             return;
         }
         if let Some(ClientShellOverlay::Settings(settings)) = self.content_page_mut() {
             settings.installing_integrations = true;
             settings.integration_messages.clear();
+            settings.integration_notice = None;
         }
         self.pending_integration_installs = 0;
         for target in targets {
@@ -453,6 +494,21 @@ impl ClientShellState {
         }
         if matches!(code, KeyCode::PageUp | KeyCode::PageDown) {
             self.move_settings_selection(if code == KeyCode::PageUp { -8 } else { 8 });
+            outcome.repaint = true;
+            return true;
+        }
+        // TOOL-04：批量安装的显式入口，只在 Integrations 分区生效。
+        if code == KeyCode::Char('a')
+            && modifiers.is_empty()
+            && matches!(
+                self.overlay,
+                Some(ClientShellOverlay::Settings(ClientSettingsOverlay {
+                    section: ClientSettingsSection::Integrations,
+                    ..
+                }))
+            )
+        {
+            self.install_recommended_integrations(outcome);
             outcome.repaint = true;
             return true;
         }
