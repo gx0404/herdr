@@ -29,11 +29,14 @@ pub(crate) fn render_collapsed_sidebar(
     area: Rect,
     snapshot: &ClientShellSnapshot,
     config: &ClientShellConfig,
-    selected_workspace_id: Option<&str>,
-    chrome_hover: Option<&super::feedback::ChromeHover>,
+    state: &mut ShellRenderState<'_>,
     hits: &mut ShellHitMap,
 ) {
     let palette = &config.palette;
+    let chrome_hover = state.chrome_hover;
+    let selected_workspace_id = state
+        .selected_workspace_id
+        .map(|target| target.workspace_id.as_str());
     render_sidebar_background(
         buffer,
         area,
@@ -44,16 +47,84 @@ pub(crate) fn render_collapsed_sidebar(
         ),
     );
     let (workspace_area, divider_y, detail_area) = collapsed_sidebar_sections(area);
+
+    // 折叠侧栏此前直接 `take(height)`：工作区数超过可视高度后导航选中行会落到不可见
+    // 区且永不可达，滚轮也因为 `hits.workspace_body` 恒为 default 而失效（C-26/SB-02）。
+    // 这里与 `endpoint_sidebar::render_collapsed` 同构：行高恒 1 的滚动窗口 + 消费
+    // reveal + 回写 hit 区域，沿用既有「compose 期回写 scroll」模式，不额外扩面。
+    //
+    // 矮侧栏（`content.height < 7`）没有 detail 区，workspace 区一路铺到 area 底格，
+    // 而折叠开关 » 正画在该格上：与高侧栏 `detail_content` 让出底格的做法对齐，否则
+    // 滚轮停在开关上会滚工作区列表，reveal 也能把目标行停到被开关压住的一行。
+    let workspace_body = if detail_area.is_empty() {
+        Rect::new(
+            workspace_area.x,
+            workspace_area.y,
+            workspace_area.width,
+            workspace_area.height.saturating_sub(1),
+        )
+    } else {
+        workspace_area
+    };
+    // 两个 reveal 标志必须无条件消费。此前写成
+    // `reveal_target.is_none() && take(reveal_focused_workspace)`：导航 reveal 命中的
+    // 那一帧因 `&&` 短路不消费聚焦标志，它残留到下一次任意重绘（spinner tick、agent
+    // 输出）才生效，把滚动位置拉回聚焦行，刚揭示出来的选中行再次滑出可视区——正是
+    // C-26 要修的症状。
+    let (reveal_navigation, reveal_focused) = if workspace_body.is_empty() {
+        (false, false)
+    } else {
+        (
+            std::mem::take(state.reveal_navigation_workspace),
+            std::mem::take(state.reveal_focused_workspace),
+        )
+    };
+    let mut reveal_target = None;
+    if reveal_navigation {
+        reveal_target = selected_workspace_id.and_then(|workspace_id| {
+            snapshot
+                .workspaces
+                .iter()
+                .position(|workspace| workspace.workspace_id == workspace_id)
+        });
+    }
+    if reveal_target.is_none() && reveal_focused {
+        reveal_target = snapshot
+            .workspaces
+            .iter()
+            .position(|workspace| workspace.focused);
+    }
+    if let Some(target) = reveal_target {
+        *state.workspace_scroll = super::scroll::uniform_scroll_start_to_reveal(
+            snapshot.workspaces.len(),
+            workspace_body.height,
+            *state.workspace_scroll,
+            target,
+        );
+    }
+    let workspace_metrics = super::scroll::uniform_scroll_metrics(
+        snapshot.workspaces.len(),
+        workspace_body.height,
+        *state.workspace_scroll,
+    );
+    hits.workspace_body = workspace_body;
+    hits.workspace_max_scroll = workspace_metrics.max_offset_from_bottom;
+    *state.workspace_scroll = workspace_metrics
+        .max_offset_from_bottom
+        .saturating_sub(workspace_metrics.offset_from_bottom);
+    let workspace_scroll = *state.workspace_scroll;
+
     for (index, workspace) in snapshot
         .workspaces
         .iter()
-        .take(workspace_area.height as usize)
         .enumerate()
+        .skip(workspace_scroll)
+        .take(workspace_body.height as usize)
     {
         let rect = Rect::new(
-            workspace_area.x,
-            workspace_area.y + index as u16,
-            workspace_area.width,
+            workspace_body.x,
+            workspace_body.y + (index - workspace_scroll) as u16,
+            workspace_body.width,
             1,
         );
         let selected = selected_workspace_id == Some(workspace.workspace_id.as_str());
@@ -124,27 +195,42 @@ pub(crate) fn render_collapsed_sidebar(
         detail_area.width,
         detail_area.height.saturating_sub(1),
     );
-    for (index, pane_id) in super::ordered_agent_pane_ids(snapshot, config.agent_panel_sort)
-        .into_iter()
-        .take(detail_content.height as usize)
+    // agents 分区同样只做过 `take(height)`：这里复用同一套行高 1 的滚动窗口，让折叠态
+    // 的 agent 列表也能被滚轮推动。
+    let agent_pane_ids = super::ordered_agent_pane_ids(snapshot, config.agent_panel_sort);
+    let agent_metrics = super::scroll::uniform_scroll_metrics(
+        agent_pane_ids.len(),
+        detail_content.height,
+        *state.agent_scroll,
+    );
+    hits.agent_body = detail_content;
+    hits.agent_max_scroll = agent_metrics.max_offset_from_bottom;
+    *state.agent_scroll = agent_metrics
+        .max_offset_from_bottom
+        .saturating_sub(agent_metrics.offset_from_bottom);
+    let agent_scroll = *state.agent_scroll;
+    for (index, pane_id) in agent_pane_ids
+        .iter()
         .enumerate()
+        .skip(agent_scroll)
+        .take(detail_content.height as usize)
     {
         let Some(agent) = snapshot
             .agents
             .iter()
-            .find(|agent| agent.pane_id == pane_id)
+            .find(|agent| &agent.pane_id == pane_id)
         else {
             continue;
         };
         let rect = Rect::new(
             detail_content.x,
-            detail_content.y + index as u16,
+            detail_content.y + (index - agent_scroll) as u16,
             detail_content.width,
             1,
         );
         let hovered = matches!(
             chrome_hover,
-            Some(super::feedback::ChromeHover::AgentRow(id)) if id == &pane_id
+            Some(super::feedback::ChromeHover::AgentRow(id)) if id == pane_id
         );
         if agent.focused {
             buffer.set_style(rect, Style::default().bg(palette.active_row_bg));
@@ -171,7 +257,7 @@ pub(crate) fn render_collapsed_sidebar(
             status_icon(agent.agent_status, config.status_indicators),
             Style::default().fg(status_color(agent.agent_status, palette)),
         );
-        hits.agents.push((rect, pane_id));
+        hits.agents.push((rect, pane_id.clone()));
     }
     hits.sidebar_toggle = if area.is_empty() || workspace_area.width == 0 {
         Rect::default()

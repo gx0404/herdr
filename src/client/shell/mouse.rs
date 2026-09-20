@@ -2728,6 +2728,9 @@ impl ClientShellState {
                 if super::contains(self.hits.sidebar_toggle, point) {
                     self.sidebar_collapsed = !self.sidebar_collapsed;
                     self.sidebar_collapsed_manual = true;
+                    // 与键盘 `ToggleSidebar` 一致：折叠态与展开态的 `workspace_scroll`
+                    // 上限不同，切换后按聚焦行重新定位，而不是沿用被钳过的下标。
+                    self.reveal_focused_workspace = true;
                     self.invalidate_pane_surface();
                     outcome.repaint = true;
                     outcome.resize = true;

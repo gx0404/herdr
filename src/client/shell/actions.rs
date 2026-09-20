@@ -19,6 +19,12 @@ impl ClientShellState {
                     self.workbench_sidebar(self.sidebar_collapsed);
                 }
                 self.reveal_navigation_workspace = true;
+                // 折叠态的 `workspace_scroll` 是行高 1 的下标、上限比展开态小，
+                // compose 期会把共享的 `workspace_scroll` 钳到折叠态上限，于是
+                // 「展开→折叠→再展开」原地停在被钳过的位置。这里显式要求下一帧
+                // 按聚焦行重新定位：两个方向都锚定聚焦工作区，取代沿用旧下标
+                // （C-26 的已知取舍）。
+                self.reveal_focused_workspace = true;
                 self.invalidate_pane_surface();
                 outcome.repaint = true;
                 outcome.resize = true;

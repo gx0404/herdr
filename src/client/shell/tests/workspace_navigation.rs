@@ -506,8 +506,12 @@ fn aggregate_navigation_reveals_overflow_and_preserves_order() {
 }
 
 fn overflowing_agent_sidebar_state() -> ClientShellState {
+    agent_sidebar_state(12)
+}
+
+fn agent_sidebar_state(count: usize) -> ClientShellState {
     let mut projected = snapshot();
-    projected.agents = (1..=12)
+    projected.agents = (1..=count)
         .map(|index| ClientShellAgent {
             pane_id: format!("pane_{index}"),
             workspace_id: "ws_1".into(),
@@ -519,7 +523,7 @@ fn overflowing_agent_sidebar_state() -> ClientShellState {
             terminal_title: None,
             terminal_title_stripped: None,
             agent_status: AgentStatus::Idle,
-            state_change_seq: index,
+            state_change_seq: index as u64,
             state_labels: Vec::new(),
             tokens: Vec::new(),
             focused: index == 1,
@@ -962,5 +966,331 @@ fn navigator_search_on_a_machine_name_keeps_the_machine_row_selected() {
     assert_eq!(
         crate::client::shell::aggregate_navigation::navigator_selected_index(&rows, navigator),
         Some(0)
+    );
+}
+
+fn collapsed_workspace_state(count: usize) -> ClientShellState {
+    let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
+    state.sidebar_collapsed = true;
+    state.set_snapshot(Box::new(workspaces(count)));
+    state.set_pane_surface(surface());
+    state
+}
+
+#[test]
+fn collapsed_sidebar_reveals_the_navigation_target_past_the_viewport() {
+    // 折叠侧栏此前 `workspaces.iter().take(height)`：第 18 个工作区在可视窗口之外，
+    // navigate ↓ 走到它时选中框直接消失且永不可达（C-26/SB-02）。
+    let mut state = collapsed_workspace_state(20);
+    state.compose(100, 28).expect("collapsed sidebar frame");
+    let body = state.hits.workspace_body;
+    assert!(body.height > 0, "折叠侧栏必须回写 hits.workspace_body");
+    assert!(
+        usize::from(body.height) < 20,
+        "本用例需要工作区多于折叠侧栏可视高度，实际 {}",
+        body.height
+    );
+    assert!(
+        state.hits.workspace_max_scroll > 0,
+        "折叠侧栏必须给出可滚动上限"
+    );
+
+    enter_navigation(&mut state);
+    for _ in 0..17 {
+        preview_key(&mut state, b"\x1b[B");
+    }
+    assert_selected(&state, &ClientEndpointId::Local, "ws_18");
+    state.compose(100, 28).expect("revealed collapsed frame");
+    assert!(
+        state
+            .hits
+            .workspaces
+            .iter()
+            .any(|hit| hit.workspace_id == "ws_18"),
+        "导航目标必须被揭示进命中表"
+    );
+    assert!(
+        state.workspace_scroll > 0,
+        "揭示第 18 行必须真的推动 workspace_scroll"
+    );
+}
+
+#[test]
+fn collapsed_sidebar_scrolls_workspaces_with_the_wheel() {
+    let mut state = collapsed_workspace_state(20);
+    state.compose(100, 28).expect("collapsed sidebar frame");
+    assert_eq!(state.workspace_scroll, 0);
+    assert!(
+        state.hits.agent_body.height > 0,
+        "折叠侧栏必须回写 hits.agent_body"
+    );
+    let body = state.hits.workspace_body;
+
+    let down = state.handle_raw_events(vec![RawInputEvent::Mouse(MouseEvent {
+        kind: MouseEventKind::ScrollDown,
+        column: body.x,
+        row: body.y,
+        modifiers: KeyModifiers::NONE,
+    })]);
+    assert!(down.repaint, "滚轮必须请求重绘");
+    assert_eq!(state.workspace_scroll, 1, "滚轮应当推动 workspace_scroll");
+    state.compose(100, 28).expect("scrolled collapsed frame");
+    assert!(
+        state
+            .hits
+            .workspaces
+            .iter()
+            .all(|hit| hit.workspace_id != "ws_1"),
+        "向下滚动一行后首个工作区应当移出窗口"
+    );
+
+    state.handle_raw_events(vec![RawInputEvent::Mouse(MouseEvent {
+        kind: MouseEventKind::ScrollUp,
+        column: body.x,
+        row: body.y,
+        modifiers: KeyModifiers::NONE,
+    })]);
+    assert_eq!(state.workspace_scroll, 0);
+}
+
+#[test]
+fn collapsed_endpoint_sidebar_scrolls_workspaces_with_the_wheel() {
+    // 多端点折叠侧栏已有滚动与 reveal，但同样没有回写 `hits.workspace_body`，
+    // `mouse.rs` 的滚轮守卫因此恒不成立。
+    let (mut state, _remote) = navigation_state(workspaces(20));
+    state.sidebar_collapsed = true;
+    state.compose(100, 28).expect("collapsed endpoint frame");
+    assert!(
+        state.hits.workspace_max_scroll > 0,
+        "本用例需要折叠侧栏可滚动"
+    );
+    let body = state.hits.workspace_body;
+    assert!(body.height > 0, "折叠端点侧栏必须回写 hits.workspace_body");
+    let down = state.handle_raw_events(vec![RawInputEvent::Mouse(MouseEvent {
+        kind: MouseEventKind::ScrollDown,
+        column: body.x,
+        row: body.y,
+        modifiers: KeyModifiers::NONE,
+    })]);
+    assert!(down.repaint);
+    assert_eq!(state.workspace_scroll, 1);
+    state.compose(100, 28).expect("scrolled endpoint frame");
+    assert!(
+        state
+            .hits
+            .machines
+            .iter()
+            .all(|hit| hit.endpoint_id != ClientEndpointId::Local),
+        "向下滚动一行后本机端点行应当移出窗口"
+    );
+
+    state.handle_raw_events(vec![RawInputEvent::Mouse(MouseEvent {
+        kind: MouseEventKind::ScrollUp,
+        column: body.x,
+        row: body.y,
+        modifiers: KeyModifiers::NONE,
+    })]);
+    assert_eq!(state.workspace_scroll, 0, "向上滚必须回到列表顶部");
+    state.compose(100, 28).expect("restored endpoint frame");
+    assert!(
+        state
+            .hits
+            .machines
+            .iter()
+            .any(|hit| hit.endpoint_id == ClientEndpointId::Local),
+        "回到顶部后本机端点行应当重新出现"
+    );
+}
+
+#[test]
+fn collapsed_sidebar_scrolls_agents_with_the_wheel() {
+    // agents 段此前同样只有 `take(height)`。这条用例固化「滚轮真的推动列表」，
+    // 而不是只断言回写了一个矩形——后者即使把 skip/take 整段删掉也照样绿。
+    let mut state = agent_sidebar_state(30);
+    state.sidebar_collapsed = true;
+    state.compose(100, 28).expect("collapsed agent sidebar");
+    let body = state.hits.agent_body;
+    assert!(body.height > 0, "折叠侧栏必须回写 hits.agent_body");
+    assert!(
+        state.hits.agent_max_scroll > 0,
+        "30 个 agent 必须溢出折叠 agents 区，实际 body {body:?}"
+    );
+    assert_eq!(first_agent(&state), Some("pane_1"));
+
+    let down = state.handle_raw_events(vec![RawInputEvent::Mouse(MouseEvent {
+        kind: MouseEventKind::ScrollDown,
+        column: body.x,
+        row: body.y,
+        modifiers: KeyModifiers::NONE,
+    })]);
+    assert!(down.repaint, "滚轮必须请求重绘");
+    assert_eq!(state.agent_scroll, 1, "滚轮应当推动 agent_scroll");
+    state.compose(100, 28).expect("scrolled agent frame");
+    assert_eq!(
+        first_agent(&state),
+        Some("pane_2"),
+        "向下滚一行后首个 agent 应当变成 pane_2"
+    );
+
+    state.handle_raw_events(vec![RawInputEvent::Mouse(MouseEvent {
+        kind: MouseEventKind::ScrollUp,
+        column: body.x,
+        row: body.y,
+        modifiers: KeyModifiers::NONE,
+    })]);
+    assert_eq!(state.agent_scroll, 0);
+    state.compose(100, 28).expect("restored agent frame");
+    assert_eq!(first_agent(&state), Some("pane_1"));
+}
+
+fn first_agent(state: &ClientShellState) -> Option<&str> {
+    state
+        .hits
+        .agents
+        .first()
+        .map(|(_, pane_id)| pane_id.as_str())
+}
+
+#[test]
+fn collapsed_sidebar_reveals_the_next_agent_past_the_viewport() {
+    // `hits.agent_max_scroll` 同时是 `KeybindAction::NextAgent` 的钳位上限：折叠态
+    // 下它此前恒为 0，键盘揭示路径静默失效（永远把 agent_scroll 钳回 0）。
+    let mut state = agent_sidebar_state(30);
+    state.sidebar_collapsed = true;
+    state.compose(100, 28).expect("collapsed agent sidebar");
+    let max_scroll = state.hits.agent_max_scroll;
+    assert!(max_scroll > 0, "本用例需要 agents 段可滚动");
+
+    state.agent_scroll = max_scroll;
+    state
+        .compose(100, 28)
+        .expect("agents scrolled to the bottom");
+    assert!(
+        state
+            .hits
+            .agents
+            .iter()
+            .all(|(_, pane_id)| pane_id != "pane_2"),
+        "pane_2 应当已滚出可视窗口"
+    );
+
+    // 聚焦的是 pane_1，NextAgent 的目标是窗口外的 pane_2。
+    let mut input = ClientShellInput::default();
+    state.record_binding(
+        crate::input::KeybindMatch::Action(crate::input::KeybindAction::NextAgent),
+        &mut input,
+    );
+    state.compose(100, 28).expect("revealed agent frame");
+    assert!(
+        state
+            .hits
+            .agents
+            .iter()
+            .any(|(_, pane_id)| pane_id == "pane_2"),
+        "NextAgent 必须把窗口外的 agent 揭示回可视区"
+    );
+}
+
+#[test]
+fn collapsed_sidebar_keeps_the_navigation_target_visible_on_the_next_frame() {
+    // 导航 reveal 命中的那一帧曾因 `&&` 短路而不消费 `reveal_focused_workspace`，
+    // 残留标志在紧接着的任意一次重绘（spinner tick、agent 输出）里把滚动位置拉回
+    // 聚焦行 ws_1，刚揭示出来的 ws_18 再次滑出可视区且不会自愈。
+    let mut state = collapsed_workspace_state(20);
+    state.compose(100, 28).expect("collapsed sidebar frame");
+    enter_navigation(&mut state);
+    for _ in 0..17 {
+        preview_key(&mut state, b"\x1b[B");
+    }
+    assert_selected(&state, &ClientEndpointId::Local, "ws_18");
+
+    // 端点切换 / 焦点变化会在同一帧把聚焦 reveal 也置真。
+    state.reveal_focused_workspace = true;
+    state.compose(100, 28).expect("revealed collapsed frame");
+    assert!(
+        state
+            .hits
+            .workspaces
+            .iter()
+            .any(|hit| hit.workspace_id == "ws_18"),
+        "揭示帧内导航目标必须可见"
+    );
+
+    state.compose(100, 28).expect("next collapsed frame");
+    assert!(
+        state
+            .hits
+            .workspaces
+            .iter()
+            .any(|hit| hit.workspace_id == "ws_18"),
+        "下一帧（无任何输入）不得把滚动位置拉回聚焦行"
+    );
+}
+
+#[test]
+fn toggling_the_sidebar_reanchors_the_workspace_list_on_the_focused_row() {
+    // 折叠态的 `workspace_scroll` 上限比展开态小，compose 期回写会把共享下标钳小，
+    // 「展开→折叠→再展开」于是停在被钳过的位置。取舍（C-26 已知取舍）：切换折叠
+    // 时显式按聚焦行重新定位，两个方向行为一致且可解释。
+    let mut state = collapsed_workspace_state(20);
+    state.sidebar_collapsed = false;
+    state.compose(100, 28).expect("expanded sidebar frame");
+    state.workspace_scroll = 8;
+    state.compose(100, 28).expect("scrolled expanded frame");
+    assert_eq!(state.workspace_scroll, 8, "展开态应当停在第 9 行");
+
+    for expected_collapsed in [true, false] {
+        let toggle = state.hits.sidebar_toggle;
+        assert!(toggle.width > 0 && toggle.height > 0, "折叠开关应当可见");
+        state.handle_raw_events(vec![RawInputEvent::Mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: toggle.x,
+            row: toggle.y,
+            modifiers: KeyModifiers::NONE,
+        })]);
+        assert_eq!(state.sidebar_collapsed, expected_collapsed);
+        // 折叠切换会 `invalidate_pane_surface()`，真实客户端随后拿到新 surface；
+        // 不补这一步 compose 会落进 `compose_unavailable` 的兜底侧栏。
+        state.set_pane_surface(surface());
+        state.compose(100, 28).expect("toggled sidebar frame");
+        assert_eq!(state.workspace_scroll, 0, "切换后应当重新锚定聚焦的 ws_1");
+        assert!(
+            state
+                .hits
+                .workspaces
+                .iter()
+                .any(|hit| hit.workspace_id == "ws_1"),
+            "聚焦工作区必须可见"
+        );
+    }
+}
+
+#[test]
+fn short_collapsed_sidebar_keeps_the_toggle_row_out_of_the_workspace_body() {
+    // 矮侧栏（`content.height < 7`，无 detail 区）的工作区段一路铺到 area 底格，而
+    // 折叠开关 » 正画在该格上：滚轮停在开关上会滚工作区列表，reveal 也能把目标行
+    // 停到被开关压住的一行。与高侧栏 `detail_content` 让出底格的做法对齐。
+    let mut state = collapsed_workspace_state(20);
+    state.compose(100, 6).expect("short collapsed sidebar");
+    let body = state.hits.workspace_body;
+    let toggle = state.hits.sidebar_toggle;
+    assert!(body.height > 0, "矮侧栏仍要回写 workspace_body");
+    assert!(toggle.height > 0, "折叠开关应当可见");
+    assert_eq!(
+        state.hits.agent_body,
+        Rect::default(),
+        "本用例需要落在没有 detail 区的矮侧栏分支"
+    );
+    assert!(
+        !crate::client::shell::contains(body, (toggle.x, toggle.y)),
+        "workspace_body {body:?} 不得包含折叠开关 {toggle:?}"
+    );
+    assert!(
+        state
+            .hits
+            .workspaces
+            .iter()
+            .all(|hit| hit.rect.y != toggle.y),
+        "不得把工作区行画到折叠开关那一行"
     );
 }

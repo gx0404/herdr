@@ -131,6 +131,9 @@ pub(super) fn render_collapsed(
         }
     }
     hits.workspace_max_scroll = max_scroll;
+    // 折叠态此前没有回写 `workspace_body`，`mouse.rs` 的滚轮守卫因此恒不成立
+    // （C-26/SB-02 与单端点折叠侧栏同源）。
+    hits.workspace_body = workspace_area;
     let mut skip = *state.workspace_scroll;
     let mut y = workspace_area.y;
     for (index, endpoint) in state.endpoints.iter().enumerate() {
