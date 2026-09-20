@@ -26,6 +26,54 @@ use super::ClientLoopEvent;
 #[cfg(any(windows, test))]
 mod windows_vti;
 
+/// 客户端 stdin 空闲成帧窗口（毫秒），来自 `[ui]`，客户端启动时读取一次。
+/// 取值被钳制在 `RAW_INPUT_IDLE_FLUSH_TIMEOUT_MS..=MAX_STDIN_FLUSH_TIMEOUT_MS`：
+/// 越界会写一条 warn 并按边界处理，避免写错一位让一次空闲 poll 挂上几十秒。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct StdinFlushTimeouts {
+    /// `ui.input_sequence_timeout_ms`：已见 `ESC [` 的不完整控制序列等待剩余字节的窗口。
+    pub sequence_ms: i32,
+    /// `ui.escape_after_mouse_timeout_ms`：最近收到过鼠标报文时孤立 ESC 的等待窗口。
+    pub escape_after_mouse_ms: i32,
+}
+
+impl StdinFlushTimeouts {
+    pub fn from_ui_config(ui: &crate::config::UiConfig) -> Self {
+        Self {
+            sequence_ms: clamp_flush_timeout_ms(ui.input_sequence_timeout_ms),
+            escape_after_mouse_ms: clamp_flush_timeout_ms(ui.escape_after_mouse_timeout_ms),
+        }
+    }
+}
+
+/// 成帧窗口上界（毫秒）：足以覆盖高 RTT 的 SSH 链路，又不会让含不完整控制序列的
+/// 缓冲区在一次空闲 poll 里挂到肉眼可见。
+pub(crate) const MAX_STDIN_FLUSH_TIMEOUT_MS: i32 = 1000;
+
+fn clamp_flush_timeout_ms(ms: u64) -> i32 {
+    let requested = i32::try_from(ms).unwrap_or(i32::MAX);
+    let clamped = requested.clamp(
+        crate::raw_input::RAW_INPUT_IDLE_FLUSH_TIMEOUT_MS,
+        MAX_STDIN_FLUSH_TIMEOUT_MS,
+    );
+    if clamped != requested {
+        tracing::warn!(
+            requested = ms,
+            clamped,
+            min = crate::raw_input::RAW_INPUT_IDLE_FLUSH_TIMEOUT_MS,
+            max = MAX_STDIN_FLUSH_TIMEOUT_MS,
+            "input framing window out of range; clamped"
+        );
+    }
+    clamped
+}
+
+/// 鼠标捕获标志滞后时的兜底证据窗口：最近这么久内解析出过鼠标报文，孤立 ESC 也
+/// 可能是被切断的 SGR 报文头。捕获标志本身已是首选证据，这个窗口只负责补上
+/// 「host 已经在发报文但 herdr 还没记到捕获状态」的空档。
+#[cfg(unix)]
+const MOUSE_REPORT_EVIDENCE_WINDOW: std::time::Duration = std::time::Duration::from_millis(500);
+
 // ---------------------------------------------------------------------------
 // Stdin reader thread
 // ---------------------------------------------------------------------------
@@ -42,6 +90,7 @@ pub fn stdin_reader_loop(
     host_cell_size_query_sent: bool,
     host_mouse_capture_active: Arc<AtomicBool>,
     host_sgr_pixels_active: Arc<AtomicBool>,
+    flush_timeouts: StdinFlushTimeouts,
     #[cfg(unix)] direct_response: Arc<std::sync::Mutex<super::direct_graphics::ResponseMatcher>>,
     #[cfg(unix)] direct_response_active: Arc<AtomicBool>,
 ) {
@@ -52,6 +101,7 @@ pub fn stdin_reader_loop(
             host_cell_size_query_sent,
             host_mouse_capture_active,
             host_sgr_pixels_active,
+            flush_timeouts,
         );
         windows_stdin_reader_loop(event_tx, should_quit);
     }
@@ -64,6 +114,7 @@ pub fn stdin_reader_loop(
         host_cell_size_query_sent,
         host_mouse_capture_active,
         host_sgr_pixels_active,
+        flush_timeouts,
         direct_response,
         direct_response_active,
     );
@@ -77,6 +128,7 @@ fn unix_stdin_reader_loop(
     host_cell_size_query_sent: bool,
     host_mouse_capture_active: Arc<AtomicBool>,
     host_sgr_pixels_active: Arc<AtomicBool>,
+    flush_timeouts: StdinFlushTimeouts,
     direct_response: Arc<std::sync::Mutex<super::direct_graphics::ResponseMatcher>>,
     direct_response_active: Arc<AtomicBool>,
 ) {
@@ -165,6 +217,8 @@ fn unix_stdin_reader_loop(
                 let timeout_ms = idle_flush_timeout_ms(
                     &framer,
                     host_mouse_capture_active.load(Ordering::Acquire),
+                    &flush_timeouts,
+                    std::time::Instant::now(),
                 );
                 if stdin_read_ready(&reader, timeout_ms) == Some(false) {
                     let had_pending = framer.has_pending_input();
@@ -307,18 +361,36 @@ fn flush_unix_palette_input(
         .is_ok()
 }
 
+/// 决定下一次空闲 poll 的等待窗口：只有「等待没有延迟代价」或「有证据表明字节
+/// 还在路上」的缓冲区才多等，其余保持基线窗口，保证 Esc 等按键的即时性。
 #[cfg(unix)]
 fn idle_flush_timeout_ms(
     framer: &crate::raw_input::RawInputByteFramer,
     host_mouse_capture_active: bool,
+    timeouts: &StdinFlushTimeouts,
+    now: std::time::Instant,
 ) -> i32 {
-    if host_mouse_capture_active
-        && (framer.has_pending_lone_escape() || framer.has_pending_incomplete_mouse_sequence())
-    {
-        crate::raw_input::MOUSE_ACTIVE_ESCAPE_SEQUENCE_FLUSH_TIMEOUT_MS
-    } else {
-        crate::raw_input::RAW_INPUT_IDLE_FLUSH_TIMEOUT_MS
+    // 已含参数字节的不完整 CSI（kitty 键序列或 SGR 鼠标报文）与裸 `ESC [` 都不可能
+    // 是完整按键：多等序列窗口只影响传统 Alt+[ 这类罕见形态，却能让 read(2) 边界
+    // 切开的序列重组而不是被丢弃（上游 #4356）。
+    if framer.has_pending_incomplete_csi() || framer.has_pending_csi_intro() {
+        return timeouts.sequence_ms;
     }
+    // 默认编码鼠标报文前缀只在鼠标捕获期间才可能出现。
+    if host_mouse_capture_active && framer.has_pending_incomplete_mouse_sequence() {
+        return timeouts.sequence_ms;
+    }
+    // 孤立 ESC 可能是恰在 ESC 后 0 字节处被切断的 SGR 报文头。鼠标捕获处于开启状态
+    // 本身就是证据（捕获刚开启、或鼠标静止超过证据窗口后的首条报文都还没有时间戳
+    // 可依据）；「最近收到过鼠标报文」只是捕获标志滞后时的兜底。两者都不成立就是
+    // 纯键盘输入，Esc 按基线窗口立即送出。
+    if framer.has_pending_lone_escape()
+        && (host_mouse_capture_active
+            || framer.mouse_report_seen_within(now, MOUSE_REPORT_EVIDENCE_WINDOW))
+    {
+        return timeouts.escape_after_mouse_ms;
+    }
+    crate::raw_input::RAW_INPUT_IDLE_FLUSH_TIMEOUT_MS
 }
 
 #[cfg(windows)]
@@ -730,36 +802,135 @@ mod tests {
     }
 
     #[test]
-    fn mouse_active_escape_sequences_get_longer_reassembly_window() {
-        let mut escape = crate::raw_input::RawInputByteFramer::default();
-        assert!(escape.push(b"\x1b").is_empty());
+    fn incomplete_control_sequences_get_the_sequence_window() {
+        // 已含参数字节的不完整 CSI（kitty 键序列、SGR 鼠标报文）不可能是完整按键，
+        // 无论鼠标捕获与否都等待序列窗口，避免 read(2) 边界切开的序列 10 ms 后被丢。
+        let timeouts = StdinFlushTimeouts::from_ui_config(&crate::config::UiConfig::default());
+        let now = std::time::Instant::now();
+        let idle = crate::raw_input::RAW_INPUT_IDLE_FLUSH_TIMEOUT_MS;
+
         let mut sgr_mouse = crate::raw_input::RawInputByteFramer::default();
         assert!(sgr_mouse.push(b"\x1b[<3").is_empty());
+        let mut kitty_key = crate::raw_input::RawInputByteFramer::default();
+        assert!(kitty_key.push(b"\x1b[49:33;2:").is_empty());
+        let mut super_space = crate::raw_input::RawInputByteFramer::default();
+        assert!(super_space.push(b"\x1b[32").is_empty());
+        for framer in [&sgr_mouse, &kitty_key, &super_space] {
+            for mouse_capture in [false, true] {
+                assert_eq!(
+                    idle_flush_timeout_ms(framer, mouse_capture, &timeouts, now),
+                    timeouts.sequence_ms
+                );
+            }
+        }
+
+        // 裸 `\x1b[` 是每条 CSI 的引导符：无论鼠标捕获与否都等序列窗口，否则
+        // `\x1b[` | `32;9u` 这样的切分在纯键盘输入下 10 ms 就被拆成 Alt+[ 加文本。
+        let mut csi_intro = crate::raw_input::RawInputByteFramer::default();
+        assert!(csi_intro.push(b"\x1b[").is_empty());
+        for mouse_capture in [false, true] {
+            assert_eq!(
+                idle_flush_timeout_ms(&csi_intro, mouse_capture, &timeouts, now),
+                timeouts.sequence_ms
+            );
+        }
+
+        // 默认编码鼠标报文前缀只在鼠标捕获期间才可能出现。
         let mut default_mouse = crate::raw_input::RawInputByteFramer::default();
         assert!(default_mouse.push(b"\x1b[MC").is_empty());
-        let mut unrelated = crate::raw_input::RawInputByteFramer::default();
-        assert!(unrelated.push(b"\x1b[49:33;2:").is_empty());
-
-        for framer in [&escape, &sgr_mouse, &default_mouse, &unrelated] {
-            assert_eq!(
-                idle_flush_timeout_ms(framer, false),
-                crate::raw_input::RAW_INPUT_IDLE_FLUSH_TIMEOUT_MS
-            );
-        }
-        for framer in [&escape, &sgr_mouse, &default_mouse] {
-            assert_eq!(
-                idle_flush_timeout_ms(framer, true),
-                crate::raw_input::MOUSE_ACTIVE_ESCAPE_SEQUENCE_FLUSH_TIMEOUT_MS
-            );
-        }
         assert_eq!(
-            idle_flush_timeout_ms(&unrelated, true),
-            crate::raw_input::RAW_INPUT_IDLE_FLUSH_TIMEOUT_MS
+            idle_flush_timeout_ms(&default_mouse, false, &timeouts, now),
+            idle
+        );
+        assert_eq!(
+            idle_flush_timeout_ms(&default_mouse, true, &timeouts, now),
+            timeouts.sequence_ms
         );
 
-        let mouse_timeout_ms =
-            std::hint::black_box(crate::raw_input::MOUSE_ACTIVE_ESCAPE_SEQUENCE_FLUSH_TIMEOUT_MS);
-        assert!(mouse_timeout_ms > 100);
+        // 主机控制串与括号粘贴由 framer 自己等待终止符，不占用序列窗口。
+        let mut osc = crate::raw_input::RawInputByteFramer::default();
+        assert!(osc.push(b"\x1b]11;").is_empty());
+        let mut paste = crate::raw_input::RawInputByteFramer::default();
+        assert!(paste.push(b"\x1b[200~partial").is_empty());
+        for framer in [&osc, &paste] {
+            for mouse_capture in [false, true] {
+                assert_eq!(
+                    idle_flush_timeout_ms(framer, mouse_capture, &timeouts, now),
+                    idle
+                );
+            }
+        }
+
+        let sequence_ms = std::hint::black_box(timeouts.sequence_ms);
+        assert!(sequence_ms > 100);
+    }
+
+    #[test]
+    fn lone_escape_waits_a_short_window_whenever_mouse_reports_are_possible() {
+        let timeouts = StdinFlushTimeouts::from_ui_config(&crate::config::UiConfig::default());
+        let idle = crate::raw_input::RAW_INPUT_IDLE_FLUSH_TIMEOUT_MS;
+
+        // 纯键盘输入（无鼠标捕获）：Esc 按基线窗口立即送出，不再多付 150 ms。
+        let mut escape = crate::raw_input::RawInputByteFramer::default();
+        assert!(escape.push(b"\x1b").is_empty());
+        let now = std::time::Instant::now();
+        assert_eq!(idle_flush_timeout_ms(&escape, false, &timeouts, now), idle);
+
+        // 鼠标捕获刚开启、还没有任何鼠标报文时间戳：孤立 ESC 仍可能是恰在 ESC 后
+        // 被切断的首条 SGR 报文头，必须拿到短窗口而不是基线窗口，否则该报文丢失
+        // 且一个伪 Esc 打进 pane。
+        assert!(!escape.mouse_report_seen_within(now, MOUSE_REPORT_EVIDENCE_WINDOW));
+        assert_eq!(
+            idle_flush_timeout_ms(&escape, true, &timeouts, now),
+            timeouts.escape_after_mouse_ms
+        );
+
+        // 捕获标志滞后时由「最近收到过鼠标报文」兜底，且该证据会过期。
+        let mut after_mouse = crate::raw_input::RawInputByteFramer::default();
+        assert_eq!(after_mouse.push(b"\x1b[<35;2;3M").len(), 1);
+        assert!(after_mouse.push(b"\x1b").is_empty());
+        let now = std::time::Instant::now();
+        assert_eq!(
+            idle_flush_timeout_ms(&after_mouse, false, &timeouts, now),
+            timeouts.escape_after_mouse_ms
+        );
+        assert_eq!(
+            idle_flush_timeout_ms(
+                &after_mouse,
+                false,
+                &timeouts,
+                now + MOUSE_REPORT_EVIDENCE_WINDOW + std::time::Duration::from_millis(1)
+            ),
+            idle
+        );
+
+        let escape_after_mouse_ms = std::hint::black_box(timeouts.escape_after_mouse_ms);
+        assert!((25..=35).contains(&escape_after_mouse_ms));
+        assert!(escape_after_mouse_ms < timeouts.sequence_ms);
+    }
+
+    #[test]
+    fn stdin_flush_timeouts_are_clamped_to_the_documented_range() {
+        let idle = crate::raw_input::RAW_INPUT_IDLE_FLUSH_TIMEOUT_MS;
+        let mut ui = crate::config::UiConfig::default();
+        ui.input_sequence_timeout_ms = u64::MAX;
+        ui.escape_after_mouse_timeout_ms = 0;
+        let timeouts = StdinFlushTimeouts::from_ui_config(&ui);
+        // 写错一位不得让一次空闲 poll 挂上几十秒：上界与下界都钳制。
+        assert_eq!(timeouts.sequence_ms, MAX_STDIN_FLUSH_TIMEOUT_MS);
+        assert_eq!(timeouts.escape_after_mouse_ms, idle);
+
+        ui.input_sequence_timeout_ms = MAX_STDIN_FLUSH_TIMEOUT_MS as u64 + 1;
+        ui.escape_after_mouse_timeout_ms = (idle - 1) as u64;
+        let timeouts = StdinFlushTimeouts::from_ui_config(&ui);
+        assert_eq!(timeouts.sequence_ms, MAX_STDIN_FLUSH_TIMEOUT_MS);
+        assert_eq!(timeouts.escape_after_mouse_ms, idle);
+
+        ui.input_sequence_timeout_ms = 400;
+        ui.escape_after_mouse_timeout_ms = 80;
+        let timeouts = StdinFlushTimeouts::from_ui_config(&ui);
+        assert_eq!(timeouts.sequence_ms, 400);
+        assert_eq!(timeouts.escape_after_mouse_ms, 80);
     }
 }
 

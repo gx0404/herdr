@@ -323,6 +323,8 @@ The sidebar is the main Herdr dashboard. Search `ui.` in the [Config reference](
 
 Mouse interaction timings are tunable: `ui.double_click_ms` (default `350`) is the window in which repeated pane clicks become double-click word selection or triple-click line selection, `ui.drag_throttle_ms` (default `33`) throttles pane scrollbar and split divider drag updates, and `ui.selection_autoscroll_interval_ms` / `ui.selection_autoscroll_min_lines` / `ui.selection_autoscroll_max_lines` (defaults `30` / `3` / `15`) control selection auto-scroll while dragging past a pane edge.
 
+Input framing windows are tunable too: `ui.input_sequence_timeout_ms` (default `150`) is how long the client waits for the rest of an incomplete control sequence that arrived split across reads — a key encoding, a mouse report, or a bare `ESC [` introducer — before discarding the fragment — a genuine `Alt+[` keypress is therefore delivered only after that window elapses — and `ui.escape_after_mouse_timeout_ms` (default `30`) is how long a lone Escape waits for a possible mouse-report continuation while mouse capture is active (or mouse reports arrived within the last half second); otherwise Escape is sent after the 10 ms idle window. Raise both on high-latency SSH links. Both are clamped to `10..=1000`, are read when the client starts, and only apply to the Unix client (the Windows client polls at a fixed 10 ms).
+
 Set `tab_bar_position = "bottom"` under `[ui]` to place the desktop tab row below the terminal panes. Prefix, Navigate, Copy, and Resize mode bars temporarily replace the bottom tab row while active. The default is `"top"`.
 
 Configure an ordered tmux-style status area at the right edge of the tab row:

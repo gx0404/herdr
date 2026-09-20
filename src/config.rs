@@ -27,7 +27,7 @@ pub use self::{
         ColorDepthConfig, Config, ConfigReloadReport, ConfigReloadStatus, HostCursorModeConfig,
         NewTerminalCwdConfig, PaneBordersConfig, RepeatImeCursorAnchorConfig, ShellModeConfig,
         SidebarCollapsedModeConfig, StatusIndicatorStyle, TabBarPositionConfig,
-        ToastClipboardPosition, ToastConfig, ToastDelivery, ToastHerdrPosition,
+        ToastClipboardPosition, ToastConfig, ToastDelivery, ToastHerdrPosition, UiConfig,
         UpdateChannelConfig, MAX_TOAST_DELAY_SECONDS,
     },
     sidebar::{

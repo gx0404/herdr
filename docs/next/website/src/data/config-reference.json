@@ -1067,6 +1067,18 @@
           "description": "Maximum lines scrolled per auto-scroll step far past the pane edge."
         },
         {
+          "key": "ui.input_sequence_timeout_ms",
+          "type": "integer",
+          "default": "150",
+          "description": "Milliseconds a key encoding or mouse report that arrived split across reads (its `ESC [` intro is already buffered) waits for its remaining bytes before the fragment is discarded. Raise it on high-latency SSH links. Clamped to `10..=1000`; Unix client only (the Windows client polls at a fixed 10 ms). Read at client start."
+        },
+        {
+          "key": "ui.escape_after_mouse_timeout_ms",
+          "type": "integer",
+          "default": "30",
+          "description": "Milliseconds a lone Escape waits for a possible mouse-report continuation while mouse capture is active (or mouse reports arrived within the last half second); otherwise Escape is sent after the 10 ms idle window. Raise it on high-latency SSH links. Clamped to `10..=1000`; Unix client only (the Windows client polls at a fixed 10 ms). Read at client start."
+        },
+        {
           "key": "ui.confirm_close",
           "type": "boolean",
           "default": "true",

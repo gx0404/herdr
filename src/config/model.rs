@@ -1058,6 +1058,18 @@ pub struct UiConfig {
     pub selection_autoscroll_min_lines: usize,
     /// Maximum lines scrolled per auto-scroll step far past the pane edge. Default: 15.
     pub selection_autoscroll_max_lines: usize,
+    /// Milliseconds a key encoding or mouse report that arrived split across reads
+    /// (its `ESC [` intro is already buffered) waits for its remaining bytes before
+    /// the fragment is discarded. Raise it on high-latency SSH links. Clamped to
+    /// `10..=1000`; Unix client only (the Windows client polls at a fixed 10 ms).
+    /// Read at client start. Default: 150.
+    pub input_sequence_timeout_ms: u64,
+    /// Milliseconds a lone Escape waits for a possible mouse-report continuation while
+    /// mouse capture is active (or mouse reports arrived within the last half second);
+    /// otherwise Escape is sent after the 10 ms idle window. Clamped to `10..=1000`;
+    /// Unix client only (the Windows client polls at a fixed 10 ms). Read at client
+    /// start. Default: 30.
+    pub escape_after_mouse_timeout_ms: u64,
     /// Ask for confirmation before closing a workspace. Default: true.
     pub confirm_close: bool,
     /// Highlight interactive chrome (rows, buttons) under the mouse pointer. Default: true.
@@ -1346,6 +1358,8 @@ impl Default for UiConfig {
             selection_autoscroll_interval_ms: 30,
             selection_autoscroll_min_lines: 3,
             selection_autoscroll_max_lines: 15,
+            input_sequence_timeout_ms: 150,
+            escape_after_mouse_timeout_ms: 30,
             confirm_close: true,
             hover_effects: true,
             spinner: true,

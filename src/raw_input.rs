@@ -19,10 +19,9 @@ use crate::terminal_theme::{
 };
 
 const ESC: u8 = 0x1b;
-#[cfg(unix)]
+/// 空闲成帧基线窗口（毫秒）：这么久没有新字节就提交或丢弃缓冲区。孤立 ESC 与
+/// 不完整控制序列的更长窗口由客户端按 `[ui]` 配置在此基线之上决定。
 pub(crate) const RAW_INPUT_IDLE_FLUSH_TIMEOUT_MS: i32 = 10;
-#[cfg(unix)]
-pub(crate) const MOUSE_ACTIVE_ESCAPE_SEQUENCE_FLUSH_TIMEOUT_MS: i32 = 150;
 pub(crate) const GHOSTTY_COLOR_SCHEME_DARK_REPORT: &[u8] = b"\x1b[?997;1n";
 pub(crate) const GHOSTTY_COLOR_SCHEME_LIGHT_REPORT: &[u8] = b"\x1b[?997;2n";
 const BRACKETED_PASTE_START: &[u8] = b"\x1b[200~";
@@ -142,7 +141,16 @@ pub(crate) struct RawInputByteFramer {
     discarded_tail_bytes: usize,
     // Keep the discarded prefix separate from continuation bytes awaiting validation.
     timed_out_mouse_prefix: Option<Vec<u8>>,
-    lone_escape_recently_flushed: bool,
+    // 刚因超时送出的 CSI 头部：随后到达的残余尾巴要被吃掉而不是当作文本。
+    flushed_csi_head: Option<FlushedCsiHead>,
+    // 裸 `ESC [` 已被多等一个空闲窗口（它是每条 CSI 的引导符，也可能是 Alt+[）。
+    held_csi_intro_flush: bool,
+    // 尾字节丢弃来自键盘侧的不完整 CSI（而非 herdr 自己发出的主机查询回复）：
+    // 必须有时间上界，否则永远到不了的尾巴会吞掉用户随后敲的参数字节。
+    input_csi_tail_discard: bool,
+    // 上面两种「超时后等尾巴」的武装时刻：超过 MAX_TIMED_OUT_CSI_RECOVERY 即失效。
+    // 读线程平时阻塞在 read(2) 上、不产生空闲 flush，所以上界必须是墙钟而非次数。
+    timed_out_csi_at: Option<std::time::Instant>,
     host_color_replies_awaited: u16,
     host_cell_size_replies_awaited: u16,
     host_appearance_reply_awaited: bool,
@@ -150,12 +158,56 @@ pub(crate) struct RawInputByteFramer {
     host_color_scheme_change_tracking: bool,
     host_appearance_query_on_focus: bool,
     split_coalesced_escape: bool,
+    // 最近一次解析出鼠标报文的时刻：孤立 ESC 是否值得多等一个短窗口的证据。
+    last_mouse_report_at: Option<std::time::Instant>,
 }
 
 const HOST_COLOR_QUERY_REPLIES: u16 = 258;
 #[cfg(any(unix, test))]
 const HOST_CELL_SIZE_QUERY_REPLIES: u16 = 1;
-const MAX_ORPHANED_SGR_MOUSE_TAIL_BYTES: usize = 32;
+const MAX_ORPHANED_CSI_TAIL_BYTES: usize = 32;
+
+/// 「超时送出头部后等尾巴」的存活上限。被 read(2) 边界切开的尾巴在几微秒到几毫秒内
+/// 必到，半秒足够宽松；过了这个窗口就当作用户真正键入的字节，不再吃掉。
+const MAX_TIMED_OUT_CSI_RECOVERY: std::time::Duration = std::time::Duration::from_millis(500);
+
+/// 超时送出的 CSI 头部。CSI 在读取边界被切开时，头部已经作为按键送出（孤立 ESC
+/// 送 Esc、裸 `ESC [` 送传统 Alt+[），随后到达的尾巴既不能重组也不能当作文本，
+/// 只能吃掉（上游 #4356/#4365/#4184）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FlushedCsiHead {
+    /// 孤立 ESC：尾巴必须以 `[` 开头，这个引导符就是「不是用户键入的文本」的判据。
+    LoneEscape,
+    /// 裸 `ESC [`：尾巴直接是参数字节，因此要求至少一个参数字节后才认终止字节，
+    /// 否则 Alt+[ 之后用户敲的单个字符会被当成终止字节吃掉。
+    CsiIntro,
+}
+
+impl FlushedCsiHead {
+    /// 与尾巴拼回去用于校验的头部字节。
+    fn prefix(self) -> &'static [u8] {
+        match self {
+            Self::LoneEscape => b"\x1b",
+            Self::CsiIntro => b"\x1b[",
+        }
+    }
+
+    /// 尾巴必须先出现的引导字节（孤立 ESC 的尾巴以 `[` 开头）。
+    fn tail_intro(self) -> &'static [u8] {
+        match self {
+            Self::LoneEscape => b"[",
+            Self::CsiIntro => b"",
+        }
+    }
+
+    /// 认终止字节前至少需要的参数字节数。
+    fn min_body_len(self) -> usize {
+        match self {
+            Self::LoneEscape => 0,
+            Self::CsiIntro => 1,
+        }
+    }
+}
 
 impl RawInputByteFramer {
     pub(crate) fn for_host_input() -> Self {
@@ -229,6 +281,30 @@ impl RawInputByteFramer {
             || starts_with_incomplete_default_mouse_sequence(&self.buffer)
     }
 
+    /// 已见 `ESC [` 且其后至少一个参数/中间字节（0x20..=0x3F）但尚无终止字节：
+    /// 不可能是完整按键，只可能是被切断的 kitty 键序列或 SGR 鼠标报文。
+    #[cfg(any(unix, test))]
+    pub(crate) fn has_pending_incomplete_csi(&self) -> bool {
+        starts_with_incomplete_csi(&self.buffer)
+    }
+
+    /// 缓冲区恰为裸 `ESC [`：可能是传统终端的 Alt+[，也可能是任一 CSI 的切断头。
+    #[cfg(any(unix, test))]
+    pub(crate) fn has_pending_csi_intro(&self) -> bool {
+        self.buffer.as_slice() == b"\x1b["
+    }
+
+    /// 最近 `window` 内是否解析出过鼠标报文。
+    #[cfg(any(unix, test))]
+    pub(crate) fn mouse_report_seen_within(
+        &self,
+        now: std::time::Instant,
+        window: std::time::Duration,
+    ) -> bool {
+        self.last_mouse_report_at
+            .is_some_and(|at| now.saturating_duration_since(at) <= window)
+    }
+
     #[cfg(any(windows, test))]
     pub(crate) fn has_pending_bracketed_paste(&self) -> bool {
         self.buffer.starts_with(BRACKETED_PASTE_START)
@@ -246,6 +322,9 @@ impl RawInputByteFramer {
 
         if let Some(family) = self.discard_until {
             if family == ControlStringFamily::HostReplyCsi {
+                // 空闲不是尾巴已结束的证据；键盘侧武装的墙钟上界由
+                // `expire_timed_out_csi_recovery`（上面的 drain 已执行）负责，主机
+                // 回复的武装范围由 herdr 自己发出的查询限定，不设上界。
                 return chunks;
             }
             let keep_split_st = self.buffer.last() == Some(&ESC);
@@ -267,7 +346,9 @@ impl RawInputByteFramer {
             return chunks;
         }
 
-        if self.lone_escape_recently_flushed && self.buffer.starts_with(b"[<") {
+        if self.flushed_csi_head == Some(FlushedCsiHead::LoneEscape)
+            && self.buffer.starts_with(b"[<")
+        {
             tracing::debug!(
                 len = self.buffer.len(),
                 "discarding incomplete orphaned SGR mouse tail after input timeout"
@@ -275,7 +356,23 @@ impl RawInputByteFramer {
             let mut prefix = vec![ESC];
             prefix.append(&mut self.buffer);
             self.retain_timed_out_mouse_prefix(prefix);
-            self.lone_escape_recently_flushed = false;
+            self.flushed_csi_head = None;
+            return chunks;
+        }
+
+        // 孤立 ESC 送出后残留的非鼠标 CSI 尾巴（`[` + 至少一个参数字节）等不到终止
+        // 字节：武装带墙钟上界的尾字节丢弃，残余不得在下一次 push 里变成文本。单个
+        // `[` 可能就是用户键入的字符，不走这里，交给后面的按键解析。
+        if self.flushed_csi_head == Some(FlushedCsiHead::LoneEscape)
+            && self.buffer.len() > 1
+            && starts_with_incomplete_orphaned_csi_tail(FlushedCsiHead::LoneEscape, &self.buffer)
+        {
+            tracing::debug!(
+                bytes = ?self.buffer,
+                "arming tail discard for an orphaned CSI tail after input timeout"
+            );
+            self.arm_input_csi_tail_discard();
+            self.buffer.clear();
             return chunks;
         }
 
@@ -312,6 +409,9 @@ impl RawInputByteFramer {
         {
             if !self.held_pending_host_reply_esc {
                 self.held_pending_host_reply_esc = true;
+                // 这一轮 hold 同时算作裸 `ESC [` 的引导符 hold，避免下面的分支
+                // 再多等一个窗口。
+                self.held_csi_intro_flush = true;
                 tracing::trace!("holding incomplete host CSI reply one flush");
                 return chunks;
             }
@@ -369,6 +469,37 @@ impl RawInputByteFramer {
             return chunks;
         }
 
+        if starts_with_incomplete_csi(&self.buffer) {
+            // 被 read(2) 边界切断的 kitty 键序列或 CSI-u 释放事件：前缀已无法成为
+            // 完整按键，丢弃时必须连同稍后到达的尾字节（如 `;9u`）一起吃到终止字节，
+            // 否则残余会作为文本进入 pane（上游 #4356/#4365/#4184）。裸 `ESC [`
+            // 不走这里，保留传统终端 Alt+[ 的语义。
+            tracing::debug!(
+                bytes = ?self.buffer,
+                "discarding incomplete CSI after input timeout; its tail is dropped through the final byte"
+            );
+            self.arm_input_csi_tail_discard();
+            self.buffer.clear();
+            return chunks;
+        }
+
+        if self.buffer.as_slice() == b"\x1b[" {
+            // 裸 `ESC [` 既是传统终端的 Alt+[，也是每条 CSI 的引导符。先多等一个
+            // 空闲窗口（等价于把重组窗口翻倍），到期仍无字节才按 Alt+[ 送出，并记下
+            // 头部，让随后到达的参数尾巴被吃掉而不是作为文本进入 pane。
+            if !self.held_csi_intro_flush {
+                self.held_csi_intro_flush = true;
+                tracing::trace!("holding a bare CSI intro one extra flush");
+                return chunks;
+            }
+            self.held_csi_intro_flush = false;
+            self.flushed_csi_head = Some(FlushedCsiHead::CsiIntro);
+            self.timed_out_csi_at = Some(std::time::Instant::now());
+            tracing::debug!("flushing a bare CSI intro as legacy alt bracket after input timeout");
+            chunks.push(std::mem::take(&mut self.buffer));
+            return chunks;
+        }
+
         if self.buffer.as_slice() == [ESC] {
             if self.awaiting_host_reply() && !self.held_pending_host_reply_esc {
                 self.held_pending_host_reply_esc = true;
@@ -384,13 +515,17 @@ impl RawInputByteFramer {
                 bytes = ?self.buffer,
                 "flushing lone escape after input timeout; if this follows an alt chord or focus switch it may reach the pane as plain esc"
             );
-            self.lone_escape_recently_flushed = true;
+            self.flushed_csi_head = Some(FlushedCsiHead::LoneEscape);
+            self.timed_out_csi_at = Some(std::time::Instant::now());
+            self.held_csi_intro_flush = false;
             chunks.push(std::mem::take(&mut self.buffer));
             return chunks;
         }
 
         if let Ok(text) = std::str::from_utf8(&self.buffer) {
             if parse_terminal_key_sequence(text).is_some() {
+                self.flushed_csi_head = None;
+                self.held_csi_intro_flush = false;
                 chunks.push(std::mem::take(&mut self.buffer));
                 return chunks;
             }
@@ -408,9 +543,63 @@ impl RawInputByteFramer {
         }
 
         tracing::debug!(bytes = ?self.buffer, "dropping incomplete raw input buffer after timeout");
-        self.lone_escape_recently_flushed = false;
+        self.flushed_csi_head = None;
+        self.held_csi_intro_flush = false;
         self.buffer.clear();
         chunks
+    }
+
+    /// 武装通用 CSI 尾字节丢弃：吃掉残余参数字节直到终止字节。与主机回复共用
+    /// `HostReplyCsi` 的吃法，但额外标记来源是键盘输入，使其受墙钟上界约束。
+    fn arm_input_csi_tail_discard(&mut self) {
+        self.discard_until = Some(ControlStringFamily::HostReplyCsi);
+        self.discarded_tail_bytes = 0;
+        self.input_csi_tail_discard = true;
+        self.timed_out_csi_at = Some(std::time::Instant::now());
+        self.flushed_csi_head = None;
+        // 不完整 CSI 不产生事件，`drain_available_chunks` 的复位不会执行；这里一并
+        // 放掉 hold 标志，否则下一个真正的孤立 ESC 会跳过本该有的 hold。
+        self.held_pending_host_reply_esc = false;
+        self.held_csi_intro_flush = false;
+    }
+
+    fn disarm_csi_tail_discard(&mut self) {
+        self.discard_until = None;
+        self.discarded_tail_bytes = 0;
+        self.input_csi_tail_discard = false;
+        self.timed_out_csi_at = None;
+    }
+
+    /// 超时送出的 CSI 头部/尾字节丢弃过期即放手：此后到达的字节按普通输入处理。
+    fn expire_timed_out_csi_recovery(&mut self) {
+        let expired = self
+            .timed_out_csi_at
+            .is_none_or(|at| at.elapsed() > MAX_TIMED_OUT_CSI_RECOVERY);
+        if !expired {
+            return;
+        }
+        if self.flushed_csi_head.is_some() {
+            tracing::debug!("giving up on an orphaned CSI tail after its recovery window");
+            self.flushed_csi_head = None;
+        }
+        if self.input_csi_tail_discard {
+            tracing::debug!("disarming the input CSI tail discard after its recovery window");
+            self.disarm_csi_tail_discard();
+        }
+        self.timed_out_csi_at = None;
+    }
+
+    /// 把「等尾巴」的武装时刻回拨到过期，供单测验证上界而不真的睡半秒。
+    #[cfg(test)]
+    fn backdate_timed_out_csi_for_test(&mut self) {
+        self.timed_out_csi_at = self.timed_out_csi_at.and_then(|at| {
+            at.checked_sub(MAX_TIMED_OUT_CSI_RECOVERY + std::time::Duration::from_millis(1))
+        });
+    }
+
+    /// 记下「刚解析出鼠标报文」的时刻：孤立 ESC 是否值得多等一个短窗口的证据。
+    fn note_mouse_report(&mut self) {
+        self.last_mouse_report_at = Some(std::time::Instant::now());
     }
 
     fn retain_timed_out_mouse_prefix(&mut self, prefix: Vec<u8>) {
@@ -422,35 +611,45 @@ impl RawInputByteFramer {
     fn drain_available_chunks(&mut self) -> Vec<Vec<u8>> {
         let mut chunks = Vec::new();
 
+        if self.timed_out_csi_at.is_some() {
+            self.expire_timed_out_csi_recovery();
+        }
+
         loop {
             if let Some(prefix) = &self.timed_out_mouse_prefix {
                 match classify_sgr_mouse_continuation(prefix, &self.buffer) {
                     SgrMouseContinuation::Incomplete => break,
                     SgrMouseContinuation::Complete(len) => {
                         self.buffer.drain(..len);
+                        // 被切断后重新拼回的报文同样是「最近收到过鼠标报文」的证据。
+                        self.note_mouse_report();
                     }
                     SgrMouseContinuation::Invalid => {}
                 }
                 self.timed_out_mouse_prefix = None;
             }
 
-            if self.lone_escape_recently_flushed {
-                if starts_with_incomplete_orphaned_sgr_mouse_tail(&self.buffer) {
+            if let Some(head) = self.flushed_csi_head {
+                if starts_with_incomplete_orphaned_csi_tail(head, &self.buffer) {
                     break;
                 }
-                if discard_complete_orphaned_sgr_mouse_tail(&mut self.buffer) {
-                    self.lone_escape_recently_flushed = false;
+                if let Some(was_mouse_report) =
+                    discard_complete_orphaned_csi_tail(head, &mut self.buffer)
+                {
+                    if was_mouse_report {
+                        self.note_mouse_report();
+                    }
+                    self.flushed_csi_head = None;
                     continue;
                 }
-                self.lone_escape_recently_flushed = false;
+                self.flushed_csi_head = None;
             }
 
             if let Some(family) = self.discard_until {
                 if family == ControlStringFamily::HostReplyCsi {
                     if discard_host_reply_csi_tail(&mut self.buffer, &mut self.discarded_tail_bytes)
                     {
-                        self.discard_until = None;
-                        self.discarded_tail_bytes = 0;
+                        self.disarm_csi_tail_discard();
                         continue;
                     }
                     break;
@@ -475,7 +674,9 @@ impl RawInputByteFramer {
             let Some((event, consumed)) = extract_one_event(&self.buffer) else {
                 break;
             };
-            if matches!(
+            if matches!(event, RawInputEvent::Mouse(_)) {
+                self.note_mouse_report();
+            } else if matches!(
                 event,
                 RawInputEvent::HostDefaultColor { .. } | RawInputEvent::HostPaletteColors { .. }
             ) {
@@ -494,6 +695,7 @@ impl RawInputByteFramer {
                 }
             }
             self.held_pending_host_reply_esc = false;
+            self.held_csi_intro_flush = false;
             chunks.push(self.buffer[..consumed].to_vec());
             self.buffer.drain(..consumed);
         }
@@ -831,46 +1033,68 @@ fn starts_with_incomplete_sgr_mouse_sequence(buffer: &[u8]) -> bool {
             .all(|byte| byte.is_ascii_digit() || *byte == b';')
 }
 
+/// `ESC [` 之后至少一个字节且全部落在 ECMA-48 参数/中间字节区（0x20..=0x3F），
+/// 尚未出现终止字节（0x40..=0x7E）。裸 `ESC [` 不算，它可能是传统 Alt+[。
+fn starts_with_incomplete_csi(buffer: &[u8]) -> bool {
+    match buffer.strip_prefix(b"\x1b[") {
+        Some(body) => !body.is_empty() && body.iter().all(|byte| (0x20..=0x3f).contains(byte)),
+        None => false,
+    }
+}
+
 #[cfg(any(unix, windows, test))]
 fn starts_with_incomplete_default_mouse_sequence(buffer: &[u8]) -> bool {
     buffer.starts_with(b"\x1b[M") && buffer.len() < 6
 }
 
-fn starts_with_incomplete_orphaned_sgr_mouse_tail(buffer: &[u8]) -> bool {
-    if buffer.len() > MAX_ORPHANED_SGR_MOUSE_TAIL_BYTES {
+/// 缓冲区仍可能长成 `head` 被切断的那条 CSI 的尾巴（尚无终止字节），值得再等。
+fn starts_with_incomplete_orphaned_csi_tail(head: FlushedCsiHead, buffer: &[u8]) -> bool {
+    if buffer.len() > MAX_ORPHANED_CSI_TAIL_BYTES {
         return false;
     }
-    buffer.len() < 3 && b"[<".starts_with(buffer)
-        || buffer.starts_with(b"[<")
-            && buffer[2..]
-                .iter()
-                .all(|byte| byte.is_ascii_digit() || *byte == b';')
+    let intro = head.tail_intro();
+    if buffer.len() < intro.len() {
+        // 孤立 ESC 之后连 `[` 都还没到。
+        return intro.starts_with(buffer);
+    }
+    buffer.starts_with(intro)
+        && buffer[intro.len()..]
+            .iter()
+            .all(|byte| (0x20..=0x3f).contains(byte))
 }
 
-fn discard_complete_orphaned_sgr_mouse_tail(buffer: &mut Vec<u8>) -> bool {
-    let Some(terminator_len) = buffer
-        .iter()
-        .position(|byte| matches!(*byte, b'M' | b'm'))
-        .map(|idx| idx + 1)
-    else {
-        return false;
-    };
-    if terminator_len > MAX_ORPHANED_SGR_MOUSE_TAIL_BYTES {
-        return false;
+/// 若缓冲区开头正是 `head` 被切断的那条 CSI 的完整尾巴（含终止字节），就吃掉它；
+/// 返回 `Some(true)` 表示吃掉的是鼠标报文。只认「与头部拼回去确实解析成一个已知
+/// 事件」的尾巴，其它一律释放，避免把用户键入的文本吃掉。
+fn discard_complete_orphaned_csi_tail(head: FlushedCsiHead, buffer: &mut Vec<u8>) -> Option<bool> {
+    let body_start = head.tail_intro().len();
+    if !buffer.starts_with(head.tail_intro()) {
+        return None;
     }
-    let mut sequence = Vec::with_capacity(terminator_len + 1);
-    sequence.push(ESC);
-    sequence.extend_from_slice(&buffer[..terminator_len]);
-    let Ok(sequence) = std::str::from_utf8(&sequence) else {
-        return false;
+    let mut index = body_start;
+    let terminator_len = loop {
+        if index >= MAX_ORPHANED_CSI_TAIL_BYTES {
+            return None;
+        }
+        match *buffer.get(index)? {
+            0x20..=0x3f => index += 1,
+            0x40..=0x7e if index >= body_start + head.min_body_len() => break index + 1,
+            _ => return None,
+        }
     };
-    if parse_sgr_mouse(sequence).is_none() {
-        return false;
+
+    let mut sequence = head.prefix().to_vec();
+    sequence.extend_from_slice(&buffer[..terminator_len]);
+    let (event, consumed) = extract_one_event(&sequence)?;
+    if consumed != sequence.len() || matches!(event, RawInputEvent::Unsupported) {
+        return None;
     }
     buffer.drain(..terminator_len);
-    true
+    Some(matches!(event, RawInputEvent::Mouse(_)))
 }
 
+/// 吃掉一条已被丢弃前缀的 CSI 尾巴直到终止字节（含），遇到非 CSI 字节（如新的 ESC）
+/// 立即释放；既用于超时的主机 CSI 回复，也用于超时的不完整键盘/鼠标 CSI。
 fn discard_host_reply_csi_tail(buffer: &mut Vec<u8>, discarded_tail_bytes: &mut usize) -> bool {
     let remaining = MAX_DISCARDED_CONTROL_TAIL_BYTES.saturating_sub(*discarded_tail_bytes);
     let inspected = buffer.len().min(remaining);
@@ -1470,7 +1694,9 @@ mod tests {
     fn split_color_scheme_timeout_does_not_swallow_legacy_alt_bracket() {
         let mut framer = RawInputByteFramer::default();
 
+        // 裸 `ESC [` 是每条 CSI 的引导符：先多等一个空闲窗口，到期才按 Alt+[ 送出。
         assert!(framer.push(b"\x1b[").is_empty());
+        assert!(framer.flush_timeout().is_empty());
         assert_eq!(framer.flush_timeout(), vec![b"\x1b[".to_vec()]);
     }
 
@@ -2108,6 +2334,400 @@ mod tests {
             events.into_iter().next().unwrap(),
             KeyCode::Char('1'),
             KeyModifiers::SHIFT,
+        );
+    }
+
+    #[test]
+    fn timed_out_incomplete_csi_discards_its_tail_instead_of_leaking_text() {
+        // kitty CSI-u（Super+Space、释放事件）与 ghostty 增强释放序列在参数中间被
+        // read(2) 切断：前缀超时后必须武装尾字节丢弃，`;9u` 一类残余不得变成文本。
+        for (prefix, tail) in [
+            (b"\x1b[32".as_slice(), b";9u".as_slice()),
+            (b"\x1b[32;".as_slice(), b"9u".as_slice()),
+            (b"\x1b[32;9".as_slice(), b"u".as_slice()),
+            (b"\x1b[108:76;2:3".as_slice(), b"u".as_slice()),
+            (b"\x1b[1;1:".as_slice(), b"3A".as_slice()),
+        ] {
+            let mut framer = RawInputByteFramer::default();
+            assert!(framer.push(prefix).is_empty(), "prefix: {prefix:?}");
+            assert!(framer.flush_timeout().is_empty(), "prefix: {prefix:?}");
+            assert!(framer.push(tail).is_empty(), "tail: {tail:?}");
+            assert_eq!(framer.push(b"a"), vec![b"a".to_vec()], "tail: {tail:?}");
+            assert!(framer.flush_timeout().is_empty(), "tail: {tail:?}");
+        }
+    }
+
+    #[test]
+    fn incomplete_csi_tail_discard_stops_at_the_final_byte() {
+        let mut framer = RawInputByteFramer::default();
+
+        assert!(framer.push(b"\x1b[32").is_empty());
+        assert!(framer.flush_timeout().is_empty());
+        assert_eq!(
+            framer.push(b";9uabc"),
+            vec![b"a".to_vec(), b"b".to_vec(), b"c".to_vec()]
+        );
+    }
+
+    #[test]
+    fn incomplete_csi_tail_discard_releases_on_a_new_escape() {
+        let mut framer = RawInputByteFramer::default();
+
+        assert!(framer.push(b"\x1b[32").is_empty());
+        assert!(framer.flush_timeout().is_empty());
+        assert_eq!(framer.push(b"\x1b[A"), vec![b"\x1b[A".to_vec()]);
+        assert!(!framer.has_pending_input());
+    }
+
+    #[test]
+    fn incomplete_csi_tail_discard_is_bounded_by_time_and_by_byte_budget() {
+        // 键盘侧的武装必须有墙钟上界：一条永远到不了的尾巴（应用中途退出、SSH 丢
+        // 字节、粘贴被截断）不得把用户随后敲的数字/`;`/`:` 吞掉。读线程平时阻塞在
+        // read(2) 上、不产生空闲 flush，所以上界不能靠空闲次数。
+        let mut framer = RawInputByteFramer::default();
+        assert!(framer.push(b"\x1b[32").is_empty());
+        assert!(framer.flush_timeout().is_empty());
+        assert!(framer.push(b";").is_empty()); // 窗口内到达的尾字节仍被吃掉
+        framer.backdate_timed_out_csi_for_test();
+        assert_eq!(framer.push(b"9"), vec![b"9".to_vec()]);
+        assert_eq!(framer.push(b";"), vec![b";".to_vec()]);
+        assert!(framer.flush_timeout().is_empty());
+
+        // 空闲 flush 也不会让过期的武装继续吞字节。
+        let mut framer = RawInputByteFramer::default();
+        assert!(framer.push(b"\x1b[32").is_empty());
+        assert!(framer.flush_timeout().is_empty());
+        framer.backdate_timed_out_csi_for_test();
+        assert!(framer.flush_timeout().is_empty());
+        assert_eq!(
+            framer.push(b";9u"),
+            vec![b";".to_vec(), b"9".to_vec(), b"u".to_vec()]
+        );
+
+        // 单次 push 内的字节预算仍然有界，不依赖时间。
+        let mut framer = RawInputByteFramer::default();
+        assert!(framer.push(b"\x1b[32").is_empty());
+        assert!(framer.flush_timeout().is_empty());
+        assert!(framer.push(&[b'1'; 64]).is_empty());
+        assert_eq!(
+            framer.push(&[b'2'; 67]),
+            vec![b"2".to_vec(), b"2".to_vec(), b"2".to_vec()]
+        );
+    }
+
+    #[test]
+    fn orphaned_csi_tail_recovery_expires_so_later_typing_is_not_eaten() {
+        // 孤立 ESC 送出后的「等尾巴」窗口同样有墙钟上界：过期后用户键入的 `[A`
+        // 不再被当作被切断的 Up 键尾巴吃掉。
+        let mut framer = RawInputByteFramer::default();
+        assert!(framer.push(b"\x1b").is_empty());
+        assert_eq!(framer.flush_timeout(), vec![b"\x1b".to_vec()]);
+        framer.backdate_timed_out_csi_for_test();
+        assert_eq!(framer.push(b"[A"), vec![b"[".to_vec(), b"A".to_vec()]);
+
+        // 裸 `ESC [` 之后同理。
+        let mut framer = RawInputByteFramer::default();
+        assert!(framer.push(b"\x1b[").is_empty());
+        assert!(framer.flush_timeout().is_empty());
+        assert_eq!(framer.flush_timeout(), vec![b"\x1b[".to_vec()]);
+        framer.backdate_timed_out_csi_for_test();
+        assert_eq!(framer.push(b"32;9u").concat(), b"32;9u");
+    }
+
+    #[test]
+    fn incomplete_csi_timeout_does_not_change_legacy_alt_bracket_or_lone_escape() {
+        // 裸 `\x1b[` 仍作为传统终端的 Alt+[ 送出，只是先被多等一个空闲窗口（它是
+        // 每条 CSI 的引导符）；孤立 ESC 仍按原节奏一个窗口后送出。
+        let mut alt_bracket = RawInputByteFramer::default();
+        assert!(alt_bracket.push(b"\x1b[").is_empty());
+        assert!(alt_bracket.flush_timeout().is_empty());
+        assert_eq!(alt_bracket.flush_timeout(), vec![b"\x1b[".to_vec()]);
+        assert_eq!(alt_bracket.push(b"a"), vec![b"a".to_vec()]);
+
+        let mut escape = RawInputByteFramer::default();
+        assert!(escape.push(b"\x1b").is_empty());
+        assert_eq!(escape.flush_timeout(), vec![b"\x1b".to_vec()]);
+        assert_eq!(escape.push(b"a"), vec![b"a".to_vec()]);
+    }
+
+    #[test]
+    fn bare_csi_intro_reassembles_when_its_parameters_arrive_one_window_late() {
+        // `\x1b[` | `32;9u`（Super+Space 恰在引导符后被切断）：引导符被多等一个
+        // 窗口，尾巴到达后整条序列仍然重组，按键不丢也不泄漏为文本。
+        let mut framer = RawInputFramer::default();
+        assert!(framer.push(b"\x1b[").is_empty());
+        assert!(framer.flush_timeout().is_empty());
+        let events = framer.push(b"32;9u");
+        assert_eq!(events.len(), 1, "{events:?}");
+        assert_raw_key(
+            events.into_iter().next().unwrap(),
+            KeyCode::Char(' '),
+            KeyModifiers::SUPER,
+        );
+    }
+
+    #[test]
+    fn alt_bracket_then_orphaned_parameter_tail_is_discarded_not_typed() {
+        // 两个空闲窗口都没等到字节 → 按 Alt+[ 送出；此后到达的参数尾巴仍是被切断
+        // 的序列残余，必须吃掉而不是变成 `32;9u` 文本。
+        let mut framer = RawInputByteFramer::default();
+        assert!(framer.push(b"\x1b[").is_empty());
+        assert!(framer.flush_timeout().is_empty());
+        assert_eq!(framer.flush_timeout(), vec![b"\x1b[".to_vec()]);
+        assert!(framer.push(b"32;9u").is_empty());
+        assert_eq!(framer.push(b"a"), vec![b"a".to_vec()]);
+
+        // 但只剩一个终止字节的尾巴与用户键入的字符同形，只能作为文本送出。
+        let mut framer = RawInputByteFramer::default();
+        assert!(framer.push(b"\x1b[").is_empty());
+        assert!(framer.flush_timeout().is_empty());
+        assert_eq!(framer.flush_timeout(), vec![b"\x1b[".to_vec()]);
+        assert_eq!(framer.push(b"A"), vec![b"A".to_vec()]);
+    }
+
+    #[test]
+    fn orphaned_csi_tail_after_lone_escape_timeout_is_discarded_not_typed() {
+        // #4356 的原始症状：kitty 序列恰在 ESC 后 0 字节处被切断，孤立 ESC 送出后
+        // `[32;9u` 一类尾巴不得逐字节变成文本。
+        for tail in [
+            b"[32;9u".as_slice(),
+            b"[108:76;2:1u".as_slice(),
+            b"[1;1:3A".as_slice(),
+            b"[27;6;108~".as_slice(),
+            b"[A".as_slice(),
+        ] {
+            let mut framer = RawInputFramer::default();
+            assert!(framer.push(b"\x1b").is_empty());
+            let timed_out = framer.flush_timeout();
+            assert_eq!(timed_out.len(), 1, "tail: {tail:?}");
+            assert_raw_key(
+                timed_out.into_iter().next().unwrap(),
+                KeyCode::Esc,
+                KeyModifiers::empty(),
+            );
+            assert!(framer.push(tail).is_empty(), "tail: {tail:?}");
+            let mut events = framer.push(b"x");
+            assert_eq!(events.len(), 1, "tail: {tail:?}");
+            assert_raw_key(events.remove(0), KeyCode::Char('x'), KeyModifiers::empty());
+        }
+    }
+
+    #[test]
+    fn orphaned_csi_tail_that_is_not_a_known_sequence_stays_text() {
+        // 拼回头部也解析不出已知事件的字节不是被切断的序列尾巴，必须原样交给 pane。
+        let mut framer = RawInputFramer::default();
+        assert!(framer.push(b"\x1b").is_empty());
+        assert_eq!(framer.flush_timeout().len(), 1);
+        let events = framer.push(b"[<x");
+        assert_eq!(events.len(), 3, "{events:?}");
+
+        // 用户在 Esc 之后键入 `[`：单个 `[` 先被等一个窗口，随后作为文本送出，
+        // 尾巴武装也随之解除，下一个字符不受影响。
+        let mut framer = RawInputByteFramer::default();
+        assert!(framer.push(b"\x1b").is_empty());
+        assert_eq!(framer.flush_timeout(), vec![b"\x1b".to_vec()]);
+        assert!(framer.push(b"[").is_empty());
+        assert_eq!(framer.flush_timeout(), vec![b"[".to_vec()]);
+        assert_eq!(framer.push(b"3"), vec![b"3".to_vec()]);
+    }
+
+    #[test]
+    fn timed_out_incomplete_csi_releases_a_held_host_reply_escape() {
+        // 不完整 CSI 不产生事件，`drain_available_chunks` 的复位不会执行：新分支
+        // 必须自己放掉 hold 标志，否则下一个孤立 ESC 会跳过本该有的 hold 并清空
+        // 等待计数，一次本该被 hold 的主机回复 ESC 变成打进 pane 的 Esc。
+        // 对照：hold 一轮后到期，孤立 ESC 照常送出。
+        let mut framer = RawInputByteFramer::default();
+        framer.host_color_query_sent();
+        assert!(framer.push(b"\x1b").is_empty());
+        assert!(framer.flush_timeout().is_empty());
+        assert_eq!(framer.flush_timeout(), vec![b"\x1b".to_vec()]);
+
+        let mut framer = RawInputByteFramer::default();
+        framer.host_color_query_sent();
+        assert!(framer.push(b"\x1b").is_empty());
+        assert!(framer.flush_timeout().is_empty()); // hold 一轮
+        assert!(framer.push(b"[32;9").is_empty());
+        assert!(framer.flush_timeout().is_empty()); // 不完整 CSI 武装尾字节丢弃
+        assert!(framer.push(b"\x1b").is_empty());
+        assert!(
+            framer.flush_timeout().is_empty(),
+            "held flag must be released so the next lone escape is held again"
+        );
+        assert_eq!(framer.flush_timeout(), vec![b"\x1b".to_vec()]);
+    }
+
+    #[test]
+    fn recovered_split_mouse_report_counts_as_mouse_report_evidence() {
+        let window = std::time::Duration::from_millis(500);
+
+        // 被切断后按前缀重组的报文。
+        let mut framer = RawInputByteFramer::default();
+        assert!(framer.push(b"\x1b[<35;2").is_empty());
+        assert!(framer.flush_timeout().is_empty());
+        assert!(framer.push(b";3M").is_empty());
+        assert!(
+            framer.mouse_report_seen_within(std::time::Instant::now(), window),
+            "recovered report must refresh the evidence timestamp"
+        );
+
+        // 孤立 ESC 送出后被吃掉的鼠标尾巴。
+        let mut framer = RawInputByteFramer::default();
+        assert!(framer.push(b"\x1b").is_empty());
+        assert_eq!(framer.flush_timeout(), vec![b"\x1b".to_vec()]);
+        assert!(framer.push(b"[<35;2;3M").is_empty());
+        assert!(
+            framer.mouse_report_seen_within(std::time::Instant::now(), window),
+            "discarded orphaned report must refresh the evidence timestamp"
+        );
+    }
+
+    #[test]
+    fn pending_incomplete_csi_accessors_distinguish_the_bare_intro() {
+        let mut bare = RawInputByteFramer::default();
+        assert!(bare.push(b"\x1b[").is_empty());
+        assert!(bare.has_pending_csi_intro());
+        assert!(!bare.has_pending_incomplete_csi());
+
+        let mut key = RawInputByteFramer::default();
+        assert!(key.push(b"\x1b[49:33;2:").is_empty());
+        assert!(key.has_pending_incomplete_csi());
+        assert!(!key.has_pending_csi_intro());
+
+        let mut mouse = RawInputByteFramer::default();
+        assert!(mouse.push(b"\x1b[<35;2").is_empty());
+        assert!(mouse.has_pending_incomplete_csi());
+
+        let mut escape = RawInputByteFramer::default();
+        assert!(escape.push(b"\x1b").is_empty());
+        assert!(!escape.has_pending_incomplete_csi());
+        assert!(!escape.has_pending_csi_intro());
+
+        let mut osc = RawInputByteFramer::default();
+        assert!(osc.push(b"\x1b]11;").is_empty());
+        assert!(!osc.has_pending_incomplete_csi());
+        assert!(!osc.has_pending_csi_intro());
+
+        let mut paste = RawInputByteFramer::default();
+        assert!(paste.push(b"\x1b[200~partial").is_empty());
+        assert!(!paste.has_pending_incomplete_csi());
+    }
+
+    #[test]
+    fn mouse_report_evidence_expires_and_ignores_keys() {
+        let window = std::time::Duration::from_millis(500);
+        let mut framer = RawInputByteFramer::default();
+        assert!(!framer.mouse_report_seen_within(std::time::Instant::now(), window));
+
+        assert_eq!(framer.push(b"\x1b[A").len(), 1);
+        assert!(!framer.mouse_report_seen_within(std::time::Instant::now(), window));
+
+        assert_eq!(framer.push(b"\x1b[<35;2;3M").len(), 1);
+        let now = std::time::Instant::now();
+        assert!(framer.mouse_report_seen_within(now, window));
+        assert!(!framer.mouse_report_seen_within(now + std::time::Duration::from_secs(1), window));
+
+        let mut default_mouse = RawInputByteFramer::default();
+        assert_eq!(default_mouse.push(b"\x1b[M !!").len(), 1);
+        assert!(default_mouse.mouse_report_seen_within(std::time::Instant::now(), window));
+    }
+
+    #[test]
+    fn keyboard_corpus_split_at_every_byte_boundary_never_leaks_text() {
+        // 语料中每条多字节序列在每个字节边界切成两次 push，全部切分点都要满足
+        // 「产生 KeyCode::Char 的切分数为 0」。三种超时时序的语义各不相同：
+        // (a) 无空闲：原样重组为语料期望的按键；
+        // (b) 切分点 1（缓冲区只有孤立 ESC）：ESC 作为 Esc 键送出（无法追回），
+        //     随后到达的尾巴被吃掉，既不泄漏为文本也不吃掉后续按键；
+        // (c) 切分点 2（裸 `ESC [`）：引导符被多等一个空闲窗口，尾巴到达后整条
+        //     序列仍然重组为期望按键；
+        // (d) 切分点 ≥3（前缀已含参数字节）：整条序列静默丢弃。
+        // 切分点 2 连续两个空窗口后按 Alt+[ 送出的分支见
+        // `alt_bracket_then_orphaned_parameter_tail_is_discarded_not_typed`。
+        let corpus = include_str!("../tests/fixtures/keyboard_protocol_corpus.tsv");
+        let mut covered = [0usize; 4];
+        for line in corpus.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            let columns: Vec<_> = line.split('\t').collect();
+            let bytes = decode_hex(columns[1]);
+            if bytes.len() < 2 {
+                continue;
+            }
+            let expected_code = parse_fixture_key_code(columns[2]);
+            let expected_modifiers = parse_fixture_modifiers(columns[3]);
+
+            for split in 1..bytes.len() {
+                let (head, tail) = bytes.split_at(split);
+
+                let mut framer = RawInputFramer::default();
+                assert!(framer.push(head).is_empty(), "{line} split {split}");
+                let mut events = framer.push(tail);
+                events.extend(framer.flush_timeout());
+                assert_eq!(events.len(), 1, "{line} split {split}: {events:?}");
+                assert_raw_key(events.remove(0), expected_code, expected_modifiers);
+                covered[0] += 1;
+
+                let mut framer = RawInputFramer::default();
+                assert!(framer.push(head).is_empty(), "{line} split {split}");
+                let timed_out = framer.flush_timeout();
+                match split {
+                    1 => {
+                        assert_eq!(timed_out.len(), 1, "{line} split {split}: {timed_out:?}");
+                        assert_raw_key(
+                            timed_out.into_iter().next().unwrap(),
+                            KeyCode::Esc,
+                            KeyModifiers::empty(),
+                        );
+                        for event in framer.push(tail) {
+                            assert!(
+                                !matches!(
+                                    event,
+                                    RawInputEvent::Key(ref key)
+                                        if matches!(key.code, KeyCode::Char(_))
+                                ),
+                                "{line} split {split}: tail leaked as text {event:?}"
+                            );
+                        }
+                        covered[1] += 1;
+                    }
+                    2 => {
+                        assert!(
+                            timed_out.is_empty(),
+                            "{line} split {split}: bare CSI intro must be held one extra window, got {timed_out:?}"
+                        );
+                        let mut events = framer.push(tail);
+                        events.extend(framer.flush_timeout());
+                        assert_eq!(events.len(), 1, "{line} split {split}: {events:?}");
+                        assert_raw_key(events.remove(0), expected_code, expected_modifiers);
+                        covered[2] += 1;
+                    }
+                    _ => {
+                        assert!(
+                            timed_out.is_empty(),
+                            "{line} split {split}: timed-out prefix produced {timed_out:?}"
+                        );
+                        let leaked = framer.push(tail);
+                        assert!(
+                            leaked.is_empty(),
+                            "{line} split {split}: tail leaked as {leaked:?}"
+                        );
+                        covered[3] += 1;
+                    }
+                }
+
+                // 无论走哪一支，紧随其后的正常按键都必须完整到达。
+                let mut events = framer.push(b"x");
+                assert_eq!(events.len(), 1, "{line} split {split}: {events:?}");
+                assert_raw_key(events.remove(0), KeyCode::Char('x'), KeyModifiers::empty());
+                assert!(framer.flush_timeout().is_empty(), "{line} split {split}");
+            }
+        }
+        assert!(
+            covered.iter().all(|count| *count > 0),
+            "every timing branch must be exercised: {covered:?}"
         );
     }
 

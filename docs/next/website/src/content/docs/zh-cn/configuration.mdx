@@ -319,6 +319,8 @@ selection_mix_ratio = 0.35
 
 鼠标交互时序可调：`ui.double_click_ms`（默认 `350`）是双击选词、三击选整行的时间窗；`ui.drag_throttle_ms`（默认 `33`）节流窗格滚动条与分割条的拖拽更新；`ui.selection_autoscroll_interval_ms` / `ui.selection_autoscroll_min_lines` / `ui.selection_autoscroll_max_lines`（默认 `30` / `3` / `15`）控制拖过窗格边缘时的选区自动滚动。
 
+输入成帧窗口同样可调：`ui.input_sequence_timeout_ms`（默认 `150`）是客户端等待被读取边界切开的不完整控制序列剩余字节的时长——按键编码、鼠标报文或裸 `ESC [` 引导符都算——超时后丢弃该片段（因此真正的 Alt+[ 按键也要等这个窗口才送出）；`ui.escape_after_mouse_timeout_ms`（默认 `30`）是鼠标捕获开启（或最近半秒内收到过鼠标报文）时，孤立 Esc 等待可能的鼠标报文续接的时长，否则 Esc 在 10 ms 空闲窗口后即送出。SSH 高延迟链路可将两者调大；两者取值被钳制在 `10..=1000`，都在客户端启动时读取，且仅对 Unix 客户端生效（Windows 客户端固定按 10 ms 轮询）。
+
 在 `[ui]` 下设置 `tab_bar_position = "bottom"`，可将桌面标签栏放到终端窗格下方。Prefix、Navigate、Copy 和 Resize 模式栏会在显示期间临时替换底部标签栏。默认值为 `"top"`。
 
 可在标签栏右侧配置一个类似 tmux 的有序状态区：

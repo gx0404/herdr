@@ -180,6 +180,7 @@ fn run_client_with_mode(
         &render_ansi::ImeAnchorHostEnv::from_process_env(),
     );
     let remote_image_paste_key = client_remote_image_paste_key(&loaded_config.config);
+    let stdin_flush_timeouts = input::StdinFlushTimeouts::from_ui_config(&loaded_config.config.ui);
     let kitty_graphics_enabled =
         loaded_config.config.kitty_graphics_enabled() && client_rendered_shell;
     let pixel_geometry_enabled = kitty_graphics_enabled || attach_escape.is_some();
@@ -196,6 +197,7 @@ fn run_client_with_mode(
         pixel_geometry_enabled,
         pixel_geometry_fallback: kitty_graphics_enabled,
         mouse_capture_active: mouse_capture,
+        stdin_flush_timeouts,
         endpoint_keybindings,
         remote_image_paste_key,
         shell_config,
@@ -484,6 +486,7 @@ async fn run_client_loop(
     let stdin_quit = should_quit.clone();
     let stdin_mouse_capture_active = host_mouse_capture_active.clone();
     let stdin_sgr_pixels_active = host_sgr_pixels_active.clone();
+    let stdin_flush_timeouts = config.stdin_flush_timeouts;
     #[cfg(unix)]
     let stdin_direct_response = state.direct_graphics_response.clone();
     #[cfg(unix)]
@@ -499,6 +502,7 @@ async fn run_client_loop(
             will_query_host_cell_size,
             stdin_mouse_capture_active,
             stdin_sgr_pixels_active,
+            stdin_flush_timeouts,
             #[cfg(unix)]
             stdin_direct_response,
             #[cfg(unix)]

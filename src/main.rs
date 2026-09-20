@@ -325,6 +325,20 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # selection_autoscroll_min_lines = 3
 # selection_autoscroll_max_lines = 15
 
+# Input framing windows (milliseconds), read when the client starts. Both are
+# clamped to 10..=1000 and only apply to the Unix client (the Windows client
+# polls at a fixed 10 ms).
+# A key encoding or mouse report that arrives split across reads (its "ESC ["
+# intro is already buffered) waits this long for its remaining bytes before the
+# fragment is discarded. Raise it on high-latency SSH links.
+# input_sequence_timeout_ms = 150
+
+# A lone Escape waits this long for a possible mouse-report continuation while
+# mouse capture is active (or mouse reports arrived within the last half
+# second); otherwise Escape is sent after the 10 ms idle window. Raise it on
+# high-latency SSH links.
+# escape_after_mouse_timeout_ms = 30
+
 # Ask for confirmation before closing a workspace
 # confirm_close = true
 

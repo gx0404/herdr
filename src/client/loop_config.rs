@@ -11,6 +11,9 @@ pub(super) struct ClientLoopConfig {
     pub(super) pixel_geometry_enabled: bool,
     pub(super) pixel_geometry_fallback: bool,
     pub(super) mouse_capture_active: bool,
+    /// `[ui]` 的 stdin 成帧窗口（`input_sequence_timeout_ms` / `escape_after_mouse_timeout_ms`），
+    /// 客户端启动时读取一次并交给 stdin 读线程。
+    pub(super) stdin_flush_timeouts: input::StdinFlushTimeouts,
     pub(super) endpoint_keybindings: bool,
     pub(super) remote_image_paste_key:
         Option<(crossterm::event::KeyCode, crossterm::event::KeyModifiers)>,
