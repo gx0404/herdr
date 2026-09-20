@@ -23,6 +23,10 @@ A pane is a real terminal. Herdr renders the terminal output, sends input back t
 
 Panes can be split right or down. They can be renamed manually, read from the CLI, sent input, and closed.
 
+Panes always answer default color queries. A program that asks for the foreground, background, or cursor color with `OSC 10 ; ?`, `OSC 11 ; ?`, or `OSC 12 ; ?` gets a reply even before Herdr has learned the host terminal's theme. The fallback is per color: whichever color the host terminal has not reported falls back to Herdr's own terminal default, so a host that reports only a background leaves the pane reporting Herdr's default foreground. The cursor color follows the foreground unless the program sets one. Herdr's own defaults follow the host appearance: black on white when the host reports a light appearance, white on black otherwise. Programs that pick a palette from `OSC 11` therefore do not land on a dark theme in a light terminal. Replies use the same terminator as the query, `BEL` or `ST`.
+
+Because panes now have real default colors, reverse video (`CSI ? 5 h`) actually swaps them and paints the pane explicitly instead of being ignored. Panes still inherit the host background whenever their colors match the defaults Herdr gave them.
+
 ## Mouse UI
 
 Herdr is mouse-native. You can click panes, tabs, workspaces, and agents. You can drag split borders, select text, and use right-click menus. Everything below is also reachable by mouse; keyboard bindings are an optional layer.

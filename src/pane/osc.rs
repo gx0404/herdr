@@ -32,10 +32,34 @@ pub(super) enum DefaultColorEvent {
     PaletteQuery(u8),
 }
 
+/// OSC 字符串的终止符。
+///
+/// 回复必须跟随查询本身使用的终止符：libghostty 自己就是回显请求的终止符，
+/// herdr 自产的回复若恒用 ST，按 BEL 定长读取回复的子进程会读不到终止符。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(super) enum OscTerminator {
+    /// `ESC \`（ST）。
+    #[default]
+    St,
+    /// `BEL`（0x07）。
+    Bel,
+}
+
+impl OscTerminator {
+    pub(super) fn as_str(self) -> &'static str {
+        match self {
+            Self::St => "\x1b\\",
+            Self::Bel => "\x07",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct DefaultColorTrackedEvent {
     pub(super) end_offset: usize,
     pub(super) event: DefaultColorEvent,
+    /// 触发本事件的 OSC 字符串所用的终止符，回复原样跟随。
+    pub(super) terminator: OscTerminator,
 }
 
 #[derive(Debug, Default)]
@@ -180,7 +204,7 @@ impl DefaultColorEventTracker {
                 }
                 DefaultColorOscTrackerState::OscBody => match byte {
                     0x07 => {
-                        self.finalize(index + 1);
+                        self.finalize(index + 1, OscTerminator::Bel);
                         self.state = DefaultColorOscTrackerState::Ground;
                     }
                     0x1b => self.state = DefaultColorOscTrackerState::OscEscape,
@@ -188,7 +212,7 @@ impl DefaultColorEventTracker {
                 },
                 DefaultColorOscTrackerState::OscEscape => {
                     if byte == b'\\' {
-                        self.finalize(index + 1);
+                        self.finalize(index + 1, OscTerminator::St);
                         self.state = DefaultColorOscTrackerState::Ground;
                     } else {
                         self.body.push(0x1b);
@@ -231,11 +255,15 @@ impl DefaultColorEventTracker {
         }
     }
 
-    fn finalize(&mut self, end_offset: usize) {
+    fn finalize(&mut self, end_offset: usize, terminator: OscTerminator) {
         self.pending.extend(
             parse_default_color_events(&self.body)
                 .into_iter()
-                .map(|event| DefaultColorTrackedEvent { end_offset, event }),
+                .map(|event| DefaultColorTrackedEvent {
+                    end_offset,
+                    event,
+                    terminator,
+                }),
         );
         self.body.clear();
     }

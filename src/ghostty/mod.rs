@@ -370,6 +370,36 @@ impl From<ffi::GhosttyColorRgb> for RgbColor {
     }
 }
 
+/// herdr 在宿主终端主题未知、且宿主外观未知或为 Dark 时使用的默认前景色。
+///
+/// 与 `crate::ghostty::Terminal::screen_colors` 的兜底取值同源：pane 新建时就把
+/// 它写进 libghostty 的 default，子进程查询 `OSC 10 ; ?` 才有色值可回。
+///
+/// 注意这不是唯一的兜底来源：`crate::ghostty::RenderState::colors` 读的是
+/// vendored `render.zig` 里 `RenderState.empty` 的内建 black/white，只有在
+/// default 层被填满（`colors.foreground/background` 都非 unset）之后，
+/// 两条路径才会给出一致的取值。
+pub const DEFAULT_TERMINAL_FOREGROUND: RgbColor = RgbColor {
+    r: 255,
+    g: 255,
+    b: 255,
+};
+
+/// herdr 在宿主终端主题未知、且宿主外观未知或为 Dark 时使用的默认背景色
+/// （与前景色同源，见其文档）。
+pub const DEFAULT_TERMINAL_BACKGROUND: RgbColor = RgbColor { r: 0, g: 0, b: 0 };
+
+/// 宿主外观为 Light 时的默认前景色：浅色宿主上必须回黑字，否则子进程
+/// （neovim `background=`、bat/delta 等）会据 `OSC 10/11` 选成深色配色。
+pub const DEFAULT_TERMINAL_FOREGROUND_LIGHT: RgbColor = RgbColor { r: 0, g: 0, b: 0 };
+
+/// 宿主外观为 Light 时的默认背景色（与 `DEFAULT_TERMINAL_FOREGROUND_LIGHT` 配套）。
+pub const DEFAULT_TERMINAL_BACKGROUND_LIGHT: RgbColor = RgbColor {
+    r: 255,
+    g: 255,
+    b: 255,
+};
+
 pub fn default_palette() -> [RgbColor; 256] {
     let mut palette = [ffi::GhosttyColorRgb::default(); 256];
     unsafe { ffi::ghostty_color_palette_default(palette.as_mut_ptr()) };
@@ -977,6 +1007,51 @@ impl Terminal {
         }
     }
 
+    /// 设置默认前景色（`None` 清除，使其回到 unset）。
+    ///
+    /// 默认色是 `OSC 10 ; ?` 查询在没有子进程 override 时的回复来源。
+    pub fn set_default_foreground(&mut self, color: Option<RgbColor>) -> Result<(), Error> {
+        self.set_default_color(
+            ffi::GhosttyTerminalOption_GHOSTTY_TERMINAL_OPT_COLOR_FOREGROUND,
+            color,
+        )
+    }
+
+    /// 设置默认背景色（`None` 清除，使其回到 unset）。
+    ///
+    /// 默认色是 `OSC 11 ; ?` 查询在没有子进程 override 时的回复来源。
+    pub fn set_default_background(&mut self, color: Option<RgbColor>) -> Result<(), Error> {
+        self.set_default_color(
+            ffi::GhosttyTerminalOption_GHOSTTY_TERMINAL_OPT_COLOR_BACKGROUND,
+            color,
+        )
+    }
+
+    fn set_default_color(
+        &mut self,
+        option: ffi::GhosttyTerminalOption,
+        color: Option<RgbColor>,
+    ) -> Result<(), Error> {
+        let value = color.map(|color| ffi::GhosttyColorRgb {
+            r: color.r,
+            g: color.g,
+            b: color.b,
+        });
+        // SAFETY: self.raw 是有效 terminal 句柄；这两个 option 的输入类型是
+        // `GhosttyColorRgb*`，空指针表示清除默认值（vendored terminal.h 的约定）。
+        // value 在整个调用期间存活。
+        unsafe {
+            ffi::ghostty_terminal_set(
+                self.raw,
+                option,
+                value
+                    .as_ref()
+                    .map_or(std::ptr::null(), |value| std::ptr::from_ref(value).cast()),
+            )
+            .into_result()
+        }
+    }
+
     pub fn set_default_palette(&mut self, palette: &[RgbColor; 256]) -> Result<(), Error> {
         let palette = palette.map(|color| ffi::GhosttyColorRgb {
             r: color.r,
@@ -1105,6 +1180,13 @@ impl Terminal {
 
     pub fn set_color_scheme(&mut self, color_scheme: Option<ColorScheme>) -> Option<ColorScheme> {
         mem::replace(&mut self.callback_state.color_scheme, color_scheme)
+    }
+
+    /// 当前已知的宿主外观（`CSI ? 996 n` / DECSET 2031 回报的同一真源）。
+    ///
+    /// 与宿主终端主题（OSC 10/11 应答）相互独立：宿主可能报了外观却没报主题。
+    pub fn color_scheme(&self) -> Option<ColorScheme> {
+        self.callback_state.color_scheme
     }
 
     pub fn take_bell_count(&mut self) -> u16 {
@@ -1316,16 +1398,14 @@ impl Terminal {
             .into_result()?;
         }
         Ok(RenderColors {
-            foreground: self.effective_foreground_color()?.unwrap_or(RgbColor {
-                r: 255,
-                g: 255,
-                b: 255,
-            }),
+            foreground: self
+                .effective_foreground_color()?
+                .unwrap_or(DEFAULT_TERMINAL_FOREGROUND),
             background: self
                 .get_optional_rgb_color(
                     ffi::GhosttyTerminalData_GHOSTTY_TERMINAL_DATA_COLOR_BACKGROUND,
                 )?
-                .unwrap_or(RgbColor { r: 0, g: 0, b: 0 }),
+                .unwrap_or(DEFAULT_TERMINAL_BACKGROUND),
             palette: palette.map(Into::into),
         })
     }
@@ -1750,6 +1830,24 @@ impl Terminal {
 
     pub fn effective_cursor_color(&self) -> Result<Option<RgbColor>, Error> {
         self.get_optional_rgb_color(TERMINAL_DATA_COLOR_CURSOR)
+    }
+
+    /// 只读 default 层的前景色（忽略子进程的 OSC 10 override），供测试直接
+    /// 断言 `set_default_foreground` 的写入落点。
+    #[cfg(test)]
+    pub(crate) fn default_foreground_color(&self) -> Result<Option<RgbColor>, Error> {
+        self.get_optional_rgb_color(
+            ffi::GhosttyTerminalData_GHOSTTY_TERMINAL_DATA_COLOR_FOREGROUND_DEFAULT,
+        )
+    }
+
+    /// 只读 default 层的背景色（忽略子进程的 OSC 11 override），供测试直接
+    /// 断言 `set_default_background` 的写入落点。
+    #[cfg(test)]
+    pub(crate) fn default_background_color(&self) -> Result<Option<RgbColor>, Error> {
+        self.get_optional_rgb_color(
+            ffi::GhosttyTerminalData_GHOSTTY_TERMINAL_DATA_COLOR_BACKGROUND_DEFAULT,
+        )
     }
 
     pub(crate) fn width_px(&self) -> Result<u32, Error> {
@@ -3637,6 +3735,41 @@ mod tests {
             .unwrap();
         }
         out
+    }
+
+    #[test]
+    fn set_default_color_writes_and_clears_the_default_layer() {
+        let mut terminal = Terminal::new(20, 5, 0).unwrap();
+        // 新建终端的 default 层是 unset——这正是 OSC 10/11 查询被丢弃的起点。
+        assert_eq!(terminal.default_foreground_color().unwrap(), None);
+        assert_eq!(terminal.default_background_color().unwrap(), None);
+
+        let foreground = RgbColor {
+            r: 0x12,
+            g: 0x34,
+            b: 0x56,
+        };
+        let background = RgbColor {
+            r: 0x65,
+            g: 0x43,
+            b: 0x21,
+        };
+        terminal.set_default_foreground(Some(foreground)).unwrap();
+        terminal.set_default_background(Some(background)).unwrap();
+        assert_eq!(
+            terminal.default_foreground_color().unwrap(),
+            Some(foreground)
+        );
+        assert_eq!(
+            terminal.default_background_color().unwrap(),
+            Some(background)
+        );
+
+        // 传 None 走空指针分支：default 回到 unset（vendored terminal.h 的约定）。
+        terminal.set_default_foreground(None).unwrap();
+        terminal.set_default_background(None).unwrap();
+        assert_eq!(terminal.default_foreground_color().unwrap(), None);
+        assert_eq!(terminal.default_background_color().unwrap(), None);
     }
 
     #[test]

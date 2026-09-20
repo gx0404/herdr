@@ -35,7 +35,7 @@ use super::{
         maybe_filter_primary_screen_scrollback_clear, parse_reported_cwd,
         restore_host_terminal_theme_if_needed, write_host_terminal_theme_selective,
         AgentOscStateTracker, DefaultColorEvent, DefaultColorEventTracker, DefaultColorOscTracker,
-        DefaultColorQuery, DefaultColorTrackedEvent, OscDebugTracker,
+        DefaultColorQuery, DefaultColorTrackedEvent, OscDebugTracker, OscTerminator,
     },
     xtgettcap::{C1XtgettcapQueryTracker, C1XtgettcapResponse},
 };
@@ -1404,6 +1404,17 @@ impl GhosttyPaneTerminal {
             })
             .map_err(|e| std::io::Error::other(e.to_string()))?;
 
+        // 宿主主题尚未到达时也要有可回的默认色，否则子进程的 OSC 10/11 查询
+        // 会被 libghostty 直接丢弃（默认色 unset 时它不生成回复）。外观此刻也
+        // 还未知，先按 Dark 兜底；`apply_host_terminal_appearance` 会在外观到
+        // 达时重写。
+        let color_scheme = terminal.color_scheme();
+        apply_default_terminal_colors(
+            &mut terminal,
+            crate::terminal_theme::TerminalTheme::default(),
+            color_scheme,
+        );
+
         let mut render_state =
             crate::ghostty::RenderState::new().map_err(|e| std::io::Error::other(e.to_string()))?;
         let initial_colors = render_state
@@ -1477,6 +1488,13 @@ impl GhosttyPaneTerminal {
             if let Err(err) = core.terminal.set_default_palette(&palette) {
                 debug!(err = %err, "failed to apply host terminal palette");
             }
+            let color_scheme = core.terminal.color_scheme();
+            let (foreground, background) =
+                apply_default_terminal_colors(&mut core.terminal, theme, color_scheme);
+            // default 层就是「herdr 认为中性」的基准：渲染只在当前生效色偏离
+            // 基准时才显式着色，因此基准必须跟着 default 一起走。
+            core.initial_default_foreground = Some(foreground);
+            core.initial_default_background = Some(background);
 
             write_host_terminal_theme_selective(
                 &mut core.terminal,
@@ -1497,6 +1515,18 @@ impl GhosttyPaneTerminal {
             crate::terminal_theme::HostAppearance::Light => crate::ghostty::ColorScheme::Light,
         });
         let previous = core.terminal.set_color_scheme(color_scheme);
+
+        // 宿主外观决定「宿主主题缺色时」的兜底取值，所以 scheme 变动后必须
+        // 重写 default 层：pane 创建时先 apply_host_terminal_theme 再
+        // apply_host_terminal_appearance（`src/pane.rs`），首次外观到达一定
+        // 走这里；否则浅色宿主上的 `OSC 10/11 ; ?` 会一直回白字黑底。
+        if previous != color_scheme {
+            let theme = core.host_terminal_theme;
+            let (foreground, background) =
+                apply_default_terminal_colors(&mut core.terminal, theme, color_scheme);
+            core.initial_default_foreground = Some(foreground);
+            core.initial_default_background = Some(background);
+        }
 
         let transitioned = matches!(
             (previous, color_scheme),
@@ -1796,7 +1826,8 @@ impl GhosttyPaneTerminal {
             }
             match event {
                 OrderedColorOrC1Event::Color(event) => {
-                    let replacement = respond_to_default_color_event(core, event.event);
+                    let replacement =
+                        respond_to_default_color_event(core, event.event, event.terminator);
                     if replacement.is_some() {
                         remove_last_matching_libghostty_color_reply(
                             &mut libghostty_responses,
@@ -1824,7 +1855,9 @@ impl GhosttyPaneTerminal {
             core.terminal.write(&bytes[written..]);
             let mut libghostty_responses = self.drain_pending_pty_responses();
             if let Some(event) = in_progress_default_color_event {
-                if default_color_event_response(core, event).is_some() {
+                // 这里只用返回值判断要不要压掉 libghostty 的回复，回复本身留到
+                // OSC 完整到达后再生成，所以终止符此刻未知、取值无关紧要。
+                if default_color_event_response(core, event, OscTerminator::default()).is_some() {
                     remove_last_matching_libghostty_color_reply(&mut libghostty_responses, event);
                 }
             }
@@ -3661,10 +3694,11 @@ fn is_matching_libghostty_color_reply(response: &Bytes, event: DefaultColorEvent
 fn respond_to_default_color_event(
     core: &mut GhosttyPaneCore,
     event: DefaultColorEvent,
+    terminator: OscTerminator,
 ) -> Option<Bytes> {
     match event {
         DefaultColorEvent::Query(_) | DefaultColorEvent::PaletteQuery(_) => {
-            default_color_event_response(core, event)
+            default_color_event_response(core, event, terminator)
         }
         DefaultColorEvent::Set(query) => {
             mark_child_default_color_changed(core, query, true);
@@ -3681,10 +3715,13 @@ fn respond_to_default_color_event(
 fn default_color_event_response(
     core: &mut GhosttyPaneCore,
     event: DefaultColorEvent,
+    terminator: OscTerminator,
 ) -> Option<Bytes> {
     match event {
-        DefaultColorEvent::Query(query) => default_color_query_response(query, core),
-        DefaultColorEvent::PaletteQuery(index) => palette_color_query_response(index, core),
+        DefaultColorEvent::Query(query) => default_color_query_response(query, core, terminator),
+        DefaultColorEvent::PaletteQuery(index) => {
+            palette_color_query_response(index, core, terminator)
+        }
         DefaultColorEvent::Set(_) | DefaultColorEvent::Reset(_) => None,
     }
 }
@@ -3692,6 +3729,7 @@ fn default_color_event_response(
 fn default_color_query_response(
     query: DefaultColorQuery,
     core: &mut GhosttyPaneCore,
+    terminator: OscTerminator,
 ) -> Option<Bytes> {
     let color = match query {
         DefaultColorQuery::Foreground if !core.child_default_foreground_changed => core
@@ -3710,6 +3748,7 @@ fn default_color_query_response(
         color.r,
         color.g,
         color.b,
+        terminator,
     ))
 }
 
@@ -3731,7 +3770,11 @@ fn cursor_color_query_color(core: &mut GhosttyPaneCore) -> Option<crate::ghostty
         })
 }
 
-fn palette_color_query_response(index: u8, core: &mut GhosttyPaneCore) -> Option<Bytes> {
+fn palette_color_query_response(
+    index: u8,
+    core: &mut GhosttyPaneCore,
+    terminator: OscTerminator,
+) -> Option<Bytes> {
     let GhosttyPaneCore {
         terminal,
         render_state,
@@ -3745,14 +3788,18 @@ fn palette_color_query_response(index: u8, core: &mut GhosttyPaneCore) -> Option
         color.r,
         color.g,
         color.b,
+        terminator,
     ))
 }
 
-fn osc_rgb_response(command: &str, r: u8, g: u8, b: u8) -> Bytes {
+fn osc_rgb_response(command: &str, r: u8, g: u8, b: u8, terminator: OscTerminator) -> Bytes {
     let r = u16::from(r) * 257;
     let g = u16::from(g) * 257;
     let b = u16::from(b) * 257;
-    Bytes::from(format!("\x1b]{command};rgb:{r:04x}/{g:04x}/{b:04x}\x1b\\"))
+    let terminator = terminator.as_str();
+    Bytes::from(format!(
+        "\x1b]{command};rgb:{r:04x}/{g:04x}/{b:04x}{terminator}"
+    ))
 }
 
 fn host_theme_color_to_ghostty(color: crate::terminal_theme::RgbColor) -> crate::ghostty::RgbColor {
@@ -3761,6 +3808,59 @@ fn host_theme_color_to_ghostty(color: crate::terminal_theme::RgbColor) -> crate:
         g: color.g,
         b: color.b,
     }
+}
+
+/// 把宿主主题的前景/背景写成 libghostty 的 **default**（不是子进程 override）。
+///
+/// 宿主主题缺色时**逐色**退回 herdr 自身的默认终端色（宿主只报了背景就只有
+/// 背景跟宿主走），保证 `colors.foreground/background` 任何时刻都有值：子进程
+/// 查询 `OSC 10/11/12 ; ?` 总能拿到回复，子进程的 `OSC 110/111` 复位也会落回
+/// 这里而不是 unset。
+///
+/// herdr 自身的兜底色跟随宿主外观：`Light` 用黑字白底，`Dark`/未知用白字黑底。
+/// 外观与宿主主题在 server 侧是两个独立字段（`src/server/clients.rs`），宿主
+/// 可能报了外观却没报主题（tmux/screen 吞掉 OSC 10/11 应答、或主题查询超时），
+/// 此时若一律回黑底，浅色宿主上的子进程会选成不可读的深色配色。
+///
+/// 注意：宿主主题**已知**时这里写进 default 的宿主色不会被 `OSC 10/11 ; ?`
+/// 直接观察到——`default_color_query_response` 会先用 `core.host_terminal_theme`
+/// 自答并删掉 libghostty 的回复。default 层在那种情况下只对「子进程先 OSC 10/11
+/// 取得 override、再 OSC 110/111 复位」这条路径可见。
+///
+/// 返回实际写入 default 层的 `(前景, 背景)`，供调用方同步 `initial_default_*`
+/// 这个「渲染是否显式着色」的基准值。
+fn apply_default_terminal_colors(
+    terminal: &mut crate::ghostty::Terminal,
+    theme: crate::terminal_theme::TerminalTheme,
+    color_scheme: Option<crate::ghostty::ColorScheme>,
+) -> (crate::ghostty::RgbColor, crate::ghostty::RgbColor) {
+    let (fallback_foreground, fallback_background) =
+        if matches!(color_scheme, Some(crate::ghostty::ColorScheme::Light)) {
+            (
+                crate::ghostty::DEFAULT_TERMINAL_FOREGROUND_LIGHT,
+                crate::ghostty::DEFAULT_TERMINAL_BACKGROUND_LIGHT,
+            )
+        } else {
+            (
+                crate::ghostty::DEFAULT_TERMINAL_FOREGROUND,
+                crate::ghostty::DEFAULT_TERMINAL_BACKGROUND,
+            )
+        };
+    let foreground = theme
+        .foreground
+        .map(host_theme_color_to_ghostty)
+        .unwrap_or(fallback_foreground);
+    let background = theme
+        .background
+        .map(host_theme_color_to_ghostty)
+        .unwrap_or(fallback_background);
+    if let Err(err) = terminal.set_default_foreground(Some(foreground)) {
+        debug!(err = %err, "failed to apply default terminal foreground");
+    }
+    if let Err(err) = terminal.set_default_background(Some(background)) {
+        debug!(err = %err, "failed to apply default terminal background");
+    }
+    (foreground, background)
 }
 
 fn apply_cached_host_default_color(core: &mut GhosttyPaneCore, query: DefaultColorQuery) {
@@ -4431,11 +4531,18 @@ mod tests {
         render_state.colors().unwrap().palette[usize::from(index)]
     }
 
-    fn expected_osc_rgb_response(command: &str, color: crate::ghostty::RgbColor) -> Bytes {
+    fn expected_osc_rgb_response(
+        command: &str,
+        color: crate::ghostty::RgbColor,
+        terminator: OscTerminator,
+    ) -> Bytes {
         let r = u16::from(color.r) * 257;
         let g = u16::from(color.g) * 257;
         let b = u16::from(color.b) * 257;
-        Bytes::from(format!("\x1b]{command};rgb:{r:04x}/{g:04x}/{b:04x}\x1b\\"))
+        let terminator = terminator.as_str();
+        Bytes::from(format!(
+            "\x1b]{command};rgb:{r:04x}/{g:04x}/{b:04x}{terminator}"
+        ))
     }
 
     #[test]
@@ -6874,7 +6981,8 @@ mod tests {
                 assert_eq!(
                     replies,
                     vec![
-                        Bytes::from_static(b"\x1b]11;rgb:0000/2b2b/3636\x1b\\"),
+                        // 第一条查询用 BEL、最后一条用 ST，回复各自跟随。
+                        Bytes::from_static(b"\x1b]11;rgb:0000/2b2b/3636\x07"),
                         expected_xtgettcap_response("5463", None),
                         expected_xtgettcap_response("524742", Some(b"8")),
                         Bytes::from_static(b"\x1b]11;rgb:0000/2b2b/3636\x1b\\"),
@@ -6975,7 +7083,7 @@ mod tests {
             result.terminal_responses,
             vec![
                 expected_xtgettcap_response("5463", None),
-                Bytes::from_static(b"\x1b]11;rgb:0000/2b2b/3636\x1b\\"),
+                Bytes::from_static(b"\x1b]11;rgb:0000/2b2b/3636\x07"),
             ]
         );
         assert!(rx.try_recv().is_err());
@@ -7032,7 +7140,7 @@ mod tests {
         let result = pane.process_pty_bytes(pane_id, 0, b"\x1b]11;?\x07", &tx);
         assert_eq!(
             result.terminal_responses,
-            vec![Bytes::from_static(b"\x1b]11;rgb:aaaa/bbbb/cccc\x1b\\")]
+            vec![Bytes::from_static(b"\x1b]11;rgb:aaaa/bbbb/cccc\x07")]
         );
         assert!(rx.try_recv().is_err());
     }
@@ -7196,7 +7304,7 @@ mod tests {
         assert_eq!(result.terminal_responses.len(), 2);
         assert_eq!(
             result.terminal_responses[0],
-            Bytes::from_static(b"\x1b]11;rgb:0000/2b2b/3636\x1b\\")
+            Bytes::from_static(b"\x1b]11;rgb:0000/2b2b/3636\x07")
         );
         assert!(String::from_utf8_lossy(&result.terminal_responses[1]).contains('c'));
         assert!(rx.try_recv().is_err());
@@ -7223,7 +7331,7 @@ mod tests {
 
         assert_eq!(
             result.terminal_responses,
-            vec![Bytes::from_static(b"\x1b]4;0;rgb:1111/2222/3333\x1b\\")]
+            vec![Bytes::from_static(b"\x1b]4;0;rgb:1111/2222/3333\x07")]
         );
         assert!(rx.try_recv().is_err());
     }
@@ -7256,11 +7364,11 @@ mod tests {
         assert_eq!(result.terminal_responses.len(), 256);
         assert_eq!(
             result.terminal_responses[0],
-            Bytes::from_static(b"\x1b]4;0;rgb:0000/2222/3333\x1b\\")
+            Bytes::from_static(b"\x1b]4;0;rgb:0000/2222/3333\x07")
         );
         assert_eq!(
             result.terminal_responses[255],
-            Bytes::from_static(b"\x1b]4;255;rgb:ffff/2222/3333\x1b\\")
+            Bytes::from_static(b"\x1b]4;255;rgb:ffff/2222/3333\x07")
         );
     }
 
@@ -7324,7 +7432,7 @@ mod tests {
 
         assert_eq!(
             result.terminal_responses,
-            vec![expected_osc_rgb_response("4;255", color)]
+            vec![expected_osc_rgb_response("4;255", color, OscTerminator::St)]
         );
         assert!(rx.try_recv().is_err());
     }
@@ -7377,11 +7485,11 @@ mod tests {
         assert_eq!(result.terminal_responses.len(), 3);
         assert_eq!(
             result.terminal_responses[0],
-            expected_osc_rgb_response("4;0", color)
+            expected_osc_rgb_response("4;0", color, OscTerminator::Bel)
         );
         assert_eq!(
             result.terminal_responses[1],
-            Bytes::from_static(b"\x1b]11;rgb:0000/2b2b/3636\x1b\\")
+            Bytes::from_static(b"\x1b]11;rgb:0000/2b2b/3636\x07")
         );
         assert!(String::from_utf8_lossy(&result.terminal_responses[2]).contains('c'));
         assert!(rx.try_recv().is_err());
@@ -7407,7 +7515,7 @@ mod tests {
 
         assert_eq!(
             result.terminal_responses,
-            vec![Bytes::from_static(b"\x1b]11;rgb:0000/2b2b/3636\x1b\\")]
+            vec![Bytes::from_static(b"\x1b]11;rgb:0000/2b2b/3636\x07")]
         );
         assert!(rx.try_recv().is_err());
     }
@@ -7535,7 +7643,7 @@ mod tests {
 
         assert_eq!(
             result.terminal_responses,
-            vec![Bytes::from_static(b"\x1b]12;rgb:6565/7b7b/8383\x1b\\")]
+            vec![Bytes::from_static(b"\x1b]12;rgb:6565/7b7b/8383\x07")]
         );
         assert!(rx.try_recv().is_err());
     }
@@ -7561,7 +7669,7 @@ mod tests {
 
         assert_eq!(
             result.terminal_responses,
-            vec![Bytes::from_static(b"\x1b]12;rgb:1111/2222/3333\x1b\\")]
+            vec![Bytes::from_static(b"\x1b]12;rgb:1111/2222/3333\x07")]
         );
         assert!(rx.try_recv().is_err());
     }
@@ -7587,7 +7695,7 @@ mod tests {
 
         assert_eq!(
             result.terminal_responses,
-            vec![Bytes::from_static(b"\x1b]12;rgb:1111/2222/3333\x1b\\")]
+            vec![Bytes::from_static(b"\x1b]12;rgb:1111/2222/3333\x07")]
         );
         assert!(rx.try_recv().is_err());
     }
@@ -7618,9 +7726,9 @@ mod tests {
         assert_eq!(
             result.terminal_responses,
             vec![
-                Bytes::from_static(b"\x1b]10;rgb:6565/7b7b/8383\x1b\\"),
-                Bytes::from_static(b"\x1b]11;rgb:fdfd/f6f6/e3e3\x1b\\"),
-                Bytes::from_static(b"\x1b]12;rgb:6565/7b7b/8383\x1b\\"),
+                Bytes::from_static(b"\x1b]10;rgb:6565/7b7b/8383\x07"),
+                Bytes::from_static(b"\x1b]11;rgb:fdfd/f6f6/e3e3\x07"),
+                Bytes::from_static(b"\x1b]12;rgb:6565/7b7b/8383\x07"),
             ]
         );
         assert!(rx.try_recv().is_err());
@@ -7688,6 +7796,204 @@ mod tests {
         assert!(rx.try_recv().is_err());
     }
 
+    /// 走与 `src/pane.rs` 相同的 pane 创建序列：`new` 之后紧跟一次
+    /// `apply_host_terminal_theme`（空主题时它会写出 OSC 110/111 复位序列），
+    /// 再跟一次 `apply_host_terminal_appearance`。
+    fn new_pane_like_production(
+        terminal: crate::ghostty::Terminal,
+        tx: &mpsc::Sender<Bytes>,
+        theme: crate::terminal_theme::TerminalTheme,
+        appearance: Option<crate::terminal_theme::HostAppearance>,
+    ) -> GhosttyPaneTerminal {
+        let pane = GhosttyPaneTerminal::new(terminal, tx.clone()).unwrap();
+        pane.apply_host_terminal_theme(theme);
+        let _ = pane.apply_host_terminal_appearance(appearance);
+        pane
+    }
+
+    #[test]
+    fn default_color_query_answers_with_herdr_fallback_when_host_theme_is_empty() {
+        let (tx, mut rx) = mpsc::channel(4);
+        let terminal = crate::ghostty::Terminal::new(20, 5, 0).unwrap();
+        let pane = new_pane_like_production(
+            terminal,
+            &tx,
+            crate::terminal_theme::TerminalTheme::default(),
+            None,
+        );
+        let pane_id = PaneId::from_raw(1);
+
+        // 宿主主题未知：libghostty 的 default 由 herdr 兜底色填上，子进程的
+        // OSC 10/11 查询不再石沉大海；OSC 12 光标色回落到默认前景，同样有回复。
+        let result =
+            pane.process_pty_bytes(pane_id, 0, b"\x1b]11;?\x07\x1b]10;?\x07\x1b]12;?\x07", &tx);
+        assert_eq!(
+            result.terminal_responses,
+            vec![
+                Bytes::from_static(b"\x1b]11;rgb:0000/0000/0000\x07"),
+                Bytes::from_static(b"\x1b]10;rgb:ffff/ffff/ffff\x07"),
+                Bytes::from_static(b"\x1b]12;rgb:ffff/ffff/ffff\x07"),
+            ]
+        );
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn default_color_query_falls_back_per_color_when_host_theme_is_partial() {
+        let (tx, mut rx) = mpsc::channel(4);
+        let terminal = crate::ghostty::Terminal::new(20, 5, 0).unwrap();
+        let pane = GhosttyPaneTerminal::new(terminal, tx.clone()).unwrap();
+        let pane_id = PaneId::from_raw(1);
+
+        let result = pane.process_pty_bytes(pane_id, 0, b"\x1b]11;?\x07", &tx);
+        assert_eq!(
+            result.terminal_responses,
+            vec![Bytes::from_static(b"\x1b]11;rgb:0000/0000/0000\x07")]
+        );
+
+        pane.apply_host_terminal_theme(crate::terminal_theme::TerminalTheme {
+            foreground: None,
+            background: Some(crate::terminal_theme::RgbColor {
+                r: 0xfd,
+                g: 0xf6,
+                b: 0xe3,
+            }),
+            ..Default::default()
+        });
+
+        // 宿主主题到达后背景改回宿主色，且只回一条。
+        let result = pane.process_pty_bytes(pane_id, 0, b"\x1b]11;?\x07", &tx);
+        assert_eq!(
+            result.terminal_responses,
+            vec![Bytes::from_static(b"\x1b]11;rgb:fdfd/f6f6/e3e3\x07")]
+        );
+
+        // 宿主主题里没有前景色时前景仍回落到 herdr 兜底色——回落是逐色的，
+        // 不是「主题一到达就整体切到宿主色」。光标色跟随前景，同样回落。
+        let result = pane.process_pty_bytes(pane_id, 0, b"\x1b]10;?\x07\x1b]12;?\x07", &tx);
+        assert_eq!(
+            result.terminal_responses,
+            vec![
+                Bytes::from_static(b"\x1b]10;rgb:ffff/ffff/ffff\x07"),
+                Bytes::from_static(b"\x1b]12;rgb:ffff/ffff/ffff\x07"),
+            ]
+        );
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn host_theme_rewrites_the_libghostty_default_layer_not_just_the_override() {
+        let (tx, mut rx) = mpsc::channel(4);
+        let terminal = crate::ghostty::Terminal::new(20, 5, 0).unwrap();
+        let pane = GhosttyPaneTerminal::new(terminal, tx.clone()).unwrap();
+        let pane_id = PaneId::from_raw(1);
+        let host_background = crate::terminal_theme::RgbColor {
+            r: 0xfd,
+            g: 0xf6,
+            b: 0xe3,
+        };
+
+        // 起点：default 层是 herdr 兜底色。
+        assert_eq!(
+            pane.core
+                .lock()
+                .unwrap()
+                .terminal
+                .default_background_color()
+                .unwrap(),
+            Some(crate::ghostty::DEFAULT_TERMINAL_BACKGROUND)
+        );
+
+        // 子进程先取得 override（herdr 自答路径随之让位给 libghostty）。
+        pane.process_pty_bytes(pane_id, 0, b"\x1b]11;rgb:11/22/33\x07", &tx);
+        pane.apply_host_terminal_theme(crate::terminal_theme::TerminalTheme {
+            foreground: None,
+            background: Some(host_background),
+            ..Default::default()
+        });
+
+        // 宿主色必须落到 default 层本身：`_DEFAULT` 只读 default、忽略 override，
+        // 所以这条断言只有 `apply_host_terminal_theme` 改写了 default 才成立。
+        assert_eq!(
+            pane.core
+                .lock()
+                .unwrap()
+                .terminal
+                .default_background_color()
+                .unwrap(),
+            Some(host_theme_color_to_ghostty(host_background))
+        );
+
+        // 子进程 OSC 111 复位掉自己的 override 后落回宿主色而不是 unset。
+        let result = pane.process_pty_bytes(pane_id, 0, b"\x1b]111\x07\x1b]11;?\x07", &tx);
+        assert_eq!(
+            result.terminal_responses,
+            vec![Bytes::from_static(b"\x1b]11;rgb:fdfd/f6f6/e3e3\x07")]
+        );
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn default_color_fallback_follows_host_appearance_when_host_theme_is_empty() {
+        let (tx, mut rx) = mpsc::channel(4);
+        let terminal = crate::ghostty::Terminal::new(20, 5, 0).unwrap();
+        // 宿主报了外观但没报主题（tmux/screen 吞掉 OSC 10/11 应答，或主题查询超时）。
+        let pane = new_pane_like_production(
+            terminal,
+            &tx,
+            crate::terminal_theme::TerminalTheme::default(),
+            Some(crate::terminal_theme::HostAppearance::Light),
+        );
+        let pane_id = PaneId::from_raw(1);
+
+        let result = pane.process_pty_bytes(pane_id, 0, b"\x1b]11;?\x07\x1b]10;?\x07", &tx);
+        assert_eq!(
+            result.terminal_responses,
+            vec![
+                Bytes::from_static(b"\x1b]11;rgb:ffff/ffff/ffff\x07"),
+                Bytes::from_static(b"\x1b]10;rgb:0000/0000/0000\x07"),
+            ]
+        );
+        assert!(rx.try_recv().is_err());
+
+        // 外观切回 Dark 时兜底色跟着回来。
+        let _ =
+            pane.apply_host_terminal_appearance(Some(crate::terminal_theme::HostAppearance::Dark));
+        let result = pane.process_pty_bytes(pane_id, 0, b"\x1b]11;?\x07", &tx);
+        assert_eq!(
+            result.terminal_responses,
+            vec![Bytes::from_static(b"\x1b]11;rgb:0000/0000/0000\x07")]
+        );
+    }
+
+    #[test]
+    fn default_color_query_reply_follows_the_query_terminator() {
+        let (tx, _rx) = mpsc::channel(4);
+        let terminal = crate::ghostty::Terminal::new(20, 5, 0).unwrap();
+        let pane = GhosttyPaneTerminal::new(terminal, tx.clone()).unwrap();
+        let pane_id = PaneId::from_raw(1);
+        pane.apply_host_terminal_theme(crate::terminal_theme::TerminalTheme {
+            foreground: None,
+            background: Some(crate::terminal_theme::RgbColor {
+                r: 0xfd,
+                g: 0xf6,
+                b: 0xe3,
+            }),
+            ..Default::default()
+        });
+
+        // 同一个 pane 对 BEL 查询回 BEL、对 ST 查询回 ST：herdr 自答的回复与
+        // libghostty 回显的终止符保持一致，按 BEL 定长读取的子进程不会卡住。
+        let result = pane.process_pty_bytes(pane_id, 0, b"\x1b]11;?\x07\x1b]11;?\x1b\\", &tx);
+        assert_eq!(
+            result.terminal_responses,
+            vec![
+                Bytes::from_static(b"\x1b]11;rgb:fdfd/f6f6/e3e3\x07"),
+                Bytes::from_static(b"\x1b]11;rgb:fdfd/f6f6/e3e3\x1b\\"),
+            ]
+        );
+    }
+
     #[test]
     fn process_pty_bytes_tracks_default_color_set_and_reset_before_replying() {
         let (tx, mut rx) = mpsc::channel(4);
@@ -7715,7 +8021,7 @@ mod tests {
         let result = pane.process_pty_bytes(pane_id, 0, b"\x1b]111\x07\x1b]11;?\x07", &tx);
         assert_eq!(
             result.terminal_responses,
-            vec![Bytes::from_static(b"\x1b]11;rgb:fdfd/f6f6/e3e3\x1b\\")]
+            vec![Bytes::from_static(b"\x1b]11;rgb:fdfd/f6f6/e3e3\x07")]
         );
         assert!(rx.try_recv().is_err());
     }
@@ -7757,6 +8063,85 @@ mod tests {
         assert_eq!(buffer[(2, 0)].symbol(), " ");
         assert_eq!(buffer[(2, 0)].style().fg, Some(Color::Reset));
         assert_eq!(buffer[(2, 0)].style().bg, Some(Color::Reset));
+    }
+
+    #[test]
+    fn render_leaves_partial_host_theme_background_transparent() {
+        let (tx, _rx) = mpsc::channel(4);
+        let terminal = crate::ghostty::Terminal::new(20, 5, 0).unwrap();
+        // 宿主只报了背景：前景逐色回落到 herdr 兜底色，两者都等于 pane 的
+        // 「中性基准」，所以渲染仍然继承宿主底色而不是显式刷色。
+        let pane = new_pane_like_production(
+            terminal,
+            &tx,
+            crate::terminal_theme::TerminalTheme {
+                foreground: None,
+                background: Some(crate::terminal_theme::RgbColor {
+                    r: 0xfd,
+                    g: 0xf6,
+                    b: 0xe3,
+                }),
+                ..Default::default()
+            },
+            None,
+        );
+        {
+            let mut core = pane.core.lock().unwrap();
+            core.terminal.write(b"hi");
+        }
+
+        let backend = ratatui::backend::TestBackend::new(20, 5);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| pane.render(frame, Rect::new(0, 0, 20, 5), false))
+            .unwrap();
+
+        let buffer = terminal.backend().buffer();
+        assert_eq!(buffer[(0, 0)].symbol(), "h");
+        assert_eq!(buffer[(0, 0)].style().fg, Some(Color::Reset));
+        assert_eq!(buffer[(0, 0)].style().bg, Some(Color::Reset));
+        assert_eq!(buffer[(2, 0)].style().fg, Some(Color::Reset));
+        assert_eq!(buffer[(2, 0)].style().bg, Some(Color::Reset));
+    }
+
+    #[test]
+    fn render_paints_reverse_video_explicitly_when_host_theme_is_empty() {
+        let (tx, _rx) = mpsc::channel(4);
+        let terminal = crate::ghostty::Terminal::new(20, 5, 0).unwrap();
+        let pane = new_pane_like_production(
+            terminal,
+            &tx,
+            crate::terminal_theme::TerminalTheme::default(),
+            None,
+        );
+        {
+            let mut core = pane.core.lock().unwrap();
+            // DECSCNM 反色（terminfo 的 flash/视觉铃常用）：default 层被填满
+            // 之后 libghostty 才会真的交换前景/背景，于是整窗格显式刷成
+            // 「黑字白底」而不再静默继承宿主底色。
+            core.terminal.write(b"\x1b[?5hhi");
+        }
+
+        let backend = ratatui::backend::TestBackend::new(20, 5);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| pane.render(frame, Rect::new(0, 0, 20, 5), false))
+            .unwrap();
+
+        let buffer = terminal.backend().buffer();
+        assert_eq!(buffer[(0, 0)].symbol(), "h");
+        assert_eq!(
+            buffer[(0, 0)].style().fg,
+            Some(Color::Rgb(0x00, 0x00, 0x00))
+        );
+        assert_eq!(
+            buffer[(0, 0)].style().bg,
+            Some(Color::Rgb(0xff, 0xff, 0xff))
+        );
+        assert_eq!(
+            buffer[(2, 0)].style().bg,
+            Some(Color::Rgb(0xff, 0xff, 0xff))
+        );
     }
 
     #[test]
