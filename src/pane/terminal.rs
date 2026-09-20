@@ -191,6 +191,28 @@ pub(crate) enum TerminalCompressionStep {
     Compressed(crate::ghostty::TerminalCompressionResult),
 }
 
+/// pane 终端 resize 失败的原因。调用方据此保留旧几何（`current_size` 与 pts
+/// winsize 都不提交），让下一次同几何 resize 仍然真正执行而不是被短路。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PaneResizeError {
+    /// vendored VT 拒绝了新几何（无效尺寸或内存不足）；VT 在校验失败或分配失败
+    /// 时会回滚自身状态，网格、像素几何与 2026 模式保持原样。
+    Terminal(crate::ghostty::Error),
+    /// 终端核心锁不可用（持锁线程已 panic），本次 resize 未执行。
+    CoreUnavailable,
+}
+
+impl std::fmt::Display for PaneResizeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Terminal(err) => write!(f, "terminal rejected resize: {err}"),
+            Self::CoreUnavailable => f.write_str("terminal core lock unavailable"),
+        }
+    }
+}
+
+impl std::error::Error for PaneResizeError {}
+
 pub(crate) struct GhosttyPaneTerminal {
     pub core: Mutex<GhosttyPaneCore>,
     key_encoder: Mutex<crate::ghostty::KeyEncoder>,
@@ -200,6 +222,10 @@ pub(crate) struct GhosttyPaneTerminal {
 pub(crate) struct GhosttyPaneCore {
     #[cfg(test)]
     pub dirty_collection_hook: Option<Box<dyn FnOnce() + Send>>,
+    /// 测试钩子：置位后下一次 resize 以无效列数交给 VT，走真实的拒绝路径
+    /// （而不是伪造错误值），用完即清。
+    #[cfg(test)]
+    pub reject_next_resize_for_test: bool,
     pub terminal: crate::ghostty::Terminal,
     #[cfg(windows)]
     recent_fallback: windows_recent_fallback::Cache,
@@ -237,6 +263,25 @@ struct SynchronizedOutputState {
     active: bool,
     /// 首次观察到批次开始且当前没有待决兜底：调用方安排一次超时后的重绘。
     arm_backstop: bool,
+}
+
+/// 把新几何交给 vendored VT，原样返回它的判定；测试钩子置位时改用无效列数，
+/// 让 VT 走真实的拒绝路径。
+fn resize_terminal(
+    core: &mut GhosttyPaneCore,
+    rows: u16,
+    cols: u16,
+    cell_width_px: u32,
+    cell_height_px: u32,
+) -> Result<(), crate::ghostty::Error> {
+    #[cfg(test)]
+    let cols = if std::mem::take(&mut core.reject_next_resize_for_test) {
+        0
+    } else {
+        cols
+    };
+    core.terminal
+        .resize(cols, rows, cell_width_px, cell_height_px)
 }
 
 /// 只读判定：当前是否处于未超时的同步输出批次。计时锚点只在写入路径维护，
@@ -321,13 +366,15 @@ impl PaneTerminal {
             .process_pty_bytes(pane_id, shell_pid, bytes, response_writer)
     }
 
+    /// 失败时向上报告而不吞掉：网格保持旧几何，由 `PaneRuntime` 决定是否提交
+    /// 新尺寸。
     pub fn resize(
         &self,
         rows: u16,
         cols: u16,
         cell_width_px: u32,
         cell_height_px: u32,
-    ) -> Vec<Bytes> {
+    ) -> Result<Vec<Bytes>, PaneResizeError> {
         self.ghostty
             .resize(rows, cols, cell_width_px, cell_height_px)
     }
@@ -1372,6 +1419,8 @@ impl GhosttyPaneTerminal {
             core: Mutex::new(GhosttyPaneCore {
                 #[cfg(test)]
                 dirty_collection_hook: None,
+                #[cfg(test)]
+                reject_next_resize_for_test: false,
                 terminal,
                 #[cfg(windows)]
                 recent_fallback: windows_recent_fallback::Cache::default(),
@@ -1897,89 +1946,91 @@ impl GhosttyPaneTerminal {
         }
     }
 
+    /// 把新几何交给 vendored VT。失败时返回 `Err`，此时 VT 已回滚自身状态：
+    /// 网格、像素几何与 2026 模式都保持 resize 之前的样子，调用方不得提交新
+    /// 几何，也不做任何「resize 之后」的视口恢复。
     pub fn resize(
         &self,
         rows: u16,
         cols: u16,
         cell_width_px: u32,
         cell_height_px: u32,
-    ) -> Vec<Bytes> {
-        if let Ok(mut core) = self.core.lock() {
-            #[cfg(windows)]
-            windows_recent_fallback::refresh_if_needed(&mut core);
-            let offset_from_bottom = core
-                .terminal
-                .scrollbar()
+    ) -> Result<Vec<Bytes>, PaneResizeError> {
+        let Ok(mut core) = self.core.lock() else {
+            return Err(PaneResizeError::CoreUnavailable);
+        };
+        #[cfg(windows)]
+        windows_recent_fallback::refresh_if_needed(&mut core);
+        let offset_from_bottom = core
+            .terminal
+            .scrollbar()
+            .ok()
+            .map(|scrollbar| {
+                scrollbar
+                    .total
+                    .saturating_sub(scrollbar.offset + scrollbar.len)
+            })
+            .unwrap_or(0);
+        let bottom_before_resize = ghostty_detection_text(&mut core)
+            .map(|text| !text.trim().is_empty())
+            .unwrap_or(false);
+        let resize_recovery_probe_lines = usize::from(rows)
+            .saturating_mul(8)
+            .max(DEFAULT_DETECTION_ROWS);
+        let replay_ansi = if core.terminal.active_screen().ok()
+            == Some(crate::ghostty::ActiveScreen::Primary)
+            && bottom_before_resize
+        {
+            ghostty_recent_ansi(&mut core, resize_recovery_probe_lines, true)
                 .ok()
-                .map(|scrollbar| {
-                    scrollbar
-                        .total
-                        .saturating_sub(scrollbar.offset + scrollbar.len)
-                })
-                .unwrap_or(0);
-            let bottom_before_resize = ghostty_detection_text(&mut core)
-                .map(|text| !text.trim().is_empty())
-                .unwrap_or(false);
-            let resize_recovery_probe_lines = usize::from(rows)
-                .saturating_mul(8)
-                .max(DEFAULT_DETECTION_ROWS);
-            let replay_ansi = if core.terminal.active_screen().ok()
-                == Some(crate::ghostty::ActiveScreen::Primary)
-                && bottom_before_resize
-            {
-                ghostty_recent_ansi(&mut core, resize_recovery_probe_lines, true)
-                    .ok()
-                    .filter(|ansi| !ansi.trim().is_empty())
-            } else {
-                None
-            };
-
-            #[cfg(windows)]
-            if core.recent_fallback.usable {
-                // Track the old viewport's start without pinning trailing blank rows.
-                core.terminal.track_row(0);
-            }
-
-            let _ = core
-                .terminal
-                .resize(cols, rows, cell_width_px, cell_height_px);
-            // vendored VT 在 resize 里无条件复位 2026，这条路径不经过
-            // `process_pty_bytes`，批次锚点在这里一并清零，避免下一个批次带着
-            // 过期锚点被误判为已失效。
-            core.synchronized_output_since = None;
-            let terminal_responses = self.drain_pending_pty_responses();
-
-            let bottom_is_blank = ghostty_detection_text(&mut core)
-                .map(|text| text.trim().is_empty())
-                .unwrap_or(false);
-            if bottom_is_blank {
-                if let Some(ansi) = replay_ansi.as_deref() {
-                    core.terminal.scroll_viewport_bottom();
-                    core.terminal.write(ansi.as_bytes());
-                }
-            }
-            #[cfg(windows)]
-            if core.recent_fallback.usable {
-                core.recent_fallback.needs_refresh = true;
-                core.terminal.scroll_viewport_bottom();
-                windows_recent_fallback::update(&mut core);
-            }
-            ghostty_set_scroll_offset_from_bottom(&mut core.terminal, offset_from_bottom);
-            if offset_from_bottom > 0 {
-                let mut remaining = offset_from_bottom.min(resize_recovery_probe_lines);
-                while remaining > 0
-                    && ghostty_visible_text(&mut core)
-                        .map(|text| text.trim().is_empty())
-                        .unwrap_or(false)
-                {
-                    core.terminal.scroll_viewport_delta(1);
-                    remaining -= 1;
-                }
-            }
-            terminal_responses
+                .filter(|ansi| !ansi.trim().is_empty())
         } else {
-            Vec::new()
+            None
+        };
+
+        #[cfg(windows)]
+        if core.recent_fallback.usable {
+            // Track the old viewport's start without pinning trailing blank rows.
+            core.terminal.track_row(0);
         }
+
+        resize_terminal(&mut core, rows, cols, cell_width_px, cell_height_px)
+            .map_err(PaneResizeError::Terminal)?;
+        // vendored VT 在成功的 resize 里无条件复位 2026，这条路径不经过
+        // `process_pty_bytes`，批次锚点在这里一并清零，避免下一个批次带着
+        // 过期锚点被误判为已失效。失败的 resize 已在上面返回：VT 回滚了模式，
+        // 锚点也保持不动。
+        core.synchronized_output_since = None;
+        let terminal_responses = self.drain_pending_pty_responses();
+
+        let bottom_is_blank = ghostty_detection_text(&mut core)
+            .map(|text| text.trim().is_empty())
+            .unwrap_or(false);
+        if bottom_is_blank {
+            if let Some(ansi) = replay_ansi.as_deref() {
+                core.terminal.scroll_viewport_bottom();
+                core.terminal.write(ansi.as_bytes());
+            }
+        }
+        #[cfg(windows)]
+        if core.recent_fallback.usable {
+            core.recent_fallback.needs_refresh = true;
+            core.terminal.scroll_viewport_bottom();
+            windows_recent_fallback::update(&mut core);
+        }
+        ghostty_set_scroll_offset_from_bottom(&mut core.terminal, offset_from_bottom);
+        if offset_from_bottom > 0 {
+            let mut remaining = offset_from_bottom.min(resize_recovery_probe_lines);
+            while remaining > 0
+                && ghostty_visible_text(&mut core)
+                    .map(|text| text.trim().is_empty())
+                    .unwrap_or(false)
+            {
+                core.terminal.scroll_viewport_delta(1);
+                remaining -= 1;
+            }
+        }
+        Ok(terminal_responses)
     }
 
     pub fn scroll_up(&self, lines: usize) {
@@ -2243,6 +2294,14 @@ impl GhosttyPaneTerminal {
             if let Some(since) = core.synchronized_output_since.as_mut() {
                 *since = since.checked_sub(by).unwrap_or(*since);
             }
+        }
+    }
+
+    /// 测试用：让下一次 resize 被 VT 拒绝（真实的无效尺寸路径）。
+    #[cfg(test)]
+    pub(crate) fn test_reject_next_resize(&self) {
+        if let Ok(mut core) = self.core.lock() {
+            core.reject_next_resize_for_test = true;
         }
     }
 
@@ -5866,7 +5925,7 @@ mod tests {
             let pane = GhosttyPaneTerminal::new(terminal, tx.clone()).unwrap();
             let pane_id = PaneId::from_raw(1);
 
-            pane.resize(3, 10, 0, 0);
+            pane.resize(3, 10, 0, 0).unwrap();
             pane.process_pty_bytes(
                 pane_id,
                 0,
@@ -5889,7 +5948,7 @@ mod tests {
         let pane_id = PaneId::from_raw(1);
 
         pane.set_scroll_offset_from_bottom(1);
-        pane.resize(5, 10, 0, 0);
+        pane.resize(5, 10, 0, 0).unwrap();
         let resized = pane.scroll_metrics().expect("scroll metrics after resize");
         assert_eq!(resized.max_offset_from_bottom, 0);
 
@@ -6036,7 +6095,7 @@ mod tests {
         terminal.write(b"alpha\r\nbeta\r\ngamma\r\ndelta");
         let pane = GhosttyPaneTerminal::new(terminal, tx).unwrap();
 
-        pane.resize(3, 7, 8, 16);
+        pane.resize(3, 7, 8, 16).unwrap();
 
         assert_eq!(pane.visible_text(), "beta\ngamma\ndelta\n");
         assert_eq!(pane.detection_text(), "beta\ngamma\ndelta\n");
@@ -6067,7 +6126,7 @@ mod tests {
 
         for (rows, cols) in [(4, 10), (4, 7), (6, 18), (3, 9), (5, 12)] {
             let before_resize = pane.scroll_metrics().expect("scroll metrics before resize");
-            pane.resize(rows, cols, 0, 0);
+            pane.resize(rows, cols, 0, 0).unwrap();
 
             let metrics = pane.scroll_metrics().expect("scroll metrics after resize");
             assert_eq!(metrics.viewport_rows, rows as usize);
@@ -6106,7 +6165,7 @@ mod tests {
         assert!(pane.visible_text().trim().is_empty());
         assert!(pane.detection_text().trim().is_empty());
 
-        pane.resize(3, 20, 0, 0);
+        pane.resize(3, 20, 0, 0).unwrap();
 
         assert!(pane.visible_text().trim().is_empty());
         assert!(pane.detection_text().trim().is_empty());
@@ -6126,7 +6185,7 @@ mod tests {
         pane.set_scroll_offset_from_bottom(metrics.max_offset_from_bottom);
         assert!(!pane.visible_text().trim().is_empty());
 
-        pane.resize(3, 20, 0, 0);
+        pane.resize(3, 20, 0, 0).unwrap();
 
         assert!(pane.detection_text().trim().is_empty());
         assert!(pane.recent_text(3).trim().is_empty());
@@ -6138,7 +6197,7 @@ mod tests {
         let terminal = crate::ghostty::Terminal::new(80, 24, 0).unwrap();
         let pane = GhosttyPaneTerminal::new(terminal, tx.clone()).unwrap();
         let pane_id = PaneId::from_raw(1);
-        pane.resize(24, 80, 9, 18);
+        pane.resize(24, 80, 9, 18).unwrap();
 
         let result = pane.process_pty_bytes(pane_id, 0, b"\x1b[14t\x1b[16t\x1b[18t", &tx);
 
@@ -6158,8 +6217,8 @@ mod tests {
         let terminal = crate::ghostty::Terminal::new(80, 24, 0).unwrap();
         let pane = GhosttyPaneTerminal::new(terminal, tx.clone()).unwrap();
         let pane_id = PaneId::from_raw(1);
-        pane.resize(24, 80, 9, 18);
-        pane.resize(30, 100, 10, 20);
+        pane.resize(24, 80, 9, 18).unwrap();
+        pane.resize(30, 100, 10, 20).unwrap();
 
         let result = pane.process_pty_bytes(pane_id, 0, b"\x1b[14t\x1b[16t\x1b[18t", &tx);
 
@@ -6180,7 +6239,7 @@ mod tests {
         let pane = GhosttyPaneTerminal::new(terminal, tx.clone()).unwrap();
         let pane_id = PaneId::from_raw(1);
         for (cell_width_px, cell_height_px) in [(0, 0), (0, 18), (9, 0)] {
-            pane.resize(24, 80, cell_width_px, cell_height_px);
+            pane.resize(24, 80, cell_width_px, cell_height_px).unwrap();
             let result = pane.process_pty_bytes(pane_id, 0, b"\x1b[14t\x1b[16t\x1b[18t", &tx);
             assert!(result.terminal_responses.is_empty());
         }
@@ -6193,7 +6252,7 @@ mod tests {
         let pane = GhosttyPaneTerminal::new(terminal, tx.clone()).unwrap();
         let pane_id = PaneId::from_raw(1);
         pane.process_pty_bytes(pane_id, 0, b"\x1b[?1049h", &tx);
-        assert!(pane.resize(24, 92, 9, 18).is_empty());
+        assert!(pane.resize(24, 92, 9, 18).unwrap().is_empty());
 
         let result = pane.process_pty_bytes(pane_id, 0, b"\x1b[?2048h", &tx);
 
@@ -6210,12 +6269,65 @@ mod tests {
         terminal.mode_set(2048, true).unwrap();
         let pane = GhosttyPaneTerminal::new(terminal, tx).unwrap();
 
-        let responses = pane.resize(40, 100, 9, 18);
+        let responses = pane.resize(40, 100, 9, 18).unwrap();
 
         assert_eq!(
             responses,
             vec![Bytes::from_static(b"\x1B[48;40;100;720;900t")]
         );
+    }
+
+    /// PTY-02：VT 拒绝无效几何时错误向上报告，网格、像素几何、2026 批次与
+    /// 2048 上报都保持原样；随后合法几何的 resize 正常成功并清掉批次锚点。
+    #[test]
+    fn resize_rejected_by_the_terminal_reports_the_error_and_keeps_the_grid() {
+        let (tx, _rx) = mpsc::channel(4);
+        let mut terminal = crate::ghostty::Terminal::new(80, 24, 0).unwrap();
+        terminal.mode_set(2048, true).unwrap();
+        let pane = GhosttyPaneTerminal::new(terminal, tx.clone()).unwrap();
+        let pane_id = PaneId::from_raw(1);
+        pane.process_pty_bytes(pane_id, 0, b"\x1b[?2026h", &tx);
+        assert!(pane.synchronized_output_active());
+
+        let rejected = pane.resize(0, 100, 9, 18);
+
+        assert!(
+            matches!(rejected, Err(PaneResizeError::Terminal(_))),
+            "无效行数必须由 VT 拒绝并向上报告: {rejected:?}"
+        );
+        {
+            let core = pane.core.lock().unwrap();
+            assert_eq!(core.terminal.cols().unwrap(), 80);
+            assert_eq!(core.terminal.rows().unwrap(), 24);
+        }
+        assert!(
+            pane.synchronized_output_active(),
+            "失败的 resize 不清 2026 批次锚点"
+        );
+        assert!(
+            pane.drain_pending_pty_responses().is_empty(),
+            "失败的 resize 不产生 2048 上报"
+        );
+
+        // 测试钩子走的是同一条真实拒绝路径：列数被替换为 0。
+        pane.test_reject_next_resize();
+        assert!(matches!(
+            pane.resize(30, 100, 9, 18),
+            Err(PaneResizeError::Terminal(_))
+        ));
+
+        let accepted = pane.resize(30, 100, 9, 18).unwrap();
+
+        assert_eq!(
+            accepted,
+            vec![Bytes::from_static(b"\x1B[48;30;100;540;900t")]
+        );
+        {
+            let core = pane.core.lock().unwrap();
+            assert_eq!(core.terminal.cols().unwrap(), 100);
+            assert_eq!(core.terminal.rows().unwrap(), 30);
+        }
+        assert!(!pane.synchronized_output_active());
     }
 
     #[test]
@@ -6313,7 +6425,7 @@ mod tests {
         pane_terminal.process_pty_bytes(pane_id, 0, b"\x1b[?2026h", &tx);
         assert!(pane_terminal.synchronized_output_active());
         pane_terminal.test_backdate_synchronized_output(SYNCHRONIZED_OUTPUT_TIMEOUT);
-        pane_terminal.resize(24, 100, 0, 0);
+        pane_terminal.resize(24, 100, 0, 0).unwrap();
         assert!(!pane_terminal.synchronized_output_active());
         assert_eq!(
             pane_terminal.poll_synchronized_output_backstop(),

@@ -2958,6 +2958,10 @@ impl PaneRuntime {
     }
 
     /// Resize if the dimensions actually changed.
+    ///
+    /// 只有 VT 真正接受新几何后才提交 `current_size` 并把新 winsize 推给 pts；
+    /// 失败时两者都保持旧几何（pts 与网格一致），并记一条 warn。下一次同几何
+    /// resize 因此不会被「尺寸未变」短路，而是再次真正执行。
     pub fn resize(&self, rows: u16, cols: u16, cell_width_px: u32, cell_height_px: u32) {
         let rows = rows.max(2);
         let cols = cols.max(4);
@@ -2965,17 +2969,35 @@ impl PaneRuntime {
         if self.current_size.get() == size {
             return;
         }
-        self.current_size.set(size);
         let _content_write_guard = match self.content_write_lock.lock() {
             Ok(guard) => guard,
             Err(poisoned) => poisoned.into_inner(),
         };
         self.content_seq.fetch_add(1, Ordering::AcqRel);
-        let terminal_responses = self
+        let outcome = self
             .terminal
             .resize(rows, cols, cell_width_px, cell_height_px);
         self.content_seq.fetch_add(1, Ordering::Release);
         drop(_content_write_guard);
+        let terminal_responses = match outcome {
+            Ok(responses) => responses,
+            Err(err) => {
+                let (previous_rows, previous_cols, _, _) = self.current_size.get();
+                warn!(
+                    pane = self.pane_id.raw(),
+                    rows,
+                    cols,
+                    cell_width_px,
+                    cell_height_px,
+                    previous_rows,
+                    previous_cols,
+                    err = %err,
+                    "pane terminal resize failed; keeping previous geometry"
+                );
+                return;
+            }
+        };
+        self.current_size.set(size);
         self.compression.wake();
         mark_detection_content_changed(&self.detection_content_seq);
         self.io.resize(
@@ -3466,6 +3488,10 @@ impl PaneRuntime {
     }
 }
 
+/// 测试用：观察被提交给 pts 的 winsize `(rows, cols, cell_width_px, cell_height_px)`。
+#[cfg(test)]
+type TestResizeObserver = watch::Receiver<(u16, u16, u32, u32)>;
+
 #[cfg(test)]
 impl PaneRuntime {
     pub(crate) fn test_with_channel(cols: u16, rows: u16) -> (Self, mpsc::Receiver<Bytes>) {
@@ -3571,8 +3597,27 @@ impl PaneRuntime {
         bytes: &[u8],
         channel_capacity: usize,
     ) -> (Self, mpsc::Receiver<Bytes>) {
+        let (runtime, rx, _resize_rx) = Self::test_with_channels_and_scrollback_bytes(
+            cols,
+            rows,
+            scrollback_limit_bytes,
+            bytes,
+            channel_capacity,
+        );
+        (runtime, rx)
+    }
+
+    /// 同 `test_with_channel_and_scrollback_bytes`，另外交出 pts winsize 观察端：
+    /// 只有真正提交给 pts 的几何才会出现在这个 watch 通道上。
+    pub(crate) fn test_with_channels_and_scrollback_bytes(
+        cols: u16,
+        rows: u16,
+        scrollback_limit_bytes: usize,
+        bytes: &[u8],
+        channel_capacity: usize,
+    ) -> (Self, mpsc::Receiver<Bytes>, TestResizeObserver) {
         let (tx, rx) = mpsc::channel(channel_capacity);
-        let (resize_tx, _resize_rx) = watch::channel((rows, cols, 0, 0));
+        let (resize_tx, resize_rx) = watch::channel((rows, cols, 0, 0));
         let mut terminal =
             crate::ghostty::Terminal::new(cols, rows, scrollback_limit_bytes).unwrap();
         terminal.write(bytes);
@@ -3606,6 +3651,7 @@ impl PaneRuntime {
                 detect_handle: Some(tokio::spawn(async {}).abort_handle()),
             },
             rx,
+            resize_rx,
         )
     }
 }
@@ -3669,6 +3715,40 @@ mod tests {
         };
         assert_eq!(patch.rows.len(), 5);
         assert!(patch.rows.iter().all(|(_, cells)| cells.len() == 24));
+    }
+
+    /// PTY-02：VT 拒绝新几何时 `current_size` 与 pts winsize 都保持旧几何，
+    /// 随后同几何重试不被「尺寸未变」短路，而是真正执行并成功。
+    #[tokio::test]
+    async fn resize_failure_keeps_previous_geometry_until_a_retry_succeeds() {
+        let (runtime, _rx, mut resize_rx) =
+            PaneRuntime::test_with_channels_and_scrollback_bytes(80, 24, 0, b"", 4);
+        runtime.terminal.ghostty.test_reject_next_resize();
+
+        runtime.resize(30, 100, 9, 18);
+
+        assert_eq!(runtime.current_size(), (24, 80), "失败不得提交新几何");
+        assert_eq!(
+            runtime.terminal_dimensions(),
+            Some((80, 24)),
+            "网格保持旧几何"
+        );
+        assert!(
+            !resize_rx.has_changed().unwrap(),
+            "失败不得把新 winsize 推给 pts"
+        );
+        assert!(
+            runtime.content_seq().is_multiple_of(2),
+            "失败后内容序号仍停在偶数（无写入进行中）"
+        );
+
+        runtime.resize(30, 100, 9, 18);
+
+        assert_eq!(runtime.current_size(), (30, 100), "同几何重试必须真正执行");
+        assert_eq!(runtime.terminal_dimensions(), Some((100, 30)));
+        assert!(resize_rx.has_changed().unwrap());
+        assert_eq!(*resize_rx.borrow_and_update(), (30, 100, 9, 18));
+        assert_eq!(runtime.pixel_size(), Some((900, 540)));
     }
 
     #[test]
