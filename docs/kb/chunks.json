@@ -1,5 +1,5 @@
 {
-  "chunk_count": 971,
+  "chunk_count": 972,
   "chunks": [
     {
       "anchor": "herdr",
@@ -1545,8 +1545,8 @@
       "anchor": "Config file > IME cursor tracking",
       "doc": "docs/next/website/src/content/docs/configuration.mdx",
       "id": "docs-next-website-src-content-docs-configuration-mdx-config-file-ime-cursor-tracking",
-      "source_sha256": "f8ea9166575a13e85b31d7b85cc7042cf20871cbb1633376f6f928ceea4011bc",
-      "text": "## IME cursor tracking\n\nAI Agent TUIs that hide the hardware cursor leave the host terminal without a cursor anchor, so input-method candidate windows stop following the focused pane and the typing caret disappears mid-edit. Herdr therefore reveals a blinking-bar anchor by default; opt out or narrow it with:\n\n```toml\n[experimental]\nreveal_hidden_cursor_for_cjk_ime = true # default\ncjk_ime_cursor_shape = \"bar\"            # default\ncjk_ime_agents = []                     # empty = any focused pane\n```\n\nRestricting `cjk_ime_agents` avoids showing an extra hardware cursor in unrelated applications. Search these keys in the [Config reference](/docs/config-reference/) for accepted Agent names and cursor shapes."
+      "source_sha256": "ffb6cd6c6757932760849b5d4969a6ce39985c95544d20c2a7846cc7750df95b",
+      "text": "## IME cursor tracking\n\nAI Agent TUIs that hide the hardware cursor leave the host terminal without a cursor anchor, so input-method candidate windows stop following the focused pane and the typing caret disappears mid-edit. Herdr therefore reveals a blinking-bar anchor by default; opt out or narrow it with:\n\n```toml\n[experimental]\nreveal_hidden_cursor_for_cjk_ime = true # default\ncjk_ime_cursor_shape = \"bar\"            # default\ncjk_ime_agents = []                     # empty = any focused pane\n```\n\nRestricting `cjk_ime_agents` avoids showing an extra hardware cursor in unrelated applications. Search these keys in the [Config reference](/docs/config-reference/) for accepted Agent names and cursor shapes.\n\nApplications that wrap a repaint in synchronized output (`DECSET 2026`) keep the previous cursor state while the batch is open rather than hiding the cursor, so the host never receives a hide/show pair per frame. A batch left open for more than 1 s is treated as expired: Herdr resumes rendering and the cursor follows the pane again, so a TUI that never resets the mode cannot leave the host terminal without a cursor."
     },
     {
       "anchor": "Config file > Indexed jumps",
@@ -2489,9 +2489,16 @@
     {
       "anchor": "Menus, pages, and stable selection > Docking",
       "doc": "docs/next/website/src/content/docs/monitoring.mdx",
-      "id": "docs-next-website-src-content-docs-monitoring-mdx-menus-pages-and-stable-selection-docking",
-      "source_sha256": "38171945deeb2c9986f5e92f743e14ae57e54987202dd879bed512a245f546d9",
-      "text": "## Docking\n\nDrag a panel's `⠿` title handle to another panel's edge. The drop preview shows the destination. Drag dividers to resize, tabs to reorder or create another terminal group, and pane handles to swap panes or move them between tabs without restarting their processes. Borderless panes show their handles only in Layout mode, keeping normal terminal text unobstructed. Right-click tab menus remain available.\n\nThe primary terminal page belongs to the focused workspace: clicking a workspace in the sidebar swaps both the tab strip and the terminal content to that workspace's tabs, numbered from 1 per workspace. Tabs dragged into their own panel stay visible regardless of workspace focus.\n\n`□` maximizes/restores a panel. In Layout mode, `Tab` / `Shift+Tab` selects a panel, arrows resize, `Shift+arrows` move, `Enter` maximizes, and `Esc` finishes. Lock prevents accidental rearrangement; Reset restores the default layout. Layouts persist per client and endpoint. Small terminals project the focused panel without discarding the saved layout. Older servers retain the previous single-view UI."
+      "id": "docs-next-website-src-content-docs-monitoring-mdx-menus-pages-and-stable-selection-docking-part1",
+      "source_sha256": "1f959ce6fcf71b12e155f3a2752b9233a475f0d3f9387ab5b1424d02416c9191",
+      "text": "## Docking\n\nDrag a panel's `⠿` title handle to another panel's edge. The drop preview shows the destination. Drag dividers to resize, tabs to reorder or create another terminal group, and pane handles to swap panes or move them between tabs without restarting their processes. Borderless panes show their handles only in Layout mode, keeping normal terminal text unobstructed. Right-click tab menus remain available.\n\nThe primary terminal page belongs to the focused workspace: clicking a workspace in the sidebar swaps both the tab strip and the terminal content to that workspace's tabs, numbered from 1 per workspace. Tabs dragged into their own panel stay visible regardless of workspace focus.\n\n`□` maximizes/restores a panel. In Layout mode, `Tab` / `Shift+Tab` selects a panel, arrows resize, `Shift+arrows` move, `Enter` maximizes, and `Esc` finishes. Lock prevents accidental rearrangement; Reset restores the default layout. Layouts persist per client and endpoint. Small terminals project the focused panel without discarding the saved layout. Older servers retain the previous single-view UI.\n"
+    },
+    {
+      "anchor": "Menus, pages, and stable selection > Docking",
+      "doc": "docs/next/website/src/content/docs/monitoring.mdx",
+      "id": "docs-next-website-src-content-docs-monitoring-mdx-menus-pages-and-stable-selection-docking-part2",
+      "source_sha256": "1f959ce6fcf71b12e155f3a2752b9233a475f0d3f9387ab5b1424d02416c9191",
+      "text": "Monitor and Accounts panels carry a ` × ` button in their header next to `□`. When the panel is focused, `Esc` closes the panel hosting the page; when a terminal is focused, `Esc` goes to the terminal, so use the header button or **Close monitor panel** in command search (listed only while the Monitor panel is docked). With the layout locked, closing is refused and the panel footer says so. The monitor tab you last selected — System, Accounts or Settings — is kept in client preferences and restored when the panel regains focus or reopens. A docked Monitor or Accounts panel no longer hides the focused terminal's cursor: the cursor disappears only where a panel, a floating usage overview or a dialog actually covers it."
     },
     {
       "anchor": "Menus, pages, and stable selection > Host resources",

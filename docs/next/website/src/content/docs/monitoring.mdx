@@ -25,6 +25,8 @@ The primary terminal page belongs to the focused workspace: clicking a workspace
 
 `□` maximizes/restores a panel. In Layout mode, `Tab` / `Shift+Tab` selects a panel, arrows resize, `Shift+arrows` move, `Enter` maximizes, and `Esc` finishes. Lock prevents accidental rearrangement; Reset restores the default layout. Layouts persist per client and endpoint. Small terminals project the focused panel without discarding the saved layout. Older servers retain the previous single-view UI.
 
+Monitor and Accounts panels carry a ` × ` button in their header next to `□`. When the panel is focused, `Esc` closes the panel hosting the page; when a terminal is focused, `Esc` goes to the terminal, so use the header button or **Close monitor panel** in command search (listed only while the Monitor panel is docked). With the layout locked, closing is refused and the panel footer says so. The monitor tab you last selected — System, Accounts or Settings — is kept in client preferences and restored when the panel regains focus or reopens. A docked Monitor or Accounts panel no longer hides the focused terminal's cursor: the cursor disappears only where a panel, a floating usage overview or a dialog actually covers it.
+
 ## Host resources
 
 Choose total/per-core CPU, RAM/swap, GPUs, disks, network interfaces, temperatures and processes. Sampling supports 500, 1000, 2000 and 5000 ms. Slow collectors run independently. Initial differential samples, unavailable drivers and permission failures display a status or `—`, rather than zero.

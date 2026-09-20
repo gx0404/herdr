@@ -570,6 +570,8 @@ cjk_ime_agents = []                     # empty = any focused pane
 
 Restricting `cjk_ime_agents` avoids showing an extra hardware cursor in unrelated applications. Search these keys in the [Config reference](/docs/config-reference/) for accepted Agent names and cursor shapes.
 
+Applications that wrap a repaint in synchronized output (`DECSET 2026`) keep the previous cursor state while the batch is open rather than hiding the cursor, so the host never receives a hide/show pair per frame. A batch left open for more than 1 s is treated as expired: Herdr resumes rendering and the cursor follows the pane again, so a TUI that never resets the mode cannot leave the host terminal without a cursor.
+
 ## Prefix input source switching
 
 On macOS and Windows, Herdr can temporarily switch to an ASCII-capable input source while prefix commands and prefix-launched modes are active:
