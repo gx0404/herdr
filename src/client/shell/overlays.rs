@@ -360,15 +360,12 @@ pub(crate) fn render_context_menu(
             break;
         }
         let row = Rect::new(inner.x, row_y, inner.width, 1);
-        let highlighted = index == menu.highlighted;
-        let style = if highlighted {
-            Style::default()
-                .fg(panel_contrast_fg(palette))
-                .bg(palette.accent)
-                .add_modifier(Modifier::BOLD)
-        } else {
-            Style::default().fg(palette.text).bg(palette.panel_bg)
-        };
+        let style = list_row_style(
+            palette,
+            cx.components,
+            index == menu.highlighted,
+            menu.hovered == Some(index),
+        );
         buffer.set_style(row, style);
         put_text(buffer, row.x, row.y, row.width, item.label, style);
         rows.push((row, index));
@@ -1014,6 +1011,10 @@ fn render_navigator_overlay(
         .max(selected.saturating_sub(body.height.saturating_sub(1) as usize))
         .min(selected)
         .min(max);
+    let hovered = n
+        .hovered
+        .as_ref()
+        .and_then(|target| rows.iter().position(|row| row.target == *target));
     let following_siblings = navigator_following_siblings(&rows);
     let mut ancestor_siblings = Vec::new();
     let federated = endpoints.len() > 1;
@@ -1026,14 +1027,14 @@ fn render_navigator_overlay(
         }
         let rect = Rect::new(body.x, body.y + (ix - scroll) as u16, body.width, 1);
         row_hits.push((rect, r.target.clone()));
+        // 三态与其它浮层同一口径：选中 accent 反色 > 悬浮弱底色 > 常态。
+        // stale 行保留它自己的 surface0 选中底色（它不参与反色）。
+        let is_hovered = ix != selected && hovered == Some(ix);
+        let row_bg = super::list_row_bg(p, cx.components, false, is_hovered);
         let st = if r.stale {
             Style::default()
                 .fg(p.overlay0)
-                .bg(if ix == selected {
-                    p.surface0
-                } else {
-                    p.panel_bg
-                })
+                .bg(if ix == selected { p.surface0 } else { row_bg })
                 .add_modifier(Modifier::DIM)
         } else if ix == selected {
             Style::default()
@@ -1043,7 +1044,7 @@ fn render_navigator_overlay(
         } else {
             Style::default()
                 .fg(if r.current { p.text } else { p.subtext0 })
-                .bg(p.panel_bg)
+                .bg(row_bg)
         };
         b.set_style(rect, st);
         let tree = match &r.target {
@@ -1089,7 +1090,7 @@ fn render_navigator_overlay(
             let status_style = if r.stale || ix == selected {
                 st
             } else {
-                Style::default().fg(status_color(status, p)).bg(p.panel_bg)
+                Style::default().fg(status_color(status, p)).bg(row_bg)
             };
             put_text(
                 b,
@@ -1119,7 +1120,7 @@ fn render_navigator_overlay(
             } else {
                 Style::default()
                     .fg(color)
-                    .bg(p.panel_bg)
+                    .bg(row_bg)
                     .add_modifier(if r.stale {
                         Modifier::DIM
                     } else {
@@ -1495,10 +1496,12 @@ fn render_notification_history_overlay(
                 1,
             );
             let is_selected = ix == selected;
+            // 三态与其它浮层同一口径：选中 accent 反色 > 悬浮弱底色 > 常态。
+            let is_hovered = !is_selected && o.hovered == Some(ix);
+            let row_bg = super::list_row_bg(p, cx.components, is_selected, is_hovered);
+            let base = base.bg(row_bg);
             let row_style = if is_selected {
-                base.fg(panel_contrast_fg(p))
-                    .bg(p.accent)
-                    .add_modifier(Modifier::BOLD)
+                base.fg(panel_contrast_fg(p)).add_modifier(Modifier::BOLD)
             } else {
                 base.fg(p.text)
             };

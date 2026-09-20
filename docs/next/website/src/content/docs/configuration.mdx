@@ -309,7 +309,7 @@ toast_border_error = "#f38ba8"
 selection_mix_ratio = 0.35
 ```
 
-Unset fields keep their semantic fallback: pane borders use `accent`/`overlay0`, the scrollbar thumb uses `overlay1` (focused) or `overlay0`, the scrollbar track uses `overlay0` (focused) or `surface_dim`, toast borders use `green`/`blue`/`red`, and the mode bar uses `accent`. `selection_mix_ratio` (0.0–1.0, default 0.28) controls how strongly the selection background mixes the host background toward white or black. Selected text keeps its bold, italic, and underline styling; only the cell colors change. Search `theme.components` in the [Config reference](/docs/config-reference/) for the full list.
+Unset fields keep their semantic fallback: pane borders use `accent`/`overlay0`, the scrollbar thumb uses `overlay1` (focused) or `overlay0`, the scrollbar track uses `overlay0` (focused) or `surface_dim`, toast borders use `green`/`blue`/`red`, the mode bar uses `accent`, and `hover_bg` (the row the pointer hovers in menus and overlay lists) uses the first theme surface that stays visually distinct from the panel background — `surface1` in most themes, a stronger surface in light themes whose `surface1` is nearly identical to `panel_bg`. `selection_mix_ratio` (0.0–1.0, default 0.28) controls how strongly the selection background mixes the host background toward white or black. Selected text keeps its bold, italic, and underline styling; only the cell colors change. Search `theme.components` in the [Config reference](/docs/config-reference/) for the full list.
 
 ## UI and sidebar
 

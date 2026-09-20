@@ -456,6 +456,12 @@
           "description": "Error toast border color. Falls back to the red token. Accepts hex, named colors, rgb(r,g,b), or reset aliases."
         },
         {
+          "key": "theme.components.hover_bg",
+          "type": "color",
+          "default": "unset",
+          "description": "Background of the row the pointer hovers in menus and overlay lists. Falls back to the first theme surface that stays visually distinct from the panel background (surface1 in most themes). Accepts hex, named colors, rgb(r,g,b), or reset aliases."
+        },
+        {
           "key": "theme.components.selection_mix_ratio",
           "type": "number",
           "default": "0.28",

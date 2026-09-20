@@ -375,9 +375,10 @@ fn snippet_run_multi_machine_fans_out_per_endpoint() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// TOOL-07：hover 会把列表选中改到指针所在行，所以「二次点击才运行」不能靠
-/// `selected == row` 判定——指针路过后的首次点击只允许选中。窗口显式放大到
-/// 60 s，判定结果与真实耗时（nextest 并行下的调度抖动）无关。
+/// TOOL-07：指针路过后的首次点击只允许选中。MENU-01 之后 hover 只写
+/// `hovered`，键盘选中不再被指针劫持，但「二次点击才运行」仍靠独立的点击
+/// 痕迹判定。窗口显式放大到 60 s，判定结果与真实耗时（nextest 并行下的调度
+/// 抖动）无关。
 #[test]
 fn snippet_list_click_runs_only_on_the_second_click_after_hover() {
     let dir = with_temp_state_home("double-click");
@@ -395,7 +396,7 @@ fn snippet_list_click_runs_only_on_the_second_click_after_hover() {
         .expect("the list should expose clickable rows");
     let point = (rect.x, rect.y);
 
-    // 指针移到该行：只改选中。
+    // 指针移到该行：只写 hover，键盘选中不动（MENU-01）。
     state.handle_raw_events(vec![RawInputEvent::Mouse(MouseEvent {
         kind: MouseEventKind::Moved,
         column: point.0,
@@ -405,7 +406,8 @@ fn snippet_list_click_runs_only_on_the_second_click_after_hover() {
     let Some(ClientShellOverlay::Snippets(overlay)) = state.overlay.as_ref() else {
         panic!("snippets overlay");
     };
-    assert_eq!(overlay.selected, row);
+    assert_eq!(overlay.hovered, Some(row));
+    assert_eq!(overlay.selected, 0, "hover 不改写键盘选中");
     assert!(
         overlay.last_click.is_none(),
         "hover alone must not leave a click trace"
@@ -432,12 +434,90 @@ fn snippet_list_click_runs_only_on_the_second_click_after_hover() {
         "the first click must record a trace"
     );
 
+    // 指针移出行区域：hover 清空（不能留在鼠标早已离开的那一行）。
+    state.handle_raw_events(vec![RawInputEvent::Mouse(MouseEvent {
+        kind: MouseEventKind::Moved,
+        column: point.0,
+        row: 0,
+        modifiers: KeyModifiers::empty(),
+    })]);
+    let Some(ClientShellOverlay::Snippets(overlay)) = state.overlay.as_ref() else {
+        panic!("snippets overlay");
+    };
+    assert_eq!(overlay.hovered, None, "移出行区域后不留残影");
+
     // 同一片段的第二次点击才开始运行流。
     click_snippet_point(&mut state, point);
     assert!(matches!(
         snippets_view(&state),
         super::super::snippets_overlay::ClientSnippetsView::RunTargets(_)
     ));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// MENU-01：`hovered` 存的是行号，而 List / RunTargets / RunPickPane /
+/// RunPickMachines / History 五个视图共用这一个字段。切视图不清就会在新视图
+/// 里把同号的那一行画成「悬浮」，而指针其实停在别处，且要等下一次 `Moved`
+/// 才纠正——切视图的唯一写点 `set_view` 必须连带清掉它。
+#[test]
+fn snippet_view_switch_clears_the_pointer_hover() {
+    let dir = with_temp_state_home("hover-view-switch");
+    seed_snippet("deploy", "kubectl rollout restart deploy/web", &[]);
+    seed_snippet("logs", "kubectl logs -f svc/web", &[]);
+    let mut state = state();
+    state.config.double_click_window = std::time::Duration::from_secs(60);
+    state.open_snippets_overlay(false);
+    state.compose(106, 30).expect("composed frame");
+
+    let (rect, row) = *state
+        .hits
+        .snippet_rows
+        .get(1)
+        .expect("the list should expose clickable rows");
+    let point = (rect.x, rect.y);
+    state.handle_raw_events(vec![RawInputEvent::Mouse(MouseEvent {
+        kind: MouseEventKind::Moved,
+        column: point.0,
+        row: point.1,
+        modifiers: KeyModifiers::empty(),
+    })]);
+    let Some(ClientShellOverlay::Snippets(overlay)) = state.overlay.as_ref() else {
+        panic!("snippets overlay");
+    };
+    assert_eq!(overlay.hovered, Some(row));
+
+    // 双击进运行流：换到 RunTargets，旧行号必须失效。
+    click_snippet_point(&mut state, point);
+    click_snippet_point(&mut state, point);
+    assert!(matches!(
+        snippets_view(&state),
+        super::super::snippets_overlay::ClientSnippetsView::RunTargets(_)
+    ));
+    let Some(ClientShellOverlay::Snippets(overlay)) = state.overlay.as_ref() else {
+        panic!("snippets overlay");
+    };
+    assert_eq!(overlay.hovered, None, "换视图必须清 hover");
+
+    // 退回列表同样清。
+    state.handle_raw_events(vec![RawInputEvent::Mouse(MouseEvent {
+        kind: MouseEventKind::Moved,
+        column: point.0,
+        row: point.1,
+        modifiers: KeyModifiers::empty(),
+    })]);
+    assert!(matches!(
+        state.overlay.as_ref(),
+        Some(ClientShellOverlay::Snippets(overlay)) if overlay.hovered.is_some()
+    ));
+    state.handle_input_bytes(b"\x1b");
+    assert!(matches!(
+        snippets_view(&state),
+        super::super::snippets_overlay::ClientSnippetsView::List
+    ));
+    let Some(ClientShellOverlay::Snippets(overlay)) = state.overlay.as_ref() else {
+        panic!("snippets overlay");
+    };
+    assert_eq!(overlay.hovered, None, "回到列表也清 hover");
     let _ = std::fs::remove_dir_all(&dir);
 }
 

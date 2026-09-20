@@ -23,6 +23,9 @@ pub(super) struct ClientSnippetsOverlay {
     pub(super) query: TextEditor,
     pub(super) search_focused: bool,
     pub(super) selected: usize,
+    /// 指针悬浮行：只由 `Moved` 改写。`selected` 只由键盘与点击改写，否则
+    /// 指针路过任意一行之后按回车运行的是「鼠标最后路过的片段」（MENU-01）。
+    pub(super) hovered: Option<usize>,
     pub(super) scroll: usize,
     /// One-shot feedback line shown in the list footer (saved/removed/...).
     pub(super) message: Option<String>,
@@ -34,11 +37,23 @@ pub(super) struct ClientSnippetsOverlay {
     pub(super) library: SnippetLibrary,
     /// Library load failure replaces the list body.
     pub(super) library_error: Option<String>,
-    /// 列表里最近一次被左键点击的片段身份 + 时刻。hover 会改写 `selected`，
-    /// 所以「二次点击才运行」必须用独立的点击痕迹判定，不能看 `selected == row`；
-    /// 记身份而不是行号，筛选、删除、保存重排等任何改动列表内容的路径都天然失效，
-    /// 不需要逐个出口手工清痕迹。
+    /// 列表里最近一次被左键点击的片段身份 + 时刻。「二次点击才运行」必须用
+    /// 独立的点击痕迹判定，不能看 `selected == row`（点击本身就会写
+    /// `selected`，首击即成立）；记身份而不是行号，筛选、删除、保存重排等
+    /// 任何改动列表内容的路径都天然失效，不需要逐个出口手工清痕迹。
     pub(super) last_click: Option<(SnippetId, std::time::Instant)>,
+}
+
+impl ClientSnippetsOverlay {
+    /// 切视图的唯一入口：顺带清掉指针悬浮行。`hovered` 存的是行号，而 List /
+    /// RunTargets / RunPickPane / RunPickMachines / History 五个视图共用同一个
+    /// 字段——换了视图不清，新视图里同号的那一行会立刻被画成「悬浮」，而指针
+    /// 其实停在别处，且要等下一次 `Moved` 才纠正（MENU-01）。直接写 `view`
+    /// 就会漏掉这一半，所以写点只留这一个。
+    pub(super) fn set_view(&mut self, view: ClientSnippetsView) {
+        self.view = view;
+        self.hovered = None;
+    }
 }
 
 #[derive(Debug)]
@@ -295,6 +310,7 @@ impl ClientShellState {
             query: TextEditor::default(),
             search_focused: false,
             selected: 0,
+            hovered: None,
             scroll: 0,
             message: None,
             pick_for_run,
@@ -413,7 +429,7 @@ impl ClientShellState {
             },
         };
         if let Some(ClientShellOverlay::Snippets(overlay)) = self.overlay.as_mut() {
-            overlay.view = ClientSnippetsView::Form(Box::new(form));
+            overlay.set_view(ClientSnippetsView::Form(Box::new(form)));
         }
     }
 
@@ -494,7 +510,7 @@ impl ClientShellState {
         };
         let t = &crate::i18n::texts().snippets;
         if let Some(ClientShellOverlay::Snippets(overlay)) = self.overlay.as_mut() {
-            overlay.view = ClientSnippetsView::List;
+            overlay.set_view(ClientSnippetsView::List);
             overlay.message = Some(match result {
                 Saved::Added | Saved::Updated => t.saved_message.to_owned(),
                 // The snippet vanished underneath the form (external edit).
@@ -508,7 +524,7 @@ impl ClientShellState {
             return;
         };
         if let Some(ClientShellOverlay::Snippets(overlay)) = self.overlay.as_mut() {
-            overlay.view = ClientSnippetsView::DeleteConfirm(snippet.id.clone());
+            overlay.set_view(ClientSnippetsView::DeleteConfirm(snippet.id.clone()));
         }
     }
 
@@ -527,7 +543,7 @@ impl ClientShellState {
         });
         let t = &crate::i18n::texts().snippets;
         if let Some(ClientShellOverlay::Snippets(overlay)) = self.overlay.as_mut() {
-            overlay.view = ClientSnippetsView::List;
+            overlay.set_view(ClientSnippetsView::List);
             overlay.message = match (removed, stored) {
                 (true, Ok(())) => Some(t.removed_message.to_owned()),
                 (_, Err(error)) => Some(error),
@@ -540,8 +556,9 @@ impl ClientShellState {
 
     fn start_snippet_run_flow(&mut self, snippet: Snippet) {
         if let Some(ClientShellOverlay::Snippets(overlay)) = self.overlay.as_mut() {
-            overlay.view =
-                ClientSnippetsView::RunTargets(Box::new(ClientSnippetRunDraft::new(snippet)));
+            overlay.set_view(ClientSnippetsView::RunTargets(Box::new(
+                ClientSnippetRunDraft::new(snippet),
+            )));
         }
     }
 
@@ -550,7 +567,7 @@ impl ClientShellState {
     fn advance_run_draft(&mut self) {
         if let Some(ClientShellOverlay::Snippets(overlay)) = self.overlay.as_mut() {
             let view = std::mem::replace(&mut overlay.view, ClientSnippetsView::List);
-            overlay.view = match view {
+            overlay.set_view(match view {
                 ClientSnippetsView::RunTargets(draft)
                 | ClientSnippetsView::RunPickPane(draft)
                 | ClientSnippetsView::RunPickMachines(draft)
@@ -564,7 +581,7 @@ impl ClientShellState {
                     }
                 }
                 other => other,
-            };
+            });
         }
     }
 
@@ -591,7 +608,7 @@ impl ClientShellState {
                 if let Some(ClientShellOverlay::Snippets(overlay)) = self.overlay.as_mut() {
                     let view = std::mem::replace(&mut overlay.view, ClientSnippetsView::List);
                     if let ClientSnippetsView::RunTargets(draft) = view {
-                        overlay.view = ClientSnippetsView::RunPickPane(draft);
+                        overlay.set_view(ClientSnippetsView::RunPickPane(draft));
                     }
                 }
             }
@@ -604,7 +621,7 @@ impl ClientShellState {
                     let view = std::mem::replace(&mut overlay.view, ClientSnippetsView::List);
                     if let ClientSnippetsView::RunTargets(mut draft) = view {
                         draft.machine_selected = vec![true; count];
-                        overlay.view = ClientSnippetsView::RunPickMachines(draft);
+                        overlay.set_view(ClientSnippetsView::RunPickMachines(draft));
                     }
                 }
             }
@@ -721,7 +738,7 @@ impl ClientShellState {
             if let Some(ClientShellOverlay::Snippets(overlay)) = self.overlay.as_mut() {
                 let view = std::mem::replace(&mut overlay.view, ClientSnippetsView::List);
                 if let ClientSnippetsView::RunVariables(draft) = view {
-                    overlay.view = ClientSnippetsView::RunConfirm(draft);
+                    overlay.set_view(ClientSnippetsView::RunConfirm(draft));
                 }
             }
         }
@@ -732,7 +749,7 @@ impl ClientShellState {
             return;
         };
         let view = std::mem::replace(&mut overlay.view, ClientSnippetsView::List);
-        overlay.view = match view {
+        overlay.set_view(match view {
             ClientSnippetsView::List => {
                 self.overlay = None;
                 return;
@@ -747,7 +764,7 @@ impl ClientShellState {
             ClientSnippetsView::RunVariables(draft) | ClientSnippetsView::RunConfirm(draft) => {
                 ClientSnippetsView::RunTargets(draft)
             }
-        };
+        });
     }
 
     /// Executes the confirmed run: every target gets its own pane-input
@@ -1219,10 +1236,10 @@ impl ClientShellState {
             KeyCode::Char('h') if plain => {
                 self.reload_snippets_library();
                 if let Some(ClientShellOverlay::Snippets(overlay)) = self.overlay.as_mut() {
-                    overlay.view = ClientSnippetsView::History {
+                    overlay.set_view(ClientSnippetsView::History {
                         selected: 0,
                         scroll: 0,
-                    };
+                    });
                 }
                 outcome.repaint = true;
             }
@@ -1387,10 +1404,10 @@ impl ClientShellState {
             Btn::History => {
                 self.reload_snippets_library();
                 if let Some(ClientShellOverlay::Snippets(overlay)) = self.overlay.as_mut() {
-                    overlay.view = ClientSnippetsView::History {
+                    overlay.set_view(ClientSnippetsView::History {
                         selected: 0,
                         scroll: 0,
-                    };
+                    });
                 }
             }
             Btn::Back => self.snippets_back(),
@@ -1425,8 +1442,8 @@ impl ClientShellState {
         };
         match &mut overlay.view {
             ClientSnippetsView::List => {
-                // 指针路过就会把 `selected` 拉到该行，所以只有独立记录的同一个
-                // 片段的点击痕迹才能算「二次点击」。
+                // 点击痕迹按片段身份记：筛选、删除、保存后重排都不会让上一次
+                // 点击落到别的片段上，所以「二次点击才运行」不看 `selected`。
                 let now = std::time::Instant::now();
                 let second_click = match (clicked.as_ref(), overlay.last_click.as_ref()) {
                     (Some(id), Some((last_id, at))) => {
@@ -1470,24 +1487,25 @@ impl ClientShellState {
         outcome.repaint = true;
     }
 
-    /// Hover over a list/picker row selects it without activating; returns
-    /// true when the selection moved.
-    pub(super) fn hover_snippet_row(&mut self, index: usize) -> bool {
+    /// 指针悬浮行：只写 `hovered`，绝不动 `selected` / `target_selected`——
+    /// 否则指针路过任意一行之后按回车运行的是「鼠标最后路过的片段」
+    /// （TOOL-07）。`None` 表示指针不在任何行上，出界也要写，否则弱底色会留在
+    /// 鼠标早已离开的那一行（MENU-01）。返回 true 表示悬浮行变了。
+    pub(super) fn hover_snippet_row(&mut self, hovered: Option<usize>) -> bool {
         let Some(ClientShellOverlay::Snippets(overlay)) = self.overlay.as_mut() else {
             return false;
         };
-        let selected = match &mut overlay.view {
-            ClientSnippetsView::List => &mut overlay.selected,
-            ClientSnippetsView::RunTargets(draft)
-            | ClientSnippetsView::RunPickPane(draft)
-            | ClientSnippetsView::RunPickMachines(draft) => &mut draft.target_selected,
-            ClientSnippetsView::History { selected, .. } => selected,
-            _ => return false,
-        };
-        let changed = *selected != index;
-        if changed {
-            *selected = index;
-        }
+        let hoverable = matches!(
+            overlay.view,
+            ClientSnippetsView::List
+                | ClientSnippetsView::RunTargets(_)
+                | ClientSnippetsView::RunPickPane(_)
+                | ClientSnippetsView::RunPickMachines(_)
+                | ClientSnippetsView::History { .. }
+        );
+        let hovered = hovered.filter(|_| hoverable);
+        let changed = overlay.hovered != hovered;
+        overlay.hovered = hovered;
         changed
     }
 
@@ -1522,10 +1540,12 @@ pub(super) fn render_snippets_overlay(
         ClientSnippetsView::DeleteConfirm(id) => {
             render_snippet_delete_confirm(b, id, &overlay.library, cx)
         }
-        ClientSnippetsView::RunTargets(draft) => render_run_targets(b, draft, cx),
-        ClientSnippetsView::RunPickPane(draft) => render_run_pick_pane(b, draft, endpoints, cx),
+        ClientSnippetsView::RunTargets(draft) => render_run_targets(b, draft, overlay.hovered, cx),
+        ClientSnippetsView::RunPickPane(draft) => {
+            render_run_pick_pane(b, draft, overlay.hovered, endpoints, cx)
+        }
         ClientSnippetsView::RunPickMachines(draft) => {
-            render_run_pick_machines(b, draft, endpoints, cx)
+            render_run_pick_machines(b, draft, overlay.hovered, endpoints, cx)
         }
         ClientSnippetsView::RunVariables(draft) => render_run_variables(b, draft, cx),
         ClientSnippetsView::RunConfirm(draft) => {
@@ -1648,14 +1668,8 @@ fn render_snippet_list(
         let rect = Rect::new(body.x, y, body.width, row_height as u16);
         row_hits.push((rect, index));
         let is_selected = index == selected;
-        let style = if is_selected {
-            Style::default()
-                .fg(panel_contrast_fg(p))
-                .bg(p.accent)
-                .add_modifier(Modifier::BOLD)
-        } else {
-            Style::default().fg(p.text).bg(p.panel_bg)
-        };
+        let is_hovered = overlay.hovered == Some(index);
+        let style = list_row_style(p, cx.components, is_selected, is_hovered);
         b.set_style(rect, style);
         put_text(
             b,
@@ -1672,7 +1686,9 @@ fn render_snippet_list(
         let meta_style = if is_selected {
             style
         } else {
-            Style::default().fg(p.overlay0).bg(p.panel_bg)
+            Style::default()
+                .fg(p.overlay0)
+                .bg(list_row_bg(p, cx.components, false, is_hovered))
         };
         put_text(
             b,
@@ -2042,6 +2058,7 @@ fn run_title(snippet: &Snippet) -> String {
 fn render_run_targets(
     b: &mut Buffer,
     draft: &ClientSnippetRunDraft,
+    hovered: Option<usize>,
     cx: &super::feedback::ChromeContext<'_>,
 ) -> Option<OverlayRender> {
     let p = cx.palette;
@@ -2089,14 +2106,7 @@ fn render_run_targets(
         }
         let rect = Rect::new(body.x, y, body.width, 1);
         row_hits.push((rect, index));
-        let style = if index == selected {
-            Style::default()
-                .fg(panel_contrast_fg(p))
-                .bg(p.accent)
-                .add_modifier(Modifier::BOLD)
-        } else {
-            Style::default().fg(p.text).bg(p.panel_bg)
-        };
+        let style = list_row_style(p, cx.components, index == selected, hovered == Some(index));
         b.set_style(rect, style);
         put_text(b, rect.x, rect.y, rect.width, &format!(" {label}"), style);
     }
@@ -2121,6 +2131,7 @@ fn render_run_targets(
 fn render_run_pick_pane(
     b: &mut Buffer,
     draft: &ClientSnippetRunDraft,
+    hovered: Option<usize>,
     endpoints: &[ClientShellEndpoint],
     cx: &super::feedback::ChromeContext<'_>,
 ) -> Option<OverlayRender> {
@@ -2176,14 +2187,7 @@ fn render_run_pick_pane(
         let rect = Rect::new(body.x, y, body.width, 1);
         row_hits.push((rect, index));
         let is_selected = index == selected;
-        let style = if is_selected {
-            Style::default()
-                .fg(panel_contrast_fg(p))
-                .bg(p.accent)
-                .add_modifier(Modifier::BOLD)
-        } else {
-            Style::default().fg(p.text).bg(p.panel_bg)
-        };
+        let style = list_row_style(p, cx.components, is_selected, hovered == Some(index));
         b.set_style(rect, style);
         put_text(
             b,
@@ -2221,6 +2225,7 @@ fn render_run_pick_pane(
 fn render_run_pick_machines(
     b: &mut Buffer,
     draft: &ClientSnippetRunDraft,
+    hovered: Option<usize>,
     endpoints: &[ClientShellEndpoint],
     cx: &super::feedback::ChromeContext<'_>,
 ) -> Option<OverlayRender> {
@@ -2277,14 +2282,7 @@ fn render_run_pick_machines(
         row_hits.push((rect, index));
         let is_selected = index == selected;
         let checked = draft.machine_selected.get(index).copied().unwrap_or(false);
-        let style = if is_selected {
-            Style::default()
-                .fg(panel_contrast_fg(p))
-                .bg(p.accent)
-                .add_modifier(Modifier::BOLD)
-        } else {
-            Style::default().fg(p.text).bg(p.panel_bg)
-        };
+        let style = list_row_style(p, cx.components, is_selected, hovered == Some(index));
         b.set_style(rect, style);
         put_text(
             b,
@@ -2668,14 +2666,8 @@ fn render_snippet_history(
         let rect = Rect::new(body.x, y, body.width, 1);
         row_hits.push((rect, index));
         let is_selected = index == selected;
-        let style = if is_selected {
-            Style::default()
-                .fg(panel_contrast_fg(p))
-                .bg(p.accent)
-                .add_modifier(Modifier::BOLD)
-        } else {
-            Style::default().fg(p.text).bg(p.panel_bg)
-        };
+        let is_hovered = overlay.hovered == Some(index);
+        let style = list_row_style(p, cx.components, is_selected, is_hovered);
         b.set_style(rect, style);
         let (state_label, state_color) = if record.success {
             (t.history_sent, p.green)
@@ -2693,7 +2685,9 @@ fn render_snippet_history(
         let right_style = if is_selected {
             style
         } else {
-            Style::default().fg(state_color).bg(p.panel_bg)
+            Style::default()
+                .fg(state_color)
+                .bg(list_row_bg(p, cx.components, false, is_hovered))
         };
         put_right_text(b, rect, rect.y, &right, right_style);
         if !record.success && index == selected {

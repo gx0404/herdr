@@ -258,6 +258,42 @@ fn panel_contrast_fg(palette: &Palette) -> ratatui::style::Color {
     }
 }
 
+/// 浮层列表行的底色，三态优先级：键盘选中（accent 反色）> 指针悬浮
+/// （`components.hover_bg` 弱色）> 常态。hover 与 selected 分离之后两者必须
+/// 视觉可辨，否则「鼠标路过」看起来就是「键盘选中」，回车激活的却是另一项
+/// （MENU-01）。纯函数、无分配，供行循环按行调用。
+fn list_row_bg(
+    palette: &Palette,
+    components: &crate::app::state::ComponentStyles,
+    selected: bool,
+    hovered: bool,
+) -> ratatui::style::Color {
+    if selected {
+        palette.accent
+    } else if hovered {
+        components.hover_bg
+    } else {
+        palette.panel_bg
+    }
+}
+
+/// `list_row_bg` 对应的整行样式：选中行反色加粗，悬浮行只换底色。
+fn list_row_style(
+    palette: &Palette,
+    components: &crate::app::state::ComponentStyles,
+    selected: bool,
+    hovered: bool,
+) -> Style {
+    let style = Style::default().bg(list_row_bg(palette, components, selected, hovered));
+    if selected {
+        style
+            .fg(panel_contrast_fg(palette))
+            .add_modifier(Modifier::BOLD)
+    } else {
+        style.fg(palette.text)
+    }
+}
+
 fn blit_pane_surface(target: &mut FrameData, source: &FrameData, area: Rect) {
     let copy_width = source.width.min(area.width);
     let copy_height = source.height.min(area.height);

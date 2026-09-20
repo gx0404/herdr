@@ -3,6 +3,12 @@ use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
 
 const SELECTION_REPAINT_INTERVAL: std::time::Duration = std::time::Duration::from_millis(16);
 
+/// 侧栏 / 标签条把「按住不放的移动」升级成拖拽所需的最小位移（单位：cell）。
+/// 阈值只有 1 cell 时轻微手抖就会建立一次指向自身槽位的拖拽，抬起时既不重排
+/// 也不切换，用户看到的是「什么都没发生」（HERDR-UX-004）；与工作台面板拖动
+/// （`workbench::interaction` 的 `> 1`）取同一档。
+const CHROME_DRAG_THRESHOLD_CELLS: u16 = 2;
+
 impl ClientShellState {
     fn selection_autoscroll_interval(&self) -> std::time::Duration {
         self.config.selection_autoscroll_interval
@@ -582,6 +588,78 @@ impl ClientShellState {
             .map(|(_, target)| target)
     }
 
+    /// 把 `source` 拖到 `before_workspace_id` 之前是否真的改变顺序。落点槽位
+    /// 就是源槽位（`before` 是自己，或插入位置等于当前位置）时返回 false：
+    /// 这类拖拽建立了也只会在抬起时被丢弃，反而吃掉原本的点击（HERDR-UX-004）。
+    /// 纯判定、无分配，供指针移动的每个事件调用。
+    fn workspace_drop_reorders(
+        &self,
+        source_workspace_id: &str,
+        before_workspace_id: Option<&str>,
+    ) -> bool {
+        let Some(snapshot) = self.snapshot.as_deref() else {
+            return false;
+        };
+        if before_workspace_id == Some(source_workspace_id) {
+            return false;
+        }
+        let roots = || {
+            snapshot.workspaces.iter().filter(|workspace| {
+                !workspace
+                    .worktree
+                    .as_ref()
+                    .is_some_and(|worktree| worktree.is_linked_worktree)
+            })
+        };
+        let Some(source_position) =
+            roots().position(|workspace| workspace.workspace_id == source_workspace_id)
+        else {
+            return false;
+        };
+        let remaining =
+            || roots().filter(|workspace| workspace.workspace_id != source_workspace_id);
+        let insert_position = match before_workspace_id {
+            Some(target) => {
+                match remaining().position(|workspace| workspace.workspace_id == target) {
+                    Some(position) => position,
+                    None => return false,
+                }
+            }
+            None => remaining().count(),
+        };
+        insert_position != source_position
+    }
+
+    /// 把 `tab_id` 插到 `insert_index` 是否真的改变顺序。判据不在这里重写，
+    /// 直接调服务端 `Workspace::move_tab` 用的同一个
+    /// `crate::workspace::reorder_target_index`——客户端自己抄一份的话，日后
+    /// 谁改了插入语义都不会变红，症状却是静默的（客户端判定能排、服务端丢弃，
+    /// 或反过来把重排手势变成切换）。
+    pub(super) fn tab_drop_reorders(&self, tab_id: &str, insert_index: usize) -> bool {
+        let Some(snapshot) = self.snapshot.as_deref() else {
+            return false;
+        };
+        let Some(workspace_id) = snapshot.focused_workspace_id.as_deref() else {
+            return false;
+        };
+        let mut count = 0usize;
+        let mut position = None;
+        for tab in snapshot
+            .tabs
+            .iter()
+            .filter(|tab| tab.workspace_id == workspace_id)
+        {
+            if tab.tab_id == tab_id {
+                position = Some(count);
+            }
+            count += 1;
+        }
+        let Some(position) = position else {
+            return false;
+        };
+        crate::workspace::reorder_target_index(position, insert_index, count).is_some()
+    }
+
     fn workspace_move_method(
         &self,
         source_workspace_id: &str,
@@ -599,34 +677,7 @@ impl ClientShellState {
         {
             return None;
         }
-        if before_workspace_id == Some(source_workspace_id) {
-            return None;
-        }
-        let roots = snapshot
-            .workspaces
-            .iter()
-            .filter(|workspace| {
-                !workspace
-                    .worktree
-                    .as_ref()
-                    .is_some_and(|worktree| worktree.is_linked_worktree)
-            })
-            .collect::<Vec<_>>();
-        let source_position = roots
-            .iter()
-            .position(|workspace| workspace.workspace_id == source_workspace_id)?;
-        let remaining = roots
-            .iter()
-            .copied()
-            .filter(|workspace| workspace.workspace_id != source_workspace_id)
-            .collect::<Vec<_>>();
-        let insert_position = match before_workspace_id {
-            Some(target) => remaining
-                .iter()
-                .position(|workspace| workspace.workspace_id == target)?,
-            None => remaining.len(),
-        };
-        if insert_position == source_position {
+        if !self.workspace_drop_reorders(source_workspace_id, before_workspace_id) {
             return None;
         }
 
@@ -708,8 +759,10 @@ impl ClientShellState {
             return;
         }
         self.update_link_hover(mouse, outcome);
-        // Any pointer activity ends link hints mode (it is keyboard-driven).
-        if self.link_hints.take().is_some() {
+        // 按下 / 拖拽 / 抬起 / 滚轮这类明确的指针动作结束 link hints 模式（它是
+        // 键盘驱动的）；单纯的移动不结束——1003 模式下终端全程上报指针位置，
+        // 手指没离开触控板、桌面震一下都会在第二个字母之前取消（HERDR-UX-007）。
+        if mouse.kind != MouseEventKind::Moved && self.link_hints.take().is_some() {
             outcome.repaint = true;
         }
         let point = (mouse.column, mouse.row);
@@ -1254,18 +1307,42 @@ impl ClientShellState {
                 None => {}
             }
             if let Some(press) = self.workspace_press.as_ref() {
-                let delta = mouse
-                    .column
-                    .abs_diff(press.start_column)
-                    .max(mouse.row.abs_diff(press.start_row));
-                if delta >= 1 {
+                // 侧栏是纵向列表：只有纵向位移才可能是重排，横漂不算拖拽。
+                let delta = mouse.row.abs_diff(press.start_row);
+                if delta >= CHROME_DRAG_THRESHOLD_CELLS {
                     let source_workspace_id = press.workspace_id.clone();
                     let draggable = self.endpoint_workspace_is_draggable(press);
                     if draggable {
                         if let Some(target) = self.workspace_drop_target_at(point) {
-                            self.chrome_drag = Some(ClientChromeDrag::Workspace {
-                                source_workspace_id,
-                                target: Some(target),
+                            // 落点就是源槽位时不建立拖拽：保留 `workspace_press`，
+                            // 抬起时照旧是点击切换。
+                            if self
+                                .workspace_drop_reorders(&source_workspace_id, target.0.as_deref())
+                            {
+                                self.chrome_drag = Some(ClientChromeDrag::Workspace {
+                                    source_workspace_id,
+                                    target: Some(target),
+                                });
+                                outcome.repaint = true;
+                            }
+                        }
+                    }
+                }
+                return;
+            }
+            if let Some(press) = self.tab_press.as_ref() {
+                // 标签条是横向列表：只看横向位移。
+                let delta = mouse.column.abs_diff(press.start_column);
+                if delta >= CHROME_DRAG_THRESHOLD_CELLS {
+                    let tab_id = press.tab_id.clone();
+                    let workspace_id = press.workspace_id.clone();
+                    if let Some(insert_index) = self.tab_drop_index_at(point) {
+                        // 插到自己的位置不是重排（服务端同口径），保留点击语义。
+                        if self.tab_drop_reorders(&tab_id, insert_index) {
+                            self.chrome_drag = Some(ClientChromeDrag::Tab {
+                                tab_id,
+                                workspace_id,
+                                insert_index: Some(insert_index),
                             });
                             outcome.repaint = true;
                         }
@@ -1273,28 +1350,14 @@ impl ClientShellState {
                 }
                 return;
             }
-            if let Some(press) = self.tab_press.as_ref() {
-                let delta = mouse
-                    .column
-                    .abs_diff(press.start_column)
-                    .max(mouse.row.abs_diff(press.start_row));
-                if delta >= 1 {
-                    if let Some(insert_index) = self.tab_drop_index_at(point) {
-                        self.chrome_drag = Some(ClientChromeDrag::Tab {
-                            tab_id: press.tab_id.clone(),
-                            workspace_id: press.workspace_id.clone(),
-                            insert_index: Some(insert_index),
-                        });
-                        outcome.repaint = true;
-                    }
-                }
-                return;
-            }
         }
         if mouse.kind == MouseEventKind::Up(MouseButton::Left) {
             if let Some(drag) = self.chrome_drag.take() {
-                self.workspace_press = None;
-                self.tab_press = None;
+                // 抬起时拖拽没有产生真实重排，就退化回原本的点击语义
+                // （HERDR-UX-004）：一次按下抬起要么重排、要么切换，不能两头
+                // 落空。press 在拖拽期间一直保留，这里正是它的用处。
+                let workspace_press = self.workspace_press.take();
+                let tab_press = self.tab_press.take();
                 match drag {
                     ClientChromeDrag::Tab {
                         tab_id,
@@ -1316,16 +1379,31 @@ impl ClientShellState {
                                             .count()
                                 })
                         });
+                        // 落在合法插入位但不改变顺序时退化为点击切换；完全没有
+                        // 落点（拖出标签条）仍是「取消拖拽」，不产生任何动作。
                         if valid_drop {
-                            self.push_endpoint_method(
-                                crate::api::schema::Method::TabMove(
-                                    crate::api::schema::TabMoveParams {
-                                        tab_id,
-                                        insert_index: insert_index.unwrap_or_default(),
-                                    },
-                                ),
-                                outcome,
-                            );
+                            let insert_index = insert_index.unwrap_or_default();
+                            if self.tab_drop_reorders(&tab_id, insert_index) {
+                                self.push_endpoint_method(
+                                    crate::api::schema::Method::TabMove(
+                                        crate::api::schema::TabMoveParams {
+                                            tab_id,
+                                            insert_index,
+                                        },
+                                    ),
+                                    outcome,
+                                );
+                            } else if let Some(press) = tab_press {
+                                // 鼠标点击标签是用户手势：连续点击只保留最新目标。
+                                self.push_endpoint_method_coalescing(
+                                    crate::api::schema::Method::TabFocus(
+                                        crate::api::schema::TabTarget {
+                                            tab_id: press.tab_id,
+                                        },
+                                    ),
+                                    outcome,
+                                );
+                            }
                         }
                         outcome.repaint = true;
                     }
@@ -1333,12 +1411,19 @@ impl ClientShellState {
                         source_workspace_id,
                         target,
                     } => {
+                        // 同上：落在槽位但不改变顺序 → 点击语义；拖出侧栏
+                        // （`target` 为 None）→ 取消拖拽。
                         if let Some((before_workspace_id, _)) = target {
-                            if let Some(method) = self.workspace_move_method(
+                            match self.workspace_move_method(
                                 &source_workspace_id,
                                 before_workspace_id.as_deref(),
                             ) {
-                                self.push_endpoint_method(method, outcome);
+                                Some(method) => self.push_endpoint_method(method, outcome),
+                                None => {
+                                    if let Some(press) = workspace_press {
+                                        self.finish_endpoint_workspace_press(press, outcome);
+                                    }
+                                }
                             }
                         }
                         outcome.repaint = true;
@@ -1428,9 +1513,9 @@ impl ClientShellState {
                 .copied();
             match mouse.kind {
                 MouseEventKind::Moved => {
-                    if let Some((_, index)) = row_hit {
-                        outcome.repaint |= self.set_palette_selection(index);
-                    }
+                    // 指针只写 hover：键盘选中不被「鼠标路过」改写，出界也要写
+                    // None 才不会留下残影（MENU-01）。
+                    outcome.repaint |= self.set_palette_hover(row_hit.map(|(_, index)| index));
                 }
                 MouseEventKind::ScrollUp => {
                     self.scroll_palette(-1);
@@ -1445,6 +1530,8 @@ impl ClientShellState {
                         self.toggle_global_menu();
                         outcome.repaint = true;
                     } else if let Some((_, index)) = row_hit {
+                        // 点击是显式选择：与键盘一样改写 `selected`，再激活。
+                        self.set_palette_selection(index);
                         self.activate_palette_item(index, outcome);
                     } else if !super::contains(self.hits.menu_popup, point) {
                         self.close_command_browser();
@@ -1464,11 +1551,12 @@ impl ClientShellState {
                 .copied();
             match mouse.kind {
                 MouseEventKind::Moved => {
-                    if let (Some((_, index)), Some(ClientShellOverlay::ContextMenu(menu))) =
-                        (row_hit, self.overlay.as_mut())
-                    {
-                        menu.highlighted = index;
-                        outcome.repaint = true;
+                    if let Some(ClientShellOverlay::ContextMenu(menu)) = self.overlay.as_mut() {
+                        let hovered = row_hit.map(|(_, index)| index);
+                        if menu.hovered != hovered {
+                            menu.hovered = hovered;
+                            outcome.repaint = true;
+                        }
                     }
                 }
                 MouseEventKind::Down(MouseButton::Left) => {
@@ -1691,13 +1779,15 @@ impl ClientShellState {
                 .cloned();
             match mouse.kind {
                 MouseEventKind::Moved => {
-                    if let Some((_, target)) = row_hit {
-                        if let Some(ClientShellOverlay::Navigator(navigator)) =
-                            self.overlay.as_mut()
-                        {
-                            navigator.selected = Some(target);
+                    // 指针只写 hover：Enter 会真的切走（跨端点还会激活端点
+                    // 投影），键盘选中不能被「鼠标路过」改写；出界也要写 None
+                    // 才不会留下残影（MENU-01 / UX-04）。
+                    let hovered = row_hit.map(|(_, target)| target);
+                    if let Some(ClientShellOverlay::Navigator(navigator)) = self.overlay.as_mut() {
+                        if navigator.hovered != hovered {
+                            navigator.hovered = hovered;
+                            outcome.repaint = true;
                         }
-                        outcome.repaint = true;
                     }
                 }
                 MouseEventKind::Down(MouseButton::Left) => {
@@ -1770,16 +1860,16 @@ impl ClientShellState {
         if matches!(self.overlay, Some(ClientShellOverlay::Machines(_))) {
             match mouse.kind {
                 MouseEventKind::Moved if self.hits.machines_detail_area.is_empty() => {
-                    if let Some((_, profile_id)) = self
+                    // 指针只写 hover：`selected` 留给键盘与点击，否则划过列表
+                    // 就把 d / x / r / Shift+R 这些破坏性键重新指向「鼠标最后
+                    // 路过的机器」（MENU-01 / UX-04）。出界也要写 None。
+                    let hovered = self
                         .hits
                         .machines_rows
                         .iter()
                         .find(|(rect, _)| super::contains(*rect, point))
-                        .cloned()
-                    {
-                        self.hover_machine_row(&profile_id);
-                        outcome.repaint = true;
-                    }
+                        .map(|(_, profile_id)| profile_id.clone());
+                    outcome.repaint |= self.hover_machine_row(hovered.as_ref());
                 }
                 MouseEventKind::ScrollUp if super::contains(self.hits.machines_popup, point) => {
                     if super::contains(self.hits.machines_detail_area, point) {
@@ -1855,7 +1945,8 @@ impl ClientShellState {
                         .find(|(rect, _)| super::contains(*rect, point))
                         .cloned()
                     {
-                        self.hover_machine_row(&profile_id);
+                        // 点击是显式选择：写 `selected`（不是 hover）。
+                        self.select_machine_row(&profile_id);
                         if self.hits.machines_detail_area.is_empty() {
                             self.open_machine_detail(&profile_id);
                         }
@@ -1901,23 +1992,26 @@ impl ClientShellState {
         if matches!(self.overlay, Some(ClientShellOverlay::Snippets(_))) {
             match mouse.kind {
                 MouseEventKind::Moved => {
-                    if let Some((_, index)) = self
+                    // 悬浮只写 hover，不改键盘选中（MENU-01）。
+                    let hovered = self
                         .hits
                         .snippet_rows
                         .iter()
                         .find(|(rect, _)| super::contains(*rect, point))
-                        .copied()
-                    {
-                        // Hover selects the row without activating it.
-                        outcome.repaint |= self.hover_snippet_row(index);
-                    }
+                        .map(|(_, index)| *index);
+                    outcome.repaint |= self.hover_snippet_row(hovered);
                 }
                 MouseEventKind::ScrollUp if super::contains(self.hits.snippet_popup, point) => {
+                    // List/History 视图下滚轮走的是 `move_snippet_selection`：
+                    // 视口由 `selected` 反推，选中被移出窗口时视口跟着滚，指针
+                    // 下面的行随之改变，旧的 hover 行号立刻失效。
                     self.scroll_snippets_overlay(-3);
+                    self.hover_snippet_row(None);
                     outcome.repaint = true;
                 }
                 MouseEventKind::ScrollDown if super::contains(self.hits.snippet_popup, point) => {
                     self.scroll_snippets_overlay(3);
+                    self.hover_snippet_row(None);
                     outcome.repaint = true;
                 }
                 MouseEventKind::Down(MouseButton::Left) => {
@@ -2011,24 +2105,29 @@ impl ClientShellState {
             );
             match mouse.kind {
                 MouseEventKind::Moved => {
-                    if let Some((_, index)) = self
+                    // 悬浮只写 hover：恢复现场会写端点目录，键盘选中必须只由
+                    // 键盘与点击决定（MENU-01 / TOOL-02）。
+                    let hovered = self
                         .hits
                         .scenes_rows
                         .iter()
                         .find(|(rect, _)| super::contains(*rect, point))
-                        .copied()
-                    {
-                        if self.set_scenes_selection(index) {
-                            outcome.repaint = true;
-                        }
-                    }
+                        .map(|(_, index)| *index);
+                    outcome.repaint |= self.set_scenes_hover(hovered);
                 }
+                // 滚轮移动选中行（与片段浮层的 List/History 同口径：两者的
+                // 视口都是由 `selected` 反推的，没有独立 scroll）。选中被移出
+                // 可视窗口时视口会跟着滚，指针下面的行随之改变，所以顺带清
+                // hover。让滚轮不再改写键盘选中需要先给两个浮层引入真正的
+                // scroll，已登记为 C-20 残留，不在本批范围。
                 MouseEventKind::ScrollUp if super::contains(self.hits.scenes_popup, point) => {
                     self.move_scenes_selection(-3);
+                    self.set_scenes_hover(None);
                     outcome.repaint = true;
                 }
                 MouseEventKind::ScrollDown if super::contains(self.hits.scenes_popup, point) => {
                     self.move_scenes_selection(3);
+                    self.set_scenes_hover(None);
                     outcome.repaint = true;
                 }
                 MouseEventKind::Down(MouseButton::Left) => {
@@ -2181,11 +2280,10 @@ impl ClientShellState {
                 .copied();
             match mouse.kind {
                 MouseEventKind::Moved => {
-                    if let Some((_, index)) = row_hit {
-                        if self.set_notification_history_selection(index) {
-                            outcome.repaint = true;
-                        }
-                    }
+                    // 指针只写 hover：Enter 会跳到源 pane，键盘选中不能被
+                    // 「鼠标路过」改写；出界也要写 None（MENU-01 / UX-04）。
+                    outcome.repaint |=
+                        self.set_notification_history_hover(row_hit.map(|(_, index)| index));
                 }
                 MouseEventKind::ScrollUp => {
                     self.move_notification_history_selection(-3);
@@ -2658,7 +2756,6 @@ impl ClientShellState {
                     .map(|hit| ClientWorkspacePress {
                         endpoint_id: hit.endpoint_id.clone(),
                         workspace_id: hit.workspace_id.clone(),
-                        start_column: mouse.column,
                         start_row: mouse.row,
                     });
                 if let Some(workspace_press) = workspace_press {
@@ -2684,7 +2781,6 @@ impl ClientShellState {
                                     tab_id: tab.tab_id.clone(),
                                     workspace_id: tab.workspace_id.clone(),
                                     start_column: mouse.column,
-                                    start_row: mouse.row,
                                 })
                             })
                     })

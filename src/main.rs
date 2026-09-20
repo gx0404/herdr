@@ -109,7 +109,8 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # Component-level color tokens on top of the resolved palette.
 # Unset fields fall back to semantic tokens: pane borders use accent/overlay0,
 # scrollbar thumb uses overlay1, scrollbar track uses overlay0, toast borders
-# use green/blue/red, and the mode bar uses accent.
+# use green/blue/red, the mode bar uses accent, and the menu hover row uses
+# surface1.
 # [theme.components]
 # pane_border_focused = "#89b4fa"
 # pane_border_unfocused = "#585b70"
@@ -119,6 +120,7 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # toast_border_success = "#a6e3a1"
 # toast_border_info = "#89b4fa"
 # toast_border_error = "#f38ba8"
+# hover_bg = "#45475a"
 # Selection background mixes the host background toward white/black by this
 # ratio (0.0-1.0). Raise for a stronger highlight, lower for a subtler one.
 # selection_mix_ratio = 0.28

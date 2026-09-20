@@ -216,7 +216,8 @@ fn component_color_fields(components: &ThemeComponentsConfig) -> Vec<(String, &s
         mode_bar_accent,
         toast_border_success,
         toast_border_info,
-        toast_border_error
+        toast_border_error,
+        hover_bg
     )
 }
 
@@ -247,6 +248,8 @@ pub struct ThemeComponentsConfig {
     pub toast_border_info: Option<String>,
     /// Error toast border color. Fallback: red.
     pub toast_border_error: Option<String>,
+    /// Hover background of menu and overlay list rows. Fallback: surface1.
+    pub hover_bg: Option<String>,
     /// Selection background mix ratio toward white/black, 0.0..=1.0. Default: 0.28.
     pub selection_mix_ratio: Option<f32>,
 }

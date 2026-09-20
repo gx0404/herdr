@@ -340,15 +340,32 @@ fn notification_history_overlay_projects_rows_for_mouse() {
 
     assert_eq!(state.hits.notification_history_rows.len(), 2);
 
-    // Mouse hover lands directly on a row and moves the selection.
+    // 指针悬浮只写 hover：Enter 会跳到该条通知的源 pane，键盘选中不能被
+    // 「鼠标路过」改写（MENU-01 / UX-04）。
     let (row_rect, row_index) = state.hits.notification_history_rows[0];
+    let selected_before = match state.overlay.as_ref() {
+        Some(ClientShellOverlay::NotificationHistory(overlay)) => overlay.selected,
+        _ => panic!("history overlay"),
+    };
+    assert_ne!(selected_before, row_index, "默认选中最新一条，不是第一行");
     let mut outcome = ClientShellInput::default();
     state.handle_mouse(moved_mouse(row_rect.x, row_rect.y), &mut outcome);
     assert!(outcome.repaint);
     let Some(ClientShellOverlay::NotificationHistory(overlay)) = state.overlay.as_ref() else {
         panic!("history overlay");
     };
-    assert_eq!(overlay.selected, row_index);
+    assert_eq!(overlay.hovered, Some(row_index));
+    assert_eq!(overlay.selected, selected_before, "键盘选中不被指针改写");
+
+    // 指针移出列表：hover 必须清掉，否则弱底色留在鼠标早已离开的那一行。
+    let mut outcome = ClientShellInput::default();
+    state.handle_mouse(moved_mouse(row_rect.x, row_rect.bottom() + 4), &mut outcome);
+    assert!(outcome.repaint);
+    let Some(ClientShellOverlay::NotificationHistory(overlay)) = state.overlay.as_ref() else {
+        panic!("history overlay");
+    };
+    assert_eq!(overlay.hovered, None);
+    assert_eq!(overlay.selected, selected_before);
 }
 
 #[test]

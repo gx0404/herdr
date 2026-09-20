@@ -775,6 +775,62 @@ fn open_navigator_and_type(state: &mut ClientShellState, query: &str) {
     }
 }
 
+/// MENU-01 / UX-04：导航浮层的 `Moved` 只写 hover。回车会真的切走
+/// （跨端点时还会激活端点投影），键盘选中不能被「鼠标路过」改写。
+#[test]
+fn navigator_hover_does_not_move_the_keyboard_selection() {
+    let mut state = navigator_state_with_two_workspaces();
+    state.open_navigator_overlay();
+    state.compose(106, 24).expect("navigator overlay");
+    assert!(state.hits.navigator_rows.len() > 2);
+    let selected_before = match state.overlay.as_ref() {
+        Some(ClientShellOverlay::Navigator(navigator)) => navigator.selected.clone(),
+        _ => panic!("expected navigator"),
+    };
+    let (row_rect, row_target) = state
+        .hits
+        .navigator_rows
+        .iter()
+        .find(|(_, target)| Some(target) != selected_before.as_ref())
+        .cloned()
+        .expect("有一行不是当前选中的");
+
+    let mut outcome = ClientShellInput::default();
+    state.handle_mouse(
+        crossterm::event::MouseEvent {
+            kind: MouseEventKind::Moved,
+            column: row_rect.x + 1,
+            row: row_rect.y,
+            modifiers: KeyModifiers::empty(),
+        },
+        &mut outcome,
+    );
+    assert!(outcome.repaint);
+    let Some(ClientShellOverlay::Navigator(navigator)) = state.overlay.as_ref() else {
+        panic!("expected navigator");
+    };
+    assert_eq!(navigator.hovered.as_ref(), Some(&row_target));
+    assert_eq!(navigator.selected, selected_before, "键盘选中不被指针改写");
+
+    // 指针移出行区域：hover 清空，选中仍不动。
+    let mut outcome = ClientShellInput::default();
+    state.handle_mouse(
+        crossterm::event::MouseEvent {
+            kind: MouseEventKind::Moved,
+            column: row_rect.x + 1,
+            row: 0,
+            modifiers: KeyModifiers::empty(),
+        },
+        &mut outcome,
+    );
+    assert!(outcome.repaint);
+    let Some(ClientShellOverlay::Navigator(navigator)) = state.overlay.as_ref() else {
+        panic!("expected navigator");
+    };
+    assert_eq!(navigator.hovered, None);
+    assert_eq!(navigator.selected, selected_before);
+}
+
 #[test]
 fn navigator_search_does_not_skip_an_earlier_matched_row() {
     // 默认选中必须是**文档序第一个自身命中的行**。偏好叶子 pane 会跳过排在

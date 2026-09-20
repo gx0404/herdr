@@ -81,6 +81,7 @@ fn modal_paste_target_requires_a_focused_editable_client_field() {
         query: TextEditor::default(),
         search_focused: false,
         selected: None,
+        hovered: None,
         scroll: 0,
         filter: None,
         expanded_workspaces: HashSet::new(),

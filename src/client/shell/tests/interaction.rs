@@ -293,6 +293,82 @@ fn link_hints_mark_visible_urls_and_open_the_typed_marker() {
     assert!(state.link_hints.is_none());
 }
 
+/// HERDR-UX-007：1003 模式下终端全程上报指针移动，旧实现把任何 Moved 都当成
+/// 「退出 link hints」，手指还没离开触控板、桌面震一下 hints 就消失了。只有
+/// 真正的按下/拖拽/滚轮才结束这个键盘驱动的模式。
+#[test]
+fn link_hints_survive_pointer_motion_and_end_on_a_press() {
+    let mut state = hints_state(&["see https://example.com/docs here", "second row"]);
+    let mut outcome = ClientShellInput::default();
+    state.record_binding(KeybindMatch::Action(KeybindAction::LinkHints), &mut outcome);
+    assert!(state.link_hints.is_some(), "hints mode entered");
+    let pane = state.hits.panes[0].clone();
+
+    for column in 0..3u16 {
+        state.handle_raw_events(vec![RawInputEvent::Mouse(crossterm::event::MouseEvent {
+            kind: MouseEventKind::Moved,
+            column: pane.inner_rect.x + column,
+            row: pane.inner_rect.y,
+            modifiers: KeyModifiers::empty(),
+        })]);
+        assert!(state.link_hints.is_some(), "移动不取消 hints");
+    }
+    // 移动过后仍然可以把两字母 marker 敲完。
+    state.handle_input_bytes(b"a");
+    let opened = state.handle_input_bytes(b"a");
+    assert!(
+        matches!(&opened.actions[..], [ClientShellAction::OpenSafeWebUrl(url)]
+            if url == "https://example.com/docs"),
+        "移动之后 marker 仍然有效：{:?}",
+        opened.actions
+    );
+
+    // 按下是明确的指针动作：hints 退出。
+    let mut state = hints_state(&["see https://example.com/docs here", "second row"]);
+    let mut outcome = ClientShellInput::default();
+    state.record_binding(KeybindMatch::Action(KeybindAction::LinkHints), &mut outcome);
+    let pane = state.hits.panes[0].clone();
+    state.handle_raw_events(vec![RawInputEvent::Mouse(crossterm::event::MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: pane.inner_rect.x,
+        row: pane.inner_rect.y,
+        modifiers: KeyModifiers::empty(),
+    })]);
+    assert!(state.link_hints.is_none(), "按下结束 hints 模式");
+
+    // 滚轮同样结束。
+    let mut state = hints_state(&["see https://example.com/docs here", "second row"]);
+    let mut outcome = ClientShellInput::default();
+    state.record_binding(KeybindMatch::Action(KeybindAction::LinkHints), &mut outcome);
+    let pane = state.hits.panes[0].clone();
+    state.handle_raw_events(vec![RawInputEvent::Mouse(crossterm::event::MouseEvent {
+        kind: MouseEventKind::ScrollUp,
+        column: pane.inner_rect.x,
+        row: pane.inner_rect.y,
+        modifiers: KeyModifiers::empty(),
+    })]);
+    assert!(state.link_hints.is_none(), "滚轮结束 hints 模式");
+
+    // 拖拽与抬起也都是明确的指针动作：取消集合是「除 Moved 外全部」，
+    // 三语文档写的「点击、拖动或滚轮」必须逐个有断言兜底（C-23）。
+    for kind in [
+        MouseEventKind::Drag(MouseButton::Left),
+        MouseEventKind::Up(MouseButton::Left),
+    ] {
+        let mut state = hints_state(&["see https://example.com/docs here", "second row"]);
+        let mut outcome = ClientShellInput::default();
+        state.record_binding(KeybindMatch::Action(KeybindAction::LinkHints), &mut outcome);
+        let pane = state.hits.panes[0].clone();
+        state.handle_raw_events(vec![RawInputEvent::Mouse(crossterm::event::MouseEvent {
+            kind,
+            column: pane.inner_rect.x,
+            row: pane.inner_rect.y,
+            modifiers: KeyModifiers::empty(),
+        })]);
+        assert!(state.link_hints.is_none(), "拖拽 / 抬起结束 hints 模式");
+    }
+}
+
 #[test]
 fn link_hints_esc_exits_and_empty_viewports_report_no_links() {
     let mut state = hints_state(&["see https://example.com/docs here"]);

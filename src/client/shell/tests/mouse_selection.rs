@@ -1134,3 +1134,610 @@ fn context_menu_keyboard_and_outside_click_are_client_owned() {
     assert!(outside.repaint);
     assert!(state.overlay.is_none());
 }
+
+/// HERDR-UX-004：侧栏行 2 格高、拖拽阈值只有 1 cell 时，轻微手抖就会建立一次
+/// 指向自身槽位的拖拽——抬起时 `workspace_move_method` 判定为空操作返回 None，
+/// 原本的「点击切换工作区」也已经被吞掉，用户看到的是「什么都没发生」。
+#[test]
+fn sidebar_pointer_jitter_keeps_the_workspace_click() {
+    let mut projected = snapshot();
+    for index in 2..=3 {
+        let mut workspace = projected.workspaces[0].clone();
+        workspace.workspace_id = format!("ws_{index}");
+        workspace.number = index;
+        workspace.label = format!("workspace-{index}");
+        workspace.focused = false;
+        projected.workspaces.push(workspace);
+    }
+    let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
+    state.set_snapshot(Box::new(projected));
+    state.set_pane_surface(surface());
+    state.compose(106, 24).expect("three workspaces");
+    let second = state.hits.workspaces[1].rect;
+
+    state.handle_raw_events(vec![RawInputEvent::Mouse(crossterm::event::MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: second.x + 2,
+        row: second.y,
+        modifiers: KeyModifiers::empty(),
+    })]);
+    // 横漂 1 cell + 竖漂 1 行：都在阈值以内，不建立拖拽。
+    let drag = state.handle_raw_events(vec![RawInputEvent::Mouse(crossterm::event::MouseEvent {
+        kind: MouseEventKind::Drag(MouseButton::Left),
+        column: second.x + 3,
+        row: second.y + 1,
+        modifiers: KeyModifiers::empty(),
+    })]);
+    assert!(drag.actions.is_empty());
+    assert!(state.chrome_drag.is_none(), "1 cell 抖动不是拖拽");
+    assert!(state.workspace_press.is_some(), "点击仍在等待抬起");
+
+    let release =
+        state.handle_raw_events(vec![RawInputEvent::Mouse(crossterm::event::MouseEvent {
+            kind: MouseEventKind::Up(MouseButton::Left),
+            column: second.x + 3,
+            row: second.y + 1,
+            modifiers: KeyModifiers::empty(),
+        })]);
+    assert!(
+        matches!(
+            &release.actions[..],
+            [ClientShellAction::Endpoint { request, .. }]
+                if matches!(
+                    &request.method,
+                    crate::api::schema::Method::WorkspaceFocus(target)
+                        if target.workspace_id == "ws_2"
+                )
+        ),
+        "抖动之后抬起仍是点击切换：{:?}",
+        release.actions
+    );
+}
+
+/// HERDR-UX-004 第二面：位移够了但落点就是源槽位（`before == 下一个工作区`）。
+/// 旧实现照样建立拖拽，抬起时 move 被丢弃、点击语义也没了。
+#[test]
+fn workspace_drop_on_its_own_slot_stays_a_click() {
+    let mut projected = snapshot();
+    for index in 2..=3 {
+        let mut workspace = projected.workspaces[0].clone();
+        workspace.workspace_id = format!("ws_{index}");
+        workspace.number = index;
+        workspace.label = format!("workspace-{index}");
+        workspace.focused = false;
+        projected.workspaces.push(workspace);
+    }
+    let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
+    state.set_snapshot(Box::new(projected));
+    state.set_pane_surface(surface());
+    state.compose(106, 24).expect("three workspaces");
+    let first = state.hits.workspaces[0].rect;
+
+    state.handle_raw_events(vec![RawInputEvent::Mouse(crossterm::event::MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: first.x + 2,
+        row: first.y,
+        modifiers: KeyModifiers::empty(),
+    })]);
+    let drag = state.handle_raw_events(vec![RawInputEvent::Mouse(crossterm::event::MouseEvent {
+        kind: MouseEventKind::Drag(MouseButton::Left),
+        column: first.x + 2,
+        row: first.y + 2,
+        modifiers: KeyModifiers::empty(),
+    })]);
+    assert!(drag.actions.is_empty());
+    assert!(
+        state.chrome_drag.is_none(),
+        "落点等于源槽位时不建立拖拽：{:?}",
+        state.chrome_drag.is_some()
+    );
+
+    let release =
+        state.handle_raw_events(vec![RawInputEvent::Mouse(crossterm::event::MouseEvent {
+            kind: MouseEventKind::Up(MouseButton::Left),
+            column: first.x + 2,
+            row: first.y + 2,
+            modifiers: KeyModifiers::empty(),
+        })]);
+    assert!(
+        matches!(
+            &release.actions[..],
+            [ClientShellAction::Endpoint { request, .. }]
+                if matches!(
+                    &request.method,
+                    crate::api::schema::Method::WorkspaceFocus(target)
+                        if target.workspace_id == "ws_1"
+                )
+        ),
+        "空操作拖拽退化为点击：{:?}",
+        release.actions
+    );
+}
+
+/// HERDR-UX-004 标签条面：标签条是横向的，1 cell 横漂不是拖拽；落到自己所在
+/// 的插入位（i 或 i+1，服务端 `Workspace::move_tab` 判定为空操作）也不是。
+#[test]
+fn tab_pointer_jitter_and_self_slot_keep_the_tab_click() {
+    let mut projected = snapshot();
+    for index in 2..=3 {
+        let mut tab = projected.tabs[0].clone();
+        tab.tab_id = format!("tab_{index}");
+        tab.number = index;
+        tab.label = index.to_string();
+        tab.focused = false;
+        projected.tabs.push(tab);
+    }
+    let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
+    state.set_snapshot(Box::new(projected));
+    state.set_pane_surface(surface());
+    state.compose(106, 20).expect("three tabs");
+    let second = state.hits.tabs[1].0;
+
+    state.handle_raw_events(vec![RawInputEvent::Mouse(crossterm::event::MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: second.x + 1,
+        row: second.y,
+        modifiers: KeyModifiers::empty(),
+    })]);
+    let jitter =
+        state.handle_raw_events(vec![RawInputEvent::Mouse(crossterm::event::MouseEvent {
+            kind: MouseEventKind::Drag(MouseButton::Left),
+            column: second.x + 2,
+            row: second.y,
+            modifiers: KeyModifiers::empty(),
+        })]);
+    assert!(jitter.actions.is_empty());
+    assert!(state.chrome_drag.is_none(), "1 cell 横漂不是拖拽");
+
+    // 阈值内的抖动之后再横move到自己的槽位：仍旧没有拖拽。
+    let inside =
+        state.handle_raw_events(vec![RawInputEvent::Mouse(crossterm::event::MouseEvent {
+            kind: MouseEventKind::Drag(MouseButton::Left),
+            column: second.x + 3,
+            row: second.y,
+            modifiers: KeyModifiers::empty(),
+        })]);
+    assert!(inside.actions.is_empty());
+    assert!(state.chrome_drag.is_none(), "落到自己的插入位不是重排");
+
+    let release =
+        state.handle_raw_events(vec![RawInputEvent::Mouse(crossterm::event::MouseEvent {
+            kind: MouseEventKind::Up(MouseButton::Left),
+            column: second.x + 3,
+            row: second.y,
+            modifiers: KeyModifiers::empty(),
+        })]);
+    assert!(
+        matches!(
+            &release.actions[..],
+            [ClientShellAction::Endpoint { request, .. }]
+                if matches!(
+                    &request.method,
+                    crate::api::schema::Method::TabFocus(target) if target.tab_id == "tab_2"
+                )
+        ),
+        "标签抖动之后抬起仍是切换：{:?}",
+        release.actions
+    );
+}
+
+/// HERDR-UX-004 修法第 (3) 条的实现面：拖拽**真的建立起来**之后又拖回源槽位，
+/// 抬起时必须退化成原本的点击切换。前两条用例走的是「阈值/自槽位挡住了拖拽、
+/// `chrome_drag` 从未建立」的路径，这一条才驱动 Up 分支里的 `None =>
+/// finish_endpoint_workspace_press` 退化分支。
+#[test]
+fn workspace_drag_back_to_its_own_slot_releases_as_a_click() {
+    let mut projected = snapshot();
+    for index in 2..=3 {
+        let mut workspace = projected.workspaces[0].clone();
+        workspace.workspace_id = format!("ws_{index}");
+        workspace.number = index;
+        workspace.label = format!("workspace-{index}");
+        workspace.focused = false;
+        projected.workspaces.push(workspace);
+    }
+    let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
+    state.set_snapshot(Box::new(projected));
+    state.set_pane_surface(surface());
+    state.compose(106, 24).expect("three workspaces");
+    let first = state.hits.workspaces[0].rect;
+    let second = state.hits.workspaces[1].rect;
+
+    state.handle_raw_events(vec![RawInputEvent::Mouse(crossterm::event::MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: second.x + 2,
+        row: second.y,
+        modifiers: KeyModifiers::empty(),
+    })]);
+    // 拖到 ws_1 之前的槽位：位移过阈值且真的改变顺序，拖拽建立。
+    let start = state.handle_raw_events(vec![RawInputEvent::Mouse(crossterm::event::MouseEvent {
+        kind: MouseEventKind::Drag(MouseButton::Left),
+        column: second.x + 2,
+        row: first.y,
+        modifiers: KeyModifiers::empty(),
+    })]);
+    assert!(start.actions.is_empty(), "拖拽期间不发方法");
+    assert!(
+        matches!(
+            &state.chrome_drag,
+            Some(ClientChromeDrag::Workspace {
+                source_workspace_id,
+                target: Some((Some(before), _)),
+            }) if source_workspace_id == "ws_2" && before == "ws_1"
+        ),
+        "越过阈值且改变顺序时必须建立拖拽"
+    );
+
+    // 又拖回自己的槽位：Drag 分支只原样更新落点，不复查是否空操作。
+    let back = state.handle_raw_events(vec![RawInputEvent::Mouse(crossterm::event::MouseEvent {
+        kind: MouseEventKind::Drag(MouseButton::Left),
+        column: second.x + 2,
+        row: second.y,
+        modifiers: KeyModifiers::empty(),
+    })]);
+    assert!(back.actions.is_empty());
+    assert!(
+        matches!(
+            &state.chrome_drag,
+            Some(ClientChromeDrag::Workspace {
+                target: Some((Some(before), _)),
+                ..
+            }) if before == "ws_2"
+        ),
+        "落点已经回到源槽位"
+    );
+
+    let release =
+        state.handle_raw_events(vec![RawInputEvent::Mouse(crossterm::event::MouseEvent {
+            kind: MouseEventKind::Up(MouseButton::Left),
+            column: second.x + 2,
+            row: second.y,
+            modifiers: KeyModifiers::empty(),
+        })]);
+    assert!(
+        matches!(
+            &release.actions[..],
+            [ClientShellAction::Endpoint { request, .. }]
+                if matches!(
+                    &request.method,
+                    crate::api::schema::Method::WorkspaceFocus(target)
+                        if target.workspace_id == "ws_2"
+                )
+        ),
+        "拖回原槽位抬起退化为点击切换，不得发 WorkspaceMove：{:?}",
+        release.actions
+    );
+    assert!(state.chrome_drag.is_none());
+    assert!(state.workspace_press.is_none());
+}
+
+/// 同一手势的另一半：拖出侧栏（无落点）抬起是「取消」——既不重排也不切换。
+/// 把实现取的交集语义钉死，否则后续很容易被改成「无落点也退化为点击」。
+#[test]
+fn workspace_drag_off_the_sidebar_releases_without_any_action() {
+    let mut projected = snapshot();
+    for index in 2..=3 {
+        let mut workspace = projected.workspaces[0].clone();
+        workspace.workspace_id = format!("ws_{index}");
+        workspace.number = index;
+        workspace.label = format!("workspace-{index}");
+        workspace.focused = false;
+        projected.workspaces.push(workspace);
+    }
+    let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
+    state.set_snapshot(Box::new(projected));
+    state.set_pane_surface(surface());
+    state.compose(106, 24).expect("three workspaces");
+    let first = state.hits.workspaces[0].rect;
+    let second = state.hits.workspaces[1].rect;
+    let below = state.hits.new_workspace.y;
+
+    state.handle_raw_events(vec![RawInputEvent::Mouse(crossterm::event::MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: second.x + 2,
+        row: second.y,
+        modifiers: KeyModifiers::empty(),
+    })]);
+    state.handle_raw_events(vec![RawInputEvent::Mouse(crossterm::event::MouseEvent {
+        kind: MouseEventKind::Drag(MouseButton::Left),
+        column: second.x + 2,
+        row: first.y,
+        modifiers: KeyModifiers::empty(),
+    })]);
+    assert!(
+        matches!(
+            state.chrome_drag,
+            Some(ClientChromeDrag::Workspace {
+                target: Some(_),
+                ..
+            })
+        ),
+        "先建立一次真的拖拽"
+    );
+
+    state.handle_raw_events(vec![RawInputEvent::Mouse(crossterm::event::MouseEvent {
+        kind: MouseEventKind::Drag(MouseButton::Left),
+        column: second.x + 2,
+        row: below,
+        modifiers: KeyModifiers::empty(),
+    })]);
+    assert!(
+        matches!(
+            state.chrome_drag,
+            Some(ClientChromeDrag::Workspace { target: None, .. })
+        ),
+        "拖出工作区列表后没有落点"
+    );
+
+    let release =
+        state.handle_raw_events(vec![RawInputEvent::Mouse(crossterm::event::MouseEvent {
+            kind: MouseEventKind::Up(MouseButton::Left),
+            column: second.x + 2,
+            row: below,
+            modifiers: KeyModifiers::empty(),
+        })]);
+    assert!(
+        release.actions.is_empty(),
+        "无落点抬起是取消，不重排也不切换：{:?}",
+        release.actions
+    );
+    assert!(state.chrome_drag.is_none());
+    assert!(state.workspace_press.is_none());
+}
+
+/// 标签条的同一面：拖拽建立之后再拖回自己的插入位（`i` 或 `i + 1`，服务端
+/// `Workspace::move_tab` 判定为空操作），抬起必须是 TabFocus 而不是 TabMove。
+#[test]
+fn tab_drag_back_to_its_own_slot_releases_as_a_click() {
+    let mut projected = snapshot();
+    for index in 2..=3 {
+        let mut tab = projected.tabs[0].clone();
+        tab.tab_id = format!("tab_{index}");
+        tab.number = index;
+        tab.label = index.to_string();
+        tab.focused = false;
+        projected.tabs.push(tab);
+    }
+    let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
+    state.set_snapshot(Box::new(projected));
+    state.set_pane_surface(surface());
+    state.compose(106, 20).expect("three tabs");
+    let first = state.hits.tabs[0].0;
+    let second = state.hits.tabs[1].0;
+
+    state.handle_raw_events(vec![RawInputEvent::Mouse(crossterm::event::MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: second.x + 1,
+        row: second.y,
+        modifiers: KeyModifiers::empty(),
+    })]);
+    // 拖到第一个标签左沿：插入位 0，与 tab_2 的 1 / 2 都不同，拖拽建立。
+    state.handle_raw_events(vec![RawInputEvent::Mouse(crossterm::event::MouseEvent {
+        kind: MouseEventKind::Drag(MouseButton::Left),
+        column: first.x,
+        row: first.y,
+        modifiers: KeyModifiers::empty(),
+    })]);
+    assert!(
+        matches!(
+            &state.chrome_drag,
+            Some(ClientChromeDrag::Tab {
+                tab_id,
+                insert_index: Some(0),
+                ..
+            }) if tab_id == "tab_2"
+        ),
+        "越过阈值且改变顺序时必须建立拖拽"
+    );
+
+    let back = state.handle_raw_events(vec![RawInputEvent::Mouse(crossterm::event::MouseEvent {
+        kind: MouseEventKind::Drag(MouseButton::Left),
+        column: second.x + 1,
+        row: second.y,
+        modifiers: KeyModifiers::empty(),
+    })]);
+    assert!(back.actions.is_empty());
+    assert!(
+        matches!(
+            state.chrome_drag,
+            Some(ClientChromeDrag::Tab {
+                insert_index: Some(1),
+                ..
+            })
+        ),
+        "落点已经回到 tab_2 自己的插入位"
+    );
+
+    let release =
+        state.handle_raw_events(vec![RawInputEvent::Mouse(crossterm::event::MouseEvent {
+            kind: MouseEventKind::Up(MouseButton::Left),
+            column: second.x + 1,
+            row: second.y,
+            modifiers: KeyModifiers::empty(),
+        })]);
+    assert!(
+        matches!(
+            &release.actions[..],
+            [ClientShellAction::Endpoint { request, .. }]
+                if matches!(
+                    &request.method,
+                    crate::api::schema::Method::TabFocus(target) if target.tab_id == "tab_2"
+                )
+        ),
+        "拖回原插入位抬起退化为切换，不得发 TabMove：{:?}",
+        release.actions
+    );
+    assert!(state.chrome_drag.is_none());
+    assert!(state.tab_press.is_none());
+}
+
+/// MENU-01（上游 #4288）：指针只写 `hovered`，键盘选中 `highlighted` 只由键盘
+/// 与点击改写；指针移出菜单后高亮必须消失，不能留在鼠标早已离开的那一项上。
+#[test]
+fn context_menu_hover_is_separate_from_the_keyboard_highlight() {
+    let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
+    state.set_snapshot(Box::new(snapshot()));
+    state.set_pane_surface(surface());
+    state.compose(106, 20).expect("composed frame");
+    let tab = state.hits.tabs[0].0;
+    state.handle_raw_events(vec![RawInputEvent::Mouse(crossterm::event::MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Right),
+        column: tab.x + 1,
+        row: tab.y,
+        modifiers: KeyModifiers::empty(),
+    })]);
+    state.compose(106, 20).expect("tab context menu");
+    let (second_row, second_index) = state
+        .hits
+        .context_menu_rows
+        .get(1)
+        .copied()
+        .expect("context menu rows");
+    assert_eq!(second_index, 1);
+
+    let hover = state.handle_raw_events(vec![RawInputEvent::Mouse(crossterm::event::MouseEvent {
+        kind: MouseEventKind::Moved,
+        column: second_row.x,
+        row: second_row.y,
+        modifiers: KeyModifiers::empty(),
+    })]);
+    assert!(hover.repaint);
+    let Some(ClientShellOverlay::ContextMenu(menu)) = state.overlay.as_ref() else {
+        panic!("context menu overlay");
+    };
+    assert_eq!(menu.hovered, Some(1));
+    assert_eq!(menu.highlighted, 0, "指针不改写键盘选中");
+
+    // 悬浮行与选中行必须视觉可辨：hover 用 components.hover_bg，选中用 accent。
+    let frame = state.compose(106, 20).expect("hovered context menu");
+    let buffer = frame.to_ratatui_buffer().expect("frame should reconstruct");
+    let first_row = state.hits.context_menu_rows[0].0;
+    let hovered_row = state.hits.context_menu_rows[1].0;
+    assert_eq!(
+        buffer[(hovered_row.x, hovered_row.y)].bg,
+        state.config.components.hover_bg
+    );
+    assert_eq!(
+        buffer[(first_row.x, first_row.y)].bg,
+        state.config.palette.accent
+    );
+    assert_ne!(
+        state.config.components.hover_bg,
+        state.config.palette.accent
+    );
+
+    // 指针移出菜单：hover 清空，键盘选中不动。
+    let left = state.handle_raw_events(vec![RawInputEvent::Mouse(crossterm::event::MouseEvent {
+        kind: MouseEventKind::Moved,
+        column: 0,
+        row: 19,
+        modifiers: KeyModifiers::empty(),
+    })]);
+    assert!(left.repaint);
+    let Some(ClientShellOverlay::ContextMenu(menu)) = state.overlay.as_ref() else {
+        panic!("context menu overlay");
+    };
+    assert_eq!(menu.hovered, None, "移出菜单后不留残影");
+    assert_eq!(menu.highlighted, 0);
+
+    // 键盘继续按自己的节奏走，hover 不参与。
+    state.handle_input_bytes(b"\x1b[B");
+    let Some(ClientShellOverlay::ContextMenu(menu)) = state.overlay.as_ref() else {
+        panic!("context menu overlay");
+    };
+    assert_eq!(menu.highlighted, 1);
+    assert_eq!(menu.hovered, None);
+}
+
+/// MENU-01 命令面板面：鼠标路过不得改写键盘选择（回车激活的是 `selected`）。
+#[test]
+fn command_palette_hover_does_not_move_the_keyboard_selection() {
+    let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
+    state.set_snapshot(Box::new(snapshot()));
+    state.set_pane_surface(surface());
+    state.compose(106, 30).expect("composed frame");
+    state.toggle_global_menu();
+    state.compose(106, 30).expect("command palette");
+    let (row, index) = state
+        .hits
+        .global_menu_rows
+        .get(2)
+        .copied()
+        .expect("palette rows");
+
+    let hover = state.handle_raw_events(vec![RawInputEvent::Mouse(crossterm::event::MouseEvent {
+        kind: MouseEventKind::Moved,
+        column: row.x,
+        row: row.y,
+        modifiers: KeyModifiers::empty(),
+    })]);
+    assert!(hover.repaint);
+    let palette = palette_overlay(&state);
+    assert_eq!(palette.hovered, Some(index));
+    assert_eq!(palette.selected, 0, "指针不改写键盘选中");
+
+    let left = state.handle_raw_events(vec![RawInputEvent::Mouse(crossterm::event::MouseEvent {
+        kind: MouseEventKind::Moved,
+        column: row.x,
+        row: 0,
+        modifiers: KeyModifiers::empty(),
+    })]);
+    assert!(left.repaint);
+    let palette = palette_overlay(&state);
+    assert_eq!(palette.hovered, None, "移出行区域后不留残影");
+    assert_eq!(palette.selected, 0);
+}
+
+/// MENU-01 的另一半：「行集合变了而指针没动」的每一条路径都必须让 hover 失效。
+/// 点击分类进子菜单、返回上一级、改查询、键盘上下滚动都不会再来一个 `Moved`，
+/// 旧行号留着就会在新列表里画出一条指针并不在上面的弱底色。
+#[test]
+fn command_palette_hover_clears_when_the_row_set_changes() {
+    use super::super::command_palette::BrowserView;
+
+    let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
+    state.set_snapshot(Box::new(snapshot()));
+    state.set_pane_surface(surface());
+    state.compose(106, 30).expect("composed frame");
+
+    let hover_first_row = |state: &mut ClientShellState| {
+        state.compose(106, 30).expect("command palette");
+        let (row, index) = state
+            .hits
+            .global_menu_rows
+            .first()
+            .copied()
+            .expect("palette rows");
+        state.handle_raw_events(vec![RawInputEvent::Mouse(crossterm::event::MouseEvent {
+            kind: MouseEventKind::Moved,
+            column: row.x,
+            row: row.y,
+            modifiers: KeyModifiers::empty(),
+        })]);
+        assert_eq!(palette_overlay(state).hovered, Some(index));
+    };
+
+    // 点击分类进子菜单。
+    state.toggle_global_menu();
+    hover_first_row(&mut state);
+    let category = palette_row_index(&state, "category:2");
+    state.activate_palette_item(category, &mut ClientShellInput::default());
+    assert_eq!(palette_overlay(&state).view, BrowserView::Menu(Some(2)));
+    assert_eq!(palette_overlay(&state).hovered, None, "进子菜单清 hover");
+
+    // 返回上一级。
+    hover_first_row(&mut state);
+    state.browser_back();
+    assert_eq!(palette_overlay(&state).view, BrowserView::Menu(None));
+    assert_eq!(palette_overlay(&state).hovered, None, "返回上一级清 hover");
+
+    // 查询内容变化（过滤结果换了一批行）。
+    hover_first_row(&mut state);
+    assert!(state.insert_overlay_text("settings"));
+    assert_eq!(palette_overlay(&state).hovered, None, "改查询清 hover");
+
+    // 键盘上下键把列表滚到指针下面。
+    hover_first_row(&mut state);
+    state.move_palette_selection(1);
+    assert_eq!(palette_overlay(&state).hovered, None, "键盘移动清 hover");
+}

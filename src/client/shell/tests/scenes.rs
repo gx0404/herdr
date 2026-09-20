@@ -964,3 +964,75 @@ fn leaving_a_scene_subview_clears_the_click_trail() {
     assert_eq!(overlay.selected, 1);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// MENU-01：指针划过现场列表只写 `hovered`，键盘选中不动——否则 ↑↓ 选好一条
+/// 之后鼠标随便路过一行，回车恢复的就是「鼠标最后路过的现场」。
+#[test]
+fn scene_hover_does_not_move_the_keyboard_selection() {
+    use crossterm::event::MouseEventKind;
+
+    let dir = with_temp_state_home("hover-selection");
+    let build = profile("Build", "build.example", "1", true);
+    seed_catalog(std::slice::from_ref(&build));
+    let mut state = state_with_profiles(std::slice::from_ref(&build));
+    super::super::scenes_overlay::store_scenes_to(
+        &super::super::scenes_overlay::scene_snapshots_path(),
+        &[
+            scene("morning", vec![scene_machine(&build)]),
+            scene("night", vec![scene_machine(&build)]),
+        ],
+    )
+    .expect("seed scenes");
+
+    state.open_scenes_overlay();
+    state.compose(106, 32).expect("scenes overlay frame");
+    let (second, _) = state
+        .hits
+        .scenes_rows
+        .iter()
+        .find(|(_, index)| *index == 1)
+        .copied()
+        .expect("second scene row");
+
+    state.handle_raw_events(vec![RawInputEvent::Mouse(crossterm::event::MouseEvent {
+        kind: MouseEventKind::Moved,
+        column: second.x + 1,
+        row: second.y,
+        modifiers: KeyModifiers::empty(),
+    })]);
+    let Some(ClientShellOverlay::Scenes(overlay)) = state.overlay.as_ref() else {
+        panic!("scenes overlay");
+    };
+    assert_eq!(overlay.hovered, Some(1));
+    assert_eq!(overlay.selected, 0, "指针不改写键盘选中");
+
+    // 悬浮行用弱色，选中行仍是 accent 反色。
+    let frame = state.compose(106, 32).expect("hovered scenes overlay");
+    let buffer = frame.to_ratatui_buffer().expect("frame should reconstruct");
+    let (first, _) = state
+        .hits
+        .scenes_rows
+        .iter()
+        .find(|(_, index)| *index == 0)
+        .copied()
+        .expect("first scene row");
+    assert_eq!(
+        buffer[(second.x, second.y)].bg,
+        state.config.components.hover_bg
+    );
+    assert_eq!(buffer[(first.x, first.y)].bg, state.config.palette.accent);
+
+    // 指针移出行区域：hover 清空，键盘选中不动，回车恢复的仍是第 0 条。
+    state.handle_raw_events(vec![RawInputEvent::Mouse(crossterm::event::MouseEvent {
+        kind: MouseEventKind::Moved,
+        column: second.x + 1,
+        row: 0,
+        modifiers: KeyModifiers::empty(),
+    })]);
+    let Some(ClientShellOverlay::Scenes(overlay)) = state.overlay.as_ref() else {
+        panic!("scenes overlay");
+    };
+    assert_eq!(overlay.hovered, None, "移出行区域后不留残影");
+    assert_eq!(overlay.selected, 0);
+    let _ = std::fs::remove_dir_all(&dir);
+}

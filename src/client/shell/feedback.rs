@@ -244,6 +244,10 @@ pub(super) struct ClientNotificationRecord {
 #[derive(Debug)]
 pub(super) struct ClientNotificationHistoryOverlay {
     pub(super) selected: usize,
+    /// 指针悬浮行：只由 `Moved` 改写。`selected` 只由键盘、点击与滚轮改写——
+    /// Enter 会跳到该条通知的源 pane（可能跨端点），指针划过列表就把它改掉
+    /// 是 MENU-01 / UX-04 的同一类问题。
+    pub(super) hovered: Option<usize>,
 }
 
 /// Relative "n units ago" label for history rows.
@@ -415,7 +419,10 @@ impl ClientShellState {
     pub(super) fn open_notification_history(&mut self) {
         let selected = self.notification_history.len().saturating_sub(1);
         self.overlay = Some(ClientShellOverlay::NotificationHistory(
-            ClientNotificationHistoryOverlay { selected },
+            ClientNotificationHistoryOverlay {
+                selected,
+                hovered: None,
+            },
         ));
     }
 
@@ -428,9 +435,24 @@ impl ClientShellState {
         };
         let last = self.notification_history.len().saturating_sub(1) as isize;
         overlay.selected = (overlay.selected as isize + delta).clamp(0, last) as usize;
+        // 视口跟着选中走，指针下面的行可能已经换了。
+        overlay.hovered = None;
     }
 
-    /// Mouse hover lands directly on a row; returns true when it moved.
+    /// 指针悬浮行。`None` 表示指针不在任何行上——出界也要写，否则弱底色会
+    /// 留在鼠标早已离开的那一行（MENU-01）。只写 `hovered`，不动 `selected`。
+    pub(super) fn set_notification_history_hover(&mut self, hovered: Option<usize>) -> bool {
+        let count = self.notification_history.len();
+        let Some(ClientShellOverlay::NotificationHistory(overlay)) = self.overlay.as_mut() else {
+            return false;
+        };
+        let hovered = hovered.filter(|index| *index < count);
+        let changed = overlay.hovered != hovered;
+        overlay.hovered = hovered;
+        changed
+    }
+
+    /// 键盘或点击直接落到某一行；返回 true 表示选中行变了。
     pub(super) fn set_notification_history_selection(&mut self, index: usize) -> bool {
         if self.notification_history.is_empty() {
             return false;

@@ -231,6 +231,7 @@ fn every_dialog_and_menu_occludes_its_panel_not_the_whole_screen() {
             query: TextEditor::default(),
             search_focused: false,
             selected: None,
+            hovered: None,
             scroll: 0,
             filter: None,
             expanded_workspaces: HashSet::new(),
@@ -267,6 +268,7 @@ fn every_dialog_and_menu_occludes_its_panel_not_the_whole_screen() {
             x: 35,
             y: 8,
             highlighted: 0,
+            hovered: None,
         }),
         ClientShellOverlay::CommandPalette(super::command_palette::ClientCommandPaletteOverlay {
             view: super::command_palette::BrowserView::Search,
@@ -275,6 +277,7 @@ fn every_dialog_and_menu_occludes_its_panel_not_the_whole_screen() {
             aliases: HashMap::new(),
             query: TextEditor::default(),
             selected: 0,
+            hovered: None,
             scroll: 0,
             items: Vec::new(),
             recent_ids: Vec::new(),

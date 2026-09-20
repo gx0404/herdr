@@ -305,7 +305,7 @@ toast_border_error = "#f38ba8"
 selection_mix_ratio = 0.35
 ```
 
-未设置的字段保留语义回落：窗格边框使用 `accent`/`overlay0`，滚动条滑块使用 `overlay1`（聚焦）或 `overlay0`，滚动条轨道使用 `overlay0`（聚焦）或 `surface_dim`，toast 边框使用 `green`/`blue`/`red`，模式栏使用 `accent`。`selection_mix_ratio`（0.0–1.0，默认 0.28）控制选区背景向白色或黑色混合宿主背景色的强度；被选文本的粗体、斜体和下划线样式会保留，只有单元格颜色改变。完整字段列表请在[配置参考](/docs/config-reference/)中搜索 `theme.components`。
+未设置的字段保留语义回落：窗格边框使用 `accent`/`overlay0`，滚动条滑块使用 `overlay1`（聚焦）或 `overlay0`，滚动条轨道使用 `overlay0`（聚焦）或 `surface_dim`，toast 边框使用 `green`/`blue`/`red`，模式栏使用 `accent`，`hover_bg`（菜单与浮层列表中指针悬停的那一行）取主题里第一个与面板背景明显可辨的表面色——多数主题是 `surface1`，`surface1` 与 `panel_bg` 几乎同色的浅色主题会自动退到更强的一档。`selection_mix_ratio`（0.0–1.0，默认 0.28）控制选区背景向白色或黑色混合宿主背景色的强度；被选文本的粗体、斜体和下划线样式会保留，只有单元格颜色改变。完整字段列表请在[配置参考](/docs/config-reference/)中搜索 `theme.components`。
 
 ## UI 与侧边栏
 

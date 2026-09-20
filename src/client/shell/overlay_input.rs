@@ -203,6 +203,7 @@ impl ClientShellState {
             query: TextEditor::default(),
             search_focused: false,
             selected: None,
+            hovered: None,
             scroll: 0,
             filter: None,
             expanded_workspaces,
@@ -478,6 +479,8 @@ impl ClientShellState {
                     palette.reveal = true;
                     palette.selected = 0;
                     palette.scroll = 0;
+                    // 过滤结果变了但指针没动：旧行号失效（MENU-01）。
+                    palette.hovered = None;
                 }
                 true
             }
@@ -656,6 +659,7 @@ impl ClientShellState {
                                 palette.reveal = true;
                                 palette.selected = 0;
                                 palette.scroll = 0;
+                                palette.hovered = None;
                             }
                             outcome.repaint = true;
                         }

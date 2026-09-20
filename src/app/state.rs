@@ -29,6 +29,11 @@ use crate::workspace::Workspace;
 // Theme palette — all UI colors in one place, ready for theming
 // ---------------------------------------------------------------------------
 
+/// 行底色之间的最小 WCAG 对比度。低于这个比值在终端上与背景肉眼不可分：
+/// rose-pine-dawn 的 `surface1` 对 `panel_bg` 只有 1.05:1（逐通道差 5/6/6），
+/// 而同主题的 `selection_bg` 有 1.10:1 且清晰可见，所以门槛取 1.10。
+const ROW_BG_MIN_CONTRAST: f64 = 1.10;
+
 /// All colors used by the UI. Derived from a base accent color for now,
 /// but structured so a full theme system can replace it later.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -726,6 +731,69 @@ impl Palette {
             self.active_row_bg
         }
     }
+
+    /// 菜单 / 浮层列表行的「指针悬浮」底色。必须比选中行弱（选中行用 accent
+    /// 反色），又必须与常态行可区分——否则鼠标路过看起来就是键盘选中，回车
+    /// 会激活指针早已离开的那一项（MENU-01）。
+    ///
+    /// 真正要保证的是「悬浮 ≠ 常态」，而常态行画的是 `panel_bg`，所以候选按
+    /// 「弱 → 强」依次试，取第一个与 `panel_bg` 对比度过门槛的：`surface1`
+    /// 在多数主题里就是标准 hover 面，但 rose-pine-dawn 这类浅色主题的
+    /// `surface1` 比 `panel_bg` 还亮且只差几个色阶（1.05:1），在终端上肉眼
+    /// 完全不可分。只在主题解析时算一次（`ComponentStyles::resolve`），不在
+    /// 渲染循环里。
+    pub fn hover_row_bg(&self) -> Color {
+        for candidate in [
+            self.surface1,
+            self.surface0,
+            self.surface_dim,
+            self.selection_bg,
+            self.active_row_bg,
+        ] {
+            if Self::row_bg_is_distinct(self.panel_bg, candidate) {
+                return candidate;
+            }
+        }
+        // 自定义主题把所有候选填成了同一个色（或全是 Reset）：宁可退到选中
+        // 行的底色，也不要一个画了等于没画的 hover。
+        self.selection_row_bg()
+    }
+
+    /// 两个行底色在终端上是否肉眼可辨。真彩色按 WCAG 对比度判定；16 色 /
+    /// 索引色的实际亮度由终端配置决定，无法计算，只能退化成「不是同一个
+    /// 色号」——这与 `selection_row_bg` 对 terminal 主题的既有取舍一致。
+    fn row_bg_is_distinct(base: Color, candidate: Color) -> bool {
+        if candidate == Color::Reset || base == candidate {
+            return false;
+        }
+        match Self::rgb_contrast_ratio(base, candidate) {
+            Some(ratio) => ratio >= ROW_BG_MIN_CONTRAST,
+            None => true,
+        }
+    }
+
+    /// WCAG 相对亮度；非真彩色返回 None。
+    fn rgb_relative_luminance(color: Color) -> Option<f64> {
+        let Color::Rgb(r, g, b) = color else {
+            return None;
+        };
+        let channel = |value: u8| {
+            let value = f64::from(value) / 255.0;
+            if value <= 0.04045 {
+                value / 12.92
+            } else {
+                ((value + 0.055) / 1.055).powf(2.4)
+            }
+        };
+        Some(0.2126 * channel(r) + 0.7152 * channel(g) + 0.0722 * channel(b))
+    }
+
+    /// WCAG 对比度；任一侧不是真彩色时返回 None。
+    fn rgb_contrast_ratio(a: Color, b: Color) -> Option<f64> {
+        let a = Self::rgb_relative_luminance(a)?;
+        let b = Self::rgb_relative_luminance(b)?;
+        Some((a.max(b) + 0.05) / (a.min(b) + 0.05))
+    }
 }
 
 /// Geometry for the server-rendered active-tab pane surface.
@@ -787,6 +855,8 @@ pub struct ComponentStyles {
     pub toast_border_info: Color,
     /// Error toast border. Fallback: red.
     pub toast_border_error: Color,
+    /// 菜单 / 浮层列表行的指针悬浮底色。Fallback: `Palette::hover_row_bg()`。
+    pub hover_bg: Color,
     /// Selection background mix ratio toward white/black, within 0.0..=1.0.
     pub selection_mix_ratio: f32,
     /// Effective output color depth after `auto` resolution.
@@ -848,6 +918,7 @@ impl ComponentStyles {
             toast_border_success: overridden(component(|c| &c.toast_border_success), palette.green),
             toast_border_info: overridden(component(|c| &c.toast_border_info), palette.blue),
             toast_border_error: overridden(component(|c| &c.toast_border_error), palette.red),
+            hover_bg: overridden(component(|c| &c.hover_bg), palette.hover_row_bg()),
             selection_mix_ratio,
             color_depth,
         }
@@ -1835,5 +1906,77 @@ mod tests {
         bare.accent = Color::Reset;
         assert_eq!(bare.selection_row_bg(), bare.active_row_bg);
         assert_ne!(bare.selection_row_bg(), Color::Reset);
+    }
+
+    #[test]
+    fn hover_row_bg_stays_visible_and_distinct_from_the_selected_row() {
+        // 常态行画的是 panel_bg、选中行画的是 accent（`shell::list_row_bg`
+        // 的三态），所以真正要守的是 hover ≠ panel_bg 且 hover ≠ accent——
+        // 逐个内置主题核对，不是抽两个样本（MENU-01）。
+        for name in crate::config::THEME_NAMES
+            .iter()
+            .copied()
+            .filter(|name| *name != "terminal")
+        {
+            let palette = Palette::from_name(name).expect("built-in theme");
+            let hover = palette.hover_row_bg();
+            assert_ne!(hover, Color::Reset, "hover 底色落回 Reset：{name}");
+            assert_ne!(hover, palette.panel_bg, "悬浮行与常态行同色：{name}");
+            assert_ne!(hover, palette.accent, "悬浮行与选中行同色：{name}");
+            let background = contrast_ratio(palette.panel_bg, hover);
+            assert!(
+                background >= 1.10,
+                "悬浮行与常态行肉眼不可分：{name} {background:.3}:1"
+            );
+            let selected = contrast_ratio(palette.accent, hover);
+            assert!(
+                selected >= 1.10,
+                "悬浮行与选中行肉眼不可分：{name} {selected:.3}:1"
+            );
+        }
+
+        // 16 色主题算不出亮度，只能守「不是同一个色号」。
+        let terminal = Palette::terminal();
+        assert_eq!(terminal.hover_row_bg(), Color::DarkGray);
+        assert_ne!(terminal.hover_row_bg(), terminal.panel_bg);
+        assert_ne!(terminal.hover_row_bg(), terminal.accent);
+
+        // 自定义主题把候选逐个留成 Reset 时依次回退，绝不落回 Reset。
+        let mut bare = Palette::terminal();
+        bare.surface1 = Color::Reset;
+        assert_eq!(bare.hover_row_bg(), bare.surface_dim);
+        bare.surface_dim = Color::Reset;
+        assert_eq!(bare.hover_row_bg(), bare.active_row_bg);
+        bare.active_row_bg = Color::Reset;
+        assert_eq!(bare.hover_row_bg(), bare.selection_row_bg());
+        assert_ne!(bare.hover_row_bg(), Color::Reset);
+    }
+
+    /// rose-pine-dawn 是门槛的来源：它的 surface1 比 panel_bg 还亮、逐通道只
+    /// 差 5/6/6，旧实现直接取 surface1 等于没有悬浮提示。
+    #[test]
+    fn rose_pine_dawn_hover_row_skips_its_near_invisible_surface1() {
+        let palette = Palette::rose_pine_dawn();
+        assert!(contrast_ratio(palette.panel_bg, palette.surface1) < 1.10);
+        assert_ne!(palette.hover_row_bg(), palette.surface1);
+        assert_eq!(palette.hover_row_bg(), palette.active_row_bg);
+    }
+
+    #[test]
+    fn hover_bg_component_token_falls_back_and_accepts_overrides() {
+        let palette = Palette::catppuccin();
+        let components = ComponentStyles::from_palette(&palette);
+        assert_eq!(components.hover_bg, palette.hover_row_bg());
+
+        let overrides = crate::config::ThemeComponentsConfig {
+            hover_bg: Some("#010203".into()),
+            ..Default::default()
+        };
+        let components = ComponentStyles::resolve(
+            &palette,
+            Some(&overrides),
+            crate::config::ColorDepth::Truecolor,
+        );
+        assert_eq!(components.hover_bg, Color::Rgb(1, 2, 3));
     }
 }

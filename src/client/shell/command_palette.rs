@@ -113,6 +113,8 @@ pub(super) struct ClientCommandPaletteOverlay {
     pub(super) focus: super::page::PageFocus,
     pub(super) query: TextEditor,
     pub(super) selected: usize,
+    /// 指针悬浮行：只由 `Moved` 改写，`selected` 只由键盘与点击改写（MENU-01）。
+    pub(super) hovered: Option<usize>,
     pub(super) scroll: usize,
     pub(super) items: Vec<ClientPaletteItem>,
     pub(super) recent_ids: Vec<String>,
@@ -833,6 +835,7 @@ impl ClientShellState {
                 reveal: true,
                 query: TextEditor::default(),
                 selected: 0,
+                hovered: None,
                 scroll: 0,
                 items: self.build_palette_items(),
                 recent_ids: self.palette_recent.clone(),
@@ -852,6 +855,9 @@ impl ClientShellState {
                 palette.selected = 0;
                 palette.scroll = 0;
                 palette.reveal = true;
+                // 行集合整个换了，旧行号立刻失效：不清就会在新列表里把同号的
+                // 那一行画成「悬浮」，而指针其实停在别处（MENU-01）。
+                palette.hovered = None;
                 return;
             }
         }
@@ -874,6 +880,8 @@ impl ClientShellState {
         palette.reveal = true;
         palette.selected =
             (palette.selected as isize + delta).clamp(0, count.saturating_sub(1) as isize) as usize;
+        // reveal 会在渲染期重算 scroll，指针下面的行可能已经换了。
+        palette.hovered = None;
     }
 
     pub(super) fn set_palette_selection(&mut self, index: usize) -> bool {
@@ -885,12 +893,25 @@ impl ClientShellState {
         changed
     }
 
+    /// 指针悬浮行。`None` 表示指针不在任何行上——出界也要写，否则高亮会留在
+    /// 鼠标早已离开的那一行（MENU-01）。
+    pub(super) fn set_palette_hover(&mut self, hovered: Option<usize>) -> bool {
+        let Some(ClientShellOverlay::CommandPalette(palette)) = self.overlay.as_mut() else {
+            return false;
+        };
+        let changed = palette.hovered != hovered;
+        palette.hovered = hovered;
+        changed
+    }
+
     pub(super) fn scroll_palette(&mut self, delta: isize) {
         let Some(ClientShellOverlay::CommandPalette(palette)) = self.overlay.as_mut() else {
             return;
         };
         palette.reveal = false;
         palette.scroll = palette.scroll.saturating_add_signed(delta);
+        // 滚动会把别的行挪到指针下面，旧的 hover 行号立刻失效。
+        palette.hovered = None;
     }
 
     pub(super) fn activate_palette_item(&mut self, index: usize, outcome: &mut ClientShellInput) {
@@ -917,6 +938,9 @@ impl ClientShellState {
                 palette.scroll = 0;
                 palette.reveal = true;
                 palette.query = TextEditor::default();
+                // 点击分类进子菜单之后不会再来一个 `Moved`，旧行号会立刻在新
+                // 列表里画出一条假的悬浮行（MENU-01）。
+                palette.hovered = None;
                 outcome.repaint = true;
                 return;
             }
@@ -1081,14 +1105,7 @@ pub(crate) fn render_command_palette(
         };
         let row = &rows[index];
         let chosen = index == selected;
-        let style = if chosen {
-            Style::default()
-                .fg(panel_contrast_fg(p))
-                .bg(p.accent)
-                .add_modifier(Modifier::BOLD)
-        } else {
-            Style::default().fg(p.text).bg(p.panel_bg)
-        };
+        let style = list_row_style(p, cx.components, chosen, palette.hovered == Some(index));
         b.set_style(rect, style);
         let marker_width = 2.min(rect.width);
         put_text(

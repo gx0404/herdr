@@ -149,6 +149,7 @@ impl ClientShellState {
             x,
             y,
             highlighted: 0,
+            hovered: None,
         }));
     }
 
@@ -168,6 +169,7 @@ impl ClientShellState {
             x,
             y,
             highlighted: 0,
+            hovered: None,
         }));
     }
 
@@ -193,6 +195,7 @@ impl ClientShellState {
             x,
             y,
             highlighted: 0,
+            hovered: None,
         }));
     }
 
@@ -229,6 +232,7 @@ impl ClientShellState {
             x,
             y,
             highlighted: 0,
+            hovered: None,
         }));
     }
 

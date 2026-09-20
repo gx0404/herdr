@@ -432,6 +432,97 @@ fn collapsed_sidebar_marks_remote_machine_with_color_tag_letter() {
     assert_eq!(cell.fg, ratatui::style::Color::from_u32(0x00ff0000));
 }
 
+/// HERDR-UX-004：批 5 给 `saved_machine_preserves_endpoint_scoped_worktree_collapses`
+/// 里那条「远端能建立 Workspace 拖拽」的断言换成了「落点就是源槽位所以不建
+/// 拖拽」（那份 fixture 的远端只有一个根工作区）。这里把「远端真的能重排」
+/// 的一面补回来，并顺带覆盖非 Local 端点上的「拖回原槽位退化为点击」。
+#[test]
+fn remote_endpoint_root_workspaces_still_start_a_reorder_drag() {
+    let (mut state, remote_id) = state_with_remote();
+    let mut remote = snapshot();
+    remote.boot_id = "remote-boot".into();
+    remote.workspaces[0].workspace_id = "remote_ws_1".into();
+    remote.workspaces[0].label = "remote-workspace".into();
+    remote.focused_workspace_id = Some("remote_ws_1".into());
+    for index in 2..=3 {
+        let mut workspace = remote.workspaces[0].clone();
+        workspace.workspace_id = format!("remote_ws_{index}");
+        workspace.number = index;
+        workspace.label = format!("remote-workspace-{index}");
+        workspace.focused = false;
+        remote.workspaces.push(workspace);
+    }
+    state.set_endpoint_snapshot(&remote_id, Box::new(remote));
+    assert!(state.activate_endpoint_projection(&remote_id));
+    let mut remote_surface = surface();
+    remote_surface.boot_id = "remote-boot".into();
+    state.set_pane_surface(remote_surface);
+    state.compose(100, 30).expect("remote workspaces");
+
+    let rect_of = |state: &ClientShellState, workspace_id: &str| {
+        state
+            .hits
+            .workspaces
+            .iter()
+            .find(|hit| hit.endpoint_id == remote_id && hit.workspace_id == workspace_id)
+            .unwrap_or_else(|| panic!("visible remote workspace {workspace_id}"))
+            .rect
+    };
+    let first = rect_of(&state, "remote_ws_1");
+    let second = rect_of(&state, "remote_ws_2");
+
+    state.handle_raw_events(vec![RawInputEvent::Mouse(crossterm::event::MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: second.x + 3,
+        row: second.y,
+        modifiers: KeyModifiers::empty(),
+    })]);
+    state.handle_raw_events(vec![RawInputEvent::Mouse(crossterm::event::MouseEvent {
+        kind: MouseEventKind::Drag(MouseButton::Left),
+        column: second.x + 3,
+        row: first.y,
+        modifiers: KeyModifiers::empty(),
+    })]);
+    assert!(
+        matches!(
+            &state.chrome_drag,
+            Some(ClientChromeDrag::Workspace {
+                source_workspace_id,
+                target: Some((Some(before), _)),
+            }) if source_workspace_id == "remote_ws_2" && before == "remote_ws_1"
+        ),
+        "非 Local 端点上的根工作区同样可以拖动重排"
+    );
+
+    // 拖回自己的槽位再抬起：退化为点击切换，不发 WorkspaceMove。
+    state.handle_raw_events(vec![RawInputEvent::Mouse(crossterm::event::MouseEvent {
+        kind: MouseEventKind::Drag(MouseButton::Left),
+        column: second.x + 3,
+        row: second.y,
+        modifiers: KeyModifiers::empty(),
+    })]);
+    let release =
+        state.handle_raw_events(vec![RawInputEvent::Mouse(crossterm::event::MouseEvent {
+            kind: MouseEventKind::Up(MouseButton::Left),
+            column: second.x + 3,
+            row: second.y,
+            modifiers: KeyModifiers::empty(),
+        })]);
+    assert!(
+        matches!(
+            &release.actions[..],
+            [ClientShellAction::Endpoint { request, .. }]
+                if matches!(
+                    &request.method,
+                    crate::api::schema::Method::WorkspaceFocus(target)
+                        if target.workspace_id == "remote_ws_2"
+                )
+        ),
+        "远端拖回原槽位抬起仍是点击切换：{:?}",
+        release.actions
+    );
+}
+
 #[test]
 fn saved_machine_preserves_endpoint_scoped_worktree_collapses() {
     fn add_worktree_group(snapshot: &mut ClientShellSnapshot, parent_id: &str, child_id: &str) {
@@ -553,14 +644,10 @@ fn saved_machine_preserves_endpoint_scoped_worktree_collapses() {
         row: remote_child.bottom(),
         modifiers: KeyModifiers::empty(),
     })]);
-    assert!(matches!(
-        state.chrome_drag,
-        Some(ClientChromeDrag::Workspace {
-            target: Some(_),
-            ..
-        })
-    ));
-    state.chrome_drag = None;
+    // 远端这一侧只有一个根工作区（另一条是它的 linked worktree 子项），落点
+    // 必然就是源槽位：不建立拖拽，点击语义原样保留（HERDR-UX-004）。
+    assert!(state.chrome_drag.is_none());
+    assert!(state.workspace_press.is_some());
     state.workspace_press = None;
 
     let remote_toggle = state

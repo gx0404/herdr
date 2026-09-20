@@ -300,15 +300,15 @@ pub(super) struct ClientPaneMouseGesture {
 pub(super) struct ClientWorkspacePress {
     pub(super) endpoint_id: ClientEndpointId,
     pub(super) workspace_id: String,
-    pub(super) start_column: u16,
+    /// 按下时的行：侧栏是纵向列表，只有纵向位移才可能升级成重排拖拽。
     pub(super) start_row: u16,
 }
 
 pub(super) struct ClientTabPress {
     pub(super) tab_id: String,
     pub(super) workspace_id: String,
+    /// 按下时的列：标签条是横向列表，只有横向位移才可能升级成重排拖拽。
     pub(super) start_column: u16,
-    pub(super) start_row: u16,
 }
 
 pub(super) enum ClientChromeDrag {
@@ -681,6 +681,11 @@ pub(super) struct ClientNavigatorOverlay {
     pub(super) query: TextEditor,
     pub(super) search_focused: bool,
     pub(super) selected: Option<ClientNavigatorTarget>,
+    /// 指针悬浮项：只由 `Moved` 改写。`selected` 只由键盘、搜索与点击改写——
+    /// 导航浮层的 Enter 会切换 workspace/tab/pane（跨端点时还会激活端点投影），
+    /// 指针划过列表就把它改掉是 MENU-01 / UX-04 的同一类问题。存身份而不是
+    /// 行号，过滤与展开折叠后天然失效。
+    pub(super) hovered: Option<ClientNavigatorTarget>,
     pub(super) scroll: usize,
     pub(super) filter: Option<ClientNavigatorFilter>,
     pub(super) expanded_workspaces: HashSet<(ClientEndpointId, String)>,
@@ -904,7 +909,11 @@ pub(super) struct ClientContextMenuOverlay {
     pub(super) target: ClientContextMenuTarget,
     pub(super) x: u16,
     pub(super) y: u16,
+    /// 键盘选中项：回车激活的就是它，只由键盘与点击改写。
     pub(super) highlighted: usize,
+    /// 指针悬浮项：只由 `Moved` 改写，指针离开行区域即回到 None。与
+    /// `highlighted` 分离后，「鼠标路过」不再劫持键盘选择（MENU-01）。
+    pub(super) hovered: Option<usize>,
 }
 
 pub(super) struct ClientContextMenuItem {

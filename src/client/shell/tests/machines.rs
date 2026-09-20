@@ -36,6 +36,15 @@ fn frame_text(state: &mut ClientShellState, cols: u16, rows: u16) -> String {
         .join("\n")
 }
 
+fn moved_mouse(col: u16, row: u16) -> crossterm::event::MouseEvent {
+    crossterm::event::MouseEvent {
+        kind: MouseEventKind::Moved,
+        column: col,
+        row,
+        modifiers: KeyModifiers::empty(),
+    }
+}
+
 fn key(code: KeyCode) -> crate::input::TerminalKey {
     crate::input::TerminalKey::new(code, KeyModifiers::empty())
 }
@@ -84,6 +93,58 @@ fn machines_overlay_lists_profiles_with_status_and_filter() {
             }
         ))
     ));
+}
+
+/// MENU-01 / UX-04：机器列表的 `Moved` 只写 hover。List 键表里的 `d`
+/// （立即启停，会断掉在线 SSH）、`x`（删除）、`r`（重连）、`Shift+R`（改名）
+/// 全部取键盘选中的那台机器——指针划过列表就把它们重新指向「鼠标最后路过的
+/// 机器」是不可接受的。
+#[test]
+fn machine_hover_does_not_move_the_keyboard_selection() {
+    let build = profile("Build", "dev@build.example", "1");
+    let stage = profile("Stage", "stage.example", "2");
+    let mut state = state_with_profiles(&[build, stage]);
+    state.open_machines_overlay();
+    // 窄一点，走朴素列表而不是宽屏 dashboard（dashboard 有 detail 区，
+    // `Moved` 分支本来就不接管）。
+    state.compose(80, 24).expect("machines list");
+    assert!(
+        state.hits.machines_detail_area.is_empty(),
+        "这一档布局应当是朴素列表"
+    );
+    assert_eq!(state.hits.machines_rows.len(), 2);
+
+    let (second_rect, second_id) = state.hits.machines_rows[1].clone();
+    let mut outcome = ClientShellInput::default();
+    state.handle_mouse(moved_mouse(second_rect.x + 1, second_rect.y), &mut outcome);
+    assert!(outcome.repaint);
+    let Some(ClientShellOverlay::Machines(overlay)) = state.overlay.as_ref() else {
+        panic!("machines overlay");
+    };
+    assert_eq!(overlay.hovered.as_ref(), Some(&second_id));
+    assert_eq!(overlay.selected, 0, "键盘选中不被指针改写");
+
+    // 指针移出列表：hover 清空，选中仍不动。
+    let mut outcome = ClientShellInput::default();
+    state.handle_mouse(moved_mouse(second_rect.x + 1, 0), &mut outcome);
+    assert!(outcome.repaint);
+    let Some(ClientShellOverlay::Machines(overlay)) = state.overlay.as_ref() else {
+        panic!("machines overlay");
+    };
+    assert_eq!(overlay.hovered, None);
+    assert_eq!(overlay.selected, 0);
+
+    // 点击才是显式选择。
+    state.handle_raw_events(vec![RawInputEvent::Mouse(crossterm::event::MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: second_rect.x + 1,
+        row: second_rect.y,
+        modifiers: KeyModifiers::empty(),
+    })]);
+    let Some(ClientShellOverlay::Machines(overlay)) = state.overlay.as_ref() else {
+        panic!("machines overlay");
+    };
+    assert_eq!(overlay.selected, 1);
 }
 
 #[test]

@@ -26,6 +26,12 @@ pub(super) struct ClientMachinesOverlay {
     pub(super) scroll: usize,
     pub(super) reveal: bool,
     pub(super) detail_scroll: usize,
+    /// 指针悬浮的机器：只由 `Moved` 改写，`selected` 只由键盘与点击改写。
+    /// 列表视图的 `d`（立即启停，会断掉在线 SSH）、`x`（删除）、`r`
+    /// （重连）、`Shift+R`（改名）都取 `selected_machine_id()`——指针只是
+    /// 划过列表就把这些破坏性键重新指向「鼠标最后路过的机器」是不可接受的
+    /// （MENU-01 / UX-04）。存身份而不是行号，筛选与重排后天然失效。
+    pub(super) hovered: Option<ProfileId>,
     /// One-shot feedback line shown in the list view (e.g. copied command).
     pub(super) message: Option<String>,
 }
@@ -40,6 +46,7 @@ impl ClientMachinesOverlay {
             scroll: 0,
             reveal: true,
             detail_scroll: 0,
+            hovered: None,
             message: None,
         }
     }
@@ -1041,7 +1048,7 @@ impl ClientShellState {
             (overlay.selected as isize + delta).clamp(0, count.saturating_sub(1) as isize) as usize;
     }
 
-    fn select_machine_row(&mut self, profile_id: &ProfileId) {
+    pub(super) fn select_machine_row(&mut self, profile_id: &ProfileId) {
         let Some(ClientShellOverlay::Machines(overlay)) = self.content_page() else {
             return;
         };
@@ -2695,9 +2702,17 @@ impl ClientShellState {
         }
     }
 
-    /// Hover feedback for machine list rows.
-    pub(super) fn hover_machine_row(&mut self, profile_id: &ProfileId) {
-        self.select_machine_row(profile_id);
+    /// 指针悬浮的机器行。`None` 表示指针不在任何行上——出界也要写，否则弱
+    /// 底色会留在鼠标早已离开的那一行（MENU-01）。只写 `hovered`，不动
+    /// `selected`。返回 true 表示悬浮项变了。
+    pub(super) fn hover_machine_row(&mut self, profile_id: Option<&ProfileId>) -> bool {
+        let Some(ClientShellOverlay::Machines(overlay)) = self.content_page_mut() else {
+            return false;
+        };
+        let hovered = profile_id.cloned();
+        let changed = overlay.hovered != hovered;
+        overlay.hovered = hovered;
+        changed
     }
 
     /// Mouse-wheel scrolling routed per view: list moves the selection,
@@ -2932,20 +2947,23 @@ fn render_machine_list(
         let rect = Rect::new(body.x, y, body.width, row_height as u16);
         row_hits.push((rect, row.id.clone()));
         let is_selected = index == selected;
+        // 三态与其它浮层同一口径：选中 accent 反色 > 悬浮弱底色 > 常态。
+        let is_hovered = !is_selected && overlay.hovered.as_ref() == Some(&row.id);
+        let row_bg = super::list_row_bg(p, cx.components, is_selected, is_hovered);
         let style = if is_selected {
             Style::default()
                 .fg(panel_contrast_fg(p))
                 .bg(p.accent)
                 .add_modifier(Modifier::BOLD)
         } else {
-            Style::default().fg(p.text).bg(p.panel_bg)
+            Style::default().fg(p.text).bg(row_bg)
         };
         b.set_style(rect, style);
         let tag = machine_color_tag(row.color.as_deref(), &row.label, p);
         let tag_style = if is_selected {
             style
         } else {
-            Style::default().fg(tag).bg(p.panel_bg)
+            Style::default().fg(tag).bg(row_bg)
         };
         put_text(b, rect.x, rect.y, 2, " ▪", tag_style);
         put_text(
@@ -2969,13 +2987,13 @@ fn render_machine_list(
         let signal_style = if is_selected {
             style
         } else {
-            Style::default().fg(color).bg(p.panel_bg)
+            Style::default().fg(color).bg(row_bg)
         };
         put_right_text(b, rect, rect.y, &signal, signal_style);
         let meta_style = if is_selected {
             style
         } else {
-            Style::default().fg(p.overlay0).bg(p.panel_bg)
+            Style::default().fg(p.overlay0).bg(row_bg)
         };
         let group = row.group.as_deref().unwrap_or_default();
         let meta = if group.is_empty() {

@@ -211,6 +211,9 @@ pub(super) struct ClientScenesOverlay {
     pub(super) view: ClientScenesView,
     pub(super) scenes: Vec<ClientSceneSnapshot>,
     pub(super) selected: usize,
+    /// 指针悬浮行：只由 `Moved` 改写。`selected` 只由键盘与点击改写，否则指针
+    /// 划过浮层就会把键盘选中拉到最后路过的那条现场上（MENU-01）。
+    pub(super) hovered: Option<usize>,
     /// One-shot feedback line shown in the list view footer.
     pub(super) message: Option<String>,
     /// Load failure of the snapshot file (list stays empty but usable).
@@ -225,11 +228,20 @@ pub(super) struct ClientScenesOverlay {
 }
 
 impl ClientScenesOverlay {
+    /// 切视图的唯一入口：顺带清掉指针悬浮行。`hovered` 是列表视图的行号，
+    /// 换到 Save / Rename / ConfirmDelete / ConfirmRestore 再回来时旧行号
+    /// 已经失效，不清就会留下一条指针并不在上面的弱底色（MENU-01）。
+    fn set_view(&mut self, view: ClientScenesView) {
+        self.view = view;
+        self.hovered = None;
+    }
+
     fn blank() -> Self {
         Self {
             view: ClientScenesView::List,
             scenes: Vec::new(),
             selected: 0,
+            hovered: None,
             message: None,
             load_error: None,
             restore_disable_others: false,
@@ -507,12 +519,12 @@ impl ClientShellState {
             n = n.saturating_add(1);
             suggestion = crate::i18n::fill(t.default_name_fmt, &[("n", &n.to_string())]);
         }
-        overlay.view = ClientScenesView::Save(Box::new(ClientSceneForm {
+        overlay.set_view(ClientScenesView::Save(Box::new(ClientSceneForm {
             name: TextEditor::new(&suggestion, true),
             note: TextEditor::default(),
             focused: 0,
             error: None,
-        }));
+        })));
         overlay.message = None;
         overlay.last_click = None;
     }
@@ -531,11 +543,11 @@ impl ClientShellState {
         };
         let index = overlay.selected;
         let editor = TextEditor::new(&scene.name.clone(), false);
-        overlay.view = ClientScenesView::Rename {
+        overlay.set_view(ClientScenesView::Rename {
             index,
             editor,
             error: None,
-        };
+        });
         overlay.message = None;
         overlay.last_click = None;
     }
@@ -548,14 +560,14 @@ impl ClientShellState {
             return;
         }
         let index = overlay.selected;
-        overlay.view = ClientScenesView::ConfirmDelete(index);
+        overlay.set_view(ClientScenesView::ConfirmDelete(index));
         overlay.message = None;
         overlay.last_click = None;
     }
 
     pub(super) fn scenes_back(&mut self) {
         if let Some(ClientShellOverlay::Scenes(overlay)) = self.overlay.as_mut() {
-            overlay.view = ClientScenesView::List;
+            overlay.set_view(ClientScenesView::List);
             overlay.message = None;
             // 离开子视图就清点击痕迹：否则「点一行 → r 改名 → Esc 回列表 →
             // 再点同一行」会在双击窗口内被判成二次点击并直接恢复。
@@ -575,7 +587,21 @@ impl ClientShellState {
         overlay.selected = (overlay.selected as isize + delta).clamp(0, last) as usize;
     }
 
-    /// Mouse hover lands directly on a row; returns true when it moved.
+    /// 指针悬浮行。`None` 表示指针不在任何行上——出界也要写，否则高亮会留在
+    /// 鼠标早已离开的那一行（MENU-01）。只写 `hovered`，不动 `selected`。
+    pub(super) fn set_scenes_hover(&mut self, hovered: Option<usize>) -> bool {
+        let Some(ClientShellOverlay::Scenes(overlay)) = self.overlay.as_mut() else {
+            return false;
+        };
+        let hovered = hovered.filter(|index| {
+            matches!(overlay.view, ClientScenesView::List) && *index < overlay.scenes.len()
+        });
+        let changed = overlay.hovered != hovered;
+        overlay.hovered = hovered;
+        changed
+    }
+
+    /// 键盘或点击直接落到某一行；返回 true 表示选中行变了。
     pub(super) fn set_scenes_selection(&mut self, index: usize) -> bool {
         let Some(ClientShellOverlay::Scenes(overlay)) = self.overlay.as_mut() else {
             return false;
@@ -965,11 +991,11 @@ impl ClientShellState {
             if !targets.is_empty() {
                 let (disable, labels) = targets.into_iter().unzip();
                 if let Some(ClientShellOverlay::Scenes(overlay)) = self.overlay.as_mut() {
-                    overlay.view = ClientScenesView::ConfirmRestore {
+                    overlay.set_view(ClientScenesView::ConfirmRestore {
                         index,
                         disable,
                         labels,
-                    };
+                    });
                     overlay.message = None;
                     overlay.last_click = None;
                 }
@@ -1555,14 +1581,8 @@ fn render_scene_list(
         let rect = Rect::new(body.x, y, body.width, row_height as u16);
         row_hits.push((rect, index));
         let is_selected = index == selected;
-        let style = if is_selected {
-            Style::default()
-                .fg(panel_contrast_fg(p))
-                .bg(p.accent)
-                .add_modifier(Modifier::BOLD)
-        } else {
-            Style::default().fg(p.text).bg(p.panel_bg)
-        };
+        let is_hovered = overlay.hovered == Some(index);
+        let style = list_row_style(p, cx.components, is_selected, is_hovered);
         b.set_style(rect, style);
         put_text(
             b,
@@ -1576,7 +1596,9 @@ fn render_scene_list(
         let meta_style = if is_selected {
             style
         } else {
-            Style::default().fg(p.overlay0).bg(p.panel_bg)
+            Style::default()
+                .fg(p.overlay0)
+                .bg(list_row_bg(p, cx.components, false, is_hovered))
         };
         let machines = crate::i18n::fill(
             t.machines_count_fmt,

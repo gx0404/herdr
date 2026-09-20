@@ -591,20 +591,9 @@ impl Workspace {
     }
 
     pub fn move_tab(&mut self, source_idx: usize, insert_idx: usize) -> bool {
-        if source_idx >= self.tabs.len() || insert_idx > self.tabs.len() {
+        let Some(target_idx) = reorder_target_index(source_idx, insert_idx, self.tabs.len()) else {
             return false;
-        }
-
-        let target_idx = if source_idx < insert_idx {
-            insert_idx.saturating_sub(1)
-        } else {
-            insert_idx
-        }
-        .min(self.tabs.len().saturating_sub(1));
-
-        if source_idx == target_idx {
-            return false;
-        }
+        };
 
         let active_root_pane = self.tabs.get(self.active_tab).map(|tab| tab.root_pane);
         let tab = self.tabs.remove(source_idx);
@@ -1167,6 +1156,33 @@ pub(crate) struct TakenPane {
     pub workspace_empty: bool,
 }
 
+/// 「把 `source_idx` 这一项插到 `insert_idx` 之前」落到哪个下标；顺序不变
+/// （`insert_idx` 就是 `source_idx` 或 `source_idx + 1`）时返回 `None`。
+///
+/// 这份口径同时服务两侧：`Workspace::move_tab` 用它决定要不要真的搬，客户端
+/// 的拖拽落点判定（`client::shell::mouse::ClientShellState::tab_drop_reorders`）
+/// 用它在**建立拖拽之前**就知道这次手势是不是空操作——否则轻微手抖会建立一次
+/// 注定被服务端丢弃的拖拽，把原本的「点击切换」也一起吃掉（HERDR-UX-004）。
+/// 两边各写一份迟早会分叉，且分叉时全量测试仍然全绿，所以只留这一份。
+/// 纯函数、无分配。
+pub(crate) fn reorder_target_index(
+    source_idx: usize,
+    insert_idx: usize,
+    len: usize,
+) -> Option<usize> {
+    if source_idx >= len || insert_idx > len {
+        return None;
+    }
+    // 源项先被移走，所以落在它后面的插入位要往前挪一格。
+    let target_idx = if source_idx < insert_idx {
+        insert_idx.saturating_sub(1)
+    } else {
+        insert_idx
+    }
+    .min(len.saturating_sub(1));
+    (source_idx != target_idx).then_some(target_idx)
+}
+
 #[cfg(test)]
 impl Workspace {
     pub(crate) fn test_new(name: &str) -> Self {
@@ -1429,6 +1445,55 @@ impl Workspace {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `reorder_target_index` 是 `move_tab` 与客户端拖拽落点判定共用的唯一
+    /// 口径（HERDR-UX-004）。这里用「真的搬一次」的朴素实现穷举比对，任何
+    /// 一侧想改插入语义都必须先在这里改期望。
+    #[test]
+    fn reorder_target_index_matches_a_naive_remove_and_insert() {
+        for len in 0..=5usize {
+            for source in 0..len.max(1) + 1 {
+                for insert in 0..=len + 1 {
+                    let items = (0..len).collect::<Vec<_>>();
+                    let expected = if source >= len || insert > len {
+                        None
+                    } else {
+                        let mut moved = items.clone();
+                        let item = moved.remove(source);
+                        let target = if source < insert {
+                            insert.saturating_sub(1)
+                        } else {
+                            insert
+                        }
+                        .min(len.saturating_sub(1));
+                        moved.insert(target, item);
+                        (moved != items).then_some(target)
+                    };
+                    assert_eq!(
+                        reorder_target_index(source, insert, len),
+                        expected,
+                        "len={len} source={source} insert={insert}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// 自己的两个插入位（`i` 与 `i + 1`）都是空操作：客户端就是靠这一条在
+    /// 建立拖拽之前挡掉「落回原槽位」的手势。
+    #[test]
+    fn reorder_target_index_treats_both_self_slots_as_a_no_op() {
+        for source in 0..4usize {
+            assert_eq!(reorder_target_index(source, source, 4), None);
+            assert_eq!(reorder_target_index(source, source + 1, 4), None);
+        }
+        assert_eq!(reorder_target_index(0, 4, 4), Some(3));
+        assert_eq!(reorder_target_index(3, 0, 4), Some(0));
+        // 越界不重排，也不 panic。
+        assert_eq!(reorder_target_index(4, 0, 4), None);
+        assert_eq!(reorder_target_index(0, 5, 4), None);
+        assert_eq!(reorder_target_index(0, 0, 0), None);
+    }
 
     #[test]
     fn generated_workspace_ids_are_short_base32_handles() {
