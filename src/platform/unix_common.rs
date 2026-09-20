@@ -25,6 +25,19 @@ pub(crate) fn classify_child_exit(status: &portable_pty::ExitStatus) -> super::C
     }
 }
 
+/// pane 注入 `SSH_AUTH_SOCK` 前的活性判定（WEZ-INT-01）：路径必须是一个存在、
+/// 属主为当前 euid 的 unix socket。宿主终端重启后旧 agent socket 会消失（路径悬
+/// 空），wezterm 这类代理还会新建 `agent.<pid>` 路径，所以每次 spawn 都要重查，
+/// 不能缓存结果。
+pub(crate) fn ssh_auth_sock_path_is_live(path: &Path) -> bool {
+    use std::os::unix::fs::{FileTypeExt, MetadataExt};
+
+    let Ok(metadata) = std::fs::metadata(path) else {
+        return false;
+    };
+    metadata.file_type().is_socket() && metadata.uid() == unsafe { libc::geteuid() }
+}
+
 pub(crate) fn shutdown_client_stream(stream: &crate::ipc::LocalStream) -> std::io::Result<()> {
     let crate::ipc::LocalStream::UdSocket(stream) = stream;
     stream.inner().shutdown(std::net::Shutdown::Both)

@@ -704,6 +704,7 @@ async fn client_shell_attach_seeds_workspace() {
             endpoint_keybindings: false,
             mouse_capture: false,
             surface_active: true,
+            ssh_auth_sock: None,
             writer,
         })
     );
@@ -711,6 +712,39 @@ async fn client_shell_attach_seeds_workspace() {
     assert_eq!(server.app.state.mode, crate::app::Mode::Terminal);
     assert_eq!(server.app.state.workspaces.len(), 1);
     assert_eq!(server.app.state.active, Some(0));
+    shutdown_test_runtimes(&mut server);
+}
+
+#[tokio::test]
+async fn client_shell_attach_records_reported_ssh_auth_sock() {
+    let _guard = crate::pane::pane_env_test_lock();
+    crate::pane::clear_client_reported_ssh_auth_sock();
+    let mut server = test_headless_server();
+    let (writer, _control_rx, _render_rx) = test_client_writer();
+
+    assert!(
+        server.handle_server_event(ServerEvent::ClientShellConnected {
+            surface_reuse: false,
+            client_id: 64,
+            surface_cols: 80,
+            surface_rows: 23,
+            cell_width_px: 0,
+            cell_height_px: 0,
+            pixel_mouse: false,
+            direct_graphics: false,
+            endpoint_keybindings: false,
+            mouse_capture: false,
+            surface_active: true,
+            ssh_auth_sock: Some("/run/user/1000/wezterm/agent.64".to_owned()),
+            writer,
+        })
+    );
+
+    assert_eq!(
+        crate::pane::recorded_client_ssh_auth_sock_for_test().as_deref(),
+        Some(std::ffi::OsStr::new("/run/user/1000/wezterm/agent.64"))
+    );
+    crate::pane::clear_client_reported_ssh_auth_sock();
     shutdown_test_runtimes(&mut server);
 }
 
@@ -735,6 +769,7 @@ async fn client_shell_endpoint_request_uses_the_selected_connection() {
             endpoint_keybindings: false,
             mouse_capture: false,
             surface_active: true,
+            ssh_auth_sock: None,
             writer,
         })
     );
@@ -852,6 +887,7 @@ async fn client_shell_pairs_agent_view_set_replacement_and_clear_with_snapshots(
             endpoint_keybindings: false,
             mouse_capture: false,
             surface_active: false,
+            ssh_auth_sock: None,
             writer,
         })
     );
@@ -961,6 +997,7 @@ async fn client_shell_receives_metadata_then_shell_free_pane_surface() {
             endpoint_keybindings: false,
             mouse_capture: false,
             surface_active: true,
+            ssh_auth_sock: None,
             writer,
         })
     );
@@ -1129,6 +1166,7 @@ fn connect_test_shell(
             endpoint_keybindings: false,
             mouse_capture: false,
             surface_active: true,
+            ssh_auth_sock: None,
             writer,
         })
     );
@@ -1591,6 +1629,7 @@ async fn client_shell_config_diagnostics_follow_keybinding_ownership() {
             endpoint_keybindings: false,
             mouse_capture: false,
             surface_active: true,
+            ssh_auth_sock: None,
             writer: local_writer,
         })
     );
@@ -1616,6 +1655,7 @@ async fn client_shell_config_diagnostics_follow_keybinding_ownership() {
             endpoint_keybindings: true,
             mouse_capture: false,
             surface_active: true,
+            ssh_auth_sock: None,
             writer: endpoint_writer,
         })
     );
@@ -2526,6 +2566,7 @@ async fn public_api_focus_replaces_every_client_shell_projection() {
             endpoint_keybindings: false,
             mouse_capture: false,
             surface_active: true,
+            ssh_auth_sock: None,
             writer,
         })
     );
@@ -2778,6 +2819,7 @@ async fn client_shell_streams_and_targets_popup_terminal_content() {
             endpoint_keybindings: false,
             mouse_capture: false,
             surface_active: true,
+            ssh_auth_sock: None,
             writer,
         })
     );

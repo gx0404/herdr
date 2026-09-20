@@ -656,12 +656,22 @@ fn sanitized_osc_debug_payload(payload: &[u8]) -> String {
 }
 
 fn parse_file_uri_cwd(uri: &str) -> Option<PathBuf> {
+    parse_file_uri_cwd_with_hostname(uri, crate::platform::hostname().as_deref())
+}
+
+/// `file://` URI 的 host 段判定：空、`localhost`、或等于本机 hostname（大小写无关，
+/// GX-03——gx terminal.zsh 上报 `${HOST}` 原样大小写）都视为本机；其余 host 指向
+/// 远程机器，pane 不能拿来当本地 cwd。
+fn parse_file_uri_cwd_with_hostname(uri: &str, hostname: Option<&str>) -> Option<PathBuf> {
     let rest = uri.strip_prefix("file://")?;
     let path = if rest.starts_with('/') {
         rest
     } else if let Some(slash) = rest.find('/') {
         let host = &rest[..slash];
-        if !(host.is_empty() || host.eq_ignore_ascii_case("localhost")) {
+        let is_local = host.is_empty()
+            || host.eq_ignore_ascii_case("localhost")
+            || hostname.is_some_and(|hostname| host.eq_ignore_ascii_case(hostname));
+        if !is_local {
             return None;
         }
         &rest[slash..]
@@ -1005,6 +1015,46 @@ mod tests {
         assert_eq!(parse_reported_cwd(b""), None);
         assert_eq!(parse_reported_cwd(b"\xff"), None);
         assert_eq!(parse_reported_cwd(b"file://remote/tmp"), None);
+    }
+
+    #[test]
+    fn reported_cwd_accepts_local_hostname_in_file_uri() {
+        assert_eq!(
+            parse_file_uri_cwd_with_hostname("file://myhost/tmp/herdr%20repo", Some("myhost")),
+            Some(std::path::PathBuf::from("/tmp/herdr repo"))
+        );
+        // 主机名比较大小写无关（gx terminal.zsh 上报的是 `${HOST}` 原样大小写）。
+        assert_eq!(
+            parse_file_uri_cwd_with_hostname("file://MYHOST/tmp", Some("myhost")),
+            Some(std::path::PathBuf::from("/tmp"))
+        );
+        assert_eq!(
+            parse_file_uri_cwd_with_hostname("file://otherhost/tmp", Some("myhost")),
+            None
+        );
+        // 拿不到本机 hostname 时保持旧行为：只接受空 host / localhost。
+        assert_eq!(
+            parse_file_uri_cwd_with_hostname("file://myhost/tmp", None),
+            None
+        );
+        assert_eq!(
+            parse_file_uri_cwd_with_hostname("file://localhost/tmp", Some("myhost")),
+            Some(std::path::PathBuf::from("/tmp"))
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn reported_cwd_accepts_this_machines_hostname() {
+        let Some(hostname) = crate::platform::hostname() else {
+            eprintln!("skipping: hostname unavailable");
+            return;
+        };
+        let uri = format!("file://{hostname}/tmp");
+        assert_eq!(
+            parse_reported_cwd(uri.as_bytes()),
+            Some(std::path::PathBuf::from("/tmp"))
+        );
     }
 
     // -----------------------------------------------------------------------

@@ -96,6 +96,14 @@ new_cwd = "follow"
 
 `new_cwd = "follow"` keeps the default behavior and inherits the source pane or workspace. When there is no source workspace, Herdr starts in `$HOME`. Use `"home"` to always start in `$HOME`, `"current"` to use Herdr's process directory, or a fixed path such as `"~/Projects"`. Explicit `--cwd` values from the CLI or socket API still take precedence.
 
+### Pane environment and cwd reporting
+
+Panes are rendered by Herdr's own terminal layer, so they advertise Herdr instead of the terminal that launched the server: `TERM_PROGRAM=herdr`, `TERM_PROGRAM_VERSION` set to the Herdr version, `TERM=xterm-256color`, and `COLORTERM=truecolor`. Host-terminal identity variables (`WEZTERM_PANE`, `WEZTERM_UNIX_SOCKET`, `WEZTERM_EXECUTABLE`, `WEZTERM_EXECUTABLE_DIR`, `WEZTERM_CONFIG_FILE`, `WEZTERM_CONFIG_DIR`, `KITTY_WINDOW_ID`, `WT_SESSION`) are removed so programs inside a pane do not mistake Herdr for the host terminal. `HERDR_ENV=1` is always set and marks processes running inside a Herdr pane.
+
+On Unix, `SSH_AUTH_SOCK` is validated before every pane spawn: the path must exist, be a socket, and belong to the current user. When the server inherited a stale agent socket — for example after the host terminal restarted — Herdr falls back to the value reported by the most recently attached foreground client, and drops the variable when neither is usable, so `ssh` inside a pane fails with a clear "no agent" error instead of hanging on a dead socket.
+
+Shells can report their working directory with `OSC 7` (`file://<host>/<path>`). Herdr accepts the report when `<host>` is empty, `localhost`, or the machine's own hostname (case-insensitive); reports naming any other host are treated as remote and ignored. The accepted directory drives `new_cwd = "follow"` and the pane cwd shown in the sidebar and `herdr pane list`.
+
 ## Worktrees
 
 Set the root directory Herdr uses for Git worktree checkouts created from the sidebar:

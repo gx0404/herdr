@@ -448,8 +448,15 @@ mod unix_common;
 #[cfg(unix)]
 pub(crate) use unix_common::{
     begin_cli_output, default_known_hosts_path, detach_stdout, end_cli_output,
-    forward_remote_bridge_stdio, RemoteBridgeWake,
+    forward_remote_bridge_stdio, ssh_auth_sock_path_is_live, RemoteBridgeWake,
 };
+
+/// Windows 的 SSH agent 是命名管道（Win32-OpenSSH 服务），不走文件系统 socket 路径；
+/// 保留继承语义，不做路径活性判定。
+#[cfg(not(unix))]
+pub(crate) fn ssh_auth_sock_path_is_live(_path: &std::path::Path) -> bool {
+    true
+}
 
 mod client_state;
 pub(crate) use client_state::{create_private_state_file, replace_file, sync_parent_directory};
@@ -738,6 +745,29 @@ mod tests {
         for program in ["vim", "nvim", "cargo", "test-runner", "opencode"] {
             assert!(!is_pane_shell_process_name(program), "{program}");
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ssh_auth_sock_path_is_live_requires_an_owned_socket() {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let dir =
+            std::env::temp_dir().join(format!("herdr-sock-live-{}-{stamp}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("create test dir");
+
+        assert!(!ssh_auth_sock_path_is_live(&dir.join("missing")));
+        let regular = dir.join("regular");
+        std::fs::write(&regular, b"x").expect("write regular file");
+        assert!(!ssh_auth_sock_path_is_live(&regular));
+        assert!(!ssh_auth_sock_path_is_live(&dir));
+        let socket = dir.join("agent.sock");
+        let _listener = std::os::unix::net::UnixListener::bind(&socket).expect("bind socket");
+        assert!(ssh_auth_sock_path_is_live(&socket));
+
+        std::fs::remove_dir_all(&dir).expect("cleanup");
     }
 
     #[test]

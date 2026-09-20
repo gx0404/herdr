@@ -70,6 +70,19 @@ fn client_shell_geometry_error(
     None
 }
 
+/// 从 endpoint hello 提取的 client shell 连接选项，`ServerEvent::ClientShellConnected`
+/// 的字段来源。字段名与 `EndpointClientHello` 对齐。
+#[derive(Debug)]
+struct ClientShellHelloOptions {
+    pixel_mouse: bool,
+    direct_graphics: bool,
+    endpoint_keybindings: bool,
+    mouse_capture: bool,
+    surface_active: bool,
+    surface_reuse: bool,
+    ssh_auth_sock: Option<String>,
+}
+
 #[derive(serde::Deserialize)]
 struct EndpointRequestHead {
     id: String,
@@ -403,6 +416,8 @@ pub(crate) enum ServerEvent {
         mouse_capture: bool,
         surface_active: bool,
         surface_reuse: bool,
+        /// 前台 client 宿主环境上报的 `SSH_AUTH_SOCK`（WEZ-INT-01 自愈链兜底源）。
+        ssh_auth_sock: Option<String>,
         writer: ClientWriter,
     },
     /// A client sent an input message.
@@ -768,14 +783,15 @@ pub(crate) fn handle_client_handshake(
                 hello.cell_width_px,
                 hello.cell_height_px,
                 false,
-                Some((
-                    hello.pixel_mouse,
-                    hello.direct_graphics,
-                    hello.endpoint_keybindings,
-                    hello.mouse_capture,
-                    hello.surface_active,
-                    hello.surface_reuse,
-                )),
+                Some(ClientShellHelloOptions {
+                    pixel_mouse: hello.pixel_mouse,
+                    direct_graphics: hello.direct_graphics,
+                    endpoint_keybindings: hello.endpoint_keybindings,
+                    mouse_capture: hello.mouse_capture,
+                    surface_active: hello.surface_active,
+                    surface_reuse: hello.surface_reuse,
+                    ssh_auth_sock: hello.ssh_auth_sock,
+                }),
             )
         }
         ClientMessage::ClientShellHello { .. } => {
@@ -863,27 +879,20 @@ pub(crate) fn handle_client_handshake(
 
     // Notify the main loop about the new client.
     let endpoint_control_writer = shell_options.as_ref().map(|_| writer.control.clone());
-    let connected = if let Some((
-        pixel_mouse,
-        direct_graphics,
-        endpoint_keybindings,
-        mouse_capture,
-        surface_active,
-        surface_reuse,
-    )) = shell_options
-    {
+    let connected = if let Some(shell_options) = shell_options {
         ServerEvent::ClientShellConnected {
             client_id,
             surface_cols: client_cols,
             surface_rows: client_rows,
             cell_width_px,
             cell_height_px,
-            pixel_mouse,
-            direct_graphics,
-            endpoint_keybindings,
-            mouse_capture,
-            surface_active,
-            surface_reuse,
+            pixel_mouse: shell_options.pixel_mouse,
+            direct_graphics: shell_options.direct_graphics,
+            endpoint_keybindings: shell_options.endpoint_keybindings,
+            mouse_capture: shell_options.mouse_capture,
+            surface_active: shell_options.surface_active,
+            surface_reuse: shell_options.surface_reuse,
+            ssh_auth_sock: shell_options.ssh_auth_sock,
             writer,
         }
     } else {
@@ -1480,6 +1489,7 @@ mod tests {
             surface_codecs: vec![crate::protocol::endpoint::SURFACE_CODEC_V1.into()],
             input_codecs: vec![crate::protocol::endpoint::INPUT_CODEC_V1.into()],
             blob_codecs: vec![crate::protocol::endpoint::BLOB_CODEC_V1.into()],
+            ssh_auth_sock: None,
         };
         ClientMessage::EndpointControl {
             kind: ENDPOINT_HELLO_KIND.into(),
@@ -1959,6 +1969,56 @@ mod tests {
     }
 
     #[test]
+    fn client_shell_handshake_carries_client_reported_ssh_auth_sock() {
+        let (mut client_stream, server_stream, _path) =
+            local_stream_pair("client-shell-ssh-auth-sock");
+        let (server_event_tx, mut server_event_rx) = mpsc::channel(4);
+        let should_quit = Arc::new(AtomicBool::new(false));
+        let handshake_quit = should_quit.clone();
+        let handle = std::thread::spawn(move || {
+            handle_client_handshake(server_stream, 44, &server_event_tx, &handshake_quit)
+        });
+
+        let hello = endpoint_hello(80, 24);
+        let ClientMessage::EndpointControl { kind, data } = hello else {
+            panic!("expected endpoint hello");
+        };
+        let mut value: serde_json::Value = serde_json::from_str(&data).unwrap();
+        value["ssh_auth_sock"] = serde_json::json!("/run/user/1000/wezterm/agent.7");
+        protocol::write_message(
+            &mut client_stream,
+            &ClientMessage::EndpointControl {
+                kind,
+                data: serde_json::to_string(&value).unwrap(),
+            },
+        )
+        .expect("write shell hello");
+
+        let welcome: ServerMessage =
+            protocol::read_message(&mut client_stream, MAX_FRAME_SIZE).expect("read welcome");
+        assert!(endpoint_welcome(welcome).error.is_none());
+        match server_event_rx
+            .blocking_recv()
+            .expect("client shell connected event")
+        {
+            ServerEvent::ClientShellConnected { ssh_auth_sock, .. } => {
+                assert_eq!(
+                    ssh_auth_sock.as_deref(),
+                    Some("/run/user/1000/wezterm/agent.7")
+                );
+            }
+            other => panic!("expected ClientShellConnected, got {other:?}"),
+        }
+
+        drop(client_stream);
+        should_quit.store(true, Ordering::Release);
+        handle
+            .join()
+            .expect("handshake thread join")
+            .expect("handshake thread result");
+    }
+
+    #[test]
     fn dedicated_client_shell_handshake_uses_surface_viewport() {
         let (mut client_stream, server_stream, _path) = local_stream_pair("client-shell-handshake");
         let (server_event_tx, mut server_event_rx) = mpsc::channel(4);
@@ -1992,9 +2052,11 @@ mod tests {
                 mouse_capture,
                 surface_active,
                 surface_reuse,
+                ssh_auth_sock,
                 writer,
             } => {
                 assert!(!surface_reuse);
+                assert_eq!(ssh_auth_sock, None);
                 assert_eq!(client_id, 43);
                 assert_eq!((surface_cols, surface_rows), (80, 29));
                 assert_eq!((cell_width_px, cell_height_px), (8, 16));

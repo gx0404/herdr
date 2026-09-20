@@ -85,6 +85,9 @@ const TERMINAL_COMPRESSION_IDLE: std::time::Duration = std::time::Duration::from
 const TERMINAL_COMPRESSION_STEP: std::time::Duration = std::time::Duration::from_millis(1);
 pub(crate) const PANE_TERM: &str = "xterm-256color";
 const PANE_COLORTERM: &str = "truecolor";
+/// pane 对外宣称的终端程序身份：pane 由 herdr 自己的终端层渲染，不是启动 server
+/// 的宿主终端（WEZ-INT-01）。版本取 Cargo.toml 版本（`build_info::BASE_VERSION`）。
+const PANE_TERM_PROGRAM: &str = "herdr";
 
 fn terminal_compression_permits() -> Arc<tokio::sync::Semaphore> {
     static PERMITS: OnceLock<Arc<tokio::sync::Semaphore>> = OnceLock::new();
@@ -115,6 +118,86 @@ fn apply_pane_terminal_env(cmd: &mut CommandBuilder) {
     cmd.env("TERM", PANE_TERM);
     cmd.env("COLORTERM", PANE_COLORTERM);
     cmd.env_remove("WT_SESSION");
+    // 宿主终端的身份变量描述的是启动 server 的终端，而不是 pane 真正的渲染层；
+    // 继承它们会让 pane 内进程把 herdr 误判成 WezTerm/kitty（WEZ-INT-01）。
+    for key in [
+        "WEZTERM_PANE",
+        "WEZTERM_UNIX_SOCKET",
+        "WEZTERM_EXECUTABLE",
+        "WEZTERM_EXECUTABLE_DIR",
+        "WEZTERM_CONFIG_FILE",
+        "WEZTERM_CONFIG_DIR",
+        "KITTY_WINDOW_ID",
+    ] {
+        cmd.env_remove(key);
+    }
+    cmd.env("TERM_PROGRAM", PANE_TERM_PROGRAM);
+    cmd.env("TERM_PROGRAM_VERSION", crate::build_info::BASE_VERSION);
+    apply_pane_ssh_auth_sock(cmd);
+}
+
+/// pane 的 `SSH_AUTH_SOCK` 自愈链（WEZ-INT-01）：server 是 detached 长驻进程，启动时冻结
+/// 的环境在宿主终端重启后指向已失效的 agent socket。spawn 前对继承值做活性判定；失效时
+/// 改用最近一个前台 client attach 时上报的值（同样先校验属主与 socket 类型），再不行就不
+/// 注入，让 pane 内 ssh 明确报「无 agent」而不是连一个死 socket。
+fn apply_pane_ssh_auth_sock(cmd: &mut CommandBuilder) {
+    const SSH_AUTH_SOCK: &str = "SSH_AUTH_SOCK";
+    let inherited_live = cmd
+        .get_env(SSH_AUTH_SOCK)
+        .is_some_and(|value| crate::platform::ssh_auth_sock_path_is_live(Path::new(value)));
+    if inherited_live {
+        return;
+    }
+    let reported = client_reported_ssh_auth_sock()
+        .filter(|value| crate::platform::ssh_auth_sock_path_is_live(Path::new(value)));
+    match reported {
+        Some(value) => cmd.env(SSH_AUTH_SOCK, value),
+        None => cmd.env_remove(SSH_AUTH_SOCK),
+    }
+}
+
+/// 前台 client 在 endpoint 握手时上报的 `SSH_AUTH_SOCK`（自愈链的兜底源）。保留最近一次
+/// 非空上报：空上报不覆盖既有值（后 attach 的 client 没有 agent 不应清掉前一个 client
+/// 留下的好值）；该值在 pane spawn 时仍要过一遍平台活性校验，所以这里不做文件系统判定。
+static CLIENT_REPORTED_SSH_AUTH_SOCK: Mutex<Option<std::ffi::OsString>> = Mutex::new(None);
+
+pub(crate) fn note_client_reported_ssh_auth_sock(value: Option<String>) {
+    let Some(value) = value.and_then(|value| {
+        let trimmed = value.trim();
+        (!trimmed.is_empty()).then(|| std::ffi::OsString::from(trimmed))
+    }) else {
+        return;
+    };
+    if let Ok(mut slot) = CLIENT_REPORTED_SSH_AUTH_SOCK.lock() {
+        *slot = Some(value);
+    }
+}
+
+fn client_reported_ssh_auth_sock() -> Option<std::ffi::OsString> {
+    CLIENT_REPORTED_SSH_AUTH_SOCK
+        .lock()
+        .ok()
+        .and_then(|slot| slot.clone())
+}
+
+#[cfg(test)]
+pub(crate) fn clear_client_reported_ssh_auth_sock() {
+    if let Ok(mut slot) = CLIENT_REPORTED_SSH_AUTH_SOCK.lock() {
+        *slot = None;
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn recorded_client_ssh_auth_sock_for_test() -> Option<std::ffi::OsString> {
+    client_reported_ssh_auth_sock()
+}
+
+#[cfg(test)]
+pub(crate) fn pane_env_test_lock() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+        .lock()
+        .expect("pane env test lock")
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -3719,6 +3802,170 @@ mod tests {
         apply_pane_terminal_env(&mut cmd);
 
         assert!(cmd.get_env("WT_SESSION").is_none());
+    }
+
+    #[test]
+    fn pane_terminal_identity_advertises_herdr_not_the_host_terminal() {
+        let _guard = pane_env_test_lock();
+        clear_client_reported_ssh_auth_sock();
+        let mut cmd = CommandBuilder::new("shell");
+        cmd.env("TERM_PROGRAM", "WezTerm");
+        cmd.env("TERM_PROGRAM_VERSION", "20240203-110809-5046fc22");
+        cmd.env("WEZTERM_PANE", "0");
+        cmd.env("WEZTERM_UNIX_SOCKET", "/run/user/1000/wezterm/sock");
+        cmd.env("WEZTERM_EXECUTABLE", "/usr/bin/wezterm");
+        cmd.env("WEZTERM_EXECUTABLE_DIR", "/usr/bin");
+        cmd.env("WEZTERM_CONFIG_FILE", "/home/u/.config/wezterm/wezterm.lua");
+        cmd.env("WEZTERM_CONFIG_DIR", "/home/u/.config/wezterm");
+        cmd.env("KITTY_WINDOW_ID", "1");
+
+        apply_pane_terminal_env(&mut cmd);
+
+        assert_eq!(
+            cmd.get_env("TERM_PROGRAM"),
+            Some(std::ffi::OsStr::new("herdr"))
+        );
+        assert_eq!(
+            cmd.get_env("TERM_PROGRAM_VERSION"),
+            Some(std::ffi::OsStr::new(crate::build_info::BASE_VERSION))
+        );
+        for key in [
+            "WEZTERM_PANE",
+            "WEZTERM_UNIX_SOCKET",
+            "WEZTERM_EXECUTABLE",
+            "WEZTERM_EXECUTABLE_DIR",
+            "WEZTERM_CONFIG_FILE",
+            "WEZTERM_CONFIG_DIR",
+            "KITTY_WINDOW_ID",
+        ] {
+            assert!(cmd.get_env(key).is_none(), "{key} must not leak into panes");
+        }
+    }
+
+    #[test]
+    fn pane_terminal_env_keeps_herdr_env_marker() {
+        let mut cmd = CommandBuilder::new("shell");
+
+        apply_pane_terminal_env(&mut cmd);
+        apply_pane_launch_env(&mut cmd, &PaneLaunchEnv::default());
+
+        assert_eq!(
+            cmd.get_env(crate::HERDR_ENV_VAR),
+            Some(std::ffi::OsStr::new(crate::HERDR_ENV_VALUE)),
+            "gx terminal.zsh 守卫依赖 HERDR_ENV=1"
+        );
+    }
+
+    #[cfg(unix)]
+    fn bind_test_socket(
+        dir: &std::path::Path,
+        name: &str,
+    ) -> (std::path::PathBuf, std::os::unix::net::UnixListener) {
+        let path = dir.join(name);
+        let listener = std::os::unix::net::UnixListener::bind(&path).expect("bind test socket");
+        (path, listener)
+    }
+
+    #[cfg(unix)]
+    fn unique_ssh_sock_test_dir(tag: &str) -> std::path::PathBuf {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "herdr-ssh-auth-sock-{tag}-{}-{stamp}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).expect("create ssh auth sock test dir");
+        dir
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn terminal_env_ssh_auth_sock_keeps_live_inherited_value() {
+        let _guard = pane_env_test_lock();
+        clear_client_reported_ssh_auth_sock();
+        let dir = unique_ssh_sock_test_dir("live");
+        let (socket, _listener) = bind_test_socket(&dir, "agent.sock");
+        let mut cmd = CommandBuilder::new("shell");
+        cmd.env("SSH_AUTH_SOCK", &socket);
+
+        apply_pane_terminal_env(&mut cmd);
+
+        assert_eq!(cmd.get_env("SSH_AUTH_SOCK"), Some(socket.as_os_str()));
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn terminal_env_ssh_auth_sock_drops_dead_inherited_value_without_fallback() {
+        let _guard = pane_env_test_lock();
+        clear_client_reported_ssh_auth_sock();
+        let mut cmd = CommandBuilder::new("shell");
+        cmd.env(
+            "SSH_AUTH_SOCK",
+            "/run/user/1000/wezterm/agent.definitely-dead",
+        );
+
+        apply_pane_terminal_env(&mut cmd);
+
+        assert!(cmd.get_env("SSH_AUTH_SOCK").is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn terminal_env_ssh_auth_sock_falls_back_to_client_reported_value() {
+        let _guard = pane_env_test_lock();
+        let dir = unique_ssh_sock_test_dir("fallback");
+        let (socket, _listener) = bind_test_socket(&dir, "agent.sock");
+        note_client_reported_ssh_auth_sock(Some(socket.to_string_lossy().into_owned()));
+        let mut cmd = CommandBuilder::new("shell");
+        cmd.env(
+            "SSH_AUTH_SOCK",
+            "/run/user/1000/wezterm/agent.definitely-dead",
+        );
+
+        apply_pane_terminal_env(&mut cmd);
+
+        assert_eq!(cmd.get_env("SSH_AUTH_SOCK"), Some(socket.as_os_str()));
+        clear_client_reported_ssh_auth_sock();
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn terminal_env_ssh_auth_sock_ignores_dead_client_reported_value() {
+        let _guard = pane_env_test_lock();
+        note_client_reported_ssh_auth_sock(Some(
+            "/run/user/1000/wezterm/agent.also-dead".to_owned(),
+        ));
+        let mut cmd = CommandBuilder::new("shell");
+        cmd.env(
+            "SSH_AUTH_SOCK",
+            "/run/user/1000/wezterm/agent.definitely-dead",
+        );
+
+        apply_pane_terminal_env(&mut cmd);
+
+        assert!(cmd.get_env("SSH_AUTH_SOCK").is_none());
+        clear_client_reported_ssh_auth_sock();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn terminal_env_ssh_auth_sock_rejects_non_socket_paths() {
+        let _guard = pane_env_test_lock();
+        clear_client_reported_ssh_auth_sock();
+        let dir = unique_ssh_sock_test_dir("regular");
+        let regular = dir.join("not-a-socket");
+        std::fs::write(&regular, b"x").expect("write regular file");
+        let mut cmd = CommandBuilder::new("shell");
+        cmd.env("SSH_AUTH_SOCK", &regular);
+
+        apply_pane_terminal_env(&mut cmd);
+
+        assert!(cmd.get_env("SSH_AUTH_SOCK").is_none());
+        std::fs::remove_dir_all(&dir).expect("cleanup");
     }
 
     #[tokio::test]

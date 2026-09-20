@@ -96,6 +96,14 @@ new_cwd = "follow"
 
 `new_cwd = "follow"` はデフォルトの挙動を保ち、元のペインまたはワークスペースを継承します。元のワークスペースがない場合、Herdr は `$HOME` で起動します。常に `$HOME` で起動するには `"home"` を、Herdr のプロセスディレクトリを使うには `"current"` を、または `"~/Projects"` のような固定パスを使ってください。CLI またはソケット API から明示的に指定された `--cwd` の値は引き続き優先されます。
 
+### ペイン環境変数と cwd レポート
+
+ペインは Herdr 自身の端末レイヤーで描画されるため、サーバーを起動した端末ではなく Herdr として名乗ります: `TERM_PROGRAM=herdr`、`TERM_PROGRAM_VERSION` は Herdr のバージョン、`TERM=xterm-256color`、`COLORTERM=truecolor`。ホスト端末の識別変数（`WEZTERM_PANE`、`WEZTERM_UNIX_SOCKET`、`WEZTERM_EXECUTABLE`、`WEZTERM_EXECUTABLE_DIR`、`WEZTERM_CONFIG_FILE`、`WEZTERM_CONFIG_DIR`、`KITTY_WINDOW_ID`、`WT_SESSION`）は取り除かれるため、ペイン内のプログラムが Herdr をホスト端末と誤認しません。`HERDR_ENV=1` は常に設定され、Herdr ペイン内で動くプロセスの目印になります。
+
+Unix では、ペインを生成するたびに `SSH_AUTH_SOCK` が検証されます: パスが存在し、socket で、現在のユーザーが所有している必要があります。サーバーが継承した agent socket が無効になっている場合（ホスト端末の再起動後など）、Herdr は直近にアタッチされたフォアグラウンドクライアントがレポートした値にフォールバックし、どちらも使えないときは変数自体を設定しません。これにより、ペイン内の `ssh` は死んだ socket に張り付く代わりに「agent なし」の明確なエラーで失敗します。
+
+シェルは `OSC 7`（`file://<host>/<path>`）で作業ディレクトリをレポートできます。`<host>` が空、`localhost`、またはマシン自身の hostname（大文字小文字を区別しない）の場合に Herdr はレポートを受け付けます。それ以外のホストを名指すレポートはリモートとして無視されます。受け付けられたディレクトリは `new_cwd = "follow"` を駆動し、サイドバーと `herdr pane list` にペインの cwd として表示されます。
+
 ## Worktree
 
 サイドバーから作成される Git worktree チェックアウトに Herdr が使うルートディレクトリを設定します:

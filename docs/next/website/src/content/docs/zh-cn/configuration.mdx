@@ -96,6 +96,14 @@ new_cwd = "follow"
 
 `new_cwd = "follow"` 保持默认行为，并继承来源窗格或工作区。没有来源工作区时，Herdr 从 `$HOME` 启动。使用 `"home"` 可始终从 `$HOME` 启动，使用 `"current"` 可采用 Herdr 的进程目录，也可以指定 `"~/Projects"` 这样的固定路径。CLI 或 socket API 显式提供的 `--cwd` 值仍然优先。
 
+### 窗格环境变量与 cwd 上报
+
+窗格由 Herdr 自己的终端层渲染，因此它们对外宣称 Herdr 身份，而不是启动 server 的终端：`TERM_PROGRAM=herdr`、`TERM_PROGRAM_VERSION` 为 Herdr 版本号、`TERM=xterm-256color`、`COLORTERM=truecolor`。宿主终端的身份变量（`WEZTERM_PANE`、`WEZTERM_UNIX_SOCKET`、`WEZTERM_EXECUTABLE`、`WEZTERM_EXECUTABLE_DIR`、`WEZTERM_CONFIG_FILE`、`WEZTERM_CONFIG_DIR`、`KITTY_WINDOW_ID`、`WT_SESSION`）会被移除，避免窗格内程序把 Herdr 误判成宿主终端。`HERDR_ENV=1` 始终注入，用于标记运行在 Herdr 窗格内的进程。
+
+在 Unix 上，每次创建窗格前都会校验 `SSH_AUTH_SOCK`：路径必须存在、是 socket 且属主为当前用户。当 server 继承的 agent socket 已失效（例如宿主终端重启后），Herdr 回退到最近一次前台 client attach 时上报的值；两者都不可用时则不注入该变量，让窗格内的 `ssh` 明确报「无 agent」，而不是连上一个死 socket 卡死。
+
+shell 可以用 `OSC 7`（`file://<host>/<path>`）上报工作目录。`<host>` 为空、`localhost` 或本机 hostname（大小写无关）时 Herdr 接受该上报；指向其它主机的上报按远程处理并忽略。被接受的目录驱动 `new_cwd = "follow"`，并作为窗格 cwd 显示在侧边栏与 `herdr pane list` 中。
+
 ## Worktree
 
 设置 Herdr 从侧边栏创建 Git worktree 检出时使用的根目录：

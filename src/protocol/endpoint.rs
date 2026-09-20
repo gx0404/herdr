@@ -59,6 +59,11 @@ pub struct EndpointClientHello {
     pub input_codecs: Vec<String>,
     #[serde(default)]
     pub blob_codecs: Vec<String>,
+    /// 前台 client 宿主环境里的 SSH agent socket。server 是 detached 进程，自身继承的
+    /// `SSH_AUTH_SOCK` 会随宿主终端重启失效；pane spawn 前校验不通过时用这个上报值兜底
+    /// （使用端仍会校验属主与 socket 类型）。纯追加可选字段：老 client 不发、老 server 忽略。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ssh_auth_sock: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -233,6 +238,7 @@ mod tests {
             surface_codecs: vec![SURFACE_CODEC_V1.into()],
             input_codecs: vec![INPUT_CODEC_V1.into()],
             blob_codecs: vec![BLOB_CODEC_V1.into()],
+            ssh_auth_sock: None,
         }
     }
 
@@ -270,6 +276,28 @@ mod tests {
         value["future_feature"] = serde_json::json!({"enabled": true});
         let decoded: EndpointClientHello = serde_json::from_value(value).unwrap();
         assert_eq!(decoded, hello());
+    }
+
+    #[test]
+    fn hello_ssh_auth_sock_is_an_optional_append_only_field() {
+        // 旧 client 的 hello 没有该键，解码必须是 None（纯追加可选字段）。
+        let decoded: EndpointClientHello = serde_json::from_str(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/endpoint-hello-v1.json"
+        )))
+        .unwrap();
+        assert_eq!(decoded.ssh_auth_sock, None);
+
+        let mut hello = hello();
+        assert_eq!(hello.ssh_auth_sock, None);
+        // None 不序列化出键，保持线上 hello 载荷逐字节不变。
+        let text = serde_json::to_string(&hello).unwrap();
+        assert!(!text.contains("ssh_auth_sock"));
+
+        hello.ssh_auth_sock = Some("/run/user/1000/wezterm/agent.123".to_owned());
+        let decoded: EndpointClientHello =
+            serde_json::from_str(&serde_json::to_string(&hello).unwrap()).unwrap();
+        assert_eq!(decoded, hello);
     }
 
     #[test]

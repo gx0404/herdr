@@ -1984,6 +1984,7 @@ impl HeadlessServer {
                 mouse_capture,
                 surface_active,
                 surface_reuse,
+                ssh_auth_sock,
                 writer,
             } => {
                 if self.handoff_in_progress {
@@ -2009,6 +2010,9 @@ impl HeadlessServer {
                     render_encoding = ?protocol::RenderEncoding::SemanticFrame,
                     "client connected"
                 );
+                // WEZ-INT-01 自愈链：前台 client attach 时上报的 SSH agent socket 登记为
+                // pane spawn 的兜底源（spawn 前仍会逐次校验活性）。
+                crate::pane::note_client_reported_ssh_auth_sock(ssh_auth_sock);
                 self.app.ensure_default_workspace();
                 let first_app_client = self.app_client_count() == 0;
                 let last_activity = self.allocate_activity_stamp();
