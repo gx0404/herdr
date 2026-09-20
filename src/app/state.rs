@@ -1130,6 +1130,10 @@ pub struct AppState {
     pub(crate) host_cell_size: crate::kitty_graphics::HostCellSize,
     /// Set when a persisted session snapshot would change.
     pub session_dirty: bool,
+    /// 仅当「工作区集合为空」是用户/API 显式关闭最后一个工作区的结果时置位。
+    /// 它是清空持久化会话的唯一许可：主机重启同样会因为所有 pane 退出让集合
+    /// 归零，那份快照必须留住（HSR-04 / 上游 #4320）。
+    pub(crate) explicit_session_teardown: bool,
     /// Terminal runtimes that should be shut down by the app/runtime layer
     /// after state has detached their terminal metadata.
     pub(crate) terminal_runtime_shutdowns: Vec<crate::terminal::TerminalId>,
@@ -1138,6 +1142,15 @@ pub struct AppState {
 impl AppState {
     pub(crate) fn mark_session_dirty(&mut self) {
         self.session_dirty = true;
+    }
+
+    /// 记录一次显式（用户/API）工作区关闭的结果。
+    ///
+    /// 只有它会置位 `explicit_session_teardown`，而且仅在关完后集合真的为空时；
+    /// 集合还有工作区就顺带复位，避免陈旧标记留到下一次归零。隐式归零（pane
+    /// 批量退出、主机重启）走 `handle_pane_died`，那里必须复位。
+    pub(crate) fn note_explicit_workspace_teardown(&mut self) {
+        self.explicit_session_teardown = self.workspaces.is_empty();
     }
 
     pub(crate) fn remove_alias_shadowed_by_new_pane(&mut self, pane_id: PaneId) {
@@ -1354,6 +1367,7 @@ impl AppState {
             host_terminal_theme: TerminalTheme::default(),
             host_cell_size: crate::kitty_graphics::HostCellSize::default(),
             session_dirty: false,
+            explicit_session_teardown: false,
             terminal_runtime_shutdowns: Vec::new(),
         }
     }

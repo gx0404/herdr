@@ -773,6 +773,9 @@ impl AppState {
             }
             self.active = Some(self.selected);
         }
+        // 这是唯一的显式关闭入口（键位、命令面板与 workspaces/tabs API 都汇到
+        // 这里），所以只有它有资格授权清空持久化会话。
+        self.note_explicit_workspace_teardown();
     }
 }
 
@@ -2066,6 +2069,8 @@ impl AppState {
             ws.remove_pane(pane_id)
         };
         self.mark_session_dirty();
+        // pane 退出导致的归零是隐式的（主机重启即走这条路），不授权清空会话。
+        self.explicit_session_teardown = false;
 
         if should_close_workspace {
             let active_workspace_id = self

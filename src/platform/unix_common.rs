@@ -1,8 +1,25 @@
 use std::path::{Path, PathBuf};
 
+/// 宿主关机/重启时 POSIX shell 自报的可疑退出码。
+///
+/// POSIX shell 用 `128 + signal` 表示被信号打断（`129` = SIGHUP、`143` =
+/// SIGTERM），而装了 `trap` 处理的 shell（含登录 shell 与多数 agent CLI 包装）
+/// 往往直接 `exit 1`。这些退出码与「用户敲了一条失败命令后退出」无法区分，
+/// 所以统一按可疑处理：代价只是多做一次会话检查点，收益是主机重启时不会把
+/// `session.json` 清空（HSR-04 / 上游 #4320）。
+///
+/// `128 + signal` 是 unix 专属语义，所以码表留在本文件；Windows 自己维护一份
+/// （见 `docs/AGENT_RULES/platform.md`：OS 专属行为只进 `src/platform/<os>.rs`）。
+pub(crate) fn exit_code_suspects_host_shutdown(code: u32) -> bool {
+    matches!(code, 1 | 129 | 143)
+}
+
 pub(crate) fn classify_child_exit(status: &portable_pty::ExitStatus) -> super::ChildExitReason {
     if status.signal().is_some() {
         super::ChildExitReason::Interrupted
+    } else if exit_code_suspects_host_shutdown(status.exit_code()) {
+        // 捕获 SIGHUP/SIGTERM 后自行退出的 shell 只留下退出码，没有信号。
+        super::ChildExitReason::SuspectedInterruption
     } else {
         super::ChildExitReason::Exited
     }

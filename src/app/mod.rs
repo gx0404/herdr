@@ -139,6 +139,18 @@ pub struct App {
     pub(crate) session_save_deadline: Option<Instant>,
     pub(crate) session_save_thread: Option<std::thread::JoinHandle<()>>,
     pane_exit_checkpoint_pending: bool,
+    /// 最近几次真实 pane 退出的时刻，用于识别「短窗口批量退出」。
+    /// 定长 ≤ `PANE_EXIT_BURST_THRESHOLD`。
+    recent_pane_exits: Vec<Instant>,
+    /// 疑似主机打断的护栏窗口截止时刻：窗口内不许把盘上的会话快照写小
+    /// （HSR-04 / 上游 #4320）。
+    pane_exit_cascade_until: Option<Instant>,
+    /// 最近一次派发出去的写盘里有多少 workspace，即「盘上现在有多少」。
+    /// 护栏用它判断一次保存是不是在缩小快照。
+    persisted_workspace_count: usize,
+    /// 测试用：真正派发出去的会话写盘次数，守住「一次级联只写一次」。
+    #[cfg(test)]
+    session_save_writes: usize,
     pub(crate) detached_process_children: Vec<std::process::Child>,
     tab_bar_status_generation: u64,
     tab_bar_datetimes: Vec<tab_bar_status::TabBarDatetimeRuntime>,
@@ -563,6 +575,7 @@ impl App {
             host_terminal_theme: crate::terminal_theme::TerminalTheme::default(),
             host_cell_size: crate::kitty_graphics::HostCellSize::default(),
             session_dirty: false,
+            explicit_session_teardown: false,
             terminal_runtime_shutdowns: Vec::new(),
         };
 
@@ -601,6 +614,7 @@ impl App {
                 .get(idx)
                 .and_then(|ws| ws.focused_pane_id().map(|pane_id| (idx, pane_id)))
         });
+        let restored_workspace_count = state.workspaces.len();
         let client_shell_keybindings_profile = config.local_keybindings_profile_toml().ok();
         let endpoint_commands =
             custom_commands::EndpointCommandRegistry::new(&state.keybinds.custom_commands);
@@ -641,6 +655,12 @@ impl App {
             session_save_deadline: None,
             session_save_thread: None,
             pane_exit_checkpoint_pending: false,
+            recent_pane_exits: Vec::new(),
+            pane_exit_cascade_until: None,
+            // 构造时 state 刚从 session.json 恢复完，所以这就是盘上的工作区数。
+            persisted_workspace_count: restored_workspace_count,
+            #[cfg(test)]
+            session_save_writes: 0,
             detached_process_children: Vec::new(),
             tab_bar_status_generation: 0,
             tab_bar_datetimes: Vec::new(),
@@ -3217,7 +3237,7 @@ selection_mix_ratio = 0.5
         app.state.ensure_test_terminals();
         app.session_save_deadline = Some(Instant::now() - Duration::from_secs(1));
 
-        app.start_background_session_save();
+        app.start_background_session_save(Instant::now());
 
         assert!(app.session_save_thread.is_some());
         assert!(app.session_save_deadline.is_none());
@@ -3237,7 +3257,7 @@ selection_mix_ratio = 0.5
             let _ = release_rx.recv();
         }));
 
-        app.start_background_session_save();
+        app.start_background_session_save(Instant::now());
 
         assert!(app.session_save_thread.is_some());
         assert!(app.session_save_deadline.is_some());
@@ -3307,7 +3327,7 @@ selection_mix_ratio = 0.5
     }
 
     #[test]
-    fn normal_autosave_replaces_a_signaled_exit_checkpoint() {
+    fn autosave_after_a_signaled_exit_keeps_the_pane_exit_checkpoint() {
         let _guard = crate::config::test_config_env_lock().lock().unwrap();
         let config_home = unique_temp_path("signaled-pane-autosave");
         std::env::set_var("XDG_CONFIG_HOME", &config_home);
@@ -3327,16 +3347,436 @@ selection_mix_ratio = 0.5
         });
         assert!(crate::persist::load().is_some());
 
-        app.start_background_session_save();
+        // 集合归零不是用户显式关闭，后续自动保存与退出保存都不得清空快照。
+        app.start_background_session_save(Instant::now());
         if let Some(thread) = app.session_save_thread.take() {
             thread.join().unwrap();
         }
         app.save_session_on_shutdown();
 
-        assert!(crate::persist::load().is_none());
+        let snapshot = crate::persist::load().expect("checkpoint should survive autosave");
+        assert_eq!(snapshot.workspaces.len(), 1);
 
         std::env::remove_var("XDG_CONFIG_HOME");
         let _ = std::fs::remove_dir_all(config_home);
+    }
+
+    #[test]
+    fn host_restart_pane_exit_cascade_keeps_the_whole_session_snapshot() {
+        let _guard = crate::config::test_config_env_lock().lock().unwrap();
+        let config_home = unique_temp_path("host-restart-pane-cascade");
+        std::env::set_var("XDG_CONFIG_HOME", &config_home);
+        std::env::remove_var(crate::session::SESSION_ENV_VAR);
+
+        let mut app = test_app();
+        app.policy.persist_session = true;
+        app.state.workspaces = (0..9)
+            .map(|idx| Workspace::test_new(&format!("ws{idx}")))
+            .collect();
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.ensure_test_terminals();
+        let pane_ids: Vec<_> = app
+            .state
+            .workspaces
+            .iter()
+            .map(|ws| ws.tabs[0].root_pane)
+            .collect();
+
+        // 主机重启：每个 shell 捕获 SIGHUP 后以 exit 1 结束。
+        for pane_id in pane_ids {
+            app.handle_internal_event(AppEvent::PaneDied {
+                pane_id,
+                exit_reason: crate::platform::classify_child_exit(
+                    &portable_pty::ExitStatus::with_exit_code(1),
+                ),
+            });
+        }
+        assert!(app.state.workspaces.is_empty());
+
+        app.start_background_session_save(Instant::now());
+        if let Some(thread) = app.session_save_thread.take() {
+            thread.join().unwrap();
+        }
+        app.save_session_on_shutdown();
+
+        let snapshot = crate::persist::load().expect("session snapshot should survive a reboot");
+        assert_eq!(snapshot.workspaces.len(), 9);
+
+        std::env::remove_var("XDG_CONFIG_HOME");
+        let _ = std::fs::remove_dir_all(config_home);
+    }
+
+    /// 搭一个「重启前刚自动保存过」的会话：`count` 个单 pane workspace，盘上
+    /// 已有一份完整快照。返回每个 workspace 的 root pane id。
+    fn app_with_persisted_workspaces(app: &mut App, count: usize) -> Vec<crate::layout::PaneId> {
+        app.policy.persist_session = true;
+        app.state.workspaces = (0..count)
+            .map(|idx| Workspace::test_new(&format!("ws{idx}")))
+            .collect();
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.ensure_test_terminals();
+        app.save_session_now();
+        assert_eq!(
+            crate::persist::load()
+                .expect("baseline autosave")
+                .workspaces
+                .len(),
+            count
+        );
+        app.state
+            .workspaces
+            .iter()
+            .map(|ws| ws.tabs[0].root_pane)
+            .collect()
+    }
+
+    fn pane_died_with_exit_code(app: &mut App, pane_id: crate::layout::PaneId, code: u32) {
+        app.handle_internal_event(AppEvent::PaneDied {
+            pane_id,
+            exit_reason: crate::platform::classify_child_exit(
+                &portable_pty::ExitStatus::with_exit_code(code),
+            ),
+        });
+    }
+
+    /// 主机重启时部分 shell 会以 `0` 收尾（计划里 burst 判据要覆盖的那一半）：
+    /// 级联退出不得把盘上的完整快照换成被削减的中间态。
+    #[test]
+    fn host_restart_clean_pane_exit_cascade_keeps_the_persisted_snapshot() {
+        let _guard = crate::config::test_config_env_lock().lock().unwrap();
+        let config_home = unique_temp_path("host-restart-clean-cascade");
+        std::env::set_var("XDG_CONFIG_HOME", &config_home);
+        std::env::remove_var(crate::session::SESSION_ENV_VAR);
+
+        let mut app = test_app();
+        let pane_ids = app_with_persisted_workspaces(&mut app, 9);
+
+        for pane_id in pane_ids {
+            pane_died_with_exit_code(&mut app, pane_id, 0);
+        }
+        assert!(app.state.workspaces.is_empty());
+
+        app.start_background_session_save(Instant::now());
+        if let Some(thread) = app.session_save_thread.take() {
+            thread.join().unwrap();
+        }
+        app.save_session_on_shutdown();
+
+        let snapshot = crate::persist::load().expect("session snapshot should survive a reboot");
+        assert_eq!(snapshot.workspaces.len(), 9);
+
+        std::env::remove_var("XDG_CONFIG_HOME");
+        let _ = std::fs::remove_dir_all(config_home);
+    }
+
+    /// 级联被 systemd 的 SIGTERM→SIGKILL 超时拉长时会跨过 `SESSION_SAVE_DEBOUNCE`：
+    /// 到期的去抖保存看到的是「还剩几个」的中间态，不能写下去。
+    #[test]
+    fn a_pane_exit_cascade_crossing_the_debounce_window_never_shrinks_the_snapshot() {
+        let _guard = crate::config::test_config_env_lock().lock().unwrap();
+        let config_home = unique_temp_path("cascade-crosses-debounce");
+        std::env::set_var("XDG_CONFIG_HOME", &config_home);
+        std::env::remove_var(crate::session::SESSION_ENV_VAR);
+
+        let mut app = test_app();
+        let pane_ids = app_with_persisted_workspaces(&mut app, 9);
+        let writes_after_baseline = app.session_save_writes;
+
+        // 前两个 shell 先走，武装护栏。
+        pane_died_with_exit_code(&mut app, pane_ids[0], 0);
+        pane_died_with_exit_code(&mut app, pane_ids[1], 0);
+        assert_eq!(app.state.workspaces.len(), 7);
+
+        // 去抖到期（注入时钟推进 6 s > SESSION_SAVE_DEBOUNCE）。
+        let due = Instant::now() + SESSION_SAVE_DEBOUNCE + Duration::from_secs(1);
+        app.start_background_session_save(due);
+        if let Some(thread) = app.session_save_thread.take() {
+            thread.join().unwrap();
+        }
+        assert_eq!(
+            app.session_save_writes, writes_after_baseline,
+            "缩小快照的去抖保存必须被跳过"
+        );
+        assert_eq!(
+            crate::persist::load().expect("snapshot").workspaces.len(),
+            9
+        );
+        assert!(
+            app.session_save_deadline.is_some(),
+            "跳过写盘要留一个重试点"
+        );
+
+        // 剩下的 shell 在超时后陆续死掉。
+        for pane_id in &pane_ids[2..] {
+            pane_died_with_exit_code(&mut app, *pane_id, 0);
+        }
+        assert!(app.state.workspaces.is_empty());
+        app.start_background_session_save(due + Duration::from_secs(30));
+        if let Some(thread) = app.session_save_thread.take() {
+            thread.join().unwrap();
+        }
+        app.save_session_on_shutdown();
+
+        assert_eq!(
+            crate::persist::load().expect("snapshot").workspaces.len(),
+            9
+        );
+
+        std::env::remove_var("XDG_CONFIG_HOME");
+        let _ = std::fs::remove_dir_all(config_home);
+    }
+
+    /// 客户端仍连着时 headless 循环会立刻补一个默认 workspace
+    /// （`server/headless.rs` 每轮都调 `ensure_default_workspace`）。这个自动补位
+    /// 不能把 pane-exit 检查点覆盖成「1 个默认 workspace」。
+    #[tokio::test]
+    async fn an_automatic_default_workspace_does_not_overwrite_the_pane_exit_checkpoint() {
+        let _guard = crate::config::test_config_env_lock().lock().unwrap();
+        let config_home = unique_temp_path("auto-default-workspace-cascade");
+        std::env::set_var("XDG_CONFIG_HOME", &config_home);
+        std::env::remove_var(crate::session::SESSION_ENV_VAR);
+
+        let mut app = test_app();
+        let pane_ids = app_with_persisted_workspaces(&mut app, 9);
+
+        for pane_id in pane_ids {
+            pane_died_with_exit_code(&mut app, pane_id, 1);
+        }
+        assert!(app.state.workspaces.is_empty());
+        assert!(app.ensure_default_workspace());
+        assert_eq!(app.state.workspaces.len(), 1);
+
+        // 自动补位后去抖到期。
+        let due = Instant::now() + SESSION_SAVE_DEBOUNCE + Duration::from_secs(1);
+        app.start_background_session_save(due);
+        if let Some(thread) = app.session_save_thread.take() {
+            thread.join().unwrap();
+        }
+        app.save_session_on_shutdown();
+
+        let snapshot = crate::persist::load().expect("checkpoint should survive auto replacement");
+        assert_eq!(snapshot.workspaces.len(), 9);
+
+        std::env::remove_var("XDG_CONFIG_HOME");
+        let _ = std::fs::remove_dir_all(config_home);
+    }
+
+    /// 显式关闭是同步摘 pane 的，随后到达的 `PaneDied` 指向未知 pane：不能喂进
+    /// 批量退出窗口，否则关掉一个 3 pane 的 tab 就武装了 burst，紧跟的一次干净
+    /// 退出会白白换来一次同步落盘。
+    #[test]
+    fn explicitly_closing_a_workspace_does_not_arm_the_pane_exit_burst_window() {
+        let _guard = crate::config::test_config_env_lock().lock().unwrap();
+        let config_home = unique_temp_path("explicit-close-no-burst");
+        std::env::set_var("XDG_CONFIG_HOME", &config_home);
+        std::env::remove_var(crate::session::SESSION_ENV_VAR);
+
+        let mut app = test_app();
+        app.policy.persist_session = true;
+        let mut closed = Workspace::test_new("closed");
+        let closed_panes = vec![
+            closed.tabs[0].root_pane,
+            closed.test_split(ratatui::layout::Direction::Horizontal),
+            closed.test_split(ratatui::layout::Direction::Vertical),
+        ];
+        let kept = Workspace::test_new("kept");
+        let kept_pane = kept.tabs[0].root_pane;
+        app.state.workspaces = vec![closed, kept];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.ensure_test_terminals();
+        app.save_session_now();
+        let writes_after_baseline = app.session_save_writes;
+
+        app.state.close_selected_workspace();
+        assert_eq!(app.state.workspaces.len(), 1);
+        for pane_id in closed_panes {
+            app.handle_internal_event(AppEvent::PaneDied {
+                pane_id,
+                exit_reason: crate::platform::ChildExitReason::Exited,
+            });
+        }
+        assert!(
+            app.recent_pane_exits.is_empty(),
+            "显式关闭产生的 PaneDied 不得进入批量退出窗口"
+        );
+
+        // 紧跟一次真实 pane 的干净退出：不该被判为批量退出，也不该额外落盘。
+        pane_died_with_exit_code(&mut app, kept_pane, 0);
+        assert_eq!(
+            app.session_save_writes, writes_after_baseline,
+            "单次干净退出不应触发同步检查点"
+        );
+
+        std::env::remove_var("XDG_CONFIG_HOME");
+        let _ = std::fs::remove_dir_all(config_home);
+    }
+
+    /// 计划 A2「检查点触发频率上升会增加保存 I/O」的回归证据：一次退出级联最多
+    /// 换来一次同步落盘，1 pane 与 15 pane 同量级（即使期间反复 `mark_session_dirty`
+    /// 打开 `pane_exit_checkpoint_pending && !session_dirty` 那道门）。
+    #[test]
+    fn a_pane_exit_cascade_costs_one_synchronous_save_at_one_and_fifteen_panes() {
+        let _guard = crate::config::test_config_env_lock().lock().unwrap();
+        let config_home = unique_temp_path("cascade-save-io");
+        std::env::set_var("XDG_CONFIG_HOME", &config_home);
+        std::env::remove_var(crate::session::SESSION_ENV_VAR);
+
+        for workspaces in [1usize, 15] {
+            crate::persist::clear();
+            let mut app = test_app();
+            app.policy.persist_session = true;
+            app.state.workspaces = (0..workspaces)
+                .map(|idx| Workspace::test_new(&format!("ws{idx}")))
+                .collect();
+            app.state.active = Some(0);
+            app.state.selected = 0;
+            app.state.ensure_test_terminals();
+            let pane_ids: Vec<_> = app
+                .state
+                .workspaces
+                .iter()
+                .map(|ws| ws.tabs[0].root_pane)
+                .collect();
+
+            for pane_id in pane_ids {
+                // git 刷新/检测状态变化会在级联期间不断置脏。
+                app.state.mark_session_dirty();
+                pane_died_with_exit_code(&mut app, pane_id, 1);
+            }
+
+            assert_eq!(
+                app.session_save_writes, 1,
+                "{workspaces} pane 的退出级联只应换来一次落盘"
+            );
+        }
+
+        std::env::remove_var("XDG_CONFIG_HOME");
+        let _ = std::fs::remove_dir_all(config_home);
+    }
+
+    /// 明确表态（审查发现 #4）：用户在最后一个 shell 里以 `exit 1` 收尾时
+    /// `session.json` 不被删除——进程内分不出这和主机重启。恢复不会「诈尸」，
+    /// 因为客户端还连着时自动补位的默认 workspace 会正常覆盖它（集合没有变小）。
+    #[tokio::test]
+    async fn exiting_the_last_shell_keeps_the_snapshot_and_the_default_workspace_replaces_it() {
+        let _guard = crate::config::test_config_env_lock().lock().unwrap();
+        let config_home = unique_temp_path("last-shell-exit-one");
+        std::env::set_var("XDG_CONFIG_HOME", &config_home);
+        std::env::remove_var(crate::session::SESSION_ENV_VAR);
+
+        let mut app = test_app();
+        let pane_ids = app_with_persisted_workspaces(&mut app, 1);
+
+        pane_died_with_exit_code(&mut app, pane_ids[0], 1);
+        assert!(app.state.workspaces.is_empty());
+        app.start_background_session_save(Instant::now());
+        if let Some(thread) = app.session_save_thread.take() {
+            thread.join().unwrap();
+        }
+        let snapshot =
+            crate::persist::load().expect("implicit teardown must not clear the session");
+        assert_eq!(snapshot.workspaces.len(), 1);
+
+        // 客户端仍连着 → 自动补位；集合没有变小，所以护栏放行，盘上换成新会话。
+        assert!(app.ensure_default_workspace());
+        let due = Instant::now() + SESSION_SAVE_DEBOUNCE + Duration::from_secs(1);
+        app.start_background_session_save(due);
+        if let Some(thread) = app.session_save_thread.take() {
+            thread.join().unwrap();
+        }
+        let snapshot = crate::persist::load().expect("auto replacement should be persisted");
+        assert_eq!(snapshot.workspaces.len(), 1);
+        assert_eq!(snapshot.workspaces[0].custom_name, None);
+
+        std::env::remove_var("XDG_CONFIG_HOME");
+        let _ = std::fs::remove_dir_all(config_home);
+    }
+
+    #[test]
+    fn explicitly_closing_the_last_workspace_clears_the_session() {
+        let _guard = crate::config::test_config_env_lock().lock().unwrap();
+        let config_home = unique_temp_path("explicit-last-workspace-close");
+        std::env::set_var("XDG_CONFIG_HOME", &config_home);
+        std::env::remove_var(crate::session::SESSION_ENV_VAR);
+
+        let mut app = test_app();
+        app.policy.persist_session = true;
+        app.state.workspaces = vec![Workspace::test_new("only")];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.ensure_test_terminals();
+        app.save_session_now();
+        assert!(crate::persist::load().is_some());
+
+        app.state.close_selected_workspace();
+        assert!(app.state.workspaces.is_empty());
+        app.save_session_now();
+
+        assert!(
+            crate::persist::load().is_none(),
+            "explicit teardown should clear the persisted session"
+        );
+
+        std::env::remove_var("XDG_CONFIG_HOME");
+        let _ = std::fs::remove_dir_all(config_home);
+    }
+
+    #[test]
+    fn shutdown_with_an_implicitly_emptied_workspace_set_does_not_write() {
+        let _guard = crate::config::test_config_env_lock().lock().unwrap();
+        let config_home = unique_temp_path("shutdown-empty-workspace-set");
+        std::env::set_var("XDG_CONFIG_HOME", &config_home);
+        std::env::remove_var(crate::session::SESSION_ENV_VAR);
+
+        let mut app = test_app();
+        app.policy.persist_session = true;
+        app.state.workspaces = vec![Workspace::test_new("kept")];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.ensure_test_terminals();
+        app.save_session_now();
+        assert!(crate::persist::load().is_some());
+
+        let pane_id = app.state.workspaces[0].tabs[0].root_pane;
+        app.handle_internal_event(AppEvent::PaneDied {
+            pane_id,
+            exit_reason: crate::platform::ChildExitReason::Exited,
+        });
+        assert!(app.state.workspaces.is_empty());
+        app.state.should_quit = true;
+        app.state.mark_session_dirty();
+
+        app.save_session_on_shutdown();
+
+        let snapshot =
+            crate::persist::load().expect("shutdown must not clear an implicit empty set");
+        assert_eq!(snapshot.workspaces.len(), 1);
+
+        std::env::remove_var("XDG_CONFIG_HOME");
+        let _ = std::fs::remove_dir_all(config_home);
+    }
+
+    /// 辅助函数级的补充单测；行为本身由上面的端到端用例守。
+    #[test]
+    fn a_short_window_burst_of_clean_pane_exits_is_suspicious() {
+        let mut app = test_app();
+        let start = Instant::now();
+        let clean = crate::platform::ChildExitReason::Exited;
+
+        assert!(!app.note_pane_exit_requires_checkpoint(clean, start));
+        assert!(app.note_pane_exit_requires_checkpoint(clean, start + Duration::from_millis(100)));
+
+        // 窗口外的零散退出不再被视为批量退出。
+        let later = start + Duration::from_secs(30);
+        assert!(!app.note_pane_exit_requires_checkpoint(clean, later));
+        // 单次可疑退出码无需凑够批量也触发检查点。
+        assert!(app.note_pane_exit_requires_checkpoint(
+            crate::platform::ChildExitReason::SuspectedInterruption,
+            later + Duration::from_secs(30)
+        ));
     }
 
     #[test]

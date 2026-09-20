@@ -32,6 +32,12 @@ If the Herdr server stops and starts again, the original pane processes are gone
 
 Snapshot restore does not preserve running shells, servers, tests, or arbitrary processes. Panes that cannot use a stronger restore path come back as new shells in their saved directories.
 
+### When the saved session is cleared
+
+Herdr clears `session.json` only when you explicitly close the last workspace. If the workspace set empties for any other reason, such as a host restart that hangs up every shell or the last pane process exiting on its own, Herdr keeps the saved snapshot instead of deleting it, so the next start can still restore the session. What comes back is the most recent snapshot on disk, which can be a few seconds older than the moment the panes died.
+
+Herdr also guards that snapshot while panes are exiting in a cascade. When several panes exit within a couple of seconds, or a shell reports an exit status that a host shutdown typically produces, Herdr writes a checkpoint before removing the pane and stops replacing the saved snapshot with a smaller workspace set. The guard lifts about 90 seconds after the last such exit, so an ordinary round of closing shells is still saved, just a little later.
+
 ## Pane screen history replay
 
 Pane screen history restores recent terminal contents after a full server restart without restoring the old process.

@@ -3465,7 +3465,7 @@ impl HeadlessServer {
             .session_save_deadline
             .is_some_and(|deadline| now >= deadline)
         {
-            self.app.start_background_session_save();
+            self.app.start_background_session_save(now);
         }
 
         if let Some(deadline) = self

@@ -227,13 +227,22 @@ impl App {
             }
         }
 
-        let checkpointed_pane_exit = matches!(
-            &ev,
-            AppEvent::PaneDied {
-                pane_id,
-                exit_reason,
-            } if exit_reason.requires_session_checkpoint() && self.find_pane(*pane_id).is_some() && !self.overlay_panes.contains_key(pane_id)
-        );
+        let checkpointed_pane_exit = if let AppEvent::PaneDied {
+            pane_id,
+            exit_reason,
+        } = &ev
+        {
+            let (pane_id, exit_reason) = (*pane_id, *exit_reason);
+            // 先过滤再登记：只有仍在 workspaces 里的非 overlay pane 才算「主机
+            // 重启」的证据。显式关闭（close_pane / close_selected_tab /
+            // close_selected_workspace）会同步摘除 pane，随后到达的 PaneDied 不
+            // 能喂进批量退出窗口，否则关掉一个 3 pane 的 tab 就武装了 burst。
+            self.find_pane(pane_id).is_some()
+                && !self.overlay_panes.contains_key(&pane_id)
+                && self.note_pane_exit_requires_checkpoint(exit_reason, Instant::now())
+        } else {
+            false
+        };
         if checkpointed_pane_exit {
             self.checkpoint_session_before_pane_exit();
         }

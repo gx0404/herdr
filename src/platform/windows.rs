@@ -36,10 +36,23 @@ pub(crate) fn detach_stdout() -> std::io::Result<()> {
     Ok(())
 }
 
+/// 关机时 Windows shell 自报的可疑退出码。
+///
+/// Windows 没有 `128 + signal` 语义（其对应量 `0xC000013A` 由
+/// `classify_child_exit` 单列），所以只认最泛用的失败码 `1`：shell 在会话结束
+/// 时被拆掉 ConPTY 往往就是这个码。代价只是多做一次会话检查点
+/// （HSR-04 / 上游 #4320）。
+fn exit_code_suspects_host_shutdown(code: u32) -> bool {
+    code == 1
+}
+
 pub(crate) fn classify_child_exit(status: &portable_pty::ExitStatus) -> super::ChildExitReason {
     // STATUS_CONTROL_C_EXIT is reported without a Unix signal by portable-pty.
     if status.exit_code() == 0xC000013A {
         super::ChildExitReason::Interrupted
+    } else if exit_code_suspects_host_shutdown(status.exit_code()) {
+        // 关机时 ConPTY 下的 shell 同样只留一个可疑退出码。
+        super::ChildExitReason::SuspectedInterruption
     } else {
         super::ChildExitReason::Exited
     }

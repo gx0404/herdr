@@ -139,6 +139,10 @@ pub enum Signal {
 pub enum ChildExitReason {
     Exited,
     Interrupted,
+    /// 退出码看起来是宿主关机/重启打断的结果，但无法与正常退出区分。
+    /// 按打断处理，只影响持久化检查点策略；哪些退出码算可疑由各平台的
+    /// `classify_child_exit` 自己决定。
+    SuspectedInterruption,
     /// Imported runtimes have no child wait handle in the replacement server.
     #[cfg(unix)]
     Handoff,
@@ -148,7 +152,7 @@ pub enum ChildExitReason {
 impl ChildExitReason {
     pub(crate) fn requires_session_checkpoint(self) -> bool {
         match self {
-            Self::Interrupted => true,
+            Self::Interrupted | Self::SuspectedInterruption => true,
             #[cfg(unix)]
             Self::Handoff => true,
             _ => false,
@@ -159,6 +163,8 @@ impl ChildExitReason {
 #[cfg(unix)]
 pub(crate) use unix_common::classify_child_exit;
 
+/// 没有平台实现时只认「正常退出」：可疑退出码表是 OS 专属语义，各
+/// `src/platform/<os>.rs` 自己维护（见 `docs/AGENT_RULES/platform.md`）。
 #[cfg(not(any(unix, windows)))]
 pub(crate) fn classify_child_exit(_status: &portable_pty::ExitStatus) -> ChildExitReason {
     ChildExitReason::Exited
@@ -652,7 +658,7 @@ impl PrefixInputSource for RealPrefixInputSource {
 #[cfg(all(test, any(unix, windows)))]
 #[test]
 fn child_exit_classification_only_checkpoints_interruptions() {
-    for code in [0, 1, 130, 255, 0xC0000005] {
+    for code in [0, 2, 130, 255, 0xC0000005] {
         let reason = classify_child_exit(&portable_pty::ExitStatus::with_exit_code(code));
         assert_eq!(reason, ChildExitReason::Exited, "exit code {code:#x}");
         assert!(!reason.requires_session_checkpoint());
@@ -666,6 +672,35 @@ fn child_exit_classification_only_checkpoints_interruptions() {
     #[cfg(unix)]
     assert!(ChildExitReason::Handoff.requires_session_checkpoint());
     assert!(!ChildExitReason::WaitFailed.requires_session_checkpoint());
+}
+
+/// 跨平台可测试契约：`1` 是 unix 与 windows 都认可的可疑退出码，`0`/`2` 不是。
+/// `128 + signal` 那半张码表是 unix 语义，由 `unix_common` 的测试守。
+#[cfg(all(test, any(unix, windows)))]
+#[test]
+fn exit_code_one_is_a_suspected_interruption_on_every_platform() {
+    let reason = classify_child_exit(&portable_pty::ExitStatus::with_exit_code(1));
+    assert_eq!(reason, ChildExitReason::SuspectedInterruption);
+    assert!(reason.requires_session_checkpoint());
+}
+
+/// 主机重启时 shell 捕获 SIGHUP/SIGTERM 后自报 `128 + signal`：必须触发会话
+/// 检查点，否则 pane 逐个移除会把 session.json 清空（HSR-04 / 上游 #4320）。
+#[cfg(all(test, unix))]
+#[test]
+fn unix_signal_exit_codes_are_classified_as_suspected_interruptions() {
+    for code in [129, 143] {
+        let reason = classify_child_exit(&portable_pty::ExitStatus::with_exit_code(code));
+        assert_eq!(
+            reason,
+            ChildExitReason::SuspectedInterruption,
+            "exit code {code}"
+        );
+        assert!(reason.requires_session_checkpoint(), "exit code {code}");
+    }
+    assert!(!unix_common::exit_code_suspects_host_shutdown(0));
+    assert!(!unix_common::exit_code_suspects_host_shutdown(2));
+    assert!(unix_common::exit_code_suspects_host_shutdown(1));
 }
 
 #[cfg(all(test, unix))]
