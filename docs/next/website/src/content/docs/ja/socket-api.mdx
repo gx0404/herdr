@@ -641,7 +641,7 @@ workspace の get/list 応答は結果の `tokens` マップを公開し、ス�
 }
 ```
 
-最初のレスポンスは購読の確認応答です。以降の行はプッシュされるイベントです。ライフサイクルイベントの購読はリクエストが受理された時点から始まり、それ以前に保持されていたイベントは再生しません。
+最初のレスポンスは購読の確認応答です。以降の行はプッシュされるイベントです。ライフサイクルイベントの購読はリクエストが受理された時点から始まり、それ以前に保持されていたイベントは再生しません。まとまって発生したライフサイクルイベントは、ポーリング間隔ごとに1行ではなく、1回の配信でまとめて連続した複数行として届きます。配信は引き続きポーリングループが駆動するため、まとまったイベントの最初の1行の遅延はポーリング間隔が上限です。スナップショットに基づく購読(`pane.output_matched`、`pane.agent_status_changed`、`pane.scroll_changed`)はエッジトリガーで、1ポーリング間隔あたり最大1件のイベントしか出力しません。購読接続に書き込んでも(改行のキープアライブなど)ストリームは終了しません。そのバイト列は接続が閉じるまでバッファに残り、消費されません。
 
 ワークスペースのイベント購読には `workspace.created`、`workspace.updated`、`workspace.metadata_updated`、`workspace.renamed`、`workspace.moved`、`workspace.reordered`、`workspace.closed`、`workspace.focused` があります。`workspace.metadata_updated` はプラグインイベントフックを実行せずにトークン変更と TTL 失効を報告します。その他のワークスペースイベントは Herdr の UI/ランタイムのライフサイクルを記述します。ワークスペースが worktree グループに属している場合、`workspace.created` は任意の `workspace.worktree` 出自情報を含みます。`workspace.moved` は、移動した `workspace_id`、要求された `insert_index`、更新済みの順序付き `workspaces` リストを含みます。`workspace.reordered` は、アトミックに移動した `workspace_ids`、省略可能な `before_workspace_id`、サーバーが確定した順序付き `workspaces` リストを含みます。削除前に Herdr がまだ識別できる場合、`workspace.closed` は最終的な `workspace` スナップショットを含みます。
 タブのイベント購読には `tab.created`、`tab.closed`、`tab.focused`、`tab.renamed`、`tab.moved` があります。`tab.moved` は、移動した `tab_id`、`workspace_id`、要求された `insert_index`、そのワークスペースの更新済みの順序付き `tabs` リストを含みます。

@@ -820,6 +820,14 @@ Subscribe to events when you need a long-lived stream:
 The first response acknowledges the subscription. Later lines are pushed events.
 Lifecycle subscriptions start when the request is accepted and do not replay
 events retained before that point.
+A burst of lifecycle events arrives as consecutive lines in a single delivery
+pass instead of one line per polling interval. Delivery is still driven by a
+polling loop, so the latency of the first line in a burst is bounded by the
+polling interval. Snapshot-based subscriptions (`pane.output_matched`,
+`pane.agent_status_changed`, `pane.scroll_changed`) are edge triggered and emit
+at most one event per polling interval. Writing on a subscription connection
+(for example a newline keepalive) does not end the stream; those bytes stay
+buffered and unread until the connection closes.
 
 Workspace event subscriptions include `workspace.created`, `workspace.updated`, `workspace.metadata_updated`, `workspace.renamed`, `workspace.moved`, `workspace.reordered`, `workspace.closed`, and `workspace.focused`. `workspace.metadata_updated` reports token changes and TTL expiry without invoking plugin event hooks. Other workspace events describe Herdr UI/runtime lifecycle. `workspace.created` includes optional `workspace.worktree` provenance when the workspace belongs to a worktree group. `workspace.moved` includes the moved `workspace_id`, requested `insert_index`, and updated ordered `workspaces` list. `workspace.reordered` includes the atomically moved `workspace_ids`, optional `before_workspace_id`, and authoritative ordered `workspaces` list. `workspace.closed` includes a final `workspace` snapshot when Herdr can still identify it before removal.
 Tab event subscriptions include `tab.created`, `tab.closed`, `tab.focused`,

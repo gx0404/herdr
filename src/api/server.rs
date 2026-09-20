@@ -13,7 +13,7 @@ use std::fs;
 use crate::api::schema::{
     ErrorBody, ErrorResponse, Method, Request, ResponseResult, ServerCapabilities, SuccessResponse,
 };
-use crate::api::subscriptions::ActiveSubscription;
+use crate::api::subscriptions::{poll_subscriptions_round, ActiveSubscription};
 use crate::api::wait::{prompt_agent, wait_for_agent, wait_for_event, wait_for_output};
 use crate::api::{request_changes_ui, socket_path, ApiRequestMessage, ApiRequestSender, EventHub};
 use crate::ipc::{
@@ -816,14 +816,21 @@ fn stream_subscriptions(
             return Ok(());
         }
 
-        for subscription in &mut subscriptions {
-            if let Some(event) = subscription.poll(api_tx, event_hub) {
-                if let Err(err) = write_json_line(&mut stream, &event) {
-                    if is_connection_closed_error(&err) {
-                        return Ok(());
-                    }
-                    return Err(err);
+        // 每个轮询间隔只 poll 一轮，每个订阅只 poll 一次。去掉 10 Hz 上限靠的是
+        // 单次 poll 就取走本轮全部事件（`ActiveSubscription::poll` 返回 `Vec`），
+        // 不是在这里加内层 drain 循环：内层 drain 会无差别重跑连接上的**全部**
+        // 订阅，而 `pane.output_matched` / `pane.agent_status_changed` /
+        // `pane.scroll_changed` 每次 poll 都是一次对 app/渲染线程的同步往返
+        // （`APP_RESPONSE_TIMEOUT`），于是高频事件源会把这些往返按轮数放大——
+        // 既加宽乘法路径（连接 × 订阅 × 轮次），又让停机信号被饿死在
+        // 单次唤醒内。快照类订阅是边沿触发，多跑一轮也补不回中间态。
+        // 每条事件仍是独立的一行 JSON，分帧不变（HSR-03）。
+        for event in poll_subscriptions_round(&mut subscriptions, api_tx, event_hub) {
+            if let Err(err) = write_json_line(&mut stream, &event) {
+                if is_connection_closed_error(&err) {
+                    return Ok(());
                 }
+                return Err(err);
             }
         }
         std::thread::sleep(CONNECTION_POLL_INTERVAL);
@@ -1587,6 +1594,293 @@ mod tests {
         server_thread.join().unwrap();
         drop(running);
         responder.join().unwrap();
+    }
+
+    fn workspace_focused_event(workspace_id: &str) -> crate::api::schema::EventEnvelope {
+        crate::api::schema::EventEnvelope {
+            event: crate::api::schema::EventKind::WorkspaceFocused,
+            data: crate::api::schema::EventData::WorkspaceFocused {
+                workspace_id: workspace_id.into(),
+            },
+        }
+    }
+
+    fn read_json_line_from(reader: &mut BufReader<LocalStream>) -> serde_json::Value {
+        let mut line = String::new();
+        reader.read_line(&mut line).expect("read subscription line");
+        serde_json::from_str(&line).expect("decode subscription line")
+    }
+
+    /// HSR-03 回归（乘法路径）：订阅流在持续事件流下，不得把 pane 快照类订阅
+    /// 对 app/渲染线程的同步往返次数按事件率放大。
+    ///
+    /// 此前 `stream_subscriptions` 在一次唤醒内最多 drain
+    /// `MAX_SUBSCRIPTION_DRAIN_ROUNDS` 轮，而每轮都无差别重跑连接上的**全部**
+    /// 订阅——只有 event hub 订阅是廉价的内存读，`pane.output_matched` /
+    /// `pane.agent_status_changed` / `pane.scroll_changed` 每轮都要走一次
+    /// `pane_get`/`pane_read`。于是「一个高频 event 订阅 + 一个 pane 快照订阅」
+    /// 的混合连接把每 100 ms 1 次 `pane.get` 放大到最多 64 次。
+    ///
+    /// 这里让 responder 每处理一次 `pane.get` 就往 hub 里推一条事件，
+    /// 确定性地构造出「每轮都非空」的条件：旧实现会跑满上限轮，新实现每个
+    /// 轮询间隔只 poll 一次。
+    #[test]
+    fn subscription_stream_does_not_amplify_pane_dispatches_under_event_load() {
+        use interprocess::local_socket::traits::Stream as _;
+        use std::sync::atomic::AtomicUsize;
+
+        let pane_get_count = Arc::new(AtomicUsize::new(0));
+        let responder_count = Arc::clone(&pane_get_count);
+        let event_hub = EventHub::default();
+        let responder_hub = event_hub.clone();
+        let (api_tx, mut api_rx) = mpsc::unbounded_channel::<ApiRequestMessage>();
+        let responder = std::thread::spawn(move || {
+            while let Some(msg) = api_rx.blocking_recv() {
+                let Method::PaneGet(_) = msg.request.method else {
+                    panic!("unexpected request: {:?}", msg.request.method);
+                };
+                let seen = responder_count.fetch_add(1, Ordering::Relaxed);
+                // 订阅建立时的探测不计入负载；之后每次快照查询都补一条事件，
+                // 保证「本轮有事件」恒成立。
+                if seen > 0 {
+                    responder_hub.push(workspace_focused_event(&format!("ws_{seen}")));
+                }
+                msg.respond_to
+                    .send(
+                        serde_json::to_string(&SuccessResponse {
+                            id: msg.request.id,
+                            result: ResponseResult::PaneInfo {
+                                // `scroll: None` 与探测快照一致，订阅本身不产出事件，
+                                // 计数器量到的就是纯粹的 poll 次数。
+                                pane: pane_info("pane_1", crate::api::schema::AgentStatus::Unknown),
+                            },
+                        })
+                        .unwrap(),
+                    )
+                    .unwrap();
+            }
+        });
+
+        let (mut client, server, path) = local_stream_pair("api-sub-amplify");
+        client
+            .write_all(
+                br#"{"id":"sub_amplify","method":"events.subscribe","params":{"subscriptions":[{"type":"workspace.focused"},{"type":"pane.scroll_changed","pane_id":"pane_1"}]}}"#,
+            )
+            .unwrap();
+        client.write_all(b"\n").unwrap();
+        client.flush().unwrap();
+        client
+            .set_recv_timeout(Some(Duration::from_secs(10)))
+            .unwrap();
+
+        let running = Arc::new(AtomicBool::new(true));
+        let server_running = Arc::clone(&running);
+        let server_api_tx = api_tx.clone();
+        let server_event_hub = event_hub.clone();
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let server_thread = std::thread::spawn(move || {
+            let result = handle_connection(
+                server,
+                &server_api_tx,
+                &server_event_hub,
+                &server_running,
+                None,
+            );
+            done_tx.send(result).unwrap();
+        });
+
+        let mut reader = BufReader::new(client);
+        let ack = read_json_line_from(&mut reader);
+        assert_eq!(ack["result"]["type"], "subscription_started");
+        assert_eq!(
+            pane_get_count.load(Ordering::Relaxed),
+            1,
+            "订阅建立时只做一次探测快照"
+        );
+
+        // 观察窗口：先推一条事件点火，然后放任自流数个轮询间隔。
+        event_hub.push(workspace_focused_event("ignition"));
+        const OBSERVED_INTERVALS: u32 = 3;
+        std::thread::sleep(
+            CONNECTION_POLL_INTERVAL * OBSERVED_INTERVALS + CONNECTION_POLL_INTERVAL / 2,
+        );
+
+        let dispatches = pane_get_count.load(Ordering::Relaxed);
+        // 每个轮询间隔至多 1 次快照查询；留出一个间隔的调度抖动余量。
+        let budget = (OBSERVED_INTERVALS + 2) as usize;
+        assert!(
+            dispatches <= budget,
+            "pane 快照订阅每个轮询间隔至多 poll 一次：{OBSERVED_INTERVALS} 个间隔内预算 {budget} 次，实际 {dispatches} 次"
+        );
+
+        drop(reader);
+        let result = done_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert!(result.is_ok());
+        server_thread.join().unwrap();
+        drop(api_tx);
+        responder.join().unwrap();
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// 订阅流必须每个轮询间隔量级就回到 `running` 检查。此前一次唤醒内的
+    /// drain 循环从不复查停机信号，最坏要等满上限轮（每轮每个 pane 订阅还可能
+    /// 各等一次 `APP_RESPONSE_TIMEOUT`）才回到外层。
+    #[test]
+    fn subscription_stream_stops_within_a_poll_interval_when_server_stops() {
+        use interprocess::local_socket::traits::Stream as _;
+
+        let (api_tx, _api_rx) = mpsc::unbounded_channel::<ApiRequestMessage>();
+        let (mut client, server, path) = local_stream_pair("api-sub-stop");
+        client
+            .write_all(
+                br#"{"id":"sub_stop","method":"events.subscribe","params":{"subscriptions":[{"type":"workspace.focused"}]}}"#,
+            )
+            .unwrap();
+        client.write_all(b"\n").unwrap();
+        client.flush().unwrap();
+        client
+            .set_recv_timeout(Some(Duration::from_secs(10)))
+            .unwrap();
+
+        let running = Arc::new(AtomicBool::new(true));
+        let server_running = Arc::clone(&running);
+        let event_hub = EventHub::default();
+        let hub = event_hub.clone();
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let server_thread = std::thread::spawn(move || {
+            let result = handle_connection(server, &api_tx, &event_hub, &server_running, None);
+            done_tx.send(result).unwrap();
+        });
+
+        let mut reader = BufReader::new(client);
+        let ack = read_json_line_from(&mut reader);
+        assert_eq!(ack["result"]["type"], "subscription_started");
+
+        // 持续有事件可投递时也要能停：这正是旧 drain 循环饿死停机信号的条件。
+        for index in 0..64 {
+            hub.push(workspace_focused_event(&format!("ws_{index}")));
+        }
+        running.store(false, Ordering::Relaxed);
+
+        let started = Instant::now();
+        let result = done_rx
+            .recv_timeout(CONNECTION_POLL_INTERVAL * 20)
+            .expect("订阅线程应在一个轮询间隔量级内返回");
+        assert!(result.is_ok());
+        assert!(
+            started.elapsed() < CONNECTION_POLL_INTERVAL * 20,
+            "停机信号不得被单次唤醒内的投递饿死，实际 {:?}",
+            started.elapsed()
+        );
+
+        server_thread.join().unwrap();
+        drop(reader);
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// HSR-03 回归：整批事件必须在一个轮询间隔内投递完。旧行为是每轮 1 条，
+    /// 50 条要 50 × 100 ms ≈ 5 s。
+    #[test]
+    fn subscription_stream_delivers_an_event_burst_within_one_poll_interval() {
+        use interprocess::local_socket::traits::Stream as _;
+
+        const BURST: usize = 50;
+
+        let (api_tx, _api_rx) = mpsc::unbounded_channel::<ApiRequestMessage>();
+        let (mut client, server, path) = local_stream_pair("api-sub-burst");
+        client
+            .write_all(
+                br#"{"id":"sub_burst","method":"events.subscribe","params":{"subscriptions":[{"type":"workspace.focused"}]}}"#,
+            )
+            .unwrap();
+        client.write_all(b"\n").unwrap();
+        client.flush().unwrap();
+        client
+            .set_recv_timeout(Some(Duration::from_secs(10)))
+            .unwrap();
+
+        let running = Arc::new(AtomicBool::new(true));
+        let server_running = Arc::clone(&running);
+        let event_hub = EventHub::default();
+        let hub = event_hub.clone();
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let server_thread = std::thread::spawn(move || {
+            let result = handle_connection(server, &api_tx, &event_hub, &server_running, None);
+            done_tx.send(result).unwrap();
+        });
+
+        let mut reader = BufReader::new(client);
+        let ack = read_json_line_from(&mut reader);
+        assert_eq!(ack["result"]["type"], "subscription_started");
+
+        for index in 0..BURST {
+            hub.push(workspace_focused_event(&format!("ws_{index}")));
+        }
+
+        let started = Instant::now();
+        for index in 0..BURST {
+            let event = read_json_line_from(&mut reader);
+            assert_eq!(event["event"], "workspace_focused");
+            assert_eq!(event["data"]["workspace_id"], format!("ws_{index}"));
+        }
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed < Duration::from_millis(1500),
+            "{BURST} 条事件应在一个轮询间隔内投递完，实际耗时 {elapsed:?}"
+        );
+
+        drop(reader);
+        let result = done_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert!(result.is_ok());
+        server_thread.join().unwrap();
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// HSR-07 回归：客户端在订阅流上追加心跳字节后，订阅必须继续投递事件，
+    /// 而不是被探测当成连接关闭。
+    #[test]
+    fn subscription_stream_survives_client_writes() {
+        use interprocess::local_socket::traits::Stream as _;
+
+        let (api_tx, _api_rx) = mpsc::unbounded_channel::<ApiRequestMessage>();
+        let (mut client, server, path) = local_stream_pair("api-sub-heartbeat");
+        client
+            .write_all(
+                br#"{"id":"sub_heartbeat","method":"events.subscribe","params":{"subscriptions":[{"type":"workspace.focused"}]}}"#,
+            )
+            .unwrap();
+        client.write_all(b"\n").unwrap();
+        client.flush().unwrap();
+        client
+            .set_recv_timeout(Some(Duration::from_secs(10)))
+            .unwrap();
+
+        let running = Arc::new(AtomicBool::new(true));
+        let server_running = Arc::clone(&running);
+        let event_hub = EventHub::default();
+        let hub = event_hub.clone();
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let server_thread = std::thread::spawn(move || {
+            let result = handle_connection(server, &api_tx, &event_hub, &server_running, None);
+            done_tx.send(result).unwrap();
+        });
+
+        let mut reader = BufReader::new(client);
+        let ack = read_json_line_from(&mut reader);
+        assert_eq!(ack["result"]["type"], "subscription_started");
+
+        reader.get_mut().write_all(b"\n").unwrap();
+        reader.get_mut().flush().unwrap();
+
+        hub.push(workspace_focused_event("after_heartbeat"));
+        let event = read_json_line_from(&mut reader);
+        assert_eq!(event["data"]["workspace_id"], "after_heartbeat");
+
+        drop(reader);
+        let result = done_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert!(result.is_ok());
+        server_thread.join().unwrap();
+        let _ = std::fs::remove_file(path);
     }
 
     #[test]

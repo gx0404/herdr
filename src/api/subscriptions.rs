@@ -53,6 +53,9 @@ pub(super) struct ActiveAgentStatusChangedSubscription {
     last_presentation: Option<PanePresentationSnapshot>,
     last_sequence: u64,
     initial_event: Option<PaneAgentStatusChangedEvent>,
+    /// 本轮从 event hub 取到但调用方只要一条时的余量。游标已经推进过，
+    /// 丢掉就不可恢复也不可察，所以留在这里等下次取。
+    pending: std::collections::VecDeque<SubscriptionEventEnvelope>,
     request_prefix: String,
 }
 
@@ -91,9 +94,29 @@ impl PanePresentationSnapshot {
     }
 }
 
+/// 单轮投递：按订阅顺序收齐本轮全部事件，**每个订阅只 poll 一次**。
+/// event-hub 支撑的订阅一次就取走本轮全部匹配事件（投递速率不再被轮询间隔
+/// 钉死在 10 Hz，HSR-03）；pane 快照类订阅每次 poll 都是一次对 app/渲染线程的
+/// 同步往返，重复 poll 补不回中间态，只会把请求数按轮数放大（乘法路径），
+/// 所以这里不做内层 drain。
+pub(super) fn poll_subscriptions_round(
+    subscriptions: &mut [ActiveSubscription],
+    api_tx: &ApiRequestSender,
+    event_hub: &EventHub,
+) -> Vec<serde_json::Value> {
+    let mut round = Vec::new();
+    for subscription in subscriptions.iter_mut() {
+        round.extend(subscription.poll(api_tx, event_hub));
+    }
+    round
+}
+
 pub(super) struct ActiveEventSubscription {
     event_kind: crate::api::schema::EventKind,
     last_sequence: u64,
+    /// 同 `ActiveAgentStatusChangedSubscription::pending`：单条语义的调用方
+    /// 取走一条后，本轮余量留在队列里，不静默丢弃。
+    pending: std::collections::VecDeque<serde_json::Value>,
 }
 
 pub(super) enum ActiveSubscription {
@@ -116,6 +139,7 @@ impl ActiveSubscription {
             Self::Event(ActiveEventSubscription {
                 event_kind,
                 last_sequence: event_start_sequence,
+                pending: std::collections::VecDeque::new(),
             })
         };
 
@@ -230,6 +254,7 @@ impl ActiveSubscription {
                         last_presentation: Some(last_presentation),
                         last_sequence,
                         initial_event,
+                        pending: std::collections::VecDeque::new(),
                         request_prefix: format!("{request_id}:sub:{index}"),
                     },
                 )))
@@ -246,48 +271,89 @@ impl ActiveSubscription {
         }
     }
 
+    /// 返回本轮该订阅的全部事件（可能为空）。返回 `Vec` 而不是 `Option` 是为了
+    /// 去掉「每轮每订阅最多 1 条」的投递上限：调用方按 100 ms 轮询时，
+    /// 上限等于 10 Hz，更高频的事件流会在环形缓冲里静默积压（HSR-03）。
+    /// event hub 支撑的两类订阅（`Event` 与 `AgentStatusChanged` 的 hub 路径）
+    /// 一次调用即取走本轮全部匹配事件，因此调用方不需要内层 drain 循环。
+    /// 基于 pane 快照的订阅是边沿触发，一轮最多 1 条，且每轮只查一次快照。
     pub(super) fn poll(
         &mut self,
         api_tx: &ApiRequestSender,
         event_hub: &EventHub,
-    ) -> Option<serde_json::Value> {
+    ) -> Vec<serde_json::Value> {
         match self {
             Self::Event(subscription) => subscription.poll(event_hub),
-            Self::OutputMatched(subscription) => {
-                serde_json::to_value(subscription.poll(api_tx)?).ok()
-            }
-            Self::AgentStatusChanged(subscription) => {
-                serde_json::to_value(subscription.poll(api_tx, event_hub)?).ok()
-            }
-            Self::ScrollChanged(subscription) => {
-                serde_json::to_value(subscription.poll(api_tx)?).ok()
-            }
+            Self::OutputMatched(subscription) => subscription
+                .poll(api_tx)
+                .and_then(|event| serde_json::to_value(event).ok())
+                .into_iter()
+                .collect(),
+            Self::AgentStatusChanged(subscription) => subscription
+                .poll_batch(api_tx, event_hub)
+                .unwrap_or_default()
+                .into_iter()
+                .filter_map(|event| serde_json::to_value(event).ok())
+                .collect(),
+            Self::ScrollChanged(subscription) => subscription
+                .poll(api_tx)
+                .and_then(|event| serde_json::to_value(event).ok())
+                .into_iter()
+                .collect(),
         }
     }
 
+    /// 单条语义（`*.wait`）：命中第一条即返回。这里**不得**写成
+    /// 「`poll()` 取第一条、丢其余」——event hub 路径会把游标推到本轮最后一条，
+    /// 被丢弃的事件不可恢复也不可察。两类 hub 订阅把余量留在自己的 `pending`
+    /// 队列里，快照类订阅本来每轮最多 1 条。分支写穷尽，新增变体必须显式决定
+    /// 是排队还是丢弃，不被通配符静默吞掉。
     pub(super) fn poll_for_wait(
         &mut self,
         api_tx: &ApiRequestSender,
         event_hub: &EventHub,
     ) -> Result<Option<serde_json::Value>, ErrorResponse> {
         match self {
+            Self::Event(subscription) => Ok(subscription.poll_next(event_hub)),
             Self::AgentStatusChanged(subscription) => Ok(subscription
                 .poll_result(api_tx, event_hub)?
                 .and_then(|event| serde_json::to_value(event).ok())),
-            _ => Ok(self.poll(api_tx, event_hub)),
+            Self::OutputMatched(subscription) => Ok(subscription
+                .poll(api_tx)
+                .and_then(|event| serde_json::to_value(event).ok())),
+            Self::ScrollChanged(subscription) => Ok(subscription
+                .poll(api_tx)
+                .and_then(|event| serde_json::to_value(event).ok())),
         }
     }
 }
 
 impl ActiveEventSubscription {
-    fn poll(&mut self, event_hub: &EventHub) -> Option<serde_json::Value> {
+    /// 一轮取走全部匹配事件。此前命中第一条就 return，投递速率被钉死在
+    /// 1 条/订阅/轮（HSR-03）。
+    fn poll(&mut self, event_hub: &EventHub) -> Vec<serde_json::Value> {
+        self.refill(event_hub);
+        self.pending.drain(..).collect()
+    }
+
+    /// 单条语义：只取一条，余量留在 `pending` 里等下次取。
+    fn poll_next(&mut self, event_hub: &EventHub) -> Option<serde_json::Value> {
+        if self.pending.is_empty() {
+            self.refill(event_hub);
+        }
+        self.pending.pop_front()
+    }
+
+    fn refill(&mut self, event_hub: &EventHub) {
         for (sequence, event) in event_hub.events_after(self.last_sequence) {
             self.last_sequence = sequence;
-            if event.event == self.event_kind {
-                return serde_json::to_value(event).ok();
+            if event.event != self.event_kind {
+                continue;
+            }
+            if let Ok(value) = serde_json::to_value(event) {
+                self.pending.push_back(value);
             }
         }
-        None
     }
 }
 
@@ -328,19 +394,45 @@ impl ActiveOutputMatchedSubscription {
 }
 
 impl ActiveAgentStatusChangedSubscription {
-    fn poll(
+    /// 本轮全部可投递事件。先批量取走 event hub 里命中的事件（廉价的内存读），
+    /// hub 没有可投递事件时才回落到**一次** `pane_get`（一次 app/渲染线程同步
+    /// 往返）。调用方每个轮询间隔只调一次：快照判定是边沿触发，重复调用补不回
+    /// 中间态，只会把 app 往返次数按轮数放大（乘法路径，HSR-03 的代价面）。
+    fn poll_batch(
         &mut self,
         api_tx: &ApiRequestSender,
         event_hub: &EventHub,
-    ) -> Option<SubscriptionEventEnvelope> {
-        self.poll_result(api_tx, event_hub).ok().flatten()
+    ) -> Result<Vec<SubscriptionEventEnvelope>, ErrorResponse> {
+        let saw_status_event = self.refill_from_event_hub(event_hub);
+        if !self.pending.is_empty() {
+            return Ok(self.pending.drain(..).collect());
+        }
+        Ok(self
+            .poll_snapshot_fallback(api_tx, event_hub, saw_status_event)?
+            .into_iter()
+            .collect())
     }
 
+    /// 单条语义（`*.wait` 路径）：本轮余量留在 `pending` 里，下次调用继续取。
     fn poll_result(
         &mut self,
         api_tx: &ApiRequestSender,
         event_hub: &EventHub,
     ) -> Result<Option<SubscriptionEventEnvelope>, ErrorResponse> {
+        if let Some(event) = self.pending.pop_front() {
+            return Ok(Some(event));
+        }
+        let saw_status_event = self.refill_from_event_hub(event_hub);
+        if let Some(event) = self.pending.pop_front() {
+            return Ok(Some(event));
+        }
+        self.poll_snapshot_fallback(api_tx, event_hub, saw_status_event)
+    }
+
+    /// 把 event hub 中本轮命中本 pane 的事件全部收进 `pending`，返回是否见到过
+    /// 本 pane 的状态事件（含被 `status_filter` 过滤掉的）。只读 event hub，
+    /// 不做任何 app 往返。
+    fn refill_from_event_hub(&mut self, event_hub: &EventHub) -> bool {
         let mut saw_status_event = false;
         for (sequence, event) in event_hub.events_after(self.last_sequence) {
             self.last_sequence = sequence;
@@ -375,8 +467,7 @@ impl ActiveAgentStatusChangedSubscription {
                 continue;
             }
 
-            self.initial_event = None;
-            return Ok(Some(SubscriptionEventEnvelope {
+            self.pending.push_back(SubscriptionEventEnvelope {
                 event: SubscriptionEventKind::PaneAgentStatusChanged,
                 data: SubscriptionEventData::PaneAgentStatusChanged(PaneAgentStatusChangedEvent {
                     pane_id,
@@ -387,18 +478,31 @@ impl ActiveAgentStatusChangedSubscription {
                     display_agent,
                     state_labels,
                 }),
-            }));
+            });
         }
-
         if saw_status_event {
             self.initial_event = None;
-        } else if event_hub.current_sequence() != self.last_sequence {
-            return Ok(None);
-        } else if let Some(event) = self.initial_event.take() {
-            return Ok(Some(SubscriptionEventEnvelope {
-                event: SubscriptionEventKind::PaneAgentStatusChanged,
-                data: SubscriptionEventData::PaneAgentStatusChanged(event),
-            }));
+        }
+        saw_status_event
+    }
+
+    /// event hub 本轮没有可投递事件时的快照兜底：一次 `pane_get`。
+    fn poll_snapshot_fallback(
+        &mut self,
+        api_tx: &ApiRequestSender,
+        event_hub: &EventHub,
+        saw_status_event: bool,
+    ) -> Result<Option<SubscriptionEventEnvelope>, ErrorResponse> {
+        if !saw_status_event {
+            if event_hub.current_sequence() != self.last_sequence {
+                return Ok(None);
+            }
+            if let Some(event) = self.initial_event.take() {
+                return Ok(Some(SubscriptionEventEnvelope {
+                    event: SubscriptionEventKind::PaneAgentStatusChanged,
+                    data: SubscriptionEventData::PaneAgentStatusChanged(event),
+                }));
+            }
         }
 
         let before_snapshot_sequence = self.last_sequence;
@@ -655,13 +759,96 @@ mod tests {
 
         let setup_event = subscription
             .poll(&api_tx, &event_hub)
+            .into_iter()
+            .next()
             .expect("setup-window event");
         assert_eq!(setup_event["data"]["workspace_id"], "during_setup");
-        assert!(subscription.poll(&api_tx, &event_hub).is_none());
+        assert!(subscription
+            .poll(&api_tx, &event_hub)
+            .into_iter()
+            .next()
+            .is_none());
 
         event_hub.push(workspace_focused_event("after_setup"));
-        let live_event = subscription.poll(&api_tx, &event_hub).expect("live event");
+        let live_event = subscription
+            .poll(&api_tx, &event_hub)
+            .into_iter()
+            .next()
+            .expect("live event");
         assert_eq!(live_event["data"]["workspace_id"], "after_setup");
+    }
+
+    /// HSR-03 回归：一轮 poll 必须投递全部匹配事件。此前每轮只返回第一条，
+    /// 100 ms 轮询把投递速率钉死在 1 条/订阅/100 ms（10 Hz），更高频的事件流
+    /// 会在 512 条环形缓冲里静默积压并被挤掉。
+    #[test]
+    fn event_subscription_delivers_every_matching_event_in_one_poll() {
+        let event_hub = EventHub::default();
+        let (api_tx, _api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut subscription = ActiveSubscription::new(
+            Subscription::WorkspaceFocused {},
+            "test",
+            0,
+            &api_tx,
+            &event_hub,
+            event_hub.current_sequence(),
+        )
+        .expect("workspace focus subscription");
+
+        for index in 0..50 {
+            // 交错推入其它类型的事件，确认过滤与推进游标都不受影响。
+            event_hub.push(presentation_event(Some("noise")));
+            event_hub.push(workspace_focused_event(&format!("workspace_{index}")));
+        }
+
+        let delivered: Vec<_> = subscription.poll(&api_tx, &event_hub).into_iter().collect();
+        assert_eq!(delivered.len(), 50, "一轮 poll 必须投递全部匹配事件");
+        for (index, event) in delivered.iter().enumerate() {
+            assert_eq!(event["data"]["workspace_id"], format!("workspace_{index}"));
+        }
+        assert!(
+            subscription
+                .poll(&api_tx, &event_hub)
+                .into_iter()
+                .next()
+                .is_none(),
+            "drain 干净后本轮不应再有事件"
+        );
+    }
+
+    /// 单轮按订阅顺序收齐所有订阅的事件；每个订阅只 poll 一次，
+    /// `stream_subscriptions` 把这一轮的结果写完就 sleep。
+    #[test]
+    fn subscription_round_collects_events_from_every_subscription() {
+        let event_hub = EventHub::default();
+        let (api_tx, _api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let new_subscription = || {
+            ActiveSubscription::new(
+                Subscription::WorkspaceFocused {},
+                "test",
+                0,
+                &api_tx,
+                &event_hub,
+                event_hub.current_sequence(),
+            )
+            .expect("workspace focus subscription")
+        };
+        let mut subscriptions = vec![new_subscription(), new_subscription()];
+
+        event_hub.push(workspace_focused_event("first"));
+        event_hub.push(workspace_focused_event("second"));
+
+        let round = poll_subscriptions_round(&mut subscriptions, &api_tx, &event_hub);
+        assert_eq!(round.len(), 4, "两个订阅各投递两条事件");
+        assert_eq!(round[0]["data"]["workspace_id"], "first");
+        assert_eq!(round[1]["data"]["workspace_id"], "second");
+        assert_eq!(round[2]["data"]["workspace_id"], "first");
+        assert_eq!(round[3]["data"]["workspace_id"], "second");
+
+        assert!(
+            poll_subscriptions_round(&mut subscriptions, &api_tx, &event_hub).is_empty(),
+            "无新事件时本轮为空"
+        );
     }
 
     #[test]
@@ -735,6 +922,7 @@ mod tests {
             }),
             last_sequence: event_hub.current_sequence(),
             initial_event: None,
+            pending: std::collections::VecDeque::new(),
             request_prefix: "test".into(),
         };
 
@@ -742,7 +930,8 @@ mod tests {
         event_hub.push(presentation_event(None));
 
         let set_event = subscription
-            .poll(&tokio::sync::mpsc::unbounded_channel().0, &event_hub)
+            .poll_result(&tokio::sync::mpsc::unbounded_channel().0, &event_hub)
+            .expect("poll set event")
             .expect("set event");
         let SubscriptionEventData::PaneAgentStatusChanged(set_data) = set_event.data else {
             panic!("wrong event data");
@@ -750,12 +939,96 @@ mod tests {
         assert_eq!(set_data.title.as_deref(), Some("short lived"));
 
         let expiry_event = subscription
-            .poll(&tokio::sync::mpsc::unbounded_channel().0, &event_hub)
+            .poll_result(&tokio::sync::mpsc::unbounded_channel().0, &event_hub)
+            .expect("poll expiry event")
             .expect("expiry event");
         let SubscriptionEventData::PaneAgentStatusChanged(expiry_data) = expiry_event.data else {
             panic!("wrong event data");
         };
         assert_eq!(expiry_data.title, None);
+    }
+
+    /// HSR-03 回归（偏差 2 的直接证据）：`pane.agent_status_changed` 订阅
+    /// 走的是 `ActiveAgentStatusChangedSubscription`，此前它命中第一条就
+    /// `return`，一轮只产 1 条，只能靠调用方的内层 drain 循环补齐——而那个
+    /// drain 循环会连带重跑 pane 快照类订阅，把 app 往返按轮数放大。
+    /// 现在 hub 路径一次取走本轮全部命中事件，单轮即可脱离 10 Hz 上限，
+    /// 调用方不再需要内层 drain。
+    #[test]
+    fn agent_status_subscription_delivers_every_hub_event_in_one_poll() {
+        let event_hub = EventHub::default();
+        // 这个 sender 没有对端：一旦回落到 `pane_get` 快照兜底就会超时，
+        // 所以本测试同时钉住「hub 有事件时不做任何 app 往返」。
+        let (api_tx, _api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut subscription = ActiveSubscription::AgentStatusChanged(Box::new(
+            ActiveAgentStatusChangedSubscription {
+                pane_id: "pane_1".into(),
+                status_filter: None,
+                last_status: Some(AgentStatus::Working),
+                last_presentation: Some(PanePresentationSnapshot {
+                    title: None,
+                    display_agent: None,
+                    state_labels: HashMap::new(),
+                }),
+                last_sequence: event_hub.current_sequence(),
+                initial_event: None,
+                pending: std::collections::VecDeque::new(),
+                request_prefix: "test".into(),
+            },
+        ));
+
+        for index in 0..3 {
+            event_hub.push(presentation_event(Some(&format!("title_{index}"))));
+        }
+
+        let started = std::time::Instant::now();
+        let delivered = subscription.poll(&api_tx, &event_hub);
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(1),
+            "hub 有事件时不得回落到 pane_get 快照兜底"
+        );
+        assert_eq!(
+            delivered.len(),
+            3,
+            "一轮 poll 必须投递 hub 里的全部命中事件"
+        );
+        for (index, event) in delivered.iter().enumerate() {
+            assert_eq!(event["data"]["title"], format!("title_{index}"));
+        }
+    }
+
+    /// 等待语义（`*.wait`）每次只取一条，但不得把同轮余量连同游标一起丢掉：
+    /// `events_after` 的游标已经推进，被丢弃的事件不可恢复也不可察。
+    #[test]
+    fn wait_path_keeps_the_rest_of_the_round_instead_of_dropping_it() {
+        let event_hub = EventHub::default();
+        let (api_tx, _api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut subscription = ActiveSubscription::new(
+            Subscription::WorkspaceFocused {},
+            "test",
+            0,
+            &api_tx,
+            &event_hub,
+            event_hub.current_sequence(),
+        )
+        .expect("workspace focus subscription");
+
+        for index in 0..3 {
+            event_hub.push(workspace_focused_event(&format!("workspace_{index}")));
+        }
+
+        for index in 0..3 {
+            let event = subscription
+                .poll_for_wait(&api_tx, &event_hub)
+                .expect("poll for wait")
+                .unwrap_or_else(|| panic!("第 {index} 条事件被静默丢弃"));
+            assert_eq!(event["data"]["workspace_id"], format!("workspace_{index}"));
+        }
+
+        assert!(subscription
+            .poll_for_wait(&api_tx, &event_hub)
+            .expect("poll for wait")
+            .is_none());
     }
 
     #[test]
@@ -780,6 +1053,7 @@ mod tests {
                 display_agent: None,
                 state_labels: HashMap::new(),
             }),
+            pending: std::collections::VecDeque::new(),
             request_prefix: "test".into(),
         };
 
@@ -787,7 +1061,8 @@ mod tests {
         event_hub.push(presentation_event(None));
 
         let set_event = subscription
-            .poll(&tokio::sync::mpsc::unbounded_channel().0, &event_hub)
+            .poll_result(&tokio::sync::mpsc::unbounded_channel().0, &event_hub)
+            .expect("poll set event")
             .expect("set event");
         let SubscriptionEventData::PaneAgentStatusChanged(set_data) = set_event.data else {
             panic!("wrong event data");
@@ -795,7 +1070,8 @@ mod tests {
         assert_eq!(set_data.title.as_deref(), Some("short lived"));
 
         let expiry_event = subscription
-            .poll(&tokio::sync::mpsc::unbounded_channel().0, &event_hub)
+            .poll_result(&tokio::sync::mpsc::unbounded_channel().0, &event_hub)
+            .expect("poll expiry event")
             .expect("expiry event");
         let SubscriptionEventData::PaneAgentStatusChanged(expiry_data) = expiry_event.data else {
             panic!("wrong event data");
@@ -825,13 +1101,15 @@ mod tests {
                 display_agent: None,
                 state_labels: HashMap::new(),
             }),
+            pending: std::collections::VecDeque::new(),
             request_prefix: "test".into(),
         };
 
         event_hub.push(presentation_event(Some("short lived")));
 
         let event = subscription
-            .poll(&tokio::sync::mpsc::unbounded_channel().0, &event_hub)
+            .poll_result(&tokio::sync::mpsc::unbounded_channel().0, &event_hub)
+            .expect("poll setup-window event")
             .expect("setup-window event");
         let SubscriptionEventData::PaneAgentStatusChanged(data) = event.data else {
             panic!("wrong event data");
