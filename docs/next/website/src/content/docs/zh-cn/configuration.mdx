@@ -111,7 +111,7 @@ Git 工作区行提供 worktree 操作。`New worktree` 会创建检出：如果
 
 归组的 worktree 仍像普通 Herdr 工作区一样工作：可以聚焦、重命名和关闭，也可以拥有自己的标签页和窗格。父行是原始工作区。关闭父行会关闭整个 Herdr 组，但不会删除检出目录或分支。
 
-删除 worktree 检出需要显式操作。在归组的子工作区上使用 `Delete worktree checkout...` 来运行 `git worktree remove`。Herdr 会先请求 Git 安全删除。如果 Git 因检出中存在已修改或未跟踪的文件而拒绝，Herdr 会在强制删除前再次确认。分支不会被删除。
+删除 worktree 检出需要显式操作。在归组的子工作区上使用 `Delete worktree checkout...` 来运行 `git worktree remove`。Herdr 会先请求 Git 安全删除。如果 Git 因检出中存在已修改或未跟踪的文件而拒绝，Herdr 会在强制删除前再次确认。这一步的确认键故意不是回车：需要按 `y`（或 `ctrl+↵`），或点击「y 仍然删除」，这样上一步长按或连点的回车穿不到强制删除；该步的默认强调按钮是取消。分支不会被删除。
 
 ## 远程连接
 
@@ -317,7 +317,7 @@ selection_mix_ratio = 0.35
 
 `ui.color_depth` 控制 Herdr 自身 UI 颜色的输出色深：`"auto"`（默认）跟随宿主终端——当 TERM 为 `256color` 且没有 truecolor 证据时（SSH 或 tmux 中常见），主题 RGB 颜色会自动映射到最近的 xterm-256 调色板条目。使用 `"truecolor"` 强制 24 位输出，或使用 `"256"` 强制降级。
 
-鼠标交互时序可调：`ui.double_click_ms`（默认 `350`）是双击选词、三击选整行的时间窗；`ui.drag_throttle_ms`（默认 `33`）节流窗格滚动条与分割条的拖拽更新；`ui.selection_autoscroll_interval_ms` / `ui.selection_autoscroll_min_lines` / `ui.selection_autoscroll_max_lines`（默认 `30` / `3` / `15`）控制拖过窗格边缘时的选区自动滚动。
+鼠标交互时序可调：`ui.double_click_ms`（默认 `350`）是双击选词、三击选整行的时间窗，也是片段列表里「同一个片段的第二次点击才启动运行」的时间窗；`ui.drag_throttle_ms`（默认 `33`）节流窗格滚动条与分割条的拖拽更新；`ui.selection_autoscroll_interval_ms` / `ui.selection_autoscroll_min_lines` / `ui.selection_autoscroll_max_lines`（默认 `30` / `3` / `15`）控制拖过窗格边缘时的选区自动滚动。
 
 输入成帧窗口同样可调：`ui.input_sequence_timeout_ms`（默认 `150`）是客户端等待被读取边界切开的不完整控制序列剩余字节的时长——按键编码、鼠标报文或裸 `ESC [` 引导符都算——超时后丢弃该片段（因此真正的 Alt+[ 按键也要等这个窗口才送出）；`ui.escape_after_mouse_timeout_ms`（默认 `30`）是鼠标捕获开启（或最近半秒内收到过鼠标报文）时，孤立 Esc 等待可能的鼠标报文续接的时长，否则 Esc 在 10 ms 空闲窗口后即送出。SSH 高延迟链路可将两者调大；两者取值被钳制在 `10..=1000`，都在客户端启动时读取，且仅对 Unix 客户端生效（Windows 客户端固定按 10 ms 轮询）。
 

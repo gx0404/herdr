@@ -393,6 +393,15 @@ pub(super) fn render_worktree_remove_overlay(
             crate::i18n::texts().worktree.dirty_warning,
             Style::default().fg(p.red).bg(p.panel_bg),
         );
+        // 强制删除换了确认键，必须在浮层里写清楚，否则回车「没反应」像是卡住。
+        put_text(
+            b,
+            content.x,
+            content.y + 5,
+            content.width,
+            crate::i18n::texts().worktree.force_confirm_hint,
+            Style::default().fg(p.subtext0).bg(p.panel_bg),
+        );
     }
     if remove.removing {
         put_text(
@@ -435,9 +444,15 @@ pub(super) fn render_worktree_remove_overlay(
         if remove.removing {
             crate::ui::ModalButtonState::Disabled
         } else {
+            // 武装强制删除后主按钮不再是默认强调态：这一步要用户明确瞄准，
+            // 不该让「继续按同一个默认动作」显得顺理成章。
             cx.button_state(
                 &super::feedback::ChromeHover::OverlayPrimary,
-                crate::ui::ModalButtonState::Focused,
+                if remove.force_confirmation {
+                    crate::ui::ModalButtonState::Normal
+                } else {
+                    crate::ui::ModalButtonState::Focused
+                },
             )
         },
         p,
@@ -449,7 +464,14 @@ pub(super) fn render_worktree_remove_overlay(
         crate::ui::ModalButtonTone::Secondary,
         cx.button_state(
             &super::feedback::ChromeHover::OverlayCancel,
-            crate::ui::ModalButtonState::Normal,
+            // Danger 色调下 Focused 与 Normal 的样式表结果相同，所以「降级主按钮」
+            // 只靠它看不出来：强制删除这一步把默认强调态交给取消按钮，视觉上的
+            // 默认动作就是放弃。
+            if remove.force_confirmation {
+                crate::ui::ModalButtonState::Focused
+            } else {
+                crate::ui::ModalButtonState::Normal
+            },
         ),
         p,
     );

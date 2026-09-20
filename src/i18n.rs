@@ -327,6 +327,7 @@ pub struct WorktreeTexts {
     pub removes_folder: &'static str,
     pub branch_not_deleted: &'static str,
     pub dirty_warning: &'static str,
+    pub force_confirm_hint: &'static str,
     pub removing: &'static str,
     pub delete_anyway: &'static str,
     pub remove: &'static str,

@@ -52,6 +52,41 @@ fn frame_text(state: &mut ClientShellState, cols: u16, rows: u16) -> String {
         .join("\n")
 }
 
+fn click_snippet_point(state: &mut ClientShellState, point: (u16, u16)) {
+    state.handle_raw_events(vec![RawInputEvent::Mouse(MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: point.0,
+        row: point.1,
+        modifiers: KeyModifiers::empty(),
+    })]);
+}
+
+/// 列表第 `row` 行当前展示的片段标题（筛选后的顺序）。
+fn snippet_label_at(state: &ClientShellState, row: usize) -> Option<String> {
+    let Some(ClientShellOverlay::Snippets(overlay)) = state.overlay.as_ref() else {
+        panic!("snippets overlay");
+    };
+    let query = overlay.query.as_str().to_lowercase();
+    overlay
+        .library
+        .snippets
+        .iter()
+        .filter(|snippet| {
+            query.is_empty()
+                || format!(
+                    "{} {} {} {}",
+                    snippet.label,
+                    snippet.command,
+                    snippet.description.as_deref().unwrap_or_default(),
+                    snippet.tags.join(" ")
+                )
+                .to_lowercase()
+                .contains(&query)
+        })
+        .nth(row)
+        .map(|snippet| snippet.label.clone())
+}
+
 fn snippets_view(state: &ClientShellState) -> &super::super::snippets_overlay::ClientSnippetsView {
     let Some(ClientShellOverlay::Snippets(overlay)) = state.overlay.as_ref() else {
         panic!("snippets overlay");
@@ -337,6 +372,269 @@ fn snippet_run_multi_machine_fans_out_per_endpoint() {
     assert!(state.snippet_run.is_none(), "run state cleared");
     let notice = state.visible_endpoint_notice.as_ref().expect("toast");
     assert!(notice.body.contains("no such pane"), "{}", notice.body);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// TOOL-07：hover 会把列表选中改到指针所在行，所以「二次点击才运行」不能靠
+/// `selected == row` 判定——指针路过后的首次点击只允许选中。窗口显式放大到
+/// 60 s，判定结果与真实耗时（nextest 并行下的调度抖动）无关。
+#[test]
+fn snippet_list_click_runs_only_on_the_second_click_after_hover() {
+    let dir = with_temp_state_home("double-click");
+    seed_snippet("deploy", "kubectl rollout restart deploy/web", &[]);
+    seed_snippet("logs", "kubectl logs -f svc/web", &[]);
+    let mut state = state();
+    state.config.double_click_window = std::time::Duration::from_secs(60);
+    state.open_snippets_overlay(false);
+    state.compose(106, 30).expect("composed frame");
+
+    let (rect, row) = *state
+        .hits
+        .snippet_rows
+        .get(1)
+        .expect("the list should expose clickable rows");
+    let point = (rect.x, rect.y);
+
+    // 指针移到该行：只改选中。
+    state.handle_raw_events(vec![RawInputEvent::Mouse(MouseEvent {
+        kind: MouseEventKind::Moved,
+        column: point.0,
+        row: point.1,
+        modifiers: KeyModifiers::empty(),
+    })]);
+    let Some(ClientShellOverlay::Snippets(overlay)) = state.overlay.as_ref() else {
+        panic!("snippets overlay");
+    };
+    assert_eq!(overlay.selected, row);
+    assert!(
+        overlay.last_click.is_none(),
+        "hover alone must not leave a click trace"
+    );
+    assert!(matches!(
+        snippets_view(&state),
+        super::super::snippets_overlay::ClientSnippetsView::List
+    ));
+
+    // hover 之后的首次点击不得进入运行流，只留下点击痕迹。
+    click_snippet_point(&mut state, point);
+    assert!(
+        matches!(
+            snippets_view(&state),
+            super::super::snippets_overlay::ClientSnippetsView::List
+        ),
+        "the first click after a hover must only select the row"
+    );
+    let Some(ClientShellOverlay::Snippets(overlay)) = state.overlay.as_ref() else {
+        panic!("snippets overlay");
+    };
+    assert!(
+        overlay.last_click.is_some(),
+        "the first click must record a trace"
+    );
+
+    // 同一片段的第二次点击才开始运行流。
+    click_snippet_point(&mut state, point);
+    assert!(matches!(
+        snippets_view(&state),
+        super::super::snippets_overlay::ClientSnippetsView::RunTargets(_)
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// 点击痕迹记的是片段身份，不是行号：删掉一个片段后整列上移，原先记下的行号
+/// 指向的已经是另一个片段，这一次点击必须只算首击。
+#[test]
+fn deleting_a_snippet_invalidates_the_click_trace_for_that_row() {
+    let dir = with_temp_state_home("delete-trace");
+    seed_snippet("alpha", "echo alpha", &[]);
+    seed_snippet("beta", "echo beta", &[]);
+    seed_snippet("gamma", "echo gamma", &[]);
+    let mut state = state();
+    state.config.double_click_window = std::time::Duration::from_secs(60);
+    state.open_snippets_overlay(false);
+    state.compose(106, 30).expect("composed frame");
+
+    let (rect, _) = *state
+        .hits
+        .snippet_rows
+        .get(1)
+        .expect("the list should expose clickable rows");
+    let point = (rect.x, rect.y);
+
+    // 第 1 行（beta）点一次：留下 beta 的点击痕迹。
+    click_snippet_point(&mut state, point);
+    let clicked_label = snippet_label_at(&state, 1);
+    assert_eq!(clicked_label.as_deref(), Some("beta"));
+
+    // 删掉 beta：确认视图回到列表后，第 1 行已经是 gamma。
+    state.handle_raw_events(vec![RawInputEvent::Key(key(KeyCode::Char('x')))]);
+    assert!(matches!(
+        snippets_view(&state),
+        super::super::snippets_overlay::ClientSnippetsView::DeleteConfirm(_)
+    ));
+    state.handle_raw_events(vec![RawInputEvent::Key(key(KeyCode::Enter))]);
+    assert!(matches!(
+        snippets_view(&state),
+        super::super::snippets_overlay::ClientSnippetsView::List
+    ));
+    state.compose(106, 30).expect("composed frame");
+    assert_eq!(snippet_label_at(&state, 1).as_deref(), Some("gamma"));
+
+    // 「确认删除」按钮在确认视图关闭后正好被列表体覆盖，所以一次双击就能让第二个
+    // Down 落进列表行——挤上来的片段不得被这一击直接运行。
+    click_snippet_point(&mut state, point);
+    assert!(
+        matches!(
+            snippets_view(&state),
+            super::super::snippets_overlay::ClientSnippetsView::List
+        ),
+        "a snippet that moved up into the clicked row must not run on the first click"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// 窗口过期分支：超过 `ui.double_click_ms` 的第二次点击仍然只算首击。
+#[test]
+fn snippet_click_outside_the_double_click_window_only_selects() {
+    let dir = with_temp_state_home("expired-window");
+    seed_snippet("deploy", "kubectl rollout restart deploy/web", &[]);
+    seed_snippet("logs", "kubectl logs -f svc/web", &[]);
+    let mut state = state();
+    // 1 ns 的窗口保证两次事件之间必然过期。
+    state.config.double_click_window = std::time::Duration::from_nanos(1);
+    state.open_snippets_overlay(false);
+    state.compose(106, 30).expect("composed frame");
+    let (rect, _) = *state
+        .hits
+        .snippet_rows
+        .get(1)
+        .expect("the list should expose clickable rows");
+    let point = (rect.x, rect.y);
+
+    click_snippet_point(&mut state, point);
+    click_snippet_point(&mut state, point);
+    assert!(
+        matches!(
+            snippets_view(&state),
+            super::super::snippets_overlay::ClientSnippetsView::List
+        ),
+        "a click outside the double-click window must only select"
+    );
+    let Some(ClientShellOverlay::Snippets(overlay)) = state.overlay.as_ref() else {
+        panic!("snippets overlay");
+    };
+    assert!(
+        overlay.last_click.is_some(),
+        "the expired click still becomes the new trace"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// 整套长按保护取决于 `step()` 为每个破坏性步进返回不同值：把某个变体并进零值组
+/// 就静默失去保护，这里把「两两不同」固化下来。
+#[test]
+fn overlay_step_separates_every_destructive_snippet_step() {
+    use super::super::snippets_overlay::{
+        ClientSnippetForm, ClientSnippetRunDraft, ClientSnippetsView,
+    };
+
+    let mut library = SnippetLibrary::default();
+    library
+        .add_snippet("deploy", "echo deploy", None, Vec::new(), Vec::new())
+        .expect("seed snippet");
+    let snippet = library.snippets[0].clone();
+    let draft = || {
+        Box::new(ClientSnippetRunDraft {
+            snippet: snippet.clone(),
+            targets: Vec::new(),
+            target_selected: 0,
+            machine_selected: Vec::new(),
+            variables: Vec::new(),
+            variable_focused: 0,
+            press_enter: true,
+            error: None,
+        })
+    };
+    let views = [
+        ClientSnippetsView::List,
+        ClientSnippetsView::Form(Box::new(ClientSnippetForm {
+            editing: None,
+            focused: 0,
+            label: TextEditor::default(),
+            command: TextEditor::default(),
+            description: TextEditor::default(),
+            variables: TextEditor::default(),
+            tags: TextEditor::default(),
+            error: None,
+        })),
+        ClientSnippetsView::DeleteConfirm(snippet.id.clone()),
+        ClientSnippetsView::RunTargets(draft()),
+        ClientSnippetsView::RunPickPane(draft()),
+        ClientSnippetsView::RunPickMachines(draft()),
+        ClientSnippetsView::RunVariables(draft()),
+        ClientSnippetsView::RunConfirm(draft()),
+        ClientSnippetsView::History {
+            selected: 0,
+            scroll: 0,
+        },
+    ];
+    let steps = views
+        .iter()
+        .map(super::super::snippets_overlay::ClientSnippetsView::step)
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(
+        steps.len(),
+        views.len(),
+        "every snippets view needs its own step value"
+    );
+
+    // worktree 的强制删除是同一浮层里的另一步，武装前后也必须不同。
+    let remove = |force_confirmation: bool| {
+        ClientShellOverlay::WorktreeRemove(super::super::state::ClientWorktreeRemoveOverlay {
+            workspace_id: "ws_1".into(),
+            path: "/repo-feature".into(),
+            error: None,
+            removing: false,
+            force_confirmation,
+        })
+    };
+    assert_ne!(remove(false).step(), remove(true).step());
+}
+
+/// TOOL-01：列表 → 运行目标 → 确认是三步不同的确认，长按回车不得一路走完
+/// 并把命令注入 pane。
+#[test]
+fn held_enter_does_not_walk_the_snippet_run_flow() {
+    use crossterm::event::KeyEventKind;
+
+    let dir = with_temp_state_home("held-enter");
+    seed_snippet("deploy", "kubectl rollout restart deploy/web", &[]);
+    let mut state = state();
+    state.open_snippets_overlay(false);
+
+    let enter = key(KeyCode::Enter);
+    state.handle_raw_events(vec![RawInputEvent::Key(enter.clone())]);
+    assert!(matches!(
+        snippets_view(&state),
+        super::super::snippets_overlay::ClientSnippetsView::RunTargets(_)
+    ));
+
+    for _ in 0..4 {
+        let repeat = state.handle_raw_events(vec![RawInputEvent::Key(
+            enter.clone().with_kind(KeyEventKind::Repeat),
+        )]);
+        assert!(
+            repeat.actions.is_empty() && repeat.requests.is_empty(),
+            "held enter must not advance the run flow"
+        );
+        assert!(
+            matches!(
+                snippets_view(&state),
+                super::super::snippets_overlay::ClientSnippetsView::RunTargets(_)
+            ),
+            "held enter must not advance past the target picker"
+        );
+    }
     let _ = std::fs::remove_dir_all(&dir);
 }
 

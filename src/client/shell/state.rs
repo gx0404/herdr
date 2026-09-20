@@ -961,6 +961,37 @@ impl ClientShellOverlay {
             Self::UsageDashboard => ClientShellOverlayKind::UsageDashboard,
         }
     }
+
+    /// 浮层内部的步进指纹：同一浮层里每一步破坏性确认或视图切换都有不同取值。
+    /// 只取「真实步进」的状态（视图判别式、已武装的强制确认），不取请求在途一类
+    /// 的瞬时标志，这样同一步内的长按重复仍按原语义回放。
+    pub(super) fn step(&self) -> u32 {
+        match self {
+            // 普通删除失败后武装的强制删除是独立一步。
+            Self::WorktreeRemove(remove) => u32::from(remove.force_confirmation),
+            // 片段库的运行流水线：列表 → 目标 → 变量 → 确认，每步各算一步。
+            Self::Snippets(overlay) => overlay.view.step(),
+            Self::Onboarding
+            | Self::ProductAnnouncement(_)
+            | Self::ReleaseNotes(_)
+            | Self::Rename(_)
+            | Self::ConfirmClose(_)
+            | Self::Help(_)
+            | Self::Navigator(_)
+            | Self::WorktreeCreate(_)
+            | Self::WorktreeOpen(_)
+            | Self::ContextMenu(_)
+            | Self::CommandPalette(_)
+            | Self::Settings(_)
+            | Self::Machines(_)
+            | Self::MachineAuth(_)
+            | Self::NotificationHistory(_)
+            | Self::Scenes(_)
+            | Self::Broadcast(_)
+            | Self::MachineFiles(_)
+            | Self::UsageDashboard => 0,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -1134,6 +1165,11 @@ pub(super) enum ClientInputTarget {
 pub(super) struct ClientInputContext {
     pub(super) mode: ClientShellMode,
     pub(super) overlay: Option<ClientShellOverlayKind>,
+    /// 浮层内部的步进指纹（`ClientShellOverlay::step`）：切换 view 或武装
+    /// 破坏性确认都会改变它。`overlay` 只有种类粒度，会把「普通删除 → 强制
+    /// 删除」「列表 → 运行确认」折叠成同一上下文，使自动重复的 Repeat 能替
+    /// 用户按完后面几步；带上步进指纹后 lease 跨步即失效。
+    pub(super) overlay_step: u32,
     pub(super) popup_terminal_id: Option<String>,
     pub(super) popup_pending: bool,
     pub(super) retained_selection: bool,

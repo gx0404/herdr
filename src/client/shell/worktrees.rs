@@ -144,18 +144,30 @@ impl ClientShellState {
                 true
             }
             Some(ClientShellOverlay::WorktreeRemove(_)) => {
-                let removing = matches!(
-                    self.overlay,
-                    Some(ClientShellOverlay::WorktreeRemove(
-                        ClientWorktreeRemoveOverlay { removing: true, .. }
-                    ))
-                );
+                let (removing, forced) = match &self.overlay {
+                    Some(ClientShellOverlay::WorktreeRemove(remove)) => {
+                        (remove.removing, remove.force_confirmation)
+                    }
+                    _ => (false, false),
+                };
                 match code {
                     KeyCode::Esc if !removing => {
                         self.overlay = None;
                         outcome.repaint = true;
                     }
-                    KeyCode::Enter => self.submit_worktree_remove(outcome),
+                    // 普通删除用回车确认；一旦失败武装了「强制删除」，这一步就换键
+                    // （y 或 ctrl+↵）。换键与「重复是否可辨识」解耦：宿主不支持
+                    // kitty 事件类型时自动重复只发普通 Press，lease 的步进指纹拦不
+                    // 住，但换键后长按/连点回车都到不了强制删除。
+                    KeyCode::Enter
+                        if !forced
+                            || modifiers.contains(crossterm::event::KeyModifiers::CONTROL) =>
+                    {
+                        self.submit_worktree_remove(outcome)
+                    }
+                    KeyCode::Char('y' | 'Y') if forced && !removing => {
+                        self.submit_worktree_remove(outcome)
+                    }
                     _ => {}
                 }
                 true

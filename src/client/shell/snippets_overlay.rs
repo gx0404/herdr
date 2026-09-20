@@ -34,6 +34,11 @@ pub(super) struct ClientSnippetsOverlay {
     pub(super) library: SnippetLibrary,
     /// Library load failure replaces the list body.
     pub(super) library_error: Option<String>,
+    /// 列表里最近一次被左键点击的片段身份 + 时刻。hover 会改写 `selected`，
+    /// 所以「二次点击才运行」必须用独立的点击痕迹判定，不能看 `selected == row`；
+    /// 记身份而不是行号，筛选、删除、保存重排等任何改动列表内容的路径都天然失效，
+    /// 不需要逐个出口手工清痕迹。
+    pub(super) last_click: Option<(SnippetId, std::time::Instant)>,
 }
 
 #[derive(Debug)]
@@ -51,6 +56,25 @@ pub(super) enum ClientSnippetsView {
         selected: usize,
         scroll: usize,
     },
+}
+
+impl ClientSnippetsView {
+    /// 运行流水线中的步序，喂给 `ClientInputContext::overlay_step`：任何视图
+    /// 切换都让长按残余的 Repeat 失效，避免一次长按走完「列表 → 目标 → 确认」
+    /// 把命令注入 pane。
+    pub(super) fn step(&self) -> u32 {
+        match self {
+            Self::List => 0,
+            Self::Form(_) => 1,
+            Self::DeleteConfirm(_) => 2,
+            Self::RunTargets(_) => 3,
+            Self::RunPickPane(_) => 4,
+            Self::RunPickMachines(_) => 5,
+            Self::RunVariables(_) => 6,
+            Self::RunConfirm(_) => 7,
+            Self::History { .. } => 8,
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -276,6 +300,7 @@ impl ClientShellState {
             pick_for_run,
             library,
             library_error,
+            last_click: None,
         }));
     }
 
@@ -1382,15 +1407,38 @@ impl ClientShellState {
 
     /// Mouse click on a list/picker row, identified by its rendered index.
     pub(super) fn click_snippet_row(&mut self, row: usize, outcome: &mut ClientShellInput) {
+        let double_click_window = self.config.double_click_window;
+        // 列表分支先按行号解析出被点的片段身份：点击痕迹记身份，行序变化
+        // （筛选、删除、保存后重排）自然不会让上一次点击落到别的片段上。
+        let clicked = match self.overlay.as_ref() {
+            Some(ClientShellOverlay::Snippets(overlay))
+                if matches!(overlay.view, ClientSnippetsView::List) =>
+            {
+                filtered_snippets(&overlay.library, overlay.query.as_str())
+                    .get(row)
+                    .map(|snippet| snippet.id.clone())
+            }
+            _ => None,
+        };
         let Some(ClientShellOverlay::Snippets(overlay)) = self.overlay.as_mut() else {
             return;
         };
         match &mut overlay.view {
             ClientSnippetsView::List => {
-                let already = overlay.selected == row;
+                // 指针路过就会把 `selected` 拉到该行，所以只有独立记录的同一个
+                // 片段的点击痕迹才能算「二次点击」。
+                let now = std::time::Instant::now();
+                let second_click = match (clicked.as_ref(), overlay.last_click.as_ref()) {
+                    (Some(id), Some((last_id, at))) => {
+                        last_id == id && now.duration_since(*at) <= double_click_window
+                    }
+                    _ => false,
+                };
                 overlay.selected = row;
-                if already {
-                    // Second click on the selected row starts the run flow.
+                overlay.last_click = clicked.map(|id| (id, now));
+                if second_click {
+                    // 运行后清痕迹，第三次点击重新从选中开始。
+                    overlay.last_click = None;
                     if let Some(snippet) = self.selected_snippet() {
                         self.start_snippet_run_flow(snippet);
                     }

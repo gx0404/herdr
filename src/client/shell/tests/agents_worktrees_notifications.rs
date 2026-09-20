@@ -1487,7 +1487,25 @@ fn worktree_remove_escalates_recoverable_failure_to_force_confirmation() {
         let compact: String = text.chars().filter(|ch| !ch.is_whitespace()).collect();
         assert!(compact.contains("仍然删除"));
         assert!(compact.contains("永久删除"));
-        let force = state.handle_input_bytes(b"\r");
+        // 强制删除换了确认键，浮层必须把新键位写出来。
+        assert!(compact.contains("回车已不再确认"), "frame: {text}");
+        // 视觉默认动作交给取消按钮：强制删除这一步不再是「继续按默认键」。
+        let cancel_rect = state.hits.overlay_cancel;
+        let cancel_cell = usize::from(cancel_rect.y) * usize::from(frame.width)
+            + usize::from(cancel_rect.x.saturating_add(1));
+        assert_eq!(
+            frame.cells[cancel_cell].bg,
+            crate::protocol::color_to_u32(state.config.palette.accent),
+            "the cancel button must be the emphasized default while force is armed"
+        );
+        // 上一步的确认键（回车）在这一步必须无效，否则连点两下就能强删。
+        let ignored = state.handle_input_bytes(b"\r");
+        assert!(
+            ignored.actions.is_empty(),
+            "enter must not confirm the forced remove: {:?}",
+            ignored.actions.len()
+        );
+        let force = state.handle_input_bytes(b"y");
         let [ClientShellAction::Endpoint { request, .. }] = &force.actions[..] else {
             panic!("forced worktree remove should use endpoint API");
         };
@@ -1516,6 +1534,130 @@ fn worktree_remove_escalates_recoverable_failure_to_force_confirmation() {
         );
         state.handle_input_bytes(b"\x1b");
         assert!(state.overlay.is_none());
+    }
+}
+
+/// TOOL-01：普通删除失败后浮层被推进到「强制删除」确认，长按回车残余的
+/// Repeat 不得替用户按下这一步；回车本身也不再是这一步的确认键（换键后即使在
+/// 不支持 kitty 事件类型、自动重复只发普通 Press 的宿主上也穿不过去），必须按 y。
+#[test]
+fn held_enter_repeat_does_not_confirm_forced_worktree_remove() {
+    use crossterm::event::KeyEventKind;
+
+    let mut snapshot = snapshot();
+    snapshot.workspaces[0].worktree = Some(ClientShellWorktree {
+        key: "repo-key".into(),
+        label: "repo".into(),
+        is_linked_worktree: true,
+    });
+    let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
+    state.set_snapshot(Box::new(snapshot));
+    state.set_pane_surface(surface());
+    let mut prepare = ClientShellInput::default();
+    state.record_binding(
+        crate::input::KeybindMatch::Action(crate::input::KeybindAction::RemoveWorktree),
+        &mut prepare,
+    );
+    let [ClientShellAction::Endpoint { request, .. }] = &prepare.actions[..] else {
+        panic!("remove worktree should prepare through worktree.list");
+    };
+    let request_id = request.id.clone();
+    state.handle_endpoint_result(
+        "boot-1",
+        &request_id,
+        Ok(worktree_list_result(Some("ws_1"))),
+    );
+
+    let enter = crate::input::TerminalKey::new(KeyCode::Enter, KeyModifiers::empty());
+    let press = state.handle_raw_events(vec![RawInputEvent::Key(enter.clone())]);
+    let [ClientShellAction::Endpoint { request, .. }] = &press.actions[..] else {
+        panic!("worktree remove should use endpoint API");
+    };
+    assert!(matches!(
+        &request.method,
+        crate::api::schema::Method::WorktreeRemove(params)
+            if params.workspace_id == "ws_1" && !params.force
+    ));
+    let request_id = request.id.clone();
+
+    // 按键仍被按住时服务端返回「脏检出需要 force」，浮层步进到强制确认。
+    let (_, actions) = state.handle_endpoint_result(
+        "boot-1",
+        &request_id,
+        Err(ClientShellEndpointError {
+            code: Some("dirty_worktree_requires_force".into()),
+            message: "dirty worktree".into(),
+        }),
+    );
+    assert!(actions.is_empty(), "failure must not retry automatically");
+    let Some(ClientShellOverlay::WorktreeRemove(remove)) = &state.overlay else {
+        panic!("failed remove should keep its confirmation");
+    };
+    assert!(remove.force_confirmation);
+
+    // 自动重复的残余按键不得穿透这一步确认。
+    for _ in 0..3 {
+        let repeat = state.handle_raw_events(vec![RawInputEvent::Key(
+            enter.clone().with_kind(KeyEventKind::Repeat),
+        )]);
+        assert!(
+            repeat.actions.is_empty(),
+            "held enter must not confirm the forced remove: {:?}",
+            repeat.actions.len()
+        );
+    }
+    let Some(ClientShellOverlay::WorktreeRemove(remove)) = &state.overlay else {
+        panic!("forced confirmation should still be waiting");
+    };
+    assert!(remove.force_confirmation);
+    assert!(!remove.removing);
+
+    // 松手后重新按下回车也不再确认：这一步的确认键已换成 y / ctrl+↵。
+    state.handle_raw_events(vec![RawInputEvent::Key(
+        enter.clone().with_kind(KeyEventKind::Release),
+    )]);
+    let fresh_enter = state.handle_raw_events(vec![RawInputEvent::Key(enter)]);
+    assert!(
+        fresh_enter.actions.is_empty(),
+        "a fresh enter press must not confirm the forced remove"
+    );
+    // ctrl+↵ 是 y 之外的第二个确认键（`worktree_remove_escalates_…` 覆盖 y）。
+    let confirmed = state.handle_raw_events(vec![RawInputEvent::Key(
+        crate::input::TerminalKey::new(KeyCode::Enter, KeyModifiers::CONTROL),
+    )]);
+    let [ClientShellAction::Endpoint { request, .. }] = &confirmed.actions[..] else {
+        panic!("ctrl+enter should confirm the forced remove");
+    };
+    assert!(matches!(
+        &request.method,
+        crate::api::schema::Method::WorktreeRemove(params)
+            if params.workspace_id == "ws_1" && params.force
+    ));
+}
+
+/// 上一个用例的对照：pane 路径的普通长按重复不受浮层步进指纹影响。
+#[test]
+fn held_key_repeats_still_reach_the_focused_pane() {
+    use crossterm::event::KeyEventKind;
+
+    let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
+    state.set_snapshot(Box::new(snapshot()));
+    state.set_pane_surface(surface());
+    let key = crate::input::TerminalKey::new(KeyCode::Char('x'), KeyModifiers::empty());
+    assert!(matches!(
+        &state
+            .handle_raw_events(vec![RawInputEvent::Key(key.clone())])
+            .requests[..],
+        [ClientMessage::ClientShellPaneInput { pane_id, .. }] if pane_id == "pane_1"
+    ));
+    for _ in 0..3 {
+        let repeat = state.handle_raw_events(vec![RawInputEvent::Key(
+            key.clone().with_kind(KeyEventKind::Repeat),
+        )]);
+        assert!(matches!(
+            &repeat.requests[..],
+            [ClientMessage::ClientShellPaneInput { pane_id, .. }] if pane_id == "pane_1"
+        ));
     }
 }
 

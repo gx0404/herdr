@@ -271,6 +271,10 @@ mod tests {
     #[derive(Clone, Debug, PartialEq, Eq)]
     enum Context {
         Pane,
+        /// 浮层上下文携带步进指纹（`ClientInputContext::overlay_step` 的替身）。
+        Overlay {
+            step: u32,
+        },
     }
 
     type Leases = InputLeaseTable<u64, Context, u64>;
@@ -428,6 +432,69 @@ mod tests {
                 tracked: true,
             }
         ));
+    }
+
+    /// TOOL-01：浮层步进（普通删除 → 强制删除确认、片段列表 → 运行流）后，
+    /// 长按残余的 Repeat 必须彻底失效，且失效是粘性的——步进回退也不复活。
+    #[test]
+    fn overlay_step_change_suppresses_held_repeats_for_good() {
+        let key = TerminalKey::new(KeyCode::Enter, KeyModifiers::empty()).with_repeat_count(3);
+        let lease_key = InputLeaseKey::new(7, &key);
+        let armed = Context::Overlay { step: 0 };
+        let confirming = Context::Overlay { step: 1 };
+        let mut leases = Leases::default();
+
+        // 首次按下停在同一步：重复仍按原语义回放。
+        assert!(matches!(
+            leases.complete_press(lease_key, &key, Some(&armed), Some(&armed), None),
+            RepeatPlan::Reprocess {
+                repetitions: 2,
+                tracked: true,
+                ..
+            }
+        ));
+        // 服务端失败把浮层推进到强制确认：这一拍的 Repeat 不得再回放。
+        assert!(matches!(
+            leases.plan_repeat(lease_key, &key, Some(&confirming)),
+            RepeatPlan::Ignore
+        ));
+        // 步进回退（例如确认被撤销）也不得复活这条 lease。
+        assert!(matches!(
+            leases.plan_repeat(lease_key, &key, Some(&armed)),
+            RepeatPlan::Ignore
+        ));
+        // 同一按下期间的后续重复同样落在 SuppressRepeats。
+        assert!(matches!(
+            leases.plan_repeat(lease_key, &key, Some(&confirming)),
+            RepeatPlan::Ignore
+        ));
+    }
+
+    /// 同上的对照：上下文没有步进时（pane 长按、同一浮层视图内长按方向键）
+    /// 重复回放不受影响。
+    #[test]
+    fn repeats_within_one_step_keep_replaying() {
+        let key = TerminalKey::new(KeyCode::Down, KeyModifiers::empty()).with_repeat_count(1);
+        let lease_key = InputLeaseKey::new(7, &key);
+        let mut leases = Leases::default();
+
+        for context in [Context::Pane, Context::Overlay { step: 4 }] {
+            leases.remove(&lease_key);
+            assert!(matches!(
+                leases.complete_press(lease_key, &key, Some(&context), Some(&context), None),
+                RepeatPlan::Ignore
+            ));
+            for _ in 0..3 {
+                assert!(matches!(
+                    leases.plan_repeat(lease_key, &key, Some(&context)),
+                    RepeatPlan::Reprocess {
+                        repetitions: 1,
+                        tracked: true,
+                        ..
+                    }
+                ));
+            }
+        }
     }
 
     #[test]

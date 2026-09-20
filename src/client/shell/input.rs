@@ -1008,6 +1008,7 @@ impl ClientShellState {
         ClientInputContext {
             mode: self.mode,
             overlay: self.overlay.as_ref().map(ClientShellOverlay::kind),
+            overlay_step: self.overlay.as_ref().map_or(0, ClientShellOverlay::step),
             popup_terminal_id: self.popup_input_target().and_then(|target| match target {
                 ClientInputTarget::Popup(terminal_id) => Some(terminal_id),
                 ClientInputTarget::Pane(_) => None,
