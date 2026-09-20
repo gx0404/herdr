@@ -40,6 +40,8 @@ fn protocol_schema_document() -> serde_json::Value {
             "success_response": protocol_schema_entry::<SuccessResponse>("success_response"),
             "error_response": protocol_schema_entry::<ErrorResponse>("error_response"),
             "event": protocol_schema_entry::<EventEnvelope>("event"),
+            "stream_event": protocol_schema_entry::<StreamEventEnvelope>("stream_event"),
+            "event_stream_notice": protocol_schema_entry::<EventStreamNotice>("event_stream_notice"),
             "subscription_event": protocol_schema_entry::<SubscriptionEventEnvelope>("subscription_event"),
             "observation_event": protocol_schema_entry::<ObservationEventEnvelope>("observation_event"),
         },
@@ -661,6 +663,83 @@ fn subscribe_request_parses_parameterized_subscriptions() {
     ));
 }
 
+/// HSR-03/APP-006：`notices` 是显式可选面，且是**纯追加**的请求字段。
+/// 省略即关闭（既有客户端行为不变），关闭时线上形状与旧请求逐字节一致。
+#[test]
+fn subscribe_request_notices_flag_defaults_off_and_only_appends() {
+    let legacy = r#"{"id":"sub_1","method":"events.subscribe","params":{"subscriptions":[{"type":"workspace.focused"}]}}"#;
+    let request: Request = serde_json::from_str(legacy).expect("旧请求必须仍能解析");
+    let Method::EventsSubscribe(params) = &request.method else {
+        panic!("wrong method");
+    };
+    assert!(!params.notices, "省略 notices 即关闭通知帧");
+    assert_eq!(
+        serde_json::to_string(&request).unwrap(),
+        legacy,
+        "关闭时不得出现在线上"
+    );
+
+    let opted_in = r#"{"id":"sub_1","method":"events.subscribe","params":{"subscriptions":[{"type":"workspace.focused"}],"notices":true}}"#;
+    let request: Request = serde_json::from_str(opted_in).expect("显式开启必须能解析");
+    let Method::EventsSubscribe(params) = &request.method else {
+        panic!("wrong method");
+    };
+    assert!(params.notices);
+    assert_eq!(serde_json::to_string(&request).unwrap(), opted_in);
+}
+
+/// HSR-03/APP-006：订阅流帧只在 `EventEnvelope` 基础上**纯追加**可选
+/// `sequence`。带序号的帧必须能被旧形状（`EventEnvelope`）宽松解码，不带序号时
+/// 线上形状与旧帧逐字节一致。
+#[test]
+fn stream_event_envelope_only_appends_an_optional_sequence() {
+    let envelope = EventEnvelope {
+        event: EventKind::WorkspaceFocused,
+        data: EventData::WorkspaceFocused {
+            workspace_id: "w_1".into(),
+        },
+    };
+
+    let without_sequence = StreamEventEnvelope {
+        event: envelope.event,
+        data: envelope.data.clone(),
+        sequence: None,
+    };
+    assert_eq!(
+        serde_json::to_string(&without_sequence).unwrap(),
+        serde_json::to_string(&envelope).unwrap(),
+        "没有序号时线上形状必须与旧事件帧完全一致"
+    );
+
+    let sequenced = StreamEventEnvelope::new(42, envelope.clone());
+    let json = serde_json::to_value(&sequenced).unwrap();
+    assert_eq!(json["sequence"], 42);
+    let legacy: EventEnvelope =
+        serde_json::from_value(json.clone()).expect("旧客户端必须忽略未知字段");
+    assert_eq!(legacy, envelope);
+    let restored: StreamEventEnvelope = serde_json::from_value(json).unwrap();
+    assert_eq!(restored, sequenced);
+
+    // 旧 server 不发 `sequence`，新客户端解码后得到 `None`。
+    let legacy_frame = serde_json::to_value(&envelope).unwrap();
+    let decoded: StreamEventEnvelope = serde_json::from_value(legacy_frame).unwrap();
+    assert_eq!(decoded.sequence, None);
+}
+
+/// 断层通知帧与事件帧同形（`event` + `data`），是纯新增帧：旧客户端按事件名
+/// 分派时忽略它，新客户端据此重拉全量快照。
+#[test]
+fn event_stream_notice_round_trips_with_the_event_envelope_shape() {
+    let notice = EventStreamNotice::EventsLost(EventGap { from: 1, to: 88 });
+    let json = serde_json::to_value(notice).unwrap();
+    assert_eq!(
+        json,
+        serde_json::json!({"event": "events.lost", "data": {"from": 1, "to": 88}})
+    );
+    let restored: EventStreamNotice = serde_json::from_value(json).unwrap();
+    assert_eq!(restored, notice);
+}
+
 #[test]
 fn subscription_event_envelope_round_trips() {
     let event = SubscriptionEventEnvelope {
@@ -679,10 +758,15 @@ fn subscription_event_envelope_round_trips() {
                 truncated: false,
             },
         }),
+        sequence: None,
     };
 
     let json = serde_json::to_string(&event).unwrap();
     assert!(json.contains("\"event\":\"pane.output_matched\""));
+    assert!(
+        !json.contains("sequence"),
+        "快照类订阅没有序号时不得出现在线上（纯追加可选字段）"
+    );
     let restored: SubscriptionEventEnvelope = serde_json::from_str(&json).unwrap();
     assert_eq!(restored, event);
 }
@@ -700,6 +784,7 @@ fn scroll_changed_subscription_event_round_trips() {
                 viewport_rows: 30,
             },
         }),
+        sequence: None,
     };
 
     let json = serde_json::to_string(&event).unwrap();
@@ -957,6 +1042,7 @@ fn worktree_lifecycle_events_round_trip() {
                 Subscription::WorktreeOpened {},
                 Subscription::WorktreeRemoved {},
             ],
+            notices: false,
         }),
     };
     let json = serde_json::to_string(&subscription).unwrap();
@@ -1310,6 +1396,7 @@ fn authority_mutation_requests_round_trip() {
                 Subscription::TabMoved {},
                 Subscription::LayoutUpdated {},
             ],
+            notices: false,
         }),
     };
     let json = serde_json::to_string(&subscription).unwrap();
@@ -1648,10 +1735,34 @@ fn observation_event_kinds_match_envelope_tags() {
 }
 
 #[test]
+fn protocol_schema_entry_set_is_a_contract() {
+    let document = protocol_schema_document();
+    let schemas = document["schemas"].as_object().unwrap();
+    // 按**集合**比对，与序列化顺序无关：`serde_json` 的 `preserve_order`
+    // 特性可能被任何一个传递依赖打开（Cargo feature 取并集），届时按数组比对
+    // 会以「顺序不对」而不是「条目不对」的形式变红。
+    let mut keys = schemas.keys().map(String::as_str).collect::<Vec<_>>();
+    keys.sort_unstable();
+    assert_eq!(
+        keys,
+        [
+            "error_response",
+            "event",
+            "event_stream_notice",
+            "observation_event",
+            "request",
+            "stream_event",
+            "subscription_event",
+            "success_response",
+        ],
+        "schema 条目集合是契约的一部分，新增只能追加"
+    );
+}
+
+#[test]
 fn protocol_schema_registers_observation_events() {
     let document = protocol_schema_document();
     let schemas = document["schemas"].as_object().unwrap();
-    assert_eq!(schemas.len(), 6, "第 6 个 schema 条目是观测事件");
     let entry = &schemas["observation_event"];
     let tags = entry["oneOf"]
         .as_array()

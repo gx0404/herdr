@@ -11,6 +11,12 @@ use super::worktrees::WorktreeInfo;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct EventsSubscribeParams {
     pub subscriptions: Vec<Subscription>,
+    /// 是否在这条流上下发**通知帧**（目前只有 `events.lost`）。通知帧的
+    /// `event` 名不在 `EventKind` 里，严格按 `event` 条目解码每一行的客户端会
+    /// 解不开，所以默认关闭、由调用方显式开启（HSR-03/APP-006）。
+    /// 省略即 `false`，线上形状与旧请求逐字节一致。
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub notices: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
@@ -253,6 +259,45 @@ impl EventKind {
     }
 }
 
+impl EventKind {
+    /// `EventKind` 变体总数。`EventHub` 用它作为「按种别记录挤出高水位」的
+    /// 定长数组长度。这是进程内实现细节，不进 wire 形状。
+    pub(crate) const COUNT: usize = 26;
+
+    /// 稳定的进程内下标。**不是** wire 值，不得序列化；只用来索引定长数组。
+    /// 写成穷尽 match，新增变体必须显式分配下标（并同步 `COUNT`）。
+    pub(crate) fn index(self) -> usize {
+        match self {
+            EventKind::WorkspaceCreated => 0,
+            EventKind::WorkspaceUpdated => 1,
+            EventKind::WorkspaceMetadataUpdated => 2,
+            EventKind::WorkspaceClosed => 3,
+            EventKind::WorkspaceRenamed => 4,
+            EventKind::WorkspaceMoved => 5,
+            EventKind::WorkspaceReordered => 6,
+            EventKind::WorkspaceFocused => 7,
+            EventKind::WorktreeCreated => 8,
+            EventKind::WorktreeOpened => 9,
+            EventKind::WorktreeRemoved => 10,
+            EventKind::TabCreated => 11,
+            EventKind::TabClosed => 12,
+            EventKind::TabRenamed => 13,
+            EventKind::TabMoved => 14,
+            EventKind::TabFocused => 15,
+            EventKind::PaneCreated => 16,
+            EventKind::PaneClosed => 17,
+            EventKind::PaneUpdated => 18,
+            EventKind::PaneFocused => 19,
+            EventKind::PaneMoved => 20,
+            EventKind::PaneOutputChanged => 21,
+            EventKind::PaneExited => 22,
+            EventKind::PaneAgentDetected => 23,
+            EventKind::PaneAgentStatusChanged => 24,
+            EventKind::LayoutUpdated => 25,
+        }
+    }
+}
+
 #[cfg(test)]
 pub const KNOWN_EVENT_KINDS: &[EventKind] = &[
     EventKind::WorkspaceCreated,
@@ -364,6 +409,51 @@ pub struct EventEnvelope {
     pub data: EventData,
 }
 
+/// 事件订阅流上的一帧。形状与 `EventEnvelope` 完全一致（`event` + `data`），
+/// 只**纯追加**一个可选 `sequence`（该事件在 server 事件序列里的序号）。
+/// 旧客户端按 `EventEnvelope` 解码时会忽略这个未知字段，语义不变
+/// （HSR-03/APP-006）。`sequence` 可用作重连游标，并与 `events.lost` 通知帧
+/// 一起让断层可感知。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct StreamEventEnvelope {
+    pub event: EventKind,
+    pub data: EventData,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sequence: Option<u64>,
+}
+
+impl StreamEventEnvelope {
+    pub fn new(sequence: u64, envelope: EventEnvelope) -> Self {
+        Self {
+            event: envelope.event,
+            data: envelope.data,
+            sequence: Some(sequence),
+        }
+    }
+}
+
+/// 被 server 事件环形缓冲挤掉的序号闭区间：`from..=to` 这些事件已经不可恢复。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct EventGap {
+    pub from: u64,
+    pub to: u64,
+}
+
+/// 事件订阅流上的**通知帧**：不是某个 pane/workspace 的生命周期事件，而是关于
+/// 这条流本身的元信息。线上形状与事件帧同形（`{"event": ..., "data": {...}}`），
+/// 只是 `event` 取通知名——`events.lost` 不在 `EventKind` 里，按 `event` 条目
+/// 严格解码每一行的客户端会解不开，所以这类帧**只对显式开启
+/// `events.subscribe` 的 `notices: true` 的订阅方下发**；socket-api 同时把
+/// 「必须忽略无法识别的 `event` 名」写成了这条流的显式契约。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(tag = "event", content = "data")]
+pub enum EventStreamNotice {
+    /// 订阅方的游标落在保留窗口之外：`from..=to` 的事件已被挤掉，客户端需要
+    /// 重新拉取 `session.snapshot` 之类的全量快照再续流。
+    #[serde(rename = "events.lost")]
+    EventsLost(EventGap),
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub enum SubscriptionEventKind {
     #[serde(rename = "pane.output_matched")]
@@ -378,6 +468,10 @@ pub enum SubscriptionEventKind {
 pub struct SubscriptionEventEnvelope {
     pub event: SubscriptionEventKind,
     pub data: SubscriptionEventData,
+    /// 事件来自 server 事件序列时的序号；由 pane 快照兜底产生的帧没有序号。
+    /// 纯追加的可选字段，旧客户端忽略（HSR-03/APP-006）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sequence: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]

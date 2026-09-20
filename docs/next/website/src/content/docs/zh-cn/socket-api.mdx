@@ -30,7 +30,7 @@ herdr api schema --json
 herdr api schema --output herdr-api.schema.json
 ```
 
-普通的 `herdr api schema` 打印简短摘要。`--json` 打印供工具使用的完整 JSON Schema,`--output PATH` 将该文档写入文件。schema 覆盖原始请求、成功响应、错误响应、发出的事件和订阅事件。
+普通的 `herdr api schema` 打印简短摘要。`--json` 打印供工具使用的完整 JSON Schema,`--output PATH` 将该文档写入文件。schema 覆盖原始请求、成功响应、错误响应、发出的事件和订阅事件。`events.subscribe` 流上推送的行由 `stream_event` 条目(事件帧加可选 `sequence`)与 `event_stream_notice` 条目(流的元信息,例如 `events.lost`)描述;`event` 条目描述的是事件载荷本身。
 
 ## 你能控制什么
 
@@ -632,12 +632,27 @@ workspace 的 get/list 响应会公开生成的 `tokens` 映射,空间侧边栏�
   "params": {
     "subscriptions": [
       { "type": "pane.agent_status_changed", "pane_id": "w1:p1", "agent_status": "blocked" }
-    ]
+    ],
+    "notices": true
   }
 }
 ```
 
 第一个响应确认订阅。之后的行是推送的事件。生命周期事件订阅从请求被接受时开始,不会重放在此之前保留的事件。一批生命周期事件会在同一次投递中作为连续多行到达,而不是每个轮询间隔一行。投递仍由轮询循环驱动,因此一批事件中第一行的延迟上限仍是一个轮询间隔。基于快照的订阅(`pane.output_matched`、`pane.agent_status_changed`、`pane.scroll_changed`)是边沿触发,每个轮询间隔至多产出一条事件。在订阅连接上写入内容(例如换行保活)不会结束该流;这些字节会留在缓冲里不被消费,直到连接关闭。
+
+每一行生命周期事件都带有可选的 `sequence`,即该事件在本 server 事件序列中的位置。可以用它对账事件顺序、判断流推进到哪里。基于快照的帧没有序号,会省略该字段;旧版 server 在所有位置都省略它。
+
+server 只保留有界的近期事件环形缓冲。如果订阅方落后到**它订阅的**事件在投递前就被挤掉,流可以在幸存事件之前先发一行通知:
+
+```json
+{"event":"events.lost","data":{"from":601,"to":688}}
+```
+
+通知行需要显式开启:在 `events.subscribe` 的参数里设 `notices: true` 才会收到;该字段默认 `false`,省略它的订阅看到的行与以前完全一致。只有本订阅关心的事件种别真被挤掉才会报断层——无关流量滚过缓冲不会触发;同一连接即使多个订阅同时受影响,每个轮询轮次也至多收到一条通知。
+
+`from` 与 `to` 是你订阅的事件被丢弃且不可恢复的序号闭区间。把它当作重新同步信号:重新读取 `session.snapshot`(或你自己缓存的状态),然后继续应用后续事件流。
+
+这条通知是新增的行类型,不改变既有事件帧的形状。由此把 `events.subscribe` 流的契约写明:每一行要么是 `stream_event`(带可选 `sequence` 的事件帧),要么是 `event_stream_notice`,客户端**必须**忽略无法识别的 `event` 名,而不是当成错误。`events.lost` 不是事件种别,所以严格按 `event` 条目解码每一行的客户端要么不开启通知(默认),要么按 `stream_event` 与 `event_stream_notice` 一起解码。
 
 工作区事件订阅包括 `workspace.created`、`workspace.updated`、`workspace.metadata_updated`、`workspace.renamed`、`workspace.moved`、`workspace.reordered`、`workspace.closed` 和 `workspace.focused`。`workspace.metadata_updated` 报告令牌变更和 TTL 到期,但不会调用插件事件钩子。其他工作区事件描述 Herdr UI/运行时的生命周期。当工作区属于 worktree 组时,`workspace.created` 包含可选的 `workspace.worktree` 来源信息。`workspace.moved` 包含被移动的 `workspace_id`、请求的 `insert_index` 和更新后的有序 `workspaces` 列表。`workspace.reordered` 包含原子移动的 `workspace_ids`、可选的 `before_workspace_id` 和服务器确认的有序 `workspaces` 列表。在移除前 Herdr 仍能识别时,`workspace.closed` 包含最终的 `workspace` 快照。
 标签页事件订阅包括 `tab.created`、`tab.closed`、`tab.focused`、`tab.renamed` 和 `tab.moved`。`tab.moved` 包含被移动的 `tab_id`、`workspace_id`、请求的 `insert_index` 和该工作区更新后的有序 `tabs` 列表。
@@ -755,7 +770,7 @@ herdr agent wait w1:p1 --until blocked
 
 由客户端渲染的 Herdr UI 对本地和 SSH 服务器使用稳定的端点代数。客户端和服务器构建不必一致。连接时，双方会协商核心快照、屏幕、输入和 blob 编解码器，服务器则公布支持的 API 方法和可选能力。已保存的 SSH 机器需要 `surface_interest` 来确保只有选中的机器传输窗格画面，并需要 `health_check` 来发现空闲连接的故障。缺少这些能力的服务器会显示 Attention，直到明确更新。详见[连接机器](/zh-cn/docs/connecting-machines/)。缺少方法时,只禁用该服务器上的对应操作并显示客户端本地通知;操作被拒绝或超时也不会断开连接。只有早于端点第 1 代的服务器需要最后更新一次。
 
-带编号的二进制协议仍用于同一安装内的内部操作,包括直接终端连接和实时交接。跨不同构建使用这些操作前,请检查 `ping` 或 `herdr status`。JSON API 客户端应忽略未知字段,并把不支持的方法当作普通错误处理。
+带编号的二进制协议仍用于同一安装内的内部操作,包括直接终端连接和实时交接。跨不同构建使用这些操作前,请检查 `ping` 或 `herdr status`。JSON API 客户端应忽略未知字段,并把不支持的方法当作普通错误处理。在推送流上还必须忽略无法识别的 `event` 名:新的行类型(例如 `events.lost`)会从那里加入,而是否接收它们由 `events.subscribe` 的 `notices` 开关控制。
 
 ## 不可变文字快照
 

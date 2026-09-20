@@ -390,7 +390,26 @@ fn wait_for_resolved_agent(
 
         let mut should_probe = false;
         let mut matched_event_status = None;
-        for (sequence, event) in event_hub.events_after(last_event_sequence) {
+        // 这个循环是纯边沿驱动的：只有看到本 pane 的事件才会 return 或置
+        // `should_probe`，而 `timeout_ms` 是可选的——没给超时就没有 deadline
+        // 兜底。一旦环形缓冲在两次轮询之间把本 pane 的 `pane.exited` /
+        // `pane.closed` / `pane.agent_status_changed` 挤掉，等待方就会永久挂起
+        // 并持续把已死的 agent 报为「仍在等待」，正是 HSR-03/APP-006 要关掉的
+        // 症状。所以断层必须强制触发一次探测：`agent_get` 的结果能自愈
+        // （identity 不匹配 → `agent_not_running`，匹配 → 按快照判定）。
+        // 判据用 `None`（任意种别）：本循环关心的是多个种别，多探一次廉价，
+        // 漏探一次是永久挂起。
+        let retained = event_hub.retained_after(last_event_sequence, None);
+        if let Some(gap) = retained.gap {
+            tracing::warn!(
+                pane_id = %pane_id,
+                gap_from = gap.from,
+                gap_to = gap.to,
+                "agent 等待游标落在事件保留窗口之外，强制探测一次 agent 状态"
+            );
+            should_probe = true;
+        }
+        for (sequence, event) in retained.events {
             last_event_sequence = sequence;
             match event.data {
                 EventData::PaneAgentDetected {
@@ -824,6 +843,127 @@ fn wait_matched_response(request_id: &str, event: serde_json::Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::api::ApiRequestMessage;
+    use interprocess::local_socket::traits::Listener as _;
+
+    fn wait_test_stream_pair(name: &str) -> (LocalStream, LocalStream, std::path::PathBuf) {
+        let path = std::env::temp_dir().join(format!(
+            "herdr-wait-{name}-{}-{}.sock",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|elapsed| elapsed.as_nanos())
+                .unwrap_or_default()
+        ));
+        let listener = crate::ipc::bind_local_listener(&path).expect("bind test socket");
+        let client = crate::ipc::connect_local_stream(&path).expect("connect test socket");
+        let server = listener.accept().expect("accept test socket");
+        (client, server, path)
+    }
+
+    fn agent_wait_test_agent() -> crate::api::schema::AgentInfo {
+        crate::api::schema::AgentInfo {
+            terminal_id: "term_1".into(),
+            name: Some("pi".into()),
+            agent: Some("pi".into()),
+            title: None,
+            terminal_title: None,
+            terminal_title_stripped: None,
+            display_agent: None,
+            agent_status: crate::api::schema::AgentStatus::Working,
+            screen_detection_skipped: false,
+            state_labels: std::collections::HashMap::new(),
+            tokens: std::collections::HashMap::new(),
+            agent_session: None,
+            workspace_id: "ws_1".into(),
+            tab_id: "tab_1".into(),
+            pane_id: "w1:p1".into(),
+            focused: true,
+            launch_pending: false,
+            interactive_ready: true,
+            state_change_seq: 0,
+            cwd: None,
+            foreground_cwd: None,
+            revision: 1,
+        }
+    }
+
+    /// HSR-03/APP-006 回归：`agent.wait` 的事件循环是**纯边沿驱动**的——只有看到
+    /// 本 pane 的事件才会 return 或探测，而 `timeout_ms` 可选，没给超时就没有
+    /// deadline 兜底。环形缓冲把本 pane 的 `pane.exited` 挤掉后，此前的实现既不
+    /// 探测也不返回，无超时的 `agent.wait` 会永久挂起并持续把已死的 agent 报为
+    /// 「仍在等待」。现在断层必须强制走一次探测，在一个轮询间隔内给出结论。
+    #[test]
+    fn agent_wait_probes_after_an_event_gap_instead_of_hanging_forever() {
+        let (_client, mut server, path) = wait_test_stream_pair("agent-wait-gap");
+        let (api_tx, mut api_rx) = tokio::sync::mpsc::unbounded_channel::<ApiRequestMessage>();
+        // 探测应答：agent 已经不在了。没有断层触发探测的话，这个应答永远不会
+        // 被请求，测试就会卡在 `wait_for_resolved_agent` 里直到超时。
+        let responder = std::thread::spawn(move || {
+            while let Some(message) = api_rx.blocking_recv() {
+                let response = serde_json::to_string(&ErrorResponse {
+                    id: message.request.id.clone(),
+                    error: ErrorBody {
+                        code: "agent_not_found".into(),
+                        message: "agent is gone".into(),
+                    },
+                })
+                .expect("serialize probe response");
+                let _ = message.respond_to.send(response);
+            }
+        });
+
+        let event_hub = EventHub::default();
+        // 游标停在 0，随后推入的无关事件多到把保留窗口整体推走：本 pane 的
+        // 生命周期事件（如果有过）都落进了断层。
+        for index in 0..600 {
+            event_hub.push(crate::api::schema::EventEnvelope {
+                event: EventKind::WorkspaceFocused,
+                data: EventData::WorkspaceFocused {
+                    workspace_id: format!("ws_{index}"),
+                },
+            });
+        }
+
+        let initial = agent_wait_test_agent();
+        let wait = ResolvedAgentWait {
+            target: "pi".into(),
+            until: vec![crate::api::schema::AgentStatus::Idle],
+            // 关键：没有超时，所以 deadline 分支不会兜底。
+            timeout_ms: None,
+            initial,
+            last_event_sequence: 0,
+            after_state_change_seq: None,
+            accept_transient_status: false,
+            timeout_kind: AgentWaitTimeoutKind::Status,
+        };
+
+        let started = std::time::Instant::now();
+        let outcome = wait_for_resolved_agent(
+            "wait_1".into(),
+            wait,
+            &mut server,
+            &api_tx,
+            &event_hub,
+            &Arc::new(AtomicBool::new(true)),
+        )
+        .expect("wait for resolved agent");
+        let elapsed = started.elapsed();
+
+        let Some(AgentWaitOutcome::Response(response)) = outcome else {
+            panic!("断层后必须立刻给出结论，而不是继续等待");
+        };
+        let response: ErrorResponse = serde_json::from_str(&response).expect("decode response");
+        assert_eq!(response.error.code, "agent_not_running");
+        assert!(
+            elapsed < std::time::Duration::from_secs(2),
+            "断层必须在一个轮询间隔内触发探测，实际耗时 {elapsed:?}"
+        );
+
+        drop(api_tx);
+        responder.join().expect("join responder");
+        let _ = std::fs::remove_file(path);
+    }
 
     #[test]
     fn agent_wait_probe_only_translates_agent_disappearance() {

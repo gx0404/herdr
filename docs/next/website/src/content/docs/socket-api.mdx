@@ -34,7 +34,10 @@ herdr api schema --output herdr-api.schema.json
 Plain `herdr api schema` prints a short summary. `--json` prints the full JSON
 Schema document for tools, and `--output PATH` writes that document to a file.
 The schema covers raw requests, success responses, error responses, emitted
-events, and subscription events.
+events, and subscription events. Lines pushed on an `events.subscribe` stream
+are described by the `stream_event` entry (an event frame plus an optional
+`sequence`) and the `event_stream_notice` entry (stream metadata such as
+`events.lost`); the `event` entry describes the event payload itself.
 
 ## What you can control
 
@@ -812,7 +815,8 @@ Subscribe to events when you need a long-lived stream:
   "params": {
     "subscriptions": [
       { "type": "pane.agent_status_changed", "pane_id": "w1:p1", "agent_status": "blocked" }
-    ]
+    ],
+    "notices": true
   }
 }
 ```
@@ -828,6 +832,40 @@ polling interval. Snapshot-based subscriptions (`pane.output_matched`,
 at most one event per polling interval. Writing on a subscription connection
 (for example a newline keepalive) does not end the stream; those bytes stay
 buffered and unread until the connection closes.
+
+Every lifecycle event line carries an optional `sequence`, the event's position
+in this server's event sequence. Use it to reconcile ordering or to tell how far
+a stream has advanced. Snapshot-based frames have no sequence and omit the
+field, and older servers omit it everywhere.
+
+The server keeps a bounded ring buffer of recent events. If a subscriber falls
+behind far enough that events it subscribed to are evicted before delivery, the
+stream can send a notice line before the events that survived:
+
+```json
+{"event":"events.lost","data":{"from":601,"to":688}}
+```
+
+Notice lines are opt in. Set `notices: true` in the `events.subscribe` params to
+receive them; the field defaults to `false`, so a subscription that omits it sees
+exactly the lines it saw before. A gap is only reported when an event kind this
+subscription asked for was evicted — unrelated traffic rolling through the buffer
+does not trigger one — and a connection receives at most one notice per polling
+round even when several of its subscriptions were affected.
+
+`from` and `to` are the inclusive range of sequence numbers in which events you
+subscribed to were dropped and cannot be recovered. Treat it as a resync signal:
+re-read `session.snapshot` (or the state you cache) and then keep applying the
+stream.
+
+The notice is a new line type, not a change to existing event frames. This makes
+the contract for the `events.subscribe` stream explicit: a line is either a
+`stream_event` (an event frame with an optional `sequence`) or an
+`event_stream_notice`, and clients **must** ignore any `event` name they do not
+recognize rather than treating it as an error. `events.lost` is not an event
+kind, so a client that decodes every line strictly against the `event` schema
+entry has to opt out of notices (the default) or decode against `stream_event`
+and `event_stream_notice` together.
 
 Workspace event subscriptions include `workspace.created`, `workspace.updated`, `workspace.metadata_updated`, `workspace.renamed`, `workspace.moved`, `workspace.reordered`, `workspace.closed`, and `workspace.focused`. `workspace.metadata_updated` reports token changes and TTL expiry without invoking plugin event hooks. Other workspace events describe Herdr UI/runtime lifecycle. `workspace.created` includes optional `workspace.worktree` provenance when the workspace belongs to a worktree group. `workspace.moved` includes the moved `workspace_id`, requested `insert_index`, and updated ordered `workspaces` list. `workspace.reordered` includes the atomically moved `workspace_ids`, optional `before_workspace_id`, and authoritative ordered `workspaces` list. `workspace.closed` includes a final `workspace` snapshot when Herdr can still identify it before removal.
 Tab event subscriptions include `tab.created`, `tab.closed`, `tab.focused`,
@@ -972,7 +1010,10 @@ from before endpoint generation 1 need one final update.
 The numbered binary protocol remains for same-install and internal operations,
 including direct terminal attach and live handoff. Check `ping` or `herdr status`
 before using those operations across different builds. JSON API clients should
-ignore unknown fields and handle unsupported methods as normal errors.
+ignore unknown fields and handle unsupported methods as normal errors. On pushed
+streams they must also ignore lines whose `event` name they do not recognize:
+new line types such as `events.lost` are added there, and opting in to them is
+what `events.subscribe`'s `notices` flag controls.
 
 ## Immutable text snapshots
 

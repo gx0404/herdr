@@ -517,12 +517,26 @@ fn api_schema_json_prints_bundled_schema() {
         .get("protocol")
         .and_then(serde_json::Value::as_u64)
         .is_some_and(|protocol| protocol > 0));
+    let schemas = schema
+        .get("schemas")
+        .and_then(serde_json::Value::as_object)
+        .expect("bundled schema entries");
+    // 按集合比对，与序列化顺序无关（`serde_json` 的 `preserve_order` 可能被
+    // 传递依赖打开，而这里读的是解析后的 JSON，顺序更没有契约含义）。
+    let mut keys = schemas.keys().map(String::as_str).collect::<Vec<_>>();
+    keys.sort_unstable();
     assert_eq!(
-        schema
-            .get("schemas")
-            .and_then(serde_json::Value::as_object)
-            .map(serde_json::Map::len),
-        Some(6)
+        keys,
+        [
+            "error_response",
+            "event",
+            "event_stream_notice",
+            "observation_event",
+            "request",
+            "stream_event",
+            "subscription_event",
+            "success_response",
+        ]
     );
 }
 

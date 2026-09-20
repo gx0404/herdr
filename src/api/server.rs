@@ -774,6 +774,9 @@ fn stream_subscriptions(
     running: &Arc<AtomicBool>,
 ) -> std::io::Result<()> {
     let event_start_sequence = event_hub.current_sequence();
+    // 通知帧（`events.lost`）的 `event` 名不在 `EventKind` 里，只对显式开启的
+    // 订阅方下发，严格按 `event` 条目解码每一行的旧客户端不受影响。
+    let notices = params.notices;
     let mut subscriptions = Vec::with_capacity(params.subscriptions.len());
     for (index, subscription) in params.subscriptions.into_iter().enumerate() {
         let active = match ActiveSubscription::new(
@@ -825,7 +828,7 @@ fn stream_subscriptions(
         // 既加宽乘法路径（连接 × 订阅 × 轮次），又让停机信号被饿死在
         // 单次唤醒内。快照类订阅是边沿触发，多跑一轮也补不回中间态。
         // 每条事件仍是独立的一行 JSON，分帧不变（HSR-03）。
-        for event in poll_subscriptions_round(&mut subscriptions, api_tx, event_hub) {
+        for event in poll_subscriptions_round(&mut subscriptions, api_tx, event_hub, notices) {
             if let Err(err) = write_json_line(&mut stream, &event) {
                 if is_connection_closed_error(&err) {
                     return Ok(());
@@ -1818,16 +1821,146 @@ mod tests {
         }
 
         let started = Instant::now();
+        // HSR-03/APP-006：线上帧带 server 事件序号（纯追加的可选字段）。被测
+        // 行为是「一轮内投递完整批事件且序号严格递增」，不是序号的绝对起点——
+        // 启动路径将来多推一条事件不该让这条断言变红，所以以首帧为基准。
+        let mut previous_sequence: Option<u64> = None;
         for index in 0..BURST {
             let event = read_json_line_from(&mut reader);
             assert_eq!(event["event"], "workspace_focused");
             assert_eq!(event["data"]["workspace_id"], format!("ws_{index}"));
+            let sequence = event["sequence"].as_u64().expect("事件帧必须带序号");
+            if let Some(previous) = previous_sequence {
+                assert_eq!(sequence, previous + 1, "同一批事件的序号必须严格 +1");
+            }
+            previous_sequence = Some(sequence);
         }
         let elapsed = started.elapsed();
         assert!(
             elapsed < Duration::from_millis(1500),
             "{BURST} 条事件应在一个轮询间隔内投递完，实际耗时 {elapsed:?}"
         );
+
+        drop(reader);
+        let result = done_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert!(result.is_ok());
+        server_thread.join().unwrap();
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// HSR-03/APP-006 端到端回归：断层通知帧必须真的写到订阅连接的线上，
+    /// 排在幸存事件之前。单元级只钉住「帧的产生」，这条钉住「帧的投递与分帧」。
+    /// 确定性靠两件事：`with_test_capacity` 把环形缓冲调到 4 格，
+    /// `push_batch` 一次持锁推完，轮询不可能落在推入中间。
+    #[test]
+    fn subscription_stream_reports_the_gap_before_the_events_that_survived() {
+        use interprocess::local_socket::traits::Stream as _;
+
+        const CAPACITY: usize = 4;
+        const PUSHED: usize = 10;
+
+        let (api_tx, _api_rx) = mpsc::unbounded_channel::<ApiRequestMessage>();
+        let (mut client, server, path) = local_stream_pair("api-sub-gap");
+        client
+            .write_all(
+                br#"{"id":"sub_gap","method":"events.subscribe","params":{"subscriptions":[{"type":"workspace.focused"}],"notices":true}}"#,
+            )
+            .unwrap();
+        client.write_all(b"\n").unwrap();
+        client.flush().unwrap();
+        client
+            .set_recv_timeout(Some(Duration::from_secs(10)))
+            .unwrap();
+
+        let running = Arc::new(AtomicBool::new(true));
+        let server_running = Arc::clone(&running);
+        let event_hub = EventHub::with_test_capacity(CAPACITY);
+        let hub = event_hub.clone();
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let server_thread = std::thread::spawn(move || {
+            let result = handle_connection(server, &api_tx, &event_hub, &server_running, None);
+            done_tx.send(result).unwrap();
+        });
+
+        let mut reader = BufReader::new(client);
+        let ack = read_json_line_from(&mut reader);
+        assert_eq!(ack["result"]["type"], "subscription_started");
+
+        hub.push_batch(
+            (0..PUSHED)
+                .map(|index| workspace_focused_event(&format!("ws_{index}")))
+                .collect(),
+        );
+
+        let notice = read_json_line_from(&mut reader);
+        assert_eq!(notice["event"], "events.lost", "断层通知必须是第一行");
+        assert_eq!(notice["data"]["from"], 1);
+        assert_eq!(notice["data"]["to"], (PUSHED - CAPACITY) as u64);
+
+        for index in (PUSHED - CAPACITY)..PUSHED {
+            let event = read_json_line_from(&mut reader);
+            assert_eq!(event["event"], "workspace_focused");
+            assert_eq!(event["data"]["workspace_id"], format!("ws_{index}"));
+            assert_eq!(event["sequence"], index as u64 + 1);
+        }
+
+        drop(reader);
+        let result = done_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert!(result.is_ok());
+        server_thread.join().unwrap();
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// 未开启 `notices` 的订阅方（所有既有客户端）拿到的仍然只有事件行：
+    /// `events.lost` 这个 `EventKind` 之外的 `event` 名不会凭空出现在流上。
+    #[test]
+    fn subscription_stream_omits_gap_notices_unless_requested() {
+        use interprocess::local_socket::traits::Stream as _;
+
+        const CAPACITY: usize = 4;
+        const PUSHED: usize = 10;
+
+        let (api_tx, _api_rx) = mpsc::unbounded_channel::<ApiRequestMessage>();
+        let (mut client, server, path) = local_stream_pair("api-sub-no-notice");
+        client
+            .write_all(
+                br#"{"id":"sub_no_notice","method":"events.subscribe","params":{"subscriptions":[{"type":"workspace.focused"}]}}"#,
+            )
+            .unwrap();
+        client.write_all(b"\n").unwrap();
+        client.flush().unwrap();
+        client
+            .set_recv_timeout(Some(Duration::from_secs(10)))
+            .unwrap();
+
+        let running = Arc::new(AtomicBool::new(true));
+        let server_running = Arc::clone(&running);
+        let event_hub = EventHub::with_test_capacity(CAPACITY);
+        let hub = event_hub.clone();
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let server_thread = std::thread::spawn(move || {
+            let result = handle_connection(server, &api_tx, &event_hub, &server_running, None);
+            done_tx.send(result).unwrap();
+        });
+
+        let mut reader = BufReader::new(client);
+        let ack = read_json_line_from(&mut reader);
+        assert_eq!(ack["result"]["type"], "subscription_started");
+
+        hub.push_batch(
+            (0..PUSHED)
+                .map(|index| workspace_focused_event(&format!("ws_{index}")))
+                .collect(),
+        );
+
+        for index in (PUSHED - CAPACITY)..PUSHED {
+            let event = read_json_line_from(&mut reader);
+            assert_eq!(
+                event["event"], "workspace_focused",
+                "未请求通知帧时第一行就应该是幸存事件"
+            );
+            assert_eq!(event["data"]["workspace_id"], format!("ws_{index}"));
+        }
 
         drop(reader);
         let result = done_rx.recv_timeout(Duration::from_secs(2)).unwrap();
