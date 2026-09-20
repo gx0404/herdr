@@ -306,6 +306,12 @@ herdr pane move <pane_id> --new-workspace [--label TEXT] [--tab-label TEXT] [--f
 herdr pane close <pane_id>
 ```
 
+`pane close` answers as soon as the pane is detached. Herdr terminates the
+pane's processes in the background with SIGHUP, then SIGTERM, then SIGKILL, so
+a process that refuses to exit no longer stalls other requests. Scripts that
+need those processes gone should poll for it instead of assuming they exited
+when the response arrived.
+
 For pane commands that accept `--current`, Herdr uses the calling pane's
 `HERDR_PANE_ID` when the command runs inside a Herdr pane. For `pane split`,
 an explicit pane id or `--pane ID` splits that pane. An omitted target splits

@@ -304,6 +304,161 @@ fn closing_pane_terminates_processes_inside_it() {
 }
 
 #[test]
+fn closing_a_pane_returns_before_the_signal_ladder_finishes() {
+    // HSR-01：信号阶梯曾在事件循环内同步执行，关一个赖着不退的 pane 会把整个 server
+    // 冻住最多 750 ms。阶梯移到 reaper 线程后，pane.close 必须在进程还活着时就返回，
+    // 期间其它 API 照常响应，最终进程仍被 SIGKILL 收掉、不泄漏。
+    let base = unique_test_dir();
+    let config_home = base.join("config");
+    let runtime_dir = base.join("runtime");
+    let socket_path = runtime_dir.join("herdr.sock");
+
+    let herdr = spawn_herdr(&config_home, &runtime_dir, &socket_path);
+    wait_for_socket(&socket_path, Duration::from_secs(5));
+
+    let created = run_cli(
+        &socket_path,
+        &["workspace", "create", "--cwd", base.to_str().unwrap()],
+    );
+    assert!(created.status.success());
+
+    let split = run_cli(
+        &socket_path,
+        &["pane", "split", "1-1", "--direction", "right"],
+    );
+    assert!(split.status.success());
+    let split_json: serde_json::Value = serde_json::from_slice(&split.stdout).unwrap();
+    let pane_id = split_json["result"]["pane"]["pane_id"].as_str().unwrap();
+
+    let pid_file = base.join("pane-close-stubborn.pid");
+    let command = format!(
+        "python3 -c 'import os,signal,time,pathlib; signal.signal(signal.SIGHUP, signal.SIG_IGN); signal.signal(signal.SIGTERM, signal.SIG_IGN); pathlib.Path(r\"{}\").write_text(str(os.getpid())); time.sleep(1000)'",
+        pid_file.display()
+    );
+    let ran = run_cli(&socket_path, &["pane", "run", pane_id, &command]);
+    assert!(
+        ran.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&ran.stderr)
+    );
+
+    let pid = wait_for_pid_file(&pid_file, Duration::from_secs(5)).unwrap_or_else(|err| {
+        panic!("failed to read pane child pid: {err}");
+    });
+    assert!(process_exists(pid), "child process was not running");
+
+    // 基线：同一条 CLI 链路（起进程 + 连 socket + 请求 + 响应）在本机的往返成本。
+    // 用相对基线而不是绝对毫秒做断言，负载高的机器上基线同样变慢，不会假红。
+    let baseline_started = Instant::now();
+    let listed_before = run_cli(&socket_path, &["workspace", "list"]);
+    let baseline = baseline_started.elapsed();
+    assert!(
+        listed_before.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&listed_before.stderr)
+    );
+
+    let close_started = Instant::now();
+    let closed = run_cli(&socket_path, &["pane", "close", pane_id]);
+    let close_elapsed = close_started.elapsed();
+    assert!(
+        closed.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&closed.stderr)
+    );
+    // 同步阶梯要多花整条阶梯（3×250 ms）；这里只允许比基线多出不到一个首级宽限。
+    let first_grace = Duration::from_millis(250);
+    assert!(
+        close_elapsed < baseline + first_grace,
+        "pane close took {close_elapsed:?} against a {baseline:?} baseline: \
+         it still waits for the signal ladder before answering"
+    );
+    if close_elapsed < first_grace {
+        // 实测落在首级宽限内，SIGKILL 还没来得及发：进程必然还在。
+        assert!(
+            process_exists(pid),
+            "pane close waited for the whole signal ladder before answering"
+        );
+    }
+
+    // 阶梯还在跑，事件循环必须照常服务其它请求。
+    let listed = run_cli(&socket_path, &["workspace", "list"]);
+    assert!(
+        listed.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&listed.stderr)
+    );
+
+    assert!(
+        wait_for_pid_exit(pid, Duration::from_secs(5)),
+        "process {pid} survived pane close"
+    );
+
+    cleanup_spawned_herdr(herdr, base);
+}
+
+#[test]
+fn closing_a_pane_kills_background_processes_after_its_shell_exits() {
+    // HSR-01 的竞态：关闭 pane 会先关 PTY master，shell 随即退出并在几毫秒内被 wait
+    // 回收。终止阶梯跑在后台线程上，等它动手时 shell 的进程表条目往往已经消失——只有
+    // 凭投递时刻快照的会话锚点，才能找到仍留在会话里的后台进程。按 child pid 现扫会话
+    // 会扫出空集合，后台进程被永久泄漏。
+    let base = unique_test_dir();
+    let config_home = base.join("config");
+    let runtime_dir = base.join("runtime");
+    let socket_path = runtime_dir.join("herdr.sock");
+
+    let herdr = spawn_herdr(&config_home, &runtime_dir, &socket_path);
+    wait_for_socket(&socket_path, Duration::from_secs(5));
+
+    let created = run_cli(
+        &socket_path,
+        &["workspace", "create", "--cwd", base.to_str().unwrap()],
+    );
+    assert!(created.status.success());
+
+    let split = run_cli(
+        &socket_path,
+        &["pane", "split", "1-1", "--direction", "right"],
+    );
+    assert!(split.status.success());
+    let split_json: serde_json::Value = serde_json::from_slice(&split.stdout).unwrap();
+    let pane_id = split_json["result"]["pane"]["pane_id"].as_str().unwrap();
+
+    let pid_file = base.join("pane-close-background.pid");
+    // 后台运行且忽略 SIGHUP：shell 退出不会带走它，只有阶梯的 SIGTERM 能收掉它。
+    let command = format!(
+        "python3 -c 'import os,signal,time,pathlib; signal.signal(signal.SIGHUP, signal.SIG_IGN); pathlib.Path(r\"{}\").write_text(str(os.getpid())); time.sleep(1000)' &",
+        pid_file.display()
+    );
+    let ran = run_cli(&socket_path, &["pane", "run", pane_id, &command]);
+    assert!(
+        ran.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&ran.stderr)
+    );
+
+    let pid = wait_for_pid_file(&pid_file, Duration::from_secs(5)).unwrap_or_else(|err| {
+        panic!("failed to read background pid: {err}");
+    });
+    assert!(process_exists(pid), "background process was not running");
+
+    let closed = run_cli(&socket_path, &["pane", "close", pane_id]);
+    assert!(
+        closed.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&closed.stderr)
+    );
+
+    assert!(
+        wait_for_pid_exit(pid, Duration::from_secs(5)),
+        "background process {pid} survived pane close"
+    );
+
+    cleanup_spawned_herdr(herdr, base);
+}
+
+#[test]
 fn closing_workspace_terminates_processes_inside_it() {
     let base = unique_test_dir();
     let config_home = base.join("config");

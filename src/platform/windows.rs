@@ -396,7 +396,7 @@ use windows_sys::{
     },
 };
 
-use super::{ClipboardImage, ForegroundJob, Signal};
+use super::{ClipboardImage, ForegroundJob, ProcessSessionId, Signal};
 
 const STILL_ACTIVE: u32 = 259;
 const FOREGROUND_PROCESS_SNAPSHOT_CACHE_TTL: Duration = Duration::from_millis(250);
@@ -2183,6 +2183,34 @@ pub fn session_processes(child_pid: u32) -> Vec<u32> {
     session_processes_from_snapshot(child_pid, &snapshot)
 }
 
+/// pane 进程树的锚点。Windows 没有 Unix 的会话语义，进程树按父子关系枚举，所以锚点就是
+/// pane 自己的 child pid；这里只确认它当下确实存在（见 [`ProcessSessionId`]）。
+pub fn process_session_id(pid: u32) -> Option<ProcessSessionId> {
+    if pid == 0 || !process_exists(pid) {
+        return None;
+    }
+    Some(ProcessSessionId(i64::from(pid)))
+}
+
+/// 一次进程快照取出整批进程树的成员 pid，返回与 `sessions` 一一对应的桶：关 N 个 pane
+/// 只拍一次快照，而不是 N 次。
+pub fn session_processes_batch(sessions: &[ProcessSessionId]) -> Vec<Vec<u32>> {
+    if sessions.is_empty() {
+        return Vec::new();
+    }
+
+    let snapshot = ProcessSnapshot::new(snapshot_processes());
+    sessions
+        .iter()
+        .map(|session| {
+            let Ok(root) = u32::try_from(session.0) else {
+                return Vec::new();
+            };
+            session_processes_from_snapshot(root, &snapshot)
+        })
+        .collect()
+}
+
 fn session_processes_from_snapshot(child_pid: u32, snapshot: &ProcessSnapshot) -> Vec<u32> {
     if snapshot.entry(child_pid).is_none() {
         return Vec::new();
@@ -2220,6 +2248,14 @@ pub fn process_exists(pid: u32) -> bool {
     let mut exit_code = 0;
     let ok = unsafe { GetExitCodeProcess(process.0, &mut exit_code) } != 0;
     ok && exit_code == STILL_ACTIVE
+}
+
+/// 进程是否仍在运行、需要继续等它退出。
+///
+/// Windows 没有僵尸进程：`GetExitCodeProcess` 对已退出的进程返回退出码而不是
+/// `STILL_ACTIVE`，[`process_exists`] 本身已满足终止阶梯的语义（HSR-02）。
+pub fn process_alive_excluding_zombies(pid: u32) -> bool {
+    process_exists(pid)
 }
 
 pub fn write_clipboard(bytes: &[u8]) -> bool {

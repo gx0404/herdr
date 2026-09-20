@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 use std::process::Command;
 
-use super::{ClipboardImage, ForegroundJob, Signal};
+use super::{ClipboardImage, ForegroundJob, ProcessSessionId, Signal};
 
 #[cfg(unix)]
 pub(crate) use super::unix_common::set_default_plugin_pane_pwd;
@@ -226,8 +226,14 @@ pub fn process_cwd(_pid: u32) -> Option<PathBuf> {
 }
 
 /// Unsupported platform stub.
-pub fn session_processes(_child_pid: u32) -> Vec<u32> {
-    Vec::new()
+/// Unsupported platform stub.
+pub fn process_session_id(_pid: u32) -> Option<ProcessSessionId> {
+    None
+}
+
+/// Unsupported platform stub.
+pub fn session_processes_batch(sessions: &[ProcessSessionId]) -> Vec<Vec<u32>> {
+    vec![Vec::new(); sessions.len()]
 }
 
 /// Unsupported platform stub.
@@ -235,6 +241,11 @@ pub fn signal_processes(_pids: &[u32], _signal: Signal) {}
 
 /// Unsupported platform stub.
 pub fn process_exists(_pid: u32) -> bool {
+    false
+}
+
+/// Unsupported platform stub.
+pub fn process_alive_excluding_zombies(_pid: u32) -> bool {
     false
 }
 

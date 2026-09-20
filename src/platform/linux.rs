@@ -11,7 +11,7 @@ pub(super) const REMOTE_BRIDGE_CLOCK: libc::clockid_t = libc::CLOCK_BOOTTIME;
 
 use super::{
     read_limited_reader, ClipboardCommand, ClipboardImage, ForegroundJob, ForegroundProcess,
-    LimitedRead, Signal,
+    LimitedRead, ProcessSessionId, Signal,
 };
 
 pub(crate) use super::unix_common::{
@@ -720,12 +720,26 @@ pub fn process_agent_hint(pid: u32) -> Option<crate::detect::Agent> {
     super::parse_agent_env_hint(&environ)
 }
 
-pub fn session_processes(child_pid: u32) -> Vec<u32> {
-    let Some(session_id) = process_session_id(child_pid) else {
-        return Vec::new();
-    };
+/// 进程所属会话的 id（`/proc/<pid>/stat` 的第 6 个字段）。单个小文件读，事件循环里
+/// 快照 pane 进程树的锚点用它，见 [`ProcessSessionId`]。
+pub fn process_session_id(pid: u32) -> Option<ProcessSessionId> {
+    if pid == 0 {
+        return None;
+    }
+    process_session_id_raw(pid).map(|sid| ProcessSessionId(i64::from(sid)))
+}
 
-    let mut pids = Vec::new();
+/// 一次 `/proc` 遍历取出整批会话的成员 pid，返回与 `sessions` 一一对应的桶。
+///
+/// 关 15 个 pane 时逐个扫会话就是 15 次全量 `/proc` 遍历顺序执行，第 15 个 pane 的首级
+/// 信号要等前 14 次扫完才发得出去；批量扫描把它降到 1 次（`app-render.md` 的频率×基数
+/// 纪律同样适用于后台线程）。
+pub fn session_processes_batch(sessions: &[ProcessSessionId]) -> Vec<Vec<u32>> {
+    let mut buckets = vec![Vec::new(); sessions.len()];
+    if sessions.is_empty() {
+        return buckets;
+    }
+
     for entry in std::fs::read_dir("/proc").into_iter().flatten().flatten() {
         let file_name = entry.file_name();
         let Some(pid_str) = file_name.to_str() else {
@@ -738,11 +752,18 @@ pub fn session_processes(child_pid: u32) -> Vec<u32> {
         let Ok(pid) = pid_str.parse::<u32>() else {
             continue;
         };
-        if process_session_id(pid) == Some(session_id) {
-            pids.push(pid);
+        let Some(session_id) = process_session_id_raw(pid) else {
+            continue;
+        };
+        // 会话数是 pane 数量级（个位到十几），线性比对比建哈希表更便宜，也天然容忍
+        // 同一会话被多个 pane 引用。
+        for (bucket, session) in buckets.iter_mut().zip(sessions) {
+            if session.0 == i64::from(session_id) {
+                bucket.push(pid);
+            }
         }
     }
-    pids
+    buckets
 }
 
 pub fn signal_processes(pids: &[u32], signal: Signal) {
@@ -772,6 +793,50 @@ pub fn process_exists(pid: u32) -> bool {
     } else {
         std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
     }
+}
+
+/// 进程是否仍在运行、需要继续等它退出。
+///
+/// [`process_exists`] 用 `kill(pid, 0)` 判定，僵尸进程（已退出但尚未被父进程回收）同样
+/// 返回 true。handoff 导入的 pane 其子进程不是本进程的子进程，没有 `wait` 去回收它，
+/// 终止阶梯会一直认为它活着并走满三级以 SIGKILL 收尾（HSR-02）。这里按
+/// `/proc/<pid>/stat` 的进程状态位把 `Z`（僵尸）与 `X`/`x`（已死）视为已退出；`/proc`
+/// 读不到时回退到 `process_exists`，宁可多等也不误判成已退出。
+pub fn process_alive_excluding_zombies(pid: u32) -> bool {
+    if pid == 0 {
+        return false;
+    }
+    // 先做 `kill(pid, 0)`：一次系统调用、无分配，进程已经消失（终止阶梯里的常见情形）
+    // 时立刻判定，不再为每次轮询读一遍 `/proc`。只有进程还在时才需要区分僵尸。
+    if !process_exists(pid) {
+        return false;
+    }
+    match process_stat_state(pid) {
+        Some(state) => !process_state_has_exited(state),
+        // `kill` 说它在、`/proc` 读不到：宁可多等也不误判成已退出。
+        None => true,
+    }
+}
+
+/// 读 `/proc/<pid>/stat` 的状态位。状态字段在行首附近，读进栈上缓冲区即可，不为每次
+/// 轮询分配 `String`。
+fn process_stat_state(pid: u32) -> Option<char> {
+    let mut file = std::fs::File::open(format!("/proc/{pid}/stat")).ok()?;
+    let mut buffer = [0u8; 256];
+    let read = file.read(&mut buffer).ok()?;
+    let stat = std::str::from_utf8(&buffer[..read]).ok()?;
+    process_stat_state_from_stat(stat)
+}
+
+/// `/proc/<pid>/stat` 形如 `pid (comm) state ppid ...`；`comm` 可能含空格与括号，所以从
+/// 最后一个 `)` 之后开始取字段。
+fn process_stat_state_from_stat(stat: &str) -> Option<char> {
+    let rest = stat.get(stat.rfind(')')? + 2..)?;
+    rest.split_whitespace().next()?.chars().next()
+}
+
+fn process_state_has_exited(state: char) -> bool {
+    matches!(state, 'Z' | 'X' | 'x')
 }
 
 pub fn write_clipboard(bytes: &[u8]) -> bool {
@@ -1148,7 +1213,7 @@ fn detach_clipboard_owner(child: std::process::Child) -> bool {
     true
 }
 
-fn process_session_id(pid: u32) -> Option<i32> {
+fn process_session_id_raw(pid: u32) -> Option<i32> {
     let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
     let rest = stat.get(stat.rfind(')')? + 2..)?;
     let fields: Vec<&str> = rest.split_whitespace().collect();
@@ -2153,6 +2218,68 @@ mod tests {
         let args = std::fs::read_to_string(&path).expect("args file");
         let _ = std::fs::remove_file(&path);
         assert_eq!(args, "--app-name\nHerdr\n--\n-danger\nbody\n");
+    }
+
+    #[test]
+    fn process_stat_state_survives_comm_with_spaces_and_parens() {
+        let stat = "1234 (weird )name( ) Z 1 1234 1234 0 -1 4194560 0 0";
+        assert_eq!(process_stat_state_from_stat(stat), Some('Z'));
+    }
+
+    #[test]
+    fn process_state_marks_only_dead_states_as_exited() {
+        assert!(process_state_has_exited('Z'));
+        assert!(process_state_has_exited('X'));
+        assert!(process_state_has_exited('x'));
+        assert!(!process_state_has_exited('R'));
+        assert!(!process_state_has_exited('S'));
+        assert!(!process_state_has_exited('D'));
+    }
+
+    #[test]
+    fn zombie_child_counts_as_exited_for_the_shutdown_ladder() {
+        // HSR-02：handoff 导入的 pane 没有 child_wait_completed，其子进程留成僵尸时
+        // kill(pid, 0) 仍然成功，终止阶梯会一路走到 SIGKILL。
+        let mut child = std::process::Command::new("/bin/sh")
+            .args(["-c", "exit 0"])
+            .spawn()
+            .expect("spawn probe child");
+        let pid = child.id();
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while std::time::Instant::now() < deadline && process_stat_state(pid) != Some('Z') {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+
+        assert_eq!(process_stat_state(pid), Some('Z'), "子进程应停在僵尸态");
+        assert!(process_exists(pid), "僵尸进程对 kill(pid, 0) 仍然存在");
+        assert!(!process_alive_excluding_zombies(pid), "僵尸不应再等待");
+
+        let _ = child.wait();
+    }
+
+    #[test]
+    fn session_processes_batch_buckets_every_session_in_one_scan() {
+        let session = process_session_id(std::process::id()).expect("本进程应有会话 id");
+        let buckets = session_processes_batch(&[session, ProcessSessionId(-1)]);
+        assert_eq!(buckets.len(), 2, "桶与请求的会话一一对应");
+        assert!(
+            buckets[0].contains(&std::process::id()),
+            "本进程应落在自己的会话桶里"
+        );
+        assert!(buckets[1].is_empty(), "不存在的会话应得到空桶");
+        assert!(session_processes_batch(&[]).is_empty());
+    }
+
+    #[test]
+    fn process_session_id_rejects_pid_zero() {
+        assert_eq!(process_session_id(0), None);
+    }
+
+    #[test]
+    fn running_process_is_not_reported_as_exited() {
+        assert!(process_alive_excluding_zombies(std::process::id()));
+        assert!(!process_alive_excluding_zombies(0));
     }
 
     #[test]

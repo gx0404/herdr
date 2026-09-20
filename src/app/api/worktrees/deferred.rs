@@ -11,6 +11,12 @@ use crate::events::{ApiWorktreeAddRequest, ApiWorktreeRemoveRequest, AppEvent};
 use super::super::responses::{encode_error, encode_success};
 use super::{absolute_user_path, WorktreeSource};
 
+/// 删除检出目录前等待 pane 终止阶梯收尾的上限：一轮阶梯（reaper 把新请求并入同一个
+/// 轮询循环，不会排成多轮）再留同样长的余量给取件延迟与调度抖动。
+fn worktree_remove_pane_drain_timeout() -> Duration {
+    crate::pane::PANE_SHUTDOWN_LADDER_WORST_CASE * 2
+}
+
 impl App {
     pub(crate) fn handle_deferred_worktree_api_request(
         &mut self,
@@ -315,6 +321,9 @@ impl App {
             } else {
                 Vec::new()
             };
+        // 终止阶梯已移出事件循环（HSR-01），但删除检出目录要求 pane 进程真的退出
+        // （Windows 上进程持有目录会让删除失败），所以在执行 git 的后台线程里补等一次。
+        let wait_for_pane_shutdown = !shutdown_panes.is_empty();
 
         let operation_id = self.next_api_worktree_operation_id();
         self.pending_api_worktree_removes
@@ -342,13 +351,32 @@ impl App {
         let trust_repository = params.trust_repository;
         let event_tx = self.event_tx.clone();
         std::thread::spawn(move || {
+            let panes_terminated = !wait_for_pane_shutdown
+                || crate::pane::drain_pending_pane_shutdowns(worktree_remove_pane_drain_timeout());
+            if !panes_terminated {
+                tracing::warn!(
+                    path = %path.display(),
+                    "removing a worktree checkout while its pane processes are still terminating"
+                );
+            }
             let result = crate::worktree::run_worktree_remove_command_with_recovery(
                 &command,
                 &repo_root,
                 &path,
                 force,
                 trust_repository,
-            );
+            )
+            // 删除失败又没等到 pane 进程退出时，把失败归因写进错误：调用方能据此重试，
+            // 而不是看到一条与「进程仍持有目录」无关的 git 报错。
+            .map_err(|err| {
+                if panes_terminated {
+                    err
+                } else {
+                    format!(
+                        "{err}; pane processes were still terminating and may still hold the checkout"
+                    )
+                }
+            });
             let _ = event_tx.blocking_send(AppEvent::WorktreeRemoveFinished(Box::new(
                 crate::events::WorktreeRemoveResult {
                     workspace_id: workspace_internal_id,

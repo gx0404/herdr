@@ -137,6 +137,8 @@ CLI 的 `herdr api snapshot` 会把当前 `session.snapshot` 响应输出为 JSO
 
 `pane.current` 返回单个 `PaneInfo`。带有 `caller_pane_id` 时,Herdr 返回那个窗格。省略时,Herdr 返回当前聚焦的活动窗格。
 
+`pane.close` 在窗格被摘除后立即返回。Herdr 在后台按 SIGHUP、SIGTERM、SIGKILL 的顺序终止窗格内的进程,赖着不退的进程不再拖住同一连接或其它连接上的请求。需要确认这些进程已退出的调用方应轮询检查(例如对仍存活的窗格调用 `pane.process_info`,或自行检查进程),而不是假定响应返回时它们已经结束。
+
 终端滚动指标可用时,`PaneInfo` 包含 `scroll`:
 
 ```json

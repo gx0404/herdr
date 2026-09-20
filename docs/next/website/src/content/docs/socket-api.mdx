@@ -170,6 +170,13 @@ back to its pane menu. Right-clicking the pane frame always opens Herdr's menu.
 `pane.split` accepts the same optional `right_click` value for the newly created
 pane.
 
+`pane.close` answers as soon as the pane is detached. Herdr terminates the
+pane's processes in the background with SIGHUP, then SIGTERM, then SIGKILL, so
+a process that refuses to exit no longer stalls other requests on the same
+connection or on other connections. Callers that need those processes gone
+should poll (for example with `pane.process_info` on a surviving pane, or their
+own process check) instead of assuming they exited when the response arrived.
+
 `PaneInfo` includes `scroll` when terminal scroll metrics are available:
 
 ```json

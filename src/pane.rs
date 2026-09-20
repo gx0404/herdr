@@ -29,6 +29,7 @@ mod cursor;
 mod input;
 mod kitty_keyboard;
 mod osc;
+mod shutdown;
 mod state;
 mod terminal;
 mod xtgettcap;
@@ -51,6 +52,23 @@ pub use self::{
     state::PaneState,
     terminal::{ScrollMetrics, TerminalCursorState},
 };
+
+/// 单个 pane 终止阶梯的最坏耗时（SIGHUP/SIGTERM/SIGKILL 三级宽限之和）。等待阶梯收尾的
+/// 调用方按它推导超时，不各自写死毫秒数。
+pub const PANE_SHUTDOWN_LADDER_WORST_CASE: std::time::Duration = shutdown::LADDER_WORST_CASE;
+
+/// 等待后台 reaper 把已投递的 pane 进程终止阶梯执行完，最多等 `timeout`；返回是否等到。
+///
+/// 终止阶梯移出事件循环后（HSR-01），只有在进程退出前显式等一次才能保证 pane 进程不被
+/// 留成孤儿。服务端进程收尾与「关掉 pane 再删 worktree 目录」这类依赖进程已死的流程
+/// 调用它。
+///
+/// reaper 把新投递的请求并入同一个轮询循环，不会排成多轮阶梯，所以等待上限是
+/// 「取件延迟 + 一轮 [`PANE_SHUTDOWN_LADDER_WORST_CASE`]」而不是随 pane 数增长；返回
+/// `false` 表示超时，调用方必须把「进程可能仍在」计入自己的结论，不能静默继续。
+pub fn drain_pending_pane_shutdowns(timeout: std::time::Duration) -> bool {
+    shutdown::drain_pending(timeout)
+}
 
 pub(crate) struct TerminalDirtyPatchSnapshot {
     pub patch: TerminalDirtyPatchOutcome,
@@ -1451,108 +1469,17 @@ impl Drop for PaneRuntime {
     fn drop(&mut self) {
         // Abort detection task immediately and terminate the owned session.
         // The PTY actor shuts down before the process/session policy runs.
+        // 会话锚点在关掉 PTY 之前快照，理由见 `PaneRuntime::shutdown`。
+        let request = (!self.preserve_processes_on_drop).then(|| self.process_shutdown_request());
         if let Some(handle) = &self.detect_handle {
             handle.abort();
         }
         self.compression.abort();
         self.io.shutdown();
-        if !self.preserve_processes_on_drop {
-            shutdown_pane_processes(
-                self.pane_id,
-                self.child_pid.load(Ordering::Acquire),
-                self.child_wait_completed.as_deref(),
-            );
+        if let Some(request) = request {
+            shutdown::submit(request);
         }
     }
-}
-
-fn process_alive_for_shutdown(
-    pid: u32,
-    child_pid: u32,
-    child_wait_completed: bool,
-    process_exists: impl FnOnce(u32) -> bool,
-) -> bool {
-    if pid == child_pid && child_wait_completed {
-        return false;
-    }
-    process_exists(pid)
-}
-
-fn wait_for_processes_to_exit(
-    pids: &[u32],
-    child_pid: u32,
-    child_wait_completed: Option<&AtomicBool>,
-    timeout: std::time::Duration,
-) -> bool {
-    let deadline = std::time::Instant::now() + timeout;
-    loop {
-        let child_wait_completed =
-            child_wait_completed.is_some_and(|flag| flag.load(Ordering::Acquire));
-        if pids.iter().all(|pid| {
-            !process_alive_for_shutdown(
-                *pid,
-                child_pid,
-                child_wait_completed,
-                crate::platform::process_exists,
-            )
-        }) {
-            return true;
-        }
-        if std::time::Instant::now() >= deadline {
-            return false;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(20));
-    }
-}
-
-fn shutdown_pane_processes(
-    pane_id: PaneId,
-    child_pid: u32,
-    child_wait_completed: Option<&AtomicBool>,
-) {
-    if child_pid == 0 {
-        return;
-    }
-
-    let mut pids = crate::platform::session_processes(child_pid);
-    if pids.is_empty() {
-        pids.push(child_pid);
-    }
-    pids.sort_unstable();
-    pids.dedup();
-
-    for (signal, grace) in [
-        (
-            crate::platform::Signal::Hangup,
-            std::time::Duration::from_millis(250),
-        ),
-        (
-            crate::platform::Signal::Terminate,
-            std::time::Duration::from_millis(250),
-        ),
-        (
-            crate::platform::Signal::Kill,
-            std::time::Duration::from_millis(250),
-        ),
-    ] {
-        crate::platform::signal_processes(&pids, signal);
-        if wait_for_processes_to_exit(&pids, child_pid, child_wait_completed, grace) {
-            info!(
-                pane = pane_id.raw(),
-                pid = child_pid,
-                ?signal,
-                "pane session terminated"
-            );
-            return;
-        }
-    }
-
-    warn!(
-        pane = pane_id.raw(),
-        pid = child_pid,
-        pids = ?pids,
-        "pane session still alive after forced shutdown"
-    );
 }
 
 #[cfg(unix)]
@@ -1884,18 +1811,31 @@ fn publish_reported_cwd(
 }
 
 impl PaneRuntime {
+    /// 关闭 pane：同步摘除 I/O 与后台任务，进程终止阶梯交给 reaper 线程。
+    ///
+    /// 调用方是事件循环，必须立刻返回：信号阶梯最坏要等 750 ms，同步执行会把 PTY 输出、
+    /// 输入、渲染与其它 API 一起冻住（HSR-01）。
     pub fn shutdown(mut self) {
+        // 会话锚点必须在关掉 PTY **之前**快照：`io.shutdown()` 关掉 master 后 shell 会在
+        // 几毫秒内退出并被 wait 回收，进程表条目一消失就再也认不出这棵进程树，会话里的
+        // 孙进程就会被漏杀（HSR-01）。
+        let request = self.process_shutdown_request();
         if let Some(handle) = self.detect_handle.take() {
             handle.abort();
         }
         self.compression.abort();
         self.io.shutdown();
-        shutdown_pane_processes(
+        shutdown::submit(request);
+        self.preserve_processes_on_drop = true;
+    }
+
+    /// 构造本 pane 的终止请求（含会话锚点快照）。调用方负责在 `io.shutdown()` 之后投递。
+    fn process_shutdown_request(&self) -> shutdown::PaneShutdownRequest {
+        shutdown::PaneShutdownRequest::new(
             self.pane_id,
             self.child_pid.load(Ordering::Acquire),
-            self.child_wait_completed.as_deref(),
-        );
-        self.preserve_processes_on_drop = true;
+            self.child_wait_completed.clone(),
+        )
     }
 
     #[cfg(unix)]
@@ -3860,26 +3800,6 @@ mod tests {
         *runtime.reported_cwd.lock().unwrap() = Some(cwd.clone());
 
         assert_eq!(runtime.follow_cwd(), Some(cwd));
-    }
-
-    #[test]
-    fn shutdown_liveness_treats_reaped_direct_child_as_gone() {
-        assert!(!process_alive_for_shutdown(42, 42, true, |_| true));
-    }
-
-    #[test]
-    fn shutdown_liveness_keeps_unreaped_direct_child_alive() {
-        assert!(process_alive_for_shutdown(42, 42, false, |_| true));
-    }
-
-    #[test]
-    fn shutdown_liveness_keeps_other_session_processes_alive() {
-        assert!(process_alive_for_shutdown(43, 42, true, |_| true));
-    }
-
-    #[test]
-    fn shutdown_liveness_treats_missing_process_as_gone() {
-        assert!(!process_alive_for_shutdown(43, 42, false, |_| false));
     }
 
     #[cfg(unix)]

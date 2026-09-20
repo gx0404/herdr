@@ -134,6 +134,16 @@ pub enum Signal {
     Kill,
 }
 
+/// 一棵 pane 进程树的锚点：Unix 上是会话 id（session leader 退出后仍然有效），Windows
+/// 没有会话语义、用 pane 自己的 child pid 代指这棵树。
+///
+/// 终止阶梯在事件循环里对 child 快照一次锚点（[`process_session_id`]，单次廉价查询），
+/// 之后后台线程凭锚点枚举成员（[`session_processes_batch`]）。这样即便 child 在投递到
+/// 执行之间被 `wait` 回收、进程表条目消失，会话里的孙进程仍然找得到，也不会因为 pid
+/// 被复用而误伤无关进程（HSR-01）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ProcessSessionId(pub i64);
+
 /// Why a pane runtime ended, before application persistence policy is applied.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ChildExitReason {

@@ -11,7 +11,7 @@ pub(super) const REMOTE_BRIDGE_CLOCK: libc::clockid_t = libc::CLOCK_MONOTONIC;
 
 use super::{
     read_limited_reader, ClipboardCommand, ClipboardImage, ForegroundJob, ForegroundProcess,
-    LimitedRead, Signal,
+    LimitedRead, ProcessSessionId, Signal,
 };
 
 pub(crate) use super::unix_common::{
@@ -1058,20 +1058,36 @@ pub fn process_cwd(pid: u32) -> Option<PathBuf> {
     Some(PathBuf::from(OsStr::from_bytes(&vip_path[..nul])))
 }
 
-pub fn session_processes(child_pid: u32) -> Vec<u32> {
-    if child_pid == 0 {
-        return Vec::new();
+/// 进程所属会话的 id。事件循环在投递终止请求时快照它，之后后台线程凭它枚举会话成员
+/// （见 [`ProcessSessionId`]）。
+pub fn process_session_id(pid: u32) -> Option<ProcessSessionId> {
+    if pid == 0 {
+        return None;
+    }
+    let session = unsafe { libc::getsid(pid as libc::pid_t) };
+    (session > 0).then(|| ProcessSessionId(i64::from(session)))
+}
+
+/// 一次进程表遍历取出整批会话的成员 pid，返回与 `sessions` 一一对应的桶：关 N 个 pane
+/// 只列一次全表，而不是 N 次。
+pub fn session_processes_batch(sessions: &[ProcessSessionId]) -> Vec<Vec<u32>> {
+    let mut buckets = vec![Vec::new(); sessions.len()];
+    if sessions.is_empty() {
+        return buckets;
     }
 
-    let target_session = unsafe { libc::getsid(child_pid as libc::c_int) };
-    if target_session <= 0 {
-        return Vec::new();
+    for pid in all_pids() {
+        let session = unsafe { libc::getsid(pid as libc::pid_t) };
+        if session <= 0 {
+            continue;
+        }
+        for (bucket, wanted) in buckets.iter_mut().zip(sessions) {
+            if wanted.0 == i64::from(session) {
+                bucket.push(pid);
+            }
+        }
     }
-
-    all_pids()
-        .into_iter()
-        .filter(|pid| unsafe { libc::getsid(*pid as libc::pid_t) } == target_session)
-        .collect()
+    buckets
 }
 
 fn all_pids() -> Vec<u32> {
@@ -1139,6 +1155,16 @@ pub fn process_exists(pid: u32) -> bool {
     } else {
         std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
     }
+}
+
+/// 进程是否仍在运行、需要继续等它退出。
+///
+/// **macOS 未覆盖 HSR-02**：这里与 [`process_exists`] 同语义，僵尸进程仍算「活着」，
+/// handoff 导入 pane 的终止阶梯在本平台保持旧行为（走满三级 750 ms 才 SIGKILL）。
+/// 补齐方案是 `proc_pidinfo(PROC_PIDTBSDINFO)` 读 `pbi_status == SZOMB`；缺口登记在
+/// `.local/prd/2026-09-19-usage-monitoring/06-followups.md` 的跨平台风险条目。
+pub fn process_alive_excluding_zombies(pid: u32) -> bool {
+    process_exists(pid)
 }
 
 #[cfg(test)]

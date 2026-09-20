@@ -1,5 +1,21 @@
 use super::*;
 
+/// 进程退出前等待 pane 终止阶梯收尾的上限：一轮阶梯（reaper 把新请求并入同一个轮询
+/// 循环，不会排成多轮）再留同样长的余量给取件延迟与调度抖动。
+fn pane_shutdown_drain_timeout() -> Duration {
+    crate::pane::PANE_SHUTDOWN_LADDER_WORST_CASE * 2
+}
+
+/// 退出前等 pane 终止阶梯收尾；超时说明 pane 进程可能被留成孤儿，必须记进退出日志而
+/// 不是静默继续（`rt.shutdown_timeout` 之后进程就没机会再发 SIGKILL 了）。
+fn drain_pane_shutdowns_before_exit() {
+    if !crate::pane::drain_pending_pane_shutdowns(pane_shutdown_drain_timeout()) {
+        tracing::warn!(
+            "exiting before every pane session finished terminating; some pane processes may be left behind"
+        );
+    }
+}
+
 /// Run the headless server. This is the entry point called from main.rs.
 pub fn run_server() -> io::Result<()> {
     init_logging();
@@ -81,6 +97,8 @@ pub fn run_server() -> io::Result<()> {
         server.run().await
     });
 
+    // 终止阶梯跑在 reaper 线程上（HSR-01）：退出前等它收尾，否则 pane 进程会被留成孤儿。
+    drain_pane_shutdowns_before_exit();
     rt.shutdown_timeout(Duration::from_millis(100));
     crate::logging::shutdown("server");
     result
@@ -189,6 +207,8 @@ fn run_handoff_import_server(socket_path: &Path, token: &str) -> io::Result<()> 
         server.run().await
     });
 
+    // 终止阶梯跑在 reaper 线程上（HSR-01）：退出前等它收尾，否则 pane 进程会被留成孤儿。
+    drain_pane_shutdowns_before_exit();
     rt.shutdown_timeout(Duration::from_millis(100));
     crate::logging::shutdown("server");
     result
