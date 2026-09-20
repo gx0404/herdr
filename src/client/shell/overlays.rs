@@ -29,6 +29,10 @@ pub(crate) struct OverlayRender {
     pub(crate) machines_popup: Rect,
     pub(crate) machines_detail_area: Rect,
     pub(crate) machines_scroll: usize,
+    /// 本帧是否真的画了某个机器面板列表（列表 / 导入向导 / 转发编辑器）。
+    /// 早退分支（窗口太小、discover 步骤）不计算窗口，compose 期的 scroll
+    /// 回写必须跳过，否则每帧把用户的滚动位置抹成 0。
+    pub(crate) machines_scroll_valid: bool,
     pub(crate) machines_search: Rect,
     pub(crate) machines_rows: Vec<(Rect, crate::client::endpoint::ProfileId)>,
     pub(crate) machines_actions: Vec<(Rect, super::machines_overlay::MachineOverlayButton)>,

@@ -922,6 +922,7 @@ impl ClientShellState {
                 self.hits.machines_popup = rendered.machines_popup;
                 self.hits.machines_detail_area = rendered.machines_detail_area;
                 self.hits.machines_scroll = rendered.machines_scroll;
+                self.hits.machines_scroll_valid = rendered.machines_scroll_valid;
                 self.hits.machines_search = rendered.machines_search;
                 self.hits.machines_rows = rendered.machines_rows;
                 self.hits.machines_actions = rendered.machines_actions;
@@ -984,9 +985,25 @@ impl ClientShellState {
             settings.reveal = false;
         }
         if let Some(ClientShellOverlay::Machines(page)) = self.overlay.as_mut() {
-            if matches!(page.view, super::machines_overlay::ClientMachinesView::List) {
-                page.scroll = self.hits.machines_scroll;
-                page.reveal = false;
+            // 列表 / 导入向导 / 转发编辑器共用「compose 期回写 scroll」：渲染是
+            // 唯一知道可见行数的地方，reveal 是一次性请求，画完即清。本帧没
+            // 真的画列表（窗口太小、discover 步骤）时跳过，别把滚动位置清零。
+            if self.hits.machines_scroll_valid {
+                match &mut page.view {
+                    super::machines_overlay::ClientMachinesView::List => {
+                        page.scroll = self.hits.machines_scroll;
+                        page.reveal = false;
+                    }
+                    super::machines_overlay::ClientMachinesView::Import(view) => {
+                        view.scroll = self.hits.machines_scroll;
+                        view.reveal = false;
+                    }
+                    super::machines_overlay::ClientMachinesView::Forwards(view) => {
+                        view.scroll = self.hits.machines_scroll;
+                        view.reveal = false;
+                    }
+                    _ => {}
+                }
             }
             if matches!(
                 page.view,

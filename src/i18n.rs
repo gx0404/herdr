@@ -571,6 +571,7 @@ pub struct MachinesTexts {
     pub empty_hint: &'static str,
     // Footer hint labels (rendered as key caps by `render_key_hints`).
     pub hint_select: &'static str,
+    pub hint_scroll: &'static str,
     pub hint_details: &'static str,
     pub hint_add: &'static str,
     pub hint_import: &'static str,
@@ -670,6 +671,10 @@ pub struct MachinesTexts {
     pub forward_field_target_port: &'static str,
     pub forward_saved: &'static str,
     pub forward_removed: &'static str,
+    pub forward_remove_confirm_fmt: &'static str, // args: rule
+    pub forward_remove_cancelled: &'static str,
+    /// 武装与确认之间规则表被外部改写时的取消提示。
+    pub forward_remove_stale: &'static str,
     pub forwards_button: &'static str,
     // SSH config import wizard.
     pub import_button: &'static str,
@@ -687,6 +692,7 @@ pub struct MachinesTexts {
     pub import_include_wildcards: &'static str,
     pub import_group_label: &'static str,
     pub import_selected_fmt: &'static str, // args: selected, total
+    pub import_scroll_position_fmt: &'static str, // args: start, total
     pub import_run_button: &'static str,
     pub import_result_imported: &'static str,
     pub import_result_skipped: &'static str,

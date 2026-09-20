@@ -78,10 +78,27 @@ pub(super) enum ClientMachinesView {
 pub(super) struct ClientForwardRulesView {
     pub(super) profile_id: ProfileId,
     pub(super) selected: usize,
+    /// 规则列表的滚动窗口起点；由渲染经 `OverlayRender::machines_scroll` 回写，
+    /// 与机器列表同一套「compose 期回写 scroll」模式。
+    pub(super) scroll: usize,
+    /// 一次性「把选中项滚进窗口」请求：键盘移动置位，compose 后清零。
+    pub(super) reveal: bool,
     pub(super) adding: bool,
     pub(super) form: ClientForwardRuleForm,
+    /// 待确认删除的目标：`x` 只进入确认态，Enter 才真正删除。
+    pub(super) pending_remove: Option<PendingForwardRemoval>,
     pub(super) error: Option<String>,
     pub(super) message: Option<String>,
+}
+
+/// 武装中的转发删除目标。只记下标不够：目录 watcher（`set_endpoint_catalog`）
+/// 会在浮层打开期间重新镜像 `saved_profiles`，另一个客户端或
+/// `herdr machine forward remove` 都能在武装与确认之间改写规则表。确认落盘
+/// 前比对整条规则，不一致就取消确认而不是照下标删（HERDR-MACH-005/025）。
+#[derive(Debug, Clone)]
+pub(super) struct PendingForwardRemoval {
+    pub(super) index: usize,
+    pub(super) rule: PortForwardRule,
 }
 
 #[derive(Debug)]
@@ -96,7 +113,7 @@ pub(super) struct ClientForwardRuleForm {
 }
 
 impl ClientForwardRuleForm {
-    fn blank() -> Self {
+    pub(super) fn blank() -> Self {
         Self {
             kind: 0,
             listen_port: TextEditor::default(),
@@ -134,6 +151,11 @@ pub(super) struct ClientMachineImportView {
     /// Focus across candidate rows, then the wildcard toggle, then the group
     /// input (last two positions).
     pub(super) focus_row: usize,
+    /// 候选列表（select 步骤）与结果列表（done 步骤）共用的滚动窗口起点，
+    /// 由渲染经 `OverlayRender::machines_scroll` 回写；换步骤时归零。
+    pub(super) scroll: usize,
+    /// 一次性「把聚焦行滚进窗口」请求：焦点移动置位，compose 后清零。
+    pub(super) reveal: bool,
     pub(super) group: TextEditor,
     pub(super) results: Vec<ClientImportResultRow>,
     pub(super) summary: (usize, usize, usize),
@@ -173,6 +195,8 @@ impl ClientMachineImportView {
             selected: Vec::new(),
             include_wildcards: false,
             focus_row: 0,
+            scroll: 0,
+            reveal: true,
             group: TextEditor::default(),
             results: Vec::new(),
             summary: (0, 0, 0),
@@ -852,6 +876,7 @@ pub(super) enum MachineOverlayButton {
     Forwards,
     ForwardAddStart,
     ForwardRemove,
+    ForwardCancelRemove,
     ForwardSave,
     ForwardCancel,
     Broadcast,
@@ -1479,8 +1504,11 @@ impl ClientShellState {
             overlay.view = ClientMachinesView::Forwards(Box::new(ClientForwardRulesView {
                 profile_id: profile_id.clone(),
                 selected: 0,
+                scroll: 0,
+                reveal: true,
                 adding: false,
                 form: ClientForwardRuleForm::blank(),
+                pending_remove: None,
                 error: None,
                 message: None,
             }));
@@ -1523,34 +1551,129 @@ impl ClientShellState {
         Ok(())
     }
 
-    fn forward_remove_selected(&mut self) {
-        let (profile_id, index) = {
+    /// 转发编辑器是否正处于删除确认态。
+    fn forward_remove_pending(&self) -> bool {
+        matches!(
+            self.overlay.as_ref(),
+            Some(ClientShellOverlay::Machines(overlay))
+                if matches!(&overlay.view, ClientMachinesView::Forwards(view) if view.pending_remove.is_some())
+        )
+    }
+
+    /// `x` / 移除按钮的第一步：记下待删规则的下标与规则值，画面点名后等
+    /// Enter 确认（HERDR-MACH-025）。
+    fn forward_arm_remove(&mut self) {
+        let armed = match self.overlay.as_ref() {
+            Some(ClientShellOverlay::Machines(overlay)) => match &overlay.view {
+                ClientMachinesView::Forwards(view) => {
+                    let Some(profile) = self.saved_profile(&view.profile_id) else {
+                        return;
+                    };
+                    let rules = profile.port_forwards.as_slice();
+                    if rules.is_empty() {
+                        return;
+                    }
+                    let index = view.selected.min(rules.len() - 1);
+                    let Some(rule) = rules.get(index) else {
+                        return;
+                    };
+                    PendingForwardRemoval {
+                        index,
+                        rule: rule.clone(),
+                    }
+                }
+                _ => return,
+            },
+            _ => return,
+        };
+        if let Some(ClientShellOverlay::Machines(overlay)) = self.overlay.as_mut() {
+            if let ClientMachinesView::Forwards(view) = &mut overlay.view {
+                view.selected = armed.index;
+                view.pending_remove = Some(armed);
+                view.message = None;
+                view.error = None;
+                view.reveal = true;
+            }
+        }
+    }
+
+    fn forward_cancel_remove(&mut self) {
+        if let Some(ClientShellOverlay::Machines(overlay)) = self.overlay.as_mut() {
+            if let ClientMachinesView::Forwards(view) = &mut overlay.view {
+                if view.pending_remove.take().is_some() {
+                    view.message = Some(
+                        crate::i18n::texts()
+                            .machines
+                            .forward_remove_cancelled
+                            .to_owned(),
+                    );
+                }
+            }
+        }
+    }
+
+    /// 确认后真正落盘删除。只按武装时记下的规则删：没武装就什么都不做，
+    /// 规则表在武装与确认之间被外部改写（目录 watcher / CLI / 另一个客户端）
+    /// 就取消确认并提示重选，绝不按下标兜底删掉另一条。
+    fn forward_remove_confirmed(&mut self) {
+        let (profile_id, armed) = {
             let Some(ClientShellOverlay::Machines(overlay)) = self.overlay.as_ref() else {
                 return;
             };
             let ClientMachinesView::Forwards(view) = &overlay.view else {
                 return;
             };
-            (view.profile_id.clone(), view.selected)
+            let Some(armed) = view.pending_remove.clone() else {
+                return;
+            };
+            (view.profile_id.clone(), armed)
         };
         let Some(profile) = self.saved_profile(&profile_id).cloned() else {
             return;
         };
-        if profile.port_forwards.is_empty() {
+        if profile.port_forwards.get(armed.index) != Some(&armed.rule) {
+            self.forward_remove_stale();
             return;
         }
-        let index = index.min(profile.port_forwards.len() - 1);
         let mut rules = profile.port_forwards.clone();
-        rules.remove(index);
-        let message = match self.store_forward_rules(&profile_id, rules) {
-            Ok(()) => Some(crate::i18n::texts().machines.forward_removed.to_owned()),
-            Err(error) => Some(error),
-        };
+        rules.remove(armed.index);
+        let remaining = rules.len();
+        let outcome = self.store_forward_rules(&profile_id, rules);
         if let Some(ClientShellOverlay::Machines(overlay)) = self.overlay.as_mut() {
             if let ClientMachinesView::Forwards(view) = &mut overlay.view {
-                view.error = None;
-                view.message = message;
-                view.selected = view.selected.saturating_sub(1);
+                view.pending_remove = None;
+                // 落盘失败必须走红色 error 分支，不能以绿色「成功」样式显示。
+                match outcome {
+                    Ok(()) => {
+                        view.message =
+                            Some(crate::i18n::texts().machines.forward_removed.to_owned());
+                        view.error = None;
+                        // 原位补位；删掉末条时回退一行。
+                        view.selected = armed.index.min(remaining.saturating_sub(1));
+                    }
+                    Err(error) => {
+                        view.error = Some(error);
+                        view.message = None;
+                    }
+                }
+                view.reveal = true;
+            }
+        }
+    }
+
+    /// 武装期间规则表被外部改写：清掉确认态并提示重选。
+    fn forward_remove_stale(&mut self) {
+        if let Some(ClientShellOverlay::Machines(overlay)) = self.overlay.as_mut() {
+            if let ClientMachinesView::Forwards(view) = &mut overlay.view {
+                view.pending_remove = None;
+                view.error = Some(
+                    crate::i18n::texts()
+                        .machines
+                        .forward_remove_stale
+                        .to_owned(),
+                );
+                view.message = None;
+                view.reveal = true;
             }
         }
     }
@@ -1592,7 +1715,9 @@ impl ClientShellState {
             Err(error) => {
                 if let Some(ClientShellOverlay::Machines(overlay)) = self.overlay.as_mut() {
                     if let ClientMachinesView::Forwards(view) = &mut overlay.view {
+                        // 失败只走红色 error 分支，别把上一次的绿色成功文案留在画面上。
                         view.error = Some(error);
+                        view.message = None;
                     }
                 }
             }
@@ -1632,6 +1757,8 @@ impl ClientShellState {
                         selected,
                         include_wildcards: false,
                         focus_row: 0,
+                        scroll: 0,
+                        reveal: true,
                         group: TextEditor::default(),
                         results: Vec::new(),
                         summary: (0, 0, 0),
@@ -1688,6 +1815,8 @@ impl ClientShellState {
             .collect();
         view.include_wildcards = include_wildcards;
         view.focus_row = 0;
+        view.scroll = 0;
+        view.reveal = true;
     }
 
     /// Executes the checked imports in dependency order, reporting per host.
@@ -1789,6 +1918,8 @@ impl ClientShellState {
             .count();
         view.summary = (imported, skipped_pre + deselected, failed);
         view.step = ClientImportStep::Done;
+        view.scroll = 0;
+        view.reveal = false;
     }
 
     /// Focus rows on the select step: candidates, then the wildcard toggle,
@@ -1813,6 +1944,18 @@ impl ClientShellState {
                 view.focus_row = (view.focus_row as isize + delta)
                     .clamp(0, count.saturating_sub(1) as isize)
                     as usize;
+                view.reveal = true;
+            }
+        }
+    }
+
+    /// done 步骤的结果列表滚动：上界由渲染回填（`machines_max_scroll`）。
+    fn scroll_import_results(&mut self, delta: isize) {
+        let max_scroll = self.hits.machines_max_scroll;
+        if let Some(ClientShellOverlay::Machines(overlay)) = self.overlay.as_mut() {
+            if let ClientMachinesView::Import(view) = &mut overlay.view {
+                view.scroll = view.scroll.saturating_add_signed(delta).min(max_scroll);
+                view.reveal = false;
             }
         }
     }
@@ -1867,6 +2010,7 @@ impl ClientShellState {
             }
             ClientMachinesView::Forwards(view) => {
                 view.selected = row;
+                view.pending_remove = None;
             }
             _ => {}
         }
@@ -1961,29 +2105,31 @@ impl ClientShellState {
             outcome.repaint = true;
             return;
         }
+        // 删除确认态独占 Enter/Esc：Esc 只取消确认，不退出编辑器。
+        let pending = self.forward_remove_pending();
         match code {
+            KeyCode::Esc if pending => self.forward_cancel_remove(),
             KeyCode::Esc => self.machines_back(),
+            KeyCode::Enter if pending => self.forward_remove_confirmed(),
+            // 确认键必须与触发键不同（与机器删除的 `ConfirmRemove` 对齐）：
+            // 否则长按 `x` 会 arm → confirm → arm → … 把规则删光。
+            KeyCode::Char('x') if plain && pending => self.forward_cancel_remove(),
             KeyCode::Up | KeyCode::Char('k') if plain => {
                 if let Some(ClientShellOverlay::Machines(overlay)) = self.overlay.as_mut() {
                     if let ClientMachinesView::Forwards(view) = &mut overlay.view {
                         view.selected = view.selected.saturating_sub(1);
+                        view.pending_remove = None;
+                        view.reveal = true;
                     }
                 }
             }
             KeyCode::Down | KeyCode::Char('j') if plain => {
-                let count = match self.overlay.as_ref() {
-                    Some(ClientShellOverlay::Machines(overlay)) => match &overlay.view {
-                        ClientMachinesView::Forwards(view) => self
-                            .saved_profile(&view.profile_id)
-                            .map(|profile| profile.port_forwards.len())
-                            .unwrap_or(0),
-                        _ => 0,
-                    },
-                    _ => 0,
-                };
+                let count = self.forward_rule_count();
                 if let Some(ClientShellOverlay::Machines(overlay)) = self.overlay.as_mut() {
                     if let ClientMachinesView::Forwards(view) = &mut overlay.view {
                         view.selected = (view.selected + 1).min(count.saturating_sub(1));
+                        view.pending_remove = None;
+                        view.reveal = true;
                     }
                 }
             }
@@ -1991,15 +2137,30 @@ impl ClientShellState {
                 if let Some(ClientShellOverlay::Machines(overlay)) = self.overlay.as_mut() {
                     if let ClientMachinesView::Forwards(view) = &mut overlay.view {
                         view.adding = true;
+                        view.pending_remove = None;
                         view.message = None;
                         view.error = None;
                     }
                 }
             }
-            KeyCode::Char('x') if plain => self.forward_remove_selected(),
+            KeyCode::Char('x') if plain => self.forward_arm_remove(),
             _ => {}
         }
         outcome.repaint = true;
+    }
+
+    /// 当前转发编辑器对应机器的规则条数。
+    fn forward_rule_count(&self) -> usize {
+        match self.overlay.as_ref() {
+            Some(ClientShellOverlay::Machines(overlay)) => match &overlay.view {
+                ClientMachinesView::Forwards(view) => self
+                    .saved_profile(&view.profile_id)
+                    .map(|profile| profile.port_forwards.len())
+                    .unwrap_or(0),
+                _ => 0,
+            },
+            _ => 0,
+        }
     }
 
     fn route_machine_import_key(
@@ -2033,6 +2194,8 @@ impl ClientShellState {
                             {
                                 if let ClientMachinesView::Import(view) = &mut overlay.view {
                                     view.step = ClientImportStep::Select;
+                                    view.scroll = 0;
+                                    view.reveal = true;
                                 }
                             }
                         }
@@ -2089,12 +2252,21 @@ impl ClientShellState {
                 }
                 outcome.repaint = true;
             }
-            ClientImportStep::Done => {
-                if matches!(code, KeyCode::Esc | KeyCode::Enter) {
+            ClientImportStep::Done => match code {
+                KeyCode::Esc | KeyCode::Enter => {
                     self.machines_back();
                     outcome.repaint = true;
                 }
-            }
+                KeyCode::Up | KeyCode::Char('k') if plain => {
+                    self.scroll_import_results(-1);
+                    outcome.repaint = true;
+                }
+                KeyCode::Down | KeyCode::Char('j') if plain => {
+                    self.scroll_import_results(1);
+                    outcome.repaint = true;
+                }
+                _ => {}
+            },
         }
     }
 
@@ -2555,6 +2727,8 @@ impl ClientShellState {
                             && !view.plan.ready.is_empty()
                         {
                             view.step = ClientImportStep::Select;
+                            view.scroll = 0;
+                            view.reveal = true;
                         }
                     }
                 }
@@ -2569,12 +2743,20 @@ impl ClientShellState {
                 if let Some(ClientShellOverlay::Machines(overlay)) = self.overlay.as_mut() {
                     if let ClientMachinesView::Forwards(view) = &mut overlay.view {
                         view.adding = true;
+                        view.pending_remove = None;
                         view.message = None;
                         view.error = None;
                     }
                 }
             }
-            Btn::ForwardRemove => self.forward_remove_selected(),
+            Btn::ForwardRemove => {
+                if self.forward_remove_pending() {
+                    self.forward_remove_confirmed();
+                } else {
+                    self.forward_arm_remove();
+                }
+            }
+            Btn::ForwardCancelRemove => self.forward_cancel_remove(),
             Btn::ForwardSave => self.forward_save_new_rule(),
             Btn::ForwardCancel => {
                 if let Some(ClientShellOverlay::Machines(overlay)) = self.overlay.as_mut() {
@@ -2782,13 +2964,33 @@ impl ClientShellState {
                 }
             }
             ScrollTarget::Forwards => {
+                let count = self.forward_rule_count();
                 if let Some(ClientShellOverlay::Machines(overlay)) = self.overlay.as_mut() {
                     if let ClientMachinesView::Forwards(view) = &mut overlay.view {
-                        view.selected = (view.selected as isize + delta).max(0) as usize;
+                        view.selected = (view.selected as isize + delta)
+                            .clamp(0, count.saturating_sub(1) as isize)
+                            as usize;
+                        view.pending_remove = None;
+                        view.reveal = true;
                     }
                 }
             }
-            ScrollTarget::Import => self.move_import_focus(delta),
+            ScrollTarget::Import => {
+                let step = match self.overlay.as_ref() {
+                    Some(ClientShellOverlay::Machines(overlay)) => match &overlay.view {
+                        ClientMachinesView::Import(view) => Some(view.step),
+                        _ => None,
+                    },
+                    _ => None,
+                };
+                match step {
+                    // select 步骤滚轮走焦点：reveal 会把窗口带过去，焦点不脱屏。
+                    Some(ClientImportStep::Select) => self.move_import_focus(delta),
+                    Some(ClientImportStep::Done) => self.scroll_import_results(delta),
+                    // discover 步骤不消费 `view.scroll`，滚轮在这里没有目标。
+                    Some(ClientImportStep::Discover) | None => {}
+                }
+            }
             ScrollTarget::None => {}
         }
     }
@@ -3098,6 +3300,7 @@ fn render_machine_list(
         area: popup,
         machines_popup: popup,
         machines_scroll: scroll,
+        machines_scroll_valid: true,
         machines_search: Rect::new(stack.header.x, stack.header.y + 1, stack.header.width, 1),
         machines_rows: row_hits,
         machines_actions: action_hits,
@@ -4043,12 +4246,44 @@ fn render_machine_forwards(
     let body = stack.content;
     let statuses = port_forwards.get(&ClientEndpointId::Ssh(view.profile_id.clone()));
     let mut row_hits = Vec::new();
-    let mut y = body.y;
-    if profile.port_forwards.is_empty() && !view.adding {
+    // 规则列表只占 body 的上半部：添加表单（空行 + 标题 + 字段 + 错误行）与
+    // 非添加态的消息/确认行都有固定席位，规则多于一屏时列表自己滚动而不是把
+    // 表单挤出画面（HERDR-MACH-005）。
+    let reserved = if view.adding {
+        FORWARD_FORM_FIELDS as u16 + 3
+    } else {
+        1
+    };
+    let list_height = body.height.saturating_sub(reserved);
+    // 窗口起点与滚动上界共用同一个提升后的行数，否则 body 高度不足时上界比
+    // 渲染实际接受的位点多一整屏。
+    let visible_rows = usize::from(list_height).max(1);
+    let rules = profile.port_forwards.as_slice();
+    let selected = if rules.is_empty() {
+        0
+    } else {
+        view.selected.min(rules.len() - 1)
+    };
+    // 确认态在本帧是否仍然成立：下标与规则值都要对得上，否则整帧（横幅、
+    // 页脚、按钮行）一致地按「非确认态」画，不出现点不到名的确认横幅。
+    let pending_rule = view.pending_remove.as_ref().and_then(|armed| {
+        rules
+            .get(armed.index)
+            .filter(|rule| **rule == armed.rule && !view.adding)
+    });
+    let scroll = super::page::list_start(
+        view.scroll,
+        selected,
+        rules.len(),
+        visible_rows,
+        view.reveal,
+    );
+    let max_scroll = rules.len().saturating_sub(visible_rows);
+    if rules.is_empty() && !view.adding {
         put_text(
             b,
             body.x,
-            y,
+            body.y,
             body.width,
             t.forward_none,
             base.fg(p.overlay1),
@@ -4056,19 +4291,21 @@ fn render_machine_forwards(
         put_text(
             b,
             body.x,
-            y + 1,
+            body.y + 1,
             body.width,
             t.forward_none_hint,
             base.fg(p.overlay0),
         );
     }
-    for (index, rule) in profile.port_forwards.iter().enumerate() {
-        if y >= body.bottom() {
-            break;
-        }
-        let rect = Rect::new(body.x, y, body.width, 1);
+    for (index, rule) in rules
+        .iter()
+        .enumerate()
+        .skip(scroll)
+        .take(usize::from(list_height))
+    {
+        let rect = Rect::new(body.x, body.y + (index - scroll) as u16, body.width, 1);
         row_hits.push((rect, index));
-        let is_selected = index == view.selected && !view.adding;
+        let is_selected = index == selected && !view.adding;
         let style = if is_selected {
             Style::default()
                 .fg(panel_contrast_fg(p))
@@ -4109,8 +4346,9 @@ fn render_machine_forwards(
             Style::default().fg(status_color).bg(p.panel_bg)
         };
         put_right_text(b, rect, rect.y, &status_text, status_style);
-        y += 1;
     }
+    // 列表之后的内容一律从固定席位开始，不受滚动窗口影响。
+    let mut y = body.y + list_height;
 
     // Add-rule form: kind choice plus the four text fields.
     let mut field_hits = Vec::new();
@@ -4222,6 +4460,24 @@ fn render_machine_forwards(
                 );
             }
         }
+    } else if let Some(rule) = pending_rule {
+        // 待确认删除：点名规则本身，避免「删掉看不见的那一条」（HERDR-MACH-025）。
+        if y < body.bottom() {
+            put_text(
+                b,
+                body.x,
+                y,
+                body.width,
+                &format!(
+                    " {}",
+                    crate::i18n::fill(
+                        t.forward_remove_confirm_fmt,
+                        &[("rule", &forward_rule_display(rule))]
+                    )
+                ),
+                base.fg(p.red).add_modifier(Modifier::BOLD),
+            );
+        }
     } else if let Some(message) = view.message.as_deref() {
         if y < body.bottom() {
             put_text(b, body.x, y, body.width, message, base.fg(p.green));
@@ -4247,6 +4503,18 @@ fn render_machine_forwards(
                 ("enter".to_owned(), t.hint_confirm.to_owned()),
                 ("esc".to_owned(), t.hint_back.to_owned()),
             ]
+        } else if pending_rule.is_some() {
+            vec![
+                ("enter".to_owned(), t.hint_confirm.to_owned()),
+                (
+                    "esc".to_owned(),
+                    crate::i18n::texts()
+                        .overlays
+                        .cancel_button
+                        .trim()
+                        .to_owned(),
+                ),
+            ]
         } else {
             vec![
                 ("↑↓".to_owned(), t.hint_select.to_owned()),
@@ -4268,6 +4536,19 @@ fn render_machine_forwards(
                 MachineOverlayButton::ForwardCancel,
             ],
         )
+    } else if pending_rule.is_some() {
+        (
+            vec![
+                crate::i18n::texts().overlays.confirm_button,
+                crate::i18n::texts().overlays.cancel_button,
+                back_label,
+            ],
+            vec![
+                MachineOverlayButton::ForwardRemove,
+                MachineOverlayButton::ForwardCancelRemove,
+                MachineOverlayButton::Back,
+            ],
+        )
     } else {
         (
             vec![t.add_button, t.remove_button, back_label],
@@ -4282,8 +4563,7 @@ fn render_machine_forwards(
     if rects.len() == labels.len() {
         for (index, rect) in rects.iter().enumerate() {
             let button = buttons[index];
-            let enabled =
-                button != MachineOverlayButton::ForwardRemove || !profile.port_forwards.is_empty();
+            let enabled = button != MachineOverlayButton::ForwardRemove || !rules.is_empty();
             let (tone, base_state) = match button {
                 MachineOverlayButton::ForwardAddStart | MachineOverlayButton::ForwardSave => (
                     crate::ui::ModalButtonTone::Primary,
@@ -4316,9 +4596,12 @@ fn render_machine_forwards(
     Some(OverlayRender {
         area: popup,
         machines_popup: popup,
+        machines_scroll: scroll,
+        machines_scroll_valid: true,
         machines_wizard_rows: row_hits,
         machines_wizard_fields: field_hits,
         machines_actions: action_hits,
+        machines_max_scroll: max_scroll,
         cursor,
         ..OverlayRender::default()
     })
@@ -4402,18 +4685,29 @@ fn render_machine_import(
 
     let body = stack.content;
     let mut cursor = None;
+    let mut scroll = 0usize;
+    let mut max_scroll = 0usize;
+    // discover 步骤没有可滚动列表：不声明 scroll 有效，compose 期的回写会
+    // 跳过它而不是每帧把 `view.scroll` 抹成 0。
+    let mut scroll_valid = false;
     let wizard_rows: Vec<(Rect, usize)> = match view.step {
         ClientImportStep::Discover => {
             render_import_discover(b, body, view, base, p);
             Vec::new()
         }
         ClientImportStep::Select => {
-            let (rows, select_cursor) = render_import_select(b, body, view, base, p);
-            cursor = select_cursor;
-            rows
+            let rendered = render_import_select(b, body, view, base, p);
+            cursor = rendered.cursor;
+            scroll = rendered.scroll;
+            max_scroll = rendered.max_scroll;
+            scroll_valid = true;
+            rendered.rows
         }
         ClientImportStep::Done => {
-            render_import_done(b, body, view, base, p);
+            let (done_scroll, done_max) = render_import_done(b, body, view, base, p);
+            scroll = done_scroll;
+            max_scroll = done_max;
+            scroll_valid = true;
             Vec::new()
         }
     };
@@ -4431,7 +4725,10 @@ fn render_machine_import(
                 ("enter".to_owned(), t.hint_import.to_owned()),
                 ("esc".to_owned(), t.hint_back.to_owned()),
             ],
-            ClientImportStep::Done => vec![("esc/enter".to_owned(), t.hint_back.to_owned())],
+            ClientImportStep::Done => vec![
+                ("↑↓".to_owned(), t.hint_scroll.to_owned()),
+                ("esc/enter".to_owned(), t.hint_back.to_owned()),
+            ],
         };
         render_key_hints(b, footer, &hints, p, cx.components);
     }
@@ -4487,8 +4784,11 @@ fn render_machine_import(
     Some(OverlayRender {
         area: popup,
         machines_popup: popup,
+        machines_scroll: scroll,
+        machines_scroll_valid: scroll_valid,
         machines_wizard_rows: wizard_rows,
         machines_actions: action_hits,
+        machines_max_scroll: max_scroll,
         cursor,
         ..OverlayRender::default()
     })
@@ -4579,25 +4879,45 @@ fn render_import_discover(
     }
 }
 
-/// Renders the select step; returns the clickable row rects (candidate
-/// toggles, wildcard toggle, group input) plus the text cursor while the
-/// group input is focused.
+/// select 步骤的渲染产物：窗口内的可点击行（候选、通配符开关、分组输入）、
+/// 分组输入聚焦时的文本光标，以及本帧采用的滚动窗口起点与上界。
+struct ImportSelectRender {
+    rows: Vec<(Rect, usize)>,
+    cursor: Option<crate::protocol::CursorState>,
+    scroll: usize,
+    max_scroll: usize,
+}
+
+/// 候选列表在上方滚动，通配符开关 / 分组输入 / 计数行固定占据 body 底部三行，
+/// 主机多于一屏时它们仍然可见可点（HERDR-MACH-001）。只收录窗口内的候选行，
+/// 保证鼠标命中与画面一致。
 fn render_import_select(
     b: &mut Buffer,
     body: Rect,
     view: &ClientMachineImportView,
     base: Style,
     p: &Palette,
-) -> (Vec<(Rect, usize)>, Option<crate::protocol::CursorState>) {
+) -> ImportSelectRender {
+    /// 通配符开关、分组输入、计数行。
+    const FIXED_ROWS: u16 = 3;
     let t = &crate::i18n::texts().machines;
     let mut hits = Vec::new();
     let candidates = view.plan.ready.len();
-    let mut y = body.y;
-    for (index, planned) in view.plan.ready.iter().enumerate() {
-        if y >= body.bottom() {
-            break;
-        }
-        let rect = Rect::new(body.x, y, body.width, 1);
+    let list_height = body.height.saturating_sub(FIXED_ROWS);
+    // 窗口起点与滚动上界共用同一个提升后的行数，口径保持一致。
+    let visible_rows = usize::from(list_height).max(1);
+    let focus = view.focus_row.min(candidates.saturating_sub(1));
+    let scroll = super::page::list_start(view.scroll, focus, candidates, visible_rows, view.reveal);
+    let max_scroll = candidates.saturating_sub(visible_rows);
+    for (index, planned) in view
+        .plan
+        .ready
+        .iter()
+        .enumerate()
+        .skip(scroll)
+        .take(usize::from(list_height))
+    {
+        let rect = Rect::new(body.x, body.y + (index - scroll) as u16, body.width, 1);
         hits.push((rect, index));
         let focused = view.focus_row == index;
         let checked = view.selected.get(index).copied().unwrap_or(false);
@@ -4623,8 +4943,8 @@ fn render_import_select(
             ),
             style,
         );
-        y += 1;
     }
+    let mut y = body.y + list_height;
     // Wildcard toggle row.
     if y < body.bottom() {
         let rect = Rect::new(body.x, y, body.width, 1);
@@ -4690,41 +5010,56 @@ fn render_import_select(
     // Selection counter.
     if y < body.bottom() {
         let selected = view.selected.iter().filter(|selected| **selected).count();
-        put_text(
-            b,
-            body.x,
-            y,
-            body.width,
-            &format!(
-                " {}",
-                crate::i18n::fill(
-                    t.import_selected_fmt,
-                    &[
-                        ("selected", &selected.to_string()),
-                        ("total", &candidates.to_string())
-                    ]
-                )
-            ),
-            base.fg(p.overlay0),
+        let mut counter = format!(
+            " {}",
+            crate::i18n::fill(
+                t.import_selected_fmt,
+                &[
+                    ("selected", &selected.to_string()),
+                    ("total", &candidates.to_string())
+                ]
+            )
         );
+        // 滚动位置走自己的本地化条目：裸 `X/Y` 直接拼在「已选 12/30」后面
+        // 会读成第二个计数。
+        if max_scroll > 0 {
+            counter.push_str("  ");
+            counter.push_str(&crate::i18n::fill(
+                t.import_scroll_position_fmt,
+                &[
+                    ("start", &(scroll + 1).to_string()),
+                    ("total", &candidates.to_string()),
+                ],
+            ));
+        }
+        put_text(b, body.x, y, body.width, &counter, base.fg(p.overlay0));
     }
-    (hits, cursor)
+    ImportSelectRender {
+        rows: hits,
+        cursor,
+        scroll,
+        max_scroll,
+    }
 }
 
+/// done 步骤：汇总行固定在顶部，逐条结果（含失败提示与结尾说明）进入可滚动
+/// 区域，主机多时末尾条目不再被截断（HERDR-MACH-010）。返回滚动窗口起点与上界。
 fn render_import_done(
     b: &mut Buffer,
     body: Rect,
     view: &ClientMachineImportView,
     base: Style,
     p: &Palette,
-) {
+) -> (usize, usize) {
     let t = &crate::i18n::texts().machines;
-    let mut y = body.y;
+    if body.height == 0 {
+        return (0, 0);
+    }
     let (imported, skipped, failed) = view.summary;
     put_text(
         b,
         body.x,
-        y,
+        body.y,
         body.width,
         &format!(
             " {}",
@@ -4739,9 +5074,30 @@ fn render_import_done(
         ),
         base.fg(p.text).add_modifier(Modifier::BOLD),
     );
-    y += 1;
+    // done 步骤和其它步骤一样每次 repaint 都重画（后台 pane 有流式输出时
+    // 30–60 fps），所以行数只做计数、不做格式化：全量 `format!` 会按
+    // 频率(repaint) × 基数(~/.ssh/config 的 Host 数) 加宽每帧工作量。
+    let failed_hints = view
+        .results
+        .iter()
+        .filter(|row| row.outcome == ClientImportOutcome::Failed)
+        .count();
+    let total_lines = view.results.len() + failed_hints + usize::from(imported > 0);
+    let list = Rect::new(
+        body.x,
+        body.y + 1,
+        body.width,
+        body.height.saturating_sub(1),
+    );
+    let visible = usize::from(list.height);
+    let scroll =
+        super::page::list_start(view.scroll, view.scroll, total_lines, visible.max(1), false);
+    let max_scroll = total_lines.saturating_sub(visible);
+    // 只对落在窗口里的行做 `format!`：`line` 按与计数完全相同的顺序推进。
+    let end = scroll.saturating_add(visible);
+    let mut line = 0usize;
     for row in &view.results {
-        if y >= body.bottom() {
+        if line >= end {
             break;
         }
         let (tag, color) = match row.outcome {
@@ -4749,33 +5105,48 @@ fn render_import_done(
             ClientImportOutcome::Skipped => (t.import_result_skipped, p.overlay0),
             ClientImportOutcome::Failed => (t.import_result_failed, p.red),
         };
-        let text = if row.detail.is_empty() {
-            format!(" {tag} {}", row.label)
-        } else {
-            format!(" {tag} {} — {}", row.label, row.detail)
-        };
-        put_text(b, body.x, y, body.width, &text, base.fg(color));
-        y += 1;
-        if row.outcome == ClientImportOutcome::Failed && y < body.bottom() {
+        if line >= scroll {
+            let text = if row.detail.is_empty() {
+                format!(" {tag} {}", row.label)
+            } else {
+                format!(" {tag} {} — {}", row.label, row.detail)
+            };
             put_text(
                 b,
-                body.x,
-                y,
-                body.width,
-                &format!("   {}", t.import_failed_hint),
-                base.fg(p.yellow),
+                list.x,
+                list.y + (line - scroll) as u16,
+                list.width,
+                &text,
+                base.fg(color),
             );
-            y += 1;
+        }
+        line += 1;
+        if row.outcome == ClientImportOutcome::Failed {
+            if line >= end {
+                break;
+            }
+            if line >= scroll {
+                put_text(
+                    b,
+                    list.x,
+                    list.y + (line - scroll) as u16,
+                    list.width,
+                    &format!("   {}", t.import_failed_hint),
+                    base.fg(p.yellow),
+                );
+            }
+            line += 1;
         }
     }
-    if imported > 0 && y < body.bottom() {
+    if imported > 0 && line >= scroll && line < end {
         put_text(
             b,
-            body.x,
-            y,
-            body.width,
+            list.x,
+            list.y + (line - scroll) as u16,
+            list.width,
             t.import_connect_note,
             base.fg(p.overlay1),
         );
     }
+    (scroll, max_scroll)
 }

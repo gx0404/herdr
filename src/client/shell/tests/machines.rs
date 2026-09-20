@@ -1235,6 +1235,7 @@ fn forwards_editor_adds_and_removes_rules_in_the_catalog() {
     // Remove it again.
     state.route_machines_key(&key(KeyCode::Char('f')), &mut ClientShellInput::default());
     state.route_machines_key(&key(KeyCode::Char('x')), &mut ClientShellInput::default());
+    state.route_machines_key(&key(KeyCode::Enter), &mut ClientShellInput::default());
     let catalog = crate::client::endpoint::EndpointCatalog::load().expect("catalog");
     assert!(catalog.ssh[0].port_forwards.is_empty());
     let _ = std::fs::remove_dir_all(&dir);
@@ -1285,4 +1286,445 @@ fn detail_card_shows_live_forward_status_from_the_mirror() {
         state.port_forward_poll_due(std::time::Instant::now()),
         Some(endpoint_id)
     );
+}
+
+// ---------------------------------------------------------------------
+// C-10 / C-11：导入向导与端口转发列表的滚动窗口与删除确认
+// ---------------------------------------------------------------------
+
+/// 生成 `count` 台主机的 SSH 配置，用来把候选列表撑出一屏。
+fn many_hosts_config(count: usize) -> String {
+    let mut text = String::new();
+    for index in 0..count {
+        text.push_str(&format!(
+            "Host host{index:02}\n    HostName host{index:02}.internal\n\n"
+        ));
+    }
+    text
+}
+
+/// 一次 compose 同时取回整帧文本（去空白便于匹配 CJK 宽字符）与光标。
+fn frame_compact(
+    state: &mut ClientShellState,
+    cols: u16,
+    rows: u16,
+) -> (String, Option<crate::protocol::CursorState>) {
+    let frame = state.compose(cols, rows).expect("composed frame");
+    let text = frame
+        .cells
+        .chunks(frame.width as usize)
+        .map(|row| {
+            row.iter()
+                .map(|cell| cell.symbol.as_str())
+                .collect::<String>()
+        })
+        .collect::<Vec<String>>()
+        .join("\n");
+    (
+        text.chars().filter(|ch| !ch.is_whitespace()).collect(),
+        frame.cursor.clone(),
+    )
+}
+
+fn seed_forward_profile(rules: usize) -> SavedSshEndpoint {
+    let mut catalog = crate::client::endpoint::EndpointCatalog::default();
+    let id = catalog
+        .add_ssh("Build", "build.example", "default")
+        .expect("seed profile");
+    let forwards = (0..rules)
+        .map(|index| crate::client::endpoint::PortForwardRule {
+            kind: crate::client::endpoint::PortForwardKind::Local,
+            bind_address: None,
+            listen_port: 9000 + index as u16,
+            target_host: Some("127.0.0.1".into()),
+            target_port: Some(80),
+        })
+        .collect();
+    catalog
+        .set_port_forwards(&id, forwards)
+        .expect("seed forwards");
+    catalog.store_profiles().expect("seed store");
+    crate::client::endpoint::EndpointCatalog::load()
+        .expect("catalog")
+        .ssh[0]
+        .clone()
+}
+
+#[test]
+fn import_select_scrolls_so_the_group_input_stays_visible() {
+    let dir = with_temp_home("import-scroll");
+    std::fs::write(dir.join(".ssh").join("config"), many_hosts_config(30)).unwrap();
+    let mut state = state_with_profiles(&[]);
+    state.open_machine_import_wizard();
+    // discover → select
+    state.route_machines_key(&key(KeyCode::Enter), &mut ClientShellInput::default());
+    // 30 个候选 + 通配符开关，分组输入框是第 31 个焦点位。
+    for _ in 0..31 {
+        state.route_machines_key(&key(KeyCode::Down), &mut ClientShellInput::default());
+    }
+    let (text, cursor) = frame_compact(&mut state, 110, 32);
+    let t = &crate::i18n::texts().machines;
+    assert!(
+        text.contains(&t.import_group_label.replace(' ', "")),
+        "分组输入行可见：{text}"
+    );
+    assert!(
+        text.contains(&t.import_include_wildcards.replace(' ', "")),
+        "通配符开关可见：{text}"
+    );
+    // 整帧光标可能回落到未被浮层盖住的终端光标，必须断言它落在分组输入行上。
+    let group_row = state
+        .hits
+        .machines_wizard_rows
+        .iter()
+        .find(|(_, index)| *index == 31)
+        .map(|(rect, _)| *rect)
+        .expect("分组输入行在命中表里");
+    let cursor = cursor.expect("分组输入框聚焦时返回光标");
+    assert!(cursor.visible, "光标可见");
+    assert_eq!(cursor.y, group_row.y, "光标落在分组输入行");
+    assert!(
+        cursor.x >= group_row.x && cursor.x < group_row.right(),
+        "光标横坐标落在分组输入行内：{cursor:?} / {group_row:?}"
+    );
+    assert!(
+        !text.contains("host00.internal"),
+        "列表已滚动，第一个候选移出窗口：{text}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn import_wizard_rows_track_the_scrolled_window() {
+    let dir = with_temp_home("import-rows");
+    std::fs::write(dir.join(".ssh").join("config"), many_hosts_config(30)).unwrap();
+    let mut state = state_with_profiles(&[]);
+    state.open_machine_import_wizard();
+    state.route_machines_key(&key(KeyCode::Enter), &mut ClientShellInput::default());
+    for _ in 0..20 {
+        state.route_machines_key(&key(KeyCode::Down), &mut ClientShellInput::default());
+    }
+    let _ = state.compose(110, 32).expect("composed frame");
+    let candidate_rows: Vec<usize> = state
+        .hits
+        .machines_wizard_rows
+        .iter()
+        .map(|(_, index)| *index)
+        .filter(|index| *index < 30)
+        .collect();
+    assert!(
+        candidate_rows.contains(&20),
+        "聚焦行在命中表里：{candidate_rows:?}"
+    );
+    assert!(
+        candidate_rows.iter().copied().min().unwrap_or(0) > 0,
+        "滚出窗口的行不再收录：{candidate_rows:?}"
+    );
+    let popup = state.hits.machines_popup;
+    assert!(
+        state
+            .hits
+            .machines_wizard_rows
+            .iter()
+            .all(|(rect, _)| rect.y >= popup.y && rect.bottom() <= popup.bottom()),
+        "命中矩形不越出弹窗"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn import_done_step_scrolls_through_every_result_row() {
+    let dir = with_temp_home("import-done");
+    std::fs::write(dir.join(".ssh").join("config"), many_hosts_config(30)).unwrap();
+    let mut state = state_with_profiles(&[]);
+    state.open_machine_import_wizard();
+    state.route_machines_key(&key(KeyCode::Enter), &mut ClientShellInput::default());
+    state.route_machines_key(&key(KeyCode::Enter), &mut ClientShellInput::default());
+    let (text, _) = frame_compact(&mut state, 110, 32);
+    assert!(text.contains("host00"), "首条结果可见：{text}");
+    assert!(!text.contains("host29"), "末条结果一屏放不下：{text}");
+    for _ in 0..40 {
+        state.route_machines_key(&key(KeyCode::Down), &mut ClientShellInput::default());
+    }
+    let (text, _) = frame_compact(&mut state, 110, 32);
+    assert!(text.contains("host29"), "向下滚动后末条结果可见：{text}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// 把 `forward_remove_confirm_fmt` 按给定规则文案压成无空白串，便于在整帧
+/// 文本里匹配。
+fn forward_confirm_prompt(rule: &str) -> String {
+    crate::i18n::fill(
+        crate::i18n::texts().machines.forward_remove_confirm_fmt,
+        &[("rule", rule)],
+    )
+    .chars()
+    .filter(|ch| !ch.is_whitespace())
+    .collect()
+}
+
+#[test]
+fn forwards_editor_scrolls_to_the_selected_rule() {
+    let dir = with_temp_home("forwards-scroll");
+    // 目录上限是每台机器 16 条转发规则，取满额后选中末条。
+    let saved = seed_forward_profile(16);
+    let mut state = state_with_profiles(std::slice::from_ref(&saved));
+    state.open_machines_overlay_for(&saved.id);
+    state.route_machines_key(&key(KeyCode::Char('f')), &mut ClientShellInput::default());
+    for _ in 0..15 {
+        state.route_machines_key(&key(KeyCode::Down), &mut ClientShellInput::default());
+    }
+    let (text, _) = frame_compact(&mut state, 110, 32);
+    assert!(
+        text.contains("9015->127.0.0.1:80"),
+        "选中的末条规则可见：{text}"
+    );
+    assert!(
+        !text.contains("9000->127.0.0.1:80"),
+        "列表已滚动，首条规则移出窗口：{text}"
+    );
+
+    // C-11 的完整链路：列表已滚动时 `x` 点名的必须是当前选中项，Enter 删掉
+    // 的也必须是它，而不是窗口外的首条。
+    state.route_machines_key(&key(KeyCode::Char('x')), &mut ClientShellInput::default());
+    let (text, _) = frame_compact(&mut state, 110, 32);
+    assert!(
+        text.contains(&forward_confirm_prompt("local 9015 -> 127.0.0.1:80")),
+        "确认文案点名滚动后的选中规则：{text}"
+    );
+    assert!(
+        !text.contains(&forward_confirm_prompt("local 9000 -> 127.0.0.1:80")),
+        "不得点名窗口外的首条规则：{text}"
+    );
+    state.route_machines_key(&key(KeyCode::Enter), &mut ClientShellInput::default());
+    let catalog = crate::client::endpoint::EndpointCatalog::load().expect("catalog");
+    assert_eq!(catalog.ssh[0].port_forwards.len(), 15);
+    assert!(
+        catalog.ssh[0]
+            .port_forwards
+            .iter()
+            .all(|rule| rule.listen_port != 9015),
+        "删掉的是被点名的那一条"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// 滚轮在转发编辑器里移动选中项，上界是规则条数：此前 `(selected + delta)`
+/// 只有下界，能把 `selected` 推到规则数以外。
+#[test]
+fn forwards_editor_wheel_clamps_the_selection_to_the_rule_count() {
+    let dir = with_temp_home("forwards-wheel");
+    let saved = seed_forward_profile(4);
+    let mut state = state_with_profiles(std::slice::from_ref(&saved));
+    state.open_machines_overlay_for(&saved.id);
+    state.route_machines_key(&key(KeyCode::Char('f')), &mut ClientShellInput::default());
+    state.scroll_machines_overlay(100);
+    let selected = match state.overlay.as_ref() {
+        Some(ClientShellOverlay::Machines(overlay)) => match &overlay.view {
+            super::super::machines_overlay::ClientMachinesView::Forwards(view) => view.selected,
+            _ => panic!("forwards view"),
+        },
+        _ => panic!("overlay"),
+    };
+    assert_eq!(selected, 3, "滚轮不得把选中项推到规则数以外");
+    state.scroll_machines_overlay(-100);
+    let selected = match state.overlay.as_ref() {
+        Some(ClientShellOverlay::Machines(overlay)) => match &overlay.view {
+            super::super::machines_overlay::ClientMachinesView::Forwards(view) => view.selected,
+            _ => panic!("forwards view"),
+        },
+        _ => panic!("overlay"),
+    };
+    assert_eq!(selected, 0);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// HERDR-MACH-025 的真实失败模式在 lease 层：长按 `x` 的自动重复不得把
+/// 「武装 → 确认」一路走完。经 `handle_raw_events` 覆盖 Press + Repeat 与
+/// 不上报 Repeat 的终端（连发 Press）两条路。
+#[test]
+fn held_x_does_not_walk_the_forward_removal() {
+    use crossterm::event::KeyEventKind;
+
+    let dir = with_temp_home("forwards-held-x");
+    let saved = seed_forward_profile(4);
+    let mut state = state_with_profiles(std::slice::from_ref(&saved));
+    state.open_machines_overlay_for(&saved.id);
+    state.route_machines_key(&key(KeyCode::Char('f')), &mut ClientShellInput::default());
+
+    let remove = key(KeyCode::Char('x'));
+    state.handle_raw_events(vec![RawInputEvent::Key(remove.clone())]);
+    for _ in 0..5 {
+        state.handle_raw_events(vec![RawInputEvent::Key(
+            remove
+                .clone()
+                .with_kind(KeyEventKind::Repeat)
+                .with_repeat_count(4),
+        )]);
+    }
+    let catalog = crate::client::endpoint::EndpointCatalog::load().expect("catalog");
+    assert_eq!(
+        catalog.ssh[0].port_forwards.len(),
+        4,
+        "长按 x 不得删除任何规则"
+    );
+
+    // 不上报 Repeat 的终端：连发 Press 也只在武装/取消之间来回，绝不落盘。
+    for _ in 0..6 {
+        state.handle_raw_events(vec![RawInputEvent::Key(remove.clone())]);
+    }
+    let catalog = crate::client::endpoint::EndpointCatalog::load().expect("catalog");
+    assert_eq!(
+        catalog.ssh[0].port_forwards.len(),
+        4,
+        "连发 x 不得删除任何规则"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// 整套长按保护取决于 `step()` 为每个破坏性步进返回不同值（与
+/// `snippets::overlay_step_separates_every_destructive_snippet_step` 同源）。
+#[test]
+fn overlay_step_separates_every_destructive_machine_step() {
+    use super::super::machines_overlay::{
+        ClientForwardRuleForm, ClientForwardRulesView, ClientMachinesOverlay, ClientMachinesView,
+        PendingForwardRemoval,
+    };
+
+    let dir = with_temp_home("machine-step");
+    let saved = seed_forward_profile(2);
+    let armed = saved.port_forwards[0].clone();
+    let forwards = |pending: Option<PendingForwardRemoval>| {
+        ClientShellOverlay::Machines(ClientMachinesOverlay {
+            view: ClientMachinesView::Forwards(Box::new(ClientForwardRulesView {
+                profile_id: saved.id.clone(),
+                selected: 0,
+                scroll: 0,
+                reveal: false,
+                adding: false,
+                form: ClientForwardRuleForm::blank(),
+                pending_remove: pending,
+                error: None,
+                message: None,
+            })),
+            query: TextEditor::default(),
+            search_focused: false,
+            selected: 0,
+            scroll: 0,
+            reveal: false,
+            detail_scroll: 0,
+            hovered: None,
+            message: None,
+        })
+    };
+    let idle = forwards(None);
+    let pending = forwards(Some(PendingForwardRemoval {
+        index: 0,
+        rule: armed,
+    }));
+    assert_ne!(
+        idle.step(),
+        pending.step(),
+        "转发删除武装前后必须是不同的步进指纹"
+    );
+    let confirm_remove = ClientShellOverlay::Machines(ClientMachinesOverlay {
+        view: ClientMachinesView::ConfirmRemove(saved.id.clone()),
+        query: TextEditor::default(),
+        search_focused: false,
+        selected: 0,
+        scroll: 0,
+        reveal: false,
+        detail_scroll: 0,
+        hovered: None,
+        message: None,
+    });
+    assert_ne!(idle.step(), confirm_remove.step());
+    assert_ne!(pending.step(), confirm_remove.step());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// 目录 watcher（`set_endpoint_catalog`）会在浮层打开期间重新镜像规则表：
+/// 武装与确认之间规则变了就取消确认，绝不按下标删掉另一条。
+#[test]
+fn forward_remove_is_cancelled_when_the_rules_change_while_armed() {
+    let dir = with_temp_home("forwards-stale");
+    let saved = seed_forward_profile(3);
+    let mut state = state_with_profiles(std::slice::from_ref(&saved));
+    state.open_machines_overlay_for(&saved.id);
+    state.route_machines_key(&key(KeyCode::Char('f')), &mut ClientShellInput::default());
+    state.route_machines_key(&key(KeyCode::Down), &mut ClientShellInput::default());
+    state.route_machines_key(&key(KeyCode::Down), &mut ClientShellInput::default());
+    state.route_machines_key(&key(KeyCode::Char('x')), &mut ClientShellInput::default());
+
+    // 外部把规则表缩短：原来的下标 2 已不存在。
+    let mut shortened = saved.clone();
+    shortened.port_forwards.truncate(1);
+    state.set_endpoint_catalog(std::slice::from_ref(&shortened));
+
+    state.route_machines_key(&key(KeyCode::Enter), &mut ClientShellInput::default());
+    let catalog = crate::client::endpoint::EndpointCatalog::load().expect("catalog");
+    assert_eq!(
+        catalog.ssh[0].port_forwards.len(),
+        3,
+        "规则变化后 Enter 不得落盘删除"
+    );
+    let (text, _) = frame_compact(&mut state, 110, 32);
+    let stale: String = crate::i18n::texts()
+        .machines
+        .forward_remove_stale
+        .chars()
+        .filter(|ch| !ch.is_whitespace())
+        .collect();
+    assert!(text.contains(&stale), "给出「规则已变化」提示：{text}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn forward_remove_asks_for_confirmation_before_deleting() {
+    let dir = with_temp_home("forwards-confirm");
+    let saved = seed_forward_profile(2);
+    let mut state = state_with_profiles(std::slice::from_ref(&saved));
+    state.open_machines_overlay_for(&saved.id);
+    state.route_machines_key(&key(KeyCode::Char('f')), &mut ClientShellInput::default());
+
+    // 第一次 x 只进入确认态，规则原封不动。
+    state.route_machines_key(&key(KeyCode::Char('x')), &mut ClientShellInput::default());
+    let catalog = crate::client::endpoint::EndpointCatalog::load().expect("catalog");
+    assert_eq!(catalog.ssh[0].port_forwards.len(), 2, "x 不立即删除");
+    let (text, _) = frame_compact(&mut state, 110, 32);
+    assert!(
+        text.contains(&forward_confirm_prompt("local 9000 -> 127.0.0.1:80")),
+        "确认文案点名待删规则：{text}"
+    );
+
+    // 确认态下再按一次 `x` 只取消，不落盘：确认键必须与触发键不同。
+    state.route_machines_key(&key(KeyCode::Char('x')), &mut ClientShellInput::default());
+    let catalog = crate::client::endpoint::EndpointCatalog::load().expect("catalog");
+    assert_eq!(catalog.ssh[0].port_forwards.len(), 2, "第二次 x 不确认删除");
+
+    // Esc 取消确认，仍停在转发编辑器里。
+    state.route_machines_key(&key(KeyCode::Char('x')), &mut ClientShellInput::default());
+    state.route_machines_key(&key(KeyCode::Esc), &mut ClientShellInput::default());
+    assert!(
+        matches!(
+            state.overlay,
+            Some(ClientShellOverlay::Machines(
+                super::super::machines_overlay::ClientMachinesOverlay {
+                    view: super::super::machines_overlay::ClientMachinesView::Forwards(_),
+                    ..
+                }
+            ))
+        ),
+        "取消确认不退出编辑器"
+    );
+    let catalog = crate::client::endpoint::EndpointCatalog::load().expect("catalog");
+    assert_eq!(catalog.ssh[0].port_forwards.len(), 2);
+
+    // x + enter 才真正删除。
+    state.route_machines_key(&key(KeyCode::Char('x')), &mut ClientShellInput::default());
+    state.route_machines_key(&key(KeyCode::Enter), &mut ClientShellInput::default());
+    let catalog = crate::client::endpoint::EndpointCatalog::load().expect("catalog");
+    assert_eq!(catalog.ssh[0].port_forwards.len(), 1, "确认后删除一条");
+    assert_eq!(catalog.ssh[0].port_forwards[0].listen_port, 9001);
+    let _ = std::fs::remove_dir_all(&dir);
 }

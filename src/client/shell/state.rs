@@ -231,6 +231,8 @@ pub(super) struct ShellHitMap {
     pub(super) machines_popup: Rect,
     pub(super) machines_detail_area: Rect,
     pub(super) machines_scroll: usize,
+    /// 上一帧是否真的画了某个机器面板列表；见 `OverlayRender`。
+    pub(super) machines_scroll_valid: bool,
     pub(super) machines_search: Rect,
     pub(super) machines_rows: Vec<(Rect, crate::client::endpoint::ProfileId)>,
     pub(super) machines_actions: Vec<(Rect, super::machines_overlay::MachineOverlayButton)>,
@@ -995,11 +997,17 @@ impl ClientShellOverlay {
             // 现场快照：列表的 Enter 就是破坏性恢复，确认页是同键的下一步。
             Self::Scenes(overlay) => overlay.view.step(),
             // 机器与机器文件：删除确认与列表必须是不同步，否则将来把确认键
-            // 改回 Enter 会静默回归成「长按删完」。
-            Self::Machines(overlay) => u32::from(matches!(
-                overlay.view,
-                super::machines_overlay::ClientMachinesView::ConfirmRemove(_)
-            )),
+            // 改回 Enter 会静默回归成「长按删完」。转发编辑器的删除武装态
+            // 同样是破坏性一步，必须与未武装的编辑器区分开。
+            Self::Machines(overlay) => match &overlay.view {
+                super::machines_overlay::ClientMachinesView::ConfirmRemove(_) => 1,
+                super::machines_overlay::ClientMachinesView::Forwards(view)
+                    if view.pending_remove.is_some() =>
+                {
+                    2
+                }
+                _ => 0,
+            },
             Self::MachineFiles(overlay) => u32::from(matches!(
                 overlay.view,
                 super::machine_files_overlay::ClientMachineFilesView::ConfirmDelete { .. }
