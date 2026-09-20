@@ -35,7 +35,23 @@ pub(super) fn render_dashboard(
             ..OverlayRender::default()
         });
     }
-    let layout = PageLayout::new(inner, 0, true, true);
+    // 页脚键表要先算出来：它的行数决定 `PageLayout` 给 footer 留几行
+    // （HERDR-MACH-007 的键表在单行里必然被尾部截断）。
+    let rows = machine_list_rows(profiles, endpoints, overlay.query.as_str());
+    let selected = overlay.selected.min(rows.len().saturating_sub(1));
+    let has_review = rows.get(selected).is_some_and(|row| {
+        errors
+            .get(&ClientEndpointId::Ssh(row.id.clone()))
+            .is_some_and(super::super::machine_auth_overlay::failure_kind_has_review)
+    });
+    let hints = super::machine_list_hints(!rows.is_empty(), has_review);
+    let layout = PageLayout::with_footer_rows(
+        inner,
+        0,
+        true,
+        1,
+        super::machine_footer_rows(&hints, inner.width),
+    );
     put_text(
         b,
         layout.header.x,
@@ -44,7 +60,6 @@ pub(super) fn render_dashboard(
         t.title,
         Style::default().fg(p.accent).add_modifier(Modifier::BOLD),
     );
-    let rows = machine_list_rows(profiles, endpoints, overlay.query.as_str());
     let cursor = render_search_bar(
         b,
         layout.search,
@@ -75,7 +90,6 @@ pub(super) fn render_dashboard(
         put_text(b, left.right(), y, 1, "│", Style::default().fg(p.surface1));
     }
     let count = usize::from(left.height / 2);
-    let selected = overlay.selected.min(rows.len().saturating_sub(1));
     let scroll = list_start(overlay.scroll, selected, rows.len(), count, overlay.reveal);
     let mut row_hits = Vec::new();
     for (index, row) in rows.iter().enumerate().skip(scroll).take(count) {
@@ -172,10 +186,7 @@ pub(super) fn render_dashboard(
             ),
             (t.remove_button, MachineOverlayButton::Remove),
         ];
-        if errors
-            .get(&endpoint_id)
-            .is_some_and(super::super::machine_auth_overlay::failure_kind_has_review)
-        {
+        if has_review {
             buttons.insert(
                 0,
                 (
@@ -306,18 +317,9 @@ pub(super) fn render_dashboard(
         );
         action_hits.push((rect, action));
     }
-    render_key_hints(
-        b,
-        layout.footer,
-        &[
-            ("↑↓".into(), t.hint_select.into()),
-            ("Enter".into(), t.hint_details.into()),
-            ("/".into(), t.hint_filter.into()),
-            ("Esc".into(), t.hint_close.into()),
-        ],
-        p,
-        cx.components,
-    );
+    // 页脚与动作网格同一套键：网格里有的按钮，页脚就有它的键
+    // （HERDR-MACH-007）。
+    render_key_hints(b, layout.footer, &hints, p, cx.components);
     Some(OverlayRender {
         area: popup,
         machines_popup: popup,
@@ -327,6 +329,7 @@ pub(super) fn render_dashboard(
         machines_detail_area: right,
         machines_scroll: scroll,
         machines_max_scroll: detail_max_scroll,
+        machines_toast: layout.footer,
         cursor,
         ..OverlayRender::default()
     })

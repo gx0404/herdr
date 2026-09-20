@@ -924,6 +924,7 @@ impl ClientShellState {
                 self.hits.machines_scroll = rendered.machines_scroll;
                 self.hits.machines_scroll_valid = rendered.machines_scroll_valid;
                 self.hits.machines_search = rendered.machines_search;
+                self.hits.machines_footer = rendered.machines_toast;
                 self.hits.machines_rows = rendered.machines_rows;
                 self.hits.machines_actions = rendered.machines_actions;
                 self.hits.machines_fields = rendered.machines_fields;

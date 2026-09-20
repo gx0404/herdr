@@ -1598,6 +1598,7 @@ fn overlay_step_separates_every_destructive_machine_step() {
         ClientShellOverlay::Machines(ClientMachinesOverlay {
             view: ClientMachinesView::Forwards(Box::new(ClientForwardRulesView {
                 profile_id: saved.id.clone(),
+                from_list: false,
                 selected: 0,
                 scroll: 0,
                 reveal: false,
@@ -1727,4 +1728,341 @@ fn forward_remove_asks_for_confirmation_before_deleting() {
     assert_eq!(catalog.ssh[0].port_forwards.len(), 1, "确认后删除一条");
     assert_eq!(catalog.ssh[0].port_forwards[0].listen_port, 9001);
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// 宽字符在帧里按显示宽度占两格，`frame_text` 会在它们之间留空格：比对
+/// i18n 文案一律去空白后再比。
+fn compact(text: &str) -> String {
+    text.chars().filter(|ch| !ch.is_whitespace()).collect()
+}
+
+/// 机器面板 toast 的写入时刻；`None` 表示当前没有 toast。
+fn machine_toast_at(state: &ClientShellState) -> Option<std::time::Instant> {
+    match state.overlay.as_ref() {
+        Some(ClientShellOverlay::Machines(overlay)) => {
+            overlay.message.as_ref().map(|toast| toast.at)
+        }
+        _ => None,
+    }
+}
+
+/// 只取页脚那几行（`OverlayRender::machines_toast` 报出来的 rect，也是 toast
+/// 的落点）并按 rect 的列范围裁剪。对整帧做 contains 会被动作网格的按钮文案
+/// 蒙对——`edit` ⊂ ` edit `、`重连` ⊂ ` 重连 `——所以页脚断言必须锚定到行。
+fn machines_footer_text(state: &mut ClientShellState, cols: u16, rows: u16) -> String {
+    let text = frame_text(state, cols, rows);
+    let lines = text.lines().map(str::to_owned).collect::<Vec<_>>();
+    let footer = state.hits.machines_footer;
+    assert!(!footer.is_empty(), "该视图应报出页脚行");
+    (footer.y..footer.bottom())
+        .filter_map(|y| lines.get(y as usize))
+        .map(|line| {
+            line.chars()
+                .skip(usize::from(footer.x))
+                .take(usize::from(footer.width))
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// HERDR-MACH-006：`overlay.message` 是机器面板的公共 toast。Detail 视图按
+/// `c` 之后反馈必须画在弹窗底部（此前唯一渲染点在窄屏 List 分支，Detail 与
+/// 宽屏 dashboard 零反馈），并带时间戳由 feedback tick 自动清除。
+#[test]
+fn machine_toast_renders_in_the_detail_view_and_expires() {
+    let saved = profile("Build", "dev@build.example", "60");
+    let mut state = state_with_profiles(std::slice::from_ref(&saved));
+    // 入场动画会让 `overlay_since` 也挂一个截止时刻，那样「toast 自己挂唤醒
+    // 时刻」这条断言只要有动画就恒真。关掉动画，`chrome_feedback_deadline()`
+    // 的唯一来源就只剩 toast。
+    state.config.feedback.animations = false;
+    state.open_machines_overlay_for(&saved.id);
+    let mut outcome = ClientShellInput::default();
+    state.route_machines_key(&key(KeyCode::Char('c')), &mut outcome);
+
+    let copied = compact(crate::i18n::texts().machines.copied_fix_command);
+    let text = frame_text(&mut state, 106, 36);
+    assert!(
+        compact(&text).contains(&copied),
+        "Detail 视图应显示 toast: {text}"
+    );
+
+    // toast 必须自己挂一个截止时刻，否则没有后续事件时它永远不消失。
+    let at = machine_toast_at(&state).expect("toast 写入时刻");
+    assert_eq!(
+        state.chrome_feedback_deadline(),
+        Some(at + super::super::machines_overlay::MACHINE_TOAST_DURATION),
+        "唤醒时刻必须由 toast 自己给出"
+    );
+
+    // 边界：到期前一刻不清，到期即清。
+    let almost = at + super::super::machines_overlay::MACHINE_TOAST_DURATION
+        - std::time::Duration::from_millis(1);
+    assert!(!state.tick_chrome_feedback(almost), "到期前不应重绘");
+    assert!(
+        machine_toast_at(&state).is_some(),
+        "到期前 toast 不应被清除"
+    );
+
+    let expired = at + super::super::machines_overlay::MACHINE_TOAST_DURATION;
+    assert!(
+        state.tick_chrome_feedback(expired),
+        "toast 到期必须请求一次重绘"
+    );
+    assert!(machine_toast_at(&state).is_none(), "到期后 toast 应被清除");
+    let text = frame_text(&mut state, 106, 36);
+    assert!(
+        !compact(&text).contains(&copied),
+        "toast 到期后应消失: {text}"
+    );
+}
+
+/// toast 是一次性反馈而不是入场动画：`feedback.animations` 开着时同样按
+/// `MACHINE_TOAST_DURATION` 清除（提交注释声称的性质，此前无测试兜底）。
+#[test]
+fn machine_toast_expires_with_animations_enabled() {
+    let saved = profile("Build", "dev@build.example", "64");
+    let mut state = state_with_profiles(std::slice::from_ref(&saved));
+    assert!(
+        state.config.feedback.animations,
+        "默认应开启入场动画，这条用例才有意义"
+    );
+    state.open_machines_overlay_for(&saved.id);
+    state.route_machines_key(&key(KeyCode::Char('c')), &mut ClientShellInput::default());
+
+    let at = machine_toast_at(&state).expect("toast 写入时刻");
+    assert!(
+        state.tick_chrome_feedback(at + super::super::machines_overlay::MACHINE_TOAST_DURATION),
+        "toast 到期必须请求一次重绘"
+    );
+    assert!(machine_toast_at(&state).is_none(), "到期后 toast 应被清除");
+}
+
+/// 同一条 toast 在宽屏 dashboard 上也必须可见（向导成功的「机器 X 已就绪」
+/// 此前在宽屏直接消失）。
+#[test]
+fn machine_toast_renders_on_the_wide_dashboard() {
+    let saved = profile("Build", "dev@build.example", "61");
+    let mut state = state_with_profiles(std::slice::from_ref(&saved));
+    state.open_machines_overlay();
+    let mut outcome = ClientShellInput::default();
+    state.route_machines_key(&key(KeyCode::Char('c')), &mut outcome);
+
+    let copied = compact(crate::i18n::texts().machines.copied_fix_command);
+    let text = frame_text(&mut state, 130, 40);
+    assert!(
+        compact(&text).contains(&copied),
+        "dashboard 应显示 toast: {text}"
+    );
+}
+
+/// HERDR-MACH-007：宽屏 dashboard 接管 List 之后，网格里的「转发 / 浏览文件 /
+/// 查看问题 / 复制修复命令」必须同样有键盘入口（`f/o/v/c`），取的是键盘选中
+/// 的机器而不是指针悬浮的那台。
+#[test]
+fn wide_list_routes_the_machine_action_keys() {
+    let dir = with_temp_home("machine-action-keys");
+    let saved = profile("Build", "dev@build.example", "62");
+    let mut state = state_with_profiles(std::slice::from_ref(&saved));
+    state.open_machines_overlay();
+    state.compose(130, 40).expect("dashboard frame");
+
+    // f：端口转发编辑器。
+    state.route_machines_key(&key(KeyCode::Char('f')), &mut ClientShellInput::default());
+    assert!(
+        matches!(
+            state.overlay,
+            Some(ClientShellOverlay::Machines(
+                super::super::machines_overlay::ClientMachinesOverlay {
+                    view: super::super::machines_overlay::ClientMachinesView::Forwards(_),
+                    ..
+                }
+            ))
+        ),
+        "List 的 f 应进入转发编辑器"
+    );
+    // Esc 必须回列表：从列表按 `f` 进来的转发编辑器退回更窄的 Detail 模态
+    // 正是 C-25 要消除的尺寸跳变。
+    state.route_machines_key(&key(KeyCode::Esc), &mut ClientShellInput::default());
+    assert!(
+        matches!(
+            state.overlay,
+            Some(ClientShellOverlay::Machines(
+                super::super::machines_overlay::ClientMachinesOverlay {
+                    view: super::super::machines_overlay::ClientMachinesView::List,
+                    ..
+                }
+            ))
+        ),
+        "从列表进入的转发编辑器按 Esc 应回列表，而不是 Detail"
+    );
+
+    // 从 Detail 进入时反过来：Esc 回 Detail。
+    state.open_machine_detail(&saved.id);
+    state.route_machines_key(&key(KeyCode::Char('f')), &mut ClientShellInput::default());
+    state.route_machines_key(&key(KeyCode::Esc), &mut ClientShellInput::default());
+    assert!(
+        matches!(
+            state.overlay,
+            Some(ClientShellOverlay::Machines(
+                super::super::machines_overlay::ClientMachinesOverlay {
+                    view: super::super::machines_overlay::ClientMachinesView::Detail(_),
+                    ..
+                }
+            ))
+        ),
+        "从详情进入的转发编辑器按 Esc 应回详情"
+    );
+    state.route_machines_key(&key(KeyCode::Esc), &mut ClientShellInput::default());
+
+    // o：远程文件浏览器。
+    state.route_machines_key(&key(KeyCode::Char('o')), &mut ClientShellInput::default());
+    assert!(
+        matches!(state.overlay, Some(ClientShellOverlay::MachineFiles(_))),
+        "List 的 o 应打开远程文件浏览器"
+    );
+
+    // c：复制修复命令。
+    state.open_machines_overlay();
+    let mut outcome = ClientShellInput::default();
+    state.route_machines_key(&key(KeyCode::Char('c')), &mut outcome);
+    let [ClientShellAction::ClipboardWrite(bytes)] = &outcome.actions[..] else {
+        panic!("clipboard write: {:?}", outcome.actions);
+    };
+    assert_eq!(
+        String::from_utf8_lossy(bytes),
+        "herdr --remote dev@build.example --session default"
+    );
+
+    // v：失败复核（只有真有失败时才有落点）。
+    state.set_endpoint_connection_error_kind(
+        &ClientEndpointId::Ssh(saved.id.clone()),
+        Some(crate::remote::ConnectionErrorKind::HostKeyChanged),
+    );
+    state.route_machines_key(&key(KeyCode::Char('v')), &mut ClientShellInput::default());
+    assert!(
+        matches!(state.overlay, Some(ClientShellOverlay::MachineAuth(_))),
+        "List 的 v 应打开失败复核"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// dashboard 页脚必须和它自己的动作网格同一套键，否则用户看得到按钮却以为
+/// 只有 `↑↓ / Enter / / / Esc`。断言锚定在页脚那几行（整帧 contains 会被
+/// 动作网格按钮文案蒙对），并在三个现实宽度与两种语言上各跑一遍。
+#[test]
+fn dashboard_footer_advertises_the_action_grid_keys() {
+    for lang in [crate::i18n::Lang::ZhCn, crate::i18n::Lang::En] {
+        let _guard = crate::i18n::lang_guard(lang);
+        for cols in [96u16, 116, 130] {
+            let saved = profile("Build", "dev@build.example", "63");
+            let mut state = state_with_profiles(std::slice::from_ref(&saved));
+            state.open_machines_overlay();
+            let footer = compact(&machines_footer_text(&mut state, cols, 40));
+            let t = &crate::i18n::texts().machines;
+            // 动作网格里的每个按钮都要在页脚有对应键，外加页面级键。
+            for hint in [
+                t.hint_reconnect,
+                t.hint_edit,
+                t.hint_browse_files,
+                t.hint_forwards,
+                t.hint_toggle_enabled,
+                t.hint_remove,
+                t.hint_details,
+                t.hint_select,
+                t.hint_filter,
+                t.hint_close,
+                t.hint_broadcast,
+            ] {
+                assert!(
+                    footer.contains(&compact(hint)),
+                    "{lang:?} @ {cols} 列页脚缺少 {hint}: {footer}"
+                );
+            }
+        }
+    }
+}
+
+/// 页面级键（`/` 过滤、`esc` 关闭、`b` 广播）在任何现实宽度下都不能被单机
+/// 动作键挤掉——它们在 List / dashboard 上没有等效的可见入口。
+#[test]
+fn machine_page_level_keys_survive_every_width() {
+    for lang in [crate::i18n::Lang::ZhCn, crate::i18n::Lang::En] {
+        let _guard = crate::i18n::lang_guard(lang);
+        for (cols, rows) in [(80u16, 30u16), (96, 34), (116, 36), (130, 40)] {
+            let saved = profile("Build", "dev@build.example", "65");
+            let mut state = state_with_profiles(std::slice::from_ref(&saved));
+            state.open_machines_overlay();
+            let footer = compact(&machines_footer_text(&mut state, cols, rows));
+            let t = &crate::i18n::texts().machines;
+            for hint in [t.hint_filter, t.hint_close, t.hint_broadcast] {
+                assert!(
+                    footer.contains(&compact(hint)),
+                    "{lang:?} @ {cols} 列页脚缺少页面级键 {hint}: {footer}"
+                );
+            }
+        }
+    }
+}
+
+/// 窄屏 List 的 `v 处理失败` 此前恒被写死成 false，键能用但页脚永远不提示。
+#[test]
+fn narrow_list_footer_advertises_review_when_the_failure_has_one() {
+    let saved = profile("Build", "dev@build.example", "66");
+    let mut state = state_with_profiles(std::slice::from_ref(&saved));
+    state.open_machines_overlay();
+    let review = compact(crate::i18n::texts().machines.hint_review);
+
+    // 没有失败时不提示（否则按下去是空操作）。
+    let footer = compact(&machines_footer_text(&mut state, 80, 30));
+    assert!(!footer.contains(&review), "无失败时不应提示 v: {footer}");
+
+    state.set_endpoint_connection_error_kind(
+        &ClientEndpointId::Ssh(saved.id.clone()),
+        Some(crate::remote::ConnectionErrorKind::HostKeyChanged),
+    );
+    let footer = compact(&machines_footer_text(&mut state, 80, 30));
+    assert!(
+        footer.contains(&review),
+        "窄屏 List 有可复核失败时页脚应出现 v: {footer}"
+    );
+}
+
+/// C-27 点名的第三个触发点：侧栏右键菜单的「复制修复命令」。机器面板没开，
+/// 反馈必须走通用通知通道，而不是无声无息。
+#[test]
+fn sidebar_copy_fix_command_reports_feedback_without_the_machines_page() {
+    let saved = profile("Build", "dev@build.example", "67");
+    let mut state = state_with_profiles(std::slice::from_ref(&saved));
+    let endpoint_id = ClientEndpointId::Ssh(saved.id.clone());
+    state.open_machine_context_menu(&endpoint_id, 0, 0);
+    let index = match state.overlay.as_ref() {
+        Some(ClientShellOverlay::ContextMenu(menu)) => menu
+            .items()
+            .iter()
+            .position(|item| {
+                item.action == super::super::state::ClientContextMenuAction::CopyMachineFixCommand
+            })
+            .expect("复制修复命令项"),
+        _ => panic!("右键菜单未打开"),
+    };
+    let mut outcome = ClientShellInput::default();
+    state.activate_context_menu_item(index, &mut outcome);
+
+    let [ClientShellAction::ClipboardWrite(bytes)] = &outcome.actions[..] else {
+        panic!("clipboard write: {:?}", outcome.actions);
+    };
+    assert_eq!(
+        String::from_utf8_lossy(bytes),
+        "herdr --remote dev@build.example --session default"
+    );
+    assert_eq!(
+        state
+            .visible_endpoint_notice
+            .as_ref()
+            .map(|notice| notice.title.as_str()),
+        Some(crate::i18n::texts().machines.copied_fix_command),
+        "面板未打开时必须有通用反馈"
+    );
 }

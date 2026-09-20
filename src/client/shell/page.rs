@@ -31,6 +31,18 @@ impl PageLayout {
         search: bool,
         action_rows: u16,
     ) -> Self {
+        Self::with_footer_rows(area, navigation_rows, search, action_rows, 1)
+    }
+
+    /// 页脚要多于一行时用这个入口：键表较长的页面（机器列表 / 工作台）给
+    /// `render_key_hints` 两行，避免页面级键被单行尾部截断吃掉。
+    pub fn with_footer_rows(
+        area: Rect,
+        navigation_rows: u16,
+        search: bool,
+        action_rows: u16,
+        footer_rows: u16,
+    ) -> Self {
         let mut remaining = area;
         let mut take = |height: u16| {
             let result = Rect::new(
@@ -47,7 +59,8 @@ impl PageLayout {
         let navigation = take(navigation_rows);
         let search = take(u16::from(search));
         take(u16::from(area.height >= 10));
-        let footer_height = u16::from(remaining.height > 0);
+        // `footer_rows == 1` 与旧行为逐格一致：剩余高度为 0 时没有页脚。
+        let footer_height = footer_rows.min(remaining.height);
         let action_height = action_rows.min(remaining.height.saturating_sub(footer_height));
         let content = Rect::new(
             remaining.x,

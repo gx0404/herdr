@@ -585,6 +585,7 @@ pub struct MachinesTexts {
     pub hint_toggle_enabled: &'static str,
     pub hint_remove: &'static str,
     pub hint_forwards: &'static str,
+    pub hint_copy_fix: &'static str,
     pub hint_fields: &'static str,
     pub hint_change: &'static str,
     pub hint_next: &'static str,

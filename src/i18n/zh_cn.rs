@@ -470,6 +470,7 @@ pub const TEXTS: Texts = Texts {
         hint_toggle_enabled: "启用/禁用",
         hint_remove: "移除",
         hint_forwards: "端口转发",
+        hint_copy_fix: "复制修复命令",
         hint_fields: "切换字段",
         hint_change: "调整",
         hint_next: "下一步",

@@ -38,10 +38,44 @@ pub(in crate::client::shell) fn render_sidebar_background(
     }
 }
 
+/// 一段键提示在 `render_key_hints` 里占用的列宽：键帽（左右各一个空格）+
+/// 一个间隔 + 文案，非末项再加两列分隔。页脚要在绘制前判断能否放下时必须
+/// 用这个函数，避免两处各写一份宽度公式。
+fn key_hint_segment_width(key: &str, label: &str, last: bool) -> u16 {
+    display_width(key)
+        .saturating_add(2)
+        .saturating_add(1)
+        .saturating_add(display_width(label))
+        .saturating_add(if last { 0 } else { 2 })
+}
+
+/// 一组键提示按 `width` 列排版需要的行数（0 行表示放不下任何一项）。
+pub(super) fn key_hints_rows(hints: &[(String, String)], width: u16) -> u16 {
+    if width == 0 || hints.is_empty() {
+        return 0;
+    }
+    let mut rows = 1u16;
+    let mut used = 0u16;
+    for (index, (key, label)) in hints.iter().enumerate() {
+        let last = index + 1 == hints.len();
+        let segment = key_hint_segment_width(key, label, last);
+        if used.saturating_add(segment) > width {
+            if used == 0 {
+                // 单项就超宽：再换行也放不下，按当前行计。
+                return rows;
+            }
+            rows = rows.saturating_add(1);
+            used = 0;
+        }
+        used = used.saturating_add(segment);
+    }
+    rows
+}
+
 /// Keycap-style shortcut footer: each hint renders as a padded key cap
 /// (accent on surface0) followed by its description in the muted base color.
-/// Hints that no longer fit are dropped whole and an ellipsis marks the
-/// truncation. Callers pass hints resolved from the live keybind config so
+/// 放不下的提示整项换行；`area` 的行用完后剩余项整项丢弃，并在末尾画省略号
+/// 标记截断。Callers pass hints resolved from the live keybind config so
 /// the footer stays documentation generated from bindings.
 pub(super) fn render_key_hints(
     buffer: &mut Buffer,
@@ -59,28 +93,37 @@ pub(super) fn render_key_hints(
         .bg(palette.surface0)
         .add_modifier(Modifier::BOLD);
     let mut x = area.x;
+    let mut y = area.y;
     let end = area.right();
+    let bottom = area.bottom();
     let mut truncated = false;
     for (index, (key, label)) in hints.iter().enumerate() {
         let cap_width = display_width(key).saturating_add(2);
         let label_width = display_width(label);
         let separator = if index + 1 == hints.len() { 0 } else { 2 };
-        let segment = cap_width
-            .saturating_add(1)
-            .saturating_add(label_width)
-            .saturating_add(separator);
+        let segment = key_hint_segment_width(key, label, index + 1 == hints.len());
+        if x.saturating_add(segment) > end {
+            // 多行页脚（`area.height > 1`）先换行再放弃；单行页脚行为不变。
+            if x > area.x && y.saturating_add(1) < bottom {
+                y = y.saturating_add(1);
+                x = area.x;
+            } else {
+                truncated = true;
+                break;
+            }
+        }
         if x.saturating_add(segment) > end {
             truncated = true;
             break;
         }
         let cap_text = format!(" {key} ");
-        put_text(buffer, x, area.y, cap_width.min(end - x), &cap_text, cap);
+        put_text(buffer, x, y, cap_width.min(end - x), &cap_text, cap);
         x = x.saturating_add(cap_width).saturating_add(1);
-        put_text(buffer, x, area.y, label_width.min(end - x), label, base);
+        put_text(buffer, x, y, label_width.min(end - x), label, base);
         x = x.saturating_add(label_width).saturating_add(separator);
     }
     if truncated && x < end {
-        put_text(buffer, x, area.y, end - x, "…", base);
+        put_text(buffer, x, y, end - x, "…", base);
     }
 }
 

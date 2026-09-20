@@ -433,6 +433,7 @@ pub const TEXTS: Texts = Texts {
         hint_toggle_enabled: "enable/disable",
         hint_remove: "remove",
         hint_forwards: "forwards",
+        hint_copy_fix: "copy fix",
         hint_fields: "fields",
         hint_change: "change",
         hint_next: "next",

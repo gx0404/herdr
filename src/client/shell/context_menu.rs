@@ -333,20 +333,10 @@ impl ClientShellState {
                         self.machine_set_enabled(&profile_id, !enabled);
                     }
                     Action::RemoveMachine => self.open_machine_remove_confirm(&profile_id),
+                    // 与机器面板的 `c` 同一条路径：自己拼命令会漏掉反馈
+                    // （C-27：这个触发点此前零反馈）。
                     Action::CopyMachineFixCommand => {
-                        if let Some(profile) = self
-                            .saved_profiles
-                            .iter()
-                            .find(|profile| profile.id == profile_id)
-                        {
-                            let command = crate::remote::saved_ssh_bootstrap_command(
-                                &profile.target,
-                                &profile.session,
-                            );
-                            outcome
-                                .actions
-                                .push(ClientShellAction::ClipboardWrite(command.into_bytes()));
-                        }
+                        self.machine_copy_fix_command(&profile_id, outcome)
                     }
                     _ => {}
                 }

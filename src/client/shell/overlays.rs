@@ -44,6 +44,10 @@ pub(crate) struct OverlayRender {
     /// forward add form.
     pub(crate) machines_wizard_fields: Vec<(Rect, usize)>,
     pub(crate) machines_max_scroll: usize,
+    /// 机器面板公共 toast 的落点：List / Detail / dashboard 各自把自己的
+    /// 页脚行报上来，`render_machines_overlay` 在顶层统一画一次
+    /// （HERDR-MACH-006）。空 rect = 该视图不承载 toast。
+    pub(crate) machines_toast: Rect,
     pub(crate) machine_auth_max_scroll: usize,
     pub(crate) machine_auth_actions: Vec<(Rect, super::machine_auth_overlay::MachineAuthButton)>,
     pub(crate) broadcast_popup: Rect,

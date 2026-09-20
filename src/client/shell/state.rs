@@ -234,6 +234,9 @@ pub(super) struct ShellHitMap {
     /// 上一帧是否真的画了某个机器面板列表；见 `OverlayRender`。
     pub(super) machines_scroll_valid: bool,
     pub(super) machines_search: Rect,
+    /// 上一帧机器面板的页脚行（键表 + 公共 toast 的落点）；空 rect 表示当前
+    /// 视图不承载页脚。
+    pub(super) machines_footer: Rect,
     pub(super) machines_rows: Vec<(Rect, crate::client::endpoint::ProfileId)>,
     pub(super) machines_actions: Vec<(Rect, super::machines_overlay::MachineOverlayButton)>,
     pub(super) machines_fields: Vec<(Rect, super::machines_overlay::MachineField)>,

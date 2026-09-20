@@ -32,9 +32,20 @@ pub(super) struct ClientMachinesOverlay {
     /// 划过列表就把这些破坏性键重新指向「鼠标最后路过的机器」是不可接受的
     /// （MENU-01 / UX-04）。存身份而不是行号，筛选与重排后天然失效。
     pub(super) hovered: Option<ProfileId>,
-    /// One-shot feedback line shown in the list view (e.g. copied command).
-    pub(super) message: Option<String>,
+    /// 机器面板的一次性反馈（复制修复命令、向导成功）。带时间戳，由
+    /// `tick_chrome_feedback` 到期清除；渲染落点见 `render_machines_toast`。
+    pub(super) message: Option<MachineToast>,
 }
+
+/// 机器面板公共 toast：一行反馈 + 写入时刻。
+#[derive(Debug, Clone)]
+pub(super) struct MachineToast {
+    pub(super) text: String,
+    pub(super) at: std::time::Instant,
+}
+
+/// toast 在屏时长；到期由 feedback tick 清除并请求一次重绘。
+pub(super) const MACHINE_TOAST_DURATION: std::time::Duration = std::time::Duration::from_secs(4);
 
 impl ClientMachinesOverlay {
     fn blank() -> Self {
@@ -49,6 +60,19 @@ impl ClientMachinesOverlay {
             hovered: None,
             message: None,
         }
+    }
+
+    /// 写入一条公共 toast（覆盖上一条，重新计时）。
+    ///
+    /// 时间戳在这里取：按键路由与向导 bootstrap 轮询这两条调用链都没有本帧
+    /// 的 now 可传（`record_terminal_bell` 的生产调用点同样是就地
+    /// `Instant::now()`），注入只会把同一行代码挪到调用方。`at` 是公开字段，
+    /// 测试可以据此在 `MACHINE_TOAST_DURATION` 边界上精确断言。
+    pub(super) fn set_message(&mut self, text: String) {
+        self.message = Some(MachineToast {
+            text,
+            at: std::time::Instant::now(),
+        });
     }
 
     /// A wizard bootstrap is running (no failure yet): drives the spinner.
@@ -77,6 +101,10 @@ pub(super) enum ClientMachinesView {
 #[derive(Debug)]
 pub(super) struct ClientForwardRulesView {
     pub(super) profile_id: ProfileId,
+    /// 进入这个编辑器时停在哪个视图：宽屏 dashboard / 窄屏 List 直接按 `f`
+    /// 进来的，Esc 必须回列表而不是掉进更窄的 Detail 模态（那正是 C-25 要
+    /// 消除的尺寸跳变）。
+    pub(super) from_list: bool,
     pub(super) selected: usize,
     /// 规则列表的滚动窗口起点；由渲染经 `OverlayRender::machines_scroll` 回写，
     /// 与机器列表同一套「compose 期回写 scroll」模式。
@@ -1025,17 +1053,36 @@ impl ClientShellState {
         });
     }
 
-    fn machine_copy_fix_command(&mut self, profile_id: &ProfileId, outcome: &mut ClientShellInput) {
+    /// 复制该机器的修复 / 启动命令，并给一条反馈。机器面板开着时落到公共
+    /// toast；侧栏右键菜单触发时面板根本没开（C-27 点名的第三个触发点），
+    /// 走通用 Success 通知通道，不至于零反馈。
+    pub(super) fn machine_copy_fix_command(
+        &mut self,
+        profile_id: &ProfileId,
+        outcome: &mut ClientShellInput,
+    ) {
         let Some(profile) = self.saved_profile(profile_id) else {
             return;
         };
+        let label = profile.label.clone();
         let command = crate::remote::saved_ssh_bootstrap_command(&profile.target, &profile.session);
         outcome
             .actions
             .push(ClientShellAction::ClipboardWrite(command.into_bytes()));
-        if let Some(ClientShellOverlay::Machines(overlay)) = self.overlay.as_mut() {
-            overlay.message = Some(crate::i18n::texts().machines.copied_fix_command.to_owned());
+        let text = crate::i18n::texts().machines.copied_fix_command;
+        // 取法与向导成功路径、feedback tick 一致：命令面板盖在机器页之上时
+        // 仍写进机器页自己的 toast。
+        if let Some(ClientShellOverlay::Machines(overlay)) = self.content_page_mut() {
+            overlay.set_message(text.to_owned());
+            return;
         }
+        self.push_endpoint_notice(
+            super::state::ClientEndpointNoticeKind::Success,
+            "machine:copy_fix_command",
+            text,
+            label,
+        );
+        outcome.repaint = true;
     }
 
     fn filtered_machine_rows(&self, query: &str) -> Vec<MachineListRow> {
@@ -1119,7 +1166,11 @@ impl ClientShellState {
                         }
                         return;
                     }
-                    Back::Detail(view.profile_id.clone())
+                    if view.from_list {
+                        Back::List
+                    } else {
+                        Back::Detail(view.profile_id.clone())
+                    }
                 }
                 ClientMachinesView::Import(view) => match view.step {
                     ClientImportStep::Select => {
@@ -1431,7 +1482,7 @@ impl ClientShellState {
             Ok(profile_id) => {
                 if let Some(ClientShellOverlay::Machines(overlay)) = self.content_page_mut() {
                     overlay.view = ClientMachinesView::List;
-                    overlay.message = Some(crate::i18n::fill(
+                    overlay.set_message(crate::i18n::fill(
                         crate::i18n::texts().machines.progress_done_fmt,
                         &[("label", &label)],
                     ));
@@ -1501,8 +1552,10 @@ impl ClientShellState {
             return;
         }
         if let Some(ClientShellOverlay::Machines(overlay)) = self.overlay.as_mut() {
+            let from_list = matches!(overlay.view, ClientMachinesView::List);
             overlay.view = ClientMachinesView::Forwards(Box::new(ClientForwardRulesView {
                 profile_id: profile_id.clone(),
+                from_list,
                 selected: 0,
                 scroll: 0,
                 reveal: true,
@@ -2373,25 +2426,13 @@ impl ClientShellState {
                                 overlay.detail_scroll.saturating_add(1).min(256);
                         }
                     }
-                    KeyCode::Char('e') if plain => self.open_machine_edit_form(&id),
-                    KeyCode::Char('R') if modifiers == KeyModifiers::SHIFT => {
-                        self.open_machine_rename_overlay(&id)
-                    }
-                    KeyCode::Char('r') if plain => self.machine_reconnect(&id, outcome),
-                    KeyCode::Char('v') if plain => {
-                        self.open_machine_auth_for_endpoint(&id, outcome);
-                    }
-                    KeyCode::Char('d') if plain => self.machine_toggle_enabled(&id),
-                    KeyCode::Char('x') if plain => {
-                        if let Some(ClientShellOverlay::Machines(overlay)) = self.overlay.as_mut() {
-                            overlay.view = ClientMachinesView::ConfirmRemove(id);
+                    KeyCode::Char('b') if plain => self.open_broadcast_overlay(),
+                    // 其余动作键与 List 共用一张表（HERDR-MACH-007）。
+                    _ => {
+                        if !self.handle_machine_action_key(&id, code, modifiers, outcome) {
+                            return true;
                         }
                     }
-                    KeyCode::Char('c') if plain => self.machine_copy_fix_command(&id, outcome),
-                    KeyCode::Char('f') if plain => self.open_machine_forwards(&id),
-                    KeyCode::Char('b') if plain => self.open_broadcast_overlay(),
-                    KeyCode::Char('o') if plain => self.open_machine_files(&id, outcome),
-                    _ => return true,
                 }
                 outcome.repaint = true;
                 return true;
@@ -2497,35 +2538,54 @@ impl ClientShellState {
                 self.open_machine_import_wizard();
                 outcome.repaint = true;
             }
-            KeyCode::Char('e' | 'r' | 'd' | 'x') if plain => {
-                if let Some(id) = self.selected_machine_id() {
-                    match code {
-                        KeyCode::Char('e') => self.open_machine_edit_form(&id),
-                        KeyCode::Char('r') => self.machine_reconnect(&id, outcome),
-                        KeyCode::Char('d') => self.machine_toggle_enabled(&id),
-                        KeyCode::Char('x') => {
-                            if let Some(ClientShellOverlay::Machines(overlay)) =
-                                self.overlay.as_mut()
-                            {
-                                overlay.view = ClientMachinesView::ConfirmRemove(id);
-                            }
-                        }
-                        _ => {}
-                    }
-                }
-                outcome.repaint = true;
-            }
-            KeyCode::Char('R') if modifiers == KeyModifiers::SHIFT => {
-                if let Some(id) = self.selected_machine_id() {
-                    self.open_machine_rename_overlay(&id);
-                }
-                outcome.repaint = true;
-            }
             KeyCode::Char('b') if plain => {
                 self.open_broadcast_overlay();
                 outcome.repaint = true;
             }
-            _ => {}
+            // 宽屏 dashboard 接管 List 后网格里有转发 / 浏览文件 / 查看问题 /
+            // 复制修复命令，键盘必须有同样的入口（HERDR-MACH-007）。目标一律
+            // 取键盘选中的那台机器，指针悬浮不参与。
+            _ => {
+                if let Some(id) = self.selected_machine_id() {
+                    if self.handle_machine_action_key(&id, code, modifiers, outcome) {
+                        outcome.repaint = true;
+                    }
+                }
+            }
+        }
+        true
+    }
+
+    /// List 与 Detail 共用的单机动作表：`e/R/r/v/d/x/c/f/o`。返回 true 表示
+    /// 这次按键被消费（调用方负责置 `repaint`）。
+    fn handle_machine_action_key(
+        &mut self,
+        profile_id: &ProfileId,
+        code: KeyCode,
+        modifiers: KeyModifiers,
+        outcome: &mut ClientShellInput,
+    ) -> bool {
+        let plain = modifiers.is_empty();
+        match code {
+            KeyCode::Char('e') if plain => self.open_machine_edit_form(profile_id),
+            KeyCode::Char('R') if modifiers == KeyModifiers::SHIFT => {
+                self.open_machine_rename_overlay(profile_id)
+            }
+            KeyCode::Char('r') if plain => self.machine_reconnect(profile_id, outcome),
+            KeyCode::Char('v') if plain => {
+                // 没有可复核的失败时是空操作（照样算消费，避免落到别的键）。
+                self.open_machine_auth_for_endpoint(profile_id, outcome);
+            }
+            KeyCode::Char('d') if plain => self.machine_toggle_enabled(profile_id),
+            KeyCode::Char('x') if plain => {
+                if let Some(ClientShellOverlay::Machines(overlay)) = self.overlay.as_mut() {
+                    overlay.view = ClientMachinesView::ConfirmRemove(profile_id.clone());
+                }
+            }
+            KeyCode::Char('c') if plain => self.machine_copy_fix_command(profile_id, outcome),
+            KeyCode::Char('f') if plain => self.open_machine_forwards(profile_id),
+            KeyCode::Char('o') if plain => self.open_machine_files(profile_id, outcome),
+            _ => return false,
         }
         true
     }
@@ -3019,7 +3079,145 @@ pub(super) fn machine_hash_color(label: &str, p: &Palette) -> ratatui::style::Co
     hues[(hash as usize) % hues.len()]
 }
 
+/// List 与宽屏 dashboard 共用的页脚键表：与 `handle_machine_action_key` 的
+/// 动作表、dashboard 动作网格同序同集（HERDR-MACH-007）。
+///
+/// 顺序就是「丢弃优先级」：`render_key_hints` 填满 `area` 的行之后整项丢弃
+/// 并画 `…`，所以页面级键（`/` 过滤、`esc` 关闭、`b` 广播——这三个在 List /
+/// dashboard 上没有等效按钮或搜索框以外的入口）排在所有单机动作键之前，
+/// 而末尾的 `a` 添加 / `i` 导入在两个视图里都有对应按钮兜底。`c` 的出现
+/// 条件与按键一致（有选中即可用），不再按 Attention 门禁——侧栏右键菜单的
+/// 「复制修复命令」同样不分状态。
+fn machine_list_hints(has_selection: bool, has_review: bool) -> Vec<(String, String)> {
+    let t = &crate::i18n::texts().machines;
+    let mut hints = vec![
+        ("↑↓".to_owned(), t.hint_select.to_owned()),
+        ("enter".to_owned(), t.hint_details.to_owned()),
+        ("/".to_owned(), t.hint_filter.to_owned()),
+        ("esc".to_owned(), t.hint_close.to_owned()),
+        ("b".to_owned(), t.hint_broadcast.to_owned()),
+    ];
+    if has_selection {
+        hints.extend(machine_action_hints(has_review));
+    }
+    hints.extend([
+        ("a".to_owned(), t.hint_add.to_owned()),
+        ("i".to_owned(), t.hint_import.to_owned()),
+    ]);
+    hints
+}
+
+/// Detail 页脚：与 List / dashboard 同一张单机动作表，只是把页面级键换成
+/// `esc 返回` 与 `b 广播`（Detail 没有列表导航与添加 / 导入）。
+fn machine_detail_hints(has_review: bool) -> Vec<(String, String)> {
+    let t = &crate::i18n::texts().machines;
+    let mut hints = vec![
+        ("esc".to_owned(), t.hint_back.to_owned()),
+        ("b".to_owned(), t.hint_broadcast.to_owned()),
+    ];
+    hints.extend(machine_action_hints(has_review));
+    hints
+}
+
+/// 单机动作键：三个视图（List / 宽屏 dashboard / Detail）同序同集，出现
+/// 条件也只在这一处判定（HERDR-MACH-007）。`v` 只在失败类型真有界面内恢复
+/// 路径时出现（`open_machine_auth_for_endpoint` 否则是空操作）；`c` 与按键
+/// 一样不分状态，侧栏右键菜单的「复制修复命令」同样不分状态。
+fn machine_action_hints(has_review: bool) -> Vec<(String, String)> {
+    let t = &crate::i18n::texts().machines;
+    let mut hints = Vec::with_capacity(9);
+    if has_review {
+        hints.push(("v".to_owned(), t.hint_review.to_owned()));
+    }
+    hints.extend([
+        ("r".to_owned(), t.hint_reconnect.to_owned()),
+        ("e".to_owned(), t.hint_edit.to_owned()),
+        ("f".to_owned(), t.hint_forwards.to_owned()),
+        ("o".to_owned(), t.hint_browse_files.to_owned()),
+        ("d".to_owned(), t.hint_toggle_enabled.to_owned()),
+        ("x".to_owned(), t.hint_remove.to_owned()),
+        ("R".to_owned(), t.hint_rename.to_owned()),
+        ("c".to_owned(), t.hint_copy_fix.to_owned()),
+    ]);
+    hints
+}
+
+/// 机器页页脚（List / 宽屏 dashboard / Detail）要的行数：完整键表在单行里
+/// 必然被尾部截断，所以按实际宽度取，最多两行——再多会把列表可见行数吃掉。
+/// 两行仍放不下时按上面的顺序从尾部丢（`R` / `c` / `a` / `i`，这几个都还有
+/// 按钮或侧栏右键菜单兜底）。
+fn machine_footer_rows(hints: &[(String, String)], width: u16) -> u16 {
+    super::render::key_hints_rows(hints, width).clamp(1, 2)
+}
+
+/// 机器面板公共 toast：视图各自把页脚行报成 `OverlayRender::machines_toast`，
+/// 这里在顶层统一画一次，所以 List / Detail / dashboard 反馈落点一致
+/// （HERDR-MACH-006）。
+fn render_machines_toast(b: &mut Buffer, rect: Rect, message: &str, p: &Palette) {
+    use ratatui::widgets::Widget as _;
+    if rect.is_empty() {
+        return;
+    }
+    let row = Rect::new(rect.x, rect.bottom().saturating_sub(1), rect.width, 1);
+    ratatui::widgets::Clear.render(row, b);
+    b.set_style(row, Style::default().bg(p.panel_bg));
+    let icon_width = display_width("● ").min(row.width);
+    put_text(
+        b,
+        row.x,
+        row.y,
+        icon_width,
+        "● ",
+        Style::default().fg(p.green).bg(p.panel_bg),
+    );
+    put_text(
+        b,
+        row.x.saturating_add(icon_width),
+        row.y,
+        row.width.saturating_sub(icon_width),
+        message,
+        Style::default()
+            .fg(p.green)
+            .bg(p.panel_bg)
+            .add_modifier(Modifier::BOLD),
+    );
+}
+
+// 机器面板渲染入口：视图分派 + 公共 toast。参数与既有机器页渲染入口一致，
+// 集中在一次投影中避免从全局重新查状态；打包成 struct 反而要多一层生命周期
+// 标注，故豁免 too_many_arguments。
+#[allow(clippy::too_many_arguments)]
 pub(super) fn render_machines_overlay(
+    b: &mut Buffer,
+    overlay: &ClientMachinesOverlay,
+    endpoints: &[ClientShellEndpoint],
+    saved_profiles: &[SavedSshEndpoint],
+    connection_errors: &HashMap<ClientEndpointId, crate::remote::ConnectionErrorKind>,
+    port_forwards: &HashMap<ClientEndpointId, Vec<crate::remote::PortForwardStatus>>,
+    session_log_dropped: &HashMap<ProfileId, u64>,
+    cx: &super::feedback::ChromeContext<'_>,
+) -> Option<OverlayRender> {
+    let render = render_machines_view(
+        b,
+        overlay,
+        endpoints,
+        saved_profiles,
+        connection_errors,
+        port_forwards,
+        session_log_dropped,
+        cx,
+    );
+    // 公共 toast 最后画，盖在视图自己的页脚提示之上。
+    if let (Some(render), Some(toast)) = (render.as_ref(), overlay.message.as_ref()) {
+        render_machines_toast(b, render.machines_toast, &toast.text, cx.palette);
+    }
+    render
+}
+
+// 参数与 `render_machines_overlay` 逐个一致（视图分派本身不带公共 chrome），
+// 同理豁免 too_many_arguments：收成 struct 只会把同一组只读引用再包一层。
+#[allow(clippy::too_many_arguments)]
+fn render_machines_view(
     b: &mut Buffer,
     overlay: &ClientMachinesOverlay,
     endpoints: &[ClientShellEndpoint],
@@ -3044,12 +3242,21 @@ pub(super) fn render_machines_overlay(
         );
     }
     match &overlay.view {
-        ClientMachinesView::List => render_machine_list(b, overlay, endpoints, saved_profiles, cx),
+        ClientMachinesView::List => {
+            render_machine_list(b, overlay, endpoints, saved_profiles, connection_errors, cx)
+        }
         ClientMachinesView::Detail(id) => {
             if !saved_profiles.iter().any(|profile| &profile.id == id) {
                 // The profile vanished underneath the overlay (external edit);
                 // degrade to the list rather than aborting composition.
-                return render_machine_list(b, overlay, endpoints, saved_profiles, cx);
+                return render_machine_list(
+                    b,
+                    overlay,
+                    endpoints,
+                    saved_profiles,
+                    connection_errors,
+                    cx,
+                );
             }
             render_machine_detail(
                 b,
@@ -3065,7 +3272,14 @@ pub(super) fn render_machines_overlay(
         }
         ClientMachinesView::ConfirmRemove(id) => {
             if !saved_profiles.iter().any(|profile| &profile.id == id) {
-                return render_machine_list(b, overlay, endpoints, saved_profiles, cx);
+                return render_machine_list(
+                    b,
+                    overlay,
+                    endpoints,
+                    saved_profiles,
+                    connection_errors,
+                    cx,
+                );
             }
             render_machine_confirm_remove(b, id, saved_profiles, cx)
         }
@@ -3075,7 +3289,14 @@ pub(super) fn render_machines_overlay(
                 .iter()
                 .any(|profile| profile.id == view.profile_id)
             {
-                return render_machine_list(b, overlay, endpoints, saved_profiles, cx);
+                return render_machine_list(
+                    b,
+                    overlay,
+                    endpoints,
+                    saved_profiles,
+                    connection_errors,
+                    cx,
+                );
             }
             render_machine_forwards(b, view, saved_profiles, port_forwards, cx)
         }
@@ -3088,6 +3309,7 @@ fn render_machine_list(
     overlay: &ClientMachinesOverlay,
     endpoints: &[ClientShellEndpoint],
     saved_profiles: &[SavedSshEndpoint],
+    connection_errors: &HashMap<ClientEndpointId, crate::remote::ConnectionErrorKind>,
     cx: &super::feedback::ChromeContext<'_>,
 ) -> Option<OverlayRender> {
     let p = cx.palette;
@@ -3100,7 +3322,22 @@ fn render_machine_list(
             ..OverlayRender::default()
         });
     }
-    let stack = crate::ui::modal_stack_areas(inner, 2, 1, 1, 1);
+    let rows = machine_list_rows(saved_profiles, endpoints, overlay.query.as_str());
+    // `v 处理失败` 的出现条件与 dashboard 同一张表：用选中机器的失败类型，
+    // 而不是硬编码 false（窄屏 List 此前永远不显示它）。
+    let selected = if rows.is_empty() {
+        0
+    } else {
+        overlay.selected.min(rows.len() - 1)
+    };
+    let has_review = rows.get(selected).is_some_and(|row| {
+        connection_errors
+            .get(&ClientEndpointId::Ssh(row.id.clone()))
+            .is_some_and(super::machine_auth_overlay::failure_kind_has_review)
+    });
+    let hints = machine_list_hints(!rows.is_empty(), has_review);
+    let stack =
+        crate::ui::modal_stack_areas(inner, 2, machine_footer_rows(&hints, inner.width), 1, 1);
     let base = Style::default()
         .bg(p.panel_bg)
         .remove_modifier(Modifier::DIM);
@@ -3112,7 +3349,6 @@ fn render_machine_list(
         &format!(" {}", t.title),
         base.fg(p.text).add_modifier(Modifier::BOLD),
     );
-    let rows = machine_list_rows(saved_profiles, endpoints, overlay.query.as_str());
     let count = crate::i18n::fill(t.count_fmt, &[("count", &rows.len().to_string())]);
     let cursor = render_search_bar(
         b,
@@ -3131,11 +3367,6 @@ fn render_machine_list(
     let body = stack.content;
     let row_height = 2usize;
     let visible = (usize::from(body.height) / row_height).max(1);
-    let selected = if rows.is_empty() {
-        0
-    } else {
-        overlay.selected.min(rows.len() - 1)
-    };
     let scroll = super::page::list_start(
         overlay.scroll,
         selected,
@@ -3220,32 +3451,7 @@ fn render_machine_list(
         );
     }
     if let Some(footer) = stack.footer {
-        if let Some(message) = overlay.message.as_deref() {
-            put_text(
-                b,
-                footer.x,
-                footer.y,
-                footer.width,
-                message,
-                base.fg(p.green),
-            );
-        } else {
-            render_key_hints(
-                b,
-                footer,
-                &[
-                    ("↑↓".to_owned(), t.hint_select.to_owned()),
-                    ("enter".to_owned(), t.hint_details.to_owned()),
-                    ("a".to_owned(), t.hint_add.to_owned()),
-                    ("i".to_owned(), t.hint_import.to_owned()),
-                    ("b".to_owned(), t.hint_broadcast.to_owned()),
-                    ("/".to_owned(), t.hint_filter.to_owned()),
-                    ("esc".to_owned(), t.hint_close.to_owned()),
-                ],
-                p,
-                cx.components,
-            );
-        }
+        render_key_hints(b, footer, &hints, p, cx.components);
     }
 
     let mut action_hits = Vec::new();
@@ -3305,6 +3511,7 @@ fn render_machine_list(
         machines_rows: row_hits,
         machines_actions: action_hits,
         machines_max_scroll: rows.len().saturating_sub(visible),
+        machines_toast: stack.footer.unwrap_or_default(),
         cursor,
         ..OverlayRender::default()
     })
@@ -3548,11 +3755,15 @@ fn render_machine_detail(
         buttons.push(MachineOverlayButton::CopyFix);
     }
     buttons.push(MachineOverlayButton::Close);
-    let stack = super::page::PageLayout::with_action_rows(
+    // 页脚键表先算出来：Detail 的单机动作表同样在单行里必然被尾部截断
+    // （HERDR-MACH-007「同序同集」只有在页脚真的画得下时才成立）。
+    let hints = machine_detail_hints(has_review);
+    let stack = super::page::PageLayout::with_footer_rows(
         inner,
         0,
         false,
         super::page::action_row_count(inner.width, &labels),
+        machine_footer_rows(&hints, inner.width),
     );
     let base = Style::default()
         .bg(p.panel_bg)
@@ -3655,26 +3866,7 @@ fn render_machine_detail(
         );
     }
 
-    {
-        let footer = stack.footer;
-        let mut hints: Vec<(String, String)> = vec![
-            ("e".to_owned(), t.hint_edit.to_owned()),
-            ("R".to_owned(), t.hint_rename.to_owned()),
-            ("r".to_owned(), t.hint_reconnect.to_owned()),
-        ];
-        if attention {
-            hints.push(("v".to_owned(), t.hint_review.to_owned()));
-        }
-        hints.extend([
-            ("d".to_owned(), t.hint_toggle_enabled.to_owned()),
-            ("x".to_owned(), t.hint_remove.to_owned()),
-            ("f".to_owned(), t.hint_forwards.to_owned()),
-            ("o".to_owned(), t.hint_browse_files.to_owned()),
-            ("b".to_owned(), t.hint_broadcast.to_owned()),
-            ("esc".to_owned(), t.hint_back.to_owned()),
-        ]);
-        render_key_hints(b, footer, &hints, p, cx.components);
-    }
+    render_key_hints(b, stack.footer, &hints, p, cx.components);
 
     let rects = super::page::action_grid(stack.actions, &labels);
     if rects.len() == labels.len() {
@@ -3714,6 +3906,7 @@ fn render_machine_detail(
         machines_popup: popup,
         machines_actions: action_hits,
         machines_max_scroll: max_scroll,
+        machines_toast: stack.footer,
         ..OverlayRender::default()
     })
 }
