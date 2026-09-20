@@ -11,10 +11,16 @@
 //!    `CUP` positions during the frame stream.
 //! 5. After writing all changed cells, restore the final cursor visibility
 //!    and position from `frame.cursor`.
-//! 6. On platforms that need it, repeat the final cursor anchor after ending
+//! 6. On hosts that need it, repeat the final cursor anchor after ending
 //!    synchronized output so external IMEs can place candidate windows at the
 //!    real input position. Windows Terminal exposes that repeat as visible
-//!    cursor movement during active TUI repaints, so Windows skips it.
+//!    cursor movement during active TUI repaints, so Windows skips it. The
+//!    policy is an explicit [`BlitEncoder`] field: the client-rendered shell
+//!    resolves `ui.repeat_ime_cursor_anchor` once at start via
+//!    [`client_ime_anchor_repeat`] and injects it; server/headless encoders
+//!    keep the legacy default. `auto` skips the repeat on terminals where the
+//!    bare post-sync `CUP`+`?25h` is known to show up as cursor/tab-switch
+//!    flicker (see [`ImeAnchorHostEnv::post_sync_anchor_repeat_shows_as_flicker`]).
 //!
 //! Escape sequences used:
 //! - `CSI H` (CUP) — move cursor to (row, col)
@@ -55,16 +61,42 @@ pub(crate) struct EncodedBlit {
 }
 
 /// Stateful encoder that diffs semantic frames into terminal ANSI bytes.
-#[derive(Default)]
 pub(crate) struct BlitEncoder {
     last_frame: Option<FrameData>,
     last_visible_cursor: Option<(u16, u16)>,
     last_cursor_shape: u8,
+    /// 同步块结束后是否补发最终光标锚点（模块文档第 6 条）。显式字段而非进程级
+    /// 全局：客户端按 `ui.repeat_ime_cursor_anchor` 注入，其它构造点用平台默认。
+    repeat_ime_anchor: bool,
+}
+
+impl Default for BlitEncoder {
+    fn default() -> Self {
+        Self::with_ime_anchor_repeat(PLATFORM_ALLOWS_IME_ANCHOR_REPEAT)
+    }
 }
 
 impl BlitEncoder {
+    /// 平台默认策略（旧行为）：非 Windows 补发、Windows 不补发。server 帧流与
+    /// headless 路径用它。
     pub(crate) fn new() -> Self {
         Self::default()
+    }
+
+    /// 显式注入块外锚点策略；客户端自渲染 shell 用 [`client_ime_anchor_repeat`] 的结果。
+    pub(crate) fn with_ime_anchor_repeat(repeat_ime_anchor: bool) -> Self {
+        Self {
+            last_frame: None,
+            last_visible_cursor: None,
+            last_cursor_shape: 0,
+            repeat_ime_anchor,
+        }
+    }
+
+    /// 当前生效的块外锚点策略（测试断言注入链路用）。
+    #[cfg(test)]
+    pub(crate) fn repeats_ime_anchor(&self) -> bool {
+        self.repeat_ime_anchor
     }
 
     pub(crate) fn encode(&self, frame: &FrameData, repaint: bool) -> EncodedBlit {
@@ -103,7 +135,7 @@ impl BlitEncoder {
             prev,
             &mut next_last_visible_cursor,
             &mut next_last_cursor_shape,
-            repeat_ime_anchor_after_sync(),
+            self.repeat_ime_anchor,
             clear_before_full_redraw,
             suppress_visible_cursor,
         );
@@ -157,7 +189,7 @@ impl BlitEncoder {
             cursor,
             &mut next_last_visible_cursor,
             &mut next_last_cursor_shape,
-            repeat_ime_anchor_after_sync(),
+            self.repeat_ime_anchor,
             suppress_visible_cursor,
         );
         Some(EncodedBlit {
@@ -511,7 +543,7 @@ fn blit_frame_to_with_cursor_memory(
         prev,
         last_visible_cursor,
         last_cursor_shape,
-        repeat_ime_anchor_after_sync(),
+        PLATFORM_ALLOWS_IME_ANCHOR_REPEAT,
         suppress_visible_cursor,
     );
 }
@@ -714,14 +746,153 @@ fn blit_frame_to_with_cursor_memory_and_clear_policy(
     let _ = writer.flush();
 }
 
-#[cfg(windows)]
-fn repeat_ime_anchor_after_sync() -> bool {
-    false
+/// `ui.repeat_ime_cursor_anchor` 的运行时形态：协议层不依赖 config 模型的 serde 细节。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum ImeAnchorRepeatMode {
+    /// 宿主已知支持 DEC 2026 同步输出时关闭块外重复，未知宿主保持旧行为。
+    #[default]
+    Auto,
+    /// 无条件重复（Windows 除外）。
+    Always,
+    /// 从不重复。
+    Never,
 }
 
+impl From<crate::config::RepeatImeCursorAnchorConfig> for ImeAnchorRepeatMode {
+    fn from(config: crate::config::RepeatImeCursorAnchorConfig) -> Self {
+        use crate::config::RepeatImeCursorAnchorConfig as Config;
+        match config {
+            Config::Auto => Self::Auto,
+            Config::Always => Self::Always,
+            Config::Never => Self::Never,
+        }
+    }
+}
+
+/// 启动期采集一次的宿主终端身份证据；仓库里没有对外层终端的 DECRQM 2026 探测，
+/// 与 `terminal_notify` / `handshake::direct_graphics_profile_values` 一样按环境变量启发。
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub(crate) struct ImeAnchorHostEnv {
+    pub(crate) term_program: Option<String>,
+    pub(crate) term: Option<String>,
+    /// `KITTY_WINDOW_ID` 存在（kitty 不设置 `TERM_PROGRAM`）。
+    pub(crate) kitty_window: bool,
+    /// 运行在 tmux/screen 里（`TMUX`/`STY` 存在，或 `TERM` 以 `screen`/`tmux` 开头）。
+    /// 多路复用器会把外层终端的 `TERM_PROGRAM`/`KITTY_WINDOW_ID` 原样传给 pane，
+    /// 但 2026 passthrough 行为随版本变化，因此必须先于宿主白名单判定（与
+    /// `input::model::host_modify_other_keys_mode_for_env` 先查 `TMUX` 同一约定）。
+    pub(crate) in_multiplexer: bool,
+}
+
+impl ImeAnchorHostEnv {
+    pub(crate) fn from_process_env() -> Self {
+        Self::from_values(
+            std::env::var("TERM_PROGRAM").ok(),
+            std::env::var("TERM").ok(),
+            std::env::var_os("KITTY_WINDOW_ID").is_some(),
+            std::env::var_os("TMUX").is_some() || std::env::var_os("STY").is_some(),
+        )
+    }
+
+    /// 由环境变量值构造（可测）：`multiplexer_var` 是 `TMUX`/`STY` 任一存在。
+    fn from_values(
+        term_program: Option<String>,
+        term: Option<String>,
+        kitty_window: bool,
+        multiplexer_var: bool,
+    ) -> Self {
+        let in_multiplexer = multiplexer_var
+            || term
+                .as_deref()
+                .is_some_and(|term| term.starts_with("screen") || term.starts_with("tmux"));
+        Self {
+            term_program,
+            term,
+            kitty_window,
+            in_multiplexer,
+        }
+    }
+
+    /// 在这些宿主上，同步块外的裸 `CUP`+`?25h` 会被看见成光标/切换标签闪烁，所以
+    /// `auto` 不补发。白名单表示「补发会被看见」，**不等价于**「宿主原子呈现 DEC 2026」：
+    /// 例如 wezterm 在 `?2026h` 处也会 flush，一帧被拆成多次渲染，块外锚点恰恰因此
+    /// 可见。多路复用器（tmux/screen）先于白名单判定：外层终端身份会被继承，但
+    /// passthrough 行为随版本变化，保守按未知宿主处理并保留补发。VS Code/Apple Terminal
+    /// 等同样不在列表内。按终端名判定不看版本。
+    pub(crate) fn post_sync_anchor_repeat_shows_as_flicker(&self) -> bool {
+        if self.in_multiplexer {
+            return false;
+        }
+        if self.kitty_window {
+            return true;
+        }
+        let program = self
+            .term_program
+            .as_deref()
+            .map(|value| value.trim().to_ascii_lowercase());
+        if matches!(
+            program.as_deref(),
+            Some(
+                "wezterm"
+                    | "kitty"
+                    | "ghostty"
+                    | "contour"
+                    | "foot"
+                    | "iterm.app"
+                    | "alacritty"
+                    | "rio"
+            )
+        ) {
+            return true;
+        }
+        let term = self
+            .term
+            .as_deref()
+            .map(|value| value.trim().to_ascii_lowercase())
+            .unwrap_or_default();
+        matches!(
+            term.as_str(),
+            "xterm-kitty" | "xterm-ghostty" | "alacritty" | "contour" | "rio"
+        ) || term.contains("wezterm")
+            || term.starts_with("foot")
+    }
+}
+
+/// 纯判定（与平台无关）：给定配置模式与宿主证据，是否在同步块外重复最终光标锚点。
+pub(crate) fn resolve_ime_anchor_repeat(
+    mode: ImeAnchorRepeatMode,
+    host: &ImeAnchorHostEnv,
+) -> bool {
+    match mode {
+        ImeAnchorRepeatMode::Always => true,
+        ImeAnchorRepeatMode::Never => false,
+        ImeAnchorRepeatMode::Auto => !host.post_sync_anchor_repeat_shows_as_flicker(),
+    }
+}
+
+/// 平台默认（旧行为）：Windows Terminal 把块外补发显示为 TUI 重绘期间的光标移动，
+/// 因此 Windows 恒不补发；其它平台默认补发。
+#[cfg(windows)]
+const PLATFORM_ALLOWS_IME_ANCHOR_REPEAT: bool = false;
 #[cfg(not(windows))]
-fn repeat_ime_anchor_after_sync() -> bool {
-    true
+const PLATFORM_ALLOWS_IME_ANCHOR_REPEAT: bool = true;
+
+/// 客户端自渲染 shell 启动时解析一次的生效策略：平台闸门叠加 [`resolve_ime_anchor_repeat`]，
+/// 结果由调用方注入 [`BlitEncoder::with_ime_anchor_repeat`]。生效值以 info 级别记录，
+/// 便于排查「为什么我的 auto 没生效」。
+#[must_use = "生效值必须注入 BlitEncoder，否则配置不起作用"]
+pub(crate) fn client_ime_anchor_repeat(mode: ImeAnchorRepeatMode, host: &ImeAnchorHostEnv) -> bool {
+    let effective = PLATFORM_ALLOWS_IME_ANCHOR_REPEAT && resolve_ime_anchor_repeat(mode, host);
+    tracing::info!(
+        ?mode,
+        term_program = host.term_program.as_deref().unwrap_or(""),
+        term = host.term.as_deref().unwrap_or(""),
+        kitty_window = host.kitty_window,
+        in_multiplexer = host.in_multiplexer,
+        repeat = effective,
+        "resolved post-sync IME cursor anchor repeat"
+    );
+    effective
 }
 
 /// Writes all cells in the frame (full redraw).
@@ -2380,5 +2551,338 @@ mod tests {
             output_str.contains("\x1b[1;2H"),
             "cells hidden by a previous halfwidth voiced kana must be redrawn when visible"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // 切换标签闪烁（计划 2.1）：块外 IME 锚点重复按宿主判定并显式注入编码器
+    // -----------------------------------------------------------------------
+
+    fn host_env(
+        term_program: Option<&str>,
+        term: Option<&str>,
+        kitty_window: bool,
+    ) -> ImeAnchorHostEnv {
+        ImeAnchorHostEnv {
+            term_program: term_program.map(str::to_owned),
+            term: term.map(str::to_owned),
+            kitty_window,
+            in_multiplexer: false,
+        }
+    }
+
+    fn multiplexed(mut host: ImeAnchorHostEnv) -> ImeAnchorHostEnv {
+        host.in_multiplexer = true;
+        host
+    }
+
+    /// 切换标签量级的两帧：同尺寸、整屏内容全变、光标可见且位置不变。
+    fn tab_switch_frames() -> (FrameData, FrameData) {
+        let cursor = Some(CursorState {
+            x: 3,
+            y: 2,
+            visible: true,
+            shape: 0,
+        });
+        let mut before = make_frame(24, 8, vec![make_cell("A", 0, 0, 0); 24 * 8]);
+        before.cursor = cursor.clone();
+        let mut after = make_frame(24, 8, vec![make_cell("B", 0, 0, 0); 24 * 8]);
+        after.cursor = cursor;
+        (before, after)
+    }
+
+    /// 块外锚点的确切字节：最终光标 (3,2) 的 CUP + 显示光标。
+    const TAB_SWITCH_POST_SYNC_ANCHOR: &str = "\x1b[3;4H\x1b[?25h";
+
+    /// 经生产入口 `BlitEncoder::encode`：先提交首帧，再返回切换帧的字节。
+    fn encode_tab_switch_with_encoder(encoder: &mut BlitEncoder) -> String {
+        let (before, after) = tab_switch_frames();
+        let first = encoder.encode(&before, false);
+        encoder.commit(before, first);
+        let second = encoder.encode(&after, false);
+        String::from_utf8(second.bytes).unwrap()
+    }
+
+    fn assert_single_sync_block_without_trailing_bytes(output: &str) {
+        assert_eq!(
+            output.matches("\x1b[?2026h").count(),
+            1,
+            "恰一个同步块开头: {output:?}"
+        );
+        assert_eq!(
+            output.matches("\x1b[?2026l").count(),
+            1,
+            "恰一个同步块结尾: {output:?}"
+        );
+        assert!(output.starts_with("\x1b[?2026h"), "块前 0 字节: {output:?}");
+        assert!(
+            output.ends_with("\x1b[?25h\x1b[?2026l"),
+            "块内以 ?25h 结尾且块外 0 字节: {output:?}"
+        );
+        assert!(!output.contains("\x1b[2J"), "切换标签不清屏: {output:?}");
+    }
+
+    fn assert_only_post_sync_anchor_outside_block(output: &str) {
+        assert_eq!(output.matches("\x1b[?2026l").count(), 1);
+        let sync_end = output.find("\x1b[?2026l").expect("同步块结尾");
+        let trailing = &output[sync_end + "\x1b[?2026l".len()..];
+        assert_eq!(
+            trailing, TAB_SWITCH_POST_SYNC_ANCHOR,
+            "块外只剩最终光标锚点: {output:?}"
+        );
+        assert!(!output.contains("\x1b[2J"));
+    }
+
+    #[test]
+    fn tab_switch_frames_stay_inside_one_sync_block_when_auto_resolves_to_no_repeat() {
+        // auto + WezTerm（块外补发会被看见成闪烁）→ 经 BlitEncoder::encode 的切换帧块外 0 字节。
+        let policy = resolve_ime_anchor_repeat(
+            ImeAnchorRepeatMode::Auto,
+            &host_env(Some("WezTerm"), Some("xterm-256color"), false),
+        );
+        assert!(!policy, "auto 且宿主会把补发看见成闪烁 → 不重复块外锚点");
+        let mut encoder = BlitEncoder::with_ime_anchor_repeat(policy);
+        assert_single_sync_block_without_trailing_bytes(&encode_tab_switch_with_encoder(
+            &mut encoder,
+        ));
+    }
+
+    #[test]
+    fn tab_switch_frames_stay_inside_one_sync_block_when_repeat_is_never() {
+        let policy = resolve_ime_anchor_repeat(
+            ImeAnchorRepeatMode::Never,
+            &host_env(None, Some("xterm-256color"), false),
+        );
+        assert!(!policy, "never 在未知宿主上也不重复");
+        let mut encoder = BlitEncoder::with_ime_anchor_repeat(policy);
+        assert_single_sync_block_without_trailing_bytes(&encode_tab_switch_with_encoder(
+            &mut encoder,
+        ));
+    }
+
+    #[test]
+    fn tab_switch_frames_keep_the_post_sync_anchor_for_always_and_unknown_hosts() {
+        let policies = [
+            resolve_ime_anchor_repeat(
+                ImeAnchorRepeatMode::Always,
+                &host_env(Some("WezTerm"), Some("xterm-256color"), false),
+            ),
+            resolve_ime_anchor_repeat(
+                ImeAnchorRepeatMode::Auto,
+                &host_env(None, Some("xterm-256color"), false),
+            ),
+        ];
+        for policy in policies {
+            assert!(policy, "always / 未知宿主保留旧行为");
+            let mut encoder = BlitEncoder::with_ime_anchor_repeat(policy);
+            assert_only_post_sync_anchor_outside_block(&encode_tab_switch_with_encoder(
+                &mut encoder,
+            ));
+        }
+    }
+
+    #[test]
+    fn injected_anchor_policy_changes_exactly_the_post_sync_anchor_bytes() {
+        // 扩展证据（确定性替代 HERDR_RENDER_PROF 前后对比）：两种策略编码同一对切换帧，
+        // 字节差恰好是块外锚点，块内内容逐字节一致；策略不会影响 diff 本身。
+        let mut with_repeat = BlitEncoder::with_ime_anchor_repeat(true);
+        let mut without_repeat = BlitEncoder::with_ime_anchor_repeat(false);
+        let repeated = encode_tab_switch_with_encoder(&mut with_repeat);
+        let silent = encode_tab_switch_with_encoder(&mut without_repeat);
+        assert_eq!(
+            repeated,
+            format!("{silent}{TAB_SWITCH_POST_SYNC_ANCHOR}"),
+            "策略只增减块外锚点"
+        );
+        assert_eq!(
+            repeated.len() - silent.len(),
+            TAB_SWITCH_POST_SYNC_ANCHOR.len()
+        );
+    }
+
+    #[test]
+    fn encode_patch_honours_the_injected_anchor_policy() {
+        let (before, _) = tab_switch_frames();
+        let cursor = before.cursor.clone();
+        let row = PaneSurfacePatchRow {
+            x: 0,
+            y: 0,
+            cells: vec![make_cell("Z", 0, 0, 0); 4],
+        };
+        for repeat in [false, true] {
+            let mut encoder = BlitEncoder::with_ime_anchor_repeat(repeat);
+            let first = encoder.encode(&before, false);
+            encoder.commit(before.clone(), first);
+            let patch = encoder
+                .encode_patch(std::slice::from_ref(&row), cursor.clone(), false)
+                .expect("patch fits the committed frame");
+            let output = String::from_utf8(patch.bytes).unwrap();
+            assert_eq!(output.matches("\x1b[?2026l").count(), 1, "{output:?}");
+            let sync_end = output.find("\x1b[?2026l").expect("同步块结尾");
+            let trailing = &output[sync_end + "\x1b[?2026l".len()..];
+            let expected = if repeat {
+                TAB_SWITCH_POST_SYNC_ANCHOR
+            } else {
+                ""
+            };
+            assert_eq!(trailing, expected, "repeat={repeat}: {output:?}");
+        }
+    }
+
+    #[test]
+    fn config_auto_on_wezterm_reaches_the_encoder_without_post_sync_bytes() {
+        // 端到端接线：config 枚举 → ImeAnchorRepeatMode → client_ime_anchor_repeat →
+        // BlitEncoder::with_ime_anchor_repeat → encode 字节。auto+WezTerm 在任何平台上
+        // 都不补发。
+        let mode: ImeAnchorRepeatMode = crate::config::RepeatImeCursorAnchorConfig::Auto.into();
+        let host = host_env(Some("WezTerm"), Some("xterm-256color"), false);
+        let policy = client_ime_anchor_repeat(mode, &host);
+        assert!(!policy);
+        let mut encoder = BlitEncoder::with_ime_anchor_repeat(policy);
+        assert!(!encoder.repeats_ime_anchor());
+        assert_single_sync_block_without_trailing_bytes(&encode_tab_switch_with_encoder(
+            &mut encoder,
+        ));
+
+        // always 受平台闸门：非 Windows 补发，Windows 恒不补发。
+        let mode: ImeAnchorRepeatMode = crate::config::RepeatImeCursorAnchorConfig::Always.into();
+        let policy = client_ime_anchor_repeat(mode, &host);
+        assert_eq!(policy, PLATFORM_ALLOWS_IME_ANCHOR_REPEAT);
+        let mut encoder = BlitEncoder::with_ime_anchor_repeat(policy);
+        let output = encode_tab_switch_with_encoder(&mut encoder);
+        if PLATFORM_ALLOWS_IME_ANCHOR_REPEAT {
+            assert_only_post_sync_anchor_outside_block(&output);
+        } else {
+            assert_single_sync_block_without_trailing_bytes(&output);
+        }
+    }
+
+    #[test]
+    fn blit_encoder_default_keeps_the_platform_legacy_anchor_policy() {
+        // server 帧流 / headless 路径不经过 client 配置：`new()` 保持旧行为
+        // （非 Windows 补发、Windows 不补发），与显式注入互不影响。
+        assert_eq!(
+            BlitEncoder::new().repeats_ime_anchor(),
+            PLATFORM_ALLOWS_IME_ANCHOR_REPEAT
+        );
+        assert_eq!(
+            BlitEncoder::default().repeats_ime_anchor(),
+            PLATFORM_ALLOWS_IME_ANCHOR_REPEAT
+        );
+        assert!(!BlitEncoder::with_ime_anchor_repeat(false).repeats_ime_anchor());
+        assert!(BlitEncoder::with_ime_anchor_repeat(true).repeats_ime_anchor());
+    }
+
+    #[test]
+    fn ime_anchor_repeat_auto_follows_host_flicker_evidence() {
+        let flickering = [
+            (Some("WezTerm"), None, false),
+            (Some("wezterm"), Some("xterm-256color"), false),
+            (Some("kitty"), None, false),
+            (Some("ghostty"), None, false),
+            (Some("contour"), None, false),
+            (Some("foot"), None, false),
+            (Some("iTerm.app"), Some("xterm-256color"), false),
+            (Some("Alacritty"), None, false),
+            (Some("rio"), None, false),
+            (None, Some("xterm-kitty"), false),
+            (None, Some("xterm-ghostty"), false),
+            (None, Some("wezterm"), false),
+            (None, Some("xterm-wezterm"), false),
+            (None, Some("foot-extra"), false),
+            (None, Some("alacritty"), false),
+            (None, Some("contour"), false),
+            (None, Some("rio"), false),
+            (None, Some("xterm-256color"), true),
+        ];
+        for (program, term, kitty_window) in flickering {
+            assert!(
+                !resolve_ime_anchor_repeat(
+                    ImeAnchorRepeatMode::Auto,
+                    &host_env(program, term, kitty_window)
+                ),
+                "{program:?}/{term:?}/kitty={kitty_window} 块外补发会被看见成闪烁 → 不补发"
+            );
+        }
+        let unknown = [
+            (None, None),
+            (None, Some("xterm-256color")),
+            (Some("Apple_Terminal"), Some("xterm-256color")),
+            (Some("vscode"), Some("xterm-256color")),
+        ];
+        for (program, term) in unknown {
+            assert!(
+                resolve_ime_anchor_repeat(
+                    ImeAnchorRepeatMode::Auto,
+                    &host_env(program, term, false)
+                ),
+                "{program:?}/{term:?} 未知宿主保持旧行为"
+            );
+        }
+        assert!(resolve_ime_anchor_repeat(
+            ImeAnchorRepeatMode::Always,
+            &host_env(Some("WezTerm"), None, false)
+        ));
+        assert!(!resolve_ime_anchor_repeat(
+            ImeAnchorRepeatMode::Never,
+            &host_env(None, None, false)
+        ));
+    }
+
+    #[test]
+    fn ime_anchor_repeat_auto_keeps_the_repeat_inside_a_multiplexer() {
+        // tmux 继承外层终端的 TERM_PROGRAM / KITTY_WINDOW_ID，但 2026 passthrough 随版本
+        // 变化：多路复用器闸门先于白名单，auto 保留补发（旧行为）。
+        let inherited = [
+            multiplexed(host_env(Some("WezTerm"), Some("tmux-256color"), false)),
+            multiplexed(host_env(Some("kitty"), Some("screen-256color"), false)),
+            multiplexed(host_env(None, Some("xterm-kitty"), true)),
+            multiplexed(host_env(None, Some("xterm-256color"), false)),
+        ];
+        for host in inherited {
+            assert!(
+                resolve_ime_anchor_repeat(ImeAnchorRepeatMode::Auto, &host),
+                "{host:?} 多路复用器内保留补发"
+            );
+        }
+        // 显式 never 仍然关闭。
+        assert!(!resolve_ime_anchor_repeat(
+            ImeAnchorRepeatMode::Never,
+            &multiplexed(host_env(Some("WezTerm"), Some("tmux-256color"), false))
+        ));
+    }
+
+    #[test]
+    fn ime_anchor_host_env_derives_the_multiplexer_flag_from_tmux_sty_or_term() {
+        let wezterm_in_tmux = ImeAnchorHostEnv::from_values(
+            Some("WezTerm".into()),
+            Some("tmux-256color".into()),
+            false,
+            true,
+        );
+        assert!(wezterm_in_tmux.in_multiplexer);
+        assert!(resolve_ime_anchor_repeat(
+            ImeAnchorRepeatMode::Auto,
+            &wezterm_in_tmux
+        ));
+
+        // 只有 TERM 前缀（例如 tmux 里 TMUX 被清掉）也算多路复用器。
+        for term in ["screen", "screen-256color", "tmux", "tmux-256color"] {
+            let host = ImeAnchorHostEnv::from_values(
+                Some("WezTerm".into()),
+                Some(term.into()),
+                false,
+                false,
+            );
+            assert!(host.in_multiplexer, "TERM={term}");
+        }
+        // 直接跑在 wezterm 里：无 TMUX/STY、TERM 不以 screen/tmux 开头。
+        let bare = ImeAnchorHostEnv::from_values(
+            Some("WezTerm".into()),
+            Some("xterm-256color".into()),
+            false,
+            false,
+        );
+        assert!(!bare.in_multiplexer);
+        assert!(!resolve_ime_anchor_repeat(ImeAnchorRepeatMode::Auto, &bare));
     }
 }

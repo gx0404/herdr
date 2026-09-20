@@ -16,6 +16,7 @@ pub(super) fn dispatch_client_shell_actions(
                 endpoint_id,
                 boot_id,
                 request,
+                coalesce,
             } => {
                 if let Some(connection) = endpoints.connection(&endpoint_id).filter(|_| {
                     crate::api::api_method_name(&request.method).starts_with("account.")
@@ -23,7 +24,18 @@ pub(super) fn dispatch_client_shell_actions(
                         || (endpoints.active_id() == &endpoint_id
                             && endpoints.active_surface_available())
                 }) {
-                    endpoint_commands.enqueue(endpoint_id, connection.generation, boot_id, request);
+                    let superseded = endpoint_commands.enqueue(
+                        endpoint_id,
+                        connection.generation,
+                        boot_id,
+                        request,
+                        coalesce,
+                    );
+                    if let Some(shell) = shell.as_deref_mut() {
+                        for request_id in superseded {
+                            repaint |= shell.supersede_endpoint_request(&request_id);
+                        }
+                    }
                 } else if let Some(shell) = shell.as_deref_mut() {
                     repaint |= shell.cancel_endpoint_request(&request.id);
                 }
@@ -38,9 +50,18 @@ pub(super) fn dispatch_client_shell_actions(
                 // rejects stale connections.
                 if let Some(connection) = endpoints.connection(&endpoint_id) {
                     let generation = connection.generation;
-                    endpoint_commands.enqueue(endpoint_id.clone(), generation, boot_id, request);
+                    let superseded = endpoint_commands.enqueue(
+                        endpoint_id.clone(),
+                        generation,
+                        boot_id,
+                        request,
+                        false,
+                    );
                     let cancelled = endpoint_commands.send_next(&endpoint_id, endpoints);
                     if let Some(shell) = shell.as_deref_mut() {
+                        for request_id in superseded {
+                            repaint |= shell.supersede_endpoint_request(&request_id);
+                        }
                         for request_id in cancelled {
                             repaint |= shell.cancel_endpoint_request(&request_id);
                         }
@@ -597,6 +618,8 @@ pub(super) fn complete_endpoint_activation(
         state.present_graphics(&cleanup);
         if let Some(frame) = frame {
             state.present_frame(frame);
+        } else {
+            state.flush_pending_graphics();
         }
         return Ok(None);
     }
@@ -646,6 +669,8 @@ pub(super) fn complete_endpoint_activation(
     state.present_graphics(&cleanup);
     if let Some(frame) = frame {
         state.present_frame(frame);
+    } else {
+        state.flush_pending_graphics();
     }
     if let Some(intent) = successor {
         return Ok(Some(ClientLoopEvent::ActivateEndpoint {
@@ -867,6 +892,8 @@ pub(super) fn install_client_shell_snapshot(
         } else {
             state.present_frozen_chrome(frame);
         }
+    } else {
+        state.flush_pending_graphics();
     }
     Ok(())
 }

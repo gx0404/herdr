@@ -190,7 +190,17 @@ impl ClientShellState {
                     return;
                 }
                 if let Some(method) = self.endpoint_method_for_action(action) {
-                    self.push_endpoint_method(method, outcome);
+                    if matches!(
+                        action,
+                        crate::input::KeybindAction::SwitchTab(_)
+                            | crate::input::KeybindAction::PreviousTab
+                            | crate::input::KeybindAction::NextTab
+                    ) {
+                        // 连续切标签（键盘重复 / 滚轮每格一次）只需要最后一个目标。
+                        self.push_endpoint_method_coalescing(method, outcome);
+                    } else {
+                        self.push_endpoint_method(method, outcome);
+                    }
                     return;
                 }
                 // The action has no live target right now (no focused
@@ -338,6 +348,17 @@ impl ClientShellState {
         self.push_endpoint_method_with_kind(method, PendingEndpointKind::Generic, outcome);
     }
 
+    /// 用户连续手势（键盘 `NextTab`/`PreviousTab`/`SwitchTab`、鼠标点击/滚轮切标签）
+    /// 发起的请求：标记为可折叠，让 lane 队尾尚未写出的同类手势只保留最新目标。
+    /// 程序发起的聚焦一律走 [`Self::push_endpoint_method`]。
+    pub(super) fn push_endpoint_method_coalescing(
+        &mut self,
+        method: crate::api::schema::Method,
+        outcome: &mut ClientShellInput,
+    ) {
+        self.push_endpoint_request(method, PendingEndpointKind::Generic, true, outcome);
+    }
+
     pub(super) fn push_endpoint_notice(
         &mut self,
         kind: ClientEndpointNoticeKind,
@@ -400,6 +421,16 @@ impl ClientShellState {
         kind: PendingEndpointKind,
         outcome: &mut ClientShellInput,
     ) -> bool {
+        self.push_endpoint_request(method, kind, false, outcome)
+    }
+
+    fn push_endpoint_request(
+        &mut self,
+        method: crate::api::schema::Method,
+        kind: PendingEndpointKind,
+        coalesce: bool,
+        outcome: &mut ClientShellInput,
+    ) -> bool {
         if !self.endpoint_is_online(&self.active_endpoint_id) {
             let label = self.active_endpoint_label().to_owned();
             outcome.repaint |= self.receive_endpoint_unavailable(crate::i18n::fill(
@@ -452,6 +483,7 @@ impl ClientShellState {
         outcome.actions.push(ClientShellAction::Endpoint {
             endpoint_id: self.active_endpoint_id.clone(),
             boot_id: snapshot.boot_id.clone(),
+            coalesce,
             request: Box::new(crate::api::schema::Request {
                 id: request_id,
                 method,
@@ -558,6 +590,23 @@ impl ClientShellState {
         let mut outcome = ClientShellInput::default();
         self.push_endpoint_method(method, &mut outcome);
         outcome.actions
+    }
+
+    /// 排队中被更新目标折叠掉的请求（如连续 `tab.focus`）：只静默移除配对项，
+    /// 不弹「动作被打断」提示，也不触发重绘——取代它的请求会带来真正的帧。
+    /// 只有无附加簿记的 `Generic` 请求且没有 `confirmation_workspace_id`（`tab.close` /
+    /// `pane.close` 的确认关闭浮窗靠它兜底）可以这样处理；其它退回正常取消路径。
+    pub(crate) fn supersede_endpoint_request(&mut self, request_id: &str) -> bool {
+        let Some(pending) = self.pending_requests.get(request_id) else {
+            return false;
+        };
+        if !matches!(pending.kind, PendingEndpointKind::Generic)
+            || pending.confirmation_workspace_id.is_some()
+        {
+            return self.cancel_endpoint_request(request_id);
+        }
+        self.pending_requests.remove(request_id);
+        false
     }
 
     pub(crate) fn cancel_endpoint_request(&mut self, request_id: &str) -> bool {

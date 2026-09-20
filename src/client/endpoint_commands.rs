@@ -16,6 +16,8 @@ struct QueuedCommand {
     generation: u64,
     boot_id: String,
     request: Box<Request>,
+    /// 用户连续手势发起，允许被队尾更新的同类手势折叠（见 [`EndpointCommands::enqueue`]）。
+    coalesce: bool,
 }
 
 struct InFlightCommand {
@@ -71,13 +73,25 @@ pub(super) struct EndpointCommands {
 }
 
 impl EndpointCommands {
+    /// 入队一个端点请求。返回被折叠掉的请求 id，调用方必须对这些 id 做等价清理
+    /// （`ClientShellState::supersede_endpoint_request`），否则响应配对项悬空。
+    ///
+    /// 折叠规则（顺序保证）：只有 `coalesce == true`（用户连续手势）且方法属于
+    /// [`folds_queued_predecessors`] 的请求参与折叠；折叠范围只到 lane **队尾连续**的
+    /// 同类可折叠请求——从队尾向前遇到第一个不满足条件的请求就停，因此夹在中间的
+    /// 其它命令与它们之前的聚焦保持原有相对顺序（`[TabFocus(A), X]` 再入队
+    /// `TabFocus(B)` 得到 `[TabFocus(A), X, TabFocus(B)]`，X 仍在 A 聚焦后执行）。
+    /// 程序发起（`coalesce == false`）的聚焦既不折叠别人也不会被折叠。已在途的请求
+    /// 不受影响。
+    #[must_use = "被折叠的请求 id 必须交给 shell 清理配对项"]
     pub(super) fn enqueue(
         &mut self,
         endpoint_id: ClientEndpointId,
         generation: u64,
         boot_id: String,
         request: Box<Request>,
-    ) {
+        coalesce: bool,
+    ) -> Vec<String> {
         let name = crate::api::api_method_name(&request.method);
         let lanes = if name.starts_with("pane.text_snapshot.") {
             &mut self.reading
@@ -89,15 +103,26 @@ impl EndpointCommands {
         } else {
             &mut self.lanes
         };
-        lanes
-            .entry(endpoint_id)
-            .or_default()
-            .queued
-            .push_back(QueuedCommand {
-                generation,
-                boot_id,
-                request,
-            });
+        let lane = lanes.entry(endpoint_id).or_default();
+        let mut superseded = Vec::new();
+        if coalesce && folds_queued_predecessors(&request.method) {
+            while lane.queued.back().is_some_and(|tail| {
+                tail.coalesce && folds_queued_predecessors(&tail.request.method)
+            }) {
+                if let Some(tail) = lane.queued.pop_back() {
+                    superseded.push(tail.request.id);
+                }
+            }
+            // 队尾向前弹出得到的是倒序；按入队顺序交给调用方。
+            superseded.reverse();
+        }
+        lane.queued.push_back(QueuedCommand {
+            generation,
+            boot_id,
+            request,
+            coalesce,
+        });
+        superseded
     }
 
     pub(super) fn send_next(
@@ -331,6 +356,14 @@ impl EndpointCommands {
         }
         request_ids
     }
+}
+
+/// 排队时只保留最新目标的方法：后来的目标覆盖先前排队但未写出的同类请求。
+/// 只允许无附加簿记、无 `confirmation_workspace_id`、目标显式且幂等的方法
+/// （`ClientShellState::supersede_endpoint_request` 对被折叠项只做静默移除）；
+/// `tab.close` / `pane.close` 这类带确认兜底的方法不得加入。
+fn folds_queued_predecessors(method: &crate::api::schema::Method) -> bool {
+    matches!(method, crate::api::schema::Method::TabFocus(_))
 }
 
 pub(super) fn parse_response(
@@ -572,6 +605,7 @@ mod tests {
                         crate::api::schema::EmptyParams::default(),
                     ),
                 }),
+                coalesce: false,
             });
         commands.lanes.insert(
             remote.clone(),
@@ -585,6 +619,7 @@ mod tests {
                             crate::api::schema::EmptyParams::default(),
                         ),
                     }),
+                    coalesce: false,
                 }]),
                 ..EndpointCommandLane::default()
             },
@@ -632,6 +667,7 @@ mod tests {
                         crate::api::schema::EmptyParams::default(),
                     ),
                 }),
+                coalesce: false,
             });
         assert_eq!(
             commands.disconnect(&endpoint()),
@@ -677,5 +713,297 @@ mod tests {
             .unwrap()
             .is_none());
         assert!(has_in_flight(&commands));
+    }
+
+    // -----------------------------------------------------------------------
+    // 切换标签闪烁（计划 2.1）：排队中的 TabFocus 折叠为最新目标
+    // -----------------------------------------------------------------------
+
+    fn tab_focus(id: &str, tab_id: &str) -> Box<Request> {
+        Box::new(Request {
+            id: id.into(),
+            method: crate::api::schema::Method::TabFocus(crate::api::schema::TabTarget {
+                tab_id: tab_id.into(),
+            }),
+        })
+    }
+
+    fn queued_ids(commands: &EndpointCommands, endpoint_id: &ClientEndpointId) -> Vec<String> {
+        commands
+            .lanes
+            .get(endpoint_id)
+            .map(|lane| {
+                lane.queued
+                    .iter()
+                    .map(|queued| queued.request.id.clone())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn queued_tab_focus_requests_fold_to_the_latest_target_without_touching_in_flight() {
+        let mut commands = commands_with_in_flight();
+        let list = Box::new(Request {
+            id: "list".into(),
+            method: crate::api::schema::Method::WorkspaceList(
+                crate::api::schema::EmptyParams::default(),
+            ),
+        });
+
+        assert!(commands
+            .enqueue(
+                endpoint(),
+                1,
+                "boot-a".into(),
+                tab_focus("focus-1", "tab_1"),
+                true
+            )
+            .is_empty());
+        assert!(commands
+            .enqueue(endpoint(), 1, "boot-a".into(), list, false)
+            .is_empty());
+        // focus-1 排在非折叠请求 list 之前：不被跨越折叠，保持「focus-1 → list」顺序。
+        assert!(commands
+            .enqueue(
+                endpoint(),
+                1,
+                "boot-a".into(),
+                tab_focus("focus-2", "tab_2"),
+                true
+            )
+            .is_empty());
+        // 队尾连续的手势 focus-2 被 focus-3 折叠。
+        assert_eq!(
+            commands.enqueue(
+                endpoint(),
+                1,
+                "boot-a".into(),
+                tab_focus("focus-3", "tab_3"),
+                true
+            ),
+            vec!["focus-2"]
+        );
+
+        assert_eq!(
+            queued_ids(&commands, &endpoint()),
+            vec!["focus-1", "list", "focus-3"]
+        );
+        let lane = commands.lanes.get(&endpoint()).unwrap();
+        assert!(matches!(
+            &lane.queued[2].request.method,
+            crate::api::schema::Method::TabFocus(target) if target.tab_id == "tab_3"
+        ));
+        assert_eq!(
+            lane.in_flight
+                .as_ref()
+                .map(|command| command.request_id.as_str()),
+            Some("request-a"),
+            "在途请求不受折叠影响"
+        );
+    }
+
+    #[test]
+    fn tab_focus_folding_only_touches_the_same_endpoint_lane() {
+        let remote = ClientEndpointId::Ssh(
+            crate::client::endpoint::ProfileId::parse("0123456789abcdef0123456789abcdef").unwrap(),
+        );
+        let mut commands = EndpointCommands::default();
+        assert!(commands
+            .enqueue(
+                remote.clone(),
+                2,
+                "boot-b".into(),
+                tab_focus("remote-focus", "tab_9"),
+                true
+            )
+            .is_empty());
+        assert!(commands
+            .enqueue(
+                endpoint(),
+                1,
+                "boot-a".into(),
+                tab_focus("local-1", "tab_1"),
+                true
+            )
+            .is_empty());
+        assert_eq!(
+            commands.enqueue(
+                endpoint(),
+                1,
+                "boot-a".into(),
+                tab_focus("local-2", "tab_2"),
+                true
+            ),
+            vec!["local-1"]
+        );
+        assert_eq!(queued_ids(&commands, &remote), vec!["remote-focus"]);
+        assert_eq!(queued_ids(&commands, &endpoint()), vec!["local-2"]);
+    }
+
+    #[test]
+    fn folded_tab_focus_sends_only_the_latest_target() {
+        use crate::client::endpoint::{EndpointNegotiation, EndpointRegistry, EndpointTransport};
+        use std::sync::{Arc, Mutex};
+
+        struct Recording(Arc<Mutex<Vec<String>>>);
+        impl EndpointTransport for Recording {
+            fn send(&mut self, message: &ClientMessage) -> io::Result<()> {
+                if let ClientMessage::ClientShellEndpointRequest { request, .. } = message {
+                    self.0.lock().unwrap().push(request.clone());
+                }
+                Ok(())
+            }
+        }
+
+        let sent = Arc::new(Mutex::new(Vec::new()));
+        let mut endpoints =
+            EndpointRegistry::new(Recording(sent.clone()), 1, EndpointNegotiation::default());
+        let mut commands = EndpointCommands::default();
+        let mut superseded = Vec::new();
+        for (id, tab_id) in [
+            ("focus-1", "tab_1"),
+            ("focus-2", "tab_2"),
+            ("focus-3", "tab_3"),
+        ] {
+            superseded.extend(commands.enqueue(
+                endpoint(),
+                1,
+                "boot-a".into(),
+                tab_focus(id, tab_id),
+                true,
+            ));
+        }
+        assert_eq!(superseded, vec!["focus-1", "focus-2"]);
+
+        assert!(commands.send_next(&endpoint(), &mut endpoints).is_empty());
+        let sent = sent.lock().unwrap();
+        assert_eq!(sent.len(), 1, "三次连续 TabFocus 只写出最后一个: {sent:?}");
+        assert!(sent[0].contains("\"focus-3\""), "{}", sent[0]);
+        assert!(sent[0].contains("tab_3"), "{}", sent[0]);
+        assert!(commands.accepts_response(&endpoint(), 1, "boot-a", "focus-3"));
+        assert!(!commands.accepts_response(&endpoint(), 1, "boot-a", "focus-1"));
+        assert!(queued_ids(&commands, &endpoint()).is_empty());
+    }
+
+    #[test]
+    fn identical_tab_focus_targets_fold_to_one_queued_request() {
+        // 真实滚轮形态：快照未更新时相对 NextTab 连续三格算出同一个目标，
+        // 被折叠的是重复请求而非递进目标。
+        let mut commands = commands_with_in_flight();
+        let mut superseded = Vec::new();
+        for id in ["focus-1", "focus-2", "focus-3"] {
+            superseded.extend(commands.enqueue(
+                endpoint(),
+                1,
+                "boot-a".into(),
+                tab_focus(id, "tab_2"),
+                true,
+            ));
+        }
+        assert_eq!(superseded, vec!["focus-1", "focus-2"]);
+        assert_eq!(queued_ids(&commands, &endpoint()), vec!["focus-3"]);
+        assert!(has_in_flight(&commands), "在途请求不受折叠影响");
+    }
+
+    #[test]
+    fn tab_focus_folding_stops_at_the_first_non_foldable_request() {
+        // 顺序保证：[TabFocus(A), X] 再入队 TabFocus(B) 得到 [TabFocus(A), X, TabFocus(B)]，
+        // X 仍在 A 聚焦后执行；夹在中间的命令不会被跨越。
+        let mut commands = EndpointCommands::default();
+        let implicit_target = Box::new(Request {
+            id: "split".into(),
+            method: crate::api::schema::Method::WorkspaceList(
+                crate::api::schema::EmptyParams::default(),
+            ),
+        });
+        assert!(commands
+            .enqueue(
+                endpoint(),
+                1,
+                "boot-a".into(),
+                tab_focus("focus-a", "tab_a"),
+                true,
+            )
+            .is_empty());
+        assert!(commands
+            .enqueue(endpoint(), 1, "boot-a".into(), implicit_target, false)
+            .is_empty());
+        assert!(
+            commands
+                .enqueue(
+                    endpoint(),
+                    1,
+                    "boot-a".into(),
+                    tab_focus("focus-b", "tab_b"),
+                    true,
+                )
+                .is_empty(),
+            "队尾是非折叠请求：不跨越它折叠更早的聚焦"
+        );
+        assert_eq!(
+            queued_ids(&commands, &endpoint()),
+            vec!["focus-a", "split", "focus-b"]
+        );
+
+        // 只有队尾连续的可折叠请求才被折叠。
+        assert_eq!(
+            commands.enqueue(
+                endpoint(),
+                1,
+                "boot-a".into(),
+                tab_focus("focus-c", "tab_c"),
+                true,
+            ),
+            vec!["focus-b"]
+        );
+        assert_eq!(
+            queued_ids(&commands, &endpoint()),
+            vec!["focus-a", "split", "focus-c"]
+        );
+    }
+
+    #[test]
+    fn programmatic_tab_focus_is_never_folded() {
+        // worktree 创建后的自动聚焦 / 上下文菜单前置聚焦（coalesce=false）：
+        // 既不会被用户手势折掉，也不会折掉别人。
+        let mut commands = EndpointCommands::default();
+        assert!(commands
+            .enqueue(
+                endpoint(),
+                1,
+                "boot-a".into(),
+                tab_focus("worktree-focus", "tab_new"),
+                false,
+            )
+            .is_empty());
+        assert!(
+            commands
+                .enqueue(
+                    endpoint(),
+                    1,
+                    "boot-a".into(),
+                    tab_focus("wheel-1", "tab_2"),
+                    true,
+                )
+                .is_empty(),
+            "用户手势不折叠程序发起的聚焦"
+        );
+        assert!(
+            commands
+                .enqueue(
+                    endpoint(),
+                    1,
+                    "boot-a".into(),
+                    tab_focus("menu-focus", "tab_3"),
+                    false,
+                )
+                .is_empty(),
+            "程序发起的聚焦不折叠别人"
+        );
+        assert_eq!(
+            queued_ids(&commands, &endpoint()),
+            vec!["worktree-focus", "wheel-1", "menu-focus"]
+        );
     }
 }

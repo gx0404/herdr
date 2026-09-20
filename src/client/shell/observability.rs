@@ -1739,6 +1739,7 @@ impl ClientShellState {
                 id: request_id,
                 method,
             }),
+            coalesce: false,
         });
         self.observability.pending.insert(key.into_owned());
         RequestOutcome::Sent

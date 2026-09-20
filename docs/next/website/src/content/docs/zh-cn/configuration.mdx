@@ -568,6 +568,15 @@ cjk_ime_agents = []                     # 留空 = 任意聚焦窗格
 
 应用用同步输出（`DECSET 2026`）包裹重绘时，批次未结束期间保持上一帧的光标状态而不是隐藏光标，宿主不会每帧收到一对隐藏/显示序列。批次超过 1 秒仍未复位视为失效：Herdr 恢复渲染，光标重新跟随窗格，因此从不复位该模式的 TUI 也不会让宿主终端失去光标。
 
+Herdr 自己的每一帧都包在同步输出批次里，并默认在批次结束后再补发一次最终光标锚点，让忽略 `DECSET 2026` 块内光标移动的原生输入法仍能跟随插入符。在会把这次多出来的裸光标移动显示出来的终端上，它只会表现为光标或切换标签时的闪烁，因此 `ui.repeat_ime_cursor_anchor` 在客户端启动时判定一次：
+
+```toml
+[ui]
+repeat_ime_cursor_anchor = "auto" # auto | always | never
+```
+
+`auto` 在 `TERM_PROGRAM`、`TERM` 或 `KITTY_WINDOW_ID` 标识出已知会把补发显示成闪烁的终端（WezTerm、kitty、ghostty、foot、contour、iTerm2、Alacritty、rio）时跳过补发；未知宿主以及 tmux、screen 内保留补发——多路复用器会继承外层终端的身份，但其同步输出透传行为随版本变化。判定只看终端名不看版本：若在上述终端的旧版本里输入法丢失插入符，设为 `always`；若未知宿主本身已能原子呈现同步输出，设为 `never` 去掉补发。Windows 无论如何都不补发。该设置只影响客户端自渲染 shell 的帧；`herdr terminal attach` 会话由服务端渲染，保持默认补发。
+
 ## 前缀输入源切换
 
 在 macOS 和 Windows 上，当前缀命令和由前缀启动的模式处于活动状态时，Herdr 可以临时切换到支持 ASCII 的输入源：

@@ -219,6 +219,7 @@ mod tests {
             shell: Some(shell::ClientShellState::new(
                 shell::ClientShellConfig::from_config(&crate::config::Config::default()),
             )),
+            pending_graphics: Vec::new(),
         }
     }
 

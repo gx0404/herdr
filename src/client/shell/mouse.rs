@@ -1409,7 +1409,8 @@ impl ClientShellState {
                 return;
             }
             if let Some(press) = self.tab_press.take() {
-                self.push_endpoint_method(
+                // 鼠标点击标签是用户手势：连续点击只保留最新目标。
+                self.push_endpoint_method_coalescing(
                     crate::api::schema::Method::TabFocus(crate::api::schema::TabTarget {
                         tab_id: press.tab_id,
                     }),

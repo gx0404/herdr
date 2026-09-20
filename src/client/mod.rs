@@ -107,7 +107,7 @@ pub use errors::ClientError;
 use frame_output::{clear_received_kitty_graphics, kitty_graphics_image_ids};
 use frame_output::{
     contains_kitty_graphics_bytes, record_received_kitty_graphics,
-    write_encoded_frame_with_graphics,
+    write_encoded_frame_with_graphics, write_standalone_graphics, write_synchronized_graphics,
 };
 pub(crate) use handshake::probe_endpoint_negotiation;
 use handshake::{client_shell_keybinding_source, do_handshake, is_remote_client_process};
@@ -173,6 +173,12 @@ fn run_client_with_mode(
     let mouse_scroll_lines = loaded_config.config.ui.mouse_scroll_lines();
     let redraw_on_focus_gained = loaded_config.config.ui.redraw_on_focus_gained;
     let host_cursor = loaded_config.config.ui.host_cursor;
+    // 同步块外的 IME 光标锚点重复按宿主判定一次，显式注入客户端的 BlitEncoder；
+    // attach（server 渲染帧）与 headless 路径不经过这里，保持平台默认。
+    let repeat_ime_cursor_anchor = render_ansi::client_ime_anchor_repeat(
+        loaded_config.config.ui.repeat_ime_cursor_anchor.into(),
+        &render_ansi::ImeAnchorHostEnv::from_process_env(),
+    );
     let remote_image_paste_key = client_remote_image_paste_key(&loaded_config.config);
     let kitty_graphics_enabled =
         loaded_config.config.kitty_graphics_enabled() && client_rendered_shell;
@@ -185,6 +191,7 @@ fn run_client_with_mode(
         mouse_scroll_lines,
         redraw_on_focus_gained,
         host_cursor,
+        repeat_ime_cursor_anchor,
         kitty_graphics_enabled,
         pixel_geometry_enabled,
         pixel_geometry_fallback: kitty_graphics_enabled,
@@ -385,7 +392,9 @@ async fn run_client_loop(
     let local_unavailable = initial.is_none();
 
     let mut state = ClientState {
-        blit_encoder: render_ansi::BlitEncoder::new(),
+        blit_encoder: render_ansi::BlitEncoder::with_ime_anchor_repeat(
+            config.repeat_ime_cursor_anchor,
+        ),
         mouse_capture_active: config.mouse_capture_active,
         endpoint_mouse_capture_requested: false,
         endpoint_sgr_pixels_requested: false,
@@ -417,6 +426,7 @@ async fn run_client_loop(
         draw_host_cursor,
         detached_process_children: Vec::new(),
         shell: config.shell_config.map(shell::ClientShellState::new),
+        pending_graphics: Vec::new(),
     };
     let mut federated = endpoint_catalog.has_enabled_ssh();
     if let Some(shell) = state.shell.as_mut() {
@@ -598,6 +608,14 @@ async fn run_client_loop(
     #[cfg(windows)]
     let mut stdin_open = true;
     while !should_quit.load(Ordering::Acquire) {
+        // 不变量：上一轮事件处理结束时，图形暂存已随帧/独立同步块送出。漏配对的
+        // 呈现路径在 debug 构建下立刻暴露；release 构建下由这里兜底排空，避免图片
+        // 删除滞留到下一次呈现。
+        debug_assert!(
+            state.presentation_frozen || state.pending_graphics.is_empty(),
+            "present_graphics 未配对 present_frame / flush_pending_graphics"
+        );
+        state.flush_pending_graphics();
         if pending_activation.is_none() {
             if let Some(reload) = pending_catalog.take() {
                 match reload {
@@ -683,6 +701,8 @@ async fn run_client_loop(
                     state.present_graphics(&cleanup);
                     if let Some(frame) = frame {
                         state.present_frame(frame);
+                    } else {
+                        state.flush_pending_graphics();
                     }
                     state.presentation_frozen = frozen;
                 }
@@ -1677,9 +1697,10 @@ async fn run_client_loop(
                     }
                     ServerMessage::Graphics { bytes } => {
                         if state.kitty_graphics_enabled {
-                            record_received_kitty_graphics(&bytes);
+                            // 透传的图形也整批到达宿主：只加同步块标记，不改动
+                            // 服务端编码好的光标定位语义。
                             let mut stdout = io::stdout();
-                            let _ = stdout.write_all(&bytes);
+                            let _ = write_synchronized_graphics(&mut stdout, &bytes);
                             let _ = stdout.flush();
                         }
                     }
@@ -1749,15 +1770,11 @@ async fn run_client_loop(
                                     &control,
                                     &path,
                                 );
+                                // 直传命令自带 ESC7/ESC8；这里只补同步块标记。
                                 let mut stdout = io::stdout();
-                                let written = stdout
-                                    .write_all(&command)
+                                write_synchronized_graphics(&mut stdout, &command)
                                     .and_then(|()| stdout.flush())
-                                    .is_ok();
-                                if written {
-                                    record_received_kitty_graphics(&command);
-                                }
-                                written
+                                    .is_ok()
                             } else {
                                 false
                             };
@@ -1833,6 +1850,7 @@ async fn run_client_loop(
                                     .unwrap_or_else(|| shell.take_pending_graphics_cleanup())
                             });
                             state.present_graphics(&cleanup);
+                            state.flush_pending_graphics();
                             if let Ok(mut matcher) = state.direct_graphics_response.lock() {
                                 matcher.retire(transfer_id);
                             }

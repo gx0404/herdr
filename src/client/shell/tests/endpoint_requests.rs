@@ -148,6 +148,7 @@ fn worktree_create_success_focuses_returned_tab_on_its_endpoint_after_snapshot_u
             endpoint_id: target,
             boot_id: target_boot,
             request,
+            ..
         }] = &focus[..]
         else {
             panic!("creation should request focus through normal client navigation");
@@ -317,11 +318,14 @@ fn stale_queued_request_is_cancelled_without_blocking_the_current_generation() {
                 endpoint_id,
                 boot_id,
                 request,
+                ..
             } = action
             else {
                 panic!("expected endpoint request");
             };
-            commands.enqueue(endpoint_id, generation, boot_id, request);
+            assert!(commands
+                .enqueue(endpoint_id, generation, boot_id, request, false)
+                .is_empty());
         }
     }
     let mut endpoints = EndpointRegistry::new(
@@ -451,4 +455,191 @@ fn another_machine_disconnect_does_not_cancel_active_popup() {
     state.mark_endpoint_disconnected(&remote);
     assert!(state.popup_pending);
     assert_eq!(state.pending_requests.len(), 1);
+}
+
+/// 焦点在 tab_1、工作区内共 `count` 个标签的快照（NextTab 连续按下在快照未更新时
+/// 每次都算出同一个目标 tab_2，与真实滚轮形态一致）。
+fn snapshot_with_tabs(count: usize) -> crate::protocol::ClientShellSnapshot {
+    let mut projection = snapshot();
+    for number in 2..=count {
+        projection.tabs.push(ClientShellTab {
+            tab_id: format!("tab_{number}"),
+            workspace_id: "ws_1".into(),
+            number,
+            label: number.to_string(),
+            custom_label: false,
+            zoomed: false,
+            focused: false,
+            agent_status: AgentStatus::Idle,
+        });
+    }
+    projection
+}
+
+fn dispatch_one(
+    state: &mut ClientShellState,
+    actions: Vec<ClientShellAction>,
+    commands: &mut crate::client::endpoint_commands::EndpointCommands,
+    endpoints: &mut crate::client::endpoint::EndpointRegistry,
+) -> String {
+    let id = request_id(&actions).to_owned();
+    let (tx, _rx) = tokio::sync::mpsc::channel(16);
+    let (replay, _) = crate::client::shell_runtime::dispatch_client_shell_actions(
+        actions,
+        commands,
+        endpoints,
+        Some(state),
+        &mut Vec::new(),
+        &tx,
+    )
+    .unwrap();
+    assert!(replay.is_empty());
+    id
+}
+
+/// 滚轮/键盘连续切标签（快照未更新 → 三次目标完全相同）：排队中尚未写出的 TabFocus
+/// 被最新手势折叠，被替换的请求静默清理（不弹「动作被打断」提示），配对闸门不悬空。
+#[test]
+fn dispatcher_folds_repeated_tab_gestures_silently() {
+    use crate::client::endpoint::{EndpointNegotiation, EndpointRegistry};
+    use crate::client::endpoint_commands::EndpointCommands;
+    use crate::input::{KeybindAction, KeybindMatch};
+
+    let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
+    state.set_snapshot(Box::new(snapshot_with_tabs(2)));
+    state.set_pane_surface(surface());
+    let mut endpoints = EndpointRegistry::new(
+        TestTransport { fail: false },
+        1,
+        EndpointNegotiation::default(),
+    );
+    endpoints.set_surface_active(&ClientEndpointId::Local, true);
+    let mut commands = EndpointCommands::default();
+
+    let mut ids = Vec::new();
+    for _ in 0..3 {
+        let mut outcome = ClientShellInput::default();
+        state.record_binding(KeybindMatch::Action(KeybindAction::NextTab), &mut outcome);
+        let [ClientShellAction::Endpoint {
+            request, coalesce, ..
+        }] = &outcome.actions[..]
+        else {
+            panic!("expected one endpoint request");
+        };
+        assert!(*coalesce, "键盘/滚轮切标签是可折叠的用户手势");
+        assert!(
+            matches!(&request.method, crate::api::schema::Method::TabFocus(target) if target.tab_id == "tab_2"),
+            "快照未更新：相对 NextTab 每次算出同一个目标"
+        );
+        ids.push(dispatch_one(
+            &mut state,
+            outcome.actions,
+            &mut commands,
+            &mut endpoints,
+        ));
+    }
+
+    // 第一次 TabFocus 在分发时已写出（在途，不可折叠）；第二次排队后被第三次折叠。
+    let mut pending = state.pending_requests.keys().cloned().collect::<Vec<_>>();
+    pending.sort();
+    assert_eq!(
+        pending,
+        vec![ids[0].clone(), ids[2].clone()],
+        "在途请求与最新目标保留，中间目标被折叠"
+    );
+    assert!(
+        state.visible_endpoint_notice.is_none(),
+        "被折叠的请求不产生端点提示"
+    );
+    assert!(commands.accepts_response(&ClientEndpointId::Local, 1, "boot-1", &ids[0]));
+    assert!(!commands.accepts_response(&ClientEndpointId::Local, 1, "boot-1", &ids[1]));
+    assert!(!commands.accepts_response(&ClientEndpointId::Local, 1, "boot-1", &ids[2]));
+
+    // 在途请求完成后，lane 只写出折叠后的最新目标。
+    let response = serde_json::to_vec(&crate::api::schema::SuccessResponse {
+        id: ids[0].clone(),
+        result: crate::api::schema::ResponseResult::Ok {},
+    })
+    .unwrap();
+    let completed = commands
+        .receive_chunk(
+            &ClientEndpointId::Local,
+            1,
+            "boot-1",
+            &ids[0],
+            true,
+            response,
+        )
+        .unwrap()
+        .expect("in-flight focus completes");
+    assert_eq!(completed.request_id, ids[0]);
+    assert!(commands
+        .send_next(&ClientEndpointId::Local, &mut endpoints)
+        .is_empty());
+    assert!(commands.accepts_response(&ClientEndpointId::Local, 1, "boot-1", &ids[2]));
+    assert!(!commands.accepts_response(&ClientEndpointId::Local, 1, "boot-1", &ids[1]));
+    assert!(commands
+        .send_next(&ClientEndpointId::Local, &mut endpoints)
+        .is_empty());
+    assert!(
+        commands.disconnect(&ClientEndpointId::Local).len() == 1,
+        "lane 里只剩正在写出的最新目标"
+    );
+}
+
+/// 程序发起的聚焦（endpoint 激活目标、worktree 创建回调等）不参与折叠：
+/// 用户此刻的一次切标签不会无声吞掉它，它也不会折掉用户手势。
+#[test]
+fn dispatcher_keeps_programmatic_tab_focus_out_of_gesture_folding() {
+    use crate::client::endpoint::{EndpointNegotiation, EndpointRegistry};
+    use crate::client::endpoint_commands::EndpointCommands;
+    use crate::input::{KeybindAction, KeybindMatch};
+
+    let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
+    state.set_snapshot(Box::new(snapshot_with_tabs(3)));
+    state.set_pane_surface(surface());
+    let mut endpoints = EndpointRegistry::new(
+        TestTransport { fail: false },
+        1,
+        EndpointNegotiation::default(),
+    );
+    endpoints.set_surface_active(&ClientEndpointId::Local, true);
+    let mut commands = EndpointCommands::default();
+
+    // 第一个程序聚焦立即写出（在途）；第二个程序聚焦排队。
+    let mut ids = Vec::new();
+    for tab_id in ["tab_2", "tab_3"] {
+        let actions = state.focus_endpoint_target(ClientEndpointFocusTarget::Tab(tab_id.into()));
+        let [ClientShellAction::Endpoint { coalesce, .. }] = &actions[..] else {
+            panic!("expected one endpoint request");
+        };
+        assert!(!coalesce, "程序发起的聚焦不可折叠");
+        ids.push(dispatch_one(
+            &mut state,
+            actions,
+            &mut commands,
+            &mut endpoints,
+        ));
+    }
+    // 用户手势排在程序聚焦之后，不折叠它。
+    let mut outcome = ClientShellInput::default();
+    state.record_binding(KeybindMatch::Action(KeybindAction::NextTab), &mut outcome);
+    ids.push(dispatch_one(
+        &mut state,
+        outcome.actions,
+        &mut commands,
+        &mut endpoints,
+    ));
+
+    let mut pending = state.pending_requests.keys().cloned().collect::<Vec<_>>();
+    pending.sort();
+    let mut expected = ids.clone();
+    expected.sort();
+    assert_eq!(pending, expected, "三个请求的配对项全部保留");
+    assert!(state.visible_endpoint_notice.is_none());
+    assert_eq!(
+        commands.disconnect(&ClientEndpointId::Local).len(),
+        3,
+        "1 在途 + 2 排队，程序聚焦未被折叠"
+    );
 }

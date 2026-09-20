@@ -125,6 +125,21 @@ impl StatusIndicatorStyle {
     }
 }
 
+/// `ui.repeat_ime_cursor_anchor`: whether to re-emit the final cursor anchor
+/// after each synchronized-output frame so IMEs that ignore cursor moves inside
+/// a `DECSET 2026` batch still track the caret.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RepeatImeCursorAnchorConfig {
+    /// Skip the repeat on hosts known to support synchronized output; keep it elsewhere.
+    #[default]
+    Auto,
+    /// Always repeat (Windows still skips it).
+    Always,
+    /// Never repeat.
+    Never,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum HostCursorModeConfig {
@@ -1015,6 +1030,12 @@ pub struct UiConfig {
     pub copy_on_select: bool,
     /// Host cursor policy. Default: auto.
     pub host_cursor: HostCursorModeConfig,
+    /// Repeat the final cursor anchor after each synchronized-output frame for IMEs:
+    /// "auto" skips it on hosts known to support DEC 2026 synchronized output
+    /// (WezTerm, kitty, ghostty, foot, contour, iTerm2, Alacritty, rio) where it only
+    /// causes cursor/tab-switch flicker, "always" forces it, "never" drops it.
+    /// Windows never repeats it. Read at client start. Default: auto.
+    pub repeat_ime_cursor_anchor: RepeatImeCursorAnchorConfig,
     /// Modifier that lets right-click gestures pass through to pane apps. Empty disables it.
     pub right_click_passthrough_modifier: RightClickPassthroughModifierConfig,
     /// Force a full host-terminal redraw when the outer terminal regains focus. Default: true.
@@ -1315,6 +1336,7 @@ impl Default for UiConfig {
             mouse_capture: true,
             copy_on_select: true,
             host_cursor: HostCursorModeConfig::Auto,
+            repeat_ime_cursor_anchor: RepeatImeCursorAnchorConfig::Auto,
             right_click_passthrough_modifier: RightClickPassthroughModifierConfig::default(),
             redraw_on_focus_gained: true,
             mouse_scroll_lines: None,
@@ -2313,5 +2335,26 @@ scrollback_lines = 12345
 "#;
         let config: Config = toml::from_str(toml).unwrap();
         assert_eq!(config.advanced.scrollback_limit_bytes, 12345);
+    }
+
+    #[test]
+    fn repeat_ime_cursor_anchor_defaults_to_auto_and_parses_lowercase_values() {
+        assert_eq!(
+            Config::default().ui.repeat_ime_cursor_anchor,
+            RepeatImeCursorAnchorConfig::Auto
+        );
+        for (value, expected) in [
+            ("auto", RepeatImeCursorAnchorConfig::Auto),
+            ("always", RepeatImeCursorAnchorConfig::Always),
+            ("never", RepeatImeCursorAnchorConfig::Never),
+        ] {
+            let config: Config =
+                toml::from_str(&format!("[ui]\nrepeat_ime_cursor_anchor = \"{value}\"\n")).unwrap();
+            assert_eq!(config.ui.repeat_ime_cursor_anchor, expected, "{value}");
+        }
+        // 未知取值按其它 ui 枚举的惯例报错（加载器整体回退默认并给出诊断）。
+        assert!(
+            toml::from_str::<Config>("[ui]\nrepeat_ime_cursor_anchor = \"sometimes\"\n").is_err()
+        );
     }
 }

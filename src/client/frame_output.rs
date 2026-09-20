@@ -25,6 +25,35 @@ pub(super) fn write_encoded_frame_with_graphics(
     writer.write_all(&encoded[insertion..])
 }
 
+/// 没有帧可搭车的图形清理：仍包在自己的同步块里，保证整批到达宿主。
+pub(super) fn write_standalone_graphics(
+    mut writer: impl io::Write,
+    graphics: &[u8],
+) -> io::Result<()> {
+    if graphics.is_empty() {
+        return Ok(());
+    }
+    record_received_kitty_graphics(graphics);
+    writer.write_all(b"\x1b[?2026h\x1b7")?;
+    writer.write_all(graphics)?;
+    writer.write_all(b"\x1b8\x1b[?2026l")
+}
+
+/// 透传/直传的图形命令：只包同步块标记，不加 ESC7/ESC8（字节本身已带光标定位语义，
+/// 直传命令自带 ESC7/ESC8），保证整批到达宿主而不改变既有光标行为。
+pub(super) fn write_synchronized_graphics(
+    mut writer: impl io::Write,
+    graphics: &[u8],
+) -> io::Result<()> {
+    if graphics.is_empty() {
+        return Ok(());
+    }
+    record_received_kitty_graphics(graphics);
+    writer.write_all(b"\x1b[?2026h")?;
+    writer.write_all(graphics)?;
+    writer.write_all(b"\x1b[?2026l")
+}
+
 pub(super) fn contains_kitty_graphics_bytes(bytes: &[u8]) -> bool {
     bytes.windows(3).any(|window| window == b"\x1b_G")
 }
@@ -94,4 +123,65 @@ fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     haystack
         .windows(needle.len())
         .position(|window| window == needle)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const DELETE_IMAGE: &[u8] = b"\x1b_Ga=d,d=I,i=7,q=2;\x1b\\";
+
+    #[test]
+    fn standalone_graphics_are_wrapped_in_their_own_synchronized_block() {
+        // 没有帧可搭车时，图形清理也必须整批到达宿主：?2026h … ?2026l 包裹。
+        let mut output = Vec::new();
+        write_standalone_graphics(&mut output, DELETE_IMAGE).unwrap();
+        let expected = [
+            b"\x1b[?2026h\x1b7".as_slice(),
+            DELETE_IMAGE,
+            b"\x1b8\x1b[?2026l",
+        ]
+        .concat();
+        assert_eq!(output, expected);
+
+        let mut empty = Vec::new();
+        write_standalone_graphics(&mut empty, b"").unwrap();
+        assert!(empty.is_empty(), "空图形不写任何字节");
+    }
+
+    #[test]
+    fn synchronized_graphics_keep_their_own_cursor_semantics_inside_a_sync_block() {
+        // 透传/直传：只加 ?2026h/?2026l，不加 ESC7/ESC8（直传命令自带）。
+        let command = b"\x1b7\x1b[2;3H\x1b_Ga=T,t=f,i=9;cGF0aA==\x1b\\\x1b8";
+        let mut output = Vec::new();
+        write_synchronized_graphics(&mut output, command).unwrap();
+        let expected = [b"\x1b[?2026h".as_slice(), command, b"\x1b[?2026l"].concat();
+        assert_eq!(output, expected);
+
+        let mut empty = Vec::new();
+        write_synchronized_graphics(&mut empty, b"").unwrap();
+        assert!(empty.is_empty(), "空图形不写任何字节");
+    }
+
+    #[test]
+    fn frame_graphics_land_between_the_frame_sync_markers() {
+        let encoded = b"\x1b[?2026h\x1b[?25l\x1b[1;1HX\x1b[1;2H\x1b[?25h\x1b[?2026l";
+        let mut output = Vec::new();
+        write_encoded_frame_with_graphics(&mut output, encoded, DELETE_IMAGE).unwrap();
+        let output = String::from_utf8_lossy(&output).into_owned();
+        let start = output.find("\x1b[?2026h").expect("sync start");
+        let end = output.rfind("\x1b[?2026l").expect("sync end");
+        let graphics = output.find("\x1b_G").expect("graphics");
+        assert!(start < graphics && graphics < end, "{output:?}");
+        assert_eq!(output.matches("\x1b[?2026h").count(), 1);
+        assert_eq!(output.matches("\x1b[?2026l").count(), 1);
+        // 图形紧跟最终光标状态之后、同步块结束之前：宿主一次呈现帧与图片。
+        let cursor_shown = output.find("\x1b[?25h").expect("final cursor state");
+        assert!(cursor_shown < graphics, "{output:?}");
+        assert!(output.ends_with("\x1b8\x1b[?2026l"), "{output:?}");
+        assert!(
+            output[end..].len() == "\x1b[?2026l".len(),
+            "块外 0 字节: {output:?}"
+        );
+    }
 }

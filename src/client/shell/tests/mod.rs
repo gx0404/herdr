@@ -311,3 +311,4 @@ mod popup_focus_projection;
 mod scenes;
 mod snippets;
 mod startup_overlays;
+mod tab_switch;

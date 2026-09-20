@@ -1,3 +1,5 @@
+use std::borrow::Cow;
+
 use super::*;
 
 /// State tracking for the thin client.
@@ -41,6 +43,13 @@ pub(super) struct ClientState {
     pub(super) draw_host_cursor: bool,
     pub(super) detached_process_children: Vec<std::process::Child>,
     pub(super) shell: Option<shell::ClientShellState>,
+    /// kitty 图形清理不再单独写宿主：先暂存，随下一次呈现的同步块一起送达，
+    /// 让图片删除与帧内容同一批次到达（否则宿主会先呈现「无图」的中间态）。
+    ///
+    /// 不变量：每个 `present_graphics` 调用点紧跟 `present_frame` /
+    /// `present_surface_patch` / `flush_pending_graphics`；`unfreeze_presentation`
+    /// 必排空；客户端事件循环每轮开头兜底排空并在 debug 构建下断言为空。
+    pub(super) pending_graphics: Vec<u8>,
 }
 
 impl Drop for ClientState {
@@ -112,6 +121,9 @@ impl ClientState {
 
     pub(super) fn unfreeze_presentation(&mut self) {
         self.presentation_frozen = false;
+        // 解冻必排空：冻结前暂存、冻结期间没有帧可搭车的图形清理在这里送出，
+        // 不依赖调用方纪律。
+        self.flush_pending_graphics();
         // A resize or metadata event may have happened while frozen. Force a full frame rather
         // than attempting to patch the old source frame.
         self.request_repaint();
@@ -126,13 +138,33 @@ impl ClientState {
         self.presentation_frozen = frozen;
     }
 
+    /// 暂存图形清理，等本轮的 `present_frame` / `present_surface_patch` 把它并进同步块；
+    /// 本轮没有帧时调用方用 [`Self::flush_pending_graphics`] 单独包一个同步块送出。
     pub(super) fn present_graphics(&mut self, graphics: &[u8]) {
         if self.presentation_frozen || graphics.is_empty() || !self.kitty_graphics_enabled {
             return;
         }
+        self.pending_graphics.extend_from_slice(graphics);
+    }
+
+    /// 没有帧可搭车时，把暂存的图形清理包在自己的同步块里立即送出。
+    pub(super) fn flush_pending_graphics(&mut self) {
+        if self.presentation_frozen || self.pending_graphics.is_empty() {
+            return;
+        }
+        let graphics = std::mem::take(&mut self.pending_graphics);
         let mut stdout = io::stdout();
-        let _ = write_encoded_frame_with_graphics(&mut stdout, &[], graphics);
+        let _ = write_standalone_graphics(&mut stdout, &graphics);
         let _ = stdout.flush();
+    }
+
+    /// 本次呈现要带上的图形字节：先前暂存的清理在前，本帧图形在后。暂存为空（常态）
+    /// 时零拷贝借用本帧切片，热路径不新增分配。
+    fn take_graphics_for_presentation<'frame>(
+        &mut self,
+        frame_graphics: &'frame [u8],
+    ) -> Cow<'frame, [u8]> {
+        merge_presentation_graphics(&mut self.pending_graphics, frame_graphics)
     }
 
     pub(super) fn present_surface_patch(
@@ -165,8 +197,9 @@ impl ClientState {
         };
         crate::render_prof::duration_since("client_surface_patch.encode", encode_started);
         let write_started = crate::render_prof::timer();
+        let graphics = self.take_graphics_for_presentation(&[]);
         let mut stdout = io::stdout();
-        stdout.write_all(&encoded.bytes)?;
+        write_encoded_frame_with_graphics(&mut stdout, &encoded.bytes, &graphics)?;
         stdout.flush()?;
         crate::render_prof::duration_since("client_surface_patch.write", write_started);
         let committed = self.blit_encoder.commit_patch(&rows, patch.cursor, encoded);
@@ -218,14 +251,50 @@ impl ClientState {
             self.blit_encoder.encode(&frame_data, self.repaint_pending)
         };
         let mut stdout = io::stdout();
-        let graphics = if self.kitty_graphics_enabled {
+        let frame_graphics = if self.kitty_graphics_enabled {
             frame_data.graphics.as_slice()
         } else {
             &[]
         };
-        let _ = write_encoded_frame_with_graphics(&mut stdout, &encoded.bytes, graphics);
+        let graphics = self.take_graphics_for_presentation(frame_graphics);
+        let _ = write_encoded_frame_with_graphics(&mut stdout, &encoded.bytes, &graphics);
         let _ = stdout.flush();
         self.blit_encoder.commit(frame_data, encoded);
         self.repaint_pending = false;
+    }
+}
+
+/// 把暂存的图形清理与本帧图形合成一次写出的字节；暂存区被清空。暂存为空时借用
+/// 本帧切片（零拷贝），只有暂存非空的罕见路径才付一次拼接。
+fn merge_presentation_graphics<'frame>(
+    pending: &mut Vec<u8>,
+    frame_graphics: &'frame [u8],
+) -> Cow<'frame, [u8]> {
+    if pending.is_empty() {
+        return Cow::Borrowed(frame_graphics);
+    }
+    let mut graphics = std::mem::take(pending);
+    graphics.extend_from_slice(frame_graphics);
+    Cow::Owned(graphics)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::merge_presentation_graphics;
+    use std::borrow::Cow;
+
+    #[test]
+    fn pending_cleanup_precedes_frame_graphics_and_drains_the_buffer() {
+        let mut pending = b"<cleanup>".to_vec();
+        let merged = merge_presentation_graphics(&mut pending, b"<frame>");
+        assert!(matches!(merged, Cow::Owned(_)), "暂存非空才拼接");
+        assert_eq!(merged.as_ref(), b"<cleanup><frame>");
+        assert!(pending.is_empty());
+
+        // 常态（暂存为空）：零拷贝借用本帧图形，不分配。
+        let merged = merge_presentation_graphics(&mut pending, b"<frame>");
+        assert!(matches!(merged, Cow::Borrowed(_)), "暂存为空时零拷贝");
+        assert_eq!(merged.as_ref(), b"<frame>");
+        assert!(merge_presentation_graphics(&mut pending, b"").is_empty());
     }
 }

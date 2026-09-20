@@ -1002,6 +1002,17 @@
           ]
         },
         {
+          "key": "ui.repeat_ime_cursor_anchor",
+          "type": "enum",
+          "default": "auto",
+          "description": "Repeat the final cursor anchor after each synchronized-output frame so IMEs that ignore cursor moves inside a DEC 2026 batch still track the caret. \"auto\" skips the repeat when TERM_PROGRAM, TERM or KITTY_WINDOW_ID identifies a terminal where it is known to show up as cursor/tab-switch flicker (WezTerm, kitty, ghostty, foot, contour, iTerm2, Alacritty, rio), and keeps it on unknown hosts and inside tmux/screen; the check goes by terminal name, not version. \"always\" forces it; \"never\" drops it. Windows never repeats it. Resolved once when the client starts; only affects client-rendered shell frames (attach sessions are rendered by the server).",
+          "values": [
+            "auto",
+            "always",
+            "never"
+          ]
+        },
+        {
           "key": "ui.right_click_passthrough_modifier",
           "type": "string",
           "default": "\"\"",

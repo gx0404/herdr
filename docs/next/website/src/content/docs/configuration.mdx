@@ -572,6 +572,15 @@ Restricting `cjk_ime_agents` avoids showing an extra hardware cursor in unrelate
 
 Applications that wrap a repaint in synchronized output (`DECSET 2026`) keep the previous cursor state while the batch is open rather than hiding the cursor, so the host never receives a hide/show pair per frame. A batch left open for more than 1 s is treated as expired: Herdr resumes rendering and the cursor follows the pane again, so a TUI that never resets the mode cannot leave the host terminal without a cursor.
 
+Herdr paints each of its own frames inside a synchronized-output batch and, by default, repeats the final cursor anchor once more after the batch ends so native IMEs that ignore cursor moves inside `DECSET 2026` still track the caret. On terminals where that extra bare cursor move is visible it only shows up as cursor or tab-switch flicker, so `ui.repeat_ime_cursor_anchor` resolves it once when the client starts:
+
+```toml
+[ui]
+repeat_ime_cursor_anchor = "auto" # auto | always | never
+```
+
+`auto` skips the repeat when `TERM_PROGRAM`, `TERM` or `KITTY_WINDOW_ID` identifies a terminal where the repeat is known to show up as flicker (WezTerm, kitty, ghostty, foot, contour, iTerm2, Alacritty, rio). It keeps the repeat on unknown hosts and inside tmux or screen, whose synchronized-output passthrough varies by version even though they inherit the outer terminal's identity. The check goes by terminal name, not version: if an IME loses the caret on an older release of one of those terminals, set `always`; set `never` to drop the repeat on an unknown host that already renders synchronized output atomically. Windows never repeats the anchor regardless of this setting. The setting only affects frames rendered by the client's own shell; `herdr terminal attach` sessions are rendered by the server and keep the default repeat.
+
 ## Prefix input source switching
 
 On macOS and Windows, Herdr can temporarily switch to an ASCII-capable input source while prefix commands and prefix-launched modes are active:

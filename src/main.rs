@@ -287,6 +287,15 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # "native" always uses the outer terminal cursor. "drawn" always draws Herdr's cursor as terminal cell content.
 # host_cursor = "auto"
 
+# Repeat the final cursor anchor after each synchronized-output frame so
+# native IMEs that ignore cursor moves inside a DEC 2026 batch still track
+# the caret: "auto", "always", or "never".
+# "auto" skips the repeat on hosts known to support synchronized output
+# (WezTerm, kitty, ghostty, foot, contour, iTerm2, Alacritty, rio), where it
+# only shows up as cursor/tab-switch flicker; unknown hosts keep it.
+# Windows never repeats it. Read when the client starts.
+# repeat_ime_cursor_anchor = "auto"
+
 # Optional modifier that forwards right-click hold/drag gestures to pane apps instead of opening Herdr's pane menu.
 # Empty/off disables this. Shift is intentionally unsupported because terminals commonly reserve Shift+mouse.
 # right_click_passthrough_modifier = ""

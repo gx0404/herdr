@@ -375,6 +375,10 @@ pub(crate) enum ClientShellAction {
         endpoint_id: ClientEndpointId,
         boot_id: String,
         request: Box<crate::api::schema::Request>,
+        /// 由用户连续手势（键盘/鼠标切标签）发起：允许与 lane 队尾尚未写出的同类
+        /// 手势请求折叠为最新目标。程序发起的聚焦（worktree 创建后的自动聚焦、
+        /// 上下文菜单动作前置聚焦）保持 `false`，永不被折叠。
+        coalesce: bool,
     },
     ClipboardWrite(Vec<u8>),
     OpenSafeWebUrl(String),
