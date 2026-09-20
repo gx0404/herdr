@@ -670,6 +670,9 @@ pub(super) struct ClientNavigatorRow {
     pub(super) status: Option<crate::api::schema::AgentStatus>,
     pub(super) stale: bool,
     pub(super) current: bool,
+    /// 该行自身命中了当前查询/过滤（而不是因为某个后代命中才被带出来）。
+    /// 没有查询也没有过滤时恒为 false，默认选中沿用「第一行」语义。
+    pub(super) matched: bool,
     pub(super) target: ClientNavigatorTarget,
 }
 

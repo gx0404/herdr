@@ -782,7 +782,9 @@ fn mobile_items(
             });
             let background = if selected {
                 if palette.surface0 == ratatui::style::Color::Reset {
-                    palette.active_row_bg
+                    // 16 色主题的 surface0 是终端默认背景：回退到与「聚焦行」
+                    // （surface_dim）可区分的选中底色，别再落回 active_row_bg。
+                    palette.selection_row_bg()
                 } else {
                     palette.surface0
                 }

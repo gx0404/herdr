@@ -709,6 +709,23 @@ impl Palette {
         }
         self
     }
+
+    /// 列表选中行的底色。terminal 之类的 16 色主题把 `selection_bg` 留成
+    /// `Color::Reset`（即终端默认背景），直接拿它当选中底色会让选中行与
+    /// 普通行像素完全一致；回退到 `active_row_bg` 又会撞上「聚焦行」——侧栏
+    /// 聚焦的 workspace 用的正是 `active_row_bg`，导航光标停在非聚焦行上时
+    /// 依旧看不出来（上游 #4300）。所以优先回退到 `accent`（terminal 下是
+    /// Blue，与 `active_row_bg` 的 DarkGray 可区分），accent 也未定义时才退到
+    /// `active_row_bg` 保底。纯函数、无分配，供侧栏行循环按格调用。
+    pub fn selection_row_bg(&self) -> Color {
+        if self.selection_bg != Color::Reset {
+            self.selection_bg
+        } else if self.accent != Color::Reset {
+            self.accent
+        } else {
+            self.active_row_bg
+        }
+    }
 }
 
 /// Geometry for the server-rendered active-tab pane surface.
@@ -1795,5 +1812,28 @@ mod tests {
             components.toast_border_success,
             Color::Indexed(crate::config::rgb_to_xterm256(0xa6, 0xe3, 0xa1))
         );
+    }
+
+    #[test]
+    fn selection_row_bg_falls_back_when_the_theme_leaves_selection_unset() {
+        // terminal 16 色主题的 selection_bg 是 Color::Reset：直接当选中底色用，
+        // 选中行与普通行像素完全一致（上游 #4300）。
+        let terminal = Palette::terminal();
+        assert_eq!(terminal.selection_bg, Color::Reset);
+        assert_ne!(terminal.selection_row_bg(), Color::Reset);
+        // 回退也不能落到 active_row_bg：侧栏聚焦行用的就是它，否则「选中」
+        // 与「聚焦」同色，导航光标依旧不可辨认。
+        assert_ne!(terminal.selection_row_bg(), terminal.active_row_bg);
+        assert_eq!(terminal.selection_row_bg(), terminal.accent);
+
+        // 显式给了 selection_bg 的主题原样返回。
+        let catppuccin = Palette::catppuccin();
+        assert_eq!(catppuccin.selection_row_bg(), catppuccin.selection_bg);
+
+        // selection_bg 与 accent 都未定义时退到 active_row_bg 保底，仍不是 Reset。
+        let mut bare = Palette::terminal();
+        bare.accent = Color::Reset;
+        assert_eq!(bare.selection_row_bg(), bare.active_row_bg);
+        assert_ne!(bare.selection_row_bg(), Color::Reset);
     }
 }

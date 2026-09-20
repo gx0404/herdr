@@ -220,11 +220,7 @@ pub(super) fn render_collapsed(
             let selected = state.selected_workspace_id.is_some_and(|target| {
                 target.matches(&endpoint.endpoint_id, &workspace.workspace_id)
             });
-            let selection_background = if palette.selection_bg == ratatui::style::Color::Reset {
-                palette.active_row_bg
-            } else {
-                palette.selection_bg
-            };
+            let selection_background = palette.selection_row_bg();
             if selected {
                 buffer.set_style(rect, Style::default().bg(selection_background));
             } else if focused {
@@ -620,9 +616,6 @@ pub(super) fn render_expanded_regions(
                     hovered,
                     palette,
                 );
-                if selected && palette.selection_bg == ratatui::style::Color::Reset {
-                    buffer.set_style(nested, Style::default().bg(palette.active_row_bg));
-                }
                 if endpoint.status != ClientEndpointStatus::Online {
                     buffer.set_style(
                         rect,

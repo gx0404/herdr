@@ -304,10 +304,17 @@ impl ClientShellState {
         if let (Some(workspace_key), Some(ClientShellOverlay::Navigator(navigator))) =
             (workspace_key, self.overlay.as_mut())
         {
+            let (endpoint_id, workspace_id) = workspace_key.clone();
             if !navigator.expanded_workspaces.remove(&workspace_key) {
                 navigator.expanded_workspaces.insert(workspace_key);
             }
-            navigator.selected = None;
+            // 折叠/展开后光标留在刚被切换的 workspace 行上。这里不能再写
+            // `selected = None` 来表示「回到顶部」：`None` 的含义是「尚未选择」，
+            // 在搜索/过滤下会落到第一个命中行而不是第 0 行。
+            navigator.selected = Some(ClientNavigatorTarget::Workspace {
+                endpoint_id,
+                workspace_id,
+            });
             navigator.scroll = 0;
         }
     }
@@ -811,8 +818,21 @@ impl ClientShellState {
                 return;
             }
             if code == KeyCode::Home && modifiers.is_empty() {
+                // Home 必须显式落到第一行，和 End 对称。用 `selected = None` 当
+                // 「回到顶部」的哨兵是错的：`None` 表示「尚未选择」，搜索或状态
+                // 过滤生效时会落到第一个命中行，Home 就再也回不到列表首行。
+                let first = self.overlay.as_ref().and_then(|overlay| match overlay {
+                    ClientShellOverlay::Navigator(navigator) => render::client_navigator_rows(
+                        &self.endpoints,
+                        &self.active_endpoint_id,
+                        navigator,
+                    )
+                    .first()
+                    .map(|row| row.target.clone()),
+                    _ => None,
+                });
                 if let Some(ClientShellOverlay::Navigator(navigator)) = self.overlay.as_mut() {
-                    navigator.selected = None;
+                    navigator.selected = first;
                     navigator.scroll = 0;
                 }
                 outcome.repaint = true;

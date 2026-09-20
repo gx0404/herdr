@@ -541,7 +541,15 @@ pub(super) fn render_agent_list<T>(
     }
 
     if show_scrollbar {
-        let track = Rect::new(body.right().saturating_sub(1), body.y, 1, body.height);
+        // 轨道让出底格：侧栏折叠开关 « 画在同一列的最后一行，几何重叠时
+        // `agent_scrollbar` 在鼠标分派里排在 `sidebar_toggle` 之前且无条件
+        // return，点 « 会变成「列表跳到底」，绘制上也会盖掉 «。
+        let track = Rect::new(
+            body.right().saturating_sub(1),
+            body.y,
+            1,
+            body.height.saturating_sub(1),
+        );
         hits.agent_scrollbar = track;
         super::scroll::render_list_scrollbar(
             buffer,

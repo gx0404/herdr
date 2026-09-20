@@ -275,12 +275,46 @@ pub(super) fn online_agent_targets(
         .collect()
 }
 
+/// 把若干字段拼成同一行的小写 haystack（复用调用方缓冲区，ASCII 字段完全不分配），
+/// 再要求查询的每个 token 都命中其中。这样「server web」也能命中「web server」，
+/// 多词与乱序不再漏匹配。空查询恒真。
+///
+/// 调用方传进来的 `parts` 里第一项一直是端点名，所以联邦模式下「机器名 + 行内
+/// 关键词」可以跨字段命中；反过来，整串查询都落在端点名里时，该端点下每一行都会
+/// 自身命中。
+///
+/// 小写规则必须与查询侧的 `str::to_lowercase` 一致：`char::to_lowercase` 不做
+/// 上下文判定（希腊词尾 Σ→σ 而非 ς、U+0130 不展开），两侧规则不同会让用户照抄
+/// 标签也搜不到。ASCII 字段两种规则等价，所以按字段走快路径，只有非 ASCII 字段
+/// 才落到 `str::to_lowercase` 的一次短分配。
+fn tokens_match(tokens: &[&str], haystack: &mut String, parts: &[&str]) -> bool {
+    if tokens.is_empty() {
+        return true;
+    }
+    haystack.clear();
+    for part in parts {
+        if part.is_empty() {
+            continue;
+        }
+        if !haystack.is_empty() {
+            haystack.push(' ');
+        }
+        if part.is_ascii() {
+            haystack.extend(part.chars().map(|ch| ch.to_ascii_lowercase()));
+        } else {
+            haystack.push_str(&part.to_lowercase());
+        }
+    }
+    tokens.iter().all(|token| haystack.contains(token))
+}
+
 pub(super) fn navigator_rows(
     endpoints: &[ClientShellEndpoint],
     active_endpoint_id: &ClientEndpointId,
     navigator: &ClientNavigatorOverlay,
 ) -> Vec<ClientNavigatorRow> {
     let query = navigator.query.trim().to_lowercase();
+    let tokens = query.split_whitespace().collect::<Vec<_>>();
     let filter = |status| match navigator.filter {
         Some(ClientNavigatorFilter::Blocked) => status == crate::api::schema::AgentStatus::Blocked,
         Some(ClientNavigatorFilter::Working) => status == crate::api::schema::AgentStatus::Working,
@@ -288,15 +322,19 @@ pub(super) fn navigator_rows(
         Some(ClientNavigatorFilter::Done) => status == crate::api::schema::AgentStatus::Done,
         None => true,
     };
-    let text = |value: &str| query.is_empty() || value.to_lowercase().contains(&query);
-    let filtering = navigator.filter.is_some() || !query.is_empty();
+    let filtering = navigator.filter.is_some() || !tokens.is_empty();
     let federated = endpoints.len() > 1;
     let depth_offset = u8::from(federated);
+    // 整个 navigator_rows 共用一个 haystack 缓冲区。
+    let mut haystack = String::new();
     let mut rows = Vec::new();
 
     for endpoint in endpoints {
         let stale = endpoint.status != ClientEndpointStatus::Online;
-        let endpoint_query_matches = !query.is_empty() && text(&endpoint.label);
+        // 端点名也进每行的 haystack，所以「机器名 + 行内关键词」可以跨字段命中；
+        // 整串查询都落在端点名里时该端点下所有行自然全中，这里只用于端点行本身。
+        let endpoint_query_matches =
+            !tokens.is_empty() && tokens_match(&tokens, &mut haystack, &[endpoint.label.as_str()]);
         let mut endpoint_rows = Vec::new();
         if let Some(snapshot) = endpoint.snapshot.as_deref() {
             for workspace in &snapshot.workspaces {
@@ -334,10 +372,13 @@ pub(super) fn navigator_rows(
                             .clone()
                             .or_else(|| pane.cwd.clone())
                             .unwrap_or_default();
-                        if !filtering
-                            || filter(status)
-                                && (endpoint_query_matches || text(&label) || text(&meta))
-                        {
+                        let matched = filter(status)
+                            && tokens_match(
+                                &tokens,
+                                &mut haystack,
+                                &[endpoint.label.as_str(), label.as_str(), meta.as_str()],
+                            );
+                        if !filtering || matched {
                             panes.push(ClientNavigatorRow {
                                 depth: 2 + depth_offset,
                                 label,
@@ -346,6 +387,7 @@ pub(super) fn navigator_rows(
                                 stale,
                                 current: endpoint.endpoint_id == *active_endpoint_id
                                     && snapshot.focused_pane_id.as_deref() == Some(&pane.pane_id),
+                                matched: filtering && matched,
                                 target: ClientNavigatorTarget::Pane {
                                     endpoint_id: endpoint.endpoint_id.clone(),
                                     pane_id: pane.pane_id.clone(),
@@ -353,10 +395,13 @@ pub(super) fn navigator_rows(
                             });
                         }
                     }
-                    if !filtering
-                        || filter(tab.agent_status) && (endpoint_query_matches || text(&tab.label))
-                        || !panes.is_empty()
-                    {
+                    let tab_matched = filter(tab.agent_status)
+                        && tokens_match(
+                            &tokens,
+                            &mut haystack,
+                            &[endpoint.label.as_str(), tab.label.as_str()],
+                        );
+                    if !filtering || tab_matched || !panes.is_empty() {
                         children.push(ClientNavigatorRow {
                             depth: 1 + depth_offset,
                             label: tab.label.clone(),
@@ -371,6 +416,7 @@ pub(super) fn navigator_rows(
                             status: None,
                             stale,
                             current: false,
+                            matched: filtering && tab_matched,
                             target: ClientNavigatorTarget::Tab {
                                 endpoint_id: endpoint.endpoint_id.clone(),
                                 tab_id: tab.tab_id.clone(),
@@ -380,7 +426,15 @@ pub(super) fn navigator_rows(
                     }
                 }
                 let workspace_matches = filter(workspace.agent_status)
-                    && (endpoint_query_matches || text(&workspace.label) || text(&workspace_meta));
+                    && tokens_match(
+                        &tokens,
+                        &mut haystack,
+                        &[
+                            endpoint.label.as_str(),
+                            workspace.label.as_str(),
+                            workspace_meta.as_str(),
+                        ],
+                    );
                 if !filtering || workspace_matches || !children.is_empty() {
                     let key = (endpoint.endpoint_id.clone(), workspace.workspace_id.clone());
                     endpoint_rows.push(ClientNavigatorRow {
@@ -390,6 +444,7 @@ pub(super) fn navigator_rows(
                         status: None,
                         stale,
                         current: false,
+                        matched: filtering && workspace_matches,
                         target: ClientNavigatorTarget::Workspace {
                             endpoint_id: endpoint.endpoint_id.clone(),
                             workspace_id: workspace.workspace_id.clone(),
@@ -410,6 +465,7 @@ pub(super) fn navigator_rows(
                     status: None,
                     stale,
                     current: false,
+                    matched: filtering && endpoint_query_matches,
                     target: ClientNavigatorTarget::Machine {
                         endpoint_id: endpoint.endpoint_id.clone(),
                     },
@@ -427,7 +483,18 @@ pub(super) fn navigator_selected_index(
 ) -> Option<usize> {
     match navigator.selected.as_ref() {
         Some(target) => rows.iter().position(|row| row.target == *target),
-        None => (!rows.is_empty()).then_some(0),
+        None => {
+            if rows.is_empty() {
+                return None;
+            }
+            // 搜索/过滤下第 0 行通常是被 `endpoint_rows.extend(children)` 一并带
+            // 出来的 workspace（或机器）祖先，自身并未命中，直接回车会跳到祖先而
+            // 不是命中的 pane：落在**文档序第一个自身命中的行**上。不再额外偏好
+            // 叶子 pane——那样会跳过排在前面、同样命中的 workspace/tab/机器行
+            // （例如查机器名时该端点每行都命中，本该停在机器行）。无查询无过滤时
+            // `matched` 恒 false，回到第 0 行，既有语义原样保留。
+            Some(rows.iter().position(|row| row.matched).unwrap_or(0))
+        }
     }
 }
 

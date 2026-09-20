@@ -1,4 +1,5 @@
 use super::*;
+use crate::input::TerminalKey;
 
 fn workspaces(count: usize) -> ClientShellSnapshot {
     let mut projected = snapshot();
@@ -99,25 +100,25 @@ fn navigation_highlights_only_the_preview_and_activates_on_enter() {
                 let other = workspace_rect(&state, collision, "ws_2");
                 let focused = workspace_rect(&state, &ClientEndpointId::Local, "ws_1");
                 let palette = &state.config.palette;
-                let color = if cols == 44 {
+                let color = if cols == 44 && palette.surface0 != ratatui::style::Color::Reset {
                     palette.surface0
                 } else {
-                    palette.selection_bg
-                };
-                let color = if color == ratatui::style::Color::Reset {
-                    palette.active_row_bg
-                } else {
-                    color
+                    palette.selection_row_bg()
                 };
                 assert_eq!(buffer[(selected.x + 2, selected.y)].bg, color);
                 assert_ne!(buffer[(other.x + 2, other.y)].bg, color);
-                assert_eq!(
+                let focused_bg = if cols == 44 {
+                    palette.surface_dim
+                } else {
+                    palette.active_row_bg
+                };
+                assert_eq!(buffer[(focused.x + 2, focused.y)].bg, focused_bg);
+                // 导航光标必须和「聚焦行」可区分：terminal 主题曾让两者同为
+                // DarkGray，选中位置完全看不出来（上游 #4300）。
+                assert_ne!(
+                    buffer[(selected.x + 2, selected.y)].bg,
                     buffer[(focused.x + 2, focused.y)].bg,
-                    if cols == 44 {
-                        palette.surface_dim
-                    } else {
-                        palette.active_row_bg
-                    }
+                    "cols={cols} terminal_theme={terminal_theme}"
                 );
             }
             assert_eq!(state.snapshot.as_ref().unwrap().boot_id, "boot-1");
@@ -502,4 +503,408 @@ fn aggregate_navigation_reveals_overflow_and_preserves_order() {
         preview_key(&mut state, b"\x1b[B");
         assert_selected(&state, &ClientEndpointId::Local, "ws_1");
     }
+}
+
+fn overflowing_agent_sidebar_state() -> ClientShellState {
+    let mut projected = snapshot();
+    projected.agents = (1..=12)
+        .map(|index| ClientShellAgent {
+            pane_id: format!("pane_{index}"),
+            workspace_id: "ws_1".into(),
+            tab_id: "tab_1".into(),
+            name: Some(format!("agent-{index}")),
+            display_agent: None,
+            agent: Some("pi".into()),
+            title: None,
+            terminal_title: None,
+            terminal_title_stripped: None,
+            agent_status: AgentStatus::Idle,
+            state_change_seq: index,
+            state_labels: Vec::new(),
+            tokens: Vec::new(),
+            focused: index == 1,
+        })
+        .collect();
+    projected.panes = projected
+        .agents
+        .iter()
+        .map(|agent| ClientShellPane {
+            pane_id: agent.pane_id.clone(),
+            focused: agent.focused,
+            ..projected.panes[0].clone()
+        })
+        .collect();
+    let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
+    state.set_snapshot(Box::new(projected));
+    state.set_pane_surface(surface());
+    state
+}
+
+#[test]
+fn sidebar_collapse_toggle_stays_clickable_when_the_agent_list_overflows() {
+    // agents 溢出时滚动条轨道曾一直画到 body 底格，正好压住右下角的 « 折叠开关；
+    // 鼠标分派里 agent_scrollbar 排在 sidebar_toggle 之前且无条件 return，
+    // 结果点 « 变成「列表跳到底」。轨道必须让出底格。
+    let mut state = overflowing_agent_sidebar_state();
+    state.compose(106, 20).expect("overflowing agent sidebar");
+    let track = state.hits.agent_scrollbar;
+    let toggle = state.hits.sidebar_toggle;
+    assert!(track.height > 0, "agents 应当溢出并画出滚动条");
+    assert!(toggle.width > 0 && toggle.height > 0, "« 开关应当可见");
+    assert!(
+        !crate::client::shell::contains(track, (toggle.x, toggle.y)),
+        "滚动条轨道 {track:?} 不得包含折叠开关中心 {toggle:?}"
+    );
+
+    let collapsed_before = state.sidebar_collapsed;
+    state.handle_raw_events(vec![RawInputEvent::Mouse(MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: toggle.x,
+        row: toggle.y,
+        modifiers: KeyModifiers::NONE,
+    })]);
+    assert_eq!(
+        state.sidebar_collapsed, !collapsed_before,
+        "点 « 应当切换侧栏折叠而不是滚动 agents"
+    );
+    assert_eq!(state.agent_scroll, 0, "点 « 不应滚动 agents 列表");
+}
+
+#[test]
+fn terminal_theme_keeps_the_navigation_selection_visible_without_a_machine_column() {
+    // theme = "terminal" 的 selection_bg 是 Color::Reset：单端点侧栏此前直接用它做
+    // 选中底色，选中行与未选中行像素完全相同；回退到 active_row_bg 又会与聚焦行
+    // 同色，导航光标照样看不出来（上游 #4300）。
+    // 从 `theme.name = "terminal"` 走完整解析链，而不是直接塞 Palette。
+    let mut config = Config::default();
+    config.theme.name = Some("terminal".into());
+    let terminal_palette = ClientShellConfig::from_config(&config).palette;
+    assert_eq!(
+        terminal_palette.selection_bg,
+        ratatui::style::Color::Reset,
+        "terminal 主题应当保持 selection_bg 未定义，否则这条用例失去意义"
+    );
+    for collapsed in [false, true] {
+        let mut state = ClientShellState::new(ClientShellConfig::from_config(&config));
+        state.sidebar_collapsed = collapsed;
+        state.set_snapshot(Box::new(workspaces(3)));
+        state.set_pane_surface(surface());
+        state.compose(100, 28).unwrap();
+        enter_navigation(&mut state);
+        preview_key(&mut state, b"\x1b[B");
+        assert_selected(&state, &ClientEndpointId::Local, "ws_2");
+        let buffer = state.compose(100, 28).unwrap().to_ratatui_buffer().unwrap();
+        let selected = workspace_rect(&state, &ClientEndpointId::Local, "ws_2");
+        let plain = workspace_rect(&state, &ClientEndpointId::Local, "ws_3");
+        // ws_1 是聚焦的 workspace：它用 active_row_bg。
+        let focused = workspace_rect(&state, &ClientEndpointId::Local, "ws_1");
+        let palette = &state.config.palette;
+        assert_eq!(
+            buffer[(selected.x, selected.y)].bg,
+            palette.selection_row_bg(),
+            "collapsed={collapsed}"
+        );
+        assert_ne!(
+            buffer[(selected.x, selected.y)].bg,
+            ratatui::style::Color::Reset,
+            "collapsed={collapsed}"
+        );
+        assert_ne!(
+            buffer[(selected.x, selected.y)].bg,
+            buffer[(plain.x, plain.y)].bg,
+            "collapsed={collapsed}: 选中行必须与未选中行可区分"
+        );
+        assert_eq!(
+            buffer[(focused.x, focused.y)].bg,
+            palette.active_row_bg,
+            "collapsed={collapsed}"
+        );
+        assert_ne!(
+            buffer[(selected.x, selected.y)].bg,
+            buffer[(focused.x, focused.y)].bg,
+            "collapsed={collapsed}: 选中行必须与聚焦行可区分"
+        );
+    }
+}
+
+fn navigator_state_with_panes(labels: &[&str]) -> ClientShellState {
+    let mut projected = snapshot();
+    projected.panes = labels
+        .iter()
+        .enumerate()
+        .map(|(index, label)| ClientShellPane {
+            pane_id: format!("pane_{}", index + 1),
+            label: Some((*label).to_string()),
+            focused: index == 0,
+            ..projected.panes[0].clone()
+        })
+        .collect();
+    projected.focused_pane_id = Some("pane_1".into());
+    let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
+    state.set_snapshot(Box::new(projected));
+    state.set_pane_surface(surface());
+    state
+}
+
+fn navigator_rows_for(state: &mut ClientShellState, query: &str) -> Vec<ClientNavigatorRow> {
+    let Some(ClientShellOverlay::Navigator(navigator)) = state.overlay.as_mut() else {
+        panic!("expected navigator");
+    };
+    navigator.query = query.into();
+    navigator.selected = None;
+    let Some(ClientShellOverlay::Navigator(navigator)) = state.overlay.as_ref() else {
+        panic!("expected navigator");
+    };
+    render::client_navigator_rows(&state.endpoints, &state.active_endpoint_id, navigator)
+}
+
+#[test]
+fn navigator_search_matches_tokens_in_any_order() {
+    // 单一连续子串匹配让「server web」打不中「web server」（上游 #4273）。
+    let mut state = navigator_state_with_panes(&["web server", "database"]);
+    state.open_navigator_overlay();
+    for query in ["server web", "web server", "  SERVER   web "] {
+        let rows = navigator_rows_for(&mut state, query);
+        assert!(
+            rows.iter().any(|row| row.label == "web server"),
+            "query={query:?} 应当命中 web server，实得 {:?}",
+            rows.iter()
+                .map(|row| row.label.as_str())
+                .collect::<Vec<_>>()
+        );
+        assert!(
+            !rows.iter().any(|row| row.label == "database"),
+            "query={query:?} 不应命中 database"
+        );
+    }
+}
+
+#[test]
+fn navigator_search_defaults_the_selection_to_the_matched_pane() {
+    // NAV-02（上游 #4109）：搜索后默认选中第 0 行（workspace 祖先），
+    // 直接回车会聚焦 workspace 而不是唯一命中的 pane。
+    let mut state = navigator_state_with_panes(&["web server", "database"]);
+    state.open_navigator_overlay();
+    let rows = navigator_rows_for(&mut state, "server");
+    let Some(ClientShellOverlay::Navigator(navigator)) = state.overlay.as_ref() else {
+        panic!("expected navigator");
+    };
+    let index =
+        crate::client::shell::aggregate_navigation::navigator_selected_index(&rows, navigator)
+            .expect("默认选中");
+    assert_eq!(rows[index].label, "web server");
+    assert!(matches!(
+        rows[index].target,
+        ClientNavigatorTarget::Pane { .. }
+    ));
+
+    // 无查询无过滤时仍然默认第 0 行，不改变既有行为。
+    let rows = navigator_rows_for(&mut state, "");
+    let Some(ClientShellOverlay::Navigator(navigator)) = state.overlay.as_ref() else {
+        panic!("expected navigator");
+    };
+    assert_eq!(
+        crate::client::shell::aggregate_navigation::navigator_selected_index(&rows, navigator),
+        Some(0)
+    );
+}
+
+/// 两个 workspace：`web-app` 自身命中 `web` 但底下没有命中的 pane，`other`
+/// 自身不命中却带着命中的 `web server`。用来分辨「第一个命中行」与
+/// 「第一个命中的 pane」两种默认选中规则。
+fn navigator_state_with_two_workspaces() -> ClientShellState {
+    let mut projected = snapshot();
+    projected.workspaces[0].label = "web-app".into();
+    let mut second_workspace = projected.workspaces[0].clone();
+    second_workspace.workspace_id = "ws_2".into();
+    second_workspace.active_tab_id = "tab_2".into();
+    second_workspace.number = 2;
+    second_workspace.label = "other".into();
+    second_workspace.focused = false;
+    projected.workspaces.push(second_workspace);
+
+    let mut second_tab = projected.tabs[0].clone();
+    second_tab.tab_id = "tab_2".into();
+    second_tab.workspace_id = "ws_2".into();
+    second_tab.number = 2;
+    second_tab.label = "2".into();
+    second_tab.focused = false;
+    projected.tabs.push(second_tab);
+
+    projected.panes[0].label = Some("database".into());
+    let mut second_pane = projected.panes[0].clone();
+    second_pane.pane_id = "pane_2".into();
+    second_pane.workspace_id = "ws_2".into();
+    second_pane.tab_id = "tab_2".into();
+    second_pane.label = Some("web server".into());
+    second_pane.focused = false;
+    projected.panes.push(second_pane);
+
+    let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
+    state.set_snapshot(Box::new(projected));
+    state.set_pane_surface(surface());
+    state
+}
+
+fn navigator_rows_now(state: &ClientShellState) -> Vec<ClientNavigatorRow> {
+    let Some(ClientShellOverlay::Navigator(navigator)) = state.overlay.as_ref() else {
+        panic!("expected navigator");
+    };
+    render::client_navigator_rows(&state.endpoints, &state.active_endpoint_id, navigator)
+}
+
+fn navigator_target_now(state: &ClientShellState) -> Option<ClientNavigatorTarget> {
+    let rows = navigator_rows_now(state);
+    let Some(ClientShellOverlay::Navigator(navigator)) = state.overlay.as_ref() else {
+        panic!("expected navigator");
+    };
+    crate::client::shell::aggregate_navigation::selected_navigator_target(&rows, navigator)
+}
+
+/// 走真实按键路径：prefix+g 开导航 → `/` 聚焦搜索框 → 逐字输入查询。
+fn open_navigator_and_type(state: &mut ClientShellState, query: &str) {
+    preview_key(state, &[0x02]);
+    preview_key(state, b"g");
+    assert!(matches!(
+        state.overlay,
+        Some(ClientShellOverlay::Navigator(_))
+    ));
+    preview_key(state, b"/");
+    for byte in query.as_bytes() {
+        preview_key(state, &[*byte]);
+    }
+}
+
+#[test]
+fn navigator_search_does_not_skip_an_earlier_matched_row() {
+    // 默认选中必须是**文档序第一个自身命中的行**。偏好叶子 pane 会跳过排在
+    // 前面、同样命中的 workspace 行，回车打开的是另一个 workspace 深处的 pane。
+    let mut state = navigator_state_with_two_workspaces();
+    state.open_navigator_overlay();
+    let rows = navigator_rows_for(&mut state, "web");
+    let labels = rows
+        .iter()
+        .map(|row| row.label.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(labels, ["web-app", "other", "2", "web server"]);
+    assert!(rows[0].matched, "web-app 自身命中");
+    assert!(!rows[1].matched, "other 只是被后代带出来");
+
+    let Some(ClientShellOverlay::Navigator(navigator)) = state.overlay.as_ref() else {
+        panic!("expected navigator");
+    };
+    let index =
+        crate::client::shell::aggregate_navigation::navigator_selected_index(&rows, navigator)
+            .expect("默认选中");
+    assert_eq!(index, 0, "实得 {:?}", rows[index].label);
+    assert!(matches!(
+        rows[index].target,
+        ClientNavigatorTarget::Workspace { .. }
+    ));
+}
+
+#[test]
+fn navigator_search_enter_opens_the_matched_pane_through_the_key_path() {
+    // NAV-02 的用户可见行为：搜索后直接回车打开搜到的 pane，而不是只为容纳它
+    // 才被带出来的 workspace 祖先。整条路径都走按键，不手工改 selected。
+    let mut state = navigator_state_with_two_workspaces();
+    state.compose(120, 28).expect("compose");
+    open_navigator_and_type(&mut state, "web server");
+    let labels = navigator_rows_now(&state)
+        .iter()
+        .map(|row| row.label.clone())
+        .collect::<Vec<_>>();
+    assert_eq!(labels, ["other", "2", "web server"]);
+
+    let outcome = state.handle_input_bytes(b"\r");
+    let [ClientShellAction::Endpoint { request, .. }] = &outcome.actions[..] else {
+        panic!("回车应当走端点 API，实得 {:?}", outcome.actions.len());
+    };
+    assert!(
+        matches!(
+            &request.method,
+            crate::api::schema::Method::PaneFocus(target) if target.pane_id == "pane_2"
+        ),
+        "回车应当聚焦命中的 pane，实得 {:?}",
+        request.method
+    );
+}
+
+#[test]
+fn navigator_home_returns_to_the_first_row_while_a_query_is_active() {
+    // Home 曾用 `selected = None` 当「回到顶部」的哨兵。`None` 的真实含义是
+    // 「尚未选择」，搜索生效时会落到第一个命中行，Home 于是再也回不到首行。
+    let mut state = navigator_state_with_two_workspaces();
+    state.compose(120, 28).expect("compose");
+    open_navigator_and_type(&mut state, "web server");
+    // Esc 退出搜索框但保留查询。
+    preview_key(&mut state, b"\x1b");
+    let Some(ClientShellOverlay::Navigator(navigator)) = state.overlay.as_ref() else {
+        panic!("expected navigator");
+    };
+    assert!(!navigator.search_focused);
+    assert_eq!(navigator.query.as_str(), "web server");
+
+    preview_key(&mut state, b"\x1b[B"); // ↓ 走到别处
+    let rows = navigator_rows_now(&state);
+    assert_ne!(navigator_target_now(&state), Some(rows[0].target.clone()));
+
+    let outcome = state.handle_raw_events(vec![RawInputEvent::Key(TerminalKey::new(
+        KeyCode::Home,
+        KeyModifiers::NONE,
+    ))]);
+    assert!(outcome.actions.is_empty() && outcome.requests.is_empty());
+    assert_eq!(
+        navigator_target_now(&state),
+        Some(rows[0].target.clone()),
+        "Home 必须回到列表首行"
+    );
+    let Some(ClientShellOverlay::Navigator(navigator)) = state.overlay.as_ref() else {
+        panic!("expected navigator");
+    };
+    assert_eq!(navigator.scroll, 0);
+}
+
+#[test]
+fn navigator_search_folds_case_the_same_way_on_both_sides() {
+    // 查询侧是 `str::to_lowercase`（做 Final_Sigma 等上下文映射），haystack 侧
+    // 若按 `char::to_lowercase` 逐字符折叠，ΟΔΟΣ 会变成 οδοσ 而查询是 οδος，
+    // 照抄标签反而搜不到。
+    let mut state = navigator_state_with_panes(&["ΟΔΟΣ", "database"]);
+    state.open_navigator_overlay();
+    for query in ["ΟΔΟΣ", "οδος", "ΟΔΟΣ"] {
+        let rows = navigator_rows_for(&mut state, query);
+        assert!(
+            rows.iter().any(|row| row.label == "ΟΔΟΣ"),
+            "query={query:?} 应当命中 ΟΔΟΣ，实得 {:?}",
+            rows.iter()
+                .map(|row| row.label.as_str())
+                .collect::<Vec<_>>()
+        );
+    }
+}
+
+#[test]
+fn navigator_search_on_a_machine_name_keeps_the_machine_row_selected() {
+    // 端点名进了该端点每一行的 haystack：整串查询落在机器名里时全端点行都自身
+    // 命中。默认选中取文档序第一个命中行 → Machine 行，「搜机器名 + 回车 = 切到
+    // 那台机器」的老行为得以保留。
+    let (mut state, remote) = navigation_state(workspaces(2));
+    state.open_navigator_overlay();
+    let rows = navigator_rows_for(&mut state, "Build");
+    assert!(
+        matches!(&rows[0].target, ClientNavigatorTarget::Machine { endpoint_id } if *endpoint_id == remote),
+        "首行应当是 Build 机器行，实得 {:?}",
+        rows.iter()
+            .map(|row| row.label.as_str())
+            .collect::<Vec<_>>()
+    );
+    assert!(rows[0].matched);
+    let Some(ClientShellOverlay::Navigator(navigator)) = state.overlay.as_ref() else {
+        panic!("expected navigator");
+    };
+    assert_eq!(
+        crate::client::shell::aggregate_navigation::navigator_selected_index(&rows, navigator),
+        Some(0)
+    );
 }
