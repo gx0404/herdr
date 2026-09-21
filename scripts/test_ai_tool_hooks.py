@@ -65,6 +65,14 @@ class PreToolUseGateTests(unittest.TestCase):
         "echo '{}' > distribution/latest.json",
         "sed -i s/x/y/ distribution/preview.json",
         "cat ~/.ssh/id_rsa",
+        # 命令位置的各种真执行形态都必须拦住
+        "just check && git push origin master --force",
+        "git -C /tmp/x push -f origin master",
+        "bash -c 'gh pr merge 12'",
+        "GH_TOKEN=x gh release create v9.9.9",
+        "bash <<'EOF'\ncargo publish\nEOF",
+        "echo '{}' | sudo tee distribution/latest.json",
+        "if true; then git commit -m x --no-verify; fi",
     ]
     ASK_COMMANDS = [
         "git push origin feature/x --force-with-lease",
@@ -94,6 +102,10 @@ class PreToolUseGateTests(unittest.TestCase):
         "python3 - <<'PYEOF'\ntext = '只精确暂存，禁 git add -A'\nPYEOF",
         "python3 - <<'PYEOF'\ntext = '需人工确认：git push --force-with-lease'\nPYEOF",
         "git commit -m 'docs: 说明为何不用 git add --all'",
+        "rg 'gh pr merge' docs/",
+        "python3 - <<'PYEOF'\ntext = '禁 git push --force、gh pr merge 与 cargo publish'\nPYEOF",
+        "python3 - <<'PYEOF'\ntext = '勿用 sed 改 distribution/latest.json，勿 cat ~/.ssh/id_rsa'\nPYEOF",
+        "git commit -m 'docs: 解释为何禁止 git push --force 与 gh release create'",
     ]
     DENY_FILES = [
         "distribution/latest.json",
