@@ -775,11 +775,7 @@ async fn run_client_loop(
                     .as_mut()
                     .is_some_and(|shell| shell.refresh_broadcast_mirror());
                 if mirror_changed {
-                    if let Some(frame) = state.shell.as_mut().and_then(|shell| {
-                        shell.compose(state.reported_size.0, state.reported_size.1)
-                    }) {
-                        state.present_frame(frame);
-                    }
+                    state.compose_and_present();
                 }
             }
             #[cfg(unix)]
@@ -996,8 +992,10 @@ async fn run_client_loop(
                 if let Some(owner) = owner {
                     write_stream.send_to(&owner, &message);
                 }
-                if let Some(frame) = composed {
-                    state.present_frame(frame);
+                match composed {
+                    Some(frame) => state.present_frame(frame),
+                    // 本事件触发了 compose 但没出帧（等配对 surface）：欠一帧。
+                    None => state.request_repaint(),
                 }
             }
             #[cfg(unix)]
@@ -1292,8 +1290,9 @@ async fn run_client_loop(
                         negotiation,
                         false,
                     );
-                    if let Some(frame) = frame {
-                        state.present_frame(frame);
+                    match frame {
+                        Some(frame) => state.present_frame(frame),
+                        None => state.request_repaint(),
                     }
                     let reader_tx = event_tx.clone();
                     std::thread::spawn(move || {
@@ -1324,11 +1323,7 @@ async fn run_client_loop(
                             endpoint::ClientEndpointStatus::Connecting,
                         );
                     }
-                    if let Some(frame) = state.shell.as_mut().and_then(|shell| {
-                        shell.compose(state.reported_size.0, state.reported_size.1)
-                    }) {
-                        state.present_frame(frame);
-                    }
+                    state.compose_and_present();
                 }
             }
             ClientLoopEvent::MachineInteractiveReady { ticket, connection } => {
@@ -1387,11 +1382,7 @@ async fn run_client_loop(
                         &event_tx,
                     )?;
                     if needs_compose || dispatch_repaint {
-                        if let Some(frame) = state.shell.as_mut().and_then(|shell| {
-                            shell.compose(state.reported_size.0, state.reported_size.1)
-                        }) {
-                            state.present_frame(frame);
-                        }
+                        state.compose_and_present();
                     }
                 }
             }
@@ -1403,11 +1394,7 @@ async fn run_client_loop(
                         shell.show_machine_auth_prompt(ticket, queue[0].prompt())
                     });
                     if shown {
-                        if let Some(frame) = state.shell.as_mut().and_then(|shell| {
-                            shell.compose(state.reported_size.0, state.reported_size.1)
-                        }) {
-                            state.present_frame(frame);
-                        }
+                        state.compose_and_present();
                     } else {
                         // No live dialog claims the session: decline so ssh
                         // fails fast instead of hanging on a hidden prompt.
@@ -1435,11 +1422,7 @@ async fn run_client_loop(
                         if let Some(shell) = state.shell.as_mut() {
                             shell.show_machine_auth_prompt(ticket, &next_prompt);
                         }
-                        if let Some(frame) = state.shell.as_mut().and_then(|shell| {
-                            shell.compose(state.reported_size.0, state.reported_size.1)
-                        }) {
-                            state.present_frame(frame);
-                        }
+                        state.compose_and_present();
                     }
                 }
             }
@@ -1479,11 +1462,7 @@ async fn run_client_loop(
                         &event_tx,
                     )?;
                     if needs_compose || dispatch_repaint {
-                        if let Some(frame) = state.shell.as_mut().and_then(|shell| {
-                            shell.compose(state.reported_size.0, state.reported_size.1)
-                        }) {
-                            state.present_frame(frame);
-                        }
+                        state.compose_and_present();
                     }
                 }
             }
@@ -1532,11 +1511,7 @@ async fn run_client_loop(
                     .as_mut()
                     .is_some_and(|shell| shell.receive_view(generation, *view))
                 {
-                    if let Some(frame) = state.shell.as_mut().and_then(|shell| {
-                        shell.compose(state.reported_size.0, state.reported_size.1)
-                    }) {
-                        state.present_frame(frame);
-                    }
+                    state.compose_and_present();
                 }
             }
             ClientLoopEvent::ServerMessage {

@@ -76,6 +76,20 @@ impl ClientState {
         self.repaint_pending = true;
     }
 
+    /// compose 并呈现一帧；`compose` 返回 `None`（等待配对的快照 / surface
+    /// 分代）时记下「还欠一帧」：否则这次 repaint 请求被静默吞掉，后续补丁会
+    /// 走快路径一直不补画这次变化（CFP-12）。
+    pub(super) fn compose_and_present(&mut self) {
+        let Some(shell) = self.shell.as_mut() else {
+            return;
+        };
+        let (cols, rows) = self.reported_size;
+        match shell.compose(cols, rows) {
+            Some(frame) => self.present_frame(frame),
+            None => self.request_repaint(),
+        }
+    }
+
     pub(super) fn freeze_presentation(&mut self) {
         self.presentation_frozen = true;
     }
