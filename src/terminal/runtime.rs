@@ -415,7 +415,8 @@ impl TerminalRuntime {
         &self,
         area_width: u16,
         area_height: u16,
-    ) -> Option<crate::pane::TerminalDirtyPatchSnapshot> {
+    ) -> Result<crate::pane::TerminalDirtyPatchSnapshot, crate::pane::DirtyPatchSnapshotUnavailable>
+    {
         self.0.collect_dirty_patch_snapshot(area_width, area_height)
     }
 
@@ -592,6 +593,10 @@ impl TerminalRuntime {
         bytes: Vec<u8>,
     ) -> (std::sync::mpsc::Sender<()>, std::thread::JoinHandle<bool>) {
         self.0.test_contend_during_dirty_collection(bytes)
+    }
+
+    pub(crate) fn test_bump_content_seq(&self) {
+        self.0.test_bump_content_seq();
     }
 
     pub(crate) fn test_with_channel(cols: u16, rows: u16) -> (Self, mpsc::Receiver<Bytes>) {

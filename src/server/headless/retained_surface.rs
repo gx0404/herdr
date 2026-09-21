@@ -222,6 +222,10 @@ impl HeadlessServer {
     ) -> bool {
         crate::render_prof::event("retained_surface.attempt");
         let started = crate::render_prof::timer();
+        // RS-01/RS-05 过渡层：回退拆成两类。全局不安全（unsafe_state /
+        // non_shell_target）保持整 tick 回退；接收者级与 pane 级问题只剔除
+        // 受影响者，观看它的客户端延期到一次全量渲染恢复基线（defer_full_render
+        // + 显式 render kick），其余 pane/接收者照常走补丁。
         macro_rules! fallback {
             ($reason:literal) => {{
                 crate::render_prof::event(concat!("retained_surface.fallback.", $reason));
@@ -262,20 +266,26 @@ impl HeadlessServer {
             fallback!("non_shell_target");
         }
 
+        let mut deferred_clients: HashSet<u64> = HashSet::new();
         let mut recipients = Vec::with_capacity(targets.len());
         for (client_id, (cols, rows), _, _, _) in &targets {
             let Some(client) = self.clients.get(client_id) else {
-                fallback!("client_missing");
+                // client_missing：收集期间客户端已消失，剔除即可（延期无对象）。
+                crate::render_prof::event("retained_surface.skip.client_missing");
+                continue;
             };
             if client.deferred_render() != DeferredRender::None {
                 crate::render_prof::event("retained_surface.recipient_deferred");
                 continue;
             }
-            let surfaces = if let Some(views) = &client.views {
-                let mut surfaces = Vec::new();
+            let mut surfaces = Vec::new();
+            if let Some(views) = &client.views {
                 for (index, view) in views.views.iter().enumerate() {
                     let Some(surface) = view.render_state.last_pane_surface() else {
-                        fallback!("no_view_baseline");
+                        // no_view_baseline：剔除该 view 并延期客户端全量重绘。
+                        crate::render_prof::event("retained_surface.defer.no_view_baseline");
+                        deferred_clients.insert(*client_id);
+                        continue;
                     };
                     surfaces.push((
                         Some(ViewIdentity {
@@ -289,13 +299,13 @@ impl HeadlessServer {
                         view.spec.rows,
                     ));
                 }
-                surfaces
+            } else if let Some(surface) = client.render_state.last_pane_surface() {
+                surfaces.push((None, surface, *cols, *rows));
             } else {
-                let Some(surface) = client.render_state.last_pane_surface() else {
-                    fallback!("no_baseline");
-                };
-                vec![(None, surface, *cols, *rows)]
-            };
+                // no_baseline：客户端还没有基线（首个全量渲染前），延期恢复。
+                crate::render_prof::event("retained_surface.defer.no_baseline");
+                deferred_clients.insert(*client_id);
+            }
             for (view, surface, cols, rows) in surfaces {
                 if surface.boot_id != self.client_shell_boot_id
                     || surface.projection_revision != client.shell_projection_revision
@@ -305,7 +315,10 @@ impl HeadlessServer {
                     || !surface.graphics.assets.is_empty()
                     || !surface.frame.graphics.is_empty()
                 {
-                    fallback!("baseline_mismatch");
+                    // baseline_mismatch：基线陈旧/不适用，剔除并延期全量重绘。
+                    crate::render_prof::event("retained_surface.defer.baseline_mismatch");
+                    deferred_clients.insert(*client_id);
+                    continue;
                 }
                 recipients.push(RetainedRecipient {
                     client_id: *client_id,
@@ -323,6 +336,7 @@ impl HeadlessServer {
             let mut public_pane_id = None;
             let mut width = 0u16;
             let mut height = 0u16;
+            let mut watching_clients = HashSet::new();
             for recipient in &recipients {
                 let Some(pane) = recipient.surface.panes.iter().find(|pane| {
                     self.app
@@ -331,6 +345,7 @@ impl HeadlessServer {
                 }) else {
                     continue;
                 };
+                watching_clients.insert(recipient.client_id);
                 public_pane_id.get_or_insert_with(|| pane.pane_id.clone());
                 width = width.max(pane.inner_rect.width);
                 height = height.max(pane.inner_rect.height);
@@ -339,17 +354,38 @@ impl HeadlessServer {
                 continue;
             };
             let Some((workspace_index, pane_id)) = self.app.parse_pane_id(&public_pane_id) else {
-                fallback!("pane_missing");
+                // pane_missing：基线里的 pane 已从状态消失，剔除并让观看者全量重绘。
+                crate::render_prof::event("retained_surface.defer.pane_missing");
+                deferred_clients.extend(watching_clients);
+                continue;
             };
             let Some(runtime) = self.app.state.runtime_for_pane_in_workspace(
                 &self.app.terminal_runtimes,
                 workspace_index,
                 pane_id,
             ) else {
-                fallback!("runtime_missing");
+                // runtime_missing：pane 生命周期切换中，剔除并让观看者全量重绘。
+                crate::render_prof::event("retained_surface.defer.runtime_missing");
+                deferred_clients.extend(watching_clients);
+                continue;
             };
-            let Some(snapshot) = runtime.collect_dirty_patch_snapshot(width, height) else {
-                fallback!("terminal_snapshot");
+            let snapshot = match runtime.collect_dirty_patch_snapshot(width, height) {
+                Ok(snapshot) => snapshot,
+                Err(crate::pane::DirtyPatchSnapshotUnavailable::Contended) => {
+                    // terminal_snapshot 竞态：revision 未配对完成，武装下一 tick
+                    // 重试补丁，不延期、不整 tick 回退。
+                    crate::render_prof::event("retained_surface.retry.terminal_snapshot");
+                    self.app.render_dirty.request_pty(pane_id);
+                    self.app.render_notify.notify_one();
+                    continue;
+                }
+                Err(crate::pane::DirtyPatchSnapshotUnavailable::PatchFallback) => {
+                    // terminal_patch（如超链接单元格）：剔除该 pane，观看者延期
+                    // 全量重绘重建基线。
+                    crate::render_prof::event("retained_surface.defer.terminal_patch");
+                    deferred_clients.extend(watching_clients);
+                    continue;
+                }
             };
             let patch = match snapshot.patch {
                 crate::pane::TerminalDirtyPatchOutcome::Clean => {
@@ -358,7 +394,11 @@ impl HeadlessServer {
                 }
                 crate::pane::TerminalDirtyPatchOutcome::Patch(patch) => patch,
                 crate::pane::TerminalDirtyPatchOutcome::Fallback => {
-                    fallback!("terminal_patch");
+                    // collect_dirty_patch_snapshot 已把 Fallback 映射为
+                    // Err(PatchFallback)；防御分支同等处理。
+                    crate::render_prof::event("retained_surface.defer.terminal_patch");
+                    deferred_clients.extend(watching_clients);
+                    continue;
                 }
             };
             collected.push(CollectedPanePatch {
@@ -374,7 +414,7 @@ impl HeadlessServer {
         }
 
         let mut updates = Vec::with_capacity(recipients.len());
-        for recipient in recipients {
+        'recipient: for recipient in recipients {
             let client_id = recipient.client_id;
             let surface = recipient.surface;
             let mut panes = surface.panes.clone();
@@ -393,24 +433,32 @@ impl HeadlessServer {
                     continue;
                 };
                 // Alternate-screen transitions change whether the pane reserves
-                // a scrollbar gutter. Recompute layout and resize the runtime
-                // through the complete renderer before retaining further rows.
+                // a scrollbar gutter. 该 pane 剔除出本 tick 补丁，观看客户端延期到
+                // 全量渲染重算布局并 resize runtime。
                 if pane.alternate_screen_active != collected_pane.alternate_screen_active {
-                    fallback!("alternate_screen_geometry");
+                    crate::render_prof::event("retained_surface.defer.alternate_screen_geometry");
+                    deferred_clients.insert(client_id);
+                    continue;
                 }
                 if patch_intersects_hyperlinks(
                     &surface.frame,
                     pane.inner_rect,
                     &collected_pane.patch,
                 ) {
-                    fallback!("hyperlink");
+                    // 基线超链接与脏区相交：该 pane 剔除（RS-01 过渡层），
+                    // 观看客户端延期全量重绘。
+                    crate::render_prof::event("retained_surface.defer.hyperlink");
+                    deferred_clients.insert(client_id);
+                    continue;
                 }
                 refresh_graphics |= collected_pane.graphics_may_have_placements;
                 let previous_pane = pane.clone();
                 let Some(rows) =
                     changed_rows(&surface.frame, pane.inner_rect, &collected_pane.patch)
                 else {
-                    fallback!("invalid_patch");
+                    crate::render_prof::event("retained_surface.defer.invalid_patch");
+                    deferred_clients.insert(client_id);
+                    continue;
                 };
                 patch_rows.extend(rows);
                 let Some(scrollbar_rows) = retained_scrollbar_patch(
@@ -420,7 +468,9 @@ impl HeadlessServer {
                     collected_pane.alternate_screen_active,
                     collected_pane.scroll_metrics,
                 ) else {
-                    fallback!("scrollbar_patch");
+                    crate::render_prof::event("retained_surface.defer.scrollbar_patch");
+                    deferred_clients.insert(client_id);
+                    continue;
                 };
                 patch_rows.extend(scrollbar_rows);
                 pane.content_revision = collected_pane.content_revision;
@@ -461,7 +511,9 @@ impl HeadlessServer {
                     })
                     .or_else(|| self.shell_target_for_client(client_id));
                 let Some(target) = target else {
-                    fallback!("graphics_target");
+                    crate::render_prof::event("retained_surface.defer.graphics_target");
+                    deferred_clients.insert(client_id);
+                    continue 'recipient;
                 };
                 let client = &self.clients[&client_id];
                 let mut next_surface = surface.clone();
@@ -481,7 +533,9 @@ impl HeadlessServer {
                         client_id,
                     )
                 else {
-                    fallback!("graphics_geometry");
+                    crate::render_prof::event("retained_surface.defer.graphics_geometry");
+                    deferred_clients.insert(client_id);
+                    continue 'recipient;
                 };
                 graphics_changed = graphics != surface.graphics;
                 next_surface.graphics = graphics;
@@ -498,6 +552,21 @@ impl HeadlessServer {
                 patch,
                 graphics,
             });
+        }
+        if !deferred_clients.is_empty() {
+            let mut armed = false;
+            for client_id in &deferred_clients {
+                if let Some(client) = self.clients.get_mut(client_id) {
+                    client.defer_full_render();
+                    armed = true;
+                }
+            }
+            if armed {
+                // 延期必须可靠唤醒：客户端写入侧没有待发帧时不会有
+                // ClientWriterDrained 事件，显式安排一次全量渲染恢复基线。
+                self.app.render_dirty.request_generic();
+                self.app.render_notify.notify_one();
+            }
         }
         if updates.is_empty() {
             success!("unchanged");
@@ -616,7 +685,9 @@ impl HeadlessServer {
                     }
                     if needs_retry {
                         client.defer_full_render();
-                    } else {
+                    } else if !deferred_clients.contains(&client_id) {
+                        // 本 tick 被剔除 pane 而延期的客户端不在此清除：
+                        // 补丁成功不代表基线已恢复，全量渲染后才清。
                         client.clear_deferred_render();
                     }
                 }

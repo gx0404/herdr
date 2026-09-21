@@ -1512,7 +1512,13 @@ async fn different_size_shells_receive_geometry_specific_patches_from_one_dirty_
     .contains("MIXED"));
 
     write_shared_test_pane(&mut server, pane_id, b"\x1b[?1049hALT");
-    assert!(!server.render_retained_pane_surface_and_stream(&HashSet::from([pane_id])));
+    // alt-screen 进出改变 pane 几何：该 pane 被剔除出 retained 补丁并延期到
+    // 全量渲染重建基线，不再让整个 tick 回退。
+    assert!(server.render_retained_pane_surface_and_stream(&HashSet::from([pane_id])));
+    while large_render.try_recv().is_ok() {}
+    while small_render.try_recv().is_ok() {}
+    assert_eq!(server.clients[&7].deferred_render(), DeferredRender::Full);
+    assert_eq!(server.clients[&8].deferred_render(), DeferredRender::Full);
     server.render_and_stream();
     let large_alt = recv_pane_surface(&large_render, "large alternate-screen surface");
     let small_alt = recv_pane_surface(&small_render, "small alternate-screen surface");
@@ -1532,7 +1538,10 @@ async fn different_size_shells_receive_geometry_specific_patches_from_one_dirty_
     );
 
     write_shared_test_pane(&mut server, pane_id, b"\x1b[?1049l");
-    assert!(!server.render_retained_pane_surface_and_stream(&HashSet::from([pane_id])));
+    // 回到主屏同理：pane 剔除 + 延期，下一帧全量渲染恢复。
+    assert!(server.render_retained_pane_surface_and_stream(&HashSet::from([pane_id])));
+    while large_render.try_recv().is_ok() {}
+    while small_render.try_recv().is_ok() {}
     server.render_and_stream();
     let large_main = recv_pane_surface(&large_render, "large restored main-screen surface");
     let small_main = recv_pane_surface(&small_render, "small restored main-screen surface");
@@ -1606,7 +1615,7 @@ async fn retained_patches_only_reach_shells_viewing_the_dirty_tab() {
 }
 
 #[tokio::test]
-async fn late_retained_fallback_leaves_all_client_baselines_unchanged() {
+async fn retained_hyperlink_intersection_excludes_only_the_affected_client() {
     let mut server = test_headless_server();
     let pane_id = install_shared_view_test_runtime(&mut server);
     let (_first_control, first_render) = connect_matching_test_shell(&mut server, 7);
@@ -1615,7 +1624,7 @@ async fn late_retained_fallback_leaves_all_client_baselines_unchanged() {
     let _ = recv_pane_surface(&first_render, "first baseline");
     let _ = recv_pane_surface(&second_render, "second baseline");
 
-    // Foreground renders last. Its old hyperlink forces a fallback after the first plan.
+    // Foreground renders last. Its old hyperlink intersects the dirty rows.
     server.foreground_client_id = Some(8);
     let crate::server::render_stream::ClientRenderState::Semantic { last_surface, .. } =
         &mut server.clients.get_mut(&8).unwrap().render_state
@@ -1625,24 +1634,141 @@ async fn late_retained_fallback_leaves_all_client_baselines_unchanged() {
     let linked = last_surface.as_mut().unwrap();
     linked.frame.hyperlinks.push("https://example.com".into());
     linked.frame.cells[0].hyperlink = Some(0);
-    let before = [7, 8].map(|id| {
-        server.clients[&id]
-            .render_state
-            .last_pane_surface()
-            .unwrap()
-            .clone()
-    });
+    let before_eight = server.clients[&8]
+        .render_state
+        .last_pane_surface()
+        .unwrap()
+        .clone();
 
     write_shared_test_pane(&mut server, pane_id, b"\rNEXT\x1b[?1003h");
-    assert!(!server.render_retained_pane_surface_and_stream(&HashSet::from([pane_id])));
-    assert!(first_render.try_recv().is_err());
-    assert!(second_render.try_recv().is_err());
-    for (id, expected) in [7, 8].into_iter().zip(before) {
-        assert_eq!(
-            server.clients[&id].render_state.last_pane_surface(),
-            Some(&expected)
-        );
+    // 单个接收者的基线问题不再升级整 tick：retained 照常完成。
+    assert!(server.render_retained_pane_surface_and_stream(&HashSet::from([pane_id])));
+    // 未受影响的 7 照常收补丁。
+    let patch = recv_pane_surface_patch(&first_render, "unaffected client keeps patching");
+    assert!(patch.panes[0].mouse_reporting);
+    // 受影响的 8 只可能收到光标补丁（剔除 pane 后 rows/panes 为空），
+    // 并被延期 + 武装一次全量渲染恢复基线。
+    while let Ok(bytes) = second_render.try_recv() {
+        let ServerMessage::PaneSurfacePatch(patch) = read_server_message(bytes) else {
+            panic!("excluded client must not receive a full surface");
+        };
+        assert!(patch.rows.is_empty() && patch.panes.is_empty());
     }
+    assert_eq!(server.clients[&8].deferred_render(), DeferredRender::Full);
+    assert!(server.app.render_dirty.is_pending());
+    let after_eight = server.clients[&8].render_state.last_pane_surface().unwrap();
+    assert_eq!(
+        after_eight.frame.cells, before_eight.frame.cells,
+        "excluded client frame cells must not be partially committed"
+    );
+    assert_eq!(
+        after_eight.panes, before_eight.panes,
+        "excluded client pane metadata must not be partially committed"
+    );
+
+    // 下一帧全量渲染后基线恢复（基线不再含超链接），retained 快路径重新接管。
+    // 7 的基线已被补丁推进，恢复帧与它一致时服务端跳过（skip_identical），
+    // 因此这里只做容错排空而不是必须收到帧。
+    server.render_and_stream();
+    while first_render.try_recv().is_ok() {}
+    let _ = recv_pane_surface(&second_render, "recovery full render");
+    assert_eq!(server.clients[&8].deferred_render(), DeferredRender::None);
+    write_shared_test_pane(&mut server, pane_id, b"\rPLAIN\x1b[?1003l");
+    assert!(server.render_retained_pane_surface_and_stream(&HashSet::from([pane_id])));
+    let _ = recv_pane_surface_patch(&first_render, "first client follows");
+    let _ = recv_pane_surface_patch(&second_render, "recovered client follows");
+    shutdown_test_runtimes(&mut server);
+}
+
+#[tokio::test]
+async fn retained_hyperlink_cells_defer_watchers_and_recover_via_full_render() {
+    let mut server = test_headless_server();
+    let pane_id = install_shared_view_test_runtime(&mut server);
+    let (_control, render) = connect_matching_test_shell(&mut server, 7);
+    let _ = _control.recv().expect("snapshot");
+    server.render_and_stream();
+    let _ = recv_pane_surface(&render, "baseline");
+
+    // OSC 8 超链接单元格让 dirty 收集回退：该 pane 被剔除出补丁流，
+    // 观看它的客户端延期并武装全量渲染，而不是整 tick 回退。
+    write_shared_test_pane(
+        &mut server,
+        pane_id,
+        b"\r\x1b]8;;https://example.com\x1b\\LINK\x1b]8;;\x1b\\",
+    );
+    assert!(server.render_retained_pane_surface_and_stream(&HashSet::from([pane_id])));
+    while let Ok(bytes) = render.try_recv() {
+        let ServerMessage::PaneSurfacePatch(patch) = read_server_message(bytes) else {
+            panic!("excluded pane must not stream a full surface");
+        };
+        assert!(patch.rows.is_empty() && patch.panes.is_empty());
+    }
+    assert_eq!(server.clients[&7].deferred_render(), DeferredRender::Full);
+    assert!(server.app.render_dirty.is_pending());
+
+    server.render_and_stream();
+    let surface = recv_pane_surface(&render, "recovery full render");
+    assert!(frame_text(&surface.frame).contains("LINK"));
+    assert_eq!(server.clients[&7].deferred_render(), DeferredRender::None);
+
+    // 普通内容覆盖超链接行：收集可以出补丁，但基线仍含链接，相交检查
+    // 再剔除一次并延期；下一帧全量渲染后基线不再含链接。
+    write_shared_test_pane(&mut server, pane_id, b"\rPLAIN");
+    assert!(server.render_retained_pane_surface_and_stream(&HashSet::from([pane_id])));
+    assert_eq!(server.clients[&7].deferred_render(), DeferredRender::Full);
+    while render.try_recv().is_ok() {}
+    server.render_and_stream();
+    let _ = recv_pane_surface(&render, "second recovery full render");
+    assert_eq!(server.clients[&7].deferred_render(), DeferredRender::None);
+
+    // 基线无超链接后，retained 补丁恢复。
+    write_shared_test_pane(&mut server, pane_id, b"\r\nFINAL");
+    assert!(server.render_retained_pane_surface_and_stream(&HashSet::from([pane_id])));
+    let patch = recv_pane_surface_patch(&render, "patch resumes after link-free baseline");
+    assert!(!patch.rows.is_empty());
+    shutdown_test_runtimes(&mut server);
+}
+
+#[tokio::test]
+async fn retained_contended_snapshot_retries_patch_without_full_render() {
+    let mut server = test_headless_server();
+    let pane_id = install_shared_view_test_runtime(&mut server);
+    let (_control, render) = connect_matching_test_shell(&mut server, 7);
+    let _ = _control.recv().expect("snapshot");
+    server.render_and_stream();
+    let _ = recv_pane_surface(&render, "baseline");
+
+    // 写入 announce 后尚未配对完成（奇数 revision）：collect 竞态，
+    // 该 pane 本 tick 跳过并武装重试，不延期、不全量。
+    server
+        .app
+        .state
+        .runtime_for_pane_in_workspace(&server.app.terminal_runtimes, 0, pane_id)
+        .expect("runtime")
+        .test_bump_content_seq();
+    assert!(server.render_retained_pane_surface_and_stream(&HashSet::from([pane_id])));
+    assert!(render.try_recv().is_err(), "contended pane is skipped");
+    assert_eq!(
+        server.clients[&7].deferred_render(),
+        DeferredRender::None,
+        "contention retries the patch instead of deferring a full render"
+    );
+    assert!(
+        server.app.render_dirty.is_pending(),
+        "contention re-arms a render retry"
+    );
+
+    // 写入落定后补丁正常流动。
+    server
+        .app
+        .state
+        .runtime_for_pane_in_workspace(&server.app.terminal_runtimes, 0, pane_id)
+        .expect("runtime")
+        .test_bump_content_seq();
+    write_shared_test_pane(&mut server, pane_id, b"\rAFTER");
+    assert!(server.render_retained_pane_surface_and_stream(&HashSet::from([pane_id])));
+    let patch = recv_pane_surface_patch(&render, "patch after contention cleared");
+    assert!(!patch.rows.is_empty());
     shutdown_test_runtimes(&mut server);
 }
 

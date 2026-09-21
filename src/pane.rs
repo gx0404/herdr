@@ -82,6 +82,18 @@ pub(crate) struct TerminalDirtyPatchSnapshot {
     pub graphics_may_have_placements: bool,
 }
 
+/// `collect_dirty_patch_snapshot` 拿不到快照的两类原因，恢复策略不同：
+/// 竞态只重试补丁，回退要重建基线。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DirtyPatchSnapshotUnavailable {
+    /// 写入方在 announce 与落定之间（revision 未配对或收集中被推进）——
+    /// 瞬时竞态，下一 tick 重试补丁即可。
+    Contended,
+    /// dirty 收集自身要求回退（如含超链接单元格）——该 pane 的观看者需要
+    /// 一次全量渲染重建基线。
+    PatchFallback,
+}
+
 const RELEASE_REACQUIRE_SUPPRESSION: std::time::Duration = std::time::Duration::from_secs(1);
 const TERMINAL_COMPRESSION_IDLE: std::time::Duration = std::time::Duration::from_millis(250);
 const TERMINAL_COMPRESSION_STEP: std::time::Duration = std::time::Duration::from_millis(1);
@@ -3252,7 +3264,7 @@ impl PaneRuntime {
         &self,
         area_width: u16,
         area_height: u16,
-    ) -> Option<TerminalDirtyPatchSnapshot> {
+    ) -> Result<TerminalDirtyPatchSnapshot, DirtyPatchSnapshotUnavailable> {
         // PTY/resize writers announce changes before locking the terminal core.
         // Exclude them until rows and metadata have been paired with their revision.
         let _content_guard = self
@@ -3261,11 +3273,11 @@ impl PaneRuntime {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let revision = self.content_seq();
         if !revision.is_multiple_of(2) {
-            return None;
+            return Err(DirtyPatchSnapshotUnavailable::Contended);
         }
         let patch = self.terminal.collect_dirty_patch(area_width, area_height);
         if matches!(patch, TerminalDirtyPatchOutcome::Fallback) {
-            return None;
+            return Err(DirtyPatchSnapshotUnavailable::PatchFallback);
         }
         let snapshot = TerminalDirtyPatchSnapshot {
             patch,
@@ -3277,7 +3289,11 @@ impl PaneRuntime {
             graphics_may_have_placements: crate::kitty_graphics::is_enabled()
                 && self.kitty_graphics_may_have_placements(),
         };
-        (self.content_seq() == revision).then_some(snapshot)
+        if self.content_seq() == revision {
+            Ok(snapshot)
+        } else {
+            Err(DirtyPatchSnapshotUnavailable::Contended)
+        }
     }
 
     pub fn visible_hyperlinks(&self, area: Rect) -> Vec<((u16, u16), String, String)> {
@@ -3531,6 +3547,12 @@ impl PaneRuntime {
         Self::test_with_scrollback_bytes(cols, rows, 0, bytes)
     }
 
+    /// 测试用：推进一次 content_seq。奇数 revision 表示写入 announce 后尚未
+    /// 配对完成（collect 路径视为竞态），再调一次回到偶数表示写入落定。
+    pub(crate) fn test_bump_content_seq(&self) {
+        self.content_seq.fetch_add(1, Ordering::AcqRel);
+    }
+
     pub(crate) fn test_contend_during_dirty_collection(
         &self,
         bytes: Vec<u8>,
@@ -3699,7 +3721,10 @@ mod tests {
         assert!(!snapshot.alternate_screen_active);
 
         runtime.test_process_pty_bytes(b"\x1b]8;;https://example.com\x1b\\link\x1b]8;;\x1b\\");
-        assert!(runtime.collect_dirty_patch_snapshot(20, 4).is_none());
+        assert!(matches!(
+            runtime.collect_dirty_patch_snapshot(20, 4),
+            Err(DirtyPatchSnapshotUnavailable::PatchFallback)
+        ));
         assert!(runtime.content_write_lock.try_lock().is_ok());
     }
 
