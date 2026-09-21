@@ -20,6 +20,11 @@ pub(super) struct ClientMachineFilesOverlay {
     pub(super) cwd: String,
     /// `None` while the first listing is in flight.
     pub(super) entries: Option<Vec<RemoteDirEntry>>,
+    /// 与 `entries` 同步重建的小写名目（C-16：过滤不再逐条 `to_lowercase`）。
+    names_lower: Vec<String>,
+    /// 当前 query 下的过滤计数缓存；与 selected clamp 同机更新（条目到达、
+    /// query 编辑、目录切换都经同一组同步点）。
+    pub(super) filtered_count: usize,
     pub(super) selected: usize,
     pub(super) query: TextEditor,
     pub(super) search_focused: bool,
@@ -31,6 +36,88 @@ pub(super) struct ClientMachineFilesOverlay {
     latest_read: Option<u64>,
     pub(super) message: Option<String>,
     pub(super) error: Option<String>,
+}
+
+impl ClientMachineFilesOverlay {
+    /// 预小写 query 的零克隆过滤迭代（C-16）：名目小写在条目到达时已算好；
+    /// 可见窗口由调用方用 enumerate + skip + take 决定。
+    pub(super) fn filtered_entries(&self) -> impl Iterator<Item = &RemoteDirEntry> {
+        let query = self.query.trim().to_lowercase();
+        self.entries
+            .as_deref()
+            .unwrap_or_default()
+            .iter()
+            .zip(self.names_lower.iter())
+            .filter(move |(_, name_lower)| query.is_empty() || name_lower.contains(&query))
+            .map(|(entry, _)| entry)
+    }
+
+    /// 条目集合变更的同机更新：重建小写名目、重算过滤计数。
+    fn set_entries(&mut self, entries: Option<Vec<RemoteDirEntry>>) {
+        self.names_lower = entries
+            .as_deref()
+            .unwrap_or_default()
+            .iter()
+            .map(|entry| entry.name.to_lowercase())
+            .collect();
+        self.entries = entries;
+        self.resync_filter_count();
+    }
+
+    /// 过滤计数重算（query 或条目变化后调用方负责 selected 的复位/夹取）。
+    fn resync_filter_count(&mut self) {
+        self.filtered_count = self.filtered_entries().count();
+    }
+}
+
+/// `str::lines()` 语义的行偏移表：按 `\n` 分段、行尾 `\r` 不计入长度、
+/// 末尾无换行的残段收尾；空内容零行。切片 `&content[start..start + len]`
+/// 即该行文本，零分配。
+fn viewer_line_offsets(content: &str) -> Vec<(usize, usize)> {
+    let bytes = content.as_bytes();
+    let mut offsets = Vec::new();
+    let mut start = 0;
+    for (index, _) in content.match_indices('\n') {
+        let mut len = index - start;
+        if len > 0 && bytes[start + len - 1] == b'\r' {
+            len -= 1;
+        }
+        offsets.push((start, len));
+        start = index + 1;
+    }
+    if start < bytes.len() {
+        let mut len = bytes.len() - start;
+        if len > 0 && bytes[start + len - 1] == b'\r' {
+            len -= 1;
+        }
+        offsets.push((start, len));
+    }
+    offsets
+}
+
+#[cfg(test)]
+mod viewer_line_offsets_tests {
+    #[test]
+    fn offsets_match_str_lines() {
+        for content in [
+            "",
+            "a",
+            "a\n",
+            "a\n\n",
+            "a\nb\n",
+            "a\r\nb\r\n",
+            "\n\n\n",
+            "tail 无换行",
+        ] {
+            let offsets = super::viewer_line_offsets(content);
+            let sliced: Vec<&str> = offsets
+                .iter()
+                .map(|&(start, len)| &content[start..start + len])
+                .collect();
+            let expected: Vec<&str> = content.lines().collect();
+            assert_eq!(sliced, expected, "content: {content:?}");
+        }
+    }
 }
 
 impl Drop for ClientMachineFilesOverlay {
@@ -54,6 +141,12 @@ pub(super) enum ClientMachineFilesView {
     Viewer {
         path: String,
         content: String,
+        /// C-17：内容落地时一次算好的行偏移（字节起点、不含换行/`\r` 的长度），
+        /// 渲染按 scroll 切片借用 `&str`，不再逐帧 `content.lines().collect()`。
+        line_offsets: Vec<(usize, usize)>,
+        /// HERDR-MACH-009：滚动上界 = 行数 − 可见行数；渲染期随最新可见行数回写，
+        /// 落地时先按行数兜底。所有改写 scroll 的键/滚轮都 clamp 到它。
+        max_scroll: usize,
         scroll: usize,
     },
     ConfirmDelete {
@@ -148,6 +241,8 @@ impl ClientShellState {
             profile_id: profile_id.clone(),
             cwd: ".".to_owned(),
             entries: None,
+            names_lower: Vec::new(),
+            filtered_count: 0,
             selected: 0,
             query: TextEditor::default(),
             search_focused: false,
@@ -259,9 +354,9 @@ impl ClientShellState {
     fn machine_files_cd(&mut self, path: String, outcome: &mut ClientShellInput) {
         if let Some(overlay) = self.machine_files_overlay_mut() {
             overlay.cwd = path;
-            overlay.entries = None;
-            overlay.selected = 0;
             overlay.query.clear();
+            overlay.set_entries(None);
+            overlay.selected = 0;
             overlay.view = ClientMachineFilesView::List;
             overlay.error = None;
             overlay.message = None;
@@ -269,28 +364,14 @@ impl ClientShellState {
         self.machine_files_refresh(outcome);
     }
 
-    fn filtered_machine_files_entries(&self) -> Vec<RemoteDirEntry> {
-        let Some(overlay) = self.machine_files_overlay() else {
-            return Vec::new();
-        };
-        let query = overlay.query.trim().to_lowercase();
-        overlay
-            .entries
-            .as_deref()
-            .unwrap_or_default()
-            .iter()
-            .filter(|entry| query.is_empty() || entry.name.to_lowercase().contains(&query))
-            .cloned()
-            .collect()
-    }
-
     fn selected_machine_files_entry(&self) -> Option<RemoteDirEntry> {
-        let entries = self.filtered_machine_files_entries();
-        let selected = self.machine_files_overlay()?.selected;
-        if entries.is_empty() {
+        let overlay = self.machine_files_overlay()?;
+        let count = overlay.filtered_count;
+        if count == 0 {
             return None;
         }
-        Some(entries[selected.min(entries.len() - 1)].clone())
+        let index = overlay.selected.min(count - 1);
+        overlay.filtered_entries().nth(index).cloned()
     }
 
     fn machine_files_open_selected(&mut self, outcome: &mut ClientShellInput) {
@@ -315,7 +396,7 @@ impl ClientShellState {
     }
 
     fn move_machine_files_selection(&mut self, delta: isize) {
-        let count = self.filtered_machine_files_entries().len();
+        let count = self.machine_files_overlay().map_or(0, |o| o.filtered_count);
         let Some(overlay) = self.machine_files_overlay_mut() else {
             return;
         };
@@ -572,20 +653,27 @@ impl ClientShellState {
         let refresh_after = matches!(result, Ok(MachineFsOutcome::Changed { .. }));
         match result {
             Ok(MachineFsOutcome::Entries { entries }) => {
-                overlay.entries = Some(entries);
+                // 同机更新：名目小写表 + 过滤计数缓存 + selected 夹取。
+                overlay.set_entries(Some(entries));
                 overlay.error = None;
-                let count = self.filtered_machine_files_entries().len();
-                if let Some(overlay) = self.machine_files_overlay_mut() {
-                    overlay.selected = overlay.selected.min(count.saturating_sub(1));
-                }
+                overlay.selected = overlay
+                    .selected
+                    .min(overlay.filtered_count.saturating_sub(1));
             }
             Ok(MachineFsOutcome::FileContent { content }) => {
                 let FileRequest::Read { path } = request else {
                     return;
                 };
+                // C-17：行偏移在内容落地时一次算好；max_scroll 先按行数兜底，
+                // 渲染期回写为「行数 − 可见行数」（HERDR-MACH-009）。
+                let content = String::from_utf8_lossy(&content).into_owned();
+                let line_offsets = viewer_line_offsets(&content);
+                let max_scroll = line_offsets.len().saturating_sub(1);
                 overlay.view = ClientMachineFilesView::Viewer {
                     path,
-                    content: String::from_utf8_lossy(&content).into_owned(),
+                    content,
+                    line_offsets,
+                    max_scroll,
                     scroll: 0,
                 };
                 overlay.error = None;
@@ -597,7 +685,7 @@ impl ClientShellState {
             Err(error) => {
                 overlay.error = Some(error);
                 if overlay.entries.is_none() {
-                    overlay.entries = Some(Vec::new());
+                    overlay.set_entries(Some(Vec::new()));
                 }
             }
         }
@@ -637,11 +725,14 @@ impl ClientShellState {
                     }
                     KeyCode::Down | KeyCode::Char('j') if plain => {
                         if let Some(ClientMachineFilesOverlay {
-                            view: ClientMachineFilesView::Viewer { scroll, .. },
+                            view:
+                                ClientMachineFilesView::Viewer {
+                                    scroll, max_scroll, ..
+                                },
                             ..
                         }) = self.machine_files_overlay_mut()
                         {
-                            *scroll = scroll.saturating_add(1);
+                            *scroll = scroll.saturating_add(1).min(*max_scroll);
                         }
                         outcome.repaint = true;
                     }
@@ -657,11 +748,14 @@ impl ClientShellState {
                     }
                     KeyCode::PageDown => {
                         if let Some(ClientMachineFilesOverlay {
-                            view: ClientMachineFilesView::Viewer { scroll, .. },
+                            view:
+                                ClientMachineFilesView::Viewer {
+                                    scroll, max_scroll, ..
+                                },
                             ..
                         }) = self.machine_files_overlay_mut()
                         {
-                            *scroll = scroll.saturating_add(8);
+                            *scroll = scroll.saturating_add(8).min(*max_scroll);
                         }
                         outcome.repaint = true;
                     }
@@ -727,6 +821,7 @@ impl ClientShellState {
                         overlay.query.handle_key(key).inspect(|changed| {
                             if *changed {
                                 overlay.selected = 0;
+                                overlay.resync_filter_count();
                             }
                         })
                     });
@@ -851,11 +946,15 @@ impl ClientShellState {
             Some(ClientMachineFilesView::Viewer { .. })
         ) {
             if let Some(ClientMachineFilesOverlay {
-                view: ClientMachineFilesView::Viewer { scroll, .. },
+                view:
+                    ClientMachineFilesView::Viewer {
+                        scroll, max_scroll, ..
+                    },
                 ..
             }) = self.machine_files_overlay_mut()
             {
-                *scroll = scroll.saturating_add_signed(delta * 3);
+                // HERDR-MACH-009：滚轮向下不得越过最后一页。
+                *scroll = scroll.saturating_add_signed(delta * 3).min(*max_scroll);
             }
         } else {
             self.move_machine_files_selection(delta);
@@ -872,6 +971,7 @@ impl ClientShellState {
                 let changed = overlay.query.insert(text);
                 if changed {
                     overlay.selected = 0;
+                    overlay.resync_filter_count();
                 }
                 changed
             }
@@ -897,7 +997,6 @@ pub(super) fn render_machine_files_overlay(
     b: &mut Buffer,
     overlay: &ClientMachineFilesOverlay,
     machine_label: &str,
-    entries: &[RemoteDirEntry],
     cx: &super::feedback::ChromeContext<'_>,
 ) -> Option<OverlayRender> {
     let p = cx.palette;
@@ -934,13 +1033,16 @@ pub(super) fn render_machine_files_overlay(
     let mut action_hits = Vec::new();
     let mut row_hits = Vec::new();
     let mut cursor = None;
+    let mut viewer_max_scroll = None;
     let body = stack.content;
 
     match &overlay.view {
         ClientMachineFilesView::Viewer {
             path,
             content,
+            line_offsets,
             scroll,
+            ..
         } => {
             put_text(
                 b,
@@ -950,16 +1052,17 @@ pub(super) fn render_machine_files_overlay(
                 &crate::i18n::fill(t.viewer_title_fmt, &[("path", path)]),
                 base.fg(p.overlay1),
             );
-            let lines: Vec<&str> = content.lines().collect();
             let visible = usize::from(body.height).max(1);
-            let scroll = (*scroll).min(lines.len().saturating_sub(visible));
-            for (offset, line) in lines.iter().skip(scroll).take(visible).enumerate() {
+            viewer_max_scroll = Some(line_offsets.len().saturating_sub(visible));
+            let scroll = (*scroll).min(line_offsets.len().saturating_sub(visible));
+            for (offset, (start, len)) in line_offsets.iter().skip(scroll).take(visible).enumerate()
+            {
                 put_text(
                     b,
                     body.x,
                     body.y + offset as u16,
                     body.width,
-                    line,
+                    &content[*start..*start + *len],
                     base.fg(p.text),
                 );
             }
@@ -1149,10 +1252,14 @@ pub(super) fn render_machine_files_overlay(
             }
         }
         ClientMachineFilesView::List => {
-            let count = if overlay.pending > 0 && entries.is_empty() {
+            let count = if overlay.pending > 0 && overlay.filtered_count == 0 {
                 t.loading.to_owned()
             } else {
-                crate::i18n::fill(t.count_fmt, &[("count", &entries.len().to_string())])
+                // C-16：计数走缓存（与条目到达/query 编辑同机更新），不再逐帧过滤。
+                crate::i18n::fill(
+                    t.count_fmt,
+                    &[("count", &overlay.filtered_count.to_string())],
+                )
             };
             cursor = render_search_bar(
                 b,
@@ -1168,15 +1275,21 @@ pub(super) fn render_machine_files_overlay(
                 p,
             );
             let visible = usize::from(body.height).max(1);
-            let selected = if entries.is_empty() {
+            let selected = if overlay.filtered_count == 0 {
                 0
             } else {
-                overlay.selected.min(entries.len() - 1)
+                overlay.selected.min(overlay.filtered_count - 1)
             };
             let scroll = selected
                 .saturating_sub(visible.saturating_sub(1))
                 .min(selected);
-            for (index, entry) in entries.iter().enumerate().skip(scroll).take(visible) {
+            // C-16：只对可见窗口工作，不物化整个目录。
+            for (index, entry) in overlay
+                .filtered_entries()
+                .enumerate()
+                .skip(scroll)
+                .take(visible)
+            {
                 let y = body.y + (index - scroll) as u16;
                 let rect = Rect::new(body.x, y, body.width, 1);
                 row_hits.push((rect, index));
@@ -1218,7 +1331,7 @@ pub(super) fn render_machine_files_overlay(
                 };
                 put_right_text(b, rect, rect.y, &meta, meta_style);
             }
-            if entries.is_empty() && overlay.pending == 0 {
+            if overlay.filtered_count == 0 && overlay.pending == 0 {
                 let line = if overlay.error.is_some() {
                     None
                 } else {
@@ -1287,7 +1400,7 @@ pub(super) fn render_machine_files_overlay(
                         MachineFilesButton::Download
                             | MachineFilesButton::Rename
                             | MachineFilesButton::Delete
-                    ) || !entries.is_empty();
+                    ) || overlay.filtered_count > 0;
                     let (tone, base_state) = match button {
                         MachineFilesButton::Delete => (
                             crate::ui::ModalButtonTone::Danger,
@@ -1321,6 +1434,7 @@ pub(super) fn render_machine_files_overlay(
         machine_files_search: Rect::new(stack.header.x, stack.header.y + 1, stack.header.width, 1),
         machine_files_rows: row_hits,
         machine_files_actions: action_hits,
+        machine_files_viewer_max_scroll: viewer_max_scroll,
         cursor,
         ..OverlayRender::default()
     })

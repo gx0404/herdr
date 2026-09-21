@@ -251,6 +251,8 @@ pub(super) struct ShellHitMap {
     pub(super) machine_files_popup: Rect,
     pub(super) machine_files_search: Rect,
     pub(super) machine_files_rows: Vec<(Rect, usize)>,
+    /// 查看器滚动上界的渲染期回写通道（HERDR-MACH-009），非查看器帧为 None。
+    pub(super) machine_files_viewer_max_scroll: Option<usize>,
     pub(super) machine_files_actions: Vec<(Rect, super::machine_files_overlay::MachineFilesButton)>,
     pub(super) snippet_popup: Rect,
     pub(super) snippet_search: Rect,

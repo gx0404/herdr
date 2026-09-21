@@ -345,3 +345,89 @@ fn prompts_build_the_right_operations() {
         super::super::state::MachineFsOp::Delete { path, recursive: true, .. } if path == "logs"
     ));
 }
+
+/// C-16：过滤计数缓存与 selected clamp 同机更新；渲染只处理可见窗口，
+/// 不再每帧克隆整个目录并对每个条目 to_lowercase。
+#[test]
+fn machine_files_filter_count_caches_and_clamps_with_query() {
+    let build = profile("Build", "build.example", "60");
+    let mut state = state_with_profiles(std::slice::from_ref(&build));
+    open_files(&mut state, &build);
+    let entries: Vec<_> = (0..5000)
+        .map(|i| entry(&format!("file-{i:04}"), RemoteEntryKind::File))
+        .collect();
+    state.handle_machine_fs_result(
+        1,
+        Ok(super::super::state::MachineFsOutcome::Entries { entries }),
+        &mut ClientShellInput::default(),
+    );
+    assert_eq!(files_overlay(&mut state).filtered_count, 5000);
+
+    // 搜索过滤：计数缓存同步更新、selected 复位。
+    files_overlay(&mut state).search_focused = true;
+    for ch in "file-4999".chars() {
+        state.insert_overlay_text(&ch.to_string());
+    }
+    assert_eq!(files_overlay(&mut state).filtered_count, 1);
+    assert_eq!(files_overlay(&mut state).selected, 0);
+
+    // 渲染只画可见窗口；计数走缓存。
+    let frame = state.compose(100, 28).expect("files frame");
+    let text = frame_rows(&frame).join("\n");
+    assert!(text.contains("file-4999"), "frame: {text}");
+    assert!(text.contains("1"), "frame: {text}");
+}
+
+/// C-17 + HERDR-MACH-009：查看器行偏移在内容落地时一次算好，渲染按 scroll
+/// 切片借用 &str；scroll 有上界（行数 − 可见行数），越过底部后停在最后一页。
+#[test]
+fn machine_files_viewer_slices_lines_and_clamps_scroll() {
+    let build = profile("Build", "build.example", "61");
+    let mut state = state_with_profiles(std::slice::from_ref(&build));
+    open_files(&mut state, &build);
+    state.handle_machine_fs_result(
+        1,
+        Ok(super::super::state::MachineFsOutcome::Entries {
+            entries: vec![entry("app.log", RemoteEntryKind::File)],
+        }),
+        &mut ClientShellInput::default(),
+    );
+    // Enter on the file issues a Read op (ticket 2).
+    state.handle_raw_events(vec![RawInputEvent::Key(crossterm_key(KeyCode::Enter))]);
+    let content: String = (0..10000).map(|i| format!("line {i}\n")).collect();
+    state.handle_machine_fs_result(
+        2,
+        Ok(super::super::state::MachineFsOutcome::FileContent {
+            content: content.into_bytes(),
+        }),
+        &mut ClientShellInput::default(),
+    );
+    // 滚轮一路向下：scroll 停在 max_scroll，不再无限增长。
+    for _ in 0..4000 {
+        state.scroll_machine_files_overlay(1);
+    }
+    let view = &files_overlay(&mut state).view;
+    let super::super::machine_files_overlay::ClientMachineFilesView::Viewer {
+        scroll,
+        max_scroll,
+        line_offsets,
+        ..
+    } = view
+    else {
+        panic!("viewer view");
+    };
+    assert_eq!(line_offsets.len(), 10000);
+    assert!(*max_scroll > 0 && *max_scroll < 10000);
+    assert_eq!(
+        *scroll, *max_scroll,
+        "scroll 停在最后一页（无上界增长已修复）"
+    );
+
+    let frame = state.compose(100, 28).expect("viewer frame");
+    let text = frame_rows(&frame).join("\n");
+    assert!(text.contains("line 9999"), "frame tail: {text}");
+    assert!(
+        !text.contains("line 0001"),
+        "frame must not render the head: {text}"
+    );
+}

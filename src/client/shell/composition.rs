@@ -945,6 +945,8 @@ impl ClientShellState {
                 self.hits.machine_files_search = rendered.machine_files_search;
                 self.hits.machine_files_rows = rendered.machine_files_rows;
                 self.hits.machine_files_actions = rendered.machine_files_actions;
+                self.hits.machine_files_viewer_max_scroll =
+                    rendered.machine_files_viewer_max_scroll;
                 self.hits.snippet_popup = rendered.snippet_popup;
                 self.hits.snippet_search = rendered.snippet_search;
                 self.hits.snippet_rows = rendered.snippet_rows;
@@ -988,6 +990,21 @@ impl ClientShellState {
         if let Some(ClientShellOverlay::CommandPalette(palette)) = self.overlay.as_mut() {
             palette.scroll = self.hits.menu_scroll;
             palette.reveal = false;
+        }
+        // 查看器滚动上界的渲染期回写（HERDR-MACH-009）：渲染是唯一知道可见行数的
+        // 地方；本帧不是查看器视图时不回写，保持既有上界。
+        if let Some(ClientShellOverlay::MachineFiles(page)) = self.overlay.as_mut() {
+            if let Some(max) = self.hits.machine_files_viewer_max_scroll {
+                if let super::machine_files_overlay::ClientMachineFilesView::Viewer {
+                    max_scroll,
+                    scroll,
+                    ..
+                } = &mut page.view
+                {
+                    *max_scroll = max;
+                    *scroll = (*scroll).min(max);
+                }
+            }
         }
         if let Some(ClientShellOverlay::Settings(settings)) = self.overlay.as_mut() {
             settings.scroll = self.hits.settings_scroll;

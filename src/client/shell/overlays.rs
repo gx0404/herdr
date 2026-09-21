@@ -57,6 +57,9 @@ pub(crate) struct OverlayRender {
     pub(crate) machine_files_search: Rect,
     pub(crate) machine_files_rows: Vec<(Rect, usize)>,
     pub(crate) machine_files_actions: Vec<(Rect, super::machine_files_overlay::MachineFilesButton)>,
+    /// 查看器可见行数推出的滚动上界（行数 − 可见行数），渲染期回写进 view
+    ///（HERDR-MACH-009）。非查看器视图时为 None。
+    pub(crate) machine_files_viewer_max_scroll: Option<usize>,
     pub(crate) snippet_popup: Rect,
     pub(crate) snippet_search: Rect,
     pub(crate) snippet_rows: Vec<(Rect, usize)>,
@@ -191,22 +194,8 @@ pub(crate) fn render_client_overlay(
                 .find(|profile| profile.id == v.profile_id)
                 .map(|profile| profile.label.clone())
                 .unwrap_or_else(|| v.profile_id.to_string());
-            let query = v.query.trim().to_lowercase();
-            let entries: Vec<crate::remote::RemoteDirEntry> = v
-                .entries
-                .as_deref()
-                .unwrap_or_default()
-                .iter()
-                .filter(|entry| query.is_empty() || entry.name.to_lowercase().contains(&query))
-                .cloned()
-                .collect();
-            super::machine_files_overlay::render_machine_files_overlay(
-                b,
-                v,
-                &machine_label,
-                &entries,
-                cx,
-            )
+            // C-16：渲染不再克隆整个目录，过滤迭代由 overlay 自己完成。
+            super::machine_files_overlay::render_machine_files_overlay(b, v, &machine_label, cx)
         }
         ClientShellOverlay::WorktreeCreate(v) => {
             worktree_overlays::render_worktree_create_overlay(b, v, cx)
