@@ -467,6 +467,9 @@ impl HeadlessServer {
         }
 
         let mut broken_clients: Vec<u64> = Vec::new();
+        // RS-06：同一 tab 被 N 个客户端观看时，本 tick 内按（tab、面积、cell
+        // 尺寸、popup）记忆化渲染结果；kitty graphics 场景不入缓存。
+        let mut surface_memo = crate::server::client_shell::SurfaceMemo::default();
         for (client_id, (cols, rows), cell_size, _is_foreground, mode) in render_targets {
             #[cfg(unix)]
             if matches!(mode, ClientConnectionMode::TerminalObserve { .. })
@@ -615,6 +618,19 @@ impl HeadlessServer {
                     } else {
                         crate::kitty_graphics::HostCellSize::default()
                     };
+                    let memo_key = crate::server::client_shell::SurfaceMemoKey::new(
+                        shell_target,
+                        area,
+                        render_cell_size,
+                        shell_shows_popup,
+                    );
+                    let delivery_pristine = self
+                        .clients
+                        .get(&client_id)
+                        .is_some_and(|client| client.shell_graphics_delivery.is_pristine());
+                    let reused = delivery_pristine
+                        .then(|| surface_memo.reuse(memo_key))
+                        .flatten();
                     let crate::server::client_shell::RenderedPaneSurface {
                         frame,
                         panes,
@@ -622,16 +638,29 @@ impl HeadlessServer {
                         popup,
                         graphics,
                         graphics_delivery: next_graphics_delivery,
-                    } = render_client_shell_pane_surface(
-                        &mut self.app,
-                        shell_target,
-                        area,
-                        false,
-                        shell_shows_popup,
-                        render_cell_size,
-                        &shell_graphics_delivery,
-                        client_id,
-                    );
+                    } = match reused {
+                        Some(mut cached) => {
+                            crate::render_prof::event("full_render.memo_hit");
+                            cached.graphics_delivery = shell_graphics_delivery.clone();
+                            cached
+                        }
+                        None => {
+                            let rendered = render_client_shell_pane_surface(
+                                &mut self.app,
+                                shell_target,
+                                area,
+                                false,
+                                shell_shows_popup,
+                                render_cell_size,
+                                &shell_graphics_delivery,
+                                client_id,
+                            );
+                            if delivery_pristine {
+                                surface_memo.store(memo_key, &rendered);
+                            }
+                            rendered
+                        }
+                    };
                     crate::render_prof::duration_since(
                         "full_render.render_tab_surface_virtual",
                         render_started,

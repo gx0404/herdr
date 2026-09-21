@@ -28,6 +28,11 @@ impl DeliveryCache {
     pub(crate) fn has_pending(&self) -> bool {
         self.pending
     }
+
+    /// 无任何已投递/待决资产：命中共用的渲染结果时不会遗留或漏发图形。
+    pub(crate) fn is_pristine(&self) -> bool {
+        self.assets.is_empty() && !self.pending
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

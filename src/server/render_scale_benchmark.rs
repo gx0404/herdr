@@ -397,6 +397,70 @@ fn print_surface_reuse_profiles() {
     }
 }
 
+fn profile_same_tab_fanout(count: usize, client_count: usize) -> StageStats {
+    let mut pipeline = RenderPipeline::new(active_panes(count));
+    pipeline.app.state.ensure_test_terminals();
+    let target = Some(crate::ui::TabSurfaceTarget {
+        workspace_index: 0,
+        tab_index: 0,
+    });
+    let area = Rect::new(0, 0, COLS, ROWS);
+    let cell_size = HostCellSize {
+        width_px: 1,
+        height_px: 1,
+    };
+    let key = super::client_shell::SurfaceMemoKey::new(target, area, cell_size, false);
+    let mut run = || {
+        let started = Instant::now();
+        // RS-19：一轮 = 一次 render_and_stream 的同 tab 扇出（1 次全渲染 +
+        // 其余客户端命中克隆）。
+        let mut memo = super::client_shell::SurfaceMemo::default();
+        for client_index in 0..client_count {
+            let rendered = match memo.reuse(key) {
+                Some(mut cached) => {
+                    cached.graphics_delivery =
+                        crate::kitty_graphics::surface::DeliveryCache::default();
+                    cached
+                }
+                None => {
+                    let rendered = super::client_shell::render_pane_surface(
+                        &mut pipeline.app,
+                        target,
+                        area,
+                        false,
+                        false,
+                        cell_size,
+                        &crate::kitty_graphics::surface::DeliveryCache::default(),
+                        client_index as u64 + 1,
+                    );
+                    memo.store(key, &rendered);
+                    rendered
+                }
+            };
+            black_box(rendered.frame.width);
+        }
+        started.elapsed()
+    };
+    for _ in 0..WARMUP_COUNT {
+        black_box(run());
+    }
+    summarize((0..SAMPLE_COUNT).map(|_| run()).collect())
+}
+
+fn print_same_tab_fanout_profiles() {
+    println!("active panes same-tab fan-out (surface memo, RS-06/RS-19)");
+    println!("       panes  clients  median_us  p95_us  max_us");
+    for count in CARDINALITIES {
+        for client_count in [1, 3] {
+            let stats = profile_same_tab_fanout(count, client_count);
+            println!(
+                "  {count:>10}  {client_count:>7}  {:>9}  {:>6}  {:>6}",
+                stats.median_us, stats.p95_us, stats.max_us
+            );
+        }
+    }
+}
+
 #[tokio::test(flavor = "current_thread")]
 #[ignore = "manual client-rendered pipeline scaling profile"]
 async fn render_scale_profile() {
@@ -406,4 +470,5 @@ async fn render_scale_profile() {
     print_snapshot_encoding_profiles("active panes", active_panes);
     print_token_rule_profiles();
     print_surface_reuse_profiles();
+    print_same_tab_fanout_profiles();
 }

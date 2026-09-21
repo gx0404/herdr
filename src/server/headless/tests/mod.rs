@@ -1564,6 +1564,33 @@ async fn different_size_shells_receive_geometry_specific_patches_from_one_dirty_
 }
 
 #[tokio::test]
+async fn same_tab_clients_receive_identical_full_frames() {
+    // RS-06 输出不变性：同 tab 同几何的第二个客户端命中记忆化复用，
+    // 收到的帧必须与独立渲染逐字段相同。
+    let mut server = test_headless_server();
+    let pane_id = install_shared_view_test_runtime(&mut server);
+    let (first_control, first_render) = connect_test_shell(&mut server, 7, 80, 23);
+    let (second_control, second_render) = connect_test_shell(&mut server, 8, 80, 23);
+    let _ = first_control.recv().expect("first snapshot");
+    let _ = second_control.recv().expect("second snapshot");
+    server.render_and_stream();
+    let first = recv_pane_surface(&first_render, "first full surface");
+    let second = recv_pane_surface(&second_render, "second full surface");
+    assert_eq!(first.frame, second.frame);
+    assert_eq!(first.panes, second.panes);
+    assert_eq!(first.splits, second.splits);
+
+    // 内容变化后两者仍一致（缓存不串帧）。
+    write_shared_test_pane(&mut server, pane_id, b"\rNEXT");
+    server.render_and_stream();
+    let first = recv_pane_surface(&first_render, "first updated surface");
+    let second = recv_pane_surface(&second_render, "second updated surface");
+    assert_eq!(first.frame, second.frame);
+    assert!(frame_text(&first.frame).contains("NEXT"));
+    shutdown_test_runtimes(&mut server);
+}
+
+#[tokio::test]
 async fn retained_patches_only_reach_shells_viewing_the_dirty_tab() {
     let mut server = test_headless_server();
     let mut workspace = crate::workspace::Workspace::test_new("divergent-retained");

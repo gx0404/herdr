@@ -243,6 +243,8 @@ pub(super) fn snapshot(
     }
 }
 
+/// RS-06：一次完整渲染的结果。可被同 tick 内同 tab 同几何的客户端复用。
+#[derive(Clone)]
 pub(super) struct RenderedPaneSurface {
     pub(super) frame: FrameData,
     pub(super) panes: Vec<protocol::PaneSurfacePane>,
@@ -250,6 +252,61 @@ pub(super) struct RenderedPaneSurface {
     pub(super) popup: Option<Box<protocol::ClientShellPopupSurface>>,
     pub(super) graphics: protocol::SurfaceGraphicsScene,
     pub(super) graphics_delivery: crate::kitty_graphics::surface::DeliveryCache,
+}
+
+/// RS-06：单次 render_and_stream 内按（tab、面积、cell 尺寸、popup）复用
+/// 同 tab 多客户端的渲染结果。键不覆盖的 per-client 部分（graphics_delivery、
+/// 投影修订、序列化）由调用方重算。仅在 resize_panes=false 的调用使用
+/// （渲染不改状态，复用安全）；含 kitty graphics 资产的场景不入缓存。
+#[derive(Default)]
+pub(super) struct SurfaceMemo {
+    entries: std::collections::HashMap<SurfaceMemoKey, RenderedPaneSurface>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub(super) struct SurfaceMemoKey {
+    target: Option<(usize, usize)>,
+    width: u16,
+    height: u16,
+    cell_width_px: u32,
+    cell_height_px: u32,
+    shows_popup: bool,
+}
+
+impl SurfaceMemoKey {
+    pub(super) fn new(
+        target: Option<crate::ui::TabSurfaceTarget>,
+        area: Rect,
+        cell_size: crate::kitty_graphics::HostCellSize,
+        shows_popup: bool,
+    ) -> Self {
+        Self {
+            target: target.map(|target| (target.workspace_index, target.tab_index)),
+            width: area.width,
+            height: area.height,
+            cell_width_px: cell_size.width_px,
+            cell_height_px: cell_size.height_px,
+            shows_popup,
+        }
+    }
+}
+
+impl SurfaceMemo {
+    /// 命中返回克隆；调用方负责把 `graphics_delivery` 换成命中客户端自己的。
+    /// 只允许 delivery 为空（无已投递/待决资产）的客户端命中。
+    pub(super) fn reuse(&self, key: SurfaceMemoKey) -> Option<RenderedPaneSurface> {
+        self.entries.get(&key).cloned()
+    }
+
+    /// 场景不含任何图形资产时才入缓存（kitty graphics pane 排除）。
+    pub(super) fn store(&mut self, key: SurfaceMemoKey, rendered: &RenderedPaneSurface) {
+        if rendered.graphics.assets.is_empty()
+            && rendered.graphics.placements.is_empty()
+            && rendered.graphics.retained_assets.is_empty()
+        {
+            self.entries.insert(key, rendered.clone());
+        }
+    }
 }
 
 pub(super) fn render_pane_surface(
