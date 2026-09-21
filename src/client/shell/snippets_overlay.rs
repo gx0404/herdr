@@ -1880,14 +1880,10 @@ fn render_snippet_form(
             rect.width.saturating_sub(label_width),
             1,
         );
-        b.set_style(input, Style::default().fg(p.text).bg(p.surface0));
+        let field = crate::ui::input_field_style(p);
+        b.set_style(input, field);
         let inner_input = Rect::new(input.x + 1, input.y, input.width.saturating_sub(1), 1);
-        let field_cursor = text_editor::render(
-            b,
-            inner_input,
-            editor,
-            Style::default().fg(p.text).bg(p.surface0),
-        );
+        let field_cursor = text_editor::render(b, inner_input, editor, field);
         if is_focused {
             cursor = field_cursor;
             if let Some(hint) = hint {
@@ -2383,14 +2379,10 @@ fn render_run_variables(
             rect.width.saturating_sub(label_width),
             1,
         );
-        b.set_style(input, Style::default().fg(p.text).bg(p.surface0));
+        let field = crate::ui::input_field_style(p);
+        b.set_style(input, field);
         let inner_input = Rect::new(input.x + 1, input.y, input.width.saturating_sub(1), 1);
-        let field_cursor = text_editor::render(
-            b,
-            inner_input,
-            editor,
-            Style::default().fg(p.text).bg(p.surface0),
-        );
+        let field_cursor = text_editor::render(b, inner_input, editor, field);
         if is_focused {
             cursor = field_cursor;
         }

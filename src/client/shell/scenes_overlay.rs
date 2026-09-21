@@ -1823,10 +1823,9 @@ fn render_scene_save_form(
         put_text(b, body.x, label_y, body.width, label, base.fg(p.overlay0));
         let input = Rect::new(body.x, label_y.saturating_add(1), body.width, 1);
         let is_focused = form.focused == index;
-        let style =
-            Style::default()
-                .fg(p.text)
-                .bg(if is_focused { p.surface0 } else { p.panel_bg });
+        // 两个字段都画成输入框（与机器导入表单同口径）：焦点由光标指示，字段
+        // 本身不再用「有底 / 无底」区分，否则 terminal 主题下未聚焦字段没有边界。
+        let style = crate::ui::input_field_style(p);
         b.set_style(input, style);
         let inner_input = Rect::new(
             input.x.saturating_add(1),
@@ -1943,7 +1942,7 @@ fn render_scene_rename_form(
         base.fg(p.text).add_modifier(Modifier::BOLD),
     );
     let input = Rect::new(stack.content.x, stack.content.y, stack.content.width, 1);
-    let style = Style::default().fg(p.text).bg(p.surface0);
+    let style = crate::ui::input_field_style(p);
     b.set_style(input, style);
     let inner_input = Rect::new(
         input.x.saturating_add(1),

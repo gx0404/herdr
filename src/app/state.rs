@@ -133,6 +133,13 @@ impl Palette {
     }
 
     /// Terminal 16-color theme.
+    ///
+    /// `surface0`/`surface1` 用 DarkGray/Gray 而不是 `Reset`（C-28 / ds-02）：
+    /// 结构面留成终端背景会让输入框、键帽、侧栏与标签 hover 与常态面板同像素。
+    /// `text`/`panel_bg` 保持 `Reset`——正文与面板底色跟随宿主是好设计的部分。
+    /// `selection_bg` 也保持 `Reset`：填入 DarkGray 会与聚焦行用的
+    /// `active_row_bg` 撞色（`selection_row_bg()` 的 accent 回退正是为此存在，
+    /// 上游 #4300）；选中面的可见性交给 `selection_row_bg()` 守。
     pub fn terminal() -> Self {
         Self {
             accent: Color::Blue,
@@ -140,8 +147,8 @@ impl Palette {
             sidebar_bg: Color::Reset,
             active_row_bg: Color::DarkGray,
             selection_bg: Color::Reset,
-            surface0: Color::Reset,
-            surface1: Color::DarkGray,
+            surface0: Color::DarkGray,
+            surface1: Color::Gray,
             surface_dim: Color::DarkGray,
             overlay0: Color::Gray,
             overlay1: Color::White,
@@ -729,6 +736,25 @@ impl Palette {
             self.accent
         } else {
             self.active_row_bg
+        }
+    }
+
+    /// 列表「选中」行的弱底色（窄屏工作区列表用）：只要比常态行亮一档，
+    /// 不像 `selection_row_bg` 那样做 accent 反色。
+    ///
+    /// 但它必须与同一列表里的「聚焦行」（`surface_dim`）和常态行（`panel_bg`）
+    /// 都不同：16 色主题可能把 `surface0` 留成终端默认背景（= 常态行），
+    /// terminal 主题则让 `surface0` 与 `surface_dim` 同为 DarkGray（选中行看起
+    /// 来就是聚焦行）。撞色时退到 `selection_row_bg()`——宁可给一个更显眼的
+    /// 选中色，也不要「选中 = 常态」或「选中 = 聚焦」。
+    pub fn surface_selection_bg(&self) -> Color {
+        if self.surface0 == Color::Reset
+            || self.surface0 == self.surface_dim
+            || self.surface0 == self.panel_bg
+        {
+            self.selection_row_bg()
+        } else {
+            self.surface0
         }
     }
 
@@ -1902,6 +1928,55 @@ mod tests {
         assert_ne!(bare.selection_row_bg(), Color::Reset);
     }
 
+    /// C-28 (ds-02)：terminal 调色板曾把 `surface0`/`surface1` 留成
+    /// `Color::Reset`，于是输入框、键帽、侧栏与标签的 hover 全部与常态面板
+    /// 同像素，塌缩成普通文本。16 色不是必然代价——DarkGray/Gray 可用。
+    #[test]
+    fn terminal_theme_surfaces_stay_visible_against_the_terminal_background() {
+        let terminal = Palette::terminal();
+        assert_ne!(terminal.surface0, Color::Reset, "surface0 塌缩成终端背景");
+        assert_ne!(terminal.surface1, Color::Reset, "surface1 塌缩成终端背景");
+        assert_ne!(
+            terminal.surface0, terminal.surface1,
+            "surface0/surface1 必须保持「弱 / 更亮」的层级"
+        );
+        // 结构面不能撞上同一主题的行语义：选中行用 selection_row_bg（accent
+        // 回退），聚焦行用 active_row_bg。
+        assert_ne!(terminal.surface0, terminal.selection_row_bg());
+        assert_ne!(terminal.surface1, terminal.selection_row_bg());
+    }
+
+    #[test]
+    fn surface_selection_bg_stays_distinct_from_the_plain_row_for_every_theme() {
+        for name in crate::config::THEME_NAMES {
+            let palette = Palette::from_name(name).expect("built-in theme");
+            let selected = palette.surface_selection_bg();
+            assert_ne!(selected, Color::Reset, "{name} 选中行落回终端背景");
+            assert_ne!(selected, palette.panel_bg, "{name} 选中行与常态行同色");
+        }
+    }
+
+    #[test]
+    fn surface_selection_bg_backs_off_when_the_surface_collides_with_the_focused_row() {
+        // terminal：surface0 与 surface_dim 同为 DarkGray，选中行会被读成聚焦行，
+        // 所以退到 selection_row_bg() 的 accent（Blue）。
+        let terminal = Palette::terminal();
+        assert_eq!(terminal.surface0, terminal.surface_dim);
+        assert_eq!(terminal.surface_selection_bg(), terminal.selection_row_bg());
+        assert_ne!(terminal.surface_selection_bg(), terminal.surface_dim);
+
+        // 常规主题用 surface0 原值，不改变观感。
+        let catppuccin = Palette::catppuccin();
+        assert_eq!(catppuccin.surface_selection_bg(), catppuccin.surface0);
+
+        // rose-pine-dawn 的 surface0/surface_dim/selection_bg 三个 token 同值，
+        // 回退也救不回「选中 ≠ 聚焦」——这是该主题自身的 token 重复（归 ds-11），
+        // 本批不动主题数据；这里只钉住「至少不与常态行同色」。
+        let dawn = Palette::rose_pine_dawn();
+        assert_eq!(dawn.surface0, dawn.surface_dim);
+        assert_ne!(dawn.surface_selection_bg(), dawn.panel_bg);
+    }
+
     #[test]
     fn hover_row_bg_stays_visible_and_distinct_from_the_selected_row() {
         // 常态行画的是 panel_bg、选中行画的是 accent（`shell::list_row_bg`
@@ -1931,13 +2006,18 @@ mod tests {
 
         // 16 色主题算不出亮度，只能守「不是同一个色号」。
         let terminal = Palette::terminal();
-        assert_eq!(terminal.hover_row_bg(), Color::DarkGray);
+        // surface1 = Gray 是 terminal 的 hover 面（surface0 = DarkGray 是常态
+        // 结构面，两者与 Reset 的 panel_bg 都可区分）。
+        assert_eq!(terminal.hover_row_bg(), Color::Gray);
         assert_ne!(terminal.hover_row_bg(), terminal.panel_bg);
         assert_ne!(terminal.hover_row_bg(), terminal.accent);
+        assert_ne!(terminal.hover_row_bg(), terminal.surface0);
 
         // 自定义主题把候选逐个留成 Reset 时依次回退，绝不落回 Reset。
         let mut bare = Palette::terminal();
         bare.surface1 = Color::Reset;
+        assert_eq!(bare.hover_row_bg(), bare.surface0);
+        bare.surface0 = Color::Reset;
         assert_eq!(bare.hover_row_bg(), bare.surface_dim);
         bare.surface_dim = Color::Reset;
         assert_eq!(bare.hover_row_bg(), bare.active_row_bg);

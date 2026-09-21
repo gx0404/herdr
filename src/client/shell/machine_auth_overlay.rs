@@ -1723,7 +1723,8 @@ fn render_password_prompt(
         stack.header.width.saturating_sub(2),
         1,
     );
-    b.set_style(input_rect, Style::default().fg(p.text).bg(p.surface0));
+    let field = crate::ui::input_field_style(p);
+    b.set_style(input_rect, field);
     let masked_len = view
         .input
         .as_str()
@@ -1737,7 +1738,7 @@ fn render_password_prompt(
         input_rect.y,
         input_rect.width.saturating_sub(2),
         &masked,
-        Style::default().fg(p.text).bg(p.surface0),
+        field,
     );
     let cursor_x = input_rect
         .x

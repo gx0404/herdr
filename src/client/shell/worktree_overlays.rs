@@ -37,12 +37,13 @@ pub(super) fn render_worktree_create_overlay(
         Style::default().fg(p.overlay0).bg(p.panel_bg),
     );
     let input = Rect::new(content.x, content.y + 1, content.width, 1);
-    b.set_style(input, Style::default().fg(p.text).bg(p.surface0));
+    let field = crate::ui::input_field_style(p);
+    b.set_style(input, field);
     let cursor = text_editor::render(
         b,
         Rect::new(input.x + 1, input.y, input.width.saturating_sub(1), 1),
         &create.branch,
-        Style::default().fg(p.text).bg(p.surface0),
+        field,
     );
     put_text(
         b,

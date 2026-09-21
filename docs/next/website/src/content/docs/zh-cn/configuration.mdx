@@ -257,6 +257,8 @@ name = "catppuccin"
 
 在[配置参考](/docs/config-reference/)中搜索 `theme.name` 可查看所有内置主题。如果想让 Herdr UI 颜色跟随宿主终端的 ANSI 调色板，请使用 `terminal`。
 
+`terminal` 主题把 Herdr 的结构色映射到 ANSI 调色板：输入框、键帽与未聚焦标签用的弱结构面是 `DarkGray`，更强的 hover / 活动面是 `Gray`，而正文与面板底色仍跟随终端自身的颜色。因此输入框、hover 高亮与禁用按钮在 16 色终端上仍有可见边界，不会塌缩成普通文本。
+
 要让 Herdr 在宿主终端报告明暗外观变化时自动切换自身的 UI 主题，请启用主题自动切换：
 
 ```toml

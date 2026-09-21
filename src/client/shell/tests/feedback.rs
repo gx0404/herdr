@@ -61,6 +61,96 @@ fn chrome_hover_marks_workspace_rows() {
     );
 }
 
+/// SB-04（与 C-28 同根）：terminal 主题的 `surface0` 曾经是 `Color::Reset`，
+/// 侧栏行与标签的 hover 底色于是和常态行一模一样——指针移动没有任何反馈。
+#[test]
+fn terminal_theme_keeps_sidebar_and_tab_hover_visible() {
+    let mut config = Config::default();
+    config.theme.name = Some("terminal".into());
+    let mut state = ClientShellState::new(ClientShellConfig::from_config(&config));
+    let mut projected = snapshot();
+    let mut second_workspace = projected.workspaces[0].clone();
+    second_workspace.workspace_id = "ws_2".into();
+    second_workspace.number = 2;
+    second_workspace.label = "second".into();
+    second_workspace.focused = false;
+    second_workspace.active_tab_id = "tab_3".into();
+    projected.workspaces.push(second_workspace);
+    // 标签条只画聚焦工作区的标签：第二个未聚焦标签留在 ws_1。
+    let mut second_tab = projected.tabs[0].clone();
+    second_tab.tab_id = "tab_2".into();
+    second_tab.number = 2;
+    second_tab.focused = false;
+    projected.tabs.push(second_tab);
+    let mut third_tab = projected.tabs[1].clone();
+    third_tab.tab_id = "tab_3".into();
+    third_tab.workspace_id = "ws_2".into();
+    third_tab.number = 3;
+    projected.tabs.push(third_tab);
+    state.set_snapshot(Box::new(projected));
+    state.set_pane_surface(surface());
+    state.compose(106, 20).expect("chrome shell");
+
+    let sidebar_row = state
+        .hits
+        .workspaces
+        .iter()
+        .find(|hit| hit.workspace_id == "ws_2")
+        .map(|hit| hit.rect)
+        .expect("ws_2 row");
+    let (tab_rect, tab_id) = state
+        .hits
+        .tabs
+        .iter()
+        .find(|(_, tab_id)| tab_id == "tab_2")
+        .cloned()
+        .expect("tab_2 rect");
+
+    let rendered_bg = |state: &mut ClientShellState, col: u16, row: u16| {
+        state
+            .compose(106, 20)
+            .expect("composed")
+            .to_ratatui_buffer()
+            .expect("buffer")[(col, row)]
+            .bg
+    };
+    let plain_sidebar = rendered_bg(&mut state, sidebar_row.x + 1, sidebar_row.y);
+    let plain_tab = rendered_bg(&mut state, tab_rect.x + 1, tab_rect.y);
+
+    let mut outcome = ClientShellInput::default();
+    state.handle_mouse(moved_mouse(sidebar_row.x, sidebar_row.y), &mut outcome);
+    assert_eq!(
+        state.hover,
+        Some(ChromeHover::WorkspaceRow {
+            endpoint_id: ClientEndpointId::Local,
+            workspace_id: "ws_2".into(),
+        })
+    );
+    let hovered_sidebar = rendered_bg(&mut state, sidebar_row.x + 1, sidebar_row.y);
+    assert_ne!(
+        hovered_sidebar, plain_sidebar,
+        "terminal 主题的侧栏 hover 与常态行同像素"
+    );
+    assert_ne!(hovered_sidebar, ratatui::style::Color::Reset);
+
+    let mut outcome = ClientShellInput::default();
+    state.handle_mouse(moved_mouse(tab_rect.x, tab_rect.y), &mut outcome);
+    assert_eq!(state.hover, Some(ChromeHover::Tab(tab_id)));
+    let hovered_tab = rendered_bg(&mut state, tab_rect.x, tab_rect.y);
+    assert_ne!(
+        hovered_tab, plain_tab,
+        "terminal 主题的标签 hover 与常态标签同像素"
+    );
+    assert_ne!(hovered_tab, ratatui::style::Color::Reset);
+
+    // 走完整解析链（`theme.name = "terminal"`）后，结构面确实落在 ANSI 灰阶上。
+    assert_eq!(
+        state.config.palette.surface0,
+        ratatui::style::Color::DarkGray
+    );
+    assert_eq!(state.config.palette.surface1, ratatui::style::Color::Gray);
+}
+
 #[test]
 fn chrome_hover_stays_off_when_hover_effects_are_disabled() {
     let mut state = chrome_state();

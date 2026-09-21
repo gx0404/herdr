@@ -179,6 +179,35 @@ pub(crate) fn modal_button_style(
     }
 }
 
+/// 输入框底色：结构性的「弱面板」token。主题可以把它留成 `Color::Reset`
+/// （= 终端默认背景，16 色与手写调色板都可能这样），那时输入框与四周面板
+/// 同像素，既没有边界也没有焦点提示（C-28 / ds-14）。回退按「弱 → 强」试
+/// 其余结构面 token。
+pub(crate) fn input_field_bg(palette: &Palette) -> Color {
+    for candidate in [palette.surface0, palette.surface_dim, palette.surface1] {
+        if candidate != Color::Reset {
+            return candidate;
+        }
+    }
+    Color::Reset
+}
+
+/// 唯一的文本输入框样式：浮层输入框、过滤框与表单行都从这里取样式，字段边界
+/// 与光标底色因此保持一致。连回退结构面都未定义时用下划线划出输入区——没有
+/// 颜色可用时，文字属性是最后的边界。
+pub(crate) fn input_field_style(palette: &Palette) -> Style {
+    let background = input_field_bg(palette);
+    let base = Style::default()
+        .fg(palette.text)
+        .bg(background)
+        .remove_modifier(Modifier::DIM);
+    if background == Color::Reset {
+        base.add_modifier(Modifier::UNDERLINED)
+    } else {
+        base
+    }
+}
+
 /// Button width follows the i18n label display width (CJK safe); labels
 /// carry their own padding so the rect hugs the text exactly.
 pub(crate) fn modal_button_width(label: &str) -> u16 {
@@ -268,6 +297,52 @@ mod tests {
         );
         assert_eq!(disabled.fg, Some(palette.overlay0));
         assert!(!disabled.add_modifier.contains(Modifier::BOLD));
+    }
+
+    /// C-28 (ds-14)：输入框必须有自己的组件，且在每个内置主题下都与常态面板
+    /// 可区分；`surface0` 塌缩成 Reset 的主题不能把输入框画成普通文本。
+    #[test]
+    fn input_field_style_stays_visible_for_every_built_in_theme() {
+        for name in crate::config::THEME_NAMES {
+            let palette = Palette::from_name(name).expect("built-in theme");
+            let style = input_field_style(&palette);
+            assert_eq!(style.fg, Some(palette.text), "{name} 输入文字应与正文同色");
+            assert_ne!(
+                input_field_bg(&palette),
+                palette.panel_bg,
+                "{name} 输入框底色与面板同色，字段没有边界"
+            );
+            if input_field_bg(&palette) == Color::Reset {
+                assert!(
+                    style.add_modifier.contains(Modifier::UNDERLINED),
+                    "{name} 无可用底色时必须用下划线划出输入区"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn input_field_style_falls_back_when_every_surface_is_unset() {
+        let mut palette = Palette::terminal();
+        palette.surface0 = Color::Reset;
+        palette.surface_dim = Color::Reset;
+        palette.surface1 = Color::Reset;
+        let style = input_field_style(&palette);
+        assert_eq!(style.bg, Some(Color::Reset));
+        assert!(style.add_modifier.contains(Modifier::UNDERLINED));
+        // 弱 → 强依次回退：只把 surface0 留空时用 surface_dim。
+        palette.surface_dim = Color::DarkGray;
+        assert_eq!(input_field_bg(&palette), Color::DarkGray);
+        palette.surface_dim = Color::Reset;
+        palette.surface1 = Color::Gray;
+        assert_eq!(input_field_bg(&palette), Color::Gray);
+    }
+
+    #[test]
+    fn input_field_style_drops_the_dimmed_backdrop_modifier() {
+        let style = input_field_style(&Palette::catppuccin());
+        assert!(style.sub_modifier.contains(Modifier::DIM));
+        assert_eq!(style.bg, Some(Palette::catppuccin().surface0));
     }
 
     #[test]

@@ -246,8 +246,11 @@ pub(super) fn render_mode_bar(
                 buffer.set_string(content_x + 7, bar.y, marker, key);
             }
             let footer = mode_bar.copy_footer;
+            // 页脚宽度按显示宽度算：中文页脚（"  enter 搜索  esc 取消"）比字节
+            // 长度短 4 格，用 `len()` 会把搜索输入区挤窄并让页脚左移压住查询尾部
+            // （ds-05）。
             let footer_width = if bar.width.saturating_sub(broadcast_width) >= 50 {
-                footer.len() as u16
+                display_width(footer)
             } else {
                 0
             };

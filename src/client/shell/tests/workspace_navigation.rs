@@ -100,8 +100,9 @@ fn navigation_highlights_only_the_preview_and_activates_on_enter() {
                 let other = workspace_rect(&state, collision, "ws_2");
                 let focused = workspace_rect(&state, &ClientEndpointId::Local, "ws_1");
                 let palette = &state.config.palette;
-                let color = if cols == 44 && palette.surface0 != ratatui::style::Color::Reset {
-                    palette.surface0
+                // 44 列走窄屏列表（弱选中底色），宽屏走侧栏的导航光标底色。
+                let color = if cols == 44 {
+                    palette.surface_selection_bg()
                 } else {
                     palette.selection_row_bg()
                 };

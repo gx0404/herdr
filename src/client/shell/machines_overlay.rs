@@ -4102,7 +4102,7 @@ fn render_machine_form(
                         .bg(p.accent)
                         .add_modifier(Modifier::BOLD)
                 } else {
-                    Style::default().fg(p.text).bg(p.surface0)
+                    crate::ui::input_field_style(p)
                 };
                 b.set_style(input, style);
                 put_text(
@@ -4114,14 +4114,10 @@ fn render_machine_form(
                     style,
                 );
             } else if let Some(editor) = form.editor(*field) {
-                b.set_style(input, Style::default().fg(p.text).bg(p.surface0));
+                let field_style = crate::ui::input_field_style(p);
+                b.set_style(input, field_style);
                 let inner_input = Rect::new(input.x + 1, input.y, input.width.saturating_sub(1), 1);
-                let field_cursor = text_editor::render(
-                    b,
-                    inner_input,
-                    editor,
-                    Style::default().fg(p.text).bg(p.surface0),
-                );
+                let field_cursor = text_editor::render(b, inner_input, editor, field_style);
                 if is_focused {
                     cursor = field_cursor;
                     if let Some(hint) = field.hint() {
@@ -4612,7 +4608,7 @@ fn render_machine_forwards(
                             .bg(p.accent)
                             .add_modifier(Modifier::BOLD)
                     } else {
-                        Style::default().fg(p.text).bg(p.surface0)
+                        crate::ui::input_field_style(p)
                     };
                     b.set_style(input, style);
                     put_text(
@@ -4625,15 +4621,11 @@ fn render_machine_forwards(
                     );
                 }
                 Some(editor) => {
-                    b.set_style(input, Style::default().fg(p.text).bg(p.surface0));
+                    let field_style = crate::ui::input_field_style(p);
+                    b.set_style(input, field_style);
                     let inner_input =
                         Rect::new(input.x + 1, input.y, input.width.saturating_sub(1), 1);
-                    let field_cursor = text_editor::render(
-                        b,
-                        inner_input,
-                        editor,
-                        Style::default().fg(p.text).bg(p.surface0),
-                    );
+                    let field_cursor = text_editor::render(b, inner_input, editor, field_style);
                     if is_focused {
                         cursor = field_cursor;
                     }
@@ -5187,14 +5179,10 @@ fn render_import_select(
             rect.width.saturating_sub(label_width),
             1,
         );
-        b.set_style(input, Style::default().fg(p.text).bg(p.surface0));
+        let field_style = crate::ui::input_field_style(p);
+        b.set_style(input, field_style);
         let inner_input = Rect::new(input.x + 1, input.y, input.width.saturating_sub(1), 1);
-        let field_cursor = text_editor::render(
-            b,
-            inner_input,
-            &view.group,
-            Style::default().fg(p.text).bg(p.surface0),
-        );
+        let field_cursor = text_editor::render(b, inner_input, &view.group, field_style);
         if focused {
             cursor = field_cursor;
         }

@@ -573,6 +573,69 @@ fn keyboard_copy_mode_content_motion_is_endpoint_backed_and_stale_safe() {
     );
 }
 
+/// ds-05：搜索栏把页脚宽度当成 `str::len()`（字节）。中文页脚比显示宽度多
+/// 4 格，输入区被挤窄 4 格、页脚左移压住查询尾部——查询并非超长却被截断。
+#[test]
+fn copy_search_field_uses_the_footer_display_width() {
+    let _lang = crate::i18n::lang_guard(crate::i18n::Lang::ZhCn);
+    let config = ClientShellConfig::from_config(&Config::default());
+    let footer = crate::i18n::texts().mode_bar.copy_footer;
+    let footer_width = usize::from(render::display_width(footer));
+    assert!(
+        footer.len() > footer_width,
+        "中文页脚必须能暴露「字节长度 ≠ 显示宽度」"
+    );
+    // 输入区宽度 = 栏宽 −（前缀 8 + 页脚显示宽度），栏宽取「查询 + 20」让查询
+    // 在正确实现下完整可见；字节长度算错时输入区少 4 格，尾部 4 格被切掉。
+    let bar_width = 8 + footer_width + 24;
+    let query = format!("{}ZZ", "a".repeat(20));
+    assert!(bar_width >= 50, "栏宽需落在页脚会渲染的区间内");
+    let copy_mode = ClientCopyModeState {
+        pane_id: "pane_1".into(),
+        content_revision: 0,
+        geometry: (bar_width as u16, 1),
+        cursor: crate::api::schema::PaneTextPoint { row: 0, col: 0 },
+        offset_from_bottom: 0,
+        max_offset_from_bottom: 0,
+        entry_offset_from_bottom: 0,
+        selection: None,
+        search_prompt: Some(ClientCopySearchPrompt {
+            direction: crate::api::schema::PaneCopySearchDirection::Forward,
+            query: TextEditor::new(&query, false),
+        }),
+        search_query: String::new(),
+        search_direction: None,
+        search_matches: Vec::new(),
+        search_total: 0,
+        search_current: None,
+        search_current_global: None,
+        search_generation: 0,
+        copy_after_search: false,
+    };
+    let area = Rect::new(0, 0, bar_width as u16, 1);
+    let mut buffer = Buffer::empty(area);
+    let bar = render::render_mode_bar(
+        &mut buffer,
+        area,
+        ClientShellMode::Copy,
+        Some(&copy_mode),
+        None,
+        false,
+        None,
+        &config.keybinds,
+        &config.palette,
+        &config.components,
+    )
+    .expect("mode bar");
+    let row: String = (bar.x..bar.right())
+        .map(|x| buffer[(x, bar.y)].symbol().to_owned())
+        .collect();
+    assert!(
+        row.contains(&query),
+        "查询未被截断地渲染在搜索栏里：{row:?}"
+    );
+}
+
 #[test]
 fn copy_search_owns_prompt_repeat_highlights_selection_and_restore() {
     let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));

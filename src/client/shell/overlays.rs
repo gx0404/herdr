@@ -890,12 +890,13 @@ fn render_rename_overlay(
             .add_modifier(Modifier::BOLD),
     );
     let input = Rect::new(stack.content.x, stack.content.y, stack.content.width, 1);
-    b.set_style(input, Style::default().fg(p.text).bg(p.surface0));
+    let field = crate::ui::input_field_style(p);
+    b.set_style(input, field);
     let cursor = text_editor::render(
         b,
         Rect::new(input.x + 1, input.y, input.width.saturating_sub(1), 1),
         &v.input,
-        Style::default().fg(p.text).bg(p.surface0),
+        field,
     );
     let rs = modal_button_row(
         stack.actions.unwrap_or_default(),

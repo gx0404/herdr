@@ -1189,7 +1189,8 @@ pub(super) fn render_machine_files_overlay(
                 base.fg(p.text),
             );
             let input_rect = Rect::new(body.x, body.y + 2, body.width, 1);
-            b.set_style(input_rect, Style::default().fg(p.text).bg(p.surface0));
+            let field = crate::ui::input_field_style(p);
+            b.set_style(input_rect, field);
             cursor = text_editor::render(
                 b,
                 Rect::new(
@@ -1199,7 +1200,7 @@ pub(super) fn render_machine_files_overlay(
                     1,
                 ),
                 input,
-                Style::default().fg(p.text).bg(p.surface0),
+                field,
             );
             let confirm_label = crate::i18n::texts().overlays.confirm_button;
             let cancel_label = crate::i18n::texts().overlays.cancel_button;

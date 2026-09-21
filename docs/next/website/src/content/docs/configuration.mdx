@@ -261,6 +261,8 @@ name = "catppuccin"
 
 Search `theme.name` in the [Config reference](/docs/config-reference/) for every built-in theme. Use `terminal` when you want Herdr UI colors to follow your host terminal's ANSI palette.
 
+The `terminal` theme maps Herdr's structural surfaces onto ANSI colors: the subtle surface behind input fields, keycaps, and unfocused tabs is `DarkGray`, the stronger hover/active surface is `Gray`, and text plus panel backgrounds stay at the terminal's own colors. Input fields, hover highlights, and disabled buttons therefore keep a visible boundary instead of collapsing into plain text on 16-color terminals.
+
 To let Herdr switch its own UI theme when the host terminal reports a light/dark appearance change, enable theme auto-switching:
 
 ```toml
