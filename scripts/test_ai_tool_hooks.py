@@ -71,6 +71,14 @@ class PreToolUseGateTests(unittest.TestCase):
         "git add -A",
         "git add --all",
         "pkill -9 herdr",
+        "cargo build && pkill herdr",
+        "sudo killall herdr",
+        "pgrep herdr | xargs -r pkill -f",
+        "bash <<'EOF'\npkill herdr\nEOF",
+        "bash -c 'pkill herdr'",
+        "HERDR_SESSION=x pkill herdr",
+        "cd /tmp && git add -A",
+        "if true; then git push origin x --force-with-lease; fi",
     ]
     ALLOW_COMMANDS = [
         "cargo nextest run --locked",
@@ -80,6 +88,12 @@ class PreToolUseGateTests(unittest.TestCase):
         "git commit -m 'fix: pane focus'",
         "python3 -m unittest scripts.test_changelog",
         "rg 'fn main' src/",
+        # 文本提及不是执行：ask 级模式只在命令位置命中。
+        "rg pkill docs/",
+        "python3 - <<'PYEOF'\ntext = '禁 pkill/猜 PID'\nprint(len(text))\nPYEOF",
+        "python3 - <<'PYEOF'\ntext = '只精确暂存，禁 git add -A'\nPYEOF",
+        "python3 - <<'PYEOF'\ntext = '需人工确认：git push --force-with-lease'\nPYEOF",
+        "git commit -m 'docs: 说明为何不用 git add --all'",
     ]
     DENY_FILES = [
         "distribution/latest.json",
