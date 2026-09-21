@@ -819,6 +819,10 @@ async fn two_headless_servers_drive_atomic_endpoint_handoff() {
                 break;
             }
             ServerMessage::WindowTitle { .. } => {}
+            // 焦点 pane 的 cwd 上送与窗口标题同属呈现效应，栅栏前重放是预期行为
+            //（WEZ-INT-02）。
+            ServerMessage::EndpointControl { kind, .. }
+                if kind == crate::protocol::endpoint::TERMINAL_CWD_KIND => {}
             other => panic!("unexpected presentation fence message: {other:?}"),
         }
     }

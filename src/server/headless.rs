@@ -1640,7 +1640,16 @@ impl HeadlessServer {
         let uri = changed_path
             .as_deref()
             .and_then(crate::pane::file_uri_for_cwd);
-        self.send_terminal_cwd(changed_path, uri);
+        match uri {
+            Some(uri) => {
+                self.send_terminal_cwd(changed_path, Some(uri));
+            }
+            None => {
+                // 没有可上送的值（无前台目标，或路径不可 UTF-8 编码）：只记账不发送；
+                // OSC 7 没有清除语义，宿主终端保持最后一次有效 cwd。
+                self.sent_terminal_cwd = self.foreground_client_id.map(|id| (id, changed_path));
+            }
+        }
     }
 
     /// 发送 cwd 上送帧；与 `send_window_title` 同样只在前台 client 真正收下后才记账，
