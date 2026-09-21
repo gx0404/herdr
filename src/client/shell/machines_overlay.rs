@@ -829,15 +829,21 @@ pub(super) struct MachineListRow {
 
 fn machine_matches(profile: &SavedSshEndpoint, query: &str) -> bool {
     let query = query.trim().to_lowercase();
-    query.is_empty()
-        || format!(
-            "{} {} {}",
-            profile.label,
-            profile.target,
-            profile.group.as_deref().unwrap_or_default()
-        )
-        .to_lowercase()
-        .contains(&query)
+    if query.is_empty() {
+        return true;
+    }
+    // 逐词匹配：每个词单独出现即可，不必相邻；标签（tags）也是搜索面。
+    let mut haystack = format!("{} {}", profile.label, profile.target);
+    if let Some(group) = &profile.group {
+        haystack.push(' ');
+        haystack.push_str(group);
+    }
+    for tag in &profile.tags {
+        haystack.push(' ');
+        haystack.push_str(tag);
+    }
+    let haystack = haystack.to_lowercase();
+    query.split_whitespace().all(|word| haystack.contains(word))
 }
 
 pub(super) fn machine_list_rows(
@@ -1261,7 +1267,7 @@ impl ClientShellState {
                     MachineFormStep::Target => {
                         if form.target.trim().is_empty() {
                             form.error =
-                                Some(crate::i18n::texts().cli_errors.label_required.to_owned());
+                                Some(crate::i18n::texts().machines.target_required.to_owned());
                         } else {
                             if form.label.trim().is_empty() {
                                 let target = form.target.trim().to_owned();
@@ -1588,6 +1594,17 @@ impl ClientShellState {
             .ok_or_else(|| t.machine_forward_listen_port_required.to_owned())?;
         let target_host = nonempty(form.target_host.trim());
         let target_port = parse_port(&form.target_port, "--target-port")?;
+        // local/remote 转发必须有目标：这里先拦，避免存盘时才被 catalog 校验
+        // 挡回来（那条错误是英文且面向 CLI）。
+        if matches!(kind, PortForwardKind::Local | PortForwardKind::Remote) {
+            let ui = &crate::i18n::texts().machines;
+            if target_host.is_none() {
+                return Err(ui.forward_target_host_required.to_owned());
+            }
+            if target_port.is_none_or(|port| port == 0) {
+                return Err(ui.forward_target_port_required.to_owned());
+            }
+        }
         Ok(PortForwardRule {
             kind,
             bind_address: nonempty(form.bind_address.trim()),
@@ -5425,7 +5442,7 @@ fn render_import_discover(
             y += 1;
         }
     }
-    if !view.plan.skipped.is_empty() {
+    if !view.plan.skipped.is_empty() && y < body.bottom() {
         put_text(
             b,
             body.x,

@@ -373,18 +373,22 @@ fn render_choice_section(
             .bg(palette.panel_bg)
             .add_modifier(Modifier::BOLD),
     );
-    put_text(
-        buffer,
-        area.x,
-        area.y + 1,
-        area.width,
-        description,
-        Style::default().fg(palette.overlay1).bg(palette.panel_bg),
-    );
+    if area.height >= 2 {
+        put_text(
+            buffer,
+            area.x,
+            area.y + 1,
+            area.width,
+            description,
+            Style::default().fg(palette.overlay1).bg(palette.panel_bg),
+        );
+    }
+    // 标题与说明无论如何都会画，所以矮区域也得给它们留行；第三行留白只在有余量
+    // 时才留。否则第一个选项会跟标题写在同一条线上（TOOL-20）。
     let header_rows = if area.height >= choices.len() as u16 + 3 {
         3
     } else {
-        0
+        area.height.min(2)
     };
     let row_gap = u16::from(area.height >= header_rows + choices.len() as u16 * 2);
     for (index, choice) in choices.iter().enumerate() {

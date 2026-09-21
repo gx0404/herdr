@@ -1347,11 +1347,17 @@ fn client_settings_preview_restore_and_endpoint_integrations_are_owned_by_overla
                 )
             )
     ));
+    // 安装进行中 Esc 不关页面，但要说明原因（TOOL-21）：一次提示 + 重绘，
+    // 不再是静默吞键。
     let escape = state.handle_input_bytes(b"\x1b");
-    assert!(!escape.repaint);
+    assert!(escape.repaint);
     assert!(matches!(
         state.overlay,
         Some(ClientShellOverlay::Settings(_))
+    ));
+    assert!(matches!(
+        state.overlay.as_ref(),
+        Some(ClientShellOverlay::Settings(settings)) if settings.integration_notice.is_some()
     ));
     let install_request_id = match &install.actions[0] {
         ClientShellAction::Endpoint { request, .. } => request.id.clone(),

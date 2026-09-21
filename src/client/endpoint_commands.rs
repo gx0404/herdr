@@ -238,11 +238,13 @@ impl EndpointCommands {
             .chain(self.background.iter_mut())
             .chain(self.reading.iter_mut())
             .filter_map(|(endpoint_id, lane)| {
-                let command = lane.in_flight.as_ref()?;
-                if now.saturating_duration_since(command.sent_at) < ENDPOINT_COMMAND_TIMEOUT {
+                let expired = lane.in_flight.as_ref().is_some_and(|command| {
+                    now.saturating_duration_since(command.sent_at) >= ENDPOINT_COMMAND_TIMEOUT
+                });
+                if !expired {
                     return None;
                 }
-                let command = lane.in_flight.take().expect("checked in-flight command");
+                let command = lane.in_flight.take()?;
                 lane.retire((
                     command.generation,
                     command.boot_id.clone(),
@@ -321,7 +323,9 @@ impl EndpointCommands {
             return Ok(None);
         }
 
-        let in_flight = lane.in_flight.take().expect("checked in-flight command");
+        let Some(in_flight) = lane.in_flight.take() else {
+            return Ok(None);
+        };
         let result = parse_response(&in_flight.request_id, &in_flight.response);
         Ok(Some(EndpointCommandResult {
             endpoint_id: endpoint_id.clone(),

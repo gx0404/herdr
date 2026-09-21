@@ -458,13 +458,20 @@ impl ClientShellState {
         }
         let (code, modifiers) = crate::config::normalize_key_combo((key.code, key.modifiers));
         if code == KeyCode::Esc {
-            if !matches!(
+            if matches!(
                 self.overlay,
                 Some(ClientShellOverlay::Settings(ClientSettingsOverlay {
                     installing_integrations: true,
                     ..
                 }))
             ) {
+                // 安装期间不关页面，但也不能静默吞掉 Esc：给出原因（TOOL-21）。
+                if let Some(ClientShellOverlay::Settings(settings)) = self.content_page_mut() {
+                    settings.integration_notice =
+                        Some(crate::i18n::texts().settings.install_in_progress.to_owned());
+                }
+                outcome.repaint = true;
+            } else {
                 self.cancel_settings_overlay();
                 outcome.repaint = true;
             }

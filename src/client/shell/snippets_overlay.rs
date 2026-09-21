@@ -646,9 +646,13 @@ impl ClientShellState {
                 if let Some(ClientShellOverlay::Snippets(overlay)) = self.overlay.as_mut() {
                     let view = std::mem::replace(&mut overlay.view, ClientSnippetsView::List);
                     if let ClientSnippetsView::RunTargets(mut draft) = view {
+                        // 默认只勾当前机器：整队在确认页只展开前几个目标，默认全选
+                        // 等于让一次回车落到所有在线机器上（TOOL-09）。
+                        let active = self.active_endpoint_id.clone();
                         draft.machine_selected = machine_rows(&self.endpoints)
                             .into_iter()
                             .map(|(endpoint_id, _)| endpoint_id)
+                            .filter(|endpoint_id| endpoint_id == &active)
                             .collect();
                         overlay.set_view(ClientSnippetsView::RunPickMachines(draft));
                     }
@@ -738,6 +742,17 @@ impl ClientShellState {
             }
         }
         if targets.is_empty() {
+            // 空选择不能静默吞掉回车：告诉用户怎么选（TOOL-09）。
+            if let Some(ClientShellOverlay::Snippets(overlay)) = self.overlay.as_mut() {
+                if let ClientSnippetsView::RunPickMachines(draft) = &mut overlay.view {
+                    draft.error = Some(
+                        crate::i18n::texts()
+                            .snippets
+                            .machines_picker_empty_selection
+                            .to_owned(),
+                    );
+                }
+            }
             return;
         }
         if let Some(ClientShellOverlay::Snippets(overlay)) = self.overlay.as_mut() {
@@ -2384,6 +2399,19 @@ fn render_run_pick_machines(
             style,
         );
     }
+    if let Some(error) = draft.error.as_deref() {
+        let y = body.bottom().saturating_sub(1);
+        if y >= body.y {
+            put_text(
+                b,
+                body.x,
+                y,
+                body.width,
+                &format!(" {error}"),
+                base.fg(p.red),
+            );
+        }
+    }
     snippet_footer_hints(
         b,
         stack.footer,
@@ -2506,6 +2534,43 @@ fn render_run_variables(
     })
 }
 
+/// 确认页的命令折行：按可视宽度切（不拆多字节字符），最多 `lines` 行，
+/// 放不下的部分在最后一行以 `…` 收尾——长命令必须能看清再确认（TOOL-10）。
+fn wrap_command_rows(command: &str, width: usize, lines: usize) -> Vec<String> {
+    if width == 0 || lines == 0 {
+        return Vec::new();
+    }
+    let mut rows: Vec<String> = Vec::new();
+    let mut current = String::new();
+    let mut current_width = 0usize;
+    for ch in command.chars() {
+        let ch_width = usize::from(display_width(&ch.to_string()));
+        if current_width + ch_width > width && !current.is_empty() {
+            rows.push(std::mem::take(&mut current));
+            current_width = 0;
+            if rows.len() == lines {
+                break;
+            }
+        }
+        current.push(ch);
+        current_width += ch_width;
+    }
+    if rows.len() < lines && !current.is_empty() {
+        rows.push(current);
+    } else if rows.len() == lines {
+        // 折到上限还有剩余：末行截断并加省略号，至少让用户知道命令没显示完。
+        if let Some(last) = rows.last_mut() {
+            let trimmed = crate::ui::truncate_end(last, width.saturating_sub(1));
+            let trimmed_width = usize::from(display_width(&trimmed));
+            *last = trimmed;
+            if trimmed_width < width {
+                last.push('…');
+            }
+        }
+    }
+    rows
+}
+
 fn render_run_confirm(
     b: &mut Buffer,
     draft: &ClientSnippetRunDraft,
@@ -2556,14 +2621,21 @@ fn render_run_confirm(
         base.fg(p.overlay0),
     );
     y += 1;
-    put_text(
-        b,
-        body.x,
-        y,
-        body.width,
-        &format!(" {command}"),
-        base.fg(p.text),
-    );
+    let command_rows = wrap_command_rows(&command, usize::from(body.width).saturating_sub(1), 3);
+    for row in &command_rows {
+        if y >= body.bottom() {
+            break;
+        }
+        put_text(
+            b,
+            body.x,
+            y,
+            body.width,
+            &format!(" {row}"),
+            base.fg(p.text),
+        );
+        y += 1;
+    }
     y += 1;
     let targets = crate::i18n::fill(
         t.confirm_targets_fmt,

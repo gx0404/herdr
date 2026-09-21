@@ -1855,7 +1855,7 @@ impl ClientShellState {
         }
         if matches!(self.overlay, Some(ClientShellOverlay::Machines(_))) {
             match mouse.kind {
-                MouseEventKind::Moved if self.hits.machines_detail_area.is_empty() => {
+                MouseEventKind::Moved => {
                     // 指针只写 hover：`selected` 留给键盘与点击，否则划过列表
                     // 就把 d / x / r / Shift+R 这些破坏性键重新指向「鼠标最后
                     // 路过的机器」（MENU-01 / UX-04）。出界也要写 None。

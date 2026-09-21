@@ -381,6 +381,8 @@ pub struct SettingsTexts {
     pub state_available: &'static str,
     pub state_not_found: &'static str,
     pub installing: &'static str,
+    /// 安装进行中按 Esc 的反馈：不静默吞键（TOOL-21）。
+    pub install_in_progress: &'static str,
     /// One-shot feedback when the selected integration row needs no install.
     /// Kept apart from `integration_messages`, which carries the endpoint's
     /// install report and must survive this hint.
@@ -570,6 +572,11 @@ pub struct EndpointTexts {
 pub struct MachinesTexts {
     pub title: &'static str,
     pub search_hint: &'static str,
+    /// 添加/编辑向导里目标主机为空时的提示（不是 CLI 的 `--label` 文案）。
+    pub target_required: &'static str,
+    /// local/remote 转发的目标必填项提示（动态转发的这几个字段不参与）。
+    pub forward_target_host_required: &'static str,
+    pub forward_target_port_required: &'static str,
     pub count_fmt: &'static str, // args: count
     pub empty: &'static str,
     pub empty_hint: &'static str,
@@ -740,8 +747,10 @@ pub struct BroadcastTexts {
     pub enabled_message: &'static str,
     pub disabled_message: &'static str,
     pub cleared_message: &'static str,
-    pub added_fmt: &'static str,     // args: machine, pane
-    pub removed_fmt: &'static str,   // args: machine, pane
+    pub added_fmt: &'static str,   // args: machine, pane
+    pub removed_fmt: &'static str, // args: machine, pane
+    /// 目标列表被外部改动后按 x 的提示（不暴露 CLI 的编号文案，TOOL-23）。
+    pub target_missing: &'static str,
     pub duplicate_fmt: &'static str, // args: machine
     pub pick_machine_title: &'static str,
     pub pick_pane_title_fmt: &'static str, // args: label
@@ -930,6 +939,8 @@ pub struct SnippetsTexts {
     pub pane_picker_title: &'static str,
     pub picker_empty: &'static str,
     pub machines_picker_title: &'static str,
+    /// 每台机器一个 pane 的模式下，选中集合为空时按 Enter 的提示。
+    pub machines_picker_empty_selection: &'static str,
     pub variables_title: &'static str,
     pub confirm_title: &'static str,
     pub confirm_command: &'static str,

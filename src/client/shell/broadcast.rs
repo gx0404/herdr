@@ -220,6 +220,10 @@ impl ClientShellState {
             return false;
         }
         self.broadcast = set;
+        let last = self.broadcast.targets().len().saturating_sub(1);
+        if let Some(ClientShellOverlay::Broadcast(overlay)) = self.overlay.as_mut() {
+            overlay.selected = overlay.selected.min(last);
+        }
         true
     }
 
@@ -257,6 +261,16 @@ impl ClientShellState {
             Some(ClientShellOverlay::Broadcast(overlay)) => overlay.selected,
             _ => return,
         };
+        // 文件 watcher 可能已经把目标删掉：越界时给 overlay 自己的文案，而不是把
+        // CLI 的「target number must be between 1 and N」端到用户面前（TOOL-23）。
+        let target_count = self.broadcast.targets().len();
+        if index >= target_count {
+            if let Some(ClientShellOverlay::Broadcast(overlay)) = self.overlay.as_mut() {
+                overlay.message = Some(crate::i18n::texts().broadcast.target_missing.to_owned());
+                overlay.selected = target_count.saturating_sub(1);
+            }
+            return;
+        }
         let result = self.mutate_broadcast_set(|set| {
             let removed = set.remove_target(index.saturating_add(1))?;
             Ok(removed)
@@ -273,7 +287,10 @@ impl ClientShellState {
         };
         if let Some(ClientShellOverlay::Broadcast(overlay)) = self.overlay.as_mut() {
             overlay.message = message;
-            overlay.selected = overlay.selected.saturating_sub(1);
+            // 失败时列表长度没变，夹取等于原地不动；成功时列表变短，光标跟着
+            // 收到新长度上（TOOL-23）。
+            let last = self.broadcast.targets().len().saturating_sub(1);
+            overlay.selected = overlay.selected.min(last);
         }
     }
 

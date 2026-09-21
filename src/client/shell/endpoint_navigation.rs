@@ -149,6 +149,9 @@ impl ClientShellState {
             action,
             KeybindAction::PreviousWorkspace | KeybindAction::NextWorkspace
         ) {
+            // 与 navigate 模式同一份折叠状态：用空集合枚举会把光标送进侧栏里
+            // 被折叠隐藏的 worktree 子工作区（NAV-04）。
+            let empty_collapsed_groups = HashSet::new();
             let workspaces = self
                 .endpoints
                 .iter()
@@ -158,7 +161,10 @@ impl ClientShellState {
                         .snapshot
                         .as_deref()
                         .map_or_else(Vec::new, |snapshot| {
-                            render::workspace_entries(snapshot, &HashSet::new())
+                            let collapsed_groups = self
+                                .collapsed_groups_for_endpoint(&endpoint.endpoint_id)
+                                .unwrap_or(&empty_collapsed_groups);
+                            render::workspace_entries(snapshot, collapsed_groups)
                                 .into_iter()
                                 .filter_map(|entry| {
                                     snapshot.workspaces.get(entry.index).map(|workspace| {

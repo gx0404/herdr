@@ -307,7 +307,7 @@ impl ClientShellState {
                     break;
                 }
                 let cell = &mut buffer[(x, y)];
-                cell.set_symbol(&ch.to_string());
+                cell.set_char(ch);
                 cell.set_style(style);
             }
         }

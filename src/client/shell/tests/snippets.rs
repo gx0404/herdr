@@ -317,7 +317,8 @@ fn snippet_run_multi_machine_fans_out_per_endpoint() {
         snippets_view(&state),
         super::super::snippets_overlay::ClientSnippetsView::RunPickMachines(_)
     ));
-    // Both machines start selected; confirm resolves each to its focused pane.
+    // 默认只勾当前机器；显式全选后确认页把每台机器解析到各自聚焦的 pane。
+    state.route_snippets_key(&key(KeyCode::Char('a')), &mut ClientShellInput::default());
     state.route_snippets_key(&key(KeyCode::Enter), &mut ClientShellInput::default());
     assert!(matches!(
         snippets_view(&state),
@@ -942,6 +943,8 @@ fn machine_picker_keeps_selections_bound_to_endpoints_across_list_changes() {
         super::super::snippets_overlay::ClientSnippetsView::RunPickMachines(_)
     ));
 
+    // TOOL-09 之后默认只勾当前机器，这里先按 a 全选，再复现「取消一个」的场景。
+    state.route_snippets_key(&key(KeyCode::Char('a')), &mut ClientShellInput::default());
     // 行序：(本地, Alpha, Beta)；光标从目标模式带过来停在第 2 行，上移一行到
     // Alpha 再取消勾选。
     state.route_snippets_key(&key(KeyCode::Up), &mut ClientShellInput::default());
@@ -1006,6 +1009,8 @@ fn concurrent_snippet_runs_keep_their_own_pending_state() {
             snippets_view(state),
             super::super::snippets_overlay::ClientSnippetsView::RunPickMachines(_)
         ) {
+            // TOOL-09 之后默认只勾当前机器；这里显式全选再确认。
+            state.route_snippets_key(&key(KeyCode::Char('a')), &mut ClientShellInput::default());
             state.route_snippets_key(&key(KeyCode::Enter), &mut ClientShellInput::default());
         }
         let mut outcome = ClientShellInput::default();

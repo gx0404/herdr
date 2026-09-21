@@ -1356,17 +1356,20 @@ pub(super) fn render_machine_files_overlay(
                     put_text(b, body.x, body.y, body.width, line, base.fg(p.overlay1));
                 }
             }
+            // 状态行落在正文最后一行：贴在 body.y 会盖住第一行条目（也就是
+            // 光标所在行），而末行只是同屏最后一条、滚动即可看到。
+            let status_y = body.bottom().saturating_sub(1);
             if let Some(error) = overlay.error.as_deref() {
                 put_text(
                     b,
                     body.x,
-                    body.y,
+                    status_y,
                     body.width,
                     &crate::i18n::fill(t.error_fmt, &[("error", error)]),
                     base.fg(p.red),
                 );
             } else if let Some(message) = overlay.message.as_deref() {
-                put_text(b, body.x, body.y, body.width, message, base.fg(p.green));
+                put_text(b, body.x, status_y, body.width, message, base.fg(p.green));
             }
             if let Some(footer) = stack.footer {
                 render_key_hints(

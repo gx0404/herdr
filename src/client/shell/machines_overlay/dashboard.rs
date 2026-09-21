@@ -136,10 +136,14 @@ pub(super) fn render_dashboard(
             left.width.saturating_sub(1),
             2,
         );
-        let style = if index == selected {
+        let is_selected = index == selected;
+        let is_hovered = !is_selected && overlay.hovered.as_ref() == Some(&row.id);
+        // 宽屏工作台与窄屏列表同一套三态：选中 accent 反色 > 悬浮弱底色 > 常态。
+        let hover_bg = super::super::list_row_bg(p, cx.components, is_selected, is_hovered);
+        let style = if is_selected {
             Style::default().fg(panel_contrast_fg(p)).bg(p.accent)
         } else {
-            Style::default().fg(p.text).bg(p.panel_bg)
+            Style::default().fg(p.text).bg(hover_bg)
         };
         b.set_style(rect, style);
         let (glyph, state, color) = endpoint_status_presentation(row.status, p, cx.spinner);
