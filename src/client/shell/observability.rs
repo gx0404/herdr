@@ -404,6 +404,55 @@ pub(super) enum Action {
     AlertCooldown(usize),
 }
 
+/// 每个账号保留的用量历史样本数（右栏 sparkline 的窗口）。
+pub(super) const USAGE_HISTORY_SAMPLES: usize = 120;
+
+/// 一次账号用量采样：`percent` 取该账号各窗口里已用比例最高的一档（「最紧的
+/// 那一档」是用户扫一眼 sparkline 想看的压力信号）。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(super) struct UsageSample {
+    pub at_ms: u64,
+    pub percent: f32,
+}
+
+/// 账号的压力百分比：各窗口 `used/limit`（或 `used_percent`）里最高的一档；
+/// 没有额度字段（如只报请求数）的账号不产生样本。
+fn usage_pressure_percent(account: &AccountUsageSnapshot) -> Option<f32> {
+    account
+        .metrics
+        .iter()
+        .filter_map(super::observability::render::metric_percent)
+        .reduce(f32::max)
+}
+
+/// 追加一条样本：`observed_at_ms` 未前进（同一份快照被重复投递）时跳过，
+/// 超出上限丢最旧的。
+fn push_usage_sample(samples: &mut VecDeque<UsageSample>, at_ms: u64, percent: f32) {
+    if samples.back().is_some_and(|sample| sample.at_ms >= at_ms) {
+        return;
+    }
+    if samples.len() >= USAGE_HISTORY_SAMPLES {
+        samples.pop_front();
+    }
+    samples.push_back(UsageSample { at_ms, percent });
+}
+
+fn record_usage_history(
+    history: &mut HashMap<String, VecDeque<UsageSample>>,
+    accounts: &[AccountUsageSnapshot],
+) {
+    for account in accounts {
+        let Some(percent) = usage_pressure_percent(account) else {
+            continue;
+        };
+        push_usage_sample(
+            history.entry(account.account_id.clone()).or_default(),
+            account.observed_at_ms,
+            percent,
+        );
+    }
+}
+
 #[derive(Clone)]
 pub(super) struct HistoryPoint {
     pub at: u64,
@@ -646,6 +695,10 @@ pub(super) struct State {
     pub usage: AccountUsageConfig,
     pub metrics: Option<Box<SystemMetricsSnapshot>>,
     pub history: VecDeque<HistoryPoint>,
+    /// 账号用量历史样本（按账号 id）：右栏 sparkline 的数据源。只在快照的
+    /// `observed_at_ms` 前进时追加（轮询响应与订阅事件都走这里），每个账号保留
+    /// 最近 `USAGE_HISTORY_SAMPLES` 个点。
+    pub usage_history: HashMap<String, VecDeque<UsageSample>>,
     pub providers: Vec<UsageProviderInfo>,
     /// 账号页 / 浮动仪表盘的账号快照（页面作用域）。
     pub accounts: Vec<AccountUsageSnapshot>,
@@ -912,6 +965,7 @@ impl State {
         refresh: Option<UsageRefreshState>,
     ) {
         let account_id = account.account_id.clone();
+        record_usage_history(&mut self.usage_history, std::slice::from_ref(&account));
         if let Some(slot) = self
             .accounts
             .iter_mut()
@@ -1043,6 +1097,10 @@ impl State {
                 scope_refresh.extend(refresh);
                 scope_accounts.sort_by_key(|account| provider_order(&account.agent));
             }
+        }
+        // 样本只记页面作用域：悬浮层是逐 pane 的临时视图，不进 sparkline 历史。
+        if !hover {
+            record_usage_history(&mut self.usage_history, &self.accounts);
         }
     }
 
@@ -1213,6 +1271,7 @@ impl State {
             usage,
             metrics: None,
             history: VecDeque::new(),
+            usage_history: HashMap::new(),
             providers: Vec::new(),
             accounts: Vec::new(),
             selected_provider: None,
@@ -3921,5 +3980,96 @@ impl ClientShellState {
             self.hits.pane_splits.clear();
         }
         Some(covered)
+    }
+}
+
+#[cfg(test)]
+mod usage_history_tests {
+    use super::*;
+
+    fn sampled(account_id: &str, at_ms: u64, percent: Option<f64>) -> AccountUsageSnapshot {
+        AccountUsageSnapshot {
+            account_id: account_id.into(),
+            account_label: account_id.into(),
+            agent: "claude".into(),
+            provider: "claude".into(),
+            status: ObservationStatus::Ready,
+            observed_at_ms: at_ms,
+            metrics: vec![UsageMetric {
+                label: "session".into(),
+                used_percent: percent,
+                ..Default::default()
+            }],
+            ..Default::default()
+        }
+    }
+
+    /// 右栏 sparkline 的数据源：每次采样按 `observed_at_ms` 前进追加，重复投递
+    /// 同一份快照不产生第二个点。
+    #[test]
+    fn samples_are_recorded_once_per_observed_at_ms() {
+        let mut history: HashMap<String, VecDeque<UsageSample>> = HashMap::new();
+        record_usage_history(
+            &mut history,
+            &[sampled("claude:default", 1_000, Some(12.0))],
+        );
+        record_usage_history(
+            &mut history,
+            &[sampled("claude:default", 1_000, Some(12.0))],
+        );
+        record_usage_history(
+            &mut history,
+            &[sampled("claude:default", 2_000, Some(30.0))],
+        );
+        let samples = history.get("claude:default").expect("样本");
+        assert_eq!(samples.len(), 2, "同一 observed_at_ms 只记一次");
+        assert_eq!(samples[0].at_ms, 1_000);
+        assert_eq!(samples[1].percent, 30.0);
+    }
+
+    /// 没有额度字段的账号不产生样本；已经过期的 `observed_at_ms` 不覆盖新点。
+    #[test]
+    fn samples_skip_accounts_without_quota_and_ignore_stale_snapshots() {
+        let mut history: HashMap<String, VecDeque<UsageSample>> = HashMap::new();
+        record_usage_history(&mut history, &[sampled("claude:default", 2_000, None)]);
+        assert!(history.is_empty(), "只报请求数的账号不进 sparkline");
+        record_usage_history(
+            &mut history,
+            &[sampled("claude:default", 2_000, Some(40.0))],
+        );
+        record_usage_history(
+            &mut history,
+            &[sampled("claude:default", 1_500, Some(10.0))],
+        );
+        let samples = history.get("claude:default").expect("样本");
+        assert_eq!(samples.len(), 1);
+        assert_eq!(samples[0].percent, 40.0, "过期快照不追加");
+    }
+
+    /// 压力值取各窗口里最高的一档，并夹在 0..100。
+    #[test]
+    fn pressure_percent_takes_the_tightest_window() {
+        let mut account = sampled("claude:default", 1_000, Some(12.0));
+        account.metrics.push(UsageMetric {
+            label: "weekly".into(),
+            used: Some(90.0),
+            limit: Some(100.0),
+            ..Default::default()
+        });
+        assert_eq!(usage_pressure_percent(&account), Some(90.0));
+        let mut over = sampled("claude:default", 1_000, Some(1_000.0));
+        over.metrics[0].used_percent = Some(250.0);
+        assert_eq!(usage_pressure_percent(&over), Some(100.0));
+    }
+
+    /// 上限：旧点先出队。
+    #[test]
+    fn samples_are_bounded() {
+        let mut samples: VecDeque<UsageSample> = VecDeque::new();
+        for at_ms in 1..=(USAGE_HISTORY_SAMPLES as u64 + 10) {
+            push_usage_sample(&mut samples, at_ms, at_ms as f32);
+        }
+        assert_eq!(samples.len(), USAGE_HISTORY_SAMPLES);
+        assert_eq!(samples.front().map(|sample| sample.at_ms), Some(11));
     }
 }

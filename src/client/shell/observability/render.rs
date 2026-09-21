@@ -288,7 +288,7 @@ fn age_text(now_ms: u64, observed_at_ms: u64, status: ObservationStatus) -> Stri
 
 /// 两种显示模式统一的已用百分比：官方 `used_percent` 优先，否则由 `used/limit`
 /// 推算；统一夹取到 0..=100（ACC-20）。
-fn metric_percent(metric: &UsageMetric) -> Option<f32> {
+pub(super) fn metric_percent(metric: &UsageMetric) -> Option<f32> {
     metric
         .used_percent
         .or_else(|| match (metric.used, metric.limit) {
@@ -2081,6 +2081,60 @@ fn account_detail(
             Style::default().fg(color),
         );
     }
+    // 用量历史 sparkline：数据来自客户端记录的采样（`State::usage_history`），
+    // 每次轮询响应 / 订阅事件按 `observed_at_ms` 前进追加一条。
+    let history_row = rows.len() as u16 + 1;
+    if inner.height <= history_row {
+        return;
+    }
+    let samples = state
+        .usage_history
+        .get(&account.account_id)
+        .map(VecDeque::as_slices)
+        .map(|(front, back)| front.iter().chain(back.iter()).copied().collect::<Vec<_>>())
+        .unwrap_or_default();
+    let label = if samples.len() < 2 {
+        format!(
+            "{} · {}",
+            texts.detail_history, texts.detail_history_waiting
+        )
+    } else {
+        crate::i18n::fill(
+            texts.detail_history_fmt,
+            &[("count", &samples.len().to_string())],
+        )
+    };
+    text(
+        buffer,
+        inner,
+        history_row,
+        &label,
+        Style::default().fg(palette.overlay0),
+    );
+    if samples.len() >= 2 && inner.height > history_row + 1 {
+        // 不足采样数的列由 `Sparkline` 自己留白；`max(100)` 与柱高口径一致。
+        let data = samples
+            .iter()
+            .map(|sample| u64::from(sample.percent.clamp(0.0, 100.0).round() as u8))
+            .collect::<Vec<_>>();
+        Sparkline::default()
+            .data(&data)
+            .max(100)
+            .style(Style::default().fg(quota_color(
+                samples.last().map_or(0.0, |sample| sample.percent),
+                None,
+                palette,
+            )))
+            .render(
+                Rect::new(
+                    inner.x,
+                    inner.y.saturating_add(history_row + 1),
+                    inner.width,
+                    inner.height.saturating_sub(history_row + 1),
+                ),
+                buffer,
+            );
+    }
 }
 
 fn metric_scope(scope: &str) -> &str {
@@ -3678,6 +3732,53 @@ mod tests {
             );
             assert!(!expect_round || cx.glyphs.top_left == "╭");
         }
+    }
+
+    /// 右栏（≥96 列）在账号详情下方画出用量历史 sparkline：数据来自客户端记录
+    /// 的采样，少于两个点时只显示「正在采样…」。
+    #[test]
+    fn account_detail_draws_the_usage_history_sparkline() {
+        let _guard = lang_guard(Lang::ZhCn);
+        let mut state = populated();
+        state.accounts = vec![account("claude:default", ObservationStatus::Ready)];
+        state.selected_provider = Some("claude".into());
+        let right_column = |buffer: &Buffer| -> String {
+            (0..buffer.area.height)
+                .flat_map(|y| {
+                    (90..buffer.area.width).map(move |x| buffer[(x, y)].symbol().to_owned())
+                })
+                .collect()
+        };
+
+        // 一个采样点：只提示还在采样，不画 sparkline。
+        state.usage_history.insert(
+            "claude:default".into(),
+            std::collections::VecDeque::from([UsageSample {
+                at_ms: 1_000,
+                percent: 12.0,
+            }]),
+        );
+        let (buffer, _) = paint_page(&state, Page::Accounts, 120, 30);
+        let text = right_column(&buffer);
+        let stripped = text.split_whitespace().collect::<String>();
+        assert!(stripped.contains("正在采样"), "右栏: {text}");
+
+        // 多个采样点：标签带计数，并出现 sparkline 的方块字。
+        let samples = (0..8)
+            .map(|index| UsageSample {
+                at_ms: 1_000 + index * 1_000,
+                percent: 10.0 + index as f32 * 5.0,
+            })
+            .collect::<std::collections::VecDeque<_>>();
+        state.usage_history.insert("claude:default".into(), samples);
+        let (buffer, _) = paint_page(&state, Page::Accounts, 120, 30);
+        let text = right_column(&buffer);
+        let stripped = text.split_whitespace().collect::<String>();
+        assert!(stripped.contains("用量历史"), "右栏: {text}");
+        assert!(
+            text.chars().any(|ch| "▁▂▃▄▅▆▇█".contains(ch)),
+            "sparkline 方块字应出现在右栏: {text}"
+        );
     }
 
     /// ds-08：terminal 主题的 `panel_bg` 是 `Reset`，页签「反色」于是退化成
