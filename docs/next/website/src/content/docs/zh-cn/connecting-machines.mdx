@@ -124,6 +124,8 @@ herdr machine forward remove <profile-id> <rule-number>
 
 每台保存的机器还通过同一受管 SSH 通道暴露文件系统，底层是批处理模式的 OpenSSH `sftp` 客户端。它面向小文件——配置、脚本、笔记——不是批量传输：
 
+这些一次性通道按档案共用一条 ssh 控制连接（master），连续的文件操作因此省掉 TCP 与 SSH 握手；空闲超过 `ControlPersist`（默认 120 秒，可按档案覆盖）后 master 自行退出。可复用的配置目录位于 `/tmp/herdr-ssh-<uid>-*`，复用时校验属主与权限；改动档案的连接字段后立刻换用新的 master。
+
 ```bash
 herdr machine fs build ls /srv/app
 herdr machine fs build stat /srv/app/config.toml

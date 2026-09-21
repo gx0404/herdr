@@ -124,6 +124,8 @@ herdr machine forward remove <profile-id> <rule-number>
 
 保存した各マシンは、同じ管理 SSH チャネル経由でファイルシステムも公開します。バッチモードの OpenSSH `sftp` クライアントを使う仕組みで、設定・スクリプト・メモのような小さなファイル向けであり、大量転送向けではありません:
 
+これらの使い捨てチャネルはプロファイルごとに 1 本の ssh 制御接続（master）を共有するため、連続するファイル操作は TCP と SSH のハンドシェイクを省略できます。`ControlPersist`（既定 120 秒、プロファイル単位で上書き可）の間アイドルになると master は終了します。再利用される設定ディレクトリは `/tmp/herdr-ssh-<uid>-*` にあり、所有者と権限を検証してから使います。プロファイルの接続項目を編集すると即座に新しい master に切り替わります。
+
 ```bash
 herdr machine fs build ls /srv/app
 herdr machine fs build stat /srv/app/config.toml

@@ -159,6 +159,8 @@ Each rule runs as its own non-interactive `ssh -N` child process over the same g
 
 Every saved machine also exposes its filesystem through the same managed SSH channel, using the OpenSSH `sftp` client in batch mode. This is meant for small files — configs, scripts, notes — not bulk transfer:
 
+These one-off channels share a single ssh control connection (a master) per saved profile, so consecutive file operations skip the TCP and SSH handshake; it idles out after `ControlPersist` (120 seconds by default, overridable per profile). The reusable config directory lives under `/tmp/herdr-ssh-<uid>-*` with owner and permission checks, and editing a profile's connection fields switches to a fresh master immediately.
+
 ```bash
 herdr machine fs build ls /srv/app
 herdr machine fs build stat /srv/app/config.toml
