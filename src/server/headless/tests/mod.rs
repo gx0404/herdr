@@ -1682,7 +1682,38 @@ async fn retained_patch_omits_metadata_for_panes_without_rows_or_changes() {
     shutdown_test_runtimes(&mut server);
 }
 
+/// 复审 M1：chrome tick 与**可见 pane 脏帧**同 tick 就绪时，投影刷新之后必须继续
+/// 下发 surface 帧——本 tick 的 `render_request` 已经被 take 走，丢掉的脏帧不会
+/// 被任何东西补发（输出末帧撞上 chrome tick、此后 pane 静默时画面永久滞留）。
+#[tokio::test]
+async fn projection_only_tick_still_streams_a_coincident_dirty_surface() {
+    let mut server = test_headless_server();
+    let pane_id = install_shared_view_test_runtime(&mut server);
+    let (_control, render) = connect_matching_test_shell(&mut server, 7);
+    server.render_and_stream();
+    let _ = recv_pane_surface(&render, "baseline");
+
+    // 同一 tick：chrome 变化（投影纪元递增）+ 可见 pane 有输出。
+    server.app.state.bump_projection_epoch();
+    server.app.state.workspaces[0].test_runtimes[&pane_id].test_process_pty_bytes(b"\rCOINCIDENT");
+    assert!(server.pty_sources_visible_to_any_render_target(&HashSet::from([pane_id])));
+
+    server.dispatch_render_tick(true, false, &HashSet::from([pane_id]), false);
+
+    let patch = recv_pane_surface_patch(&render, "coincident dirty surface");
+    assert!(
+        patch
+            .rows
+            .iter()
+            .any(|row| row.cells.iter().any(|cell| cell.symbol.contains('C'))),
+        "coincident PTY output must still reach the client surface"
+    );
+
+    shutdown_test_runtimes(&mut server);
+}
+
 /// RS-12：纯 chrome 变化（tab-bar 文本）只刷新客户端 shell 投影，不重发
+/// pane surface。/// RS-12：纯 chrome 变化（tab-bar 文本）只刷新客户端 shell 投影，不重发
 /// pane surface。
 #[tokio::test]
 async fn chrome_only_change_streams_the_projection_without_a_pane_surface() {

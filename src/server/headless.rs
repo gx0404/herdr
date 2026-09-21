@@ -618,21 +618,12 @@ impl HeadlessServer {
                     && !needs_full_render
                     && !needs_graphics_render
                     && !self.pty_sources_visible_to_any_render_target(&render_request.pty_sources);
-                if projection_only_render && !needs_full_render && !needs_graphics_render {
-                    // RS-12：投影刷新（快照/agent view）单独一条路径，不重发 surface。
-                    crate::render_prof::event("projection_only.invoke");
-                    self.stream_client_shell_projections();
-                } else if hidden_only {
-                    crate::render_prof::event("render.skipped.hidden_sources");
-                } else if !needs_full_render
-                    && !needs_graphics_render
-                    && self.render_retained_pane_surface_and_stream(&render_request.pty_sources)
-                {
-                    crate::render_prof::event("retained_surface.invoke");
-                } else {
-                    crate::render_prof::event("full_render.invoke");
-                    self.render_and_stream();
-                }
+                self.dispatch_render_tick(
+                    projection_only_render,
+                    needs_full_render || needs_graphics_render,
+                    &render_request.pty_sources,
+                    hidden_only,
+                );
                 self.app.record_render_attempt(now, !hidden_only);
                 needs_render = false;
                 needs_full_render = false;
@@ -1133,6 +1124,41 @@ impl HeadlessServer {
         } else {
             self.resize_tabs_for_only_shell_client(true);
         }
+    }
+
+    /// 复审 M1：本 tick 的渲染分派。
+    ///
+    /// 纯 chrome tick（`projection_only`）先刷新投影；若同一 tick 还有脏帧
+    /// （`pty_sources` 非空且对至少一个渲染目标可见），必须**继续**走 surface 路径——
+    /// 本 tick 的 `render_request` 已经被取走，丢掉的脏帧不会再被补发
+    /// （输出末帧撞上 chrome tick、此后 pane 静默时，画面会永久停在旧帧）。
+    pub(super) fn dispatch_render_tick(
+        &mut self,
+        projection_only: bool,
+        full_render_pending: bool,
+        pty_sources: &HashSet<crate::layout::PaneId>,
+        hidden_only: bool,
+    ) {
+        let surface_work = !pty_sources.is_empty() && !hidden_only;
+        if projection_only {
+            crate::render_prof::event("projection_only.invoke");
+            self.stream_client_shell_projections();
+            if !surface_work {
+                if hidden_only {
+                    crate::render_prof::event("render.skipped.hidden_sources");
+                }
+                return;
+            }
+        } else if hidden_only {
+            crate::render_prof::event("render.skipped.hidden_sources");
+            return;
+        }
+        if !full_render_pending && self.render_retained_pane_surface_and_stream(pty_sources) {
+            crate::render_prof::event("retained_surface.invoke");
+            return;
+        }
+        crate::render_prof::event("full_render.invoke");
+        self.render_and_stream();
     }
 
     /// Accepts pending client connections from the non-blocking listener.
