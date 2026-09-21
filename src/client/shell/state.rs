@@ -208,7 +208,6 @@ pub(super) struct ShellHitMap {
     pub(super) notification_toast: Rect,
     pub(super) menu_popup: Rect,
     pub(super) menu_search: Rect,
-    pub(super) menu_scroll: usize,
     pub(super) global_menu_rows: Vec<(Rect, usize)>,
     pub(super) context_menu_rows: Vec<(Rect, usize)>,
     pub(super) notification_history_rows: Vec<(Rect, usize)>,
@@ -223,16 +222,12 @@ pub(super) struct ShellHitMap {
     pub(super) help_popup: Rect,
     pub(super) help_scrollbar: Rect,
     pub(super) help_scroll_metrics: Option<crate::pane::ScrollMetrics>,
-    pub(super) help_max_scroll: usize,
     pub(super) settings_popup: Rect,
-    pub(super) settings_scroll: usize,
     pub(super) settings_tabs: Vec<(Rect, ClientSettingsSection)>,
     pub(super) settings_choices: Vec<(Rect, usize)>,
     pub(super) machines_popup: Rect,
     pub(super) machines_detail_area: Rect,
-    pub(super) machines_scroll: usize,
     /// 上一帧是否真的画了某个机器面板列表；见 `OverlayRender`。
-    pub(super) machines_scroll_valid: bool,
     pub(super) machines_search: Rect,
     /// 上一帧机器面板的页脚行（键表 + 公共 toast 的落点）；空 rect 表示当前
     /// 视图不承载页脚。
@@ -242,7 +237,6 @@ pub(super) struct ShellHitMap {
     pub(super) machines_fields: Vec<(Rect, super::machines_overlay::MachineField)>,
     pub(super) machines_wizard_rows: Vec<(Rect, usize)>,
     pub(super) machines_wizard_fields: Vec<(Rect, usize)>,
-    pub(super) machines_max_scroll: usize,
     pub(super) machine_auth_max_scroll: usize,
     pub(super) machine_auth_actions: Vec<(Rect, super::machine_auth_overlay::MachineAuthButton)>,
     pub(super) broadcast_popup: Rect,
@@ -252,7 +246,6 @@ pub(super) struct ShellHitMap {
     pub(super) machine_files_search: Rect,
     pub(super) machine_files_rows: Vec<(Rect, usize)>,
     /// 查看器滚动上界的渲染期回写通道（HERDR-MACH-009），非查看器帧为 None。
-    pub(super) machine_files_viewer_max_scroll: Option<usize>,
     pub(super) machine_files_actions: Vec<(Rect, super::machine_files_overlay::MachineFilesButton)>,
     pub(super) snippet_popup: Rect,
     pub(super) snippet_search: Rect,
@@ -268,10 +261,8 @@ pub(super) struct ShellHitMap {
     pub(super) lifecycle_banner_give_up: Rect,
     pub(super) product_announcement_scrollbar: Rect,
     pub(super) product_announcement_scroll_metrics: Option<crate::pane::ScrollMetrics>,
-    pub(super) product_announcement_max_scroll: usize,
     pub(super) release_notes_scrollbar: Rect,
     pub(super) release_notes_scroll_metrics: Option<crate::pane::ScrollMetrics>,
-    pub(super) release_notes_max_scroll: usize,
 }
 
 #[derive(Clone)]
@@ -706,6 +697,8 @@ pub(super) struct ClientHelpOverlay {
     pub(super) query: TextEditor,
     pub(super) search_focused: bool,
     pub(super) scroll: usize,
+    /// 正文最大滚动量：由视图计算阶段写入（STATE-04），输入路径读它夹紧。
+    pub(super) max_scroll: usize,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

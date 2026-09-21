@@ -6,6 +6,7 @@ fn pasted_help_and_copy_queries_normalize_single_line_text() {
     state.overlay = Some(ClientShellOverlay::Help(ClientHelpOverlay {
         query: TextEditor::default(),
         search_focused: true,
+        max_scroll: 0,
         scroll: 0,
     }));
 

@@ -33,6 +33,44 @@ fn draw_choice(
     );
 }
 
+/// 设置浮层的正文几何与（列表型分区的）行数：视图计算阶段与渲染阶段共用
+/// （STATE-04）。非列表分区返回 `None`，滚动位置保持不动。
+pub(in crate::client::shell) fn settings_list_window(
+    area: Rect,
+    page_bounds: Option<Rect>,
+    settings: &ClientSettingsOverlay,
+) -> Option<(Rect, usize)> {
+    let integration_height = 14u16
+        .saturating_add(settings.integrations.len().max(1) as u16)
+        .saturating_add(settings.integration_messages.len().min(6) as u16);
+    let height = if settings.section == ClientSettingsSection::Integrations {
+        integration_height.max(22)
+    } else {
+        22
+    };
+    let outer = page_bounds
+        .map(|rect| rect.intersection(area))
+        .or_else(|| crate::ui::modal_rect(area, crate::ui::ModalSize::Large.with_height(height)))?;
+    let inner = super::render::panel_inner(outer)?;
+    if inner.width < 20 || inner.height < 8 {
+        return None;
+    }
+    let labels = ClientSettingsSection::ALL
+        .iter()
+        .map(|section| section.label())
+        .collect::<Vec<_>>();
+    let nav_rows = super::super::page::navigation_rows(inner.width, &labels);
+    let layout = super::super::page::PageLayout::new(inner, nav_rows, false, true);
+    let count = match settings.section {
+        ClientSettingsSection::Theme => crate::config::THEME_NAMES.len(),
+        ClientSettingsSection::Integrations => {
+            settings.integrations.len() + settings.integration_messages.len()
+        }
+        _ => return None,
+    };
+    Some((layout.content, count))
+}
+
 pub(super) fn render_settings_overlay(
     buffer: &mut Buffer,
     settings: &ClientSettingsOverlay,
@@ -136,7 +174,6 @@ pub(super) fn render_settings_overlay(
 
     let content = stack.content;
     let mut choice_hits = Vec::new();
-    let mut scroll = 0;
     match settings.section {
         ClientSettingsSection::Language => {
             render_choice_section(
@@ -153,7 +190,8 @@ pub(super) fn render_settings_overlay(
         }
         ClientSettingsSection::Theme => {
             let visible = usize::from(content.height);
-            scroll = super::super::page::list_start(
+            // 窗口起点由视图计算阶段写好的 `scroll` 决定（STATE-04）。
+            let scroll = super::super::page::list_start(
                 settings.scroll,
                 settings.selected,
                 crate::config::THEME_NAMES.len(),
@@ -227,7 +265,7 @@ pub(super) fn render_settings_overlay(
             );
         }
         ClientSettingsSection::Integrations => {
-            scroll = render_integrations(buffer, content, settings, cx);
+            render_integrations(buffer, content, settings, cx);
         }
     }
 
@@ -307,7 +345,6 @@ pub(super) fn render_settings_overlay(
         primary,
         cancel: close,
         settings_popup: popup,
-        settings_scroll: scroll,
         settings_tabs: tab_hits,
         settings_choices: choice_hits,
         ..OverlayRender::default()

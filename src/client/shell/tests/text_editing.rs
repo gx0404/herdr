@@ -35,6 +35,7 @@ fn shell(field: usize) -> ClientShellState {
             state.overlay = Some(ClientShellOverlay::Help(ClientHelpOverlay {
                 query: TextEditor::default(),
                 search_focused: true,
+                max_scroll: 0,
                 scroll: 0,
             }))
         }

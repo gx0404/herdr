@@ -16,6 +16,126 @@ impl ClientShellState {
         let page_bounds = self.floating_page_rect(cols, rows);
         self.compute_scenes_scroll(area, page_bounds);
         self.compute_snippets_scroll(area, page_bounds);
+        self.compute_palette_scroll(area, page_bounds);
+        self.compute_settings_scroll(area, page_bounds);
+        self.compute_scrollback_scrolls(area, page_bounds);
+        self.compute_machine_files_scroll(area, page_bounds);
+        self.compute_machines_view(area, page_bounds);
+    }
+
+    fn compute_palette_scroll(&mut self, area: Rect, page_bounds: Option<Rect>) {
+        let Self { overlay, .. } = self;
+        let Some(ClientShellOverlay::CommandPalette(palette)) = overlay.as_mut() else {
+            return;
+        };
+        if let Some(window) = command_palette::palette_window(area, page_bounds, palette) {
+            palette.scroll = window.start;
+        }
+        palette.reveal = false;
+    }
+
+    fn compute_settings_scroll(&mut self, area: Rect, page_bounds: Option<Rect>) {
+        let Self { overlay, .. } = self;
+        let Some(ClientShellOverlay::Settings(settings)) = overlay.as_mut() else {
+            return;
+        };
+        if let Some((body, count)) =
+            super::render::settings_list_window(area, page_bounds, settings)
+        {
+            settings.scroll = page::list_start(
+                settings.scroll,
+                settings.selected,
+                count,
+                usize::from(body.height),
+                settings.reveal,
+            );
+        }
+        settings.reveal = false;
+    }
+
+    /// 发行说明 / 产品公告：正文长度已知的浮层，只把 `scroll` 夹到当前窗口。
+    fn compute_scrollback_scrolls(&mut self, area: Rect, page_bounds: Option<Rect>) {
+        let Self {
+            overlay,
+            config,
+            snapshot,
+            ..
+        } = self;
+        let install_command = snapshot
+            .as_deref()
+            .map(|snapshot| snapshot.update_install_command.as_str())
+            .unwrap_or_default();
+        match overlay.as_mut() {
+            Some(ClientShellOverlay::ReleaseNotes(notes)) => {
+                let body = super::render::scrollback_overlay_body(
+                    area,
+                    page_bounds,
+                    crate::ui::ModalSize::Content {
+                        width: crate::ui::RELEASE_NOTES_MODAL_SIZE.0,
+                        height: crate::ui::RELEASE_NOTES_MODAL_SIZE.1,
+                    },
+                );
+                let Some(body) = body else {
+                    return;
+                };
+                let lines =
+                    crate::ui::release_notes_display_lines(notes, install_command, &config.palette);
+                let metrics = crate::ui::display_lines_scroll_metrics(&lines, notes.scroll, body);
+                notes.scroll = notes
+                    .scroll
+                    .min(u16::try_from(metrics.max_offset_from_bottom).unwrap_or(u16::MAX));
+            }
+            Some(ClientShellOverlay::ProductAnnouncement(announcement)) => {
+                let body = super::render::scrollback_overlay_body(
+                    area,
+                    page_bounds,
+                    crate::ui::ModalSize::XLarge,
+                );
+                let Some(body) = body else {
+                    return;
+                };
+                let lines =
+                    crate::ui::product_announcement_display_lines(announcement, &config.palette);
+                let metrics =
+                    crate::ui::display_lines_scroll_metrics(&lines, announcement.scroll, body);
+                announcement.scroll = announcement
+                    .scroll
+                    .min(u16::try_from(metrics.max_offset_from_bottom).unwrap_or(u16::MAX));
+            }
+            Some(ClientShellOverlay::Help(help)) => {
+                let Some((_, body)) = super::render::help_geometry(area, page_bounds) else {
+                    return;
+                };
+                let max_scroll =
+                    super::render::help_max_scroll(help, &config.keybinds, body, &config.palette);
+                help.max_scroll = max_scroll;
+                help.scroll = help.scroll.min(max_scroll);
+            }
+            _ => {}
+        }
+    }
+
+    fn compute_machine_files_scroll(&mut self, area: Rect, page_bounds: Option<Rect>) {
+        let Self { overlay, .. } = self;
+        let Some(ClientShellOverlay::MachineFiles(page)) = overlay.as_mut() else {
+            return;
+        };
+        let Some((_, body)) = machine_files_overlay::machine_files_geometry(area, page_bounds)
+        else {
+            return;
+        };
+        if let machine_files_overlay::ClientMachineFilesView::Viewer {
+            line_offsets,
+            max_scroll,
+            scroll,
+            ..
+        } = &mut page.view
+        {
+            let visible = usize::from(body.height).max(1);
+            let max = line_offsets.len().saturating_sub(visible);
+            *max_scroll = max;
+            *scroll = (*scroll).min(max);
+        }
     }
 
     fn compute_scenes_scroll(&mut self, area: Rect, page_bounds: Option<Rect>) {

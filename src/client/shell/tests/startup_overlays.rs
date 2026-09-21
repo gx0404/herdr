@@ -249,7 +249,11 @@ fn product_announcement_mouse_is_modal_and_closes_only_from_its_button() {
         state.overlay,
         Some(ClientShellOverlay::ProductAnnouncement(
             crate::app::state::ProductAnnouncementState { scroll, .. }
-        )) if usize::from(scroll) == state.hits.product_announcement_max_scroll
+        )) if usize::from(scroll)
+            == state
+                .hits
+                .product_announcement_scroll_metrics
+                .map_or(0, |metrics| metrics.max_offset_from_bottom)
     ));
 
     let close = state.hits.overlay_primary;
@@ -830,7 +834,11 @@ fn update_ready_menu_opens_client_owned_release_notes_and_dismisses_by_version()
         state.overlay,
         Some(ClientShellOverlay::ReleaseNotes(
             crate::app::state::ReleaseNotesState { scroll, .. }
-        )) if usize::from(scroll) == state.hits.release_notes_max_scroll
+        )) if usize::from(scroll)
+            == state
+                .hits
+                .release_notes_scroll_metrics
+                .map_or(0, |metrics| metrics.max_offset_from_bottom)
     ));
     if let Some(ClientShellOverlay::ReleaseNotes(notes)) = state.overlay.as_mut() {
         notes.scroll = 0;
@@ -1525,8 +1533,12 @@ fn projected_release_notes_geometry_matches_the_rendered_hits() {
         "滚动条轨道：回退几何与渲染真源必须一致"
     );
     assert_eq!(
-        projected.2.max_offset_from_bottom, state.hits.release_notes_max_scroll,
-        "滚动上限：回退几何与渲染真源必须一致"
+        projected.2.max_offset_from_bottom,
+        state
+            .hits
+            .release_notes_scroll_metrics
+            .map_or(0, |metrics| metrics.max_offset_from_bottom),
+        "滚动上限：回退几何与渲染真值必须一致"
     );
 
     // 拖动浮窗后两边仍要一致（回退几何同样尊重 `floating_page_rect`）。

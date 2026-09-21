@@ -993,6 +993,50 @@ impl ClientShellState {
     }
 }
 
+/// 命令面板的列表窗口：行投影（`recent` 分组占行）与几何一次算好，视图计算
+/// 阶段与渲染阶段共用（STATE-04）。
+pub(crate) fn palette_window(
+    area: Rect,
+    page_bounds: Option<Rect>,
+    palette: &ClientCommandPaletteOverlay,
+) -> Option<crate::client::shell::page::ListWindow> {
+    let rows = palette_rows(palette);
+    let menu_height = match palette.view {
+        BrowserView::Menu(_) if palette.query.as_str().is_empty() => {
+            (rows.len().saturating_add(6).min(22)) as u16
+        }
+        _ => 22,
+    };
+    let outer = page_bounds
+        .map(|rect| rect.intersection(area))
+        .or_else(|| {
+            crate::ui::modal_rect(area, crate::ui::ModalSize::Large.with_height(menu_height))
+        })?;
+    let inner = super::render::panel_inner(outer)?;
+    let searching = palette.view == BrowserView::Search || !palette.query.as_str().is_empty();
+    let layout = super::page::PageLayout::new(inner, 0, searching, false);
+    let mut visual = Vec::new();
+    for (index, row) in rows.iter().enumerate() {
+        if (index == 0 && row.recent) || (index > 0 && rows[index - 1].recent && !row.recent) {
+            visual.push(None);
+        }
+        visual.push(Some(index));
+    }
+    let selected = palette.selected.min(rows.len().saturating_sub(1));
+    let selected_line = visual
+        .iter()
+        .position(|entry| *entry == Some(selected))
+        .unwrap_or(0);
+    Some(super::page::list_window(
+        layout.content,
+        1,
+        visual.len(),
+        palette.scroll,
+        selected_line,
+        palette.reveal,
+    ))
+}
+
 pub(crate) fn render_command_palette(
     b: &mut Buffer,
     palette: &ClientCommandPaletteOverlay,
@@ -1214,7 +1258,6 @@ pub(crate) fn render_command_palette(
         area: outer,
         menu_popup: outer,
         menu_search: layout.search,
-        menu_scroll: scroll,
         menu_rows: row_hits,
         cursor,
         ..OverlayRender::default()

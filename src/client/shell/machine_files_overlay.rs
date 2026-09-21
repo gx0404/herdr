@@ -993,6 +993,22 @@ fn entry_kind_label(kind: RemoteEntryKind) -> &'static str {
 }
 
 #[allow(clippy::too_many_arguments)]
+/// 远程文件浮层的弹窗与正文矩形：视图计算阶段与渲染阶段共用（STATE-04）。
+pub(super) fn machine_files_geometry(
+    area: Rect,
+    page_bounds: Option<Rect>,
+) -> Option<(Rect, Rect)> {
+    let outer = page_bounds
+        .map(|rect| rect.intersection(area))
+        .or_else(|| crate::ui::modal_rect(area, crate::ui::ModalSize::Large.with_height(22)))?;
+    let inner = super::render::panel_inner(outer)?;
+    if inner.width < 24 || inner.height < 8 {
+        return None;
+    }
+    let stack = crate::ui::modal_stack_areas(inner, 2, 1, 1, 1);
+    Some((outer, stack.content))
+}
+
 pub(super) fn render_machine_files_overlay(
     b: &mut Buffer,
     overlay: &ClientMachineFilesOverlay,
@@ -1033,7 +1049,6 @@ pub(super) fn render_machine_files_overlay(
     let mut action_hits = Vec::new();
     let mut row_hits = Vec::new();
     let mut cursor = None;
-    let mut viewer_max_scroll = None;
     let body = stack.content;
 
     match &overlay.view {
@@ -1053,7 +1068,6 @@ pub(super) fn render_machine_files_overlay(
                 base.fg(p.overlay1),
             );
             let visible = usize::from(body.height).max(1);
-            viewer_max_scroll = Some(line_offsets.len().saturating_sub(visible));
             let scroll = (*scroll).min(line_offsets.len().saturating_sub(visible));
             for (offset, (start, len)) in line_offsets.iter().skip(scroll).take(visible).enumerate()
             {
@@ -1435,7 +1449,6 @@ pub(super) fn render_machine_files_overlay(
         machine_files_search: Rect::new(stack.header.x, stack.header.y + 1, stack.header.width, 1),
         machine_files_rows: row_hits,
         machine_files_actions: action_hits,
-        machine_files_viewer_max_scroll: viewer_max_scroll,
         cursor,
         ..OverlayRender::default()
     })

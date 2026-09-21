@@ -9,9 +9,11 @@ mod tabs;
 
 pub(super) use super::agent_sidebar::{ordered_agent_pane_ids, render_agent_panel};
 pub(super) use super::aggregate_navigation::navigator_rows as client_navigator_rows;
+pub(in crate::client::shell) use overlays::settings_overlay::settings_list_window;
 pub(in crate::client::shell) use overlays::{
-    modal_button, modal_button_row, modal_panel, panel, panel_inner, render_search_bar,
-    scrollback_overlay_layout, titled_panel, OverlayRender, SearchBar,
+    help_geometry, help_max_scroll, modal_button, modal_button_row, modal_panel, panel,
+    panel_inner, render_search_bar, scrollback_overlay_body, scrollback_overlay_layout,
+    titled_panel, OverlayRender, SearchBar,
 };
 pub(super) use overlays::{render_client_overlay, render_context_menu, render_minimum_overlay};
 pub(super) use sidebar::{render_collapsed_sidebar, render_sidebar, workspace_entries};

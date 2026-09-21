@@ -7,6 +7,48 @@ use ratatui::widgets::{Paragraph, Widget, Wrap};
 
 // 参数与现有机器页渲染入口一致，集中在一次投影中避免从全局重新查状态。
 #[allow(clippy::too_many_arguments)]
+/// 宽屏 dashboard 的面板内框 + `PageLayout`：视图计算阶段与渲染阶段共用
+/// （STATE-04）。
+pub(super) fn dashboard_layout(
+    area: Rect,
+    page_bounds: Option<Rect>,
+    overlay: &ClientMachinesOverlay,
+    profiles: &[SavedSshEndpoint],
+    endpoints: &[ClientShellEndpoint],
+    errors: &HashMap<ClientEndpointId, crate::remote::ConnectionErrorKind>,
+) -> Option<PageLayout> {
+    let outer = page_bounds
+        .map(|rect| rect.intersection(area))
+        .or_else(|| {
+            crate::ui::modal_rect(
+                area,
+                crate::ui::ModalSize::Content {
+                    width: 116,
+                    height: 34,
+                },
+            )
+        })?;
+    let inner = super::super::render::panel_inner(outer)?;
+    if inner.height < 8 || inner.width < 32 {
+        return None;
+    }
+    let rows = machine_list_rows(profiles, endpoints, overlay.query.as_str());
+    let selected = overlay.selected.min(rows.len().saturating_sub(1));
+    let has_review = rows.get(selected).is_some_and(|row| {
+        errors
+            .get(&ClientEndpointId::Ssh(row.id.clone()))
+            .is_some_and(super::super::machine_auth_overlay::failure_kind_has_review)
+    });
+    let hints = super::machine_list_hints(!rows.is_empty(), has_review);
+    Some(PageLayout::with_footer_rows(
+        inner,
+        0,
+        true,
+        1,
+        super::machine_footer_rows(&hints, inner.width),
+    ))
+}
+
 pub(super) fn render_dashboard(
     b: &mut Buffer,
     overlay: &ClientMachinesOverlay,
@@ -36,7 +78,8 @@ pub(super) fn render_dashboard(
         });
     }
     // 页脚键表要先算出来：它的行数决定 `PageLayout` 给 footer 留几行
-    // （HERDR-MACH-007 的键表在单行里必然被尾部截断）。
+    // （HERDR-MACH-007 的键表在单行里必然被尾部截断）。几何与视图计算阶段
+    // 共用同一份实现（STATE-04）。
     let rows = machine_list_rows(profiles, endpoints, overlay.query.as_str());
     let selected = overlay.selected.min(rows.len().saturating_sub(1));
     let has_review = rows.get(selected).is_some_and(|row| {
@@ -45,13 +88,7 @@ pub(super) fn render_dashboard(
             .is_some_and(super::super::machine_auth_overlay::failure_kind_has_review)
     });
     let hints = super::machine_list_hints(!rows.is_empty(), has_review);
-    let layout = PageLayout::with_footer_rows(
-        inner,
-        0,
-        true,
-        1,
-        super::machine_footer_rows(&hints, inner.width),
-    );
+    let layout = dashboard_layout(b.area, cx.page_bounds, overlay, profiles, endpoints, errors)?;
     put_text(
         b,
         layout.header.x,
@@ -164,7 +201,6 @@ pub(super) fn render_dashboard(
         row_hits.push((rect, row.id.clone()));
     }
     let mut action_hits = Vec::new();
-    let mut detail_max_scroll = 0;
     if let Some(profile) = rows
         .get(selected)
         .and_then(|row| profiles.iter().find(|profile| profile.id == row.id))
@@ -238,7 +274,7 @@ pub(super) fn render_dashboard(
             overlay.detail_scroll.min(u16::MAX as usize) as u16,
             details.content,
         );
-        detail_max_scroll = metrics.max_offset_from_bottom;
+        let detail_max_scroll = metrics.max_offset_from_bottom;
         Paragraph::new(lines.into_iter().map(|(_, line)| line).collect::<Vec<_>>())
             .wrap(Wrap { trim: false })
             .scroll((overlay.detail_scroll.min(detail_max_scroll) as u16, 0))
@@ -327,8 +363,6 @@ pub(super) fn render_dashboard(
         machines_rows: row_hits,
         machines_actions: action_hits,
         machines_detail_area: right,
-        machines_scroll: scroll,
-        machines_max_scroll: detail_max_scroll,
         machines_toast: layout.footer,
         cursor,
         ..OverlayRender::default()

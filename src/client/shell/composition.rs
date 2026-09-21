@@ -913,7 +913,6 @@ impl ClientShellState {
                 self.hits.usage_dashboard_actions = rendered.usage_dashboard_actions;
                 self.hits.menu_popup = rendered.menu_popup;
                 self.hits.menu_search = rendered.menu_search;
-                self.hits.menu_scroll = rendered.menu_scroll;
                 self.hits.global_menu_rows = rendered.menu_rows;
                 self.hits.navigator_popup = rendered.navigator_popup;
                 self.hits.navigator_search = rendered.navigator_search;
@@ -923,15 +922,11 @@ impl ClientShellState {
                 self.hits.help_popup = rendered.help_popup;
                 self.hits.help_scrollbar = rendered.help_scrollbar;
                 self.hits.help_scroll_metrics = rendered.help_scroll_metrics;
-                self.hits.help_max_scroll = rendered.help_max_scroll;
                 self.hits.settings_popup = rendered.settings_popup;
-                self.hits.settings_scroll = rendered.settings_scroll;
                 self.hits.settings_tabs = rendered.settings_tabs;
                 self.hits.settings_choices = rendered.settings_choices;
                 self.hits.machines_popup = rendered.machines_popup;
                 self.hits.machines_detail_area = rendered.machines_detail_area;
-                self.hits.machines_scroll = rendered.machines_scroll;
-                self.hits.machines_scroll_valid = rendered.machines_scroll_valid;
                 self.hits.machines_search = rendered.machines_search;
                 self.hits.machines_footer = rendered.machines_toast;
                 self.hits.machines_rows = rendered.machines_rows;
@@ -939,7 +934,6 @@ impl ClientShellState {
                 self.hits.machines_fields = rendered.machines_fields;
                 self.hits.machines_wizard_rows = rendered.machines_wizard_rows;
                 self.hits.machines_wizard_fields = rendered.machines_wizard_fields;
-                self.hits.machines_max_scroll = rendered.machines_max_scroll;
                 self.hits.machine_auth_max_scroll = rendered.machine_auth_max_scroll;
                 self.hits.machine_auth_actions = rendered.machine_auth_actions;
                 self.hits.broadcast_popup = rendered.broadcast_popup;
@@ -949,8 +943,6 @@ impl ClientShellState {
                 self.hits.machine_files_search = rendered.machine_files_search;
                 self.hits.machine_files_rows = rendered.machine_files_rows;
                 self.hits.machine_files_actions = rendered.machine_files_actions;
-                self.hits.machine_files_viewer_max_scroll =
-                    rendered.machine_files_viewer_max_scroll;
                 self.hits.snippet_popup = rendered.snippet_popup;
                 self.hits.snippet_search = rendered.snippet_search;
                 self.hits.snippet_rows = rendered.snippet_rows;
@@ -964,11 +956,8 @@ impl ClientShellState {
                 self.hits.product_announcement_scrollbar = rendered.product_announcement_scrollbar;
                 self.hits.product_announcement_scroll_metrics =
                     rendered.product_announcement_scroll_metrics;
-                self.hits.product_announcement_max_scroll =
-                    rendered.product_announcement_max_scroll;
                 self.hits.release_notes_scrollbar = rendered.release_notes_scrollbar;
                 self.hits.release_notes_scroll_metrics = rendered.release_notes_scroll_metrics;
-                self.hits.release_notes_max_scroll = rendered.release_notes_max_scroll;
                 self.hits.overlay_kind = Some(overlay.kind());
                 // 浮层自带光标（文本输入）时归浮层；否则只有浮层矩形真正盖住
                 // 终端光标才把它抹掉，未覆盖的终端插入点保留（用量仪表盘等）。
@@ -991,71 +980,8 @@ impl ClientShellState {
             // CFP-15：浮层矩形内的格归浮层所有，即使符号巧合未变也不再保留 OSC 8 链接。
             canvas.clear_links_in(entrance_area);
         }
-        if let Some(ClientShellOverlay::CommandPalette(palette)) = self.overlay.as_mut() {
-            palette.scroll = self.hits.menu_scroll;
-            palette.reveal = false;
-        }
-        // 查看器滚动上界的渲染期回写（HERDR-MACH-009）：渲染是唯一知道可见行数的
-        // 地方；本帧不是查看器视图时不回写，保持既有上界。
-        if let Some(ClientShellOverlay::MachineFiles(page)) = self.overlay.as_mut() {
-            if let Some(max) = self.hits.machine_files_viewer_max_scroll {
-                if let super::machine_files_overlay::ClientMachineFilesView::Viewer {
-                    max_scroll,
-                    scroll,
-                    ..
-                } = &mut page.view
-                {
-                    *max_scroll = max;
-                    *scroll = (*scroll).min(max);
-                }
-            }
-        }
-        if let Some(ClientShellOverlay::Settings(settings)) = self.overlay.as_mut() {
-            settings.scroll = self.hits.settings_scroll;
-            settings.reveal = false;
-        }
-        if let Some(ClientShellOverlay::Machines(page)) = self.overlay.as_mut() {
-            // 列表 / 导入向导 / 转发编辑器共用「compose 期回写 scroll」：渲染是
-            // 唯一知道可见行数的地方，reveal 是一次性请求，画完即清。本帧没
-            // 真的画列表（窗口太小、discover 步骤）时跳过，别把滚动位置清零。
-            if self.hits.machines_scroll_valid {
-                match &mut page.view {
-                    super::machines_overlay::ClientMachinesView::List => {
-                        page.scroll = self.hits.machines_scroll;
-                        page.reveal = false;
-                    }
-                    super::machines_overlay::ClientMachinesView::Import(view) => {
-                        view.scroll = self.hits.machines_scroll;
-                        view.reveal = false;
-                    }
-                    super::machines_overlay::ClientMachinesView::Forwards(view) => {
-                        view.scroll = self.hits.machines_scroll;
-                        view.reveal = false;
-                    }
-                    _ => {}
-                }
-            }
-            if matches!(
-                page.view,
-                super::machines_overlay::ClientMachinesView::Detail(_)
-            ) || !self.hits.machines_detail_area.is_empty()
-            {
-                page.detail_scroll = page.detail_scroll.min(self.hits.machines_max_scroll);
-            }
-        }
-        if let Some(ClientShellOverlay::Help(help)) = self.overlay.as_mut() {
-            help.scroll = help.scroll.min(self.hits.help_max_scroll);
-        }
-        if let Some(ClientShellOverlay::ProductAnnouncement(announcement)) = self.overlay.as_mut() {
-            announcement.scroll = announcement
-                .scroll
-                .min(u16::try_from(self.hits.product_announcement_max_scroll).unwrap_or(u16::MAX));
-        }
-        if let Some(ClientShellOverlay::ReleaseNotes(notes)) = self.overlay.as_mut() {
-            notes.scroll = notes
-                .scroll
-                .min(u16::try_from(self.hits.release_notes_max_scroll).unwrap_or(u16::MAX));
-        }
+        // 滚动窗口与 `reveal` 已在 `compute_overlay_view`（绘制前）写回状态，这里
+        // 不再从渲染输出反写（STATE-04 / ARCH-02 / TOOL-13）。
         Some(())
     }
 }

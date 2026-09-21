@@ -1,14 +1,13 @@
 use super::feedback::{relative_time_ago, ChromeContext, ChromeHover, ClientNotificationRecord};
 use super::*;
 
-mod settings_overlay;
+pub(in crate::client::shell) mod settings_overlay;
 mod worktree_overlays;
 #[derive(Default)]
 pub(crate) struct OverlayRender {
     pub(crate) area: Rect,
     pub(crate) menu_popup: Rect,
     pub(crate) menu_search: Rect,
-    pub(crate) menu_scroll: usize,
     pub(crate) menu_rows: Vec<(Rect, usize)>,
     pub(crate) primary: Rect,
     pub(crate) clear: Rect,
@@ -21,18 +20,11 @@ pub(crate) struct OverlayRender {
     pub(crate) help_popup: Rect,
     pub(crate) help_scrollbar: Rect,
     pub(crate) help_scroll_metrics: Option<crate::pane::ScrollMetrics>,
-    pub(crate) help_max_scroll: usize,
     pub(crate) settings_popup: Rect,
-    pub(crate) settings_scroll: usize,
     pub(crate) settings_tabs: Vec<(Rect, ClientSettingsSection)>,
     pub(crate) settings_choices: Vec<(Rect, usize)>,
     pub(crate) machines_popup: Rect,
     pub(crate) machines_detail_area: Rect,
-    pub(crate) machines_scroll: usize,
-    /// 本帧是否真的画了某个机器面板列表（列表 / 导入向导 / 转发编辑器）。
-    /// 早退分支（窗口太小、discover 步骤）不计算窗口，compose 期的 scroll
-    /// 回写必须跳过，否则每帧把用户的滚动位置抹成 0。
-    pub(crate) machines_scroll_valid: bool,
     pub(crate) machines_search: Rect,
     pub(crate) machines_rows: Vec<(Rect, crate::client::endpoint::ProfileId)>,
     pub(crate) machines_actions: Vec<(Rect, super::machines_overlay::MachineOverlayButton)>,
@@ -43,7 +35,6 @@ pub(crate) struct OverlayRender {
     /// Index-keyed input fields of the import wizard group editor and the
     /// forward add form.
     pub(crate) machines_wizard_fields: Vec<(Rect, usize)>,
-    pub(crate) machines_max_scroll: usize,
     /// 机器面板公共 toast 的落点：List / Detail / dashboard 各自把自己的
     /// 页脚行报上来，`render_machines_overlay` 在顶层统一画一次
     /// （HERDR-MACH-006）。空 rect = 该视图不承载 toast。
@@ -57,9 +48,7 @@ pub(crate) struct OverlayRender {
     pub(crate) machine_files_search: Rect,
     pub(crate) machine_files_rows: Vec<(Rect, usize)>,
     pub(crate) machine_files_actions: Vec<(Rect, super::machine_files_overlay::MachineFilesButton)>,
-    /// 查看器可见行数推出的滚动上界（行数 − 可见行数），渲染期回写进 view
     ///（HERDR-MACH-009）。非查看器视图时为 None。
-    pub(crate) machine_files_viewer_max_scroll: Option<usize>,
     pub(crate) snippet_popup: Rect,
     pub(crate) snippet_search: Rect,
     pub(crate) snippet_rows: Vec<(Rect, usize)>,
@@ -72,10 +61,8 @@ pub(crate) struct OverlayRender {
     pub(crate) notification_history_rows: Vec<(Rect, usize)>,
     pub(crate) product_announcement_scrollbar: Rect,
     pub(crate) product_announcement_scroll_metrics: Option<crate::pane::ScrollMetrics>,
-    pub(crate) product_announcement_max_scroll: usize,
     pub(crate) release_notes_scrollbar: Rect,
     pub(crate) release_notes_scroll_metrics: Option<crate::pane::ScrollMetrics>,
-    pub(crate) release_notes_max_scroll: usize,
     /// 浮动用量仪表盘内的账号行 / 按钮命中区（非模态，浮层内点击派发）。
     pub(in crate::client::shell) usage_dashboard_actions: Vec<(Rect, super::observability::Action)>,
     pub(crate) cursor: Option<crate::protocol::CursorState>,
@@ -584,7 +571,6 @@ struct ScrollbackOverlayRender {
     close: Rect,
     track: Option<Rect>,
     metrics: Option<crate::pane::ScrollMetrics>,
-    max_scroll: usize,
 }
 
 /// `render_scrollback_overlay` 的版式推导结果：header / content / footer 三段与
@@ -623,6 +609,19 @@ pub(in crate::client::shell) fn scrollback_overlay_layout(
     Some(ScrollbackOverlayLayout { stack, close })
 }
 
+/// 滚动浮层（发行说明 / 产品公告）的正文矩形：视图计算阶段与渲染阶段共用
+/// 同一口径（STATE-04）。
+pub(in crate::client::shell) fn scrollback_overlay_body(
+    area: Rect,
+    page_bounds: Option<Rect>,
+    size: crate::ui::ModalSize,
+) -> Option<Rect> {
+    let outer = page_bounds
+        .map(|rect| rect.intersection(area))
+        .or_else(|| crate::ui::modal_rect(area, size))?;
+    scrollback_overlay_layout(outer).map(|layout| layout.stack.content)
+}
+
 /// Title/subtitle/close header plus scrollable body and scroll-hint footer;
 /// release notes and product announcement share this frame.
 #[allow(clippy::too_many_arguments)]
@@ -644,7 +643,6 @@ fn render_scrollback_overlay(
             close: Rect::default(),
             track: None,
             metrics: None,
-            max_scroll: 0,
         });
     };
 
@@ -731,7 +729,6 @@ fn render_scrollback_overlay(
         close,
         track,
         metrics: Some(metrics),
-        max_scroll,
     })
 }
 fn render_release_notes_overlay(
@@ -764,7 +761,6 @@ fn render_release_notes_overlay(
         primary: rendered.close,
         release_notes_scrollbar: rendered.track.unwrap_or_default(),
         release_notes_scroll_metrics: rendered.metrics,
-        release_notes_max_scroll: rendered.max_scroll,
         ..OverlayRender::default()
     })
 }
@@ -796,7 +792,6 @@ fn render_product_announcement_overlay(
         primary: rendered.close,
         product_announcement_scrollbar: rendered.track.unwrap_or_default(),
         product_announcement_scroll_metrics: rendered.metrics,
-        product_announcement_max_scroll: rendered.max_scroll,
         ..OverlayRender::default()
     })
 }
@@ -1306,6 +1301,49 @@ fn help_lines(
     lines
 }
 
+/// 帮助浮层的弹窗与正文矩形：视图计算阶段与渲染阶段共用（STATE-04）。
+pub(in crate::client::shell) fn help_geometry(
+    area: Rect,
+    page_bounds: Option<Rect>,
+) -> Option<(Rect, Rect)> {
+    let outer = page_bounds
+        .map(|rect| rect.intersection(area))
+        .or_else(|| crate::ui::modal_rect(area, crate::ui::ModalSize::Large))?;
+    let inner = panel_inner(outer)?;
+    if inner.width < 20 || inner.height < 6 {
+        return None;
+    }
+    let stack = crate::ui::modal_stack_areas(inner, 2, 1, 0, 1);
+    Some((outer, stack.content))
+}
+
+/// 帮助浮层正文的最大滚动量：按宽度折行后的总行数 − 可见行数。渲染与视图计算
+/// 阶段共用，避免两处各算一遍折行（STATE-04）。
+pub(in crate::client::shell) fn help_max_scroll(
+    help: &ClientHelpOverlay,
+    keybinds: &LiveKeybindConfig,
+    body: Rect,
+    palette: &Palette,
+) -> usize {
+    let lines = help_lines(keybinds, &help.query, palette);
+    let viewport_rows = usize::from(body.height.max(1));
+    let wrapped_rows = |width: u16| {
+        let width = usize::from(width.max(1));
+        lines
+            .iter()
+            .map(|(line_width, _)| line_width.max(&1).div_ceil(width))
+            .sum::<usize>()
+    };
+    // 需要滚动条时正文再让出一列，折行行数与渲染逐格一致。
+    let needs_scrollbar = wrapped_rows(body.width) > viewport_rows;
+    let text_width = if needs_scrollbar {
+        body.width.saturating_sub(1)
+    } else {
+        body.width
+    };
+    wrapped_rows(text_width).saturating_sub(viewport_rows)
+}
+
 fn render_help_overlay(
     b: &mut Buffer,
     h: &ClientHelpOverlay,
@@ -1371,21 +1409,13 @@ fn render_help_overlay(
     let body = stack.content;
     let lines = help_lines(k, &h.query, p);
     let viewport_rows = usize::from(body.height.max(1));
-    let wrapped_rows = |width: u16| {
-        let width = usize::from(width.max(1));
-        lines
-            .iter()
-            .map(|(line_width, _)| line_width.max(&1).div_ceil(width))
-            .sum::<usize>()
-    };
-    let needs_scrollbar = wrapped_rows(body.width) > viewport_rows;
+    let max_scroll = help_max_scroll(h, k, body, p);
+    let needs_scrollbar = max_scroll > 0;
     let text_area = if needs_scrollbar {
         Rect::new(body.x, body.y, body.width.saturating_sub(1), body.height)
     } else {
         body
     };
-    let total_rows = wrapped_rows(text_area.width);
-    let max_scroll = total_rows.saturating_sub(viewport_rows);
     let scroll = h.scroll.min(max_scroll);
     let metrics = crate::pane::ScrollMetrics {
         offset_from_bottom: max_scroll.saturating_sub(scroll),
@@ -1425,7 +1455,6 @@ fn render_help_overlay(
         help_popup: q,
         help_scrollbar: scrollbar.unwrap_or_default(),
         help_scroll_metrics: Some(metrics),
-        help_max_scroll: max_scroll,
         cursor,
         ..OverlayRender::default()
     })

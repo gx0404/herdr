@@ -26,6 +26,9 @@ pub(super) struct ClientMachinesOverlay {
     pub(super) scroll: usize,
     pub(super) reveal: bool,
     pub(super) detail_scroll: usize,
+    /// 本帧视图的滚动上界：由视图计算阶段（`compute_machines_view`）写入，
+    /// 键盘 / 滚轮的边界判定读它（STATE-04；此前读上一帧的渲染命中区）。
+    pub(super) view_max_scroll: usize,
     /// 指针悬浮的机器：只由 `Moved` 改写，`selected` 只由键盘与点击改写。
     /// 列表视图的 `d`（立即启停，会断掉在线 SSH）、`x`（删除）、`r`
     /// （重连）、`Shift+R`（改名）都取 `selected_machine_id()`——指针只是
@@ -57,6 +60,7 @@ impl ClientMachinesOverlay {
             scroll: 0,
             reveal: true,
             detail_scroll: 0,
+            view_max_scroll: 0,
             hovered: None,
             message: None,
         }
@@ -2004,7 +2008,7 @@ impl ClientShellState {
 
     /// done 步骤的结果列表滚动：上界由渲染回填（`machines_max_scroll`）。
     fn scroll_import_results(&mut self, delta: isize) {
-        let max_scroll = self.hits.machines_max_scroll;
+        let max_scroll = self.machines_view_max_scroll();
         if let Some(ClientShellOverlay::Machines(overlay)) = self.overlay.as_mut() {
             if let ClientMachinesView::Import(view) = &mut overlay.view {
                 view.scroll = view.scroll.saturating_add_signed(delta).min(max_scroll);
@@ -2663,7 +2667,7 @@ impl ClientShellState {
             code,
             KeyCode::Up | KeyCode::Down | KeyCode::PageUp | KeyCode::PageDown
         ) {
-            let max = self.hits.machines_max_scroll;
+            let max = self.machines_view_max_scroll();
             if let Some(ClientShellOverlay::Machines(page)) = self.overlay.as_mut() {
                 if let ClientMachinesView::Form(form) = &mut page.view {
                     if form.step == MachineFormStep::Confirm && form.editing.is_none() {
@@ -2961,10 +2965,8 @@ impl ClientShellState {
     /// detail scrolls the field card, the form moves the focused field.
     pub(super) fn scroll_machine_details(&mut self, delta: isize) {
         if let Some(ClientShellOverlay::Machines(overlay)) = self.overlay.as_mut() {
-            overlay.detail_scroll = overlay
-                .detail_scroll
-                .saturating_add_signed(delta)
-                .min(self.hits.machines_max_scroll);
+            let max = overlay.view_max_scroll;
+            overlay.detail_scroll = overlay.detail_scroll.saturating_add_signed(delta).min(max);
         }
     }
 
@@ -2996,7 +2998,7 @@ impl ClientShellState {
                 }
             }
             ScrollTarget::Detail => {
-                let max_scroll = self.hits.machines_max_scroll;
+                let max_scroll = self.machines_view_max_scroll();
                 if let Some(ClientShellOverlay::Machines(overlay)) = self.overlay.as_mut() {
                     overlay.detail_scroll = if delta.is_negative() {
                         overlay.detail_scroll.saturating_sub(delta.unsigned_abs())
@@ -3007,7 +3009,7 @@ impl ClientShellState {
                 }
             }
             ScrollTarget::Form => {
-                let max = self.hits.machines_max_scroll;
+                let max = self.machines_view_max_scroll();
                 if let Some(ClientShellOverlay::Machines(overlay)) = self.overlay.as_mut() {
                     if let ClientMachinesView::Form(form) = &mut overlay.view {
                         if form.step == MachineFormStep::Confirm && form.editing.is_none() {
@@ -3109,6 +3111,45 @@ fn machine_list_hints(has_selection: bool, has_review: bool) -> Vec<(String, Str
 
 /// Detail 页脚：与 List / dashboard 同一张单机动作表，只是把页面级键换成
 /// `esc 返回` 与 `b 广播`（Detail 没有列表导航与添加 / 导入）。
+/// 详情卡底部的动作标签：渲染与视图计算阶段共用——`action_row_count` 用它
+/// 决定给按钮留几行，两边必须同源（STATE-04）。
+fn machine_detail_labels(
+    profile: &SavedSshEndpoint,
+    endpoints: &[ClientShellEndpoint],
+    connection_errors: &HashMap<ClientEndpointId, crate::remote::ConnectionErrorKind>,
+) -> Vec<&'static str> {
+    let t = &crate::i18n::texts().machines;
+    let status = endpoint_for(endpoints, &profile.id).map_or(
+        if profile.enabled {
+            ClientEndpointStatus::Connecting
+        } else {
+            ClientEndpointStatus::Disabled
+        },
+        |endpoint| endpoint.status,
+    );
+    let has_review = connection_errors
+        .get(&ClientEndpointId::Ssh(profile.id.clone()))
+        .is_some_and(super::machine_auth_overlay::failure_kind_has_review);
+    let mut labels: Vec<&'static str> = vec![t.reconnect_button, t.edit_button];
+    labels.push(if profile.enabled {
+        t.disable_button
+    } else {
+        t.enable_button
+    });
+    labels.push(t.forwards_button);
+    labels.push(t.browse_files_button);
+    labels.push(t.broadcast_button);
+    labels.push(t.remove_button);
+    if status == ClientEndpointStatus::Attention && has_review {
+        labels.push(crate::i18n::texts().machine_auth.review_button);
+    }
+    if status == ClientEndpointStatus::Attention {
+        labels.push(t.copy_fix_button);
+    }
+    labels.push(crate::ui::modal_close_button_text());
+    labels
+}
+
 fn machine_detail_hints(has_review: bool) -> Vec<(String, String)> {
     let t = &crate::i18n::texts().machines;
     let mut hints = vec![
@@ -3187,6 +3228,370 @@ fn render_machines_toast(b: &mut Buffer, rect: Rect, message: &str, p: &Palette)
 // 集中在一次投影中避免从全局重新查状态；打包成 struct 反而要多一层生命周期
 // 标注，故豁免 too_many_arguments。
 #[allow(clippy::too_many_arguments)]
+/// 机器面板各视图的正文几何：视图计算阶段与渲染阶段共用（STATE-04）。
+/// 返回值 `None` 表示该视图本帧不画列表（窗口太小 / discover 步骤）。
+pub(super) enum MachinesBody {
+    /// 窄屏列表：正文 + 行高 2。
+    List(Rect),
+    /// 详情卡。
+    Detail(Rect),
+    /// 转发规则编辑器：正文 + 可见行数。
+    Forwards(Rect),
+    /// 导入向导的候选 / 目标选择列表：正文 + 可见行数。
+    ImportSelect(Rect, usize),
+    /// 导入向导的结果列表。
+    ImportDone(Rect),
+    /// 新建 / 编辑表单：正文（上界按步骤算）。
+    Form(Rect),
+}
+
+pub(super) fn machines_body(
+    area: Rect,
+    page_bounds: Option<Rect>,
+    overlay: &ClientMachinesOverlay,
+    endpoints: &[ClientShellEndpoint],
+    saved_profiles: &[SavedSshEndpoint],
+    connection_errors: &HashMap<ClientEndpointId, crate::remote::ConnectionErrorKind>,
+) -> Option<MachinesBody> {
+    match &overlay.view {
+        ClientMachinesView::List => {
+            if page_bounds.unwrap_or(area).width >= 96 {
+                let layout = dashboard::dashboard_layout(
+                    area,
+                    page_bounds,
+                    overlay,
+                    saved_profiles,
+                    endpoints,
+                    connection_errors,
+                )?;
+                let left_width = (layout.content.width / 3).clamp(24, 36);
+                return Some(MachinesBody::List(Rect::new(
+                    layout.content.x,
+                    layout.content.y,
+                    left_width,
+                    layout.content.height,
+                )));
+            }
+            let (_, inner) = machines_panel(area, page_bounds, 24)?;
+            let rows = machine_list_rows(saved_profiles, endpoints, overlay.query.as_str());
+            let selected = if rows.is_empty() {
+                0
+            } else {
+                overlay.selected.min(rows.len() - 1)
+            };
+            let has_review = rows.get(selected).is_some_and(|row| {
+                connection_errors
+                    .get(&ClientEndpointId::Ssh(row.id.clone()))
+                    .is_some_and(super::machine_auth_overlay::failure_kind_has_review)
+            });
+            let hints = machine_list_hints(!rows.is_empty(), has_review);
+            let stack = crate::ui::modal_stack_areas(
+                inner,
+                2,
+                machine_footer_rows(&hints, inner.width),
+                1,
+                1,
+            );
+            Some(MachinesBody::List(stack.content))
+        }
+        ClientMachinesView::Detail(id) => {
+            let (_, inner) = machines_panel(area, page_bounds, 26)?;
+            let profile = saved_profiles.iter().find(|profile| &profile.id == id)?;
+            let has_review = saved_profiles.iter().any(|profile| {
+                connection_errors.contains_key(&ClientEndpointId::Ssh(profile.id.clone()))
+            });
+            let hints = machine_detail_hints(has_review);
+            let labels = machine_detail_labels(profile, endpoints, connection_errors);
+            let stack = super::page::PageLayout::with_footer_rows(
+                inner,
+                0,
+                false,
+                super::page::action_row_count(inner.width, &labels),
+                machine_footer_rows(&hints, inner.width),
+            );
+            Some(MachinesBody::Detail(stack.content))
+        }
+        ClientMachinesView::Forwards(_) => {
+            let (_, inner) = machines_panel(area, page_bounds, 20)?;
+            let stack = crate::ui::modal_stack_areas(inner, 1, 1, 1, 1);
+            Some(MachinesBody::Forwards(stack.content))
+        }
+        ClientMachinesView::Import(view) => {
+            let (_, inner) = machines_panel(area, page_bounds, 24)?;
+            let stack = crate::ui::modal_stack_areas(inner, 2, 1, 1, 1);
+            match view.step {
+                ClientImportStep::Discover => None,
+                ClientImportStep::Select => {
+                    // 候选列表要扣掉固定行（通配符开关 / 分组输入 / 计数行）。
+                    let list_height = stack
+                        .content
+                        .height
+                        .saturating_sub(IMPORT_SELECT_FIXED_ROWS);
+                    Some(MachinesBody::ImportSelect(
+                        stack.content,
+                        usize::from(list_height.max(1)),
+                    ))
+                }
+                ClientImportStep::Done => Some(MachinesBody::ImportDone(stack.content)),
+            }
+        }
+        ClientMachinesView::Form(_) => {
+            let (_, inner) = machines_panel(area, page_bounds, 24)?;
+            let stack = crate::ui::modal_stack_areas(inner, 2, 1, 1, 1);
+            Some(MachinesBody::Form(stack.content))
+        }
+        _ => None,
+    }
+}
+
+/// 机器面板的弹窗与内框，视图计算与渲染共用（各视图高度不同）。
+fn machines_panel(area: Rect, page_bounds: Option<Rect>, height: u16) -> Option<(Rect, Rect)> {
+    let outer = page_bounds
+        .map(|rect| rect.intersection(area))
+        .or_else(|| crate::ui::modal_rect(area, crate::ui::ModalSize::Large.with_height(height)))?;
+    let inner = super::render::panel_inner(outer)?;
+    (inner.width >= 24 && inner.height >= 8).then_some((outer, inner))
+}
+
+const IMPORT_SELECT_FIXED_ROWS: u16 = 3;
+
+impl ClientShellState {
+    /// 当前机器面板视图的滚动上界：由视图计算阶段写入（STATE-04）。
+    fn machines_view_max_scroll(&self) -> usize {
+        match self.overlay.as_ref() {
+            Some(ClientShellOverlay::Machines(page)) => page.view_max_scroll,
+            _ => 0,
+        }
+    }
+
+    /// 机器面板的滚动视图计算（STATE-04）：几何与渲染共用 `machines_body`，
+    /// 数字在这里写回状态；渲染阶段只读。`reveal` 是一次性请求，消费即清。
+    pub(super) fn compute_machines_view(&mut self, area: Rect, page_bounds: Option<Rect>) {
+        if !matches!(self.overlay, Some(ClientShellOverlay::Machines(_))) {
+            return;
+        }
+        let endpoints = std::mem::take(&mut self.endpoints);
+        let saved_profiles = std::mem::take(&mut self.saved_profiles);
+        let connection_errors = std::mem::take(&mut self.endpoint_connection_errors);
+        let port_forwards = std::mem::take(&mut self.endpoint_port_forwards);
+        let session_log_dropped = std::mem::take(&mut self.session_log_dropped);
+        let palette = self.config.palette.clone();
+        self.compute_machines_view_with(
+            area,
+            page_bounds,
+            &palette,
+            &endpoints,
+            &saved_profiles,
+            &connection_errors,
+            &port_forwards,
+            &session_log_dropped,
+        );
+        self.endpoints = endpoints;
+        self.saved_profiles = saved_profiles;
+        self.endpoint_connection_errors = connection_errors;
+        self.endpoint_port_forwards = port_forwards;
+        self.session_log_dropped = session_log_dropped;
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments)]
+    fn compute_machines_view_with(
+        &mut self,
+        area: Rect,
+        page_bounds: Option<Rect>,
+        palette: &Palette,
+        endpoints: &[ClientShellEndpoint],
+        saved_profiles: &[SavedSshEndpoint],
+        connection_errors: &HashMap<ClientEndpointId, crate::remote::ConnectionErrorKind>,
+        port_forwards: &HashMap<ClientEndpointId, Vec<crate::remote::PortForwardStatus>>,
+        session_log_dropped: &HashMap<ProfileId, u64>,
+    ) {
+        let body = {
+            let Some(ClientShellOverlay::Machines(page)) = self.overlay.as_ref() else {
+                return;
+            };
+            machines_body(
+                area,
+                page_bounds,
+                page,
+                endpoints,
+                saved_profiles,
+                connection_errors,
+            )
+        };
+        let Some(body) = body else {
+            return;
+        };
+        let Some(ClientShellOverlay::Machines(page)) = self.overlay.as_mut() else {
+            return;
+        };
+        match body {
+            MachinesBody::List(rect) => {
+                let rows = machine_list_rows(saved_profiles, endpoints, page.query.as_str());
+                let selected = if rows.is_empty() {
+                    0
+                } else {
+                    page.selected.min(rows.len() - 1)
+                };
+                let window = super::page::list_window(
+                    rect,
+                    2,
+                    rows.len(),
+                    page.scroll,
+                    selected,
+                    page.reveal,
+                );
+                if !rows.is_empty() && rect.height > 0 {
+                    page.scroll = window.start;
+                }
+                page.view_max_scroll = rows.len().saturating_sub(window.visible);
+            }
+            MachinesBody::Detail(rect) => {
+                let ClientMachinesView::Detail(id) = &page.view else {
+                    return;
+                };
+                let Some(profile) = saved_profiles.iter().find(|profile| &profile.id == id) else {
+                    return;
+                };
+                let endpoint = endpoints
+                    .iter()
+                    .find(|endpoint| endpoint.endpoint_id == ClientEndpointId::Ssh(id.clone()));
+                let status = endpoint.map_or(
+                    if profile.enabled {
+                        ClientEndpointStatus::Connecting
+                    } else {
+                        ClientEndpointStatus::Disabled
+                    },
+                    |endpoint| endpoint.status,
+                );
+                let error_kind = connection_errors.get(&ClientEndpointId::Ssh(id.clone()));
+                let attention_rows =
+                    if status == ClientEndpointStatus::Attention && error_kind.is_some() {
+                        4
+                    } else if status == ClientEndpointStatus::Attention {
+                        2
+                    } else {
+                        0
+                    };
+                let lines = detail_lines(
+                    profile,
+                    endpoint,
+                    port_forwards
+                        .get(&ClientEndpointId::Ssh(id.clone()))
+                        .map(Vec::as_slice),
+                    session_log_dropped.get(id).copied(),
+                );
+                let visible = usize::from(rect.height).saturating_sub(attention_rows);
+                let max_scroll = lines.len().saturating_sub(visible.max(1));
+                page.view_max_scroll = max_scroll;
+                page.detail_scroll = page.detail_scroll.min(max_scroll);
+            }
+            MachinesBody::Form(rect) => {
+                let ClientMachinesView::Form(form) = &mut page.view else {
+                    return;
+                };
+                if form.bootstrap.is_some() {
+                    page.view_max_scroll = 0;
+                    return;
+                }
+                if form.step == MachineFormStep::Confirm && form.editing.is_none() {
+                    page.view_max_scroll = form_confirm_max_scroll(form, rect, palette);
+                    return;
+                }
+                let fields = form.fields();
+                let visible = usize::from(rect.height).max(1);
+                let focused = form.focused.min(fields.len().saturating_sub(1));
+                // 表单没有独立的 reveal 位：聚焦字段必须始终可见（渲染与
+                // 输入路径都按同一口径夹紧）。
+                let window =
+                    super::page::list_window(rect, 1, fields.len(), form.scroll, focused, true);
+                if !fields.is_empty() && rect.height > 0 {
+                    form.scroll = window.start;
+                }
+                page.view_max_scroll = fields.len().saturating_sub(visible);
+            }
+            MachinesBody::Forwards(rect) => {
+                let ClientMachinesView::Forwards(view) = &mut page.view else {
+                    return;
+                };
+                let Some(profile) = saved_profiles
+                    .iter()
+                    .find(|profile| profile.id == view.profile_id)
+                else {
+                    return;
+                };
+                let reserved = if view.adding {
+                    FORWARD_FORM_FIELDS as u16 + 3
+                } else {
+                    1
+                };
+                let list_height = rect.height.saturating_sub(reserved);
+                let visible_rows = usize::from(list_height).max(1);
+                let rules = profile.port_forwards.as_slice();
+                let selected = if rules.is_empty() {
+                    0
+                } else {
+                    view.selected.min(rules.len() - 1)
+                };
+                // 可见行数取扣掉固定席位后的列表高度，与渲染口径一致。
+                let list_rect = Rect::new(rect.x, rect.y, rect.width, list_height);
+                let window = super::page::list_window(
+                    list_rect,
+                    1,
+                    rules.len(),
+                    view.scroll,
+                    selected,
+                    view.reveal,
+                );
+                if !rules.is_empty() && list_height > 0 {
+                    view.scroll = window.start;
+                }
+                view.reveal = false;
+                page.view_max_scroll = rules.len().saturating_sub(visible_rows);
+            }
+            MachinesBody::ImportSelect(rect, visible_rows) => {
+                let ClientMachinesView::Import(view) = &mut page.view else {
+                    return;
+                };
+                let candidates = view.plan.ready.len();
+                let focus = view.focus_row.min(candidates.saturating_sub(1));
+                let list_rect = Rect::new(
+                    rect.x,
+                    rect.y,
+                    rect.width,
+                    u16::try_from(visible_rows).unwrap_or(u16::MAX),
+                );
+                let window = super::page::list_window(
+                    list_rect,
+                    1,
+                    candidates,
+                    view.scroll,
+                    focus,
+                    view.reveal,
+                );
+                if candidates > 0 && rect.height > 0 {
+                    view.scroll = window.start;
+                }
+                view.reveal = false;
+                page.view_max_scroll = candidates.saturating_sub(visible_rows);
+            }
+            MachinesBody::ImportDone(rect) => {
+                let ClientMachinesView::Import(view) = &page.view else {
+                    return;
+                };
+                let imported = view
+                    .results
+                    .iter()
+                    .filter(|row| row.outcome == ClientImportOutcome::Imported)
+                    .count();
+                let total_lines = view.results.len() + usize::from(imported > 0);
+                let visible = usize::from(rect.height.saturating_sub(1));
+                page.view_max_scroll = total_lines.saturating_sub(visible);
+            }
+        }
+    }
+}
+
 pub(super) fn render_machines_overlay(
     b: &mut Buffer,
     overlay: &ClientMachinesOverlay,
@@ -3505,12 +3910,9 @@ fn render_machine_list(
     Some(OverlayRender {
         area: popup,
         machines_popup: popup,
-        machines_scroll: scroll,
-        machines_scroll_valid: true,
         machines_search: Rect::new(stack.header.x, stack.header.y + 1, stack.header.width, 1),
         machines_rows: row_hits,
         machines_actions: action_hits,
-        machines_max_scroll: rows.len().saturating_sub(visible),
         machines_toast: stack.footer.unwrap_or_default(),
         cursor,
         ..OverlayRender::default()
@@ -3722,23 +4124,7 @@ fn render_machine_detail(
         });
     }
     let has_review = error_kind.is_some_and(super::machine_auth_overlay::failure_kind_has_review);
-    let mut labels: Vec<&str> = vec![t.reconnect_button, t.edit_button];
-    labels.push(if profile.enabled {
-        t.disable_button
-    } else {
-        t.enable_button
-    });
-    labels.push(t.forwards_button);
-    labels.push(t.browse_files_button);
-    labels.push(t.broadcast_button);
-    labels.push(t.remove_button);
-    if status == ClientEndpointStatus::Attention && has_review {
-        labels.push(crate::i18n::texts().machine_auth.review_button);
-    }
-    if status == ClientEndpointStatus::Attention {
-        labels.push(t.copy_fix_button);
-    }
-    labels.push(crate::ui::modal_close_button_text());
+    let labels = machine_detail_labels(profile, endpoints, connection_errors);
     let mut buttons: Vec<MachineOverlayButton> = vec![
         MachineOverlayButton::Reconnect,
         MachineOverlayButton::Edit,
@@ -3905,7 +4291,6 @@ fn render_machine_detail(
         area: popup,
         machines_popup: popup,
         machines_actions: action_hits,
-        machines_max_scroll: max_scroll,
         machines_toast: stack.footer,
         ..OverlayRender::default()
     })
@@ -4054,11 +4439,10 @@ fn render_machine_form(
     let body = stack.content;
     let mut field_hits = Vec::new();
     let mut cursor = None;
-    let mut max_scroll = 0;
     if let Some(bootstrap) = form.bootstrap.as_ref() {
         render_bootstrap_progress(b, body, form, bootstrap, base, cx);
     } else if form.step == MachineFormStep::Confirm && !editing {
-        max_scroll = render_form_confirm(b, body, form, base, p);
+        render_form_confirm(b, body, form, base, p);
     } else {
         let fields = form.fields();
         let visible = usize::from(body.height).max(1);
@@ -4276,7 +4660,6 @@ fn render_machine_form(
         area: popup,
         machines_popup: popup,
         machines_fields: field_hits,
-        machines_max_scroll: max_scroll,
         machines_actions: action_hits,
         cursor,
         ..OverlayRender::default()
@@ -4290,8 +4673,44 @@ fn render_form_confirm(
     base: Style,
     p: &Palette,
 ) -> usize {
-    use ratatui::text::{Line, Span};
     use ratatui::widgets::{Paragraph, Widget, Wrap};
+    let lines = form_confirm_lines(form, base, p);
+    let measured = lines
+        .iter()
+        .cloned()
+        .map(|line| (line.width(), line))
+        .collect::<Vec<_>>();
+    let metrics = crate::ui::display_lines_scroll_metrics(
+        &measured,
+        form.scroll.min(u16::MAX as usize) as u16,
+        area,
+    );
+    Paragraph::new(lines)
+        .wrap(Wrap { trim: false })
+        .scroll((form.scroll.min(metrics.max_offset_from_bottom) as u16, 0))
+        .render(area, b);
+    metrics.max_offset_from_bottom
+}
+
+/// 确认步骤正文的最大滚动量：视图计算阶段与渲染阶段共用同一批行（STATE-04）。
+fn form_confirm_max_scroll(form: &ClientMachineForm, area: Rect, palette: &Palette) -> usize {
+    let base = Style::default();
+    let lines = form_confirm_lines(form, base, palette);
+    let measured = lines
+        .iter()
+        .cloned()
+        .map(|line| (line.width(), line))
+        .collect::<Vec<_>>();
+    crate::ui::display_lines_scroll_metrics(&measured, 0, area).max_offset_from_bottom
+}
+
+/// 确认步骤的正文行：`render_form_confirm` 与 `form_confirm_max_scroll` 共用。
+fn form_confirm_lines<'a>(
+    form: &'a ClientMachineForm,
+    base: Style,
+    p: &Palette,
+) -> Vec<ratatui::text::Line<'a>> {
+    use ratatui::text::{Line, Span};
     let t = &crate::i18n::texts().machines;
     let mut lines = vec![
         Line::styled(t.confirm_install_note, base.fg(p.yellow)),
@@ -4313,21 +4732,7 @@ fn render_form_confirm(
             ]));
         }
     }
-    let measured = lines
-        .iter()
-        .cloned()
-        .map(|line| (line.width(), line))
-        .collect::<Vec<_>>();
-    let metrics = crate::ui::display_lines_scroll_metrics(
-        &measured,
-        form.scroll.min(u16::MAX as usize) as u16,
-        area,
-    );
-    Paragraph::new(lines)
-        .wrap(Wrap { trim: false })
-        .scroll((form.scroll.min(metrics.max_offset_from_bottom) as u16, 0))
-        .render(area, b);
-    metrics.max_offset_from_bottom
+    lines
 }
 
 fn render_bootstrap_progress(
@@ -4467,7 +4872,6 @@ fn render_machine_forwards(
         visible_rows,
         view.reveal,
     );
-    let max_scroll = rules.len().saturating_sub(visible_rows);
     if rules.is_empty() && !view.adding {
         put_text(
             b,
@@ -4781,12 +5185,9 @@ fn render_machine_forwards(
     Some(OverlayRender {
         area: popup,
         machines_popup: popup,
-        machines_scroll: scroll,
-        machines_scroll_valid: true,
         machines_wizard_rows: row_hits,
         machines_wizard_fields: field_hits,
         machines_actions: action_hits,
-        machines_max_scroll: max_scroll,
         cursor,
         ..OverlayRender::default()
     })
@@ -4870,11 +5271,7 @@ fn render_machine_import(
 
     let body = stack.content;
     let mut cursor = None;
-    let mut scroll = 0usize;
-    let mut max_scroll = 0usize;
-    // discover 步骤没有可滚动列表：不声明 scroll 有效，compose 期的回写会
-    // 跳过它而不是每帧把 `view.scroll` 抹成 0。
-    let mut scroll_valid = false;
+    // discover 步骤没有可滚动列表：窗口由视图计算阶段按步骤给出（STATE-04）。
     let wizard_rows: Vec<(Rect, usize)> = match view.step {
         ClientImportStep::Discover => {
             render_import_discover(b, body, view, base, p);
@@ -4883,16 +5280,10 @@ fn render_machine_import(
         ClientImportStep::Select => {
             let rendered = render_import_select(b, body, view, base, p);
             cursor = rendered.cursor;
-            scroll = rendered.scroll;
-            max_scroll = rendered.max_scroll;
-            scroll_valid = true;
             rendered.rows
         }
         ClientImportStep::Done => {
-            let (done_scroll, done_max) = render_import_done(b, body, view, base, p);
-            scroll = done_scroll;
-            max_scroll = done_max;
-            scroll_valid = true;
+            render_import_done(b, body, view, base, p);
             Vec::new()
         }
     };
@@ -4969,11 +5360,8 @@ fn render_machine_import(
     Some(OverlayRender {
         area: popup,
         machines_popup: popup,
-        machines_scroll: scroll,
-        machines_scroll_valid: scroll_valid,
         machines_wizard_rows: wizard_rows,
         machines_actions: action_hits,
-        machines_max_scroll: max_scroll,
         cursor,
         ..OverlayRender::default()
     })
@@ -5069,8 +5457,6 @@ fn render_import_discover(
 struct ImportSelectRender {
     rows: Vec<(Rect, usize)>,
     cursor: Option<crate::protocol::CursorState>,
-    scroll: usize,
-    max_scroll: usize,
 }
 
 /// 候选列表在上方滚动，通配符开关 / 分组输入 / 计数行固定占据 body 底部三行，
@@ -5215,12 +5601,7 @@ fn render_import_select(
         }
         put_text(b, body.x, y, body.width, &counter, base.fg(p.overlay0));
     }
-    ImportSelectRender {
-        rows: hits,
-        cursor,
-        scroll,
-        max_scroll,
-    }
+    ImportSelectRender { rows: hits, cursor }
 }
 
 /// done 步骤：汇总行固定在顶部，逐条结果（含失败提示与结尾说明）进入可滚动

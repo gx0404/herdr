@@ -1708,7 +1708,7 @@ impl ClientShellState {
                 }
                 MouseEventKind::ScrollDown => {
                     if let Some(ClientShellOverlay::Help(help)) = self.overlay.as_mut() {
-                        let next = help.scroll.saturating_add(3).min(self.hits.help_max_scroll);
+                        let next = help.scroll.saturating_add(3).min(help.max_scroll);
                         if next != help.scroll {
                             help.scroll = next;
                             outcome.repaint = true;

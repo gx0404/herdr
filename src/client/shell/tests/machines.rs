@@ -1614,6 +1614,7 @@ fn overlay_step_separates_every_destructive_machine_step() {
             scroll: 0,
             reveal: false,
             detail_scroll: 0,
+            view_max_scroll: 0,
             hovered: None,
             message: None,
         })
@@ -1636,6 +1637,7 @@ fn overlay_step_separates_every_destructive_machine_step() {
         scroll: 0,
         reveal: false,
         detail_scroll: 0,
+        view_max_scroll: 0,
         hovered: None,
         message: None,
     });

@@ -66,6 +66,7 @@ impl ClientShellState {
                         query: TextEditor::default(),
                         search_focused: false,
                         scroll: 0,
+                        max_scroll: 0,
                     }));
                     outcome.repaint = true;
                     return;

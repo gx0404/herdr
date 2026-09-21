@@ -726,7 +726,12 @@ fn help_overlay_restores_released_search_scroll_and_custom_binding_behavior() {
         .collect::<Vec<_>>()
         .join("\n");
     assert!(text.replace(' ', "").contains("全局"));
-    assert!(state.hits.help_max_scroll > 0);
+    match state.overlay.as_ref() {
+        Some(ClientShellOverlay::Help(help)) => {
+            assert!(help.max_scroll > 0, "帮助正文需要滚动时上界非零");
+        }
+        _ => panic!("help overlay"),
+    }
     assert_ne!(state.hits.help_scrollbar, Rect::default());
 
     state.handle_input_bytes(b"/");
@@ -767,15 +772,19 @@ fn help_overlay_restores_released_search_scroll_and_custom_binding_behavior() {
         Some(ClientShellOverlay::Help(ClientHelpOverlay {
             search_focused: false,
             ref query,
-            scroll: 0,
+            max_scroll: 0,
+                scroll: 0,
         })) if query.is_empty()
     ));
     state.compose(106, 30).expect("restored help");
     state.handle_input_bytes(b"\x1b[F");
     assert!(matches!(
         state.overlay,
-        Some(ClientShellOverlay::Help(ClientHelpOverlay { scroll, .. }))
-            if scroll == state.hits.help_max_scroll
+        Some(ClientShellOverlay::Help(ClientHelpOverlay {
+            scroll,
+            max_scroll,
+            ..
+        })) if scroll == max_scroll && max_scroll > 0
     ));
     state.handle_input_bytes(b"\x1b[H");
     assert!(matches!(

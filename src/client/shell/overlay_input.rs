@@ -33,15 +33,14 @@ impl ClientShellState {
     }
 
     pub(super) fn scroll_product_announcement(&mut self, delta: isize) {
-        let max_scroll = self.hits.product_announcement_max_scroll;
         if let Some(ClientShellOverlay::ProductAnnouncement(announcement)) = self.overlay.as_mut() {
+            // 上界由视图计算阶段在下一帧夹紧（STATE-04），这里只落一个增量。
             let current = usize::from(announcement.scroll);
             let next = if delta.is_negative() {
                 current.saturating_sub(delta.unsigned_abs())
             } else {
                 current.saturating_add(delta as usize)
-            }
-            .min(max_scroll);
+            };
             announcement.scroll = u16::try_from(next).unwrap_or(u16::MAX);
         }
     }
@@ -50,7 +49,12 @@ impl ClientShellState {
         &mut self,
         offset_from_bottom: usize,
     ) {
-        let max_scroll = self.hits.product_announcement_max_scroll;
+        // 滚动条拖拽的上界来自命中区里的滚动指标（视图计算阶段同样按它夹紧）。
+        let max_scroll = self
+            .hits
+            .product_announcement_scroll_metrics
+            .map(|metrics| metrics.max_offset_from_bottom)
+            .unwrap_or_default();
         if let Some(ClientShellOverlay::ProductAnnouncement(announcement)) = self.overlay.as_mut() {
             announcement.scroll =
                 u16::try_from(max_scroll.saturating_sub(offset_from_bottom.min(max_scroll)))
@@ -166,7 +170,7 @@ impl ClientShellState {
         self.current_release_notes_input_geometry()
             .and_then(|(_, _, metrics)| metrics)
             .map(|metrics| metrics.max_offset_from_bottom)
-            .unwrap_or(self.hits.release_notes_max_scroll)
+            .unwrap_or_default()
     }
 
     pub(super) fn scroll_release_notes(&mut self, delta: isize) {
@@ -577,9 +581,8 @@ impl ClientShellState {
                     if let Some(ClientShellOverlay::ProductAnnouncement(announcement)) =
                         self.overlay.as_mut()
                     {
-                        announcement.scroll =
-                            u16::try_from(self.hits.product_announcement_max_scroll)
-                                .unwrap_or(u16::MAX);
+                        // 落到最大：视图计算阶段会按当前窗口夹紧（STATE-04）。
+                        announcement.scroll = u16::MAX;
                     }
                     outcome.repaint = true;
                 }
@@ -985,7 +988,7 @@ impl ClientShellState {
                             help.scroll = help
                                 .scroll
                                 .saturating_add_signed(delta)
-                                .min(self.hits.help_max_scroll);
+                                .min(help.max_scroll);
                         }
                     }
                     _ => {}
@@ -1003,7 +1006,7 @@ impl ClientShellState {
                 }
                 KeyCode::End => {
                     if let Some(ClientShellOverlay::Help(help)) = self.overlay.as_mut() {
-                        help.scroll = self.hits.help_max_scroll;
+                        help.scroll = help.max_scroll;
                     }
                 }
                 KeyCode::Up
@@ -1023,7 +1026,7 @@ impl ClientShellState {
                         help.scroll = help
                             .scroll
                             .saturating_add_signed(delta)
-                            .min(self.hits.help_max_scroll);
+                            .min(help.max_scroll);
                     }
                 }
                 _ if text_character == Some('/') => {
