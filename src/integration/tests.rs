@@ -244,26 +244,12 @@ fn windows_devin_dir_uses_appdata_without_xdg_override() {
 
 #[cfg(windows)]
 #[test]
-fn windows_supports_portable_integrations() {
+fn windows_supports_every_official_integration() {
     use crate::api::schema::IntegrationTarget;
 
-    assert!(integration_target_supported(IntegrationTarget::Hermes));
-    assert!(integration_target_supported(IntegrationTarget::Cursor));
-    assert!(integration_target_supported(IntegrationTarget::Devin));
-    assert!(integration_target_supported(IntegrationTarget::Mastracode));
-    assert!(integration_target_supported(IntegrationTarget::Grok));
-
-    assert!(integration_target_supported(IntegrationTarget::Pi));
-    assert!(integration_target_supported(IntegrationTarget::Omp));
-    assert!(integration_target_supported(IntegrationTarget::Claude));
-    assert!(integration_target_supported(IntegrationTarget::Codex));
-    assert!(integration_target_supported(IntegrationTarget::Copilot));
-    assert!(integration_target_supported(IntegrationTarget::Opencode));
-    assert!(integration_target_supported(IntegrationTarget::Kilo));
-    assert!(integration_target_supported(IntegrationTarget::Droid));
-    assert!(integration_target_supported(IntegrationTarget::Kimi));
-    assert!(integration_target_supported(IntegrationTarget::Qodercli));
-    assert!(integration_target_supported(IntegrationTarget::Qwen));
+    for target in IntegrationTarget::ALL {
+        assert!(integration_target_supported(target), "{target:?}");
+    }
 }
 
 #[cfg(windows)]
@@ -279,29 +265,118 @@ fn windows_availability_includes_native_integrations() {
     std::env::set_var("PATH", &bin);
 
     fs::write(bin.join("pi.cmd"), "@echo off\r\n").unwrap();
-    fs::write(bin.join("omp.cmd"), "@echo off\r\n").unwrap();
     fs::write(bin.join("opencode.cmd"), "@echo off\r\n").unwrap();
-    fs::write(bin.join("kilo.cmd"), "@echo off\r\n").unwrap();
-    fs::write(bin.join("hermes.exe"), "").unwrap();
-    fs::write(bin.join("cursor-agent.cmd"), "@echo off\r\n").unwrap();
-    fs::write(bin.join("devin.cmd"), "@echo off\r\n").unwrap();
-    fs::write(bin.join("mastracode.cmd"), "@echo off\r\n").unwrap();
-    fs::write(bin.join("grok.cmd"), "@echo off\r\n").unwrap();
+    fs::write(bin.join("kimi.exe"), "").unwrap();
 
     assert!(integration_target_available(IntegrationTarget::Pi));
-    assert!(integration_target_available(IntegrationTarget::Omp));
     assert!(integration_target_available(IntegrationTarget::Opencode));
-    assert!(integration_target_available(IntegrationTarget::Kilo));
-    assert!(integration_target_available(IntegrationTarget::Hermes));
-    assert!(integration_target_available(IntegrationTarget::Cursor));
-    assert!(integration_target_available(IntegrationTarget::Devin));
-    assert!(integration_target_available(IntegrationTarget::Mastracode));
-    assert!(integration_target_available(IntegrationTarget::Grok));
+    assert!(integration_target_available(IntegrationTarget::Kimi));
 
     if let Some(path) = original_path {
         std::env::set_var("PATH", path);
     } else {
         std::env::remove_var("PATH");
+    }
+    let _ = fs::remove_dir_all(base);
+}
+
+/// 冻结枚举的全部 serde 名（generation-1 契约，见 `tests/fixtures/
+/// endpoint-method-shapes-v1.json` 的 `integration.install` 摘要）。退役测试用它
+/// 枚举「旧客户端可能传来的每一个名字」。
+const FROZEN_INTEGRATION_TARGET_WIRE_NAMES: [&str; 17] = [
+    "pi",
+    "omp",
+    "claude",
+    "codex",
+    "copilot",
+    "devin",
+    "droid",
+    "kimi",
+    "opencode",
+    "kilo",
+    "hermes",
+    "qodercli",
+    "qwen",
+    "cursor",
+    "mastracode",
+    "antigravity_cli",
+    "grok",
+];
+
+#[test]
+fn frozen_integration_targets_still_deserialize_and_split_into_official_and_retired() {
+    use crate::api::schema::IntegrationTarget;
+
+    let mut official = Vec::new();
+    for name in FROZEN_INTEGRATION_TARGET_WIRE_NAMES {
+        // 旧客户端按名字发来的 target 必须仍能反序列化：枚举变体一个都不能删。
+        let target: IntegrationTarget = serde_json::from_value(json!(name))
+            .unwrap_or_else(|err| panic!("{name} 不再能反序列化: {err}"));
+        assert_eq!(target.wire_name(), name);
+        assert_eq!(IntegrationTarget::from_wire_name(name), Some(target));
+        if !target.is_retired() {
+            official.push(name);
+        }
+    }
+    assert_eq!(official, ["pi", "claude", "codex", "kimi", "opencode"]);
+    assert_eq!(
+        IntegrationTarget::ALL.map(integration_target_label),
+        ["pi", "claude", "codex", "kimi", "opencode"]
+    );
+}
+
+#[test]
+fn retired_integration_targets_get_a_retired_error_and_stay_out_of_listings() {
+    use crate::api::schema::IntegrationTarget;
+
+    let _lock = integration_env_lock();
+    let base = unique_base();
+    let original_home = std::env::var_os("HOME");
+    std::env::set_var("HOME", &base);
+    clear_integration_path_env();
+
+    for name in FROZEN_INTEGRATION_TARGET_WIRE_NAMES {
+        let target = IntegrationTarget::from_wire_name(name).unwrap();
+        if !target.is_retired() {
+            continue;
+        }
+        assert!(!integration_target_supported(target), "{name}");
+        assert!(!integration_target_available(target), "{name}");
+        for (lang, marker) in [
+            (crate::i18n::Lang::En, "retired"),
+            (crate::i18n::Lang::ZhCn, "退役"),
+        ] {
+            let _lang = crate::i18n::lang_guard(lang);
+            for (action, result) in [
+                ("install", install_target(target)),
+                ("uninstall", uninstall_target(target)),
+            ] {
+                let message = result
+                    .expect_err(&format!("{action} {name} 必须失败"))
+                    .to_string();
+                assert!(
+                    message.contains(name) && message.contains(marker),
+                    "{action} {name}: {message}"
+                );
+            }
+        }
+    }
+    // 退役错误不得在 HOME 下留下任何文件。
+    assert!(!base.exists() || fs::read_dir(&base).unwrap().next().is_none());
+
+    let listed: Vec<_> = integration_recommendations()
+        .into_iter()
+        .map(|recommendation| recommendation.target)
+        .collect();
+    assert_eq!(listed, IntegrationTarget::ALL);
+    assert!(installed_integration_statuses()
+        .iter()
+        .all(|status| !status.target.is_retired()));
+
+    if let Some(home) = original_home {
+        std::env::set_var("HOME", home);
+    } else {
+        std::env::remove_var("HOME");
     }
     let _ = fs::remove_dir_all(base);
 }
@@ -352,76 +427,6 @@ fn command_available_finds_windows_command_shims_on_path() {
 
     assert!(!command_available("missing-agent"));
 
-    if let Some(path) = original_path {
-        std::env::set_var("PATH", path);
-    } else {
-        std::env::remove_var("PATH");
-    }
-    let _ = fs::remove_dir_all(base);
-}
-
-#[test]
-#[cfg(windows)]
-fn qodercli_availability_checks_windows_aliases() {
-    let _lock = integration_env_lock();
-    let base = unique_base();
-    let bin = base.join("bin");
-    fs::create_dir_all(&bin).unwrap();
-    let original_path = std::env::var_os("PATH");
-    std::env::set_var("PATH", &bin);
-
-    fs::write(bin.join("qoder.cmd"), "@echo off\r\n").unwrap();
-
-    assert!(integration_target_available(
-        crate::api::schema::IntegrationTarget::Qodercli
-    ));
-
-    if let Some(path) = original_path {
-        std::env::set_var("PATH", path);
-    } else {
-        std::env::remove_var("PATH");
-    }
-    let _ = fs::remove_dir_all(base);
-}
-
-#[test]
-#[cfg(windows)]
-fn hermes_layout_makes_target_available() {
-    let _lock = integration_env_lock();
-    let base = unique_base();
-    let local_app_data = base.join("local-app-data");
-    let hermes_bin = local_app_data.join("hermes").join("bin");
-    fs::create_dir_all(&hermes_bin).unwrap();
-    fs::write(hermes_bin.join("hermes.exe"), "").unwrap();
-    let original_hermes_home = std::env::var_os(HERMES_HOME_ENV_VAR);
-    let original_home = std::env::var_os("HOME");
-    let original_local_app_data = std::env::var_os("LOCALAPPDATA");
-    let original_path = std::env::var_os("PATH");
-    std::env::remove_var(HERMES_HOME_ENV_VAR);
-    std::env::remove_var("HOME");
-    std::env::set_var("LOCALAPPDATA", &local_app_data);
-    std::env::set_var("PATH", "");
-
-    assert!(hermes_install_layout_available());
-    assert!(integration_target_available(
-        crate::api::schema::IntegrationTarget::Hermes
-    ));
-
-    if let Some(hermes_home) = original_hermes_home {
-        std::env::set_var(HERMES_HOME_ENV_VAR, hermes_home);
-    } else {
-        std::env::remove_var(HERMES_HOME_ENV_VAR);
-    }
-    if let Some(home) = original_home {
-        std::env::set_var("HOME", home);
-    } else {
-        std::env::remove_var("HOME");
-    }
-    if let Some(local_app_data) = original_local_app_data {
-        std::env::set_var("LOCALAPPDATA", local_app_data);
-    } else {
-        std::env::remove_var("LOCALAPPDATA");
-    }
     if let Some(path) = original_path {
         std::env::set_var("PATH", path);
     } else {
@@ -1021,36 +1026,6 @@ fn outdated_integrations_detect_previous_pi_version() {
     assert_eq!(outdated[0].path, extension_path);
     assert_eq!(outdated[0].installed_version, Some(4));
     assert_eq!(outdated[0].expected_version, PI_INTEGRATION_VERSION);
-
-    std::env::remove_var("HOME");
-    let _ = fs::remove_dir_all(base);
-}
-
-#[test]
-fn outdated_integrations_detect_previous_omp_version() {
-    let _lock = integration_env_lock();
-    let base = unique_base();
-    let home = base.join("home");
-    let ext_dir = home.join(".omp/agent/extensions");
-    fs::create_dir_all(&ext_dir).unwrap();
-    let extension_path = ext_dir.join(OMP_EXTENSION_INSTALL_NAME);
-    fs::write(
-        &extension_path,
-        "// HERDR_INTEGRATION_ID=omp\n// HERDR_INTEGRATION_VERSION=4\n",
-    )
-    .unwrap();
-    std::env::set_var("HOME", &home);
-
-    let outdated = outdated_installed_integrations();
-
-    assert_eq!(outdated.len(), 1);
-    assert_eq!(
-        outdated[0].target,
-        crate::api::schema::IntegrationTarget::Omp
-    );
-    assert_eq!(outdated[0].path, extension_path);
-    assert_eq!(outdated[0].installed_version, Some(4));
-    assert_eq!(outdated[0].expected_version, OMP_INTEGRATION_VERSION);
 
     std::env::remove_var("HOME");
     let _ = fs::remove_dir_all(base);
@@ -1871,36 +1846,6 @@ fn install_copilot_writes_hook_and_updates_settings() {
 }
 
 #[test]
-fn copilot_v1_integration_status_is_outdated() {
-    let _lock = integration_env_lock();
-    let base = unique_base();
-    let home = base.join("home");
-    let copilot_hooks_dir = home.join(".copilot").join("hooks");
-    fs::create_dir_all(&copilot_hooks_dir).unwrap();
-    let hook_path = copilot_hooks_dir.join(COPILOT_HOOK_INSTALL_NAME);
-    fs::write(
-        &hook_path,
-        "#!/bin/sh\n# HERDR_INTEGRATION_ID=copilot\n# HERDR_INTEGRATION_VERSION=1\n",
-    )
-    .unwrap();
-    std::env::set_var("HOME", &home);
-
-    let statuses = installed_integration_statuses();
-    let copilot = statuses
-        .iter()
-        .find(|status| status.target == crate::api::schema::IntegrationTarget::Copilot)
-        .unwrap();
-
-    assert_eq!(copilot.path, hook_path);
-    assert_eq!(copilot.installed_version, Some(1));
-    assert_eq!(copilot.expected_version, COPILOT_INTEGRATION_VERSION);
-    assert_eq!(copilot.state, IntegrationStatusKind::Outdated);
-
-    std::env::remove_var("HOME");
-    let _ = fs::remove_dir_all(base);
-}
-
-#[test]
 fn install_copilot_uses_copilot_home_env_and_is_idempotent() {
     let _lock = integration_env_lock();
     let base = unique_base();
@@ -2324,36 +2269,6 @@ fn install_droid_is_idempotent_for_hook_entries() {
             "expected hooks.{event} to be idempotent"
         );
     }
-
-    std::env::remove_var("HOME");
-    let _ = fs::remove_dir_all(base);
-}
-
-#[test]
-fn droid_v1_integration_status_is_outdated() {
-    let _lock = integration_env_lock();
-    let base = unique_base();
-    let home = base.join("home");
-    let droid_hooks_dir = home.join(".factory").join("hooks");
-    fs::create_dir_all(&droid_hooks_dir).unwrap();
-    let hook_path = droid_hooks_dir.join(DROID_HOOK_INSTALL_NAME);
-    fs::write(
-        &hook_path,
-        "#!/bin/sh\n# HERDR_INTEGRATION_ID=droid\n# HERDR_INTEGRATION_VERSION=1\n",
-    )
-    .unwrap();
-    std::env::set_var("HOME", &home);
-
-    let statuses = installed_integration_statuses();
-    let droid = statuses
-        .iter()
-        .find(|status| status.target == crate::api::schema::IntegrationTarget::Droid)
-        .unwrap();
-
-    assert_eq!(droid.path, hook_path);
-    assert_eq!(droid.installed_version, Some(1));
-    assert_eq!(droid.expected_version, DROID_INTEGRATION_VERSION);
-    assert_eq!(droid.state, IntegrationStatusKind::Outdated);
 
     std::env::remove_var("HOME");
     let _ = fs::remove_dir_all(base);
@@ -3659,194 +3574,6 @@ fn install_qwen_errors_when_config_dir_missing() {
 }
 
 #[test]
-fn install_and_uninstall_letta_preserve_unrelated_settings_and_hooks() {
-    let _lock = integration_env_lock();
-    let base = unique_base();
-    let home = base.join("home");
-    let letta_dir = home.join(".letta");
-    fs::create_dir_all(&letta_dir).unwrap();
-    let settings_path = letta_dir.join("settings.json");
-    fs::write(
-        &settings_path,
-        r#"{"theme":"dark","hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"echo user"}]}]}}"#,
-    )
-    .unwrap();
-    let previous_home = std::env::var_os("HOME");
-    std::env::set_var("HOME", &home);
-
-    let installed = install_letta().unwrap();
-    assert_eq!(
-        installed.hook_path,
-        letta_dir.join("hooks").join(LETTA_HOOK_INSTALL_NAME)
-    );
-    let first_install = fs::read_to_string(&settings_path).unwrap();
-    let settings: Value = serde_json::from_str(&first_install).unwrap();
-    let entries = settings["hooks"]["SessionStart"].as_array().unwrap();
-    assert_eq!(entries.len(), 2);
-    assert_eq!(entries[0]["hooks"][0]["command"], "echo user");
-    assert!(entries[1].get("matcher").is_none());
-    assert_eq!(entries[1]["hooks"][0]["timeout"], LETTA_HOOK_TIMEOUT_MS);
-    assert_eq!(entries[1]["hooks"][0]["quiet"], true);
-    assert!(entries[1]["hooks"][0]["command"]
-        .as_str()
-        .unwrap()
-        .ends_with("session"));
-    assert_eq!(settings["theme"], "dark");
-
-    install_letta().unwrap();
-    assert_eq!(fs::read_to_string(&settings_path).unwrap(), first_install);
-
-    let result = uninstall_letta().unwrap();
-    assert!(result.removed_hook_file);
-    assert!(result.updated_settings);
-    assert!(!installed.hook_path.exists());
-    let settings: Value =
-        serde_json::from_str(&fs::read_to_string(&settings_path).unwrap()).unwrap();
-    assert_eq!(settings["theme"], "dark");
-    let remaining = settings["hooks"]["SessionStart"].as_array().unwrap();
-    assert_eq!(remaining.len(), 1);
-    assert_eq!(remaining[0]["hooks"][0]["command"], "echo user");
-
-    if let Some(home) = previous_home {
-        std::env::set_var("HOME", home);
-    } else {
-        std::env::remove_var("HOME");
-    }
-    let _ = fs::remove_dir_all(base);
-}
-
-#[cfg(unix)]
-#[test]
-fn letta_session_hook_is_silent_and_encodes_default_conversation() {
-    use std::io::Write;
-    use std::os::unix::fs::PermissionsExt;
-    use std::process::{Command, Stdio};
-
-    let _lock = integration_env_lock();
-    let base = unique_base();
-    let home = base.join("home");
-    fs::create_dir_all(home.join(".letta")).unwrap();
-    let previous_home = std::env::var_os("HOME");
-    std::env::set_var("HOME", &home);
-    let installed = install_letta().unwrap();
-
-    let capture = base.join("args.txt");
-    let fake_herdr = base.join("herdr");
-    fs::write(
-        &fake_herdr,
-        format!(
-            "#!/bin/sh\nprintf '%s\\n' \"$*\" > '{}'\n",
-            capture.display()
-        ),
-    )
-    .unwrap();
-    let mut permissions = fs::metadata(&fake_herdr).unwrap().permissions();
-    permissions.set_mode(0o755);
-    fs::set_permissions(&fake_herdr, permissions).unwrap();
-
-    let mut child = Command::new("sh")
-        .arg(&installed.hook_path)
-        .arg("session")
-        .env("HERDR_ENV", "1")
-        .env("HERDR_PANE_ID", "w1:p2")
-        .env("HERDR_SOCKET_PATH", "/tmp/herdr.sock")
-        .env("HERDR_BIN_PATH", &fake_herdr)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap();
-    child
-        .stdin
-        .take()
-        .unwrap()
-        .write_all(
-            br#"{"event_type":"SessionStart","conversation_id":"default","agent_id":"agent-123","is_new_session":false}"#,
-        )
-        .unwrap();
-    let output = child.wait_with_output().unwrap();
-    assert!(output.status.success());
-    assert!(output.stdout.is_empty());
-    assert!(output.stderr.is_empty());
-    let args = fs::read_to_string(capture).unwrap();
-    assert!(args.contains("report-agent-session w1:p2"));
-    assert!(args.contains("--source herdr:letta --agent letta"));
-    assert!(args.contains("--agent-session-id default:agent-123"));
-    assert!(args.contains("--session-start-source resume"));
-
-    if let Some(home) = previous_home {
-        std::env::set_var("HOME", home);
-    } else {
-        std::env::remove_var("HOME");
-    }
-    let _ = fs::remove_dir_all(base);
-}
-
-#[test]
-fn install_letta_errors_when_config_dir_missing() {
-    let _lock = integration_env_lock();
-    let base = unique_base();
-    let home = base.join("home");
-    fs::create_dir_all(&home).unwrap();
-    let previous_home = std::env::var_os("HOME");
-    std::env::set_var("HOME", &home);
-
-    let err = install_letta().unwrap_err().to_string();
-    assert!(err.contains("letta code config directory not found"));
-
-    if let Some(home) = previous_home {
-        std::env::set_var("HOME", home);
-    } else {
-        std::env::remove_var("HOME");
-    }
-    let _ = fs::remove_dir_all(base);
-}
-
-#[test]
-fn install_letta_does_not_publish_hook_when_settings_are_invalid() {
-    let _lock = integration_env_lock();
-    let base = unique_base();
-    let home = base.join("home");
-    let letta_dir = home.join(".letta");
-    fs::create_dir_all(&letta_dir).unwrap();
-    fs::write(letta_dir.join("settings.json"), "not json").unwrap();
-    let previous_home = std::env::var_os("HOME");
-    std::env::set_var("HOME", &home);
-
-    assert!(install_letta().is_err());
-    assert!(!letta_dir
-        .join("hooks")
-        .join(LETTA_HOOK_INSTALL_NAME)
-        .exists());
-
-    if let Some(home) = previous_home {
-        std::env::set_var("HOME", home);
-    } else {
-        std::env::remove_var("HOME");
-    }
-    let _ = fs::remove_dir_all(base);
-}
-
-#[test]
-fn letta_staged_install_can_restore_the_prior_file() {
-    let base = unique_base();
-    fs::create_dir_all(&base).unwrap();
-    let target = base.join("settings.json");
-    fs::write(&target, "old").unwrap();
-
-    let (staged, backup) = prepare_letta_install_file(&target, b"new", false, true).unwrap();
-    let had_original = publish_letta_install_file(&target, &staged, &backup).unwrap();
-    assert!(had_original);
-    assert_eq!(fs::read_to_string(&target).unwrap(), "new");
-
-    rollback_letta_install_file(&target, &backup, had_original).unwrap();
-    assert_eq!(fs::read_to_string(&target).unwrap(), "old");
-    assert!(!backup.exists());
-
-    let _ = fs::remove_dir_all(base);
-}
-
-#[test]
 fn install_cursor_writes_hook_and_updates_hooks_json() {
     let _lock = integration_env_lock();
     let base = unique_base();
@@ -3962,32 +3689,6 @@ fn install_cursor_uses_cursor_config_dir_env() {
         cursor_dir.join(CURSOR_HOOK_INSTALL_NAME)
     );
     assert_eq!(installed.hooks_path, cursor_dir.join("hooks.json"));
-
-    clear_integration_path_env();
-    let _ = fs::remove_dir_all(base);
-}
-
-#[test]
-fn cursor_v1_integration_status_is_current() {
-    let _lock = integration_env_lock();
-    let base = unique_base();
-    let cursor_dir = base.join(".cursor");
-    fs::create_dir_all(&cursor_dir).unwrap();
-    let hook_path = cursor_dir.join(CURSOR_HOOK_INSTALL_NAME);
-    fs::write(
-        &hook_path,
-        "#!/bin/sh\n# HERDR_INTEGRATION_ID=cursor\n# HERDR_INTEGRATION_VERSION=1\n",
-    )
-    .unwrap();
-    std::env::set_var(CURSOR_CONFIG_DIR_ENV_VAR, &cursor_dir);
-
-    let statuses = installed_integration_statuses();
-    let cursor = statuses
-        .iter()
-        .find(|status| status.target == crate::api::schema::IntegrationTarget::Cursor)
-        .expect("cursor integration status");
-    assert_eq!(cursor.state, IntegrationStatusKind::Current);
-    assert_eq!(cursor.installed_version, Some(CURSOR_INTEGRATION_VERSION));
 
     clear_integration_path_env();
     let _ = fs::remove_dir_all(base);
@@ -4479,39 +4180,6 @@ fn install_antigravity_cli_writes_hook_and_updates_hooks_json() {
 }
 
 #[test]
-fn antigravity_cli_v2_install_is_outdated_until_reinstalled() {
-    let _lock = integration_env_lock();
-    let base = unique_base();
-    let agy_dir = base.join(".gemini").join("config");
-    let hook_dir = agy_dir.join("hooks");
-    fs::create_dir_all(&hook_dir).unwrap();
-    fs::write(
-        hook_dir.join(ANTIGRAVITY_CLI_HOOK_INSTALL_NAME),
-        ANTIGRAVITY_CLI_HOOK_ASSET
-            .replace("HERDR_INTEGRATION_VERSION=3", "HERDR_INTEGRATION_VERSION=2"),
-    )
-    .unwrap();
-    std::env::set_var(ANTIGRAVITY_CLI_CONFIG_DIR_ENV_VAR, &agy_dir);
-
-    let status = || {
-        installed_integration_statuses()
-            .into_iter()
-            .find(|status| status.target == crate::api::schema::IntegrationTarget::AntigravityCli)
-            .expect("antigravity cli integration status")
-    };
-    let outdated = status();
-    assert_eq!(outdated.state, IntegrationStatusKind::Outdated);
-    assert_eq!(outdated.installed_version, Some(2));
-    assert_eq!(outdated.expected_version, 3);
-
-    install_antigravity_cli().unwrap();
-    assert_eq!(status().state, IntegrationStatusKind::Current);
-
-    std::env::remove_var(ANTIGRAVITY_CLI_CONFIG_DIR_ENV_VAR);
-    let _ = fs::remove_dir_all(base);
-}
-
-#[test]
 fn install_antigravity_cli_rewrites_stale_herdr_block() {
     let _lock = integration_env_lock();
     let base = unique_base();
@@ -4569,149 +4237,6 @@ fn install_antigravity_cli_errors_when_config_dir_missing() {
     assert!(!agy_dir.exists(), "install must not create the config dir");
 
     std::env::remove_var(ANTIGRAVITY_CLI_CONFIG_DIR_ENV_VAR);
-    let _ = fs::remove_dir_all(base);
-}
-
-#[test]
-fn grok_v1_integration_status_is_outdated() {
-    let _lock = integration_env_lock();
-    let base = unique_base();
-    let grok_dir = base.join(".grok");
-    let hooks_dir = grok_dir.join("hooks");
-    fs::create_dir_all(&hooks_dir).unwrap();
-    std::env::set_var(GROK_CONFIG_DIR_ENV_VAR, &grok_dir);
-    let hook_path = hooks_dir.join(GROK_HOOK_INSTALL_NAME);
-    fs::write(
-        &hook_path,
-        "#!/bin/sh\n# HERDR_INTEGRATION_ID=grok\n# HERDR_INTEGRATION_VERSION=1\n",
-    )
-    .unwrap();
-    fs::write(
-        hooks_dir.join(GROK_HOOK_CONFIG_INSTALL_NAME),
-        serde_json::to_string(&grok_hook_config(&hook_path)).unwrap(),
-    )
-    .unwrap();
-
-    let grok = installed_integration_statuses()
-        .into_iter()
-        .find(|status| status.target == crate::api::schema::IntegrationTarget::Grok)
-        .expect("grok integration status");
-    assert_eq!(grok.installed_version, Some(1));
-    assert_eq!(grok.expected_version, GROK_INTEGRATION_VERSION);
-    assert_eq!(grok.state, IntegrationStatusKind::Outdated);
-
-    clear_integration_path_env();
-    let _ = fs::remove_dir_all(base);
-}
-
-#[test]
-fn grok_v2_integration_status_is_current() {
-    let _lock = integration_env_lock();
-    let base = unique_base();
-    let grok_dir = base.join(".grok");
-    fs::create_dir_all(&grok_dir).unwrap();
-    std::env::set_var(GROK_CONFIG_DIR_ENV_VAR, &grok_dir);
-    // A real install writes both the hook script and hooks/herdr.json.
-    install_grok().unwrap();
-
-    let statuses = installed_integration_statuses();
-    let grok = statuses
-        .iter()
-        .find(|status| status.target == crate::api::schema::IntegrationTarget::Grok)
-        .expect("grok integration status");
-    assert_eq!(grok.state, IntegrationStatusKind::Current);
-    assert_eq!(grok.installed_version, Some(GROK_INTEGRATION_VERSION));
-
-    clear_integration_path_env();
-    let _ = fs::remove_dir_all(base);
-}
-
-#[test]
-fn grok_status_reports_outdated_when_hook_config_missing_or_broken() {
-    let _lock = integration_env_lock();
-    let base = unique_base();
-    let grok_dir = base.join(".grok");
-    fs::create_dir_all(&grok_dir).unwrap();
-    std::env::set_var(GROK_CONFIG_DIR_ENV_VAR, &grok_dir);
-    install_grok().unwrap();
-    let config_path = grok_dir.join("hooks").join(GROK_HOOK_CONFIG_INSTALL_NAME);
-
-    let grok_state = || {
-        installed_integration_statuses()
-            .into_iter()
-            .find(|status| status.target == crate::api::schema::IntegrationTarget::Grok)
-            .expect("grok integration status")
-            .state
-    };
-
-    // Missing config: grok never runs the hook, so the install is not current.
-    fs::remove_file(&config_path).unwrap();
-    assert_eq!(grok_state(), IntegrationStatusKind::Outdated);
-
-    // Corrupt config.
-    fs::write(&config_path, "{not json").unwrap();
-    assert_eq!(grok_state(), IntegrationStatusKind::Outdated);
-
-    // Config that no longer references the hook script.
-    fs::write(
-        &config_path,
-        r#"{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"echo other"}]}]}}"#,
-    )
-    .unwrap();
-    assert_eq!(grok_state(), IntegrationStatusKind::Outdated);
-
-    // Config that mentions the script name without invoking it, and one that
-    // invokes it without the required `session` action: both are
-    // nonfunctional, so neither may report current.
-    fs::write(
-        &config_path,
-        r#"{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"echo herdr-agent-state.sh"}]}]}}"#,
-    )
-    .unwrap();
-    assert_eq!(grok_state(), IntegrationStatusKind::Outdated);
-    let hook_path = grok_dir.join("hooks").join(GROK_HOOK_INSTALL_NAME);
-    fs::write(
-        &config_path,
-        format!(
-            r#"{{"hooks":{{"SessionStart":[{{"hooks":[{{"type":"command","command":"sh '{}'"}}]}}]}}}}"#,
-            hook_path.display()
-        ),
-    )
-    .unwrap();
-    assert_eq!(grok_state(), IntegrationStatusKind::Outdated);
-
-    // Correct command but not a command-type hook: grok will not execute it.
-    let session_command = grok_session_command(&grok_hook_config(&hook_path));
-    fs::write(
-        &config_path,
-        format!(
-            r#"{{"hooks":{{"SessionStart":[{{"hooks":[{{"type":"http","command":{}}}]}}]}}}}"#,
-            serde_json::to_string(&session_command).unwrap()
-        ),
-    )
-    .unwrap();
-    assert_eq!(grok_state(), IntegrationStatusKind::Outdated);
-
-    // A matcher can prevent the expected hook from running.
-    let mut config = grok_hook_config(&hook_path);
-    config["hooks"]["SessionStart"][0]["matcher"] = json!("(");
-    fs::write(&config_path, serde_json::to_string(&config).unwrap()).unwrap();
-    assert_eq!(grok_state(), IntegrationStatusKind::Outdated);
-
-    // A malformed sibling group makes grok reject the event's hook groups.
-    let mut config = grok_hook_config(&hook_path);
-    config["hooks"]["SessionStart"]
-        .as_array_mut()
-        .unwrap()
-        .push(json!({}));
-    fs::write(&config_path, serde_json::to_string(&config).unwrap()).unwrap();
-    assert_eq!(grok_state(), IntegrationStatusKind::Outdated);
-
-    // Reinstall repairs both files.
-    install_grok().unwrap();
-    assert_eq!(grok_state(), IntegrationStatusKind::Current);
-
-    clear_integration_path_env();
     let _ = fs::remove_dir_all(base);
 }
 

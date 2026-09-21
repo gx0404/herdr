@@ -17,9 +17,7 @@ pub(crate) use usage::statusline_enabled as usage_statusline_enabled;
 pub(crate) use usage::supports_extension_push as usage_supports_extension_push;
 pub(crate) use usage::supports_statusline as usage_supports_statusline;
 
-pub(crate) use actions::{
-    install_experimental_letta, install_target, uninstall_experimental_letta, uninstall_target,
-};
+pub(crate) use actions::{install_target, uninstall_target};
 #[cfg(test)]
 pub(crate) use env::integration_env_lock;
 pub(crate) use env::{
@@ -28,19 +26,10 @@ pub(crate) use env::{
 };
 pub(crate) use registry::{
     codex_layout_binary_path, command_available, command_path_candidates, executable_file_exists,
-    experimental_letta_integration_status, installed_integration_statuses,
-    integration_recommendations, integration_target_available, integration_target_label,
-    print_outdated_update_notice,
+    installed_integration_statuses, integration_recommendations, integration_target_available,
+    integration_target_label, print_outdated_update_notice, retired_integration_error,
 };
-pub(crate) use types::{
-    ExperimentalIntegrationStatus, IntegrationRecommendation, IntegrationStatus,
-    IntegrationStatusKind,
-};
-
-/// CLI labels for experimental integrations that are intentionally not part of
-/// the frozen client endpoint `IntegrationTarget` enum. Empty this list once the
-/// agent registry provides first-class target registration.
-pub(crate) const EXPERIMENTAL_INTEGRATION_TARGET_LABELS: &[&str] = &["letta"];
+pub(crate) use types::{IntegrationRecommendation, IntegrationStatus, IntegrationStatusKind};
 
 const PI_EXTENSION_INSTALL_NAME: &str = "herdr-agent-state.ts";
 const PI_EXTENSION_ASSET: &str = include_str!("assets/pi/herdr-agent-state.ts");
@@ -227,18 +216,6 @@ const QWEN_HOOK_ASSET: &str = if cfg!(windows) {
 };
 const QWEN_INTEGRATION_VERSION: u32 = 1;
 const QWEN_HOOK_EVENTS: [(&str, &str); 1] = [("SessionStart", "session")];
-const LETTA_HOOK_INSTALL_NAME: &str = if cfg!(windows) {
-    "herdr-agent-session.ps1"
-} else {
-    "herdr-agent-session.sh"
-};
-const LETTA_HOOK_ASSET: &str = if cfg!(windows) {
-    include_str!("assets/letta/herdr-agent-session.ps1")
-} else {
-    include_str!("assets/letta/herdr-agent-session.sh")
-};
-const LETTA_INTEGRATION_VERSION: u32 = 1;
-const LETTA_HOOK_TIMEOUT_MS: u64 = 10_000;
 const QODERCLI_REMOVED_LIFECYCLE_HOOK_EVENTS: [(&str, &str); 12] = [
     ("SessionStart", "idle"),
     ("UserPromptSubmit", "working"),

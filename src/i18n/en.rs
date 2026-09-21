@@ -1142,7 +1142,6 @@ pub const TEXTS: Texts = Texts {
         integration_current_fmt: "current ({version})",
         integration_needs_repair_fmt: "needs repair ({version})",
         integration_outdated_fmt: "outdated ({version} < {expected})",
-        integration_experimental_label: " (experimental): ",
         explain_agent_label: "agent: ",
         explain_state_label: "state: ",
         explain_manifest_label: "manifest: ",
@@ -1538,10 +1537,11 @@ pub const TEXTS: Texts = Texts {
 
         integration_status_usage: "usage: herdr integration status [--outdated-only]",
         integration_target_usage_fmt:
-            "usage: herdr integration {action} <pi|omp|claude|codex|copilot|devin|droid|kimi|opencode|kilo|hermes|qodercli|qwen|letta|cursor|mastracode|grok>",
+            "usage: herdr integration {action} <pi|claude|codex|kimi|opencode>",
         integration_target_unknown_fmt: "unknown integration target: {target}",
-        integration_targets_supported:
-            "currently supported: pi, omp, claude, codex, copilot, devin, droid, kimi, opencode, kilo, hermes, qodercli, qwen, letta, cursor, mastracode, antigravity-cli, grok",
+        integration_target_retired_fmt:
+            "integration target {target} has been retired in this fork and can no longer be installed or uninstalled",
+        integration_targets_supported: "currently supported: pi, claude, codex, kimi, opencode",
 
         integrations_need_updating_fmt: "installed herdr integrations need updating; {instructions}.",
         integration_instructions_run_fmt: "run {command}",

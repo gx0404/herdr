@@ -63,6 +63,11 @@ pub(crate) fn cursor_command_names() -> &'static [&'static str] {
 }
 
 pub(crate) fn integration_target_supported(target: crate::api::schema::IntegrationTarget) -> bool {
+    // 退役变体在任何平台都不受支持：不进 `integration.list`、状态与更新提示。
+    if target.is_retired() {
+        return false;
+    }
+
     #[cfg(windows)]
     {
         matches!(
@@ -89,9 +94,31 @@ pub(crate) fn integration_target_supported(target: crate::api::schema::Integrati
 
     #[cfg(not(windows))]
     {
-        let _ = target;
         true
     }
+}
+
+/// 退役集成的统一错误：install / uninstall 与 API 入口都返回它，旧客户端按名字传来
+/// 的退役 target 因此得到明确的「已退役」而不是反序列化失败。口径见
+/// `docs/AGENT_RULES/README.md` 的「fork 已删除的集成」。
+pub(crate) fn retired_integration_error(
+    action: &'static str,
+    target: crate::api::schema::IntegrationTarget,
+) -> io::Error {
+    let name = target.wire_name();
+    tracing::warn!(
+        event = "integration.retired",
+        subsystem = "integration",
+        action,
+        target = %name,
+        "retired integration target requested"
+    );
+    io::Error::other(crate::i18n::fill(
+        crate::i18n::texts()
+            .cli_errors
+            .integration_target_retired_fmt,
+        &[("target", &name)],
+    ))
 }
 
 pub(crate) fn integration_target_available(target: crate::api::schema::IntegrationTarget) -> bool {
@@ -577,27 +604,6 @@ pub(crate) fn integration_status_at(
         installed_version,
         expected_version,
     }
-}
-
-/// Letta is intentionally kept out of the frozen client endpoint
-/// `IntegrationTarget` enum so published generation-1 clients never receive an
-/// unknown variant. It is installable and reportable as an experimental
-/// CLI-only target until the agent registry replaces the enum-keyed registry.
-pub(crate) fn experimental_letta_integration_status() -> Option<super::ExperimentalIntegrationStatus>
-{
-    let path = letta_dir()
-        .ok()?
-        .join("hooks")
-        .join(super::LETTA_HOOK_INSTALL_NAME);
-    let (state, installed_version) =
-        integration_state_for_path(&path, super::LETTA_INTEGRATION_VERSION);
-    Some(super::ExperimentalIntegrationStatus {
-        label: "letta",
-        path,
-        state,
-        installed_version,
-        expected_version: super::LETTA_INTEGRATION_VERSION,
-    })
 }
 
 pub(crate) fn parse_integration_version(content: &str) -> Option<u32> {

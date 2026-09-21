@@ -1340,7 +1340,6 @@ pub struct CliOutputTexts {
     pub integration_current_fmt: &'static str,
     pub integration_needs_repair_fmt: &'static str,
     pub integration_outdated_fmt: &'static str,
-    pub integration_experimental_label: &'static str,
     pub explain_agent_label: &'static str,
     pub explain_state_label: &'static str,
     pub explain_manifest_label: &'static str,
@@ -1699,6 +1698,7 @@ pub struct CliErrorTexts {
     pub integration_status_usage: &'static str,
     pub integration_target_usage_fmt: &'static str, // args: action
     pub integration_target_unknown_fmt: &'static str, // args: target
+    pub integration_target_retired_fmt: &'static str, // args: target
     pub integration_targets_supported: &'static str,
 
     // src/integration (registry notice + install support check)

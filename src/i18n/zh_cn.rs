@@ -1143,7 +1143,6 @@ pub const TEXTS: Texts = Texts {
         integration_current_fmt: "当前（{version}）",
         integration_needs_repair_fmt: "需要修复（{version}）",
         integration_outdated_fmt: "已过期（{version} < {expected}）",
-        integration_experimental_label: "（实验性）：",
         explain_agent_label: "agent：",
         explain_state_label: "状态：",
         explain_manifest_label: "manifest：",
@@ -1517,10 +1516,11 @@ pub const TEXTS: Texts = Texts {
 
         integration_status_usage: "用法：herdr integration status [--outdated-only]",
         integration_target_usage_fmt:
-            "用法：herdr integration {action} <pi|omp|claude|codex|copilot|devin|droid|kimi|opencode|kilo|hermes|qodercli|qwen|letta|cursor|mastracode|grok>",
+            "用法：herdr integration {action} <pi|claude|codex|kimi|opencode>",
         integration_target_unknown_fmt: "未知的集成目标：{target}",
-        integration_targets_supported:
-            "当前支持：pi, omp, claude, codex, copilot, devin, droid, kimi, opencode, kilo, hermes, qodercli, qwen, letta, cursor, mastracode, antigravity-cli, grok",
+        integration_target_retired_fmt:
+            "集成目标 {target} 已在本 fork 退役，不再支持安装或卸载",
+        integration_targets_supported: "当前支持：pi, claude, codex, kimi, opencode",
 
         integrations_need_updating_fmt: "已安装的 herdr 集成需要更新；{instructions}。",
         integration_instructions_run_fmt: "运行 {command}",

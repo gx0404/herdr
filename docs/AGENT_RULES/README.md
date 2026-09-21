@@ -102,18 +102,22 @@ fork **照常同步上游**；本节只约束同步时怎样处理六家以外�
     `integration.list` 返回里，fork 客户端就解析不出这份列表。枚举与 fixture 归
     上游维护，删了还是每次同步的永久冲突。该枚举按名字走 JSON（serde
     `snake_case`），不经 `src/protocol/wire.rs` 的 bincode，变体序号不是理由。
-  - **退役的代码形态**（后续删除波次的前置：先建退役分支，再删资产与注册
-    分支）：变体留在枚举里，位置与 serde 名不动；从 `IntegrationTarget::ALL`
-    （`src/cli/spec.rs` 由它生成 `--target` 取值）、
-    `src/integration/registry.rs::integration_specs`（`integration.list` 与更新
-    提示的来源）和 `src/cli/integration.rs::parse_integration_target` 摘除。
-    `registry.rs::integration_target_label`、`::integration_target_command_names`
-    与 `src/integration/actions.rs::install_target_inner`、`::uninstall_target`
-    这 4 处 match 是穷尽的、没有 `_` 兜底（`registry.rs` 唯一的 `_ => false` 属于
-    `integration_target_install_layout_available`）：先在这 4 处建立统一的退役
-    分支（install/uninstall 返回明确的「已退役」错误，
-    `integration_target_supported` 返回 false），否则「丢弃 registry/actions
-    分支」直接 E0004 编译失败，上面的共享文件口径不可执行。
+  - **退役的代码形态**（退役门已落地；资产与注册分支的物理删除在其后）：变体
+    留在枚举里，位置与 serde 名不动。`IntegrationTarget::ALL` 只列官方集成
+    （`src/cli/spec.rs` 由它生成 `--target` 取值），`IntegrationTarget::is_retired`
+    即「不在 `ALL` 里」，上游日后追加的变体因此自动退役。退役门有三道：
+    `src/integration/actions.rs::install_target_inner` 与 `::uninstall_target` 在
+    入口返回 `registry.rs::retired_integration_error`（文案
+    `integration_target_retired_fmt`，en / zh_cn）；
+    `registry.rs::integration_target_supported` 对退役变体返回 false，
+    `integration.list`、`herdr integration status` 与更新提示随之不再列出；
+    `src/app/api/integrations.rs` 对旧客户端按名字传来的退役 target 回错误码
+    `integration_retired`（能反序列化、不 panic）。
+    `src/cli/integration.rs::parse_integration_target` 只接受 `ALL`，其余能解析成
+    冻结变体的名字给退役提示。`registry.rs::integration_target_label`、
+    `::integration_target_command_names` 与 `actions.rs` 的两处 match 是穷尽的：
+    删资产与注册分支时必须同时把退役变体并进统一的退役分支，否则直接 E0004
+    编译失败，上面的共享文件口径不可执行。
   - **上游日后追加非六家变体**：接收枚举那一行并让它落入退役分支（分支写成
     `_` 兜底则无需再改，写成显式 arm 则把新变体并进去），不进 `ALL`、
     `integration_specs` 与 `parse_integration_target`；其资产、注册、清单、
@@ -127,10 +131,11 @@ fork **照常同步上游**；本节只约束同步时怎样处理六家以外�
     generation-1 期望归上游维护，fork 只跟随、不自行重写。上游若改用独立冻结
     （参照同一测试里 `pane.link.resolve` 的内联摘要与
     `tests/fixtures/endpoint-observability-shapes-v1.json`），跟随上游的做法。
-  - **上游现行做法是不动冻结枚举**：letta 走
+  - **上游现行做法是不动冻结枚举**：letta 在上游走
     `src/cli/integration.rs::IntegrationCommandTarget` 与
     `src/integration/mod.rs::EXPERIMENTAL_INTEGRATION_TARGET_LABELS` 的 CLI-only
-    通道。这类新增不触及冻结面，整块丢弃即可。
+    通道。这类新增不触及冻结面，整块丢弃即可；fork 已把这条旁路整条删除，
+    同步时这两个符号连同其调用点都不再合入。
 - **检查**：同步后跑 `python3 scripts/upstream_sync_drop_check.py`——清单命中的
   路径仍是 Git 可见文件即退出码 1；`--list` 只列不判。物理删除在后续波次落地，
   此刻这些路径还在，所以它**尚未接入** `just check` / `just maintenance-test`；

@@ -980,12 +980,10 @@ fn integration_target_arg() -> Arg {
 }
 
 fn integration_target_values() -> Vec<&'static str> {
-    let mut values: Vec<&'static str> = crate::api::schema::IntegrationTarget::ALL
+    crate::api::schema::IntegrationTarget::ALL
         .into_iter()
         .map(crate::integration::integration_target_label)
-        .collect();
-    values.extend_from_slice(crate::integration::EXPERIMENTAL_INTEGRATION_TARGET_LABELS);
-    values
+        .collect()
 }
 
 fn id_command(name: &'static str, id: &'static str, about: &'static str) -> Command {
@@ -1207,25 +1205,26 @@ mod tests {
     #[test]
     fn spec_matches_all_integration_targets() {
         let cmd = super::command();
-        let install = command_path(&cmd, &["integration", "install"]);
-        let mut expected: Vec<String> = crate::api::schema::IntegrationTarget::ALL
-            .map(crate::integration::integration_target_label)
-            .map(str::to_string)
-            .to_vec();
-        expected.extend(
-            crate::integration::EXPERIMENTAL_INTEGRATION_TARGET_LABELS
-                .iter()
-                .map(|label| (*label).to_string()),
-        );
+        // 取值表钉死为本 fork 的五家官方集成：退役变体与已删除的 CLI-only 旁路都不得
+        // 出现在 `--help` 与补全里。
+        let expected = ["pi", "claude", "codex", "kimi", "opencode"];
         assert_eq!(
-            argument(install, "target")
-                .get_value_parser()
-                .possible_values()
-                .unwrap()
-                .map(|value| value.get_name().to_string())
-                .collect::<Vec<_>>(),
+            crate::api::schema::IntegrationTarget::ALL
+                .map(crate::integration::integration_target_label),
             expected
         );
+        for action in ["install", "uninstall"] {
+            let subcommand = command_path(&cmd, &["integration", action]);
+            assert_eq!(
+                argument(subcommand, "target")
+                    .get_value_parser()
+                    .possible_values()
+                    .unwrap()
+                    .map(|value| value.get_name().to_string())
+                    .collect::<Vec<_>>(),
+                expected
+            );
+        }
     }
 
     #[test]

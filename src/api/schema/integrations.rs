@@ -50,25 +50,36 @@ pub enum IntegrationTarget {
 }
 
 impl IntegrationTarget {
-    pub(crate) const ALL: [Self; 17] = [
+    /// 本 fork 官方支持的集成。枚举本身是 generation-1 冻结 codec 可达的类型，
+    /// 变体不删、不重排、不改 serde 名；其余变体只作为退役墓碑保留，
+    /// 不出现在这里（`src/cli/spec.rs` 由它生成 `--target` 取值）。
+    pub(crate) const ALL: [Self; 5] = [
         Self::Pi,
-        Self::Omp,
         Self::Claude,
         Self::Codex,
-        Self::Copilot,
-        Self::Devin,
-        Self::Droid,
         Self::Kimi,
         Self::Opencode,
-        Self::Kilo,
-        Self::Hermes,
-        Self::Qodercli,
-        Self::Qwen,
-        Self::Cursor,
-        Self::Mastracode,
-        Self::AntigravityCli,
-        Self::Grok,
     ];
+
+    /// 是否为已退役的集成：不在 `ALL` 里的变体一律视为退役，上游日后追加的
+    /// 非官方变体因此自动落入退役分支。
+    pub(crate) fn is_retired(self) -> bool {
+        !Self::ALL.contains(&self)
+    }
+
+    /// serde 名（`snake_case`）。退役变体没有独立标签表，错误与日志用它指名。
+    pub(crate) fn wire_name(self) -> String {
+        match serde_json::to_value(self) {
+            Ok(serde_json::Value::String(name)) => name,
+            // 单元变体总是序列化成字符串；这里只是不 panic 的兜底。
+            _ => format!("{self:?}").to_lowercase(),
+        }
+    }
+
+    /// 按 serde 名解析（CLI 习惯的 `-` 视同 `_`）。未知名字返回 `None`。
+    pub(crate) fn from_wire_name(name: &str) -> Option<Self> {
+        serde_json::from_value(serde_json::Value::String(name.replace('-', "_"))).ok()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]

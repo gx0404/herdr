@@ -41,7 +41,6 @@ fn integration_status(args: &[String]) -> std::io::Result<i32> {
         return Ok(0);
     }
 
-    let t = &crate::i18n::texts().cli_output;
     for status in crate::integration::installed_integration_statuses() {
         let target = crate::integration::integration_target_label(status.target);
         let state = describe_integration_state(
@@ -50,20 +49,6 @@ fn integration_status(args: &[String]) -> std::io::Result<i32> {
             status.expected_version,
         );
         println!("{target}: {state} ({})", status.path.display());
-    }
-
-    if let Some(status) = crate::integration::experimental_letta_integration_status() {
-        let state = describe_integration_state(
-            status.state,
-            status.installed_version,
-            status.expected_version,
-        );
-        println!(
-            "{}{}{state} ({})",
-            status.label,
-            t.integration_experimental_label,
-            status.path.display()
-        );
     }
 
     Ok(0)
@@ -109,11 +94,7 @@ fn integration_install(args: &[String]) -> std::io::Result<i32> {
         return Ok(2);
     };
 
-    let installed = match target {
-        IntegrationCommandTarget::Builtin(target) => crate::integration::install_target(target),
-        IntegrationCommandTarget::Letta => crate::integration::install_experimental_letta(),
-    };
-    match installed {
+    match crate::integration::install_target(target) {
         Ok(messages) => {
             print_integration_messages(messages);
             Ok(0)
@@ -130,11 +111,7 @@ fn integration_uninstall(args: &[String]) -> std::io::Result<i32> {
         return Ok(2);
     };
 
-    let removed = match target {
-        IntegrationCommandTarget::Builtin(target) => crate::integration::uninstall_target(target),
-        IntegrationCommandTarget::Letta => crate::integration::uninstall_experimental_letta(),
-    };
-    match removed {
+    match crate::integration::uninstall_target(target) {
         Ok(messages) => {
             print_integration_messages(messages);
             Ok(0)
@@ -152,18 +129,12 @@ fn print_integration_messages(messages: Vec<String>) {
     }
 }
 
-/// Integration target accepted by the CLI. Letta is deliberately kept out of
-/// the frozen client endpoint `IntegrationTarget` enum and is handled as an
-/// experimental CLI-only target until the agent registry replaces it.
-enum IntegrationCommandTarget {
-    Builtin(IntegrationTarget),
-    Letta,
-}
-
+/// CLI 只接受 `IntegrationTarget::ALL` 里的官方集成。其余名字里，能解析成冻结枚举
+/// 变体的是本 fork 已退役的集成，给出明确的退役提示；否则按未知目标处理。
 fn parse_integration_target(
     args: &[String],
     action: &str,
-) -> std::io::Result<Option<IntegrationCommandTarget>> {
+) -> std::io::Result<Option<IntegrationTarget>> {
     let Some(target) = args.first().map(|arg| arg.as_str()) else {
         eprintln!(
             "{}",
@@ -179,28 +150,20 @@ fn parse_integration_target(
         return Ok(None);
     }
 
-    let parsed = match target {
-        "pi" => IntegrationCommandTarget::Builtin(IntegrationTarget::Pi),
-        "omp" => IntegrationCommandTarget::Builtin(IntegrationTarget::Omp),
-        "claude" => IntegrationCommandTarget::Builtin(IntegrationTarget::Claude),
-        "codex" => IntegrationCommandTarget::Builtin(IntegrationTarget::Codex),
-        "copilot" => IntegrationCommandTarget::Builtin(IntegrationTarget::Copilot),
-        "devin" => IntegrationCommandTarget::Builtin(IntegrationTarget::Devin),
-        "droid" => IntegrationCommandTarget::Builtin(IntegrationTarget::Droid),
-        "kimi" => IntegrationCommandTarget::Builtin(IntegrationTarget::Kimi),
-        "opencode" => IntegrationCommandTarget::Builtin(IntegrationTarget::Opencode),
-        "kilo" => IntegrationCommandTarget::Builtin(IntegrationTarget::Kilo),
-        "hermes" => IntegrationCommandTarget::Builtin(IntegrationTarget::Hermes),
-        "qodercli" => IntegrationCommandTarget::Builtin(IntegrationTarget::Qodercli),
-        "qwen" => IntegrationCommandTarget::Builtin(IntegrationTarget::Qwen),
-        "letta" => IntegrationCommandTarget::Letta,
-        "cursor" => IntegrationCommandTarget::Builtin(IntegrationTarget::Cursor),
-        "mastracode" => IntegrationCommandTarget::Builtin(IntegrationTarget::Mastracode),
-        "antigravity-cli" | "antigravity_cli" => {
-            IntegrationCommandTarget::Builtin(IntegrationTarget::AntigravityCli)
+    match parse_integration_target_name(target) {
+        IntegrationTargetName::Supported(parsed) => Ok(Some(parsed)),
+        IntegrationTargetName::Retired(retired) => {
+            eprintln!(
+                "{}",
+                crate::i18n::fill(
+                    errors().integration_target_retired_fmt,
+                    &[("target", &retired.wire_name())]
+                )
+            );
+            eprintln!("{}", errors().integration_targets_supported);
+            Ok(None)
         }
-        "grok" => IntegrationCommandTarget::Builtin(IntegrationTarget::Grok),
-        _ => {
+        IntegrationTargetName::Unknown => {
             eprintln!(
                 "{}",
                 crate::i18n::fill(
@@ -209,50 +172,74 @@ fn parse_integration_target(
                 )
             );
             eprintln!("{}", errors().integration_targets_supported);
-            return Ok(None);
+            Ok(None)
         }
-    };
+    }
+}
 
-    Ok(Some(parsed))
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum IntegrationTargetName {
+    Supported(IntegrationTarget),
+    Retired(IntegrationTarget),
+    Unknown,
+}
+
+fn parse_integration_target_name(name: &str) -> IntegrationTargetName {
+    if let Some(target) = IntegrationTarget::ALL
+        .into_iter()
+        .find(|target| crate::integration::integration_target_label(*target) == name)
+    {
+        return IntegrationTargetName::Supported(target);
+    }
+    match IntegrationTarget::from_wire_name(name) {
+        Some(target) if target.is_retired() => IntegrationTargetName::Retired(target),
+        _ => IntegrationTargetName::Unknown,
+    }
 }
 
 fn print_integration_help() {
     eprintln!("herdr integration commands:");
-    eprintln!("  herdr integration install pi");
-    eprintln!("  herdr integration install omp");
-    eprintln!("  herdr integration install claude");
-    eprintln!("  herdr integration install codex");
-    eprintln!("  herdr integration install copilot");
-    eprintln!("  herdr integration install devin");
-    eprintln!("  herdr integration install droid");
-    eprintln!("  herdr integration install kimi");
-    eprintln!("  herdr integration install opencode");
-    eprintln!("  herdr integration install kilo");
-    eprintln!("  herdr integration install hermes");
-    eprintln!("  herdr integration install qodercli");
-    eprintln!("  herdr integration install qwen");
-    eprintln!("  herdr integration install letta");
-    eprintln!("  herdr integration install cursor");
-    eprintln!("  herdr integration install mastracode");
-    eprintln!("  herdr integration install antigravity-cli");
-    eprintln!("  herdr integration install grok");
-    eprintln!("  herdr integration uninstall pi");
-    eprintln!("  herdr integration uninstall omp");
-    eprintln!("  herdr integration uninstall claude");
-    eprintln!("  herdr integration uninstall codex");
-    eprintln!("  herdr integration uninstall copilot");
-    eprintln!("  herdr integration uninstall devin");
-    eprintln!("  herdr integration uninstall droid");
-    eprintln!("  herdr integration uninstall kimi");
-    eprintln!("  herdr integration uninstall opencode");
-    eprintln!("  herdr integration uninstall kilo");
-    eprintln!("  herdr integration uninstall hermes");
-    eprintln!("  herdr integration uninstall qodercli");
-    eprintln!("  herdr integration uninstall qwen");
-    eprintln!("  herdr integration uninstall letta");
-    eprintln!("  herdr integration uninstall cursor");
-    eprintln!("  herdr integration uninstall mastracode");
-    eprintln!("  herdr integration uninstall antigravity-cli");
-    eprintln!("  herdr integration uninstall grok");
+    for action in ["install", "uninstall"] {
+        for target in IntegrationTarget::ALL {
+            eprintln!(
+                "  herdr integration {action} {}",
+                crate::integration::integration_target_label(target)
+            );
+        }
+    }
     eprintln!("  herdr integration status [--outdated-only]");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cli_accepts_exactly_the_official_targets() {
+        for target in IntegrationTarget::ALL {
+            let label = crate::integration::integration_target_label(target);
+            assert_eq!(
+                parse_integration_target_name(label),
+                IntegrationTargetName::Supported(target)
+            );
+        }
+    }
+
+    #[test]
+    fn cli_reports_retired_targets_instead_of_installing_them() {
+        // 退役变体仍在冻结枚举里，CLI 认得名字但不再接受。
+        for name in ["cursor", "omp", "antigravity-cli", "antigravity_cli"] {
+            let IntegrationTargetName::Retired(target) = parse_integration_target_name(name) else {
+                panic!("{name} 应解析为退役目标");
+            };
+            assert!(target.is_retired());
+        }
+        // 从未进入冻结枚举的名字（含已删除的 CLI-only 旁路）是未知目标。
+        for name in ["letta", "zcode", "", "Claude"] {
+            assert_eq!(
+                parse_integration_target_name(name),
+                IntegrationTargetName::Unknown
+            );
+        }
+    }
 }
