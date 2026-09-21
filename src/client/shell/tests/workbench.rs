@@ -223,6 +223,144 @@ fn captured_dock_drag_finishes_even_when_released_inside_hover_bounds() {
     );
 }
 
+/// 与 `ready()` 同构，但用指定的 `ui.border_style` 起工作台。
+fn ready_with_border_style(style: crate::config::BorderStyleConfig) -> ClientShellState {
+    let mut raw = Config::default();
+    raw.ui.border_style = style;
+    let mut state = ClientShellState::new(ClientShellConfig::from_config(&raw));
+    state.set_snapshot(Box::new(snapshot()));
+    state.set_endpoint_methods(Some(vec!["client.views.set".into(), "tab.focus".into()]));
+    state.set_pane_surface(surface());
+    state.compose(120, 40).expect("初始画面");
+    state.tick_workbench(std::time::Instant::now(), &mut ClientShellInput::default());
+    state.workbench.pending = false;
+    state.workbench.acknowledged = state.workbench.revision;
+    state
+}
+
+/// THEME-01/02：终端组弹窗边框走共享的带标题面板——字形跟随
+/// `ui.border_style`、颜色取组件 token，不再硬编码 Rounded + accent。
+#[test]
+fn workbench_popup_border_follows_the_border_style_and_component_token() {
+    use crate::client::shell::workbench::View;
+    for style in [
+        crate::config::BorderStyleConfig::Single,
+        crate::config::BorderStyleConfig::Double,
+    ] {
+        let mut state = ready_with_border_style(style);
+        state.workbench.views.insert(
+            "1".into(),
+            View {
+                tab: "tab_1".into(),
+                surface: surface_with_popup(),
+                graphics: Default::default(),
+            },
+        );
+        state.compose(120, 40).expect("弹窗帧");
+        let popup = state.hits.popup.as_ref().expect("弹窗几何");
+        let buffer = state.compose_buffer.as_ref().expect("保留帧缓冲");
+        let corner = buffer[(popup.rect.x, popup.rect.y)].clone();
+        assert_eq!(
+            corner.symbol(),
+            state.config.border_glyphs.top_left,
+            "弹窗边框字形应跟随 ui.border_style（{style:?}）"
+        );
+        assert_eq!(
+            corner.style().fg,
+            Some(state.config.components.pane_border_focused),
+            "弹窗边框色应取组件 token（{style:?}）"
+        );
+        // 标题仍画在顶边上。
+        let title_first = "popup title".chars().next().expect("标题首字");
+        let top_row: String = (popup.rect.x..popup.rect.right())
+            .map(|x| buffer[(x, popup.rect.y)].symbol().to_owned())
+            .collect();
+        assert!(top_row.contains(title_first), "标题画在边框上：{top_row:?}");
+    }
+}
+
+/// THEME-01/02：布局拖放的落点预览同样换成组件字形与边框 token，并且仍然
+/// 只画轮廓（填底会盖住用来判断落点的终端内容）。
+#[test]
+fn workbench_drop_preview_border_follows_the_border_style() {
+    let mut state = ready_with_border_style(crate::config::BorderStyleConfig::Double);
+    state.workbench_open(PanelId::Monitor);
+    state.compose(120, 40).expect("两个面板");
+    let (panel, area) = state
+        .workbench
+        .geometry
+        .panels
+        .iter()
+        .find(|(panel, _)| *panel == PanelId::Monitor)
+        .map(|(panel, area)| (panel.clone(), *area))
+        .expect("监控面板在布局里");
+    let terminal = state
+        .workbench
+        .geometry
+        .panels
+        .iter()
+        .find(|(panel, _)| matches!(panel, PanelId::Terminal(_)))
+        .map(|(_, area)| *area)
+        .expect("终端面板在布局里");
+    // 真鼠标路径：按住终端面板头部拖动到监控面板中心即产生落点预览。
+    let mut outcome = ClientShellInput::default();
+    let mouse = |kind, column, row| MouseEvent {
+        kind,
+        column,
+        row,
+        modifiers: KeyModifiers::NONE,
+    };
+    state.handle_mouse(
+        mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            terminal.x + 2,
+            terminal.y,
+        ),
+        &mut outcome,
+    );
+    state.handle_mouse(
+        mouse(
+            MouseEventKind::Drag(MouseButton::Left),
+            area.x + area.width / 2,
+            area.y + area.height / 2,
+        ),
+        &mut outcome,
+    );
+    let frame = state.compose(120, 40).expect("拖放预览帧");
+    let buffer = state.compose_buffer.as_ref().expect("保留帧缓冲");
+    // 落点在面板中心 → 无边缘取向 → 预览就是整块面板。
+    let corner = buffer[(area.x, area.y)].clone();
+    assert_eq!(
+        corner.symbol(),
+        state.config.border_glyphs.top_left,
+        "拖放预览边框字形应跟随 ui.border_style"
+    );
+    assert_eq!(
+        corner.style().fg,
+        Some(state.config.components.pane_border_focused),
+        "拖放预览边框色应取组件 token"
+    );
+    // 预览只画轮廓：落点面板的正文（页签行）仍在，没有被整块填底盖掉。
+    let page = state.observability.page_rect;
+    assert_eq!(
+        page,
+        super::super::workbench::body(area, &panel),
+        "监控页铺满落点面板正文"
+    );
+    let inner_row = page.y + 1;
+    let text: String = frame_rows(&frame)
+        .get(inner_row as usize)
+        .cloned()
+        .unwrap_or_default();
+    let tab_label = crate::client::shell::observability::tr("System", "系统");
+    let first = tab_label.chars().next().expect("页签首字");
+    assert!(
+        text.contains(first),
+        "落点面板的正文应保留（第 {inner_row} 行）：{text:?}"
+    );
+    assert!(matches!(panel, PanelId::Monitor));
+}
+
 #[test]
 fn process_dialog_blocks_background_panels_and_page_shortcuts() {
     use crate::client::shell::observability::{Action, Page, ProcessDialog};

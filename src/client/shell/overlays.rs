@@ -420,6 +420,32 @@ pub(in crate::client::shell) fn panel(
     }
     Some(Rect::new(a.x + 1, a.y + 1, a.width - 2, a.height - 2))
 }
+/// 带标题的面板：`panel` 加一行画在顶边上的标题。自建面板（监控页、终端组
+/// 弹窗）都从这里取边框与标题，边框字形与颜色不再各写一套（C-29 / ds-13）。
+pub(in crate::client::shell) fn titled_panel(
+    b: &mut Buffer,
+    a: Rect,
+    title: &str,
+    border: ratatui::style::Color,
+    bg: ratatui::style::Color,
+    glyphs: crate::ui::BorderGlyphs,
+) -> Option<Rect> {
+    let inner = panel(b, a, border, bg, glyphs)?;
+    put_text(
+        b,
+        a.x + 1,
+        a.y,
+        a.width.saturating_sub(2),
+        title,
+        Style::default()
+            .fg(border)
+            .bg(bg)
+            .add_modifier(Modifier::BOLD)
+            .remove_modifier(Modifier::DIM),
+    );
+    Some(inner)
+}
+
 /// Centered modal of a size tier plus its painted panel: the shared frame
 /// every overlay starts from.
 pub(in crate::client::shell) fn modal_panel(

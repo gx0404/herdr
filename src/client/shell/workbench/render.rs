@@ -1,7 +1,7 @@
 use super::super::observability::{tr, Page};
 use super::interaction::Action;
 use super::*;
-use ratatui::widgets::{Block, BorderType, Borders, Widget};
+use ratatui::widgets::{Block, Borders, Widget};
 
 fn put(buffer: &mut Buffer, area: Rect, text: &str, style: Style) {
     if area.is_empty() {
@@ -467,11 +467,16 @@ impl ClientShellState {
                         .find(|(panel, _)| panel == &target)
                     {
                         let area = super::interaction::preview(*area, edge);
+                        // 拖放预览只画轮廓、不填底：盖住底下的终端内容就没法判断
+                        // 放到哪一侧。边框字形与颜色跟面板边框同源（THEME-01/02）。
                         Block::default()
                             .borders(Borders::ALL)
-                            .border_type(BorderType::Rounded)
-                            .border_style(Style::default().fg(palette.accent))
+                            .border_set(self.config.border_glyphs.border_set())
+                            .border_style(
+                                Style::default().fg(self.config.components.pane_border_focused),
+                            )
                             .title(tr(" Drop here ", " 放到这里 "))
+                            .title_style(Style::default().fg(palette.accent))
                             .render(area, composed);
                         occlusion.cover(area);
                     }
@@ -543,12 +548,16 @@ impl ClientShellState {
             ) {
                 occlusion.start_popup(geometry.outer);
                 ratatui::widgets::Clear.render(geometry.outer, canvas.buffer());
-                Block::default()
-                    .borders(Borders::ALL)
-                    .border_type(BorderType::Rounded)
-                    .title(popup.title.clone())
-                    .border_style(Style::default().fg(palette.accent))
-                    .render(geometry.outer, canvas.buffer());
+                // 弹窗边框走共享的带标题面板（字形跟随 ui.border_style，颜色取
+                // 组件 token），随后 blit 的弹窗帧盖住面板底（THEME-01/02）。
+                super::super::render::titled_panel(
+                    canvas.buffer(),
+                    geometry.outer,
+                    &popup.title,
+                    self.config.components.pane_border_focused,
+                    palette.panel_bg,
+                    self.config.border_glyphs,
+                );
                 canvas.set_cursor(None);
                 canvas.blit_frame(&popup.frame, geometry.inner);
                 self.hits.popup = Some(PaneHit {

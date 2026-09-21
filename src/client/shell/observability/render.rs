@@ -20,31 +20,28 @@ fn text(buffer: &mut Buffer, rect: Rect, row: u16, value: &str, style: Style) {
     buffer.set_stringn(rect.x, rect.y + row, value, rect.width as usize, style);
 }
 
-/// 带标题的面板：走共享的 `overlays::panel`，边框色取组件 token
+/// 带标题的面板：走共享的 `overlays::titled_panel`，边框色取组件 token
 /// （`components.pane_border_focused`），与其它浮层同一种边框语言；字形表
 /// 尊重 `ui.border_style`。
 fn block(buffer: &mut Buffer, rect: Rect, title: &str, cx: &ChromeContext<'_>) -> Rect {
     let palette = cx.palette;
-    let Some(inner) = super::super::render::panel(
+    let Some(inner) = super::super::render::titled_panel(
         buffer,
         rect,
+        title,
         cx.components.pane_border_focused,
         palette.panel_bg,
         cx.glyphs,
     ) else {
         return Rect::default();
     };
-    let base = Style::default()
-        .fg(palette.text)
-        .bg(palette.panel_bg)
-        .remove_modifier(Modifier::DIM);
-    buffer.set_style(inner, base);
-    text(
-        buffer,
-        Rect::new(rect.x + 1, rect.y, rect.width.saturating_sub(2), 1),
-        0,
-        title,
-        base.fg(palette.accent).add_modifier(Modifier::BOLD),
+    // 面板正文底：字色与底色是内容默认值，正文自己的样式优先。
+    buffer.set_style(
+        inner,
+        Style::default()
+            .fg(palette.text)
+            .bg(palette.panel_bg)
+            .remove_modifier(Modifier::DIM),
     );
     inner
 }
