@@ -414,6 +414,12 @@ pub(crate) fn collect_scene(
         popup_target.as_ref(),
     ) {
         if let Some(runtime) = app.terminal_runtimes.get(&popup.terminal_id) {
+            // PTY-12：滚动偏移在本次收集内是常量，取一次即可（原先每条摆放都取
+            // 终端核心锁 + FFI）。
+            let popup_scrollback_offset = runtime
+                .scroll_metrics()
+                .map(|metrics| metrics.offset_from_bottom as u32)
+                .unwrap_or(0);
             let mut requested = HashSet::new();
             for placement in runtime.kitty_image_placements_with_data_filter(|descriptor| {
                 let key = asset_key_from_descriptor(
@@ -435,10 +441,7 @@ pub(crate) fn collect_scene(
                         image_id: placement.image_id,
                     },
                     placement,
-                    scrollback_offset: runtime
-                        .scroll_metrics()
-                        .map(|metrics| metrics.offset_from_bottom as u32)
-                        .unwrap_or(0),
+                    scrollback_offset: popup_scrollback_offset,
                 });
             }
         }

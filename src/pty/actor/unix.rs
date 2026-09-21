@@ -814,7 +814,9 @@ impl PtyIoActorRunner {
     }
 
     fn read_once(&mut self) -> bool {
-        let mut buf = [0u8; 8192];
+        // PTY-07：8 KiB 太小——高吞吐输出每 MB 要 128 次 read 与返回 poll。
+        // 64 KiB 把系统调用与循环次数降一个量级（缓冲区在 actor 线程栈上）。
+        let mut buf = [0u8; 64 * 1024];
         match self.file.read(&mut buf) {
             Ok(0) => false,
             Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => true,
@@ -829,19 +831,18 @@ impl PtyIoActorRunner {
                     .lock()
                     .unwrap_or_else(|poisoned| poisoned.into_inner());
                 let result = (self.on_read)(&buf[..n]);
-                self.controls
-                    .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner())
-                    .terminal_responses
-                    .extend(result.terminal_responses);
-                drop(_order);
-                let terminal_responses = std::mem::take(
-                    &mut self
+                // PTY-07：一次取锁完成追加与取出（原先同一把锁取两次）。
+                let terminal_responses = {
+                    let mut controls = self
                         .controls
                         .lock()
-                        .unwrap_or_else(|poisoned| poisoned.into_inner())
-                        .terminal_responses,
-                );
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                    controls
+                        .terminal_responses
+                        .extend(result.terminal_responses);
+                    std::mem::take(&mut controls.terminal_responses)
+                };
+                drop(_order);
                 self.enqueue_terminal_responses(terminal_responses);
                 true
             }
