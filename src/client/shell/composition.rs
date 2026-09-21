@@ -662,6 +662,7 @@ impl ClientShellState {
                         composed,
                         Rect::new(0, 0, cols, rows),
                         notification,
+                        notifications::notification_agent_label(&self.endpoints, notification),
                         has_config_diagnostic || lifecycle_offset > 0,
                         &self.config.palette,
                         &self.config.components,

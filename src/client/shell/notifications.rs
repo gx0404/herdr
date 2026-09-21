@@ -65,19 +65,50 @@ pub(super) fn render_mobile_notice_banner(
     rect
 }
 
+/// 通知横幅上的 agent 标签（NOTIF-01）：优先 pane 的显示名，`display_agent`
+/// → `name` → `agent` → `title` 依次回退；解析不出时退到通知自带的 canonical
+/// agent（`event.agent`）。
+pub(super) fn notification_agent_label<'a>(
+    endpoints: &'a [ClientShellEndpoint],
+    notification: &'a ClientVisibleNotification,
+) -> Option<&'a str> {
+    let event = &notification.event;
+    let from_pane = event.pane_id.as_deref().and_then(|pane_id| {
+        endpoints
+            .iter()
+            .find(|endpoint| endpoint.endpoint_id == notification.endpoint_id)?
+            .snapshot
+            .as_deref()?
+            .agents
+            .iter()
+            .find(|agent| agent.pane_id == pane_id)
+            .and_then(|agent| {
+                agent
+                    .display_agent
+                    .as_deref()
+                    .or(agent.name.as_deref())
+                    .or(agent.agent.as_deref())
+                    .or(agent.title.as_deref())
+            })
+    });
+    from_pane.or(event.agent.as_deref())
+}
+
 pub(super) fn render_mobile_notification_banner(
     buffer: &mut Buffer,
     area: Rect,
     notification: &ClientVisibleNotification,
+    agent_label: Option<&str>,
     offset_for_warning: bool,
     palette: &Palette,
     components: &crate::app::state::ComponentStyles,
 ) -> Rect {
     let event = &notification.event;
+    // `agent_label` 是调用方按 pane 解析出的显示名（`display_agent → name →
+    // agent`）；通知自带的 `event.agent` 是 canonical id，只在解析不出时兜底
+    // （NOTIF-01）。
     let title = match event.kind {
-        SemanticNotificationKind::NeedsAttention => event
-            .agent
-            .as_ref()
+        SemanticNotificationKind::NeedsAttention => agent_label
             .map(|agent| {
                 crate::i18n::fill(
                     crate::i18n::texts().notify.agent_waiting_fmt,
@@ -85,9 +116,7 @@ pub(super) fn render_mobile_notification_banner(
                 )
             })
             .unwrap_or_else(|| event.title.clone()),
-        SemanticNotificationKind::Finished => event
-            .agent
-            .as_ref()
+        SemanticNotificationKind::Finished => agent_label
             .map(|agent| {
                 crate::i18n::fill(
                     crate::i18n::texts().notify.agent_done_fmt,
@@ -269,6 +298,7 @@ mod tests {
             &mut buffer,
             area,
             &notification,
+            Some("pi"),
             true,
             &palette,
             &components,
@@ -288,6 +318,79 @@ mod tests {
         assert!(buffer.content[18 * 44..19 * 44]
             .iter()
             .all(|cell| cell.symbol() != "X"));
+    }
+
+    /// NOTIF-01：横幅用 pane 的显示名（如「Claude Code」），不是 canonical id。
+    #[test]
+    fn mobile_notification_banner_prefers_the_pane_display_agent() {
+        let palette = crate::app::client_palette_from_config(&Config::default());
+        let components = crate::app::state::ComponentStyles::from_palette(&palette);
+        let mut notification = notification();
+        notification.event.kind = SemanticNotificationKind::Finished;
+        notification.event.agent = Some("claude".into());
+        let area = Rect::new(0, 0, 44, 20);
+        let mut buffer = Buffer::empty(area);
+        render_mobile_notification_banner(
+            &mut buffer,
+            area,
+            &notification,
+            Some("Claude Code"),
+            true,
+            &palette,
+            &components,
+        );
+        let text = buffer
+            .content
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(text.contains("Claude Code"), "横幅用显示名: {text}");
+        assert!(!text.contains("claude "), "不再显示 canonical id: {text}");
+    }
+
+    /// NOTIF-01 的解析链：pane 的显示名优先，其次 name / agent / title，最后
+    /// 才退到通知自带的 canonical agent；pane 不在快照里时同样退回 canonical。
+    #[test]
+    fn notification_agent_label_prefers_the_pane_display_chain() {
+        let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
+        let mut snapshot = super::super::tests::snapshot();
+        snapshot.agents.push(crate::protocol::ClientShellAgent {
+            pane_id: "pane_1".into(),
+            workspace_id: "ws_1".into(),
+            tab_id: "tab_1".into(),
+            name: Some("Friendly Name".into()),
+            display_agent: Some("Claude Code".into()),
+            agent: Some("claude".into()),
+            title: None,
+            terminal_title: None,
+            terminal_title_stripped: None,
+            agent_status: crate::api::schema::AgentStatus::Idle,
+            state_change_seq: 1,
+            state_labels: Vec::new(),
+            tokens: Vec::new(),
+            focused: true,
+        });
+        state.set_snapshot(Box::new(snapshot));
+        let mut notification = notification();
+        notification.event.pane_id = Some("pane_1".into());
+        notification.event.agent = Some("claude".into());
+        assert_eq!(
+            notification_agent_label(&state.endpoints, &notification),
+            Some("Claude Code"),
+            "显示名优先于 canonical id"
+        );
+
+        // pane 不在快照里：退回通知自带的 canonical agent。
+        notification.event.pane_id = Some("pane-missing".into());
+        assert_eq!(
+            notification_agent_label(&state.endpoints, &notification),
+            Some("claude")
+        );
+        notification.event.pane_id = None;
+        assert_eq!(
+            notification_agent_label(&state.endpoints, &notification),
+            Some("claude")
+        );
     }
 
     #[test]
