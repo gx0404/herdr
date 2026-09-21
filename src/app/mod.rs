@@ -602,12 +602,9 @@ impl App {
             let update_tx = event_tx.clone();
             std::thread::spawn(move || crate::update::auto_update(update_tx));
         }
-        if manifest_check_enabled {
-            let manifest_update_tx = event_tx.clone();
-            std::thread::spawn(move || {
-                crate::detect::manifest_update::auto_update(manifest_update_tx)
-            });
-        }
+        // UPD-01：manifest 更新检查不再在 App::new 里立即 spawn（避免与会话
+        // 恢复的 fork 风暴叠加），改由定时器驱动；deadline 立即到期，但
+        // run_agent_manifest_update_check 在首帧渲染完成前不真正发起抓取。
 
         let last_focus = state.active.and_then(|idx| {
             state
@@ -646,8 +643,7 @@ impl App {
             next_api_worktree_operation_id: 1,
             next_auto_update_check: version_check_enabled
                 .then_some(Instant::now() + AUTO_UPDATE_CHECK_INTERVAL),
-            next_agent_manifest_update_check: manifest_check_enabled
-                .then_some(Instant::now() + AUTO_UPDATE_CHECK_INTERVAL),
+            next_agent_manifest_update_check: manifest_check_enabled.then_some(Instant::now()),
             next_plugin_registry_refresh: policy
                 .persist_plugin_registry
                 .then_some(Instant::now() + api::plugins::PLUGIN_REGISTRY_REFRESH_INTERVAL),

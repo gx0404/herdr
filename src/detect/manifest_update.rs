@@ -13,6 +13,8 @@ use serde::{Deserialize, Serialize};
 use super::{agent_label, parse_agent_label, Agent};
 
 pub(crate) const MANIFEST_ENGINE_VERSION: u32 = 3;
+/// 后台 manifest 检查的最小间隔：6 小时内重复启动不再抓取（UPD-01）。
+pub(crate) const AUTO_UPDATE_THROTTLE_SECS: u64 = 6 * 60 * 60;
 const DEFAULT_CATALOG_URL: &str = "https://herdr.dev/agent-detection/index.toml";
 const CATALOG_URL_ENV: &str = "HERDR_AGENT_DETECTION_MANIFEST_CATALOG_URL";
 const MAX_FETCH_BYTES: usize = 256 * 1024;
@@ -166,6 +168,15 @@ struct CatalogAgent {
 }
 
 pub(crate) fn auto_update(events: tokio::sync::mpsc::Sender<crate::events::AppEvent>) {
+    // UPD-01：6h 节流。上次检查还新鲜就直接返回——不抓 catalog、不 spawn
+    // curl、不发事件。手动 `herdr server update-agent-manifests` 走
+    // check_and_update，不经过本函数，保持不节流。
+    let status = load_status();
+    if let Some(last_check) = status.last_check_unix {
+        if now_unix().saturating_sub(last_check) < AUTO_UPDATE_THROTTLE_SECS {
+            return;
+        }
+    }
     let result = check_and_update();
     let status = match result {
         Ok(output) => {
@@ -245,14 +256,17 @@ fn check_and_update_from_url(url: &str) -> Result<ManifestUpdateOutput, String> 
     status.last_result = Some("checked".to_string());
 
     let checked = catalog.iter().map(|entry| entry.agent).collect::<Vec<_>>();
+    // UPD-01：全部 manifest 合并为单次 curl --parallel 抓取，每个 URL 一个
+    // -o 临时文件。curl --parallel 的聚合退出码不可靠（实测 7.68 恒为 0），
+    // 每个 agent 的成败以输出文件是否存在判定。
+    let fetched = fetch_manifests_parallel(&catalog, &base_url)?;
     let mut updated = Vec::new();
-    for entry in catalog {
+    for (entry, content) in catalog.into_iter().zip(fetched) {
         let agent_id = agent_label(entry.agent).to_string();
-        let manifest_url = join_url(&base_url, &entry.path)?;
-        match fetch_text(&manifest_url)
-            .map_err(|err| format!("fetch failed: {err}"))
-            .and_then(|content| process_agent_manifest(entry.agent, &content, check_time))
-        {
+        let outcome = content
+            .ok_or_else(|| "fetch failed: transfer produced no output".to_string())
+            .and_then(|content| process_agent_manifest(entry.agent, &content, check_time));
+        match outcome {
             Ok(Some(commit)) => {
                 status.agents.insert(
                     agent_id,
@@ -309,6 +323,86 @@ fn check_and_update_from_url(url: &str) -> Result<ManifestUpdateOutput, String> 
         updated,
         status,
     })
+}
+
+/// 单次 curl 进程并行抓取全部 catalog manifest。返回与 `entries` 等长的
+/// 结果向量：文件已写出为 Some(content)，传输失败（HTTP 错误/超时/空
+/// 输出文件）为 None。
+fn fetch_manifests_parallel(
+    entries: &[CatalogAgent],
+    base_url: &str,
+) -> Result<Vec<Option<String>>, String> {
+    if entries.is_empty() {
+        return Ok(Vec::new());
+    }
+    let download_dir = std::env::temp_dir().join(format!(
+        "herdr-manifest-fetch-{}-{}",
+        std::process::id(),
+        now_nanos()
+    ));
+    fs::create_dir_all(&download_dir).map_err(|err| {
+        format!(
+            "failed to create manifest download dir {}: {err}",
+            download_dir.display()
+        )
+    })?;
+    let result = fetch_manifests_parallel_into(&download_dir, entries, base_url);
+    let _ = fs::remove_dir_all(&download_dir);
+    result
+}
+
+fn fetch_manifests_parallel_into(
+    download_dir: &Path,
+    entries: &[CatalogAgent],
+    base_url: &str,
+) -> Result<Vec<Option<String>>, String> {
+    let max_fetch_bytes = MAX_FETCH_BYTES.to_string();
+    let mut command = crate::noninteractive_process::curl_command();
+    command.args([
+        "-sfL",
+        "--retry",
+        "2",
+        "--connect-timeout",
+        "5",
+        "--max-time",
+        "15",
+        "--max-filesize",
+        &max_fetch_bytes,
+        "--parallel",
+        "--parallel-max",
+        "6",
+    ]);
+    let mut files = Vec::with_capacity(entries.len());
+    for (index, entry) in entries.iter().enumerate() {
+        let url = join_url(base_url, &entry.path)?;
+        let file = download_dir.join(format!("{index}.toml"));
+        command.arg("-o").arg(&file).arg(url);
+        files.push(file);
+    }
+    // --parallel 下聚合退出码不可靠（实测恒 0），丢弃 stdout/stderr，
+    // 统一以输出文件判定每个 transfer 的结果。
+    let status = command
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map_err(|err| format!("curl failed: {err}"))?;
+    if !status.success() {
+        tracing::warn!(%status, "parallel manifest fetch exited with failure");
+    }
+    let mut results = Vec::with_capacity(files.len());
+    for file in files {
+        match fs::read_to_string(&file) {
+            Ok(content) if !content.is_empty() && content.len() <= MAX_FETCH_BYTES => {
+                results.push(Some(content));
+            }
+            Ok(_) => {
+                results.push(None);
+            }
+            Err(_) => results.push(None),
+        }
+    }
+    Ok(results)
 }
 
 fn process_agent_manifest(
@@ -651,6 +745,82 @@ contains = ["{contains}"]
         assert!(ManifestVersion::parse("2026.06.alpha").is_err());
         assert!(ManifestVersion::parse("2026..06").is_err());
         assert!(ManifestVersion::parse("2026.999999999999999999999999999999").is_err());
+    }
+
+    #[test]
+    fn auto_update_throttles_checks_within_six_hours() {
+        with_state_dir("throttle-six-hours", || {
+            let web_dir = std::env::temp_dir().join(format!(
+                "herdr-manifest-update-throttle-web-{}",
+                std::process::id()
+            ));
+            let _ = fs::remove_dir_all(&web_dir);
+            fs::create_dir_all(&web_dir).unwrap();
+            fs::write(
+                web_dir.join("index.toml"),
+                r#"
+schema_version = 1
+
+[[agents]]
+id = "codex"
+path = "codex.toml"
+"#,
+            )
+            .unwrap();
+            fs::write(
+                web_dir.join("codex.toml"),
+                remote_manifest("9999.01.01.1", "throttle-ready"),
+            )
+            .unwrap();
+            let old_catalog_url = std::env::var_os(CATALOG_URL_ENV);
+            std::env::set_var(
+                CATALOG_URL_ENV,
+                format!(
+                    "file:///{}",
+                    web_dir
+                        .join("index.toml")
+                        .to_string_lossy()
+                        .replace('\\', "/")
+                        .trim_start_matches('/')
+                ),
+            );
+
+            // 上次检查就在刚刚：节流直接返回，不抓取、不发事件。
+            let mut status = ManifestUpdateStatus {
+                last_check_unix: Some(now_unix()),
+                ..ManifestUpdateStatus::default()
+            };
+            save_status(&status).unwrap();
+            let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+            auto_update(tx);
+            assert!(
+                rx.try_recv().is_err(),
+                "fresh last_check must skip the fetch and emit nothing"
+            );
+            assert!(
+                cached_remote_version(Agent::Codex).is_none(),
+                "throttled check must not commit anything"
+            );
+
+            // 上次检查在 7 小时前：正常抓取并提交。
+            status.last_check_unix = Some(now_unix() - 7 * 60 * 60);
+            save_status(&status).unwrap();
+            let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+            auto_update(tx);
+            let event = rx.try_recv().expect("stale check must run");
+            let crate::events::AppEvent::AgentDetectionManifestsUpdated { updated, .. } = event
+            else {
+                panic!("unexpected event");
+            };
+            assert_eq!(updated.len(), 1);
+            assert_eq!(updated[0].agent, Agent::Codex);
+
+            match old_catalog_url {
+                Some(value) => std::env::set_var(CATALOG_URL_ENV, value),
+                None => std::env::remove_var(CATALOG_URL_ENV),
+            }
+            let _ = fs::remove_dir_all(&web_dir);
+        });
     }
 
     #[test]

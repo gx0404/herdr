@@ -126,6 +126,12 @@ impl App {
             return;
         }
 
+        // UPD-01：首帧渲染完成前不发起抓取（curl fork 风暴不再压启动路径）。
+        // 不重新武装 deadline，让到期状态保留到首帧之后的第一轮调度。
+        if self.last_render_at.is_none() {
+            return;
+        }
+
         self.next_agent_manifest_update_check = Some(Instant::now() + AUTO_UPDATE_CHECK_INTERVAL);
 
         let manifest_update_tx = self.event_tx.clone();

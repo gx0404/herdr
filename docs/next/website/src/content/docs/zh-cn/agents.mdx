@@ -64,7 +64,7 @@ Herdr 首先检测每个窗格的前台进程。之后,每个窗格有且只有�
 
 ## 检测清单
 
-内置清单打包在 Herdr 内部。Herdr 还会向 herdr.dev 检查远程清单更新,并自动应用有效的按智能体规则更新,不需要重启 Herdr。远程清单存放在 Herdr 的状态目录中。设置 `[update] manifest_check = false` 可以禁用后台远程清单检查。
+内置清单打包在 Herdr 内部。Herdr 还会向 herdr.dev 检查远程清单更新,并自动应用有效的按智能体规则更新,不需要重启 Herdr。后台检查每 6 小时最多执行一次,且在首帧渲染完成后才开始;`herdr server update-agent-manifests` 手动拉取不受节流限制,始终立即执行。远程清单存放在 Herdr 的状态目录中。设置 `[update] manifest_check = false` 可以禁用后台远程清单检查。
 
 本地覆盖可以从平台配置目录替换远程或内置清单:
 
