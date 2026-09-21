@@ -1429,3 +1429,52 @@ fn codex_osc_working_beats_weak_blocker_screen() {
         Some("osc_title_working")
     );
 }
+
+#[test]
+fn manifest_cache_indexes_align_with_agent_all() {
+    // get/set 的定长数组索引依赖「判别式 == ALL 下标」这一不变量。
+    for agent in Agent::ALL {
+        assert_eq!(Agent::ALL[agent as usize], agent);
+    }
+}
+
+#[test]
+fn detect_and_explain_agree_on_detection_fields() {
+    // collect_evidence=false 的检测热路径必须与 explain（=true）给出逐字段
+    // 相同的判定；证据收集只是观察面，不得影响匹配结果。
+    let screens = [
+        "",
+        "plain shell output\n$ ",
+        "● Esc to cancel · 1m 2s\n",
+        "Do you want to proceed? (y/n)\n",
+        "⠋ Working…\n",
+        "✻ Thinking…\n  allow once? [y/n]\n",
+    ];
+    for agent in Agent::SCREEN_MANIFEST_AGENTS {
+        for screen in screens {
+            for (osc_title, osc_progress) in [("", ""), ("⠙ proj", "50")] {
+                let input = DetectionInput {
+                    screen,
+                    osc_title,
+                    osc_progress,
+                };
+                let detection = detect_with_osc(agent, input);
+                let explain = explain_with_input(agent, input);
+                assert_eq!(
+                    detection.state, explain.state,
+                    "state mismatch for {agent:?} screen={screen:?}"
+                );
+                assert_eq!(detection.skip_state_update, explain.skip_state_update);
+                assert_eq!(detection.visible_idle, explain.visible_idle);
+                assert_eq!(detection.visible_blocker, explain.visible_blocker);
+                assert_eq!(detection.visible_working, explain.visible_working);
+                assert!(
+                    !explain.evaluated_rules.is_empty()
+                        || explain.fallback_reason.is_some()
+                        || explain.matched_rule.is_none(),
+                    "explain path must collect rule evidence"
+                );
+            }
+        }
+    }
+}

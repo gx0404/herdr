@@ -131,9 +131,24 @@ struct LoadedManifest {
     local_override_shadowing_remote: bool,
 }
 
+/// 检测热路径按 pane×tick 取 manifest：缓存存 Arc，取用只做 Arc clone；
+/// 按 Agent 判别式定长数组索引（`Agent::ALL` 与枚举声明同序），不做线性扫描。
 #[derive(Debug, Clone)]
 struct ManifestCache {
-    manifests: Vec<(Agent, Option<LoadedManifest>)>,
+    manifests: [Option<Arc<LoadedManifest>>; Agent::ALL.len()],
+}
+
+impl ManifestCache {
+    fn get(&self, agent: Agent) -> Option<Arc<LoadedManifest>> {
+        let loaded = &self.manifests[agent as usize];
+        debug_assert_eq!(Agent::ALL[agent as usize], agent);
+        loaded.clone()
+    }
+
+    fn set(&mut self, agent: Agent, loaded: Option<Arc<LoadedManifest>>) {
+        debug_assert_eq!(Agent::ALL[agent as usize], agent);
+        self.manifests[agent as usize] = loaded;
+    }
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -300,20 +315,14 @@ pub(crate) fn reload_manifests_for_agents(agents: &[Agent]) {
     let replacements = Agent::SCREEN_MANIFEST_AGENTS
         .into_iter()
         .filter(|agent| agents.contains(agent))
-        .map(|agent| (agent, load_manifest_uncached(agent)))
+        .map(|agent| (agent, load_manifest_uncached(agent).map(Arc::new)))
         .collect::<Vec<_>>();
     let mut cache = match lock.write() {
         Ok(guard) => guard,
         Err(poisoned) => poisoned.into_inner(),
     };
     for (agent, replacement) in replacements {
-        if let Some((_, loaded)) = cache
-            .manifests
-            .iter_mut()
-            .find(|(cached_agent, _)| *cached_agent == agent)
-        {
-            *loaded = replacement;
-        }
+        cache.set(agent, replacement);
     }
 }
 
@@ -322,34 +331,35 @@ fn manifest_cache() -> &'static RwLock<ManifestCache> {
 }
 
 fn build_manifest_cache() -> ManifestCache {
-    ManifestCache {
-        manifests: Agent::SCREEN_MANIFEST_AGENTS
-            .into_iter()
-            .map(|agent| (agent, load_manifest_uncached(agent)))
-            .collect(),
+    let mut manifests: [Option<Arc<LoadedManifest>>; Agent::ALL.len()] =
+        [const { None }; Agent::ALL.len()];
+    for agent in Agent::SCREEN_MANIFEST_AGENTS {
+        manifests[agent as usize] = load_manifest_uncached(agent).map(Arc::new);
     }
+    ManifestCache { manifests }
 }
 
 fn manifest_summaries_from_cache(cache: &ManifestCache) -> Vec<AgentManifestSummary> {
     cache
         .manifests
         .iter()
-        .filter_map(|(agent, loaded)| {
+        .zip(Agent::ALL)
+        .filter_map(|(loaded, agent)| {
             loaded
-                .clone()
-                .map(|loaded| manifest_summary_from_loaded(*agent, loaded))
+                .as_deref()
+                .map(|loaded| manifest_summary_from_loaded(agent, loaded))
         })
         .collect()
 }
 
-fn manifest_summary_from_loaded(agent: Agent, loaded: LoadedManifest) -> AgentManifestSummary {
+fn manifest_summary_from_loaded(agent: Agent, loaded: &LoadedManifest) -> AgentManifestSummary {
     AgentManifestSummary {
         agent,
         active_version: loaded.manifest.version.as_ref().map(ToString::to_string),
-        active_source: loaded.source,
-        cached_remote_version: loaded.cached_remote_version,
+        active_source: loaded.source.clone(),
+        cached_remote_version: loaded.cached_remote_version.clone(),
         local_override_shadowing_remote: loaded.local_override_shadowing_remote,
-        warning: loaded.warning,
+        warning: loaded.warning.clone(),
     }
 }
 
@@ -369,7 +379,7 @@ pub fn detect_with_osc(agent: Agent, input: DetectionInput<'_>) -> AgentDetectio
     let Some(loaded) = load_manifest(agent) else {
         return fallback_explain(Some(agent), None, false).into_detection();
     };
-    evaluate_loaded_manifest(agent, input, loaded, false).into_detection()
+    evaluate_loaded_manifest(agent, input, &loaded, false, false).into_detection()
 }
 
 pub fn explain(agent: Agent, screen_content: &str) -> DetectionExplain {
@@ -387,7 +397,7 @@ pub fn explain_with_input(agent: Agent, input: DetectionInput<'_>) -> DetectionE
     let Some(loaded) = load_manifest(agent) else {
         return fallback_explain(Some(agent), None, true);
     };
-    evaluate_loaded_manifest(agent, input, loaded, true)
+    evaluate_loaded_manifest(agent, input, &loaded, true, true)
 }
 
 pub fn explain_for_label(agent_label: &str, screen_content: &str) -> DetectionExplain {
@@ -431,10 +441,11 @@ impl DetectionExplain {
 fn evaluate_loaded_manifest(
     agent: Agent,
     input: DetectionInput<'_>,
-    loaded: LoadedManifest,
+    loaded: &LoadedManifest,
     include_update_status: bool,
+    collect_evidence: bool,
 ) -> DetectionExplain {
-    let mut matched: Option<(&ManifestRule, String)> = None;
+    let mut matched: Option<&ManifestRule> = None;
     let mut evaluated_rules = Vec::new();
 
     for (rule, compiled_rule) in loaded
@@ -445,29 +456,33 @@ fn evaluate_loaded_manifest(
     {
         let region_text = region(input, &rule.region);
         let matched_rule = compiled_rule_matches(compiled_rule, region_text);
-        evaluated_rules.push(EvaluatedRule {
-            id: rule.id.clone(),
-            priority: rule.priority,
-            region: rule.region.clone(),
-            evidence: rule_evidence(rule, region_text),
-            state: rule
-                .state
-                .map(AgentState::from)
-                .unwrap_or(AgentState::Unknown),
-            matched: matched_rule,
-        });
+        // 证据构建（每规则 3 个 Vec<String> clone + region 预览）只服务
+        // explain 输出；检测热路径（collect_evidence=false）跳过。
+        if collect_evidence {
+            evaluated_rules.push(EvaluatedRule {
+                id: rule.id.clone(),
+                priority: rule.priority,
+                region: rule.region.clone(),
+                evidence: rule_evidence(rule, region_text),
+                state: rule
+                    .state
+                    .map(AgentState::from)
+                    .unwrap_or(AgentState::Unknown),
+                matched: matched_rule,
+            });
+        }
 
         if !matched_rule {
             continue;
         }
 
         match matched {
-            Some((previous, _)) if previous.priority >= rule.priority => {}
-            _ => matched = Some((rule, rule.region.clone())),
+            Some(previous) if previous.priority >= rule.priority => {}
+            _ => matched = Some(rule),
         }
     }
 
-    let Some((rule, region_name)) = matched else {
+    let Some(rule) = matched else {
         return fallback_explain(
             Some(agent),
             Some((loaded, evaluated_rules)),
@@ -490,11 +505,11 @@ fn evaluate_loaded_manifest(
     DetectionExplain {
         agent: Some(agent_label(agent).to_string()),
         state,
-        source: Some(loaded.source),
+        source: Some(loaded.source.clone()),
         matched_rule: Some(MatchedRule {
             id: rule.id.clone(),
             priority: rule.priority,
-            region: region_name,
+            region: rule.region.clone(),
             state,
         }),
         screen_detection_skipped: false,
@@ -505,9 +520,9 @@ fn evaluate_loaded_manifest(
         skipped_update_reason,
         fallback_reason: None,
         evaluated_rules,
-        warning: loaded.warning,
+        warning: loaded.warning.clone(),
         manifest_version: loaded.manifest.version.as_ref().map(ToString::to_string),
-        cached_remote_version: loaded.cached_remote_version,
+        cached_remote_version: loaded.cached_remote_version.clone(),
         local_override_shadowing_remote: loaded.local_override_shadowing_remote,
         remote_update_status: remote_update_status
             .as_ref()
@@ -518,7 +533,7 @@ fn evaluate_loaded_manifest(
 
 fn fallback_explain(
     agent: Option<Agent>,
-    context: Option<(LoadedManifest, Vec<EvaluatedRule>)>,
+    context: Option<(&LoadedManifest, Vec<EvaluatedRule>)>,
     include_update_status: bool,
 ) -> DetectionExplain {
     let (
@@ -531,11 +546,11 @@ fn fallback_explain(
     ) = context
         .map(|(loaded, evaluated)| {
             (
-                Some(loaded.source),
+                Some(loaded.source.clone()),
                 evaluated,
-                loaded.warning,
+                loaded.warning.clone(),
                 loaded.manifest.version.as_ref().map(ToString::to_string),
-                loaded.cached_remote_version,
+                loaded.cached_remote_version.clone(),
                 loaded.local_override_shadowing_remote,
             )
         })
@@ -573,17 +588,13 @@ fn fallback_explain(
     }
 }
 
-fn load_manifest(agent: Agent) -> Option<LoadedManifest> {
+fn load_manifest(agent: Agent) -> Option<Arc<LoadedManifest>> {
     let lock = manifest_cache();
     let guard = match lock.read() {
         Ok(guard) => guard,
         Err(poisoned) => poisoned.into_inner(),
     };
-    guard
-        .manifests
-        .iter()
-        .find(|(cached_agent, _)| *cached_agent == agent)
-        .and_then(|(_, loaded)| loaded.clone())
+    guard.get(agent)
 }
 
 fn load_manifest_uncached(agent: Agent) -> Option<LoadedManifest> {
