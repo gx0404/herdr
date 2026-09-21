@@ -1214,7 +1214,7 @@ mod tests {
 
     fn make_cell(symbol: &str, fg: u32, bg: u32, modifier: u16) -> CellData {
         CellData {
-            symbol: symbol.to_owned(),
+            symbol: symbol.into(),
             fg,
             bg,
             modifier,

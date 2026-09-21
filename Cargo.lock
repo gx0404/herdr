@@ -238,6 +238,7 @@ dependencies = [
  "itoa",
  "rustversion",
  "ryu",
+ "serde",
  "static_assertions",
 ]
 
@@ -828,6 +829,7 @@ dependencies = [
  "bytes",
  "clap",
  "clap_complete",
+ "compact_str",
  "crossterm",
  "ctrlc",
  "interprocess",

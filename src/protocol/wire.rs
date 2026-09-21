@@ -702,7 +702,9 @@ pub enum AttachScrollSource {
 #[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CellData {
     /// Grapheme cluster displayed in this cell (usually 1–2 chars).
-    pub symbol: String,
+    /// CompactString 与 String 的 bincode 编码逐字节一致（有测试守门），
+    /// ≤24 字节的符号内联零堆分配（C-14）。
+    pub symbol: compact_str::CompactString,
     /// Foreground color as a packed u32 (0xAARRGGBB or ratatui Color index).
     pub fg: u32,
     /// Background color as a packed u32.
@@ -733,7 +735,7 @@ impl Clone for CellData {
 impl CellData {
     pub(crate) fn from_ratatui_cell(cell: &ratatui::buffer::Cell) -> Self {
         Self {
-            symbol: cell.symbol().to_owned(),
+            symbol: compact_str::CompactString::from(cell.symbol()),
             fg: color_to_u32(cell.fg),
             bg: color_to_u32(cell.bg),
             modifier: modifier_to_u16(cell.modifier),
@@ -858,7 +860,7 @@ impl FrameData {
                     let uri = self.hyperlinks.get(cell.hyperlink? as usize)?;
                     let x = u16::try_from(index % usize::from(width)).ok()?;
                     let y = u16::try_from(index / usize::from(width)).ok()?;
-                    Some(((x, y), cell.symbol.clone(), uri.clone()))
+                    Some(((x, y), cell.symbol.to_string(), uri.clone()))
                 })
                 .collect::<Vec<_>>()
         };
@@ -1739,6 +1741,34 @@ mod tests {
     fn encoded_sha256(value: &impl Serialize) -> String {
         let encoded = bincode::serde::encode_to_vec(value, bincode::config::standard()).unwrap();
         format!("{:x}", Sha256::digest(encoded))
+    }
+
+    /// C-14 的 wire 兼容前提：`CellData.symbol` 从 `String` 换成 `CompactString`
+    /// 后 bincode 线格式必须逐字节不变（冻结 fixture 变红即回滚，绝不改期望）。
+    /// compact_str 0.9 的 serde 走 `as_str().serialize` / visitor 重建，与 String
+    /// 同为「varint 长度 + UTF-8 字节」。
+    #[test]
+    fn compact_string_bincode_encoding_is_byte_identical_to_string() {
+        for text in [
+            "",
+            "a",
+            "中",
+            "🐢🚀",
+            "a grapheme cluster far beyond the inline capacity of CompactString ……",
+        ] {
+            let as_string =
+                bincode::serde::encode_to_vec(text.to_owned(), bincode::config::standard())
+                    .unwrap();
+            let as_compact = bincode::serde::encode_to_vec(
+                compact_str::CompactString::from(text),
+                bincode::config::standard(),
+            )
+            .unwrap();
+            assert_eq!(as_string, as_compact, "{text:?}");
+            let (decoded, _): (compact_str::CompactString, _) =
+                bincode::serde::decode_from_slice(&as_string, bincode::config::standard()).unwrap();
+            assert_eq!(decoded, text);
+        }
     }
 
     // These digests freeze representative generation-1 bincode payloads. A mismatch
@@ -2961,9 +2991,9 @@ mod tests {
         let cells: Vec<CellData> = (0..(width as usize) * (height as usize))
             .map(|i| CellData {
                 symbol: if i % 256 < 32 {
-                    " ".to_owned()
+                    " ".into()
                 } else {
-                    format!("{:03}", i % 1000)
+                    format!("{:03}", i % 1000).into()
                 },
                 fg: color_to_u32(Color::Rgb((i % 256) as u8, ((i / 256) % 256) as u8, 128)),
                 bg: color_to_u32(Color::Indexed((i % 256) as u8)),

@@ -26,6 +26,9 @@ bincode = { version = "2", features = ["serde"] }
 bytes = "1"
 clap = { version = "4.5", default-features = false, features = ["std", "help", "usage"] }
 clap_complete = "4.5"
+# CellData.symbol 的线格式等价替换（C-14）：serde 编码与 String 逐字节一致，
+# ≤24 字节符号内联零堆分配。锁文件已经由 ratatui-core 带入 0.9.0。
+compact_str = { version = "0.9", features = ["serde"] }
 crossterm = "0.29"
 ctrlc = { version = "3", features = ["termination"] }
 interprocess = "2.4.2"

@@ -201,7 +201,7 @@ fn mobile_header_and_switcher_render_released_sections_and_stable_targets() {
     state.set_snapshot(Box::new(projected));
     let mut projected_surface = surface();
     for cell in &mut projected_surface.frame.cells {
-        cell.symbol = "X".to_owned();
+        cell.symbol = "X".into();
     }
     state.set_pane_surface(projected_surface);
 

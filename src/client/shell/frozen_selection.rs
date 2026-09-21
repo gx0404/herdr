@@ -792,7 +792,7 @@ impl ClientShellState {
                                 symbol: if cell.width == 0 {
                                     " ".into()
                                 } else {
-                                    cell.text.clone()
+                                    cell.text.clone().into()
                                 },
                                 fg: cell.fg,
                                 bg: cell.bg,

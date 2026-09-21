@@ -320,7 +320,7 @@ mod tests {
 
     fn cell(symbol: &str) -> crate::protocol::CellData {
         crate::protocol::CellData {
-            symbol: symbol.to_owned(),
+            symbol: symbol.into(),
             fg: 0,
             bg: 0,
             modifier: 0,
