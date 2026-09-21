@@ -578,6 +578,7 @@ impl App {
             session_dirty: false,
             explicit_session_teardown: false,
             terminal_runtime_shutdowns: Vec::new(),
+            projection_epoch: 0,
         };
 
         state.terminals = restored_terminals;
@@ -816,6 +817,9 @@ impl App {
         notify_success: bool,
     ) -> crate::config::ConfigReloadReport {
         self.config_reloaded_from_disk = true;
+        // 配置派生的投影字段（keybindings 档、tab bar、agent 序等）可能整体变化
+        // （HSR-05 写入点）。
+        self.state.bump_projection_epoch();
         let previous_toast = self.state.toast.clone();
         let report = match crate::config::load_live_config() {
             Ok(loaded) => {
@@ -1160,6 +1164,123 @@ mod tests {
                 observed_at: Instant::now(),
             })
         );
+    }
+
+    #[test]
+    fn projection_epoch_bumps_at_every_projection_write_point() {
+        let mut app = test_app();
+        app.state.workspaces.push(Workspace::test_new("one"));
+        app.state.ensure_test_terminals();
+        let pane_id = app.state.workspaces[0].tabs[0].root_pane;
+        let workspace_id = app.state.workspaces[0].id.clone();
+        let identity_cwd = app.state.workspaces[0].identity_cwd.clone();
+
+        macro_rules! assert_bumps {
+            ($label:literal, $action:expr) => {{
+                let before = app.state.projection_epoch;
+                let _ = $action;
+                assert!(
+                    app.state.projection_epoch != before,
+                    "projection_epoch must bump at write point: {}",
+                    $label
+                );
+            }};
+        }
+
+        assert_bumps!("mark_session_dirty", app.state.mark_session_dirty());
+        assert_bumps!("emit_pane_updated", app.emit_pane_updated(0, pane_id));
+        assert_bumps!(
+            "emit_workspace_token_updated",
+            app.emit_workspace_token_updated(0)
+        );
+        assert_bumps!(
+            "UpdateReady",
+            app.handle_internal_event(AppEvent::UpdateReady {
+                version: "9.9.9".into(),
+                install_command: "herdr update".into(),
+            })
+        );
+        assert_bumps!(
+            "apply_workspace_git_statuses",
+            app.state.apply_workspace_git_statuses(
+                &app.terminal_runtimes,
+                vec![crate::workspace::WorkspaceGitStatus {
+                    workspace_id: workspace_id.clone(),
+                    resolved_identity_cwd: identity_cwd.clone(),
+                    status_cache_key: identity_cwd.clone(),
+                    demand: crate::workspace::GitStatusRefreshDemand::ALL,
+                    auto_label: "one".into(),
+                    branch: Some("main".into()),
+                    ahead_behind: None,
+                    space: None,
+                }],
+            )
+        );
+        // 无事件焦点收敛（显式不写事件的路径也必须递增）
+        app.state.active = Some(0);
+        assert_bumps!(
+            "accept_current_focus_without_events",
+            app.accept_current_focus_without_events()
+        );
+
+        // 负面对照：blocked 心跳（同一观测重复上报）不产生 pane 更新，
+        // 也不得搅动投影纪元（与 B1 的无渲染影响一致）。
+        let heartbeat = || AppEvent::StateChanged {
+            pane_id,
+            agent: Some(Agent::Codex),
+            state: AgentState::Blocked,
+            visible_blocker: true,
+            visible_working: false,
+            process_exited: false,
+            observed_at: Instant::now(),
+        };
+        app.handle_internal_event(heartbeat());
+        let before = app.state.projection_epoch;
+        app.handle_internal_event(heartbeat());
+        assert_eq!(
+            app.state.projection_epoch, before,
+            "identical blocked keepalive must not bump projection_epoch"
+        );
+
+        if crate::platform::status_commands_supported() {
+            app.configure_tab_bar_status(
+                &[crate::config::TabBarRightEntryConfig::Command {
+                    command: "status".into(),
+                    interval_seconds: 5,
+                    timeout_seconds: 2,
+                }],
+                " ",
+            );
+            let generation = app.tab_bar_status_generation;
+            assert_bumps!(
+                "handle_tab_bar_command_finished",
+                app.handle_internal_event(AppEvent::TabBarCommandFinished {
+                    generation,
+                    segment_index: 0,
+                    result: Ok(Some("ready".into())),
+                })
+            );
+            // 命令输出未变时不递增（幂等）
+            let before = app.state.projection_epoch;
+            app.handle_internal_event(AppEvent::TabBarCommandFinished {
+                generation,
+                segment_index: 0,
+                result: Ok(Some("ready".into())),
+            });
+            assert_eq!(app.state.projection_epoch, before);
+        }
+
+        // 配置重载（配置派生字段整体可能变化）
+        {
+            let _guard = config_env_lock().lock().unwrap();
+            let path = temp_config_path("projection-epoch-reload");
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, "[terminal]\nscrollback_limit_bytes = 1000000\n").unwrap();
+            std::env::set_var(crate::config::CONFIG_PATH_ENV_VAR, &path);
+            assert_bumps!("reload_config", app.reload_config());
+            std::env::remove_var(crate::config::CONFIG_PATH_ENV_VAR);
+            let _ = std::fs::remove_dir_all(path.parent().unwrap());
+        }
     }
 
     #[test]

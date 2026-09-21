@@ -310,7 +310,7 @@ pub(crate) fn manifest_for(
 ) -> HandoffManifest {
     HandoffManifest {
         version: HANDOFF_VERSION,
-        source_version: crate::build_info::version(),
+        source_version: crate::build_info::version().to_owned(),
         source_protocol: crate::protocol::PROTOCOL_VERSION,
         expected_version,
         expected_protocol,

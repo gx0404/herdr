@@ -140,6 +140,10 @@ impl App {
             }
             self.next_tab_bar_datetime_refresh = Some(now + DATETIME_REFRESH_INTERVAL);
         }
+        if changed {
+            // tab_bar_right 段进入 ClientShell 投影（HSR-05 写入点）。
+            self.state.bump_projection_epoch();
+        }
 
         let command_due = self
             .tab_bar_commands
@@ -211,6 +215,10 @@ impl App {
         };
         let changed = *current != output;
         *current = output;
+        if changed {
+            // tab_bar_right 段进入 ClientShell 投影（HSR-05 写入点）。
+            self.state.bump_projection_epoch();
+        }
         changed
     }
 }

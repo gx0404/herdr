@@ -193,6 +193,11 @@ pub(crate) struct ClientConnection {
     pub(crate) shell_agent_view: Option<crate::api::schema::AgentViewSetParams>,
     /// Monotonic shell replacement revision for this connection.
     pub(crate) shell_projection_revision: u64,
+    /// 上次构建候选投影时观测到的 AppState::projection_epoch（HSR-05）。
+    /// 纪元与投影输入都未变时跳过整份重建与深比较。
+    pub(crate) shell_projection_epoch: u64,
+    /// 上次构建候选投影时的 shell location（影响 focused/active_tab 覆盖）。
+    pub(crate) shell_projection_location: Option<ClientShellLocation>,
     /// Whether this shell is waiting for one ordered endpoint command response.
     pub(crate) shell_endpoint_command_in_flight: bool,
     /// Surface projection epoch that owned the in-flight command. Deferred navigation may run
@@ -261,6 +266,8 @@ impl ClientConnection {
             shell_snapshot: None,
             shell_agent_view: None,
             shell_projection_revision: 0,
+            shell_projection_epoch: u64::MAX,
+            shell_projection_location: None,
             shell_endpoint_command_in_flight: false,
             shell_endpoint_command_surface_revision: None,
             shell_deferred_navigation_request_id: None,

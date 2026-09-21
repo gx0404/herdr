@@ -372,7 +372,7 @@ fn handle_request(
         return serde_json::to_string(&SuccessResponse {
             id: request.id,
             result: ResponseResult::Pong {
-                version: crate::build_info::version(),
+                version: crate::build_info::version().to_owned(),
                 protocol: crate::protocol::PROTOCOL_VERSION,
                 capabilities,
             },

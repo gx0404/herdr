@@ -10,14 +10,15 @@ pub fn build_id() -> Option<&'static str> {
     non_empty(option_env!("HERDR_BUILD_ID"))
 }
 
-pub fn version() -> String {
-    match channel() {
+pub fn version() -> &'static str {
+    static VERSION: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    VERSION.get_or_init(|| match channel() {
         "stable" => BASE_VERSION.to_string(),
         channel => match build_id() {
             Some(build_id) => format!("{BASE_VERSION}-{channel}.{build_id}"),
             None => format!("{BASE_VERSION}-{channel}"),
         },
-    }
+    })
 }
 
 pub fn is_preview() -> bool {

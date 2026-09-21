@@ -489,48 +489,58 @@ impl HeadlessServer {
                     .get(&client_id)
                     .and_then(|client| client.shell_location.clone());
                 let agent_view = self.app.state.agent_view_override.clone();
+                let epoch = self.app.state.projection_epoch;
                 let Some(client) = self.clients.get_mut(&client_id) else {
                     continue;
                 };
-                let mut candidate = client_shell_snapshot(
-                    &self.app,
-                    &self.client_shell_boot_id,
-                    client.shell_projection_revision,
-                    None,
-                    location.as_ref(),
-                );
-                candidate.config_diagnostic = if client.shell_uses_endpoint_keybindings {
-                    self.server_config_diagnostic.clone()
-                } else {
-                    self.server_config_diagnostic_without_keybindings.clone()
-                };
-                candidate.revision = client.shell_projection_revision;
-                if client.shell_snapshot.as_ref() != Some(&candidate)
-                    || client.shell_agent_view != agent_view
-                {
-                    client.shell_projection_revision =
-                        client.shell_projection_revision.saturating_add(1);
-                    candidate.revision = client.shell_projection_revision;
-                    let projection_message = if agent_view.is_some()
-                        || client.shell_agent_view.is_some()
-                    {
-                        match crate::protocol::endpoint::agent_view_projection_message(
-                            &candidate.boot_id,
-                            candidate.revision,
-                            agent_view.as_ref(),
-                        ) {
-                            Ok(message) => Some(message),
-                            Err(err) => {
-                                warn!(client_id, err = %err, "failed to encode endpoint agent view");
-                                broken_clients.push(client_id);
-                                continue;
-                            }
-                        }
+                // HSR-05：投影纪元与全部投影输入（location / agent_view）未变时，
+                // 跳过整份 ClientShellSnapshot 重建与深比较；纪元变化后的重建仍以
+                // 深比较兜底决定是否需要下发。
+                let reuse_projection = client.shell_projection_epoch == epoch
+                    && client.shell_projection_location == location
+                    && client.shell_agent_view == agent_view
+                    && client.shell_snapshot.is_some();
+                if !reuse_projection {
+                    let mut candidate = client_shell_snapshot(
+                        &self.app,
+                        &self.client_shell_boot_id,
+                        client.shell_projection_revision,
+                        None,
+                        location.as_ref(),
+                    );
+                    candidate.config_diagnostic = if client.shell_uses_endpoint_keybindings {
+                        self.server_config_diagnostic.clone()
                     } else {
-                        None
+                        self.server_config_diagnostic_without_keybindings.clone()
                     };
-                    let snapshot_message =
-                        match crate::protocol::endpoint::snapshot_message(&candidate) {
+                    candidate.revision = client.shell_projection_revision;
+                    if client.shell_snapshot.as_ref() != Some(&candidate)
+                        || client.shell_agent_view != agent_view
+                    {
+                        client.shell_projection_revision =
+                            client.shell_projection_revision.saturating_add(1);
+                        candidate.revision = client.shell_projection_revision;
+                        let projection_message = if agent_view.is_some()
+                            || client.shell_agent_view.is_some()
+                        {
+                            match crate::protocol::endpoint::agent_view_projection_message(
+                                &candidate.boot_id,
+                                candidate.revision,
+                                agent_view.as_ref(),
+                            ) {
+                                Ok(message) => Some(message),
+                                Err(err) => {
+                                    warn!(client_id, err = %err, "failed to encode endpoint agent view");
+                                    broken_clients.push(client_id);
+                                    continue;
+                                }
+                            }
+                        } else {
+                            None
+                        };
+                        let snapshot_message = match crate::protocol::endpoint::snapshot_message(
+                            &candidate,
+                        ) {
                             Ok(message) => message,
                             Err(err) => {
                                 warn!(client_id, err = %err, "failed to encode endpoint snapshot");
@@ -538,38 +548,42 @@ impl HeadlessServer {
                                 continue;
                             }
                         };
-                    let projection_framed = match projection_message
-                        .as_ref()
-                        .map(Self::frame_server_message)
-                        .transpose()
-                    {
-                        Ok(framed) => framed,
-                        Err(err) => {
-                            warn!(client_id, err = %err, "failed to frame endpoint agent view");
+                        let projection_framed = match projection_message
+                            .as_ref()
+                            .map(Self::frame_server_message)
+                            .transpose()
+                        {
+                            Ok(framed) => framed,
+                            Err(err) => {
+                                warn!(client_id, err = %err, "failed to frame endpoint agent view");
+                                broken_clients.push(client_id);
+                                continue;
+                            }
+                        };
+                        let snapshot_framed = match Self::frame_server_message(&snapshot_message) {
+                            Ok(framed) => framed,
+                            Err(err) => {
+                                warn!(client_id, err = %err, "failed to frame endpoint snapshot");
+                                broken_clients.push(client_id);
+                                continue;
+                            }
+                        };
+                        let Some(writer) = client.writer.as_ref() else {
+                            broken_clients.push(client_id);
+                            continue;
+                        };
+                        if projection_framed
+                            .is_some_and(|framed| writer.control.send(framed).is_err())
+                            || writer.control.send(snapshot_framed).is_err()
+                        {
                             broken_clients.push(client_id);
                             continue;
                         }
-                    };
-                    let snapshot_framed = match Self::frame_server_message(&snapshot_message) {
-                        Ok(framed) => framed,
-                        Err(err) => {
-                            warn!(client_id, err = %err, "failed to frame endpoint snapshot");
-                            broken_clients.push(client_id);
-                            continue;
-                        }
-                    };
-                    let Some(writer) = client.writer.as_ref() else {
-                        broken_clients.push(client_id);
-                        continue;
-                    };
-                    if projection_framed.is_some_and(|framed| writer.control.send(framed).is_err())
-                        || writer.control.send(snapshot_framed).is_err()
-                    {
-                        broken_clients.push(client_id);
-                        continue;
+                        client.shell_snapshot = Some(candidate);
+                        client.shell_agent_view = agent_view;
                     }
-                    client.shell_snapshot = Some(candidate);
-                    client.shell_agent_view = agent_view;
+                    client.shell_projection_epoch = epoch;
+                    client.shell_projection_location = location;
                 }
                 shell_projection_revision = client.shell_projection_revision;
                 if !client.shell_surface_active {

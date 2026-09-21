@@ -762,6 +762,8 @@ impl App {
     }
 
     pub(super) fn emit_event(&mut self, event: crate::api::schema::EventEnvelope) {
+        // 每个可 hook 事件都对应一次投影可见的状态变更（HSR-05 写入点）。
+        self.state.bump_projection_epoch();
         self.run_plugin_event_hooks(&event);
         self.event_hub.push(event);
     }
@@ -778,6 +780,7 @@ impl App {
     pub(crate) fn emit_workspace_token_updated(&mut self, ws_idx: usize) {
         // Token updates bypass plugin hooks so a hook cannot refresh its own
         // token and recursively trigger workspace.updated.
+        self.state.bump_projection_epoch();
         self.event_hub.push(crate::api::schema::EventEnvelope {
             event: crate::api::schema::EventKind::WorkspaceMetadataUpdated,
             data: crate::api::schema::EventData::WorkspaceMetadataUpdated {
@@ -791,12 +794,17 @@ impl App {
     }
 
     pub(crate) fn accept_current_focus_without_events(&mut self) {
-        self.last_focus = self.state.active.and_then(|idx| {
+        let next_focus = self.state.active.and_then(|idx| {
             self.state
                 .workspaces
                 .get(idx)
                 .and_then(|workspace| workspace.focused_pane_id().map(|pane_id| (idx, pane_id)))
         });
+        // 焦点进入投影但不走事件面（HSR-05 写入点）。
+        if next_focus != self.last_focus {
+            self.state.bump_projection_epoch();
+        }
+        self.last_focus = next_focus;
     }
 
     pub(crate) fn accept_current_focus_with_api_events(&mut self) {

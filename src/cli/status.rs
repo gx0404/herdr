@@ -325,7 +325,7 @@ struct UpdateStatusJson {
 
 fn client_status_json() -> ClientStatusJson {
     ClientStatusJson {
-        version: crate::build_info::version(),
+        version: crate::build_info::version().to_owned(),
         channel: crate::config::Config::load().config.update.channel.as_str(),
         protocol: crate::protocol::PROTOCOL_VERSION,
         endpoint_protocol_generation: crate::protocol::endpoint::ENDPOINT_PROTOCOL_GENERATION,
@@ -474,7 +474,7 @@ mod tests {
 
     #[test]
     fn server_without_endpoint_baseline_requires_restart() {
-        let server = running_server(Some(crate::build_info::version().as_str()), None);
+        let server = running_server(Some(crate::build_info::version()), None);
 
         assert_eq!(restart_needed_bool(&server), Some(true));
         assert_eq!(server_binary_stale_bool(&server), Some(false));

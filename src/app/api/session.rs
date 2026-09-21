@@ -14,6 +14,16 @@ impl App {
     }
 
     pub(crate) fn session_snapshot(&self) -> SessionSnapshot {
+        self.session_snapshot_impl(true)
+    }
+
+    /// Client shell 投影专用：`ClientShellSnapshot` 没有 layouts 字段，
+    /// 逐 tab 的 pane_layout_snapshot 在投影路径是纯浪费（HSR-05）。
+    pub(crate) fn session_snapshot_for_projection(&self) -> SessionSnapshot {
+        self.session_snapshot_impl(false)
+    }
+
+    fn session_snapshot_impl(&self, include_layouts: bool) -> SessionSnapshot {
         let focused_workspace_id = self
             .state
             .active
@@ -36,14 +46,16 @@ impl App {
                 if let Some(tab) = self.tab_info(ws_idx, tab_idx) {
                     tabs.push(tab);
                 }
-                if let Some(layout) = self.pane_layout_snapshot(ws_idx, tab_idx) {
-                    layouts.push(layout);
+                if include_layouts {
+                    if let Some(layout) = self.pane_layout_snapshot(ws_idx, tab_idx) {
+                        layouts.push(layout);
+                    }
                 }
             }
         }
 
         SessionSnapshot {
-            version: crate::build_info::version(),
+            version: crate::build_info::version().to_owned(),
             protocol: crate::protocol::PROTOCOL_VERSION,
             focused_workspace_id,
             focused_tab_id,

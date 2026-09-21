@@ -168,7 +168,7 @@ impl EndpointServerWelcome {
     pub fn compatible(methods: Vec<String>) -> Self {
         Self {
             generation: ENDPOINT_PROTOCOL_GENERATION,
-            server_version: crate::build_info::version(),
+            server_version: crate::build_info::version().to_owned(),
             snapshot_codec: SNAPSHOT_CODEC_V1.into(),
             surface_codec: SURFACE_CODEC_V1.into(),
             input_codec: INPUT_CODEC_V1.into(),
@@ -189,7 +189,7 @@ impl EndpointServerWelcome {
     pub fn incompatible(code: &str, message: impl Into<String>) -> Self {
         Self {
             generation: ENDPOINT_PROTOCOL_GENERATION,
-            server_version: crate::build_info::version(),
+            server_version: crate::build_info::version().to_owned(),
             snapshot_codec: SNAPSHOT_CODEC_V1.into(),
             surface_codec: SURFACE_CODEC_V1.into(),
             input_codec: INPUT_CODEC_V1.into(),

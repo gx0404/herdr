@@ -1441,6 +1441,10 @@ impl AppState {
                 changed = true;
             }
         }
+        if changed {
+            // 分支/ahead-behind 都会进入 ClientShell 投影（HSR-05 写入点）。
+            self.bump_projection_epoch();
+        }
         changed
     }
 
@@ -1455,6 +1459,7 @@ impl AppState {
                 version,
                 install_command,
             } => {
+                self.bump_projection_epoch();
                 self.update_available = Some(version.clone());
                 self.update_install_command = install_command.clone();
                 self.latest_release_notes_available = true;

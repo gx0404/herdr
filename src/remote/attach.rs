@@ -627,7 +627,7 @@ struct RemoteManifestReleaseRef<'a> {
 }
 
 fn current_version() -> String {
-    crate::build_info::version()
+    crate::build_info::version().to_owned()
 }
 
 fn current_channel() -> &'static str {

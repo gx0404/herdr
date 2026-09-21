@@ -1137,11 +1137,20 @@ pub struct AppState {
     /// Terminal runtimes that should be shut down by the app/runtime layer
     /// after state has detached their terminal metadata.
     pub(crate) terminal_runtime_shutdowns: Vec<crate::terminal::TerminalId>,
+    /// 投影纪元：任何会进入 ClientShell 投影的内容变更都必须在写入点递增它
+    /// （HSR-05/APP-002）。render 循环用它跳过无变化的候选重建；递增遗漏会
+    /// 导致客户端投影陈旧，写入点清单由 projection_epoch 测试守门。
+    pub(crate) projection_epoch: u64,
 }
 
 impl AppState {
+    pub(crate) fn bump_projection_epoch(&mut self) {
+        self.projection_epoch = self.projection_epoch.wrapping_add(1);
+    }
+
     pub(crate) fn mark_session_dirty(&mut self) {
         self.session_dirty = true;
+        self.bump_projection_epoch();
     }
 
     /// 记录一次显式（用户/API）工作区关闭的结果。
@@ -1361,6 +1370,7 @@ impl AppState {
             session_dirty: false,
             explicit_session_teardown: false,
             terminal_runtime_shutdowns: Vec::new(),
+            projection_epoch: 0,
         }
     }
 
