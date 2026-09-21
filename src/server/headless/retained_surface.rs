@@ -1,5 +1,12 @@
 use super::*;
 
+/// 接收者基线链接表的条目上界（RS-01 根治的配套界）。表只追加：只有全量帧会
+/// 重建它，所以长会话里被引用过的 URI 会一直占位，同时把每格的线性扫描拉长。
+/// 达到上界就剔除该接收者并延期一次全量渲染，让表回到「只含当前可见链接」。
+/// 单个全量帧的可见链接本身就超过上界时（极端 pane）退化为每 tick 全量渲染，
+/// 与 B9 之前的行为一致，不会更差。
+pub(super) const MAX_RECIPIENT_HYPERLINKS: usize = 4096;
+
 fn rect_fits_frame(rect: protocol::SurfaceRect, frame: &FrameData) -> bool {
     rect.x.saturating_add(rect.width) <= frame.width
         && rect.y.saturating_add(rect.height) <= frame.height
@@ -26,39 +33,65 @@ fn frame_hyperlink_index(
     index
 }
 
-/// 把收集补丁行的超链接索引翻译到接收者基线帧；无链接或整行无需改写时零拷贝
-/// 借用，只有真正改索引的格子才复制（符号是 String，逐格克隆要避开热路径）。
-fn translate_row_hyperlinks<'a>(
+/// 把收集补丁行的超链接索引翻译到接收者基线帧。默认零拷贝借用原行，只有真正改
+/// 索引（或防御性丢链）的格子才复制一份——符号是 String，逐格克隆要避开热路径。
+struct RowHyperlinks<'a> {
     cells: &'a [protocol::CellData],
-    patch: &crate::pane::TerminalDirtyPatch,
-    frame: &FrameData,
-    new_hyperlink_uris: &mut Vec<String>,
-) -> std::borrow::Cow<'a, [protocol::CellData]> {
-    if patch.hyperlinks.is_empty() {
-        return std::borrow::Cow::Borrowed(cells);
-    }
-    let mut translated: Option<Vec<protocol::CellData>> = None;
-    for (index, cell) in cells.iter().enumerate() {
-        let Some(local) = cell.hyperlink else {
-            continue;
-        };
-        // 收集期索引与链接表同步构造，越组不会发生；防御性丢链优于写出错误
-        // 索引（ctrl-hover 会开错 URL）。
-        let absolute = patch
-            .hyperlinks
-            .get(local as usize)
-            .map(|uri| frame_hyperlink_index(frame, new_hyperlink_uris, uri));
-        if absolute == cell.hyperlink {
-            continue;
+    /// 按格偏移升序的覆盖项：`(offset, 翻译后的格子)`。
+    overrides: Vec<(usize, protocol::CellData)>,
+}
+
+impl<'a> RowHyperlinks<'a> {
+    fn new(
+        cells: &'a [protocol::CellData],
+        local_uris: &[String],
+        frame: &FrameData,
+        new_hyperlink_uris: &mut Vec<String>,
+    ) -> Self {
+        let mut overrides: Vec<(usize, protocol::CellData)> = Vec::new();
+        if local_uris.is_empty() {
+            return Self { cells, overrides };
         }
-        let owned = translated.get_or_insert_with(|| cells.to_vec());
-        if let Some(cell) = owned.get_mut(index) {
-            cell.hyperlink = absolute;
+        // 同一 URI 的连续游程（一行里最常见的形态）只查表一次，避免每格线性扫描。
+        let mut last: Option<(&str, u32)> = None;
+        for (offset, cell) in cells.iter().enumerate() {
+            let Some(local) = cell.hyperlink else {
+                continue;
+            };
+            // 收集期索引与局部表同步构造，越界不会发生；防御性丢链优于写出错误
+            // 索引（ctrl-hover 会开错 URL）。
+            let Some(uri) = local_uris.get(local as usize) else {
+                let mut dropped = cell.clone();
+                dropped.hyperlink = None;
+                overrides.push((offset, dropped));
+                continue;
+            };
+            let absolute = match last {
+                Some((known, index)) if known == uri.as_str() => index,
+                _ => {
+                    let index = frame_hyperlink_index(frame, new_hyperlink_uris, uri);
+                    last = Some((uri.as_str(), index));
+                    index
+                }
+            };
+            if Some(absolute) == cell.hyperlink {
+                continue;
+            }
+            let mut translated = cell.clone();
+            translated.hyperlink = Some(absolute);
+            overrides.push((offset, translated));
         }
+        Self { cells, overrides }
     }
-    match translated {
-        Some(cells) => std::borrow::Cow::Owned(cells),
-        None => std::borrow::Cow::Borrowed(cells),
+
+    fn cell(&self, offset: usize) -> Option<&protocol::CellData> {
+        match self
+            .overrides
+            .binary_search_by_key(&offset, |(offset, _)| *offset)
+        {
+            Ok(index) => self.overrides.get(index).map(|(_, cell)| cell),
+            Err(_) => self.cells.get(offset),
+        }
     }
 }
 
@@ -99,28 +132,36 @@ fn changed_rows(
         let frame_end = frame_start.checked_add(width)?;
         let existing = frame.cells.get(frame_start..frame_end)?;
         // 先按接收者基线翻译超链接索引，再做逐格 diff——两表不同源，
-        // 直接比 u32 索引是错的。
-        let desired = translate_row_hyperlinks(&cells[..width], patch, frame, new_hyperlink_uris);
-        let desired: &[protocol::CellData] = &desired;
+        // 直接比 u32 索引是错的。未改索引的格子保持借用，不逐格克隆。
+        let translation = RowHyperlinks::new(
+            &cells[..width],
+            &patch.hyperlinks,
+            frame,
+            new_hyperlink_uris,
+        );
         let mut offset = 0;
         while offset < width {
-            if existing[offset] == desired[offset] {
+            if existing[offset] == *translation.cell(offset)? {
                 offset += 1;
                 continue;
             }
             let start = offset;
             offset += 1;
-            while offset < width && existing[offset] != desired[offset] {
+            while offset < width && existing[offset] != *translation.cell(offset)? {
                 offset += 1;
             }
             // Include the following cell so a wide-to-narrow (or
             // narrow-to-wide) transition repaints content covered by the old
             // grapheme width even when that logical neighbor is unchanged.
             let end = offset.saturating_add(1).min(width);
+            let mut emitted = Vec::with_capacity(end - start);
+            for index in start..end {
+                emitted.push(translation.cell(index)?.clone());
+            }
             rows.push(protocol::PaneSurfacePatchRow {
                 x: area.x.checked_add(u16::try_from(start).ok()?)?,
                 y,
-                cells: desired[start..end].to_vec(),
+                cells: emitted,
             });
             offset = end;
         }
@@ -527,6 +568,19 @@ impl HeadlessServer {
                 changed_panes.push(pane.clone());
             }
 
+            // 链接表上界（见常量说明）：超限剔除该接收者，延期一次全量渲染重建表。
+            if surface
+                .frame
+                .hyperlinks
+                .len()
+                .saturating_add(new_hyperlink_uris.len())
+                > MAX_RECIPIENT_HYPERLINKS
+            {
+                crate::render_prof::event("retained_surface.defer.hyperlink_table_full");
+                deferred_clients.insert(client_id);
+                continue 'recipient;
+            }
+
             let cursor = retained_cursor(&self.app, &panes);
             let cursor_changed = cursor != surface.frame.cursor;
             let patch = protocol::PaneSurfacePatch {
@@ -874,5 +928,83 @@ mod tests {
         .expect("valid patch");
 
         assert!(rows.is_empty());
+    }
+
+    /// 非门禁扩展剖析（`just bench-render-scale` 的 `render_scale_profile` 过滤命中）：
+    /// 带链接脏行的补丁翻译 + 逐格 diff 在 1 / 15 pane 下的成本，并给出同形状
+    /// 无链接行作对照。修复前该形状每 tick 直接回落整帧，所以这里是净新增工作量
+    /// 的口径（不是与被删代码的等价替换）。
+    #[test]
+    #[ignore = "non-gating hyperlink patch translation profile"]
+    fn render_scale_profile_hyperlink_patch_translation() {
+        const WIDTH: u16 = 120;
+        const PANE_HEIGHT: u16 = 40;
+        const LINKED_CELLS: usize = 40;
+        const SAMPLES: usize = 200;
+        for count in [1usize, 15] {
+            let height = PANE_HEIGHT * count as u16;
+            let baseline_uris: Vec<String> = (0..64)
+                .map(|index| format!("https://known.example/{index}"))
+                .collect();
+            let frame = FrameData {
+                width: WIDTH,
+                height,
+                cells: vec![cell("x"); usize::from(WIDTH) * usize::from(height)],
+                cursor: None,
+                hyperlinks: baseline_uris.clone(),
+                graphics: Vec::new(),
+            };
+            // 局部链接表：0 号是本轮新 URI，1..=8 复用基线已有 URI；行内 40 格
+            // 按 8 格一段重复引用，覆盖「连续同 URI 游程」这一常见形态。
+            let local_uris: Vec<String> = std::iter::once("https://new.example/0".to_owned())
+                .chain(baseline_uris.iter().take(8).cloned())
+                .collect();
+            let linked_row = |plain: bool| {
+                let mut row = vec![cell("x"); usize::from(WIDTH)];
+                if !plain {
+                    for (index, cell) in row.iter_mut().take(LINKED_CELLS).enumerate() {
+                        cell.hyperlink = Some(u32::try_from(index / 8).unwrap_or(0));
+                    }
+                }
+                row
+            };
+            for plain in [true, false] {
+                let patch = crate::pane::TerminalDirtyPatch {
+                    rows: vec![(0, linked_row(plain))],
+                    hyperlinks: if plain {
+                        Vec::new()
+                    } else {
+                        local_uris.clone()
+                    },
+                };
+                let run = || {
+                    let started = Instant::now();
+                    let mut new_hyperlink_uris = Vec::new();
+                    for pane_index in 0..count {
+                        let area = protocol::SurfaceRect {
+                            x: 0,
+                            y: PANE_HEIGHT * pane_index as u16,
+                            width: WIDTH,
+                            height: PANE_HEIGHT,
+                        };
+                        let rows = changed_rows(&frame, area, &patch, &mut new_hyperlink_uris)
+                            .expect("valid patch");
+                        std::hint::black_box(rows);
+                    }
+                    started.elapsed().as_micros()
+                };
+                for _ in 0..20 {
+                    std::hint::black_box(run());
+                }
+                let mut samples: Vec<u128> = (0..SAMPLES).map(|_| run()).collect();
+                samples.sort_unstable();
+                println!(
+                    "hyperlink translation panes={count} plain={plain} median_us={} p95_us={} max_us={}",
+                    samples[SAMPLES / 2],
+                    samples[SAMPLES * 95 / 100],
+                    samples[SAMPLES - 1],
+                );
+            }
+        }
     }
 }

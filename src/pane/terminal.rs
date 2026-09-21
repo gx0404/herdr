@@ -3118,13 +3118,14 @@ fn ghostty_collect_dirty_patch(
             let hyperlink = if basic.has_hyperlink {
                 match terminal.viewport_hyperlink_uri(x, y.into()) {
                     Ok(Some(uri)) => {
+                        let as_index = |len: usize| u32::try_from(len).unwrap_or(u32::MAX);
                         let index = patch_hyperlinks
                             .iter()
                             .position(|known| *known == uri)
-                            .map(|index| index as u32)
+                            .map(as_index)
                             .unwrap_or_else(|| {
                                 patch_hyperlinks.push(uri);
-                                (patch_hyperlinks.len() - 1) as u32
+                                as_index(patch_hyperlinks.len().saturating_sub(1))
                             });
                         Some(index)
                     }

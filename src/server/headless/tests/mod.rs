@@ -1825,6 +1825,204 @@ async fn retained_hyperlink_patches_grow_the_table_and_match_a_rebuilt_baseline(
     shutdown_test_runtimes(&mut server);
 }
 
+/// B8 的「剔除 pane → 观看者延期 → 全量渲染恢复基线且无部分提交」在 B9 改写
+/// 超链接测试后没有等价覆盖，这里用非超链接触发器（切备用屏导致基线几何失效）
+/// 把整条链钉住。
+#[tokio::test]
+async fn retained_alternate_screen_geometry_defers_watchers_and_recovers() {
+    let mut server = test_headless_server();
+    let pane_id = install_shared_view_test_runtime(&mut server);
+    let (_control, render) = connect_matching_test_shell(&mut server, 7);
+    let _ = _control.recv().expect("snapshot");
+    server.render_and_stream();
+    let baseline = recv_pane_surface(&render, "baseline");
+    assert!(!baseline.panes[0].alternate_screen_active);
+
+    write_shared_test_pane(&mut server, pane_id, b"\x1b[?1049hALT");
+    assert!(server.render_retained_pane_surface_and_stream(&HashSet::from([pane_id])));
+    // 剔除的 pane 不参与本 tick：观看者只可能收到空补丁，并被延期。
+    while let Ok(bytes) = render.try_recv() {
+        let ServerMessage::PaneSurfacePatch(patch) = read_server_message(bytes) else {
+            panic!("excluded pane must not stream a full surface");
+        };
+        assert!(patch.rows.is_empty() && patch.panes.is_empty());
+    }
+    assert_eq!(server.clients[&7].deferred_render(), DeferredRender::Full);
+    assert!(server.app.render_dirty.is_pending());
+    let after = server.clients[&7].render_state.last_pane_surface().unwrap();
+    assert_eq!(
+        after.frame.cells, baseline.frame.cells,
+        "剔除的 pane 不得部分提交"
+    );
+    assert_eq!(after.panes, baseline.panes);
+
+    // 全量渲染恢复基线（含备用屏标记）并清延期，retained 快路径重新接管。
+    server.render_and_stream();
+    let recovered = recv_pane_surface(&render, "recovery full render");
+    assert!(recovered.panes[0].alternate_screen_active);
+    assert_eq!(server.clients[&7].deferred_render(), DeferredRender::None);
+    write_shared_test_pane(&mut server, pane_id, b"\rPLAIN");
+    assert!(server.render_retained_pane_surface_and_stream(&HashSet::from([pane_id])));
+    let patch = recv_pane_surface_patch(&render, "patch resumes after recovery");
+    assert!(!patch.rows.is_empty() || !patch.panes.is_empty());
+    shutdown_test_runtimes(&mut server);
+}
+
+/// 行已收集、链接增量已记账之后才延期的路径（滚动条补丁失败）：该 pane 的行与
+/// 链接增量必须一起回滚。同 tick 里另一个 pane 的行会把补丁发出去，因此这两处
+/// 泄漏都能从线上观测到。
+#[tokio::test]
+async fn retained_scrollbar_failure_rolls_back_rows_and_hyperlink_delta() {
+    let mut server = test_headless_server();
+    let mut workspace = crate::workspace::Workspace::test_new("rollback");
+    let first_pane = workspace.tabs[0].root_pane;
+    let second_pane = workspace.test_split(ratatui::layout::Direction::Horizontal);
+    workspace.insert_test_runtime(
+        first_pane,
+        crate::terminal::TerminalRuntime::test_with_screen_bytes(80, 23, b"FIRST"),
+    );
+    workspace.insert_test_runtime(
+        second_pane,
+        crate::terminal::TerminalRuntime::test_with_screen_bytes(80, 23, b"SECOND"),
+    );
+    server.app.state.workspaces = vec![workspace];
+    server.app.state.active = Some(0);
+    server.app.state.selected = 0;
+    server.app.state.mode = crate::app::Mode::Terminal;
+    let first_pane_id = server
+        .app
+        .public_pane_id(0, first_pane)
+        .expect("first pane id");
+    let (_control, render) = connect_matching_test_shell(&mut server, 7);
+    let _ = _control.recv().expect("snapshot");
+    server.render_and_stream();
+    let baseline = recv_pane_surface(&render, "baseline");
+
+    // 第一个 pane 的基线带着一条越界的滚动条矩形（几何已失效）：本 tick 无滚动
+    // 指标，于是按旧矩形出补丁，`patch_row_changed` 因越界返回 None → 延期。
+    {
+        let crate::server::render_stream::ClientRenderState::Semantic { last_surface, .. } =
+            &mut server.clients.get_mut(&7).unwrap().render_state
+        else {
+            panic!("semantic client");
+        };
+        let surface = last_surface.as_mut().unwrap();
+        let pane = surface
+            .panes
+            .iter_mut()
+            .find(|pane| pane.pane_id == first_pane_id)
+            .expect("first pane in baseline");
+        pane.scrollbar_rect = Some(crate::protocol::SurfaceRect {
+            x: baseline.frame.width.saturating_sub(1),
+            y: baseline.frame.height,
+            width: 1,
+            height: 2,
+        });
+    }
+
+    write_shared_test_pane(
+        &mut server,
+        first_pane,
+        b"\r\x1b]8;;https://rollback.example/x\x1b\\ROLL\x1b]8;;\x1b\\",
+    );
+    write_shared_test_pane(&mut server, second_pane, b"\rSURVIVOR");
+    assert!(
+        server.render_retained_pane_surface_and_stream(&HashSet::from([first_pane, second_pane]))
+    );
+    assert_eq!(server.clients[&7].deferred_render(), DeferredRender::Full);
+
+    // 未延期的 pane 照常出行；延期 pane 的行与链接增量都不得出现。
+    let patch = recv_pane_surface_patch(&render, "surviving pane patch");
+    assert!(!patch.rows.is_empty(), "未延期的 pane 必须照常出补丁");
+    assert!(
+        patch.hyperlink_uris.is_empty(),
+        "延期 pane 的链接增量不得泄漏进补丁"
+    );
+    assert!(patch
+        .rows
+        .iter()
+        .all(|row| row.cells.iter().all(|cell| cell.hyperlink.is_none())));
+
+    let after = server.clients[&7].render_state.last_pane_surface().unwrap();
+    let text = frame_text(&after.frame);
+    assert!(text.contains("FIRST"), "延期 pane 不得部分提交");
+    assert!(!text.contains("ROLL"), "延期 pane 的新行不得进入基线");
+    assert!(text.contains("SURVIVOR"));
+    assert_eq!(
+        after.frame.hyperlinks, baseline.frame.hyperlinks,
+        "无人引用的链接条目不得进入基线"
+    );
+
+    // 全量渲染重建基线，随后 retained 照常出补丁。
+    server.render_and_stream();
+    let _ = recv_pane_surface(&render, "recovery full render");
+    assert_eq!(server.clients[&7].deferred_render(), DeferredRender::None);
+    write_shared_test_pane(&mut server, first_pane, b"\rPLAIN");
+    assert!(server.render_retained_pane_surface_and_stream(&HashSet::from([first_pane])));
+    let _ = recv_pane_surface_patch(&render, "patch resumes after recovery");
+    shutdown_test_runtimes(&mut server);
+}
+
+/// 链接表上界：超过上界的补丁剔除接收者并延期，全量渲染把表重建回「只含可见链接」。
+#[tokio::test]
+async fn retained_hyperlink_table_cap_defers_and_rebuilds_the_table() {
+    let mut server = test_headless_server();
+    let pane_id = install_shared_view_test_runtime(&mut server);
+    let (_control, render) = connect_matching_test_shell(&mut server, 7);
+    let _ = _control.recv().expect("snapshot");
+    server.render_and_stream();
+    let _ = recv_pane_surface(&render, "baseline");
+
+    let limit = super::retained_surface::MAX_RECIPIENT_HYPERLINKS;
+    {
+        let crate::server::render_stream::ClientRenderState::Semantic { last_surface, .. } =
+            &mut server.clients.get_mut(&7).unwrap().render_state
+        else {
+            panic!("semantic client");
+        };
+        last_surface.as_mut().unwrap().frame.hyperlinks = (0..limit)
+            .map(|index| format!("https://history.example/{index}"))
+            .collect();
+    }
+
+    write_shared_test_pane(
+        &mut server,
+        pane_id,
+        b"\r\x1b]8;;https://live.example/x\x1b\\LIVE\x1b]8;;\x1b\\",
+    );
+    assert!(server.render_retained_pane_surface_and_stream(&HashSet::from([pane_id])));
+    assert_eq!(server.clients[&7].deferred_render(), DeferredRender::Full);
+    while let Ok(bytes) = render.try_recv() {
+        let ServerMessage::PaneSurfacePatch(patch) = read_server_message(bytes) else {
+            panic!("capped recipient must not stream a full surface");
+        };
+        assert!(patch.rows.is_empty() && patch.hyperlink_uris.is_empty());
+    }
+    let capped = server.clients[&7].render_state.last_pane_surface().unwrap();
+    assert_eq!(capped.frame.hyperlinks.len(), limit, "超限的表不得继续增长");
+
+    // 全量渲染重建：表回到可见链接，绑定关系仍然自洽。
+    server.render_and_stream();
+    let rebuilt = recv_pane_surface(&render, "rebuilt baseline after cap");
+    assert!(rebuilt.frame.hyperlinks.len() < limit);
+    assert!(rebuilt
+        .frame
+        .hyperlinks
+        .iter()
+        .any(|uri| uri == "https://live.example/x"));
+    for cell in rebuilt
+        .frame
+        .cells
+        .iter()
+        .filter(|cell| cell.hyperlink.is_some())
+    {
+        let index = cell.hyperlink.unwrap_or_default() as usize;
+        assert!(rebuilt.frame.hyperlinks.get(index).is_some());
+    }
+    assert_eq!(server.clients[&7].deferred_render(), DeferredRender::None);
+    shutdown_test_runtimes(&mut server);
+}
+
 #[tokio::test]
 async fn retained_contended_snapshot_retries_patch_without_full_render() {
     let mut server = test_headless_server();

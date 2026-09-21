@@ -3882,11 +3882,21 @@ mod tests {
             panic!("hyperlink cells must be patchable");
         };
         assert_eq!(patch.hyperlinks, vec!["https://example.com".to_owned()]);
-        let linked = patch.rows.iter().flat_map(|(_, cells)| cells.iter());
-        assert!(linked.clone().any(|cell| cell.hyperlink == Some(0)));
-        assert!(linked
-            .clone()
-            .all(|cell| cell.hyperlink.is_none() || cell.hyperlink == Some(0)));
+        let (_, cells) = patch
+            .rows
+            .iter()
+            .find(|(y, _)| *y == 0)
+            .expect("dirty hyperlink row");
+        let linked: Vec<usize> = cells
+            .iter()
+            .enumerate()
+            .filter_map(|(index, cell)| cell.hyperlink.map(|_| index))
+            .collect();
+        assert_eq!(linked, vec![0, 1, 2, 3], "只有 'link' 四格带链接");
+        assert!(
+            cells[4..].iter().all(|cell| cell.hyperlink.is_none()),
+            "链接右侧的空白格必须保持无链接"
+        );
 
         // 行已收集、尚未清脏时回退：快照报 PatchFallback，且不持有写入锁。
         runtime

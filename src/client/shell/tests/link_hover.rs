@@ -473,6 +473,87 @@ fn overlay_covered_hyperlinks_are_dropped_from_the_frame() {
     }
 }
 
+/// 非门禁扩展剖析：带链接补丁的客户端应用成本（`fast_path_blocker` 命中 →
+/// 整份 `PaneSurfaceFrame` 克隆 + 重排）与无链接补丁（原地写格快路径）在
+/// 1 / 15 pane 下的对照；口径为「单次 apply（含应用后的下一次 compose）」。
+#[test]
+#[ignore = "non-gating hyperlink patch apply profile"]
+fn hyperlink_patch_render_scale_profile() {
+    for count in [1, 15] {
+        let mut state = hover_state();
+        state.set_endpoint_methods(Some(vec![]));
+        let mut next = surface();
+        next.surface_revision += 1;
+        next.frame =
+            FrameData::from_ratatui_buffer(&Buffer::with_lines(vec!["x".repeat(120); 30]), None);
+        let template = next.panes[0].clone();
+        next.panes.clear();
+        for index in 0..count {
+            let mut pane = template.clone();
+            pane.pane_id = format!("pane_{index}");
+            pane.inner_rect = SurfaceRect {
+                x: if count == 1 { 0 } else { (index % 5) * 24 },
+                y: if count == 1 { 0 } else { (index / 5) * 10 },
+                width: if count == 1 { 120 } else { 24 },
+                height: if count == 1 { 30 } else { 10 },
+            };
+            pane.rect = pane.inner_rect;
+            next.panes.push(pane);
+        }
+        // 基线链接表预置 64 条；补丁只引用已有条目（生产里 URI 已在基线的形态），
+        // 因此下表在循环中不增长，测的是「补丁应用」而不是「表增长」。
+        next.frame.hyperlinks = (0..64)
+            .map(|index| format!("https://known.example/{index}"))
+            .collect();
+        state.set_pane_surface(next);
+        state.compose(146, 32).unwrap();
+        for linked in [false, true] {
+            let mut apply_samples = Vec::new();
+            let mut cycle_samples = Vec::new();
+            for _ in 0..200 {
+                let base = state.pane_surface.as_ref().expect("pane surface").clone();
+                let mut pane = base.panes[0].clone();
+                pane.content_revision += 2;
+                let origin = pane.inner_rect;
+                let index =
+                    usize::from(origin.y) * usize::from(base.frame.width) + usize::from(origin.x);
+                let mut row = vec![base.frame.cells[index].clone(); 8];
+                for cell in row.iter_mut() {
+                    cell.symbol = "d".into();
+                    cell.hyperlink = linked.then_some(3);
+                }
+                let patch = crate::protocol::PaneSurfacePatch {
+                    boot_id: "boot-1".into(),
+                    projection_revision: 1,
+                    base_surface_revision: base.surface_revision,
+                    surface_revision: base.surface_revision + 1,
+                    rows: vec![crate::protocol::PaneSurfacePatchRow {
+                        x: origin.x,
+                        y: origin.y,
+                        cells: row,
+                    }],
+                    panes: vec![pane],
+                    cursor: None,
+                    hyperlink_uris: Vec::new(),
+                };
+                let started = std::time::Instant::now();
+                let outcome = state.apply_pane_surface_patch(patch);
+                apply_samples.push(started.elapsed().as_micros());
+                assert!(matches!(outcome, ClientPaneSurfacePatchOutcome::Applied(_)));
+                let started = std::time::Instant::now();
+                std::hint::black_box(state.compose(146, 32).unwrap());
+                cycle_samples.push(started.elapsed().as_micros());
+            }
+            apply_samples.sort_unstable();
+            cycle_samples.sort_unstable();
+            eprintln!(
+                "hyperlink patch panes={count} linked={linked} apply_median_us={} apply_p95_us={} compose_median_us={}",
+                apply_samples[100], apply_samples[190], cycle_samples[100]
+            );
+        }
+    }
+}
+
 #[test]
 #[ignore = "non-gating fixed-geometry hover composition profile"]
 fn ctrl_hover_render_scale_profile() {
