@@ -533,6 +533,28 @@ pub(crate) fn create_remote_ssh_config_file(
         .open(path)
 }
 
+/// 复用只在支持 SSH 多路复用的平台上有意义；Windows 的
+/// `remote_ssh_config_paths().multiplexing` 为 false（没有 ControlPath），
+/// 这里退回一次性唯一目录。
+pub(crate) fn reusable_remote_ssh_config_dir(
+    _key: &str,
+    control_socket_name: &str,
+) -> std::io::Result<PathBuf> {
+    create_remote_ssh_config_dir(control_socket_name)
+}
+
+/// 覆写受管 ssh 配置：共享目录里同一档案的配置每次操作都会重写，
+/// `create_new` 会 AlreadyExists。
+pub(crate) fn write_remote_ssh_config_file(
+    path: &std::path::Path,
+) -> std::io::Result<std::fs::File> {
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(path)
+}
+
 pub(crate) fn create_remote_private_dir(path: &std::path::Path) -> std::io::Result<()> {
     use interprocess::os::windows::security_descriptor::{
         AsSecurityDescriptorExt as _, SecurityDescriptor,

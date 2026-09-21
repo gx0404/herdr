@@ -343,12 +343,92 @@ pub(crate) fn create_remote_ssh_config_dir(control_socket_name: &str) -> std::io
     ))
 }
 
+/// 可复用的受管配置目录：同一个 `key` 得到同一个路径，多个 herdr 进程因此共用
+/// 一个 ssh ControlPath（ControlMaster 复用，HERDR-MACH-003）。已存在的目录必须
+/// 是本用户的私有目录（属主 + 0700，且不是符号链接）才复用；校验不过就退回一次性
+/// 唯一目录——宁可放弃复用，也不用别人控制的目录装控制 socket。
+pub(crate) fn reusable_remote_ssh_config_dir(
+    key: &str,
+    control_socket_name: &str,
+) -> std::io::Result<PathBuf> {
+    use std::os::unix::fs::DirBuilderExt;
+
+    let name = format!(
+        "herdr-ssh-{}-{:016x}",
+        current_uid(),
+        stable_key_digest(key)
+    );
+    let mut bases = vec![std::env::temp_dir()];
+    let short_tmp = PathBuf::from("/tmp");
+    if bases.first() != Some(&short_tmp) {
+        bases.push(short_tmp);
+    }
+
+    for base in bases {
+        let dir = base.join(&name);
+        if !fits_unix_socket_path(&dir.join(control_socket_name)) {
+            continue;
+        }
+        match std::fs::DirBuilder::new().mode(0o700).create(&dir) {
+            Ok(()) => return Ok(dir),
+            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
+                if private_owned_dir(&dir) {
+                    return Ok(dir);
+                }
+                break;
+            }
+            Err(err) => return Err(err),
+        }
+    }
+    create_remote_ssh_config_dir(control_socket_name)
+}
+
+/// 目录是否为本用户的私有目录：`symlink_metadata` 不跟随符号链接，避免被别人
+/// 用符号链接把控制 socket 引到别处。
+fn private_owned_dir(path: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+
+    let Ok(metadata) = std::fs::symlink_metadata(path) else {
+        return false;
+    };
+    metadata.is_dir() && metadata.uid() == current_uid() && metadata.mode() & 0o077 == 0
+}
+
+fn current_uid() -> u32 {
+    // SAFETY: geteuid 只读当前进程的有效用户 id，没有额外前置条件。
+    unsafe { libc::geteuid() }
+}
+
+/// key 的稳定摘要：目录名要在不同进程、不同 herdr 版本之间保持一致，因此不用
+/// 标准库的哈希实现（其算法不保证稳定），改用 FNV-1a（这里只需要防碰撞）。
+fn stable_key_digest(key: &str) -> u64 {
+    let mut hash = 0xcbf2_9ce4_8422_2325_u64;
+    for byte in key.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    hash
+}
+
 pub(crate) fn create_remote_ssh_config_file(path: &Path) -> std::io::Result<std::fs::File> {
     use std::os::unix::fs::OpenOptionsExt;
 
     std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
+        .mode(0o600)
+        .open(path)
+}
+
+/// 覆写受管 ssh 配置：共享目录里同一档案的配置每次操作都会重写，
+/// `create_new` 会 AlreadyExists。
+pub(crate) fn write_remote_ssh_config_file(path: &Path) -> std::io::Result<std::fs::File> {
+    use std::os::unix::fs::OpenOptionsExt;
+
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
         .mode(0o600)
         .open(path)
 }
@@ -529,6 +609,52 @@ mod tests {
     fn remote_ssh_config_dir_rejects_overlong_control_socket_name() {
         let err = create_remote_ssh_config_dir(&"x".repeat(200)).unwrap_err();
         assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+    }
+
+    /// 目录名要在进程之间稳定（下一个 herdr 进程靠它接到同一个 ssh master），
+    /// 所以摘要算法一旦变化就会让既有 master 失去复用；这里钉住算法与取值。
+    #[test]
+    fn reusable_dir_key_digest_is_stable() {
+        assert_eq!(stable_key_digest("herdr"), 0xe4e1_6546_1418_32fe);
+    }
+
+    #[test]
+    fn reusable_remote_ssh_config_dir_reuses_one_private_dir_per_key() {
+        use std::os::unix::fs::MetadataExt;
+
+        let key = format!("test-reuse-{}", std::process::id());
+        let first = reusable_remote_ssh_config_dir(&key, "ctl").expect("first");
+        let second = reusable_remote_ssh_config_dir(&key, "ctl").expect("second");
+        let other =
+            reusable_remote_ssh_config_dir(&format!("{key}-other"), "ctl").expect("other key");
+
+        assert_eq!(first, second, "同 key 复用同一个目录");
+        assert_ne!(first, other, "不同 key 不共享目录");
+        assert_eq!(
+            std::fs::metadata(&first).expect("metadata").mode() & 0o077,
+            0,
+            "复用目录必须是 0700"
+        );
+
+        let _ = std::fs::remove_dir_all(&first);
+        let _ = std::fs::remove_dir_all(&other);
+    }
+
+    #[test]
+    fn reusable_remote_ssh_config_dir_falls_back_for_non_private_dir() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let key = format!("test-fallback-{}", std::process::id());
+        let existing = reusable_remote_ssh_config_dir(&key, "ctl").expect("first");
+        std::fs::set_permissions(&existing, std::fs::Permissions::from_mode(0o777))
+            .expect("loosen permissions");
+
+        let fallback = reusable_remote_ssh_config_dir(&key, "ctl").expect("fallback");
+        assert_ne!(fallback, existing, "非私有目录不复用，退回唯一目录");
+        assert!(fallback.is_dir(), "退回目录仍然可用");
+
+        let _ = std::fs::remove_dir_all(&existing);
+        let _ = std::fs::remove_dir_all(&fallback);
     }
 }
 

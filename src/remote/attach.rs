@@ -9,7 +9,7 @@ use super::{
     restart_policy::*,
     shell_quote,
 };
-use crate::client::endpoint::StrictHostKeyChecking;
+use crate::client::endpoint::{SavedSshEndpoint, StrictHostKeyChecking};
 use base64::Engine as _;
 use std::collections::BTreeMap;
 use std::fs::{self, File};
@@ -47,6 +47,12 @@ const WINDOWS_REMOTE_PATH_MARKER: &str = "herdr-remote-path:1:";
 const WINDOWS_REMOTE_INSTALL_DIR_MARKER: &str = "herdr-remote-install-dir:1:";
 const WINDOWS_REMOTE_INSTALL_RESULT_MARKER: &str = "herdr-remote-install-result:1:";
 const SSH_CONTROL_SOCKET_NAME: &str = "ctl";
+
+/// 一次性 / 桥接通道的默认 `ControlPersist`：master 空闲这么久后自行退出。
+/// 档案自己配了 `ControlPersist` 时命令行不下发（命令行 `-o` 覆盖配置文件，
+/// 用户的显式设置优先）。
+const DEFAULT_CONTROL_PERSIST: &str = "120";
+
 pub(crate) fn run_remote(remote: RemoteLaunch) -> io::Result<()> {
     let session_name = crate::session::active_name()
         .unwrap_or_else(|| crate::session::DEFAULT_SESSION_NAME.to_string());
@@ -671,6 +677,9 @@ pub(super) struct ManagedSshOptions {
     /// Profile host-key policy, mapped onto command-line `-o` for
     /// noninteractive commands (which win over the config fallback).
     pub(super) strict_host_key_checking: Option<StrictHostKeyChecking>,
+    /// 档案自己配的 `ControlPersist`：非空时命令行不再下发默认值（命令行
+    /// `-o` 会覆盖配置，用户显式设置优先）。
+    pub(super) control_persist: Option<String>,
 }
 
 /// Shared owner of the managed ssh config directory; the last drop removes
@@ -1385,9 +1394,12 @@ pub(super) fn apply_managed_ssh_options(
             .arg("-S")
             .arg(control_path)
             .arg("-o")
-            .arg("ControlMaster=auto")
-            .arg("-o")
-            .arg("ControlPersist=yes");
+            .arg("ControlMaster=auto");
+        if options.control_persist.is_none() {
+            command
+                .arg("-o")
+                .arg(format!("ControlPersist={DEFAULT_CONTROL_PERSIST}"));
+        }
     }
 }
 
@@ -1411,9 +1423,12 @@ pub(super) fn apply_managed_channel_options(
                 ssh_config_quote(&control_path.to_string_lossy())
             ))
             .arg("-o")
-            .arg("ControlMaster=auto")
-            .arg("-o")
-            .arg("ControlPersist=yes");
+            .arg("ControlMaster=auto");
+        if options.control_persist.is_none() {
+            command
+                .arg("-o")
+                .arg(format!("ControlPersist={DEFAULT_CONTROL_PERSIST}"));
+        }
     }
 }
 
@@ -3057,7 +3072,114 @@ pub(super) fn write_managed_ssh_config(
     let control_path = paths
         .multiplexing
         .then(|| dir.join(SSH_CONTROL_SOCKET_NAME));
+    let contents = managed_ssh_config_contents(profile);
+    let write_result = (|| {
+        let mut file = crate::platform::create_remote_ssh_config_file(&path)?;
+        file.write_all(contents.as_bytes())
+    })();
+    if let Err(err) = write_result {
+        let _ = fs::remove_dir_all(&dir);
+        return Err(err);
+    }
+    Ok(ManagedSshConfig {
+        options: ManagedSshOptions {
+            config_path: path,
+            pinned_known_hosts: None,
+            control_path,
+            config_dir: Some(Arc::new(ManagedSshConfigDir { path: dir })),
+            server_alive_interval: profile.and_then(|p| p.server_alive_interval),
+            server_alive_count_max: profile.and_then(|p| p.server_alive_count_max),
+            strict_host_key_checking: profile.and_then(|p| p.strict_host_key_checking),
+            control_persist: profile.and_then(|p| p.control_persist.clone()),
+        },
+    })
+}
 
+/// 一次性通道（sftp / `machine exec` / host-key 探测）共用的受管配置：同一个
+/// 档案复用同一个目录与 ControlPath，ssh master 因此只建一次并被后续操作复用
+/// （HERDR-MACH-003），而不是每个操作新建一个后台 master（HERDR-MACH-004 的
+/// 原始形态）。配置文件每次重写（档案可能被外部编辑），但路径稳定，已有 master
+/// 继续服务。
+pub(super) fn write_shared_channel_ssh_config(
+    profile: &SavedSshEndpoint,
+    options: Option<&ProfileSshOptions>,
+) -> io::Result<ManagedSshConfig> {
+    let paths = crate::platform::remote_ssh_config_paths();
+    let dir = shared_channel_dir(&channel_share_key(profile), SSH_CONTROL_SOCKET_NAME)?;
+    let path = dir.join("config");
+    let control_path = paths
+        .multiplexing
+        .then(|| dir.join(SSH_CONTROL_SOCKET_NAME));
+    let contents = managed_ssh_config_contents(options);
+    let mut file = crate::platform::write_remote_ssh_config_file(&path)?;
+    file.write_all(contents.as_bytes())?;
+    Ok(ManagedSshConfig {
+        options: ManagedSshOptions {
+            config_path: path,
+            pinned_known_hosts: None,
+            control_path,
+            // 目录是可复用目录：它的生命周期跨进程（下一个操作，甚至是另一个
+            // herdr 进程的操作，要能接到同一个 master），因此不随本次操作删除。
+            config_dir: None,
+            server_alive_interval: options.and_then(|p| p.server_alive_interval),
+            server_alive_count_max: options.and_then(|p| p.server_alive_count_max),
+            strict_host_key_checking: options.and_then(|p| p.strict_host_key_checking),
+            control_persist: options.and_then(|p| p.control_persist.clone()),
+        },
+    })
+}
+
+/// 共享 key：档案 id + 影响连接建立的字段（目标 / 端口 / 用户 / 身份 / 跳板 /
+/// keepalive / ControlPersist / 家目录）。档案被编辑后 key 变化 → 换目录 → 换
+/// master，不会拿旧配置的 master 继续跑；反之，同一档案的所有一次性操作共用
+/// 一个 master。
+fn channel_share_key(profile: &SavedSshEndpoint) -> String {
+    let home = std::env::var_os("HOME");
+    format!(
+        "{id}\n{target}\n{session}\n{port:?}\n{user:?}\n{identity:?}\n\
+         {identities_only:?}\n{identity_agent:?}\n{strict:?}\n{proxy_jump:?}\n\
+         {forward_agent:?}\n{alive:?}\n{alive_max:?}\n{persist:?}\n{home:?}",
+        id = profile.id.as_str(),
+        target = profile.target,
+        session = profile.session,
+        port = profile.port,
+        user = profile.user,
+        identity = profile.identity_file,
+        identities_only = profile.identities_only,
+        identity_agent = profile.identity_agent,
+        strict = profile.strict_host_key_checking,
+        proxy_jump = profile.proxy_jump,
+        forward_agent = profile.forward_agent,
+        alive = profile.server_alive_interval,
+        alive_max = profile.server_alive_count_max,
+        persist = profile.control_persist,
+    )
+}
+
+/// 每档案共享目录：同一 key 解析到同一个可复用目录——进程内由缓存复用，跨进程
+/// 由目录名复用（HERDR-MACH-003）。`Arc` 留在进程级表里，本进程因此不会删除
+/// 目录（其他进程可能正连着同一个 master）。
+fn shared_channel_dir(key: &str, control_socket_name: &str) -> io::Result<PathBuf> {
+    use std::sync::{Mutex, OnceLock};
+    static SHARED: OnceLock<Mutex<std::collections::HashMap<String, Arc<ManagedSshConfigDir>>>> =
+        OnceLock::new();
+    let table = SHARED.get_or_init(|| Mutex::new(std::collections::HashMap::new()));
+    let mut guard = table
+        .lock()
+        .map_err(|_| io::Error::other("shared ssh config dir lock poisoned"))?;
+    if let Some(dir) = guard.get(key) {
+        return Ok(dir.path.clone());
+    }
+    let path = crate::platform::reusable_remote_ssh_config_dir(key, control_socket_name)?;
+    let dir = Arc::new(ManagedSshConfigDir { path: path.clone() });
+    guard.insert(key.to_owned(), Arc::clone(&dir));
+    Ok(path)
+}
+
+/// 受管 ssh 配置正文：先 Include 用户配置（OpenSSH 首个取值生效，用户的
+/// keepalive 等设置不被覆盖），再把档案选项放进 `Host *` 兜底块。
+fn managed_ssh_config_contents(profile: Option<&ProfileSshOptions>) -> String {
+    let paths = crate::platform::remote_ssh_config_paths();
     let mut contents = String::new();
     if let Some(include) = ssh_user_config_include(paths.user_config.as_deref()) {
         contents.push_str(&format!("Include {include}\n"));
@@ -3080,26 +3202,7 @@ pub(super) fn write_managed_ssh_config(
     let server_alive_count_max = profile.and_then(|p| p.server_alive_count_max).unwrap_or(4);
     contents.push_str(&format!("  ServerAliveInterval {server_alive_interval}\n"));
     contents.push_str(&format!("  ServerAliveCountMax {server_alive_count_max}\n"));
-
-    let write_result = (|| {
-        let mut file = crate::platform::create_remote_ssh_config_file(&path)?;
-        file.write_all(contents.as_bytes())
-    })();
-    if let Err(err) = write_result {
-        let _ = fs::remove_dir_all(&dir);
-        return Err(err);
-    }
-    Ok(ManagedSshConfig {
-        options: ManagedSshOptions {
-            config_path: path,
-            pinned_known_hosts: None,
-            control_path,
-            config_dir: Some(Arc::new(ManagedSshConfigDir { path: dir })),
-            server_alive_interval: profile.and_then(|p| p.server_alive_interval),
-            server_alive_count_max: profile.and_then(|p| p.server_alive_count_max),
-            strict_host_key_checking: profile.and_then(|p| p.strict_host_key_checking),
-        },
-    })
+    contents
 }
 
 struct BridgeUploadStop {
@@ -3963,6 +4066,36 @@ mod tests {
         );
     }
 
+    /// 共享 key 决定 ControlPath 复用面：同一档案复用，档案或连接字段变化换
+    /// master（不会拿旧配置的 master 继续跑）。
+    #[test]
+    fn channel_share_key_follows_the_connection_fields() {
+        let profile =
+            SavedSshEndpoint::new("fs-key", "user@example.invalid", "default").expect("profile");
+        let key = channel_share_key(&profile);
+
+        let same = profile.clone();
+        assert_eq!(channel_share_key(&same), key, "同一档案复用同一个 key");
+
+        let mut other_port = profile.clone();
+        other_port.port = Some(2222);
+        assert_ne!(channel_share_key(&other_port), key, "端口变化换 master");
+
+        let mut other_user = profile.clone();
+        other_user.user = Some("other".to_string());
+        assert_ne!(channel_share_key(&other_user), key, "用户变化换 master");
+
+        let mut identity = profile.clone();
+        identity.identity_file = vec!["/tmp/other-key".to_string()];
+        assert_ne!(channel_share_key(&identity), key, "身份文件变化换 master");
+
+        // 展示字段（标签 / 分组 / 颜色）不参与：改标签不该丢掉已有的 master。
+        let mut renamed = profile.clone();
+        renamed.label = "renamed".to_string();
+        renamed.color = Some("blue".to_string());
+        assert_eq!(channel_share_key(&renamed), key, "展示字段不换 master");
+    }
+
     #[cfg(unix)]
     #[test]
     fn remote_ssh_command_uses_managed_config_when_present() {
@@ -3999,7 +4132,7 @@ mod tests {
                 "-o".to_string(),
                 "ControlMaster=auto".to_string(),
                 "-o".to_string(),
-                "ControlPersist=yes".to_string(),
+                "ControlPersist=120".to_string(),
                 "-T".to_string(),
                 "example".to_string(),
             ]
@@ -4020,7 +4153,7 @@ mod tests {
                 "-o".to_string(),
                 "ControlMaster=auto".to_string(),
                 "-o".to_string(),
-                "ControlPersist=yes".to_string(),
+                "ControlPersist=120".to_string(),
             ]
         );
     }

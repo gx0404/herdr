@@ -26,8 +26,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use super::attach::{
-    apply_managed_channel_options, apply_noninteractive_ssh_options, write_managed_ssh_config,
-    ManagedSshConfig,
+    apply_managed_channel_options, apply_noninteractive_ssh_options,
+    write_shared_channel_ssh_config, ManagedSshConfig,
 };
 use crate::client::endpoint::SavedSshEndpoint;
 
@@ -105,14 +105,10 @@ pub(crate) struct RemoteFs {
 impl RemoteFs {
     pub(crate) fn connect(profile: &SavedSshEndpoint) -> io::Result<Self> {
         let profile_options = super::saved::saved_profile_ssh_options(profile)?;
-        let mut config = write_managed_ssh_config(profile_options.as_ref())?;
-        // 一次性 sftp 通道不建控制主连接：每个操作都会写一份新的受管配置
-        // （ControlPath 因此每次不同），`ControlMaster=auto` + `ControlPersist`
-        // 会让每个操作在后台留下一个永不退出的 ssh master（HERDR-MACH-004；
-        // man ssh_config：`ControlPersist yes` = 永久驻留）。没有共享
-        // ControlPath 时复用本就为零，这里显式关掉，与 `machine exec`、
-        // 端口转发等一次性通道同口径。
-        config.options.control_path = None;
+        // 同一个档案的所有一次性 sftp 通道共用一个 ControlPath：ssh master 只建
+        // 一次并被后续操作复用（HERDR-MACH-003），默认 `ControlPersist=120`
+        // 保证空闲后自行退出（HERDR-MACH-004）。
+        let config = write_shared_channel_ssh_config(profile, profile_options.as_ref())?;
         Ok(Self {
             target: profile.target.clone(),
             identity_file: profile.identity_file.first().cloned(),
@@ -607,17 +603,26 @@ fn parse_mode(field: &str) -> Option<u32> {
 mod tests {
     use super::*;
 
-    /// HERDR-MACH-004：一次性 sftp 通道不建控制主连接。每个操作都会新建受管
-    /// 配置（ControlPath 因此每次不同），留着 `ControlMaster=auto` +
-    /// `ControlPersist` 只会让每个操作在后台留下一个永不退出的 ssh master。
+    /// HERDR-MACH-003：同一个档案的所有一次性 sftp 通道共用同一个 ControlPath
+    /// （master 因此只建一次并被复用），不同档案互不共享；控制路径落在进程级
+    /// 共享目录里，进程存活期内不被删除。
     #[test]
-    fn one_off_sftp_channels_do_not_keep_a_control_master() {
+    fn one_off_sftp_channels_share_one_control_path_per_profile() {
         let profile =
             SavedSshEndpoint::new("fs-test", "user@example.invalid", "default").expect("profile");
-        let fs = RemoteFs::connect(&profile).expect("connect");
-        assert!(
-            fs.config.options.control_path.is_none(),
-            "一次性通道不带控制路径"
+        let other =
+            SavedSshEndpoint::new("fs-other", "other@example.invalid", "default").expect("profile");
+        let first = RemoteFs::connect(&profile).expect("connect");
+        let second = RemoteFs::connect(&profile).expect("connect");
+        let third = RemoteFs::connect(&other).expect("connect");
+        assert_eq!(
+            first.config.options.control_path, second.config.options.control_path,
+            "同档案复用同一个控制路径"
+        );
+        assert!(first.config.options.control_path.is_some());
+        assert_ne!(
+            first.config.options.control_path, third.config.options.control_path,
+            "不同档案不共享控制路径"
         );
     }
 

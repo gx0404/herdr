@@ -53,9 +53,9 @@ pub(crate) fn effective_host_key_target(
     profile: &crate::client::endpoint::SavedSshEndpoint,
 ) -> io::Result<EffectiveHostKeyTarget> {
     let options = super::saved::saved_profile_ssh_options(profile)?;
-    let mut config = super::attach::write_managed_ssh_config(options.as_ref())?;
-    // `-G` 只打印有效配置，不需要控制主连接（HERDR-MACH-004）。
-    config.options.control_path = None;
+    // 与 sftp / exec 共用同一档案的 ControlPath：`-G` 也会顺手复用 master
+    // （HERDR-MACH-003），默认 ControlPersist=120（HERDR-MACH-004）。
+    let config = super::attach::write_shared_channel_ssh_config(profile, options.as_ref())?;
     let mut command = Command::new("ssh");
     super::attach::apply_managed_channel_options(&mut command, Some(&config.options));
     command
