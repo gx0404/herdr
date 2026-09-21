@@ -701,10 +701,16 @@ impl ClientShellState {
         {
             return (false, Vec::new());
         }
-        if let PendingEndpointKind::SnippetRun { machine, pane_id } = &pending.kind {
+        if let PendingEndpointKind::SnippetRun {
+            run_id,
+            machine,
+            pane_id,
+        } = &pending.kind
+        {
+            let (run_id, machine, pane_id) = (*run_id, machine.clone(), pane_id.clone());
             let error = result.err().map(|error| error.message);
             return (
-                self.complete_snippet_run_target(machine, pane_id, error),
+                self.complete_snippet_run_target(run_id, &machine, &pane_id, error),
                 Vec::new(),
             );
         }

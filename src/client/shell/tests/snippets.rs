@@ -369,7 +369,7 @@ fn snippet_run_multi_machine_fans_out_per_endpoint() {
         .expect("one failure recorded");
     assert_eq!(failed.machine, build_profile_id.to_string());
     assert_eq!(failed.error.as_deref(), Some("no such pane"));
-    assert!(state.snippet_run.is_none(), "run state cleared");
+    assert!(state.snippet_runs.is_empty(), "run state cleared");
     let notice = state.visible_endpoint_notice.as_ref().expect("toast");
     assert!(notice.body.contains("no such pane"), "{}", notice.body);
     let _ = std::fs::remove_dir_all(&dir);
@@ -628,7 +628,7 @@ fn overlay_step_separates_every_destructive_snippet_step() {
             snippet: snippet.clone(),
             targets: Vec::new(),
             target_selected: 0,
-            machine_selected: Vec::new(),
+            machine_selected: std::collections::HashSet::new(),
             variables: Vec::new(),
             variable_focused: 0,
             press_enter: true,
@@ -912,5 +912,164 @@ fn composing_twice_leaves_the_list_scroll_untouched() {
         _ => panic!("snippets overlay"),
     };
     assert_eq!(after_repaint, after_input, "重绘不得改写滚动状态");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// TOOL-05：机器选择器的勾选按端点 id 记录，端点上下线导致行错位时不会把勾选
+/// 错绑到别的机器上。
+#[test]
+fn machine_picker_keeps_selections_bound_to_endpoints_across_list_changes() {
+    let dir = with_temp_state_home("picker-identity");
+    seed_snippet("uptime", "uptime", &[]);
+    let alpha = SavedSshEndpoint::new("Alpha", "alpha.example", "default").expect("profile");
+    let beta = SavedSshEndpoint::new("Beta", "beta.example", "default").expect("profile");
+    let alpha_id = ClientEndpointId::Ssh(alpha.id.clone());
+    let beta_id = ClientEndpointId::Ssh(beta.id.clone());
+    let mut state = state();
+    state.set_endpoint_catalog(&[alpha.clone(), beta.clone()]);
+    state.cache_endpoint_snapshot(&alpha_id, Box::new(snapshot()));
+    state.cache_endpoint_snapshot(&beta_id, Box::new(snapshot()));
+    state.set_endpoint_status(&alpha_id, ClientEndpointStatus::Online);
+    state.set_endpoint_status(&beta_id, ClientEndpointStatus::Online);
+
+    state.open_snippets_overlay(true);
+    state.route_snippets_key(&key(KeyCode::Enter), &mut ClientShellInput::default());
+    state.route_snippets_key(&key(KeyCode::Down), &mut ClientShellInput::default());
+    state.route_snippets_key(&key(KeyCode::Down), &mut ClientShellInput::default());
+    state.route_snippets_key(&key(KeyCode::Enter), &mut ClientShellInput::default());
+    assert!(matches!(
+        snippets_view(&state),
+        super::super::snippets_overlay::ClientSnippetsView::RunPickMachines(_)
+    ));
+
+    // 行序：(本地, Alpha, Beta)；光标从目标模式带过来停在第 2 行，上移一行到
+    // Alpha 再取消勾选。
+    state.route_snippets_key(&key(KeyCode::Up), &mut ClientShellInput::default());
+    state.route_snippets_key(&key(KeyCode::Char(' ')), &mut ClientShellInput::default());
+
+    // 端点上下线：Alpha 掉线离开列表（快照仍在，只是不再 Online），行随之前移。
+    state.set_endpoint_status(&alpha_id, ClientEndpointStatus::Connecting);
+
+    state.route_snippets_key(&key(KeyCode::Enter), &mut ClientShellInput::default());
+    let mut outcome = ClientShellInput::default();
+    state.route_snippets_key(&key(KeyCode::Char('y')), &mut outcome);
+    let endpoints: Vec<ClientEndpointId> = outcome
+        .actions
+        .iter()
+        .map(|action| match action {
+            ClientShellAction::EndpointRequest { endpoint_id, .. } => endpoint_id.clone(),
+            other => panic!("unexpected action: {other:?}"),
+        })
+        .collect();
+    assert!(
+        endpoints.contains(&ClientEndpointId::Local),
+        "本地机仍然被勾选: {endpoints:?}"
+    );
+    assert!(
+        endpoints.contains(&beta_id),
+        "Beta 从未被取消勾选: {endpoints:?}"
+    );
+    assert!(
+        !endpoints.contains(&alpha_id),
+        "Alpha 被取消勾选后不得因行错位重新进入目标: {endpoints:?}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// TOOL-06：并发运行各占一个槽位——两次运行前后开始、各自收尾，互不覆盖。
+#[test]
+fn concurrent_snippet_runs_keep_their_own_pending_state() {
+    let dir = with_temp_state_home("concurrent-runs");
+    seed_snippet("alpha-snippet", "uptime", &[]);
+    seed_snippet("beta-snippet", "whoami", &[]);
+    let build = SavedSshEndpoint::new("Build", "build.example", "default").expect("profile");
+    let build_id = ClientEndpointId::Ssh(build.id.clone());
+    let mut state = state();
+    state.set_endpoint_catalog(std::slice::from_ref(&build));
+    state.cache_endpoint_snapshot(&build_id, Box::new(snapshot()));
+    state.set_endpoint_status(&build_id, ClientEndpointStatus::Online);
+
+    let run = |state: &mut ClientShellState, label: &str| -> Vec<ClientShellAction> {
+        state.open_snippets_overlay(true);
+        let row = (0..8)
+            .find(|row| snippet_label_at(state, *row).as_deref() == Some(label))
+            .unwrap_or_else(|| panic!("{label} in list"));
+        for _ in 0..row {
+            state.route_snippets_key(&key(KeyCode::Down), &mut ClientShellInput::default());
+        }
+        state.route_snippets_key(&key(KeyCode::Enter), &mut ClientShellInput::default());
+        // 目标模式：每台机器一个 pane。
+        state.route_snippets_key(&key(KeyCode::Down), &mut ClientShellInput::default());
+        state.route_snippets_key(&key(KeyCode::Down), &mut ClientShellInput::default());
+        state.route_snippets_key(&key(KeyCode::Enter), &mut ClientShellInput::default());
+        if matches!(
+            snippets_view(state),
+            super::super::snippets_overlay::ClientSnippetsView::RunPickMachines(_)
+        ) {
+            state.route_snippets_key(&key(KeyCode::Enter), &mut ClientShellInput::default());
+        }
+        let mut outcome = ClientShellInput::default();
+        state.route_snippets_key(&key(KeyCode::Char('y')), &mut outcome);
+        outcome.actions
+    };
+
+    let first = run(&mut state, "alpha-snippet");
+    assert_eq!(state.snippet_runs.len(), 1, "第一次运行在途");
+    let second = run(&mut state, "beta-snippet");
+    assert_eq!(state.snippet_runs.len(), 2, "并发运行各占一个槽位");
+
+    // 先收第一次运行的响应：它自己收尾，第二次仍在途。
+    for action in &first {
+        let ClientShellAction::EndpointRequest {
+            boot_id, request, ..
+        } = action
+        else {
+            continue;
+        };
+        state.handle_endpoint_result(
+            boot_id,
+            &request.id,
+            Ok(crate::api::schema::ResponseResult::Ok {}),
+        );
+    }
+    assert_eq!(state.snippet_runs.len(), 1, "第一次运行收尾后只剩第二次");
+    for action in &second {
+        let ClientShellAction::EndpointRequest {
+            boot_id, request, ..
+        } = action
+        else {
+            continue;
+        };
+        state.handle_endpoint_result(
+            boot_id,
+            &request.id,
+            Ok(crate::api::schema::ResponseResult::Ok {}),
+        );
+    }
+    assert!(state.snippet_runs.is_empty(), "两次运行都收尾");
+    // 每次运行对每个目标写一条历史：两次运行各 2 条（本地 + Build），
+    // 谁也没有被对方覆盖。
+    let library = SnippetLibrary::load().expect("library");
+    let labels = library
+        .history
+        .iter()
+        .map(|record| record.snippet_label.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        labels
+            .iter()
+            .filter(|label| **label == "alpha-snippet")
+            .count(),
+        2,
+        "第一次运行的两条历史都在：{labels:?}"
+    );
+    assert_eq!(
+        labels
+            .iter()
+            .filter(|label| **label == "beta-snippet")
+            .count(),
+        2,
+        "第二次运行的两条历史都在：{labels:?}"
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }

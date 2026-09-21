@@ -124,8 +124,10 @@ pub(super) struct ClientSnippetRunDraft {
     pub(super) targets: Vec<ClientSnippetTarget>,
     /// Selection inside the target-mode and pane-picker lists.
     pub(super) target_selected: usize,
-    /// Checkbox states parallel to the machine picker rows.
-    pub(super) machine_selected: Vec<bool>,
+    /// 机器选择器里勾选的端点。按**端点 id** 记录而不是与行位置对齐的
+    /// `Vec<bool>`：端点上下线会让行错位，位置对齐会把勾选错绑到别的机器上
+    /// （TOOL-05）。光标（`target_selected`）仍然是行号——那是位置语义。
+    pub(super) machine_selected: HashSet<ClientEndpointId>,
     /// Declared variables with their input editors.
     pub(super) variables: Vec<(String, TextEditor)>,
     pub(super) variable_focused: usize,
@@ -282,7 +284,7 @@ impl ClientSnippetRunDraft {
             snippet,
             targets: Vec::new(),
             target_selected: 0,
-            machine_selected: Vec::new(),
+            machine_selected: HashSet::new(),
             variables,
             variable_focused: 0,
             press_enter: true,
@@ -644,7 +646,10 @@ impl ClientShellState {
                 if let Some(ClientShellOverlay::Snippets(overlay)) = self.overlay.as_mut() {
                     let view = std::mem::replace(&mut overlay.view, ClientSnippetsView::List);
                     if let ClientSnippetsView::RunTargets(mut draft) = view {
-                        draft.machine_selected = vec![true; count];
+                        draft.machine_selected = machine_rows(&self.endpoints)
+                            .into_iter()
+                            .map(|(endpoint_id, _)| endpoint_id)
+                            .collect();
                         overlay.set_view(ClientSnippetsView::RunPickMachines(draft));
                     }
                 }
@@ -672,20 +677,33 @@ impl ClientShellState {
     }
 
     fn run_draft_toggle_machine(&mut self, row: usize) {
+        // 行号属于光标；勾选按端点 id 落账，行错位（端点上下线）也不会错绑。
+        let Some((endpoint_id, _)) = machine_rows(&self.endpoints).get(row).cloned() else {
+            return;
+        };
         if let Some(ClientShellOverlay::Snippets(overlay)) = self.overlay.as_mut() {
             if let ClientSnippetsView::RunPickMachines(draft) = &mut overlay.view {
-                if let Some(selected) = draft.machine_selected.get_mut(row) {
-                    *selected = !*selected;
+                if !draft.machine_selected.remove(&endpoint_id) {
+                    draft.machine_selected.insert(endpoint_id);
                 }
             }
         }
     }
 
     fn run_draft_toggle_all_machines(&mut self) {
+        let rows = machine_rows(&self.endpoints);
         if let Some(ClientShellOverlay::Snippets(overlay)) = self.overlay.as_mut() {
             if let ClientSnippetsView::RunPickMachines(draft) = &mut overlay.view {
-                let all = draft.machine_selected.iter().all(|selected| *selected);
-                draft.machine_selected.fill(!all);
+                let all = rows
+                    .iter()
+                    .all(|(endpoint_id, _)| draft.machine_selected.contains(endpoint_id));
+                for (endpoint_id, _) in &rows {
+                    if all {
+                        draft.machine_selected.remove(endpoint_id);
+                    } else {
+                        draft.machine_selected.insert(endpoint_id.clone());
+                    }
+                }
             }
         }
     }
@@ -701,8 +719,8 @@ impl ClientShellState {
             },
             _ => return,
         };
-        for ((endpoint_id, label), selected) in rows.iter().zip(selected.iter()) {
-            if !selected {
+        for (endpoint_id, label) in rows.iter() {
+            if !selected.contains(endpoint_id) {
                 continue;
             }
             let pane = self
@@ -834,6 +852,8 @@ impl ClientShellState {
                 })
             }
         };
+        let run_id = self.next_snippet_run_id;
+        self.next_snippet_run_id = self.next_snippet_run_id.saturating_add(1);
         let mut run = ClientSnippetRunState {
             snippet_id: draft.snippet.id.clone(),
             label: draft.snippet.label.clone(),
@@ -855,6 +875,7 @@ impl ClientShellState {
                     &target.endpoint_id,
                     method,
                     PendingEndpointKind::SnippetRun {
+                        run_id,
                         machine: target.machine.clone(),
                         pane_id: target.pane_id.clone(),
                     },
@@ -879,7 +900,8 @@ impl ClientShellState {
         if run.pending == 0 {
             self.finish_snippet_run(run, outcome);
         } else {
-            self.snippet_run = Some(run);
+            // 并发运行各自占一个槽位：后来的运行不覆盖前一次（TOOL-06）。
+            self.snippet_runs.insert(run_id, run);
         }
         outcome.repaint = true;
     }
@@ -888,11 +910,12 @@ impl ClientShellState {
     /// history is persisted and the summary toast shown.
     pub(super) fn complete_snippet_run_target(
         &mut self,
+        run_id: u64,
         machine: &str,
         pane_id: &str,
         error: Option<String>,
     ) -> bool {
-        let Some(run) = self.snippet_run.as_mut() else {
+        let Some(run) = self.snippet_runs.get_mut(&run_id) else {
             return false;
         };
         run.outcomes
@@ -901,7 +924,7 @@ impl ClientShellState {
         if run.pending > 0 {
             return true;
         }
-        let Some(run) = self.snippet_run.take() else {
+        let Some(run) = self.snippet_runs.remove(&run_id) else {
             return false;
         };
         let mut outcome = ClientShellInput::default();
@@ -2344,12 +2367,12 @@ fn render_run_pick_machines(
             base.fg(p.overlay0),
         );
     }
-    for (index, (_, label)) in rows.iter().enumerate().skip(scroll).take(visible) {
+    for (index, (endpoint_id, label)) in rows.iter().enumerate().skip(scroll).take(visible) {
         let y = body.y + (index - scroll) as u16;
         let rect = Rect::new(body.x, y, body.width, 1);
         row_hits.push((rect, index));
         let is_selected = index == selected;
-        let checked = draft.machine_selected.get(index).copied().unwrap_or(false);
+        let checked = draft.machine_selected.contains(endpoint_id);
         let style = list_row_style(p, cx.components, is_selected, hovered == Some(index));
         b.set_style(rect, style);
         put_text(

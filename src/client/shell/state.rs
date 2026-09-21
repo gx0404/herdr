@@ -1114,8 +1114,11 @@ pub(super) enum PendingEndpointKind {
         session_generation: u64,
     },
     /// One target of a snippet run: the pane input request in flight to a
-    /// (possibly non-active) endpoint. `machine` is the display/history name.
+    /// (possibly non-active) endpoint. `machine` is the display/history name；
+    /// `run_id` 把响应路由回它所属的那次运行——并发运行各自记账，不共用
+    /// 单个槽位（TOOL-06）。
     SnippetRun {
+        run_id: u64,
         machine: String,
         pane_id: String,
     },
@@ -1377,7 +1380,10 @@ pub(crate) struct ClientShellState {
     pub(super) port_forward_polled_at: Option<std::time::Instant>,
     /// In-flight snippet run: per-target outcomes collect here until every
     /// request resolves, then history is written and the summary toast shows.
-    pub(super) snippet_run: Option<super::snippets_overlay::ClientSnippetRunState>,
+    /// 在途的片段运行，按 run id 索引：并发运行互不覆盖（TOOL-06）。
+    pub(super) snippet_runs: HashMap<u64, super::snippets_overlay::ClientSnippetRunState>,
+    /// 下一个 run id（单调递增，跨运行不重复）。
+    pub(super) next_snippet_run_id: u64,
     /// In-memory mirror of the persisted broadcast target set
     /// (`endpoint::broadcast`): the per-keystroke fan-out reads only this
     /// copy, refreshed on overlay open, after every mutation, and when the
@@ -1599,7 +1605,8 @@ impl ClientShellState {
             endpoint_port_forwards: HashMap::new(),
             session_log_dropped: HashMap::new(),
             port_forward_polled_at: None,
-            snippet_run: None,
+            snippet_runs: HashMap::new(),
+            next_snippet_run_id: 0,
             broadcast: crate::client::endpoint::BroadcastSet::load().unwrap_or_default(),
             machine_files_ticket: None,
             next_machine_files_ticket: 1,
