@@ -5347,3 +5347,45 @@ fn per_provider_response_replaces_orphaned_refresh_states_of_that_provider() {
         "孤儿状态被权威响应替换而不是残留旧的 in_flight"
     );
 }
+
+/// U-6：用量仪表盘有默认键位（`keys.toggle_usage_dashboard`，默认 `prefix+a`），
+/// 这是 `ui.mouse_capture = false`（侧栏按钮收不到点击）时的入口。
+#[test]
+fn usage_dashboard_toggles_from_its_default_prefix_binding() {
+    let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
+    state.set_snapshot(Box::new(snapshot()));
+    state.set_pane_surface(surface());
+    state.compose(106, 30).expect("初始画面");
+
+    // prefix + a：打开跨厂商总览浮层。
+    let outcome = state.handle_input_bytes(b"\x02a");
+    assert!(outcome.repaint, "按键应重绘");
+    assert!(
+        matches!(state.overlay, Some(ClientShellOverlay::UsageDashboard)),
+        "prefix+a 打开用量仪表盘"
+    );
+    assert_eq!(state.mode, ClientShellMode::Terminal, "派发后离开前缀模式");
+
+    // 再按一次关闭（幂等切换）。
+    let outcome = state.handle_input_bytes(b"\x02a");
+    assert!(outcome.repaint);
+    assert!(state.overlay.is_none(), "再按一次关闭");
+}
+
+/// U-6：`!mouse_capture` 下侧栏按钮没有命中区，但键位仍在，且不依赖鼠标配置。
+#[test]
+fn usage_dashboard_keybinding_survives_disabled_mouse_capture() {
+    let mut raw = Config::default();
+    raw.ui.mouse_capture = false;
+    let mut state = ClientShellState::new(ClientShellConfig::from_config(&raw));
+    state.set_snapshot(Box::new(snapshot()));
+    state.set_pane_surface(surface());
+    state.compose(106, 30).expect("初始画面");
+    assert!(state.hits.agent_usage_toggle.is_empty(), "无命中区");
+
+    state.handle_input_bytes(b"\x02a");
+    assert!(
+        matches!(state.overlay, Some(ClientShellOverlay::UsageDashboard)),
+        "无鼠标捕获时仍有键盘入口"
+    );
+}

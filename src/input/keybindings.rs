@@ -73,6 +73,7 @@ pub(crate) enum KeybindAction {
     Detach,
     OpenNavigator,
     LinkHints,
+    ToggleUsageDashboard,
 }
 
 pub(crate) fn resolve_direct_binding(
@@ -160,6 +161,10 @@ pub(crate) fn resolve_non_indexed_action(
         (&keybinds.detach, KeybindAction::Detach),
         (&keybinds.goto, KeybindAction::OpenNavigator),
         (&keybinds.link_hints, KeybindAction::LinkHints),
+        (
+            &keybinds.toggle_usage_dashboard,
+            KeybindAction::ToggleUsageDashboard,
+        ),
     ] {
         if action_matches(bindings, key, dispatch) {
             return Some(action);

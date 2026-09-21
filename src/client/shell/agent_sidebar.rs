@@ -432,8 +432,8 @@ pub(super) fn render_agent_panel_header(
         1,
     );
     let usage_fits = usage_rect.x >= min_usage_x;
-    // `!mouse_capture` 下按钮只绘制不产生命中区；键位 / which-key 兜底（U-6）
-    // 尚未落地，届时总览由 `toggle_usage_dashboard` 的默认键位承接。
+    // `!mouse_capture` 下按钮只绘制不产生命中区：总览由
+    // `keys.toggle_usage_dashboard`（默认 `prefix+a`）与 which-key 承接（U-6）。
     hits.agent_usage_toggle = if config.mouse_capture && usage_fits {
         usage_rect
     } else {

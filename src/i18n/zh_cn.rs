@@ -170,6 +170,7 @@ pub const TEXTS: Texts = Texts {
         cycle_pane_previous: "上一个窗格",
         last_pane: "最近窗格",
         link_hints: "链接提示",
+        toggle_usage_dashboard: "用量仪表盘",
         custom_command: "自定义命令",
     },
     overlays: OverlayTexts {

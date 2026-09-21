@@ -687,6 +687,12 @@
           "description": "Enter link hints mode: visible pane URLs get two-letter markers; typing a marker opens the link."
         },
         {
+          "key": "keys.toggle_usage_dashboard",
+          "type": "keybinding",
+          "default": "\"prefix+a\"",
+          "description": "Toggle the cross-provider usage dashboard; the keyboard fallback when ui.mouse_capture = false."
+        },
+        {
           "key": "keys.previous_workspace",
           "type": "keybinding",
           "default": "unset",

@@ -148,6 +148,7 @@ pub const TEXTS: Texts = Texts {
         cycle_pane_previous: "cycle pane previous",
         last_pane: "last pane",
         link_hints: "link hints",
+        toggle_usage_dashboard: "usage dashboard",
         custom_command: "custom command",
     },
     overlays: OverlayTexts {

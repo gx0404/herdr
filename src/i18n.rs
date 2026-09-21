@@ -266,6 +266,7 @@ pub struct KeybindTexts {
     pub cycle_pane_previous: &'static str,
     pub last_pane: &'static str,
     pub link_hints: &'static str,
+    pub toggle_usage_dashboard: &'static str,
     pub custom_command: &'static str,
 }
 
