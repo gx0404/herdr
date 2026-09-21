@@ -53,10 +53,6 @@ pub(super) struct ClientChromePreferences {
     pub(super) usage_position: Option<crate::config::UsageDisplayPosition>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(super) usage_disabled_providers: Option<Vec<String>>,
-    /// 扫过 Agents 面板头部「用量」按钮是否弹出跨厂商总览浮层（默认开；关掉后
-    /// 点击仍可钉住）。独立 bool 键，不给 `usage_position` 加枚举变体。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(super) usage_hover_dashboard: Option<bool>,
     /// 监控 → 设置 里改过的悬浮延时（ms）；未改过时沿用 config.toml 的
     /// `account_usage.hover_delay_ms`。
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -107,7 +103,6 @@ impl ClientChromePreferences {
     }
 
     /// 「恢复配置文件值」：整组清空 usage_* 影子键，让它们重新跟随 config.toml。
-    /// `usage_hover_dashboard` 没有配置文件对应项，不在此列。
     pub(super) fn clear_usage_overrides(&mut self) {
         self.usage_enabled = None;
         self.usage_format = None;
@@ -315,8 +310,39 @@ mod tests {
         );
         assert_eq!(preferences.agent_panel_sort, None);
         assert!(preferences.monitor.is_none());
-        assert_eq!(preferences.usage_hover_dashboard, Some(false));
         assert_eq!(preferences.sidebar_width, Some(30));
+    }
+
+    /// 用量入口拆除后旧偏好文件里的残留键：`usage_hover_dashboard` 已无对应字段，
+    /// `pages.usage_dashboard` 已无对应浮层——都只被忽略，其余字段照常恢复，
+    /// 下一次写盘不再带它们。
+    #[test]
+    fn load_ignores_keys_of_the_removed_usage_entry_points() {
+        let path = std::env::temp_dir().join(format!(
+            "herdr-shell-removed-usage-preferences-{}.json",
+            std::process::id()
+        ));
+        std::fs::write(
+            &path,
+            r#"{"usage_hover_dashboard":false,"sidebar_width":31,"usage_position":"both","pages":{"usage_dashboard":{"x":0.1,"y":0.1,"width":0.5,"height":0.5},"settings":{"x":0.1,"y":0.1,"width":0.5,"height":0.5}},"palette_recent":["observation:usage-dashboard"]}"#,
+        )
+        .expect("write preferences");
+        let loaded = load(&path).expect("残留键不应让整份偏好失效");
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(loaded.sidebar_width, Some(31));
+        assert_eq!(
+            loaded.usage_position,
+            Some(crate::config::UsageDisplayPosition::Both)
+        );
+        assert!(
+            !loaded.pages.contains_key("usage_dashboard"),
+            "已移除浮层的窗口位置被丢弃"
+        );
+        assert!(loaded.pages.contains_key("settings"), "其余浮层位置保留");
+        assert_eq!(loaded.palette_recent, ["observation:usage-dashboard"]);
+        let saved = serde_json::to_string(&loaded).expect("serialize preferences");
+        assert!(!saved.contains("usage_hover_dashboard"), "saved: {saved}");
+        assert!(!saved.contains("\"usage_dashboard\""), "saved: {saved}");
     }
 
     #[test]

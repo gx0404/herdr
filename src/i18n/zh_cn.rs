@@ -170,7 +170,6 @@ pub const TEXTS: Texts = Texts {
         cycle_pane_previous: "上一个窗格",
         last_pane: "最近窗格",
         link_hints: "链接提示",
-        toggle_usage_dashboard: "用量仪表盘",
         custom_command: "自定义命令",
     },
     overlays: OverlayTexts {
@@ -351,7 +350,6 @@ pub const TEXTS: Texts = Texts {
         sort_grouped: "按工作区分组",
         sort_priority: "按优先级",
         no_matching_agents: "  没有匹配的 agent",
-        agent_usage: "用量",
     },
     status: StatusTexts {
         blocked: "已阻塞",

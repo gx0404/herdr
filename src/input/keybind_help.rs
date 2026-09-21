@@ -84,10 +84,6 @@ pub(crate) fn keybind_help_groups(
                 entry(binding_label(&keybinds.help), t.keybinds),
                 entry(binding_label(&keybinds.settings), t.settings),
                 entry(binding_label(&keybinds.manage_machines), t.manage_machines),
-                entry(
-                    binding_label(&keybinds.toggle_usage_dashboard),
-                    t.toggle_usage_dashboard,
-                ),
                 entry(binding_label(&keybinds.detach), t.detach),
                 entry(binding_label(&keybinds.reload_config), t.reload_config),
                 entry(

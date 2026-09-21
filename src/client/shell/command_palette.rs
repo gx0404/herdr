@@ -29,7 +29,6 @@ pub(super) enum ClientPaletteAction {
     Search,
     Back,
     Observation(super::observability::Page),
-    UsageDashboard,
     CloseMonitor,
     Arrange,
     Notifications,
@@ -725,13 +724,6 @@ impl ClientShellState {
             badge: false,
             action: ClientPaletteAction::Observation(super::observability::Page::Monitor),
         });
-        items.push(ClientPaletteItem {
-            id: "observation:usage-dashboard".into(),
-            title: super::observability::tr("Usage dashboard", "用量仪表盘").into(),
-            subtitle: String::new(),
-            badge: false,
-            action: ClientPaletteAction::UsageDashboard,
-        });
         if self.workbench.enabled
             && self
                 .workbench
@@ -958,7 +950,6 @@ impl ClientShellState {
                 self.record_binding(crate::input::KeybindMatch::Command(command), outcome);
             }
             ClientPaletteAction::Observation(page) => self.open_observation_page(page, outcome),
-            ClientPaletteAction::UsageDashboard => self.toggle_usage_dashboard(outcome),
             ClientPaletteAction::CloseMonitor => {
                 self.close_workbench_panel(super::dock::PanelId::Monitor, outcome);
             }

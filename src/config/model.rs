@@ -398,10 +398,6 @@ pub struct KeysConfig {
     /// Enter link hints mode: visible pane URLs get two-letter markers opened by
     /// typing them. Default: "prefix+u".
     pub link_hints: BindingConfig,
-    /// 跨厂商用量总览浮层的开关（`keys.toggle_usage_dashboard`，默认
-    /// `prefix+a`）：`ui.mouse_capture = false` 时侧栏的用量按钮收不到点击，
-    /// 键位与 which-key 是唯一入口（U-6）。
-    pub toggle_usage_dashboard: BindingConfig,
     /// Select the previous workspace. Unset by default.
     pub previous_workspace: BindingConfig,
     /// Select the next workspace. Unset by default.
@@ -541,7 +537,12 @@ pub(crate) struct KeysConfigOverlay {
     open_notification_target: Option<BindingConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
     link_hints: Option<BindingConfig>,
-    toggle_usage_dashboard: Option<BindingConfig>,
+    /// Retired binding Herdr accepted before the floating usage dashboard was
+    /// removed. Swallowed (any value shape) so a leftover key neither warns as
+    /// unknown nor invalidates the whole `[keys]` section. Not `IgnoredAny`:
+    /// `serde_ignored` reports that as an unknown key.
+    #[serde(rename = "toggle_usage_dashboard", skip_serializing)]
+    _legacy_toggle_usage_dashboard: Option<toml::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     previous_workspace: Option<BindingConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -673,7 +674,6 @@ impl<'de> Deserialize<'de> for KeysConfig {
         apply_field!(reload_config);
         apply_field!(open_notification_target);
         apply_field!(link_hints);
-        apply_field!(toggle_usage_dashboard);
         apply_field!(previous_workspace);
         apply_field!(next_workspace);
         apply_field!(previous_agent);
@@ -782,7 +782,6 @@ impl KeysConfig {
         copy_effective_action_field!(reload_config, keybinds.reload_config);
         copy_effective_action_field!(open_notification_target, keybinds.open_notification_target);
         copy_effective_action_field!(link_hints, keybinds.link_hints);
-        copy_effective_action_field!(toggle_usage_dashboard, keybinds.toggle_usage_dashboard);
         copy_effective_action_field!(previous_workspace, keybinds.previous_workspace);
         copy_effective_action_field!(next_workspace, keybinds.next_workspace);
         copy_effective_action_field!(previous_agent, keybinds.previous_agent);
@@ -1288,7 +1287,6 @@ impl Default for KeysConfig {
             reload_config: BindingConfig::one("prefix+shift+r"),
             open_notification_target: BindingConfig::one("prefix+o"),
             link_hints: BindingConfig::one("prefix+u"),
-            toggle_usage_dashboard: BindingConfig::one("prefix+a"),
             previous_workspace: BindingConfig::empty(),
             next_workspace: BindingConfig::empty(),
             previous_agent: BindingConfig::empty(),

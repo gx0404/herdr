@@ -143,7 +143,6 @@ pub(super) enum ChromeHover {
     MachineRow(ClientEndpointId),
     AgentRow(String),
     AgentGroupRow(String),
-    AgentUsageToggle,
     EndpointAgentRow(ClientEndpointId, String),
     Tab(String),
     NewTab,
@@ -575,7 +574,6 @@ impl ClientShellState {
                 .agent_group_toggles
                 .iter()
                 .any(|(rect, id)| id == key && super::contains(*rect, point)),
-            ChromeHover::AgentUsageToggle => super::contains(hits.agent_usage_toggle, point),
             ChromeHover::EndpointAgentRow(endpoint_id, pane_id) => {
                 hits.endpoint_agents.iter().any(|(rect, id, pane)| {
                     id == endpoint_id && pane == pane_id && super::contains(*rect, point)
@@ -786,9 +784,6 @@ impl ClientShellState {
                 return Some(ChromeHover::AgentGroupRow(key.clone()));
             }
         }
-        if super::contains(hits.agent_usage_toggle, point) {
-            return Some(ChromeHover::AgentUsageToggle);
-        }
         for (rect, endpoint_id, pane_id) in &hits.endpoint_agents {
             if super::contains(*rect, point) {
                 return Some(ChromeHover::EndpointAgentRow(
@@ -883,7 +878,6 @@ impl ShellHitMap {
         for (rect, _) in &self.agent_group_toggles {
             extend(&mut sidebar, *rect);
         }
-        extend(&mut sidebar, self.agent_usage_toggle);
         for (rect, _, _) in &self.endpoint_agents {
             extend(&mut sidebar, *rect);
         }

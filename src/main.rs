@@ -173,7 +173,6 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # reload_config = "prefix+shift+r"
 # open_notification_target = "prefix+o"
 # link_hints = "prefix+u"   # two-letter markers over visible pane URLs; type a marker to open it
-# toggle_usage_dashboard = "prefix+a"  # cross-provider usage overview; also the keyboard fallback when ui.mouse_capture = false
 # workspace_picker = "prefix+w"
 # goto = "prefix+g"
 # new_workspace = "prefix+shift+n"

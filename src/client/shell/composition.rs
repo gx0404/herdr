@@ -576,7 +576,6 @@ impl ClientShellState {
         self.compose_buffer = Some(buffer);
         self.compose_graphics(&mut frame, layout, &occlusion);
         self.hits.rebuild_chrome_bounds();
-        self.hits.composed = true;
         Some(frame)
     }
     pub(super) fn paint_shell_feedback(
@@ -941,7 +940,6 @@ impl ClientShellState {
                     &self.active_endpoint_id,
                     &self.config.keybinds,
                     &self.notification_history,
-                    &self.observability,
                     &cx,
                 )
                 .unwrap_or_else(|| render::render_minimum_overlay(canvas.buffer(), &cx));
@@ -950,7 +948,6 @@ impl ClientShellState {
                 self.hits.overlay_primary = rendered.primary;
                 self.hits.overlay_clear = rendered.clear;
                 self.hits.overlay_cancel = rendered.cancel;
-                self.hits.usage_dashboard_actions = rendered.usage_dashboard_actions;
                 self.hits.menu_popup = rendered.menu_popup;
                 self.hits.menu_search = rendered.menu_search;
                 self.hits.global_menu_rows = rendered.menu_rows;
@@ -1000,7 +997,7 @@ impl ClientShellState {
                 self.hits.release_notes_scroll_metrics = rendered.release_notes_scroll_metrics;
                 self.hits.overlay_kind = Some(overlay.kind());
                 // 浮层自带光标（文本输入）时归浮层；否则只有浮层矩形真正盖住
-                // 终端光标才把它抹掉，未覆盖的终端插入点保留（用量仪表盘等）。
+                // 终端光标才把它抹掉，未覆盖的终端插入点保留。
                 rendered.cursor.or_else(|| {
                     canvas
                         .cursor()
@@ -1008,16 +1005,12 @@ impl ClientShellState {
                 })
             };
             self.hits.overlay_bounds = entrance_area;
-            let modal_overlay = !self.overlay_passes_input(None);
-            if modal_overlay
-                && self.overlay_since.is_some_and(|since| {
-                    compose_now.duration_since(since) < super::feedback::ENTRANCE_DURATION
-                })
-                && !entrance_area.is_empty()
+            if self.overlay_since.is_some_and(|since| {
+                compose_now.duration_since(since) < super::feedback::ENTRANCE_DURATION
+            }) && !entrance_area.is_empty()
             {
                 // 入场提示压暗的是浮层**周围**的一帧：压自己会把边框、标题与
-                // 按钮一起变暗，看起来像渲染故障（HERDR-UX-07）。非模态浮层
-                // （用量仪表盘）本来就不遮画面，不参与。
+                // 按钮一起变暗，看起来像渲染故障（HERDR-UX-07）。
                 dim_around(canvas.buffer(), entrance_area);
             }
             canvas.set_cursor(cursor);

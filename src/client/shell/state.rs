@@ -163,11 +163,6 @@ pub(super) enum ClientMobileTarget {
 
 #[derive(Default)]
 pub(super) struct ShellHitMap {
-    /// 本表由一次完整 compose 产生（经典布局或停靠工作台），而不是
-    /// `invalidate_pane_surface` / 快照换代 / 未配对 surface 留下的空表。tick 里
-    /// 依赖命中区几何做判断（如总览浮层的孤儿防护）只在为真时进行：空表只说明
-    /// 还没重绘，不代表锚点丢失。
-    pub(super) composed: bool,
     pub(super) overlay_bounds: Rect,
     /// 本帧 chrome 悬浮区的分组包围盒（侧栏 / 顶栏 / 横幅）：指针不在任何一组
     /// 里时无需走整份线性扫描——pane 上的指针是最常见的 `Moved` 场景
@@ -194,9 +189,6 @@ pub(super) struct ShellHitMap {
     pub(super) agent_max_scroll: usize,
     pub(super) agent_sort_toggle: Rect,
     pub(super) agent_group_toggles: Vec<(Rect, String)>,
-    pub(super) agent_usage_toggle: Rect,
-    /// 浮动用量仪表盘（非模态 overlay）内的账号行 / 按钮命中区。
-    pub(super) usage_dashboard_actions: Vec<(Rect, super::observability::Action)>,
     pub(super) sidebar_divider: Rect,
     pub(super) sidebar_section_divider: Rect,
     pub(super) sidebar_toggle: Rect,
@@ -603,7 +595,6 @@ pub(super) enum ClientShellOverlayKind {
     Scenes,
     Broadcast,
     MachineFiles,
-    UsageDashboard,
 }
 
 impl ClientShellOverlayKind {
@@ -631,7 +622,6 @@ impl ClientShellOverlayKind {
             Self::Scenes => "scenes",
             Self::Broadcast => "broadcast",
             Self::MachineFiles => "machine_files",
-            Self::UsageDashboard => "usage_dashboard",
         }
     }
 
@@ -644,7 +634,7 @@ impl ClientShellOverlayKind {
             .find(|kind| kind.storage_key() == key || format!("{kind:?}") == key)
     }
 
-    const ALL: [Self; 21] = [
+    const ALL: [Self; 20] = [
         Self::Onboarding,
         Self::ProductAnnouncement,
         Self::ReleaseNotes,
@@ -665,7 +655,6 @@ impl ClientShellOverlayKind {
         Self::Scenes,
         Self::Broadcast,
         Self::MachineFiles,
-        Self::UsageDashboard,
     ];
 }
 
@@ -1020,7 +1009,6 @@ pub(super) enum ClientShellOverlay {
     Scenes(super::scenes_overlay::ClientScenesOverlay),
     Broadcast(super::broadcast::ClientBroadcastOverlay),
     MachineFiles(super::machine_files_overlay::ClientMachineFilesOverlay),
-    UsageDashboard,
 }
 
 impl ClientShellOverlay {
@@ -1046,7 +1034,6 @@ impl ClientShellOverlay {
             Self::Scenes(_) => ClientShellOverlayKind::Scenes,
             Self::Broadcast(_) => ClientShellOverlayKind::Broadcast,
             Self::MachineFiles(_) => ClientShellOverlayKind::MachineFiles,
-            Self::UsageDashboard => ClientShellOverlayKind::UsageDashboard,
         }
     }
 
@@ -1091,8 +1078,7 @@ impl ClientShellOverlay {
             | Self::Settings(_)
             | Self::MachineAuth(_)
             | Self::NotificationHistory(_)
-            | Self::Broadcast(_)
-            | Self::UsageDashboard => 0,
+            | Self::Broadcast(_) => 0,
         }
     }
 }

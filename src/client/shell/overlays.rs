@@ -63,8 +63,6 @@ pub(crate) struct OverlayRender {
     pub(crate) product_announcement_scroll_metrics: Option<crate::pane::ScrollMetrics>,
     pub(crate) release_notes_scrollbar: Rect,
     pub(crate) release_notes_scroll_metrics: Option<crate::pane::ScrollMetrics>,
-    /// 浮动用量仪表盘内的账号行 / 按钮命中区（非模态，浮层内点击派发）。
-    pub(in crate::client::shell) usage_dashboard_actions: Vec<(Rect, super::observability::Action)>,
     pub(crate) cursor: Option<crate::protocol::CursorState>,
 }
 
@@ -88,16 +86,13 @@ pub(crate) fn render_client_overlay(
     active_endpoint_id: &ClientEndpointId,
     k: &LiveKeybindConfig,
     history: &std::collections::VecDeque<ClientNotificationRecord>,
-    usage: &super::observability::State,
     cx: &ChromeContext<'_>,
 ) -> Option<OverlayRender> {
-    // 非模态的浮层不压暗整屏：导航器、上下文菜单与浮动用量仪表盘（按键透传到
-    // 聚焦终端，正在打字的终端内容不能是暗的）。
+    // 非模态的浮层不压暗整屏：导航器与上下文菜单（按键透传到聚焦终端，正在
+    // 打字的终端内容不能是暗的）。
     if !matches!(
         o,
-        ClientShellOverlay::Navigator(_)
-            | ClientShellOverlay::ContextMenu(_)
-            | ClientShellOverlay::UsageDashboard
+        ClientShellOverlay::Navigator(_) | ClientShellOverlay::ContextMenu(_)
     ) {
         for y in b.area.y..b.area.bottom() {
             for x in b.area.x..b.area.right() {
@@ -199,91 +194,8 @@ pub(crate) fn render_client_overlay(
         ClientShellOverlay::CommandPalette(v) => {
             super::command_palette::render_command_palette(b, v, cx)
         }
-        ClientShellOverlay::UsageDashboard => render_usage_dashboard_overlay(b, usage, cx),
         ClientShellOverlay::ContextMenu(_) => None,
     }
-}
-
-/// Floating usage dashboard: the accounts overview inside the shared frame,
-/// so it supports the same drag-to-float window behavior as settings and the
-/// command palette. Non-modal: it respects `usage.format`, its account rows
-/// come back as `usage_dashboard_actions` for in-overlay clicks, and data
-/// refreshes through the observability polling loop while it is open.
-///
-/// `cursor: None` 只表示浮层不拥有光标；组合层按浮层矩形是否覆盖终端光标
-/// 决定是否保留终端插入点，仪表盘打开时未被盖住的光标仍然可见。
-fn render_usage_dashboard_overlay(
-    b: &mut Buffer,
-    usage: &super::observability::State,
-    cx: &ChromeContext<'_>,
-) -> Option<OverlayRender> {
-    let (outer, inner) = modal_panel(b, crate::ui::ModalSize::Large, cx.palette.accent, cx)?;
-    let tr = super::observability::tr;
-    let mut actions = Vec::new();
-    put_text(
-        b,
-        inner.x,
-        inner.y,
-        inner.width,
-        tr("Usage dashboard", "用量仪表盘"),
-        Style::default()
-            .fg(cx.palette.text)
-            .add_modifier(Modifier::BOLD),
-    );
-    if inner.height > 2 {
-        let body = Rect::new(
-            inner.x,
-            inner.y + 1,
-            inner.width,
-            inner.height.saturating_sub(2),
-        );
-        if !usage.usage.enabled {
-            put_text(
-                b,
-                body.x,
-                body.y,
-                body.width,
-                tr(
-                    "Account usage is disabled in settings.",
-                    "账号用量已在设置中关闭。",
-                ),
-                Style::default().fg(cx.palette.overlay0),
-            );
-        } else if usage.accounts.is_empty() {
-            put_text(
-                b,
-                body.x,
-                body.y,
-                body.width,
-                if usage.refreshing() {
-                    tr("Refreshing…", "刷新中…")
-                } else {
-                    tr("Waiting for account usage data…", "等待账号用量数据…")
-                },
-                Style::default().fg(cx.palette.overlay0),
-            );
-        } else {
-            super::observability::render_usage_body(b, body, usage, cx.palette, &mut actions);
-        }
-    }
-    if inner.height > 1 {
-        put_text(
-            b,
-            inner.x,
-            inner.y + inner.height.saturating_sub(1),
-            inner.width,
-            tr(
-                "esc close · click a row to select · scroll · drag edges to resize",
-                "esc 关闭 · 点击账号行选中 · 滚轮滚动 · 拖动边缘缩放",
-            ),
-            Style::default().fg(cx.palette.overlay0),
-        );
-    }
-    Some(OverlayRender {
-        area: outer,
-        usage_dashboard_actions: actions,
-        ..OverlayRender::default()
-    })
 }
 
 pub(crate) fn render_minimum_overlay(b: &mut Buffer, cx: &ChromeContext<'_>) -> OverlayRender {

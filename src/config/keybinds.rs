@@ -338,10 +338,6 @@ pub struct Keybinds {
     pub open_notification_target: ActionKeybinds,
     /// Link hints mode shortcut (`keys.link_hints`, `prefix+u` by default).
     pub link_hints: ActionKeybinds,
-    /// Usage-dashboard toggle (`keys.toggle_usage_dashboard`, `prefix+a` by
-    /// default): the keyboard fallback for the sidebar usage button, which is
-    /// unreachable when `ui.mouse_capture = false` (U-6).
-    pub toggle_usage_dashboard: ActionKeybinds,
     pub previous_workspace: ActionKeybinds,
     pub next_workspace: ActionKeybinds,
     pub previous_agent: ActionKeybinds,
@@ -514,7 +510,6 @@ impl Config {
             reload_config: empty_action!(),
             open_notification_target: empty_action!(),
             link_hints: empty_action!(),
-            toggle_usage_dashboard: empty_action!(),
             previous_workspace: empty_action!(),
             next_workspace: empty_action!(),
             previous_agent: empty_action!(),
@@ -651,11 +646,6 @@ impl Config {
                 source
             );
             apply_action!(keybinds.link_hints, link_hints, source);
-            apply_action!(
-                keybinds.toggle_usage_dashboard,
-                toggle_usage_dashboard,
-                source
-            );
             apply_action!(keybinds.previous_workspace, previous_workspace, source);
             apply_action!(keybinds.next_workspace, next_workspace, source);
             apply_action!(keybinds.previous_agent, previous_agent, source);

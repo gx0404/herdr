@@ -2303,39 +2303,6 @@ impl ClientShellState {
             }
             return;
         }
-        if matches!(self.overlay, Some(ClientShellOverlay::UsageDashboard)) {
-            // 非模态浮动仪表盘：浮层内点击派发账号行 / 按钮动作，滚轮驱动页面
-            // 作用域的 account_scroll，点外才关闭。
-            let inside = super::contains(self.hits.overlay_bounds, point);
-            match mouse.kind {
-                MouseEventKind::Down(MouseButton::Left) if inside => {
-                    if let Some(action) = self
-                        .hits
-                        .usage_dashboard_actions
-                        .iter()
-                        .rev()
-                        .find(|(rect, _)| super::contains(*rect, point))
-                        .map(|(_, action)| action.clone())
-                    {
-                        self.observation_action(action, outcome);
-                    }
-                }
-                MouseEventKind::Down(MouseButton::Left) => {
-                    self.overlay = None;
-                    outcome.repaint = true;
-                }
-                MouseEventKind::ScrollDown if inside => {
-                    self.observability.scroll_accounts(1, false);
-                    outcome.repaint = true;
-                }
-                MouseEventKind::ScrollUp if inside => {
-                    self.observability.scroll_accounts(-1, false);
-                    outcome.repaint = true;
-                }
-                _ => {}
-            }
-            return;
-        }
         if self.overlay.is_some() {
             if mouse.kind != MouseEventKind::Down(MouseButton::Left) {
                 return;
@@ -2808,11 +2775,6 @@ impl ClientShellState {
                     self.agent_scroll = 0;
                     outcome.repaint = true;
                     self.persist_chrome_preferences(outcome);
-                    return;
-                }
-                if super::contains(self.hits.agent_usage_toggle, point) {
-                    // 点击 = 钉住 / 取消钉住跨厂商总览浮层（非模态，页面与焦点不动）。
-                    self.pin_usage_overview(outcome);
                     return;
                 }
                 let agent_pane_id = self

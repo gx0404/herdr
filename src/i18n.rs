@@ -266,7 +266,6 @@ pub struct KeybindTexts {
     pub cycle_pane_previous: &'static str,
     pub last_pane: &'static str,
     pub link_hints: &'static str,
-    pub toggle_usage_dashboard: &'static str,
     pub custom_command: &'static str,
 }
 
@@ -467,7 +466,6 @@ pub struct SidebarTexts {
     pub sort_grouped: &'static str,
     pub sort_priority: &'static str,
     pub no_matching_agents: &'static str,
-    pub agent_usage: &'static str,
 }
 
 pub struct StatusTexts {

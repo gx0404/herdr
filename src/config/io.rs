@@ -1084,6 +1084,34 @@ agent_panel_sort = "priority"
     }
 
     #[test]
+    fn load_live_config_accepts_legacy_toggle_usage_dashboard_without_warning() {
+        // 字符串、数组与形状不对的值都要被吞掉：残留键不能让整个 [keys] 失效。
+        for value in [r#""prefix+a""#, r#"["prefix+a", "f9"]"#, "5"] {
+            let loaded = load_live_config_from_str(&format!(
+                "[keys]\ntoggle_usage_dashboard = {value}\nzoom = \"prefix+shift+z\"\n"
+            ))
+            .unwrap();
+
+            assert!(
+                loaded.diagnostics.is_empty(),
+                "{value}: {:?}",
+                loaded.diagnostics
+            );
+            assert!(loaded.invalid_sections.is_empty(), "{value}");
+            assert!(
+                loaded
+                    .config
+                    .keybinds()
+                    .zoom
+                    .bindings
+                    .iter()
+                    .any(|binding| binding.label == "prefix+shift+z"),
+                "{value}: 同段其余键位照常生效"
+            );
+        }
+    }
+
+    #[test]
     fn load_live_config_discards_ignored_keys_from_an_invalid_section() {
         let loaded = load_live_config_from_str(
             r#"
@@ -1193,6 +1221,38 @@ omp = [["agent"]]
         let _ = std::fs::remove_file(path);
 
         assert!(loaded.diagnostics.is_empty(), "{:?}", loaded.diagnostics);
+    }
+
+    #[test]
+    fn startup_config_accepts_legacy_toggle_usage_dashboard_without_warning() {
+        let _guard = crate::config::test_config_env_lock().lock().unwrap();
+        let path = std::env::temp_dir().join(format!(
+            "herdr-config-legacy-toggle-usage-dashboard-{}.toml",
+            std::process::id()
+        ));
+        std::fs::write(
+            &path,
+            "[keys]\ntoggle_usage_dashboard = \"prefix+a\"\nzoom = \"prefix+shift+z\"\n",
+        )
+        .unwrap();
+        std::env::set_var(CONFIG_PATH_ENV_VAR, &path);
+
+        let loaded = Config::load();
+
+        std::env::remove_var(CONFIG_PATH_ENV_VAR);
+        let _ = std::fs::remove_file(path);
+
+        assert!(loaded.diagnostics.is_empty(), "{:?}", loaded.diagnostics);
+        assert!(
+            loaded
+                .config
+                .keybinds()
+                .zoom
+                .bindings
+                .iter()
+                .any(|binding| binding.label == "prefix+shift+z"),
+            "残留键不让整份配置回退默认"
+        );
     }
 
     #[test]

@@ -949,41 +949,6 @@ fn accounts_page_lists_only_installed_or_configured_providers() {
     );
 }
 
-#[test]
-fn usage_dashboard_overlays_the_shell_and_closes_on_escape() {
-    let mut state = ready();
-    state.observability.selected_provider = Some("codex".into());
-    let mut outcome = ClientShellInput::default();
-    state.toggle_usage_dashboard(&mut outcome);
-    assert!(matches!(
-        state.overlay,
-        Some(ClientShellOverlay::UsageDashboard)
-    ));
-    assert_eq!(
-        state.observability.selected_provider, None,
-        "dashboard opens on the cross-provider overview"
-    );
-    assert!(outcome.repaint);
-    let frame = state.compose(120, 40).expect("仪表盘画面");
-    let text = frame_text(&frame);
-    let compact: String = text.chars().filter(|ch| !ch.is_whitespace()).collect();
-    assert!(compact.contains("用量仪表盘"), "dashboard frame: {text}");
-    state.handle_raw_events(vec![RawInputEvent::Key(crate::input::TerminalKey::new(
-        crossterm::event::KeyCode::Esc,
-        KeyModifiers::empty(),
-    ))]);
-    assert!(
-        state.overlay.is_none(),
-        "escape closes the floating dashboard"
-    );
-    state.toggle_usage_dashboard(&mut outcome);
-    state.toggle_usage_dashboard(&mut outcome);
-    assert!(
-        state.overlay.is_none(),
-        "toggling the launcher button twice closes the dashboard"
-    );
-}
-
 /// Layout 模式下最大化后仍要能用键盘轮转面板：几何取自去最大化投影，
 /// 最大化目标跟随新焦点。
 #[test]

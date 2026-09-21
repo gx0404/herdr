@@ -156,12 +156,6 @@ impl ClientShellState {
                 .usage_disabled_providers
                 .as_ref()
                 .map(|_| self.observability.usage.disabled_providers.clone()),
-            // 只有用户显式设置过才回写（与其它 usage_* 键一致）。
-            usage_hover_dashboard: self
-                .config
-                .preferences
-                .usage_hover_dashboard
-                .map(|_| self.observability.usage_hover_dashboard),
             usage_hover_delay_ms: self
                 .config
                 .preferences

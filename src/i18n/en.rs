@@ -148,7 +148,6 @@ pub const TEXTS: Texts = Texts {
         cycle_pane_previous: "cycle pane previous",
         last_pane: "last pane",
         link_hints: "link hints",
-        toggle_usage_dashboard: "usage dashboard",
         custom_command: "custom command",
     },
     overlays: OverlayTexts {
@@ -330,7 +329,6 @@ pub const TEXTS: Texts = Texts {
         sort_grouped: "grouped",
         sort_priority: "priority",
         no_matching_agents: "  no matching agents",
-        agent_usage: "usage",
     },
     status: StatusTexts {
         blocked: "blocked",

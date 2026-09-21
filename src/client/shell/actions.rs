@@ -193,10 +193,6 @@ impl ClientShellState {
                     self.enter_link_hints(outcome);
                     return;
                 }
-                if action == crate::input::KeybindAction::ToggleUsageDashboard {
-                    self.toggle_usage_dashboard(outcome);
-                    return;
-                }
                 if self.handle_endpoint_navigation(action, outcome) {
                     return;
                 }

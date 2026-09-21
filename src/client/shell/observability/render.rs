@@ -498,8 +498,8 @@ pub(super) struct PaintOutput {
 }
 
 /// 渲染纯函数：`page` 是本次要画的页面（停靠面板由调用方决定画哪个 tab），
-/// 状态只读；`draw_hover` 为真时画可见的悬浮层（agent 行悬浮只在没有页面时，
-/// 总览浮层不受页面影响），进程对话框总是最后覆盖。调色板、组件 token 与
+/// 状态只读；`draw_hover` 为真时画可见的悬浮层（agent 行悬浮只在没有页面时），
+/// 进程对话框总是最后覆盖。调色板、组件 token 与
 /// 边框字形都来自 `ChromeContext`（与浮层同源，C-29）。
 pub(super) fn paint(
     buffer: &mut Buffer,
@@ -588,12 +588,11 @@ pub(super) fn paint(
     }
     let mut hover_rect = Rect::default();
     let mut hover_hits = Vec::new();
-    // agent 行悬浮只在没有页面时画（停靠面板的全局 pass / 经典布局无页面）；
-    // 总览浮层锚在侧栏按钮上，经典布局页面打开时同样放行。
+    // agent 行悬浮只在没有页面时画（停靠面板的全局 pass / 经典布局无页面）。
     let hover = state
         .hover
         .as_ref()
-        .filter(|hover| draw_hover && hover.visible && (page.is_none() || hover.is_overview()));
+        .filter(|hover| draw_hover && hover.visible && page.is_none());
     if let Some(hover) = hover {
         match &hover.target {
             HoverTarget::Agent { agent, .. } => {
@@ -637,35 +636,6 @@ pub(super) fn paint(
                     Rect::new(inner.x, y, inner.width.min(24), 1),
                     tr("Open page", "打开页面"),
                     Action::Page(Page::Accounts),
-                    palette,
-                    &mut hover_hits,
-                );
-            }
-            HoverTarget::UsageOverview => {
-                let scope = hover_scope(state);
-                let (width, height) = usage_hover_size(state, &scope, buffer.area);
-                // 按钮下方左对齐；下方放不下就上翻到按钮上方。两侧都放不下时取
-                // 空间更大的一侧并收缩高度：浮层永远不盖住按钮本身（否则按钮上的
-                // 点击会落进浮层独占分支、变成「打开账号页」而不是取消钉住）。
-                let x = hover
-                    .anchor
-                    .x
-                    .min(buffer.area.right().saturating_sub(width));
-                let (y, height) = usage_hover_placement(hover.anchor, height, buffer.area);
-                hover_rect = Rect::new(x, y, width, height);
-                clear(buffer, hover_rect);
-                let inner = block(
-                    buffer,
-                    hover_rect,
-                    &format!(" {} ", tr("Usage overview", "用量总览")),
-                    cx,
-                );
-                usage_hover(
-                    buffer,
-                    inner,
-                    state,
-                    &scope,
-                    hover.pinned,
                     palette,
                     &mut hover_hits,
                 );
@@ -2146,20 +2116,6 @@ fn metric_scope(scope: &str) -> &str {
     }
 }
 
-/// 紧凑的单行用量（总览浮层 / 表格用量列）：`数量或百分比 ↻距重置`。
-fn metric_value(metric: &UsageMetric, now_ms: u64) -> String {
-    let quantity = metric_quantity(metric);
-    let value = match (metric_percent(metric), quantity.as_str()) {
-        (Some(percent), "—") => format!("{percent:.1}% {}", tr("used", "已用")),
-        (Some(percent), quantity) => format!("{percent:.1}% · {quantity}"),
-        (None, quantity) => quantity.to_owned(),
-    };
-    match reset_secs(metric, now_ms) {
-        Some(seconds) => format!("{value} ↻{}", span_text(seconds)),
-        None => value,
-    }
-}
-
 /// 账号正文的宿主。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum BodyChrome {
@@ -2272,7 +2228,7 @@ fn table_status(account: &AccountUsageSnapshot, state: Option<&UsageRefreshState
     }
 }
 
-/// 账号页 / 浮动仪表盘使用的页面作用域。
+/// 账号页使用的页面作用域。
 pub(super) fn page_scope(state: &State) -> AccountsScope<'_> {
     AccountsScope {
         accounts: &state.accounts,
@@ -2574,246 +2530,6 @@ pub(super) fn usage_table(
     )
     .column_spacing(1)
     .render(area, buffer);
-}
-
-/// 总览浮层（紧凑版）每账号的行数：1 头行 + ≤3 指标行 + 需要绑定时 1 行提示。
-/// 与页面 / 仪表盘的 `account_rows` 口径不同：浮层只做一眼总览。
-pub(super) fn usage_hover_rows(accounts: &[AccountUsageSnapshot]) -> usize {
-    accounts
-        .iter()
-        .map(|account| {
-            1 + account.metrics.len().min(USAGE_HOVER_METRICS)
-                + usize::from(account.status == ObservationStatus::NeedsBinding)
-        })
-        .sum()
-}
-
-/// 总览浮层每账号最多显示的指标行数。
-const USAGE_HOVER_METRICS: usize = 3;
-/// 指标行尾部进度条的列数（含 1 列间距）。
-const USAGE_HOVER_BAR: usize = 13;
-
-/// 总览浮层的头行：`账号 · 状态[ · 刷新中…]`。
-fn usage_hover_header(account: &AccountUsageSnapshot, scope: &AccountsScope<'_>) -> String {
-    let mut line = format!("{} · {}", account.account_label, status(account.status));
-    if scope
-        .refresh_of(&account.account_id)
-        .is_some_and(|state| state.in_flight)
-    {
-        line.push_str(" · ");
-        line.push_str(tr("refreshing…", "刷新中…"));
-    }
-    line
-}
-
-/// 总览浮层的指标行：`指标 用量`（重置时间用紧凑格式）。
-fn usage_hover_metric(metric: &UsageMetric, now_ms: u64) -> String {
-    format!("{} {}", metric.label, metric_value(metric, now_ms))
-}
-
-/// 需要绑定的账号在浮层里的一行提示。
-fn usage_hover_binding_note() -> &'static str {
-    tr(
-        "→ needs a pane binding · open the accounts page",
-        "→ 需要账号绑定 · 打开账号页绑定 pane",
-    )
-}
-
-/// 总览浮层的纵向落点 `(y, height)`：优先按钮下方，放不下则上翻到按钮上方
-/// （`bottom() == anchor.y`）；两侧都不够时取空间更大的一侧并把高度收缩到该
-/// 空间，永远不与按钮行相交。
-pub(super) fn usage_hover_placement(anchor: Rect, height: u16, area: Rect) -> (u16, u16) {
-    let below = anchor.bottom().min(area.bottom());
-    let space_below = area.bottom().saturating_sub(below);
-    let space_above = anchor.y.saturating_sub(area.y);
-    if height <= space_below {
-        (below, height)
-    } else if height <= space_above {
-        (anchor.y - height, height)
-    } else if space_below >= space_above {
-        (below, space_below)
-    } else {
-        (anchor.y - space_above, space_above)
-    }
-}
-
-/// 总览浮层的尺寸（含边框）：高 `(2 + Σ行 + 1 页脚).clamp(5, 14)`、宽按内容
-/// `clamp(34, 56)`，再按整帧夹取；loading 态占 1 行占位。
-pub(super) fn usage_hover_size(state: &State, scope: &AccountsScope<'_>, area: Rect) -> (u16, u16) {
-    let rows = usage_hover_rows(scope.accounts).max(1);
-    let height = (2 + rows + 1).clamp(5, 14);
-    let content = scope
-        .accounts
-        .iter()
-        .map(|account| {
-            let header = UnicodeWidthStr::width(usage_hover_header(account, scope).as_str());
-            let metrics = account
-                .metrics
-                .iter()
-                .take(USAGE_HOVER_METRICS)
-                .map(|metric| {
-                    UnicodeWidthStr::width(usage_hover_metric(metric, state.now_ms).as_str())
-                        + usize::from(metric.used_percent.is_some()) * USAGE_HOVER_BAR
-                })
-                .max()
-                .unwrap_or(0);
-            let note = if account.status == ObservationStatus::NeedsBinding {
-                UnicodeWidthStr::width(usage_hover_binding_note())
-            } else {
-                0
-            };
-            header.max(metrics).max(note)
-        })
-        .max()
-        .unwrap_or(0);
-    // 2 列边框 + 2 列内边距。
-    let width = (content + 4).clamp(34, 56);
-    (
-        (width as u16).min(area.width.saturating_sub(2)),
-        (height as u16).min(area.height.saturating_sub(2)),
-    )
-}
-
-/// 总览浮层正文（紧凑版）：每账号 1 头行 + ≤3 指标行（百分比指标带进度条），
-/// 无按钮条，整块命中区打开账号页；页脚提示钉住 / 关闭方式。数据未到时显示
-/// 「查询中…」占位而不是空框。
-pub(super) fn usage_hover(
-    buffer: &mut Buffer,
-    area: Rect,
-    state: &State,
-    scope: &AccountsScope<'_>,
-    pinned: bool,
-    palette: &Palette,
-    hits: &mut Vec<(Rect, Action)>,
-) {
-    if area.is_empty() {
-        return;
-    }
-    // 1 列内边距。
-    let inner = Rect::new(
-        area.x.saturating_add(1),
-        area.y,
-        area.width.saturating_sub(2),
-        area.height,
-    );
-    let content = Rect::new(
-        inner.x,
-        inner.y,
-        inner.width,
-        inner.height.saturating_sub(1),
-    );
-    if !state.usage.enabled {
-        // 只有显式点击「用量」按钮（`pin_usage_overview`）会走到这里：扫过按钮
-        // 在 `usage.enabled` 关闭时不弹浮层，点击则用这一行说明去哪里开启。
-        text(
-            buffer,
-            content,
-            0,
-            tr(
-                "Account usage is disabled · Monitor → Settings turns it on.",
-                "账号用量已在设置中关闭 · 监控 → 设置 可开启。",
-            ),
-            Style::default().fg(palette.overlay0),
-        );
-    } else if scope.accounts.is_empty() {
-        // 在途判定含逐厂商的 `hover_usage:<agent>` 键，不只看整体请求的键。
-        let loading = scope.refreshing || state.usage_in_flight(true);
-        text(
-            buffer,
-            content,
-            0,
-            if loading {
-                tr("Loading…", "查询中…")
-            } else {
-                tr("No account usage yet.", "暂无账号用量数据。")
-            },
-            Style::default().fg(palette.overlay0),
-        );
-    } else {
-        let rows = usage_hover_rows(scope.accounts);
-        let start = scope
-            .scroll
-            .min(rows.saturating_sub(content.height.max(1) as usize));
-        let viewport_row = |row: usize| {
-            row.checked_sub(start)
-                .filter(|row| *row < content.height as usize)
-                .map(|row| Rect::new(content.x, content.y + row as u16, content.width, 1))
-        };
-        let mut row = 0;
-        for account in scope.accounts {
-            if row >= start + content.height as usize {
-                break;
-            }
-            if let Some(rect) = viewport_row(row) {
-                let header = usage_hover_header(account, scope);
-                text(
-                    buffer,
-                    rect,
-                    0,
-                    &header,
-                    Style::default()
-                        .fg(status_color(account.status, palette))
-                        .add_modifier(Modifier::BOLD),
-                );
-            }
-            row += 1;
-            for metric in account.metrics.iter().take(USAGE_HOVER_METRICS) {
-                if let Some(rect) = viewport_row(row) {
-                    let line = usage_hover_metric(metric, state.now_ms);
-                    text(buffer, rect, 0, &line, Style::default().fg(palette.text));
-                    if let Some(percent) = metric.used_percent {
-                        let used = UnicodeWidthStr::width(line.as_str()) as u16;
-                        let bar_rect = Rect::new(
-                            rect.x.saturating_add(used).saturating_add(1),
-                            rect.y,
-                            rect.width.saturating_sub(used.saturating_add(1)),
-                            1,
-                        );
-                        if bar_rect.width >= 6 {
-                            bar(buffer, bar_rect, Some(percent as f32), palette);
-                        }
-                    }
-                }
-                row += 1;
-            }
-            if account.status == ObservationStatus::NeedsBinding {
-                if let Some(rect) = viewport_row(row) {
-                    text(
-                        buffer,
-                        rect,
-                        0,
-                        usage_hover_binding_note(),
-                        Style::default().fg(palette.yellow),
-                    );
-                }
-                row += 1;
-            }
-        }
-        if scope.refreshing {
-            buffer.set_style(content, Style::default().add_modifier(Modifier::DIM));
-        }
-    }
-    if inner.height > 1 {
-        let footer = Rect::new(inner.x, inner.bottom().saturating_sub(1), inner.width, 1);
-        text(
-            buffer,
-            footer,
-            0,
-            if pinned {
-                tr(
-                    "click opens accounts · esc closes",
-                    "点击打开账号页 · Esc 关闭",
-                )
-            } else {
-                tr(
-                    "click opens accounts · usage button pins",
-                    "点击打开账号页 · 点「用量」钉住",
-                )
-            },
-            Style::default().fg(palette.overlay0),
-        );
-    }
-    hits.push((area, Action::Page(Page::Accounts)));
 }
 
 /// 仪表盘模式下每个账号占用的行数：头行 + 说明行（message / 服务端说明 / 套餐·身份）

@@ -55,28 +55,6 @@ pub(super) fn provider_listed(provider: &UsageProviderInfo) -> bool {
     provider.installed != Some(false) || !provider.configured_accounts.is_empty()
 }
 
-/// 浮动用量仪表盘的正文：按 `usage.format` 画仪表盘（进度条）或表格，作用域
-/// 是页面作用域（与账号页共用 `accounts` / `selected_*` / `account_scroll`），
-/// 账号行命中区写进 `hits` 供浮层内点击派发。
-pub(super) fn render_usage_body(
-    buffer: &mut Buffer,
-    area: Rect,
-    state: &State,
-    palette: &Palette,
-    hits: &mut Vec<(Rect, Action)>,
-) {
-    let scope = render::page_scope(state);
-    if state.usage.format == UsageDisplayFormat::Table {
-        render::usage_table(buffer, area, state, &scope, palette, hits);
-    } else {
-        render::usage_dashboard(buffer, area, state, &scope, palette, hits);
-    }
-    if scope.refreshing {
-        // 与账号页一致：强意图刷新在途时旧快照保留但变暗。
-        buffer.set_style(area, Style::default().add_modifier(Modifier::DIM));
-    }
-}
-
 /// 监控面板内的页面（tab）；可持久化为客户端偏好，因此 wire 名固定为 snake_case。
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -461,8 +439,7 @@ pub(super) struct HistoryPoint {
     pub cores: Vec<Option<f32>>,
 }
 
-/// 悬浮层的目标：Agents 面板里某个 pane 的 agent（按 pane 查该厂商用量），或
-/// 面板头部「用量」按钮的跨厂商总览（不带厂商 / pane，不受 `usage.position` 门禁）。
+/// 悬浮层的目标：Agents 面板里某个 pane 的 agent（按 pane 查该厂商用量）。
 #[derive(Clone, Debug, PartialEq)]
 pub(super) enum HoverTarget {
     Agent {
@@ -470,7 +447,6 @@ pub(super) enum HoverTarget {
         pane: String,
         agent: String,
     },
-    UsageOverview,
 }
 
 pub(super) struct Hover {
@@ -479,15 +455,9 @@ pub(super) struct Hover {
     pub since: Instant,
     pub visible: bool,
     pub leave_at: Option<Instant>,
-    /// 点击「用量」按钮钉住的总览：指针离开不再关闭，Esc / 再次点击 / 浮层外
-    /// 点击才关闭。只有 `UsageOverview` 会被钉住。
+    /// 钉住的浮层：指针离开不再关闭，Esc / 浮层外点击才关闭。目前没有入口会
+    /// 置位，留给「键盘钉住单 agent 用量卡」。
     pub pinned: bool,
-}
-
-impl Hover {
-    pub(super) fn is_overview(&self) -> bool {
-        self.target == HoverTarget::UsageOverview
-    }
 }
 
 /// 悬浮层独立的数据作用域：厂商 / pane / 端点 / 账号快照 / epoch / 刷新标志 /
@@ -673,7 +643,7 @@ struct AlertState {
 pub(super) struct Painted {
     /// 供 kitty 图片 occlusion 使用的覆盖区：进程对话框存在时只有对话框，否则
     /// 页面与悬浮层各占一块（空块由 `Occlusion::cover` 忽略）。两块分开给出而
-    /// 不合成外接矩形：经典布局下页面铺在 pane 区、总览浮层锚在侧栏按钮下方，
+    /// 不合成外接矩形：经典布局下页面铺在 pane 区、悬浮层锚在侧栏 agent 行旁，
     /// 外接矩形会把中间没被盖住的区域也算成覆盖。
     pub covered: [Rect; 2],
     /// 页面（或进程对话框）的命中区。
@@ -700,7 +670,7 @@ pub(super) struct State {
     /// 最近 `USAGE_HISTORY_SAMPLES` 个点。
     pub usage_history: HashMap<String, VecDeque<UsageSample>>,
     pub providers: Vec<UsageProviderInfo>,
-    /// 账号页 / 浮动仪表盘的账号快照（页面作用域）。
+    /// 账号页的账号快照（页面作用域）。
     pub accounts: Vec<AccountUsageSnapshot>,
     pub selected_provider: Option<String>,
     pub selected_account: Option<String>,
@@ -718,9 +688,6 @@ pub(super) struct State {
     pub hover: Option<Hover>,
     /// 悬浮层作用域，见 `HoverScope`。
     pub hover_scope: HoverScope,
-    /// 客户端偏好 `usage_hover_dashboard`：扫过「用量」按钮是否弹出跨厂商总览
-    /// （默认开）。关掉后点击仍可钉住总览。
-    pub usage_hover_dashboard: bool,
     /// usage_* 偏好键里是否有本机覆盖（`ClientChromePreferences::usage_overridden`
     /// 的镜像，供设置页「恢复配置文件值」决定是否可点）；随偏好写入 / 重载刷新。
     pub usage_overridden: bool,
@@ -728,7 +695,7 @@ pub(super) struct State {
     queued_binding: Option<QueuedBinding>,
     /// 订阅推送在呈现面可见时到达：下一次 tick 重绘一次（事件不逐帧 compose）。
     event_repaint: bool,
-    /// 上一 tick 页面作用域（账号页 / 浮动仪表盘）是否可见：由不可见变可见时
+    /// 上一 tick 页面作用域（账号页）是否可见：由不可见变可见时
     /// 冷启动一次 get，不等订阅期间的低频兜底轮询。
     page_seen: bool,
     /// 页面作用域的 `account.usage.refresh` 在途；响应到达即清除。与
@@ -741,8 +708,8 @@ pub(super) struct State {
     /// 的（既有契约：浮层按钮可从总表列举）。
     pub hits: Vec<(Rect, Action)>,
     /// `hits` 里页面命中区的数量：键盘 Tab / Enter 只在 `hits[..page_hits]` 内
-    /// 循环，浮层命中区只服务鼠标——否则页面打开且总览钉住时 Tab 到末尾会把
-    /// 高亮夹在最后一个页面控件上、Enter 却触发浮层的「打开账号页」。
+    /// 循环，浮层命中区只服务鼠标——否则页面与浮层同帧时 Tab 到末尾会把
+    /// 高亮夹在最后一个页面控件上、Enter 却触发浮层的「打开页面」。
     pub page_hits: usize,
     pub selected_hit: usize,
     pub selected_card: Option<String>,
@@ -808,19 +775,14 @@ impl State {
     }
 
     /// 滚动账号列表；`hover` 为真时按悬浮层作用域的账号数夹取并写悬浮层自己的
-    /// 滚动位置，否则按页面。总览浮层用紧凑版的行数口径。
+    /// 滚动位置，否则按页面。
     pub(super) fn scroll_accounts(&mut self, delta: isize, hover: bool) {
         let (accounts, refresh_states) = if hover {
             (&self.hover_scope.accounts, &self.hover_scope.refresh_states)
         } else {
             (&self.accounts, &self.refresh_states)
         };
-        let overview = hover && self.hover.as_ref().is_some_and(Hover::is_overview);
-        let rows = if overview {
-            render::usage_hover_rows(accounts)
-        } else {
-            render::account_rows(self, accounts, refresh_states)
-        };
+        let rows = render::account_rows(self, accounts, refresh_states);
         let limit = rows.saturating_sub(1);
         let scroll = if hover {
             &mut self.hover_scope.scroll
@@ -1149,17 +1111,6 @@ impl State {
         self.next_usage = Instant::now();
     }
 
-    /// 打开跨厂商总览的悬浮层作用域：复位并换代，不选厂商 / pane（请求带
-    /// `pane_id=None`；总览按本机启用厂商逐个发 `agent=Some(x)`，定向到非活动
-    /// 主机或厂商列表不可用时回落 `agent=None`，见 `usage_targets`），定向到
-    /// `endpoint`，出现本身视为强意图刷新。页面作用域（`selected_*` / `accounts`
-    /// / `epoch` / `account_scroll`）不动。
-    fn open_overview_scope(&mut self, endpoint: ClientEndpointId) {
-        self.reset_hover_scope();
-        self.hover_scope.endpoint = Some(endpoint);
-        self.hover_scope.request_refresh();
-    }
-
     /// 复位悬浮层作用域并换代，作废在途悬浮层请求。
     fn reset_hover_scope(&mut self) {
         let epoch = self.hover_scope.epoch.saturating_add(1);
@@ -1237,7 +1188,6 @@ impl State {
         if let Some(value) = config.preferences.monitor_tab {
             self.monitor_tab = value;
         }
-        self.usage_hover_dashboard = config.preferences.usage_hover_dashboard.unwrap_or(true);
         self.usage_overridden = config.preferences.usage_overridden();
         self.glyphs = config.border_glyphs;
         self.next_metrics = Instant::now();
@@ -1282,7 +1232,6 @@ impl State {
             subscription: UsageSubscription::default(),
             hover: None,
             hover_scope: HoverScope::default(),
-            usage_hover_dashboard: config.preferences.usage_hover_dashboard.unwrap_or(true),
             usage_overridden: config.preferences.usage_overridden(),
             queued_binding: None,
             event_repaint: false,
@@ -1378,7 +1327,7 @@ impl State {
         });
         canvas.set_cursor(cursor);
         let dialog = !output.dialog_rect.is_empty();
-        // 经典布局下页面与总览浮层可同帧出现：两块各自交给 kitty 图片 occlusion，
+        // 页面与悬浮层可同帧出现：两块各自交给 kitty 图片 occlusion，
         // 不合成外接矩形（见 `Painted::covered`）。
         let covered = if dialog {
             [output.dialog_rect, Rect::default()]
@@ -1552,27 +1501,6 @@ impl State {
 }
 
 impl ClientShellState {
-    pub(super) fn toggle_usage_dashboard(&mut self, outcome: &mut ClientShellInput) {
-        if matches!(self.overlay, Some(ClientShellOverlay::UsageDashboard)) {
-            self.overlay = None;
-        } else {
-            self.overlay = Some(ClientShellOverlay::UsageDashboard);
-            // 仪表盘是跨厂商总览：悬浮层作用域整体复位，页面选择回到总览态并
-            // 换代，打开本身视为强意图刷新；厂商列表也顺手重拉一次。
-            self.observability.clear_hover();
-            self.observability.auto_select_provider = false;
-            self.observability.account_scroll = 0;
-            self.observability.bump_page_epoch();
-            self.observability.selected_provider = None;
-            self.observability.selected_account = None;
-            self.observability.selected_pane = None;
-            self.observability.selected_pane_label = None;
-            self.observability.request_refresh();
-            self.observability.next_providers = Instant::now();
-        }
-        outcome.repaint = true;
-    }
-
     /// 回到跨厂商总览（`Action::Overview`）：与选厂商同样是显式选择——页面作用域
     /// 换代、强意图刷新，旧快照保留到新数据到达；自动选中不再抢回厂商。
     fn select_usage_overview(&mut self) {
@@ -1992,20 +1920,6 @@ impl ClientShellState {
             .unwrap_or_default()
             .as_millis()
             .min(u128::from(u64::MAX)) as u64;
-        // 孤儿防护：总览浮层锚定「用量」按钮，按钮命中区消失（面板变窄 / 关闭
-        // 鼠标捕获）或移位（重新布局）即结束浮层，钉住的也不例外。只看完整
-        // compose 产生的命中区：终端 resize / 配置重载 / 未配对 surface 会把
-        // `hits` 整体重置成空表且不立即重绘，空表不代表锚点丢失。
-        let orphaned = self.hits.composed
-            && self.observability.hover.as_ref().is_some_and(|hover| {
-                hover.is_overview()
-                    && (self.hits.agent_usage_toggle.is_empty()
-                        || hover.anchor != self.hits.agent_usage_toggle)
-            });
-        if orphaned {
-            self.observability.clear_hover();
-            outcome.repaint = true;
-        }
         // 悬浮层状态机：离开延时到期即结束（钉住的浮层不设离开时刻）；停留满
         // hover_delay_ms 则可见，并把目标写进悬浮层作用域（页面作用域不动）。
         enum HoverStep {
@@ -2047,10 +1961,6 @@ impl ClientShellState {
                         // 轮询节奏都不动。
                         self.observability.hover_scope.request_refresh();
                     }
-                    Some(HoverTarget::UsageOverview) => {
-                        let endpoint = self.active_endpoint_id.clone();
-                        self.observability.open_overview_scope(endpoint);
-                    }
                     None => {}
                 }
                 outcome.repaint = true;
@@ -2062,15 +1972,12 @@ impl ClientShellState {
             .hover
             .as_ref()
             .is_some_and(|hover| hover.visible);
-        // 账号页（经典布局页面 / 停靠面板的账号 tab / legacy 账号面板）可见；
-        // 浮动仪表盘是跨厂商总览，单列出来以免触发自动选厂商。
+        // 账号页（经典布局页面 / 停靠面板的账号 tab / legacy 账号面板）可见。
         let accounts_page_visible = self.observability.page == Some(Page::Accounts)
             || (self.workbench.visible(&dock::PanelId::Monitor)
                 && self.observability.monitor_tab == Page::Accounts)
             || self.workbench.visible(&dock::PanelId::Accounts);
-        let page_visible = accounts_page_visible
-            || matches!(self.overlay, Some(ClientShellOverlay::UsageDashboard));
-        let usage_visible = page_visible || hover_visible;
+        let usage_visible = accounts_page_visible || hover_visible;
         // 账号页由不可见变可见（含偏好恢复 monitor_tab=accounts、面板随布局
         // 恢复，这些路径不经过 open_observation_page）且尚未选厂商：自动选中。
         if accounts_page_visible
@@ -2114,10 +2021,10 @@ impl ClientShellState {
         }
         // 页面作用域由不可见变可见（订阅期间兜底轮询可能还有几十秒才到期）：
         // 冷启动一次 get，先把当前快照拿到手，再靠事件保持实时。
-        if page_visible && !self.observability.page_seen {
+        if accounts_page_visible && !self.observability.page_seen {
             self.observability.next_usage = now;
         }
-        self.observability.page_seen = page_visible;
+        self.observability.page_seen = accounts_page_visible;
         if usage_visible || self.observation_surface_visible() {
             outcome.repaint |= previous_second != self.observability.now_ms / 1000;
         }
@@ -2189,12 +2096,12 @@ impl ClientShellState {
             self.observation_request(Method::SystemMetricsGet(params), Purpose::Metrics, outcome);
         }
         let settings_open = self.observability.page == Some(Page::Settings);
-        // 页面作用域的订阅：账号页 / 浮动仪表盘可见、厂商未关闭且端点宣告了订阅
+        // 页面作用域的订阅：账号页可见、厂商未关闭且端点宣告了订阅
         // 方法时按当前 (厂商, 账号) 订阅；不可见即退订。订阅覆盖期间轮询降为低频兜底。
         let provider_disabled = |state: &State, agent: Option<&String>| {
             agent.is_some_and(|agent| state.usage.disabled_providers.contains(agent))
         };
-        let subscription_wanted = page_visible
+        let subscription_wanted = accounts_page_visible
             && self.observability.usage.enabled
             && !provider_disabled(
                 &self.observability,
@@ -2205,7 +2112,8 @@ impl ClientShellState {
         let subscribed = self.sync_usage_subscription(subscription_wanted, now, outcome);
         // 页面与悬浮层各有自己的轮询时刻：悬浮层出现 / 点「刷新」只唤醒悬浮层，
         // 页面的 2 秒节流不受影响；反之亦然。
-        let page_due = (page_visible || settings_open) && now >= self.observability.next_usage;
+        let page_due =
+            (accounts_page_visible || settings_open) && now >= self.observability.next_usage;
         let hover_due = hover_visible && now >= self.observability.hover_scope.next_usage;
         if self.observability.usage.enabled && (page_due || hover_due) {
             // 厂商列表：页面打开时立即、之后每 5 分钟低频重拉（OBS-14）；失败按
@@ -2948,14 +2856,13 @@ impl ClientShellState {
     }
 
     /// 监控 / 账号数据当前是否有可见的呈现面：页面、悬浮层、停靠的监控或
-    /// legacy 账号面板、浮动用量仪表盘。新响应到达时据此立即重绘，每秒 tick
+    /// legacy 账号面板。新响应到达时据此立即重绘，每秒 tick
     /// 据此刷新时间显示；与 `usage_visible` 的面板判据保持同一套。
     fn observation_surface_visible(&self) -> bool {
         self.observability.page.is_some()
             || self.observability.hover.is_some()
             || self.workbench.visible(&dock::PanelId::Monitor)
             || self.workbench.visible(&dock::PanelId::Accounts)
-            || matches!(self.overlay, Some(ClientShellOverlay::UsageDashboard))
     }
 
     pub(super) fn observation_action(&mut self, action: Action, outcome: &mut ClientShellInput) {
@@ -3633,14 +3540,8 @@ impl ClientShellState {
             outcome.repaint = true;
             return true;
         }
-        // 浮层外按下即结束悬浮；「用量」按钮上的按下留给 `pin_usage_overview`
-        // 处理（钉住 / 取消钉住），不能先把 hover 清掉。
-        let on_usage_toggle = !self.hits.agent_usage_toggle.is_empty()
-            && contains(self.hits.agent_usage_toggle, point);
-        if matches!(mouse.kind, MouseEventKind::Down(_))
-            && self.observability.hover.is_some()
-            && !on_usage_toggle
-        {
+        // 浮层外按下即结束悬浮。
+        if matches!(mouse.kind, MouseEventKind::Down(_)) && self.observability.hover.is_some() {
             self.observability.clear_hover();
             outcome.repaint = true;
         }
@@ -3653,35 +3554,8 @@ impl ClientShellState {
             .hover
             .as_ref()
             .is_some_and(|hover| hover.pinned);
-        if hover_moves && on_usage_toggle {
-            // 跨厂商总览：不受 `usage.position` 门禁影响（F01）；已是总览就只撤销
-            // 离开时刻，否则替换掉 agent 悬浮进入延时状态。偏好
-            // `usage_hover_dashboard` 关闭时按钮不弹总览，但指针已经离开了 agent
-            // 行，现有 agent 悬浮仍要按 250 ms 宽限关闭。
-            match self.observability.hover.as_mut() {
-                Some(hover) if hover.is_overview() => hover.leave_at = None,
-                _ if self.observability.usage_hover_dashboard => {
-                    self.observability.clear_hover();
-                    self.observability.hover = Some(Hover {
-                        target: HoverTarget::UsageOverview,
-                        anchor: self.hits.agent_usage_toggle,
-                        since: Instant::now(),
-                        visible: false,
-                        leave_at: None,
-                        pinned: false,
-                    });
-                    self.observability.hover_rect = Rect::default();
-                    outcome.repaint = true;
-                }
-                Some(hover) => {
-                    hover
-                        .leave_at
-                        .get_or_insert(Instant::now() + Duration::from_millis(250));
-                }
-                None => {}
-            }
-        } else if hover_moves && pinned {
-            // 钉住的总览不随指针离开关闭，也不被 agent 行悬浮替换。
+        if hover_moves && pinned {
+            // 钉住的浮层不随指针离开关闭，也不被别的 agent 行悬浮替换。
         } else if hover_moves && self.observability.usage.position != UsageDisplayPosition::Page {
             let pane = self
                 .hits
@@ -3761,8 +3635,8 @@ impl ClientShellState {
                     .get_or_insert(Instant::now() + Duration::from_millis(250));
             }
         } else if hover_moves {
-            // `usage.position = page` 关掉了 agent 行悬浮，但总览浮层仍要在指针
-            // 离开按钮后按 250 ms 宽限关闭。
+            // `usage.position = page` 关掉了 agent 行悬浮：设置切换前已存在的浮层仍
+            // 按 250 ms 宽限关闭。
             if let Some(hover) = &mut self.observability.hover {
                 hover
                     .leave_at
@@ -3772,53 +3646,12 @@ impl ClientShellState {
         false
     }
 
-    /// 点击 Agents 面板头部的「用量」按钮：钉住 / 取消钉住跨厂商总览浮层。
-    /// 幂等 show/hide，不复用 `toggle_usage_dashboard`：未显示 → 立即显示并钉住；
-    /// 悬浮中（未钉住）→ 钉住；已钉住 → 关闭。钉住不走模态 overlay，页面
-    /// （`observability.page`）与停靠焦点都不动。
-    ///
-    /// 入口门禁有意不对称：`usage.enabled` 关闭时扫过按钮不弹任何东西（被动
-    /// 动作不该冒出浮层），但显式点击仍打开浮层，由 `render::usage_hover` 的
-    /// disabled 分支说明「已在设置中关闭」——点击必须有反馈而不是静默失败。
-    pub(super) fn pin_usage_overview(&mut self, outcome: &mut ClientShellInput) {
-        let anchor = self.hits.agent_usage_toggle;
-        match self.observability.hover.as_mut() {
-            Some(hover) if hover.is_overview() && hover.pinned => {
-                self.observability.clear_hover();
-            }
-            Some(hover) if hover.is_overview() => {
-                hover.pinned = true;
-                hover.leave_at = None;
-                if !hover.visible {
-                    hover.visible = true;
-                    let endpoint = self.active_endpoint_id.clone();
-                    self.observability.open_overview_scope(endpoint);
-                }
-            }
-            _ => {
-                self.observability.clear_hover();
-                self.observability.hover = Some(Hover {
-                    target: HoverTarget::UsageOverview,
-                    anchor,
-                    since: Instant::now(),
-                    visible: true,
-                    leave_at: None,
-                    pinned: true,
-                });
-                self.observability.hover_rect = Rect::default();
-                let endpoint = self.active_endpoint_id.clone();
-                self.observability.open_overview_scope(endpoint);
-            }
-        }
-        outcome.repaint = true;
-    }
-
     pub(super) fn observation_key(
         &mut self,
         key: &crate::input::TerminalKey,
         outcome: &mut ClientShellInput,
     ) -> bool {
-        // 钉住的总览浮层：Esc 关闭（其它按键照常落到终端 / 页面）。
+        // 钉住的浮层：Esc 关闭（其它按键照常落到终端 / 页面）。
         if key.code == KeyCode::Esc
             && self
                 .observability
@@ -3888,8 +3721,8 @@ impl ClientShellState {
                 return true;
             }
         }
-        // 键盘只在页面命中区（`hits[..page_hits]`）内循环；总览浮层与页面同帧时
-        // 浮层的命中区只服务鼠标，Tab / Enter 不会跳到浮层的「打开账号页」。
+        // 键盘只在页面命中区（`hits[..page_hits]`）内循环；悬浮层与页面同帧时
+        // 浮层的命中区只服务鼠标，Tab / Enter 不会跳到浮层的「打开页面」。
         let keyboard_hits = self.observability.page_hits;
         let action = match key.code {
             KeyCode::Tab | KeyCode::BackTab => {

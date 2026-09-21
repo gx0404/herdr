@@ -168,6 +168,39 @@ fn command_palette_recent_commands_lead_and_persist() {
     assert_eq!(rows[1].item.id, "binding:Help");
 }
 
+/// 已移除的命令面板项（浮动用量仪表盘）可能残留在旧偏好的最近列表里：找不到
+/// 对应条目就跳过，不 panic、不占位，其余最近项照常领头。
+#[test]
+fn command_palette_ignores_recent_ids_of_removed_entries() {
+    let path = std::env::temp_dir().join(format!(
+        "herdr-palette-recent-removed-{}.json",
+        std::process::id()
+    ));
+    std::fs::write(
+        &path,
+        r#"{"palette_recent":["observation:usage-dashboard","binding:Help"]}"#,
+    )
+    .expect("write preferences");
+    let mut state = ClientShellState::new(
+        ClientShellConfig::from_config(&Config::default()).with_preferences_path(path.clone()),
+    );
+    let _ = std::fs::remove_file(&path);
+    state.set_snapshot(Box::new(snapshot()));
+    state.set_pane_surface(surface());
+    assert_eq!(state.palette_recent[0], "observation:usage-dashboard");
+
+    state.open_command_search();
+    let rows = super::command_palette::palette_rows(palette_overlay(&state));
+    assert!(
+        rows.iter()
+            .all(|row| row.item.id != "observation:usage-dashboard"),
+        "已移除的条目不再出现"
+    );
+    assert_eq!(rows[0].item.id, "binding:Help", "其余最近项照常领头");
+    assert!(rows[0].recent);
+    assert!(!rows[1].recent, "残留 id 不占最近项的位置");
+}
+
 #[test]
 fn command_palette_lists_machine_actions_and_runs_them() {
     let hex = "ab".repeat(16);

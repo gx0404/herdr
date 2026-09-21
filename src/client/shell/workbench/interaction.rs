@@ -323,12 +323,9 @@ impl ClientShellState {
             outcome.repaint = true;
             return true;
         }
-        // 悬浮层内部与「用量」按钮上的事件透传给 observability：按钮上的按下是
-        // 钉住 / 取消钉住总览，不能在这里清 hover，也不能落到下方的面板聚焦兜底
-        // （那会顺带把监控页 `page` 清空）。
-        if contains(self.observability.hover_rect, point)
-            || contains(self.hits.agent_usage_toggle, point)
-        {
+        // 悬浮层内部的事件透传给 observability：不能在这里清 hover，也不能落到
+        // 下方的面板聚焦兜底（那会顺带把监控页 `page` 清空）。
+        if contains(self.observability.hover_rect, point) {
             return false;
         }
         if matches!(mouse.kind, MouseEventKind::Down(_)) {
