@@ -8,7 +8,11 @@
 //!    not expose intermediate cursor positions while the frame is painted.
 //! 4. Before writing any cells, hide the cursor to avoid stray cursor
 //!    artifacts on terminals that render the hardware cursor at intermediate
-//!    `CUP` positions during the frame stream.
+//!    `CUP` positions during the frame stream. The leading `?25l` is only
+//!    written when the previous frame ended with the cursor visible (or when
+//!    visibility is still unknown): a frame that already left the cursor
+//!    hidden keeps it hidden, so re-hiding it every frame would restart the
+//!    host's cursor blink phase for nothing.
 //! 5. After writing all changed cells, restore the final cursor visibility
 //!    and position from `frame.cursor`.
 //! 6. On hosts that need it, repeat the final cursor anchor after ending
@@ -58,6 +62,8 @@ pub(crate) struct EncodedBlit {
     pub(crate) full: bool,
     next_last_visible_cursor: Option<(u16, u16)>,
     next_last_cursor_shape: u8,
+    /// 本帧写完后宿主光标是否可能可见（见 `BlitEncoder::cursor_may_be_visible`）。
+    next_cursor_may_be_visible: bool,
 }
 
 /// Stateful encoder that diffs semantic frames into terminal ANSI bytes.
@@ -65,6 +71,10 @@ pub(crate) struct BlitEncoder {
     last_frame: Option<FrameData>,
     last_visible_cursor: Option<(u16, u16)>,
     last_cursor_shape: u8,
+    /// 宿主光标是否可能仍可见。块内前导 `?25l` 只在它可能可见时写：上一帧已经
+    /// 留下隐藏光标时再写一次只会重置宿主的 blink 相位（模块文档第 4 条）。
+    /// 初值取 `true`（未知即按可见处理，先隐藏再画）。
+    cursor_may_be_visible: bool,
     /// 同步块结束后是否补发最终光标锚点（模块文档第 6 条）。显式字段而非进程级
     /// 全局：客户端按 `ui.repeat_ime_cursor_anchor` 注入，其它构造点用平台默认。
     repeat_ime_anchor: bool,
@@ -89,6 +99,7 @@ impl BlitEncoder {
             last_frame: None,
             last_visible_cursor: None,
             last_cursor_shape: 0,
+            cursor_may_be_visible: true,
             repeat_ime_anchor,
         }
     }
@@ -129,12 +140,14 @@ impl BlitEncoder {
         let mut bytes = Vec::new();
         let mut next_last_visible_cursor = self.last_visible_cursor;
         let mut next_last_cursor_shape = self.last_cursor_shape;
+        let mut next_cursor_may_be_visible = self.cursor_may_be_visible;
         blit_frame_to_with_cursor_memory_and_clear_policy(
             &mut bytes,
             frame,
             prev,
             &mut next_last_visible_cursor,
             &mut next_last_cursor_shape,
+            &mut next_cursor_may_be_visible,
             self.repeat_ime_anchor,
             clear_before_full_redraw,
             suppress_visible_cursor,
@@ -156,12 +169,14 @@ impl BlitEncoder {
             full,
             next_last_visible_cursor,
             next_last_cursor_shape,
+            next_cursor_may_be_visible,
         }
     }
 
     pub(crate) fn commit(&mut self, frame: FrameData, encoded: EncodedBlit) {
         self.last_visible_cursor = encoded.next_last_visible_cursor;
         self.last_cursor_shape = encoded.next_last_cursor_shape;
+        self.cursor_may_be_visible = encoded.next_cursor_may_be_visible;
         self.last_frame = Some(frame);
     }
 
@@ -182,6 +197,7 @@ impl BlitEncoder {
         let mut bytes = Vec::new();
         let mut next_last_visible_cursor = self.last_visible_cursor;
         let mut next_last_cursor_shape = self.last_cursor_shape;
+        let mut next_cursor_may_be_visible = self.cursor_may_be_visible;
         blit_patch_to(
             &mut bytes,
             frame,
@@ -189,6 +205,7 @@ impl BlitEncoder {
             cursor,
             &mut next_last_visible_cursor,
             &mut next_last_cursor_shape,
+            &mut next_cursor_may_be_visible,
             self.repeat_ime_anchor,
             suppress_visible_cursor,
         );
@@ -197,6 +214,7 @@ impl BlitEncoder {
             full: false,
             next_last_visible_cursor,
             next_last_cursor_shape,
+            next_cursor_may_be_visible,
         })
     }
 
@@ -558,12 +576,15 @@ fn blit_frame_to_with_cursor_memory_and_policy(
     repeat_ime_anchor: bool,
     suppress_visible_cursor: bool,
 ) {
+    // 单帧辅助：光标可见性未知，按「可能可见」处理（先隐藏再画）。
+    let mut cursor_may_be_visible = true;
     blit_frame_to_with_cursor_memory_and_clear_policy(
         writer,
         frame,
         prev,
         last_visible_cursor,
         last_cursor_shape,
+        &mut cursor_may_be_visible,
         repeat_ime_anchor,
         true,
         suppress_visible_cursor,
@@ -622,10 +643,16 @@ fn blit_patch_to(
     cursor: Option<CursorState>,
     last_visible_cursor: &mut Option<(u16, u16)>,
     last_cursor_shape: &mut u8,
+    cursor_may_be_visible: &mut bool,
     repeat_ime_anchor: bool,
     suppress_visible_cursor: bool,
 ) {
-    let _ = writer.write_all(b"\x1b[?2026h\x1b[?25l\x1b]8;;\x1b\\");
+    let _ = writer.write_all(b"\x1b[?2026h\x1b]8;;\x1b\\");
+    // 只在宿主光标可能仍可见时隐藏：上一帧已留下隐藏光标时重复 `?25l` 只会
+    // 重置宿主的 blink 相位（模块文档第 4 条）。
+    if *cursor_may_be_visible {
+        let _ = writer.write_all(b"\x1b[?25l");
+    }
     let mut last_sgr = String::new();
     let mut active_hyperlink = None;
     for row in rows {
@@ -673,6 +700,7 @@ fn blit_patch_to(
         host_cursor.visible = false;
     }
     write_host_cursor_state(&mut writer, host_cursor, last_cursor_shape);
+    *cursor_may_be_visible = host_cursor.visible;
     let _ = writer.write_all(b"\x1b[?2026l");
     if repeat_ime_anchor {
         write_ime_anchor_cursor_state(&mut writer, host_cursor);
@@ -686,6 +714,7 @@ fn blit_frame_to_with_cursor_memory_and_clear_policy(
     prev: Option<&FrameData>,
     last_visible_cursor: &mut Option<(u16, u16)>,
     last_cursor_shape: &mut u8,
+    cursor_may_be_visible: &mut bool,
     repeat_ime_anchor: bool,
     clear_before_full_redraw: bool,
     suppress_visible_cursor: bool,
@@ -701,7 +730,11 @@ fn blit_frame_to_with_cursor_memory_and_clear_policy(
 
     // Hide cursor before any cell writes to avoid stray cursor artifacts
     // on terminals that render the hardware cursor at intermediate CUP positions.
-    let _ = writer.write_all(b"\x1b[?25l");
+    // 上一帧已经留下隐藏光标时跳过：重复的 `?25l` 只会重置宿主 blink 相位
+    // （模块文档第 4 条）。
+    if *cursor_may_be_visible {
+        let _ = writer.write_all(b"\x1b[?25l");
+    }
 
     // Start each frame from a known OSC 8 state. If a previous write was
     // interrupted or the outer terminal had an active hyperlink, unlinked cells
@@ -730,6 +763,7 @@ fn blit_frame_to_with_cursor_memory_and_clear_policy(
         host_cursor.visible = false;
     }
     write_host_cursor_state(&mut writer, host_cursor, last_cursor_shape);
+    *cursor_may_be_visible = host_cursor.visible;
 
     // End the synchronized output block immediately after the final cursor
     // state is emitted so supporting terminals can present the frame atomically.
@@ -1370,6 +1404,87 @@ mod tests {
         let inside = resolve_host_cursor_state(&frame, &mut last_visible_cursor);
         assert!(!inside.visible);
         assert_eq!(inside.position, (2, 1));
+    }
+
+    /// 2.1 修法 4：块内前导 `?25l` 条件化——上一帧已经留下隐藏光标时不再重复
+    /// 写它（重复会重置宿主 blink 相位）；光标可见时仍然先隐藏再画。
+    #[test]
+    fn consecutive_hidden_frames_skip_the_redundant_cursor_hide() {
+        let frame = make_frame(
+            2,
+            2,
+            vec![
+                make_cell("a", 0, 0, 0),
+                make_cell("b", 0, 0, 0),
+                make_cell("c", 0, 0, 0),
+                make_cell("d", 0, 0, 0),
+            ],
+        );
+        let mut encoder = BlitEncoder::new();
+        let first = encoder.encode(&frame, true);
+        let first_str = String::from_utf8(first.bytes.clone()).unwrap();
+        assert!(
+            first_str.starts_with("\x1b[?2026h\x1b[?25l"),
+            "首帧可见性未知，必须先隐藏再画"
+        );
+        assert!(
+            first_str.trim_end().ends_with("\x1b[?25l"),
+            "无光标帧以隐藏光标收尾"
+        );
+        encoder.commit(frame.clone(), first);
+
+        let mut changed = frame.clone();
+        changed.cells[0] = make_cell("e", 0, 0, 0);
+        let second = encoder.encode(&changed, false);
+        let second_str = String::from_utf8(second.bytes).unwrap();
+        assert!(
+            !second_str.contains("\x1b[?2026h\x1b[?25l"),
+            "上一帧已隐藏光标时不再重复前导 ?25l：{second_str:?}"
+        );
+        assert!(
+            second_str.starts_with("\x1b[?2026h\x1b]8;;"),
+            "同步块开始后直接进入 OSC 8 复位：{second_str:?}"
+        );
+        let paint = second_str.find("\x1b[1;1H").expect("changed cell painted");
+        let hide = second_str.find("\x1b[?25l").expect("帧尾光标状态");
+        assert!(paint < hide, "本帧唯一一次 ?25l 在收尾而不在画之前");
+    }
+
+    #[test]
+    fn a_visible_cursor_frame_still_hides_before_the_next_paint() {
+        let blank = make_frame(
+            2,
+            2,
+            vec![
+                make_cell("a", 0, 0, 0),
+                make_cell("b", 0, 0, 0),
+                make_cell("c", 0, 0, 0),
+                make_cell("d", 0, 0, 0),
+            ],
+        );
+        let mut visible = blank.clone();
+        visible.cursor = Some(CursorState {
+            x: 1,
+            y: 1,
+            visible: true,
+            shape: 0,
+        });
+        let mut encoder = BlitEncoder::new();
+        let first = encoder.encode(&visible, true);
+        assert!(String::from_utf8(first.bytes.clone())
+            .unwrap()
+            .ends_with("\x1b[?25h"));
+        encoder.commit(visible.clone(), first);
+
+        let mut changed = visible.clone();
+        changed.cells[0] = make_cell("e", 0, 0, 0);
+        let second = encoder.encode(&changed, false);
+        let second_str = String::from_utf8(second.bytes).unwrap();
+        assert!(
+            second_str.starts_with("\x1b[?2026h\x1b[?25l"),
+            "上一帧留下了可见光标，本帧仍须先隐藏再画：{second_str:?}"
+        );
+        let _ = blank;
     }
 
     #[test]
