@@ -272,8 +272,7 @@ impl ClientShellState {
                                 // 不变式与 `store_acknowledged_snapshot` 相同
                                 // （独立复审 中-1）。
                                 self.snapshot = Some(updated);
-                                self.agent_rows_epoch =
-                                    self.agent_rows_epoch.saturating_add(1);
+                                self.agent_rows_epoch = self.agent_rows_epoch.saturating_add(1);
                                 outcome.repaint = true;
                             }
                         }

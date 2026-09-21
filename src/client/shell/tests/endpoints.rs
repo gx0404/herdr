@@ -2455,11 +2455,7 @@ fn acknowledging_a_surface_refreshes_cached_federated_agent_rows() {
     projected.agents = vec![agent("done agent", AgentStatus::Done, 7)];
     state.set_endpoint_snapshot(&ClientEndpointId::Local, Box::new(projected));
     state.refresh_federated_agent_rows();
-    assert_eq!(
-        status(&state),
-        Some(AgentStatus::Done),
-        "未确认前显示 Done"
-    );
+    assert_eq!(status(&state), Some(AgentStatus::Done), "未确认前显示 Done");
 
     // 匹配表面帧到达：`revision` 不变，但 Done 被原地改写成 Idle。
     let mut matching = surface();
