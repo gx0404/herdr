@@ -747,9 +747,8 @@ fn process_probe_result(
 }
 
 /// PTY-05：检测 tick 维护 PTY 解析回调只读的前台 job 缓存。pgid 来自
-/// TIOCGPGRP（每 tick 的廉价观测）；droid 兼容判定只在探到 job 的 tick
-/// 刷新；瞬态默认色 owner 用当前前台 pgid 纯计算。整条链不读 /proc。
-#[cfg(unix)]
+/// 前台进程组观测（每 tick 的廉价探测）；droid 兼容判定只在探到 job 的
+/// tick 刷新；瞬态默认色 owner 用当前前台 pgid 纯计算。整条链不读 /proc。
 fn maintain_foreground_job_cache(
     terminal: &PaneTerminal,
     pid: u32,
@@ -1430,6 +1429,7 @@ enum PaneRuntimeIo {
 #[derive(Default)]
 struct CwdCache {
     cwd: Option<(std::time::Instant, Option<std::path::PathBuf>)>,
+    #[cfg(unix)]
     foreground_cwd: Option<(std::time::Instant, Option<std::path::PathBuf>)>,
 }
 
@@ -3557,6 +3557,7 @@ impl PaneRuntime {
         cwd
     }
 
+    #[cfg(unix)]
     fn foreground_cwd_impl(
         &self,
         fetch: impl FnOnce() -> Option<std::path::PathBuf>,
@@ -4141,15 +4142,6 @@ mod tests {
         assert_eq!(first, second, "TTL 内必须命中缓存");
         assert_eq!(calls.get(), 1, "TTL 内只能 fetch 一次");
 
-        let first_foreground = runtime.foreground_cwd_impl(fetch);
-        let second_foreground = runtime.foreground_cwd_impl(fetch);
-        assert_eq!(first_foreground, second_foreground);
-        assert_eq!(calls.get(), 2, "foreground 槽位独立缓存");
-        assert_ne!(
-            first, first_foreground,
-            "cwd 与 foreground_cwd 槽位互不覆盖"
-        );
-
         // 把槽位时间戳回拨到 TTL 之外，下一次读必须重新 fetch。
         {
             let mut cache = runtime.cwd_cache.lock().unwrap();
@@ -4158,13 +4150,35 @@ mod tests {
             if let Some((at, _)) = &mut cache.cwd {
                 *at = expired;
             }
-            if let Some((at, _)) = &mut cache.foreground_cwd {
-                *at = expired;
-            }
         }
         let third = runtime.cwd_impl(fetch);
-        assert_eq!(calls.get(), 3, "TTL 过期后必须重新 fetch");
+        assert_eq!(calls.get(), 2, "TTL 过期后必须重新 fetch");
         assert_ne!(third, first, "过期后读到新值");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn foreground_cwd_ttl_cache_is_a_separate_slot() {
+        // foreground_cwd 槽位与 cwd 互不覆盖（unix 才有前台进程组 cwd）。
+        let (runtime, _rx) = PaneRuntime::test_with_channel(80, 24);
+        let calls = std::cell::Cell::new(0u32);
+        let fetch = || {
+            calls.set(calls.get() + 1);
+            Some(std::path::PathBuf::from(format!(
+                "/tmp/cwd-{}",
+                calls.get()
+            )))
+        };
+
+        let cwd_value = runtime.cwd_impl(fetch);
+        let first_foreground = runtime.foreground_cwd_impl(fetch);
+        let second_foreground = runtime.foreground_cwd_impl(fetch);
+        assert_eq!(first_foreground, second_foreground);
+        assert_eq!(calls.get(), 2, "foreground 槽位独立缓存");
+        assert_ne!(
+            cwd_value, first_foreground,
+            "cwd 与 foreground_cwd 槽位互不覆盖"
+        );
     }
 
     #[cfg(unix)]
