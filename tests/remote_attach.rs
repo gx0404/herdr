@@ -115,6 +115,8 @@ exit 255
         .env("FAKE_SSH_FIRST_DONE", &first_done_path)
         .env("HERDR_CONFIG_PATH", temp_dir.join("config.toml"))
         .env_remove("HERDR_ENV")
+        // 宿主在 herdr 窗格内跑测试时会注入 HERDR_STARTUP_CWD：server 会据此预建启动工作区，破坏用例的工作区/pane 假设。
+        .env_remove("HERDR_STARTUP_CWD")
         .env_remove("HERDR_SESSION")
         .env_remove("HERDR_SOCKET_PATH")
         .env_remove("HERDR_CLIENT_SOCKET_PATH")

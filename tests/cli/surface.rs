@@ -282,6 +282,8 @@ fn root_and_command_group_help_point_agents_to_plain_text_docs() {
             .env_remove("HERDR_SOCKET_PATH")
             .env_remove("HERDR_CLIENT_SOCKET_PATH")
             .env_remove("HERDR_ENV")
+            // 宿主在 herdr 窗格内跑测试时会注入 HERDR_STARTUP_CWD：server 会据此预建启动工作区，破坏用例的工作区/pane 假设。
+            .env_remove("HERDR_STARTUP_CWD")
             .output()
             .unwrap();
         assert!(output.status.success(), "herdr {} failed", args.join(" "));
@@ -331,6 +333,8 @@ fn subcommand_help_explains_automation_semantics_without_a_server() {
             .env_remove("HERDR_SOCKET_PATH")
             .env_remove("HERDR_CLIENT_SOCKET_PATH")
             .env_remove("HERDR_ENV")
+            // 宿主在 herdr 窗格内跑测试时会注入 HERDR_STARTUP_CWD：server 会据此预建启动工作区，破坏用例的工作区/pane 假设。
+            .env_remove("HERDR_STARTUP_CWD")
             .output()
             .unwrap();
         assert!(
@@ -428,6 +432,8 @@ fn completion_command_prints_zsh_script_without_session_startup() {
         .env_remove("HERDR_SOCKET_PATH")
         .env_remove("HERDR_CLIENT_SOCKET_PATH")
         .env_remove("HERDR_ENV")
+        // 宿主在 herdr 窗格内跑测试时会注入 HERDR_STARTUP_CWD：server 会据此预建启动工作区，破坏用例的工作区/pane 假设。
+        .env_remove("HERDR_STARTUP_CWD")
         .output()
         .unwrap();
 

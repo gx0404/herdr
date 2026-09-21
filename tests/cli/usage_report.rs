@@ -40,6 +40,8 @@ fn spawn_statusline_shell(
         shell.env("HERDR_BIN_PATH", env!("CARGO_BIN_EXE_herdr"));
     } else {
         shell.env_remove("HERDR_ENV");
+        // 宿主在 herdr 窗格内跑测试时会注入 HERDR_STARTUP_CWD：server 会据此预建启动工作区，破坏用例的工作区/pane 假设。
+        shell.env_remove("HERDR_STARTUP_CWD");
         shell.env_remove("HERDR_BIN_PATH");
     }
     match socket_path {
