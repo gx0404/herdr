@@ -1,6 +1,7 @@
 # integration-assets（agent 集成资产）
 
-范围：`src/integration/**`、`scripts/test_hermes_integration_asset.py`。
+范围：`src/integration/**`、`scripts/test_hermes_integration_asset.py`、上游同步
+丢弃清单与检查器（`scripts/upstream_sync_drop_*`，与 `detection.md` 并集）。
 
 ## 职责
 
@@ -21,3 +22,6 @@
   `docs/next` 用户文档（见 `docs-pipeline.md`）。
 - 新增 agent 集成时：注册表、检测 manifest（`detection.md`）、集成资产与文档
   四者一起评审，避免「能装但不能识别」或「能识别但不能装」。
+- **官方集成仅六家**（claude、codex、kimi、zcode、pi、opencode）：其余集成商的
+  资产与注册分支不新增，同步上游时也不合入；丢弃路径、共享文件口径与
+  `IntegrationTarget` 墓碑策略见 `README.md` 的「fork 已删除的集成」。

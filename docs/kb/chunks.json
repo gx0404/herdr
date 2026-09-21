@@ -1,5 +1,5 @@
 {
-  "chunk_count": 992,
+  "chunk_count": 996,
   "chunks": [
     {
       "anchor": "herdr",
@@ -47,8 +47,8 @@
       "anchor": "herdr > 角色与授权分层",
       "doc": "AGENTS.md",
       "id": "agents-md-herdr-角色与授权分层",
-      "source_sha256": "78d2d232e38d8dcede81f59986d00cf2acdecbfb9019892530e5f3bec2fcb94a",
-      "text": "## 角色与授权分层\n\n指令分层，完整判定条件与流程见 `docs/AGENT_RULES/governance.md`：\n\n- **通用规则**适用所有在本仓库工作的 agent（包括 fork）。\n- **维护者工作流 / Can 本机工作流**：仅在 `governance.md` 列出的账号与环境\n  条件全部满足时适用，否则跳过。\n- **外部贡献者守门**：对上游 `herdrdev/herdr` 开 issue/PR/推分支前必须按\n  `governance.md` 核实身份（`.github/MAINTAINERS`、`APPROVED_CONTRIBUTORS`、\n  `CONTRIBUTING.md`）；不满足条件时不得代为提交。\n- 本仓库是 `gx0404/herdr` fork（upstream `herdrdev/herdr`）：日常开发按通用\n  规则在 fork 分支进行；同步上游时按 `docs/AGENT_RULES/README.md` 的章节映射\n  表移植 AGENTS.md 变更。"
+      "source_sha256": "983220f655c4337f371d8cd957ba9ad5b27e0f6c5f5697bf219b866e56e4c221",
+      "text": "## 角色与授权分层\n\n指令分层，完整判定条件与流程见 `docs/AGENT_RULES/governance.md`：\n\n- **通用规则**适用所有在本仓库工作的 agent（包括 fork）。\n- **维护者工作流 / Can 本机工作流**：仅在 `governance.md` 列出的账号与环境\n  条件全部满足时适用，否则跳过。\n- **外部贡献者守门**：对上游 `herdrdev/herdr` 开 issue/PR/推分支前必须按\n  `governance.md` 核实身份（`.github/MAINTAINERS`、`APPROVED_CONTRIBUTORS`、\n  `CONTRIBUTING.md`）；不满足条件时不得代为提交。\n- 本仓库是 `gx0404/herdr` fork（upstream `herdrdev/herdr`）：日常开发按通用\n  规则在 fork 分支进行；同步上游时按 `docs/AGENT_RULES/README.md` 的章节映射\n  表移植 AGENTS.md 变更。官方集成只保留六家：同步时不合入上游对其余集成商的\n  新增与修改，口径见同一 README 的「fork 已删除的集成」。"
     },
     {
       "anchor": "herdr > 语言与协作",
@@ -327,8 +327,8 @@
       "anchor": "detection（agent 状态检测与 manifest） > 发布目录",
       "doc": "docs/AGENT_RULES/detection.md",
       "id": "docs-agent-rules-detection-md-detection-agent-状态检测与-manifest-发布目录",
-      "source_sha256": "d780d210ae1ba8d1d973330ad8b0f13e8aa361c1080d94632e0e20ffc21b3eca",
-      "text": "## 发布目录\n\n`distribution/agent-detection/` 是已发布客户端的远端目录。已发布 agent 的改动\n必须与其捆绑 manifest 对齐，除非 validator 记录了精确的版本+摘要例外。当前\nstable 客户端无法识别的新捆绑 agent 可暂不发布（挂在精确例外后），但必须在\n首个携带它的 stable 发布前加入目录并移除例外；`just release-docs-check` 强制\n不存在未发布例外。`scripts/agent_detection_manifest_check.py`（`just\nmaintenance-test` 内）校验捆绑与发布副本一致性。"
+      "source_sha256": "b728d7f1e3fa5ddd44659db4b0d9b70754a223cafdf497709c8aeb65fa65ad81",
+      "text": "## 发布目录\n\n`distribution/agent-detection/` 是已发布客户端的远端目录。已发布 agent 的改动\n必须与其捆绑 manifest 对齐，除非 validator 记录了精确的版本+摘要例外。当前\nstable 客户端无法识别的新捆绑 agent 可暂不发布（挂在精确例外后），但必须在\n首个携带它的 stable 发布前加入目录并移除例外；`just release-docs-check` 强制\n不存在未发布例外。`scripts/agent_detection_manifest_check.py`（`just\nmaintenance-test` 内）校验捆绑与发布副本一致性。\n\n官方集成仅六家：其余 agent 的捆绑 manifest 不新增，同步上游时也不合入，发布\n目录里的对应副本随之删减；名单与口径见 `README.md` 的「fork 已删除的集成」，\n目录归属的 fork 例外登记在 `release-channels.md`。"
     },
     {
       "anchor": "detection（agent 状态检测与 manifest） > 架构不变量（上游 Principles）",
@@ -411,15 +411,15 @@
       "anchor": "integration-assets（agent 集成资产）",
       "doc": "docs/AGENT_RULES/integration-assets.md",
       "id": "docs-agent-rules-integration-assets-md-integration-assets-agent-集成资产",
-      "source_sha256": "a350ca3fd977c086528cfeac3d1182f3e5303bed06e9c32ab2a149dfc9b6d73a",
-      "text": "# integration-assets（agent 集成资产）\n\n范围：`src/integration/**`、`scripts/test_hermes_integration_asset.py`。"
+      "source_sha256": "3bbd10f683551ade669d2715d7a13857f73c482812706ae0d013a7a1d18c267e",
+      "text": "# integration-assets（agent 集成资产）\n\n范围：`src/integration/**`、`scripts/test_hermes_integration_asset.py`、上游同步\n丢弃清单与检查器（`scripts/upstream_sync_drop_*`，与 `detection.md` 并集）。"
     },
     {
       "anchor": "integration-assets（agent 集成资产） > 不变量",
       "doc": "docs/AGENT_RULES/integration-assets.md",
       "id": "docs-agent-rules-integration-assets-md-integration-assets-agent-集成资产-不变量",
-      "source_sha256": "613a82dcfe42fb46ad1c379d8f8e7105d8a8b531bd53c911206daa5bca83333c",
-      "text": "## 不变量\n\n- **集成资产版本是相对最新 release tag 的迁移版本，不是 master 上的逐 commit\n  计数器**：`HERDR_INTEGRATION_VERSION` 标记与对应 `*_INTEGRATION_VERSION` 常量，\n  在两个 release 之间多次变更同一资产时只 bump 一次（从最新 release 中的版本起算）。\n- 对宿主配置的编辑必须幂等且可回读：重复运行不叠加注入；备份/恢复路径遵循\n  `src/platform` 的配置目录约定（见 `platform.md`）。\n- 资产内容（`src/integration/assets/**`，含 TS 与 JSON）是受控生成/冻结输入：\n  修改后必须跑 `just integration-assets-test`（bun），语义变化同步\n  `docs/next` 用户文档（见 `docs-pipeline.md`）。\n- 新增 agent 集成时：注册表、检测 manifest（`detection.md`）、集成资产与文档\n  四者一起评审，避免「能装但不能识别」或「能识别但不能装」。"
+      "source_sha256": "3e9057105c879a07a1f188ebcdb1afdad85a21666babbd5fbec32113f041bd7a",
+      "text": "## 不变量\n\n- **集成资产版本是相对最新 release tag 的迁移版本，不是 master 上的逐 commit\n  计数器**：`HERDR_INTEGRATION_VERSION` 标记与对应 `*_INTEGRATION_VERSION` 常量，\n  在两个 release 之间多次变更同一资产时只 bump 一次（从最新 release 中的版本起算）。\n- 对宿主配置的编辑必须幂等且可回读：重复运行不叠加注入；备份/恢复路径遵循\n  `src/platform` 的配置目录约定（见 `platform.md`）。\n- 资产内容（`src/integration/assets/**`，含 TS 与 JSON）是受控生成/冻结输入：\n  修改后必须跑 `just integration-assets-test`（bun），语义变化同步\n  `docs/next` 用户文档（见 `docs-pipeline.md`）。\n- 新增 agent 集成时：注册表、检测 manifest（`detection.md`）、集成资产与文档\n  四者一起评审，避免「能装但不能识别」或「能识别但不能装」。\n- **官方集成仅六家**（claude、codex、kimi、zcode、pi、opencode）：其余集成商的\n  资产与注册分支不新增，同步上游时也不合入；丢弃路径、共享文件口径与\n  `IntegrationTarget` 墓碑策略见 `README.md` 的「fork 已删除的集成」。"
     },
     {
       "anchor": "integration-assets（agent 集成资产） > 职责",
@@ -618,6 +618,27 @@
       "text": "## 与上游 herdrdev/herdr 的章节映射\n\n本目录由上游单体 AGENTS.md（约 27 KiB）拆分而来。上游合并后若 AGENTS.md 冲突，\n按下表把上游改动移植到对应文档（右侧为真源）：\n\n| 上游章节 | 现在的真源 |\n|---|---|\n| Scope and Audience | 根 AGENTS.md「角色与授权分层」＋ `governance.md` |\n| Universal Project Rules / Principles | 根「跨域硬边界」＋ `app-render.md`、`platform.md`、`detection.md` |\n| Multiplicative performance paths | 根「跨域硬边界」摘要 ＋ `app-render.md` 全文 |\n| Runtime/client boundary guardrail | 根摘要 ＋ `protocol-api.md` |\n| Stable client endpoint contract | `protocol-api.md` |\n| Maintainer Workflow | `governance.md` |\n| Testing | `testing.md`（根保留一行入口） |\n| Local Can Machine Workflow | `governance.md` |\n| Agent Detection Updates | `detection.md` |\n| Vendored libghostty-vt | `vendored-libghostty-vt.md` |\n| Docs | `docs-pipeline.md` |\n| Commit Style | 根 AGENTS.md「提交规范」 |\n| Code Conventions | `project-infra.md`、`platform.md`、`integration-assets.md`、`protocol-api.md` |\n| Release Channels | `release-channels.md` |\n| External contributor guardrail | `governance.md` |\n\n框架本身（路由、工具面、图谱、KB、文档集）是 fork 侧资产，上游没有对应物；\n上游合并只可能冲突根 AGENTS.md 与既有业务文件。"
     },
     {
+      "anchor": "闭集校验（体积上限、双射、零命中、覆盖、嵌套 AGENTS、重复正文） > 与上游 herdrdev/herdr 的章节映射 > fork 已删除的集成",
+      "doc": "docs/AGENT_RULES/README.md",
+      "id": "docs-agent-rules-readme-md-闭集校验-体积上限-双射-零命中-覆盖-嵌套-agents-重复正文-与上游-herdrdev-herdr-的章节映射-fork-已删除的集成-part1",
+      "source_sha256": "85747b46c2d6a6e92d0b63713214a24052f2010b7d96989c50f610b1974fb55f",
+      "text": "### fork 已删除的集成\n\nfork **照常同步上游**；本节只约束同步时怎样处理六家以外的集成商——它们的新增\n与修改一律不合入（不是「fork 不再同步上游」）。\n\n- **六家名单**：claude、codex、kimi、zcode、pi、opencode。zcode 此刻尚无任何\n  文件，属保留名单：日后新增的 zcode 路径不进丢弃清单。\n- **丢弃路径**：机器真源是 `scripts/upstream_sync_drop_paths.txt`（每行一个\n  glob，语义同 `routes.toml`），覆盖四类整文件属于非六家的路径：\n  - `src/integration/assets/<非六家>/**`\n  - `src/detect/manifests/<非六家>.toml`\n  - `distribution/agent-detection/<非六家>.toml`\n  - 非六家专属的 `docs/next` 页面与脚本测试（当前 `docs/next` 没有专属页面，\n    集成说明都在共享页面里，按下面的共享文件口径处理）\n- **处理口径**：\n  - 上游**新增**非六家集成：整块不合入（资产、清单、注册条目、文档、专属\n    测试），并在同一次同步里把它的专属路径追加进清单。清单是按名字的拒绝表，\n    不会自动发现新厂商，这一步靠人工识别。唯一要收的是冻结面上的改动，见下面\n    的墓碑策略。\n  - 上游**修改** fork 已删的文件（git 报 `deleted by us`）：保持删除。\n  - 上游改**共享文件**里非六家的分支：丢弃该分支、保留其余。共享文件指同时\n    承载六家与非六家分支的文件，典型如 `src/integration/registry.rs`、\n    `actions.rs`、`targets.rs`、`src/cli/integration.rs`、`src/i18n/*`、\n    `src/integration/tests.rs`、`src/detect/manifest/tests.rs`，以及\n    `distribution/agent-detection/index.toml` 与 `docs/next` 的共享页面。\n- **`IntegrationTarget` 墓碑策略**：\n  `src/api/schema/integrations.rs::IntegrationTarget` 是 `integration.install` /\n  `integration.uninstall` 的参数与 `integration.list` 的返回值，属 generation-1\n  冻结面；非六家变体**不删、不重排**，只标退役（不可安装、不再列出）。\n  - **理由**（都可复核）：① `protocol-api.md`「不得增删、重排或重新解释已发布\n    codec 可达的字段与枚举变体」，该枚举经 `integration.install` 可达；②\n    `tests/fixtures/endpoint-method-shapes-v1.json` 的 `integration.install` 摘要\n    含枚举名单（`src/server/client_commands.rs::normalized_wire_schema` 不剥"
+    },
+    {
+      "anchor": "闭集校验（体积上限、双射、零命中、覆盖、嵌套 AGENTS、重复正文） > 与上游 herdrdev/herdr 的章节映射 > fork 已删除的集成",
+      "doc": "docs/AGENT_RULES/README.md",
+      "id": "docs-agent-rules-readme-md-闭集校验-体积上限-双射-零命中-覆盖-嵌套-agents-重复正文-与上游-herdrdev-herdr-的章节映射-fork-已删除的集成-part2",
+      "source_sha256": "85747b46c2d6a6e92d0b63713214a24052f2010b7d96989c50f610b1974fb55f",
+      "text": "    `enum` 数组），删变体即红，而 generation-1 期望永不重写；③ 生成物\n    `docs/next/api/herdr-api.schema.json` 的 `$defs/IntegrationTarget` 随之变化；\n    ④ 混版本链路真实存在：`src/remote/attach.rs::prepare_remote_herdr_ctx` 复用\n    远端已有的 herdr，或经 `::remote_release_asset` 按 herdr.dev 的发布清单（仓库\n    副本 `distribution/latest.json`，指向 `github.com/herdrdev/herdr` 的 release）\n    装上游构建；枚举没有 `Unknown` 回退，fork 删掉的变体一旦出现在上游 server 的\n    `integration.list` 返回里，fork 客户端就解析不出这份列表。枚举与 fixture 归\n    上游维护，删了还是每次同步的永久冲突。该枚举按名字走 JSON（serde\n    `snake_case`），不经 `src/protocol/wire.rs` 的 bincode，变体序号不是理由。\n  - **退役的代码形态**（后续删除波次的前置：先建退役分支，再删资产与注册\n    分支）：变体留在枚举里，位置与 serde 名不动；从 `IntegrationTarget::ALL`\n    （`src/cli/spec.rs` 由它生成 `--target` 取值）、\n    `src/integration/registry.rs::integration_specs`（`integration.list` 与更新\n    提示的来源）和 `src/cli/integration.rs::parse_integration_target` 摘除。\n    `registry.rs::integration_target_label`、`::integration_target_command_names`\n    与 `src/integration/actions.rs::install_target_inner`、`::uninstall_target`\n    这 4 处 match 是穷尽的、没有 `_` 兜底（`registry.rs` 唯一的 `_ => false` 属于\n    `integration_target_install_layout_available`）：先在这 4 处建立统一的退役\n    分支（install/uninstall 返回明确的「已退役」错误，\n    `integration_target_supported` 返回 false），否则「丢弃 registry/actions\n    分支」直接 E0004 编译失败，上面的共享文件口径不可执行。\n  - **上游日后追加非六家变体**：接收枚举那一行并让它落入退役分支（分支写成\n    `_` 兜底则无需再改，写成显式 arm 则把新变体并进去），不进 `ALL`、\n    `integration_specs` 与 `parse_integration_target`；其资产、注册、清单、\n    文档、专属测试照旧丢弃。**一并接收**上游随附的"
+    },
+    {
+      "anchor": "闭集校验（体积上限、双射、零命中、覆盖、嵌套 AGENTS、重复正文） > 与上游 herdrdev/herdr 的章节映射 > fork 已删除的集成",
+      "doc": "docs/AGENT_RULES/README.md",
+      "id": "docs-agent-rules-readme-md-闭集校验-体积上限-双射-零命中-覆盖-嵌套-agents-重复正文-与上游-herdrdev-herdr-的章节映射-fork-已删除的集成-part3",
+      "source_sha256": "85747b46c2d6a6e92d0b63713214a24052f2010b7d96989c50f610b1974fb55f",
+      "text": "    `tests/fixtures/endpoint-method-shapes-v1.json` 中 `integration.install` 摘要\n    更新，并按 `docs/README.md` 的生成物登记重建\n    `docs/next/api/herdr-api.schema.json`。该摘要是枚举名单的函数（追加与删除\n    同样改变它），不是厂商专属测试：fork 的枚举与上游逐字一致，上游的摘要对\n    fork 同样成立；丢掉它，\n    `advertised_client_shell_method_shapes_stay_at_the_v1_contract` 必红，而\n    generation-1 期望归上游维护，fork 只跟随、不自行重写。上游若改用独立冻结\n    （参照同一测试里 `pane.link.resolve` 的内联摘要与\n    `tests/fixtures/endpoint-observability-shapes-v1.json`），跟随上游的做法。\n  - **上游现行做法是不动冻结枚举**：letta 走\n    `src/cli/integration.rs::IntegrationCommandTarget` 与\n    `src/integration/mod.rs::EXPERIMENTAL_INTEGRATION_TARGET_LABELS` 的 CLI-only\n    通道。这类新增不触及冻结面，整块丢弃即可。\n- **检查**：同步后跑 `python3 scripts/upstream_sync_drop_check.py`——清单命中的\n  路径仍是 Git 可见文件即退出码 1；`--list` 只列不判。物理删除在后续波次落地，\n  此刻这些路径还在，所以它**尚未接入** `just check` / `just maintenance-test`；\n  **删除落地后再接入**。脚本逻辑自测 `scripts/test_upstream_sync_drop_check.py`\n  已在 maintenance-test 清单内。清单里的注释记着删除时的硬阻塞（grok 的 staged\n  例外，详见 `release-channels.md` 的 fork 例外），按清单删文件前先读。"
+    },
+    {
       "anchor": "闭集校验（体积上限、双射、零命中、覆盖、嵌套 AGENTS、重复正文） > 维护",
       "doc": "docs/AGENT_RULES/README.md",
       "id": "docs-agent-rules-readme-md-闭集校验-体积上限-双射-零命中-覆盖-嵌套-agents-重复正文-维护",
@@ -637,6 +658,13 @@
       "id": "docs-agent-rules-release-channels-md-release-channels-发布渠道与版本真源-changelog-与版本",
       "source_sha256": "00f0c2019ef90cc82b54a16fa2d758c1bcf1f5455a9e4bd2d5ff952b590aec4d",
       "text": "## CHANGELOG 与版本\n\n- 版本唯一真源是 `Cargo.toml` 的 `version`。根 `CHANGELOG.md` 为 Keep-a-Changelog\n  格式（`## Unreleased` + `## [x.y.z] - 日期`），`docs/next/CHANGELOG.md` 是其\n  未发布副本；由 `scripts/changelog.py` 在 release 流程同步，**日常 feature/fix\n  不手改两者**（`docs-pipeline.md`）。\n- 保持用户可见 commit subject 有描述性并带 `refs #<issue>` 行，stable 发布准备\n  才能用完整区间盘点生成 changelog；网站-only/文档-only/CI/构建/仓库维护变更\n  不记 changelog。"
+    },
+    {
+      "anchor": "release-channels（发布渠道与版本真源） > fork 例外：agent-detection 发布目录",
+      "doc": "docs/AGENT_RULES/release-channels.md",
+      "id": "docs-agent-rules-release-channels-md-release-channels-发布渠道与版本真源-fork-例外-agent-detection-发布目录",
+      "source_sha256": "d4c8ffe80833d941bcddd3f97d0a7224278168fc0af5f5ac8cd370e6da8e9c70",
+      "text": "## fork 例外：agent-detection 发布目录\n\n`distribution/agent-detection/` 的归属**不变**：仍是上游发布目录（语义见\n`detection.md`「发布目录」），fork 不自行发布它。唯一例外是 fork 删除六家以外\n的捆绑 manifest 时，随之删减该目录里对应的 `<agent>.toml` 与 `index.toml`\n条目——只为让 `scripts/agent_detection_manifest_check.py` 的捆绑↔发布一致性\n继续成立；不借此改动六家自身的发布副本，也不触碰 `distribution/*.json` 等其他\n渠道文件。名单与同步口径见 `README.md` 的「fork 已删除的集成」。\n\ngrok 是已知硬阻塞：`scripts/agent_detection_manifest_check.py` 的\n`STAGED_PUBLISHED_MANIFESTS` 钉着它的（捆绑版本、发布版本、sha256）例外，\n`scripts/test_agent_detection_manifest_check.py::staged_grok_dirs` 又直接读真实的\n`src/detect/manifests/grok.toml` 与 `distribution/agent-detection/grok.toml`。删\ngrok 时必须在同一次改动里移除该例外条目并处理它的两个 staged 用例（删掉，或\n改成自造 manifest 并 patch 例外表），否则 `just maintenance-test` 以\nFileNotFoundError 变红；同一提示也写在 `scripts/upstream_sync_drop_paths.txt` 的\ngrok 行上方。"
     },
     {
       "anchor": "release-channels（发布渠道与版本真源） > 性能 smoke",

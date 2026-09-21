@@ -39,3 +39,7 @@ stable 客户端无法识别的新捆绑 agent 可暂不发布（挂在精确例
 首个携带它的 stable 发布前加入目录并移除例外；`just release-docs-check` 强制
 不存在未发布例外。`scripts/agent_detection_manifest_check.py`（`just
 maintenance-test` 内）校验捆绑与发布副本一致性。
+
+官方集成仅六家：其余 agent 的捆绑 manifest 不新增，同步上游时也不合入，发布
+目录里的对应副本随之删减；名单与口径见 `README.md` 的「fork 已删除的集成」，
+目录归属的 fork 例外登记在 `release-channels.md`。

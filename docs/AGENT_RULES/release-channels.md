@@ -35,6 +35,24 @@ release 工作流必须发布五个资产：`herdr-linux-x86_64`、`herdr-linux-
 Windows 归档必须含 `herdr.exe` 与其 app-local ConPTY 运行时（`platform.md`），
 不得发布裸可执行文件作为 stable Windows 资产。
 
+## fork 例外：agent-detection 发布目录
+
+`distribution/agent-detection/` 的归属**不变**：仍是上游发布目录（语义见
+`detection.md`「发布目录」），fork 不自行发布它。唯一例外是 fork 删除六家以外
+的捆绑 manifest 时，随之删减该目录里对应的 `<agent>.toml` 与 `index.toml`
+条目——只为让 `scripts/agent_detection_manifest_check.py` 的捆绑↔发布一致性
+继续成立；不借此改动六家自身的发布副本，也不触碰 `distribution/*.json` 等其他
+渠道文件。名单与同步口径见 `README.md` 的「fork 已删除的集成」。
+
+grok 是已知硬阻塞：`scripts/agent_detection_manifest_check.py` 的
+`STAGED_PUBLISHED_MANIFESTS` 钉着它的（捆绑版本、发布版本、sha256）例外，
+`scripts/test_agent_detection_manifest_check.py::staged_grok_dirs` 又直接读真实的
+`src/detect/manifests/grok.toml` 与 `distribution/agent-detection/grok.toml`。删
+grok 时必须在同一次改动里移除该例外条目并处理它的两个 staged 用例（删掉，或
+改成自造 manifest 并 patch 例外表），否则 `just maintenance-test` 以
+FileNotFoundError 变红；同一提示也写在 `scripts/upstream_sync_drop_paths.txt` 的
+grok 行上方。
+
 ## CHANGELOG 与版本
 
 - 版本唯一真源是 `Cargo.toml` 的 `version`。根 `CHANGELOG.md` 为 Keep-a-Changelog

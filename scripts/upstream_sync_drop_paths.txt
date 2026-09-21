@@ -1,0 +1,75 @@
+# fork 同步上游时丢弃的路径：六家官方集成（claude / codex / kimi / zcode / pi /
+# opencode）以外的集成商专属文件。口径与维护流程见 docs/AGENT_RULES/README.md
+# 「fork 已删除的集成」；检查器是 scripts/upstream_sync_drop_check.py。
+#
+# 格式：每行一个 glob，整行 # 为注释（不支持行尾注释）。语义与
+# docs/AGENT_RULES/routes.toml 相同：* 不跨目录，** 跨目录，目录写成 `dir/**`。
+# 这是按名字的拒绝表：上游新增非六家集成时，在同一次同步里把新路径追加到这里。
+# 只列「整文件属于非六家」的路径；共享文件里的非六家分支按 README 口径手工丢弃。
+
+# 集成资产目录（保留 claude、codex、kimi、opencode、pi 与共享的
+# herdr-agent-state.test.ts）
+src/integration/assets/antigravity_cli/**
+src/integration/assets/copilot/**
+src/integration/assets/cursor/**
+src/integration/assets/devin/**
+src/integration/assets/droid/**
+src/integration/assets/grok/**
+src/integration/assets/hermes/**
+src/integration/assets/kilo/**
+src/integration/assets/letta/**
+src/integration/assets/mastracode/**
+src/integration/assets/omp/**
+src/integration/assets/qodercli/**
+src/integration/assets/qwen/**
+
+# 捆绑检测清单（保留 claude、codex、kimi、opencode、pi）
+src/detect/manifests/amp.toml
+src/detect/manifests/antigravity.toml
+src/detect/manifests/cline.toml
+src/detect/manifests/cursor.toml
+src/detect/manifests/devin.toml
+src/detect/manifests/droid.toml
+src/detect/manifests/gemini.toml
+src/detect/manifests/github-copilot.toml
+# grok 有硬阻塞：删这一行与发布目录的 grok.toml 时，必须在同一次改动里移除
+# scripts/agent_detection_manifest_check.py::STAGED_PUBLISHED_MANIFESTS 的 grok
+# 条目，并处理 scripts/test_agent_detection_manifest_check.py::staged_grok_dirs
+# 与它的两个 staged 用例（删掉，或改成自造 manifest 并 patch 该例外表）。
+# staged_grok_dirs 直接 read_bytes() 这两个真实文件，只删文件会让
+# just maintenance-test 以 FileNotFoundError 变红。
+src/detect/manifests/grok.toml
+src/detect/manifests/hermes.toml
+src/detect/manifests/kilo.toml
+src/detect/manifests/kiro.toml
+src/detect/manifests/letta.toml
+src/detect/manifests/maki.toml
+src/detect/manifests/muse.toml
+src/detect/manifests/qodercli.toml
+src/detect/manifests/qwen.toml
+
+# 发布目录副本（与捆绑清单逐一对应；index.toml 是共享目录文件，保留并删减条目）
+distribution/agent-detection/amp.toml
+distribution/agent-detection/antigravity.toml
+distribution/agent-detection/cline.toml
+distribution/agent-detection/cursor.toml
+distribution/agent-detection/devin.toml
+distribution/agent-detection/droid.toml
+distribution/agent-detection/gemini.toml
+distribution/agent-detection/github-copilot.toml
+# grok：与上面捆绑清单的 grok.toml 同一次改动删除，硬阻塞见该行上方注释。
+distribution/agent-detection/grok.toml
+distribution/agent-detection/hermes.toml
+distribution/agent-detection/kilo.toml
+distribution/agent-detection/kiro.toml
+distribution/agent-detection/letta.toml
+distribution/agent-detection/maki.toml
+distribution/agent-detection/muse.toml
+distribution/agent-detection/qodercli.toml
+distribution/agent-detection/qwen.toml
+
+# 非六家专属的维护脚本测试（随 hermes 资产一起删除）
+scripts/test_hermes_integration_asset.py
+
+# docs/next：目前没有任何集成商专属页面（集成说明集中在共享的 integrations.mdx
+# 等页面里，按共享文件口径处理）；上游日后新增非六家专属页面时追加到这里。

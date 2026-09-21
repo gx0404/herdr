@@ -71,6 +71,10 @@ paths = [
   "scripts/agent_detection_manifest_check.py",
   "scripts/capture_agent_screen.py",
   "scripts/test_agent_detection_manifest_check.py",
+  # 上游同步丢弃清单同时覆盖检测 manifest 与集成资产，与 integration-assets 取并集。
+  "scripts/test_upstream_sync_drop_check.py",
+  "scripts/upstream_sync_drop_check.py",
+  "scripts/upstream_sync_drop_paths.txt",
   "src/detect/**",
   # 检测的运行时消费点与领域实现共用不变量，取并集。
   "src/pane/agent_detection.rs",
@@ -112,6 +116,10 @@ id = "integration-assets"
 doc = "docs/AGENT_RULES/integration-assets.md"
 paths = [
   "scripts/test_hermes_integration_asset.py",
+  # 上游同步丢弃清单（六家以外的集成），与 detection 取并集。
+  "scripts/test_upstream_sync_drop_check.py",
+  "scripts/upstream_sync_drop_check.py",
+  "scripts/upstream_sync_drop_paths.txt",
   "src/integration/**",
 ]
 tasks = []

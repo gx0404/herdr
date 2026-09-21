@@ -40,7 +40,8 @@ python3 scripts/resolve_agent_rules.py --check                   # 闭集/体积
   `CONTRIBUTING.md`）；不满足条件时不得代为提交。
 - 本仓库是 `gx0404/herdr` fork（upstream `herdrdev/herdr`）：日常开发按通用
   规则在 fork 分支进行；同步上游时按 `docs/AGENT_RULES/README.md` 的章节映射
-  表移植 AGENTS.md 变更。
+  表移植 AGENTS.md 变更。官方集成只保留六家：同步时不合入上游对其余集成商的
+  新增与修改，口径见同一 README 的「fork 已删除的集成」。
 
 ## 项目模型
 
