@@ -213,7 +213,7 @@ fn snippet_run_current_pane_sends_input_and_records_history() {
     );
 
     let mut outcome = ClientShellInput::default();
-    state.route_snippets_key(&key(KeyCode::Enter), &mut outcome);
+    state.route_snippets_key(&key(KeyCode::Char('y')), &mut outcome);
     let [ClientShellAction::EndpointRequest {
         endpoint_id,
         request,
@@ -324,7 +324,7 @@ fn snippet_run_multi_machine_fans_out_per_endpoint() {
         super::super::snippets_overlay::ClientSnippetsView::RunConfirm(_)
     ));
     let mut outcome = ClientShellInput::default();
-    state.route_snippets_key(&key(KeyCode::Enter), &mut outcome);
+    state.route_snippets_key(&key(KeyCode::Char('y')), &mut outcome);
     let endpoints: Vec<ClientEndpointId> = outcome
         .actions
         .iter()
@@ -715,6 +715,85 @@ fn held_enter_does_not_walk_the_snippet_run_flow() {
             "held enter must not advance past the target picker"
         );
     }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// C-02 残留面（已拍板）：RunConfirm 的执行键换成 y（与 worktree 强删同构）。
+/// 非 kitty 宿主下自动重复只发普通 Press，三次普通回车不得注入命令；回车在该步
+/// 不再执行，`y`（或 ctrl+↵）才执行。
+#[test]
+fn plain_enter_presses_never_execute_snippet_run() {
+    let dir = with_temp_state_home("plain-enter-run");
+    seed_snippet("deploy", "kubectl rollout restart deploy/web", &[]);
+    let mut state = state();
+    state.open_snippets_overlay(true);
+    // List → RunTargets → RunConfirm。
+    state.route_snippets_key(&key(KeyCode::Enter), &mut ClientShellInput::default());
+    state.route_snippets_key(&key(KeyCode::Enter), &mut ClientShellInput::default());
+    assert!(matches!(
+        snippets_view(&state),
+        super::super::snippets_overlay::ClientSnippetsView::RunConfirm(_)
+    ));
+
+    for _ in 0..3 {
+        let mut outcome = ClientShellInput::default();
+        state.route_snippets_key(&key(KeyCode::Enter), &mut outcome);
+        assert!(
+            outcome.actions.is_empty() && outcome.requests.is_empty(),
+            "plain enter must not execute: {:?}",
+            outcome.actions
+        );
+        assert!(
+            matches!(
+                snippets_view(&state),
+                super::super::snippets_overlay::ClientSnippetsView::RunConfirm(_)
+            ),
+            "plain enter must stay on the confirm step"
+        );
+    }
+
+    let mut outcome = ClientShellInput::default();
+    state.route_snippets_key(&key(KeyCode::Char('y')), &mut outcome);
+    let [ClientShellAction::EndpointRequest { request, .. }] = &outcome.actions[..] else {
+        panic!("y executes the run: {:?}", outcome.actions);
+    };
+    let crate::api::schema::Method::PaneSendInput(params) = &request.method else {
+        panic!("pane send input: {:?}", request.method);
+    };
+    assert_eq!(params.text, "kubectl rollout restart deploy/web");
+    assert!(
+        state.overlay.is_none(),
+        "overlay closes once the run starts"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn ctrl_enter_executes_snippet_run() {
+    let dir = with_temp_state_home("ctrl-enter-run");
+    seed_snippet("deploy", "kubectl rollout restart deploy/web", &[]);
+    let mut state = state();
+    state.open_snippets_overlay(true);
+    state.route_snippets_key(&key(KeyCode::Enter), &mut ClientShellInput::default());
+    state.route_snippets_key(&key(KeyCode::Enter), &mut ClientShellInput::default());
+    assert!(matches!(
+        snippets_view(&state),
+        super::super::snippets_overlay::ClientSnippetsView::RunConfirm(_)
+    ));
+
+    let mut outcome = ClientShellInput::default();
+    state.route_snippets_key(
+        &crate::input::TerminalKey::new(KeyCode::Enter, KeyModifiers::CONTROL),
+        &mut outcome,
+    );
+    assert!(
+        matches!(
+            outcome.actions[..],
+            [ClientShellAction::EndpointRequest { .. }]
+        ),
+        "ctrl+enter executes the run: {:?}",
+        outcome.actions
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
 

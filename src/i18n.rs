@@ -932,6 +932,8 @@ pub struct SnippetsTexts {
     pub confirm_targets_fmt: &'static str, // args: count
     pub confirm_press_enter: &'static str,
     pub run_now_button: &'static str,
+    /// 确认执行步的提示行：执行键是 y（或 ctrl+↵），普通回车不执行（C-02）。
+    pub run_confirm_hint: &'static str,
     // Per-target outcomes and the completion toast.
     pub target_offline_fmt: &'static str,  // args: label
     pub target_no_pane_fmt: &'static str,  // args: label

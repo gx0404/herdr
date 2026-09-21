@@ -1137,7 +1137,15 @@ impl ClientShellState {
                             }
                         }
                     }
-                    KeyCode::Enter => self.execute_snippet_run(outcome),
+                    // 执行键是 y（或 ctrl+↵），与 worktree 强删同构：普通回车在这一步
+                    // 无效。非 kitty 宿主下自动重复只发普通 Press，长按回车走不完确认
+                    // （C-02 残留面，已拍板换键）。
+                    KeyCode::Char('y' | 'Y') => self.execute_snippet_run(outcome),
+                    KeyCode::Enter
+                        if modifiers.contains(crossterm::event::KeyModifiers::CONTROL) =>
+                    {
+                        self.execute_snippet_run(outcome)
+                    }
                     _ => {}
                 }
                 outcome.repaint = true;
@@ -2539,6 +2547,18 @@ fn render_run_confirm(
             ),
             base.fg(p.text),
         );
+        y += 1;
+    }
+    // 换键提示行：回车在这一步不执行，避免长按穿透（C-02 残留面）。
+    if y < body.bottom().saturating_sub(1) {
+        put_text(
+            b,
+            body.x,
+            y,
+            body.width,
+            t.run_confirm_hint,
+            base.fg(p.overlay0),
+        );
     }
     if let Some(error) = draft.error.as_deref() {
         let error_y = stack
@@ -2561,7 +2581,7 @@ fn render_run_confirm(
         stack.footer,
         &[
             ("space".to_owned(), t.confirm_press_enter.to_owned()),
-            ("enter".to_owned(), t.hint_run.to_owned()),
+            ("y".to_owned(), t.hint_run.to_owned()),
             ("esc".to_owned(), t.hint_back.to_owned()),
         ],
         cx,
@@ -2577,7 +2597,7 @@ fn render_run_confirm(
             crate::ui::ModalButtonTone::Primary,
             cx.button_state(
                 &super::feedback::ChromeHover::SnippetButton(SnippetOverlayButton::RunNow),
-                crate::ui::ModalButtonState::Focused,
+                crate::ui::ModalButtonState::Normal,
             ),
             p,
         );
@@ -2588,7 +2608,7 @@ fn render_run_confirm(
             crate::ui::ModalButtonTone::Secondary,
             cx.button_state(
                 &super::feedback::ChromeHover::SnippetButton(SnippetOverlayButton::Back),
-                crate::ui::ModalButtonState::Normal,
+                crate::ui::ModalButtonState::Focused,
             ),
             p,
         );
