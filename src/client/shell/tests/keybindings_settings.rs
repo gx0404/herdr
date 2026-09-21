@@ -68,6 +68,9 @@ fn manual_client_chrome_preferences_round_trip_per_endpoint() {
     state
         .remote_collapsed_groups
         .insert(remote_id.clone(), HashSet::from(["/repo".to_owned()]));
+    // STATE-05：折叠的端点（机器分组）也要跨进程保留。
+    state.collapsed_endpoints.insert(ClientEndpointId::Local);
+    state.collapsed_endpoints.insert(remote_id.clone());
     state.persist_chrome_preferences(&mut ClientShellInput::default());
     let stored = std::fs::read_to_string(&path).expect("stored client chrome preferences");
     assert!(stored.contains(profile.id.as_str()));
@@ -92,11 +95,17 @@ fn manual_client_chrome_preferences_round_trip_per_endpoint() {
         reloaded.remote_collapsed_groups.get(&remote_id),
         Some(&HashSet::from(["/repo".to_owned()]))
     );
+    assert_eq!(
+        reloaded.collapsed_endpoints,
+        HashSet::from([ClientEndpointId::Local, remote_id.clone()]),
+        "折叠的端点跨进程保留（STATE-05）"
+    );
     let mut reloaded = reloaded;
     reloaded.persist_chrome_preferences(&mut ClientShellInput::default());
     let stored_again = std::fs::read_to_string(&path).expect("restored client chrome preferences");
     assert!(stored_again.contains(profile.id.as_str()));
     assert!(stored_again.contains("/repo"));
+    assert!(stored_again.contains("ssh:"));
     std::fs::remove_file(path).expect("remove client chrome preferences");
 }
 

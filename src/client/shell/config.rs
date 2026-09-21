@@ -25,6 +25,18 @@ pub(super) const PREFERENCES_FLUSH_DEBOUNCE: std::time::Duration =
 pub(super) const PREFERENCES_FLUSH_MAX_DELAY: std::time::Duration =
     std::time::Duration::from_secs(5);
 
+/// 折叠端点的落盘形态：按 `storage_key` 排序，保证同一状态写出同一串。
+fn sorted_collapsed_endpoints(
+    collapsed: &std::collections::HashSet<ClientEndpointId>,
+) -> Vec<String> {
+    let mut keys = collapsed
+        .iter()
+        .map(ClientEndpointId::storage_key)
+        .collect::<Vec<_>>();
+    keys.sort();
+    keys
+}
+
 impl ClientShellState {
     pub(super) fn set_local_config_diagnostic(&mut self, diagnostic: Option<String>) {
         self.local_config_diagnostic = diagnostic;
@@ -172,6 +184,7 @@ impl ClientShellState {
                 .then_some(self.config.agent_panel_sort),
             collapsed_groups,
             remote_collapsed_groups,
+            collapsed_endpoints: sorted_collapsed_endpoints(&self.collapsed_endpoints),
             palette_recent: self.palette_recent.clone(),
         };
         // 落盘尝试计数：C-13 的验收指标是写入次数，测试与诊断都以它为真源。

@@ -1034,7 +1034,12 @@ fn collapsed_sidebar_scrolls_workspaces_with_the_wheel() {
         modifiers: KeyModifiers::NONE,
     })]);
     assert!(down.repaint, "滚轮必须请求重绘");
-    assert_eq!(state.workspace_scroll, 1, "滚轮应当推动 workspace_scroll");
+    // 滚轮步进与 pane 同一口径（HERDR-UX-014）：一格 = ui.mouse_scroll_lines。
+    assert_eq!(
+        state.workspace_scroll,
+        state.config.mouse_scroll_lines,
+        "滚轮应当按配置步进推动 workspace_scroll"
+    );
     state.compose(100, 28).expect("scrolled collapsed frame");
     assert!(
         state
@@ -1074,7 +1079,8 @@ fn collapsed_endpoint_sidebar_scrolls_workspaces_with_the_wheel() {
         modifiers: KeyModifiers::NONE,
     })]);
     assert!(down.repaint);
-    assert_eq!(state.workspace_scroll, 1);
+    // 步进跟 `ui.mouse_scroll_lines`（HERDR-UX-014）。
+    assert_eq!(state.workspace_scroll, state.config.mouse_scroll_lines);
     state.compose(100, 28).expect("scrolled endpoint frame");
     assert!(
         state
@@ -1125,12 +1131,15 @@ fn collapsed_sidebar_scrolls_agents_with_the_wheel() {
         modifiers: KeyModifiers::NONE,
     })]);
     assert!(down.repaint, "滚轮必须请求重绘");
-    assert_eq!(state.agent_scroll, 1, "滚轮应当推动 agent_scroll");
+    // 步进跟 `ui.mouse_scroll_lines`（默认 3，HERDR-UX-014）：一次滚轮 = n 行。
+    let step = state.config.mouse_scroll_lines;
+    assert_eq!(state.agent_scroll, step, "滚轮应当按配置步进推动 agent_scroll");
     state.compose(100, 28).expect("scrolled agent frame");
     assert_eq!(
         first_agent(&state),
-        Some("pane_2"),
-        "向下滚一行后首个 agent 应当变成 pane_2"
+        Some(format!("pane_{}", step + 1).as_str()),
+        "向下滚 {step} 行后首个 agent 应当是 pane_{}",
+        step + 1
     );
 
     state.handle_raw_events(vec![RawInputEvent::Mouse(MouseEvent {

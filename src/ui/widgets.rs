@@ -154,26 +154,24 @@ pub(crate) fn modal_button_style(
     let base = Style::default().remove_modifier(Modifier::DIM);
     match state {
         ModalButtonState::Focused | ModalButtonState::Hovered => {
-            let bg = match tone {
-                ModalButtonTone::Primary => palette.accent,
-                ModalButtonTone::Danger => palette.red,
-                ModalButtonTone::Secondary => palette.accent,
-            };
-            base.fg(panel_contrast_fg(palette))
-                .bg(bg)
-                .add_modifier(Modifier::BOLD)
-        }
-        ModalButtonState::Normal => {
-            let fg = match tone {
-                ModalButtonTone::Secondary => palette.text,
-                ModalButtonTone::Primary | ModalButtonTone::Danger => panel_contrast_fg(palette),
-            };
-            let bg = match tone {
-                ModalButtonTone::Secondary => palette.surface0,
-                ModalButtonTone::Primary => palette.accent,
-                ModalButtonTone::Danger => palette.red,
+            let (bg, fg) = match tone {
+                ModalButtonTone::Primary => (palette.accent, panel_contrast_fg(palette)),
+                ModalButtonTone::Danger => (palette.red, panel_contrast_fg(palette)),
+                // 次级按钮的焦点/悬浮同样取 accent 底：这是有意的「安全默认项
+                // 也要显眼」语义（强制删除确认页把取消按钮画成强调项）。
+                ModalButtonTone::Secondary => (palette.accent, panel_contrast_fg(palette)),
             };
             base.fg(fg).bg(bg).add_modifier(Modifier::BOLD)
+        }
+        ModalButtonState::Normal => {
+            let (bg, fg) = match tone {
+                ModalButtonTone::Secondary => (palette.surface0, palette.text),
+                ModalButtonTone::Primary => (palette.accent, panel_contrast_fg(palette)),
+                ModalButtonTone::Danger => (palette.red, panel_contrast_fg(palette)),
+            };
+            // 常态不加粗：Primary/Danger 的悬浮与焦点因此有可见反馈
+            // （HERDR-UX-02 之前两态逐字段相同）。
+            base.fg(fg).bg(bg)
         }
         ModalButtonState::Disabled => base.fg(palette.overlay0).bg(palette.surface0),
     }
@@ -233,6 +231,34 @@ pub(crate) fn close_button_rect(area: Rect) -> Rect {
 pub(crate) fn continue_button_rect(area: Rect) -> Rect {
     let width = modal_button_width(modal_continue_button_text());
     Rect::new(area.x, area.y, width, 1)
+}
+
+#[cfg(test)]
+mod button_state_tests {
+    use super::*;
+
+    /// HERDR-UX-02：Primary/Danger 的常态与悬浮/焦点必须看得出差别，次级按钮
+    /// 也不能长得跟 Primary 一样。
+    #[test]
+    fn modal_button_states_are_visually_distinct() {
+        let palette = Palette::catppuccin();
+        for tone in [
+            ModalButtonTone::Primary,
+            ModalButtonTone::Danger,
+            ModalButtonTone::Secondary,
+        ] {
+            let normal = modal_button_style(&palette, tone, ModalButtonState::Normal);
+            let focused = modal_button_style(&palette, tone, ModalButtonState::Focused);
+            let hovered = modal_button_style(&palette, tone, ModalButtonState::Hovered);
+            assert_ne!(normal, focused, "{tone:?} 常态与焦点同形");
+            assert_eq!(focused, hovered, "{tone:?} 焦点与悬浮同一口径");
+        }
+        // 常态之间的区别也要在：次级是弱表面，主/危险是实心色块。
+        let primary_normal = modal_button_style(&palette, ModalButtonTone::Primary, ModalButtonState::Normal);
+        let secondary_normal =
+            modal_button_style(&palette, ModalButtonTone::Secondary, ModalButtonState::Normal);
+        assert_ne!(primary_normal, secondary_normal, "常态下三种 tone 必须可区分");
+    }
 }
 
 #[cfg(test)]

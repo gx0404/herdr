@@ -236,6 +236,8 @@ impl ClientShellState {
         }));
     }
 
+    /// 上下键在菜单里回绕，与工作台 Layout 模式、导航器同一口径
+    /// （HERDR-UX-08 之前是 clamp，到头就卡住）。
     pub(super) fn move_context_menu_selection(&mut self, delta: isize) {
         let Some(ClientShellOverlay::ContextMenu(menu)) = self.overlay.as_mut() else {
             return;
@@ -244,8 +246,20 @@ impl ClientShellState {
         if item_count == 0 {
             return;
         }
-        menu.highlighted = (menu.highlighted as isize + delta)
-            .clamp(0, item_count.saturating_sub(1) as isize) as usize;
+        let count = item_count as isize;
+        menu.highlighted = (menu.highlighted as isize + delta).rem_euclid(count) as usize;
+    }
+
+    /// Home / End 直接跳到首尾项（HERDR-UX-08：其它列表都有）。
+    pub(super) fn set_context_menu_selection(&mut self, last: bool) {
+        let Some(ClientShellOverlay::ContextMenu(menu)) = self.overlay.as_mut() else {
+            return;
+        };
+        let item_count = menu.items().len();
+        if item_count == 0 {
+            return;
+        }
+        menu.highlighted = if last { item_count - 1 } else { 0 };
     }
 
     pub(super) fn activate_context_menu_item(

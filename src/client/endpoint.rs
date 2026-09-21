@@ -91,6 +91,17 @@ impl ClientEndpointId {
             Self::Ssh(profile_id) => format!("ssh:{profile_id}"),
         }
     }
+
+    /// `storage_key` 的反向解析（偏好文件里的键）。未知或损坏的值返回 `None`：
+    /// 与其它偏好键同一口径——坏值按未设置处理，不让整份偏好失效（STATE-05）。
+    pub(crate) fn from_storage_key(key: &str) -> Option<Self> {
+        if key == "local" {
+            return Some(Self::Local);
+        }
+        key.strip_prefix("ssh:")
+            .and_then(|profile_id| ProfileId::parse(profile_id).ok())
+            .map(Self::Ssh)
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -105,6 +116,20 @@ pub(crate) enum ClientEndpointStatus {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn endpoint_storage_keys_round_trip_and_reject_junk() {
+        let remote = ClientEndpointId::Ssh(
+            ProfileId::parse("0123456789abcdef0123456789abcdef").expect("profile id"),
+        );
+        for endpoint_id in [ClientEndpointId::Local, remote] {
+            let key = endpoint_id.storage_key();
+            assert_eq!(ClientEndpointId::from_storage_key(&key), Some(endpoint_id));
+        }
+        for junk in ["", "local:", "ssh:", "ssh:not-a-profile-id", "remote"] {
+            assert_eq!(ClientEndpointId::from_storage_key(junk), None, "{junk}");
+        }
+    }
 
     #[test]
     fn profile_ids_are_opaque_and_stable_when_parsed() {

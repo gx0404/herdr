@@ -759,12 +759,20 @@ impl ClientShellState {
                     self.overlay = None;
                     outcome.repaint = true;
                 }
-                KeyCode::Up => {
+                KeyCode::Up | KeyCode::Char('k') => {
                     self.move_context_menu_selection(-1);
                     outcome.repaint = true;
                 }
-                KeyCode::Down => {
+                KeyCode::Down | KeyCode::Char('j') => {
                     self.move_context_menu_selection(1);
+                    outcome.repaint = true;
+                }
+                KeyCode::Home | KeyCode::Char('g') => {
+                    self.set_context_menu_selection(false);
+                    outcome.repaint = true;
+                }
+                KeyCode::End | KeyCode::Char('G') => {
+                    self.set_context_menu_selection(true);
                     outcome.repaint = true;
                 }
                 KeyCode::Enter => {

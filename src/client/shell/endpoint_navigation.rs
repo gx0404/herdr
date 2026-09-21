@@ -75,6 +75,8 @@ impl ClientShellState {
             if !self.collapsed_endpoints.remove(&endpoint_id) {
                 self.collapsed_endpoints.insert(endpoint_id);
             }
+            // 折叠状态跟着偏好走：下次 attach 还要是这个样子（STATE-05）。
+            self.schedule_chrome_preferences(std::time::Instant::now());
             outcome.repaint = true;
         } else if self.endpoint_is_online(&endpoint_id) {
             outcome.actions.push(ClientShellAction::ActivateEndpoint {

@@ -102,6 +102,11 @@ pub(super) fn render_settings_overlay(
         .collect::<Vec<_>>();
     let nav_rows = super::super::page::navigation_rows(inner.width, &labels);
     let stack = super::super::page::PageLayout::new(inner, nav_rows, false, true);
+    // 焦点指示（TOOL-17）：`focus` 此前只写不读，Tab 在导航/正文/按钮之间移动
+    // 时画面没有任何变化。
+    let focus = settings.focus;
+    let nav_focused = focus == super::super::page::PageFocus::Navigation;
+    let content_focused = focus == super::super::page::PageFocus::Content;
 
     put_text(
         buffer,
@@ -138,10 +143,15 @@ pub(super) fn render_settings_overlay(
         let rect = Rect::new(tab_x, tab_y, width, 1);
         let active = *section == settings.section;
         let style = if active {
-            Style::default()
+            let style = Style::default()
                 .fg(panel_contrast_fg(palette))
                 .bg(palette.accent)
-                .add_modifier(Modifier::BOLD)
+                .add_modifier(Modifier::BOLD);
+            if nav_focused {
+                style.add_modifier(Modifier::UNDERLINED)
+            } else {
+                style
+            }
         } else {
             Style::default().fg(palette.overlay1).bg(palette.panel_bg)
         };
@@ -184,6 +194,7 @@ pub(super) fn render_settings_overlay(
                 &[t.lang_zh, t.lang_en],
                 settings.selected,
                 settings.current,
+                content_focused,
                 palette,
                 &mut choice_hits,
             );
@@ -215,7 +226,7 @@ pub(super) fn render_settings_overlay(
                     buffer,
                     rect,
                     crate::i18n::theme_display_name(name),
-                    index == settings.selected,
+                    index == settings.selected && content_focused,
                     super::super::settings::normalized_theme_name(name)
                         == super::super::settings::normalized_theme_name(
                             &settings.original_theme_name,
@@ -234,6 +245,7 @@ pub(super) fn render_settings_overlay(
                 &[t.indicator_dots, t.indicator_symbols],
                 settings.selected,
                 settings.current,
+                content_focused,
                 palette,
                 &mut choice_hits,
             );
@@ -247,6 +259,7 @@ pub(super) fn render_settings_overlay(
                 &[t.sound_on, t.sound_off],
                 settings.selected,
                 settings.current,
+                content_focused,
                 palette,
                 &mut choice_hits,
             );
@@ -260,6 +273,7 @@ pub(super) fn render_settings_overlay(
                 &[t.toast_off, t.toast_herdr, t.toast_terminal, t.toast_system],
                 settings.selected,
                 settings.current,
+                content_focused,
                 palette,
                 &mut choice_hits,
             );
@@ -351,6 +365,7 @@ pub(super) fn render_settings_overlay(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_choice_section(
     buffer: &mut Buffer,
     area: Rect,
@@ -359,6 +374,7 @@ fn render_choice_section(
     choices: &[&str],
     selected: usize,
     current: usize,
+    focused: bool,
     palette: &Palette,
     hits: &mut Vec<(Rect, usize)>,
 ) {
@@ -401,7 +417,7 @@ fn render_choice_section(
             buffer,
             rect,
             choice,
-            index == selected,
+            focused && index == selected,
             index == current,
             palette,
         );

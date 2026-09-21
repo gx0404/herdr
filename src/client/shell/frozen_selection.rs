@@ -78,9 +78,17 @@ impl ClientShellState {
             .find(|endpoint| endpoint.endpoint_id == self.active_endpoint_id)
             .and_then(|endpoint| endpoint.methods.as_ref())
             .is_some_and(|methods| {
-                ["capture", "read", "selection", "release", "retain"]
-                    .iter()
-                    .all(|name| methods.contains(&format!("pane.text_snapshot.{name}")))
+                // 常量名直查：原来每次左键按下都要为探测能力构造 5 个
+                // `format!` 字符串（HERDR-PERF-019）。
+                [
+                    "pane.text_snapshot.capture",
+                    "pane.text_snapshot.read",
+                    "pane.text_snapshot.selection",
+                    "pane.text_snapshot.release",
+                    "pane.text_snapshot.retain",
+                ]
+                .iter()
+                .all(|name| methods.contains(*name))
             });
         if !advertised || hit.popup {
             return false;

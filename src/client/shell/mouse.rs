@@ -843,11 +843,11 @@ impl ClientShellState {
                     self.chrome_drag = None;
                 }
                 MouseEventKind::ScrollUp => {
-                    self.scroll_product_announcement(-3);
+                    self.scroll_product_announcement(-(self.config.mouse_scroll_lines as isize));
                     outcome.repaint = true;
                 }
                 MouseEventKind::ScrollDown => {
-                    self.scroll_product_announcement(3);
+                    self.scroll_product_announcement(self.config.mouse_scroll_lines as isize);
                     outcome.repaint = true;
                 }
                 _ => {}
@@ -902,11 +902,11 @@ impl ClientShellState {
                     self.chrome_drag = None;
                 }
                 MouseEventKind::ScrollUp => {
-                    self.scroll_release_notes(-3);
+                    self.scroll_release_notes(-(self.config.mouse_scroll_lines as isize));
                     outcome.repaint = true;
                 }
                 MouseEventKind::ScrollDown => {
-                    self.scroll_release_notes(3);
+                    self.scroll_release_notes(self.config.mouse_scroll_lines as isize);
                     outcome.repaint = true;
                 }
                 _ => {}
@@ -1514,11 +1514,11 @@ impl ClientShellState {
                     outcome.repaint |= self.set_palette_hover(row_hit.map(|(_, index)| index));
                 }
                 MouseEventKind::ScrollUp => {
-                    self.scroll_palette(-1);
+                    self.scroll_palette((self.config.mouse_scroll_lines as isize) * -1);
                     outcome.repaint = true;
                 }
                 MouseEventKind::ScrollDown => {
-                    self.scroll_palette(1);
+                    self.scroll_palette((self.config.mouse_scroll_lines as isize) * 1);
                     outcome.repaint = true;
                 }
                 MouseEventKind::Down(MouseButton::Left) => {
@@ -1699,7 +1699,7 @@ impl ClientShellState {
             match mouse.kind {
                 MouseEventKind::ScrollUp => {
                     if let Some(ClientShellOverlay::Help(help)) = self.overlay.as_mut() {
-                        let next = help.scroll.saturating_sub(3);
+                        let next = help.scroll.saturating_sub(self.config.mouse_scroll_lines);
                         if next != help.scroll {
                             help.scroll = next;
                             outcome.repaint = true;
@@ -1708,7 +1708,10 @@ impl ClientShellState {
                 }
                 MouseEventKind::ScrollDown => {
                     if let Some(ClientShellOverlay::Help(help)) = self.overlay.as_mut() {
-                        let next = help.scroll.saturating_add(3).min(help.max_scroll);
+                        let next = help
+                            .scroll
+                            .saturating_add(self.config.mouse_scroll_lines)
+                            .min(help.max_scroll);
                         if next != help.scroll {
                             help.scroll = next;
                             outcome.repaint = true;
@@ -1814,11 +1817,11 @@ impl ClientShellState {
                     }
                 }
                 MouseEventKind::ScrollUp => {
-                    self.move_navigator_selection(-3);
+                    self.move_navigator_selection(-(self.config.mouse_scroll_lines as isize));
                     outcome.repaint = true;
                 }
                 MouseEventKind::ScrollDown => {
-                    self.move_navigator_selection(3);
+                    self.move_navigator_selection(self.config.mouse_scroll_lines as isize);
                     outcome.repaint = true;
                 }
                 _ => {}
@@ -1869,17 +1872,17 @@ impl ClientShellState {
                 }
                 MouseEventKind::ScrollUp if super::contains(self.hits.machines_popup, point) => {
                     if super::contains(self.hits.machines_detail_area, point) {
-                        self.scroll_machine_details(-3);
+                        self.scroll_machine_details(-(self.config.mouse_scroll_lines as isize));
                     } else {
-                        self.scroll_machines_overlay(-3);
+                        self.scroll_machines_overlay(-(self.config.mouse_scroll_lines as isize));
                     }
                     outcome.repaint = true;
                 }
                 MouseEventKind::ScrollDown if super::contains(self.hits.machines_popup, point) => {
                     if super::contains(self.hits.machines_detail_area, point) {
-                        self.scroll_machine_details(3);
+                        self.scroll_machine_details(self.config.mouse_scroll_lines as isize);
                     } else {
-                        self.scroll_machines_overlay(3);
+                        self.scroll_machines_overlay(self.config.mouse_scroll_lines as isize);
                     }
                     outcome.repaint = true;
                 }
@@ -2001,12 +2004,12 @@ impl ClientShellState {
                     // List/History 视图下滚轮走的是 `move_snippet_selection`：
                     // 视口由 `selected` 反推，选中被移出窗口时视口跟着滚，指针
                     // 下面的行随之改变，旧的 hover 行号立刻失效。
-                    self.scroll_snippets_overlay(-3);
+                    self.scroll_snippets_overlay(-(self.config.mouse_scroll_lines as isize));
                     self.hover_snippet_row(None);
                     outcome.repaint = true;
                 }
                 MouseEventKind::ScrollDown if super::contains(self.hits.snippet_popup, point) => {
-                    self.scroll_snippets_overlay(3);
+                    self.scroll_snippets_overlay(self.config.mouse_scroll_lines as isize);
                     self.hover_snippet_row(None);
                     outcome.repaint = true;
                 }
@@ -2115,12 +2118,12 @@ impl ClientShellState {
                 // 作用在原来的选中行上，而不是「滚到的那一行」。视口滚动会换
                 // 行，指针下面的行随之改变，所以顺带清 hover。
                 MouseEventKind::ScrollUp if super::contains(self.hits.scenes_popup, point) => {
-                    self.scroll_scenes_list(-3);
+                    self.scroll_scenes_list(-(self.config.mouse_scroll_lines as isize));
                     self.set_scenes_hover(None);
                     outcome.repaint = true;
                 }
                 MouseEventKind::ScrollDown if super::contains(self.hits.scenes_popup, point) => {
-                    self.scroll_scenes_list(3);
+                    self.scroll_scenes_list(self.config.mouse_scroll_lines as isize);
                     self.set_scenes_hover(None);
                     outcome.repaint = true;
                 }
@@ -2183,13 +2186,13 @@ impl ClientShellState {
                 MouseEventKind::ScrollUp
                     if super::contains(self.hits.machine_files_popup, point) =>
                 {
-                    self.scroll_machine_files_overlay(-3);
+                    self.scroll_machine_files_overlay(-(self.config.mouse_scroll_lines as isize));
                     outcome.repaint = true;
                 }
                 MouseEventKind::ScrollDown
                     if super::contains(self.hits.machine_files_popup, point) =>
                 {
-                    self.scroll_machine_files_overlay(3);
+                    self.scroll_machine_files_overlay(self.config.mouse_scroll_lines as isize);
                     outcome.repaint = true;
                 }
                 MouseEventKind::Down(MouseButton::Left) => {
@@ -2229,11 +2232,11 @@ impl ClientShellState {
         if matches!(self.overlay, Some(ClientShellOverlay::Broadcast(_))) {
             match mouse.kind {
                 MouseEventKind::ScrollUp if super::contains(self.hits.broadcast_popup, point) => {
-                    self.scroll_broadcast_overlay(-3);
+                    self.scroll_broadcast_overlay(-(self.config.mouse_scroll_lines as isize));
                     outcome.repaint = true;
                 }
                 MouseEventKind::ScrollDown if super::contains(self.hits.broadcast_popup, point) => {
-                    self.scroll_broadcast_overlay(3);
+                    self.scroll_broadcast_overlay(self.config.mouse_scroll_lines as isize);
                     outcome.repaint = true;
                 }
                 MouseEventKind::Down(MouseButton::Left) => {
@@ -2539,7 +2542,9 @@ impl ClientShellState {
                 );
             }
             MouseEventKind::ScrollUp if super::contains(self.hits.agent_body, point) => {
-                let next = self.agent_scroll.saturating_sub(1);
+                let next = self
+                    .agent_scroll
+                    .saturating_sub(self.config.mouse_scroll_lines);
                 if next != self.agent_scroll {
                     self.agent_scroll = next;
                     outcome.repaint = true;
@@ -2548,7 +2553,7 @@ impl ClientShellState {
             MouseEventKind::ScrollDown if super::contains(self.hits.agent_body, point) => {
                 let next = self
                     .agent_scroll
-                    .saturating_add(1)
+                    .saturating_add(self.config.mouse_scroll_lines)
                     .min(self.hits.agent_max_scroll);
                 if next != self.agent_scroll {
                     self.agent_scroll = next;
@@ -2556,7 +2561,9 @@ impl ClientShellState {
                 }
             }
             MouseEventKind::ScrollUp if super::contains(self.hits.workspace_body, point) => {
-                let next = self.workspace_scroll.saturating_sub(1);
+                let next = self
+                    .workspace_scroll
+                    .saturating_sub(self.config.mouse_scroll_lines);
                 if next != self.workspace_scroll {
                     self.workspace_scroll = next;
                     outcome.repaint = true;
@@ -2565,7 +2572,7 @@ impl ClientShellState {
             MouseEventKind::ScrollDown if super::contains(self.hits.workspace_body, point) => {
                 let next = self
                     .workspace_scroll
-                    .saturating_add(1)
+                    .saturating_add(self.config.mouse_scroll_lines)
                     .min(self.hits.workspace_max_scroll);
                 if next != self.workspace_scroll {
                     self.workspace_scroll = next;
@@ -2977,14 +2984,28 @@ impl ClientShellState {
             MouseEventKind::Up(MouseButton::Left | MouseButton::Middle)
             | MouseEventKind::Drag(MouseButton::Left | MouseButton::Middle) => {}
             MouseEventKind::Moved => {
+                // 借引用即可（`push_pane_mouse_event` 只读 self）：原来每移动一次
+                // 白克隆一个 `PaneHit`（HERDR-PERF-009）。
                 if let Some(hit) = self
                     .hits
                     .panes
                     .iter()
                     .find(|hit| super::contains(hit.inner_rect, point) && hit.mouse_reporting)
-                    .cloned()
                 {
-                    self.push_pane_mouse_event(&hit, mouse, mouse.modifiers, outcome);
+                    // 同一格的重复移动不转发：像素模式下同一格会被反复上报，
+                    // 应用只关心格子/像素坐标变化（HERDR-PERF-012）。
+                    let position = (
+                        hit.pane_id.clone(),
+                        mouse.column,
+                        mouse.row,
+                        mouse.modifiers,
+                    );
+                    if self.last_pane_move.as_ref() != Some(&position) {
+                        self.last_pane_move = Some(position);
+                        self.push_pane_mouse_event(hit, mouse, mouse.modifiers, outcome);
+                    }
+                } else {
+                    self.last_pane_move = None;
                 }
             }
             MouseEventKind::ScrollUp

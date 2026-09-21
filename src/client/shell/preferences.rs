@@ -84,6 +84,11 @@ pub(super) struct ClientChromePreferences {
     pub(super) collapsed_groups: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub(super) remote_collapsed_groups: Vec<ClientRemoteCollapsedGroups>,
+    /// 侧栏里折叠起来的端点（`ClientEndpointId::storage_key`）。与
+    /// `collapsed_groups` 同族：重启/重新 attach 之后机器分组仍然保持折叠
+    /// （STATE-05）。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(super) collapsed_endpoints: Vec<String>,
     /// Command palette MRU ids (newest first), capped on write.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub(super) palette_recent: Vec<String>,

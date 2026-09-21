@@ -851,14 +851,20 @@ pub(super) fn machine_list_rows(
     endpoints: &[ClientShellEndpoint],
     query: &str,
 ) -> Vec<MachineListRow> {
+    // 端点索引建一次：原来每个 profile 都要线性扫一遍 endpoints，并为比较
+    // 克隆一份 `ClientEndpointId`（HERDR-MACH-017）。
+    let mut by_profile: HashMap<&ProfileId, &ClientShellEndpoint> =
+        HashMap::with_capacity(endpoints.len());
+    for endpoint in endpoints {
+        if let ClientEndpointId::Ssh(profile_id) = &endpoint.endpoint_id {
+            by_profile.entry(profile_id).or_insert(endpoint);
+        }
+    }
     saved_profiles
         .iter()
         .filter(|profile| machine_matches(profile, query))
         .map(|profile| {
-            let endpoint_id = ClientEndpointId::Ssh(profile.id.clone());
-            let endpoint = endpoints
-                .iter()
-                .find(|endpoint| endpoint.endpoint_id == endpoint_id);
+            let endpoint = by_profile.get(&profile.id).copied();
             MachineListRow {
                 id: profile.id.clone(),
                 label: profile.label.clone(),

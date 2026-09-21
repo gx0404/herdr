@@ -1,5 +1,32 @@
 use super::*;
 
+/// 把 `rect` 之外、`buffer` 之内的四条件带压暗一帧（浮层入场提示，
+/// HERDR-UX-07）。整屏压暗留给后续需要时再抽，这里只服务入场效果。
+fn dim_around(buffer: &mut ratatui::buffer::Buffer, rect: Rect) {
+    let area = buffer.area;
+    let bands = [
+        Rect::new(area.x, area.y, area.width, rect.y.saturating_sub(area.y)),
+        Rect::new(
+            area.x,
+            rect.bottom(),
+            area.width,
+            area.bottom().saturating_sub(rect.bottom()),
+        ),
+        Rect::new(area.x, rect.y, rect.x.saturating_sub(area.x), rect.height),
+        Rect::new(
+            rect.right(),
+            rect.y,
+            area.right().saturating_sub(rect.right()),
+            rect.height,
+        ),
+    ];
+    for band in bands {
+        if !band.is_empty() {
+            buffer.set_style(band, Style::default().add_modifier(Modifier::DIM));
+        }
+    }
+}
+
 impl ClientShellState {
     fn prepare_chrome_feedback(&mut self, now: std::time::Instant) {
         // Entrance-fade clocks: overlay kind transitions and toast arrivals
@@ -981,13 +1008,17 @@ impl ClientShellState {
                 })
             };
             self.hits.overlay_bounds = entrance_area;
-            if self.overlay_since.is_some_and(|since| {
-                compose_now.duration_since(since) < super::feedback::ENTRANCE_DURATION
-            }) && !entrance_area.is_empty()
+            let modal_overlay = !self.overlay_passes_input(None);
+            if modal_overlay
+                && self.overlay_since.is_some_and(|since| {
+                    compose_now.duration_since(since) < super::feedback::ENTRANCE_DURATION
+                })
+                && !entrance_area.is_empty()
             {
-                canvas
-                    .buffer()
-                    .set_style(entrance_area, Style::default().add_modifier(Modifier::DIM));
+                // 入场提示压暗的是浮层**周围**的一帧：压自己会把边框、标题与
+                // 按钮一起变暗，看起来像渲染故障（HERDR-UX-07）。非模态浮层
+                // （用量仪表盘）本来就不遮画面，不参与。
+                dim_around(canvas.buffer(), entrance_area);
             }
             canvas.set_cursor(cursor);
             // CFP-15：浮层矩形内的格归浮层所有，即使符号巧合未变也不再保留 OSC 8 链接。

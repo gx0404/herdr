@@ -1419,6 +1419,9 @@ pub(crate) struct ClientShellState {
     pub(super) page_drag: Option<super::floating_pages::Drag>,
     pub(super) previous_pane_id: Option<String>,
     pub(super) pane_mouse_gesture: Option<ClientPaneMouseGesture>,
+    /// 上一次转发给 pane 的裸移动坐标（pane id + 列/行 + 修饰键）：同一格
+    /// 重复上报不重复转发（HERDR-PERF-012）。
+    pub(super) last_pane_move: Option<(String, u16, u16, crossterm::event::KeyModifiers)>,
     pub(super) link_hover: Option<super::link_hover::LinkHover>,
     /// Active link hints session (two-letter URL markers over the viewport).
     pub(super) link_hints: Option<super::link_hints::ClientLinkHints>,
@@ -1627,7 +1630,11 @@ impl ClientShellState {
             reconnect_progress: HashMap::new(),
             next_machine_auth_ticket: 1,
             active_endpoint_id: ClientEndpointId::Local,
-            collapsed_endpoints: HashSet::new(),
+            collapsed_endpoints: preferences
+                .collapsed_endpoints
+                .iter()
+                .filter_map(|key| ClientEndpointId::from_storage_key(key))
+                .collect(),
             mode: ClientShellMode::Terminal,
             navigate_workspace_id: None,
             reveal_navigation_workspace: false,
@@ -1637,6 +1644,7 @@ impl ClientShellState {
             page_drag: None,
             previous_pane_id: None,
             pane_mouse_gesture: None,
+            last_pane_move: None,
             link_hover: None,
             link_hints: None,
             url_click_consumes_until_up: false,
@@ -1863,6 +1871,7 @@ impl ClientShellState {
             .then_some(ClientShellOverlay::Onboarding);
         self.previous_pane_id = None;
         self.pane_mouse_gesture = None;
+        self.last_pane_move = None;
         self.link_hover = None;
         self.link_hints = None;
         self.url_click_consumes_until_up = false;
@@ -2228,6 +2237,7 @@ impl ClientShellState {
         if surface.projection_revision == snapshot.revision.saturating_add(1) {
             // The next expected surface waits separately for its exact snapshot. Keeping the
             // current pair avoids treating this speculative successor as presentation evidence.
+            //
             self.pending_pane_surface = Some(surface);
             self.hits = ShellHitMap::default();
             return;
@@ -2302,6 +2312,8 @@ impl ClientShellState {
                 gesture.hit.popup && previous_popup.as_deref() == Some(gesture.hit.pane_id.as_str())
             }) {
                 self.pane_mouse_gesture = None;
+                self.last_pane_move = None;
+                self.last_pane_move = None;
             }
             self.hits.popup = None;
             self.endpoint_error = None;
