@@ -1681,6 +1681,42 @@ async fn retained_patch_omits_metadata_for_panes_without_rows_or_changes() {
 
     shutdown_test_runtimes(&mut server);
 }
+
+/// RS-12：纯 chrome 变化（tab-bar 文本）只刷新客户端 shell 投影，不重发
+/// pane surface。
+#[tokio::test]
+async fn chrome_only_change_streams_the_projection_without_a_pane_surface() {
+    let mut server = test_headless_server();
+    let _pane_id = install_shared_view_test_runtime(&mut server);
+    let (control, render) = connect_matching_test_shell(&mut server, 7);
+    assert!(client_shell_snapshot(read_server_message(
+        control.recv().expect("initial snapshot")
+    ))
+    .tab_bar_right
+    .is_empty());
+    server.render_and_stream();
+    let _ = recv_pane_surface(&render, "baseline");
+
+    // tab-bar 右段文本变化：投影纪元由写入点递增（HSR-05）。
+    server.app.state.tab_bar_right = vec![crate::app::state::TabBarStatusSegment::Text(Some(
+        "12:00".into(),
+    ))];
+    server.app.state.bump_projection_epoch();
+    server.stream_client_shell_projections();
+
+    let snapshot = client_shell_snapshot(read_server_message(
+        control.recv().expect("chrome-only projection"),
+    ));
+    assert_eq!(snapshot.tab_bar_right.len(), 1);
+    assert_eq!(snapshot.tab_bar_right[0].text, "12:00");
+    assert!(
+        render.try_recv().is_err(),
+        "chrome-only refresh must not resend the pane surface"
+    );
+
+    shutdown_test_runtimes(&mut server);
+}
+
 /// 两个接收者的链接表长度不同（重建/重连后基线表长不一）时，增量表与单元格
 /// 索引必须各自对齐自己的基线：同一份 pane 内容不能对两个客户端算出同一组
 /// 绝对索引。
@@ -5862,7 +5898,11 @@ fn headless_scheduled_tasks_expire_agent_metadata() {
         Some("short lived")
     );
 
-    assert!(server.handle_scheduled_tasks_headless(deadline + Duration::from_millis(1), false));
+    assert!(
+        server
+            .handle_scheduled_tasks_headless(deadline + Duration::from_millis(1), false)
+            .surface
+    );
 
     assert_eq!(server.app.agent_metadata_deadline, None);
     assert_eq!(
@@ -5898,8 +5938,51 @@ fn headless_scheduled_tasks_clears_disabled_agent_manifest_update_deadline() {
     let now = Instant::now();
     server.app.next_agent_manifest_update_check = Some(now - Duration::from_millis(1));
 
-    assert!(!server.handle_scheduled_tasks_headless(now, false));
+    let impact = server.handle_scheduled_tasks_headless(now, false);
+    assert!(!impact.surface && !impact.chrome);
     assert_eq!(server.app.next_agent_manifest_update_check, None);
+}
+
+/// RS-12 回归护栏：纯 chrome tick 必须继续走到投影刷新——不能被「只有 OSC
+/// 标题这类客户端本地副作用」的早退吞掉（会让 tab-bar 文本停止更新）。
+#[test]
+fn projection_only_render_work_is_not_swallowed_by_the_client_local_early_exit() {
+    assert!(!RenderWork {
+        full: false,
+        graphics: false,
+        pty: false,
+        projection_only: true,
+    }
+    .only_client_local_title_work());
+    assert!(RenderWork {
+        full: false,
+        graphics: false,
+        pty: false,
+        projection_only: false,
+    }
+    .only_client_local_title_work());
+    for work in [
+        RenderWork {
+            full: true,
+            graphics: false,
+            pty: false,
+            projection_only: false,
+        },
+        RenderWork {
+            full: false,
+            graphics: true,
+            pty: false,
+            projection_only: false,
+        },
+        RenderWork {
+            full: false,
+            graphics: false,
+            pty: true,
+            projection_only: false,
+        },
+    ] {
+        assert!(!work.only_client_local_title_work());
+    }
 }
 
 #[cfg(unix)]
@@ -5928,14 +6011,18 @@ async fn headless_scheduled_tasks_start_pending_agent_resume_without_foreground_
     assert_ne!(server.app.state.view.terminal_area, Rect::default());
 
     let now = Instant::now();
-    assert!(!server.handle_scheduled_tasks_headless(now, false));
+    assert!(!server.handle_scheduled_tasks_headless(now, false).surface);
     assert!(server.app.terminal_runtimes.get(&terminal_id).is_none());
     let deadline = server
         .app
         .pending_agent_resume_deadline
         .expect("clientless resume should wait briefly for a host theme");
 
-    assert!(server.handle_scheduled_tasks_headless(deadline, false));
+    assert!(
+        server
+            .handle_scheduled_tasks_headless(deadline, false)
+            .surface
+    );
     assert!(server.app.terminal_runtimes.get(&terminal_id).is_some());
     assert!(server
         .app

@@ -516,11 +516,19 @@ impl HeadlessServer {
             // 6. Handle scheduled tasks.
             let now = Instant::now();
             self.text_snapshots.expire(now);
-            if self.handle_scheduled_tasks_headless(now, needs_render) {
+            let scheduled = self.handle_scheduled_tasks_headless(now, needs_render);
+            let mut projection_only_render = false;
+            if scheduled.surface {
                 needs_render = true;
                 needs_full_render = true;
                 needs_graphics_render = false;
                 crate::render_prof::event("full_render_cause.scheduled_tasks");
+            } else if scheduled.chrome {
+                // RS-12：纯 chrome（tab-bar 文本、配置诊断、toast 过期）只刷新
+                // 客户端投影，不把整面 pane surface 重发一遍。
+                needs_render = true;
+                projection_only_render = true;
+                crate::render_prof::event("projection_only.scheduled_chrome");
             }
 
             self.poll_pending_alt_screen_reads(now);
@@ -593,7 +601,13 @@ impl HeadlessServer {
                     // 焦点切换引发的整帧渲染也是 cwd 上送的时机（焦点面变化时 cwd 变）。
                     self.sync_terminal_cwd();
                 }
-                if !needs_full_render && !needs_graphics_render && !pty_dirty {
+                let work = RenderWork {
+                    full: needs_full_render,
+                    graphics: needs_graphics_render,
+                    pty: pty_dirty,
+                    projection_only: projection_only_render,
+                };
+                if work.only_client_local_title_work() {
                     // A synchronized-output OSC title can be the only pending work.
                     // Its deferred PTY repaint has its own signal; do not manufacture
                     // a full UI render for this client-local side effect.
@@ -604,7 +618,11 @@ impl HeadlessServer {
                     && !needs_full_render
                     && !needs_graphics_render
                     && !self.pty_sources_visible_to_any_render_target(&render_request.pty_sources);
-                if hidden_only {
+                if projection_only_render && !needs_full_render && !needs_graphics_render {
+                    // RS-12：投影刷新（快照/agent view）单独一条路径，不重发 surface。
+                    crate::render_prof::event("projection_only.invoke");
+                    self.stream_client_shell_projections();
+                } else if hidden_only {
                     crate::render_prof::event("render.skipped.hidden_sources");
                 } else if !needs_full_render
                     && !needs_graphics_render
@@ -3485,8 +3503,12 @@ impl HeadlessServer {
     /// Handle scheduled tasks for the headless server.
     ///
     /// Similar to the former App scheduler but without terminal resize polling.
-    fn handle_scheduled_tasks_headless(&mut self, now: Instant, geometry_dirty: bool) -> bool {
-        let mut changed = false;
+    fn handle_scheduled_tasks_headless(
+        &mut self,
+        now: Instant,
+        geometry_dirty: bool,
+    ) -> ScheduledTaskImpact {
+        let mut impact = ScheduledTaskImpact::default();
 
         // No resize polling needed — server has no terminal.
         // Client resize messages drive size changes instead.
@@ -3498,7 +3520,9 @@ impl HeadlessServer {
         {
             self.app.config_diagnostic_deadline = None;
             self.app.state.config_diagnostic = None;
-            changed = true;
+            // 诊断文本随快照下发；纪元递增才让投影重建并（在变化时）下发。
+            self.app.state.bump_projection_epoch();
+            impact.chrome = true;
         }
 
         if self
@@ -3508,7 +3532,9 @@ impl HeadlessServer {
         {
             self.app.toast_deadline = None;
             self.app.state.toast = None;
-            changed = true;
+            // 服务端 toast 状态不在 pane surface 里：客户端 shell 自行管理通知
+            // 显示时长，过期只需走一次投影刷新。
+            impact.chrome = true;
         }
 
         if self
@@ -3526,7 +3552,7 @@ impl HeadlessServer {
                 for delivery in &deliveries {
                     self.forward_agent_notification_delivery(delivery);
                 }
-                changed = true;
+                impact.chrome = true;
             }
         }
 
@@ -3565,21 +3591,53 @@ impl HeadlessServer {
             .agent_metadata_deadline
             .filter(|deadline| now >= *deadline)
         {
+            // agent 状态进入 pane 边框标题（`border_label`），过期是整数帧变化。
             self.app.expire_metadata_at(deadline, now);
-            changed = true;
+            impact.surface = true;
         }
 
-        changed |= self.app.handle_tab_bar_status_tasks(now);
+        if self.app.handle_tab_bar_status_tasks(now) {
+            // tab-bar 右段文本只进投影（HSR-05 写入点已递增纪元）。
+            impact.chrome = true;
+        }
 
         if geometry_dirty {
             self.app.pending_agent_resume_deadline = None;
         } else {
             self.app.sync_pending_agent_resume_deadline(now);
-            changed |= self
+            if self
                 .app
-                .start_pending_agent_resumes(self.app.pending_agent_resume_due(now));
+                .start_pending_agent_resumes(self.app.pending_agent_resume_due(now))
+            {
+                impact.surface = true;
+            }
         }
-        changed
+        impact
+    }
+}
+
+/// RS-12：定时任务变化的影响面。`surface` 需要整帧重绘；`chrome` 只影响客户端
+/// 投影（快照 / agent view）与客户端本地 chrome，不必重发 pane surface。
+#[derive(Debug, Clone, Copy, Default)]
+struct ScheduledTaskImpact {
+    surface: bool,
+    chrome: bool,
+}
+
+/// RS-12：本 tick 的渲染工作量分类。只有 OSC 标题这类客户端本地副作用的 tick
+/// 不该制造渲染；纯 chrome（投影）tick 必须继续走到投影刷新，不能一起被早退
+/// 吞掉（否则 tab-bar 文本不再更新）。
+#[derive(Debug, Clone, Copy)]
+struct RenderWork {
+    full: bool,
+    graphics: bool,
+    pty: bool,
+    projection_only: bool,
+}
+
+impl RenderWork {
+    fn only_client_local_title_work(self) -> bool {
+        !self.full && !self.graphics && !self.pty && !self.projection_only
     }
 }
 
