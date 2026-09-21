@@ -139,6 +139,12 @@ struct ManifestCache {
 }
 
 impl ManifestCache {
+    fn empty() -> Self {
+        Self {
+            manifests: std::array::from_fn(|_| None),
+        }
+    }
+
     fn get(&self, agent: Agent) -> Option<Arc<LoadedManifest>> {
         let loaded = &self.manifests[agent as usize];
         debug_assert_eq!(Agent::ALL[agent as usize], agent);
@@ -294,7 +300,9 @@ pub(crate) fn reload_manifests() -> Vec<AgentManifestSummary> {
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let cache = build_manifest_cache();
     let summaries = manifest_summaries_from_cache(&cache);
-    let lock = MANIFEST_CACHE.get_or_init(|| RwLock::new(cache.clone()));
+    // DET-04：首次调用时缓存还没有值，`get_or_init` 里克隆整份 cache 是白做
+    // （紧接着就被下面的写入覆盖）。用空缓存占位再写入。
+    let lock = MANIFEST_CACHE.get_or_init(|| RwLock::new(ManifestCache::empty()));
     match lock.write() {
         Ok(mut guard) => *guard = cache,
         Err(poisoned) => *poisoned.into_inner() = cache,
