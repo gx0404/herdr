@@ -161,9 +161,6 @@ pub(crate) fn tab_surface_cursor(
 ) -> Option<CursorState> {
     let ws_idx = surface.target?.workspace_index;
     let info = surface.pane_infos.iter().find(|info| info.is_focused)?;
-    if !app.pane_exposes_host_cursor(ws_idx, info.id) {
-        return None;
-    }
     let runtime = app.runtime_for_pane_in_workspace(terminal_runtimes, ws_idx, info.id)?;
     pane_host_cursor(
         runtime,
