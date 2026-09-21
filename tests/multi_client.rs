@@ -147,9 +147,14 @@ fn api_request(socket: &Path, request: &str) -> Value {
 }
 
 fn create_pane(socket: &Path, label: &str) -> String {
+    // `focus` 默认 false：不聚焦的新工作区对 client shell 不可见，pane 输出会被
+    // 判为 hidden source 而不产生渲染。这两条用例断言的是「可见 pane 的输出/几何
+    // 如何扇出」，因此必须让新建工作区成为当前工作区。
     let result = api_request(
         socket,
-        &format!(r#"{{"id":"create","method":"workspace.create","params":{{"label":"{label}"}}}}"#),
+        &format!(
+            r#"{{"id":"create","method":"workspace.create","params":{{"label":"{label}","focus":true}}}}"#
+        ),
     );
     assert!(
         result.get("error").is_none(),
