@@ -159,12 +159,12 @@ mod tests {
         saved
             .identities
             .insert("kimi:default".into(), "bad\u{7}id".into());
-        saved.identities.insert("omp:default".into(), String::new());
+        saved.identities.insert("pi:default".into(), String::new());
         let configured = [
             "claude:default",
             "codex:default",
             "kimi:default",
-            "omp:default",
+            "pi:default",
         ];
         saved.prune_identities(|id| configured.contains(&id));
         assert_eq!(

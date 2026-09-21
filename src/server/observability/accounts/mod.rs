@@ -30,6 +30,9 @@ pub(super) const CALLBACK_LATCH_MS: u64 = 15 * 60 * 1000;
 /// 回调闩锁到期后写入快照的说明；样本与采样时间原样保留。
 const CALLBACK_STALE_MESSAGE: &str =
     "官方回调已超过 15 分钟未更新，显示的是缓存样本；等待下一次回调";
+/// 同上，样本来自 herdr 集成扩展的推送（pi）时的说明：会话空闲时扩展不会推送。
+const EXTENSION_PUSH_STALE_MESSAGE: &str =
+    "集成扩展已超过 15 分钟未推送，显示的是缓存的会话统计；会话继续后更新";
 /// 配置文件戳的复查周期；已安装厂商与终态指纹的复查对齐 `registry::AVAILABILITY_TTL`。
 const RELOAD_INTERVAL: Duration = Duration::from_secs(5);
 /// 隐式默认账号（`<agent>:default`）在官方 CLI 暂时检测不到时的保留时长：PATH 抖动、
@@ -988,7 +991,16 @@ fn age_out_callbacks(cache: &mut HashMap<String, CacheEntry>, now_ms: u64) -> Ve
         let expired = entry.callback_until_ms.is_some_and(|until| now_ms >= until);
         if expired && entry.snapshot.status == ObservationStatus::Ready {
             entry.snapshot.status = ObservationStatus::Stale;
-            entry.snapshot.message = Some(CALLBACK_STALE_MESSAGE.into());
+            let pushed_by_extension = registry::provider(&entry.snapshot.agent)
+                .is_some_and(registry::supports_extension_push);
+            entry.snapshot.message = Some(
+                if pushed_by_extension {
+                    EXTENSION_PUSH_STALE_MESSAGE
+                } else {
+                    CALLBACK_STALE_MESSAGE
+                }
+                .into(),
+            );
             aged.push(id.clone());
         }
     }
@@ -1157,8 +1169,8 @@ fn uses_api(account: &UsageAccountConfig) -> bool {
 }
 
 /// 对外播报的最小刷新间隔（秒）——`account.usage.providers` 的 `minimum_interval_seconds`
-/// 与自动轮询间隔的唯一真源。API 凭据与报表接口按 `api_refresh_seconds`（≥60）；回调型厂商
-/// 没有可轮询的官方接口，播报 0；其余 CLI 探测按 `cli_refresh_seconds`（≥300）。
+/// 与自动轮询间隔的唯一真源。API 凭据按 `api_refresh_seconds`（≥60）；回调型与扩展推送型
+/// 厂商没有可轮询的官方接口，播报 0；其余 CLI 探测按 `cli_refresh_seconds`（≥300）。
 fn minimum_interval_seconds(
     provider: Option<&registry::Provider>,
     api: bool,
@@ -1168,8 +1180,7 @@ fn minimum_interval_seconds(
         return config.api_refresh_seconds.max(60);
     }
     match provider.map(|provider| provider.query) {
-        Some(registry::Query::Callback) => 0,
-        Some(registry::Query::Portal) => config.api_refresh_seconds.max(60),
+        Some(registry::Query::Callback | registry::Query::ExtensionPush) => 0,
         _ => config.cli_refresh_seconds.max(300),
     }
 }
@@ -1581,16 +1592,25 @@ fn claude_probe(
     Err((ObservationStatus::NeedsBinding, message))
 }
 
-/// 非交互查询回退到备用参数形态时的来源说明：`local` 作用域的厂商（opencode）标明是
-/// 本地会话统计，与账号额度分区。
-fn json_fallback_source(provider: &registry::Provider, args: &[&str]) -> String {
-    let command = format!("{} {}", provider.command, args.join(" "));
+/// 非交互查询的来源说明：实际选用的命令形态（查询体之类带空白的参数不进文案）；`local`
+/// 作用域的厂商（opencode）无论走哪种形态都标明是本地会话统计、不是账号额度。
+fn json_query_source(provider: &registry::Provider, args: &[&str]) -> String {
+    let shown = args
+        .iter()
+        .filter(|arg| !arg.contains(char::is_whitespace))
+        .copied()
+        .collect::<Vec<_>>()
+        .join(" ");
+    let command = format!("{} {shown}", provider.command);
     if provider.scope == "local" {
-        format!("{command} · 本地会话统计")
+        format!("{command} · 本地会话统计，非账号额度")
     } else {
         command
     }
 }
+
+/// pi 的占位说明：用量只由 herdr 的 pi 扩展在会话内推送，探测不起任何进程。
+const PI_WAITING_MESSAGE: &str = "等待 herdr 的 pi 扩展推送会话用量：请确认已安装并更新 pi 集成（herdr integration install pi），并在 herdr 窗格内运行 pi；每轮响应结束后推送一次。这是会话统计，不是账号额度";
 
 fn query(account: &UsageAccountConfig, timeout: Duration, options: ProbeOptions) -> ProbeOutcome {
     let mut snapshot = empty_snapshot(account);
@@ -1631,32 +1651,31 @@ fn query(account: &UsageAccountConfig, timeout: Duration, options: ProbeOptions)
                     parse::kimi(&usage)
                 })
             }
-            registry::Query::Json { args, fallback_args } => {
-                snapshot.source = provider.method.into();
-                transport::capture_query(provider, account, args, fallback_args, timeout, |text, _| {
-                    if provider.agent == "letta" { return Ok(parse::letta(text)); }
-                    if let Ok(value) = serde_json::from_str::<serde_json::Value>(text) {
-                        if provider.agent == "omp" { parse::omp(&value, account) } else { Ok(parse::structured(&value, provider.scope)) }
-                    } else if provider.agent == "opencode" {
-                        // 无 `--json` 的回退形态：框线表是本地会话统计，不是账号额度。
-                        Ok(parse::opencode_stats(text))
-                    } else { Ok(parse::screen(text, provider.scope)) }
-                })
+            registry::Query::Json {
+                args,
+                fallback_args,
+            } => {
+                snapshot.source = json_query_source(provider, args);
+                transport::capture_query(
+                    provider,
+                    account,
+                    args,
+                    fallback_args,
+                    timeout,
+                    |text, chosen| {
+                        // 两种形态都是本地会话统计，不是账号额度：首选形态是 session 表的聚合行
+                        // （JSON），回退形态是 `stats` 的框线表。
+                        Ok(if chosen.first() == Some(&"db") {
+                            parse::opencode_sessions(text)
+                        } else {
+                            parse::opencode_stats(text)
+                        })
+                    },
+                )
                 .map(|outcome| {
-                    if outcome.args != args {
-                        snapshot.source = json_fallback_source(provider, outcome.args);
-                    }
+                    snapshot.source = json_query_source(provider, outcome.args);
                     outcome.metrics
                 })
-            }
-            registry::Query::Interactive(command) => {
-                snapshot.source = format!("官方 CLI {command}");
-                transport::interactive(provider, account, command, timeout, None)
-                    .map(|text| parse::screen(&text, provider.scope))
-                    .map_err(|error| {
-                        flags.trust_required = error.trust_required;
-                        (error.status, error.message)
-                    })
             }
             registry::Query::Callback if provider.agent == "claude" => claude_probe(
                 &RealClaudeTransport,
@@ -1667,15 +1686,16 @@ fn query(account: &UsageAccountConfig, timeout: Duration, options: ProbeOptions)
                 &mut snapshot,
                 &mut flags,
             ),
-            registry::Query::Callback if provider.agent == "antigravity" => Err((ObservationStatus::NeedsBinding, "请将官方 statusline JSON 接入 herdr api usage-report --agent antigravity；等待 quota 字段".into())),
             registry::Query::Callback => Err((
                 ObservationStatus::NeedsBinding,
                 "此工具的会话统计不代表账号额度；请绑定实际计费厂商，或启用官方用量回调".into(),
             )),
-            registry::Query::Portal => Err((
-                ObservationStatus::NeedsBinding,
-                "请配置官方报表接口的凭据引用与账号范围；官方页面入口可随时打开".into(),
-            )),
+            registry::Query::ExtensionPush => {
+                // 稳定占位：没有可轮询的接口，样本只来自扩展推送，按慢 TTL 保持即可。
+                snapshot.source = "herdr 集成扩展推送".into();
+                flags.slow_poll = true;
+                Err((ObservationStatus::NeedsBinding, PI_WAITING_MESSAGE.into()))
+            }
         }
     } else {
         Err((
@@ -1948,19 +1968,60 @@ mod tests {
     }
 
     #[test]
-    fn json_fallback_source_marks_local_scope_vendors_only() {
+    fn json_query_source_marks_local_statistics_on_every_shape() {
         let opencode = registry::provider("opencode").expect("opencode 已登记");
+        let registry::Query::Json {
+            args,
+            fallback_args,
+        } = opencode.query
+        else {
+            panic!("opencode 是非交互子命令查询");
+        };
         assert_eq!(
-            json_fallback_source(opencode, &["stats"]),
-            "opencode stats · 本地会话统计",
-            "opencode 的回退形态是本地会话统计，来源说明给人看；客户端分区以 metric.scope 为准"
+            json_query_source(opencode, args),
+            "opencode db --format json · 本地会话统计，非账号额度",
+            "首选形态：查询体不进文案，但「本地统计、非账号额度」必须明示"
         );
-        let omp = registry::provider("omp").expect("omp 已登记");
-        assert_eq!(json_fallback_source(omp, &["usage"]), "omp usage");
         assert_eq!(
-            json_fallback_source(omp, &["usage", "--plain"]),
-            "omp usage --plain"
+            json_query_source(opencode, fallback_args.expect("opencode 有回退形态")),
+            "opencode stats · 本地会话统计，非账号额度",
+            "回退形态同样明示；客户端分区以 metric.scope 为准"
         );
+        // 账号作用域的厂商不带这条说明。
+        let codex = registry::provider("codex").expect("codex 已登记");
+        assert_eq!(
+            json_query_source(codex, &["usage", "--plain"]),
+            "codex usage --plain"
+        );
+    }
+
+    /// pi 的探测不起进程：稳定占位说明用量来自扩展推送，并按慢 TTL 保持。
+    #[test]
+    fn pi_probe_is_a_stable_placeholder_that_waits_for_the_extension_push() {
+        let account = UsageAccountConfig {
+            id: "pi:default".into(),
+            agent: "pi".into(),
+            ..Default::default()
+        };
+        let outcome = query(
+            &account,
+            Duration::from_secs(5),
+            ProbeOptions {
+                manual: true,
+                interactive_probe: true,
+            },
+        );
+        assert_eq!(outcome.snapshot.status, ObservationStatus::NeedsBinding);
+        assert!(outcome.slow_poll);
+        assert!(!outcome.trust_required);
+        let message = outcome.snapshot.message.expect("占位说明");
+        assert!(
+            message.contains("herdr integration install pi"),
+            "{message}"
+        );
+        assert!(message.contains("不是账号额度"), "{message}");
+        assert_eq!(outcome.snapshot.source, "herdr 集成扩展推送");
+        assert!(outcome.snapshot.metrics.is_empty());
     }
 
     #[test]
@@ -2254,15 +2315,18 @@ mod tests {
     fn minimum_interval_is_the_single_source_for_advertising_and_polling() {
         let config = AccountUsageConfig::default();
         let claude = registry::provider("claude");
-        let cursor = registry::provider("cursor");
+        let opencode = registry::provider("opencode");
         let pi = registry::provider("pi");
-        // 播报值：交互/JSON 探测按 CLI 周期，报表接口按 API 周期，回调型为 0
-        // （claude 主路径已改为官方 statusline 回调）。
-        let gemini = registry::provider("gemini");
-        assert_eq!(minimum_interval_seconds(gemini, false, &config), 300);
+        // 播报值：CLI 探测按 CLI 周期，回调型与扩展推送型为 0（claude 主路径是官方 statusline
+        // 回调，pi 的用量由 herdr 扩展推送）。
+        assert_eq!(minimum_interval_seconds(opencode, false, &config), 300);
         assert_eq!(minimum_interval_seconds(claude, false, &config), 0);
-        assert_eq!(minimum_interval_seconds(cursor, false, &config), 60);
         assert_eq!(minimum_interval_seconds(pi, false, &config), 0);
+        assert_eq!(
+            minimum_interval_seconds(None, false, &config),
+            300,
+            "未登记的 agent 按 CLI 周期"
+        );
         assert_eq!(minimum_interval_seconds(claude, true, &config), 60);
         // 自动轮询取同一真源；回调型厂商的占位探测按 CLI 周期而不是 0。
         let account = |agent: &str, auth_mode: &str| UsageAccountConfig {
@@ -2270,11 +2334,10 @@ mod tests {
             auth_mode: auth_mode.into(),
             ..Default::default()
         };
-        assert_eq!(refresh_interval(&account("cursor", "cli"), &config), 60);
         assert_eq!(refresh_interval(&account("pi", "cli"), &config), 300);
         assert_eq!(refresh_interval(&account("claude", "api"), &config), 60);
         assert_eq!(refresh_interval(&claude_account(), &config), 300);
-        assert_eq!(refresh_interval(&account("gemini", "cli"), &config), 300);
+        assert_eq!(refresh_interval(&account("opencode", "cli"), &config), 300);
         // 显式刷新防抖是固定 10 s，与厂商间隔无关。
         assert_eq!(MANUAL_DEBOUNCE, Duration::from_secs(10));
     }
@@ -2476,17 +2539,17 @@ mod tests {
             !refresh_state(&entry, &account, &opted_in, now, 1_000).callback_only,
             "开启交互探测后显式刷新可回落到 /usage"
         );
-        let gemini = UsageAccountConfig {
-            id: "gemini:default".into(),
-            agent: "gemini".into(),
+        let kimi = UsageAccountConfig {
+            id: "kimi:default".into(),
+            agent: "kimi".into(),
             ..Default::default()
         };
         assert!(
-            !refresh_state(&fresh_entry(&gemini), &gemini, &config, now, 1_000).callback_only,
-            "交互型厂商有可回落的探测"
+            !refresh_state(&fresh_entry(&kimi), &kimi, &config, now, 1_000).callback_only,
+            "可主动查询的厂商：显式刷新会产生新数据"
         );
 
-        // 回调型厂商：显式刷新不会产生新数据，客户端据此禁用刷新动作。
+        // 扩展推送型厂商：显式刷新不会产生新数据，客户端据此禁用刷新动作。
         let pi = UsageAccountConfig {
             id: "pi:default".into(),
             agent: "pi".into(),
@@ -2881,6 +2944,39 @@ mod tests {
         assert_eq!(entry.snapshot.status, ObservationStatus::Ready);
         assert!(!entry.callback_latched());
         cleanup(&state);
+    }
+
+    /// pi 的样本来自扩展推送：会话空闲 15 分钟后降为缓存态，说明写的是「扩展未推送」而不是
+    /// 「官方回调」；之后的占位探测（NeedsBinding）不会把已推送的会话统计冲掉。
+    #[test]
+    fn idle_pi_session_keeps_the_pushed_statistics_as_cached_data() {
+        let now_ms = 1_700_000_000_000;
+        let mut pushed = ready_snapshot(12.0, now_ms - 1);
+        pushed.account_id = "pi:default".into();
+        pushed.agent = "pi".into();
+        let mut entry = CacheEntry::new(pushed);
+        entry.callback_until_ms = Some(now_ms - 1);
+        let mut cache = HashMap::from([("pi:default".to_string(), entry)]);
+        assert_eq!(
+            age_out_callbacks(&mut cache, now_ms),
+            vec!["pi:default".to_string()]
+        );
+        let entry = cache.get_mut("pi:default").expect("缓存条目");
+        assert_eq!(entry.snapshot.status, ObservationStatus::Stale);
+        assert_eq!(
+            entry.snapshot.message.as_deref(),
+            Some(EXTENSION_PUSH_STALE_MESSAGE)
+        );
+        let placeholder = AccountUsageSnapshot {
+            account_id: "pi:default".into(),
+            agent: "pi".into(),
+            status: ObservationStatus::NeedsBinding,
+            message: Some(PI_WAITING_MESSAGE.into()),
+            ..Default::default()
+        };
+        assert!(!merge_result(entry, placeholder, Instant::now()));
+        assert_eq!(entry.snapshot.status, ObservationStatus::Stale);
+        assert_eq!(entry.snapshot.metrics[0].used, Some(12.0), "会话统计保留");
     }
 
     // ---- 订阅参数与读路径同一份解析 ----

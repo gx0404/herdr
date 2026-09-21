@@ -5,8 +5,19 @@ use std::{io, path::PathBuf};
 /// 支持 herdr 用量 statusline 回调的厂商：名单唯一真源。`configure` / `edit` 按它拒绝其它
 /// 厂商，server 端 registry 也据此宣告 `UsageProviderInfo.supports_callback`；新增厂商只改
 /// 这里（以及 `settings_path` 的目录推导与 `src/platform` 的管道形态）。
+///
+/// 只回答「官方 statusline 回调」这一种来源：herdr 改写厂商官方 `settings.json` 的
+/// `statusLine` 来接入。由 herdr 自带集成扩展推送用量的厂商是另一种来源，见
+/// `supports_extension_push`——两份名单互斥，不要合并成一个「支持回调」的谓词。
 pub(crate) fn supports_statusline(agent: &str) -> bool {
-    matches!(agent, "claude" | "antigravity")
+    matches!(agent, "claude")
+}
+
+/// 用量由 herdr 自带集成扩展推送的厂商：名单唯一真源。扩展（`assets/<agent>/`）在会话事件里
+/// 取数并经 socket 调 `account.usage.report`；这里没有可改写的官方 `settings.json`，所以
+/// `configure` / `settings_path` 不接受这些厂商，接入与否取决于集成是否已安装。
+pub(crate) fn supports_extension_push(agent: &str) -> bool {
+    matches!(agent, "pi")
 }
 
 /// 账号的官方 `settings.json` 路径：`profile_dir` 优先于厂商默认目录。写入（`configure`）与
@@ -14,7 +25,6 @@ pub(crate) fn supports_statusline(agent: &str) -> bool {
 pub(crate) fn settings_path(account: &crate::config::UsageAccountConfig) -> io::Result<PathBuf> {
     let default_dir = match account.agent.as_str() {
         "claude" => super::env::claude_dir(),
-        "antigravity" => super::env::antigravity_runtime_dir(),
         _ => return Err(io::Error::other("此厂商未提供受支持的 statusline 配额回调")),
     };
     let dir = match account.profile_dir.as_ref() {
@@ -190,7 +200,7 @@ mod tests {
         );
         assert_eq!(statusline_enabled(&settings, "claude"), Some(true));
         assert_eq!(
-            statusline_enabled(&settings, "antigravity"),
+            statusline_enabled(&settings, "codex"),
             None,
             "命令按 agent 区分：别的厂商的 herdr 回调对本厂商是无法识别的包装，不能算未接入"
         );
@@ -287,15 +297,34 @@ mod tests {
                 crate::platform::UNRECOGNIZED_USAGE_STATUSLINE
             );
         }
-        // 别的厂商的回调同理：antigravity 的设置里不能把 claude 的回调再包一层。
+        // 别的厂商的回调同理：按另一个 agent 名检测时，claude 的回调是无法识别的包装。
         let other = format!(
             "{{\"statusLine\":{{\"type\":\"command\",\"command\":{}}}}}",
             serde_json::Value::String(
                 crate::platform::usage_statusline_pipeline("claude", "python custom.py").unwrap()
             )
         );
-        assert_eq!(statusline_enabled(&other, "antigravity"), None);
-        assert!(edit(&other, "antigravity", true).is_err());
+        assert_eq!(statusline_enabled(&other, "codex"), None);
+    }
+
+    /// 「官方 statusline 回调」与「扩展推送」是两种来源：名单互斥；扩展推送型厂商没有可改写的
+    /// 官方 settings，`edit` / `settings_path` 一律拒绝，不会去写一个不存在的 statusLine 契约。
+    #[test]
+    fn statusline_and_extension_push_sources_are_disjoint() {
+        assert!(supports_statusline("claude") && !supports_extension_push("claude"));
+        assert!(supports_extension_push("pi") && !supports_statusline("pi"));
+        for agent in ["codex", "kimi", "opencode", "antigravity", "gemini"] {
+            assert!(!supports_statusline(agent) && !supports_extension_push(agent));
+        }
+        for agent in ["pi", "codex", "antigravity"] {
+            assert!(edit("{}", agent, true).is_err(), "{agent}");
+            let account = crate::config::UsageAccountConfig {
+                id: format!("{agent}:default"),
+                agent: agent.into(),
+                ..Default::default()
+            };
+            assert!(settings_path(&account).is_err(), "{agent}");
+        }
     }
 
     /// 文档推荐的手写集成（`herdr api usage-report --agent <agent>`）没有 herdr 包装特征：

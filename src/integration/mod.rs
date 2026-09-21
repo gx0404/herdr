@@ -14,6 +14,7 @@ mod version;
 pub(crate) use usage::configure as configure_usage;
 pub(crate) use usage::settings_path as usage_settings_path;
 pub(crate) use usage::statusline_enabled as usage_statusline_enabled;
+pub(crate) use usage::supports_extension_push as usage_supports_extension_push;
 pub(crate) use usage::supports_statusline as usage_supports_statusline;
 
 pub(crate) use actions::{
@@ -22,8 +23,8 @@ pub(crate) use actions::{
 #[cfg(test)]
 pub(crate) use env::integration_env_lock;
 pub(crate) use env::{
-    apply_pane_base_env, claude_dir, claude_state_file, codex_dir, gemini_dir, grok_dir, kimi_dir,
-    opencode_data_dir, HERDR_PANE_ID_ENV_VAR, HERDR_TAB_ID_ENV_VAR, HERDR_WORKSPACE_ID_ENV_VAR,
+    apply_pane_base_env, claude_dir, claude_state_file, codex_dir, kimi_dir, opencode_data_dir,
+    HERDR_PANE_ID_ENV_VAR, HERDR_TAB_ID_ENV_VAR, HERDR_WORKSPACE_ID_ENV_VAR,
 };
 pub(crate) use registry::{
     codex_layout_binary_path, command_available, command_path_candidates, executable_file_exists,
@@ -43,7 +44,7 @@ pub(crate) const EXPERIMENTAL_INTEGRATION_TARGET_LABELS: &[&str] = &["letta"];
 
 const PI_EXTENSION_INSTALL_NAME: &str = "herdr-agent-state.ts";
 const PI_EXTENSION_ASSET: &str = include_str!("assets/pi/herdr-agent-state.ts");
-const PI_INTEGRATION_VERSION: u32 = 9;
+const PI_INTEGRATION_VERSION: u32 = 10;
 const OMP_EXTENSION_INSTALL_NAME: &str = "herdr-omp-agent-state.ts";
 const OMP_EXTENSION_ASSET: &str = include_str!("assets/omp/herdr-agent-state.ts");
 const OMP_INTEGRATION_VERSION: u32 = 10;

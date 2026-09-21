@@ -630,6 +630,231 @@ test("Pi retries working state after an unanswered socket attempt", async () => 
   expect(reportedWorking()).toBe(true);
 });
 
+function assistantEntry(overrides: Record<string, unknown> = {}) {
+  return {
+    type: "message",
+    message: {
+      role: "assistant",
+      provider: "anthropic",
+      model: "claude-sonnet-4-5",
+      // Session entries carry cost as an object; `total` is the billed amount.
+      usage: {
+        input: 1000,
+        output: 200,
+        cacheRead: 3000,
+        cacheWrite: 40,
+        totalTokens: 4240,
+        cost: { input: 0.1, output: 0.2, cacheRead: 0.05, cacheWrite: 0.01, total: 0.36 },
+      },
+      ...overrides,
+    },
+  };
+}
+
+function piUsageContext(options: {
+  isIdle?: () => boolean;
+  mode?: string;
+  contextUsage?: unknown;
+  entries?: unknown[];
+  model?: unknown;
+}) {
+  return {
+    ...piContext(options.isIdle ?? (() => true)),
+    mode: options.mode ?? "tui",
+    model: options.model,
+    getContextUsage: () => options.contextUsage,
+    sessionManager: {
+      getSessionFile: () => undefined,
+      getSessionId: () => undefined,
+      getEntries: () => options.entries ?? [],
+    },
+  };
+}
+
+function usageReports(requests: unknown[]): Record<string, unknown>[] {
+  return requests
+    .filter((request) => isRecord(request) && request.method === "account.usage.report")
+    .map((request) => (request as { params: Record<string, unknown> }).params);
+}
+
+test("Pi pushes session usage with the billed provider and model", async () => {
+  const requests = await startRecordingServer("pi-usage-push");
+  const { handlers, pi } = createExtensionHarness();
+  const { default: install } = await importFresh("./pi/herdr-agent-state.ts");
+  install(pi);
+
+  expect(handlers.has("turn_end")).toBe(true);
+  expect(handlers.has("session_compact")).toBe(true);
+
+  const entries: unknown[] = [];
+  const context = piUsageContext({
+    contextUsage: { tokens: 45_000, contextWindow: 200_000, percent: 22.5 },
+    entries,
+    model: { provider: "anthropic", id: "claude-sonnet-4-5" },
+  });
+  await handlers.get("session_start")?.({ reason: "startup" }, context);
+  await waitFor(() => usageReports(requests).length === 1);
+  // No assistant usage yet: only the context gauge and the configured model.
+  expect(usageReports(requests)[0]).toEqual({
+    agent: "pi",
+    pane_id: "test:p1",
+    official_payload: {
+      source: "herdr:pi",
+      version: 1,
+      provider: "anthropic",
+      model: "claude-sonnet-4-5",
+      context: { tokens: 45_000, percent: 22.5, context_window: 200_000 },
+    },
+  });
+
+  // The provider answered with a different model than requested: bill that one.
+  entries.push(assistantEntry({ responseModel: "claude-sonnet-4-5-20250929" }));
+  entries.push({ type: "message", message: { role: "user", content: "hi" } });
+  entries.push({
+    type: "compaction",
+    usage: { input: 10, output: 5, cacheRead: 0, cacheWrite: 0, cost: { total: 0.04 } },
+  });
+  handlers.get("agent_settled")?.({}, context);
+  await waitFor(() => usageReports(requests).length === 2);
+  const payload = usageReports(requests)[1].official_payload as Record<string, unknown>;
+  expect(payload.model).toBe("claude-sonnet-4-5-20250929");
+  expect(payload.tokens).toEqual({
+    input: 1010,
+    output: 205,
+    cache_read: 3000,
+    cache_write: 40,
+    total: 4255,
+  });
+  // `0.36 + 0.04` sums to `0.39999999999999997` in IEEE754. Herdr computes this
+  // total itself, and the account page renders the decimal verbatim, so the wire
+  // value must already be rounded — pin the serialized digits, not an epsilon.
+  expect(payload.cost_usd).toBe(0.4);
+  expect(JSON.stringify(payload.cost_usd)).toBe("0.4");
+  // Herdr's report contract takes a number, never Pi's cost object.
+  expect(typeof payload.cost_usd).toBe("number");
+});
+
+test("Pi reports unknown context after compaction as null, not zero", async () => {
+  const requests = await startRecordingServer("pi-usage-compaction");
+  const { handlers, pi } = createExtensionHarness();
+  const { default: install } = await importFresh("./pi/herdr-agent-state.ts");
+  install(pi);
+
+  let contextUsage: unknown = { tokens: 0, contextWindow: 200_000, percent: 0 };
+  const context = {
+    ...piUsageContext({ entries: [assistantEntry()] }),
+    getContextUsage: () => contextUsage,
+  };
+  await handlers.get("session_start")?.({ reason: "startup" }, context);
+  await waitFor(() => usageReports(requests).length === 1);
+  expect((usageReports(requests)[0].official_payload as Record<string, unknown>).context).toEqual({
+    tokens: 0,
+    percent: 0,
+    context_window: 200_000,
+  });
+
+  contextUsage = { tokens: null, contextWindow: 200_000, percent: null };
+  handlers.get("session_compact")?.({}, context);
+  await waitFor(() => usageReports(requests).length === 2);
+  expect((usageReports(requests)[1].official_payload as Record<string, unknown>).context).toEqual({
+    tokens: null,
+    percent: null,
+    context_window: 200_000,
+  });
+});
+
+test("Pi reads cost from the session object shape and the RPC number shape separately", async () => {
+  const { usageCostUsd, collectUsagePayload } = await importFresh("./pi/herdr-agent-state.ts");
+
+  // Session entries / JSON mode: `usage.cost` is an object.
+  expect(usageCostUsd({ cost: { input: 0.1, output: 0.2, total: 0.3 } })).toBe(0.3);
+  // RPC `get_session_stats`: `cost` is a plain number.
+  expect(usageCostUsd({ cost: 1.25 })).toBe(1.25);
+  // An object is never coerced into a number, and junk never becomes NaN.
+  expect(usageCostUsd({ cost: { input: 0.1 } })).toBe(0);
+  expect(usageCostUsd({ cost: "1.25" })).toBe(0);
+  expect(usageCostUsd({ cost: Number.NaN })).toBe(0);
+  expect(usageCostUsd({})).toBe(0);
+  expect(usageCostUsd(undefined)).toBe(0);
+
+  const payload = collectUsagePayload(
+    piUsageContext({
+      entries: [assistantEntry(), { type: "usage", provider: "x", model: "y", usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, cost: 0.5 } }],
+    }),
+  );
+  expect(payload?.cost_usd).toBe(0.86);
+  expect(JSON.stringify(payload?.cost_usd)).toBe("0.86");
+
+  // `0.1 + 0.2` is the textbook IEEE754 tail: the reported total must carry at
+  // most 6 decimals so the account page never shows `0.30000000000000004 USD`.
+  const tailing = collectUsagePayload(
+    piUsageContext({
+      entries: [
+        { type: "usage", usage: { input: 1, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0.1 } },
+        { type: "usage", usage: { input: 1, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0.2 } },
+      ],
+    }),
+  );
+  expect(tailing?.cost_usd).toBe(0.3);
+  expect(JSON.stringify(tailing?.cost_usd)).toBe("0.3");
+
+  // Nothing to report: no context gauge and no usage entries.
+  expect(collectUsagePayload(piUsageContext({}))).toBeUndefined();
+  expect(collectUsagePayload(undefined)).toBeUndefined();
+});
+
+test("Pi throttles per-turn usage pushes and never pushes from headless modes", async () => {
+  const requests = await startRecordingServer("pi-usage-throttle");
+  const { handlers, pi } = createExtensionHarness();
+  const { default: install } = await importFresh("./pi/herdr-agent-state.ts");
+  install(pi);
+
+  const entries: unknown[] = [assistantEntry()];
+  let idle = false;
+  const context = piUsageContext({ isIdle: () => idle, entries });
+  await handlers.get("session_start")?.({ reason: "startup" }, context);
+  await waitFor(() => usageReports(requests).length === 1);
+
+  // Turns inside the throttle window are dropped; the settled push carries the latest totals.
+  entries.push(assistantEntry());
+  handlers.get("turn_end")?.({}, context);
+  entries.push(assistantEntry());
+  handlers.get("turn_end")?.({}, context);
+  await Bun.sleep(25);
+  expect(usageReports(requests)).toHaveLength(1);
+
+  idle = true;
+  handlers.get("agent_settled")?.({}, context);
+  await waitFor(() => usageReports(requests).length === 2);
+  const settled = usageReports(requests)[1].official_payload as { tokens: { input: number } };
+  expect(settled.tokens.input).toBe(3000);
+
+  // Identical data is not pushed twice.
+  handlers.get("agent_settled")?.({}, context);
+  await Bun.sleep(25);
+  expect(usageReports(requests)).toHaveLength(2);
+});
+
+test("Pi never pushes usage from RPC sessions", async () => {
+  const requests = await startRecordingServer("pi-usage-rpc");
+  const { handlers, pi } = createExtensionHarness();
+  const { default: install } = await importFresh("./pi/herdr-agent-state.ts");
+  install(pi);
+
+  const context = piUsageContext({
+    mode: "rpc",
+    contextUsage: { tokens: 1, contextWindow: 10, percent: 10 },
+    entries: [assistantEntry()],
+  });
+  await handlers.get("session_start")?.({ reason: "startup" }, context);
+  handlers.get("turn_end")?.({}, context);
+  handlers.get("session_compact")?.({}, context);
+  handlers.get("agent_settled")?.({}, context);
+  await Bun.sleep(25);
+
+  expect(requests).toEqual([]);
+});
+
 function completionHandlers(handlers: Map<string, Handler>): string[] {
   return ["agent_end", "agent_settled"].filter((event) => handlers.has(event));
 }

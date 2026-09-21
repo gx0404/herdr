@@ -1,5 +1,5 @@
-//! `account.usage.report` 与 `account.binding.set` 的纯函数落地：解析官方回调、
-//! 校验绑定并写入缓存。这里不做 I/O：持久化、订阅推送与日志由 `mod.rs` 的服务
+//! `account.usage.report` 与 `account.binding.set` 的纯函数落地：解析官方回调与 herdr
+//! 集成扩展的推送、校验绑定并写入缓存。这里不做 I/O：持久化、订阅推送与日志由 `mod.rs` 的服务
 //! 循环负责。
 
 use std::collections::{HashMap, VecDeque};
@@ -27,6 +27,9 @@ const INVALID_REPORT_MESSAGE: &str = "账号用量报告无效";
 const AUTO_BOUND_MESSAGE: &str = "已按唯一账号自动绑定";
 const NO_QUOTA_MESSAGE: &str =
     "官方回调暂无额度字段（statusline 未提供 rate_limits），等待下一次回调或探测";
+const NO_PUSH_USAGE_MESSAGE: &str = "集成扩展的推送暂无用量字段，等待下一次推送";
+const CALLBACK_SOURCE: &str = "官方 CLI 回调";
+const EXTENSION_PUSH_SOURCE: &str = "herdr 集成扩展推送 · 会话统计，非账号额度";
 
 /// `apply_report` 的只读输入。
 #[derive(Clone, Copy)]
@@ -256,6 +259,8 @@ pub(super) fn apply_report(
     // 唯一候选自动绑定：这里只选定候选；绑定要等报文解析出额度、全部校验通过后
     // 才写入，被拒的报文不得留下绑定。账号用量开关关闭时沿用旧的拒绝路径。
     let mut auto_bind_pane: Option<String> = None;
+    // pi 扩展报文里的当前服务商：账号配置没有钉死计费厂商时写进快照的 `provider`。
+    let mut reported_provider: Option<String> = None;
     if params.account_id.is_empty() && enabled {
         if let (Some(pane), Some(provider)) = (params.pane_id.as_deref(), provider) {
             let candidates = accounts
@@ -299,25 +304,42 @@ pub(super) fn apply_report(
             ));
         }
         params.snapshot.metrics = match provider.map(|provider| provider.agent) {
-            Some("claude") => parse::claude(&payload),
-            Some("antigravity") => parse::antigravity(&payload),
+            Some("claude") => {
+                let fresh = parse::claude(&payload);
+                // 官方 statusline 会把过了 `resets_at` 的窗口从 JSON 里去掉，会话首个响应之前
+                // 也整段缺省：缺席不是归零，沿用该账号上次的窗口（过期的标明）。报文本身什么
+                // 都没解析出来时不沿用，免得用旧数据刷新观测时间。
+                match cache.get(&params.account_id) {
+                    Some(entry) if !fresh.is_empty() => parse::claude_retain_missing_windows(
+                        fresh,
+                        &entry.snapshot.metrics,
+                        now_ms / 1000,
+                    ),
+                    _ => fresh,
+                }
+            }
             Some("kimi") => parse::kimi(&payload),
             Some("codex") => parse::codex(&payload),
-            Some("pi" | "qwen" | "maki" | "mastracode" | "opencode" | "omp") => {
-                parse::structured(&payload, "session")
+            Some("pi") => {
+                reported_provider = parse::pi_provider_model(&payload).0;
+                parse::pi(&payload)
             }
+            Some("opencode") => parse::structured(&payload, "session"),
             _ => Vec::new(),
         };
-        params.snapshot.message = None;
-        if provider.is_some_and(|provider| provider.agent == "antigravity") {
-            params.snapshot.account_identity =
-                parse::sanitize_identity(payload.get("email").and_then(serde_json::Value::as_str))
-                    .map(|id| id.to_ascii_lowercase());
-            params.snapshot.plan = payload
-                .get("plan_tier")
-                .and_then(serde_json::Value::as_str)
-                .map(str::to_owned);
+        // 官方 statusline 回调接管账号靠的是账号额度：报文只有会话级指标（旧版 statusline 无
+        // `rate_limits`、API key 登录，或会话首个响应之前且没有可沿用的窗口）时按「暂无额度
+        // 字段」处理——不自动绑定、不置回调闩锁，否则该账号不再回落探测。
+        if provider.is_some_and(registry::supports_callback)
+            && !params
+                .snapshot
+                .metrics
+                .iter()
+                .any(|metric| metric.scope == "account")
+        {
+            params.snapshot.metrics.clear();
         }
+        params.snapshot.message = None;
     }
     if let (Some(pane), Some(provider)) = (auto_bind_pane.as_deref(), provider) {
         if params.snapshot.metrics.is_empty() {
@@ -369,7 +391,14 @@ pub(super) fn apply_report(
             if entry.snapshot.status == ObservationStatus::Warming
                 && entry.snapshot.metrics.is_empty()
             {
-                entry.snapshot.message = Some(NO_QUOTA_MESSAGE.into());
+                entry.snapshot.message = Some(
+                    if provider.is_some_and(registry::supports_extension_push) {
+                        NO_PUSH_USAGE_MESSAGE
+                    } else {
+                        NO_QUOTA_MESSAGE
+                    }
+                    .into(),
+                );
             }
         }
         return Ok(Accepted {
@@ -391,7 +420,22 @@ pub(super) fn apply_report(
             .unwrap_or_default()
             .into();
     }
-    snapshot.source = "官方 CLI 回调".into();
+    // 多服务商 CLI（pi）的实际计费厂商随会话变化：账号配置没有钉死时取扩展报上来的当前
+    // 服务商，供客户端把这份会话统计关联到对应订阅账号的额度，而不是重复计量。
+    // 「没有钉死」有两种形态：`provider` 留空，或等于 agent 名——`configured_accounts` 给
+    // 隐式默认账号预填的就是 agent 名（`pi:default` 的 provider 是 "pi"），那不是计费厂商，
+    // 只判空会让绝大多数用户（装完 pi 直接用默认账号）永远拿不到关联。
+    if snapshot.provider.is_empty() || provider.is_some_and(|p| snapshot.provider == p.agent) {
+        if let Some(reported) = reported_provider {
+            snapshot.provider = reported;
+        }
+    }
+    snapshot.source = if provider.is_some_and(registry::supports_extension_push) {
+        EXTENSION_PUSH_SOURCE
+    } else {
+        CALLBACK_SOURCE
+    }
+    .into();
     snapshot.status = ObservationStatus::Ready;
     if snapshot.account_identity.is_none() {
         snapshot.account_identity = cache
@@ -460,6 +504,7 @@ pub(super) fn bind_pane(
 mod tests {
     use super::super::empty_snapshot;
     use super::*;
+    use crate::config::AccountUsageConfig;
     use serde_json::json;
 
     const NOW_MS: u64 = 1_700_000_000_000;
@@ -599,7 +644,7 @@ mod tests {
         assert_eq!(entry.snapshot.metrics.len(), 2);
         assert_eq!(entry.snapshot.metrics[0].used_percent, Some(42.0));
         assert_eq!(entry.snapshot.observed_at_ms, NOW_MS);
-        assert_eq!(entry.snapshot.source, "官方 CLI 回调");
+        assert_eq!(entry.snapshot.source, CALLBACK_SOURCE);
         assert_eq!(entry.snapshot.agent, "claude");
         assert_eq!(entry.snapshot.message, None);
         assert!(fixture.pending_panes().is_empty());
@@ -747,13 +792,37 @@ mod tests {
         assert_eq!(entry.snapshot.message.as_deref(), Some(NO_QUOTA_MESSAGE));
         assert_eq!(fixture.next_query, 7, "未改写缓存不消耗 generation");
 
-        // 已有真实额度时，空报文连 message 都不碰。
+        // 已有真实额度时，什么都解析不出来的报文连 message 都不碰。
         assert_eq!(code(&fixture.apply(report(None, "claude:default"))), "ok");
-        assert_eq!(code(&fixture.apply(params)), "ok");
+        let mut blank = report(None, "claude:default");
+        blank.official_payload = Some(json!({"model": {"display_name": "Opus"}}));
+        let accepted = fixture
+            .apply(blank)
+            .unwrap_or_else(|rejected| panic!("被拒: {}", rejected.code));
+        assert!(!accepted.updated, "不拿旧数据刷新观测时间");
         let entry = &fixture.cache["claude:default"];
         assert!(entry.callback_latched());
         assert_eq!(entry.snapshot.status, ObservationStatus::Ready);
         assert_eq!(entry.snapshot.metrics.len(), 2);
+        assert_eq!(entry.snapshot.message, None);
+
+        // 只带会话级字段的报文（没有 rate_limits）不会把已有额度清零：窗口沿用，会话级指标更新。
+        let accepted = fixture
+            .apply(params)
+            .unwrap_or_else(|rejected| panic!("被拒: {}", rejected.code));
+        assert!(accepted.updated);
+        let entry = &fixture.cache["claude:default"];
+        assert_eq!(
+            entry
+                .snapshot
+                .metrics
+                .iter()
+                .map(|metric| metric.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["five_hour", "seven_day", "cost/total_cost_usd"]
+        );
+        assert_eq!(entry.snapshot.metrics[0].used_percent, Some(42.0));
+        assert_eq!(entry.snapshot.status, ObservationStatus::Ready);
         assert_eq!(entry.snapshot.message, None);
     }
 
@@ -940,29 +1009,281 @@ mod tests {
 
     #[test]
     fn identity_change_revokes_the_auto_binding_before_it_is_reported() {
-        let mut fixture = Fixture::new(vec![account("antigravity:default", "antigravity")]);
-        if let Some(entry) = fixture.cache.get_mut("antigravity:default") {
+        let mut fixture = Fixture::new(vec![account("claude:default", "claude")]);
+        if let Some(entry) = fixture.cache.get_mut("claude:default") {
             entry.snapshot.account_identity = Some("a@example.test".into());
         }
         let mut params = report(Some("wT:p9"), "");
-        params.agent = Some("antigravity".into());
-        params.official_payload = Some(json!({
-            "email": "b@example.test",
-            "quota": {"gemini": {"remaining_fraction": 0.5}}
-        }));
+        params.snapshot.account_identity = Some("b@example.test".into());
         let accepted = fixture
             .apply(params)
             .unwrap_or_else(|rejected| panic!("被拒: {}", rejected.code));
         // 身份已变：绑定被撤销，不得再宣称「已自动绑定」。
         assert!(accepted.auto_bound_pane.is_none());
         assert!(fixture.bindings.is_empty());
-        let entry = &fixture.cache["antigravity:default"];
+        let entry = &fixture.cache["claude:default"];
         assert_eq!(entry.snapshot.status, ObservationStatus::NeedsBinding);
         assert_ne!(entry.snapshot.message.as_deref(), Some(AUTO_BOUND_MESSAGE));
         assert_eq!(
             entry.snapshot.account_identity.as_deref(),
             Some("b@example.test")
         );
+    }
+
+    // ---- claude：缺席的额度窗口不是归零 ----
+
+    fn metric<'a>(entry: &'a CacheEntry, id: &str) -> &'a UsageMetric {
+        entry
+            .snapshot
+            .metrics
+            .iter()
+            .find(|metric| metric.id == id)
+            .unwrap_or_else(|| panic!("缺少指标 {id}: {:#?}", entry.snapshot.metrics))
+    }
+
+    #[test]
+    fn claude_window_dropped_after_its_reset_keeps_the_last_value_as_stale() {
+        let mut fixture = Fixture::new(vec![account("claude:default", "claude")]);
+        fixture
+            .bindings
+            .insert("pane-1".into(), "claude:default".into());
+        let now_secs = NOW_MS / 1000;
+        let mut first = report(Some("pane-1"), "");
+        first.official_payload = Some(json!({
+            "cost": {"total_cost_usd": 0.5},
+            "rate_limits": {
+                "five_hour": {"used_percentage": 88, "resets_at": now_secs + 60},
+                "seven_day": {"used_percentage": 30, "resets_at": now_secs + 86_400}
+            }
+        }));
+        assert_eq!(code(&fixture.apply(first)), "ok");
+
+        // 两分钟后：five_hour 已过 resets_at，官方 JSON 里不再有它。
+        fixture.now_ms = NOW_MS + 120_000;
+        let mut second = report(Some("pane-1"), "");
+        second.official_payload = Some(json!({
+            "cost": {"total_cost_usd": 0.75},
+            "rate_limits": {"seven_day": {"used_percentage": 31, "resets_at": now_secs + 86_400}}
+        }));
+        assert_eq!(code(&fixture.apply(second)), "ok");
+        let entry = &fixture.cache["claude:default"];
+        let five_hour = metric(entry, "five_hour");
+        assert_eq!(five_hour.used_percent, Some(88.0), "保留上次值，不是 0");
+        assert_eq!(
+            five_hour.text_value.as_deref(),
+            Some(parse::CLAUDE_STALE_WINDOW_TEXT)
+        );
+        assert_eq!(metric(entry, "seven_day").used_percent, Some(31.0));
+        assert_eq!(metric(entry, "seven_day").text_value, None);
+        assert_eq!(
+            metric(entry, "cost/total_cost_usd")
+                .amount_decimal
+                .as_deref(),
+            Some("0.75"),
+            "会话级指标取本次报文"
+        );
+        assert_eq!(entry.snapshot.status, ObservationStatus::Ready);
+        assert_eq!(entry.snapshot.observed_at_ms, NOW_MS + 120_000);
+    }
+
+    /// 另一个会话在首个 API 响应之前上报：`rate_limits` 整段缺省，但该账号已有未过期的窗口
+    /// ——原样沿用、不标过期，会话级指标照常更新。
+    #[test]
+    fn claude_report_without_rate_limits_keeps_the_unexpired_windows() {
+        let mut fixture = Fixture::new(vec![account("claude:default", "claude")]);
+        fixture
+            .bindings
+            .insert("pane-1".into(), "claude:default".into());
+        let mut first = report(Some("pane-1"), "");
+        first.official_payload = Some(json!({"rate_limits": {
+            "five_hour": {"used_percentage": 42, "resets_at": NOW_MS / 1000 + 3600}
+        }}));
+        assert_eq!(code(&fixture.apply(first)), "ok");
+        let mut second = report(Some("pane-1"), "");
+        second.official_payload = Some(json!({
+            "cost": {"total_cost_usd": 0},
+            "context_window": {"context_window_size": 200000, "used_percentage": null, "current_usage": null}
+        }));
+        let accepted = fixture
+            .apply(second)
+            .unwrap_or_else(|rejected| panic!("被拒: {}", rejected.code));
+        assert!(accepted.updated);
+        let entry = &fixture.cache["claude:default"];
+        assert_eq!(metric(entry, "five_hour").used_percent, Some(42.0));
+        assert_eq!(metric(entry, "five_hour").text_value, None, "未过期不标记");
+        assert_eq!(
+            metric(entry, "context_window/used_percentage").used,
+            None,
+            "首次请求前上下文未知，不是 0"
+        );
+    }
+
+    // ---- pi：herdr 扩展推送 ----
+
+    fn pi_report(pane: &str, payload: serde_json::Value) -> UsageReportParams {
+        UsageReportParams {
+            account_id: String::new(),
+            pane_id: Some(pane.into()),
+            agent: Some("pi".into()),
+            official_payload: Some(payload),
+            snapshot: Default::default(),
+        }
+    }
+
+    /// pi 的隐式默认账号，由 `configured_accounts` 按生产路径产出：它给默认账号预填的
+    /// `provider` 是 agent 名（"pi"），不是空串。测试必须用这个形状——手工把 `provider`
+    /// 置空会绕开绝大多数用户实际走的默认路径，让「扩展报上来的服务商写不进快照」这类
+    /// 回归被测试掩盖。
+    fn pi_default_account() -> UsageAccountConfig {
+        let account =
+            super::super::configured_accounts(&AccountUsageConfig::default(), &|provider| {
+                provider.agent == "pi"
+            })
+            .into_iter()
+            .find(|account| account.agent == "pi")
+            .expect("已安装的 pi 必须补出隐式默认账号");
+        assert_eq!(account.id, "pi:default");
+        assert_eq!(
+            account.provider, "pi",
+            "默认账号的 provider 预填 agent 名；本测试依赖这个真实形状"
+        );
+        account
+    }
+
+    fn pi_payload() -> serde_json::Value {
+        json!({
+            "source": "herdr:pi",
+            "provider": "anthropic",
+            "model": "claude-sonnet-4-5",
+            "context": {"tokens": 45000, "percent": 22.5, "context_window": 200000},
+            "tokens": {"input": 1000, "output": 200, "cache_read": 3000, "cache_write": 40, "total": 4240},
+            "cost_usd": 0.42
+        })
+    }
+
+    #[test]
+    fn pi_extension_push_is_accepted_as_session_statistics() {
+        let mut fixture = Fixture::new(vec![pi_default_account()]);
+        let accepted = fixture
+            .apply(pi_report("wT:p3", pi_payload()))
+            .unwrap_or_else(|rejected| panic!("被拒: {}", rejected.code));
+        assert_eq!(accepted.account_id, "pi:default");
+        assert_eq!(
+            accepted.auto_bound_pane.as_deref(),
+            Some("wT:p3"),
+            "唯一的 pi 账号：自动绑定"
+        );
+        let entry = &fixture.cache["pi:default"];
+        assert_eq!(entry.snapshot.status, ObservationStatus::Ready);
+        assert_eq!(entry.snapshot.source, EXTENSION_PUSH_SOURCE);
+        assert!(entry.snapshot.source.contains("非账号额度"));
+        assert_eq!(
+            entry.snapshot.provider, "anthropic",
+            "账号未钉死计费厂商：取扩展报上来的当前服务商"
+        );
+        assert!(entry
+            .snapshot
+            .metrics
+            .iter()
+            .all(|metric| metric.scope == "session"));
+        assert_eq!(
+            metric(entry, "session/model").text_value.as_deref(),
+            Some("anthropic/claude-sonnet-4-5")
+        );
+        assert_eq!(metric(entry, "context/percent").used, Some(22.5));
+        assert!(entry.callback_latched(), "推送接管该账号，占位探测让位");
+    }
+
+    /// 扩展（`integration/assets/pi/herdr-agent-state.ts`）写到 socket 上的整条请求：与 bun 契约
+    /// 测试断言的形状逐字段一致，这里钉住它能被反序列化并落成指标。
+    #[test]
+    fn pi_extension_wire_request_deserializes_and_applies() {
+        let request: Request = serde_json::from_value(json!({
+            "id": "herdr:pi:usage:1:abc",
+            "method": "account.usage.report",
+            "params": {
+                "agent": "pi",
+                "pane_id": "wT:p3",
+                "official_payload": {
+                    "source": "herdr:pi",
+                    "version": 1,
+                    "provider": "openai",
+                    "model": "gpt-5",
+                    "context": {"tokens": null, "percent": null, "context_window": 400000},
+                    "tokens": {"input": 10, "output": 2, "cache_read": 0, "cache_write": 0, "total": 12},
+                    "cost_usd": 0.0012
+                }
+            }
+        }))
+        .expect("扩展的请求形状必须是合法的 account.usage.report");
+        let Method::AccountUsageReport(params) = request.method else {
+            panic!("方法名必须是 account.usage.report");
+        };
+        let mut fixture = Fixture::new(vec![pi_default_account()]);
+        assert_eq!(code(&fixture.apply(params)), "ok");
+        let entry = &fixture.cache["pi:default"];
+        assert_eq!(entry.snapshot.provider, "openai");
+        assert_eq!(metric(entry, "context/tokens").used, None);
+        assert_eq!(
+            metric(entry, "session/cost_usd").amount_decimal.as_deref(),
+            Some("0.0012")
+        );
+    }
+
+    #[test]
+    fn pi_push_keeps_a_configured_billing_provider_and_survives_compaction() {
+        // 用户显式钉死计费厂商：从默认账号出发只改 `provider`，与上面两个测试共用同一形状。
+        let mut pi_account = pi_default_account();
+        pi_account.provider = "openrouter".into();
+        let mut fixture = Fixture::new(vec![pi_account]);
+        fixture.bindings.insert("wT:p3".into(), "pi:default".into());
+        let mut payload = pi_payload();
+        payload["context"] = json!({"tokens": null, "percent": null, "context_window": 200000});
+        assert_eq!(code(&fixture.apply(pi_report("wT:p3", payload))), "ok");
+        let entry = &fixture.cache["pi:default"];
+        assert_eq!(
+            entry.snapshot.provider, "openrouter",
+            "账号配置钉死的计费厂商优先"
+        );
+        let tokens = metric(entry, "context/tokens");
+        assert_eq!(tokens.used, None, "压缩后未知，不是 0");
+        assert_eq!(
+            tokens.text_value.as_deref(),
+            Some(parse::PI_CONTEXT_PENDING_TEXT)
+        );
+        assert_eq!(metric(entry, "session/tokens/total").used, Some(4240.0));
+    }
+
+    #[test]
+    fn pi_push_without_usage_fields_does_not_take_over_the_account() {
+        let mut fixture = Fixture::new(vec![account("pi:default", "pi")]);
+        fixture.bindings.insert("wT:p3".into(), "pi:default".into());
+        let accepted = fixture
+            .apply(pi_report(
+                "wT:p3",
+                json!({"provider": "anthropic", "model": "x"}),
+            ))
+            .unwrap_or_else(|rejected| panic!("被拒: {}", rejected.code));
+        assert!(!accepted.updated);
+        let entry = &fixture.cache["pi:default"];
+        assert!(!entry.callback_latched());
+        assert_eq!(
+            entry.snapshot.message.as_deref(),
+            Some(NO_PUSH_USAGE_MESSAGE)
+        );
+    }
+
+    /// 范围外厂商的上报一律按未知 agent 处理：不解析、不自动绑定。
+    #[test]
+    fn reports_from_retired_providers_are_not_parsed() {
+        let mut fixture = Fixture::new(vec![account("claude:default", "claude")]);
+        let mut params = report(Some("wT:p9"), "");
+        params.agent = Some("antigravity".into());
+        params.official_payload = Some(json!({"quota": {"weekly": {"remaining_fraction": 0.5}}}));
+        let rejected = rejected(fixture.apply(params));
+        assert_eq!(rejected.code, "usage_binding_required");
+        assert!(fixture.bindings.is_empty());
+        assert!(!fixture.cache["claude:default"].callback_latched());
     }
 
     #[test]

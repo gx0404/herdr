@@ -141,175 +141,188 @@ pub(super) fn codex(value: &Value) -> Vec<UsageMetric> {
     metrics
 }
 
+/// claude 的账号额度窗口（官方 statusline `rate_limits` 的键）与中文标签。
+pub(super) const CLAUDE_RATE_LIMIT_WINDOWS: [(&str, &str); 3] = [
+    ("five_hour", "5 小时额度"),
+    ("seven_day", "每周额度"),
+    ("spend_limit", "网关消费额度"),
+];
+
+/// 沿用的过期窗口在 `text_value` 里的明示：官方 statusline 会在窗口过了 `resets_at` 之后把它
+/// 从 JSON 里去掉，缺席不是归零。指标保留上次的 `used_percent` 与已经过去的 `resets_at`
+/// （客户端也可据「`resets_at` 不晚于当前时间」自行判定）。
+pub(super) const CLAUDE_STALE_WINDOW_TEXT: &str = "已过重置时间，沿用上次值";
+
+/// 过期窗口最多再保留这么久（秒）：超过最长的窗口周期（7 天）后上次值已无参考意义。
+const CLAUDE_STALE_WINDOW_MAX_AGE_SECS: u64 = 7 * 24 * 60 * 60;
+
+/// `context_window` 的数值为 `null`（会话首次 API 调用之前、`/compact` 之后）时的明示：未知
+/// 不是 0，数值字段保持 `None`。
+pub(super) const CLAUDE_CONTEXT_PENDING_TEXT: &str = "暂无数据（首次请求前或 /compact 后）";
+
+/// 官方 statusline JSON → 指标：账号额度窗口（`rate_limits`，`scope = account`）在前，本会话
+/// 的费用 / 时长 / 上下文（`cost`、`context_window`，`scope = session`）在后。
+///
+/// - `spend_limit.used_percentage` 超限后可大于 100，原样保留、不截断。
+/// - 会话级指标刻意不写 `used_percent`、也不成对写 `used` + `limit`：客户端把这两种形态都
+///   当作账号额度压力，而上下文占用不是账号额度。百分比放在 `unit = "%"` 指标的 `used` 里。
+/// - 多个会话共用一个账号时，会话级指标反映最近一次上报的那个会话。
 pub(super) fn claude(value: &Value) -> Vec<UsageMetric> {
     let limits = value.get("rate_limits").unwrap_or(value);
-    [
-        ("five_hour", "5 小时额度"),
-        ("seven_day", "每周额度"),
-        ("spend_limit", "网关消费额度"),
-    ]
-    .into_iter()
-    .filter_map(|(key, label)| window(key.into(), label.into(), &limits[key], "account"))
-    .collect()
-}
-
-pub(super) fn antigravity(value: &Value) -> Vec<UsageMetric> {
-    value
-        .get("quota")
-        .and_then(Value::as_object)
+    let mut metrics = CLAUDE_RATE_LIMIT_WINDOWS
         .into_iter()
-        .flatten()
-        .filter_map(|(id, quota)| {
-            let remaining =
-                finite(quota.get("remaining_fraction")).filter(|value| *value <= 1.0)?;
-            // 键名来自官方 statusline JSON：清洗后再作 id / label。
-            let id = clean_field(id);
-            Some(UsageMetric {
-                label: id.clone(),
-                id,
-                unit: "%".into(),
-                scope: "account".into(),
-                used_percent: Some((1.0 - remaining) * 100.0),
-                resets_at: timestamp(quota.get("reset_time")),
-                ..Default::default()
-            })
-        })
-        .collect()
-}
-
-pub(super) fn omp(
-    value: &Value,
-    account: &crate::config::UsageAccountConfig,
-) -> Result<Vec<UsageMetric>, super::transport::QueryError> {
-    let reports = value
-        .get("reports")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter(|report| {
-            let provider = report.get("provider").and_then(Value::as_str);
-            (account.provider == "omp"
-                || account.provider.is_empty()
-                || provider == Some(account.provider.as_str()))
-                && account.account_user.as_ref().is_none_or(|selected| {
-                    ["email", "accountId", "projectId"].iter().any(|key| {
-                        report
-                            .get("metadata")
-                            .and_then(|meta| meta.get(*key))
-                            .and_then(Value::as_str)
-                            == Some(selected.as_str())
-                    })
-                })
-                && account.organization.as_ref().is_none_or(|org| {
-                    report.pointer("/metadata/orgId").and_then(Value::as_str) == Some(org.as_str())
-                })
-        })
+        .filter_map(|(key, label)| window(key.into(), label.into(), &limits[key], "account"))
         .collect::<Vec<_>>();
-    if reports.len() > 1 {
-        return Err((
-            crate::api::schema::ObservationStatus::NeedsBinding,
-            "OMP 有多个计费账号，请配置 provider、account_user 和需要的 organization".into(),
-        ));
-    }
-    let mut result = Vec::new();
-    for report in reports {
-        let provider = report
-            .get("provider")
-            .and_then(Value::as_str)
-            .unwrap_or("OMP");
-        for limit in report
-            .get("limits")
-            .and_then(Value::as_array)
-            .into_iter()
-            .flatten()
-        {
-            let amount = &limit["amount"];
-            let id = limit.get("id").and_then(Value::as_str).unwrap_or("");
-            let label = limit.get("label").and_then(Value::as_str).unwrap_or(id);
-            let mut metric = window(
-                format!("{provider}/{id}"),
-                format!("{provider} · {label}"),
-                amount,
-                "account",
-            )
-            .unwrap_or_else(|| UsageMetric {
-                id: clean_field(&format!("{provider}/{id}")),
-                label: clean_field(&format!("{provider} · {label}")),
-                unit: amount
-                    .get("unit")
-                    .and_then(Value::as_str)
-                    .map(clean_field)
-                    .filter(|unit| !unit.is_empty())
-                    .unwrap_or_else(|| "额度单位".into()),
-                scope: "account".into(),
-                ..Default::default()
-            });
-            metric.used_percent = finite(amount.get("usedFraction"))
-                .map(|value| value * 100.0)
-                .or_else(|| {
-                    finite(amount.get("remainingFraction"))
-                        .filter(|value| *value <= 1.0)
-                        .map(|value| (1.0 - value) * 100.0)
-                })
-                .or(metric.used_percent);
-            metric.resets_at = limit
-                .pointer("/window/resetsAt")
-                .and_then(Value::as_u64)
-                .map(|value| value / 1000);
-            metric.window_seconds = limit
-                .pointer("/window/durationMs")
-                .and_then(Value::as_u64)
-                .map(|value| value / 1000);
-            if metric.used_percent.is_some() || metric.used.is_some() || metric.remaining.is_some()
-            {
-                result.push(metric);
-            }
-        }
-    }
-    Ok(result)
+    metrics.extend(claude_session(value));
+    metrics
 }
 
-pub(super) fn letta(text: &str) -> Vec<UsageMetric> {
-    if !text.contains("# Letta usage overview") {
-        return Vec::new();
-    }
-    let mut result = Vec::new();
-    for line in text.lines().map(str::trim) {
-        if let Some(value) = line
-            .strip_prefix("* Balance: ")
-            .and_then(|value| value.strip_suffix(" credits"))
-        {
-            if let Ok(remaining) = value.parse::<f64>() {
-                result.push(UsageMetric {
-                    id: "balance".into(),
-                    label: "Letta credits".into(),
-                    unit: "credits".into(),
-                    scope: "account".into(),
-                    remaining: Some(remaining),
-                    ..Default::default()
-                });
-            }
+/// 补回本次报文里缺席的额度窗口：官方 statusline 在窗口过了 `resets_at` 后把它去掉，会话的
+/// 首个 API 响应之前也整段缺省——两种缺席都不是归零。上次的窗口原样沿用；`resets_at` 已过
+/// 的标为过期（`CLAUDE_STALE_WINDOW_TEXT`），过期超过 `CLAUDE_STALE_WINDOW_MAX_AGE_SECS`
+/// 的不再沿用。结果里额度窗口按固定顺序排在会话级指标之前。
+pub(super) fn claude_retain_missing_windows(
+    fresh: Vec<UsageMetric>,
+    previous: &[UsageMetric],
+    now_secs: u64,
+) -> Vec<UsageMetric> {
+    let is_window = |metric: &UsageMetric| {
+        metric.scope == "account"
+            && CLAUDE_RATE_LIMIT_WINDOWS
+                .iter()
+                .any(|(id, _)| metric.id == *id)
+    };
+    let (mut windows, session): (Vec<_>, Vec<_>) = fresh.into_iter().partition(is_window);
+    for carried in previous.iter().filter(|metric| is_window(metric)) {
+        if windows.iter().any(|metric| metric.id == carried.id) {
+            continue;
         }
-        if let Some(value) = line.strip_prefix("* Bucket (full/high/medium/low/empty): ") {
-            result.push(UsageMetric {
-                id: "quota-bucket".into(),
-                label: "letta/* quota".into(),
-                unit: "state".into(),
-                scope: "account".into(),
-                text_value: Some(clean_field(value).chars().take(120).collect()),
-                ..Default::default()
+        let mut carried = carried.clone();
+        if let Some(resets_at) = carried.resets_at.filter(|resets_at| *resets_at <= now_secs) {
+            if now_secs - resets_at > CLAUDE_STALE_WINDOW_MAX_AGE_SECS {
+                continue;
+            }
+            carried.text_value = Some(CLAUDE_STALE_WINDOW_TEXT.into());
+        }
+        windows.push(carried);
+    }
+    let order = |metric: &UsageMetric| {
+        CLAUDE_RATE_LIMIT_WINDOWS
+            .iter()
+            .position(|(id, _)| metric.id == *id)
+    };
+    windows.sort_by_key(order);
+    windows.extend(session);
+    windows
+}
+
+/// 毫秒时长的紧凑文案：`1h02m` / `12m05s` / `45s`。
+fn duration_text(ms: f64) -> String {
+    let seconds = (ms / 1000.0).round() as u64;
+    if seconds >= 3600 {
+        format!("{}h{:02}m", seconds / 3600, seconds % 3600 / 60)
+    } else if seconds >= 60 {
+        format!("{}m{:02}s", seconds / 60, seconds % 60)
+    } else {
+        format!("{seconds}s")
+    }
+}
+
+/// 百分比文案：整数不带小数，其余保留一位。
+fn percent_text(percent: f64) -> String {
+    if percent.fract() == 0.0 {
+        format!("{percent:.0}%")
+    } else {
+        format!("{percent:.1}%")
+    }
+}
+
+/// 官方 statusline 的会话级字段：`cost.*` 与 `context_window.*`。字段缺失就不产出对应指标；
+/// `context_window` 在场但数值为 `null` 时照常产出指标、数值留 `None` 并给出明示文案。
+fn claude_session(value: &Value) -> Vec<UsageMetric> {
+    let mut metrics = Vec::new();
+    let session = |id: &str, label: &str, unit: &str| UsageMetric {
+        id: id.into(),
+        label: label.into(),
+        unit: unit.into(),
+        scope: "session".into(),
+        ..Default::default()
+    };
+    if let Some(cost) = value
+        .pointer("/cost/total_cost_usd")
+        .filter(|cost| finite(Some(cost)).is_some())
+    {
+        metrics.push(UsageMetric {
+            // 厂商这一项也是逐次调用累加出来的浮点和：按金额规整，不原样透出尾差。
+            amount_decimal: Some(money_decimal(cost)),
+            ..session("cost/total_cost_usd", "本会话估算费用", "USD")
+        });
+    }
+    for (key, label) in [
+        ("total_duration_ms", "本会话时长"),
+        ("total_api_duration_ms", "本会话 API 等待时长"),
+    ] {
+        if let Some(ms) = finite(value.pointer(&format!("/cost/{key}"))) {
+            metrics.push(UsageMetric {
+                used: Some(ms),
+                text_value: Some(duration_text(ms)),
+                ..session(&format!("cost/{key}"), label, "ms")
             });
         }
-        if let Some(value) = line
-            .strip_prefix("* Quota Window End: ")
-            .filter(|value| *value != "Unavailable")
-        {
-            if let Some(metric) = result.iter_mut().find(|metric| metric.id == "quota-bucket") {
-                metric.resets_at = timestamp(Some(&Value::String(value.into())));
-            }
-        }
     }
-    result
+    let Some(context) = value
+        .get("context_window")
+        .filter(|context| context.is_object())
+    else {
+        return metrics;
+    };
+    // `used_percentage` / `remaining_percentage` 在会话早期可为 null。
+    let used_percentage = finite(context.get("used_percentage"));
+    metrics.push(UsageMetric {
+        used: used_percentage,
+        remaining: finite(context.get("remaining_percentage")),
+        text_value: Some(
+            used_percentage.map_or_else(|| CLAUDE_CONTEXT_PENDING_TEXT.into(), percent_text),
+        ),
+        ..session("context_window/used_percentage", "上下文占用", "%")
+    });
+    // `current_usage` 在首次 API 调用前与 `/compact` 后为 null；口径与官方 `used_percentage`
+    // 一致，只计输入侧（input + cache 创建 + cache 读取），不含输出。
+    let current = context
+        .get("current_usage")
+        .filter(|usage| usage.is_object());
+    let input_tokens = current.map(|usage| {
+        [
+            "input_tokens",
+            "cache_creation_input_tokens",
+            "cache_read_input_tokens",
+        ]
+        .into_iter()
+        .filter_map(|key| finite(usage.get(key)))
+        .sum::<f64>()
+    });
+    metrics.push(UsageMetric {
+        used: input_tokens,
+        text_value: input_tokens
+            .is_none()
+            .then(|| CLAUDE_CONTEXT_PENDING_TEXT.into()),
+        ..session(
+            "context_window/current_usage",
+            "上下文 token（输入口径）",
+            "tokens",
+        )
+    });
+    if let Some(size) = finite(context.get("context_window_size")) {
+        metrics.push(UsageMetric {
+            used: Some(size),
+            ..session(
+                "context_window/context_window_size",
+                "上下文窗口大小",
+                "tokens",
+            )
+        });
+    }
+    metrics
 }
 
 pub(super) fn kimi(value: &Value) -> Vec<UsageMetric> {
@@ -326,9 +339,12 @@ pub(super) fn kimi(value: &Value) -> Vec<UsageMetric> {
     // Kimi 2.x packs quota windows under `quota.usages` keyed by window id.
     if let Some(usages) = value.pointer("/quota/usages").and_then(Value::as_object) {
         for (key, window_value) in usages {
+            // 标签与官方 TUI 的用量面板一致：monthCode 是月度额度里 Code 占用的那一部分。
             let label = match key.as_str() {
                 "limit5h" => "5 小时额度",
                 "limit7d" => "7 天额度",
+                "monthTotal" => "月度额度",
+                "monthCode" => "月度额度 · Code 部分",
                 other => other,
             };
             if let Some(metric) = window(key.clone(), label.into(), window_value, "account") {
@@ -370,6 +386,7 @@ pub(super) fn kimi(value: &Value) -> Vec<UsageMetric> {
             });
         }
     }
+    metrics.extend(kimi_extra_usage(value.pointer("/quota/extraUsage")));
     if let Some(wallet) = value.get("extra_usage").filter(|wallet| wallet.is_object()) {
         if let Some(currency) = wallet.get("currency").and_then(Value::as_str) {
             for (key, label) in [
@@ -402,6 +419,60 @@ pub(super) fn kimi(value: &Value) -> Vec<UsageMetric> {
         }
     }
     metrics
+}
+
+/// 整数「分」→ 主单位的十进制文本（`12345` → `123.45`），不经浮点往返。
+fn cents_decimal(cents: u64) -> String {
+    format!("{}.{:02}", cents / 100, cents % 100)
+}
+
+/// Kimi Code 2.x 的 `quota.extraUsage`（超额按量的加油包钱包，可为 `null`）：金额类指标，单位
+/// 是币种，不折算成百分比。字段名取自 2.0.2 的 `boosterWalletInfoSchema`：`totalCents` 是
+/// 加油包总额、`balanceCents` 是余额、`monthlyUsedCents` 是本月按量费用；
+/// `monthlyChargeLimitCents` 只在 `monthlyChargeLimitEnabled` 且大于 0 时才是真实上限（官方
+/// 面板同一判据）。server API 官方标注为 experimental：任何字段缺失或形状不符都只跳过该项；
+/// 缺 `currency` 时按官方实现的缺省取 `USD`。
+fn kimi_extra_usage(wallet: Option<&Value>) -> Vec<UsageMetric> {
+    let Some(wallet) = wallet.filter(|wallet| wallet.is_object()) else {
+        return Vec::new();
+    };
+    let currency = wallet
+        .get("currency")
+        .and_then(Value::as_str)
+        .map(clean_field)
+        .filter(|currency| !currency.is_empty())
+        .unwrap_or_else(|| "USD".into());
+    let cents = |key: &str| wallet.get(key).and_then(Value::as_u64);
+    let limit_enabled = wallet
+        .get("monthlyChargeLimitEnabled")
+        .and_then(Value::as_bool)
+        == Some(true);
+    [
+        ("extra_usage/balance", "额外用量余额", cents("balanceCents")),
+        ("extra_usage/total", "额外用量总额", cents("totalCents")),
+        (
+            "extra_usage/monthly_used",
+            "本月额外用量费用",
+            cents("monthlyUsedCents"),
+        ),
+        (
+            "extra_usage/monthly_limit",
+            "每月额外用量上限",
+            cents("monthlyChargeLimitCents").filter(|limit| limit_enabled && *limit > 0),
+        ),
+    ]
+    .into_iter()
+    .filter_map(|(id, label, cents)| {
+        Some(UsageMetric {
+            id: id.into(),
+            label: label.into(),
+            unit: currency.clone(),
+            scope: "account".into(),
+            amount_decimal: Some(cents_decimal(cents?)),
+            ..Default::default()
+        })
+    })
+    .collect()
 }
 
 pub(super) fn moonshot_balance(value: &Value, currency: &str) -> Vec<UsageMetric> {
@@ -542,6 +613,24 @@ pub(super) fn decimal(value: &Value) -> String {
         .as_str()
         .map(str::to_owned)
         .unwrap_or_else(|| value.to_string())
+}
+
+/// 金额的十进制表示。客户端把 `amount_decimal` 原样渲染，所以浮点合计的 IEEE754 尾差
+/// （`0.36 + 0.04` = `0.39999999999999997`）不能透出去：数值按 6 位小数规整后去掉尾随 0，
+/// 比任何单次调用的单价都细。厂商给的字符串是它自己的精确十进制表示，原样保留。
+///
+/// pi 扩展自 v10 起在推送前就已规整；这里是对更早版本已装扩展（herdr 只提示过期、不会
+/// 自动改写用户的扩展文件）与厂商浮点合计的兜底。
+pub(super) fn money_decimal(value: &Value) -> String {
+    let Some(amount) = value.as_f64().filter(|amount| amount.is_finite()) else {
+        return decimal(value);
+    };
+    let rendered = format!("{amount:.6}");
+    // `{:.6}` 必定带小数点，先去尾随 0 再去小数点不会吃掉整数部分。
+    rendered
+        .trim_end_matches('0')
+        .trim_end_matches('.')
+        .to_owned()
 }
 
 /// `screen` 的两条正则：每次探测都会调用，编译一次即可。
@@ -734,9 +823,8 @@ pub(super) fn sanitize_identity(value: Option<&str>) -> Option<String> {
 /// 非交互输出是否是一份命令行帮助（yargs / commander 族在 flag 不受支持时直接打印用法，
 /// 未必带 `unknown option` 字样）。判据：出现 `Options:` / `Commands:` / `Flags:` 这类
 /// 选项列表标题行；或 `Usage:` 标题行**同时**伴有 flag 列表行（以 `-x` / `--flag` 开头的
-/// 行）。`Usage:` 单独不成立——`amp usage` / `kilo profile` 之类的真实用量输出也可能用
-/// `Usage:` 作小标题。只认标题行，不认 `--help` 子串——错误提示里的「run … --help」不是
-/// 帮助文本。
+/// 行）。`Usage:` 单独不成立——真实的用量输出也可能用 `Usage:` 作小标题。只认标题行，不认
+/// `--help` 子串——错误提示里的「run … --help」不是帮助文本。
 pub(super) fn cli_help_output(text: &str) -> bool {
     let mut usage_heading = false;
     let mut flag_line = false;
@@ -897,6 +985,172 @@ pub(super) fn opencode_stats(text: &str) -> Vec<UsageMetric> {
     metrics
 }
 
+/// `opencode db <query> --format json` 的输出（`registry::OPENCODE_SESSION_TOTALS_SQL` 的
+/// 单行聚合，`JSON.stringify(rows)` 形态的数组）→ 本地会话统计。与 `opencode_stats` 一样不是
+/// 账号额度：`scope` 固定为 `local`。stdout 里 JSON 数组之前若夹杂日志行，取首个 `[` 到末个
+/// `]` 之间再解析一次；列缺失只跳过该项。
+pub(super) fn opencode_sessions(text: &str) -> Vec<UsageMetric> {
+    let trimmed = text.trim();
+    let rows = serde_json::from_str::<Value>(trimmed).ok().or_else(|| {
+        let (start, end) = (trimmed.find('[')?, trimmed.rfind(']')?);
+        serde_json::from_str::<Value>(trimmed.get(start..=end)?).ok()
+    });
+    let Some(row) = rows
+        .as_ref()
+        .and_then(Value::as_array)
+        .and_then(|rows| rows.first())
+        .filter(|row| row.is_object())
+    else {
+        return Vec::new();
+    };
+    let local = |id: &str, label: &str, unit: &str| UsageMetric {
+        id: id.into(),
+        label: label.into(),
+        unit: unit.into(),
+        scope: "local".into(),
+        ..Default::default()
+    };
+    let mut metrics = Vec::new();
+    for (column, id, label, unit) in [
+        ("sessions", "sessions", "会话数", "sessions"),
+        (
+            "child_sessions",
+            "child_sessions",
+            "子 agent 会话数",
+            "sessions",
+        ),
+    ] {
+        if let Some(count) = finite(row.get(column)) {
+            metrics.push(UsageMetric {
+                used: Some(count),
+                ..local(id, label, unit)
+            });
+        }
+    }
+    if let Some(cost) = finite(row.get("cost")) {
+        metrics.push(UsageMetric {
+            // SQLite 的 REAL 合计带浮点尾差；费用按 4 位小数展示。
+            amount_decimal: Some(format!("{cost:.4}")),
+            ..local("total_cost", "累计费用", "USD")
+        });
+    }
+    for (column, id, label) in [
+        ("tokens_input", "input_tokens", "输入 token"),
+        ("tokens_output", "output_tokens", "输出 token"),
+        ("tokens_reasoning", "reasoning_tokens", "推理 token"),
+        ("tokens_cache_read", "cache_read_tokens", "缓存读取 token"),
+        ("tokens_cache_write", "cache_write_tokens", "缓存写入 token"),
+    ] {
+        if let Some(count) = finite(row.get(column)) {
+            metrics.push(UsageMetric {
+                used: Some(count),
+                ..local(id, label, "tokens")
+            });
+        }
+    }
+    metrics
+}
+
+/// pi 上下文用量未知（压缩之后、下一次响应之前 `tokens` / `percent` 为 null）时的明示。
+pub(super) const PI_CONTEXT_PENDING_TEXT: &str = "暂无数据（压缩后等待下一次响应）";
+
+/// pi 报文里的当前服务商 / 模型（`provider`、`model`，扩展已按 `responseModel` 优先取值）。
+/// 供快照的 `provider` 字段与 `session/model` 指标共用。
+pub(super) fn pi_provider_model(value: &Value) -> (Option<String>, Option<String>) {
+    let text = |key: &str| {
+        value
+            .get(key)
+            .and_then(Value::as_str)
+            .map(clean_field)
+            .filter(|text| !text.is_empty() && text.len() <= 128)
+    };
+    (text("provider"), text("model"))
+}
+
+/// herdr 的 pi 扩展（`integration/assets/pi/herdr-agent-state.ts`）推送的会话用量报文 → 指标。
+/// 全部是会话级统计（`scope = session`），不是账号额度：pi 是多服务商 CLI，额度属于底层
+/// 订阅账号，这里只带上当前 `provider/model` 供客户端关联，不重复计量。
+///
+/// - `context.tokens` / `context.percent` 在压缩之后、下一次响应之前为 null：数值留 `None`
+///   并给出明示文案，与 0 区分。
+/// - 费用只认扩展合计好的数值字段 `cost_usd`。pi 的会话条目里 `usage.cost` 是对象
+///   （`{input, output, …, total}`），RPC `get_session_stats` 的 `cost` 才是数值——两种形态由
+///   扩展各自取数，这里不接受对象形态，避免把对象当数值。数值经 `money_decimal` 规整，
+///   旧版已装扩展推上来的浮点尾差不会原样显示。
+/// - 与 claude 的会话级指标同理：不写 `used_percent`、不成对写 `used` + `limit`。
+pub(super) fn pi(value: &Value) -> Vec<UsageMetric> {
+    let session = |id: &str, label: &str, unit: &str| UsageMetric {
+        id: id.into(),
+        label: label.into(),
+        unit: unit.into(),
+        scope: "session".into(),
+        ..Default::default()
+    };
+    let mut metrics = Vec::new();
+    if let Some(context) = value.get("context").filter(|context| context.is_object()) {
+        let percent = finite(context.get("percent"));
+        metrics.push(UsageMetric {
+            used: percent,
+            text_value: Some(percent.map_or_else(|| PI_CONTEXT_PENDING_TEXT.into(), percent_text)),
+            ..session("context/percent", "上下文占用", "%")
+        });
+        let tokens = finite(context.get("tokens"));
+        metrics.push(UsageMetric {
+            used: tokens,
+            text_value: tokens.is_none().then(|| PI_CONTEXT_PENDING_TEXT.into()),
+            ..session("context/tokens", "上下文 token", "tokens")
+        });
+        if let Some(size) = finite(context.get("context_window")) {
+            metrics.push(UsageMetric {
+                used: Some(size),
+                ..session("context/context_window", "上下文窗口大小", "tokens")
+            });
+        }
+    }
+    if let Some(cost) = value
+        .get("cost_usd")
+        .filter(|cost| cost.is_number() && finite(Some(cost)).is_some())
+    {
+        metrics.push(UsageMetric {
+            amount_decimal: Some(money_decimal(cost)),
+            ..session("session/cost_usd", "本会话费用", "USD")
+        });
+    }
+    if let Some(tokens) = value.get("tokens").filter(|tokens| tokens.is_object()) {
+        for (key, label) in [
+            ("input", "输入 token"),
+            ("output", "输出 token"),
+            ("cache_read", "缓存读取 token"),
+            ("cache_write", "缓存写入 token"),
+            ("total", "合计 token"),
+        ] {
+            if let Some(count) = finite(tokens.get(key)) {
+                metrics.push(UsageMetric {
+                    used: Some(count),
+                    ..session(&format!("session/tokens/{key}"), label, "tokens")
+                });
+            }
+        }
+    }
+    // 只有在报文确实带了用量时才附上模型标签：单独一条模型名不是用量。
+    if !metrics.is_empty() {
+        let (provider, model) = pi_provider_model(value);
+        let tag = match (provider, model) {
+            (Some(provider), Some(model)) => Some(format!("{provider}/{model}")),
+            (None, Some(model)) => Some(model),
+            (Some(provider), None) => Some(provider),
+            (None, None) => None,
+        };
+        if let Some(tag) = tag {
+            metrics.push(UsageMetric {
+                text_value: Some(tag),
+                ..session("session/model", "当前模型", "")
+            });
+        }
+    }
+    metrics
+}
+
 /// `claude auth status --json` 的非交互登录预检结果。只取登录判定与公开身份，不含令牌。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct ClaudeAuthStatus {
@@ -973,14 +1227,12 @@ pub(super) enum ProbeBlocker {
     Trust,
 }
 
-/// 登录组关键字（小写、行首词边界锚定）。前半是各厂商登录画面的标题 / 提示行（claude 2.x、
-/// Gemini CLI 认证对话），后半是通用措辞，覆盖 gemini / grok / hermes 等共用本判定的厂商。
-/// 以 `/` 开头的斜杠命令行（`/login  Sign in with …`）在判定前被整行跳过，所以这里可以
+/// 登录组关键字（小写、行首词边界锚定）。前半是 claude 2.x 登录画面的标题 / 提示行，后半是
+/// 通用措辞（CLI 改版后的兜底）。以 `/` 开头的斜杠命令行（`/login  Sign in with …`）在判定前被整行跳过，所以这里可以
 /// 保留 `sign in` / `log in` 这类短语而不误判 `/help` 列表。
 const SIGN_IN_LINE_PREFIXES: &[&str] = &[
     "select login method",
     "how do you want to sign in",
-    "how would you like to authenticate",
     "log in to claude",
     "sign in to claude",
     "please run /login",
@@ -1007,14 +1259,12 @@ const SIGN_IN_LINE_PREFIXES: &[&str] = &[
 ];
 
 /// 信任组关键字（小写、行首词边界锚定），只锚定信任对话专属文案：Claude Code 2.x 的
-/// `Quick safety check` / `Yes, I trust this folder` / `Yes, trust it`，以及 Gemini CLI 的
-/// 目录信任对话标题。`Accessing workspace:` 是工作区横幅、`permission required` 是通用措辞，
-/// 都不能单独作为判据。
+/// `Quick safety check` / `Yes, I trust this folder` / `Yes, trust it`。`Accessing workspace:`
+/// 是工作区横幅、`permission required` 是通用措辞，都不能单独作为判据。
 const TRUST_LINE_PREFIXES: &[&str] = &[
     "quick safety check",
     "yes, i trust this folder",
     "yes, trust it",
-    "do you trust this folder",
 ];
 
 /// 去掉一行前面的边框、项目符号、单选标记、光标与 `1.` / `2)` 之类的选项序号，只保留文案本体。
@@ -1149,43 +1399,6 @@ mod tests {
  ❯
 ";
 
-    /// Gemini CLI 首次启动的认证对话（文案按官方文档 geminicli.com/docs/get-started/
-    /// authentication 编写；待真机快照校正）。
-    const GEMINI_AUTH_SCREEN: &str = "\
- ╭───────────────────────────────────────────────────────╮
- │ How would you like to authenticate for this project?  │
- │                                                       │
- │ ● 1. Login with Google                                │
- │   2. Use Gemini API Key                               │
- │   3. Vertex AI                                        │
- │                                                       │
- │ (Use Enter to select)                                 │
- ╰───────────────────────────────────────────────────────╯
-";
-
-    /// Gemini CLI 的目录信任对话（文案按官方文档 trusted-folders 编写；待真机快照校正）。
-    const GEMINI_TRUST_SCREEN: &str = "\
- ╭───────────────────────────────────────────────────────╮
- │ Do you trust this folder?                             │
- │ Trusting a folder allows Gemini to execute commands.  │
- │ ● 1. Trust folder                                     │
- │   2. Trust parent folder                              │
- │   3. Don't trust                                      │
- ╰───────────────────────────────────────────────────────╯
-";
-
-    /// Grok CLI 未登录提示（通用措辞，待真机快照校正）。
-    const GROK_SIGN_IN_SCREEN: &str = "\
- You must log in first.
- Run /login to authenticate with your xAI account.
- ❯
-";
-
-    /// Hermes 未登录提示（通用措辞，待真机快照校正）。
-    const HERMES_SIGN_IN_SCREEN: &str = "\
- Not authenticated. Run `hermes auth login` to continue.
-";
-
     #[test]
     fn claude_auth_status_parses_signed_in_and_signed_out_json() {
         let signed_in = claude_auth_status(
@@ -1272,36 +1485,17 @@ Done.
         );
     }
 
+    /// 通用登录措辞是 CLI 改版后的兜底：不依赖某一版的确切标题行。
     #[test]
-    fn login_screens_of_other_interactive_vendors_are_recognized() {
-        assert_eq!(
-            interactive_blocker(GEMINI_AUTH_SCREEN),
-            Some(ProbeBlocker::SignIn),
-            "gemini 认证对话"
-        );
-        assert_eq!(
-            interactive_blocker(GEMINI_TRUST_SCREEN),
-            Some(ProbeBlocker::Trust),
-            "gemini 目录信任对话"
-        );
-        assert_eq!(
-            interactive_blocker(GROK_SIGN_IN_SCREEN),
-            Some(ProbeBlocker::SignIn),
-            "grok 登录提示"
-        );
-        assert_eq!(
-            interactive_blocker(HERMES_SIGN_IN_SCREEN),
-            Some(ProbeBlocker::SignIn),
-            "hermes 登录提示"
-        );
+    fn generic_sign_in_phrases_are_recognized() {
         for line in [
             "Please sign in to continue",
             "You need to sign in",
             "Authentication required",
             "You must log in first",
-            "Sign in with Google to get started",
-            "Login required: run `grok auth`",
+            "Login required: run `claude auth login`",
             "Log in to your account",
+            "Not authenticated. Run `claude auth login` to continue.",
         ] {
             assert_eq!(
                 interactive_blocker(line),
@@ -1386,25 +1580,28 @@ Done.
         assert_eq!(bucket.label, "Weekly quota");
         assert_eq!(bucket.id, "/buckets/week ly");
         assert_eq!(bucket.unit, "%");
-        // codex 的 limitName、antigravity 的键名同样来自 JSON。
+        // codex 的 limitName 同样来自 JSON。
         let codex_metrics = codex(
             &json!({"rateLimitsByLimitId": {"co\tdex": {"limitName": "Co\x07dex", "primary": {"usedPercent": 5}, "credits": {"balance": "1.0"}}}}),
         );
         assert!(validate(&codex_metrics), "{codex_metrics:#?}");
         assert_eq!(codex_metrics[0].label, "Codex · 主要额度");
         assert_eq!(codex_metrics[1].id, "co dex/credits");
-        let agy = antigravity(&json!({"quota": {"gem\tini": {"remaining_fraction": 0.5}}}));
-        assert!(validate(&agy));
-        assert_eq!(agy[0].id, "gem ini");
         // opencode 框线表带 ANSI。
         let stats = opencode_stats("│\x1b[1mSessions\x1b[0m\t\t41 │\n");
         assert_eq!(stats.len(), 1);
         assert_eq!(stats[0].used, Some(41.0));
         assert!(validate(&stats));
-        // letta 的文本值。
-        let letta_metrics =
-            letta("# Letta usage overview\n* Bucket (full/high/medium/low/empty): hi\tgh\x1b[0m\n");
-        assert_eq!(letta_metrics[0].text_value.as_deref(), Some("hi gh"));
+        // pi 扩展报文里的服务商 / 模型名。
+        let pi_metrics =
+            pi(&json!({"provider": "anth\tropic", "model": "son\x1bnet", "cost_usd": 0.5}));
+        assert!(validate(&pi_metrics), "{pi_metrics:#?}");
+        assert_eq!(
+            pi_metrics
+                .last()
+                .and_then(|metric| metric.text_value.as_deref()),
+            Some("anth ropic/sonnet")
+        );
         assert_eq!(clean_field("  a \t\x1b[31m b\r\n c  "), "a b c");
         assert_eq!(clean_field("\t"), "");
     }
@@ -1586,12 +1783,12 @@ Done.
         let yargs = "opencode stats\n\nshow token usage and cost statistics\n\nOptions:\n  -h, --help  show help  [boolean]\n";
         assert!(cli_help_output(yargs));
         assert!(cli_help_output(
-            "Usage: kilo profile [options]\n\n  -h, --help  display help\n"
+            "Usage: tool profile [options]\n\n  -h, --help  display help\n"
         ));
-        assert!(cli_help_output("Commands:\n  kilo profile  show profile\n"));
+        assert!(cli_help_output("Commands:\n  tool profile  show profile\n"));
         assert!(
             cli_help_output(
-                "Error: unknown flag\nUsage:\n  kilo profile [flags]\n\nFlags:\n  -h, --help\n"
+                "Error: unknown flag\nUsage:\n  tool profile [flags]\n\nFlags:\n  -h, --help\n"
             ),
             "cobra 形态"
         );
@@ -1607,7 +1804,7 @@ Done.
             "列表符号 `- ` 不是 flag 行"
         );
         assert!(
-            !cli_help_output("Usage: kilo profile [options]\n"),
+            !cli_help_output("Usage: tool profile [options]\n"),
             "无 flag 行"
         );
         assert!(!cli_help_output(OPENCODE_STATS_SCREEN), "框线表不是帮助");
@@ -1657,13 +1854,271 @@ Done.
         assert_eq!(metrics[0].resets_at, Some(1700000000));
     }
 
+    /// 客户端把 `used_percent` 与成对的 `used` + `limit` 都当作账号额度压力：会话级指标不得
+    /// 落进这两种形态。
+    fn counts_as_quota_pressure(metric: &UsageMetric) -> bool {
+        metric.used_percent.is_some() || (metric.used.is_some() && metric.limit.is_some())
+    }
+
     #[test]
-    fn missing_claude_quota_never_becomes_zero_and_overage_is_retained() {
-        assert!(claude(&json!({"context_window":{"used_percentage":80}})).is_empty());
-        let metrics = claude(
-            &json!({"rate_limits":{"spend_limit":{"used_percentage":110,"resets_at":1700000000}}}),
+    fn missing_claude_quota_never_becomes_zero_and_context_is_never_account_quota() {
+        let metrics = claude(&json!({"context_window":{"used_percentage":80}}));
+        assert!(!metrics.is_empty(), "上下文作为会话级指标保留");
+        assert!(
+            metrics.iter().all(|metric| metric.scope == "session"),
+            "没有 rate_limits 就没有账号额度指标：{metrics:#?}"
         );
-        assert_eq!(metrics[0].used_percent, Some(110.0));
+        assert!(
+            !metrics.iter().any(counts_as_quota_pressure),
+            "上下文占用不是账号额度，不得进入额度压力口径：{metrics:#?}"
+        );
+        assert!(claude(&json!({})).is_empty());
+        assert!(claude(&json!({"model":{"display_name":"Opus"}})).is_empty());
+    }
+
+    /// `spend_limit.used_percentage` 超限后可大于 100（官方文档：above 100 once you exceed the
+    /// limit）：解析与校验都不得截断。
+    #[test]
+    fn claude_spend_limit_overage_is_not_truncated() {
+        let mut metrics = claude(
+            &json!({"rate_limits":{"spend_limit":{"used_percentage":162.8,"resets_at":1700000000}}}),
+        );
+        assert_eq!(metrics.len(), 1);
+        assert_eq!(metrics[0].id, "spend_limit");
+        assert_eq!(metrics[0].used_percent, Some(162.8));
+        assert_eq!(metrics[0].resets_at, Some(1700000000));
+        assert_eq!(retain_valid(&mut metrics), 0, "超过 100 的百分比是合规指标");
+        assert_eq!(metrics[0].used_percent, Some(162.8));
+    }
+
+    /// 官方 statusline 的完整形态（字段取自 code.claude.com/docs/en/statusline 的示例）。
+    #[test]
+    fn claude_statusline_yields_quota_windows_then_session_cost_and_context() {
+        let metrics = claude(&json!({
+            "session_id": "abc",
+            "cost": {
+                "total_cost_usd": 0.01234,
+                "total_duration_ms": 3_725_000,
+                "total_api_duration_ms": 2300,
+                "total_lines_added": 156,
+                "total_lines_removed": 23
+            },
+            "context_window": {
+                "total_input_tokens": 15234,
+                "total_output_tokens": 4521,
+                "context_window_size": 200000,
+                "used_percentage": 8,
+                "remaining_percentage": 92,
+                "current_usage": {
+                    "input_tokens": 8500,
+                    "output_tokens": 1200,
+                    "cache_creation_input_tokens": 5000,
+                    "cache_read_input_tokens": 2000
+                }
+            },
+            "rate_limits": {
+                "five_hour": {"used_percentage": 23.5, "resets_at": 1738425600},
+                "seven_day": {"used_percentage": 41.2, "resets_at": 1738857600}
+            }
+        }));
+        assert!(validate(&metrics), "{metrics:#?}");
+        let ids = metrics
+            .iter()
+            .map(|metric| metric.id.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            ids,
+            vec![
+                "five_hour",
+                "seven_day",
+                "cost/total_cost_usd",
+                "cost/total_duration_ms",
+                "cost/total_api_duration_ms",
+                "context_window/used_percentage",
+                "context_window/current_usage",
+                "context_window/context_window_size",
+            ],
+            "账号额度在前，会话级指标在后"
+        );
+        let by_id = |id: &str| metrics.iter().find(|metric| metric.id == id).unwrap();
+        assert_eq!(by_id("five_hour").scope, "account");
+        assert_eq!(by_id("five_hour").used_percent, Some(23.5));
+        for metric in metrics.iter().skip(2) {
+            assert_eq!(metric.scope, "session", "{}", metric.id);
+            assert!(!counts_as_quota_pressure(metric), "{}", metric.id);
+        }
+        let cost = by_id("cost/total_cost_usd");
+        assert_eq!(cost.amount_decimal.as_deref(), Some("0.01234"));
+        assert_eq!(cost.unit, "USD");
+        let duration = by_id("cost/total_duration_ms");
+        assert_eq!(duration.used, Some(3_725_000.0));
+        assert_eq!(duration.text_value.as_deref(), Some("1h02m"));
+        assert_eq!(
+            by_id("cost/total_api_duration_ms").text_value.as_deref(),
+            Some("2s")
+        );
+        let percent = by_id("context_window/used_percentage");
+        assert_eq!(percent.used, Some(8.0));
+        assert_eq!(percent.remaining, Some(92.0));
+        assert_eq!(percent.text_value.as_deref(), Some("8%"));
+        let tokens = by_id("context_window/current_usage");
+        assert_eq!(
+            tokens.used,
+            Some(15_500.0),
+            "与官方 used_percentage 同口径：input + cache 创建 + cache 读取，不含 output"
+        );
+        assert_eq!(tokens.text_value, None);
+        assert_eq!(
+            by_id("context_window/context_window_size").used,
+            Some(200_000.0)
+        );
+    }
+
+    /// `current_usage` / `used_percentage` 为 null（首次 API 调用前、`/compact` 后）是「未知」，
+    /// 必须与真实的 0 区分：数值留 `None` 并给出明示，而不是 `Some(0.0)`。
+    #[test]
+    fn claude_null_context_is_unknown_not_zero() {
+        let pending = claude(&json!({"context_window": {
+            "context_window_size": 200000,
+            "used_percentage": null,
+            "remaining_percentage": null,
+            "current_usage": null
+        }}));
+        let by_id = |metrics: &[UsageMetric], id: &str| {
+            metrics
+                .iter()
+                .find(|metric| metric.id == id)
+                .cloned()
+                .unwrap()
+        };
+        let percent = by_id(&pending, "context_window/used_percentage");
+        assert_eq!(percent.used, None);
+        assert_eq!(percent.remaining, None);
+        assert_eq!(
+            percent.text_value.as_deref(),
+            Some(CLAUDE_CONTEXT_PENDING_TEXT)
+        );
+        let tokens = by_id(&pending, "context_window/current_usage");
+        assert_eq!(tokens.used, None);
+        assert_eq!(
+            tokens.text_value.as_deref(),
+            Some(CLAUDE_CONTEXT_PENDING_TEXT)
+        );
+        assert_eq!(
+            by_id(&pending, "context_window/context_window_size").used,
+            Some(200_000.0),
+            "窗口大小已知，照常给出"
+        );
+        assert!(validate(&pending));
+
+        let zero = claude(&json!({"context_window": {
+            "used_percentage": 0,
+            "remaining_percentage": 100,
+            "current_usage": {"input_tokens": 0, "cache_creation_input_tokens": 0, "cache_read_input_tokens": 0}
+        }}));
+        let percent = by_id(&zero, "context_window/used_percentage");
+        assert_eq!(percent.used, Some(0.0), "真实的 0 保留为 0");
+        assert_eq!(percent.text_value.as_deref(), Some("0%"));
+        let tokens = by_id(&zero, "context_window/current_usage");
+        assert_eq!(tokens.used, Some(0.0));
+        assert_eq!(tokens.text_value, None);
+        assert_ne!(
+            by_id(&pending, "context_window/current_usage"),
+            tokens,
+            "未知与 0 不是同一个指标值"
+        );
+    }
+
+    fn claude_window(id: &str, percent: f64, resets_at: u64) -> UsageMetric {
+        UsageMetric {
+            id: id.into(),
+            label: id.into(),
+            unit: "%".into(),
+            scope: "account".into(),
+            used_percent: Some(percent),
+            resets_at: Some(resets_at),
+            ..Default::default()
+        }
+    }
+
+    /// 官方 statusline 在窗口过了 `resets_at` 后把它从 JSON 里去掉：缺席不是归零，上次值沿用
+    /// 并标为过期；尚未到 `resets_at` 的缺席（会话首个响应之前）原样沿用、不标过期。
+    #[test]
+    fn claude_window_that_disappears_is_retained_not_zeroed() {
+        let now = 1_700_010_000;
+        let previous = vec![
+            claude_window("five_hour", 87.5, now - 60),
+            claude_window("seven_day", 41.0, now + 86_400),
+            UsageMetric {
+                id: "cost/total_cost_usd".into(),
+                scope: "session".into(),
+                unit: "USD".into(),
+                amount_decimal: Some("9.99".into()),
+                ..Default::default()
+            },
+        ];
+        // five_hour 已过重置时间，从报文里消失；seven_day 仍在。
+        let fresh = claude(&json!({
+            "cost": {"total_cost_usd": 1.5},
+            "rate_limits": {"seven_day": {"used_percentage": 42.0, "resets_at": now + 86_400}}
+        }));
+        let merged = claude_retain_missing_windows(fresh, &previous, now);
+        let ids = merged
+            .iter()
+            .map(|metric| metric.id.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            ids,
+            vec!["five_hour", "seven_day", "cost/total_cost_usd"],
+            "窗口按固定顺序排在会话级指标之前；会话级指标只取本次报文"
+        );
+        let five_hour = &merged[0];
+        assert_eq!(five_hour.used_percent, Some(87.5), "保留上次值，不是 0");
+        assert_eq!(five_hour.resets_at, Some(now - 60));
+        assert_eq!(
+            five_hour.text_value.as_deref(),
+            Some(CLAUDE_STALE_WINDOW_TEXT)
+        );
+        assert_eq!(merged[1].used_percent, Some(42.0), "在场的窗口用本次报文");
+        assert_eq!(merged[1].text_value, None);
+        assert_eq!(merged[2].amount_decimal.as_deref(), Some("1.5"));
+        assert!(validate(&merged));
+
+        // 过期标记幂等：再缺席一次仍是同一条过期指标。
+        let again = claude_retain_missing_windows(
+            claude(&json!({"cost": {"total_cost_usd": 1.6}})),
+            &merged,
+            now + 30,
+        );
+        assert_eq!(again[0], merged[0]);
+        assert_eq!(again[1].used_percent, Some(42.0));
+        assert_eq!(
+            again[1].text_value, None,
+            "尚未到 resets_at 的缺席（rate_limits 整段缺省）不算过期"
+        );
+
+        // 新窗口的数据回来后取代过期值。
+        let recovered = claude_retain_missing_windows(
+            claude(
+                &json!({"rate_limits": {"five_hour": {"used_percentage": 1.0, "resets_at": now + 18_000}}}),
+            ),
+            &again,
+            now + 60,
+        );
+        assert_eq!(recovered[0].used_percent, Some(1.0));
+        assert_eq!(recovered[0].text_value, None);
+
+        // 过期太久的上次值不再沿用。
+        let ancient = claude_retain_missing_windows(
+            Vec::new(),
+            &[claude_window(
+                "five_hour",
+                87.5,
+                now - CLAUDE_STALE_WINDOW_MAX_AGE_SECS - 1,
+            )],
+            now,
+        );
+        assert!(ancient.is_empty());
     }
 
     #[test]
@@ -1721,33 +2176,6 @@ Done.
     }
 
     #[test]
-    fn omp_same_email_in_two_organizations_requires_scope() {
-        let value = json!({"reports":[{"provider":"anthropic","metadata":{"email":"user@example.test","orgId":"a"},"limits":[]},{"provider":"anthropic","metadata":{"email":"user@example.test","orgId":"b"},"limits":[]}]});
-        let mut account = crate::config::UsageAccountConfig {
-            provider: "anthropic".into(),
-            account_user: Some("user@example.test".into()),
-            ..Default::default()
-        };
-        assert_eq!(
-            omp(&value, &account).unwrap_err().0,
-            crate::api::schema::ObservationStatus::NeedsBinding
-        );
-        account.organization = Some("a".into());
-        assert!(omp(&value, &account).is_ok());
-    }
-
-    #[test]
-    fn official_statusline_ignores_context_and_converts_remaining_fraction() {
-        let values = antigravity(
-            &json!({"context_window":{"used_percentage":90},"quota":{"weekly":{"remaining_fraction":0.75,"reset_time":"2026-09-17T00:00:00Z"}}}),
-        );
-        assert_eq!(values.len(), 1);
-        assert_eq!(values[0].used_percent, Some(25.0));
-        assert!(values[0].resets_at.is_some());
-        assert!(antigravity(&json!({"quota":{"broken":{"remaining_fraction":2}}})).is_empty());
-    }
-
-    #[test]
     fn kimi_v2_quota_usages_windows_become_percent_metrics() {
         let values = kimi(&json!({
             "code": 0,
@@ -1774,5 +2202,319 @@ Done.
             .find(|metric| metric.id == "limit7d")
             .expect("7d window");
         assert!((seven_days.used_percent.unwrap() - 66.5726).abs() < 0.01);
+    }
+
+    /// 2.0.2 的 `managedQuotaUsagesSchema` 还有 monthTotal / monthCode 两个窗口：必须有中文
+    /// 标签，不能把裸键名显示出来。
+    #[test]
+    fn kimi_monthly_windows_are_labelled() {
+        let values = kimi(&json!({"data": {"kind": "ok", "quota": {"usages": {
+            "monthTotal": {"usedRatio": 0.5, "resetAt": "2026-10-01T00:00:00Z"},
+            "monthCode": {"usedRatio": 0.125}
+        }}}}));
+        let label = |id: &str| {
+            values
+                .iter()
+                .find(|metric| metric.id == id)
+                .map(|metric| metric.label.clone())
+                .unwrap()
+        };
+        assert_eq!(label("monthTotal"), "月度额度");
+        assert_eq!(label("monthCode"), "月度额度 · Code 部分");
+        assert!(values.iter().all(|metric| metric.label != metric.id));
+        let percent = |id: &str| {
+            values
+                .iter()
+                .find(|metric| metric.id == id)
+                .and_then(|metric| metric.used_percent)
+        };
+        assert_eq!(percent("monthTotal"), Some(50.0));
+        assert_eq!(percent("monthCode"), Some(12.5));
+    }
+
+    /// `quota.extraUsage`（超额按量的钱包）→ 金额类指标：单位是币种，分 → 主单位不经浮点，
+    /// 不产出百分比；月上限只在开启且大于 0 时才是真实上限。
+    #[test]
+    fn kimi_extra_usage_becomes_amount_metrics_not_percentages() {
+        let values = kimi(&json!({"data": {"kind": "ok", "quota": {
+            "usages": {"limit5h": {"usedRatio": 0.25}},
+            "extraUsage": {
+                "balanceCents": 12345,
+                "totalCents": 20000,
+                "monthlyChargeLimitEnabled": true,
+                "monthlyChargeLimitCents": 5000,
+                "monthlyUsedCents": 705,
+                "currency": "CNY"
+            }
+        }}}));
+        assert!(validate(&values), "{values:#?}");
+        let amount = |id: &str| {
+            values
+                .iter()
+                .find(|metric| metric.id == id)
+                .map(|metric| (metric.amount_decimal.clone().unwrap(), metric.unit.clone()))
+        };
+        assert_eq!(
+            amount("extra_usage/balance"),
+            Some(("123.45".into(), "CNY".into()))
+        );
+        assert_eq!(
+            amount("extra_usage/total"),
+            Some(("200.00".into(), "CNY".into()))
+        );
+        assert_eq!(
+            amount("extra_usage/monthly_used"),
+            Some(("7.05".into(), "CNY".into()))
+        );
+        assert_eq!(
+            amount("extra_usage/monthly_limit"),
+            Some(("50.00".into(), "CNY".into()))
+        );
+        for metric in values
+            .iter()
+            .filter(|metric| metric.id.starts_with("extra_usage/"))
+        {
+            assert_eq!(metric.scope, "account");
+            assert!(
+                metric.used_percent.is_none() && metric.used.is_none() && metric.limit.is_none(),
+                "金额类指标不折算百分比：{metric:#?}"
+            );
+        }
+
+        // 上限未开启或为 0：不是真实上限，不展示。
+        for wallet in [
+            json!({"balanceCents": 1, "monthlyChargeLimitEnabled": false, "monthlyChargeLimitCents": 5000}),
+            json!({"balanceCents": 1, "monthlyChargeLimitEnabled": true, "monthlyChargeLimitCents": 0}),
+        ] {
+            let values = kimi(&json!({"quota": {"usages": {}, "extraUsage": wallet}}));
+            assert!(values
+                .iter()
+                .all(|metric| metric.id != "extra_usage/monthly_limit"));
+            assert_eq!(values[0].unit, "USD", "缺 currency 按官方实现的缺省");
+        }
+    }
+
+    /// server API 官方标注 experimental：extraUsage 为 null、缺字段或形状不符都只跳过，不影响
+    /// 额度窗口。
+    #[test]
+    fn kimi_extra_usage_tolerates_missing_and_malformed_fields() {
+        for extra in [
+            json!(null),
+            json!("soon"),
+            json!([]),
+            json!({}),
+            json!({"balanceCents": "12", "totalCents": -5, "monthlyUsedCents": 1.5, "currency": 7}),
+        ] {
+            let values = kimi(&json!({"quota": {
+                "usages": {"limit7d": {"usedRatio": 0.5}},
+                "extraUsage": extra
+            }}));
+            assert_eq!(values.len(), 1, "{values:#?}");
+            assert_eq!(values[0].id, "limit7d");
+        }
+        let partial = kimi(&json!({"quota": {"extraUsage": {"monthlyUsedCents": 9}}}));
+        assert_eq!(partial.len(), 1);
+        assert_eq!(partial[0].id, "extra_usage/monthly_used");
+        assert_eq!(partial[0].amount_decimal.as_deref(), Some("0.09"));
+    }
+
+    /// `opencode db <query> --format json` 打印 `JSON.stringify(rows, null, 2)`：单行聚合 →
+    /// 本地会话统计，`scope` 固定 `local`（不是账号额度）。
+    #[test]
+    fn opencode_session_totals_become_local_session_metrics() {
+        let text = "[\n  {\n    \"sessions\": 41,\n    \"child_sessions\": 7,\n    \"cost\": 0.8800000000000001,\n    \"tokens_input\": 690300,\n    \"tokens_output\": 52100,\n    \"tokens_reasoning\": 1200,\n    \"tokens_cache_read\": 3600000,\n    \"tokens_cache_write\": 0\n  }\n]\n";
+        let metrics = opencode_sessions(text);
+        assert!(validate(&metrics), "{metrics:#?}");
+        assert!(
+            metrics.iter().all(|metric| metric.scope == "local"),
+            "本地统计，非账号额度"
+        );
+        assert!(metrics
+            .iter()
+            .all(|metric| metric.used_percent.is_none() && metric.limit.is_none()));
+        let by_id = |id: &str| metrics.iter().find(|metric| metric.id == id).unwrap();
+        assert_eq!(by_id("sessions").used, Some(41.0));
+        assert_eq!(by_id("child_sessions").used, Some(7.0));
+        assert_eq!(
+            by_id("total_cost").amount_decimal.as_deref(),
+            Some("0.8800")
+        );
+        assert_eq!(by_id("total_cost").unit, "USD");
+        assert_eq!(by_id("input_tokens").used, Some(690_300.0));
+        assert_eq!(by_id("reasoning_tokens").used, Some(1200.0));
+        assert_eq!(by_id("cache_write_tokens").used, Some(0.0));
+        // 与框线表回退形态共用 id，切换数据源后客户端看到的是同一组指标。
+        for id in ["sessions", "total_cost", "input_tokens", "output_tokens"] {
+            assert!(OPENCODE_STATS_ROWS.iter().any(|row| row.id == id), "{id}");
+        }
+
+        // JSON 前夹杂日志行、缺列、空结果、非 JSON 都不 panic。
+        let noisy = format!("Performing one time database migration...\n{text}");
+        assert_eq!(opencode_sessions(&noisy).len(), metrics.len());
+        assert_eq!(opencode_sessions("[{\"sessions\": 3}]").len(), 1);
+        assert!(opencode_sessions("[]").is_empty());
+        assert!(opencode_sessions("{}").is_empty());
+        assert!(opencode_sessions("sessions\tcost\n41\t0.88\n").is_empty());
+        assert!(opencode_sessions("").is_empty());
+    }
+
+    /// herdr pi 扩展的推送报文 → 会话级指标，并带上当前 provider/model。
+    #[test]
+    fn pi_push_payload_becomes_session_metrics_with_the_current_model() {
+        let payload = json!({
+            "source": "herdr:pi",
+            "provider": "anthropic",
+            "model": "claude-sonnet-4-5",
+            "context": {"tokens": 45_000, "percent": 22.5, "context_window": 200_000},
+            "tokens": {"input": 1000, "output": 200, "cache_read": 3000, "cache_write": 40, "total": 4240},
+            "cost_usd": 0.4213
+        });
+        let metrics = pi(&payload);
+        assert!(validate(&metrics), "{metrics:#?}");
+        assert!(metrics.iter().all(|metric| metric.scope == "session"));
+        assert!(
+            !metrics.iter().any(counts_as_quota_pressure),
+            "会话统计不进账号额度压力口径"
+        );
+        let by_id = |id: &str| metrics.iter().find(|metric| metric.id == id).unwrap();
+        assert_eq!(by_id("context/percent").used, Some(22.5));
+        assert_eq!(
+            by_id("context/percent").text_value.as_deref(),
+            Some("22.5%")
+        );
+        assert_eq!(by_id("context/tokens").used, Some(45_000.0));
+        assert_eq!(by_id("context/context_window").used, Some(200_000.0));
+        assert_eq!(
+            by_id("session/cost_usd").amount_decimal.as_deref(),
+            Some("0.4213")
+        );
+        assert_eq!(by_id("session/tokens/cache_read").used, Some(3000.0));
+        assert_eq!(by_id("session/tokens/total").used, Some(4240.0));
+        assert_eq!(
+            by_id("session/model").text_value.as_deref(),
+            Some("anthropic/claude-sonnet-4-5")
+        );
+        assert_eq!(
+            pi_provider_model(&payload),
+            (Some("anthropic".into()), Some("claude-sonnet-4-5".into()))
+        );
+        // 没有任何用量字段时，单独一条模型名不算用量。
+        assert!(pi(&json!({"provider": "anthropic", "model": "x"})).is_empty());
+        assert!(pi(&json!({})).is_empty());
+    }
+
+    /// 压缩之后、下一次响应之前 `tokens` / `percent` 为 null：未知不是 0。
+    #[test]
+    fn pi_null_context_after_compaction_is_unknown_not_zero() {
+        let pending =
+            pi(&json!({"context": {"tokens": null, "percent": null, "context_window": 200_000}}));
+        let by_id = |metrics: &[UsageMetric], id: &str| {
+            metrics
+                .iter()
+                .find(|metric| metric.id == id)
+                .cloned()
+                .unwrap()
+        };
+        for id in ["context/percent", "context/tokens"] {
+            let metric = by_id(&pending, id);
+            assert_eq!(metric.used, None, "{id}");
+            assert_eq!(
+                metric.text_value.as_deref(),
+                Some(PI_CONTEXT_PENDING_TEXT),
+                "{id}"
+            );
+        }
+        assert_eq!(
+            by_id(&pending, "context/context_window").used,
+            Some(200_000.0)
+        );
+        assert!(validate(&pending));
+
+        let zero = pi(&json!({"context": {"tokens": 0, "percent": 0, "context_window": 200_000}}));
+        assert_eq!(by_id(&zero, "context/percent").used, Some(0.0));
+        assert_eq!(
+            by_id(&zero, "context/percent").text_value.as_deref(),
+            Some("0%")
+        );
+        assert_eq!(by_id(&zero, "context/tokens").used, Some(0.0));
+        assert_eq!(by_id(&zero, "context/tokens").text_value, None);
+        assert_ne!(
+            by_id(&pending, "context/tokens"),
+            by_id(&zero, "context/tokens")
+        );
+    }
+
+    /// pi 的会话条目里 `usage.cost` 是对象（`{input, output, cacheRead, cacheWrite, total}`），
+    /// RPC `get_session_stats` 的 `cost` 是数值。服务端只认扩展合计好的数值 `cost_usd`：对象形态
+    /// 不被当成数值，别的键名也不会被误读成费用。
+    #[test]
+    fn pi_cost_is_only_read_from_the_numeric_cost_usd_field() {
+        let cost_of = |payload: Value| {
+            pi(&payload)
+                .into_iter()
+                .find(|metric| metric.id == "session/cost_usd")
+                .and_then(|metric| metric.amount_decimal)
+        };
+        let context = json!({"tokens": 1, "percent": 1, "context_window": 10});
+        assert_eq!(
+            cost_of(json!({"context": context, "cost_usd": 1.25})).as_deref(),
+            Some("1.25")
+        );
+        assert_eq!(
+            cost_of(json!({"context": context, "cost_usd": 0})).as_deref(),
+            Some("0")
+        );
+        // 对象形态（会话条目口径）与字符串都不接受。
+        for malformed in [
+            json!({"input": 0.1, "output": 0.2, "cacheRead": 0.0, "cacheWrite": 0.0, "total": 0.3}),
+            json!("1.25"),
+            json!(null),
+            json!(-1),
+        ] {
+            assert_eq!(
+                cost_of(json!({"context": context, "cost_usd": malformed})),
+                None,
+                "{malformed}"
+            );
+        }
+        // RPC / 会话条目的原始键名不是本报文的契约。
+        assert_eq!(cost_of(json!({"context": context, "cost": 1.25})), None);
+        assert_eq!(
+            cost_of(json!({"context": context, "cost": {"total": 1.25}})),
+            None
+        );
+    }
+
+    /// 金额类指标原样渲染给用户，所以浮点合计的尾差必须在这里收口：6 位小数够细
+    /// （比任何单次调用的单价都细），又不会把 `0.39999999999999997` 透出去。
+    #[test]
+    fn money_decimal_rounds_float_tails_but_keeps_vendor_strings() {
+        // 0.36 + 0.04 在 IEEE754 里就是这个值：pi v9 及更早的已装扩展会原样推上来。
+        assert_eq!(money_decimal(&json!(0.399_999_999_999_999_97)), "0.4");
+        assert_eq!(money_decimal(&json!(0.1 + 0.2)), "0.3");
+        assert_eq!(money_decimal(&json!(0)), "0");
+        assert_eq!(money_decimal(&json!(0.0012)), "0.0012");
+        assert_eq!(money_decimal(&json!(12)), "12");
+        assert_eq!(money_decimal(&json!(1.5)), "1.5");
+        // 六位以下的差额仍然保留，不会被抹成整数。
+        assert_eq!(money_decimal(&json!(0.000_001)), "0.000001");
+        // 厂商给的字符串是它自己的精确十进制表示，不做浮点往返。
+        assert_eq!(money_decimal(&json!("12.3400")), "12.3400");
+        assert_eq!(money_decimal(&json!(null)), "null");
+    }
+
+    /// 同一条尾差走完整解析路径：pi 与 claude 的费用指标都不得把它透给客户端。
+    #[test]
+    fn session_cost_metrics_never_expose_float_tails() {
+        let pi_cost = pi(&json!({"cost_usd": 0.399_999_999_999_999_97}))
+            .into_iter()
+            .find(|metric| metric.id == "session/cost_usd")
+            .and_then(|metric| metric.amount_decimal);
+        assert_eq!(pi_cost.as_deref(), Some("0.4"));
+        let claude_cost = claude(&json!({"cost": {"total_cost_usd": 0.399_999_999_999_999_97}}))
+            .into_iter()
+            .find(|metric| metric.id == "cost/total_cost_usd")
+            .and_then(|metric| metric.amount_decimal);
+        assert_eq!(claude_cost.as_deref(), Some("0.4"));
     }
 }

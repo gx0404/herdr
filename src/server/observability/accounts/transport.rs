@@ -170,8 +170,6 @@ fn profile_variable(agent: &str) -> Option<&'static str> {
         "codex" => Some("CODEX_HOME"),
         "claude" => Some("CLAUDE_CONFIG_DIR"),
         "kimi" => Some("KIMI_CODE_HOME"),
-        "qodercli" => Some("QODER_CONFIG_DIR"),
-        "hermes" => Some("HERMES_HOME"),
         "pi" => Some("PI_CODING_AGENT_DIR"),
         _ => None,
     }
@@ -683,11 +681,16 @@ enum Settled {
     Done(Result<Vec<UsageMetric>, QueryError>),
     /// 用法错误（flag / 子命令不受支持）：调用方尚有回退形态时再试一次。
     UsageError(QueryError),
+    /// 进程自己以非零退出且没有产出指标（不是用法错误，也不是被信号终止）：首选形态是
+    /// 数据库查询时，这可能只是旧库缺列之类的 schema 差异，回退形态走另一条读取路径，调用方
+    /// 尚有回退形态时再试一次；没有回退形态时就是结论。
+    Failed(QueryError),
 }
 
 /// 先看内容再看退出码（纯函数，便于表驱动测试）：stdout 能解析出指标就是结论——个别 CLI
-/// 打完结果以非零退出；否则失败退出按 `classify_failure` 分类，其中用法错误单独标出以便
-/// 回退；正常退出但没有指标就把解析结果原样交给调用方（空 → 「无已验证字段」）。
+/// 打完结果以非零退出；否则失败退出按 `classify_failure` 分类，其中用法错误与进程自身的
+/// 失败退出分别标出以便回退（被信号终止是运行环境的问题，不回退）；正常退出但没有指标就把
+/// 解析结果原样交给调用方（空 → 「无已验证字段」）。
 fn settle_query(
     provider: &Provider,
     captured: &Captured,
@@ -700,12 +703,14 @@ fn settle_query(
         Some(Ok(metrics)) if !metrics.is_empty() => Settled::Done(Ok(metrics)),
         parsed if !captured.success() => {
             let error = classify_failure(provider, captured);
+            // 解析器自己的结论不比退出码更可信：进程都失败了。
+            drop(parsed);
             if captured.usage_error() {
                 Settled::UsageError(error)
-            } else {
-                // 解析器的结论（如 omp 的 NeedsBinding）不比退出码更可信：进程都失败了。
-                drop(parsed);
+            } else if captured.exit.signal.is_some() {
                 Settled::Done(Err(error))
+            } else {
+                Settled::Failed(error)
             }
         }
         parsed => Settled::Done(parsed.unwrap_or_else(|| Ok(Vec::new()))),
@@ -730,9 +735,10 @@ fn sub_help_budget(timeout: Duration, remaining: Duration) -> Option<Duration> {
     (budget >= HELP_MIN_BUDGET).then_some(budget)
 }
 
-/// 形态选择（纯函数）：顶层帮助未列出子命令 → 终态 `Unsupported`；有回退形态且子命令级帮助
-/// 可用但未列出首选 `--flag` → 直接选回退形态、不再保留回退（不浪费一次必然失败的调用）；
-/// 其余选首选形态并保留回退（拿不到子命令帮助不作结论，留给运行结果决定）。返回
+/// 形态选择（纯函数）：顶层帮助未列出首选子命令时，回退形态的子命令若被列出就直接选回退
+/// 形态（旧版 CLI 没有首选子命令），否则终态 `Unsupported`；有回退形态且子命令级帮助可用但
+/// 未列出首选 `--flag` → 直接选回退形态、不再保留回退（不浪费一次必然失败的调用）；其余选
+/// 首选形态并保留回退（拿不到子命令帮助不作结论，留给运行结果决定）。返回
 /// `(选定形态, 仍可回退的形态)`。
 fn choose_args(
     top_help: &str,
@@ -745,7 +751,12 @@ fn choose_args(
         return Err((ObservationStatus::Unsupported, "未配置官方子命令".into()));
     };
     if !help_lists_subcommand(top_help, command, sub) {
-        return Err((
+        let alternative = fallback_args.filter(|alternative| {
+            alternative
+                .first()
+                .is_some_and(|other| help_lists_subcommand(top_help, command, other))
+        });
+        return alternative.map(|alternative| (alternative, None)).ok_or((
             ObservationStatus::Unsupported,
             "当前 CLI 帮助中没有此官方用量子命令，请更新 CLI 或使用官方页面".into(),
         ));
@@ -757,9 +768,9 @@ fn choose_args(
 }
 
 /// 非交互子命令查询。顺序：
-/// 1. 顶层 `--help`（缓存）确认子命令存在；
+/// 1. 顶层 `--help`（缓存）确认子命令存在（首选子命令缺失而回退子命令存在时直接用回退形态）；
 /// 2. 有回退形态时再看子命令级 `--help`（预算允许时）：首选 `--flag` 未列出就直接用回退形态；
-/// 3. 运行选定形态并 `settle_query`：用法错误且尚有回退形态时再试一次回退。
+/// 3. 运行选定形态并 `settle_query`：用法错误或进程自身失败、且尚有回退形态时再试一次回退。
 pub(super) fn capture_query(
     provider: &Provider,
     account: &UsageAccountConfig,
@@ -817,33 +828,35 @@ fn run_query(
             subsystem = "account_usage",
             outcome = "fallback",
             agent = provider.agent,
-            reason = "flag_not_in_help",
-            "子命令帮助未列出首选 flag，改用回退形态"
+            reason = "not_in_help",
+            "帮助文本未列出首选子命令或 flag，改用回退形态"
         );
     }
     loop {
         let captured = run(chosen, remaining())?;
-        match settle_query(provider, &captured, chosen, &mut parse) {
+        let (error, reason) = match settle_query(provider, &captured, chosen, &mut parse) {
             Settled::Done(result) => {
                 return result.map(|metrics| QueryOutcome {
                     metrics,
                     args: chosen,
                 })
             }
-            Settled::UsageError(error) => match fallback.take() {
-                Some(alternative) => {
-                    tracing::debug!(
-                        event = "account.probe.fallback",
-                        subsystem = "account_usage",
-                        outcome = "fallback",
-                        agent = provider.agent,
-                        reason = "usage_error",
-                        "首选形态以用法错误失败，改用回退形态"
-                    );
-                    chosen = alternative;
-                }
-                None => return Err(error),
-            },
+            Settled::UsageError(error) => (error, "usage_error"),
+            Settled::Failed(error) => (error, "query_failed"),
+        };
+        match fallback.take() {
+            Some(alternative) => {
+                tracing::debug!(
+                    event = "account.probe.fallback",
+                    subsystem = "account_usage",
+                    outcome = "fallback",
+                    agent = provider.agent,
+                    reason,
+                    "首选形态失败，改用回退形态"
+                );
+                chosen = alternative;
+            }
+            None => return Err(error),
         }
     }
 }
@@ -1253,7 +1266,7 @@ pub(super) fn blocker_error(
     blocker: ProbeBlocker,
     stable_dir: Option<&Path>,
 ) -> InteractiveError {
-    let statusline = matches!(provider.agent, "claude" | "antigravity");
+    let statusline = crate::integration::usage_supports_statusline(provider.agent);
     match blocker {
         ProbeBlocker::Trust => InteractiveError {
             status: ObservationStatus::Error,
@@ -1322,16 +1335,6 @@ fn probe_ready(
     };
     let plain = row.trim_matches(|ch: char| ch.is_whitespace() || "│┃".contains(ch));
     match agent {
-        "gemini" => {
-            plain.starts_with('>')
-                && plain.contains("Type your message or @path/to/file")
-                && position.x < 10
-        }
-        "hermes" | "grok" => {
-            plain.ends_with('❯')
-                && plain.chars().count() <= 64
-                && usize::from(position.x) <= plain.chars().count() + 3
-        }
         "claude" => detected && plain == "❯" && position.x < 8,
         _ => false,
     }
@@ -1344,9 +1347,6 @@ fn interactive_direct(
     timeout: Duration,
     stable_dir: Option<&Path>,
 ) -> Result<String, InteractiveError> {
-    if provider.agent == "qodercli" {
-        return Err((ObservationStatus::Unsupported, "Qoder 官方提供 /usage，但没有稳定的自动输入就绪契约；请在 CLI 中查看或绑定实际计费 provider".into()).into());
-    }
     let directory = match stable_dir {
         Some(path) => ProbeDirectory::stable(path)?,
         None => ProbeDirectory::new()?,
@@ -1367,9 +1367,6 @@ fn interactive_direct(
         })
         .map_err(|_| (ObservationStatus::Unavailable, "无法创建隔离终端".into()))?;
     let mut builder = portable_pty::CommandBuilder::new(provider.command);
-    if provider.agent == "hermes" {
-        builder.arg("--cli");
-    }
     builder.cwd(&directory.path);
     builder.env("TERM", "xterm-256color");
     builder.env("HERDR_USAGE_PROBE", "1");
@@ -1481,11 +1478,7 @@ fn interactive_direct(
                 && !detection.visible_working;
             if stage == 0 && ready && last_output.elapsed() >= Duration::from_millis(200) {
                 if let Ok(mut input) = writer.lock() {
-                    let _ = input.write_all(if provider.agent == "kiro" {
-                        b"/help --legacy\r"
-                    } else {
-                        b"/help\r"
-                    });
+                    let _ = input.write_all(b"/help\r");
                     let _ = input.flush();
                 }
                 stage = 1;
@@ -2036,13 +2029,26 @@ Options:
         assert!(!help_lists_subcommand(top, "opencode", "usage"));
         assert!(help_lists_subcommand(
             "  usage    Show usage\n",
-            "omp",
+            "kimi",
             "usage"
         ));
         assert!(!help_lists_subcommand(
             "  usages   Show usage\n",
-            "omp",
+            "kimi",
             "usage"
+        ));
+        // opencode 1.17.20 / 1.18.31 的 `db --help`：首选形态的 `--format` 被列出，SQL 位置参数
+        // 不是 flag、不参与判定。
+        assert!(help_lists_subcommand(OPENCODE_TOP_HELP, "opencode", "db"));
+        assert!(help_lists_subcommand(
+            OPENCODE_TOP_HELP,
+            "opencode",
+            "stats"
+        ));
+        assert!(help_lists_flags(OPENCODE_DB_HELP, OPENCODE_DB_ARGS));
+        assert!(!help_lists_flags(
+            OPENCODE_STATS_JSON_STDERR,
+            OPENCODE_DB_ARGS
         ));
         // 子命令帮助：1.17.20 的 stats 没有 --json。
         assert!(!help_lists_flags(
@@ -2090,6 +2096,14 @@ Options:
         assert_eq!(flag_column("--json\tdesc  more"), "--json");
     }
 
+    /// opencode 顶层帮助（1.17.20 / 1.18.31 的相关行）：`db` 与 `stats` 都在。
+    const OPENCODE_TOP_HELP: &str = "Commands:\n  opencode stats   show token usage and cost statistics\n  opencode db      database tools\n";
+    /// opencode `db --help`（1.17.20 与 1.18.31 逐字一致的选项段）。
+    const OPENCODE_DB_HELP: &str = "opencode db\n\ndatabase tools\n\nCommands:\n  opencode db [query]     open an interactive sqlite3 shell or run a query  [default]\n  opencode db path        print the database path\n\nOptions:\n  -h, --help        show help  [boolean]\n      --format      Output format  [string] [choices: \"json\", \"tsv\"] [default: \"tsv\"]\n";
+    /// 首选形态：SQL 用占位串，编排逻辑不关心查询体。
+    const OPENCODE_DB_ARGS: &[&str] = &["db", "SELECT 1", "--format", "json"];
+    const OPENCODE_STATS_ARGS: &[&str] = &["stats"];
+
     /// 一次注入的捕获：`(args, 退出码, stdout, stderr)`。
     type Scripted = (&'static [&'static str], i32, &'static str, &'static str);
 
@@ -2103,20 +2117,20 @@ Options:
         Result<QueryOutcome, QueryError>,
         Vec<&'static [&'static str]>,
     ) {
-        let args: &'static [&'static str] = &["stats", "--json"];
-        let fallback_args: Option<&'static [&'static str]> = fallback.then_some(&["stats"]);
+        let fallback_args: Option<&'static [&'static str]> =
+            fallback.then_some(OPENCODE_STATS_ARGS);
         let mut ran = Vec::new();
         let mut script = script.iter();
         let result = run_query(
             opencode(),
-            args,
+            OPENCODE_DB_ARGS,
             fallback_args,
             Duration::from_secs(20),
             |sub, budget| {
                 assert!(budget <= HELP_TIMEOUT, "帮助预检不超过封顶时限");
                 match sub {
                     None => Ok(top_help.to_owned()),
-                    Some("stats") => sub_help.clone().map(str::to_owned),
+                    Some("db") => sub_help.clone().map(str::to_owned),
                     Some(other) => panic!("意外的子命令帮助 {other}"),
                 }
             },
@@ -2129,16 +2143,10 @@ Options:
                 Ok(exited(*code, stdout.as_bytes(), stderr.as_bytes()))
             },
             |text, chosen| {
-                Ok(if text.contains("Sessions") {
-                    vec![UsageMetric {
-                        id: format!("sessions@{}", chosen.join(" ")),
-                        used: Some(1.0),
-                        ..Default::default()
-                    }]
-                } else if let Ok(value) = serde_json::from_str::<Value>(text) {
-                    parse::structured(&value, "local")
+                Ok(if chosen.first() == Some(&"db") {
+                    parse::opencode_sessions(text)
                 } else {
-                    Vec::new()
+                    parse::opencode_stats(text)
                 })
             },
         );
@@ -2147,47 +2155,86 @@ Options:
 
     #[test]
     fn query_orchestration_prechecks_help_then_falls_back_once() {
-        const TOP: &str = "Commands:\n  opencode stats  show token usage and cost statistics\n";
-        const STATS_JSON_HELP: &str =
-            "opencode stats\n\nOptions:\n  -h, --help  show help\n      --json  output json\n";
-        let json_args: &'static [&'static str] = &["stats", "--json"];
-        let plain_args: &'static [&'static str] = &["stats"];
+        let db_args = OPENCODE_DB_ARGS;
+        let stats_args = OPENCODE_STATS_ARGS;
+        let rows = "[\n  {\n    \"sessions\": 41,\n    \"cost\": 0.5\n  }\n]\n";
         let table = "│Sessions   41 │\n";
         let unavailable = || Err((ObservationStatus::Error, "no sub help".to_owned()));
 
-        // (a) 子命令帮助未列出 --json：直接选回退形态，只起一次进程，args 透出为回退形态。
+        // (a) 首选形态成功：args 保持首选，子命令帮助列出了 --format 所以不回退。
         let (result, ran) = scripted_query(
-            TOP,
-            Ok(OPENCODE_STATS_JSON_STDERR),
-            &[(plain_args, 0, table, "")],
+            OPENCODE_TOP_HELP,
+            Ok(OPENCODE_DB_HELP),
+            &[(db_args, 0, rows, "")],
+            true,
+        );
+        let outcome = result.expect("首选成功");
+        assert_eq!(outcome.args, db_args);
+        assert_eq!(ran, vec![db_args]);
+        assert_eq!(outcome.metrics[0].id, "sessions");
+        assert_eq!(outcome.metrics[0].used, Some(41.0));
+
+        // (b) 子命令帮助未列出 --format：直接选回退形态，只起一次进程，args 透出为回退形态。
+        let (result, ran) = scripted_query(
+            OPENCODE_TOP_HELP,
+            Ok("opencode db\n\nOptions:\n  -h, --help  show help\n"),
+            &[(stats_args, 0, table, "")],
             true,
         );
         let outcome = result.expect("回退形态成功");
-        assert_eq!(outcome.args, plain_args);
-        assert_eq!(ran, vec![plain_args]);
-        assert_eq!(outcome.metrics[0].id, "sessions@stats");
+        assert_eq!(outcome.args, stats_args);
+        assert_eq!(ran, vec![stats_args]);
+        assert_eq!(outcome.metrics[0].id, "sessions");
 
-        // (b) 子命令帮助取不到：先跑首选，用法错误后回退一次。
+        // (c) 旧版 CLI 没有 db 子命令但有 stats：不起必然失败的首选进程，直接用回退形态。
         let (result, ran) = scripted_query(
-            TOP,
+            "Commands:\n  opencode stats  show token usage and cost statistics\n",
+            Err((ObservationStatus::Error, "不该被调用".into())),
+            &[(stats_args, 0, table, "")],
+            true,
+        );
+        assert_eq!(result.expect("回退形态成功").args, stats_args);
+        assert_eq!(ran, vec![stats_args]);
+
+        // (d) 子命令帮助取不到：先跑首选，用法错误后回退一次。
+        let (result, ran) = scripted_query(
+            OPENCODE_TOP_HELP,
             unavailable(),
             &[
-                (json_args, 1, "", OPENCODE_STATS_JSON_STDERR),
-                (plain_args, 0, table, ""),
+                (db_args, 1, "", "error: unknown option '--format'\n"),
+                (stats_args, 0, table, ""),
             ],
             true,
         );
         let outcome = result.expect("回退成功");
-        assert_eq!(outcome.args, plain_args);
-        assert_eq!(ran, vec![json_args, plain_args]);
+        assert_eq!(outcome.args, stats_args);
+        assert_eq!(ran, vec![db_args, stats_args]);
 
-        // (c) 回退也失败：返回最后一次（回退形态）的错误——它更能反映当前可否重试。
+        // (e) 查询本身失败（旧库缺列）：不是用法错误，同样回退一次。
         let (result, ran) = scripted_query(
-            TOP,
+            OPENCODE_TOP_HELP,
+            Ok(OPENCODE_DB_HELP),
+            &[
+                (
+                    db_args,
+                    1,
+                    "",
+                    "SQLiteError: no such column: tokens_input\n",
+                ),
+                (stats_args, 0, table, ""),
+            ],
+            true,
+        );
+        assert_eq!(result.expect("回退成功").args, stats_args);
+        assert_eq!(ran, vec![db_args, stats_args]);
+
+        // (f) 回退也失败：返回最后一次（回退形态）的错误——它更能反映当前可否重试。
+        let (result, ran) = scripted_query(
+            OPENCODE_TOP_HELP,
             unavailable(),
             &[
-                (json_args, 1, "", OPENCODE_STATS_JSON_STDERR),
-                (plain_args, 1, "", "database is locked\n"),
+                (db_args, 1, "", "SQLiteError: no such table: session\n"),
+                (stats_args, 1, "", "database is locked\n"),
             ],
             true,
         );
@@ -2197,11 +2244,11 @@ Options:
         assert_eq!(ran.len(), 2);
         // 回退形态也是用法错误：终态 Unsupported，不再有第三次。
         let (result, ran) = scripted_query(
-            TOP,
+            OPENCODE_TOP_HELP,
             unavailable(),
             &[
-                (json_args, 1, "", OPENCODE_STATS_JSON_STDERR),
-                (plain_args, 1, "", "error: unknown command 'stats'\n"),
+                (db_args, 1, "", "error: unknown option '--format'\n"),
+                (stats_args, 1, "", "error: unknown command 'stats'\n"),
             ],
             true,
         );
@@ -2211,44 +2258,31 @@ Options:
         );
         assert_eq!(ran.len(), 2);
 
-        // (d) 首选形态成功：args 保持首选，子命令帮助列出了 --json 所以不回退。
-        let (result, ran) = scripted_query(
-            TOP,
-            Ok(STATS_JSON_HELP),
-            &[(json_args, 0, "{\"sessions\":{\"tokens\":5}}", "")],
-            true,
-        );
-        let outcome = result.expect("首选成功");
-        assert_eq!(outcome.args, json_args);
-        assert_eq!(ran, vec![json_args]);
-        assert_eq!(outcome.metrics.len(), 1);
-
-        // (e) 顶层帮助没有子命令：终态，不起查询进程。
+        // (g) 顶层帮助既没有首选也没有回退子命令：终态，不起查询进程。
         let (result, ran) = scripted_query("Commands:\n  opencode run\n", Ok(""), &[], true);
         let (status, message) = result.expect_err("子命令缺失");
         assert_eq!(status, ObservationStatus::Unsupported);
         assert!(message.contains("没有此官方用量子命令"), "{message}");
         assert!(ran.is_empty());
 
-        // (f) 没有回退形态：不查子命令帮助，用法错误直接是终态。
+        // (h) 没有回退形态：不查子命令帮助，失败直接是结论。
         let (result, ran) = scripted_query(
-            TOP,
+            OPENCODE_TOP_HELP,
             Err((ObservationStatus::Error, "不该被调用".into())),
-            &[(json_args, 1, "", OPENCODE_STATS_JSON_STDERR)],
+            &[(db_args, 1, "", "error: unknown option '--format'\n")],
             false,
         );
         assert_eq!(
             result.expect_err("用法错误").0,
             ObservationStatus::Unsupported
         );
-        assert_eq!(ran, vec![json_args]);
+        assert_eq!(ran, vec![db_args]);
 
-        // (g) 顶层帮助本身失败（偶发）：透传 transient 错误，不起查询进程。
-        let args: &'static [&'static str] = &["stats", "--json"];
+        // (i) 顶层帮助本身失败（偶发）：透传 transient 错误，不起查询进程。
         let result = run_query(
             opencode(),
-            args,
-            Some(&["stats"]),
+            OPENCODE_DB_ARGS,
+            Some(OPENCODE_STATS_ARGS),
             Duration::from_secs(20),
             |_, _| Err((ObservationStatus::Error, "官方 CLI 查询超时".into())),
             |chosen, _| panic!("不应起进程 {chosen:?}"),
@@ -2259,9 +2293,9 @@ Options:
 
     #[test]
     fn choose_args_is_a_pure_table() {
-        let top = "Commands:\n  opencode stats  desc\n";
-        let args: &'static [&'static str] = &["stats", "--json"];
-        let plain: &'static [&'static str] = &["stats"];
+        let top = OPENCODE_TOP_HELP;
+        let args = OPENCODE_DB_ARGS;
+        let plain = OPENCODE_STATS_ARGS;
         /// `(顶层帮助, 子命令帮助, 回退形态, 期望的 (选定, 保留回退) 或状态)`。
         type Case = (
             &'static str,
@@ -2273,14 +2307,14 @@ Options:
             // 子命令帮助未列出 flag → 回退形态、不再保留回退。
             (
                 top,
-                Some(OPENCODE_STATS_JSON_STDERR),
+                Some("Options:\n  -h, --help  show help\n"),
                 Some(plain),
                 Ok((plain, None)),
             ),
             // 子命令帮助列出了 flag → 首选并保留回退。
             (
                 top,
-                Some("Options:\n  --json  x\n"),
+                Some(OPENCODE_DB_HELP),
                 Some(plain),
                 Ok((args, Some(plain))),
             ),
@@ -2289,11 +2323,25 @@ Options:
             // 无回退形态 → 首选，子命令帮助不参与。
             (
                 top,
-                Some(OPENCODE_STATS_JSON_STDERR),
+                Some("Options:\n  -h, --help  show help\n"),
                 None,
                 Ok((args, None)),
             ),
-            // 顶层帮助没有子命令 → 终态。
+            // 顶层帮助没有首选子命令、但有回退子命令 → 直接回退，不再保留回退。
+            (
+                "Commands:\n  opencode stats  desc\n",
+                None,
+                Some(plain),
+                Ok((plain, None)),
+            ),
+            // 顶层帮助没有首选子命令，也没有回退形态 → 终态。
+            (
+                "Commands:\n  opencode stats  desc\n",
+                None,
+                None,
+                Err(ObservationStatus::Unsupported),
+            ),
+            // 顶层帮助两个子命令都没有 → 终态。
             (
                 "Commands:\n  opencode run\n",
                 None,
@@ -2348,7 +2396,7 @@ Options:
     }
 
     #[test]
-    fn settle_query_prefers_parsed_content_and_flags_usage_errors_for_fallback() {
+    fn settle_query_prefers_parsed_content_and_flags_failures_for_fallback() {
         let stats: &'static [&'static str] = &["stats"];
         let mut parse = |text: &str, _: &'static [&'static str]| {
             Ok(if text.contains("Sessions") {
@@ -2374,11 +2422,11 @@ Options:
             settle_query(opencode(), &captured, stats, &mut parse),
             Settled::UsageError((ObservationStatus::Unsupported, _))
         ));
-        // 无内容 + 普通失败 → 错误，不回退。
-        let captured = exited(1, b"", b"network down\n");
+        // 无内容 + 进程自身失败（不是用法错误）→ 单独标出，调用方有回退形态时再试一次。
+        let captured = exited(1, b"", b"SQLiteError: no such column: tokens_input\n");
         assert!(matches!(
             settle_query(opencode(), &captured, stats, &mut parse),
-            Settled::Done(Err((ObservationStatus::Error, _)))
+            Settled::Failed((ObservationStatus::Error, _))
         ));
         // 被信号终止 → transient，不回退。
         let killed = signaled(15, b"", OPENCODE_STATS_JSON_STDERR.as_bytes());
@@ -2752,7 +2800,7 @@ Options:
 
     #[test]
     fn trust_screen_is_retryable_and_sign_in_screen_is_terminal() {
-        let gemini = super::super::registry::provider("gemini").expect("gemini 已登记");
+        let kimi = super::super::registry::provider("kimi").expect("kimi 已登记");
         let trust = parse::interactive_blocker(" ❯ 1. Yes, I trust this folder\n   2. No, exit\n")
             .expect("信任对话");
         let error = blocker_error(claude(), trust, None);
@@ -2764,9 +2812,12 @@ Options:
         assert!(error.trust_required);
         assert!(error.message.contains("需在 CLI 中确认目录信任"));
         assert!(error.message.contains("statusline"), "claude 给回调指引");
-        assert!(!blocker_error(gemini, trust, None)
-            .message
-            .contains("statusline"));
+        assert!(
+            !blocker_error(kimi, trust, None)
+                .message
+                .contains("statusline"),
+            "没有 statusline 回调的厂商不给这条指引"
+        );
         // 有稳定探测目录时给出可执行的确切路径：用户在自己的 CLI 里确认一次即可复用。
         let dir = std::path::Path::new("/state/account-usage/probe/claude-default");
         let error = blocker_error(claude(), trust, Some(dir));

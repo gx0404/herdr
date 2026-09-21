@@ -11,24 +11,20 @@ use crate::config::{AccountUsageConfig, UsageAccountConfig};
 pub(super) enum Query {
     Codex,
     Kimi,
-    /// 非交互子命令查询。`args` 是首选形态；`fallback_args` 在子命令级 `--help` 预检确认首选
-    /// flag 不受支持、或首选形态以用法错误失败时回退一次（见 `transport::capture_query`）。
-    /// 目前只有 opencode：1.17.x 的 `stats` 没有 `--json`，回退到人类可读的框线表。
+    /// 非交互子命令查询。`args` 是首选形态；`fallback_args` 在帮助预检确认首选形态不受支持
+    /// （子命令或 flag 未列出）、或首选形态运行失败时回退一次（见 `transport::capture_query`）。
+    /// 目前只有 opencode：首选官方只读入口 `opencode db <query> --format json`，回退到
+    /// `opencode stats` 的人类可读框线表。
     Json {
         args: &'static [&'static str],
         fallback_args: Option<&'static [&'static str]>,
     },
-    Interactive(&'static str),
+    /// 官方 statusline 回调（claude）：厂商每次刷新状态栏都把官方 JSON 交给 herdr；herdr 能
+    /// 改写其官方 `settings.json` 来接入 / 解除（`account.usage.integration`）。
     Callback,
-    Portal,
-}
-
-/// 只有首选形态、没有回退的非交互查询。
-const fn json(args: &'static [&'static str]) -> Query {
-    Query::Json {
-        args,
-        fallback_args: None,
-    }
+    /// herdr 自带集成扩展的推送（pi）：扩展在会话事件里取数，经 socket 调
+    /// `account.usage.report`。没有可改写的官方 `settings.json`，接入与否取决于集成是否安装。
+    ExtensionPush,
 }
 
 pub(super) struct Provider {
@@ -41,32 +37,30 @@ pub(super) struct Provider {
     pub query: Query,
 }
 
+/// opencode 会话表的只读聚合查询：只取计数与合计，不读标题、目录等会话内容。列名与
+/// `--format json` 的输出形状（`JSON.stringify(rows)`）在 1.17.20 与 1.18.31 上一致。
+pub(super) const OPENCODE_SESSION_TOTALS_SQL: &str = "SELECT COUNT(*) AS sessions, \
+COALESCE(SUM(CASE WHEN parent_id IS NULL OR parent_id = '' THEN 0 ELSE 1 END), 0) AS child_sessions, \
+COALESCE(SUM(cost), 0) AS cost, \
+COALESCE(SUM(tokens_input), 0) AS tokens_input, \
+COALESCE(SUM(tokens_output), 0) AS tokens_output, \
+COALESCE(SUM(tokens_reasoning), 0) AS tokens_reasoning, \
+COALESCE(SUM(tokens_cache_read), 0) AS tokens_cache_read, \
+COALESCE(SUM(tokens_cache_write), 0) AS tokens_cache_write \
+FROM session";
+
+/// 官方来源只登记范围内的五家；zcode 的用量等其外部来源适配器，不在这里。
 pub(super) const PROVIDERS: &[Provider] = &[
     Provider { agent: "codex", label: "Codex", command: "codex", source: "https://learn.chatgpt.com/docs/app-server", method: "account/rateLimits/read; account/usage/read", scope: "account", query: Query::Codex },
     // claude 主路径是官方 statusline 回调；`/usage` 交互探测只在 `interactive_probe` 开启且
     // 显式刷新时作为兜底（见 `interactive_fallback`），登录态由非交互 `auth status` 预检。
-    Provider { agent: "claude", label: "Claude Code", command: "claude", source: "https://code.claude.com/docs/en/statusline", method: "statusline JSON rate_limits；/usage", scope: "account", query: Query::Callback },
+    Provider { agent: "claude", label: "Claude Code", command: "claude", source: "https://code.claude.com/docs/en/statusline", method: "statusline JSON rate_limits / cost / context_window；/usage", scope: "account", query: Query::Callback },
     Provider { agent: "kimi", label: "Kimi Code", command: "kimi", source: "https://www.kimi.com/code/docs/en/kimi-code-cli/reference/server-api.html", method: "GET /api/v1/oauth/usage；/usage", scope: "account", query: Query::Kimi },
-    Provider { agent: "gemini", label: "Gemini CLI", command: "gemini", source: "https://geminicli.com/docs/get-started/", method: "/stats（刷新官方配额）", scope: "account", query: Query::Interactive("/stats") },
-    Provider { agent: "cursor", label: "Cursor", command: "cursor-agent", source: "https://cursor.com/docs/account/teams/admin-api", method: "Admin API /teams/spend", scope: "organization", query: Query::Portal },
-    Provider { agent: "devin", label: "Devin", command: "devin", source: "https://docs.devin.ai/api-reference/v3/consumption/consumption-daily-users", method: "Consumption API", scope: "organization", query: Query::Portal },
-    Provider { agent: "antigravity", label: "Antigravity", command: "agy", source: "https://antigravity.google/docs/cli/commands/usage", method: "statusline JSON quota；/usage", scope: "account", query: Query::Callback },
-    Provider { agent: "cline", label: "Cline", command: "cline", source: "https://docs.cline.bot/enterprise-solutions/api-reference", method: "GET /api/v1/users/{id}/balance; usages", scope: "account", query: Query::Portal },
-    Provider { agent: "omp", label: "Oh My Pi", command: "omp", source: "https://github.com/can1357/oh-my-pi/blob/main/packages/coding-agent/src/commands/usage.ts", method: "omp usage --json", scope: "account", query: json(&["usage", "--json"]) },
-    Provider { agent: "mastracode", label: "Mastra Code", command: "mastracode", source: "https://code.mastra.ai/", method: "/cost；实际 provider 的官方接口", scope: "session", query: Query::Callback },
-    Provider { agent: "opencode", label: "OpenCode", command: "opencode", source: "https://opencode.ai/v2/docs/cli/commands/", method: "opencode stats --json", scope: "local", query: Query::Json { args: &["stats", "--json"], fallback_args: Some(&["stats"]) } },
-    Provider { agent: "github-copilot", label: "GitHub Copilot", command: "copilot", source: "https://docs.github.com/en/rest/billing/usage", method: "Billing Usage API", scope: "billing_account", query: Query::Portal },
-    Provider { agent: "kiro", label: "Kiro", command: "kiro-cli", source: "https://kiro.dev/docs/cli/reference/slash-commands/", method: "kiro-cli chat --no-interactive /usage", scope: "account", query: json(&["chat", "--no-interactive", "/usage"]) },
-    Provider { agent: "droid", label: "Factory Droid", command: "droid", source: "https://docs.factory.ai/api-reference/analytics", method: "GET /api/v1/analytics/cost/me/query", scope: "account", query: Query::Portal },
-    Provider { agent: "amp", label: "Amp", command: "amp", source: "https://ampcode.com/docs/pricing", method: "amp usage", scope: "account", query: json(&["usage"]) },
-    Provider { agent: "grok", label: "Grok", command: "grok", source: "https://x.ai/build/changelog", method: "/usage；xAI Management API", scope: "account", query: Query::Interactive("/usage") },
-    Provider { agent: "hermes", label: "Hermes", command: "hermes", source: "https://hermes-agent.nousresearch.com/docs/reference/slash-commands", method: "/usage Account limits", scope: "account", query: Query::Interactive("/usage") },
-    Provider { agent: "kilo", label: "Kilo", command: "kilo", source: "https://kilo.ai/docs/code-with-ai/platforms/cli", method: "kilo profile；余额视图", scope: "account", query: json(&["profile"]) },
-    Provider { agent: "qodercli", label: "Qoder CLI", command: "qodercli", source: "https://docs.qoder.com/cli/usage", method: "/usage", scope: "account", query: Query::Interactive("/usage") },
-    Provider { agent: "qwen", label: "Qwen Code", command: "qwen", source: "https://qwenlm.github.io/qwen-code-docs/en/users/features/commands/", method: "/stats；实际 provider 的官方接口", scope: "session", query: Query::Callback },
-    Provider { agent: "letta", label: "Letta", command: "letta", source: "https://docs.letta.com/platform/cli/slash-commands", method: "letta usage", scope: "account", query: json(&["usage"]) },
-    Provider { agent: "maki", label: "Maki", command: "maki", source: "https://maki.sh/docs/token-economy/", method: "/usage；实际 provider 的官方接口", scope: "session", query: Query::Callback },
-    Provider { agent: "pi", label: "Pi", command: "pi", source: "https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/rpc.md", method: "get_session_stats；实际 provider 的官方接口", scope: "session", query: Query::Callback },
+    // opencode 没有任何账号额度接口：两种形态给出的都是本地会话统计（`scope = local`）。
+    Provider { agent: "opencode", label: "OpenCode", command: "opencode", source: "https://opencode.ai/docs/cli/", method: "opencode db <query> --format json", scope: "local", query: Query::Json { args: &["db", OPENCODE_SESSION_TOTALS_SQL, "--format", "json"], fallback_args: Some(&["stats"]) } },
+    // pi 是多服务商 CLI：RPC 模式是另起的 headless 进程，连不进正在跑的 TUI，所以用量由 herdr
+    // 的 pi 扩展在会话内取数后推送；条目是会话级统计，不是账号额度。
+    Provider { agent: "pi", label: "Pi", command: "pi", source: "https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/extensions.md", method: "herdr pi 扩展：ctx.getContextUsage() + 会话用量合计", scope: "session", query: Query::ExtensionPush },
 ];
 
 pub(super) fn provider(agent: &str) -> Option<&'static Provider> {
@@ -74,40 +68,48 @@ pub(super) fn provider(agent: &str) -> Option<&'static Provider> {
     let canonical = match agent.as_str() {
         "claude-code" | "claude code" => "claude",
         "kimi-code" | "kimi code" => "kimi",
-        "copilot" | "github copilot" | "githubcopilot" => "github-copilot",
-        "qoder" => "qodercli",
-        "mastra-code" | "mastra code" => "mastracode",
-        "antigravity-cli" | "agy" => "antigravity",
         other => other,
     };
     PROVIDERS.iter().find(|entry| entry.agent == canonical)
 }
 
-/// 交互探测使用的斜杠命令：交互型厂商取登记值；claude 的主路径已是官方回调，`/usage` 只在
-/// 显式刷新且 `interactive_probe` 开启时作为兜底。
+/// 交互探测使用的斜杠命令：目前只有 claude——主路径已是官方回调，`/usage` 只在显式刷新且
+/// `interactive_probe` 开启时作为兜底。
 pub(super) fn interactive_fallback(provider: &Provider) -> Option<&'static str> {
     match provider.query {
-        Query::Interactive(command) => Some(command),
         Query::Callback if provider.agent == "claude" => Some("/usage"),
         _ => None,
     }
 }
 
-/// 该厂商是否只能靠官方回调拿到额度样本：显式刷新不会产生新的额度样本，但仍可能刷新
-/// 登录 / 绑定占位（claude 的登录预检就是这样）。claude 开启 `interactive_probe` 后有可回落
-/// 的 `/usage` 探测（在稳定探测目录里，需用户信任一次），不再是纯回调。
+/// 该厂商是否只能靠推送（官方 statusline 回调或 herdr 扩展推送）拿到样本：显式刷新不会产生
+/// 新样本，但仍可能刷新登录 / 绑定占位（claude 的登录预检就是这样）。claude 开启
+/// `interactive_probe` 后有可回落的 `/usage` 探测（在稳定探测目录里，需用户信任一次），不再
+/// 是纯回调。
 pub(super) fn callback_only(provider: &Provider, config: &AccountUsageConfig) -> bool {
-    matches!(provider.query, Query::Callback)
-        && !(provider.agent == "claude" && config.interactive_probe)
+    match provider.query {
+        Query::Callback => !(provider.agent == "claude" && config.interactive_probe),
+        Query::ExtensionPush => true,
+        _ => false,
+    }
 }
 
 /// 该厂商是否支持官方 statusline 回调开关（`account.usage.integration`）：回调型查询且
 /// `integration::usage` 能改写其官方 `settings.json`。厂商名单的唯一真源在
 /// `integration::usage::supports_statusline`，这里只把它与查询方式合成一条谓词，供
-/// `UsageProviderInfo.supports_callback` 宣告与账号级回调态判定共用。
+/// `UsageProviderInfo.supports_callback` 宣告与账号级回调态判定共用。扩展推送型厂商（pi）
+/// 没有可改写的 `settings.json`，不宣告这个开关（见 `supports_extension_push`）。
 pub(super) fn supports_callback(provider: &Provider) -> bool {
     matches!(provider.query, Query::Callback)
         && crate::integration::usage_supports_statusline(provider.agent)
+}
+
+/// 该厂商的用量是否由 herdr 自带的集成扩展推送：推送型查询且 `integration::usage` 登记了
+/// 该扩展。与 `supports_callback` 是两种来源——这里没有开关可切，接入与否取决于集成是否
+/// 已安装（`herdr integration install <agent>`）。
+pub(super) fn supports_extension_push(provider: &Provider) -> bool {
+    matches!(provider.query, Query::ExtensionPush)
+        && crate::integration::usage_supports_extension_push(provider.agent)
 }
 
 /// 支持官方 statusline 回调的厂商的账号：其官方 `settings.json` 是否已接入 herdr 用量回调；
@@ -185,18 +187,6 @@ fn integration_target_for(agent: &str) -> Option<crate::api::schema::Integration
         "claude" => Some(IntegrationTarget::Claude),
         "kimi" => Some(IntegrationTarget::Kimi),
         "opencode" => Some(IntegrationTarget::Opencode),
-        "github-copilot" => Some(IntegrationTarget::Copilot),
-        "devin" => Some(IntegrationTarget::Devin),
-        "droid" => Some(IntegrationTarget::Droid),
-        "kilo" => Some(IntegrationTarget::Kilo),
-        "hermes" => Some(IntegrationTarget::Hermes),
-        "qodercli" => Some(IntegrationTarget::Qodercli),
-        "qwen" => Some(IntegrationTarget::Qwen),
-        "cursor" => Some(IntegrationTarget::Cursor),
-        "mastracode" => Some(IntegrationTarget::Mastracode),
-        "antigravity" => Some(IntegrationTarget::AntigravityCli),
-        "grok" => Some(IntegrationTarget::Grok),
-        "omp" => Some(IntegrationTarget::Omp),
         "pi" => Some(IntegrationTarget::Pi),
         _ => None,
     }
@@ -308,25 +298,14 @@ fn credential_paths(provider: &Provider, account: &UsageAccountConfig) -> Vec<Pa
             }
         }
         "kimi" => {
-            // TODO: `credentials` 文件名来自 Kimi Code CLI 的本地登录存储，尚未在多个版本上
-            // 核实；不存在时戳恒为 None，自愈退化为只看 CLI 指纹。
+            // Kimi Code 的 `credentials` 是目录（内含 `kimi-code.json` 与 `mcp/`）：目录的 mtime
+            // 只在增删条目时变化，原地改写登录文件不会动它，所以要 stat 登录文件本身。
             if let Some(dir) = dir(crate::integration::kimi_dir()) {
-                paths.push(dir.join("credentials"));
-            }
-        }
-        "gemini" => {
-            if let Some(dir) = dir(crate::integration::gemini_dir()) {
-                paths.push(dir.join("oauth_creds.json"));
-                paths.push(dir.join("google_accounts.json"));
+                paths.push(dir.join("credentials").join("kimi-code.json"));
             }
         }
         "opencode" => {
             if let Some(dir) = dir(crate::integration::opencode_data_dir()) {
-                paths.push(dir.join("auth.json"));
-            }
-        }
-        "grok" => {
-            if let Some(dir) = dir(crate::integration::grok_dir()) {
                 paths.push(dir.join("auth.json"));
             }
         }
@@ -409,27 +388,59 @@ pub(super) fn probe_fingerprint(
 mod tests {
     use super::*;
 
+    /// 官方来源只登记范围内的五家：每一家都对应一个仍受支持的 `detect::Agent`，范围外的厂商
+    /// （含历史别名）一律查不到，不会再被探测或接受回调。
     #[test]
-    fn registry_covers_all_supported_agents_except_explicitly_excluded_muse() {
-        assert_eq!(PROVIDERS.len(), 23);
-        for agent in crate::detect::Agent::ALL {
-            let label = crate::detect::agent_label(agent);
-            if label == "muse" {
-                assert!(provider(label).is_none());
-            } else {
-                assert!(provider(label).is_some(), "missing {label}");
-            }
-        }
-        let unique = PROVIDERS
-            .iter()
-            .map(|p| p.agent)
+    fn registry_lists_only_the_in_scope_providers() {
+        assert_eq!(
+            PROVIDERS.iter().map(|p| p.agent).collect::<Vec<_>>(),
+            vec!["codex", "claude", "kimi", "opencode", "pi"]
+        );
+        let detectable = crate::detect::Agent::ALL
+            .into_iter()
+            .map(crate::detect::agent_label)
             .collect::<std::collections::HashSet<_>>();
-        assert_eq!(unique.len(), PROVIDERS.len());
-        assert!(PROVIDERS.iter().all(|p| p.source.starts_with("https://")));
+        for entry in PROVIDERS {
+            assert!(
+                detectable.contains(entry.agent),
+                "{} 必须是可识别的 agent",
+                entry.agent
+            );
+            assert!(entry.source.starts_with("https://"));
+        }
+        assert!(provider("Claude Code").is_some(), "别名仍归一到 claude");
+        assert!(provider("kimi-code").is_some(), "别名仍归一到 kimi");
+        for retired in [
+            "gemini",
+            "cursor",
+            "devin",
+            "antigravity",
+            "agy",
+            "cline",
+            "omp",
+            "mastracode",
+            "github-copilot",
+            "copilot",
+            "kiro",
+            "droid",
+            "amp",
+            "grok",
+            "hermes",
+            "kilo",
+            "qodercli",
+            "qoder",
+            "qwen",
+            "letta",
+            "maki",
+            "muse",
+            "zcode",
+        ] {
+            assert!(provider(retired).is_none(), "{retired} 不在用量范围内");
+        }
     }
 
     #[test]
-    fn opencode_stats_has_a_plain_fallback_and_other_json_queries_do_not() {
+    fn opencode_reads_the_session_table_and_falls_back_to_the_stats_table() {
         let opencode = provider("opencode").unwrap();
         let Query::Json {
             args,
@@ -438,25 +449,33 @@ mod tests {
         else {
             panic!("opencode 是非交互子命令查询");
         };
-        assert_eq!(args, &["stats", "--json"]);
+        assert_eq!(
+            args,
+            &["db", OPENCODE_SESSION_TOTALS_SQL, "--format", "json"],
+            "首选官方只读入口（1.17.20 与 1.18.31 都有 db 子命令与 --format）"
+        );
         assert_eq!(
             fallback_args,
             Some(&["stats"][..]),
-            "1.17.x 没有 --json：回退到框线表"
+            "没有 db 子命令或查询失败的版本回退到框线表"
         );
         assert_eq!(opencode.scope, "local", "会话统计不是账号额度");
-        for agent in ["omp", "kiro", "amp", "kilo", "letta"] {
-            let entry = provider(agent).unwrap();
-            assert!(
-                matches!(
-                    entry.query,
-                    Query::Json {
-                        fallback_args: None,
-                        ..
-                    }
-                ),
-                "{agent} 没有回退形态"
-            );
+        // 查询只读聚合：不写库，也不取标题 / 目录等会话内容。
+        let sql = OPENCODE_SESSION_TOTALS_SQL.to_ascii_uppercase();
+        assert!(sql.starts_with("SELECT "));
+        for forbidden in [
+            "INSERT",
+            "UPDATE",
+            "DELETE",
+            "DROP",
+            "ALTER",
+            "PRAGMA",
+            "ATTACH",
+            ";",
+            "TITLE",
+            "DIRECTORY",
+        ] {
+            assert!(!sql.contains(forbidden), "查询不得包含 {forbidden}");
         }
     }
 
@@ -468,12 +487,9 @@ mod tests {
             "claude 主路径是官方回调"
         );
         assert_eq!(interactive_fallback(claude), Some("/usage"));
-        assert_eq!(
-            interactive_fallback(provider("gemini").unwrap()),
-            Some("/stats")
-        );
-        assert_eq!(interactive_fallback(provider("pi").unwrap()), None);
-        assert_eq!(interactive_fallback(provider("antigravity").unwrap()), None);
+        for agent in ["codex", "kimi", "opencode", "pi"] {
+            assert_eq!(interactive_fallback(provider(agent).unwrap()), None);
+        }
 
         let mut config = AccountUsageConfig::default();
         assert!(
@@ -481,7 +497,8 @@ mod tests {
             "默认关闭交互探测：显式刷新拿不到新数据"
         );
         assert!(callback_only(provider("pi").unwrap(), &config));
-        assert!(!callback_only(provider("gemini").unwrap(), &config));
+        assert!(!callback_only(provider("kimi").unwrap(), &config));
+        assert!(!callback_only(provider("opencode").unwrap(), &config));
         config.interactive_probe = true;
         assert!(
             !callback_only(claude, &config),
@@ -489,8 +506,24 @@ mod tests {
         );
         assert!(
             callback_only(provider("pi").unwrap(), &config),
-            "其它回调型厂商不受影响"
+            "扩展推送型厂商不受交互探测开关影响"
         );
+    }
+
+    /// 「官方 statusline 回调」与「herdr 扩展推送」是两种来源：前者宣告可切换的回调开关，后者
+    /// 没有 `settings.json` 可改写，只宣告自己由扩展推送。两者互斥，其余厂商两者皆否。
+    #[test]
+    fn statusline_callbacks_and_extension_pushes_are_distinct_sources() {
+        let claude = provider("claude").unwrap();
+        let pi = provider("pi").unwrap();
+        assert!(matches!(pi.query, Query::ExtensionPush));
+        assert_eq!(pi.scope, "session", "pi 的条目是会话级统计");
+        assert!(supports_callback(claude) && !supports_extension_push(claude));
+        assert!(supports_extension_push(pi) && !supports_callback(pi));
+        for agent in ["codex", "kimi", "opencode"] {
+            let entry = provider(agent).unwrap();
+            assert!(!supports_callback(entry) && !supports_extension_push(entry));
+        }
     }
 
     #[test]
@@ -538,28 +571,26 @@ mod tests {
         let _ = std::fs::remove_dir_all(base);
     }
 
-    /// 回调开关能力与检测共用一份厂商名单与路径推导：antigravity 的 `profile_dir` 与
-    /// claude 走同一条检测路径；不支持回调的厂商既不宣告能力也没有当前态。
+    /// 回调开关能力与检测共用一份厂商名单与路径推导：不支持回调的厂商既不宣告能力也没有
+    /// 当前态（含扩展推送型的 pi）。
     #[test]
     fn statusline_detection_shares_the_integration_path_and_provider_list() {
         let claude = provider("claude").unwrap();
-        let antigravity = provider("antigravity").unwrap();
         assert!(supports_callback(claude));
-        assert!(supports_callback(antigravity));
         assert!(
             !supports_callback(provider("pi").unwrap()),
-            "回调型但 integration 无法改写其 settings 的厂商不宣告能力"
+            "扩展推送型厂商没有可改写的 settings，不宣告回调开关"
         );
         assert!(!supports_callback(provider("codex").unwrap()));
         let base = std::env::temp_dir().join(format!(
-            "herdr-agy-statusline-{}-{}",
+            "herdr-statusline-path-{}-{}",
             std::process::id(),
             crate::server::observability::now_ms()
         ));
         std::fs::create_dir_all(&base).unwrap();
         let account = UsageAccountConfig {
-            id: "antigravity:work".into(),
-            agent: "antigravity".into(),
+            id: "claude:work".into(),
+            agent: "claude".into(),
             profile_dir: Some(base.clone()),
             ..Default::default()
         };
@@ -574,7 +605,7 @@ mod tests {
             format!(
                 "{{\"statusLine\":{{\"type\":\"command\",\"command\":{}}}}}",
                 serde_json::Value::String(
-                    crate::platform::usage_statusline_pipeline("antigravity", "").unwrap()
+                    crate::platform::usage_statusline_pipeline("claude", "").unwrap()
                 )
             ),
         )
@@ -584,45 +615,35 @@ mod tests {
             Some(true),
             "文件戳变化即重读，不被缓存挡住"
         );
-        let codex = UsageAccountConfig {
-            id: "codex:default".into(),
-            agent: "codex".into(),
-            profile_dir: Some(base.clone()),
-            ..Default::default()
-        };
-        assert_eq!(
-            statusline_enabled(&codex),
-            None,
-            "不支持回调的厂商没有当前态"
-        );
+        for agent in ["codex", "pi"] {
+            let other = UsageAccountConfig {
+                id: format!("{agent}:default"),
+                agent: agent.into(),
+                profile_dir: Some(base.clone()),
+                ..Default::default()
+            };
+            assert_eq!(
+                statusline_enabled(&other),
+                None,
+                "不支持 statusline 回调的厂商没有当前态"
+            );
+        }
         let _ = std::fs::remove_dir_all(base);
     }
 
     #[test]
-    fn integration_detection_covers_shared_targets_and_only_them() {
-        // Providers outside the frozen integration enum must not invent a
-        // mapping; the shared ones must match the settings-page detection.
-        let unmapped = PROVIDERS
-            .iter()
-            .map(|p| p.agent)
-            .filter(|agent| integration_target_for(agent).is_none())
-            .collect::<Vec<_>>();
-        assert_eq!(
-            unmapped,
-            vec!["gemini", "cline", "kiro", "amp", "letta", "maki"],
-            "providers without an integration target must stay single-command"
-        );
+    fn integration_detection_covers_every_provider() {
+        // 五家都有对应的集成目标，安装判定与设置页共用同一套检测；冻结枚举里其余变体是
+        // 已退役的墓碑，这里不引用。
         for provider in PROVIDERS {
-            if let Some(target) = integration_target_for(provider.agent) {
-                assert_eq!(
-                    crate::integration::integration_target_label(target),
-                    provider
-                        .agent
-                        .replace("github-copilot", "copilot")
-                        .replace("antigravity", "antigravity-cli")
-                );
-            }
+            let target = integration_target_for(provider.agent)
+                .unwrap_or_else(|| panic!("{} 缺少集成目标", provider.agent));
+            assert_eq!(
+                crate::integration::integration_target_label(target),
+                provider.agent
+            );
         }
+        assert!(integration_target_for("gemini").is_none());
     }
 
     #[test]
@@ -752,13 +773,54 @@ mod tests {
     }
 
     #[test]
-    fn unknown_providers_only_fingerprint_the_cli() {
-        let provider = provider("amp").unwrap();
+    fn providers_without_a_verified_credential_file_only_fingerprint_the_cli() {
+        let provider = provider("pi").unwrap();
         let account = UsageAccountConfig {
-            id: "amp:default".into(),
-            agent: "amp".into(),
+            id: "pi:default".into(),
+            agent: "pi".into(),
             ..Default::default()
         };
         assert!(probe_fingerprint(provider, &account).credentials.is_empty());
+    }
+
+    /// Kimi Code 的 `credentials` 是目录：登录态在其中的 `kimi-code.json`。原地改写登录文件
+    /// 不会改变目录自身的 mtime / 大小，所以指纹必须落在文件上，否则重新登录永远不算变化。
+    #[test]
+    fn kimi_fingerprint_tracks_the_login_file_inside_the_credentials_directory() {
+        let base = std::env::temp_dir().join(format!(
+            "herdr-kimi-fingerprint-{}-{}",
+            std::process::id(),
+            crate::server::observability::now_ms()
+        ));
+        std::fs::create_dir_all(base.join("credentials").join("mcp")).unwrap();
+        let provider = provider("kimi").unwrap();
+        let account = UsageAccountConfig {
+            id: "kimi:work".into(),
+            agent: "kimi".into(),
+            profile_dir: Some(base.clone()),
+            ..Default::default()
+        };
+        let signed_out = probe_fingerprint(provider, &account);
+        assert_eq!(
+            signed_out.credentials,
+            vec![None],
+            "只有目录、没有登录文件：未登录"
+        );
+
+        let login = base.join("credentials").join("kimi-code.json");
+        std::fs::write(&login, b"{\"placeholder\":1}").unwrap();
+        let signed_in = probe_fingerprint(provider, &account);
+        assert_ne!(signed_in, signed_out, "首次登录必须算变化");
+        let stamp = signed_in.credentials[0].as_ref().expect("登录文件已存在");
+        assert_eq!(stamp.0, login);
+        assert_eq!(stamp.2, 17, "戳取自登录文件本身，不是目录");
+
+        std::fs::write(&login, b"{\"placeholder\":12}").unwrap();
+        assert_ne!(
+            probe_fingerprint(provider, &account),
+            signed_in,
+            "原地改写登录文件必须算变化"
+        );
+        let _ = std::fs::remove_dir_all(base);
     }
 }

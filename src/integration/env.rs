@@ -24,8 +24,6 @@ pub(crate) const GROK_CONFIG_DIR_ENV_VAR: &str = "GROK_CONFIG_DIR";
 /// `$GROK_HOME/config.toml` and `$GROK_HOME/auth.json`).
 pub(crate) const GROK_HOME_ENV_VAR: &str = "GROK_HOME";
 pub(crate) const HERMES_HOME_ENV_VAR: &str = "HERMES_HOME";
-/// Gemini CLI 的主目录覆盖：设置后 `.gemini` 落在该目录下而不是 `$HOME`。
-pub(crate) const GEMINI_CLI_HOME_ENV_VAR: &str = "GEMINI_CLI_HOME";
 
 pub(crate) fn apply_pane_base_env(cmd: &mut CommandBuilder) {
     cmd.env(crate::api::SOCKET_PATH_ENV_VAR, crate::api::socket_path());
@@ -74,15 +72,6 @@ pub(crate) fn claude_state_file() -> io::Result<PathBuf> {
 
 pub(crate) fn codex_dir() -> io::Result<PathBuf> {
     config_dir_from_env_or_home(CODEX_HOME_ENV_VAR, &[".codex"])
-}
-
-/// Gemini CLI 的配置目录（OAuth 凭据、账号列表）：`GEMINI_CLI_HOME` 覆盖主目录。
-pub(crate) fn gemini_dir() -> io::Result<PathBuf> {
-    if let Some(value) = std::env::var_os(GEMINI_CLI_HOME_ENV_VAR).filter(|value| !value.is_empty())
-    {
-        return expand_tilde_path(PathBuf::from(value)).map(|home| home.join(".gemini"));
-    }
-    Ok(home_dir()?.join(".gemini"))
 }
 
 pub(crate) fn kimi_dir() -> io::Result<PathBuf> {
@@ -226,14 +215,6 @@ pub(crate) fn antigravity_cli_dir() -> io::Result<PathBuf> {
     config_dir_from_env_or_home(ANTIGRAVITY_CLI_CONFIG_DIR_ENV_VAR, &[".gemini", "config"])
 }
 
-/// Antigravity CLI 的运行时数据目录（`~/.gemini/antigravity-cli`）：官方 `settings.json`
-/// （statusline 回调所在）在这里，与承载 hooks 的 `antigravity_cli_dir()` 不是同一个目录。
-/// 用量回调的写入（`usage::configure`）与检测（server 端 registry）都经 `usage::settings_path`
-/// 走这一处推导。
-pub(crate) fn antigravity_runtime_dir() -> io::Result<PathBuf> {
-    Ok(home_dir()?.join(".gemini").join("antigravity-cli"))
-}
-
 pub(crate) fn grok_dir() -> io::Result<PathBuf> {
     // GROK_CONFIG_DIR is a herdr-level override only (primarily a test
     // seam); the grok CLI does not honor it, so it stays first and explicit.
@@ -358,23 +339,6 @@ mod tests {
         match original {
             Some(value) => std::env::set_var(CLAUDE_CONFIG_DIR_ENV_VAR, value),
             None => std::env::remove_var(CLAUDE_CONFIG_DIR_ENV_VAR),
-        }
-    }
-
-    #[test]
-    fn gemini_dir_honors_the_cli_home_override() {
-        let _lock = integration_env_lock();
-        let original = std::env::var_os(GEMINI_CLI_HOME_ENV_VAR);
-        std::env::set_var(GEMINI_CLI_HOME_ENV_VAR, "~/gemini-home");
-        assert_eq!(
-            gemini_dir().unwrap(),
-            home_dir().unwrap().join("gemini-home").join(".gemini")
-        );
-        std::env::remove_var(GEMINI_CLI_HOME_ENV_VAR);
-        assert_eq!(gemini_dir().unwrap(), home_dir().unwrap().join(".gemini"));
-        match original {
-            Some(value) => std::env::set_var(GEMINI_CLI_HOME_ENV_VAR, value),
-            None => std::env::remove_var(GEMINI_CLI_HOME_ENV_VAR),
         }
     }
 
