@@ -3503,6 +3503,53 @@ mod tests {
         ));
     }
 
+    /// B-12 核验（「总览态逐厂商订阅」）：总览态的订阅参数是 `agent=None`，
+    /// 服务端按 `matches_account` 匹配全部账号——一次订阅就覆盖所有厂商的
+    /// 探测派发与事件推送，不需要逐厂商开多条订阅。
+    #[test]
+    fn a_broad_subscription_covers_every_provider() {
+        let (tasks, input) = mpsc::sync_channel(4);
+        let account = claude_account();
+        let kimi = UsageAccountConfig {
+            id: "kimi:default".into(),
+            agent: "kimi".into(),
+            ..Default::default()
+        };
+        let mut state = test_state(AccountUsageConfig::default(), vec![account.clone(), kimi]);
+        let (sender, receiver) = mpsc::channel();
+        let mut subscribers = HashMap::from([(
+            "usage-broad".to_string(),
+            (
+                None,
+                UsageParams::default(),
+                Reply::Api {
+                    sender,
+                    active: None,
+                    latest: None,
+                },
+            ),
+        )]);
+        state.request(&UsageParams::default(), false, &tasks, &mut subscribers);
+        assert!(input.try_recv().is_ok(), "总览参数派发探测");
+        let mut refreshed = Vec::new();
+        while let Ok(text) = receiver.try_recv() {
+            let event: serde_json::Value = serde_json::from_str(&text).unwrap();
+            if event["event"] != "account.usage.refreshing" {
+                continue;
+            }
+            for entry in event["data"]["refresh"].as_array().into_iter().flatten() {
+                refreshed.push(entry["account_id"].as_str().unwrap_or_default().to_string());
+            }
+        }
+        refreshed.sort();
+        assert_eq!(
+            refreshed,
+            vec!["claude:default".to_string(), "kimi:default".to_string()],
+            "一条总览订阅同时覆盖两个厂商的探测"
+        );
+        cleanup(&state);
+    }
+
     #[test]
     fn dispatching_a_probe_pushes_refreshing_events_to_matching_subscribers() {
         let (tasks, input) = mpsc::sync_channel(4);

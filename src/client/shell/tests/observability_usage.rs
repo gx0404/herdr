@@ -5389,3 +5389,62 @@ fn usage_dashboard_keybinding_survives_disabled_mouse_capture() {
         "无鼠标捕获时仍有键盘入口"
     );
 }
+
+/// B-12 核验（总览态逐厂商订阅）：总览（未选厂商）时客户端只开**一条**不带
+/// 厂商过滤的订阅，事件按 `account_id` 合并，跨厂商的更新都收得到；因此不需要
+/// 逐厂商开多条订阅（服务端 `matches_account` 对 `agent=None` 匹配全部账号，
+/// 周期性重探测也按同参数扇出）。
+#[test]
+fn overview_subscription_is_broad_and_merges_every_provider() {
+    let mut state = subscribing_ready();
+    deliver_providers(
+        &mut state,
+        vec![
+            provider("claude", &["claude:default"]),
+            provider("codex", &["codex:default"]),
+        ],
+    );
+    // 浮动仪表盘打开时就是总览态（`toggle_usage_dashboard` 复位厂商选择）。
+    state.toggle_usage_dashboard(&mut ClientShellInput::default());
+    let t0 = Instant::now() + Duration::from_secs(1);
+    let opened = tick(&mut state, t0);
+    let subscribed = subscribe_calls(&opened);
+    assert_eq!(
+        subscribed.len(),
+        1,
+        "总览态只开一条订阅: {:?}",
+        opened.actions
+    );
+    assert_eq!(subscribed[0].agent, None, "总览订阅不带厂商过滤");
+    assert_eq!(subscribed[0].account_id, None);
+    assert!(deliver_subscription(&mut state, "usage-1", true));
+
+    // 两个厂商的更新都合并进页面（同一事件、同一订阅）。
+    assert!(push_event(
+        &mut state,
+        "boot-1",
+        updated_event(
+            vec![
+                account("claude", "claude:default"),
+                account("codex", "codex:default"),
+            ],
+            Vec::new(),
+        ),
+    ));
+    assert!(
+        state
+            .observability
+            .accounts
+            .iter()
+            .any(|account| account.agent == "claude"),
+        "claude 的推送落进页面"
+    );
+    assert!(
+        state
+            .observability
+            .accounts
+            .iter()
+            .any(|account| account.agent == "codex"),
+        "codex 的推送同样落进页面"
+    );
+}
