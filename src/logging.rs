@@ -7,7 +7,9 @@ use tracing_subscriber::fmt::writer::MakeWriter;
 use tracing_subscriber::EnvFilter;
 
 const DEFAULT_MAX_LOG_BYTES: u64 = 5 * 1024 * 1024;
-const DEFAULT_RETAINED_LOG_FILES: usize = 0;
+/// LOG-02：默认保留 2 份轮转历史（与当前文件合计最多 3 × `DEFAULT_MAX_LOG_BYTES`）。
+/// 原先为 0：超过 5 MB 时整份删除，崩溃现场常被直接丢掉。
+const DEFAULT_RETAINED_LOG_FILES: usize = 2;
 
 pub(crate) fn init_file_logging(file_name: &str) {
     let Ok(make_writer) = RotatingFileMakeWriter::new(

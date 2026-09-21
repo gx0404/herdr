@@ -60,6 +60,7 @@ pub use observability::{
     AccountUsageConfig, MonitorConfig, UsageAccountConfig, UsageDisplayFormat, UsageDisplayPosition,
 };
 
+pub(crate) use self::model::LoadedConfig;
 pub(crate) use self::{keybinds::CommandKeybindType, model::KeysConfig};
 
 pub const CONFIG_PATH_ENV_VAR: &str = "HERDR_CONFIG_PATH";

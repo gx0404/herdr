@@ -186,11 +186,16 @@ pub(super) fn read_git_ref_file(path: &Path) -> Option<String> {
 }
 
 pub fn git_branch(cwd: &Path) -> Option<String> {
-    let repo_root = git_repo_root(cwd)?;
-    let git_dir = git_dir_for_repo_root(&repo_root)?;
+    git_branch_for_repo_root(&git_repo_root(cwd)?)
+}
+
+/// APP-007：已知 repo root 时直接读分支。恢复路径每 workspace 已经有
+/// `git_space_metadata` 的 repo root，不必为分支名再做一遍向上发现。
+pub fn git_branch_for_repo_root(repo_root: &Path) -> Option<String> {
+    let git_dir = git_dir_for_repo_root(repo_root)?;
     let git_common_dir = git_common_dir_for_git_dir(&git_dir);
     if git_ref_storage_is_reftable(&git_common_dir) {
-        return git_symbolic_head_short(&repo_root);
+        return git_symbolic_head_short(repo_root);
     }
 
     let head = read_git_ref_file(&git_dir.join("HEAD"))?;

@@ -122,7 +122,12 @@ pub struct App {
     pub(crate) git_refresh_in_flight: bool,
     pub(crate) git_refresh_due_after_in_flight: bool,
     pub(crate) git_identity_refresh_requested: bool,
-    pub(crate) git_status_cache: HashMap<std::path::PathBuf, crate::workspace::GitStatusCacheEntry>,
+    /// APP-008：状态缓存用 `Arc` 共享给后台刷新线程——原先每次刷新都克隆整份
+    /// 缓存。刷新完成时后台线程已经退出，`Arc::make_mut` 不会真的复制。
+    pub(crate) git_status_cache:
+        Arc<HashMap<std::path::PathBuf, crate::workspace::GitStatusCacheEntry>>,
+    /// APP-008：常驻的 git 刷新 worker（首次需要时创建），替代每 1.5 s 新建 OS 线程。
+    pub(crate) git_refresh_worker: Option<git_refresh::GitRefreshWorker>,
     pub(crate) pending_api_worktree_creates: HashMap<std::path::PathBuf, u64>,
     pub(crate) pending_api_worktree_removes: HashMap<String, u64>,
     pub(crate) pending_api_worktree_remove_paths: HashMap<std::path::PathBuf, u64>,
@@ -635,7 +640,8 @@ impl App {
             git_refresh_in_flight: false,
             git_refresh_due_after_in_flight: false,
             git_identity_refresh_requested: false,
-            git_status_cache: HashMap::new(),
+            git_status_cache: Arc::new(HashMap::new()),
+            git_refresh_worker: None,
             pending_api_worktree_creates: HashMap::new(),
             pending_api_worktree_removes: HashMap::new(),
             pending_api_worktree_remove_paths: HashMap::new(),

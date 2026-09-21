@@ -63,8 +63,10 @@ impl App {
         cache_updates: Vec<(std::path::PathBuf, crate::workspace::GitStatusCacheEntry)>,
     ) -> bool {
         self.git_refresh_in_flight = false;
+        // APP-008：缓存是 `Arc` 共享；刷新线程已退出，`make_mut` 不复制。
+        let cache = std::sync::Arc::make_mut(&mut self.git_status_cache);
         for (key, entry) in cache_updates {
-            self.git_status_cache.insert(key, entry);
+            cache.insert(key, entry);
         }
         if self.git_refresh_due_after_in_flight {
             self.mark_git_status_refresh_due(Instant::now());

@@ -25,8 +25,9 @@ pub(crate) use self::git::test_support as git_test_support;
 pub(crate) use self::{git::git_status_snapshot_for_cwd_with_demand, tab::MovedPane};
 pub use self::{
     git::{
-        derive_label_from_cwd, fallback_label_from_cwd, git_branch, git_space_metadata,
-        git_status_cache_key, GitSpaceMetadata, GitStatusCacheEntry, GitStatusRefreshDemand,
+        derive_label_from_cwd, fallback_label_from_cwd, git_branch, git_branch_for_repo_root,
+        git_space_metadata, git_status_cache_key, GitSpaceMetadata, GitStatusCacheEntry,
+        GitStatusRefreshDemand,
     },
     tab::{NewPane, Tab},
 };

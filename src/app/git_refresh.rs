@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Instant;
 
 use super::{App, GIT_REMOTE_STATUS_REFRESH_INTERVAL, GIT_REPO_DISCOVERY_REFRESH_INTERVAL};
@@ -55,7 +56,7 @@ impl App {
 
         self.git_refresh_in_flight = true;
         let event_tx = self.event_tx.clone();
-        let cache = self.git_status_cache.clone();
+        let cache = Arc::clone(&self.git_status_cache);
         let mut demand = self.git_refresh_demand();
         if self.git_identity_refresh_requested {
             demand.branch = true;
@@ -64,14 +65,23 @@ impl App {
         if refresh_repo_discovery {
             self.last_git_repo_discovery_refresh = now;
         }
-        std::thread::spawn(move || {
-            let output =
-                refresh_workspace_git_statuses_with_cache_and_demand(workspaces, &cache, demand);
-            let _ = event_tx.blocking_send(AppEvent::GitStatusRefreshed {
-                results: output.results,
-                cache_updates: output.cache_updates,
-            });
-        });
+        // APP-008：常驻 worker 收作业，不再每次刷新新建 OS 线程；缓存以 `Arc`
+        // 共享，不再深拷贝。worker 不可用时退回一次性线程（行为不变）。
+        let job = GitRefreshJob {
+            workspaces,
+            cache,
+            demand,
+            event_tx: event_tx.clone(),
+        };
+        let dispatched = self
+            .git_refresh_worker
+            .get_or_insert_with(GitRefreshWorker::spawn)
+            .dispatch(job);
+        if let Err(job) = dispatched {
+            // worker 线程已退出（或创建失败）：退回一次性线程，行为与旧实现一致。
+            self.git_refresh_worker = None;
+            std::thread::spawn(move || run_git_refresh_job(job));
+        }
     }
 
     pub(crate) fn request_git_identity_refresh(&mut self, now: Instant) {
@@ -80,7 +90,7 @@ impl App {
     }
 
     pub(crate) fn mark_git_status_refresh_due(&mut self, now: Instant) {
-        self.git_status_cache
+        std::sync::Arc::make_mut(&mut self.git_status_cache)
             .retain(|_, entry| entry.fingerprint.is_some());
         if self.git_refresh_in_flight {
             self.git_refresh_due_after_in_flight = true;
@@ -166,6 +176,55 @@ fn deduplicate_git_refresh_items(
     }
 
     jobs
+}
+
+/// APP-008：常驻 git 刷新 worker。作业按需投递，线程在 App 生命周期内复用；
+/// App 释放（sender 掉线）后 worker 自然退出。
+pub(crate) struct GitRefreshWorker {
+    tx: std::sync::mpsc::Sender<GitRefreshJob>,
+}
+
+struct GitRefreshJob {
+    workspaces: Vec<WorkspaceGitRefreshItem>,
+    cache: Arc<HashMap<PathBuf, GitStatusCacheEntry>>,
+    demand: GitStatusRefreshDemand,
+    event_tx: tokio::sync::mpsc::Sender<AppEvent>,
+}
+
+impl GitRefreshWorker {
+    fn spawn() -> Self {
+        let (tx, rx) = std::sync::mpsc::channel::<GitRefreshJob>();
+        std::thread::Builder::new()
+            .name("herdr-git-refresh".to_owned())
+            .spawn(move || {
+                while let Ok(job) = rx.recv() {
+                    run_git_refresh_job(job);
+                }
+            })
+            .map(|_| Self { tx })
+            .unwrap_or_else(|_| {
+                // 线程创建失败时用一个已断开的 sender：调用方走一次性线程兜底。
+                let (tx, rx) = std::sync::mpsc::channel::<GitRefreshJob>();
+                drop(rx);
+                Self { tx }
+            })
+    }
+
+    fn dispatch(&self, job: GitRefreshJob) -> std::result::Result<(), GitRefreshJob> {
+        self.tx.send(job).map_err(|err| err.0)
+    }
+}
+
+fn run_git_refresh_job(job: GitRefreshJob) {
+    let output = refresh_workspace_git_statuses_with_cache_and_demand(
+        job.workspaces,
+        &job.cache,
+        job.demand,
+    );
+    let _ = job.event_tx.blocking_send(AppEvent::GitStatusRefreshed {
+        results: output.results,
+        cache_updates: output.cache_updates,
+    });
 }
 
 fn refresh_workspace_git_statuses_with_cache_and_demand(
@@ -490,7 +549,7 @@ mod tests {
             None,
             GitStatusRefreshDemand::ALL,
         );
-        app.git_status_cache
+        std::sync::Arc::make_mut(&mut app.git_status_cache)
             .insert(cwd.clone(), entry.expect("non-Git cache entry"));
 
         app.mark_git_status_refresh_due(Instant::now());

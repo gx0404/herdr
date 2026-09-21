@@ -414,7 +414,10 @@ fn restore_workspace(
             cached_identity_cwd: snap.identity_cwd.clone(),
             cached_auto_label,
             cached_git_status_key,
-            cached_git_branch: crate::workspace::git_branch(&snap.identity_cwd),
+            // APP-007：已经有 repo root 就别再做一遍同步向上发现。
+            cached_git_branch: cached_git_space
+                .as_ref()
+                .and_then(|space| crate::workspace::git_branch_for_repo_root(&space.repo_root)),
             cached_git_ahead_behind: None,
             cached_git_space,
             worktree_space,
@@ -466,6 +469,17 @@ fn restore_tab(
     let mut terminals = Vec::new();
     let mut terminal_runtimes = HashMap::new();
     let mut failed_imports = 0;
+    // RST-01：恢复是每 pane 的同步路径，cwd 探测按路径缓存（同名 cwd 的 pane 很多），
+    // HOME 只解析一次。
+    let mut cwd_exists: HashMap<PathBuf, bool> = HashMap::new();
+    let home = std::env::var("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from("/"));
+    let home = if home.exists() {
+        home
+    } else {
+        PathBuf::from("/")
+    };
     for id in &pane_ids {
         let old_id = reverse_id_map.get(id);
         let saved_pane = old_id.and_then(|old_id| snap.panes.get(old_id));
@@ -473,21 +487,17 @@ fn restore_tab(
             .map(|p| p.cwd.clone())
             .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| "/".into()));
 
-        let cwd = if saved_cwd.exists() {
+        let cwd = if *cwd_exists
+            .entry(saved_cwd.clone())
+            .or_insert_with(|| saved_cwd.exists())
+        {
             saved_cwd
         } else {
             warn!(
                 cwd = %saved_cwd.display(),
                 "saved pane cwd does not exist, falling back to HOME"
             );
-            let home = std::env::var("HOME")
-                .map(PathBuf::from)
-                .unwrap_or_else(|_| PathBuf::from("/"));
-            if home.exists() {
-                home
-            } else {
-                PathBuf::from("/")
-            }
+            home.clone()
         };
 
         let saved_label = saved_pane.and_then(|p| p.label.clone());

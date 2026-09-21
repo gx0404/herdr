@@ -52,7 +52,7 @@ use transport::*;
 
 #[cfg(test)]
 pub(crate) use shell::{ClientShellConfig, ClientShellState};
-pub use startup::{run_client, run_terminal_attach};
+pub use startup::{run_client, run_client_with_startup_config, run_terminal_attach};
 pub use terminal_sessions::{run_terminal_session_control, run_terminal_session_observe};
 
 #[cfg(not(windows))]
@@ -144,10 +144,12 @@ fn run_client_with_mode(
     attach_request: Option<(String, bool)>,
     attach_escape: Option<AttachEscapeState>,
     log_message: &'static str,
+    startup_config: Option<crate::config::LoadedConfig>,
 ) -> io::Result<()> {
     init_logging();
 
-    let loaded_config = crate::config::Config::load();
+    // CFG-01：main 已经加载过配置时复用，启动路径不再二次解析 + 诊断。
+    let loaded_config = startup_config.unwrap_or_else(crate::config::Config::load);
     // Windows may not have virtual terminal processing enabled until the rendered
     // client initializes the terminal, so defer the host mouse reset to
     // `setup_terminal_with_capabilities` instead of emitting raw escapes early.

@@ -21,6 +21,11 @@ const SERVER_READY_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// Poll interval when waiting for the server socket to appear.
 const SOCKET_POLL_INTERVAL: Duration = Duration::from_millis(50);
+/// START-03：冷启动最初一段用细粒度轮询——server 通常在几十毫秒内就绪，
+/// 50 ms 粒度会平白多等一个周期。超出该窗口后退回 `SOCKET_POLL_INTERVAL`
+/// （避免长时间空转）。
+const SOCKET_POLL_INTERVAL_FAST: Duration = Duration::from_millis(5);
+const SOCKET_POLL_FAST_WINDOW: Duration = Duration::from_millis(500);
 
 /// Timeout for checking the stable JSON API before attaching to the binary protocol socket.
 const STATUS_REQUEST_TIMEOUT: Duration = Duration::from_secs(2);
@@ -250,7 +255,8 @@ fn build_server_daemon_command(exe: PathBuf) -> Command {
 /// or the timeout elapses. Returns an error if the server doesn't become
 /// ready within the timeout.
 pub fn wait_for_server_socket(socket_path: &Path, timeout: Duration) -> io::Result<()> {
-    let deadline = std::time::Instant::now() + timeout;
+    let started = std::time::Instant::now();
+    let deadline = started + timeout;
 
     while std::time::Instant::now() < deadline {
         #[cfg(windows)]
@@ -264,7 +270,12 @@ pub fn wait_for_server_socket(socket_path: &Path, timeout: Duration) -> io::Resu
             info!(path = %socket_path.display(), "server socket ready");
             return Ok(());
         }
-        std::thread::sleep(SOCKET_POLL_INTERVAL);
+        let interval = if started.elapsed() < SOCKET_POLL_FAST_WINDOW {
+            SOCKET_POLL_INTERVAL_FAST
+        } else {
+            SOCKET_POLL_INTERVAL
+        };
+        std::thread::sleep(interval);
     }
 
     Err(io::Error::new(
@@ -292,7 +303,13 @@ pub fn wait_for_server_socket(socket_path: &Path, timeout: Duration) -> io::Resu
 /// 1. Check if a server is listening on the client socket
 /// 2. If no server → spawn server daemon → wait for socket readiness
 /// 3. Run the thin client (which connects to the server)
-pub fn auto_detect_launch(saved_federation: bool) -> io::Result<()> {
+///
+/// CFG-01：`startup_config` 是调用方（main）已经加载好的配置；启动路径原先会在
+/// 这里再 `Config::load()` 一次（第二次解析 + 诊断）。
+pub fn auto_detect_launch(
+    saved_federation: bool,
+    startup_config: crate::config::LoadedConfig,
+) -> io::Result<()> {
     let socket_path = client_socket_path();
     info!(path = %socket_path.display(), "auto-detect launch starting");
 
@@ -316,7 +333,7 @@ pub fn auto_detect_launch(saved_federation: bool) -> io::Result<()> {
     }
 
     // Now attach as a thin client.
-    crate::client::run_client()
+    crate::client::run_client_with_startup_config(startup_config)
 }
 
 // ---------------------------------------------------------------------------
