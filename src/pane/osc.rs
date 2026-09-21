@@ -101,6 +101,15 @@ impl DefaultColorOscTracker {
             }
             let byte = bytes[index];
             index += 1;
+            // PTY-14：CAN/SUB 中止当前转义序列（真实 VT 解析器语义），影子状态机
+            // 必须同样回 Ground，否则与解析器失步。
+            if matches!(byte, 0x18 | 0x1a)
+                && !matches!(self.state, DefaultColorOscTrackerState::Ground)
+            {
+                self.body.clear();
+                self.state = DefaultColorOscTrackerState::Ground;
+                continue;
+            }
             match self.state {
                 DefaultColorOscTrackerState::Ground => {
                     if byte == 0x1b {
@@ -204,6 +213,15 @@ impl DefaultColorEventTracker {
                 }
             }
             let byte = bytes[index];
+            // PTY-14：同上，CAN/SUB 中止当前序列。
+            if matches!(byte, 0x18 | 0x1a)
+                && !matches!(self.state, DefaultColorOscTrackerState::Ground)
+            {
+                self.body.clear();
+                self.state = DefaultColorOscTrackerState::Ground;
+                index += 1;
+                continue;
+            }
             match self.state {
                 DefaultColorOscTrackerState::Ground => {
                     if byte == 0x1b {
@@ -411,6 +429,12 @@ impl OscStreamCollector {
             }
             let byte = bytes[index];
             index += 1;
+            // PTY-14：CAN/SUB 中止当前转义序列（真实 VT 解析器语义）。
+            if matches!(byte, 0x18 | 0x1a) && !matches!(self.state, OscStreamState::Ground) {
+                self.body.clear();
+                self.state = OscStreamState::Ground;
+                continue;
+            }
             match self.state {
                 OscStreamState::Ground => {
                     if byte == 0x1b {
@@ -769,7 +793,9 @@ fn parse_file_uri_cwd_with_hostname(uri: &str, hostname: Option<&str>) -> Option
         }
         &rest[slash..]
     } else {
-        rest
+        // PTY-15：没有路径段的 `file://host` / `file://` 不是 cwd，原先会把
+        // 主机名或空串当成本地路径接受。
+        return None;
     };
     let path = percent_decode_utf8(path)?;
 
@@ -1071,6 +1097,25 @@ mod tests {
         assert_eq!(bodies, vec![b"9;a\x1b".to_vec(), b"2;b\x1b".to_vec()]);
     }
 
+    /// PTY-14：CAN/SUB 中止当前转义序列，影子状态机必须回 Ground——否则被中止的
+    /// 序列会把后续字节吞进去，与 VT 解析器失步。
+    #[test]
+    fn osc_stream_collector_aborts_sequences_on_can_and_sub() {
+        for abort in [0x18_u8, 0x1a] {
+            let mut collector = OscStreamCollector::default();
+            let mut bodies = Vec::new();
+
+            let mut aborted = b"\x1b]7;file:///tmp/aborted".to_vec();
+            aborted.push(abort);
+            collector.observe(&aborted, |body| bodies.push(body.to_vec()));
+            collector.observe(b"\x1b]7;file:///tmp/real\x07", |body| {
+                bodies.push(body.to_vec())
+            });
+
+            assert_eq!(bodies, vec![b"7;file:///tmp/real".to_vec()]);
+        }
+    }
+
     #[test]
     fn default_color_tracker_detects_split_osc_11_sequences() {
         let mut tracker = DefaultColorOscTracker::default();
@@ -1108,6 +1153,10 @@ mod tests {
         assert_eq!(parse_reported_cwd(b""), None);
         assert_eq!(parse_reported_cwd(b"\xff"), None);
         assert_eq!(parse_reported_cwd(b"file://remote/tmp"), None);
+        // PTY-15：没有路径段的 file URI（空路径 / 只有主机名）不是 cwd。
+        assert_eq!(parse_reported_cwd(b"file://"), None);
+        assert_eq!(parse_reported_cwd(b"file://localhost"), None);
+        assert_eq!(parse_reported_cwd(b"file://myhost"), None);
     }
 
     #[test]
