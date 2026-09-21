@@ -2209,6 +2209,15 @@ async fn run_client_loop(
                                 }
                                 continue;
                             }
+                            Ok(endpoint::EndpointControlMessage::TerminalCwd(uri)) => {
+                                // 焦点 pane 的 cwd 上送：只在 server 判定焦点/cwd 变化时
+                                // 到达，直接写 OSC 7 给宿主终端（WEZ-INT-02）。
+                                let _ = crate::terminal_effects::write_terminal_cwd(
+                                    &mut io::stdout(),
+                                    uri.as_deref(),
+                                );
+                                continue;
+                            }
                             Ok(endpoint::EndpointControlMessage::Ignored) => {
                                 debug!(%kind, "ignoring unknown endpoint control message");
                                 continue;

@@ -104,6 +104,8 @@ new_cwd = "follow"
 
 shell 可以用 `OSC 7`（`file://<host>/<path>`）上报工作目录。`<host>` 为空、`localhost` 或本机 hostname（大小写无关）时 Herdr 接受该上报；指向其它主机的上报按远程处理并忽略。被接受的目录驱动 `new_cwd = "follow"`，并作为窗格 cwd 显示在侧边栏与 `herdr pane list` 中。
 
+Herdr 也会把焦点窗格的工作目录以 `OSC 7`（`file://<host>/<percent 编码路径>`）回传给宿主终端。上送只在焦点或目录变化时发生，不随帧重复。理解 `OSC 7` 的宿主终端（WezTerm、kitty、foot 等）会在该目录下打开新标签页/分屏，因此用 `Ctrl+Shift+T` 新建的宿主标签页会落在焦点窗格所在目录。
+
 ## Worktree
 
 设置 Herdr 从侧边栏创建 Git worktree 检出时使用的根目录：

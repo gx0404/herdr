@@ -223,6 +223,10 @@ pub struct HeadlessServer {
     /// when the title itself has not changed, without every code path that
     /// changes the foreground client having to remember to invalidate this.
     sent_window_title: Option<(u64, Option<String>)>,
+    /// 上送给前台 client 的焦点 pane cwd，与接收 client 配对；语义与
+    /// `sent_window_title` 相同（WEZ-INT-02）。存路径而非编码后的 URI，渲染循环里的
+    /// 稳态比较不需要分配。
+    sent_terminal_cwd: Option<(u64, Option<std::path::PathBuf>)>,
     /// Window title set through `client.window_title.set`. While present it wins
     /// over the configured `ui.window_title` until the API clears it again.
     api_window_title: Option<String>,
@@ -369,6 +373,7 @@ impl HeadlessServer {
                     .as_nanos()
             ),
             sent_window_title: None,
+            sent_terminal_cwd: None,
             api_window_title: None,
             server_keybindings,
             server_config_diagnostic,
@@ -580,6 +585,10 @@ impl HeadlessServer {
                 }
                 if needs_full_render && !outer_title_synced {
                     self.sync_window_title();
+                }
+                if needs_full_render {
+                    // 焦点切换引发的整帧渲染也是 cwd 上送的时机（焦点面变化时 cwd 变）。
+                    self.sync_terminal_cwd();
                 }
                 if !needs_full_render && !needs_graphics_render && !pty_dirty {
                     // A synchronized-output OSC title can be the only pending work.
@@ -1594,6 +1603,69 @@ impl HeadlessServer {
         sent
     }
 
+    /// 前台 client 焦点 pane 的 cwd（渲染循环里的比较输入：只读引用，不分配）。
+    fn focused_terminal_cwd_path(&self) -> Option<&std::path::Path> {
+        let target = self.foreground_window_title_target()?;
+        let tab = self
+            .app
+            .state
+            .workspaces
+            .get(target.workspace_index)?
+            .tabs
+            .get(target.tab_index)?;
+        let terminal_id = tab.terminal_id(tab.layout.focused())?;
+        let terminal = self.app.state.terminals.get(terminal_id)?;
+        Some(terminal.cwd.as_path())
+    }
+
+    /// 焦点 pane 的 cwd 上送给前台 client（WEZ-INT-02）。只在焦点或 cwd 变化时推送
+    /// （按 `(client_id, path)` 去重），渲染循环里的稳态调用只做几次 map 查找与一次
+    /// 路径比较；URI 的 hostname 查询与 percent 编码只在真实变化时发生，不进每帧路径。
+    fn sync_terminal_cwd(&mut self) {
+        if self.foreground_client_id.is_none() && self.sent_terminal_cwd.is_none() {
+            return;
+        }
+        let changed_path = {
+            let path = self.focused_terminal_cwd_path();
+            let up_to_date = matches!(
+                (self.foreground_client_id, self.sent_terminal_cwd.as_ref()),
+                (Some(client_id), Some((sent_client_id, sent_path)))
+                    if *sent_client_id == client_id && sent_path.as_deref() == path
+            );
+            if up_to_date {
+                return;
+            }
+            path.map(std::path::Path::to_path_buf)
+        };
+        let uri = changed_path
+            .as_deref()
+            .and_then(crate::pane::file_uri_for_cwd);
+        self.send_terminal_cwd(changed_path, uri);
+    }
+
+    /// 发送 cwd 上送帧；与 `send_window_title` 同样只在前台 client 真正收下后才记账，
+    /// 保证 detach 重连 / handoff 换端后一定重发。
+    fn send_terminal_cwd(&mut self, path: Option<std::path::PathBuf>, uri: Option<String>) -> bool {
+        let Some(client_id) = self.foreground_client_id else {
+            self.sent_terminal_cwd = None;
+            return false;
+        };
+        if self
+            .clients
+            .get(&client_id)
+            .is_none_or(|client| client.writer.is_none())
+        {
+            self.sent_terminal_cwd = None;
+            return false;
+        }
+        let Ok(message) = crate::protocol::endpoint::terminal_cwd_message(uri) else {
+            return false;
+        };
+        let sent = self.send_to_client(client_id, message);
+        self.sent_terminal_cwd = sent.then_some((client_id, path));
+        sent
+    }
+
     fn handle_client_window_title_api(&mut self, id: String, title: Option<String>) -> String {
         use api::schema::{ClientWindowTitleReason, ResponseResult};
 
@@ -2404,9 +2476,11 @@ impl HeadlessServer {
                 client.host_sgr_pixels_active = None;
                 client.host_keyboard_report_all_active = None;
                 self.sent_window_title = None;
+                self.sent_terminal_cwd = None;
                 self.stream_host_mouse_capture_mode();
                 self.stream_direct_terminal_keyboard_mode();
                 self.sync_window_title();
+                self.sync_terminal_cwd();
                 self.send_to_client(
                     client_id,
                     ServerMessage::EndpointControl {

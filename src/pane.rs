@@ -34,6 +34,8 @@ mod state;
 mod terminal;
 mod xtgettcap;
 
+pub(crate) use self::osc::file_uri_for_cwd;
+
 use self::agent_detection::{
     decide_detection_screen_read, decide_screen_detection_publish,
     detection_update_for_publish_with_osc, mark_detection_content_changed,

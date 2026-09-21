@@ -714,6 +714,13 @@ impl HeadlessServer {
 
                 true
             }
+            AppEvent::TerminalCwdReported { .. } => {
+                // pane 经 OSC 7 上报了新的 cwd：先落 AppState，再把焦点 pane 的最新值
+                // 上送给前台 client（WEZ-INT-02，非焦点 pane 的上报不会触发写出）。
+                let changed = self.app.handle_internal_event_with_render_impact(ev);
+                self.sync_terminal_cwd();
+                changed
+            }
             _ => self.app.handle_internal_event_with_render_impact(ev),
         }
     }

@@ -31,6 +31,9 @@ pub const AGENT_VIEW_PROJECTION_CAPABILITY: &str = "agent_view_projection";
 pub const AGENT_VIEW_PROJECTION_KIND: &str = "endpoint.agent-view.v1";
 /// 后台观测事件（账号用量 / 系统指标订阅推送）的可选控制帧；客户端不认识时忽略。
 pub const OBSERVATION_EVENT_KIND: &str = "endpoint.observation.v1";
+/// 前台焦点 pane 的 cwd 上送（WEZ-INT-02）：server 只在焦点或 cwd 变化时推送，
+/// 客户端据此向宿主终端写 OSC 7。可选控制帧，旧客户端忽略。
+pub const TERMINAL_CWD_KIND: &str = "endpoint.terminal-cwd.v1";
 
 fn default_true() -> bool {
     true
@@ -89,6 +92,20 @@ pub struct EndpointObservationEvent {
     pub boot_id: String,
     #[serde(flatten)]
     pub event: crate::api::schema::ObservationEventEnvelope,
+}
+
+/// `endpoint.terminal-cwd.v1` 控制帧的载荷：前台焦点 pane 的 cwd 的 `file://` URI
+/// （server 侧完成 hostname 与 percent 编码）；`None` 表示当前没有可上送的 cwd。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EndpointTerminalCwd {
+    pub uri: Option<String>,
+}
+
+pub fn terminal_cwd_message(uri: Option<String>) -> serde_json::Result<ServerMessage> {
+    Ok(ServerMessage::EndpointControl {
+        kind: TERMINAL_CWD_KIND.into(),
+        data: serde_json::to_string(&EndpointTerminalCwd { uri })?,
+    })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -298,6 +315,24 @@ mod tests {
         let decoded: EndpointClientHello =
             serde_json::from_str(&serde_json::to_string(&hello).unwrap()).unwrap();
         assert_eq!(decoded, hello);
+    }
+
+    #[test]
+    fn terminal_cwd_control_is_a_named_optional_frame() {
+        let message = terminal_cwd_message(Some("file://host/tmp%20x".to_owned())).unwrap();
+        let ServerMessage::EndpointControl { kind, data } = message else {
+            panic!("terminal cwd should use endpoint control");
+        };
+        assert_eq!(kind, TERMINAL_CWD_KIND);
+        let decoded: EndpointTerminalCwd = serde_json::from_str(&data).unwrap();
+        assert_eq!(decoded.uri.as_deref(), Some("file://host/tmp%20x"));
+
+        let cleared = terminal_cwd_message(None).unwrap();
+        let ServerMessage::EndpointControl { data, .. } = cleared else {
+            panic!("terminal cwd should use endpoint control");
+        };
+        let decoded: EndpointTerminalCwd = serde_json::from_str(&data).unwrap();
+        assert_eq!(decoded.uri, None);
     }
 
     #[test]

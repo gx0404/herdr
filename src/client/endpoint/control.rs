@@ -12,6 +12,8 @@ pub(crate) enum EndpointControlMessage {
     Snapshot(Box<crate::protocol::ClientShellSnapshot>),
     /// 后台观测订阅推送的 `endpoint.observation.v1` 事件（账号用量 / 系统指标）。
     Observation(Box<crate::protocol::endpoint::EndpointObservationEvent>),
+    /// 前台焦点 pane 的 cwd 上送（`endpoint.terminal-cwd.v1`），客户端写 OSC 7。
+    TerminalCwd(Option<String>),
     Ignored,
 }
 
@@ -58,6 +60,19 @@ pub(crate) fn decode_endpoint_control(
             }),
         );
     }
+    if kind == crate::protocol::endpoint::TERMINAL_CWD_KIND {
+        // 与观测事件同口径的可选控制帧：坏载荷按忽略处理。
+        return Ok(
+            serde_json::from_str::<crate::protocol::endpoint::EndpointTerminalCwd>(data).map_or(
+                EndpointControlMessage::Ignored,
+                |frame| {
+                    EndpointControlMessage::TerminalCwd(
+                        frame.uri.filter(|uri: &String| !uri.is_empty()),
+                    )
+                },
+            ),
+        );
+    }
     if kind == crate::protocol::endpoint::ENDPOINT_SNAPSHOT_KIND {
         let snapshot = serde_json::from_str(data)
             .map_err(|error| format!("invalid endpoint snapshot: {error}"))?;
@@ -86,6 +101,35 @@ mod tests {
             decode_endpoint_control("future.optional", "not json").unwrap(),
             EndpointControlMessage::Ignored
         ));
+    }
+
+    #[test]
+    fn terminal_cwd_decodes_uri_and_tolerates_bad_payloads() {
+        let crate::protocol::ServerMessage::EndpointControl { kind, data } =
+            crate::protocol::endpoint::terminal_cwd_message(Some("file://host/tmp%20x".to_owned()))
+                .unwrap()
+        else {
+            panic!("terminal cwd control");
+        };
+        let EndpointControlMessage::TerminalCwd(uri) =
+            decode_endpoint_control(&kind, &data).unwrap()
+        else {
+            panic!("decoded terminal cwd");
+        };
+        assert_eq!(uri.as_deref(), Some("file://host/tmp%20x"));
+
+        for data in ["not json", r#"{"uri":""}"#, r#"{"uri":null}"#] {
+            let decoded =
+                decode_endpoint_control(crate::protocol::endpoint::TERMINAL_CWD_KIND, data)
+                    .unwrap();
+            match decoded {
+                EndpointControlMessage::TerminalCwd(None) => {}
+                EndpointControlMessage::Ignored => {
+                    assert_eq!(data, "not json");
+                }
+                _ => panic!("unexpected decode for {data}"),
+            }
+        }
     }
 
     #[test]

@@ -85,6 +85,7 @@ fn test_headless_server_with_event_hub(event_hub: api::EventHub) -> HeadlessServ
         popup_owner_tab_id: None,
         client_shell_boot_id: "test-boot".into(),
         sent_window_title: None,
+        sent_terminal_cwd: None,
         api_window_title: None,
         server_keybindings,
         server_config_diagnostic: None,
@@ -556,6 +557,145 @@ fn clearing_the_api_title_falls_back_to_herdr_when_window_titles_are_disabled() 
 
     server.handle_client_window_title_api("clear".into(), None);
     assert_eq!(next_window_title(&control_rx), Some(None));
+
+    shutdown_test_runtimes(&mut server);
+}
+
+fn next_terminal_cwd(control_rx: &std::sync::mpsc::Receiver<Vec<u8>>) -> Option<Option<String>> {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while let Some(remaining) = deadline.checked_duration_since(Instant::now()) {
+        let Ok(bytes) = control_rx.recv_timeout(remaining) else {
+            return None;
+        };
+        if let ServerMessage::EndpointControl { kind, data } = read_server_message(bytes) {
+            if kind == crate::protocol::endpoint::TERMINAL_CWD_KIND {
+                let frame: crate::protocol::endpoint::EndpointTerminalCwd =
+                    serde_json::from_str(&data).expect("decode terminal cwd frame");
+                return Some(frame.uri);
+            }
+        }
+    }
+    None
+}
+
+fn no_terminal_cwd(control_rx: &std::sync::mpsc::Receiver<Vec<u8>>) -> bool {
+    while let Ok(bytes) = control_rx.recv_timeout(Duration::from_millis(200)) {
+        if let ServerMessage::EndpointControl { kind, .. } = read_server_message(bytes) {
+            if kind == crate::protocol::endpoint::TERMINAL_CWD_KIND {
+                return false;
+            }
+        }
+    }
+    true
+}
+
+#[test]
+fn terminal_cwd_pushes_on_change_and_dedupes() {
+    let (mut server, control_rx) = window_title_test_server();
+    server.app.state.ensure_test_terminals();
+    let focused = server.app.state.workspaces[0].tabs[0].layout.focused();
+    let terminal_id = server.app.state.workspaces[0].tabs[0]
+        .terminal_id(focused)
+        .expect("focused terminal id")
+        .clone();
+    server
+        .app
+        .state
+        .terminals
+        .get_mut(&terminal_id)
+        .expect("terminal state")
+        .cwd = std::path::PathBuf::from("/tmp/herdr-cwd-a");
+
+    server.sync_terminal_cwd();
+    let uri = next_terminal_cwd(&control_rx)
+        .expect("first push")
+        .expect("uri present");
+    assert!(
+        uri.starts_with("file://") && uri.ends_with("/tmp/herdr-cwd-a"),
+        "unexpected uri {uri}"
+    );
+
+    // 未变化不重复推送（去重键是 (client_id, uri)）。
+    server.sync_terminal_cwd();
+    assert!(no_terminal_cwd(&control_rx));
+
+    // cwd 变化触发新推送。
+    server
+        .app
+        .state
+        .terminals
+        .get_mut(&terminal_id)
+        .expect("terminal state")
+        .cwd = std::path::PathBuf::from("/tmp/herdr-cwd-b");
+    server.sync_terminal_cwd();
+    let uri = next_terminal_cwd(&control_rx)
+        .expect("second push")
+        .expect("uri present");
+    assert!(uri.ends_with("/tmp/herdr-cwd-b"), "unexpected uri {uri}");
+
+    // 新提升的前台 client 即使值未变也会收到当前 cwd。
+    let (client_tx, second_control_rx, _render_rx) = test_client_writer();
+    server.clients.insert(
+        2,
+        ClientConnection::new(
+            (80, 24),
+            crate::kitty_graphics::HostCellSize::default(),
+            2,
+            RenderEncoding::SemanticFrame,
+            Some(client_tx),
+        ),
+    );
+    server.promote_client_to_foreground(2);
+    server.sync_terminal_cwd();
+    let uri = next_terminal_cwd(&second_control_rx)
+        .expect("push to promoted client")
+        .expect("uri present");
+    assert!(uri.ends_with("/tmp/herdr-cwd-b"), "unexpected uri {uri}");
+
+    shutdown_test_runtimes(&mut server);
+}
+
+#[tokio::test]
+async fn terminal_cwd_report_event_pushes_focused_pane_cwd() {
+    let (mut server, control_rx) = window_title_test_server();
+    server.app.state.ensure_test_terminals();
+    let focused = server.app.state.workspaces[0].tabs[0].layout.focused();
+    let terminal_id = server.app.state.workspaces[0].tabs[0]
+        .terminal_id(focused)
+        .expect("focused terminal id")
+        .clone();
+    server
+        .app
+        .state
+        .terminals
+        .get_mut(&terminal_id)
+        .expect("terminal state")
+        .cwd = std::path::PathBuf::from("/tmp/herdr-cwd-initial");
+    server.sync_terminal_cwd();
+    assert!(next_terminal_cwd(&control_rx).is_some());
+
+    let cwd = std::env::temp_dir();
+    server.handle_internal_event_with_forwarding(crate::events::AppEvent::TerminalCwdReported {
+        pane_id: focused,
+        cwd: cwd.clone(),
+    });
+
+    let uri = next_terminal_cwd(&control_rx)
+        .expect("push after report")
+        .expect("uri present");
+    let expected = crate::pane::file_uri_for_cwd(&cwd).expect("expected uri");
+    assert_eq!(uri, expected);
+
+    // 非焦点 pane 的上报不产生上送。
+    let other_workspace = crate::workspace::Workspace::test_new("other");
+    let other_pane = other_workspace.tabs[0].layout.focused();
+    server.app.state.workspaces.push(other_workspace);
+    server.app.state.ensure_test_terminals();
+    server.handle_internal_event_with_forwarding(crate::events::AppEvent::TerminalCwdReported {
+        pane_id: other_pane,
+        cwd: std::path::PathBuf::from("/tmp"),
+    });
+    assert!(no_terminal_cwd(&control_rx));
 
     shutdown_test_runtimes(&mut server);
 }

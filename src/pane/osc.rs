@@ -1,5 +1,5 @@
 use std::borrow::Cow;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use tracing::info;
 
@@ -659,6 +659,65 @@ fn parse_file_uri_cwd(uri: &str) -> Option<PathBuf> {
     parse_file_uri_cwd_with_hostname(uri, crate::platform::hostname().as_deref())
 }
 
+/// pane cwd 上送宿主终端（WEZ-INT-02）的 URI 构造：`file://<本机 hostname><percent-编码路径>`。
+/// 与 [`parse_file_uri_cwd`] 互为对偶；hostname 拿不到时退化为空 host（`file:///...`），
+/// 解析侧与 wezterm 都接受。路径经 percent 编码，输出恒为可安全写入 OSC 的 ASCII。
+pub(crate) fn file_uri_for_cwd(cwd: &Path) -> Option<String> {
+    #[cfg(not(windows))]
+    let path = cwd.to_str()?;
+    #[cfg(windows)]
+    let path = {
+        let replaced = cwd.to_str()?.replace('\\', "/");
+        // `C:/foo` 在 file URI 里写作 `/C:/foo`（解析侧的 Windows 分支会剥回）。
+        if replaced.starts_with('/') {
+            replaced
+        } else {
+            format!("/{replaced}")
+        }
+    };
+    let host = crate::platform::hostname().unwrap_or_default();
+    Some(format!(
+        "file://{host}{}",
+        percent_encode_file_uri_path(path)
+    ))
+}
+
+/// `file://` 路径段的 percent 编码：保留 RFC 3986 unreserved 与 `/`/`:`（Windows 盘符），
+/// 其余字节（含 UTF-8 多字节、空格、控制字符）全部 `%XX` 大写十六进制。输出不含
+/// ESC/BEL 等 OSC 终止字符，可以直接写进 `ESC ] 7 ; … ESC \\`。
+fn percent_encode_file_uri_path(path: impl AsRef<str>) -> String {
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
+    let path = path.as_ref();
+    let mut out = String::with_capacity(path.len());
+    for &byte in path.as_bytes() {
+        let keep = byte.is_ascii_alphanumeric()
+            || matches!(
+                byte,
+                b'-' | b'.'
+                    | b'_'
+                    | b'~'
+                    | b'/'
+                    | b':'
+                    | b'!'
+                    | b'$'
+                    | b'&'
+                    | b'+'
+                    | b','
+                    | b';'
+                    | b'='
+                    | b'@'
+            );
+        if keep {
+            out.push(byte as char);
+        } else {
+            out.push('%');
+            out.push(HEX[usize::from(byte >> 4)] as char);
+            out.push(HEX[usize::from(byte & 0xf)] as char);
+        }
+    }
+    out
+}
+
 /// `file://` URI 的 host 段判定：空、`localhost`、或等于本机 hostname（大小写无关，
 /// GX-03——gx terminal.zsh 上报 `${HOST}` 原样大小写）都视为本机；其余 host 指向
 /// 远程机器，pane 不能拿来当本地 cwd。
@@ -1055,6 +1114,37 @@ mod tests {
             parse_reported_cwd(uri.as_bytes()),
             Some(std::path::PathBuf::from("/tmp"))
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn file_uri_for_cwd_roundtrips_through_parse() {
+        for path in [
+            "/tmp",
+            "/tmp/herdr repo",
+            "/home/u/中文 目录/100%",
+            "/home/u/line\nbreak",
+            "/home/u/escape\x1b]7;injected",
+        ] {
+            let uri = file_uri_for_cwd(Path::new(path)).expect("uri for cwd");
+            assert!(
+                uri.bytes().all(|byte| byte.is_ascii() && byte >= 0x20),
+                "uri must be safe printable ASCII: {uri:?}"
+            );
+            assert_eq!(
+                parse_file_uri_cwd(&uri),
+                Some(PathBuf::from(path)),
+                "roundtrip {path}"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn file_uri_for_cwd_carries_local_hostname() {
+        let uri = file_uri_for_cwd(Path::new("/tmp/x")).expect("uri for cwd");
+        let expected_host = crate::platform::hostname().unwrap_or_default();
+        assert_eq!(uri, format!("file://{expected_host}/tmp/x"));
     }
 
     // -----------------------------------------------------------------------

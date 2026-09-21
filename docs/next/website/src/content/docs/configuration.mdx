@@ -104,6 +104,8 @@ On Unix, `SSH_AUTH_SOCK` is validated before every pane spawn: the path must exi
 
 Shells can report their working directory with `OSC 7` (`file://<host>/<path>`). Herdr accepts the report when `<host>` is empty, `localhost`, or the machine's own hostname (case-insensitive); reports naming any other host are treated as remote and ignored. The accepted directory drives `new_cwd = "follow"` and the pane cwd shown in the sidebar and `herdr pane list`.
 
+Herdr also reports the focused pane's working directory back to the host terminal as `OSC 7` (`file://<host>/<percent-encoded path>`). The update is sent only when focus or the directory changes, never per frame. Host terminals that understand `OSC 7` — WezTerm, kitty, foot — open new tabs and splits in that directory, so a new host tab started with `Ctrl+Shift+T` lands where the focused pane is.
+
 ## Worktrees
 
 Set the root directory Herdr uses for Git worktree checkouts created from the sidebar:
