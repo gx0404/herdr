@@ -4751,8 +4751,8 @@
       "anchor": "structure",
       "doc": "src/client/shell/notifications.rs",
       "id": "src-client-shell-notifications-rs-structure",
-      "source_sha256": "496ecd0f25e326d602809b2f8be69c95e9fe1b59813cda4cee5ee2e9791b79c1",
-      "text": "公开项：\npub(super) fn render_mobile_notice_banner(\npub(super) fn render_mobile_notification_banner(\npub(super) fn render_notification_card(\npub(super) fn render_visible_notification("
+      "source_sha256": "916505deef0c1b19562db678880cc749bf885b9ad51a9464f0f49143f861c685",
+      "text": "公开项：\npub(super) fn render_mobile_notice_banner(\npub(super) fn notification_agent_label<'a>( — 通知横幅上的 agent 标签（NOTIF-01）：优先 pane 的显示名，`display_agent` → `name` → `agent` → `title` 依次回退；解析不出时退到通知自带的 canonical agent（`event.agent`）。\npub(super) fn render_mobile_notification_banner(\npub(super) fn render_notification_card(\npub(super) fn render_visible_notification("
     },
     {
       "anchor": "structure",
