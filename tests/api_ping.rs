@@ -148,6 +148,9 @@ fn spawn_herdr_with_options(
     cmd.env_remove("HERDR_CLIENT_SOCKET_PATH");
     cmd.env("SHELL", shell);
     cmd.env_remove("HERDR_ENV");
+    // 从 herdr 窗格内跑测试时会继承宿主 client 的启动目录：server 会据此预建一个
+    // 启动工作区，而本文件的用例都假设 server 以「零工作区」起步。
+    cmd.env_remove("HERDR_STARTUP_CWD");
     if let Some(path) = path_override {
         cmd.env("PATH", path);
     }
