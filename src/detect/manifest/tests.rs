@@ -1478,3 +1478,21 @@ fn detect_and_explain_agree_on_detection_fields() {
         }
     }
 }
+
+/// INFRA-01：bundled manifest 由 `include_str!` 编进二进制，解析或编译失败会在
+/// 运行时 panic（`bundled_manifest` / `bundled_loaded_manifest`）。这里在测试期
+/// 把每一份都走一遍，把「编译期不变量」变成守门而不是运行时炸。
+#[test]
+fn every_bundled_manifest_parses_and_compiles() {
+    for (id, content) in BUNDLED_MANIFESTS {
+        let manifest = parse_manifest(content)
+            .unwrap_or_else(|err| panic!("bundled {id} manifest is invalid: {err}"));
+        assert_eq!(
+            manifest.id.as_str(),
+            *id,
+            "bundled manifest id must match its table key"
+        );
+        loaded_manifest(manifest, ManifestSource::Bundled, None, None, false)
+            .unwrap_or_else(|err| panic!("bundled {id} manifest could not be compiled: {err}"));
+    }
+}

@@ -119,11 +119,15 @@ impl App {
                 }
                 self.schedule_session_save();
                 self.emit_tab_created_events(ws_idx, tab_idx);
-                encode_success(
-                    id,
-                    self.tab_created_result(ws_idx, tab_idx)
-                        .expect("new tab should produce a complete create response"),
-                )
+                // APP-012：不做 expect；新建 tab 元数据缺失按创建失败返回。
+                let Some(result) = self.tab_created_result(ws_idx, tab_idx) else {
+                    return encode_error(
+                        id,
+                        "tab_create_failed",
+                        "created tab metadata is unavailable",
+                    );
+                };
+                encode_success(id, result)
             }
             Err(err) => encode_error(id, "tab_create_failed", err.to_string()),
         }
@@ -134,7 +138,10 @@ impl App {
             return tab_not_found(id, &target.tab_id);
         };
         self.state.switch_workspace_tab(ws_idx, tab_idx);
-        let tab = self.tab_info(ws_idx, tab_idx).unwrap();
+        // APP-012：不做 unwrap；焦点切换后 tab 消失按 not_found 返回。
+        let Some(tab) = self.tab_info(ws_idx, tab_idx) else {
+            return tab_not_found(id, &target.tab_id);
+        };
 
         encode_success(id, ResponseResult::TabInfo { tab })
     }
@@ -158,15 +165,21 @@ impl App {
         tab.set_custom_name(params.label.clone());
         crate::logging::tab_renamed(&workspace_id, &tab_id);
         self.schedule_session_save();
+        // APP-012：不做 unwrap；重命名后的公开 id / 元数据缺失按 not_found 返回。
+        let Some(public_tab_id) = self.public_tab_id(ws_idx, tab_idx) else {
+            return tab_not_found(id, &params.tab_id);
+        };
         self.emit_event(EventEnvelope {
             event: EventKind::TabRenamed,
             data: EventData::TabRenamed {
-                tab_id: self.public_tab_id(ws_idx, tab_idx).unwrap(),
+                tab_id: public_tab_id,
                 workspace_id: self.public_workspace_id(ws_idx),
                 label: params.label,
             },
         });
-        let tab = self.tab_info(ws_idx, tab_idx).unwrap();
+        let Some(tab) = self.tab_info(ws_idx, tab_idx) else {
+            return tab_not_found(id, &params.tab_id);
+        };
 
         encode_success(id, ResponseResult::TabInfo { tab })
     }

@@ -220,9 +220,11 @@ impl ClientRenderState {
                     message: ServerMessage::PaneSurfacePatch(patch),
                 },
             ) => {
-                let surface = last_surface
-                    .as_deref_mut()
-                    .expect("prepared patch baseline");
+                // RS-15：补丁提交只在基线存在时发生（规划阶段已保证）；缺失时
+                // 不 panic，也不推进修订号，等待下一次全量帧重建基线。
+                let Some(surface) = last_surface.as_deref_mut() else {
+                    return;
+                };
                 apply_pane_surface_patch(surface, &patch);
                 *surface_revision = patch.surface_revision;
             }
@@ -261,15 +263,25 @@ pub(super) fn apply_pane_surface_patch(surface: &mut PaneSurfaceFrame, patch: &P
         .extend(patch.hyperlink_uris.iter().cloned());
     for row in &patch.rows {
         let start = usize::from(row.y) * usize::from(surface.frame.width) + usize::from(row.x);
-        surface.frame.cells[start..start + row.cells.len()].clone_from_slice(&row.cells);
+        // RS-15：规划阶段已校验行落在帧内；这里防御性跳过越界行而不是切片 panic。
+        let Some(target) = surface
+            .frame
+            .cells
+            .get_mut(start..start.saturating_add(row.cells.len()))
+        else {
+            continue;
+        };
+        target.clone_from_slice(&row.cells);
     }
     for updated in &patch.panes {
-        let pane = surface
+        // RS-15：客户端同样按 pane_id 归并，缺条目时跳过该条（不 panic）。
+        if let Some(pane) = surface
             .panes
             .iter_mut()
             .find(|pane| pane.pane_id == updated.pane_id)
-            .expect("planned patch pane");
-        pane.clone_from(updated);
+        {
+            pane.clone_from(updated);
+        }
     }
     surface.frame.cursor.clone_from(&patch.cursor);
     surface.surface_revision = patch.surface_revision;
@@ -444,12 +456,13 @@ pub(crate) fn render_tab_surface_virtual(
     let hyperlinks = crate::ui::tab_surface_hyperlinks(app_state, terminal_runtimes, surface);
 
     let backend = CursorTrackingBackend::new(area.width, area.height);
-    let mut terminal = ratatui::Terminal::new(backend).expect("TestBackend::new should never fail");
-    terminal
-        .draw(|frame| {
-            crate::ui::render_tab_surface(app_state, terminal_runtimes, surface, frame);
-        })
-        .expect("render to TestBackend should never fail");
+    // RS-15：`Terminal::new` 对本地后端不会失败（错误类型不可构造），直接绑定 Ok
+    // 分支，不做 expect。
+    let Ok(mut terminal) = ratatui::Terminal::new(backend);
+    // 绘制失败保留后端里已经画出的部分（与 `Terminal::draw` 的语义一致）。
+    let _ = terminal.draw(|frame| {
+        crate::ui::render_tab_surface(app_state, terminal_runtimes, surface, frame);
+    });
 
     (
         terminal.backend().buffer().clone(),
@@ -465,13 +478,12 @@ pub(crate) fn render_terminal_virtual(
     area: Rect,
 ) -> (ratatui::buffer::Buffer, Option<CursorState>) {
     let backend = CursorTrackingBackend::new(area.width, area.height);
-    let mut terminal = ratatui::Terminal::new(backend).expect("TestBackend::new should never fail");
+    // RS-15：同上；`Terminal::new` 不失败，直接绑定 Ok 分支。
+    let Ok(mut terminal) = ratatui::Terminal::new(backend);
 
-    terminal
-        .draw(|frame| {
-            runtime.render(frame, area, true);
-        })
-        .expect("render to TestBackend should never fail");
+    let _ = terminal.draw(|frame| {
+        runtime.render(frame, area, true);
+    });
 
     let buffer = terminal.backend().buffer().clone();
     // DECSET 2026 批次进行中不再整帧抑制光标：`runtime.cursor_state` 沿用批次前

@@ -745,6 +745,19 @@ impl CellData {
     }
 }
 
+/// 越界格子的退化值：与 ratatui 的空白格一致（`from_ratatui_buffer_with_hyperlinks`
+/// 在缓冲几何不一致时用它保持帧尺寸）。
+fn blank_cell() -> CellData {
+    CellData {
+        symbol: compact_str::CompactString::from(" "),
+        fg: 0,
+        bg: 0,
+        modifier: 0,
+        skip: false,
+        hyperlink: None,
+    }
+}
+
 /// Cursor shape encoded as a DECSCUSR parameter.
 ///
 /// 0 = terminal default, 1 = blinking block, 2 = steady block,
@@ -815,7 +828,12 @@ impl FrameData {
         let mut cells = Vec::with_capacity((width as usize) * (height as usize));
         for row in 0..height {
             for col in 0..width {
-                let cell = buffer.cell((col, row)).expect("cell within bounds");
+                // 缓冲几何就是循环边界，越界说明调用方给了不一致的 Buffer；
+                // RS-15：热路径不做 unwrap，退化为空白格并保持帧尺寸。
+                let Some(cell) = buffer.cell((col, row)) else {
+                    cells.push(blank_cell());
+                    continue;
+                };
                 let hyperlink = hyperlink_by_position
                     .get(&(col, row))
                     .and_then(|(symbol, uri)| {

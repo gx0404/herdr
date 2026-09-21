@@ -124,7 +124,14 @@ impl App {
             .terminals
             .insert(new_pane.terminal.id.clone(), new_pane.terminal);
         self.schedule_session_save();
-        let pane = self.pane_info(ws_idx, new_pane.pane_id).unwrap();
+        // APP-012：不做 unwrap；新建 pane 元数据缺失按创建失败返回。
+        let Some(pane) = self.pane_info(ws_idx, new_pane.pane_id) else {
+            return encode_error(
+                id,
+                "pane_create_failed",
+                "created pane metadata is unavailable",
+            );
+        };
         self.emit_event(EventEnvelope {
             event: EventKind::PaneCreated,
             data: EventData::PaneCreated { pane: pane.clone() },
@@ -1499,7 +1506,10 @@ impl App {
             _ => terminal.clear_manual_label(),
         }
         self.state.mark_session_dirty();
-        let pane = self.pane_info(ws_idx, pane_id).unwrap();
+        // APP-012：不做 unwrap；重命名后 pane 消失按 not_found 返回。
+        let Some(pane) = self.pane_info(ws_idx, pane_id) else {
+            return pane_not_found(id, &params.pane_id);
+        };
 
         encode_success(id, ResponseResult::PaneInfo { pane })
     }
@@ -1529,13 +1539,17 @@ impl App {
             params.lines,
         );
 
+        // APP-012：不做 unwrap；公开 tab id 缺失按 not_found 返回。
+        let Some(tab_id) = self.public_tab_id(ws_idx, tab_idx) else {
+            return pane_not_found(id, &params.pane_id);
+        };
         encode_success(
             id,
             ResponseResult::PaneRead {
                 read: PaneReadResult {
                     pane_id: public_pane_id,
                     workspace_id,
-                    tab_id: self.public_tab_id(ws_idx, tab_idx).unwrap(),
+                    tab_id,
                     source: params.source,
                     format: params.format,
                     text: snapshot.text,

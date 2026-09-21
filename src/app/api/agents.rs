@@ -234,6 +234,10 @@ impl App {
             params.format,
             params.lines,
         );
+        // APP-012：不做 unwrap；公开 tab id 缺失按 not_found 返回。
+        let Some(tab_id) = self.public_tab_id(resolved.ws_idx, resolved.tab_idx) else {
+            return agent_not_found(id, &params.target);
+        };
 
         encode_success(
             id,
@@ -243,9 +247,7 @@ impl App {
                         .public_pane_id(resolved.ws_idx, resolved.pane_id)
                         .unwrap_or_else(|| params.target.clone()),
                     workspace_id,
-                    tab_id: self
-                        .public_tab_id(resolved.ws_idx, resolved.tab_idx)
-                        .unwrap(),
+                    tab_id,
                     source: params.source,
                     format: params.format,
                     text: snapshot.text,

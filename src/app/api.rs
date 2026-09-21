@@ -1289,7 +1289,8 @@ impl App {
             }
         };
 
-        serde_json::to_string(&response).unwrap()
+        // APP-012：不做 unwrap；序列化失败回最小错误体。
+        crate::app::api::responses::encode_response_value(response)
     }
 
     fn handle_notification_show(

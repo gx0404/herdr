@@ -183,15 +183,18 @@ impl HeadlessServer {
             update.ws_idx,
             update.pane_id,
         );
-        self.send_notify_to_foreground_client(
-            toast_notify_kind(self.app.state.toast_config.delivery)
-                .expect("toast forwarding requires a client notification kind"),
-            crate::i18n::fill(
-                crate::i18n::texts().notify.title_fmt,
-                &[("agent", agent_label), ("event", event_text)],
-            ),
-            non_empty_body(&context),
-        );
+        // HSR-15：`should_forward_toast_to_clients` 已保证有 kind；这里仍用
+        // `if let` 而不是 expect，事件循环里不 panic。
+        if let Some(kind) = toast_notify_kind(self.app.state.toast_config.delivery) {
+            self.send_notify_to_foreground_client(
+                kind,
+                crate::i18n::fill(
+                    crate::i18n::texts().notify.title_fmt,
+                    &[("agent", agent_label), ("event", event_text)],
+                ),
+                non_empty_body(&context),
+            );
+        }
     }
 
     pub(super) fn forward_agent_notification_delivery(
@@ -207,10 +210,12 @@ impl HeadlessServer {
         }
 
         if should_forward_toast_to_clients(self.app.state.toast_config.delivery) {
-            if let Some(toast) = &delivery.client_notification {
+            if let (Some(toast), Some(kind)) = (
+                &delivery.client_notification,
+                toast_notify_kind(self.app.state.toast_config.delivery),
+            ) {
                 self.send_notify_to_foreground_client(
-                    toast_notify_kind(self.app.state.toast_config.delivery)
-                        .expect("toast forwarding requires a client notification kind"),
+                    kind,
                     &toast.title,
                     non_empty_body(&toast.context),
                 );
@@ -442,12 +447,12 @@ impl HeadlessServer {
                     None
                 };
 
-                if let Some(msg) = toast_msg {
-                    self.send_flat_toast_to_foreground_client(
-                        toast_notify_kind(self.app.state.toast_config.delivery)
-                            .expect("toast forwarding requires a client notification kind"),
-                        msg,
-                    );
+                // HSR-15：事件循环里不做 expect。
+                if let (Some(msg), Some(kind)) = (
+                    toast_msg,
+                    toast_notify_kind(self.app.state.toast_config.delivery),
+                ) {
+                    self.send_flat_toast_to_foreground_client(kind, msg);
                 }
 
                 // 周期性心跳（blocked 800ms 等）重复同一观测时不产生 pane_updates，
@@ -549,12 +554,12 @@ impl HeadlessServer {
                     None
                 };
 
-                if let Some(msg) = toast_msg {
-                    self.send_flat_toast_to_foreground_client(
-                        toast_notify_kind(self.app.state.toast_config.delivery)
-                            .expect("toast forwarding requires a client notification kind"),
-                        msg,
-                    );
+                // HSR-15：事件循环里不做 expect。
+                if let (Some(msg), Some(kind)) = (
+                    toast_msg,
+                    toast_notify_kind(self.app.state.toast_config.delivery),
+                ) {
+                    self.send_flat_toast_to_foreground_client(kind, msg);
                 }
 
                 // 与 StateChanged 同理：序列驳回/无变化的 hook 上报不产生
@@ -605,12 +610,12 @@ impl HeadlessServer {
                         None
                     };
 
-                if let Some(msg) = toast_msg {
-                    self.send_flat_toast_to_foreground_client(
-                        toast_notify_kind(self.app.state.toast_config.delivery)
-                            .expect("toast forwarding requires a client notification kind"),
-                        msg,
-                    );
+                // HSR-15：事件循环里不做 expect。
+                if let (Some(msg), Some(kind)) = (
+                    toast_msg,
+                    toast_notify_kind(self.app.state.toast_config.delivery),
+                ) {
+                    self.send_flat_toast_to_foreground_client(kind, msg);
                 }
 
                 true

@@ -125,9 +125,14 @@ impl App {
             }
             (ws_idx, false)
         } else if target_is_source {
-            let ws_idx = source
-                .workspace_idx
-                .expect("source workspace should exist after membership ensure");
+            // APP-012：不做 expect；成员关系补全后仍缺索引按打开失败返回。
+            let Some(ws_idx) = source.workspace_idx else {
+                return encode_error(
+                    id,
+                    "worktree_open_failed",
+                    "source workspace is unavailable",
+                );
+            };
             if params.focus {
                 self.state.switch_workspace(ws_idx);
             }
@@ -169,16 +174,23 @@ impl App {
         let tab_idx = self.state.workspaces[ws_idx].active_tab;
         let worktree = self.worktree_info_for_entry(&source, entry);
         self.emit_worktree_opened_event(ws_idx, worktree.clone(), already_open.is_some());
+        // APP-012：不做 expect；打开后的 tab / 根 pane 元数据缺失按打开失败返回。
+        let (Some(tab), Some(root_pane)) = (
+            self.tab_info(ws_idx, tab_idx),
+            self.root_pane_info(ws_idx, tab_idx),
+        ) else {
+            return encode_error(
+                id,
+                "worktree_open_failed",
+                "opened worktree workspace metadata is unavailable",
+            );
+        };
         encode_success(
             id,
             ResponseResult::WorktreeOpened {
                 workspace: self.workspace_info(ws_idx),
-                tab: self
-                    .tab_info(ws_idx, tab_idx)
-                    .expect("opened worktree workspace should have an active tab"),
-                root_pane: self
-                    .root_pane_info(ws_idx, tab_idx)
-                    .expect("opened worktree workspace should have an active root pane"),
+                tab,
+                root_pane,
                 worktree,
                 already_open: already_open.is_some(),
             },
@@ -529,7 +541,10 @@ impl App {
                     "worktree_not_found",
                     "worktree branch not found",
                 )),
-                1 => Ok(matches.into_iter().next().expect("one match should exist")),
+                // APP-012：不做 expect；长度已判定为 1，缺元素按未找到返回。
+                1 => matches.into_iter().next().ok_or_else(|| {
+                    ApiFailure::new("worktree_not_found", "worktree branch not found")
+                }),
                 _ => Err(ApiFailure::new(
                     "ambiguous_worktree_branch",
                     "multiple worktrees matched branch",

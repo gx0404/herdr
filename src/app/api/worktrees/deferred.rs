@@ -489,16 +489,25 @@ impl App {
         };
         self.emit_worktree_created_event(ws_idx, worktree.clone());
         let tab_idx = self.state.workspaces[ws_idx].active_tab;
+        // APP-012：不做 expect；创建后的 tab / 根 pane 元数据缺失按创建失败返回。
+        let (Some(tab), Some(root_pane)) = (
+            self.tab_info(ws_idx, tab_idx),
+            self.root_pane_info(ws_idx, tab_idx),
+        ) else {
+            let response = encode_error(
+                api.id,
+                "worktree_create_failed",
+                "created worktree workspace metadata is unavailable",
+            );
+            Self::send_api_response(api.respond_to, response);
+            return;
+        };
         let response = encode_success(
             api.id,
             ResponseResult::WorktreeCreated {
                 workspace: self.workspace_info(ws_idx),
-                tab: self
-                    .tab_info(ws_idx, tab_idx)
-                    .expect("created worktree workspace should have an active tab"),
-                root_pane: self
-                    .root_pane_info(ws_idx, tab_idx)
-                    .expect("created worktree workspace should have an active root pane"),
+                tab,
+                root_pane,
                 worktree,
             },
         );

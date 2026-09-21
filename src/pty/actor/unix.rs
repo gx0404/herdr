@@ -877,24 +877,27 @@ impl PtyIoActorRunner {
     }
 
     fn schedule_submission_enter(&mut self) {
-        let Some(ActiveSubmission {
-            enter,
-            phase: SubmissionPhase::WaitingUntil(deadline),
-            ..
-        }) = self.active_submission.as_ref()
-        else {
+        // PTY-16：不作 unwrap。取出提交、按需改相位再放回；期间没有 await，
+        // 语义与「原地改 phase / 当场取走」等价。
+        let Some(mut submission) = self.active_submission.take() else {
             return;
         };
-        if Instant::now() >= *deadline {
-            let enter = enter.clone();
-            if enter.is_empty() {
-                let submission = self.active_submission.take().unwrap();
-                let _ = submission.reply.send(Ok(()));
-            } else {
-                self.active_submission.as_mut().unwrap().phase = SubmissionPhase::WritingEnter;
-                self.enqueue_submission_write(enter, SubmissionBoundary::Enter);
-            }
+        let due = matches!(
+            submission.phase,
+            SubmissionPhase::WaitingUntil(deadline) if Instant::now() >= deadline
+        );
+        if !due {
+            self.active_submission = Some(submission);
+            return;
         }
+        if submission.enter.is_empty() {
+            let _ = submission.reply.send(Ok(()));
+            return;
+        }
+        submission.phase = SubmissionPhase::WritingEnter;
+        let enter = submission.enter.clone();
+        self.active_submission = Some(submission);
+        self.enqueue_submission_write(enter, SubmissionBoundary::Enter);
     }
 
     fn poll_timeout_ms(&self) -> i32 {
@@ -941,9 +944,10 @@ impl PtyIoActorRunner {
                 Ok(written) => {
                     self.current_write_offset += written;
                     if self.current_write_offset >= write.bytes.len() {
-                        let completed = self.pending_writes.pop_front().unwrap();
+                        // PTY-16：`front()` 已保证有元素，pop 不会是 None。
+                        let completed = self.pending_writes.pop_front();
                         self.current_write_offset = 0;
-                        if let Some(boundary) = completed.boundary {
+                        if let Some(boundary) = completed.and_then(|completed| completed.boundary) {
                             self.file.flush()?;
                             return Ok(Some(boundary));
                         }

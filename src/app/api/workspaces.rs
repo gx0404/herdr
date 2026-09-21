@@ -74,11 +74,15 @@ impl App {
                     }
                 }
                 self.emit_workspace_open_events(index);
-                encode_success(
-                    id,
-                    self.workspace_created_result(index)
-                        .expect("new workspace should produce a complete create response"),
-                )
+                // APP-012：不做 expect；新建 workspace 元数据缺失按创建失败返回。
+                let Some(result) = self.workspace_created_result(index) else {
+                    return encode_error(
+                        id,
+                        "workspace_create_failed",
+                        "created workspace metadata is unavailable",
+                    );
+                };
+                encode_success(id, result)
             }
             Err(err) => encode_error(id, "workspace_create_failed", err.to_string()),
         }

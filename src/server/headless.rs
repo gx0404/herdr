@@ -3392,13 +3392,17 @@ impl HeadlessServer {
         {
             if let Some(toast) = &toast_after {
                 debug!(title = %toast.title, body = %toast.context, "forwarding toast notification from API request");
-                self.send_notify_to_foreground_client(
-                    toast_notify_kind(self.app.state.toast_config.delivery)
-                        .expect("toast forwarding requires a client notification kind"),
-                    &toast.title,
-                    non_empty_body(&toast.context),
-                );
-                true
+                // HSR-15：不做 expect；kind 缺失时视为未转发。
+                if let Some(kind) = toast_notify_kind(self.app.state.toast_config.delivery) {
+                    self.send_notify_to_foreground_client(
+                        kind,
+                        &toast.title,
+                        non_empty_body(&toast.context),
+                    );
+                    true
+                } else {
+                    false
+                }
             } else {
                 false
             }
@@ -3491,12 +3495,15 @@ impl HeadlessServer {
                             *ws_idx,
                             *pane_id,
                         );
-                        self.send_notify_to_foreground_client(
-                            toast_notify_kind(self.app.state.toast_config.delivery)
-                                .expect("toast forwarding requires a client notification kind"),
-                            format!("{agent_label} {event_text}"),
-                            non_empty_body(&context),
-                        );
+                        // HSR-15：不做 expect；kind 缺失时跳过该条转发。
+                        if let Some(kind) = toast_notify_kind(self.app.state.toast_config.delivery)
+                        {
+                            self.send_notify_to_foreground_client(
+                                kind,
+                                format!("{agent_label} {event_text}"),
+                                non_empty_body(&context),
+                            );
+                        }
                     }
                 }
             }

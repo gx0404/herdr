@@ -719,10 +719,6 @@ fn blit_frame_to_with_cursor_memory_and_clear_policy(
     clear_before_full_redraw: bool,
     suppress_visible_cursor: bool,
 ) {
-    // On first frame or size change, do a full redraw.
-    let full_redraw =
-        prev.is_none() || prev.is_some_and(|p| p.width != frame.width || p.height != frame.height);
-
     // Ask terminals that support synchronized output to apply the whole frame
     // atomically. This keeps IMEs and cursor trackers from observing the
     // intermediate CUP positions used while painting changed cells.
@@ -741,15 +737,17 @@ fn blit_frame_to_with_cursor_memory_and_clear_policy(
     // must not inherit it.
     let _ = writer.write_all(b"\x1b]8;;\x1b\\");
 
-    if full_redraw {
-        if clear_before_full_redraw {
-            let _ = writer.write_all(b"\x1b[2J");
+    // 首帧或几何变化走整帧重绘；否则只写变化单元格（RS-15：不用 unwrap）。
+    match prev {
+        Some(prev) if prev.width == frame.width && prev.height == frame.height => {
+            write_changed_cells(&mut writer, frame, prev);
         }
-        write_all_cells(&mut writer, frame);
-    } else {
-        // Diff-based update: only write changed cells.
-        let prev = prev.unwrap();
-        write_changed_cells(&mut writer, frame, prev);
+        _ => {
+            if clear_before_full_redraw {
+                let _ = writer.write_all(b"\x1b[2J");
+            }
+            write_all_cells(&mut writer, frame);
+        }
     }
 
     // Position the cursor while it is still hidden, then restore visibility.
