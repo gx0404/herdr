@@ -336,6 +336,12 @@ impl TerminalRuntime {
         self.0.alternate_screen_active()
     }
 
+    /// RS-08：一次取核拿全部呈现元数据（滚动条、鼠标模式、alt-screen、
+    /// kitty graphics）。
+    pub fn presentation_metadata(&self) -> crate::pane::PanePresentationMetadata {
+        self.0.presentation_metadata()
+    }
+
     pub fn cursor_state(
         &self,
         area: Rect,

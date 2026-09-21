@@ -1641,6 +1641,46 @@ async fn retained_patches_only_reach_shells_viewing_the_dirty_tab() {
     shutdown_test_runtimes(&mut server);
 }
 
+/// RS-18：补丁只为「元数据变化或带行」的 pane 回传完整元数据。同 tick 里被
+/// 标记为脏、但既无行差异也无元数据变化的 pane 不再随补丁回传；带行的 pane
+/// 必须保留（客户端按 patch.panes 校验行归属）。
+#[tokio::test]
+async fn retained_patch_omits_metadata_for_panes_without_rows_or_changes() {
+    let mut server = test_headless_server();
+    let mut workspace = crate::workspace::Workspace::test_new("retained-metadata");
+    let first_pane = workspace.tabs[0].root_pane;
+    let second_pane = workspace.test_split(ratatui::layout::Direction::Vertical);
+    workspace.insert_test_runtime(
+        first_pane,
+        crate::terminal::TerminalRuntime::test_with_screen_bytes(80, 23, b"FIRST"),
+    );
+    workspace.insert_test_runtime(
+        second_pane,
+        crate::terminal::TerminalRuntime::test_with_screen_bytes(80, 23, b"SECOND"),
+    );
+    server.app.state.workspaces = vec![workspace];
+    server.app.state.active = Some(0);
+    server.app.state.selected = 0;
+    server.app.state.mode = crate::app::Mode::Terminal;
+
+    let (_control, render) = connect_matching_test_shell(&mut server, 7);
+    server.render_and_stream();
+    let baseline = recv_pane_surface(&render, "baseline");
+    assert_eq!(baseline.panes.len(), 2);
+
+    // 只有第一个 pane 有输出；第二个在同一 tick 里被请求收集但没有变化。
+    server.app.state.workspaces[0].test_runtimes[&first_pane]
+        .test_process_pty_bytes(b"\rFIRST_PATCH");
+    assert!(
+        server.render_retained_pane_surface_and_stream(&HashSet::from([first_pane, second_pane,]))
+    );
+    let patch = recv_pane_surface_patch(&render, "patch");
+    assert!(!patch.rows.is_empty());
+    assert_eq!(patch.panes.len(), 1);
+    assert_eq!(patch.panes[0].pane_id, baseline.panes[0].pane_id);
+
+    shutdown_test_runtimes(&mut server);
+}
 /// 两个接收者的链接表长度不同（重建/重连后基线表长不一）时，增量表与单元格
 /// 索引必须各自对齐自己的基线：同一份 pane 内容不能对两个客户端算出同一组
 /// 绝对索引。

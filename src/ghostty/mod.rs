@@ -3320,6 +3320,33 @@ impl<'a> RowIter<'a> {
         self.set_dirty(false)
     }
 
+    /// RS-07：整行是否可能含超链接（行级 `GHOSTTY_ROW_DATA_HYPERLINK`）。标记
+    /// 允许假阳性但不允许假阴性，因此 false 表示该行确实没有链接，可以整行跳过
+    /// 逐格 FFI。完整渲染收集超链接时用它做快速筛选。
+    pub fn row_hyperlink(&self) -> Result<bool, Error> {
+        let mut row = 0;
+        // SAFETY: raw row output matches requested row data type.
+        unsafe {
+            ffi::ghostty_render_state_row_get(
+                self.iterator.raw,
+                ffi::GhosttyRenderStateRowData_GHOSTTY_RENDER_STATE_ROW_DATA_RAW,
+                (&mut row as *mut ffi::GhosttyRow).cast(),
+            )
+            .into_result()?;
+        }
+        let mut has_hyperlink = false;
+        // SAFETY: hyperlink output matches requested row data type.
+        unsafe {
+            ffi::ghostty_row_get(
+                row,
+                ffi::GhosttyRowData_GHOSTTY_ROW_DATA_HYPERLINK,
+                (&mut has_hyperlink as *mut bool).cast(),
+            )
+            .into_result()?;
+        }
+        Ok(has_hyperlink)
+    }
+
     pub fn set_dirty(&mut self, dirty: bool) -> Result<(), Error> {
         // SAFETY: dirty pointer matches the expected row option type.
         unsafe {

@@ -47,8 +47,9 @@ use self::agent_detection::{
 pub use self::terminal::InputState;
 use self::terminal::{GhosttyPaneTerminal, PaneTerminal, SynchronizedOutputBackstop};
 pub(crate) use self::terminal::{
-    TerminalCompressionStep, TerminalDirtyPatch, TerminalDirtyPatchOutcome, TerminalReadSnapshot,
-    TerminalSearchDirection, TerminalSearchWindow, TerminalTextPoint, TerminalWordMotion,
+    PanePresentationMetadata, TerminalCompressionStep, TerminalDirtyPatch,
+    TerminalDirtyPatchOutcome, TerminalReadSnapshot, TerminalSearchDirection, TerminalSearchWindow,
+    TerminalTextPoint, TerminalWordMotion,
 };
 pub use self::{
     state::PaneState,
@@ -3134,6 +3135,12 @@ impl PaneRuntime {
         self.terminal.scroll_metrics()
     }
 
+    /// RS-08：渲染与补丁收集逐 pane 需要的终端标量事实一次取核（原先每事实
+    /// 各取一次锁）。语义与各窄访问器一致，错误回退值也保持相同。
+    pub(crate) fn presentation_metadata(&self) -> PanePresentationMetadata {
+        self.terminal.presentation_metadata()
+    }
+
     pub(crate) fn search_text_window(
         &self,
         query: &str,
@@ -3336,15 +3343,16 @@ impl PaneRuntime {
         if matches!(patch, TerminalDirtyPatchOutcome::Fallback) {
             return Err(DirtyPatchSnapshotUnavailable::PatchFallback);
         }
+        let metadata = self.presentation_metadata();
         let snapshot = TerminalDirtyPatchSnapshot {
             patch,
             content_revision: revision,
-            scroll_metrics: self.scroll_metrics(),
-            mouse_reporting: self.mouse_reporting_enabled(),
-            sgr_pixel_mouse: self.sgr_pixel_mouse_enabled(),
-            alternate_screen_active: self.alternate_screen_active(),
+            scroll_metrics: metadata.scroll_metrics,
+            mouse_reporting: metadata.mouse_reporting,
+            sgr_pixel_mouse: metadata.sgr_pixel_mouse,
+            alternate_screen_active: metadata.alternate_screen_active,
             graphics_may_have_placements: crate::kitty_graphics::is_enabled()
-                && self.kitty_graphics_may_have_placements(),
+                && metadata.kitty_graphics_may_have_placements,
         };
         if self.content_seq() == revision {
             Ok(snapshot)
@@ -3368,10 +3376,6 @@ impl PaneRuntime {
 
     pub(crate) fn link_target_at(&self, col: u16, row: u16) -> Option<crate::ghostty::LinkTarget> {
         self.terminal.link_target_at(col, row)
-    }
-
-    pub(crate) fn kitty_graphics_may_have_placements(&self) -> bool {
-        self.terminal.kitty_graphics_may_have_placements()
     }
 
     pub fn kitty_image_placements_with_data_filter<F>(

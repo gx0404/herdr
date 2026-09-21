@@ -58,6 +58,28 @@ pub struct ScrollMetrics {
     pub viewport_rows: usize,
 }
 
+/// RS-08：渲染/补丁收集逐 pane 需要的全部终端核心标量事实。一次持锁读取，
+/// 替代原先每事实一次的 `Mutex` 往返。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct PanePresentationMetadata {
+    pub scroll_metrics: Option<ScrollMetrics>,
+    pub mouse_reporting: bool,
+    pub sgr_pixel_mouse: bool,
+    pub alternate_screen_active: bool,
+    pub kitty_graphics_may_have_placements: bool,
+}
+
+fn scroll_metrics_of(terminal: &crate::ghostty::Terminal) -> Option<ScrollMetrics> {
+    let scrollbar = terminal.scrollbar().ok()?;
+    Some(ScrollMetrics {
+        offset_from_bottom: scrollbar
+            .total
+            .saturating_sub(scrollbar.offset + scrollbar.len),
+        max_offset_from_bottom: scrollbar.total.saturating_sub(scrollbar.len),
+        viewport_rows: scrollbar.len,
+    })
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) struct TerminalTextPoint {
     pub row: u32,
@@ -597,6 +619,11 @@ impl PaneTerminal {
         self.ghostty.mouse_reporting_enabled()
     }
 
+    /// RS-08：一次取核拿全部呈现元数据（见 `PanePresentationMetadata`）。
+    pub fn presentation_metadata(&self) -> PanePresentationMetadata {
+        self.ghostty.presentation_metadata()
+    }
+
     pub fn modify_other_keys_level(&self) -> u8 {
         self.ghostty.modify_other_keys_level()
     }
@@ -834,10 +861,6 @@ impl PaneTerminal {
 
     pub(crate) fn link_target_at(&self, col: u16, row: u16) -> Option<crate::ghostty::LinkTarget> {
         self.ghostty.link_target_at(col, row)
-    }
-
-    pub(crate) fn kitty_graphics_may_have_placements(&self) -> bool {
-        self.ghostty.kitty_graphics_may_have_placements()
     }
 
     pub fn kitty_image_placements_with_data_filter<F>(
@@ -2202,17 +2225,8 @@ impl GhosttyPaneTerminal {
     }
 
     pub fn scroll_metrics(&self) -> Option<ScrollMetrics> {
-        let Ok(core) = self.core.lock() else {
-            return None;
-        };
-        let scrollbar = core.terminal.scrollbar().ok()?;
-        Some(ScrollMetrics {
-            offset_from_bottom: scrollbar
-                .total
-                .saturating_sub(scrollbar.offset + scrollbar.len),
-            max_offset_from_bottom: scrollbar.total.saturating_sub(scrollbar.len),
-            viewport_rows: scrollbar.len,
-        })
+        let core = self.core.lock().ok()?;
+        scroll_metrics_of(&core.terminal)
     }
 
     pub fn keyboard_protocol(&self) -> Option<crate::input::KeyboardProtocol> {
@@ -2242,6 +2256,29 @@ impl GhosttyPaneTerminal {
         self.core
             .lock()
             .is_ok_and(|core| core.terminal.mouse_tracking_enabled().unwrap_or(false))
+    }
+
+    /// RS-08：pane 级呈现元数据一次取核。渲染与 retained 补丁收集逐 pane 需要
+    /// 滚动条、鼠标模式、alt-screen 与 kitty graphics 四个标量事实；原先每个
+    /// 事实各取一次终端核心锁（每 pane 4 次），合并为一次持锁读取。
+    pub fn presentation_metadata(&self) -> PanePresentationMetadata {
+        let Ok(core) = self.core.lock() else {
+            return PanePresentationMetadata::default();
+        };
+        PanePresentationMetadata {
+            scroll_metrics: scroll_metrics_of(&core.terminal),
+            mouse_reporting: core.terminal.mouse_tracking_enabled().unwrap_or(false),
+            sgr_pixel_mouse: core
+                .terminal
+                .mode_get(crate::ghostty::MODE_MOUSE_SGR_PIXELS)
+                .unwrap_or(false),
+            alternate_screen_active: core.terminal.active_screen().ok()
+                == Some(crate::ghostty::ActiveScreen::Alternate),
+            kitty_graphics_may_have_placements: core
+                .terminal
+                .kitty_graphics_may_have_placements()
+                .unwrap_or(true),
+        }
     }
 
     pub fn modify_other_keys_level(&self) -> u8 {
@@ -2752,14 +2789,6 @@ impl GhosttyPaneTerminal {
             .unwrap_or_default()
     }
 
-    pub(crate) fn kitty_graphics_may_have_placements(&self) -> bool {
-        self.core
-            .lock()
-            .ok()
-            .and_then(|core| core.terminal.kitty_graphics_may_have_placements().ok())
-            .unwrap_or(true)
-    }
-
     pub fn kitty_image_placements_with_data_filter<F>(
         &self,
         needs_data: F,
@@ -3221,6 +3250,13 @@ fn ghostty_visible_hyperlinks(
     let mut links = Vec::new();
     let mut y = 0u16;
     while y < area.height && rows.next() {
+        // RS-07：行级标记为 false 时整行无链接，跳过逐格 FFI（常见 pane 无
+        // 链接，原先每行都要按宽度做 2 次 FFI/格）。标记查询失败时按「可能有」
+        // 处理，宁可慢也不丢链接。
+        if !rows.row_hyperlink().unwrap_or(true) {
+            y += 1;
+            continue;
+        }
         let mut cells = rows.populate_cells(&mut row_cells)?;
         let mut x = 0u16;
         while x < area.width && cells.next() {

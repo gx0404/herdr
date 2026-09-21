@@ -43,10 +43,12 @@ impl HeadlessServer {
                         .shell_surface_active
                         .then(|| self.shell_focused_runtime(client_id))
                         .flatten();
+                    // RS-08：一次取核拿全部呈现模式标量。
+                    let metadata = focused.map(|(runtime, _)| runtime.presentation_metadata());
                     let child_requests_mouse =
-                        focused.is_some_and(|(runtime, _)| runtime.mouse_reporting_enabled());
+                        metadata.is_some_and(|metadata| metadata.mouse_reporting);
                     let sgr_pixels = client.pixel_mouse
-                        && focused.is_some_and(|(runtime, _)| runtime.sgr_pixel_mouse_enabled());
+                        && metadata.is_some_and(|metadata| metadata.sgr_pixel_mouse);
                     Some((
                         client_id,
                         client.shell_surface_active
@@ -355,22 +357,41 @@ impl HeadlessServer {
             {
                 return self.popup_owner_tab_id == self.shell_tab_id_for_client(client_id);
             }
-            self.client_view_targets(client_id)
-                .into_iter()
-                .any(|target| {
-                    let Some(tab) = self
-                        .app
-                        .state
-                        .workspaces
-                        .get(target.workspace_index)
-                        .and_then(|workspace| workspace.tabs.get(target.tab_index))
-                    else {
-                        return false;
-                    };
-                    tab.panes.contains_key(&pane_id)
-                        && (!tab.zoomed || tab.layout.focused() == pane_id)
+            // RS-09：隐藏源早退本身是 pane×客户端×view 的乘法路径，这里不再按
+            // 客户端构造 `Vec<TabSurfaceTarget>` 与 tab id `String`，直接就地
+            // 判定 pane 是否落在该客户端的任一视图 tab 内。
+            if let Some(views) = client.views.as_ref() {
+                return views.views.iter().any(|view| {
+                    self.app.parse_tab_id(&view.spec.tab_id).is_some_and(
+                        |(workspace_index, tab_index)| {
+                            self.tab_contains_pane(workspace_index, tab_index, pane_id)
+                        },
+                    )
+                });
+            }
+            self.shell_target_for_client(client_id)
+                .is_some_and(|target| {
+                    self.tab_contains_pane(target.workspace_index, target.tab_index, pane_id)
                 })
         })
+    }
+
+    fn tab_contains_pane(
+        &self,
+        workspace_index: usize,
+        tab_index: usize,
+        pane_id: crate::layout::PaneId,
+    ) -> bool {
+        let Some(tab) = self
+            .app
+            .state
+            .workspaces
+            .get(workspace_index)
+            .and_then(|workspace| workspace.tabs.get(tab_index))
+        else {
+            return false;
+        };
+        tab.panes.contains_key(&pane_id) && (!tab.zoomed || tab.layout.focused() == pane_id)
     }
 
     pub(super) fn render_and_stream(&mut self) {
@@ -444,7 +465,11 @@ impl HeadlessServer {
                                 pane_id,
                             )
                             .is_some_and(|runtime| {
-                                runtime.alternate_screen_active() != pane.alternate_screen_active
+                                // RS-11：alt-screen 只可能随 pane 输出变化；内容序
+                                // 与基线一致时不取核探测（原先每帧逐 pane 锁 + FFI）。
+                                runtime.content_seq() != pane.content_revision
+                                    && runtime.alternate_screen_active()
+                                        != pane.alternate_screen_active
                             })
                     })
                 });
@@ -472,7 +497,7 @@ impl HeadlessServer {
         let mut surface_memo = crate::server::client_shell::SurfaceMemo::default();
         for (client_id, (cols, rows), cell_size, _is_foreground, mode) in render_targets {
             #[cfg(unix)]
-            if matches!(mode, ClientConnectionMode::TerminalObserve { .. })
+            if matches!(mode, RenderTargetMode::TerminalObserve)
                 && self
                     .clients
                     .get(&client_id)
@@ -486,7 +511,7 @@ impl HeadlessServer {
             let shell_tab_id = self.shell_tab_id_for_client(client_id);
             let shell_shows_popup = shell_tab_id.as_deref() == self.popup_owner_tab_id.as_deref();
             let mut shell_projection_revision = 0;
-            if matches!(mode, ClientConnectionMode::ClientShell) {
+            if matches!(mode, RenderTargetMode::ClientShell) {
                 let location = self
                     .clients
                     .get(&client_id)
@@ -611,7 +636,7 @@ impl HeadlessServer {
                 .unwrap_or_default();
             let mut surface_parts = None;
             let frame = match mode {
-                ClientConnectionMode::ClientShell => {
+                RenderTargetMode::ClientShell => {
                     let render_started = crate::render_prof::timer();
                     let render_cell_size = if cell_size.is_known() {
                         cell_size
@@ -668,9 +693,18 @@ impl HeadlessServer {
                     surface_parts = Some((panes, splits, popup, graphics, next_graphics_delivery));
                     frame
                 }
-                ClientConnectionMode::TerminalPending => continue,
-                ClientConnectionMode::TerminalAttach { terminal_id }
-                | ClientConnectionMode::TerminalObserve { terminal_id } => {
+                RenderTargetMode::TerminalPending => continue,
+                RenderTargetMode::TerminalAttach | RenderTargetMode::TerminalObserve => {
+                    // RS-17：终端 id 按 client_id 现取，不再随目标列表逐帧克隆。
+                    let Some(terminal_id) = self
+                        .clients
+                        .get(&client_id)
+                        .and_then(|client| client.mode.terminal_id())
+                        .map(str::to_owned)
+                    else {
+                        broken_clients.push(client_id);
+                        continue;
+                    };
                     let Some(runtime) = self.runtime_for_terminal_id_string(&terminal_id) else {
                         self.send_to_client(
                             client_id,

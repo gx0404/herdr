@@ -56,7 +56,7 @@ use crate::server::client_shell::{
 use crate::server::client_transport::ServerEvent;
 use crate::server::clients::{
     latest_shell_client, render_targets, terminal_stream_client_ids, ClientConnection,
-    ClientConnectionMode, ClientShellInputTarget, DeferredRender,
+    ClientConnectionMode, ClientShellInputTarget, DeferredRender, RenderTargetMode,
 };
 use crate::server::keybindings::{app_keybindings, apply_keybindings};
 use crate::server::notifications::{

@@ -362,10 +362,10 @@ pub(super) fn render_pane_surface(
                             workspace_index,
                             pane.id,
                         );
-                        let mouse_reporting =
-                            runtime.is_some_and(|runtime| runtime.mouse_reporting_enabled());
-                        let sgr_pixel_mouse =
-                            runtime.is_some_and(|runtime| runtime.sgr_pixel_mouse_enabled());
+                        let metadata = runtime.map_or(
+                            crate::pane::PanePresentationMetadata::default(),
+                            crate::terminal::TerminalRuntime::presentation_metadata,
+                        );
                         let (pixel_width, pixel_height) = if cell_size.is_known() {
                             (
                                 u32::from(pane.inner_rect.width) * cell_size.width_px,
@@ -390,18 +390,17 @@ pub(super) fn render_pane_surface(
                             rect: pane.rect.into(),
                             inner_rect: pane.inner_rect.into(),
                             scrollbar_rect: pane.scrollbar_rect.map(Into::into),
-                            scroll: runtime.and_then(|runtime| runtime.scroll_metrics()).map(
-                                |metrics| protocol::PaneSurfaceScrollMetrics {
+                            scroll: metadata.scroll_metrics.map(|metrics| {
+                                protocol::PaneSurfaceScrollMetrics {
                                     offset_from_bottom: metrics.offset_from_bottom as u64,
                                     max_offset_from_bottom: metrics.max_offset_from_bottom as u64,
                                     viewport_rows: metrics.viewport_rows as u64,
-                                },
-                            ),
+                                }
+                            }),
                             focused: pane.is_focused,
-                            mouse_reporting,
-                            sgr_pixel_mouse,
-                            alternate_screen_active: runtime
-                                .is_some_and(|runtime| runtime.alternate_screen_active()),
+                            mouse_reporting: metadata.mouse_reporting,
+                            sgr_pixel_mouse: metadata.sgr_pixel_mouse,
+                            alternate_screen_active: metadata.alternate_screen_active,
                             pixel_width,
                             pixel_height,
                         }
@@ -482,6 +481,7 @@ fn render_popup_surface(
     let (buffer, cursor) =
         crate::server::render_stream::render_terminal_virtual(runtime, content_area);
     let hyperlinks = runtime.visible_hyperlinks(content_area);
+    let metadata = runtime.presentation_metadata();
     let title = app
         .state
         .terminals
@@ -502,8 +502,8 @@ fn render_popup_surface(
         width: popup.width.map(client_popup_size),
         height: popup.height.map(client_popup_size),
         frame: FrameData::from_ratatui_buffer_with_hyperlinks(&buffer, cursor, &hyperlinks),
-        mouse_reporting: runtime.mouse_reporting_enabled(),
-        sgr_pixel_mouse: runtime.sgr_pixel_mouse_enabled(),
+        mouse_reporting: metadata.mouse_reporting,
+        sgr_pixel_mouse: metadata.sgr_pixel_mouse,
         pixel_width,
         pixel_height,
     }))

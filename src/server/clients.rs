@@ -16,12 +16,45 @@ pub(crate) enum ClientConnectionMode {
     TerminalObserve { terminal_id: String },
 }
 
+impl ClientConnectionMode {
+    pub(crate) fn terminal_id(&self) -> Option<&str> {
+        match self {
+            Self::TerminalAttach { terminal_id } | Self::TerminalObserve { terminal_id } => {
+                Some(terminal_id)
+            }
+            Self::ClientShell | Self::TerminalPending => None,
+        }
+    }
+}
+
+/// RS-17：渲染目标里的连接形态只需 Copy 判别值。原先整份
+/// `ClientConnectionMode`（含 `String` 的终端 id）每帧按客户端克隆，一帧两次；
+/// 需要终端 id 的调用点按 client_id 现取。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum RenderTargetMode {
+    ClientShell,
+    TerminalPending,
+    TerminalAttach,
+    TerminalObserve,
+}
+
+impl RenderTargetMode {
+    fn of(mode: &ClientConnectionMode) -> Self {
+        match mode {
+            ClientConnectionMode::ClientShell => Self::ClientShell,
+            ClientConnectionMode::TerminalPending => Self::TerminalPending,
+            ClientConnectionMode::TerminalAttach { .. } => Self::TerminalAttach,
+            ClientConnectionMode::TerminalObserve { .. } => Self::TerminalObserve,
+        }
+    }
+}
+
 pub(crate) type RenderTarget = (
     u64,
     (u16, u16),
     crate::kitty_graphics::HostCellSize,
     bool,
-    ClientConnectionMode,
+    RenderTargetMode,
 );
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -558,7 +591,7 @@ pub(crate) fn render_targets(
                 client.terminal_size,
                 client.cell_size,
                 foreground_client_id == Some(client_id),
-                client.mode.clone(),
+                RenderTargetMode::of(&client.mode),
             )
         })
         .collect();

@@ -271,6 +271,15 @@ struct RetainedRecipient<'a> {
     surface: &'a protocol::PaneSurfaceFrame,
 }
 
+/// RS-10：本 tick 被补丁覆盖的脏 pane，及其在接收者基线里的公开 id、观看者与
+/// 最大内部几何。
+struct WatchedSource {
+    public_pane_id: String,
+    watching_clients: HashSet<u64>,
+    width: u16,
+    height: u16,
+}
+
 struct CollectedPanePatch {
     pane_id: String,
     patch: crate::pane::TerminalDirtyPatch,
@@ -327,20 +336,23 @@ impl HeadlessServer {
         {
             fallback!("unsafe_state");
         }
-        let mut targets = render_targets(&self.clients, self.foreground_client_id);
-        targets.retain(|(client_id, _, _, _, mode)| {
-            !matches!(mode, ClientConnectionMode::ClientShell)
-                || self
-                    .clients
-                    .get(client_id)
-                    .is_some_and(|client| client.shell_surface_active)
-        });
+        // RS-17：目标列表只装 Copy 判别值（不再克隆含 String 的连接形态）。
+        let targets: Vec<_> = render_targets(&self.clients, self.foreground_client_id)
+            .into_iter()
+            .filter(|(client_id, _, _, _, mode)| {
+                !matches!(mode, RenderTargetMode::ClientShell)
+                    || self
+                        .clients
+                        .get(client_id)
+                        .is_some_and(|client| client.shell_surface_active)
+            })
+            .collect();
         if targets.is_empty() {
             success!("no_active_surface");
         }
         if targets
             .iter()
-            .any(|target| !matches!(target.4, ClientConnectionMode::ClientShell))
+            .any(|target| !matches!(target.4, RenderTargetMode::ClientShell))
         {
             fallback!("non_shell_target");
         }
@@ -410,26 +422,39 @@ impl HeadlessServer {
             success!("all_recipients_deferred");
         }
 
-        let mut collected = Vec::with_capacity(pty_sources.len());
-        for source in pty_sources {
-            let mut public_pane_id = None;
-            let mut width = 0u16;
-            let mut height = 0u16;
-            let mut watching_clients = HashSet::new();
-            for recipient in &recipients {
-                let Some(pane) = recipient.surface.panes.iter().find(|pane| {
-                    self.app
-                        .parse_pane_id(&pane.pane_id)
-                        .is_some_and(|(_, pane_id)| pane_id == *source)
-                }) else {
+        // RS-10：先按接收者基线扫一遍，一次聚合「脏 pane → 观看者 / 公开 id /
+        // 最大几何」。原先每个源 × 每个接收者 × 每个 pane 都要解析一次公开 id
+        // 并线性扫描该接收者的 pane 列表（O(源×接收者×pane²) 的字符串解析）。
+        let mut watching: HashMap<crate::layout::PaneId, WatchedSource> = HashMap::new();
+        for recipient in &recipients {
+            for pane in &recipient.surface.panes {
+                let Some((_, pane_id)) = self.app.parse_pane_id(&pane.pane_id) else {
                     continue;
                 };
-                watching_clients.insert(recipient.client_id);
-                public_pane_id.get_or_insert_with(|| pane.pane_id.clone());
-                width = width.max(pane.inner_rect.width);
-                height = height.max(pane.inner_rect.height);
+                if !pty_sources.contains(&pane_id) {
+                    continue;
+                }
+                let entry = watching.entry(pane_id).or_insert_with(|| WatchedSource {
+                    public_pane_id: pane.pane_id.clone(),
+                    watching_clients: HashSet::new(),
+                    width: 0,
+                    height: 0,
+                });
+                entry.watching_clients.insert(recipient.client_id);
+                entry.width = entry.width.max(pane.inner_rect.width);
+                entry.height = entry.height.max(pane.inner_rect.height);
             }
-            let Some(public_pane_id) = public_pane_id else {
+        }
+
+        let mut collected = Vec::with_capacity(watching.len());
+        for source in pty_sources {
+            let Some(WatchedSource {
+                public_pane_id,
+                watching_clients,
+                width,
+                height,
+            }) = watching.remove(source)
+            else {
                 continue;
             };
             let Some((workspace_index, pane_id)) = self.app.parse_pane_id(&public_pane_id) else {
@@ -497,6 +522,13 @@ impl HeadlessServer {
             let client_id = recipient.client_id;
             let surface = recipient.surface;
             let mut panes = surface.panes.clone();
+            // RS-10：公开 id → 本接收者基线内的下标，避免逐个收集 pane 做线性
+            // 扫描 + 字符串比较。
+            let mut pane_positions: HashMap<&str, usize> =
+                HashMap::with_capacity(surface.panes.len());
+            for (index, pane) in surface.panes.iter().enumerate() {
+                pane_positions.entry(pane.pane_id.as_str()).or_insert(index);
+            }
             let projection_revision = surface.projection_revision;
             let base_surface_revision = surface.surface_revision;
             let mut changed_panes = Vec::with_capacity(collected.len());
@@ -506,10 +538,11 @@ impl HeadlessServer {
             let mut refresh_graphics = !surface.graphics.placements.is_empty()
                 || !surface.graphics.retained_assets.is_empty();
             for collected_pane in &collected {
-                let Some(pane) = panes
-                    .iter_mut()
-                    .find(|pane| pane.pane_id == collected_pane.pane_id)
+                let Some(index) = pane_positions.get(collected_pane.pane_id.as_str()).copied()
                 else {
+                    continue;
+                };
+                let Some(pane) = panes.get_mut(index) else {
                     continue;
                 };
                 // Alternate-screen transitions change whether the pane reserves
@@ -538,6 +571,7 @@ impl HeadlessServer {
                     deferred_clients.insert(client_id);
                     continue;
                 };
+                let mut rows_present = !rows.is_empty();
                 patch_rows.extend(rows);
                 let Some(scrollbar_rows) = retained_scrollbar_patch(
                     &self.app,
@@ -552,6 +586,7 @@ impl HeadlessServer {
                     deferred_clients.insert(client_id);
                     continue;
                 };
+                rows_present |= !scrollbar_rows.is_empty();
                 patch_rows.extend(scrollbar_rows);
                 pane.content_revision = collected_pane.content_revision;
                 pane.mouse_reporting = collected_pane.mouse_reporting;
@@ -564,8 +599,14 @@ impl HeadlessServer {
                         viewport_rows: metrics.viewport_rows as u64,
                     }
                 });
-                metadata_changed |= *pane != previous_pane;
-                changed_panes.push(pane.clone());
+                let pane_metadata_changed = *pane != previous_pane;
+                metadata_changed |= pane_metadata_changed;
+                // RS-18：只回传真正变化的 pane 元数据——但带行的 pane 必须保留，
+                // 客户端按 patch.panes 校验行归属（行必须落在某个条目的
+                // inner_rect / scrollbar_rect 内），缺条目会让整补丁被拒。
+                if pane_metadata_changed || rows_present {
+                    changed_panes.push(pane.clone());
+                }
             }
 
             // 链接表上界（见常量说明）：超限剔除该接收者，延期一次全量渲染重建表。
