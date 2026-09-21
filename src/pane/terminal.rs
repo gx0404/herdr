@@ -31,7 +31,6 @@ use super::{
     },
     kitty_keyboard::KittyKeyboardTracker,
     osc::{
-        contains_scrollback_clear_sequence, current_transient_default_color_owner,
         maybe_filter_primary_screen_scrollback_clear, parse_reported_cwd,
         restore_host_terminal_theme_if_needed, write_host_terminal_theme_selective,
         AgentOscStateTracker, DefaultColorEvent, DefaultColorEventTracker, DefaultColorOscTracker,
@@ -254,6 +253,22 @@ pub(crate) struct GhosttyPaneCore {
     /// 是否已有一个待决的看门狗兜底定时器（每 pane 至多一个，避免批次频繁
     /// 开合时堆积 spawn 与定时器）。
     synchronized_output_backstop_armed: bool,
+    /// PTY-05：检测 tick 写入的前台 job 缓存，PTY 解析回调只读它。
+    /// `None` 表示首个 tick 还没跑完（此刻一切判定走保守默认）。
+    foreground_job_cache: Option<CachedForegroundJob>,
+    /// 解析回调观察到默认色 OSC set 时置位的事实位；owner 判定由检测 tick
+    /// 在 `resolve_transient_default_color_owner` 里完成（PTY-05）。
+    transient_default_color_pending: bool,
+}
+
+/// PTY-05：检测 tick 供给解析路径的前台 job 摘要。
+#[derive(Debug, Clone, Copy)]
+pub(super) struct CachedForegroundJob {
+    /// 当前前台进程组 pgid（TIOCGPGRP，tick 每轮刷新）。
+    pub(super) pgid: Option<u32>,
+    /// 前台 job 是否命中 droid 的 CSI 3J 兼容 hack；只在探到 job 的 tick
+    /// 刷新，pgid 变了但还没探到时保守回落为 false。
+    pub(super) uses_droid_scrollback_compat: bool,
 }
 
 /// 写入路径上一次同步输出观察的结果。
@@ -845,6 +860,28 @@ impl PaneTerminal {
     pub fn maybe_restore_host_terminal_theme(&self, pane_id: PaneId, shell_pid: u32) -> bool {
         self.ghostty
             .maybe_restore_host_terminal_theme(pane_id, shell_pid)
+    }
+
+    pub fn note_foreground_pgid_observation(
+        &self,
+        pgid: Option<u32>,
+        uses_droid_scrollback_compat: Option<bool>,
+    ) {
+        self.ghostty
+            .note_foreground_pgid_observation(pgid, uses_droid_scrollback_compat);
+    }
+
+    pub fn take_transient_default_color_pending(&self) -> bool {
+        self.ghostty.take_transient_default_color_pending()
+    }
+
+    pub fn resolve_transient_default_color_owner(
+        &self,
+        foreground_pgid: Option<u32>,
+        shell_pid: u32,
+    ) {
+        self.ghostty
+            .resolve_transient_default_color_owner(foreground_pgid, shell_pid);
     }
 
     pub fn terminal_title(&self) -> Option<String> {
@@ -1454,6 +1491,8 @@ impl GhosttyPaneTerminal {
                 synchronized_output_since: None,
                 synchronized_output_cursor: None,
                 synchronized_output_backstop_armed: false,
+                foreground_job_cache: None,
+                transient_default_color_pending: false,
             }),
             key_encoder: Mutex::new(key_encoder),
             pending_pty_responses,
@@ -1543,28 +1582,83 @@ impl GhosttyPaneTerminal {
         appearance.map(|appearance| Bytes::from_static(appearance.color_scheme_report()))
     }
 
+    /// PTY-08：tick 加速只服务「有可还原内容」的场景——宿主主题未知时
+    /// 恢复探测必然早退，不再把检测 tick 提到 50ms 空转。
     pub fn has_transient_default_color_override(&self) -> bool {
         self.core
             .lock()
-            .map(|core| core.transient_default_color_owner_pgid.is_some())
+            .map(|core| {
+                core.transient_default_color_owner_pgid.is_some()
+                    && !core.host_terminal_theme.is_empty()
+            })
             .unwrap_or(false)
     }
 
-    pub fn maybe_restore_host_terminal_theme(&self, pane_id: PaneId, shell_pid: u32) -> bool {
-        {
-            let Ok(core) = self.core.lock() else {
-                return false;
-            };
-            if !should_probe_host_terminal_theme_restore(&core) {
-                return false;
+    /// PTY-05：检测 tick 每轮记录前台 pgid（TIOCGPGRP，廉价 ioctl）；
+    /// 探到 job 的 tick 顺带刷新 droid 兼容判定。pgid 变化但未探到 job 时
+    /// 兼容判定保守回落为 false（默认终端行为）。
+    pub fn note_foreground_pgid_observation(
+        &self,
+        pgid: Option<u32>,
+        uses_droid_scrollback_compat: Option<bool>,
+    ) {
+        if let Ok(mut core) = self.core.lock() {
+            let cache = core
+                .foreground_job_cache
+                .get_or_insert(CachedForegroundJob {
+                    pgid: None,
+                    uses_droid_scrollback_compat: false,
+                });
+            if cache.pgid != pgid {
+                cache.pgid = pgid;
+                if uses_droid_scrollback_compat.is_none() {
+                    cache.uses_droid_scrollback_compat = false;
+                }
+            }
+            if let Some(compat) = uses_droid_scrollback_compat {
+                cache.uses_droid_scrollback_compat = compat;
             }
         }
+    }
 
-        let foreground_job = crate::detect::foreground_job(shell_pid);
+    /// 解析路径消费挂起位：本 chunk 观察到默认色 OSC set 后由检测 tick
+    /// 取走并做 owner 判定。
+    pub fn take_transient_default_color_pending(&self) -> bool {
+        self.core
+            .lock()
+            .map(|mut core| std::mem::take(&mut core.transient_default_color_pending))
+            .unwrap_or(false)
+    }
+
+    /// 检测 tick 的瞬态默认色 owner 判定：用本 tick 观测到的前台 pgid 纯
+    /// 计算（前台不是 pane shell 时 owner 即该进程组），不读进程树。
+    pub fn resolve_transient_default_color_owner(
+        &self,
+        foreground_pgid: Option<u32>,
+        shell_pid: u32,
+    ) {
+        let owner = foreground_pgid.filter(|pgid| *pgid != shell_pid);
+        if let Some(owner_pgid) = owner {
+            if let Ok(mut core) = self.core.lock() {
+                core.transient_default_color_owner_pgid = Some(owner_pgid);
+            }
+        }
+    }
+
+    pub fn maybe_restore_host_terminal_theme(&self, pane_id: PaneId, shell_pid: u32) -> bool {
         let Ok(mut core) = self.core.lock() else {
             return false;
         };
+        if !should_probe_host_terminal_theme_restore(&core) {
+            return false;
+        }
 
+        // PTY-05/PTY-08：恢复判定读检测 tick 维护的前台 pgid 缓存，
+        // 探测本身不再做 /proc BFS。
+        let foreground_pgid = core
+            .foreground_job_cache
+            .as_ref()
+            .and_then(|cache| cache.pgid);
         let alternate_screen = core
             .terminal
             .active_screen()
@@ -1575,7 +1669,7 @@ impl GhosttyPaneTerminal {
             pane_id,
             shell_pid,
             alternate_screen,
-            foreground_job.as_ref(),
+            foreground_pgid,
         )
     }
 
@@ -1648,13 +1742,9 @@ impl GhosttyPaneTerminal {
         let _ = core.terminal.take_clipboard_writes();
         let default_color_observation = core.default_color_tracker.observe(bytes);
         if shell_pid > 0 && default_color_observation {
-            if let Some(owner_pgid) = current_transient_default_color_owner(shell_pid) {
-                core.transient_default_color_owner_pgid = Some(owner_pgid);
-                debug!(
-                    pane = pane_id.raw(),
-                    owner_pgid, "tracked transient default color override"
-                );
-            }
+            // PTY-05：解析回调只记事实位，owner 判定由检测 tick 完成，
+            // 不在持锁解析路径上做 /proc 进程树 BFS。
+            core.transient_default_color_pending = true;
         }
 
         core.osc_debug_tracker.observe(bytes);
@@ -1674,13 +1764,15 @@ impl GhosttyPaneTerminal {
             .map(|screen| screen == crate::ghostty::ActiveScreen::Alternate)
             .unwrap_or(false);
         let filtered_bytes = if shell_pid > 0 {
-            let foreground_job = (!alternate_screen && contains_scrollback_clear_sequence(bytes))
-                .then(|| crate::detect::foreground_job(shell_pid))
-                .flatten();
+            // PTY-05：droid 兼容判定读检测 tick 写入的缓存，不查进程树。
+            let uses_droid_scrollback_compat = core
+                .foreground_job_cache
+                .as_ref()
+                .is_some_and(|cache| cache.uses_droid_scrollback_compat);
             maybe_filter_primary_screen_scrollback_clear(
                 bytes,
                 alternate_screen,
-                foreground_job.as_ref(),
+                uses_droid_scrollback_compat,
             )
         } else {
             Cow::Borrowed(bytes)
@@ -8265,5 +8357,101 @@ mod tests {
         let mut rows = vec!["hello".to_string(), "".to_string(), "   ".to_string()];
         trim_trailing_blank_rows(&mut rows);
         assert_eq!(rows, vec!["hello".to_string()]);
+    }
+
+    #[test]
+    fn scrollback_clear_filter_reads_tick_written_foreground_cache() {
+        // PTY-05：解析回调不读进程树，droid 兼容判定只来自检测 tick 缓存。
+        // 用不存在的 bogus pid 证明路径不碰 /proc（旧实现会 BFS 并拿到 None）。
+        let make_pane = || {
+            let (tx, _rx) = mpsc::channel(4);
+            let terminal = crate::ghostty::Terminal::new(20, 3, 4096).unwrap();
+            PaneTerminal::new(GhosttyPaneTerminal::new(terminal, tx).unwrap())
+        };
+        let fill = b"one\r\ntwo\r\nthree\r\nfour\r\nfive\r\n";
+        let bogus_pid = 4_000_000;
+
+        // 缓存缺省（首个检测 tick 之前）：保守不过滤，scrollback 被清。
+        let pane = make_pane();
+        let (_tx, _rx) = mpsc::channel(4);
+        pane.process_pty_bytes(PaneId::from_raw(1), bogus_pid, fill, &_tx);
+        assert!(
+            pane.scroll_metrics().unwrap().max_offset_from_bottom > 0,
+            "lines must scroll into scrollback"
+        );
+        pane.process_pty_bytes(PaneId::from_raw(1), bogus_pid, b"\x1b[3J", &_tx);
+        assert_eq!(
+            pane.scroll_metrics().unwrap().max_offset_from_bottom,
+            0,
+            "without a tick-written cache the clear sequence must pass through"
+        );
+
+        // tick 写入 droid 兼容判定后：CSI 3J 被剥离，scrollback 保留。
+        let pane = make_pane();
+        pane.process_pty_bytes(PaneId::from_raw(1), bogus_pid, fill, &_tx);
+        let before = pane.scroll_metrics().unwrap().max_offset_from_bottom;
+        pane.note_foreground_pgid_observation(Some(4242), Some(true));
+        pane.process_pty_bytes(PaneId::from_raw(1), bogus_pid, b"\x1b[3J", &_tx);
+        assert_eq!(
+            pane.scroll_metrics().unwrap().max_offset_from_bottom,
+            before,
+            "tick-written droid compat must strip the clear sequence"
+        );
+
+        // pgid 变了但没探到 job：判定保守回落，恢复不过滤。
+        pane.note_foreground_pgid_observation(Some(9999), None);
+        pane.process_pty_bytes(PaneId::from_raw(1), bogus_pid, b"six\r\n", &_tx);
+        let before = pane.scroll_metrics().unwrap().max_offset_from_bottom;
+        pane.process_pty_bytes(PaneId::from_raw(1), bogus_pid, b"\x1b[3J", &_tx);
+        assert_eq!(
+            pane.scroll_metrics().unwrap().max_offset_from_bottom,
+            0,
+            "pgid change without a probe must fall back to not filtering; before={before}"
+        );
+    }
+
+    #[test]
+    fn default_color_set_marks_pending_and_tick_resolves_owner() {
+        // PTY-05：默认色 OSC set 在解析路径只置事实位；owner 判定在 tick 完成。
+        let (tx, _rx) = mpsc::channel(4);
+        let terminal = crate::ghostty::Terminal::new(80, 24, 0).unwrap();
+        let pane = PaneTerminal::new(GhosttyPaneTerminal::new(terminal, tx).unwrap());
+        let (_tx, _rx) = mpsc::channel(4);
+        let shell_pid = 7;
+        let host_theme = crate::terminal_theme::TerminalTheme {
+            foreground: Some(crate::terminal_theme::RgbColor { r: 1, g: 2, b: 3 }),
+            background: Some(crate::terminal_theme::RgbColor { r: 4, g: 5, b: 6 }),
+            ..Default::default()
+        };
+        pane.apply_host_terminal_theme(host_theme);
+
+        pane.process_pty_bytes(
+            PaneId::from_raw(1),
+            shell_pid,
+            b"\x1b]11;rgb:aa/bb/cc\x1b\\",
+            &_tx,
+        );
+        assert!(
+            pane.take_transient_default_color_pending(),
+            "default color set must raise the pending bit"
+        );
+        assert!(
+            !pane.take_transient_default_color_pending(),
+            "pending bit is consumed once"
+        );
+        assert!(
+            !pane.has_transient_default_color_override(),
+            "no owner yet before the detection tick resolves it"
+        );
+
+        // tick：前台是外来进程组（非 shell）→ owner 落定。
+        pane.note_foreground_pgid_observation(Some(4242), None);
+        pane.resolve_transient_default_color_owner(Some(4242), shell_pid);
+        assert!(pane.has_transient_default_color_override());
+
+        // 前台回到 shell（pgid == shell_pid）→ 恢复宿主主题并清 owner。
+        pane.note_foreground_pgid_observation(Some(shell_pid), None);
+        assert!(pane.maybe_restore_host_terminal_theme(PaneId::from_raw(1), shell_pid));
+        assert!(!pane.has_transient_default_color_override());
     }
 }

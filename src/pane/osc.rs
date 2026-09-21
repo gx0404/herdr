@@ -783,16 +783,9 @@ fn hex_value(byte: u8) -> Option<u8> {
     }
 }
 
-fn foreground_job_is_shell(job: &crate::platform::ForegroundJob, shell_pid: u32) -> bool {
-    job.processes.iter().any(|process| process.pid == shell_pid)
-}
-
-pub(super) fn current_transient_default_color_owner(shell_pid: u32) -> Option<u32> {
-    let job = crate::detect::foreground_job(shell_pid)?;
-    (!foreground_job_is_shell(&job, shell_pid)).then_some(job.process_group_id)
-}
-
-fn foreground_job_uses_droid_scrollback_compat(job: &crate::platform::ForegroundJob) -> bool {
+pub(super) fn foreground_job_uses_droid_scrollback_compat(
+    job: &crate::platform::ForegroundJob,
+) -> bool {
     job.processes.iter().any(|process| {
         process.name.eq_ignore_ascii_case("droid")
             || process
@@ -839,14 +832,15 @@ fn strip_scrollback_clear_sequences<'a>(bytes: &'a [u8]) -> Cow<'a, [u8]> {
 pub(super) fn maybe_filter_primary_screen_scrollback_clear<'a>(
     bytes: &'a [u8],
     alternate_screen: bool,
-    foreground_job: Option<&crate::platform::ForegroundJob>,
+    uses_droid_scrollback_compat: bool,
 ) -> Cow<'a, [u8]> {
     // Droid redraws its primary-screen TUI with CSI 3 J, which erases pane
     // scrollback inside herdr. Keep the hack scoped to Droid on the primary
     // screen so normal terminal clear-history behavior still works elsewhere.
+    // PTY-05：判定值由检测 tick 写入的缓存供给，解析路径不读进程树。
     if alternate_screen
         || !contains_scrollback_clear_sequence(bytes)
-        || !foreground_job.is_some_and(foreground_job_uses_droid_scrollback_compat)
+        || !uses_droid_scrollback_compat
     {
         return Cow::Borrowed(bytes);
     }
@@ -859,18 +853,14 @@ pub(super) fn should_restore_host_terminal_theme(
     owner_pgid: u32,
     shell_pid: u32,
     alternate_screen: bool,
-    foreground_job: Option<&crate::platform::ForegroundJob>,
+    foreground_pgid: Option<u32>,
 ) -> bool {
     if alternate_screen {
         return false;
     }
 
-    let Some(foreground_job) = foreground_job else {
-        return false;
-    };
-
     let _ = owner_pgid;
-    foreground_job_is_shell(foreground_job, shell_pid)
+    foreground_pgid == Some(shell_pid)
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -878,18 +868,20 @@ pub(super) fn should_restore_host_terminal_theme(
     owner_pgid: u32,
     shell_pid: u32,
     alternate_screen: bool,
-    foreground_job: Option<&crate::platform::ForegroundJob>,
+    foreground_pgid: Option<u32>,
 ) -> bool {
     if alternate_screen {
         return false;
     }
 
-    let Some(foreground_job) = foreground_job else {
+    // PTY-05：前台身份用检测 tick 缓存的 pgid 判定，不再做 /proc 进程树
+    // 遍历。pane shell 是登录会话的进程组长，pgid == shell_pid 即前台回到
+    // shell；owner 组还在前台（pgid == owner_pgid）时不还原。
+    let Some(foreground_pgid) = foreground_pgid else {
         return false;
     };
 
-    foreground_job.process_group_id != owner_pgid
-        && foreground_job_is_shell(foreground_job, shell_pid)
+    foreground_pgid != owner_pgid && foreground_pgid == shell_pid
 }
 
 pub(super) fn write_host_terminal_theme(
@@ -939,7 +931,7 @@ pub(super) fn restore_host_terminal_theme_if_needed(
     pane_id: PaneId,
     shell_pid: u32,
     alternate_screen: bool,
-    foreground_job: Option<&crate::platform::ForegroundJob>,
+    foreground_pgid: Option<u32>,
 ) -> bool {
     let Some(owner_pgid) = core.transient_default_color_owner_pgid else {
         return false;
@@ -947,7 +939,7 @@ pub(super) fn restore_host_terminal_theme_if_needed(
     if core.host_terminal_theme.is_empty() {
         return false;
     }
-    if !should_restore_host_terminal_theme(owner_pgid, shell_pid, alternate_screen, foreground_job)
+    if !should_restore_host_terminal_theme(owner_pgid, shell_pid, alternate_screen, foreground_pgid)
     {
         return false;
     }
@@ -1563,82 +1555,32 @@ mod tests {
 
     #[test]
     fn primary_screen_droid_compat_ignores_scrollback_clear_only_for_droid() {
-        let droid_job = crate::platform::ForegroundJob {
-            process_group_id: 42,
-            processes: vec![crate::platform::ForegroundProcess {
-                pid: 42,
-                name: "droid".to_string(),
-                argv0: Some("droid".to_string()),
-                argv: Some(vec!["droid".to_string()]),
-                cmdline: Some("droid".to_string()),
-            }],
-        };
-
-        let filtered = maybe_filter_primary_screen_scrollback_clear(
-            b"\x1b[3J\x1b[2J",
-            false,
-            Some(&droid_job),
-        );
+        // 判定值来自检测 tick 缓存（见 foreground_job_uses_droid_scrollback_compat
+        // 的匹配测试）；这里钉住解析路径的消费语义。
+        let filtered = maybe_filter_primary_screen_scrollback_clear(b"\x1b[3J\x1b[2J", false, true);
         assert_eq!(filtered.as_ref(), b"\x1b[2J");
 
-        let shell = maybe_filter_primary_screen_scrollback_clear(
-            b"\x1b[3J\x1b[2J",
-            false,
-            Some(&shell_job(7)),
-        );
+        let shell = maybe_filter_primary_screen_scrollback_clear(b"\x1b[3J\x1b[2J", false, false);
         assert_eq!(shell.as_ref(), b"\x1b[3J\x1b[2J");
 
-        let alternate =
-            maybe_filter_primary_screen_scrollback_clear(b"\x1b[3J\x1b[2J", true, Some(&droid_job));
+        let alternate = maybe_filter_primary_screen_scrollback_clear(b"\x1b[3J\x1b[2J", true, true);
         assert_eq!(alternate.as_ref(), b"\x1b[3J\x1b[2J");
     }
 
     #[test]
     fn host_theme_restore_waits_for_shell_and_non_alternate_screen() {
-        assert!(!should_restore_host_terminal_theme(
-            42,
-            7,
-            true,
-            Some(&shell_job(7)),
-        ));
+        assert!(!should_restore_host_terminal_theme(42, 7, true, Some(7)));
         assert!(!should_restore_host_terminal_theme(42, 7, false, None));
-        assert!(!should_restore_host_terminal_theme(
-            42,
-            7,
-            false,
-            Some(&crate::platform::ForegroundJob {
-                process_group_id: 42,
-                processes: vec![crate::platform::ForegroundProcess {
-                    pid: 42,
-                    name: "droid".to_string(),
-                    argv0: Some("droid".to_string()),
-                    argv: Some(vec!["droid".to_string()]),
-                    cmdline: Some("droid".to_string()),
-                }],
-            }),
-        ));
-        assert!(should_restore_host_terminal_theme(
-            42,
-            7,
-            false,
-            Some(&shell_job(7)),
-        ));
+        // 前台仍是 owner 自己的进程组时不还原。
+        assert!(!should_restore_host_terminal_theme(42, 7, false, Some(42)));
+        // 前台回到 shell（pgid 归 shell 且不是 owner）时还原。
+        assert!(should_restore_host_terminal_theme(42, 7, false, Some(7)));
 
         #[cfg(target_os = "macos")]
-        assert!(should_restore_host_terminal_theme(
-            7,
-            7,
-            false,
-            Some(&shell_job(7)),
-        ));
+        assert!(should_restore_host_terminal_theme(7, 7, false, Some(7)));
 
         #[cfg(not(target_os = "macos"))]
-        assert!(!should_restore_host_terminal_theme(
-            7,
-            7,
-            false,
-            Some(&shell_job(7)),
-        ));
+        assert!(!should_restore_host_terminal_theme(7, 7, false, Some(7)));
     }
 
     #[test]
@@ -1684,7 +1626,7 @@ mod tests {
                 pane_id,
                 shell_pid,
                 false,
-                Some(&shell_job(shell_pid)),
+                Some(shell_pid),
             ));
         }
 

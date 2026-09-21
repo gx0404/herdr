@@ -694,6 +694,9 @@ struct ProcessProbeResult {
     foreground_is_pane_shell: bool,
     agent: Option<Agent>,
     process_name: Option<String>,
+    /// PTY-05：job 在手的探测顺带算出 droid 兼容判定，供检测 tick 写入
+    /// 解析路径只读的缓存。
+    uses_droid_scrollback_compat: bool,
 }
 
 fn agent_hint_for_foreground_job_members(
@@ -739,6 +742,23 @@ fn process_probe_result(
         foreground_is_pane_shell: job.processes.iter().any(|process| process.pid == pid),
         agent: Some(agent),
         process_name: Some(process_name),
+        uses_droid_scrollback_compat: osc::foreground_job_uses_droid_scrollback_compat(job),
+    }
+}
+
+/// PTY-05：检测 tick 维护 PTY 解析回调只读的前台 job 缓存。pgid 来自
+/// TIOCGPGRP（每 tick 的廉价观测）；droid 兼容判定只在探到 job 的 tick
+/// 刷新；瞬态默认色 owner 用当前前台 pgid 纯计算。整条链不读 /proc。
+#[cfg(unix)]
+fn maintain_foreground_job_cache(
+    terminal: &PaneTerminal,
+    pid: u32,
+    foreground_pgid: Option<u32>,
+    probed_uses_droid_scrollback_compat: Option<bool>,
+) {
+    terminal.note_foreground_pgid_observation(foreground_pgid, probed_uses_droid_scrollback_compat);
+    if terminal.take_transient_default_color_pending() {
+        terminal.resolve_transient_default_color_owner(foreground_pgid, pid);
     }
 }
 
@@ -800,6 +820,7 @@ fn probe_foreground_process_from_jobs(
             foreground_is_pane_shell: job.processes.iter().any(|process| process.pid == pid),
             agent: identified.as_ref().map(|(agent, _)| *agent),
             process_name: identified.map(|(_, process_name)| process_name),
+            uses_droid_scrollback_compat: osc::foreground_job_uses_droid_scrollback_compat(job),
         };
     }
 
@@ -808,6 +829,7 @@ fn probe_foreground_process_from_jobs(
         foreground_is_pane_shell: false,
         agent: None,
         process_name: None,
+        uses_droid_scrollback_compat: false,
     }
 }
 
@@ -926,11 +948,13 @@ fn spawn_basic_detection_task(
                 ) && should_probe_foreground_job(process_probe_input)
             };
 
+            let mut probed_uses_droid_scrollback_compat = None;
             if should_check_process {
                 last_process_check = now;
                 let had_process_probe = has_process_probe;
                 has_process_probe = true;
                 let probe = probe_foreground_process(pid, foreground_pgid);
+                probed_uses_droid_scrollback_compat = Some(probe.uses_droid_scrollback_compat);
                 let process_group_id = probe.process_group_id;
                 let tracked_process_group_id =
                     process_group_for_change_tracking(foreground_pgid, process_group_id);
@@ -1000,6 +1024,14 @@ fn spawn_basic_detection_task(
                     }
                 }
             }
+
+            // PTY-05：每个检测 tick 维护解析路径只读的前台 job 缓存。
+            maintain_foreground_job_cache(
+                &terminal,
+                pid,
+                foreground_pgid,
+                probed_uses_droid_scrollback_compat,
+            );
 
             let process_exited = pending_foreground_shell_clear
                 && agent.is_some()
@@ -2688,12 +2720,15 @@ impl PaneRuntime {
                     };
 
                     let mut agent_changed = false;
+                    let mut probed_uses_droid_scrollback_compat = None;
                     if should_check_process {
                         last_process_check = now;
                         let had_process_probe = has_process_probe;
                         has_process_probe = true;
                         if pid > 0 {
                             let probe = probe_foreground_process(pid, foreground_pgid);
+                            probed_uses_droid_scrollback_compat =
+                                Some(probe.uses_droid_scrollback_compat);
                             let process_name = probe.process_name;
                             let process_group_id = probe.process_group_id;
                             let tracked_process_group_id = process_group_for_change_tracking(
@@ -2798,6 +2833,14 @@ impl PaneRuntime {
                     }
 
                     let pid = child_pid.load(Ordering::Acquire);
+                    // PTY-05：每个检测 tick 维护解析路径只读的前台 job 缓存；
+                    // 先于 restore 探测写缓存，让恢复判定读最新 pgid。
+                    maintain_foreground_job_cache(
+                        &terminal,
+                        pid,
+                        foreground_pgid,
+                        probed_uses_droid_scrollback_compat,
+                    );
                     // Keep the terminal restore side effect separate from render notification state.
                     #[allow(clippy::collapsible_if)]
                     if pid > 0 && terminal.maybe_restore_host_terminal_theme(pane_id, pid) {
