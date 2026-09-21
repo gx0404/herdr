@@ -1078,3 +1078,51 @@ fn concurrent_snippet_runs_keep_their_own_pending_state() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// 独立复审 中-3：端点投影重建（远端重启 / 重新附加）会丢掉在途请求，挂着的
+/// 片段运行必须按失败收尾（历史 + 结局 toast），不能在 `snippet_runs` 里留下
+/// 永远不会完成的条目。
+#[test]
+fn endpoint_projection_reset_finishes_in_flight_snippet_runs() {
+    let dir = with_temp_state_home("projection-reset-runs");
+    seed_snippet("uptime", "uptime", &[]);
+    let build = SavedSshEndpoint::new("Build", "build.example", "default").expect("profile");
+    let build_id = ClientEndpointId::Ssh(build.id.clone());
+    let mut state = state();
+    state.set_endpoint_catalog(std::slice::from_ref(&build));
+    state.cache_endpoint_snapshot(&build_id, Box::new(snapshot()));
+    state.set_endpoint_status(&build_id, ClientEndpointStatus::Online);
+
+    // 起一次「每台机器一个 pane」的运行，但**不**回应任何目标。
+    state.open_snippets_overlay(true);
+    state.route_snippets_key(&key(KeyCode::Enter), &mut ClientShellInput::default());
+    state.route_snippets_key(&key(KeyCode::Down), &mut ClientShellInput::default());
+    state.route_snippets_key(&key(KeyCode::Down), &mut ClientShellInput::default());
+    state.route_snippets_key(&key(KeyCode::Enter), &mut ClientShellInput::default());
+    state.route_snippets_key(&key(KeyCode::Char('a')), &mut ClientShellInput::default());
+    state.route_snippets_key(&key(KeyCode::Enter), &mut ClientShellInput::default());
+    let mut outcome = ClientShellInput::default();
+    state.route_snippets_key(&key(KeyCode::Char('y')), &mut outcome);
+    assert!(
+        !state.snippet_runs.is_empty(),
+        "未回应的运行还在途: {:?}",
+        state.snippet_runs.len()
+    );
+
+    // 端点重启：投影重建。
+    state.reset_endpoint_projection();
+    assert!(
+        state.snippet_runs.is_empty(),
+        "投影重建后不得留下悬挂的运行"
+    );
+    let library = SnippetLibrary::load().expect("library");
+    assert!(
+        library
+            .history
+            .iter()
+            .any(|record| record.snippet_label == "uptime" && !record.success),
+        "被丢弃的目标按失败写入历史: {:?}",
+        library.history.len()
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}

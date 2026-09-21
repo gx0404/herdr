@@ -2431,3 +2431,50 @@ fn federated_agent_rows_are_cached_between_frames_and_refresh_on_data_change() {
         "数据变了必须重算"
     );
 }
+
+/// 独立复审 中-1：确认表面会把 `Done` 原地改写成 `Idle`（快照 `revision`
+/// 不变），联邦 agents 行缓存必须跟着换代，否则 Done 徽标会滞留到下一次无关的
+/// revision 推进才消失。
+#[test]
+fn acknowledging_a_surface_refreshes_cached_federated_agent_rows() {
+    let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
+    state.set_snapshot(Box::new(snapshot()));
+    state.set_pane_surface(surface());
+    state.compose(100, 28).expect("first frame");
+
+    let status = |state: &ClientShellState| {
+        state
+            .federated_agent_rows
+            .as_ref()
+            .and_then(|cache| cache.rows().first().map(|row| row.agent.status))
+    };
+
+    // 新快照：agent 变 Done（seq 7）。此刻还没有匹配的表面帧，确认不会发生。
+    let mut projected = snapshot();
+    projected.revision = 2;
+    projected.agents = vec![agent("done agent", AgentStatus::Done, 7)];
+    state.set_endpoint_snapshot(&ClientEndpointId::Local, Box::new(projected));
+    state.refresh_federated_agent_rows();
+    assert_eq!(
+        status(&state),
+        Some(AgentStatus::Done),
+        "未确认前显示 Done"
+    );
+
+    // 匹配表面帧到达：`revision` 不变，但 Done 被原地改写成 Idle。
+    let mut matching = surface();
+    matching.projection_revision = 2;
+    matching.surface_revision = matching.surface_revision.saturating_add(1);
+    state.set_pane_surface(matching);
+    assert_eq!(
+        state.snapshot.as_deref().expect("snapshot").revision,
+        2,
+        "确认不推进 revision"
+    );
+    state.refresh_federated_agent_rows();
+    assert_eq!(
+        status(&state),
+        Some(AgentStatus::Idle),
+        "确认之后缓存的行必须重建为 Idle"
+    );
+}

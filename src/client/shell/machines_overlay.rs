@@ -3423,7 +3423,6 @@ impl ClientShellState {
     }
 
     #[allow(clippy::too_many_arguments)]
-    #[allow(clippy::too_many_arguments)]
     fn compute_machines_view_with(
         &mut self,
         area: Rect,

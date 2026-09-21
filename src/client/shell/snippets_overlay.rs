@@ -947,6 +947,39 @@ impl ClientShellState {
         true
     }
 
+    /// 端点投影重建会丢掉在途请求：其中的片段运行要按失败收尾（结局 toast +
+    /// 历史），否则 `snippet_runs` 里会留下永远不会完成的条目（独立复审 中-3）。
+    /// 未应答的目标按失败记账，汇总与历史才不会把它们当成功。
+    pub(super) fn cancel_snippet_runs_on_projection_reset(&mut self) {
+        let abandoned: Vec<u64> = self
+            .pending_requests
+            .values()
+            .filter_map(|pending| match &pending.kind {
+                PendingEndpointKind::SnippetRun { run_id, .. } => Some(*run_id),
+                _ => None,
+            })
+            .collect();
+        for run_id in abandoned {
+            let Some(mut run) = self.snippet_runs.remove(&run_id) else {
+                continue;
+            };
+            let interrupted = crate::i18n::texts().snippets.run_interrupted.to_owned();
+            // 每个没有结局的目标都记一条失败：`pending` 只统计已发出的请求，
+            // 拿它当上限会漏掉还没轮到发送的目标。
+            let unanswered = run.total.saturating_sub(run.outcomes.len());
+            for _ in 0..unanswered {
+                // 机器/窗格未知：历史里用占位符，校验不允许空串。
+                run.outcomes
+                    .push(("—".to_owned(), "—".to_owned(), Some(interrupted.clone())));
+            }
+            run.pending = 0;
+            // 与 `complete_snippet_run_target` 同一口径：这条路径没有 outcome
+            // 参数，重绘由调用方自己安排。
+            let mut outcome = ClientShellInput::default();
+            self.finish_snippet_run(run, &mut outcome);
+        }
+    }
+
     fn finish_snippet_run(&mut self, run: ClientSnippetRunState, outcome: &mut ClientShellInput) {
         let failures: Vec<&(String, String, Option<String>)> = run
             .outcomes

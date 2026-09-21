@@ -749,6 +749,7 @@ pub const TEXTS: Texts = Texts {
         picker_empty: " nothing online to pick from",
         machines_picker_title: "pick machines (each run goes to its focused pane)",
         machines_picker_empty_selection: "select at least one machine (space / a)",
+        run_interrupted: "the machine reconnected before this target answered",
         variables_title: "variables",
         confirm_title: "confirm run",
         confirm_command: "command",

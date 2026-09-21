@@ -776,6 +776,7 @@ pub const TEXTS: Texts = Texts {
         picker_empty: " 没有在线目标可选",
         machines_picker_title: "选择机器（运行到各自聚焦的窗格）",
         machines_picker_empty_selection: "至少选择一台机器（空格 / a）",
+        run_interrupted: "该目标未应答前机器已重连",
         variables_title: "变量",
         confirm_title: "确认运行",
         confirm_command: "命令",

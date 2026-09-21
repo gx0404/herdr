@@ -2068,3 +2068,45 @@ fn sidebar_copy_fix_command_reports_feedback_without_the_machines_page() {
         "面板未打开时必须有通用反馈"
     );
 }
+
+/// STATE-04 守门（独立复审 中-2）：机器列表的滚动状态只在视图计算阶段更新，
+/// 渲染是纯函数——连续 compose 之间逐字段不变。
+#[test]
+fn composing_twice_leaves_the_machine_list_scroll_untouched() {
+    let profiles: Vec<SavedSshEndpoint> = (0..12)
+        .map(|index| {
+            profile(
+                &format!("machine-{index:02}"),
+                &format!("host-{index}.example"),
+                &format!("{index}"),
+            )
+        })
+        .collect();
+    let mut state = state_with_profiles(&profiles);
+    state.open_machines_overlay();
+    state.compose(106, 16).expect("first frame");
+    let scroll_state = |state: &ClientShellState| match state.overlay.as_ref() {
+        Some(ClientShellOverlay::Machines(overlay)) => {
+            (overlay.scroll, overlay.selected, overlay.reveal)
+        }
+        _ => panic!("machines overlay"),
+    };
+    let before = scroll_state(&state);
+
+    // 键盘移动一次：选中行被推离初始值，reveal 被消费。
+    state.handle_raw_events(vec![RawInputEvent::Key(key(KeyCode::Char('j')))]);
+    state.compose(106, 16).expect("second frame");
+    let after_input = scroll_state(&state);
+    assert_ne!(
+        after_input.1, before.1,
+        "输入应移动机器列表的选中行：{before:?} -> {after_input:?}"
+    );
+
+    // 再画一帧：没有任何输入，状态必须逐字段不变。
+    state.compose(106, 16).expect("third frame");
+    assert_eq!(
+        scroll_state(&state),
+        after_input,
+        "重绘不得改写机器列表的滚动状态"
+    );
+}

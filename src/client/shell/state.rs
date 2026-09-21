@@ -1451,8 +1451,14 @@ pub(crate) struct ClientShellState {
     pub(super) federated_agent_rows: Option<super::endpoint_agents::AgentRowsCache>,
     /// 配置代际：`reload_client_config` 递增，缓存据此失效。
     pub(super) config_epoch: u64,
-    /// 侧栏数据的代际：快照 / 状态 / 目录写入时递增，联邦 agents 行缓存据此
-    /// 失效（PERF-02）。内容比较不可靠——测试与部分路径会原地替换快照。
+    /// 侧栏数据的代际：**每一处改变端点快照 / 状态 / 目录的写入都要递增**，联邦
+    /// agents 行缓存据此失效（PERF-02）。内容比较不可靠——会原地替换快照、也会
+    /// 原地改写 agent 状态（确认表面时 Done → Idle，revision 不变）。
+    ///
+    /// 当前写入点（新增写入点必须一起处理，`test_ui_hot_path_architecture` 有守门）：
+    /// `set_endpoint_catalog`、`set_endpoint_status`、`set_endpoint_snapshot`、
+    /// `cache_endpoint_snapshot_with_surface`（生产快照路径）、
+    /// `store_acknowledged_snapshot`（确认表面写回）、测试用 `set_snapshot`。
     pub(super) agent_rows_epoch: u64,
     /// 在途的片段运行，按 run id 索引：并发运行互不覆盖（TOOL-06）。
     pub(super) snippet_runs: HashMap<u64, super::snippets_overlay::ClientSnippetRunState>,
@@ -1887,6 +1893,7 @@ impl ClientShellState {
     }
 
     pub(super) fn reset_endpoint_projection(&mut self) {
+        self.cancel_snippet_runs_on_projection_reset();
         self.browser_return = None;
         self.page_drag = None;
         self.cancel_frozen_selection();

@@ -3133,6 +3133,9 @@ pub(super) fn write_shared_channel_ssh_config(
 /// keepalive / ControlPersist / 家目录）。档案被编辑后 key 变化 → 换目录 → 换
 /// master，不会拿旧配置的 master 继续跑；反之，同一档案的所有一次性操作共用
 /// 一个 master。
+/// 已知缺口（独立复审 PENDING）：`proxy_jump` 里以 `profile:<id>` 引用的跳板，
+/// 其解析目标是**解析时刻**从被引用档案读出的，不在这份 key 里——改被引用档案的
+/// 目标/端口不会让本档案换 master，最多陈旧一个 `ControlPersist` 窗口。
 fn channel_share_key(profile: &SavedSshEndpoint) -> String {
     let home = std::env::var_os("HOME");
     format!(

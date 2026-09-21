@@ -943,6 +943,8 @@ pub struct SnippetsTexts {
     pub machines_picker_title: &'static str,
     /// 每台机器一个 pane 的模式下，选中集合为空时按 Enter 的提示。
     pub machines_picker_empty_selection: &'static str,
+    /// 端点投影重建时被丢弃的在途运行：按失败收尾的记账文案（独立复审 中-3）。
+    pub run_interrupted: &'static str,
     pub variables_title: &'static str,
     pub confirm_title: &'static str,
     pub confirm_command: &'static str,

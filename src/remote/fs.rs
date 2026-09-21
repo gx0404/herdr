@@ -94,8 +94,10 @@ impl RemoteDirEntry {
 }
 
 /// Remote filesystem bound to one saved profile. Holds the managed ssh
-/// config alive; dropping it removes the config directory like the other
-/// saved-machine paths.
+/// config alive. 一次性通道用的是**可复用**的共享目录（HERDR-MACH-003）：
+/// 它按「档案 + 连接字段」命名、跨进程复用同一个 ssh master，因此有意不随
+/// drop 删除（进程退出后目录留在 `/tmp/herdr-ssh-<uid>-*`，空闲 master 由
+/// `ControlPersist=120` 自行退出）。
 pub(crate) struct RemoteFs {
     target: String,
     identity_file: Option<String>,
@@ -624,6 +626,19 @@ mod tests {
             first.config.options.control_path, third.config.options.control_path,
             "不同档案不共享控制路径"
         );
+
+        // 复用目录按设计不随进程退出删除，测试自己收拾（独立复审 轻级）。
+        for path in [
+            first.config.options.control_path.as_ref(),
+            third.config.options.control_path.as_ref(),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            if let Some(dir) = path.parent() {
+                let _ = std::fs::remove_dir_all(dir);
+            }
+        }
     }
 
     #[test]

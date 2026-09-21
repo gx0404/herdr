@@ -178,6 +178,8 @@ impl ClientShellState {
         }
     }
 
+    /// 状态详情只出现在侧栏端点行的副标题里，不进联邦 agents 行（`AgentRowsKey`
+    /// 不含它），因此**不**递增 `agent_rows_epoch`（独立复审 中-1 口径核对）。
     pub(crate) fn set_endpoint_status_detail(
         &mut self,
         endpoint_id: &ClientEndpointId,
@@ -756,6 +758,9 @@ impl ClientShellState {
                 .agent_presentation
                 .acknowledge_surface(&mut snapshot, surface, self.outer_focused);
         }
+        // 端点快照换代：联邦 agents 行缓存（PERF-02）据此失效。这是**生产**
+        // 快照写入路径，别在别处直接改 `endpoint.snapshot`（独立复审 中-1）。
+        self.agent_rows_epoch = self.agent_rows_epoch.saturating_add(1);
         let previous = self.endpoints[index].snapshot.as_deref();
         let mut next_recency = self
             .endpoints
@@ -831,8 +836,16 @@ impl ClientShellState {
         ) else {
             return false;
         };
-        self.snapshot = Some(updated);
+        self.store_acknowledged_snapshot(updated);
         true
+    }
+
+    /// 写回「确认表面」原地改过的快照：`revision` 没变，但 agent_status 与聚合
+    /// 状态变了（Done → Idle），联邦 agents 行缓存必须跟着换代，否则 Done 徽标
+    /// 会滞留到下一次无关的 revision 推进（独立复审 中-1）。
+    pub(super) fn store_acknowledged_snapshot(&mut self, snapshot: Box<ClientShellSnapshot>) {
+        self.snapshot = Some(snapshot);
+        self.agent_rows_epoch = self.agent_rows_epoch.saturating_add(1);
     }
 
     #[cfg(test)]

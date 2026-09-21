@@ -293,5 +293,36 @@ fn render() { TerminalRuntime::input_state; }
             )
 
 
+    def test_overlay_renderers_never_write_scroll_state(self) -> None:
+        # STATE-04：滚动窗口与一次性 reveal 只在视图计算阶段（compose 之前）
+        # 更新；渲染函数是纯函数。浮层逐个点名守门——新增浮层渲染入口时把
+        # 函数名加进来（chrome 面 tabs/workbench/mobile 仍是遗留面，见交付
+        # 记录的显式 PENDING）。
+        renderers = {
+            PROJECT_ROOT / "src" / "client" / "shell" / "machines_overlay.rs": (
+                "render_machines_view",
+            ),
+            PROJECT_ROOT / "src" / "client" / "shell" / "overlays.rs": ("render_help_overlay",),
+            PROJECT_ROOT / "src" / "client" / "shell" / "command_palette.rs": (
+                "render_command_palette",
+            ),
+            PROJECT_ROOT / "src" / "client" / "shell" / "snippets_overlay.rs": (
+                "render_run_pick_machines",
+            ),
+        }
+        write = re.compile(r"\.(?:scroll|reveal)\s*=[^=]")
+        for path, names in renderers.items():
+            code = production_code(path.read_text(encoding="utf-8"))
+            for name in names:
+                body = rust_function_body(code, name)
+                self.assertNotEqual(body, "", f"{path.name}: {name} body not found")
+                match = write.search(body)
+                if match is not None:
+                    line = body.count("\n", 0, match.start()) + 1
+                    self.fail(
+                        f"{path.name}: {name} 渲染期回写滚动状态"
+                        f"（body 内第 {line} 行）：{match.group(0)!r}"
+                    )
+
 if __name__ == "__main__":
     unittest.main()
