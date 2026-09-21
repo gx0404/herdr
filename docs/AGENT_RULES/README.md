@@ -102,22 +102,24 @@ fork **照常同步上游**；本节只约束同步时怎样处理六家以外�
     `integration.list` 返回里，fork 客户端就解析不出这份列表。枚举与 fixture 归
     上游维护，删了还是每次同步的永久冲突。该枚举按名字走 JSON（serde
     `snake_case`），不经 `src/protocol/wire.rs` 的 bincode，变体序号不是理由。
-  - **退役的代码形态**（退役门已落地；资产与注册分支的物理删除在其后）：变体
-    留在枚举里，位置与 serde 名不动。`IntegrationTarget::ALL` 只列官方集成
-    （`src/cli/spec.rs` 由它生成 `--target` 取值），`IntegrationTarget::is_retired`
-    即「不在 `ALL` 里」，上游日后追加的变体因此自动退役。退役门有三道：
-    `src/integration/actions.rs::install_target_inner` 与 `::uninstall_target` 在
-    入口返回 `registry.rs::retired_integration_error`（文案
-    `integration_target_retired_fmt`，en / zh_cn）；
-    `registry.rs::integration_target_supported` 对退役变体返回 false，
-    `integration.list`、`herdr integration status` 与更新提示随之不再列出；
+  - **退役的代码形态**（已落地）：变体留在枚举里，位置与 serde 名不动。
+    `IntegrationTarget::ALL` 只列官方集成（`src/cli/spec.rs` 由它生成 `--target`
+    取值），`IntegrationTarget::is_retired` 即「不在 `ALL` 里」，上游日后追加的
+    变体因此自动退役；退役变体没有标签表，错误与日志用
+    `IntegrationTarget::wire_name`（serde 名）指名。
+    `src/integration/registry.rs::integration_specs`（`integration.list`、
+    `herdr integration status` 与更新提示的来源）只登记官方集成，
+    `::integration_target_supported` 对退役变体返回 false。
+    `registry.rs::integration_target_label`、`::integration_target_command_names`
+    与 `src/integration/actions.rs::install_target_inner`、`::uninstall_target`
+    这 4 处 match 只为官方集成写显式 arm，其余一律落入 `_` 统一退役分支：
+    install / uninstall 在入口返回 `registry.rs::retired_integration_error`
+    （文案 `integration_target_retired_fmt`，en / zh_cn），不 panic、不落盘。
     `src/app/api/integrations.rs` 对旧客户端按名字传来的退役 target 回错误码
-    `integration_retired`（能反序列化、不 panic）。
-    `src/cli/integration.rs::parse_integration_target` 只接受 `ALL`，其余能解析成
-    冻结变体的名字给退役提示。`registry.rs::integration_target_label`、
-    `::integration_target_command_names` 与 `actions.rs` 的两处 match 是穷尽的：
-    删资产与注册分支时必须同时把退役变体并进统一的退役分支，否则直接 E0004
-    编译失败，上面的共享文件口径不可执行。
+    `integration_retired`（照常反序列化）；
+    `src/cli/integration.rs::parse_integration_target` 只接受 `ALL`，其余能解析
+    成冻结变体的名字给退役提示。同步上游时丢弃它对这 4 处 match 新增的非六家
+    arm 即可，`_` 分支保证仍然穷尽。
   - **上游日后追加非六家变体**：接收枚举那一行并让它落入退役分支（分支写成
     `_` 兜底则无需再改，写成显式 arm 则把新变体并进去），不进 `ALL`、
     `integration_specs` 与 `parse_integration_target`；其资产、注册、清单、

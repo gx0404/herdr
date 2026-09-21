@@ -4,34 +4,31 @@ use std::path::{Path, PathBuf};
 
 use super::env::*;
 
+/// 退役变体的标签占位：它们没有独立标签表，错误与日志里用
+/// `IntegrationTarget::wire_name` 指名（见 `retired_integration_error`）。
+pub(crate) const RETIRED_INTEGRATION_TARGET_LABEL: &str = "retired";
+
 pub(crate) fn integration_target_label(
     target: crate::api::schema::IntegrationTarget,
 ) -> &'static str {
     match target {
         crate::api::schema::IntegrationTarget::Pi => "pi",
-        crate::api::schema::IntegrationTarget::Omp => "omp",
         crate::api::schema::IntegrationTarget::Claude => "claude",
         crate::api::schema::IntegrationTarget::Codex => "codex",
-        crate::api::schema::IntegrationTarget::Copilot => "copilot",
-        crate::api::schema::IntegrationTarget::Devin => "devin",
-        crate::api::schema::IntegrationTarget::Droid => "droid",
         crate::api::schema::IntegrationTarget::Kimi => "kimi",
         crate::api::schema::IntegrationTarget::Opencode => "opencode",
-        crate::api::schema::IntegrationTarget::Kilo => "kilo",
-        crate::api::schema::IntegrationTarget::Hermes => "hermes",
-        crate::api::schema::IntegrationTarget::Qodercli => "qodercli",
-        crate::api::schema::IntegrationTarget::Qwen => "qwen",
-        crate::api::schema::IntegrationTarget::Cursor => "cursor",
-        crate::api::schema::IntegrationTarget::Mastracode => "mastracode",
-        crate::api::schema::IntegrationTarget::AntigravityCli => "antigravity-cli",
-        crate::api::schema::IntegrationTarget::Grok => "grok",
+        // 统一退役分支：冻结枚举里其余变体（含上游日后追加的）都落到这里。
+        _ => RETIRED_INTEGRATION_TARGET_LABEL,
     }
 }
 
 pub(crate) fn integration_target_command(
     target: crate::api::schema::IntegrationTarget,
 ) -> &'static str {
-    integration_target_command_names(target)[0]
+    integration_target_command_names(target)
+        .first()
+        .copied()
+        .unwrap_or(RETIRED_INTEGRATION_TARGET_LABEL)
 }
 
 pub(crate) fn integration_target_command_names(
@@ -39,63 +36,19 @@ pub(crate) fn integration_target_command_names(
 ) -> &'static [&'static str] {
     match target {
         crate::api::schema::IntegrationTarget::Pi => &["pi"],
-        crate::api::schema::IntegrationTarget::Omp => &["omp"],
         crate::api::schema::IntegrationTarget::Claude => &["claude"],
         crate::api::schema::IntegrationTarget::Codex => &["codex"],
-        crate::api::schema::IntegrationTarget::Copilot => &["copilot"],
-        crate::api::schema::IntegrationTarget::Devin => &["devin"],
-        crate::api::schema::IntegrationTarget::Droid => &["droid"],
         crate::api::schema::IntegrationTarget::Kimi => &["kimi"],
         crate::api::schema::IntegrationTarget::Opencode => &["opencode"],
-        crate::api::schema::IntegrationTarget::Kilo => &["kilo", "kilo-code"],
-        crate::api::schema::IntegrationTarget::Hermes => &["hermes"],
-        crate::api::schema::IntegrationTarget::Qodercli => qodercli_command_names(),
-        crate::api::schema::IntegrationTarget::Qwen => &["qwen"],
-        crate::api::schema::IntegrationTarget::Cursor => cursor_command_names(),
-        crate::api::schema::IntegrationTarget::Mastracode => &["mastracode"],
-        crate::api::schema::IntegrationTarget::AntigravityCli => &["agy"],
-        crate::api::schema::IntegrationTarget::Grok => &["grok"],
+        // 统一退役分支：退役变体没有可探测的命令，永远不可用。
+        _ => &[],
     }
 }
 
-pub(crate) fn cursor_command_names() -> &'static [&'static str] {
-    &["cursor-agent"]
-}
-
+/// 官方集成在所有平台都受支持；退役变体在任何平台都不受支持，因此不进
+/// `integration.list`、`herdr integration status` 与更新提示。
 pub(crate) fn integration_target_supported(target: crate::api::schema::IntegrationTarget) -> bool {
-    // 退役变体在任何平台都不受支持：不进 `integration.list`、状态与更新提示。
-    if target.is_retired() {
-        return false;
-    }
-
-    #[cfg(windows)]
-    {
-        matches!(
-            target,
-            crate::api::schema::IntegrationTarget::Pi
-                | crate::api::schema::IntegrationTarget::Omp
-                | crate::api::schema::IntegrationTarget::Claude
-                | crate::api::schema::IntegrationTarget::Codex
-                | crate::api::schema::IntegrationTarget::Copilot
-                | crate::api::schema::IntegrationTarget::Opencode
-                | crate::api::schema::IntegrationTarget::Kilo
-                | crate::api::schema::IntegrationTarget::Droid
-                | crate::api::schema::IntegrationTarget::Kimi
-                | crate::api::schema::IntegrationTarget::Qodercli
-                | crate::api::schema::IntegrationTarget::Qwen
-                | crate::api::schema::IntegrationTarget::AntigravityCli
-                | crate::api::schema::IntegrationTarget::Devin
-                | crate::api::schema::IntegrationTarget::Hermes
-                | crate::api::schema::IntegrationTarget::Cursor
-                | crate::api::schema::IntegrationTarget::Mastracode
-                | crate::api::schema::IntegrationTarget::Grok
-        )
-    }
-
-    #[cfg(not(windows))]
-    {
-        true
-    }
+    !target.is_retired()
 }
 
 /// 退役集成的统一错误：install / uninstall 与 API 入口都返回它，旧客户端按名字传来
@@ -132,22 +85,11 @@ pub(crate) fn integration_target_available(target: crate::api::schema::Integrati
         || integration_target_install_layout_available(target)
 }
 
-#[cfg(windows)]
-pub(crate) fn qodercli_command_names() -> &'static [&'static str] {
-    &["qodercli", "qoder", "qoderclicn", "qodercn"]
-}
-
-#[cfg(not(windows))]
-pub(crate) fn qodercli_command_names() -> &'static [&'static str] {
-    &["qodercli"]
-}
-
 pub(crate) fn integration_target_install_layout_available(
     target: crate::api::schema::IntegrationTarget,
 ) -> bool {
     match target {
         crate::api::schema::IntegrationTarget::Codex => codex_install_layout_available(),
-        crate::api::schema::IntegrationTarget::Hermes => hermes_install_layout_available(),
         _ => false,
     }
 }
@@ -300,27 +242,6 @@ pub(crate) fn codex_executable_name() -> &'static str {
     }
 }
 
-pub(crate) fn hermes_install_layout_available() -> bool {
-    #[cfg(windows)]
-    {
-        let Ok(dir) = hermes_dir() else {
-            return false;
-        };
-        [
-            dir.join("hermes.exe"),
-            dir.join("bin").join("hermes.exe"),
-            dir.join("Scripts").join("hermes.exe"),
-        ]
-        .into_iter()
-        .any(|path| executable_file_exists(&path))
-    }
-
-    #[cfg(not(windows))]
-    {
-        false
-    }
-}
-
 pub(crate) fn installed_integration_statuses() -> Vec<super::IntegrationStatus> {
     integration_specs()
         .into_iter()
@@ -362,21 +283,18 @@ pub(crate) fn outdated_installed_integrations() -> Vec<super::IntegrationStatus>
         .collect()
 }
 
+/// `integration.list`、状态与更新提示的来源：只登记官方集成，顺序同
+/// `IntegrationTarget::ALL`。
 fn integration_specs() -> [(
     crate::api::schema::IntegrationTarget,
     io::Result<PathBuf>,
     u32,
-); 17] {
+); 5] {
     [
         (
             crate::api::schema::IntegrationTarget::Pi,
             pi_extension_dir().map(|dir| dir.join(super::PI_EXTENSION_INSTALL_NAME)),
             super::PI_INTEGRATION_VERSION,
-        ),
-        (
-            crate::api::schema::IntegrationTarget::Omp,
-            omp_extension_dir().map(|dir| dir.join(super::OMP_EXTENSION_INSTALL_NAME)),
-            super::OMP_INTEGRATION_VERSION,
         ),
         (
             crate::api::schema::IntegrationTarget::Claude,
@@ -387,21 +305,6 @@ fn integration_specs() -> [(
             crate::api::schema::IntegrationTarget::Codex,
             codex_dir().map(|dir| dir.join(super::CODEX_HOOK_INSTALL_NAME)),
             super::CODEX_INTEGRATION_VERSION,
-        ),
-        (
-            crate::api::schema::IntegrationTarget::Copilot,
-            copilot_dir().map(|dir| dir.join("hooks").join(super::COPILOT_HOOK_INSTALL_NAME)),
-            super::COPILOT_INTEGRATION_VERSION,
-        ),
-        (
-            crate::api::schema::IntegrationTarget::Devin,
-            devin_dir().map(|dir| dir.join(super::DEVIN_HOOK_INSTALL_NAME)),
-            super::DEVIN_INTEGRATION_VERSION,
-        ),
-        (
-            crate::api::schema::IntegrationTarget::Droid,
-            droid_dir().map(|dir| dir.join("hooks").join(super::DROID_HOOK_INSTALL_NAME)),
-            super::DROID_INTEGRATION_VERSION,
         ),
         (
             crate::api::schema::IntegrationTarget::Kimi,
@@ -415,49 +318,6 @@ fn integration_specs() -> [(
                     .join(super::OPENCODE_PLUGIN_INSTALL_NAME)
             }),
             super::OPENCODE_INTEGRATION_VERSION,
-        ),
-        (
-            crate::api::schema::IntegrationTarget::Kilo,
-            kilo_dir().map(|dir| dir.join("plugin").join(super::KILO_PLUGIN_INSTALL_NAME)),
-            super::KILO_INTEGRATION_VERSION,
-        ),
-        (
-            crate::api::schema::IntegrationTarget::Hermes,
-            hermes_plugin_dir().map(|dir| dir.join(super::HERMES_PLUGIN_INIT_INSTALL_NAME)),
-            super::HERMES_INTEGRATION_VERSION,
-        ),
-        (
-            crate::api::schema::IntegrationTarget::Qodercli,
-            qodercli_dir().map(|dir| dir.join("hooks").join(super::QODERCLI_HOOK_INSTALL_NAME)),
-            super::QODERCLI_INTEGRATION_VERSION,
-        ),
-        (
-            crate::api::schema::IntegrationTarget::Qwen,
-            qwen_dir().map(|dir| dir.join("hooks").join(super::QWEN_HOOK_INSTALL_NAME)),
-            super::QWEN_INTEGRATION_VERSION,
-        ),
-        (
-            crate::api::schema::IntegrationTarget::Cursor,
-            cursor_dir().map(|dir| dir.join(super::CURSOR_HOOK_INSTALL_NAME)),
-            super::CURSOR_INTEGRATION_VERSION,
-        ),
-        (
-            crate::api::schema::IntegrationTarget::Mastracode,
-            mastracode_dir().map(|dir| dir.join("hooks").join(super::MASTRACODE_HOOK_INSTALL_NAME)),
-            super::MASTRACODE_INTEGRATION_VERSION,
-        ),
-        (
-            crate::api::schema::IntegrationTarget::AntigravityCli,
-            antigravity_cli_dir().map(|dir| {
-                dir.join("hooks")
-                    .join(super::ANTIGRAVITY_CLI_HOOK_INSTALL_NAME)
-            }),
-            super::ANTIGRAVITY_CLI_INTEGRATION_VERSION,
-        ),
-        (
-            crate::api::schema::IntegrationTarget::Grok,
-            grok_dir().map(|dir| dir.join("hooks").join(super::GROK_HOOK_INSTALL_NAME)),
-            super::GROK_INTEGRATION_VERSION,
         ),
     ]
 }
@@ -510,19 +370,6 @@ pub(crate) fn print_outdated_update_notice() -> bool {
         .replace('`', "")
     );
     true
-}
-
-/// Whether the Herdr-owned Grok hook config exactly matches the installed
-/// integration. JSON formatting and object key order do not affect validity.
-fn grok_hook_config_is_valid(hook_path: &Path) -> bool {
-    let Some(hooks_dir) = hook_path.parent() else {
-        return false;
-    };
-    let config_path = hooks_dir.join(super::GROK_HOOK_CONFIG_INSTALL_NAME);
-    fs::read_to_string(config_path)
-        .ok()
-        .and_then(|content| serde_json::from_str::<serde_json::Value>(&content).ok())
-        .is_some_and(|config| config == super::targets::grok_hook_config(hook_path))
 }
 
 fn opencode_tui_integration_is_valid(plugin_path: &Path, expected_version: u32) -> bool {
@@ -580,16 +427,6 @@ pub(crate) fn integration_status_at(
 ) -> super::IntegrationStatus {
     let (mut state, installed_version) = integration_state_for_path(&path, expected_version);
 
-    // Grok only invokes the hook when the herdr-owned `hooks/herdr.json`
-    // registers it, so a current hook script with a missing or broken config
-    // is a nonfunctional install: report it as outdated so `herdr integration
-    // status` flags it and a reinstall rewrites both files.
-    if target == crate::api::schema::IntegrationTarget::Grok
-        && state == super::IntegrationStatusKind::Current
-        && !grok_hook_config_is_valid(&path)
-    {
-        state = super::IntegrationStatusKind::Outdated;
-    }
     if target == crate::api::schema::IntegrationTarget::Opencode
         && state == super::IntegrationStatusKind::Current
         && !opencode_tui_integration_is_valid(&path, expected_version)

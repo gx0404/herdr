@@ -20,118 +20,11 @@ pub(crate) struct KimiInstallPaths {
 }
 
 #[derive(Debug)]
-pub(crate) struct CopilotInstallPaths {
-    pub hook_path: PathBuf,
-    pub settings_path: PathBuf,
-}
-
-#[derive(Debug)]
-pub(crate) struct DevinInstallPaths {
-    pub hook_path: PathBuf,
-    pub settings_path: PathBuf,
-}
-
-#[derive(Debug)]
-pub(crate) struct DroidInstallPaths {
-    pub hook_path: PathBuf,
-    pub hooks_path: PathBuf,
-    pub settings_path: PathBuf,
-    pub updated_legacy_hooks: bool,
-}
-
-#[derive(Debug)]
 pub(crate) struct OpenCodeInstallPaths {
     pub plugin_path: PathBuf,
     pub tui_plugin_path: PathBuf,
     pub tui_config_path: PathBuf,
     pub cli_config_path: Option<PathBuf>,
-}
-
-#[derive(Debug)]
-pub(crate) struct KiloInstallPaths {
-    pub plugin_path: PathBuf,
-}
-
-#[derive(Debug)]
-pub(crate) struct OmpInstallPaths {
-    pub extension_path: PathBuf,
-    pub removed_legacy_pi_extension: bool,
-}
-
-#[derive(Debug)]
-pub(crate) struct HermesInstallPaths {
-    pub plugin_dir: PathBuf,
-    pub config_path: PathBuf,
-}
-
-#[derive(Debug)]
-pub(crate) struct QodercliInstallPaths {
-    pub hook_path: PathBuf,
-    pub settings_path: PathBuf,
-}
-
-#[derive(Debug)]
-pub(crate) struct QwenInstallPaths {
-    pub hook_path: PathBuf,
-    pub settings_path: PathBuf,
-}
-
-#[derive(Debug)]
-pub(crate) struct CursorInstallPaths {
-    pub hook_path: PathBuf,
-    pub hooks_path: PathBuf,
-}
-
-#[derive(Debug)]
-pub(crate) struct CursorUninstallResult {
-    pub hook_path: PathBuf,
-    pub hooks_path: PathBuf,
-    pub removed_hook_file: bool,
-    pub updated_hooks: bool,
-}
-
-#[derive(Debug)]
-pub(crate) struct MastracodeInstallPaths {
-    pub hook_path: PathBuf,
-    pub hooks_path: PathBuf,
-}
-
-#[derive(Debug)]
-pub(crate) struct MastracodeUninstallResult {
-    pub hook_path: PathBuf,
-    pub hooks_path: PathBuf,
-    pub removed_hook_file: bool,
-    pub updated_hooks: bool,
-}
-
-#[derive(Debug)]
-pub(crate) struct GrokInstallPaths {
-    pub hook_path: PathBuf,
-    pub config_path: PathBuf,
-}
-
-#[derive(Debug)]
-pub(crate) struct GrokUninstallResult {
-    pub hook_path: PathBuf,
-    pub config_path: PathBuf,
-    pub removed_hook_file: bool,
-    pub removed_config_file: bool,
-}
-
-#[derive(Debug)]
-pub(crate) struct QodercliUninstallResult {
-    pub hook_path: PathBuf,
-    pub settings_path: PathBuf,
-    pub removed_hook_file: bool,
-    pub updated_settings: bool,
-}
-
-#[derive(Debug)]
-pub(crate) struct QwenUninstallResult {
-    pub hook_path: PathBuf,
-    pub settings_path: PathBuf,
-    pub removed_hook_file: bool,
-    pub updated_settings: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -174,12 +67,6 @@ pub(crate) struct PiUninstallResult {
 }
 
 #[derive(Debug)]
-pub(crate) struct OmpUninstallResult {
-    pub extension_path: PathBuf,
-    pub removed_extension: bool,
-}
-
-#[derive(Debug)]
 pub(crate) struct ClaudeUninstallResult {
     pub hook_path: PathBuf,
     pub settings_path: PathBuf,
@@ -205,32 +92,6 @@ pub(crate) struct KimiUninstallResult {
 }
 
 #[derive(Debug)]
-pub(crate) struct CopilotUninstallResult {
-    pub hook_path: PathBuf,
-    pub settings_path: PathBuf,
-    pub removed_hook_file: bool,
-    pub updated_settings: bool,
-}
-
-#[derive(Debug)]
-pub(crate) struct DevinUninstallResult {
-    pub hook_path: PathBuf,
-    pub settings_path: PathBuf,
-    pub removed_hook_file: bool,
-    pub updated_settings: bool,
-}
-
-#[derive(Debug)]
-pub(crate) struct DroidUninstallResult {
-    pub hook_path: PathBuf,
-    pub hooks_path: PathBuf,
-    pub settings_path: PathBuf,
-    pub removed_hook_file: bool,
-    pub updated_hooks: bool,
-    pub updated_settings: bool,
-}
-
-#[derive(Debug)]
 pub(crate) struct OpenCodeUninstallResult {
     pub plugin_path: PathBuf,
     pub tui_plugin_path: PathBuf,
@@ -238,32 +99,4 @@ pub(crate) struct OpenCodeUninstallResult {
     pub removed_plugin: bool,
     pub removed_tui_plugin: bool,
     pub updated_tui_config: bool,
-}
-
-#[derive(Debug)]
-pub(crate) struct KiloUninstallResult {
-    pub plugin_path: PathBuf,
-    pub removed_plugin: bool,
-}
-
-#[derive(Debug)]
-pub(crate) struct HermesUninstallResult {
-    pub plugin_dir: PathBuf,
-    pub config_path: PathBuf,
-    pub removed_plugin_dir: bool,
-    pub updated_config: bool,
-}
-
-#[derive(Debug)]
-pub(crate) struct AntigravityCliInstallPaths {
-    pub hook_path: PathBuf,
-    pub hooks_path: PathBuf,
-}
-
-#[derive(Debug)]
-pub(crate) struct AntigravityCliUninstallResult {
-    pub hook_path: PathBuf,
-    pub hooks_path: PathBuf,
-    pub removed_hook_file: bool,
-    pub updated_hooks: bool,
 }

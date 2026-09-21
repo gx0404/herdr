@@ -8,10 +8,8 @@ const originalPlatform = process.platform;
 const originalCreateConnection = net.createConnection;
 const originalEnvironment = {
   HERDR_ENV: process.env.HERDR_ENV,
-  HERDR_OMP_IDLE_DEBOUNCE_MS: process.env.HERDR_OMP_IDLE_DEBOUNCE_MS,
   HERDR_PANE_ID: process.env.HERDR_PANE_ID,
   HERDR_SOCKET_PATH: process.env.HERDR_SOCKET_PATH,
-  OMPCODE: process.env.OMPCODE,
 };
 
 let server: Server | undefined;
@@ -46,7 +44,6 @@ afterEach(async () => {
 
 const integrations = [
   { name: "Pi", modulePath: "./pi/herdr-agent-state.ts" },
-  { name: "Oh My Pi", modulePath: "./omp/herdr-agent-state.ts" },
 ] as const;
 
 const socketPlugins = [
@@ -55,7 +52,6 @@ const socketPlugins = [
     modulePath: "./opencode/herdr-agent-state.js",
     sessionID: "opencode-session",
   },
-  { name: "Kilo", modulePath: "./kilo/herdr-agent-state.js", sessionID: "kilo-session" },
 ] as const;
 
 function importFresh(modulePath: string) {
@@ -229,44 +225,6 @@ for (const integration of integrations) {
     expect(reportedState()).toBe("working");
   });
 }
-
-test("OMP ignores nested sessions launched inside another OMP shell", async () => {
-  const requests = await startRecordingServer("omp-nested");
-  process.env.OMPCODE = "1";
-  const { handlers, pi } = createExtensionHarness();
-
-  const { default: install } = await importFresh("./omp/herdr-agent-state.ts");
-  install(pi);
-
-  // OMP sets OMPCODE on every shell it spawns. A nested `omp` inherits it and
-  // must not claim the pane's session for its short-lived conversation.
-  expect(handlers.size).toBe(0);
-  await handlers.get("session_start")?.(
-    { reason: "startup" },
-    {
-      hasUI: true,
-      isIdle: () => true,
-      sessionManager: {
-        getSessionFile: () => "/tmp/omp-nested.jsonl",
-        getSessionId: () => "omp-nested",
-      },
-    },
-  );
-  await Bun.sleep(25);
-
-  expect(requests).toEqual([]);
-});
-
-test("OMP accepts POSIX and Windows session paths", async () => {
-  const { isAbsoluteSessionPath } = await importFresh("./omp/herdr-agent-state.ts");
-
-  expect(isAbsoluteSessionPath("/tmp/omp-session.jsonl")).toBe(true);
-  expect(isAbsoluteSessionPath("C:\\Users\\User\\.omp\\agent\\sessions\\omp-session.jsonl")).toBe(
-    true,
-  );
-  expect(isAbsoluteSessionPath("C:/Users/User/.omp/agent/sessions/omp-session.jsonl")).toBe(true);
-  expect(isAbsoluteSessionPath("relative/omp-session.jsonl")).toBe(false);
-});
 
 test("Pi reports a Windows session path", async () => {
   const requests = await startRecordingServer("pi-windows-session-path");
@@ -517,75 +475,6 @@ async function startDroppedFirstResponseServer(name: string) {
     connectionCount: () => connectionCount,
   };
 }
-
-test("Oh My Pi retries working before a queued idle state", async () => {
-  const { attemptedRequests } = await startDroppedFirstResponseServer("omp-retry");
-  process.env.HERDR_OMP_IDLE_DEBOUNCE_MS = "0";
-  const { handlers, pi } = createExtensionHarness();
-
-  const { default: install } = await importFresh("./omp/herdr-agent-state.ts");
-  install(pi);
-
-  const context = {
-    hasUI: true,
-    isIdle: () => false,
-    sessionManager: {
-      getSessionFile: () => undefined,
-      getSessionId: () => undefined,
-    },
-  };
-  handlers.get("session_start")?.({ reason: "startup" }, context);
-  handlers.get("agent_end")?.({ messages: [] }, context);
-
-  const deadline = Date.now() + 2_500;
-  while (Date.now() < deadline && attemptedRequests.length < 3) {
-    await Bun.sleep(5);
-  }
-
-  expect(attemptedRequests).toHaveLength(3);
-  expect(attemptedRequests[1]).toEqual(attemptedRequests[0]);
-  expect(requestState(attemptedRequests[0])).toBe("working");
-  expect(requestState(attemptedRequests[2])).toBe("idle");
-});
-
-test("Oh My Pi keeps working when a turn ends with a scheduled continuation", async () => {
-  const requests = await startRecordingServer("omp-will-continue");
-  process.env.HERDR_OMP_IDLE_DEBOUNCE_MS = "0";
-  const { handlers, pi } = createExtensionHarness();
-
-  const { default: install } = await importFresh("./omp/herdr-agent-state.ts");
-  install(pi);
-
-  let idle = true;
-  const context = {
-    hasUI: true,
-    isIdle: () => idle,
-    sessionManager: {
-      getSessionFile: () => undefined,
-      getSessionId: () => undefined,
-    },
-  };
-
-  handlers.get("session_start")?.({ reason: "startup" }, context);
-  await waitFor(() => requestStates(requests).length === 1);
-
-  idle = false;
-  handlers.get("agent_start")?.({}, context);
-  await waitFor(() => requestStates(requests).length === 2);
-  expect(requestStates(requests)).toEqual(["idle", "working"]);
-
-  // OMP already scheduled an automatic continuation, so this loop end is not a
-  // user-visible settle and must not publish idle. See issue #2851.
-  handlers.get("agent_end")?.({ messages: [], willContinue: true }, context);
-  await Bun.sleep(50);
-  expect(requestStates(requests)).toEqual(["idle", "working"]);
-
-  // The real terminal end still settles the pane.
-  idle = true;
-  handlers.get("agent_end")?.({ messages: [] }, context);
-  await waitFor(() => requestStates(requests).length === 3);
-  expect(requestStates(requests)).toEqual(["idle", "working", "idle"]);
-});
 
 test("Pi retries working state after an unanswered socket attempt", async () => {
   const { attemptedRequests, deliveredRequests, connectionCount } =

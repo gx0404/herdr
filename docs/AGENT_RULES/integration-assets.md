@@ -1,12 +1,12 @@
 # integration-assets（agent 集成资产）
 
-范围：`src/integration/**`、`scripts/test_hermes_integration_asset.py`、上游同步
-丢弃清单与检查器（`scripts/upstream_sync_drop_*`，与 `detection.md` 并集）。
+范围：`src/integration/**`、上游同步丢弃清单与检查器
+（`scripts/upstream_sync_drop_*`，与 `detection.md` 并集）。
 
 ## 职责
 
-`src/integration` 为每个受支持的编码 agent（claude、codex、opencode 等）生成或
-编辑其宿主配置（settings、MCP、hook、keybinding 等），使 agent 能被 herdr 驱动：
+`src/integration` 为每个受支持的编码 agent（claude、codex、kimi、opencode、pi）
+生成或编辑其宿主配置（settings、MCP、hook、keybinding 等），使 agent 能被 herdr 驱动：
 `registry.rs` 注册集成、`targets.rs` 定位写入点、`config_edit.rs`/`config_file.rs`
 执行最小侵入编辑、`version.rs` 管理集成资产版本。
 
@@ -22,6 +22,7 @@
   `docs/next` 用户文档（见 `docs-pipeline.md`）。
 - 新增 agent 集成时：注册表、检测 manifest（`detection.md`）、集成资产与文档
   四者一起评审，避免「能装但不能识别」或「能识别但不能装」。
-- **官方集成仅六家**（claude、codex、kimi、zcode、pi、opencode）：其余集成商的
-  资产与注册分支不新增，同步上游时也不合入；丢弃路径、共享文件口径与
-  `IntegrationTarget` 墓碑策略见 `README.md` 的「fork 已删除的集成」。
+- **官方集成仅六家**（claude、codex、kimi、zcode、pi、opencode；zcode 计划以
+  外部 agent 来源形式支持，不在本目录落资产与 `IntegrationTarget` 变体）：其余
+  集成商的资产与注册分支已物理删除，不新增，同步上游时也不合入；丢弃路径、共享
+  文件口径与 `IntegrationTarget` 墓碑策略见 `README.md` 的「fork 已删除的集成」。

@@ -115,7 +115,6 @@ tasks = []
 id = "integration-assets"
 doc = "docs/AGENT_RULES/integration-assets.md"
 paths = [
-  "scripts/test_hermes_integration_asset.py",
   # 上游同步丢弃清单（六家以外的集成），与 detection 取并集。
   "scripts/test_upstream_sync_drop_check.py",
   "scripts/upstream_sync_drop_check.py",
