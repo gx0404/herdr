@@ -141,7 +141,7 @@ impl PendingAltScreenRead {
             .restore_started_at
             .is_some_and(|started| now.duration_since(started) >= MAX_RESTORE_DURATION);
         if restore_expired {
-            return self.complete_fallback();
+            return self.complete_fallback_restoring_viewport(runtime);
         }
         let traversal_expired = now.duration_since(self.started_at) >= MAX_DURATION
             && matches!(
@@ -190,7 +190,7 @@ impl PendingAltScreenRead {
         }
         let Some((screen, snapshot, snapshot_seq)) = runtime.screen_text_snapshot_with_seq() else {
             if traversal_expired {
-                return self.complete_fallback();
+                return self.complete_fallback_restoring_viewport(runtime);
             }
             self.observed_content_seq = runtime.content_seq();
             self.step_observed_output = false;
@@ -433,6 +433,21 @@ impl PendingAltScreenRead {
         let _ = self.respond_to.send(self.fallback_response);
         None
     }
+
+    /// 回退收尾前补偿视口：流程向上采集过历史（净向上滚轮事件）时，
+    /// 先补发等量的向下滚动再回包，避免 pane 停在卷上去的位置。
+    /// 滚轮路由已失效时 send_wheel 返回 Err，直接回包。
+    fn complete_fallback_restoring_viewport(self, runtime: &TerminalRuntime) -> PollOutcome {
+        if self.upward_events > 0 {
+            let _ = send_wheel(
+                runtime,
+                MouseEventKind::ScrollDown,
+                self.upward_events,
+                &self.previous,
+            );
+        }
+        self.complete_fallback()
+    }
 }
 
 pub(crate) type PollOutcome = Option<PendingAltScreenRead>;
@@ -610,6 +625,58 @@ mod tests {
                 .recv_timeout(Duration::from_millis(50))
                 .expect("fallback response"),
             "fallback"
+        );
+
+        drop(runtime);
+        drop(_guard);
+        rt.shutdown_timeout(Duration::from_millis(100));
+    }
+
+    #[test]
+    fn fallback_after_restore_timeout_restores_viewport_downward() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime");
+        let _guard = rt.enter();
+        let (runtime, mut input_rx) = TerminalRuntime::test_with_channel_capacity(20, 5, 8);
+        runtime.test_process_pty_bytes(&draw(&["16", "17", "18", "19", "20"], true));
+        let started = Instant::now();
+        let (pending, response_rx) = pending_read(&runtime, started, 8);
+        let harvest_started = started + INITIAL_QUIET + STEP_TIMEOUT;
+
+        let pending = pending
+            .poll(Some(&runtime), started + INITIAL_QUIET)
+            .expect("bottom probe");
+        input_rx.try_recv().expect("bottom wheel probe");
+        let pending = pending
+            .poll(Some(&runtime), harvest_started)
+            .expect("history harvest");
+        input_rx.try_recv().expect("upward wheel batch");
+        runtime.test_process_pty_bytes(&draw(&["13", "14", "15", "16", "17"], false));
+        let pending = pending
+            .poll(Some(&runtime), harvest_started + Duration::from_millis(1))
+            .expect("redraw coalescing");
+        let restore_started = harvest_started + Duration::from_millis(11);
+        let pending = pending
+            .poll(Some(&runtime), restore_started)
+            .expect("viewport restore");
+        input_rx.try_recv().expect("restore wheel batch");
+
+        // 应用一直不收敛（持续展示卷上去的内容），还原硬超时后走回退。
+        assert!(pending
+            .poll(Some(&runtime), restore_started + MAX_RESTORE_DURATION)
+            .is_none());
+        assert_eq!(
+            response_rx
+                .recv_timeout(Duration::from_millis(50))
+                .expect("fallback response"),
+            "fallback"
+        );
+        // 回退也必须把视口向下补回，pane 不得停在卷上去的位置。
+        assert!(
+            input_rx.try_recv().is_ok(),
+            "fallback must compensate with downward wheel events"
         );
 
         drop(runtime);
