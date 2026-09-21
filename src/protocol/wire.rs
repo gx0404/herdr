@@ -783,6 +783,17 @@ pub struct FrameData {
     pub graphics: Vec<u8>,
 }
 
+/// `replace_from_ratatui_buffer_preserving_effects` 的超链接策略，由调用方声明
+/// 该次往返是否可能改写符号格（C-12 第二步前半）：
+/// - `Reattach`（默认，旧语义）：按（位置 + 符号）重新挂接，符号变了的格掉链。
+/// - `SymbolsUntouched`：该次往返只改样式/装饰、没有改写任何符号，保留每格既有
+///   超链接索引并跳过全表扫描。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum HyperlinkPreservation {
+    Reattach,
+    SymbolsUntouched,
+}
+
 impl FrameData {
     /// Creates a `FrameData` from a ratatui `Buffer` and optional cursor.
     ///
@@ -849,26 +860,113 @@ impl FrameData {
         buffer: &ratatui::buffer::Buffer,
         cursor: Option<CursorState>,
     ) {
-        let width = self.width;
-        let hyperlinks = if width == 0 {
-            Vec::new()
-        } else {
-            self.cells
-                .iter()
-                .enumerate()
-                .filter_map(|(index, cell)| {
-                    let uri = self.hyperlinks.get(cell.hyperlink? as usize)?;
-                    let x = u16::try_from(index % usize::from(width)).ok()?;
-                    let y = u16::try_from(index / usize::from(width)).ok()?;
-                    Some(((x, y), cell.symbol.to_string(), uri.clone()))
-                })
-                .collect::<Vec<_>>()
-        };
-        let graphics = std::mem::take(&mut self.graphics);
-        let mut replacement =
-            Self::from_ratatui_buffer_with_hyperlinks(buffer, cursor, &hyperlinks);
-        replacement.graphics = graphics;
-        *self = replacement;
+        self.replace_from_ratatui_buffer_with_policy(
+            buffer,
+            cursor,
+            HyperlinkPreservation::Reattach,
+        )
+    }
+
+    pub(crate) fn replace_from_ratatui_buffer_with_policy(
+        &mut self,
+        buffer: &ratatui::buffer::Buffer,
+        cursor: Option<CursorState>,
+        policy: HyperlinkPreservation,
+    ) {
+        let area = buffer.area;
+        let expected = usize::from(area.width) * usize::from(area.height);
+        let fits = self.width == area.width
+            && self.height == area.height
+            && self.cells.len() == expected
+            && expected > 0;
+        if !fits {
+            // 尺寸变化才重建（此时旧格的位置索引整体失效，一律按 Reattach 旧路径走，
+            // 与 policy 无关）。
+            let hyperlinks = if self.width == 0 {
+                Vec::new()
+            } else {
+                let width = self.width;
+                self.cells
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(index, cell)| {
+                        let uri = self.hyperlinks.get(cell.hyperlink? as usize)?;
+                        let x = u16::try_from(index % usize::from(width)).ok()?;
+                        let y = u16::try_from(index / usize::from(width)).ok()?;
+                        Some(((x, y), cell.symbol.to_string(), uri.clone()))
+                    })
+                    .collect::<Vec<_>>()
+            };
+            let graphics = std::mem::take(&mut self.graphics);
+            let mut replacement =
+                Self::from_ratatui_buffer_with_hyperlinks(buffer, cursor, &hyperlinks);
+            replacement.graphics = graphics;
+            *self = replacement;
+            return;
+        }
+
+        // 原地更新：cells Vec 与每格的 CompactString 堆缓冲都复用（clone_from）。
+        match policy {
+            HyperlinkPreservation::SymbolsUntouched => {
+                for (index, buffer_cell) in buffer.content().iter().enumerate() {
+                    let mut next = CellData::from_ratatui_cell(buffer_cell);
+                    next.hyperlink = self.cells[index].hyperlink;
+                    self.cells[index].clone_from(&next);
+                }
+            }
+            HyperlinkPreservation::Reattach => {
+                // 旧格的位置→(符号, uri) 映射；只为带链接的格分配。
+                let mut old_links: HashMap<(u16, u16), (compact_str::CompactString, &str)> =
+                    HashMap::new();
+                for (index, cell) in self.cells.iter().enumerate() {
+                    let Some(uri_index) = cell.hyperlink else {
+                        continue;
+                    };
+                    let Some(uri) = self.hyperlinks.get(uri_index as usize) else {
+                        continue;
+                    };
+                    let x = index as u16 % area.width;
+                    let y = index as u16 / area.width;
+                    old_links.insert((x, y), (cell.symbol.clone(), uri.as_str()));
+                }
+                let mut hyperlinks = Vec::<String>::new();
+                let mut indices = HashMap::<&str, u32>::new();
+                for (index, buffer_cell) in buffer.content().iter().enumerate() {
+                    let x = index as u16 % area.width;
+                    let y = index as u16 / area.width;
+                    let mut next = CellData::from_ratatui_cell(buffer_cell);
+                    if let Some((symbol, uri)) = old_links.get(&(x, y)) {
+                        if symbol.as_str() == buffer_cell.symbol() {
+                            let index_u32 = *indices.entry(*uri).or_insert_with(|| {
+                                hyperlinks.push((*uri).to_owned());
+                                hyperlinks.len() as u32 - 1
+                            });
+                            next.hyperlink = Some(index_u32);
+                        }
+                    }
+                    self.cells[index].clone_from(&next);
+                }
+                self.hyperlinks = hyperlinks;
+            }
+        }
+        self.cursor = cursor;
+    }
+
+    /// 浮层覆盖后，覆盖区内的超链接随之失效（CFP-15）：被盖住的格不再向宿主发 OSC 8。
+    /// 即使浮层恰好写了同符号文本也不保留——那些格的内容所有权已归浮层。
+    /// 超链接表里的孤儿条目由下一次 Reattach 重建清掉，这里不动表。
+    pub(crate) fn clear_hyperlinks_in(&mut self, area: ratatui::layout::Rect) {
+        if self.hyperlinks.is_empty() {
+            return;
+        }
+        for y in area.y..area.y.saturating_add(area.height) {
+            for x in area.x..area.x.saturating_add(area.width) {
+                let index = usize::from(y) * usize::from(self.width) + usize::from(x);
+                if let Some(cell) = self.cells.get_mut(index) {
+                    cell.hyperlink = None;
+                }
+            }
+        }
     }
 
     /// Reconstructs a ratatui `Buffer` from this frame data.
@@ -3369,6 +3467,114 @@ mod tests {
             graphics: Vec::new(),
         };
         assert!(frame.to_ratatui_buffer().is_none());
+    }
+
+    // ---- In-place replace (C-12 第二步前半) ----
+
+    fn styled_buffer(cols: u16, rows: u16, symbols: &[&str]) -> ratatui::buffer::Buffer {
+        let mut buffer =
+            ratatui::buffer::Buffer::empty(ratatui::layout::Rect::new(0, 0, cols, rows));
+        for (index, symbol) in symbols.iter().enumerate() {
+            let x = index as u16 % cols;
+            let y = index as u16 / cols;
+            buffer.cell_mut((x, y)).unwrap().set_symbol(symbol);
+        }
+        buffer
+    }
+
+    #[test]
+    fn replace_preserving_effects_reuses_cell_storage_and_keeps_untouched_links() {
+        let buffer = styled_buffer(4, 2, &["a", "b", "c", "d", "e", "f", "g", "h"]);
+        let mut frame = FrameData::from_ratatui_buffer_with_hyperlinks(
+            &buffer,
+            None,
+            &[((1, 0), "b".to_owned(), "https://example.com".to_owned())],
+        );
+        assert_eq!(frame.cells[1].hyperlink, Some(0));
+        let storage = frame.cells.as_ptr();
+
+        // 同尺寸、只改样式（不改符号）：原地更新，Vec 存储地址不变。
+        let mut next = buffer.clone();
+        next.cell_mut((0, 0)).unwrap().fg = Color::Red;
+        next.cell_mut((3, 1)).unwrap().set_symbol("z");
+        frame.replace_from_ratatui_buffer_with_policy(
+            &next,
+            None,
+            HyperlinkPreservation::SymbolsUntouched,
+        );
+
+        assert_eq!(
+            frame.cells.as_ptr(),
+            storage,
+            "same-size replace must not rebuild the cells vec"
+        );
+        assert_eq!(frame.cells[0].fg, color_to_u32(Color::Red));
+        assert_eq!(frame.cells[7].symbol, "z");
+        assert_eq!(
+            frame.cells[1].hyperlink,
+            Some(0),
+            "SymbolsUntouched keeps per-cell link indices"
+        );
+        assert_eq!(frame.hyperlinks, vec!["https://example.com".to_owned()]);
+    }
+
+    #[test]
+    fn replace_reattach_drops_links_whose_symbol_changed() {
+        let buffer = styled_buffer(4, 2, &["a", "b", "c", "d", "e", "f", "g", "h"]);
+        let mut frame = FrameData::from_ratatui_buffer_with_hyperlinks(
+            &buffer,
+            None,
+            &[
+                ((1, 0), "b".to_owned(), "https://changed".to_owned()),
+                ((1, 1), "f".to_owned(), "https://kept".to_owned()),
+            ],
+        );
+        assert_eq!(frame.cells[1].hyperlink, Some(0));
+        assert_eq!(frame.cells[5].hyperlink, Some(1));
+
+        let mut next = buffer.clone();
+        next.cell_mut((1, 0)).unwrap().set_symbol("x");
+        frame.replace_from_ratatui_buffer_preserving_effects(&next, None);
+
+        assert_eq!(
+            frame.cells[1].hyperlink, None,
+            "symbol changed: link must not be re-attached"
+        );
+        assert_eq!(
+            frame.cells[5].hyperlink,
+            Some(0),
+            "unchanged symbol keeps link"
+        );
+        assert_eq!(frame.hyperlinks, vec!["https://kept".to_owned()]);
+    }
+
+    #[test]
+    fn replace_on_resize_rebuilds_cells() {
+        let buffer = styled_buffer(4, 2, &["a"; 8]);
+        let mut frame = FrameData::from_ratatui_buffer(&buffer, None);
+        let bigger = styled_buffer(3, 3, &["q"; 9]);
+        frame.replace_from_ratatui_buffer_preserving_effects(&bigger, None);
+        assert_eq!((frame.width, frame.height, frame.cells.len()), (3, 3, 9));
+        assert!(frame.cells.iter().all(|cell| cell.symbol == "q"));
+    }
+
+    #[test]
+    fn clear_hyperlinks_in_drops_only_covered_links() {
+        let buffer = styled_buffer(4, 2, &["a", "b", "c", "d", "e", "f", "g", "h"]);
+        let mut frame = FrameData::from_ratatui_buffer_with_hyperlinks(
+            &buffer,
+            None,
+            &[
+                ((1, 0), "b".to_owned(), "https://covered".to_owned()),
+                ((1, 1), "f".to_owned(), "https://visible".to_owned()),
+            ],
+        );
+        frame.clear_hyperlinks_in(ratatui::layout::Rect::new(0, 0, 4, 1));
+        assert_eq!(
+            frame.cells[1].hyperlink, None,
+            "covered link dropped (CFP-15)"
+        );
+        assert_eq!(frame.cells[5].hyperlink, Some(1), "uncovered link kept");
     }
 
     // ---- Color conversion coverage ----

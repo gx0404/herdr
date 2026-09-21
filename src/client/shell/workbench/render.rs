@@ -486,7 +486,12 @@ impl ClientShellState {
                         hit,
                         palette.yellow,
                     );
-                    frame.replace_from_ratatui_buffer_preserving_effects(&composed, cursor);
+                    // 聚焦边框强调只改样式不改符号，保留既有超链接索引。
+                    frame.replace_from_ratatui_buffer_with_policy(
+                        &composed,
+                        cursor,
+                        crate::protocol::HyperlinkPreservation::SymbolsUntouched,
+                    );
                 }
             }
         }

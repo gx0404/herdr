@@ -324,6 +324,69 @@ fn ctrl_hover_explicit_wide_label_includes_the_spacer_cell() {
 }
 
 #[test]
+fn overlay_covered_hyperlinks_are_dropped_from_the_frame() {
+    let mut state = hover_state();
+    // 先拿到浮层矩形，再把链接埋进覆盖区正中央，避免布局假设。
+    state.open_command_search();
+    state.compose(146, 32).expect("compose with palette");
+    let overlay_area = state.hits.overlay_bounds;
+    assert!(!overlay_area.is_empty(), "palette overlay area");
+    state.overlay = None;
+
+    let mut next = surface();
+    next.surface_revision += 1;
+    next.frame =
+        FrameData::from_ratatui_buffer(&Buffer::with_lines(vec!["x".repeat(120); 30]), None);
+    next.panes[0].inner_rect = SurfaceRect {
+        x: 0,
+        y: 0,
+        width: 120,
+        height: 30,
+    };
+    next.panes[0].rect = next.panes[0].inner_rect;
+    state.set_pane_surface(next);
+    state.compose(146, 32).unwrap();
+    let pane_origin = state.hits.panes[0].inner_rect;
+    let (x, y) = (
+        overlay_area.x + overlay_area.width / 2,
+        overlay_area.y + overlay_area.height / 2,
+    );
+    // surface 帧宽 120 与组合帧宽不同：索引分开算。
+    let surface_width = usize::from(state.pane_surface.as_ref().unwrap().frame.width);
+    let surface_index =
+        usize::from(y - pane_origin.y) * surface_width + usize::from(x - pane_origin.x);
+    let mut next = state.pane_surface.as_ref().unwrap().clone();
+    next.surface_revision += 1;
+    next.frame.hyperlinks.push("https://example.com/".into());
+    next.frame.cells[surface_index].hyperlink = Some(0);
+    state.set_pane_surface(next);
+    let frame = state.compose(146, 32).unwrap();
+    let composed_index = usize::from(y) * usize::from(frame.width) + usize::from(x);
+    assert!(
+        frame.cells[composed_index].hyperlink.is_some(),
+        "sanity: link present without overlay"
+    );
+
+    state.open_command_search();
+    let frame = state.compose(146, 32).unwrap();
+    let overlay_area = state.hits.overlay_bounds;
+    for (index, cell) in frame.cells.iter().enumerate() {
+        if cell.hyperlink.is_none() {
+            continue;
+        }
+        let (cx, cy) = (index as u16 % frame.width, index as u16 / frame.width);
+        let covered = cx >= overlay_area.x
+            && cx < overlay_area.x + overlay_area.width
+            && cy >= overlay_area.y
+            && cy < overlay_area.y + overlay_area.height;
+        assert!(
+            !covered,
+            "CFP-15: covered cell ({cx},{cy}) must not keep its OSC 8 link"
+        );
+    }
+}
+
+#[test]
 #[ignore = "non-gating fixed-geometry hover composition profile"]
 fn ctrl_hover_render_scale_profile() {
     for count in [1, 15] {

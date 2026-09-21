@@ -389,7 +389,12 @@ impl ClientShellState {
                     let cursor = frame.cursor.clone();
                     let mut composed = frame.to_ratatui_buffer()?;
                     emphasize_pane_border(&mut composed, &hit, self.config.palette.yellow);
-                    frame.replace_from_ratatui_buffer_preserving_effects(&composed, cursor);
+                    // 聚焦边框强调只改样式不改符号，保留既有超链接索引。
+                    frame.replace_from_ratatui_buffer_with_policy(
+                        &composed,
+                        cursor,
+                        crate::protocol::HyperlinkPreservation::SymbolsUntouched,
+                    );
                 }
             }
         }
@@ -839,7 +844,17 @@ impl ClientShellState {
                         .add_modifier(Modifier::BOLD),
                 );
             }
-            frame.replace_from_ratatui_buffer_preserving_effects(&composed, cursor);
+            frame.replace_from_ratatui_buffer_with_policy(
+                &composed,
+                cursor,
+                // link hints 会把标签字符写进格内（改了符号），必须走 Reattach；
+                // 其余子段（选区/搜索高亮、copy 光标格）只改样式。
+                if has_link_hints {
+                    crate::protocol::HyperlinkPreservation::Reattach
+                } else {
+                    crate::protocol::HyperlinkPreservation::SymbolsUntouched
+                },
+            );
         }
         self.render_link_hover(frame, occlusion);
         Some(())
@@ -992,6 +1007,8 @@ impl ClientShellState {
                 composed.set_style(entrance_area, Style::default().add_modifier(Modifier::DIM));
             }
             frame.replace_from_ratatui_buffer_preserving_effects(&composed, cursor);
+            // CFP-15：浮层矩形内的格归浮层所有，即使符号巧合未变也不再保留 OSC 8 链接。
+            frame.clear_hyperlinks_in(entrance_area);
         }
         if let Some(ClientShellOverlay::CommandPalette(palette)) = self.overlay.as_mut() {
             palette.scroll = self.hits.menu_scroll;
