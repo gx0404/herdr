@@ -1,13 +1,25 @@
 use super::*;
 
+/// CLI-01：两个 watcher 的轮询间隔。被观察的文件不存在时没有内容可看，退到
+/// 5 s（新建文件最迟 5 s 内被发现）；文件存在时保持 1 s，保证 CLI 改动的
+/// 可见延迟不变。
+fn catalog_poll_interval(watched_path: &std::path::Path) -> Duration {
+    if watched_path.exists() {
+        Duration::from_secs(1)
+    } else {
+        Duration::from_secs(5)
+    }
+}
+
 pub(super) fn watch_profiles(
     event_tx: tokio::sync::mpsc::Sender<ClientLoopEvent>,
     should_quit: Arc<AtomicBool>,
 ) {
-    // One bounded read per second per client, independent of rendering and pane count.
+    // One bounded read per poll per client, independent of rendering and pane count.
     std::thread::spawn(move || {
         let mut previous = None;
         while !should_quit.load(Ordering::Acquire) {
+            let path = endpoint::catalog_path();
             let current = endpoint::EndpointCatalog::load_profiles();
             if previous.as_ref() != Some(&current) {
                 previous = Some(current.clone());
@@ -18,7 +30,7 @@ pub(super) fn watch_profiles(
                     break;
                 }
             }
-            std::thread::sleep(Duration::from_secs(1));
+            std::thread::sleep(catalog_poll_interval(&path));
         }
     });
 }
@@ -34,7 +46,8 @@ pub(super) fn watch_broadcast_set(
     std::thread::spawn(move || {
         let mut previous = None;
         while !should_quit.load(Ordering::Acquire) {
-            let current = std::fs::read(endpoint::broadcast_path()).unwrap_or_default();
+            let path = endpoint::broadcast_path();
+            let current = std::fs::read(&path).unwrap_or_default();
             if previous.as_ref() != Some(&current) {
                 previous = Some(current);
                 if event_tx
@@ -44,7 +57,7 @@ pub(super) fn watch_broadcast_set(
                     break;
                 }
             }
-            std::thread::sleep(Duration::from_secs(1));
+            std::thread::sleep(catalog_poll_interval(&path));
         }
     });
 }
