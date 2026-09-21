@@ -259,6 +259,16 @@ impl ClientState {
         if self.presentation_frozen {
             return;
         }
+        // 帧与上次提交的完全相同、且没有待重绘标记时直接跳过：server 端
+        // `render_stream` 一直有这条短路，客户端此前每次都要整帧 diff 加两次
+        // syscall（CFP-10）。画主机光标时不短路——光标位置可能单独变化。
+        if !self.repaint_pending
+            && !self.draw_host_cursor
+            && frame_data.graphics.is_empty()
+            && self.blit_encoder.is_current(&frame_data)
+        {
+            return;
+        }
         let frame_data = if self.draw_host_cursor {
             render_ansi::frame_with_drawn_cursor(frame_data)
         } else {

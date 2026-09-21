@@ -58,8 +58,9 @@ pub(super) struct Drag {
 }
 
 fn window_key(overlay: &ClientShellOverlay) -> Option<String> {
+    // 稳定键（ARCH-01）：`{:?}` 会随枚举改名静默丢配置。
     (!matches!(overlay, ClientShellOverlay::ContextMenu(_)))
-        .then(|| format!("{:?}", overlay.kind()))
+        .then(|| overlay.kind().storage_key().to_owned())
 }
 
 impl ClientShellState {

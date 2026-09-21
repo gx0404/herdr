@@ -2321,6 +2321,12 @@ impl ClientShellState {
                 match code {
                     KeyCode::Up | KeyCode::Char('k') if plain => self.move_import_focus(-1),
                     KeyCode::Down | KeyCode::Char('j') if plain => self.move_import_focus(1),
+                    // 候选可能有几十条：补翻页与首尾（HERDR-MACH-026）。步长交给
+                    // `move_import_focus` 自己钳位。
+                    KeyCode::PageUp if plain => self.move_import_focus(-10),
+                    KeyCode::PageDown if plain => self.move_import_focus(10),
+                    KeyCode::Home | KeyCode::Char('g') if plain => self.move_import_focus(-1000),
+                    KeyCode::End | KeyCode::Char('G') if plain => self.move_import_focus(1000),
                     KeyCode::Tab if plain => self.move_import_focus(1),
                     KeyCode::BackTab if modifiers.difference(KeyModifiers::SHIFT).is_empty() => {
                         self.move_import_focus(-1)

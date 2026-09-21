@@ -18,6 +18,10 @@ struct QueuedCommand {
     request: Box<Request>,
     /// 用户连续手势发起，允许被队尾更新的同类手势折叠（见 [`EndpointCommands::enqueue`]）。
     coalesce: bool,
+    /// 入队时刻：泳道只在 active endpoint 且表面可用时推进，排队中的命令
+    /// 因此可能一直等不到发送（HERDR-MACH-019）。超时后按失败回报，调用方
+    /// 的 pending 状态不会永远挂着。
+    enqueued_at: Instant,
 }
 
 struct InFlightCommand {
@@ -121,6 +125,7 @@ impl EndpointCommands {
             boot_id,
             request,
             coalesce,
+            enqueued_at: Instant::now(),
         });
         superseded
     }
@@ -232,36 +237,71 @@ impl EndpointCommands {
         request_ids
     }
 
-    pub(super) fn expire(&mut self, now: Instant) -> Vec<EndpointCommandResult> {
-        self.lanes
+    /// 排队命令的超时（HERDR-MACH-019）：泳道只在 active endpoint 且表面可用时
+    /// 才推进，排队项可能一直等不到发送。队头过期说明这一批手势已经没意义，
+    /// 按失败回报，让调用方的 pending 状态与 toast 收尾。
+    fn expire_queued(&mut self, now: Instant) -> Vec<EndpointCommandResult> {
+        let mut expired = Vec::new();
+        for (endpoint_id, lane) in self
+            .lanes
             .iter_mut()
             .chain(self.background.iter_mut())
             .chain(self.reading.iter_mut())
-            .filter_map(|(endpoint_id, lane)| {
-                let expired = lane.in_flight.as_ref().is_some_and(|command| {
-                    now.saturating_duration_since(command.sent_at) >= ENDPOINT_COMMAND_TIMEOUT
-                });
-                if !expired {
-                    return None;
-                }
-                let command = lane.in_flight.take()?;
-                lane.retire((
-                    command.generation,
-                    command.boot_id.clone(),
-                    command.request_id.clone(),
-                ));
-                Some(EndpointCommandResult {
+        {
+            while lane.queued.front().is_some_and(|command| {
+                now.saturating_duration_since(command.enqueued_at) >= ENDPOINT_COMMAND_TIMEOUT
+            }) {
+                let Some(command) = lane.queued.pop_front() else {
+                    break;
+                };
+                expired.push(EndpointCommandResult {
                     endpoint_id: endpoint_id.clone(),
                     generation: command.generation,
                     boot_id: command.boot_id,
-                    request_id: command.request_id,
+                    request_id: command.request.id,
                     result: Err(ClientShellEndpointError {
                         code: Some("endpoint_timeout".into()),
-                        message: "this server did not respond to the action".into(),
+                        message: "this server did not accept the action in time".into(),
                     }),
-                })
-            })
-            .collect()
+                });
+            }
+        }
+        expired
+    }
+
+    pub(super) fn expire(&mut self, now: Instant) -> Vec<EndpointCommandResult> {
+        let mut failed = self.expire_queued(now);
+        failed.extend(
+            self.lanes
+                .iter_mut()
+                .chain(self.background.iter_mut())
+                .chain(self.reading.iter_mut())
+                .filter_map(|(endpoint_id, lane)| {
+                    let expired = lane.in_flight.as_ref().is_some_and(|command| {
+                        now.saturating_duration_since(command.sent_at) >= ENDPOINT_COMMAND_TIMEOUT
+                    });
+                    if !expired {
+                        return None;
+                    }
+                    let command = lane.in_flight.take()?;
+                    lane.retire((
+                        command.generation,
+                        command.boot_id.clone(),
+                        command.request_id.clone(),
+                    ));
+                    Some(EndpointCommandResult {
+                        endpoint_id: endpoint_id.clone(),
+                        generation: command.generation,
+                        boot_id: command.boot_id,
+                        request_id: command.request_id,
+                        result: Err(ClientShellEndpointError {
+                            code: Some("endpoint_timeout".into()),
+                            message: "this server did not respond to the action".into(),
+                        }),
+                    })
+                }),
+        );
+        failed
     }
 
     pub(super) fn receive_chunk(
@@ -589,6 +629,50 @@ mod tests {
             .is_some_and(|lane| lane.in_flight.is_none()));
     }
 
+    /// HERDR-MACH-019：排队中的命令也要过期。泳道只在 active endpoint 且表面
+    /// 可用时推进，之前排队的命令没有任何时间戳，会一直挂在调用方的 pending 里。
+    #[test]
+    fn queued_commands_expire_on_the_same_deadline_as_in_flight_ones() {
+        let mut commands = EndpointCommands::default();
+        commands
+            .lanes
+            .entry(endpoint())
+            .or_default()
+            .queued
+            .push_back(QueuedCommand {
+                generation: 1,
+                boot_id: "boot-a".into(),
+                request: Box::new(Request {
+                    id: "queued-late".into(),
+                    method: crate::api::schema::Method::WorkspaceList(
+                        crate::api::schema::EmptyParams::default(),
+                    ),
+                }),
+                coalesce: false,
+                enqueued_at: Instant::now(),
+            });
+        assert!(commands.expire(Instant::now()).is_empty(), "未到期不报错");
+        let results = commands.expire(Instant::now() + ENDPOINT_COMMAND_TIMEOUT);
+        assert_eq!(results.len(), 1, "恰好一条过期结果");
+        let result = results.first().expect("expired result");
+        assert_eq!(result.request_id, "queued-late");
+        assert_eq!(
+            result
+                .result
+                .as_ref()
+                .err()
+                .and_then(|error| error.code.as_deref()),
+            Some("endpoint_timeout")
+        );
+        assert!(
+            commands
+                .lanes
+                .get(&endpoint())
+                .is_some_and(|lane| lane.queued.is_empty()),
+            "过期后队列清空"
+        );
+    }
+
     #[test]
     fn retiring_complete_source_lane_cancels_queued_ids_and_keeps_other_lanes() {
         let remote = ClientEndpointId::Ssh(
@@ -610,6 +694,7 @@ mod tests {
                     ),
                 }),
                 coalesce: false,
+                enqueued_at: Instant::now(),
             });
         commands.lanes.insert(
             remote.clone(),
@@ -624,6 +709,7 @@ mod tests {
                         ),
                     }),
                     coalesce: false,
+                    enqueued_at: Instant::now(),
                 }]),
                 ..EndpointCommandLane::default()
             },
@@ -672,6 +758,7 @@ mod tests {
                     ),
                 }),
                 coalesce: false,
+                enqueued_at: Instant::now(),
             });
         assert_eq!(
             commands.disconnect(&endpoint()),

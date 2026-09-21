@@ -774,6 +774,8 @@ pub struct BroadcastTexts {
 /// `*_fmt` entries are `fill` templates; placeholders are documented inline.
 pub struct MachineFilesTexts {
     pub title_fmt: &'static str, // args: label
+    /// 下载目标已存在时的拒绝文案（args: path，HERDR-MACH-020）。
+    pub download_exists_fmt: &'static str,
     pub search_hint: &'static str,
     pub count_fmt: &'static str, // args: count
     pub loading: &'static str,

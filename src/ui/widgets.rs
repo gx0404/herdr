@@ -254,10 +254,17 @@ mod button_state_tests {
             assert_eq!(focused, hovered, "{tone:?} 焦点与悬浮同一口径");
         }
         // 常态之间的区别也要在：次级是弱表面，主/危险是实心色块。
-        let primary_normal = modal_button_style(&palette, ModalButtonTone::Primary, ModalButtonState::Normal);
-        let secondary_normal =
-            modal_button_style(&palette, ModalButtonTone::Secondary, ModalButtonState::Normal);
-        assert_ne!(primary_normal, secondary_normal, "常态下三种 tone 必须可区分");
+        let primary_normal =
+            modal_button_style(&palette, ModalButtonTone::Primary, ModalButtonState::Normal);
+        let secondary_normal = modal_button_style(
+            &palette,
+            ModalButtonTone::Secondary,
+            ModalButtonState::Normal,
+        );
+        assert_ne!(
+            primary_normal, secondary_normal,
+            "常态下三种 tone 必须可区分"
+        );
     }
 }
 

@@ -151,6 +151,12 @@ impl ClientShellState {
                     _ => (false, false),
                 };
                 match code {
+                    // y / n 是浮层画出的两个按钮：只有 Enter/Esc 时「取消」按钮
+                    // 键盘走不到（HERDR-TOOL-24）。
+                    KeyCode::Char('n' | 'N') if !removing => {
+                        self.overlay = None;
+                        outcome.repaint = true;
+                    }
                     KeyCode::Esc if !removing => {
                         self.overlay = None;
                         outcome.repaint = true;
@@ -165,6 +171,8 @@ impl ClientShellState {
                     {
                         self.submit_worktree_remove(outcome)
                     }
+                    // 普通确认仍是回车：`y` 只在强制删除那一步生效，换键正是
+                    // 「长按回车走不过去」的保护（见上面的注释）。
                     KeyCode::Char('y' | 'Y') if forced && !removing => {
                         self.submit_worktree_remove(outcome)
                     }

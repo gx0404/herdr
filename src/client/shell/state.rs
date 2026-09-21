@@ -606,6 +606,69 @@ pub(super) enum ClientShellOverlayKind {
     UsageDashboard,
 }
 
+impl ClientShellOverlayKind {
+    /// 浮窗位置偏好文件里的键。**不要**用 `{:?}`：重命名枚举变体会静默丢掉
+    /// 所有已保存的浮窗位置（ARCH-01）。这里是与代码解耦的稳定字面量。
+    pub(super) fn storage_key(self) -> &'static str {
+        match self {
+            Self::Onboarding => "onboarding",
+            Self::ProductAnnouncement => "product_announcement",
+            Self::ReleaseNotes => "release_notes",
+            Self::Rename => "rename",
+            Self::ConfirmClose => "confirm_close",
+            Self::Help => "help",
+            Self::Navigator => "navigator",
+            Self::WorktreeCreate => "worktree_create",
+            Self::WorktreeOpen => "worktree_open",
+            Self::WorktreeRemove => "worktree_remove",
+            Self::ContextMenu => "context_menu",
+            Self::CommandPalette => "command_palette",
+            Self::Settings => "settings",
+            Self::Machines => "machines",
+            Self::MachineAuth => "machine_auth",
+            Self::NotificationHistory => "notification_history",
+            Self::Snippets => "snippets",
+            Self::Scenes => "scenes",
+            Self::Broadcast => "broadcast",
+            Self::MachineFiles => "machine_files",
+            Self::UsageDashboard => "usage_dashboard",
+        }
+    }
+
+    /// 稳定键的反解，并兼容 0.9 之前写盘的 Debug 名（`{:?}`），升级后旧位置
+    /// 不会被丢掉（ARCH-01）。
+    pub(super) fn from_storage_key(key: &str) -> Option<Self> {
+        Self::ALL
+            .iter()
+            .copied()
+            .find(|kind| kind.storage_key() == key || format!("{kind:?}") == key)
+    }
+
+    const ALL: [Self; 21] = [
+        Self::Onboarding,
+        Self::ProductAnnouncement,
+        Self::ReleaseNotes,
+        Self::Rename,
+        Self::ConfirmClose,
+        Self::Help,
+        Self::Navigator,
+        Self::WorktreeCreate,
+        Self::WorktreeOpen,
+        Self::WorktreeRemove,
+        Self::ContextMenu,
+        Self::CommandPalette,
+        Self::Settings,
+        Self::Machines,
+        Self::MachineAuth,
+        Self::NotificationHistory,
+        Self::Snippets,
+        Self::Scenes,
+        Self::Broadcast,
+        Self::MachineFiles,
+        Self::UsageDashboard,
+    ];
+}
+
 #[derive(Debug)]
 pub(super) enum ClientRenameTarget {
     NewWorkspace {

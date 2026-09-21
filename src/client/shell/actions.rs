@@ -981,7 +981,9 @@ impl ClientShellState {
                         );
                         (true, false)
                     }
-                    Err(_) => (true, false),
+                    // 失败也要继续放行队列：把在途期间敲的键整批丢掉等于吞输入
+                    // （HERDR-BUG-018）。
+                    Err(_) => (true, true),
                 };
                 self.complete_copy_operation(session_generation, continue_queue, &mut outcome);
                 return (repaint || outcome.repaint, outcome.actions);
@@ -1039,7 +1041,8 @@ impl ClientShellState {
                     }
                     Err(_) => {
                         self.cancel_deferred_copy_after_search(generation);
-                        (true, false)
+                        // 同上：失败不吞排队按键（HERDR-BUG-018）。
+                        (true, true)
                     }
                 };
                 self.complete_copy_operation(session_generation, continue_queue, &mut outcome);

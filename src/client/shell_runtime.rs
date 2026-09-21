@@ -290,6 +290,14 @@ fn run_machine_fs_op(
             local,
             message,
         } => {
+            // 不静默覆盖本地同名文件（HERDR-MACH-020）：目标默认就是远程文件名，
+            // 落在客户端 CWD，覆盖掉别人的东西是不可逆的。
+            if std::path::Path::new(&local).exists() {
+                return Err(crate::i18n::fill(
+                    crate::i18n::texts().machine_files.download_exists_fmt,
+                    &[("path", &local)],
+                ));
+            }
             let data = fs
                 .read_small_file(&remote)
                 .map_err(|error| error.to_string())?;

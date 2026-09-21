@@ -129,7 +129,9 @@ fn read_pages<'de, D: serde::Deserializer<'de>>(
         .filter_map(|(key, value)| {
             let window: super::floating_pages::Window =
                 serde_json::from_value(value.clone()).ok()?;
-            (key.len() <= 64 && window.valid()).then(|| (key.clone(), window))
+            // 只认识已知浮层，并把旧版 Debug 名归一成稳定键（ARCH-01）。
+            let kind = super::state::ClientShellOverlayKind::from_storage_key(key)?;
+            (key.len() <= 64 && window.valid()).then(|| (kind.storage_key().to_owned(), window))
         })
         .collect())
 }
@@ -262,6 +264,27 @@ mod tests {
         let second = path_for_local_endpoint(Path::new("/run/herdr/two.sock"));
         assert_eq!(first, again);
         assert_ne!(first, second);
+    }
+
+    /// ARCH-01：浮窗位置用稳定键写盘，旧版本的 Debug 名读回时归一化，
+    /// 枚举改名不再静默丢配置；未知键按未设置处理。
+    #[test]
+    fn floating_page_keys_are_stable_and_legacy_debug_names_migrate() {
+        let window = r#"{"x":0.1,"y":0.2,"width":0.3,"height":0.4}"#;
+        let preferences: ClientChromePreferences = serde_json::from_str(&format!(
+            r#"{{"pages":{{"product_announcement":{window},"Help":{window},"mystery":{window}}}}}"#
+        ))
+        .expect("pages");
+        assert!(
+            preferences.pages.contains_key("product_announcement"),
+            "稳定键原样保留"
+        );
+        assert!(
+            preferences.pages.contains_key("help"),
+            "旧 Debug 名归一成稳定键：{:?}",
+            preferences.pages.keys().collect::<Vec<_>>()
+        );
+        assert_eq!(preferences.pages.len(), 2, "未知键被丢弃");
     }
 
     #[test]

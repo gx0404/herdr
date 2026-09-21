@@ -597,6 +597,7 @@ pub const TEXTS: Texts = Texts {
         hint_back: "back",
     },
     machine_files: MachineFilesTexts {
+        download_exists_fmt: "{path} already exists; move it away or rename it (downloads never overwrite)",
         title_fmt: "files · {label}",
         search_hint: " type to filter entries",
         count_fmt: "{count} entries",

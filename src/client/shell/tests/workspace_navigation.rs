@@ -1036,8 +1036,7 @@ fn collapsed_sidebar_scrolls_workspaces_with_the_wheel() {
     assert!(down.repaint, "滚轮必须请求重绘");
     // 滚轮步进与 pane 同一口径（HERDR-UX-014）：一格 = ui.mouse_scroll_lines。
     assert_eq!(
-        state.workspace_scroll,
-        state.config.mouse_scroll_lines,
+        state.workspace_scroll, state.config.mouse_scroll_lines,
         "滚轮应当按配置步进推动 workspace_scroll"
     );
     state.compose(100, 28).expect("scrolled collapsed frame");
@@ -1133,7 +1132,10 @@ fn collapsed_sidebar_scrolls_agents_with_the_wheel() {
     assert!(down.repaint, "滚轮必须请求重绘");
     // 步进跟 `ui.mouse_scroll_lines`（默认 3，HERDR-UX-014）：一次滚轮 = n 行。
     let step = state.config.mouse_scroll_lines;
-    assert_eq!(state.agent_scroll, step, "滚轮应当按配置步进推动 agent_scroll");
+    assert_eq!(
+        state.agent_scroll, step,
+        "滚轮应当按配置步进推动 agent_scroll"
+    );
     state.compose(100, 28).expect("scrolled agent frame");
     assert_eq!(
         first_agent(&state),

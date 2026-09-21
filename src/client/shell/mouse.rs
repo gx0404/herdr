@@ -1514,11 +1514,11 @@ impl ClientShellState {
                     outcome.repaint |= self.set_palette_hover(row_hit.map(|(_, index)| index));
                 }
                 MouseEventKind::ScrollUp => {
-                    self.scroll_palette((self.config.mouse_scroll_lines as isize) * -1);
+                    self.scroll_palette(-(self.config.mouse_scroll_lines as isize));
                     outcome.repaint = true;
                 }
                 MouseEventKind::ScrollDown => {
-                    self.scroll_palette((self.config.mouse_scroll_lines as isize) * 1);
+                    self.scroll_palette(self.config.mouse_scroll_lines as isize);
                     outcome.repaint = true;
                 }
                 MouseEventKind::Down(MouseButton::Left) => {

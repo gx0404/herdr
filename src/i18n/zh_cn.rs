@@ -632,6 +632,7 @@ pub const TEXTS: Texts = Texts {
         hint_back: "返回",
     },
     machine_files: MachineFilesTexts {
+        download_exists_fmt: "{path} 已存在；请先移走或改名（下载不覆盖）",
         title_fmt: "文件 · {label}",
         search_hint: " 输入以过滤条目",
         count_fmt: "{count} 个条目",
