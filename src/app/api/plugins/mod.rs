@@ -18,6 +18,11 @@ use manifest::{
     effective_platforms, ensure_platform_supported, normalize_action_id, normalize_plugin_source,
 };
 
+/// 注册表低频重载间隔：事件 hook 的前缀路径只用内存缓存判订阅者
+/// （APP-001），盘上的带外修改由这个定时器兜底收敛。
+pub(crate) const PLUGIN_REGISTRY_REFRESH_INTERVAL: std::time::Duration =
+    std::time::Duration::from_secs(30);
+
 #[cfg(test)]
 use crate::api::schema::{PluginCommandStatus, PluginInvocationContext};
 pub(crate) use manifest::load_plugin_manifest;
@@ -43,6 +48,22 @@ impl App {
         let entries = crate::persist::plugin_registry::try_load()?;
         self.replace_installed_plugins(entries);
         Ok(())
+    }
+
+    /// 低频定时器驱动的注册表重载。事件 hook 路径只读内存缓存
+    /// （`run_plugin_event_hooks` 判空前置），写 API 内联刷新；这里兜底
+    /// 收敛带外的盘上修改。
+    pub(crate) fn refresh_installed_plugins_registry_if_due(&mut self, now: std::time::Instant) {
+        let Some(deadline) = self.next_plugin_registry_refresh else {
+            return;
+        };
+        if now < deadline {
+            return;
+        }
+        self.next_plugin_registry_refresh = Some(now + PLUGIN_REGISTRY_REFRESH_INTERVAL);
+        if let Err(err) = self.refresh_installed_plugins() {
+            tracing::debug!(err = %err, "periodic plugin registry refresh failed");
+        }
     }
 
     fn update_installed_plugins<T>(
@@ -2648,6 +2669,66 @@ command = ["sh", "-c", "printf %s ${{HERDR_PANE_ID-unset}} > '{}'; sleep 1"]
         });
         assert_eq!(app.state.plugin_command_logs.len(), logs_before);
 
+        let _ = std::fs::remove_dir_all(&base);
+        match previous_config_home {
+            Some(previous) => std::env::set_var("XDG_CONFIG_HOME", previous),
+            None => std::env::remove_var("XDG_CONFIG_HOME"),
+        }
+    }
+
+    #[test]
+    fn event_hooks_skip_registry_refresh_without_cached_subscriber() {
+        let _guard = crate::config::test_config_env_lock().lock().unwrap();
+        let previous_config_home = std::env::var_os("XDG_CONFIG_HOME");
+        let base = unique_temp_path("plugin-cached-subscriber-precheck");
+        std::env::set_var("XDG_CONFIG_HOME", &base);
+        let root = base.join("plugin");
+        write_manifest(&root);
+        let plugin = load_plugin_manifest(&root.display().to_string(), true).unwrap();
+        // 只在盘上注册表放入订阅者；内存缓存保持为空。
+        crate::persist::plugin_registry::update(|plugins| {
+            plugins.retain(|entry| entry.plugin_id != plugin.plugin_id);
+            plugins.push(plugin.clone());
+        })
+        .unwrap();
+
+        let mut app = test_app();
+        app.policy.persist_plugin_registry = true;
+        let workspace = crate::workspace::Workspace::test_new("plugin-precheck");
+        app.state.workspaces = vec![workspace];
+        app.state.ensure_test_terminals();
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        assert!(app.state.installed_plugins.is_empty());
+
+        app.run_plugin_event_hooks(&crate::api::schema::EventEnvelope {
+            event: crate::api::schema::EventKind::WorktreeCreated,
+            data: crate::api::schema::EventData::WorktreeCreated {
+                workspace: app.workspace_info(0),
+                worktree: crate::api::schema::WorktreeInfo {
+                    path: "/tmp/repo".into(),
+                    branch: Some("feature".into()),
+                    is_bare: false,
+                    is_detached: false,
+                    is_prunable: false,
+                    is_linked_worktree: true,
+                    open_workspace_id: None,
+                    label: "feature".into(),
+                },
+            },
+        });
+
+        assert!(
+            app.state.plugin_command_logs.is_empty(),
+            "cached registry has no subscriber: event hooks must not refresh from disk"
+        );
+        // 内存缓存依旧为空：判空前置没有触发注册表加载。
+        assert!(app.state.installed_plugins.is_empty());
+
+        crate::persist::plugin_registry::update(|plugins| {
+            plugins.retain(|entry| entry.plugin_id != plugin.plugin_id);
+        })
+        .unwrap();
         let _ = std::fs::remove_dir_all(&base);
         match previous_config_home {
             Some(previous) => std::env::set_var("XDG_CONFIG_HOME", previous),

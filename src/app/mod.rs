@@ -131,6 +131,7 @@ pub struct App {
     pub(crate) next_api_worktree_operation_id: u64,
     pub(crate) next_auto_update_check: Option<Instant>,
     pub(crate) next_agent_manifest_update_check: Option<Instant>,
+    pub(crate) next_plugin_registry_refresh: Option<Instant>,
     pub(crate) update_version_check_enabled: bool,
     pub(crate) update_manifest_check_enabled: bool,
     pub(crate) loaded_host_cursor: crate::config::HostCursorModeConfig,
@@ -647,6 +648,9 @@ impl App {
                 .then_some(Instant::now() + AUTO_UPDATE_CHECK_INTERVAL),
             next_agent_manifest_update_check: manifest_check_enabled
                 .then_some(Instant::now() + AUTO_UPDATE_CHECK_INTERVAL),
+            next_plugin_registry_refresh: policy
+                .persist_plugin_registry
+                .then_some(Instant::now() + api::plugins::PLUGIN_REGISTRY_REFRESH_INTERVAL),
             update_version_check_enabled: config.update.version_check,
             update_manifest_check_enabled: config.update.manifest_check,
             loaded_host_cursor: config.ui.host_cursor,
@@ -1125,6 +1129,41 @@ mod tests {
 
         assert!(!changed);
         assert!(!app.git_refresh_in_flight);
+    }
+
+    #[test]
+    fn blocked_keepalive_state_change_has_no_render_impact() {
+        let mut app = test_app();
+        app.state.workspaces.push(Workspace::test_new("one"));
+        app.state.ensure_test_terminals();
+        let pane_id = app.state.workspaces[0].tabs[0].root_pane;
+
+        let heartbeat = || AppEvent::StateChanged {
+            pane_id,
+            agent: Some(Agent::Codex),
+            state: AgentState::Blocked,
+            visible_blocker: true,
+            visible_working: false,
+            process_exited: false,
+            observed_at: Instant::now(),
+        };
+
+        // 首次进入 blocked 是真实迁移，必须渲染。
+        assert!(app.handle_internal_event_with_render_impact(heartbeat()));
+        // 800ms 稳定可见信号心跳重复同一观测，不得触发整帧重绘。
+        assert!(!app.handle_internal_event_with_render_impact(heartbeat()));
+        // 真实迁移（blocked → idle）仍然渲染。
+        assert!(
+            app.handle_internal_event_with_render_impact(AppEvent::StateChanged {
+                pane_id,
+                agent: Some(Agent::Codex),
+                state: AgentState::Idle,
+                visible_blocker: false,
+                visible_working: false,
+                process_exited: false,
+                observed_at: Instant::now(),
+            })
+        );
     }
 
     #[test]

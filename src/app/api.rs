@@ -43,6 +43,13 @@ impl App {
                 self.handle_internal_event(ev);
                 false
             }
+            // blocked/稳定可见信号的周期性心跳会重复上报同一观测：只有真实迁移
+            // （pane_updates 非空）或 toast 变化才有渲染影响。
+            ev @ (AppEvent::StateChanged { .. } | AppEvent::HookStateReported { .. }) => {
+                let toast_before = self.state.toast.clone();
+                let pane_updates = self.handle_internal_event_with_pane_updates(ev);
+                !pane_updates.is_empty() || self.state.toast != toast_before
+            }
             ev => {
                 self.handle_internal_event(ev);
                 true

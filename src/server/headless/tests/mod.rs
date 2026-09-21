@@ -4368,6 +4368,45 @@ fn changed_git_refresh_requests_headless_render() {
     assert!(changed);
 }
 
+#[test]
+fn blocked_keepalive_state_change_requests_no_headless_render() {
+    let mut server = test_headless_server();
+    let workspace = crate::workspace::Workspace::test_new("one");
+    let pane_id = workspace.tabs[0].root_pane;
+    server.app.state.workspaces = vec![workspace];
+    server.app.state.ensure_test_terminals();
+    server.app.state.active = Some(0);
+    server.app.state.selected = 0;
+
+    let heartbeat = || AppEvent::StateChanged {
+        pane_id,
+        agent: Some(crate::detect::Agent::Codex),
+        state: crate::detect::AgentState::Blocked,
+        visible_blocker: true,
+        visible_working: false,
+        process_exited: false,
+        observed_at: std::time::Instant::now(),
+    };
+
+    // 首次进入 blocked 是真实迁移，必须渲染。
+    assert!(server.handle_internal_event_with_forwarding(heartbeat()));
+    // 800ms 稳定可见信号心跳重复同一观测，不得升级为整帧重绘；
+    // toast/声音兜底也不变（无客户端、无 toast 变化）。
+    assert!(!server.handle_internal_event_with_forwarding(heartbeat()));
+    // 真实迁移（blocked → idle）仍然渲染。
+    assert!(
+        server.handle_internal_event_with_forwarding(AppEvent::StateChanged {
+            pane_id,
+            agent: Some(crate::detect::Agent::Codex),
+            state: crate::detect::AgentState::Idle,
+            visible_blocker: false,
+            visible_working: false,
+            process_exited: false,
+            observed_at: std::time::Instant::now(),
+        })
+    );
+}
+
 #[tokio::test]
 async fn pane_death_reconciles_each_client_view_and_focus() {
     let mut server = test_headless_server();

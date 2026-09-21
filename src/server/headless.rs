@@ -3547,6 +3547,8 @@ impl HeadlessServer {
             self.app.run_agent_manifest_update_check();
         }
 
+        self.app.refresh_installed_plugins_registry_if_due(now);
+
         if self
             .app
             .session_save_deadline

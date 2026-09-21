@@ -147,6 +147,24 @@ def find_violations(paths, rules) -> list[str]:
     return violations
 
 
+def rust_function_body(code: str, name: str) -> str:
+    match = re.search(rf"(?m)^\s*(?:pub(?:\([^)]*\))?\s+)?fn\s+{name}\s*\(", code)
+    if match is None:
+        return ""
+    start = code.find("{", match.end())
+    if start == -1:
+        return ""
+    depth = 0
+    for index in range(start, len(code)):
+        if code[index] == "{":
+            depth += 1
+        elif code[index] == "}":
+            depth -= 1
+            if depth == 0:
+                return code[start : index + 1]
+    return ""
+
+
 class UiHotPathArchitectureTests(unittest.TestCase):
     def test_render_hot_paths_avoid_known_expensive_runtime_queries(self) -> None:
         violations = find_violations(HOT_PATH_SOURCES, FORBIDDEN_CALLS)
@@ -207,6 +225,55 @@ fn render() { TerminalRuntime::input_state; }
     def test_scanner_catches_imported_process_query(self) -> None:
         source = "fn render() { foreground_job(pid); }"
         self.assertRegex(production_code(source), FORBIDDEN_CALLS[3][0])
+
+    def test_plugin_event_hooks_check_cached_subscribers_before_registry_load(self) -> None:
+        # APP-001：emit_event 对每个可 hook 事件触发。注册表磁盘加载
+        # （plugin_registry::try_load，经 refresh_installed_plugins 包装）
+        # 不得出现在判订阅者之前的前缀路径上。
+        registry_load_calls = ("plugin_registry::try_load", "refresh_installed_plugins")
+
+        api_rs = production_code(
+            (PROJECT_ROOT / "src" / "app" / "api.rs").read_text(encoding="utf-8")
+        )
+        emit_event = rust_function_body(api_rs, "emit_event")
+        self.assertIn("run_plugin_event_hooks", emit_event, "emit_event body not found")
+        for call in registry_load_calls:
+            self.assertNotIn(
+                call, emit_event, f"emit_event must not reach the registry via {call}"
+            )
+
+        runtime_rs = production_code(
+            (PROJECT_ROOT / "src" / "app" / "api" / "plugins" / "runtime.rs").read_text(
+                encoding="utf-8"
+            )
+        )
+        hooks = rust_function_body(runtime_rs, "run_plugin_event_hooks")
+        subscriber_check = hooks.find("plugin_subscribes_to_event")
+        self.assertNotEqual(
+            subscriber_check,
+            -1,
+            "run_plugin_event_hooks must pre-check cached subscribers before loading",
+        )
+        load_index = hooks.find("refresh_installed_plugins")
+        self.assertNotEqual(
+            load_index,
+            -1,
+            "run_plugin_event_hooks must still refresh the registry "
+            "once a cached subscriber exists",
+        )
+        self.assertGreater(
+            load_index,
+            subscriber_check,
+            "refresh_installed_plugins must not run before the cached-subscriber check",
+        )
+        try_load_index = hooks.find("plugin_registry::try_load")
+        if try_load_index != -1:
+            self.assertGreater(
+                try_load_index,
+                subscriber_check,
+                "plugin_registry::try_load must not appear on the prefix path "
+                "before the cached-subscriber check",
+            )
 
 
 if __name__ == "__main__":

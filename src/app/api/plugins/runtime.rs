@@ -220,6 +220,17 @@ impl App {
         if !crate::api::schema::PLUGIN_HOOK_EVENT_KINDS.contains(&event.event) {
             return;
         }
+        // 先用内存缓存的注册表判订阅者：零插件/零订阅时不在每个事件上
+        // 做磁盘 refresh（flock + read + serde）。注册表的新鲜度由 plugin.*
+        // 写 API 与低频定时器负责（见 refresh_installed_plugins_registry_if_due）。
+        if !self
+            .state
+            .installed_plugins
+            .values()
+            .any(|plugin| plugin_subscribes_to_event(plugin, event_name))
+        {
+            return;
+        }
         if let Err(err) = self.refresh_installed_plugins() {
             tracing::warn!(err = %err, "failed to refresh plugin registry before event hooks");
             return;
@@ -228,11 +239,7 @@ impl App {
             .state
             .installed_plugins
             .values()
-            .filter(|plugin| {
-                plugin.enabled
-                    && plugin_manifest_available(plugin)
-                    && plugin.events.iter().any(|hook| hook.on == event_name)
-            })
+            .filter(|plugin| plugin_subscribes_to_event(plugin, event_name))
             .cloned()
             .collect::<Vec<_>>();
         if plugins.is_empty() {
@@ -279,6 +286,12 @@ fn current_unix_ms() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|duration| duration.as_millis().min(u128::from(u64::MAX)) as u64)
         .unwrap_or(0)
+}
+
+fn plugin_subscribes_to_event(plugin: &InstalledPluginInfo, event_name: &str) -> bool {
+    plugin.enabled
+        && plugin_manifest_available(plugin)
+        && plugin.events.iter().any(|hook| hook.on == event_name)
 }
 
 pub(super) fn read_capped_plugin_output(mut reader: impl Read, cap: usize) -> String {

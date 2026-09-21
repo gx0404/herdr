@@ -394,6 +394,7 @@ impl HeadlessServer {
                 let next_state = self.pane_effective_state(pane_id_val);
                 let next_agent_label = self.pane_effective_agent_label(pane_id_val);
 
+                let mut sound_forwarded = false;
                 if !suppress_completion
                     && self.app.state.toast_config.delay_seconds == 0
                     && self.app.state.sound.allows(agent_val)
@@ -412,6 +413,7 @@ impl HeadlessServer {
                             sound_notify_message(sound),
                             None,
                         );
+                        sound_forwarded = true;
                     }
                 }
 
@@ -448,7 +450,9 @@ impl HeadlessServer {
                     );
                 }
 
-                true
+                // 周期性心跳（blocked 800ms 等）重复同一观测时不产生 pane_updates，
+                // 不得升级为整帧重绘；toast/声音兜底保留。
+                !pane_updates.is_empty() || self.app.state.toast != toast_before || sound_forwarded
             }
             AppEvent::HookStateReported {
                 pane_id,
@@ -497,6 +501,7 @@ impl HeadlessServer {
                 let next_state = self.pane_effective_state(pane_id_val);
                 let next_agent_label = self.pane_effective_agent_label(pane_id_val);
 
+                let mut sound_forwarded = false;
                 if !suppress_completion
                     && self.app.state.toast_config.delay_seconds == 0
                     && self.app.state.sound.allows(agent_val)
@@ -515,6 +520,7 @@ impl HeadlessServer {
                             sound_notify_message(sound),
                             None,
                         );
+                        sound_forwarded = true;
                     }
                 }
 
@@ -551,7 +557,9 @@ impl HeadlessServer {
                     );
                 }
 
-                true
+                // 与 StateChanged 同理：序列驳回/无变化的 hook 上报不产生
+                // pane_updates，不升级为整帧重绘；toast/声音兜底保留。
+                !pane_updates.is_empty() || self.app.state.toast != toast_before || sound_forwarded
             }
             AppEvent::UpdateReady {
                 version,
