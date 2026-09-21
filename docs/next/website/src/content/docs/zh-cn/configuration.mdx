@@ -55,6 +55,16 @@ herdr server reload-config
 
 主题、侧边栏布局、复制行为等显示设置来自客户端的本地配置，查看 SSH 机器时也一样。窗格默认值、worktree、集成和自定义命令属于运行窗格的服务器。UI 中的 `reload config` 会同时重载客户端本地设置和选中服务器的配置，本地按键绑定也会更新；指定 `--remote-keybindings server` 时则使用选中服务器的按键绑定。
 
+## 界面语言
+
+`language` 决定 Herdr 自身 TUI 与 CLI 消息的语言，支持 `"zh-CN"`（默认）与 `"en"`。
+
+```toml
+language = "en"
+```
+
+环境变量 `HERDR_LANG` 可在单次运行时覆盖它。包含这一项在内的客户端设置支持热重载：`reload config`（或全局菜单中的 `reload config`）即生效，不需要重启窗格。
+
 ## 无客户端终端尺寸
 
 没有客户端连接时，服务器会使用 120×40 的虚拟终端进行布局并创建新窗格。可通过以下配置更改用于无客户端编排的回退尺寸：
