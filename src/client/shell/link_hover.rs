@@ -326,7 +326,7 @@ impl ClientShellState {
 
     pub(super) fn render_link_hover(
         &self,
-        frame: &mut FrameData,
+        canvas: &mut super::compose_canvas::ComposeCanvas,
         occlusion: &mut crate::kitty_graphics::surface::Occlusion,
     ) {
         let Some(hover) = self
@@ -337,9 +337,10 @@ impl ClientShellState {
             return;
         };
         let rect = hover.target.inner_rect;
+        let (frame_width, frame_height) = canvas.size();
         for region in &hover.regions {
             let row = rect.y.saturating_add(region.row);
-            if row >= frame.height {
+            if row >= frame_height {
                 continue;
             }
             occlusion.cover(
@@ -352,19 +353,14 @@ impl ClientShellState {
                         .saturating_add(1),
                     1,
                 )
-                .intersection(Rect::new(0, 0, frame.width, frame.height)),
+                .intersection(Rect::new(0, 0, frame_width, frame_height)),
             );
             for col in region.start_col..=region.end_col {
                 let col = rect.x.saturating_add(col);
-                if col >= frame.width {
+                if col >= frame_width {
                     continue;
                 }
-                if let Some(cell) = frame
-                    .cells
-                    .get_mut(usize::from(row) * usize::from(frame.width) + usize::from(col))
-                {
-                    cell.modifier |= Modifier::UNDERLINED.bits();
-                }
+                canvas.buffer()[(col, row)].modifier |= Modifier::UNDERLINED;
             }
         }
     }

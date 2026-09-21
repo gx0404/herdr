@@ -7,6 +7,7 @@ mod workspace_navigation;
 use workspace_navigation::WorkspaceNavigationTarget;
 mod broadcast;
 mod command_palette;
+mod compose_canvas;
 mod composition;
 mod config;
 mod context_menu;
@@ -292,48 +293,6 @@ fn list_row_style(
     } else {
         style.fg(palette.text)
     }
-}
-
-fn blit_pane_surface(target: &mut FrameData, source: &FrameData, area: Rect) {
-    let copy_width = source.width.min(area.width);
-    let copy_height = source.height.min(area.height);
-    let hyperlink_base = target.hyperlinks.len() as u32;
-    target.hyperlinks.extend(source.hyperlinks.iter().cloned());
-
-    for row in 0..copy_height {
-        for col in 0..copy_width {
-            let source_index = row as usize * source.width as usize + col as usize;
-            let target_x = area.x + col;
-            let target_y = area.y + row;
-            let target_index = target_y as usize * target.width as usize + target_x as usize;
-            let (Some(source_cell), Some(target_cell)) = (
-                source.cells.get(source_index),
-                target.cells.get_mut(target_index),
-            ) else {
-                continue;
-            };
-            *target_cell = source_cell.clone();
-            target_cell.hyperlink = source_cell.hyperlink.and_then(|index| {
-                ((index as usize) < source.hyperlinks.len()).then_some(hyperlink_base + index)
-            });
-        }
-    }
-
-    // 尺寸不匹配（resize 首帧仍在等新尺寸的 surface）时真实光标在可见区外：
-    // 把它夹回目标区域边缘但标记不可见，IME 锚点留在 pane 内而宿主不会把
-    // 边缘当成真实插入点；区域内的光标原样透传。
-    target.cursor = source.cursor.as_ref().and_then(|cursor| {
-        (copy_width > 0 && copy_height > 0).then(|| {
-            let in_range = cursor.x < copy_width && cursor.y < copy_height;
-            crate::protocol::CursorState {
-                x: area.x + cursor.x.min(copy_width - 1),
-                y: area.y + cursor.y.min(copy_height - 1),
-                visible: cursor.visible && in_range,
-                shape: cursor.shape,
-            }
-        })
-    });
-    target.graphics.clear();
 }
 
 #[cfg(test)]

@@ -1286,7 +1286,7 @@ impl State {
     /// 聚焦终端的插入点（经典布局下页面铺满 pane 区域，行为不变）。
     pub(super) fn paint(
         &self,
-        frame: &mut FrameData,
+        canvas: &mut super::compose_canvas::ComposeCanvas,
         area: Rect,
         palette: &Palette,
         painting_page: Option<Page>,
@@ -1298,12 +1298,18 @@ impl State {
         if !visible {
             return None;
         }
-        let mut buffer = frame.to_ratatui_buffer()?;
-        let output = render::paint(&mut buffer, area, self, palette, painting_page, draw_hover);
+        let output = render::paint(
+            canvas.buffer(),
+            area,
+            self,
+            palette,
+            painting_page,
+            draw_hover,
+        );
         if painting_page.is_some() {
             let selected = self.selected_hit.min(output.hits.len().saturating_sub(1));
             if let Some((rect, _)) = output.hits.get(selected) {
-                buffer.set_style(
+                canvas.buffer().set_style(
                     *rect,
                     Style::default()
                         .fg(palette.accent)
@@ -1311,13 +1317,13 @@ impl State {
                 );
             }
         }
-        let cursor = frame.cursor.clone().filter(|cursor| {
+        let cursor = canvas.cursor().filter(|cursor| {
             let point = (cursor.x, cursor.y);
             !(contains(output.page_rect, point)
                 || contains(output.hover_rect, point)
                 || contains(output.dialog_rect, point))
         });
-        frame.replace_from_ratatui_buffer_preserving_effects(&buffer, cursor);
+        canvas.set_cursor(cursor);
         let dialog = !output.dialog_rect.is_empty();
         // 经典布局下页面与总览浮层可同帧出现：两块各自交给 kitty 图片 occlusion，
         // 不合成外接矩形（见 `Painted::covered`）。
@@ -3896,12 +3902,12 @@ impl ClientShellState {
     /// `Painted::covered`）。
     pub(super) fn paint_observability(
         &mut self,
-        frame: &mut FrameData,
+        canvas: &mut super::compose_canvas::ComposeCanvas,
         area: Rect,
     ) -> Option<[Rect; 2]> {
         self.observability.begin_paint();
         let painted = self.observability.paint(
-            frame,
+            canvas,
             area,
             &self.config.palette,
             self.observability.page,

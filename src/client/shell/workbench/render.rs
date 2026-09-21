@@ -53,8 +53,15 @@ impl ClientShellState {
         let palette = self.config.palette.clone();
         let palette = &palette;
         let full = Rect::new(0, 0, cols, rows);
-        let mut buffer = Buffer::empty(full);
-        buffer.set_style(full, Style::default().fg(palette.text).bg(palette.panel_bg));
+        // 单 Buffer 管线（批 12b）：与经典 compose 共用同一个保留 Buffer。
+        let mut canvas = super::super::compose_canvas::ComposeCanvas::reuse_or_new(
+            self.compose_buffer.take(),
+            cols,
+            rows,
+        );
+        canvas
+            .buffer()
+            .set_style(full, Style::default().fg(palette.text).bg(palette.panel_bg));
         self.hits = ShellHitMap::default();
         self.workbench.hits.clear();
         self.workbench.geometry =
@@ -82,7 +89,7 @@ impl ClientShellState {
             let width = (label.width() as u16).min(cols.saturating_sub(x));
             let rect = Rect::new(x, 0, width, u16::from(rows > 0));
             put(
-                &mut buffer,
+                canvas.buffer(),
                 rect,
                 label,
                 Style::default()
@@ -136,7 +143,7 @@ impl ClientShellState {
         };
         if !workspace.is_empty() || !agents.is_empty() {
             super::super::endpoint_sidebar::render_expanded_regions(
-                &mut buffer,
+                canvas.buffer(),
                 workspace,
                 Some(snapshot),
                 &self.config,
@@ -200,13 +207,15 @@ impl ClientShellState {
                 }
             };
             let header = Rect::new(area.x, area.y, area.width, 1);
-            buffer.set_style(header, Style::default().bg(palette.surface0));
+            canvas
+                .buffer()
+                .set_style(header, Style::default().bg(palette.surface0));
             // 监控 / 账号面板头部带显式关闭按钮：终端聚焦时 Esc 进终端，
             // 用户仍能一键关掉停靠面板。
             let closable = matches!(panel, PanelId::Monitor | PanelId::Accounts);
             let controls = if closable { 6 } else { 3 };
             put(
-                &mut buffer,
+                canvas.buffer(),
                 Rect::new(area.x, area.y, area.width.saturating_sub(controls), 1),
                 &label,
                 Style::default()
@@ -224,7 +233,7 @@ impl ClientShellState {
                 1,
             );
             put(
-                &mut buffer,
+                canvas.buffer(),
                 toggle,
                 if self.workbench.dock.maximized.is_some() {
                     " ◫ "
@@ -238,7 +247,7 @@ impl ClientShellState {
                 .push((toggle, Action::Maximize(panel.clone())));
             if closable && area.width > 6 {
                 let close = Rect::new(toggle.x.saturating_sub(3).max(area.x), area.y, 3, 1);
-                put(&mut buffer, close, " × ", Style::default().fg(color));
+                put(canvas.buffer(), close, " × ", Style::default().fg(color));
                 self.workbench
                     .hits
                     .push((close, Action::Close(panel.clone())));
@@ -264,7 +273,7 @@ impl ClientShellState {
                 self.workbench.tab_focus.insert(*id, stamp);
                 let mut strip_hits = ShellHitMap::default();
                 super::super::render::render_tab_strip(
-                    &mut buffer,
+                    canvas.buffer(),
                     Rect::new(area.x, area.y + 1, area.width, u16::from(area.height > 1)),
                     &self.config,
                     scroll,
@@ -303,7 +312,7 @@ impl ClientShellState {
         for divider in &self.workbench.geometry.dividers {
             for y in divider.handle.y..divider.handle.bottom() {
                 for x in divider.handle.x..divider.handle.right() {
-                    buffer[(x, y)]
+                    canvas.buffer()[(x, y)]
                         .set_symbol(if divider.axis == dock::Axis::Horizontal {
                             "│"
                         } else {
@@ -328,12 +337,11 @@ impl ClientShellState {
             )
         };
         put(
-            &mut buffer,
+            canvas.buffer(),
             footer,
             hint,
             Style::default().fg(palette.overlay0),
         );
-        let mut frame = FrameData::from_ratatui_buffer_with_hyperlinks(&buffer, None, &[]);
         let mut occlusion = crate::kitty_graphics::surface::Occlusion::default();
         self.observability.begin_paint();
         let mut stale_panel_areas = Vec::new();
@@ -350,10 +358,10 @@ impl ClientShellState {
                     stale_panel_areas.push(area);
                     continue;
                 };
-                let cursor = frame.cursor.clone();
-                blit_pane_surface(&mut frame, &view.surface.frame, area);
+                let cursor = canvas.cursor();
+                canvas.blit_frame(&view.surface.frame, area);
                 if panel != &self.workbench.dock.focused {
-                    frame.cursor = cursor;
+                    canvas.set_cursor(cursor);
                 }
                 self.hits
                     .panes
@@ -391,7 +399,7 @@ impl ClientShellState {
                 // 面板 pass 不画悬浮层：悬浮层由下方的全局 pass 画一次。
                 if let Some(painted) =
                     self.observability
-                        .paint(&mut frame, area, palette, Some(tab), false)
+                        .paint(&mut canvas, area, palette, Some(tab), false)
                 {
                     for rect in painted.covered {
                         occlusion.cover(rect);
@@ -416,10 +424,11 @@ impl ClientShellState {
             || drop_preview.is_some()
             || self.endpoint_error.is_some()
         {
-            if let Some(mut composed) = frame.to_ratatui_buffer() {
+            {
+                let composed = canvas.buffer();
                 for area in &stale_panel_areas {
                     put(
-                        &mut composed,
+                        composed,
                         *area,
                         tr("Waiting for terminal…", "正在同步终端…"),
                         Style::default().fg(palette.overlay0),
@@ -431,12 +440,7 @@ impl ClientShellState {
                         && (hit.inner_rect.y > hit.rect.y || self.workbench.arranging)
                     {
                         let handle = Rect::new(hit.rect.x + 1, hit.rect.y, 2, 1);
-                        put(
-                            &mut composed,
-                            handle,
-                            "⠿",
-                            Style::default().fg(palette.accent),
-                        );
+                        put(composed, handle, "⠿", Style::default().fg(palette.accent));
                         self.workbench
                             .hits
                             .push((handle, Action::Pane(hit.pane_id.clone())));
@@ -457,20 +461,13 @@ impl ClientShellState {
                             .border_type(BorderType::Rounded)
                             .border_style(Style::default().fg(palette.accent))
                             .title(tr(" Drop here ", " 放到这里 "))
-                            .render(area, &mut composed);
+                            .render(area, composed);
                         occlusion.cover(area);
                     }
                 }
                 if let Some(error) = self.endpoint_error.as_deref() {
-                    put(
-                        &mut composed,
-                        footer,
-                        error,
-                        Style::default().fg(palette.red),
-                    );
+                    put(composed, footer, error, Style::default().fg(palette.red));
                 }
-                let cursor = frame.cursor.clone();
-                frame.replace_from_ratatui_buffer_preserving_effects(&composed, cursor);
             }
         }
         if visual_bell {
@@ -479,29 +476,21 @@ impl ClientShellState {
                 .as_ref()
                 .and_then(|id| self.hits.panes.iter().find(|hit| &hit.pane_id == id))
             {
-                let cursor = frame.cursor.clone();
-                if let Some(mut composed) = frame.to_ratatui_buffer() {
-                    super::super::composition::emphasize_pane_border(
-                        &mut composed,
-                        hit,
-                        palette.yellow,
-                    );
-                    // 聚焦边框强调只改样式不改符号，保留既有超链接索引。
-                    frame.replace_from_ratatui_buffer_with_policy(
-                        &composed,
-                        cursor,
-                        crate::protocol::HyperlinkPreservation::SymbolsUntouched,
-                    );
-                }
+                // 聚焦边框强调只改样式不改符号，链接登记不受影响。
+                super::super::composition::emphasize_pane_border(
+                    canvas.buffer(),
+                    hit,
+                    palette.yellow,
+                );
             }
         }
-        self.paint_frozen_selection(&mut frame, &mut occlusion);
-        self.paint_shell_copy(&mut frame, &mut occlusion)?;
-        // C-12 (c)：overlay 打开时这次往返的结果被直接丢弃，提前到分配前判断。
+        self.paint_frozen_selection(&mut canvas, &mut occlusion);
+        self.paint_shell_copy(&mut canvas, &mut occlusion)?;
+        // C-12 (c)：overlay 打开时这段不画，提前到任何写入之前判断。
         if self.overlay.is_none() {
-            if let Some(mut composed) = frame.to_ratatui_buffer() {
+            {
                 if let Some(bar) = super::super::render::render_mode_bar(
-                    &mut composed,
+                    canvas.buffer(),
                     full,
                     self.mode,
                     self.copy_mode.as_ref(),
@@ -514,8 +503,6 @@ impl ClientShellState {
                 ) {
                     occlusion.cover(bar);
                 }
-                let cursor = frame.cursor.clone();
-                frame.replace_from_ratatui_buffer_preserving_effects(&composed, cursor);
             }
         }
         self.hits.popup = None;
@@ -544,16 +531,15 @@ impl ClientShellState {
                 area,
             ) {
                 occlusion.start_popup(geometry.outer);
-                let mut composed = frame.to_ratatui_buffer()?;
-                ratatui::widgets::Clear.render(geometry.outer, &mut composed);
+                ratatui::widgets::Clear.render(geometry.outer, canvas.buffer());
                 Block::default()
                     .borders(Borders::ALL)
                     .border_type(BorderType::Rounded)
                     .title(popup.title.clone())
                     .border_style(Style::default().fg(palette.accent))
-                    .render(geometry.outer, &mut composed);
-                frame.replace_from_ratatui_buffer_preserving_effects(&composed, None);
-                blit_pane_surface(&mut frame, &popup.frame, geometry.inner);
+                    .render(geometry.outer, canvas.buffer());
+                canvas.set_cursor(None);
+                canvas.blit_frame(&popup.frame, geometry.inner);
                 self.hits.popup = Some(PaneHit {
                     rect: geometry.outer,
                     inner_rect: geometry.inner,
@@ -578,7 +564,7 @@ impl ClientShellState {
             // 全局浮层在终端内容、把手与选择高亮之后绘制，保持视觉与输入层级一致。
             if let Some(painted) = self
                 .observability
-                .paint(&mut frame, full, palette, None, true)
+                .paint(&mut canvas, full, palette, None, true)
             {
                 for rect in painted.covered {
                     occlusion.cover(rect);
@@ -587,7 +573,7 @@ impl ClientShellState {
             }
         }
         self.paint_shell_feedback(
-            &mut frame,
+            &mut canvas,
             ClientShellLayout {
                 sidebar: Rect::default(),
                 tab_bar: Rect::default(),
@@ -596,7 +582,7 @@ impl ClientShellState {
             },
             &mut occlusion,
         )?;
-        self.paint_shell_overlays(&mut frame, &mut occlusion)?;
+        self.paint_shell_overlays(&mut canvas, &mut occlusion)?;
         let mut graphics = std::mem::take(&mut self.workbench.cleanup);
         for (id, view) in &mut self.workbench.views {
             let area = self.workbench.geometry.panels.iter().find(|(panel, _)| matches!(panel, PanelId::Terminal(group) if group.to_string() == *id)).map(|(panel, area)| body(*area, panel));
@@ -627,7 +613,8 @@ impl ClientShellState {
                 &occlusion,
             ));
         }
-        frame.graphics = graphics;
+        let (frame, buffer) = canvas.finish(graphics);
+        self.compose_buffer = Some(buffer);
         self.hits.composed = true;
         Some(frame)
     }

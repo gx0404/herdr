@@ -331,9 +331,9 @@ fn observability_paint_keeps_the_pane_cursor_outside_the_page_rect() {
         visible: true,
         shape: 2,
     };
-    let blank = Buffer::empty(Rect::new(0, 0, 120, 40));
     let mut beside =
-        FrameData::from_ratatui_buffer_with_hyperlinks(&blank, Some(cursor.clone()), &[]);
+        crate::client::shell::compose_canvas::ComposeCanvas::reuse_or_new(None, 120, 40);
+    beside.set_cursor(Some(cursor.clone()));
     let painted = state
         .paint(
             &mut beside,
@@ -345,12 +345,14 @@ fn observability_paint_keeps_the_pane_cursor_outside_the_page_rect() {
         .expect("页面已绘制");
     assert_eq!(painted.page_rect, Rect::new(60, 1, 60, 38));
     assert_eq!(
-        beside.cursor,
+        beside.cursor(),
         Some(cursor.clone()),
         "页面矩形不含光标时保留"
     );
 
-    let mut covering = FrameData::from_ratatui_buffer_with_hyperlinks(&blank, Some(cursor), &[]);
+    let mut covering =
+        crate::client::shell::compose_canvas::ComposeCanvas::reuse_or_new(None, 120, 40);
+    covering.set_cursor(Some(cursor));
     state
         .paint(
             &mut covering,
@@ -360,7 +362,7 @@ fn observability_paint_keeps_the_pane_cursor_outside_the_page_rect() {
             false,
         )
         .expect("页面已绘制");
-    assert!(covering.cursor.is_none(), "页面矩形覆盖光标时置空");
+    assert!(covering.cursor().is_none(), "页面矩形覆盖光标时置空");
 }
 
 #[test]
@@ -459,11 +461,11 @@ fn blit_clamps_an_out_of_range_cursor_instead_of_dropping_it() {
         visible: true,
         shape: 2,
     });
-    let blank = Buffer::empty(Rect::new(0, 0, 40, 10));
-    let mut target = FrameData::from_ratatui_buffer_with_hyperlinks(&blank, None, &[]);
-    blit_pane_surface(&mut target, &source.frame, Rect::new(10, 2, 2, 1));
+    let mut canvas =
+        crate::client::shell::compose_canvas::ComposeCanvas::reuse_or_new(None, 40, 10);
+    canvas.blit_frame(&source.frame, Rect::new(10, 2, 2, 1));
     assert_eq!(
-        target.cursor,
+        canvas.cursor(),
         Some(crate::protocol::CursorState {
             x: 11,
             y: 2,
@@ -472,10 +474,11 @@ fn blit_clamps_an_out_of_range_cursor_instead_of_dropping_it() {
         }),
         "越界光标夹回边缘且不可见"
     );
-    let mut fits = FrameData::from_ratatui_buffer_with_hyperlinks(&blank, None, &[]);
-    blit_pane_surface(&mut fits, &source.frame, Rect::new(10, 2, 10, 5));
+    let mut canvas =
+        crate::client::shell::compose_canvas::ComposeCanvas::reuse_or_new(None, 40, 10);
+    canvas.blit_frame(&source.frame, Rect::new(10, 2, 10, 5));
     assert_eq!(
-        fits.cursor,
+        canvas.cursor(),
         Some(crate::protocol::CursorState {
             x: 13,
             y: 3,
@@ -484,9 +487,10 @@ fn blit_clamps_an_out_of_range_cursor_instead_of_dropping_it() {
         }),
         "区域内的光标保持可见"
     );
-    let mut empty = FrameData::from_ratatui_buffer_with_hyperlinks(&blank, None, &[]);
-    blit_pane_surface(&mut empty, &source.frame, Rect::new(10, 2, 0, 0));
-    assert!(empty.cursor.is_none(), "空区域没有光标可放");
+    let mut canvas =
+        crate::client::shell::compose_canvas::ComposeCanvas::reuse_or_new(None, 40, 10);
+    canvas.blit_frame(&source.frame, Rect::new(10, 2, 0, 0));
+    assert!(canvas.cursor().is_none(), "空区域没有光标可放");
 }
 
 // ---------------------------------------------------------------------------
@@ -4328,16 +4332,18 @@ fn observability_paint_reports_page_and_overview_covers_separately() {
         leave_at: None,
         pinned: true,
     });
-    let mut frame = state.compose(120, 40).expect("页面 + 总览同帧");
+    state.compose(120, 40).expect("页面 + 总览同帧");
     let area = state.observability.page_rect;
     assert!(!area.is_empty(), "经典布局页面铺满 pane 区");
     let hover_rect = state.observability.hover_rect;
     assert!(!hover_rect.is_empty());
     state.observability.begin_paint();
+    let mut canvas =
+        crate::client::shell::compose_canvas::ComposeCanvas::reuse_or_new(None, 120, 40);
     let painted = state
         .observability
         .paint(
-            &mut frame,
+            &mut canvas,
             area,
             &state.config.palette,
             Some(Page::Monitor),

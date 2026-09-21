@@ -1349,6 +1349,9 @@ pub(crate) struct ClientShellState {
     pub(super) last_tab_bar_width: Option<u16>,
     pub(super) last_composed_size: Option<(u16, u16)>,
     pub(super) last_composed_at: Option<std::time::Instant>,
+    /// compose 单 Buffer 管线的保留缓冲（批 12b）：跨帧复用格分配，
+    /// 尺寸变化时重建。compose 入口 take、收尾存回。
+    pub(super) compose_buffer: Option<ratatui::buffer::Buffer>,
     pub(super) selection_repaint_deadline: Option<std::time::Instant>,
     pub(super) hits: ShellHitMap,
     pub(super) endpoints: Vec<ClientShellEndpoint>,
@@ -1590,6 +1593,7 @@ impl ClientShellState {
             last_tab_bar_width: None,
             last_composed_size: None,
             last_composed_at: None,
+            compose_buffer: None,
             selection_repaint_deadline: None,
             hits: ShellHitMap::default(),
             endpoints: vec![local_endpoint()],

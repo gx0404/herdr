@@ -753,7 +753,7 @@ impl ClientShellState {
 
     pub(super) fn paint_frozen_selection(
         &mut self,
-        frame: &mut FrameData,
+        canvas: &mut super::compose_canvas::ComposeCanvas,
         occlusion: &mut crate::kitty_graphics::surface::Occlusion,
     ) {
         let Some(capture) = self.selection_capture.as_ref() else {
@@ -771,35 +771,31 @@ impl ClientShellState {
             self.cancel_frozen_selection();
             return;
         }
+        let (frame_width, frame_height) = canvas.size();
         let area = hit
             .inner_rect
-            .intersection(Rect::new(0, 0, frame.width, frame.height));
-        let link_offset = frame.hyperlinks.len() as u32;
-        if capture.text.is_none() {
-            frame.hyperlinks.extend(capture.preview.hyperlinks.clone());
-        }
+            .intersection(Rect::new(0, 0, frame_width, frame_height));
         for y in 0..area.height {
             for x in 0..area.width {
                 let cell = if let Some(text) = capture.text.as_ref() {
                     text.row(capture.top + u32::from(y))
                         .and_then(|row| row.cells.get(usize::from(x)))
                         .map(|cell| {
-                            let hyperlink = cell.hyperlink.as_ref().map(|uri| {
-                                frame.hyperlinks.push(uri.clone());
-                                frame.hyperlinks.len() as u32 - 1
-                            });
-                            crate::protocol::CellData {
-                                symbol: if cell.width == 0 {
-                                    " ".into()
-                                } else {
-                                    cell.text.clone().into()
+                            (
+                                crate::protocol::CellData {
+                                    symbol: if cell.width == 0 {
+                                        " ".into()
+                                    } else {
+                                        cell.text.clone().into()
+                                    },
+                                    fg: cell.fg,
+                                    bg: cell.bg,
+                                    modifier: cell.modifier,
+                                    skip: cell.width == 0,
+                                    hyperlink: None,
                                 },
-                                fg: cell.fg,
-                                bg: cell.bg,
-                                modifier: cell.modifier,
-                                skip: cell.width == 0,
-                                hyperlink,
-                            }
+                                cell.hyperlink.clone(),
+                            )
                         })
                 } else {
                     capture
@@ -810,15 +806,18 @@ impl ClientShellState {
                                 * usize::from(capture.preview.width)
                                 + usize::from(capture.preview_area.x + x),
                         )
-                        .cloned()
-                        .map(|mut cell| {
-                            cell.hyperlink = cell.hyperlink.map(|id| id + link_offset);
-                            cell
+                        .map(|cell| {
+                            let uri = cell
+                                .hyperlink
+                                .and_then(|id| capture.preview.hyperlinks.get(id as usize))
+                                .cloned();
+                            let mut cell = cell.clone();
+                            cell.hyperlink = None;
+                            (cell, uri)
                         })
                 };
-                if let Some(cell) = cell {
-                    frame.cells[usize::from(area.y + y) * usize::from(frame.width)
-                        + usize::from(area.x + x)] = cell;
+                if let Some((cell, uri)) = cell {
+                    canvas.put_cell_data(area.x + x, area.y + y, &cell, uri.as_deref());
                 }
             }
         }
@@ -835,12 +834,12 @@ impl ClientShellState {
                     .saturating_sub(capture.top) as usize,
             });
         }
-        if frame
-            .cursor
+        if canvas
+            .cursor()
             .as_ref()
             .is_some_and(|cursor| contains(area, (cursor.x, cursor.y)))
         {
-            frame.cursor = None;
+            canvas.set_cursor(None);
         }
         if let Some(capture) = self
             .selection_capture

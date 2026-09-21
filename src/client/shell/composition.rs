@@ -1,25 +1,5 @@
 use super::*;
 
-fn restore_mode_bar(
-    frame: &mut FrameData,
-    bar: Option<Rect>,
-    cells: Option<&[crate::protocol::CellData]>,
-) {
-    let (Some(bar), Some(cells)) = (bar, cells) else {
-        return;
-    };
-    let start = usize::from(bar.y) * usize::from(frame.width) + usize::from(bar.x);
-    frame.cells[start..start + usize::from(bar.width)].clone_from_slice(cells);
-    // 只有模式条真正覆盖了光标所在的列区间才抹掉光标；同一行其它列仍归终端。
-    if frame
-        .cursor
-        .as_ref()
-        .is_some_and(|cursor| contains(bar, (cursor.x, cursor.y)))
-    {
-        frame.cursor = None;
-    }
-}
-
 impl ClientShellState {
     fn prepare_chrome_feedback(&mut self, now: std::time::Instant) {
         // Entrance-fade clocks: overlay kind transitions and toast arrivals
@@ -39,11 +19,19 @@ impl ClientShellState {
         self.had_toast = has_toast;
     }
 
-    fn compose_unavailable(&mut self, cols: u16, rows: u16) -> FrameData {
+    fn compose_unavailable(
+        &mut self,
+        cols: u16,
+        rows: u16,
+    ) -> super::compose_canvas::ComposeCanvas {
         let layout = self.layout(cols, rows);
-        let mut buffer = Buffer::empty(Rect::new(0, 0, cols, rows));
-        buffer.set_style(
-            buffer.area,
+        let mut canvas = super::compose_canvas::ComposeCanvas::reuse_or_new(
+            self.compose_buffer.take(),
+            cols,
+            rows,
+        );
+        canvas.buffer().set_style(
+            Rect::new(0, 0, cols, rows),
             Style::default()
                 .fg(self.config.palette.text)
                 .bg(self.config.palette.panel_bg),
@@ -95,7 +83,7 @@ impl ClientShellState {
         };
         if let Some(snapshot) = local_snapshot {
             render::render_sidebar(
-                &mut buffer,
+                canvas.buffer(),
                 sidebar,
                 snapshot,
                 &self.config,
@@ -104,7 +92,7 @@ impl ClientShellState {
             );
         } else {
             super::endpoint_sidebar::render_expanded(
-                &mut buffer,
+                canvas.buffer(),
                 sidebar,
                 self.snapshot.as_deref(),
                 &self.config,
@@ -136,7 +124,7 @@ impl ClientShellState {
         };
         if local_snapshot.is_none() || self.endpoint_error.is_some() {
             render::put_text(
-                &mut buffer,
+                canvas.buffer(),
                 message_area.x,
                 message_area.y,
                 message_area.width,
@@ -145,7 +133,7 @@ impl ClientShellState {
             );
         }
         render::render_mode_bar(
-            &mut buffer,
+            canvas.buffer(),
             Rect::new(0, 0, cols, rows),
             self.mode,
             None,
@@ -156,7 +144,7 @@ impl ClientShellState {
             &self.config.palette,
             &self.config.components,
         );
-        FrameData::from_ratatui_buffer_with_hyperlinks(&buffer, None, &[])
+        canvas
     }
 
     pub(crate) fn compose(&mut self, cols: u16, rows: u16) -> Option<FrameData> {
@@ -191,12 +179,14 @@ impl ClientShellState {
                 .as_ref()
                 .is_some_and(|target| self.navigation_target_valid(target));
         if self.snapshot.is_none() || self.pane_surface.is_none() {
-            let mut frame = self.compose_unavailable(cols, rows);
+            let mut canvas = self.compose_unavailable(cols, rows);
             let area = self.layout(cols, rows).pane_surface;
-            self.paint_observability(&mut frame, area);
+            self.paint_observability(&mut canvas, area);
             let mut occlusion = crate::kitty_graphics::surface::Occlusion::default();
-            self.paint_shell_feedback(&mut frame, self.layout(cols, rows), &mut occlusion)?;
-            self.paint_shell_overlays(&mut frame, &mut occlusion)?;
+            self.paint_shell_feedback(&mut canvas, self.layout(cols, rows), &mut occlusion)?;
+            self.paint_shell_overlays(&mut canvas, &mut occlusion)?;
+            let (frame, buffer) = canvas.finish(Vec::new());
+            self.compose_buffer = Some(buffer);
             return Some(frame);
         }
         let snapshot = self.snapshot.as_deref()?;
@@ -232,9 +222,15 @@ impl ClientShellState {
         };
         let visual_bell = self.visual_bell_active();
         let spinner = self.spinner_glyph();
-        let mut buffer = Buffer::empty(Rect::new(0, 0, cols, rows));
+        // 单 Buffer 管线（批 12b）：chrome 与 pane 内容画进同一个保留 Buffer，
+        // 各装饰段直写，收尾只做一次 Buffer→FrameData 转换。
+        let mut canvas = super::compose_canvas::ComposeCanvas::reuse_or_new(
+            self.compose_buffer.take(),
+            cols,
+            rows,
+        );
         self.hits = render::render_shell(
-            &mut buffer,
+            canvas.buffer(),
             layout,
             snapshot,
             &self.config,
@@ -353,7 +349,7 @@ impl ClientShellState {
             None
         } else {
             render::render_mode_bar(
-                &mut buffer,
+                canvas.buffer(),
                 mode_bar_area,
                 self.mode,
                 self.copy_mode.as_ref(),
@@ -371,12 +367,8 @@ impl ClientShellState {
             self.hits.tab_scroll_left = Rect::default();
             self.hits.tab_scroll_right = Rect::default();
         }
-        let mut frame = FrameData::from_ratatui_buffer_with_hyperlinks(&buffer, None, &[]);
-        let mode_bar_cells = mode_bar.map(|bar| {
-            let start = usize::from(bar.y) * usize::from(frame.width) + usize::from(bar.x);
-            frame.cells[start..start + usize::from(bar.width)].to_vec()
-        });
-        blit_pane_surface(&mut frame, &surface.frame, layout.pane_surface);
+        let mode_bar_cells = mode_bar.map(|bar| canvas.save_cells(bar));
+        canvas.blit_frame(&surface.frame, layout.pane_surface);
         if visual_bell {
             if let Some(focused_pane_id) = snapshot.focused_pane_id.as_deref() {
                 if let Some(hit) = self
@@ -386,25 +378,26 @@ impl ClientShellState {
                     .find(|hit| hit.pane_id == focused_pane_id)
                     .cloned()
                 {
-                    let cursor = frame.cursor.clone();
-                    let mut composed = frame.to_ratatui_buffer()?;
-                    emphasize_pane_border(&mut composed, &hit, self.config.palette.yellow);
-                    // 聚焦边框强调只改样式不改符号，保留既有超链接索引。
-                    frame.replace_from_ratatui_buffer_with_policy(
-                        &composed,
-                        cursor,
-                        crate::protocol::HyperlinkPreservation::SymbolsUntouched,
-                    );
+                    // 聚焦边框强调只改样式不改符号，链接登记不受影响。
+                    emphasize_pane_border(canvas.buffer(), &hit, self.config.palette.yellow);
                 }
             }
         }
-        restore_mode_bar(&mut frame, mode_bar, mode_bar_cells.as_deref());
+        if let Some(bar) = mode_bar {
+            if let Some(cells) = mode_bar_cells.as_deref() {
+                canvas.restore_cells(bar, cells);
+            }
+        }
         let mut occlusion = crate::kitty_graphics::surface::Occlusion::default();
-        self.paint_frozen_selection(&mut frame, &mut occlusion);
-        self.paint_shell_copy(&mut frame, &mut occlusion)?;
-        restore_mode_bar(&mut frame, mode_bar, mode_bar_cells.as_deref());
-        self.paint_shell_feedback(&mut frame, layout, &mut occlusion)?;
-        if let Some(covered) = self.paint_observability(&mut frame, layout.pane_surface) {
+        self.paint_frozen_selection(&mut canvas, &mut occlusion);
+        self.paint_shell_copy(&mut canvas, &mut occlusion)?;
+        if let Some(bar) = mode_bar {
+            if let Some(cells) = mode_bar_cells.as_deref() {
+                canvas.restore_cells(bar, cells);
+            }
+        }
+        self.paint_shell_feedback(&mut canvas, layout, &mut occlusion)?;
+        if let Some(covered) = self.paint_observability(&mut canvas, layout.pane_surface) {
             for rect in covered {
                 occlusion.cover(rect);
             }
@@ -419,21 +412,17 @@ impl ClientShellState {
                 crate::popup_size::resolve_popup_geometry(width, height, layout.pane_surface)
             {
                 occlusion.start_popup(geometry.outer);
-                let mut composed = frame.to_ratatui_buffer()?;
+                let composed = canvas.buffer();
                 let block = ratatui::widgets::Block::default()
                     .borders(ratatui::widgets::Borders::ALL)
                     .border_set(self.config.border_glyphs.border_set())
                     .border_style(ratatui::style::Style::default().fg(self.config.palette.accent))
                     .title(popup.title.clone())
                     .style(ratatui::style::Style::default().bg(self.config.palette.panel_bg));
-                ratatui::widgets::Widget::render(
-                    ratatui::widgets::Clear,
-                    geometry.outer,
-                    &mut composed,
-                );
-                ratatui::widgets::Widget::render(block, geometry.outer, &mut composed);
-                frame.replace_from_ratatui_buffer_preserving_effects(&composed, None);
-                blit_pane_surface(&mut frame, &popup.frame, geometry.inner);
+                ratatui::widgets::Widget::render(ratatui::widgets::Clear, geometry.outer, composed);
+                ratatui::widgets::Widget::render(block, geometry.outer, composed);
+                canvas.set_cursor(None);
+                canvas.blit_frame(&popup.frame, geometry.inner);
                 self.hits.popup = Some(PaneHit {
                     rect: geometry.outer,
                     inner_rect: geometry.inner,
@@ -485,10 +474,10 @@ impl ClientShellState {
             && self.mode == ClientShellMode::Navigate
             && self.overlay.is_none()
         {
-            let mut composed = frame.to_ratatui_buffer()?;
+            let composed = canvas.buffer();
             occlusion.cover(composed.area);
             super::mobile::render_mobile_switcher(
-                &mut composed,
+                composed,
                 Rect::new(0, 0, cols, rows),
                 snapshot,
                 &self.endpoints,
@@ -503,7 +492,7 @@ impl ClientShellState {
             );
             if let Some((_, label, status, progress)) = active_lifecycle.as_ref() {
                 let _ = endpoint_notices::render_lifecycle_banner(
-                    &mut composed,
+                    composed,
                     Rect::new(0, 0, cols, rows),
                     label,
                     *status,
@@ -515,7 +504,7 @@ impl ClientShellState {
             }
             if let Some(notice) = self.visible_endpoint_notice.as_ref() {
                 self.hits.notification_toast = endpoint_notices::render_mobile_banner(
-                    &mut composed,
+                    composed,
                     Rect::new(0, 0, cols, rows),
                     notice,
                     active_lifecycle.is_some(),
@@ -523,33 +512,37 @@ impl ClientShellState {
                     &self.config.components,
                 );
             }
-            frame.replace_from_ratatui_buffer_preserving_effects(&composed, None);
+            canvas.set_cursor(None);
             self.hits.panes.clear();
             self.hits.pane_splits.clear();
             self.hits.popup = None;
         }
-        restore_mode_bar(&mut frame, mode_bar, mode_bar_cells.as_deref());
         if let Some(bar) = mode_bar {
+            if let Some(cells) = mode_bar_cells.as_deref() {
+                canvas.restore_cells(bar, cells);
+            }
             occlusion.cover(bar);
         }
-        self.paint_shell_overlays(&mut frame, &mut occlusion)?;
+        self.paint_shell_overlays(&mut canvas, &mut occlusion)?;
         if self.endpoint_status(&self.active_endpoint_id) != Some(ClientEndpointStatus::Online) {
-            frame.cursor = None;
+            canvas.set_cursor(None);
             self.hits.panes.clear();
             self.hits.pane_splits.clear();
             self.hits.popup = None;
         }
+        let (mut frame, buffer) = canvas.finish(Vec::new());
+        self.compose_buffer = Some(buffer);
         self.compose_graphics(&mut frame, layout, &occlusion);
         self.hits.composed = true;
         Some(frame)
     }
     pub(super) fn paint_shell_feedback(
         &mut self,
-        frame: &mut FrameData,
+        canvas: &mut super::compose_canvas::ComposeCanvas,
         layout: ClientShellLayout,
         occlusion: &mut crate::kitty_graphics::surface::Occlusion,
     ) -> Option<()> {
-        let (cols, rows) = (frame.width, frame.height);
+        let (cols, rows) = canvas.size();
         let compose_now = self
             .last_composed_at
             .unwrap_or_else(std::time::Instant::now);
@@ -596,8 +589,7 @@ impl ClientShellState {
             || self.visible_endpoint_notice.is_some()
             || self.visible_notification.is_some()
         {
-            let cursor = frame.cursor.clone();
-            let mut composed = frame.to_ratatui_buffer()?;
+            let composed = canvas.buffer();
             if let Some(diagnostic) = self.config_diagnostic.as_deref() {
                 let diagnostic_area = if layout.mobile_header.is_empty() {
                     Rect::new(0, 0, cols, rows)
@@ -605,7 +597,7 @@ impl ClientShellState {
                     layout.pane_surface
                 };
                 crate::ui::render_config_diagnostic_buffer(
-                    &mut composed,
+                    composed,
                     diagnostic_area,
                     diagnostic,
                     &self.config.palette,
@@ -616,7 +608,7 @@ impl ClientShellState {
                 (0, None),
                 |(endpoint_id, label, status, progress)| {
                     let banner = endpoint_notices::render_lifecycle_banner(
-                        &mut composed,
+                        composed,
                         Rect::new(0, 0, cols, rows),
                         label,
                         *status,
@@ -636,7 +628,7 @@ impl ClientShellState {
             if let Some(notice) = self.visible_endpoint_notice.as_ref() {
                 self.hits.notification_toast = if layout.mobile_header.is_empty() {
                     endpoint_notices::render_notice(
-                        &mut composed,
+                        composed,
                         Rect::new(0, 0, cols, rows),
                         notice,
                         u16::from(has_config_diagnostic) + lifecycle_offset,
@@ -644,7 +636,7 @@ impl ClientShellState {
                     )
                 } else {
                     endpoint_notices::render_mobile_banner(
-                        &mut composed,
+                        composed,
                         Rect::new(0, 0, cols, rows),
                         notice,
                         has_config_diagnostic || lifecycle_offset > 0,
@@ -655,7 +647,7 @@ impl ClientShellState {
             } else if let Some(notification) = self.visible_notification.as_ref() {
                 self.hits.notification_toast = if layout.mobile_header.is_empty() {
                     notifications::render_visible_notification(
-                        &mut composed,
+                        composed,
                         Rect::new(0, 0, cols, rows),
                         notification,
                         self.config.toast_position,
@@ -664,7 +656,7 @@ impl ClientShellState {
                     )
                 } else {
                     notifications::render_mobile_notification_banner(
-                        &mut composed,
+                        composed,
                         Rect::new(0, 0, cols, rows),
                         notification,
                         has_config_diagnostic || lifecycle_offset > 0,
@@ -683,11 +675,9 @@ impl ClientShellState {
                     Style::default().add_modifier(Modifier::DIM),
                 );
             }
-            frame.replace_from_ratatui_buffer_preserving_effects(&composed, cursor);
         }
         if let Some(feedback) = self.copy_feedback.as_ref() {
-            let cursor = frame.cursor.clone();
-            let mut composed = frame.to_ratatui_buffer()?;
+            let composed = canvas.buffer();
             let base_offset = u16::from(has_config_diagnostic);
             let feedback_area = if layout.mobile_header.is_empty() {
                 layout.pane_surface
@@ -702,7 +692,7 @@ impl ClientShellState {
                 self.hits.notification_toast,
             );
             occlusion.cover(crate::ui::render_copy_feedback_buffer_styled(
-                &mut composed,
+                composed,
                 feedback_area,
                 feedback,
                 offset,
@@ -710,14 +700,13 @@ impl ClientShellState {
                 &self.config.palette,
                 &self.config.components,
             ));
-            frame.replace_from_ratatui_buffer_preserving_effects(&composed, cursor);
         }
         Some(())
     }
 
     pub(super) fn paint_shell_copy(
         &self,
-        frame: &mut FrameData,
+        canvas: &mut super::compose_canvas::ComposeCanvas,
         occlusion: &mut crate::kitty_graphics::surface::Occlusion,
     ) -> Option<()> {
         let has_selection = self
@@ -733,6 +722,7 @@ impl ClientShellState {
         // 调一遍渲染函数。
         let selection_owner = self.selection.as_ref().map(|s| s.pane_id.as_str());
         let copy_owner = self.copy_mode.as_ref().map(|c| c.pane_id.as_str());
+        let (frame_width, frame_height) = canvas.size();
         // Copy 模式的单格光标（原第三段往返）：先算出目标格，界外则不画。
         let copy_cursor_cell = if self.mode == ClientShellMode::Copy {
             self.copy_mode.as_ref().and_then(|copy_mode| {
@@ -749,8 +739,8 @@ impl ClientShellState {
                 let y = hit.inner_rect.y.saturating_add(viewport_row as u16);
                 (viewport_row < u32::from(hit.inner_rect.height)
                     && copy_mode.cursor.col < hit.inner_rect.width
-                    && x < frame.width
-                    && y < frame.height)
+                    && x < frame_width
+                    && y < frame_height)
                     .then_some((x, y))
             })
         } else {
@@ -758,18 +748,15 @@ impl ClientShellState {
         };
         // Copy 模式整帧无光标（与原逐段行为一致，不论光标格是否在界内）。
         if self.mode == ClientShellMode::Copy {
-            frame.cursor = None;
+            canvas.set_cursor(None);
         }
-        // C-12 (d)：选区/搜索高亮、link hints、copy-mode 光标三段互不冲突的整帧往返
-        // 合并为一次 Buffer 转换；绘制顺序与原顺序一致。
+        // 选区/搜索高亮、link hints、copy-mode 光标合并为同一次 Buffer 直写
+        //（C-12 第二步后半：单 Buffer 管线），绘制顺序与原逐段顺序一致。
         if has_selection || has_search || has_link_hints || copy_cursor_cell.is_some() {
-            let keep_cursor = !has_link_hints && self.mode != ClientShellMode::Copy;
-            let cursor = if keep_cursor {
-                frame.cursor.clone()
-            } else {
-                None
-            };
-            let mut composed = frame.to_ratatui_buffer()?;
+            // link hints 把标签字符写进格内（改写符号），hints/Copy 模式整帧无光标。
+            if has_link_hints || self.mode == ClientShellMode::Copy {
+                canvas.set_cursor(None);
+            }
             if has_selection || has_search {
                 for hit in self.hits.panes.iter().filter(|hit| {
                     selection_owner == Some(hit.pane_id.as_str())
@@ -779,7 +766,7 @@ impl ClientShellState {
                         client_copy_surface_coherent(self.copy_mode.as_ref(), hit);
                     if copy_surface_coherent {
                         render_client_copy_search_highlights(
-                            &mut composed,
+                            canvas.buffer(),
                             self.copy_mode.as_ref(),
                             hit,
                             &self.config.palette,
@@ -805,7 +792,7 @@ impl ClientShellState {
                         }
                         crate::ui::render_selection_highlight_styled(
                             self.selection.as_ref(),
-                            &mut composed,
+                            canvas.buffer(),
                             &hit.pane_id,
                             hit.inner_rect,
                             hit.scroll,
@@ -819,7 +806,7 @@ impl ClientShellState {
                     }
                     if copy_surface_coherent {
                         render_client_copy_search_highlights(
-                            &mut composed,
+                            canvas.buffer(),
                             self.copy_mode.as_ref(),
                             hit,
                             &self.config.palette,
@@ -830,11 +817,11 @@ impl ClientShellState {
                 }
             }
             if has_link_hints {
-                self.render_link_hints(&mut composed, occlusion);
+                self.render_link_hints(canvas.buffer(), occlusion);
             }
             if let Some((x, y)) = copy_cursor_cell {
                 occlusion.cover(Rect::new(x, y, 1, 1));
-                composed[(x, y)].set_style(
+                canvas.buffer()[(x, y)].set_style(
                     Style::default()
                         .fg(match self.config.palette.panel_bg {
                             ratatui::style::Color::Reset => self.config.palette.surface_dim,
@@ -844,33 +831,23 @@ impl ClientShellState {
                         .add_modifier(Modifier::BOLD),
                 );
             }
-            frame.replace_from_ratatui_buffer_with_policy(
-                &composed,
-                cursor,
-                // link hints 会把标签字符写进格内（改了符号），必须走 Reattach；
-                // 其余子段（选区/搜索高亮、copy 光标格）只改样式。
-                if has_link_hints {
-                    crate::protocol::HyperlinkPreservation::Reattach
-                } else {
-                    crate::protocol::HyperlinkPreservation::SymbolsUntouched
-                },
-            );
         }
-        self.render_link_hover(frame, occlusion);
+        self.render_link_hover(canvas, occlusion);
         Some(())
     }
 
     pub(super) fn paint_shell_overlays(
         &mut self,
-        frame: &mut FrameData,
+        canvas: &mut super::compose_canvas::ComposeCanvas,
         occlusion: &mut crate::kitty_graphics::surface::Occlusion,
     ) -> Option<()> {
         let compose_now = self
             .last_composed_at
             .unwrap_or_else(std::time::Instant::now);
         let spinner = self.spinner_glyph();
+        let (frame_width, frame_height) = canvas.size();
         let cx = super::feedback::ChromeContext {
-            page_bounds: self.floating_page_rect(frame.width, frame.height),
+            page_bounds: self.floating_page_rect(frame_width, frame_height),
             palette: &self.config.palette,
             components: &self.config.components,
             glyphs: self.config.border_glyphs,
@@ -878,12 +855,11 @@ impl ClientShellState {
             spinner,
             now: compose_now,
         };
-        let layout = self.layout(frame.width, frame.height);
+        let (frame_width, frame_height) = canvas.size();
+        let layout = self.layout(frame_width, frame_height);
         if self.mode == ClientShellMode::Prefix && self.config.which_key && self.overlay.is_none() {
-            let cursor = frame.cursor.clone();
-            let mut composed = frame.to_ratatui_buffer()?;
             super::which_key::render_which_key(
-                &mut composed,
+                canvas.buffer(),
                 Rect::new(
                     layout.pane_surface.x,
                     layout.pane_surface.y,
@@ -894,24 +870,22 @@ impl ClientShellState {
                 &cx,
                 occlusion,
             );
-            frame.replace_from_ratatui_buffer_preserving_effects(&composed, cursor);
         }
         self.hits.overlay_bounds = Rect::default();
         self.hits.overlay_kind = None;
         let snapshot = self.snapshot.as_deref();
         if let Some(overlay) = self.overlay.as_ref() {
-            let mut composed = frame.to_ratatui_buffer()?;
             let entrance_area: Rect;
             let cursor = if let ClientShellOverlay::ContextMenu(menu) = overlay {
-                let rendered = render::render_context_menu(&mut composed, menu, &cx)
-                    .unwrap_or_else(|| render::render_minimum_overlay(&mut composed, &cx));
+                let rendered = render::render_context_menu(canvas.buffer(), menu, &cx)
+                    .unwrap_or_else(|| render::render_minimum_overlay(canvas.buffer(), &cx));
                 entrance_area = rendered.area;
                 occlusion.cover(rendered.area);
                 self.hits.context_menu_rows = rendered.menu_rows;
                 None
             } else {
                 let rendered = render::render_client_overlay(
-                    &mut composed,
+                    canvas.buffer(),
                     overlay,
                     snapshot,
                     &self.endpoints,
@@ -926,7 +900,7 @@ impl ClientShellState {
                     &self.observability,
                     &cx,
                 )
-                .unwrap_or_else(|| render::render_minimum_overlay(&mut composed, &cx));
+                .unwrap_or_else(|| render::render_minimum_overlay(canvas.buffer(), &cx));
                 entrance_area = rendered.area;
                 occlusion.cover(rendered.area);
                 self.hits.overlay_primary = rendered.primary;
@@ -993,9 +967,8 @@ impl ClientShellState {
                 // 浮层自带光标（文本输入）时归浮层；否则只有浮层矩形真正盖住
                 // 终端光标才把它抹掉，未覆盖的终端插入点保留（用量仪表盘等）。
                 rendered.cursor.or_else(|| {
-                    frame
-                        .cursor
-                        .clone()
+                    canvas
+                        .cursor()
                         .filter(|cursor| !contains(rendered.area, (cursor.x, cursor.y)))
                 })
             };
@@ -1004,11 +977,13 @@ impl ClientShellState {
                 compose_now.duration_since(since) < super::feedback::ENTRANCE_DURATION
             }) && !entrance_area.is_empty()
             {
-                composed.set_style(entrance_area, Style::default().add_modifier(Modifier::DIM));
+                canvas
+                    .buffer()
+                    .set_style(entrance_area, Style::default().add_modifier(Modifier::DIM));
             }
-            frame.replace_from_ratatui_buffer_preserving_effects(&composed, cursor);
+            canvas.set_cursor(cursor);
             // CFP-15：浮层矩形内的格归浮层所有，即使符号巧合未变也不再保留 OSC 8 链接。
-            frame.clear_hyperlinks_in(entrance_area);
+            canvas.clear_links_in(entrance_area);
         }
         if let Some(ClientShellOverlay::CommandPalette(palette)) = self.overlay.as_mut() {
             palette.scroll = self.hits.menu_scroll;
@@ -1180,31 +1155,31 @@ pub(super) fn emphasize_pane_border(
 mod tests {
     use super::*;
 
-    fn frame_with_cursor(x: u16, y: u16) -> FrameData {
-        let buffer = Buffer::empty(Rect::new(0, 0, 20, 4));
-        FrameData::from_ratatui_buffer_with_hyperlinks(
-            &buffer,
-            Some(crate::protocol::CursorState {
-                x,
-                y,
-                visible: true,
-                shape: 0,
-            }),
-            &[],
-        )
+    fn canvas_with_cursor(x: u16, y: u16) -> super::compose_canvas::ComposeCanvas {
+        let mut canvas = super::compose_canvas::ComposeCanvas::reuse_or_new(None, 20, 4);
+        canvas.set_cursor(Some(crate::protocol::CursorState {
+            x,
+            y,
+            visible: true,
+            shape: 0,
+        }));
+        canvas
     }
 
     #[test]
-    fn restore_mode_bar_only_hides_a_cursor_inside_the_bar_columns() {
+    fn restore_cells_only_hides_a_cursor_inside_the_bar_columns() {
         let bar = Rect::new(10, 3, 5, 1);
-        let cells = frame_with_cursor(0, 0).cells[..5].to_vec();
-        let mut covered = frame_with_cursor(12, 3);
-        restore_mode_bar(&mut covered, Some(bar), Some(&cells));
-        assert!(covered.cursor.is_none(), "模式条列区间内的光标被抹掉");
-        let mut beside = frame_with_cursor(2, 3);
-        restore_mode_bar(&mut beside, Some(bar), Some(&cells));
+        let cells = {
+            let canvas = canvas_with_cursor(0, 0);
+            canvas.save_cells(Rect::new(0, 0, 5, 1))
+        };
+        let mut covered = canvas_with_cursor(12, 3);
+        covered.restore_cells(bar, &cells);
+        assert!(covered.cursor().is_none(), "模式条列区间内的光标被抹掉");
+        let mut beside = canvas_with_cursor(2, 3);
+        beside.restore_cells(bar, &cells);
         assert!(
-            beside.cursor.is_some(),
+            beside.cursor().is_some(),
             "同一行但不在模式条列区间内的光标保留"
         );
     }
