@@ -139,6 +139,36 @@ pub(super) fn list_start(
     }
 }
 
+/// 渲染前的列表滚动窗口：几何 + 行高 + 选中行 + 一次性 `reveal` 折算成实际
+/// 起点与上界。视图计算阶段（`ClientShellState::compute_overlay_view`）用它
+/// 更新 `scroll`，渲染阶段只读结果——渲染是纯函数，不再回写滚动状态
+/// （STATE-04 / ARCH-02 / TOOL-13）。
+#[derive(Debug, Clone, Copy)]
+pub(super) struct ListWindow {
+    pub body: Rect,
+    pub visible: usize,
+    pub start: usize,
+}
+
+pub(super) fn list_window(
+    body: Rect,
+    row_height: usize,
+    count: usize,
+    scroll: usize,
+    selected: usize,
+    reveal: bool,
+) -> ListWindow {
+    let row_height = row_height.max(1);
+    let visible = (usize::from(body.height) / row_height).max(1);
+    let start =
+        list_start(scroll, selected, count, visible, reveal).min(count.saturating_sub(visible));
+    ListWindow {
+        body,
+        visible,
+        start,
+    }
+}
+
 /// 分类窄屏换行，所有入口都保留；内容区域随实际导航高度调整。
 pub(super) fn navigation_rows(width: u16, labels: &[&str]) -> u16 {
     use unicode_width::UnicodeWidthStr;

@@ -374,6 +374,13 @@ pub(crate) fn render_context_menu(
     })
 }
 
+/// 面板边框内的可用矩形。`panel` 与视图计算阶段共用同一口径——渲染前的滚动
+/// 窗口必须按渲染真正使用的几何来算（STATE-04）。
+pub(in crate::client::shell) fn panel_inner(area: Rect) -> Option<Rect> {
+    (area.width >= 2 && area.height >= 2)
+        .then(|| Rect::new(area.x + 1, area.y + 1, area.width - 2, area.height - 2))
+}
+
 pub(in crate::client::shell) fn panel(
     b: &mut Buffer,
     a: Rect,
@@ -381,9 +388,7 @@ pub(in crate::client::shell) fn panel(
     bg: ratatui::style::Color,
     glyphs: crate::ui::BorderGlyphs,
 ) -> Option<Rect> {
-    if a.width < 2 || a.height < 2 {
-        return None;
-    }
+    let inner = panel_inner(a)?;
     let background = Style::default().bg(bg).remove_modifier(Modifier::DIM);
     let border = Style::default().fg(c).bg(bg).remove_modifier(Modifier::DIM);
     for y in a.y..a.bottom() {
@@ -418,7 +423,7 @@ pub(in crate::client::shell) fn panel(
             .set_symbol(glyphs.vertical)
             .set_style(border);
     }
-    Some(Rect::new(a.x + 1, a.y + 1, a.width - 2, a.height - 2))
+    Some(inner)
 }
 /// 带标题的面板：`panel` 加一行画在顶边上的标题。自建面板（监控页、终端组
 /// 弹窗）都从这里取边框与标题，边框字形与颜色不再各写一套（C-29 / ds-13）。

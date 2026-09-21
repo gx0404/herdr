@@ -814,3 +814,103 @@ fn palette_lists_snippet_and_import_actions() {
         ))
     ));
 }
+
+/// C-20 残留面：滚轮只滚视口，不改键盘选中；回车仍作用在原选中行上。
+#[test]
+fn snippet_list_wheel_scrolls_the_viewport_without_moving_the_selection() {
+    let dir = with_temp_state_home("wheel-scroll");
+    for index in 0..12 {
+        seed_snippet(&format!("snippet-{index:02}"), "true", &[]);
+    }
+    let mut state = state();
+    state.open_snippets_overlay(false);
+    state.compose(106, 24).expect("snippets overlay frame");
+    let popup = state.hits.snippet_popup;
+    assert!(!popup.is_empty(), "浮层几何");
+    let (scroll, selected) = match state.overlay.as_ref() {
+        Some(ClientShellOverlay::Snippets(overlay)) => (overlay.scroll, overlay.selected),
+        _ => panic!("snippets overlay"),
+    };
+    assert_eq!((scroll, selected), (0, 0));
+
+    for _ in 0..2 {
+        state.handle_raw_events(vec![RawInputEvent::Mouse(MouseEvent {
+            kind: MouseEventKind::ScrollDown,
+            column: popup.x + popup.width / 2,
+            row: popup.y + popup.height / 2,
+            modifiers: KeyModifiers::empty(),
+        })]);
+    }
+    state.compose(106, 24).expect("scrolled frame");
+    let (scroll, selected) = match state.overlay.as_ref() {
+        Some(ClientShellOverlay::Snippets(overlay)) => (overlay.scroll, overlay.selected),
+        _ => panic!("snippets overlay"),
+    };
+    assert!(scroll > 0, "滚轮应移动视口: scroll={scroll}");
+    assert_eq!(selected, 0, "滚轮不改写键盘选中");
+
+    // 视口真的滚了：第一行不再是第 0 条。
+    let text = frame_text(&mut state, 106, 24);
+    assert!(!text.contains("snippet-00"), "frame: {text}");
+    assert!(text.contains("snippet-06"), "frame: {text}");
+
+    // 键盘移动把选中行滚进视野（reveal 一次性消费，与机器列表同口径）。
+    let _ = scroll;
+    state.handle_raw_events(vec![RawInputEvent::Key(crate::input::TerminalKey::new(
+        KeyCode::Char('j'),
+        KeyModifiers::empty(),
+    ))]);
+    state.compose(106, 24).expect("keyboard moved frame");
+    let Some(ClientShellOverlay::Snippets(overlay)) = state.overlay.as_ref() else {
+        panic!("snippets overlay");
+    };
+    assert_eq!(overlay.selected, selected + 1);
+    assert!(!overlay.reveal, "reveal 由视图计算阶段消费");
+    let label = snippet_label_at(&state, overlay.selected).expect("选中行标签");
+    let text = frame_text(&mut state, 106, 24);
+    assert!(text.contains(&label), "选中行必须滚进视野: {text}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// STATE-04 守门：渲染是纯函数——连续 compose 之间滚动状态不变，只有输入
+/// （键盘 / 滚轮）能改它。
+#[test]
+fn composing_twice_leaves_the_list_scroll_untouched() {
+    let dir = with_temp_state_home("scroll-purity");
+    for index in 0..12 {
+        seed_snippet(&format!("snippet-{index:02}"), "true", &[]);
+    }
+    let mut state = state();
+    state.open_snippets_overlay(false);
+    state.compose(106, 24).expect("first frame");
+    let snapshot = match state.overlay.as_ref() {
+        Some(ClientShellOverlay::Snippets(overlay)) => {
+            (overlay.scroll, overlay.selected, overlay.reveal)
+        }
+        _ => panic!("snippets overlay"),
+    };
+    // 键盘移动一次，把选中行与 reveal 都推离初始值。
+    state.handle_raw_events(vec![RawInputEvent::Key(crate::input::TerminalKey::new(
+        KeyCode::Char('j'),
+        KeyModifiers::empty(),
+    ))]);
+    state.compose(106, 24).expect("second frame");
+    let after_input = match state.overlay.as_ref() {
+        Some(ClientShellOverlay::Snippets(overlay)) => {
+            (overlay.scroll, overlay.selected, overlay.reveal)
+        }
+        _ => panic!("snippets overlay"),
+    };
+    assert_ne!(after_input, snapshot, "输入应改变滚动状态");
+    assert!(!after_input.2, "reveal 一次性消费");
+    // 再画一帧：没有任何输入，状态必须逐字段不变。
+    state.compose(106, 24).expect("third frame");
+    let after_repaint = match state.overlay.as_ref() {
+        Some(ClientShellOverlay::Snippets(overlay)) => {
+            (overlay.scroll, overlay.selected, overlay.reveal)
+        }
+        _ => panic!("snippets overlay"),
+    };
+    assert_eq!(after_repaint, after_input, "重绘不得改写滚动状态");
+    let _ = std::fs::remove_dir_all(&dir);
+}

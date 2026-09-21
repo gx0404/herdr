@@ -225,6 +225,11 @@ pub(super) struct ClientScenesOverlay {
     /// 列表视图的点击痕迹（现场名 + 时刻）：单击只选中，同一条现场的二次
     /// 点击才执行恢复。记名称而非行号，列表重排后痕迹自然失效。
     pub(super) last_click: Option<(String, std::time::Instant)>,
+    /// 列表视口的滚动起点。键盘与滚轮各自更新它：滚轮只滚视口、不改键盘选中
+    /// （C-20 残留面），键盘移动置 `reveal` 让选中行滚进视野。
+    pub(super) scroll: usize,
+    /// 一次性「把选中行滚进视野」请求，由视图计算阶段消费后清零（STATE-04）。
+    pub(super) reveal: bool,
 }
 
 impl ClientScenesOverlay {
@@ -246,6 +251,8 @@ impl ClientScenesOverlay {
             load_error: None,
             restore_disable_others: false,
             last_click: None,
+            scroll: 0,
+            reveal: false,
         }
     }
 }
@@ -585,6 +592,18 @@ impl ClientShellState {
         }
         let last = overlay.scenes.len().saturating_sub(1) as isize;
         overlay.selected = (overlay.selected as isize + delta).clamp(0, last) as usize;
+        // 键盘移动把选中行滚进视野；滚轮走 `scroll_scenes_list`，只滚视口。
+        overlay.reveal = true;
+    }
+
+    /// 滚轮：只滚列表视口，不改键盘选中（C-20 残留面）。起点由视图计算阶段
+    /// 按可见行数夹紧，这里只落一个请求值。
+    pub(super) fn scroll_scenes_list(&mut self, delta: isize) {
+        let Some(ClientShellOverlay::Scenes(overlay)) = self.overlay.as_mut() else {
+            return;
+        };
+        overlay.scroll = overlay.scroll.saturating_add_signed(delta);
+        overlay.reveal = false;
     }
 
     /// 指针悬浮行。`None` 表示指针不在任何行上——出界也要写，否则高亮会留在
@@ -1529,6 +1548,33 @@ fn render_scene_restore_confirm(
     })
 }
 
+/// 列表行高（名称行 + 机器/备注行）。
+pub(super) const SCENE_LIST_ROW_HEIGHT: usize = 2;
+
+/// 生效的选中行：列表为空或越界时归零，视图计算阶段与渲染阶段共用。
+pub(super) fn scene_list_selected(overlay: &ClientScenesOverlay) -> usize {
+    if overlay.scenes.is_empty() {
+        0
+    } else {
+        overlay.selected.min(overlay.scenes.len() - 1)
+    }
+}
+
+/// 现场列表的弹窗与正文矩形。视图计算阶段（`compute_overlay_view`）与渲染
+/// 阶段共用同一口径，渲染前的滚动窗口与真正画出来的几何因此不会漂移
+/// （STATE-04）。
+pub(super) fn scene_list_geometry(area: Rect, page_bounds: Option<Rect>) -> Option<(Rect, Rect)> {
+    let popup = page_bounds
+        .map(|rect| rect.intersection(area))
+        .or_else(|| crate::ui::modal_rect(area, crate::ui::ModalSize::Large.with_height(22)))?;
+    let inner = super::render::panel_inner(popup)?;
+    if inner.width < 24 || inner.height < 8 {
+        return None;
+    }
+    let stack = crate::ui::modal_stack_areas(inner, 1, 2, 1, 1);
+    Some((popup, stack.content))
+}
+
 fn render_scene_list(
     b: &mut Buffer,
     overlay: &ClientScenesOverlay,
@@ -1559,20 +1605,21 @@ fn render_scene_list(
     let count = crate::i18n::fill(t.count_fmt, &[("count", &overlay.scenes.len().to_string())]);
     put_right_text(b, stack.header, stack.header.y, &count, base.fg(p.overlay0));
 
-    let body = stack.content;
-    let row_height = 2usize;
-    let visible = (usize::from(body.height) / row_height).max(1);
-    let selected = if overlay.scenes.is_empty() {
-        0
-    } else {
-        overlay.selected.min(overlay.scenes.len() - 1)
-    };
-    let max_scroll = overlay.scenes.len().saturating_sub(visible);
-    let scroll = selected
-        .saturating_add(1)
-        .saturating_sub(visible)
-        .min(selected)
-        .min(max_scroll);
+    let row_height = SCENE_LIST_ROW_HEIGHT;
+    let selected = scene_list_selected(overlay);
+    // 滚动起点由视图计算阶段写好的 `scroll` 决定（滚轮只滚视口，不改键盘选中，
+    // C-20）；这里再折一次 `reveal` 只是让直接调用渲染的路径也拿到正确窗口。
+    let window = crate::client::shell::page::list_window(
+        stack.content,
+        row_height,
+        overlay.scenes.len(),
+        overlay.scroll,
+        selected,
+        overlay.reveal,
+    );
+    let body = window.body;
+    let visible = window.visible;
+    let scroll = window.start;
     let mut row_hits = Vec::new();
     for (index, scene) in overlay.scenes.iter().enumerate().skip(scroll).take(visible) {
         let y = body

@@ -170,6 +170,9 @@ impl ClientShellState {
         }
         self.last_composed_size = Some((cols, rows));
         self.prepare_chrome_feedback(compose_now);
+        // 渲染前的显式视图计算：滚动窗口与 reveal 在这里更新，渲染只读
+        // （STATE-04 / ARCH-02 / TOOL-13）。
+        self.compute_overlay_view(cols, rows);
         if self.workbench.enabled {
             return self.compose_workbench(cols, rows);
         }

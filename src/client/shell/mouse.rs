@@ -2111,18 +2111,16 @@ impl ClientShellState {
                         .map(|(_, index)| *index);
                     outcome.repaint |= self.set_scenes_hover(hovered);
                 }
-                // 滚轮移动选中行（与片段浮层的 List/History 同口径：两者的
-                // 视口都是由 `selected` 反推的，没有独立 scroll）。选中被移出
-                // 可视窗口时视口会跟着滚，指针下面的行随之改变，所以顺带清
-                // hover。让滚轮不再改写键盘选中需要先给两个浮层引入真正的
-                // scroll，已登记为 C-20 残留，不在本批范围。
+                // 滚轮只滚视口，不改键盘选中（C-20 残留面）：滚完之后 Enter
+                // 作用在原来的选中行上，而不是「滚到的那一行」。视口滚动会换
+                // 行，指针下面的行随之改变，所以顺带清 hover。
                 MouseEventKind::ScrollUp if super::contains(self.hits.scenes_popup, point) => {
-                    self.move_scenes_selection(-3);
+                    self.scroll_scenes_list(-3);
                     self.set_scenes_hover(None);
                     outcome.repaint = true;
                 }
                 MouseEventKind::ScrollDown if super::contains(self.hits.scenes_popup, point) => {
-                    self.move_scenes_selection(3);
+                    self.scroll_scenes_list(3);
                     self.set_scenes_hover(None);
                     outcome.repaint = true;
                 }

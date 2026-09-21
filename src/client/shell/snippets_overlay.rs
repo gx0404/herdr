@@ -26,7 +26,11 @@ pub(super) struct ClientSnippetsOverlay {
     /// 指针悬浮行：只由 `Moved` 改写。`selected` 只由键盘与点击改写，否则
     /// 指针路过任意一行之后按回车运行的是「鼠标最后路过的片段」（MENU-01）。
     pub(super) hovered: Option<usize>,
+    /// 列表 / 历史的视口滚动起点。滚轮只改它，键盘移动改 `selected` 并置
+    /// `reveal`（C-20 残留面）。
     pub(super) scroll: usize,
+    /// 一次性「把选中行滚进视野」请求，由视图计算阶段消费后清零（STATE-04）。
+    pub(super) reveal: bool,
     /// One-shot feedback line shown in the list footer (saved/removed/...).
     pub(super) message: Option<String>,
     /// Opened through the palette's "run snippet…": the title switches and
@@ -173,7 +177,7 @@ fn snippet_matches(snippet: &Snippet, query: &str) -> bool {
         .contains(&query)
 }
 
-fn filtered_snippets<'a>(library: &'a SnippetLibrary, query: &str) -> Vec<&'a Snippet> {
+pub(super) fn filtered_snippets<'a>(library: &'a SnippetLibrary, query: &str) -> Vec<&'a Snippet> {
     library
         .snippets
         .iter()
@@ -312,6 +316,7 @@ impl ClientShellState {
             selected: 0,
             hovered: None,
             scroll: 0,
+            reveal: false,
             message: None,
             pick_for_run,
             library,
@@ -381,6 +386,25 @@ impl ClientShellState {
             }
             _ => {}
         }
+        // 键盘移动把选中行滚进视野；滚轮只滚视口（C-20 残留面）。
+        overlay.reveal = true;
+    }
+
+    /// 列表 / 历史视图的滚轮：只滚视口，不改键盘选中（C-20 残留面）。
+    fn scroll_snippet_view(&mut self, delta: isize) {
+        let Some(ClientShellOverlay::Snippets(overlay)) = self.overlay.as_mut() else {
+            return;
+        };
+        match &mut overlay.view {
+            ClientSnippetsView::List => {
+                overlay.scroll = overlay.scroll.saturating_add_signed(delta);
+            }
+            ClientSnippetsView::History { scroll, .. } => {
+                *scroll = scroll.saturating_add_signed(delta);
+            }
+            _ => {}
+        }
+        overlay.reveal = false;
     }
 
     fn scroll_snippet_list(&mut self, delta: isize) {
@@ -1523,7 +1547,7 @@ impl ClientShellState {
         };
         match &overlay.view {
             ClientSnippetsView::List | ClientSnippetsView::History { .. } => {
-                self.move_snippet_selection(delta)
+                self.scroll_snippet_view(delta)
             }
             ClientSnippetsView::RunTargets(_)
             | ClientSnippetsView::RunPickPane(_)
@@ -1563,6 +1587,41 @@ pub(super) fn render_snippets_overlay(
             render_snippet_history(b, overlay, *selected, *scroll, saved_profiles, cx)
         }
     }
+}
+
+/// 列表行高（名称行 + 目标/动作行）。
+pub(super) const SNIPPET_LIST_ROW_HEIGHT: usize = 2;
+
+/// 片段列表（List）与历史（History）的弹窗与正文矩形。视图计算阶段与渲染
+/// 阶段共用同一口径，渲染前的滚动窗口与真正画出来的几何不会漂移（STATE-04）。
+pub(super) fn snippet_list_geometry(area: Rect, page_bounds: Option<Rect>) -> Option<(Rect, Rect)> {
+    snippet_view_geometry(area, page_bounds, 22, 2, 1, 1)
+}
+
+pub(super) fn snippet_history_geometry(
+    area: Rect,
+    page_bounds: Option<Rect>,
+) -> Option<(Rect, Rect)> {
+    snippet_view_geometry(area, page_bounds, 20, 1, 1, 0)
+}
+
+fn snippet_view_geometry(
+    area: Rect,
+    page_bounds: Option<Rect>,
+    height: u16,
+    header_rows: u16,
+    footer_rows: u16,
+    action_rows: u16,
+) -> Option<(Rect, Rect)> {
+    let popup = page_bounds
+        .map(|rect| rect.intersection(area))
+        .or_else(|| crate::ui::modal_rect(area, crate::ui::ModalSize::Large.with_height(height)))?;
+    let inner = super::render::panel_inner(popup)?;
+    if inner.width < 24 || inner.height < 8 {
+        return None;
+    }
+    let stack = crate::ui::modal_stack_areas(inner, header_rows, footer_rows, action_rows, 1);
+    Some((popup, stack.content))
 }
 
 fn snippets_panel(
@@ -1636,20 +1695,25 @@ fn render_snippet_list(
         p,
     );
 
-    let body = stack.content;
-    let row_height = 2usize;
-    let visible = (usize::from(body.height) / row_height).max(1);
+    let row_height = SNIPPET_LIST_ROW_HEIGHT;
     let selected = if rows.is_empty() {
         0
     } else {
         overlay.selected.min(rows.len() - 1)
     };
-    let max_scroll = rows.len().saturating_sub(visible);
-    let scroll = overlay
-        .scroll
-        .max(selected.saturating_sub(visible.saturating_sub(1)))
-        .min(selected)
-        .min(max_scroll);
+    // 起点由视图计算阶段写好的 `scroll` 决定：滚轮只滚视口，不改键盘选中
+    // （C-20 残留面）；这里再折一次 `reveal` 让直接调用渲染的路径也正确。
+    let window = crate::client::shell::page::list_window(
+        stack.content,
+        row_height,
+        rows.len(),
+        overlay.scroll,
+        selected,
+        overlay.reveal,
+    );
+    let body = window.body;
+    let visible = window.visible;
+    let scroll = window.start;
     let mut row_hits = Vec::new();
     if let Some(error) = overlay.library_error.as_deref() {
         put_text(
@@ -2656,12 +2720,18 @@ fn render_snippet_history(
             .map(|profile| profile.label.clone())
             .unwrap_or_else(|| machine.to_owned())
     };
-    let body = stack.content;
-    let visible = usize::from(body.height).max(1);
     let selected = selected.min(history.len().saturating_sub(1));
-    let scroll = scroll
-        .max(selected.saturating_sub(visible.saturating_sub(1)))
-        .min(selected);
+    let window = crate::client::shell::page::list_window(
+        stack.content,
+        1,
+        history.len(),
+        scroll,
+        selected,
+        overlay.reveal,
+    );
+    let body = window.body;
+    let visible = window.visible;
+    let scroll = window.start;
     let mut row_hits = Vec::new();
     if history.is_empty() {
         put_text(

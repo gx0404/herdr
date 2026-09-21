@@ -1036,3 +1036,85 @@ fn scene_hover_does_not_move_the_keyboard_selection() {
     assert_eq!(overlay.selected, 0);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// C-20 残留面：滚轮只滚视口，不改键盘选中；回车恢复的仍是原选中现场，
+/// 不是「滚到的那一条」。
+#[test]
+fn scenes_wheel_scrolls_the_viewport_without_moving_the_selection() {
+    use crossterm::event::MouseEventKind;
+
+    let dir = with_temp_state_home("wheel-selection");
+    let profiles = (0..12)
+        .map(|index| {
+            profile(
+                &format!("m{index:02}"),
+                &format!("m{index:02}.example"),
+                &format!("{index}"),
+                false,
+            )
+        })
+        .collect::<Vec<_>>();
+    seed_catalog(&profiles);
+    let mut state = state_with_profiles(&profiles);
+    let snapshots = (0..12)
+        .map(|index| {
+            scene(
+                &format!("s{index:02}"),
+                vec![scene_machine(&profiles[index])],
+            )
+        })
+        .collect::<Vec<_>>();
+    super::super::scenes_overlay::store_scenes_to(
+        &super::super::scenes_overlay::scene_snapshots_path(),
+        &snapshots,
+    )
+    .expect("seed scenes");
+
+    state.open_scenes_overlay();
+    state.compose(106, 24).expect("scenes overlay frame");
+    let popup = state.hits.scenes_popup;
+    assert!(!popup.is_empty(), "浮层几何");
+    let (scroll, selected) = match state.overlay.as_ref() {
+        Some(ClientShellOverlay::Scenes(overlay)) => (overlay.scroll, overlay.selected),
+        _ => panic!("scenes overlay"),
+    };
+    assert_eq!((scroll, selected), (0, 0));
+
+    for _ in 0..2 {
+        state.handle_raw_events(vec![RawInputEvent::Mouse(crossterm::event::MouseEvent {
+            kind: MouseEventKind::ScrollDown,
+            column: popup.x + popup.width / 2,
+            row: popup.y + popup.height / 2,
+            modifiers: KeyModifiers::empty(),
+        })]);
+    }
+    state.compose(106, 24).expect("scrolled frame");
+    let Some(ClientShellOverlay::Scenes(overlay)) = state.overlay.as_ref() else {
+        panic!("scenes overlay");
+    };
+    assert!(
+        overlay.scroll > 0,
+        "滚轮应移动视口: scroll={}",
+        overlay.scroll
+    );
+    assert_eq!(overlay.selected, 0, "滚轮不改写键盘选中");
+
+    // 视口真的滚了：第一条现场不再显示，后面的现场露出来。
+    let text = frame_text(&mut state, 106, 24);
+    assert!(!text.contains("s00"), "frame: {text}");
+    assert!(text.contains("s06"), "frame: {text}");
+
+    // 回车恢复的仍是 s00：只有 m00 被启用。
+    state.route_scenes_key(&key(KeyCode::Enter), &mut ClientShellInput::default());
+    let catalog = EndpointCatalog::load().expect("catalog");
+    let enabled = |profile: &SavedSshEndpoint| {
+        catalog
+            .ssh
+            .iter()
+            .find(|candidate| candidate.id == profile.id)
+            .is_some_and(|candidate| candidate.enabled)
+    };
+    assert!(enabled(&profiles[0]), "回车应恢复原选中现场 s00");
+    assert!(!enabled(&profiles[6]), "滚到的 s06 不该被恢复");
+    let _ = std::fs::remove_dir_all(&dir);
+}

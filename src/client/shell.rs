@@ -39,6 +39,7 @@ mod notification_policy;
 mod notifications;
 mod observability;
 mod overlay_input;
+mod overlay_view;
 mod page;
 mod preferences;
 mod render;
