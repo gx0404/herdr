@@ -62,7 +62,7 @@ impl ClientShellState {
 
     pub(super) fn move_navigate_workspace(&mut self, delta: isize) {
         let mobile = self.mobile_layout_active();
-        let surface_available = self.snapshot.is_some() && self.pane_surface.is_some();
+        let surface_available = self.snapshot.is_some() && self.has_presented_surface();
         let empty_collapsed_groups = HashSet::new();
         let mut targets = Vec::new();
         for endpoint in &self.endpoints {
@@ -124,7 +124,7 @@ impl ClientShellState {
         self.navigate_workspace_id = Some(target);
         self.reveal_mobile_workspace = mobile;
         self.reveal_navigation_workspace =
-            !mobile || self.snapshot.is_none() || self.pane_surface.is_none();
+            !mobile || self.snapshot.is_none() || !self.has_presented_surface();
     }
 
     pub(super) fn accept_navigate_workspace(&mut self, outcome: &mut ClientShellInput) {

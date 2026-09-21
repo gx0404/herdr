@@ -502,6 +502,124 @@ fn dragging_an_inactive_groups_inner_split_targets_its_own_tab() {
     assert!(outcome.actions.iter().any(|action| matches!(action, ClientShellAction::Endpoint { request, .. } if matches!(&request.method, Method::LayoutSetSplitRatio(params) if params.tab_id.as_deref() == Some("tab_2")))));
 }
 
+/// HERDR-BUG-006 复现面：两个终端分组、各自 view 的画面内容不同；
+/// group 1（pane_1）聚焦，group 2（pane_2）非聚焦。
+fn two_group_state() -> ClientShellState {
+    use crate::client::shell::workbench::View;
+    let mut state = ready();
+    let mut snapshot = snapshot();
+    let mut second = snapshot.tabs[0].clone();
+    second.tab_id = "tab_2".into();
+    second.focused = false;
+    snapshot.tabs.push(second);
+    let mut pane = snapshot.panes[0].clone();
+    pane.pane_id = "pane_2".into();
+    pane.tab_id = "tab_2".into();
+    pane.focused = false;
+    snapshot.panes.push(pane);
+    state.set_snapshot(Box::new(snapshot));
+    state.set_endpoint_methods(Some(vec![
+        "client.views.set".into(),
+        "tab.focus".into(),
+        "pane.selection.read".into(),
+    ]));
+    state.workbench.dock.reconcile_workspace_tabs(
+        &["tab_1".into(), "tab_2".into()],
+        &["tab_1".into(), "tab_2".into()],
+        None,
+    );
+    state
+        .workbench
+        .dock
+        .move_tab("tab_2", 1, 0, Some(Edge::Right));
+    state.workbench.dock.focused = PanelId::Terminal(1);
+
+    let mut first = surface();
+    first.frame = FrameData::from_ratatui_buffer_with_hyperlinks(
+        &Buffer::with_lines(["a         "]),
+        None,
+        &[],
+    );
+    first.panes[0].rect.width = 10;
+    first.panes[0].inner_rect.width = 10;
+    state.workbench.views.insert(
+        "1".into(),
+        View {
+            tab: "tab_1".into(),
+            surface: first,
+            graphics: Default::default(),
+        },
+    );
+    let mut second_surface = surface();
+    second_surface.panes[0].pane_id = "pane_2".into();
+    second_surface.panes[0].focused = false;
+    second_surface.panes[0].content_revision = 42;
+    second_surface.frame = FrameData::from_ratatui_buffer_with_hyperlinks(
+        &Buffer::with_lines(["xy z      "]),
+        None,
+        &[],
+    );
+    second_surface.panes[0].rect.width = 10;
+    second_surface.panes[0].inner_rect.width = 10;
+    state.workbench.views.insert(
+        "2".into(),
+        View {
+            tab: "tab_2".into(),
+            surface: second_surface,
+            graphics: Default::default(),
+        },
+    );
+    state
+}
+
+/// HERDR-BUG-006：选区/悬停/复制读取 pane 画面时必须落到该 pane 所在 view 的
+/// surface；非聚焦分组不得读到聚焦分组的画面。
+#[test]
+fn inactive_group_reads_its_own_view_surface() {
+    let mut state = two_group_state();
+    assert_eq!(
+        state
+            .visible_surface_for_pane("pane_2")
+            .and_then(|surface| surface
+                .panes
+                .iter()
+                .find(|pane| pane.pane_id == "pane_2")
+                .map(|pane| pane.content_revision)),
+        Some(42),
+        "非聚焦分组的 pane 必须解析到自己 view 的 surface"
+    );
+    state.compose(160, 40).expect("compose workbench");
+    let hit = state
+        .hits
+        .panes
+        .iter()
+        .find(|hit| hit.pane_id == "pane_2")
+        .expect("pane_2 hit")
+        .clone();
+
+    // 三击选行：行尾必须是非聚焦组画面里 "xy z" 的最后一个非空格列（3），
+    // 而不是镜像缺失时的兜底宽度。
+    let mut outcome = ClientShellInput::default();
+    state.select_line_at(&hit, 0, &mut outcome);
+    let selection = state.selection.as_ref().expect("line selection");
+    assert_eq!(selection.ordered_cells(), ((0, 0), (0, 3)));
+
+    // 双击选词手势的内容版本也必须来自 pane_2 自己的 view。
+    let mut outcome = ClientShellInput::default();
+    state.request_word_selection(&hit, 0, 1, &mut outcome);
+    let read = outcome.actions.iter().find_map(|action| match action {
+        ClientShellAction::EndpointRequest { request, .. }
+        | ClientShellAction::Endpoint { request, .. } => match &request.method {
+            Method::PaneSelectionRead(params) => Some(params),
+            _ => None,
+        },
+        _ => None,
+    });
+    let params = read.expect("word selection row read request");
+    assert_eq!(params.pane_id, "pane_2");
+    assert_eq!(params.content_revision, Some(42));
+}
+
 #[test]
 fn borderless_terminal_text_is_not_overwritten_by_pane_drag_handles() {
     let mut state = ready();
@@ -545,7 +663,6 @@ fn copy_search_prompt_and_cursor_are_visible_in_docked_terminal() {
             graphics: Default::default(),
         },
     );
-    state.sync_workbench_surface();
     state.compose(120, 40).unwrap();
     assert!(state.enter_copy_mode(&mut ClientShellInput::default()));
     state.handle_input_bytes(b"/needle");

@@ -38,13 +38,15 @@ impl ClientShellState {
             anchor_bounds: None,
             cursor: (row, col),
             end_col: hit.inner_rect.width.saturating_sub(1),
-            content_revision: self.pane_surface.as_ref().and_then(|surface| {
-                surface
-                    .panes
-                    .iter()
-                    .find(|pane| pane.pane_id == hit.pane_id)
-                    .map(|pane| pane.content_revision)
-            }),
+            content_revision: self
+                .visible_surface_for_pane(&hit.pane_id)
+                .and_then(|surface| {
+                    surface
+                        .panes
+                        .iter()
+                        .find(|pane| pane.pane_id == hit.pane_id)
+                        .map(|pane| pane.content_revision)
+                }),
             cached_row: None,
             pending_row: None,
             dragged: false,
@@ -145,15 +147,16 @@ impl ClientShellState {
     /// glyph counts both of its cells), or 0 for a blank row.
     fn line_end_col(&self, hit: &PaneHit, viewport_row: u16) -> u16 {
         let fallback = hit.inner_rect.width.saturating_sub(1);
-        let Some(pane) = self.pane_surface.as_ref().and_then(|surface| {
-            surface
-                .panes
-                .iter()
-                .find(|pane| pane.pane_id == hit.pane_id)
-        }) else {
+        // HERDR-BUG-006：workbench 下画面按 pane 所属 view 取，非聚焦分组不能
+        // 读聚焦组的镜像。
+        let Some(surface) = self.visible_surface_for_pane(&hit.pane_id) else {
             return fallback;
         };
-        let Some(surface) = self.pane_surface.as_ref() else {
+        let Some(pane) = surface
+            .panes
+            .iter()
+            .find(|pane| pane.pane_id == hit.pane_id)
+        else {
             return fallback;
         };
         let frame_row = usize::from(pane.inner_rect.y) + usize::from(viewport_row);

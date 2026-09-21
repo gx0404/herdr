@@ -739,7 +739,12 @@ impl ClientShellState {
             .agent_presentation
             .project_snapshot(&mut snapshot);
         let presented_surface = if acknowledge_surface && endpoint_id == &self.active_endpoint_id {
-            self.pane_surface.as_ref()
+            // workbench 下没有单一镜像：确认聚焦 view 的画面（HERDR-BUG-006）。
+            if self.workbench.enabled {
+                self.workbench.focused_view().map(|view| &view.surface)
+            } else {
+                self.pane_surface.as_ref()
+            }
         } else {
             None
         };
@@ -815,26 +820,16 @@ impl ClientShellState {
     }
 
     pub(crate) fn acknowledge_active_surface_agents(&mut self, surface: &PaneSurfaceFrame) -> bool {
-        let Some(index) = self
-            .endpoints
-            .iter()
-            .position(|endpoint| endpoint.endpoint_id == self.active_endpoint_id)
-        else {
+        let Some(updated) = acknowledge_active_surface_agents_on(
+            &mut self.endpoints,
+            &self.active_endpoint_id,
+            self.outer_focused,
+            surface,
+        ) else {
             return false;
         };
-        let changed = {
-            let endpoint = &mut self.endpoints[index];
-            let Some(snapshot) = endpoint.snapshot.as_deref_mut() else {
-                return false;
-            };
-            endpoint
-                .agent_presentation
-                .acknowledge_surface(snapshot, surface, self.outer_focused)
-        };
-        if changed {
-            self.snapshot = self.endpoints[index].snapshot.clone();
-        }
-        changed
+        self.snapshot = Some(updated);
+        true
     }
 
     #[cfg(test)]
@@ -942,5 +937,30 @@ pub(super) fn local_endpoint() -> ClientShellEndpoint {
         methods: None,
         server_version: None,
         status_detail: None,
+    }
+}
+
+/// `acknowledge_active_surface_agents` 的字段级形态：调用方拆开 `ClientShellState`
+/// 的借用后逐 surface 调用（workbench 下每个可见 view 各调一次，HERDR-BUG-006）。
+/// 有变化时返回更新后的快照，由调用方写回。
+pub(super) fn acknowledge_active_surface_agents_on(
+    endpoints: &mut [ClientShellEndpoint],
+    active_endpoint_id: &ClientEndpointId,
+    outer_focused: Option<bool>,
+    surface: &PaneSurfaceFrame,
+) -> Option<Box<ClientShellSnapshot>> {
+    let endpoint = endpoints
+        .iter_mut()
+        .find(|endpoint| endpoint.endpoint_id == *active_endpoint_id)?;
+    let changed = {
+        let snapshot = endpoint.snapshot.as_deref_mut()?;
+        endpoint
+            .agent_presentation
+            .acknowledge_surface(snapshot, surface, outer_focused)
+    };
+    if changed {
+        endpoint.snapshot.clone()
+    } else {
+        None
     }
 }

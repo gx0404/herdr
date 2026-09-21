@@ -396,8 +396,6 @@ impl ClientShellState {
         {
             return false;
         }
-        let focused =
-            self.workbench.dock.focused == PanelId::Terminal(view.view_id.parse().unwrap_or(0));
         match view.message {
             crate::protocol::ServerMessage::PaneSurface(surface) => {
                 if surface.frame.width == 0 || surface.frame.height == 0 {
@@ -452,9 +450,6 @@ impl ClientShellState {
                 }
             }
             _ => return false,
-        }
-        if focused {
-            self.sync_workbench_surface();
         }
         true
     }

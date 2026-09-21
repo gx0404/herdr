@@ -131,7 +131,6 @@ impl ClientShellState {
         // 焦点离开监控面板只是键盘归终端；用户选中的 tab（monitor_tab）保留，
         // 面板继续画同一页并继续轮询。
         self.sync_observation_page_with_focus();
-        self.sync_workbench_surface();
     }
 
     /// 停靠工作台下 `observability.page` 与 `dock.focused` 同步：监控 / 账号面板
@@ -195,19 +194,8 @@ impl ClientShellState {
         self.selection = None;
         self.clear_link_hover();
         self.sync_observation_page_with_focus();
-        self.sync_workbench_surface();
         outcome.repaint = true;
         true
-    }
-
-    pub(in crate::client::shell) fn sync_workbench_surface(&mut self) {
-        if let Some(view) = self.workbench.focused_view() {
-            let mut surface = view.surface.clone();
-            surface.graphics = Default::default();
-            // 单组镜像只供已有选择/复制逻辑使用，版本已由独立视图缓存校验。
-            self.pane_surface_generation = None;
-            self.set_pane_surface(surface);
-        }
     }
 
     pub(in crate::client::shell) fn workbench_mouse(
@@ -455,7 +443,6 @@ impl ClientShellState {
                         entry.active = Some(tab.clone());
                     }
                     self.focus_workbench_panel(PanelId::Terminal(group));
-                    self.sync_workbench_surface();
                     if !self.workbench.dock.locked {
                         self.workbench.drag = Some(Drag::Move {
                             panel: PanelId::Terminal(group),

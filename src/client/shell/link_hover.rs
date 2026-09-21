@@ -234,7 +234,8 @@ impl ClientShellState {
     }
 
     fn explicit_link_regions(&self, target: &LinkHoverTarget) -> Option<Vec<PaneLinkRegion>> {
-        let surface = self.pane_surface.as_ref()?;
+        // HERDR-BUG-006：workbench 下按 pane 所属 view 取画面。
+        let surface = self.visible_surface_for_pane(&target.pane_id)?;
         let rect = target.source_rect;
         let cell = |col: u16, row: u16| {
             let x = usize::from(rect.x) + usize::from(col);

@@ -336,6 +336,7 @@ impl ClientShellState {
         let mut frame = FrameData::from_ratatui_buffer_with_hyperlinks(&buffer, None, &[]);
         let mut occlusion = crate::kitty_graphics::surface::Occlusion::default();
         self.observability.begin_paint();
+        let mut stale_panel_areas = Vec::new();
         for (panel, rect) in &self.workbench.geometry.panels {
             let area = body(*rect, panel);
             if let PanelId::Terminal(id) = panel {
@@ -345,16 +346,8 @@ impl ClientShellState {
                     .get(&id.to_string())
                     .filter(|view| view.surface.projection_revision == projection_revision)
                 else {
-                    if let Some(mut buffer) = frame.to_ratatui_buffer() {
-                        put(
-                            &mut buffer,
-                            area,
-                            tr("Waiting for terminal…", "正在同步终端…"),
-                            Style::default().fg(palette.overlay0),
-                        );
-                        let cursor = frame.cursor.clone();
-                        frame.replace_from_ratatui_buffer_preserving_effects(&buffer, cursor);
-                    }
+                    // C-12 (a)：占位不再逐面板整帧往返，先收集区域，与把手/预览合并成一次。
+                    stale_panel_areas.push(area);
                     continue;
                 };
                 let cursor = frame.cursor.clone();
@@ -407,58 +400,78 @@ impl ClientShellState {
                 }
             }
         }
-        if let Some(mut composed) = frame.to_ratatui_buffer() {
-            for hit in &self.hits.panes {
-                if hit.rect.width > 4
-                    && !self.workbench.dock.locked
-                    && (hit.inner_rect.y > hit.rect.y || self.workbench.arranging)
-                {
-                    let handle = Rect::new(hit.rect.x + 1, hit.rect.y, 2, 1);
+        // C-12 (b)：把手/预览/错误/占位的合并往返只在确有内容可画时才做；
+        // 守卫谓词与下方各绘制分支完全一致，守卫为假时今天也是空跑往返。
+        let has_handles = !self.workbench.dock.locked
+            && self.hits.panes.iter().any(|hit| {
+                hit.rect.width > 4 && (hit.inner_rect.y > hit.rect.y || self.workbench.arranging)
+            });
+        let drop_preview = self
+            .workbench
+            .drag
+            .as_ref()
+            .and_then(|drag| drag.drop_target(&self.workbench.geometry));
+        if !stale_panel_areas.is_empty()
+            || has_handles
+            || drop_preview.is_some()
+            || self.endpoint_error.is_some()
+        {
+            if let Some(mut composed) = frame.to_ratatui_buffer() {
+                for area in &stale_panel_areas {
                     put(
                         &mut composed,
-                        handle,
-                        "⠿",
-                        Style::default().fg(palette.accent),
+                        *area,
+                        tr("Waiting for terminal…", "正在同步终端…"),
+                        Style::default().fg(palette.overlay0),
                     );
-                    self.workbench
-                        .hits
-                        .push((handle, Action::Pane(hit.pane_id.clone())));
-                    occlusion.cover(handle);
                 }
-            }
-            if let Some((target, edge)) = self
-                .workbench
-                .drag
-                .as_ref()
-                .and_then(|drag| drag.drop_target(&self.workbench.geometry))
-            {
-                if let Some((_, area)) = self
-                    .workbench
-                    .geometry
-                    .panels
-                    .iter()
-                    .find(|(panel, _)| panel == &target)
-                {
-                    let area = super::interaction::preview(*area, edge);
-                    Block::default()
-                        .borders(Borders::ALL)
-                        .border_type(BorderType::Rounded)
-                        .border_style(Style::default().fg(palette.accent))
-                        .title(tr(" Drop here ", " 放到这里 "))
-                        .render(area, &mut composed);
-                    occlusion.cover(area);
+                for hit in &self.hits.panes {
+                    if hit.rect.width > 4
+                        && !self.workbench.dock.locked
+                        && (hit.inner_rect.y > hit.rect.y || self.workbench.arranging)
+                    {
+                        let handle = Rect::new(hit.rect.x + 1, hit.rect.y, 2, 1);
+                        put(
+                            &mut composed,
+                            handle,
+                            "⠿",
+                            Style::default().fg(palette.accent),
+                        );
+                        self.workbench
+                            .hits
+                            .push((handle, Action::Pane(hit.pane_id.clone())));
+                        occlusion.cover(handle);
+                    }
                 }
+                if let Some((target, edge)) = drop_preview {
+                    if let Some((_, area)) = self
+                        .workbench
+                        .geometry
+                        .panels
+                        .iter()
+                        .find(|(panel, _)| panel == &target)
+                    {
+                        let area = super::interaction::preview(*area, edge);
+                        Block::default()
+                            .borders(Borders::ALL)
+                            .border_type(BorderType::Rounded)
+                            .border_style(Style::default().fg(palette.accent))
+                            .title(tr(" Drop here ", " 放到这里 "))
+                            .render(area, &mut composed);
+                        occlusion.cover(area);
+                    }
+                }
+                if let Some(error) = self.endpoint_error.as_deref() {
+                    put(
+                        &mut composed,
+                        footer,
+                        error,
+                        Style::default().fg(palette.red),
+                    );
+                }
+                let cursor = frame.cursor.clone();
+                frame.replace_from_ratatui_buffer_preserving_effects(&composed, cursor);
             }
-            if let Some(error) = self.endpoint_error.as_deref() {
-                put(
-                    &mut composed,
-                    footer,
-                    error,
-                    Style::default().fg(palette.red),
-                );
-            }
-            let cursor = frame.cursor.clone();
-            frame.replace_from_ratatui_buffer_preserving_effects(&composed, cursor);
         }
         if visual_bell {
             if let Some(hit) = snapshot
@@ -479,8 +492,9 @@ impl ClientShellState {
         }
         self.paint_frozen_selection(&mut frame, &mut occlusion);
         self.paint_shell_copy(&mut frame, &mut occlusion)?;
-        if let Some(mut composed) = frame.to_ratatui_buffer() {
-            if self.overlay.is_none() {
+        // C-12 (c)：overlay 打开时这次往返的结果被直接丢弃，提前到分配前判断。
+        if self.overlay.is_none() {
+            if let Some(mut composed) = frame.to_ratatui_buffer() {
                 if let Some(bar) = super::super::render::render_mode_bar(
                     &mut composed,
                     full,

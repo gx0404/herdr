@@ -256,8 +256,34 @@ impl ClientShellState {
                     self.outer_focused = Some(true);
                     outcome.query_host_appearance = true;
                     outcome.repaint |= self.config.redraw_on_focus_gained;
-                    if let Some(surface) = self.pane_surface.clone() {
-                        outcome.repaint |= self.acknowledge_active_surface_agents(&surface);
+                    // workbench 下没有单一镜像：所有可见 view 的画面各确认一次
+                    // （HERDR-BUG-006）；顺带不再为确认深拷贝整帧（HERDR-PERF-010）。
+                    if self.workbench.enabled {
+                        for view in self.workbench.views.values() {
+                            if let Some(updated) =
+                                super::endpoints::acknowledge_active_surface_agents_on(
+                                    &mut self.endpoints,
+                                    &self.active_endpoint_id,
+                                    self.outer_focused,
+                                    &view.surface,
+                                )
+                            {
+                                self.snapshot = Some(updated);
+                                outcome.repaint = true;
+                            }
+                        }
+                    } else if let Some(surface) = self.pane_surface.as_ref() {
+                        if let Some(updated) =
+                            super::endpoints::acknowledge_active_surface_agents_on(
+                                &mut self.endpoints,
+                                &self.active_endpoint_id,
+                                self.outer_focused,
+                                surface,
+                            )
+                        {
+                            self.snapshot = Some(updated);
+                            outcome.repaint = true;
+                        }
                     }
                     outcome
                         .requests
@@ -946,7 +972,12 @@ impl ClientShellState {
         let Some(snapshot) = self.snapshot.as_deref() else {
             return;
         };
-        let Some(surface) = self.pane_surface.as_ref() else {
+        // workbench 下没有单一镜像：在聚焦分组的 view 画面内循环（与原镜像语义一致）。
+        let Some(surface) = (if self.workbench.enabled {
+            self.workbench.focused_view().map(|view| &view.surface)
+        } else {
+            self.pane_surface.as_ref()
+        }) else {
             return;
         };
         if surface.panes.is_empty() {

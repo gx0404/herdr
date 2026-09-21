@@ -2184,7 +2184,9 @@ impl ClientShellState {
     }
 
     pub(crate) fn has_presented_surface(&self) -> bool {
+        // workbench 下画面在各 view 里，没有单一镜像（C-15）。
         self.pane_surface.is_some()
+            || (self.workbench.enabled && self.workbench.focused_view().is_some())
     }
 
     pub(crate) fn set_pane_surface(&mut self, surface: PaneSurfaceFrame) {

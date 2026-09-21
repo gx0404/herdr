@@ -42,7 +42,6 @@ fn docked_with(snapshot: ClientShellSnapshot) -> ClientShellState {
             graphics: Default::default(),
         },
     );
-    state.sync_workbench_surface();
     state
 }
 
