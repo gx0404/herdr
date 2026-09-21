@@ -1384,6 +1384,13 @@ pub(crate) struct ClientShellState {
     pub(super) port_forward_polled_at: Option<std::time::Instant>,
     /// In-flight snippet run: per-target outcomes collect here until every
     /// request resolves, then history is written and the summary toast shows.
+    /// 联邦 agents 面板行的缓存（PERF-02）：视图计算阶段按端点分代刷新，渲染只读。
+    pub(super) federated_agent_rows: Option<super::endpoint_agents::AgentRowsCache>,
+    /// 配置代际：`reload_client_config` 递增，缓存据此失效。
+    pub(super) config_epoch: u64,
+    /// 侧栏数据的代际：快照 / 状态 / 目录写入时递增，联邦 agents 行缓存据此
+    /// 失效（PERF-02）。内容比较不可靠——测试与部分路径会原地替换快照。
+    pub(super) agent_rows_epoch: u64,
     /// 在途的片段运行，按 run id 索引：并发运行互不覆盖（TOOL-06）。
     pub(super) snippet_runs: HashMap<u64, super::snippets_overlay::ClientSnippetRunState>,
     /// 下一个 run id（单调递增，跨运行不重复）。
@@ -1609,6 +1616,9 @@ impl ClientShellState {
             endpoint_port_forwards: HashMap::new(),
             session_log_dropped: HashMap::new(),
             port_forward_polled_at: None,
+            federated_agent_rows: None,
+            config_epoch: 0,
+            agent_rows_epoch: 0,
             snippet_runs: HashMap::new(),
             next_snippet_run_id: 0,
             broadcast: crate::client::endpoint::BroadcastSet::load().unwrap_or_default(),

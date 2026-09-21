@@ -64,6 +64,7 @@ impl ClientShellState {
     }
 
     pub(crate) fn set_endpoint_catalog(&mut self, profiles: &[SavedSshEndpoint]) {
+        self.agent_rows_epoch = self.agent_rows_epoch.saturating_add(1);
         self.mirror_saved_profiles(profiles.to_vec());
         let mut next = Vec::with_capacity(profiles.len().saturating_add(1));
         let local = self
@@ -164,6 +165,7 @@ impl ClientShellState {
         endpoint_id: &ClientEndpointId,
         status: ClientEndpointStatus,
     ) {
+        self.agent_rows_epoch = self.agent_rows_epoch.saturating_add(1);
         if let Some(endpoint) = self
             .endpoints
             .iter_mut()
@@ -633,6 +635,7 @@ impl ClientShellState {
 
     #[cfg(test)]
     pub(crate) fn set_snapshot(&mut self, snapshot: Box<ClientShellSnapshot>) {
+        self.agent_rows_epoch = self.agent_rows_epoch.saturating_add(1);
         let endpoint_id = self.active_endpoint_id.clone();
         self.set_endpoint_snapshot(&endpoint_id, snapshot);
     }
@@ -838,6 +841,7 @@ impl ClientShellState {
         endpoint_id: &ClientEndpointId,
         snapshot: Box<ClientShellSnapshot>,
     ) {
+        self.agent_rows_epoch = self.agent_rows_epoch.saturating_add(1);
         self.cache_endpoint_snapshot(endpoint_id, snapshot);
         self.apply_cached_endpoint_snapshot(endpoint_id);
     }

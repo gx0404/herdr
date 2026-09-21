@@ -119,7 +119,13 @@ impl ClientShellState {
             .find(|(id, _)| *id == PanelId::Agents)
             .map(|(id, area)| body(*area, id))
             .unwrap_or_default();
+        let federated_agent_rows = self
+            .federated_agent_rows
+            .as_ref()
+            .map(|cache| cache.rows())
+            .unwrap_or(&[]);
         let mut sidebar_state = super::super::render::ShellRenderState {
+            federated_agent_rows,
             endpoints: &self.endpoints,
             machine_chrome: &self.machine_chrome,
             active_endpoint_id: &self.active_endpoint_id,

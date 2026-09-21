@@ -202,6 +202,8 @@ impl ClientShellState {
     }
 
     pub(crate) fn reload_client_config(&mut self) {
+        // 配置变了：联邦 agents 行缓存（PERF-02）据此失效。
+        self.config_epoch = self.config_epoch.saturating_add(1);
         match crate::config::load_live_config() {
             Ok(loaded) => {
                 let agent_panel_sort = self.config.agent_panel_sort;

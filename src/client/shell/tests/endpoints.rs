@@ -2362,3 +2362,72 @@ fn navigator_foreign_tab_selection_keeps_the_tab_target() {
         }] if activated == &endpoint_id && tab_id == "tab_1"
     ));
 }
+
+/// PERF-02：联邦 agents 面板的行按（快照分代、配置、排序、过滤标签、活动端点）
+/// 缓存，键不变时跨帧复用，数据变了才重算——不再每帧为所有端点的全部 agent
+/// 物化一遍再只画一屏。
+#[test]
+fn federated_agent_rows_are_cached_between_frames_and_refresh_on_data_change() {
+    use crate::client::shell::endpoint_agents::AgentRowsCache;
+
+    let (mut state, endpoint_id) = state_with_remote();
+    let mut remote = snapshot();
+    remote.boot_id = "remote-boot".into();
+    remote.workspaces[0].label = "remote-workspace".into();
+    remote.agents = vec![agent("remote agent", AgentStatus::Idle, 1)];
+    state.set_endpoint_snapshot(&endpoint_id, Box::new(remote));
+
+    state.compose(100, 28).expect("first frame");
+    let rows = state
+        .federated_agent_rows
+        .as_ref()
+        .map(|cache| cache.rows().len())
+        .unwrap_or(0);
+    assert!(rows >= 1, "缓存里有行: {rows}");
+    let key = AgentRowsCache::key_for(
+        &state.endpoints,
+        &state.config,
+        state.config_epoch,
+        state.agent_rows_epoch,
+        &state.active_endpoint_id,
+        state
+            .snapshot
+            .as_deref()
+            .and_then(|snapshot| snapshot.agent_view_label.as_deref()),
+    );
+    assert!(
+        state
+            .federated_agent_rows
+            .as_ref()
+            .expect("有缓存")
+            .key_matches(&key),
+        "键与当前数据一致"
+    );
+
+    // 再画一帧：数据没变，键仍匹配（即复用，而不是每帧重建）。
+    state.compose(100, 28).expect("second frame");
+    assert!(
+        state
+            .federated_agent_rows
+            .as_ref()
+            .expect("有缓存")
+            .key_matches(&key),
+        "无变化时跨帧复用缓存"
+    );
+
+    // 远端快照换了（即便 revision 不变也要失效——数据代际覆盖原地替换）。
+    let mut changed = snapshot();
+    changed.boot_id = "remote-boot".into();
+    changed.workspaces[0].label = "remote-workspace".into();
+    changed.agents = vec![agent("renamed remote agent", AgentStatus::Working, 9)];
+    state.set_endpoint_snapshot(&endpoint_id, Box::new(changed));
+    state.compose(100, 28).expect("third frame");
+    assert!(
+        !state
+            .federated_agent_rows
+            .as_ref()
+            .expect("有缓存")
+            .key_matches(&key),
+        "数据变了必须重算"
+    );
+}

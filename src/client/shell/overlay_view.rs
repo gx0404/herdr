@@ -12,6 +12,8 @@ impl ClientShellState {
     /// `reveal` 是一次性请求（键盘把选中行滚进视野），这里消费即清；滚轮只改
     /// `scroll`，不改键盘选中（C-20 残留面）。
     pub(super) fn compute_overlay_view(&mut self, cols: u16, rows: u16) {
+        // 联邦 agents 面板的行：按端点分代缓存，键未变则复用（PERF-02）。
+        self.refresh_federated_agent_rows();
         let area = Rect::new(0, 0, cols, rows);
         let page_bounds = self.floating_page_rect(cols, rows);
         self.compute_scenes_scroll(area, page_bounds);

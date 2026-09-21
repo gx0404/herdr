@@ -10,6 +10,7 @@ use ratatui::{
 
 use super::*;
 
+#[derive(Debug)]
 pub(super) struct AgentRow {
     pub(super) pane_id: String,
     pub(super) status: crate::api::schema::AgentStatus,

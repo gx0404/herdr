@@ -56,7 +56,13 @@ impl ClientShellState {
                     == Some(ClientEndpointStatus::Online)
         });
         let spinner = self.spinner_glyph();
+        let federated_agent_rows = self
+            .federated_agent_rows
+            .as_ref()
+            .map(|cache| cache.rows())
+            .unwrap_or(&[]);
         let mut render_state = render::ShellRenderState {
+            federated_agent_rows,
             endpoints: &self.endpoints,
             machine_chrome: &self.machine_chrome,
             active_endpoint_id: &self.active_endpoint_id,
@@ -232,12 +238,18 @@ impl ClientShellState {
             cols,
             rows,
         );
+        let federated_agent_rows = self
+            .federated_agent_rows
+            .as_ref()
+            .map(|cache| cache.rows())
+            .unwrap_or(&[]);
         self.hits = render::render_shell(
             canvas.buffer(),
             layout,
             snapshot,
             &self.config,
             render::ShellRenderState {
+                federated_agent_rows,
                 endpoints: &self.endpoints,
                 machine_chrome: &self.machine_chrome,
                 active_endpoint_id: &self.active_endpoint_id,
