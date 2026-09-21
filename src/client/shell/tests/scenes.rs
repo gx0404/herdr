@@ -1118,3 +1118,78 @@ fn scenes_wheel_scrolls_the_viewport_without_moving_the_selection() {
     assert!(!enabled(&profiles[6]), "滚到的 s06 不该被恢复");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// STATE-03：列表变空的瞬间不能把滚动位置清零——快照重载 / 全部删除后列表
+/// 回来时，用户滚到的位置要还在。
+#[test]
+fn emptying_the_scene_list_keeps_the_scroll_position() {
+    use crossterm::event::MouseEventKind;
+
+    let dir = with_temp_state_home("state-03");
+    let profiles = (0..12)
+        .map(|index| {
+            profile(
+                &format!("m{index:02}"),
+                &format!("m{index:02}.example"),
+                &format!("{index}"),
+                true,
+            )
+        })
+        .collect::<Vec<_>>();
+    seed_catalog(&profiles);
+    let mut state = state_with_profiles(&profiles);
+    let snapshots = (0..12)
+        .map(|index| {
+            scene(
+                &format!("s{index:02}"),
+                vec![scene_machine(&profiles[index])],
+            )
+        })
+        .collect::<Vec<_>>();
+    super::super::scenes_overlay::store_scenes_to(
+        &super::super::scenes_overlay::scene_snapshots_path(),
+        &snapshots,
+    )
+    .expect("seed scenes");
+
+    state.open_scenes_overlay();
+    state.compose(106, 24).expect("scenes overlay frame");
+    let popup = state.hits.scenes_popup;
+    for _ in 0..2 {
+        state.handle_raw_events(vec![RawInputEvent::Mouse(crossterm::event::MouseEvent {
+            kind: MouseEventKind::ScrollDown,
+            column: popup.x + popup.width / 2,
+            row: popup.y + popup.height / 2,
+            modifiers: KeyModifiers::empty(),
+        })]);
+    }
+    state.compose(106, 24).expect("scrolled frame");
+    let scrolled = match state.overlay.as_ref() {
+        Some(ClientShellOverlay::Scenes(overlay)) => overlay.scroll,
+        _ => panic!("scenes overlay"),
+    };
+    assert!(scrolled > 0, "滚轮先滚动视口");
+
+    // 列表被清空（快照重载 / 全部删除）：渲染不得把位置清零。
+    if let Some(ClientShellOverlay::Scenes(overlay)) = state.overlay.as_mut() {
+        overlay.scenes.clear();
+    }
+    state.compose(106, 24).expect("empty list frame");
+    let after_empty = match state.overlay.as_ref() {
+        Some(ClientShellOverlay::Scenes(overlay)) => overlay.scroll,
+        _ => panic!("scenes overlay"),
+    };
+    assert_eq!(after_empty, scrolled, "空列表不改写滚动位置（STATE-03）");
+
+    // 列表回来：位置还在。
+    if let Some(ClientShellOverlay::Scenes(overlay)) = state.overlay.as_mut() {
+        overlay.scenes = snapshots;
+    }
+    state.compose(106, 24).expect("restored list frame");
+    let restored = match state.overlay.as_ref() {
+        Some(ClientShellOverlay::Scenes(overlay)) => overlay.scroll,
+        _ => panic!("scenes overlay"),
+    };
+    assert_eq!(restored, scrolled, "列表回来后视口位置保持");
+    let _ = std::fs::remove_dir_all(&dir);
+}

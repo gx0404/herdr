@@ -395,6 +395,9 @@ impl DockLayout {
         if self.focused == *panel {
             self.focused = PanelId::Terminal(self.groups.first().map_or(1, |group| group.id));
         }
+        // 与 `resize` / `move_tab` 同约定：改写布局就推进 revision，否则关闭
+        // 面板不会被当成待同步的布局变化（BUG-01）。
+        self.revision = self.revision.saturating_add(1);
         true
     }
 
@@ -581,6 +584,28 @@ mod tests {
                 assert!(rect.right() <= area.right() && rect.bottom() <= area.bottom());
             }
         }
+    }
+
+    /// BUG-01：关闭面板也是「改写布局」，必须推进 revision，否则这次变化不被
+    /// 当成待同步的布局（与 `resize` / `move_tab` 同约定）。
+    #[test]
+    fn closing_a_panel_advances_the_revision() {
+        let mut layout = DockLayout::default();
+        assert!(layout.dock(PanelId::Agents, &PanelId::Terminal(1), Edge::Left));
+        let before = layout.revision;
+        assert!(layout.close_panel(&PanelId::Agents));
+        assert_eq!(
+            layout.revision,
+            before + 1,
+            "关闭面板要推进 revision（BUG-01）"
+        );
+
+        // 拒绝的关闭（终端组 / 锁定）不动 revision。
+        let before = layout.revision;
+        assert!(!layout.close_panel(&PanelId::Terminal(1)));
+        layout.locked = true;
+        assert!(!layout.close_panel(&PanelId::Monitor));
+        assert_eq!(layout.revision, before, "未改布局就不推进 revision");
     }
 
     #[test]

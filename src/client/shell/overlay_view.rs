@@ -22,18 +22,24 @@ impl ClientShellState {
         let Some(ClientShellOverlay::Scenes(overlay)) = self.overlay.as_mut() else {
             return;
         };
-        if matches!(overlay.view, scenes_overlay::ClientScenesView::List) {
+        // 列表为空或正文高 0 时不动滚动位置：窗口为空的瞬间按 0 回写会把用户
+        // 滚到的位置永久清零（STATE-03）。
+        if matches!(overlay.view, scenes_overlay::ClientScenesView::List)
+            && !overlay.scenes.is_empty()
+        {
             if let Some((_, body)) = scenes_overlay::scene_list_geometry(area, page_bounds) {
-                let selected = scenes_overlay::scene_list_selected(overlay);
-                let window = page::list_window(
-                    body,
-                    scenes_overlay::SCENE_LIST_ROW_HEIGHT,
-                    overlay.scenes.len(),
-                    overlay.scroll,
-                    selected,
-                    overlay.reveal,
-                );
-                overlay.scroll = window.start;
+                if body.height > 0 {
+                    let selected = scenes_overlay::scene_list_selected(overlay);
+                    let window = page::list_window(
+                        body,
+                        scenes_overlay::SCENE_LIST_ROW_HEIGHT,
+                        overlay.scenes.len(),
+                        overlay.scroll,
+                        selected,
+                        overlay.reveal,
+                    );
+                    overlay.scroll = window.start;
+                }
             }
         }
         overlay.reveal = false;
@@ -45,36 +51,49 @@ impl ClientShellState {
         };
         match &mut overlay.view {
             snippets_overlay::ClientSnippetsView::List => {
+                // 过滤到空结果 / 正文高 0 时不动滚动位置：窗口为空的瞬间按 0
+                // 回写会把位置永久清零（STATE-03）。
                 let rows =
                     snippets_overlay::filtered_snippets(&overlay.library, overlay.query.as_str())
                         .len();
-                if let Some((_, body)) = snippets_overlay::snippet_list_geometry(area, page_bounds)
-                {
-                    let selected = if rows == 0 {
-                        0
-                    } else {
-                        overlay.selected.min(rows - 1)
-                    };
-                    let window = page::list_window(
-                        body,
-                        snippets_overlay::SNIPPET_LIST_ROW_HEIGHT,
-                        rows,
-                        overlay.scroll,
-                        selected,
-                        overlay.reveal,
-                    );
-                    overlay.scroll = window.start;
+                if rows > 0 {
+                    if let Some((_, body)) =
+                        snippets_overlay::snippet_list_geometry(area, page_bounds)
+                    {
+                        if body.height > 0 {
+                            let selected = overlay.selected.min(rows - 1);
+                            let window = page::list_window(
+                                body,
+                                snippets_overlay::SNIPPET_LIST_ROW_HEIGHT,
+                                rows,
+                                overlay.scroll,
+                                selected,
+                                overlay.reveal,
+                            );
+                            overlay.scroll = window.start;
+                        }
+                    }
                 }
             }
             snippets_overlay::ClientSnippetsView::History { selected, scroll } => {
                 let count = overlay.library.history.len();
-                if let Some((_, body)) =
-                    snippets_overlay::snippet_history_geometry(area, page_bounds)
-                {
-                    let selected = (*selected).min(count.saturating_sub(1));
-                    let window =
-                        page::list_window(body, 1, count, *scroll, selected, overlay.reveal);
-                    *scroll = window.start;
+                if count > 0 {
+                    if let Some((_, body)) =
+                        snippets_overlay::snippet_history_geometry(area, page_bounds)
+                    {
+                        if body.height > 0 {
+                            let selected = (*selected).min(count - 1);
+                            let window = page::list_window(
+                                body,
+                                1,
+                                count,
+                                *scroll,
+                                selected,
+                                overlay.reveal,
+                            );
+                            *scroll = window.start;
+                        }
+                    }
                 }
             }
             _ => {}

@@ -1355,3 +1355,53 @@ fn failed_preference_write_keeps_the_batch_dirty_for_the_next_retry() {
     assert!(state.preferences_dirty_since.is_none(), "重试成功后清脏");
     let _ = std::fs::remove_dir_all(&blocker);
 }
+
+/// LEAK-01：分组销毁后回收它的标签页视口状态（`tab_scroll` / `tab_focus`），
+/// 否则按分组 id 索引的两张表会随工作区开关无限增长。
+#[test]
+fn tab_view_state_is_pruned_to_live_groups() {
+    let mut state = ready();
+    state.compose(160, 40).expect("初始画面");
+    let live = state
+        .workbench
+        .dock
+        .groups
+        .first()
+        .map(|group| group.id)
+        .expect("至少一个终端组");
+    let stale = state
+        .workbench
+        .dock
+        .groups
+        .iter()
+        .map(|group| group.id)
+        .max()
+        .unwrap_or(live)
+        + 7;
+
+    // 现存分组保留，已销毁分组的残留条目要在 tick 里被回收。
+    state.workbench.tab_scroll.insert(live, 2);
+    state.workbench.tab_scroll.insert(stale, 3);
+    state
+        .workbench
+        .tab_focus
+        .insert(stale, (Some("tab_x".into()), 40));
+
+    state.tick_workbench(
+        std::time::Instant::now() + std::time::Duration::from_millis(10),
+        &mut ClientShellInput::default(),
+    );
+    assert!(
+        !state.workbench.tab_scroll.contains_key(&stale),
+        "销毁的分组不再保留 tab_scroll（LEAK-01）"
+    );
+    assert!(
+        !state.workbench.tab_focus.contains_key(&stale),
+        "销毁的分组不再保留 tab_focus（LEAK-01）"
+    );
+    assert_eq!(
+        state.workbench.tab_scroll.get(&live).copied(),
+        Some(2),
+        "现存分组的视口状态保留"
+    );
+}

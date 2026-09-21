@@ -6,6 +6,7 @@ mod render;
 use super::dock::{DockLayout, Geometry, PanelId};
 use super::*;
 use crate::api::schema::{ClientViewSpec, ClientViewsSetParams, Method};
+use std::collections::HashSet;
 use std::time::{Duration, Instant};
 
 pub(super) struct View {
@@ -229,6 +230,20 @@ impl ClientShellState {
         self.workbench.disconnect();
     }
 
+    /// 分组销毁后回收它的标签页视口状态：`tab_scroll` / `tab_focus` 按分组 id
+    /// 索引，不过滤就会随开关面板与工作区切换无限增长（LEAK-01）。
+    fn prune_tab_view_state(&mut self) {
+        let live = self
+            .workbench
+            .dock
+            .groups
+            .iter()
+            .map(|group| group.id)
+            .collect::<HashSet<u64>>();
+        self.workbench.tab_scroll.retain(|id, _| live.contains(id));
+        self.workbench.tab_focus.retain(|id, _| live.contains(id));
+    }
+
     pub(crate) fn tick_workbench(&mut self, now: Instant, outcome: &mut ClientShellInput) {
         if !self.endpoint_is_online(&self.active_endpoint_id) {
             return;
@@ -315,6 +330,7 @@ impl ClientShellState {
                 .last_focus
                 .clone_from(&snapshot.focused_tab_id);
         }
+        self.prune_tab_view_state();
         let Some((cols, rows)) = self.last_composed_size else {
             return;
         };

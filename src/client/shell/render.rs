@@ -350,7 +350,9 @@ pub(super) fn render_mode_bar(
                 ],
             )
         }
-        ClientShellMode::Terminal => unreachable!(),
+        // 终端的错误 / 广播两条路径已在上面各自 return；这里再保一层：渲染
+        // 路径不 panic，最多只画一个没有内容的模式条（CFP-17）。
+        ClientShellMode::Terminal => return Some(bar),
     };
 
     let badge_width = display_width(&badge);
