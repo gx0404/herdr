@@ -209,6 +209,7 @@ fn ctrl_hover_content_patch_removes_all_old_underlines() {
         }],
         panes: vec![pane],
         cursor: None,
+        hyperlink_uris: Vec::new(),
     };
     assert!(matches!(
         state.apply_pane_surface_patch(patch),
@@ -257,6 +258,7 @@ fn ctrl_hover_preserves_fast_patches_for_other_panes() {
         }],
         panes: vec![other],
         cursor: None,
+        hyperlink_uris: Vec::new(),
     };
     assert!(matches!(
         state.apply_pane_surface_patch(patch),
@@ -321,6 +323,91 @@ fn ctrl_hover_explicit_wide_label_includes_the_spacer_cell() {
     let regions = &state.link_hover.as_ref().unwrap().regions;
     assert_eq!(regions.len(), 1);
     assert_eq!((regions[0].start_col, regions[0].end_col), (1, 2));
+}
+
+/// RS-01 根治：增量补丁携带的链接表必须先按序并入基线，ctrl-hover 与链接
+/// 提示才能解析出正确 URL——补丁行的索引以「基线表长 + 增量偏移」编码。
+#[test]
+fn ctrl_hover_resolves_urls_from_an_incremental_hyperlink_table() {
+    let mut state = hover_state();
+    state.set_endpoint_methods(Some(vec![]));
+    // 基线表已有一条历史 URI，补丁新增的是第二条。
+    let mut next = surface();
+    next.surface_revision += 1;
+    next.frame.hyperlinks.push("https://old.example/".into());
+    next.frame.cells[4].hyperlink = Some(0);
+    state.set_pane_surface(next);
+    state.compose(106, 20).unwrap();
+
+    let before = state.pane_surface.as_ref().unwrap().clone();
+    let mut pane = before.panes[0].clone();
+    pane.content_revision += 2;
+    let mut linked = before.frame.cells[6].clone();
+    linked.hyperlink = Some(1);
+    let patch = crate::protocol::PaneSurfacePatch {
+        boot_id: "boot-1".into(),
+        projection_revision: 1,
+        base_surface_revision: before.surface_revision,
+        surface_revision: before.surface_revision + 1,
+        rows: vec![crate::protocol::PaneSurfacePatchRow {
+            x: 2,
+            y: 1,
+            cells: vec![linked],
+        }],
+        panes: vec![pane],
+        cursor: None,
+        hyperlink_uris: vec!["https://new.example/".into()],
+    };
+    assert!(matches!(
+        state.apply_pane_surface_patch(patch),
+        ClientPaneSurfacePatchOutcome::Applied(_)
+    ));
+    let surface = state.pane_surface.as_ref().unwrap();
+    assert_eq!(
+        surface.frame.hyperlinks,
+        vec![
+            "https://old.example/".to_owned(),
+            "https://new.example/".to_owned()
+        ]
+    );
+    assert_eq!(surface.frame.cells[6].hyperlink, Some(1));
+
+    let mouse = hover_mouse(&state, 2, 1);
+    let outcome = state.handle_raw_events(vec![RawInputEvent::Mouse(mouse)]);
+    assert!(outcome.actions.is_empty());
+    assert!(outcome.repaint);
+    let regions = &state.link_hover.as_ref().unwrap().regions;
+    assert_eq!(regions.len(), 1, "只有增量表里的新链接命中");
+    assert_eq!(
+        (regions[0].row, regions[0].start_col, regions[0].end_col),
+        (1, 2, 2)
+    );
+
+    let mut outcome = ClientShellInput::default();
+    state.enter_link_hints(&mut outcome);
+    let hints = &state.link_hints.as_ref().expect("link hints").hints;
+    assert_eq!(
+        hints
+            .iter()
+            .map(|hint| hint.url.as_str())
+            .collect::<Vec<_>>(),
+        vec!["https://old.example/", "https://new.example/"]
+    );
+    let mut outcome = ClientShellInput::default();
+    for letter in ['a', 'b'] {
+        state.route_link_hints_key(
+            &crate::input::TerminalKey::new(KeyCode::Char(letter), KeyModifiers::empty()),
+            &mut outcome,
+        );
+    }
+    assert!(
+        matches!(
+            &outcome.actions[..],
+            [ClientShellAction::OpenSafeWebUrl(url)] if url == "https://new.example/"
+        ),
+        "{:?}",
+        outcome.actions
+    );
 }
 
 #[test]

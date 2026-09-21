@@ -301,6 +301,7 @@ fn retained_mouse_selection_survives_output_and_copies_without_terminal_input() 
                 cells: vec![cell]
             }],
             cursor: updated.frame.cursor,
+            hyperlink_uris: Vec::new(),
         }),
         super::super::surface_patch::ClientPaneSurfacePatchOutcome::Applied(_)
     ));

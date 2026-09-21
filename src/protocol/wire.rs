@@ -1243,6 +1243,13 @@ pub struct PaneSurfacePatch {
     pub panes: Vec<PaneSurfacePane>,
     /// Final cursor relative to the pane surface.
     pub cursor: Option<CursorState>,
+    /// RS-01 根治：本补丁新引入的 OSC 8 超链接 URI，按序追加到基线帧的
+    /// `FrameData::hyperlinks` 表。patch 行内 `CellData.hyperlink` 的索引以
+    /// 「基线表长 + 本表内偏移」绝对编码；客户端应用时先按序追加再写格。
+    /// 旧协议（PROTOCOL_VERSION ≤ 22）不产生该字段；23 起补丁可直接携带
+    /// 超链接，不再需要整帧回退。
+    #[serde(default)]
+    pub hyperlink_uris: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -2510,7 +2517,7 @@ mod tests {
                     bg: 2,
                     modifier: 3,
                     skip: false,
-                    hyperlink: None,
+                    hyperlink: Some(0),
                 }],
             }],
             panes: Vec::new(),
@@ -2520,6 +2527,7 @@ mod tests {
                 visible: true,
                 shape: 2,
             }),
+            hyperlink_uris: vec!["https://example.com/a".into()],
         });
         let encoded = bincode::serde::encode_to_vec(&msg, bincode::config::standard()).unwrap();
         let (decoded, _): (ServerMessage, _) =
@@ -2527,7 +2535,7 @@ mod tests {
         assert_eq!(decoded, msg);
         assert_eq!(
             encoded_sha256(&msg),
-            "0814b99a1dc6eaf7918424aa416c066509cbfb73b72344a809c27cde78cb6dbd"
+            "263c119530668af838bf2ce3645d13d1b800d7e43a6305e59690445fe8034669"
         );
     }
 
@@ -2671,6 +2679,7 @@ mod tests {
                 rows: Vec::new(),
                 panes: Vec::new(),
                 cursor: None,
+                hyperlink_uris: Vec::new(),
             })),
             19
         );

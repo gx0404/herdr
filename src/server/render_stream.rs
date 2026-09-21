@@ -253,6 +253,12 @@ pub(super) fn apply_pane_surface_patch(surface: &mut PaneSurfaceFrame, patch: &P
     debug_assert_eq!(surface.boot_id, patch.boot_id);
     debug_assert_eq!(surface.projection_revision, patch.projection_revision);
     debug_assert_eq!(surface.surface_revision, patch.base_surface_revision);
+    // RS-01 根治：先把补丁新增的超链接 URI 按序并进基线表，再写行——
+    // 行内索引以「基线表长 + 增量偏移」绝对编码。
+    surface
+        .frame
+        .hyperlinks
+        .extend(patch.hyperlink_uris.iter().cloned());
     for row in &patch.rows {
         let start = usize::from(row.y) * usize::from(surface.frame.width) + usize::from(row.x);
         surface.frame.cells[start..start + row.cells.len()].clone_from_slice(&row.cells);
@@ -595,6 +601,7 @@ mod tests {
                     }],
                     panes: Vec::new(),
                     cursor: None,
+                    hyperlink_uris: Vec::new(),
                 })
                 .unwrap();
             decoder.decode(patch.message().clone()).unwrap();

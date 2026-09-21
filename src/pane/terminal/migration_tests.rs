@@ -248,11 +248,26 @@ fn dirty_patch_fallback_keeps_previously_collected_rows_dirty() {
     let mut terminal = Harness::new(8, 6);
     terminal.write(b"\x1b[2;3H");
     terminal.pane.collect_dirty_patch(8, 6);
-    terminal.write(b"\x1b[2;3HX\x1b[5;4H\x1b]8;;https://example.test\x1b\\Y\x1b]8;;\x1b\\");
+    terminal.write(b"\x1b[2;3HX\x1b[5;4HY");
+    // 行已收集、尚未清脏时回退：回退不得消费脏行，下一轮必须重新看到它们。
+    terminal
+        .pane
+        .ghostty
+        .core
+        .lock()
+        .unwrap()
+        .force_fallback_after_collection_for_test = true;
     assert!(matches!(
         terminal.pane.collect_dirty_patch(8, 6),
         TerminalDirtyPatchOutcome::Fallback
     ));
+    let TerminalDirtyPatchOutcome::Patch(patch) = terminal.pane.collect_dirty_patch(8, 6) else {
+        panic!("dirty rows must survive a fallback");
+    };
+    assert_eq!(
+        patch.rows.iter().map(|(y, _)| *y).collect::<Vec<_>>(),
+        vec![1, 4]
+    );
     let core = terminal.pane.ghostty.core.lock().unwrap();
     let mut iterator = crate::ghostty::RowIterator::new().unwrap();
     let mut rows = core
@@ -267,7 +282,55 @@ fn dirty_patch_fallback_keeps_previously_collected_rows_dirty() {
         }
         y += 1;
     }
-    assert_eq!(dirty, vec![1, 4]);
+    assert!(
+        dirty.is_empty(),
+        "collected rows are only cleared on success"
+    );
+}
+
+#[test]
+fn dirty_patch_exposes_hyperlink_uri_table_instead_of_falling_back() {
+    let mut terminal = Harness::new(8, 6);
+    terminal.write(b"\x1b[2;3H");
+    terminal.pane.collect_dirty_patch(8, 6);
+    terminal.write(
+        b"\x1b]8;;https://example.test/a\x1b\\AB\x1b]8;;\x1b\\ \x1b]8;;https://example.test/b\x1b\\C\x1b]8;;\x1b\\",
+    );
+    let TerminalDirtyPatchOutcome::Patch(patch) = terminal.pane.collect_dirty_patch(8, 6) else {
+        panic!("hyperlink rows must patch instead of falling back");
+    };
+    // 补丁局部链接表按首次出现顺序编号，单元格只带表内索引。
+    assert_eq!(
+        patch.hyperlinks,
+        vec![
+            "https://example.test/a".to_owned(),
+            "https://example.test/b".to_owned()
+        ]
+    );
+    let (_, cells) = patch
+        .rows
+        .iter()
+        .find(|(y, _)| *y == 1)
+        .expect("dirty hyperlink row");
+    assert_eq!(cells[2].hyperlink, Some(0));
+    assert_eq!(cells[3].hyperlink, Some(0));
+    assert_eq!(cells[4].hyperlink, None);
+    assert_eq!(cells[5].hyperlink, Some(1));
+    // 收集不改写终端链接：完整渲染仍取回同一 URI，两条路径可互校。
+    let links = terminal
+        .pane
+        .visible_hyperlinks(Rect::new(0, 0, 8, 6))
+        .into_iter()
+        .map(|((x, y), _, uri)| (x, y, uri))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        links,
+        vec![
+            (2, 1, "https://example.test/a".to_owned()),
+            (3, 1, "https://example.test/a".to_owned()),
+            (5, 1, "https://example.test/b".to_owned()),
+        ]
+    );
 }
 
 #[test]

@@ -108,9 +108,13 @@ pub struct TerminalCursorState {
     pub shape: u8,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub(crate) struct TerminalDirtyPatch {
     pub rows: Vec<(u16, Vec<CellData>)>,
+    /// RS-01 根治：本次收集引入的 OSC 8 超链接 URI 局部表；行内
+    /// `CellData.hyperlink` 的索引指向本表。retained 投递时按接收者基线
+    /// 翻译为「基线表长 + 追加偏移」。
+    pub hyperlinks: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -226,6 +230,10 @@ pub(crate) struct GhosttyPaneCore {
     /// （而不是伪造错误值），用完即清。
     #[cfg(test)]
     pub reject_next_resize_for_test: bool,
+    /// 测试钩子：置位后下一次收集在行已收集、尚未清脏时回退，用来验证
+    /// 「回退不消费脏行」的不变式（0.16.0 C 面无其它可用回退触发点）。
+    #[cfg(test)]
+    pub force_fallback_after_collection_for_test: bool,
     pub terminal: crate::ghostty::Terminal,
     #[cfg(windows)]
     recent_fallback: windows_recent_fallback::Cache,
@@ -1470,6 +1478,8 @@ impl GhosttyPaneTerminal {
                 dirty_collection_hook: None,
                 #[cfg(test)]
                 reject_next_resize_for_test: false,
+                #[cfg(test)]
+                force_fallback_after_collection_for_test: false,
                 terminal,
                 #[cfg(windows)]
                 recent_fallback: windows_recent_fallback::Cache::default(),
@@ -3043,6 +3053,9 @@ fn ghostty_collect_dirty_patch(
     let host_theme = core.host_terminal_theme;
     let initial_default_foreground = core.initial_default_foreground;
     let initial_default_background = core.initial_default_background;
+    #[cfg(test)]
+    let force_fallback_after_collection =
+        std::mem::take(&mut core.force_fallback_after_collection_for_test);
     let GhosttyPaneCore {
         terminal,
         render_state,
@@ -3081,6 +3094,7 @@ fn ghostty_collect_dirty_patch(
     let mut grapheme_bytes = Vec::new();
     let mut symbol_scratch = String::new();
     let mut patch_rows = Vec::new();
+    let mut patch_hyperlinks: Vec<String> = Vec::new();
     while let Some(y) = rows.next_dirty() {
         if y >= area_height {
             break;
@@ -3099,9 +3113,28 @@ fn ghostty_collect_dirty_patch(
             let Ok(basic) = cells.basic_data() else {
                 fallback!("basic_data_error");
             };
-            if basic.has_hyperlink {
-                fallback!("hyperlink_present");
-            }
+            // RS-01 根治：超链接单元格不再整帧回退——URI 解析进补丁局部
+            // 链接表，单元格携带表内索引。
+            let hyperlink = if basic.has_hyperlink {
+                match terminal.viewport_hyperlink_uri(x, y.into()) {
+                    Ok(Some(uri)) => {
+                        let index = patch_hyperlinks
+                            .iter()
+                            .position(|known| *known == uri)
+                            .map(|index| index as u32)
+                            .unwrap_or_else(|| {
+                                patch_hyperlinks.push(uri);
+                                (patch_hyperlinks.len() - 1) as u32
+                            });
+                        Some(index)
+                    }
+                    // 有链接但 URI 解析不出来（理论不发生）：保守回退，
+                    // 不静默丢链接。
+                    _ => fallback!("hyperlink_uri_unresolved"),
+                }
+            } else {
+                None
+            };
             let style = ghostty_cell_style(
                 &cells,
                 &basic,
@@ -3121,7 +3154,9 @@ fn ghostty_collect_dirty_patch(
                 Ok(symbol) => symbol.to_owned(),
                 Err(_) => ghostty_blank_symbol_for_width(basic.wide).to_owned(),
             };
-            patch_cells.push(cell_data_from_style(symbol, style));
+            let mut cell = cell_data_from_style(symbol, style);
+            cell.hyperlink = hyperlink;
+            patch_cells.push(cell);
             x += 1;
         }
         while x < area_width {
@@ -3129,6 +3164,12 @@ fn ghostty_collect_dirty_patch(
             x += 1;
         }
         patch_rows.push((y, patch_cells));
+    }
+
+    // 测试钩子：行已收集、尚未清脏，此时回退——下一轮必须重新看到同一批行。
+    #[cfg(test)]
+    if force_fallback_after_collection {
+        fallback!("forced_for_test");
     }
 
     // Nothing above mutates dirty state. Only clear it after every row has
@@ -3158,7 +3199,8 @@ fn ghostty_collect_dirty_patch(
     }
 
     finish!(TerminalDirtyPatchOutcome::Patch(TerminalDirtyPatch {
-        rows: patch_rows
+        rows: patch_rows,
+        hyperlinks: patch_hyperlinks,
     }));
 }
 

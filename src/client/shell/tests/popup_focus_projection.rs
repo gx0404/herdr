@@ -1067,6 +1067,7 @@ fn retained_surface_patch_updates_only_pane_cells_without_recomposing_chrome() {
         }],
         panes: vec![updated_pane],
         cursor: None,
+        hyperlink_uris: Vec::new(),
     };
 
     let ClientPaneSurfacePatchOutcome::Applied(Some(patch)) = state.apply_pane_surface_patch(patch)
@@ -1117,6 +1118,7 @@ fn retained_surface_patch_recomposes_client_owned_mode_and_diagnostic_rows() {
             rows: Vec::new(),
             panes: vec![updated_pane],
             cursor: None,
+            hyperlink_uris: Vec::new(),
         };
 
         assert!(matches!(
@@ -1173,6 +1175,7 @@ fn retained_surface_patch_updates_scrollbar_cells_and_pane_hit_metadata() {
         }],
         panes: vec![updated_pane],
         cursor: None,
+        hyperlink_uris: Vec::new(),
     };
 
     let ClientPaneSurfacePatchOutcome::Applied(Some(patch)) = state.apply_pane_surface_patch(patch)
@@ -1220,6 +1223,7 @@ fn retained_surface_patch_rejects_stale_base_without_mutating_surface() {
         rows: Vec::new(),
         panes: Vec::new(),
         cursor: None,
+        hyperlink_uris: Vec::new(),
     });
     assert!(matches!(outcome, ClientPaneSurfacePatchOutcome::Rejected));
     assert_eq!(state.pane_surface, before);

@@ -1641,118 +1641,187 @@ async fn retained_patches_only_reach_shells_viewing_the_dirty_tab() {
     shutdown_test_runtimes(&mut server);
 }
 
+/// 两个接收者的链接表长度不同（重建/重连后基线表长不一）时，增量表与单元格
+/// 索引必须各自对齐自己的基线：同一份 pane 内容不能对两个客户端算出同一组
+/// 绝对索引。
 #[tokio::test]
-async fn retained_hyperlink_intersection_excludes_only_the_affected_client() {
+async fn retained_hyperlink_patches_align_each_recipient_baseline_table() {
     let mut server = test_headless_server();
     let pane_id = install_shared_view_test_runtime(&mut server);
     let (_first_control, first_render) = connect_matching_test_shell(&mut server, 7);
     let (_second_control, second_render) = connect_matching_test_shell(&mut server, 8);
     server.render_and_stream();
-    let _ = recv_pane_surface(&first_render, "first baseline");
-    let _ = recv_pane_surface(&second_render, "second baseline");
+    let first_baseline = recv_pane_surface(&first_render, "first baseline");
+    let mut second_baseline = recv_pane_surface(&second_render, "second baseline");
+    assert!(first_baseline.frame.hyperlinks.is_empty());
+    assert!(second_baseline.frame.hyperlinks.is_empty());
 
-    // Foreground renders last. Its old hyperlink intersects the dirty rows.
+    // 两个接收者的链接表长度不同：表只在全量帧重建，旧条目不会因引用消失而
+    // 回收，不同 view 的基线因此可以带着不同的历史条目。8 的基线多一条。
+    second_baseline
+        .frame
+        .hyperlinks
+        .push("https://example.com/stale".into());
     server.foreground_client_id = Some(8);
     let crate::server::render_stream::ClientRenderState::Semantic { last_surface, .. } =
         &mut server.clients.get_mut(&8).unwrap().render_state
     else {
         panic!("semantic client");
     };
-    let linked = last_surface.as_mut().unwrap();
-    linked.frame.hyperlinks.push("https://example.com".into());
-    linked.frame.cells[0].hyperlink = Some(0);
-    let before_eight = server.clients[&8]
-        .render_state
-        .last_pane_surface()
+    last_surface
+        .as_mut()
         .unwrap()
-        .clone();
+        .frame
+        .hyperlinks
+        .push("https://example.com/stale".into());
 
-    write_shared_test_pane(&mut server, pane_id, b"\rNEXT\x1b[?1003h");
-    // 单个接收者的基线问题不再升级整 tick：retained 照常完成。
+    write_shared_test_pane(
+        &mut server,
+        pane_id,
+        b"\r\x1b]8;;https://example.com/live\x1b\\LINK\x1b]8;;\x1b\\\x1b[?1003h",
+    );
     assert!(server.render_retained_pane_surface_and_stream(&HashSet::from([pane_id])));
-    // 未受影响的 7 照常收补丁。
-    let patch = recv_pane_surface_patch(&first_render, "unaffected client keeps patching");
-    assert!(patch.panes[0].mouse_reporting);
-    // 受影响的 8 只可能收到光标补丁（剔除 pane 后 rows/panes 为空），
-    // 并被延期 + 武装一次全量渲染恢复基线。
-    while let Ok(bytes) = second_render.try_recv() {
-        let ServerMessage::PaneSurfacePatch(patch) = read_server_message(bytes) else {
-            panic!("excluded client must not receive a full surface");
-        };
-        assert!(patch.rows.is_empty() && patch.panes.is_empty());
+
+    // 两个接收者都收到同一个新 URI 的增量表；索引在应用时按各自基线表长重算。
+    let first_patch = recv_pane_surface_patch(&first_render, "first hyperlink patch");
+    let second_patch = recv_pane_surface_patch(&second_render, "second hyperlink patch");
+    for patch in [&first_patch, &second_patch] {
+        assert_eq!(
+            patch.hyperlink_uris,
+            vec!["https://example.com/live".to_owned()]
+        );
+        assert!(patch.panes[0].mouse_reporting);
     }
-    assert_eq!(server.clients[&8].deferred_render(), DeferredRender::Full);
-    assert!(server.app.render_dirty.is_pending());
-    let after_eight = server.clients[&8].render_state.last_pane_surface().unwrap();
-    assert_eq!(
-        after_eight.frame.cells, before_eight.frame.cells,
-        "excluded client frame cells must not be partially committed"
-    );
-    assert_eq!(
-        after_eight.panes, before_eight.panes,
-        "excluded client pane metadata must not be partially committed"
-    );
 
-    // 下一帧全量渲染后基线恢复（基线不再含超链接），retained 快路径重新接管。
-    // 7 的基线已被补丁推进，恢复帧与它一致时服务端跳过（skip_identical），
-    // 因此这里只做容错排空而不是必须收到帧。
-    server.render_and_stream();
-    while first_render.try_recv().is_ok() {}
-    let _ = recv_pane_surface(&second_render, "recovery full render");
-    assert_eq!(server.clients[&8].deferred_render(), DeferredRender::None);
-    write_shared_test_pane(&mut server, pane_id, b"\rPLAIN\x1b[?1003l");
-    assert!(server.render_retained_pane_surface_and_stream(&HashSet::from([pane_id])));
-    let _ = recv_pane_surface_patch(&first_render, "first client follows");
-    let _ = recv_pane_surface_patch(&second_render, "recovered client follows");
+    let mut first_client = first_baseline;
+    crate::server::render_stream::apply_pane_surface_patch(&mut first_client, &first_patch);
+    let mut second_client = second_baseline;
+    crate::server::render_stream::apply_pane_surface_patch(&mut second_client, &second_patch);
+    assert_eq!(
+        first_client.frame.hyperlinks,
+        vec!["https://example.com/live".to_owned()]
+    );
+    assert_eq!(
+        second_client.frame.hyperlinks,
+        vec![
+            "https://example.com/stale".to_owned(),
+            "https://example.com/live".to_owned()
+        ]
+    );
+    for client in [&first_client, &second_client] {
+        let linked = client.frame.cells[0]
+            .hyperlink
+            .expect("first cell carries the live link");
+        assert_eq!(
+            client.frame.hyperlinks[linked as usize],
+            "https://example.com/live"
+        );
+    }
+    // 服务端记账与接收者各自应用补丁的结果逐字节一致。
+    assert_eq!(
+        first_client.frame,
+        server.clients[&7]
+            .render_state
+            .last_pane_surface()
+            .unwrap()
+            .frame
+    );
+    assert_eq!(
+        second_client.frame,
+        server.clients[&8]
+            .render_state
+            .last_pane_surface()
+            .unwrap()
+            .frame
+    );
     shutdown_test_runtimes(&mut server);
 }
 
+/// 超链接单元格走补丁路径：增量表在基线表尾追加，旧索引不变；重连（全新基线）
+/// 的全量渲染必须与增量结果对每个单元格给出同一个 URI。
 #[tokio::test]
-async fn retained_hyperlink_cells_defer_watchers_and_recover_via_full_render() {
+async fn retained_hyperlink_patches_grow_the_table_and_match_a_rebuilt_baseline() {
     let mut server = test_headless_server();
     let pane_id = install_shared_view_test_runtime(&mut server);
     let (_control, render) = connect_matching_test_shell(&mut server, 7);
     let _ = _control.recv().expect("snapshot");
     server.render_and_stream();
-    let _ = recv_pane_surface(&render, "baseline");
+    let baseline = recv_pane_surface(&render, "baseline");
+    assert!(baseline.frame.hyperlinks.is_empty());
 
-    // OSC 8 超链接单元格让 dirty 收集回退：该 pane 被剔除出补丁流，
-    // 观看它的客户端延期并武装全量渲染，而不是整 tick 回退。
+    // OSC 8 行不再让收集回退：该 pane 照常出补丁，链接随增量表下发。
     write_shared_test_pane(
         &mut server,
         pane_id,
-        b"\r\x1b]8;;https://example.com\x1b\\LINK\x1b]8;;\x1b\\",
+        b"\r\x1b]8;;https://example.com/first\x1b\\LINK\x1b]8;;\x1b\\",
     );
     assert!(server.render_retained_pane_surface_and_stream(&HashSet::from([pane_id])));
-    while let Ok(bytes) = render.try_recv() {
-        let ServerMessage::PaneSurfacePatch(patch) = read_server_message(bytes) else {
-            panic!("excluded pane must not stream a full surface");
-        };
-        assert!(patch.rows.is_empty() && patch.panes.is_empty());
-    }
-    assert_eq!(server.clients[&7].deferred_render(), DeferredRender::Full);
-    assert!(server.app.render_dirty.is_pending());
-
-    server.render_and_stream();
-    let surface = recv_pane_surface(&render, "recovery full render");
-    assert!(frame_text(&surface.frame).contains("LINK"));
+    let patch = recv_pane_surface_patch(&render, "first hyperlink patch");
+    assert_eq!(
+        patch.hyperlink_uris,
+        vec!["https://example.com/first".to_owned()]
+    );
     assert_eq!(server.clients[&7].deferred_render(), DeferredRender::None);
+    let mut client = baseline;
+    crate::server::render_stream::apply_pane_surface_patch(&mut client, &patch);
+    assert_eq!(
+        client.frame.hyperlinks,
+        vec!["https://example.com/first".to_owned()]
+    );
 
-    // 普通内容覆盖超链接行：收集可以出补丁，但基线仍含链接，相交检查
-    // 再剔除一次并延期；下一帧全量渲染后基线不再含链接。
-    write_shared_test_pane(&mut server, pane_id, b"\rPLAIN");
+    // 第二个链接追加到基线表尾：旧链接索引不变，新链接索引等于旧表长。
+    write_shared_test_pane(
+        &mut server,
+        pane_id,
+        b"\r\n\x1b]8;;https://example.com/second\x1b\\MORE\x1b]8;;\x1b\\",
+    );
     assert!(server.render_retained_pane_surface_and_stream(&HashSet::from([pane_id])));
-    assert_eq!(server.clients[&7].deferred_render(), DeferredRender::Full);
-    while render.try_recv().is_ok() {}
+    let patch = recv_pane_surface_patch(&render, "second hyperlink patch");
+    assert_eq!(
+        patch.hyperlink_uris,
+        vec!["https://example.com/second".to_owned()]
+    );
+    crate::server::render_stream::apply_pane_surface_patch(&mut client, &patch);
+    assert_eq!(
+        client.frame.hyperlinks,
+        vec![
+            "https://example.com/first".to_owned(),
+            "https://example.com/second".to_owned()
+        ]
+    );
+    assert_eq!(client.frame.cells[0].hyperlink, Some(0));
+    let second_row = usize::from(client.frame.width);
+    assert_eq!(client.frame.cells[second_row].hyperlink, Some(1));
+    assert_eq!(
+        client.frame,
+        server.clients[&7]
+            .render_state
+            .last_pane_surface()
+            .unwrap()
+            .frame
+    );
+
+    // 重连的新客户端拿到重建后的基线：逐格 URI 必须与增量路径一致。
+    let (_reconnect_control, reconnect_render) = connect_matching_test_shell(&mut server, 9);
+    let _ = _reconnect_control.recv().expect("reconnect snapshot");
     server.render_and_stream();
-    let _ = recv_pane_surface(&render, "second recovery full render");
-    assert_eq!(server.clients[&7].deferred_render(), DeferredRender::None);
-
-    // 基线无超链接后，retained 补丁恢复。
-    write_shared_test_pane(&mut server, pane_id, b"\r\nFINAL");
-    assert!(server.render_retained_pane_surface_and_stream(&HashSet::from([pane_id])));
-    let patch = recv_pane_surface_patch(&render, "patch resumes after link-free baseline");
-    assert!(!patch.rows.is_empty());
+    let rebuilt = recv_pane_surface(&reconnect_render, "rebuilt baseline");
+    assert!(rebuilt
+        .frame
+        .cells
+        .iter()
+        .any(|cell| cell.hyperlink.is_some()));
+    let resolve = |frame: &FrameData| -> Vec<Option<String>> {
+        frame
+            .cells
+            .iter()
+            .map(|cell| {
+                cell.hyperlink
+                    .map(|index| frame.hyperlinks[index as usize].clone())
+            })
+            .collect()
+    };
+    assert_eq!(resolve(&client.frame), resolve(&rebuilt.frame));
     shutdown_test_runtimes(&mut server);
 }
 

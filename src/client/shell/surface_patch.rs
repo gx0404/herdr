@@ -34,6 +34,12 @@ pub(super) fn apply_patch_to_surface(
     surface: &mut crate::protocol::PaneSurfaceFrame,
     patch: &crate::protocol::PaneSurfacePatch,
 ) -> bool {
+    // RS-01 根治：先把补丁新增的超链接 URI 按序并进基线表，再写行——
+    // 行内 CellData.hyperlink 索引以「基线表长 + 增量偏移」绝对编码。
+    surface
+        .frame
+        .hyperlinks
+        .extend(patch.hyperlink_uris.iter().cloned());
     for row in &patch.rows {
         if !apply_row(row, &mut surface.frame) {
             return false;
@@ -80,6 +86,15 @@ fn fast_path_blocker(
         Some("client_surface_patch.fallback.copy_mode")
     } else if state.selection_highlight_clear_deadline.is_some() {
         Some("client_surface_patch.fallback.selection_deadline")
+    } else if !patch.hyperlink_uris.is_empty()
+        || patch
+            .rows
+            .iter()
+            .any(|row| row.cells.iter().any(|cell| cell.hyperlink.is_some()))
+    {
+        // 带超链接的补丁走完整重排分支：compose 帧的链接表是每次 compose
+        // 重建的，与 pane_surface 表不同源，快速路径原地写格会错链。
+        Some("client_surface_patch.fallback.hyperlinks")
     } else if patch.panes.iter().any(|pane| {
         !state
             .hits

@@ -3874,6 +3874,29 @@ mod tests {
         assert!(!snapshot.alternate_screen_active);
 
         runtime.test_process_pty_bytes(b"\x1b]8;;https://example.com\x1b\\link\x1b]8;;\x1b\\");
+        // RS-01 根治：超链接单元格不再整体回退，而是带出补丁局部链接表。
+        let snapshot = runtime
+            .collect_dirty_patch_snapshot(20, 4)
+            .expect("hyperlink snapshot");
+        let TerminalDirtyPatchOutcome::Patch(patch) = snapshot.patch else {
+            panic!("hyperlink cells must be patchable");
+        };
+        assert_eq!(patch.hyperlinks, vec!["https://example.com".to_owned()]);
+        let linked = patch.rows.iter().flat_map(|(_, cells)| cells.iter());
+        assert!(linked.clone().any(|cell| cell.hyperlink == Some(0)));
+        assert!(linked
+            .clone()
+            .all(|cell| cell.hyperlink.is_none() || cell.hyperlink == Some(0)));
+
+        // 行已收集、尚未清脏时回退：快照报 PatchFallback，且不持有写入锁。
+        runtime
+            .terminal
+            .ghostty
+            .core
+            .lock()
+            .unwrap()
+            .force_fallback_after_collection_for_test = true;
+        runtime.test_process_pty_bytes(b"\r\nmore");
         assert!(matches!(
             runtime.collect_dirty_patch_snapshot(20, 4),
             Err(DirtyPatchSnapshotUnavailable::PatchFallback)

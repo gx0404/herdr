@@ -5,27 +5,61 @@ fn rect_fits_frame(rect: protocol::SurfaceRect, frame: &FrameData) -> bool {
         && rect.y.saturating_add(rect.height) <= frame.height
 }
 
-fn patch_intersects_hyperlinks(
+/// RS-01 根治：把收集期局部链接表索引翻译为接收者基线帧的绝对索引——
+/// 已有 URI 复用基线索引，新 URI 追加到本补丁的增量表
+/// （索引 = 基线表长 + 增量表内偏移）。
+fn frame_hyperlink_index(
     frame: &FrameData,
-    area: protocol::SurfaceRect,
-    patch: &crate::pane::TerminalDirtyPatch,
-) -> bool {
-    if frame.hyperlinks.is_empty() || !rect_fits_frame(area, frame) {
-        return false;
+    new_hyperlink_uris: &mut Vec<String>,
+    uri: &str,
+) -> u32 {
+    let as_index = |len: usize| u32::try_from(len).unwrap_or(u32::MAX);
+    if let Some(index) = frame.hyperlinks.iter().position(|known| known == uri) {
+        return as_index(index);
     }
-    let width = usize::from(frame.width);
-    patch
-        .rows
-        .iter()
-        .filter(|(local_y, _)| *local_y < area.height)
-        .any(|(local_y, _)| {
-            let start = usize::from(area.y + *local_y) * width + usize::from(area.x);
-            let end = start + usize::from(area.width);
-            end > frame.cells.len()
-                || frame.cells[start..end]
-                    .iter()
-                    .any(|cell| cell.hyperlink.is_some())
-        })
+    let base = as_index(frame.hyperlinks.len());
+    if let Some(offset) = new_hyperlink_uris.iter().position(|known| known == uri) {
+        return base.saturating_add(as_index(offset));
+    }
+    let index = base.saturating_add(as_index(new_hyperlink_uris.len()));
+    new_hyperlink_uris.push(uri.to_owned());
+    index
+}
+
+/// 把收集补丁行的超链接索引翻译到接收者基线帧；无链接或整行无需改写时零拷贝
+/// 借用，只有真正改索引的格子才复制（符号是 String，逐格克隆要避开热路径）。
+fn translate_row_hyperlinks<'a>(
+    cells: &'a [protocol::CellData],
+    patch: &crate::pane::TerminalDirtyPatch,
+    frame: &FrameData,
+    new_hyperlink_uris: &mut Vec<String>,
+) -> std::borrow::Cow<'a, [protocol::CellData]> {
+    if patch.hyperlinks.is_empty() {
+        return std::borrow::Cow::Borrowed(cells);
+    }
+    let mut translated: Option<Vec<protocol::CellData>> = None;
+    for (index, cell) in cells.iter().enumerate() {
+        let Some(local) = cell.hyperlink else {
+            continue;
+        };
+        // 收集期索引与链接表同步构造，越组不会发生；防御性丢链优于写出错误
+        // 索引（ctrl-hover 会开错 URL）。
+        let absolute = patch
+            .hyperlinks
+            .get(local as usize)
+            .map(|uri| frame_hyperlink_index(frame, new_hyperlink_uris, uri));
+        if absolute == cell.hyperlink {
+            continue;
+        }
+        let owned = translated.get_or_insert_with(|| cells.to_vec());
+        if let Some(cell) = owned.get_mut(index) {
+            cell.hyperlink = absolute;
+        }
+    }
+    match translated {
+        Some(cells) => std::borrow::Cow::Owned(cells),
+        None => std::borrow::Cow::Borrowed(cells),
+    }
 }
 
 fn patch_row_changed(frame: &FrameData, row: &protocol::PaneSurfacePatchRow) -> Option<bool> {
@@ -46,6 +80,7 @@ fn changed_rows(
     frame: &FrameData,
     area: protocol::SurfaceRect,
     patch: &crate::pane::TerminalDirtyPatch,
+    new_hyperlink_uris: &mut Vec<String>,
 ) -> Option<Vec<protocol::PaneSurfacePatchRow>> {
     if !rect_fits_frame(area, frame) {
         return None;
@@ -63,7 +98,10 @@ fn changed_rows(
         let frame_start = usize::from(y) * usize::from(frame.width) + usize::from(area.x);
         let frame_end = frame_start.checked_add(width)?;
         let existing = frame.cells.get(frame_start..frame_end)?;
-        let desired = &cells[..width];
+        // 先按接收者基线翻译超链接索引，再做逐格 diff——两表不同源，
+        // 直接比 u32 索引是错的。
+        let desired = translate_row_hyperlinks(&cells[..width], patch, frame, new_hyperlink_uris);
+        let desired: &[protocol::CellData] = &desired;
         let mut offset = 0;
         while offset < width {
             if existing[offset] == desired[offset] {
@@ -390,7 +428,7 @@ impl HeadlessServer {
             let patch = match snapshot.patch {
                 crate::pane::TerminalDirtyPatchOutcome::Clean => {
                     crate::render_prof::event("retained_surface.pane_clean");
-                    crate::pane::TerminalDirtyPatch { rows: Vec::new() }
+                    crate::pane::TerminalDirtyPatch::default()
                 }
                 crate::pane::TerminalDirtyPatchOutcome::Patch(patch) => patch,
                 crate::pane::TerminalDirtyPatchOutcome::Fallback => {
@@ -423,6 +461,7 @@ impl HeadlessServer {
             let mut changed_panes = Vec::with_capacity(collected.len());
             let mut patch_rows = Vec::new();
             let mut metadata_changed = false;
+            let mut new_hyperlink_uris: Vec<String> = Vec::new();
             let mut refresh_graphics = !surface.graphics.placements.is_empty()
                 || !surface.graphics.retained_assets.is_empty();
             for collected_pane in &collected {
@@ -440,23 +479,21 @@ impl HeadlessServer {
                     deferred_clients.insert(client_id);
                     continue;
                 }
-                if patch_intersects_hyperlinks(
+                refresh_graphics |= collected_pane.graphics_may_have_placements;
+                let previous_pane = pane.clone();
+                // 该 pane 可能中途延期：把行与链接增量一起回滚到本 pane 之前，
+                // 「剔除该 pane」才名副其实——否则会留下无人引用的链接条目，
+                // 或让被剔除的行引用已回滚的索引。
+                let rows_checkpoint = patch_rows.len();
+                let hyperlinks_checkpoint = new_hyperlink_uris.len();
+                let Some(rows) = changed_rows(
                     &surface.frame,
                     pane.inner_rect,
                     &collected_pane.patch,
-                ) {
-                    // 基线超链接与脏区相交：该 pane 剔除（RS-01 过渡层），
-                    // 观看客户端延期全量重绘。
-                    crate::render_prof::event("retained_surface.defer.hyperlink");
-                    deferred_clients.insert(client_id);
-                    continue;
-                }
-                refresh_graphics |= collected_pane.graphics_may_have_placements;
-                let previous_pane = pane.clone();
-                let Some(rows) =
-                    changed_rows(&surface.frame, pane.inner_rect, &collected_pane.patch)
-                else {
+                    &mut new_hyperlink_uris,
+                ) else {
                     crate::render_prof::event("retained_surface.defer.invalid_patch");
+                    new_hyperlink_uris.truncate(hyperlinks_checkpoint);
                     deferred_clients.insert(client_id);
                     continue;
                 };
@@ -469,6 +506,8 @@ impl HeadlessServer {
                     collected_pane.scroll_metrics,
                 ) else {
                     crate::render_prof::event("retained_surface.defer.scrollbar_patch");
+                    patch_rows.truncate(rows_checkpoint);
+                    new_hyperlink_uris.truncate(hyperlinks_checkpoint);
                     deferred_clients.insert(client_id);
                     continue;
                 };
@@ -498,6 +537,7 @@ impl HeadlessServer {
                 rows: patch_rows,
                 panes: changed_panes,
                 cursor,
+                hyperlink_uris: new_hyperlink_uris,
             };
             let mut graphics_changed = false;
             let graphics = if refresh_graphics {
@@ -737,8 +777,10 @@ mod tests {
         };
         let patch = crate::pane::TerminalDirtyPatch {
             rows: vec![(0, vec![cell(" "), cell("x"), cell("y"), cell(" ")])],
+            hyperlinks: Vec::new(),
         };
 
+        let mut new_hyperlink_uris = Vec::new();
         let rows = changed_rows(
             &frame,
             protocol::SurfaceRect {
@@ -748,6 +790,7 @@ mod tests {
                 height: 1,
             },
             &patch,
+            &mut new_hyperlink_uris,
         )
         .expect("valid patch");
 
@@ -774,8 +817,10 @@ mod tests {
         };
         let patch = crate::pane::TerminalDirtyPatch {
             rows: vec![(0, vec![cell("x"), cell("z"), cell("q")])],
+            hyperlinks: Vec::new(),
         };
 
+        let mut new_hyperlink_uris = Vec::new();
         let rows = changed_rows(
             &frame,
             protocol::SurfaceRect {
@@ -785,6 +830,7 @@ mod tests {
                 height: 1,
             },
             &patch,
+            &mut new_hyperlink_uris,
         )
         .expect("valid patch");
 
@@ -810,8 +856,10 @@ mod tests {
         };
         let patch = crate::pane::TerminalDirtyPatch {
             rows: vec![(0, vec![cell(" "); 4]), (1, vec![cell(" "); 4])],
+            hyperlinks: Vec::new(),
         };
 
+        let mut new_hyperlink_uris = Vec::new();
         let rows = changed_rows(
             &frame,
             protocol::SurfaceRect {
@@ -821,6 +869,7 @@ mod tests {
                 height: 2,
             },
             &patch,
+            &mut new_hyperlink_uris,
         )
         .expect("valid patch");
 
