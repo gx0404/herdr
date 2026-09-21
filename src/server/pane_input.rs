@@ -204,13 +204,34 @@ pub(super) fn apply_client_pane_input_events(
     runtime: &crate::terminal::TerminalRuntime,
     events: &[ClientPaneInputEvent],
 ) -> Result<(), String> {
-    apply_client_terminal_input_events(runtime, events, true)
+    apply_client_pane_input_events_counted(runtime, events)
+        .map(|_| ())
+        .map_err(|(_, message)| message)
 }
 
 pub(super) fn apply_client_popup_input_events(
     runtime: &crate::terminal::TerminalRuntime,
     events: &[ClientPaneInputEvent],
 ) -> Result<(), String> {
+    apply_client_popup_input_events_counted(runtime, events)
+        .map(|_| ())
+        .map_err(|(_, message)| message)
+}
+
+/// HSR-08：逐事件投递并回报真正送达 PTY 的事件数。批次中途失败（PTY 队列满、
+/// 编码失败）时后面的输入不会到达子进程，调用方必须按这个前缀更新按键租约——
+/// 否则同一批里的 release 会把「其实没送到的 press」从租约里抹掉，pane 卡键。
+pub(super) fn apply_client_pane_input_events_counted(
+    runtime: &crate::terminal::TerminalRuntime,
+    events: &[ClientPaneInputEvent],
+) -> Result<usize, (usize, String)> {
+    apply_client_terminal_input_events(runtime, events, true)
+}
+
+pub(super) fn apply_client_popup_input_events_counted(
+    runtime: &crate::terminal::TerminalRuntime,
+    events: &[ClientPaneInputEvent],
+) -> Result<usize, (usize, String)> {
     apply_client_terminal_input_events(runtime, events, false)
 }
 
@@ -218,136 +239,180 @@ fn apply_client_terminal_input_events(
     runtime: &crate::terminal::TerminalRuntime,
     events: &[ClientPaneInputEvent],
     host_page_keys: bool,
-) -> Result<(), String> {
+) -> Result<usize, (usize, String)> {
+    let mut applied = 0;
     for event in events {
-        if let ClientPaneInputEvent::Mouse {
-            kind,
-            position,
-            modifiers,
-            lines,
-            ..
-        } = event
-        {
-            let kind = kind.to_crossterm();
-            let modifiers = KeyModifiers::from_bits_truncate(*modifiers);
-            let position = match position {
-                crate::protocol::ClientMousePosition::Cell { column, row } => {
+        apply_client_terminal_input_event(runtime, event, host_page_keys)
+            .map_err(|message| (applied, message))?;
+        applied += 1;
+    }
+    Ok(applied)
+}
+
+fn apply_client_terminal_input_event(
+    runtime: &crate::terminal::TerminalRuntime,
+    event: &ClientPaneInputEvent,
+    host_page_keys: bool,
+) -> Result<(), String> {
+    if let ClientPaneInputEvent::Mouse {
+        kind,
+        position,
+        modifiers,
+        lines,
+        ..
+    } = event
+    {
+        let kind = kind.to_crossterm();
+        let modifiers = KeyModifiers::from_bits_truncate(*modifiers);
+        let position = match position {
+            crate::protocol::ClientMousePosition::Cell { column, row } => {
+                crate::input::mouse::Position::Cell {
+                    column: *column,
+                    row: *row,
+                }
+            }
+            crate::protocol::ClientMousePosition::Pixels { x, y, column, row } => {
+                if runtime.sgr_pixel_mouse_enabled() {
+                    crate::input::mouse::Position::Pixels { x: *x, y: *y }
+                } else {
                     crate::input::mouse::Position::Cell {
                         column: *column,
                         row: *row,
                     }
                 }
-                crate::protocol::ClientMousePosition::Pixels { x, y, column, row } => {
-                    if runtime.sgr_pixel_mouse_enabled() {
-                        crate::input::mouse::Position::Pixels { x: *x, y: *y }
-                    } else {
-                        crate::input::mouse::Position::Cell {
-                            column: *column,
-                            row: *row,
+            }
+        };
+        let bytes = match kind {
+            MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
+                let direction = if kind == MouseEventKind::ScrollUp {
+                    AttachScrollDirection::Up
+                } else {
+                    AttachScrollDirection::Down
+                };
+                apply_scroll(
+                    runtime,
+                    AttachScrollSource::Wheel,
+                    direction,
+                    (*lines).max(1),
+                    position,
+                    modifiers.bits(),
+                )?;
+                return Ok(());
+            }
+            MouseEventKind::ScrollLeft | MouseEventKind::ScrollRight => runtime
+                .encode_mouse_wheel(kind, position, modifiers)
+                .unwrap_or_default(),
+            MouseEventKind::Down(_) | MouseEventKind::Up(_) | MouseEventKind::Drag(_) => runtime
+                .encode_mouse_button(kind, position, modifiers)
+                .unwrap_or_default(),
+            MouseEventKind::Moved => runtime
+                .encode_mouse_motion(kind, position, modifiers)
+                .unwrap_or_default(),
+        };
+        if !bytes.is_empty() {
+            if kind != MouseEventKind::Moved {
+                runtime.scroll_reset();
+            }
+            runtime
+                .try_send_bytes(Bytes::from(bytes))
+                .map_err(|err| format!("targeted pane mouse input failed: {err}"))?;
+        }
+        return Ok(());
+    }
+
+    match event.to_raw_input_event() {
+        crate::raw_input::RawInputEvent::Key(key) => {
+            let key_event = key.as_key_event();
+            if host_page_keys
+                && matches!(key_event.code, KeyCode::PageUp | KeyCode::PageDown)
+                && key_event.modifiers.is_empty()
+                && runtime.plain_page_keys_use_host_scrollback() == Some(true)
+            {
+                match key_event.kind {
+                    KeyEventKind::Release => return Ok(()),
+                    KeyEventKind::Press | KeyEventKind::Repeat => {
+                        let lines = runtime.current_size().0.max(1) as usize;
+                        if key_event.code == KeyCode::PageUp {
+                            runtime.scroll_up(lines);
+                        } else {
+                            runtime.scroll_down(lines);
                         }
+                        return Ok(());
                     }
                 }
-            };
-            let bytes = match kind {
-                MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
-                    let direction = if kind == MouseEventKind::ScrollUp {
-                        AttachScrollDirection::Up
-                    } else {
-                        AttachScrollDirection::Down
-                    };
-                    apply_scroll(
-                        runtime,
-                        AttachScrollSource::Wheel,
-                        direction,
-                        (*lines).max(1),
-                        position,
-                        modifiers.bits(),
-                    )?;
-                    continue;
-                }
-                MouseEventKind::ScrollLeft | MouseEventKind::ScrollRight => runtime
-                    .encode_mouse_wheel(kind, position, modifiers)
-                    .unwrap_or_default(),
-                MouseEventKind::Down(_) | MouseEventKind::Up(_) | MouseEventKind::Drag(_) => {
-                    runtime
-                        .encode_mouse_button(kind, position, modifiers)
-                        .unwrap_or_default()
-                }
-                MouseEventKind::Moved => runtime
-                    .encode_mouse_motion(kind, position, modifiers)
-                    .unwrap_or_default(),
-            };
+            }
+
+            runtime.scroll_reset();
+            let bytes = runtime.encode_terminal_key(key);
             if !bytes.is_empty() {
-                if kind != MouseEventKind::Moved {
-                    runtime.scroll_reset();
-                }
                 runtime
                     .try_send_bytes(Bytes::from(bytes))
-                    .map_err(|err| format!("targeted pane mouse input failed: {err}"))?;
+                    .map_err(|err| format!("targeted pane key input failed: {err}"))?;
             }
-            continue;
+            Ok(())
         }
-
-        match event.to_raw_input_event() {
-            crate::raw_input::RawInputEvent::Key(key) => {
-                let key_event = key.as_key_event();
-                if host_page_keys
-                    && matches!(key_event.code, KeyCode::PageUp | KeyCode::PageDown)
-                    && key_event.modifiers.is_empty()
-                    && runtime.plain_page_keys_use_host_scrollback() == Some(true)
-                {
-                    match key_event.kind {
-                        KeyEventKind::Release => continue,
-                        KeyEventKind::Press | KeyEventKind::Repeat => {
-                            let lines = runtime.current_size().0.max(1) as usize;
-                            if key_event.code == KeyCode::PageUp {
-                                runtime.scroll_up(lines);
-                            } else {
-                                runtime.scroll_down(lines);
-                            }
-                            continue;
-                        }
-                    }
-                }
-
-                runtime.scroll_reset();
-                let bytes = runtime.encode_terminal_key(key);
-                if !bytes.is_empty() {
-                    runtime
-                        .try_send_bytes(Bytes::from(bytes))
-                        .map_err(|err| format!("targeted pane key input failed: {err}"))?;
-                }
-            }
-            crate::raw_input::RawInputEvent::Text(text) => {
-                runtime.scroll_reset();
-                runtime
-                    .try_send_bytes(Bytes::copy_from_slice(text.as_str().as_bytes()))
-                    .map_err(|err| format!("targeted pane text input failed: {err}"))?;
-            }
-            crate::raw_input::RawInputEvent::Paste(text) => {
-                runtime.scroll_reset();
-                runtime
-                    .try_send_paste(text)
-                    .map_err(|err| format!("targeted pane paste failed: {err}"))?;
-            }
-            crate::raw_input::RawInputEvent::Mouse(_)
-            | crate::raw_input::RawInputEvent::OuterFocusGained
-            | crate::raw_input::RawInputEvent::OuterFocusLost
-            | crate::raw_input::RawInputEvent::HostDefaultColor { .. }
-            | crate::raw_input::RawInputEvent::HostPaletteColors { .. }
-            | crate::raw_input::RawInputEvent::HostColorSchemeChanged(_)
-            | crate::raw_input::RawInputEvent::HostCellSizeReport { .. }
-            | crate::raw_input::RawInputEvent::Unsupported => {
-                return Err("non-pane input reached targeted pane input".to_owned());
-            }
+        crate::raw_input::RawInputEvent::Text(text) => {
+            runtime.scroll_reset();
+            runtime
+                .try_send_bytes(Bytes::copy_from_slice(text.as_str().as_bytes()))
+                .map_err(|err| format!("targeted pane text input failed: {err}"))
+        }
+        crate::raw_input::RawInputEvent::Paste(text) => {
+            runtime.scroll_reset();
+            runtime
+                .try_send_paste(text)
+                .map_err(|err| format!("targeted pane paste failed: {err}"))
+        }
+        crate::raw_input::RawInputEvent::Mouse(_)
+        | crate::raw_input::RawInputEvent::OuterFocusGained
+        | crate::raw_input::RawInputEvent::OuterFocusLost
+        | crate::raw_input::RawInputEvent::HostDefaultColor { .. }
+        | crate::raw_input::RawInputEvent::HostPaletteColors { .. }
+        | crate::raw_input::RawInputEvent::HostColorSchemeChanged(_)
+        | crate::raw_input::RawInputEvent::HostCellSizeReport { .. }
+        | crate::raw_input::RawInputEvent::Unsupported => {
+            Err("non-pane input reached targeted pane input".to_owned())
         }
     }
-    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// HSR-08：批次中途失败时只回报「已投递的前缀」。同一批里的 release 若
+    /// 因为队列已满没有送到子进程，就不能记成已送达——否则租约被清空、pane
+    /// 卡键。
+    #[tokio::test]
+    async fn counted_delivery_reports_the_delivered_prefix_on_failure() {
+        let (runtime, _input_rx) =
+            crate::terminal::TerminalRuntime::test_with_channel_and_scrollback_bytes(
+                20, 5, 0, b"", 1,
+            );
+        let key = |ch: char, kind| crate::protocol::ClientPaneInputEvent::Key {
+            code: crate::protocol::ClientKeyCode::Char(ch),
+            modifiers: 0,
+            kind,
+            repeat_count: 1,
+            shifted_codepoint: None,
+            generated_text: None,
+            tracks_release: true,
+            physical_key_id: None,
+            windows_record: None,
+        };
+        let batch = vec![
+            key('a', crate::protocol::ClientKeyKind::Press),
+            key('b', crate::protocol::ClientKeyKind::Press),
+            key('c', crate::protocol::ClientKeyKind::Press),
+        ];
+
+        let Err((applied, message)) = apply_client_pane_input_events_counted(&runtime, &batch)
+        else {
+            panic!("a full input queue must fail the batch");
+        };
+        assert_eq!(applied, 1, "only the first event reaches the PTY");
+        assert!(message.contains("targeted pane key input failed"));
+    }
 
     #[tokio::test]
     async fn terminal_attach_stale_geometry_falls_back_to_the_canonical_cell() {

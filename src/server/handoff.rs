@@ -351,24 +351,35 @@ fn accept_with_timeout(
     }
 }
 
+/// HSR-12：handoff 的行式读取。原先逐字节 `read(2)`——in-place 升级的清单是
+/// 十万字节量级，等于十万次系统调用。
+///
+/// 改为「peek 当前可读窗口 → 精确读到行尾」：窗口里没有换行就整块消费（块内
+/// 不可能含换行，不会吞掉下一行），有换行就只读到换行。`peek` 阻塞等待数据，
+/// 连接的读超时（`SO_RCVTIMEO`）照常生效。
 #[cfg(unix)]
 fn read_line_unbuffered(stream: &mut UnixStream) -> io::Result<String> {
+    const MAX_LINE_BYTES: usize = 16 * 1024 * 1024;
     let mut bytes = Vec::new();
-    let mut byte = [0u8; 1];
+    let mut window = [0u8; 64 * 1024];
     loop {
-        let read = stream.read(&mut byte)?;
-        if read == 0 {
+        let peeked = crate::platform::peek_unix_stream(stream, &mut window)?;
+        if peeked == 0 {
             return Err(io::Error::new(
                 io::ErrorKind::UnexpectedEof,
                 "handoff stream closed while reading line",
             ));
         }
-        bytes.push(byte[0]);
-        if byte[0] == b'\n' {
+        let newline = window[..peeked].iter().position(|byte| *byte == b'\n');
+        let take = newline.map_or(peeked, |index| index + 1);
+        let start = bytes.len();
+        bytes.resize(start + take, 0);
+        stream.read_exact(&mut bytes[start..])?;
+        if newline.is_some() {
             return String::from_utf8(bytes)
                 .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err));
         }
-        if bytes.len() > 16 * 1024 * 1024 {
+        if bytes.len() > MAX_LINE_BYTES {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 "handoff line exceeded maximum size",

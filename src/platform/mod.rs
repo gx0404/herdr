@@ -448,7 +448,7 @@ mod unix_common;
 #[cfg(unix)]
 pub(crate) use unix_common::{
     begin_cli_output, default_known_hosts_path, detach_stdout, end_cli_output,
-    forward_remote_bridge_stdio, ssh_auth_sock_path_is_live, RemoteBridgeWake,
+    forward_remote_bridge_stdio, peek_unix_stream, ssh_auth_sock_path_is_live, RemoteBridgeWake,
 };
 
 /// Windows 的 SSH agent 是命名管道（Win32-OpenSSH 服务），不走文件系统 socket 路径；

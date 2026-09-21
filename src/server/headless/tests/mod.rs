@@ -3884,6 +3884,75 @@ async fn client_shell_mouse_motion_delivers_without_render_when_foreground() {
     shutdown_test_runtimes(&mut server);
 }
 
+/// HSR-08：一批输入中途失败（PTY 队列满）时，租约只记真正送达的事件前缀。
+/// 旧的「整批先记租约」会把没送到的按键也记上（或抹掉），pane 因此卡键。
+#[tokio::test]
+async fn client_shell_input_batch_lease_only_tracks_delivered_events() {
+    let mut server = test_headless_server();
+    let mut workspace = crate::workspace::Workspace::test_new("input-lease");
+    let pane = workspace.tabs[0].root_pane;
+    let (runtime, mut input_rx) =
+        crate::terminal::TerminalRuntime::test_with_channel_and_scrollback_bytes(80, 24, 0, b"", 1);
+    workspace.insert_test_runtime(pane, runtime);
+    server.app.state.workspaces = vec![workspace];
+    server.app.state.active = Some(0);
+    server.app.state.selected = 0;
+    server.app.state.mode = crate::app::Mode::Terminal;
+    let pane_id = server.app.public_pane_id(0, pane).unwrap();
+    server.clients.insert(
+        11,
+        ClientConnection::new_with_mode(
+            ClientConnectionMode::ClientShell,
+            (80, 24),
+            crate::kitty_graphics::HostCellSize::default(),
+            1,
+            RenderEncoding::SemanticFrame,
+            None,
+        ),
+    );
+    server.foreground_client_id = Some(11);
+    assert!(server.claim_unowned_shell_tab_geometry(11, false));
+
+    let key = |ch: char| crate::protocol::ClientPaneInputEvent::Key {
+        code: crate::protocol::ClientKeyCode::Char(ch),
+        modifiers: 0,
+        kind: crate::protocol::ClientKeyKind::Press,
+        repeat_count: 1,
+        shifted_codepoint: None,
+        generated_text: None,
+        tracks_release: true,
+        physical_key_id: None,
+        windows_record: None,
+    };
+
+    assert!(
+        !server.handle_server_event(ServerEvent::ClientShellPaneInput {
+            client_id: 11,
+            pane_id: pane_id.clone(),
+            events: vec![key('x'), key('y')],
+        }),
+        "a failed batch must not report a render impact"
+    );
+    assert!(input_rx.try_recv().is_ok(), "first press reaches the PTY");
+    assert!(
+        input_rx.try_recv().is_err(),
+        "second press is dropped by the full queue"
+    );
+
+    let held = server
+        .clients
+        .get_mut(&11)
+        .expect("client")
+        .drain_shell_held_inputs();
+    assert_eq!(
+        held.len(),
+        1,
+        "only the delivered press may hold a release lease"
+    );
+    assert_eq!(held[0].target, ClientShellInputTarget::Pane(pane_id));
+    shutdown_test_runtimes(&mut server);
+}
+
 #[tokio::test]
 async fn client_shell_mouse_motion_promotes_and_requests_render() {
     let mut server = test_headless_server();

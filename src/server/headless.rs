@@ -2575,23 +2575,26 @@ impl HeadlessServer {
                     if releases.is_empty() {
                         return false;
                     }
+                    let scroll_before = runtime.scroll_metrics();
+                    // HSR-08：租约只记已投递前缀。
+                    let applied = match super::pane_input::apply_client_pane_input_events_counted(
+                        runtime, &releases,
+                    ) {
+                        Ok(applied) => applied,
+                        Err((applied, err)) => {
+                            warn!(client_id, pane_id, err = %err, "targeted client shell release failed");
+                            applied
+                        }
+                    };
                     if let Some(client) = self.clients.get_mut(&client_id) {
                         client.track_shell_input(
                             ClientShellInputTarget::Pane(pane_id.clone()),
-                            &releases,
+                            &releases[..applied],
                         );
-                    }
-                    let scroll_before = runtime.scroll_metrics();
-                    if let Err(err) = apply_client_pane_input_events(runtime, &releases) {
-                        warn!(client_id, pane_id, err = %err, "targeted client shell release failed");
                     }
                     return runtime.scroll_metrics() != scroll_before;
                 }
                 let interaction = client_pane_input_has_interaction(&events);
-                if let Some(client) = self.clients.get_mut(&client_id) {
-                    client
-                        .track_shell_input(ClientShellInputTarget::Pane(pane_id.clone()), &events);
-                }
                 let foreground_changed =
                     interaction && self.promote_client_to_foreground(client_id);
                 let geometry_changed =
@@ -2604,8 +2607,22 @@ impl HeadlessServer {
                     return foreground_changed | geometry_changed;
                 };
                 let scroll_before = runtime.scroll_metrics();
-                if let Err(err) = apply_client_pane_input_events(runtime, &events) {
-                    warn!(client_id, pane_id, err = %err, "targeted client shell input failed");
+                // HSR-08：租约按「真正送达」的事件前缀记，批次中途失败不会把
+                // 未投递的 release 记成已送达（否则 pane 卡键）。
+                let applied = match super::pane_input::apply_client_pane_input_events_counted(
+                    runtime, &events,
+                ) {
+                    Ok(applied) => applied,
+                    Err((applied, err)) => {
+                        warn!(client_id, pane_id, err = %err, "targeted client shell input failed");
+                        applied
+                    }
+                };
+                if let Some(client) = self.clients.get_mut(&client_id) {
+                    client.track_shell_input(
+                        ClientShellInputTarget::Pane(pane_id.clone()),
+                        &events[..applied],
+                    );
                 }
                 foreground_changed | geometry_changed || runtime.scroll_metrics() != scroll_before
             }
@@ -2655,25 +2672,26 @@ impl HeadlessServer {
                     if releases.is_empty() {
                         return false;
                     }
+                    let scroll_before = runtime.scroll_metrics();
+                    // HSR-08：租约只记已投递前缀。
+                    let applied = match super::pane_input::apply_client_popup_input_events_counted(
+                        runtime, &releases,
+                    ) {
+                        Ok(applied) => applied,
+                        Err((applied, err)) => {
+                            warn!(client_id, terminal_id, err = %err, "targeted client popup release failed");
+                            applied
+                        }
+                    };
                     if let Some(client) = self.clients.get_mut(&client_id) {
                         client.track_shell_input(
                             ClientShellInputTarget::Popup(terminal_id.clone()),
-                            &releases,
+                            &releases[..applied],
                         );
-                    }
-                    let scroll_before = runtime.scroll_metrics();
-                    if let Err(err) = apply_client_popup_input_events(runtime, &releases) {
-                        warn!(client_id, terminal_id, err = %err, "targeted client popup release failed");
                     }
                     return runtime.scroll_metrics() != scroll_before;
                 }
                 let interaction = client_pane_input_has_interaction(&events);
-                if let Some(client) = self.clients.get_mut(&client_id) {
-                    client.track_shell_input(
-                        ClientShellInputTarget::Popup(terminal_id.clone()),
-                        &events,
-                    );
-                }
                 let foreground_changed =
                     interaction && self.promote_client_to_foreground(client_id);
                 let geometry_changed =
@@ -2682,8 +2700,21 @@ impl HeadlessServer {
                     return foreground_changed | geometry_changed;
                 };
                 let scroll_before = runtime.scroll_metrics();
-                if let Err(err) = apply_client_popup_input_events(runtime, &events) {
-                    warn!(client_id, terminal_id, err = %err, "targeted client popup input failed");
+                // HSR-08：同 pane 路径，租约只记已投递前缀。
+                let applied = match super::pane_input::apply_client_popup_input_events_counted(
+                    runtime, &events,
+                ) {
+                    Ok(applied) => applied,
+                    Err((applied, err)) => {
+                        warn!(client_id, terminal_id, err = %err, "targeted client popup input failed");
+                        applied
+                    }
+                };
+                if let Some(client) = self.clients.get_mut(&client_id) {
+                    client.track_shell_input(
+                        ClientShellInputTarget::Popup(terminal_id.clone()),
+                        &events[..applied],
+                    );
                 }
                 foreground_changed | geometry_changed || runtime.scroll_metrics() != scroll_before
             }

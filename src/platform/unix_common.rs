@@ -72,6 +72,31 @@ impl std::io::Read for ClientStreamReader<'_> {
     }
 }
 
+/// HSR-12：`MSG_PEEK` 窥探 Unix 流当前可读的字节数，且不消费数据。
+///
+/// 阻塞语义与普通 `read` 一致（不传 `MSG_DONTWAIT`，因此连接的 `SO_RCVTIMEO`
+/// 照常生效）；返回 0 表示对端已关闭写端。handoff 的行式读取据此只在「当前
+/// 可读窗口里还没有换行」时才整块消费，避免逐字节 `read(2)` 的十万级系统调用。
+pub(crate) fn peek_unix_stream(
+    stream: &std::os::unix::net::UnixStream,
+    buffer: &mut [u8],
+) -> std::io::Result<usize> {
+    use std::os::fd::AsRawFd as _;
+
+    let peeked = unsafe {
+        libc::recv(
+            stream.as_raw_fd(),
+            buffer.as_mut_ptr().cast::<libc::c_void>(),
+            buffer.len(),
+            libc::MSG_PEEK,
+        )
+    };
+    if peeked < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(peeked as usize)
+}
+
 pub(crate) fn write_client_stream(
     stream: &crate::ipc::LocalStream,
     mut data: &[u8],
@@ -88,10 +113,7 @@ pub(crate) fn write_client_stream(
     let timed_out = || {
         // Dropping the writer clone alone would leave the reader blocked.
         let _ = shutdown_client_stream(stream);
-        io::Error::new(
-            io::ErrorKind::TimedOut,
-            "terminal observer stopped receiving output",
-        )
+        io::Error::new(io::ErrorKind::TimedOut, "client stopped receiving output")
     };
     let mut progress = Instant::now();
     while !data.is_empty() {

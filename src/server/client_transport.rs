@@ -44,6 +44,18 @@ const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(4);
 #[cfg(unix)]
 const OBSERVER_WRITE_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// HSR-06/RS-16：客户端连接（含 TUI / endpoint 客户端）的发送停滞上限。
+/// `write_client_stream` 在每次成功写入后重置计时，所以只有「完全不再读」的
+/// 客户端会被断开。
+const CLIENT_WRITE_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// HSR-06/RS-16：control 车道（可靠消息：关闭、通知、clipboard、投影）每客户端
+/// 的排队字节上限。control 不能像 render 一样静默丢弃；超过上限说明客户端已经
+/// 不读了，直接断开比无界增长安全。
+const MAX_CLIENT_CONTROL_BACKLOG_BYTES: usize = 4 * 1024 * 1024;
+/// 同一 backlog 的消息条数上限（防止大量小消息只吃字节计数）。
+const MAX_CLIENT_CONTROL_BACKLOG_MESSAGES: usize = 4096;
+
 /// Maximum input payload size (bytes) for a single `ClientMessage::Input`.
 const MAX_INPUT_PAYLOAD: usize = 1024 * 1024; // 1 MB
 const MAX_CLIENT_SHELL_DIMENSION: u16 = 4096;
@@ -268,6 +280,9 @@ struct ClientWriterQueue {
 #[derive(Debug, Default)]
 struct ClientWriterQueueState {
     control: VecDeque<Vec<u8>>,
+    /// HSR-06/RS-16：control 车道的已排队字节数（上限见
+    /// `MAX_CLIENT_CONTROL_BACKLOG_BYTES`）。
+    control_bytes: usize,
     ordered: VecDeque<Vec<u8>>,
     render: Option<Vec<u8>>,
     senders: usize,
@@ -307,6 +322,20 @@ impl ClientWriterQueue {
         if !state.writer_alive {
             return Err(SendError(data));
         }
+        if state.control_bytes.saturating_add(data.len()) > MAX_CLIENT_CONTROL_BACKLOG_BYTES
+            || state.control.len() >= MAX_CLIENT_CONTROL_BACKLOG_MESSAGES
+        {
+            // HSR-06/RS-16：客户端已经不读了（socket 写超时也会在同一状态兜底）。
+            // 丢弃排队内容并让 writer 收尾；调用方按 SendError 走断开路径。
+            state.writer_alive = false;
+            state.control.clear();
+            state.control_bytes = 0;
+            state.ordered.clear();
+            state.render = None;
+            self.ready.notify_all();
+            return Err(SendError(data));
+        }
+        state.control_bytes = state.control_bytes.saturating_add(data.len());
         state.control.push_back(data);
         self.ready.notify_one();
         Ok(())
@@ -352,6 +381,7 @@ impl ClientWriterQueue {
         let mut state = self.lock_state();
         loop {
             if let Some(data) = state.control.pop_front() {
+                state.control_bytes = state.control_bytes.saturating_sub(data.len());
                 return Some(ClientWriteItem::Control(data));
             }
             if let Some(data) = state.ordered.pop_front() {
@@ -361,7 +391,7 @@ impl ClientWriterQueue {
             if let Some(data) = state.render.take() {
                 return Some(ClientWriteItem::Render(data));
             }
-            if state.senders == 0 {
+            if state.senders == 0 || !state.writer_alive {
                 return None;
             }
             state = self
@@ -374,6 +404,7 @@ impl ClientWriterQueue {
     fn close_writer(&self) {
         let mut state = self.lock_state();
         state.writer_alive = false;
+        state.control_bytes = 0;
         state.render = None;
         state.ordered.clear();
         self.ready.notify_all();
@@ -668,6 +699,27 @@ fn set_client_recv_timeout(
     stream.set_recv_timeout(timeout)
 }
 
+/// HSR-06/RS-16：给客户端读写流设置发送超时。Windows 管道/命名管道不支持时
+/// 记一条 debug 并继续（该平台由 writer 线程的写失败兜底）。
+fn set_client_write_timeout(
+    stream: &LocalStream,
+    timeout: Option<Duration>,
+    client_id: u64,
+) -> io::Result<()> {
+    match stream.set_send_timeout(timeout) {
+        Ok(()) => Ok(()),
+        Err(err) if err.kind() == io::ErrorKind::Unsupported => {
+            debug!(
+                client_id,
+                err = %err,
+                "client socket write timeout unavailable"
+            );
+            Ok(())
+        }
+        Err(err) => Err(err),
+    }
+}
+
 /// Handles the client handshake on a blocking thread.
 ///
 /// Reads the `TerminalHello` or `ClientShellHello` message, validates the version,
@@ -857,6 +909,10 @@ pub(crate) fn handle_client_handshake(
         "failed to clear client handshake read timeout",
         client_id,
     )?;
+    // HSR-06/RS-16：客户端 socket 也要有发送超时。每条消息的写入按「有进展就
+    // 续期、完全停滞就超时」判定（见 `write_client_stream`），所以慢但活着的
+    // 客户端不受影响；假死客户端不再让 writer 线程永久阻塞。
+    set_client_write_timeout(&stream, Some(CLIENT_WRITE_TIMEOUT), client_id)?;
 
     // Create separate channels for reliable control messages and droppable renders.
     let writer_queue = ClientWriterQueue::new();
@@ -1543,6 +1599,67 @@ mod tests {
         let mut bytes = Vec::new();
         protocol::write_message(&mut bytes, message).expect("frame server message");
         bytes
+    }
+
+    /// HSR-06/RS-16：control 车道字节或条数越界说明客户端已经不读——丢队列、
+    /// 让 writer 收尾，调用方据此断开，而不是无界增长。
+    #[test]
+    fn client_control_backlog_is_bounded_and_wedges_the_client() {
+        let (writer, queue) = test_queue_writer();
+        let chunk = vec![b'x'; 64 * 1024];
+        let fits = MAX_CLIENT_CONTROL_BACKLOG_BYTES / chunk.len();
+        for _ in 0..fits {
+            writer.control.send(chunk.clone()).expect("backlog fits");
+        }
+        assert!(matches!(writer.control.send(chunk), Err(SendError(_))));
+        assert!(queue.recv().is_none(), "backlog is dropped on overflow");
+        assert!(matches!(writer.control.send(vec![b'y']), Err(SendError(_))));
+        assert!(matches!(
+            writer.render.try_send(vec![b'z']),
+            Err(TrySendError::Disconnected(_))
+        ));
+
+        let (writer, _queue) = test_queue_writer();
+        for _ in 0..MAX_CLIENT_CONTROL_BACKLOG_MESSAGES {
+            writer.control.send(vec![1]).expect("message fits");
+        }
+        assert!(matches!(writer.control.send(vec![1]), Err(SendError(_))));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn client_shell_handshake_arms_a_send_timeout() {
+        let (mut client_stream, server_stream, _path) =
+            local_stream_pair("client-shell-write-timeout");
+        let server_probe = server_stream.try_clone().expect("clone server stream");
+        let (server_event_tx, mut server_event_rx) = mpsc::channel(4);
+        let should_quit = Arc::new(AtomicBool::new(false));
+        let handshake_quit = should_quit.clone();
+        let handle = std::thread::spawn(move || {
+            handle_client_handshake(server_stream, 45, &server_event_tx, &handshake_quit)
+        });
+
+        protocol::write_message(&mut client_stream, &endpoint_hello(80, 24))
+            .expect("write shell hello");
+        let _: ServerMessage =
+            protocol::read_message(&mut client_stream, MAX_FRAME_SIZE).expect("read welcome");
+        let _ = server_event_rx
+            .blocking_recv()
+            .expect("client shell connected event");
+
+        let LocalStream::UdSocket(socket) = &server_probe;
+        assert_eq!(
+            socket.inner().write_timeout().unwrap(),
+            Some(CLIENT_WRITE_TIMEOUT),
+            "HSR-06: a stalled client must hit the send timeout"
+        );
+
+        drop(client_stream);
+        should_quit.store(true, Ordering::Release);
+        handle
+            .join()
+            .expect("handshake thread join")
+            .expect("handshake thread result");
     }
 
     #[test]
