@@ -30,7 +30,13 @@ impl GpuWorker {
                     match requests.recv_timeout(GPU_NVML_IDLE_TIMEOUT) {
                         Ok(()) => {}
                         Err(mpsc::RecvTimeoutError::Timeout) => {
-                            let _ = nvml.take();
+                            let released = nvml.take().is_some();
+                            if released {
+                                // 复审轻级 3：释放的同时复位 30 s 失败节流——否则
+                                // 「初始化失败 → 释放 → 用户重开监控页」会落在节流
+                                // 窗口里拿到空表。空闲已经过去了，重试一次是便宜的。
+                                retry_at = Instant::now();
+                            }
                             continue;
                         }
                         Err(mpsc::RecvTimeoutError::Disconnected) => break,

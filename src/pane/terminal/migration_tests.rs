@@ -288,6 +288,52 @@ fn dirty_patch_fallback_keeps_previously_collected_rows_dirty() {
     );
 }
 
+/// RS-22 空洞（复审）：采集高度**以内**没有脏行（`patch_rows` 为空）但更深处有
+/// 脏行时，清扫与 Partial 判定同样必须发生——原先的 `patch_rows.is_empty()` 守卫
+/// 会直接置 `Dirty::Clean`，那些行永久失去标记。
+#[test]
+fn empty_patch_with_deeper_dirty_rows_keeps_partial_dirty() {
+    let mut terminal = Harness::new(8, 6);
+    // 先整屏采集一次清掉初始脏状态；再把光标移到第 5 行（移动光标会脏掉旧光标所在
+    // 的行，所以这一步也整屏采集掉）；最后只写第 5 行（索引 4）。
+    terminal.pane.collect_dirty_patch(8, 6);
+    terminal.write(b"\x1b[5;1H");
+    terminal.pane.collect_dirty_patch(8, 6);
+    terminal.write(b"deeper");
+    let TerminalDirtyPatchOutcome::Patch(patch) = terminal.pane.collect_dirty_patch(8, 3) else {
+        panic!("collection must succeed");
+    };
+    assert!(
+        patch.rows.is_empty(),
+        "no dirty row inside the collected area, got {:?}",
+        patch.rows.iter().map(|(y, _)| *y).collect::<Vec<_>>()
+    );
+    {
+        let core = terminal.pane.ghostty.core.lock().unwrap();
+        let mut iterator = crate::ghostty::RowIterator::new().unwrap();
+        let mut rows = core
+            .render_state
+            .populate_row_iterator(&mut iterator)
+            .unwrap();
+        let mut dirty = Vec::new();
+        let mut y = 0;
+        while rows.next() {
+            if rows.dirty().unwrap() {
+                dirty.push(y);
+            }
+            y += 1;
+        }
+        assert!(
+            dirty.contains(&4),
+            "row below the collected height must stay dirty, got {dirty:?}"
+        );
+    }
+    let TerminalDirtyPatchOutcome::Patch(patch) = terminal.pane.collect_dirty_patch(8, 6) else {
+        panic!("deeper rows must still patch after the area grows");
+    };
+    assert!(patch.rows.iter().any(|(y, _)| *y == 4));
+}
+
 /// RS-22：采集高度以外的脏行必须保留脏标记——原先收尾把整份渲染状态置 Clean，
 /// 那些行再也不会被采集（只有几何变化触发的整帧重绘才会重新看到内容）。
 #[test]

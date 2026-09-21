@@ -644,4 +644,4 @@ Common log files:
 ~/.config/herdr/herdr-server.log
 ```
 
-Logs rotate automatically. Include the current log and rotated siblings when reporting issues.
+Logs rotate automatically: each file is capped at 5 MB and the two most recent rotated copies are kept next to it (`herdr-server.log.1`, `herdr-server.log.2`, and so on). Include the current log and rotated siblings when reporting issues.

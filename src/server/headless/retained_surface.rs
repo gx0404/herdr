@@ -874,6 +874,73 @@ mod tests {
     }
 
     /// RS-13：窄 pane（完整渲染不会留出滚动条留白）不补滚动条；正常宽度补。
+    /// RS-13（复审补测）：5 列宽 pane 的留白可用——基线没有滚动条时，开始滚动
+    /// （`max_offset_from_bottom > 0`）后补丁里出现留白列的滚动条；4 列宽（完整渲染
+    /// 不留留白）即使滚动也不出现。
+    #[test]
+    fn narrow_pane_scrollbar_appears_only_where_the_full_render_reserves_a_gutter() {
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let app = crate::app::App::new(
+            &crate::config::Config::default(),
+            crate::app::AppPolicy::TEST,
+            None,
+            api_rx,
+            crate::api::EventHub::default(),
+        );
+        let frame = FrameData {
+            width: 12,
+            height: 8,
+            cells: vec![cell(" "); 12 * 8],
+            cursor: None,
+            hyperlinks: Vec::new(),
+            graphics: Vec::new(),
+        };
+        let pane = |inner_width: u16| protocol::PaneSurfacePane {
+            pane_id: "w1:p1".into(),
+            content_revision: 0,
+            rect: protocol::SurfaceRect {
+                x: 0,
+                y: 0,
+                width: inner_width + 2,
+                height: 8,
+            },
+            inner_rect: protocol::SurfaceRect {
+                x: 1,
+                y: 0,
+                width: inner_width,
+                height: 8,
+            },
+            scrollbar_rect: None,
+            scroll: None,
+            focused: true,
+            mouse_reporting: false,
+            sgr_pixel_mouse: false,
+            alternate_screen_active: false,
+            pixel_width: 0,
+            pixel_height: 0,
+        };
+        let metrics = crate::pane::ScrollMetrics {
+            offset_from_bottom: 0,
+            max_offset_from_bottom: 4,
+            viewport_rows: 8,
+        };
+
+        let mut wide = pane(5);
+        let rows = retained_scrollbar_patch(&app, &frame, &mut wide, false, Some(metrics))
+            .expect("scrollbar patch");
+        assert!(
+            !rows.is_empty(),
+            "a 5-column pane must show the gutter once it scrolls"
+        );
+        assert!(wide.scrollbar_rect.is_some());
+
+        let mut narrow = pane(4);
+        let rows = retained_scrollbar_patch(&app, &frame, &mut narrow, false, Some(metrics))
+            .expect("narrow pane patch");
+        assert!(rows.is_empty(), "a 4-column pane has no reserved gutter");
+        assert!(narrow.scrollbar_rect.is_none());
+    }
+
     #[test]
     fn scrollbar_gutter_follows_the_full_render_layout_rule() {
         let pane = |inner_width: u16, baseline_scrollbar: bool| protocol::PaneSurfacePane {

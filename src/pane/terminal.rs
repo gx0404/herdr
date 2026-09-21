@@ -2263,7 +2263,14 @@ impl GhosttyPaneTerminal {
     /// 事实各取一次终端核心锁（每 pane 4 次），合并为一次持锁读取。
     pub fn presentation_metadata(&self) -> PanePresentationMetadata {
         let Ok(core) = self.core.lock() else {
-            return PanePresentationMetadata::default();
+            // 锁中毒（writer panic 在临界区）时回退值必须与各窄访问器一致：原先
+            // `kitty_graphics_may_have_placements()` 在取锁失败时返回 `true`
+            // （保守：宁可多收一次图形也不丢）。其余字段各自的原语义就是
+            // false/None，与 `Default` 相同。
+            return PanePresentationMetadata {
+                kitty_graphics_may_have_placements: true,
+                ..PanePresentationMetadata::default()
+            };
         };
         PanePresentationMetadata {
             scroll_metrics: scroll_metrics_of(&core.terminal),
@@ -3207,25 +3214,25 @@ fn ghostty_collect_dirty_patch(
     // Nothing above mutates dirty state. Only clear it after every row has
     // been collected successfully, so a safety fallback leaves the next
     // collection with the same information.
-    // RS-22：采集只覆盖 `area_height` 以内的行；更深处仍在脏集里的行必须让整份
-    // 渲染状态保持 Partial，否则 `Dirty::Clean` 会把它们永久标干净、更新丢失
-    // （几何变化触发的整帧重绘才会重新看到内容）。
+    //
+    // RS-22：清扫循环无条件跑一次——原先用 `patch_rows.is_empty()` 守卫，
+    // 「采集高度以内没有脏行、但更深处有脏行」时直接跳到 `Dirty::Clean`，那些
+    // 脏行永久失去标记（几何变化触发的整帧重绘才会重新看到内容）。`patch_rows`
+    // 为空 ⇒ 高度以内没有脏行，此时循环只会遍历到「更深处」的行并按需要保留 Partial。
     let mut dirty_beyond_area = false;
-    if !patch_rows.is_empty() {
-        let Ok(mut clear_row_iterator) = crate::ghostty::RowIterator::new() else {
-            fallback!("clear_row_iterator_new_error");
-        };
-        let Ok(mut clear_rows) = render_state.populate_row_iterator(&mut clear_row_iterator) else {
-            fallback!("clear_populate_rows_error");
-        };
-        while let Some(y) = clear_rows.next_dirty() {
-            if y >= area_height {
-                dirty_beyond_area = true;
-                break;
-            }
-            if clear_rows.clear_dirty().is_err() {
-                fallback!("clear_dirty_error");
-            }
+    let Ok(mut clear_row_iterator) = crate::ghostty::RowIterator::new() else {
+        fallback!("clear_row_iterator_new_error");
+    };
+    let Ok(mut clear_rows) = render_state.populate_row_iterator(&mut clear_row_iterator) else {
+        fallback!("clear_populate_rows_error");
+    };
+    while let Some(y) = clear_rows.next_dirty() {
+        if y >= area_height {
+            dirty_beyond_area = true;
+            break;
+        }
+        if clear_rows.clear_dirty().is_err() {
+            fallback!("clear_dirty_error");
         }
     }
     let dirty_state = if dirty_beyond_area {

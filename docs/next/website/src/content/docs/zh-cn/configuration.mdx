@@ -639,4 +639,4 @@ switch_ascii_input_source_in_prefix = true
 ~/.config/herdr/herdr-server.log
 ```
 
-日志会自动轮转。报告问题时，请附上当前日志和轮转后的同级日志文件。
+日志会自动轮转：单个文件上限 5 MB，并在同级保留最近两份轮转副本（`herdr-server.log.1`、`herdr-server.log.2` 等）。报告问题时，请附上当前日志和轮转后的同级日志文件。
