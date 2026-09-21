@@ -15,6 +15,13 @@ APP_SERVER_SOURCES = (
     *sorted((PROJECT_ROOT / "src" / "app").rglob("*.rs")),
     *sorted((PROJECT_ROOT / "src" / "server").rglob("*.rs")),
 )
+# APP-014：投影/快照构建路径（HSR-05/APP-002 的 cwd 与 procfs 成本面）同样
+# 禁止进程树检查等重查询；`foreground_job(` 在这些文件必须为 0。
+PROJECTION_SOURCES = (
+    PROJECT_ROOT / "src" / "server" / "client_shell.rs",
+    PROJECT_ROOT / "src" / "app" / "creation.rs",
+    PROJECT_ROOT / "src" / "app" / "api" / "session.rs",
+)
 TEST_MODULE = re.compile(r"(?m)^#\[cfg\(test\)\]\s*\nmod\s+\w+\s*\{")
 INPUT_STATE_CALL = re.compile(r"(?:\.|::)input_state\b")
 KEYBOARD_STATE_ANSI_CALL = re.compile(
@@ -185,6 +192,16 @@ class UiHotPathArchitectureTests(unittest.TestCase):
             [],
             "App/server code must use narrow terminal-state accessors:\n"
             + "\n".join(violations),
+        )
+
+    def test_projection_paths_avoid_expensive_runtime_queries(self) -> None:
+        violations = find_violations(PROJECTION_SOURCES, FORBIDDEN_CALLS)
+
+        self.assertEqual(
+            violations,
+            [],
+            "Projection/snapshot construction must not perform pane-scaled "
+            "expensive reads (APP-014):\n" + "\n".join(violations),
         )
 
     def test_scanner_ignores_non_production_references(self) -> None:

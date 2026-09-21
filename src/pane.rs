@@ -1400,6 +1400,9 @@ pub struct PaneRuntime {
     current_size: Cell<(u16, u16, u32, u32)>,
     child_pid: Arc<AtomicU32>,
     reported_cwd: Arc<Mutex<Option<std::path::PathBuf>>>,
+    /// APP-002 第二步：cwd()/foreground_cwd() 的 500ms TTL 缓存；渲染/快照
+    /// 路径命中时只读缓存标量，不做 readlink(/proc/*/cwd)。
+    cwd_cache: Mutex<CwdCache>,
     child_wait_completed: Option<Arc<AtomicBool>>,
     kitty_keyboard_flags: Arc<AtomicU16>,
     content_seq: Arc<AtomicU64>,
@@ -1422,6 +1425,15 @@ enum PaneRuntimeIo {
         resize_tx: watch::Sender<(u16, u16, u32, u32)>,
     },
 }
+
+/// APP-002 第二步：cwd 查询的 TTL 缓存槽位。
+#[derive(Default)]
+struct CwdCache {
+    cwd: Option<(std::time::Instant, Option<std::path::PathBuf>)>,
+    foreground_cwd: Option<(std::time::Instant, Option<std::path::PathBuf>)>,
+}
+
+const CWD_CACHE_TTL: std::time::Duration = std::time::Duration::from_millis(500);
 
 impl PaneRuntimeIo {
     fn shutdown(&self) {
@@ -2387,6 +2399,7 @@ impl PaneRuntime {
             current_size: Cell::new((rows, cols, cell_width_px, cell_height_px)),
             child_pid,
             reported_cwd,
+            cwd_cache: Mutex::new(CwdCache::default()),
             child_wait_completed: None,
             kitty_keyboard_flags,
             content_seq,
@@ -2982,6 +2995,7 @@ impl PaneRuntime {
             current_size: Cell::new((rows, cols, 0, 0)),
             child_pid,
             reported_cwd,
+            cwd_cache: Mutex::new(CwdCache::default()),
             child_wait_completed: Some(child_wait_completed),
             kitty_keyboard_flags,
             content_seq,
@@ -3517,7 +3531,81 @@ impl PaneRuntime {
         }
 
         let pid = self.child_pid.load(Ordering::Relaxed);
-        crate::platform::process_cwd(pid)
+        self.cwd_impl(|| crate::platform::process_cwd(pid))
+    }
+
+    /// cwd 的 TTL 缓存读写：命中返回缓存标量，未命中调用 fetch 并回填。
+    /// fetch 分离出来让测试可以用计数替身驱动。
+    fn cwd_impl(
+        &self,
+        fetch: impl FnOnce() -> Option<std::path::PathBuf>,
+    ) -> Option<std::path::PathBuf> {
+        let now = std::time::Instant::now();
+        if let Some(cached) = self.cwd_cache.lock().ok().and_then(|cache| {
+            cache
+                .cwd
+                .as_ref()
+                .filter(|(at, _)| now.duration_since(*at) < CWD_CACHE_TTL)
+                .map(|(_, cwd)| cwd.clone())
+        }) {
+            return cached;
+        }
+        let cwd = fetch();
+        if let Ok(mut cache) = self.cwd_cache.lock() {
+            cache.cwd = Some((now, cwd.clone()));
+        }
+        cwd
+    }
+
+    fn foreground_cwd_impl(
+        &self,
+        fetch: impl FnOnce() -> Option<std::path::PathBuf>,
+    ) -> Option<std::path::PathBuf> {
+        let now = std::time::Instant::now();
+        if let Some(cached) = self.cwd_cache.lock().ok().and_then(|cache| {
+            cache
+                .foreground_cwd
+                .as_ref()
+                .filter(|(at, _)| now.duration_since(*at) < CWD_CACHE_TTL)
+                .map(|(_, cwd)| cwd.clone())
+        }) {
+            return cached;
+        }
+        let cwd = fetch();
+        if let Ok(mut cache) = self.cwd_cache.lock() {
+            cache.foreground_cwd = Some((now, cwd.clone()));
+        }
+        cwd
+    }
+
+    #[cfg(unix)]
+    fn foreground_cwd_uncached(&self) -> Option<std::path::PathBuf> {
+        let pid = self.child_pid.load(Ordering::Acquire);
+        let shell_cwd = absolute_process_cwd(pid);
+        let foreground_pgid = self
+            .io
+            .foreground_process_group_id()
+            .or_else(|| crate::platform::foreground_process_group_id(pid));
+        let leader_cwd = foreground_pgid.and_then(absolute_process_cwd);
+
+        // The group leader's cwd is authoritative (issue #3270): a helper
+        // process that chdirs elsewhere inside the same foreground group
+        // must not override it. Scan other members only when the leader's
+        // cwd cannot be read at all.
+        leader_cwd.or_else(|| foreground_member_cwd_different_from_shell(pid, shell_cwd.as_ref()))
+    }
+
+    /// Get the current working directory of the process group controlling the pane PTY.
+    pub fn foreground_cwd(&self) -> Option<std::path::PathBuf> {
+        #[cfg(unix)]
+        {
+            self.foreground_cwd_impl(|| self.foreground_cwd_uncached())
+        }
+
+        #[cfg(not(unix))]
+        {
+            None
+        }
     }
 
     pub fn child_pid(&self) -> Option<u32> {
@@ -3538,32 +3626,6 @@ impl PaneRuntime {
         #[cfg(not(unix))]
         {
             self.cwd()
-        }
-    }
-
-    /// Get the current working directory of the process group controlling the pane PTY.
-    pub fn foreground_cwd(&self) -> Option<std::path::PathBuf> {
-        #[cfg(unix)]
-        {
-            let pid = self.child_pid.load(Ordering::Acquire);
-            let shell_cwd = absolute_process_cwd(pid);
-            let foreground_pgid = self
-                .io
-                .foreground_process_group_id()
-                .or_else(|| crate::platform::foreground_process_group_id(pid));
-            let leader_cwd = foreground_pgid.and_then(absolute_process_cwd);
-
-            // The group leader's cwd is authoritative (issue #3270): a helper
-            // process that chdirs elsewhere inside the same foreground group
-            // must not override it. Scan other members only when the leader's
-            // cwd cannot be read at all.
-            leader_cwd
-                .or_else(|| foreground_member_cwd_different_from_shell(pid, shell_cwd.as_ref()))
-        }
-
-        #[cfg(not(unix))]
-        {
-            None
         }
     }
 }
@@ -3724,6 +3786,7 @@ impl PaneRuntime {
                 current_size: Cell::new((rows, cols, 0, 0)),
                 child_pid: Arc::new(AtomicU32::new(0)),
                 reported_cwd: Arc::new(Mutex::new(None)),
+                cwd_cache: Mutex::new(CwdCache::default()),
                 child_wait_completed: None,
                 kitty_keyboard_flags: Arc::new(AtomicU16::new(0)),
                 content_seq: Arc::new(AtomicU64::new(0)),
@@ -4058,6 +4121,50 @@ mod tests {
         std::fs::remove_dir(&cwd).expect("remove reported cwd after admission");
 
         assert_eq!(runtime.cwd(), Some(cwd));
+    }
+
+    #[tokio::test]
+    async fn cwd_ttl_cache_serves_repeated_reads_and_refreshes_after_expiry() {
+        // APP-002 第二步：TTL 内重复读不重复 fetch；超过 500ms 后重新 fetch。
+        let (runtime, _rx) = PaneRuntime::test_with_channel(80, 24);
+        let calls = std::cell::Cell::new(0u32);
+        let fetch = || {
+            calls.set(calls.get() + 1);
+            Some(std::path::PathBuf::from(format!(
+                "/tmp/cwd-{}",
+                calls.get()
+            )))
+        };
+
+        let first = runtime.cwd_impl(fetch);
+        let second = runtime.cwd_impl(fetch);
+        assert_eq!(first, second, "TTL 内必须命中缓存");
+        assert_eq!(calls.get(), 1, "TTL 内只能 fetch 一次");
+
+        let first_foreground = runtime.foreground_cwd_impl(fetch);
+        let second_foreground = runtime.foreground_cwd_impl(fetch);
+        assert_eq!(first_foreground, second_foreground);
+        assert_eq!(calls.get(), 2, "foreground 槽位独立缓存");
+        assert_ne!(
+            first, first_foreground,
+            "cwd 与 foreground_cwd 槽位互不覆盖"
+        );
+
+        // 把槽位时间戳回拨到 TTL 之外，下一次读必须重新 fetch。
+        {
+            let mut cache = runtime.cwd_cache.lock().unwrap();
+            let expired =
+                std::time::Instant::now() - CWD_CACHE_TTL - std::time::Duration::from_millis(1);
+            if let Some((at, _)) = &mut cache.cwd {
+                *at = expired;
+            }
+            if let Some((at, _)) = &mut cache.foreground_cwd {
+                *at = expired;
+            }
+        }
+        let third = runtime.cwd_impl(fetch);
+        assert_eq!(calls.get(), 3, "TTL 过期后必须重新 fetch");
+        assert_ne!(third, first, "过期后读到新值");
     }
 
     #[cfg(unix)]
@@ -4758,6 +4865,7 @@ mod tests {
             current_size: Cell::new((80, 24, 0, 0)),
             child_pid: Arc::new(AtomicU32::new(0)),
             reported_cwd: Arc::new(Mutex::new(None)),
+            cwd_cache: Mutex::new(CwdCache::default()),
             child_wait_completed: None,
             kitty_keyboard_flags: Arc::new(AtomicU16::new(0)),
             content_seq: Arc::new(AtomicU64::new(0)),
@@ -4795,6 +4903,7 @@ mod tests {
             current_size: Cell::new((80, 24, 0, 0)),
             child_pid: Arc::new(AtomicU32::new(0)),
             reported_cwd: Arc::new(Mutex::new(None)),
+            cwd_cache: Mutex::new(CwdCache::default()),
             child_wait_completed: None,
             kitty_keyboard_flags: Arc::new(AtomicU16::new(0)),
             content_seq: Arc::new(AtomicU64::new(0)),

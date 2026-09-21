@@ -849,18 +849,31 @@ fn pane_info_reports_foreground_cwd_without_changing_pane_cwd() {
         foreground
     );
 
-    let pane = send_request(
-        &socket_path,
-        &format!(
-            r#"{{"id":"fg_pane","method":"pane.get","params":{{"pane_id":"{}"}}}}"#,
-            pane_id
-        ),
-    );
-    assert_eq!(pane["result"]["pane"]["cwd"], base.display().to_string());
-    assert_eq!(
-        pane["result"]["pane"]["foreground_cwd"],
-        foreground.display().to_string()
-    );
+    // cwd 查询有 500ms TTL 缓存（APP-002）：pane.create 响应已经把当时的
+    // foreground_cwd 缓存为 shell cwd，前台的 cd 要等缓存过期才可见。
+    // 有界轮询等收敛。
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let pane = send_request(
+            &socket_path,
+            &format!(
+                r#"{{"id":"fg_pane","method":"pane.get","params":{{"pane_id":"{}"}}}}"#,
+                pane_id
+            ),
+        );
+        let cwd = pane["result"]["pane"]["cwd"].as_str().unwrap_or_default();
+        let foreground_cwd = pane["result"]["pane"]["foreground_cwd"]
+            .as_str()
+            .unwrap_or_default();
+        if cwd == base.display().to_string() && foreground_cwd == foreground.display().to_string() {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "foreground_cwd did not converge: cwd={cwd} foreground_cwd={foreground_cwd}"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
 
     let panes = send_request(
         &socket_path,
