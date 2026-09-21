@@ -536,6 +536,7 @@ impl ClientShellState {
         let (mut frame, buffer) = canvas.finish(Vec::new());
         self.compose_buffer = Some(buffer);
         self.compose_graphics(&mut frame, layout, &occlusion);
+        self.hits.rebuild_chrome_bounds();
         self.hits.composed = true;
         Some(frame)
     }

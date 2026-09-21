@@ -729,6 +729,11 @@ impl ClientShellState {
             }
             return None;
         }
+        // 指针不在任何 chrome 分组里（最常见的「浮在 pane 上」）：直接判定不是
+        // chrome 悬浮，不再走下面整份线性扫描（HERDR-PERF-008）。
+        if !hits.chrome_bounds.contains(point) {
+            return None;
+        }
         if super::contains(hits.notification_toast, point)
             && (self.visible_endpoint_notice.is_some()
                 || self
@@ -818,5 +823,83 @@ impl ClientShellState {
             return Some(ChromeHover::SidebarDivider);
         }
         None
+    }
+}
+
+/// chrome 悬浮区的分组包围盒：侧栏、顶栏（标签条 / 全局入口）、横幅。
+/// 分组而不是一个大并集——标签条在顶、侧栏在左、横幅在底部，并集很快退化成
+/// 整屏，早退就永远不生效。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(super) struct ChromeBounds {
+    sidebar: Rect,
+    top: Rect,
+    banners: Rect,
+}
+
+impl ChromeBounds {
+    pub(super) fn contains(&self, point: (u16, u16)) -> bool {
+        super::contains(self.sidebar, point)
+            || super::contains(self.top, point)
+            || super::contains(self.banners, point)
+    }
+}
+
+impl ShellHitMap {
+    /// 重算 chrome 悬浮区分组包围盒（每帧 compose 收尾调用一次）。矩形来自
+    /// `chrome_hover_at` 会查询的每一处，缺一个就会让那块区域的悬浮失效，
+    /// 所以新增命中区字段时这里要同步。
+    pub(super) fn rebuild_chrome_bounds(&mut self) {
+        let mut sidebar = Rect::default();
+        let mut top = Rect::default();
+        let mut banners = Rect::default();
+        let extend = |bounds: &mut Rect, rect: Rect| {
+            if rect.is_empty() {
+                return;
+            }
+            *bounds = if bounds.is_empty() {
+                rect
+            } else {
+                bounds.union(rect)
+            };
+        };
+        extend(&mut banners, self.notification_toast);
+        extend(&mut banners, self.lifecycle_banner_retry);
+        extend(&mut banners, self.lifecycle_banner_give_up);
+        for (rect, _) in &self.tabs {
+            extend(&mut top, *rect);
+        }
+        extend(&mut top, self.new_tab);
+        extend(&mut top, self.tab_scroll_left);
+        extend(&mut top, self.tab_scroll_right);
+        for hit in &self.machines {
+            extend(&mut sidebar, hit.rect);
+        }
+        for hit in &self.workspaces {
+            extend(&mut sidebar, hit.rect);
+        }
+        for (rect, _) in &self.agents {
+            extend(&mut sidebar, *rect);
+        }
+        for (rect, _) in &self.agent_group_toggles {
+            extend(&mut sidebar, *rect);
+        }
+        extend(&mut sidebar, self.agent_usage_toggle);
+        for (rect, _, _) in &self.endpoint_agents {
+            extend(&mut sidebar, *rect);
+        }
+        extend(&mut sidebar, self.workspace_scrollbar);
+        extend(&mut sidebar, self.agent_scrollbar);
+        extend(&mut sidebar, self.agent_sort_toggle);
+        extend(&mut sidebar, self.sidebar_section_divider);
+        extend(&mut sidebar, self.sidebar_toggle);
+        extend(&mut sidebar, self.sidebar_divider);
+        // 全局入口在侧栏页脚（经典布局）或顶栏（工作台）：两处都并进侧栏组，
+        // 它既不与标签条同排也不在横幅区。
+        extend(&mut sidebar, self.global_launcher);
+        self.chrome_bounds = ChromeBounds {
+            sidebar,
+            top,
+            banners,
+        };
     }
 }

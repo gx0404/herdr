@@ -535,3 +535,49 @@ fn relative_time_labels_cover_just_now_minutes_hours_and_days() {
     assert_eq!(ago(std::time::Duration::from_secs(3 * 3600)), "3h ago");
     assert_eq!(ago(std::time::Duration::from_secs(2 * 86_400)), "2d ago");
 }
+
+/// HERDR-PERF-008：`chrome_hover_at` 每次 `Moved` 都要线性扫描全部命中区；
+/// 视图计算阶段给出 chrome 悬浮区并集后，指针在 pane 上（最常见情形）可以直接
+/// 短路，同时不能因此漏掉真正的 chrome 命中。
+#[test]
+fn chrome_hover_bounds_short_circuit_pane_pointer_without_losing_chrome_hits() {
+    let mut state = chrome_state();
+    let bounds = state.hits.chrome_bounds;
+
+    // 指针停在 pane 上：不在并集里，`chrome_hover_at` 可以直接判定不是 chrome。
+    let pane = state.hits.panes[0].inner_rect;
+    let pane_point = (pane.x + pane.width / 2, pane.y + pane.height / 2);
+    assert!(
+        !bounds.contains(pane_point),
+        "pane 内的指针不应落在 chrome 分组里: {pane_point:?}"
+    );
+
+    // chrome 命中仍然解析得出：标签条上的指针既在并集里，也能拿到目标。
+    let (tab_rect, tab_id) = state.hits.tabs[0].clone();
+    let tab_point = (tab_rect.x, tab_rect.y);
+    assert!(
+        bounds.contains(tab_point),
+        "标签应落在 chrome 分组里: {tab_rect:?}"
+    );
+    let mut outcome = ClientShellInput::default();
+    state.handle_mouse(moved_mouse(tab_rect.x, tab_rect.y), &mut outcome);
+    assert_eq!(
+        state.hover,
+        Some(ChromeHover::Tab(tab_id)),
+        "早退不得漏掉标签悬浮"
+    );
+
+    // 侧栏行同样解析得出。
+    let row = state.hits.workspaces[0].rect;
+    let row_point = (row.x + 1, row.y);
+    assert!(bounds.contains(row_point), "工作区行应在分组里");
+    let mut outcome = ClientShellInput::default();
+    state.handle_mouse(moved_mouse(row_point.0, row_point.1), &mut outcome);
+    assert_eq!(
+        state.hover,
+        Some(ChromeHover::WorkspaceRow {
+            endpoint_id: ClientEndpointId::Local,
+            workspace_id: "ws_1".into(),
+        })
+    );
+}

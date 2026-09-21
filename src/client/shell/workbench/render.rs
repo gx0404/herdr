@@ -643,6 +643,7 @@ impl ClientShellState {
         }
         let (frame, buffer) = canvas.finish(graphics);
         self.compose_buffer = Some(buffer);
+        self.hits.rebuild_chrome_bounds();
         self.hits.composed = true;
         Some(frame)
     }

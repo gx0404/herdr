@@ -169,6 +169,10 @@ pub(super) struct ShellHitMap {
     /// 还没重绘，不代表锚点丢失。
     pub(super) composed: bool,
     pub(super) overlay_bounds: Rect,
+    /// 本帧 chrome 悬浮区的分组包围盒（侧栏 / 顶栏 / 横幅）：指针不在任何一组
+    /// 里时无需走整份线性扫描——pane 上的指针是最常见的 `Moved` 场景
+    /// （HERDR-PERF-008）。每帧由 compose 收尾重算一次，鼠标事件里只读。
+    pub(super) chrome_bounds: super::feedback::ChromeBounds,
     /// 本帧真正绘制的浮层种类：输入侧据此判断浮层命中区是否属于当前浮层
     /// （浮层刚打开、还没合成时为 `None`，此时才允许回退到几何推导）。
     pub(super) overlay_kind: Option<ClientShellOverlayKind>,
