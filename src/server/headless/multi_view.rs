@@ -291,7 +291,11 @@ impl HeadlessServer {
                     }
                 }
                 Some(Err(std::sync::mpsc::TrySendError::Full(_))) => pending = true,
-                _ => alive = false,
+                // RS-14：本连接已经没有 writer（发送端消失）与单视图路径一致——
+                // 跳过并延期，不当作断开（断开只留给 writer 线程真的消失的
+                // `Disconnected`）。
+                None => pending = true,
+                Some(Err(std::sync::mpsc::TrySendError::Disconnected(_))) => alive = false,
             }
         }
         if let Some(client) = self.clients.get_mut(&client_id) {

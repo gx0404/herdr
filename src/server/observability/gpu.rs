@@ -5,6 +5,9 @@ use std::time::{Duration, Instant};
 
 use crate::api::schema::{GpuMetric, ObservationStatus};
 
+/// RS-20：最后一次指标请求之后多久释放 NVML（见 worker 循环）。
+const GPU_NVML_IDLE_TIMEOUT: Duration = Duration::from_secs(5);
+
 pub(super) struct GpuWorker {
     request: mpsc::SyncSender<()>,
     latest: Arc<Mutex<(Option<Instant>, Vec<GpuMetric>)>>,
@@ -21,7 +24,17 @@ impl GpuWorker {
                 let mut nvml = None;
                 let mut retry_at = Instant::now();
                 let mut native: Option<crate::platform::NativeGpuCollector> = None;
-                while requests.recv().is_ok() {
+                loop {
+                    // RS-20：空闲就释放 NVML——初始化后它常驻 7 个设备 fd 与上百 MB
+                    // 驱动映射，而指标只有打开监控页时才会被请求。下一次请求重新 init。
+                    match requests.recv_timeout(GPU_NVML_IDLE_TIMEOUT) {
+                        Ok(()) => {}
+                        Err(mpsc::RecvTimeoutError::Timeout) => {
+                            let _ = nvml.take();
+                            continue;
+                        }
+                        Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                    }
                     if nvml.is_none() && Instant::now() >= retry_at {
                         nvml = nvml_wrapper::Nvml::init().ok();
                         retry_at = Instant::now() + Duration::from_secs(30);

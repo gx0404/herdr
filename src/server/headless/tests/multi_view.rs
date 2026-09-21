@@ -156,6 +156,26 @@ async fn duplicate_tabs_and_stale_layouts_do_not_change_live_geometry() {
     assert_eq!(server.clients[&1].views.as_ref().unwrap().revision, 2);
 }
 
+/// RS-14：多视图客户端没有 writer 时与单视图路径一致——跳过并延期，不断开
+/// 连接（`Disconnected` 才是 writer 线程消失）。
+#[tokio::test]
+async fn multi_view_without_a_writer_defers_instead_of_disconnecting() {
+    let (mut server, _, _, _) = retained_test_server_with_control(b"BASE");
+    let tab = server.app.public_tab_id(0, 0).unwrap();
+    set_views(&mut server, 1, std::slice::from_ref(&tab));
+    server.clients.get_mut(&1).unwrap().writer = None;
+
+    assert!(
+        server.render_client_views(1),
+        "missing writer must not be reported as a broken client"
+    );
+    assert!(server.clients.contains_key(&1));
+    assert!(
+        server.clients[&1].deferred_render() != DeferredRender::None,
+        "deferred work must be armed so the frame is re-sent once a writer exists"
+    );
+}
+
 #[tokio::test]
 async fn resize_retires_held_keys_before_opening_the_new_view_generation() {
     let (mut server, _, _, pane) = retained_test_server_with_control(b"");

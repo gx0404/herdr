@@ -3174,6 +3174,8 @@ fn ghostty_collect_dirty_patch(
                 resolved_bg,
                 palette_overrides.as_ref(),
             );
+            // PTY-10：符号留在复用的 scratch 里，直接构造 `CompactString`
+            // （≤24 字节内联零堆分配），不再每格 `to_owned()` 出一个临时 String。
             let symbol = match ghostty_buffer_symbol_into(
                 &cells,
                 basic.wide,
@@ -3181,8 +3183,8 @@ fn ghostty_collect_dirty_patch(
                 &mut grapheme_bytes,
                 &mut symbol_scratch,
             ) {
-                Ok(symbol) => symbol.to_owned(),
-                Err(_) => ghostty_blank_symbol_for_width(basic.wide).to_owned(),
+                Ok(symbol) => symbol,
+                Err(_) => ghostty_blank_symbol_for_width(basic.wide),
             };
             let mut cell = cell_data_from_style(symbol, style);
             cell.hyperlink = hyperlink;
@@ -3205,6 +3207,10 @@ fn ghostty_collect_dirty_patch(
     // Nothing above mutates dirty state. Only clear it after every row has
     // been collected successfully, so a safety fallback leaves the next
     // collection with the same information.
+    // RS-22：采集只覆盖 `area_height` 以内的行；更深处仍在脏集里的行必须让整份
+    // 渲染状态保持 Partial，否则 `Dirty::Clean` 会把它们永久标干净、更新丢失
+    // （几何变化触发的整帧重绘才会重新看到内容）。
+    let mut dirty_beyond_area = false;
     if !patch_rows.is_empty() {
         let Ok(mut clear_row_iterator) = crate::ghostty::RowIterator::new() else {
             fallback!("clear_row_iterator_new_error");
@@ -3214,6 +3220,7 @@ fn ghostty_collect_dirty_patch(
         };
         while let Some(y) = clear_rows.next_dirty() {
             if y >= area_height {
+                dirty_beyond_area = true;
                 break;
             }
             if clear_rows.clear_dirty().is_err() {
@@ -3221,10 +3228,13 @@ fn ghostty_collect_dirty_patch(
             }
         }
     }
-    if render_state
-        .set_dirty(crate::ghostty::Dirty::Clean)
-        .is_err()
-    {
+    let dirty_state = if dirty_beyond_area {
+        crate::render_prof::event("dirty_collect.beyond_area_dirty");
+        crate::ghostty::Dirty::Partial
+    } else {
+        crate::ghostty::Dirty::Clean
+    };
+    if render_state.set_dirty(dirty_state).is_err() {
         fallback!("set_clean_error");
     }
 
@@ -3711,13 +3721,10 @@ fn ghostty_reset_cell(
 }
 
 fn blank_cell_data(default_fg: Option<Color>, default_bg: Option<Color>) -> CellData {
-    cell_data_from_style(
-        " ".to_string(),
-        ghostty_default_style(default_fg, default_bg),
-    )
+    cell_data_from_style(" ", ghostty_default_style(default_fg, default_bg))
 }
 
-fn cell_data_from_style(symbol: String, style: Style) -> CellData {
+fn cell_data_from_style(symbol: &str, style: Style) -> CellData {
     CellData {
         symbol: symbol.into(),
         fg: crate::protocol::color_to_u32(style.fg.unwrap_or(Color::Reset)),

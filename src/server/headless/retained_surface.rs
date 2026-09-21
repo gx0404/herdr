@@ -169,6 +169,17 @@ fn changed_rows(
     Some(rows)
 }
 
+/// RS-13：完整渲染只在 `pane_inner.width > 4` 时留出滚动条留白
+/// （`ui::terminal_inner_rect`）。窄 pane 没有留白，补丁照旧按
+/// `inner_rect.x + inner_rect.width` 画会落到 pane 右边框，与完整渲染不一致
+/// （滚动时闪烁）。留白后 `inner_rect.width = pane_inner.width - 1`，因此
+/// `inner_rect.width >= 5` 一定留了留白（pane_inner ≤ 4 不可能留）；`== 4` 是
+/// 两种情形唯一重叠的一档，只有基线本来就画着滚动条（说明上一帧完整渲染留了
+/// 留白）时才补。
+fn scrollbar_gutter_available(pane: &protocol::PaneSurfacePane) -> bool {
+    pane.inner_rect.width >= 5 || (pane.inner_rect.width == 4 && pane.scrollbar_rect.is_some())
+}
+
 fn retained_scrollbar_patch(
     app: &app::App,
     frame: &FrameData,
@@ -176,9 +187,11 @@ fn retained_scrollbar_patch(
     alternate_screen_active: bool,
     metrics: Option<crate::pane::ScrollMetrics>,
 ) -> Option<Vec<protocol::PaneSurfacePatchRow>> {
+    let gutter_available = scrollbar_gutter_available(pane);
     let next_rect = metrics
         .filter(|metrics| metrics.max_offset_from_bottom > 0)
         .filter(|_| app.state.pane_scrollbars && !alternate_screen_active)
+        .filter(|_| gutter_available)
         .and_then(|_| {
             let rect = protocol::SurfaceRect {
                 x: pane.inner_rect.x.checked_add(pane.inner_rect.width)?,
@@ -858,6 +871,45 @@ mod tests {
             skip: false,
             hyperlink: None,
         }
+    }
+
+    /// RS-13：窄 pane（完整渲染不会留出滚动条留白）不补滚动条；正常宽度补。
+    #[test]
+    fn scrollbar_gutter_follows_the_full_render_layout_rule() {
+        let pane = |inner_width: u16, baseline_scrollbar: bool| protocol::PaneSurfacePane {
+            pane_id: "w1:p1".into(),
+            content_revision: 0,
+            rect: protocol::SurfaceRect {
+                x: 0,
+                y: 0,
+                width: inner_width + 2,
+                height: 10,
+            },
+            inner_rect: protocol::SurfaceRect {
+                x: 1,
+                y: 1,
+                width: inner_width,
+                height: 8,
+            },
+            scrollbar_rect: baseline_scrollbar.then_some(protocol::SurfaceRect {
+                x: 1 + inner_width,
+                y: 1,
+                width: 1,
+                height: 8,
+            }),
+            scroll: None,
+            focused: true,
+            mouse_reporting: false,
+            sgr_pixel_mouse: false,
+            alternate_screen_active: false,
+            pixel_width: 0,
+            pixel_height: 0,
+        };
+
+        assert!(!scrollbar_gutter_available(&pane(3, false)));
+        assert!(!scrollbar_gutter_available(&pane(4, false)));
+        assert!(scrollbar_gutter_available(&pane(4, true)));
+        assert!(scrollbar_gutter_available(&pane(5, false)));
     }
 
     #[test]

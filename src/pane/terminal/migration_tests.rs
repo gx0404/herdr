@@ -288,6 +288,44 @@ fn dirty_patch_fallback_keeps_previously_collected_rows_dirty() {
     );
 }
 
+/// RS-22：采集高度以外的脏行必须保留脏标记——原先收尾把整份渲染状态置 Clean，
+/// 那些行再也不会被采集（只有几何变化触发的整帧重绘才会重新看到内容）。
+#[test]
+fn dirty_collection_beyond_area_height_keeps_deeper_rows_dirty() {
+    let mut terminal = Harness::new(8, 6);
+    terminal.write(b"\x1b[2;1Htop\x1b[5;1Hbottom");
+    // 只采集前 3 行：第 5 行的更新落在采集高度之外。
+    let TerminalDirtyPatchOutcome::Patch(patch) = terminal.pane.collect_dirty_patch(8, 3) else {
+        panic!("upper rows must patch");
+    };
+    assert!(patch.rows.iter().all(|(y, _)| *y < 3));
+    {
+        let core = terminal.pane.ghostty.core.lock().unwrap();
+        let mut iterator = crate::ghostty::RowIterator::new().unwrap();
+        let mut rows = core
+            .render_state
+            .populate_row_iterator(&mut iterator)
+            .unwrap();
+        let mut dirty = Vec::new();
+        let mut y = 0;
+        while rows.next() {
+            if rows.dirty().unwrap() {
+                dirty.push(y);
+            }
+            y += 1;
+        }
+        assert!(
+            dirty.contains(&4),
+            "row below the collected height must stay dirty, got {dirty:?}"
+        );
+    }
+    // 采集高度恢复后，那一行仍然会被补丁带上。
+    let TerminalDirtyPatchOutcome::Patch(patch) = terminal.pane.collect_dirty_patch(8, 6) else {
+        panic!("deeper rows must still patch after the area grows");
+    };
+    assert!(patch.rows.iter().any(|(y, _)| *y == 4));
+}
+
 #[test]
 fn dirty_patch_exposes_hyperlink_uri_table_instead_of_falling_back() {
     let mut terminal = Harness::new(8, 6);

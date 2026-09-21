@@ -78,13 +78,12 @@ pub(super) fn snapshot(
     let tabs = snapshot
         .tabs
         .into_iter()
-        .zip(
-            app.state
-                .workspaces
-                .iter()
-                .flat_map(|workspace| workspace.tabs.iter()),
-        )
-        .map(|(tab, state)| {
+        .map(|tab| {
+            // APP-013：按 tab_id 解析对应状态，不按位置 zip——`session_snapshot`
+            // 里任何被静默跳过的 tab 都会让后续 tab 的标签/状态错位。
+            let state = app
+                .parse_tab_id(&tab.tab_id)
+                .and_then(|(ws_idx, tab_idx)| app.state.workspaces.get(ws_idx)?.tabs.get(tab_idx));
             let tab_id = tab.tab_id;
             protocol::ClientShellTab {
                 focused: focused_tab_id.as_deref() == Some(tab_id.as_str()),
@@ -92,8 +91,8 @@ pub(super) fn snapshot(
                 workspace_id: tab.workspace_id,
                 number: tab.number,
                 label: tab.label,
-                custom_label: !state.is_auto_named(),
-                zoomed: state.zoomed,
+                custom_label: state.is_some_and(|state| !state.is_auto_named()),
+                zoomed: state.is_some_and(|state| state.zoomed),
                 agent_status: tab.agent_status,
             }
         })

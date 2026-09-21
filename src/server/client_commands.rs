@@ -79,8 +79,16 @@ pub(crate) fn supported_client_shell_method_names() -> &'static [&'static str] {
     CLIENT_SHELL_METHODS
 }
 
+/// HSR-17：白名单查询是每请求路径，改哈希表（原先线性比较 ~70 条）。
+/// 顺序列表仍是握手宣告的真源。
+fn client_shell_method_set() -> &'static std::collections::HashSet<&'static str> {
+    static SET: std::sync::OnceLock<std::collections::HashSet<&'static str>> =
+        std::sync::OnceLock::new();
+    SET.get_or_init(|| CLIENT_SHELL_METHODS.iter().copied().collect())
+}
+
 pub(crate) fn supports_client_shell_method_name(method: &str) -> bool {
-    CLIENT_SHELL_METHODS.contains(&method)
+    client_shell_method_set().contains(method)
 }
 
 pub(crate) fn supports_client_shell_method(method: &Method) -> bool {

@@ -1,6 +1,9 @@
 #[derive(Debug, Clone, Default)]
 pub(crate) struct KittyKeyboardTracker {
     pending: Vec<u8>,
+    /// PTY-11：跨块拼接用的复用缓冲。原先每次拼接都新建一个 `pending + chunk`
+    /// 的 Vec（8 KB 级分配/块）；容量在这里复用，拼接退化为一次 memcpy。
+    scratch: Vec<u8>,
     stack: Vec<u16>,
     flags: u16,
     modify_other_keys_level: u8,
@@ -8,19 +11,17 @@ pub(crate) struct KittyKeyboardTracker {
 
 impl KittyKeyboardTracker {
     pub(crate) fn observe(&mut self, bytes: &[u8]) {
-        let combined;
-        let bytes = if self.pending.is_empty() {
-            bytes
+        let mut combined = if self.pending.is_empty() {
+            None
         } else {
-            combined = self
-                .pending
-                .iter()
-                .copied()
-                .chain(bytes.iter().copied())
-                .collect::<Vec<_>>();
+            let mut scratch = std::mem::take(&mut self.scratch);
+            scratch.clear();
+            scratch.extend_from_slice(&self.pending);
+            scratch.extend_from_slice(bytes);
             self.pending.clear();
-            &combined
+            Some(scratch)
         };
+        let bytes: &[u8] = combined.as_deref().unwrap_or(bytes);
         let mut index = 0;
         while index < bytes.len() {
             if bytes[index] != 0x1b {
@@ -69,6 +70,10 @@ impl KittyKeyboardTracker {
             }
             index = end + 1;
         }
+        // PTY-11：把拼接缓冲放回复用槽位（容量保留，下一次跨块拼接不再分配）。
+        if let Some(scratch) = combined.take() {
+            self.recycle_scratch(scratch);
+        }
     }
 
     pub(crate) fn modify_other_keys_level(&self) -> u8 {
@@ -99,6 +104,11 @@ impl KittyKeyboardTracker {
             self.modify_other_keys_level =
                 value.map(parse_kitty_keyboard_flags).unwrap_or(0).min(2) as u8;
         }
+    }
+
+    /// 归还拼接缓冲（`observe` 借出后在这里放回，容量复用）。
+    fn recycle_scratch(&mut self, scratch: Vec<u8>) {
+        self.scratch = scratch;
     }
 
     fn store_pending(&mut self, bytes: &[u8]) {
