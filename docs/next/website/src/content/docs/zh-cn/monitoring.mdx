@@ -59,7 +59,7 @@ cooldown_seconds = 60
 
 ## 账号绑定与展示
 
-账号页只列出本机已安装官方 CLI 的厂商——检测与设置页的集成检测同源（多别名 PATH 扫描 + codex 的 standalone/nvm/volta/bun、Hermes 等安装布局），两处结论一致；显式配置了账号的厂商始终保留。`account.usage.providers` 为每个厂商返回 `installed` 标记；旧版 server 缺少该字段时仍显示完整注册表。自动刷新由服务端在有客户端展示数据期间执行：API 与门户账号按 `api_refresh_seconds`（不低于 60 s），CLI 探测按 `cli_refresh_seconds`（不低于 300 s；`account.usage.providers` 以 `minimum_interval_seconds` 播报实际生效值），失败后带上限的退避。只接受官方回调的厂商不播报轮询间隔，由回调驱动刷新。账号页打开时若尚未选厂商，按聚焦窗格正在运行的 agent 选，否则选第一个已列出的厂商。切换厂商或账号时旧快照保留并变暗，直到新数据到达；当前作用域配置的账号不足两个时「切换账号」为禁用态；在设置里关闭的厂商会同时离开厂商标签、切换候选和总览。codex 通过安装布局定位时，探测子进程会把该布局的 bin 目录前置到 `PATH`，使 npm shim 脚本能解析到自身的 node 解释器。
+账号页只列出本机已安装官方 CLI 的厂商——检测与设置页的集成检测同源（多别名 PATH 扫描 + codex 的 standalone/nvm/volta/bun 等安装布局），两处结论一致；显式配置了账号的厂商始终保留。`account.usage.providers` 为每个厂商返回 `installed` 标记；旧版 server 缺少该字段时仍显示完整注册表。自动刷新由服务端在有客户端展示数据期间执行：API 账号按 `api_refresh_seconds`（不低于 60 s），CLI 探测按 `cli_refresh_seconds`（不低于 300 s；`account.usage.providers` 以 `minimum_interval_seconds` 播报实际生效值），失败后带上限的退避。由官方回调（Claude Code）或 Herdr 自带集成扩展（Pi）推送数据的厂商不播报轮询间隔，由这些推送驱动刷新。账号页打开时若尚未选厂商，按聚焦窗格正在运行的 agent 选，否则选第一个已列出的厂商。切换厂商或账号时旧快照保留并变暗，直到新数据到达；当前作用域配置的账号不足两个时「切换账号」为禁用态；在设置里关闭的厂商会同时离开厂商标签、切换候选和总览。codex 通过安装布局定位时，探测子进程会把该布局的 bin 目录前置到 `PATH`，使 npm shim 脚本能解析到自身的 node 解释器。
 
 扫过 Agents 面板头部的「用量」按钮（停留满 `hover_delay_ms`，默认 400 ms）会在按钮下方弹出紧凑的跨厂商总览：每个账号一行头部加最多三行带进度条的额度，下方放不下时上翻到按钮上方。指针移开 250 ms 后自动关闭；点击按钮即钉住，之后只有 `Esc`、再次点击按钮或在浮层外点击才会关闭。点击浮层本体打开账号页。总览有自己的作用域，不会改写账号页的选择；钉住的总览只在按钮因面板过窄而消失时才自行关闭。面板很窄时按钮先缩成 1 列的 `%`，再截断排序标签；按钮需要开启鼠标捕获。
 
@@ -70,17 +70,19 @@ cooldown_seconds = 60
 鼠标停留在 Agent 行或 CLI 标题上，可以打开账号用量浮层。`format` 决定仪表盘还是表格；`position` 决定这个按窗格的浮层放在哪里：`hover` 与 `both` 都保留 Agent 行和 CLI 标题上的浮层，`page` 则关闭该浮层，只留账号页作为按窗格的入口（选中它时设置页会常驻提示）。账号页、用量按钮的总览和浮动仪表盘在任一取值下都可用。在 监控→设置 里做的修改保存为客户端偏好，在本机覆盖 `enabled`、`format`、`position`、`hover_delay_ms` 与关闭的厂商，直到在那里点「恢复配置文件值」。浮层中的「确认账号绑定」将当前窗格与选定账号关联。品牌相同不代表账号相同：未绑定窗格收到官方回调时，若该厂商只配置了一个账号，服务端会自动绑定并持久化，快照标注「已按唯一账号自动绑定」；配置了多个账号时回调被拒绝并列出候选，需要显式绑定。自动绑定要求 `account_usage.enabled` 开启且回调含额度字段。
 
 面板够宽（≥96 列）时，右侧详情栏还会画出所选账号「最紧的那一档」额度随时间的变化：客户端保留最近 120 个采样（轮询响应与订阅推送都算），以「用量历史」标题下的 sparkline 呈现。
-显式刷新（`account.usage.refresh`、账号页的刷新动作、切换厂商或账号）按账号做 10 s 防抖，且不豁免厂商退避（HTTP 429）；被防抖时响应带 `next_allowed_at_ms`。终态结果（需要登录、不支持、无权限）按慢周期自动重试——10 分钟起、每次翻倍、1 小时封顶、最多 6 次；CLI 可执行文件或凭据文件一有变化就解除保持，登录后无需重启即可自愈；显式刷新始终重试终态。没有额度字段的官方回调不会覆盖缓存样本。超过 15 分钟没有回调时快照显示为缓存数据，可能回落探测，但只有探测成功或下一次回调才会替换它。只接受官方回调的厂商在刷新状态里标 `callback_only`：显式刷新对它们产生不了新的额度样本，但仍可能刷新登录或绑定占位。
+显式刷新（`account.usage.refresh`、账号页的刷新动作、切换厂商或账号）按账号做 10 s 防抖，且不豁免厂商退避（HTTP 429）；被防抖时响应带 `next_allowed_at_ms`。终态结果（需要登录、不支持、无权限）按慢周期自动重试——10 分钟起、每次翻倍、1 小时封顶、最多 6 次；CLI 可执行文件或凭据文件一有变化就解除保持，登录后无需重启即可自愈；显式刷新始终重试终态。没有额度字段的官方回调不会覆盖缓存样本。超过 15 分钟没有回调时快照显示为缓存数据，可能回落探测，但只有探测成功或下一次回调才会替换它。靠推送取数的厂商（Claude Code 的官方回调、Pi 的扩展推送）在刷新状态里标 `callback_only`：显式刷新对它们产生不了新的样本，但仍可能刷新登录或绑定占位。
 
 账号页或浮动仪表盘可见期间，客户端会在宣告了 `account.usage.subscribe` 的 server 上订阅，收到 `account.usage.updated` / `account.usage.refreshing` 推送即时更新，只保留 30 s 的兜底轮询；页面隐藏即退订，断线重连后重新订阅，旧版 server 回退到轮询（2 s，探测在途时 500 ms）。正在探测的账号在自己一行显示「刷新中…」；「刷新」按钮在选中账号（未选中时为所有已列出账号）仍被防抖期间显示「N 秒后可刷新」，超过一分钟的厂商退避改在账号行说明而不锁按钮。账号页还有一行绑定入口：只列出运行所选厂商 agent 的 pane 选择器、「绑定到聚焦 pane」，以及服务端拒绝未绑定窗格的回调后给出的 `pending_binding` 一键候选。所有绑定入口都会拒绝运行其它厂商 agent 的 pane；启用官方回调后顺手绑定的是应答那台主机上的 pane，不会发往其间切换到的其它主机。
 
 Claude Code 以回调为主路径：额度来自官方 statusline 回调，探测只用非交互的 `claude auth status --json` 检查登录态（只读地复用真实登录存储）。已登录但未接入回调的账号显示「等待官方 statusline 回调」并指向启用它的设置；在第一次回调到达前，这个预检按与终态相同的慢周期退避。交互式 `/usage` 探测需要显式开启（`interactive_probe = true`），且只在显式刷新时运行，工作目录固定在 herdr 状态目录下的稳定探测目录：Claude Code 会要求你在自己的 CLI 里对该目录确认一次信任——刷新状态里标 `trust_required`，message 给出目录路径——Herdr 不会代为应答。交互探测复用真实登录态，并发启动可能触发凭据轮换；除非确实需要在没有回调的情况下取 `/usage`，否则保持关闭。
 
+除 `rate_limits` 里的账号额度窗口（`five_hour`、`seven_day`，以及 Claude apps gateway 下的 `spend_limit`）外，回调还带上报会话的估算费用、会话时长与 API 等待时长（`cost.*`）和上下文窗口（`context_window.*`）。它们按会话统计列出，从不算作账号额度；多个会话共用一个账号时，反映的是最近一次上报的那个会话。三处细节遵循官方 statusline 契约：某个窗口过了 `resets_at` 后 Claude Code 会把它从 JSON 里去掉（会话首个 API 响应之前则整段不带 `rate_limits`），所以缺席的窗口沿用上次的值而不是归零，且在重置时间已过后标明「已过重置时间」；`context_window.current_usage` 与 `used_percentage` 在首次 API 调用之前、以及 `/compact` 之后为 `null`，显示为「暂无数据」而不是 0；`spend_limit` 可以超过 100%，按上报值保留。完全不带 `rate_limits`（旧版 CLI 或 API key 登录）且没有可沿用窗口的回调不会接管该账号。
+
 仪表盘和表格都支持滚轮浏览；在账号页也可使用上下键翻看超出视口的额度窗口。悬浮层可与监控面板同时显示，操作浮层不会触发下面的卡片或进程行。
 
 查询结果保留套餐窗口、重置时间、余额单位、采样时间和数据来源。套餐额度、API 密钥预算、组织账单和本机会话 token 各自标注范围。暂时网络失败保留旧样本并显示缓存状态，遵守最短刷新周期和服务端重试间隔。
 
-账号配置属于运行 Agent 的 server。只填写凭据环境变量名称；令牌不会保存到 Herdr 配置、偏好或远程客户端。CLI 登录由官方工具管理。
+账号配置属于运行 Agent 的 server。只填写凭据环境变量名称；令牌不会保存到 Herdr 配置、偏好或远程客户端。CLI 登录由官方工具管理。Kimi Code 用 `KIMI_CODE_HOME` 选择 profile，登录态在该目录的 `credentials/kimi-code.json`；在那里登录后，「需要登录」的账号无需重启即可自愈。
 
 ```toml
 [account_usage]
@@ -111,45 +113,31 @@ auth_mode = "api"
 credential_env = "ANTHROPIC_ADMIN_KEY"
 ```
 
-`organization`、`account_user` 按对应官方接口设置组织、团队、用户 ID 或明确要求的邮箱。GitHub Enterprise 使用 `billing_scope = "enterprise"` 并把 enterprise slug 填入 `organization`；OpenRouter 的 `billing_scope = "account"` 使用管理密钥查询账号总额，默认仅查询当前 API key。OMP 多账号查询必须指定实际 provider 和账号身份。`base_url` 只接受已登记的官方地址；Kimi 本地 API 只允许 loopback。
+`organization`、`account_user` 按对应官方接口设置组织、团队、用户 ID 或明确要求的邮箱。API 密钥账号覆盖 OpenAI、Anthropic、Moonshot 与 OpenRouter；OpenRouter 的 `billing_scope = "account"` 使用管理密钥查询账号总额，默认仅查询当前 API key。`base_url` 只接受已登记的官方地址；Kimi 本地 API 只允许 loopback。
 
-Kimi 2.x 的 `quota.usages` 窗口与旧版字段都支持解析；OpenCode 需要 `stats` 支持 JSON 输出的 CLI 版本，旧版本会显示明确的升级提示。
+Kimi 的 Server API 被官方标为 experimental：`quota.usages` 的窗口与旧版字段都支持解析，缺失或形状不符的字段只跳过该项，不会让整份样本失败。
 
 ## 官方回调
 
-Claude 与 Antigravity 的账号页可启用或移除官方状态栏回调。已有状态栏命令通过管道保留；输入报文原样交给原渲染器，Herdr 只抽取用量字段。Claude 的 `rate_limits` 需要支持该字段的 CLI 版本，并且通常在首次正常 API 响应后出现；Herdr 不会为取额度发送模型任务。
+Claude Code 的账号页可启用或移除官方状态栏回调。已有状态栏命令通过管道保留；输入报文原样交给原渲染器，Herdr 只抽取用量字段。Claude 的 `rate_limits` 需要支持该字段的 CLI 版本，并且通常在首次正常 API 响应后出现；Herdr 不会为取额度发送模型任务。
 
 其他官方集成可以将受支持的 JSON 通过 `herdr api usage-report --agent <agent>` 写入 stdin。默认使用 `HERDR_PANE_ID` 对应的绑定，也可明确指定 `--account <id>`。未绑定的窗格仅在该厂商只有一个账号时自动绑定，否则先绑定账号；原始 JSON 和会话内容不会写入持久化文件。`--passthrough` 用于已有状态栏管道。
 
+Pi 没有 statusline 契约，它的 RPC 模式又是另起的 headless 进程，看不到窗格里正在运行的会话。因此由 Herdr 的 Pi 扩展（集成版本 `10`；运行 `herdr integration install pi` 更新）在运行中的 TUI 会话里直接取数，经 Herdr socket 推送：会话开始时、每轮结束后（最多每 5 s 一次）、压缩之后，以及 agent 停稳时。推送内容是上下文用量（`ctx.getContextUsage()`）、本会话的 token 与费用合计，以及当前服务商与模型——服务商实际应答的模型与请求的不同时取实际应答的那个。Pi 是多服务商 CLI，所以这些是会话统计，不是账号额度：带上服务商 / 模型是为了把这份会话关联到为它付费的订阅账号，而不是重复计量。刚压缩完、下一次响应到来之前，Pi 自己也不知道上下文大小；Herdr 显示为「暂无数据」，不是 0。Pi 没有回调开关；第一次推送到达之前，账号会说明它在等什么。
+
 ## 厂商能力与官方依据
 
-按 2026-09-16 的官方文档登记 23 个 Agent，Muse 不在本功能范围内。官方未公开个人额度 API、权限不足或 CLI 输出变化时，显示可用性说明和官方入口。表中的会话统计不代表账号剩余额度。
+账号用量覆盖五个 Agent：Codex、Claude Code、Kimi Code、OpenCode 与 Pi。官方依据最近一次复核于 2026-09-22（Codex 为 2026-09-16）。官方未公开个人额度 API、权限不足或 CLI 输出变化时，显示可用性说明和官方入口；为其它 Agent 配置的账号会提示未登记官方来源。表中的会话统计与本地统计不代表账号剩余额度。
 
 | Agent | 官方查询与范围 |
 | --- | --- |
 | Codex | [App Server](https://learn.chatgpt.com/docs/app-server) 的账号、速率窗口和附加用量；API 计费另用管理员报表。 |
-| Claude Code | [statusline JSON](https://code.claude.com/docs/en/statusline) 的 `rate_limits`，以及官方 `/usage`。API 组织用量与费用独立。 |
-| Kimi Code | [本地 Server API](https://www.kimi.com/code/docs/en/kimi-code-cli/reference/server-api.html) 的 userinfo、usage 和额外钱包；Moonshot API 余额另查。 |
-| Gemini CLI | [内置统计命令](https://geminicli.com/docs/cli/commands/)；通过 CLI 查询，不复用其 OAuth 凭据调用第三方客户端。 |
-| Cursor | [Admin API](https://cursor.com/docs/account/teams/admin-api) 按精确用户过滤；按量费用与包含套餐的消费分开。 |
-| Devin | [Enterprise consumption](https://docs.devin.ai/api-reference/v3/consumption/consumption-daily-users)，单位 ACU；个人套餐可能无权限。 |
-| Antigravity | [statusline quota](https://antigravity.google/docs/cli/statusline/) 的剩余比例和重置时间。 |
-| Cline | [账号/组织余额接口](https://docs.cline.bot/enterprise-solutions/api-reference)。 |
-| OMP | [omp usage --json](https://github.com/can1357/oh-my-pi/blob/main/packages/coding-agent/src/commands/usage.ts)，按真实账号和 provider 选择。 |
-| Mastra Code | [/cost](https://code.mastra.ai/) 为会话统计，账号额度由实际计费 provider 提供。 |
-| OpenCode | [stats --json](https://opencode.ai/v2/docs/cli/commands/) 为本地统计，账号计费另绑定 provider。 |
-| GitHub Copilot | [Billing Usage API](https://docs.github.com/en/rest/billing/usage)，按实际付款用户或组织查询。 |
-| Kiro | [非交互 /usage](https://kiro.dev/docs/reference/slash-commands/)；裸 `/help` 不是额度查询。 |
-| Factory Droid | [Analytics API](https://docs.factory.ai/api-reference/analytics)，仅查询昨天 UTC 或更早的 FSC 日报。 |
-| Amp | [amp usage](https://ampcode.com/docs/pricing)；工作区费用另用 [External API](https://ampcode.com/api/external)，不把 BYOK 估价视作账单。 |
-| Grok | [官方 /usage](https://docs.x.ai/build/modes-and-commands)；xAI API 预付余额使用独立 Management API。 |
-| Hermes | [/usage](https://hermes-agent.nousresearch.com/docs/reference/slash-commands) 的账号限制与会话统计分别识别。 |
-| Kilo | [CLI profile/余额视图](https://kilo.ai/docs/code-with-ai/platforms/cli)；未取得可验证额度字段时明确不可用。 |
-| Qoder | [官方 /usage](https://docs.qoder.com/cli/usage)；目前没有可验证的自动输入就绪契约，不自动注入命令。 |
-| Qwen Code | [/stats](https://qwenlm.github.io/qwen-code-docs/en/users/features/commands/) 为会话数据，账号用量绑定实际 provider。 |
-| Letta | [letta usage](https://github.com/letta-ai/letta-code/blob/main/src/cli/subcommands/usage.ts) 返回余额和档位；档位不换算成百分比。 |
-| Maki | [/usage](https://maki.sh/docs/token-economy/) 为会话统计，账号额度另查实际 provider。 |
-| Pi | [get_session_stats](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/rpc.md) 为会话数据，账号额度另查实际 provider。 |
+| Claude Code | [statusline JSON](https://code.claude.com/docs/en/statusline)：`rate_limits` 的账号额度窗口，加上本会话的 `cost` 与 `context_window`；可选开启官方 `/usage`。API 组织用量与费用独立。 |
+| Kimi Code | [本地 Server API](https://www.kimi.com/code/docs/en/kimi-code-cli/reference/server-api.html)（官方标为 experimental）：`quota.usages` 的 5 小时、7 天、月度窗口及月度窗口里的 Code 部分；`quota.extraUsage` 超额按量钱包以金额显示（余额、总额、本月费用，以及开启时的每月上限）。Moonshot API 余额另查。 |
+| OpenCode | [`opencode db <query> --format json`](https://opencode.ai/docs/cli/)：对 `session` 表的只读聚合——会话数、子 agent 会话数、费用，以及输入 / 输出 / 推理 / 缓存 token。本地统计，非账号额度。 |
+| Pi | Herdr 的 Pi 扩展，基于官方[扩展 API](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/extensions.md)：上下文用量、本会话 token 与费用、当前服务商 / 模型。会话统计，非账号额度。 |
+
+OpenCode 没有任何账号额度接口，所以它的两种形态都在指标范围与来源说明里标明是本地会话统计。`db` 查询只读计数与合计，不读会话标题或路径。没有 `db` 子命令或其 `--format` 选项的 CLI 版本，以及查询失败的情况（例如旧版数据库结构），回退到解析 `opencode stats` 的表格。OpenRouter 的密钥预算与账号总额是两回事。
 
 ## API
 
