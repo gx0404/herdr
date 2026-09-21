@@ -286,6 +286,7 @@ pub(super) fn palette_overlay(
     palette
 }
 
+mod agent_panel_characterization;
 mod agents_worktrees_notifications;
 mod broadcast;
 mod chrome_context;

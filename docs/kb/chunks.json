@@ -1,5 +1,5 @@
 {
-  "chunk_count": 996,
+  "chunk_count": 997,
   "chunks": [
     {
       "anchor": "herdr",
@@ -4942,6 +4942,13 @@
       "id": "src-client-shell-tabs-rs-structure",
       "source_sha256": "7dd6ec3e1aad14b1d3051a11f63ddb104e8d9333b14b49fd4907fa5f8cc8d76a",
       "text": "公开项：\npub(crate) fn render_tab_bar(\npub(crate) struct TabStripContext<'a> {\npub(crate) fn render_tab_strip(\npub(crate) fn tab_bar_status_width(snapshot: &ClientShellSnapshot) -> u16 {"
+    },
+    {
+      "anchor": "structure",
+      "doc": "src/client/shell/tests/agent_panel_characterization.rs",
+      "id": "src-client-shell-tests-agent-panel-characterization-rs-structure",
+      "source_sha256": "36bb9355ab5e8023cf37143852ce832f20de7b0703b459367d29bea0572a933a",
+      "text": "模块文档：Agents 面板三条并行渲染路径的 characterization（现状）测试。  W3 要把 classic / workbench（联邦）/ mobile 三条路径统一到同一套树构建与行 渲染；动手之前先把**重构前**的可见行为钉住，重构时每一处有意的行为变化都会 在这里显式翻红，而不是悄悄漂移。  - classic：`agent_sidebar::render_agent_panel`，单端点且未启用 workbench； - workbench / 联邦：`endpoint_agents::render_expanded`，行来自视图计算阶段的   `AgentRowsCache`； - mobile 与排序来源：`aggregate_navigation::aggregate_agent_rows`。  标注「现状，W3 将改变」的断言描述的是已知缺陷而非期望行为。\n公开项："
     },
     {
       "anchor": "structure",
