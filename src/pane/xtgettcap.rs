@@ -38,7 +38,21 @@ enum C1XtgettcapTrackerState {
 
 impl C1XtgettcapQueryTracker {
     pub(super) fn observe(&mut self, bytes: &[u8]) {
-        for (index, &byte) in bytes.iter().enumerate() {
+        // PTY-04：Ground 态快路径——Ground 只响应 ESC 与 C1 引导字节
+        // （0x90/0x98/0x9d/0x9e/0x9f），用 std 的等值扫描（release 下自动
+        // 向量化）跳到下一个命中点。native_dcs_pending 的逐字节监听期间不跳过。
+        let mut index = 0;
+        while index < bytes.len() {
+            if !self.native_dcs_pending && matches!(self.state, C1XtgettcapTrackerState::Ground) {
+                match bytes[index..]
+                    .iter()
+                    .position(|&byte| matches!(byte, 0x1b | 0x90 | 0x98 | 0x9d | 0x9e | 0x9f))
+                {
+                    Some(offset) => index += offset,
+                    None => break,
+                }
+            }
+            let byte = bytes[index];
             // With a 7-bit intro and raw ST, the native parser still holds the
             // DCS open. At its eventual unhook it can answer earlier keys in a
             // multi-key request again. Discard only that dispatch's XTGETTCAP
@@ -164,6 +178,8 @@ impl C1XtgettcapQueryTracker {
                 self.body.clear();
                 self.state = C1XtgettcapTrackerState::OversizedDcs;
             }
+
+            index += 1;
         }
     }
 

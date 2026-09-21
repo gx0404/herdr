@@ -24,7 +24,11 @@ impl KittyKeyboardTracker {
         let mut index = 0;
         while index < bytes.len() {
             if bytes[index] != 0x1b {
-                index += 1;
+                // PTY-04：等值扫描（release 下自动向量化）跳到下一个 ESC。
+                match bytes[index..].iter().position(|&byte| byte == 0x1b) {
+                    Some(offset) => index += offset,
+                    None => break,
+                }
                 continue;
             }
             if index + 1 >= bytes.len() {

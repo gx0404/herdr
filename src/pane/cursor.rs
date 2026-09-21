@@ -28,8 +28,18 @@ enum DecscusrParseState {
 
 impl DecscusrTracker {
     pub(crate) fn observe(&mut self, bytes: &[u8]) {
-        for &byte in bytes {
-            self.observe_byte(byte);
+        // PTY-04：Ground 态快路径——Ground 只响应 0x1b，用 std 的等值扫描
+        // （release 下自动向量化）跳到下一个 ESC，中间字节在 Ground 无迁移。
+        let mut index = 0;
+        while index < bytes.len() {
+            if matches!(self.state, DecscusrParseState::Ground) {
+                match bytes[index..].iter().position(|&byte| byte == 0x1b) {
+                    Some(offset) => index += offset,
+                    None => break,
+                }
+            }
+            self.observe_byte(bytes[index]);
+            index += 1;
         }
     }
 

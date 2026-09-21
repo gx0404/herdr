@@ -89,7 +89,18 @@ impl DefaultColorOscTracker {
     pub(super) fn observe(&mut self, bytes: &[u8]) -> bool {
         let mut saw_default_color_set = false;
 
-        for &byte in bytes {
+        // PTY-04：Ground 态快路径——Ground 只响应 0x1b，用 std 的等值扫描
+        // （release 下自动向量化）跳到下一个 ESC，中间字节在 Ground 无迁移。
+        let mut index = 0;
+        while index < bytes.len() {
+            if matches!(self.state, DefaultColorOscTrackerState::Ground) {
+                match bytes[index..].iter().position(|&byte| byte == 0x1b) {
+                    Some(offset) => index += offset,
+                    None => break,
+                }
+            }
+            let byte = bytes[index];
+            index += 1;
             match self.state {
                 DefaultColorOscTrackerState::Ground => {
                     if byte == 0x1b {
@@ -182,7 +193,17 @@ pub(super) struct DefaultColorEventTracker {
 
 impl DefaultColorEventTracker {
     pub(super) fn observe(&mut self, bytes: &[u8]) {
-        for (index, &byte) in bytes.iter().enumerate() {
+        // PTY-04：Ground 态快路径——Ground 只响应 0x1b，用 std 的等值扫描
+        // （release 下自动向量化）跳到下一个 ESC，中间字节在 Ground 无迁移。
+        let mut index = 0;
+        while index < bytes.len() {
+            if matches!(self.state, DefaultColorOscTrackerState::Ground) {
+                match bytes[index..].iter().position(|&byte| byte == 0x1b) {
+                    Some(offset) => index += offset,
+                    None => break,
+                }
+            }
+            let byte = bytes[index];
             match self.state {
                 DefaultColorOscTrackerState::Ground => {
                     if byte == 0x1b {
@@ -252,6 +273,8 @@ impl DefaultColorEventTracker {
                 self.body.clear();
                 self.state = DefaultColorOscTrackerState::OversizedOsc;
             }
+
+            index += 1;
         }
     }
 
@@ -376,7 +399,18 @@ impl OscStreamCollector {
     const MAX_BODY_BYTES: usize = 4096;
 
     fn observe(&mut self, bytes: &[u8], mut receive: impl FnMut(&[u8])) {
-        for &byte in bytes {
+        // PTY-04：Ground 态快路径——Ground 只响应 0x1b，用 std 的等值扫描
+        // （release 下自动向量化）跳到下一个 ESC，中间字节在 Ground 无迁移。
+        let mut index = 0;
+        while index < bytes.len() {
+            if matches!(self.state, OscStreamState::Ground) {
+                match bytes[index..].iter().position(|&byte| byte == 0x1b) {
+                    Some(offset) => index += offset,
+                    None => break,
+                }
+            }
+            let byte = bytes[index];
+            index += 1;
             match self.state {
                 OscStreamState::Ground => {
                     if byte == 0x1b {
@@ -801,8 +835,17 @@ pub(super) fn foreground_job_uses_droid_scrollback_compat(
 }
 
 pub(super) fn contains_scrollback_clear_sequence(bytes: &[u8]) -> bool {
-    bytes.windows(4).any(|window| window == b"\x1b[3J")
-        || bytes.windows(5).any(|window| window == b"\x1b[?3J")
+    // PTY-04：单遍化——等值扫描（release 下自动向量化）找 ESC，命中处做
+    // 前缀匹配，替代两遍 windows() 扫描。
+    let mut offset = 0;
+    while let Some(found) = bytes[offset..].iter().position(|&byte| byte == 0x1b) {
+        let rest = &bytes[offset + found..];
+        if rest.starts_with(b"\x1b[3J") || rest.starts_with(b"\x1b[?3J") {
+            return true;
+        }
+        offset += found + 1;
+    }
+    false
 }
 
 fn strip_scrollback_clear_sequences<'a>(bytes: &'a [u8]) -> Cow<'a, [u8]> {
@@ -833,15 +876,14 @@ pub(super) fn maybe_filter_primary_screen_scrollback_clear<'a>(
     bytes: &'a [u8],
     alternate_screen: bool,
     uses_droid_scrollback_compat: bool,
+    contains_scrollback_clear: bool,
 ) -> Cow<'a, [u8]> {
     // Droid redraws its primary-screen TUI with CSI 3 J, which erases pane
     // scrollback inside herdr. Keep the hack scoped to Droid on the primary
     // screen so normal terminal clear-history behavior still works elsewhere.
     // PTY-05：判定值由检测 tick 写入的缓存供给，解析路径不读进程树。
-    if alternate_screen
-        || !contains_scrollback_clear_sequence(bytes)
-        || !uses_droid_scrollback_compat
-    {
+    // PTY-04：序列存在性由调用方单遍扫描供给，本函数不重复扫描。
+    if alternate_screen || !uses_droid_scrollback_compat || !contains_scrollback_clear {
         return Cow::Borrowed(bytes);
     }
 
@@ -1556,15 +1598,41 @@ mod tests {
     #[test]
     fn primary_screen_droid_compat_ignores_scrollback_clear_only_for_droid() {
         // 判定值来自检测 tick 缓存（见 foreground_job_uses_droid_scrollback_compat
-        // 的匹配测试）；这里钉住解析路径的消费语义。
-        let filtered = maybe_filter_primary_screen_scrollback_clear(b"\x1b[3J\x1b[2J", false, true);
+        // 的匹配测试）；序列存在性由调用方单遍扫描供给（见
+        // contains_scrollback_clear_sequence 的测试）。这里钉住消费语义。
+        let clear = contains_scrollback_clear_sequence(b"\x1b[3J\x1b[2J");
+        assert!(clear);
+        let filtered =
+            maybe_filter_primary_screen_scrollback_clear(b"\x1b[3J\x1b[2J", false, true, clear);
         assert_eq!(filtered.as_ref(), b"\x1b[2J");
 
-        let shell = maybe_filter_primary_screen_scrollback_clear(b"\x1b[3J\x1b[2J", false, false);
+        let shell =
+            maybe_filter_primary_screen_scrollback_clear(b"\x1b[3J\x1b[2J", false, false, clear);
         assert_eq!(shell.as_ref(), b"\x1b[3J\x1b[2J");
 
-        let alternate = maybe_filter_primary_screen_scrollback_clear(b"\x1b[3J\x1b[2J", true, true);
+        let alternate =
+            maybe_filter_primary_screen_scrollback_clear(b"\x1b[3J\x1b[2J", true, true, clear);
         assert_eq!(alternate.as_ref(), b"\x1b[3J\x1b[2J");
+    }
+
+    #[test]
+    fn scrollback_clear_detection_is_a_single_vectorized_pass() {
+        // 长 Ground 前缀 + 序列在末尾：等值扫描跳转后前缀匹配命中。
+        let mut bytes = vec![b'x'; 4096];
+        bytes.extend_from_slice(b"\x1b[3J");
+        assert!(contains_scrollback_clear_sequence(&bytes));
+
+        // 部分前缀（ESC [ 3 后不是 J）不命中；紧邻的完整序列命中。
+        let mut bytes = vec![b'x'; 128];
+        bytes.extend_from_slice(b"\x1b[3X");
+        bytes.extend_from_slice(b"\x1b[?3J");
+        assert!(contains_scrollback_clear_sequence(&bytes));
+
+        // 重叠 ESC：`\x1b\x1b[3J` 命中（第二个 ESC 引导）。
+        assert!(contains_scrollback_clear_sequence(b"\x1b\x1b[3J"));
+        assert!(!contains_scrollback_clear_sequence(b"\x1b[3x\x1b[3"));
+        assert!(!contains_scrollback_clear_sequence(b"\x1b"));
+        assert!(!contains_scrollback_clear_sequence(b""));
     }
 
     #[test]

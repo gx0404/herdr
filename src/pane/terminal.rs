@@ -31,10 +31,11 @@ use super::{
     },
     kitty_keyboard::KittyKeyboardTracker,
     osc::{
-        maybe_filter_primary_screen_scrollback_clear, parse_reported_cwd,
-        restore_host_terminal_theme_if_needed, write_host_terminal_theme_selective,
-        AgentOscStateTracker, DefaultColorEvent, DefaultColorEventTracker, DefaultColorOscTracker,
-        DefaultColorQuery, DefaultColorTrackedEvent, OscDebugTracker, OscTerminator,
+        contains_scrollback_clear_sequence, maybe_filter_primary_screen_scrollback_clear,
+        parse_reported_cwd, restore_host_terminal_theme_if_needed,
+        write_host_terminal_theme_selective, AgentOscStateTracker, DefaultColorEvent,
+        DefaultColorEventTracker, DefaultColorOscTracker, DefaultColorQuery,
+        DefaultColorTrackedEvent, OscDebugTracker, OscTerminator,
     },
     xtgettcap::{C1XtgettcapQueryTracker, C1XtgettcapResponse},
 };
@@ -1769,10 +1770,14 @@ impl GhosttyPaneTerminal {
                 .foreground_job_cache
                 .as_ref()
                 .is_some_and(|cache| cache.uses_droid_scrollback_compat);
+            // PTY-04：单遍检测只在 droid 兼容时发生，结果传入过滤函数。
+            let contains_clear =
+                uses_droid_scrollback_compat && contains_scrollback_clear_sequence(bytes);
             maybe_filter_primary_screen_scrollback_clear(
                 bytes,
                 alternate_screen,
                 uses_droid_scrollback_compat,
+                contains_clear,
             )
         } else {
             Cow::Borrowed(bytes)
