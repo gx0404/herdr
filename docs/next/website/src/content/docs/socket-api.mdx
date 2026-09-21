@@ -1022,6 +1022,14 @@ streams they must also ignore lines whose `event` name they do not recognize:
 new line types such as `events.lost` are added there, and opting in to them is
 what `events.subscribe`'s `notices` flag controls.
 
+Additions inside the generation-1 endpoint stay optional too: the client may
+report its host `ssh_auth_sock` in the handshake so a detached server can fall
+back to it once the host terminal restarts, and the server pushes
+`endpoint.terminal-cwd.v1` control frames when the focused pane's directory
+changes, so the client can write the host terminal's OSC 7. Unknown control
+frame kinds, unknown handshake fields, and unknown event names are ignored
+rather than rejected.
+
 ## Immutable text snapshots
 
 Servers advertise `pane.text_snapshot.capture`, `pane.text_snapshot.read`, `pane.text_snapshot.selection`, `pane.text_snapshot.retain`, and `pane.text_snapshot.release` independently of the generation 1 binary codec. Capture takes `pane_id` and returns a server boot identifier, a snapshot identifier, and an initial styled window with absolute row coordinates. The captured range and truncation flag describe retained history; read takes `snapshot_id`, `start_row`, and `rows`. Selection takes the identifier plus inclusive `anchor` and `cursor` points. It never re-reads live terminal content.

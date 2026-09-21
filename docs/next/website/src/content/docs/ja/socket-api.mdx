@@ -778,6 +778,8 @@ herdr agent wait w1:p1 --until blocked
 
 番号付きバイナリプロトコルは、直接ターミナル接続やライブハンドオフなど、同一インストール内の内部操作に残ります。異なるビルド間でそれらを使う前に `ping` または `herdr status` を確認してください。JSON API クライアントは未知のフィールドを無視し、未対応メソッドを通常のエラーとして扱う必要があります。push されるストリームでは、認識できない `event` 名の行も無視する必要があります: `events.lost` のような新しい行の種別はそこに追加され、受け取るかどうかは `events.subscribe` の `notices` フラグで制御します。
 
+generation-1 エンドポイント内の追加も同様に任意です。クライアントはハンドシェイクでホストの `ssh_auth_sock` を報告でき、detached server はホストターミナルの再起動後にそれをフォールバックとして使えます。フォーカス中のペインのディレクトリが変わると、server は `endpoint.terminal-cwd.v1` 制御フレームを push し、クライアントがホストターミナルの OSC 7 を書き込みます。未知の制御フレーム種別、未知のハンドシェイクフィールド、未知のイベント名は拒否せず無視します。
+
 ## 不変テキストスナップショット
 
 サーバーは `pane.text_snapshot.capture`、`pane.text_snapshot.read`、`pane.text_snapshot.selection`、`pane.text_snapshot.retain`、`pane.text_snapshot.release` を個別に公開し、generation 1 のバイナリ codec は変更しません。capture は `pane_id` を受け取り、boot、スナップショット ID、スタイル付きの初期ウィンドウと絶対行座標を返します。保持範囲と切り捨てフラグが履歴の境界です。read は `snapshot_id`、`start_row`、`rows`、selection は ID と両端を含む `anchor`、`cursor` を受け取ります。選択はライブ端末を再読しません。

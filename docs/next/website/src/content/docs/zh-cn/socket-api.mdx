@@ -774,6 +774,8 @@ herdr agent wait w1:p1 --until blocked
 
 带编号的二进制协议仍用于同一安装内的内部操作,包括直接终端连接和实时交接。跨不同构建使用这些操作前,请检查 `ping` 或 `herdr status`。JSON API 客户端应忽略未知字段,并把不支持的方法当作普通错误处理。在推送流上还必须忽略无法识别的 `event` 名:新的行类型(例如 `events.lost`)会从那里加入,而是否接收它们由 `events.subscribe` 的 `notices` 开关控制。
 
+generation-1 端点内的追加同样保持可选:客户端可在握手中上报宿主 `ssh_auth_sock`,供 detached server 在宿主终端重启后兜底;焦点 pane 的目录变化时,server 推送 `endpoint.terminal-cwd.v1` 控制帧,由客户端写宿主终端的 OSC 7。未知的控制帧种类、未知的握手字段与未知的事件名一律忽略,而不是拒绝。
+
 ## 不可变文字快照
 
 server 分别声明 `pane.text_snapshot.capture`、`pane.text_snapshot.read`、`pane.text_snapshot.selection`、`pane.text_snapshot.retain` 和 `pane.text_snapshot.release`，不改变 generation 1 二进制 codec。capture 接收 `pane_id`，返回 server boot、快照 ID、带样式的初始窗口和绝对行坐标。保留范围与截断标记说明历史边界；read 接收 `snapshot_id`、`start_row` 和 `rows`。selection 接收 ID 以及包含端点的 `anchor`、`cursor` 坐标，只读取固定快照。
