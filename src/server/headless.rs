@@ -564,6 +564,9 @@ impl HeadlessServer {
                         )))
             {
                 crate::render_prof::event("render.attempt");
+                // cwd 投影（TTL 缓存）渲染前刷新：值变化才递增纪元。
+                self.app
+                    .refresh_expired_cwd_caches_noting_projection_changes();
                 let render_request = self.app.render_dirty.take();
                 let pty_dirty = !render_request.pty_sources.is_empty();
                 if pty_dirty {

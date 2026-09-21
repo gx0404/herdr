@@ -40,6 +40,8 @@ impl App {
             Err(err) => return encode_error(id, "integration_install_failed", err.to_string()),
         };
         self.state.integration_recommendations = crate::integration::integration_recommendations();
+        // integration_recommendations 进入 ClientShell 投影（HSR-05 写入点）。
+        self.state.bump_projection_epoch();
 
         encode_success(
             id,
@@ -61,6 +63,8 @@ impl App {
             Err(err) => return encode_error(id, "integration_uninstall_failed", err.to_string()),
         };
         self.state.integration_recommendations = crate::integration::integration_recommendations();
+        // integration_recommendations 进入 ClientShell 投影（HSR-05 写入点）。
+        self.state.bump_projection_epoch();
 
         encode_success(
             id,

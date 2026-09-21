@@ -208,7 +208,10 @@ impl PendingAltScreenRead {
             || snapshot.cols != self.initial.cols
             || snapshot.rows.len() != self.initial.rows.len()
         {
-            return self.complete_fallback();
+            // 采集/还原途中几何变化或切出 alt-screen（用户 resize 可达）：
+            // 只要向上采集过历史，回退也必须先补发向下还原（send_wheel 在
+            // 滚轮路由失效时拒绝，不会向 primary screen 的 shell 注入字节）。
+            return self.complete_fallback_restoring_viewport(runtime);
         }
         match self.phase {
             Phase::SettleInitial => {
@@ -677,6 +680,60 @@ mod tests {
         assert!(
             input_rx.try_recv().is_ok(),
             "fallback must compensate with downward wheel events"
+        );
+
+        drop(runtime);
+        drop(_guard);
+        rt.shutdown_timeout(Duration::from_millis(100));
+    }
+
+    #[test]
+    fn fallback_after_leaving_alt_screen_restores_viewport_downward() {
+        // 补漏 6 复审：采集途中切出 alt-screen（几何/屏幕不匹配路径）
+        // 也必须补发向下还原，pane 不停在卷上去的位置。
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime");
+        let _guard = rt.enter();
+        let (runtime, mut input_rx) = TerminalRuntime::test_with_channel_capacity(20, 5, 8);
+        runtime.test_process_pty_bytes(&draw(&["16", "17", "18", "19", "20"], true));
+        let started = Instant::now();
+        let (pending, response_rx) = pending_read(&runtime, started, 8);
+        let harvest_started = started + INITIAL_QUIET + STEP_TIMEOUT;
+
+        let pending = pending
+            .poll(Some(&runtime), started + INITIAL_QUIET)
+            .expect("bottom probe");
+        input_rx.try_recv().expect("bottom wheel probe");
+        let pending = pending
+            .poll(Some(&runtime), harvest_started)
+            .expect("history harvest");
+        input_rx.try_recv().expect("upward wheel batch");
+
+        // 采集进行中应用切回主屏。
+        runtime.test_process_pty_bytes(b"\x1b[?1049l");
+        let pending = pending
+            .poll(Some(&runtime), harvest_started + Duration::from_millis(1))
+            .expect("leaving alt screen is coalesced first");
+        assert!(pending
+            .poll(
+                Some(&runtime),
+                harvest_started + Duration::from_millis(1) + OUTPUT_QUIET,
+            )
+            .is_none());
+        assert_eq!(
+            response_rx
+                .recv_timeout(Duration::from_millis(50))
+                .expect("fallback response"),
+            "fallback"
+        );
+        let compensation = input_rx
+            .try_recv()
+            .expect("fallback must compensate with downward wheel events");
+        assert!(
+            compensation.windows(4).any(|window| window == b"<65;"),
+            "compensation must be scroll-down wheel events, got {compensation:?}"
         );
 
         drop(runtime);

@@ -3579,6 +3579,52 @@ impl PaneRuntime {
         cwd
     }
 
+    /// APP-002 第二步配套：TTL 过期的槽位才真正重读 procfs；刷新后值变化
+    /// 返回 true（调用方递增投影纪元并安排全量渲染——非 OSC 7 shell 的 cwd
+    /// 投影由此收敛）。首个观测值不视为变化（避免启动风暴）。
+    pub fn refresh_expired_cwd_cache(&self) -> bool {
+        let now = std::time::Instant::now();
+        // reported_cwd（OSC 7 上报）在线时 cwd 走事件面，procfs 槽位无需刷新。
+        let reported = self
+            .reported_cwd
+            .lock()
+            .ok()
+            .and_then(|cwd| cwd.clone())
+            .is_some();
+        let pid = self.child_pid.load(Ordering::Relaxed);
+        let mut changed = false;
+        if let Ok(mut cache) = self.cwd_cache.lock() {
+            if !reported {
+                changed |= Self::refresh_cwd_slot(&mut cache.cwd, now, || {
+                    crate::platform::process_cwd(pid)
+                });
+            }
+            #[cfg(unix)]
+            {
+                changed |= Self::refresh_cwd_slot(&mut cache.foreground_cwd, now, || {
+                    self.foreground_cwd_uncached()
+                });
+            }
+        }
+        changed
+    }
+
+    fn refresh_cwd_slot(
+        slot: &mut Option<(std::time::Instant, Option<std::path::PathBuf>)>,
+        now: std::time::Instant,
+        fetch: impl FnOnce() -> Option<std::path::PathBuf>,
+    ) -> bool {
+        let stale = slot
+            .as_ref()
+            .is_none_or(|(at, _)| now.duration_since(*at) >= CWD_CACHE_TTL);
+        if !stale {
+            return false;
+        }
+        let fresh = fetch();
+        let previous = slot.replace((now, fresh.clone()));
+        previous.is_some_and(|(_, previous)| previous != fresh)
+    }
+
     #[cfg(unix)]
     fn foreground_cwd_uncached(&self) -> Option<std::path::PathBuf> {
         let pid = self.child_pid.load(Ordering::Acquire);
@@ -4179,6 +4225,34 @@ mod tests {
             cwd_value, first_foreground,
             "cwd 与 foreground_cwd 槽位互不覆盖"
         );
+    }
+
+    #[test]
+    fn refresh_cwd_slot_reports_only_observed_value_changes() {
+        let now = std::time::Instant::now();
+        let mut slot = None;
+        // 首次观测不算变化（避免启动时的纪元搅动）。
+        assert!(!PaneRuntime::refresh_cwd_slot(&mut slot, now, || Some(
+            std::path::PathBuf::from("/tmp/a")
+        )));
+        // TTL 内不重读。
+        assert!(!PaneRuntime::refresh_cwd_slot(&mut slot, now, || {
+            panic!("fresh slot must not refetch")
+        }));
+        // 过期但值相同：重读不报变化。
+        let stale_at = now - CWD_CACHE_TTL - std::time::Duration::from_millis(1);
+        slot = Some((stale_at, Some(std::path::PathBuf::from("/tmp/a"))));
+        assert!(!PaneRuntime::refresh_cwd_slot(&mut slot, now, || Some(
+            std::path::PathBuf::from("/tmp/a")
+        )));
+        // 过期且值变化：报变化。
+        slot = Some((stale_at, Some(std::path::PathBuf::from("/tmp/a"))));
+        assert!(PaneRuntime::refresh_cwd_slot(&mut slot, now, || Some(
+            std::path::PathBuf::from("/tmp/b")
+        )));
+        // 曾读到值 → 读不到（进程退出）：也算变化。
+        slot = Some((stale_at, Some(std::path::PathBuf::from("/tmp/b"))));
+        assert!(PaneRuntime::refresh_cwd_slot(&mut slot, now, || None));
     }
 
     #[cfg(unix)]

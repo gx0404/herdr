@@ -1281,6 +1281,62 @@ mod tests {
             std::env::remove_var(crate::config::CONFIG_PATH_ENV_VAR);
             let _ = std::fs::remove_dir_all(path.parent().unwrap());
         }
+
+        // pane.input_set 改 right_click_passthrough（投影可见）
+        let public_pane_id = app.public_pane_id(0, pane_id).expect("public pane id");
+        assert_bumps!(
+            "handle_pane_input_set",
+            app.handle_api_request(crate::api::schema::Request {
+                id: "input-set".into(),
+                method: crate::api::schema::Method::PaneInputSet(
+                    crate::api::schema::PaneInputSetParams {
+                        pane_id: public_pane_id.clone(),
+                        right_click: crate::api::schema::PaneRightClickTarget::Pane,
+                    },
+                ),
+            })
+        );
+
+        // integration install/uninstall 改 integration_recommendations（投影可见）
+        {
+            let _guard = config_env_lock().lock().unwrap();
+            let base = unique_temp_path("projection-epoch-integration");
+            let home = base.join("home");
+            let codex_dir = home.join(".codex");
+            std::fs::create_dir_all(&codex_dir).unwrap();
+            std::fs::write(codex_dir.join("config.toml"), "model = \"gpt-5.4\"\n").unwrap();
+            let previous_home = std::env::var_os("HOME");
+            std::env::set_var("HOME", &home);
+
+            assert_bumps!(
+                "handle_integration_install",
+                app.handle_api_request(crate::api::schema::Request {
+                    id: "install".into(),
+                    method: crate::api::schema::Method::IntegrationInstall(
+                        crate::api::schema::IntegrationInstallParams {
+                            target: crate::api::schema::IntegrationTarget::Codex,
+                        },
+                    ),
+                })
+            );
+            assert_bumps!(
+                "handle_integration_uninstall",
+                app.handle_api_request(crate::api::schema::Request {
+                    id: "uninstall".into(),
+                    method: crate::api::schema::Method::IntegrationUninstall(
+                        crate::api::schema::IntegrationUninstallParams {
+                            target: crate::api::schema::IntegrationTarget::Codex,
+                        },
+                    ),
+                })
+            );
+
+            match previous_home {
+                Some(home) => std::env::set_var("HOME", home),
+                None => std::env::remove_var("HOME"),
+            }
+            let _ = std::fs::remove_dir_all(&base);
+        }
     }
 
     #[test]

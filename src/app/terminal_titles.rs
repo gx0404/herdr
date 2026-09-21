@@ -73,6 +73,13 @@ impl App {
             self.emit_pane_updated(ws_idx, pane_id);
         }
 
+        // HSR-05 写入点：raw 标题变化（spinner 逐帧推进、剥离后不变的形态）
+        // 在侧栏使用 raw token 时也必须递增投影纪元，否则 quiescent 期间
+        // 侧栏标题冻结。stripped 变化已由上方 emit_pane_updated 覆盖。
+        if self.terminal_title_sidebar_changed(&changes) {
+            self.state.bump_projection_epoch();
+        }
+
         changes
     }
 }
@@ -231,6 +238,63 @@ mod tests {
             vec![vec![crate::config::AgentSidebarToken::TerminalTitle]],
         );
         assert!(app.terminal_title_sidebar_changed(&spinner_only));
+    }
+
+    #[tokio::test]
+    async fn raw_title_change_bumps_projection_epoch_when_sidebar_uses_raw_form() {
+        let event_hub = crate::api::EventHub::default();
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(
+            &Config::default(),
+            crate::app::AppPolicy::TEST,
+            None,
+            api_rx,
+            event_hub,
+        );
+        app.state.workspaces = vec![Workspace::test_new("one")];
+        app.state.active = Some(0);
+        app.state.ensure_test_terminals();
+        // 侧栏使用 raw token（默认配置的第一顺位）。
+        app.state.sidebar_agents.rows = vec![vec![crate::config::AgentSidebarToken::TerminalTitle]];
+        let pane_id = app.state.workspaces[0].tabs[0].root_pane;
+        let terminal_id = app.state.workspaces[0]
+            .terminal_id(pane_id)
+            .unwrap()
+            .clone();
+        let runtime = crate::terminal::TerminalRuntime::test_with_screen_bytes(80, 24, b"");
+        runtime.test_process_pty_bytes("\x1b]0;⠋ working\x07".as_bytes());
+        app.terminal_runtimes.insert(terminal_id.clone(), runtime);
+        let sources = HashSet::from([pane_id]);
+        app.sync_terminal_titles(&sources);
+
+        // spinner 逐帧推进：raw 变、剥离后不变——也必须递增纪元。
+        app.terminal_runtimes
+            .get(&terminal_id)
+            .unwrap()
+            .test_process_pty_bytes("\x1b]0;⠙ working\x07".as_bytes());
+        let before = app.state.projection_epoch;
+        let changes = app.sync_terminal_titles(&sources);
+        assert!(changes.raw_changed && !changes.stripped_changed);
+        assert_ne!(
+            app.state.projection_epoch, before,
+            "raw title change visible to the sidebar must bump projection_epoch"
+        );
+
+        // 侧栏不用 raw token 时，raw-only 变化不搅动投影。
+        app.state.sidebar_agents.rows = vec![vec![
+            crate::config::AgentSidebarToken::TerminalTitleStripped,
+        ]];
+        app.terminal_runtimes
+            .get(&terminal_id)
+            .unwrap()
+            .test_process_pty_bytes("\x1b]0;⠧ working\x07".as_bytes());
+        let before = app.state.projection_epoch;
+        let changes = app.sync_terminal_titles(&sources);
+        assert!(changes.raw_changed && !changes.stripped_changed);
+        assert_eq!(
+            app.state.projection_epoch, before,
+            "raw-only change invisible to the sidebar must not bump projection_epoch"
+        );
     }
 
     fn pane_updated_events(event_hub: &crate::api::EventHub) -> usize {

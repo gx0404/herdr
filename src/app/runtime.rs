@@ -94,6 +94,21 @@ impl App {
         }
     }
 
+    /// APP-002 第二步配套：渲染前刷新过期的 cwd 缓存槽位；值变化才递增
+    /// 投影纪元并安排全量渲染——非 OSC 7 shell 的 cwd 投影也能在
+    /// 「TTL + 一次渲染」内收敛，而不是等下一次别的纪元写入点。
+    pub(crate) fn refresh_expired_cwd_caches_noting_projection_changes(&mut self) {
+        let mut changed = false;
+        for runtime in self.terminal_runtimes.values() {
+            changed |= runtime.refresh_expired_cwd_cache();
+        }
+        if changed {
+            self.state.bump_projection_epoch();
+            self.render_dirty.request_generic();
+            self.render_notify.notify_one();
+        }
+    }
+
     pub(crate) fn run_auto_update_check(&mut self) {
         if !background_update_check_enabled(
             self.policy.background_updates,

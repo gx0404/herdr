@@ -573,6 +573,12 @@ impl TerminalRuntime {
         self.0.foreground_cwd()
     }
 
+    /// APP-002 第二步配套：渲染前调用；TTL 过期的 cwd 槽位重读，值变化
+    /// 返回 true。
+    pub fn refresh_expired_cwd_cache(&self) -> bool {
+        self.0.refresh_expired_cwd_cache()
+    }
+
     pub fn child_pid(&self) -> Option<u32> {
         self.0.child_pid()
     }
