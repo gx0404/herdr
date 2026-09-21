@@ -24,6 +24,10 @@ conventional-commit 检查独立 job。PR 政策门在 `pr-gate.yml`（无测试
   合法输入（本仓库实践：resolver/hooks/KB 的每个拒绝项都有独立注入测试）。
 - 必要工具链缺失不得整族 skip 后报绿；跑不了就明确 PENDING。
 - fixture 是契约：不为过门修改期望；生成物 freshness 失败先查输入是否有意。
+- 会拉起守护进程的测试必须能在被强杀后自清理：`Drop` 在 SIGKILL/SIGTERM 下
+  不执行。`tests/ssh_e2e.rs` 用独立会话的收割进程接管清理，并在下次启动时清扫
+  陈旧沙箱；排查残留用 `ls -d /tmp/herdr-ssh-e2e-*` 与
+  `pgrep -af herdr-ssh-e2e`，正常应为空，重跑该测试即自愈。
 - **UI 截图：N/A**——herdr 是 TUI。等效证据 = `herdr-throwaway-repro` 隔离会话
   中真实操作 + `herdr agent read`/`capture_agent_screen.py` 读回；键盘/终端
   行为用 `tests/fixtures` 的实测 TSV 语料。

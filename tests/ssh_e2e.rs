@@ -7,6 +7,11 @@
 //! removed on drop; the user's real `~/.ssh` and default Herdr session are
 //! never touched.
 //!
+//! A killed test process never reaches `Drop`, so cleanup has two more
+//! layers: a detached reaper that takes over the sweep the moment its owner
+//! dies, and a stale-root sweep at the start of the next run for the case
+//! where the reaper was killed too.
+//!
 //! Covered chains:
 //!
 //! 1. port-forward rules written to the catalog (`machine forward add`) are
@@ -41,6 +46,11 @@ use portable_pty::{native_pty_system, CommandBuilder, PtySize};
 const HERDR: &str = env!("CARGO_BIN_EXE_herdr");
 const SSHD_CANDIDATES: &[&str] = &["/usr/sbin/sshd", "/usr/bin/sshd", "/sbin/sshd"];
 const SERVICE_BODY: &[u8] = b"E2E-SVC-OK";
+const ROOT_PREFIX: &str = "herdr-ssh-e2e-";
+const E2E_TEST_NAME: &str = "sshd_real_machine_end_to_end";
+/// Set on the re-executed test binary that acts as the orphan reaper.
+const REAPER_OWNER_ENV: &str = "HERDR_SSH_E2E_REAPER_OWNER";
+const REAPER_ROOT_ENV: &str = "HERDR_SSH_E2E_REAPER_ROOT";
 
 /// Environment variables inherited from an enclosing Herdr session that must
 /// never leak into the isolated client/remote environments.
@@ -393,34 +403,82 @@ fn kill_sshd_tree(child: &mut Child) {
     }
 }
 
-/// Best-effort sweep of stray processes (ssh control masters, bridges,
-/// remote servers) whose command line references the test root.
-fn kill_processes_referencing(root: &Path) {
-    let needle = root.as_os_str().as_bytes().to_vec();
+/// Whether `haystack` mentions `root` itself. A trailing ASCII digit means a
+/// longer pid (`…-e2e-123` inside `…-e2e-1234`): that is another run's root
+/// and must not be touched.
+fn mentions_root(haystack: &[u8], root: &[u8]) -> bool {
+    haystack
+        .windows(root.len())
+        .enumerate()
+        .any(|(start, window)| {
+            window == root
+                && !haystack
+                    .get(start + root.len())
+                    .is_some_and(u8::is_ascii_digit)
+        })
+}
+
+/// `path` is `root` itself or lives below it.
+fn path_is_under(path: &[u8], root: &[u8]) -> bool {
+    path.strip_prefix(root)
+        .is_some_and(|rest| rest.first().is_none_or(|byte| *byte == b'/'))
+}
+
+/// Whether the process behind `/proc/<pid>` belongs to the sandbox. Merely
+/// mentioning the path is not enough: a developer's `tail -f` on a sandbox
+/// log, or an agent shell whose script names a stale root, must survive.
+fn belongs_to_root(proc_dir: &Path, root: &[u8]) -> bool {
+    // Launched with the sandbox HOME/XDG: the client-side server (a plain
+    // `herdr server` on the command line), TUI, pane shells, ssh forwards.
+    let env_in_root = fs::read(proc_dir.join("environ")).is_ok_and(|environ| {
+        environ.split(|byte| *byte == 0).any(|var| {
+            var.iter()
+                .position(|byte| *byte == b'=')
+                .is_some_and(|eq| path_is_under(&var[eq + 1..], root))
+        })
+    });
+    if env_in_root {
+        return true;
+    }
+    let Ok(exe) = fs::read_link(proc_dir.join("exe")) else {
+        return false;
+    };
+    // Remote-side servers and bridges run the binary installed in the root.
+    if path_is_under(exe.as_os_str().as_bytes(), root) {
+        return true;
+    }
+    // sshd rewrites its process title, so `-f <root>/sshd/sshd_config` is
+    // only visible as a substring of one opaque command line.
+    exe.file_name().is_some_and(|name| name == "sshd")
+        && fs::read(proc_dir.join("cmdline")).is_ok_and(|cmdline| mentions_root(&cmdline, root))
+}
+
+/// Best-effort sweep of the stray processes that belong to the test root
+/// (ssh control masters, bridges, servers), returning how many were
+/// signalled.
+fn kill_sandbox_processes(root: &Path, spare: &[u32]) -> usize {
+    let needle = root.as_os_str().as_bytes();
     let self_pid = std::process::id();
     let Ok(entries) = fs::read_dir("/proc") else {
-        return;
+        return 0;
     };
+    let mut killed = 0;
     for entry in entries.flatten() {
         let name = entry.file_name();
         let Ok(pid) = name.to_string_lossy().parse::<u32>() else {
             continue;
         };
-        if pid == self_pid {
+        if pid == self_pid || spare.contains(&pid) {
             continue;
         }
-        let Ok(cmdline) = fs::read(entry.path().join("cmdline")) else {
-            continue;
-        };
-        if cmdline
-            .windows(needle.len())
-            .any(|window| window == needle.as_slice())
-        {
-            // SAFETY: the PID was just read from /proc and matched the
-            // unique per-test root path.
+        if belongs_to_root(&entry.path(), needle) {
+            // SAFETY: the PID was just read from /proc and belongs to the
+            // unique per-test root.
             unsafe { libc::kill(pid as libc::pid_t, libc::SIGKILL) };
+            killed += 1;
         }
     }
+    killed
 }
 
 struct Tui {
@@ -491,6 +549,7 @@ struct Rig {
     sshd_log: PathBuf,
     sshd: Option<Child>,
     tui: Option<Tui>,
+    reaper: Option<Child>,
     service_stop: Arc<AtomicBool>,
     client: Side,
     remote: Side,
@@ -547,9 +606,16 @@ impl Drop for Rig {
         }
         self.stop_sshd();
         self.service_stop.store(true, Ordering::Release);
-        kill_processes_referencing(&self.root);
+        // The reaper references the root too; it goes last so a kill that
+        // lands mid-drop still leaves someone to finish the sweep.
+        let reaper_pid: Vec<u32> = self.reaper.iter().map(Child::id).collect();
+        kill_sandbox_processes(&self.root, &reaper_pid);
         sweep_managed_ssh_configs(&self.root, tui_pid);
         let _ = fs::remove_dir_all(&self.root);
+        if let Some(mut reaper) = self.reaper.take() {
+            let _ = reaper.kill();
+            let _ = reaper.wait();
+        }
     }
 }
 
@@ -558,7 +624,7 @@ impl Drop for Rig {
 /// client cannot run the `ManagedSshConfigDir` destructors, so the rig
 /// sweeps them here instead of leaving ssh configs behind.
 fn sweep_managed_ssh_configs(root: &Path, tui_pid: Option<u32>) {
-    let needle = root.as_os_str().as_bytes().to_vec();
+    let needle = root.as_os_str().as_bytes();
     let tui_prefix = tui_pid.map(|pid| format!("herdr-ssh-{pid}-"));
     let Ok(entries) = fs::read_dir(std::env::temp_dir()) else {
         return;
@@ -572,12 +638,7 @@ fn sweep_managed_ssh_configs(root: &Path, tui_pid: Option<u32>) {
             .as_ref()
             .is_some_and(|prefix| name.starts_with(prefix));
         let references_root = fs::read(entry.path().join("config"))
-            .map(|content| {
-                content
-                    .windows(needle.len())
-                    .any(|window| window == needle.as_slice())
-            })
-            .unwrap_or(false);
+            .is_ok_and(|content| mentions_root(&content, needle));
         if owned_by_tui || references_root {
             if entry.path().is_dir() {
                 let _ = fs::remove_dir_all(entry.path());
@@ -585,6 +646,121 @@ fn sweep_managed_ssh_configs(root: &Path, tui_pid: Option<u32>) {
                 let _ = fs::remove_file(entry.path());
             }
         }
+    }
+}
+
+/// Guards every out-of-band removal: only `<tmp>/herdr-ssh-e2e-*` qualifies,
+/// so a stray `HERDR_SSH_E2E_REAPER_ROOT` can never aim the sweep elsewhere.
+fn is_e2e_root(path: &Path) -> bool {
+    path.parent() == Some(std::env::temp_dir().as_path())
+        && path
+            .file_name()
+            .is_some_and(|name| name.to_string_lossy().starts_with(ROOT_PREFIX))
+}
+
+/// The sweep shared by every path that cannot rely on `Drop for Rig`.
+fn reap_root(root: &Path) {
+    if !is_e2e_root(root) {
+        return;
+    }
+    // Pane shells and ssh bridges can outlive the first pass by a beat.
+    for _ in 0..5 {
+        if kill_sandbox_processes(root, &[]) == 0 {
+            break;
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+    sweep_managed_ssh_configs(root, None);
+    let _ = fs::remove_dir_all(root);
+}
+
+/// `Drop for Rig` never runs when the test process is killed by a signal
+/// (nextest timeout, Ctrl-C, a terminated agent session), which used to strand
+/// the daemonized herdr servers and the sshd listener for hours. The reaper is
+/// this same test binary re-executed in a private session, out of reach of the
+/// group-wide signals that kill the test; it outlives the owner and then runs
+/// the sweep in its place.
+fn spawn_orphan_reaper(root: &Path) -> Child {
+    let mut command = Command::new(std::env::current_exe().expect("test binary path"));
+    command
+        .args(["--exact", E2E_TEST_NAME, "--nocapture"])
+        .env(REAPER_OWNER_ENV, std::process::id().to_string())
+        .env(REAPER_ROOT_ENV, root)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    // SAFETY: setsid is async-signal-safe and touches no state shared with
+    // the parent.
+    unsafe {
+        command.pre_exec(|| {
+            libc::setsid();
+            Ok(())
+        });
+    }
+    command.spawn().expect("spawn orphan reaper")
+}
+
+/// Reaper entry point: returns false in a normal test run.
+fn run_as_orphan_reaper() -> bool {
+    let (Some(owner), Some(root)) = (
+        std::env::var(REAPER_OWNER_ENV)
+            .ok()
+            .and_then(|pid| pid.parse::<libc::pid_t>().ok()),
+        std::env::var_os(REAPER_ROOT_ENV).map(PathBuf::from),
+    ) else {
+        return false;
+    };
+    // Reparenting is the death signal: unlike probing the owner's pid it is
+    // immune to pid reuse and needs no /proc.
+    // SAFETY: getppid has no preconditions.
+    while unsafe { libc::getppid() } == owner {
+        thread::sleep(Duration::from_millis(500));
+    }
+    reap_root(&root);
+    true
+}
+
+/// Whether `pid` is still a running ssh_e2e test binary. Without /proc a live
+/// pid is assumed to be the owner: a wrongly kept root merely waits for a
+/// later run, a wrongly swept one would kill a concurrent run.
+fn owner_is_live(pid: u32) -> bool {
+    // SAFETY: signal 0 only probes for existence.
+    let alive = unsafe { libc::kill(pid as libc::pid_t, 0) } == 0
+        || std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH);
+    if !alive {
+        return false;
+    }
+    const TEST_BINARY: &[u8] = b"ssh_e2e";
+    match fs::read(format!("/proc/{pid}/cmdline")) {
+        Ok(cmdline) => cmdline
+            .windows(TEST_BINARY.len())
+            .any(|window| window == TEST_BINARY),
+        Err(_) => true,
+    }
+}
+
+/// Backstop for runs whose reaper died with them (tree-kill, OOM, reboot):
+/// a root named after a pid that is no longer a live ssh_e2e binary is stale.
+fn sweep_stale_roots() {
+    let Ok(entries) = fs::read_dir(std::env::temp_dir()) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let Some(owner) = name
+            .strip_prefix(ROOT_PREFIX)
+            .and_then(|pid| pid.parse::<u32>().ok())
+        else {
+            continue;
+        };
+        if owner == std::process::id() || owner_is_live(owner) {
+            continue;
+        }
+        log(
+            "setup",
+            &format!("sweeping stale root {}", entry.path().display()),
+        );
+        reap_root(&entry.path());
     }
 }
 
@@ -606,6 +782,9 @@ fn tool_or_skip(tool: &str) -> bool {
 
 #[test]
 fn sshd_real_machine_end_to_end() {
+    if run_as_orphan_reaper() {
+        return;
+    }
     let Some(sshd_binary) = sshd_path() else {
         eprintln!("[ssh-e2e] SKIP: no OpenSSH sshd available on this machine");
         return;
@@ -617,9 +796,11 @@ fn sshd_real_machine_end_to_end() {
     }
 
     let phase = "setup";
-    let root = std::env::temp_dir().join(format!("herdr-ssh-e2e-{}", std::process::id()));
+    sweep_stale_roots();
+    let root = std::env::temp_dir().join(format!("{ROOT_PREFIX}{}", std::process::id()));
     let _ = fs::remove_dir_all(&root);
     fs::create_dir_all(&root).expect("create e2e root");
+    let reaper = spawn_orphan_reaper(&root);
 
     let user = std::env::var("USER").expect("USER is set");
     let sshd_port = free_port();
@@ -753,6 +934,7 @@ fn sshd_real_machine_end_to_end() {
         sshd_log: sshd_dir.join("sshd.log"),
         sshd: None,
         tui: None,
+        reaper: Some(reaper),
         service_stop,
         client,
         remote,
@@ -1480,6 +1662,6 @@ fn ssh_config_import_wildcards_multihop_and_multi_identity() {
     );
     log(phase, "re-import skipped everything");
 
-    kill_processes_referencing(&root);
+    kill_sandbox_processes(&root, &[]);
     let _ = fs::remove_dir_all(&root);
 }

@@ -712,8 +712,8 @@
       "anchor": "testing（测试分层与验证纪律） > 新测试要求",
       "doc": "docs/AGENT_RULES/testing.md",
       "id": "docs-agent-rules-testing-md-testing-测试分层与验证纪律-新测试要求",
-      "source_sha256": "209cc79a5a20daf24b13d93fc6773747a83254588983d906bcdb103896f35a04",
-      "text": "## 新测试要求\n\n- 覆盖关键失败路径：超时、断线、取消、旧响应、代际变化、重复操作；拒绝门\n  也要测合法输入，防「全部拒绝」假安全。\n- 测试真正被入口收集执行：marker 与清单并存时验证两边无漏项；必要工具链缺失\n  不得整族 skip 后报绿。\n- fixture 是契约（`tests/fixtures/`：endpoint 形状、键盘 TSV、插件 smoke）：\n  不得为过门改 fixture；生成物登记与 freshness 纪律见 `docs/README.md`。"
+      "source_sha256": "934fa246b8d7f1ebd12f859c940a46dbe5560fa3929cbf142ea11a2cb70dc686",
+      "text": "## 新测试要求\n\n- 覆盖关键失败路径：超时、断线、取消、旧响应、代际变化、重复操作；拒绝门\n  也要测合法输入，防「全部拒绝」假安全。\n- 测试真正被入口收集执行：marker 与清单并存时验证两边无漏项；必要工具链缺失\n  不得整族 skip 后报绿。\n- 拉起脱离进程树的守护进程或监听端口（detached `herdr server`、`sshd`、端口\n  转发）的测试不得只靠 `Drop` 清理：测试进程被信号杀死（nextest 超时、Ctrl-C、\n  agent 会话中断）时 `Drop` 不执行，孤儿会存活数小时。必须同时具备进程外回收\n  （独立会话的收割进程，以 `getppid()` 变化感知属主死亡）与启动时清扫陈旧沙箱\n  的兜底；回收按「属于沙箱」判定（环境变量值或可执行文件位于沙箱内），不按\n  命令行包含路径判定，避免误杀 `tail -f` 沙箱日志的旁观进程。参考实现\n  `tests/ssh_e2e.rs::spawn_orphan_reaper`、`::sweep_stale_roots`、\n  `::belongs_to_root`；新增此类测试须演练「运行中途 SIGKILL 进程组」后零残留。\n- fixture 是契约（`tests/fixtures/`：endpoint 形状、键盘 TSV、插件 smoke）：\n  不得为过门改 fixture；生成物登记与 freshness 纪律见 `docs/README.md`。"
     },
     {
       "anchor": "vendored-libghostty-vt（vendored 终端内核与补丁）",
@@ -3491,8 +3491,8 @@
       "anchor": "herdr 测试分层 > 纪律要点（规则全文见 `AGENT_RULES/testing.md`）",
       "doc": "docs/TESTING.md",
       "id": "docs-testing-md-herdr-测试分层-纪律要点-规则全文见-agent-rules-testing-md",
-      "source_sha256": "148eff79bf02dc9c3af286a134b7f7c0e5fc4aa4235cc3ac5e46a277ceb3cca0",
-      "text": "## 纪律要点（规则全文见 `AGENT_RULES/testing.md`）\n\n- 新脚本测试必须加入 justfile `maintenance-test` 的模块清单，否则不会被收集。\n- 失败路径优先：超时、断线、取消、旧响应、代际变化、重复操作；拒绝门也要测\n  合法输入（本仓库实践：resolver/hooks/KB 的每个拒绝项都有独立注入测试）。\n- 必要工具链缺失不得整族 skip 后报绿；跑不了就明确 PENDING。\n- fixture 是契约：不为过门修改期望；生成物 freshness 失败先查输入是否有意。\n- **UI 截图：N/A**——herdr 是 TUI。等效证据 = `herdr-throwaway-repro` 隔离会话\n  中真实操作 + `herdr agent read`/`capture_agent_screen.py` 读回；键盘/终端\n  行为用 `tests/fixtures` 的实测 TSV 语料。\n- 在 herdr 内测 herdr：`env -u HERDR_SOCKET_PATH -u HERDR_CLIENT_SOCKET_PATH\n  cargo run -- <command>`，避免污染安装版会话。"
+      "source_sha256": "bd774474a3e8a85f444bb47843ff36246eda99c2c7258cab6a79e82b57b3d82e",
+      "text": "## 纪律要点（规则全文见 `AGENT_RULES/testing.md`）\n\n- 新脚本测试必须加入 justfile `maintenance-test` 的模块清单，否则不会被收集。\n- 失败路径优先：超时、断线、取消、旧响应、代际变化、重复操作；拒绝门也要测\n  合法输入（本仓库实践：resolver/hooks/KB 的每个拒绝项都有独立注入测试）。\n- 必要工具链缺失不得整族 skip 后报绿；跑不了就明确 PENDING。\n- fixture 是契约：不为过门修改期望；生成物 freshness 失败先查输入是否有意。\n- 会拉起守护进程的测试必须能在被强杀后自清理：`Drop` 在 SIGKILL/SIGTERM 下\n  不执行。`tests/ssh_e2e.rs` 用独立会话的收割进程接管清理，并在下次启动时清扫\n  陈旧沙箱；排查残留用 `ls -d /tmp/herdr-ssh-e2e-*` 与\n  `pgrep -af herdr-ssh-e2e`，正常应为空，重跑该测试即自愈。\n- **UI 截图：N/A**——herdr 是 TUI。等效证据 = `herdr-throwaway-repro` 隔离会话\n  中真实操作 + `herdr agent read`/`capture_agent_screen.py` 读回；键盘/终端\n  行为用 `tests/fixtures` 的实测 TSV 语料。\n- 在 herdr 内测 herdr：`env -u HERDR_SOCKET_PATH -u HERDR_CLIENT_SOCKET_PATH\n  cargo run -- <command>`，避免污染安装版会话。"
     },
     {
       "anchor": "herdr > agent instructions",

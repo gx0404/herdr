@@ -47,5 +47,13 @@ ID、workspace/tab/pane 身份、restore/handoff、agent 检测权威或 UI/输�
   也要测合法输入，防「全部拒绝」假安全。
 - 测试真正被入口收集执行：marker 与清单并存时验证两边无漏项；必要工具链缺失
   不得整族 skip 后报绿。
+- 拉起脱离进程树的守护进程或监听端口（detached `herdr server`、`sshd`、端口
+  转发）的测试不得只靠 `Drop` 清理：测试进程被信号杀死（nextest 超时、Ctrl-C、
+  agent 会话中断）时 `Drop` 不执行，孤儿会存活数小时。必须同时具备进程外回收
+  （独立会话的收割进程，以 `getppid()` 变化感知属主死亡）与启动时清扫陈旧沙箱
+  的兜底；回收按「属于沙箱」判定（环境变量值或可执行文件位于沙箱内），不按
+  命令行包含路径判定，避免误杀 `tail -f` 沙箱日志的旁观进程。参考实现
+  `tests/ssh_e2e.rs::spawn_orphan_reaper`、`::sweep_stale_roots`、
+  `::belongs_to_root`；新增此类测试须演练「运行中途 SIGKILL 进程组」后零残留。
 - fixture 是契约（`tests/fixtures/`：endpoint 形状、键盘 TSV、插件 smoke）：
   不得为过门改 fixture；生成物登记与 freshness 纪律见 `docs/README.md`。
