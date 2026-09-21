@@ -980,9 +980,8 @@ path = "codex.toml"
         with_state_dir("auto-update-skips-failed-agent", || {
             let initial_codex = remote_manifest("9999.01.01.1", "codex-initial-ready");
             process_agent_manifest(Agent::Codex, &initial_codex, 1).unwrap();
-            let initial_cursor =
-                remote_manifest_for("cursor", "9999.01.01.1", "cursor-initial-ready");
-            process_agent_manifest(Agent::Cursor, &initial_cursor, 1).unwrap();
+            let initial_kimi = remote_manifest_for("kimi", "9999.01.01.1", "kimi-initial-ready");
+            process_agent_manifest(Agent::Kimi, &initial_kimi, 1).unwrap();
             crate::detect::manifest::reload_manifests();
 
             let old_catalog_url = std::env::var_os(CATALOG_URL_ENV);
@@ -1002,8 +1001,8 @@ id = "codex"
 path = "codex.toml"
 
 [[agents]]
-id = "cursor"
-path = "missing-cursor.toml"
+id = "kimi"
+path = "missing-kimi.toml"
 "#,
             )
             .unwrap();
@@ -1011,8 +1010,8 @@ path = "missing-cursor.toml"
             fs::write(web_dir.join("codex.toml"), &current_codex).unwrap();
             fs::write(remote_manifest_path(Agent::Codex), current_codex).unwrap();
             fs::write(
-                remote_manifest_path(Agent::Cursor),
-                remote_manifest_for("cursor", "9999.01.01.2", "cursor-current-ready"),
+                remote_manifest_path(Agent::Kimi),
+                remote_manifest_for("kimi", "9999.01.01.2", "kimi-current-ready"),
             )
             .unwrap();
             std::env::set_var(
@@ -1046,10 +1045,10 @@ path = "missing-cursor.toml"
                 codex.matched_rule.as_ref().map(|rule| rule.id.as_str()),
                 Some("idle")
             );
-            let cursor = crate::detect::manifest::explain(Agent::Cursor, "cursor-initial-ready");
-            assert_eq!(cursor.manifest_version.as_deref(), Some("9999.01.01.1"));
+            let kimi = crate::detect::manifest::explain(Agent::Kimi, "kimi-initial-ready");
+            assert_eq!(kimi.manifest_version.as_deref(), Some("9999.01.01.1"));
             assert_eq!(
-                cursor.matched_rule.as_ref().map(|rule| rule.id.as_str()),
+                kimi.matched_rule.as_ref().map(|rule| rule.id.as_str()),
                 Some("idle")
             );
 
@@ -1085,7 +1084,7 @@ path = "missing-cursor.toml"
                 },
             );
             let output = ManifestUpdateOutput {
-                checked: vec![Agent::Cursor],
+                checked: vec![Agent::Kimi],
                 updated: Vec::new(),
                 status,
             };
@@ -1164,6 +1163,97 @@ path = "codex-2.toml"
 "#
         )
         .is_err());
+    }
+
+    #[test]
+    fn remote_catalog_with_deleted_agent_ids_is_skipped_without_writing_anything() {
+        // 上游发布目录仍会列出本 fork 已删除的 agent：整份目录照常接受，未知 id 只跳过，
+        // 既不进结果与状态，也不在缓存目录或本地覆盖目录落任何文件。
+        with_state_dir("deleted-agent-ids", || {
+            let web_dir = std::env::temp_dir().join(format!(
+                "herdr-manifest-update-deleted-ids-web-{}",
+                std::process::id()
+            ));
+            let _ = fs::remove_dir_all(&web_dir);
+            fs::create_dir_all(&web_dir).unwrap();
+            let index = r#"
+schema_version = 1
+
+[[agents]]
+id = "cursor"
+path = "cursor.toml"
+
+[[agents]]
+id = "codex"
+path = "codex.toml"
+
+[[agents]]
+id = "gemini"
+path = "gemini.toml"
+"#;
+            fs::write(web_dir.join("index.toml"), index).unwrap();
+            fs::write(
+                web_dir.join("codex.toml"),
+                remote_manifest("9999.01.01.1", "codex-ready"),
+            )
+            .unwrap();
+            for deleted in ["cursor", "gemini"] {
+                fs::write(
+                    web_dir.join(format!("{deleted}.toml")),
+                    remote_manifest_for(deleted, "9999.01.01.1", "deleted-ready"),
+                )
+                .unwrap();
+            }
+
+            let catalog = parse_catalog(index).expect("含已删 id 的目录仍须整体接受");
+            assert_eq!(
+                catalog.iter().map(|entry| entry.agent).collect::<Vec<_>>(),
+                vec![Agent::Codex]
+            );
+
+            let url = format!(
+                "file:///{}",
+                web_dir
+                    .join("index.toml")
+                    .to_string_lossy()
+                    .replace('\\', "/")
+                    .trim_start_matches('/')
+            );
+            let output = check_and_update_from_url(&url).expect("更新不因已删 id 失败");
+
+            assert_eq!(output.checked, vec![Agent::Codex]);
+            assert_eq!(
+                output
+                    .updated
+                    .iter()
+                    .map(|commit| commit.agent)
+                    .collect::<Vec<_>>(),
+                vec![Agent::Codex]
+            );
+            assert_eq!(
+                output.status.agents.keys().collect::<Vec<_>>(),
+                vec!["codex"]
+            );
+
+            let remote_dir = remote_manifest_path(Agent::Codex)
+                .parent()
+                .expect("remote manifest dir")
+                .to_path_buf();
+            let mut cached = fs::read_dir(&remote_dir)
+                .unwrap()
+                .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+                .collect::<Vec<_>>();
+            cached.sort();
+            assert_eq!(cached, vec!["codex.toml"]);
+            let override_dir = crate::config::config_dir().join("agent-detection");
+            assert!(
+                !override_dir.exists(),
+                "不得写本地覆盖目录 {}",
+                override_dir.display()
+            );
+
+            let _ = fs::remove_dir_all(&web_dir);
+        });
     }
 
     #[test]

@@ -57,16 +57,13 @@ MAX_MATCHERS_PER_GATE = 32
 MAX_TOTAL_MATCHERS = 1024
 MAX_MATCHER_CHARS = 512
 
-# Keep engine-2 clients on the OSC-capable manifest until an engine-3 release
-# can consume top_non_empty_lines. Remove this entry when the distribution
-# publishes the bundled Grok manifest.
-STAGED_PUBLISHED_MANIFESTS = {
-    "grok": (
-        "2026.07.16.2",
-        "2026.07.16.1",
-        "1f35b3271a96cf830c64bed78751619bfd8013c277c0d7c0f999b7a433895f28",
-    ),
-}
+# Exact (bundled version, published version, published sha256) exceptions that
+# keep older-engine clients on an older published manifest until a release can
+# consume the bundled one. Empty in this fork: the only upstream entry belonged
+# to a manifest the fork no longer bundles (see docs/AGENT_RULES/
+# release-channels.md). The mechanism stays covered by self-made manifests in
+# scripts/test_agent_detection_manifest_check.py.
+STAGED_PUBLISHED_MANIFESTS: dict[str, tuple[str, str, str]] = {}
 
 UNPUBLISHED_BUNDLED_MANIFESTS: dict[str, tuple[str, str]] = {}
 

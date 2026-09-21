@@ -1,5 +1,5 @@
 {
-  "chunk_count": 1001,
+  "chunk_count": 984,
   "chunks": [
     {
       "anchor": "herdr",
@@ -327,8 +327,8 @@
       "anchor": "detection（agent 状态检测与 manifest） > 发布目录",
       "doc": "docs/AGENT_RULES/detection.md",
       "id": "docs-agent-rules-detection-md-detection-agent-状态检测与-manifest-发布目录",
-      "source_sha256": "b728d7f1e3fa5ddd44659db4b0d9b70754a223cafdf497709c8aeb65fa65ad81",
-      "text": "## 发布目录\n\n`distribution/agent-detection/` 是已发布客户端的远端目录。已发布 agent 的改动\n必须与其捆绑 manifest 对齐，除非 validator 记录了精确的版本+摘要例外。当前\nstable 客户端无法识别的新捆绑 agent 可暂不发布（挂在精确例外后），但必须在\n首个携带它的 stable 发布前加入目录并移除例外；`just release-docs-check` 强制\n不存在未发布例外。`scripts/agent_detection_manifest_check.py`（`just\nmaintenance-test` 内）校验捆绑与发布副本一致性。\n\n官方集成仅六家：其余 agent 的捆绑 manifest 不新增，同步上游时也不合入，发布\n目录里的对应副本随之删减；名单与口径见 `README.md` 的「fork 已删除的集成」，\n目录归属的 fork 例外登记在 `release-channels.md`。"
+      "source_sha256": "ce572bba0a1a1919531de675c5513260c1874cd2da84a8b35f9a2012fe467224",
+      "text": "## 发布目录\n\n`distribution/agent-detection/` 是已发布客户端的远端目录。已发布 agent 的改动\n必须与其捆绑 manifest 对齐，除非 validator 记录了精确的版本+摘要例外。当前\nstable 客户端无法识别的新捆绑 agent 可暂不发布（挂在精确例外后），但必须在\n首个携带它的 stable 发布前加入目录并移除例外；`just release-docs-check` 强制\n不存在未发布例外。`scripts/agent_detection_manifest_check.py`（`just\nmaintenance-test` 内）校验捆绑与发布副本一致性。\n\n官方集成仅六家：其余 agent 的捆绑 manifest 与 `src/detect/mod.rs::Agent` 变体已\n删除（`Agent` 不派生 serde、不进 wire 结构，对外只以 `agent_label` 字符串出现），\n不新增，同步上游时也不合入，发布目录里的对应副本随之删减；名单与口径见\n`README.md` 的「fork 已删除的集成」，目录归属的 fork 例外登记在\n`release-channels.md`。\n\n删除后的兼容不变量：\n\n- **远程目录回流**：上游发布目录仍会列出已删 agent。\n  `src/detect/manifest_update.rs::parse_catalog` 对未知 id 只 `warn` 并跳过，整份\n  目录照常接受，不进状态、不落缓存、不写本地覆盖。\n- **用户配置**：`src/detect/mod.rs::RETIRED_AGENT_LABELS` 登记删除前的规范 id，只\n  服务配置兼容，不参与识别。`src/config/sidebar.rs::deserialize_rows_by_agent` 据此\n  忽略并告警已删 agent 的 `rows_by_agent` 键（否则启动会整份回退默认、热重载会\n  拒收整个 ui 段）；`src/config/sound.rs::AgentSoundOverrides` 的旧键按未知键处理，\n  只产生 `unknown config key` 诊断。上游日后新增、fork 不收的 agent 不需要登记。\n- **残留 hook 与旧快照**：`src/agent_resume.rs::is_official_agent_source` 只认五家，\n  已删集成残留 hook 的会话上报与旧快照里的会话一律按非官方来源丢弃。"
     },
     {
       "anchor": "detection（agent 状态检测与 manifest） > 架构不变量（上游 Principles）",
@@ -663,8 +663,8 @@
       "anchor": "release-channels（发布渠道与版本真源） > fork 例外：agent-detection 发布目录",
       "doc": "docs/AGENT_RULES/release-channels.md",
       "id": "docs-agent-rules-release-channels-md-release-channels-发布渠道与版本真源-fork-例外-agent-detection-发布目录",
-      "source_sha256": "d4c8ffe80833d941bcddd3f97d0a7224278168fc0af5f5ac8cd370e6da8e9c70",
-      "text": "## fork 例外：agent-detection 发布目录\n\n`distribution/agent-detection/` 的归属**不变**：仍是上游发布目录（语义见\n`detection.md`「发布目录」），fork 不自行发布它。唯一例外是 fork 删除六家以外\n的捆绑 manifest 时，随之删减该目录里对应的 `<agent>.toml` 与 `index.toml`\n条目——只为让 `scripts/agent_detection_manifest_check.py` 的捆绑↔发布一致性\n继续成立；不借此改动六家自身的发布副本，也不触碰 `distribution/*.json` 等其他\n渠道文件。名单与同步口径见 `README.md` 的「fork 已删除的集成」。\n\ngrok 是已知硬阻塞：`scripts/agent_detection_manifest_check.py` 的\n`STAGED_PUBLISHED_MANIFESTS` 钉着它的（捆绑版本、发布版本、sha256）例外，\n`scripts/test_agent_detection_manifest_check.py::staged_grok_dirs` 又直接读真实的\n`src/detect/manifests/grok.toml` 与 `distribution/agent-detection/grok.toml`。删\ngrok 时必须在同一次改动里移除该例外条目并处理它的两个 staged 用例（删掉，或\n改成自造 manifest 并 patch 例外表），否则 `just maintenance-test` 以\nFileNotFoundError 变红；同一提示也写在 `scripts/upstream_sync_drop_paths.txt` 的\ngrok 行上方。"
+      "source_sha256": "299d939154be6ec3142654c32267bf790bc5f1bf1d60f0c9d4a85b490beac29a",
+      "text": "## fork 例外：agent-detection 发布目录\n\n`distribution/agent-detection/` 的归属**不变**：仍是上游发布目录（语义见\n`detection.md`「发布目录」），fork 不自行发布它。唯一例外是 fork 删除六家以外\n的捆绑 manifest 时，随之删减该目录里对应的 `<agent>.toml` 与 `index.toml`\n条目——只为让 `scripts/agent_detection_manifest_check.py` 的捆绑↔发布一致性\n继续成立；不借此改动六家自身的发布副本，也不触碰 `distribution/*.json` 等其他\n渠道文件。名单与同步口径见 `README.md` 的「fork 已删除的集成」。\n\n删减已落地：目录里只剩五家的副本与 `index.toml` 的五个条目。上游曾在\n`scripts/agent_detection_manifest_check.py::STAGED_PUBLISHED_MANIFESTS` 为 grok 钉\n（捆绑版本、发布版本、sha256）例外，fork 删 grok 时已清空该表，\n`scripts/test_agent_detection_manifest_check.py` 的 staged 用例改用自造 manifest\n并 patch 例外表，不再读取任何真实清单文件。同步上游时不要把 grok 条目与读取真实\n`grok.toml` 的用例合回来；同一提示也写在 `scripts/upstream_sync_drop_paths.txt` 的\ngrok 行上方。"
     },
     {
       "anchor": "release-channels（发布渠道与版本真源） > 性能 smoke",
@@ -3659,8 +3659,8 @@
       "anchor": "structure",
       "doc": "src/agent_resume.rs",
       "id": "src-agent-resume-rs-structure",
-      "source_sha256": "4ec9391f9dd001c871b7f81ffa22fba3a843e2be2b3584294d5bbc97a1fe17df",
-      "text": "公开项：\npub struct AgentSessionRef {\npub enum AgentSessionRefKind {\npub struct AgentResumePlan {\npub struct PersistedAgentSession {\nimpl AgentSessionRef {\npub fn id(value: impl Into<String>) -> Option<Self> {\npub fn path(value: impl Into<String>) -> Option<Self> {\npub fn session_ref_from_report(\npub fn persisted_session_from_launch_args(\npub fn normalize_session_start_source(value: Option<String>) -> Option<String> {\npub fn is_reserved_native_state_source(source: &str, agent: &str) -> bool {\npub fn session_ref_from_snapshot(\npub fn plan(source: &str, agent: &str, session_ref: &AgentSessionRef) -> Option<AgentResumePlan> {\npub fn dedupe_key(source: &str, agent: &str, session_ref: &AgentSessionRef) -> String {\npub(crate) fn is_official_agent_source(source: &str, agent: &str) -> bool {"
+      "source_sha256": "35a0bbf0da8cce3e42efc7133a5498b53bb59976a899f47985e2410f40f0a7e7",
+      "text": "公开项：\npub struct AgentSessionRef {\npub enum AgentSessionRefKind {\npub struct AgentResumePlan {\npub struct PersistedAgentSession {\nimpl AgentSessionRef {\npub fn id(value: impl Into<String>) -> Option<Self> {\npub fn path(value: impl Into<String>) -> Option<Self> {\npub fn session_ref_from_report(\npub fn persisted_session_from_launch_args(\npub fn normalize_session_start_source(value: Option<String>) -> Option<String> {\npub fn is_reserved_native_state_source(source: &str, agent: &str) -> bool {\npub fn session_ref_from_snapshot(\npub fn plan(source: &str, agent: &str, session_ref: &AgentSessionRef) -> Option<AgentResumePlan> {\npub fn dedupe_key(source: &str, agent: &str, session_ref: &AgentSessionRef) -> String {\npub(crate) fn is_official_agent_source(source: &str, agent: &str) -> bool { — 官方集成的保留来源：只有五家官方集成能以 `herdr:<agent>` 上报会话并参与恢复。 已删除集成残留的 hook 即使仍在上报，也按非官方来源处理（不落会话、不生成恢复计划）。"
     },
     {
       "anchor": "structure",
@@ -5407,31 +5407,10 @@
     },
     {
       "anchor": "summary",
-      "doc": "src/detect/manifests/amp.toml",
-      "id": "src-detect-manifests-amp-toml-summary",
-      "source_sha256": "06e3f743123cfa22ce7ae52d886c9a0b5ac7f5564861863be584c885d04d4b7a",
-      "text": "agent 检测 manifest：src/detect/manifests/amp.toml\nid = \"amp\"\nversion = \"2026.07.09.1\"\nmin_engine_version = 2\n[[rules]]\nid = \"osc_title_plugin_confirmation_blocked\"\nstate = \"blocked\"\npriority = 1100\n[[rules]]\nid = \"osc_title_working\"\nstate = \"working\"\npriority = 1050\n[[rules]]\nid = \"approval_footer\"\nstate = \"blocked\"\npriority = 300\n[[rules]]\nid = \"status_footer_working\"\nstate = \"working\"\npriority = 200\n[[rules]]\nid = \"esc_cancel_working\"\nstate = \"working\"\npriority = 100\n[[rules]]\nid = \"osc_title_idle\"\nstate = \"idle\"\npriority = 50"
-    },
-    {
-      "anchor": "summary",
-      "doc": "src/detect/manifests/antigravity.toml",
-      "id": "src-detect-manifests-antigravity-toml-summary",
-      "source_sha256": "68dfdd6ef1a1b9b530ba23b10c2f3f55429eb4fe339e1a873806afd3d5712ad4",
-      "text": "agent 检测 manifest：src/detect/manifests/antigravity.toml\nid = \"agy\"\nversion = \"2026.06.24.1\"\nmin_engine_version = 1\n[[rules]]\nid = \"permission_prompt\"\nstate = \"blocked\"\npriority = 300\n[[rules]]\nid = \"spinner_working\"\nstate = \"working\"\npriority = 100\n[[rules]]\nid = \"background_tasks_working\"\nstate = \"working\"\npriority = 90"
-    },
-    {
-      "anchor": "summary",
       "doc": "src/detect/manifests/claude.toml",
       "id": "src-detect-manifests-claude-toml-summary",
       "source_sha256": "60ed74cbef86419de5f87b829cec2327a18c66af88757d6d57e05906e9d9e2c6",
       "text": "agent 检测 manifest：src/detect/manifests/claude.toml\nid = \"claude\"\nversion = \"2026.09.11.1\"\nmin_engine_version = 2\n[[rules]]\nid = \"osc_title_working\"\nstate = \"working\"\npriority = 1100\n[[rules]]\nid = \"live_turn_working\"\nstate = \"working\"\npriority = 970\n[[rules]]\nid = \"background_agents_working\"\nstate = \"working\"\npriority = 965\n[[rules]]\nid = \"background_mcp_task_working\"\nstate = \"working\"\npriority = 965\n[[rules]]\nid = \"btw_overlay_working\"\nstate = \"working\"\npriority = 975\n[[rules]]\nid = \"transcript_viewer\"\nstate = \"unknown\"\npriority = 1000\n[[rules]]\nid = \"live_blocked_form\"\nstate = \"blocked\"\npriority = 980\n[[rules]]\nid = \"dynamic_workflow_prompt\"\nstate = \"blocked\"\npriority = 980\n[[rules]]\nid = \"mcp_elicitation_prompt\"\nstate = \"blocked\"\npriority = 980\n[[rules]]\nid = \"live_prompt_box\"\nstate = \"idle\"\npriority = 950\n[[rules]]\nid = \"model_picker_menu\"\nstate = \"unknown\"\npriority = 900\n[[rules]]\nid = \"bash_permission_prompt\"\nstate = \"blocked\"\npriority = 850\n[[rules]]\nid = \"generic_permission_prompt\"\nstate = \"blocked\"\npriority = 840\n[[rules]]\nid = \"legacy_no_prompt_blocker\"\nstate = \"blocked\"\npriority = 300\n[[rules]]\nid = \"osc_title_idle\"\nstate = \"idle\"\npriority = 250\n[[rules]]\nid = \"osc_progress_idle\"\nstate = \"idle\"\npriority = 250"
-    },
-    {
-      "anchor": "summary",
-      "doc": "src/detect/manifests/cline.toml",
-      "id": "src-detect-manifests-cline-toml-summary",
-      "source_sha256": "9a6074dcd13b8e31ba03f3ad901768f25a6799e124e86e4169916f4bbaea4f8c",
-      "text": "agent 检测 manifest：src/detect/manifests/cline.toml\nid = \"cline\"\nversion = \"2026.09.11.1\"\nmin_engine_version = 1\n[[rules]]\nid = \"tool_permission\"\nstate = \"blocked\"\npriority = 300\n[[rules]]\nid = \"inline_tool_permission\"\nstate = \"blocked\"\npriority = 300\n[[rules]]\nid = \"inline_question\"\nstate = \"blocked\"\npriority = 300\n[[rules]]\nid = \"active_turn\"\nstate = \"working\"\npriority = 200\n[[rules]]\nid = \"composer_idle\"\nstate = \"idle\"\npriority = 100\n[[rules]]\nid = \"default_cline_working\"\nstate = \"working\"\npriority = -10"
     },
     {
       "anchor": "summary",
@@ -5442,94 +5421,10 @@
     },
     {
       "anchor": "summary",
-      "doc": "src/detect/manifests/cursor.toml",
-      "id": "src-detect-manifests-cursor-toml-summary",
-      "source_sha256": "ed6cd7c80cafa757c48d583ac8e3195e8377d6371f190da8c57b755e282d0a76",
-      "text": "agent 检测 manifest：src/detect/manifests/cursor.toml\nid = \"cursor\"\nversion = \"2026.08.03.1\"\nmin_engine_version = 1\n[[rules]]\nid = \"write_file_approval\"\nstate = \"blocked\"\npriority = 320\n[[rules]]\nid = \"approval_prompt\"\nstate = \"blocked\"\npriority = 300\n[[rules]]\nid = \"stop_hint_working\"\nstate = \"working\"\npriority = 100\n[[rules]]\nid = \"background_task_status_working\"\nstate = \"working\"\npriority = 95\n[[rules]]\nid = \"spinner_working\"\nstate = \"working\"\npriority = 90"
-    },
-    {
-      "anchor": "summary",
-      "doc": "src/detect/manifests/devin.toml",
-      "id": "src-detect-manifests-devin-toml-summary",
-      "source_sha256": "0375b83caf2d03ca085f090e1da050b63bbb0f5cced6271956ab8c0519b446e7",
-      "text": "agent 检测 manifest：src/detect/manifests/devin.toml\nid = \"devin\"\nversion = \"2026.06.15.1\"\nmin_engine_version = 1\n[[rules]]\nid = \"workspace_trust_prompt\"\nstate = \"blocked\"\npriority = 300\n[[rules]]\nid = \"permission_prompt\"\nstate = \"blocked\"\npriority = 290\n[[rules]]\nid = \"running_tools_footer\"\nstate = \"working\"\npriority = 200\n[[rules]]\nid = \"guide_while_working\"\nstate = \"working\"\npriority = 190\n[[rules]]\nid = \"tool_reading_timeout\"\nstate = \"working\"\npriority = 180\n[[rules]]\nid = \"welcome_prompt_footer\"\nstate = \"idle\"\npriority = 120\n[[rules]]\nid = \"live_prompt_footer\"\nstate = \"idle\"\npriority = 100"
-    },
-    {
-      "anchor": "summary",
-      "doc": "src/detect/manifests/droid.toml",
-      "id": "src-detect-manifests-droid-toml-summary",
-      "source_sha256": "39d1d9b36fdbb45c6df1e3816c6e8ccd4ed58d6ac488f147ed044e5678b5886e",
-      "text": "agent 检测 manifest：src/detect/manifests/droid.toml\nid = \"droid\"\nversion = \"2026.06.10.1\"\nmin_engine_version = 1\n[[rules]]\nid = \"execute_selection_blocker\"\nstate = \"blocked\"\npriority = 300\n[[rules]]\nid = \"selection_menu_blocker\"\nstate = \"blocked\"\npriority = 290\n[[rules]]\nid = \"spinner_stop_working\"\nstate = \"working\"\npriority = 110\n[[rules]]\nid = \"stop_hint_working\"\nstate = \"working\"\npriority = 100"
-    },
-    {
-      "anchor": "summary",
-      "doc": "src/detect/manifests/gemini.toml",
-      "id": "src-detect-manifests-gemini-toml-summary",
-      "source_sha256": "5d37e0063608d8f3c87f668fc12b04ad7076262afc3b7eca26996a01e12212c4",
-      "text": "agent 检测 manifest：src/detect/manifests/gemini.toml\nid = \"gemini\"\nversion = \"2026.06.10.1\"\nmin_engine_version = 1\n[[rules]]\nid = \"apply_or_allow_change\"\nstate = \"blocked\"\npriority = 300\n[[rules]]\nid = \"esc_cancel_working\"\nstate = \"working\"\npriority = 100"
-    },
-    {
-      "anchor": "summary",
-      "doc": "src/detect/manifests/github-copilot.toml",
-      "id": "src-detect-manifests-github-copilot-toml-summary",
-      "source_sha256": "693da16e8f82bbe7e495a562d4bcfdc4376b6e2bbd9be3135c61102a659c79da",
-      "text": "agent 检测 manifest：src/detect/manifests/github-copilot.toml\nid = \"copilot\"\nversion = \"2026.08.29.1\"\nmin_engine_version = 1\n[[rules]]\nid = \"selection_blocker\"\nstate = \"blocked\"\npriority = 300\n[[rules]]\nid = \"background_agents_working\"\nstate = \"working\"\npriority = 110\n[[rules]]\nid = \"working_cancel_hint\"\nstate = \"working\"\npriority = 100"
-    },
-    {
-      "anchor": "summary",
-      "doc": "src/detect/manifests/grok.toml",
-      "id": "src-detect-manifests-grok-toml-summary",
-      "source_sha256": "79e526123d50a9acafb46266c02cc8b5ea8575f140ef0a81310fa7ffe83056f3",
-      "text": "agent 检测 manifest：src/detect/manifests/grok.toml\nid = \"grok\"\nversion = \"2026.07.16.2\"\nmin_engine_version = 3\n[[rules]]\nid = \"osc_title_blocked\"\nstate = \"blocked\"\npriority = 1300\n[[rules]]\nid = \"option_dialog_blocked\"\nstate = \"blocked\"\npriority = 1200\n[[rules]]\nid = \"permission_hints_blocked\"\nstate = \"blocked\"\npriority = 1190\n[[rules]]\nid = \"question_dialog_hints_blocked\"\nstate = \"blocked\"\npriority = 1185\n[[rules]]\nid = \"permission_scope_selector\"\nstate = \"blocked\"\npriority = 1180\n[[rules]]\nid = \"background_work_chip_working\"\nstate = \"working\"\npriority = 1170\n[[rules]]\nid = \"osc_progress_working\"\nstate = \"working\"\npriority = 1150\n[[rules]]\nid = \"osc_title_idle\"\nstate = \"idle\"\npriority = 1100\n[[rules]]\nid = \"osc_title_working\"\nstate = \"working\"\npriority = 1000\n[[rules]]\nid = \"osc_progress_idle\"\nstate = \"idle\"\npriority = 950\n[[rules]]\nid = \"spinner_status_working\"\nstate = \"working\"\npriority = 200\n[[rules]]\nid = \"esc_cancel_hints_working\"\nstate = \"working\"\npriority = 190\n[[rules]]\nid = \"waiting_tool_working\"\nstate = \"working\"\npriority = 120\n[[rules]]\nid = \"prompt_hints_idle\"\nstate = \"idle\"\npriority = 100"
-    },
-    {
-      "anchor": "summary",
-      "doc": "src/detect/manifests/hermes.toml",
-      "id": "src-detect-manifests-hermes-toml-summary",
-      "source_sha256": "1feb389b2b2d87700ee38b1e61c424717710b992c59700de8c616b97e64a4f06",
-      "text": "agent 检测 manifest：src/detect/manifests/hermes.toml\nid = \"hermes\"\nversion = \"2026.07.24.1\"\nmin_engine_version = 2\n[[rules]]\nid = \"osc_title_blocked\"\nstate = \"blocked\"\npriority = 1100\n[[rules]]\nid = \"osc_title_working\"\nstate = \"working\"\npriority = 1050\n[[rules]]\nid = \"dangerous_command_approval\"\nstate = \"blocked\"\npriority = 900\n[[rules]]\nid = \"clarification_prompt\"\nstate = \"blocked\"\npriority = 900\n[[rules]]\nid = \"credential_prompt\"\nstate = \"blocked\"\npriority = 900\n[[rules]]\nid = \"confirmation_prompt\"\nstate = \"blocked\"\npriority = 900\n[[rules]]\nid = \"interrupt_status_working\"\nstate = \"working\"\npriority = 950\n[[rules]]\nid = \"classic_cancel_working\"\nstate = \"working\"\npriority = 500\n[[rules]]\nid = \"osc_title_idle\"\nstate = \"idle\"\npriority = 100"
-    },
-    {
-      "anchor": "summary",
-      "doc": "src/detect/manifests/kilo.toml",
-      "id": "src-detect-manifests-kilo-toml-summary",
-      "source_sha256": "0e07b892a6bfbb0259c7fa0c54e244a59c45a8a1f5752b31f8fc363b4698e0c0",
-      "text": "agent 检测 manifest：src/detect/manifests/kilo.toml\nid = \"kilo\"\nversion = \"2026.06.10.1\"\nmin_engine_version = 1\n[[rules]]\nid = \"opencode_permission\"\nstate = \"blocked\"\npriority = 300\n[[rules]]\nid = \"esc_interrupt_working\"\nstate = \"working\"\npriority = 100"
-    },
-    {
-      "anchor": "summary",
       "doc": "src/detect/manifests/kimi.toml",
       "id": "src-detect-manifests-kimi-toml-summary",
       "source_sha256": "9526bcb9f15760bba1b8583bca93a27d94bc114776f1dd55f925566af03b3b69",
       "text": "agent 检测 manifest：src/detect/manifests/kimi.toml\nid = \"kimi\"\nversion = \"2026.06.10.1\"\nmin_engine_version = 1\n[[rules]]\nid = \"current_approval_panel\"\nstate = \"blocked\"\npriority = 400\n[[rules]]\nid = \"question_panel\"\nstate = \"blocked\"\npriority = 390\n[[rules]]\nid = \"legacy_approval_panel\"\nstate = \"blocked\"\npriority = 300\n[[rules]]\nid = \"background_agent_status_working\"\nstate = \"working\"\npriority = 120\n[[rules]]\nid = \"moon_spinner_working\"\nstate = \"working\"\npriority = 100\n[[rules]]\nid = \"braille_spinner_working\"\nstate = \"working\"\npriority = 90"
-    },
-    {
-      "anchor": "summary",
-      "doc": "src/detect/manifests/kiro.toml",
-      "id": "src-detect-manifests-kiro-toml-summary",
-      "source_sha256": "93d3e8b93d122ea8e36dc2eaa4400cc112ae9ce0dee84c7513c0f5c54b196e97",
-      "text": "agent 检测 manifest：src/detect/manifests/kiro.toml\nid = \"kiro\"\nversion = \"2026.08.01.1\"\nmin_engine_version = 1\n[[rules]]\nid = \"tool_approval\"\nstate = \"blocked\"\npriority = 300\n[[rules]]\nid = \"subagent_approval\"\nstate = \"blocked\"\npriority = 290\n[[rules]]\nid = \"prompt_idle\"\nstate = \"idle\"\npriority = 200\n[[rules]]\nid = \"kiro_working_marker\"\nstate = \"working\"\npriority = 100\n[[rules]]\nid = \"tool_spinner_working\"\nstate = \"working\"\npriority = 90"
-    },
-    {
-      "anchor": "summary",
-      "doc": "src/detect/manifests/letta.toml",
-      "id": "src-detect-manifests-letta-toml-summary",
-      "source_sha256": "0ca895b68b314fb938c6311ebb6ebf63de3f6cafa252af8bf10d7706f230293e",
-      "text": "agent 检测 manifest：src/detect/manifests/letta.toml\nid = \"letta\"\nversion = \"2026.08.24.1\"\nmin_engine_version = 3\n[[rules]]\nid = \"osc_progress_blocked\"\nstate = \"blocked\"\npriority = 1400\n[[rules]]\nid = \"osc_title_blocked\"\nstate = \"blocked\"\npriority = 1300\n[[rules]]\nid = \"command_approval\"\nstate = \"blocked\"\npriority = 1200\n[[rules]]\nid = \"osc_title_working\"\nstate = \"working\"\npriority = 900\n[[rules]]\nid = \"active_status\"\nstate = \"working\"\npriority = 850\n[[rules]]\nid = \"running_tool\"\nstate = \"working\"\npriority = 800\n[[rules]]\nid = \"profile_selector\"\nstate = \"unknown\"\npriority = 700\n[[rules]]\nid = \"composer_input\"\nstate = \"unknown\"\npriority = 150\n[[rules]]\nid = \"composer_idle\"\nstate = \"idle\"\npriority = 100\n[[rules]]\nid = \"no_live_state_evidence\"\nstate = \"unknown\"\npriority = 0"
-    },
-    {
-      "anchor": "summary",
-      "doc": "src/detect/manifests/maki.toml",
-      "id": "src-detect-manifests-maki-toml-summary",
-      "source_sha256": "7978eae5d6837697f5c2aab93cb8b8a55b4ebf33e33d2616e7fe3d24e157f548",
-      "text": "agent 检测 manifest：src/detect/manifests/maki.toml\nid = \"maki\"\nversion = \"2026.07.09.2\"\nmin_engine_version = 1\n[[rules]]\nid = \"permission_prompt\"\nstate = \"blocked\"\npriority = 980\n[[rules]]\nid = \"plan_complete_form\"\nstate = \"blocked\"\npriority = 970\n[[rules]]\nid = \"status_bar_spinner_working\"\nstate = \"working\"\npriority = 900\n[[rules]]\nid = \"status_bar_idle\"\nstate = \"idle\"\npriority = 850\n[[rules]]\nid = \"prompt_box_idle\"\nstate = \"idle\"\npriority = 840"
-    },
-    {
-      "anchor": "summary",
-      "doc": "src/detect/manifests/muse.toml",
-      "id": "src-detect-manifests-muse-toml-summary",
-      "source_sha256": "efee65b61a1c8e0c8f3be56d92411b504334d7142bcacb431b63cfad53f415a1",
-      "text": "agent 检测 manifest：src/detect/manifests/muse.toml\nid = \"muse\"\nversion = \"2026.08.26.1\"\nmin_engine_version = 2\n[[rules]]\nid = \"workspace_trust_blocked\"\nstate = \"blocked\"\npriority = 970\n[[rules]]\nid = \"pick_request_blocked\"\nstate = \"blocked\"\npriority = 950\n[[rules]]\nid = \"menu_overlay\"\nstate = \"unknown\"\npriority = 940\n[[rules]]\nid = \"working_esc_interrupt\"\nstate = \"working\"\npriority = 900\n[[rules]]\nid = \"blocked_approval\"\nstate = \"blocked\"\npriority = 850\n[[rules]]\nid = \"idle_prompt\"\nstate = \"idle\"\npriority = 700\n[[rules]]\nid = \"idle_status_fallback\"\nstate = \"idle\"\npriority = 500"
     },
     {
       "anchor": "summary",
@@ -5546,25 +5441,11 @@
       "text": "agent 检测 manifest：src/detect/manifests/pi.toml\nid = \"pi\"\nversion = \"2026.09.14.1\"\nmin_engine_version = 1\n[[rules]]\nid = \"working_literal\"\nstate = \"working\"\npriority = 100\n[[rules]]\nid = \"working_border\"\nstate = \"working\"\npriority = 100"
     },
     {
-      "anchor": "summary",
-      "doc": "src/detect/manifests/qodercli.toml",
-      "id": "src-detect-manifests-qodercli-toml-summary",
-      "source_sha256": "77d0b14581319ae1cdd104181a400afafd0b03cb0ffaa2b97f8bd381365e20cf",
-      "text": "agent 检测 manifest：src/detect/manifests/qodercli.toml\nid = \"qodercli\"\nversion = \"2026.06.10.1\"\nmin_engine_version = 1\n[[rules]]\nid = \"confirmation_or_input_blocker\"\nstate = \"blocked\"\npriority = 300\n[[rules]]\nid = \"cancel_hint_working\"\nstate = \"working\"\npriority = 100\n[[rules]]\nid = \"spinner_working\"\nstate = \"working\"\npriority = 90"
-    },
-    {
-      "anchor": "summary",
-      "doc": "src/detect/manifests/qwen.toml",
-      "id": "src-detect-manifests-qwen-toml-summary",
-      "source_sha256": "d4a7cfc7118ab596f300bda21406ddbaa2e016bf2afbd1f0752b4706a773959c",
-      "text": "agent 检测 manifest：src/detect/manifests/qwen.toml\nid = \"qwen\"\nversion = \"2026.08.14.1\"\nmin_engine_version = 2\n[[rules]]\nid = \"osc_title_blocked\"\nstate = \"blocked\"\npriority = 1200\n[[rules]]\nid = \"osc_title_working\"\nstate = \"working\"\npriority = 1100\n[[rules]]\nid = \"waiting_for_confirmation\"\nstate = \"blocked\"\npriority = 1000\n[[rules]]\nid = \"tool_confirmation\"\nstate = \"blocked\"\npriority = 990\n[[rules]]\nid = \"question_dialog\"\nstate = \"blocked\"\npriority = 980\n[[rules]]\nid = \"folder_trust_dialog\"\nstate = \"blocked\"\npriority = 970\n[[rules]]\nid = \"cancel_hint_working\"\nstate = \"working\"\npriority = 900\n[[rules]]\nid = \"narrow_cancel_hint_working\"\nstate = \"working\"\npriority = 890\n[[rules]]\nid = \"osc_tool_progress_working\"\nstate = \"working\"\npriority = 850\n[[rules]]\nid = \"composer_idle\"\nstate = \"idle\"\npriority = 100"
-    },
-    {
       "anchor": "structure",
       "doc": "src/detect/mod.rs",
       "id": "src-detect-mod-rs-structure",
-      "source_sha256": "c02b86252638345521218e6e9d7e563aa0d77350020aa6a434d5b49089d2ed8d",
-      "text": "模块文档：Agent state detection via terminal tail pattern matching.  Each pane's live bottom-of-buffer text is read periodically and matched against known agent output patterns to determine state.\n公开项：\npub mod manifest;\npub mod manifest_update;\npub enum AgentState {\npub struct AgentDetection {\npub enum Agent {\nimpl Agent {\npub const ALL: [Self; 24] = [\npub const SCREEN_MANIFEST_AGENTS: [Self; 22] = [\npub fn agent_label(agent: Agent) -> &'static str {\npub fn interactive_agent_executable(agent: Agent) -> &'static str {\npub fn parse_agent_label(agent: &str) -> Option<Agent> {\npub(crate) fn parse_canonical_agent_label(label: &str) -> Option<Agent> {\npub fn identify_agent(process_name: &str) -> Option<Agent> { — Identify which agent is running from the process name. Returns `None` for plain shells or unrecognized programs.\npub fn identify_agent_in_job(job: &crate::platform::ForegroundJob) -> Option<(Agent, String)> {\npub fn detect_state(agent: Option<Agent>, screen_content: &str) -> AgentState {\npub fn detect_agent(agent: Option<Agent>, screen_content: &str) -> AgentDetection {\npub fn detect_agent_with_osc( — Detect state using screen content plus OSC title/progress strings.\npub(crate) fn full_lifecycle_hook_authority(source: &str, agent_label: &str) -> bool {\npub(crate) fn session_identity_only_integration(source: &str, agent_label: &str) -> bool {\npub fn foreground_job(child_pid: u32) -> Option<crate::platform::ForegroundJob> { — Get the foreground job for a given child PID. Delegates to platform-specific implementation.\npub fn foreground_group_leader_job( — Get the foreground process group leader as a one-process job. This is cheaper than collecting every process in the foreground job.\npub fn foreground_process_group_id(child_pid: u32) -> Option<u32> { — Get the foreground process group for a pane shell PID. This is cheaper than collecting every process in the foreground job."
+      "source_sha256": "e7a849127fdb0dd9f38d29d2370cb501e6994ccb79d4a1c44a02a06a72a9b92b",
+      "text": "模块文档：Agent state detection via terminal tail pattern matching.  Each pane's live bottom-of-buffer text is read periodically and matched against known agent output patterns to determine state.\n公开项：\npub mod manifest;\npub mod manifest_update;\npub enum AgentState {\npub struct AgentDetection {\npub enum Agent {\nimpl Agent {\npub const ALL: [Self; 5] = [\npub const SCREEN_MANIFEST_AGENTS: [Self; 5] = Self::ALL;\npub(crate) const RETIRED_AGENT_LABELS: [&str; 19] = [ — 本 fork 删除前曾是规范 agent id 的标签。只用于配置兼容：用户旧 config.toml 里 以这些 id 为键的覆盖项（如 `ui.sidebar.agents.rows_by_agent`）要被忽略并告警， 而不是让整份配置解析失败回退默认。不参与识别，`parse_agent_label` 不认它们。\npub(crate) fn is_retired_agent_label(label: &str) -> bool {\npub fn agent_label(agent: Agent) -> &'static str {\npub fn interactive_agent_executable(agent: Agent) -> &'static str {\npub fn parse_agent_label(agent: &str) -> Option<Agent> {\npub(crate) fn parse_canonical_agent_label(label: &str) -> Option<Agent> {\npub fn identify_agent(process_name: &str) -> Option<Agent> { — Identify which agent is running from the process name. Returns `None` for plain shells or unrecognized programs.\npub fn identify_agent_in_job(job: &crate::platform::ForegroundJob) -> Option<(Agent, String)> {\npub fn detect_state(agent: Option<Agent>, screen_content: &str) -> AgentState {\npub fn detect_agent(agent: Option<Agent>, screen_content: &str) -> AgentDetection {\npub fn detect_agent_with_osc( — Detect state using screen content plus OSC title/progress strings.\npub(crate) fn full_lifecycle_hook_authority(source: &str, agent_label: &str) -> bool {\npub(crate) fn session_identity_only_integration(_source: &str, _agent_label: &str) -> bool { — 只上报会话身份、不上报生命周期状态的集成。五家官方集成里没有这一类（上游属于 此类的集成都不在官方名单内，已随安装层删除）；保留这个分类函数，是为了让 `src/terminal/state.rs` 的调用点与上游保持一致、同步时不产生冲突。\npub fn foreground_job(child_pid: u32) -> Option<crate::platform::ForegroundJob> { — Get the foreground job for a given child PID. Delegates to platform-specific implementation.\npub fn foreground_group_leader_job( — Get the foreground process group leader as a one-process job. This is cheaper than collecting every process in the foreground job.\npub fn foreground_process_group_id(child_pid: u32) -> Option<u32> { — Get the foreground process group for a pane shell PID. This is cheaper than collecting every process in the foreground job."
     },
     {
       "anchor": "structure",

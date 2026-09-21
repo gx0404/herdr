@@ -1961,7 +1961,7 @@ fn pane_report_agent_accepts_unknown_agent_labels() {
     let hook = send_request(
         &socket_path,
         &format!(
-            r#"{{"id":"req_hook_generic_2","method":"pane.report_agent","params":{{"pane_id":"{}","source":"custom:hermes","agent":"hermes","state":"working"}}}}"#,
+            r#"{{"id":"req_hook_generic_2","method":"pane.report_agent","params":{{"pane_id":"{}","source":"custom:reviewer-bot","agent":"reviewer-bot","state":"working"}}}}"#,
             pane_id
         ),
     );
@@ -1974,7 +1974,7 @@ fn pane_report_agent_accepts_unknown_agent_labels() {
             pane_id
         ),
     );
-    assert_eq!(pane["result"]["pane"]["agent"], "hermes");
+    assert_eq!(pane["result"]["pane"]["agent"], "reviewer-bot");
     assert_eq!(pane["result"]["pane"]["agent_status"], "working");
 
     cleanup_spawned_herdr(child, base);

@@ -1737,7 +1737,7 @@ mod tests {
             api_rx,
             crate::api::EventHub::default(),
         );
-        app.state.workspaces = vec![crate::workspace::Workspace::test_new("agent-explain-omp")];
+        app.state.workspaces = vec![crate::workspace::Workspace::test_new("agent-explain-pi")];
         app.state.ensure_test_terminals();
         let pane_id = app.state.workspaces[0].tabs[0].root_pane;
         let terminal_id = app.state.workspaces[0].tabs[0].panes[&pane_id]
@@ -1748,8 +1748,8 @@ mod tests {
             .get_mut(&terminal_id)
             .unwrap()
             .set_hook_authority(
-                "herdr:omp".to_string(),
-                "omp".to_string(),
+                "herdr:pi".to_string(),
+                "pi".to_string(),
                 AgentState::Working,
                 None,
                 Some(1),
@@ -1759,7 +1759,7 @@ mod tests {
         let target = app.public_pane_id(0, pane_id).unwrap();
 
         let response = app.handle_api_request(crate::api::schema::Request {
-            id: "agent_explain_omp".into(),
+            id: "agent_explain_pi".into(),
             method: crate::api::schema::Method::AgentExplain(crate::api::schema::AgentTarget {
                 target,
             }),

@@ -1100,6 +1100,83 @@ mouse_captur = true
         assert_eq!(loaded.invalid_sections, vec!["ui"]);
     }
 
+    /// 用户旧 config.toml 里残留的已删 agent 覆盖键：启动与热重载两条路径都只忽略
+    /// 这些键，同段其余设置照常生效，不回退默认、不拒收整段。
+    const RETIRED_AGENT_KEYS_CONFIG: &str = r#"
+[ui]
+mouse_capture = false
+
+[ui.sound]
+enabled = true
+
+[ui.sound.agents]
+claude = "off"
+droid = "off"
+cursor = "on"
+github_copilot = "default"
+
+[ui.sidebar.agents.rows_by_agent]
+claude = [["terminal_title"]]
+cursor = [["agent"]]
+omp = [["agent"]]
+"#;
+
+    fn assert_retired_agent_keys_were_only_ignored(loaded: &LoadedConfig) {
+        assert!(loaded.invalid_sections.is_empty(), "{loaded:?}");
+        assert!(
+            loaded.diagnostics.iter().all(|diagnostic| {
+                !diagnostic.contains("using defaults") && !diagnostic.contains("keeping current")
+            }),
+            "{:?}",
+            loaded.diagnostics
+        );
+        // 已删 agent 的 sound 键走既有的未知键诊断，用户看得到该清理什么。
+        for key in ["droid", "cursor", "github_copilot"] {
+            assert!(
+                loaded.diagnostics.iter().any(|diagnostic| {
+                    diagnostic == &format!("unknown config key ui.sound.agents.{key}; ignoring key")
+                }),
+                "{key}: {:?}",
+                loaded.diagnostics
+            );
+        }
+        let ui = &loaded.config.ui;
+        assert!(!ui.mouse_capture, "同段其余设置必须照常生效");
+        assert_eq!(
+            ui.sound.agents.claude,
+            crate::config::sound::AgentSoundSetting::Off
+        );
+        assert_eq!(
+            ui.sidebar.agents.rows_by_agent.keys().collect::<Vec<_>>(),
+            vec!["claude"]
+        );
+    }
+
+    #[test]
+    fn startup_config_ignores_retired_agent_keys_without_falling_back_to_defaults() {
+        let _guard = crate::config::test_config_env_lock().lock().unwrap();
+        let path = std::env::temp_dir().join(format!(
+            "herdr-config-retired-agent-keys-{}.toml",
+            std::process::id()
+        ));
+        std::fs::write(&path, RETIRED_AGENT_KEYS_CONFIG).unwrap();
+        std::env::set_var(CONFIG_PATH_ENV_VAR, &path);
+
+        let loaded = Config::load();
+
+        std::env::remove_var(CONFIG_PATH_ENV_VAR);
+        let _ = std::fs::remove_file(path);
+
+        assert_retired_agent_keys_were_only_ignored(&loaded);
+    }
+
+    #[test]
+    fn live_reload_ignores_retired_agent_keys_without_rejecting_the_ui_section() {
+        let loaded = load_live_config_from_str(RETIRED_AGENT_KEYS_CONFIG).unwrap();
+
+        assert_retired_agent_keys_were_only_ignored(&loaded);
+    }
+
     #[test]
     fn startup_config_accepts_legacy_agent_panel_scope_without_warning() {
         let _guard = crate::config::test_config_env_lock().lock().unwrap();

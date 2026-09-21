@@ -29,18 +29,31 @@ path = "{path}"
 '''
 
 
-def staged_grok_dirs(root: Path) -> tuple[Path, Path]:
+# The staged-exception mechanism is exercised with self-made manifests so it
+# does not depend on any real bundled/published manifest staying in the repo.
+STAGED_TEST_BUNDLED = manifest("testagent", "2026.06.10.2").replace(
+    "min_engine_version = 1", "min_engine_version = 3"
+)
+STAGED_TEST_PUBLISHED = manifest("testagent", "2026.06.10.1").replace(
+    "min_engine_version = 1", "min_engine_version = 2"
+)
+STAGED_TEST_EXCEPTION = {
+    "testagent": (
+        "2026.06.10.2",
+        "2026.06.10.1",
+        hashlib.sha256(STAGED_TEST_PUBLISHED.encode()).hexdigest(),
+    ),
+}
+
+
+def staged_manifest_dirs(root: Path) -> tuple[Path, Path]:
     bundled = root / "bundled"
     published = root / "published"
     bundled.mkdir()
     published.mkdir()
-    (bundled / "grok.toml").write_bytes(
-        (check.DEFAULT_BUNDLED_DIR / "grok.toml").read_bytes()
-    )
-    (published / "grok.toml").write_bytes(
-        (check.DEFAULT_PUBLISHED_DIR / "grok.toml").read_bytes()
-    )
-    (published / "index.toml").write_text(catalog("grok", "grok.toml"))
+    (bundled / "testagent.toml").write_text(STAGED_TEST_BUNDLED, encoding="utf-8", newline="\n")
+    (published / "testagent.toml").write_text(STAGED_TEST_PUBLISHED, encoding="utf-8", newline="\n")
+    (published / "index.toml").write_text(catalog("testagent", "testagent.toml"))
     return bundled, published
 
 
@@ -96,20 +109,30 @@ class AgentDetectionManifestCheckTests(unittest.TestCase):
 
     def test_allows_explicitly_staged_published_manifest(self):
         with tempfile.TemporaryDirectory() as tmp:
-            bundled, website = staged_grok_dirs(Path(tmp))
+            bundled, website = staged_manifest_dirs(Path(tmp))
 
             bundled_manifests = check.load_manifest_dir(bundled, engine_version=3)
-            check.validate_catalog(website, bundled_manifests, engine_version=3)
+            with patch.object(check, "STAGED_PUBLISHED_MANIFESTS", STAGED_TEST_EXCEPTION):
+                check.validate_catalog(website, bundled_manifests, engine_version=3)
 
-    def test_rejects_mutated_staged_published_manifest(self):
+    def test_rejects_staged_published_manifest_without_an_exception(self):
         with tempfile.TemporaryDirectory() as tmp:
-            bundled, website = staged_grok_dirs(Path(tmp))
-            with (website / "grok.toml").open("a") as manifest_file:
-                manifest_file.write("\n# unexpected mutation\n")
+            bundled, website = staged_manifest_dirs(Path(tmp))
 
             bundled_manifests = check.load_manifest_dir(bundled, engine_version=3)
             with self.assertRaisesRegex(check.CheckError, "lower than bundled"):
                 check.validate_catalog(website, bundled_manifests, engine_version=3)
+
+    def test_rejects_mutated_staged_published_manifest(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            bundled, website = staged_manifest_dirs(Path(tmp))
+            with (website / "testagent.toml").open("a") as manifest_file:
+                manifest_file.write("\n# unexpected mutation\n")
+
+            bundled_manifests = check.load_manifest_dir(bundled, engine_version=3)
+            with patch.object(check, "STAGED_PUBLISHED_MANIFESTS", STAGED_TEST_EXCEPTION):
+                with self.assertRaisesRegex(check.CheckError, "lower than bundled"):
+                    check.validate_catalog(website, bundled_manifests, engine_version=3)
 
     def test_rejects_unlisted_published_manifest_lag_for_new_engine(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -22,31 +22,17 @@ pub struct SoundConfig {
     pub agents: AgentSoundOverrides,
 }
 
+/// 每个官方 agent 一个覆盖键。本 fork 已删除的 agent 不再有字段：旧配置里残留的键
+/// （如 `droid = "off"`）按未知键处理——忽略并给出 `unknown config key` 诊断，同段
+/// 其余设置照常生效，启动与热重载都不会因此回退默认。
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(default)]
 pub struct AgentSoundOverrides {
     pub pi: AgentSoundSetting,
     pub claude: AgentSoundSetting,
     pub codex: AgentSoundSetting,
-    pub gemini: AgentSoundSetting,
-    pub cursor: AgentSoundSetting,
-    pub devin: AgentSoundSetting,
-    pub agy: AgentSoundSetting,
-    pub cline: AgentSoundSetting,
     pub open_code: AgentSoundSetting,
-    pub github_copilot: AgentSoundSetting,
     pub kimi: AgentSoundSetting,
-    pub kiro: AgentSoundSetting,
-    pub droid: AgentSoundSetting,
-    pub amp: AgentSoundSetting,
-    pub grok: AgentSoundSetting,
-    pub hermes: AgentSoundSetting,
-    pub kilo: AgentSoundSetting,
-    pub qodercli: AgentSoundSetting,
-    pub qwen: AgentSoundSetting,
-    pub letta: AgentSoundSetting,
-    pub maki: AgentSoundSetting,
-    pub muse: AgentSoundSetting,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
@@ -125,27 +111,8 @@ impl AgentSoundOverrides {
             Some(Agent::Pi) => self.pi,
             Some(Agent::Claude) => self.claude,
             Some(Agent::Codex) => self.codex,
-            Some(Agent::Gemini) => self.gemini,
-            Some(Agent::Cursor) => self.cursor,
-            Some(Agent::Devin) => self.devin,
-            Some(Agent::Antigravity) => self.agy,
-            Some(Agent::Cline) => self.cline,
-            Some(Agent::Omp) => AgentSoundSetting::Default,
-            Some(Agent::Mastracode) => AgentSoundSetting::Default,
             Some(Agent::OpenCode) => self.open_code,
-            Some(Agent::GithubCopilot) => self.github_copilot,
             Some(Agent::Kimi) => self.kimi,
-            Some(Agent::Kiro) => self.kiro,
-            Some(Agent::Droid) => self.droid,
-            Some(Agent::Amp) => self.amp,
-            Some(Agent::Grok) => self.grok,
-            Some(Agent::Hermes) => self.hermes,
-            Some(Agent::Kilo) => self.kilo,
-            Some(Agent::Qodercli) => self.qodercli,
-            Some(Agent::Qwen) => self.qwen,
-            Some(Agent::Letta) => self.letta,
-            Some(Agent::Maki) => self.maki,
-            Some(Agent::Muse) => self.muse,
             None => AgentSoundSetting::Default,
         }
     }
@@ -169,25 +136,8 @@ impl Default for AgentSoundOverrides {
             pi: AgentSoundSetting::Default,
             claude: AgentSoundSetting::Default,
             codex: AgentSoundSetting::Default,
-            gemini: AgentSoundSetting::Default,
-            cursor: AgentSoundSetting::Default,
-            devin: AgentSoundSetting::Default,
-            agy: AgentSoundSetting::Default,
-            cline: AgentSoundSetting::Default,
             open_code: AgentSoundSetting::Default,
-            github_copilot: AgentSoundSetting::Default,
             kimi: AgentSoundSetting::Default,
-            kiro: AgentSoundSetting::Default,
-            droid: AgentSoundSetting::Off,
-            amp: AgentSoundSetting::Default,
-            grok: AgentSoundSetting::Default,
-            hermes: AgentSoundSetting::Default,
-            kilo: AgentSoundSetting::Default,
-            qodercli: AgentSoundSetting::Default,
-            qwen: AgentSoundSetting::Default,
-            letta: AgentSoundSetting::Default,
-            maki: AgentSoundSetting::Default,
-            muse: AgentSoundSetting::Default,
         }
     }
 }
@@ -209,7 +159,7 @@ done_path = "sounds/done.mp3"
 request_path = "/tmp/request.mp3"
 
 [ui.sound.agents]
-droid = "off"
+kimi = "off"
 claude = "on"
 "#;
         let config: Config = toml::from_str(toml).unwrap();
@@ -223,20 +173,41 @@ claude = "on"
             config.ui.sound.request_path,
             Some(PathBuf::from("/tmp/request.mp3"))
         );
-        assert_eq!(config.ui.sound.agents.droid, AgentSoundSetting::Off);
+        assert_eq!(config.ui.sound.agents.kimi, AgentSoundSetting::Off);
         assert_eq!(config.ui.sound.agents.claude, AgentSoundSetting::On);
         assert_eq!(config.ui.sound.agents.pi, AgentSoundSetting::Default);
-        assert_eq!(config.ui.sound.agents.letta, AgentSoundSetting::Default);
+        assert!(!config.ui.sound.allows(Some(Agent::Kimi)));
+        assert!(config.ui.sound.allows(Some(Agent::Claude)));
     }
 
     #[test]
-    fn letta_sound_override_is_used() {
-        let overrides: AgentSoundOverrides = toml::from_str("letta = \"on\"").unwrap();
-        assert_eq!(overrides.letta, AgentSoundSetting::On);
-        assert_eq!(
-            overrides.for_agent(Some(Agent::Letta)),
-            AgentSoundSetting::On
-        );
+    fn every_agent_has_a_sound_override_key() {
+        for (key, agent) in [
+            ("pi", Agent::Pi),
+            ("claude", Agent::Claude),
+            ("codex", Agent::Codex),
+            ("open_code", Agent::OpenCode),
+            ("kimi", Agent::Kimi),
+        ] {
+            let overrides: AgentSoundOverrides =
+                toml::from_str(&format!("{key} = \"on\"")).unwrap();
+            assert_eq!(
+                overrides.for_agent(Some(agent)),
+                AgentSoundSetting::On,
+                "{key}"
+            );
+        }
+        assert_eq!(Agent::ALL.len(), 5, "新增 agent 时同步补覆盖键");
+    }
+
+    #[test]
+    fn retired_agent_sound_keys_are_ignored_without_failing_the_section() {
+        // 已删除 agent 的覆盖键不再有字段；serde 对未知键的默认行为是忽略，
+        // 值即使不合法也不参与解析，同段其余键照常生效。
+        let overrides: AgentSoundOverrides =
+            toml::from_str("droid = \"off\"\ncursor = \"bogus\"\nclaude = \"off\"").unwrap();
+        assert_eq!(overrides.claude, AgentSoundSetting::Off);
+        assert_eq!(overrides.pi, AgentSoundSetting::Default);
     }
 
     #[test]

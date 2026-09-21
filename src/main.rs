@@ -474,9 +474,9 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # request_path = "sounds/request.mp3" # overrides only needs-attention notifications
 
 # Per-agent overrides: default | on | off
-# By default, droid is muted.
+# Keys: pi, claude, codex, open_code, kimi.
 # [ui.sound.agents]
-# droid = "off"
+# kimi = "off"
 
 [session]
 # Resume supported AI-agent panes into their native conversation sessions after
@@ -514,9 +514,7 @@ pane_history = false
 # Optional allow-list: only reveal for focused panes whose detected agent
 # matches one of these names. Empty means apply to any focused pane.
 # If the list contains no valid names, the reveal does not apply.
-# Accepted: pi, claude, codex, gemini, cursor, devin, cline, opencode,
-# copilot, kimi, kiro, droid, amp, grok, hermes, kilo, qodercli, qoder, qwen,
-# qwen-code, letta, letta-code, maki.
+# Accepted: pi, claude, claude-code, codex, opencode, kimi, kimi-code.
 # cjk_ime_agents = []
 # Cursor shape rendered when reveal_hidden_cursor_for_cjk_ime is true.
 # Values: block, steady_block, underline, steady_underline, bar (default), steady_bar.

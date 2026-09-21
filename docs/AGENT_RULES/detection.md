@@ -40,6 +40,21 @@ stable 客户端无法识别的新捆绑 agent 可暂不发布（挂在精确例
 不存在未发布例外。`scripts/agent_detection_manifest_check.py`（`just
 maintenance-test` 内）校验捆绑与发布副本一致性。
 
-官方集成仅六家：其余 agent 的捆绑 manifest 不新增，同步上游时也不合入，发布
-目录里的对应副本随之删减；名单与口径见 `README.md` 的「fork 已删除的集成」，
-目录归属的 fork 例外登记在 `release-channels.md`。
+官方集成仅六家：其余 agent 的捆绑 manifest 与 `src/detect/mod.rs::Agent` 变体已
+删除（`Agent` 不派生 serde、不进 wire 结构，对外只以 `agent_label` 字符串出现），
+不新增，同步上游时也不合入，发布目录里的对应副本随之删减；名单与口径见
+`README.md` 的「fork 已删除的集成」，目录归属的 fork 例外登记在
+`release-channels.md`。
+
+删除后的兼容不变量：
+
+- **远程目录回流**：上游发布目录仍会列出已删 agent。
+  `src/detect/manifest_update.rs::parse_catalog` 对未知 id 只 `warn` 并跳过，整份
+  目录照常接受，不进状态、不落缓存、不写本地覆盖。
+- **用户配置**：`src/detect/mod.rs::RETIRED_AGENT_LABELS` 登记删除前的规范 id，只
+  服务配置兼容，不参与识别。`src/config/sidebar.rs::deserialize_rows_by_agent` 据此
+  忽略并告警已删 agent 的 `rows_by_agent` 键（否则启动会整份回退默认、热重载会
+  拒收整个 ui 段）；`src/config/sound.rs::AgentSoundOverrides` 的旧键按未知键处理，
+  只产生 `unknown config key` 诊断。上游日后新增、fork 不收的 agent 不需要登记。
+- **残留 hook 与旧快照**：`src/agent_resume.rs::is_official_agent_source` 只认五家，
+  已删集成残留 hook 的会话上报与旧快照里的会话一律按非官方来源丢弃。

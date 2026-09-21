@@ -410,31 +410,19 @@ mod tests {
         }
         assert!(provider("Claude Code").is_some(), "别名仍归一到 claude");
         assert!(provider("kimi-code").is_some(), "别名仍归一到 kimi");
-        for retired in [
-            "gemini",
-            "cursor",
-            "devin",
-            "antigravity",
-            "agy",
-            "cline",
-            "omp",
-            "mastracode",
-            "github-copilot",
-            "copilot",
-            "kiro",
-            "droid",
-            "amp",
-            "grok",
-            "hermes",
-            "kilo",
-            "qodercli",
-            "qoder",
-            "qwen",
-            "letta",
-            "maki",
-            "muse",
-            "zcode",
-        ] {
+        // 五家官方来源与可识别的 agent 一一对应：检测层删掉的 agent 不会再有用量来源。
+        assert_eq!(
+            PROVIDERS
+                .iter()
+                .map(|p| p.agent)
+                .collect::<std::collections::HashSet<_>>(),
+            detectable
+        );
+        for retired in crate::detect::RETIRED_AGENT_LABELS
+            .iter()
+            .copied()
+            .chain(["zcode"])
+        {
             assert!(provider(retired).is_none(), "{retired} 不在用量范围内");
         }
     }

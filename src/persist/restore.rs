@@ -1149,17 +1149,36 @@ mod tests {
     #[test]
     fn restore_rehydrates_agent_session_metadata() {
         let session = super::super::snapshot::PaneAgentSessionSnapshot {
-            source: "herdr:hermes".into(),
-            agent: "hermes".into(),
+            source: "herdr:kimi".into(),
+            agent: "kimi".into(),
             kind: crate::agent_resume::AgentSessionRefKind::Id,
-            value: "hermes-session".into(),
+            value: "kimi-session".into(),
         };
 
         let preserved = restored_terminal_agent_session(Some(&session), false)
             .expect("restore should preserve metadata");
-        assert_eq!(preserved.source, "herdr:hermes");
-        assert_eq!(preserved.agent, "hermes");
-        assert_eq!(preserved.session_ref.value, "hermes-session");
+        assert_eq!(preserved.source, "herdr:kimi");
+        assert_eq!(preserved.agent, "kimi");
+        assert_eq!(preserved.session_ref.value, "kimi-session");
+    }
+
+    #[test]
+    fn restore_drops_agent_session_metadata_of_retired_integrations() {
+        // 旧快照里可能还存着本 fork 已删除集成的会话：恢复时按非官方来源丢弃，
+        // 不 panic，也不把它带进新会话。
+        for label in crate::detect::RETIRED_AGENT_LABELS {
+            let session = super::super::snapshot::PaneAgentSessionSnapshot {
+                source: format!("herdr:{label}"),
+                agent: label.to_string(),
+                kind: crate::agent_resume::AgentSessionRefKind::Id,
+                value: "legacy-session".into(),
+            };
+
+            assert!(
+                restored_terminal_agent_session(Some(&session), false).is_none(),
+                "{label}"
+            );
+        }
     }
 
     #[test]

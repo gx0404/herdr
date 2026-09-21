@@ -407,7 +407,16 @@ fn deserialize_rows_by_agent<'de, D>(
 where
     D: serde::Deserializer<'de>,
 {
-    let rows_by_agent = BTreeMap::<String, AgentSidebarRows>::deserialize(deserializer)?;
+    let mut rows_by_agent = BTreeMap::<String, AgentSidebarRows>::deserialize(deserializer)?;
+    // 本 fork 已删除的 agent：旧配置里残留的覆盖键忽略并告警。它们曾是合法的规范 id，
+    // 若按未知 id 拒绝，启动时整份配置会回退默认、热重载时整个 ui 段会被拒收。
+    rows_by_agent.retain(|id, _| {
+        let retired = crate::detect::is_retired_agent_label(id);
+        if retired {
+            warn_retired_rows_by_agent_id_once(id);
+        }
+        !retired
+    });
     for (id, rows) in &rows_by_agent {
         if crate::detect::parse_canonical_agent_label(id).is_none() {
             return Err(serde::de::Error::custom(format!(
@@ -417,6 +426,22 @@ where
         validate_sidebar_rows(rows).map_err(serde::de::Error::custom)?;
     }
     Ok(rows_by_agent)
+}
+
+/// 同一个退役 id 只告警一次：配置热重载会反复解析同一份文件。
+fn warn_retired_rows_by_agent_id_once(id: &str) {
+    static WARNED: std::sync::OnceLock<std::sync::Mutex<std::collections::BTreeSet<String>>> =
+        std::sync::OnceLock::new();
+    let mut warned = WARNED
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if warned.insert(id.to_string()) {
+        tracing::warn!(
+            agent = id,
+            "ignoring ui.sidebar.agents.rows_by_agent override for an agent retired in this fork"
+        );
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
@@ -714,6 +739,28 @@ rows = [[{ token = "$status", rules = [{ contains = "error", bold = true }] }]]
         let config: crate::config::Config = toml::from_str(&input).expect("canonical keys");
 
         assert_eq!(config.ui.sidebar.agents.rows_by_agent.len(), agents.len());
+    }
+
+    #[test]
+    fn retired_agent_override_keys_are_dropped_instead_of_rejected() {
+        let input = "[ui.sidebar.agents.rows_by_agent]\n\
+                     claude = [[\"terminal_title\"]]\n\
+                     cursor = [[\"agent\"]]\n\
+                     omp = [[\"agent\"]]\n";
+        let config: crate::config::Config =
+            toml::from_str(input).expect("retired agent ids must not fail the config");
+        let rows_by_agent = &config.ui.sidebar.agents.rows_by_agent;
+        assert_eq!(rows_by_agent.keys().collect::<Vec<_>>(), vec!["claude"]);
+
+        for retired in crate::detect::RETIRED_AGENT_LABELS {
+            let input = format!("[ui.sidebar.agents.rows_by_agent]\n{retired} = [[\"agent\"]]\n");
+            let config: crate::config::Config = toml::from_str(&input)
+                .unwrap_or_else(|err| panic!("{retired} must be tolerated: {err}"));
+            assert!(
+                config.ui.sidebar.agents.rows_by_agent.is_empty(),
+                "{retired}"
+            );
+        }
     }
 
     #[test]

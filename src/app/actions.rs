@@ -3417,8 +3417,8 @@ mod tests {
 
         state.handle_app_event(AppEvent::HookStateReported {
             pane_id: bg_pane_id,
-            source: "custom:hermes".into(),
-            agent_label: "hermes".into(),
+            source: "custom:reviewer-bot".into(),
+            agent_label: "reviewer-bot".into(),
             state: AgentState::Blocked,
             message: None,
             seq: None,
@@ -3427,7 +3427,7 @@ mod tests {
 
         let toast = state.toast.as_ref().unwrap();
         assert_eq!(toast.kind, ToastKind::NeedsAttention);
-        assert_eq!(toast.title, "hermes 需要关注");
+        assert_eq!(toast.title, "reviewer-bot 需要关注");
         assert_eq!(toast.context, "background · 2");
     }
 
@@ -3591,42 +3591,6 @@ mod tests {
     }
 
     #[test]
-    fn devin_state_report_refreshes_session_without_overriding_screen_state() {
-        let mut state = app_with_workspaces(&["active"]);
-        let pane_id = *state.workspaces[0].panes.keys().next().unwrap();
-        let terminal_id = state.workspaces[0]
-            .panes
-            .get(&pane_id)
-            .unwrap()
-            .attached_terminal_id
-            .clone();
-
-        state.handle_app_event(AppEvent::StateChanged {
-            pane_id,
-            agent: Some(Agent::Devin),
-            state: AgentState::Idle,
-            visible_blocker: false,
-            visible_working: false,
-            process_exited: false,
-            observed_at: std::time::Instant::now(),
-        });
-        state.handle_app_event(AppEvent::HookStateReported {
-            pane_id,
-            source: "herdr:devin".into(),
-            agent_label: "devin".into(),
-            state: AgentState::Working,
-            message: None,
-            seq: Some(1),
-            session_ref: crate::agent_resume::AgentSessionRef::id("devin-session"),
-        });
-
-        let terminal = state.terminals.get(&terminal_id).unwrap();
-        assert_eq!(terminal.state, AgentState::Idle);
-        assert!(terminal.hook_authority.is_none());
-        assert!(terminal.persisted_agent_session.is_some());
-    }
-
-    #[test]
     fn hidden_custom_session_ref_only_update_marks_session_dirty_without_visible_update() {
         let mut state = app_with_workspaces(&["active"]);
         let pane_id = *state.workspaces[0].panes.keys().next().unwrap();
@@ -3735,7 +3699,7 @@ mod tests {
 
         state.handle_app_event(AppEvent::StateChanged {
             pane_id: bg_pane_id,
-            agent: Some(Agent::Droid),
+            agent: Some(Agent::Kimi),
             state: AgentState::Idle,
             visible_blocker: false,
             visible_working: false,
@@ -3745,7 +3709,7 @@ mod tests {
 
         let toast = state.toast.as_ref().unwrap();
         assert_eq!(toast.kind, ToastKind::Finished);
-        assert_eq!(toast.title, "droid 已完成");
+        assert_eq!(toast.title, "kimi 已完成");
         assert_eq!(toast.context, "background · 2");
         let target = toast.target.as_ref().expect("toast target");
         assert_eq!(&target.workspace_id, &state.workspaces[1].id);

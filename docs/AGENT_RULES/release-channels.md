@@ -44,13 +44,12 @@ Windows 归档必须含 `herdr.exe` 与其 app-local ConPTY 运行时（`platfor
 继续成立；不借此改动六家自身的发布副本，也不触碰 `distribution/*.json` 等其他
 渠道文件。名单与同步口径见 `README.md` 的「fork 已删除的集成」。
 
-grok 是已知硬阻塞：`scripts/agent_detection_manifest_check.py` 的
-`STAGED_PUBLISHED_MANIFESTS` 钉着它的（捆绑版本、发布版本、sha256）例外，
-`scripts/test_agent_detection_manifest_check.py::staged_grok_dirs` 又直接读真实的
-`src/detect/manifests/grok.toml` 与 `distribution/agent-detection/grok.toml`。删
-grok 时必须在同一次改动里移除该例外条目并处理它的两个 staged 用例（删掉，或
-改成自造 manifest 并 patch 例外表），否则 `just maintenance-test` 以
-FileNotFoundError 变红；同一提示也写在 `scripts/upstream_sync_drop_paths.txt` 的
+删减已落地：目录里只剩五家的副本与 `index.toml` 的五个条目。上游曾在
+`scripts/agent_detection_manifest_check.py::STAGED_PUBLISHED_MANIFESTS` 为 grok 钉
+（捆绑版本、发布版本、sha256）例外，fork 删 grok 时已清空该表，
+`scripts/test_agent_detection_manifest_check.py` 的 staged 用例改用自造 manifest
+并 patch 例外表，不再读取任何真实清单文件。同步上游时不要把 grok 条目与读取真实
+`grok.toml` 的用例合回来；同一提示也写在 `scripts/upstream_sync_drop_paths.txt` 的
 grok 行上方。
 
 ## CHANGELOG 与版本

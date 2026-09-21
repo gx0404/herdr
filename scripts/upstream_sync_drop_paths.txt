@@ -32,12 +32,9 @@ src/detect/manifests/devin.toml
 src/detect/manifests/droid.toml
 src/detect/manifests/gemini.toml
 src/detect/manifests/github-copilot.toml
-# grok 有硬阻塞：删这一行与发布目录的 grok.toml 时，必须在同一次改动里移除
-# scripts/agent_detection_manifest_check.py::STAGED_PUBLISHED_MANIFESTS 的 grok
-# 条目，并处理 scripts/test_agent_detection_manifest_check.py::staged_grok_dirs
-# 与它的两个 staged 用例（删掉，或改成自造 manifest 并 patch 该例外表）。
-# staged_grok_dirs 直接 read_bytes() 这两个真实文件，只删文件会让
-# just maintenance-test 以 FileNotFoundError 变红。
+# grok：上游在 scripts/agent_detection_manifest_check.py::STAGED_PUBLISHED_MANIFESTS
+# 里为它钉了 staged 例外。fork 删除时已清空该表，staged 用例改用自造 manifest；
+# 同步上游时不要把 grok 条目与读取真实 grok.toml 的用例合回来。
 src/detect/manifests/grok.toml
 src/detect/manifests/hermes.toml
 src/detect/manifests/kilo.toml
@@ -57,7 +54,7 @@ distribution/agent-detection/devin.toml
 distribution/agent-detection/droid.toml
 distribution/agent-detection/gemini.toml
 distribution/agent-detection/github-copilot.toml
-# grok：与上面捆绑清单的 grok.toml 同一次改动删除，硬阻塞见该行上方注释。
+# grok：staged 例外的处理见上面捆绑清单 grok.toml 行的注释。
 distribution/agent-detection/grok.toml
 distribution/agent-detection/hermes.toml
 distribution/agent-detection/kilo.toml
