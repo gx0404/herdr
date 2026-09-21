@@ -1351,12 +1351,31 @@ fn is_word_separator(ch: char) -> bool {
                 | ','
                 | ';'
                 | '!'
+                // 中文/全角标点：只补全角形态，不动 ASCII 的 `?` `"` `'` 等
+                // （URL 里合法，加了会把查询串截断，HERDR-BUG-013）。
                 | '（'
                 | '）'
                 | '：'
+                | '；'
                 | '、'
                 | '。'
                 | '，'
+                | '！'
+                | '？'
+                | '“'
+                | '”'
+                | '‘'
+                | '’'
+                | '《'
+                | '》'
+                | '〈'
+                | '〉'
+                | '「'
+                | '」'
+                | '『'
+                | '』'
+                | '【'
+                | '】'
         )
 }
 
@@ -2339,16 +2358,23 @@ mod tests {
 
     #[test]
     fn double_click_word_bounds_treat_cjk_punctuation_as_delimiters() {
-        for delimiter in ['（', '）', '：', '、', '。', '，'] {
+        for delimiter in [
+            '（', '）', '：', '；', '、', '。', '，', '！', '？', '“', '”', '‘', '’', '《', '》',
+            '〈', '〉', '「', '」', '『', '』', '【', '】',
+        ] {
             let row = format!("left{delimiter}right");
             assert_selects(&row, "left", "left");
             assert_selects(&row, "right", "right");
             assert_selects_nothing(&row, &delimiter.to_string());
-            assert_eq!(
-                selected_word(&row, col_of(&row, &delimiter.to_string()) + 1),
-                None,
-                "second display cell of {delimiter:?} should not select"
-            );
+            // 只有占两列的全角标点才有「第二个显示格」；“ ” ‘ ’ 属 East Asian
+            // Ambiguous，宽度是 1，`+1` 已经是下一个字符。
+            if crate::ghostty::unicode_codepoint_width(delimiter as u32) == 2 {
+                assert_eq!(
+                    selected_word(&row, col_of(&row, &delimiter.to_string()) + 1),
+                    None,
+                    "second display cell of {delimiter:?} should not select"
+                );
+            }
         }
     }
 
