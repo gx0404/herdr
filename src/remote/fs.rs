@@ -105,7 +105,14 @@ pub(crate) struct RemoteFs {
 impl RemoteFs {
     pub(crate) fn connect(profile: &SavedSshEndpoint) -> io::Result<Self> {
         let profile_options = super::saved::saved_profile_ssh_options(profile)?;
-        let config = write_managed_ssh_config(profile_options.as_ref())?;
+        let mut config = write_managed_ssh_config(profile_options.as_ref())?;
+        // 一次性 sftp 通道不建控制主连接：每个操作都会写一份新的受管配置
+        // （ControlPath 因此每次不同），`ControlMaster=auto` + `ControlPersist`
+        // 会让每个操作在后台留下一个永不退出的 ssh master（HERDR-MACH-004；
+        // man ssh_config：`ControlPersist yes` = 永久驻留）。没有共享
+        // ControlPath 时复用本就为零，这里显式关掉，与 `machine exec`、
+        // 端口转发等一次性通道同口径。
+        config.options.control_path = None;
         Ok(Self {
             target: profile.target.clone(),
             identity_file: profile.identity_file.first().cloned(),
@@ -599,6 +606,20 @@ fn parse_mode(field: &str) -> Option<u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// HERDR-MACH-004：一次性 sftp 通道不建控制主连接。每个操作都会新建受管
+    /// 配置（ControlPath 因此每次不同），留着 `ControlMaster=auto` +
+    /// `ControlPersist` 只会让每个操作在后台留下一个永不退出的 ssh master。
+    #[test]
+    fn one_off_sftp_channels_do_not_keep_a_control_master() {
+        let profile =
+            SavedSshEndpoint::new("fs-test", "user@example.invalid", "default").expect("profile");
+        let fs = RemoteFs::connect(&profile).expect("connect");
+        assert!(
+            fs.config.options.control_path.is_none(),
+            "一次性通道不带控制路径"
+        );
+    }
 
     #[test]
     fn quote_batch_path_wraps_in_double_quotes() {

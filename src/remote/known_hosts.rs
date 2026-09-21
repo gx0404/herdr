@@ -53,7 +53,9 @@ pub(crate) fn effective_host_key_target(
     profile: &crate::client::endpoint::SavedSshEndpoint,
 ) -> io::Result<EffectiveHostKeyTarget> {
     let options = super::saved::saved_profile_ssh_options(profile)?;
-    let config = super::attach::write_managed_ssh_config(options.as_ref())?;
+    let mut config = super::attach::write_managed_ssh_config(options.as_ref())?;
+    // `-G` 只打印有效配置，不需要控制主连接（HERDR-MACH-004）。
+    config.options.control_path = None;
     let mut command = Command::new("ssh");
     super::attach::apply_managed_channel_options(&mut command, Some(&config.options));
     command

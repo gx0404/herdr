@@ -21,7 +21,10 @@ use crate::client::endpoint::SavedSshEndpoint;
 /// the sftp path, not an interactive shell.
 pub(crate) fn exec_saved_ssh(profile: &SavedSshEndpoint, command: &[String]) -> io::Result<i32> {
     let profile_options = super::saved::saved_profile_ssh_options(profile)?;
-    let config = write_managed_ssh_config(profile_options.as_ref())?;
+    let mut config = write_managed_ssh_config(profile_options.as_ref())?;
+    // 前台一次性命令不建控制主连接：受管配置按调用新建，ControlPath 每次不同，
+    // 开着只会留下后台常驻 master（HERDR-MACH-004）。
+    config.options.control_path = None;
     let mut ssh = Command::new("ssh");
     apply_managed_channel_options(&mut ssh, Some(&config.options));
     apply_noninteractive_ssh_options(
