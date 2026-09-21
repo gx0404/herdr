@@ -99,6 +99,19 @@ fn visible_cursor_inside(frame: &FrameData, area: Rect) {
     );
 }
 
+/// 监控面板渲染所需的组件上下文：测试只关心几何、调色板与组件 token。
+fn chrome_context(config: &ClientShellConfig) -> crate::client::shell::feedback::ChromeContext<'_> {
+    crate::client::shell::feedback::ChromeContext {
+        page_bounds: None,
+        palette: &config.palette,
+        components: &config.components,
+        glyphs: config.border_glyphs,
+        hover: None,
+        spinner: "",
+        now: std::time::Instant::now(),
+    }
+}
+
 #[test]
 fn docked_monitor_panel_keeps_the_focused_terminal_cursor() {
     let mut state = docked();
@@ -334,11 +347,12 @@ fn observability_paint_keeps_the_pane_cursor_outside_the_page_rect() {
     let mut beside =
         crate::client::shell::compose_canvas::ComposeCanvas::reuse_or_new(None, 120, 40);
     beside.set_cursor(Some(cursor.clone()));
+    let cx = chrome_context(&config);
     let painted = state
         .paint(
             &mut beside,
             Rect::new(60, 1, 60, 38),
-            &config.palette,
+            &cx,
             Some(Page::Monitor),
             false,
         )
@@ -357,7 +371,7 @@ fn observability_paint_keeps_the_pane_cursor_outside_the_page_rect() {
         .paint(
             &mut covering,
             Rect::new(0, 1, 120, 38),
-            &config.palette,
+            &cx,
             Some(Page::Monitor),
             false,
         )
@@ -4340,15 +4354,10 @@ fn observability_paint_reports_page_and_overview_covers_separately() {
     state.observability.begin_paint();
     let mut canvas =
         crate::client::shell::compose_canvas::ComposeCanvas::reuse_or_new(None, 120, 40);
+    let cx = chrome_context(&state.config);
     let painted = state
         .observability
-        .paint(
-            &mut canvas,
-            area,
-            &state.config.palette,
-            Some(Page::Monitor),
-            true,
-        )
+        .paint(&mut canvas, area, &cx, Some(Page::Monitor), true)
         .expect("绘制");
     assert_eq!(painted.page_rect, area);
     assert_eq!(painted.hover_rect, hover_rect);

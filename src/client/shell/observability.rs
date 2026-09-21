@@ -1288,24 +1288,18 @@ impl State {
         &self,
         canvas: &mut super::compose_canvas::ComposeCanvas,
         area: Rect,
-        palette: &Palette,
+        cx: &super::feedback::ChromeContext<'_>,
         painting_page: Option<Page>,
         draw_hover: bool,
     ) -> Option<Painted> {
+        let palette = cx.palette;
         let visible = painting_page.is_some()
             || self.process_dialog.is_some()
             || (draw_hover && self.hover.as_ref().is_some_and(|hover| hover.visible));
         if !visible {
             return None;
         }
-        let output = render::paint(
-            canvas.buffer(),
-            area,
-            self,
-            palette,
-            painting_page,
-            draw_hover,
-        );
+        let output = render::paint(canvas.buffer(), area, self, cx, painting_page, draw_hover);
         if painting_page.is_some() {
             let selected = self.selected_hit.min(output.hits.len().saturating_sub(1));
             if let Some((rect, _)) = output.hits.get(selected) {
@@ -3905,14 +3899,21 @@ impl ClientShellState {
         canvas: &mut super::compose_canvas::ComposeCanvas,
         area: Rect,
     ) -> Option<[Rect; 2]> {
+        let cx = super::feedback::ChromeContext {
+            page_bounds: None,
+            palette: &self.config.palette,
+            components: &self.config.components,
+            glyphs: self.config.border_glyphs,
+            hover: self.hover.as_ref(),
+            spinner: self.spinner_glyph(),
+            now: self
+                .last_composed_at
+                .unwrap_or_else(std::time::Instant::now),
+        };
         self.observability.begin_paint();
-        let painted = self.observability.paint(
-            canvas,
-            area,
-            &self.config.palette,
-            self.observability.page,
-            true,
-        )?;
+        let painted = self
+            .observability
+            .paint(canvas, area, &cx, self.observability.page, true)?;
         let covered = painted.covered;
         self.observability.commit_paint(painted);
         if self.observability.page.is_some() {

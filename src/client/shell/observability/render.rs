@@ -1,8 +1,9 @@
 use super::*;
 use ratatui::layout::{Constraint, Layout};
 use ratatui::style::Color;
-use ratatui::widgets::{Block, Borders, Cell, Row, Sparkline, Table, Widget};
-use unicode_segmentation::UnicodeSegmentation;
+use ratatui::widgets::{Cell, Row, Sparkline, Table, Widget};
+
+use super::super::feedback::ChromeContext;
 
 fn text(buffer: &mut Buffer, rect: Rect, row: u16, value: &str, style: Style) {
     if row >= rect.height || rect.width == 0 {
@@ -13,51 +14,64 @@ fn text(buffer: &mut Buffer, rect: Rect, row: u16, value: &str, style: Style) {
         .filter(|c| !c.is_control())
         .collect::<String>();
     // Clip with an ellipsis instead of a hard cut so panel edges never
-    // swallow the tail of a long status message.
-    let value = if UnicodeWidthStr::width(value.as_str()) > usize::from(rect.width) {
-        let mut cut = String::new();
-        let mut used = 0_usize;
-        for grapheme in value.graphemes(true) {
-            let width = grapheme.width();
-            if used + width > usize::from(rect.width).saturating_sub(1) {
-                break;
-            }
-            cut.push_str(grapheme);
-            used += width;
-        }
-        cut.push('…');
-        cut
-    } else {
-        value
-    };
+    // swallow the tail of a long status message；截断走共享实现，CJK 边界
+    // 修复不必在每个自建组件里重复一遍（C-29）。
+    let value = crate::ui::truncate_end(&value, usize::from(rect.width));
     buffer.set_stringn(rect.x, rect.y + row, value, rect.width as usize, style);
 }
 
-/// 带标题的面板边框；字形表尊重 `ui.border_style`。
-fn block(
-    buffer: &mut Buffer,
-    rect: Rect,
-    title: &str,
-    palette: &Palette,
-    glyphs: crate::ui::BorderGlyphs,
-) -> Rect {
-    let panel = Block::default()
-        .borders(Borders::ALL)
-        .border_set(glyphs.border_set())
-        .border_style(Style::default().fg(palette.surface1))
-        .title(title.to_owned())
-        .title_style(
-            Style::default()
-                .fg(palette.accent)
-                .add_modifier(Modifier::BOLD),
-        )
-        .style(Style::default().fg(palette.text).bg(palette.panel_bg));
-    let inner = panel.inner(rect);
-    panel.render(rect, buffer);
+/// 带标题的面板：走共享的 `overlays::panel`，边框色取组件 token
+/// （`components.pane_border_focused`），与其它浮层同一种边框语言；字形表
+/// 尊重 `ui.border_style`。
+fn block(buffer: &mut Buffer, rect: Rect, title: &str, cx: &ChromeContext<'_>) -> Rect {
+    let palette = cx.palette;
+    let Some(inner) = super::super::render::panel(
+        buffer,
+        rect,
+        cx.components.pane_border_focused,
+        palette.panel_bg,
+        cx.glyphs,
+    ) else {
+        return Rect::default();
+    };
+    let base = Style::default()
+        .fg(palette.text)
+        .bg(palette.panel_bg)
+        .remove_modifier(Modifier::DIM);
+    buffer.set_style(inner, base);
+    text(
+        buffer,
+        Rect::new(rect.x + 1, rect.y, rect.width.saturating_sub(2), 1),
+        0,
+        title,
+        base.fg(palette.accent).add_modifier(Modifier::BOLD),
+    );
     inner
 }
 
+/// 面板按钮：共用 `overlays::modal_button` 的语义色与状态表；`tone` 区分
+/// 主操作与破坏性操作（结束进程 = Danger）。
 fn button(
+    buffer: &mut Buffer,
+    rect: Rect,
+    label: &str,
+    tone: crate::ui::ModalButtonTone,
+    state: crate::ui::ModalButtonState,
+    action: Action,
+    palette: &Palette,
+    hits: &mut Vec<(Rect, Action)>,
+) {
+    let label = format!(" {label} ");
+    let width = crate::ui::modal_button_width(&label).min(rect.width);
+    let rect = Rect::new(rect.x, rect.y, width, rect.height.min(1));
+    super::super::render::modal_button(buffer, rect, &label, tone, state, palette);
+    if !rect.is_empty() {
+        hits.push((rect, action));
+    }
+}
+
+/// 常态（非破坏性）按钮：面板里绝大多数按钮都是这一档。
+fn secondary_button(
     buffer: &mut Buffer,
     rect: Rect,
     label: &str,
@@ -65,27 +79,22 @@ fn button(
     palette: &Palette,
     hits: &mut Vec<(Rect, Action)>,
 ) {
-    let width = (UnicodeWidthStr::width(label) as u16)
-        .saturating_add(2)
-        .min(rect.width);
-    let rect = Rect::new(rect.x, rect.y, width, rect.height.min(1));
-    buffer.set_style(rect, Style::default().bg(palette.surface0));
-    text(
+    button(
         buffer,
         rect,
-        0,
-        &format!(" {label} "),
-        Style::default()
-            .fg(palette.text)
-            .add_modifier(Modifier::BOLD),
+        label,
+        crate::ui::ModalButtonTone::Secondary,
+        crate::ui::ModalButtonState::Normal,
+        action,
+        palette,
+        hits,
     );
-    if !rect.is_empty() {
-        hits.push((rect, action));
-    }
 }
 
 /// Page tab with an unambiguous active state: the selected page inverts into
-/// the accent color so it can never be confused with idle tabs.
+/// the accent color so it can never be confused with idle tabs. 反色的前景取
+/// 组件表（`panel_contrast_fg`），terminal 主题下不再是「终端默认前景压在
+/// accent 上」（ds-08）。
 fn page_tab(
     buffer: &mut Buffer,
     rect: Rect,
@@ -95,20 +104,20 @@ fn page_tab(
     palette: &Palette,
     hits: &mut Vec<(Rect, Action)>,
 ) {
-    let width = (UnicodeWidthStr::width(label) as u16)
-        .saturating_add(2)
-        .min(rect.width);
+    let label = format!(" {label} ");
+    let width = crate::ui::modal_button_width(&label).min(rect.width);
     let rect = Rect::new(rect.x, rect.y, width, rect.height.min(1));
-    let style = if active {
-        Style::default()
-            .fg(palette.panel_bg)
-            .bg(palette.accent)
-            .add_modifier(Modifier::BOLD)
-    } else {
-        Style::default().fg(palette.text).bg(palette.surface0)
-    };
+    let style = crate::ui::modal_button_style(
+        palette,
+        if active {
+            crate::ui::ModalButtonTone::Primary
+        } else {
+            crate::ui::ModalButtonTone::Secondary
+        },
+        crate::ui::ModalButtonState::Normal,
+    );
     buffer.set_style(rect, style);
-    text(buffer, rect, 0, &format!(" {label} "), style);
+    text(buffer, rect, 0, &label, style);
     if !rect.is_empty() {
         hits.push((rect, action));
     }
@@ -493,15 +502,17 @@ pub(super) struct PaintOutput {
 
 /// 渲染纯函数：`page` 是本次要画的页面（停靠面板由调用方决定画哪个 tab），
 /// 状态只读；`draw_hover` 为真时画可见的悬浮层（agent 行悬浮只在没有页面时，
-/// 总览浮层不受页面影响），进程对话框总是最后覆盖。
+/// 总览浮层不受页面影响），进程对话框总是最后覆盖。调色板、组件 token 与
+/// 边框字形都来自 `ChromeContext`（与浮层同源，C-29）。
 pub(super) fn paint(
     buffer: &mut Buffer,
     area: Rect,
     state: &State,
-    palette: &Palette,
+    cx: &ChromeContext<'_>,
     page: Option<Page>,
     draw_hover: bool,
 ) -> PaintOutput {
+    let palette = cx.palette;
     let mut hits = Vec::new();
     let mut page_rect = Rect::default();
     if let Some(page) = page {
@@ -512,13 +523,7 @@ pub(super) fn paint(
                 buffer[(x, y)].set_symbol(" ");
             }
         }
-        let inner = block(
-            buffer,
-            area,
-            tr(" MONITOR ", " 监控 "),
-            palette,
-            state.glyphs,
-        );
+        let inner = block(buffer, area, tr(" MONITOR ", " 监控 "), cx);
         // Single navigation level: page tabs only. Refresh/pause/close live
         // on keyboard shortcuts (see footer) so the row never mixes
         // navigation with actions.
@@ -568,7 +573,7 @@ pub(super) fn paint(
             inner.height.saturating_sub(3),
         );
         match page {
-            Page::Monitor => monitor(buffer, body, state, palette, &mut hits),
+            Page::Monitor => monitor(buffer, body, state, cx, &mut hits),
             Page::Accounts => accounts(buffer, body, state, palette, &mut hits),
             Page::Settings => settings(buffer, body, state, palette, &mut hits),
         }
@@ -612,8 +617,7 @@ pub(super) fn paint(
                     buffer,
                     hover_rect,
                     &format!(" {} · {} ", agent, tr("Account usage", "账号用量")),
-                    palette,
-                    state.glyphs,
+                    cx,
                 );
                 accounts_body(
                     buffer,
@@ -631,7 +635,7 @@ pub(super) fn paint(
                 // 底行只留「打开页面」：绑定 / 刷新 / 回调等动作都在正文自带的动作行里，
                 // 不再出现两个「绑定账号」（ACC-02）。
                 let y = inner.bottom().saturating_sub(1);
-                button(
+                secondary_button(
                     buffer,
                     Rect::new(inner.x, y, inner.width.min(24), 1),
                     tr("Open page", "打开页面"),
@@ -657,8 +661,7 @@ pub(super) fn paint(
                     buffer,
                     hover_rect,
                     &format!(" {} ", tr("Usage overview", "用量总览")),
-                    palette,
-                    state.glyphs,
+                    cx,
                 );
                 usage_hover(
                     buffer,
@@ -684,13 +687,7 @@ pub(super) fn paint(
                 buffer[(x, y)].set_symbol(" ");
             }
         }
-        let inner = block(
-            buffer,
-            rect,
-            tr(" PROCESS DETAILS ", " 进程详情 "),
-            palette,
-            state.glyphs,
-        );
+        let inner = block(buffer, rect, tr(" PROCESS DETAILS ", " 进程详情 "), cx);
         let host = state
             .metrics
             .as_ref()
@@ -729,7 +726,7 @@ pub(super) fn paint(
         );
         hits.clear();
         let y = inner.bottom().saturating_sub(1);
-        button(
+        secondary_button(
             buffer,
             Rect::new(inner.x, y, 16.min(inner.width), 1),
             tr("Cancel", "取消"),
@@ -771,6 +768,8 @@ pub(super) fn paint(
                 },
                 Style::default().fg(palette.red),
             );
+            // 结束进程是破坏性操作：与浮层的 Danger 按钮同色，不再和「取消」
+            // 长相一样（C-29）。
             button(
                 buffer,
                 Rect::new(
@@ -780,6 +779,8 @@ pub(super) fn paint(
                     1,
                 ),
                 tr("Confirm", "确认执行"),
+                crate::ui::ModalButtonTone::Danger,
+                crate::ui::ModalButtonState::Normal,
                 Action::ConfirmProcess,
                 palette,
                 &mut hits,
@@ -794,6 +795,8 @@ pub(super) fn paint(
                     1,
                 ),
                 tr("Terminate", "正常结束"),
+                crate::ui::ModalButtonTone::Danger,
+                crate::ui::ModalButtonState::Normal,
                 Action::Terminate(false),
                 palette,
                 &mut hits,
@@ -807,6 +810,8 @@ pub(super) fn paint(
                     1,
                 ),
                 tr("Force", "强制结束"),
+                crate::ui::ModalButtonTone::Danger,
+                crate::ui::ModalButtonState::Normal,
                 Action::Terminate(true),
                 palette,
                 &mut hits,
@@ -837,9 +842,10 @@ fn monitor(
     buffer: &mut Buffer,
     area: Rect,
     state: &State,
-    palette: &Palette,
+    cx: &ChromeContext<'_>,
     hits: &mut Vec<(Rect, Action)>,
 ) {
+    let palette = cx.palette;
     let Some(sample) = state.metrics.as_ref() else {
         text(
             buffer,
@@ -908,10 +914,10 @@ fn monitor(
         }
         let rect = Rect::new(x, y, width, card_height.min(area.bottom() - y));
         let title = section_title(section);
-        let inner = block(buffer, rect, title, palette, state.glyphs);
+        let inner = block(buffer, rect, title, cx);
         hits.push((rect, Action::Card((*section).clone())));
         if rect.width > 18 {
-            button(
+            secondary_button(
                 buffer,
                 Rect::new(rect.right() - 8, rect.y, 3, 1),
                 "↑",
@@ -919,7 +925,7 @@ fn monitor(
                 palette,
                 hits,
             );
-            button(
+            secondary_button(
                 buffer,
                 Rect::new(rect.right() - 4, rect.y, 3, 1),
                 "↓",
@@ -1260,7 +1266,7 @@ fn monitor(
                         .unwrap_or(-1.0)
                         .total_cmp(&a.cpu_percent.unwrap_or(-1.0)),
                 });
-                button(
+                secondary_button(
                     buffer,
                     Rect::new(inner.x, inner.y, inner.width.min(15), 1),
                     tr("Sort", "排序"),
@@ -1268,7 +1274,7 @@ fn monitor(
                     palette,
                     hits,
                 );
-                button(
+                secondary_button(
                     buffer,
                     Rect::new(inner.x + 16, inner.y, inner.width.saturating_sub(16), 1),
                     tr("Filter /", "筛选 /"),
@@ -1502,7 +1508,7 @@ fn toolbar_item(
 ) -> u16 {
     match &item.action {
         Some(action) => {
-            button(buffer, rect, &item.label, action.clone(), palette, hits);
+            secondary_button(buffer, rect, &item.label, action.clone(), palette, hits);
             item.width().min(rect.width)
         }
         None => disabled_button(buffer, rect, &item.label, palette),
@@ -1673,7 +1679,7 @@ fn provider_picker(
     };
     let previous = entries[(index + entries.len() - 1) % entries.len()];
     let next = entries[(index + 1) % entries.len()];
-    button(
+    secondary_button(
         buffer,
         Rect::new(row.x, row.y, 3.min(row.width), 1),
         "‹",
@@ -1713,7 +1719,7 @@ fn provider_picker(
             hits,
         ),
     }
-    button(
+    secondary_button(
         buffer,
         Rect::new(
             row.right().saturating_sub(3).max(row.x),
@@ -2253,19 +2259,19 @@ pub(super) fn hover_scope(state: &State) -> AccountsScope<'_> {
     }
 }
 
-/// 禁用态按钮：灰色、不回填命中区；返回实际占用宽度。
+/// 禁用态按钮：走组件的 `Disabled` 档（灰字 + 弱底色），不回填命中区；
+/// 返回实际占用宽度。
 fn disabled_button(buffer: &mut Buffer, rect: Rect, label: &str, palette: &Palette) -> u16 {
-    let width = (UnicodeWidthStr::width(label) as u16)
-        .saturating_add(2)
-        .min(rect.width);
+    let label = format!(" {label} ");
+    let width = crate::ui::modal_button_width(&label).min(rect.width);
     let rect = Rect::new(rect.x, rect.y, width, rect.height.min(1));
-    buffer.set_style(rect, Style::default().bg(palette.surface0));
-    text(
+    super::super::render::modal_button(
         buffer,
         rect,
-        0,
-        &format!(" {label} "),
-        Style::default().fg(palette.overlay0),
+        &label,
+        crate::ui::ModalButtonTone::Secondary,
+        crate::ui::ModalButtonState::Disabled,
+        palette,
     );
     width
 }
@@ -2285,7 +2291,7 @@ fn flow_button(
     let width = (UnicodeWidthStr::width(label) as u16)
         .saturating_add(2)
         .min(rect.width);
-    button(buffer, rect, label, action, palette, hits);
+    secondary_button(buffer, rect, label, action, palette, hits);
     *x = x.saturating_add(width).saturating_add(1);
 }
 
@@ -3529,11 +3535,25 @@ mod tests {
         state
     }
 
+    /// 测试用的组件上下文：只需要调色板、组件 token 与字形。
+    fn chrome_context(config: &ClientShellConfig) -> ChromeContext<'_> {
+        ChromeContext {
+            page_bounds: None,
+            palette: &config.palette,
+            components: &config.components,
+            glyphs: config.border_glyphs,
+            hover: None,
+            spinner: "",
+            now: std::time::Instant::now(),
+        }
+    }
+
     fn paint_page(state: &State, page: Page, width: u16, height: u16) -> (Buffer, PaintOutput) {
         let area = Rect::new(0, 0, width, height);
         let mut buffer = Buffer::empty(area);
-        let palette = config().palette;
-        let output = paint(&mut buffer, area, state, &palette, Some(page), false);
+        let config = config();
+        let cx = chrome_context(&config);
+        let output = paint(&mut buffer, area, state, &cx, Some(page), false);
         (buffer, output)
     }
 
@@ -3571,6 +3591,211 @@ mod tests {
                     .contains(&needle.replace(' ', ""))
         })?;
         buffer[(x, y)].style().fg
+    }
+
+    /// 未确认的进程对话框：Terminate / Force 都该是破坏性语义。
+    fn process_dialog_state() -> State {
+        let mut state = State::new(&config());
+        state.now_ms = 14_000;
+        state.process_dialog = Some(ProcessDialog {
+            process: ProcessMetric {
+                identity: ProcessIdentity {
+                    pid: 4242,
+                    started_at: 1_700_000_000,
+                    boot_id: "boot-1".into(),
+                    instance_token: None,
+                },
+                parent_pid: Some(1),
+                name: "herdr-test".into(),
+                cpu_percent: Some(12.5),
+                memory_bytes: 64 * 1024 * 1024,
+                status: "Running".into(),
+                user: Some("tester".into()),
+                protected: false,
+                action_token: Some("token-1".into()),
+                executable: Some("/usr/bin/herdr-test".into()),
+            },
+            force: false,
+            confirm: false,
+            pending: false,
+        });
+        state
+    }
+
+    /// 带 `needle` 的那一行里，该矩形起点处的底色。
+    fn rect_bg(buffer: &Buffer, rect: Rect, needle: &str) -> Color {
+        let y = (rect.y..rect.bottom())
+            .find(|y| row_has(buffer, *y, needle))
+            .unwrap_or_else(|| panic!("{needle} 未出现在对话框里"));
+        buffer[(rect.x, y)].style().bg.unwrap_or(Color::Reset)
+    }
+
+    /// C-29：面板边框与其它浮层同源——字形取 `ui.border_style`，颜色取
+    /// `components.pane_border_focused`，不再自带一套 `surface1` 边框语言。
+    #[test]
+    fn page_border_uses_the_component_token_and_the_border_style() {
+        for (style, expect_round) in [
+            (crate::config::BorderStyleConfig::Rounded, true),
+            (crate::config::BorderStyleConfig::Double, false),
+        ] {
+            let mut raw = Config::default();
+            raw.ui.border_style = style;
+            let config = ClientShellConfig::from_config(&raw);
+            let cx = chrome_context(&config);
+            let area = Rect::new(0, 0, 100, 30);
+            let mut buffer = Buffer::empty(area);
+            paint(
+                &mut buffer,
+                area,
+                &populated(),
+                &cx,
+                Some(Page::Monitor),
+                false,
+            );
+            let corner = buffer[(0, 0)].clone();
+            assert_eq!(
+                corner.symbol(),
+                cx.glyphs.top_left,
+                "面板左上角字形应跟随 ui.border_style（{style:?}）"
+            );
+            assert_eq!(
+                corner.style().fg,
+                Some(cx.components.pane_border_focused),
+                "面板边框色应取组件 token（{style:?}）"
+            );
+            // 宽字符续格在 ratatui 里会被 reset，取右侧/底边这类纯边框格核对。
+            for (x, y) in [(99, 10), (50, 29)] {
+                assert_eq!(
+                    buffer[(x, y)].style().fg,
+                    Some(cx.components.pane_border_focused),
+                    "边框格 ({x},{y}) 应取组件 token（{style:?}）"
+                );
+            }
+            // 标题仍然画在顶边上（宽字符续格是空符号，按首字判定）。
+            let title = tr(" MONITOR ", " 监控 ");
+            let first = title.trim().chars().next().expect("标题首字");
+            assert!(
+                row_text(&buffer, 0).contains(first),
+                "标题仍在边框上（{style:?}）：{:?}",
+                row_text(&buffer, 0)
+            );
+            assert!(!expect_round || cx.glyphs.top_left == "╭");
+        }
+    }
+
+    /// ds-08：terminal 主题的 `panel_bg` 是 `Reset`，页签「反色」于是退化成
+    /// 「终端默认前景压在 accent 上」。反色前景改取组件表（与按钮同源），
+    /// 16 色主题下也有明确对比。
+    #[test]
+    fn active_page_tab_inverts_with_the_component_contrast_color() {
+        let mut raw = Config::default();
+        raw.theme.name = Some("terminal".into());
+        let config = ClientShellConfig::from_config(&raw);
+        let cx = chrome_context(&config);
+        let area = Rect::new(0, 0, 100, 30);
+        let mut buffer = Buffer::empty(area);
+        let output = paint(
+            &mut buffer,
+            area,
+            &populated(),
+            &cx,
+            Some(Page::Monitor),
+            false,
+        );
+        assert_eq!(
+            config.palette.panel_bg,
+            Color::Reset,
+            "terminal 主题的面板底是终端默认背景"
+        );
+        let active = output
+            .hits
+            .iter()
+            .find(|(_, action)| matches!(action, Action::Page(Page::Monitor)))
+            .map(|(rect, _)| *rect)
+            .expect("系统页签命中区");
+        let cell = buffer[(active.x, active.y)].clone();
+        assert_eq!(cell.style().bg, Some(config.palette.accent), "活动页签底色");
+        assert_eq!(
+            cell.style().fg,
+            Some(config.palette.surface_dim),
+            "面板底为 Reset 时反色前景取 surface_dim（组件表口径）"
+        );
+        assert_ne!(cell.style().fg, Some(Color::Reset));
+    }
+
+    /// C-29：结束进程是破坏性操作，用组件的 Danger 语义色；「取消」保持常态，
+    /// 两者不再长得一样。
+    #[test]
+    fn process_dialog_marks_destructive_buttons_with_the_danger_tone() {
+        let state = process_dialog_state();
+        let (buffer, output) = paint_page(&state, Page::Monitor, 120, 40);
+        let palette = &config().palette;
+        let rect_of = |wanted: fn(&Action) -> bool| {
+            output
+                .hits
+                .iter()
+                .find(|(_, action)| wanted(action))
+                .map(|(rect, _)| *rect)
+                .expect("按钮命中区")
+        };
+        let cancel = rect_of(|action| matches!(action, Action::CancelProcess));
+        let terminate = rect_of(|action| matches!(action, Action::Terminate(false)));
+        let force = rect_of(|action| matches!(action, Action::Terminate(true)));
+        assert_eq!(
+            rect_bg(&buffer, terminate, tr("Terminate", "正常结束")),
+            palette.red,
+            "正常结束应带 Danger 底色"
+        );
+        assert_eq!(
+            rect_bg(&buffer, force, tr("Force", "强制结束")),
+            palette.red,
+            "强制结束应带 Danger 底色"
+        );
+        assert_eq!(
+            rect_bg(&buffer, cancel, tr("Cancel", "取消")),
+            palette.surface0,
+            "取消保持 Secondary 常态"
+        );
+    }
+
+    /// ds-15：对话框按钮用固定 cell 起点，中文标签必须完整落在命中区内
+    /// （不是被截断或与相邻按钮重叠）。
+    #[test]
+    fn process_dialog_fixed_offsets_fit_the_chinese_labels() {
+        let _guard = lang_guard(Lang::ZhCn);
+        let state = process_dialog_state();
+        let (buffer, output) = paint_page(&state, Page::Monitor, 120, 40);
+        let rect_of = |wanted: fn(&Action) -> bool| {
+            output
+                .hits
+                .iter()
+                .find(|(_, action)| wanted(action))
+                .map(|(rect, _)| *rect)
+                .expect("按钮命中区")
+        };
+        let cancel = rect_of(|action| matches!(action, Action::CancelProcess));
+        let terminate = rect_of(|action| matches!(action, Action::Terminate(false)));
+        let force = rect_of(|action| matches!(action, Action::Terminate(true)));
+        for (rect, label) in [
+            (cancel, "取消"),
+            (terminate, "正常结束"),
+            (force, "强制结束"),
+        ] {
+            let width = UnicodeWidthStr::width(label) as u16;
+            assert!(
+                rect.width >= width,
+                "{label} 的命中区只有 {} 列，放不下 {width} 列",
+                rect.width
+            );
+            assert!(
+                row_has(&buffer, rect.y, label),
+                "{label} 应完整画在命中区所在行"
+            );
+        }
+        assert!(
+            terminate.right() < force.x || force.right() <= terminate.x,
+            "固定列偏移下两个结束按钮不能重叠: {terminate:?} / {force:?}"
+        );
     }
 
     fn contains_rect(outer: Rect, inner: Rect) -> bool {

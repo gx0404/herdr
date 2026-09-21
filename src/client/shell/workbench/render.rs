@@ -397,9 +397,20 @@ impl ClientShellState {
                     self.observability.monitor_tab
                 };
                 // 面板 pass 不画悬浮层：悬浮层由下方的全局 pass 画一次。
+                let cx = super::super::feedback::ChromeContext {
+                    page_bounds: None,
+                    palette,
+                    components: &self.config.components,
+                    glyphs: self.config.border_glyphs,
+                    hover: None,
+                    spinner,
+                    now: self
+                        .last_composed_at
+                        .unwrap_or_else(std::time::Instant::now),
+                };
                 if let Some(painted) =
                     self.observability
-                        .paint(&mut canvas, area, palette, Some(tab), false)
+                        .paint(&mut canvas, area, &cx, Some(tab), false)
                 {
                     for rect in painted.covered {
                         occlusion.cover(rect);
@@ -562,10 +573,18 @@ impl ClientShellState {
                 .is_some_and(|hover| hover.visible)
         {
             // 全局浮层在终端内容、把手与选择高亮之后绘制，保持视觉与输入层级一致。
-            if let Some(painted) = self
-                .observability
-                .paint(&mut canvas, full, palette, None, true)
-            {
+            let cx = super::super::feedback::ChromeContext {
+                page_bounds: None,
+                palette,
+                components: &self.config.components,
+                glyphs: self.config.border_glyphs,
+                hover: None,
+                spinner,
+                now: self
+                    .last_composed_at
+                    .unwrap_or_else(std::time::Instant::now),
+            };
+            if let Some(painted) = self.observability.paint(&mut canvas, full, &cx, None, true) {
                 for rect in painted.covered {
                     occlusion.cover(rect);
                 }
