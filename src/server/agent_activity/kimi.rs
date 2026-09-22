@@ -63,11 +63,15 @@
 //! 片：单行超过 `max_bytes` 时只给前缀、跳过该行其余部分并置 `truncated`；尚未写完
 //! 的末行留到下次。`Text` 优先在换行处切片，不切断 UTF-8 字符。
 //!
+//! 「没内容」分两种，不可混：会话目录还没落盘 → `Unavailable`（稍后重试）；会话在、
+//! 节点在、只是内容文件还没生成 → 空片段且 `eof`（确实还没有正文）。
+//!
 //! # 定位会话
 //!
 //! 优先用 pane 上报的会话引用（钩子 `SessionStart` 报的 `session_id`）：先查
-//! `session_index.jsonl`，再在各 `wd_*` 桶下找同名目录；引用给了却找不到时返回空树，
-//! 不退回 cwd（会话可能还没落盘）。没有引用时按 cwd：索引里 `workDir` 相同的会话与
+//! `session_index.jsonl`，再在各 `wd_*` 桶下找同名目录；引用给了却找不到时 `discover`
+//! 回空树、`read` 回 `Unavailable`，不退回 cwd（会话可能还没落盘）。没有引用时按
+//! cwd：索引里 `workDir` 相同的会话与
 //! 按哈希规则算出的桶下的会话里，取最近活动的一个——同一目录多个 kimi 同时运行时
 //! 可能认错，钩子上报引用后即以引用为准。两者都没有时返回 `Unsupported`。
 //!
@@ -217,8 +221,9 @@ fn read_in(
     };
     let offset = parse_cursor(cursor)?;
     let max_bytes = effective_max_bytes(max_bytes);
+    // 会话目录还没落盘：`Unavailable` 让调用方稍后重试，不能装成「读完了」。
     let Some(session_dir) = locate_session(root, cx)? else {
-        return Ok(empty_chunk(format, offset));
+        return Err(SourceError::Unavailable);
     };
     match node {
         NodeRef::Agent(agent_id) => {
@@ -2209,6 +2214,14 @@ mod tests {
         let no_wire = read_in(&root, &cx, "agent:agent-6", None, 1024).expect("read");
         assert_eq!(no_wire.format, AgentActivityContentFormat::Jsonl);
         assert!(no_wire.text.is_empty() && no_wire.eof);
+
+        // 会话目录还没落盘：`Unavailable`，不能是「空且已读完」。
+        let absent = AgentSessionRef::id("session_absent").expect("id");
+        let absent_cx = context(&root, Some(&absent), None, FAR_FUTURE_MS);
+        assert!(matches!(
+            read_in(&root, &absent_cx, "agent:main", None, 1024),
+            Err(SourceError::Unavailable)
+        ));
     }
 
     #[test]
