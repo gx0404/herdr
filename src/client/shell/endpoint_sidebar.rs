@@ -658,6 +658,10 @@ pub(super) fn render_expanded_regions(
     }
 
     let footer_y = workspace_area.bottom().saturating_sub(1);
+    // 工作台布局（`regions` 由停靠面板给出）：主菜单入口只留顶栏「herdr ≡」，
+    // 工作区面板不能收起，页脚既不画「菜单」也不画「«」。经典布局两者都画。
+    let workbench = regions.is_some();
+    let toggle = sidebar_toggle_rect(area, workbench);
     if config.mouse_capture {
         let label = crate::i18n::fill(
             crate::i18n::texts().sidebar.new_endpoint_fmt,
@@ -677,35 +681,34 @@ pub(super) fn render_expanded_regions(
             &label,
             Style::default().fg(palette.overlay0),
         );
-        let attention = active_snapshot.is_some_and(super::global_menu::global_menu_attention);
-        let menu_label = if attention {
-            crate::i18n::texts().sidebar.attention_menu
-        } else {
-            crate::i18n::texts().sidebar.menu
-        };
-        let width = display_width(menu_label).min(workspace_area.width);
-        hits.global_launcher = Rect::new(
-            workspace_area.right().saturating_sub(width),
-            footer_y,
-            width,
-            1,
-        );
-        put_right_text(
-            buffer,
-            workspace_area,
-            footer_y,
-            menu_label,
-            Style::default().fg(if attention {
-                palette.accent
-            } else if matches!(
-                state.chrome_hover,
-                Some(super::feedback::ChromeHover::GlobalLauncher)
-            ) {
-                palette.text
+        if !workbench {
+            let attention = active_snapshot.is_some_and(super::global_menu::global_menu_attention);
+            let menu_label = if attention {
+                crate::i18n::texts().sidebar.attention_menu
             } else {
-                palette.overlay0
-            }),
-        );
+                crate::i18n::texts().sidebar.menu
+            };
+            let slot = footer_menu_slot(workspace_area, footer_y, toggle);
+            let width = display_width(menu_label).min(slot.width);
+            hits.global_launcher =
+                Rect::new(slot.right().saturating_sub(width), footer_y, width, 1);
+            put_right_text(
+                buffer,
+                slot,
+                footer_y,
+                menu_label,
+                Style::default().fg(if attention {
+                    palette.accent
+                } else if matches!(
+                    state.chrome_hover,
+                    Some(super::feedback::ChromeHover::GlobalLauncher)
+                ) {
+                    palette.text
+                } else {
+                    palette.overlay0
+                }),
+            );
+        }
     }
     super::endpoint_agents::render_expanded(
         buffer,
@@ -717,12 +720,10 @@ pub(super) fn render_expanded_regions(
         state.chrome_hover,
         hits,
     );
-    hits.sidebar_toggle = Rect::new(
-        area.right().saturating_sub(2),
-        area.bottom().saturating_sub(1),
-        u16::from(area.width > 1),
-        u16::from(area.height > 0),
-    );
+    hits.sidebar_toggle = toggle;
+    if toggle.is_empty() {
+        return;
+    }
     put_text(
         buffer,
         hits.sidebar_toggle.x,
@@ -740,6 +741,35 @@ pub(super) fn render_expanded_regions(
             },
         ),
     );
+}
+
+/// 展开侧栏右下角的收起开关「«」；工作台布局没有可收起的侧栏，给空矩形。
+pub(super) fn sidebar_toggle_rect(area: Rect, workbench: bool) -> Rect {
+    if workbench {
+        return Rect::default();
+    }
+    Rect::new(
+        area.right().saturating_sub(2),
+        area.bottom().saturating_sub(1),
+        u16::from(area.width > 1),
+        u16::from(area.height > 0),
+    )
+}
+
+/// 页脚「菜单」标签右对齐所用的槽位：与「«」同一行时让出它和一格间隔，免得
+/// 「«」盖住宽字符的半格（「菜«」）。
+pub(super) fn footer_menu_slot(workspace_area: Rect, footer_y: u16, toggle: Rect) -> Rect {
+    let right = if !toggle.is_empty() && toggle.y == footer_y {
+        toggle.x.saturating_sub(1).max(workspace_area.x)
+    } else {
+        workspace_area.right()
+    };
+    Rect::new(
+        workspace_area.x,
+        footer_y,
+        right.min(workspace_area.right()) - workspace_area.x,
+        1,
+    )
 }
 
 fn active_endpoint_label<'a>(state: &'a ShellRenderState<'_>) -> &'a str {

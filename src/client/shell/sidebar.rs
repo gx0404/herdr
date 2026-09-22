@@ -506,6 +506,7 @@ pub(crate) fn render_sidebar_regions(
     }
 
     let footer_y = workspace_area.bottom().saturating_sub(1);
+    let toggle = super::super::endpoint_sidebar::sidebar_toggle_rect(area, false);
     if config.mouse_capture {
         hits.new_workspace = Rect::new(
             workspace_area.x,
@@ -524,14 +525,17 @@ pub(crate) fn render_sidebar_regions(
         let attention = super::super::global_menu::global_menu_attention(snapshot);
         let menu_label = crate::i18n::texts().sidebar.menu;
         let menu_width = super::render::display_width(menu_label);
+        // 与「«」同一行时整体左移让出它，「菜单」两字不被半格覆盖。
+        let slot =
+            super::super::endpoint_sidebar::footer_menu_slot(workspace_area, footer_y, toggle);
         let launcher_width = if attention {
             menu_width.saturating_add(2)
         } else {
             menu_width
         }
-        .min(workspace_area.width);
+        .min(slot.width);
         hits.global_launcher = Rect::new(
-            workspace_area.right().saturating_sub(launcher_width),
+            slot.right().saturating_sub(launcher_width),
             footer_y,
             launcher_width,
             1,
@@ -541,9 +545,7 @@ pub(crate) fn render_sidebar_regions(
             Some(super::feedback::ChromeHover::GlobalLauncher)
         );
         if attention {
-            let start_x = workspace_area
-                .right()
-                .saturating_sub(menu_width.saturating_add(2));
+            let start_x = slot.right().saturating_sub(menu_width.saturating_add(2));
             put_text(
                 buffer,
                 start_x,
@@ -569,7 +571,7 @@ pub(crate) fn render_sidebar_regions(
         } else {
             put_right_text(
                 buffer,
-                workspace_area,
+                slot,
                 footer_y,
                 menu_label,
                 Style::default().fg(if launcher_hovered {
@@ -592,12 +594,7 @@ pub(crate) fn render_sidebar_regions(
         hits,
     );
 
-    hits.sidebar_toggle = Rect::new(
-        area.right().saturating_sub(2),
-        area.bottom().saturating_sub(1),
-        u16::from(area.width > 1),
-        u16::from(area.height > 0),
-    );
+    hits.sidebar_toggle = toggle;
     put_text(
         buffer,
         hits.sidebar_toggle.x,

@@ -1146,15 +1146,19 @@ pub struct AgentActivityTexts {
     pub status_unknown: &'static str,
 }
 
-/// 统一菜单组件（全局菜单 / 右键菜单 / 子菜单）新增的文案。
-/// `*_fmt` entries are `fill` templates; placeholders are documented inline.
-// seam-stub(menu)：接缝预落的文案，字段暂无读者；对应车道用上后删除本 allow。
-#[allow(dead_code)]
+/// 统一菜单组件（全局菜单 / 右键菜单 / 子菜单）与工作台顶栏、「调整布局」
+/// 页脚提示的文案。
 pub struct MenuTexts {
     pub arrange_layout: &'static str,
+    /// 「调整布局」模式下页脚最左侧的状态标签。
     pub arrange_hint: &'static str,
+    /// 「调整布局」模式页脚键位提示的动作名（键帽不翻译）。
+    pub arrange_focus: &'static str,
+    pub arrange_resize: &'static str,
+    pub arrange_move: &'static str,
+    pub arrange_maximize: &'static str,
+    pub arrange_done: &'static str,
     pub unavailable_suffix: &'static str,
-    pub submenu_machine: &'static str,
     pub submenu_view: &'static str,
     pub monitor: &'static str,
     pub monitor_short: &'static str,

@@ -797,3 +797,196 @@ fn catalog_scroll_follows_the_keyboard_highlight() {
         .iter()
         .all(|(_, index)| *index != selected));
 }
+
+// ---- 入口去重、「«」与「调整布局」 ----
+
+/// 与 `workbench::ready()` 同构：宣告 `client.views.set` 后 tick 一次启用停靠工作台。
+fn workbench_state() -> ClientShellState {
+    let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
+    state.set_snapshot(Box::new(snapshot()));
+    state.set_endpoint_methods(Some(vec!["client.views.set".into(), "tab.focus".into()]));
+    state.set_pane_surface(surface());
+    state.compose(120, 40).expect("初始画面");
+    state.tick_workbench(std::time::Instant::now(), &mut ClientShellInput::default());
+    state.workbench.pending = false;
+    state.workbench.acknowledged = state.workbench.revision;
+    assert!(state.workbench.enabled, "夹具前提：workbench 布局已启用");
+    state
+}
+
+fn workbench_action_rect(
+    state: &ClientShellState,
+    wanted: fn(&super::super::workbench::interaction::Action) -> bool,
+) -> Rect {
+    state
+        .workbench
+        .hits
+        .iter()
+        .find(|(_, action)| wanted(action))
+        .map(|(rect, _)| *rect)
+        .expect("工作台命中区")
+}
+
+/// 工作台布局只保留顶栏「herdr ≡」一个主菜单入口：侧栏页脚不画「菜单」，也不画
+/// 点不了的「«」；点顶栏入口，目录菜单从入口下沿向下展开。
+#[test]
+fn workbench_keeps_a_single_menu_entry_in_the_top_bar() {
+    let mut state = workbench_state();
+    let frame = state.compose(120, 40).expect("workbench frame");
+    let rows = frame_rows(&frame);
+    let launcher = state.hits.global_launcher;
+    assert_eq!(launcher.y, 0, "入口在顶栏：{launcher:?}");
+    assert!(compact(&rows[0]).contains("herdr≡"));
+    assert!(state.hits.sidebar_toggle.is_empty());
+    let menu_label = compact(crate::i18n::texts().sidebar.menu);
+    for row in &rows[1..] {
+        assert!(
+            !compact(row).contains(&menu_label),
+            "侧栏页脚不再画菜单：{row}"
+        );
+        assert!(!row.contains('«'), "工作台下不画「«」：{row}");
+    }
+
+    state.handle_raw_events(vec![mouse_event(
+        MouseEventKind::Down(MouseButton::Left),
+        launcher.x + 1,
+        launcher.y,
+    )]);
+    state.compose(120, 40).expect("catalog frame");
+    assert_eq!(
+        palette_overlay(&state).view,
+        super::super::command_palette::BrowserView::Menu(None)
+    );
+    let popup = catalog_area(&state);
+    assert_eq!(popup.y, launcher.bottom(), "下拉菜单贴着顶栏入口展开");
+    assert_eq!(popup.x, launcher.x);
+}
+
+/// 经典布局保留页脚「菜单」入口：两个字完整（不被「«」盖掉半格），「«」画在
+/// 侧栏右下角且可点；单机侧栏与多机侧栏两条渲染路径都一样。
+#[test]
+fn classic_footer_keeps_the_menu_label_whole_and_the_toggle_clickable() {
+    let prod = profile("prod", 'd');
+    let menu_label = crate::i18n::texts().sidebar.menu;
+    for mut state in [
+        {
+            let mut state =
+                ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
+            state.set_snapshot(Box::new(snapshot()));
+            state.set_pane_surface(surface());
+            state
+        },
+        state_with_profiles(std::slice::from_ref(&prod)),
+    ] {
+        state.compose(106, 30).expect("classic frame");
+        let launcher = state.hits.global_launcher;
+        let toggle = state.hits.sidebar_toggle;
+        assert!(!launcher.is_empty() && !toggle.is_empty());
+        assert!(
+            launcher.intersection(toggle).is_empty(),
+            "入口与「«」不重叠"
+        );
+        let cells = row_cells(&state, launcher, launcher.y);
+        assert_eq!(compact(&cells.concat()), compact(menu_label), "{cells:?}");
+        let buffer = state.compose_buffer.as_ref().expect("帧缓冲");
+        assert_eq!(buffer[(toggle.x, toggle.y)].symbol(), "«");
+
+        state.handle_raw_events(vec![mouse_event(
+            MouseEventKind::Down(MouseButton::Left),
+            toggle.x,
+            toggle.y,
+        )]);
+        assert!(state.sidebar_collapsed, "「«」可点：收起侧栏");
+    }
+}
+
+/// 「菜单」与「«」落在同一行时（侧栏只有工作区一段）菜单槽位让出「«」和一格
+/// 间隔。
+#[test]
+fn footer_menu_slot_steps_aside_for_the_toggle_on_the_same_row() {
+    use super::super::endpoint_sidebar::{footer_menu_slot, sidebar_toggle_rect};
+    let sidebar = Rect::new(0, 1, 26, 12);
+    let workspace = Rect::new(0, 1, 25, 12);
+    let footer_y = workspace.bottom() - 1;
+    let toggle = sidebar_toggle_rect(sidebar, false);
+    assert_eq!(toggle.y, footer_y, "夹具前提：同一行");
+    let slot = footer_menu_slot(workspace, footer_y, toggle);
+    assert_eq!(slot.right() + 1, toggle.x);
+    // 不同行时照常贴右。
+    let apart = footer_menu_slot(workspace, footer_y - 3, toggle);
+    assert_eq!(apart.right(), workspace.right());
+    assert!(
+        sidebar_toggle_rect(sidebar, true).is_empty(),
+        "工作台不画「«」"
+    );
+}
+
+/// 顶栏「布局」改名「调整布局」：点它进入模式（按钮反色），页脚换成状态标签 +
+/// 键位提示条，「Esc 完成」可点退出；「锁定布局」是勾选态，不再换「解锁」文案。
+#[test]
+fn arrange_layout_button_enters_the_mode_with_footer_hints() {
+    use super::super::workbench::interaction::Action;
+    let mut state = workbench_state();
+    state.config.mouse_capture = true;
+    let t = &crate::i18n::texts().menu;
+    let frame = state.compose(120, 40).expect("workbench frame");
+    let top = compact(&frame_rows(&frame)[0]);
+    assert!(top.contains(&compact(t.arrange_layout)), "{top}");
+    assert!(
+        top.contains(&compact(t.lock_layout)) && !top.contains('✓'),
+        "{top}"
+    );
+
+    let arrange = workbench_action_rect(&state, |action| matches!(action, Action::Arrange));
+    let mut outcome = ClientShellInput::default();
+    assert!(state.workbench_mouse(
+        MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: arrange.x + 1,
+            row: arrange.y,
+            modifiers: KeyModifiers::empty(),
+        },
+        &mut outcome,
+    ));
+    assert!(state.workbench.arranging);
+    state.workbench.dock.locked = true;
+    let frame = state.compose(120, 40).expect("arranging frame");
+    let rows = frame_rows(&frame);
+    assert!(compact(&rows[0]).contains(&format!("✓{}", compact(t.lock_layout))));
+    let footer = compact(&rows[39]);
+    for label in [
+        t.arrange_hint,
+        t.arrange_focus,
+        t.arrange_resize,
+        t.arrange_maximize,
+        t.arrange_done,
+    ] {
+        assert!(footer.contains(&compact(label)), "页脚缺 {label}：{footer}");
+    }
+    let buffer = state.compose_buffer.as_ref().expect("帧缓冲");
+    let arrange = workbench_action_rect(&state, |action| matches!(action, Action::Arrange));
+    assert_eq!(
+        buffer[(arrange.x, arrange.y)].style().bg,
+        Some(state.config.palette.accent),
+        "模式开着时按钮反色"
+    );
+    // 页脚「Esc 完成」可点：退出调整布局。
+    let done = state
+        .workbench
+        .hits
+        .iter()
+        .filter(|(_, action)| matches!(action, Action::Arrange))
+        .map(|(rect, _)| *rect)
+        .find(|rect| rect.y == 39)
+        .expect("页脚完成命中区");
+    assert!(state.workbench_mouse(
+        MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: done.x + 1,
+            row: done.y,
+            modifiers: KeyModifiers::empty(),
+        },
+        &mut outcome,
+    ));
+    assert!(!state.workbench.arranging);
+}

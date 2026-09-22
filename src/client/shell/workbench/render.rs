@@ -1,6 +1,8 @@
+use super::super::feedback::ChromeHover;
 use super::super::observability::{tr, Page};
 use super::interaction::Action;
 use super::*;
+use crate::ui::kit::footer_hints::{render_footer_hints, FooterHint};
 use ratatui::widgets::{Block, Borders, Widget};
 
 fn put(buffer: &mut Buffer, area: Rect, text: &str, style: Style) {
@@ -68,35 +70,47 @@ impl ClientShellState {
             self.workbench
                 .dock
                 .geometry(Rect::new(0, 1.min(rows), cols, rows.saturating_sub(2)));
+        let menu_texts = &crate::i18n::texts().menu;
+        // 顶栏：主菜单入口、监控、调整布局（模式开关，进入时反色）、锁定布局
+        // （二态开关用勾选态，不再在「锁定 / 解锁」两套文案间切换）、复位（只在
+        // 调整布局时出现）。
+        let launcher_hovered = matches!(self.hover, Some(ChromeHover::GlobalLauncher));
+        let lock_label = if self.workbench.dock.locked {
+            format!(" ✓ {} ", menu_texts.lock_layout)
+        } else {
+            format!(" {} ", menu_texts.lock_layout)
+        };
         let mut x = 0;
         for (label, action) in [
-            (" herdr ≡ ", Action::Menu),
-            (tr(" Monitor ", " 监控 "), Action::Open(PanelId::Monitor)),
-            (tr(" Layout ", " 布局 "), Action::Arrange),
+            (" herdr ≡ ".to_owned(), Action::Menu),
             (
-                if self.workbench.dock.locked {
-                    tr(" Unlock ", " 解锁 ")
-                } else {
-                    tr(" Lock ", " 锁定 ")
-                },
-                Action::Lock,
+                format!(" {} ", menu_texts.monitor_short),
+                Action::Open(PanelId::Monitor),
             ),
-            (tr(" Reset ", " 复位 "), Action::Reset),
+            (format!(" {} ", menu_texts.arrange_layout), Action::Arrange),
+            (lock_label, Action::Lock),
+            (tr(" Reset ", " 复位 ").to_owned(), Action::Reset),
         ]
         .into_iter()
         .filter(|(_, action)| self.workbench.arranging || !matches!(action, Action::Reset))
         {
             let width = (label.width() as u16).min(cols.saturating_sub(x));
             let rect = Rect::new(x, 0, width, u16::from(rows > 0));
-            put(
-                canvas.buffer(),
-                rect,
-                label,
-                Style::default()
-                    .fg(palette.accent)
-                    .bg(palette.surface0)
+            let base = Style::default()
+                .fg(palette.accent)
+                .bg(palette.surface0)
+                .add_modifier(Modifier::BOLD);
+            let style = match action {
+                Action::Arrange if self.workbench.arranging => Style::default()
+                    .fg(crate::ui::color::contrast_fg(palette, palette.accent))
+                    .bg(palette.accent)
                     .add_modifier(Modifier::BOLD),
-            );
+                Action::Menu if launcher_hovered => {
+                    base.fg(palette.text).bg(self.config.components.hover_bg)
+                }
+                _ => base,
+            };
+            put(canvas.buffer(), rect, &label, style);
             if matches!(action, Action::Menu) {
                 self.hits.global_launcher = rect;
             }
@@ -329,25 +343,82 @@ impl ClientShellState {
             }
         }
         let footer = Rect::new(0, rows.saturating_sub(1), cols, u16::from(rows > 0));
-        let hint = if self.workbench.arranging {
-            tr("LAYOUT · Tab focus · arrows resize · Shift+arrows move · Enter maximize · Esc done", "布局 · Tab 切换 · 方向键调尺寸 · Shift+方向键移动 · Enter 最大化 · Esc 完成")
-        } else if self.workbench.geometry.compact {
-            tr(
-                "Compact view · use Layout / Tab to switch panels",
-                "紧凑视图 · 在「布局」模式用 Tab 切换面板",
-            )
+        if self.workbench.arranging {
+            // 「调整布局」模式：状态标签 + 键位提示条；「Esc 完成」可点，退出模式。
+            let status = format!(" {} ", menu_texts.arrange_hint);
+            let status_width = (status.width() as u16).min(footer.width);
+            put(
+                canvas.buffer(),
+                Rect::new(footer.x, footer.y, status_width, footer.height),
+                &status,
+                Style::default()
+                    .fg(palette.accent)
+                    .add_modifier(Modifier::BOLD),
+            );
+            let hints = [
+                FooterHint {
+                    key: "Tab",
+                    label: menu_texts.arrange_focus,
+                    enabled: true,
+                    primary: false,
+                },
+                FooterHint {
+                    key: "←↑↓→",
+                    label: menu_texts.arrange_resize,
+                    enabled: true,
+                    primary: false,
+                },
+                FooterHint {
+                    key: "Shift+←↑↓→",
+                    label: menu_texts.arrange_move,
+                    enabled: true,
+                    primary: false,
+                },
+                FooterHint {
+                    key: "Enter",
+                    label: menu_texts.arrange_maximize,
+                    enabled: true,
+                    primary: false,
+                },
+                FooterHint {
+                    key: "Esc",
+                    label: menu_texts.arrange_done,
+                    enabled: true,
+                    primary: true,
+                },
+            ];
+            let hint_area = Rect::new(
+                footer.x.saturating_add(status_width).saturating_add(1),
+                footer.y,
+                footer.width.saturating_sub(status_width.saturating_add(1)),
+                footer.height,
+            );
+            for (rect, index) in
+                render_footer_hints(canvas.buffer(), hint_area, &hints, None, palette)
+            {
+                if index == hints.len() - 1 {
+                    self.workbench.hits.push((rect, Action::Arrange));
+                }
+            }
         } else {
-            tr(
-                "Drag ⠿ to dock · drag borders to resize · drag tabs to split or regroup",
-                "拖动 ⠿ 停靠 · 拖动分隔线调尺寸 · 拖动标签拆分或归组",
-            )
-        };
-        put(
-            canvas.buffer(),
-            footer,
-            hint,
-            Style::default().fg(palette.overlay0),
-        );
+            let hint = if self.workbench.geometry.compact {
+                tr(
+                    "Compact view · use Arrange layout / Tab to switch panels",
+                    "紧凑视图 · 在「调整布局」模式用 Tab 切换面板",
+                )
+            } else {
+                tr(
+                    "Drag ⠿ to dock · drag borders to resize · drag tabs to split or regroup",
+                    "拖动 ⠿ 停靠 · 拖动分隔线调尺寸 · 拖动标签拆分或归组",
+                )
+            };
+            put(
+                canvas.buffer(),
+                footer,
+                hint,
+                Style::default().fg(palette.overlay0),
+            );
+        }
         let mut occlusion = crate::kitty_graphics::surface::Occlusion::default();
         self.observability.begin_paint();
         let mut stale_panel_areas = Vec::new();
