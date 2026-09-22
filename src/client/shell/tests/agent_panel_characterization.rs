@@ -1287,7 +1287,8 @@ fn activity_badge_distinguishes_running_total_and_none() {
         let mut agent = panel_agent("pane_1", "ws_1", "tab_1", "one", AgentStatus::Idle, 1);
         agent.activity.running = running;
         agent.activity.total = total;
-        super::super::agent_tree::mobile_activity_badge(&agent)
+        // 宽度不设限，只看文案本身。
+        super::super::agent_tree::mobile_activity_badge(&agent, u16::MAX)
     };
     for (lang, expected) in [
         (
@@ -1307,6 +1308,86 @@ fn activity_badge_distinguishes_running_total_and_none() {
         assert_eq!(agent(0, 0), None, "没有活动不画徽标");
         // 总数比运行中小（上报不一致）时按运行中补齐总数。
         assert_eq!(agent(2, 0), agent(2, 2), "{lang:?}");
+    }
+}
+
+/// mobile 详情行的活动徽标只拿其余字段排完后剩下的宽度（审查发现：原先把完整
+/// 文案接在行尾再整体截断，长标签页名会把数字截成「运行中 2…」或「2/…」，看着
+/// 像只有 2 个活动）。32 / 44 列、中英各扫一遍标签页名长度（0 表示不显示标签
+/// 页）：徽标要么是完整文案、要么是完整的 `2/5`、要么整段不出现，画出来时整行
+/// 不截断；每种宽度下三档都实际出现过。
+#[test]
+fn mobile_activity_badge_degrades_instead_of_truncating_digits() {
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+    enum Tier {
+        Full,
+        Compact,
+        Hidden,
+    }
+    const TAB_LABEL: &str = "feature-branch-with-a-very-long-tab-name";
+    for lang in [crate::i18n::Lang::En, crate::i18n::Lang::ZhCn] {
+        let _lang = crate::i18n::lang_guard(lang);
+        let full = compact(&running_badge(2, 5));
+        let lead = full.chars().next().expect("徽标非空");
+        for cols in [32u16, 44] {
+            let mut tiers = HashSet::new();
+            for len in 0..=TAB_LABEL.len() {
+                let mut projected = two_workspace_snapshot();
+                // pane_3 独占 ws_2 / tab_2：只有自定义标签页名才会进详情行。
+                projected.tabs[1].label = TAB_LABEL[..len].into();
+                projected.tabs[1].custom_label = len > 0;
+                projected.agents[2].activity = ClientShellAgentActivity {
+                    running: 2,
+                    total: 5,
+                    truncated: false,
+                    nodes: Vec::new(),
+                };
+                let mut state = classic_state_with(AgentPanelSortConfig::Spaces, projected);
+                state.compose(cols, 40).expect("mobile 头部");
+                assert!(
+                    state.mobile_layout_active(),
+                    "夹具前提：{cols} 列走 mobile 布局"
+                );
+                let switch = state.hits.mobile_switch;
+                state.handle_raw_events(vec![click(switch)]);
+                state.compose(cols, 40).expect("mobile 切换器");
+                let (rect, _) = mobile_agent_targets(&state)
+                    .into_iter()
+                    .find(|(_, pane_id)| pane_id == "pane_3")
+                    .expect("pane_3 行");
+                let rows = rect_rows(&state, rect);
+                let detail = compact(&rows[1]);
+                let context = format!("{lang:?} {cols} 列，标签页名 {len} 字符：{:?}", rows[1]);
+                let tier = if detail.contains(&full) {
+                    Tier::Full
+                } else if detail.contains("2/5") {
+                    Tier::Compact
+                } else {
+                    Tier::Hidden
+                };
+                match tier {
+                    Tier::Full | Tier::Compact => {
+                        assert!(!detail.contains('…'), "徽标画出来时整行不截断：{context}");
+                        let shown = if tier == Tier::Full {
+                            full.as_str()
+                        } else {
+                            "2/5"
+                        };
+                        assert!(detail.ends_with(shown), "徽标完整收尾：{context}");
+                    }
+                    Tier::Hidden => assert!(
+                        !detail.contains('2') && !detail.contains(lead),
+                        "放不下就整段不画，不留残段：{context}"
+                    ),
+                }
+                tiers.insert(tier);
+            }
+            assert_eq!(
+                tiers.len(),
+                3,
+                "{lang:?} {cols} 列：扫描应覆盖完整 / 只留数字 / 不画三档：{tiers:?}"
+            );
+        }
     }
 }
 

@@ -623,6 +623,9 @@ fn mobile_items(
         config.agent_panel_sort,
     );
     let agent_view_label = snapshot.agent_view_label.as_deref();
+    // agent 行详情行的缩进与字段分隔符；活动徽标按两者算剩余宽度。
+    const DETAIL_INDENT: &str = "  ";
+    const DETAIL_SEPARATOR: &str = " · ";
     if !agents.is_empty() || agent_view_label.is_some() {
         let title = agent_view_label
             .map(|label| {
@@ -698,9 +701,23 @@ fn mobile_items(
                     }),
             );
             detail.push(agent_label.to_owned());
-            detail.extend(super::agent_tree::mobile_activity_badge(agent));
+            let badge_index = detail.len();
             if endpoint.stale() {
                 detail.push(endpoint_status_label(endpoint.status).to_owned());
+            }
+            // 活动徽标只拿其余详情排完后剩下的宽度，按与桌面树相同的三档退化
+            // （完整文案 → 只留数字 → 不画）：行尾截断落不进徽标，不会画出
+            // 「运行中 2…」这种看着像只有 2 个活动的残段。其余字段各带一个
+            // 分隔符（字段之间的，加上徽标前的那个）。
+            let used = detail
+                .iter()
+                .fold(display_width(DETAIL_INDENT), |used, part| {
+                    used.saturating_add(display_width(part))
+                        .saturating_add(display_width(DETAIL_SEPARATOR))
+                });
+            let room = content_width.saturating_sub(used);
+            if let Some(badge) = super::agent_tree::mobile_activity_badge(agent, room) {
+                detail.insert(badge_index, badge);
             }
             let background = if endpoint.endpoint_id == active_endpoint_id && agent.focused {
                 palette.surface_dim
@@ -746,7 +763,7 @@ fn mobile_items(
                     ]),
                     Line::from(Span::styled(
                         crate::ui::truncate_end(
-                            &format!("  {}", detail.join(" · ")),
+                            &format!("{DETAIL_INDENT}{}", detail.join(DETAIL_SEPARATOR)),
                             usize::from(content_width),
                         ),
                         Style::default()

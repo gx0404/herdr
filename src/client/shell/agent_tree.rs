@@ -275,7 +275,11 @@ impl ActivityBadge {
     /// 首行宽 `width` 列时要画的档位（文本, 宽度）：先扣 [`PRIMARY_MIN_WIDTH`]
     /// 与徽标前的 1 列间隔，剩下的放得下哪档画哪档；都放不下为 `None`。
     fn fit(&self, width: u16) -> Option<(&str, u16)> {
-        let room = width.saturating_sub(PRIMARY_MIN_WIDTH + 1);
+        self.fit_room(width.saturating_sub(PRIMARY_MIN_WIDTH + 1))
+    }
+
+    /// 徽标自己能占 `room` 列时要画的档位：完整文案 → 只留数字 → `None`。
+    fn fit_room(&self, room: u16) -> Option<(&str, u16)> {
         if self.full_width <= room {
             Some((self.full.as_str(), self.full_width))
         } else if self.compact_width <= room {
@@ -331,10 +335,13 @@ fn badge_text(running: u32, total: u32) -> Option<String> {
     })
 }
 
-/// mobile 切换器 agent 行的活动徽标，与桌面树同一口径；没有活动为 `None`。
-/// `mobile.rs` 只调这一处，徽标逻辑留在本文件。
-pub(super) fn mobile_activity_badge(agent: &ClientShellAgent) -> Option<String> {
-    badge_text(agent.activity.running, agent.activity.total)
+/// mobile 切换器 agent 行的活动徽标，与桌面树同一口径、同样三档退化：`room`
+/// 是详情行排完其余字段与徽标前间隔后剩下的列数，放得下完整文案给完整文案，
+/// 否则只留数字（`2/5`；没有运行中时是总数 `5`），再放不下为 `None`；没有活动
+/// 也为 `None`。`mobile.rs` 只调这一处，徽标逻辑留在本文件。
+pub(super) fn mobile_activity_badge(agent: &ClientShellAgent, room: u16) -> Option<String> {
+    let badge = activity_badge(agent.activity.running, agent.activity.total)?;
+    badge.fit_room(room).map(|(text, _)| text.to_owned())
 }
 
 /// 视图计算阶段：按当前排序、折叠态与各端点快照产出展平的行序列，末子掩码已
