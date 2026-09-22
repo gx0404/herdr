@@ -2,6 +2,8 @@
 //! 的挂载）与各页共用的小工具；系统页 / 账号页 / 设置页 / 悬浮层各在
 //! `render/{system,accounts,settings,hover}.rs`。
 
+use std::borrow::Cow;
+
 use super::*;
 use ratatui::style::Color;
 
@@ -101,6 +103,48 @@ fn secondary_button(
         palette,
         hits,
     );
+}
+
+/// 页签标签按可用宽度逐级截短。kit 的 `render_tabs` 遇到放不下的项整体丢弃：
+/// 被丢弃的页签既不画也不登记命中区，鼠标从此没有路径进入那一页，当前页正好
+/// 被丢弃时三个页签还会一个都不高亮。herdr 是 mouse-first TUI，所以窄面板下
+/// 先把最长的标签截短（英文「Monitor preferences」比中文长得多），保证每个
+/// 页签都在。返回值与 `labels` 一一对应，放得下时原样借用、不分配。
+fn fit_tab_labels<'a, const N: usize>(labels: [&'a str; N], width: u16) -> [Cow<'a, str>; N] {
+    let full: [u16; N] = labels.map(crate::ui::display_width_u16);
+    // 与 `render_tabs` 的排版一致：每项左右各一列内边距，项与项之间一列间隔。
+    let count = N as u16;
+    let chrome = count
+        .saturating_mul(2)
+        .saturating_add(count.saturating_sub(1));
+    let budget = u32::from(width.saturating_sub(chrome));
+    let mut fitted = full;
+    let mut total: u32 = full.iter().map(|width| u32::from(*width)).sum();
+    while total > budget {
+        // 每次削最长的那个，短标签先保住；谁都削不动（都只剩 1 列）就收手，
+        // 这种宽度下整行本来也画不出。
+        let Some(index) = fitted
+            .iter()
+            .enumerate()
+            .filter(|(_, width)| **width > 1)
+            .max_by_key(|(_, width)| **width)
+            .map(|(index, _)| index)
+        else {
+            break;
+        };
+        fitted[index] -= 1;
+        total -= 1;
+    }
+    std::array::from_fn(|index| {
+        if fitted[index] >= full[index] {
+            Cow::Borrowed(labels[index])
+        } else {
+            Cow::Owned(crate::ui::truncate_end(
+                labels[index],
+                usize::from(fitted[index]),
+            ))
+        }
+    })
 }
 
 /// 页脚键位提示（kit `footer_hints`，可点）：系统页多一个「暂停 / 继续」；
@@ -324,7 +368,10 @@ pub(super) fn paint(
             (texts.tab_accounts, Page::Accounts),
             (texts.tab_preferences, Page::Settings),
         ];
-        let items = tabs.map(|(label, _)| crate::ui::kit::tabs::TabItem::new(label));
+        let labels = fit_tab_labels(tabs.map(|(label, _)| label), inner.width);
+        let items = labels
+            .each_ref()
+            .map(|label| crate::ui::kit::tabs::TabItem::new(label));
         let active = tabs.iter().position(|(_, tab)| *tab == page).unwrap_or(0);
         let rects = crate::ui::kit::tabs::render_tabs(
             buffer,

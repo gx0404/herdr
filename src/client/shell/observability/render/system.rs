@@ -1964,4 +1964,42 @@ mod tests {
             Action::Page(Page::Accounts)
         )));
     }
+
+    /// 窄面板下三个页签都得留着：英文标签比中文长得多，放不下时截短而不是
+    /// 整项丢弃，否则鼠标再也进不去那一页，活动页也不再高亮。
+    #[test]
+    fn narrow_panel_truncates_page_tabs_instead_of_dropping_them() {
+        let _guard = lang_guard(Lang::En);
+        let state = monitored();
+        for width in [120_u16, 60, 40, 30, 24] {
+            let (buffer, output) = paint_page(&state, Page::Settings, width, 40);
+            let text = buffer_text(&buffer);
+            for page in [Page::Monitor, Page::Accounts, Page::Settings] {
+                assert!(
+                    has(
+                        &output,
+                        |action| matches!(action, Action::Page(p) if *p == page)
+                    ),
+                    "宽 {width}: {page:?} 页签可点\n{text}"
+                );
+            }
+            // 活动页签反色：被丢弃时 rect 为空，这一条就红。
+            let active = hit_rect(&output, |action| {
+                matches!(action, Action::Page(Page::Settings))
+            })
+            .expect("监控偏好页签命中区");
+            assert_eq!(
+                buffer[(active.x, active.y)].style().bg,
+                Some(config().palette.accent),
+                "宽 {width}: 活动页签反色\n{text}"
+            );
+        }
+        // 宽面板仍是完整标签，截短只在放不下时发生。
+        let (buffer, _) = paint_page(&state, Page::Settings, 120, 40);
+        assert!(
+            buffer_has(&buffer, "Monitor preferences"),
+            "{}",
+            buffer_text(&buffer)
+        );
+    }
 }
