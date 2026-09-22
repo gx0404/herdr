@@ -10,6 +10,11 @@
 //!
 //! 机器动作（重连、切换、重命名、编辑、启用、复制修复命令、移除）是同一组条目：
 //! 命令面板按机器铺开，右键机器行按对象取，执行都落到同一个分支。
+//!
+//! 右键菜单按对象过滤：[`context_layout`] 给出每种对象的条目顺序、分隔线与
+//! 子菜单，[`context_action_state`] 按右键时记下的对象事实判定可见 / 可用 /
+//! 勾选（不适用的不列，暂时不可用的置灰）。Agent 行的条目由接缝在
+//! `context_menu.rs` 定稿，不走这里的版式。
 
 use super::*;
 use crate::config::{ActionKeybinds, CustomCommandKeybind, Keybinds};
@@ -170,8 +175,6 @@ pub(super) struct ActionSpec {
     /// 在右键菜单里的身份：对象种类 + 该对象菜单里的动作。
     pub(super) context: Option<(ContextKind, ClientContextMenuAction)>,
     /// 破坏性动作（关闭、移除）：菜单里标红。
-    // 右键菜单接 kit::menu 的提交里读取，届时删除本 allow。
-    #[allow(dead_code)]
     pub(super) danger: bool,
 }
 
@@ -192,8 +195,6 @@ impl ActionSpec {
     }
 
     /// 用户当前键位的首个标签（菜单右侧只放一个，多个键位时取第一个）。
-    // 右键菜单接 kit::menu 的提交里读取，届时删除本 allow。
-    #[allow(dead_code)]
     pub(super) fn shortcut(&self, keybinds: &Keybinds) -> Option<String> {
         let binding = self.binding?;
         (binding.keys)(keybinds).labels().into_iter().next()
@@ -902,6 +903,7 @@ pub(super) static ACTIONS: &[ActionSpec] = &[
     ActionSpec {
         palette: PaletteMode::PerMachine,
         label: Some(|t| t.context_menu.switch_machine),
+        context: Some((Kind::Machine, Ctx::SwitchMachine)),
         ..spec(
             Id::MachineSwitch,
             "machine:switch",
@@ -1079,6 +1081,135 @@ pub(super) static ACTIONS: &[ActionSpec] = &[
         )
     },
 ];
+
+/// 右键菜单版式的一项。
+pub(super) enum ContextLayoutEntry {
+    Item(ActionId),
+    Separator,
+    /// 子菜单：父项标签与子项（子项之间不画分隔线）。
+    Submenu(TextKey, &'static [ActionId]),
+}
+
+use ContextLayoutEntry as Entry;
+
+static WORKSPACE_MENU: &[ContextLayoutEntry] = &[
+    Entry::Item(Id::RenameWorkspace),
+    Entry::Separator,
+    Entry::Item(Id::NewWorktree),
+    Entry::Item(Id::OpenWorktree),
+    Entry::Item(Id::RemoveWorktree),
+    Entry::Separator,
+    Entry::Item(Id::ToggleWorkspaceGroup),
+    Entry::Separator,
+    Entry::Item(Id::CloseWorkspace),
+];
+
+static TAB_MENU: &[ContextLayoutEntry] = &[
+    Entry::Item(Id::NewTab),
+    Entry::Item(Id::RenameTab),
+    Entry::Separator,
+    Entry::Item(Id::CloseTab),
+];
+
+static PANE_MENU: &[ContextLayoutEntry] = &[
+    Entry::Item(Id::RenamePane),
+    Entry::Item(Id::ClearPaneName),
+    Entry::Separator,
+    Entry::Item(Id::SplitRight),
+    Entry::Item(Id::SplitDown),
+    Entry::Item(Id::SwapWithFocusedPane),
+    Entry::Separator,
+    Entry::Submenu(
+        |t| t.menu.submenu_view,
+        &[Id::Zoom, Id::RightClickPassthrough],
+    ),
+    Entry::Separator,
+    Entry::Item(Id::ClosePane),
+];
+
+static MACHINE_MENU: &[ContextLayoutEntry] = &[
+    Entry::Item(Id::ManageMachines),
+    Entry::Separator,
+    Entry::Item(Id::MachineConnect),
+    Entry::Item(Id::MachineSwitch),
+    Entry::Separator,
+    Entry::Item(Id::MachineRename),
+    Entry::Item(Id::MachineEdit),
+    Entry::Item(Id::MachineEnabled),
+    Entry::Separator,
+    Entry::Item(Id::MachineCopyFixCommand),
+    Entry::Separator,
+    Entry::Item(Id::MachineRemove),
+];
+
+/// 某种对象的右键菜单版式。Agent 行的条目由 `context_menu.rs` 的接缝代码给出，
+/// 这里为空。
+pub(super) fn context_layout(kind: ContextKind) -> &'static [ContextLayoutEntry] {
+    match kind {
+        ContextKind::Workspace => WORKSPACE_MENU,
+        ContextKind::Tab => TAB_MENU,
+        ContextKind::Pane => PANE_MENU,
+        ContextKind::Machine => MACHINE_MENU,
+        ContextKind::Agent => &[],
+    }
+}
+
+/// 右键对象上某个动作的状态：由打开菜单时记下的对象事实判定。结构上不适用
+/// 的（非 git 工作区的工作树动作、本机的 SSH 动作）不列；暂时不可用的（没有
+/// 手动名字的「清除窗格名称」、已在线机器的「立即重连」）置灰。
+pub(super) fn context_action_state(id: ActionId, target: &ClientContextMenuTarget) -> ActionState {
+    match target {
+        ClientContextMenuTarget::Workspace {
+            is_git,
+            is_linked_worktree,
+            has_worktree_children,
+            collapsed,
+            ..
+        } => {
+            let linked = *is_git && *is_linked_worktree;
+            let parent = *is_git && !linked && *has_worktree_children;
+            match id {
+                ActionId::NewWorktree | ActionId::OpenWorktree if !*is_git || linked => {
+                    ActionState::HIDDEN
+                }
+                ActionId::RemoveWorktree if !linked => ActionState::HIDDEN,
+                ActionId::ToggleWorkspaceGroup if !parent => ActionState::HIDDEN,
+                ActionId::ToggleWorkspaceGroup => ActionState::checked(*collapsed),
+                ActionId::CloseWorkspace => ActionState {
+                    alternate: parent,
+                    ..ActionState::ENABLED
+                },
+                _ => ActionState::ENABLED,
+            }
+        }
+        ClientContextMenuTarget::Tab { .. } => ActionState::ENABLED,
+        ClientContextMenuTarget::Pane {
+            source_pane_id,
+            has_manual_label,
+            right_click_passthrough,
+            ..
+        } => match id {
+            ActionId::ClearPaneName => ActionState::enabled_if(*has_manual_label),
+            ActionId::SwapWithFocusedPane => ActionState::enabled_if(source_pane_id.is_some()),
+            ActionId::RightClickPassthrough => ActionState::checked(*right_click_passthrough),
+            _ => ActionState::ENABLED,
+        },
+        ClientContextMenuTarget::Machine {
+            endpoint_id,
+            enabled,
+            online,
+            env,
+        } => match (id, endpoint_id) {
+            (ActionId::ManageMachines, _) => ActionState::ENABLED,
+            // 本机不是已保存的 SSH 机器：只有「管理机器」。
+            (_, ClientEndpointId::Local) => ActionState::HIDDEN,
+            _ => machine_action_state(id, *enabled, *online, env.active_machine()),
+        },
+        ClientContextMenuTarget::Agent { .. } | ClientContextMenuTarget::ExternalAgent { .. } => {
+            ActionState::ENABLED
+        }
+    }
+}
 
 /// 按 id 取表项。表由单测守门（每个 id 恰好一条），查不到只可能是新增变体
 /// 忘了登记——落回第一条，保证渲染不 panic。
@@ -1806,6 +1937,33 @@ mod tests {
                 assert!(!seen.contains(&slot), "{slot:?} 重复登记");
                 seen.push(slot);
                 assert_eq!(context_action(slot.0, slot.1), Some(spec.id));
+            }
+        }
+    }
+
+    #[test]
+    fn context_layouts_only_list_actions_of_that_object_kind() {
+        for kind in [
+            ContextKind::Workspace,
+            ContextKind::Tab,
+            ContextKind::Pane,
+            ContextKind::Machine,
+        ] {
+            let mut ids = Vec::new();
+            for entry in context_layout(kind) {
+                match entry {
+                    ContextLayoutEntry::Item(id) => ids.push(*id),
+                    ContextLayoutEntry::Submenu(_, children) => ids.extend(children.iter()),
+                    ContextLayoutEntry::Separator => {}
+                }
+            }
+            assert!(!ids.is_empty());
+            for id in ids {
+                let context = action_spec(id).context;
+                assert!(
+                    matches!(context, Some((spec_kind, _)) if spec_kind == kind),
+                    "{id:?} 不是 {kind:?} 菜单的条目"
+                );
             }
         }
     }

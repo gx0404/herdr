@@ -215,26 +215,36 @@ fn machine_context_menu_items_track_endpoint_state() {
         t.manage_machines,
         t.edit_machine,
         t.reconnect_machine,
-        t.disable_machine,
+        t.enable_machine,
         t.remove_machine,
         t.copy_machine_fix_command,
     ] {
         assert!(labels.contains(&expected), "missing {expected}: {labels:?}");
     }
-    // An online machine has nothing to reconnect; a disabled one shows enable.
+    // 启用是勾选项（不再用「启用 / 禁用」两套文案）；已在线的机器「立即重连」
+    // 置灰而不是剔除。
+    let item = |menu: &ClientContextMenuOverlay, action| {
+        menu.items()
+            .into_iter()
+            .find(|item| item.action == action)
+            .unwrap_or_else(|| panic!("{action:?} 应列出"))
+    };
+    assert_eq!(
+        item(menu, ClientContextMenuAction::ToggleMachineEnabled).checked,
+        Some(true)
+    );
+    assert!(item(menu, ClientContextMenuAction::ReconnectMachine).enabled);
     state.set_endpoint_status(&build_id, ClientEndpointStatus::Online);
     state.cache_endpoint_snapshot(&build_id, Box::new(snapshot()));
     state.open_machine_context_menu(&build_id, 4, 4);
     let Some(ClientShellOverlay::ContextMenu(menu)) = state.overlay.as_ref() else {
         panic!("context menu");
     };
-    let labels = menu
-        .items()
-        .iter()
-        .map(|item| item.label)
-        .collect::<Vec<_>>();
-    assert!(!labels.contains(&t.reconnect_machine), "{labels:?}");
-    assert!(labels.contains(&t.disable_machine), "{labels:?}");
+    assert!(!item(menu, ClientContextMenuAction::ReconnectMachine).enabled);
+    assert_eq!(
+        item(menu, ClientContextMenuAction::ToggleMachineEnabled).checked,
+        Some(true)
+    );
 }
 
 #[test]
@@ -969,19 +979,24 @@ fn disabling_a_machine_updates_the_catalog_and_context_menu() {
     let catalog = crate::client::endpoint::EndpointCatalog::load().expect("catalog");
     assert!(!catalog.ssh[0].enabled);
 
-    // The context menu now offers enable and drops reconnect.
+    // 停用后「启用」勾选项取消勾选，「立即重连」置灰。
     state.open_machine_context_menu(&endpoint_id, 4, 4);
     let Some(ClientShellOverlay::ContextMenu(menu)) = state.overlay.as_ref() else {
         panic!("context menu");
     };
-    let labels = menu
-        .items()
+    let items = menu.items();
+    let toggle = items
         .iter()
-        .map(|item| item.label)
-        .collect::<Vec<_>>();
-    let t = &crate::i18n::texts().context_menu;
-    assert!(labels.contains(&t.enable_machine), "{labels:?}");
-    assert!(!labels.contains(&t.reconnect_machine), "{labels:?}");
+        .find(|item| item.action == ClientContextMenuAction::ToggleMachineEnabled)
+        .expect("启用勾选项");
+    assert_eq!(
+        toggle.label,
+        crate::i18n::texts().context_menu.enable_machine
+    );
+    assert_eq!(toggle.checked, Some(false));
+    assert!(items
+        .iter()
+        .any(|item| item.action == ClientContextMenuAction::ReconnectMachine && !item.enabled));
     let _ = std::fs::remove_dir_all(&dir);
 }
 

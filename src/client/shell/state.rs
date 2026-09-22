@@ -214,10 +214,9 @@ pub(super) struct ShellHitMap {
     pub(super) menu_popup: Rect,
     pub(super) menu_search: Rect,
     pub(super) global_menu_rows: Vec<(Rect, usize)>,
+    /// 右键菜单可激活的行（含展开的子菜单）：下标是 `items()` 的平铺下标，
+    /// 子菜单父项是 `context_menu::SUBMENU_ROW`。
     pub(super) context_menu_rows: Vec<(Rect, usize)>,
-    // seam-stub(menu)：子菜单行由波 2 菜单车道填充并消费后删除本 allow。
-    #[allow(dead_code)]
-    pub(super) context_submenu_rows: Vec<(Rect, usize)>,
     pub(super) notification_history_rows: Vec<(Rect, usize)>,
     pub(super) overlay_primary: Rect,
     pub(super) overlay_clear: Rect,
@@ -964,6 +963,7 @@ pub(super) enum ClientContextMenuAction {
     RenameMachine,
     EditMachine,
     ReconnectMachine,
+    SwitchMachine,
     ToggleMachineEnabled,
     RemoveMachine,
     CopyMachineFixCommand,
@@ -983,10 +983,12 @@ pub(super) enum ClientContextMenuTarget {
         is_linked_worktree: bool,
         has_worktree_children: bool,
         collapsed: bool,
+        env: super::context_menu::ContextMenuEnv,
     },
     Tab {
         tab_id: String,
         workspace_id: String,
+        env: super::context_menu::ContextMenuEnv,
     },
     Pane {
         pane_id: String,
@@ -994,11 +996,13 @@ pub(super) enum ClientContextMenuTarget {
         source_pane_id: Option<String>,
         has_manual_label: bool,
         right_click_passthrough: bool,
+        env: super::context_menu::ContextMenuEnv,
     },
     Machine {
         endpoint_id: ClientEndpointId,
         enabled: bool,
         online: bool,
+        env: super::context_menu::ContextMenuEnv,
     },
     /// Agents 面板里某个 pane 的 agent 行。
     Agent {
@@ -1020,9 +1024,9 @@ pub(super) enum ClientContextMenuTarget {
     },
 }
 
-/// 右键菜单展开的子菜单：`parent` 是父菜单里的项下标。
-// seam-stub(menu)：由波 2 菜单车道构造并消费后删除本 allow。
-#[allow(dead_code)]
+/// 右键菜单展开的子菜单：`parent` 是父项在顶层 kit 条目里的下标；
+/// `highlighted` / `hovered` 是子项在 `items()` 里的平铺下标，`highlighted`
+/// 为 `usize::MAX` 表示子菜单是指针悬浮打开的、键盘焦点还在顶层。
 #[derive(Debug)]
 pub(super) struct ClientContextSubmenu {
     pub(super) parent: usize,
@@ -1040,8 +1044,6 @@ pub(super) struct ClientContextMenuOverlay {
     /// 指针悬浮项：只由 `Moved` 改写，指针离开行区域即回到 None。与
     /// `highlighted` 分离后，「鼠标路过」不再劫持键盘选择（MENU-01）。
     pub(super) hovered: Option<usize>,
-    // seam-stub(menu)：子菜单由波 2 菜单车道打开并消费后删除本 allow。
-    #[allow(dead_code)]
     pub(super) submenu: Option<ClientContextSubmenu>,
 }
 
@@ -1050,13 +1052,11 @@ pub(super) struct ClientContextMenuItem {
     pub(super) action: ClientContextMenuAction,
     /// 禁用项照常列出但不可激活。
     pub(super) enabled: bool,
-    // seam-stub(menu)：以下三项供统一菜单组件消费，波 2 菜单车道用上后删除各自
-    // 的 allow。
-    #[allow(dead_code)]
-    pub(super) shortcut: Option<&'static str>,
-    #[allow(dead_code)]
+    /// 右对齐的快捷键标签（用户当前键位，打开菜单时解析）。
+    pub(super) shortcut: Option<String>,
+    /// 二态开关的当前状态（`None` = 不是开关）。
     pub(super) checked: Option<bool>,
-    #[allow(dead_code)]
+    /// 在本项之前画一条分隔线。
     pub(super) separator_before: bool,
 }
 

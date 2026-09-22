@@ -387,13 +387,23 @@ fn agent_row_context_menu_lists_seam_items_and_routes_stub_actions() {
         assert!(!items[index].enabled, "{action:?} 未接通时应禁用");
     }
 
-    // 禁用项：点击不激活，菜单保持打开。
+    // 禁用项：不进命中表（kit::menu 只登记可激活行），点它所在的行不激活，
+    // 菜单保持打开。agent 菜单没有分隔线，行位 = 首行 + 条目下标。
     state.compose(106, 24).expect("context menu frame");
-    let disabled_row = state.hits.context_menu_rows[view_activity].0;
+    let row_of = |state: &ClientShellState, item: usize| {
+        state
+            .hits
+            .context_menu_rows
+            .iter()
+            .find(|(_, index)| *index == item)
+            .map(|(rect, _)| *rect)
+    };
+    let focus_row = row_of(&state, 0).expect("聚焦行");
+    assert!(row_of(&state, view_activity).is_none(), "禁用项不可点");
     state.handle_raw_events(vec![mouse(
         MouseEventKind::Down(MouseButton::Left),
-        disabled_row.x + 1,
-        disabled_row.y,
+        focus_row.x + 1,
+        focus_row.y + view_activity as u16,
     )]);
     assert!(matches!(
         state.overlay,
@@ -401,7 +411,6 @@ fn agent_row_context_menu_lists_seam_items_and_routes_stub_actions() {
     ));
 
     // 「聚焦」：当前端点直接发 pane.focus。
-    let focus_row = state.hits.context_menu_rows[0].0;
     let outcome = state.handle_raw_events(vec![mouse(
         MouseEventKind::Down(MouseButton::Left),
         focus_row.x + 1,

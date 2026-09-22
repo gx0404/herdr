@@ -1,14 +1,115 @@
-use super::action_table::{ActionTarget, ContextKind};
+//! 右键菜单：条目按对象从动作表取（[`super::action_table::context_layout`]），
+//! 渲染走 `kit::menu`（分隔线、右对齐快捷键、禁用置灰、勾选态、危险项、子菜单、
+//! 悬浮与键盘高亮分离），键盘支持方向键、Home / End、首字母跳转与左右键进出
+//! 子菜单。
+//!
+//! 行 id：`highlighted` / `hovered` 与 `hits.context_menu_rows` 的下标都是
+//! [`ClientContextMenuOverlay::items`] 的平铺下标；子菜单的父项不是可执行条目，
+//! 用 [`SUBMENU_ROW`] 表示。子菜单的子项也在平铺条目里，归属由
+//! [`ContextMenuModel::submenu`] 给出。
+
+use std::ops::Range;
+
+use super::action_table::{
+    action_spec, context_action, context_action_state, context_layout, ActionTarget, ContextKind,
+    ContextLayoutEntry, ACTIONS,
+};
 use super::feedback::ChromeContext;
-use super::render::{display_width, panel, put_text, OverlayRender};
+use super::render::OverlayRender;
 use super::*;
-use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+use crate::ui::kit::menu::{
+    menu_first_letter, menu_size, menu_step, render_menu, MenuItem, MenuState,
+};
+use crossterm::event::{KeyCode, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+
+/// 子菜单父项在行 id 空间里的标记。
+pub(super) const SUBMENU_ROW: usize = usize::MAX;
+
+/// 打开菜单时从客户端状态取的、渲染阶段拿不到的事实：用户当前键位下各条目
+/// 的快捷键标签、右键的机器是不是当前活动机器。挂在右键对象上随菜单走；
+/// `state.rs` 只持有它，字段只在本车道的文件里读写。
+#[derive(Debug, Clone, Default)]
+pub(super) struct ContextMenuEnv {
+    shortcuts: Vec<(ClientContextMenuAction, String)>,
+    active_machine: bool,
+}
+
+impl ContextMenuEnv {
+    fn resolve(kind: ContextKind, keybinds: &crate::config::Keybinds) -> Self {
+        Self {
+            shortcuts: ACTIONS
+                .iter()
+                .filter_map(|spec| {
+                    let (spec_kind, action) = spec.context?;
+                    if spec_kind != kind {
+                        return None;
+                    }
+                    spec.shortcut(keybinds).map(|label| (action, label))
+                })
+                .collect(),
+            active_machine: false,
+        }
+    }
+
+    fn shortcut(&self, action: ClientContextMenuAction) -> Option<&str> {
+        self.shortcuts
+            .iter()
+            .find(|(candidate, _)| *candidate == action)
+            .map(|(_, label)| label.as_str())
+    }
+
+    /// 右键的机器是当前活动机器（「切换到此机器」置灰）。
+    pub(super) fn active_machine(&self) -> bool {
+        self.active_machine
+    }
+}
+
+/// 子菜单：父项标签与子项在平铺条目里的范围。
+pub(super) struct ContextSubmenuSpec {
+    pub(super) label: &'static str,
+    pub(super) children: Range<usize>,
+    pub(super) separator_before: bool,
+}
+
+/// 菜单版式：平铺条目（顶层与子菜单子项，按显示顺序）+ 至多一个子菜单。
+pub(super) struct ContextMenuModel {
+    pub(super) items: Vec<ClientContextMenuItem>,
+    pub(super) submenu: Option<ContextSubmenuSpec>,
+}
+
+impl ContextMenuModel {
+    /// 顶层的行：`(行 id, 分隔线在前)`，子菜单的子项收进父项。
+    fn top_rows(&self) -> Vec<(usize, bool)> {
+        let mut rows = Vec::with_capacity(self.items.len() + 1);
+        for (index, item) in self.items.iter().enumerate() {
+            match &self.submenu {
+                Some(spec) if spec.children.contains(&index) => {
+                    if index == spec.children.start {
+                        rows.push((SUBMENU_ROW, spec.separator_before));
+                    }
+                }
+                _ => rows.push((index, item.separator_before)),
+            }
+        }
+        rows
+    }
+
+    fn is_child(&self, row: usize) -> bool {
+        self.submenu
+            .as_ref()
+            .is_some_and(|spec| spec.children.contains(&row))
+    }
+}
 
 impl ClientContextMenuOverlay {
+    /// 平铺条目（顶层与子菜单的子项）：激活、测试与渲染都按这个下标说话。
     pub(super) fn items(&self) -> Vec<ClientContextMenuItem> {
+        self.model().items
+    }
+
+    pub(super) fn model(&self) -> ContextMenuModel {
         use ClientContextMenuAction as Action;
 
-        let t = &crate::i18n::texts().context_menu;
         let item = |label, action| ClientContextMenuItem {
             label,
             action,
@@ -17,105 +118,7 @@ impl ClientContextMenuOverlay {
             checked: None,
             separator_before: false,
         };
-        match &self.target {
-            ClientContextMenuTarget::Workspace { is_git: false, .. } => {
-                vec![item(t.rename, Action::Rename), item(t.close, Action::Close)]
-            }
-            ClientContextMenuTarget::Workspace {
-                is_linked_worktree: false,
-                has_worktree_children: false,
-                ..
-            } => vec![
-                item(t.rename, Action::Rename),
-                item(t.close, Action::Close),
-                item(t.new_worktree, Action::NewWorktree),
-                item(t.open_worktree, Action::OpenWorktree),
-            ],
-            ClientContextMenuTarget::Workspace {
-                is_linked_worktree: true,
-                ..
-            } => vec![
-                item(t.rename, Action::Rename),
-                item(t.close, Action::Close),
-                item(t.delete_worktree, Action::RemoveWorktree),
-            ],
-            ClientContextMenuTarget::Workspace {
-                has_worktree_children: true,
-                collapsed,
-                ..
-            } => vec![
-                item(t.rename, Action::Rename),
-                item(t.close_group, Action::Close),
-                item(t.new_worktree, Action::NewWorktree),
-                item(t.open_worktree, Action::OpenWorktree),
-                item(
-                    if *collapsed { t.expand } else { t.collapse },
-                    Action::ToggleGroup,
-                ),
-            ],
-            ClientContextMenuTarget::Tab { .. } => vec![
-                item(t.new_tab, Action::NewTab),
-                item(t.rename, Action::Rename),
-                item(t.close, Action::Close),
-            ],
-            ClientContextMenuTarget::Pane {
-                source_pane_id,
-                has_manual_label,
-                right_click_passthrough,
-                ..
-            } => {
-                let mut items = vec![item(t.rename_pane, Action::RenamePane)];
-                if *has_manual_label {
-                    items.push(item(t.clear_pane_name, Action::ClearPaneName));
-                }
-                if source_pane_id.is_some() {
-                    items.push(item(t.swap_with_focused, Action::SwapWithFocusedPane));
-                }
-                items.extend([
-                    item(t.split_right, Action::SplitRight),
-                    item(t.split_down, Action::SplitDown),
-                    item(t.zoom, Action::Zoom),
-                    item(
-                        if *right_click_passthrough {
-                            t.use_herdr_menu
-                        } else {
-                            t.send_right_clicks
-                        },
-                        Action::ToggleRightClickPassthrough,
-                    ),
-                    item(t.close_pane, Action::ClosePane),
-                ]);
-                items
-            }
-            ClientContextMenuTarget::Machine {
-                endpoint_id,
-                enabled,
-                online,
-            } => {
-                let mut items = vec![item(t.manage_machines, Action::ManageMachines)];
-                if endpoint_id.is_local() {
-                    return items;
-                }
-                items.push(item(t.rename, Action::RenameMachine));
-                items.push(item(t.edit_machine, Action::EditMachine));
-                if *enabled && !*online {
-                    items.push(item(t.reconnect_machine, Action::ReconnectMachine));
-                }
-                items.push(item(
-                    if *enabled {
-                        t.disable_machine
-                    } else {
-                        t.enable_machine
-                    },
-                    Action::ToggleMachineEnabled,
-                ));
-                items.push(item(t.remove_machine, Action::RemoveMachine));
-                items.push(item(
-                    t.copy_machine_fix_command,
-                    Action::CopyMachineFixCommand,
-                ));
-                items
-            }
+        let items = match &self.target {
             // agent 行的条目由接缝定稿：面板车道只接动作，菜单车道只重写渲染与
             // 键盘导航，都不改条目语义。
             ClientContextMenuTarget::Agent {
@@ -150,10 +153,194 @@ impl ClientContextMenuOverlay {
                 crate::i18n::texts().agent_panel.menu_view_activity,
                 Action::ViewAgentActivity,
             )],
+            target => return layout_model(target),
+        };
+        ContextMenuModel {
+            items,
+            submenu: None,
         }
     }
 }
+
+fn context_kind(target: &ClientContextMenuTarget) -> ContextKind {
+    match target {
+        ClientContextMenuTarget::Workspace { .. } => ContextKind::Workspace,
+        ClientContextMenuTarget::Tab { .. } => ContextKind::Tab,
+        ClientContextMenuTarget::Pane { .. } => ContextKind::Pane,
+        ClientContextMenuTarget::Machine { .. } => ContextKind::Machine,
+        ClientContextMenuTarget::Agent { .. } | ClientContextMenuTarget::ExternalAgent { .. } => {
+            ContextKind::Agent
+        }
+    }
+}
+
+fn target_env(target: &ClientContextMenuTarget) -> Option<&ContextMenuEnv> {
+    match target {
+        ClientContextMenuTarget::Workspace { env, .. }
+        | ClientContextMenuTarget::Tab { env, .. }
+        | ClientContextMenuTarget::Pane { env, .. }
+        | ClientContextMenuTarget::Machine { env, .. } => Some(env),
+        ClientContextMenuTarget::Agent { .. } | ClientContextMenuTarget::ExternalAgent { .. } => {
+            None
+        }
+    }
+}
+
+/// 按动作表版式展开某个对象的菜单：不适用的条目不列，分隔线只画在两段都有
+/// 条目的地方。
+fn layout_model(target: &ClientContextMenuTarget) -> ContextMenuModel {
+    let texts = crate::i18n::texts();
+    let kind = context_kind(target);
+    let env = target_env(target);
+    let make = |id, separator_before| {
+        let spec = action_spec(id);
+        let (_, action) = spec.context?;
+        let state = context_action_state(id, target);
+        state.visible.then(|| ClientContextMenuItem {
+            label: spec.label_text(texts, state.alternate),
+            action,
+            enabled: state.enabled,
+            shortcut: env.and_then(|env| env.shortcut(action)).map(str::to_owned),
+            checked: state.checked,
+            separator_before,
+        })
+    };
+    let mut items = Vec::new();
+    let mut submenu = None;
+    let mut separator = false;
+    for entry in context_layout(kind) {
+        match entry {
+            ContextLayoutEntry::Separator => separator = true,
+            ContextLayoutEntry::Item(id) => {
+                if let Some(item) = make(*id, separator && !items.is_empty()) {
+                    items.push(item);
+                    separator = false;
+                }
+            }
+            ContextLayoutEntry::Submenu(label, children) => {
+                let start = items.len();
+                let separator_before = separator && start > 0;
+                items.extend(children.iter().filter_map(|id| make(*id, false)));
+                if items.len() > start {
+                    submenu = Some(ContextSubmenuSpec {
+                        label: label(texts),
+                        children: start..items.len(),
+                        separator_before,
+                    });
+                    separator = false;
+                }
+            }
+        }
+    }
+    ContextMenuModel { items, submenu }
+}
+
+/// 条目是否标红：动作表里的破坏性动作。
+fn is_danger(kind: ContextKind, action: ClientContextMenuAction) -> bool {
+    context_action(kind, action).is_some_and(|id| action_spec(id).danger)
+}
+
+fn kit_item(item: &ClientContextMenuItem, kind: ContextKind) -> MenuItem<'_> {
+    MenuItem {
+        shortcut: item.shortcut.as_deref(),
+        enabled: item.enabled,
+        checked: item.checked,
+        danger: is_danger(kind, item.action),
+        ..MenuItem::action(item.label)
+    }
+}
+
+/// 顶层的 kit 条目与每条对应的行 id（分隔线为 `None`）。
+fn top_menu(
+    model: &ContextMenuModel,
+    kind: ContextKind,
+) -> (Vec<MenuItem<'_>>, Vec<Option<usize>>) {
+    let rows = model.top_rows();
+    let mut items = Vec::with_capacity(rows.len() * 2);
+    let mut ids = Vec::with_capacity(rows.len() * 2);
+    for (row, separator_before) in rows {
+        if separator_before && !items.is_empty() {
+            items.push(MenuItem::separator());
+            ids.push(None);
+        }
+        let item = match (row, &model.submenu) {
+            (SUBMENU_ROW, Some(spec)) => MenuItem::submenu(spec.label),
+            _ => match model.items.get(row) {
+                Some(item) => kit_item(item, kind),
+                None => continue,
+            },
+        };
+        items.push(item);
+        ids.push(Some(row));
+    }
+    (items, ids)
+}
+
+/// 子菜单的 kit 条目（下标 + `children.start` = 平铺下标）。
+fn sub_menu(model: &ContextMenuModel, kind: ContextKind) -> Vec<MenuItem<'_>> {
+    model
+        .submenu
+        .as_ref()
+        .map(|spec| {
+            model.items[spec.children.clone()]
+                .iter()
+                .map(|item| kit_item(item, kind))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn kit_index(ids: &[Option<usize>], row: usize) -> usize {
+    ids.iter()
+        .position(|id| *id == Some(row))
+        .unwrap_or(usize::MAX)
+}
+
+fn child_kit_index(model: &ContextMenuModel, row: usize) -> usize {
+    match &model.submenu {
+        Some(spec) if spec.children.contains(&row) => row - spec.children.start,
+        _ => usize::MAX,
+    }
+}
+
+/// 打开子菜单。`keyboard` 为真时键盘焦点进子菜单、高亮第一个可用子项；指针
+/// 悬浮打开时焦点留在顶层。
+fn open_submenu(menu: &mut ClientContextMenuOverlay, model: &ContextMenuModel, keyboard: bool) {
+    let Some(spec) = model.submenu.as_ref() else {
+        return;
+    };
+    let (_, ids) = top_menu(model, context_kind(&menu.target));
+    let highlighted = if keyboard {
+        spec.children
+            .clone()
+            .find(|row| model.items[*row].enabled)
+            .unwrap_or(usize::MAX)
+    } else {
+        usize::MAX
+    };
+    menu.submenu = Some(ClientContextSubmenu {
+        parent: kit_index(&ids, SUBMENU_ROW),
+        highlighted,
+        hovered: None,
+    });
+}
+
 impl ClientShellState {
+    fn open_context_menu(&mut self, target: ClientContextMenuTarget, x: u16, y: u16) {
+        self.overlay = Some(ClientShellOverlay::ContextMenu(ClientContextMenuOverlay {
+            target,
+            x,
+            y,
+            highlighted: 0,
+            hovered: None,
+            submenu: None,
+        }));
+    }
+
+    fn context_env(&self, kind: ContextKind) -> ContextMenuEnv {
+        ContextMenuEnv::resolve(kind, &self.config.keybinds.keybinds)
+    }
+
     pub(super) fn open_workspace_context_menu(&mut self, workspace_id: String, x: u16, y: u16) {
         let Some(snapshot) = self.snapshot.as_deref() else {
             return;
@@ -183,20 +370,15 @@ impl ClientShellState {
         let collapsed = worktree.is_some_and(|worktree| {
             self.group_is_collapsed(&self.active_endpoint_id, &worktree.key)
         });
-        self.overlay = Some(ClientShellOverlay::ContextMenu(ClientContextMenuOverlay {
-            target: ClientContextMenuTarget::Workspace {
-                workspace_id,
-                is_git: worktree.is_some() || workspace.branch.is_some(),
-                is_linked_worktree: worktree.is_some_and(|worktree| worktree.is_linked_worktree),
-                has_worktree_children,
-                collapsed,
-            },
-            x,
-            y,
-            highlighted: 0,
-            hovered: None,
-            submenu: None,
-        }));
+        let target = ClientContextMenuTarget::Workspace {
+            workspace_id,
+            is_git: worktree.is_some() || workspace.branch.is_some(),
+            is_linked_worktree: worktree.is_some_and(|worktree| worktree.is_linked_worktree),
+            has_worktree_children,
+            collapsed,
+            env: self.context_env(ContextKind::Workspace),
+        };
+        self.open_context_menu(target, x, y);
     }
 
     pub(super) fn open_tab_context_menu(&mut self, tab_id: String, x: u16, y: u16) {
@@ -207,17 +389,12 @@ impl ClientShellState {
         else {
             return;
         };
-        self.overlay = Some(ClientShellOverlay::ContextMenu(ClientContextMenuOverlay {
-            target: ClientContextMenuTarget::Tab {
-                tab_id,
-                workspace_id: tab.workspace_id.clone(),
-            },
-            x,
-            y,
-            highlighted: 0,
-            hovered: None,
-            submenu: None,
-        }));
+        let target = ClientContextMenuTarget::Tab {
+            tab_id,
+            workspace_id: tab.workspace_id.clone(),
+            env: self.context_env(ContextKind::Tab),
+        };
+        self.open_context_menu(target, x, y);
     }
 
     pub(super) fn open_pane_context_menu(&mut self, pane_id: String, x: u16, y: u16) {
@@ -231,20 +408,15 @@ impl ClientShellState {
             .focused_pane_id
             .clone()
             .filter(|focused| focused != &pane_id);
-        self.overlay = Some(ClientShellOverlay::ContextMenu(ClientContextMenuOverlay {
-            target: ClientContextMenuTarget::Pane {
-                pane_id,
-                workspace_id: pane.workspace_id.clone(),
-                source_pane_id,
-                has_manual_label: pane.label.is_some(),
-                right_click_passthrough: pane.right_click_passthrough,
-            },
-            x,
-            y,
-            highlighted: 0,
-            hovered: None,
-            submenu: None,
-        }));
+        let target = ClientContextMenuTarget::Pane {
+            pane_id,
+            workspace_id: pane.workspace_id.clone(),
+            source_pane_id,
+            has_manual_label: pane.label.is_some(),
+            right_click_passthrough: pane.right_click_passthrough,
+            env: self.context_env(ContextKind::Pane),
+        };
+        self.open_context_menu(target, x, y);
     }
 
     pub(super) fn open_machine_context_menu(
@@ -271,44 +443,100 @@ impl ClientShellState {
                 (enabled, self.endpoint_is_online(endpoint_id))
             }
         };
-        self.overlay = Some(ClientShellOverlay::ContextMenu(ClientContextMenuOverlay {
-            target: ClientContextMenuTarget::Machine {
-                endpoint_id: endpoint_id.clone(),
-                enabled,
-                online,
+        let target = ClientContextMenuTarget::Machine {
+            endpoint_id: endpoint_id.clone(),
+            enabled,
+            online,
+            env: ContextMenuEnv {
+                active_machine: &self.active_endpoint_id == endpoint_id,
+                ..self.context_env(ContextKind::Machine)
             },
-            x,
-            y,
-            highlighted: 0,
-            hovered: None,
-            submenu: None,
-        }));
+        };
+        self.open_context_menu(target, x, y);
     }
 
-    /// 上下键在菜单里回绕，与工作台 Layout 模式、导航器同一口径
-    /// （HERDR-UX-08 之前是 clamp，到头就卡住）。
-    pub(super) fn move_context_menu_selection(&mut self, delta: isize) {
+    /// 右键菜单打开时的按键：方向键在当前层（子菜单有键盘焦点时是子菜单）里
+    /// 跳过分隔线与禁用项回绕移动，Home / End 到首尾，可打印字符按首字母跳转，
+    /// → / Enter 进子菜单，← / Esc 退出子菜单，再按 Esc 关闭菜单。不在该浮层时
+    /// 返回 `false`。
+    pub(super) fn route_context_menu_key(
+        &mut self,
+        key: &crate::input::TerminalKey,
+        outcome: &mut ClientShellInput,
+    ) -> bool {
         let Some(ClientShellOverlay::ContextMenu(menu)) = self.overlay.as_mut() else {
-            return;
+            return false;
         };
-        let item_count = menu.items().len();
-        if item_count == 0 {
-            return;
-        }
-        let count = item_count as isize;
-        menu.highlighted = (menu.highlighted as isize + delta).rem_euclid(count) as usize;
-    }
-
-    /// Home / End 直接跳到首尾项（HERDR-UX-08：其它列表都有）。
-    pub(super) fn set_context_menu_selection(&mut self, last: bool) {
-        let Some(ClientShellOverlay::ContextMenu(menu)) = self.overlay.as_mut() else {
-            return;
+        let model = menu.model();
+        let kind = context_kind(&menu.target);
+        let (top, ids) = top_menu(&model, kind);
+        let children = sub_menu(&model, kind);
+        let child_focus = menu
+            .submenu
+            .as_ref()
+            .filter(|open| open.highlighted != usize::MAX)
+            .map(|open| open.highlighted);
+        // 当前层的条目与键盘高亮所在的 kit 下标。
+        let (level, from) = match child_focus {
+            Some(row) => (&children, child_kit_index(&model, row)),
+            None => (&top, kit_index(&ids, menu.highlighted)),
         };
-        let item_count = menu.items().len();
-        if item_count == 0 {
-            return;
+        let step = match key.code {
+            KeyCode::Up => menu_step(level, from, -1),
+            KeyCode::Down => menu_step(level, from, 1),
+            KeyCode::Home => menu_step(level, usize::MAX, 1),
+            KeyCode::End => menu_step(level, usize::MAX, -1),
+            KeyCode::Char(ch)
+                if !key
+                    .modifiers
+                    .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+            {
+                menu_first_letter(level, ch, from)
+            }
+            _ => None,
+        };
+        let mut activate = None;
+        let mut close = false;
+        match key.code {
+            KeyCode::Up | KeyCode::Down | KeyCode::Home | KeyCode::End | KeyCode::Char(_) => {
+                if let Some(index) = step {
+                    match (child_focus, &model.submenu, menu.submenu.as_mut()) {
+                        (Some(_), Some(spec), Some(open)) => {
+                            open.highlighted = spec.children.start + index;
+                        }
+                        _ => {
+                            if let Some(Some(row)) = ids.get(index) {
+                                menu.highlighted = *row;
+                                // 键盘离开了子菜单父项：悬浮打开的子菜单随之收起。
+                                if *row != SUBMENU_ROW {
+                                    menu.submenu = None;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            KeyCode::Right if child_focus.is_none() && menu.highlighted == SUBMENU_ROW => {
+                open_submenu(menu, &model, true);
+            }
+            KeyCode::Left if menu.submenu.is_some() => menu.submenu = None,
+            KeyCode::Esc if menu.submenu.is_some() => menu.submenu = None,
+            KeyCode::Esc => close = true,
+            KeyCode::Enter => match child_focus {
+                Some(row) => activate = Some(row),
+                None if menu.highlighted == SUBMENU_ROW => open_submenu(menu, &model, true),
+                None => activate = Some(menu.highlighted),
+            },
+            _ => {}
         }
-        menu.highlighted = if last { item_count - 1 } else { 0 };
+        if close {
+            self.overlay = None;
+        }
+        if let Some(row) = activate {
+            self.activate_context_menu_item(row, outcome);
+        }
+        outcome.repaint = true;
+        true
     }
 
     pub(super) fn activate_context_menu_item(
@@ -333,7 +561,7 @@ impl ClientShellState {
             return;
         }
         let (kind, target) = context_action_target(menu.target);
-        if let Some(id) = super::action_table::context_action(kind, action) {
+        if let Some(id) = context_action(kind, action) {
             self.run_action(id, target, outcome);
         }
         outcome.repaint = true;
@@ -350,6 +578,7 @@ fn context_action_target(target: ClientContextMenuTarget) -> (ContextKind, Actio
         ClientContextMenuTarget::Tab {
             tab_id,
             workspace_id,
+            ..
         } => (
             ContextKind::Tab,
             ActionTarget::Tab {
@@ -401,7 +630,9 @@ fn context_action_target(target: ClientContextMenuTarget) -> (ContextKind, Actio
 
 impl ClientShellState {
     /// 右键菜单打开时的鼠标分派：不在该浮层时返回 `false`，由
-    /// `mouse.rs::handle_mouse` 继续往下走。
+    /// `mouse.rs::handle_mouse` 继续往下走。指针悬浮只写 `hovered`（悬到子菜单
+    /// 父项上顺带展开子菜单，悬到别的顶层项上收起悬浮展开的子菜单）；点击可用
+    /// 行激活，点在菜单内的禁用行 / 分隔线 / 边框上什么都不做，点在菜单外关闭。
     pub(super) fn handle_context_menu_mouse(
         &mut self,
         mouse: MouseEvent,
@@ -416,85 +647,142 @@ impl ClientShellState {
             .context_menu_rows
             .iter()
             .find(|(rect, _)| super::contains(*rect, point))
-            .copied();
+            .map(|(_, row)| *row);
+        let inside = super::contains(self.hits.overlay_bounds, point);
         match mouse.kind {
             MouseEventKind::Moved => {
                 if let Some(ClientShellOverlay::ContextMenu(menu)) = self.overlay.as_mut() {
-                    let hovered = row_hit.map(|(_, index)| index);
-                    if menu.hovered != hovered {
-                        menu.hovered = hovered;
-                        outcome.repaint = true;
+                    let model = menu.model();
+                    let before = (menu.hovered, menu.submenu.as_ref().map(|open| open.hovered));
+                    match row_hit {
+                        Some(row) if row != SUBMENU_ROW && model.is_child(row) => {
+                            menu.hovered = None;
+                            if let Some(open) = menu.submenu.as_mut() {
+                                open.hovered = Some(row);
+                            }
+                        }
+                        hovered => {
+                            menu.hovered = hovered;
+                            if let Some(open) = menu.submenu.as_mut() {
+                                open.hovered = None;
+                            }
+                            match hovered {
+                                Some(SUBMENU_ROW) if menu.submenu.is_none() => {
+                                    open_submenu(menu, &model, false);
+                                    outcome.repaint = true;
+                                }
+                                Some(_)
+                                    if menu
+                                        .submenu
+                                        .as_ref()
+                                        .is_some_and(|open| open.highlighted == usize::MAX) =>
+                                {
+                                    menu.submenu = None;
+                                    outcome.repaint = true;
+                                }
+                                _ => {}
+                            }
+                        }
                     }
+                    let after = (menu.hovered, menu.submenu.as_ref().map(|open| open.hovered));
+                    outcome.repaint |= before != after;
                 }
             }
-            MouseEventKind::Down(MouseButton::Left) => {
-                if let Some((_, index)) = row_hit {
-                    self.activate_context_menu_item(index, outcome);
-                } else {
+            MouseEventKind::Down(MouseButton::Left) => match row_hit {
+                Some(SUBMENU_ROW) => {
+                    if let Some(ClientShellOverlay::ContextMenu(menu)) = self.overlay.as_mut() {
+                        let model = menu.model();
+                        menu.highlighted = SUBMENU_ROW;
+                        open_submenu(menu, &model, true);
+                    }
+                    outcome.repaint = true;
+                }
+                Some(row) => self.activate_context_menu_item(row, outcome),
+                None if inside => {}
+                None => {
                     self.overlay = None;
                     outcome.repaint = true;
                 }
-            }
+            },
             _ => {}
         }
         true
     }
 }
 
+/// 画右键菜单（渲染只读状态）：顶层菜单锚在右键位置，放不下时平移贴边；展开
+/// 的子菜单贴在父项右侧，右侧放不下翻到左侧。返回的 `menu_rows` 覆盖两层的
+/// 可激活行，`area` 是两层的包围盒。
 pub(super) fn render_context_menu(
     buffer: &mut Buffer,
     menu: &ClientContextMenuOverlay,
     cx: &ChromeContext<'_>,
 ) -> Option<OverlayRender> {
-    let palette = cx.palette;
-    let items = menu.items();
-    let screen = buffer.area;
-    let max_item_width = items
-        .iter()
-        .map(|item| display_width(item.label))
-        .max()
-        .unwrap_or(0);
-    let width = max_item_width
-        .saturating_add(4)
-        .max(14)
-        .min(screen.width.max(1));
-    let height = (items.len() as u16)
-        .saturating_add(2)
-        .min(screen.height.max(1));
-    let x = menu
-        .x
-        .min(screen.x.saturating_add(screen.width.saturating_sub(width)));
-    let y = menu.y.min(
-        screen
-            .y
-            .saturating_add(screen.height.saturating_sub(height)),
+    let model = menu.model();
+    let kind = context_kind(&menu.target);
+    let (items, ids) = top_menu(&model, kind);
+    let bounds = buffer.area;
+    let hover_bg = Some(cx.components.hover_bg);
+    let state = MenuState {
+        highlighted: kit_index(&ids, menu.highlighted),
+        hovered: menu.hovered.map(|row| kit_index(&ids, row)),
+        hover_bg,
+        scroll: 0,
+    };
+    let main = render_menu(
+        buffer,
+        (menu.x, menu.y),
+        bounds,
+        &items,
+        &state,
+        cx.glyphs,
+        false,
+        cx.palette,
     );
-    let rect = Rect::new(x, y, width, height);
-    let inner = panel(buffer, rect, palette.accent, palette.panel_bg, cx.glyphs)?;
-    let mut rows = Vec::new();
-    for (index, item) in items.iter().enumerate() {
-        let row_y = inner.y.saturating_add(index as u16);
-        if row_y >= inner.bottom() {
-            break;
+    if main.area.is_empty() {
+        return None;
+    }
+    let mut rows = main
+        .rows
+        .iter()
+        .filter_map(|(rect, index)| ids.get(*index).copied().flatten().map(|row| (*rect, row)))
+        .collect::<Vec<_>>();
+    let mut area = main.area;
+    if let (Some(open), Some(spec)) = (menu.submenu.as_ref(), model.submenu.as_ref()) {
+        if let Some((parent, _)) = main.rows.iter().find(|(_, index)| *index == open.parent) {
+            let children = sub_menu(&model, kind);
+            let (width, _) = menu_size(&children);
+            let x = if main.area.right().saturating_add(width) <= bounds.right() {
+                main.area.right()
+            } else {
+                main.area.x.saturating_sub(width)
+            };
+            let sub_state = MenuState {
+                highlighted: child_kit_index(&model, open.highlighted),
+                hovered: open.hovered.map(|row| child_kit_index(&model, row)),
+                hover_bg,
+                scroll: 0,
+            };
+            let sub = render_menu(
+                buffer,
+                (x, parent.y.saturating_sub(1)),
+                bounds,
+                &children,
+                &sub_state,
+                cx.glyphs,
+                false,
+                cx.palette,
+            );
+            rows.extend(
+                sub.rows
+                    .iter()
+                    .map(|(rect, index)| (*rect, spec.children.start + index)),
+            );
+            area = area.union(sub.area);
         }
-        let row = Rect::new(inner.x, row_y, inner.width, 1);
-        let style = list_row_style(
-            palette,
-            cx.components,
-            index == menu.highlighted,
-            menu.hovered == Some(index),
-        );
-        let style = if item.enabled {
-            style
-        } else {
-            style.fg(palette.overlay0)
-        };
-        buffer.set_style(row, style);
-        put_text(buffer, row.x, row.y, row.width, item.label, style);
-        rows.push((row, index));
     }
     Some(OverlayRender {
-        area: rect,
+        area,
         menu_rows: rows,
         ..OverlayRender::default()
     })

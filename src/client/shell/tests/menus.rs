@@ -239,3 +239,339 @@ fn mobile_menu_rows_match_the_action_table() {
         );
     }
 }
+
+// ---- 右键菜单：kit::menu 渲染、键盘与鼠标 ----
+
+fn key_event(code: crossterm::event::KeyCode) -> RawInputEvent {
+    RawInputEvent::Key(crate::input::TerminalKey::new(code, KeyModifiers::empty()))
+}
+
+fn mouse_event(kind: MouseEventKind, column: u16, row: u16) -> RawInputEvent {
+    RawInputEvent::Mouse(MouseEvent {
+        kind,
+        column,
+        row,
+        modifiers: KeyModifiers::empty(),
+    })
+}
+
+/// 保留帧缓冲里 `area` 内第 `y` 行的逐格字形（宽字符的续格是空格）。
+fn row_cells(state: &ClientShellState, area: Rect, y: u16) -> Vec<String> {
+    let buffer = state.compose_buffer.as_ref().expect("保留帧缓冲");
+    (area.x..area.right())
+        .map(|x| buffer[(x, y)].symbol().to_owned())
+        .collect()
+}
+
+/// ASCII 串在逐格字形里的起始列（相对 `area.x`）。
+fn find_cells(cells: &[String], needle: &str) -> Option<usize> {
+    let wanted = needle.chars().map(String::from).collect::<Vec<_>>();
+    cells
+        .windows(wanted.len())
+        .position(|window| window == wanted.as_slice())
+}
+
+/// 画着 `label` 的那一行（绝对 y）。
+fn menu_row_with(state: &ClientShellState, area: Rect, label: &str) -> u16 {
+    (area.y..area.bottom())
+        .find(|y| compact(&row_cells(state, area, *y).concat()).contains(&compact(label)))
+        .unwrap_or_else(|| panic!("菜单里没有 {label}"))
+}
+
+/// `label` 首字符所在的格（绝对坐标）。
+fn label_cell(state: &ClientShellState, area: Rect, label: &str) -> (u16, u16) {
+    let y = menu_row_with(state, area, label);
+    let first = label.chars().next().expect("非空标签").to_string();
+    let x = row_cells(state, area, y)
+        .iter()
+        .position(|cell| *cell == first)
+        .expect("标签首字符");
+    (area.x + x as u16, y)
+}
+
+fn pane_menu_state(right_click_passthrough: bool) -> ClientShellState {
+    let mut projected = snapshot();
+    projected.panes[0].right_click_passthrough = right_click_passthrough;
+    let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
+    state.set_snapshot(Box::new(projected));
+    state.set_pane_surface(surface());
+    state.compose(106, 30).expect("shell frame");
+    state.open_pane_context_menu("pane_1".into(), 40, 3);
+    state.compose(106, 30).expect("context menu frame");
+    state
+}
+
+fn context_menu(state: &ClientShellState) -> &ClientContextMenuOverlay {
+    match state.overlay.as_ref() {
+        Some(ClientShellOverlay::ContextMenu(menu)) => menu,
+        other => panic!("右键菜单应打开: {other:?}"),
+    }
+}
+
+fn item_index(state: &ClientShellState, action: ClientContextMenuAction) -> usize {
+    context_menu(state)
+        .items()
+        .iter()
+        .position(|item| item.action == action)
+        .unwrap_or_else(|| panic!("缺少 {action:?}"))
+}
+
+/// 窗格右键菜单走 kit::menu：分组之间是与边框相接的分隔线；快捷键取用户当前
+/// 键位、右对齐成一列；暂时不可用的条目置灰照常列出；破坏性动作标红；子菜单
+/// 父项行尾画箭头。
+#[test]
+fn pane_context_menu_draws_separators_right_aligned_shortcuts_and_dimmed_rows() {
+    let state = pane_menu_state(false);
+    let area = state.hits.overlay_bounds;
+    assert!(!area.is_empty());
+    let glyphs = state.config.border_glyphs;
+    let palette = &state.config.palette;
+    let t = &crate::i18n::texts().context_menu;
+
+    // 分隔线：左右两端是 T 形接头，中间整行横线。
+    let separators = (area.y + 1..area.bottom() - 1)
+        .filter(|y| {
+            let cells = row_cells(&state, area, *y);
+            cells[0] == glyphs.tee_right
+                && cells[cells.len() - 1] == glyphs.tee_left
+                && cells[1..cells.len() - 1]
+                    .iter()
+                    .all(|cell| *cell == glyphs.horizontal)
+        })
+        .count();
+    assert_eq!(separators, 3, "重命名 | 分屏与交换 | 视图 | 关闭 四组");
+
+    // 快捷键：取当前键位的标签，所有快捷键的末列对齐。
+    let keybinds = &state.config.keybinds.keybinds;
+    let mut ends = Vec::new();
+    for (label, keys) in [
+        (t.rename_pane, &keybinds.rename_pane),
+        (t.split_right, &keybinds.split_vertical),
+        (t.split_down, &keybinds.split_horizontal),
+        (t.close_pane, &keybinds.close_pane),
+    ] {
+        let shortcut = keys.labels().into_iter().next().expect("默认键位");
+        let y = menu_row_with(&state, area, label);
+        let cells = row_cells(&state, area, y);
+        let start = find_cells(&cells, &shortcut)
+            .unwrap_or_else(|| panic!("{label} 行应带快捷键 {shortcut}: {cells:?}"));
+        ends.push(start + shortcut.chars().count());
+    }
+    assert!(
+        ends.windows(2).all(|pair| pair[0] == pair[1]),
+        "快捷键右对齐：{ends:?}"
+    );
+
+    // 置灰：没有手动名字的「清除窗格名称」与没有来源窗格的「交换」照常列出。
+    for label in [t.clear_pane_name, t.swap_with_focused] {
+        let (x, y) = label_cell(&state, area, label);
+        let cell = &state.compose_buffer.as_ref().expect("帧缓冲")[(x, y)];
+        assert_eq!(cell.style().fg, Some(palette.overlay0), "{label} 应置灰");
+    }
+    // 破坏性动作标红。
+    let (x, y) = label_cell(&state, area, t.close_pane);
+    let cell = &state.compose_buffer.as_ref().expect("帧缓冲")[(x, y)];
+    assert_eq!(cell.style().fg, Some(palette.red));
+    // 子菜单父项行尾画箭头。
+    let view = crate::i18n::texts().menu.submenu_view;
+    let cells = row_cells(&state, area, menu_row_with(&state, area, view));
+    assert!(cells.iter().any(|cell| cell == "▸"), "{cells:?}");
+
+    // 禁用项不进命中表：点它不激活，菜单保持打开。
+    let clear = item_index(&state, ClientContextMenuAction::ClearPaneName);
+    assert!(state
+        .hits
+        .context_menu_rows
+        .iter()
+        .all(|(_, index)| *index != clear));
+}
+
+/// 二态开关用勾选态：「右键透传给窗格」打开时在子菜单里画勾，而不是换一套
+/// 「使用 Herdr 右键菜单」的互斥文案。键盘进出子菜单：→ 进、← 出。
+#[test]
+fn toggle_items_render_check_marks_in_the_submenu() {
+    let t = &crate::i18n::texts().context_menu;
+    for passthrough in [true, false] {
+        let mut state = pane_menu_state(passthrough);
+        // End 落到最后一项（关闭窗格），↑ 回到子菜单父项，→ 打开子菜单。
+        state.handle_raw_events(vec![
+            key_event(crossterm::event::KeyCode::End),
+            key_event(crossterm::event::KeyCode::Up),
+            key_event(crossterm::event::KeyCode::Right),
+        ]);
+        state.compose(106, 30).expect("submenu frame");
+        let menu = context_menu(&state);
+        let submenu = menu.submenu.as_ref().expect("子菜单已展开");
+        assert_eq!(
+            submenu.highlighted,
+            item_index(&state, ClientContextMenuAction::Zoom),
+            "键盘打开子菜单时高亮第一个子项"
+        );
+        let area = state.hits.overlay_bounds;
+        let y = menu_row_with(&state, area, t.send_right_clicks);
+        let checked = row_cells(&state, area, y).iter().any(|cell| cell == "✓");
+        assert_eq!(checked, passthrough, "勾选态跟随透传开关");
+        assert!(
+            !compact(
+                &(area.y..area.bottom())
+                    .map(|y| row_cells(&state, area, y).concat())
+                    .collect::<String>()
+            )
+            .contains(&compact(crate::i18n::en::TEXTS.context_menu.close_group)),
+            "不再出现互斥文案"
+        );
+        state.handle_raw_events(vec![key_event(crossterm::event::KeyCode::Left)]);
+        assert!(context_menu(&state).submenu.is_none(), "← 收起子菜单");
+    }
+}
+
+/// 键盘导航跳过分隔线与禁用项并回绕；Home / End 到首尾；可打印字符按首字母
+/// 跳转，连按在同首字母的条目间轮转；回车激活高亮项。
+#[test]
+fn context_menu_keyboard_navigation_skips_disabled_rows_and_jumps_by_letter() {
+    use crossterm::event::KeyCode;
+    let mut state = pane_menu_state(false);
+    let highlighted = |state: &ClientShellState| context_menu(state).highlighted;
+    let rename = item_index(&state, ClientContextMenuAction::RenamePane);
+    let split_right = item_index(&state, ClientContextMenuAction::SplitRight);
+    let split_down = item_index(&state, ClientContextMenuAction::SplitDown);
+    let close = item_index(&state, ClientContextMenuAction::ClosePane);
+    assert_eq!(highlighted(&state), rename);
+
+    // ↓ 跳过置灰的「清除窗格名称」与分隔线。
+    state.handle_raw_events(vec![key_event(KeyCode::Down)]);
+    assert_eq!(highlighted(&state), split_right);
+    state.handle_raw_events(vec![key_event(KeyCode::End)]);
+    assert_eq!(highlighted(&state), close);
+    state.handle_raw_events(vec![key_event(KeyCode::Home)]);
+    assert_eq!(highlighted(&state), rename);
+    // ↑ 从首项回绕到末项。
+    state.handle_raw_events(vec![key_event(KeyCode::Up)]);
+    assert_eq!(highlighted(&state), close);
+
+    // 首字母：与「向右分割」同首字母、可用的顶层条目依次轮转。
+    let items = context_menu(&state).items();
+    let first = items[split_right]
+        .label
+        .chars()
+        .next()
+        .expect("非空标签")
+        .to_lowercase()
+        .next()
+        .expect("小写");
+    let expected = [rename, split_right, split_down, close]
+        .into_iter()
+        .filter(|index| {
+            items[*index]
+                .label
+                .chars()
+                .next()
+                .and_then(|ch| ch.to_lowercase().next())
+                == Some(first)
+        })
+        .collect::<Vec<_>>();
+    assert!(expected.len() >= 2, "夹具前提：两个分屏项同首字母");
+    let mut visited = Vec::new();
+    for _ in 0..expected.len() + 1 {
+        state.handle_raw_events(vec![key_event(KeyCode::Char(first))]);
+        visited.push(highlighted(&state));
+    }
+    assert_eq!(&visited[..expected.len()], expected.as_slice());
+    assert_eq!(visited[expected.len()], expected[0], "连按回绕");
+
+    // 回车激活高亮项：分屏走端点 API。
+    while highlighted(&state) != split_down {
+        state.handle_raw_events(vec![key_event(KeyCode::Down)]);
+    }
+    let outcome = state.handle_raw_events(vec![key_event(KeyCode::Enter)]);
+    assert!(state.overlay.is_none());
+    assert!(outcome.actions.iter().any(|action| matches!(
+        action,
+        ClientShellAction::Endpoint { request, .. }
+            if matches!(
+                &request.method,
+                crate::api::schema::Method::PaneSplit(params)
+                    if params.direction == crate::api::schema::SplitDirection::Down
+            )
+    )));
+}
+
+/// 指针：悬浮行用主题的 `hover_bg`（与键盘高亮分离）；悬到子菜单父项上展开
+/// 子菜单，点子项执行对应动作。
+#[test]
+fn context_menu_hover_uses_theme_hover_bg_and_opens_the_submenu() {
+    let mut state = pane_menu_state(false);
+    let split_down = item_index(&state, ClientContextMenuAction::SplitDown);
+    let row = state
+        .hits
+        .context_menu_rows
+        .iter()
+        .find(|(_, index)| *index == split_down)
+        .expect("分屏行")
+        .0;
+    state.handle_raw_events(vec![mouse_event(MouseEventKind::Moved, row.x + 2, row.y)]);
+    state.compose(106, 30).expect("hover frame");
+    assert_eq!(context_menu(&state).hovered, Some(split_down));
+    assert_eq!(
+        context_menu(&state).highlighted,
+        item_index(&state, ClientContextMenuAction::RenamePane),
+        "悬浮不改键盘高亮"
+    );
+    // 行首、行尾的内边距格（宽字符的续格不带样式，不取它们）。
+    let buffer = state.compose_buffer.as_ref().expect("帧缓冲");
+    for x in [row.x, row.right() - 1] {
+        assert_eq!(
+            buffer[(x, row.y)].style().bg,
+            Some(state.config.components.hover_bg)
+        );
+    }
+
+    let parent = state
+        .hits
+        .context_menu_rows
+        .iter()
+        .find(|(_, index)| *index == super::super::context_menu::SUBMENU_ROW)
+        .expect("子菜单父项行")
+        .0;
+    state.handle_raw_events(vec![mouse_event(
+        MouseEventKind::Moved,
+        parent.x + 2,
+        parent.y,
+    )]);
+    state.compose(106, 30).expect("submenu frame");
+    let submenu = context_menu(&state)
+        .submenu
+        .as_ref()
+        .expect("悬浮展开子菜单");
+    assert_eq!(
+        submenu.highlighted,
+        usize::MAX,
+        "悬浮展开时键盘焦点留在顶层"
+    );
+    let zoom = item_index(&state, ClientContextMenuAction::Zoom);
+    let zoom_row = state
+        .hits
+        .context_menu_rows
+        .iter()
+        .find(|(_, index)| *index == zoom)
+        .expect("子菜单行进命中表")
+        .0;
+    // 子菜单贴在父菜单旁边、与父项同行起：右侧放不下（本例）就翻到左侧，
+    // 两层互不遮挡。
+    assert_eq!(zoom_row.y, parent.y);
+    assert!(
+        zoom_row.x > parent.right() || zoom_row.right() < parent.x,
+        "子菜单不压父菜单：{zoom_row:?} / {parent:?}"
+    );
+    let outcome = state.handle_raw_events(vec![mouse_event(
+        MouseEventKind::Down(MouseButton::Left),
+        zoom_row.x + 1,
+        zoom_row.y,
+    )]);
+    assert!(state.overlay.is_none());
+    assert!(outcome.actions.iter().any(|action| matches!(
+        action,
+        ClientShellAction::Endpoint { request, .. }
+            if matches!(&request.method, crate::api::schema::Method::PaneZoom(_))
+    )));
+}

@@ -366,7 +366,14 @@ fn context_menus_capture_stable_targets_and_route_actions() {
             .expect("split right item"),
         _ => panic!("pane context menu"),
     };
-    let split = state.hits.context_menu_rows[split_index].0;
+    // 命中表只登记可激活行（kit::menu），按条目下标找，不按位置取。
+    let split = state
+        .hits
+        .context_menu_rows
+        .iter()
+        .find(|(_, index)| *index == split_index)
+        .expect("split right row")
+        .0;
     let outcome =
         state.handle_raw_events(vec![RawInputEvent::Mouse(crossterm::event::MouseEvent {
             kind: MouseEventKind::Down(MouseButton::Left),
