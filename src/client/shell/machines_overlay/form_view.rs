@@ -6,8 +6,8 @@
 
 use super::footer::{render_machine_footer, MachineHint};
 use super::form::{
-    ClientMachineBootstrap, FieldGroup, QuickStatus, TestRecovery, TriChoice, FORM_GROUPS,
-    STRICT_HOST_KEY_CHOICES,
+    ClientMachineBootstrap, FieldGroup, FormPrompt, QuickStatus, TestRecovery, TriChoice,
+    FORM_GROUPS, STRICT_HOST_KEY_CHOICES,
 };
 use super::*;
 use crate::ui::kit::form_field::{form_field_height, render_form_field, FieldState, FormFieldSpec};
@@ -22,6 +22,9 @@ const FORM_SIZE: crate::ui::ModalSize = crate::ui::ModalSize::Content {
 const PREVIEW_MIN_WIDTH: u16 = 72;
 /// 窄屏时测试结果在字段栏底部占的行数上限（标题 + 四步 + 结论 + 说明）。
 const NARROW_TEST_ROWS: u16 = 8;
+/// 确认条折行后的行数上限（再多就截断，宽度 24 起步时也放得下说明）。
+const PROMPT_MAX_ROWS: u16 = 4;
+const PROMPT_ICON: &str = "⚠ ";
 
 pub(super) const BOOTSTRAP_STEPS: [SavedSshBootstrapStep; 4] = [
     SavedSshBootstrapStep::DetectPlatform,
@@ -59,7 +62,28 @@ pub(super) struct FormLayout {
     /// 窄屏：测试结果画在字段栏下方。
     pub(super) test: Rect,
     pub(super) error: Rect,
+    /// 待确认的一步（紧贴页脚上方，宽窄屏都有）。
+    pub(super) prompt: Rect,
     pub(super) footer: Rect,
+}
+
+fn prompt_text(prompt: FormPrompt) -> &'static str {
+    let f = &crate::i18n::texts().machine_form;
+    match prompt {
+        FormPrompt::ConfirmTest => f.test_confirm_note,
+    }
+}
+
+/// 确认条折行后的行数：与渲染同一个 Paragraph 折行口径。
+fn prompt_rows(prompt: FormPrompt, width: u16) -> u16 {
+    use ratatui::widgets::{Paragraph, Wrap};
+    let line = Line::from(vec![Span::raw(PROMPT_ICON), Span::raw(prompt_text(prompt))]);
+    let rows = Paragraph::new(line)
+        .wrap(Wrap { trim: false })
+        .line_count(width.max(1));
+    u16::try_from(rows)
+        .unwrap_or(PROMPT_MAX_ROWS)
+        .clamp(1, PROMPT_MAX_ROWS)
 }
 
 pub(super) fn form_layout(inner: Rect, form: &ClientMachineForm) -> FormLayout {
@@ -69,6 +93,11 @@ pub(super) fn form_layout(inner: Rect, form: &ClientMachineForm) -> FormLayout {
         ..FormLayout::default()
     };
     let mut bottom = layout.footer.y;
+    if let Some(prompt) = form.prompt {
+        let rows = prompt_rows(prompt, inner.width);
+        bottom = bottom.saturating_sub(rows);
+        layout.prompt = Rect::new(inner.x, bottom, inner.width, rows);
+    }
     if form.error.is_some() {
         bottom = bottom.saturating_sub(1);
         layout.error = Rect::new(inner.x, bottom, inner.width, 1);
@@ -258,6 +287,19 @@ fn form_hints(form: &ClientMachineForm) -> Vec<MachineHint<'static>> {
             )
             .disabled(),
         ];
+    }
+    if let Some(prompt) = form.prompt {
+        return match prompt {
+            FormPrompt::ConfirmTest => vec![
+                MachineHint::button(
+                    "enter",
+                    f.test_confirm_start,
+                    MachineOverlayButton::TestConnection,
+                )
+                .primary(),
+                MachineHint::button("esc", f.prompt_cancel, MachineOverlayButton::Back),
+            ],
+        };
     }
     let focused = form.focused_field();
     let mut hints = vec![MachineHint::key("tab", t.hint_fields)];
@@ -826,7 +868,20 @@ pub(super) fn render_machine_form(
             base.fg(p.red),
         );
     }
+    if let (false, Some(prompt)) = (layout.prompt.is_empty(), form.prompt) {
+        let warn = base.fg(p.yellow);
+        render_lines(
+            b,
+            layout.prompt,
+            vec![Line::from(vec![
+                Span::styled(PROMPT_ICON, warn.add_modifier(Modifier::BOLD)),
+                Span::styled(prompt_text(prompt), warn),
+            ])],
+        );
+    }
     let action_hits = render_machine_footer(b, layout.footer, &form_hints(form), cx);
+    // 确认条在时表单只读：不给输入光标。
+    let cursor = if form.prompt.is_some() { None } else { cursor };
 
     Some(OverlayRender {
         area: popup,

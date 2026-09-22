@@ -964,6 +964,9 @@ pub const TEXTS: Texts = Texts {
         review_host_key: "核对主机密钥",
         test_not_saved: "尚未保存：按 Enter 保存",
         fix_fields: "请先修正标红的字段",
+        test_confirm_note: "测试会在必要时于远端安装或更新 herdr；更新需要时会停止远端正在运行的 server 及其全部 pane 进程。",
+        test_confirm_start: "开始测试",
+        prompt_cancel: "取消",
         saved_fmt: "已保存 {label}",
     },
     cli_help: CliHelpTexts {

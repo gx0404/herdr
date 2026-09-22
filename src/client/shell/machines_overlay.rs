@@ -476,6 +476,7 @@ impl ClientShellState {
             List,
             Detail(ProfileId),
             CancelTest,
+            DismissPrompt,
         }
         let action = match self.overlay.as_ref() {
             Some(ClientShellOverlay::Machines(overlay)) => match &overlay.view {
@@ -512,6 +513,9 @@ impl ClientShellState {
                 ClientMachinesView::Form(form) => {
                     if form.running() {
                         Back::CancelTest
+                    } else if form.prompt.is_some() {
+                        // 确认条上的 Esc 只收起确认条，表单原样留着。
+                        Back::DismissPrompt
                     } else {
                         match &form.editing {
                             Some(id) if self.saved_profile(id).is_some() => {
@@ -541,6 +545,13 @@ impl ClientShellState {
                     if let ClientMachinesView::Form(form) = &mut overlay.view {
                         // 丢弃即取消（`Drop` 触发 cancel），表单回到可编辑。
                         form.bootstrap = None;
+                    }
+                }
+            }
+            Back::DismissPrompt => {
+                if let Some(ClientShellOverlay::Machines(overlay)) = self.overlay.as_mut() {
+                    if let ClientMachinesView::Form(form) = &mut overlay.view {
+                        form.prompt = None;
                     }
                 }
             }
@@ -870,7 +881,7 @@ impl ClientShellState {
             }
             Btn::Back => self.machines_back(),
             Btn::Save => self.save_machine_form(),
-            Btn::TestConnection => self.start_machine_test(outcome),
+            Btn::TestConnection => self.request_machine_test(outcome),
             Btn::TestRecover => self.open_machine_test_recovery(None, outcome),
             Btn::QuickApply => self.apply_machine_quick_input(),
             Btn::Import => self.open_machine_import_wizard(),

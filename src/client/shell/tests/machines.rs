@@ -2045,7 +2045,14 @@ fn left_click(col: u16, row: u16) -> crossterm::event::MouseEvent {
     }
 }
 
+/// 测试连接是两段式：第一次 Ctrl+T 只弹确认条，第二次才下发 bootstrap。
 fn start_test(state: &mut ClientShellState) -> u64 {
+    let outcome = press(state, ctrl('t'));
+    assert!(
+        outcome.actions.is_empty(),
+        "确认前不下发：{:?}",
+        outcome.actions
+    );
     let outcome = press(state, ctrl('t'));
     let [ClientShellAction::BootstrapMachine { ticket, .. }] = &outcome.actions[..] else {
         panic!("bootstrap action: {:?}", outcome.actions);
@@ -2254,10 +2261,11 @@ fn inline_validation_waits_for_blur_or_submit_then_blocks_save() {
             .is_empty(),
         "有错不落盘"
     );
-    // 测试连接同样被拦下。
+    // 测试连接同样被拦下：连确认条都不弹。
     let outcome = press(&mut state, ctrl('t'));
     assert!(outcome.actions.is_empty(), "{:?}", outcome.actions);
     assert!(machine_form(&state).bootstrap.is_none());
+    assert!(machine_form(&state).prompt.is_none());
 }
 
 #[test]
@@ -2445,7 +2453,10 @@ fn test_connection_runs_the_bootstrap_chain_without_saving() {
     let dir = with_temp_state_home("form-test-ok");
     let mut state = state_with_profiles(&[]);
     add_form_overlay(&mut state, "build.example", "Build");
+    // 第一次只弹确认条，Enter 确认后才下发。
     let outcome = press(&mut state, ctrl('t'));
+    assert!(outcome.actions.is_empty(), "{:?}", outcome.actions);
+    let outcome = press(&mut state, key(KeyCode::Enter));
     let [ClientShellAction::BootstrapMachine {
         ticket,
         target,
@@ -2801,6 +2812,125 @@ fn edit_form_offers_no_test_connection_or_recovery() {
         vec!["~/.ssh/other".to_owned()]
     );
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// 从带 `⚠` 的那一行起，取弹窗内框里连续几行的文字（到右边框为止）拼起来
+/// 去空白：确认条会折行，整帧 contains 对不上折行处。
+fn prompt_block_text(text: &str) -> String {
+    let rows: Vec<Vec<char>> = text.lines().map(|line| line.chars().collect()).collect();
+    let Some((start, column)) = rows
+        .iter()
+        .enumerate()
+        .find_map(|(y, row)| row.iter().position(|ch| *ch == '⚠').map(|x| (y, x)))
+    else {
+        return String::new();
+    };
+    let mut block = String::new();
+    for row in rows.iter().skip(start).take(4) {
+        block.extend(
+            row.iter()
+                .skip(column)
+                .take_while(|ch| **ch != '│')
+                .filter(|ch| !ch.is_whitespace()),
+        );
+    }
+    block
+}
+
+/// 测试连接以预先授权模式跑 bootstrap（必要时安装 / 更新并停止远端 server
+/// 及其 pane 进程），所以第一次 Ctrl+T 先在页脚上方写明后果——窄屏没有预览
+/// 栏，这条说明同样要在；Esc 收起确认条不下发，确认（Ctrl+T / Enter / 点
+/// 「开始测试」）才下发。
+#[test]
+fn test_connection_asks_for_confirmation_on_every_width() {
+    let _dir = with_temp_state_home("form-test-confirm");
+    let f = &crate::i18n::texts().machine_form;
+    let note = compact(f.test_confirm_note);
+    for (cols, rows) in [(70u16, 32u16), (120, 40)] {
+        let mut state = state_with_profiles(&[]);
+        add_form_overlay(&mut state, "build.example", "Build");
+        let text = frame_text(&mut state, cols, rows);
+        assert!(
+            prompt_block_text(&text).is_empty(),
+            "{cols} 列：未请求前无确认条"
+        );
+
+        let outcome = press(&mut state, ctrl('t'));
+        assert!(
+            outcome.actions.is_empty(),
+            "{cols} 列：{:?}",
+            outcome.actions
+        );
+        assert!(machine_form(&state).bootstrap.is_none());
+        let text = frame_text(&mut state, cols, rows);
+        assert!(
+            prompt_block_text(&text).contains(&note),
+            "{cols} 列：测试前写明后果：{text}"
+        );
+        let buttons = machine_buttons(&state);
+        assert_eq!(
+            buttons,
+            vec![
+                MachineOverlayButton::TestConnection,
+                MachineOverlayButton::Back
+            ],
+            "{cols} 列：确认条上只有开始 / 取消"
+        );
+        assert!(
+            compact(&text).contains(&compact(f.test_confirm_start)),
+            "{cols} 列：{text}"
+        );
+        // 没有输入光标（合成层可能回落到弹窗外的 pane 光标）。
+        let frame = state.compose(cols, rows).expect("frame");
+        let popup = state.hits.machines_popup;
+        assert!(
+            frame.cursor.as_ref().is_none_or(|cursor| {
+                cursor.x < popup.x
+                    || cursor.x >= popup.right()
+                    || cursor.y < popup.y
+                    || cursor.y >= popup.bottom()
+            }),
+            "{cols} 列：确认条期间弹窗内无输入光标"
+        );
+
+        // 确认条期间表单只读：打字、粘贴都不动字段。
+        type_text(&mut state, "x");
+        assert!(!state.insert_machines_overlay_text("y"));
+        assert_eq!(machine_form(&state).label.as_str(), "Build");
+
+        // Esc 只收起确认条：不下发、表单还在。
+        let outcome = press(&mut state, key(KeyCode::Esc));
+        assert!(outcome.actions.is_empty());
+        assert!(machine_form(&state).prompt.is_none());
+        let text = frame_text(&mut state, cols, rows);
+        assert!(prompt_block_text(&text).is_empty(), "{cols} 列：{text}");
+
+        // 再请求一次，点页脚的「开始测试」下发 bootstrap。
+        press(&mut state, ctrl('t'));
+        frame_text(&mut state, cols, rows);
+        let start = state
+            .hits
+            .machines_actions
+            .iter()
+            .find(|(_, button)| *button == MachineOverlayButton::TestConnection)
+            .map(|(rect, _)| *rect)
+            .expect("开始测试可点");
+        let mut outcome = ClientShellInput::default();
+        state.handle_mouse(left_click(start.x, start.y), &mut outcome);
+        assert!(
+            matches!(
+                &outcome.actions[..],
+                [ClientShellAction::BootstrapMachine { .. }]
+            ),
+            "{cols} 列：{:?}",
+            outcome.actions
+        );
+        assert!(machine_form(&state)
+            .bootstrap
+            .as_ref()
+            .is_some_and(|test| test.failure.is_none() && !test.passed));
+        assert!(machine_form(&state).prompt.is_none());
+    }
 }
 
 // ---------------------------------------------------------------------

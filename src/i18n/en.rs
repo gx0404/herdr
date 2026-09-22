@@ -957,6 +957,9 @@ pub const TEXTS: Texts = Texts {
         review_host_key: "review host key",
         test_not_saved: "not saved yet: Enter saves",
         fix_fields: "Fix the highlighted fields first",
+        test_confirm_note: "Testing installs or updates herdr on the remote when needed; if the update requires it, the running remote server is stopped along with all of its pane processes.",
+        test_confirm_start: "start test",
+        prompt_cancel: "cancel",
         saved_fmt: "Saved {label}",
     },
     cli_help: CliHelpTexts {

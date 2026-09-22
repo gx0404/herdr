@@ -1184,6 +1184,12 @@ pub struct MachineFormTexts {
     pub test_not_saved: &'static str,
     /// 保存 / 测试被字段校验拦下时的提示。
     pub fix_fields: &'static str,
+    /// 测试连接的确认条：预先授权的后果（安装 / 更新、停止远端 server）。
+    pub test_confirm_note: &'static str,
+    /// 确认条上开始测试的页脚项。
+    pub test_confirm_start: &'static str,
+    /// 确认条上的取消。
+    pub prompt_cancel: &'static str,
     pub saved_fmt: &'static str, // args: label
 }
 

@@ -246,6 +246,15 @@ const ADD_FOCUS_ORDER: &[MachineField] = &[
     MachineField::SessionLogInterval,
 ];
 
+/// 表单上待确认的一步：页脚上方一条说明 + 页脚换成确认 / 取消两项。确认条
+/// 在时表单只读：Enter 确认、Esc 取消，其余键与字段点击都不动表单。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::client::shell) enum FormPrompt {
+    /// 测试连接以预先授权模式跑 bootstrap：必要时在远端安装 / 更新，并在
+    /// 更新要求时停止正在运行的 server 及其 pane 进程。先写明后果再下发。
+    ConfirmTest,
+}
+
 /// 快速输入框最近一次解析的结论（显示在输入框下方）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum QuickStatus {
@@ -302,6 +311,8 @@ pub(in crate::client::shell) struct ClientMachineForm {
     pub(in crate::client::shell) session_log: Option<SessionLogProfile>,
     /// 目录层面的失败（落盘出错、字段之间的约束）：画在页脚上方。
     pub(in crate::client::shell) error: Option<String>,
+    /// 页脚上方待确认的一步（见 `FormPrompt`）。
+    pub(in crate::client::shell) prompt: Option<FormPrompt>,
     /// 测试连接：运行中 / 通过 / 失败。
     pub(in crate::client::shell) bootstrap: Option<ClientMachineBootstrap>,
 }
@@ -504,6 +515,7 @@ impl ClientMachineForm {
             session_log_interval: TextEditor::default(),
             session_log: None,
             error: None,
+            prompt: None,
             bootstrap: None,
         }
     }
@@ -1069,7 +1081,7 @@ impl ClientMachineForm {
 
     /// 粘贴 / 宿主插入文本到聚焦字段。快速输入先压平续行符，粘贴即解析。
     pub(super) fn insert_text(&mut self, text: &str) -> bool {
-        if self.running() {
+        if self.running() || self.prompt.is_some() {
             return false;
         }
         let Some(field) = self.focused_field() else {
@@ -1128,7 +1140,7 @@ impl ClientShellState {
             let ClientMachinesView::Form(form) = &mut overlay.view else {
                 return;
             };
-            if form.running() || !form.submit_gate(saved) {
+            if form.running() || form.prompt.is_some() || !form.submit_gate(saved) {
                 return;
             }
             match form.profile_options() {
@@ -1181,10 +1193,43 @@ impl ClientShellState {
         }
     }
 
-    /// 测试连接（Ctrl+T / 测试按钮）：与保存同一道校验，再按当前字段在内存
-    /// 目录里解析出 SSH 选项，跑一遍预先授权的 bootstrap（检测平台、必要时
-    /// 安装 / 更新并启动 server、验证）。只测不存。
-    pub(super) fn start_machine_test(&mut self, outcome: &mut ClientShellInput) {
+    /// 测试连接（Ctrl+T / 测试按钮）的两段式入口。bootstrap 以预先授权模式
+    /// 运行、不会再问，所以第一次只过字段校验并在页脚上方写明后果（必要时
+    /// 安装 / 更新，更新要求时停止远端 server 及其 pane 进程）；确认条上
+    /// 再按一次（Enter / Ctrl+T / 点「开始测试」）才真正下发。宽窄屏都画
+    /// 这条说明（窄屏没有预览栏）。
+    pub(super) fn request_machine_test(&mut self, outcome: &mut ClientShellInput) {
+        let confirmed = {
+            let saved = &self.saved_profiles;
+            let Some(ClientShellOverlay::Machines(overlay)) = self.overlay.as_mut() else {
+                return;
+            };
+            let ClientMachinesView::Form(form) = &mut overlay.view else {
+                return;
+            };
+            if !form.can_test() || form.running() {
+                return;
+            }
+            match form.prompt {
+                Some(FormPrompt::ConfirmTest) => true,
+                None => {
+                    if form.submit_gate(saved) {
+                        form.prompt = Some(FormPrompt::ConfirmTest);
+                    }
+                    false
+                }
+            }
+        };
+        if confirmed {
+            self.start_machine_test(outcome);
+        }
+        outcome.repaint = true;
+    }
+
+    /// 确认条上的「开始测试」：与保存同一道校验，再按当前字段在内存目录里
+    /// 解析出 SSH 选项，跑一遍预先授权的 bootstrap（检测平台、必要时安装 /
+    /// 更新并启动 server、验证）。只测不存。
+    fn start_machine_test(&mut self, outcome: &mut ClientShellInput) {
         let ticket = self.next_machine_bootstrap_ticket;
         let saved = &self.saved_profiles;
         let Some(ClientShellOverlay::Machines(overlay)) = self.overlay.as_mut() else {
@@ -1193,6 +1238,10 @@ impl ClientShellState {
         let ClientMachinesView::Form(form) = &mut overlay.view else {
             return;
         };
+        if form.prompt != Some(FormPrompt::ConfirmTest) {
+            return;
+        }
+        form.prompt = None;
         if !form.can_test() || form.running() || !form.submit_gate(saved) {
             return;
         }
@@ -1321,7 +1370,7 @@ impl ClientShellState {
     /// 快速输入的「填入」（快速输入框里按 Enter / 点页脚）。
     pub(super) fn apply_machine_quick_input(&mut self) {
         if let Some(form) = self.machine_form_mut() {
-            if !form.running() {
+            if !form.running() && form.prompt.is_none() {
                 form.apply_quick();
             }
         }
@@ -1386,9 +1435,21 @@ impl ClientShellState {
             // 测试在后台跑：表单只读，直到通过或失败。
             return;
         }
+        if let Some(prompt) = self.machine_form_mut().and_then(|form| form.prompt) {
+            // 确认条独占 Enter（测试确认上 Ctrl+T 同义）；其余键不动表单。
+            match prompt {
+                FormPrompt::ConfirmTest
+                    if code == KeyCode::Enter || (code == KeyCode::Char('t') && ctrl) =>
+                {
+                    self.request_machine_test(outcome);
+                }
+                FormPrompt::ConfirmTest => {}
+            }
+            return;
+        }
         match code {
             KeyCode::Char('t') if ctrl => {
-                self.start_machine_test(outcome);
+                self.request_machine_test(outcome);
                 outcome.repaint = true;
                 return;
             }
@@ -1477,7 +1538,7 @@ impl ClientShellState {
         let Some(form) = self.machine_form_mut() else {
             return;
         };
-        if form.running() {
+        if form.running() || form.prompt.is_some() {
             return;
         }
         let Some(index) = form

@@ -132,7 +132,7 @@ impl ClientShellState {
                                     ClientMachinesView::Form(ref form),
                                 ..
                             }
-                        )) if form.bootstrap.is_some()
+                        )) if form.bootstrap.is_some() || form.prompt.is_some()
                     );
                     if !running {
                         self.overlay = None;
