@@ -1,7 +1,14 @@
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
+/// 文本的终端显示宽度（列数）。全仓库唯一真源：宽字符按 2 列计。
 pub(crate) fn display_width(text: &str) -> usize {
     UnicodeWidthStr::width(text)
+}
+
+/// `display_width` 的 `u16` 版（饱和到 `u16::MAX`），供按 `Rect` 坐标算宽度的
+/// 调用方使用。
+pub(crate) fn display_width_u16(text: &str) -> u16 {
+    display_width(text).min(usize::from(u16::MAX)) as u16
 }
 
 pub(crate) fn truncate_end(text: &str, max_width: usize) -> String {

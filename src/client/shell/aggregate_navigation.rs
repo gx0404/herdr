@@ -10,7 +10,6 @@ pub(super) struct CachedEndpointSnapshot<'a> {
     pub(super) label: &'a str,
     pub(super) status: ClientEndpointStatus,
     pub(super) snapshot: &'a ClientShellSnapshot,
-    pub(super) agent_recency: &'a HashMap<String, u64>,
     pub(super) agent_presentation: &'a super::endpoint_agent_state::EndpointAgentPresentation,
 }
 
@@ -36,7 +35,6 @@ pub(super) fn cached_endpoint_snapshots(
                     label: &endpoint.label,
                     status: endpoint.status,
                     snapshot,
-                    agent_recency: &endpoint.agent_recency,
                     agent_presentation: &endpoint.agent_presentation,
                 })
         })
@@ -45,7 +43,6 @@ pub(super) fn cached_endpoint_snapshots(
 pub(super) struct AggregateAgentRow<'a> {
     pub(super) endpoint: CachedEndpointSnapshot<'a>,
     pub(super) agent: &'a ClientShellAgent,
-    pub(super) recency: u64,
 }
 
 pub(super) struct AggregateAgentTarget {
@@ -87,15 +84,7 @@ pub(super) fn aggregate_agent_rows<'a>(
                     .snapshot
                     .agents
                     .iter()
-                    .map(move |agent| AggregateAgentRow {
-                        recency: endpoint
-                            .agent_recency
-                            .get(&agent.pane_id)
-                            .copied()
-                            .unwrap_or_default(),
-                        endpoint,
-                        agent,
-                    })
+                    .map(move |agent| AggregateAgentRow { endpoint, agent })
             })
             .collect::<Vec<_>>();
         if let Some(view) = view {
@@ -140,15 +129,7 @@ pub(super) fn aggregate_agent_rows<'a>(
                         .agents
                         .iter()
                         .find(|agent| agent.pane_id == pane_id)?;
-                    Some(AggregateAgentRow {
-                        recency: endpoint
-                            .agent_recency
-                            .get(&pane_id)
-                            .copied()
-                            .unwrap_or_default(),
-                        endpoint,
-                        agent,
-                    })
+                    Some(AggregateAgentRow { endpoint, agent })
                 })
         })
         .collect::<Vec<_>>();
@@ -160,13 +141,11 @@ fn sort_aggregate_rows(
     rows: &mut [AggregateAgentRow<'_>],
     sort: crate::config::AgentPanelSortConfig,
 ) {
-    if sort == crate::config::AgentPanelSortConfig::Priority {
+    if sort == crate::config::AgentPanelSortConfig::Launch {
+        // 稳定排序：`launch_seq` 全为 0（旧 server）时保持快照顺序。
         rows.sort_by_key(|row| {
-            (
-                row.endpoint.stale(),
-                std::cmp::Reverse(status_priority(row.agent.agent_status)),
-                std::cmp::Reverse(row.recency),
-            )
+            let (unknown, launch_seq) = super::agent_sidebar::launch_order_key(row.agent);
+            (row.endpoint.stale(), unknown, launch_seq)
         });
     }
 }

@@ -1613,6 +1613,37 @@ impl AppState {
                 })
                 .into_iter()
                 .collect(),
+            AppEvent::AgentActivityHinted {
+                pane_id,
+                source,
+                agent_label,
+                hint,
+                node_id,
+                seq,
+            } => {
+                // seam-stub(activity-schema)：提示先只记录；波 1 活动树 schema 车道
+                // 在这里接刷新调度（限频 + 后台读取）。
+                tracing::debug!(
+                    ?pane_id,
+                    %source,
+                    %agent_label,
+                    ?hint,
+                    ?node_id,
+                    ?seq,
+                    "agent activity hint received"
+                );
+                Vec::new()
+            }
+            AppEvent::AgentActivityRefreshed { pane_id, nodes } => {
+                // seam-stub(activity-schema)：活动树落库由波 1 活动树 schema 车道实现。
+                tracing::debug!(?pane_id, nodes = nodes.len(), "agent activity refreshed");
+                Vec::new()
+            }
+            AppEvent::ExternalAgentsRefreshed { source, agents } => {
+                // seam-stub(activity-schema)：外部来源落库由波 1 活动树 schema 车道实现。
+                tracing::debug!(%source, agents = agents.len(), "external agents refreshed");
+                Vec::new()
+            }
             AppEvent::HookMetadataReported {
                 pane_id,
                 source,

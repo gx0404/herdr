@@ -149,6 +149,8 @@ pub(super) fn snapshot(
                 state_labels,
                 tokens,
                 focused,
+                launch_seq: 0,
+                activity: Default::default(),
             }
         })
         .collect();
@@ -239,6 +241,7 @@ pub(super) fn snapshot(
         panes,
         agents,
         commands: app.client_shell_command_manifest(),
+        external_agents: Vec::new(),
     }
 }
 

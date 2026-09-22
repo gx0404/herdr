@@ -5,11 +5,10 @@ use ratatui::{
 
 use crate::app::state::Palette;
 
-pub(super) fn panel_contrast_fg(palette: &Palette) -> Color {
-    match palette.panel_bg {
-        Color::Reset => palette.surface_dim,
-        color => color,
-    }
+/// 叠在 `accent` 底色上的前景色（选中标签、主按钮）。按对比度挑，而不是直接拿
+/// `panel_bg`：两者亮度接近的主题、或降色后量化成同色时，字会看不见。
+pub(crate) fn panel_contrast_fg(palette: &Palette) -> Color {
+    super::color::contrast_fg(palette, palette.accent)
 }
 
 /// Named modal size tiers. Overlays pick a tier instead of hardcoding cell
@@ -156,7 +155,9 @@ pub(crate) fn modal_button_style(
         ModalButtonState::Focused | ModalButtonState::Hovered => {
             let (bg, fg) = match tone {
                 ModalButtonTone::Primary => (palette.accent, panel_contrast_fg(palette)),
-                ModalButtonTone::Danger => (palette.red, panel_contrast_fg(palette)),
+                ModalButtonTone::Danger => {
+                    (palette.red, super::color::contrast_fg(palette, palette.red))
+                }
                 // 次级按钮的焦点/悬浮同样取 accent 底：这是有意的「安全默认项
                 // 也要显眼」语义（强制删除确认页把取消按钮画成强调项）。
                 ModalButtonTone::Secondary => (palette.accent, panel_contrast_fg(palette)),
@@ -167,7 +168,9 @@ pub(crate) fn modal_button_style(
             let (bg, fg) = match tone {
                 ModalButtonTone::Secondary => (palette.surface0, palette.text),
                 ModalButtonTone::Primary => (palette.accent, panel_contrast_fg(palette)),
-                ModalButtonTone::Danger => (palette.red, panel_contrast_fg(palette)),
+                ModalButtonTone::Danger => {
+                    (palette.red, super::color::contrast_fg(palette, palette.red))
+                }
             };
             // 常态不加粗：Primary/Danger 的悬浮与焦点因此有可见反馈
             // （HERDR-UX-02 之前两态逐字段相同）。

@@ -124,6 +124,19 @@ impl HeadlessServer {
             self.send_to_client(client_id, message);
             return result.unwrap_or(false);
         }
+        if crate::server::agent_activity::handles(&request.method) {
+            // seam-stub(activity-schema)：波 1 活动树 schema 车道在这里接后台读取。
+            self.send_to_client(
+                client_id,
+                crate::server::client_commands::error_message(
+                    boot_id,
+                    request_id,
+                    crate::server::agent_activity::NOT_IMPLEMENTED_CODE,
+                    crate::server::agent_activity::NOT_IMPLEMENTED_MESSAGE,
+                ),
+            );
+            return false;
+        }
         if crate::server::observability::is_background_method(&request.method) {
             let reply = crate::server::observability::Reply::Endpoint {
                 client_id,

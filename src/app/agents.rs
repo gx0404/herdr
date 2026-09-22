@@ -388,6 +388,8 @@ impl App {
             state_labels: pane.state_labels,
             tokens: pane.tokens,
             agent_session: pane.agent_session,
+            // seam-stub(activity-schema)：活动树存储接通前恒为空。
+            activity: Vec::new(),
             workspace_id: pane.workspace_id,
             tab_id: pane.tab_id,
             pane_id: pane.pane_id,

@@ -270,6 +270,7 @@ fn every_dialog_and_menu_occludes_its_panel_not_the_whole_screen() {
             y: 8,
             highlighted: 0,
             hovered: None,
+            submenu: None,
         }),
         ClientShellOverlay::CommandPalette(super::command_palette::ClientCommandPaletteOverlay {
             view: super::command_palette::BrowserView::Search,

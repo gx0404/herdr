@@ -172,6 +172,76 @@ def rust_function_body(code: str, name: str) -> str:
     return ""
 
 
+RUST_FN_HEADER = re.compile(r"(?m)^\s*(?:pub(?:\([^)]*\))?\s+)?fn\s+(\w+)\s*\(")
+
+
+def rust_function_bodies(code: str) -> list[tuple[str, int, int]]:
+    """每个函数的 `(名字, body 起点, body 终点)`；起点是 `{`，终点是配对的 `}` 之后。"""
+    bodies: list[tuple[str, int, int]] = []
+    for header in RUST_FN_HEADER.finditer(code):
+        start = code.find("{", header.end())
+        if start == -1:
+            continue
+        depth = 0
+        for index in range(start, len(code)):
+            if code[index] == "{":
+                depth += 1
+            elif code[index] == "}":
+                depth -= 1
+                if depth == 0:
+                    bodies.append((header.group(1), start, index + 1))
+                    break
+    return bodies
+
+
+def enclosing_function(code: str, position: int) -> tuple[str, str] | None:
+    """包含 `position` 的最内层函数：`(名字, body)`。"""
+    innermost: tuple[str, int, int] | None = None
+    for name, start, end in rust_function_bodies(code):
+        if start <= position < end and (innermost is None or start > innermost[1]):
+            innermost = (name, start, end)
+    if innermost is None:
+        return None
+    name, start, end = innermost
+    return name, code[start:end]
+
+
+# 折叠 / 展开集合的写入：直接赋值，或调用会改写集合的方法，或取 `&mut` 引用
+# 再改写。三个集合决定 Agents 面板统一树的行序列，行缓存以
+# `tree_collapse_epoch` 为键，所以每个写入点所在的函数都必须递增它。
+COLLAPSE_STATE_WRITES = (
+    re.compile(
+        r"\.\s*(remote_)?collapsed_(groups|endpoints)\s*"
+        r"(=[^=]|\.\s*(insert|remove|retain|clear|extend|entry|drain)\s*\()"
+    ),
+    re.compile(r"&mut\s+[\w.]*\.(remote_)?collapsed_(groups|endpoints)\b"),
+)
+COLLAPSE_EPOCH_BUMP = "bump_tree_collapse_epoch("
+
+
+def client_shell_production_sources() -> list[Path]:
+    root = PROJECT_ROOT / "src" / "client" / "shell"
+    return sorted(
+        path
+        for path in root.rglob("*.rs")
+        if (root / "tests") not in path.parents
+    )
+
+
+def collapse_state_write_sites(paths) -> list[tuple[Path, int, str, str]]:
+    """每个写入点：`(文件, 行号, 所在函数名, 函数 body)`。"""
+    sites: list[tuple[Path, int, str, str]] = []
+    for path in paths:
+        code = production_code(path.read_text(encoding="utf-8"))
+        for pattern in COLLAPSE_STATE_WRITES:
+            for match in pattern.finditer(code):
+                line = code.count("\n", 0, match.start()) + 1
+                enclosing = enclosing_function(code, match.start())
+                name, body = enclosing if enclosing is not None else ("<none>", "")
+                sites.append((path, line, name, body))
+    return sites
+
+
 class UiHotPathArchitectureTests(unittest.TestCase):
     def test_render_hot_paths_avoid_known_expensive_runtime_queries(self) -> None:
         violations = find_violations(HOT_PATH_SOURCES, FORBIDDEN_CALLS)
@@ -309,6 +379,9 @@ fn render() { TerminalRuntime::input_state; }
             PROJECT_ROOT / "src" / "client" / "shell" / "snippets_overlay.rs": (
                 "render_run_pick_machines",
             ),
+            PROJECT_ROOT / "src" / "client" / "shell" / "agent_activity_overlay.rs": (
+                "render_agent_activity_overlay",
+            ),
         }
         write = re.compile(r"\.(?:scroll|reveal)\s*=[^=]")
         for path, names in renderers.items():
@@ -323,6 +396,57 @@ fn render() { TerminalRuntime::input_state; }
                         f"{path.name}: {name} 渲染期回写滚动状态"
                         f"（body 内第 {line} 行）：{match.group(0)!r}"
                     )
+
+    def test_collapse_state_writes_bump_tree_epoch(self) -> None:
+        # 折叠态决定 Agents 面板统一树的行序列，agents 行缓存以
+        # `ClientShellState::tree_collapse_epoch` 为键之一。静态扫描每一处改写
+        # `collapsed_groups` / `remote_collapsed_groups` / `collapsed_endpoints`
+        # 的语句，断言所在函数递增了代际；单测兜不住后续新增的写入点，这里兜。
+        sites = collapse_state_write_sites(client_shell_production_sources())
+        self.assertGreaterEqual(
+            len(sites), 5, "折叠集合写入点比预期少：扫描正则可能失效"
+        )
+        missing = sorted(
+            f"{path.relative_to(PROJECT_ROOT)}:{line}: fn {name} 改写折叠集合却没有调用 "
+            f"{COLLAPSE_EPOCH_BUMP}"
+            for path, line, name, body in sites
+            if COLLAPSE_EPOCH_BUMP not in body
+        )
+        self.assertEqual(
+            missing,
+            [],
+            "改写折叠 / 展开集合的函数必须调用 bump_tree_collapse_epoch：\n"
+            + "\n".join(missing),
+        )
+
+    def test_collapse_state_scanner_catches_each_write_form(self) -> None:
+        cases = (
+            "fn a(&mut self) { self.collapsed_groups = x; }",
+            "fn a(&mut self) { self.remote_collapsed_groups.entry(k).or_default(); }",
+            "fn a(&mut self) { self.collapsed_endpoints.retain(|_| true); }",
+            "fn a(&mut self) { let g = &mut self.collapsed_groups; g.clear(); }",
+            "fn a(&mut self) {\n    self.remote_collapsed_groups\n        .clear();\n}",
+        )
+        for source in cases:
+            with self.subTest(source=source):
+                code = production_code(source)
+                self.assertTrue(
+                    any(pattern.search(code) for pattern in COLLAPSE_STATE_WRITES),
+                    "写入形态未被识别",
+                )
+                enclosing = enclosing_function(code, code.find("collapsed_"))
+                self.assertIsNotNone(enclosing)
+                self.assertEqual(enclosing[0], "a")
+        # 只读访问不算写入。
+        for source in (
+            "fn a(&self) -> bool { self.collapsed_groups.contains(k) }",
+            "fn a(&self) { if self.collapsed_endpoints == other {} }",
+        ):
+            with self.subTest(source=source):
+                code = production_code(source)
+                self.assertFalse(
+                    any(pattern.search(code) for pattern in COLLAPSE_STATE_WRITES)
+                )
 
 if __name__ == "__main__":
     unittest.main()

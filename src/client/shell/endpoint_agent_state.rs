@@ -137,6 +137,8 @@ mod tests {
             state_labels: Vec::new(),
             tokens: Vec::new(),
             focused: true,
+            launch_seq: 0,
+            activity: Default::default(),
         }
     }
 

@@ -555,6 +555,7 @@ impl ClientShellState {
                         | PendingEndpointKind::SnippetRun { .. }
                         | PendingEndpointKind::BroadcastSend { .. }
                         | PendingEndpointKind::Observation { .. }
+                        | PendingEndpointKind::AgentActivityRead { .. }
                 )
             })
     }
@@ -659,6 +660,9 @@ impl ClientShellState {
                 return self.receive_text_copy(*epoch, result);
             }
             PendingEndpointKind::TextRelease => return (false, Vec::new()),
+            PendingEndpointKind::AgentActivityRead { epoch, node_id } => {
+                return self.receive_agent_activity_read(*epoch, node_id.clone(), result);
+            }
             _ => {}
         }
         if let PendingEndpointKind::Observation {
@@ -785,6 +789,7 @@ impl ClientShellState {
             | PendingEndpointKind::TextCopy { .. }
             | PendingEndpointKind::TextRelease
             | PendingEndpointKind::Observation { .. }
+            | PendingEndpointKind::AgentActivityRead { .. }
             | PendingEndpointKind::Views { .. } => {
                 unreachable!("后台响应已提前处理")
             }

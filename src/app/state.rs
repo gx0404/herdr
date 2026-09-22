@@ -838,7 +838,7 @@ pub enum Mode {
 pub enum AgentPanelSort {
     #[default]
     Spaces,
-    Priority,
+    Launch,
 }
 
 #[derive(Debug, Clone)]

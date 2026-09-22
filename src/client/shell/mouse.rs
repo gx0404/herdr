@@ -2229,6 +2229,9 @@ impl ClientShellState {
             }
             return;
         }
+        if self.handle_agent_activity_mouse(mouse, point, outcome) {
+            return;
+        }
         if matches!(self.overlay, Some(ClientShellOverlay::Broadcast(_))) {
             match mouse.kind {
                 MouseEventKind::ScrollUp if super::contains(self.hits.broadcast_popup, point) => {
@@ -2437,6 +2440,10 @@ impl ClientShellState {
                 if !self.config.mouse_capture {
                     return;
                 }
+                if self.open_agent_context_menu_at(point) {
+                    outcome.repaint = true;
+                    return;
+                }
                 let workspace_id = (!self.sidebar_collapsed)
                     .then(|| self.active_endpoint_workspace_at(point))
                     .flatten();
@@ -2632,15 +2639,7 @@ impl ClientShellState {
                     return;
                 }
                 if super::contains(self.hits.agent_sort_toggle, point) {
-                    let sort = match self.config.agent_panel_sort {
-                        crate::config::AgentPanelSortConfig::Spaces => {
-                            crate::config::AgentPanelSortConfig::Priority
-                        }
-                        crate::config::AgentPanelSortConfig::Priority => {
-                            crate::config::AgentPanelSortConfig::Spaces
-                        }
-                    };
-                    self.config.agent_panel_sort = sort;
+                    self.config.agent_panel_sort = self.config.agent_panel_sort.next();
                     self.agent_panel_sort_manual = true;
                     self.agent_scroll = 0;
                     self.persist_chrome_preferences(outcome);
@@ -2758,6 +2757,10 @@ impl ClientShellState {
                     .flatten();
                 if let Some(tab_press) = tab_press {
                     self.tab_press = Some(tab_press);
+                    return;
+                }
+                // 树节点的折叠开关落在行矩形之内：必须先于行点击。
+                if self.handle_agent_tree_click(point, outcome) {
                     return;
                 }
                 if self.handle_endpoint_agent_click(point, outcome) {

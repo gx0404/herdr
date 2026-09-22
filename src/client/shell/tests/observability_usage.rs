@@ -532,6 +532,8 @@ fn agent_in_pane(pane_id: &str, agent: &str) -> ClientShellAgent {
         state_labels: Vec::new(),
         tokens: Vec::new(),
         focused: true,
+        launch_seq: 0,
+        activity: Default::default(),
     }
 }
 

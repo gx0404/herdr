@@ -119,6 +119,11 @@ type EndpointRowsKey = (ClientEndpointId, Option<(u64, String)>, String, bool);
 pub(super) struct AgentRowsKey {
     config_epoch: u64,
     data_epoch: u64,
+    /// 折叠 / 展开集合的代际（`ClientShellState::tree_collapse_epoch`）。
+    collapse_epoch: u64,
+    /// 不随快照 revision 变化的活动 / 外部来源数据的代际
+    /// （`ClientShellState::agent_activity_epoch`）。
+    activity_epoch: u64,
     active_endpoint: ClientEndpointId,
     sort: crate::config::AgentPanelSortConfig,
     view_label: Option<String>,
@@ -137,12 +142,16 @@ impl AgentRowsCache {
         config: &ClientShellConfig,
         config_epoch: u64,
         data_epoch: u64,
+        collapse_epoch: u64,
+        activity_epoch: u64,
         active_endpoint_id: &ClientEndpointId,
         view_label: Option<&str>,
     ) -> AgentRowsKey {
         AgentRowsKey {
             config_epoch,
             data_epoch,
+            collapse_epoch,
+            activity_epoch,
             active_endpoint: active_endpoint_id.clone(),
             sort: config.agent_panel_sort,
             view_label: view_label.map(str::to_owned),
@@ -192,6 +201,8 @@ impl ClientShellState {
             &self.config,
             self.config_epoch,
             self.agent_rows_epoch,
+            self.tree_collapse_epoch,
+            self.agent_activity_epoch,
             &self.active_endpoint_id,
             self.snapshot
                 .as_deref()

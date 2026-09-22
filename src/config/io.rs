@@ -1077,9 +1077,40 @@ agent_panel_sort = "priority"
 
         assert!(loaded.diagnostics.is_empty());
         assert!(loaded.invalid_sections.is_empty());
+        // `"priority"` 是已移除的旧取值：静默回退默认，`[ui]` 不失效。
         assert_eq!(
             loaded.config.ui.agent_panel_sort,
-            super::super::AgentPanelSortConfig::Priority
+            super::super::AgentPanelSortConfig::Spaces
+        );
+    }
+
+    #[test]
+    fn startup_config_accepts_removed_priority_sort_without_falling_back() {
+        let _guard = crate::config::test_config_env_lock().lock().unwrap();
+        let path = std::env::temp_dir().join(format!(
+            "herdr-config-removed-priority-sort-{}.toml",
+            std::process::id()
+        ));
+        std::fs::write(
+            &path,
+            "[ui]\nagent_panel_sort = \"priority\"\nsidebar_width = 31\n",
+        )
+        .unwrap();
+        std::env::set_var(CONFIG_PATH_ENV_VAR, &path);
+
+        let loaded = Config::load();
+
+        std::env::remove_var(CONFIG_PATH_ENV_VAR);
+        let _ = std::fs::remove_file(path);
+
+        assert!(loaded.diagnostics.is_empty(), "{:?}", loaded.diagnostics);
+        assert_eq!(
+            loaded.config.ui.agent_panel_sort,
+            super::super::AgentPanelSortConfig::Spaces
+        );
+        assert_eq!(
+            loaded.config.ui.sidebar_width, 31,
+            "旧取值不让整份配置回退默认"
         );
     }
 

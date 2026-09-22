@@ -1,6 +1,8 @@
 use ratatui::layout::Rect;
 
 mod borders;
+pub(crate) mod color;
+pub(crate) mod kit;
 mod onboarding;
 mod panes;
 mod release_notes;
@@ -47,11 +49,11 @@ pub(crate) use self::tab_surface::{
     render_tab_surface, resize_tab_surface, tab_surface_cursor, tab_surface_hyperlinks,
     PaneHostCursorInputs, TabSurfaceLayout, TabSurfaceTarget, TabSurfaceView,
 };
-pub(crate) use self::text::truncate_end;
+pub(crate) use self::text::{display_width, display_width_u16, truncate_end};
 pub(crate) use self::widgets::{
     centered_popup_rect, input_field_style, modal_button_style, modal_button_width,
     modal_close_button_text, modal_continue_button_text, modal_rect, modal_stack_areas,
-    ModalButtonState, ModalButtonTone, ModalSize, ModalStackAreas,
+    panel_contrast_fg, ModalButtonState, ModalButtonTone, ModalSize, ModalStackAreas,
 };
 
 use crate::app::AppState;

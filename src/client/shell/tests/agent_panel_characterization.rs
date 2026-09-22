@@ -41,10 +41,13 @@ fn panel_agent(
         state_labels: Vec::new(),
         tokens: Vec::new(),
         focused: false,
+        launch_seq: 0,
+        activity: Default::default(),
     }
 }
 
-/// 两个工作区、三个 agent（服务端顺序 one / two / three）。状态刻意避开 `Done`：
+/// 两个工作区、三个 agent（服务端顺序 one / two / three；启动顺序 two → three →
+/// one，刻意与快照顺序不同）。状态刻意避开 `Done`：
 /// 客户端首次见到某个 boot 时会把既有 `Done` 投影成 `Idle`
 /// （`endpoint_agent_state::project_snapshot`），夹具里用它只会让断言含糊。
 fn two_workspace_snapshot() -> ClientShellSnapshot {
@@ -74,10 +77,13 @@ fn two_workspace_snapshot() -> ClientShellSnapshot {
         panel_agent("pane_2", "ws_1", "tab_1", "two", AgentStatus::Blocked, 20),
         panel_agent("pane_3", "ws_2", "tab_2", "three", AgentStatus::Working, 30),
     ];
+    for (agent, launch_seq) in projected.agents.iter_mut().zip([3, 1, 2]) {
+        agent.launch_seq = launch_seq;
+    }
     projected
 }
 
-/// 远端端点的快照：单工作区、两个 agent（r-one / r-two）。
+/// 远端端点的快照：单工作区、两个 agent（r-one / r-two；启动顺序 r-two → r-one）。
 fn remote_snapshot() -> ClientShellSnapshot {
     let mut remote = snapshot();
     remote.boot_id = "remote-boot".into();
@@ -90,6 +96,9 @@ fn remote_snapshot() -> ClientShellSnapshot {
         panel_agent("pane_1", "ws_1", "tab_1", "r-one", AgentStatus::Working, 10),
         panel_agent("pane_2", "ws_1", "tab_1", "r-two", AgentStatus::Idle, 20),
     ];
+    for (agent, launch_seq) in remote.agents.iter_mut().zip([2, 1]) {
+        agent.launch_seq = launch_seq;
+    }
     remote
 }
 
@@ -353,44 +362,47 @@ fn characterization_classic_collapsed_workspace_hides_children_and_flips_chevron
     assert!(!body.contains('├'), "只剩一个独子行: {body}");
 }
 
-/// (b) classic + Priority：**仍是两层树**，不是平铺。优先级只在每个工作区内部
-/// 重排子行；工作区之间保持快照顺序，哪怕最高优先级的 agent 在靠后的工作区。
+/// (b) classic + Launch：**仍是两层树**，不是平铺。启动顺序只在每个工作区内部
+/// 重排子行；工作区之间保持快照顺序，哪怕最早启动的 agent 在靠后的工作区。
+/// `launch_seq` 全为 0（旧 server 不下发）时退回快照顺序。
 #[test]
-fn characterization_classic_priority_keeps_workspace_tree_and_sorts_within_workspace() {
-    let mut projected = two_workspace_snapshot();
-    // 让全局最高优先级（Blocked）落在第二个工作区。
-    projected.agents[1].agent_status = AgentStatus::Working;
-    projected.agents[2].agent_status = AgentStatus::Blocked;
-    let mut state = ClientShellState::new(panel_config(AgentPanelSortConfig::Priority));
-    state.set_snapshot(Box::new(projected));
-    state.set_pane_surface(surface());
-    state.compose(106, 30).expect("classic priority 帧");
+fn characterization_classic_launch_keeps_workspace_tree_and_sorts_within_workspace() {
+    let mut state = classic_state(AgentPanelSortConfig::Launch);
+    state.compose(106, 30).expect("classic launch 帧");
 
     assert_eq!(
         sort_label(&state),
-        compact(crate::i18n::texts().sidebar.sort_priority)
+        compact(crate::i18n::texts().agent_panel.sort_launch)
     );
     assert_eq!(
         group_keys(&state),
         [agent_group_key("ws_1"), agent_group_key("ws_2")],
-        "工作区头仍在，且不按优先级重排工作区"
+        "工作区头仍在，且不按启动顺序重排工作区"
     );
     assert_eq!(
         classic_hit_ids(&state),
         ["pane_2", "pane_1", "pane_3"],
-        "工作区内按状态优先级排；全局最高优先级的 pane_3 仍排在最后"
+        "工作区内按启动顺序排；全局第二个启动的 pane_3 仍排在最后"
     );
     let two = rect_rows(&state, classic_agent_rect(&state, "pane_2"));
-    assert!(two[0].starts_with("   ├─ ◐"), "{two:?}");
+    assert!(two[0].starts_with("   ├─ ×"), "{two:?}");
     let one = rect_rows(&state, classic_agent_rect(&state, "pane_1"));
     assert!(one[0].starts_with("   └─ ○"), "{one:?}");
     let three = rect_rows(&state, classic_agent_rect(&state, "pane_3"));
-    assert!(three[0].starts_with("   └─ ×"), "{three:?}");
-    let header = &rect_rows(&state, group_rect(&state, "ws_2"))[0];
-    assert!(
-        header.starts_with(" × herdr"),
-        "头汇总组内最高状态: {header:?}"
-    );
+    assert!(three[0].starts_with("   └─ ◐"), "{three:?}");
+
+    // 旧 server 不下发 launch_seq：全为 0，稳定排序保持快照顺序。
+    let mut projected = two_workspace_snapshot();
+    for agent in &mut projected.agents {
+        agent.launch_seq = 0;
+    }
+    let mut state = ClientShellState::new(panel_config(AgentPanelSortConfig::Launch));
+    state.set_snapshot(Box::new(projected));
+    state.set_pane_surface(surface());
+    state
+        .compose(106, 30)
+        .expect("classic launch 帧（launch_seq 全 0）");
+    assert_eq!(classic_hit_ids(&state), ["pane_1", "pane_2", "pane_3"]);
 }
 
 /// (c) classic 矮面板：列表区不足 3 行（放不下「工作区头 + 一个 agent 行」）时
@@ -420,12 +432,12 @@ fn characterization_classic_short_panel_degrades_to_flat_rows() {
     state.compose(106, 30).expect("高面板帧");
     assert_eq!(state.hits.agent_group_toggles.len(), 2);
 
-    // Priority 下退化视图按全局优先级平铺（树视图里则是 two / one / three）。
-    let mut state = classic_state(AgentPanelSortConfig::Priority);
+    // Launch 下退化视图按全局启动顺序平铺（树视图里则是 two / one / three）。
+    let mut state = classic_state(AgentPanelSortConfig::Launch);
     let mut flat_order = Vec::new();
     for start in 0..3 {
         state.agent_scroll = start;
-        state.compose(106, 10).expect("矮面板 priority 帧");
+        state.compose(106, 10).expect("矮面板 launch 帧");
         assert!(state.hits.agent_group_toggles.is_empty());
         flat_order.push(classic_hit_ids(&state)[0].to_owned());
     }
@@ -506,18 +518,15 @@ fn characterization_workbench_spaces_sort_is_flat_despite_grouped_header() {
     );
     assert!(state.hits.agent_group_toggles.is_empty());
 
-    // 点表头排序标签切到 Priority：只换行序，仍然平铺。
+    // 点表头排序标签切到 Launch：只换行序，仍然平铺。
     let toggle = state.hits.agent_sort_toggle;
     assert!(!toggle.is_empty(), "排序标签可点");
     state.handle_raw_events(vec![click(toggle)]);
-    assert_eq!(
-        state.config.agent_panel_sort,
-        AgentPanelSortConfig::Priority
-    );
-    state.compose(120, 40).expect("priority workbench 帧");
+    assert_eq!(state.config.agent_panel_sort, AgentPanelSortConfig::Launch);
+    state.compose(120, 40).expect("launch workbench 帧");
     assert_eq!(
         sort_label(&state),
-        compact(crate::i18n::texts().sidebar.sort_priority)
+        compact(crate::i18n::texts().agent_panel.sort_launch)
     );
     assert_eq!(
         endpoint_hit_ids(&state),
@@ -656,6 +665,8 @@ fn current_rows_key(
         &state.config,
         state.config_epoch,
         state.agent_rows_epoch,
+        state.tree_collapse_epoch,
+        state.agent_activity_epoch,
         &state.active_endpoint_id,
         state
             .snapshot
@@ -683,13 +694,12 @@ fn cached_pane_ids(state: &ClientShellState) -> Vec<&str> {
         .collect()
 }
 
-/// (f) `AgentRowsCache`：键不变跨帧复用；折叠态不在键里，所以**仅折叠态变化不会
-/// 重建**；快照 revision 与排序在键里，变了就重建。
-///
-/// 现状，W3 将改变：树进入缓存后键要补折叠集合的代际，届时「折叠不重建」这一段
-/// 应翻转为「折叠即重建」。
+/// (f) `AgentRowsCache`：键不变跨帧复用；折叠集合的代际（`tree_collapse_epoch`）
+/// 在键里，所以**折叠态一变就重建**（统一树的行序列取决于折叠态；接缝 S2 起
+/// 生效，行内容在面板车道把树接进缓存前仍与折叠无关）；快照 revision 与排序
+/// 在键里，变了就重建。
 #[test]
-fn characterization_agent_rows_cache_rebuilds_on_revision_but_not_on_collapse() {
+fn characterization_agent_rows_cache_rebuilds_on_revision_and_on_collapse() {
     let mut state = workbench_state(AgentPanelSortConfig::Spaces);
     state.compose(120, 40).expect("第一帧");
     let key = current_rows_key(&state);
@@ -701,13 +711,22 @@ fn characterization_agent_rows_cache_rebuilds_on_revision_but_not_on_collapse() 
     assert_eq!(current_rows_key(&state), key);
     assert_eq!(cached_rows_address(&state), address, "无变化时跨帧复用");
 
-    // 仅折叠态变化：键不含折叠态，不重建，行也原样。
+    // 仅折叠态变化：折叠代际进键，重建；平铺的联邦行内容暂不受折叠影响。
     state.toggle_collapsed_group(&ClientEndpointId::Local, agent_group_key("ws_1"));
     assert!(state.group_is_collapsed(&ClientEndpointId::Local, &agent_group_key("ws_1")));
     state.compose(120, 40).expect("折叠后的帧");
-    assert_eq!(current_rows_key(&state), key, "折叠态不进缓存键");
-    assert_eq!(cached_rows_address(&state), address, "仅折叠态变化不重建");
+    let collapsed_key = current_rows_key(&state);
+    assert_ne!(collapsed_key, key, "折叠代际进缓存键");
+    let collapsed_address = cached_rows_address(&state);
+    assert_ne!(collapsed_address, address, "折叠即重建");
     assert_eq!(cached_pane_ids(&state), ["pane_1", "pane_2", "pane_3"]);
+    state.compose(120, 40).expect("折叠后的第二帧");
+    assert_eq!(
+        cached_rows_address(&state),
+        collapsed_address,
+        "折叠后键稳定，跨帧复用"
+    );
+    let (key, address) = (collapsed_key, collapsed_address);
 
     // revision 在键里。这里绕开 `set_endpoint_snapshot` 原地推进 revision，只为把
     // 它与数据代际（agent_rows_epoch，生产写入路径会一并递增）隔离开。
@@ -745,10 +764,10 @@ fn characterization_agent_rows_cache_rebuilds_on_revision_but_not_on_collapse() 
         "重建后的行上屏"
     );
 
-    // 排序在键里：点排序标签 → 重建为 Priority 行序。
+    // 排序在键里：点排序标签 → 重建为 Launch 行序。
     let toggle = state.hits.agent_sort_toggle;
     state.handle_raw_events(vec![click(toggle)]);
-    state.compose(120, 40).expect("priority 帧");
+    state.compose(120, 40).expect("launch 帧");
     assert_ne!(cached_rows_address(&state), renamed_address);
     assert_eq!(cached_pane_ids(&state), ["pane_2", "pane_3", "pane_1"]);
 }
@@ -767,10 +786,10 @@ fn aggregate_names(state: &ClientShellState, sort: AgentPanelSortConfig) -> Vec<
 }
 
 /// (g) `aggregate_agent_rows` 是联邦面板与 mobile 的行序来源。Spaces：端点顺序 →
-/// 各端点快照顺序，不看状态；Priority：在线优先，再按状态优先级
+/// 各端点快照顺序，不看状态；Launch：在线优先，再按 `launch_seq` 升序
 /// （Blocked > Working > Idle），同级按客户端观测到的新近度，跨端点混排。
 #[test]
-fn characterization_aggregate_agent_rows_order_under_spaces_and_priority() {
+fn characterization_aggregate_agent_rows_order_under_spaces_and_launch() {
     let (mut state, remote) = federated_state(AgentPanelSortConfig::Spaces);
     // 端点是否宣告 agent view 投影决定走哪条分支；无自定义视图时两条分支同序。
     for projection_supported in [false, true] {
@@ -790,20 +809,20 @@ fn characterization_aggregate_agent_rows_order_under_spaces_and_priority() {
             "projection_supported={projection_supported}"
         );
         assert_eq!(
-            aggregate_names(&state, AgentPanelSortConfig::Priority),
+            aggregate_names(&state, AgentPanelSortConfig::Launch),
             [
                 "Local/two",
-                "Build/r-one",
-                "Local/three",
                 "Build/r-two",
+                "Local/three",
+                "Build/r-one",
                 "Local/one"
             ],
             "projection_supported={projection_supported}"
         );
     }
 
-    // 远端掉线（stale）：Spaces 行序不变；Priority 把 stale 端点整体沉底，
-    // 哪怕它的 agent 状态优先级更高。
+    // 远端掉线（stale）：Spaces 行序不变；Launch 把 stale 端点整体沉底，
+    // 哪怕它的 agent 启动得更早。
     state.set_endpoint_status(&remote, ClientEndpointStatus::Reconnecting);
     assert_eq!(
         aggregate_names(&state, AgentPanelSortConfig::Spaces),
@@ -816,20 +835,20 @@ fn characterization_aggregate_agent_rows_order_under_spaces_and_priority() {
         ]
     );
     assert_eq!(
-        aggregate_names(&state, AgentPanelSortConfig::Priority),
+        aggregate_names(&state, AgentPanelSortConfig::Launch),
         [
             "Local/two",
             "Local/three",
             "Local/one",
-            "Build/r-one",
-            "Build/r-two"
+            "Build/r-two",
+            "Build/r-one"
         ]
     );
     // 键盘按序号聚焦 agent 用的目标表：同一行序，但剔除 stale 端点。
     let targets = aggregate_navigation::online_agent_targets(
         &state.endpoints,
         &state.active_endpoint_id,
-        AgentPanelSortConfig::Priority,
+        AgentPanelSortConfig::Launch,
     )
     .into_iter()
     .map(|target| (target.endpoint_id, target.pane_id))
@@ -855,10 +874,7 @@ fn mobile_agent_targets(state: &ClientShellState) -> Vec<(Rect, String)> {
 fn characterization_mobile_switcher_lists_agents_flat_in_aggregate_order() {
     for (sort, expected) in [
         (AgentPanelSortConfig::Spaces, ["pane_1", "pane_2", "pane_3"]),
-        (
-            AgentPanelSortConfig::Priority,
-            ["pane_2", "pane_3", "pane_1"],
-        ),
+        (AgentPanelSortConfig::Launch, ["pane_2", "pane_3", "pane_1"]),
     ] {
         let mut state = classic_state(sort);
         state.toggle_collapsed_group(&ClientEndpointId::Local, agent_group_key("ws_1"));

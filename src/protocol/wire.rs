@@ -949,6 +949,9 @@ pub struct ClientShellSnapshot {
     pub panes: Vec<ClientShellPane>,
     pub agents: Vec<ClientShellAgent>,
     pub commands: Vec<ClientShellCommand>,
+    /// 不属于任何 pane 的外部来源条目；旧 server 不下发（缺省为空）。
+    #[serde(default)]
+    pub external_agents: Vec<ClientShellExternalAgent>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1084,6 +1087,82 @@ pub struct ClientShellAgent {
     pub state_labels: Vec<(String, String)>,
     pub tokens: Vec<(String, String)>,
     pub focused: bool,
+    /// pane 首次获得 agent 身份时分配的单调序号（释放后重新识别取新号）；
+    /// 0 = 未知（旧 server 不下发），此时「按启动顺序」退回快照顺序。
+    #[serde(default)]
+    pub launch_seq: u64,
+    /// 该 agent 的活动树摘要；旧 server 不下发（缺省为空）。
+    #[serde(default)]
+    pub activity: ClientShellAgentActivity,
+}
+
+// 以下三个结构是 API schema（`AgentActivityNode` / `ExternalAgentInfo`）的 wire
+// 镜像。本文件内不用 `skip_serializing_if`：快照仍经 legacy 变体
+// `ServerMessage::ClientShellSnapshot` 被 bincode 可达，跳过序列化会让编解码
+// 不对称；新字段一律只靠 `#[serde(default)]` 对旧 JSON 兼容。
+
+/// 一个 agent 的活动树摘要。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClientShellAgentActivity {
+    #[serde(default)]
+    pub running: u32,
+    #[serde(default)]
+    pub total: u32,
+    /// `nodes` 被每 agent 的上限截断；全量经 `agent.activity.read` 取。
+    #[serde(default)]
+    pub truncated: bool,
+    #[serde(default)]
+    pub nodes: Vec<ClientShellActivityNode>,
+}
+
+/// `AgentActivityNode` 的 wire 镜像。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClientShellActivityNode {
+    pub id: String,
+    #[serde(default)]
+    pub kind: crate::api::schema::AgentActivityKind,
+    #[serde(default)]
+    pub label: String,
+    #[serde(default)]
+    pub status: crate::api::schema::AgentActivityStatus,
+    #[serde(default)]
+    pub parent_id: Option<String>,
+    #[serde(default)]
+    pub agent_type: Option<String>,
+    #[serde(default)]
+    pub content_ref: Option<String>,
+    #[serde(default)]
+    pub summary: Option<String>,
+    #[serde(default)]
+    pub started_at_ms: Option<u64>,
+    #[serde(default)]
+    pub ended_at_ms: Option<u64>,
+}
+
+/// `ExternalAgentInfo` 的 wire 镜像：不属于任何 pane 的外部来源条目。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClientShellExternalAgent {
+    pub external_id: String,
+    pub source: String,
+    #[serde(deserialize_with = "deserialize_client_shell_agent_status")]
+    pub agent_status: crate::api::schema::AgentStatus,
+    #[serde(default)]
+    pub label: String,
+    /// false = 来源暂不可读。
+    #[serde(default = "client_shell_default_true")]
+    pub readable: bool,
+    #[serde(default)]
+    pub agent: Option<String>,
+    #[serde(default)]
+    pub cwd: Option<String>,
+    #[serde(default)]
+    pub updated_at_ms: Option<u64>,
+    #[serde(default)]
+    pub activity: ClientShellAgentActivity,
+}
+
+fn client_shell_default_true() -> bool {
+    true
 }
 
 /// Origin-relative geometry for one pane in a rendered pane surface.
@@ -2786,11 +2865,59 @@ mod tests {
                 action: ClientShellCommandAction::Shell,
                 description: Some("deploy".into()),
             }],
+            external_agents: Vec::new(),
         }));
         let encoded = bincode::serde::encode_to_vec(&msg, bincode::config::standard()).unwrap();
         let (decoded, _): (ServerMessage, _) =
             bincode::serde::decode_from_slice(&encoded, bincode::config::standard()).unwrap();
         assert_eq!(msg, decoded);
+    }
+
+    /// 活动树与外部来源的 wire 镜像不使用 `skip_serializing_if`：bincode 不是自
+    /// 描述格式，跳过序列化会让 legacy 变体的编解码不对称。
+    #[test]
+    fn client_shell_activity_mirrors_roundtrip_through_bincode() {
+        let activity = ClientShellAgentActivity {
+            running: 1,
+            total: 2,
+            truncated: true,
+            nodes: vec![
+                ClientShellActivityNode {
+                    id: "n1".into(),
+                    kind: crate::api::schema::AgentActivityKind::Subagent,
+                    label: "explore".into(),
+                    status: crate::api::schema::AgentActivityStatus::Running,
+                    parent_id: None,
+                    agent_type: Some("Explore".into()),
+                    content_ref: Some("ref".into()),
+                    summary: None,
+                    started_at_ms: Some(1),
+                    ended_at_ms: None,
+                },
+                ClientShellActivityNode {
+                    id: "n2".into(),
+                    parent_id: Some("n1".into()),
+                    ..ClientShellActivityNode::default()
+                },
+            ],
+        };
+        let external = ClientShellExternalAgent {
+            external_id: "zcode:abc".into(),
+            source: "zcode".into(),
+            agent_status: crate::api::schema::AgentStatus::Working,
+            label: String::new(),
+            readable: false,
+            agent: None,
+            cwd: Some("/repo".into()),
+            updated_at_ms: None,
+            activity: activity.clone(),
+        };
+        let encoded =
+            bincode::serde::encode_to_vec((&activity, &external), bincode::config::standard())
+                .unwrap();
+        let (decoded, _): ((ClientShellAgentActivity, ClientShellExternalAgent), _) =
+            bincode::serde::decode_from_slice(&encoded, bincode::config::standard()).unwrap();
+        assert_eq!(decoded, (activity, external));
     }
 
     #[test]

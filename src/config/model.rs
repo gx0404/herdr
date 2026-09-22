@@ -95,10 +95,22 @@ pub enum ToastClipboardPosition {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum AgentPanelSortConfig {
+    /// `"priority"` 是已移除的旧取值：静默回退到默认，不产生诊断、不让 `[ui]`
+    /// 失效；序列化只写 `"spaces"` / `"launch"`，旧值在下次保存时自然消失。
     #[default]
-    #[serde(alias = "workspaces")]
+    #[serde(alias = "workspaces", alias = "priority")]
     Spaces,
-    Priority,
+    Launch,
+}
+
+impl AgentPanelSortConfig {
+    /// 表头点击的循环顺序。
+    pub fn next(self) -> Self {
+        match self {
+            Self::Spaces => Self::Launch,
+            Self::Launch => Self::Spaces,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -1120,7 +1132,7 @@ pub struct UiConfig {
     /// Format for the outer terminal window title. Empty leaves the title alone.
     /// Default: "{hostname}: {workspace}".
     pub window_title: String,
-    /// Agent sidebar ordering. Saved values are "spaces" or "priority". Default: "spaces".
+    /// Agent sidebar ordering. Saved values are "spaces" or "launch". Default: "spaces".
     pub agent_panel_sort: AgentPanelSortConfig,
     /// Retired setting that Herdr wrote before the workspace filter was removed.
     #[serde(rename = "agent_panel_scope")]
@@ -1623,10 +1635,34 @@ resume_agents_on_restore = false
 
         let toml = r#"
 [ui]
+agent_panel_sort = "launch"
+"#;
+        let config: Config = toml::from_str(toml).unwrap();
+        assert_eq!(config.ui.agent_panel_sort, AgentPanelSortConfig::Launch);
+
+        // 已移除的旧取值：静默回退到默认，序列化不再写它。
+        let toml = r#"
+[ui]
 agent_panel_sort = "priority"
 "#;
         let config: Config = toml::from_str(toml).unwrap();
-        assert_eq!(config.ui.agent_panel_sort, AgentPanelSortConfig::Priority);
+        assert_eq!(config.ui.agent_panel_sort, AgentPanelSortConfig::Spaces);
+        assert_eq!(
+            serde_json::to_string(&config.ui.agent_panel_sort).unwrap(),
+            r#""spaces""#
+        );
+        assert_eq!(
+            serde_json::to_string(&AgentPanelSortConfig::Launch).unwrap(),
+            r#""launch""#
+        );
+        assert_eq!(
+            AgentPanelSortConfig::Spaces.next(),
+            AgentPanelSortConfig::Launch
+        );
+        assert_eq!(
+            AgentPanelSortConfig::Launch.next(),
+            AgentPanelSortConfig::Spaces
+        );
 
         let toml = r#"
 [ui]

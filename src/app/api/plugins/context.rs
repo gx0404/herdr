@@ -185,6 +185,14 @@ impl App {
                     context.focused_pane_id = Some(pane_id.clone());
                     context
                 }),
+            // 不在 `PLUGIN_HOOK_EVENT_KINDS` 里，插件钩子收不到它；这里只为穷尽。
+            EventData::PaneAgentActivityChanged { pane_id, .. } => self
+                .plugin_context_for_public_pane_id(pane_id, correlation_id)
+                .unwrap_or_else(|| {
+                    let mut context = empty_plugin_context(correlation_id);
+                    context.focused_pane_id = Some(pane_id.clone());
+                    context
+                }),
         }
     }
 

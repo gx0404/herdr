@@ -3497,8 +3497,9 @@ mod tests {
         );
     }
 
-    /// ds-08：terminal 主题的 `panel_bg` 是 `Reset`，页签「反色」于是退化成
-    /// 「终端默认前景压在 accent 上」。反色前景改取组件表（与按钮同源），
+    /// ds-08：terminal 主题的 `panel_bg` 是 `Reset`，页签「反色」曾退化成
+    /// 「终端默认前景压在 accent 上」。反色前景取组件表（与按钮同源）；组件表
+    /// 现在按对比度挑颜色（`crate::ui::color::contrast_fg`），`Reset` 候选被跳过，
     /// 16 色主题下也有明确对比。
     #[test]
     fn active_page_tab_inverts_with_the_component_contrast_color() {
@@ -3529,12 +3530,16 @@ mod tests {
             .expect("系统页签命中区");
         let cell = buffer[(active.x, active.y)].clone();
         assert_eq!(cell.style().bg, Some(config.palette.accent), "活动页签底色");
+        let fg = cell.style().fg.expect("活动页签有前景");
+        assert_ne!(fg, Color::Reset, "面板底为 Reset 时不能退回终端默认前景");
         assert_eq!(
-            cell.style().fg,
-            Some(config.palette.surface_dim),
-            "面板底为 Reset 时反色前景取 surface_dim（组件表口径）"
+            fg,
+            crate::ui::panel_contrast_fg(&config.palette),
+            "反色前景与组件表同源"
         );
-        assert_ne!(cell.style().fg, Some(Color::Reset));
+        let ratio = crate::ui::color::contrast_ratio(fg, config.palette.accent)
+            .expect("ANSI accent 可换算");
+        assert!(ratio >= 4.5, "对比度只有 {ratio:.2}");
     }
 
     /// C-29：结束进程是破坏性操作，用组件的 Danger 语义色；「取消」保持常态，
@@ -4061,5 +4066,85 @@ mod tests {
         assert!(buffer_has(&buffer, "还有") || buffer_has(&buffer, "more"));
         paint_page(&state, Page::Accounts, 0, 0);
         paint_page(&state, Page::Settings, 0, 0);
+    }
+
+    /// 选中页签反色到 accent 底上；前景由 `panel_contrast_fg` 按对比度挑选，
+    /// 每个内置主题在真彩与 256 色降级下都要读得出字：各格字符逐一相等，且
+    /// 前景 / 底色对比度 ≥ 3.0（曾有主题的 `panel_bg` 与 `accent` 亮度接近，
+    /// 字叠上去就看不见）。
+    #[test]
+    fn active_page_tab_stays_legible_on_every_builtin_theme_and_color_depth() {
+        type ThemeCtor = fn() -> Palette;
+        let themes: [(&str, ThemeCtor); 18] = [
+            ("catppuccin", Palette::catppuccin),
+            ("catppuccin_latte", Palette::catppuccin_latte),
+            ("terminal", Palette::terminal),
+            ("tokyo_night", Palette::tokyo_night),
+            ("tokyo_night_day", Palette::tokyo_night_day),
+            ("dracula", Palette::dracula),
+            ("nord", Palette::nord),
+            ("gruvbox", Palette::gruvbox),
+            ("gruvbox_light", Palette::gruvbox_light),
+            ("one_dark", Palette::one_dark),
+            ("one_light", Palette::one_light),
+            ("solarized", Palette::solarized),
+            ("solarized_light", Palette::solarized_light),
+            ("kanagawa", Palette::kanagawa),
+            ("kanagawa_lotus", Palette::kanagawa_lotus),
+            ("rose_pine", Palette::rose_pine),
+            ("rose_pine_dawn", Palette::rose_pine_dawn),
+            ("vesper", Palette::vesper),
+        ];
+        let label = "Accounts";
+        let expected = format!(" {label} ");
+        for (name, theme) in themes {
+            for depth in [
+                crate::config::ColorDepth::Truecolor,
+                crate::config::ColorDepth::Color256,
+            ] {
+                let palette = theme().with_color_depth(depth);
+                let area = Rect::new(0, 0, 20, 1);
+                let mut buffer = Buffer::empty(area);
+                let mut hits = Vec::new();
+                page_tab(
+                    &mut buffer,
+                    area,
+                    label,
+                    true,
+                    Action::Page(Page::Accounts),
+                    &palette,
+                    &mut hits,
+                );
+                let (rect, _) = hits.first().expect("选中页签登记命中区");
+                assert_eq!(
+                    rect.width as usize,
+                    expected.chars().count(),
+                    "{name}/{depth:?}"
+                );
+                for (index, ch) in expected.chars().enumerate() {
+                    let cell = &buffer[(rect.x + index as u16, rect.y)];
+                    assert_eq!(
+                        cell.symbol(),
+                        ch.to_string(),
+                        "{name}/{depth:?} 第 {index} 格"
+                    );
+                    let style = cell.style();
+                    let bg = style.bg.expect("选中页签有底色");
+                    let fg = style.fg.expect("选中页签有前景");
+                    assert_eq!(bg, palette.accent, "{name}/{depth:?}");
+                    match crate::ui::color::contrast_ratio(fg, bg) {
+                        Some(ratio) => assert!(
+                            ratio >= 3.0,
+                            "{name}/{depth:?}: fg {fg:?} 叠在 accent {bg:?} 上对比度只有 {ratio:.2}"
+                        ),
+                        // terminal 主题的 accent 是终端默认色，无从换算。
+                        None => assert!(
+                            matches!(bg, Color::Reset) || matches!(fg, Color::Reset),
+                            "{name}/{depth:?}: 只有 Reset 才允许算不出对比度"
+                        ),
+                    }
+                }
+            }
+        }
     }
 }

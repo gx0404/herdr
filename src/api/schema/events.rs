@@ -88,6 +88,10 @@ pub enum Subscription {
     PaneScrollChanged { pane_id: String },
     #[serde(rename = "layout.updated")]
     LayoutUpdated {},
+    /// 无参：订阅者按事件里的 `pane_id` 自行过滤（投递侧不按 pane 过滤，宣告了
+    /// 承重参数却不生效才是问题）。
+    #[serde(rename = "pane.agent_activity_changed")]
+    PaneAgentActivityChanged {},
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
@@ -224,6 +228,7 @@ pub enum EventKind {
     PaneAgentDetected,
     PaneAgentStatusChanged,
     LayoutUpdated,
+    PaneAgentActivityChanged,
 }
 
 impl EventKind {
@@ -255,6 +260,7 @@ impl EventKind {
             EventKind::PaneAgentDetected => "pane.agent_detected",
             EventKind::PaneAgentStatusChanged => "pane.agent_status_changed",
             EventKind::LayoutUpdated => "layout.updated",
+            EventKind::PaneAgentActivityChanged => "pane.agent_activity_changed",
         }
     }
 }
@@ -262,7 +268,7 @@ impl EventKind {
 impl EventKind {
     /// `EventKind` 变体总数。`EventHub` 用它作为「按种别记录挤出高水位」的
     /// 定长数组长度。这是进程内实现细节，不进 wire 形状。
-    pub(crate) const COUNT: usize = 26;
+    pub(crate) const COUNT: usize = 27;
 
     /// 稳定的进程内下标。**不是** wire 值，不得序列化；只用来索引定长数组。
     /// 写成穷尽 match，新增变体必须显式分配下标（并同步 `COUNT`）。
@@ -294,6 +300,7 @@ impl EventKind {
             EventKind::PaneAgentDetected => 23,
             EventKind::PaneAgentStatusChanged => 24,
             EventKind::LayoutUpdated => 25,
+            EventKind::PaneAgentActivityChanged => 26,
         }
     }
 }
@@ -326,6 +333,7 @@ pub const KNOWN_EVENT_KINDS: &[EventKind] = &[
     EventKind::PaneAgentDetected,
     EventKind::PaneAgentStatusChanged,
     EventKind::LayoutUpdated,
+    EventKind::PaneAgentActivityChanged,
 ];
 
 pub const PLUGIN_HOOK_EVENT_KINDS: &[EventKind] = &[
@@ -646,5 +654,12 @@ pub enum EventData {
     },
     LayoutUpdated {
         layout: super::panes::PaneLayoutSnapshot,
+    },
+    /// 某 pane 的 agent 活动树变了。只带计数；节点经 `agent.get` /
+    /// `agent.activity.read` 取。
+    PaneAgentActivityChanged {
+        pane_id: String,
+        running: u32,
+        total: u32,
     },
 }

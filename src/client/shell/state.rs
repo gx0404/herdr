@@ -189,6 +189,15 @@ pub(super) struct ShellHitMap {
     pub(super) agent_max_scroll: usize,
     pub(super) agent_sort_toggle: Rect,
     pub(super) agent_group_toggles: Vec<(Rect, String)>,
+    /// 统一树节点的折叠开关：`(矩形, 端点, 折叠键)`。开关矩形落在行矩形之内，
+    /// 命中解析与点击分派都必须先查它。
+    pub(super) agent_tree_toggles: Vec<(Rect, ClientEndpointId, String)>,
+    /// agent 行下展开的活动节点行。
+    pub(super) agent_activity_rows: Vec<AgentActivityHit>,
+    /// 「外部」来源分组头：`(矩形, 端点, source)`。
+    pub(super) external_agent_groups: Vec<(Rect, ClientEndpointId, String)>,
+    /// 外部来源条目行：`(矩形, 端点, external_id)`。
+    pub(super) external_agents: Vec<(Rect, ClientEndpointId, String)>,
     pub(super) sidebar_divider: Rect,
     pub(super) sidebar_section_divider: Rect,
     pub(super) sidebar_toggle: Rect,
@@ -206,6 +215,9 @@ pub(super) struct ShellHitMap {
     pub(super) menu_search: Rect,
     pub(super) global_menu_rows: Vec<(Rect, usize)>,
     pub(super) context_menu_rows: Vec<(Rect, usize)>,
+    // seam-stub(menu)：子菜单行由波 2 菜单车道填充并消费后删除本 allow。
+    #[allow(dead_code)]
+    pub(super) context_submenu_rows: Vec<(Rect, usize)>,
     pub(super) notification_history_rows: Vec<(Rect, usize)>,
     pub(super) overlay_primary: Rect,
     pub(super) overlay_clear: Rect,
@@ -243,6 +255,15 @@ pub(super) struct ShellHitMap {
     pub(super) machine_files_rows: Vec<(Rect, usize)>,
     /// 查看器滚动上界的渲染期回写通道（HERDR-MACH-009），非查看器帧为 None。
     pub(super) machine_files_actions: Vec<(Rect, super::machine_files_overlay::MachineFilesButton)>,
+    /// 「Agent 活动」窗口的命中区：渲染输出经 `composition.rs` 回写，悬浮解析已在
+    /// `feedback.rs` 接好；内容区 / 滚动条由波 3 二级窗口车道填充并消费。
+    pub(super) agent_activity_popup: Rect,
+    pub(super) agent_activity_content: Rect,
+    pub(super) agent_activity_scrollbar: Rect,
+    pub(super) agent_activity_tree_rows: Vec<(Rect, String)>,
+    pub(super) agent_activity_scroll_metrics: Option<crate::pane::ScrollMetrics>,
+    pub(super) agent_activity_actions:
+        Vec<(Rect, super::agent_activity_overlay::AgentActivityButton)>,
     pub(super) snippet_popup: Rect,
     pub(super) snippet_search: Rect,
     pub(super) snippet_rows: Vec<(Rect, usize)>,
@@ -348,6 +369,15 @@ pub(super) enum ClientChromeDrag {
         last_sent_offset: Option<usize>,
         last_sent_at: Option<std::time::Instant>,
     },
+}
+
+/// agent 行下一条活动节点行的命中区。`owner_key` 是 `pane:<id>` / `ext:<id>`，
+/// 用字符串避免在悬浮目标里嵌套枚举。
+pub(super) struct AgentActivityHit {
+    pub(super) rect: Rect,
+    pub(super) endpoint_id: ClientEndpointId,
+    pub(super) owner_key: String,
+    pub(super) node_id: String,
 }
 
 pub(super) struct WorkspaceHit {
@@ -595,6 +625,7 @@ pub(super) enum ClientShellOverlayKind {
     Scenes,
     Broadcast,
     MachineFiles,
+    AgentActivity,
 }
 
 impl ClientShellOverlayKind {
@@ -622,6 +653,7 @@ impl ClientShellOverlayKind {
             Self::Scenes => "scenes",
             Self::Broadcast => "broadcast",
             Self::MachineFiles => "machine_files",
+            Self::AgentActivity => "agent_activity",
         }
     }
 
@@ -634,7 +666,7 @@ impl ClientShellOverlayKind {
             .find(|kind| kind.storage_key() == key || format!("{kind:?}") == key)
     }
 
-    const ALL: [Self; 20] = [
+    pub(super) const ALL: [Self; 21] = [
         Self::Onboarding,
         Self::ProductAnnouncement,
         Self::ReleaseNotes,
@@ -655,6 +687,7 @@ impl ClientShellOverlayKind {
         Self::Scenes,
         Self::Broadcast,
         Self::MachineFiles,
+        Self::AgentActivity,
     ];
 }
 
@@ -934,6 +967,12 @@ pub(super) enum ClientContextMenuAction {
     ToggleMachineEnabled,
     RemoveMachine,
     CopyMachineFixCommand,
+    FocusAgent,
+    ViewAgentActivity,
+    RenameAgent,
+    ShowAgentUsage,
+    BindAgentAccount,
+    CloseAgentPane,
 }
 
 #[derive(Debug)]
@@ -961,6 +1000,34 @@ pub(super) enum ClientContextMenuTarget {
         enabled: bool,
         online: bool,
     },
+    /// Agents 面板里某个 pane 的 agent 行。
+    Agent {
+        endpoint_id: ClientEndpointId,
+        pane_id: String,
+        // seam-stub(agent-panel)：重命名 / 关闭由波 2 面板车道接上后删除这两个 allow。
+        #[allow(dead_code)]
+        workspace_id: String,
+        /// 识别出的 agent 名；`None` 时不提供用量 / 绑定账号。
+        agent: Option<String>,
+        #[allow(dead_code)]
+        has_manual_name: bool,
+        has_activity: bool,
+    },
+    /// 不属于任何 pane 的外部来源条目。
+    ExternalAgent {
+        endpoint_id: ClientEndpointId,
+        external_id: String,
+    },
+}
+
+/// 右键菜单展开的子菜单：`parent` 是父菜单里的项下标。
+// seam-stub(menu)：由波 2 菜单车道构造并消费后删除本 allow。
+#[allow(dead_code)]
+#[derive(Debug)]
+pub(super) struct ClientContextSubmenu {
+    pub(super) parent: usize,
+    pub(super) highlighted: usize,
+    pub(super) hovered: Option<usize>,
 }
 
 #[derive(Debug)]
@@ -973,11 +1040,24 @@ pub(super) struct ClientContextMenuOverlay {
     /// 指针悬浮项：只由 `Moved` 改写，指针离开行区域即回到 None。与
     /// `highlighted` 分离后，「鼠标路过」不再劫持键盘选择（MENU-01）。
     pub(super) hovered: Option<usize>,
+    // seam-stub(menu)：子菜单由波 2 菜单车道打开并消费后删除本 allow。
+    #[allow(dead_code)]
+    pub(super) submenu: Option<ClientContextSubmenu>,
 }
 
 pub(super) struct ClientContextMenuItem {
     pub(super) label: &'static str,
     pub(super) action: ClientContextMenuAction,
+    /// 禁用项照常列出但不可激活。
+    pub(super) enabled: bool,
+    // seam-stub(menu)：以下三项供统一菜单组件消费，波 2 菜单车道用上后删除各自
+    // 的 allow。
+    #[allow(dead_code)]
+    pub(super) shortcut: Option<&'static str>,
+    #[allow(dead_code)]
+    pub(super) checked: Option<bool>,
+    #[allow(dead_code)]
+    pub(super) separator_before: bool,
 }
 
 #[derive(Debug)]
@@ -1009,6 +1089,7 @@ pub(super) enum ClientShellOverlay {
     Scenes(super::scenes_overlay::ClientScenesOverlay),
     Broadcast(super::broadcast::ClientBroadcastOverlay),
     MachineFiles(super::machine_files_overlay::ClientMachineFilesOverlay),
+    AgentActivity(super::agent_activity_overlay::ClientAgentActivityOverlay),
 }
 
 impl ClientShellOverlay {
@@ -1034,6 +1115,7 @@ impl ClientShellOverlay {
             Self::Scenes(_) => ClientShellOverlayKind::Scenes,
             Self::Broadcast(_) => ClientShellOverlayKind::Broadcast,
             Self::MachineFiles(_) => ClientShellOverlayKind::MachineFiles,
+            Self::AgentActivity(_) => ClientShellOverlayKind::AgentActivity,
         }
     }
 
@@ -1078,7 +1160,8 @@ impl ClientShellOverlay {
             | Self::Settings(_)
             | Self::MachineAuth(_)
             | Self::NotificationHistory(_)
-            | Self::Broadcast(_) => 0,
+            | Self::Broadcast(_)
+            | Self::AgentActivity(_) => 0,
         }
     }
 }
@@ -1179,6 +1262,13 @@ pub(super) enum PendingEndpointKind {
     /// snippet run but reports through the throttled broadcast notice.
     BroadcastSend {
         machine: String,
+    },
+    /// 「Agent 活动」窗口的 `agent.activity.read`；`epoch` 对不上的响应被丢弃。
+    // seam-stub(activity-window)：由波 3 二级窗口车道发出请求后删除本 allow。
+    #[allow(dead_code)]
+    AgentActivityRead {
+        epoch: u64,
+        node_id: Option<String>,
     },
 }
 
@@ -1441,11 +1531,27 @@ pub(crate) struct ClientShellState {
     /// agents 行缓存据此失效（PERF-02）。内容比较不可靠——会原地替换快照、也会
     /// 原地改写 agent 状态（确认表面时 Done → Idle，revision 不变）。
     ///
-    /// 当前写入点（新增写入点必须一起处理，`test_ui_hot_path_architecture` 有守门）：
+    /// 当前写入点（没有自动守门：新增写入点靠这份清单评审与
+    /// `federated_agent_rows_are_cached_between_frames_and_refresh_on_data_change`
+    /// 兜底）：
     /// `set_endpoint_catalog`、`set_endpoint_status`、`set_endpoint_snapshot`、
     /// `cache_endpoint_snapshot_with_surface`（生产快照路径）、
     /// `store_acknowledged_snapshot`（确认表面写回）、测试用 `set_snapshot`。
     pub(super) agent_rows_epoch: u64,
+    /// 折叠 / 展开集合（`collapsed_groups`、`remote_collapsed_groups`、
+    /// `collapsed_endpoints`）的代际：折叠态决定统一树的行序列，agents 行缓存据此
+    /// 失效。**每一处改写这三个集合的函数都要调 `bump_tree_collapse_epoch`**，
+    /// `test_ui_hot_path_architecture::test_collapse_state_writes_bump_tree_epoch`
+    /// 静态守门。
+    pub(super) tree_collapse_epoch: u64,
+    /// 不随快照 revision 变化的活动 / 外部来源数据的代际。活动树默认随快照
+    /// 下发、已被 `(revision, boot)` 覆盖，本字段恒为 0；为带外通道预留，启用者
+    /// 须给上述守门脚本加一条同形规则。
+    pub(super) agent_activity_epoch: u64,
+    /// 面板车道的私有状态（统一树）。
+    // seam-stub(agent-panel)：波 2 面板车道读写后删除本 allow。
+    #[allow(dead_code)]
+    pub(super) agent_tree: super::agent_tree::AgentTreeState,
     /// 在途的片段运行，按 run id 索引：并发运行互不覆盖（TOOL-06）。
     pub(super) snippet_runs: HashMap<u64, super::snippets_overlay::ClientSnippetRunState>,
     /// 下一个 run id（单调递增，跨运行不重复）。
@@ -1677,6 +1783,9 @@ impl ClientShellState {
             federated_agent_rows: None,
             config_epoch: 0,
             agent_rows_epoch: 0,
+            tree_collapse_epoch: 0,
+            agent_activity_epoch: 0,
+            agent_tree: Default::default(),
             snippet_runs: HashMap::new(),
             next_snippet_run_id: 0,
             broadcast: crate::client::endpoint::BroadcastSet::load().unwrap_or_default(),
@@ -1820,6 +1929,13 @@ impl ClientShellState {
         if !groups.remove(&key) {
             groups.insert(key);
         }
+        self.bump_tree_collapse_epoch();
+    }
+
+    /// 折叠 / 展开集合变了：agents 行缓存的键随之变化。改写 `collapsed_groups`、
+    /// `remote_collapsed_groups`、`collapsed_endpoints` 的函数都必须调它。
+    pub(super) fn bump_tree_collapse_epoch(&mut self) {
+        self.tree_collapse_epoch = self.tree_collapse_epoch.saturating_add(1);
     }
 
     pub(super) fn navigation_workspace_entries(

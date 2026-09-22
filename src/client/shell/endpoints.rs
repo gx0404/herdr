@@ -16,7 +16,6 @@ pub(crate) struct ClientShellEndpoint {
     pub(crate) snapshot: Option<Box<ClientShellSnapshot>>,
     /// Connection generation that produced `snapshot`. `None` is reserved for local tests.
     pub(crate) snapshot_generation: Option<u64>,
-    pub(crate) agent_recency: HashMap<String, u64>,
     pub(super) agent_presentation: super::endpoint_agent_state::EndpointAgentPresentation,
     pub(crate) agent_view_projection: Option<ClientEndpointAgentViewProjection>,
     pending_agent_view_projection: Option<ClientEndpointAgentViewProjection>,
@@ -96,9 +95,6 @@ impl ClientShellState {
                 ),
                 snapshot: previous.and_then(|endpoint| endpoint.snapshot.clone()),
                 snapshot_generation: previous.and_then(|endpoint| endpoint.snapshot_generation),
-                agent_recency: previous
-                    .map(|endpoint| endpoint.agent_recency.clone())
-                    .unwrap_or_default(),
                 agent_presentation: previous
                     .map(|endpoint| endpoint.agent_presentation.clone())
                     .unwrap_or_default(),
@@ -124,6 +120,9 @@ impl ClientShellState {
             next.iter()
                 .any(|endpoint| &endpoint.endpoint_id == endpoint_id)
         });
+        // 本函数开头已递增 `agent_rows_epoch`；这里仍显式递增折叠代际，让
+        // 「折叠写入点必须 bump」的静态守门没有例外。
+        self.bump_tree_collapse_epoch();
         self.endpoints = next;
     }
 
@@ -150,7 +149,6 @@ impl ClientShellState {
             endpoint.snapshot = None;
             endpoint.snapshot_generation = None;
             endpoint.methods = None;
-            endpoint.agent_recency.clear();
             endpoint.agent_presentation = Default::default();
             endpoint.agent_view_projection = None;
             endpoint.pending_agent_view_projection = None;
@@ -761,39 +759,7 @@ impl ClientShellState {
         // 端点快照换代：联邦 agents 行缓存（PERF-02）据此失效。这是**生产**
         // 快照写入路径，别在别处直接改 `endpoint.snapshot`（独立复审 中-1）。
         self.agent_rows_epoch = self.agent_rows_epoch.saturating_add(1);
-        let previous = self.endpoints[index].snapshot.as_deref();
-        let mut next_recency = self
-            .endpoints
-            .iter()
-            .flat_map(|endpoint| endpoint.agent_recency.values())
-            .copied()
-            .max()
-            .unwrap_or_default();
-        let mut agents = snapshot.agents.iter().collect::<Vec<_>>();
-        agents.sort_by_key(|agent| agent.state_change_seq);
-        let mut recency = self.endpoints[index].agent_recency.clone();
-        for agent in agents {
-            let changed = previous
-                .and_then(|snapshot| {
-                    snapshot
-                        .agents
-                        .iter()
-                        .find(|previous| previous.pane_id == agent.pane_id)
-                })
-                .is_none_or(|previous| previous.state_change_seq != agent.state_change_seq);
-            if changed {
-                next_recency = next_recency.saturating_add(1);
-                recency.insert(agent.pane_id.clone(), next_recency);
-            }
-        }
-        recency.retain(|pane_id, _| {
-            snapshot
-                .agents
-                .iter()
-                .any(|agent| &agent.pane_id == pane_id)
-        });
         let endpoint = &mut self.endpoints[index];
-        endpoint.agent_recency = recency;
         endpoint.snapshot_generation = generation;
         endpoint.snapshot = Some(snapshot);
         let pending_matches =
@@ -946,7 +912,6 @@ pub(super) fn local_endpoint() -> ClientShellEndpoint {
         status: ClientEndpointStatus::Online,
         snapshot: None,
         snapshot_generation: None,
-        agent_recency: HashMap::new(),
         agent_presentation: Default::default(),
         agent_view_projection: None,
         pending_agent_view_projection: None,

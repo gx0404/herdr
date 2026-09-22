@@ -117,7 +117,9 @@ impl ClientShellState {
             None => 0,
         };
         let target = targets.swap_remove(next);
-        self.collapsed_endpoints.remove(&target.endpoint_id);
+        if self.collapsed_endpoints.remove(&target.endpoint_id) {
+            self.bump_tree_collapse_epoch();
+        }
         if self.endpoints.len() == 1 && !mobile {
             self.reveal_workspace(&target.workspace_id);
         }

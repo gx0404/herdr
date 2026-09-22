@@ -67,19 +67,11 @@ pub(crate) fn apply_agent_view(app: &AppState, entries: &mut Vec<AgentPanelEntry
         }
     }
 
-    if matches!(
-        app.agent_panel_sort,
-        crate::app::state::AgentPanelSort::Priority
-    ) {
-        entries.sort_by_key(|entry| {
-            (
-                std::cmp::Reverse(super::api_helpers::tab_attention_priority(
-                    entry.state,
-                    entry.seen,
-                )),
-                std::cmp::Reverse(entry.last_agent_state_change_seq),
-            )
-        });
+    match app.agent_panel_sort {
+        crate::app::state::AgentPanelSort::Spaces => {}
+        // seam-stub(activity-schema)：`launch_seq` 由波 1 活动树 schema 车道在
+        // server 侧分配后，这里按它稳定排序；在此之前保持 workspace 顺序。
+        crate::app::state::AgentPanelSort::Launch => {}
     }
 }
 

@@ -464,7 +464,6 @@ pub struct SidebarTexts {
     pub wt_root: &'static str,
     pub wt_prunable: &'static str,
     pub sort_grouped: &'static str,
-    pub sort_priority: &'static str,
     pub no_matching_agents: &'static str,
 }
 
@@ -1040,6 +1039,94 @@ pub struct ScenesTexts {
     pub restore_missing_fmt: &'static str, // args: names
     pub restore_offline_fmt: &'static str, // args: label
     pub load_failed_fmt: &'static str,     // args: error
+}
+
+/// Agents 面板（统一树）与 agent 行右键菜单的文案。
+/// `*_fmt` entries are `fill` templates; placeholders are documented inline.
+// seam-stub(agent-panel)：接缝预落的文案，字段暂无读者；对应车道用上后删除本 allow。
+#[allow(dead_code)]
+pub struct AgentPanelTexts {
+    pub sort_launch: &'static str,
+    pub external_group: &'static str,
+    pub external_unreadable: &'static str,
+    pub activity_badge_fmt: &'static str, // args: n
+    pub activity_more_fmt: &'static str,  // args: n
+    pub menu_focus: &'static str,
+    pub menu_view_activity: &'static str,
+    pub menu_rename: &'static str,
+    pub menu_usage: &'static str,
+    pub menu_bind_account: &'static str,
+    pub menu_close: &'static str,
+}
+
+/// 「Agent 活动」二级窗口的文案；节点种类 / 状态的标签 Agents 面板也读。
+/// `*_fmt` entries are `fill` templates; placeholders are documented inline.
+// seam-stub(activity-window)：接缝预落的文案，字段暂无读者；对应车道用上后删除本 allow。
+#[allow(dead_code)]
+pub struct AgentActivityTexts {
+    pub title_fmt: &'static str, // args: name
+    pub tree_title: &'static str,
+    pub content_title: &'static str,
+    pub empty_tree: &'static str,
+    pub empty_content: &'static str,
+    pub loading: &'static str,
+    pub read_failed_fmt: &'static str, // args: error
+    pub unsupported: &'static str,
+    pub external_read_only: &'static str,
+    pub truncated: &'static str,
+    pub follow_on: &'static str,
+    pub follow_off: &'static str,
+    pub hint_select: &'static str,
+    pub hint_follow: &'static str,
+    pub hint_close: &'static str,
+    pub kind_subagent: &'static str,
+    pub kind_task: &'static str,
+    pub kind_todo: &'static str,
+    pub kind_background: &'static str,
+    pub kind_unknown: &'static str,
+    pub status_pending: &'static str,
+    pub status_running: &'static str,
+    pub status_blocked: &'static str,
+    pub status_done: &'static str,
+    pub status_failed: &'static str,
+    pub status_unknown: &'static str,
+}
+
+/// 统一菜单组件（全局菜单 / 右键菜单 / 子菜单）新增的文案。
+/// `*_fmt` entries are `fill` templates; placeholders are documented inline.
+// seam-stub(menu)：接缝预落的文案，字段暂无读者；对应车道用上后删除本 allow。
+#[allow(dead_code)]
+pub struct MenuTexts {
+    pub arrange_layout: &'static str,
+    pub arrange_hint: &'static str,
+    pub unavailable_suffix: &'static str,
+    pub submenu_machine: &'static str,
+    pub submenu_view: &'static str,
+}
+
+/// 机器表单（快速添加、分组、预览、连接测试与校验）的文案。
+/// `*_fmt` entries are `fill` templates; placeholders are documented inline.
+// seam-stub(machines)：接缝预落的文案，字段暂无读者；对应车道用上后删除本 allow。
+#[allow(dead_code)]
+pub struct MachineFormTexts {
+    pub quick_label: &'static str,
+    pub quick_placeholder: &'static str,
+    pub quick_parsed_fmt: &'static str, // args: n
+    pub quick_parse_failed: &'static str,
+    pub group_connection: &'static str,
+    pub group_auth: &'static str,
+    pub group_session: &'static str,
+    pub group_advanced: &'static str,
+    pub preview_title: &'static str,
+    pub test_connection: &'static str,
+    pub test_running: &'static str,
+    pub test_passed: &'static str,
+    pub test_failed_fmt: &'static str, // args: step
+    pub err_required: &'static str,
+    pub err_port: &'static str,
+    pub err_host: &'static str,
+    pub err_duplicate_name: &'static str,
+    pub import_select_hint: &'static str,
 }
 
 /// Help/about strings for the clap CLI surface. Option and subcommand
@@ -1797,6 +1884,16 @@ pub struct Texts {
     pub scenes: ScenesTexts,
     pub broadcast: BroadcastTexts,
     pub machine_files: MachineFilesTexts,
+    pub agent_panel: AgentPanelTexts,
+    // seam-stub(activity-window)：二级窗口车道用上后删除本 allow。
+    #[allow(dead_code)]
+    pub agent_activity: AgentActivityTexts,
+    // seam-stub(menu)：菜单车道用上后删除本 allow。
+    #[allow(dead_code)]
+    pub menu: MenuTexts,
+    // seam-stub(machines)：机器车道用上后删除本 allow。
+    #[allow(dead_code)]
+    pub machine_form: MachineFormTexts,
     pub cli_help: CliHelpTexts,
     pub cli_output: CliOutputTexts,
     pub cli_errors: CliErrorTexts,

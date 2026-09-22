@@ -723,6 +723,35 @@
                 "layout"
               ],
               "type": "object"
+            },
+            {
+              "description": "某 pane 的 agent 活动树变了。只带计数；节点经 `agent.get` /\n`agent.activity.read` 取。",
+              "properties": {
+                "pane_id": {
+                  "type": "string"
+                },
+                "running": {
+                  "format": "uint32",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "total": {
+                  "format": "uint32",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "type": {
+                  "const": "pane_agent_activity_changed",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "pane_id",
+                "running",
+                "total"
+              ],
+              "type": "object"
             }
           ]
         },
@@ -753,7 +782,8 @@
             "pane_exited",
             "pane_agent_detected",
             "pane_agent_status_changed",
-            "layout_updated"
+            "layout_updated",
+            "pane_agent_activity_changed"
           ],
           "type": "string"
         },
@@ -2230,6 +2260,49 @@
             "observed_at_ms",
             "metrics"
           ],
+          "type": "object"
+        },
+        "AgentActivityReadParams": {
+          "description": "`agent.activity.read` 的参数。`pane_id` / `external_id` 恰给其一，否则\n`invalid_params`；`node_id` 为空只回活动树。",
+          "properties": {
+            "cursor": {
+              "description": "上一次响应的 `next_cursor`；对调用方不透明。",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "external_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "follow": {
+              "description": "为真时从末尾开始读并在后续调用中跟随增长。",
+              "type": "boolean"
+            },
+            "max_bytes": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "node_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "pane_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
           "type": "object"
         },
         "AgentPromptParams": {
@@ -4084,6 +4157,47 @@
           ],
           "type": "object"
         },
+        "PaneReportAgentActivityParams": {
+          "description": "钩子上报「该 pane 的 agent 活动可能变了」的提示：server 据此刷新活动树，\n提示本身不携带树内容。",
+          "properties": {
+            "agent": {
+              "type": "string"
+            },
+            "hint": {
+              "description": "触发提示的钩子事件名等自由文本，仅用于诊断与刷新策略。",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "node_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "pane_id": {
+              "type": "string"
+            },
+            "seq": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "source": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "pane_id",
+            "source",
+            "agent"
+          ],
+          "type": "object"
+        },
         "PaneReportAgentParams": {
           "properties": {
             "agent": {
@@ -5529,6 +5643,19 @@
               "properties": {
                 "type": {
                   "const": "layout.updated",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type"
+              ],
+              "type": "object"
+            },
+            {
+              "description": "无参：订阅者按事件里的 `pane_id` 自行过滤（投递侧不按 pane 过滤，宣告了\n承重参数却不生效才是问题）。",
+              "properties": {
+                "type": {
+                  "const": "pane.agent_activity_changed",
                   "type": "string"
                 }
               },
@@ -7177,6 +7304,38 @@
         {
           "properties": {
             "method": {
+              "const": "agent.activity.read",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/AgentActivityReadParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "agent.external.list",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/EmptyParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
               "const": "pane.split",
               "type": "string"
             },
@@ -7806,6 +7965,22 @@
             },
             "params": {
               "$ref": "#/schemas/request/$defs/PaneReportAgentSessionParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "pane.report_agent_activity",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/PaneReportAgentActivityParams"
             }
           },
           "required": [
@@ -8864,6 +9039,35 @@
                 "layout"
               ],
               "type": "object"
+            },
+            {
+              "description": "某 pane 的 agent 活动树变了。只带计数；节点经 `agent.get` /\n`agent.activity.read` 取。",
+              "properties": {
+                "pane_id": {
+                  "type": "string"
+                },
+                "running": {
+                  "format": "uint32",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "total": {
+                  "format": "uint32",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "type": {
+                  "const": "pane_agent_activity_changed",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "pane_id",
+                "running",
+                "total"
+              ],
+              "type": "object"
             }
           ]
         },
@@ -8894,7 +9098,8 @@
             "pane_exited",
             "pane_agent_detected",
             "pane_agent_status_changed",
-            "layout_updated"
+            "layout_updated",
+            "pane_agent_activity_changed"
           ],
           "type": "string"
         },
@@ -9665,8 +9870,148 @@
           ],
           "type": "object"
         },
+        "AgentActivityContent": {
+          "description": "一个活动节点的内容片段。",
+          "properties": {
+            "eof": {
+              "default": false,
+              "type": "boolean"
+            },
+            "format": {
+              "$ref": "#/schemas/success_response/$defs/AgentActivityContentFormat",
+              "default": "unknown"
+            },
+            "next_cursor": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "node_id": {
+              "type": "string"
+            },
+            "text": {
+              "default": "",
+              "type": "string"
+            },
+            "truncated": {
+              "default": false,
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "node_id"
+          ],
+          "type": "object"
+        },
+        "AgentActivityContentFormat": {
+          "description": "活动节点内容片段的格式。未知字符串落 `Unknown`。",
+          "enum": [
+            "text",
+            "markdown",
+            "jsonl",
+            "unknown"
+          ],
+          "type": "string"
+        },
+        "AgentActivityKind": {
+          "description": "活动树节点的种类。未知字符串落 `Unknown`，旧客户端可安全忽略新种类。",
+          "enum": [
+            "subagent",
+            "task",
+            "todo",
+            "background",
+            "unknown"
+          ],
+          "type": "string"
+        },
+        "AgentActivityNode": {
+          "description": "agent 活动树的一个节点。`AgentInfo` 派生 `Eq`，这里不得出现浮点；时间一律\n用毫秒时间戳。",
+          "properties": {
+            "agent_type": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "content_ref": {
+              "description": "可经 `agent.activity.read` 读取内容时给出；对调用方不透明。",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "ended_at_ms": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "id": {
+              "description": "同一 owner（pane 或外部条目）内唯一。",
+              "type": "string"
+            },
+            "kind": {
+              "$ref": "#/schemas/success_response/$defs/AgentActivityKind",
+              "default": "unknown"
+            },
+            "label": {
+              "default": "",
+              "type": "string"
+            },
+            "parent_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "started_at_ms": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "status": {
+              "$ref": "#/schemas/success_response/$defs/AgentActivityStatus",
+              "default": "unknown"
+            },
+            "summary": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "id"
+          ],
+          "type": "object"
+        },
+        "AgentActivityStatus": {
+          "description": "活动树节点的状态。未知字符串落 `Unknown`。",
+          "enum": [
+            "pending",
+            "running",
+            "blocked",
+            "done",
+            "failed",
+            "unknown"
+          ],
+          "type": "string"
+        },
         "AgentInfo": {
           "properties": {
+            "activity": {
+              "description": "该 agent 的活动树（子 agent / 任务 / 待办 / 后台进程）；没有活动时省略。",
+              "items": {
+                "$ref": "#/schemas/success_response/$defs/AgentActivityNode"
+              },
+              "type": "array"
+            },
             "agent": {
               "type": [
                 "string",
@@ -10662,6 +11007,35 @@
                 "layout"
               ],
               "type": "object"
+            },
+            {
+              "description": "某 pane 的 agent 活动树变了。只带计数；节点经 `agent.get` /\n`agent.activity.read` 取。",
+              "properties": {
+                "pane_id": {
+                  "type": "string"
+                },
+                "running": {
+                  "format": "uint32",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "total": {
+                  "format": "uint32",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "type": {
+                  "const": "pane_agent_activity_changed",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "pane_id",
+                "running",
+                "total"
+              ],
+              "type": "object"
             }
           ]
         },
@@ -10707,9 +11081,66 @@
             "pane_exited",
             "pane_agent_detected",
             "pane_agent_status_changed",
-            "layout_updated"
+            "layout_updated",
+            "pane_agent_activity_changed"
           ],
           "type": "string"
+        },
+        "ExternalAgentInfo": {
+          "description": "不属于任何 pane 的外部来源条目。`AgentInfo` 的 terminal_id / workspace_id /\ntab_id / pane_id 均为必填，外部条目不能复用它。",
+          "properties": {
+            "activity": {
+              "items": {
+                "$ref": "#/schemas/success_response/$defs/AgentActivityNode"
+              },
+              "type": "array"
+            },
+            "agent": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "agent_status": {
+              "$ref": "#/schemas/success_response/$defs/AgentStatus"
+            },
+            "cwd": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "external_id": {
+              "description": "`<source>:<来源内会话 id>`。",
+              "type": "string"
+            },
+            "label": {
+              "default": "",
+              "type": "string"
+            },
+            "readable": {
+              "default": true,
+              "description": "false = 来源暂不可读（数据库被锁、格式未识别等）。",
+              "type": "boolean"
+            },
+            "source": {
+              "type": "string"
+            },
+            "updated_at_ms": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "external_id",
+            "source",
+            "agent_status"
+          ],
+          "type": "object"
         },
         "FrozenCell": {
           "properties": {
@@ -13390,6 +13821,56 @@
                 },
                 "type": {
                   "const": "agent_list",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "agents"
+              ],
+              "type": "object"
+            },
+            {
+              "description": "`agent.activity.read`：活动树，以及请求了 `node_id` 时该节点的内容片段。",
+              "properties": {
+                "content": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/schemas/success_response/$defs/AgentActivityContent"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "nodes": {
+                  "items": {
+                    "$ref": "#/schemas/success_response/$defs/AgentActivityNode"
+                  },
+                  "type": "array"
+                },
+                "type": {
+                  "const": "agent_activity",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "nodes"
+              ],
+              "type": "object"
+            },
+            {
+              "description": "`agent.external.list`：不属于任何 pane 的外部来源条目。",
+              "properties": {
+                "agents": {
+                  "items": {
+                    "$ref": "#/schemas/success_response/$defs/ExternalAgentInfo"
+                  },
+                  "type": "array"
+                },
+                "type": {
+                  "const": "external_agent_list",
                   "type": "string"
                 }
               },

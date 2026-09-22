@@ -170,6 +170,18 @@ pub(super) enum ChromeHover {
     MachineFilesButton(super::machine_files_overlay::MachineFilesButton),
     LifecycleBannerRetry,
     LifecycleBannerGiveUp,
+    /// 统一树节点的折叠开关：`(端点, 折叠键)`。
+    AgentTreeToggle(ClientEndpointId, String),
+    /// agent 行下的活动节点行：`(端点, owner_key, node_id)`；`owner_key` 是
+    /// `pane:<id>` / `ext:<id>`，用字符串避免枚举嵌套。
+    AgentActivityRow(ClientEndpointId, String, String),
+    /// 「外部」来源分组头：`(端点, source)`。
+    ExternalAgentGroup(ClientEndpointId, String),
+    /// 外部来源条目行：`(端点, external_id)`。
+    ExternalAgentRow(ClientEndpointId, String),
+    /// 「Agent 活动」窗口左列的树行（节点 id）。
+    AgentActivityNode(String),
+    AgentActivityButton(super::agent_activity_overlay::AgentActivityButton),
 }
 
 /// Resolved render context for client chrome: palette, component tokens,
@@ -566,19 +578,59 @@ impl ClientShellState {
                 .machines
                 .iter()
                 .any(|hit| &hit.endpoint_id == endpoint_id && super::contains(hit.rect, point)),
-            ChromeHover::AgentRow(pane_id) => hits
-                .agents
-                .iter()
-                .any(|(rect, id)| id == pane_id && super::contains(*rect, point)),
+            // 折叠开关落在行矩形之内：指针移到开关上时行悬浮必须让位。
+            ChromeHover::AgentRow(pane_id) => {
+                !on_agent_tree_toggle(hits, point)
+                    && hits
+                        .agents
+                        .iter()
+                        .any(|(rect, id)| id == pane_id && super::contains(*rect, point))
+            }
             ChromeHover::AgentGroupRow(key) => hits
                 .agent_group_toggles
                 .iter()
                 .any(|(rect, id)| id == key && super::contains(*rect, point)),
             ChromeHover::EndpointAgentRow(endpoint_id, pane_id) => {
-                hits.endpoint_agents.iter().any(|(rect, id, pane)| {
-                    id == endpoint_id && pane == pane_id && super::contains(*rect, point)
+                !on_agent_tree_toggle(hits, point)
+                    && hits.endpoint_agents.iter().any(|(rect, id, pane)| {
+                        id == endpoint_id && pane == pane_id && super::contains(*rect, point)
+                    })
+            }
+            ChromeHover::AgentTreeToggle(endpoint_id, key) => {
+                hits.agent_tree_toggles.iter().any(|(rect, id, toggle)| {
+                    id == endpoint_id && toggle == key && super::contains(*rect, point)
                 })
             }
+            ChromeHover::AgentActivityRow(endpoint_id, owner_key, node_id) => {
+                !on_agent_tree_toggle(hits, point)
+                    && hits.agent_activity_rows.iter().any(|hit| {
+                        &hit.endpoint_id == endpoint_id
+                            && &hit.owner_key == owner_key
+                            && &hit.node_id == node_id
+                            && super::contains(hit.rect, point)
+                    })
+            }
+            ChromeHover::ExternalAgentGroup(endpoint_id, source) => {
+                hits.external_agent_groups.iter().any(|(rect, id, group)| {
+                    id == endpoint_id && group == source && super::contains(*rect, point)
+                })
+            }
+            ChromeHover::ExternalAgentRow(endpoint_id, external_id) => {
+                !on_agent_tree_toggle(hits, point)
+                    && hits.external_agents.iter().any(|(rect, id, external)| {
+                        id == endpoint_id
+                            && external == external_id
+                            && super::contains(*rect, point)
+                    })
+            }
+            ChromeHover::AgentActivityNode(node_id) => hits
+                .agent_activity_tree_rows
+                .iter()
+                .any(|(rect, id)| id == node_id && super::contains(*rect, point)),
+            ChromeHover::AgentActivityButton(button) => hits
+                .agent_activity_actions
+                .iter()
+                .any(|(rect, candidate)| candidate == button && super::contains(*rect, point)),
             ChromeHover::Tab(tab_id) => hits
                 .tabs
                 .iter()
@@ -708,6 +760,20 @@ impl ClientShellState {
             {
                 return Some(ChromeHover::MachineFilesButton(*button));
             }
+            if let Some((_, button)) = hits
+                .agent_activity_actions
+                .iter()
+                .find(|(rect, _)| super::contains(*rect, point))
+            {
+                return Some(ChromeHover::AgentActivityButton(*button));
+            }
+            if let Some((_, node_id)) = hits
+                .agent_activity_tree_rows
+                .iter()
+                .find(|(rect, _)| super::contains(*rect, point))
+            {
+                return Some(ChromeHover::AgentActivityNode(node_id.clone()));
+            }
             if thumb_contains(hits.help_scrollbar, hits.help_scroll_metrics, point) {
                 return Some(ChromeHover::HelpScrollbarThumb);
             }
@@ -774,6 +840,16 @@ impl ClientShellState {
                 });
             }
         }
+        // 折叠开关的矩形落在行矩形之内：必须排在 agents / endpoint_agents /
+        // agent_activity_rows / external_agents 之前。
+        for (rect, endpoint_id, key) in &hits.agent_tree_toggles {
+            if super::contains(*rect, point) {
+                return Some(ChromeHover::AgentTreeToggle(
+                    endpoint_id.clone(),
+                    key.clone(),
+                ));
+            }
+        }
         for (rect, pane_id) in &hits.agents {
             if super::contains(*rect, point) {
                 return Some(ChromeHover::AgentRow(pane_id.clone()));
@@ -789,6 +865,31 @@ impl ClientShellState {
                 return Some(ChromeHover::EndpointAgentRow(
                     endpoint_id.clone(),
                     pane_id.clone(),
+                ));
+            }
+        }
+        for hit in &hits.agent_activity_rows {
+            if super::contains(hit.rect, point) {
+                return Some(ChromeHover::AgentActivityRow(
+                    hit.endpoint_id.clone(),
+                    hit.owner_key.clone(),
+                    hit.node_id.clone(),
+                ));
+            }
+        }
+        for (rect, endpoint_id, source) in &hits.external_agent_groups {
+            if super::contains(*rect, point) {
+                return Some(ChromeHover::ExternalAgentGroup(
+                    endpoint_id.clone(),
+                    source.clone(),
+                ));
+            }
+        }
+        for (rect, endpoint_id, external_id) in &hits.external_agents {
+            if super::contains(*rect, point) {
+                return Some(ChromeHover::ExternalAgentRow(
+                    endpoint_id.clone(),
+                    external_id.clone(),
                 ));
             }
         }
@@ -819,6 +920,14 @@ impl ClientShellState {
         }
         None
     }
+}
+
+/// 指针是否落在某个树节点折叠开关上。开关矩形在行矩形之内，行类悬浮目标的
+/// 复核要先排除它，否则指针从行移到开关上时悬浮不会切换。
+fn on_agent_tree_toggle(hits: &ShellHitMap, point: (u16, u16)) -> bool {
+    hits.agent_tree_toggles
+        .iter()
+        .any(|(rect, _, _)| super::contains(*rect, point))
 }
 
 /// chrome 悬浮区的分组包围盒：侧栏、顶栏（标签条 / 全局入口）、横幅。
@@ -879,6 +988,20 @@ impl ShellHitMap {
             extend(&mut sidebar, *rect);
         }
         for (rect, _, _) in &self.endpoint_agents {
+            extend(&mut sidebar, *rect);
+        }
+        // 统一树的新命中向量全部并进侧栏组：否则包围盒早退（HERDR-PERF-008）会
+        // 让这些行收不到悬浮。
+        for (rect, _, _) in &self.agent_tree_toggles {
+            extend(&mut sidebar, *rect);
+        }
+        for hit in &self.agent_activity_rows {
+            extend(&mut sidebar, hit.rect);
+        }
+        for (rect, _, _) in &self.external_agent_groups {
+            extend(&mut sidebar, *rect);
+        }
+        for (rect, _, _) in &self.external_agents {
             extend(&mut sidebar, *rect);
         }
         extend(&mut sidebar, self.workspace_scrollbar);

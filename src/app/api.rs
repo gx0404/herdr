@@ -932,7 +932,9 @@ impl App {
             | Method::AccountUsageUnsubscribe(_)
             | Method::AccountUsageReport(_)
             | Method::AccountBindingSet(_)
-            | Method::ClientViewsSet(_) => {
+            | Method::ClientViewsSet(_)
+            | Method::AgentActivityRead(_)
+            | Method::AgentExternalList(_) => {
                 return responses::encode_error(
                     request.id,
                     "server_context_required",
@@ -1217,6 +1219,9 @@ impl App {
             }
             Method::PaneReportAgentSession(params) => {
                 return self.handle_pane_report_agent_session(request.id, params);
+            }
+            Method::PaneReportAgentActivity(params) => {
+                return self.handle_pane_report_agent_activity(request.id, params);
             }
             Method::PaneReportMetadata(params) => {
                 return self.handle_pane_report_metadata(request.id, params);

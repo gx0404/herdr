@@ -542,6 +542,4 @@ pub(super) fn put_text(buffer: &mut Buffer, x: u16, y: u16, width: u16, text: &s
     buffer.set_stringn(x, y, text, width as usize, style);
 }
 
-pub(super) fn display_width(text: &str) -> u16 {
-    UnicodeWidthStr::width(text).min(u16::MAX as usize) as u16
-}
+pub(super) use crate::ui::display_width_u16 as display_width;

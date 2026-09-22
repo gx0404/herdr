@@ -980,6 +980,12 @@ impl ClientShellState {
                 self.hits.machine_files_search = rendered.machine_files_search;
                 self.hits.machine_files_rows = rendered.machine_files_rows;
                 self.hits.machine_files_actions = rendered.machine_files_actions;
+                self.hits.agent_activity_popup = rendered.agent_activity_popup;
+                self.hits.agent_activity_content = rendered.agent_activity_content;
+                self.hits.agent_activity_scrollbar = rendered.agent_activity_scrollbar;
+                self.hits.agent_activity_tree_rows = rendered.agent_activity_tree_rows;
+                self.hits.agent_activity_scroll_metrics = rendered.agent_activity_scroll_metrics;
+                self.hits.agent_activity_actions = rendered.agent_activity_actions;
                 self.hits.snippet_popup = rendered.snippet_popup;
                 self.hits.snippet_search = rendered.snippet_search;
                 self.hits.snippet_rows = rendered.snippet_rows;

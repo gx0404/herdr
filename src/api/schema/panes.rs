@@ -475,6 +475,22 @@ pub struct PaneReportAgentSessionParams {
     pub session_start_source: Option<String>,
 }
 
+/// 钩子上报「该 pane 的 agent 活动可能变了」的提示：server 据此刷新活动树，
+/// 提示本身不携带树内容。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct PaneReportAgentActivityParams {
+    pub pane_id: String,
+    pub source: String,
+    pub agent: String,
+    /// 触发提示的钩子事件名等自由文本，仅用于诊断与刷新策略。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hint: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub node_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seq: Option<u64>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct PaneReportMetadataParams {
     pub pane_id: String,

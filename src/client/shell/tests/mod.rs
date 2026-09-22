@@ -64,6 +64,7 @@ pub(super) fn snapshot() -> ClientShellSnapshot {
         }],
         agents: Vec::new(),
         commands: Vec::new(),
+        external_agents: Vec::new(),
     }
 }
 
@@ -287,6 +288,7 @@ pub(super) fn palette_overlay(
 }
 
 mod agent_panel_characterization;
+mod agent_tree_seam;
 mod agents_worktrees_notifications;
 mod broadcast;
 mod chrome_context;

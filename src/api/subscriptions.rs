@@ -221,6 +221,9 @@ impl ActiveSubscription {
                 Ok(event_subscription(EventKind::PaneAgentDetected))
             }
             Subscription::LayoutUpdated {} => Ok(event_subscription(EventKind::LayoutUpdated)),
+            Subscription::PaneAgentActivityChanged {} => {
+                Ok(event_subscription(EventKind::PaneAgentActivityChanged))
+            }
             Subscription::PaneOutputMatched {
                 pane_id,
                 source,
@@ -1184,6 +1187,35 @@ mod tests {
         assert!(
             poll_subscriptions_round(&mut subscriptions, &api_tx, &event_hub, true).is_empty(),
             "无新事件时本轮为空"
+        );
+    }
+
+    /// `pane.agent_activity_changed` 是无参订阅：走通用事件投递，订阅者按事件里的
+    /// `pane_id` 自行过滤。
+    #[test]
+    fn agent_activity_subscription_registers_as_a_plain_event_subscription() {
+        let event_hub = EventHub::default();
+        let (api_tx, _api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let subscription = ActiveSubscription::new(
+            Subscription::PaneAgentActivityChanged {},
+            "test",
+            0,
+            &api_tx,
+            &event_hub,
+            event_hub.current_sequence(),
+        )
+        .expect("agent activity subscription");
+
+        assert!(matches!(
+            subscription,
+            ActiveSubscription::Event(ActiveEventSubscription {
+                event_kind: EventKind::PaneAgentActivityChanged,
+                ..
+            })
+        ));
+        assert_eq!(
+            serde_json::from_str::<Subscription>(r#"{"type":"pane.agent_activity_changed"}"#).ok(),
+            Some(Subscription::PaneAgentActivityChanged {}),
         );
     }
 

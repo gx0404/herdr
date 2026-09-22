@@ -48,6 +48,13 @@ pub(crate) struct OverlayRender {
     pub(crate) machine_files_search: Rect,
     pub(crate) machine_files_rows: Vec<(Rect, usize)>,
     pub(crate) machine_files_actions: Vec<(Rect, super::machine_files_overlay::MachineFilesButton)>,
+    pub(crate) agent_activity_popup: Rect,
+    pub(crate) agent_activity_content: Rect,
+    pub(crate) agent_activity_scrollbar: Rect,
+    pub(crate) agent_activity_tree_rows: Vec<(Rect, String)>,
+    pub(crate) agent_activity_scroll_metrics: Option<crate::pane::ScrollMetrics>,
+    pub(crate) agent_activity_actions:
+        Vec<(Rect, super::agent_activity_overlay::AgentActivityButton)>,
     ///（HERDR-MACH-009）。非查看器视图时为 None。
     pub(crate) snippet_popup: Rect,
     pub(crate) snippet_search: Rect,
@@ -194,6 +201,9 @@ pub(crate) fn render_client_overlay(
         ClientShellOverlay::CommandPalette(v) => {
             super::command_palette::render_command_palette(b, v, cx)
         }
+        ClientShellOverlay::AgentActivity(v) => {
+            super::agent_activity_overlay::render_agent_activity_overlay(b, v, endpoints, cx)
+        }
         ClientShellOverlay::ContextMenu(_) => None,
     }
 }
@@ -262,6 +272,11 @@ pub(crate) fn render_context_menu(
             index == menu.highlighted,
             menu.hovered == Some(index),
         );
+        let style = if item.enabled {
+            style
+        } else {
+            style.fg(palette.overlay0)
+        };
         buffer.set_style(row, style);
         put_text(buffer, row.x, row.y, row.width, item.label, style);
         rows.push((row, index));

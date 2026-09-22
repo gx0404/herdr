@@ -97,6 +97,30 @@ pub enum AppEvent {
         session_ref: Option<crate::agent_resume::AgentSessionRef>,
         session_start_source: Option<String>,
     },
+    /// A hook hinted that a pane's agent activity (subagents, tasks, todos,
+    /// background processes) may have changed. The hint carries no tree content.
+    AgentActivityHinted {
+        pane_id: PaneId,
+        source: String,
+        agent_label: String,
+        hint: Option<String>,
+        node_id: Option<String>,
+        seq: Option<u64>,
+    },
+    /// A background refresh produced the activity tree for a pane's agent.
+    // seam-stub(activity-schema)：波 1 活动树 schema 车道接通后台刷新后删除。
+    #[allow(dead_code)]
+    AgentActivityRefreshed {
+        pane_id: PaneId,
+        nodes: Vec<crate::api::schema::AgentActivityNode>,
+    },
+    /// A background refresh produced the external agents of one source.
+    // seam-stub(activity-schema)：波 1 活动树 schema 车道接通后台刷新后删除。
+    #[allow(dead_code)]
+    ExternalAgentsRefreshed {
+        source: String,
+        agents: Vec<crate::api::schema::ExternalAgentInfo>,
+    },
     /// Display-only agent metadata was reported for a pane.
     HookMetadataReported {
         pane_id: PaneId,

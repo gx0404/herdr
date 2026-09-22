@@ -362,6 +362,8 @@ fn pane_cycle_last_and_agent_actions_resolve_to_stable_pane_ids() {
             state_labels: Vec::new(),
             tokens: Vec::new(),
             focused: true,
+            launch_seq: 0,
+            activity: Default::default(),
         },
         ClientShellAgent {
             pane_id: "pane_2".into(),
@@ -378,6 +380,8 @@ fn pane_cycle_last_and_agent_actions_resolve_to_stable_pane_ids() {
             state_labels: Vec::new(),
             tokens: Vec::new(),
             focused: false,
+            launch_seq: 0,
+            activity: Default::default(),
         },
     ];
     let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
@@ -430,7 +434,7 @@ fn pane_cycle_last_and_agent_actions_resolve_to_stable_pane_ids() {
 }
 
 #[test]
-fn agent_sidebar_honors_priority_symbols_tokens_and_stable_hits() {
+fn agent_sidebar_honors_launch_order_symbols_tokens_and_stable_hits() {
     let mut projected = snapshot();
     let mut second_pane = projected.panes[0].clone();
     second_pane.pane_id = "pane_2".into();
@@ -452,6 +456,8 @@ fn agent_sidebar_honors_priority_symbols_tokens_and_stable_hits() {
             state_labels: Vec::new(),
             tokens: vec![("summary".into(), "review complete".into())],
             focused: true,
+            launch_seq: 2,
+            activity: Default::default(),
         },
         ClientShellAgent {
             pane_id: "pane_2".into(),
@@ -468,10 +474,13 @@ fn agent_sidebar_honors_priority_symbols_tokens_and_stable_hits() {
             state_labels: vec![("blocked".into(), "needs input".into())],
             tokens: vec![("summary".into(), "waiting for Can".into())],
             focused: false,
+            launch_seq: 1,
+            activity: Default::default(),
         },
     ];
     let mut config = Config::default();
-    config.ui.agent_panel_sort = crate::config::AgentPanelSortConfig::Priority;
+    // pane_2 先启动（launch_seq 1），排在 pane_1（launch_seq 2）之前。
+    config.ui.agent_panel_sort = crate::config::AgentPanelSortConfig::Launch;
     config.ui.status_indicators = crate::config::StatusIndicatorStyle::Symbols;
     config.ui.sidebar.agents.rows = vec![vec![crate::config::AgentSidebarToken::Agent]];
     config.ui.sidebar.agents.rows_by_agent.insert(
@@ -596,6 +605,8 @@ fn muted_agent_sidebar_rows_do_not_stack_terminal_faint() {
         state_labels: Vec::new(),
         tokens: Vec::new(),
         focused: true,
+        launch_seq: 0,
+        activity: Default::default(),
     }];
     let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
     state.set_snapshot(Box::new(projected));
@@ -667,6 +678,8 @@ fn active_agent_view_controls_sidebar_order_and_focus_indices() {
             state_labels: Vec::new(),
             tokens: Vec::new(),
             focused: true,
+            launch_seq: 0,
+            activity: Default::default(),
         },
         ClientShellAgent {
             pane_id: "pane_2".into(),
@@ -683,6 +696,8 @@ fn active_agent_view_controls_sidebar_order_and_focus_indices() {
             state_labels: Vec::new(),
             tokens: Vec::new(),
             focused: false,
+            launch_seq: 0,
+            activity: Default::default(),
         },
         ClientShellAgent {
             pane_id: "pane_3".into(),
@@ -699,6 +714,8 @@ fn active_agent_view_controls_sidebar_order_and_focus_indices() {
             state_labels: Vec::new(),
             tokens: Vec::new(),
             focused: false,
+            launch_seq: 0,
+            activity: Default::default(),
         },
     ];
     projected.agent_view_label = Some("review".into());
@@ -773,6 +790,8 @@ fn agent_sort_toggle_is_client_local_and_persists_per_endpoint() {
         state_labels: Vec::new(),
         tokens: Vec::new(),
         focused: true,
+        launch_seq: 0,
+        activity: Default::default(),
     });
     let config =
         ClientShellConfig::from_config(&Config::default()).with_preferences_path(path.clone());
@@ -791,7 +810,7 @@ fn agent_sort_toggle_is_client_local_and_persists_per_endpoint() {
 
     assert_eq!(
         state.config.agent_panel_sort,
-        crate::config::AgentPanelSortConfig::Priority
+        crate::config::AgentPanelSortConfig::Launch
     );
     assert!(click.actions.is_empty());
     let reloaded_config =
@@ -799,7 +818,7 @@ fn agent_sort_toggle_is_client_local_and_persists_per_endpoint() {
     let reloaded = ClientShellState::new(reloaded_config);
     assert_eq!(
         reloaded.config.agent_panel_sort,
-        crate::config::AgentPanelSortConfig::Priority
+        crate::config::AgentPanelSortConfig::Launch
     );
     assert!(reloaded.agent_panel_sort_manual);
     std::fs::remove_file(path).expect("remove agent sort preferences");
@@ -1683,6 +1702,8 @@ fn semantic_notifications_use_client_policy_and_stable_navigation_targets() {
         state_labels: Vec::new(),
         tokens: Vec::new(),
         focused: false,
+        launch_seq: 0,
+        activity: Default::default(),
     });
     state.set_snapshot(Box::new(projected));
     state.set_pane_surface(surface());
@@ -1839,6 +1860,8 @@ fn panel_agent(
         state_labels: Vec::new(),
         tokens: Vec::new(),
         focused: false,
+        launch_seq: 0,
+        activity: Default::default(),
     }
 }
 

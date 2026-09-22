@@ -171,6 +171,10 @@ pub enum Method {
     AgentPrompt(AgentPromptParams),
     #[serde(rename = "agent.wait")]
     AgentWait(AgentWaitParams),
+    #[serde(rename = "agent.activity.read")]
+    AgentActivityRead(AgentActivityReadParams),
+    #[serde(rename = "agent.external.list")]
+    AgentExternalList(EmptyParams),
     #[serde(rename = "pane.split")]
     PaneSplit(PaneSplitParams),
     #[serde(rename = "pane.swap")]
@@ -266,6 +270,8 @@ pub enum Method {
     PaneReportAgent(PaneReportAgentParams),
     #[serde(rename = "pane.report_agent_session")]
     PaneReportAgentSession(PaneReportAgentSessionParams),
+    #[serde(rename = "pane.report_agent_activity")]
+    PaneReportAgentActivity(PaneReportAgentActivityParams),
     #[serde(rename = "pane.report_metadata")]
     PaneReportMetadata(PaneReportMetadataParams),
     #[serde(rename = "pane.clear_agent_authority")]

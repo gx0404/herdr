@@ -159,6 +159,16 @@ pub enum ResponseResult {
     AgentList {
         agents: Vec<AgentInfo>,
     },
+    /// `agent.activity.read`：活动树，以及请求了 `node_id` 时该节点的内容片段。
+    AgentActivity {
+        nodes: Vec<super::AgentActivityNode>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        content: Option<super::AgentActivityContent>,
+    },
+    /// `agent.external.list`：不属于任何 pane 的外部来源条目。
+    ExternalAgentList {
+        agents: Vec<super::ExternalAgentInfo>,
+    },
     AgentView {
         active: bool,
         #[serde(default, skip_serializing_if = "Option::is_none")]

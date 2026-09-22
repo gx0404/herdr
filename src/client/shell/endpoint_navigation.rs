@@ -75,6 +75,7 @@ impl ClientShellState {
             if !self.collapsed_endpoints.remove(&endpoint_id) {
                 self.collapsed_endpoints.insert(endpoint_id);
             }
+            self.bump_tree_collapse_epoch();
             // 折叠状态跟着偏好走：下次 attach 还要是这个样子（STATE-05）。
             self.schedule_chrome_preferences(std::time::Instant::now());
             outcome.repaint = true;
@@ -117,24 +118,7 @@ impl ClientShellState {
         else {
             return false;
         };
-        if !self.endpoint_is_online(&endpoint_id) {
-            let label = self.endpoint_label(&endpoint_id).to_owned();
-            self.receive_endpoint_unavailable(crate::i18n::fill(
-                crate::i18n::texts().mobile.reconnecting_fmt,
-                &[("label", &label)],
-            ));
-            outcome.repaint = true;
-        } else if endpoint_id == self.active_endpoint_id {
-            self.push_endpoint_method(
-                crate::api::schema::Method::PaneFocus(crate::api::schema::PaneTarget { pane_id }),
-                outcome,
-            );
-        } else {
-            outcome.actions.push(ClientShellAction::ActivateEndpoint {
-                endpoint_id,
-                target: Some(ClientEndpointFocusTarget::Pane(pane_id)),
-            });
-        }
+        self.focus_agent_pane(endpoint_id, pane_id, outcome);
         true
     }
 

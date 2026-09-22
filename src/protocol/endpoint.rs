@@ -284,6 +284,7 @@ mod tests {
             panes: Vec::new(),
             agents: Vec::new(),
             commands: Vec::new(),
+            external_agents: Vec::new(),
         }
     }
 
@@ -432,6 +433,92 @@ mod tests {
             decoded.commands[0].action,
             crate::protocol::ClientShellCommandAction::Unknown
         );
+    }
+
+    /// 旧 server 的快照没有活动树 / 外部来源 / 启动序号：缺字段取默认值。冻结
+    /// fixture 里的 agent 同样没有这些字段。
+    #[test]
+    fn snapshot_json_without_activity_fields_decodes_with_defaults() {
+        let frozen: ClientShellSnapshot = serde_json::from_str(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/endpoint-snapshot-v1.json"
+        )))
+        .unwrap();
+        assert!(frozen.external_agents.is_empty());
+        assert!(!frozen.agents.is_empty(), "夹具前提：冻结快照里有 agent");
+        for agent in &frozen.agents {
+            assert_eq!(agent.launch_seq, 0, "旧 server 不下发启动序号");
+            assert_eq!(
+                agent.activity,
+                crate::protocol::ClientShellAgentActivity::default()
+            );
+        }
+
+        // 当前编码去掉新字段后仍可解码（新 client ↔ 旧 server）。
+        let mut value = serde_json::to_value(snapshot()).unwrap();
+        value.as_object_mut().unwrap().remove("external_agents");
+        let decoded: ClientShellSnapshot = serde_json::from_value(value).unwrap();
+        assert_eq!(decoded, snapshot());
+    }
+
+    /// 新 server → 旧 client 的方向：agent / 活动节点 / 外部条目里出现未知字段与
+    /// 未知枚举值都不让整份快照解码失败。
+    #[test]
+    fn snapshot_json_tolerates_future_agent_and_activity_fields() {
+        let mut value: serde_json::Value = serde_json::from_str(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/endpoint-snapshot-v1.json"
+        )))
+        .unwrap();
+        value["agents"][0]["future_agent_field"] = serde_json::json!({"nested": [1, 2, 3]});
+        value["agents"][0]["launch_seq"] = serde_json::json!(7);
+        value["agents"][0]["activity"] = serde_json::json!({
+            "running": 1,
+            "total": 2,
+            "future_summary": "x",
+            "nodes": [
+                {
+                    "id": "n1",
+                    "kind": "subagent",
+                    "label": "explore",
+                    "status": "running",
+                    "future_node_field": true
+                },
+                {"id": "n2", "kind": "future_kind", "status": "future_status"}
+            ]
+        });
+        value["external_agents"] = serde_json::json!([{
+            "external_id": "zcode:abc",
+            "source": "zcode",
+            "agent_status": "future_status",
+            "future_external_field": 1
+        }]);
+
+        let decoded: ClientShellSnapshot = serde_json::from_value(value).unwrap();
+        let agent = &decoded.agents[0];
+        assert_eq!(agent.launch_seq, 7);
+        assert_eq!((agent.activity.running, agent.activity.total), (1, 2));
+        assert!(!agent.activity.truncated);
+        assert_eq!(
+            agent.activity.nodes[0].kind,
+            crate::api::schema::AgentActivityKind::Subagent
+        );
+        assert_eq!(
+            agent.activity.nodes[1].kind,
+            crate::api::schema::AgentActivityKind::Unknown
+        );
+        assert_eq!(
+            agent.activity.nodes[1].status,
+            crate::api::schema::AgentActivityStatus::Unknown
+        );
+        let external = &decoded.external_agents[0];
+        assert_eq!(external.external_id, "zcode:abc");
+        assert_eq!(
+            external.agent_status,
+            crate::api::schema::AgentStatus::Unknown
+        );
+        assert!(external.readable, "缺省为可读");
+        assert!(external.label.is_empty());
     }
 
     #[test]

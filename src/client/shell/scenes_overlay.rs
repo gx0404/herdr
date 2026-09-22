@@ -970,6 +970,7 @@ impl ClientShellState {
             resized = true;
         }
         self.sidebar_collapsed_manual = true;
+        self.bump_tree_collapse_epoch();
         self.collapsed_groups = sidebar.collapsed_groups.iter().cloned().collect();
         self.remote_collapsed_groups = sidebar
             .remote_collapsed_groups

@@ -1,7 +1,10 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 
+mod action_table;
 mod actions;
+mod agent_activity_overlay;
 mod agent_sidebar;
+mod agent_tree;
 mod aggregate_navigation;
 mod workspace_navigation;
 use workspace_navigation::WorkspaceNavigationTarget;
@@ -83,6 +86,7 @@ use crate::protocol::{
 };
 #[cfg(test)]
 use crate::raw_input::RawInputEvent;
+use crate::ui::panel_contrast_fg;
 
 fn target_event_message(target: ClientInputTarget, event: ClientPaneInputEvent) -> ClientMessage {
     match target {
@@ -250,13 +254,6 @@ fn status_color(
         AgentStatus::Done => palette.teal,
         AgentStatus::Idle => palette.green,
         AgentStatus::Unknown => palette.overlay0,
-    }
-}
-
-fn panel_contrast_fg(palette: &Palette) -> ratatui::style::Color {
-    match palette.panel_bg {
-        ratatui::style::Color::Reset => palette.surface_dim,
-        color => color,
     }
 }
 

@@ -634,7 +634,7 @@ mod tests {
         let mut next = Config::default();
         next.ui.sidebar_width = 31;
         next.ui.tab_bar_position = TabBarPositionConfig::Bottom;
-        next.ui.agent_panel_sort = crate::config::AgentPanelSortConfig::Priority;
+        next.ui.agent_panel_sort = crate::config::AgentPanelSortConfig::Launch;
         next.ui.status_indicators = crate::config::StatusIndicatorStyle::Symbols;
         next.ui.sidebar.agents = toml::from_str("rows = [[{ token = 'machine', rules = [{ equals = 'Local', bold = true }] }]]\nrow_gap = 2").unwrap();
         next.keys.prefix = "ctrl+a".to_owned();
@@ -646,7 +646,7 @@ mod tests {
         assert_eq!(shell.tab_bar_position, TabBarPositionConfig::Bottom);
         assert_eq!(
             shell.agent_panel_sort,
-            crate::config::AgentPanelSortConfig::Priority
+            crate::config::AgentPanelSortConfig::Launch
         );
         assert_eq!(
             shell.status_indicators,

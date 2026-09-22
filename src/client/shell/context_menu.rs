@@ -5,7 +5,14 @@ impl ClientContextMenuOverlay {
         use ClientContextMenuAction as Action;
 
         let t = &crate::i18n::texts().context_menu;
-        let item = |label, action| ClientContextMenuItem { label, action };
+        let item = |label, action| ClientContextMenuItem {
+            label,
+            action,
+            enabled: true,
+            shortcut: None,
+            checked: None,
+            separator_before: false,
+        };
         match &self.target {
             ClientContextMenuTarget::Workspace { is_git: false, .. } => {
                 vec![item(t.rename, Action::Rename), item(t.close, Action::Close)]
@@ -105,6 +112,33 @@ impl ClientContextMenuOverlay {
                 ));
                 items
             }
+            // agent 行的条目由接缝定稿：面板车道只接动作，菜单车道只重写渲染与
+            // 键盘导航，都不改条目语义。
+            ClientContextMenuTarget::Agent {
+                agent,
+                has_activity,
+                ..
+            } => {
+                let t = &crate::i18n::texts().agent_panel;
+                let mut items = vec![
+                    item(t.menu_focus, Action::FocusAgent),
+                    ClientContextMenuItem {
+                        enabled: *has_activity,
+                        ..item(t.menu_view_activity, Action::ViewAgentActivity)
+                    },
+                    item(t.menu_rename, Action::RenameAgent),
+                ];
+                if agent.is_some() {
+                    items.push(item(t.menu_usage, Action::ShowAgentUsage));
+                    items.push(item(t.menu_bind_account, Action::BindAgentAccount));
+                }
+                items.push(item(t.menu_close, Action::CloseAgentPane));
+                items
+            }
+            ClientContextMenuTarget::ExternalAgent { .. } => vec![item(
+                crate::i18n::texts().agent_panel.menu_view_activity,
+                Action::ViewAgentActivity,
+            )],
         }
     }
 }
@@ -150,6 +184,7 @@ impl ClientShellState {
             y,
             highlighted: 0,
             hovered: None,
+            submenu: None,
         }));
     }
 
@@ -170,6 +205,7 @@ impl ClientShellState {
             y,
             highlighted: 0,
             hovered: None,
+            submenu: None,
         }));
     }
 
@@ -196,6 +232,7 @@ impl ClientShellState {
             y,
             highlighted: 0,
             hovered: None,
+            submenu: None,
         }));
     }
 
@@ -233,6 +270,7 @@ impl ClientShellState {
             y,
             highlighted: 0,
             hovered: None,
+            submenu: None,
         }));
     }
 
@@ -270,10 +308,19 @@ impl ClientShellState {
         let Some(ClientShellOverlay::ContextMenu(menu)) = self.overlay.take() else {
             return;
         };
-        let Some(action) = menu.items().get(index).map(|item| item.action) else {
+        let Some((action, enabled)) = menu
+            .items()
+            .get(index)
+            .map(|item| (item.action, item.enabled))
+        else {
             outcome.repaint = true;
             return;
         };
+        if !enabled {
+            // 禁用项不可激活：菜单保持打开，高亮不动。
+            self.overlay = Some(ClientShellOverlay::ContextMenu(menu));
+            return;
+        }
         match menu.target {
             ClientContextMenuTarget::Workspace { workspace_id, .. } => {
                 self.activate_workspace_context_action(workspace_id, action, outcome)
@@ -299,6 +346,25 @@ impl ClientShellState {
             ClientContextMenuTarget::Machine { endpoint_id, .. } => {
                 self.activate_machine_context_action(&endpoint_id, action, outcome)
             }
+            ClientContextMenuTarget::Agent {
+                endpoint_id,
+                pane_id,
+                ..
+            } => self.activate_agent_context_action(
+                endpoint_id,
+                super::agent_activity_overlay::AgentActivityOwner::Pane { pane_id },
+                action,
+                outcome,
+            ),
+            ClientContextMenuTarget::ExternalAgent {
+                endpoint_id,
+                external_id,
+            } => self.activate_agent_context_action(
+                endpoint_id,
+                super::agent_activity_overlay::AgentActivityOwner::External { external_id },
+                action,
+                outcome,
+            ),
         }
         outcome.repaint = true;
     }

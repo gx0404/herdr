@@ -261,6 +261,10 @@ mod tests {
     }
 
     fn endpoint_method_shape_digests() -> BTreeMap<String, String> {
+        method_shape_digests(CLIENT_SHELL_METHODS)
+    }
+
+    fn method_shape_digests(methods: &[&str]) -> BTreeMap<String, String> {
         let schema = serde_json::to_value(schemars::schema_for!(crate::api::schema::Request))
             .expect("request schema");
         let definitions = schema
@@ -273,7 +277,7 @@ mod tests {
             .expect("request method branches");
         let mut digests = BTreeMap::new();
 
-        for method in CLIENT_SHELL_METHODS {
+        for method in methods {
             let branch = branches
                 .iter()
                 .find(|branch| {
@@ -368,6 +372,22 @@ mod tests {
             actual, expected,
             "an existing endpoint method changed shape; add load-bearing behavior as a new advertised method or explicitly gate new fields"
         );
+    }
+
+    /// 活动树方法的请求形状先独立钉住：server 侧还是桩，方法尚未进
+    /// `CLIENT_SHELL_METHODS`（进了就会落入上面与冻结 fixture 的比对）。宣告时在
+    /// `advertised_client_shell_method_shapes_stay_at_the_v1_contract` 里新增一段
+    /// 独立的摘出块，比对同一份 fixture；不得往既有 fixture 加键。
+    #[test]
+    fn agent_activity_method_shapes_are_pinned_in_their_own_fixture() {
+        let expected: BTreeMap<String, String> = serde_json::from_str(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/endpoint-agent-activity-shapes-v1.json"
+        )))
+        .expect("活动树方法的独立契约");
+        let methods = expected.keys().map(String::as_str).collect::<Vec<_>>();
+        assert_eq!(methods, ["agent.activity.read", "agent.external.list"]);
+        assert_eq!(method_shape_digests(&methods), expected);
     }
 
     #[test]

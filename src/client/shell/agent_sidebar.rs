@@ -9,6 +9,8 @@ use ratatui::{
 };
 
 use super::*;
+// 显式导入优先于上面的 glob：本文件按 `usize` 算宽度。
+use crate::ui::display_width;
 
 #[derive(Debug)]
 pub(super) struct AgentRow {
@@ -36,18 +38,19 @@ pub(super) fn ordered_agent_pane_ids(
             .collect();
     }
     let mut agents = snapshot.agents.iter().collect::<Vec<_>>();
-    if sort == crate::config::AgentPanelSortConfig::Priority {
-        agents.sort_by_key(|agent| {
-            (
-                std::cmp::Reverse(status_priority(agent.agent_status)),
-                std::cmp::Reverse(agent.state_change_seq),
-            )
-        });
+    if sort == crate::config::AgentPanelSortConfig::Launch {
+        agents.sort_by_key(|agent| launch_order_key(agent));
     }
     agents
         .into_iter()
         .map(|agent| agent.pane_id.clone())
         .collect()
+}
+
+/// 「按启动顺序」的稳定排序键：`launch_seq` 升序，未知（0，旧 server 不下发）
+/// 排在最后；全为 0 时稳定排序保持快照顺序。
+pub(super) fn launch_order_key(agent: &crate::protocol::ClientShellAgent) -> (bool, u64) {
+    (agent.launch_seq == 0, agent.launch_seq)
 }
 
 /// One rendered line of the agents panel: a collapsible workspace header or
@@ -88,14 +91,9 @@ fn workspace_agent_pane_ids(
             .into_iter()
             .map(|agent| agent.pane_id.clone())
             .collect(),
-        crate::config::AgentPanelSortConfig::Priority => {
+        crate::config::AgentPanelSortConfig::Launch => {
             let mut sorted = agents;
-            sorted.sort_by_key(|agent| {
-                (
-                    std::cmp::Reverse(status_priority(agent.agent_status)),
-                    std::cmp::Reverse(agent.state_change_seq),
-                )
-            });
+            sorted.sort_by_key(|agent| launch_order_key(agent));
             sorted
                 .into_iter()
                 .map(|agent| agent.pane_id.clone())
@@ -353,7 +351,7 @@ pub(super) fn render_agent_panel_header(
     let texts = crate::i18n::texts();
     let sort_label = agent_view_label.unwrap_or(match config.agent_panel_sort {
         crate::config::AgentPanelSortConfig::Spaces => texts.sidebar.sort_grouped,
-        crate::config::AgentPanelSortConfig::Priority => texts.sidebar.sort_priority,
+        crate::config::AgentPanelSortConfig::Launch => texts.agent_panel.sort_launch,
     });
     let sort_width = display_width(sort_label).min(area.width as usize) as u16;
     let sort_rect = Rect::new(
@@ -659,10 +657,6 @@ fn put_text(buffer: &mut Buffer, x: u16, y: u16, width: u16, text: &str, style: 
     // set_stringn truncates by display width and writes spacer cells after
     // double-width graphemes; a per-cell char loop would corrupt CJK text.
     buffer.set_stringn(x, y, text, width as usize, style);
-}
-
-fn display_width(text: &str) -> usize {
-    unicode_width::UnicodeWidthStr::width(text)
 }
 
 fn sidebar_status_text(status: crate::api::schema::AgentStatus) -> &'static str {

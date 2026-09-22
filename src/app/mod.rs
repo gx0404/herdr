@@ -210,7 +210,7 @@ fn agent_panel_sort_from_config(
 ) -> state::AgentPanelSort {
     match sort {
         crate::config::AgentPanelSortConfig::Spaces => state::AgentPanelSort::Spaces,
-        crate::config::AgentPanelSortConfig::Priority => state::AgentPanelSort::Priority,
+        crate::config::AgentPanelSortConfig::Launch => state::AgentPanelSort::Launch,
     }
 }
 
@@ -1620,7 +1620,7 @@ mod tests {
     #[test]
     fn startup_uses_configured_agent_panel_sort() {
         let mut config = Config::default();
-        config.ui.agent_panel_sort = crate::config::AgentPanelSortConfig::Priority;
+        config.ui.agent_panel_sort = crate::config::AgentPanelSortConfig::Launch;
         let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
 
         let app = App::new(
@@ -1631,7 +1631,7 @@ mod tests {
             crate::api::EventHub::default(),
         );
 
-        assert_eq!(app.state.agent_panel_sort, state::AgentPanelSort::Priority);
+        assert_eq!(app.state.agent_panel_sort, state::AgentPanelSort::Launch);
     }
 
     #[test]
@@ -2099,7 +2099,7 @@ selection_mix_ratio = 0.5
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(
             &path,
-            "[terminal]\ndefault_shell = \"nu\"\nshell_mode = \"non_login\"\nnew_cwd = \"home\"\n[keys]\nnew_workspace = \"prefix+m\"\nprefix = \"ctrl+a\"\n[update]\nversion_check = false\nmanifest_check = false\n[server]\nheadless_cols = 160\nheadless_rows = 50\n[ui]\nagent_panel_sort = \"priority\"\n[ui.toast]\ndelivery = \"herdr\"\n",
+            "[terminal]\ndefault_shell = \"nu\"\nshell_mode = \"non_login\"\nnew_cwd = \"home\"\n[keys]\nnew_workspace = \"prefix+m\"\nprefix = \"ctrl+a\"\n[update]\nversion_check = false\nmanifest_check = false\n[server]\nheadless_cols = 160\nheadless_rows = 50\n[ui]\nagent_panel_sort = \"launch\"\n[ui.toast]\ndelivery = \"herdr\"\n",
         )
         .unwrap();
         std::env::set_var(crate::config::CONFIG_PATH_ENV_VAR, &path);
@@ -2122,7 +2122,7 @@ selection_mix_ratio = 0.5
             app.state.toast_config.delivery,
             crate::config::ToastDelivery::Herdr
         );
-        assert_eq!(app.state.agent_panel_sort, state::AgentPanelSort::Priority);
+        assert_eq!(app.state.agent_panel_sort, state::AgentPanelSort::Launch);
         let report = app.reload_config();
         assert_eq!(report.status, crate::config::ConfigReloadStatus::Applied);
         assert!(app.state.request_client_config_reload);

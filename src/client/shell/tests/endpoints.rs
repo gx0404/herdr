@@ -38,6 +38,8 @@ fn agent(
         state_labels: Vec::new(),
         tokens: Vec::new(),
         focused: true,
+        launch_seq: 0,
+        activity: Default::default(),
     }
 }
 
@@ -908,7 +910,7 @@ fn aggregate_agents_use_configured_rows_machine_token_and_status_colors() {
     })]);
     assert_eq!(
         state.config.agent_panel_sort,
-        crate::config::AgentPanelSortConfig::Priority
+        crate::config::AgentPanelSortConfig::Launch
     );
     assert!(click.actions.is_empty());
 
@@ -1206,7 +1208,7 @@ fn selected_custom_sort_orders_rendering_and_indexed_navigation() {
     use crate::config::AgentSidebarToken;
 
     let mut config = Config::default();
-    config.ui.agent_panel_sort = crate::config::AgentPanelSortConfig::Priority;
+    config.ui.agent_panel_sort = crate::config::AgentPanelSortConfig::Launch;
     config.ui.sidebar.agents.rows =
         vec![vec![AgentSidebarToken::Machine, AgentSidebarToken::Agent]];
     let mut state = ClientShellState::new(ClientShellConfig::from_config(&config));
@@ -1323,7 +1325,7 @@ fn selected_position_sort_uses_public_tab_and_pane_numbers() {
     let names = aggregate_navigation::aggregate_agent_rows(
         &state.endpoints,
         &state.active_endpoint_id,
-        crate::config::AgentPanelSortConfig::Priority,
+        crate::config::AgentPanelSortConfig::Launch,
     )
     .into_iter()
     .map(|row| row.agent.name.as_deref().expect("agent name"))
@@ -1332,12 +1334,12 @@ fn selected_position_sort_uses_public_tab_and_pane_numbers() {
 }
 
 #[test]
-fn aggregate_priority_uses_client_observed_recency_across_machines() {
+fn aggregate_launch_orders_agents_by_launch_seq_across_machines() {
     use crate::api::schema::AgentStatus;
     use crate::config::AgentSidebarToken;
 
     let mut config = Config::default();
-    config.ui.agent_panel_sort = crate::config::AgentPanelSortConfig::Priority;
+    config.ui.agent_panel_sort = crate::config::AgentPanelSortConfig::Launch;
     config.ui.sidebar.agents.rows =
         vec![vec![AgentSidebarToken::Machine, AgentSidebarToken::Agent]];
     let mut state = ClientShellState::new(ClientShellConfig::from_config(&config));
@@ -1346,18 +1348,15 @@ fn aggregate_priority_uses_client_observed_recency_across_machines() {
     state.set_endpoint_catalog(&[profile]);
     state.set_endpoint_status(&endpoint_id, ClientEndpointStatus::Online);
 
+    // 旧 server 不下发 launch_seq（全 0）：退回端点顺序 + 快照顺序。
     let mut local = snapshot();
-    local.agents = vec![agent("local agent", AgentStatus::Idle, 1)];
-    state.set_snapshot(Box::new(local));
+    local.agents = vec![agent("local agent", AgentStatus::Blocked, 1)];
+    state.set_snapshot(Box::new(local.clone()));
     state.set_pane_surface(surface());
     let mut remote = snapshot();
     remote.boot_id = "remote-boot".into();
     remote.agents = vec![agent("remote agent", AgentStatus::Idle, 1)];
     state.set_endpoint_snapshot(&endpoint_id, Box::new(remote.clone()));
-
-    let mut local = snapshot();
-    local.agents = vec![agent("local agent", AgentStatus::Idle, 2)];
-    state.set_snapshot(Box::new(local));
     let frame_text = |state: &mut ClientShellState| {
         let frame = state.compose(100, 28).expect("combined endpoint frame");
         frame
@@ -1377,15 +1376,12 @@ fn aggregate_priority_uses_client_observed_recency_across_machines() {
             < text.find("Build · remote agent").expect("remote agent")
     );
 
-    remote.agents = vec![agent("remote agent", AgentStatus::Working, 2)];
-    state.set_endpoint_snapshot(&endpoint_id, Box::new(remote.clone()));
-    let text = frame_text(&mut state);
-    assert!(
-        text.find("Build · remote agent").expect("remote agent")
-            < text.find("Local · local agent").expect("local agent")
-    );
-
-    remote.agents = vec![agent("remote agent", AgentStatus::Idle, 3)];
+    // 远端 agent 先启动：跨机器按 launch_seq 升序，不看状态。本机快照保持
+    // revision 不变：表面（`surface()`）钉在 revision 1，换代会让帧不可用。
+    local.agents[0].launch_seq = 2;
+    state.set_snapshot(Box::new(local));
+    remote.revision += 1;
+    remote.agents[0].launch_seq = 1;
     state.set_endpoint_snapshot(&endpoint_id, Box::new(remote));
     let text = frame_text(&mut state);
     assert!(
@@ -2389,6 +2385,8 @@ fn federated_agent_rows_are_cached_between_frames_and_refresh_on_data_change() {
         &state.config,
         state.config_epoch,
         state.agent_rows_epoch,
+        state.tree_collapse_epoch,
+        state.agent_activity_epoch,
         &state.active_endpoint_id,
         state
             .snapshot

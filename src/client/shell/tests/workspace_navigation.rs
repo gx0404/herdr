@@ -528,6 +528,8 @@ fn agent_sidebar_state(count: usize) -> ClientShellState {
             state_labels: Vec::new(),
             tokens: Vec::new(),
             focused: index == 1,
+            launch_seq: 0,
+            activity: Default::default(),
         })
         .collect();
     projected.panes = projected

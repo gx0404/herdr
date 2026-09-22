@@ -404,9 +404,12 @@ impl ClientShellState {
         use crate::api::schema::ResponseResult;
 
         match (kind, result) {
-            (PendingEndpointKind::Observation { .. } | PendingEndpointKind::Views { .. }, _) => {
-                false
-            }
+            (
+                PendingEndpointKind::Observation { .. }
+                | PendingEndpointKind::Views { .. }
+                | PendingEndpointKind::AgentActivityRead { .. },
+                _,
+            ) => false,
             (
                 PendingEndpointKind::PrepareWorktreeCreate { workspace_id },
                 Ok(ResponseResult::WorktreeList { source, .. }),

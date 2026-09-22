@@ -3176,6 +3176,16 @@ impl HeadlessServer {
             return false;
         }
 
+        if super::agent_activity::handles(&msg.request.method) {
+            // seam-stub(activity-schema)：波 1 活动树 schema 车道在这里接后台读取。
+            let _ = msg.respond_to.send(super::client_commands::error_response(
+                msg.request.id.clone(),
+                super::agent_activity::NOT_IMPLEMENTED_CODE,
+                super::agent_activity::NOT_IMPLEMENTED_MESSAGE,
+            ));
+            return false;
+        }
+
         if crate::server::observability::is_background_method(&msg.request.method) {
             self.submit_observation(
                 msg.request,
