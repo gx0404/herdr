@@ -192,9 +192,15 @@ pub(super) fn spawn_named_server(
     )
     .unwrap();
 
+    // HOME 隔离到测试目录：server 的活动树适配器（zcode 等）会按 HOME 读开发机上
+    // 真实的 CLI 数据，把外部会话塞进快照，让用例随开发机状态漂移。
+    let home = runtime_dir.join("home");
+    let _ = fs::create_dir_all(&home);
+
     let mut command = Command::new(env!("CARGO_BIN_EXE_herdr"));
     command
         .args(["--session", session, "server"])
+        .env("HOME", &home)
         .env("XDG_CONFIG_HOME", config_home)
         .env("XDG_RUNTIME_DIR", runtime_dir)
         .env_remove("HERDR_SOCKET_PATH")
@@ -244,9 +250,15 @@ pub(super) fn run_named_cli_with_env_and_socket_override(
     envs: &[(&str, &Path)],
     socket_override: Option<&Path>,
 ) -> std::process::Output {
+    // HOME 隔离到测试目录：server 的活动树适配器（zcode 等）会按 HOME 读开发机上
+    // 真实的 CLI 数据，把外部会话塞进快照，让用例随开发机状态漂移。
+    let home = runtime_dir.join("home");
+    let _ = fs::create_dir_all(&home);
+
     let mut command = Command::new(env!("CARGO_BIN_EXE_herdr"));
     command
         .args(args)
+        .env("HOME", &home)
         .env("XDG_CONFIG_HOME", config_home)
         .env("XDG_RUNTIME_DIR", runtime_dir)
         // Human-readable CLI stdout is localized (zh-CN default); pin English
@@ -328,6 +340,11 @@ pub(super) fn spawn_herdr_with_config(
 
     let mut cmd = CommandBuilder::new(env!("CARGO_BIN_EXE_herdr"));
     cmd.arg("server");
+    // HOME 隔离到测试目录：server 的活动树适配器（zcode 等）会按 HOME 读开发机上
+    // 真实的 CLI 数据，把外部会话塞进快照，让用例随开发机状态漂移。
+    let home = runtime_dir.join("home");
+    let _ = fs::create_dir_all(&home);
+    cmd.env("HOME", &home);
     cmd.env("XDG_CONFIG_HOME", config_home);
     cmd.env("XDG_RUNTIME_DIR", runtime_dir);
     cmd.env("HERDR_SOCKET_PATH", socket_path);

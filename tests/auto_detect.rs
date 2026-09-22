@@ -107,6 +107,11 @@ fn spawn_server(
 
     let mut cmd = CommandBuilder::new(env!("CARGO_BIN_EXE_herdr"));
     cmd.arg("server");
+    // HOME 隔离到测试目录：server 的活动树适配器（zcode 等）会按 HOME 读开发机上
+    // 真实的 CLI 数据，把外部会话塞进快照，让用例随开发机状态漂移。
+    let home = runtime_dir.join("home");
+    let _ = fs::create_dir_all(&home);
+    cmd.env("HOME", &home);
     cmd.env("XDG_CONFIG_HOME", config_home);
     cmd.env("XDG_RUNTIME_DIR", runtime_dir);
     cmd.env("HERDR_SOCKET_PATH", api_socket_path);
@@ -153,6 +158,11 @@ fn spawn_herdr_auto(
 
     let mut cmd = CommandBuilder::new(env!("CARGO_BIN_EXE_herdr"));
     // No subcommand → auto-detect launch.
+    // HOME 隔离到测试目录：server 的活动树适配器（zcode 等）会按 HOME 读开发机上
+    // 真实的 CLI 数据，把外部会话塞进快照，让用例随开发机状态漂移。
+    let home = runtime_dir.join("home");
+    let _ = fs::create_dir_all(&home);
+    cmd.env("HOME", &home);
     cmd.env("XDG_CONFIG_HOME", config_home);
     cmd.env("XDG_RUNTIME_DIR", runtime_dir);
     cmd.env("HERDR_SOCKET_PATH", api_socket_path);
@@ -538,6 +548,11 @@ fn auto_detect_default_socket_path_from_config_dir() {
 
     let mut cmd = CommandBuilder::new(env!("CARGO_BIN_EXE_herdr"));
     cmd.arg("server");
+    // HOME 隔离到测试目录：server 的活动树适配器（zcode 等）会按 HOME 读开发机上
+    // 真实的 CLI 数据，把外部会话塞进快照，让用例随开发机状态漂移。
+    let home = runtime_dir.join("home");
+    let _ = fs::create_dir_all(&home);
+    cmd.env("HOME", &home);
     cmd.env("XDG_CONFIG_HOME", &config_home);
     cmd.env("XDG_RUNTIME_DIR", &runtime_dir);
     cmd.env("SHELL", "/bin/sh");
@@ -647,7 +662,12 @@ fn auto_detect_respects_nested_guard_before_auto_attach() {
         .map(|workspaces| workspaces.len())
         .unwrap_or(0);
 
+    // HOME 隔离到测试目录：即便此次启动会在嵌套守卫处提前失败，仍按同一约定固定 HOME，
+    // 避免子进程读到开发机上真实的 CLI 数据。
+    let nested_home = runtime_dir.join("home");
+    let _ = fs::create_dir_all(&nested_home);
     let output = Command::new(env!("CARGO_BIN_EXE_herdr"))
+        .env("HOME", &nested_home)
         .env("XDG_CONFIG_HOME", &config_home)
         .env("XDG_RUNTIME_DIR", &runtime_dir)
         .env("HERDR_SOCKET_PATH", &api_socket)

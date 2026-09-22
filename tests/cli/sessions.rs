@@ -232,8 +232,13 @@ fn dead_server_cli_reports_one_session_aware_json_line() {
 
     let stale_socket = runtime_dir.join("stale.sock");
     drop(UnixListener::bind(&stale_socket).unwrap());
+    // HOME 隔离到测试目录：即便此次调用会在探测到 stale socket 后立刻失败，仍按同一约定固定
+    // HOME，避免子进程读到开发机上真实的 CLI 数据。
+    let stale_home = runtime_dir.join("home");
+    fs::create_dir_all(&stale_home).unwrap();
     let stale = Command::new(env!("CARGO_BIN_EXE_herdr"))
         .args(["workspace", "create"])
+        .env("HOME", &stale_home)
         .env("XDG_CONFIG_HOME", &config_home)
         .env("XDG_RUNTIME_DIR", &runtime_dir)
         .env("HERDR_SOCKET_PATH", &stale_socket)

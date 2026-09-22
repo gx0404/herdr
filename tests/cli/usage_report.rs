@@ -459,11 +459,16 @@ fn usage_report_passthrough_binary_reports_to_the_named_session_socket() {
             "--passthrough",
         ],
     ];
+    // HOME 隔离到测试目录：passthrough 上报进程也是 herdr 子进程，按同一约定固定 HOME，
+    // 避免读到开发机上真实的 CLI 数据。
+    let home = base.join("home");
+    fs::create_dir_all(&home).unwrap();
     for args in shapes {
         let listener = UnixListener::bind(&socket_path).unwrap();
         let server = accept_one_request(listener, Duration::ZERO);
         let output = Command::new(env!("CARGO_BIN_EXE_herdr"))
             .args(args)
+            .env("HOME", &home)
             .env("XDG_CONFIG_HOME", &config_home)
             .env("HERDR_SESSION", "work")
             .env("HERDR_PANE_ID", "w1:p1")

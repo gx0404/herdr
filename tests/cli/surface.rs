@@ -615,9 +615,14 @@ fn explicit_client_command_respects_nested_guard() {
     let base = unique_test_dir();
     fs::create_dir_all(&base).unwrap();
 
+    // HOME 隔离到测试目录：即便此次启动会在嵌套守卫处提前失败，仍按同一约定固定 HOME，
+    // 避免子进程读到开发机上真实的 CLI 数据。
+    let home = base.join("home");
+    fs::create_dir_all(&home).unwrap();
     let output = Command::new(env!("CARGO_BIN_EXE_herdr"))
         .arg("client")
         .env("HERDR_ENV", "1")
+        .env("HOME", &home)
         .env("XDG_CONFIG_HOME", &base)
         .env_remove("HERDR_CONFIG_PATH")
         .output()
