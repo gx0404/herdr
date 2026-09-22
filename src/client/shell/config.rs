@@ -166,6 +166,11 @@ impl ClientShellState {
                 .preferences
                 .monitor_tab
                 .map(|_| self.observability.monitor_tab),
+            monitor_chart_glyphs: self
+                .config
+                .preferences
+                .monitor_chart_glyphs
+                .map(|_| self.observability.chart_glyphs),
             sidebar_width: self.sidebar_width_manual.then_some(self.sidebar_width),
             sidebar_section_split: self
                 .sidebar_section_split_manual

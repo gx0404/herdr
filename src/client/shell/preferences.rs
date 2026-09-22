@@ -64,6 +64,14 @@ pub(super) struct ClientChromePreferences {
         skip_serializing_if = "Option::is_none"
     )]
     pub(super) monitor_tab: Option<super::observability::Page>,
+    /// 系统页迷你图 / 条形的字形档位（braille / blocks / ascii）；未知值按未设置
+    /// 处理，不让整份偏好失效。
+    #[serde(
+        default,
+        deserialize_with = "read_lenient",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub(super) monitor_chart_glyphs: Option<super::observability::ChartGlyphsPreference>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(super) sidebar_width: Option<u16>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

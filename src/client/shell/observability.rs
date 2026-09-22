@@ -333,6 +333,8 @@ enum PreferenceKey {
     UsagePosition,
     DisabledProviders,
     HoverDelay,
+    /// 系统页迷你图 / 条形的字形档位（`monitor_chart_glyphs`）。
+    ChartGlyphs,
     /// 「恢复配置文件值」：不写任何键，只把已清空的偏好落盘。
     RestoreUsage,
 }
@@ -355,6 +357,7 @@ impl PreferenceKey {
             Action::UsagePosition(_) => Self::UsagePosition,
             Action::ProviderEnabled(_) => Self::DisabledProviders,
             Action::HoverDelay(_) => Self::HoverDelay,
+            Action::ChartGlyphs(_) => Self::ChartGlyphs,
             Action::RestoreUsagePreferences => Self::RestoreUsage,
             _ => return None,
         })
@@ -409,6 +412,8 @@ pub(super) enum Action {
     UsagePosition(UsageDisplayPosition),
     /// 悬浮延时步进（200 / 400 / 800 / 1200 / 2000 ms 档位），持久化为客户端偏好。
     HoverDelay(i8),
+    /// 系统页迷你图 / 条形的字形档位。
+    ChartGlyphs(ChartGlyphsPreference),
     /// 设置页「恢复配置文件值」：清掉 usage_* 的本机覆盖，重新跟随 config.toml。
     RestoreUsagePreferences,
     /// 回到跨厂商总览（账号页首个 chip / 再点已选厂商 chip）。
@@ -1263,6 +1268,7 @@ impl State {
         if let Some(value) = config.preferences.monitor_tab {
             self.monitor_tab = value;
         }
+        self.chart_glyphs = config.preferences.monitor_chart_glyphs.unwrap_or_default();
         self.usage_overridden = config.preferences.usage_overridden();
         self.glyphs = config.border_glyphs;
         self.next_metrics = Instant::now();
@@ -1321,7 +1327,7 @@ impl State {
             selected_card: None,
             selected_core: None,
             layout_editing: false,
-            chart_glyphs: ChartGlyphsPreference::default(),
+            chart_glyphs: config.preferences.monitor_chart_glyphs.unwrap_or_default(),
             net_history: HashMap::new(),
             card_scroll: HashMap::new(),
             account_scroll: 0,
@@ -3085,6 +3091,7 @@ impl ClientShellState {
                 monitor.history_minutes =
                     step_ladder(&HISTORY_STEPS, monitor.history_minutes, delta);
             }
+            Action::ChartGlyphs(glyphs) => self.observability.chart_glyphs = glyphs,
             Action::Device(id) => {
                 let hidden = &mut self.observability.monitor.hidden_devices;
                 if hidden.contains(&id) {
@@ -3407,6 +3414,9 @@ impl ClientShellState {
             }
             Some(PreferenceKey::HoverDelay) => {
                 preferences.usage_hover_delay_ms = Some(usage.hover_delay_ms);
+            }
+            Some(PreferenceKey::ChartGlyphs) => {
+                preferences.monitor_chart_glyphs = Some(self.observability.chart_glyphs);
             }
             // 恢复已在动作分支里把键置 None，这里只需落盘。
             Some(PreferenceKey::RestoreUsage) | None => {}

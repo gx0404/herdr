@@ -483,6 +483,10 @@ pub struct MonitorTexts {
     pub proc_col_mem: &'static str,
     pub no_matching_processes: &'static str,
     // ---- 监控偏好页 ----
+    pub chart_glyphs: &'static str,
+    pub glyph_braille: &'static str,
+    pub glyph_blocks: &'static str,
+    pub glyph_ascii: &'static str,
     pub sampling_interval: &'static str,
     pub card_height: &'static str,
     pub history_range: &'static str,

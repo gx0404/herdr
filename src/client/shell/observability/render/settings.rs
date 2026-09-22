@@ -105,6 +105,11 @@ fn build_cards(state: &State) -> Vec<Card<'_>> {
     let usage = &state.usage;
     let mut cards = Vec::new();
 
+    let glyph_active = match state.chart_glyphs {
+        ChartGlyphsPreference::Braille => 0,
+        ChartGlyphsPreference::Blocks => 1,
+        ChartGlyphsPreference::Ascii => 2,
+    };
     cards.push(Card {
         title: texts.section_monitor,
         rows: vec![
@@ -131,6 +136,16 @@ fn build_cards(state: &State) -> Vec<Card<'_>> {
                 monitor.alerts_enabled,
                 Action::ToggleAlerts,
             ),
+            Row::Segmented {
+                label: texts.chart_glyphs,
+                options: vec![texts.glyph_braille, texts.glyph_blocks, texts.glyph_ascii],
+                active: glyph_active,
+                actions: vec![
+                    Action::ChartGlyphs(ChartGlyphsPreference::Braille),
+                    Action::ChartGlyphs(ChartGlyphsPreference::Blocks),
+                    Action::ChartGlyphs(ChartGlyphsPreference::Ascii),
+                ],
+            },
         ],
     });
 
@@ -554,6 +569,10 @@ mod tests {
             "卡片高度",
             "历史范围",
             "15 min",
+            "图表字形",
+            "盲文",
+            "方块",
+            "ASCII",
             "账号用量",
             "仪表盘",
             "表格",
@@ -581,6 +600,8 @@ mod tests {
             |a: &Action| matches!(a, Action::CardSize(1)),
             |a: &Action| matches!(a, Action::HistoryRange(-1)),
             |a: &Action| matches!(a, Action::ToggleAlerts),
+            |a: &Action| matches!(a, Action::ChartGlyphs(ChartGlyphsPreference::Blocks)),
+            |a: &Action| matches!(a, Action::ChartGlyphs(ChartGlyphsPreference::Ascii)),
             |a: &Action| matches!(a, Action::UsageEnabled),
             |a: &Action| matches!(a, Action::UsageFormat(UsageDisplayFormat::Table)),
             |a: &Action| matches!(a, Action::UsagePosition(UsageDisplayPosition::Page)),

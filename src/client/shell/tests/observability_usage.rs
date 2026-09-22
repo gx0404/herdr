@@ -3535,9 +3535,10 @@ fn edit_layout_mode_moves_the_selected_card_with_arrow_keys() {
 }
 
 /// 监控偏好页的控件：点分段 / 步进器 / 开关只回写各自的偏好键（`PreferenceKey`），
-/// 落盘后重启可恢复。
+/// 落盘后重启可恢复；图表字形是独立的客户端偏好键 `monitor_chart_glyphs`。
 #[test]
 fn preferences_page_controls_write_back_only_their_preference_key() {
+    use crate::client::shell::observability::ChartGlyphsPreference;
     use crate::config::UsageDisplayFormat;
     let path = std::env::temp_dir().join(format!(
         "herdr-shell-monitor-prefs-{}.json",
@@ -3568,6 +3569,24 @@ fn preferences_page_controls_write_back_only_their_preference_key() {
     assert_eq!(preferences.monitor, None, "未改过的键不写影子值");
     assert_eq!(preferences.usage_enabled, None);
     assert_eq!(preferences.usage_position, None);
+    assert_eq!(preferences.monitor_chart_glyphs, None);
+    // 分段控件：图表字形 → 方块，只写 monitor_chart_glyphs。
+    state.compose(120, 60).expect("重绘");
+    let blocks = hit(&state, |action| {
+        matches!(action, Action::ChartGlyphs(ChartGlyphsPreference::Blocks))
+    });
+    click(&mut state, blocks.x + 1, blocks.y);
+    assert_eq!(
+        state.observability.chart_glyphs,
+        ChartGlyphsPreference::Blocks
+    );
+    let preferences = &state.config.preferences;
+    assert_eq!(
+        preferences.monitor_chart_glyphs,
+        Some(ChartGlyphsPreference::Blocks)
+    );
+    assert_eq!(preferences.monitor, None, "图表字形不写进 monitor 键");
+    assert_eq!(preferences.usage_enabled, None);
     // 步进器：采样间隔 +1 档，只写 monitor 键。
     state.compose(120, 60).expect("重绘");
     let plus = hit(&state, |action| matches!(action, Action::Interval(1)));
@@ -3594,6 +3613,10 @@ fn preferences_page_controls_write_back_only_their_preference_key() {
     let saved = preferences::load(&path).expect("偏好已写入");
     assert_eq!(saved.usage_format, Some(UsageDisplayFormat::Table));
     assert_eq!(saved.usage_enabled, Some(false));
+    assert_eq!(
+        saved.monitor_chart_glyphs,
+        Some(ChartGlyphsPreference::Blocks)
+    );
     let restored = ClientShellState::new(
         ClientShellConfig::from_config(&Config::default()).with_preferences_path(path.clone()),
     );
@@ -3603,6 +3626,10 @@ fn preferences_page_controls_write_back_only_their_preference_key() {
     );
     assert!(!restored.observability.usage.enabled);
     assert_eq!(restored.observability.monitor.interval_ms, 2000);
+    assert_eq!(
+        restored.observability.chart_glyphs,
+        ChartGlyphsPreference::Blocks
+    );
     std::fs::remove_file(path).expect("remove preferences");
 }
 
