@@ -744,6 +744,367 @@ test("Pi never pushes usage from RPC sessions", async () => {
   expect(requests).toEqual([]);
 });
 
+// Activity snapshot ----------------------------------------------------------
+
+const PI_ACTIVITY_FIXTURE = join(
+  import.meta.dir,
+  "../../../tests/fixtures/agent-activity/pi/snapshot-extension.json",
+);
+
+function toolCatalog(entries: Record<string, string>) {
+  return () =>
+    Object.entries(entries).map(([name, source]) => ({
+      name,
+      description: name,
+      parameters: {},
+      sourceInfo: { path: `<${source}:${name}>`, source, scope: "user", origin: "top-level" },
+    }));
+}
+
+function assistant(text: string, stopReason = "toolUse") {
+  return { role: "assistant", content: [{ type: "text", text }], stopReason };
+}
+
+function delegated(agent: string, task: string, fields: Record<string, unknown> = {}) {
+  return { agent, agentSource: "user", task, exitCode: 0, messages: [], stderr: "", ...fields };
+}
+
+function activityRequests(requests: unknown[]): Record<string, unknown>[] {
+  return requests
+    .filter((request) => isRecord(request) && request.method === "pane.report_agent_activity")
+    .map((request) => (request as { params: Record<string, unknown> }).params);
+}
+
+function activityNodes(params: Record<string, unknown>): Record<string, unknown>[] {
+  return (JSON.parse(params.hint as string) as { nodes: Record<string, unknown>[] }).nodes;
+}
+
+// Replays one parallel subagent call (the official example's details shape),
+// a failed extension tool, a built-in tool and a running tool with CJK output
+// past the tail limit. The golden file is also the Rust adapter's fixture.
+function scriptedActivitySnapshot(createActivityTracker: (pi: unknown) => any): string {
+  const tracker = createActivityTracker({
+    getAllTools: toolCatalog({
+      bash: "builtin",
+      read: "builtin",
+      subagent: "/home/user/.pi/agent/extensions/subagent/index.ts",
+      web_search: "/home/user/.pi/agent/extensions/web-search.ts",
+      notes: "sdk",
+    }),
+  });
+  const tasks = [
+    { agent: "scout", task: "Map the auth module" },
+    { agent: "reviewer", task: "Review the login flow\nFocus on token refresh" },
+    { agent: "planner", task: "Draft a migration plan" },
+  ];
+  const call = { toolCallId: "call_par", toolName: "subagent", args: { tasks } };
+  const placeholders = tasks.map((t) => delegated(t.agent, t.task, { exitCode: -1 }));
+  const update = (results: unknown[], text: string) =>
+    tracker.update(
+      {
+        ...call,
+        partialResult: {
+          content: [{ type: "text", text }],
+          details: { mode: "parallel", agentScope: "user", projectAgentsDir: null, results },
+        },
+      },
+      2_000,
+    );
+
+  tracker.start(call, 1_000);
+  update(placeholders, "Parallel: 0/3 done, 3 running...");
+  const scoutRunning = delegated("scout", tasks[0].task, {
+    messages: [assistant("Reading src/auth to find the session store.")],
+  });
+  update([scoutRunning, placeholders[1], placeholders[2]], "Parallel: 0/3 done, 3 running...");
+  const scoutDone = delegated("scout", tasks[0].task, {
+    messages: [
+      assistant("Reading src/auth to find the session store."),
+      assistant("The session store lives in src/auth/session.ts.", "stop"),
+    ],
+  });
+  const reviewerFailed = delegated("reviewer", tasks[1].task, {
+    exitCode: 1,
+    stderr: "provider rejected the request",
+    messages: [assistant("Checking the refresh path.")],
+  });
+  const plannerRunning = delegated("planner", tasks[2].task, {
+    messages: [assistant("Listing the tables that change.")],
+  });
+  update([scoutDone, reviewerFailed, plannerRunning], "Parallel: 2/3 done, 1 running...");
+  tracker.start({ toolCallId: "call_bash", toolName: "bash", args: { command: "ls" } }, 2_500);
+  tracker.end(
+    {
+      ...call,
+      result: {
+        content: [{ type: "text", text: "Parallel: 1/3 succeeded" }],
+        details: {
+          mode: "parallel",
+          results: [
+            scoutDone,
+            reviewerFailed,
+            delegated("planner", tasks[2].task, {
+              messages: [assistant("Plan: add a nullable column first.", "stop")],
+            }),
+          ],
+        },
+      },
+      isError: false,
+    },
+    3_000,
+  );
+
+  const search = { toolCallId: "call_ws", toolName: "web_search", args: { query: "ratatui tree widget" } };
+  tracker.start(search, 4_000);
+  tracker.update({ ...search, partialResult: { content: [{ type: "text", text: "Searching" }] } }, 4_100);
+  tracker.update({ ...search, partialResult: { content: [{ type: "text", text: "Searching..." }] } }, 4_200);
+  tracker.end(
+    { ...search, result: { content: [{ type: "text", text: "\u001b[31mrate limited\u001b[0m" }], isError: true }, isError: false },
+    4_300,
+  );
+
+  const notes = { toolCallId: "call_notes", toolName: "notes", args: { title: "发布检查清单" } };
+  tracker.start(notes, 5_000);
+  const line = "检查点：确认迁移脚本可回滚。\n";
+  tracker.update({ ...notes, partialResult: { content: [{ type: "text", text: line.repeat(150) }] } }, 5_100);
+
+  return tracker.snapshot({
+    session_path: "/home/user/.pi/agent/sessions/--home-user-demo--/2026-09-22T10-00-00-000Z_5f000000-0000-4000-8000-000000000001.jsonl",
+    session_id: "5f000000-0000-4000-8000-000000000001",
+  });
+}
+
+test("Pi activity snapshot matches the adapter fixture", async () => {
+  const { createActivityTracker } = await importFresh("./pi/herdr-agent-state.ts");
+  const hint = scriptedActivitySnapshot(createActivityTracker);
+  if (process.env.HERDR_UPDATE_PI_ACTIVITY_FIXTURE === "1") {
+    await Bun.write(PI_ACTIVITY_FIXTURE, `${JSON.stringify(JSON.parse(hint), null, 2)}\n`);
+  }
+  expect(JSON.parse(hint)).toEqual(await Bun.file(PI_ACTIVITY_FIXTURE).json());
+
+  const snapshot = JSON.parse(hint);
+  expect(snapshot.type).toBe("herdr.activity.snapshot");
+  expect(snapshot.version).toBe(1);
+  const byId = new Map(snapshot.nodes.map((node: { id: string }) => [node.id, node]));
+  // The built-in tool never becomes a node; parents precede their children.
+  expect(snapshot.nodes.map((node: { id: string }) => node.id)).toEqual([
+    "call_par",
+    "call_par/0",
+    "call_par/1",
+    "call_par/2",
+    "call_ws",
+    "call_notes",
+  ]);
+  expect(byId.get("call_par")).toMatchObject({ kind: "subagent", status: "done", ended_at_ms: 3_000 });
+  expect(byId.get("call_par/0")).toMatchObject({ status: "done", agent_type: "scout", parent_id: "call_par" });
+  expect(byId.get("call_par/1")).toMatchObject({ status: "failed", summary: "provider rejected the request" });
+  expect(byId.get("call_par/2")).toMatchObject({ status: "done", ended_at_ms: 3_000 });
+  // `isError` inside the returned result marks the tool failed; ANSI is stripped.
+  expect(byId.get("call_ws")).toMatchObject({ kind: "task", status: "failed", summary: "rate limited" });
+  expect((byId.get("call_ws") as { output: { text: string } }).output.text).toBe(
+    "Searching...\n\nrate limited",
+  );
+  // The head of a long log is dropped; `start` counts the dropped UTF-8 bytes.
+  const notesOutput = (byId.get("call_notes") as { output: { text: string; start: number } }).output;
+  expect(notesOutput.text.length).toBe(2_000);
+  expect(notesOutput.start).toBe(Buffer.byteLength("检查点：确认迁移脚本可回滚。\n".repeat(150), "utf8") -
+    Buffer.byteLength(notesOutput.text, "utf8"));
+});
+
+test("Pi activity tracks extension tools only", async () => {
+  const { isExtensionTool } = await importFresh("./pi/herdr-agent-state.ts");
+  const pi = {
+    getAllTools: toolCatalog({ bash: "user-sandbox", subagent: "ext", web_fetch: "builtin", notes: "sdk" }),
+  };
+  // An override of a built-in name is still the everyday tool.
+  expect(isExtensionTool(pi, "bash")).toBe(false);
+  expect(isExtensionTool(pi, "web_fetch")).toBe(false);
+  expect(isExtensionTool(pi, "subagent")).toBe(true);
+  expect(isExtensionTool(pi, "notes")).toBe(true);
+  // Unknown to the catalog (or no catalog at all): only the built-in names are excluded.
+  expect(isExtensionTool(pi, "late_tool")).toBe(true);
+  expect(isExtensionTool({}, "subagent")).toBe(true);
+  expect(isExtensionTool({}, "read")).toBe(false);
+  expect(isExtensionTool({ getAllTools: () => { throw new Error("not bound"); } }, "subagent")).toBe(true);
+  expect(isExtensionTool(pi, "")).toBe(false);
+  expect(isExtensionTool(pi, undefined)).toBe(false);
+});
+
+test("Pi activity log appends growth and keeps replaced text", async () => {
+  const { createActivityTracker, ACTIVITY_OUTPUT_CHANGED, ACTIVITY_TREE_CHANGED } =
+    await importFresh("./pi/herdr-agent-state.ts");
+  const tracker = createActivityTracker({});
+  const call = { toolCallId: "call_1", toolName: "research", args: { prompt: "Find \u001b[1mall\u001b[0m callers\nof foo" } };
+  expect(tracker.start(call, 10)).toBe(ACTIVITY_TREE_CHANGED);
+  expect(tracker.start(call, 11)).toBe(0);
+  const text = (value: string) => ({ ...call, partialResult: { content: [{ type: "text", text: value }] } });
+  expect(tracker.update(text("Step 1"), 12)).toBe(ACTIVITY_OUTPUT_CHANGED);
+  expect(tracker.update(text("Step 1"), 13)).toBe(0);
+  expect(tracker.update(text("Step 1 done"), 14)).toBe(ACTIVITY_OUTPUT_CHANGED);
+  // A lone surrogate never reaches the wire; carriage returns become newlines.
+  expect(tracker.update(text("Step 2\r\nbad \ud800 half"), 15)).toBe(ACTIVITY_OUTPUT_CHANGED);
+
+  const [node] = JSON.parse(tracker.snapshot({})).nodes;
+  expect(node).toEqual({
+    id: "call_1",
+    kind: "task",
+    label: "research Find all callers",
+    status: "running",
+    summary: "bad � half",
+    started_at_ms: 10,
+    output: { text: "Step 1 done\n\nStep 2\nbad � half", start: 0, format: "text" },
+  });
+  const final = { content: [{ type: "text", text: "Found 3 callers\n- a.ts\n- b.ts" }] };
+  expect(tracker.end({ ...call, result: final, isError: false }, 20)).toBe(ACTIVITY_TREE_CHANGED);
+  // Late events for a finished tool change nothing.
+  expect(tracker.update(text("late"), 21)).toBe(0);
+  expect(tracker.end({ ...call, result: {}, isError: true }, 22)).toBe(0);
+  // A finished node is summarized by the headline of its final text.
+  expect(JSON.parse(tracker.snapshot({})).nodes[0]).toMatchObject({
+    status: "done",
+    ended_at_ms: 20,
+    summary: "Found 3 callers",
+  });
+});
+
+test("Pi activity adopts a tool first seen after a reload", async () => {
+  const { createActivityTracker } = await importFresh("./pi/herdr-agent-state.ts");
+  const tracker = createActivityTracker({});
+  const call = { toolCallId: "call_2", toolName: "subagent", args: { agent: "scout", task: "Scan" } };
+  tracker.update({ ...call, partialResult: { content: [{ type: "text", text: "(running...)" }], details: { mode: "single", results: [delegated("scout", "Scan")] } } }, 30);
+  tracker.end({ ...call, result: { content: [{ type: "text", text: "Found it" }] }, isError: false }, 40);
+  const nodes = JSON.parse(tracker.snapshot({ session_id: "s" })).nodes;
+  // A single delegated agent is the tool node itself: no child row.
+  expect(nodes).toHaveLength(1);
+  expect(nodes[0]).toMatchObject({ id: "call_2", kind: "subagent", agent_type: "scout", status: "done", ended_at_ms: 40 });
+  expect(nodes[0].started_at_ms).toBeUndefined();
+});
+
+test("Pi activity stays bounded", async () => {
+  const { createActivityTracker } = await importFresh("./pi/herdr-agent-state.ts");
+  const tracker = createActivityTracker({});
+  const big = "x".repeat(5_000);
+  for (let index = 0; index < 20; index += 1) {
+    const call = { toolCallId: `call_${index}`, toolName: "subagent", args: { tasks: [] } };
+    tracker.start(call, index);
+    const results = Array.from({ length: 12 }, (_, step) =>
+      delegated(`agent${step}`, `task ${step}`, { step: step + 1, messages: [assistant(`${big}${step}`)] }),
+    );
+    tracker.update({ ...call, partialResult: { content: [{ type: "text", text: big }], details: { mode: "chain", results } } }, index);
+    if (index < 18) {
+      tracker.end({ ...call, result: { content: [{ type: "text", text: "ok" }] }, isError: false }, index);
+    }
+  }
+  const hint = tracker.snapshot({});
+  expect(hint.length).toBeLessThanOrEqual(64 * 1024);
+  const nodes = JSON.parse(hint).nodes as Record<string, any>[];
+  const roots = nodes.filter((node) => node.parent_id === undefined);
+  expect(roots).toHaveLength(8);
+  // Running roots survive pruning; a long chain keeps its latest eight steps.
+  expect(roots.map((node) => node.id)).toContain("call_18");
+  expect(roots.map((node) => node.id)).toContain("call_19");
+  expect(nodes.filter((node) => node.parent_id === "call_19").map((node) => node.id)).toEqual(
+    Array.from({ length: 8 }, (_, step) => `call_19/${step + 4}`),
+  );
+  // Over budget, finished nodes give up their text first and keep the byte offset.
+  const finished = nodes.find((node) => node.id === "call_17");
+  expect(finished?.output.text).toBe("");
+  expect(finished?.output.start).toBeGreaterThan(0);
+});
+
+test("Pi reports extension tool activity as snapshots from TUI sessions", async () => {
+  const requests = await startRecordingServer("pi-activity");
+  const { handlers, pi } = createExtensionHarness();
+  (pi as Record<string, unknown>).getAllTools = toolCatalog({ bash: "builtin", subagent: "ext" });
+  const { default: install } = await importFresh("./pi/herdr-agent-state.ts");
+  install(pi);
+
+  const context = {
+    ...piContext(() => false),
+    sessionManager: {
+      getSessionFile: () => "/tmp/pi-activity.jsonl",
+      getSessionId: () => "pi-activity",
+    },
+  };
+  await handlers.get("session_start")?.({ reason: "startup" }, context);
+  await waitFor(() => requestStates(requests).length === 1);
+
+  handlers.get("tool_execution_start")?.({ toolCallId: "b1", toolName: "bash", args: { command: "ls" } }, context);
+  const call = { toolCallId: "s1", toolName: "subagent", args: { agent: "scout", task: "Scan the repo" } };
+  handlers.get("tool_execution_start")?.(call, context);
+  await waitFor(() => activityRequests(requests).length === 1);
+  const [first] = activityRequests(requests);
+  expect(first).toMatchObject({ pane_id: "test:p1", source: "herdr:pi", agent: "pi" });
+  expect(typeof first.seq).toBe("number");
+  const snapshot = JSON.parse(first.hint as string);
+  expect(snapshot).toMatchObject({
+    type: "herdr.activity.snapshot",
+    version: 1,
+    session_path: "/tmp/pi-activity.jsonl",
+    session_id: "pi-activity",
+  });
+  expect(snapshot.nodes.map((node: { id: string }) => node.id)).toEqual(["s1"]);
+
+  // Output-only updates are coalesced into one later snapshot.
+  const update = (text: string) =>
+    handlers.get("tool_execution_update")?.({ ...call, partialResult: { content: [{ type: "text", text }] } }, context);
+  update("one");
+  update("one two");
+  update("one two three");
+  await Bun.sleep(50);
+  expect(activityRequests(requests)).toHaveLength(1);
+  await waitFor(() => activityRequests(requests).length === 2, 2_000);
+  expect(activityNodes(activityRequests(requests)[1])[0]).toMatchObject({
+    summary: "one two three",
+    output: { text: "one two three", start: 0 },
+  });
+
+  // Finishing is a tree change: sent at once, with a newer seq.
+  handlers.get("tool_execution_end")?.({ ...call, result: { content: [{ type: "text", text: "done" }] }, isError: false }, context);
+  await waitFor(() => activityRequests(requests).length === 3);
+  const [, second, third] = activityRequests(requests);
+  expect(third.seq as number).toBeGreaterThan(second.seq as number);
+  expect(activityNodes(third)[0]).toMatchObject({ status: "done" });
+});
+
+test("Pi drops a pending activity snapshot when the session shuts down", async () => {
+  const requests = await startRecordingServer("pi-activity-shutdown");
+  const { handlers, pi } = createExtensionHarness();
+  const { default: install } = await importFresh("./pi/herdr-agent-state.ts");
+  install(pi);
+
+  const context = piContext(() => false);
+  await handlers.get("session_start")?.({ reason: "startup" }, context);
+  const call = { toolCallId: "s2", toolName: "subagent", args: { agent: "scout", task: "Scan" } };
+  handlers.get("tool_execution_start")?.(call, context);
+  await waitFor(() => activityRequests(requests).length === 1);
+  handlers.get("tool_execution_update")?.({ ...call, partialResult: { content: [{ type: "text", text: "partial" }] } }, context);
+  handlers.get("session_shutdown")?.({}, context);
+  await Bun.sleep(1_200);
+  expect(activityRequests(requests)).toHaveLength(1);
+  handlers.get("tool_execution_end")?.({ ...call, result: {}, isError: false }, context);
+  await Bun.sleep(25);
+  expect(activityRequests(requests)).toHaveLength(1);
+});
+
+test("Pi never reports activity from headless modes", async () => {
+  const requests = await startRecordingServer("pi-activity-rpc");
+  const { handlers, pi } = createExtensionHarness();
+  const { default: install } = await importFresh("./pi/herdr-agent-state.ts");
+  install(pi);
+
+  // A delegated `pi --mode json` child loads the same extension.
+  const context = { ...piContext(() => false), hasUI: false, mode: "json" };
+  await handlers.get("session_start")?.({ reason: "startup" }, context);
+  const call = { toolCallId: "s3", toolName: "subagent", args: { agent: "scout", task: "Scan" } };
+  handlers.get("tool_execution_start")?.(call, context);
+  handlers.get("tool_execution_update")?.({ ...call, partialResult: { content: [{ type: "text", text: "x" }] } }, context);
+  handlers.get("tool_execution_end")?.({ ...call, result: {}, isError: false }, context);
+  await Bun.sleep(25);
+
+  expect(requests).toEqual([]);
+});
+
 function completionHandlers(handlers: Map<string, Handler>): string[] {
   return ["agent_end", "agent_settled"].filter((event) => handlers.has(event));
 }

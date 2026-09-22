@@ -4,7 +4,14 @@
 // HERDR_INTEGRATION_ID=pi
 // HERDR_INTEGRATION_VERSION=10
 // @ts-nocheck
+//
+// Reports to Herdr over the pane socket, from interactive (TUI) sessions only:
+// - pane.report_agent / pane.report_agent_session: lifecycle and session identity
+// - account.usage.report: session usage (tokens, cost, context window)
+// - pane.report_agent_activity: extension tool activity, sent as a
+//   `herdr.activity.snapshot` version 1 hint (see "Activity snapshot" below)
 
+import { Buffer } from "node:buffer";
 import net from "node:net";
 import path from "node:path";
 
@@ -318,6 +325,613 @@ function pushUsage(ctx: any, force: boolean): void {
   });
 }
 
+// Activity snapshot ------------------------------------------------------------
+//
+// Pi has no built-in subagents, plans, todos or background jobs: extensions
+// provide them. The official `subagent` example spawns
+// `pi --mode json -p --no-session`, so delegated agents never write a session
+// file Herdr could scan, and the session JSONL `id`/`parentId` tree is the
+// conversation branch structure, not an agent tree. The activity tree is
+// therefore observed from this process: every tool that is not one of Pi's
+// built-in tools becomes a root node (id = toolCallId), and the official
+// subagent `details.results[]` shape adds one child per delegated agent. The
+// streamed update text of each node is kept as an append-only log whose head
+// is dropped past a fixed tail, so Herdr can page it with byte cursors.
+//
+// The whole bounded tree is sent as a snapshot in the `hint` of
+// `pane.report_agent_activity`; each snapshot replaces the previous one (the
+// higher `seq` wins). Format, version 1 (reader:
+// `src/server/agent_activity/pi.rs`; later versions stay additive):
+//
+//   { "type": "herdr.activity.snapshot", "version": 1,
+//     "session_path"?: string, "session_id"?: string,
+//     "nodes": [{ "id", "parent_id"?, "kind", "label", "status",
+//                 "agent_type"?, "summary"?, "started_at_ms"?, "ended_at_ms"?,
+//                 "output"?: { "text", "start", "format" } }] }
+//
+// `kind` is `subagent` or `task`; `status` is `pending`, `running`, `done` or
+// `failed`; nodes come in tree order (a parent precedes its children).
+// `output.start` is the UTF-8 byte offset of `output.text` inside the node's
+// log (bytes dropped from the head); `format` is `markdown` or `text`.
+
+const ACTIVITY_HINT_TYPE = "herdr.activity.snapshot";
+const ACTIVITY_HINT_VERSION = 1;
+// Output-only updates are coalesced; lifecycle changes are sent at once.
+const ACTIVITY_UPDATE_INTERVAL_MS = 1_000;
+const ACTIVITY_MAX_ROOTS = 8;
+const ACTIVITY_MAX_CHILDREN = 8;
+const ACTIVITY_OUTPUT_TAIL_CHARS = 2_000;
+const ACTIVITY_LABEL_CHARS = 120;
+const ACTIVITY_SUMMARY_CHARS = 160;
+const ACTIVITY_HINT_MAX_CHARS = 64 * 1024;
+// Pi 0.87 built-in tool names (`allToolNames`). An extension that overrides
+// one of them (a sandboxed `bash`) is still the same everyday tool, so these
+// never become activity nodes.
+const BUILTIN_TOOL_NAMES = new Set(["read", "bash", "powershell", "edit", "write", "grep", "find", "ls"]);
+
+type ActivityStatus = "pending" | "running" | "done" | "failed";
+
+type ActivityOutput = {
+  log: string;
+  start: number;
+  last: string | undefined;
+  format: "markdown" | "text";
+};
+
+type ActivityNode = {
+  id: string;
+  parentId?: string;
+  kind: "subagent" | "task";
+  label: string;
+  status: ActivityStatus;
+  agentType?: string;
+  summary?: string;
+  startedAt?: number;
+  endedAt?: number;
+  output: ActivityOutput;
+  children: string[];
+};
+
+export type ActivitySession = { session_path?: string; session_id?: string };
+
+// Bit flags returned by the tracker: what a tool event changed.
+export const ACTIVITY_OUTPUT_CHANGED = 1;
+export const ACTIVITY_TREE_CHANGED = 2;
+
+const ANSI_SEQUENCE = /\u001b(?:\[[0-?]*[ -/]*[@-~]|\][^\u0007\u001b]*(?:\u0007|\u001b\\)?|[@-Z\\-_])/g;
+const LINE_CONTROLS = /[\u0000-\u001f\u007f-\u009f]+/g;
+const OUTPUT_CONTROLS = /[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/g;
+
+// Lone surrogates would serialize as `\udXXX` escapes that Herdr's JSON parser
+// rejects, dropping the whole snapshot.
+function wellFormed(text: string): string {
+  return typeof text.toWellFormed === "function" ? text.toWellFormed() : text;
+}
+
+function cleanOutput(text: string): string {
+  return wellFormed(text)
+    .replace(ANSI_SEQUENCE, "")
+    .replace(/\r\n?/g, "\n")
+    .replace(OUTPUT_CONTROLS, "");
+}
+
+function oneLine(text: unknown, max: number): string | undefined {
+  if (typeof text !== "string") {
+    return undefined;
+  }
+  const flat = wellFormed(text)
+    .replace(ANSI_SEQUENCE, "")
+    .replace(LINE_CONTROLS, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (flat.length === 0) {
+    return undefined;
+  }
+  if (flat.length <= max) {
+    return flat;
+  }
+  let cut = max - 1;
+  const code = flat.charCodeAt(cut - 1);
+  if (code >= 0xd800 && code <= 0xdbff) {
+    cut -= 1;
+  }
+  return `${flat.slice(0, cut)}…`;
+}
+
+function firstLine(text: string): string {
+  for (const line of text.split("\n")) {
+    if (line.trim().length > 0) {
+      return line;
+    }
+  }
+  return text;
+}
+
+function lastLine(text: string): string {
+  let end = text.length;
+  while (end > 0) {
+    const start = text.lastIndexOf("\n", end - 1) + 1;
+    const line = text.slice(start, end);
+    if (line.trim().length > 0) {
+      return line;
+    }
+    end = start - 1;
+  }
+  return text;
+}
+
+export function isExtensionTool(pi: any, toolName: unknown): boolean {
+  if (typeof toolName !== "string" || toolName.length === 0 || BUILTIN_TOOL_NAMES.has(toolName)) {
+    return false;
+  }
+  try {
+    const tools = pi?.getAllTools?.();
+    if (Array.isArray(tools)) {
+      const info = tools.find((tool) => tool?.name === toolName);
+      if (info) {
+        return info.sourceInfo?.source !== "builtin";
+      }
+    }
+  } catch {
+    // Older Pi builds without tool metadata: the name check above decides.
+  }
+  return true;
+}
+
+function toolResultText(result: any): string | undefined {
+  const content = result?.content;
+  if (typeof content === "string") {
+    return content;
+  }
+  if (!Array.isArray(content)) {
+    return undefined;
+  }
+  const parts = content
+    .filter((part) => part?.type === "text" && typeof part.text === "string")
+    .map((part) => part.text);
+  return parts.length > 0 ? parts.join("\n") : undefined;
+}
+
+function argsSummary(args: any): string | undefined {
+  if (typeof args === "string") {
+    return firstLine(args);
+  }
+  if (args === null || typeof args !== "object") {
+    return undefined;
+  }
+  // The official subagent example: parallel `tasks` or sequential `chain`.
+  if (Array.isArray(args.tasks) && args.tasks.length > 0) {
+    return `parallel (${args.tasks.length} tasks)`;
+  }
+  if (Array.isArray(args.chain) && args.chain.length > 0) {
+    return `chain (${args.chain.length} steps)`;
+  }
+  const agent = nonEmptyString(args.agent);
+  for (const key of ["task", "prompt", "description", "query", "command", "title", "name", "path"]) {
+    const value = nonEmptyString(args[key]);
+    if (value) {
+      return agent ? `${agent}: ${firstLine(value)}` : firstLine(value);
+    }
+  }
+  if (agent) {
+    return agent;
+  }
+  try {
+    const encoded = JSON.stringify(args);
+    return encoded === "{}" ? undefined : encoded;
+  } catch {
+    return undefined;
+  }
+}
+
+function lastAssistantMessage(messages: unknown): any {
+  if (!Array.isArray(messages)) {
+    return undefined;
+  }
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    if (messages[index]?.role === "assistant") {
+      return messages[index];
+    }
+  }
+  return undefined;
+}
+
+// Mirrors the example's `getFinalOutput`: the first text part of the latest
+// assistant message that has one.
+function delegatedFinalText(messages: unknown): string | undefined {
+  if (!Array.isArray(messages)) {
+    return undefined;
+  }
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index];
+    if (message?.role !== "assistant" || !Array.isArray(message.content)) {
+      continue;
+    }
+    for (const part of message.content) {
+      if (part?.type === "text" && typeof part.text === "string") {
+        return part.text;
+      }
+    }
+  }
+  return undefined;
+}
+
+// Status of one `details.results[]` entry. While the tool runs, `exitCode` is
+// only meaningful as the parallel placeholder -1 (a streaming entry reports 0
+// until its process exits), so the latest assistant `stopReason` decides.
+function delegatedStatus(result: any, toolEnded: boolean): ActivityStatus {
+  const stopReason = lastAssistantMessage(result.messages)?.stopReason ?? result.stopReason;
+  if (stopReason === "error" || stopReason === "aborted") {
+    return "failed";
+  }
+  const exitCode = finiteNumber(result.exitCode);
+  const hasMessages = Array.isArray(result.messages) && result.messages.length > 0;
+  if (exitCode === -1) {
+    return hasMessages ? "running" : "pending";
+  }
+  if (exitCode !== undefined && exitCode !== 0) {
+    return "failed";
+  }
+  if (toolEnded || stopReason === "stop" || stopReason === "length") {
+    return "done";
+  }
+  return "running";
+}
+
+function delegatedOutput(result: any, status: ActivityStatus): string | undefined {
+  const text = delegatedFinalText(result.messages);
+  if (status !== "failed") {
+    return text;
+  }
+  return nonEmptyString(result.errorMessage) ?? nonEmptyString(result.stderr) ?? text;
+}
+
+function delegatedLabel(result: any): string {
+  const step = finiteNumber(result.step);
+  const task = nonEmptyString(result.task);
+  const head = step !== undefined ? `#${step} ${result.agent}` : result.agent;
+  return oneLine(task ? `${head}: ${firstLine(task)}` : head, ACTIVITY_LABEL_CHARS) ?? "subagent";
+}
+
+function newOutput(format: ActivityOutput["format"]): ActivityOutput {
+  return { log: "", start: 0, last: undefined, format };
+}
+
+// Appends the latest update text to the node's log: a growing text appends its
+// new suffix, a replaced text is appended whole after a blank line. Returns
+// whether the log changed.
+function appendOutput(output: ActivityOutput, raw: unknown): boolean {
+  if (typeof raw !== "string" || raw.length === 0) {
+    return false;
+  }
+  const text = cleanOutput(raw);
+  if (text.length === 0 || text === output.last) {
+    return false;
+  }
+  const previous = output.last;
+  const hasLog = output.log.length > 0 || output.start > 0;
+  output.last = text;
+  output.log +=
+    previous !== undefined && text.startsWith(previous)
+      ? text.slice(previous.length)
+      : `${hasLog ? "\n\n" : ""}${text}`;
+  if (output.log.length > ACTIVITY_OUTPUT_TAIL_CHARS) {
+    let cut = output.log.length - ACTIVITY_OUTPUT_TAIL_CHARS;
+    const code = output.log.charCodeAt(cut);
+    if (code >= 0xdc00 && code <= 0xdfff) {
+      cut += 1;
+    }
+    output.start += Buffer.byteLength(output.log.slice(0, cut), "utf8");
+    output.log = output.log.slice(cut);
+  }
+  return true;
+}
+
+function isFinished(node: ActivityNode): boolean {
+  return node.status === "done" || node.status === "failed";
+}
+
+// Tracks the extension tool executions of one extension instance. `now` is
+// passed in so snapshots are reproducible in tests.
+export function createActivityTracker(pi: any) {
+  const nodes = new Map<string, ActivityNode>();
+  const roots: string[] = [];
+
+  function removeRoot(index: number) {
+    const [id] = roots.splice(index, 1);
+    for (const child of nodes.get(id)?.children ?? []) {
+      nodes.delete(child);
+    }
+    nodes.delete(id);
+  }
+
+  // Finished roots go first; running ones only past a hard ceiling.
+  function prune() {
+    while (roots.length > ACTIVITY_MAX_ROOTS) {
+      const finished = roots.findIndex((id) => {
+        const node = nodes.get(id);
+        return node !== undefined && isFinished(node);
+      });
+      if (finished >= 0) {
+        removeRoot(finished);
+      } else if (roots.length > ACTIVITY_MAX_ROOTS * 2) {
+        removeRoot(0);
+      } else {
+        break;
+      }
+    }
+  }
+
+  // Also adopts tools first seen through an update or end event, e.g. after
+  // `/reload` replaced this extension mid-run; their start time is unknown.
+  function rootFor(
+    event: any,
+    startedAt: number | undefined,
+  ): { node: ActivityNode; created: boolean } | undefined {
+    const id = nonEmptyString(event?.toolCallId);
+    const toolName = nonEmptyString(event?.toolName);
+    if (!id || !toolName) {
+      return undefined;
+    }
+    const existing = nodes.get(id);
+    if (existing) {
+      return existing.parentId === undefined ? { node: existing, created: false } : undefined;
+    }
+    if (!isExtensionTool(pi, toolName)) {
+      return undefined;
+    }
+    const subagent = /agent/i.test(toolName);
+    const node: ActivityNode = {
+      id,
+      kind: subagent ? "subagent" : "task",
+      label: oneLine(`${toolName} ${argsSummary(event.args) ?? ""}`, ACTIVITY_LABEL_CHARS) ?? toolName,
+      status: "running",
+      agentType: nonEmptyString(event.args?.agent),
+      startedAt,
+      output: newOutput(subagent ? "markdown" : "text"),
+      children: [],
+    };
+    nodes.set(id, node);
+    roots.push(id);
+    prune();
+    return { node, created: true };
+  }
+
+  // The summary follows the newest line while the node runs and the headline
+  // (first line) of its final text once it has finished.
+  function recordText(node: ActivityNode, text: unknown): number {
+    if (!appendOutput(node.output, text)) {
+      return 0;
+    }
+    const latest = node.output.last ?? "";
+    node.summary = oneLine(isFinished(node) ? firstLine(latest) : lastLine(latest), ACTIVITY_SUMMARY_CHARS);
+    return ACTIVITY_OUTPUT_CHANGED;
+  }
+
+  function syncChildren(parent: ActivityNode, details: any, now: number, toolEnded: boolean): number {
+    const results = details?.results;
+    // A single delegated agent is the tool node itself.
+    if (!Array.isArray(results) || details.mode === "single") {
+      return 0;
+    }
+    let changed = 0;
+    for (let index = Math.max(0, results.length - ACTIVITY_MAX_CHILDREN); index < results.length; index += 1) {
+      const result = results[index];
+      if (result === null || typeof result !== "object" || typeof result.agent !== "string") {
+        continue;
+      }
+      const id = `${parent.id}/${index}`;
+      const status = delegatedStatus(result, toolEnded);
+      let child = nodes.get(id);
+      if (!child) {
+        child = {
+          id,
+          parentId: parent.id,
+          kind: "subagent",
+          label: delegatedLabel(result),
+          status,
+          agentType: nonEmptyString(result.agent),
+          output: newOutput("markdown"),
+          children: [],
+        };
+        nodes.set(id, child);
+        parent.children.push(id);
+        changed |= ACTIVITY_TREE_CHANGED;
+      } else if (status !== child.status) {
+        child.status = status;
+        changed |= ACTIVITY_TREE_CHANGED;
+      }
+      // A queued (pending) agent has not started yet.
+      if (status !== "pending") {
+        child.startedAt ??= now;
+      }
+      if (isFinished(child)) {
+        child.endedAt ??= now;
+      }
+      changed |= recordText(child, delegatedOutput(result, status));
+    }
+    // A long chain keeps only its latest steps.
+    while (parent.children.length > ACTIVITY_MAX_CHILDREN) {
+      nodes.delete(parent.children.shift()!);
+      changed |= ACTIVITY_TREE_CHANGED;
+    }
+    return changed;
+  }
+
+  function orderedNodes(): ActivityNode[] {
+    const ordered: ActivityNode[] = [];
+    for (const id of roots) {
+      const root = nodes.get(id);
+      if (!root) {
+        continue;
+      }
+      ordered.push(root);
+      for (const child of root.children) {
+        const node = nodes.get(child);
+        if (node) {
+          ordered.push(node);
+        }
+      }
+    }
+    return ordered;
+  }
+
+  function serializeNode(node: ActivityNode, withText: boolean): Record<string, unknown> {
+    const encoded: Record<string, unknown> = {
+      id: node.id,
+      kind: node.kind,
+      label: node.label,
+      status: node.status,
+    };
+    if (node.parentId !== undefined) encoded.parent_id = node.parentId;
+    if (node.agentType !== undefined) encoded.agent_type = node.agentType;
+    if (node.summary !== undefined) encoded.summary = node.summary;
+    if (node.startedAt !== undefined) encoded.started_at_ms = node.startedAt;
+    if (node.endedAt !== undefined) encoded.ended_at_ms = node.endedAt;
+    const output = node.output;
+    if (output.log.length > 0 || output.start > 0) {
+      encoded.output = withText
+        ? { text: output.log, start: output.start, format: output.format }
+        : { text: "", start: output.start + Buffer.byteLength(output.log, "utf8"), format: output.format };
+    }
+    return encoded;
+  }
+
+  return {
+    start(event: any, now: number): number {
+      return rootFor(event, now)?.created ? ACTIVITY_TREE_CHANGED : 0;
+    },
+
+    update(event: any, now: number): number {
+      const root = rootFor(event, undefined);
+      if (!root || isFinished(root.node)) {
+        return 0;
+      }
+      let changed = root.created ? ACTIVITY_TREE_CHANGED : 0;
+      changed |= recordText(root.node, toolResultText(event.partialResult));
+      changed |= syncChildren(root.node, event.partialResult?.details, now, false);
+      return changed;
+    },
+
+    end(event: any, now: number): number {
+      const root = rootFor(event, undefined);
+      if (!root || isFinished(root.node)) {
+        return 0;
+      }
+      const node = root.node;
+      // Pi 0.87 sets `isError` only when `execute` throws; the subagent example
+      // reports failures as `{ isError: true }` inside the returned result.
+      node.status = event.isError === true || event.result?.isError === true ? "failed" : "done";
+      node.endedAt = now;
+      recordText(node, toolResultText(event.result));
+      syncChildren(node, event.result?.details, now, true);
+      for (const id of node.children) {
+        const child = nodes.get(id);
+        if (child && !isFinished(child)) {
+          child.status = node.status;
+          child.endedAt ??= now;
+        }
+      }
+      prune();
+      return ACTIVITY_TREE_CHANGED;
+    },
+
+    // Drops the tree (a new, resumed or forked session). Returns whether there
+    // was anything to clear.
+    reset(): boolean {
+      const hadNodes = roots.length > 0;
+      nodes.clear();
+      roots.length = 0;
+      return hadNodes;
+    },
+
+    // The `herdr.activity.snapshot` hint. Output text is dropped first from
+    // finished nodes, then from all nodes, if the snapshot would exceed the
+    // size budget (labels and summaries alone stay far below it).
+    snapshot(session: ActivitySession): string {
+      const ordered = orderedNodes();
+      const encode = (withText: (node: ActivityNode) => boolean) =>
+        JSON.stringify({
+          type: ACTIVITY_HINT_TYPE,
+          version: ACTIVITY_HINT_VERSION,
+          ...session,
+          nodes: ordered.map((node) => serializeNode(node, withText(node))),
+        });
+      let encoded = encode(() => true);
+      if (encoded.length > ACTIVITY_HINT_MAX_CHARS) {
+        encoded = encode((node) => !isFinished(node));
+      }
+      if (encoded.length > ACTIVITY_HINT_MAX_CHARS) {
+        encoded = encode(() => false);
+      }
+      return encoded;
+    },
+  };
+}
+
+function activitySession(): ActivitySession {
+  const session: ActivitySession = {};
+  if (currentAgentSessionPath) {
+    session.session_path = currentAgentSessionPath;
+  }
+  if (currentAgentSessionId) {
+    session.session_id = currentAgentSessionId;
+  }
+  return session;
+}
+
+type QueuedActivity = {
+  hint: string;
+  seq: number;
+};
+
+let activityInFlight = false;
+let queuedActivity: QueuedActivity | undefined;
+let lastActivityHint: string | undefined;
+
+// Latest snapshot wins: at most one request in flight, identical snapshots are
+// not sent twice.
+function queueActivity(hint: string): void {
+  if (hint === lastActivityHint) {
+    return;
+  }
+  lastActivityHint = hint;
+  queuedActivity = { hint, seq: nextReportSeq() };
+  if (!activityInFlight) {
+    void drainActivityQueue();
+  }
+}
+
+async function drainActivityQueue(): Promise<void> {
+  if (activityInFlight) {
+    return;
+  }
+
+  activityInFlight = true;
+  try {
+    while (queuedActivity) {
+      const next = queuedActivity;
+      queuedActivity = undefined;
+      await sendRequest({
+        id: `${source}:activity:${Date.now()}:${Math.random().toString(36).slice(2)}`,
+        method: "pane.report_agent_activity",
+        params: {
+          pane_id: paneId,
+          source,
+          agent: "pi",
+          hint: next.hint,
+          seq: next.seq,
+        },
+      });
+    }
+  } finally {
+    activityInFlight = false;
+    if (queuedActivity) {
+      void drainActivityQueue();
+    }
+  }
+}
+
 let sendInFlight = false;
 let queuedState: QueuedState | undefined;
 
@@ -359,6 +973,38 @@ export default function (pi) {
   let lastState: AgentState | undefined;
   let lastMessage: string | undefined;
   let rootSession = false;
+
+  const activity = createActivityTracker(pi);
+  let activityTimer: ReturnType<typeof setTimeout> | undefined;
+  let lastActivityFlushAt = 0;
+
+  function cancelActivityTimer() {
+    if (activityTimer) {
+      clearTimeout(activityTimer);
+      activityTimer = undefined;
+    }
+  }
+
+  function flushActivity() {
+    cancelActivityTimer();
+    lastActivityFlushAt = Date.now();
+    queueActivity(activity.snapshot(activitySession()));
+  }
+
+  // Tree changes (a tool or delegated agent starts, finishes or fails) go out
+  // at once; streamed output is coalesced to one snapshot per interval.
+  function publishActivity(changed: number) {
+    if (changed & ACTIVITY_TREE_CHANGED) {
+      flushActivity();
+      return;
+    }
+    if (!(changed & ACTIVITY_OUTPUT_CHANGED) || activityTimer) {
+      return;
+    }
+    const wait = Math.max(0, lastActivityFlushAt + ACTIVITY_UPDATE_INTERVAL_MS - Date.now());
+    activityTimer = setTimeout(flushActivity, wait);
+    activityTimer.unref?.();
+  }
 
   function desiredState() {
     if (blockedCount > 0) {
@@ -407,6 +1053,10 @@ export default function (pi) {
     rootSession = true;
     updateSessionRef(ctx);
     await reportSession(event?.reason);
+    // A replaced session starts with an empty activity tree.
+    if (activity.reset()) {
+      flushActivity();
+    }
     // A reload can replace this extension mid-run without emitting another agent_start.
     agentActive = ctx?.isIdle?.() === false;
     publishState(true);
@@ -449,5 +1099,35 @@ export default function (pi) {
     agentActive = false;
     publishState();
     pushUsage(ctx, true);
+  });
+
+  // Notification only, and never awaited on the socket: Pi awaits extension
+  // handlers inside the tool loop.
+  pi.on("tool_execution_start", (event) => {
+    if (!rootSession) {
+      return;
+    }
+    publishActivity(activity.start(event, Date.now()));
+  });
+
+  pi.on("tool_execution_update", (event) => {
+    if (!rootSession) {
+      return;
+    }
+    publishActivity(activity.update(event, Date.now()));
+  });
+
+  pi.on("tool_execution_end", (event) => {
+    if (!rootSession) {
+      return;
+    }
+    publishActivity(activity.end(event, Date.now()));
+  });
+
+  // This instance is being replaced (session switch, fork, reload): a pending
+  // snapshot must not be sent under the next session's identity.
+  pi.on("session_shutdown", () => {
+    cancelActivityTimer();
+    rootSession = false;
   });
 }

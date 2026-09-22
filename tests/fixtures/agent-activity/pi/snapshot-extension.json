@@ -1,0 +1,97 @@
+{
+  "type": "herdr.activity.snapshot",
+  "version": 1,
+  "session_path": "/home/user/.pi/agent/sessions/--home-user-demo--/2026-09-22T10-00-00-000Z_5f000000-0000-4000-8000-000000000001.jsonl",
+  "session_id": "5f000000-0000-4000-8000-000000000001",
+  "nodes": [
+    {
+      "id": "call_par",
+      "kind": "subagent",
+      "label": "subagent parallel (3 tasks)",
+      "status": "done",
+      "summary": "Parallel: 1/3 succeeded",
+      "started_at_ms": 1000,
+      "ended_at_ms": 3000,
+      "output": {
+        "text": "Parallel: 0/3 done, 3 running...\n\nParallel: 2/3 done, 1 running...\n\nParallel: 1/3 succeeded",
+        "start": 0,
+        "format": "markdown"
+      }
+    },
+    {
+      "id": "call_par/0",
+      "kind": "subagent",
+      "label": "scout: Map the auth module",
+      "status": "done",
+      "parent_id": "call_par",
+      "agent_type": "scout",
+      "summary": "The session store lives in src/auth/session.ts.",
+      "started_at_ms": 2000,
+      "ended_at_ms": 2000,
+      "output": {
+        "text": "Reading src/auth to find the session store.\n\nThe session store lives in src/auth/session.ts.",
+        "start": 0,
+        "format": "markdown"
+      }
+    },
+    {
+      "id": "call_par/1",
+      "kind": "subagent",
+      "label": "reviewer: Review the login flow",
+      "status": "failed",
+      "parent_id": "call_par",
+      "agent_type": "reviewer",
+      "summary": "provider rejected the request",
+      "started_at_ms": 2000,
+      "ended_at_ms": 2000,
+      "output": {
+        "text": "provider rejected the request",
+        "start": 0,
+        "format": "markdown"
+      }
+    },
+    {
+      "id": "call_par/2",
+      "kind": "subagent",
+      "label": "planner: Draft a migration plan",
+      "status": "done",
+      "parent_id": "call_par",
+      "agent_type": "planner",
+      "summary": "Plan: add a nullable column first.",
+      "started_at_ms": 2000,
+      "ended_at_ms": 3000,
+      "output": {
+        "text": "Listing the tables that change.\n\nPlan: add a nullable column first.",
+        "start": 0,
+        "format": "markdown"
+      }
+    },
+    {
+      "id": "call_ws",
+      "kind": "task",
+      "label": "web_search ratatui tree widget",
+      "status": "failed",
+      "summary": "rate limited",
+      "started_at_ms": 4000,
+      "ended_at_ms": 4300,
+      "output": {
+        "text": "Searching...\n\nrate limited",
+        "start": 0,
+        "format": "text"
+      }
+    },
+    {
+      "id": "call_notes",
+      "kind": "task",
+      "label": "notes 发布检查清单",
+      "status": "running",
+      "summary": "检查点：确认迁移脚本可回滚。",
+      "started_at_ms": 5000,
+      "output": {
+        "text": "可回滚。\n检查点：确认迁移脚本可回滚。\n检查点：确认迁移脚本可回滚。\n检查点：确认迁移脚本可回滚。\n检查点：确认迁移脚本可回滚。\n检查点：确认迁移脚本可回滚。\n检查点：确认迁移脚本可回滚。\n检查点：确认迁移脚本可回滚。\n检查点：确认迁移脚本可回滚。\n检查点：确认迁移脚本可回滚。\n检查点：确认迁移脚本可回滚。\n检查点：确认迁移脚本可回滚。\n检查点：确认迁移脚本可回滚。\n检查点：确认迁移脚本可回滚。\n检查点：确认迁移脚本可回滚。\n检查点：确认迁移脚本可回滚。\n检查点：确认迁移脚本可回滚。\n检查点：确认迁移脚本可回滚。\n检查点：确认迁移脚本可回滚。\n检查点：确认迁移脚本可回滚。\n检查点：确认迁移脚本可回滚。\n检查点：确认迁移脚本可回滚。\n检查点：确认迁移脚本可回滚。\n检查点：确认迁移脚本可回滚。\n检查点：确认迁移脚本可回滚。\n检查点：确认迁移脚本可回滚。\n检查点：确认迁移脚本可回滚。\n检查点：确认迁移脚本可回滚。\n检查点：确认迁移脚本可回滚。\n检查点：确认迁移脚本可回滚。\n检查点：确认迁移脚本可回滚。\n检查点：确认迁移脚本可回滚。\n检查点：确认迁移脚本可回滚。\n检查点：确认迁移脚本可回滚。\n检查点：确认迁移脚本可回滚。\n检查点：确认迁移脚本可回滚。\n检查点：确认迁移脚本可回滚。\n检查点：确认迁移脚本可回滚。\n检查点：确认迁移脚本可回滚。\n检查点：确认迁移脚本可回滚。\n检查点：确认迁移脚本可回滚。\n检查点：确认迁移脚本可回滚。\n检查点：确认迁移脚本可回滚。\n检查点：确认迁移脚本可回滚。\n检查点：确认迁移脚本可回滚。\n检查点：确认迁移脚本可回滚。\n检查点：确认迁移脚本可回滚。\n检查点：确认迁移脚本可回滚。\n检查点：确认迁移脚本可回滚。\n检查点：确认迁移脚本可回滚。\n检查点：确认迁移脚本可回滚。\n检查点：确认迁移脚本可回滚。\n检查点：确认迁移脚本可回滚。\n检查点：确认迁移脚本可回滚。\n检查点：确认迁移脚本可回滚。\n检查点：确认迁移脚本可回滚。\n检查点：确认迁移脚本可回滚。\n检查点：确认迁移脚本可回滚。\n检查点：确认迁移脚本可回滚。\n检查点：确认迁移脚本可回滚。\n检查点：确认迁移脚本可回滚。\n检查点：确认迁移脚本可回滚。\n检查点：确认迁移脚本可回滚。\n检查点：确认迁移脚本可回滚。\n检查点：确认迁移脚本可回滚。\n检查点：确认迁移脚本可回滚。\n检查点：确认迁移脚本可回滚。\n检查点：确认迁移脚本可回滚。\n检查点：确认迁移脚本可回滚。\n检查点：确认迁移脚本可回滚。\n检查点：确认迁移脚本可回滚。\n检查点：确认迁移脚本可回滚。\n检查点：确认迁移脚本可回滚。\n检查点：确认迁移脚本可回滚。\n检查点：确认迁移脚本可回滚。\n检查点：确认迁移脚本可回滚。\n检查点：确认迁移脚本可回滚。\n检查点：确认迁移脚本可回滚。\n检查点：确认迁移脚本可回滚。\n检查点：确认迁移脚本可回滚。\n检查点：确认迁移脚本可回滚。\n检查点：确认迁移脚本可回滚。\n检查点：确认迁移脚本可回滚。\n检查点：确认迁移脚本可回滚。\n检查点：确认迁移脚本可回滚。\n检查点：确认迁移脚本可回滚。\n检查点：确认迁移脚本可回滚。\n检查点：确认迁移脚本可回滚。\n检查点：确认迁移脚本可回滚。\n检查点：确认迁移脚本可回滚。\n检查点：确认迁移脚本可回滚。\n检查点：确认迁移脚本可回滚。\n检查点：确认迁移脚本可回滚。\n检查点：确认迁移脚本可回滚。\n检查点：确认迁移脚本可回滚。\n检查点：确认迁移脚本可回滚。\n检查点：确认迁移脚本可回滚。\n检查点：确认迁移脚本可回滚。\n检查点：确认迁移脚本可回滚。\n检查点：确认迁移脚本可回滚。\n检查点：确认迁移脚本可回滚。\n检查点：确认迁移脚本可回滚。\n检查点：确认迁移脚本可回滚。\n检查点：确认迁移脚本可回滚。\n检查点：确认迁移脚本可回滚。\n检查点：确认迁移脚本可回滚。\n检查点：确认迁移脚本可回滚。\n检查点：确认迁移脚本可回滚。\n检查点：确认迁移脚本可回滚。\n检查点：确认迁移脚本可回滚。\n检查点：确认迁移脚本可回滚。\n检查点：确认迁移脚本可回滚。\n检查点：确认迁移脚本可回滚。\n检查点：确认迁移脚本可回滚。\n检查点：确认迁移脚本可回滚。\n检查点：确认迁移脚本可回滚。\n检查点：确认迁移脚本可回滚。\n检查点：确认迁移脚本可回滚。\n检查点：确认迁移脚本可回滚。\n检查点：确认迁移脚本可回滚。\n检查点：确认迁移脚本可回滚。\n检查点：确认迁移脚本可回滚。\n检查点：确认迁移脚本可回滚。\n检查点：确认迁移脚本可回滚。\n检查点：确认迁移脚本可回滚。\n检查点：确认迁移脚本可回滚。\n检查点：确认迁移脚本可回滚。\n检查点：确认迁移脚本可回滚。\n检查点：确认迁移脚本可回滚。\n检查点：确认迁移脚本可回滚。\n检查点：确认迁移脚本可回滚。\n检查点：确认迁移脚本可回滚。\n检查点：确认迁移脚本可回滚。\n检查点：确认迁移脚本可回滚。\n",
+        "start": 718,
+        "format": "text"
+      }
+    }
+  ]
+}
