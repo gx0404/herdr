@@ -9,6 +9,7 @@ import net from "node:net";
 const SOURCE = "herdr:opencode";
 const AGENT = "opencode";
 let reportSeq = Date.now() * 1000;
+let activitySeq = Date.now() * 1000;
 let requestChain = Promise.resolve();
 let reportedRootSessionID;
 
@@ -28,9 +29,25 @@ const CHILD_EVENT_STATES = new Map([
   ["question.rejected", "working"],
 ]);
 
+// Events that can change the session tree or todos. The server refreshes the
+// activity tree from opencode.db on each hint; the hint only names the event.
+const ACTIVITY_EVENTS = new Set([
+  "session.created",
+  "session.updated",
+  "session.status",
+  "session.idle",
+  "session.deleted",
+  "todo.updated",
+]);
+
 function nextReportSeq() {
   reportSeq += 1;
   return reportSeq;
+}
+
+function nextActivitySeq() {
+  activitySeq += 1;
+  return activitySeq;
 }
 
 function sessionIDFromProperties(properties) {
@@ -74,6 +91,7 @@ function stateFromSessionStatus(status) {
     : undefined;
 }
 
+// `params` may be a function so that its content is decided at dispatch time.
 function request(method, params) {
   const pending = requestChain.then(() => requestOnce(method, params));
   requestChain = pending.catch(() => {});
@@ -94,6 +112,10 @@ function requestOnce(method, params) {
   const requestId = `${SOURCE}:${Date.now()}:${Math.floor(Math.random() * 1_000_000)
     .toString()
     .padStart(6, "0")}`;
+  // Activity hints bring their own sequence so lifecycle numbering stays
+  // contiguous for the server's stale-report check.
+  const resolved = typeof params === "function" ? params() : params;
+  const seq = resolved.seq ?? nextReportSeq();
   const request = {
     id: requestId,
     method,
@@ -101,8 +123,8 @@ function requestOnce(method, params) {
       pane_id: paneId,
       source: SOURCE,
       agent: AGENT,
-      seq: nextReportSeq(),
-      ...params,
+      ...resolved,
+      seq,
     },
   };
 
@@ -140,6 +162,24 @@ function reportState(state, sessionID) {
   return request("pane.report_agent", params);
 }
 
+// One slot: events arriving before the queued report is dispatched only
+// replace its hint, so a burst collapses into a single request. Rate limiting
+// of the actual refresh belongs to the server.
+let queuedActivityHint;
+
+function reportActivity(hint) {
+  if (queuedActivityHint !== undefined) {
+    queuedActivityHint = hint;
+    return Promise.resolve();
+  }
+  queuedActivityHint = hint;
+  return request("pane.report_agent_activity", () => {
+    const params = { hint: queuedActivityHint, seq: nextActivitySeq() };
+    queuedActivityHint = undefined;
+    return params;
+  });
+}
+
 export const HerdrAgentStatePlugin = async () => {
   if (
     process.env.HERDR_ENV !== "1" ||
@@ -168,6 +208,9 @@ export const HerdrAgentStatePlugin = async () => {
       }
       rememberSession(sessionID);
       rememberSession(info?.id);
+      if (ACTIVITY_EVENTS.has(type)) {
+        await reportActivity(type);
+      }
       if (sessionID && childSessions.has(sessionID)) {
         const state = CHILD_EVENT_STATES.get(type);
         if (state) {
@@ -226,7 +269,7 @@ export const HerdrAgentStatePlugin = async () => {
 };
 
 // The loader takes `default` first: an object carrying `id`/`server`/`tui`
-// only has its `server()` called and named exports are ignored, while a module
+// only has its `server()` called, and named exports are ignored; a module
 // without such a default falls back to every export. Keep both so either
 // loader path reaches the same factory. V2 calls setup() instead. Its shared
 // server cannot attribute sessions using its process environment: the
