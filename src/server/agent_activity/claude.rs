@@ -75,8 +75,8 @@ use crate::api::schema::{
     AgentActivityContentFormat, AgentActivityKind, AgentActivityNode, AgentActivityStatus,
 };
 
-/// 一次 discover 最多收录的子 agent 数；超出后按路径序丢弃其余（分组与待办节点
-/// 另计，各自有界）。
+/// 一次 discover 最多收录的子 agent 数；超出后保留最近修改的那批（分组与待办
+/// 节点另计，各自有界）。
 const MAX_NODES: usize = 256;
 /// 单个子 agent 转录的完整扫描字节上限。
 const MAX_TRANSCRIPT_BYTES: u64 = 4 * 1024 * 1024;
@@ -196,13 +196,23 @@ fn session_dir_from_transcript(path: &Path) -> Option<PathBuf> {
     Some(parent.join(stem))
 }
 
+/// 转录根目录，本适配器所有「按 home 拼路径」的唯一出口。
+///
+/// TODO(activity-schema)：Claude Code 支持用 `CLAUDE_CONFIG_DIR` 把配置目录挪出
+/// `<home>/.claude`，此处跟不上。骨架车道会给 `SourceContext` 追加可选的 agent
+/// 配置目录字段，合入后把本函数改成「优先用该字段，缺省才回退 `<home>/.claude`」
+/// 即可，调用方不用动。
+fn projects_root(home: &Path) -> PathBuf {
+    home.join(".claude").join("projects")
+}
+
 /// 在 `<home>/.claude/projects/*/` 下找名为会话 id 的目录。项目 slug 由 cwd 推导的
 /// 规则并不可靠（路径里的 `-` 与分隔符会混淆），直接逐个项目目录探测更稳。
 fn find_session_dir_by_id(home: &Path, session_id: &str) -> Option<PathBuf> {
     if session_id.is_empty() || session_id.contains(['/', '\\']) || session_id.contains("..") {
         return None;
     }
-    let projects = home.join(".claude").join("projects");
+    let projects = projects_root(home);
     let mut matches: Vec<PathBuf> = Vec::new();
     for entry in std::fs::read_dir(&projects).ok()?.flatten() {
         if !entry.file_type().is_ok_and(|kind| kind.is_dir()) {
@@ -304,6 +314,24 @@ fn workflow_of(rel: &str) -> Option<String> {
     (parts.next()? == "subagents" && parts.next()? == "workflows")
         .then(|| parts.next().map(str::to_string))
         .flatten()
+}
+
+/// 超过节点上限时保留**最近修改**的那批，再按相对路径排回来保持顺序确定。
+///
+/// 直接按相对路径截断会让排在后面的目录（如 `subagents/workflows/wf_zzz/`）整批
+/// 消失，而那往往正是刚派生、最该看见的一批。缺修改时间的排最后先丢。
+fn retain_recent(files: &mut Vec<SubagentFile>, limit: usize) {
+    if files.len() <= limit {
+        return;
+    }
+    files.sort_by(|left, right| {
+        right
+            .modified_ms
+            .cmp(&left.modified_ms)
+            .then_with(|| left.rel.cmp(&right.rel))
+    });
+    files.truncate(limit);
+    files.sort_by(|left, right| left.rel.cmp(&right.rel));
 }
 
 fn find_subagent_file(session_dir: &Path, agent_id: &str) -> Option<PathBuf> {
@@ -538,7 +566,7 @@ fn scan_transcript(path: &Path, modified_ms: Option<u64>, budget: &mut u64) -> T
 
 fn build_tree(session_dir: &Path, now_ms: u64) -> Vec<AgentActivityNode> {
     let mut files = collect_subagent_files(session_dir);
-    files.truncate(MAX_NODES);
+    retain_recent(&mut files, MAX_NODES);
 
     // 每个 workflow 目录读一次 journal 与状态文件；读不动就只是少了增强。
     let mut journals: BTreeMap<String, BTreeMap<String, JournalRecord>> = BTreeMap::new();
@@ -1257,6 +1285,44 @@ mod tests {
         assert!(summary.starts_with("sonnet · 2 msg"), "{summary}");
         assert!(summary.contains("in 1.2k"), "{summary}");
         assert!(summary.contains("out 340"), "{summary}");
+    }
+
+    #[test]
+    fn the_node_cap_keeps_the_most_recently_modified_subagents() {
+        fn file(rel: &str, modified_ms: Option<u64>) -> SubagentFile {
+            SubagentFile {
+                agent_id: rel.to_string(),
+                path: PathBuf::from(rel),
+                rel: rel.to_string(),
+                workflow: None,
+                modified_ms,
+            }
+        }
+
+        // 按相对路径排在最后、但刚写过的那批必须留下；缺修改时间的先丢。
+        let mut files = vec![
+            file("subagents/a", Some(10)),
+            file("subagents/b", Some(40)),
+            file("subagents/c", None),
+            file("subagents/workflows/wf_z/d", Some(30)),
+        ];
+        retain_recent(&mut files, 2);
+        assert_eq!(
+            files
+                .iter()
+                .map(|file| file.rel.as_str())
+                .collect::<Vec<_>>(),
+            ["subagents/b", "subagents/workflows/wf_z/d"],
+            "保留最近修改的两个，并排回相对路径序"
+        );
+
+        // 未超限时一个不动。
+        let mut few = vec![file("subagents/b", Some(1)), file("subagents/a", Some(9))];
+        retain_recent(&mut few, 2);
+        assert_eq!(
+            few.iter().map(|file| file.rel.as_str()).collect::<Vec<_>>(),
+            ["subagents/b", "subagents/a"]
+        );
     }
 
     #[test]
