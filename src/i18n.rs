@@ -1110,6 +1110,8 @@ pub struct AgentPanelTexts {
     pub activity_more_fmt: &'static str, // args: n
     pub menu_focus: &'static str,
     pub menu_view_activity: &'static str,
+    /// 重命名的是 agent 所在的 pane（`pane.rename`，改 pane 标签），文案照实写
+    /// 「重命名窗格」，与 pane 右键菜单同名。
     pub menu_rename: &'static str,
     pub menu_usage: &'static str,
     pub menu_bind_account: &'static str,

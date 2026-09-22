@@ -905,7 +905,7 @@ pub const TEXTS: Texts = Texts {
         activity_more_fmt: "+{n} more",
         menu_focus: "Focus",
         menu_view_activity: "View agent activity",
-        menu_rename: "Rename agent",
+        menu_rename: "Rename pane",
         menu_usage: "Usage",
         menu_bind_account: "Bind account",
         menu_close: "Close pane",

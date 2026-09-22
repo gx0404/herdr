@@ -1310,6 +1310,23 @@ fn activity_badge_distinguishes_running_total_and_none() {
     }
 }
 
+/// agent 行右键的「重命名」实际执行 `pane.rename`、改 pane 标签（审查发现 4）：
+/// 文案照实写「重命名窗格」（与 pane 右键菜单的同名项一致；那边归菜单车道，
+/// 这里只钉本结构体的字面量，不跨车道比对）。
+#[test]
+fn agent_menu_rename_is_labelled_as_renaming_the_pane() {
+    for (lang, expected) in [
+        (crate::i18n::Lang::En, "Rename pane"),
+        (crate::i18n::Lang::ZhCn, "重命名窗格"),
+    ] {
+        assert_eq!(
+            crate::i18n::texts_for(lang).agent_panel.menu_rename,
+            expected,
+            "{lang:?}"
+        );
+    }
+}
+
 /// 「运行中 / 总数」形态的活动徽标（有运行中的节点时）。
 fn running_badge(running: u32, total: u32) -> String {
     crate::i18n::fill(
@@ -2218,6 +2235,11 @@ fn tree_agent_context_actions_rename_bind_and_close_the_agent_pane() {
                 &rename.target,
                 ClientRenameTarget::Pane { pane_id } if pane_id == "pane_2"
             ));
+            assert_eq!(
+                rename.title,
+                crate::i18n::texts().dialogs.rename_pane,
+                "浮层标题与 pane 右键菜单的重命名同一条 i18n 文案"
+            );
         }
         other => panic!("应打开 pane 重命名浮层: {other:?}"),
     }

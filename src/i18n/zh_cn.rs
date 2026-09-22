@@ -912,7 +912,7 @@ pub const TEXTS: Texts = Texts {
         activity_more_fmt: "还有 {n} 项",
         menu_focus: "聚焦",
         menu_view_activity: "查看 Agent 活动",
-        menu_rename: "重命名 Agent",
+        menu_rename: "重命名窗格",
         menu_usage: "用量",
         menu_bind_account: "绑定账号",
         menu_close: "关闭窗格",
