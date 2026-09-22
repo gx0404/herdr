@@ -494,8 +494,9 @@ fn characterization_classic_launch_is_flat_in_global_launch_order() {
 }
 
 /// (c) classic 矮面板：列表区不足 3 行（放不下「分组头 + 一个 agent 行」）时
-/// 退化为只画 agent 行的平铺——无分组头、无树前缀，行序与树里的 agent 行序一致
-/// （被折叠分组藏起来的 agent 同样不出现）。
+/// 退化为平铺视图——无分组头、无树前缀。行带完整 token（工作区名不再由分组头
+/// 承载），按聚合顺序列出全部 agent：这个视图没有分组头，面板内折叠了的工作区
+/// 在这里展不开，所以折叠也藏不住它的 agent（审查发现 1）。
 #[test]
 fn characterization_classic_short_panel_degrades_to_flat_rows() {
     let mut state = classic_state(AgentPanelSortConfig::Spaces);
@@ -512,8 +513,8 @@ fn characterization_classic_short_panel_degrades_to_flat_rows() {
     assert_eq!(classic_hit_ids(&state).first(), Some(&"pane_1"));
     let one = rect_rows(&state, classic_agent_rect(&state, "pane_1"));
     assert!(
-        one[0].starts_with("  ○ one"),
-        "平铺行只有两列前缀，内容同树里的 agent 行: {one:?}"
+        one[0].starts_with("  ○ client-shell"),
+        "平铺行只有两列前缀，首行带工作区名: {one:?}"
     );
     assert_no_tree_glyphs(&body_text(&state));
 
@@ -521,11 +522,27 @@ fn characterization_classic_short_panel_degrades_to_flat_rows() {
     state.compose(106, 30).expect("高面板帧");
     assert_eq!(state.hits.agent_tree_toggles.len(), 2);
 
-    // 折叠的分组在退化视图里同样藏起自己的 agent。
+    // 折叠 ws_1 之后，退化视图仍能逐个滚到全部三个 agent，各带自己的工作区名。
     state.toggle_collapsed_group(&ClientEndpointId::Local, agent_group_key("ws_1"));
-    state.agent_scroll = 0;
-    state.compose(106, 10).expect("折叠后的矮面板帧");
-    assert_eq!(classic_hit_ids(&state), ["pane_3"]);
+    let mut seen = Vec::new();
+    for start in 0..3 {
+        state.agent_scroll = start;
+        state.compose(106, 10).expect("折叠后的矮面板帧");
+        assert!(state.hits.agent_tree_toggles.is_empty());
+        let pane_id = classic_hit_ids(&state)[0].to_owned();
+        let first_line = rect_rows(&state, classic_agent_rect(&state, &pane_id))[0].clone();
+        assert_no_tree_glyphs(&first_line);
+        seen.push((pane_id, compact(&first_line)));
+    }
+    assert_eq!(
+        seen,
+        [
+            ("pane_1".to_owned(), "○client-shell".to_owned()),
+            ("pane_2".to_owned(), "×client-shell".to_owned()),
+            ("pane_3".to_owned(), "◐herdr".to_owned()),
+        ],
+        "折叠的工作区藏不住平铺视图里的 agent"
+    );
 
     // Launch 下退化视图按全局启动顺序平铺。
     let mut state = classic_state(AgentPanelSortConfig::Launch);
@@ -537,6 +554,60 @@ fn characterization_classic_short_panel_degrades_to_flat_rows() {
         flat_order.push(classic_hit_ids(&state)[0].to_owned());
     }
     assert_eq!(flat_order, ["pane_2", "pane_3", "pane_1"]);
+}
+
+/// 联邦折叠侧栏（单列「机器首字母 + 状态图标」）同样走平铺视图：面板内折叠了
+/// 工作区，其下的 agent 仍按聚合顺序列出、可点（这里没有分组头，展不开）；机器
+/// 层折叠照旧藏起该端点的 agent（上方工作区区的机器行可切换）（审查发现 1）。
+#[test]
+fn characterization_federated_collapsed_sidebar_keeps_agents_of_collapsed_workspaces() {
+    let (mut state, remote) = federated_state(AgentPanelSortConfig::Spaces);
+    state.toggle_collapsed_group(&ClientEndpointId::Local, agent_group_key("ws_1"));
+    state.toggle_collapsed_group(&remote, agent_group_key("ws_1"));
+    state.sidebar_collapsed = true;
+    state.compose(106, 40).expect("联邦折叠侧栏帧");
+
+    assert_eq!(
+        endpoint_hit_ids(&state),
+        [
+            local("pane_1"),
+            local("pane_2"),
+            local("pane_3"),
+            (remote.clone(), "pane_1".to_owned()),
+            (remote.clone(), "pane_2".to_owned()),
+        ],
+        "两端的 ws_1 都折叠了，折叠侧栏仍列出全部 agent"
+    );
+    let cells = |state: &ClientShellState, index: usize| {
+        compact(&rect_rows(state, state.hits.endpoint_agents[index].0)[0])
+    };
+    assert_eq!(cells(&state, 0), "L○", "本机 one：Idle");
+    assert_eq!(cells(&state, 1), "L×", "本机 two：Blocked");
+    assert_eq!(cells(&state, 3), "B◐", "远端 r-one：Working");
+
+    // 折叠工作区里的远端 agent 照样可点：切到该端点并聚焦它。
+    let (rect, _, _) = state.hits.endpoint_agents[3].clone();
+    let outcome = state.handle_raw_events(vec![click(rect)]);
+    assert!(
+        matches!(
+            outcome.actions.as_slice(),
+            [ClientShellAction::ActivateEndpoint {
+                endpoint_id,
+                target: Some(ClientEndpointFocusTarget::Pane(pane_id)),
+            }] if endpoint_id == &remote && pane_id == "pane_1"
+        ),
+        "{:?}",
+        outcome.actions
+    );
+
+    // 机器层折叠：远端的 agent 不再列出。
+    state.collapsed_endpoints.insert(remote.clone());
+    state.bump_tree_collapse_epoch();
+    state.compose(106, 40).expect("远端机器折叠帧");
+    assert_eq!(
+        endpoint_hit_ids(&state),
+        [local("pane_1"), local("pane_2"), local("pane_3")]
+    );
 }
 
 /// (c) 退化阈值：逐个终端高度扫一遍，「无分组头」当且仅当列表区不足 3 行。

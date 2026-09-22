@@ -12,6 +12,10 @@
 //! 仍可展开活动摘要。外部来源（不属于任何 pane 的条目）按 source 单列「外部」
 //! 分组（状态过滤视图不列），点击其行打开「Agent 活动」窗口。
 //!
+//! 平铺视图：列表区不足 3 行的退化视图与联邦折叠侧栏不画分组头，改用构建期
+//! 一并产出的平铺行（[`flat_view_rows`]）——忽略面板内的折叠态、保留完整
+//! token、按聚合顺序列出全部 agent，被折叠分组里的 agent 仍可见可点。
+//!
 //! 活动摘要：快照默认只带每个 agent 的 running / total 计数与至多 1 个最新节点
 //! （`truncated` 表示还有更多，整树经 `agent.activity.read` 取，归「Agent 活动」
 //! 窗口）。agent 行右侧画活动徽标；展开后是最新节点一行，被截断时再跟一行
@@ -49,7 +53,9 @@ use super::feedback::ChromeHover;
 use super::state::AgentActivityHit;
 use super::*;
 use crate::api::schema::{AgentActivityKind, AgentActivityStatus, AgentStatus};
-use crate::protocol::{ClientShellActivityNode, ClientShellAgent, ClientShellAgentActivity};
+use crate::protocol::{
+    ClientShellActivityNode, ClientShellAgent, ClientShellAgentActivity, ClientShellExternalAgent,
+};
 use crate::ui::display_width;
 use crate::ui::kit::tree::{
     fill_last_child_masks, render_tree_prefix, tree_prefix_width, TreeEntry,
@@ -130,6 +136,9 @@ pub(super) struct AgentTreeNode {
     running: bool,
     /// 活动徽标（见 [`ActivityBadge`]），没有活动为 `None`。
     badge: Option<ActivityBadge>,
+    /// 平铺视图的行，只挂在整棵树的第 0 行上（见 [`flat_view_rows`]）；其余行与
+    /// 平铺视图自己的行都是 `None`。
+    flat_view: Option<Box<[AgentTreeRow]>>,
     pub(super) kind: AgentTreeKind,
 }
 
@@ -152,6 +161,7 @@ impl AgentTreeNode {
             },
             running: running > 0,
             badge: activity_badge(running, total),
+            flat_view: None,
             kind,
         }
     }
@@ -172,6 +182,21 @@ impl AgentTreeNode {
 
 /// 统一树展平后的一行：`TreeEntry` 的深度 / 折叠键 / 末子掩码 + 客户端负载。
 pub(super) type AgentTreeRow = TreeEntry<AgentTreeNode>;
+
+/// 退化视图（列表区不足 3 行）与联邦折叠侧栏用的平铺行。这两种视图不画分组头，
+/// 面板内折叠了的分组在这里展不开，所以平铺行忽略面板内的折叠态、保留完整 token
+/// （工作区名等不再由分组头承载），按 `aggregate_agent_rows` 的顺序列出全部
+/// agent，再跟外部条目（状态过滤视图不列）；机器层折叠（`collapsed_endpoints`，
+/// 工作区区的机器行照样能切换）在树里生效时这里同样生效。
+///
+/// 平铺行在视图计算阶段与树一起构建，挂在树的第 0 行上随行切片传给渲染：
+/// `ShellRenderState` 只带一个行切片（共享热文件，不为它加字段）。有 agent 或外部
+/// 条目时树至少有一个分组头或 agent 行，所以树为空时平铺视图也为空。
+pub(super) fn flat_view_rows(rows: &[AgentTreeRow]) -> &[AgentTreeRow] {
+    rows.first()
+        .and_then(|row| row.kind.flat_view.as_deref())
+        .unwrap_or(&[])
+}
 
 /// 构建树时的折叠态只读视图（三个集合都在 `ClientShellState` 上）。
 pub(super) struct CollapseState<'a> {
@@ -336,6 +361,7 @@ pub(super) fn build_agent_tree(
         config,
         collapse,
         active_endpoint_id,
+        owners_only: false,
     };
 
     if flat {
@@ -475,6 +501,45 @@ pub(super) fn build_agent_tree(
         }
     }
     fill_last_child_masks(&mut rows);
+
+    // 平铺视图（见 `flat_view_rows`）：机器层折叠只在树按机器分组时生效，与树
+    // 一致（`Launch` / 状态过滤的平铺树本来就不看机器折叠）。
+    let honor_machine_collapse = federated && !flat;
+    let visible = |endpoint_id: &ClientEndpointId| {
+        !(honor_machine_collapse && collapse.endpoint_collapsed(endpoint_id))
+    };
+    let mut flat_rows = Vec::new();
+    let mut flat_builder = TreeBuilder {
+        rows: &mut flat_rows,
+        config,
+        collapse,
+        active_endpoint_id,
+        owners_only: true,
+    };
+    for row in ordered
+        .iter()
+        .filter(|row| visible(row.endpoint.endpoint_id))
+    {
+        flat_builder.push_agent(
+            0,
+            row.endpoint,
+            row.agent,
+            federated.then_some(row.endpoint.label),
+            TokenDrop::default(),
+        );
+    }
+    if view_label.is_none() {
+        for endpoint in
+            cached_endpoint_snapshots(endpoints).filter(|endpoint| visible(endpoint.endpoint_id))
+        {
+            flat_builder.push_external_entries(0, endpoint);
+        }
+    }
+    if let Some(first) = rows.first_mut() {
+        if !flat_rows.is_empty() {
+            first.kind.flat_view = Some(flat_rows.into_boxed_slice());
+        }
+    }
     rows
 }
 
@@ -555,6 +620,8 @@ struct TreeBuilder<'a> {
     config: &'a ClientShellConfig,
     collapse: &'a CollapseState<'a>,
     active_endpoint_id: &'a ClientEndpointId,
+    /// 平铺视图只要属主行（agent / 外部条目）：不挂活动子行，也没有折叠开关。
+    owners_only: bool,
 }
 
 impl TreeBuilder<'_> {
@@ -616,14 +683,7 @@ impl TreeBuilder<'_> {
         if externals.is_empty() {
             return;
         }
-        // 按 source 分组，保持首次出现的顺序；来源种类极少，线性查重即可。
-        let mut sources: Vec<&str> = Vec::new();
-        for external in externals {
-            if !sources.contains(&external.source.as_str()) {
-                sources.push(&external.source);
-            }
-        }
-        for source in sources {
+        for source in external_sources(externals) {
             let key = external_group_key(source);
             let collapsed = self.collapse.group_key_present(endpoint.endpoint_id, &key);
             let count = externals
@@ -650,28 +710,54 @@ impl TreeBuilder<'_> {
                 .iter()
                 .filter(|external| external.source == source)
             {
-                let owner = owner_key(&AgentActivityOwner::External {
-                    external_id: external.external_id.clone(),
-                });
-                self.push_owner(
-                    depth + 1,
-                    endpoint,
-                    owner,
-                    &external.activity,
-                    AgentTreeKind::ExternalAgent {
-                        external_id: external.external_id.clone(),
-                        label: if external.label.is_empty() {
-                            external.external_id.clone()
-                        } else {
-                            external.label.clone()
-                        },
-                        agent: external.agent.clone(),
-                        status: external.agent_status,
-                        readable: external.readable,
-                    },
-                );
+                self.push_external_entry(depth + 1, endpoint, external);
             }
         }
+    }
+
+    /// 平铺视图的外部条目：不画来源分组头、不看其折叠态，顺序与树里一致（按
+    /// source 首次出现的顺序归组）。
+    fn push_external_entries(&mut self, depth: u8, endpoint: CachedEndpointSnapshot<'_>) {
+        let externals = &endpoint.snapshot.external_agents;
+        if externals.is_empty() {
+            return;
+        }
+        for source in external_sources(externals) {
+            for external in externals
+                .iter()
+                .filter(|external| external.source == source)
+            {
+                self.push_external_entry(depth, endpoint, external);
+            }
+        }
+    }
+
+    fn push_external_entry(
+        &mut self,
+        depth: u8,
+        endpoint: CachedEndpointSnapshot<'_>,
+        external: &ClientShellExternalAgent,
+    ) {
+        let owner = owner_key(&AgentActivityOwner::External {
+            external_id: external.external_id.clone(),
+        });
+        self.push_owner(
+            depth,
+            endpoint,
+            owner,
+            &external.activity,
+            AgentTreeKind::ExternalAgent {
+                external_id: external.external_id.clone(),
+                label: if external.label.is_empty() {
+                    external.external_id.clone()
+                } else {
+                    external.label.clone()
+                },
+                agent: external.agent.clone(),
+                status: external.agent_status,
+                readable: external.readable,
+            },
+        );
     }
 
     /// 活动树的属主行（agent 或外部条目）及其展开的活动节点。
@@ -690,7 +776,7 @@ impl TreeBuilder<'_> {
         } else {
             0
         };
-        let has_children = !activity.nodes.is_empty() || hidden > 0;
+        let has_children = !self.owners_only && (!activity.nodes.is_empty() || hidden > 0);
         let key = activity_list_key(&owner);
         // 活动摘要默认折叠：键在集合里才展开。
         let expanded = has_children && self.collapse.group_key_present(endpoint.endpoint_id, &key);
@@ -796,6 +882,17 @@ impl TreeBuilder<'_> {
     }
 }
 
+/// 外部条目的来源，按首次出现的顺序去重；来源种类极少，线性查重即可。
+fn external_sources(externals: &[ClientShellExternalAgent]) -> Vec<&str> {
+    let mut sources: Vec<&str> = Vec::new();
+    for external in externals {
+        if !sources.contains(&external.source.as_str()) {
+            sources.push(&external.source);
+        }
+    }
+    sources
+}
+
 /// `parent` 的直接子节点下标（按列表顺序）；自指的节点不算自己的子节点。
 fn child_indices<'n>(
     nodes: &'n [ClientShellActivityNode],
@@ -813,7 +910,8 @@ fn child_indices<'n>(
 /// 渲染阶段：表头 + 统一树的行列表。`endpoint_qualified` 决定 agent 行写进
 /// `hits.agents`（classic 单端点，端点隐含为本机）还是 `hits.endpoint_agents`
 /// （联邦 / workbench）。列表区不足 3 行（放不下「分组头 + 一个 agent 行」）时退化
-/// 为只画 agent / 外部条目行的平铺视图，让 agent 仍可见可点。
+/// 为 [`flat_view_rows`] 的平铺视图：没有分组头，被折叠分组里的 agent 也列出，
+/// 仍可见可点。
 #[allow(clippy::too_many_arguments)]
 pub(super) fn render_agent_tree_rows(
     buffer: &mut Buffer,
@@ -844,26 +942,16 @@ pub(super) fn render_agent_tree_rows(
         endpoint_qualified,
     };
     if area.height.saturating_sub(3) < 3 {
-        // 退化视图只在极矮面板出现，这里的一次小分配可以接受。
-        let flat = rows
-            .iter()
-            .filter(|row| {
-                matches!(
-                    row.kind.kind,
-                    AgentTreeKind::Agent { .. } | AgentTreeKind::ExternalAgent { .. }
-                )
-            })
-            .collect::<Vec<_>>();
         render_agent_list(
             buffer,
             area,
-            &flat,
+            flat_view_rows(rows),
             empty_message,
             config,
             agent_scroll,
             thumb_hovered,
             hits,
-            |row| row_lines(row),
+            row_lines,
             |buffer, rect, row, hits| render_tree_row(buffer, rect, row, &cx, hits, true),
         );
         return;

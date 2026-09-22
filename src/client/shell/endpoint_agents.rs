@@ -1,9 +1,13 @@
-use super::agent_tree::{build_agent_tree, AgentTreeKind, AgentTreeRow, CollapseState};
+use super::agent_tree::{
+    build_agent_tree, flat_view_rows, AgentTreeKind, AgentTreeRow, CollapseState,
+};
 use super::render::put_text;
 use super::*;
 
-/// 折叠侧栏的单列视图：只画统一树里的 agent 行（机器首字母 + 状态图标），行序
-/// 与展开视图一致，被折叠分组藏起来的 agent 同样不出现。
+/// 折叠侧栏的单列视图：每个 agent 一行（机器首字母 + 状态图标），取统一树的
+/// 平铺行（`agent_tree::flat_view_rows`）。这里不画分组头，面板内折叠了的分组
+/// 在这里展不开，所以按聚合顺序列出全部 agent；机器层折叠照旧藏起该端点的
+/// agent（上方工作区区的机器行可切换）。
 pub(super) fn render_collapsed(
     buffer: &mut Buffer,
     area: Rect,
@@ -12,14 +16,16 @@ pub(super) fn render_collapsed(
     chrome_hover: Option<&super::feedback::ChromeHover>,
     hits: &mut ShellHitMap,
 ) {
-    let agents = rows.iter().filter_map(|row| match &row.kind.kind {
-        AgentTreeKind::Agent {
-            agent,
-            machine_initial,
-            ..
-        } => Some((&row.kind, agent, *machine_initial)),
-        _ => None,
-    });
+    let agents = flat_view_rows(rows)
+        .iter()
+        .filter_map(|row| match &row.kind.kind {
+            AgentTreeKind::Agent {
+                agent,
+                machine_initial,
+                ..
+            } => Some((&row.kind, agent, *machine_initial)),
+            _ => None,
+        });
     for (index, (node, agent, initial)) in agents.take(area.height as usize).enumerate() {
         let rect = Rect::new(area.x, area.y + index as u16, area.width, 1);
         let hovered = matches!(
