@@ -1,5 +1,5 @@
 {
-  "chunk_count": 1012,
+  "chunk_count": 1015,
   "chunks": [
     {
       "anchor": "herdr",
@@ -2364,14 +2364,21 @@
       "anchor": "What the prefix is",
       "doc": "docs/next/website/src/content/docs/keyboard.mdx",
       "id": "docs-next-website-src-content-docs-keyboard-mdx-what-the-prefix-is-part1",
-      "source_sha256": "fa3893699433a18db03482f03d7be5e4ee57976dd9b4142caaa4a948323e0e05",
-      "text": "## What the prefix is\n\nA terminal multiplexer sits between your terminal and the programs running inside it. Those programs already use most key combinations: `ctrl+c` interrupts, `ctrl+r` searches history, editors claim nearly everything else. If Herdr grabbed common keys directly, it would break the programs inside it.\n\nThe prefix solves this. Press the prefix key, default `ctrl+b`, and the next keypress goes to Herdr instead of your terminal. `prefix+c` means: press `ctrl+b`, release, then press `c`. Herdr reserves one key instead of dozens.\n\nPress `prefix+?` at any time to see every active binding. Press `/` in the keybind help to filter actions and shortcuts; use Backspace to edit the filter or `ctrl+u` to clear it. While prefix mode waits for the next key, a which-key popup lists the bindings available next (set `ui.which_key = false` to disable it). The menu button in the sidebar footer opens a fuzzy command palette over every action — including machine connect, edit, and SSH config import, plus snippet management and runs, scene snapshots, and the input broadcast manager — that surfaces recently used commands when the search box is empty.\n"
+      "source_sha256": "c9c50721d01359d0b7c6149d7533f4397c9826237524c6ac7e1784e0b9ff68dd",
+      "text": "## What the prefix is\n\nA terminal multiplexer sits between your terminal and the programs running inside it. Those programs already use most key combinations: `ctrl+c` interrupts, `ctrl+r` searches history, editors claim nearly everything else. If Herdr grabbed common keys directly, it would break the programs inside it.\n\nThe prefix solves this. Press the prefix key, default `ctrl+b`, and the next keypress goes to Herdr instead of your terminal. `prefix+c` means: press `ctrl+b`, release, then press `c`. Herdr reserves one key instead of dozens.\n"
     },
     {
       "anchor": "What the prefix is",
       "doc": "docs/next/website/src/content/docs/keyboard.mdx",
       "id": "docs-next-website-src-content-docs-keyboard-mdx-what-the-prefix-is-part2",
-      "source_sha256": "fa3893699433a18db03482f03d7be5e4ee57976dd9b4142caaa4a948323e0e05",
+      "source_sha256": "c9c50721d01359d0b7c6149d7533f4397c9826237524c6ac7e1784e0b9ff68dd",
+      "text": "Press `prefix+?` at any time to see every active binding. Press `/` in the keybind help to filter actions and shortcuts; use Backspace to edit the filter or `ctrl+u` to clear it. While prefix mode waits for the next key, a which-key popup lists the bindings available next (set `ui.which_key = false` to disable it). The main menu opens from **menu** in the sidebar footer, or from **herdr ≡** in the top bar when the docked layout is active (its sidebar has no second entry). It drops down from the entry you clicked: each category is a submenu, entries show their current shortcut on the right, on/off entries such as **Lock layout** or a machine's **Enable** carry a check mark, and entries that do not apply right now stay listed but dimmed. The arrow keys skip dimmed entries and separators, `→` opens a category and `←` returns to the category list, and `Home` / `End` jump to the first and last entries; long categories scroll, with `▲` / `▼` on the border while more entries are hidden. Typing, `/`, or `prefix+/` switches to a fuzzy command search over every action — including machine connect, edit, and SSH config import, plus snippet management and runs, scene snapshots, and the input broadcast manager. Recently used commands lead both the main menu and the empty search box.\n"
+    },
+    {
+      "anchor": "What the prefix is",
+      "doc": "docs/next/website/src/content/docs/keyboard.mdx",
+      "id": "docs-next-website-src-content-docs-keyboard-mdx-what-the-prefix-is-part3",
+      "source_sha256": "c9c50721d01359d0b7c6149d7533f4397c9826237524c6ac7e1784e0b9ff68dd",
       "text": "Overlay pages carry their own local keys, shown in each page's footer: on the machines page (`prefix+m`), `b` opens the broadcast target set, and the machine actions — `e` edit, `R` rename, `r` reconnect, `f` port forwards, `o` remote file browser, `d` enable/disable, `x` remove, `v` review a failure, `c` copy the fix command — work the same from the list and from a machine's detail card. One-shot feedback such as \"fix command copied\" appears at the bottom of the machine list and of a machine's detail card, and clears itself after a few seconds. While input broadcast is on, the mode bar shows a permanent `⇄ BROADCAST ×N` badge so you can never miss that your typing fans out to other machines."
     },
     {
@@ -2490,14 +2497,21 @@
       "anchor": "Menus, pages, and stable selection > Docking",
       "doc": "docs/next/website/src/content/docs/monitoring.mdx",
       "id": "docs-next-website-src-content-docs-monitoring-mdx-menus-pages-and-stable-selection-docking-part1",
-      "source_sha256": "630d0368d1dbb9d34d7a0b433f3d22122720ed6b1cc0e29ee05fd38cd1291b85",
-      "text": "## Docking\n\nDrag a panel's `⠿` title handle to another panel's edge. The drop preview shows the destination. Drag dividers to resize, tabs to reorder or create another terminal group, and pane handles to swap panes or move them between tabs without restarting their processes. Borderless panes show their handles only in Layout mode, keeping normal terminal text unobstructed. Right-click tab menus remain available.\n\nThe primary terminal page belongs to the focused workspace: clicking a workspace in the sidebar swaps both the tab strip and the terminal content to that workspace's tabs, numbered from 1 per workspace. Tabs dragged into their own panel stay visible regardless of workspace focus.\n\n`□` maximizes/restores a panel. In Layout mode, `Tab` / `Shift+Tab` selects a panel, arrows resize, `Shift+arrows` move, `Enter` maximizes, and `Esc` finishes. While a panel is maximized the whole layout still responds: `Tab` moves the maximized panel along with the focus, and arrows or `Shift+arrows` leave maximize first so the resize or move is visible. Lock prevents accidental rearrangement; Reset restores the default layout. Layouts persist per client and endpoint. Small terminals project the focused panel without discarding the saved layout. Older servers retain the previous single-view UI.\n"
+      "source_sha256": "2987b44c657c2410e3e7c9da7642200005fc3a08d3a7c07f82fb42fe4cf786f7",
+      "text": "## Docking\n\nDrag a panel's `⠿` title handle to another panel's edge. The drop preview shows the destination. Drag dividers to resize, tabs to reorder or create another terminal group, and pane handles to swap panes or move them between tabs without restarting their processes. Borderless panes show their handles only in **Arrange layout** mode, keeping normal terminal text unobstructed. Right-click tab menus remain available.\n\nThe primary terminal page belongs to the focused workspace: clicking a workspace in the sidebar swaps both the tab strip and the terminal content to that workspace's tabs, numbered from 1 per workspace. Tabs dragged into their own panel stay visible regardless of workspace focus.\n"
     },
     {
       "anchor": "Menus, pages, and stable selection > Docking",
       "doc": "docs/next/website/src/content/docs/monitoring.mdx",
       "id": "docs-next-website-src-content-docs-monitoring-mdx-menus-pages-and-stable-selection-docking-part2",
-      "source_sha256": "630d0368d1dbb9d34d7a0b433f3d22122720ed6b1cc0e29ee05fd38cd1291b85",
+      "source_sha256": "2987b44c657c2410e3e7c9da7642200005fc3a08d3a7c07f82fb42fe4cf786f7",
+      "text": "`□` maximizes/restores a panel. **Arrange layout** in the top bar enters arrange mode and stays highlighted while it is on; the footer then names the mode and lists its keys: `Tab` / `Shift+Tab` selects a panel, arrows resize, `Shift+arrows` move, `Enter` maximizes, and `Esc` finishes (the footer's **Esc done** hint is clickable too). While a panel is maximized the whole layout still responds: `Tab` moves the maximized panel along with the focus, and arrows or `Shift+arrows` leave maximize first so the resize or move is visible. **Lock layout** is an on/off toggle that carries a check mark while the layout is locked and prevents accidental rearrangement; **Reset**, shown in arrange mode, restores the default layout. Layouts persist per client and endpoint. Small terminals project the focused panel without discarding the saved layout. Older servers retain the previous single-view UI.\n"
+    },
+    {
+      "anchor": "Menus, pages, and stable selection > Docking",
+      "doc": "docs/next/website/src/content/docs/monitoring.mdx",
+      "id": "docs-next-website-src-content-docs-monitoring-mdx-menus-pages-and-stable-selection-docking-part3",
+      "source_sha256": "2987b44c657c2410e3e7c9da7642200005fc3a08d3a7c07f82fb42fe4cf786f7",
       "text": "Monitor and Accounts panels carry a ` × ` button in their header next to `□`. When the panel is focused, `Esc` closes the panel hosting the page; when a terminal is focused, `Esc` goes to the terminal, so use the header button or **Close monitor panel** in command search (listed only while the Monitor panel is docked). With the layout locked, closing is refused and the panel footer says so. The monitor tab you last selected — System, Accounts or Monitor preferences — is kept in client preferences and restored when the panel regains focus or reopens. A docked Monitor or Accounts panel no longer hides the focused terminal's cursor: the cursor disappears only where a panel, a usage popover or a dialog actually covers it."
     },
     {
@@ -2826,15 +2840,22 @@
       "anchor": "Create a workspace > Use the mouse",
       "doc": "docs/next/website/src/content/docs/quick-start.mdx",
       "id": "docs-next-website-src-content-docs-quick-start-mdx-create-a-workspace-use-the-mouse-part1",
-      "source_sha256": "2f9101569643a32411a31929dcdbd5a1943b70ee6d539f0b2bcf084dfe230ce1",
+      "source_sha256": "d25d9d1e6d7637cdd65873a79ddaf59d1a944a3fa315cf2ed9f96916b2c91564",
       "text": "## Use the mouse\n\nHerdr is mouse-native, so start by clicking panes, tabs, workspaces, and agents to focus them. Drag split borders to resize. Right-click for context menus, including splitting panes and creating tabs. Drag-select text to copy it to your clipboard. Double-click a token to select it, or hold the second press and drag to extend the selection by whole words. Both gestures copy when you release the mouse. Copying does not require Ctrl+C. Sidebar workspaces and tabs are reordered by dragging them at least two cells along the list — vertically in the sidebar, horizontally in the tab strip; a smaller wobble, or a drop back on the row's own slot, stays an ordinary click and still switches to it. Dropping outside the list cancels the drag and changes nothing.\n\nIn menus, the command palette, and the snippet and scene lists, moving the pointer only previews the row under it. The keyboard selection — the row Enter activates — changes with the arrow keys or a click, never by hovering, and the preview clears as soon as the pointer leaves the list. Link hints (`prefix+u`) stay open while the pointer moves; a click, drag, or wheel event ends them.\n"
     },
     {
       "anchor": "Create a workspace > Use the mouse",
       "doc": "docs/next/website/src/content/docs/quick-start.mdx",
       "id": "docs-next-website-src-content-docs-quick-start-mdx-create-a-workspace-use-the-mouse-part2",
-      "source_sha256": "2f9101569643a32411a31929dcdbd5a1943b70ee6d539f0b2bcf084dfe230ce1",
-      "text": "Ctrl-click opens pane links when your terminal sends the modified click to Herdr. This works for OSC 8 hyperlinks and `http://` or `https://` URLs, including wrapped links whose beginning or end is outside the visible area. Hold Ctrl and move the pointer over a link to underline its visible segments. Hover highlighting clears when you move away, the pane content changes, or Herdr receives a Ctrl-release event; some terminals only report modifier changes with mouse movement. On macOS, use Ctrl-click for Herdr-handled pane links while mouse capture is enabled; Cmd-click is only available through the terminal-native bypass path, such as Shift-Cmd-click or `ui.mouse_capture = false`.\n\nIf you configure `ui.right_click_passthrough_modifier`, that modifier plus right-click sends right-click, hold, and drag gestures to mouse-reporting pane apps. To make normal right-click go to one pane app, choose **Send right-clicks to pane** from that pane's menu or run `herdr pane input --current --right-click pane` inside it. Right-click the pane frame to reopen Herdr's menu."
+      "source_sha256": "d25d9d1e6d7637cdd65873a79ddaf59d1a944a3fa315cf2ed9f96916b2c91564",
+      "text": "Right-click menus draw separators between groups, show each entry's current shortcut on the right, dim entries that do not apply right now, and mark on/off entries with a check. From the keyboard, the arrow keys skip dimmed entries, typing an entry's first letter jumps to it (press it again to cycle through entries with the same letter), `→` / `←` open and close a submenu such as the pane menu's **View**, and `Esc` closes an open submenu before the menu itself. Right-clicking a machine in the sidebar lists the same per-machine actions as the main menu's machines category, including **Switch to this machine**.\n\nCtrl-click opens pane links when your terminal sends the modified click to Herdr. This works for OSC 8 hyperlinks and `http://` or `https://` URLs, including wrapped links whose beginning or end is outside the visible area. Hold Ctrl and move the pointer over a link to underline its visible segments. Hover highlighting clears when you move away, the pane content changes, or Herdr receives a Ctrl-release event; some terminals only report modifier changes with mouse movement. On macOS, use Ctrl-click for Herdr-handled pane links while mouse capture is enabled; Cmd-click is only available through the terminal-native bypass path, such as Shift-Cmd-click or `ui.mouse_capture = false`.\n"
+    },
+    {
+      "anchor": "Create a workspace > Use the mouse",
+      "doc": "docs/next/website/src/content/docs/quick-start.mdx",
+      "id": "docs-next-website-src-content-docs-quick-start-mdx-create-a-workspace-use-the-mouse-part3",
+      "source_sha256": "d25d9d1e6d7637cdd65873a79ddaf59d1a944a3fa315cf2ed9f96916b2c91564",
+      "text": "If you configure `ui.right_click_passthrough_modifier`, that modifier plus right-click sends right-click, hold, and drag gestures to mouse-reporting pane apps. To make normal right-click go to one pane app, check **Send right-clicks to pane** under **View** in that pane's menu, or run `herdr pane input --current --right-click pane` inside it. Right-click the pane frame to reopen Herdr's menu and clear the check."
     },
     {
       "anchor": "Create a workspace > Where next",
