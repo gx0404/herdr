@@ -886,6 +886,7 @@ mod tests {
             foreground_cwd: None,
             revision: 1,
             activity: Vec::new(),
+            launch_seq: 0,
         }
     }
 

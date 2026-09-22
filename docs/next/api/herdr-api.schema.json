@@ -10058,6 +10058,13 @@
             "launch_pending": {
               "type": "boolean"
             },
+            "launch_seq": {
+              "default": 0,
+              "description": "pane 首次获得 agent 身份时分配的单调启动序号（释放后重新识别取新号）；\n`0` = 未知。只在同一 server 进程内可比，旧 server 不下发。",
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
             "name": {
               "type": [
                 "string",

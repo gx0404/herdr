@@ -149,7 +149,7 @@ pub(super) fn snapshot(
                 state_labels,
                 tokens,
                 focused,
-                launch_seq: 0,
+                launch_seq: agent.launch_seq,
                 activity: Default::default(),
             }
         })
@@ -715,6 +715,68 @@ mod tests {
         assert_eq!(
             split_hit_rect(&horizontal, false, true, &[Rect::new(19, 3, 1, 12)]),
             None
+        );
+    }
+}
+
+#[cfg(test)]
+mod agent_activity_tests {
+    use super::snapshot;
+    use crate::detect::{Agent, AgentState};
+    use crate::events::AppEvent;
+
+    fn app_with_panes(names: &[&str]) -> crate::app::App {
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = crate::app::App::new(
+            &crate::config::Config::default(),
+            crate::app::AppPolicy::TEST,
+            None,
+            api_rx,
+            crate::api::EventHub::default(),
+        );
+        for name in names {
+            app.state
+                .workspaces
+                .push(crate::workspace::Workspace::test_new(name));
+        }
+        app.state.ensure_test_terminals();
+        app.state.active = Some(0);
+        app
+    }
+
+    fn detect(app: &mut crate::app::App, pane_id: crate::layout::PaneId, agent: Agent) {
+        app.handle_internal_event(AppEvent::StateChanged {
+            pane_id,
+            agent: Some(agent),
+            state: AgentState::Working,
+            visible_blocker: false,
+            visible_working: false,
+            process_exited: false,
+            observed_at: std::time::Instant::now(),
+        });
+    }
+
+    /// headless 投影带上 server 分配的启动序号：按识别顺序 1、2，未识别的 pane 不进
+    /// agents。
+    #[test]
+    fn snapshot_carries_server_assigned_launch_seq() {
+        let mut app = app_with_panes(&["first", "second"]);
+        let first = app.state.workspaces[0].tabs[0].root_pane;
+        let second = app.state.workspaces[1].tabs[0].root_pane;
+        // 反序识别：序号跟识别顺序走，不跟工作区顺序走。
+        detect(&mut app, second, Agent::Claude);
+        detect(&mut app, first, Agent::Pi);
+
+        let snapshot = snapshot(&app, "boot", 1, None, None);
+        let mut seqs = snapshot
+            .agents
+            .iter()
+            .map(|agent| (agent.agent.clone(), agent.launch_seq))
+            .collect::<Vec<_>>();
+        seqs.sort();
+        assert_eq!(
+            seqs,
+            vec![(Some("claude".into()), 1), (Some("pi".into()), 2)]
         );
     }
 }

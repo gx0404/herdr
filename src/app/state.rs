@@ -1040,6 +1040,38 @@ pub(crate) struct PaneFocusTarget {
     pub pane_id: PaneId,
 }
 
+/// agent 启动序号与活动树的存储：纯数据，随 `AppState` 走，无 PTY 可测。
+///
+/// 启动序号在 pane 首次获得 agent 身份时分配（进程内单调计数，不持久化、跨
+/// server 不可比），agent 释放或 pane 关闭后作废，重新识别取新号；`0` 表示未知。
+#[derive(Debug, Default)]
+pub struct AgentActivityStore {
+    next_launch_seq: u64,
+    launch_seqs: std::collections::HashMap<PaneId, u64>,
+}
+
+impl AgentActivityStore {
+    /// 该 pane 的启动序号；未分配为 `0`。
+    pub fn launch_seq(&self, pane_id: PaneId) -> u64 {
+        self.launch_seqs.get(&pane_id).copied().unwrap_or(0)
+    }
+
+    /// pane 首次获得 agent 身份时分配序号；已有序号保持不变。返回是否新分配。
+    pub fn ensure_launch_seq(&mut self, pane_id: PaneId) -> bool {
+        if self.launch_seqs.contains_key(&pane_id) {
+            return false;
+        }
+        self.next_launch_seq = self.next_launch_seq.saturating_add(1);
+        self.launch_seqs.insert(pane_id, self.next_launch_seq);
+        true
+    }
+
+    /// agent 释放或 pane 关闭：作废该 pane 的序号。返回是否有内容被移除。
+    pub fn forget_pane(&mut self, pane_id: PaneId) -> bool {
+        self.launch_seqs.remove(&pane_id).is_some()
+    }
+}
+
 /// All application state — pure data, no channels or async runtime.
 /// Testable without PTYs or a tokio runtime.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1092,6 +1124,8 @@ pub struct AppState {
     pub sidebar_agents: crate::config::AgentsSidebarConfig,
     pub sidebar_spaces: crate::config::SpacesSidebarConfig,
     pub next_agent_state_change_seq: u64,
+    /// agent 启动序号与活动树（`AgentInfo.launch_seq` / `.activity` 与投影的来源）。
+    pub agent_activity: AgentActivityStore,
     pub confirm_close: bool,
     pub pane_borders: crate::config::PaneBordersConfig,
     pub pane_outer_borders: bool,
@@ -1341,6 +1375,7 @@ impl AppState {
             sidebar_agents: crate::config::AgentsSidebarConfig::default(),
             sidebar_spaces: crate::config::SpacesSidebarConfig::default(),
             next_agent_state_change_seq: 0,
+            agent_activity: AgentActivityStore::default(),
             confirm_close: true,
             pane_borders: crate::config::PaneBordersConfig::Auto,
             pane_outer_borders: true,

@@ -211,6 +211,10 @@ pub struct AgentInfo {
     /// 该 agent 的活动树（子 agent / 任务 / 待办 / 后台进程）；没有活动时省略。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub activity: Vec<AgentActivityNode>,
+    /// pane 首次获得 agent 身份时分配的单调启动序号（释放后重新识别取新号）；
+    /// `0` = 未知。只在同一 server 进程内可比，旧 server 不下发。
+    #[serde(default)]
+    pub launch_seq: u64,
     pub workspace_id: String,
     pub tab_id: String,
     pub pane_id: String,
@@ -365,4 +369,40 @@ pub struct AgentActivityContent {
     pub truncated: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub next_cursor: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 混版本：`launch_seq` 是追加字段，旧 server 的 `AgentInfo` JSON 没有它也必须能
+    /// 解码（取 0），带它时原样往返。
+    #[test]
+    fn agent_info_launch_seq_defaults_to_zero_when_absent() {
+        let legacy = serde_json::json!({
+            "terminal_id": "term_1",
+            "agent_status": "working",
+            "screen_detection_skipped": false,
+            "state_labels": {},
+            "tokens": {},
+            "workspace_id": "ws_1",
+            "tab_id": "t_1",
+            "pane_id": "p_1",
+            "focused": false,
+            "launch_pending": false,
+            "interactive_ready": false,
+            "state_change_seq": 0,
+            "revision": 1
+        });
+        let decoded: AgentInfo = serde_json::from_value(legacy).expect("旧 JSON 可解码");
+        assert_eq!(decoded.launch_seq, 0);
+        assert!(decoded.activity.is_empty());
+
+        let mut with_seq = decoded.clone();
+        with_seq.launch_seq = 7;
+        let json = serde_json::to_value(&with_seq).expect("序列化");
+        assert_eq!(json["launch_seq"], 7);
+        let round_trip: AgentInfo = serde_json::from_value(json).expect("往返");
+        assert_eq!(round_trip, with_seq);
+    }
 }

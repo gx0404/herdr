@@ -390,6 +390,7 @@ impl App {
             agent_session: pane.agent_session,
             // seam-stub(activity-schema)：活动树存储接通前恒为空。
             activity: Vec::new(),
+            launch_seq: self.state.agent_activity.launch_seq(pane_id),
             workspace_id: pane.workspace_id,
             tab_id: pane.tab_id,
             pane_id: pane.pane_id,

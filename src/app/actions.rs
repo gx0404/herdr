@@ -1806,6 +1806,16 @@ impl AppState {
                 terminal.last_agent_state_change_seq = Some(self.next_agent_state_change_seq);
             }
         }
+        // 启动序号：pane 首次获得 agent 身份时分配，释放后作废（重新识别取新号）。
+        // 序号进入 ClientShell 投影（HSR-05 写入点）。
+        let launch_changed = if !agent_released && change.agent_label.is_some() {
+            self.agent_activity.ensure_launch_seq(pane_id)
+        } else {
+            self.agent_activity.forget_pane(pane_id)
+        };
+        if launch_changed {
+            self.bump_projection_epoch();
+        }
         let seen = self.apply_pane_state_change(ws_idx, pane_id, &change, suppress_completion)?;
         let update = PaneStateUpdate {
             pane_id,
@@ -2103,6 +2113,7 @@ impl AppState {
 
     fn handle_pane_died(&mut self, pane_id: PaneId) {
         self.pending_agent_notifications.remove(&pane_id);
+        self.agent_activity.forget_pane(pane_id);
         self.remove_plugin_pane_records([pane_id]);
         let ws_idx = self
             .workspaces
@@ -3409,6 +3420,67 @@ mod tests {
         assert!(deliveries[0].toast.is_none());
         assert!(deliveries[0].client_notification.is_some());
         assert!(state.toast.is_none());
+    }
+
+    fn detect_agent(state: &mut AppState, pane_id: PaneId, agent: Agent, agent_state: AgentState) {
+        state.handle_app_event(AppEvent::StateChanged {
+            pane_id,
+            agent: Some(agent),
+            state: agent_state,
+            visible_blocker: false,
+            visible_working: false,
+            process_exited: false,
+            observed_at: std::time::Instant::now(),
+        });
+    }
+
+    /// 启动序号在 pane 首次获得 agent 身份时分配，后续状态变化不改号；释放后作废，
+    /// 重新识别取新号（进程内单调）。
+    #[test]
+    fn launch_seq_is_allocated_once_per_agent_identity_and_reset_after_release() {
+        let mut state = app_with_workspaces(&["one", "two"]);
+        let first = state.workspaces[0].tabs[0].root_pane;
+        let second = state.workspaces[1].tabs[0].root_pane;
+        assert_eq!(state.agent_activity.launch_seq(first), 0);
+
+        let epoch_before = state.projection_epoch;
+        detect_agent(&mut state, first, Agent::Pi, AgentState::Working);
+        assert_eq!(state.agent_activity.launch_seq(first), 1);
+        assert_ne!(
+            state.projection_epoch, epoch_before,
+            "序号进入投影，写入点须递增纪元"
+        );
+
+        detect_agent(&mut state, first, Agent::Pi, AgentState::Idle);
+        detect_agent(&mut state, first, Agent::Pi, AgentState::Blocked);
+        assert_eq!(state.agent_activity.launch_seq(first), 1);
+
+        detect_agent(&mut state, second, Agent::Claude, AgentState::Working);
+        assert_eq!(state.agent_activity.launch_seq(second), 2);
+        assert_eq!(state.agent_activity.launch_seq(first), 1);
+
+        let released = state.publish_pane_process_exit_if_agent(first, false);
+        assert!(released.is_some_and(|update| update.agent_released));
+        assert_eq!(state.agent_activity.launch_seq(first), 0);
+        assert_eq!(state.agent_activity.launch_seq(second), 2);
+
+        detect_agent(&mut state, first, Agent::Pi, AgentState::Working);
+        assert_eq!(state.agent_activity.launch_seq(first), 3);
+    }
+
+    #[test]
+    fn launch_seq_is_dropped_when_the_pane_dies() {
+        let mut state = app_with_workspaces(&["one", "two"]);
+        let pane_id = state.workspaces[1].tabs[0].root_pane;
+        detect_agent(&mut state, pane_id, Agent::Codex, AgentState::Working);
+        assert_eq!(state.agent_activity.launch_seq(pane_id), 1);
+
+        state.handle_app_event(AppEvent::PaneDied {
+            pane_id,
+            exit_reason: crate::platform::ChildExitReason::Exited,
+        });
+
+        assert_eq!(state.agent_activity.launch_seq(pane_id), 0);
     }
 
     #[test]
