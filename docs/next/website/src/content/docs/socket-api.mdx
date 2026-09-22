@@ -109,10 +109,10 @@ Raw socket method names use dot notation:
 | Workspace | `workspace.create`, `workspace.list`, `workspace.get`, `workspace.focus`, `workspace.rename`, `workspace.move`, `workspace.move_block`, `workspace.report_metadata`, `workspace.close` |
 | Worktree | `worktree.list`, `worktree.create`, `worktree.open`, `worktree.remove` |
 | Tab | `tab.create`, `tab.list`, `tab.get`, `tab.focus`, `tab.rename`, `tab.move`, `tab.close` |
-| Pane | `pane.split`, `pane.swap`, `pane.move`, `pane.zoom`, `pane.layout`, `pane.process_info`, `pane.neighbor`, `pane.edges`, `pane.focus_direction`, `pane.resize`, `pane.list`, `pane.current`, `pane.get`, `pane.rename`, `pane.send_text`, `pane.send_keys`, `pane.send_input`, `pane.read`, `pane.graphics.info`, `pane.graphics.set`, `pane.graphics.clear`, `pane.graphics.stream`, `pane.report_agent`, `pane.report_agent_session`, `pane.report_metadata`, `pane.clear_agent_authority`, `pane.release_agent`, `pane.close`, `pane.wait_for_output` |
+| Pane | `pane.split`, `pane.swap`, `pane.move`, `pane.zoom`, `pane.layout`, `pane.process_info`, `pane.neighbor`, `pane.edges`, `pane.focus_direction`, `pane.resize`, `pane.list`, `pane.current`, `pane.get`, `pane.rename`, `pane.send_text`, `pane.send_keys`, `pane.send_input`, `pane.read`, `pane.graphics.info`, `pane.graphics.set`, `pane.graphics.clear`, `pane.graphics.stream`, `pane.report_agent`, `pane.report_agent_session`, `pane.report_agent_activity`, `pane.report_metadata`, `pane.clear_agent_authority`, `pane.release_agent`, `pane.close`, `pane.wait_for_output` |
 | Popup | `popup.close` |
 | Layout | `layout.export`, `layout.apply`, `layout.set_split_ratio` |
-| Agent | `agent.list`, `agent.get`, `agent.read`, `agent.explain`, `agent.send_keys`, `agent.prompt`, `agent.wait`, `agent.rename`, `agent.focus`, `agent.start`, `agent.view.set`, `agent.view.clear` |
+| Agent | `agent.list`, `agent.get`, `agent.read`, `agent.explain`, `agent.send_keys`, `agent.prompt`, `agent.wait`, `agent.rename`, `agent.focus`, `agent.start`, `agent.view.set`, `agent.view.clear`, `agent.activity.read`, `agent.external.list` |
 | Events | `events.subscribe`, `events.wait` |
 | Integrations | `integration.install`, `integration.uninstall` |
 | Plugins | `plugin.link`, `plugin.list`, `plugin.unlink`, `plugin.enable`, `plugin.disable`, `plugin.action.list`, `plugin.action.invoke`, `plugin.log.list`, `plugin.pane.open`, `plugin.pane.focus`, `plugin.pane.close` |
@@ -811,6 +811,100 @@ Use `ttl_ms` for short-lived metadata. It must be between `1` and `86400000` mil
 
 Use `seq` when a hook may send updates out of order. For the same `source`, reports with a sequence number less than or equal to the last accepted sequence are accepted by the API but ignored by the pane state. A pane or workspace accepts sequenced token reports from at most 32 distinct sources during its lifetime; clearing or expiry does not release those source slots.
 
+## Agent activity
+
+An agent's activity tree (subagents, tasks, todos, background processes) is a
+server-owned fact. The server reads it from a per-agent source adapter on a
+background thread; hooks only signal that something may have changed.
+
+Hooks signal with `pane.report_agent_activity`:
+
+```json
+{
+  "id": "req_4",
+  "method": "pane.report_agent_activity",
+  "params": {
+    "pane_id": "w1:p1",
+    "source": "herdr:pi",
+    "agent": "pi",
+    "hint": "{\"type\":\"herdr.activity.snapshot\",\"version\":1,\"nodes\":[]}"
+  }
+}
+```
+
+`hint` is optional. It can be a free-text marker such as the hook event name, or
+a structured snapshot that the agent's source adapter understands: Herdr's Pi
+extension reports the whole tree as a `herdr.activity.snapshot` JSON document
+this way, because Pi keeps no activity on disk. The server keeps only the latest
+hint per pane and hands it to the source adapter on the next refresh. `node_id`
+and `seq` are accepted for diagnostics. The response is `ok`; the tree itself is
+never part of the request or the response.
+
+A hint schedules a refresh right away, rate limited to one refresh per pane per
+second. Independently of hints, the server refreshes an agent once when it is
+first detected, every 5 seconds while its status is `working`, and once more
+when work ends. Each refresh keeps at most 32 nodes per agent (running nodes and
+their ancestors first) and sets `truncated` when the source reported more.
+
+`agent.get`, `agent.list`, and `session.snapshot` expose the stored tree as
+`AgentInfo.activity`, omitted when empty. Each node carries `id`, `kind`
+(`subagent`, `task`, `todo`, `background`, `unknown`), `label`, `status`
+(`pending`, `running`, `blocked`, `done`, `failed`, `unknown`), and optional
+`parent_id`, `agent_type`, `started_at_ms`, `ended_at_ms`, `content_ref`, and
+`summary`. Unknown enum values decode as `unknown`. `AgentInfo.launch_seq` is
+the server-assigned launch order: a pane receives a new monotonic number when it
+first gains an agent identity, keeps it across state changes, and gets a new one
+after the agent is released or re-detected. `0` means unknown (older servers
+omit the field); the number is only comparable within one server process.
+
+Read a tree or one node's content with `agent.activity.read`:
+
+```json
+{
+  "id": "req_5",
+  "method": "agent.activity.read",
+  "params": {
+    "pane_id": "w1:p1",
+    "node_id": "call_par/0",
+    "cursor": null,
+    "max_bytes": 65536,
+    "follow": true
+  }
+}
+```
+
+Give exactly one of `pane_id` or `external_id`, otherwise the call fails with
+`invalid_params`. Without `node_id` the response carries the full tree in
+`nodes` (this read also refreshes the stored tree, so the next snapshot matches
+it); with `node_id` it carries a `content` chunk: `format` (`text`, `markdown`,
+`jsonl`, `unknown`), `text`, `eof`, `truncated`, and `next_cursor` to pass back
+as `cursor` for the next page. `cursor` is opaque to the caller. `max_bytes`
+defaults to 65536 and is capped at 524288. `follow: true` keeps the server
+refreshing that pane's tree every second for the next 10 seconds so a viewer
+that polls can track a running node. The response is
+`{"type":"agent_activity","nodes":[...],"content":{...}}` and is produced on the
+background reader thread, so it may arrive after responses to later requests.
+
+Errors: `pane_not_found`, `agent_not_found` (the pane hosts no agent, or the
+external source is unknown), `not_implemented` (this server has no source
+adapter for that agent), `activity_unavailable` (the source cannot be read right
+now, for example Pi has not reported a snapshot yet), `activity_malformed` (the
+source or the cursor is not in the expected format), `activity_io_error`, and
+`server_busy` when the reader queue is full. Today only Pi, through Herdr's Pi
+extension, provides a tree; other agents answer `not_implemented` until their
+source adapters exist.
+
+`agent.external.list` (no params) lists agent sessions that belong to no pane,
+as `{"type":"external_agent_list","agents":[...]}` with `ExternalAgentInfo`
+entries: `external_id` (`<source>:<session id>`, usable as `external_id` in
+`agent.activity.read`), `source`, `agent_status`, `label`, `readable`, and
+optional `agent`, `cwd`, `updated_at_ms`, and `activity`. No external source is
+implemented yet, so the method currently answers `not_implemented`.
+
+When a refresh changes a stored tree the server emits
+`pane.agent_activity_changed` with `pane_id`, `running`, and `total`. The event
+carries counts only; read the tree with `agent.get` or `agent.activity.read`.
+
 ## Event subscriptions
 
 Subscribe to events when you need a long-lived stream:
@@ -880,7 +974,7 @@ Tab event subscriptions include `tab.created`, `tab.closed`, `tab.focused`,
 `workspace_id`, requested `insert_index`, and updated ordered `tabs` list for
 that workspace.
 Pane event subscriptions include `pane.created`, `pane.updated`, `pane.closed`, `pane.focused`,
-`pane.moved`, `pane.exited`, `pane.agent_detected`,
+`pane.moved`, `pane.exited`, `pane.agent_detected`, `pane.agent_activity_changed`,
 `pane.output_matched`, `pane.agent_status_changed`, and `pane.scroll_changed`.
 `pane.focused` also reports manual pane selection changes from any client attached
 to this server. It does not move other clients' views, and its payload does not

@@ -102,10 +102,10 @@ herdr pane read w1:p2 --source recent --lines 50
 | ワークスペース | `workspace.create`、`workspace.list`、`workspace.get`、`workspace.focus`、`workspace.rename`、`workspace.move`、`workspace.move_block`、`workspace.report_metadata`、`workspace.close` |
 | Worktree | `worktree.list`、`worktree.create`、`worktree.open`、`worktree.remove` |
 | タブ | `tab.create`、`tab.list`、`tab.get`、`tab.focus`、`tab.rename`、`tab.move`、`tab.close` |
-| ペイン | `pane.split`、`pane.swap`、`pane.move`、`pane.zoom`、`pane.layout`、`pane.process_info`、`pane.neighbor`、`pane.edges`、`pane.focus_direction`、`pane.resize`、`pane.list`、`pane.current`、`pane.get`、`pane.rename`、`pane.send_text`、`pane.send_keys`、`pane.send_input`、`pane.read`、`pane.graphics.info`、`pane.graphics.set`、`pane.graphics.clear`、`pane.graphics.stream`、`pane.report_agent`、`pane.report_agent_session`、`pane.report_metadata`、`pane.clear_agent_authority`、`pane.release_agent`、`pane.close`、`pane.wait_for_output` |
+| ペイン | `pane.split`、`pane.swap`、`pane.move`、`pane.zoom`、`pane.layout`、`pane.process_info`、`pane.neighbor`、`pane.edges`、`pane.focus_direction`、`pane.resize`、`pane.list`、`pane.current`、`pane.get`、`pane.rename`、`pane.send_text`、`pane.send_keys`、`pane.send_input`、`pane.read`、`pane.graphics.info`、`pane.graphics.set`、`pane.graphics.clear`、`pane.graphics.stream`、`pane.report_agent`、`pane.report_agent_session`、`pane.report_agent_activity`、`pane.report_metadata`、`pane.clear_agent_authority`、`pane.release_agent`、`pane.close`、`pane.wait_for_output` |
 | ポップアップ | `popup.close` |
 | レイアウト | `layout.export`、`layout.apply`、`layout.set_split_ratio` |
-| エージェント | `agent.list`、`agent.get`、`agent.read`、`agent.explain`、`agent.send_keys`、`agent.prompt`、`agent.wait`、`agent.rename`、`agent.focus`、`agent.start` |
+| エージェント | `agent.list`、`agent.get`、`agent.read`、`agent.explain`、`agent.send_keys`、`agent.prompt`、`agent.wait`、`agent.rename`、`agent.focus`、`agent.start`、`agent.activity.read`、`agent.external.list` |
 | イベント | `events.subscribe`、`events.wait` |
 | インテグレーション | `integration.install`、`integration.uninstall` |
 | プラグイン | `plugin.link`、`plugin.list`、`plugin.unlink`、`plugin.enable`、`plugin.disable`、`plugin.action.list`、`plugin.action.invoke`、`plugin.log.list`、`plugin.pane.open`、`plugin.pane.focus`、`plugin.pane.close` |
@@ -627,6 +627,101 @@ workspace の get/list 応答は結果の `tokens` マップを公開し、ス�
 
 フックが順不同で更新を送る可能性がある場合は `seq` を使ってください。同じ `source` について、最後に受理されたシーケンス以下のシーケンス番号を持つ報告は、API には受理されますがペイン状態には無視されます。ペインまたはワークスペースが存続する間、シーケンス付きトークン報告を送れる異なるソースは最大 32 個です。クリアや失効でもそのソース枠は解放されません。
 
+## エージェントアクティビティ
+
+エージェントのアクティビティツリー(サブエージェント、タスク、Todo、バックグラウンド
+プロセス)はサーバーが所有する事実です。サーバーはエージェントごとのソースアダプターを
+通じてバックグラウンドスレッドでそれを読み取り、フックは「変わったかもしれない」という
+合図を送るだけです。
+
+フックは `pane.report_agent_activity` で合図します:
+
+```json
+{
+  "id": "req_4",
+  "method": "pane.report_agent_activity",
+  "params": {
+    "pane_id": "w1:p1",
+    "source": "herdr:pi",
+    "agent": "pi",
+    "hint": "{\"type\":\"herdr.activity.snapshot\",\"version\":1,\"nodes\":[]}"
+  }
+}
+```
+
+`hint` は省略可能です。フックのイベント名のような自由テキストでも、そのエージェントの
+ソースアダプターが理解できる構造化スナップショットでもかまいません。Pi はディスク上に
+アクティビティを残さないため、Herdr の Pi 拡張はツリー全体を `herdr.activity.snapshot`
+JSON ドキュメントとしてこの方法で報告します。サーバーはペインごとに最新の hint を 1 つ
+だけ保持し、次回の更新時にソースアダプターへ渡します。`node_id` と `seq` は診断用に
+受理されます。レスポンスは `ok` で、ツリー自体はリクエストにもレスポンスにも含まれ
+ません。
+
+hint はすぐに更新をスケジュールしますが、同じペインの更新は毎秒 1 回に制限されます。
+hint とは独立に、サーバーはエージェントを最初に検出したときに 1 回、状態が `working`
+の間は 5 秒ごとに、作業が終わったときにもう 1 回更新します。各更新はエージェントごとに
+最大 32 ノード(実行中のノードとその祖先を優先)を保持し、ソースがそれ以上を報告した
+場合は `truncated` を立てます。
+
+`agent.get`、`agent.list`、`session.snapshot` は保存されたツリーを `AgentInfo.activity`
+として公開します(空なら省略)。各ノードは `id`、`kind`(`subagent`、`task`、`todo`、
+`background`、`unknown`)、`label`、`status`(`pending`、`running`、`blocked`、`done`、
+`failed`、`unknown`)と、任意の `parent_id`、`agent_type`、`started_at_ms`、
+`ended_at_ms`、`content_ref`、`summary` を持ちます。未知の列挙値は `unknown` として
+デコードされます。`AgentInfo.launch_seq` はサーバーが割り当てる起動順です。ペインが
+最初にエージェントの身元を得たときに新しい単調増加の番号を受け取り、状態が変わっても
+保持し、エージェントが解放または再検出されると新しい番号になります。`0` は不明を意味し
+(古いサーバーはこのフィールドを省略します)、番号は同じサーバープロセス内でのみ比較
+できます。
+
+ツリーまたは 1 つのノードの内容は `agent.activity.read` で読み取ります:
+
+```json
+{
+  "id": "req_5",
+  "method": "agent.activity.read",
+  "params": {
+    "pane_id": "w1:p1",
+    "node_id": "call_par/0",
+    "cursor": null,
+    "max_bytes": 65536,
+    "follow": true
+  }
+}
+```
+
+`pane_id` と `external_id` はちょうど一方だけを指定します。そうでなければ呼び出しは
+`invalid_params` で失敗します。`node_id` を省くとレスポンスは `nodes` にツリー全体を
+含みます(この読み取りは保存されたツリーも更新するため、次のスナップショットはこれと
+一致します)。`node_id` を指定するとレスポンスは `content` チャンクを含みます:`format`
+(`text`、`markdown`、`jsonl`、`unknown`)、`text`、`eof`、`truncated`、そして次のページで
+`cursor` として返す `next_cursor` です。`cursor` は呼び出し側にとって不透明です。
+`max_bytes` の既定値は 65536 で、上限は 524288 です。`follow: true` にすると、サーバーは
+その後 10 秒間、そのペインのツリーを毎秒更新するため、ポーリングするビューアーは
+実行中のノードを追跡できます。レスポンスは
+`{"type":"agent_activity","nodes":[...],"content":{...}}` の形で、バックグラウンドの
+読み取りスレッドが生成するため、後続のリクエストへのレスポンスより遅れて届くことが
+あります。
+
+エラー:`pane_not_found`、`agent_not_found`(ペインにエージェントがいない、または外部
+ソースが未知)、`not_implemented`(このサーバーにそのエージェントのソースアダプターが
+ない)、`activity_unavailable`(ソースを今は読めない。たとえば Pi がまだスナップショットを
+報告していない)、`activity_malformed`(ソースの内容またはカーソルが期待した形式では
+ない)、`activity_io_error`、読み取りキューが満杯のときの `server_busy`。現在ツリーを提供
+するのは Herdr の Pi 拡張を通じた Pi だけで、他のエージェントはそれぞれのソース
+アダプターが実装されるまで `not_implemented` を返します。
+
+`agent.external.list`(パラメーターなし)は、どのペインにも属さないエージェント
+セッションを `{"type":"external_agent_list","agents":[...]}` として列挙します。エントリーは
+`ExternalAgentInfo` で、`external_id`(`<source>:<セッション id>`。`agent.activity.read` の
+`external_id` として使えます)、`source`、`agent_status`、`label`、`readable` と、任意の
+`agent`、`cwd`、`updated_at_ms`、`activity` を持ちます。外部ソースはまだ実装されていない
+ため、このメソッドは現在 `not_implemented` を返します。
+
+更新によって保存されたツリーが変わると、サーバーは `pane_id`、`running`、`total` を持つ
+`pane.agent_activity_changed` を発行します。このイベントはカウントだけを運びます。
+ツリーは `agent.get` または `agent.activity.read` で読み取ってください。
+
 ## イベント購読
 
 長寿命のストリームが必要なときはイベントを購読します:
@@ -662,7 +757,7 @@ server が保持する直近イベントのリングバッファには上限が�
 
 ワークスペースのイベント購読には `workspace.created`、`workspace.updated`、`workspace.metadata_updated`、`workspace.renamed`、`workspace.moved`、`workspace.reordered`、`workspace.closed`、`workspace.focused` があります。`workspace.metadata_updated` はプラグインイベントフックを実行せずにトークン変更と TTL 失効を報告します。その他のワークスペースイベントは Herdr の UI/ランタイムのライフサイクルを記述します。ワークスペースが worktree グループに属している場合、`workspace.created` は任意の `workspace.worktree` 出自情報を含みます。`workspace.moved` は、移動した `workspace_id`、要求された `insert_index`、更新済みの順序付き `workspaces` リストを含みます。`workspace.reordered` は、アトミックに移動した `workspace_ids`、省略可能な `before_workspace_id`、サーバーが確定した順序付き `workspaces` リストを含みます。削除前に Herdr がまだ識別できる場合、`workspace.closed` は最終的な `workspace` スナップショットを含みます。
 タブのイベント購読には `tab.created`、`tab.closed`、`tab.focused`、`tab.renamed`、`tab.moved` があります。`tab.moved` は、移動した `tab_id`、`workspace_id`、要求された `insert_index`、そのワークスペースの更新済みの順序付き `tabs` リストを含みます。
-ペインのイベント購読には `pane.created`、`pane.updated`、`pane.closed`、`pane.focused`、`pane.moved`、`pane.exited`、`pane.agent_detected`、`pane.output_matched`、`pane.agent_status_changed`、`pane.scroll_changed` があります。ターミナルタイトルの変更は `pane.updated` を発行することがありますが、生のタイトルでスピナーだけが変化し、`terminal_title_stripped` が変わらない場合は発行しません。`pane.scroll_changed` は 1 つの `pane_id` を対象とし、Herdr がスクロールスナップショットの変化を検出するたびに `pane_id`、`workspace_id`、現在の `scroll` 情報を発行します。
+ペインのイベント購読には `pane.created`、`pane.updated`、`pane.closed`、`pane.focused`、`pane.moved`、`pane.exited`、`pane.agent_detected`、`pane.agent_activity_changed`、`pane.output_matched`、`pane.agent_status_changed`、`pane.scroll_changed` があります。ターミナルタイトルの変更は `pane.updated` を発行することがありますが、生のタイトルでスピナーだけが変化し、`terminal_title_stripped` が変わらない場合は発行しません。`pane.scroll_changed` は 1 つの `pane_id` を対象とし、Herdr がスクロールスナップショットの変化を検出するたびに `pane_id`、`workspace_id`、現在の `scroll` 情報を発行します。
 レイアウトのイベント購読には `layout.updated` があります。このイベントは 1 つのタブについて更新済みの `PaneLayoutSnapshot` を運びます。`session.snapshot` でブートストラップするクライアントは、同じ `workspace_id` と `tab_id` のキャッシュ済みレイアウトを置き換えてください。
 
 worktree のイベント購読には `worktree.created`、`worktree.opened`、`worktree.removed` があります。worktree イベントは Git チェックアウトのライフサイクルを記述します。`worktree.created` は開かれた `workspace` と作成された `worktree` を含みます。`worktree.opened` は対象の `workspace`、開かれた `worktree`、`already_open` を含みます。`worktree.removed` は `workspace_id`、削除された `worktree`、`forced` を含みます。

@@ -102,10 +102,10 @@ herdr pane read w1:p2 --source recent --lines 50
 | 工作区 | `workspace.create`、`workspace.list`、`workspace.get`、`workspace.focus`、`workspace.rename`、`workspace.move`、`workspace.move_block`、`workspace.report_metadata`、`workspace.close` |
 | Worktree | `worktree.list`、`worktree.create`、`worktree.open`、`worktree.remove` |
 | 标签页 | `tab.create`、`tab.list`、`tab.get`、`tab.focus`、`tab.rename`、`tab.move`、`tab.close` |
-| 窗格 | `pane.split`、`pane.swap`、`pane.move`、`pane.zoom`、`pane.layout`、`pane.process_info`、`pane.neighbor`、`pane.edges`、`pane.focus_direction`、`pane.resize`、`pane.list`、`pane.current`、`pane.get`、`pane.rename`、`pane.send_text`、`pane.send_keys`、`pane.send_input`、`pane.read`、`pane.graphics.info`、`pane.graphics.set`、`pane.graphics.clear`、`pane.graphics.stream`、`pane.report_agent`、`pane.report_agent_session`、`pane.report_metadata`、`pane.clear_agent_authority`、`pane.release_agent`、`pane.close`、`pane.wait_for_output` |
+| 窗格 | `pane.split`、`pane.swap`、`pane.move`、`pane.zoom`、`pane.layout`、`pane.process_info`、`pane.neighbor`、`pane.edges`、`pane.focus_direction`、`pane.resize`、`pane.list`、`pane.current`、`pane.get`、`pane.rename`、`pane.send_text`、`pane.send_keys`、`pane.send_input`、`pane.read`、`pane.graphics.info`、`pane.graphics.set`、`pane.graphics.clear`、`pane.graphics.stream`、`pane.report_agent`、`pane.report_agent_session`、`pane.report_agent_activity`、`pane.report_metadata`、`pane.clear_agent_authority`、`pane.release_agent`、`pane.close`、`pane.wait_for_output` |
 | 弹窗 | `popup.close` |
 | 布局 | `layout.export`、`layout.apply`、`layout.set_split_ratio` |
-| 智能体 | `agent.list`、`agent.get`、`agent.read`、`agent.explain`、`agent.send_keys`、`agent.prompt`、`agent.wait`、`agent.rename`、`agent.focus`、`agent.start` |
+| 智能体 | `agent.list`、`agent.get`、`agent.read`、`agent.explain`、`agent.send_keys`、`agent.prompt`、`agent.wait`、`agent.rename`、`agent.focus`、`agent.start`、`agent.activity.read`、`agent.external.list` |
 | 事件 | `events.subscribe`、`events.wait` |
 | 集成 | `integration.install`、`integration.uninstall` |
 | 插件 | `plugin.link`、`plugin.list`、`plugin.unlink`、`plugin.enable`、`plugin.disable`、`plugin.action.list`、`plugin.action.invoke`、`plugin.log.list`、`plugin.pane.open`、`plugin.pane.focus`、`plugin.pane.close` |
@@ -623,6 +623,91 @@ workspace 的 get/list 响应会公开生成的 `tokens` 映射,空间侧边栏�
 
 钩子可能乱序发送更新时,使用 `seq`。对同一 `source`,序号小于等于最后接受序号的上报会被 API 接受,但被窗格状态忽略。每个窗格或工作区在其生命周期内最多接受来自 32 个不同来源的带序号令牌上报;清除或过期不会释放这些来源名额。
 
+## 智能体活动
+
+智能体的活动树(子智能体、任务、待办、后台进程)是服务器拥有的事实。服务器在
+后台线程里通过每种智能体各自的来源适配器读取它;钩子只负责发出「可能变了」的
+信号。
+
+钩子用 `pane.report_agent_activity` 发信号:
+
+```json
+{
+  "id": "req_4",
+  "method": "pane.report_agent_activity",
+  "params": {
+    "pane_id": "w1:p1",
+    "source": "herdr:pi",
+    "agent": "pi",
+    "hint": "{\"type\":\"herdr.activity.snapshot\",\"version\":1,\"nodes\":[]}"
+  }
+}
+```
+
+`hint` 可选。它可以是钩子事件名之类的自由文本,也可以是该智能体的来源适配器能
+理解的结构化快照:Herdr 的 Pi 扩展就是这样把整棵树作为 `herdr.activity.snapshot`
+JSON 文档上报的,因为 Pi 不在磁盘上保留任何活动记录。服务器只保留每个窗格最近
+一份 hint,并在下一次刷新时交给来源适配器。`node_id` 与 `seq` 仅用于诊断。响应是
+`ok`;树本身从不出现在请求或响应里。
+
+一个 hint 会立即安排一次刷新,但同一窗格每秒最多刷新一次。与 hint 无关地,服务器
+在首次检测到智能体时刷新一次,在其状态为 `working` 期间每 5 秒刷新一次,并在工作
+结束时再补刷一次。每次刷新每个智能体最多保留 32 个节点(运行中的节点及其祖先
+优先),来源给出的节点更多时置 `truncated`。
+
+`agent.get`、`agent.list` 和 `session.snapshot` 以 `AgentInfo.activity` 暴露已存储的
+树,为空时省略。每个节点带 `id`、`kind`(`subagent`、`task`、`todo`、`background`、
+`unknown`)、`label`、`status`(`pending`、`running`、`blocked`、`done`、`failed`、
+`unknown`),以及可选的 `parent_id`、`agent_type`、`started_at_ms`、`ended_at_ms`、
+`content_ref` 和 `summary`。未知枚举值解码为 `unknown`。`AgentInfo.launch_seq` 是
+服务器分配的启动顺序:窗格首次获得智能体身份时得到一个新的单调序号,状态变化
+不改号,智能体被释放或重新识别后取新号。`0` 表示未知(旧服务器不下发该字段);
+序号只在同一个服务器进程内可比。
+
+用 `agent.activity.read` 读取树或某个节点的内容:
+
+```json
+{
+  "id": "req_5",
+  "method": "agent.activity.read",
+  "params": {
+    "pane_id": "w1:p1",
+    "node_id": "call_par/0",
+    "cursor": null,
+    "max_bytes": 65536,
+    "follow": true
+  }
+}
+```
+
+`pane_id` 与 `external_id` 恰好给一个,否则调用以 `invalid_params` 失败。不带
+`node_id` 时响应在 `nodes` 里带整棵树(这次读取同时刷新已存储的树,下一份快照与之
+一致);带 `node_id` 时响应带一个 `content` 片段:`format`(`text`、`markdown`、
+`jsonl`、`unknown`)、`text`、`eof`、`truncated`,以及下一页要作为 `cursor` 回传的
+`next_cursor`。`cursor` 对调用方不透明。`max_bytes` 默认 65536,上限 524288。
+`follow: true` 让服务器在接下来的 10 秒内每秒刷新该窗格的树,轮询的查看器可以借此
+跟踪运行中的节点。响应形如
+`{"type":"agent_activity","nodes":[...],"content":{...}}`,由后台读取线程产生,
+因此可能晚于后续请求的响应到达。
+
+错误:`pane_not_found`;`agent_not_found`(窗格没有智能体,或外部来源未知);
+`not_implemented`(本服务器没有该智能体的来源适配器);`activity_unavailable`
+(来源此刻不可读,例如 Pi 还没有上报过快照);`activity_malformed`(来源内容或
+游标不是预期格式);`activity_io_error`;读取队列已满时 `server_busy`。目前只有 Pi
+(通过 Herdr 的 Pi 扩展)提供树;其他智能体在各自的来源适配器落地前回
+`not_implemented`。
+
+`agent.external.list`(无参数)列出不属于任何窗格的智能体会话,响应为
+`{"type":"external_agent_list","agents":[...]}`,条目是 `ExternalAgentInfo`:
+`external_id`(`<source>:<会话 id>`,可作为 `agent.activity.read` 的
+`external_id`)、`source`、`agent_status`、`label`、`readable`,以及可选的 `agent`、
+`cwd`、`updated_at_ms` 和 `activity`。目前还没有实现任何外部来源,该方法当前回
+`not_implemented`。
+
+刷新改变了已存储的树时,服务器发出 `pane.agent_activity_changed`,带 `pane_id`、
+`running` 和 `total`。该事件只带计数;树要用 `agent.get` 或 `agent.activity.read`
+读取。
+
 ## 事件订阅
 
 需要长期数据流时订阅事件:
@@ -658,7 +743,7 @@ server 只保留有界的近期事件环形缓冲。如果订阅方落后到**�
 
 工作区事件订阅包括 `workspace.created`、`workspace.updated`、`workspace.metadata_updated`、`workspace.renamed`、`workspace.moved`、`workspace.reordered`、`workspace.closed` 和 `workspace.focused`。`workspace.metadata_updated` 报告令牌变更和 TTL 到期,但不会调用插件事件钩子。其他工作区事件描述 Herdr UI/运行时的生命周期。当工作区属于 worktree 组时,`workspace.created` 包含可选的 `workspace.worktree` 来源信息。`workspace.moved` 包含被移动的 `workspace_id`、请求的 `insert_index` 和更新后的有序 `workspaces` 列表。`workspace.reordered` 包含原子移动的 `workspace_ids`、可选的 `before_workspace_id` 和服务器确认的有序 `workspaces` 列表。在移除前 Herdr 仍能识别时,`workspace.closed` 包含最终的 `workspace` 快照。
 标签页事件订阅包括 `tab.created`、`tab.closed`、`tab.focused`、`tab.renamed` 和 `tab.moved`。`tab.moved` 包含被移动的 `tab_id`、`workspace_id`、请求的 `insert_index` 和该工作区更新后的有序 `tabs` 列表。
-窗格事件订阅包括 `pane.created`、`pane.updated`、`pane.closed`、`pane.focused`、`pane.moved`、`pane.exited`、`pane.agent_detected`、`pane.output_matched`、`pane.agent_status_changed` 和 `pane.scroll_changed`。终端标题变化可能发出 `pane.updated`,但如果原始标题只有旋转指示符发生变化且 `terminal_title_stripped` 不变,则不会发出。`pane.scroll_changed` 只针对一个 `pane_id`,每当 Herdr 观察到滚动快照变化时,都会发出 `pane_id`、`workspace_id` 和当前 `scroll` 指标。
+窗格事件订阅包括 `pane.created`、`pane.updated`、`pane.closed`、`pane.focused`、`pane.moved`、`pane.exited`、`pane.agent_detected`、`pane.agent_activity_changed`、`pane.output_matched`、`pane.agent_status_changed` 和 `pane.scroll_changed`。终端标题变化可能发出 `pane.updated`,但如果原始标题只有旋转指示符发生变化且 `terminal_title_stripped` 不变,则不会发出。`pane.scroll_changed` 只针对一个 `pane_id`,每当 Herdr 观察到滚动快照变化时,都会发出 `pane_id`、`workspace_id` 和当前 `scroll` 指标。
 布局事件订阅包括 `layout.updated`。该事件携带一个标签页更新后的 `PaneLayoutSnapshot`。使用 `session.snapshot` 引导的客户端应替换具有相同 `workspace_id` 和 `tab_id` 的缓存布局。
 
 Worktree 事件订阅包括 `worktree.created`、`worktree.opened` 和 `worktree.removed`。Worktree 事件描述 Git 检出的生命周期。`worktree.created` 包含打开的 `workspace` 和创建的 `worktree`。`worktree.opened` 包含目标 `workspace`、打开的 `worktree` 和 `already_open`。`worktree.removed` 包含 `workspace_id`、被移除的 `worktree` 和 `forced`。
