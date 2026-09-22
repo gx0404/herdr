@@ -2691,6 +2691,11 @@ mod agent_activity_event_tests {
         });
         assert!(response.contains("\"result\""), "{response}");
         assert!(app.state.agent_activity.has_hints());
+        assert_eq!(
+            app.state.agent_activity.latest_hint(agent_pane).as_deref(),
+            Some("SubagentStart"),
+            "提示文本另存最近一份，交给来源适配器"
+        );
         assert!(
             activity_events(&event_hub).is_empty(),
             "提示本身不发变化事件"

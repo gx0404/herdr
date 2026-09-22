@@ -1622,16 +1622,26 @@ impl AppState {
                 seq,
             } => {
                 // 提示只进收件箱（不改投影）：刷新调度（限频 + 后台读取）在 server
-                // 侧取走后执行，见 `server::agent_activity::Service`。
+                // 侧取走后执行，见 `server::agent_activity::Service`。提示文本另存
+                // 一份最新的，交给来源适配器（pi 的树整份装在里面）。
                 tracing::debug!(
                     ?pane_id,
                     %source,
                     %agent_label,
-                    ?hint,
+                    hint_bytes = hint.as_ref().map_or(0, String::len),
                     ?node_id,
                     ?seq,
                     "agent activity hint received"
                 );
+                if let Some(hint) = hint.as_deref() {
+                    if !self.agent_activity.store_hint(pane_id, hint) {
+                        tracing::debug!(
+                            ?pane_id,
+                            bytes = hint.len(),
+                            "agent activity hint too large to cache"
+                        );
+                    }
+                }
                 self.agent_activity.note_hint(pane_id);
                 Vec::new()
             }

@@ -14,9 +14,6 @@ mod claude;
 mod codex;
 mod kimi;
 mod opencode;
-// seam-stub(adapter-pi)：pi 的入口 `discover_from_hint` / `read_from_hint` 不走
-// trait，runtime 接通前整个子模块无调用方；接通提交删除。
-#[allow(dead_code)]
 mod pi;
 mod zcode;
 
@@ -34,23 +31,32 @@ use crate::events::AppEvent;
 use crate::layout::PaneId;
 use crate::server::client_transport::ServerEvent;
 
-/// 一次发现 / 读取的上下文。`home` 由调用方注入，测试传临时目录。
-// seam-stub(adapters)：字段只有适配器读取，六个适配器目前都是空壳；首个读取
-// 上下文的适配器车道落地后删除。
-#[allow(dead_code)]
+/// 一次发现 / 读取的上下文。`home` 由调用方注入，测试传临时目录；其余路径类字段
+/// 由 runtime 解析，适配器只读。
 pub(crate) struct SourceContext<'a> {
     /// 规范化的 agent 名：`"claude"`、`"codex"` 等。
     pub agent: &'a str,
     pub session: Option<&'a crate::agent_resume::AgentSessionRef>,
+    // seam-stub(adapters)：以下三个字段只有适配器读取，尚无适配器用到；首个读取
+    // 它们的适配器车道落地后删除对应 allow。
+    #[allow(dead_code)]
     pub cwd: Option<&'a Path>,
+    #[allow(dead_code)]
     pub home: &'a Path,
+    #[allow(dead_code)]
     pub now_ms: u64,
+    /// 该 CLI 的配置目录（见 `agent_config_dir`：环境变量覆盖优先，否则 `home`
+    /// 下的默认目录；claude 借此跟随 `CLAUDE_CONFIG_DIR`）。没有对应 CLI 时为 `None`。
+    // seam-stub(adapters)：同上，claude / codex / kimi 适配器落地后删除。
+    #[allow(dead_code)]
+    pub agent_config_dir: Option<&'a Path>,
+    /// server 缓存的该 pane 最近一份 `pane.report_agent_activity` hint（pi 的树整份
+    /// 装在里面，见 `pi::discover_from_hint`）；外部来源与从未报过提示的 pane 为
+    /// `None`。
+    pub latest_hint: Option<&'a str>,
 }
 
 /// 一个节点的内容片段；`next_cursor` 对调用方不透明。
-// seam-stub(adapters)：只有适配器会构造内容片段，六个适配器目前都回
-// `Unsupported`；首个实现 `read` 的适配器车道落地后删除。
-#[allow(dead_code)]
 pub(crate) struct ContentChunk {
     pub format: AgentActivityContentFormat,
     pub text: String,
@@ -63,13 +69,12 @@ pub(crate) struct ContentChunk {
 pub(crate) enum SourceError {
     /// 该来源不提供此能力（含尚未实现的适配器）。
     Unsupported,
-    /// 来源此刻不可读（文件被占用、数据库被锁）；稍后重试。
-    // seam-stub(adapters)：以下三个变体只由适配器构造；适配器落地后删除。
-    #[allow(dead_code)]
+    /// 来源此刻不可读（文件被占用、数据库被锁、快照尚未上报）；稍后重试。
     Unavailable,
     /// 来源内容不是预期格式；附说明，不 panic。
-    #[allow(dead_code)]
     Malformed(String),
+    // seam-stub(adapters)：只由读文件的适配器构造（pi 不读文件）；首个落地的文件型
+    // 适配器车道删除。
     #[allow(dead_code)]
     Io(std::io::Error),
 }
@@ -153,6 +158,78 @@ pub(crate) fn handles(method: &Method) -> bool {
         method,
         Method::AgentActivityRead(_) | Method::AgentExternalList(_)
     )
+}
+
+/// 发现入口。pi 的树只存在于 hint 里（trait 实现回 `Unsupported`），runtime 直接走
+/// `pi::discover_from_hint`；还没有 hint 时视同「会话尚未生成」回空树。其余来源走
+/// trait。
+fn discover_nodes(
+    source: &dyn ActivitySource,
+    cx: &SourceContext<'_>,
+) -> Result<Vec<AgentActivityNode>, SourceError> {
+    if cx.agent == pi::Pi.id() {
+        return match cx.latest_hint {
+            Some(hint) => pi::discover_from_hint(cx, hint),
+            None => Ok(Vec::new()),
+        };
+    }
+    source.discover(cx)
+}
+
+/// 读取入口，与 [`discover_nodes`] 同一套分流；pi 没有 hint 时回 `Unavailable`。
+fn read_node(
+    source: &dyn ActivitySource,
+    cx: &SourceContext<'_>,
+    node_id: &str,
+    cursor: Option<&str>,
+    max_bytes: usize,
+) -> Result<ContentChunk, SourceError> {
+    if cx.agent == pi::Pi.id() {
+        return match cx.latest_hint {
+            Some(hint) => pi::read_from_hint(cx, hint, node_id, cursor, max_bytes),
+            None => Err(SourceError::Unavailable),
+        };
+    }
+    source.read(cx, node_id, cursor, max_bytes)
+}
+
+/// 该 CLI 的配置目录，与 `integration::env` 的 `claude_dir` / `codex_dir` /
+/// `kimi_dir` 同一套规则：环境变量覆盖优先（支持 `~` 前缀），否则 `home` 下的
+/// 默认目录。opencode 与 zcode 没有覆盖变量；未知 agent 为 `None`。`integration`
+/// 没有导出这些常量与 `~` 展开，此处按同一规则镜像，等价性由测试钉住。
+fn agent_config_dir(agent: &str, home: &Path) -> Option<PathBuf> {
+    let (env_var, segments): (Option<&str>, &[&str]) = match agent {
+        "claude" => (Some("CLAUDE_CONFIG_DIR"), &[".claude"]),
+        "codex" => (Some("CODEX_HOME"), &[".codex"]),
+        "kimi" => (Some("KIMI_CODE_HOME"), &[".kimi-code"]),
+        "opencode" => (None, &[".config", "opencode"]),
+        "pi" => (Some("PI_CODING_AGENT_DIR"), &[".pi", "agent"]),
+        "zcode" => (None, &[".zcode", "cli"]),
+        _ => return None,
+    };
+    if let Some(value) = env_var
+        .and_then(std::env::var_os)
+        .filter(|value| !value.is_empty())
+    {
+        return Some(expand_tilde(PathBuf::from(value), home));
+    }
+    let mut dir = home.to_path_buf();
+    dir.extend(segments);
+    Some(dir)
+}
+
+/// `~` / `~/rest` / `~\rest` 展开到 `home`；其余原样。
+fn expand_tilde(path: PathBuf, home: &Path) -> PathBuf {
+    let Some(raw) = path.to_str() else {
+        return path;
+    };
+    if raw == "~" {
+        return home.to_path_buf();
+    }
+    match raw.strip_prefix("~/").or_else(|| raw.strip_prefix("~\\")) {
+        Some(rest) => home.join(rest),
+        None => path,
+    }
 }
 
 /// 来源未实现（适配器回 `Unsupported`）时的应答。
@@ -506,9 +583,9 @@ impl Worker {
                 source,
                 subject,
             } => {
-                let result = source
-                    .discover(&pane_context(&subject, &home, now_ms))
-                    .map_err(|error| error.to_string());
+                let config_dir = agent_config_dir(&subject.agent, &home);
+                let cx = pane_context(&subject, &home, config_dir.as_deref(), now_ms);
+                let result = discover_nodes(source, &cx).map_err(|error| error.to_string());
                 self.send_event(AppEvent::AgentActivityRefreshed { pane_id, result })
             }
             Job::DiscoverExternal { sources } => {
@@ -619,21 +696,28 @@ impl Worker {
             reply,
         } = job;
         let external_agent = source.id();
+        let config_dir = match &target {
+            ReadTarget::Pane { subject, .. } => agent_config_dir(&subject.agent, home),
+            ReadTarget::External { .. } => agent_config_dir(external_agent, home),
+        };
         let cx = match &target {
-            ReadTarget::Pane { subject, .. } => pane_context(subject, home, now_ms),
+            ReadTarget::Pane { subject, .. } => {
+                pane_context(subject, home, config_dir.as_deref(), now_ms)
+            }
             ReadTarget::External { session } => SourceContext {
                 agent: external_agent,
                 session: Some(session),
                 cwd: None,
                 home,
                 now_ms,
+                agent_config_dir: config_dir.as_deref(),
+                latest_hint: None,
             },
         };
         let result = match node_id {
-            None => source.discover(&cx).map(|nodes| (nodes, None)),
-            Some(node_id) => source
-                .read(&cx, &node_id, cursor.as_deref(), max_bytes)
-                .map(|chunk| {
+            None => discover_nodes(source, &cx).map(|nodes| (nodes, None)),
+            Some(node_id) => {
+                read_node(source, &cx, &node_id, cursor.as_deref(), max_bytes).map(|chunk| {
                     let content = AgentActivityContent {
                         node_id,
                         format: chunk.format,
@@ -643,7 +727,8 @@ impl Worker {
                         next_cursor: chunk.next_cursor,
                     };
                     (Vec::new(), Some(content))
-                }),
+                })
+            }
         };
         let mut alive = true;
         if let (ReadTarget::Pane { pane_id, .. }, Ok((nodes, None))) = (&target, &result) {
@@ -670,6 +755,7 @@ impl Worker {
 fn pane_context<'a>(
     subject: &'a AgentActivitySubject,
     home: &'a Path,
+    agent_config_dir: Option<&'a Path>,
     now_ms: u64,
 ) -> SourceContext<'a> {
     SourceContext {
@@ -678,6 +764,8 @@ fn pane_context<'a>(
         cwd: subject.cwd.as_deref(),
         home,
         now_ms,
+        agent_config_dir,
+        latest_hint: subject.latest_hint.as_deref(),
     }
 }
 
@@ -988,6 +1076,8 @@ mod tests {
                 cwd: None,
                 home: &home,
                 now_ms: 0,
+                agent_config_dir: None,
+                latest_hint: None,
             };
             assert!(matches!(
                 source.discover(&cx),
@@ -1008,6 +1098,100 @@ mod tests {
         )));
         assert!(handles(&Method::AgentExternalList(EmptyParams::default())));
         assert!(!handles(&Method::AgentList(EmptyParams::default())));
+    }
+
+    /// 环境变量的临时改写：作用域结束恢复原值。调用方须先持有 integration 的环境锁。
+    struct EnvOverride {
+        name: &'static str,
+        original: Option<std::ffi::OsString>,
+    }
+
+    impl EnvOverride {
+        fn set(name: &'static str, value: Option<&str>) -> Self {
+            let original = std::env::var_os(name);
+            match value {
+                Some(value) => std::env::set_var(name, value),
+                None => std::env::remove_var(name),
+            }
+            Self { name, original }
+        }
+    }
+
+    impl Drop for EnvOverride {
+        fn drop(&mut self) {
+            match self.original.take() {
+                Some(value) => std::env::set_var(self.name, value),
+                None => std::env::remove_var(self.name),
+            }
+        }
+    }
+
+    /// 配置目录的解析与 `integration::env` 同一套规则：默认目录在注入的 home 下，环境
+    /// 变量覆盖优先并展开 `~`；对真实 home 的结果与 integration 导出的函数逐字相等。
+    #[test]
+    fn agent_config_dir_mirrors_the_integration_layout() {
+        let _lock = crate::integration::integration_env_lock();
+        let home = Path::new("/srv/agent-home");
+        {
+            let _claude = EnvOverride::set("CLAUDE_CONFIG_DIR", None);
+            let _codex = EnvOverride::set("CODEX_HOME", None);
+            let _kimi = EnvOverride::set("KIMI_CODE_HOME", None);
+            let _pi = EnvOverride::set("PI_CODING_AGENT_DIR", None);
+            for (agent, expected) in [
+                ("claude", ".claude"),
+                ("codex", ".codex"),
+                ("kimi", ".kimi-code"),
+                ("opencode", ".config/opencode"),
+                ("pi", ".pi/agent"),
+                ("zcode", ".zcode/cli"),
+            ] {
+                assert_eq!(
+                    agent_config_dir(agent, home),
+                    Some(home.join(expected)),
+                    "{agent} 的默认目录"
+                );
+            }
+            assert!(agent_config_dir("unknown", home).is_none());
+
+            let real_home = home_dir().expect("测试环境有 HOME");
+            assert_eq!(
+                agent_config_dir("claude", &real_home),
+                crate::integration::claude_dir().ok()
+            );
+            assert_eq!(
+                agent_config_dir("codex", &real_home),
+                crate::integration::codex_dir().ok()
+            );
+            assert_eq!(
+                agent_config_dir("kimi", &real_home),
+                crate::integration::kimi_dir().ok()
+            );
+        }
+        {
+            let _claude = EnvOverride::set("CLAUDE_CONFIG_DIR", Some("~/profiles/work"));
+            let _codex = EnvOverride::set("CODEX_HOME", Some("/opt/codex-home"));
+            let _pi = EnvOverride::set("PI_CODING_AGENT_DIR", Some(""));
+            assert_eq!(
+                agent_config_dir("claude", home),
+                Some(home.join("profiles/work")),
+                "`~` 展开到注入的 home"
+            );
+            assert_eq!(
+                agent_config_dir("codex", home),
+                Some(PathBuf::from("/opt/codex-home"))
+            );
+            assert_eq!(
+                agent_config_dir("pi", home),
+                Some(home.join(".pi/agent")),
+                "空值视同未设置"
+            );
+            let real_home = home_dir().expect("测试环境有 HOME");
+            assert_eq!(
+                agent_config_dir("claude", &real_home),
+                crate::integration::claude_dir().ok(),
+                "覆盖值下与 integration 一致"
+            );
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -1425,6 +1609,120 @@ mod tests {
         service.tick(&mut pi.state, Instant::now() + secs(1.0), false);
         std::thread::sleep(Duration::from_millis(50));
         assert!(received.try_recv().is_err());
+    }
+
+    fn pi_fixture(name: &str) -> String {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/agent-activity/pi")
+            .join(name);
+        std::fs::read_to_string(&path)
+            .unwrap_or_else(|error| panic!("读取夹具 {}：{error}", path.display()))
+    }
+
+    fn registered_service() -> (Service, tokio::sync::mpsc::Receiver<AppEvent>) {
+        let (events, received) = tokio::sync::mpsc::channel(32);
+        let service =
+            Service::with_sources(events, Sources::REGISTERED, Some(std::env::temp_dir()));
+        (service, received)
+    }
+
+    fn hint(app: &mut crate::app::App, pane_id: PaneId, hint: Option<&str>) {
+        app.handle_internal_event(AppEvent::AgentActivityHinted {
+            pane_id,
+            source: "herdr:pi".into(),
+            agent_label: "pi".into(),
+            hint: hint.map(str::to_owned),
+            node_id: None,
+            seq: None,
+        });
+    }
+
+    /// pi 走真实注册表：树与内容都来自 server 缓存的最近一份 hint；没报过 hint 时
+    /// 发现回空树、读取回 `activity_unavailable`；坏 hint 的发现按失败回报（保留旧树）。
+    #[test]
+    fn pi_discovery_and_reads_come_from_the_latest_hint() {
+        let (mut service, mut received) = registered_service();
+        let (mut app, pane_id, public) = app_with_agent(Some(Agent::Pi));
+        let t0 = Instant::now();
+
+        // 还没有 hint：首次发现回空树。
+        service.tick(&mut app.state, t0, false);
+        match recv_event(&mut received) {
+            AppEvent::AgentActivityRefreshed { result, .. } => {
+                assert_eq!(result.expect("没有 hint 视同会话尚未生成"), Vec::new());
+            }
+            other => panic!("应为活动树刷新事件：{other:?}"),
+        }
+        service.pane_refreshed(pane_id, false);
+        let read = |service: &mut Service, app: &crate::app::App, node_id: &str| {
+            submit_api(
+                service,
+                app,
+                read_request(crate::api::schema::AgentActivityReadParams {
+                    pane_id: Some(public.clone()),
+                    node_id: Some(node_id.into()),
+                    ..Default::default()
+                }),
+            )
+            .expect("参数合法，异步应答")
+        };
+        assert_eq!(
+            read(&mut service, &app, "call_par/0")["error"]["code"],
+            "activity_unavailable"
+        );
+
+        // 扩展上报快照：提示触发刷新，树来自快照；节点内容按快照里的输出分页。
+        hint(
+            &mut app,
+            pane_id,
+            Some(&pi_fixture("snapshot-extension.json")),
+        );
+        service.tick(&mut app.state, t0 + secs(1.0), false);
+        match recv_event(&mut received) {
+            AppEvent::AgentActivityRefreshed { result, .. } => {
+                let nodes = result.expect("快照可解析");
+                assert_eq!(
+                    nodes
+                        .iter()
+                        .map(|node| node.id.as_str())
+                        .collect::<Vec<_>>(),
+                    [
+                        "call_par",
+                        "call_par/0",
+                        "call_par/1",
+                        "call_par/2",
+                        "call_ws",
+                        "call_notes"
+                    ]
+                );
+                assert_eq!(nodes[1].agent_type.as_deref(), Some("scout"));
+            }
+            other => panic!("应为活动树刷新事件：{other:?}"),
+        }
+        service.pane_refreshed(pane_id, true);
+        let content = read(&mut service, &app, "call_par/0");
+        assert_eq!(content["result"]["type"], "agent_activity");
+        assert_eq!(content["result"]["content"]["format"], "markdown");
+        assert!(content["result"]["content"]["text"]
+            .as_str()
+            .is_some_and(|text| text.starts_with("Reading src/auth")));
+        assert_eq!(
+            read(&mut service, &app, "no-such-node")["error"]["code"],
+            "activity_unavailable"
+        );
+
+        // 只有信号没有文本的提示不覆盖上一份快照；坏快照按失败回报。
+        hint(&mut app, pane_id, None);
+        assert!(app.state.agent_activity.latest_hint(pane_id).is_some());
+        hint(&mut app, pane_id, Some("tool_execution_end"));
+        service.tick(&mut app.state, t0 + secs(2.0), false);
+        match recv_event(&mut received) {
+            AppEvent::AgentActivityRefreshed { result, .. } => {
+                let error = result.expect_err("非快照文本不是 pi 的树");
+                assert!(error.starts_with("malformed"), "{error}");
+            }
+            other => panic!("应为活动树刷新事件：{other:?}"),
+        }
     }
 
     #[test]

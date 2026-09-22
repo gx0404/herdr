@@ -495,6 +495,8 @@ mod tests {
             cwd: None,
             home,
             now_ms: 1_726_990_000_000,
+            agent_config_dir: None,
+            latest_hint: None,
         }
     }
 

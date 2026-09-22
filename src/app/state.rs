@@ -1048,6 +1048,10 @@ pub const MAX_AGENT_ACTIVITY_NODES: usize = 32;
 /// false`），但不删除：来源恢复后整源替换回来。
 pub const EXTERNAL_AGENT_STALE_AFTER: std::time::Duration = std::time::Duration::from_secs(60);
 
+/// 每个 pane 缓存的最近一份 `pane.report_agent_activity` hint 的字节上限（与 API
+/// 单请求上限同量级）；更长的提示只当信号、不缓存文本。
+pub const MAX_AGENT_ACTIVITY_HINT_BYTES: usize = 1024 * 1024;
+
 /// 一个 agent（pane）的活动树快照：后台适配器一次发现的结果，截断后落库。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AgentActivitySnapshot {
@@ -1087,6 +1091,8 @@ pub(crate) struct AgentActivitySubject {
     pub agent: String,
     pub session: Option<crate::agent_resume::AgentSessionRef>,
     pub cwd: Option<std::path::PathBuf>,
+    /// 该 pane 最近一份 hint 文本（共享所有权：提交后台任务不复制大快照）。
+    pub latest_hint: Option<std::sync::Arc<str>>,
 }
 
 /// agent 启动序号与活动树的存储：纯数据，随 `AppState` 走，无 PTY 可测。
@@ -1096,13 +1102,15 @@ pub(crate) struct AgentActivitySubject {
 /// 活动树按 pane 存放，每个 agent 最多 [`MAX_AGENT_ACTIVITY_NODES`] 个节点；外部
 /// 来源条目按 `(source, external_id)` 排序存放，整源替换。`hinted` 是钩子提示的
 /// 收件箱：只记「哪个 pane 报过有变化」，刷新调度（限频、后台读取）在 server 侧
-/// 取走后执行。
+/// 取走后执行；`latest_hints` 另存每个 pane 最近一份 hint 文本（pi 的树整份装在
+/// 里面），交给来源适配器读取。
 #[derive(Debug, Default)]
 pub struct AgentActivityStore {
     next_launch_seq: u64,
     launch_seqs: std::collections::HashMap<PaneId, u64>,
     activity: std::collections::HashMap<PaneId, AgentActivitySnapshot>,
     hinted: std::collections::HashSet<PaneId>,
+    latest_hints: std::collections::HashMap<PaneId, std::sync::Arc<str>>,
     external: Vec<ExternalAgentRecord>,
     /// 各外部来源最近一次成功刷新的时刻。
     external_refreshed_at: std::collections::HashMap<String, std::time::Instant>,
@@ -1128,6 +1136,7 @@ impl AgentActivityStore {
     /// 投影可见的内容（序号或活动树）是否有被移除。
     pub fn forget_pane(&mut self, pane_id: PaneId) -> bool {
         self.hinted.remove(&pane_id);
+        self.latest_hints.remove(&pane_id);
         let seq = self.launch_seqs.remove(&pane_id).is_some();
         let activity = self.activity.remove(&pane_id).is_some();
         seq || activity
@@ -1140,6 +1149,7 @@ impl AgentActivityStore {
         self.launch_seqs.retain(|pane_id, _| alive(*pane_id));
         self.activity.retain(|pane_id, _| alive(*pane_id));
         self.hinted.retain(|pane_id| alive(*pane_id));
+        self.latest_hints.retain(|pane_id, _| alive(*pane_id));
         before != self.launch_seqs.len() + self.activity.len()
     }
 
@@ -1206,6 +1216,21 @@ impl AgentActivityStore {
     /// 记一次钩子提示。返回是否是新提示（同一 pane 未取走前重复提示只算一次）。
     pub fn note_hint(&mut self, pane_id: PaneId) -> bool {
         self.hinted.insert(pane_id)
+    }
+
+    /// 缓存该 pane 最近一份 hint 文本（后来者覆盖）。超过
+    /// [`MAX_AGENT_ACTIVITY_HINT_BYTES`] 的提示不缓存（上一份保留），返回 false。
+    pub fn store_hint(&mut self, pane_id: PaneId, hint: &str) -> bool {
+        if hint.len() > MAX_AGENT_ACTIVITY_HINT_BYTES {
+            return false;
+        }
+        self.latest_hints.insert(pane_id, hint.into());
+        true
+    }
+
+    /// 该 pane 最近一份 hint 文本；没报过或已作废为 `None`。
+    pub fn latest_hint(&self, pane_id: PaneId) -> Option<std::sync::Arc<str>> {
+        self.latest_hints.get(&pane_id).cloned()
     }
 
     pub fn has_hints(&self) -> bool {
@@ -1648,6 +1673,7 @@ impl AppState {
             agent,
             session,
             cwd,
+            latest_hint: self.agent_activity.latest_hint(pane_id),
         })
     }
 
@@ -2723,6 +2749,38 @@ mod agent_activity_store_tests {
         assert!(store.forget_pane(kept));
         assert!(!store.has_hints());
         assert!(!store.forget_pane(kept));
+    }
+
+    #[test]
+    fn latest_hint_text_is_kept_per_pane_capped_and_dropped_with_the_pane() {
+        let mut store = AgentActivityStore::default();
+        let kept = PaneId::from_raw(1);
+        let gone = PaneId::from_raw(2);
+        assert!(store.latest_hint(kept).is_none());
+        assert!(store.store_hint(kept, "first"));
+        assert!(store.store_hint(kept, "second"), "后来者覆盖");
+        assert!(store.store_hint(gone, "elsewhere"));
+        assert_eq!(store.latest_hint(kept).as_deref(), Some("second"));
+        assert_eq!(store.latest_hint(gone).as_deref(), Some("elsewhere"));
+
+        let oversized = "x".repeat(MAX_AGENT_ACTIVITY_HINT_BYTES + 1);
+        assert!(!store.store_hint(kept, &oversized), "超限不缓存");
+        assert_eq!(
+            store.latest_hint(kept).as_deref(),
+            Some("second"),
+            "超限时上一份保留"
+        );
+        let at_limit = "y".repeat(MAX_AGENT_ACTIVITY_HINT_BYTES);
+        assert!(store.store_hint(kept, &at_limit), "恰好到上限可缓存");
+
+        assert!(
+            !store.retain_panes(|pane| pane == kept),
+            "只有 hint 文本的 pane 被清掉不算投影变化"
+        );
+        assert!(store.latest_hint(gone).is_none());
+        assert!(store.latest_hint(kept).is_some());
+        assert!(!store.forget_pane(kept), "没有序号和树：不算投影变化");
+        assert!(store.latest_hint(kept).is_none(), "释放后提示文本作废");
     }
 
     #[test]
