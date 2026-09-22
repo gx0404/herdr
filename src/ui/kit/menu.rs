@@ -1,9 +1,12 @@
 //! 菜单：右键菜单、命令面板目录视图与子菜单共用的列表原语。分隔线、分组标题、
-//! 右对齐快捷键、子菜单箭头、禁用置灰、勾选态、危险项、悬浮 / 键盘高亮分离；
-//! 键盘导航（跳过分隔与禁用项、回绕）与首字母跳转是纯函数。
+//! 右对齐快捷键、子菜单箭头、禁用置灰、勾选态、危险项、注意徽标、悬浮 / 键盘
+//! 高亮分离；行数放不下时按滚动窗口画（键盘高亮永远在窗口内，上下边框画
+//! `▲` / `▼` 提示还有项）。键盘导航（跳过分隔与禁用项、回绕）、首字母跳转与
+//! 滚动窗口起点都是纯函数。
 //!
-//! 行版式（边框内）：`␠[✓␠]标签…[␠␠快捷键][␠▸]␠`。勾选列只在有项带 `checked`
-//! 时出现，箭头列只在有子菜单时出现，快捷键列按最宽的快捷键右对齐。
+//! 行版式（边框内）：`␠[✓␠]标签…[␠●][␠␠快捷键][␠▸]␠`。勾选列只在有项带
+//! `checked` 时出现，徽标列只在有项带 `badge` 时出现，箭头列只在有子菜单时出现，
+//! 快捷键列按最宽的快捷键右对齐。
 
 #![allow(dead_code)] // seam-stub(menu)：波 2 菜单车道接入右键菜单 / 命令面板后删除
 
@@ -28,7 +31,9 @@ pub(crate) enum MenuItemKind {
 }
 
 /// 一个菜单项。`checked`：`None` = 不是勾选项，`Some(false)` = 可勾选但未勾；
-/// `danger` = 破坏性动作（关闭、删除），标签转红。
+/// `danger` = 破坏性动作（关闭、删除），标签转红；`badge` = 需要注意（如分类里
+/// 有可用更新，对应命令面板的 `ClientPaletteItem.badge`），在快捷键列前画一个
+/// accent 圆点（`ascii` 为 `o`），只在动作 / 子菜单行画。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct MenuItem<'a> {
     pub kind: MenuItemKind,
@@ -37,6 +42,7 @@ pub(crate) struct MenuItem<'a> {
     pub enabled: bool,
     pub checked: Option<bool>,
     pub danger: bool,
+    pub badge: bool,
 }
 
 impl<'a> MenuItem<'a> {
@@ -48,6 +54,7 @@ impl<'a> MenuItem<'a> {
             enabled: true,
             checked: None,
             danger: false,
+            badge: false,
         }
     }
 
@@ -80,19 +87,24 @@ impl<'a> MenuItem<'a> {
 /// 交互状态：`highlighted` 是键盘选中项（回车激活的就是它），`hovered` 是指针
 /// 悬浮项，两者分离（鼠标路过不劫持键盘选择）。指向不可激活项时不画高亮。
 /// `hover_bg` 为 `None` 时取 `Palette::hover_row_bg()`；右键菜单接入时传
-/// `ComponentStyles::hover_bg`，保住用户主题里的 `hover_bg` 覆盖。
+/// `ComponentStyles::hover_bg`，保住用户主题里的 `hover_bg` 覆盖。`scroll` 是
+/// 期望的首个可见项下标（默认 0 = 从头画），渲染时按 [`menu_scroll`] 折算。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub(crate) struct MenuState {
     pub highlighted: usize,
     pub hovered: Option<usize>,
     pub hover_bg: Option<Color>,
+    pub scroll: usize,
 }
 
-/// 渲染结果：菜单实际占的矩形（含边框）与可激活项的 `(行矩形, 项下标)`。
+/// 渲染结果：菜单实际占的矩形（含边框）、画出来的可激活项 `(行矩形, 项下标)`
+/// 与实际生效的 `scroll`（首个画出的项下标）。调用方把 `scroll` 记回自己的状态，
+/// 滚轮从这里继续；本函数不改输入状态。
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub(crate) struct MenuRender {
     pub area: Rect,
     pub rows: Vec<(Rect, usize)>,
+    pub scroll: usize,
 }
 
 /// 菜单最窄宽度（含边框），与既有右键菜单一致。
@@ -100,11 +112,13 @@ const MIN_WIDTH: u16 = 14;
 /// 空间不够时，快捷键列只在标签列还能保住这么多列时保留。
 const MIN_LABEL_WITH_SHORTCUT: u16 = 8;
 
-/// 各列宽度：勾选列、标签列、快捷键列（不含前面的 2 列间隔）、箭头列。
+/// 各列宽度：勾选列、标签列、徽标列（间隔 + 圆点）、快捷键列（不含前面的 2 列
+/// 间隔）、箭头列。
 #[derive(Debug, Clone, Copy, Default)]
 struct Columns {
     check: u16,
     label: u16,
+    badge: u16,
     shortcut: u16,
     arrow: u16,
 }
@@ -126,6 +140,9 @@ impl Columns {
             if item.kind == MenuItemKind::Submenu {
                 columns.arrow = 2;
             }
+            if item.badge && item.kind != MenuItemKind::Header {
+                columns.badge = 2;
+            }
         }
         columns
     }
@@ -145,6 +162,7 @@ pub(crate) fn menu_size(items: &[MenuItem<'_>]) -> (u16, u16) {
     let inner = columns
         .check
         .saturating_add(columns.label)
+        .saturating_add(columns.badge)
         .saturating_add(columns.shortcut_span())
         .saturating_add(columns.arrow)
         .saturating_add(2);
@@ -187,10 +205,41 @@ fn row_styles(
     (label, row.fg(palette.overlay0))
 }
 
+/// 滚动窗口起点（首个画出的项下标）。`visible` 是边框内的行数，即
+/// `min(menu_size 的高, bounds 的高) - 2`；[`render_menu`] 用同一口径，调用方
+/// 可在视图计算阶段先算好。先把 `state.scroll` 收回到「最后一屏」之内，再移动
+/// 最少的行让**可激活**的 `highlighted` 落进窗口——回车激活的永远是画出来的项。
+/// 向上揭示时顺带露出高亮项正上方紧挨着的分组标题 / 分隔线（窗口放得下为限），
+/// 免得回绕到顶时看不到组名。滚轮滚动而不想被拉回高亮项时，调用方随滚动移动
+/// `highlighted`，或把它置为越界值放弃键盘高亮（[`menu_step`] 从越界值出发会
+/// 落到首 / 末项）。
+pub(crate) fn menu_scroll(items: &[MenuItem<'_>], state: &MenuState, visible: usize) -> usize {
+    let visible = visible.max(1);
+    let mut scroll = state.scroll.min(items.len().saturating_sub(visible));
+    let highlighted = state.highlighted;
+    if !items.get(highlighted).is_some_and(MenuItem::is_activatable) {
+        return scroll;
+    }
+    if highlighted < scroll {
+        scroll = highlighted;
+        while scroll > 0
+            && highlighted - (scroll - 1) < visible
+            && !items[scroll - 1].is_activatable()
+        {
+            scroll -= 1;
+        }
+    } else if highlighted >= scroll + visible {
+        scroll = highlighted + 1 - visible;
+    }
+    scroll
+}
+
 /// 画菜单。`anchor` 是左上角的期望位置，放不下时向左 / 向上平移贴住 `bounds`
 /// （与既有右键菜单一致；子菜单要「翻到父菜单左侧」由调用方按 [`menu_size`]
 /// 算好 anchor）。`bounds` 比自然尺寸小时收窄：先截断标签，标签列不足 8 列再丢
-/// 快捷键列；行数放不下的项不画。`ascii` 把 `✓` / `▸` 降级为 `*` / `>`。
+/// 快捷键列（徽标列保留）；行数放不下时只画 [`menu_scroll`] 算出的窗口，上 / 下
+/// 还有项时在上 / 下边框正中画 `▲` / `▼`。`ascii` 把 `✓` / `▸` / `●` / `▲` /
+/// `▼` 降级为 `*` / `>` / `o` / `^` / `v`。
 pub(crate) fn render_menu(
     buffer: &mut Buffer,
     anchor: (u16, u16),
@@ -228,14 +277,17 @@ pub(crate) fn render_menu(
     let mut columns = Columns::of(items);
     // 内容区 = 两侧各 1 列内边距之间；勾选列与箭头列固定，其余归标签与快捷键。
     let content = inner.width.saturating_sub(2);
-    // 极窄时依次让出箭头列、勾选列，保证标签至少 1 列、右侧不越过边框。
-    if columns.check + columns.arrow + 1 > content {
+    // 极窄时依次让出箭头列、徽标列、勾选列，保证标签至少 1 列、右侧不越过边框。
+    if columns.check + columns.badge + columns.arrow + 1 > content {
         columns.arrow = 0;
+    }
+    if columns.check + columns.badge + 1 > content {
+        columns.badge = 0;
     }
     if columns.check + 1 > content {
         columns.check = 0;
     }
-    let flexible = content.saturating_sub(columns.check + columns.arrow);
+    let flexible = content.saturating_sub(columns.check + columns.badge + columns.arrow);
     if columns.shortcut > 0
         && flexible < columns.label.min(MIN_LABEL_WITH_SHORTCUT) + columns.shortcut_span()
     {
@@ -243,16 +295,24 @@ pub(crate) fn render_menu(
     }
     let label_budget = flexible.saturating_sub(columns.shortcut_span());
     let hover_bg = state.hover_bg.unwrap_or_else(|| palette.hover_row_bg());
-    let (check_glyph, arrow_glyph) = if ascii { ("*", ">") } else { ("✓", "▸") };
+    let (check_glyph, arrow_glyph, badge_glyph) = if ascii {
+        ("*", ">", "o")
+    } else {
+        ("✓", "▸", "●")
+    };
 
-    for (index, item) in items.iter().enumerate() {
-        let Some(row_y) = u16::try_from(index)
-            .ok()
-            .and_then(|offset| inner.y.checked_add(offset))
-            .filter(|row_y| *row_y < inner.bottom())
-        else {
-            break;
-        };
+    let visible = usize::from(inner.height);
+    let scroll = menu_scroll(items, state, visible);
+    render.scroll = scroll;
+    for (offset, (index, item)) in items
+        .iter()
+        .enumerate()
+        .skip(scroll)
+        .take(visible)
+        .enumerate()
+    {
+        // offset < inner.height ≤ u16::MAX，转换不会失败。
+        let row_y = inner.y + u16::try_from(offset).unwrap_or(0);
         match item.kind {
             MenuItemKind::Separator => {
                 put_str(buffer, x, row_y, 1, glyphs.tee_right, border);
@@ -285,7 +345,7 @@ pub(crate) fn render_menu(
                     cursor += columns.check;
                 }
                 put_str_ellipsis(buffer, cursor, row_y, label_budget, item.label, label_style);
-                // 右侧自右向左：内边距、箭头列、快捷键列。
+                // 右侧自右向左：内边距、箭头列、快捷键列、徽标列。
                 let mut end = inner.right() - 1;
                 if columns.arrow > 0 {
                     if item.kind == MenuItemKind::Submenu {
@@ -305,6 +365,16 @@ pub(crate) fn render_menu(
                             aside_style,
                         );
                     }
+                    end -= columns.shortcut_span();
+                }
+                if columns.badge > 0 && item.badge {
+                    // 高亮行随整行反色、禁用行随整行置灰，其余用 accent 点出来。
+                    let style = if highlighted || !item.enabled {
+                        aside_style
+                    } else {
+                        aside_style.fg(palette.accent)
+                    };
+                    put_str(buffer, end - 1, row_y, 1, badge_glyph, style);
                 }
                 if activatable {
                     render
@@ -313,6 +383,16 @@ pub(crate) fn render_menu(
                 }
             }
         }
+    }
+
+    // 窗口外还有项：上 / 下边框正中画箭头提示。
+    let (up_glyph, down_glyph) = if ascii { ("^", "v") } else { ("▲", "▼") };
+    let middle = x + width / 2;
+    if scroll > 0 {
+        put_str(buffer, middle, y, 1, up_glyph, border);
+    }
+    if scroll + visible < items.len() {
+        put_str(buffer, middle, area.bottom() - 1, 1, down_glyph, border);
     }
     render
 }
@@ -445,6 +525,7 @@ mod tests {
                 highlighted: 1,
                 hovered: Some(3),
                 hover_bg: None,
+                scroll: 0,
             },
             false,
         );
@@ -519,6 +600,7 @@ mod tests {
                 highlighted: 6,
                 hovered: Some(2),
                 hover_bg: Some(override_bg),
+                scroll: 0,
             },
             false,
         );
@@ -536,6 +618,7 @@ mod tests {
                 highlighted: 4,
                 hovered: Some(4),
                 hover_bg: None,
+                scroll: 0,
             },
             false,
         );
@@ -585,7 +668,7 @@ mod tests {
             "标签保不住 8 列时丢快捷键列"
         );
         let (_, render, _) = paint(20, 3, (0, 0), &items, MenuState::default(), false);
-        assert_eq!(render.rows.len(), 1, "放不下的行不画、不进命中表");
+        assert_eq!(render.rows.len(), 1, "窗口外的行不画、不进命中表");
         let (_, render, _) = paint(2, 9, (0, 0), &items, MenuState::default(), false);
         assert_eq!(render, MenuRender::default());
         // 极窄：箭头列与勾选列让位，标签截断，边框不被覆盖。
@@ -595,6 +678,193 @@ mod tests {
         assert_eq!(row_text(&buffer, 4), "│ M… │", "箭头列让位");
         let (buffer, _, _) = paint(3, 9, (0, 0), &sample(), MenuState::default(), false);
         assert_eq!(row_text(&buffer, 4), "│ │");
+    }
+
+    /// 两组共 8 项：标题 + a1..a3、分隔线 + b1..b3。
+    fn scrolling() -> [MenuItem<'static>; 8] {
+        [
+            MenuItem::header("Group"),
+            MenuItem::action("a1"),
+            MenuItem::action("a2"),
+            MenuItem::action("a3"),
+            MenuItem::separator(),
+            MenuItem::action("b1"),
+            MenuItem::action("b2"),
+            MenuItem::action("b3"),
+        ]
+    }
+
+    fn scrolled(highlighted: usize, scroll: usize) -> MenuState {
+        MenuState {
+            highlighted,
+            scroll,
+            ..MenuState::default()
+        }
+    }
+
+    #[test]
+    fn window_follows_a_highlight_past_the_visible_rows() {
+        let items = scrolling();
+        // 高 5 → 边框内 3 行。高亮 b2（6）越过窗口底：窗口下移到 4..=6。
+        let (buffer, render, palette) = paint(14, 5, (0, 0), &items, scrolled(6, 0), false);
+        assert_eq!(render.scroll, 4);
+        assert_eq!(menu_scroll(&items, &scrolled(6, 0), 3), 4, "与渲染同口径");
+        let rows: Vec<String> = (0..5).map(|y| row_text(&buffer, y)).collect();
+        assert_eq!(
+            rows,
+            vec![
+                "┌──────▲─────┐",
+                "├────────────┤",
+                "│ b1         │",
+                "│ b2         │",
+                "└──────▼─────┘",
+            ]
+        );
+        assert_eq!(
+            render
+                .rows
+                .iter()
+                .map(|(rect, index)| (rect.y, *index))
+                .collect::<Vec<_>>(),
+            vec![(2, 5), (3, 6)],
+            "只有窗口内的可激活项进命中表，行矩形按窗口偏移"
+        );
+        assert_eq!(
+            buffer[(2, 3)].style().bg,
+            Some(palette.accent),
+            "高亮在窗口内"
+        );
+        assert_eq!(
+            buffer[(7, 0)].style().fg,
+            Some(palette.accent),
+            "滚动提示随边框色"
+        );
+
+        // 高亮回到 a1 而 scroll 还停在 4：窗口上移，并带上正上方的分组标题。
+        let (buffer, render, _) = paint(14, 5, (0, 0), &items, scrolled(1, 4), false);
+        assert_eq!(render.scroll, 0);
+        assert_eq!(row_text(&buffer, 0), "┌────────────┐", "上面没有更多项");
+        assert_eq!(row_text(&buffer, 1), "│ Group      │");
+        assert_eq!(row_text(&buffer, 4), "└──────▼─────┘");
+
+        let (buffer, _, _) = paint(14, 5, (0, 0), &items, scrolled(6, 0), true);
+        assert_eq!(row_text(&buffer, 0), "┌──────^─────┐", "ascii 降级");
+        assert_eq!(row_text(&buffer, 4), "└──────v─────┘");
+    }
+
+    #[test]
+    fn scroll_is_clamped_and_only_moved_to_reveal_the_highlight() {
+        let items = scrolling();
+        assert_eq!(
+            menu_scroll(&items, &scrolled(5, 99), 3),
+            5,
+            "越界收回到最后一屏"
+        );
+        assert_eq!(
+            menu_scroll(&items, &scrolled(3, 2), 3),
+            2,
+            "高亮已可见时尊重 scroll"
+        );
+        assert_eq!(
+            menu_scroll(&items, &scrolled(usize::MAX, 3), 3),
+            3,
+            "没有键盘高亮时滚轮说了算"
+        );
+        assert_eq!(
+            menu_scroll(&items, &scrolled(0, 3), 3),
+            3,
+            "高亮落在标题上不揭示"
+        );
+        assert_eq!(menu_scroll(&items, &scrolled(0, 0), 20), 0, "放得下时不滚");
+        assert_eq!(menu_scroll(&[], &scrolled(0, 5), 3), 0);
+        // 向上揭示连带的标题 / 分隔线以窗口放得下为限，高亮项本身始终可见。
+        let stacked = [
+            MenuItem::header("H"),
+            MenuItem::separator(),
+            MenuItem::header("H2"),
+            MenuItem::action("a"),
+            MenuItem::action("b"),
+            MenuItem::action("c"),
+        ];
+        assert_eq!(menu_scroll(&stacked, &scrolled(3, 4), 2), 2);
+    }
+
+    #[test]
+    fn keyboard_highlight_is_always_drawn_and_hit_testable() {
+        let items = scrolling();
+        let activatable = (0..items.len()).filter(|&index| items[index].is_activatable());
+        for highlighted in activatable {
+            for scroll in 0..=items.len() + 1 {
+                let (buffer, render, palette) =
+                    paint(14, 5, (0, 0), &items, scrolled(highlighted, scroll), false);
+                let Some((rect, _)) = render.rows.iter().find(|(_, i)| *i == highlighted) else {
+                    panic!("高亮 {highlighted} 在 scroll {scroll} 时没画出来");
+                };
+                assert_eq!(
+                    buffer[(rect.x + 1, rect.y)].style().bg,
+                    Some(palette.accent),
+                    "高亮 {highlighted} / scroll {scroll}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn badge_draws_an_accent_dot_before_the_shortcut_column() {
+        let items = [
+            MenuItem {
+                shortcut: Some("^U"),
+                badge: true,
+                ..MenuItem::action("Updates")
+            },
+            MenuItem::action("Settings"),
+            MenuItem {
+                badge: true,
+                enabled: false,
+                ..MenuItem::action("Plugins")
+            },
+        ];
+        // 内容：标签 8 + 徽标 2 + 间隔 2 + 快捷键 2 + 内边距 2 = 16，边框 +2。
+        assert_eq!(menu_size(&items), (18, 5));
+        let state = MenuState {
+            highlighted: 1,
+            hovered: Some(0),
+            ..MenuState::default()
+        };
+        let (buffer, _, palette) = paint(18, 5, (0, 0), &items, state, false);
+        assert_eq!(row_text(&buffer, 1), "│ Updates  ●  ^U │");
+        assert_eq!(row_text(&buffer, 2), "│ Settings       │");
+        assert_eq!(row_text(&buffer, 3), "│ Plugins  ●     │");
+        let dot = buffer[(11, 1)].style();
+        assert_eq!(dot.fg, Some(palette.accent), "徽标 accent");
+        assert_eq!(dot.bg, Some(palette.hover_row_bg()), "随悬浮行底色");
+        assert_eq!(
+            buffer[(11, 3)].style().fg,
+            Some(palette.overlay0),
+            "禁用项的徽标随整行置灰"
+        );
+
+        let (buffer, _, palette) = paint(18, 5, (0, 0), &items, MenuState::default(), false);
+        assert_eq!(
+            buffer[(11, 1)].style(),
+            buffer[(3, 1)].style(),
+            "高亮行的徽标随整行反色"
+        );
+        assert_eq!(buffer[(11, 1)].style().bg, Some(palette.accent));
+
+        let (buffer, _, _) = paint(18, 5, (0, 0), &items, state, true);
+        assert_eq!(row_text(&buffer, 1), "│ Updates  o  ^U │", "ascii 降级");
+        // 收窄：快捷键列先丢，徽标列保留；极窄时徽标列也让位。
+        let (buffer, _, _) = paint(14, 5, (0, 0), &items, state, false);
+        assert_eq!(row_text(&buffer, 1), "│ Updates  ● │");
+        let (buffer, _, _) = paint(6, 5, (0, 0), &items, state, false);
+        assert_eq!(row_text(&buffer, 1), "│ U… │");
+        // 标题不画徽标，也不因此多占一列。
+        let header = [MenuItem {
+            badge: true,
+            ..MenuItem::header("Long header text")
+        }];
+        assert_eq!(menu_size(&header), (20, 3));
     }
 
     #[test]
