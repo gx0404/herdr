@@ -41,10 +41,18 @@
 //! 主转录里派生子 agent 的工具名实测是 `Agent`（输入键 `description` /
 //! `subagent_type` / `model` / `prompt`），不是 `Task`；workflow 派生的子 agent 在
 //! 父转录里只有一条 `Workflow` 工具调用 → 反查父转录得不到完整树，目录扫描是
-//! 主力。**未在本机 25 份主转录里观察到任何 `TodoWrite` / `TaskCreate` 调用，也
-//! 没有 `~/.claude/todos/` 目录**（只有 `~/.claude/tasks/<session>/` 且仅含
-//! `.lock` / `.highwatermark`）→ 待办条目按公开的工具输入形状尽力解析，夹具是
-//! 按该形状手写的，不是本机样本。
+//! 主力。
+//!
+//! 待办：**本机 25 份主转录里没有任何 `TodoWrite` / `TaskCreate` 调用**，形状取自
+//! 2.1.278 二进制内嵌的输入 schema（只读字符串检索）：`TodoWrite` 的
+//! `input.todos[]` 为 `{content, status, activeForm}`，`status` ∈ `pending` /
+//! `in_progress` / `completed`，本适配器取尾部窗口里最后一次写入；夹具按该形状
+//! 手写。另一套 Tasks 系统（`TaskCreate` 输入 `{subject, description,
+//! activeForm}`，任务 id 只出现在工具结果文本 `Task #<id> created successfully`
+//! 里，状态靠后续 `TaskUpdate {taskId, status}`）**本版不重建**：它的持久化目录
+//! `<config>/tasks/<listId>/<id>.json` 的 listId 在本机 4 个样本里都对不上任何
+//! 会话 id，没有可靠的会话→清单映射；`TaskCreated` / `TaskCompleted` 钩子只负责
+//! 触发刷新信号。
 
 use std::collections::BTreeMap;
 use std::fs::File;
@@ -83,8 +91,8 @@ const RUNNING_WINDOW_MS: u64 = 120_000;
 const MIN_READ_BYTES: usize = 1024;
 const MAX_READ_BYTES: usize = 1024 * 1024;
 
-/// 主转录里写入待办清单的工具名。本机未观察到调用，按公开输入形状尽力解析。
-const TODO_TOOL_NAMES: [&str; 3] = ["TodoWrite", "TaskCreate", "TaskCreated"];
+/// 主转录里整份覆写待办清单的工具名（输入形状见模块文档）。
+const TODO_TOOL_NAME: &str = "TodoWrite";
 
 pub(super) struct Claude;
 
@@ -697,11 +705,7 @@ fn read_todos(session_dir: &Path) -> Vec<AgentActivityNode> {
             if block.get("type").and_then(Value::as_str) != Some("tool_use") {
                 continue;
             }
-            let name = block
-                .get("name")
-                .and_then(Value::as_str)
-                .unwrap_or_default();
-            if !TODO_TOOL_NAMES.contains(&name) {
+            if block.get("name").and_then(Value::as_str) != Some(TODO_TOOL_NAME) {
                 continue;
             }
             if let Some(items) = block
