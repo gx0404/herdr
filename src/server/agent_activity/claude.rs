@@ -43,6 +43,19 @@
 //! `general-purpose`），不是 id；token 用量在 `message.usage`，键为
 //! `input_tokens` / `output_tokens` / `cache_creation_input_tokens` /
 //! `cache_read_input_tokens` 等。`timestamp` 是 RFC3339 毫秒 UTC。
+//!
+//! **一次 API 响应会被按内容块拆成多行 `assistant` 记录**：同一响应的各行共用
+//! 同一个 `message.id` 并逐行重复整份 `message.usage`。本机 60 份子 agent 转录
+//! 实测 4207 条 assistant 行只对应 2236 个 `message.id`（58/60 份文件存在重复
+//! id）；同 id 各行的 `input_tokens` 完全相同、`output_tokens` 单调不减，取最后
+//! 一行即该响应的最终用量。逐行相加会把 input 放大约 1.8 倍、output 放大约
+//! 1.1%，消息数放大近一倍 → 本适配器按 id 归并。同 id 的行实测总是连续出现
+//! （80 份文件 3244 个 id 组，0 例非连续重现），所以只需记住上一个 id。
+//! 实测 assistant 行 100% 带 `message.id`；`user` 行带 `message` 但既无 `id`
+//! 也无 `usage`；`attachment` 行没有 `message`。
+//! `input_tokens` **不含**缓存：本机同一批样本里去重后 `input_tokens` 合计
+//! 5544，而 `cache_read_input_tokens` 合计 4.37 亿、`cache_creation_input_tokens`
+//! 合计 751 万 → 摘要里的 `in` 取三者之和才有意义。
 //! `message.content` 既可能是字符串，也可能是块数组（块 `type` 实测 `text` /
 //! `thinking` / `tool_use` / `tool_result`）。
 //!
@@ -478,13 +491,71 @@ fn read_workflow_state(session_dir: &Path, workflow: &str) -> Option<WorkflowSta
 struct TranscriptScan {
     started_at_ms: Option<u64>,
     last_at_ms: Option<u64>,
+    /// 消息条数：同一 `message.id` 的多行只算一条（模块文档「一次 API 响应…」）。
     messages: u32,
+    /// 输入 token 合计，含缓存创建与缓存命中；裸 `input_tokens` 只是零头。
     input_tokens: u64,
     output_tokens: u64,
     first_user_text: Option<String>,
     attribution: Option<String>,
     /// 是否完整扫到了文件末尾；只有这时消息数与 token 才是全量。
     complete: bool,
+}
+
+/// 按 `message.id` 归并同一次 API 响应拆出的多行：同 id 只算一条消息，用量取该组
+/// 最后一行（同 id 各行的 usage 是重复的整份快照，见模块文档）。同 id 的行实测
+/// 总是连续出现，所以只记住上一组，不用集合，逐行零分配。
+#[derive(Default)]
+struct UsageMerge {
+    open_id: Option<String>,
+    open_input: u64,
+    open_output: u64,
+}
+
+impl UsageMerge {
+    /// 收下一条带 `message` 的记录；`id` 为 `None`（实测 `user` 行）的自成一条。
+    fn push(&mut self, scan: &mut TranscriptScan, id: Option<&str>, input: u64, output: u64) {
+        match id {
+            Some(id) => {
+                if self.open_id.as_deref() != Some(id) {
+                    self.flush(scan);
+                    self.open_id = Some(id.to_string());
+                }
+                self.open_input = input;
+                self.open_output = output;
+            }
+            None => {
+                self.flush(scan);
+                scan.messages = scan.messages.saturating_add(1);
+                scan.input_tokens = scan.input_tokens.saturating_add(input);
+                scan.output_tokens = scan.output_tokens.saturating_add(output);
+            }
+        }
+    }
+
+    /// 结算当前这一组；扫描结束时必须调用一次，否则最后一组会丢。
+    fn flush(&mut self, scan: &mut TranscriptScan) {
+        if self.open_id.take().is_none() {
+            return;
+        }
+        scan.messages = scan.messages.saturating_add(1);
+        scan.input_tokens = scan.input_tokens.saturating_add(self.open_input);
+        scan.output_tokens = scan.output_tokens.saturating_add(self.open_output);
+        self.open_input = 0;
+        self.open_output = 0;
+    }
+}
+
+/// 一条记录的 (输入, 输出) token。输入含缓存创建与缓存命中——裸 `input_tokens`
+/// 在本机样本里只占总输入的万分之一量级，单报它会严重低估。
+fn usage_tokens(message: &Value) -> (u64, u64) {
+    let Some(usage) = message.get("usage") else {
+        return (0, 0);
+    };
+    let input = non_negative(usage.get("input_tokens"))
+        .saturating_add(non_negative(usage.get("cache_creation_input_tokens")))
+        .saturating_add(non_negative(usage.get("cache_read_input_tokens")));
+    (input, non_negative(usage.get("output_tokens")))
 }
 
 /// 流式扫描一个子 agent 转录，坏行只跳过。
@@ -508,6 +579,7 @@ fn scan_transcript(path: &Path, modified_ms: Option<u64>, budget: &mut u64) -> T
     let mut reader = BufReader::new(std::io::Read::take(file, limit));
     let mut consumed = 0u64;
     let mut raw = Vec::new();
+    let mut merge = UsageMerge::default();
     loop {
         if !full && scan.started_at_ms.is_some() && scan.first_user_text.is_some() {
             break;
@@ -535,21 +607,20 @@ fn scan_transcript(path: &Path, modified_ms: Option<u64>, budget: &mut u64) -> T
         let Some(message) = value.get("message").filter(|value| value.is_object()) else {
             continue;
         };
-        scan.messages = scan.messages.saturating_add(1);
-        if let Some(usage) = message.get("usage") {
-            scan.input_tokens = scan
-                .input_tokens
-                .saturating_add(non_negative(usage.get("input_tokens")));
-            scan.output_tokens = scan
-                .output_tokens
-                .saturating_add(non_negative(usage.get("output_tokens")));
-        }
+        let (input, output) = usage_tokens(message);
+        let message_id = message
+            .get("id")
+            .and_then(Value::as_str)
+            .or_else(|| value.get("requestId").and_then(Value::as_str))
+            .or_else(|| value.get("uuid").and_then(Value::as_str));
+        merge.push(&mut scan, message_id, input, output);
         if scan.first_user_text.is_none()
             && message.get("role").and_then(Value::as_str) == Some("user")
         {
             scan.first_user_text = plain_text(message.get("content")).map(|text| clip(&text));
         }
     }
+    merge.flush(&mut scan);
     if full {
         *budget = budget.saturating_sub(consumed);
     }
@@ -1281,10 +1352,13 @@ mod tests {
         let first = node(&nodes, "a0000000000000001");
         assert_eq!(first.label, "map the render hot path");
         assert_eq!(first.agent_type.as_deref(), Some("Explore"));
-        let summary = first.summary.clone().expect("有用量摘要");
-        assert!(summary.starts_with("sonnet · 2 msg"), "{summary}");
-        assert!(summary.contains("in 1.2k"), "{summary}");
-        assert!(summary.contains("out 340"), "{summary}");
+        // 夹具里一次响应拆成 3 行 assistant，共用一个 message.id 并重复同一份
+        // usage：消息数与 token 都不得翻倍（逐行相加会得到 4 msg / in 3.7k /
+        // out 710）。
+        assert_eq!(
+            first.summary.as_deref(),
+            Some("sonnet · 2 msg · in 1.2k · out 340")
+        );
     }
 
     #[test]
@@ -1332,6 +1406,41 @@ mod tests {
         // 无 meta.json、无 journal → label 取首条用户文本，类型取 attributionAgent。
         assert_eq!(second.label, "check the config reference");
         assert_eq!(second.agent_type.as_deref(), Some("Plan"));
+        // 输入合计含缓存创建与缓存命中：10 + 300 + 4000 = 4310。只看裸
+        // input_tokens 会报成 10，与真实用量差几个数量级。
+        assert_eq!(second.summary.as_deref(), Some("2 msg · in 4.3k"));
+    }
+
+    #[test]
+    fn repeated_usage_rows_sharing_a_message_id_are_merged() {
+        let path = fixture_home().join(
+            ".claude/projects/-tmp-demo-project/5f000000-0000-4000-8000-000000000001/subagents/agent-a0000000000000001.jsonl",
+        );
+        let mut budget = MAX_DISCOVER_BYTES;
+        let scan = scan_transcript(&path, None, &mut budget);
+        assert!(scan.complete);
+        // 1 条 user + 1 组 assistant（3 行同 id）= 2 条消息。
+        assert_eq!(scan.messages, 2);
+        // 同 id 各行的 usage 是重复快照：input 只取一次，output 取组内最后一行。
+        assert_eq!(scan.input_tokens, 1234);
+        assert_eq!(scan.output_tokens, 340);
+
+        // 没有 message.id 的行（实测 user 行）各算一条，用量直接计入；它也会
+        // 结束上一组，之后同名 id 重新开组。
+        let mut scan = TranscriptScan::default();
+        let mut merge = UsageMerge::default();
+        merge.push(&mut scan, Some("m1"), 10, 1);
+        merge.push(&mut scan, Some("m1"), 10, 2);
+        merge.push(&mut scan, None, 5, 5);
+        merge.push(&mut scan, Some("m1"), 10, 3);
+        merge.flush(&mut scan);
+        assert_eq!(
+            (scan.messages, scan.input_tokens, scan.output_tokens),
+            (3, 25, 10)
+        );
+        // 重复 flush 不会重复计数。
+        merge.flush(&mut scan);
+        assert_eq!(scan.messages, 3);
     }
 
     #[test]
