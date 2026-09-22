@@ -127,6 +127,11 @@ fn spawn_client_process_with_args_and_env(
     let mut cmd = CommandBuilder::new(env!("CARGO_BIN_EXE_herdr"));
     cmd.args(args);
     cmd.env("HERDR_DISABLE_SOUND", "1");
+    // HOME 隔离到测试目录：server 的活动树适配器（zcode 等）会按 HOME 读开发机上
+    // 真实的 CLI 数据，把外部会话塞进快照，让用例随开发机状态漂移。
+    let home = runtime_dir.join("home");
+    let _ = std::fs::create_dir_all(&home);
+    cmd.env("HOME", &home);
     cmd.env("XDG_STATE_HOME", runtime_dir.join("state"));
     cmd.env("XDG_CONFIG_HOME", config_home);
     cmd.env("XDG_RUNTIME_DIR", runtime_dir);
@@ -188,6 +193,9 @@ fn spawn_server_with_config(
 
     let mut cmd = CommandBuilder::new(env!("CARGO_BIN_EXE_herdr"));
     cmd.arg("server");
+    let home = runtime_dir.join("home");
+    let _ = std::fs::create_dir_all(&home);
+    cmd.env("HOME", &home);
     cmd.env("XDG_CONFIG_HOME", config_home);
     cmd.env("XDG_RUNTIME_DIR", runtime_dir);
     cmd.env("HERDR_SOCKET_PATH", api_socket_path);

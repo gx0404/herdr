@@ -66,7 +66,15 @@ fn test_headless_server_with_event_hub(event_hub: api::EventHub) -> HeadlessServ
     spawn_windows_client_accept_thread(listener, should_quit.clone(), server_event_tx.clone());
     let server_keybindings = app_keybindings(&app);
     let headless_size = app.state.headless_size;
-    let agent_activity = crate::server::agent_activity::Service::new(app.event_tx.clone());
+    // 活动树运行时的 home 隔离到本测试的临时目录：适配器（zcode 等）会按 home 读
+    // 本机真实的 CLI 数据，用真 HOME 会让「外部来源为空」之类的断言随开发机状态漂移。
+    let activity_home = dir.join("home");
+    let _ = fs::create_dir_all(&activity_home);
+    let agent_activity = crate::server::agent_activity::Service::with_sources(
+        app.event_tx.clone(),
+        crate::server::agent_activity::Sources::REGISTERED,
+        Some(activity_home),
+    );
 
     HeadlessServer {
         text_snapshots: crate::server::text_snapshots::Store::default(),
