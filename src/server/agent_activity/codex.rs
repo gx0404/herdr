@@ -791,6 +791,8 @@ mod tests {
             cwd: None,
             home,
             now_ms: 1_790_043_600_000,
+            agent_config_dir: None,
+            latest_hint: None,
         }
     }
 
