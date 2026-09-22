@@ -3534,6 +3534,94 @@ fn edit_layout_mode_moves_the_selected_card_with_arrow_keys() {
     assert_eq!(state.observability.page, None, "再按 Esc 才关闭页面");
 }
 
+/// 系统页卡片滚动走真实绘制链路：`commit_paint` 把上一帧各卡的滚动上界写回，
+/// 滚轮按它钳位——进程表滚到底停在最后一屏，反向滚第一格画面立刻变化。
+#[test]
+fn process_card_wheel_scroll_is_bounded_by_the_painted_table() {
+    use crate::api::schema::{ProcessIdentity, ProcessMetric, ProcessSort, SystemMetricsSnapshot};
+    let mut state = docked();
+    state.open_observation_page(Page::Monitor, &mut ClientShellInput::default());
+    state.observability.monitor.visible = vec!["processes".into()];
+    state.observability.process_sort = ProcessSort::Pid;
+    state.observability.metrics = Some(Box::new(SystemMetricsSnapshot {
+        boot_id: "boot".into(),
+        sequence: 1,
+        sampled_at_ms: 1_000,
+        processes: (1..=40)
+            .map(|pid| ProcessMetric {
+                identity: ProcessIdentity {
+                    pid,
+                    ..Default::default()
+                },
+                name: format!("proc{pid:02}"),
+                ..Default::default()
+            })
+            .collect(),
+        ..Default::default()
+    }));
+    state.compose(120, 40).expect("监控面板");
+    let card = state
+        .observability
+        .hits
+        .iter()
+        .find_map(|(rect, action)| {
+            matches!(action, Action::Card(id) if id == "processes").then_some(*rect)
+        })
+        .expect("进程卡已画出");
+    let limit = state
+        .observability
+        .card_scroll_limits
+        .get("processes")
+        .expect("上一帧写回了进程卡的滚动上界");
+    assert!(limit > 0, "40 个进程放不下一张卡");
+    let wheel = |state: &mut ClientShellState, kind: MouseEventKind| {
+        state.handle_mouse(
+            MouseEvent {
+                kind,
+                column: card.x + 2,
+                row: card.y + 3,
+                modifiers: KeyModifiers::NONE,
+            },
+            &mut ClientShellInput::default(),
+        );
+    };
+    let card_text = |state: &mut ClientShellState| {
+        let frame = state.compose(120, 40).expect("重绘");
+        (card.y..card.bottom())
+            .map(|y| {
+                (card.x..card.right())
+                    .map(|x| {
+                        frame.cells[usize::from(y) * usize::from(frame.width) + usize::from(x)]
+                            .symbol
+                            .as_str()
+                    })
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    for _ in 0..limit + 10 {
+        wheel(&mut state, MouseEventKind::ScrollDown);
+    }
+    assert_eq!(
+        state.observability.card_scroll.get("processes").copied(),
+        Some(limit),
+        "滚到底停在上界"
+    );
+    let bottom = card_text(&mut state);
+    assert!(
+        bottom.contains("proc40"),
+        "最后一屏露出最后一个进程\n{bottom}"
+    );
+    wheel(&mut state, MouseEventKind::ScrollUp);
+    assert_eq!(
+        state.observability.card_scroll.get("processes").copied(),
+        Some(limit - 1)
+    );
+    let after = card_text(&mut state);
+    assert!(!after.contains("proc40"), "反向第一格画面就变\n{after}");
+}
+
 /// 监控偏好页的控件：点分段 / 步进器 / 开关只回写各自的偏好键（`PreferenceKey`），
 /// 落盘后重启可恢复；图表字形是独立的客户端偏好键 `monitor_chart_glyphs`。
 #[test]

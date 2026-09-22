@@ -9,7 +9,9 @@ use crate::ui::kit::braille_chart::{render_area_chart, render_sparkline, ChartGl
 use crate::ui::kit::card::{render_card, CardSpec};
 use crate::ui::kit::gauge::{gauge_color, GaugeSpec, GaugeThresholds};
 use crate::ui::kit::meter_row::{render_meter_row, MeterRow};
-use crate::ui::kit::table::{render_table, Column, ColumnWidth, SortState, TableCell, TableState};
+use crate::ui::kit::table::{
+    render_table, Column, ColumnWidth, SortState, TableCell, TableRender, TableState,
+};
 
 /// 历史迷你图最多分多少个采样槽（盲文 256 列）；再宽的图右对齐留白。
 const HISTORY_SLOTS: usize = 512;
@@ -19,6 +21,54 @@ const TWO_COLUMN_MIN_WIDTH: u16 = 94;
 
 /// 逐核迷你条每格的宽度（标签 + 最窄条形 + 数字）。
 const CORE_SLOT_WIDTH: u16 = 16;
+
+/// 系统页里内容可滚动的卡片；`CardScrollLimits` 按这个顺序存各卡的滚动上界。
+const SCROLLABLE_CARDS: [&str; 6] = ["cores", "gpu", "disks", "network", "sensors", "processes"];
+
+/// 系统页各可滚动卡片本次绘制的滚动上界：卡片内首个可见条目（逐核卡是首个
+/// 可见行）下标的最大值，由卡片内高与每个条目占的行数算出——内容放得下时为
+/// 0，滚到上界时最后一个条目正好完整露出。卡片自己按它钳 offset，
+/// `State::scroll_card` 也按它钳，两处是同一个值；没画出内容的卡片为 `None`。
+/// 定长数组、`Copy`，渲染期不分配。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(in crate::client::shell) struct CardScrollLimits([Option<usize>; SCROLLABLE_CARDS.len()]);
+
+impl CardScrollLimits {
+    fn slot(card: &str) -> Option<usize> {
+        SCROLLABLE_CARDS.iter().position(|id| *id == card)
+    }
+
+    fn set(&mut self, card: &str, max: usize) {
+        if let Some(slot) = Self::slot(card) {
+            self.0[slot] = Some(max);
+        }
+    }
+
+    /// `card` 本次绘制的滚动上界；没画出来（或不可滚动）时为 `None`。
+    pub(in crate::client::shell) fn get(&self, card: &str) -> Option<usize> {
+        Self::slot(card).and_then(|slot| self.0[slot])
+    }
+
+    /// 合并同一帧里另一次绘制的上界（多个停靠面板依次绘制）：只覆盖对方画出
+    /// 来的卡片。
+    pub(in crate::client::shell::observability) fn merge(&mut self, other: &Self) {
+        for (mine, theirs) in self.0.iter_mut().zip(other.0) {
+            if theirs.is_some() {
+                *mine = theirs;
+            }
+        }
+    }
+}
+
+/// kit 表格的滚动上界：与 `render_table` 内部的钳位同一个值（行数 − 表体行数）；
+/// 没有表体时不可滚动。
+fn table_scroll_max(rows: usize, render: &TableRender) -> usize {
+    if render.body.is_empty() {
+        0
+    } else {
+        rows.saturating_sub(usize::from(render.body.height))
+    }
+}
 
 /// 迷你图一列容纳的样本数：盲文每格两列、方块与 ASCII 一格一列（与 kit 的
 /// 字形定义一致，见 `braille_chart` 模块说明）。
@@ -219,13 +269,15 @@ fn summary_bar(
 }
 
 /// 系统页：摘要条 + 卡片网格（`TWO_COLUMN_MIN_WIDTH` 起双列）。每张卡片走 kit
-/// `card`；编辑布局模式下卡片顶边带 ↑↓，未选中的卡片转灰。
+/// `card`；编辑布局模式下卡片顶边带 ↑↓，未选中的卡片转灰。可滚动卡片的滚动
+/// 上界写进 `limits`（见 `CardScrollLimits`）。
 pub(super) fn monitor(
     buffer: &mut Buffer,
     area: Rect,
     state: &State,
     cx: &ChromeContext<'_>,
     hits: &mut Vec<(Rect, Action)>,
+    limits: &mut CardScrollLimits,
 ) {
     let palette = cx.palette;
     let Some(sample) = state.metrics.as_ref() else {
@@ -335,16 +387,23 @@ pub(super) fn monitor(
             continue;
         }
         let offset = state.card_scroll.get(id).copied().unwrap_or(0);
-        match id {
-            "cpu" => cpu_card(buffer, inner, state, sample, palette),
+        let max = match id {
+            "cpu" => {
+                cpu_card(buffer, inner, state, sample, palette);
+                continue;
+            }
+            "memory" => {
+                memory_card(buffer, inner, state, sample, palette);
+                continue;
+            }
             "cores" => cores_card(buffer, inner, state, sample, palette, offset, hits),
-            "memory" => memory_card(buffer, inner, state, sample, palette),
             "gpu" => gpu_card(buffer, inner, state, sample, palette, offset),
             "disks" => disks_card(buffer, inner, state, sample, palette, offset),
             "network" => network_card(buffer, inner, state, sample, palette, offset),
             "sensors" => sensors_card(buffer, inner, state, sample, palette, offset),
             _ => processes_card(buffer, inner, state, sample, palette, offset, hits),
-        }
+        };
+        limits.set(id, max);
     }
 }
 
@@ -409,7 +468,9 @@ fn cpu_card(
     }
 }
 
-/// 逐核卡：每核一条迷你 meter row，按列铺开；点击选中该核的历史曲线。
+/// 逐核卡：每核一条迷你 meter row，按列铺开；点击选中该核的历史曲线。滚动
+/// 按整行步进（`offset` 是首个可见行，逐核步进会让多列时所有核整体错一列），
+/// 返回滚动上界。
 fn cores_card(
     buffer: &mut Buffer,
     inner: Rect,
@@ -418,19 +479,26 @@ fn cores_card(
     palette: &Palette,
     offset: usize,
     hits: &mut Vec<(Rect, Action)>,
-) {
+) -> usize {
     let slots = (inner.width / (CORE_SLOT_WIDTH + 1)).max(1);
     let slot_width = if slots == 1 {
         inner.width
     } else {
         CORE_SLOT_WIDTH
     };
+    let per_row = usize::from(slots);
+    let max = sample
+        .cores
+        .len()
+        .div_ceil(per_row)
+        .saturating_sub(usize::from(inner.height));
+    let offset = offset.min(max);
     let ascii = state.chart_glyphs.ascii();
     for (index, core) in sample
         .cores
         .iter()
-        .skip(offset)
-        .take(usize::from(inner.height) * usize::from(slots))
+        .skip(offset.saturating_mul(per_row))
+        .take(usize::from(inner.height) * per_row)
         .enumerate()
     {
         let row = index as u16 / slots;
@@ -466,6 +534,7 @@ fn cores_card(
         }
         hits.push((rect, Action::Core(core.id)));
     }
+    max
 }
 
 /// 内存卡：已用 / 缓存分段 gauge、Swap gauge、历史迷你图。
@@ -564,7 +633,7 @@ fn listed_gpus<'a>(state: &State, sample: &'a SystemMetricsSnapshot) -> Vec<&'a 
 }
 
 /// GPU 卡：每块 GPU 三行——名称 + 温度、利用率 gauge、显存 gauge（无显存数据时
-/// 换成驱动说明）。
+/// 换成驱动说明）。返回滚动上界。
 fn gpu_card(
     buffer: &mut Buffer,
     inner: Rect,
@@ -572,7 +641,7 @@ fn gpu_card(
     sample: &SystemMetricsSnapshot,
     palette: &Palette,
     offset: usize,
-) {
+) -> usize {
     let texts = &crate::i18n::texts().monitor;
     if sample.gpus.is_empty() {
         text(
@@ -582,12 +651,15 @@ fn gpu_card(
             tr("No GPU data available", "无可用 GPU 数据"),
             Style::default().fg(palette.overlay0),
         );
-        return;
+        return 0;
     }
     let gpus = listed_gpus(state, sample);
-    // 滚动位置按卡片实际列出的条目钳一次：隐藏设备或快照变动都会让存量 offset
-    // 越界，越界就整块画空白（与 kit::table 的内部钳位同口径）。
-    let offset = offset.min(gpus.len().saturating_sub(1));
+    // 上界按完整放得下的块数算（每块 3 行）：滚到底时最后一块的三行全露出，
+    // 放得下时不可滚；隐藏设备或快照变动留下的越界存量 offset 也钳回来。
+    let max = gpus
+        .len()
+        .saturating_sub(usize::from(inner.height / 3).max(1));
+    let offset = offset.min(max);
     let ascii = state.chart_glyphs.ascii();
     for (index, gpu) in gpus
         .iter()
@@ -665,6 +737,7 @@ fn gpu_card(
             }
         }
     }
+    max
 }
 
 /// 磁盘卡实际会列出的盘：没有容量的伪文件系统不进表，同一设备挂在多处只列
@@ -684,7 +757,7 @@ fn listed_disks<'a>(state: &State, sample: &'a SystemMetricsSnapshot) -> Vec<&'a
 }
 
 /// 磁盘卡：表格列出真实数据盘——没有容量的伪文件系统不进表，同一设备挂在多处
-/// 只列一次（服务端已按容量去重，这里再按设备名兜底）。
+/// 只列一次（服务端已按容量去重，这里再按设备名兜底）。返回滚动上界。
 fn disks_card(
     buffer: &mut Buffer,
     inner: Rect,
@@ -692,7 +765,7 @@ fn disks_card(
     sample: &SystemMetricsSnapshot,
     palette: &Palette,
     offset: usize,
-) {
+) -> usize {
     let texts = &crate::i18n::texts().monitor;
     let disks = listed_disks(state, sample);
     if disks.is_empty() {
@@ -703,7 +776,7 @@ fn disks_card(
             texts.no_disks,
             Style::default().fg(palette.overlay0),
         );
-        return;
+        return 0;
     }
     let columns = [
         Column {
@@ -750,7 +823,7 @@ fn disks_card(
         hovered: None,
         ascii: state.chart_glyphs.ascii(),
     };
-    render_table(
+    let render = render_table(
         buffer,
         inner,
         &columns,
@@ -774,6 +847,7 @@ fn disks_card(
         },
         palette,
     );
+    table_scroll_max(disks.len(), &render)
 }
 
 /// 网络接口当前的 (收, 发) 速率；两个方向都未知（首次差分）时为 `None`。
@@ -834,7 +908,7 @@ fn listed_networks<'a>(
 }
 
 /// 网络卡：每个活动接口两行——名称 + 速率、收 / 发堆叠迷你图；空闲接口折成
-/// 末行的一句说明。
+/// 末行的一句说明。返回滚动上界。
 fn network_card(
     buffer: &mut Buffer,
     inner: Rect,
@@ -842,13 +916,15 @@ fn network_card(
     sample: &SystemMetricsSnapshot,
     palette: &Palette,
     offset: usize,
-) {
+) -> usize {
     let texts = &crate::i18n::texts().monitor;
     let (active, idle) = listed_networks(state, sample);
-    // 折叠空闲接口后卡片的行数远少于快照里的接口数，存量 offset 越界就会把卡片
-    // 滚成空白，按实际列出的接口钳一次。
-    let offset = offset.min(active.len().saturating_sub(1));
     let bottom = inner.bottom() - u16::from(idle > 0 && inner.height > 1);
+    // 末行留给空闲接口说明，其余每个活动接口占 2 行：上界按完整放得下的接口数
+    // 算，滚到底时最后一个接口的两行都露出，放得下时不可滚。
+    let capacity = usize::from(bottom.saturating_sub(inner.y) / 2).max(1);
+    let max = active.len().saturating_sub(capacity);
+    let offset = offset.min(max);
     let glyphs = state.chart_glyphs.chart();
     let mut y = inner.y;
     for net in active.iter().skip(offset) {
@@ -903,6 +979,7 @@ fn network_card(
             Style::default().fg(palette.overlay0),
         );
     }
+    max
 }
 
 /// 一颗芯片（传感器名的首个词）的温度汇总。
@@ -958,7 +1035,7 @@ fn sensor_chips<'a>(state: &State, sample: &'a SystemMetricsSnapshot) -> Vec<Chi
 }
 
 /// 温度卡：传感器按芯片汇总成一行（最高 / 平均），gauge 以临界温度（未知时
-/// 100 °C）定标。
+/// 100 °C）定标。返回滚动上界。
 fn sensors_card(
     buffer: &mut Buffer,
     inner: Rect,
@@ -966,7 +1043,7 @@ fn sensors_card(
     sample: &SystemMetricsSnapshot,
     palette: &Palette,
     offset: usize,
-) {
+) -> usize {
     let texts = &crate::i18n::texts().monitor;
     if sample.sensors.is_empty() {
         text(
@@ -979,11 +1056,13 @@ fn sensors_card(
             ),
             Style::default().fg(palette.overlay0),
         );
-        return;
+        return 0;
     }
     let chips = sensor_chips(state, sample);
-    // 汇总后的行数远少于传感器数，存量 offset 越界就会把卡片滚成空白。
-    let offset = offset.min(chips.len().saturating_sub(1));
+    // 每颗芯片一行：上界是芯片数 − 内高，放得下时不可滚，滚到底时最后一颗
+    // 落在末行（汇总后的行数远少于传感器数，不能按传感器数算）。
+    let max = chips.len().saturating_sub(usize::from(inner.height));
+    let offset = offset.min(max);
     let ascii = state.chart_glyphs.ascii();
     for (index, chip) in chips
         .iter()
@@ -1020,6 +1099,7 @@ fn sensors_card(
             palette,
         );
     }
+    max
 }
 
 /// 进程表的列顺序与 `ProcessSort` 的对应关系。
@@ -1043,27 +1123,8 @@ fn listed_processes<'a>(
         .collect()
 }
 
-/// 卡片内可滚动的条目数：与卡片**实际渲染**的条目同口径——温度按芯片汇总、
-/// 网络折叠空闲接口、磁盘去重、进程按筛选词过滤，都比快照里的原始条数少。
-/// 滚动上界必须用它，否则 ↑↓ 与滚轮能把卡片滚成空白。
-pub(in crate::client::shell::observability) fn card_scroll_len(
-    state: &State,
-    sample: &SystemMetricsSnapshot,
-    card: &str,
-) -> usize {
-    match card {
-        "cores" => sample.cores.len(),
-        "gpu" => listed_gpus(state, sample).len(),
-        "disks" => listed_disks(state, sample).len(),
-        "network" => listed_networks(state, sample).0.len(),
-        "sensors" => sensor_chips(state, sample).len(),
-        "processes" => listed_processes(state, sample).len(),
-        _ => 0,
-    }
-}
-
 /// 进程卡：首行是筛选入口 + 当前筛选词 + 可见范围，其下是带表头的可排序表格
-/// （点击表头按列排序，点击行打开详情）。
+/// （点击表头按列排序，点击行打开详情）。返回滚动上界。
 fn processes_card(
     buffer: &mut Buffer,
     inner: Rect,
@@ -1072,7 +1133,7 @@ fn processes_card(
     palette: &Palette,
     offset: usize,
     hits: &mut Vec<(Rect, Action)>,
-) {
+) -> usize {
     let texts = &crate::i18n::texts().monitor;
     let mut processes = listed_processes(state, sample);
     processes.sort_by(|a, b| match state.process_sort {
@@ -1095,7 +1156,7 @@ fn processes_card(
     );
     let filter_width = crate::ui::modal_button_width(&format!(" {filter_label} "));
     if inner.height < 2 {
-        return;
+        return 0;
     }
     let columns = [
         Column {
@@ -1214,6 +1275,7 @@ fn processes_card(
             Style::default().fg(palette.overlay0),
         );
     }
+    table_scroll_max(processes.len(), &render)
 }
 
 /// 进程详情对话框：居中覆盖在页面与悬浮层之上，返回其矩形；`hits` 只含
@@ -1746,48 +1808,225 @@ mod tests {
         assert!(!card_has("Core 0"), "逐传感器行已汇总\n{text}");
     }
 
-    /// 温度卡按芯片汇总、网络卡折叠空闲接口后，卡片行数远少于快照里的条目数：
-    /// 滚动上界与渲染钳位都要按实际条目算，否则卡片会被滚成空白。
+    /// 画一帧系统页，并像 `State::commit_paint` 那样把各卡的滚动上界写回状态。
+    fn paint_committed(state: &mut State, width: u16, height: u16) -> (Buffer, PaintOutput) {
+        let (buffer, output) = paint_page(state, Page::Monitor, width, height);
+        state.card_scroll_limits = output.card_scroll_limits;
+        (buffer, output)
+    }
+
+    fn card_text(buffer: &Buffer, rect: Rect) -> String {
+        (rect.y..rect.bottom())
+            .map(|y| row_text(buffer, y))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// 卡片内容放得下时滚动上界为 0：滚轮 / ↑↓ 不改变 `card_scroll`，画面也不
+    /// 动；快照变动留下的越界存量 offset 由卡片按同一个上界钳回来。
     #[test]
-    fn scrolling_temperature_and_network_cards_never_empties_them() {
+    fn scrolling_leaves_cards_whose_content_fits_untouched() {
         let _guard = lang_guard(Lang::ZhCn);
         let mut state = monitored();
-        let card_text = |buffer: &Buffer, rect: Rect| {
-            (rect.y..rect.bottom())
-                .map(|y| row_text(buffer, y))
-                .collect::<Vec<_>>()
-                .join("\n")
-        };
-        // 3 个传感器汇成 2 颗芯片、3 个接口只有 eth0 非空闲：滚到底停在最后
-        // 一条渲染出来的条目上。
-        for _ in 0..8 {
-            state.scroll_card("sensors", 1);
-            state.scroll_card("network", 1);
+        let (baseline, output) = paint_committed(&mut state, 120, 100);
+        // 4 核 / 1 块 GPU / 2 块盘 / 1 个活动接口 / 2 颗芯片 / 3 个进程，都放得下。
+        for card in SCROLLABLE_CARDS {
+            assert_eq!(state.card_scroll_limits.get(card), Some(0), "{card}");
+            for _ in 0..3 {
+                state.scroll_card(card, 1);
+            }
+            assert_eq!(state.card_scroll.get(card).copied(), Some(0), "{card}");
         }
-        assert_eq!(
-            state.card_scroll.get("sensors").copied(),
-            Some(1),
-            "芯片数 2"
+        let (buffer, _) = paint_committed(&mut state, 120, 100);
+        for card in SCROLLABLE_CARDS {
+            let rect = card_rect(&output, card);
+            assert_eq!(
+                card_text(&buffer, rect),
+                card_text(&baseline, rect),
+                "{card} 画面不动"
+            );
+        }
+        let sensors = card_text(&buffer, card_rect(&output, "sensors")).replace(' ', "");
+        assert!(
+            sensors.contains("coretemp") && sensors.contains("nvme"),
+            "{sensors}"
         );
-        assert_eq!(
-            state.card_scroll.get("network").copied(),
-            Some(0),
-            "非空闲接口只有 eth0"
+        for card in SCROLLABLE_CARDS {
+            state.card_scroll.insert(card.into(), 9);
+        }
+        let (buffer, _) = paint_committed(&mut state, 120, 100);
+        for card in SCROLLABLE_CARDS {
+            let rect = card_rect(&output, card);
+            assert_eq!(
+                card_text(&buffer, rect),
+                card_text(&baseline, rect),
+                "{card} 越界存量钳回 0"
+            );
+        }
+    }
+
+    /// 进程表按表体行数定上界（与 kit::table 的内部钳位同一个值）：滚到底停在
+    /// 最后一屏，反向滚第一格画面就变，没有死区；越界的存量值也一样。
+    #[test]
+    fn process_table_scrolls_to_the_last_screen_and_back_without_a_dead_zone() {
+        let _guard = lang_guard(Lang::ZhCn);
+        let mut state = monitored();
+        state.process_sort = ProcessSort::Pid;
+        if let Some(sample) = state.metrics.as_mut() {
+            sample.processes = (1..=30)
+                .map(|pid| process(pid, &format!("proc{pid:02}"), 1.0, 1024))
+                .collect();
+        }
+        paint_committed(&mut state, 120, 100);
+        // 卡高 10：内高 8，减去筛选行与表头，表体 6 行 → 上界 30 − 6。
+        assert_eq!(state.card_scroll_limits.get("processes"), Some(24));
+        for _ in 0..40 {
+            state.scroll_card("processes", 1);
+        }
+        assert_eq!(state.card_scroll.get("processes").copied(), Some(24));
+        let (buffer, output) = paint_committed(&mut state, 120, 100);
+        let card = card_text(&buffer, card_rect(&output, "processes")).replace(' ', "");
+        assert!(
+            card.contains("25–30/30") && card.contains("proc30"),
+            "{card}"
         );
-        let (buffer, output) = paint_page(&state, Page::Monitor, 120, 100);
-        let sensors = card_text(&buffer, card_rect(&output, "sensors"));
-        assert!(sensors.replace(' ', "").contains("nvme"), "{sensors}");
-        let network = card_text(&buffer, card_rect(&output, "network"));
-        assert!(network.replace(' ', "").contains("eth0"), "{network}");
-        // 接口刚转为空闲、传感器刚被隐藏时会留下越界的存量 offset，卡片自己
-        // 也要钳回来。
-        state.card_scroll.insert("sensors".into(), 9);
-        state.card_scroll.insert("network".into(), 9);
-        let (buffer, output) = paint_page(&state, Page::Monitor, 120, 100);
-        let sensors = card_text(&buffer, card_rect(&output, "sensors"));
-        assert!(sensors.replace(' ', "").contains("nvme"), "{sensors}");
-        let network = card_text(&buffer, card_rect(&output, "network"));
-        assert!(network.replace(' ', "").contains("eth0"), "{network}");
+        assert!(!card.contains("proc24"), "{card}");
+        state.scroll_card("processes", -1);
+        assert_eq!(state.card_scroll.get("processes").copied(), Some(23));
+        let (buffer, _) = paint_committed(&mut state, 120, 100);
+        let card = card_text(&buffer, card_rect(&output, "processes")).replace(' ', "");
+        assert!(
+            card.contains("24–29/30") && card.contains("proc24"),
+            "{card}"
+        );
+        assert!(!card.contains("proc30"), "反向第一格就有变化\n{card}");
+        // 越界的存量值（进程刚退出、卡片刚变高）：反向第一格同样立刻生效。
+        state.card_scroll.insert("processes".into(), 29);
+        state.scroll_card("processes", -1);
+        assert_eq!(state.card_scroll.get("processes").copied(), Some(23));
+    }
+
+    /// 放不下的温度 / 网络 / GPU 卡：上界按「条目数 − 放得下的完整条目数」算，
+    /// 滚到底时最后一个条目完整露出、卡片不留空白。
+    #[test]
+    fn overflowing_cards_scroll_until_the_last_item_is_fully_shown() {
+        let _guard = lang_guard(Lang::ZhCn);
+        let mut state = monitored();
+        if let Some(sample) = state.metrics.as_mut() {
+            sample.sensors = (0..12)
+                .map(|chip| sensor(&format!("chip{chip:02} Core"), 50.0))
+                .collect();
+            sample.networks = (0..6)
+                .map(|net| network(&format!("eth{net}"), Some(4096.0), Some(1024.0)))
+                .chain([network("lo", Some(0.0), Some(0.0))])
+                .collect();
+            sample.gpus = ["GPU-A", "GPU-B", "GPU-C", "GPU-D"]
+                .iter()
+                .map(|name| GpuMetric {
+                    id: (*name).into(),
+                    name: (*name).into(),
+                    status: ObservationStatus::Ready,
+                    usage_percent: Some(30.0),
+                    memory_used_bytes: Some(GIB),
+                    memory_total_bytes: Some(8 * GIB),
+                    ..Default::default()
+                })
+                .collect();
+        }
+        paint_committed(&mut state, 120, 100);
+        // 内高 8：温度 12 颗芯片 − 8 行；网络末行留给空闲说明，7 行放 3 个完整
+        // 接口；GPU 每块 3 行，放 2 块完整的。
+        assert_eq!(state.card_scroll_limits.get("sensors"), Some(4));
+        assert_eq!(state.card_scroll_limits.get("network"), Some(3));
+        assert_eq!(state.card_scroll_limits.get("gpu"), Some(2));
+        for _ in 0..20 {
+            for card in ["sensors", "network", "gpu"] {
+                state.scroll_card(card, 1);
+            }
+        }
+        assert_eq!(state.card_scroll.get("sensors").copied(), Some(4));
+        assert_eq!(state.card_scroll.get("network").copied(), Some(3));
+        assert_eq!(state.card_scroll.get("gpu").copied(), Some(2));
+        let (buffer, output) = paint_committed(&mut state, 120, 100);
+        let sensors = card_rect(&output, "sensors");
+        let inner_rows = sensors.y + 1..sensors.bottom() - 1;
+        assert!(
+            row_has(&buffer, sensors.y + 1, "chip04"),
+            "{}",
+            card_text(&buffer, sensors)
+        );
+        assert!(
+            row_has(&buffer, sensors.bottom() - 2, "chip11"),
+            "最后一颗落在末行\n{}",
+            card_text(&buffer, sensors)
+        );
+        assert!(
+            inner_rows.clone().all(|y| row_has(&buffer, y, "chip")),
+            "滚到底不留空白\n{}",
+            card_text(&buffer, sensors)
+        );
+        let network = card_text(&buffer, card_rect(&output, "network")).replace(' ', "");
+        assert!(
+            network.contains("eth3") && network.contains("eth5"),
+            "{network}"
+        );
+        assert!(
+            !network.contains("eth2") && network.contains("1个空闲接口"),
+            "{network}"
+        );
+        let gpu = card_rect(&output, "gpu");
+        let gpu_text = card_text(&buffer, gpu);
+        assert!(row_has(&buffer, gpu.y + 1, "GPU-C"), "{gpu_text}");
+        assert!(row_has(&buffer, gpu.y + 4, "GPU-D"), "{gpu_text}");
+        assert!(
+            row_has(&buffer, gpu.y + 6, "显存"),
+            "最后一块三行全露出\n{gpu_text}"
+        );
+        assert!(!gpu_text.contains("GPU-B"), "{gpu_text}");
+    }
+
+    /// 逐核卡按整行滚动：多列时滚一格所有核换一整行，不会整体错一列；滚到底
+    /// 最后一个核可见。
+    #[test]
+    fn core_card_scrolls_by_whole_rows() {
+        let _guard = lang_guard(Lang::ZhCn);
+        let mut state = monitored();
+        if let Some(sample) = state.metrics.as_mut() {
+            sample.cores = (0..40).map(|id| core(id, 20.0)).collect();
+        }
+        let core_hits = |output: &PaintOutput| {
+            output
+                .hits
+                .iter()
+                .filter_map(|(rect, action)| match action {
+                    Action::Core(id) => Some((rect.y, *id)),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+        let (_, output) = paint_committed(&mut state, 120, 100);
+        let hits = core_hits(&output);
+        let first_row = hits[0].0;
+        let slots = hits.iter().filter(|(y, _)| *y == first_row).count();
+        assert!(slots > 1, "双列布局下逐核卡一行多格");
+        let rows = 40_usize.div_ceil(slots);
+        assert_eq!(state.card_scroll_limits.get("cores"), Some(rows - 8));
+        state.scroll_card("cores", 1);
+        let (_, output) = paint_committed(&mut state, 120, 100);
+        let hits = core_hits(&output);
+        assert_eq!(hits[0].1, slots, "滚一格换一整行");
+        assert!(
+            hits.iter()
+                .all(|(y, id)| usize::from(*y - first_row) == (id - slots) / slots),
+            "每个核仍在自己的列上：{hits:?}"
+        );
+        for _ in 0..100 {
+            state.scroll_card("cores", 1);
+        }
+        let (_, output) = paint_committed(&mut state, 120, 100);
+        let hits = core_hits(&output);
+        assert_eq!(hits[0].1, (rows - 8) * slots);
+        assert_eq!(hits.last().map(|(_, id)| *id), Some(39), "最后一个核可见");
     }
 
     #[test]

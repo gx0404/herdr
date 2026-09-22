@@ -725,6 +725,8 @@ pub(super) struct Painted {
     pub page_rect: Rect,
     pub hover_rect: Rect,
     pub dialog: bool,
+    /// 系统页各可滚动卡片的滚动上界，见 `render::CardScrollLimits`。
+    pub card_scroll_limits: render::CardScrollLimits,
 }
 
 pub(super) struct State {
@@ -795,6 +797,9 @@ pub(super) struct State {
     /// 判定的数据源；随主机 boot 变化清空，接口消失即丢弃。
     pub net_history: HashMap<String, VecDeque<(f32, f32)>>,
     pub card_scroll: HashMap<String, usize>,
+    /// 上一帧各可滚动卡片的滚动上界（`commit_paint` 写回、`begin_paint` 复位）：
+    /// `scroll_card` 按它钳位，与卡片渲染时的钳位是同一个值。
+    pub card_scroll_limits: render::CardScrollLimits,
     pub account_scroll: usize,
     /// 系统页卡片列表的滚动位置；设置页用 `settings_scroll`，两页互不泄漏。
     pub scroll: usize,
@@ -872,17 +877,17 @@ impl State {
         *scroll = scroll.saturating_add_signed(delta).min(limit);
     }
 
-    /// 滚动系统页某张卡片的内容。上界按卡片**实际渲染**的条目数算：温度卡按
-    /// 芯片汇总、网络卡折叠空闲接口、磁盘去重、进程按筛选词过滤，用快照里的
-    /// 原始条数当上界会把卡片滚成空白。
+    /// 滚动系统页某张卡片的内容，按上一帧画出的该卡滚动上界
+    /// （`card_scroll_limits`：条目数减去卡片内高放得下的条目数）钳位——内容
+    /// 放得下时不动，滚到底时最后一条正好完整露出。上一帧没画出这张卡片时
+    /// 不知道上界，只许往回滚。
     pub(super) fn scroll_card(&mut self, card: &str, delta: isize) {
-        let limit = self
-            .metrics
-            .as_ref()
-            .map_or(0, |sample| render::card_scroll_len(self, sample, card))
-            .saturating_sub(1);
-        let scroll = self.card_scroll.entry(card.to_owned()).or_default();
-        *scroll = scroll.saturating_add_signed(delta).min(limit);
+        let current = self.card_scroll.get(card).copied().unwrap_or(0);
+        let limit = self.card_scroll_limits.get(card).unwrap_or(current);
+        // 先把存量值钳回上界再走一步：快照变动 / 卡片变高会让它越界，不钳的话
+        // 反向的前几格都耗在越界部分上，画面不动。
+        let next = current.min(limit).saturating_add_signed(delta).min(limit);
+        self.card_scroll.insert(card.to_owned(), next);
     }
 
     /// 滚动当前页面自己的列表：系统页滚卡片、设置页滚设置行（账号页走
@@ -1343,6 +1348,7 @@ impl State {
             chart_glyphs: config.preferences.monitor_chart_glyphs.unwrap_or_default(),
             net_history: HashMap::new(),
             card_scroll: HashMap::new(),
+            card_scroll_limits: render::CardScrollLimits::default(),
             account_scroll: 0,
             scroll: 0,
             settings_scroll: 0,
@@ -1380,6 +1386,7 @@ impl State {
         self.hover_hits.clear();
         self.hover_rect = Rect::default();
         self.page_rect = Rect::default();
+        self.card_scroll_limits = render::CardScrollLimits::default();
     }
 
     /// 渲染纯函数：把 `painting_page`（停靠面板传该面板的 tab，全局浮层传 `None`）、
@@ -1438,6 +1445,7 @@ impl State {
             page_rect: output.page_rect,
             hover_rect: output.hover_rect,
             dialog,
+            card_scroll_limits: output.card_scroll_limits,
         })
     }
 
@@ -1465,6 +1473,7 @@ impl State {
         if !painted.page_rect.is_empty() {
             self.page_rect = painted.page_rect;
         }
+        self.card_scroll_limits.merge(&painted.card_scroll_limits);
         self.selected_hit = self.selected_hit.min(self.page_hits.saturating_sub(1));
     }
 

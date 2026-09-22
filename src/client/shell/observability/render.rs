@@ -20,7 +20,7 @@ use settings::*;
 use system::*;
 
 pub(super) use accounts::{account_rows, metric_percent};
-pub(super) use system::card_scroll_len;
+pub(super) use system::CardScrollLimits;
 
 fn text(buffer: &mut Buffer, rect: Rect, row: u16, value: &str, style: Style) {
     if row >= rect.height || rect.width == 0 {
@@ -324,6 +324,8 @@ pub(super) struct PaintOutput {
     pub page_rect: Rect,
     pub hover_rect: Rect,
     pub dialog_rect: Rect,
+    /// 系统页各可滚动卡片的滚动上界（本次没画系统页时全为 `None`）。
+    pub card_scroll_limits: CardScrollLimits,
 }
 
 /// 渲染纯函数：`page` 是本次要画的页面（停靠面板由调用方决定画哪个 tab），
@@ -341,6 +343,7 @@ pub(super) fn paint(
     let palette = cx.palette;
     let mut hits = Vec::new();
     let mut page_rect = Rect::default();
+    let mut card_scroll_limits = CardScrollLimits::default();
     if let Some(page) = page {
         page_rect = area;
         buffer.set_style(area, Style::default().fg(palette.text).bg(palette.panel_bg));
@@ -414,7 +417,7 @@ pub(super) fn paint(
             inner.height.saturating_sub(3),
         );
         match page {
-            Page::Monitor => monitor(buffer, body, state, cx, &mut hits),
+            Page::Monitor => monitor(buffer, body, state, cx, &mut hits, &mut card_scroll_limits),
             Page::Accounts => accounts(buffer, body, state, palette, &mut hits),
             Page::Settings => settings(buffer, body, state, palette, &mut hits),
         }
@@ -451,6 +454,7 @@ pub(super) fn paint(
         page_rect,
         hover_rect,
         dialog_rect,
+        card_scroll_limits,
     }
 }
 
