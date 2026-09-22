@@ -78,9 +78,11 @@
 //! # 钩子
 //!
 //! herdr 的 kimi 钩子（`src/integration/assets/kimi/`）在 `SubagentStart`、
-//! `SubagentStop`、`TaskStarted`、`Notification`（`task.*`）与 `PostToolUse`
-//! （`TodoList`）上发 `pane.report_agent_activity`：`hint` 为钩子事件名，非子 agent
-//! 任务另带 `node_id = "task:<taskId>"`。钩子只是触发器，树以本适配器读到的文件为准。
+//! `SubagentStop`、`Notification`（`task.*`）与 `PostToolUse`（`TodoList`）上发
+//! `pane.report_agent_activity`：`hint` 为钩子事件名，非子 agent 任务另带
+//! `node_id = "task:<taskId>"`。钩子只是触发器，树以本适配器读到的文件为准；后台任务
+//! 开始没有钩子事件（`TaskStarted` 超出 `KIMI_MIN_VERSION` 的事件枚举，见
+//! `crate::integration::KIMI_HOOK_EVENTS`），靠轮询兜底。
 
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};

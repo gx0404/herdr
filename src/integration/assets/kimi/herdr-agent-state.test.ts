@@ -58,8 +58,50 @@ function herdrEnv(socketPath: string) {
   return { HERDR_ENV: "1", HERDR_SOCKET_PATH: socketPath, HERDR_PANE_ID: "test:p1" };
 }
 
-test("TaskStarted reports an activity hint that names the background task node", async () => {
+// Kimi validates the whole `config.toml` against a fixed hook-event enum, so an
+// event name that the minimum supported Kimi does not know invalidates the file
+// and takes the lifecycle hooks down with it. The narrower of the two enums that
+// parse the same file is the node-sdk one (Kimi Code 2.0.2, read-only inspection
+// of the shipped bundle); agent-core-v2 adds UserPromptQueued, TurnStarted,
+// SessionHeartbeat and TaskStarted on top of it.
+const HOOK_EVENTS_AT_MIN_VERSION = new Set([
+  "PreToolUse",
+  "PostToolUse",
+  "PostToolUseFailure",
+  "PermissionRequest",
+  "PermissionResult",
+  "UserPromptSubmit",
+  "Stop",
+  "StopFailure",
+  "Interrupt",
+  "SessionStart",
+  "SessionEnd",
+  "SubagentStart",
+  "SubagentStop",
+  "PreCompact",
+  "PostCompact",
+  "Notification",
+]);
+
+test("every installed hook event exists at the minimum supported Kimi version", async () => {
+  const source = await readFile(join(import.meta.dir, "..", "..", "mod.rs"), "utf8");
+
+  // Raising the floor is exactly when the allowed set above has to be revisited.
+  expect(source).toContain('const KIMI_MIN_VERSION: &str = "0.14.0";');
+
+  const table = source.match(/const KIMI_HOOK_EVENTS: \[\(&str, Option<&str>, &str\); (\d+)\] = \[([\s\S]*?)\n\];/);
+  expect(table).not.toBeNull();
+  const [, declaredLength, body] = table!;
+  const events = [...body.matchAll(/\(\s*"([A-Za-z]+)"/g)].map((match) => match[1]);
+
+  expect(events).toHaveLength(Number(declaredLength));
+  expect(events.filter((event) => !HOOK_EVENTS_AT_MIN_VERSION.has(event))).toEqual([]);
+});
+
+test("a task_id payload maps to a background task node whatever the event is", async () => {
   const { socketPath, requests } = await listen();
+  // TaskStarted is not installed at the current KIMI_MIN_VERSION; the script
+  // already handles it so the subscription can come back as a one-line change.
   const payload = {
     hook_event_name: "TaskStarted",
     session_id: "session_0f0f0f0f-1111-4222-8333-444455556666",

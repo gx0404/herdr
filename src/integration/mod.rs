@@ -75,10 +75,16 @@ const KIMI_OTHER_TOOL_MATCHER: &str = "^(?!AskUserQuestion$).*$";
 /// Kimi 的 `Notification` 以通知类型作 matcher 值，后台任务收尾是 `task.<status>`。
 const KIMI_TASK_NOTIFICATION_MATCHER: &str = "^task\\.";
 const KIMI_TODO_TOOL_MATCHER: &str = "^TodoList$";
-/// 末尾五条 `activity` 只给活动树发「有变化」信号（`pane.report_agent_activity`）。
-/// Kimi Code 2.0.2 按固定事件名枚举严格校验整个 `hooks` 段，出现未知事件名会
-/// 整段忽略，新增事件名必须是该枚举里已有的。
-const KIMI_HOOK_EVENTS: [(&str, Option<&str>, &str); 17] = [
+/// 末尾四条 `activity` 只给活动树发「有变化」信号（`pane.report_agent_activity`）。
+///
+/// **本表每个事件名的最低 Kimi 版本必须 `<= KIMI_MIN_VERSION`。** Kimi 按固定枚举
+/// 校验 `[[hooks]]`（`HookDefSchema` 是 `strict` 的 `event: enum(...)`），未知事件名
+/// 让**整份 `config.toml` 判为非法**而不只是丢掉那一条：本表其余生命周期钩子会一起
+/// 失效。两份枚举都会校验同一份 config：agent-core-v2 的 20 项与 node-sdk 的 16 项，
+/// 按较窄的那份取交集。`TaskStarted` 只在 20 项里，因此暂不订阅——后台任务开始靠
+/// `Notification`（`task.*`，实测通知类型是 `task.<终态>`）与轮询兜底；待
+/// `KIMI_MIN_VERSION` 提到含 `TaskStarted` 的版本后再加回。
+const KIMI_HOOK_EVENTS: [(&str, Option<&str>, &str); 16] = [
     ("SessionStart", None, "session"),
     ("UserPromptSubmit", None, "working"),
     ("PreToolUse", Some(KIMI_OTHER_TOOL_MATCHER), "working"),
@@ -105,7 +111,6 @@ const KIMI_HOOK_EVENTS: [(&str, Option<&str>, &str); 17] = [
     ("Interrupt", None, "idle"),
     ("SubagentStart", None, "activity"),
     ("SubagentStop", None, "activity"),
-    ("TaskStarted", None, "activity"),
     (
         "Notification",
         Some(KIMI_TASK_NOTIFICATION_MATCHER),
