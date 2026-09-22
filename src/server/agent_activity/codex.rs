@@ -148,6 +148,12 @@ impl ActivitySource for Codex {
 
 // ---- 会话定位 ----
 
+/// 会话库根目录，本适配器所有「按 home 拼路径」的唯一出口。
+///
+/// TODO(activity-schema)：Codex 支持用 `CODEX_HOME` 把配置目录挪出 `<home>/.codex`
+/// （解析口径同 `integration::env::codex_dir`），此处跟不上。骨架车道会给
+/// `SourceContext` 追加可选的 agent 配置目录字段，合入后把本函数改成「优先用该
+/// 字段，缺省才回退 `<home>/.codex`」即可，调用方不用动。
 fn sessions_dir(home: &Path) -> PathBuf {
     home.join(".codex").join("sessions")
 }
