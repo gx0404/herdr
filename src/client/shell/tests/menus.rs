@@ -575,3 +575,225 @@ fn context_menu_hover_uses_theme_hover_bg_and_opens_the_submenu() {
             if matches!(&request.method, crate::api::schema::Method::PaneZoom(_))
     )));
 }
+
+// ---- 命令面板目录视图：kit::menu ----
+
+fn open_catalog(state: &mut ClientShellState, cols: u16, rows: u16) {
+    state.compose(cols, rows).expect("shell frame");
+    state.toggle_global_menu();
+    state.compose(cols, rows).expect("catalog frame");
+}
+
+/// 目录视图 kit 菜单所占的矩形（命中表里的 `menu_popup`）。
+fn catalog_area(state: &ClientShellState) -> Rect {
+    let area = state.hits.menu_popup;
+    assert!(!area.is_empty(), "目录视图应画成菜单");
+    area
+}
+
+fn catalog_text(state: &ClientShellState) -> Vec<String> {
+    let area = catalog_area(state);
+    (area.y..area.bottom())
+        .map(|y| row_cells(state, area, y).concat())
+        .collect()
+}
+
+/// 主菜单：分类是子菜单项（行尾 ▸），有更新的分类带徽标；「搜索命令」与分类
+/// 之间有分隔线，右列是它的快捷键。
+#[test]
+fn catalog_main_menu_draws_submenu_arrows_badges_and_the_search_shortcut() {
+    let mut projected = snapshot();
+    projected.integration_updates_available = true;
+    let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
+    state.set_snapshot(Box::new(projected));
+    state.set_pane_surface(surface());
+    open_catalog(&mut state, 106, 30);
+    let t = &crate::i18n::texts().global_menu;
+    let area = catalog_area(&state);
+    for category in t.categories {
+        let y = menu_row_with(&state, area, category);
+        let cells = row_cells(&state, area, y);
+        assert!(
+            cells.iter().any(|cell| cell == "▸"),
+            "{category}: {cells:?}"
+        );
+    }
+    // 设置分类里有集成更新：分类行带 ● 徽标。
+    let settings = menu_row_with(&state, area, t.categories[5]);
+    assert!(row_cells(&state, area, settings)
+        .iter()
+        .any(|cell| cell == "●"));
+    let search = menu_row_with(&state, area, t.command_search);
+    let shortcut = state
+        .config
+        .keybinds
+        .keybinds
+        .command_search
+        .label()
+        .expect("默认键位");
+    assert!(find_cells(&row_cells(&state, area, search), &shortcut).is_some());
+    let glyphs = state.config.border_glyphs;
+    assert_eq!(
+        row_cells(&state, area, search - 1)[0],
+        glyphs.tee_right,
+        "搜索命令之前有分隔线"
+    );
+    // 悬浮底色取主题 hover_bg。
+    let (row, index) = state.hits.global_menu_rows[1];
+    state.handle_raw_events(vec![mouse_event(MouseEventKind::Moved, row.x, row.y)]);
+    state.compose(106, 30).expect("hover frame");
+    assert_eq!(palette_overlay(&state).hovered, Some(index));
+    let buffer = state.compose_buffer.as_ref().expect("帧缓冲");
+    assert_eq!(
+        buffer[(row.x, row.y)].style().bg,
+        Some(state.config.components.hover_bg)
+    );
+}
+
+/// 分类子菜单：分类名作标题，动作表的组号变化处画分隔线，「返回」前也有一条；
+/// 开关类动作画勾选、暂时不可用的置灰且键盘跳过。→ 进分类、← 回主菜单并选中
+/// 刚才的分类。
+#[test]
+fn catalog_category_submenu_groups_items_and_navigates_with_arrows() {
+    use crossterm::event::KeyCode;
+    let prod = profile("prod", 'c');
+    let prod_id = ClientEndpointId::Ssh(prod.id.clone());
+    let mut state = state_with_profiles(std::slice::from_ref(&prod));
+    state.set_endpoint_status(&prod_id, ClientEndpointStatus::Online);
+    state.cache_endpoint_snapshot(&prod_id, Box::new(snapshot()));
+    open_catalog(&mut state, 106, 60);
+
+    // 键盘选到「机器与 SSH」再按 →。
+    while palette_rows(palette_overlay(&state))[palette_overlay(&state).selected]
+        .item
+        .id
+        != "category:2"
+    {
+        state.handle_raw_events(vec![key_event(KeyCode::Down)]);
+    }
+    state.handle_raw_events(vec![key_event(KeyCode::Right)]);
+    assert_eq!(
+        palette_overlay(&state).view,
+        super::super::command_palette::BrowserView::Menu(Some(2))
+    );
+    state.compose(106, 60).expect("machines submenu");
+    let t = crate::i18n::texts();
+    let text = catalog_text(&state);
+    assert!(
+        compact(&text[1]).contains(&compact(t.global_menu.categories[2])),
+        "{text:?}"
+    );
+    let glyphs = state.config.border_glyphs;
+    let separators = text
+        .iter()
+        .filter(|row| row.starts_with(glyphs.tee_right))
+        .count();
+    assert_eq!(separators, 2, "管理组 | 每台机器一组 | 返回：{text:?}");
+    assert!(
+        text.iter().any(|row| row.contains(&prod.target)),
+        "机器地址作组标题：{text:?}"
+    );
+
+    // 「启用」是勾选项；已在线的机器「连接」置灰、键盘跳过。
+    let area = catalog_area(&state);
+    let enable = crate::i18n::fill(t.global_menu.machine_enable_fmt, &[("label", "prod")]);
+    let enable_y = menu_row_with(&state, area, &enable);
+    assert!(row_cells(&state, area, enable_y)
+        .iter()
+        .any(|cell| cell == "✓"));
+    let connect = crate::i18n::fill(t.global_menu.machine_connect_fmt, &[("label", "prod")]);
+    let (x, y) = label_cell(&state, area, &connect);
+    let buffer = state.compose_buffer.as_ref().expect("帧缓冲");
+    assert_eq!(
+        buffer[(x, y)].style().fg,
+        Some(state.config.palette.overlay0)
+    );
+    let connect_id = format!("machine:connect:{}", prod.id.as_str());
+    for _ in 0..palette_rows(palette_overlay(&state)).len() * 2 {
+        state.handle_raw_events(vec![key_event(KeyCode::Down)]);
+        let palette = palette_overlay(&state);
+        assert_ne!(
+            palette_rows(palette)[palette.selected].item.id,
+            connect_id,
+            "置灰项不可选"
+        );
+    }
+
+    // ← 回主菜单，选中刚才进入的分类。
+    state.handle_raw_events(vec![key_event(KeyCode::Left)]);
+    let palette = palette_overlay(&state);
+    assert_eq!(
+        palette.view,
+        super::super::command_palette::BrowserView::Menu(None)
+    );
+    assert_eq!(
+        palette_rows(palette)[palette.selected].item.id,
+        "category:2"
+    );
+    // Home / End 到首尾可用项。
+    state.handle_raw_events(vec![key_event(KeyCode::End)]);
+    let palette = palette_overlay(&state);
+    assert_eq!(palette_rows(palette)[palette.selected].item.id, "search");
+    state.handle_raw_events(vec![key_event(KeyCode::Home)]);
+    assert_eq!(palette_overlay(&state).selected, 0);
+}
+
+/// 行数放不下时按滚动窗口画：键盘高亮永远画在窗口里（视图计算阶段把 `scroll`
+/// 写回状态），上 / 下还有项时在边框正中画 ▲ / ▼；滚轮滚走窗口时不拉回高亮。
+#[test]
+fn catalog_scroll_follows_the_keyboard_highlight() {
+    use crossterm::event::KeyCode;
+    let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
+    state.set_snapshot(Box::new(snapshot()));
+    state.set_pane_surface(surface());
+    state.compose(100, 16).expect("shell frame");
+    state.toggle_global_menu();
+    let tabs = palette_row_index(&state, "category:1");
+    state.activate_palette_item(tabs, &mut ClientShellInput::default());
+    let rows = palette_rows(palette_overlay(&state)).len();
+    let mut last_scroll = 0;
+    let mut scrolled = false;
+    for _ in 0..rows {
+        state.compose(100, 16).expect("catalog frame");
+        let palette = palette_overlay(&state);
+        let selected = palette.selected;
+        assert!(
+            state
+                .hits
+                .global_menu_rows
+                .iter()
+                .any(|(_, index)| *index == selected),
+            "高亮行 {selected} 必须画在窗口里（scroll {}）",
+            palette.scroll
+        );
+        assert!(palette.scroll >= last_scroll || palette.scroll == 0);
+        scrolled |= palette.scroll > 0;
+        last_scroll = palette.scroll;
+        let area = catalog_area(&state);
+        let middle = area.x + area.width / 2;
+        let buffer = state.compose_buffer.as_ref().expect("帧缓冲");
+        let top = buffer[(middle, area.y)].symbol().to_owned();
+        let bottom = buffer[(middle, area.bottom() - 1)].symbol().to_owned();
+        assert_eq!(top == "▲", palette.scroll > 0, "上方还有项时画 ▲");
+        if palette.selected + 1 < rows {
+            assert_eq!(bottom, "▼", "下方还有项时画 ▼");
+        }
+        state.handle_raw_events(vec![key_event(KeyCode::Down)]);
+    }
+    assert!(scrolled, "夹具前提：分类条目多于窗口行数");
+
+    // 滚轮：窗口移动而高亮不被拉回。
+    state.handle_raw_events(vec![key_event(KeyCode::Home)]);
+    state.compose(100, 16).expect("top");
+    assert_eq!(palette_overlay(&state).scroll, 0);
+    state.scroll_palette(3);
+    state.compose(100, 16).expect("wheel");
+    let palette = palette_overlay(&state);
+    assert_eq!(palette.scroll, 3, "滚轮不把窗口拉回高亮项");
+    let selected = palette.selected;
+    assert!(state
+        .hits
+        .global_menu_rows
+        .iter()
+        .all(|(_, index)| *index != selected));
+}

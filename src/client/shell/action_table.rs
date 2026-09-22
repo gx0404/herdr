@@ -165,8 +165,6 @@ pub(super) struct ActionSpec {
     pub(super) alt_label: Option<TextKey>,
     pub(super) category: ActionCategory,
     /// 分类内的组号：主菜单子菜单在组号变化处画分隔线。
-    // 主菜单目录视图接 kit::menu 的提交里读取，届时删除本 allow。
-    #[allow(dead_code)]
     pub(super) group: u8,
     pub(super) binding: Option<ActionBinding>,
     pub(super) palette: PaletteMode,

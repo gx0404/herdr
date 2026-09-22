@@ -8,8 +8,6 @@
 //! `checked` 时出现，徽标列只在有项带 `badge` 时出现，箭头列只在有子菜单时出现，
 //! 快捷键列按最宽的快捷键右对齐。
 
-#![allow(dead_code)] // seam-stub(menu)：波 2 菜单车道接入右键菜单 / 命令面板后删除
-
 use ratatui::{
     buffer::Buffer,
     layout::Rect,

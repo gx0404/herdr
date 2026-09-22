@@ -1,6 +1,6 @@
 use super::action_table::{
-    global_action_state, machine_action_state, ActionCategory, ActionId, ActionTarget, PaletteMode,
-    ACTIONS,
+    action_spec, global_action_state, machine_action_state, ActionCategory, ActionId, ActionTarget,
+    PaletteMode, ACTIONS,
 };
 use super::feedback::ChromeContext;
 use super::render::{
@@ -8,10 +8,14 @@ use super::render::{
     OverlayRender, SearchBar,
 };
 use super::*;
-use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+use crate::ui::kit::menu::{menu_scroll, menu_size, menu_step, render_menu, MenuItem, MenuState};
+use crossterm::event::{KeyCode, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 
 /// Cap on the persisted most-recently-used command list.
 pub(super) const PALETTE_RECENT_LIMIT: usize = 5;
+
+/// 按机器铺开的条目的组号起点：每台机器一组，排在动作表的组号（`u8`）之后。
+const MACHINE_GROUP_BASE: u16 = 0x100;
 
 /// One executable row of the command palette.
 #[derive(Debug, Clone)]
@@ -24,6 +28,9 @@ pub(super) struct ClientPaletteItem {
     pub(super) subtitle: String,
     /// 主菜单分类下标（`GlobalMenuTexts::categories`），由动作表给出。
     pub(super) category: usize,
+    /// 分类里的分组号：目录视图在相邻两项组号不同处画分隔线。取动作表的
+    /// `group`；按机器铺开的条目每台机器一组。
+    pub(super) group: u16,
     pub(super) badge: bool,
     /// 暂时不可用：目录视图里置灰、搜索里不列出，激活是空操作。
     pub(super) enabled: bool,
@@ -69,6 +76,9 @@ pub(super) struct ClientCommandPaletteOverlay {
     pub(super) items: Vec<ClientPaletteItem>,
     pub(super) recent_ids: Vec<String>,
     pub(super) aliases: HashMap<String, String>,
+    /// 打开时入口（顶栏「herdr ≡」/ 侧栏「菜单」）所在的矩形：目录视图的下拉
+    /// 菜单贴着它展开（入口在上半屏向下、在下半屏向上）；没有可见入口时居中。
+    pub(super) anchor: Option<Rect>,
 }
 
 /// One filtered row: the item plus fuzzy-match character positions in its
@@ -216,6 +226,219 @@ pub(super) fn palette_rows(palette: &ClientCommandPaletteOverlay) -> Vec<ClientP
         .collect::<Vec<_>>()
 }
 
+/// 目录视图：主菜单与分类子菜单（查询为空）走 kit::menu 画成下拉菜单；搜索
+/// 视图仍是带模糊高亮的列表页。
+fn is_catalog(palette: &ClientCommandPaletteOverlay) -> bool {
+    matches!(palette.view, BrowserView::Menu(_)) && palette.query.as_str().trim().is_empty()
+}
+
+/// 目录视图的 kit 条目，以及每条对应的 [`palette_rows`] 下标（标题与分隔线为
+/// `None`）。`selected` / `hovered` / 命中表都按 `palette_rows` 下标说话，
+/// 换算只在这里。
+struct CatalogMenu<'a> {
+    items: Vec<MenuItem<'a>>,
+    ids: Vec<Option<usize>>,
+}
+
+impl CatalogMenu<'_> {
+    /// `palette_rows` 下标 → kit 下标；不在菜单里时给越界值（kit 视为未选中）。
+    fn kit_index(&self, row: usize) -> usize {
+        self.ids
+            .iter()
+            .position(|id| *id == Some(row))
+            .unwrap_or(usize::MAX)
+    }
+
+    /// kit 下标 → `palette_rows` 下标。
+    fn row(&self, kit: usize) -> Option<usize> {
+        self.ids.get(kit).copied().flatten()
+    }
+}
+
+fn machine_item(item: &ClientPaletteItem) -> bool {
+    item.group >= MACHINE_GROUP_BASE
+}
+
+fn catalog_item(item: &ClientPaletteItem) -> MenuItem<'_> {
+    let base = if matches!(item.action, ClientPaletteAction::Category(_)) {
+        MenuItem::submenu(&item.title)
+    } else {
+        MenuItem::action(&item.title)
+    };
+    // 右列只放快捷键：按机器铺开的条目的副标题是机器地址，改由分组标题给出。
+    let shortcut =
+        (!item.subtitle.is_empty() && !machine_item(item)).then_some(item.subtitle.as_str());
+    MenuItem {
+        shortcut,
+        enabled: item.enabled,
+        checked: item.checked,
+        danger: matches!(item.action, ClientPaletteAction::Run(id, _) if action_spec(id).danger),
+        badge: item.badge,
+        ..base
+    }
+}
+
+/// 按行投影排出目录视图的菜单：主菜单 = 「最近使用」段 + 分类（子菜单项）+
+/// 「搜索命令」；分类子菜单 = 分类名标题 + 条目（组号变化处画分隔线，每台
+/// 机器一组、以机器地址作组标题）+ 「返回」。
+fn catalog_menu<'a>(
+    palette: &ClientCommandPaletteOverlay,
+    rows: &[ClientPaletteRow<'a>],
+) -> CatalogMenu<'a> {
+    let t = &crate::i18n::texts().global_menu;
+    let mut menu = CatalogMenu {
+        items: Vec::with_capacity(rows.len() + 4),
+        ids: Vec::with_capacity(rows.len() + 4),
+    };
+    if let BrowserView::Menu(Some(category)) = palette.view {
+        if let Some(title) = t.categories.get(category) {
+            menu.items.push(MenuItem::header(title));
+            menu.ids.push(None);
+        }
+    }
+    let mut previous: Option<&ClientPaletteRow<'a>> = None;
+    for (index, row) in rows.iter().enumerate() {
+        let separator = previous.is_some_and(|previous| {
+            (previous.recent && !row.recent)
+                || matches!(
+                    row.item.action,
+                    ClientPaletteAction::Search | ClientPaletteAction::Back
+                )
+                || (!row.recent
+                    && !navigation(previous.item)
+                    && !navigation(row.item)
+                    && previous.item.group != row.item.group)
+        });
+        if separator {
+            menu.items.push(MenuItem::separator());
+            menu.ids.push(None);
+        } else if previous.is_none() && row.recent {
+            menu.items.push(MenuItem::header(t.recent));
+            menu.ids.push(None);
+        }
+        let new_machine = !row.recent
+            && machine_item(row.item)
+            && previous.is_none_or(|previous| previous.item.group != row.item.group);
+        if new_machine && !row.item.subtitle.is_empty() {
+            menu.items.push(MenuItem::header(&row.item.subtitle));
+            menu.ids.push(None);
+        }
+        menu.items.push(catalog_item(row.item));
+        menu.ids.push(Some(index));
+        previous = Some(row);
+    }
+    menu
+}
+
+/// 目录视图菜单的摆放：锚点、允许占用的区域与边框内可见行数。视图计算与
+/// 渲染共用同一口径。有入口时像桌面下拉菜单一样贴着入口展开：下方放得下（或
+/// 下方比上方宽裕）就向下，否则向上、下沿贴住入口；只占入口一侧，放不下就在
+/// 那一侧滚动，不盖住入口本身。没有入口时水平居中、垂直偏上。
+struct CatalogGeometry {
+    anchor: (u16, u16),
+    bounds: Rect,
+    visible: usize,
+}
+
+fn catalog_geometry(
+    palette: &ClientCommandPaletteOverlay,
+    items: &[MenuItem<'_>],
+    area: Rect,
+) -> CatalogGeometry {
+    let (width, natural) = menu_size(items);
+    let side = palette.anchor.and_then(|entry| {
+        let below_y = entry.bottom().clamp(area.y, area.bottom());
+        let below = Rect::new(area.x, below_y, area.width, area.bottom() - below_y);
+        let above_bottom = entry.y.clamp(area.y, area.bottom());
+        let above = Rect::new(area.x, area.y, area.width, above_bottom - area.y);
+        let region = if natural <= below.height || below.height >= above.height {
+            below
+        } else {
+            above
+        };
+        // 连边框都放不下的一侧不用，退回整屏。
+        (region.height >= 3).then(|| {
+            let height = natural.min(region.height);
+            let y = if region == below {
+                region.y
+            } else {
+                region.bottom() - height
+            };
+            ((entry.x, y), region, height)
+        })
+    });
+    let (anchor, bounds, height) = side.unwrap_or_else(|| {
+        let height = natural.min(area.height);
+        (
+            (
+                area.x + area.width.saturating_sub(width) / 2,
+                area.y + area.height.saturating_sub(height) / 3,
+            ),
+            area,
+            height,
+        )
+    });
+    CatalogGeometry {
+        anchor,
+        bounds,
+        visible: usize::from(height.saturating_sub(2)),
+    }
+}
+
+/// 目录视图的滚动起点：键盘刚移动过（`reveal`）就把选中项滚进窗口，否则只把
+/// 滚轮留下的 `scroll` 收回合法范围、不拉回选中项。
+fn catalog_scroll(
+    palette: &ClientCommandPaletteOverlay,
+    menu: &CatalogMenu<'_>,
+    visible: usize,
+) -> usize {
+    let highlighted = if palette.reveal {
+        menu.kit_index(palette.selected)
+    } else {
+        usize::MAX
+    };
+    menu_scroll(
+        &menu.items,
+        &MenuState {
+            highlighted,
+            scroll: palette.scroll,
+            ..MenuState::default()
+        },
+        visible,
+    )
+}
+
+/// 翻页：向 `delta` 的方向最多走 `|delta|` 个可激活项，到头停住、不回绕。
+fn catalog_page_step(items: &[MenuItem<'_>], from: usize, delta: isize) -> Option<usize> {
+    let forward = delta > 0;
+    let mut current = from;
+    for _ in 0..delta.unsigned_abs() {
+        let Some(next) = menu_step(items, current, delta.signum()) else {
+            break;
+        };
+        if current < items.len() && (next > current) != forward {
+            break;
+        }
+        current = next;
+    }
+    (current < items.len()).then_some(current)
+}
+
+/// 目录视图里选中项不可激活（置灰、或行集合刚换过）时落到下一个可激活项。
+fn settle_catalog_selection(palette: &mut ClientCommandPaletteOverlay) {
+    if !is_catalog(palette) {
+        return;
+    }
+    let settled = {
+        let rows = palette_rows(palette);
+        let menu = catalog_menu(palette, &rows);
+        menu_step(&menu.items, menu.kit_index(palette.selected), 0).and_then(|kit| menu.row(kit))
+    };
+    if let Some(row) = settled {
+        palette.selected = row;
+    }
+}
+
 impl ClientShellState {
     /// 命令面板的条目全集：动作表按声明顺序展开（聚焦对象语义的一条、按机器
     /// 铺开的每台机器一组、自定义命令每条一项），再追加分类与导航项。暂时不可
@@ -242,6 +465,7 @@ impl ClientShellState {
                             .and_then(|binding| (binding.keys)(keybinds).label())
                             .unwrap_or_default(),
                         category: spec.category.index(),
+                        group: spec.group.into(),
                         badge: state.badge,
                         enabled: state.enabled,
                         checked: state.checked,
@@ -258,6 +482,7 @@ impl ClientShellState {
                                 .unwrap_or_else(|| command.command.clone()),
                             subtitle: command.label.clone(),
                             category: spec.category.index(),
+                            group: spec.group.into(),
                             badge: false,
                             enabled: true,
                             checked: None,
@@ -278,15 +503,16 @@ impl ClientShellState {
             }
         }
         for (index, title) in texts.global_menu.categories.iter().enumerate() {
-            let count = items.iter().filter(|item| item.category == index).count();
             let badge = items
                 .iter()
                 .any(|item| item.category == index && item.badge);
+            // 目录视图里是子菜单项（行尾画 ▸），不再另写条目数与箭头。
             items.push(ClientPaletteItem {
                 id: format!("category:{index}"),
                 title: title.to_string(),
-                subtitle: format!("{count}  ›"),
+                subtitle: String::new(),
                 category: index,
+                group: 0,
                 badge,
                 enabled: true,
                 checked: None,
@@ -311,6 +537,7 @@ impl ClientShellState {
                     String::new()
                 },
                 category: ActionCategory::Help.index(),
+                group: 0,
                 badge: false,
                 enabled: true,
                 checked: None,
@@ -323,8 +550,10 @@ impl ClientShellState {
     /// 机器动作组按已保存机器展开：与机器行右键菜单同一组条目、同一套可用性。
     fn push_machine_palette_items(&self, items: &mut Vec<ClientPaletteItem>) {
         let texts = crate::i18n::texts();
-        for profile in &self.saved_profiles {
+        for (machine, profile) in self.saved_profiles.iter().enumerate() {
             let endpoint_id = ClientEndpointId::Ssh(profile.id.clone());
+            let group =
+                MACHINE_GROUP_BASE.saturating_add(u16::try_from(machine).unwrap_or(u16::MAX));
             let online = self.endpoint_is_online(&endpoint_id);
             let active = self.active_endpoint_id == endpoint_id;
             for spec in ACTIONS
@@ -340,6 +569,7 @@ impl ClientShellState {
                     ),
                     subtitle: profile.target.clone(),
                     category: spec.category.index(),
+                    group,
                     badge: state.badge,
                     enabled: state.enabled,
                     checked: state.checked,
@@ -399,8 +629,14 @@ impl ClientShellState {
                 scroll: 0,
                 items: self.build_palette_items(),
                 recent_ids: self.palette_recent.clone(),
+                // 上一帧画出来的入口：顶栏「herdr ≡」或侧栏「菜单」。
+                anchor: (!self.hits.global_launcher.is_empty())
+                    .then_some(self.hits.global_launcher),
             },
         ));
+        if let Some(ClientShellOverlay::CommandPalette(palette)) = self.overlay.as_mut() {
+            settle_catalog_selection(palette);
+        }
     }
 
     pub(super) fn close_command_browser(&mut self) {
@@ -409,15 +645,21 @@ impl ClientShellState {
 
     pub(super) fn browser_back(&mut self) {
         if let Some(ClientShellOverlay::CommandPalette(palette)) = self.overlay.as_mut() {
-            if matches!(palette.view, BrowserView::Menu(Some(_))) {
+            if let BrowserView::Menu(Some(category)) = palette.view {
                 palette.view = BrowserView::Menu(None);
                 palette.query = TextEditor::default();
-                palette.selected = 0;
+                // 回到主菜单时选中刚才进入的分类，与桌面菜单退回父级一致。
+                let parent = format!("category:{category}");
+                palette.selected = palette_rows(palette)
+                    .iter()
+                    .position(|row| row.item.id == parent)
+                    .unwrap_or(0);
                 palette.scroll = 0;
                 palette.reveal = true;
                 // 行集合整个换了，旧行号立刻失效：不清就会在新列表里把同号的
                 // 那一行画成「悬浮」，而指针其实停在别处（MENU-01）。
                 palette.hovered = None;
+                settle_catalog_selection(palette);
                 return;
             }
         }
@@ -425,13 +667,31 @@ impl ClientShellState {
     }
 
     pub(super) fn move_palette_selection(&mut self, delta: isize) {
-        let Some(ClientShellOverlay::CommandPalette(palette)) = self.overlay.as_ref() else {
-            return;
-        };
-        let count = palette_rows(palette).len();
         let Some(ClientShellOverlay::CommandPalette(palette)) = self.overlay.as_mut() else {
             return;
         };
+        if is_catalog(palette) {
+            // 目录视图按 kit::menu 的规则走：跳过标题、分隔线与置灰项；单步回绕，
+            // 翻页到头停住。
+            let next = {
+                let rows = palette_rows(palette);
+                let menu = catalog_menu(palette, &rows);
+                let from = menu.kit_index(palette.selected);
+                let kit = if delta.unsigned_abs() > 1 {
+                    catalog_page_step(&menu.items, from, delta)
+                } else {
+                    menu_step(&menu.items, from, delta)
+                };
+                kit.and_then(|kit| menu.row(kit))
+            };
+            if let Some(row) = next {
+                palette.selected = row;
+            }
+            palette.reveal = true;
+            palette.hovered = None;
+            return;
+        }
+        let count = palette_rows(palette).len();
         if count == 0 {
             palette.selected = 0;
             palette.scroll = 0;
@@ -474,6 +734,58 @@ impl ClientShellState {
         palette.hovered = None;
     }
 
+    /// 目录视图专有的按键：→ 进入高亮的分类、← 回到主菜单、Home / End 到首尾
+    /// 可用项。其余按键（上下、回车、Esc、打字即搜索）照旧由调用方处理；不在
+    /// 目录视图时返回 `false`。
+    pub(super) fn route_palette_catalog_key(
+        &mut self,
+        key: &crate::input::TerminalKey,
+        outcome: &mut ClientShellInput,
+    ) -> bool {
+        let Some(ClientShellOverlay::CommandPalette(palette)) = self.overlay.as_mut() else {
+            return false;
+        };
+        if !is_catalog(palette)
+            || key
+                .modifiers
+                .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+        {
+            return false;
+        }
+        match key.code {
+            KeyCode::Right => {
+                let selected = palette.selected;
+                let category = palette_rows(palette)
+                    .get(selected)
+                    .is_some_and(|row| matches!(row.item.action, ClientPaletteAction::Category(_)));
+                if category {
+                    self.activate_palette_item(selected, outcome);
+                }
+            }
+            KeyCode::Left => {
+                if matches!(palette.view, BrowserView::Menu(Some(_))) {
+                    self.browser_back();
+                }
+            }
+            KeyCode::Home | KeyCode::End => {
+                let next = {
+                    let rows = palette_rows(palette);
+                    let menu = catalog_menu(palette, &rows);
+                    let delta = if key.code == KeyCode::Home { 1 } else { -1 };
+                    menu_step(&menu.items, usize::MAX, delta).and_then(|kit| menu.row(kit))
+                };
+                if let Some(row) = next {
+                    palette.selected = row;
+                    palette.reveal = true;
+                    palette.hovered = None;
+                }
+            }
+            _ => return false,
+        }
+        outcome.repaint = true;
+        true
+    }
+
     pub(super) fn activate_palette_item(&mut self, index: usize, outcome: &mut ClientShellInput) {
         let (id, action) = {
             let Some(ClientShellOverlay::CommandPalette(palette)) = self.overlay.as_ref() else {
@@ -505,6 +817,7 @@ impl ClientShellState {
                 // 点击分类进子菜单之后不会再来一个 `Moved`，旧行号会立刻在新
                 // 列表里画出一条假的悬浮行（MENU-01）。
                 palette.hovered = None;
+                settle_catalog_selection(palette);
                 outcome.repaint = true;
                 return;
             }
@@ -529,6 +842,16 @@ pub(crate) fn palette_window(
     palette: &ClientCommandPaletteOverlay,
 ) -> Option<crate::client::shell::page::ListWindow> {
     let rows = palette_rows(palette);
+    if is_catalog(palette) {
+        // 目录视图是贴着入口的下拉菜单，与浮动页无关；滚动口径同 kit::menu。
+        let menu = catalog_menu(palette, &rows);
+        let geometry = catalog_geometry(palette, &menu.items, area);
+        return Some(super::page::ListWindow {
+            body: geometry.bounds,
+            visible: geometry.visible,
+            start: catalog_scroll(palette, &menu, geometry.visible),
+        });
+    }
     let menu_height = match palette.view {
         BrowserView::Menu(_) if palette.query.as_str().is_empty() => {
             (rows.len().saturating_add(6).min(22)) as u16
@@ -565,12 +888,59 @@ pub(crate) fn palette_window(
     ))
 }
 
+/// 画目录视图（只读状态）：滚动起点已在视图计算阶段写回 `palette.scroll`；
+/// 选中项不在窗口里（滚轮滚走了）时不画键盘高亮。
+fn render_catalog(
+    b: &mut Buffer,
+    palette: &ClientCommandPaletteOverlay,
+    cx: &ChromeContext<'_>,
+) -> Option<OverlayRender> {
+    let rows = palette_rows(palette);
+    let menu = catalog_menu(palette, &rows);
+    let geometry = catalog_geometry(palette, &menu.items, b.area);
+    let selected = menu.kit_index(palette.selected);
+    let in_window = selected >= palette.scroll && selected - palette.scroll < geometry.visible;
+    let state = MenuState {
+        highlighted: if in_window { selected } else { usize::MAX },
+        hovered: palette.hovered.map(|row| menu.kit_index(row)),
+        hover_bg: Some(cx.components.hover_bg),
+        scroll: palette.scroll,
+    };
+    let rendered = render_menu(
+        b,
+        geometry.anchor,
+        geometry.bounds,
+        &menu.items,
+        &state,
+        cx.glyphs,
+        false,
+        cx.palette,
+    );
+    if rendered.area.is_empty() {
+        return None;
+    }
+    let menu_rows = rendered
+        .rows
+        .iter()
+        .filter_map(|(rect, kit)| menu.row(*kit).map(|row| (*rect, row)))
+        .collect();
+    Some(OverlayRender {
+        area: rendered.area,
+        menu_popup: rendered.area,
+        menu_rows,
+        ..OverlayRender::default()
+    })
+}
+
 pub(crate) fn render_command_palette(
     b: &mut Buffer,
     palette: &ClientCommandPaletteOverlay,
     cx: &ChromeContext<'_>,
 ) -> Option<OverlayRender> {
     use super::page::{list_start, PageLayout};
+    if is_catalog(palette) {
+        return render_catalog(b, palette, cx);
+    }
     let p = cx.palette;
     let t = &crate::i18n::texts().global_menu;
     let rows = palette_rows(palette);

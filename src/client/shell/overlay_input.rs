@@ -622,6 +622,9 @@ impl ClientShellState {
         }
 
         if matches!(self.overlay, Some(ClientShellOverlay::CommandPalette(_))) {
+            if self.route_palette_catalog_key(key, outcome) {
+                return;
+            }
             let (code, modifiers) = crate::config::normalize_key_combo((key.code, key.modifiers));
             match code {
                 KeyCode::Esc => {
