@@ -1190,6 +1190,12 @@ pub struct MachineFormTexts {
     pub test_confirm_start: &'static str,
     /// 确认条上的取消。
     pub prompt_cancel: &'static str,
+    /// 有改动时离开表单的确认条。
+    pub discard_prompt: &'static str,
+    /// 放弃确认条上的「放弃更改」。
+    pub discard_confirm: &'static str,
+    /// 放弃确认条上的「继续编辑」。
+    pub keep_editing: &'static str,
     pub saved_fmt: &'static str, // args: label
 }
 

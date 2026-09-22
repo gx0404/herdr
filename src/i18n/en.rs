@@ -960,6 +960,9 @@ pub const TEXTS: Texts = Texts {
         test_confirm_note: "Testing installs or updates herdr on the remote when needed; if the update requires it, the running remote server is stopped along with all of its pane processes.",
         test_confirm_start: "start test",
         prompt_cancel: "cancel",
+        discard_prompt: "Discard unsaved changes? The form contents will be lost.",
+        discard_confirm: "discard",
+        keep_editing: "keep editing",
         saved_fmt: "Saved {label}",
     },
     cli_help: CliHelpTexts {

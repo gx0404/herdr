@@ -967,6 +967,9 @@ pub const TEXTS: Texts = Texts {
         test_confirm_note: "测试会在必要时于远端安装或更新 herdr；更新需要时会停止远端正在运行的 server 及其全部 pane 进程。",
         test_confirm_start: "开始测试",
         prompt_cancel: "取消",
+        discard_prompt: "放弃未保存的更改？表单里的内容不会保留。",
+        discard_confirm: "放弃更改",
+        keep_editing: "继续编辑",
         saved_fmt: "已保存 {label}",
     },
     cli_help: CliHelpTexts {

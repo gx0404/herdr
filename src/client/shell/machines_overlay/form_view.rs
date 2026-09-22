@@ -71,6 +71,7 @@ fn prompt_text(prompt: FormPrompt) -> &'static str {
     let f = &crate::i18n::texts().machine_form;
     match prompt {
         FormPrompt::ConfirmTest => f.test_confirm_note,
+        FormPrompt::Discard => f.discard_prompt,
     }
 }
 
@@ -298,6 +299,15 @@ fn form_hints(form: &ClientMachineForm) -> Vec<MachineHint<'static>> {
                 )
                 .primary(),
                 MachineHint::button("esc", f.prompt_cancel, MachineOverlayButton::Back),
+            ],
+            FormPrompt::Discard => vec![
+                MachineHint::button(
+                    "enter",
+                    f.discard_confirm,
+                    MachineOverlayButton::DiscardForm,
+                )
+                .primary(),
+                MachineHint::button("esc", f.keep_editing, MachineOverlayButton::Back),
             ],
         };
     }

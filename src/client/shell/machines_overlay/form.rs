@@ -253,6 +253,8 @@ pub(in crate::client::shell) enum FormPrompt {
     /// 测试连接以预先授权模式跑 bootstrap：必要时在远端安装 / 更新，并在
     /// 更新要求时停止正在运行的 server 及其 pane 进程。先写明后果再下发。
     ConfirmTest,
+    /// 有未保存的改动时离开表单（Esc / 返回）：先问是否放弃。
+    Discard,
 }
 
 /// 快速输入框最近一次解析的结论（显示在输入框下方）。
@@ -280,6 +282,9 @@ pub(in crate::client::shell) struct ClientMachineForm {
     /// 首屏不会一片红；保存 / 测试尝试之后 `submitted` 让全部错误现形。
     pub(super) touched: u32,
     pub(super) submitted: bool,
+    /// 用户改过任何内容（输入、切换选项、快速输入填入）。只失焦不算：Esc
+    /// 离开前据此决定要不要先问「放弃更改？」。
+    pub(super) dirty: bool,
     pub(in crate::client::shell) target: TextEditor,
     pub(in crate::client::shell) label: TextEditor,
     pub(in crate::client::shell) session: TextEditor,
@@ -491,6 +496,7 @@ impl ClientMachineForm {
             quick_dirty: false,
             touched: 0,
             submitted: false,
+            dirty: false,
             target: TextEditor::default(),
             label: TextEditor::default(),
             session: TextEditor::default(),
@@ -628,6 +634,11 @@ impl ClientMachineForm {
         self.editing.is_none()
     }
 
+    /// 离开前要不要先确认放弃：改过内容，或快速输入框里还有字。
+    pub(super) fn has_unsaved_changes(&self) -> bool {
+        self.dirty || !self.quick.trim().is_empty()
+    }
+
     /// 测试连接正在跑：表单只读，只接受 Esc 取消。
     pub(super) fn running(&self) -> bool {
         self.bootstrap
@@ -747,6 +758,7 @@ impl ClientMachineForm {
     /// 表单只读，到不了这里）。
     fn mark_edited(&mut self, field: MachineField) {
         self.touched |= field.bit();
+        self.dirty = true;
         self.reveal = true;
         if field == MachineField::Quick {
             self.quick_dirty = true;
@@ -1212,6 +1224,8 @@ impl ClientShellState {
             }
             match form.prompt {
                 Some(FormPrompt::ConfirmTest) => true,
+                // 放弃确认条上不接测试。
+                Some(FormPrompt::Discard) => return,
                 None => {
                     if form.submit_gate(saved) {
                         form.prompt = Some(FormPrompt::ConfirmTest);
@@ -1367,6 +1381,16 @@ impl ClientShellState {
         }
     }
 
+    /// 放弃确认条上的「放弃更改」（Enter / 点页脚）：丢掉表单离开。
+    pub(super) fn discard_machine_form(&mut self) {
+        if self
+            .machine_form_mut()
+            .is_some_and(|form| form.prompt == Some(FormPrompt::Discard))
+        {
+            self.leave_machine_form();
+        }
+    }
+
     /// 快速输入的「填入」（快速输入框里按 Enter / 点页脚）。
     pub(super) fn apply_machine_quick_input(&mut self) {
         if let Some(form) = self.machine_form_mut() {
@@ -1443,8 +1467,10 @@ impl ClientShellState {
                 {
                     self.request_machine_test(outcome);
                 }
-                FormPrompt::ConfirmTest => {}
+                FormPrompt::Discard if code == KeyCode::Enter => self.discard_machine_form(),
+                FormPrompt::ConfirmTest | FormPrompt::Discard => {}
             }
+            outcome.repaint = true;
             return;
         }
         match code {

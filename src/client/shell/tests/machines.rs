@@ -2933,6 +2933,133 @@ fn test_connection_asks_for_confirmation_on_every_width() {
     }
 }
 
+fn machines_view_is_list(state: &ClientShellState) -> bool {
+    matches!(
+        state.overlay,
+        Some(ClientShellOverlay::Machines(
+            super::super::machines_overlay::ClientMachinesOverlay {
+                view: super::super::machines_overlay::ClientMachinesView::List,
+                ..
+            }
+        ))
+    )
+}
+
+/// 测试结束（通过或失败）后第一次 Esc 只清掉结论，表单与字段都在（旧向导
+/// FormEdit 的语义）；没有改动的表单再按 Esc 才离开。
+#[test]
+fn esc_after_a_finished_test_only_clears_the_result() {
+    let _dir = with_temp_state_home("form-test-esc");
+    for result in [Ok(()), Err("Permission denied (publickey)".to_owned())] {
+        let mut state = state_with_profiles(&[]);
+        add_form_overlay(&mut state, "build.example", "Build");
+        let ticket = start_test(&mut state);
+        state.handle_machine_bootstrap_update(
+            ticket,
+            MachineBootstrapUpdate::Finished(result.clone()),
+        );
+        press(&mut state, key(KeyCode::Esc));
+        let form = machine_form(&state);
+        assert!(form.bootstrap.is_none(), "{result:?}：第一次 Esc 清掉结论");
+        assert_eq!(form.target.as_str(), "build.example");
+        assert_eq!(form.label.as_str(), "Build");
+        press(&mut state, key(KeyCode::Esc));
+        assert!(machines_view_is_list(&state), "{result:?}：再按才离开");
+    }
+}
+
+/// 有未保存的改动时 Esc 不直接丢表单：页脚上方先问「放弃更改？」，Esc 继续
+/// 编辑、Enter 或点「放弃更改」才离开；有改动时点窗外也不关页面。编辑表单
+/// 放弃后回详情，目录不变。
+#[test]
+fn esc_with_unsaved_changes_asks_before_discarding_the_form() {
+    let dir = with_temp_state_home("form-discard");
+    let f = &crate::i18n::texts().machine_form;
+    let mut state = state_with_profiles(&[]);
+    state.open_machine_add_form();
+    type_text(&mut state, "dev@build.example");
+
+    press(&mut state, key(KeyCode::Esc));
+    assert!(machine_form(&state).prompt.is_some(), "先问，不离开");
+    let text = frame_text(&mut state, 120, 40);
+    assert!(
+        prompt_block_text(&text).contains(&compact(f.discard_prompt)),
+        "放弃确认条：{text}"
+    );
+    assert_eq!(
+        machine_buttons(&state),
+        vec![
+            MachineOverlayButton::DiscardForm,
+            MachineOverlayButton::Back
+        ]
+    );
+    // Esc = 继续编辑：确认条收起，输入还在。
+    press(&mut state, key(KeyCode::Esc));
+    let form = machine_form(&state);
+    assert!(form.prompt.is_none());
+    assert_eq!(form.quick.as_str(), "dev@build.example");
+
+    // 有改动时点窗外不关页面。
+    frame_text(&mut state, 120, 40);
+    let popup = state.hits.machines_popup;
+    assert!(popup.x > 0, "{popup:?}");
+    state.handle_mouse(
+        left_click(popup.x - 1, popup.y),
+        &mut ClientShellInput::default(),
+    );
+    assert!(
+        matches!(state.overlay, Some(ClientShellOverlay::Machines(_))),
+        "有改动时点窗外不关"
+    );
+    machine_form(&state);
+
+    // Esc 再问，Enter 放弃：回列表，什么都没落盘。
+    press(&mut state, key(KeyCode::Esc));
+    press(&mut state, key(KeyCode::Enter));
+    assert!(machines_view_is_list(&state));
+    assert!(crate::client::endpoint::EndpointCatalog::load()
+        .expect("catalog")
+        .ssh
+        .is_empty());
+
+    // 编辑表单：改一个字段，Esc 问，点「放弃更改」回详情，档案原样。
+    let saved = seed_catalog_machine("Build", "build.example");
+    let mut state = state_with_profiles(std::slice::from_ref(&saved));
+    state.open_machine_edit_form(&saved.id);
+    focus_field(&mut state, MachineField::Port);
+    type_text(&mut state, "2222");
+    press(&mut state, key(KeyCode::Esc));
+    frame_text(&mut state, 120, 40);
+    click_machine_button(&mut state, MachineOverlayButton::DiscardForm);
+    assert!(matches!(
+        state.overlay,
+        Some(ClientShellOverlay::Machines(
+            super::super::machines_overlay::ClientMachinesOverlay {
+                view: super::super::machines_overlay::ClientMachinesView::Detail(_),
+                ..
+            }
+        ))
+    ));
+    let catalog = crate::client::endpoint::EndpointCatalog::load().expect("catalog");
+    assert_eq!(catalog.ssh.len(), 1);
+    assert_eq!(catalog.ssh[0].port, None, "放弃的改动不落盘");
+
+    // 只切焦点、没改内容：Esc 直接离开。
+    state.open_machine_edit_form(&saved.id);
+    press(&mut state, key(KeyCode::Tab));
+    press(&mut state, key(KeyCode::Esc));
+    assert!(matches!(
+        state.overlay,
+        Some(ClientShellOverlay::Machines(
+            super::super::machines_overlay::ClientMachinesOverlay {
+                view: super::super::machines_overlay::ClientMachinesView::Detail(_),
+                ..
+            }
+        ))
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 // ---------------------------------------------------------------------
 // 合并页脚、空状态与带预览的导入清单
 // ---------------------------------------------------------------------

@@ -23,6 +23,7 @@ use crate::client::endpoint::{
 };
 use crate::remote::SavedSshBootstrapStep;
 use crossterm::event::KeyModifiers;
+use form::FormPrompt;
 #[cfg(test)]
 pub(super) use form::{ClientMachineBootstrap, TriChoice};
 pub(super) use form::{ClientMachineForm, MachineField};
@@ -217,6 +218,8 @@ pub(super) enum MachineOverlayButton {
     TestRecover,
     /// 表单：解析快速输入并填入字段。
     QuickApply,
+    /// 表单：放弃确认条上的「放弃更改」。
+    DiscardForm,
     Edit,
     Reconnect,
     ToggleEnabled,
@@ -475,8 +478,10 @@ impl ClientShellState {
             Close,
             List,
             Detail(ProfileId),
-            CancelTest,
+            ClearTest,
             DismissPrompt,
+            AskDiscard,
+            LeaveForm,
         }
         let action = match self.overlay.as_ref() {
             Some(ClientShellOverlay::Machines(overlay)) => match &overlay.view {
@@ -510,19 +515,21 @@ impl ClientShellState {
                     }
                     ClientImportStep::Discover | ClientImportStep::Done => Back::List,
                 },
+                // 表单的 Esc 一层层退：取消运行中的测试 / 收起确认条 / 清掉已
+                // 结束的测试结论 / 有改动先问放弃，最后才离开表单。
                 ClientMachinesView::Form(form) => {
                     if form.running() {
-                        Back::CancelTest
+                        Back::ClearTest
                     } else if form.prompt.is_some() {
                         // 确认条上的 Esc 只收起确认条，表单原样留着。
                         Back::DismissPrompt
+                    } else if form.bootstrap.is_some() {
+                        // 测试已通过 / 失败：先只清掉结论（原 FormEdit 语义）。
+                        Back::ClearTest
+                    } else if form.has_unsaved_changes() {
+                        Back::AskDiscard
                     } else {
-                        match &form.editing {
-                            Some(id) if self.saved_profile(id).is_some() => {
-                                Back::Detail(id.clone())
-                            }
-                            _ => Back::List,
-                        }
+                        Back::LeaveForm
                     }
                 }
             },
@@ -540,21 +547,40 @@ impl ClientShellState {
                     overlay.view = ClientMachinesView::Detail(id);
                 }
             }
-            Back::CancelTest => {
+            Back::ClearTest | Back::DismissPrompt | Back::AskDiscard => {
                 if let Some(ClientShellOverlay::Machines(overlay)) = self.overlay.as_mut() {
                     if let ClientMachinesView::Form(form) = &mut overlay.view {
-                        // 丢弃即取消（`Drop` 触发 cancel），表单回到可编辑。
-                        form.bootstrap = None;
+                        match action {
+                            // 运行中的测试丢弃即取消（`Drop` 触发 cancel）；已结束
+                            // 的结论只清掉。表单回到可编辑，字段都在。
+                            Back::ClearTest => form.bootstrap = None,
+                            Back::DismissPrompt => form.prompt = None,
+                            _ => form.prompt = Some(FormPrompt::Discard),
+                        }
                     }
                 }
             }
-            Back::DismissPrompt => {
-                if let Some(ClientShellOverlay::Machines(overlay)) = self.overlay.as_mut() {
-                    if let ClientMachinesView::Form(form) = &mut overlay.view {
-                        form.prompt = None;
-                    }
-                }
-            }
+            Back::LeaveForm => self.leave_machine_form(),
+        }
+    }
+
+    /// 离开表单（不保存）：编辑回详情（档案还在时），添加回列表。
+    fn leave_machine_form(&mut self) {
+        let detail = match self.overlay.as_ref() {
+            Some(ClientShellOverlay::Machines(overlay)) => match &overlay.view {
+                ClientMachinesView::Form(form) if !form.running() => form
+                    .editing
+                    .clone()
+                    .filter(|id| self.saved_profile(id).is_some()),
+                _ => return,
+            },
+            _ => return,
+        };
+        if let Some(ClientShellOverlay::Machines(overlay)) = self.overlay.as_mut() {
+            overlay.view = match detail {
+                Some(id) => ClientMachinesView::Detail(id),
+                None => ClientMachinesView::List,
+            };
         }
     }
 
@@ -884,6 +910,7 @@ impl ClientShellState {
             Btn::TestConnection => self.request_machine_test(outcome),
             Btn::TestRecover => self.open_machine_test_recovery(None, outcome),
             Btn::QuickApply => self.apply_machine_quick_input(),
+            Btn::DiscardForm => self.discard_machine_form(),
             Btn::Import => self.open_machine_import_wizard(),
             Btn::ImportContinue => {
                 if let Some(ClientShellOverlay::Machines(overlay)) = self.overlay.as_mut() {
