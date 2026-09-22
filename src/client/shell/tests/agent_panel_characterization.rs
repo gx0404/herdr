@@ -858,6 +858,119 @@ fn characterization_aggregate_agent_rows_order_under_spaces_and_launch() {
     assert_eq!(targets, [local("pane_2"), local("pane_3"), local("pane_1")]);
 }
 
+/// 渲染扩展 profile 的夹具：`agents` 个 agent 平摊到若干工作区（每 4 个一个
+/// 工作区、每工作区一个 tab），每个 agent 挂 `activity` 个活动节点（一半是根
+/// 节点，另一半各挂在一个根下）。活动节点在面板车道把树接进缓存之前不参与
+/// 渲染，但作为输入保持一致，好让改造前后的数字可比。
+fn scale_snapshot(agents: usize, activity: usize) -> ClientShellSnapshot {
+    let mut projected = snapshot();
+    projected.workspaces.clear();
+    projected.tabs.clear();
+    projected.panes.clear();
+    projected.agents.clear();
+    let workspace_count = agents.div_ceil(4).max(1);
+    for index in 0..workspace_count {
+        let mut workspace = snapshot().workspaces[0].clone();
+        workspace.workspace_id = format!("ws_{index}");
+        workspace.active_tab_id = format!("tab_{index}");
+        workspace.number = index + 1;
+        workspace.label = format!("space-{index}");
+        workspace.focused = index == 0;
+        projected.workspaces.push(workspace);
+        let mut tab = snapshot().tabs[0].clone();
+        tab.tab_id = format!("tab_{index}");
+        tab.workspace_id = format!("ws_{index}");
+        tab.focused = index == 0;
+        projected.tabs.push(tab);
+    }
+    for index in 0..agents {
+        let workspace = index / 4;
+        let mut pane = snapshot().panes[0].clone();
+        pane.pane_id = format!("pane_{index}");
+        pane.workspace_id = format!("ws_{workspace}");
+        pane.tab_id = format!("tab_{workspace}");
+        pane.focused = index == 0;
+        projected.panes.push(pane);
+        let mut agent = panel_agent(
+            &format!("pane_{index}"),
+            &format!("ws_{workspace}"),
+            &format!("tab_{workspace}"),
+            &format!("agent-{index}"),
+            [
+                AgentStatus::Idle,
+                AgentStatus::Working,
+                AgentStatus::Blocked,
+            ][index % 3],
+            index as u64,
+        );
+        agent.launch_seq = (agents - index) as u64;
+        let roots = activity.div_ceil(2);
+        agent.activity.nodes = (0..activity)
+            .map(|node| crate::protocol::ClientShellActivityNode {
+                id: format!("node_{node}"),
+                kind: crate::api::schema::AgentActivityKind::Subagent,
+                label: format!("task {node}"),
+                status: if node % 2 == 0 {
+                    crate::api::schema::AgentActivityStatus::Running
+                } else {
+                    crate::api::schema::AgentActivityStatus::Done
+                },
+                parent_id: (node >= roots).then(|| format!("node_{}", node - roots)),
+                ..Default::default()
+            })
+            .collect();
+        agent.activity.total = activity as u32;
+        agent.activity.running = activity.div_ceil(2) as u32;
+        projected.agents.push(agent);
+    }
+    projected.focused_workspace_id = Some("ws_0".into());
+    projected.focused_tab_id = Some("tab_0".into());
+    projected.focused_pane_id = Some("pane_0".into());
+    projected
+}
+
+/// 非门禁扩展剖析（`just bench-render-scale` 的 `render_scale_profile` 过滤命中）：
+/// Agents 面板在 1 / 15 / 52 个 agent、各带 0 与 8 个活动节点下的每帧合成耗时。
+/// 三列：classic 稳态、workbench 稳态（行缓存命中）、workbench 每帧翻一次折叠
+/// 态（行缓存每帧重建，量的是构建成本）。
+#[test]
+#[ignore = "manual agents panel composition scaling profile"]
+fn agent_panel_render_scale_profile() {
+    for (agents, activity) in [(1, 0), (1, 8), (15, 0), (15, 8), (52, 0), (52, 8)] {
+        let mut classic = ClientShellState::new(panel_config(AgentPanelSortConfig::Spaces));
+        classic.set_snapshot(Box::new(scale_snapshot(agents, activity)));
+        classic.set_pane_surface(surface());
+        let mut workbench = ClientShellState::new(panel_config(AgentPanelSortConfig::Spaces));
+        workbench.set_snapshot(Box::new(scale_snapshot(agents, activity)));
+        workbench.set_pane_surface(surface());
+        enable_workbench(&mut workbench);
+
+        let measure = |state: &mut ClientShellState, toggle: bool| {
+            for _ in 0..20 {
+                std::hint::black_box(state.compose(120, 40).expect("agents panel frame"));
+            }
+            let start = std::time::Instant::now();
+            for _ in 0..1000 {
+                if toggle {
+                    state.toggle_collapsed_group(
+                        &ClientEndpointId::Local,
+                        "agent-panel:ws_0".into(),
+                    );
+                }
+                std::hint::black_box(state.compose(120, 40).expect("agents panel frame"));
+            }
+            start.elapsed().as_secs_f64() * 1000.0
+        };
+        let classic_us = measure(&mut classic, false);
+        let workbench_us = measure(&mut workbench, false);
+        let rebuild_us = measure(&mut workbench, true);
+        eprintln!(
+            "agents panel: {agents} agents x {activity} nodes, classic {classic_us:.1} us/frame, \
+             workbench {workbench_us:.1} us/frame, workbench+rebuild {rebuild_us:.1} us/frame"
+        );
+    }
+}
+
 fn mobile_agent_targets(state: &ClientShellState) -> Vec<(Rect, String)> {
     state
         .hits
