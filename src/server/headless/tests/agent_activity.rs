@@ -112,14 +112,18 @@ async fn activity_refresh_only_touches_the_projection_until_it_reaches_clients()
 
     let snapshot = next_snapshot(&control_rx);
     let activity = &snapshot.agents[0].activity;
-    assert_eq!((activity.running, activity.total), (1, 2));
+    // 默认摘要形态：计数 + 最新节点，整树经 agent.activity.read 取。
+    assert_eq!(
+        (activity.running, activity.total, activity.truncated),
+        (1, 2, true)
+    );
     assert_eq!(
         activity
             .nodes
             .iter()
             .map(|node| node.id.as_str())
             .collect::<Vec<_>>(),
-        ["a", "b"]
+        ["a"]
     );
     assert_eq!(snapshot.agents[0].launch_seq, 1);
 

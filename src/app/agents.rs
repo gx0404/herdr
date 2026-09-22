@@ -21,6 +21,19 @@ fn valid_agent_name(name: &str) -> bool {
 
 impl App {
     pub(super) fn collect_agent_infos(&self) -> Vec<crate::api::schema::AgentInfo> {
+        self.collect_agent_infos_with(true)
+    }
+
+    /// 客户端投影专用：`activity` 留空，不复制活动树——快照按自己的下发形态直接读
+    /// 存储（体积护栏见 `server::client_shell::SNAPSHOT_ACTIVITY`）。
+    pub(super) fn collect_agent_infos_for_projection(&self) -> Vec<crate::api::schema::AgentInfo> {
+        self.collect_agent_infos_with(false)
+    }
+
+    fn collect_agent_infos_with(
+        &self,
+        include_activity: bool,
+    ) -> Vec<crate::api::schema::AgentInfo> {
         self.state
             .workspaces
             .iter()
@@ -30,7 +43,9 @@ impl App {
                     tab.layout
                         .pane_ids()
                         .into_iter()
-                        .filter_map(move |pane_id| self.agent_info(ws_idx, pane_id))
+                        .filter_map(move |pane_id| {
+                            self.agent_info_with(ws_idx, pane_id, include_activity)
+                        })
                 })
             })
             .collect()
@@ -368,6 +383,15 @@ impl App {
         ws_idx: usize,
         pane_id: crate::layout::PaneId,
     ) -> Option<crate::api::schema::AgentInfo> {
+        self.agent_info_with(ws_idx, pane_id, true)
+    }
+
+    fn agent_info_with(
+        &self,
+        ws_idx: usize,
+        pane_id: crate::layout::PaneId,
+        include_activity: bool,
+    ) -> Option<crate::api::schema::AgentInfo> {
         let ws = self.state.workspaces.get(ws_idx)?;
         let pane_state = ws.pane_state(pane_id)?;
         let terminal = self.state.terminals.get(&pane_state.attached_terminal_id)?;
@@ -388,12 +412,15 @@ impl App {
             state_labels: pane.state_labels,
             tokens: pane.tokens,
             agent_session: pane.agent_session,
-            activity: self
-                .state
-                .agent_activity
-                .activity(pane_id)
-                .map(|snapshot| snapshot.nodes.clone())
-                .unwrap_or_default(),
+            activity: if include_activity {
+                self.state
+                    .agent_activity
+                    .activity(pane_id)
+                    .map(|snapshot| snapshot.nodes.clone())
+                    .unwrap_or_default()
+            } else {
+                Vec::new()
+            },
             launch_seq: self.state.agent_activity.launch_seq(pane_id),
             workspace_id: pane.workspace_id,
             tab_id: pane.tab_id,

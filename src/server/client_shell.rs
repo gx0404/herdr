@@ -3,12 +3,50 @@ use ratatui::layout::Rect;
 use crate::app;
 use crate::protocol::{self, FrameData};
 
+/// 快照里活动树的下发形态（体积护栏）。快照是逐客户端扇出路径，每次投影纪元
+/// 变化都会整份重建、编码并比较。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SnapshotActivity {
+    /// 每 agent 下发截断后的整棵树（至多 `MAX_AGENT_ACTIVITY_NODES` 个节点）。
+    // 备用形态：生产默认是 `Summary`，本变体只由基准与测试构造；护栏阈值重新评估
+    // 时切换 `SNAPSHOT_ACTIVITY` 即可启用，不必改客户端。
+    #[cfg_attr(not(test), allow(dead_code))]
+    Full,
+    /// 每 agent 只下发计数 + 最新一个节点（`truncated` 表示还有更多）；整棵树经
+    /// `agent.activity.read` 按需拉取。
+    Summary,
+}
+
+/// 默认下发形态：摘要。实测（`render_scale_profile_agent_activity_snapshot`，
+/// release，每 agent 32 节点；字节确定，耗时随机器浮动）：15 个 agent 时整树下发
+/// 让快照 JSON 从 28.5 KB 涨到 163 KB（+472%），投影 + 编码中位耗时 +230%，远超
+/// 25% 门槛；摘要形态 +14% 字节、中位耗时 +16%（1 个 agent 时 +2% / 持平）。
+pub(crate) const SNAPSHOT_ACTIVITY: SnapshotActivity = SnapshotActivity::Summary;
+
 pub(super) fn snapshot(
     app: &app::App,
     boot_id: &str,
     revision: u64,
     config_diagnostic: Option<&str>,
     location: Option<&crate::server::clients::ClientShellLocation>,
+) -> protocol::ClientShellSnapshot {
+    snapshot_with_activity(
+        app,
+        boot_id,
+        revision,
+        config_diagnostic,
+        location,
+        SNAPSHOT_ACTIVITY,
+    )
+}
+
+pub(super) fn snapshot_with_activity(
+    app: &app::App,
+    boot_id: &str,
+    revision: u64,
+    config_diagnostic: Option<&str>,
+    location: Option<&crate::server::clients::ClientShellLocation>,
+    activity: SnapshotActivity,
 ) -> protocol::ClientShellSnapshot {
     let snapshot = app.session_snapshot_for_projection();
     let focused_workspace_id = location
@@ -149,7 +187,7 @@ pub(super) fn snapshot(
                 tokens,
                 focused,
                 launch_seq: agent.launch_seq,
-                activity: agent_activity_projection(app, &pane_id, agent.activity),
+                activity: agent_activity_projection(app, &pane_id, activity),
                 pane_id,
             }
         })
@@ -241,19 +279,18 @@ pub(super) fn snapshot(
         panes,
         agents,
         commands: app.client_shell_command_manifest(),
-        external_agents: external_agents_projection(app),
+        external_agents: external_agents_projection(app, activity),
     }
 }
 
-/// 一个 agent 的活动树投影。`nodes` 是 `AgentInfo.activity`（已按上限截断的存储
-/// 副本，这里直接移入，不再复制）；截断前的计数取自存储。没有活动的 agent 不解析
-/// pane id、不分配。
+/// 一个 agent 的活动树投影，直接读存储（投影路径的 `AgentInfo` 不复制活动树）。
+/// 存储里没有任何活动树时不解析 pane id。
 fn agent_activity_projection(
     app: &app::App,
     public_pane_id: &str,
-    nodes: Vec<crate::api::schema::AgentActivityNode>,
+    mode: SnapshotActivity,
 ) -> protocol::ClientShellAgentActivity {
-    if nodes.is_empty() {
+    if !app.state.agent_activity.has_activity() {
         return protocol::ClientShellAgentActivity::default();
     }
     let Some(stored) = app
@@ -262,11 +299,20 @@ fn agent_activity_projection(
     else {
         return protocol::ClientShellAgentActivity::default();
     };
-    activity_projection(stored.running, stored.total, stored.truncated, nodes)
+    activity_projection(
+        stored.running,
+        stored.total,
+        stored.truncated,
+        &stored.nodes,
+        mode,
+    )
 }
 
 /// 外部来源条目投影（不属于任何 pane）。
-fn external_agents_projection(app: &app::App) -> Vec<protocol::ClientShellExternalAgent> {
+fn external_agents_projection(
+    app: &app::App,
+    mode: SnapshotActivity,
+) -> Vec<protocol::ClientShellExternalAgent> {
     app.state
         .agent_activity
         .external()
@@ -286,7 +332,8 @@ fn external_agents_projection(app: &app::App) -> Vec<protocol::ClientShellExtern
                     record.running,
                     record.total,
                     record.truncated,
-                    info.activity.clone(),
+                    &info.activity,
+                    mode,
                 ),
             }
         })
@@ -297,14 +344,54 @@ fn activity_projection(
     running: u32,
     total: u32,
     truncated: bool,
-    nodes: Vec<crate::api::schema::AgentActivityNode>,
+    nodes: &[crate::api::schema::AgentActivityNode],
+    mode: SnapshotActivity,
 ) -> protocol::ClientShellAgentActivity {
-    protocol::ClientShellAgentActivity {
-        running,
-        total,
-        truncated,
-        nodes: nodes.into_iter().map(activity_node_projection).collect(),
+    match mode {
+        SnapshotActivity::Full => protocol::ClientShellAgentActivity {
+            running,
+            total,
+            truncated,
+            nodes: nodes
+                .iter()
+                .cloned()
+                .map(activity_node_projection)
+                .collect(),
+        },
+        SnapshotActivity::Summary => {
+            let latest = latest_activity_node(nodes);
+            protocol::ClientShellAgentActivity {
+                running,
+                total,
+                truncated: truncated || nodes.len() > usize::from(latest.is_some()),
+                nodes: latest
+                    .cloned()
+                    .map(activity_node_projection)
+                    .into_iter()
+                    .collect(),
+            }
+        }
     }
+}
+
+/// 摘要里的「最新节点」：优先运行中的节点、取开始时间最晚者；没有运行中的节点
+/// 时取结束（缺失则开始）时间最晚者。时间缺失视为最早，同分取来源顺序靠后者。
+fn latest_activity_node(
+    nodes: &[crate::api::schema::AgentActivityNode],
+) -> Option<&crate::api::schema::AgentActivityNode> {
+    nodes
+        .iter()
+        .enumerate()
+        .max_by_key(|(index, node)| {
+            let running = node.status == crate::api::schema::AgentActivityStatus::Running;
+            let at = if running {
+                node.started_at_ms
+            } else {
+                node.ended_at_ms.or(node.started_at_ms)
+            };
+            (running, at, *index)
+        })
+        .map(|(_, node)| node)
 }
 
 /// `AgentActivityNode` → wire 镜像（字段逐一移入）。
@@ -890,6 +977,284 @@ mod agent_activity_tests {
             }]),
         });
         snapshot(&app, "boot", 1, None, None)
+    }
+
+    /// 一个接近真实上限的活动树：4 个子 agent（2 运行中、2 已完成），各带 7 个任务，
+    /// 共 32 个节点；字段按 Claude 子 agent 的量级填（id、标题、类型、内容引用、摘要、
+    /// 起止时间）。
+    fn bench_activity_tree() -> Vec<crate::api::schema::AgentActivityNode> {
+        use crate::api::schema::{AgentActivityKind, AgentActivityNode, AgentActivityStatus};
+        let mut nodes = Vec::with_capacity(32);
+        for agent in 0..4u64 {
+            let agent_id = format!("agent-a3f9c2e1b7d04e{agent:02}");
+            let running = agent < 2;
+            nodes.push(AgentActivityNode {
+                id: agent_id.clone(),
+                kind: AgentActivityKind::Subagent,
+                label: format!("Explore the render pipeline and summarize hot paths #{agent}"),
+                status: if running {
+                    AgentActivityStatus::Running
+                } else {
+                    AgentActivityStatus::Done
+                },
+                parent_id: None,
+                agent_type: Some("general-purpose".into()),
+                content_ref: Some(format!("subagents/workflows/wf_0001/{agent_id}.jsonl")),
+                summary: (!running).then(|| {
+                    "Found three hot paths in compute_view; retained render early-outs hold.".into()
+                }),
+                started_at_ms: Some(1_758_000_000_000 + agent * 1_000),
+                ended_at_ms: (!running).then_some(1_758_000_060_000 + agent * 1_000),
+            });
+            for task in 0..7u64 {
+                let done = task < 5;
+                nodes.push(AgentActivityNode {
+                    id: format!("{agent_id}:task-{task}"),
+                    kind: AgentActivityKind::Task,
+                    label: format!("Read src/server/headless/render.rs section {task}"),
+                    status: if done {
+                        AgentActivityStatus::Done
+                    } else {
+                        AgentActivityStatus::Running
+                    },
+                    parent_id: Some(agent_id.clone()),
+                    agent_type: None,
+                    content_ref: None,
+                    summary: None,
+                    started_at_ms: Some(1_758_000_001_000 + agent * 1_000 + task * 100),
+                    ended_at_ms: done.then_some(1_758_000_002_000 + agent * 1_000 + task * 100),
+                });
+            }
+        }
+        nodes
+    }
+
+    struct SnapshotCost {
+        json_bytes: usize,
+        framed_bytes: usize,
+        median_us: u128,
+        p95_us: u128,
+    }
+
+    /// 一次快照投影 + JSON 编码 + bincode 帧（单客户端），与 `render_scale_benchmark`
+    /// 的 snapshot encoding 口径一致。
+    fn measure_snapshot(app: &crate::app::App, activity: super::SnapshotActivity) -> SnapshotCost {
+        const WARMUP: usize = 20;
+        const SAMPLES: usize = 200;
+        let run = || {
+            let started = std::time::Instant::now();
+            let snapshot =
+                super::snapshot_with_activity(app, "bench-boot", 1, None, None, activity);
+            let message = crate::protocol::endpoint::snapshot_message(&snapshot)
+                .expect("benchmark snapshot should serialize");
+            let json_bytes = match &message {
+                crate::protocol::ServerMessage::EndpointControl { data, .. } => data.len(),
+                _ => 0,
+            };
+            let framed = bincode::serde::encode_to_vec(&message, bincode::config::standard())
+                .expect("benchmark snapshot should frame");
+            (started.elapsed(), json_bytes, framed.len())
+        };
+        for _ in 0..WARMUP {
+            std::hint::black_box(run());
+        }
+        let mut samples = Vec::with_capacity(SAMPLES);
+        let (mut json_bytes, mut framed_bytes) = (0, 0);
+        for _ in 0..SAMPLES {
+            let (elapsed, json, framed) = run();
+            samples.push(elapsed.as_micros());
+            (json_bytes, framed_bytes) = (json, framed);
+        }
+        samples.sort_unstable();
+        SnapshotCost {
+            json_bytes,
+            framed_bytes,
+            median_us: samples[SAMPLES / 2],
+            p95_us: samples[(SAMPLES - 1) * 95 / 100],
+        }
+    }
+
+    fn percent_over(value: u128, base: u128) -> f64 {
+        if base == 0 {
+            return 0.0;
+        }
+        (value as f64 - base as f64) * 100.0 / base as f64
+    }
+
+    /// 体积护栏的实测依据（`just bench-render-scale` 会跑到它）：每个 pane 一个
+    /// agent，比较「无活动」（与接入活动树之前的快照同形）、每 agent 32 节点整树
+    /// 下发、每 agent 摘要（计数 + 最新节点）三种形态的快照字节与编码耗时。
+    #[test]
+    #[ignore = "manual snapshot size / encoding profile for agent activity"]
+    fn render_scale_profile_agent_activity_snapshot() {
+        println!("agent activity snapshot projection + JSON framing (32 nodes per agent)");
+        println!(
+            "  agents  variant  json_bytes  framed_bytes  median_us  p95_us  bytes_vs_base  median_vs_base"
+        );
+        for count in [1usize, 15, 50] {
+            let names = (0..count)
+                .map(|index| format!("bench-{index}"))
+                .collect::<Vec<_>>();
+            let names = names.iter().map(String::as_str).collect::<Vec<_>>();
+            let mut app = app_with_panes(&names);
+            let panes = app
+                .state
+                .workspaces
+                .iter()
+                .map(|workspace| workspace.tabs[0].root_pane)
+                .collect::<Vec<_>>();
+            for pane_id in &panes {
+                detect(&mut app, *pane_id, Agent::Claude);
+            }
+            let base = measure_snapshot(&app, super::SnapshotActivity::Full);
+            for pane_id in &panes {
+                app.state.apply_agent_activity(
+                    *pane_id,
+                    bench_activity_tree(),
+                    std::time::Instant::now(),
+                );
+            }
+            let full = measure_snapshot(&app, super::SnapshotActivity::Full);
+            let summary = measure_snapshot(&app, super::SnapshotActivity::Summary);
+            for (variant, cost) in [("base", &base), ("full", &full), ("summary", &summary)] {
+                println!(
+                    "  {count:>6}  {variant:<7}  {:>10}  {:>12}  {:>9}  {:>6}  {:>12.1}%  {:>13.1}%",
+                    cost.json_bytes,
+                    cost.framed_bytes,
+                    cost.median_us,
+                    cost.p95_us,
+                    percent_over(cost.json_bytes as u128, base.json_bytes as u128),
+                    percent_over(cost.median_us, base.median_us),
+                );
+            }
+        }
+    }
+
+    fn timed_node(
+        id: &str,
+        status: crate::api::schema::AgentActivityStatus,
+        started: Option<u64>,
+        ended: Option<u64>,
+    ) -> crate::api::schema::AgentActivityNode {
+        crate::api::schema::AgentActivityNode {
+            id: id.into(),
+            status,
+            started_at_ms: started,
+            ended_at_ms: ended,
+            ..crate::api::schema::AgentActivityNode::default()
+        }
+    }
+
+    #[test]
+    fn latest_node_prefers_running_then_the_most_recent_time() {
+        use crate::api::schema::AgentActivityStatus::{Done, Pending, Running};
+        let nodes = vec![
+            timed_node("old-running", Running, Some(10), None),
+            timed_node("new-running", Running, Some(30), None),
+            timed_node("done-late", Done, Some(5), Some(99)),
+        ];
+        assert_eq!(
+            super::latest_activity_node(&nodes).map(|node| node.id.as_str()),
+            Some("new-running")
+        );
+        let nodes = vec![
+            timed_node("done-early", Done, Some(1), Some(20)),
+            timed_node("pending", Pending, Some(25), None),
+            timed_node("no-time", Done, None, None),
+        ];
+        assert_eq!(
+            super::latest_activity_node(&nodes).map(|node| node.id.as_str()),
+            Some("pending"),
+            "结束时间缺失时按开始时间比"
+        );
+        let nodes = vec![
+            timed_node("first", Done, None, None),
+            timed_node("second", Done, None, None),
+        ];
+        assert_eq!(
+            super::latest_activity_node(&nodes).map(|node| node.id.as_str()),
+            Some("second"),
+            "同分取来源顺序靠后者"
+        );
+        assert!(super::latest_activity_node(&[]).is_none());
+    }
+
+    /// 两种下发形态都只用既有 wire 字段（客户端不改就能消费）：整树带全部节点；
+    /// 摘要只带计数 + 最新节点，`truncated` 告诉客户端去 `agent.activity.read` 取全量。
+    #[test]
+    fn snapshot_activity_shapes_share_the_wire_fields() {
+        use crate::api::schema::AgentActivityStatus::{Done, Running};
+        let mut app = app_with_panes(&["first"]);
+        let pane_id = app.state.workspaces[0].tabs[0].root_pane;
+        detect(&mut app, pane_id, Agent::Claude);
+        app.handle_internal_event(AppEvent::AgentActivityRefreshed {
+            pane_id,
+            result: Ok(vec![
+                timed_node("a", Running, Some(10), None),
+                timed_node("b", Done, Some(1), Some(2)),
+                timed_node("c", Running, Some(20), None),
+            ]),
+        });
+
+        let full = super::snapshot_with_activity(
+            &app,
+            "boot",
+            1,
+            None,
+            None,
+            super::SnapshotActivity::Full,
+        );
+        let activity = &full.agents[0].activity;
+        assert_eq!(
+            (activity.running, activity.total, activity.truncated),
+            (2, 3, false)
+        );
+        assert_eq!(
+            activity
+                .nodes
+                .iter()
+                .map(|node| node.id.as_str())
+                .collect::<Vec<_>>(),
+            ["a", "b", "c"]
+        );
+
+        let summary = super::snapshot_with_activity(
+            &app,
+            "boot",
+            1,
+            None,
+            None,
+            super::SnapshotActivity::Summary,
+        );
+        let activity = &summary.agents[0].activity;
+        assert_eq!(
+            (activity.running, activity.total, activity.truncated),
+            (2, 3, true)
+        );
+        assert_eq!(
+            activity
+                .nodes
+                .iter()
+                .map(|node| node.id.as_str())
+                .collect::<Vec<_>>(),
+            ["c"]
+        );
+        assert_eq!(super::SNAPSHOT_ACTIVITY, super::SnapshotActivity::Summary);
+        assert_eq!(snapshot(&app, "boot", 1, None, None), summary, "默认走摘要");
+
+        // 单节点树的摘要不算截断。
+        app.handle_internal_event(AppEvent::AgentActivityRefreshed {
+            pane_id,
+            result: Ok(vec![timed_node("only", Running, Some(1), None)]),
+        });
+        let single = snapshot(&app, "boot", 1, None, None);
+        assert!(!single.agents[0].activity.truncated);
+
+        // 投影路径不把活动树复制进 AgentInfo；API 快照照常带全量。
+        assert!(app.session_snapshot_for_projection().agents[0]
+            .activity
+            .is_empty());
+        assert_eq!(app.session_snapshot().agents[0].activity.len(), 1);
     }
 
     /// 混版本：新 server 的快照对不认新字段的旧客户端仍可解码；旧 server 的快照

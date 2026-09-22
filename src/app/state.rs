@@ -1148,6 +1148,11 @@ impl AgentActivityStore {
         self.activity.get(&pane_id)
     }
 
+    /// 是否有任何 pane 存着活动树（投影据此跳过逐 agent 查找）。
+    pub fn has_activity(&self) -> bool {
+        !self.activity.is_empty()
+    }
+
     /// 写入一次发现结果（截断到上限）。内容变化返回新计数；空结果写到没有记录的
     /// pane 不算变化（轮询空树不刷事件）。无论是否变化都记下刷新时刻。
     pub fn apply_activity(

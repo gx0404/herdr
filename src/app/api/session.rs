@@ -18,12 +18,14 @@ impl App {
     }
 
     /// Client shell 投影专用：`ClientShellSnapshot` 没有 layouts 字段，
-    /// 逐 tab 的 pane_layout_snapshot 在投影路径是纯浪费（HSR-05）。
+    /// 逐 tab 的 pane_layout_snapshot 在投影路径是纯浪费（HSR-05）；`agents` 的
+    /// 活动树也不复制，快照按自己的下发形态直接读存储。
     pub(crate) fn session_snapshot_for_projection(&self) -> SessionSnapshot {
         self.session_snapshot_impl(false)
     }
 
-    fn session_snapshot_impl(&self, include_layouts: bool) -> SessionSnapshot {
+    fn session_snapshot_impl(&self, full: bool) -> SessionSnapshot {
+        let include_layouts = full;
         let focused_workspace_id = self
             .state
             .active
@@ -64,7 +66,11 @@ impl App {
             tabs,
             panes: self.collect_panes_for_workspace(None).unwrap_or_default(),
             layouts,
-            agents: self.collect_agent_infos(),
+            agents: if full {
+                self.collect_agent_infos()
+            } else {
+                self.collect_agent_infos_for_projection()
+            },
         }
     }
 }
