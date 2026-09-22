@@ -1,0 +1,27 @@
+{
+  "agentId": "agent_10000000-0000-4000-8000-000000000002",
+  "childSessionId": "sess_subagent_agent_10000000-0000-4000-8000-000000000002",
+  "createdAt": "2026-09-21T13:25:00.000Z",
+  "cwd": "/work/demo",
+  "description": "Run the unit tests",
+  "metadataFile": "/home/user/.zcode/cli/agents/sess_a0000000-0000-4000-8000-000000000001/agent_10000000-0000-4000-8000-000000000002/metadata.json",
+  "outputFile": "/home/user/.zcode/cli/agents/sess_a0000000-0000-4000-8000-000000000001/agent_10000000-0000-4000-8000-000000000002/output.txt",
+  "parentSessionId": "sess_a0000000-0000-4000-8000-000000000001",
+  "parentToolUseId": "call_fixture0000000002",
+  "profileId": "general-purpose",
+  "profileSnapshot": {
+    "name": "general-purpose",
+    "description": "General-purpose agent.",
+    "color": "blue",
+    "source": "built-in",
+    "systemPrompt": "You are a fixture sub-agent.",
+    "tools": ["Bash"]
+  },
+  "prompt": "Run the unit tests and report failures.",
+  "status": "failed",
+  "taskOutputFile": "/home/user/.zcode/cli/agents/sess_a0000000-0000-4000-8000-000000000001/agent_10000000-0000-4000-8000-000000000002/task.output",
+  "updatedAt": "2026-09-21T13:26:40.000Z",
+  "workspaceRoot": "/work/demo",
+  "completedAt": "2026-09-21T13:26:40.000Z",
+  "error": "Model provider returned 429\nretry budget exhausted"
+}

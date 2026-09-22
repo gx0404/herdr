@@ -1,0 +1,31 @@
+{
+  "agentId": "agent_10000000-0000-4000-8000-000000000008",
+  "childSessionId": "sess_subagent_agent_10000000-0000-4000-8000-000000000008",
+  "createdAt": "2026-09-21T13:28:20.000Z",
+  "cwd": "/work/demo",
+  "description": "Trace the tokenizer",
+  "parentSessionId": "sess_subagent_agent_10000000-0000-4000-8000-000000000001",
+  "parentToolUseId": "call_fixture0000000008",
+  "profileId": "Explore",
+  "profileSnapshot": {
+    "name": "Explore",
+    "color": "cyan",
+    "description": "Read-only codebase exploration.",
+    "source": "built-in",
+    "systemPrompt": "You are a fixture sub-agent."
+  },
+  "prompt": "Trace how the tokenizer feeds the parser.",
+  "status": "completed",
+  "updatedAt": "2026-09-21T13:30:00.000Z",
+  "workspaceRoot": "/work/demo",
+  "completedAt": "2026-09-21T13:30:00.000Z",
+  "totalDurationMs": 100000,
+  "totalToolUseCount": 3,
+  "usage": {
+    "inputTokens": 800,
+    "outputTokens": 150,
+    "cacheReadTokens": 0,
+    "cacheWriteTokens": 0,
+    "totalTokens": 950
+  }
+}

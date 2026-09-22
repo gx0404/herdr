@@ -1,0 +1,14 @@
+{
+  "agentId": "agent_10000000-0000-4000-8000-000000000007",
+  "childSessionId": "sess_subagent_agent_10000000-0000-4000-8000-000000000007",
+  "completedAt": "2026-09-21T13:48:20.000Z",
+  "description": "Watch the build",
+  "outputFile": "/home/user/.zcode/cli/agents/sess_a0000000-0000-4000-8000-000000000001/agent_10000000-0000-4000-8000-000000000007/output.txt",
+  "parentSessionId": "sess_a0000000-0000-4000-8000-000000000001",
+  "parentToolUseId": "call_fixture0000000007",
+  "profileId": "general-purpose",
+  "prompt": "Watch the build and report when it finishes.",
+  "status": "stopped",
+  "taskOutputFile": "/home/user/.zcode/cli/agents/sess_a0000000-0000-4000-8000-000000000001/agent_10000000-0000-4000-8000-000000000007/task.output",
+  "updatedAt": "2026-09-21T13:48:20.000Z"
+}

@@ -1,0 +1,6 @@
+# Findings
+
+解析器在 `src/parser.rs` 的 `Parser::new` 里构建，词法表来自 `lexer.rs`。
+
+- 入口：`parse_file` → `Parser::new` → `Parser::run`
+- 调用方：三处，均在 `cli/` 下

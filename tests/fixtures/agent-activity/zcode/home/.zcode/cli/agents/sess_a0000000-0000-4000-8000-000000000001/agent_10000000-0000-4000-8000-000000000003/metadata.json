@@ -1,0 +1,25 @@
+{
+  "agentId": "agent_10000000-0000-4000-8000-000000000003",
+  "childSessionId": "sess_subagent_agent_10000000-0000-4000-8000-000000000003",
+  "createdAt": "2026-09-21T14:03:20.000Z",
+  "cwd": "/work/demo",
+  "description": "Scan parser call sites",
+  "metadataFile": "/home/user/.zcode/cli/agents/sess_a0000000-0000-4000-8000-000000000001/agent_10000000-0000-4000-8000-000000000003/metadata.json",
+  "outputFile": "/home/user/.zcode/cli/agents/sess_a0000000-0000-4000-8000-000000000001/agent_10000000-0000-4000-8000-000000000003/output.txt",
+  "parentSessionId": "sess_a0000000-0000-4000-8000-000000000001",
+  "parentToolUseId": "call_fixture0000000003",
+  "profileId": "Explore",
+  "profileSnapshot": {
+    "name": "Explore",
+    "description": "Read-only codebase exploration.",
+    "color": "cyan",
+    "source": "built-in",
+    "systemPrompt": "You are a fixture sub-agent.",
+    "tools": ["Read"]
+  },
+  "prompt": "List every call site of Parser::new.",
+  "status": "running",
+  "taskOutputFile": "/home/user/.zcode/cli/agents/sess_a0000000-0000-4000-8000-000000000001/agent_10000000-0000-4000-8000-000000000003/task.output",
+  "updatedAt": "2026-09-21T14:03:20.000Z",
+  "workspaceRoot": "/work/demo"
+}

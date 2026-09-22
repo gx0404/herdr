@@ -1,0 +1,28 @@
+{"t":"s","id":"sess_a0000000-0000-4000-8000-000000000001","root":"sess_a0000000-0000-4000-8000-000000000001","depth":0,"parent":null,"task_type":"interactive","title":"Refactor the parser","directory":"/work/demo","created":1789996400000,"updated":1789999940000}
+{"t":"s","id":"sess_b0000000-0000-4000-8000-000000000002","root":"sess_b0000000-0000-4000-8000-000000000002","depth":0,"parent":null,"task_type":"interactive","title":"","directory":"/work/other","created":1789892000000,"updated":1789982000000}
+{"t":"s","id":"sess_subagent_agent_10000000-0000-4000-8000-000000000001","root":"sess_a0000000-0000-4000-8000-000000000001","depth":1,"parent":"sess_a0000000-0000-4000-8000-000000000001","task_type":"subagent_child","title":"Explore: map parser","directory":"/work/demo","created":1789997000000,"updated":1789997600000}
+{"t":"s","id":"sess_subagent_agent_10000000-0000-4000-8000-000000000002","root":"sess_a0000000-0000-4000-8000-000000000001","depth":1,"parent":"sess_a0000000-0000-4000-8000-000000000001","task_type":"subagent_child","title":"general-purpose: run tests","directory":"/work/demo","created":1789997100000,"updated":1789997200000}
+{"t":"s","id":"sess_subagent_agent_10000000-0000-4000-8000-000000000003","root":"sess_a0000000-0000-4000-8000-000000000001","depth":1,"parent":"sess_a0000000-0000-4000-8000-000000000001","task_type":"subagent_child","title":"Explore: scan call sites","directory":"/work/demo","created":1789999400000,"updated":1789999970000}
+{"t":"s","id":"sess_subagent_agent_10000000-0000-4000-8000-000000000004","root":"sess_a0000000-0000-4000-8000-000000000001","depth":1,"parent":"sess_a0000000-0000-4000-8000-000000000001","task_type":"subagent_child","title":"Check lints","directory":"/work/demo","created":1789998000000,"updated":1789998100000}
+{"t":"s","id":"sess_subagent_agent_10000000-0000-4000-8000-000000000005","root":"sess_a0000000-0000-4000-8000-000000000001","depth":1,"parent":"sess_a0000000-0000-4000-8000-000000000001","task_type":"subagent_child","title":"Draft summary","directory":"/work/demo","created":1789998200000,"updated":1789998250000}
+{"t":"s","id":"sess_subagent_agent_10000000-0000-4000-8000-000000000006","root":"sess_a0000000-0000-4000-8000-000000000001","depth":1,"parent":"sess_a0000000-0000-4000-8000-000000000001","task_type":"subagent_child","title":"Inspect fixtures","directory":"/work/demo","created":1789998300000,"updated":1789998350000}
+{"t":"s","id":"sess_subagent_agent_10000000-0000-4000-8000-000000000007","root":"sess_a0000000-0000-4000-8000-000000000001","depth":1,"parent":"sess_a0000000-0000-4000-8000-000000000001","task_type":"subagent_child","title":"Background: watch build","directory":"/work/demo","created":1789998400000,"updated":1789998500000}
+{"t":"s","id":"sess_e0000000-0000-4000-8000-000000000005","root":"sess_a0000000-0000-4000-8000-000000000001","depth":1,"parent":"sess_a0000000-0000-4000-8000-000000000001","task_type":"selection_side_chat","title":"Explain this selection","directory":"/work/demo","created":1789999000000,"updated":1789999050000}
+{"t":"s","id":"sess_f0000000-0000-4000-8000-000000000006","root":"sess_a0000000-0000-4000-8000-000000000001","depth":1,"parent":"sess_a0000000-0000-4000-8000-000000000001","task_type":"workflow_step","title":"Future step","directory":"/work/demo","created":1789999100000,"updated":1789999150000}
+{"t":"s","id":"sess_subagent_agent_10000000-0000-4000-8000-00000000000a","root":"sess_b0000000-0000-4000-8000-000000000002","depth":1,"parent":"sess_b0000000-0000-4000-8000-000000000002","task_type":"subagent_child","title":"Explore: stale run","directory":"/work/other","created":1789978400000,"updated":1789978400000}
+{"t":"s","id":"sess_subagent_agent_10000000-0000-4000-8000-000000000008","root":"sess_a0000000-0000-4000-8000-000000000001","depth":2,"parent":"sess_subagent_agent_10000000-0000-4000-8000-000000000001","task_type":"subagent_child","title":"Explore: tokenizer","directory":"/work/demo","created":1789997300000,"updated":1789997400000}
+{"t":"s","id":"sess_subagent_agent_10000000-0000-4000-8000-000000000009","root":"sess_a0000000-0000-4000-8000-000000000001","depth":3,"parent":"sess_subagent_agent_10000000-0000-4000-8000-000000000008","task_type":"subagent_child","title":"Explore: lexer tables","directory":"/work/demo","created":1789997350000,"updated":1789997380000}
+{"t":"s_end"}
+{"t":"d","id":"sess_a0000000-0000-4000-8000-000000000001","pos":0,"content":"Map the parser entry points","status":"completed"}
+{"t":"d","id":"sess_a0000000-0000-4000-8000-000000000001","pos":1,"content":"Split the tokenizer","status":"in_progress"}
+{"t":"d","id":"sess_a0000000-0000-4000-8000-000000000001","pos":2,"content":"Add regression tests","status":"pending"}
+{"t":"d","id":"sess_a0000000-0000-4000-8000-000000000001","pos":3,"content":"Tidy the docs","status":"deferred"}
+{"t":"d","id":"sess_subagent_agent_10000000-0000-4000-8000-000000000001","pos":0,"content":"Read the parser module","status":"completed"}
+{"t":"d","id":"sess_subagent_agent_10000000-0000-4000-8000-000000000003","pos":0,"content":"Scan call sites","status":"in_progress"}
+{"t":"d_end"}
+{"t":"u","id":"sess_a0000000-0000-4000-8000-000000000001","last":1789999880000,"last_status":"running"}
+{"t":"u","id":"sess_b0000000-0000-4000-8000-000000000002","last":1789982000000,"last_status":"running"}
+{"t":"u","id":"sess_subagent_agent_10000000-0000-4000-8000-000000000003","last":1789999400000,"last_status":"running"}
+{"t":"u","id":"sess_subagent_agent_10000000-0000-4000-8000-000000000004","last":1789998050000,"last_status":"completed"}
+{"t":"u_end"}
+{"t":"v","id":"0022_backfilled_session_reasoning"}

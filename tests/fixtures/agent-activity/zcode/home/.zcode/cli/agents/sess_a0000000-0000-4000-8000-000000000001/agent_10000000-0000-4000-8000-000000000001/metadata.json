@@ -1,0 +1,38 @@
+{
+  "agentId": "agent_10000000-0000-4000-8000-000000000001",
+  "childSessionId": "sess_subagent_agent_10000000-0000-4000-8000-000000000001",
+  "createdAt": "2026-09-21T13:23:20.000Z",
+  "cwd": "/work/demo",
+  "description": "Map parser entry points",
+  "metadataFile": "/home/user/.zcode/cli/agents/sess_a0000000-0000-4000-8000-000000000001/agent_10000000-0000-4000-8000-000000000001/metadata.json",
+  "outputFile": "/home/user/.zcode/cli/agents/sess_a0000000-0000-4000-8000-000000000001/agent_10000000-0000-4000-8000-000000000001/output.txt",
+  "parentSessionId": "sess_a0000000-0000-4000-8000-000000000001",
+  "parentToolUseId": "call_fixture0000000001",
+  "profileId": "Explore",
+  "profileSnapshot": {
+    "name": "Explore",
+    "description": "Read-only codebase exploration.",
+    "color": "cyan",
+    "source": "built-in",
+    "systemPrompt": "You are a fixture sub-agent.",
+    "tools": ["Read", "Bash"],
+    "injectAgentsMd": true
+  },
+  "prompt": "Find where the parser is constructed.",
+  "status": "completed",
+  "taskOutputFile": "/home/user/.zcode/cli/agents/sess_a0000000-0000-4000-8000-000000000001/agent_10000000-0000-4000-8000-000000000001/task.output",
+  "updatedAt": "2026-09-21T13:33:20.000Z",
+  "workspaceRoot": "/work/demo",
+  "completedAt": "2026-09-21T13:33:20.000Z",
+  "totalDurationMs": 600000,
+  "totalTokens": 12345,
+  "totalToolUseCount": 8,
+  "usage": {
+    "inputTokens": 11000,
+    "outputTokens": 1345,
+    "cacheReadTokens": 9000,
+    "cacheWriteTokens": 0,
+    "totalTokens": 12345
+  },
+  "transcriptFile": "/home/user/.zcode/cli/agents/sess_a0000000-0000-4000-8000-000000000001/agent_10000000-0000-4000-8000-000000000001/transcript.jsonl"
+}

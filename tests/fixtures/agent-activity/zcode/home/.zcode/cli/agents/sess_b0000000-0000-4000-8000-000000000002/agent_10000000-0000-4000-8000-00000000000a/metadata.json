@@ -1,0 +1,19 @@
+{
+  "agentId": "agent_10000000-0000-4000-8000-00000000000a",
+  "childSessionId": "sess_subagent_agent_10000000-0000-4000-8000-00000000000a",
+  "createdAt": "2026-09-21T08:13:20.000Z",
+  "cwd": "/work/other",
+  "description": "Stale exploration",
+  "parentSessionId": "sess_b0000000-0000-4000-8000-000000000002",
+  "parentToolUseId": "call_fixture000000000a",
+  "profileId": "Explore",
+  "profileSnapshot": {
+    "name": "Explore",
+    "color": "cyan",
+    "source": "built-in"
+  },
+  "prompt": "Explore the other repo.",
+  "status": "running",
+  "updatedAt": "2026-09-21T08:13:20.000Z",
+  "workspaceRoot": "/work/other"
+}

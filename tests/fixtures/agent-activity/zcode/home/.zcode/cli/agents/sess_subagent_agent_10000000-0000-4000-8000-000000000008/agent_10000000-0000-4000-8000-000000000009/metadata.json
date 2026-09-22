@@ -1,0 +1,23 @@
+{
+  "agentId": "agent_10000000-0000-4000-8000-000000000009",
+  "childSessionId": "sess_subagent_agent_10000000-0000-4000-8000-000000000009",
+  "createdAt": "2026-09-21T13:29:10.000Z",
+  "cwd": "/work/demo",
+  "description": "Dump lexer tables",
+  "parentSessionId": "sess_subagent_agent_10000000-0000-4000-8000-000000000008",
+  "parentToolUseId": "call_fixture0000000009",
+  "profileId": "flash",
+  "profileSnapshot": {
+    "name": "flash",
+    "color": "green",
+    "description": "Fast helper.",
+    "source": "user",
+    "systemPrompt": "You are a fixture sub-agent."
+  },
+  "prompt": "List the lexer tables.",
+  "status": "completed",
+  "updatedAt": "2026-09-21T13:29:40.000Z",
+  "workspaceRoot": "/work/demo",
+  "completedAt": "2026-09-21T13:29:40.000Z",
+  "totalDurationMs": 30000
+}
