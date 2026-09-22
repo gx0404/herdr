@@ -1131,14 +1131,26 @@ fn mobile_agent_targets(state: &ClientShellState) -> Vec<(Rect, String)> {
 }
 
 /// (g) mobile 切换器的 agent 段：恒为平铺（无工作区头、无树前缀、折叠态无效），
-/// 行序与 `aggregate_agent_rows` 同源，随排序设置变化。
+/// 行序与 `aggregate_agent_rows` 同源，随排序设置变化；有活动的 agent 在详情行
+/// 末尾带「N 个活动」徽标（与桌面树同一口径：运行中/总数）。
 #[test]
 fn characterization_mobile_switcher_lists_agents_flat_in_aggregate_order() {
+    let badge = crate::i18n::fill(
+        crate::i18n::texts().agent_panel.activity_badge_fmt,
+        &[("n", "1/3")],
+    );
     for (sort, expected) in [
         (AgentPanelSortConfig::Spaces, ["pane_1", "pane_2", "pane_3"]),
         (AgentPanelSortConfig::Launch, ["pane_2", "pane_3", "pane_1"]),
     ] {
-        let mut state = classic_state(sort);
+        let mut projected = two_workspace_snapshot();
+        projected.agents[1].activity = ClientShellAgentActivity {
+            running: 1,
+            total: 3,
+            truncated: true,
+            nodes: Vec::new(),
+        };
+        let mut state = classic_state_with(sort, projected);
         state.toggle_collapsed_group(&ClientEndpointId::Local, agent_group_key("ws_1"));
         state.compose(44, 40).expect("mobile 头部");
         assert!(state.mobile_layout_active(), "夹具前提：窄屏走 mobile 布局");
@@ -1174,6 +1186,11 @@ fn characterization_mobile_switcher_lists_agents_flat_in_aggregate_order() {
                 _ => "three",
             };
             assert!(text.contains(name), "{pane_id}: {text}");
+            assert_eq!(
+                compact(&text).ends_with(&compact(&badge)),
+                pane_id == "pane_2",
+                "只有有活动的 agent 带徽标: {pane_id}: {text}"
+            );
         }
         assert!(state.hits.agent_tree_toggles.is_empty());
     }
@@ -1810,4 +1827,144 @@ fn tree_rows_follow_the_machine_workspace_tab_agent_activity_hierarchy() {
             ("agent", 2, false, false),
         ]
     );
+}
+
+/// agent 行右键动作（W3 接上）：「重命名」沿用 pane 重命名浮层；「关闭窗格」发
+/// `pane.close`；「绑定账号」打开监控 → 账号页、选中该 agent 的厂商并把待绑定
+/// pane 设为它；「用量」待 observability 的公开入口，仍是空动作。其它端点的
+/// agent：重命名先切端点并聚焦（不打开浮层），关闭直接发往该端点，绑定切过去
+/// 并打开账号页但不预设 pane。
+#[test]
+fn tree_agent_context_actions_rename_bind_and_close_the_agent_pane() {
+    use super::super::agent_activity_overlay::AgentActivityOwner;
+    let pane = |pane_id: &str| AgentActivityOwner::Pane {
+        pane_id: pane_id.into(),
+    };
+    let (mut state, remote) = federated_state(AgentPanelSortConfig::Spaces);
+    state.compose(106, 40).expect("联邦帧");
+
+    // 重命名（当前端点）：pane 重命名浮层，目标是这个 pane。
+    let mut outcome = ClientShellInput::default();
+    state.activate_agent_context_action(
+        ClientEndpointId::Local,
+        pane("pane_2"),
+        ClientContextMenuAction::RenameAgent,
+        &mut outcome,
+    );
+    match state.overlay.as_ref() {
+        Some(ClientShellOverlay::Rename(rename)) => {
+            assert!(matches!(
+                &rename.target,
+                ClientRenameTarget::Pane { pane_id } if pane_id == "pane_2"
+            ));
+        }
+        other => panic!("应打开 pane 重命名浮层: {other:?}"),
+    }
+    assert!(outcome.actions.is_empty());
+    state.overlay = None;
+
+    // 重命名（其它端点）：先切过去并聚焦，不打开浮层。
+    let mut outcome = ClientShellInput::default();
+    state.activate_agent_context_action(
+        remote.clone(),
+        pane("pane_1"),
+        ClientContextMenuAction::RenameAgent,
+        &mut outcome,
+    );
+    assert!(state.overlay.is_none());
+    assert!(matches!(
+        outcome.actions.as_slice(),
+        [ClientShellAction::ActivateEndpoint {
+            endpoint_id,
+            target: Some(ClientEndpointFocusTarget::Pane(pane_id)),
+        }] if endpoint_id == &remote && pane_id == "pane_1"
+    ));
+
+    // 关闭（当前端点）：pane.close。
+    let mut outcome = ClientShellInput::default();
+    state.activate_agent_context_action(
+        ClientEndpointId::Local,
+        pane("pane_3"),
+        ClientContextMenuAction::CloseAgentPane,
+        &mut outcome,
+    );
+    let [ClientShellAction::Endpoint { request, .. }] = &outcome.actions[..] else {
+        panic!("关闭应走端点 API: {:?}", outcome.actions);
+    };
+    assert!(matches!(
+        &request.method,
+        crate::api::schema::Method::PaneClose(target) if target.pane_id == "pane_3"
+    ));
+
+    // 关闭（其它在线端点）：直接发往该端点，不切换当前端点。
+    let mut outcome = ClientShellInput::default();
+    state.activate_agent_context_action(
+        remote.clone(),
+        pane("pane_2"),
+        ClientContextMenuAction::CloseAgentPane,
+        &mut outcome,
+    );
+    let [ClientShellAction::EndpointRequest {
+        endpoint_id,
+        request,
+        ..
+    }] = &outcome.actions[..]
+    else {
+        panic!("远端关闭应发往该端点: {:?}", outcome.actions);
+    };
+    assert_eq!(endpoint_id, &remote);
+    assert!(matches!(
+        &request.method,
+        crate::api::schema::Method::PaneClose(target) if target.pane_id == "pane_2"
+    ));
+    assert!(state.active_endpoint_id.is_local());
+
+    // 用量：公开入口未就绪，空动作。
+    let mut outcome = ClientShellInput::default();
+    state.activate_agent_context_action(
+        ClientEndpointId::Local,
+        pane("pane_1"),
+        ClientContextMenuAction::ShowAgentUsage,
+        &mut outcome,
+    );
+    assert!(state.overlay.is_none() && outcome.actions.is_empty());
+    assert!(state.observability.hover.is_none());
+
+    // 绑定账号（当前端点）：账号页 + 厂商 + 待绑定 pane。
+    let mut outcome = ClientShellInput::default();
+    state.activate_agent_context_action(
+        ClientEndpointId::Local,
+        pane("pane_2"),
+        ClientContextMenuAction::BindAgentAccount,
+        &mut outcome,
+    );
+    assert_eq!(
+        state.observability.page,
+        Some(super::super::observability::Page::Accounts)
+    );
+    assert_eq!(state.observability.selected_provider.as_deref(), Some("pi"));
+    assert_eq!(state.observability.selected_pane.as_deref(), Some("pane_2"));
+    assert_eq!(
+        state.observability.selected_pane_label.as_deref(),
+        Some("two · pane_2")
+    );
+
+    // 绑定账号（其它端点）：切过去并打开账号页，不预设 pane。
+    let mut outcome = ClientShellInput::default();
+    state.activate_agent_context_action(
+        remote.clone(),
+        pane("pane_1"),
+        ClientContextMenuAction::BindAgentAccount,
+        &mut outcome,
+    );
+    assert!(outcome.actions.iter().any(|action| matches!(
+        action,
+        ClientShellAction::ActivateEndpoint { endpoint_id, .. } if endpoint_id == &remote
+    )));
+    assert_eq!(
+        state.observability.page,
+        Some(super::super::observability::Page::Accounts)
+    );
+    assert_eq!(state.observability.selected_provider.as_deref(), Some("pi"));
+    assert_eq!(state.observability.selected_pane, None);
 }

@@ -254,6 +254,12 @@ fn badge_text(running: u32, total: u32) -> Option<String> {
     ))
 }
 
+/// mobile 切换器 agent 行的活动徽标，与桌面树同一口径；没有活动为 `None`。
+/// `mobile.rs` 只调这一处，徽标逻辑留在本文件。
+pub(super) fn mobile_activity_badge(agent: &ClientShellAgent) -> Option<String> {
+    badge_text(agent.activity.running, agent.activity.total)
+}
+
 /// 视图计算阶段：按当前排序、折叠态与各端点快照产出展平的行序列，末子掩码已
 /// 填好。渲染阶段只读它。
 pub(super) fn build_agent_tree(
@@ -1632,8 +1638,8 @@ impl ClientShellState {
             })
     }
 
-    /// agent 行 / 外部条目右键菜单的动作。条目由接缝在 `context_menu.rs` 定稿；
-    /// 重命名、用量、绑定账号、关闭由后续提交在这里接上。
+    /// agent 行 / 外部条目右键菜单的动作。条目由接缝在 `context_menu.rs` 定稿
+    /// （是否可点也在那里决定）；这里只接动作。
     pub(super) fn activate_agent_context_action(
         &mut self,
         endpoint_id: ClientEndpointId,
@@ -1647,9 +1653,125 @@ impl ClientShellState {
                 self.focus_agent_pane(endpoint_id, pane_id, outcome);
             }
             (Action::ViewAgentActivity, owner) => self.open_agent_activity(endpoint_id, owner),
-            // seam-stub(agent-panel)：其余动作的条目在菜单里已灰显、不可激活，
-            // 这里兜住键盘/程序化路径。
+            (Action::RenameAgent, AgentActivityOwner::Pane { pane_id }) => {
+                self.rename_agent_pane(endpoint_id, pane_id, outcome);
+            }
+            (Action::BindAgentAccount, AgentActivityOwner::Pane { pane_id }) => {
+                self.bind_agent_account(endpoint_id, pane_id, outcome);
+            }
+            (Action::CloseAgentPane, AgentActivityOwner::Pane { pane_id }) => {
+                self.close_agent_pane(endpoint_id, pane_id, outcome);
+            }
+            // seam-stub(agent-panel)：「用量」要打开并钉住该 agent 的用量悬停卡，
+            // 悬停卡状态机归监控车道，observability 还没有可调用的公开入口；
+            // 条目在菜单里保持灰显，这里兜住键盘 / 程序化路径。
+            (Action::ShowAgentUsage, _) => {}
             _ => {}
         }
     }
+
+    /// 「重命名」：沿用 pane 重命名浮层与 `pane.rename`。浮层提交发往当前端点，
+    /// 所以只对当前端点直接打开；其它端点的 agent 先切过去并聚焦该 pane（与
+    /// 「聚焦」相同），不在端点切换完成前打开浮层，免得重命名落到同 id 的别处
+    /// pane 上。
+    fn rename_agent_pane(
+        &mut self,
+        endpoint_id: ClientEndpointId,
+        pane_id: String,
+        outcome: &mut ClientShellInput,
+    ) {
+        if endpoint_id != self.active_endpoint_id {
+            self.focus_agent_pane(endpoint_id, pane_id, outcome);
+            return;
+        }
+        let label = self.snapshot.as_deref().and_then(|snapshot| {
+            snapshot
+                .panes
+                .iter()
+                .find(|pane| pane.pane_id == pane_id)
+                .and_then(|pane| pane.label.clone())
+        });
+        self.overlay = Some(ClientShellOverlay::Rename(ClientRenameOverlay {
+            title: "rename pane",
+            input: TextEditor::new(label.as_deref().unwrap_or_default(), label.is_none()),
+            target: ClientRenameTarget::Pane { pane_id },
+        }));
+        outcome.repaint = true;
+    }
+
+    /// 「关闭窗格」：发 `pane.close`，与 pane 右键菜单的「关闭窗格」同一请求；
+    /// 其它在线端点直接发往该端点（不切换当前端点），不在线则提示。
+    fn close_agent_pane(
+        &mut self,
+        endpoint_id: ClientEndpointId,
+        pane_id: String,
+        outcome: &mut ClientShellInput,
+    ) {
+        let method =
+            crate::api::schema::Method::PaneClose(crate::api::schema::PaneTarget { pane_id });
+        if endpoint_id == self.active_endpoint_id {
+            self.push_endpoint_method(method, outcome);
+        } else if !self.push_endpoint_method_for(
+            &endpoint_id,
+            method,
+            PendingEndpointKind::Generic,
+            outcome,
+        ) {
+            let label = self.endpoint_label(&endpoint_id).to_owned();
+            self.receive_endpoint_unavailable(crate::i18n::fill(
+                crate::i18n::texts().mobile.not_ready_fmt,
+                &[("label", &label)],
+            ));
+            outcome.repaint = true;
+        }
+    }
+
+    /// 「绑定账号」：打开监控 → 账号页，选中该 agent 的厂商，并把页面的待绑定
+    /// pane 设为这个 agent（账号页的「绑定」随即作用于它）。账号页的作用域是
+    /// 当前端点：其它端点的 agent 先切过去并聚焦该 pane，页面只选厂商，pane 由
+    /// 「绑定到聚焦 pane」接手。
+    fn bind_agent_account(
+        &mut self,
+        endpoint_id: ClientEndpointId,
+        pane_id: String,
+        outcome: &mut ClientShellInput,
+    ) {
+        let Some(agent) = self.endpoint_agent(&endpoint_id, &pane_id) else {
+            return;
+        };
+        let Some(provider) = agent
+            .agent
+            .clone()
+            .filter(|name| super::observability::is_bindable_agent(name))
+        else {
+            return;
+        };
+        let label = bind_candidate_label(agent);
+        let active = endpoint_id == self.active_endpoint_id;
+        if !active {
+            if !self.endpoint_is_online(&endpoint_id) {
+                self.focus_agent_pane(endpoint_id, pane_id, outcome);
+                return;
+            }
+            self.focus_agent_pane(endpoint_id, pane_id.clone(), outcome);
+        }
+        self.open_observation_page(super::observability::Page::Accounts, outcome);
+        self.observation_action(super::observability::Action::Provider(provider), outcome);
+        if active {
+            self.observability.selected_pane = Some(pane_id);
+            self.observability.selected_pane_label = Some(label);
+        }
+    }
+}
+
+/// 账号页绑定行里 pane 的显示名：agent 显示名 · pane id。与
+/// `observability.rs` 的私有同名函数同一格式（那边归监控车道，这里不改它）。
+fn bind_candidate_label(agent: &ClientShellAgent) -> String {
+    let name = agent
+        .name
+        .as_deref()
+        .or(agent.display_agent.as_deref())
+        .or(agent.agent.as_deref())
+        .unwrap_or("agent");
+    format!("{name} · {}", agent.pane_id)
 }

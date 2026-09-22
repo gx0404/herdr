@@ -698,6 +698,7 @@ fn mobile_items(
                     }),
             );
             detail.push(agent_label.to_owned());
+            detail.extend(super::agent_tree::mobile_activity_badge(agent));
             if endpoint.stale() {
                 detail.push(endpoint_status_label(endpoint.status).to_owned());
             }

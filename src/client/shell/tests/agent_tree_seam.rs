@@ -373,19 +373,15 @@ fn agent_row_context_menu_lists_seam_items_and_routes_stub_actions() {
         .position(|item| item.action == ClientContextMenuAction::ViewAgentActivity)
         .expect("查看活动项");
     assert!(!items[view_activity].enabled, "没有活动时禁用");
-    // 动作未接通的条目灰显：否则点了只会关掉菜单、什么都不发生。
-    for action in [
-        ClientContextMenuAction::RenameAgent,
-        ClientContextMenuAction::ShowAgentUsage,
-        ClientContextMenuAction::BindAgentAccount,
-        ClientContextMenuAction::CloseAgentPane,
-    ] {
-        let index = items
-            .iter()
-            .position(|item| item.action == action)
-            .unwrap_or_else(|| panic!("缺少条目: {action:?}"));
-        assert!(!items[index].enabled, "{action:?} 未接通时应禁用");
-    }
+    // 动作未接通的条目灰显：否则点了只会关掉菜单、什么都不发生。重命名 / 绑定
+    // 账号 / 关闭已在 `agent_tree.rs` 接上（见 `agent_panel_characterization.rs`
+    // 的 `tree_agent_context_actions_*`），可点与否由菜单条目决定；「用量」仍待
+    // observability 的公开入口。
+    let usage = items
+        .iter()
+        .position(|item| item.action == ClientContextMenuAction::ShowAgentUsage)
+        .expect("缺少条目: ShowAgentUsage");
+    assert!(!items[usage].enabled, "「用量」未接通时应禁用");
 
     // 禁用项：不进命中表（kit::menu 只登记可激活行），点它所在的行不激活，
     // 菜单保持打开。agent 菜单没有分隔线，行位 = 首行 + 条目下标。
