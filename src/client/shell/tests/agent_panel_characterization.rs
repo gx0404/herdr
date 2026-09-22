@@ -1,22 +1,26 @@
-//! Agents 面板三条并行渲染路径的 characterization（现状）测试。
+//! Agents 面板统一树的 characterization（行为钉住）测试与渲染扩展 profile。
 //!
-//! W3 要把 classic / workbench（联邦）/ mobile 三条路径统一到同一套树构建与行
-//! 渲染；动手之前先把**重构前**的可见行为钉住，重构时每一处有意的行为变化都会
-//! 在这里显式翻红，而不是悄悄漂移。
+//! W3 之前 classic / workbench（联邦）/ mobile 是三条并行渲染路径，这里最初钉的
+//! 是**重构前**的可见行为；统一树落地后，用例改为钉住新行为：三条桌面路径共用
+//! `agent_tree::build_agent_tree`（视图计算阶段进 `AgentRowsCache`）与
+//! `agent_tree::render_agent_tree_rows`（渲染只读），mobile 只加活动徽标。
 //!
-//! - classic：`agent_sidebar::render_agent_panel`，单端点且未启用 workbench；
-//! - workbench / 联邦：`endpoint_agents::render_expanded`，行来自视图计算阶段的
-//!   `AgentRowsCache`；
+//! - classic：`agent_sidebar::render_agent_panel`，单端点且未启用 workbench，
+//!   agent 行写 `hits.agents`；
+//! - workbench / 联邦：`endpoint_agents::render_expanded`，agent 行写
+//!   `hits.endpoint_agents`；
 //! - mobile 与排序来源：`aggregate_navigation::aggregate_agent_rows`。
-//!
-//! 标注「现状，W3 将改变」的断言描述的是已知缺陷而非期望行为。
 
 use super::*;
 use crate::client::endpoint::{
     ClientEndpointId, ClientEndpointStatus, ProfileId, SavedSshEndpoint,
 };
 use crate::client::shell::agent_sidebar::agent_group_key;
+use crate::client::shell::agent_tree::{AgentTreeKind, MACHINE_TOGGLE_KEY};
 use crate::config::AgentPanelSortConfig;
+use crate::protocol::{
+    ClientShellActivityNode, ClientShellAgentActivity, ClientShellExternalAgent,
+};
 
 fn panel_agent(
     pane_id: &str,
@@ -124,8 +128,15 @@ fn panel_config(sort: AgentPanelSortConfig) -> ClientShellConfig {
 
 /// classic 路径：单端点、未启用 workbench。
 fn classic_state(sort: AgentPanelSortConfig) -> ClientShellState {
+    classic_state_with(sort, two_workspace_snapshot())
+}
+
+fn classic_state_with(
+    sort: AgentPanelSortConfig,
+    projected: ClientShellSnapshot,
+) -> ClientShellState {
     let mut state = ClientShellState::new(panel_config(sort));
-    state.set_snapshot(Box::new(two_workspace_snapshot()));
+    state.set_snapshot(Box::new(projected));
     state.set_pane_surface(surface());
     state
 }
@@ -194,13 +205,18 @@ fn classic_hit_ids(state: &ClientShellState) -> Vec<&str> {
         .collect()
 }
 
-fn group_keys(state: &ClientShellState) -> Vec<&str> {
+/// 统一树的折叠开关命中区：`(端点是否本机, 折叠键)`，按行序。
+fn toggle_keys(state: &ClientShellState) -> Vec<(bool, &str)> {
     state
         .hits
-        .agent_group_toggles
+        .agent_tree_toggles
         .iter()
-        .map(|(_, key)| key.as_str())
+        .map(|(_, endpoint_id, key)| (endpoint_id.is_local(), key.as_str()))
         .collect()
+}
+
+fn local_toggle_keys(state: &ClientShellState) -> Vec<&str> {
+    toggle_keys(state).into_iter().map(|(_, key)| key).collect()
 }
 
 fn endpoint_hit_ids(state: &ClientShellState) -> Vec<(ClientEndpointId, String)> {
@@ -226,22 +242,43 @@ fn classic_agent_rect(state: &ClientShellState, pane_id: &str) -> Rect {
         .0
 }
 
-fn group_rect(state: &ClientShellState, workspace_id: &str) -> Rect {
-    let key = agent_group_key(workspace_id);
+/// 某端点上某折叠键的开关命中区（分组头整行、agent 行只有开关两列）。
+fn toggle_rect(state: &ClientShellState, endpoint_id: &ClientEndpointId, key: &str) -> Rect {
     state
         .hits
-        .agent_group_toggles
+        .agent_tree_toggles
         .iter()
-        .find(|(_, id)| id == &key)
-        .unwrap_or_else(|| panic!("工作区头 {key} 不在命中表里"))
+        .find(|(_, endpoint, id)| endpoint == endpoint_id && id == key)
+        .unwrap_or_else(|| panic!("折叠开关 {key} 不在命中表里"))
         .0
 }
 
+fn group_rect(state: &ClientShellState, workspace_id: &str) -> Rect {
+    toggle_rect(
+        state,
+        &ClientEndpointId::Local,
+        &agent_group_key(workspace_id),
+    )
+}
+
 fn click(rect: Rect) -> RawInputEvent {
+    click_at(rect.x, rect.y)
+}
+
+fn click_at(column: u16, row: u16) -> RawInputEvent {
     RawInputEvent::Mouse(crossterm::event::MouseEvent {
         kind: MouseEventKind::Down(MouseButton::Left),
-        column: rect.x,
-        row: rect.y,
+        column,
+        row,
+        modifiers: KeyModifiers::empty(),
+    })
+}
+
+fn moved(column: u16, row: u16) -> RawInputEvent {
+    RawInputEvent::Mouse(crossterm::event::MouseEvent {
+        kind: MouseEventKind::Moved,
+        column,
+        row,
         modifiers: KeyModifiers::empty(),
     })
 }
@@ -255,16 +292,34 @@ fn assert_no_tree_glyphs(text: &str) {
     );
 }
 
-/// (a) classic + Spaces：「工作区头 + agent 行」两层树。工作区头汇总最高优先级
-/// 状态与 agent 数，子行带 `├─` / `└─` 前缀，续行用 `│` 或空白对齐，且子行不再
-/// 重复工作区名（头已承载）。
+/// 缓存里的 agent 行身份，按行序。
+fn cached_agent_ids(state: &ClientShellState) -> Vec<(ClientEndpointId, String)> {
+    state
+        .federated_agent_rows
+        .as_ref()
+        .expect("行缓存")
+        .rows()
+        .iter()
+        .filter_map(|row| {
+            row.kind
+                .agent()
+                .map(|agent| (row.kind.endpoint_id.clone(), agent.pane_id.clone()))
+        })
+        .collect()
+}
+
+/// (a) classic + Spaces：「工作区头 + agent 行」两层树，前缀走 kit 树原语。工作区
+/// 头以折叠开关开头、汇总最高优先级状态与 agent 数（右对齐）；子行带 `├──` /
+/// `└──` 连接线，且子行不再重复工作区名。默认行配置
+/// `[状态图标 机器 工作区 标签页] / [agent]` 丢掉分组头承载的 token 后首行只剩
+/// 图标，并进下一行成「图标 名称 状态文案」一行。
 #[test]
 fn characterization_classic_spaces_renders_two_level_workspace_tree() {
     let mut state = classic_state(AgentPanelSortConfig::Spaces);
     state.compose(106, 30).expect("classic agents 面板");
 
     assert_eq!(
-        group_keys(&state),
+        local_toggle_keys(&state),
         [agent_group_key("ws_1"), agent_group_key("ws_2")],
         "折叠键带 agent-panel: 命名空间，按快照的工作区顺序"
     );
@@ -281,26 +336,33 @@ fn characterization_classic_spaces_renders_two_level_workspace_tree() {
     let first_header = group_rect(&state, "ws_1");
     let header = &rect_rows(&state, first_header)[0];
     assert!(
-        header.starts_with(" × client-shell"),
+        header.starts_with("▾ × client-shell"),
         "工作区头: {header:?}"
     );
-    assert!(header.ends_with("· 2 ▾"), "计数与展开箭头: {header:?}");
+    assert!(header.trim_end().ends_with("· 2"), "计数右对齐: {header:?}");
     let second_header = group_rect(&state, "ws_2");
     let header = &rect_rows(&state, second_header)[0];
-    assert!(header.starts_with(" ◐ herdr"), "工作区头: {header:?}");
-    assert!(header.ends_with("· 1 ▾"), "计数与展开箭头: {header:?}");
+    assert!(header.starts_with("▾ ◐ herdr"), "工作区头: {header:?}");
+    assert!(header.trim_end().ends_with("· 1"), "计数右对齐: {header:?}");
 
+    let status = &crate::i18n::texts().status;
     let one = rect_rows(&state, classic_agent_rect(&state, "pane_1"));
-    assert!(one[0].starts_with("   ├─ ○"), "非末子行前缀: {one:?}");
-    assert!(one[1].starts_with("   │    one"), "非末子行续行: {one:?}");
-    let two = rect_rows(&state, classic_agent_rect(&state, "pane_2"));
-    assert!(two[0].starts_with("   └─ ×"), "末子行前缀: {two:?}");
-    assert!(two[1].starts_with("        two"), "末子行续行: {two:?}");
-    let three = rect_rows(&state, classic_agent_rect(&state, "pane_3"));
-    assert!(three[0].starts_with("   └─ ◐"), "独子也是末子行: {three:?}");
+    assert_eq!(one.len(), 1, "只剩图标的首行并进名称行: {one:?}");
+    assert!(one[0].starts_with("├── ○ one "), "非末子行前缀: {one:?}");
     assert!(
-        three[1].starts_with("        three"),
-        "末子行续行: {three:?}"
+        compact(&one[0]).ends_with(&compact(status.idle)),
+        "名称后跟状态文案（次要信息）: {one:?}"
+    );
+    let two = rect_rows(&state, classic_agent_rect(&state, "pane_2"));
+    assert!(two[0].starts_with("└── × two "), "末子行前缀: {two:?}");
+    assert!(
+        compact(&two[0]).ends_with(&compact(status.blocked)),
+        "{two:?}"
+    );
+    let three = rect_rows(&state, classic_agent_rect(&state, "pane_3"));
+    assert!(
+        three[0].starts_with("└── ◐ three "),
+        "独子也是末子行: {three:?}"
     );
     for lines in [&one, &two, &three] {
         assert!(
@@ -321,17 +383,24 @@ fn characterization_classic_spaces_renders_two_level_workspace_tree() {
     ];
     assert!(ys.windows(2).all(|pair| pair[0] < pair[1]), "行序: {ys:?}");
     assert_eq!(ys[1], first_header.y + 1, "子行紧贴工作区头");
+    assert_eq!(
+        first_header.width, state.hits.agent_body.width,
+        "分组头整行都是折叠开关"
+    );
 }
 
-/// (a) classic 折叠：折叠键进 `collapsed_groups` 后该工作区的子行消失、箭头变
-/// `▸`、计数保留；其它工作区不受影响并上移补位。
+/// (a) classic 折叠：折叠键进 `collapsed_groups` 后该工作区的子行消失、开关变
+/// `▸`、计数保留；其它工作区不受影响并上移补位。点分组头任意位置都能折叠，
+/// 悬浮在分组头上整行高亮。
 #[test]
 fn characterization_classic_collapsed_workspace_hides_children_and_flips_chevron() {
     let mut state = classic_state(AgentPanelSortConfig::Spaces);
     state.compose(106, 30).expect("展开帧");
     let expanded_second_header_y = group_rect(&state, "ws_2").y;
+    let first_header = group_rect(&state, "ws_1");
 
-    state.toggle_collapsed_group(&ClientEndpointId::Local, agent_group_key("ws_1"));
+    // 点在头行的标签文字上（不是开关格）也折叠。
+    state.handle_raw_events(vec![click_at(first_header.x + 6, first_header.y)]);
     assert!(
         state.collapsed_groups.contains("agent-panel:ws_1"),
         "本机折叠态存于 collapsed_groups"
@@ -339,7 +408,7 @@ fn characterization_classic_collapsed_workspace_hides_children_and_flips_chevron
     state.compose(106, 30).expect("折叠帧");
 
     assert_eq!(
-        group_keys(&state),
+        local_toggle_keys(&state),
         [agent_group_key("ws_1"), agent_group_key("ws_2")],
         "折叠后工作区头仍在"
     );
@@ -347,12 +416,12 @@ fn characterization_classic_collapsed_workspace_hides_children_and_flips_chevron
     let first_header = group_rect(&state, "ws_1");
     let header = &rect_rows(&state, first_header)[0];
     assert!(
-        header.starts_with(" × client-shell"),
-        "工作区头: {header:?}"
+        header.starts_with("▸ × client-shell"),
+        "折叠箭头: {header:?}"
     );
-    assert!(header.ends_with("· 2 ▸"), "折叠箭头，计数保留: {header:?}");
+    assert!(header.trim_end().ends_with("· 2"), "计数保留: {header:?}");
     let second_header = group_rect(&state, "ws_2");
-    assert!(rect_rows(&state, second_header)[0].ends_with("· 1 ▾"));
+    assert!(rect_rows(&state, second_header)[0].starts_with("▾ ◐ herdr"));
     assert_eq!(second_header.y, first_header.y + 1, "后续工作区上移补位");
     assert!(second_header.y < expanded_second_header_y);
 
@@ -360,13 +429,32 @@ fn characterization_classic_collapsed_workspace_hides_children_and_flips_chevron
     assert!(!body.contains("one") && !body.contains("two"), "{body}");
     assert!(body.contains("three"), "{body}");
     assert!(!body.contains('├'), "只剩一个独子行: {body}");
+
+    // 悬浮在分组头上：整行高亮（同悬浮底色），指针移开恢复。
+    let plain_bg = state.compose_buffer.as_ref().expect("缓冲")
+        [(first_header.x + 3, first_header.y)]
+        .style()
+        .bg;
+    state.handle_raw_events(vec![moved(first_header.x + 6, first_header.y)]);
+    assert!(matches!(
+        state.hover,
+        Some(super::super::feedback::ChromeHover::AgentTreeToggle(ClientEndpointId::Local, ref key))
+            if key == "agent-panel:ws_1"
+    ));
+    state.compose(106, 30).expect("悬浮帧");
+    let hovered_bg = state.compose_buffer.as_ref().expect("缓冲")
+        [(first_header.x + 3, first_header.y)]
+        .style()
+        .bg;
+    assert_ne!(hovered_bg, plain_bg, "分组头悬浮整行高亮");
+    assert_eq!(hovered_bg, Some(state.config.palette.hover_row_bg()));
 }
 
-/// (b) classic + Launch：**仍是两层树**，不是平铺。启动顺序只在每个工作区内部
-/// 重排子行；工作区之间保持快照顺序，哪怕最早启动的 agent 在靠后的工作区。
-/// `launch_seq` 全为 0（旧 server 不下发）时退回快照顺序。
+/// (b) classic + Launch：**平铺**，按全局启动顺序排（不再按工作区分组），行保留
+/// 工作区 token 以示归属；没有分组头、没有连接线。`launch_seq` 全为 0（旧 server
+/// 不下发）时退回快照顺序。
 #[test]
-fn characterization_classic_launch_keeps_workspace_tree_and_sorts_within_workspace() {
+fn characterization_classic_launch_is_flat_in_global_launch_order() {
     let mut state = classic_state(AgentPanelSortConfig::Launch);
     state.compose(106, 30).expect("classic launch 帧");
 
@@ -374,39 +462,40 @@ fn characterization_classic_launch_keeps_workspace_tree_and_sorts_within_workspa
         sort_label(&state),
         compact(crate::i18n::texts().agent_panel.sort_launch)
     );
-    assert_eq!(
-        group_keys(&state),
-        [agent_group_key("ws_1"), agent_group_key("ws_2")],
-        "工作区头仍在，且不按启动顺序重排工作区"
+    assert!(
+        state.hits.agent_tree_toggles.is_empty(),
+        "平铺：没有分组头，也没有可展开的活动"
     );
     assert_eq!(
         classic_hit_ids(&state),
-        ["pane_2", "pane_1", "pane_3"],
-        "工作区内按启动顺序排；全局第二个启动的 pane_3 仍排在最后"
+        ["pane_2", "pane_3", "pane_1"],
+        "全局启动顺序，跨工作区混排"
     );
+    assert_no_tree_glyphs(&body_text(&state));
     let two = rect_rows(&state, classic_agent_rect(&state, "pane_2"));
-    assert!(two[0].starts_with("   ├─ ×"), "{two:?}");
-    let one = rect_rows(&state, classic_agent_rect(&state, "pane_1"));
-    assert!(one[0].starts_with("   └─ ○"), "{one:?}");
+    assert!(
+        two[0].starts_with("  × client-shell"),
+        "平铺行带工作区名: {two:?}"
+    );
+    assert!(two[1].starts_with("    two"), "续行缩进对齐名称: {two:?}");
     let three = rect_rows(&state, classic_agent_rect(&state, "pane_3"));
-    assert!(three[0].starts_with("   └─ ◐"), "{three:?}");
+    assert!(three[0].starts_with("  ◐ herdr"), "{three:?}");
 
     // 旧 server 不下发 launch_seq：全为 0，稳定排序保持快照顺序。
     let mut projected = two_workspace_snapshot();
     for agent in &mut projected.agents {
         agent.launch_seq = 0;
     }
-    let mut state = ClientShellState::new(panel_config(AgentPanelSortConfig::Launch));
-    state.set_snapshot(Box::new(projected));
-    state.set_pane_surface(surface());
+    let mut state = classic_state_with(AgentPanelSortConfig::Launch, projected);
     state
         .compose(106, 30)
         .expect("classic launch 帧（launch_seq 全 0）");
     assert_eq!(classic_hit_ids(&state), ["pane_1", "pane_2", "pane_3"]);
 }
 
-/// (c) classic 矮面板：列表区不足 3 行（放不下「工作区头 + 一个 agent 行」）时
-/// 退化为平铺——无工作区头、无树前缀、工作区名回到行内，行序走全局排序。
+/// (c) classic 矮面板：列表区不足 3 行（放不下「分组头 + 一个 agent 行」）时
+/// 退化为只画 agent 行的平铺——无分组头、无树前缀，行序与树里的 agent 行序一致
+/// （被折叠分组藏起来的 agent 同样不出现）。
 #[test]
 fn characterization_classic_short_panel_degrades_to_flat_rows() {
     let mut state = classic_state(AgentPanelSortConfig::Spaces);
@@ -417,34 +506,40 @@ fn characterization_classic_short_panel_degrades_to_flat_rows() {
         "夹具前提：列表区不足 3 行，实际 {body:?}"
     );
     assert!(
-        state.hits.agent_group_toggles.is_empty(),
-        "退化后无工作区头"
+        state.hits.agent_tree_toggles.is_empty(),
+        "退化后无分组头 / 开关"
     );
     assert_eq!(classic_hit_ids(&state).first(), Some(&"pane_1"));
     let one = rect_rows(&state, classic_agent_rect(&state, "pane_1"));
     assert!(
-        one[0].starts_with(" ○ client-shell"),
-        "平铺行缩进 1 列且带工作区名: {one:?}"
+        one[0].starts_with("  ○ one"),
+        "平铺行只有两列前缀，内容同树里的 agent 行: {one:?}"
     );
     assert_no_tree_glyphs(&body_text(&state));
 
     // 同一状态换回足够高的面板，树立即回来：退化只由高度决定。
     state.compose(106, 30).expect("高面板帧");
-    assert_eq!(state.hits.agent_group_toggles.len(), 2);
+    assert_eq!(state.hits.agent_tree_toggles.len(), 2);
 
-    // Launch 下退化视图按全局启动顺序平铺（树视图里则是 two / one / three）。
+    // 折叠的分组在退化视图里同样藏起自己的 agent。
+    state.toggle_collapsed_group(&ClientEndpointId::Local, agent_group_key("ws_1"));
+    state.agent_scroll = 0;
+    state.compose(106, 10).expect("折叠后的矮面板帧");
+    assert_eq!(classic_hit_ids(&state), ["pane_3"]);
+
+    // Launch 下退化视图按全局启动顺序平铺。
     let mut state = classic_state(AgentPanelSortConfig::Launch);
     let mut flat_order = Vec::new();
     for start in 0..3 {
         state.agent_scroll = start;
         state.compose(106, 10).expect("矮面板 launch 帧");
-        assert!(state.hits.agent_group_toggles.is_empty());
+        assert!(state.hits.agent_tree_toggles.is_empty());
         flat_order.push(classic_hit_ids(&state)[0].to_owned());
     }
     assert_eq!(flat_order, ["pane_2", "pane_3", "pane_1"]);
 }
 
-/// (c) 退化阈值：逐个终端高度扫一遍，「无工作区头」当且仅当列表区不足 3 行。
+/// (c) 退化阈值：逐个终端高度扫一遍，「无分组头」当且仅当列表区不足 3 行。
 #[test]
 fn characterization_classic_tree_degrades_exactly_below_three_body_rows() {
     let mut state = classic_state(AgentPanelSortConfig::Spaces);
@@ -454,7 +549,7 @@ fn characterization_classic_tree_degrades_exactly_below_three_body_rows() {
         state.agent_scroll = 0;
         state.compose(106, rows).expect("classic 帧");
         let body_height = state.hits.agent_body.height;
-        let flat = state.hits.agent_group_toggles.is_empty();
+        let flat = state.hits.agent_tree_toggles.is_empty();
         assert_eq!(
             flat,
             body_height < 3,
@@ -472,22 +567,21 @@ fn characterization_classic_tree_degrades_exactly_below_three_body_rows() {
     assert!(seen_flat && seen_tree, "扫描范围应同时覆盖两种视图");
 }
 
-/// (d) workbench 布局：即便排序是 Spaces、表头写着「按工作区分组」，列表也**恒为
-/// 平铺**——没有工作区头、没有树前缀，折叠态对它不起作用；排序只改变行序。
-///
-/// 现状，W3 将改变：这是已知缺陷（用户所在的布局看不到任何分组结构），W3 统一
-/// 三条路径后这里应变成与 classic 相同的树。
+/// (d) workbench 布局：与 classic 同一棵树——Spaces 下有工作区头与连接线，折叠
+/// 态生效；agent 行写端点限定的命中区。切到 Launch 平铺并换行序。
 #[test]
-fn characterization_workbench_spaces_sort_is_flat_despite_grouped_header() {
+fn characterization_workbench_spaces_renders_the_same_workspace_tree_as_classic() {
     let mut state = workbench_state(AgentPanelSortConfig::Spaces);
     state.compose(120, 40).expect("workbench 帧");
 
     assert_eq!(
         sort_label(&state),
-        compact(crate::i18n::texts().sidebar.sort_grouped),
-        "表头复用 classic 的，仍显示分组标签"
+        compact(crate::i18n::texts().sidebar.sort_grouped)
     );
-    assert!(state.hits.agent_group_toggles.is_empty(), "无工作区头");
+    assert_eq!(
+        local_toggle_keys(&state),
+        [agent_group_key("ws_1"), agent_group_key("ws_2")]
+    );
     assert!(
         state.hits.agents.is_empty(),
         "workbench 不写 classic 命中区"
@@ -496,29 +590,24 @@ fn characterization_workbench_spaces_sort_is_flat_despite_grouped_header() {
         endpoint_hit_ids(&state),
         [local("pane_1"), local("pane_2"), local("pane_3")]
     );
-    assert_no_tree_glyphs(&body_text(&state));
-    let expected = [
-        (" ○ Local · client-shell", "   one"),
-        (" × Local · client-shell", "   two"),
-        (" ◐ Local · herdr", "   three"),
-    ];
-    for ((rect, _, _), (first, second)) in state.hits.endpoint_agents.iter().zip(expected) {
+    let expected = ["├── ○ one ", "└── × two ", "└── ◐ three "];
+    for ((rect, _, _), first) in state.hits.endpoint_agents.iter().zip(expected) {
         let lines = rect_rows(&state, *rect);
-        assert!(lines[0].starts_with(first), "平铺行缩进 1 列: {lines:?}");
-        assert!(lines[1].starts_with(second), "续行缩进 3 列: {lines:?}");
+        assert_eq!(lines.len(), 1, "与 classic 同样并成一行: {lines:?}");
+        assert!(lines[0].starts_with(first), "树前缀: {lines:?}");
+        assert!(
+            !lines[0].contains("Local"),
+            "单端点不画机器层，也不带机器 token: {lines:?}"
+        );
     }
 
-    // 折叠某个工作区：classic 会藏掉子行，这里毫无变化。
+    // 折叠某个工作区：子行藏起来。
     state.toggle_collapsed_group(&ClientEndpointId::Local, agent_group_key("ws_1"));
     state.compose(120, 40).expect("折叠后的 workbench 帧");
-    assert_eq!(
-        endpoint_hit_ids(&state),
-        [local("pane_1"), local("pane_2"), local("pane_3")],
-        "折叠态不影响 workbench 的行"
-    );
-    assert!(state.hits.agent_group_toggles.is_empty());
+    assert_eq!(endpoint_hit_ids(&state), [local("pane_3")]);
+    assert_eq!(local_toggle_keys(&state).len(), 2);
 
-    // 点表头排序标签切到 Launch：只换行序，仍然平铺。
+    // 点表头排序标签切到 Launch：平铺、按启动顺序。
     let toggle = state.hits.agent_sort_toggle;
     assert!(!toggle.is_empty(), "排序标签可点");
     state.handle_raw_events(vec![click(toggle)]);
@@ -528,6 +617,7 @@ fn characterization_workbench_spaces_sort_is_flat_despite_grouped_header() {
         sort_label(&state),
         compact(crate::i18n::texts().agent_panel.sort_launch)
     );
+    assert!(state.hits.agent_tree_toggles.is_empty());
     assert_eq!(
         endpoint_hit_ids(&state),
         [local("pane_2"), local("pane_3"), local("pane_1")]
@@ -535,12 +625,10 @@ fn characterization_workbench_spaces_sort_is_flat_despite_grouped_header() {
     assert_no_tree_glyphs(&body_text(&state));
 }
 
-/// (d) 联邦（多端点、未启用 workbench）走同一条 `endpoint_agents::render_expanded`：
-/// Spaces 下也是平铺，按端点顺序再按各自快照顺序；本机与远端的折叠态都不起作用。
-///
-/// 现状，W3 将改变：同上。
+/// (d) 联邦（多端点、未启用 workbench）：机器层出现在工作区之上，各端点的折叠
+/// 态各自生效；机器层复用 `collapsed_endpoints`，点机器行整体收起。
 #[test]
-fn characterization_federated_sidebar_spaces_sort_is_flat_across_endpoints() {
+fn characterization_federated_sidebar_nests_machines_above_workspaces() {
     let (mut state, remote) = federated_state(AgentPanelSortConfig::Spaces);
     assert!(!state.workbench.enabled);
     state.toggle_collapsed_group(&ClientEndpointId::Local, agent_group_key("ws_1"));
@@ -551,73 +639,132 @@ fn characterization_federated_sidebar_spaces_sort_is_flat_across_endpoints() {
         sort_label(&state),
         compact(crate::i18n::texts().sidebar.sort_grouped)
     );
-    assert!(state.hits.agent_group_toggles.is_empty());
     assert!(state.hits.agents.is_empty());
     assert_eq!(
-        endpoint_hit_ids(&state),
+        toggle_keys(&state),
         [
-            local("pane_1"),
-            local("pane_2"),
-            local("pane_3"),
-            (remote.clone(), "pane_1".to_owned()),
-            (remote.clone(), "pane_2".to_owned()),
+            (true, MACHINE_TOGGLE_KEY),
+            (true, "agent-panel:ws_1"),
+            (true, "agent-panel:ws_2"),
+            (false, MACHINE_TOGGLE_KEY),
+            (false, "agent-panel:ws_1"),
+        ],
+        "机器 → 工作区，按端点顺序"
+    );
+    assert_eq!(
+        endpoint_hit_ids(&state),
+        [local("pane_3")],
+        "两端的 ws_1 都折叠了，只剩本机 ws_2 的独子"
+    );
+    let local_machine = rect_rows(
+        &state,
+        toggle_rect(&state, &ClientEndpointId::Local, MACHINE_TOGGLE_KEY),
+    );
+    assert!(
+        local_machine[0].starts_with("▾ ● Local"),
+        "{local_machine:?}"
+    );
+    assert!(
+        local_machine[0].trim_end().ends_with("· 3"),
+        "机器行计数: {local_machine:?}"
+    );
+    let remote_machine = rect_rows(&state, toggle_rect(&state, &remote, MACHINE_TOGGLE_KEY));
+    assert!(
+        remote_machine[0].starts_with("▾ ● Build"),
+        "{remote_machine:?}"
+    );
+    let remote_workspace = rect_rows(&state, toggle_rect(&state, &remote, "agent-panel:ws_1"));
+    assert!(
+        remote_workspace[0].starts_with("└─▸ ◐ remote-space"),
+        "远端工作区挂在机器下且折叠，状态取 r-one 的 Working: {remote_workspace:?}"
+    );
+    let three = rect_rows(&state, state.hits.endpoint_agents[0].0);
+    assert!(
+        three[0].starts_with("  └── ◐ three"),
+        "深两层：ws_2 是本机的末工作区，机器层的引导线留白: {three:?}"
+    );
+    assert!(
+        three.iter().all(|line| !line.contains("Local")),
+        "机器层承载机器名，agent 行不再带机器 token: {three:?}"
+    );
+
+    // 点远端机器行：整个端点收起，写进 collapsed_endpoints（与工作区区共用）。
+    let remote_row = toggle_rect(&state, &remote, MACHINE_TOGGLE_KEY);
+    state.handle_raw_events(vec![click_at(remote_row.x + 4, remote_row.y)]);
+    assert!(state.collapsed_endpoints.contains(&remote));
+    state.compose(106, 40).expect("远端折叠帧");
+    assert_eq!(
+        toggle_keys(&state),
+        [
+            (true, MACHINE_TOGGLE_KEY),
+            (true, "agent-panel:ws_1"),
+            (true, "agent-panel:ws_2"),
+            (false, MACHINE_TOGGLE_KEY),
         ]
     );
-    assert_no_tree_glyphs(&body_text(&state));
-    let last = state.hits.endpoint_agents[4].0;
-    let lines = rect_rows(&state, last);
+    let remote_machine = rect_rows(&state, toggle_rect(&state, &remote, MACHINE_TOGGLE_KEY));
     assert!(
-        lines[0].starts_with(" ○ Build · remote-space"),
-        "机器名 token 区分端点: {lines:?}"
+        remote_machine[0].starts_with("▸ ● Build"),
+        "{remote_machine:?}"
     );
-    assert!(lines[1].starts_with("   r-two"), "{lines:?}");
+    // 再点一次展开。
+    state.handle_raw_events(vec![click_at(remote_row.x + 4, remote_row.y)]);
+    assert!(!state.collapsed_endpoints.contains(&remote));
 }
 
-/// (e) workbench 的 `hits.endpoint_agents` 与缓存行一一对应：同序、同（端点,
-/// pane）身份，矩形自列表区顶部起逐行紧排，高度等于该行的 token 行数。
+/// (e) workbench 的 `hits.endpoint_agents` 与缓存里的 agent 行一一对应：同序、同
+/// （端点, pane）身份，高度等于该行的 token 行数；点击按（端点, pane）路由。
 #[test]
 fn characterization_workbench_endpoint_agent_hits_mirror_cached_rows() {
     let (mut state, remote) = federated_state(AgentPanelSortConfig::Spaces);
     enable_workbench(&mut state);
-    state.compose(120, 40).expect("workbench 联邦帧");
+    // 机器 2 + 工作区头 3 + agent 5 行：要一个够高的面板才全放得下。
+    state.compose(120, 60).expect("workbench 联邦帧");
 
     let body = state.hits.agent_body;
     let cache = state.federated_agent_rows.as_ref().expect("行缓存");
-    let rows = cache.rows();
-    assert_eq!(rows.len(), 5, "本机 3 + 远端 2");
+    let agent_rows = cache
+        .rows()
+        .iter()
+        .filter(|row| row.kind.agent().is_some())
+        .collect::<Vec<_>>();
+    assert_eq!(agent_rows.len(), 5, "本机 3 + 远端 2");
+    assert_eq!(
+        cache.rows().len(),
+        5 + 2 + 3,
+        "外加两个机器行与三个工作区头"
+    );
     assert_eq!(
         state.hits.endpoint_agents.len(),
-        rows.len(),
+        agent_rows.len(),
         "夹具前提：全部行都放得下"
     );
     let names = ["one", "two", "three", "r-one", "r-two"];
-    let mut next_y = body.y;
     for ((rect, endpoint_id, pane_id), (row, name)) in state
         .hits
         .endpoint_agents
         .iter()
-        .zip(rows.iter().zip(names))
+        .zip(agent_rows.iter().zip(names))
     {
+        let agent = row.kind.agent().expect("agent 行");
         assert_eq!(
             (endpoint_id, pane_id),
-            (&row.endpoint_id, &row.agent.pane_id)
+            (&row.kind.endpoint_id, &agent.pane_id)
         );
-        assert_eq!(rect.y, next_y, "逐行紧排（row_gap = 0）");
         assert_eq!(
             (rect.x, rect.width),
             (body.x, body.width),
             "无滚动条时占满列表区"
         );
-        assert_eq!(usize::from(rect.height), row.agent.rows.len());
+        assert_eq!(usize::from(rect.height), agent.rows.len());
         let text = rect_rows(&state, *rect).join("\n");
         assert!(text.contains(name), "命中区里画的就是这一行: {text}");
-        next_y += rect.height;
     }
     assert_eq!(state.hits.endpoint_agents[3].1, remote);
 
     // 点击命中区按（端点, pane）身份路由：远端行触发端点激活。
     let (rect, _, _) = state.hits.endpoint_agents[4].clone();
-    let outcome = state.handle_raw_events(vec![click(rect)]);
+    let outcome = state.handle_raw_events(vec![click_at(rect.x + 6, rect.y)]);
     assert!(matches!(
         outcome.actions.as_slice(),
         [ClientShellAction::ActivateEndpoint {
@@ -627,30 +774,35 @@ fn characterization_workbench_endpoint_agent_hits_mirror_cached_rows() {
     ));
 }
 
-/// (e) 面板放不下全部行时，命中区只覆盖可见窗口：从 `agent_scroll` 指向的行起、
-/// 与缓存行的一段连续切片逐一对应，并为滚动条让出 1 列。
+/// (e) 面板放不下全部行时，命中区只覆盖可见窗口：agent 行命中区是缓存 agent 行
+/// 序列的一段连续切片，并为滚动条让出 1 列。
 #[test]
 fn characterization_workbench_endpoint_agent_hits_cover_only_the_visible_window() {
     let (mut state, _) = federated_state(AgentPanelSortConfig::Spaces);
     enable_workbench(&mut state);
-    for start in [0, 2] {
+    for start in [0, 3] {
         state.agent_scroll = start;
-        state.compose(120, 24).expect("矮 workbench 帧");
+        state.compose(120, 26).expect("矮 workbench 帧");
         let body = state.hits.agent_body;
-        let rows = state.federated_agent_rows.as_ref().expect("行缓存").rows();
-        let visible = state.hits.endpoint_agents.len();
+        let cached = cached_agent_ids(&state);
+        let visible = endpoint_hit_ids(&state);
         assert!(
-            visible >= 1 && visible < rows.len(),
-            "夹具前提：只放得下一部分行，可见 {visible} / {}，列表区 {body:?}",
-            rows.len()
+            !visible.is_empty() && visible.len() < cached.len(),
+            "夹具前提：只放得下一部分行，可见 {} / {}，列表区 {body:?}",
+            visible.len(),
+            cached.len()
         );
         assert_eq!(state.agent_scroll, start, "起始行在可滚动范围内");
-        let window = &rows[start..start + visible];
-        for ((rect, endpoint_id, pane_id), row) in state.hits.endpoint_agents.iter().zip(window) {
-            assert_eq!(
-                (endpoint_id, pane_id),
-                (&row.endpoint_id, &row.agent.pane_id)
-            );
+        let offset = cached
+            .iter()
+            .position(|id| id == &visible[0])
+            .expect("可见的第一行来自缓存");
+        assert_eq!(
+            cached[offset..offset + visible.len()],
+            visible[..],
+            "可见行是缓存 agent 行的连续切片"
+        );
+        for (rect, _, _) in &state.hits.endpoint_agents {
             assert_eq!(rect.width, body.width - 1, "滚动条占最右 1 列");
             assert!(rect.y >= body.y && rect.bottom() <= body.bottom());
         }
@@ -683,21 +835,16 @@ fn cached_rows_address(state: &ClientShellState) -> usize {
     rows.as_ptr() as usize
 }
 
-fn cached_pane_ids(state: &ClientShellState) -> Vec<&str> {
-    state
-        .federated_agent_rows
-        .as_ref()
-        .expect("行缓存")
-        .rows()
-        .iter()
-        .map(|row| row.agent.pane_id.as_str())
+fn cached_pane_ids(state: &ClientShellState) -> Vec<String> {
+    cached_agent_ids(state)
+        .into_iter()
+        .map(|(_, pane_id)| pane_id)
         .collect()
 }
 
 /// (f) `AgentRowsCache`：键不变跨帧复用；折叠集合的代际（`tree_collapse_epoch`）
-/// 在键里，所以**折叠态一变就重建**（统一树的行序列取决于折叠态；接缝 S2 起
-/// 生效，行内容在面板车道把树接进缓存前仍与折叠无关）；快照 revision 与排序
-/// 在键里，变了就重建。
+/// 在键里，折叠态一变就重建且行序列随之变化；快照 revision 与排序在键里，变了就
+/// 重建。
 #[test]
 fn characterization_agent_rows_cache_rebuilds_on_revision_and_on_collapse() {
     let mut state = workbench_state(AgentPanelSortConfig::Spaces);
@@ -711,7 +858,7 @@ fn characterization_agent_rows_cache_rebuilds_on_revision_and_on_collapse() {
     assert_eq!(current_rows_key(&state), key);
     assert_eq!(cached_rows_address(&state), address, "无变化时跨帧复用");
 
-    // 仅折叠态变化：折叠代际进键，重建；平铺的联邦行内容暂不受折叠影响。
+    // 仅折叠态变化：折叠代际进键，重建，被折叠的子行离开序列。
     state.toggle_collapsed_group(&ClientEndpointId::Local, agent_group_key("ws_1"));
     assert!(state.group_is_collapsed(&ClientEndpointId::Local, &agent_group_key("ws_1")));
     state.compose(120, 40).expect("折叠后的帧");
@@ -719,7 +866,7 @@ fn characterization_agent_rows_cache_rebuilds_on_revision_and_on_collapse() {
     assert_ne!(collapsed_key, key, "折叠代际进缓存键");
     let collapsed_address = cached_rows_address(&state);
     assert_ne!(collapsed_address, address, "折叠即重建");
-    assert_eq!(cached_pane_ids(&state), ["pane_1", "pane_2", "pane_3"]);
+    assert_eq!(cached_pane_ids(&state), ["pane_3"]);
     state.compose(120, 40).expect("折叠后的第二帧");
     assert_eq!(
         cached_rows_address(&state),
@@ -755,16 +902,17 @@ fn characterization_agent_rows_cache_rebuilds_on_revision_and_on_collapse() {
     next.revision = 3;
     next.agents[0].name = Some("renamed".into());
     state.set_snapshot(Box::new(next));
+    state.toggle_collapsed_group(&ClientEndpointId::Local, agent_group_key("ws_1"));
     state.compose(120, 40).expect("新快照帧");
     let renamed_address = cached_rows_address(&state);
     assert_ne!(renamed_address, revised_address);
     let first = state.hits.endpoint_agents[0].0;
     assert!(
-        rect_rows(&state, first)[1].starts_with("   renamed"),
+        rect_rows(&state, first)[0].starts_with("├── ○ renamed"),
         "重建后的行上屏"
     );
 
-    // 排序在键里：点排序标签 → 重建为 Launch 行序。
+    // 排序在键里：点排序标签 → 重建为 Launch 平铺行序。
     let toggle = state.hits.agent_sort_toggle;
     state.handle_raw_events(vec![click(toggle)]);
     state.compose(120, 40).expect("launch 帧");
@@ -785,7 +933,7 @@ fn aggregate_names(state: &ClientShellState, sort: AgentPanelSortConfig) -> Vec<
         .collect()
 }
 
-/// (g) `aggregate_agent_rows` 是联邦面板与 mobile 的行序来源。Spaces：端点顺序 →
+/// (g) `aggregate_agent_rows` 是统一树与 mobile 的行序来源。Spaces：端点顺序 →
 /// 各端点快照顺序，不看状态；Launch：stale 端点整体沉底，其余按端点序分组，
 /// 组内再按 `launch_seq` 升序（0，即旧 server 未下发，排最后），组内 launch_seq
 /// 打平时稳定排序保持快照序——语义是「端点内按启动顺序」，不同 server 各自计数
@@ -860,8 +1008,7 @@ fn characterization_aggregate_agent_rows_order_under_spaces_and_launch() {
 
 /// 渲染扩展 profile 的夹具：`agents` 个 agent 平摊到若干工作区（每 4 个一个
 /// 工作区、每工作区一个 tab），每个 agent 挂 `activity` 个活动节点（一半是根
-/// 节点，另一半各挂在一个根下）。活动节点在面板车道把树接进缓存之前不参与
-/// 渲染，但作为输入保持一致，好让改造前后的数字可比。
+/// 节点，另一半各挂在一个根下）。
 fn scale_snapshot(agents: usize, activity: usize) -> ClientShellSnapshot {
     let mut projected = snapshot();
     projected.workspaces.clear();
@@ -906,7 +1053,7 @@ fn scale_snapshot(agents: usize, activity: usize) -> ClientShellSnapshot {
         agent.launch_seq = (agents - index) as u64;
         let roots = activity.div_ceil(2);
         agent.activity.nodes = (0..activity)
-            .map(|node| crate::protocol::ClientShellActivityNode {
+            .map(|node| ClientShellActivityNode {
                 id: format!("node_{node}"),
                 kind: crate::api::schema::AgentActivityKind::Subagent,
                 label: format!("task {node}"),
@@ -1028,6 +1175,639 @@ fn characterization_mobile_switcher_lists_agents_flat_in_aggregate_order() {
             };
             assert!(text.contains(name), "{pane_id}: {text}");
         }
-        assert!(state.hits.agent_group_toggles.is_empty());
+        assert!(state.hits.agent_tree_toggles.is_empty());
     }
+}
+
+/// 一个 agent 挂 `activity` 个活动节点（`node_0..` 为根，`node_k` 挂在
+/// `node_{k-roots}` 下）的单工作区夹具。
+fn activity_snapshot(activity: usize) -> ClientShellSnapshot {
+    scale_snapshot(1, activity)
+}
+
+/// 标签页层只在工作区有 >1 个标签页时出现，出现后 agent 行不再重复标签页 token；
+/// 单标签页工作区的 agent 行直接挂在工作区下。
+#[test]
+fn tree_tab_level_appears_only_with_multiple_tabs_and_drops_tab_tokens() {
+    let mut projected = two_workspace_snapshot();
+    let mut second_tab = projected.tabs[0].clone();
+    second_tab.tab_id = "tab_1b".into();
+    second_tab.number = 2;
+    second_tab.label = "review".into();
+    second_tab.custom_label = true;
+    second_tab.focused = false;
+    projected.tabs.push(second_tab);
+    projected.tabs[0].label = "main".into();
+    projected.tabs[0].custom_label = true;
+    projected.agents[1].tab_id = "tab_1b".into();
+    projected.panes[1].tab_id = "tab_1b".into();
+    let mut state = classic_state_with(AgentPanelSortConfig::Spaces, projected);
+    state.compose(106, 30).expect("标签页层帧");
+
+    assert_eq!(
+        local_toggle_keys(&state),
+        [
+            "agent-panel:ws_1",
+            "agent-tab:tab_1",
+            "agent-tab:tab_1b",
+            "agent-panel:ws_2"
+        ],
+        "ws_1 有两个标签页 → 标签页层；ws_2 只有一个 → 没有"
+    );
+    let main = rect_rows(
+        &state,
+        toggle_rect(&state, &ClientEndpointId::Local, "agent-tab:tab_1"),
+    );
+    assert!(
+        main[0].starts_with("├─▾ ○ main"),
+        "标签页头带状态与名字: {main:?}"
+    );
+    assert!(main[0].trim_end().ends_with("· 1"), "{main:?}");
+    let review = rect_rows(
+        &state,
+        toggle_rect(&state, &ClientEndpointId::Local, "agent-tab:tab_1b"),
+    );
+    assert!(review[0].starts_with("└─▾ × review"), "{review:?}");
+    let one = rect_rows(&state, classic_agent_rect(&state, "pane_1"));
+    assert!(one[0].starts_with("│ └── ○"), "深两层的 agent 行: {one:?}");
+    assert!(
+        !one.iter().any(|line| line.contains("main")),
+        "标签页头承载标签页名，子行不重复: {one:?}"
+    );
+    let two = rect_rows(&state, classic_agent_rect(&state, "pane_2"));
+    assert!(two[0].starts_with("  └── ×"), "末标签页下的末子: {two:?}");
+    assert!(!two.iter().any(|line| line.contains("review")), "{two:?}");
+
+    // 折叠一个标签页只藏它自己的 agent。
+    state.toggle_collapsed_group(&ClientEndpointId::Local, "agent-tab:tab_1".into());
+    state.compose(106, 30).expect("折叠标签页帧");
+    assert_eq!(classic_hit_ids(&state), ["pane_2", "pane_3"]);
+}
+
+/// 快照默认下发的活动摘要：running / total 计数 + 至多 1 个最新节点，
+/// `truncated` 表示还有更多（整树走 `agent.activity.read`）。
+fn summary_snapshot() -> ClientShellSnapshot {
+    let mut projected = activity_snapshot(0);
+    projected.agents[0].activity = ClientShellAgentActivity {
+        running: 2,
+        total: 5,
+        truncated: true,
+        nodes: vec![ClientShellActivityNode {
+            id: "sub-7".into(),
+            kind: crate::api::schema::AgentActivityKind::Subagent,
+            label: "explore repo".into(),
+            status: crate::api::schema::AgentActivityStatus::Running,
+            // 摘要里父节点不在列表中：按根节点处理。
+            parent_id: Some("sub-1".into()),
+            ..Default::default()
+        }],
+    };
+    projected
+}
+
+/// agent 行的活动摘要（W3 按摘要渲染）：默认折叠，行尾徽标写「运行中/总数 个
+/// 活动」；点开关展开出「最新节点」一行，被截断时再跟「还有 N 项」；点最新节点
+/// 行打开「Agent 活动」窗口并选中它，点「还有 N 项」打开窗口不预选。
+#[test]
+fn tree_agent_rows_show_the_activity_summary_collapsed_by_default() {
+    let mut state = classic_state_with(AgentPanelSortConfig::Spaces, summary_snapshot());
+    state.sidebar_width = 40;
+    state.sidebar_width_manual = true;
+    state.compose(106, 30).expect("活动摘要帧");
+
+    assert_eq!(
+        local_toggle_keys(&state),
+        ["agent-panel:ws_0", "agent-activity:pane:pane_0"],
+        "有活动的 agent 行带开关"
+    );
+    assert!(
+        state.hits.agent_activity_rows.is_empty(),
+        "活动摘要默认折叠"
+    );
+    let badge = crate::i18n::fill(
+        crate::i18n::texts().agent_panel.activity_badge_fmt,
+        &[("n", "2/5")],
+    );
+    let agent = rect_rows(&state, classic_agent_rect(&state, "pane_0"));
+    assert!(agent[0].starts_with("└─▸ ○ agent-0 "), "{agent:?}");
+    assert!(
+        compact(&agent[0]).ends_with(&compact(&badge)),
+        "行尾徽标 = 运行中/总数: {agent:?}"
+    );
+    let rect = classic_agent_rect(&state, "pane_0");
+    let buffer = state.compose_buffer.as_ref().expect("缓冲");
+    // 徽标右对齐：首格（宽字符的占位格不带样式，取首格）。
+    let badge_x = rect.right() - crate::ui::display_width(&badge) as u16;
+    assert_eq!(buffer[(badge_x, rect.y)].symbol(), "2");
+    assert_eq!(
+        buffer[(badge_x, rect.y)].style().fg,
+        Some(state.config.palette.yellow),
+        "有运行中的活动：徽标用工作色"
+    );
+
+    // 点开关：展开（键在集合里 = 展开）。
+    let toggle = toggle_rect(
+        &state,
+        &ClientEndpointId::Local,
+        "agent-activity:pane:pane_0",
+    );
+    assert_eq!(toggle.width, 2, "agent 行的开关只占开关与间隔两列");
+    state.handle_raw_events(vec![click(toggle)]);
+    assert!(state
+        .collapsed_groups
+        .contains("agent-activity:pane:pane_0"));
+    state.compose(106, 30).expect("展开摘要帧");
+    let activity_ids = state
+        .hits
+        .agent_activity_rows
+        .iter()
+        .map(|hit| (hit.owner_key.as_str(), hit.node_id.as_str()))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        activity_ids,
+        [("pane:pane_0", "sub-7"), ("pane:pane_0", "")],
+        "最新节点 + 「还有 N 项」（node_id 为空）"
+    );
+    let agent = rect_rows(&state, classic_agent_rect(&state, "pane_0"));
+    assert!(agent[0].starts_with("└─▾ ○ agent-0 "), "{agent:?}");
+    let latest = rect_rows(&state, state.hits.agent_activity_rows[0].rect);
+    let texts = &crate::i18n::texts().agent_activity;
+    assert!(
+        latest[0].starts_with("  ├── ◐ explore repo "),
+        "最新节点：状态图标 + 标签: {latest:?}"
+    );
+    assert!(
+        compact(&latest[0]).contains(&compact(texts.kind_subagent)),
+        "种类是次要信息: {latest:?}"
+    );
+    let more = rect_rows(&state, state.hits.agent_activity_rows[1].rect);
+    let more_text = crate::i18n::fill(
+        crate::i18n::texts().agent_panel.activity_more_fmt,
+        &[("n", "4")],
+    );
+    assert!(more[0].starts_with("  └── "), "{more:?}");
+    assert!(compact(&more[0]).contains(&compact(&more_text)), "{more:?}");
+
+    // 点最新节点行：打开活动窗口并选中它。
+    let row = state.hits.agent_activity_rows[0].rect;
+    state.handle_raw_events(vec![click_at(row.x + 10, row.y)]);
+    match state.overlay.as_ref() {
+        Some(ClientShellOverlay::AgentActivity(overlay)) => {
+            assert_eq!(
+                overlay.owner,
+                super::super::agent_activity_overlay::AgentActivityOwner::Pane {
+                    pane_id: "pane_0".into()
+                }
+            );
+            assert_eq!(overlay.selected_node.as_deref(), Some("sub-7"));
+        }
+        other => panic!("应打开 Agent 活动窗口: {other:?}"),
+    }
+    state.overlay = None;
+    // 点「还有 N 项」：打开窗口，不预选节点。
+    let row = state.hits.agent_activity_rows[1].rect;
+    state.handle_raw_events(vec![click_at(row.x + 8, row.y)]);
+    assert!(matches!(
+        state.overlay.as_ref(),
+        Some(ClientShellOverlay::AgentActivity(overlay)) if overlay.selected_node.is_none()
+    ));
+    state.overlay = None;
+
+    // 再点开关收起。
+    state.handle_raw_events(vec![click(toggle)]);
+    state.compose(106, 30).expect("收起摘要帧");
+    assert!(state.hits.agent_activity_rows.is_empty());
+
+    // 没有运行中的活动：只写总数，徽标退为次要色。
+    let mut projected = summary_snapshot();
+    projected.agents[0].activity.running = 0;
+    let mut state = classic_state_with(AgentPanelSortConfig::Spaces, projected);
+    state.sidebar_width = 40;
+    state.sidebar_width_manual = true;
+    state.compose(106, 30).expect("无运行中活动帧");
+    let rect = classic_agent_rect(&state, "pane_0");
+    let agent = rect_rows(&state, rect);
+    let badge = crate::i18n::fill(
+        crate::i18n::texts().agent_panel.activity_badge_fmt,
+        &[("n", "5")],
+    );
+    assert!(compact(&agent[0]).ends_with(&compact(&badge)), "{agent:?}");
+    let buffer = state.compose_buffer.as_ref().expect("缓冲");
+    let badge_x = rect.right() - crate::ui::display_width(&badge) as u16;
+    assert_eq!(buffer[(badge_x, rect.y)].symbol(), "5");
+    assert_eq!(
+        buffer[(badge_x, rect.y)].style().fg,
+        Some(state.config.palette.overlay0)
+    );
+
+    // Launch 平铺下 agent 行仍可展开活动摘要。
+    let mut state = classic_state_with(AgentPanelSortConfig::Launch, summary_snapshot());
+    state.compose(106, 30).expect("launch 活动帧");
+    assert_eq!(
+        local_toggle_keys(&state),
+        ["agent-activity:pane:pane_0"],
+        "平铺没有分组头，只有 agent 行自己的开关"
+    );
+    let agent = rect_rows(&state, classic_agent_rect(&state, "pane_0"));
+    assert!(
+        agent[0].starts_with("▸ ○ space-0"),
+        "平铺行带工作区 token: {agent:?}"
+    );
+    state.handle_raw_events(vec![click(toggle_rect(
+        &state,
+        &ClientEndpointId::Local,
+        "agent-activity:pane:pane_0",
+    ))]);
+    state.compose(106, 30).expect("launch 展开帧");
+    assert_eq!(state.hits.agent_activity_rows.len(), 2);
+    let latest = rect_rows(&state, state.hits.agent_activity_rows[0].rect);
+    assert!(latest[0].starts_with("├── ◐ explore repo"), "{latest:?}");
+}
+
+/// server 下发多个节点（整树形态，基准 / 旧行为）时同一套构建按 `parent_id`
+/// 前序展开：根节点平列，子节点默认折叠、点开关逐层展开（键在集合里 = 展开）。
+#[test]
+fn tree_activity_with_several_nodes_expands_children_on_demand() {
+    let mut state = classic_state_with(AgentPanelSortConfig::Spaces, activity_snapshot(4));
+    state.toggle_collapsed_group(
+        &ClientEndpointId::Local,
+        "agent-activity:pane:pane_0".into(),
+    );
+    state.compose(106, 30).expect("多节点帧");
+    assert_eq!(
+        local_toggle_keys(&state),
+        [
+            "agent-panel:ws_0",
+            "agent-activity:pane:pane_0",
+            "agent-node:pane:pane_0:node_0",
+            "agent-node:pane:pane_0:node_1",
+        ],
+        "根节点 node_0 / node_1 各有一个子节点，默认折叠"
+    );
+    let ids = |state: &ClientShellState| {
+        state
+            .hits
+            .agent_activity_rows
+            .iter()
+            .map(|hit| hit.node_id.clone())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(ids(&state), ["node_0", "node_1"]);
+    let node_0 = rect_rows(&state, state.hits.agent_activity_rows[0].rect);
+    assert!(node_0[0].starts_with("  ├─▸ ◐ task 0"), "{node_0:?}");
+    let node_1 = rect_rows(&state, state.hits.agent_activity_rows[1].rect);
+    assert!(node_1[0].starts_with("  └─▸ ✓ task 1"), "{node_1:?}");
+
+    let toggle = toggle_rect(
+        &state,
+        &ClientEndpointId::Local,
+        "agent-node:pane:pane_0:node_0",
+    );
+    state.handle_raw_events(vec![click(toggle)]);
+    assert!(state
+        .collapsed_groups
+        .contains("agent-node:pane:pane_0:node_0"));
+    state.compose(106, 30).expect("展开 node_0 帧");
+    assert_eq!(ids(&state), ["node_0", "node_2", "node_1"]);
+    let node_2 = rect_rows(&state, state.hits.agent_activity_rows[1].rect);
+    assert!(
+        node_2[0].starts_with("  │ └── ◐ task 2"),
+        "深一层的子节点: {node_2:?}"
+    );
+}
+
+/// 多行行配置（这里 `[状态图标 agent] / [状态文案]`）：续行画祖先引导线并缩进
+/// 两列对齐名称；agent 行展开活动时，续行在开关列接一条引导线到下面的活动行。
+/// 行配置自带状态文案时不再另补。
+#[test]
+fn tree_multi_line_agent_rows_draw_continuation_guides() {
+    use crate::config::AgentSidebarToken as Token;
+    let mut config = Config::default();
+    config.ui.status_indicators = crate::config::StatusIndicatorStyle::Symbols;
+    config.ui.sidebar.agents.rows =
+        vec![vec![Token::StateIcon, Token::Agent], vec![Token::StateText]];
+    let mut state = ClientShellState::new(ClientShellConfig::from_config(&config));
+    state.set_snapshot(Box::new(two_workspace_snapshot()));
+    state.set_pane_surface(surface());
+    state.compose(106, 30).expect("多行配置帧");
+    let status = &crate::i18n::texts().status;
+    let one = rect_rows(&state, classic_agent_rect(&state, "pane_1"));
+    assert_eq!(one.len(), 2, "{one:?}");
+    assert!(one[0].starts_with("├── ○ one"), "{one:?}");
+    assert_eq!(
+        compact(&one[0]),
+        compact("├── ○ one"),
+        "行配置带状态文案：首行不另补: {one:?}"
+    );
+    assert!(
+        one[1].starts_with("│     "),
+        "非末子续行接祖先引导线: {one:?}"
+    );
+    assert_eq!(compact(&one[1]), compact(&format!("│ {}", status.idle)));
+    let two = rect_rows(&state, classic_agent_rect(&state, "pane_2"));
+    assert!(two[1].starts_with("      "), "末子续行留白: {two:?}");
+
+    // 展开活动的 agent 行：续行在开关列接引导线。
+    let mut projected = summary_snapshot();
+    projected.agents[0].agent_status = AgentStatus::Working;
+    let mut state = ClientShellState::new(ClientShellConfig::from_config(&config));
+    state.set_snapshot(Box::new(projected));
+    state.set_pane_surface(surface());
+    state.toggle_collapsed_group(
+        &ClientEndpointId::Local,
+        "agent-activity:pane:pane_0".into(),
+    );
+    state.compose(106, 30).expect("展开活动的多行帧");
+    let agent = rect_rows(&state, classic_agent_rect(&state, "pane_0"));
+    assert!(agent[0].starts_with("└─▾ ◐ agent-0"), "{agent:?}");
+    assert!(
+        agent[1].starts_with("  │   "),
+        "开关列接到活动行: {agent:?}"
+    );
+}
+
+/// 重复 id / 自指父节点的活动数据不会让构建死循环，也不重复出行。
+#[test]
+fn tree_activity_nodes_tolerate_cycles_and_duplicate_ids() {
+    let mut projected = activity_snapshot(0);
+    projected.agents[0].activity.nodes = vec![
+        ClientShellActivityNode {
+            id: "a".into(),
+            label: "root".into(),
+            ..Default::default()
+        },
+        ClientShellActivityNode {
+            id: "a".into(),
+            label: "dup".into(),
+            parent_id: Some("a".into()),
+            ..Default::default()
+        },
+        ClientShellActivityNode {
+            id: "b".into(),
+            label: "self".into(),
+            parent_id: Some("b".into()),
+            ..Default::default()
+        },
+    ];
+    projected.agents[0].activity.total = 3;
+    let mut state = classic_state_with(AgentPanelSortConfig::Spaces, projected);
+    state.toggle_collapsed_group(
+        &ClientEndpointId::Local,
+        "agent-activity:pane:pane_0".into(),
+    );
+    state.toggle_collapsed_group(&ClientEndpointId::Local, "agent-node:pane:pane_0:a".into());
+    state.compose(106, 30).expect("环状活动帧");
+    let labels = state
+        .hits
+        .agent_activity_rows
+        .iter()
+        .map(|hit| rect_rows(&state, hit.rect)[0].trim().to_owned())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        labels.len(),
+        2,
+        "root 与它的 dup 子节点各出一次；自指节点不可达: {labels:?}"
+    );
+    assert!(
+        labels[0].contains("root") && labels[1].contains("dup"),
+        "{labels:?}"
+    );
+}
+
+/// 外部来源条目：按 source 单列「外部」分组（可折叠），条目行带状态、标签、agent
+/// 名、「暂不可读」与活动徽标；点条目行打开活动窗口，右键有「查看 Agent 活动」。
+#[test]
+fn tree_external_agents_group_by_source_and_open_the_activity_window() {
+    let mut projected = two_workspace_snapshot();
+    projected.external_agents = vec![
+        ClientShellExternalAgent {
+            external_id: "zcode:abc".into(),
+            source: "zcode".into(),
+            agent_status: AgentStatus::Working,
+            label: "fix login".into(),
+            readable: true,
+            agent: Some("zcode".into()),
+            cwd: None,
+            updated_at_ms: None,
+            activity: ClientShellAgentActivity {
+                running: 1,
+                total: 2,
+                truncated: false,
+                nodes: vec![ClientShellActivityNode {
+                    id: "n1".into(),
+                    label: "sub".into(),
+                    ..Default::default()
+                }],
+            },
+        },
+        ClientShellExternalAgent {
+            external_id: "zcode:def".into(),
+            source: "zcode".into(),
+            agent_status: AgentStatus::Idle,
+            label: String::new(),
+            readable: false,
+            agent: None,
+            cwd: None,
+            updated_at_ms: None,
+            activity: Default::default(),
+        },
+    ];
+    let mut state = classic_state_with(AgentPanelSortConfig::Spaces, projected.clone());
+    // 加宽侧栏，让「标签 + agent 名 + 徽标」都放得下（窄时按值 > 标签 > 次要信息裁）。
+    state.sidebar_width = 36;
+    state.sidebar_width_manual = true;
+    state.compose(106, 34).expect("外部分组帧");
+
+    let keys = local_toggle_keys(&state);
+    assert_eq!(
+        keys.last().copied(),
+        Some("agent-activity:ext:zcode:abc"),
+        "有活动的外部条目可展开: {keys:?}"
+    );
+    assert!(keys.contains(&"agent-external:zcode"), "{keys:?}");
+    let texts = &crate::i18n::texts().agent_panel;
+    let group = rect_rows(
+        &state,
+        toggle_rect(&state, &ClientEndpointId::Local, "agent-external:zcode"),
+    );
+    assert!(group[0].starts_with('▾'), "{group:?}");
+    assert!(
+        compact(&group[0]).contains(&compact(texts.external_group)) && group[0].contains("zcode"),
+        "分组头写「外部 · source」: {group:?}"
+    );
+    assert!(group[0].trim_end().ends_with("· 2"), "{group:?}");
+    let externals = state
+        .hits
+        .external_agents
+        .iter()
+        .map(|(_, _, id)| id.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(externals, ["zcode:abc", "zcode:def"]);
+    let abc = rect_rows(&state, state.hits.external_agents[0].0);
+    assert!(
+        abc[0].starts_with("├─▸ ◐ fix login zcode"),
+        "活动摘要默认折叠: {abc:?}"
+    );
+    let badge = crate::i18n::fill(texts.activity_badge_fmt, &[("n", "1/2")]);
+    assert!(compact(&abc[0]).ends_with(&compact(&badge)), "{abc:?}");
+    assert!(state.hits.agent_activity_rows.is_empty());
+    let def = rect_rows(&state, state.hits.external_agents[1].0);
+    assert!(
+        def[0].starts_with("└── ○ zcode:def"),
+        "没有标签时回退到 id: {def:?}"
+    );
+    assert!(
+        compact(&def[0]).contains(&compact(texts.external_unreadable)),
+        "{def:?}"
+    );
+    state.handle_raw_events(vec![click(toggle_rect(
+        &state,
+        &ClientEndpointId::Local,
+        "agent-activity:ext:zcode:abc",
+    ))]);
+    state.compose(106, 34).expect("展开外部条目活动帧");
+    let node = rect_rows(&state, state.hits.agent_activity_rows[0].rect);
+    assert!(
+        node[0].starts_with("│ └── · sub"),
+        "外部条目下的活动节点: {node:?}"
+    );
+    assert_eq!(state.hits.agent_activity_rows[0].owner_key, "ext:zcode:abc");
+
+    // 点条目行：打开活动窗口。
+    let row = state.hits.external_agents[1].0;
+    state.handle_raw_events(vec![click_at(row.x + 8, row.y)]);
+    assert!(matches!(
+        state.overlay.as_ref(),
+        Some(ClientShellOverlay::AgentActivity(overlay))
+            if overlay.owner == super::super::agent_activity_overlay::AgentActivityOwner::External {
+                external_id: "zcode:def".into()
+            }
+    ));
+    state.overlay = None;
+
+    // 右键：外部条目菜单。
+    let row = state.hits.external_agents[0].0;
+    state.handle_raw_events(vec![RawInputEvent::Mouse(crossterm::event::MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Right),
+        column: row.x + 8,
+        row: row.y,
+        modifiers: KeyModifiers::empty(),
+    })]);
+    assert!(matches!(
+        state.overlay.as_ref(),
+        Some(ClientShellOverlay::ContextMenu(menu))
+            if matches!(&menu.target, ClientContextMenuTarget::ExternalAgent { external_id, .. } if external_id == "zcode:abc")
+    ));
+    state.overlay = None;
+
+    // 折叠分组：条目与活动行都藏起来。
+    let group = toggle_rect(&state, &ClientEndpointId::Local, "agent-external:zcode");
+    state.handle_raw_events(vec![click_at(group.x + 3, group.y)]);
+    state.compose(106, 34).expect("折叠外部分组帧");
+    assert!(state.hits.external_agents.is_empty());
+    assert!(state.hits.agent_activity_rows.is_empty());
+    assert!(local_toggle_keys(&state).contains(&"agent-external:zcode"));
+
+    // 平铺（Launch）下外部分组仍单列在 agent 之后。
+    let mut state = classic_state_with(AgentPanelSortConfig::Launch, projected.clone());
+    state.compose(106, 34).expect("launch 外部分组帧");
+    assert_eq!(state.hits.external_agents.len(), 2);
+    let last_agent = state.hits.agents.iter().map(|(rect, _)| rect.y).max();
+    assert!(
+        state
+            .hits
+            .external_agents
+            .iter()
+            .all(|(rect, _, _)| Some(rect.y) > last_agent),
+        "外部条目排在全部 agent 之后"
+    );
+
+    // 状态过滤视图只过滤 pane 里的 agent，外部条目不列出。
+    projected.agent_view_label = Some("blocked".into());
+    let mut state = classic_state_with(AgentPanelSortConfig::Spaces, projected);
+    state.compose(106, 34).expect("过滤视图帧");
+    assert!(state.hits.external_agents.is_empty());
+    assert!(local_toggle_keys(&state)
+        .iter()
+        .all(|key| !key.starts_with("agent-external:")));
+}
+
+/// 在线 / 离线端点的行：离线端点的整棵子树变暗（DIM），机器行带状态文案。
+#[test]
+fn tree_offline_endpoint_rows_are_dimmed_with_a_status_label() {
+    let (mut state, remote) = federated_state(AgentPanelSortConfig::Spaces);
+    state.set_endpoint_status(&remote, ClientEndpointStatus::Reconnecting);
+    state.compose(106, 40).expect("离线端点帧");
+    let machine = toggle_rect(&state, &remote, MACHINE_TOGGLE_KEY);
+    let line = &rect_rows(&state, machine)[0];
+    assert!(line.starts_with("▾ … Build"), "重连中的状态字形: {line:?}");
+    let status_label =
+        crate::client::shell::endpoints::endpoint_status_label(ClientEndpointStatus::Reconnecting);
+    assert!(compact(line).contains(&compact(status_label)), "{line:?}");
+    let buffer = state.compose_buffer.as_ref().expect("缓冲");
+    assert!(
+        buffer[(machine.x + 4, machine.y)]
+            .style()
+            .add_modifier
+            .contains(ratatui::style::Modifier::DIM),
+        "离线端点整行变暗"
+    );
+    let (rect, endpoint_id, _) = &state.hits.endpoint_agents[3];
+    assert_eq!(endpoint_id, &remote);
+    assert!(
+        buffer[(rect.x + 6, rect.y)]
+            .style()
+            .add_modifier
+            .contains(ratatui::style::Modifier::DIM),
+        "离线端点的 agent 行也变暗"
+    );
+}
+
+/// 一次统一树的 kind 清点：Spaces 树里每种节点的种类与深度都对得上层级设计。
+#[test]
+fn tree_rows_follow_the_machine_workspace_tab_agent_activity_hierarchy() {
+    let (mut state, _) = federated_state(AgentPanelSortConfig::Spaces);
+    let mut projected = activity_snapshot(2);
+    let mut tab = projected.tabs[0].clone();
+    tab.tab_id = "tab_x".into();
+    tab.label = "x".into();
+    tab.focused = false;
+    projected.tabs.push(tab);
+    state.set_snapshot(Box::new(projected));
+    state.toggle_collapsed_group(
+        &ClientEndpointId::Local,
+        "agent-activity:pane:pane_0".into(),
+    );
+    state.compose(106, 40).expect("层级帧");
+    let rows = state.federated_agent_rows.as_ref().expect("行缓存").rows();
+    let shape = rows
+        .iter()
+        .map(|row| {
+            let kind = match &row.kind.kind {
+                AgentTreeKind::Machine { .. } => "machine",
+                AgentTreeKind::Workspace { .. } => "workspace",
+                AgentTreeKind::Tab { .. } => "tab",
+                AgentTreeKind::Agent { .. } => "agent",
+                AgentTreeKind::Activity { .. } => "activity",
+                AgentTreeKind::ActivityMore { .. } => "more",
+                AgentTreeKind::ExternalGroup { .. } => "external-group",
+                AgentTreeKind::ExternalAgent { .. } => "external",
+            };
+            (kind, row.depth, row.has_children, row.collapsed)
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        shape,
+        [
+            ("machine", 0, true, false),
+            ("workspace", 1, true, false),
+            ("tab", 2, true, false),
+            ("agent", 3, true, false),
+            ("activity", 4, true, true),
+            ("machine", 0, true, false),
+            ("workspace", 1, true, false),
+            ("agent", 2, false, false),
+            ("agent", 2, false, false),
+        ]
+    );
 }

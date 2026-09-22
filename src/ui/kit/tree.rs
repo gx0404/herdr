@@ -17,8 +17,6 @@
 //!
 //! 引导线从父节点的开关格垂下，连接线正好接在它下面。
 
-#![allow(dead_code)] // seam-stub(agent-panel)：波 2 面板车道接入 Agents 树后删除
-
 use ratatui::{buffer::Buffer, layout::Rect, style::Style};
 
 use super::put_str;

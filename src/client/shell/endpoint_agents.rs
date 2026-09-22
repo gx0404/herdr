@@ -1,27 +1,37 @@
+use super::agent_tree::{build_agent_tree, AgentTreeKind, AgentTreeRow, CollapseState};
 use super::render::put_text;
 use super::*;
 
+/// 折叠侧栏的单列视图：只画统一树里的 agent 行（机器首字母 + 状态图标），行序
+/// 与展开视图一致，被折叠分组藏起来的 agent 同样不出现。
 pub(super) fn render_collapsed(
     buffer: &mut Buffer,
     area: Rect,
-    rows: &[EndpointAgentRow],
+    rows: &[AgentTreeRow],
     config: &ClientShellConfig,
     chrome_hover: Option<&super::feedback::ChromeHover>,
     hits: &mut ShellHitMap,
 ) {
-    for (index, row) in rows.iter().take(area.height as usize).enumerate() {
+    let agents = rows.iter().filter_map(|row| match &row.kind.kind {
+        AgentTreeKind::Agent {
+            agent,
+            machine_initial,
+            ..
+        } => Some((&row.kind, agent, *machine_initial)),
+        _ => None,
+    });
+    for (index, (node, agent, initial)) in agents.take(area.height as usize).enumerate() {
         let rect = Rect::new(area.x, area.y + index as u16, area.width, 1);
         let hovered = matches!(
             chrome_hover,
             Some(super::feedback::ChromeHover::EndpointAgentRow(endpoint_id, pane_id))
-                if endpoint_id == &row.endpoint_id && pane_id == &row.agent.pane_id
+                if endpoint_id == &node.endpoint_id && pane_id == &agent.pane_id
         );
-        if row.agent.focused {
+        if agent.focused {
             buffer.set_style(rect, Style::default().bg(config.palette.active_row_bg));
         } else if hovered {
-            buffer.set_style(rect, Style::default().bg(config.palette.surface0));
+            buffer.set_style(rect, Style::default().bg(config.palette.hover_row_bg()));
         }
-        let initial = row.machine_label.chars().next().unwrap_or('?');
         put_text(
             buffer,
             rect.x,
@@ -29,86 +39,54 @@ pub(super) fn render_collapsed(
             rect.width,
             &format!(
                 "{initial}{}",
-                status_icon(row.agent.status, config.status_indicators)
+                status_icon(agent.status, config.status_indicators)
             ),
             Style::default()
-                .fg(if row.stale {
+                .fg(if node.stale {
                     config.palette.overlay0
                 } else {
-                    status_color(row.agent.status, &config.palette)
+                    status_color(agent.status, &config.palette)
                 })
-                .add_modifier(if row.stale {
+                .add_modifier(if node.stale {
                     Modifier::DIM
                 } else {
                     Modifier::empty()
                 }),
         );
         hits.endpoint_agents
-            .push((rect, row.endpoint_id.clone(), row.agent.pane_id.clone()));
+            .push((rect, node.endpoint_id.clone(), agent.pane_id.clone()));
     }
 }
 
+/// 联邦 / workbench 的 Agents 面板：与 classic 同一套树渲染，只是 agent 行写进
+/// 端点限定的命中区。
+#[allow(clippy::too_many_arguments)]
 pub(super) fn render_expanded(
     buffer: &mut Buffer,
     area: Rect,
     agent_view_label: Option<&str>,
-    rows: &[EndpointAgentRow],
+    rows: &[AgentTreeRow],
     config: &ClientShellConfig,
     agent_scroll: &mut usize,
     chrome_hover: Option<&super::feedback::ChromeHover>,
     hits: &mut ShellHitMap,
 ) {
-    if !super::agent_sidebar::render_agent_panel_header(
+    super::agent_tree::render_agent_tree_rows(
         buffer,
         area,
         agent_view_label,
-        config,
-        chrome_hover,
-        hits,
-    ) {
-        return;
-    }
-    super::agent_sidebar::render_agent_list(
-        buffer,
-        area,
         rows,
-        agent_view_label.map(|_| crate::i18n::texts().sidebar.no_matching_agents),
         config,
         agent_scroll,
-        matches!(
-            chrome_hover,
-            Some(super::feedback::ChromeHover::AgentScrollbarThumb)
-        ),
+        chrome_hover,
         hits,
-        |row| row.agent.rows.len(),
-        |buffer, rect, row, hits| {
-            let hovered = matches!(
-                chrome_hover,
-                Some(super::feedback::ChromeHover::EndpointAgentRow(endpoint_id, pane_id))
-                    if endpoint_id == &row.endpoint_id && pane_id == &row.agent.pane_id
-            );
-            super::agent_sidebar::render_agent_row(buffer, rect, &row.agent, config, hovered, None);
-            if row.stale {
-                buffer.set_style(
-                    rect,
-                    Style::default()
-                        .fg(config.palette.overlay0)
-                        .add_modifier(Modifier::DIM),
-                );
-            }
-            hits.endpoint_agents
-                .push((rect, row.endpoint_id.clone(), row.agent.pane_id.clone()));
-        },
+        true,
     );
 }
 
-#[derive(Debug)]
-pub(super) struct EndpointAgentRow {
-    pub(super) endpoint_id: ClientEndpointId,
-    pub(super) machine_label: String,
-    pub(super) stale: bool,
-    pub(super) agent: super::agent_sidebar::AgentRow,
-}
+/// 缓存行的类型名沿用旧名，`render.rs::ShellRenderState` 仍按它引用；实际类型是
+/// 统一树的行。
+pub(super) type EndpointAgentRow = AgentTreeRow;
 
 /// 联邦 agents 面板行的缓存键：端点集合与各自快照分代、排序、过滤标签、配置
 /// 代际。任何一项变化才重算（PERF-02）。
@@ -130,10 +108,11 @@ pub(super) struct AgentRowsKey {
     endpoints: Vec<EndpointRowsKey>,
 }
 
-/// 联邦 agents 面板的行：视图计算阶段按 `AgentRowsKey` 维护，渲染只读。
+/// Agents 面板统一树的行：视图计算阶段按 `AgentRowsKey` 维护，渲染只读。
+/// classic / 联邦 / workbench 三条路径都从这里取行。
 pub(super) struct AgentRowsCache {
     key: AgentRowsKey,
-    rows: Vec<EndpointAgentRow>,
+    rows: Vec<AgentTreeRow>,
 }
 
 impl AgentRowsCache {
@@ -172,7 +151,7 @@ impl AgentRowsCache {
         }
     }
 
-    pub(super) fn rows(&self) -> &[EndpointAgentRow] {
+    pub(super) fn rows(&self) -> &[AgentTreeRow] {
         &self.rows
     }
 
@@ -185,16 +164,17 @@ impl AgentRowsCache {
         endpoints: &[ClientShellEndpoint],
         active: &ClientEndpointId,
         config: &ClientShellConfig,
+        collapse: &CollapseState<'_>,
     ) -> Self {
         Self {
-            rows: agent_rows(endpoints, active, config),
+            rows: build_agent_tree(endpoints, active, config, collapse),
             key,
         }
     }
 }
 
 impl ClientShellState {
-    /// 视图计算阶段刷新联邦 agents 行缓存（PERF-02）：键未变则复用上一帧的行。
+    /// 视图计算阶段刷新 agents 面板的行缓存（PERF-02）：键未变则复用上一帧的行。
     pub(super) fn refresh_federated_agent_rows(&mut self) {
         let key = AgentRowsCache::key_for(
             &self.endpoints,
@@ -218,54 +198,12 @@ impl ClientShellState {
                 &self.endpoints,
                 &self.active_endpoint_id,
                 &self.config,
+                &CollapseState {
+                    collapsed_groups: &self.collapsed_groups,
+                    remote_collapsed_groups: &self.remote_collapsed_groups,
+                    collapsed_endpoints: &self.collapsed_endpoints,
+                },
             ));
         }
     }
-}
-
-fn agent_rows(
-    endpoints: &[ClientShellEndpoint],
-    active_endpoint_id: &ClientEndpointId,
-    config: &ClientShellConfig,
-) -> Vec<EndpointAgentRow> {
-    let mut rendered_rows = endpoints
-        .iter()
-        .filter_map(|endpoint| {
-            endpoint.snapshot.as_deref().map(|snapshot| {
-                snapshot
-                    .agents
-                    .iter()
-                    .filter_map(|agent| {
-                        super::agent_sidebar::agent_row(
-                            snapshot,
-                            &agent.pane_id,
-                            config,
-                            Some(&endpoint.label),
-                        )
-                    })
-                    .map(|agent| ((endpoint.endpoint_id.clone(), agent.pane_id.clone()), agent))
-                    .collect::<Vec<_>>()
-            })
-        })
-        .flatten()
-        .collect::<HashMap<_, _>>();
-
-    super::aggregate_navigation::aggregate_agent_rows(
-        endpoints,
-        active_endpoint_id,
-        config.agent_panel_sort,
-    )
-    .into_iter()
-    .filter_map(|row| {
-        let key = (row.endpoint.endpoint_id.clone(), row.agent.pane_id.clone());
-        let mut agent = rendered_rows.remove(&key)?;
-        agent.focused &= row.endpoint.endpoint_id == active_endpoint_id;
-        Some(EndpointAgentRow {
-            endpoint_id: row.endpoint.endpoint_id.clone(),
-            machine_label: row.endpoint.label.to_owned(),
-            stale: row.endpoint.stale(),
-            agent,
-        })
-    })
-    .collect()
 }

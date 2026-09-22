@@ -100,8 +100,8 @@ fn overlay_kind_storage_keys_roundtrip_and_stay_unique() {
 fn chrome_hover_resolves_agent_tree_hit_vectors_with_toggles_before_rows() {
     let mut state = state_with_agents();
     assert!(
-        state.hits.agent_tree_toggles.is_empty() && state.hits.agent_activity_rows.is_empty(),
-        "车道填充前新向量恒空"
+        state.hits.agent_activity_rows.is_empty(),
+        "夹具里的 agent 没有活动节点"
     );
     let remote = ClientEndpointId::Ssh(
         crate::client::endpoint::ProfileId::parse("0123456789abcdef0123456789abcdef")

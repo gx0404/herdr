@@ -586,9 +586,9 @@ pub(crate) fn render_sidebar_regions(
     super::render_agent_panel(
         buffer,
         detail_area,
-        snapshot,
+        snapshot.agent_view_label.as_deref(),
+        state.federated_agent_rows,
         config,
-        state.collapsed_groups,
         state.agent_scroll,
         state.chrome_hover,
         hits,

@@ -1097,8 +1097,6 @@ pub struct ScenesTexts {
 
 /// Agents 面板（统一树）与 agent 行右键菜单的文案。
 /// `*_fmt` entries are `fill` templates; placeholders are documented inline.
-// seam-stub(agent-panel)：接缝预落的文案，字段暂无读者；对应车道用上后删除本 allow。
-#[allow(dead_code)]
 pub struct AgentPanelTexts {
     pub sort_launch: &'static str,
     pub external_group: &'static str,

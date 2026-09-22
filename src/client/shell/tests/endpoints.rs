@@ -106,9 +106,10 @@ fn state_with_scrollable_agents() -> (ClientShellState, ClientEndpointId) {
         state.set_endpoint_snapshot(&endpoint_id, projection);
     }
     state.compose(100, 28).unwrap();
-    state.agent_scroll = 6;
+    // 统一树（W3）：每个端点多了机器行与工作区头，起始行相应后移。
+    state.agent_scroll = 8;
     state.compose(100, 28).unwrap();
-    assert_eq!(state.agent_scroll, 6);
+    assert_eq!(state.agent_scroll, 8);
     (state, remote)
 }
 
@@ -138,7 +139,7 @@ fn switching_machines_preserves_aggregate_agent_scroll_and_visible_rows() {
         state.workspace_scroll = 3;
         state.tab_scroll = 2;
         assert!(state.activate_endpoint_projection(&endpoint_id));
-        assert_eq!(state.agent_scroll, 6);
+        assert_eq!(state.agent_scroll, 8);
         assert_eq!(state.workspace_scroll, 0);
         assert_eq!(state.tab_scroll, 0);
         assert!(state.pane_surface.is_none());
@@ -147,7 +148,7 @@ fn switching_machines_preserves_aggregate_agent_scroll_and_visible_rows() {
         next_surface.boot_id = state.endpoint_boot_id(&endpoint_id).unwrap().into();
         state.set_pane_surface(next_surface);
         state.compose(100, 28).unwrap();
-        assert_eq!(state.agent_scroll, 6);
+        assert_eq!(state.agent_scroll, 8);
         assert_eq!(state.hits.endpoint_agents, visible);
     }
 }
@@ -896,8 +897,12 @@ fn aggregate_agents_use_configured_rows_machine_token_and_status_colors() {
         })
         .collect::<Vec<_>>()
         .join("\n");
-    assert!(text.contains("○ Local · local agent"), "frame: {text}");
-    assert!(text.contains("× Build · remote agent"), "frame: {text}");
+    // 统一树（W3）：多端点时机器层承载机器名，agent 行不再重复机器 token。
+    assert!(text.contains("▾ ● Local"), "frame: {text}");
+    assert!(text.contains("▾ ● Build"), "frame: {text}");
+    assert!(text.contains("○ local agent"), "frame: {text}");
+    assert!(text.contains("× remote agent"), "frame: {text}");
+    assert!(!text.contains("Local · local agent"), "frame: {text}");
     let compact: String = text.chars().filter(|ch| !ch.is_whitespace()).collect();
     assert!(compact.contains("按工作区分组"), "frame: {text}");
     let toggle = state.hits.agent_sort_toggle;
@@ -1108,8 +1113,11 @@ fn selected_default_view_ignores_inactive_endpoint_projection() {
         })
         .collect::<Vec<_>>()
         .join("\n");
-    assert!(text.contains("Local · local agent"), "frame: {text}");
-    assert!(text.contains("Build · remote agent"), "frame: {text}");
+    // 统一树（W3）：机器名在机器行，agent 行只剩 agent token。
+    assert!(text.contains("▾ ● Local"), "frame: {text}");
+    assert!(text.contains("local agent"), "frame: {text}");
+    assert!(text.contains("▾ ● Build"), "frame: {text}");
+    assert!(text.contains("remote agent"), "frame: {text}");
     let compact: String = text.chars().filter(|ch| !ch.is_whitespace()).collect();
     assert!(compact.contains("按工作区分组"), "frame: {text}");
 }
@@ -1812,7 +1820,8 @@ fn disconnected_active_endpoint_freezes_surface_and_marks_cached_ui_stale() {
     let reconnecting_label = format!("◐{}", crate::i18n::texts().endpoint.st_reconnecting);
     let compact: String = text.chars().filter(|ch| !ch.is_whitespace()).collect();
     assert!(compact.contains(&reconnecting_label), "frame: {text}");
-    assert!(text.contains("Build · remote agent"), "frame: {text}");
+    assert!(text.contains("Build"), "frame: {text}");
+    assert!(text.contains("remote agent"), "frame: {text}");
     assert!(
         text.contains("LIVE"),
         "frozen surface should remain: {text}"
@@ -2478,10 +2487,13 @@ fn acknowledging_a_surface_refreshes_cached_federated_agent_rows() {
     state.compose(100, 28).expect("first frame");
 
     let status = |state: &ClientShellState| {
-        state
-            .federated_agent_rows
-            .as_ref()
-            .and_then(|cache| cache.rows().first().map(|row| row.agent.status))
+        state.federated_agent_rows.as_ref().and_then(|cache| {
+            cache
+                .rows()
+                .iter()
+                .find_map(|row| row.kind.agent())
+                .map(|agent| agent.status)
+        })
     };
 
     // 新快照：agent 变 Done（seq 7）。此刻还没有匹配的表面帧，确认不会发生。

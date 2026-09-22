@@ -4,20 +4,23 @@ use ratatui::{
     buffer::Buffer,
     layout::Rect,
     style::{Modifier, Style},
-    text::Line,
-    widgets::{Paragraph, Widget},
 };
 
 use super::*;
 // 显式导入优先于上面的 glob：本文件按 `usize` 算宽度。
 use crate::ui::display_width;
 
+/// 一个 agent 行的行数据：按侧栏行配置解析出的 token 行，由统一树
+/// （`agent_tree.rs`）在视图计算阶段构建、渲染阶段画出。
 #[derive(Debug)]
 pub(super) struct AgentRow {
     pub(super) pane_id: String,
     pub(super) status: crate::api::schema::AgentStatus,
     pub(super) focused: bool,
     pub(super) rows: Vec<Vec<crate::ui::ResolvedToken>>,
+    /// 状态文案（服务端给的自定义状态标签优先）。行配置里没有 `state_text`
+    /// token 时，统一树把它当次要信息画在名称后面，放不下先丢它。
+    pub(super) state_text: String,
 }
 
 pub(super) fn ordered_agent_pane_ids(
@@ -53,258 +56,35 @@ pub(super) fn launch_order_key(agent: &crate::protocol::ClientShellAgent) -> (bo
     (agent.launch_seq == 0, agent.launch_seq)
 }
 
-/// One rendered line of the agents panel: a collapsible workspace header or
-/// an agent row nested under its workspace.
-pub(super) enum AgentPanelEntry {
-    Workspace {
-        key: String,
-        label: String,
-        agent_count: usize,
-        status: crate::api::schema::AgentStatus,
-        collapsed: bool,
-    },
-    Agent {
-        row: AgentRow,
-        /// `Some(last_child)` in the grouped view for tree prefixes.
-        tree: Option<bool>,
-    },
-}
-
+/// 工作区分组头的折叠键（`agent-panel:` 命名空间，存 `collapsed_groups`）。
 pub(super) fn agent_group_key(workspace_id: &str) -> String {
     format!("agent-panel:{workspace_id}")
 }
 
-fn workspace_agent_pane_ids(
-    snapshot: &ClientShellSnapshot,
-    workspace_id: &str,
-    sort: crate::config::AgentPanelSortConfig,
-) -> Vec<String> {
-    let agents = snapshot
-        .agents
-        .iter()
-        .filter(|agent| agent.workspace_id == workspace_id)
-        .collect::<Vec<_>>();
-    match sort {
-        // Server already groups snapshot.agents by workspace; keep that
-        // order instead of agent_order, which only drives the filtered view.
-        crate::config::AgentPanelSortConfig::Spaces => agents
-            .into_iter()
-            .map(|agent| agent.pane_id.clone())
-            .collect(),
-        crate::config::AgentPanelSortConfig::Launch => {
-            let mut sorted = agents;
-            sorted.sort_by_key(|agent| launch_order_key(agent));
-            sorted
-                .into_iter()
-                .map(|agent| agent.pane_id.clone())
-                .collect()
-        }
-    }
-}
-
-/// Workspace-grouped entries for the unfiltered view; a status-filtered
-/// view (`agent_view_label`) stays flat because the grouping dimension is
-/// already the filter's purpose.
-pub(super) fn agent_panel_entries(
-    snapshot: &ClientShellSnapshot,
-    config: &ClientShellConfig,
-    collapsed_groups: &std::collections::HashSet<String>,
-) -> Vec<AgentPanelEntry> {
-    if snapshot.agent_view_label.is_some() {
-        return agent_rows(snapshot, config, None)
-            .into_iter()
-            .map(|row| AgentPanelEntry::Agent { row, tree: None })
-            .collect();
-    }
-    let mut entries = Vec::new();
-    for workspace in &snapshot.workspaces {
-        let rows: Vec<AgentRow> = workspace_agent_pane_ids(
-            snapshot,
-            workspace.workspace_id.as_str(),
-            config.agent_panel_sort,
-        )
-        .into_iter()
-        .filter_map(|pane_id| {
-            let mut row = agent_row(snapshot, &pane_id, config, None)?;
-            // The workspace header already carries the workspace identity;
-            // drop the now-redundant token so children stay readable.
-            for line in &mut row.rows {
-                line.retain(|token| {
-                    !matches!(token.kind, crate::ui::ResolvedTokenKind::Workspace(_))
-                });
-            }
-            row.rows.retain(|line| !line.is_empty());
-            Some(row)
-        })
-        .collect();
-        if rows.is_empty() {
-            continue;
-        }
-        let key = agent_group_key(&workspace.workspace_id);
-        let collapsed = collapsed_groups.contains(&key);
-        entries.push(AgentPanelEntry::Workspace {
-            key,
-            label: workspace.label.clone(),
-            agent_count: rows.len(),
-            status: rows
-                .iter()
-                .map(|row| row.status)
-                .max_by_key(|status| status_priority(*status))
-                .unwrap_or(crate::api::schema::AgentStatus::Idle),
-            collapsed,
-        });
-        if collapsed {
-            continue;
-        }
-        let last = rows.len().saturating_sub(1);
-        for (index, row) in rows.into_iter().enumerate() {
-            entries.push(AgentPanelEntry::Agent {
-                row,
-                tree: Some(index == last),
-            });
-        }
-    }
-    entries
-}
-
+/// classic 单端点侧栏的 Agents 面板：行来自视图计算阶段的统一树缓存
+/// （`AgentRowsCache`），与联邦 / workbench 同一套渲染，agent 行写进 `hits.agents`
+/// （端点隐含为本机）。
+#[allow(clippy::too_many_arguments)]
 pub(super) fn render_agent_panel(
     buffer: &mut Buffer,
     area: Rect,
-    snapshot: &ClientShellSnapshot,
+    agent_view_label: Option<&str>,
+    rows: &[super::agent_tree::AgentTreeRow],
     config: &ClientShellConfig,
-    collapsed_groups: &std::collections::HashSet<String>,
     agent_scroll: &mut usize,
     chrome_hover: Option<&super::feedback::ChromeHover>,
     hits: &mut ShellHitMap,
 ) {
-    if !render_agent_panel_header(
+    super::agent_tree::render_agent_tree_rows(
         buffer,
         area,
-        snapshot.agent_view_label.as_deref(),
-        config,
-        chrome_hover,
-        hits,
-    ) {
-        return;
-    }
-
-    let mut entries = agent_panel_entries(snapshot, config, collapsed_groups);
-    // Degraded mode for very short panels: without room for a workspace
-    // header plus at least one agent row, fall back to the flat list so
-    // agents stay visible and clickable.
-    if area.height.saturating_sub(3) < 3 {
-        entries = agent_rows(snapshot, config, None)
-            .into_iter()
-            .map(|row| AgentPanelEntry::Agent { row, tree: None })
-            .collect();
-    }
-    render_agent_list(
-        buffer,
-        area,
-        &entries,
-        snapshot
-            .agent_view_label
-            .as_ref()
-            .map(|_| crate::i18n::texts().sidebar.no_matching_agents),
+        agent_view_label,
+        rows,
         config,
         agent_scroll,
-        matches!(
-            chrome_hover,
-            Some(super::feedback::ChromeHover::AgentScrollbarThumb)
-        ),
+        chrome_hover,
         hits,
-        |entry| match entry {
-            AgentPanelEntry::Workspace { .. } => 1,
-            AgentPanelEntry::Agent { row, .. } => row.rows.len(),
-        },
-        |buffer, rect, entry, hits| match entry {
-            AgentPanelEntry::Workspace {
-                key,
-                label,
-                agent_count,
-                status,
-                collapsed,
-            } => {
-                let hovered = matches!(
-                    chrome_hover,
-                    Some(super::feedback::ChromeHover::AgentGroupRow(id)) if id == key
-                );
-                render_agent_group_header(
-                    buffer,
-                    rect,
-                    label,
-                    *agent_count,
-                    *status,
-                    *collapsed,
-                    config,
-                    hovered,
-                );
-                hits.agent_group_toggles.push((rect, key.clone()));
-            }
-            AgentPanelEntry::Agent { row, tree } => {
-                hits.agents.push((rect, row.pane_id.clone()));
-                let hovered = matches!(
-                    chrome_hover,
-                    Some(super::feedback::ChromeHover::AgentRow(id)) if id == &row.pane_id
-                );
-                render_agent_row(buffer, rect, row, config, hovered, *tree);
-            }
-        },
-    );
-}
-
-fn render_agent_group_header(
-    buffer: &mut Buffer,
-    rect: Rect,
-    label: &str,
-    agent_count: usize,
-    status: crate::api::schema::AgentStatus,
-    collapsed: bool,
-    config: &ClientShellConfig,
-    hovered: bool,
-) {
-    let palette = &config.palette;
-    if hovered {
-        buffer.set_style(rect, Style::default().bg(palette.surface0));
-    }
-    put_text(
-        buffer,
-        rect.x + 1,
-        rect.y,
-        1,
-        status_icon(status, config.status_indicators),
-        Style::default().fg(status_color(status, palette)),
-    );
-    let count = format!("· {agent_count}");
-    let chevron_x = rect.right().saturating_sub(1);
-    let count_width = display_width(&count).min(rect.width as usize) as u16;
-    let count_x = chevron_x.saturating_sub(count_width + 1);
-    let label_width = count_x.saturating_sub(rect.x + 3);
-    put_text(
-        buffer,
-        rect.x + 3,
-        rect.y,
-        label_width,
-        label,
-        Style::default()
-            .fg(palette.text)
-            .add_modifier(Modifier::BOLD),
-    );
-    put_text(
-        buffer,
-        count_x,
-        rect.y,
-        count_width,
-        &count,
-        Style::default().fg(palette.overlay0),
-    );
-    put_text(
-        buffer,
-        chevron_x,
-        rect.y,
-        1,
-        if collapsed { "▸" } else { "▾" },
-        Style::default().fg(palette.accent),
+        false,
     );
 }
 
@@ -487,17 +267,9 @@ pub(super) fn render_agent_list<T>(
     }
 }
 
-pub(super) fn agent_rows(
-    snapshot: &ClientShellSnapshot,
-    config: &ClientShellConfig,
-    machine: Option<&str>,
-) -> Vec<AgentRow> {
-    ordered_agent_pane_ids(snapshot, config.agent_panel_sort)
-        .into_iter()
-        .filter_map(|pane_id| agent_row(snapshot, &pane_id, config, machine))
-        .collect()
-}
-
+/// 按侧栏行配置解析一个 agent 的 token 行。`machine` 有值时行里带机器 token
+/// （联邦平铺视图）；树视图里机器 / 工作区 / 标签页由分组头承载，调用方按需
+/// 丢掉对应 token。
 pub(super) fn agent_row(
     snapshot: &ClientShellSnapshot,
     pane_id: &str,
@@ -568,89 +340,8 @@ pub(super) fn agent_row(
         status: agent.agent_status,
         focused: agent.focused,
         rows,
+        state_text: state_text.to_owned(),
     })
-}
-
-pub(super) fn render_agent_row(
-    buffer: &mut Buffer,
-    rect: Rect,
-    row: &AgentRow,
-    config: &ClientShellConfig,
-    hovered: bool,
-    tree_last_child: Option<bool>,
-) {
-    let palette = &config.palette;
-    let row_style = if row.focused {
-        Style::default().bg(palette.active_row_bg)
-    } else if hovered {
-        Style::default().bg(palette.surface0)
-    } else {
-        Style::default()
-    };
-    let name_style = if row.focused {
-        Style::default()
-            .fg(palette.text)
-            .add_modifier(Modifier::BOLD)
-    } else {
-        Style::default()
-            .fg(palette.subtext0)
-            .add_modifier(Modifier::BOLD)
-    };
-    let status_style = Style::default().fg(status_color(row.status, palette));
-    let secondary = Style::default().fg(palette.overlay0);
-    let icon = (
-        status_icon(row.status, config.status_indicators),
-        Style::default().fg(status_color(row.status, palette)),
-    );
-    let rows = if row.rows.is_empty() {
-        vec![vec![crate::ui::ResolvedToken {
-            kind: crate::ui::ResolvedTokenKind::StateIcon,
-            style: Default::default(),
-        }]]
-    } else {
-        row.rows.clone()
-    };
-    for (index, tokens) in rows.iter().take(rect.height as usize).enumerate() {
-        let (indent, prefix) = match tree_last_child {
-            Some(last_child) => (
-                0,
-                if index == 0 {
-                    if last_child {
-                        "   └─ "
-                    } else {
-                        "   ├─ "
-                    }
-                } else if last_child {
-                    "        "
-                } else {
-                    "   │    "
-                },
-            ),
-            None => (if index == 0 { 1 } else { 3 }, ""),
-        };
-        let mut spans = vec![ratatui::text::Span::raw(" ".repeat(indent))];
-        if !prefix.is_empty() {
-            spans.push(ratatui::text::Span::styled(
-                prefix,
-                Style::default().fg(palette.overlay0),
-            ));
-        }
-        spans.extend(crate::ui::resolved_token_spans(
-            tokens,
-            icon,
-            status_style,
-            name_style,
-            secondary,
-            secondary,
-            palette,
-            rect.width
-                .saturating_sub((indent + display_width(prefix)) as u16) as usize,
-        ));
-        Paragraph::new(Line::from(spans)).style(row_style).render(
-            Rect::new(rect.x, rect.y + index as u16, rect.width, 1),
-            buffer,
-        );
-    }
 }
 
 fn put_text(buffer: &mut Buffer, x: u16, y: u16, width: u16, text: &str, style: Style) {
