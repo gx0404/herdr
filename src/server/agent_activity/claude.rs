@@ -3,7 +3,8 @@
 //!
 //! # 本机取证（claude 2.1.278，只读核对目录结构与键名，未读取任何对话正文）
 //!
-//! 转录布局（`<home>/.claude/projects/<项目 slug>/` 下）：
+//! 转录布局（`<config>/projects/<项目 slug>/` 下；`<config>` 是 Claude Code 的配置
+//! 目录，跟随 `CLAUDE_CONFIG_DIR`，缺省 `<home>/.claude`）：
 //!
 //! - `<session-uuid>.jsonl` 是主转录；同名目录 `<session-uuid>/` 放派生数据。
 //! - `<session-uuid>/subagents/agent-<agentId>.jsonl` 是官方文档写的扁平布局；
@@ -183,7 +184,7 @@ enum Located {
 /// 由会话引用定位 `<项目 slug>/<session-uuid>/` 目录。
 ///
 /// `agent_resume::session_ref_from_report` 对 claude 只保留 `Id`（`transcript_path`
-/// 被丢弃），所以 `Id` 分支要在 `<home>/.claude/projects/*/` 下按会话 id 找目录；
+/// 被丢弃），所以 `Id` 分支要在 [`projects_root`] 的各项目目录下按会话 id 找目录；
 /// `Path` 分支兼容日后直接给转录路径的情况。
 fn locate_session(cx: &SourceContext<'_>) -> Located {
     let Some(session) = cx.session else {
@@ -191,7 +192,7 @@ fn locate_session(cx: &SourceContext<'_>) -> Located {
     };
     let candidate = match session.kind {
         AgentSessionRefKind::Path => session_dir_from_transcript(Path::new(&session.value)),
-        AgentSessionRefKind::Id => find_session_dir_by_id(cx.home, &session.value),
+        AgentSessionRefKind::Id => find_session_dir_by_id(&projects_root(cx), &session.value),
     };
     match candidate {
         Some(dir) if dir.is_dir() => Located::Found(dir),
@@ -212,25 +213,25 @@ fn session_dir_from_transcript(path: &Path) -> Option<PathBuf> {
     Some(parent.join(stem))
 }
 
-/// 转录根目录，本适配器所有「按 home 拼路径」的唯一出口。
-///
-/// TODO(activity-schema)：Claude Code 支持用 `CLAUDE_CONFIG_DIR` 把配置目录挪出
-/// `<home>/.claude`，此处跟不上。骨架车道会给 `SourceContext` 追加可选的 agent
-/// 配置目录字段，合入后把本函数改成「优先用该字段，缺省才回退 `<home>/.claude`」
-/// 即可，调用方不用动。
-fn projects_root(home: &Path) -> PathBuf {
-    home.join(".claude").join("projects")
+/// 转录根目录，本适配器所有「按配置目录拼路径」的唯一出口：runtime 解析好的
+/// 配置目录（`SourceContext::agent_config_dir`，跟随 `CLAUDE_CONFIG_DIR`）优先，
+/// 缺省才回退 `<home>/.claude`。给了配置目录就只认它、不再回头找 home，与 Claude
+/// Code 自己的口径一致。
+fn projects_root(cx: &SourceContext<'_>) -> PathBuf {
+    match cx.agent_config_dir {
+        Some(config_dir) => config_dir.join("projects"),
+        None => cx.home.join(".claude").join("projects"),
+    }
 }
 
-/// 在 `<home>/.claude/projects/*/` 下找名为会话 id 的目录。项目 slug 由 cwd 推导的
-/// 规则并不可靠（路径里的 `-` 与分隔符会混淆），直接逐个项目目录探测更稳。
-fn find_session_dir_by_id(home: &Path, session_id: &str) -> Option<PathBuf> {
+/// 在 `<projects>/*/` 下找名为会话 id 的目录。项目 slug 由 cwd 推导的规则并不
+/// 可靠（路径里的 `-` 与分隔符会混淆），直接逐个项目目录探测更稳。
+fn find_session_dir_by_id(projects: &Path, session_id: &str) -> Option<PathBuf> {
     if session_id.is_empty() || session_id.contains(['/', '\\']) || session_id.contains("..") {
         return None;
     }
-    let projects = projects_root(home);
     let mut matches: Vec<PathBuf> = Vec::new();
-    for entry in std::fs::read_dir(&projects).ok()?.flatten() {
+    for entry in std::fs::read_dir(projects).ok()?.flatten() {
         if !entry.file_type().is_ok_and(|kind| kind.is_dir()) {
             continue;
         }
@@ -1338,6 +1339,99 @@ mod tests {
             Claude.read(&cx, "a0000000000000001", None, 4096),
             Err(SourceError::Unavailable)
         ));
+    }
+
+    /// 每个测试自己的临时目录（仓库不带 tempfile 依赖），作用域结束删掉。
+    struct TempDir(PathBuf);
+
+    impl TempDir {
+        fn new(name: &str) -> Self {
+            let nanos = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|elapsed| elapsed.as_nanos())
+                .unwrap_or(0);
+            let path = std::env::temp_dir().join(format!(
+                "herdr-claude-activity-{name}-{}-{nanos}",
+                std::process::id()
+            ));
+            std::fs::create_dir_all(&path).expect("建临时目录");
+            Self(path)
+        }
+
+        fn path(&self) -> &Path {
+            &self.0
+        }
+    }
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// 把夹具树整棵复制到 `to`。
+    fn copy_tree(from: &Path, to: &Path) {
+        std::fs::create_dir_all(to).expect("建目标目录");
+        for entry in std::fs::read_dir(from).expect("夹具目录可读") {
+            let entry = entry.expect("夹具目录项可读");
+            let target = to.join(entry.file_name());
+            if entry.file_type().expect("夹具目录项类型可读").is_dir() {
+                copy_tree(&entry.path(), &target);
+            } else {
+                std::fs::copy(entry.path(), &target).expect("复制夹具文件");
+            }
+        }
+    }
+
+    /// `CLAUDE_CONFIG_DIR` 把配置目录挪出 home 时：runtime 给的配置目录优先，home 下
+    /// 没有 `.claude` 也能找到并读到会话；给了配置目录就只认它，不回退 home。
+    #[test]
+    fn a_relocated_config_dir_is_followed_instead_of_home() {
+        let temp = TempDir::new("config-dir");
+        let config_dir = temp.path().join("profiles").join("work");
+        copy_tree(&fixture_home().join(".claude"), &config_dir);
+        let empty_home = temp.path().join("home");
+        std::fs::create_dir_all(&empty_home).expect("建空 home");
+        let session = session_ref(SESSION_ID);
+
+        let relocated = SourceContext {
+            agent_config_dir: Some(&config_dir),
+            ..context(&empty_home, Some(&session), FIXTURE_LAST_MS)
+        };
+        let nodes = Claude.discover(&relocated).expect("配置目录下的会话可发现");
+        assert!(!nodes.is_empty());
+        assert_eq!(
+            nodes,
+            discover(SESSION_ID, FIXTURE_LAST_MS),
+            "与默认布局同一棵树"
+        );
+
+        let home = fixture_home();
+        let default_cx = context(&home, Some(&session), FIXTURE_LAST_MS);
+        let expected = Claude
+            .read(&default_cx, "a0000000000000001", None, 64 * 1024)
+            .expect("默认布局可读");
+        let page = Claude
+            .read(&relocated, "a0000000000000001", None, 64 * 1024)
+            .expect("配置目录下的转录可读");
+        assert!(!page.text.is_empty());
+        assert_eq!(page.text, expected.text);
+
+        // 不给配置目录：回退 `<home>/.claude`，空 home 下什么都没有。
+        let fallback = context(&empty_home, Some(&session), FIXTURE_LAST_MS);
+        assert!(Claude.discover(&fallback).expect("缺目录不报错").is_empty());
+        assert!(matches!(
+            Claude.read(&fallback, "a0000000000000001", None, 4096),
+            Err(SourceError::Unavailable)
+        ));
+
+        // 给了配置目录就只认它：home 下明明有数据也不回头找。
+        let nowhere = temp.path().join("nowhere");
+        let pinned = SourceContext {
+            agent_config_dir: Some(&nowhere),
+            ..context(&home, Some(&session), FIXTURE_LAST_MS)
+        };
+        assert!(Claude.discover(&pinned).expect("缺目录不报错").is_empty());
     }
 
     #[test]

@@ -37,18 +37,12 @@ pub(crate) struct SourceContext<'a> {
     /// 规范化的 agent 名：`"claude"`、`"codex"` 等。
     pub agent: &'a str,
     pub session: Option<&'a crate::agent_resume::AgentSessionRef>,
-    // seam-stub(adapters)：以下三个字段只有适配器读取，尚无适配器用到；首个读取
-    // 它们的适配器车道落地后删除对应 allow。
-    #[allow(dead_code)]
     pub cwd: Option<&'a Path>,
-    #[allow(dead_code)]
     pub home: &'a Path,
-    #[allow(dead_code)]
     pub now_ms: u64,
     /// 该 CLI 的配置目录（见 `agent_config_dir`：环境变量覆盖优先，否则 `home`
-    /// 下的默认目录；claude 借此跟随 `CLAUDE_CONFIG_DIR`）。没有对应 CLI 时为 `None`。
-    // seam-stub(adapters)：同上，claude / codex / kimi 适配器落地后删除。
-    #[allow(dead_code)]
+    /// 下的默认目录；claude / codex 借此跟随 `CLAUDE_CONFIG_DIR` / `CODEX_HOME`）。
+    /// 没有对应 CLI 时为 `None`，适配器回退 `home` 下的默认目录。
     pub agent_config_dir: Option<&'a Path>,
     /// server 缓存的该 pane 最近一份 `pane.report_agent_activity` hint（pi 的树整份
     /// 装在里面，见 `pi::discover_from_hint`）；外部来源与从未报过提示的 pane 为
@@ -73,9 +67,7 @@ pub(crate) enum SourceError {
     Unavailable,
     /// 来源内容不是预期格式；附说明，不 panic。
     Malformed(String),
-    // seam-stub(adapters)：只由读文件的适配器构造（pi 不读文件）；首个落地的文件型
-    // 适配器车道删除。
-    #[allow(dead_code)]
+    /// 读文件型来源的 I/O 失败（pi 不读文件，不会构造）。
     Io(std::io::Error),
 }
 

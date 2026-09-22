@@ -1,6 +1,7 @@
-//! Codex CLI 的活动来源适配器：从 `<home>/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl`
-//! 读出以本 pane 线程为祖先的子线程（`thread_spawn` 子 agent、guardian 审核等），
-//! `read` 按字节游标分页返回子线程自己的 rollout（JSONL 原文）。
+//! Codex CLI 的活动来源适配器：从 `<config>/sessions/YYYY/MM/DD/rollout-*.jsonl`
+//! （`<config>` 跟随 `CODEX_HOME`，缺省 `<home>/.codex`）读出以本 pane 线程为祖先的
+//! 子线程（`thread_spawn` 子 agent、guardian 审核等），`read` 按字节游标分页返回
+//! 子线程自己的 rollout（JSONL 原文）。
 //!
 //! # 本机取证（codex-cli 0.155.1，2026-09-22，267 个 rollout；只看 type 与键名）
 //!
@@ -100,7 +101,7 @@ impl ActivitySource for Codex {
         let Some(root_id) = root_thread_id(cx) else {
             return Err(SourceError::Unsupported);
         };
-        let sessions = sessions_dir(cx.home);
+        let sessions = sessions_dir(cx);
         if !sessions.is_dir() {
             return Ok(Vec::new());
         }
@@ -140,7 +141,7 @@ impl ActivitySource for Codex {
                 "codex node id 不像线程 id：{node_id:?}"
             )));
         }
-        let sessions = sessions_dir(cx.home);
+        let sessions = sessions_dir(cx);
         let path = find_rollout(&sessions, node_id)?;
         read_page(&path, cursor, max_bytes)
     }
@@ -148,14 +149,15 @@ impl ActivitySource for Codex {
 
 // ---- 会话定位 ----
 
-/// 会话库根目录，本适配器所有「按 home 拼路径」的唯一出口。
-///
-/// TODO(activity-schema)：Codex 支持用 `CODEX_HOME` 把配置目录挪出 `<home>/.codex`
-/// （解析口径同 `integration::env::codex_dir`），此处跟不上。骨架车道会给
-/// `SourceContext` 追加可选的 agent 配置目录字段，合入后把本函数改成「优先用该
-/// 字段，缺省才回退 `<home>/.codex`」即可，调用方不用动。
-fn sessions_dir(home: &Path) -> PathBuf {
-    home.join(".codex").join("sessions")
+/// 会话库根目录，本适配器所有「按配置目录拼路径」的唯一出口：runtime 解析好的
+/// 配置目录（`SourceContext::agent_config_dir`，跟随 `CODEX_HOME`，口径同
+/// `integration::env::codex_dir`）优先，缺省才回退 `<home>/.codex`。给了配置目录
+/// 就只认它、不再回头找 home。
+fn sessions_dir(cx: &SourceContext<'_>) -> PathBuf {
+    match cx.agent_config_dir {
+        Some(config_dir) => config_dir.join("sessions"),
+        None => cx.home.join(".codex").join("sessions"),
+    }
 }
 
 /// pane 的根线程 id：钩子上报的是 id；给的是路径时从文件名取。
@@ -955,6 +957,72 @@ mod tests {
             "herdr-codex-activity-{name}-{}-{nanos}",
             std::process::id()
         ))
+    }
+
+    /// 把夹具树整棵复制到 `to`。
+    fn copy_tree(from: &Path, to: &Path) {
+        fs::create_dir_all(to).expect("建目标目录");
+        for entry in fs::read_dir(from).expect("夹具目录可读") {
+            let entry = entry.expect("夹具目录项可读");
+            let target = to.join(entry.file_name());
+            if entry.file_type().expect("夹具目录项类型可读").is_dir() {
+                copy_tree(&entry.path(), &target);
+            } else {
+                fs::copy(entry.path(), &target).expect("复制夹具文件");
+            }
+        }
+    }
+
+    /// `CODEX_HOME` 把配置目录挪出 home 时：runtime 给的配置目录优先，home 下没有
+    /// `.codex` 也能找到并读到子线程；给了配置目录就只认它，不回退 home。
+    #[test]
+    fn a_relocated_codex_home_is_followed_instead_of_home() {
+        let temp = unique_temp_home("codex-home");
+        let codex_home = temp.join("opt").join("codex-home");
+        copy_tree(&fixture_home().join(".codex"), &codex_home);
+        let empty_home = temp.join("home");
+        fs::create_dir_all(&empty_home).expect("建空 home");
+        let session = AgentSessionRef::id(ROOT).expect("合法 id");
+
+        let relocated = SourceContext {
+            agent_config_dir: Some(&codex_home),
+            ..context(&empty_home, Some(&session))
+        };
+        let nodes = Codex.discover(&relocated).expect("配置目录下的会话库可读");
+        assert_eq!(nodes.len(), 10);
+        assert_eq!(
+            nodes,
+            discover(&fixture_home(), Some(&session)),
+            "与默认布局同一棵树"
+        );
+        let expected = fs::read_to_string(
+            fixture_home()
+                .join(".codex/sessions/2026/09/22")
+                .join(format!("rollout-2026-09-22T10-01-00-{CHILD_A}.jsonl")),
+        )
+        .expect("夹具可读");
+        let page = Codex
+            .read(&relocated, CHILD_A, None, MAX_READ_BYTES)
+            .expect("配置目录下的 rollout 可读");
+        assert_eq!(page.text, expected);
+
+        // 不给配置目录：回退 `<home>/.codex`，空 home 下是空树，读取稍后重试。
+        assert!(discover(&empty_home, Some(&session)).is_empty());
+        assert!(matches!(
+            Codex.read(&context(&empty_home, Some(&session)), CHILD_A, None, 300),
+            Err(SourceError::Unavailable)
+        ));
+
+        // 给了配置目录就只认它：home 下明明有数据也不回头找。
+        let home = fixture_home();
+        let nowhere = temp.join("nowhere");
+        let pinned = SourceContext {
+            agent_config_dir: Some(&nowhere),
+            ..context(&home, Some(&session))
+        };
+        assert!(Codex.discover(&pinned).expect("缺目录不报错").is_empty());
+
+        let _ = fs::remove_dir_all(&temp);
     }
 
     #[test]
