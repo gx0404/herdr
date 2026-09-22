@@ -131,6 +131,73 @@ fn claude_hook_reports_session_id_from_stdin() {
 }
 
 #[test]
+fn claude_hook_reports_subagent_and_task_activity() {
+    // 载荷形状照 claude 2.1.278 的钩子 schema：Subagent* 必带被派生子 agent 的
+    // agent_id，Task* 带 task_id；在子 agent 里触发的 Task* 另带调用方 agent_id。
+    let cases = [
+        (
+            r#"{"hook_event_name":"SubagentStart","session_id":"s1","agent_id":"a1b2c3","agent_type":"Explore"}"#,
+            "SubagentStart",
+            Some("a1b2c3"),
+        ),
+        (
+            r#"{"hook_event_name":"SubagentStop","session_id":"s1","agent_id":"a1b2c3","agent_type":"Explore","agent_transcript_path":"/tmp/agent-a1b2c3.jsonl","stop_hook_active":false}"#,
+            "SubagentStop",
+            Some("a1b2c3"),
+        ),
+        (
+            r#"{"hook_event_name":"TaskCreated","session_id":"s1","agent_id":"a1b2c3","task_id":"7","task_subject":"demo"}"#,
+            "TaskCreated",
+            Some("task:7"),
+        ),
+        (
+            r#"{"hook_event_name":"TaskCompleted","session_id":"s1","task_subject":"demo"}"#,
+            "TaskCompleted",
+            None,
+        ),
+    ];
+
+    for (input, hint, node_id) in cases {
+        let request = run_claude_hook("activity", input)
+            .unwrap_or_else(|| panic!("{hint} should report activity"));
+        assert_eq!(request["method"], "pane.report_agent_activity", "{hint}");
+        let params = &request["params"];
+        assert_eq!(params["pane_id"], "p_test");
+        assert_eq!(params["source"], "herdr:claude");
+        assert_eq!(params["agent"], "claude");
+        assert_eq!(params["hint"], hint);
+        assert!(params["seq"].as_u64().is_some(), "{hint}");
+        assert_eq!(
+            params.get("node_id").and_then(|v| v.as_str()),
+            node_id,
+            "{hint}"
+        );
+    }
+}
+
+#[test]
+fn claude_hook_keeps_activity_and_session_reports_apart() {
+    // activity 只认四个活动事件；session 仍只认根会话的 SessionStart。
+    for input in [
+        r#"{"hook_event_name":"SessionStart","session_id":"s1"}"#,
+        r#"{"hook_event_name":"Stop","session_id":"s1"}"#,
+        r#"{"hook_event_name":"future-event","agent_id":"a1"}"#,
+    ] {
+        assert!(run_claude_hook("activity", input).is_none(), "{input}");
+    }
+    assert!(run_claude_hook(
+        "session",
+        r#"{"hook_event_name":"SubagentStart","session_id":"s1","agent_id":"a1","agent_type":"Explore"}"#,
+    )
+    .is_none());
+    assert!(run_claude_hook(
+        "session",
+        r#"{"hook_event_name":"SessionStart","session_id":"s1","agent_id":"a1"}"#,
+    )
+    .is_none());
+}
+
+#[test]
 fn claude_hook_ignores_cursor_compatibility_payloads() {
     assert!(run_claude_hook(
         "session",

@@ -842,7 +842,15 @@ fn install_claude_writes_hook_and_updates_settings() {
     assert!(settings["hooks"].get("PermissionRequest").is_none());
     assert!(settings["hooks"].get("PostToolUse").is_none());
     assert!(settings["hooks"].get("PostToolUseFailure").is_none());
-    assert!(settings["hooks"].get("SubagentStop").is_none());
+    // SubagentStop 只挂活动信号钩子（Windows 上不装），旧的 working 动作不得复活。
+    assert!(settings["hooks"]["SubagentStop"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .flat_map(|group| group["hooks"].as_array().into_iter().flatten())
+        .all(|hook| hook["command"]
+            .as_str()
+            .is_some_and(|command| command.ends_with(" activity"))));
     assert!(settings["hooks"].get("Stop").is_none());
     assert!(settings["hooks"].get("SessionEnd").is_none());
 
@@ -894,7 +902,18 @@ fn install_claude_is_idempotent_for_hook_entries() {
     assert!(settings["hooks"].get("PermissionRequest").is_none());
     assert!(settings["hooks"].get("PostToolUse").is_none());
     assert!(settings["hooks"].get("PostToolUseFailure").is_none());
-    assert!(settings["hooks"].get("SubagentStop").is_none());
+    // 重复安装不叠加活动信号钩子（Windows 上不装）。
+    for event in [
+        "SubagentStart",
+        "SubagentStop",
+        "TaskCreated",
+        "TaskCompleted",
+    ] {
+        assert!(
+            settings["hooks"][event].as_array().map_or(0, Vec::len) <= 1,
+            "{event}"
+        );
+    }
     assert!(settings["hooks"].get("Stop").is_none());
     assert!(settings["hooks"].get("SessionEnd").is_none());
 
@@ -1002,7 +1021,7 @@ fn claude_v9_integration_status_is_outdated_until_reinstalled() {
 
     assert_eq!(claude.path, hook_path);
     assert_eq!(claude.installed_version, Some(9));
-    assert_eq!(claude.expected_version, 10);
+    assert_eq!(claude.expected_version, CLAUDE_INTEGRATION_VERSION);
     assert_eq!(claude.state, IntegrationStatusKind::Outdated);
 
     install_claude().unwrap();
@@ -1011,7 +1030,7 @@ fn claude_v9_integration_status_is_outdated_until_reinstalled() {
         hook_path,
         CLAUDE_INTEGRATION_VERSION,
     );
-    assert_eq!(status.installed_version, Some(10));
+    assert_eq!(status.installed_version, Some(CLAUDE_INTEGRATION_VERSION));
     assert_eq!(status.state, IntegrationStatusKind::Current);
 
     std::env::remove_var("HOME");
@@ -1041,7 +1060,7 @@ fn claude_v2_integration_status_is_outdated() {
 
     assert_eq!(claude.path, hook_path);
     assert_eq!(claude.installed_version, Some(2));
-    assert_eq!(claude.expected_version, 10);
+    assert_eq!(claude.expected_version, CLAUDE_INTEGRATION_VERSION);
     assert_eq!(claude.state, IntegrationStatusKind::Outdated);
 
     std::env::remove_var("HOME");

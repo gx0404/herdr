@@ -102,6 +102,8 @@ The hook reports Claude Code session identity to the local Herdr socket on sessi
 
 Claude integration v10 matches only the documented `SessionStart` sources: `startup`, `resume`, `clear`, `compact`, and `fork`. This prevents third-party tools that import Claude hooks from firing the imported Herdr Claude hook on other source names, without disabling unrelated Claude-compatible hooks. Reinstall the Claude integration after upgrading to migrate the previous wildcard matcher. New Claude source values require an integration update.
 
+Claude integration v11 also subscribes to `SubagentStart` and `SubagentStop` (matcher `*`) and to `TaskCreated` and `TaskCompleted` on macOS and Linux. These hooks only tell the local Herdr socket that Claude Code's sub-agents or tasks changed; they do not report agent state. They are not installed on Windows. Reinstall the Claude integration after upgrading to add them.
+
 Herdr uses `~/.claude` by default, or `CLAUDE_CONFIG_DIR` when set. The Claude config directory must already exist. Install writes `hooks/herdr-agent-state.sh` and updates `settings.json` with Herdr hook entries. Uninstall removes the matching hook entries and deletes the hook script.
 
 ## Codex

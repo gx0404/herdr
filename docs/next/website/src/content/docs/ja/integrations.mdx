@@ -104,6 +104,8 @@ herdr integration install claude
 
 Claude 統合 v10 は、文書化された `SessionStart` の source 値 `startup`、`resume`、`clear`、`compact`、`fork` のみに一致します。これにより、ほかの Claude 互換フックを無効にせずに、Claude フックをインポートするサードパーティ製ツールがほかの source 値でインポートされた Herdr の Claude フックを起動するのを防ぎます。アップグレード後に Claude 統合を再インストールして、従来のワイルドカードマッチャーを移行してください。Claude に新しい source 値が追加された場合は、統合の更新が必要です。
 
+Claude 統合 v11 は、macOS と Linux で `SubagentStart` と `SubagentStop`(マッチャー `*`)、および `TaskCreated` と `TaskCompleted` も購読します。これらのフックは、Claude Code のサブエージェントまたはタスクが変化したことをローカルの Herdr ソケットに通知するだけで、エージェントの状態は報告しません。Windows ではインストールされません。アップグレード後に Claude 統合を再インストールして追加してください。
+
 Herdr はデフォルトで `~/.claude` を使い、`CLAUDE_CONFIG_DIR` が設定されていればそちらを使います。Claude の設定ディレクトリはあらかじめ存在している必要があります。インストールは `hooks/herdr-agent-state.sh` を書き込み、`settings.json` に Herdr のフックエントリを追加します。アンインストールは一致するフックエントリを削除し、フックスクリプトを削除します。
 
 ## Codex

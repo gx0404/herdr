@@ -3,7 +3,7 @@
 # managed by herdr; reinstalling or updating the integration overwrites this file.
 # add custom hooks beside this file instead of editing it.
 # HERDR_INTEGRATION_ID=claude
-# HERDR_INTEGRATION_VERSION=10
+# HERDR_INTEGRATION_VERSION=11
 
 set -eu
 
@@ -13,7 +13,7 @@ trap 'rm -f "$hook_input_file"' EXIT HUP INT TERM
 cat >"$hook_input_file" 2>/dev/null || true
 
 case "$action" in
-  session) ;;
+  session|activity) ;;
   *) exit 0 ;;
 esac
 
@@ -51,13 +51,64 @@ if hook_input_file:
 if "CURSOR_VERSION" in os.environ or "cursor_version" in hook_input:
     raise SystemExit(0)
 hook_event_name = str(hook_input.get("hook_event_name") or "")
+request_id = f"{source}:{int(time.time() * 1000)}:{random.randrange(1_000_000):06d}"
+report_seq = time.time_ns()
+
+
+def text_field(name):
+    value = hook_input.get(name)
+    return value if isinstance(value, str) and value else None
+
+
+def send(request):
+    try:
+        client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        client.settimeout(0.5)
+        client.connect(socket_path)
+        client.sendall((json.dumps(request) + "\n").encode())
+        try:
+            client.recv(4096)
+        except Exception:
+            pass
+        client.close()
+    except Exception:
+        pass
+
+
+if action == "activity":
+    # Activity hooks only tell herdr that the sub-agent/task tree changed; the
+    # server rebuilds the tree from transcripts. SubagentStart/SubagentStop
+    # always carry the spawned agent's agent_id, and Task* events carry the
+    # caller's agent_id when fired inside a sub-agent, so the SessionStart
+    # "agent_id means sub-agent, drop it" rule must not apply here.
+    if hook_event_name in ("SubagentStart", "SubagentStop"):
+        node_id = text_field("agent_id")
+    elif hook_event_name in ("TaskCreated", "TaskCompleted"):
+        task_id = text_field("task_id")
+        node_id = f"task:{task_id}" if task_id else None
+    else:
+        raise SystemExit(0)
+    params = {
+        "pane_id": pane_id,
+        "source": source,
+        "agent": "claude",
+        "hint": hook_event_name,
+        "seq": report_seq,
+    }
+    if node_id:
+        params["node_id"] = node_id
+    send({
+        "id": request_id,
+        "method": "pane.report_agent_activity",
+        "params": params,
+    })
+    raise SystemExit(0)
+
 if hook_event_name != "SessionStart":
     raise SystemExit(0)
 is_subagent = bool(hook_input.get("agent_id"))
 if is_subagent:
     raise SystemExit(0)
-request_id = f"{source}:{int(time.time() * 1000)}:{random.randrange(1_000_000):06d}"
-report_seq = time.time_ns()
 session_id = hook_input.get("session_id")
 agent_session_id = session_id if isinstance(session_id, str) and session_id else None
 transcript_path = hook_input.get("transcript_path")
@@ -85,16 +136,5 @@ if agent_session_id:
 else:
     raise SystemExit(0)
 
-try:
-    client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    client.settimeout(0.5)
-    client.connect(socket_path)
-    client.sendall((json.dumps(request) + "\n").encode())
-    try:
-        client.recv(4096)
-    except Exception:
-        pass
-    client.close()
-except Exception:
-    pass
+send(request)
 PY

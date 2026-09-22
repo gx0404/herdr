@@ -2,10 +2,12 @@
 # managed by herdr; reinstalling or updating the integration overwrites this file.
 # add custom hooks beside this file instead of editing it.
 # HERDR_INTEGRATION_ID=claude
-# HERDR_INTEGRATION_VERSION=10
+# HERDR_INTEGRATION_VERSION=11
 
 param([string]$Action = "")
 
+# Activity hooks are not installed on Windows: the herdr CLI has no command
+# for pane.report_agent_activity, so only session reports are handled here.
 if ($Action -ne "session") { exit 0 }
 if ($env:HERDR_ENV -ne "1") { exit 0 }
 if ([string]::IsNullOrWhiteSpace($env:HERDR_PANE_ID)) { exit 0 }
