@@ -2279,7 +2279,7 @@
               ]
             },
             "follow": {
-              "description": "为真时从末尾开始读并在后续调用中跟随增长。",
+              "description": "为真时让 server 在接下来 10 s 内每秒刷新该 pane 的活动树，便于轮询的查看器\n跟随运行中的节点；不影响内容读取的起始位置，续读仍靠 `cursor`。只对\n`pane_id` 目标有效，外部来源忽略它。",
               "type": "boolean"
             },
             "max_bytes": {
@@ -10006,11 +10006,27 @@
         "AgentInfo": {
           "properties": {
             "activity": {
-              "description": "该 agent 的活动树（子 agent / 任务 / 待办 / 后台进程）；没有活动时省略。",
+              "description": "该 agent 的活动树（子 agent / 任务 / 待办 / 后台进程）；没有活动时省略。\n节点数有上限，超出时只保留运行中的节点及其祖先，截断前的规模见\n`activity_running` / `activity_total` / `activity_truncated`。",
               "items": {
                 "$ref": "#/schemas/success_response/$defs/AgentActivityNode"
               },
               "type": "array"
+            },
+            "activity_running": {
+              "description": "截断前的运行中节点数；没有活动树时为 `0`（省略）。",
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "activity_total": {
+              "description": "截断前的节点总数；没有活动树时为 `0`（省略）。",
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "activity_truncated": {
+              "description": "来源给出的节点超过上限、`activity` 已被截断。完整树用\n`agent.activity.read`（省略 `node_id`）拉取。",
+              "type": "boolean"
             },
             "agent": {
               "type": [

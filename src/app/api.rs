@@ -2773,6 +2773,15 @@ mod agent_activity_event_tests {
         );
         let info = app.agent_info(0, agent_pane).expect("agent 信息");
         assert_eq!(info.activity.len(), 1);
+        // 截断前的规模随 AgentInfo 一起下发（这里没截断）。
+        assert_eq!(
+            (
+                info.activity_running,
+                info.activity_total,
+                info.activity_truncated
+            ),
+            (0, 1, false)
+        );
         assert_eq!(info.launch_seq, 1);
     }
 

@@ -399,6 +399,10 @@ impl App {
             return None;
         }
         let pane = self.pane_info(ws_idx, pane_id)?;
+        // 投影路径不带活动树，连同计数一起留空（客户端快照另有自己的下发形态）。
+        let activity = include_activity
+            .then(|| self.state.agent_activity.activity(pane_id))
+            .flatten();
         Some(crate::api::schema::AgentInfo {
             terminal_id: pane.terminal_id,
             name: terminal.agent_name.clone(),
@@ -412,15 +416,12 @@ impl App {
             state_labels: pane.state_labels,
             tokens: pane.tokens,
             agent_session: pane.agent_session,
-            activity: if include_activity {
-                self.state
-                    .agent_activity
-                    .activity(pane_id)
-                    .map(|snapshot| snapshot.nodes.clone())
-                    .unwrap_or_default()
-            } else {
-                Vec::new()
-            },
+            activity: activity
+                .map(|snapshot| snapshot.nodes.clone())
+                .unwrap_or_default(),
+            activity_running: activity.map_or(0, |snapshot| snapshot.running),
+            activity_total: activity.map_or(0, |snapshot| snapshot.total),
+            activity_truncated: activity.is_some_and(|snapshot| snapshot.truncated),
             launch_seq: self.state.agent_activity.launch_seq(pane_id),
             workspace_id: pane.workspace_id,
             tab_id: pane.tab_id,

@@ -209,8 +209,20 @@ pub struct AgentInfo {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_session: Option<AgentSessionInfo>,
     /// 该 agent 的活动树（子 agent / 任务 / 待办 / 后台进程）；没有活动时省略。
+    /// 节点数有上限，超出时只保留运行中的节点及其祖先，截断前的规模见
+    /// `activity_running` / `activity_total` / `activity_truncated`。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub activity: Vec<AgentActivityNode>,
+    /// 截断前的运行中节点数；没有活动树时为 `0`（省略）。
+    #[serde(default, skip_serializing_if = "super::is_zero_u32")]
+    pub activity_running: u32,
+    /// 截断前的节点总数；没有活动树时为 `0`（省略）。
+    #[serde(default, skip_serializing_if = "super::is_zero_u32")]
+    pub activity_total: u32,
+    /// 来源给出的节点超过上限、`activity` 已被截断。完整树用
+    /// `agent.activity.read`（省略 `node_id`）拉取。
+    #[serde(default, skip_serializing_if = "super::is_false")]
+    pub activity_truncated: bool,
     /// pane 首次获得 agent 身份时分配的单调启动序号（释放后重新识别取新号）；
     /// `0` = 未知。只在同一 server 进程内可比，旧 server 不下发。
     #[serde(default)]
@@ -350,7 +362,9 @@ pub struct AgentActivityReadParams {
     pub cursor: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_bytes: Option<u32>,
-    /// 为真时从末尾开始读并在后续调用中跟随增长。
+    /// 为真时让 server 在接下来 10 s 内每秒刷新该 pane 的活动树，便于轮询的查看器
+    /// 跟随运行中的节点；不影响内容读取的起始位置，续读仍靠 `cursor`。只对
+    /// `pane_id` 目标有效，外部来源忽略它。
     #[serde(default, skip_serializing_if = "super::is_false")]
     pub follow: bool,
 }
@@ -397,6 +411,14 @@ mod tests {
         let decoded: AgentInfo = serde_json::from_value(legacy).expect("旧 JSON 可解码");
         assert_eq!(decoded.launch_seq, 0);
         assert!(decoded.activity.is_empty());
+        assert_eq!(
+            (
+                decoded.activity_running,
+                decoded.activity_total,
+                decoded.activity_truncated
+            ),
+            (0, 0, false)
+        );
 
         let mut with_seq = decoded.clone();
         with_seq.launch_seq = 7;
@@ -404,5 +426,45 @@ mod tests {
         assert_eq!(json["launch_seq"], 7);
         let round_trip: AgentInfo = serde_json::from_value(json).expect("往返");
         assert_eq!(round_trip, with_seq);
+    }
+
+    /// 截断标记与截断前的计数随 `AgentInfo` 下发：没有活动树时整组省略，有截断时
+    /// 消费方不必去猜 `activity` 是不是完整的。
+    #[test]
+    fn agent_info_reports_activity_truncation_alongside_the_tree() {
+        let legacy = serde_json::json!({
+            "terminal_id": "term_1",
+            "agent_status": "working",
+            "workspace_id": "ws_1",
+            "tab_id": "t_1",
+            "pane_id": "p_1",
+            "focused": false,
+            "revision": 1
+        });
+        let mut info: AgentInfo = serde_json::from_value(legacy).expect("旧 JSON 可解码");
+        let json = serde_json::to_value(&info).expect("序列化");
+        for field in [
+            "activity",
+            "activity_running",
+            "activity_total",
+            "activity_truncated",
+        ] {
+            assert!(json.get(field).is_none(), "无活动时省略 {field}");
+        }
+
+        info.activity = vec![AgentActivityNode {
+            id: "a".into(),
+            status: AgentActivityStatus::Running,
+            ..AgentActivityNode::default()
+        }];
+        info.activity_running = 3;
+        info.activity_total = 40;
+        info.activity_truncated = true;
+        let json = serde_json::to_value(&info).expect("序列化");
+        assert_eq!(json["activity_running"], 3);
+        assert_eq!(json["activity_total"], 40);
+        assert_eq!(json["activity_truncated"], true);
+        let round_trip: AgentInfo = serde_json::from_value(json).expect("往返");
+        assert_eq!(round_trip, info);
     }
 }
