@@ -4513,8 +4513,8 @@
       "anchor": "structure",
       "doc": "src/client/shell/action_table.rs",
       "id": "src-client-shell-action-table-rs-structure",
-      "source_sha256": "cb12a2c77c58b9f447c51ea630e3930566e1b9d29360036e82e33899ff721c97",
-      "text": "模块文档：统一动作表：命令面板、全局菜单与右键菜单共用的动作目录（id、标题、快捷键、 可用性）。  seam-stub(menu)：接缝只预留文件与 `mod` 声明，波 2 菜单车道在本文件内实现。\n公开项："
+      "source_sha256": "bb149a51468fbed42b2e25947e2500dc9d819623c0f2eb08de8e63e1242cb724",
+      "text": "模块文档：统一动作表：命令面板（全集）、主菜单（按分类）、右键菜单（按对象）与 mobile 菜单共用的动作目录。  每个动作只在 [`ACTIONS`] 里定义一次：稳定 id（最近使用持久化用）、标题与 菜单短标签的 i18n 键、分类与组、快捷键来源、出现在哪些入口、在右键菜单里的 身份。可用性由本模块的纯函数判定（[`global_action_state`]、 [`machine_action_state`]），执行只走 [`ClientShellState::run_action`] 这一个 分派。同一个动作可以作用在「当前聚焦对象」（快捷键语义：命令面板、主菜单） 或「右键点中的对象」上，由 [`ActionTarget`] 区分，条目本身只有一份。  机器动作（重连、切换、重命名、编辑、启用、复制修复命令、移除）是同一组条目： 命令面板按机器铺开，右键机器行按对象取，执行都落到同一个分支。\n公开项：\npub(super) enum ActionCategory {\nimpl ActionCategory {\npub(super) const fn index(self) -> usize {\npub(super) enum ActionId {\npub(super) enum PaletteMode {\npub(super) enum ContextKind {\npub(super) struct ActionBinding {\npub(super) struct ActionSpec { — 动作表的一条。\nimpl ActionSpec {\npub(super) fn title_text(&self, texts: &Texts, alternate: bool) -> &'static str {\npub(super) fn label_text(&self, texts: &Texts, alternate: bool) -> &'static str {\npub(super) fn shortcut(&self, keybinds: &Keybinds) -> Option<String> {\npub(super) struct ActionState {\nimpl ActionState {\npub(super) const ENABLED: Self = Self {\npub(super) const HIDDEN: Self = Self {\npub(super) const fn enabled_if(enabled: bool) -> Self {\npub(super) const fn checked(checked: bool) -> Self {\npub(super) enum ActionTarget {\npub(super) static ACTIONS: &[ActionSpec] = &[ — 动作表。声明顺序即命令面板的列出顺序与模糊搜索同分时的先后，也是主菜单 各分类子菜单里的顺序（同一分类的同组条目必须相邻）。\npub(super) fn action_spec(id: ActionId) -> &'static ActionSpec { — 按 id 取表项。表由单测守门（每个 id 恰好一条），查不到只可能是新增变体 忘了登记——落回第一条，保证渲染不 panic。\npub(super) fn context_action( — 右键菜单里 (对象种类, 菜单动作) 对应的动作表条目。\npub(super) struct GlobalActionContext<'a> {\nimpl<'a> GlobalActionContext<'a> {\npub(super) fn from_snapshot(snapshot: &'a ClientShellSnapshot) -> Self {\npub(super) fn global_action_state(id: ActionId, cx: &GlobalActionContext<'_>) -> ActionState { — 作用在「当前聚焦对象」上的动作此刻的状态（命令面板、主菜单、mobile 菜单）。\npub(super) fn machine_action_state( — 机器动作组对某台已保存机器的状态（命令面板按机器铺开、机器行右键共用）。\nimpl ClientShellState {\npub(super) fn global_action_context(&self) -> GlobalActionContext<'_> {\npub(super) fn run_action( — 执行一个动作。穷尽 match：每个 [`ActionId`] 都在这里有且只有一个分支。 对象不匹配的组合（如对工作区目标执行分屏）静默忽略。"
     },
     {
       "anchor": "structure",
@@ -4688,8 +4688,8 @@
       "anchor": "structure",
       "doc": "src/client/shell/global_menu.rs",
       "id": "src-client-shell-global-menu-rs-structure",
-      "source_sha256": "2aa1f1b74332bf4d9dae25497433039d68003cfe7a6e95ff4fb1a9f21473c0b6",
-      "text": "公开项：\npub(super) enum ClientGlobalMenuAction {\npub(super) fn global_menu_attention(snapshot: &ClientShellSnapshot) -> bool {\npub(super) fn global_menu_items(\nimpl ClientShellState {\npub(super) fn activate_global_menu_item("
+      "source_sha256": "4cd75650261052cb37e9cbb26e4a675140ec63e3dfa7a22a92456b5e87d17370",
+      "text": "模块文档：mobile 菜单：动作表里标了 `mobile` 的条目的渲染层。条目、标签与可用性都 取自 [`super::action_table`]，这里只负责排成一列并把点击交给 [`ClientShellState::run_action`]。\n公开项：\npub(super) struct GlobalMenuEntry {\npub(super) fn global_menu_attention(snapshot: &ClientShellSnapshot) -> bool {\npub(super) fn global_menu_items(snapshot: &ClientShellSnapshot) -> Vec<GlobalMenuEntry> { — mobile 菜单条目：动作表声明顺序，只取对当前快照可见的。\nimpl ClientShellState {\npub(super) fn activate_global_menu_item( — 激活 mobile 菜单第 `index` 行；不可用的行是空操作。"
     },
     {
       "anchor": "structure",
@@ -5103,6 +5103,13 @@
       "id": "src-client-shell-tests-machines-rs-structure",
       "source_sha256": "3aab41b0fe8a56eb9ab4597664b0c045ce707006ae7f5e37ae3566dce1bd2e23",
       "text": "公开项："
+    },
+    {
+      "anchor": "structure",
+      "doc": "src/client/shell/tests/menus.rs",
+      "id": "src-client-shell-tests-menus-rs-structure",
+      "source_sha256": "313157401a2cb014ab81b33fc9009aa89649c442fdfa19804e98fc78beedda8b",
+      "text": "模块文档：菜单信息架构：命令面板、主菜单、右键菜单与 mobile 菜单都从同一张动作表取数。\n公开项："
     },
     {
       "anchor": "structure",

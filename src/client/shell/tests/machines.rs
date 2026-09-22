@@ -241,12 +241,9 @@ fn machine_context_menu_items_track_endpoint_state() {
 fn global_menu_and_prefix_m_open_the_machines_overlay() {
     let snapshot = snapshot();
     let items = super::super::global_menu::global_menu_items(&snapshot);
-    assert!(items.iter().any(|(_, action)| matches!(
-        action,
-        super::super::global_menu::ClientGlobalMenuAction::Binding(
-            crate::input::KeybindAction::ManageMachines
-        )
-    )));
+    assert!(items
+        .iter()
+        .any(|entry| entry.id == super::super::action_table::ActionId::ManageMachines));
 
     let keybinds = crate::config::Keybinds::default();
     let matched = crate::input::resolve_prefix_binding(

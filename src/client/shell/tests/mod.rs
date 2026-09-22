@@ -251,9 +251,7 @@ fn surface_with_popup() -> PaneSurfaceFrame {
 pub(super) fn whats_new_menu_index(snapshot: &ClientShellSnapshot) -> usize {
     super::global_menu::global_menu_items(snapshot)
         .iter()
-        .position(|(_, action)| {
-            matches!(action, super::global_menu::ClientGlobalMenuAction::WhatsNew)
-        })
+        .position(|entry| entry.id == super::action_table::ActionId::WhatsNew)
         .expect("what's new entry")
 }
 
@@ -307,6 +305,7 @@ mod link_hover;
 mod machine_auth;
 mod machine_files;
 mod machines;
+mod menus;
 mod mobile;
 mod mouse_selection;
 mod observability_usage;

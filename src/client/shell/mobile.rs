@@ -942,14 +942,27 @@ fn mobile_items(
         crate::i18n::texts().mobile.section_menu,
         palette,
     ));
-    for (index, (label, _)) in super::global_menu::global_menu_items(snapshot)
+    for (index, entry) in super::global_menu::global_menu_items(snapshot)
         .into_iter()
         .enumerate()
     {
+        // 暂时不可用的条目照样列出（与桌面菜单的置灰同义），标注后缀并压暗。
+        let (text, fg) = if entry.enabled {
+            (format!("  {}", entry.label), palette.overlay1)
+        } else {
+            (
+                format!(
+                    "  {}{}",
+                    entry.label,
+                    crate::i18n::texts().menu.unavailable_suffix
+                ),
+                palette.overlay0,
+            )
+        };
         items.push(MobileItem {
             lines: vec![Line::from(Span::styled(
-                format!("  {label}"),
-                Style::default().fg(palette.overlay1).bg(palette.panel_bg),
+                text,
+                Style::default().fg(fg).bg(palette.panel_bg),
             ))],
             background: palette.panel_bg,
             target: Some(ClientMobileTarget::Menu(index)),
@@ -1096,10 +1109,7 @@ impl ClientShellState {
                 let actionable = self.snapshot.as_deref().is_some_and(|snapshot| {
                     super::global_menu::global_menu_items(snapshot)
                         .get(index)
-                        .is_some_and(|(_, action)| {
-                            *action != super::global_menu::ClientGlobalMenuAction::WhatsNew
-                                || snapshot.release_notes.is_some()
-                        })
+                        .is_some_and(|entry| entry.enabled)
                 });
                 if actionable {
                     self.mobile_switcher_suspended = true;

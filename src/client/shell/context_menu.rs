@@ -1,3 +1,4 @@
+use super::action_table::{ActionTarget, ContextKind};
 use super::feedback::ChromeContext;
 use super::render::{display_width, panel, put_text, OverlayRender};
 use super::*;
@@ -331,354 +332,70 @@ impl ClientShellState {
             self.overlay = Some(ClientShellOverlay::ContextMenu(menu));
             return;
         }
-        match menu.target {
-            ClientContextMenuTarget::Workspace { workspace_id, .. } => {
-                self.activate_workspace_context_action(workspace_id, action, outcome)
-            }
-            ClientContextMenuTarget::Tab {
-                tab_id,
-                workspace_id,
-            } => self.activate_tab_context_action(tab_id, workspace_id, action, outcome),
-            ClientContextMenuTarget::Pane {
-                pane_id,
-                workspace_id,
-                source_pane_id,
-                right_click_passthrough,
-                ..
-            } => self.activate_pane_context_action(
-                pane_id,
-                workspace_id,
-                source_pane_id,
-                right_click_passthrough,
-                action,
-                outcome,
-            ),
-            ClientContextMenuTarget::Machine { endpoint_id, .. } => {
-                self.activate_machine_context_action(&endpoint_id, action, outcome)
-            }
-            ClientContextMenuTarget::Agent {
-                endpoint_id,
-                pane_id,
-                ..
-            } => self.activate_agent_context_action(
-                endpoint_id,
-                super::agent_activity_overlay::AgentActivityOwner::Pane { pane_id },
-                action,
-                outcome,
-            ),
-            ClientContextMenuTarget::ExternalAgent {
-                endpoint_id,
-                external_id,
-            } => self.activate_agent_context_action(
-                endpoint_id,
-                super::agent_activity_overlay::AgentActivityOwner::External { external_id },
-                action,
-                outcome,
-            ),
+        let (kind, target) = context_action_target(menu.target);
+        if let Some(id) = super::action_table::context_action(kind, action) {
+            self.run_action(id, target, outcome);
         }
         outcome.repaint = true;
     }
+}
 
-    fn activate_machine_context_action(
-        &mut self,
-        endpoint_id: &ClientEndpointId,
-        action: ClientContextMenuAction,
-        outcome: &mut ClientShellInput,
-    ) {
-        use ClientContextMenuAction as Action;
-        match action {
-            Action::ManageMachines => self.open_machines_overlay(),
-            Action::RenameMachine
-            | Action::EditMachine
-            | Action::ReconnectMachine
-            | Action::ToggleMachineEnabled
-            | Action::RemoveMachine
-            | Action::CopyMachineFixCommand => {
-                let ClientEndpointId::Ssh(profile_id) = endpoint_id else {
-                    return;
-                };
-                let profile_id = profile_id.clone();
-                match action {
-                    Action::RenameMachine => {
-                        let label = self
-                            .saved_profiles
-                            .iter()
-                            .find(|profile| profile.id == profile_id)
-                            .map(|profile| profile.label.clone());
-                        if let Some(label) = label {
-                            self.overlay = Some(ClientShellOverlay::Rename(ClientRenameOverlay {
-                                title: crate::i18n::texts().machines.edit_title,
-                                input: TextEditor::new(&label, false),
-                                target: ClientRenameTarget::Machine { profile_id },
-                            }));
-                        }
-                    }
-                    Action::EditMachine => self.open_machine_edit_form(&profile_id),
-                    Action::ReconnectMachine => self.machine_reconnect(&profile_id, outcome),
-                    Action::ToggleMachineEnabled => {
-                        let enabled = self
-                            .saved_profiles
-                            .iter()
-                            .any(|profile| profile.id == profile_id && profile.enabled);
-                        self.machine_set_enabled(&profile_id, !enabled);
-                    }
-                    Action::RemoveMachine => self.open_machine_remove_confirm(&profile_id),
-                    // 与机器面板的 `c` 同一条路径：自己拼命令会漏掉反馈
-                    // （C-27：这个触发点此前零反馈）。
-                    Action::CopyMachineFixCommand => {
-                        self.machine_copy_fix_command(&profile_id, outcome)
-                    }
-                    _ => {}
-                }
-            }
-            _ => {}
+/// 右键对象 → 动作表的对象种类与执行目标。
+fn context_action_target(target: ClientContextMenuTarget) -> (ContextKind, ActionTarget) {
+    match target {
+        ClientContextMenuTarget::Workspace { workspace_id, .. } => (
+            ContextKind::Workspace,
+            ActionTarget::Workspace { workspace_id },
+        ),
+        ClientContextMenuTarget::Tab {
+            tab_id,
+            workspace_id,
+        } => (
+            ContextKind::Tab,
+            ActionTarget::Tab {
+                tab_id,
+                workspace_id,
+            },
+        ),
+        ClientContextMenuTarget::Pane {
+            pane_id,
+            workspace_id,
+            source_pane_id,
+            right_click_passthrough,
+            ..
+        } => (
+            ContextKind::Pane,
+            ActionTarget::Pane {
+                pane_id,
+                workspace_id,
+                source_pane_id,
+                right_click_passthrough,
+            },
+        ),
+        ClientContextMenuTarget::Machine { endpoint_id, .. } => {
+            (ContextKind::Machine, ActionTarget::Machine(endpoint_id))
         }
-    }
-
-    fn activate_workspace_context_action(
-        &mut self,
-        workspace_id: String,
-        action: ClientContextMenuAction,
-        outcome: &mut ClientShellInput,
-    ) {
-        use crate::input::KeybindAction;
-
-        match action {
-            ClientContextMenuAction::Rename => {
-                let label = self
-                    .snapshot
-                    .as_deref()
-                    .and_then(|snapshot| {
-                        snapshot
-                            .workspaces
-                            .iter()
-                            .find(|workspace| workspace.workspace_id == workspace_id)
-                    })
-                    .map(|workspace| workspace.label.clone());
-                if let Some(label) = label {
-                    self.overlay = Some(ClientShellOverlay::Rename(ClientRenameOverlay {
-                        title: "rename workspace",
-                        input: TextEditor::new(&label, false),
-                        target: ClientRenameTarget::Workspace { workspace_id },
-                    }));
-                }
-            }
-            ClientContextMenuAction::Close => {
-                if self.config.confirm_close {
-                    self.open_confirm_close_overlay(workspace_id);
-                } else {
-                    self.push_endpoint_method(
-                        crate::api::schema::Method::WorkspaceClose(
-                            crate::api::schema::WorkspaceCloseParams {
-                                workspace_id,
-                                close_group: true,
-                            },
-                        ),
-                        outcome,
-                    );
-                }
-            }
-            ClientContextMenuAction::NewWorktree => {
-                self.begin_worktree_action_for(KeybindAction::NewWorktree, workspace_id, outcome)
-            }
-            ClientContextMenuAction::OpenWorktree => {
-                self.begin_worktree_action_for(KeybindAction::OpenWorktree, workspace_id, outcome)
-            }
-            ClientContextMenuAction::RemoveWorktree => {
-                self.begin_worktree_action_for(KeybindAction::RemoveWorktree, workspace_id, outcome)
-            }
-            ClientContextMenuAction::ToggleGroup => {
-                let key = self.snapshot.as_deref().and_then(|snapshot| {
-                    snapshot
-                        .workspaces
-                        .iter()
-                        .find(|workspace| workspace.workspace_id == workspace_id)
-                        .and_then(|workspace| workspace.worktree.as_ref())
-                        .map(|worktree| worktree.key.clone())
-                });
-                if let Some(key) = key {
-                    let endpoint_id = self.active_endpoint_id.clone();
-                    self.toggle_collapsed_group(&endpoint_id, key);
-                    self.persist_chrome_preferences(outcome);
-                }
-            }
-            _ => {}
-        }
-    }
-
-    fn activate_tab_context_action(
-        &mut self,
-        tab_id: String,
-        workspace_id: String,
-        action: ClientContextMenuAction,
-        outcome: &mut ClientShellInput,
-    ) {
-        use crate::api::schema::{Method, TabTarget};
-
-        self.push_endpoint_method(
-            Method::TabFocus(TabTarget {
-                tab_id: tab_id.clone(),
-            }),
-            outcome,
-        );
-        match action {
-            ClientContextMenuAction::NewTab => {
-                if self.config.prompt_new_tab_name {
-                    let default_name = (self
-                        .snapshot
-                        .as_deref()
-                        .map(|snapshot| {
-                            snapshot
-                                .tabs
-                                .iter()
-                                .filter(|tab| tab.workspace_id == workspace_id)
-                                .count()
-                        })
-                        .unwrap_or(0)
-                        + 1)
-                    .to_string();
-                    self.overlay = Some(ClientShellOverlay::Rename(ClientRenameOverlay {
-                        title: "new tab",
-                        input: TextEditor::new(&default_name, true),
-                        target: ClientRenameTarget::NewTab {
-                            workspace_id,
-                            default_name,
-                        },
-                    }));
-                } else {
-                    self.push_endpoint_method(
-                        Method::TabCreate(crate::api::schema::TabCreateParams {
-                            workspace_id: Some(workspace_id),
-                            cwd: None,
-                            focus: true,
-                            label: None,
-                            env: Default::default(),
-                        }),
-                        outcome,
-                    );
-                }
-            }
-            ClientContextMenuAction::Rename => {
-                let tab = self
-                    .snapshot
-                    .as_deref()
-                    .and_then(|snapshot| snapshot.tabs.iter().find(|tab| tab.tab_id == tab_id));
-                if let Some(tab) = tab {
-                    self.overlay = Some(ClientShellOverlay::Rename(ClientRenameOverlay {
-                        title: "rename tab",
-                        input: TextEditor::new(&tab.label, false),
-                        target: ClientRenameTarget::Tab {
-                            tab_id,
-                            auto_name: !tab.custom_label,
-                            original_name: tab.label.clone(),
-                        },
-                    }));
-                }
-            }
-            ClientContextMenuAction::Close => {
-                self.push_endpoint_method(Method::TabClose(TabTarget { tab_id }), outcome);
-            }
-            _ => {}
-        }
-    }
-
-    fn activate_pane_context_action(
-        &mut self,
-        pane_id: String,
-        workspace_id: String,
-        source_pane_id: Option<String>,
-        right_click_passthrough: bool,
-        action: ClientContextMenuAction,
-        outcome: &mut ClientShellInput,
-    ) {
-        use crate::api::schema::{
-            Method, PaneInputSetParams, PaneRenameParams, PaneRightClickTarget, PaneSplitParams,
-            PaneSwapParams, PaneTarget, PaneZoomMode, PaneZoomParams, SplitDirection,
-        };
-
-        match action {
-            ClientContextMenuAction::RenamePane => {
-                let label = self.snapshot.as_deref().and_then(|snapshot| {
-                    snapshot
-                        .panes
-                        .iter()
-                        .find(|pane| pane.pane_id == pane_id)
-                        .and_then(|pane| pane.label.clone())
-                });
-                self.overlay = Some(ClientShellOverlay::Rename(ClientRenameOverlay {
-                    title: "rename pane",
-                    input: TextEditor::new(label.as_deref().unwrap_or_default(), label.is_none()),
-                    target: ClientRenameTarget::Pane { pane_id },
-                }));
-            }
-            ClientContextMenuAction::ClearPaneName => self.push_endpoint_method(
-                Method::PaneRename(PaneRenameParams {
-                    pane_id,
-                    label: None,
-                }),
-                outcome,
-            ),
-            ClientContextMenuAction::SwapWithFocusedPane => {
-                if let Some(source_pane_id) = source_pane_id {
-                    self.push_endpoint_method(
-                        Method::PaneSwap(PaneSwapParams {
-                            pane_id: None,
-                            direction: None,
-                            source_pane_id: Some(source_pane_id.clone()),
-                            target_pane_id: Some(pane_id),
-                        }),
-                        outcome,
-                    );
-                    self.push_endpoint_method(
-                        Method::PaneFocus(PaneTarget {
-                            pane_id: source_pane_id,
-                        }),
-                        outcome,
-                    );
-                }
-            }
-            ClientContextMenuAction::SplitRight | ClientContextMenuAction::SplitDown => {
-                self.push_endpoint_method(
-                    Method::PaneSplit(PaneSplitParams {
-                        workspace_id: Some(workspace_id),
-                        target_pane_id: Some(pane_id),
-                        direction: if action == ClientContextMenuAction::SplitRight {
-                            SplitDirection::Right
-                        } else {
-                            SplitDirection::Down
-                        },
-                        ratio: None,
-                        cwd: None,
-                        focus: true,
-                        right_click: Default::default(),
-                        env: Default::default(),
-                    }),
-                    outcome,
-                );
-            }
-            ClientContextMenuAction::Zoom => self.push_endpoint_method(
-                Method::PaneZoom(PaneZoomParams {
-                    pane_id: Some(pane_id),
-                    mode: PaneZoomMode::Toggle,
-                }),
-                outcome,
-            ),
-            ClientContextMenuAction::ToggleRightClickPassthrough => self.push_endpoint_method(
-                Method::PaneInputSet(PaneInputSetParams {
-                    pane_id,
-                    right_click: if right_click_passthrough {
-                        PaneRightClickTarget::Herdr
-                    } else {
-                        PaneRightClickTarget::Pane
-                    },
-                }),
-                outcome,
-            ),
-            ClientContextMenuAction::ClosePane => {
-                self.push_endpoint_method(Method::PaneClose(PaneTarget { pane_id }), outcome)
-            }
-            _ => {}
-        }
+        ClientContextMenuTarget::Agent {
+            endpoint_id,
+            pane_id,
+            ..
+        } => (
+            ContextKind::Agent,
+            ActionTarget::Agent {
+                endpoint_id,
+                owner: super::agent_activity_overlay::AgentActivityOwner::Pane { pane_id },
+            },
+        ),
+        ClientContextMenuTarget::ExternalAgent {
+            endpoint_id,
+            external_id,
+        } => (
+            ContextKind::Agent,
+            ActionTarget::Agent {
+                endpoint_id,
+                owner: super::agent_activity_overlay::AgentActivityOwner::External { external_id },
+            },
+        ),
     }
 }
 

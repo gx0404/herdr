@@ -140,6 +140,7 @@ pub struct ContextMenuTexts {
     pub delete_worktree: &'static str,
     pub expand: &'static str,
     pub collapse: &'static str,
+    pub collapse_group: &'static str,
     pub new_tab: &'static str,
     pub rename_pane: &'static str,
     pub clear_pane_name: &'static str,
@@ -152,6 +153,7 @@ pub struct ContextMenuTexts {
     pub manage_machines: &'static str,
     pub edit_machine: &'static str,
     pub reconnect_machine: &'static str,
+    pub switch_machine: &'static str,
     pub enable_machine: &'static str,
     pub disable_machine: &'static str,
     pub remove_machine: &'static str,
@@ -179,11 +181,13 @@ pub struct GlobalMenuTexts {
     pub footer_run: &'static str,
     pub footer_select: &'static str,
     pub footer_close: &'static str,
-    pub machine_connect_fmt: &'static str, // args: label
-    pub machine_switch_fmt: &'static str,  // args: label
-    pub machine_edit_fmt: &'static str,    // args: label
-    pub machine_enable_fmt: &'static str,  // args: label
-    pub machine_disable_fmt: &'static str, // args: label
+    pub machine_connect_fmt: &'static str,  // args: label
+    pub machine_switch_fmt: &'static str,   // args: label
+    pub machine_edit_fmt: &'static str,     // args: label
+    pub machine_enable_fmt: &'static str,   // args: label
+    pub machine_rename_fmt: &'static str,   // args: label
+    pub machine_remove_fmt: &'static str,   // args: label
+    pub machine_copy_fix_fmt: &'static str, // args: label
     pub machine_import: &'static str,
     pub snippets: &'static str,
     pub snippet_run: &'static str,
@@ -1156,6 +1160,10 @@ pub struct MenuTexts {
     pub unavailable_suffix: &'static str,
     pub submenu_machine: &'static str,
     pub submenu_view: &'static str,
+    pub monitor: &'static str,
+    pub monitor_short: &'static str,
+    pub close_monitor: &'static str,
+    pub lock_layout: &'static str,
 }
 
 /// 机器表单（快速添加、分组、预览、连接测试与校验）的文案。
@@ -1941,8 +1949,6 @@ pub struct Texts {
     // seam-stub(activity-window)：二级窗口车道用上后删除本 allow。
     #[allow(dead_code)]
     pub agent_activity: AgentActivityTexts,
-    // seam-stub(menu)：菜单车道用上后删除本 allow。
-    #[allow(dead_code)]
     pub menu: MenuTexts,
     // seam-stub(machines)：机器车道用上后删除本 allow。
     #[allow(dead_code)]

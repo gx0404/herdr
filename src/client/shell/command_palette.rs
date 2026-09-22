@@ -1,3 +1,7 @@
+use super::action_table::{
+    global_action_state, machine_action_state, ActionCategory, ActionId, ActionTarget, PaletteMode,
+    ACTIONS,
+};
 use super::feedback::ChromeContext;
 use super::render::{
     display_width, modal_panel, put_right_text, put_text, render_key_hints, render_search_bar,
@@ -18,83 +22,29 @@ pub(super) struct ClientPaletteItem {
     pub(super) title: String,
     /// Dim helper line: the live binding label or a machine target.
     pub(super) subtitle: String,
+    /// 主菜单分类下标（`GlobalMenuTexts::categories`），由动作表给出。
+    pub(super) category: usize,
     pub(super) badge: bool,
+    /// 暂时不可用：目录视图里置灰、搜索里不列出，激活是空操作。
+    pub(super) enabled: bool,
+    /// 二态开关的当前状态（`None` = 不是开关）。
+    pub(super) checked: Option<bool>,
     pub(super) action: ClientPaletteAction,
 }
 
 #[derive(Debug, Clone)]
 pub(super) enum ClientPaletteAction {
-    Binding(crate::input::KeybindAction),
-    CustomCommand(crate::config::CustomCommandKeybind),
+    /// 执行动作表里的一个动作。
+    Run(ActionId, ActionTarget),
     Category(usize),
     Search,
     Back,
-    Observation(super::observability::Page),
-    CloseMonitor,
-    Arrange,
-    Notifications,
-    WhatsNew,
-    MachineConnect(crate::client::endpoint::ProfileId),
-    MachineSwitch(ClientEndpointId),
-    MachineEdit(crate::client::endpoint::ProfileId),
-    MachineToggleEnabled(crate::client::endpoint::ProfileId, bool),
-    MachineImport,
-    SnippetsList,
-    SnippetRun,
-    SceneSave,
-    SceneList,
-    Broadcast,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum BrowserView {
     Menu(Option<usize>),
     Search,
-}
-
-fn category(item: &ClientPaletteItem) -> usize {
-    let id = item.id.as_str();
-    if id.starts_with("machine:") || id == "binding:ManageMachines" {
-        2
-    } else if id.starts_with("observation:") {
-        3
-    } else if id.starts_with("command:")
-        || id.starts_with("snippets:")
-        || id.starts_with("scene:")
-        || id == "broadcast"
-    {
-        4
-    } else if id.contains("Workspace")
-        || id.contains("Worktree")
-        || id.contains("Agent")
-        || id == "binding:OpenNavigator"
-    {
-        0
-    } else if id.contains("Pane")
-        || id.contains("Tab")
-        || [
-            "binding:CopyMode",
-            "binding:EditScrollback",
-            "binding:Zoom",
-            "binding:SplitVertical",
-            "binding:SplitHorizontal",
-            "binding:EnterResizeMode",
-            "layout",
-        ]
-        .contains(&id)
-    {
-        1
-    } else if [
-        "binding:Settings",
-        "binding:ReloadConfig",
-        "binding:ToggleSidebar",
-    ]
-    .contains(&id)
-    {
-        5
-    } else {
-        6
-    }
 }
 
 fn navigation(item: &ClientPaletteItem) -> bool {
@@ -180,11 +130,11 @@ pub(super) fn palette_rows(palette: &ClientCommandPaletteOverlay) -> Vec<ClientP
         let mut seen = std::collections::HashSet::new();
         if !matches!(palette.view, BrowserView::Menu(Some(_))) {
             for id in palette.recent_ids.iter().take(PALETTE_RECENT_LIMIT) {
-                if let Some(item) = palette
-                    .items
-                    .iter()
-                    .find(|item| &item.id == id && !navigation(item))
-                {
+                if let Some(item) = palette.items.iter().find(|item| {
+                    &item.id == id
+                        && !navigation(item)
+                        && (item.enabled || palette.view != BrowserView::Search)
+                }) {
                     if seen.insert(item.id.as_str()) {
                         rows.push(ClientPaletteRow {
                             item,
@@ -197,13 +147,13 @@ pub(super) fn palette_rows(palette: &ClientCommandPaletteOverlay) -> Vec<ClientP
         }
         for item in &palette.items {
             let show = match palette.view {
-                BrowserView::Search => !navigation(item),
+                BrowserView::Search => !navigation(item) && item.enabled,
                 BrowserView::Menu(None) => matches!(
                     item.action,
                     ClientPaletteAction::Category(_) | ClientPaletteAction::Search
                 ),
                 BrowserView::Menu(Some(group)) => {
-                    (!navigation(item) && category(item) == group)
+                    (!navigation(item) && item.category == group)
                         || matches!(item.action, ClientPaletteAction::Back)
                 }
             };
@@ -222,7 +172,7 @@ pub(super) fn palette_rows(palette: &ClientCommandPaletteOverlay) -> Vec<ClientP
         .iter()
         .enumerate()
         .filter_map(|(index, item)| {
-            if navigation(item) {
+            if navigation(item) || !item.enabled {
                 return None;
             }
             let aliases = format!(
@@ -234,8 +184,8 @@ pub(super) fn palette_rows(palette: &ClientCommandPaletteOverlay) -> Vec<ClientP
                     .get(&item.id)
                     .map(String::as_str)
                     .unwrap_or_default(),
-                crate::i18n::en::TEXTS.global_menu.categories[category(item)],
-                crate::i18n::zh_cn::TEXTS.global_menu.categories[category(item)]
+                crate::i18n::en::TEXTS.global_menu.categories[item.category],
+                crate::i18n::zh_cn::TEXTS.global_menu.categories[item.category]
             );
             fuzzy_match(query, &item.title)
                 .map(|(score, indices)| (score + 50, indices))
@@ -266,501 +216,84 @@ pub(super) fn palette_rows(palette: &ClientCommandPaletteOverlay) -> Vec<ClientP
         .collect::<Vec<_>>()
 }
 
-fn palette_binding_items(
-    items: &mut Vec<ClientPaletteItem>,
-    keybinds: &crate::config::Keybinds,
-    t: &crate::i18n::Texts,
-) {
-    use crate::input::KeybindAction;
-    let global_menu = &t.global_menu;
-    let keybind_texts = &t.keybinds;
-    fn push(
-        items: &mut Vec<ClientPaletteItem>,
-        id: &str,
-        title: &str,
-        bindings: &crate::config::ActionKeybinds,
-        action: KeybindAction,
-    ) {
-        items.push(ClientPaletteItem {
-            id: format!("binding:{id}"),
-            title: title.to_owned(),
-            subtitle: bindings.label().unwrap_or_default(),
-            badge: false,
-            action: ClientPaletteAction::Binding(action),
-        });
-    }
-    push(
-        items,
-        "Settings",
-        global_menu.settings,
-        &keybinds.settings,
-        KeybindAction::Settings,
-    );
-    push(
-        items,
-        "ManageMachines",
-        global_menu.machines,
-        &keybinds.manage_machines,
-        KeybindAction::ManageMachines,
-    );
-    items.push(ClientPaletteItem {
-        id: "notifications".to_owned(),
-        title: global_menu.notifications.to_owned(),
-        subtitle: String::new(),
-        badge: false,
-        action: ClientPaletteAction::Notifications,
-    });
-    push(
-        items,
-        "Help",
-        global_menu.keybinds,
-        &keybinds.help,
-        KeybindAction::Help,
-    );
-    push(
-        items,
-        "ReloadConfig",
-        global_menu.reload_config,
-        &keybinds.reload_config,
-        KeybindAction::ReloadConfig,
-    );
-    push(
-        items,
-        "WorkspacePicker",
-        keybind_texts.workspace_navigation,
-        &keybinds.workspace_picker,
-        KeybindAction::WorkspacePicker,
-    );
-    push(
-        items,
-        "OpenNavigator",
-        keybind_texts.session_navigator,
-        &keybinds.goto,
-        KeybindAction::OpenNavigator,
-    );
-    push(
-        items,
-        "NewWorkspace",
-        keybind_texts.new_workspace,
-        &keybinds.new_workspace,
-        KeybindAction::NewWorkspace,
-    );
-    push(
-        items,
-        "NewWorktree",
-        keybind_texts.new_worktree,
-        &keybinds.new_worktree,
-        KeybindAction::NewWorktree,
-    );
-    push(
-        items,
-        "OpenWorktree",
-        keybind_texts.open_worktree,
-        &keybinds.open_worktree,
-        KeybindAction::OpenWorktree,
-    );
-    push(
-        items,
-        "RemoveWorktree",
-        keybind_texts.delete_worktree_checkout,
-        &keybinds.remove_worktree,
-        KeybindAction::RemoveWorktree,
-    );
-    push(
-        items,
-        "RenameWorkspace",
-        keybind_texts.rename_workspace,
-        &keybinds.rename_workspace,
-        KeybindAction::RenameWorkspace,
-    );
-    push(
-        items,
-        "CloseWorkspace",
-        keybind_texts.close_workspace,
-        &keybinds.close_workspace,
-        KeybindAction::CloseWorkspace,
-    );
-    push(
-        items,
-        "PreviousWorkspace",
-        keybind_texts.previous_workspace,
-        &keybinds.previous_workspace,
-        KeybindAction::PreviousWorkspace,
-    );
-    push(
-        items,
-        "NextWorkspace",
-        keybind_texts.next_workspace,
-        &keybinds.next_workspace,
-        KeybindAction::NextWorkspace,
-    );
-    push(
-        items,
-        "PreviousAgent",
-        keybind_texts.previous_agent,
-        &keybinds.previous_agent,
-        KeybindAction::PreviousAgent,
-    );
-    push(
-        items,
-        "NextAgent",
-        keybind_texts.next_agent,
-        &keybinds.next_agent,
-        KeybindAction::NextAgent,
-    );
-    push(
-        items,
-        "NewTab",
-        keybind_texts.new_tab,
-        &keybinds.new_tab,
-        KeybindAction::NewTab,
-    );
-    push(
-        items,
-        "RenameTab",
-        keybind_texts.rename_tab,
-        &keybinds.rename_tab,
-        KeybindAction::RenameTab,
-    );
-    push(
-        items,
-        "PreviousTab",
-        keybind_texts.previous_tab,
-        &keybinds.previous_tab,
-        KeybindAction::PreviousTab,
-    );
-    push(
-        items,
-        "NextTab",
-        keybind_texts.next_tab,
-        &keybinds.next_tab,
-        KeybindAction::NextTab,
-    );
-    push(
-        items,
-        "MoveTabPrevious",
-        keybind_texts.move_tab_left,
-        &keybinds.move_tab_previous,
-        KeybindAction::MoveTabPrevious,
-    );
-    push(
-        items,
-        "MoveTabNext",
-        keybind_texts.move_tab_right,
-        &keybinds.move_tab_next,
-        KeybindAction::MoveTabNext,
-    );
-    push(
-        items,
-        "CloseTab",
-        keybind_texts.close_tab,
-        &keybinds.close_tab,
-        KeybindAction::CloseTab,
-    );
-    push(
-        items,
-        "RenamePane",
-        keybind_texts.rename_pane,
-        &keybinds.rename_pane,
-        KeybindAction::RenamePane,
-    );
-    push(
-        items,
-        "EditScrollback",
-        keybind_texts.edit_scrollback,
-        &keybinds.edit_scrollback,
-        KeybindAction::EditScrollback,
-    );
-    push(
-        items,
-        "CopyMode",
-        keybind_texts.copy_mode,
-        &keybinds.copy_mode,
-        KeybindAction::CopyMode,
-    );
-    push(
-        items,
-        "SplitVertical",
-        keybind_texts.split_vertical,
-        &keybinds.split_vertical,
-        KeybindAction::SplitVertical,
-    );
-    push(
-        items,
-        "SplitHorizontal",
-        keybind_texts.split_horizontal,
-        &keybinds.split_horizontal,
-        KeybindAction::SplitHorizontal,
-    );
-    push(
-        items,
-        "ClosePane",
-        keybind_texts.close_pane,
-        &keybinds.close_pane,
-        KeybindAction::ClosePane,
-    );
-    push(
-        items,
-        "Zoom",
-        keybind_texts.zoom_pane,
-        &keybinds.zoom,
-        KeybindAction::Zoom,
-    );
-    push(
-        items,
-        "EnterResizeMode",
-        keybind_texts.resize_mode,
-        &keybinds.resize_mode,
-        KeybindAction::EnterResizeMode,
-    );
-    push(
-        items,
-        "FocusPaneLeft",
-        keybind_texts.focus_pane_left,
-        &keybinds.focus_pane_left,
-        KeybindAction::FocusPaneLeft,
-    );
-    push(
-        items,
-        "FocusPaneDown",
-        keybind_texts.focus_pane_down,
-        &keybinds.focus_pane_down,
-        KeybindAction::FocusPaneDown,
-    );
-    push(
-        items,
-        "FocusPaneUp",
-        keybind_texts.focus_pane_up,
-        &keybinds.focus_pane_up,
-        KeybindAction::FocusPaneUp,
-    );
-    push(
-        items,
-        "FocusPaneRight",
-        keybind_texts.focus_pane_right,
-        &keybinds.focus_pane_right,
-        KeybindAction::FocusPaneRight,
-    );
-    push(
-        items,
-        "CyclePaneNext",
-        keybind_texts.cycle_pane_next,
-        &keybinds.cycle_pane_next,
-        KeybindAction::CyclePaneNext,
-    );
-    push(
-        items,
-        "CyclePanePrevious",
-        keybind_texts.cycle_pane_previous,
-        &keybinds.cycle_pane_previous,
-        KeybindAction::CyclePanePrevious,
-    );
-    push(
-        items,
-        "LastPane",
-        keybind_texts.last_pane,
-        &keybinds.last_pane,
-        KeybindAction::LastPane,
-    );
-    push(
-        items,
-        "LinkHints",
-        keybind_texts.link_hints,
-        &keybinds.link_hints,
-        KeybindAction::LinkHints,
-    );
-    push(
-        items,
-        "ToggleSidebar",
-        keybind_texts.toggle_sidebar,
-        &keybinds.toggle_sidebar,
-        KeybindAction::ToggleSidebar,
-    );
-    push(
-        items,
-        "Detach",
-        global_menu.detach,
-        &keybinds.detach,
-        KeybindAction::Detach,
-    );
-}
-
 impl ClientShellState {
+    /// 命令面板的条目全集：动作表按声明顺序展开（聚焦对象语义的一条、按机器
+    /// 铺开的每台机器一组、自定义命令每条一项），再追加分类与导航项。暂时不可
+    /// 用的动作照样列出（目录视图置灰），对当前布局不适用的不列。
     fn build_palette_items(&self) -> Vec<ClientPaletteItem> {
+        let texts = crate::i18n::texts();
+        let keybinds = &self.config.keybinds.keybinds;
+        let cx = self.global_action_context();
         let mut items = Vec::new();
-        // Attention items lead the list so they are visible without scrolling.
-        if let Some(snapshot) = self.snapshot.as_deref() {
-            if snapshot.update_available.is_some() || snapshot.latest_release_notes_available {
-                let global_menu = &crate::i18n::texts().global_menu;
-                items.push(ClientPaletteItem {
-                    id: "whats_new".to_owned(),
-                    title: if snapshot.update_available.is_some() {
-                        global_menu.update_ready.to_owned()
-                    } else {
-                        global_menu.whats_new.to_owned()
-                    },
-                    subtitle: String::new(),
-                    badge: snapshot.update_available.is_some(),
-                    action: ClientPaletteAction::WhatsNew,
-                });
-            }
-        }
-        palette_binding_items(
-            &mut items,
-            &self.config.keybinds.keybinds,
-            crate::i18n::texts(),
-        );
-        if let Some(snapshot) = self.snapshot.as_deref() {
-            if snapshot.integration_updates_available {
-                if let Some(item) = items.iter_mut().find(|item| item.id == "binding:Settings") {
-                    item.badge = true;
+        let mut machines_listed = false;
+        for spec in ACTIONS {
+            match spec.palette {
+                PaletteMode::Hidden => {}
+                PaletteMode::Focused => {
+                    let state = global_action_state(spec.id, &cx);
+                    if !state.visible {
+                        continue;
+                    }
+                    items.push(ClientPaletteItem {
+                        id: spec.key.to_owned(),
+                        title: spec.title_text(texts, state.alternate).to_owned(),
+                        subtitle: spec
+                            .binding
+                            .and_then(|binding| (binding.keys)(keybinds).label())
+                            .unwrap_or_default(),
+                        category: spec.category.index(),
+                        badge: state.badge,
+                        enabled: state.enabled,
+                        checked: state.checked,
+                        action: ClientPaletteAction::Run(spec.id, ActionTarget::Focused),
+                    });
                 }
+                PaletteMode::PerCommand => {
+                    for command in &keybinds.custom_commands {
+                        items.push(ClientPaletteItem {
+                            id: format!("{}:{}", spec.key, command.command),
+                            title: command
+                                .description
+                                .clone()
+                                .unwrap_or_else(|| command.command.clone()),
+                            subtitle: command.label.clone(),
+                            category: spec.category.index(),
+                            badge: false,
+                            enabled: true,
+                            checked: None,
+                            action: ClientPaletteAction::Run(
+                                spec.id,
+                                ActionTarget::Command(command.clone()),
+                            ),
+                        });
+                    }
+                }
+                // 机器动作组整组按机器展开一次（机器之间不交错），位置取组里
+                // 第一条的声明位置。
+                PaletteMode::PerMachine if !machines_listed => {
+                    machines_listed = true;
+                    self.push_machine_palette_items(&mut items);
+                }
+                PaletteMode::PerMachine => {}
             }
         }
-        for command in self.config.keybinds.keybinds.custom_commands.iter() {
-            items.push(ClientPaletteItem {
-                id: format!("command:{}", command.command),
-                title: command
-                    .description
-                    .clone()
-                    .unwrap_or_else(|| command.command.clone()),
-                subtitle: command.label.clone(),
-                badge: false,
-                action: ClientPaletteAction::CustomCommand(command.clone()),
-            });
-        }
-        let global_menu = &crate::i18n::texts().global_menu;
-        for (id, title, action) in [
-            (
-                "machine:import",
-                global_menu.machine_import,
-                ClientPaletteAction::MachineImport,
-            ),
-            (
-                "snippets:list",
-                global_menu.snippets,
-                ClientPaletteAction::SnippetsList,
-            ),
-            (
-                "snippets:run",
-                global_menu.snippet_run,
-                ClientPaletteAction::SnippetRun,
-            ),
-            (
-                "scene:save",
-                global_menu.scene_save,
-                ClientPaletteAction::SceneSave,
-            ),
-            (
-                "scene:list",
-                global_menu.scene_restore,
-                ClientPaletteAction::SceneList,
-            ),
-            (
-                "broadcast",
-                global_menu.broadcast,
-                ClientPaletteAction::Broadcast,
-            ),
-        ] {
-            items.push(ClientPaletteItem {
-                id: id.to_owned(),
-                title: title.to_owned(),
-                subtitle: String::new(),
-                badge: false,
-                action,
-            });
-        }
-        for profile in &self.saved_profiles {
-            let endpoint_id = ClientEndpointId::Ssh(profile.id.clone());
-            let online = self.endpoint_is_online(&endpoint_id);
-            let fill = |template: &str| crate::i18n::fill(template, &[("label", &profile.label)]);
-            if profile.enabled && online && self.active_endpoint_id != endpoint_id {
-                items.push(ClientPaletteItem {
-                    id: format!("machine:switch:{}", profile.id.as_str()),
-                    title: fill(global_menu.machine_switch_fmt),
-                    subtitle: profile.target.clone(),
-                    badge: false,
-                    action: ClientPaletteAction::MachineSwitch(endpoint_id.clone()),
-                });
-            }
-            if profile.enabled && !online {
-                items.push(ClientPaletteItem {
-                    id: format!("machine:connect:{}", profile.id.as_str()),
-                    title: fill(global_menu.machine_connect_fmt),
-                    subtitle: profile.target.clone(),
-                    badge: false,
-                    action: ClientPaletteAction::MachineConnect(profile.id.clone()),
-                });
-            }
-            items.push(ClientPaletteItem {
-                id: format!("machine:toggle:{}", profile.id.as_str()),
-                title: fill(if profile.enabled {
-                    global_menu.machine_disable_fmt
-                } else {
-                    global_menu.machine_enable_fmt
-                }),
-                subtitle: profile.target.clone(),
-                badge: false,
-                action: ClientPaletteAction::MachineToggleEnabled(
-                    profile.id.clone(),
-                    !profile.enabled,
-                ),
-            });
-            items.push(ClientPaletteItem {
-                id: format!("machine:edit:{}", profile.id.as_str()),
-                title: fill(global_menu.machine_edit_fmt),
-                subtitle: profile.target.clone(),
-                badge: false,
-                action: ClientPaletteAction::MachineEdit(profile.id.clone()),
-            });
-        }
-        items.push(ClientPaletteItem {
-            id: "observation:monitor".into(),
-            title: super::observability::tr(
-                "Monitor (system · accounts · settings)",
-                "监控（系统 · 账号 · 设置）",
-            )
-            .into(),
-            subtitle: String::new(),
-            badge: false,
-            action: ClientPaletteAction::Observation(super::observability::Page::Monitor),
-        });
-        if self.workbench.enabled
-            && self
-                .workbench
-                .dock
-                .root
-                .contains(&super::dock::PanelId::Monitor)
-        {
-            // 终端聚焦时 Esc 进终端，命令面板提供显式关闭停靠监控面板的入口。
-            items.push(ClientPaletteItem {
-                id: "observation:close-monitor".into(),
-                title: super::observability::tr("Close monitor panel", "关闭监控面板").into(),
-                subtitle: String::new(),
-                badge: false,
-                action: ClientPaletteAction::CloseMonitor,
-            });
-        }
-        items.push(ClientPaletteItem {
-            id: "layout".into(),
-            title: super::observability::tr("Arrange panels", "调整面板布局").into(),
-            subtitle: String::new(),
-            badge: false,
-            action: ClientPaletteAction::Arrange,
-        });
-        for (index, title) in global_menu.categories.iter().enumerate() {
-            let count = items.iter().filter(|item| category(item) == index).count();
+        for (index, title) in texts.global_menu.categories.iter().enumerate() {
+            let count = items.iter().filter(|item| item.category == index).count();
             let badge = items
                 .iter()
-                .any(|item| category(item) == index && item.badge);
+                .any(|item| item.category == index && item.badge);
             items.push(ClientPaletteItem {
                 id: format!("category:{index}"),
                 title: title.to_string(),
                 subtitle: format!("{count}  ›"),
+                category: index,
                 badge,
+                enabled: true,
+                checked: None,
                 action: ClientPaletteAction::Category(index),
             });
         }
+        let global_menu = &texts.global_menu;
         for (id, title, action) in [
             (
                 "search",
@@ -773,20 +306,50 @@ impl ClientShellState {
                 id: id.into(),
                 title: title.into(),
                 subtitle: if id == "search" {
-                    self.config
-                        .keybinds
-                        .keybinds
-                        .command_search
-                        .label()
-                        .unwrap_or_default()
+                    keybinds.command_search.label().unwrap_or_default()
                 } else {
                     String::new()
                 },
+                category: ActionCategory::Help.index(),
                 badge: false,
+                enabled: true,
+                checked: None,
                 action,
             });
         }
         items
+    }
+
+    /// 机器动作组按已保存机器展开：与机器行右键菜单同一组条目、同一套可用性。
+    fn push_machine_palette_items(&self, items: &mut Vec<ClientPaletteItem>) {
+        let texts = crate::i18n::texts();
+        for profile in &self.saved_profiles {
+            let endpoint_id = ClientEndpointId::Ssh(profile.id.clone());
+            let online = self.endpoint_is_online(&endpoint_id);
+            let active = self.active_endpoint_id == endpoint_id;
+            for spec in ACTIONS
+                .iter()
+                .filter(|spec| spec.palette == PaletteMode::PerMachine)
+            {
+                let state = machine_action_state(spec.id, profile.enabled, online, active);
+                items.push(ClientPaletteItem {
+                    id: format!("{}:{}", spec.key, profile.id.as_str()),
+                    title: crate::i18n::fill(
+                        spec.title_text(texts, state.alternate),
+                        &[("label", &profile.label)],
+                    ),
+                    subtitle: profile.target.clone(),
+                    category: spec.category.index(),
+                    badge: state.badge,
+                    enabled: state.enabled,
+                    checked: state.checked,
+                    action: ClientPaletteAction::Run(
+                        spec.id,
+                        ActionTarget::Machine(endpoint_id.clone()),
+                    ),
+                });
+            }
+        }
     }
 
     pub(super) fn toggle_global_menu(&mut self) {
@@ -806,14 +369,18 @@ impl ClientShellState {
         if !matches!(self.overlay, Some(ClientShellOverlay::CommandPalette(_))) {
             self.browser_return = self.overlay.take().map(Box::new);
         }
+        // 两种语言的标题互为别名：界面是中文时照样能用英文词搜到，反之亦然。
         let mut aliases = HashMap::<String, String>::new();
         for texts in [&crate::i18n::en::TEXTS, &crate::i18n::zh_cn::TEXTS] {
-            let mut translated = Vec::new();
-            palette_binding_items(&mut translated, &self.config.keybinds.keybinds, texts);
-            for item in translated {
-                let entry = aliases.entry(item.id).or_default();
-                entry.push(' ');
-                entry.push_str(&item.title);
+            for spec in ACTIONS
+                .iter()
+                .filter(|spec| spec.palette == PaletteMode::Focused)
+            {
+                let entry = aliases.entry(spec.key.to_owned()).or_default();
+                for alternate in [false, true] {
+                    entry.push(' ');
+                    entry.push_str(spec.title_text(texts, alternate));
+                }
             }
         }
         self.overlay = Some(ClientShellOverlay::CommandPalette(
@@ -916,6 +483,10 @@ impl ClientShellState {
             let Some(row) = rows.get(index) else {
                 return;
             };
+            if !row.item.enabled {
+                // 不可用的条目：面板保持打开，什么都不做。
+                return;
+            }
             (row.item.id.clone(), row.item.action.clone())
         };
         if let Some(ClientShellOverlay::CommandPalette(palette)) = self.overlay.as_mut() {
@@ -943,43 +514,8 @@ impl ClientShellState {
         self.palette_recent.insert(0, id);
         self.palette_recent.truncate(PALETTE_RECENT_LIMIT);
         self.persist_chrome_preferences(outcome);
-        match action {
-            ClientPaletteAction::Binding(action) => {
-                self.record_binding(crate::input::KeybindMatch::Action(action), outcome)
-            }
-            ClientPaletteAction::CustomCommand(command) => {
-                self.record_binding(crate::input::KeybindMatch::Command(command), outcome);
-            }
-            ClientPaletteAction::Observation(page) => self.open_observation_page(page, outcome),
-            ClientPaletteAction::CloseMonitor => {
-                self.close_workbench_panel(super::dock::PanelId::Monitor, outcome);
-            }
-            ClientPaletteAction::Arrange => {
-                self.workbench.arranging = true;
-            }
-            ClientPaletteAction::Category(_)
-            | ClientPaletteAction::Search
-            | ClientPaletteAction::Back => {}
-            ClientPaletteAction::Notifications => self.open_notification_history(),
-            ClientPaletteAction::WhatsNew => self.open_release_notes(),
-            ClientPaletteAction::MachineConnect(profile_id) => {
-                self.machine_reconnect(&profile_id, outcome)
-            }
-            ClientPaletteAction::MachineSwitch(endpoint_id) => {
-                self.activate_endpoint(endpoint_id, outcome);
-            }
-            ClientPaletteAction::MachineEdit(profile_id) => {
-                self.open_machine_edit_form(&profile_id)
-            }
-            ClientPaletteAction::MachineToggleEnabled(profile_id, enabled) => {
-                self.machine_set_enabled(&profile_id, enabled)
-            }
-            ClientPaletteAction::MachineImport => self.open_machine_import_wizard(),
-            ClientPaletteAction::SnippetsList => self.open_snippets_overlay(false),
-            ClientPaletteAction::SnippetRun => self.open_snippets_overlay(true),
-            ClientPaletteAction::SceneSave => self.open_scenes_overlay_saving(),
-            ClientPaletteAction::SceneList => self.open_scenes_overlay(),
-            ClientPaletteAction::Broadcast => self.open_broadcast_overlay(),
+        if let ClientPaletteAction::Run(id, target) = action {
+            self.run_action(id, target, outcome);
         }
         outcome.repaint = true;
     }
@@ -1142,16 +678,22 @@ pub(crate) fn render_command_palette(
         let row = &rows[index];
         let chosen = index == selected;
         let style = list_row_style(p, cx.components, chosen, palette.hovered == Some(index));
+        // 暂时不可用的条目只在目录视图里出现：置灰，选中也不反色成可执行的样子。
+        let style = if row.item.enabled {
+            style
+        } else {
+            style.fg(p.overlay0)
+        };
         b.set_style(rect, style);
         let marker_width = 2.min(rect.width);
-        put_text(
-            b,
-            rect.x,
-            rect.y,
-            marker_width,
-            if chosen { "› " } else { "  " },
-            style,
-        );
+        // 标记列：第 1 格是键盘选中的「›」，第 2 格是开关的勾选态。
+        let marker = match (chosen, row.item.checked == Some(true)) {
+            (true, true) => "›✓",
+            (true, false) => "› ",
+            (false, true) => " ✓",
+            (false, false) => "  ",
+        };
+        put_text(b, rect.x, rect.y, marker_width, marker, style);
         let badge_width = if row.item.badge { 2 } else { 0 };
         let available = rect.width.saturating_sub(marker_width + badge_width);
         let subtitle_width = if available < 28 || row.item.subtitle.is_empty() {
