@@ -21,6 +21,8 @@ const CLIENT_SHELL_METHODS: &[&str] = &[
     "account.usage.report",
     "account.usage.subscribe",
     "account.usage.unsubscribe",
+    "agent.activity.read",
+    "agent.external.list",
     "client.views.set",
     "client_shell.surface.set",
     "command.invoke",
@@ -339,6 +341,26 @@ mod tests {
             )))
             .expect("独立冻结的文字快照契约");
         assert_eq!(snapshot_shapes, expected_snapshots);
+        // 活动树方法：新增能力，独立摘出比对自己的 fixture，不进任何既有 fixture。
+        let activity_names = actual
+            .keys()
+            .filter(|name| name.starts_with("agent.activity.") || *name == "agent.external.list")
+            .cloned()
+            .collect::<Vec<_>>();
+        let activity_shapes = activity_names
+            .into_iter()
+            .map(|name| {
+                let digest = actual.remove(&name).expect("活动树方法存在");
+                (name, digest)
+            })
+            .collect::<BTreeMap<_, _>>();
+        let expected_activity: BTreeMap<String, String> =
+            serde_json::from_str(include_str!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/tests/fixtures/endpoint-agent-activity-shapes-v1.json"
+            )))
+            .expect("活动树方法的独立契约");
+        assert_eq!(activity_shapes, expected_activity);
         // Freeze the additive method separately without rewriting the published fixture.
         assert_eq!(
             actual.remove("pane.link.resolve").as_deref(),
@@ -374,10 +396,10 @@ mod tests {
         );
     }
 
-    /// 活动树方法的请求形状先独立钉住：server 侧还是桩，方法尚未进
-    /// `CLIENT_SHELL_METHODS`（进了就会落入上面与冻结 fixture 的比对）。宣告时在
-    /// `advertised_client_shell_method_shapes_stay_at_the_v1_contract` 里新增一段
-    /// 独立的摘出块，比对同一份 fixture；不得往既有 fixture 加键。
+    /// 活动树方法的请求形状钉在自己的 fixture 里：它们已进 `CLIENT_SHELL_METHODS`，
+    /// `advertised_client_shell_method_shapes_stay_at_the_v1_contract` 用独立摘出块
+    /// 比对同一份 fixture；这里再确认 fixture 恰好只含这两个方法且都已宣告。不得往
+    /// 既有 fixture 加键。
     #[test]
     fn agent_activity_method_shapes_are_pinned_in_their_own_fixture() {
         let expected: BTreeMap<String, String> = serde_json::from_str(include_str!(concat!(
@@ -388,6 +410,9 @@ mod tests {
         let methods = expected.keys().map(String::as_str).collect::<Vec<_>>();
         assert_eq!(methods, ["agent.activity.read", "agent.external.list"]);
         assert_eq!(method_shape_digests(&methods), expected);
+        for method in methods {
+            assert!(supports_client_shell_method_name(method), "{method} 已宣告");
+        }
     }
 
     #[test]

@@ -260,3 +260,93 @@ async fn json_api_activity_reads_answer_asynchronously() {
     ));
     shutdown_test_runtimes(&mut server);
 }
+
+fn endpoint_responses(
+    control_rx: &std::sync::mpsc::Receiver<Vec<u8>>,
+    request_id: &str,
+) -> serde_json::Value {
+    let mut data = Vec::new();
+    loop {
+        let bytes = control_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("等待端点应答");
+        if let ServerMessage::ClientShellEndpointResponseChunk {
+            request_id: chunk_request,
+            final_chunk,
+            data: chunk,
+            ..
+        } = read_server_message(bytes)
+        {
+            if chunk_request != request_id {
+                continue;
+            }
+            data.extend(chunk);
+            if final_chunk {
+                return serde_json::from_slice(&data).expect("应答是 JSON");
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn client_endpoint_activity_reads_bypass_the_command_lane() {
+    let (mut server, pane_id) = server_with_agent_pane();
+    let client_id = 53;
+    let (control_rx, _render_rx) = connect_shell(&mut server, client_id);
+    let _ = next_snapshot(&control_rx);
+    let boot_id = server.client_shell_boot_id.clone();
+    let public = server.app.public_pane_id(0, pane_id).expect("公开 id");
+
+    for method in [
+        api::schema::Method::AgentActivityRead(AgentActivityReadParams::default()),
+        api::schema::Method::AgentExternalList(api::schema::EmptyParams::default()),
+    ] {
+        assert!(
+            crate::server::client_commands::supports_client_shell_method(&method),
+            "已宣告进客户端端点"
+        );
+    }
+
+    // 参数错误：主线程同步回错误分块。
+    assert!(
+        !server.handle_server_event(ServerEvent::ClientShellEndpointRequest {
+            client_id,
+            boot_id: boot_id.clone(),
+            request: Box::new(api::schema::Request {
+                id: "client-shell:invalid".into(),
+                method: api::schema::Method::AgentActivityRead(AgentActivityReadParams::default()),
+            }),
+        })
+    );
+    let invalid = endpoint_responses(&control_rx, "client-shell:invalid");
+    assert_eq!(invalid["error"]["code"], "invalid_params");
+
+    // 合法读取：不占终端命令的 in-flight 名额，应答经 server 事件通道回来。
+    assert!(
+        !server.handle_server_event(ServerEvent::ClientShellEndpointRequest {
+            client_id,
+            boot_id: boot_id.clone(),
+            request: Box::new(api::schema::Request {
+                id: "client-shell:activity".into(),
+                method: api::schema::Method::AgentActivityRead(AgentActivityReadParams {
+                    pane_id: Some(public),
+                    ..AgentActivityReadParams::default()
+                }),
+            }),
+        })
+    );
+    assert!(!server.clients[&client_id].shell_endpoint_command_in_flight);
+    let ready = tokio::time::timeout(Duration::from_secs(5), server.server_event_rx.recv())
+        .await
+        .expect("后台应答")
+        .expect("通道未关闭");
+    assert!(matches!(ready, ServerEvent::ObservationResponse { .. }));
+    assert!(!server.handle_server_event(ready));
+    let response = endpoint_responses(&control_rx, "client-shell:activity");
+    // claude 适配器仍是空壳。
+    assert_eq!(
+        response["error"]["code"],
+        crate::server::agent_activity::NOT_IMPLEMENTED_CODE
+    );
+    shutdown_test_runtimes(&mut server);
+}
