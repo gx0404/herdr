@@ -1,0 +1,11 @@
+{
+  "type": "herdr.activity.snapshot",
+  "version": 1,
+  "nodes": [
+    { "id": "call_min" },
+    { "id": "call_label_only", "label": "notes" },
+    { "id": "call_child", "parent_id": "call_min", "status": "running" },
+    { "id": "call_output_no_text", "kind": "task", "label": "fetch", "output": { "start": 12 } },
+    { "id": "call_output_bad", "kind": "task", "label": "fetch again", "output": "not an object" }
+  ]
+}

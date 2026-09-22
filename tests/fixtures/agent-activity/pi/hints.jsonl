@@ -1,0 +1,9 @@
+{"type":"herdr.activity.snapshot","version":1,"session_id":"5f000000-0000-4000-8000-000000000003","nodes":[{"id":"call_1","kind":"task","status":"running","label":"notes draft","started_at_ms":1726990000000}]}
+{"type":"herdr.activity.snapshot","version":1,"nodes":[{"id":"call_1","kind":"task","status":"done","label":"notes draft"
+tool_execution_end
+{"type":"herdr.other.snapshot","version":1,"nodes":[]}
+{"type":"herdr.activity.snapshot","version":0,"nodes":[]}
+{"type":"herdr.activity.snapshot","nodes":[]}
+[1,2,3]
+{"type":"herdr.activity.snapshot","version":2,"sent_at_ms":1726990001000,"nodes":[{"id":"call_1","kind":"task","status":"done","label":"notes draft","eta_ms":0}]}
+{"type":"herdr.activity.snapshot","version":1}

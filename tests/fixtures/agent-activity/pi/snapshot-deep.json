@@ -1,0 +1,453 @@
+{
+ "type": "herdr.activity.snapshot",
+ "version": 1,
+ "nodes": [
+  {
+   "id": "call_d63",
+   "kind": "subagent",
+   "status": "running",
+   "label": "level 63",
+   "parent_id": "call_d62"
+  },
+  {
+   "id": "call_d62",
+   "kind": "subagent",
+   "status": "running",
+   "label": "level 62",
+   "parent_id": "call_d61"
+  },
+  {
+   "id": "call_d61",
+   "kind": "subagent",
+   "status": "running",
+   "label": "level 61",
+   "parent_id": "call_d60"
+  },
+  {
+   "id": "call_d60",
+   "kind": "subagent",
+   "status": "running",
+   "label": "level 60",
+   "parent_id": "call_d59"
+  },
+  {
+   "id": "call_d59",
+   "kind": "subagent",
+   "status": "running",
+   "label": "level 59",
+   "parent_id": "call_d58"
+  },
+  {
+   "id": "call_d58",
+   "kind": "subagent",
+   "status": "running",
+   "label": "level 58",
+   "parent_id": "call_d57"
+  },
+  {
+   "id": "call_d57",
+   "kind": "subagent",
+   "status": "running",
+   "label": "level 57",
+   "parent_id": "call_d56"
+  },
+  {
+   "id": "call_d56",
+   "kind": "subagent",
+   "status": "running",
+   "label": "level 56",
+   "parent_id": "call_d55"
+  },
+  {
+   "id": "call_d55",
+   "kind": "subagent",
+   "status": "running",
+   "label": "level 55",
+   "parent_id": "call_d54"
+  },
+  {
+   "id": "call_d54",
+   "kind": "subagent",
+   "status": "running",
+   "label": "level 54",
+   "parent_id": "call_d53"
+  },
+  {
+   "id": "call_d53",
+   "kind": "subagent",
+   "status": "running",
+   "label": "level 53",
+   "parent_id": "call_d52"
+  },
+  {
+   "id": "call_d52",
+   "kind": "subagent",
+   "status": "running",
+   "label": "level 52",
+   "parent_id": "call_d51"
+  },
+  {
+   "id": "call_d51",
+   "kind": "subagent",
+   "status": "running",
+   "label": "level 51",
+   "parent_id": "call_d50"
+  },
+  {
+   "id": "call_d50",
+   "kind": "subagent",
+   "status": "running",
+   "label": "level 50",
+   "parent_id": "call_d49"
+  },
+  {
+   "id": "call_d49",
+   "kind": "subagent",
+   "status": "running",
+   "label": "level 49",
+   "parent_id": "call_d48"
+  },
+  {
+   "id": "call_d48",
+   "kind": "subagent",
+   "status": "running",
+   "label": "level 48",
+   "parent_id": "call_d47"
+  },
+  {
+   "id": "call_d47",
+   "kind": "subagent",
+   "status": "running",
+   "label": "level 47",
+   "parent_id": "call_d46"
+  },
+  {
+   "id": "call_d46",
+   "kind": "subagent",
+   "status": "running",
+   "label": "level 46",
+   "parent_id": "call_d45"
+  },
+  {
+   "id": "call_d45",
+   "kind": "subagent",
+   "status": "running",
+   "label": "level 45",
+   "parent_id": "call_d44"
+  },
+  {
+   "id": "call_d44",
+   "kind": "subagent",
+   "status": "running",
+   "label": "level 44",
+   "parent_id": "call_d43"
+  },
+  {
+   "id": "call_d43",
+   "kind": "subagent",
+   "status": "running",
+   "label": "level 43",
+   "parent_id": "call_d42"
+  },
+  {
+   "id": "call_d42",
+   "kind": "subagent",
+   "status": "running",
+   "label": "level 42",
+   "parent_id": "call_d41"
+  },
+  {
+   "id": "call_d41",
+   "kind": "subagent",
+   "status": "running",
+   "label": "level 41",
+   "parent_id": "call_d40"
+  },
+  {
+   "id": "call_d40",
+   "kind": "subagent",
+   "status": "running",
+   "label": "level 40",
+   "parent_id": "call_d39"
+  },
+  {
+   "id": "call_d39",
+   "kind": "subagent",
+   "status": "running",
+   "label": "level 39",
+   "parent_id": "call_d38"
+  },
+  {
+   "id": "call_d38",
+   "kind": "subagent",
+   "status": "running",
+   "label": "level 38",
+   "parent_id": "call_d37"
+  },
+  {
+   "id": "call_d37",
+   "kind": "subagent",
+   "status": "running",
+   "label": "level 37",
+   "parent_id": "call_d36"
+  },
+  {
+   "id": "call_d36",
+   "kind": "subagent",
+   "status": "running",
+   "label": "level 36",
+   "parent_id": "call_d35"
+  },
+  {
+   "id": "call_d35",
+   "kind": "subagent",
+   "status": "running",
+   "label": "level 35",
+   "parent_id": "call_d34"
+  },
+  {
+   "id": "call_d34",
+   "kind": "subagent",
+   "status": "running",
+   "label": "level 34",
+   "parent_id": "call_d33"
+  },
+  {
+   "id": "call_d33",
+   "kind": "subagent",
+   "status": "running",
+   "label": "level 33",
+   "parent_id": "call_d32"
+  },
+  {
+   "id": "call_d32",
+   "kind": "subagent",
+   "status": "running",
+   "label": "level 32",
+   "parent_id": "call_d31"
+  },
+  {
+   "id": "call_d31",
+   "kind": "subagent",
+   "status": "running",
+   "label": "level 31",
+   "parent_id": "call_d30"
+  },
+  {
+   "id": "call_d30",
+   "kind": "subagent",
+   "status": "running",
+   "label": "level 30",
+   "parent_id": "call_d29"
+  },
+  {
+   "id": "call_d29",
+   "kind": "subagent",
+   "status": "running",
+   "label": "level 29",
+   "parent_id": "call_d28"
+  },
+  {
+   "id": "call_d28",
+   "kind": "subagent",
+   "status": "running",
+   "label": "level 28",
+   "parent_id": "call_d27"
+  },
+  {
+   "id": "call_d27",
+   "kind": "subagent",
+   "status": "running",
+   "label": "level 27",
+   "parent_id": "call_d26"
+  },
+  {
+   "id": "call_d26",
+   "kind": "subagent",
+   "status": "running",
+   "label": "level 26",
+   "parent_id": "call_d25"
+  },
+  {
+   "id": "call_d25",
+   "kind": "subagent",
+   "status": "running",
+   "label": "level 25",
+   "parent_id": "call_d24"
+  },
+  {
+   "id": "call_d24",
+   "kind": "subagent",
+   "status": "running",
+   "label": "level 24",
+   "parent_id": "call_d23"
+  },
+  {
+   "id": "call_d23",
+   "kind": "subagent",
+   "status": "running",
+   "label": "level 23",
+   "parent_id": "call_d22"
+  },
+  {
+   "id": "call_d22",
+   "kind": "subagent",
+   "status": "running",
+   "label": "level 22",
+   "parent_id": "call_d21"
+  },
+  {
+   "id": "call_d21",
+   "kind": "subagent",
+   "status": "running",
+   "label": "level 21",
+   "parent_id": "call_d20"
+  },
+  {
+   "id": "call_d20",
+   "kind": "subagent",
+   "status": "running",
+   "label": "level 20",
+   "parent_id": "call_d19"
+  },
+  {
+   "id": "call_d19",
+   "kind": "subagent",
+   "status": "running",
+   "label": "level 19",
+   "parent_id": "call_d18"
+  },
+  {
+   "id": "call_d18",
+   "kind": "subagent",
+   "status": "running",
+   "label": "level 18",
+   "parent_id": "call_d17"
+  },
+  {
+   "id": "call_d17",
+   "kind": "subagent",
+   "status": "running",
+   "label": "level 17",
+   "parent_id": "call_d16"
+  },
+  {
+   "id": "call_d16",
+   "kind": "subagent",
+   "status": "running",
+   "label": "level 16",
+   "parent_id": "call_d15"
+  },
+  {
+   "id": "call_d15",
+   "kind": "subagent",
+   "status": "running",
+   "label": "level 15",
+   "parent_id": "call_d14"
+  },
+  {
+   "id": "call_d14",
+   "kind": "subagent",
+   "status": "running",
+   "label": "level 14",
+   "parent_id": "call_d13"
+  },
+  {
+   "id": "call_d13",
+   "kind": "subagent",
+   "status": "running",
+   "label": "level 13",
+   "parent_id": "call_d12"
+  },
+  {
+   "id": "call_d12",
+   "kind": "subagent",
+   "status": "running",
+   "label": "level 12",
+   "parent_id": "call_d11"
+  },
+  {
+   "id": "call_d11",
+   "kind": "subagent",
+   "status": "running",
+   "label": "level 11",
+   "parent_id": "call_d10"
+  },
+  {
+   "id": "call_d10",
+   "kind": "subagent",
+   "status": "running",
+   "label": "level 10",
+   "parent_id": "call_d09"
+  },
+  {
+   "id": "call_d09",
+   "kind": "subagent",
+   "status": "running",
+   "label": "level 9",
+   "parent_id": "call_d08"
+  },
+  {
+   "id": "call_d08",
+   "kind": "subagent",
+   "status": "running",
+   "label": "level 8",
+   "parent_id": "call_d07"
+  },
+  {
+   "id": "call_d07",
+   "kind": "subagent",
+   "status": "running",
+   "label": "level 7",
+   "parent_id": "call_d06"
+  },
+  {
+   "id": "call_d06",
+   "kind": "subagent",
+   "status": "running",
+   "label": "level 6",
+   "parent_id": "call_d05"
+  },
+  {
+   "id": "call_d05",
+   "kind": "subagent",
+   "status": "running",
+   "label": "level 5",
+   "parent_id": "call_d04"
+  },
+  {
+   "id": "call_d04",
+   "kind": "subagent",
+   "status": "running",
+   "label": "level 4",
+   "parent_id": "call_d03"
+  },
+  {
+   "id": "call_d03",
+   "kind": "subagent",
+   "status": "running",
+   "label": "level 3",
+   "parent_id": "call_d02"
+  },
+  {
+   "id": "call_d02",
+   "kind": "subagent",
+   "status": "running",
+   "label": "level 2",
+   "parent_id": "call_d01"
+  },
+  {
+   "id": "call_d01",
+   "kind": "subagent",
+   "status": "running",
+   "label": "level 1",
+   "parent_id": "call_d00"
+  },
+  {
+   "id": "call_d00",
+   "kind": "subagent",
+   "status": "running",
+   "label": "level 0"
+  }
+ ]
+}

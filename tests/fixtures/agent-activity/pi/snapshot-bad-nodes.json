@@ -1,0 +1,36 @@
+{
+  "type": "herdr.activity.snapshot",
+  "version": 1,
+  "nodes": [
+    "call_string",
+    42,
+    null,
+    { "label": "no id" },
+    { "id": 17, "label": "numeric id" },
+    { "id": "   ", "label": "blank id" },
+    { "id": "call_first_child", "parent_id": "call_root", "kind": "subagent", "status": "running", "label": "listed before its parent" },
+    {
+      "id": "call_root",
+      "kind": "subagent",
+      "status": "running",
+      "label": "subagent parallel (2 tasks)",
+      "started_at_ms": "soon",
+      "ended_at_ms": -5
+    },
+    { "id": "call_root", "kind": "task", "status": "done", "label": "duplicate id is dropped" },
+    {
+      "id": "call_root/0",
+      "parent_id": "call_root",
+      "kind": "subagent",
+      "status": "done",
+      "label": "scout: map the repo",
+      "started_at_ms": 1726990000123.9,
+      "ended_at_ms": 1726990005000
+    },
+    { "id": "call_late_child", "parent_id": "call_root/0", "kind": "task", "status": "pending", "label": "grandchild" },
+    { "id": "call_orphan", "parent_id": "call_gone", "kind": "task", "status": "done", "label": "parent was pruned" },
+    { "id": "call_self", "parent_id": "call_self", "kind": "task", "status": "done", "label": "points at itself" },
+    { "id": "call_cycle_a", "parent_id": "call_cycle_b", "kind": "task", "status": "running", "label": "cycle a" },
+    { "id": "call_cycle_b", "parent_id": "call_cycle_a", "kind": "task", "status": "running", "label": "cycle b" }
+  ]
+}

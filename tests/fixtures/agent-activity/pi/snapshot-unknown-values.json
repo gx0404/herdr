@@ -1,0 +1,16 @@
+{
+  "type": "herdr.activity.snapshot",
+  "version": 1,
+  "session_id": "5f000000-0000-4000-8000-000000000002",
+  "nodes": [
+    {
+      "id": "call_a",
+      "kind": "workflow",
+      "status": "paused",
+      "label": "orchestrate release",
+      "output": { "text": "phase one", "start": 0, "format": "html" }
+    },
+    { "id": "call_b", "kind": 7, "status": null, "label": "numbers instead of names" },
+    { "id": "call_c", "kind": "background", "status": "blocked", "label": "watch tests" }
+  ]
+}
