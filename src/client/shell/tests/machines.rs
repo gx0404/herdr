@@ -3060,6 +3060,118 @@ fn esc_with_unsaved_changes_asks_before_discarding_the_form() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// toast 盖在列表页脚的最后一行上时，那一行的页脚项既看不见也不可点：
+/// 点 toast 文字不会触发底下被盖住的按钮；toast 到期后页脚恢复可点。
+#[test]
+fn machine_toast_row_swallows_no_hidden_footer_clicks() {
+    let saved = profile("Build", "dev@build.example", "90");
+    for (cols, rows) in [(80u16, 30u16), (130, 40)] {
+        let mut state = state_with_profiles(std::slice::from_ref(&saved));
+        state.config.feedback.animations = false;
+        state.open_machines_overlay();
+        frame_text(&mut state, cols, rows);
+        let footer = state.hits.machines_footer;
+        let last_row = footer.bottom() - 1;
+        let covered: Vec<(Rect, MachineOverlayButton)> = state
+            .hits
+            .machines_actions
+            .iter()
+            .filter(|(rect, _)| rect.y == last_row)
+            .copied()
+            .collect();
+        assert!(!covered.is_empty(), "{cols} 列：页脚最后一行应有按钮");
+
+        state.route_machines_key(&key(KeyCode::Char('c')), &mut ClientShellInput::default());
+        let text = frame_text(&mut state, cols, rows);
+        assert!(
+            compact(&text).contains(&compact(crate::i18n::texts().machines.copied_fix_command)),
+            "{cols} 列：{text}"
+        );
+        assert!(
+            state
+                .hits
+                .machines_actions
+                .iter()
+                .all(|(rect, _)| rect.y != last_row),
+            "{cols} 列：toast 行不留命中区：{:?}",
+            state.hits.machines_actions
+        );
+        for (rect, button) in &covered {
+            let mut outcome = ClientShellInput::default();
+            state.handle_mouse(left_click(rect.x, rect.y), &mut outcome);
+            assert!(
+                outcome.actions.is_empty(),
+                "{cols} 列 {button:?}：{:?}",
+                outcome.actions
+            );
+            assert!(
+                machines_view_is_list(&state),
+                "{cols} 列：点 toast 不触发被盖住的 {button:?}"
+            );
+        }
+
+        // 到期后页脚最后一行恢复可点。
+        let at = machine_toast_at(&state).expect("toast");
+        state.tick_chrome_feedback(at + super::super::machines_overlay::MACHINE_TOAST_DURATION);
+        frame_text(&mut state, cols, rows);
+        let restored = state
+            .hits
+            .machines_actions
+            .iter()
+            .filter(|(rect, _)| rect.y == last_row)
+            .count();
+        assert_eq!(restored, covered.len(), "{cols} 列");
+    }
+}
+
+/// 保存新机器的 toast 落在列表；4 秒内再打开添加表单，表单唯一的一行页脚
+/// 不被 toast 盖住（toast 只在列表 / 详情显示），回到列表又能看到它。表单
+/// 里触发的复制修复命令改走通用通知。
+#[test]
+fn machine_toast_stays_off_the_form_footer() {
+    let dir = with_temp_state_home("toast-form");
+    let mut state = state_with_profiles(&[]);
+    add_form_overlay(&mut state, "build.example", "");
+    press(&mut state, key(KeyCode::Enter));
+    let saved_text = compact(&crate::i18n::fill(
+        crate::i18n::texts().machine_form.saved_fmt,
+        &[("label", "build.example")],
+    ));
+    assert!(compact(&frame_text(&mut state, 106, 32)).contains(&saved_text));
+
+    press(&mut state, key(KeyCode::Char('a')));
+    let text = compact(&frame_text(&mut state, 106, 32));
+    assert!(
+        !text.contains(&saved_text),
+        "表单页脚不被 toast 盖住：{text}"
+    );
+    let buttons = machine_buttons(&state);
+    for expected in [
+        MachineOverlayButton::Save,
+        MachineOverlayButton::TestConnection,
+        MachineOverlayButton::Back,
+    ] {
+        assert!(buttons.contains(&expected), "{buttons:?}");
+    }
+
+    let profile_id = state.saved_profiles[0].id.clone();
+    let mut outcome = ClientShellInput::default();
+    state.machine_copy_fix_command(&profile_id, &mut outcome);
+    assert_eq!(
+        state
+            .visible_endpoint_notice
+            .as_ref()
+            .map(|notice| notice.title.as_str()),
+        Some(crate::i18n::texts().machines.copied_fix_command),
+        "表单里没有 toast 落点，走通用通知"
+    );
+
+    press(&mut state, key(KeyCode::Esc));
+    assert!(machines_view_is_list(&state));
+    assert!(compact(&frame_text(&mut state, 106, 32)).contains(&saved_text));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 // ---------------------------------------------------------------------
 // 合并页脚、空状态与带预览的导入清单
 // ---------------------------------------------------------------------

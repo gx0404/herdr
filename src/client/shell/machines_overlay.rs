@@ -121,6 +121,15 @@ pub(super) enum ClientMachinesView {
     Import(Box<ClientMachineImportView>),
 }
 
+impl ClientMachinesView {
+    /// 公共 toast 只在列表（含宽屏工作台）与详情显示：它的来源就在这两处
+    /// （复制修复命令、保存新机器后回列表）。表单 / 导入 / 转发 / 删除确认
+    /// 的页脚只有一两行而且整行都是按钮，toast 盖上去会把它们藏起来。
+    fn shows_toast(&self) -> bool {
+        matches!(self, Self::List | Self::Detail(_))
+    }
+}
+
 fn nonempty(value: &str) -> Option<String> {
     (!value.is_empty()).then(|| value.to_owned())
 }
@@ -402,9 +411,12 @@ impl ClientShellState {
         let text = crate::i18n::texts().machines.copied_fix_command;
         // 取法与向导成功路径、feedback tick 一致：命令面板盖在机器页之上时
         // 仍写进机器页自己的 toast。
+        // 机器页停在不显示 toast 的视图（表单等）时同样走通用通知。
         if let Some(ClientShellOverlay::Machines(overlay)) = self.content_page_mut() {
-            overlay.set_message(text.to_owned());
-            return;
+            if overlay.view.shows_toast() {
+                overlay.set_message(text.to_owned());
+                return;
+            }
         }
         self.push_endpoint_notice(
             super::state::ClientEndpointNoticeKind::Success,
@@ -1113,11 +1125,11 @@ impl ClientShellState {
 
 /// 机器面板公共 toast：视图各自把页脚行报成 `OverlayRender::machines_toast`，
 /// 这里在顶层统一画一次，所以 List / Detail / dashboard 反馈落点一致
-/// （HERDR-MACH-006）。
-fn render_machines_toast(b: &mut Buffer, rect: Rect, message: &str, p: &Palette) {
+/// （HERDR-MACH-006）。返回盖住的那一行。
+fn render_machines_toast(b: &mut Buffer, rect: Rect, message: &str, p: &Palette) -> Option<Rect> {
     use ratatui::widgets::Widget as _;
     if rect.is_empty() {
-        return;
+        return None;
     }
     let row = Rect::new(rect.x, rect.bottom().saturating_sub(1), rect.width, 1);
     ratatui::widgets::Clear.render(row, b);
@@ -1142,6 +1154,7 @@ fn render_machines_toast(b: &mut Buffer, rect: Rect, message: &str, p: &Palette)
             .bg(p.panel_bg)
             .add_modifier(Modifier::BOLD),
     );
+    Some(row)
 }
 
 // 机器面板渲染入口：视图分派 + 公共 toast。参数与既有机器页渲染入口一致，
@@ -1501,7 +1514,7 @@ pub(super) fn render_machines_overlay(
     session_log_dropped: &HashMap<ProfileId, u64>,
     cx: &super::feedback::ChromeContext<'_>,
 ) -> Option<OverlayRender> {
-    let render = render_machines_view(
+    let mut render = render_machines_view(
         b,
         overlay,
         endpoints,
@@ -1511,9 +1524,19 @@ pub(super) fn render_machines_overlay(
         session_log_dropped,
         cx,
     );
-    // 公共 toast 最后画，盖在视图自己的页脚提示之上。
-    if let (Some(render), Some(toast)) = (render.as_ref(), overlay.message.as_ref()) {
-        render_machines_toast(b, render.machines_toast, &toast.text, cx.palette);
+    // 公共 toast 最后画，盖在列表 / 详情页脚的最后一行上。页脚项就是按钮：
+    // 被盖住的那几项这几秒里看不见，也就不能留命中区（否则点 toast 文字会
+    // 触发底下的按钮），悬浮态随命中区一起消失。
+    if let (Some(render), Some(toast)) = (render.as_mut(), overlay.message.as_ref()) {
+        if overlay.view.shows_toast() {
+            if let Some(row) =
+                render_machines_toast(b, render.machines_toast, &toast.text, cx.palette)
+            {
+                render
+                    .machines_actions
+                    .retain(|(rect, _)| !rect.intersects(row));
+            }
+        }
     }
     render
 }
