@@ -1612,7 +1612,6 @@ pub const TEXTS: Texts = Texts {
         integrations_need_updating_fmt: "installed herdr integrations need updating; {instructions}.",
         integration_instructions_run_fmt: "run {command}",
         integration_instructions_run_list_fmt: "run {commands} and {last}",
-        integration_not_supported_windows_fmt: "{target} integration is not supported on Windows",
 
         self_update_disabled_homebrew_preview:
             "self-update is disabled for Homebrew installs; preview is only available for direct Herdr installs",

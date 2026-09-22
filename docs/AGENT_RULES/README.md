@@ -67,6 +67,15 @@ fork **照常同步上游**；本节只约束同步时怎样处理六家以外�
 
 - **六家名单**：claude、codex、kimi、zcode、pi、opencode。zcode 此刻尚无任何
   文件，属保留名单：日后新增的 zcode 路径不进丢弃清单。
+- **保留例外（提及非六家名字但不随资产丢弃）**：以下代码/测试提到已删除集成商
+  的名字，但服务的是「外部工具兼容」而非「该集成商本身」，不进丢弃清单：
+  - `src/integration/assets/claude/herdr-agent-state.sh` 的 `CURSOR_VERSION` /
+    `cursor_version` 守卫：Cursor Agent CLI 会原样导入 herdr 写入的 Claude hook
+    脚本运行，该守卫防止它把 Cursor 自身的 hook 事件误上报成 herdr 的 Claude
+    会话；删掉守卫不是「支持 Cursor 集成」，是破坏 Claude hook 对外部工具的
+    健壮性。
+  - `tests/cli/hooks.rs::claude_hook_ignores_cursor_compatibility_payloads`：
+    钉住上面这条守卫的行为，同属外部工具兼容用例，不是 Cursor 集成测试。
 - **丢弃路径**：机器真源是 `scripts/upstream_sync_drop_paths.txt`（每行一个
   glob，语义同 `routes.toml`），覆盖四类整文件属于非六家的路径：
   - `src/integration/assets/<非六家>/**`

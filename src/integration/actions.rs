@@ -1,8 +1,6 @@
 use std::io;
 
-use super::registry::{
-    integration_target_label, integration_target_supported, retired_integration_error,
-};
+use super::registry::{integration_target_label, retired_integration_error};
 use super::targets::{
     install_claude, install_codex, install_kimi, install_opencode, install_pi, uninstall_claude,
     uninstall_codex, uninstall_kimi, uninstall_opencode, uninstall_pi,
@@ -20,18 +18,11 @@ pub(crate) fn install_target(
 }
 
 fn install_target_inner(target: crate::api::schema::IntegrationTarget) -> io::Result<Vec<String>> {
-    // 退役门先于平台支持判断：退役变体要得到「已退役」，而不是「Windows 不支持」。
+    // 退役门是唯一的不可用判断：官方六家集成在所有平台都受支持
+    // （`registry::integration_target_supported` 恒等于 `!target.is_retired()`），
+    // 因此退役分支之后不再需要平台支持检查。
     if target.is_retired() {
         return Err(retired_integration_error("install", target));
-    }
-
-    if !integration_target_supported(target) {
-        return Err(io::Error::other(crate::i18n::fill(
-            crate::i18n::texts()
-                .cli_errors
-                .integration_not_supported_windows_fmt,
-            &[("target", integration_target_label(target))],
-        )));
     }
 
     let version_warning = match agent_version_requirement(target) {

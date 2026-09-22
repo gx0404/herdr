@@ -1591,7 +1591,6 @@ pub const TEXTS: Texts = Texts {
         integrations_need_updating_fmt: "已安装的 herdr 集成需要更新；{instructions}。",
         integration_instructions_run_fmt: "运行 {command}",
         integration_instructions_run_list_fmt: "运行 {commands} 与 {last}",
-        integration_not_supported_windows_fmt: "{target} 集成在 Windows 上不受支持",
 
         self_update_disabled_homebrew_preview:
             "Homebrew 安装不支持自更新；preview 渠道仅适用于直接安装的 Herdr",

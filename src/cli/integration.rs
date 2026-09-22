@@ -152,14 +152,8 @@ fn parse_integration_target(
 
     match parse_integration_target_name(target) {
         IntegrationTargetName::Supported(parsed) => Ok(Some(parsed)),
-        IntegrationTargetName::Retired(retired) => {
-            eprintln!(
-                "{}",
-                crate::i18n::fill(
-                    errors().integration_target_retired_fmt,
-                    &[("target", &retired.wire_name())]
-                )
-            );
+        IntegrationTargetName::Retired(_) => {
+            eprintln!("{}", retired_target_message(target));
             eprintln!("{}", errors().integration_targets_supported);
             Ok(None)
         }
@@ -175,6 +169,15 @@ fn parse_integration_target(
             Ok(None)
         }
     }
+}
+
+/// 退役目标的提示文案：回显用户输入的原始字符串，而不是 serde wire 名
+/// （两者可能不同，如 `antigravity-cli` 的 wire 名是 `antigravity_cli`）。
+fn retired_target_message(raw_input: &str) -> String {
+    crate::i18n::fill(
+        errors().integration_target_retired_fmt,
+        &[("target", raw_input)],
+    )
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -241,5 +244,26 @@ mod tests {
                 IntegrationTargetName::Unknown
             );
         }
+    }
+
+    #[test]
+    fn retired_target_message_echoes_raw_input_not_wire_name() {
+        // serde wire 名用下划线（`antigravity_cli`），用户很可能按 CLI 惯例敲
+        // 连字符（`antigravity-cli`）；提示必须原样回显用户输入。
+        let raw = "antigravity-cli";
+        let target = IntegrationTarget::from_wire_name(raw).expect("known retired variant");
+        assert!(target.is_retired());
+        assert_ne!(target.wire_name(), raw, "夹具前提：wire 名应与原始输入不同");
+
+        let message = retired_target_message(raw);
+        assert!(
+            message.contains(raw),
+            "提示应包含用户输入的原始字符串 {raw:?}：{message}"
+        );
+        assert!(
+            !message.contains(&target.wire_name()),
+            "提示不应回显 serde wire 名 {:?}：{message}",
+            target.wire_name()
+        );
     }
 }

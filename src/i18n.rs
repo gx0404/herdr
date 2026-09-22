@@ -1790,7 +1790,6 @@ pub struct CliErrorTexts {
     pub integrations_need_updating_fmt: &'static str, // args: instructions
     pub integration_instructions_run_fmt: &'static str, // args: command
     pub integration_instructions_run_list_fmt: &'static str, // args: commands, last
-    pub integration_not_supported_windows_fmt: &'static str, // args: target
 
     // src/update.rs
     pub self_update_disabled_homebrew_preview: &'static str,

@@ -881,11 +881,7 @@ fn settings_integrations_enter_installs_only_the_selected_row() {
             "claude",
             IntegrationState::NotInstalled,
         ),
-        integration(
-            IntegrationTarget::Copilot,
-            "copilot",
-            IntegrationState::NotInstalled,
-        ),
+        integration(IntegrationTarget::Pi, "pi", IntegrationState::NotInstalled),
     ];
     settings.selected = 1;
 
@@ -921,7 +917,7 @@ fn settings_integrations_enter_installs_only_the_selected_row() {
         vec![
             IntegrationTarget::Codex,
             IntegrationTarget::Claude,
-            IntegrationTarget::Copilot,
+            IntegrationTarget::Pi,
         ],
         "a 才安装全部待装项"
     );

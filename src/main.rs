@@ -513,7 +513,8 @@ pane_history = false
 # Optional allow-list: only reveal for focused panes whose detected agent
 # matches one of these names. Empty means apply to any focused pane.
 # If the list contains no valid names, the reveal does not apply.
-# Accepted: pi, claude, claude-code, codex, opencode, kimi, kimi-code.
+# Accepted: pi, claude, claude-code, codex, opencode, opencode2, open-code,
+# kimi, kimi-code, kimi code.
 # cjk_ime_agents = []
 # Cursor shape rendered when reveal_hidden_cursor_for_cjk_ime is true.
 # Values: block, steady_block, underline, steady_underline, bar (default), steady_bar.
