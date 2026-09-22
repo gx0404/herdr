@@ -1640,7 +1640,16 @@ mod tests {
         let event_hub = EventHub::default();
         let responder_hub = event_hub.clone();
         let (api_tx, mut api_rx) = mpsc::unbounded_channel::<ApiRequestMessage>();
+        // 订阅建立的探测请求（seen == 0）回复之后，`stream_subscriptions` 会
+        // 立即（不经 sleep）跑循环的第一轮 poll，在响应线程上再发一次
+        // `pane.get`。主线程读到 ack 与递增计数器分别发生在客户端 socket 与
+        // server 线程两侧，二者之间没有同步点：满载下调度抖动会让第二次 poll
+        // 抢在主线程读完计数之前完成，使断言偶发失败（HSR-03 deflake）。
+        // 这里让响应线程在应答探测请求之后阻塞，直到主线程确认过「建立时只
+        // poll 一次」再放行，把断言钉死在确定的时间点上，而不是赛跑。
+        let (probe_checked_tx, probe_checked_rx) = std::sync::mpsc::channel::<()>();
         let responder = std::thread::spawn(move || {
+            let mut gate = Some(probe_checked_rx);
             while let Some(msg) = api_rx.blocking_recv() {
                 let Method::PaneGet(_) = msg.request.method else {
                     panic!("unexpected request: {:?}", msg.request.method);
@@ -1664,6 +1673,11 @@ mod tests {
                         .unwrap(),
                     )
                     .unwrap();
+                if let Some(rx) = gate.take() {
+                    // 阻塞在这里不会拖慢用例：主线程一读完 ack 就立刻放行，
+                    // 超时只是防止断言失败时线程泄漏。
+                    let _ = rx.recv_timeout(APP_RESPONSE_TIMEOUT);
+                }
             }
         });
 
@@ -1703,6 +1717,9 @@ mod tests {
             1,
             "订阅建立时只做一次探测快照"
         );
+        // 断言过关，放行响应线程处理循环第一轮的 poll；此前它一直卡在探测
+        // 请求的回复之后，计数器不会在断言读到之前被第二次 poll 提前推进。
+        let _ = probe_checked_tx.send(());
 
         // 观察窗口：先推一条事件点火，然后放任自流数个轮询间隔。
         event_hub.push(workspace_focused_event("ignition"));

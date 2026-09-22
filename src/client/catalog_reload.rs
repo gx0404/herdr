@@ -150,8 +150,16 @@ mod tests {
         let quit = Arc::new(AtomicBool::new(false));
         watch_broadcast_set(tx, quit.clone());
 
+        // `catalog_poll_interval` 在被观察文件不存在时退到 5 s；第二次通知
+        // 必然要跨过这次退避才能触发。满载下（如并行 `cargo build
+        // --release`）线程调度可能让这次名义 5 s 的 sleep 显著晚醒，5 s 的
+        // 等待窗口与它几乎零余量，一碰上调度抖动就偶发超时。`recv` 本来就是
+        // 轮询直到条件成立（20 ms 间隔的 `try_recv`），成功路径不会真的等满
+        // deadline，所以把上限放宽到明显盖过已知的 5 s 退避不影响正常用例
+        // 耗时，只是不再和调度抖动打擦边球。
+        const EVENT_WAIT: Duration = Duration::from_secs(20);
         let recv = |rx: &mut tokio::sync::mpsc::Receiver<ClientLoopEvent>| {
-            let deadline = Instant::now() + Duration::from_secs(5);
+            let deadline = Instant::now() + EVENT_WAIT;
             loop {
                 match rx.try_recv() {
                     Ok(event) => return event,
