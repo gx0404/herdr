@@ -1,0 +1,15 @@
+[
+  {
+    "session_id": "ses_self0000000000000000000000",
+    "position": 3
+  },
+  {
+    "session_id": "ses_bare0000000000000000000000",
+    "content": "no position"
+  },
+  {
+    "position": 1,
+    "content": "no session"
+  },
+  "not an object"
+]

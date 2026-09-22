@@ -1,0 +1,32 @@
+[
+  {
+    "id": "prt_0000000000000000000000005",
+    "role": "assistant",
+    "message_completed": 1726989060000,
+    "type": "text",
+    "tool": null,
+    "tool_status": null,
+    "tool_title": null,
+    "tool_output": null,
+    "tool_output_len": null,
+    "part_end": 1726989059000,
+    "text": "Found docs/README.md",
+    "text_len": 20,
+    "filename": null
+  },
+  {
+    "id": "prt_0000000000000000000000006",
+    "role": "assistant",
+    "message_completed": 1726989060000,
+    "type": "file",
+    "tool": null,
+    "tool_status": null,
+    "tool_title": null,
+    "tool_output": null,
+    "tool_output_len": null,
+    "part_end": null,
+    "text": null,
+    "text_len": null,
+    "filename": "notes.md"
+  }
+]

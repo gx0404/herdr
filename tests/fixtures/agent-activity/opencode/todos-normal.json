@@ -1,0 +1,52 @@
+[
+  {
+    "session_id": "ses_done000000000000000000000",
+    "position": 0,
+    "status": "cancelled",
+    "priority": "low",
+    "content": "Check the index",
+    "content_len": 15,
+    "time_created": 1726989005000,
+    "time_updated": 1726989055000
+  },
+  {
+    "session_id": "ses_root0000000000000000000000",
+    "position": 0,
+    "status": "in_progress",
+    "priority": "high",
+    "content": "Write the parser tests",
+    "content_len": 22,
+    "time_created": 1726989400000,
+    "time_updated": 1726989450000
+  },
+  {
+    "session_id": "ses_root0000000000000000000000",
+    "position": 1,
+    "status": "completed",
+    "priority": "medium",
+    "content": "Read the spec",
+    "content_len": 13,
+    "time_created": 1726989400000,
+    "time_updated": 1726989500000
+  },
+  {
+    "session_id": "ses_root0000000000000000000000",
+    "position": 2,
+    "status": "pending",
+    "priority": "low",
+    "content": "Ship it",
+    "content_len": 7,
+    "time_created": 1726989400000,
+    "time_updated": 1726989400000
+  },
+  {
+    "session_id": "ses_elsewhere00000000000000000",
+    "position": 0,
+    "status": "pending",
+    "priority": "low",
+    "content": "Not in this tree",
+    "content_len": 16,
+    "time_created": 1726989400000,
+    "time_updated": 1726989400000
+  }
+]

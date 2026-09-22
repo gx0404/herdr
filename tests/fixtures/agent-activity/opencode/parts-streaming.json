@@ -1,0 +1,17 @@
+[
+  {
+    "id": "prt_0000000000000000000000021",
+    "role": "assistant",
+    "message_completed": null,
+    "type": "text",
+    "tool": null,
+    "tool_status": null,
+    "tool_title": null,
+    "tool_output": null,
+    "tool_output_len": null,
+    "part_end": null,
+    "text": "stream",
+    "text_len": 6,
+    "filename": null
+  }
+]

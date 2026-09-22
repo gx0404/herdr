@@ -1,0 +1,40 @@
+[
+  {
+    "id": "ses_root0000000000000000000000",
+    "parent_id": null,
+    "depth": 0,
+    "title": "Root session",
+    "time_updated": 1726990000000
+  },
+  {
+    "id": "ses_system00000000000000000000",
+    "parent_id": "ses_root0000000000000000000000",
+    "depth": 1,
+    "title": "System (@x subagent)",
+    "title_len": 20,
+    "cost": "free",
+    "tokens_input": 2,
+    "tokens_output": 3,
+    "time_created": 1726989000000,
+    "time_updated": 1726990000000,
+    "last_role": "system",
+    "last_completed": null,
+    "last_error": "null"
+  },
+  {
+    "id": "ses_negative000000000000000000",
+    "parent_id": "ses_root0000000000000000000000",
+    "depth": 1,
+    "title": "Negative (@x subagent)",
+    "title_len": 22,
+    "cost": -1,
+    "tokens_input": -1,
+    "tokens_output": -2,
+    "time_created": -5,
+    "time_updated": 1726990000000,
+    "finish": "weird",
+    "last_role": "assistant",
+    "last_completed": 1726989000000,
+    "last_error": "object"
+  }
+]

@@ -1,0 +1,36 @@
+[
+  {
+    "id": "ses_root0000000000000000000000",
+    "depth": 0
+  },
+  {
+    "id": "ses_child000000000000000000000",
+    "parent_id": "ses_bare0000000000000000000000",
+    "depth": 2,
+    "title": null,
+    "tokens_input": 1,
+    "time_updated": 1726990000000
+  },
+  {
+    "id": "ses_bare0000000000000000000000",
+    "parent_id": "ses_root0000000000000000000000",
+    "depth": 1
+  },
+  {
+    "id": "ses_orphan00000000000000000000",
+    "parent_id": "ses_nowhere000000000000000000",
+    "depth": 1,
+    "title": "Orphan"
+  },
+  {
+    "id": "ses_self0000000000000000000000",
+    "parent_id": "ses_self0000000000000000000000",
+    "depth": 1,
+    "title": "Self"
+  },
+  {
+    "depth": 1,
+    "title": "no id"
+  },
+  42
+]

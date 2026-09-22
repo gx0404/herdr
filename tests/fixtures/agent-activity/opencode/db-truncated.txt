@@ -1,0 +1,12 @@
+[
+  {
+    "id": "ses_root0000000000000000000000",
+    "parent_id": null,
+    "depth": 0,
+    "title": "Root session"
+  },
+  {
+    "id": "ses_cut00000000000000000000000",
+    "parent_id": "ses_root0000000000000000000000",
+    "depth": 1,
+    "title": "This row was cut by the 64 KiB pipe buffer whe

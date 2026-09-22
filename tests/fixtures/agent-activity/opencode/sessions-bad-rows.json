@@ -1,0 +1,26 @@
+[
+  {
+    "id": "ses_root0000000000000000000000",
+    "depth": 0
+  },
+  42,
+  "text",
+  null,
+  {
+    "depth": 1,
+    "title": "no id"
+  },
+  {
+    "id": "ses_bad'quote",
+    "parent_id": "ses_root0000000000000000000000",
+    "depth": 1,
+    "title": "quoted id"
+  },
+  {
+    "id": "ses_good0000000000000000000000",
+    "parent_id": "ses_root0000000000000000000000",
+    "depth": 1,
+    "title": "Good",
+    "time_updated": 1726990000000
+  }
+]

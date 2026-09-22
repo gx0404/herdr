@@ -1,0 +1,62 @@
+[
+  {
+    "id": "prt_0000000000000000000000011",
+    "role": "user",
+    "message_completed": null,
+    "type": "text",
+    "tool": null,
+    "tool_status": null,
+    "tool_title": null,
+    "tool_output": null,
+    "tool_output_len": null,
+    "part_end": null,
+    "text": "Run the suite",
+    "text_len": 500,
+    "filename": null
+  },
+  {
+    "id": "prt_0000000000000000000000012",
+    "role": "assistant",
+    "message_completed": null,
+    "type": "tool",
+    "tool": "bash",
+    "tool_status": "completed",
+    "tool_title": "cargo build",
+    "tool_output": "warning: unused",
+    "tool_output_len": 900,
+    "part_end": null,
+    "text": null,
+    "text_len": null,
+    "filename": null
+  },
+  {
+    "id": "prt_0000000000000000000000013",
+    "role": "assistant",
+    "message_completed": null,
+    "type": "tool",
+    "tool": "bash",
+    "tool_status": "running",
+    "tool_title": "cargo test",
+    "tool_output": null,
+    "tool_output_len": null,
+    "part_end": null,
+    "text": null,
+    "text_len": null,
+    "filename": null
+  },
+  {
+    "id": "prt_0000000000000000000000014",
+    "role": "assistant",
+    "message_completed": null,
+    "type": "text",
+    "tool": null,
+    "tool_status": null,
+    "tool_title": null,
+    "tool_output": null,
+    "tool_output_len": null,
+    "part_end": null,
+    "text": "Still streaming this ans",
+    "text_len": 24,
+    "filename": null
+  }
+]
