@@ -69,7 +69,8 @@ impl App {
     }
 
     /// 一个 pane 的活动树后台刷新结果落库；树变化时发 `pane.agent_activity_changed`
-    /// （只带计数）。失败结果保留旧树，只记日志。返回投影是否变化。
+    /// （只带计数）。失败结果保留旧树，只记日志。返回投影是否变化——只有随快照
+    /// 下发的活动摘要变了才算，深层节点变化不触发每客户端投影重建。
     pub(crate) fn apply_agent_activity_refresh(
         &mut self,
         pane_id: crate::layout::PaneId,
@@ -82,7 +83,7 @@ impl App {
                 return false;
             }
         };
-        let Some(counts) = self
+        let Some(applied) = self
             .state
             .apply_agent_activity(pane_id, nodes, Instant::now())
         else {
@@ -96,12 +97,12 @@ impl App {
                 event: crate::api::schema::EventKind::PaneAgentActivityChanged,
                 data: crate::api::schema::EventData::PaneAgentActivityChanged {
                     pane_id: public_pane_id,
-                    running: counts.running,
-                    total: counts.total,
+                    running: applied.counts.running,
+                    total: applied.counts.total,
                 },
             });
         }
-        true
+        applied.summary_changed
     }
 
     /// 一个外部来源的后台刷新结果整源落库。失败结果保留旧条目（过期由
@@ -2783,6 +2784,46 @@ mod agent_activity_event_tests {
             (0, 1, false)
         );
         assert_eq!(info.launch_seq, 1);
+    }
+
+    /// 深层节点变化：事件照发（客户端据此决定要不要重读），但不算渲染影响——
+    /// 快照摘要没变，重建每客户端投影只会得到逐字节相同的结果。
+    #[test]
+    fn deep_node_changes_emit_the_event_without_a_projection_rebuild() {
+        let (mut app, event_hub, agent_pane, _) = app_with_panes();
+        let public = app.public_pane_id(0, agent_pane).expect("公开 id");
+        let running = AgentActivityNode {
+            started_at_ms: Some(10),
+            ..node("a", AgentActivityStatus::Running)
+        };
+        let mut done = AgentActivityNode {
+            started_at_ms: Some(1),
+            ended_at_ms: Some(2),
+            ..node("b", AgentActivityStatus::Done)
+        };
+        assert!(
+            app.handle_internal_event_with_render_impact(AppEvent::AgentActivityRefreshed {
+                pane_id: agent_pane,
+                result: Ok(vec![running.clone(), done.clone()]),
+            })
+        );
+
+        done.ended_at_ms = Some(500);
+        assert!(
+            !app.handle_internal_event_with_render_impact(AppEvent::AgentActivityRefreshed {
+                pane_id: agent_pane,
+                result: Ok(vec![running, done]),
+            }),
+            "只有深层节点变了：不重建投影"
+        );
+        assert_eq!(
+            activity_events(&event_hub),
+            [(public.clone(), 1, 2), (public, 1, 2)],
+            "变化事件照发两次"
+        );
+        // 新值照常落库：agent.get / agent.activity.read 拿得到。
+        let info = app.agent_info(0, agent_pane).expect("agent 信息");
+        assert_eq!(info.activity[1].ended_at_ms, Some(500));
     }
 
     #[test]

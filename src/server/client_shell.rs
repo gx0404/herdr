@@ -358,12 +358,14 @@ fn activity_projection(
                 .map(activity_node_projection)
                 .collect(),
         },
+        // 摘要的选点与截断口径是 `AppState::apply_agent_activity` 判定「投影是否
+        // 变化」的同一套规则，真源在 `app::state`，两边不得各写一份。
         SnapshotActivity::Summary => {
-            let latest = latest_activity_node(nodes);
+            let latest = app::state::latest_activity_node(nodes);
             protocol::ClientShellAgentActivity {
                 running,
                 total,
-                truncated: truncated || nodes.len() > usize::from(latest.is_some()),
+                truncated: app::state::activity_summary_truncated(truncated, nodes),
                 nodes: latest
                     .cloned()
                     .map(activity_node_projection)
@@ -372,26 +374,6 @@ fn activity_projection(
             }
         }
     }
-}
-
-/// 摘要里的「最新节点」：优先运行中的节点、取开始时间最晚者；没有运行中的节点
-/// 时取结束（缺失则开始）时间最晚者。时间缺失视为最早，同分取来源顺序靠后者。
-fn latest_activity_node(
-    nodes: &[crate::api::schema::AgentActivityNode],
-) -> Option<&crate::api::schema::AgentActivityNode> {
-    nodes
-        .iter()
-        .enumerate()
-        .max_by_key(|(index, node)| {
-            let running = node.status == crate::api::schema::AgentActivityStatus::Running;
-            let at = if running {
-                node.started_at_ms
-            } else {
-                node.ended_at_ms.or(node.started_at_ms)
-            };
-            (running, at, *index)
-        })
-        .map(|(_, node)| node)
 }
 
 /// `AgentActivityNode` → wire 镜像（字段逐一移入）。
@@ -1145,6 +1127,8 @@ mod agent_activity_tests {
         }
     }
 
+    /// 摘要选点的真源在 `app::state`（投影与「投影是否变化」的判定共用它）；
+    /// 这里从投影侧钉住它的行为。
     #[test]
     fn latest_node_prefers_running_then_the_most_recent_time() {
         use crate::api::schema::AgentActivityStatus::{Done, Pending, Running};
@@ -1154,7 +1138,7 @@ mod agent_activity_tests {
             timed_node("done-late", Done, Some(5), Some(99)),
         ];
         assert_eq!(
-            super::latest_activity_node(&nodes).map(|node| node.id.as_str()),
+            crate::app::state::latest_activity_node(&nodes).map(|node| node.id.as_str()),
             Some("new-running")
         );
         let nodes = vec![
@@ -1163,7 +1147,7 @@ mod agent_activity_tests {
             timed_node("no-time", Done, None, None),
         ];
         assert_eq!(
-            super::latest_activity_node(&nodes).map(|node| node.id.as_str()),
+            crate::app::state::latest_activity_node(&nodes).map(|node| node.id.as_str()),
             Some("pending"),
             "结束时间缺失时按开始时间比"
         );
@@ -1172,11 +1156,19 @@ mod agent_activity_tests {
             timed_node("second", Done, None, None),
         ];
         assert_eq!(
-            super::latest_activity_node(&nodes).map(|node| node.id.as_str()),
+            crate::app::state::latest_activity_node(&nodes).map(|node| node.id.as_str()),
             Some("second"),
             "同分取来源顺序靠后者"
         );
-        assert!(super::latest_activity_node(&[]).is_none());
+        assert!(crate::app::state::latest_activity_node(&[]).is_none());
+    }
+
+    /// 生产默认下发摘要，`AppState::apply_agent_activity` 的投影纪元规则（只在
+    /// 摘要变化时递增）以此为前提。改回 `Full` 必须同时把那条规则改成「任意节点
+    /// 变化即递增」，否则深层节点的变化不会同步给客户端。
+    #[test]
+    fn snapshot_activity_defaults_to_summary_per_agent() {
+        assert_eq!(super::SNAPSHOT_ACTIVITY, super::SnapshotActivity::Summary);
     }
 
     /// 两种下发形态都只用既有 wire 字段（客户端不改就能消费）：整树带全部节点；

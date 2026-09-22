@@ -1075,6 +1075,47 @@ pub struct AgentActivityCounts {
     pub total: u32,
 }
 
+/// 一次活动树写入的结果（内容有变化时给出）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AgentActivityApplied {
+    /// 截断前的计数，进 `pane.agent_activity_changed`。
+    pub counts: AgentActivityCounts,
+    /// 客户端快照里可见的那部分（计数、截断标记、最新节点）是否变化。只有它为真
+    /// 才需要重建每客户端投影：整棵树照常落库，深层节点的变化走
+    /// `agent.activity.read` / `agent.get`，不值得让每个挂载客户端整份重建快照。
+    pub summary_changed: bool,
+}
+
+/// 客户端快照摘要里的「最新节点」（`server::client_shell::SnapshotActivity::
+/// Summary`）：优先运行中的节点、取开始时间最晚者；没有运行中的节点时取结束
+/// （缺失则开始）时间最晚者。时间缺失视为最早，同分取来源顺序靠后者。
+pub(crate) fn latest_activity_node(
+    nodes: &[crate::api::schema::AgentActivityNode],
+) -> Option<&crate::api::schema::AgentActivityNode> {
+    nodes
+        .iter()
+        .enumerate()
+        .max_by_key(|(index, node)| {
+            let running = node.status == crate::api::schema::AgentActivityStatus::Running;
+            let at = if running {
+                node.started_at_ms
+            } else {
+                node.ended_at_ms.or(node.started_at_ms)
+            };
+            (running, at, *index)
+        })
+        .map(|(_, node)| node)
+}
+
+/// 摘要形态下发的 `truncated`：存储本身已截断，或整棵树在摘要里放不下（摘要只带
+/// 最新一个节点）。
+pub(crate) fn activity_summary_truncated(
+    truncated: bool,
+    nodes: &[crate::api::schema::AgentActivityNode],
+) -> bool {
+    truncated || nodes.len() > 1
+}
+
 /// 一个外部来源条目（不属于任何 pane）：`info.activity` 已截断，截断前的计数另存。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExternalAgentRecord {
@@ -1163,14 +1204,15 @@ impl AgentActivityStore {
         !self.activity.is_empty()
     }
 
-    /// 写入一次发现结果（截断到上限）。内容变化返回新计数；空结果写到没有记录的
-    /// pane 不算变化（轮询空树不刷事件）。无论是否变化都记下刷新时刻。
+    /// 写入一次发现结果（截断到上限）。内容变化返回新计数并说明客户端快照摘要是否
+    /// 也变了；空结果写到没有记录的 pane 不算变化（轮询空树不刷事件）。无论是否
+    /// 变化都记下刷新时刻。
     pub fn apply_activity(
         &mut self,
         pane_id: PaneId,
         nodes: Vec<crate::api::schema::AgentActivityNode>,
         now: std::time::Instant,
-    ) -> Option<AgentActivityCounts> {
+    ) -> Option<AgentActivityApplied> {
         let truncated = truncate_activity_nodes(nodes);
         let counts = AgentActivityCounts {
             running: truncated.running,
@@ -1186,12 +1228,23 @@ impl AgentActivityStore {
                 if unchanged {
                     return None;
                 }
+                // 摘要只带计数、截断标记与最新一个节点：深层节点（结束时间、摘要
+                // 文本等）变化不进投影，不必让每个客户端整份重建快照。
+                let summary_changed = existing.running != truncated.running
+                    || existing.total != truncated.total
+                    || activity_summary_truncated(existing.truncated, &existing.nodes)
+                        != activity_summary_truncated(truncated.truncated, &truncated.nodes)
+                    || latest_activity_node(&existing.nodes)
+                        != latest_activity_node(&truncated.nodes);
                 existing.nodes = truncated.nodes;
                 existing.running = truncated.running;
                 existing.total = truncated.total;
                 existing.truncated = truncated.truncated;
                 existing.revision = existing.revision.saturating_add(1);
-                Some(counts)
+                Some(AgentActivityApplied {
+                    counts,
+                    summary_changed,
+                })
             }
             None => {
                 if truncated.nodes.is_empty() {
@@ -1208,7 +1261,10 @@ impl AgentActivityStore {
                         revision: 1,
                     },
                 );
-                Some(counts)
+                Some(AgentActivityApplied {
+                    counts,
+                    summary_changed: true,
+                })
             }
         }
     }
@@ -1574,22 +1630,32 @@ impl AppState {
     }
 
     /// 后台发现结果落库。pane 已不持有 agent（迟到的结果）则丢弃并清记录；内容
-    /// 变化返回新计数并递增投影纪元（活动摘要随快照下发，HSR-05 写入点）。
+    /// 变化返回新计数。
+    ///
+    /// 只有随快照下发的活动摘要变化时才递增投影纪元（HSR-05 写入点）。纪元是每
+    /// 客户端投影复用的键，而生产默认下发形态是摘要
+    /// （`server::client_shell::SNAPSHOT_ACTIVITY`，护栏测试
+    /// `snapshot_activity_defaults_to_summary_per_agent` 钉住）：按「任意节点变化即
+    /// 递增」会让深层节点的每一次变动都触发每个挂载客户端整份重建快照再深比较，
+    /// 产出往往逐字节相同。整棵树照常落库，供 `agent.activity.read` / `agent.get`
+    /// 读取；`pane.agent_activity_changed` 仍按内容变化发。
     pub(crate) fn apply_agent_activity(
         &mut self,
         pane_id: PaneId,
         nodes: Vec<crate::api::schema::AgentActivityNode>,
         now: std::time::Instant,
-    ) -> Option<AgentActivityCounts> {
+    ) -> Option<AgentActivityApplied> {
         if !pane_hosts_agent(&self.workspaces, &self.terminals, pane_id) {
             if self.agent_activity.forget_pane(pane_id) {
                 self.bump_projection_epoch();
             }
             return None;
         }
-        let counts = self.agent_activity.apply_activity(pane_id, nodes, now)?;
-        self.bump_projection_epoch();
-        Some(counts)
+        let applied = self.agent_activity.apply_activity(pane_id, nodes, now)?;
+        if applied.summary_changed {
+            self.bump_projection_epoch();
+        }
+        Some(applied)
     }
 
     /// 外部来源条目落库；集合变化时递增投影纪元。返回是否变化。
@@ -2614,9 +2680,12 @@ mod agent_activity_store_tests {
         ];
         assert_eq!(
             store.apply_activity(pane, tree.clone(), t0),
-            Some(AgentActivityCounts {
-                running: 1,
-                total: 2
+            Some(AgentActivityApplied {
+                counts: AgentActivityCounts {
+                    running: 1,
+                    total: 2
+                },
+                summary_changed: true
             })
         );
         let first = store.activity(pane).expect("已落库").clone();
@@ -2634,9 +2703,12 @@ mod agent_activity_store_tests {
 
         assert_eq!(
             store.apply_activity(pane, Vec::new(), t1),
-            Some(AgentActivityCounts {
-                running: 0,
-                total: 0
+            Some(AgentActivityApplied {
+                counts: AgentActivityCounts {
+                    running: 0,
+                    total: 0
+                },
+                summary_changed: true
             }),
             "已有记录的树清空是变化"
         );
@@ -2663,11 +2735,11 @@ mod agent_activity_store_tests {
             Some("gone"),
             AgentActivityStatus::Running,
         ));
-        let counts = store
+        let applied = store
             .apply_activity(pane, tree, Instant::now())
             .expect("落库");
         assert_eq!(
-            counts,
+            applied.counts,
             AgentActivityCounts {
                 running: 2,
                 total: 44
@@ -2900,6 +2972,75 @@ mod agent_activity_store_tests {
             .expect("持有 agent");
         assert_eq!(subject.agent, "claude");
         assert!(state.agent_activity_subject(shell_pane).is_none());
+    }
+
+    /// 客户端帧扇出是乘法路径：投影纪元是每客户端投影复用的键，而快照只带计数、
+    /// 截断标记与最新节点。深层节点（这里是 `ended_at_ms`）变化必须落库供
+    /// `agent.activity.read` / `agent.get` 读到，但不得递增纪元——否则每个挂载
+    /// 客户端都要整份重建快照再深比较，产出逐字节相同。
+    #[test]
+    fn deep_node_changes_keep_the_projection_epoch_but_still_land_in_the_store() {
+        let (mut state, agent_pane, _) = state_with_agent_pane();
+        let running = AgentActivityNode {
+            started_at_ms: Some(10),
+            ..node("a", None, AgentActivityStatus::Running)
+        };
+        let mut done = AgentActivityNode {
+            started_at_ms: Some(1),
+            ended_at_ms: Some(2),
+            ..node("b", Some("a"), AgentActivityStatus::Done)
+        };
+        assert!(state
+            .apply_agent_activity(
+                agent_pane,
+                vec![running.clone(), done.clone()],
+                Instant::now()
+            )
+            .is_some_and(|applied| applied.summary_changed));
+
+        let epoch = state.projection_epoch;
+        done.ended_at_ms = Some(500);
+        let applied = state
+            .apply_agent_activity(agent_pane, vec![running, done], Instant::now())
+            .expect("内容变了");
+        assert!(!applied.summary_changed, "深层节点变化不进摘要");
+        assert_eq!(
+            applied.counts,
+            AgentActivityCounts {
+                running: 1,
+                total: 2
+            },
+            "事件计数照常给出"
+        );
+        assert_eq!(
+            state.projection_epoch, epoch,
+            "摘要没变，不让客户端重建投影"
+        );
+        let stored = state.agent_activity.activity(agent_pane).expect("已落库");
+        assert_eq!(stored.revision, 2, "整棵树照常落库");
+        assert_eq!(stored.nodes[1].ended_at_ms, Some(500));
+
+        // 最新节点本身变了（运行中的节点结束）：摘要变化，纪元递增。
+        let applied = state
+            .apply_agent_activity(
+                agent_pane,
+                vec![
+                    AgentActivityNode {
+                        started_at_ms: Some(10),
+                        ended_at_ms: Some(600),
+                        ..node("a", None, AgentActivityStatus::Done)
+                    },
+                    AgentActivityNode {
+                        started_at_ms: Some(1),
+                        ended_at_ms: Some(500),
+                        ..node("b", Some("a"), AgentActivityStatus::Done)
+                    },
+                ],
+                Instant::now(),
+            )
+            .expect("内容变了");
+        assert!(applied.summary_changed);
+        assert_ne!(state.projection_epoch, epoch);
     }
 
     #[test]
