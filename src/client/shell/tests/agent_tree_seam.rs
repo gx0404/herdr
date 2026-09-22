@@ -132,6 +132,40 @@ fn chrome_hover_resolves_agent_tree_hit_vectors_with_toggles_before_rows() {
         remote.clone(),
         "zcode:abc".into(),
     ));
+    // 机器行与工作区行同属统一树，开关向量也必须先于它们解析（折叠键名由波 2
+    // 面板车道定，这里只钉解析顺序）。
+    let machine_row = Rect::new(2, base_y + 2, 30, 1);
+    let machine_toggle = Rect::new(4, base_y + 2, 1, 1);
+    state
+        .hits
+        .machines
+        .push(super::super::endpoints::MachineHit {
+            rect: machine_row,
+            collapse_toggle: machine_toggle,
+            endpoint_id: ClientEndpointId::Local,
+        });
+    state.hits.agent_tree_toggles.push((
+        machine_toggle,
+        ClientEndpointId::Local,
+        "agent-machine:local".into(),
+    ));
+    let workspace_row = Rect::new(62, base_y + 2, 30, 1);
+    let workspace_toggle = Rect::new(64, base_y + 2, 1, 1);
+    state
+        .hits
+        .workspaces
+        .push(super::super::state::WorkspaceHit {
+            rect: workspace_row,
+            endpoint_id: ClientEndpointId::Local,
+            workspace_id: "ws_1".into(),
+            indented: false,
+            group_toggle: None,
+        });
+    state.hits.agent_tree_toggles.push((
+        workspace_toggle,
+        ClientEndpointId::Local,
+        "agent-panel:ws_1".into(),
+    ));
     state.hits.rebuild_chrome_bounds();
 
     let hover_at = |state: &mut ClientShellState, x: u16, y: u16| {
@@ -174,6 +208,39 @@ fn chrome_hover_resolves_agent_tree_hit_vectors_with_toggles_before_rows() {
         hover_at(&mut state, 45, base_y + 1),
         Some(ChromeHover::ExternalAgentRow(remote, "zcode:abc".into()))
     );
+    // 机器行：行内、开关上、再回行内。
+    assert_eq!(
+        hover_at(&mut state, 2, base_y + 2),
+        Some(ChromeHover::MachineRow(ClientEndpointId::Local))
+    );
+    assert_eq!(
+        hover_at(&mut state, 4, base_y + 2),
+        Some(ChromeHover::AgentTreeToggle(
+            ClientEndpointId::Local,
+            "agent-machine:local".into()
+        ))
+    );
+    assert_eq!(
+        hover_at(&mut state, 10, base_y + 2),
+        Some(ChromeHover::MachineRow(ClientEndpointId::Local))
+    );
+    // 工作区行：同样让位给开关。
+    let workspace_hover = ChromeHover::WorkspaceRow {
+        endpoint_id: ClientEndpointId::Local,
+        workspace_id: "ws_1".into(),
+    };
+    assert_eq!(
+        hover_at(&mut state, 62, base_y + 2),
+        Some(workspace_hover.clone())
+    );
+    assert_eq!(
+        hover_at(&mut state, 64, base_y + 2),
+        Some(ChromeHover::AgentTreeToggle(
+            ClientEndpointId::Local,
+            "agent-panel:ws_1".into()
+        ))
+    );
+    assert_eq!(hover_at(&mut state, 70, base_y + 2), Some(workspace_hover));
     assert_eq!(hover_at(&mut state, 100, base_y + 2), None);
 }
 

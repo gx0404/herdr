@@ -566,19 +566,25 @@ impl ClientShellState {
     fn chrome_hover_contains(&self, hover: &ChromeHover, point: (u16, u16)) -> bool {
         let hits = &self.hits;
         match hover {
+            // 折叠开关落在行矩形之内：指针移到开关上时行悬浮必须让位。统一树的
+            // 每一层（机器 / 工作区 / tab / agent / 活动节点）都要带这个前缀。
             ChromeHover::WorkspaceRow {
                 endpoint_id,
                 workspace_id,
-            } => hits.workspaces.iter().any(|hit| {
-                &hit.endpoint_id == endpoint_id
-                    && &hit.workspace_id == workspace_id
-                    && super::contains(hit.rect, point)
-            }),
-            ChromeHover::MachineRow(endpoint_id) => hits
-                .machines
-                .iter()
-                .any(|hit| &hit.endpoint_id == endpoint_id && super::contains(hit.rect, point)),
-            // 折叠开关落在行矩形之内：指针移到开关上时行悬浮必须让位。
+            } => {
+                !on_agent_tree_toggle(hits, point)
+                    && hits.workspaces.iter().any(|hit| {
+                        &hit.endpoint_id == endpoint_id
+                            && &hit.workspace_id == workspace_id
+                            && super::contains(hit.rect, point)
+                    })
+            }
+            ChromeHover::MachineRow(endpoint_id) => {
+                !on_agent_tree_toggle(hits, point)
+                    && hits.machines.iter().any(|hit| {
+                        &hit.endpoint_id == endpoint_id && super::contains(hit.rect, point)
+                    })
+            }
             ChromeHover::AgentRow(pane_id) => {
                 !on_agent_tree_toggle(hits, point)
                     && hits
@@ -827,6 +833,17 @@ impl ClientShellState {
         if super::contains(hits.tab_scroll_right, point) {
             return Some(ChromeHover::TabScrollRight);
         }
+        // 折叠开关的矩形落在行矩形之内：必须排在统一树的全部行向量（machines /
+        // workspaces / agents / endpoint_agents / agent_activity_rows /
+        // external_agents）之前，否则机器层与工作区层的开关永远解析不到。
+        for (rect, endpoint_id, key) in &hits.agent_tree_toggles {
+            if super::contains(*rect, point) {
+                return Some(ChromeHover::AgentTreeToggle(
+                    endpoint_id.clone(),
+                    key.clone(),
+                ));
+            }
+        }
         for hit in &hits.machines {
             if super::contains(hit.rect, point) {
                 return Some(ChromeHover::MachineRow(hit.endpoint_id.clone()));
@@ -838,16 +855,6 @@ impl ClientShellState {
                     endpoint_id: hit.endpoint_id.clone(),
                     workspace_id: hit.workspace_id.clone(),
                 });
-            }
-        }
-        // 折叠开关的矩形落在行矩形之内：必须排在 agents / endpoint_agents /
-        // agent_activity_rows / external_agents 之前。
-        for (rect, endpoint_id, key) in &hits.agent_tree_toggles {
-            if super::contains(*rect, point) {
-                return Some(ChromeHover::AgentTreeToggle(
-                    endpoint_id.clone(),
-                    key.clone(),
-                ));
             }
         }
         for (rect, pane_id) in &hits.agents {
