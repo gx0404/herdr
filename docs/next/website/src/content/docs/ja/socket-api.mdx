@@ -660,15 +660,20 @@ JSON ドキュメントとしてこの方法で報告します。サーバーは
 hint はすぐに更新をスケジュールしますが、同じペインの更新は毎秒 1 回に制限されます。
 hint とは独立に、サーバーはエージェントを最初に検出したときに 1 回、状態が `working`
 の間は 5 秒ごとに、作業が終わったときにもう 1 回更新します。各更新はエージェントごとに
-最大 32 ノード(実行中のノードとその祖先を優先)を保持し、ソースがそれ以上を報告した
-場合は `truncated` を立てます。
+最大 32 ノード(実行中のノードとその祖先を優先)を保持し、切り詰める前のツリーの
+大きさを記録します。
 
 `agent.get`、`agent.list`、`session.snapshot` は保存されたツリーを `AgentInfo.activity`
 として公開します(空なら省略)。各ノードは `id`、`kind`(`subagent`、`task`、`todo`、
 `background`、`unknown`)、`label`、`status`(`pending`、`running`、`blocked`、`done`、
 `failed`、`unknown`)と、任意の `parent_id`、`agent_type`、`started_at_ms`、
 `ended_at_ms`、`content_ref`、`summary` を持ちます。未知の列挙値は `unknown` として
-デコードされます。`AgentInfo.launch_seq` はサーバーが割り当てる起動順です。ペインが
+デコードされます。`AgentInfo.activity_running`、`activity_total`、
+`activity_truncated` は、切り詰める前にソースが報告したツリーを表します。
+エージェントにアクティビティがなければ 3 つとも省略されます。
+`activity_truncated` が立っているとき `activity` には実行中のノードとその祖先しか
+残らないため、残りは `node_id` なしの `agent.activity.read` で取得してください。
+`AgentInfo.launch_seq` はサーバーが割り当てる起動順です。ペインが
 最初にエージェントの身元を得たときに新しい単調増加の番号を受け取り、状態が変わっても
 保持し、エージェントが解放または再検出されると新しい番号になります。`0` は不明を意味し
 (古いサーバーはこのフィールドを省略します)、番号は同じサーバープロセス内でのみ比較
@@ -698,7 +703,8 @@ hint とは独立に、サーバーはエージェントを最初に検出した
 `cursor` として返す `next_cursor` です。`cursor` は呼び出し側にとって不透明です。
 `max_bytes` の既定値は 65536 で、上限は 524288 です。`follow: true` にすると、サーバーは
 その後 10 秒間、そのペインのツリーを毎秒更新するため、ポーリングするビューアーは
-実行中のノードを追跡できます。レスポンスは
+実行中のノードを追跡できます。内容読み取りの開始位置は変わらないので続きは
+`cursor` で辿ってください。`external_id` の対象はこれを無視します。レスポンスは
 `{"type":"agent_activity","nodes":[...],"content":{...}}` の形で、バックグラウンドの
 読み取りスレッドが生成するため、後続のリクエストへのレスポンスより遅れて届くことが
 あります。
@@ -715,8 +721,10 @@ hint とは独立に、サーバーはエージェントを最初に検出した
 セッションを `{"type":"external_agent_list","agents":[...]}` として列挙します。エントリーは
 `ExternalAgentInfo` で、`external_id`(`<source>:<セッション id>`。`agent.activity.read` の
 `external_id` として使えます)、`source`、`agent_status`、`label`、`readable` と、任意の
-`agent`、`cwd`、`updated_at_ms`、`activity` を持ちます。外部ソースはまだ実装されていない
-ため、このメソッドは現在 `not_implemented` を返します。
+`agent`、`cwd`、`updated_at_ms`、`activity` を持ちます。外部ソースのアダプターは
+まだ 1 つもないため、この呼び出しは空のリストで成功します。リストが空で返って
+きたらクライアントは外部エントリーの領域を隠してください。登録済みのソースが
+すべて外部セッションを列挙できないと報告したときだけ `not_implemented` になります。
 
 更新によって保存されたツリーが変わると、サーバーは `pane_id`、`running`、`total` を持つ
 `pane.agent_activity_changed` を発行します。このイベントはカウントだけを運びます。

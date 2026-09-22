@@ -844,14 +844,19 @@ A hint schedules a refresh right away, rate limited to one refresh per pane per
 second. Independently of hints, the server refreshes an agent once when it is
 first detected, every 5 seconds while its status is `working`, and once more
 when work ends. Each refresh keeps at most 32 nodes per agent (running nodes and
-their ancestors first) and sets `truncated` when the source reported more.
+their ancestors first) and records how large the tree was before truncation.
 
 `agent.get`, `agent.list`, and `session.snapshot` expose the stored tree as
 `AgentInfo.activity`, omitted when empty. Each node carries `id`, `kind`
 (`subagent`, `task`, `todo`, `background`, `unknown`), `label`, `status`
 (`pending`, `running`, `blocked`, `done`, `failed`, `unknown`), and optional
 `parent_id`, `agent_type`, `started_at_ms`, `ended_at_ms`, `content_ref`, and
-`summary`. Unknown enum values decode as `unknown`. `AgentInfo.launch_seq` is
+`summary`. Unknown enum values decode as `unknown`. `AgentInfo.activity_running`,
+`activity_total`, and `activity_truncated` describe the tree as the source
+reported it, before truncation; all three are omitted when the agent has no
+activity. When `activity_truncated` is set, `activity` holds only the running
+nodes and their ancestors — fetch the rest with `agent.activity.read` without
+`node_id`. `AgentInfo.launch_seq` is
 the server-assigned launch order: a pane receives a new monotonic number when it
 first gains an agent identity, keeps it across state changes, and gets a new one
 after the agent is released or re-detected. `0` means unknown (older servers
@@ -881,7 +886,9 @@ it); with `node_id` it carries a `content` chunk: `format` (`text`, `markdown`,
 as `cursor` for the next page. `cursor` is opaque to the caller. `max_bytes`
 defaults to 65536 and is capped at 524288. `follow: true` keeps the server
 refreshing that pane's tree every second for the next 10 seconds so a viewer
-that polls can track a running node. The response is
+that polls can track a running node; it does not move where a content read
+starts, so keep paging with `cursor`, and `external_id` targets ignore it. The
+response is
 `{"type":"agent_activity","nodes":[...],"content":{...}}` and is produced on the
 background reader thread, so it may arrive after responses to later requests.
 
@@ -898,8 +905,11 @@ source adapters exist.
 as `{"type":"external_agent_list","agents":[...]}` with `ExternalAgentInfo`
 entries: `external_id` (`<source>:<session id>`, usable as `external_id` in
 `agent.activity.read`), `source`, `agent_status`, `label`, `readable`, and
-optional `agent`, `cwd`, `updated_at_ms`, and `activity`. No external source is
-implemented yet, so the method currently answers `not_implemented`.
+optional `agent`, `cwd`, `updated_at_ms`, and `activity`. No external source
+adapter ships yet, so the call succeeds with an empty list; hide the external
+section of a client when the list comes back empty. `not_implemented` is
+returned only when every registered source reports that it cannot enumerate
+external sessions.
 
 When a refresh changes a stored tree the server emits
 `pane.agent_activity_changed` with `pane_id`, `running`, and `total`. The event

@@ -653,13 +653,17 @@ JSON 文档上报的,因为 Pi 不在磁盘上保留任何活动记录。服务�
 一个 hint 会立即安排一次刷新,但同一窗格每秒最多刷新一次。与 hint 无关地,服务器
 在首次检测到智能体时刷新一次,在其状态为 `working` 期间每 5 秒刷新一次,并在工作
 结束时再补刷一次。每次刷新每个智能体最多保留 32 个节点(运行中的节点及其祖先
-优先),来源给出的节点更多时置 `truncated`。
+优先),并记下截断前这棵树有多大。
 
 `agent.get`、`agent.list` 和 `session.snapshot` 以 `AgentInfo.activity` 暴露已存储的
 树,为空时省略。每个节点带 `id`、`kind`(`subagent`、`task`、`todo`、`background`、
 `unknown`)、`label`、`status`(`pending`、`running`、`blocked`、`done`、`failed`、
 `unknown`),以及可选的 `parent_id`、`agent_type`、`started_at_ms`、`ended_at_ms`、
-`content_ref` 和 `summary`。未知枚举值解码为 `unknown`。`AgentInfo.launch_seq` 是
+`content_ref` 和 `summary`。未知枚举值解码为 `unknown`。
+`AgentInfo.activity_running`、`activity_total` 和 `activity_truncated` 描述的是
+来源报出的、截断前的那棵树;智能体没有活动时三者都省略。`activity_truncated`
+置位时 `activity` 里只剩运行中的节点及其祖先,其余用 `agent.activity.read`
+(不带 `node_id`)拉取。`AgentInfo.launch_seq` 是
 服务器分配的启动顺序:窗格首次获得智能体身份时得到一个新的单调序号,状态变化
 不改号,智能体被释放或重新识别后取新号。`0` 表示未知(旧服务器不下发该字段);
 序号只在同一个服务器进程内可比。
@@ -686,7 +690,8 @@ JSON 文档上报的,因为 Pi 不在磁盘上保留任何活动记录。服务�
 `jsonl`、`unknown`)、`text`、`eof`、`truncated`,以及下一页要作为 `cursor` 回传的
 `next_cursor`。`cursor` 对调用方不透明。`max_bytes` 默认 65536,上限 524288。
 `follow: true` 让服务器在接下来的 10 秒内每秒刷新该窗格的树,轮询的查看器可以借此
-跟踪运行中的节点。响应形如
+跟踪运行中的节点;它不改变内容读取的起始位置,续读仍靠 `cursor`,`external_id`
+目标忽略它。响应形如
 `{"type":"agent_activity","nodes":[...],"content":{...}}`,由后台读取线程产生,
 因此可能晚于后续请求的响应到达。
 
@@ -701,8 +706,9 @@ JSON 文档上报的,因为 Pi 不在磁盘上保留任何活动记录。服务�
 `{"type":"external_agent_list","agents":[...]}`,条目是 `ExternalAgentInfo`:
 `external_id`(`<source>:<会话 id>`,可作为 `agent.activity.read` 的
 `external_id`)、`source`、`agent_status`、`label`、`readable`,以及可选的 `agent`、
-`cwd`、`updated_at_ms` 和 `activity`。目前还没有实现任何外部来源,该方法当前回
-`not_implemented`。
+`cwd`、`updated_at_ms` 和 `activity`。目前还没有任何外部来源适配器,该调用成功
+返回空列表;客户端拿到空列表就隐藏外部条目区。只有当所有已注册来源都报告无法
+枚举外部会话时才回 `not_implemented`。
 
 刷新改变了已存储的树时,服务器发出 `pane.agent_activity_changed`,带 `pane_id`、
 `running` 和 `total`。该事件只带计数;树要用 `agent.get` 或 `agent.activity.read`
