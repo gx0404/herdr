@@ -1234,6 +1234,8 @@ mod tests {
             cwd: None,
             home,
             now_ms: NOW_MS,
+            agent_config_dir: None,
+            latest_hint: None,
         }
     }
 
