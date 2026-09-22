@@ -1,5 +1,5 @@
 {
-  "chunk_count": 982,
+  "chunk_count": 985,
   "chunks": [
     {
       "anchor": "herdr",
@@ -6716,10 +6716,31 @@
     },
     {
       "anchor": "structure",
+      "doc": "src/ui/kit/braille_chart.rs",
+      "id": "src-ui-kit-braille-chart-rs-structure",
+      "source_sha256": "ee398f65f3572c77e23bc9f697701780f89e2c8c0b3172a54e9509317f3fabd5",
+      "text": "模块文档：迷你图：sparkline 与堆叠面积图。盲文字形一格两列四级，方块字形一格一列 八级，ascii 一格一列八级；宿主字体缺盲文时切 `Blocks`，连方块都缺时切 `Ascii`。样本靠右对齐（最新在右），超出列数的旧样本丢弃；不分配。\n公开项：\npub(crate) enum ChartGlyphs {\nimpl ChartGlyphs {\npub(crate) fn render_sparkline( — 单序列迷你图。`max` 为 `None` 时按可见样本自动定标；`area` 可多行，级数 随行数线性叠加。空样本或空区域不画。\npub(crate) fn render_area_chart( — 堆叠面积图：`series[i]` 画在前 i 条之上，各用 `colors[i]`（不够时沿用最后一 个）。一格只能有一种前景色，取该格内最高的那条序列的颜色。`max` 为 `None` 时按各列堆叠和的最大值定标。"
+    },
+    {
+      "anchor": "structure",
+      "doc": "src/ui/kit/gauge.rs",
+      "id": "src-ui-kit-gauge-rs-structure",
+      "source_sha256": "2d8bd91bf9894abb8f894cc9db7397dda274159a227921cb8fc02b7783b78542",
+      "text": "模块文档：额度 / 用量条：阈值色、溢出态、额度窗口进度刻度、分段填充与 ascii 降级。 只画 `area` 的第一行；数字由调用方另画（见 `meter_row`），条本身不带文字。\n公开项：\npub(crate) struct GaugeThresholds {\nimpl Default for GaugeThresholds {\npub(crate) struct GaugeSpec<'a> {\npub(crate) fn gauge_color( — 用量比例的语义色：阈值之外，窗口进度 `window_progress` 给出「按时间应到的 比例」，用量超前 25 个百分点转红、超前 10 个百分点转黄。NaN 视为 0。\npub(crate) fn render_gauge( — 在 `area` 的第一行画 gauge。`area` 为空直接返回；多余的行不动。"
+    },
+    {
+      "anchor": "structure",
+      "doc": "src/ui/kit/meter_row.rs",
+      "id": "src-ui-kit-meter-row-rs-structure",
+      "source_sha256": "d29b943338b08bb6258efd7da8acc4d1e690c4796e9e2ab80ef9e3f1f91f0c97",
+      "text": "模块文档：单行「标签 + 条 + 数字 + 说明」：监控卡片与账号页的基本行。宽度预算按 value（数字永不裁）> label > gauge > detail 分配——窄时先砍条形、保数字。\n公开项：\npub(crate) struct MeterRow<'a> {\npub(crate) fn render_meter_row( — 在 `area` 的第一行画一条 meter row。条形吸收全部富余宽度；没有条形时富余 留在标签与数字之间，数字（连同其后的说明）靠右。"
+    },
+    {
+      "anchor": "structure",
       "doc": "src/ui/kit.rs",
       "id": "src-ui-kit-rs-structure",
-      "source_sha256": "6c6d9ca7d284fc352d10fdd3e91dcd4e6ea38e81c294dacc74f118e044d7718d",
-      "text": "模块文档：设计系统原语的落点：`gauge`、`meter_row`、`braille_chart`、`card`、`tabs`、 `form_field`、`tree`、`menu`、`hover_card`、`footer_hints`、`empty_state`、 `table` 各占一个子模块（`src/ui/kit/<name>.rs`），由原语车道在这里逐个声明。  统一约定：自由函数；**只画不改状态**；可交互原语返回命中矩形，由调用方写进 自己的命中表；热路径不分配；`ascii` / `glyphs` 开关做字形降级。本目录同时 服务 server 直连渲染，不得反向依赖 `crate::client`。调用写全路径 （`crate::ui::kit::gauge::render_gauge`），不往 `crate::ui` 的 re-export 区堆符号。\n公开项："
+      "source_sha256": "938b5c291ffe1cde6097442922d16d6a419b969112819c8c45ced718a98fe444",
+      "text": "模块文档：设计系统原语：`gauge`、`meter_row`、`braille_chart`、`card`、`tabs`、 `form_field`、`tree`、`menu`、`hover_card`、`footer_hints`、`empty_state`、 `table` 各占一个子模块（`src/ui/kit/<name>.rs`）。  统一约定：自由函数；**只画不改状态**；可交互原语返回命中矩形，由调用方写进 自己的命中表；热路径不分配（栈数组或调用方传入的缓冲）；`ascii` / `glyphs` 开关做字形降级；CJK 宽度一律走 `crate::ui::display_width`；颜色一律取自 `Palette` 与 `crate::ui::color`。本目录同时服务 server 直连渲染，不得反向依赖 `crate::client`。调用写全路径（`crate::ui::kit::gauge::render_gauge`），不往 `crate::ui` 的 re-export 区堆符号。  本文件另放子模块共用的小工具：带裁剪 / 省略号的文本写入、整行填充、选中 / 悬浮行样式。父模块的私有项对子模块可见，不对 `kit` 之外导出。\n公开项：\npub(crate) mod braille_chart;\npub(crate) mod gauge;\npub(crate) mod meter_row;"
     },
     {
       "anchor": "structure",
