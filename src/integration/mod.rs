@@ -126,7 +126,7 @@ const OPENCODE_TUI_PLUGIN_ASSET: &str = include_str!("assets/opencode/herdr-tui-
 const OPENCODE_V2_TUI_PLUGIN_DIR: &str = "herdr-opencode";
 const OPENCODE_V2_TUI_PLUGIN_SPEC: &str = "./herdr-opencode";
 const OPENCODE_V2_TUI_PLUGIN_ASSET: &str = include_str!("assets/opencode/tui.js");
-const OPENCODE_INTEGRATION_VERSION: u32 = 12;
+const OPENCODE_INTEGRATION_VERSION: u32 = 13;
 const INTEGRATION_VERSION_MARKER: &str = "HERDR_INTEGRATION_VERSION=";
 
 pub(crate) const INSTALL_WARNING_PREFIX: &str = "warning:";

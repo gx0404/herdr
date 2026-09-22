@@ -163,6 +163,17 @@ test("reports retry status as working", async () => {
 test("reports child prompts without replacing the root session", async () => {
   const plugin = await loadPlugin();
 
+  // OpenCode maps `parentID: parent_id ?? undefined`, so the root's own
+  // creation carries the key with no value.
+  await plugin.event({
+    event: {
+      type: "session.created",
+      properties: {
+        sessionID: "root-session",
+        info: { id: "root-session", parentID: undefined },
+      },
+    },
+  });
   await plugin.event({
     event: {
       type: "session.created",
@@ -198,6 +209,7 @@ test("reports child prompts without replacing the root session", async () => {
 test("routes nested child prompts to their own root, not the last active root", async () => {
   const plugin = await loadPlugin();
   for (const info of [
+    { id: "root-session" },
     { id: "child-session", parentID: "root-session" },
     { id: "nested-session", parentID: "child-session" },
   ]) {
@@ -221,6 +233,54 @@ test("routes nested child prompts to their own root, not the last active root", 
     "root-session",
     "root-session",
   ]);
+});
+
+test("only a parentID naming another known session makes a child", async () => {
+  const plugin = await loadPlugin();
+
+  // A parentID equal to the session itself, or naming a session this process
+  // never saw, keeps the session a root: its prompts report as its own.
+  await plugin.event({
+    event: {
+      type: "session.created",
+      properties: { sessionID: "self-parent", info: { id: "self-parent", parentID: "self-parent" } },
+    },
+  });
+  await plugin["chat.message"]({ sessionID: "self-parent" });
+  await plugin.event({
+    event: {
+      type: "session.created",
+      properties: { sessionID: "stray", info: { id: "stray", parentID: "never-seen" } },
+    },
+  });
+  await plugin["chat.message"]({ sessionID: "stray" });
+
+  // A resumed root is known from any event carrying its id, not only creation.
+  await plugin.event({
+    event: {
+      type: "session.status",
+      properties: { sessionID: "resumed", status: { type: "busy" } },
+    },
+  });
+  await plugin.event({
+    event: {
+      type: "session.created",
+      properties: { info: { id: "resumed-child", parentID: "resumed" } },
+    },
+  });
+  await plugin.event({
+    event: { type: "permission.asked", properties: { sessionID: "resumed-child" } },
+  });
+  await plugin["chat.message"]({ sessionID: "resumed-child" });
+
+  expect(requests.map(requestMethod)).toEqual([
+    "pane.report_agent",
+    "pane.report_agent",
+    "pane.report_agent",
+    "pane.report_agent",
+  ]);
+  expect(requests.map(requestState)).toEqual(["working", "working", "working", "blocked"]);
+  expect(requests.map(requestSessionID)).toEqual(["self-parent", "stray", "resumed", "resumed"]);
 });
 
 function requestMethod(request: unknown): unknown {

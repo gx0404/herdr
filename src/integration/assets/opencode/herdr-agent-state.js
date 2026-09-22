@@ -2,7 +2,7 @@
 // managed by herdr; reinstalling or updating the integration overwrites this file.
 // add custom hooks/plugins beside this file instead of editing it.
 // HERDR_INTEGRATION_ID=opencode
-// HERDR_INTEGRATION_VERSION=12
+// HERDR_INTEGRATION_VERSION=13
 
 import net from "node:net";
 
@@ -14,6 +14,11 @@ let reportedRootSessionID;
 
 // Track child sessions so their events cannot replace the pane's root session.
 // User prompts carry the root id to preserve its identity and cross-talk guard.
+// A session counts as a child only when its parentID names a different session
+// this process has already seen: OpenCode maps rows as `parentID: parent_id ??
+// undefined`, so root events carry the key too, and a stray or self parent
+// must not demote the pane's root.
+const knownSessions = new Set();
 const childSessions = new Map();
 const CHILD_EVENT_STATES = new Map([
   ["permission.asked", "blocked"],
@@ -32,6 +37,23 @@ function sessionIDFromProperties(properties) {
   return typeof properties?.sessionID === "string" && properties.sessionID
     ? properties.sessionID
     : undefined;
+}
+
+function rememberSession(sessionID) {
+  if (typeof sessionID === "string" && sessionID) {
+    knownSessions.add(sessionID);
+  }
+}
+
+function isChildInfo(info) {
+  return (
+    typeof info?.id === "string" &&
+    info.id !== "" &&
+    typeof info.parentID === "string" &&
+    info.parentID !== "" &&
+    info.parentID !== info.id &&
+    knownSessions.has(info.parentID)
+  );
 }
 
 const SESSION_STATE_BY_STATUS = new Map([
@@ -132,6 +154,7 @@ export const HerdrAgentStatePlugin = async () => {
       if (sessionID && childSessions.has(sessionID)) {
         return;
       }
+      rememberSession(sessionID);
       await reportState("working", sessionID);
     },
     event: async ({ event }) => {
@@ -140,9 +163,11 @@ export const HerdrAgentStatePlugin = async () => {
       const sessionID = sessionIDFromProperties(properties);
 
       const info = properties.info;
-      if (info?.id && info.parentID) {
+      if (isChildInfo(info)) {
         childSessions.set(info.id, info.parentID);
       }
+      rememberSession(sessionID);
+      rememberSession(info?.id);
       if (sessionID && childSessions.has(sessionID)) {
         const state = CHILD_EVENT_STATES.get(type);
         if (state) {
@@ -200,9 +225,13 @@ export const HerdrAgentStatePlugin = async () => {
   };
 };
 
-// V1 (1.18.29+) calls server(). V2 calls setup() instead. Its shared server
-// cannot attribute sessions using its process environment: the pane-local TUI
-// owns both selection and lifecycle reporting there, including remote servers.
+// The loader takes `default` first: an object carrying `id`/`server`/`tui`
+// only has its `server()` called and named exports are ignored, while a module
+// without such a default falls back to every export. Keep both so either
+// loader path reaches the same factory. V2 calls setup() instead. Its shared
+// server cannot attribute sessions using its process environment: the
+// pane-local TUI owns both selection and lifecycle reporting there, including
+// remote servers.
 export default {
   id: "herdr.opencode",
   server: HerdrAgentStatePlugin,
