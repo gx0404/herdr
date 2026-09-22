@@ -9,7 +9,7 @@ use ratatui::{
     style::{Color, Modifier, Style},
 };
 
-use super::{ellipsis_width, fill_row, put_str, put_str_ellipsis};
+use super::{draw_frame, ellipsis_width, fill_row, put_str, put_str_ellipsis};
 use crate::app::state::Palette;
 use crate::ui::BorderGlyphs;
 
@@ -64,33 +64,9 @@ pub(crate) fn render_card(
     for y in area.y..area.bottom() {
         fill_row(buffer, area.x, y, area.width, " ", background);
     }
+    draw_frame(buffer, area, glyphs, border);
     let top = area.y;
-    let bottom = area.bottom() - 1;
     let right = area.right() - 1;
-    fill_row(
-        buffer,
-        area.x + 1,
-        top,
-        area.width - 2,
-        glyphs.horizontal,
-        border,
-    );
-    fill_row(
-        buffer,
-        area.x + 1,
-        bottom,
-        area.width - 2,
-        glyphs.horizontal,
-        border,
-    );
-    for y in area.y + 1..bottom {
-        put_str(buffer, area.x, y, 1, glyphs.vertical, border);
-        put_str(buffer, right, y, 1, glyphs.vertical, border);
-    }
-    put_str(buffer, area.x, top, 1, glyphs.top_left, border);
-    put_str(buffer, right, top, 1, glyphs.top_right, border);
-    put_str(buffer, area.x, bottom, 1, glyphs.bottom_left, border);
-    put_str(buffer, right, bottom, 1, glyphs.bottom_right, border);
 
     // 上边框：` 徽标 ` 靠右先占位（优先），标题拿剩下的；两者都在时中间至少
     // 留一格边框线，不让标题贴着徽标。

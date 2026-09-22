@@ -14,11 +14,11 @@
 
 use ratatui::{
     buffer::Buffer,
-    layout::Position,
+    layout::{Position, Rect},
     style::{Modifier, Style},
 };
 
-use super::{display_width, display_width_u16};
+use super::{display_width, display_width_u16, BorderGlyphs};
 use crate::app::state::Palette;
 
 pub(crate) mod braille_chart;
@@ -27,8 +27,12 @@ pub(crate) mod empty_state;
 pub(crate) mod footer_hints;
 pub(crate) mod form_field;
 pub(crate) mod gauge;
+pub(crate) mod hover_card;
+pub(crate) mod menu;
 pub(crate) mod meter_row;
+pub(crate) mod table;
 pub(crate) mod tabs;
+pub(crate) mod tree;
 
 /// 单个字符的显示宽度：走 `display_width` 唯一真源，栈上编码、不分配。
 fn char_width(ch: char) -> usize {
@@ -111,6 +115,40 @@ fn fill_row(buffer: &mut Buffer, x: u16, y: u16, width: u16, symbol: &str, style
     }
 }
 
+/// 在 `area` 上画一圈边框（四角 + 四边，内部不动），`area` 不足 2×2 时不画。
+/// 卡片与菜单共用；分隔线等与边框相接的 T 形接头由调用方另画。
+fn draw_frame(buffer: &mut Buffer, area: Rect, glyphs: BorderGlyphs, style: Style) {
+    if area.width < 2 || area.height < 2 {
+        return;
+    }
+    let right = area.right() - 1;
+    let bottom = area.bottom() - 1;
+    fill_row(
+        buffer,
+        area.x + 1,
+        area.y,
+        area.width - 2,
+        glyphs.horizontal,
+        style,
+    );
+    fill_row(
+        buffer,
+        area.x + 1,
+        bottom,
+        area.width - 2,
+        glyphs.horizontal,
+        style,
+    );
+    for y in area.y + 1..bottom {
+        put_str(buffer, area.x, y, 1, glyphs.vertical, style);
+        put_str(buffer, right, y, 1, glyphs.vertical, style);
+    }
+    put_str(buffer, area.x, area.y, 1, glyphs.top_left, style);
+    put_str(buffer, right, area.y, 1, glyphs.top_right, style);
+    put_str(buffer, area.x, bottom, 1, glyphs.bottom_left, style);
+    put_str(buffer, right, bottom, 1, glyphs.bottom_right, style);
+}
+
 /// 测试用：把一行拼成字符串。宽字符只取一次，跳过它占用的第二格（ratatui 把
 /// 那一格 reset 成空格），这样 CJK 断言写起来与肉眼所见一致。
 #[cfg(test)]
@@ -128,7 +166,6 @@ fn row_text(buffer: &Buffer, y: u16) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ratatui::layout::Rect;
 
     #[test]
     fn put_str_clips_wide_characters_instead_of_splitting_them() {
@@ -193,5 +230,27 @@ mod tests {
         assert_eq!(row_text(&buffer, 0), "  ##");
         fill_row(&mut buffer, u16::MAX - 1, 0, 4, "#", Style::default());
         assert_eq!(row_text(&buffer, 0), "  ##");
+    }
+    #[test]
+    fn draw_frame_draws_only_the_outline() {
+        let mut buffer = Buffer::empty(Rect::new(0, 0, 5, 4));
+        fill_row(&mut buffer, 0, 1, 5, "x", Style::default());
+        draw_frame(
+            &mut buffer,
+            Rect::new(0, 0, 4, 3),
+            BorderGlyphs::ROUNDED,
+            Style::default(),
+        );
+        assert_eq!(row_text(&buffer, 0), "╭──╮ ");
+        assert_eq!(row_text(&buffer, 1), "│xx│x", "内部与区域外不动");
+        assert_eq!(row_text(&buffer, 2), "╰──╯ ");
+        let mut buffer = Buffer::empty(Rect::new(0, 0, 2, 1));
+        draw_frame(
+            &mut buffer,
+            Rect::new(0, 0, 2, 1),
+            BorderGlyphs::SINGLE,
+            Style::default(),
+        );
+        assert_eq!(row_text(&buffer, 0), "  ", "不足 2×2 不画");
     }
 }

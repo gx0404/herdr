@@ -1,5 +1,5 @@
 {
-  "chunk_count": 990,
+  "chunk_count": 994,
   "chunks": [
     {
       "anchor": "herdr",
@@ -6758,6 +6758,20 @@
     },
     {
       "anchor": "structure",
+      "doc": "src/ui/kit/hover_card.rs",
+      "id": "src-ui-kit-hover-card-rs-structure",
+      "source_sha256": "fe286c245333220f5962effff99a0747a5c4dd183d775e1350c00ba5e06e2b4a",
+      "text": "模块文档：悬停卡：统一 link / chrome / observability 三套 hover 的计时（停留多久出现、 离开后宽限多久消失、钉住后不随指针离开）与定位（锚点下方左对齐 → 放不下上翻 → 两侧都放不下取大侧收缩；永不盖住锚点）。只管状态机与几何，卡片内容由调用方 画；状态放在调用方自己的 `Option<HoverState<T>>` 里，时间由调用方传入（可测）。\n公开项：\npub(crate) struct HoverTiming {\nimpl Default for HoverTiming {\npub(crate) struct HoverState<T> {\nimpl<T: PartialEq> HoverState<T> {\npub(crate) fn enter(slot: &mut Option<Self>, target: T, anchor: Rect, now: Instant) -> bool { — 指针进入（或仍停在）`target`：同一目标只撤销离开计时并跟随锚点；换目标 （或原来没有卡）则重新计时、先不可见。返回是否需要重绘：换掉一张可见的卡、 或可见卡的锚点移动了。\npub(crate) fn leave(slot: &mut Option<Self>, now: Instant, timing: &HoverTiming) { — 指针离开所有目标（也不在卡片上）：未钉住的卡记下离开时刻；已在计时的不 推迟（来回抖动不会无限续命）。没有卡或已钉住时什么都不做。\npub(crate) fn tick(slot: &mut Option<Self>, now: Instant, timing: &HoverTiming) -> bool { — 推进计时：离开宽限到期（且未钉住）→ 清空 `slot`；停留满 `show_after` 且 指针还没离开 → 变可见。返回是否需要重绘（出现，或擦掉一张可见的卡）。\nimpl<T> HoverState<T> {\npub(crate) fn hold(&mut self) { — 指针移到卡片自身上：撤销离开计时（卡片可交互，移过去时不能消失）。\npub(crate) fn next_deadline(&self, timing: &HoverTiming) -> Option<Instant> { — 下一次需要 [`HoverState::tick`] 的时刻：离开宽限的到期时刻，或即将出现的 时刻；都没有（已可见且指针在上、或已钉住）时为 `None`。供事件循环定超时， 不必固定频率轮询。\npub(crate) fn place_hover_card(anchor: Rect, size: (u16, u16), bounds: Rect) -> Rect { — 给 `size = (宽, 高)` 的卡找位置：优先锚点正下方、与锚点左对齐（右侧放不下时 向左平移）；下方高度不够就翻到上方；两侧都不够时取空间大的一侧并把高度收缩到 该侧可用高度。卡片与锚点在纵向上永不重叠。宽度超出 `bounds` 时收缩；没有任何"
+    },
+    {
+      "anchor": "structure",
+      "doc": "src/ui/kit/menu.rs",
+      "id": "src-ui-kit-menu-rs-structure",
+      "source_sha256": "c715d4fb9a59c4f25cb4f82e566051d03137f57fb2d3450378b2c99c7f4fbba1",
+      "text": "模块文档：菜单：右键菜单、命令面板目录视图与子菜单共用的列表原语。分隔线、分组标题、 右对齐快捷键、子菜单箭头、禁用置灰、勾选态、危险项、悬浮 / 键盘高亮分离； 键盘导航（跳过分隔与禁用项、回绕）与首字母跳转是纯函数。  行版式（边框内）：`␠[✓␠]标签…[␠␠快捷键][␠▸]␠`。勾选列只在有项带 `checked` 时出现，箭头列只在有子菜单时出现，快捷键列按最宽的快捷键右对齐。\n公开项：\npub(crate) enum MenuItemKind {\npub(crate) struct MenuItem<'a> {\nimpl<'a> MenuItem<'a> {\npub(crate) const fn action(label: &'a str) -> Self { — 启用的普通动作项。\npub(crate) const fn submenu(label: &'a str) -> Self { — 展开子菜单的项（行尾画箭头）。\npub(crate) const fn header(label: &'a str) -> Self { — 分组标题：不可激活，灰色加粗。\npub(crate) const fn separator() -> Self { — 分隔线：与边框相接的一整行横线。\npub(crate) const fn is_activatable(&self) -> bool { — 能否高亮 / 激活：启用的动作或子菜单项。\npub(crate) struct MenuState {\npub(crate) struct MenuRender {\nimpl Columns {\npub(crate) fn menu_size(items: &[MenuItem<'_>]) -> (u16, u16) { — 菜单的自然尺寸 `(宽, 高)`，含边框；宽度不小于 14 列。\npub(crate) fn render_menu( — 画菜单。`anchor` 是左上角的期望位置，放不下时向左 / 向上平移贴住 `bounds` （与既有右键菜单一致；子菜单要「翻到父菜单左侧」由调用方按 [`menu_size`] 算好 anchor）。`bounds` 比自然尺寸小时收窄：先截断标签，标签列不足 8 列再丢\npub(crate) fn menu_step(items: &[MenuItem<'_>], from: usize, delta: isize) -> Option<usize> { — 从 `from` 起按 `delta` 的方向走 `|delta|` 个可激活项，跳过分隔、标题与禁用项， 两端回绕。`delta == 0` 时 `from` 可激活就停在原地，否则前进到下一个可激活项。 `from` 越界视为「还没有选中」：向下落到第一个可激活项、向上落到最后一个。\npub(crate) fn menu_first_letter(items: &[MenuItem<'_>], ch: char, from: usize) -> Option<usize> { — 首字母跳转：从 `from` 的下一项起（回绕，最后才轮到 `from` 自己）找第一个标签 首字符与 `ch` 相同（不分大小写）的可激活项。连按同一字母在同首字母项间轮转。"
+    },
+    {
+      "anchor": "structure",
       "doc": "src/ui/kit/meter_row.rs",
       "id": "src-ui-kit-meter-row-rs-structure",
       "source_sha256": "d29b943338b08bb6258efd7da8acc4d1e690c4796e9e2ab80ef9e3f1f91f0c97",
@@ -6767,8 +6781,15 @@
       "anchor": "structure",
       "doc": "src/ui/kit.rs",
       "id": "src-ui-kit-rs-structure",
-      "source_sha256": "6ad511b6d47d864e4d96f592e848fe2eca7236ee058c93d6e6a961db87c60fba",
-      "text": "模块文档：设计系统原语：`gauge`、`meter_row`、`braille_chart`、`card`、`tabs`、 `form_field`、`tree`、`menu`、`hover_card`、`footer_hints`、`empty_state`、 `table` 各占一个子模块（`src/ui/kit/<name>.rs`）。  统一约定：自由函数；**只画不改状态**；可交互原语返回命中矩形，由调用方写进 自己的命中表；热路径不分配（栈数组或调用方传入的缓冲）；`ascii` / `glyphs` 开关做字形降级；CJK 宽度一律走 `crate::ui::display_width`；颜色一律取自 `Palette` 与 `crate::ui::color`。本目录同时服务 server 直连渲染，不得反向依赖 `crate::client`。调用写全路径（`crate::ui::kit::gauge::render_gauge`），不往 `crate::ui` 的 re-export 区堆符号。  本文件另放子模块共用的小工具：带裁剪 / 省略号的文本写入、整行填充、选中 / 悬浮行样式。父模块的私有项对子模块可见，不对 `kit` 之外导出。\n公开项：\npub(crate) mod braille_chart;\npub(crate) mod card;\npub(crate) mod empty_state;\npub(crate) mod footer_hints;\npub(crate) mod form_field;\npub(crate) mod gauge;\npub(crate) mod meter_row;\npub(crate) mod tabs;"
+      "source_sha256": "0b21d51a0318457a8af3ad8988291f8b063ed76e640f494a2a29a458df4218fc",
+      "text": "模块文档：设计系统原语：`gauge`、`meter_row`、`braille_chart`、`card`、`tabs`、 `form_field`、`tree`、`menu`、`hover_card`、`footer_hints`、`empty_state`、 `table` 各占一个子模块（`src/ui/kit/<name>.rs`）。  统一约定：自由函数；**只画不改状态**；可交互原语返回命中矩形，由调用方写进 自己的命中表；热路径不分配（栈数组或调用方传入的缓冲）；`ascii` / `glyphs` 开关做字形降级；CJK 宽度一律走 `crate::ui::display_width`；颜色一律取自 `Palette` 与 `crate::ui::color`。本目录同时服务 server 直连渲染，不得反向依赖 `crate::client`。调用写全路径（`crate::ui::kit::gauge::render_gauge`），不往 `crate::ui` 的 re-export 区堆符号。  本文件另放子模块共用的小工具：带裁剪 / 省略号的文本写入、整行填充、选中 / 悬浮行样式。父模块的私有项对子模块可见，不对 `kit` 之外导出。\n公开项：\npub(crate) mod braille_chart;\npub(crate) mod card;\npub(crate) mod empty_state;\npub(crate) mod footer_hints;\npub(crate) mod form_field;\npub(crate) mod gauge;\npub(crate) mod hover_card;\npub(crate) mod menu;\npub(crate) mod meter_row;\npub(crate) mod table;\npub(crate) mod tabs;\npub(crate) mod tree;"
+    },
+    {
+      "anchor": "structure",
+      "doc": "src/ui/kit/table.rs",
+      "id": "src-ui-kit-table-rs-structure",
+      "source_sha256": "e256afc83572f9f7ded79e93ddeedfc6f7e58f15b96caa3567281ea87690b6a0",
+      "text": "模块文档：表格：一行表头（可排序列带方向标记与命中区）+ 数据行（选中 / 悬浮 / 右对齐 列 / 单元格前景色）。列宽按 `Fixed` / `Min` / `Fill` 分配，列间 1 列间隔； 放不下时先丢 `priority` 大的列（同优先级丢靠右的），至少保留一列。列布局用 栈数组（最多 64 列），单元格文本由调用方的回调按需给出，原语本身只分配返回 的命中表。\n公开项：\npub(crate) const MAX_COLUMNS: usize = 64; — 参与布局的最多列数；更多的列不画。\npub(crate) enum ColumnWidth {\npub(crate) struct Column<'a> {\npub(crate) struct SortState {\npub(crate) struct TableState {\npub(crate) struct TableCell<'a> {\nimpl<'a> From<&'a str> for TableCell<'a> {\nimpl From<String> for TableCell<'_> {\nimpl<'a> From<Cow<'a, str>> for TableCell<'a> {\npub(crate) struct TableRender {\npub(crate) fn render_table<'c, C>( — 画表格：第一行表头，其余是表体。`cell(row, column)` 只对画出来的格调用。 返回可排序表头格与数据行的命中矩形、表体区域与生效的 `scroll`。"
     },
     {
       "anchor": "structure",
@@ -6776,6 +6797,13 @@
       "id": "src-ui-kit-tabs-rs-structure",
       "source_sha256": "1cde6b39916dd552113239618c152cd4b90db834ebccca167932efad6528fdb4",
       "text": "模块文档：标签页与三个「一行内的开关类控件」：分段选择、开关、步进器。都只画一行、 返回命中矩形；放不下的项整体丢弃（不画半个标签），对应矩形为空。\n公开项：\npub(crate) struct TabItem<'a> {\nimpl<'a> TabItem<'a> {\npub(crate) const fn new(label: &'a str) -> Self {\npub(crate) fn render_tabs( — 标签页行：` label badge ` 依次排开、项间 1 列。活动项 accent 反色加粗，悬浮项 弱底色，禁用项灰字。返回与 `items` 等长的命中矩形（放不下的为空）。\npub(crate) fn render_segmented( — 分段选择：选项紧贴排开、无间隔，以 surface0 底色连成一整块；活动段 accent 反色。`enabled` 为假整块置灰、活动段只换 surface1 底。返回与 `options` 等长的命中矩形。\npub(crate) fn render_toggle( — 开关：3 列的滑块，开 `━━●`（accent）、关 `●━━`（overlay0）；`focused` 加弱 底色作焦点环，`enabled` 为假整体灰。`ascii` 用 `--o` / `o--`。返回命中矩形。\npub(crate) fn render_stepper( — 步进器：`[-] value [+]`，两个 3 列按钮天然 ASCII 且好点。步进器占满 `area` 的宽度：减号钉左端、加号钉右端、值居中——调用方按最长取值定宽，值变化时按钮 不跳位（连点不会点空）。值放不下时截断；连按钮都放不下（< 9 列）时不画、返回"
+    },
+    {
+      "anchor": "structure",
+      "doc": "src/ui/kit/tree.rs",
+      "id": "src-ui-kit-tree-rs-structure",
+      "source_sha256": "d3fc27fccf0f5eeb71e32c5adabc8575e8c08a6d0a8e55675b8bd131ac6c14aa",
+      "text": "模块文档：树：通用行条目 `TreeEntry<K>` 与行首前缀（缩进引导线 + 连接线 + 折叠开关）。 泛型于 `K`，不认识客户端类型；领域层（如 `client/shell/agent_tree.rs`）在视图 计算阶段按前序构造条目并缓存，渲染时逐行调 [`render_tree_prefix`]。  前缀版式：每层 2 列。第 1..depth-1 层画祖先的引导线（`│ ` 或空白），第 depth 层画本节点的连接线（`├─` / `└─`），随后 1 列折叠开关（`▾` / `▸`；叶子 节点接一段 `─` 把连接线延到文字前）与 1 列间隔。根（depth 0）没有连接线：  ```text ▾ machine ├─▾ workspace │ ├── tab │ └── tab └─▸ workspace   └── tab ```  引导线从父节点的开关格垂下，连接线正好接在它下面。\n公开项：\npub(crate) const MAX_TREE_DEPTH: u8 = 63; — `last_child_mask` 能表达的最深层级；更深的节点按此饱和（前缀宽度同样封顶）。\npub(crate) struct TreeEntry<K> {\npub(crate) const fn tree_prefix_width(depth: u8) -> u16 { — 前缀占多少列（只看深度，不分配），供行宽预算：`2 × depth + 2`，深度按 [`MAX_TREE_DEPTH`] 饱和。\npub(crate) fn fill_last_child_masks<K>(entries: &mut [TreeEntry<K>]) { — 按前序（父在子前、兄弟相邻）排好的条目算出每条的 `last_child_mask`，原地写回， 不分配：倒序一遍求「本节点是否末子」，正序一遍把祖先的结论逐层继承下来。 深度跳级（子比父深 2 层以上）按缺失的中间层「是末子」处理，只画空白。\npub(crate) fn render_tree_prefix( — 在 `(x, y)` 起画前缀，最多占 `max_width` 列，逐格写、不分配。`style` 用于 引导线、连接线与开关；开关要换色时，调用方对返回的命中区 `set_style` 即可。 返回 `(实际占用列数, 折叠开关命中区)`：命中区覆盖开关与其后的间隔共 2 列\nimpl Cursor {"
     },
     {
       "anchor": "structure",
