@@ -340,26 +340,54 @@ enum PreferenceKey {
 impl PreferenceKey {
     fn for_action(action: &Action) -> Option<Self> {
         Some(match action {
-            Action::Interval
+            Action::Interval(_)
             | Action::Metric(_)
             | Action::CardMove(..)
-            | Action::CardSize
-            | Action::HistoryRange
+            | Action::CardSize(_)
+            | Action::HistoryRange(_)
             | Action::Device(_)
             | Action::ToggleAlerts
-            | Action::AlertThreshold(_)
-            | Action::AlertDuration(_)
-            | Action::AlertCooldown(_) => Self::Monitor,
+            | Action::AlertThreshold(..)
+            | Action::AlertDuration(..)
+            | Action::AlertCooldown(..) => Self::Monitor,
             Action::UsageEnabled => Self::UsageEnabled,
-            Action::UsageFormat => Self::UsageFormat,
-            Action::UsagePosition => Self::UsagePosition,
+            Action::UsageFormat(_) => Self::UsageFormat,
+            Action::UsagePosition(_) => Self::UsagePosition,
             Action::ProviderEnabled(_) => Self::DisabledProviders,
-            Action::HoverDelay => Self::HoverDelay,
+            Action::HoverDelay(_) => Self::HoverDelay,
             Action::RestoreUsagePreferences => Self::RestoreUsage,
             _ => return None,
         })
     }
 }
+
+/// 在固定档位表里按方向取相邻档：`delta > 0` 取「大于当前值的最小档」，否则取
+/// 「小于当前值的最大档」，越过末档回绕。配置文件里的非档位值（如 300 ms）
+/// 第一次点击落到相邻档，不跳档。
+fn step_ladder<T: Copy + PartialOrd>(ladder: &[T], current: T, delta: i8) -> T {
+    let next = if delta < 0 {
+        ladder
+            .iter()
+            .rev()
+            .copied()
+            .find(|step| *step < current)
+            .or_else(|| ladder.last().copied())
+    } else {
+        ladder
+            .iter()
+            .copied()
+            .find(|step| *step > current)
+            .or_else(|| ladder.first().copied())
+    };
+    next.unwrap_or(current)
+}
+
+/// 设置页步进器的档位表。
+const INTERVAL_STEPS: [u64; 4] = [500, 1000, 2000, 5000];
+const CARD_HEIGHT_STEPS: [u16; 4] = [7, 10, 16, 24];
+const HISTORY_STEPS: [u16; 5] = [1, 5, 15, 30, 60];
+const ALERT_DURATION_STEPS: [u64; 4] = [10, 30, 60, 300];
+const ALERT_COOLDOWN_STEPS: [u64; 3] = [60, 300, 900];
 
 #[derive(Clone, Debug)]
 pub(super) enum Action {
@@ -372,13 +400,15 @@ pub(super) enum Action {
     Configure,
     Refresh,
     ToggleAlerts,
-    Interval,
+    /// 采样间隔步进（±1 档），持久化为客户端偏好；下同。
+    Interval(i8),
     Metric(String),
     UsageEnabled,
-    UsageFormat,
-    UsagePosition,
-    /// 悬浮延时档位循环（200 / 400 / 800 / 1200 / 2000 ms），持久化为客户端偏好。
-    HoverDelay,
+    /// 用量样式：设置页的分段控件直接设值，账号页工具栏传「另一个」。
+    UsageFormat(UsageDisplayFormat),
+    UsagePosition(UsageDisplayPosition),
+    /// 悬浮延时步进（200 / 400 / 800 / 1200 / 2000 ms 档位），持久化为客户端偏好。
+    HoverDelay(i8),
     /// 设置页「恢复配置文件值」：清掉 usage_* 的本机覆盖，重新跟随 config.toml。
     RestoreUsagePreferences,
     /// 回到跨厂商总览（账号页首个 chip / 再点已选厂商 chip）。
@@ -405,13 +435,14 @@ pub(super) enum Action {
     Card(String),
     Core(usize),
     CardMove(String, isize),
-    CardSize,
-    HistoryRange,
+    CardSize(i8),
+    HistoryRange(i8),
     ProviderEnabled(String),
     Device(String),
-    AlertThreshold(usize),
-    AlertDuration(usize),
-    AlertCooldown(usize),
+    /// 第 n 条告警规则的阈值 / 持续 / 冷却步进（±1 档）。
+    AlertThreshold(usize, i8),
+    AlertDuration(usize, i8),
+    AlertCooldown(usize, i8),
 }
 
 /// 每个账号保留的用量历史样本数（右栏 sparkline 的窗口）。
@@ -3045,24 +3076,14 @@ impl ClientShellState {
                     self.observability.monitor.visible.swap(index, next);
                 }
             }
-            Action::CardSize => {
-                self.observability.monitor.card_height =
-                    match self.observability.monitor.card_height {
-                        7 => 10,
-                        10 => 16,
-                        16 => 24,
-                        _ => 7,
-                    }
+            Action::CardSize(delta) => {
+                let monitor = &mut self.observability.monitor;
+                monitor.card_height = step_ladder(&CARD_HEIGHT_STEPS, monitor.card_height, delta);
             }
-            Action::HistoryRange => {
-                self.observability.monitor.history_minutes =
-                    match self.observability.monitor.history_minutes {
-                        1 => 5,
-                        5 => 15,
-                        15 => 30,
-                        30 => 60,
-                        _ => 1,
-                    }
+            Action::HistoryRange(delta) => {
+                let monitor = &mut self.observability.monitor;
+                monitor.history_minutes =
+                    step_ladder(&HISTORY_STEPS, monitor.history_minutes, delta);
             }
             Action::Device(id) => {
                 let hidden = &mut self.observability.monitor.hidden_devices;
@@ -3086,32 +3107,32 @@ impl ClientShellState {
                 self.config.preferences.clear_usage_overrides();
                 self.observability.reload_preferences(&self.config);
             }
-            Action::AlertThreshold(index) => {
+            Action::AlertThreshold(index, delta) => {
+                // 50–100% 每步 5 个点，越过两端回绕。
                 if let Some(rule) = self.observability.monitor.alerts.get_mut(index) {
-                    rule.threshold = if rule.threshold >= 100.0 {
+                    rule.threshold = if delta < 0 {
+                        if rule.threshold <= 50.0 {
+                            100.0
+                        } else {
+                            rule.threshold - 5.0
+                        }
+                    } else if rule.threshold >= 100.0 {
                         50.0
                     } else {
                         rule.threshold + 5.0
                     };
                 }
             }
-            Action::AlertDuration(index) => {
+            Action::AlertDuration(index, delta) => {
                 if let Some(rule) = self.observability.monitor.alerts.get_mut(index) {
-                    rule.duration_seconds = match rule.duration_seconds {
-                        10 => 30,
-                        30 => 60,
-                        60 => 300,
-                        _ => 10,
-                    };
+                    rule.duration_seconds =
+                        step_ladder(&ALERT_DURATION_STEPS, rule.duration_seconds, delta);
                 }
             }
-            Action::AlertCooldown(index) => {
+            Action::AlertCooldown(index, delta) => {
                 if let Some(rule) = self.observability.monitor.alerts.get_mut(index) {
-                    rule.cooldown_seconds = match rule.cooldown_seconds {
-                        60 => 300,
-                        300 => 900,
-                        _ => 60,
-                    };
+                    rule.cooldown_seconds =
+                        step_ladder(&ALERT_COOLDOWN_STEPS, rule.cooldown_seconds, delta);
                 }
             }
             Action::Page(page) => self.open_observation_page(page, outcome),
@@ -3137,14 +3158,9 @@ impl ClientShellState {
             }
             Action::Configure => self.open_observation_page(Page::Settings, outcome),
             Action::Pause => self.observability.paused = !self.observability.paused,
-            Action::Interval => {
-                self.observability.monitor.interval_ms =
-                    match self.observability.monitor.interval_ms {
-                        500 => 1000,
-                        1000 => 2000,
-                        2000 => 5000,
-                        _ => 500,
-                    };
+            Action::Interval(delta) => {
+                let monitor = &mut self.observability.monitor;
+                monitor.interval_ms = step_ladder(&INTERVAL_STEPS, monitor.interval_ms, delta);
                 self.observability.next_metrics = Instant::now();
             }
             Action::Metric(metric) => {
@@ -3162,34 +3178,21 @@ impl ClientShellState {
             Action::UsageEnabled => {
                 self.observability.usage.enabled = !self.observability.usage.enabled
             }
-            Action::UsageFormat => {
+            Action::UsageFormat(format) => {
                 self.observability.account_scroll = 0;
-                self.observability.usage.format = match self.observability.usage.format {
-                    UsageDisplayFormat::Dashboard => UsageDisplayFormat::Table,
-                    UsageDisplayFormat::Table => UsageDisplayFormat::Dashboard,
-                }
+                self.observability.usage.format = format;
             }
-            Action::UsagePosition => {
-                self.observability.usage.position = match self.observability.usage.position {
-                    UsageDisplayPosition::Hover => UsageDisplayPosition::Page,
-                    UsageDisplayPosition::Page => UsageDisplayPosition::Both,
-                    UsageDisplayPosition::Both => UsageDisplayPosition::Hover,
-                };
+            Action::UsagePosition(position) => {
+                self.observability.usage.position = position;
                 // 切到「页面」= agent 行悬浮层关闭：页脚说明一次，设置行也常驻提示。
-                if self.observability.usage.position == UsageDisplayPosition::Page {
+                if position == UsageDisplayPosition::Page {
                     self.observability.message =
                         Some(crate::i18n::texts().monitor.hover_closed_hint.to_owned());
                 }
             }
-            Action::HoverDelay => {
-                // 在固定档位表里取「大于当前值的下一档」，末档回到首档：配置文件里的
-                // 非档位值（如 300）第一次点击落到 400，不跳档。
-                let current = self.observability.usage.hover_delay_ms;
-                self.observability.usage.hover_delay_ms = HOVER_DELAY_STEPS
-                    .iter()
-                    .copied()
-                    .find(|step| *step > current)
-                    .unwrap_or(HOVER_DELAY_STEPS[0]);
+            Action::HoverDelay(delta) => {
+                let usage = &mut self.observability.usage;
+                usage.hover_delay_ms = step_ladder(&HOVER_DELAY_STEPS, usage.hover_delay_ms, delta);
             }
             Action::Overview => self.select_usage_overview(),
             Action::Provider(agent) => self.select_usage_provider(agent),

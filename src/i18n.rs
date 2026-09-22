@@ -482,6 +482,20 @@ pub struct MonitorTexts {
     pub proc_col_cpu: &'static str,
     pub proc_col_mem: &'static str,
     pub no_matching_processes: &'static str,
+    // ---- 监控偏好页 ----
+    pub sampling_interval: &'static str,
+    pub card_height: &'static str,
+    pub history_range: &'static str,
+    pub alerts_enabled: &'static str,
+    pub usage_enabled: &'static str,
+    pub usage_format: &'static str,
+    pub usage_position: &'static str,
+    pub restore_config: &'static str,
+    pub clear_overrides: &'static str,
+    pub no_overrides: &'static str,
+    pub alert_rule_fmt: &'static str, // args: metric
+    pub alert_duration: &'static str,
+    pub alert_cooldown: &'static str,
 }
 
 pub struct SidebarTexts {

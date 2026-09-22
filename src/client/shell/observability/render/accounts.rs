@@ -380,13 +380,13 @@ pub(super) fn source_item() -> ToolbarItem {
 /// 视图切换项：标签写的是目标视图。
 fn format_item(state: &State) -> ToolbarItem {
     let texts = &crate::i18n::texts().monitor;
-    let target = match state.usage.format {
-        UsageDisplayFormat::Dashboard => texts.format_table,
-        UsageDisplayFormat::Table => texts.format_dashboard,
+    let (target, label) = match state.usage.format {
+        UsageDisplayFormat::Dashboard => (UsageDisplayFormat::Table, texts.format_table),
+        UsageDisplayFormat::Table => (UsageDisplayFormat::Dashboard, texts.format_dashboard),
     };
     ToolbarItem {
-        label: format!("⇄ {target}"),
-        action: Some(Action::UsageFormat),
+        label: format!("⇄ {label}"),
+        action: Some(Action::UsageFormat(target)),
     }
 }
 
@@ -1170,7 +1170,12 @@ pub(super) fn page_scope(state: &State) -> AccountsScope<'_> {
 
 /// 禁用态按钮：走组件的 `Disabled` 档（灰字 + 弱底色），不回填命中区；
 /// 返回实际占用宽度。
-fn disabled_button(buffer: &mut Buffer, rect: Rect, label: &str, palette: &Palette) -> u16 {
+pub(super) fn disabled_button(
+    buffer: &mut Buffer,
+    rect: Rect,
+    label: &str,
+    palette: &Palette,
+) -> u16 {
     let label = format!(" {label} ");
     let width = crate::ui::modal_button_width(&label).min(rect.width);
     let rect = Rect::new(rect.x, rect.y, width, rect.height.min(1));

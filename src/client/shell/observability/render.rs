@@ -872,7 +872,10 @@ mod tests {
             "显示项复用系统页中文标题: {text}"
         );
         assert!(buffer_has(&buffer, "悬浮延时"), "{text}");
-        assert!(has(&output, |action| matches!(action, Action::HoverDelay)));
+        assert!(has(&output, |action| matches!(
+            action,
+            Action::HoverDelay(_)
+        )));
         assert!(!text.contains("Interval"), "只读行也走中文: {text}");
     }
 
@@ -895,7 +898,7 @@ mod tests {
         let mut state = populated();
         let (buffer, output) = paint_page(&state, Page::Accounts, 120, 40);
         assert!(has(&output, |a| matches!(a, Action::Configure)));
-        assert!(has(&output, |a| matches!(a, Action::UsageFormat)));
+        assert!(has(&output, |a| matches!(a, Action::UsageFormat(_))));
         assert!(has(&output, |a| matches!(a, Action::Refresh)));
         assert!(has(&output, |a| matches!(a, Action::Source)));
         assert!(has(&output, |a| matches!(a, Action::CycleAccount)));

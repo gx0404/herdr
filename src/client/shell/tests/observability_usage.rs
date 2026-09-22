@@ -2745,7 +2745,7 @@ fn hover_delay_cycles_fixed_steps_and_persists_only_its_own_key() {
     assert_eq!(state.observability.usage.hover_delay_ms, 400, "配置默认值");
     let mut seen = Vec::new();
     for _ in 0..5 {
-        state.observation_action(Action::HoverDelay, &mut ClientShellInput::default());
+        state.observation_action(Action::HoverDelay(1), &mut ClientShellInput::default());
         seen.push(state.observability.usage.hover_delay_ms);
     }
     assert_eq!(seen, vec![800, 1200, 2000, 200, 400], "档位循环回到起点");
@@ -2760,7 +2760,7 @@ fn hover_delay_cycles_fixed_steps_and_persists_only_its_own_key() {
     assert_eq!(saved.usage_format, None);
     // 配置文件里的非档位值：第一次点击落到下一档，不跳档。
     state.observability.usage.hover_delay_ms = 300;
-    state.observation_action(Action::HoverDelay, &mut ClientShellInput::default());
+    state.observation_action(Action::HoverDelay(1), &mut ClientShellInput::default());
     assert_eq!(state.observability.usage.hover_delay_ms, 400);
     std::fs::remove_file(path).expect("remove preferences");
 }
@@ -3534,6 +3534,78 @@ fn edit_layout_mode_moves_the_selected_card_with_arrow_keys() {
     assert_eq!(state.observability.page, None, "再按 Esc 才关闭页面");
 }
 
+/// 监控偏好页的控件：点分段 / 步进器 / 开关只回写各自的偏好键（`PreferenceKey`），
+/// 落盘后重启可恢复。
+#[test]
+fn preferences_page_controls_write_back_only_their_preference_key() {
+    use crate::config::UsageDisplayFormat;
+    let path = std::env::temp_dir().join(format!(
+        "herdr-shell-monitor-prefs-{}.json",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_file(&path);
+    let mut state = ClientShellState::new(
+        ClientShellConfig::from_config(&Config::default()).with_preferences_path(path.clone()),
+    );
+    state.set_snapshot(Box::new(snapshot()));
+    state.set_endpoint_methods(Some(vec!["client.views.set".into(), "tab.focus".into()]));
+    state.set_pane_surface(surface());
+    state.compose(120, 60).expect("初始画面");
+    state.tick_workbench(std::time::Instant::now(), &mut ClientShellInput::default());
+    state.open_observation_page(Page::Settings, &mut ClientShellInput::default());
+    state.compose(120, 60).expect("监控偏好页");
+    let hit = |state: &ClientShellState, wanted: fn(&Action) -> bool| {
+        page_hit(state, wanted).expect("控件命中区")
+    };
+    // 分段控件：用量样式 → 表格，只写 usage_format。
+    let table = hit(&state, |action| {
+        matches!(action, Action::UsageFormat(UsageDisplayFormat::Table))
+    });
+    click(&mut state, table.x + 1, table.y);
+    assert_eq!(state.observability.usage.format, UsageDisplayFormat::Table);
+    let preferences = &state.config.preferences;
+    assert_eq!(preferences.usage_format, Some(UsageDisplayFormat::Table));
+    assert_eq!(preferences.monitor, None, "未改过的键不写影子值");
+    assert_eq!(preferences.usage_enabled, None);
+    assert_eq!(preferences.usage_position, None);
+    // 步进器：采样间隔 +1 档，只写 monitor 键。
+    state.compose(120, 60).expect("重绘");
+    let plus = hit(&state, |action| matches!(action, Action::Interval(1)));
+    click(&mut state, plus.x + 1, plus.y);
+    assert_eq!(state.observability.monitor.interval_ms, 2000);
+    assert_eq!(
+        state
+            .config
+            .preferences
+            .monitor
+            .as_ref()
+            .map(|monitor| monitor.interval_ms),
+        Some(2000)
+    );
+    assert_eq!(state.config.preferences.usage_enabled, None);
+    // 开关：厂商账号用量整行可点。
+    state.compose(120, 60).expect("重绘");
+    let usage = hit(&state, |action| matches!(action, Action::UsageEnabled));
+    click(&mut state, usage.x + 1, usage.y);
+    assert!(!state.observability.usage.enabled);
+    assert_eq!(state.config.preferences.usage_enabled, Some(false));
+    assert_eq!(state.config.preferences.usage_position, None);
+    // 落盘并可恢复。
+    let saved = preferences::load(&path).expect("偏好已写入");
+    assert_eq!(saved.usage_format, Some(UsageDisplayFormat::Table));
+    assert_eq!(saved.usage_enabled, Some(false));
+    let restored = ClientShellState::new(
+        ClientShellConfig::from_config(&Config::default()).with_preferences_path(path.clone()),
+    );
+    assert_eq!(
+        restored.observability.usage.format,
+        UsageDisplayFormat::Table
+    );
+    assert!(!restored.observability.usage.enabled);
+    assert_eq!(restored.observability.monitor.interval_ms, 2000);
+    std::fs::remove_file(path).expect("remove preferences");
+}
+
 fn press_key(state: &mut ClientShellState, code: crossterm::event::KeyCode) -> ClientShellInput {
     state.handle_raw_events(vec![RawInputEvent::Key(crate::input::TerminalKey::new(
         code,
@@ -3827,7 +3899,10 @@ fn settings_actions_persist_only_their_own_usage_key() {
     assert_eq!(preferences.usage_hover_delay_ms, None);
     assert!(state.observability.usage_overridden, "已有本机覆盖");
 
-    state.observation_action(Action::UsageFormat, &mut ClientShellInput::default());
+    state.observation_action(
+        Action::UsageFormat(crate::config::UsageDisplayFormat::Table),
+        &mut ClientShellInput::default(),
+    );
     let preferences = &state.config.preferences;
     assert_eq!(
         preferences.usage_format,
@@ -3874,12 +3949,15 @@ fn restore_config_values_clears_usage_overrides_and_reloads_the_config_file() {
         "无本机覆盖时「恢复配置文件值」不可点"
     );
 
-    state.observation_action(Action::UsageFormat, &mut ClientShellInput::default());
+    state.observation_action(
+        Action::UsageFormat(crate::config::UsageDisplayFormat::Dashboard),
+        &mut ClientShellInput::default(),
+    );
     state.observation_action(
         Action::ProviderEnabled("codex".into()),
         &mut ClientShellInput::default(),
     );
-    state.observation_action(Action::HoverDelay, &mut ClientShellInput::default());
+    state.observation_action(Action::HoverDelay(1), &mut ClientShellInput::default());
     assert_eq!(
         state.observability.usage.format,
         crate::config::UsageDisplayFormat::Dashboard

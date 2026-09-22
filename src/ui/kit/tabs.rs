@@ -1,8 +1,6 @@
 //! 标签页与三个「一行内的开关类控件」：分段选择、开关、步进器。都只画一行、
 //! 返回命中矩形；放不下的项整体丢弃（不画半个标签），对应矩形为空。
 
-#![allow(dead_code)] // seam-stub(monitor)：波 2 监控车道接入监控页签 / 设置页后删除
-
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
