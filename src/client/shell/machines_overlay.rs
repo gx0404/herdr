@@ -5,6 +5,7 @@
 
 use super::*;
 mod dashboard;
+mod mouse;
 use crate::client::endpoint::{
     EndpointCatalog, PortForwardKind, PortForwardRule, ProfileId, ProxyJumpHop, SessionLogProfile,
     SshProfileOptions, StrictHostKeyChecking,

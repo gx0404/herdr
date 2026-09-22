@@ -229,65 +229,6 @@ pub(crate) fn render_minimum_overlay(b: &mut Buffer, cx: &ChromeContext<'_>) -> 
     }
 }
 
-pub(crate) fn render_context_menu(
-    buffer: &mut Buffer,
-    menu: &ClientContextMenuOverlay,
-    cx: &ChromeContext<'_>,
-) -> Option<OverlayRender> {
-    let palette = cx.palette;
-    let items = menu.items();
-    let screen = buffer.area;
-    let max_item_width = items
-        .iter()
-        .map(|item| display_width(item.label))
-        .max()
-        .unwrap_or(0);
-    let width = max_item_width
-        .saturating_add(4)
-        .max(14)
-        .min(screen.width.max(1));
-    let height = (items.len() as u16)
-        .saturating_add(2)
-        .min(screen.height.max(1));
-    let x = menu
-        .x
-        .min(screen.x.saturating_add(screen.width.saturating_sub(width)));
-    let y = menu.y.min(
-        screen
-            .y
-            .saturating_add(screen.height.saturating_sub(height)),
-    );
-    let rect = Rect::new(x, y, width, height);
-    let inner = panel(buffer, rect, palette.accent, palette.panel_bg, cx.glyphs)?;
-    let mut rows = Vec::new();
-    for (index, item) in items.iter().enumerate() {
-        let row_y = inner.y.saturating_add(index as u16);
-        if row_y >= inner.bottom() {
-            break;
-        }
-        let row = Rect::new(inner.x, row_y, inner.width, 1);
-        let style = list_row_style(
-            palette,
-            cx.components,
-            index == menu.highlighted,
-            menu.hovered == Some(index),
-        );
-        let style = if item.enabled {
-            style
-        } else {
-            style.fg(palette.overlay0)
-        };
-        buffer.set_style(row, style);
-        put_text(buffer, row.x, row.y, row.width, item.label, style);
-        rows.push((row, index));
-    }
-    Some(OverlayRender {
-        area: rect,
-        menu_rows: rows,
-        ..OverlayRender::default()
-    })
-}
-
 /// 面板边框内的可用矩形。`panel` 与视图计算阶段共用同一口径——渲染前的滚动
 /// 窗口必须按渲染真正使用的几何来算（STATE-04）。
 pub(in crate::client::shell) fn panel_inner(area: Rect) -> Option<Rect> {

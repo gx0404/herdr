@@ -1,4 +1,7 @@
+use super::feedback::ChromeContext;
+use super::render::{display_width, panel, put_text, OverlayRender};
 use super::*;
+use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
 
 impl ClientContextMenuOverlay {
     pub(super) fn items(&self) -> Vec<ClientContextMenuItem> {
@@ -670,4 +673,105 @@ impl ClientShellState {
             _ => {}
         }
     }
+}
+
+impl ClientShellState {
+    /// 右键菜单打开时的鼠标分派：不在该浮层时返回 `false`，由
+    /// `mouse.rs::handle_mouse` 继续往下走。
+    pub(super) fn handle_context_menu_mouse(
+        &mut self,
+        mouse: MouseEvent,
+        point: (u16, u16),
+        outcome: &mut ClientShellInput,
+    ) -> bool {
+        if !matches!(self.overlay, Some(ClientShellOverlay::ContextMenu(_))) {
+            return false;
+        }
+        let row_hit = self
+            .hits
+            .context_menu_rows
+            .iter()
+            .find(|(rect, _)| super::contains(*rect, point))
+            .copied();
+        match mouse.kind {
+            MouseEventKind::Moved => {
+                if let Some(ClientShellOverlay::ContextMenu(menu)) = self.overlay.as_mut() {
+                    let hovered = row_hit.map(|(_, index)| index);
+                    if menu.hovered != hovered {
+                        menu.hovered = hovered;
+                        outcome.repaint = true;
+                    }
+                }
+            }
+            MouseEventKind::Down(MouseButton::Left) => {
+                if let Some((_, index)) = row_hit {
+                    self.activate_context_menu_item(index, outcome);
+                } else {
+                    self.overlay = None;
+                    outcome.repaint = true;
+                }
+            }
+            _ => {}
+        }
+        true
+    }
+}
+
+pub(super) fn render_context_menu(
+    buffer: &mut Buffer,
+    menu: &ClientContextMenuOverlay,
+    cx: &ChromeContext<'_>,
+) -> Option<OverlayRender> {
+    let palette = cx.palette;
+    let items = menu.items();
+    let screen = buffer.area;
+    let max_item_width = items
+        .iter()
+        .map(|item| display_width(item.label))
+        .max()
+        .unwrap_or(0);
+    let width = max_item_width
+        .saturating_add(4)
+        .max(14)
+        .min(screen.width.max(1));
+    let height = (items.len() as u16)
+        .saturating_add(2)
+        .min(screen.height.max(1));
+    let x = menu
+        .x
+        .min(screen.x.saturating_add(screen.width.saturating_sub(width)));
+    let y = menu.y.min(
+        screen
+            .y
+            .saturating_add(screen.height.saturating_sub(height)),
+    );
+    let rect = Rect::new(x, y, width, height);
+    let inner = panel(buffer, rect, palette.accent, palette.panel_bg, cx.glyphs)?;
+    let mut rows = Vec::new();
+    for (index, item) in items.iter().enumerate() {
+        let row_y = inner.y.saturating_add(index as u16);
+        if row_y >= inner.bottom() {
+            break;
+        }
+        let row = Rect::new(inner.x, row_y, inner.width, 1);
+        let style = list_row_style(
+            palette,
+            cx.components,
+            index == menu.highlighted,
+            menu.hovered == Some(index),
+        );
+        let style = if item.enabled {
+            style
+        } else {
+            style.fg(palette.overlay0)
+        };
+        buffer.set_style(row, style);
+        put_text(buffer, row.x, row.y, row.width, item.label, style);
+        rows.push((row, index));
+    }
+    Some(OverlayRender {
+        area: rect,
+        menu_rows: rows,
+        ..OverlayRender::default()
+    })
 }

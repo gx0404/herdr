@@ -4,6 +4,7 @@ use super::render::{
     OverlayRender, SearchBar,
 };
 use super::*;
+use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
 
 /// Cap on the persisted most-recently-used command list.
 pub(super) const PALETTE_RECENT_LIMIT: usize = 5;
@@ -1253,6 +1254,57 @@ pub(crate) fn render_command_palette(
         cursor,
         ..OverlayRender::default()
     })
+}
+
+impl ClientShellState {
+    /// 命令面板 / 全局菜单打开时的鼠标分派：不在该浮层时返回 `false`，
+    /// 由 `mouse.rs::handle_mouse` 继续往下走。
+    pub(super) fn handle_command_palette_mouse(
+        &mut self,
+        mouse: MouseEvent,
+        point: (u16, u16),
+        outcome: &mut ClientShellInput,
+    ) -> bool {
+        if !matches!(self.overlay, Some(ClientShellOverlay::CommandPalette(_))) {
+            return false;
+        }
+        let row_hit = self
+            .hits
+            .global_menu_rows
+            .iter()
+            .find(|(rect, _)| super::contains(*rect, point))
+            .copied();
+        match mouse.kind {
+            MouseEventKind::Moved => {
+                // 指针只写 hover：键盘选中不被「鼠标路过」改写，出界也要写
+                // None 才不会留下残影（MENU-01）。
+                outcome.repaint |= self.set_palette_hover(row_hit.map(|(_, index)| index));
+            }
+            MouseEventKind::ScrollUp => {
+                self.scroll_palette(-(self.config.mouse_scroll_lines as isize));
+                outcome.repaint = true;
+            }
+            MouseEventKind::ScrollDown => {
+                self.scroll_palette(self.config.mouse_scroll_lines as isize);
+                outcome.repaint = true;
+            }
+            MouseEventKind::Down(MouseButton::Left) => {
+                if super::contains(self.hits.global_launcher, point) {
+                    self.toggle_global_menu();
+                    outcome.repaint = true;
+                } else if let Some((_, index)) = row_hit {
+                    // 点击是显式选择：与键盘一样改写 `selected`，再激活。
+                    self.set_palette_selection(index);
+                    self.activate_palette_item(index, outcome);
+                } else if !super::contains(self.hits.menu_popup, point) {
+                    self.close_command_browser();
+                    outcome.repaint = true;
+                }
+            }
+            _ => {}
+        }
+        true
+    }
 }
 
 #[cfg(test)]
