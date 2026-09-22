@@ -3,7 +3,7 @@
 # managed by herdr; reinstalling or updating the integration overwrites this file.
 # add custom hooks beside this file instead of editing it.
 # HERDR_INTEGRATION_ID=codex
-# HERDR_INTEGRATION_VERSION=8
+# HERDR_INTEGRATION_VERSION=9
 
 set -eu
 
@@ -13,7 +13,7 @@ trap 'rm -f "$hook_input_file"' EXIT HUP INT TERM
 cat >"$hook_input_file" 2>/dev/null || true
 
 case "$action" in
-  session) ;;
+  session|activity) ;;
   *) exit 0 ;;
 esac
 
@@ -49,11 +49,59 @@ if hook_input_file:
         hook_input = {}
 
 hook_event_name = str(hook_input.get("hook_event_name") or "")
+request_id = f"{source}:{int(time.time() * 1000)}:{random.randrange(1_000_000):06d}"
+report_seq = time.time_ns()
+
+
+def text_field(name):
+    value = hook_input.get(name)
+    return value if isinstance(value, str) and value else None
+
+
+def send(request):
+    try:
+        client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        client.settimeout(0.5)
+        client.connect(socket_path)
+        client.sendall((json.dumps(request) + "\n").encode())
+        try:
+            client.recv(4096)
+        except Exception:
+            pass
+        client.close()
+    except Exception:
+        pass
+
+
+if action == "activity":
+    # Activity hooks only tell herdr that this pane's sub-agent threads changed;
+    # the server rebuilds the tree from Codex's own session files. SubagentStart
+    # and SubagentStop carry the spawned thread id as agent_id (codex-cli 0.155.1
+    # hook schema), which is the activity node id. A nested codex process can
+    # only cause one extra refresh of the same tree, so the CODEX_THREAD_ID guard
+    # used for session identity does not apply here.
+    if hook_event_name not in ("SubagentStart", "SubagentStop"):
+        raise SystemExit(0)
+    params = {
+        "pane_id": pane_id,
+        "source": source,
+        "agent": "codex",
+        "hint": hook_event_name,
+        "seq": report_seq,
+    }
+    node_id = text_field("agent_id")
+    if node_id:
+        params["node_id"] = node_id
+    send({
+        "id": request_id,
+        "method": "pane.report_agent_activity",
+        "params": params,
+    })
+    raise SystemExit(0)
+
 if hook_event_name and hook_event_name != "SessionStart":
     raise SystemExit(0)
 
-request_id = f"{source}:{int(time.time() * 1000)}:{random.randrange(1_000_000):06d}"
-report_seq = time.time_ns()
 session_id = hook_input.get("session_id")
 agent_session_id = session_id if isinstance(session_id, str) and session_id else None
 transcript_path = hook_input.get("transcript_path")
@@ -83,16 +131,5 @@ if agent_session_id:
 else:
     raise SystemExit(0)
 
-try:
-    client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    client.settimeout(0.5)
-    client.connect(socket_path)
-    client.sendall((json.dumps(request) + "\n").encode())
-    try:
-        client.recv(4096)
-    except Exception:
-        pass
-    client.close()
-except Exception:
-    pass
+send(request)
 PY

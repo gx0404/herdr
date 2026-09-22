@@ -118,6 +118,8 @@ herdr integration install codex
 
 Codex フックは、他のインテグレーションと同じローカルソケット API を通じてセッション識別を報告します。Codex の状態は Herdr のスクリーンマニフェスト検出から得られます。
 
+Codex 統合 v9 は、macOS と Linux で `SubagentStart` と `SubagentStop` も購読します。これらのフックは、Codex のサブエージェントスレッドが開始または終了したことをローカルの Herdr ソケットに通知するだけで、エージェントの状態は報告しません。Herdr はアクティビティツリーを Codex 自身のセッションファイルから再構築します。Codex は `[features] hooks = true` のときだけフックを実行し、インストール時にすでに書き込まれます。Windows ではアクティビティフックはインストールされません。アップグレード後に Codex 統合を再インストールして追加してください。
+
 Herdr はデフォルトで `~/.codex` を使い、`CODEX_HOME` が設定されていればそちらを使います。Codex の設定ディレクトリはあらかじめ存在している必要があります。インストールは `herdr-agent-state.sh` を書き込み、`hooks.json` を更新し、`config.toml` に `[features] hooks = true` があることを保証します。非推奨のトップレベル `codex_hooks` フラグが存在すれば削除もします。アンインストールは `hooks.json` から Herdr のエントリを削除してフックスクリプトを削除しますが、`config.toml` は変更しません。
 
 ## Kimi Code CLI

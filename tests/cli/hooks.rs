@@ -260,3 +260,74 @@ fn codex_hook_reports_persisted_root_session_and_ignores_ephemeral_or_nested_ses
     )
     .is_none());
 }
+
+#[test]
+fn codex_hook_reports_subagent_thread_activity() {
+    // 载荷形状照 codex-cli 0.155.1 内嵌的钩子 schema：SubagentStart / SubagentStop 必带
+    // 子线程 id agent_id；SubagentStop 另带 agent_transcript_path 与 last_assistant_message。
+    let cases = [
+        (
+            r#"{"hook_event_name":"SubagentStart","session_id":"root-thread","agent_id":"01a0c6d8-4f60-7000-8000-0000000000a2","agent_type":"worker","cwd":"/work","model":"demo","permission_mode":"default","transcript_path":"/tmp/root-thread.jsonl","turn_id":"turn-1"}"#,
+            "SubagentStart",
+            Some("01a0c6d8-4f60-7000-8000-0000000000a2"),
+        ),
+        (
+            r#"{"hook_event_name":"SubagentStop","session_id":"root-thread","agent_id":"01a0c6d8-4f60-7000-8000-0000000000a2","agent_type":"worker","agent_transcript_path":"/tmp/child.jsonl","last_assistant_message":null,"stop_hook_active":false,"cwd":"/work","model":"demo","permission_mode":"default","transcript_path":"/tmp/root-thread.jsonl","turn_id":"turn-1"}"#,
+            "SubagentStop",
+            Some("01a0c6d8-4f60-7000-8000-0000000000a2"),
+        ),
+        // 缺 agent_id 也照样提示「树变了」，只是没有节点 id。
+        (
+            r#"{"hook_event_name":"SubagentStop","session_id":"root-thread"}"#,
+            "SubagentStop",
+            None,
+        ),
+    ];
+
+    for (input, hint, node_id) in cases {
+        let request = run_codex_hook("activity", input)
+            .unwrap_or_else(|| panic!("{hint} should report activity"));
+        assert_eq!(request["method"], "pane.report_agent_activity", "{hint}");
+        let params = &request["params"];
+        assert_eq!(params["pane_id"], "p_test");
+        assert_eq!(params["source"], "herdr:codex");
+        assert_eq!(params["agent"], "codex");
+        assert_eq!(params["hint"], hint);
+        assert!(params["seq"].as_u64().is_some(), "{hint}");
+        assert_eq!(
+            params.get("node_id").and_then(|v| v.as_str()),
+            node_id,
+            "{hint}"
+        );
+        assert!(params.get("agent_session_id").is_none(), "{hint}");
+    }
+
+    // 嵌套 codex 进程里的活动提示照发：最多让同一棵树多刷一次，不像会话身份那样会认错。
+    let nested = run_shell_hook_with_env(
+        "src/integration/assets/codex/herdr-agent-state.sh",
+        &["activity"],
+        r#"{"hook_event_name":"SubagentStart","session_id":"nested-thread","agent_id":"child-1","agent_type":"worker"}"#,
+        &[("CODEX_THREAD_ID", "parent-thread")],
+    )
+    .expect("nested activity should still hint");
+    assert_eq!(nested["params"]["hint"], "SubagentStart");
+    assert_eq!(nested["params"]["node_id"], "child-1");
+}
+
+#[test]
+fn codex_hook_keeps_activity_and_session_reports_apart() {
+    // activity 只认两个子 agent 事件；session 仍只认 SessionStart。
+    for input in [
+        r#"{"hook_event_name":"SessionStart","session_id":"root-thread","transcript_path":"/tmp/root-thread.jsonl"}"#,
+        r#"{"hook_event_name":"SessionEnd","session_id":"root-thread","reason":"exit"}"#,
+        r#"{"hook_event_name":"Stop","session_id":"root-thread"}"#,
+        r#"{"hook_event_name":"future-event","agent_id":"child-1"}"#,
+    ] {
+        assert!(run_codex_hook("activity", input).is_none(), "{input}");
+    }
+    assert!(run_codex_hook(
+        "session",
+        r#"{"hook_event_name":"SubagentStart","session_id":"root-thread","agent_id":"child-1","agent_type":"worker","transcript_path":"/tmp/root-thread.jsonl"}"#,
+    )
+    .is_none());
+}

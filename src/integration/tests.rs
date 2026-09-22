@@ -1193,7 +1193,7 @@ fn codex_v2_integration_status_is_outdated() {
 
     assert_eq!(codex.path, hook_path);
     assert_eq!(codex.installed_version, Some(2));
-    assert_eq!(codex.expected_version, 8);
+    assert_eq!(codex.expected_version, CODEX_INTEGRATION_VERSION);
     assert_eq!(codex.state, IntegrationStatusKind::Outdated);
 
     std::env::remove_var("HOME");
@@ -1224,6 +1224,21 @@ fn install_codex_writes_hook_and_updates_hooks_and_config() {
         .as_str()
         .unwrap()
         .contains(" session"));
+    // 活动钩子只在 Unix 安装（Windows 资产没有活动信号通道），且不带 matcher。
+    for event in ["SubagentStart", "SubagentStop"] {
+        if cfg!(windows) {
+            assert!(hooks["hooks"].get(event).is_none(), "{event}");
+        } else {
+            assert!(
+                hooks["hooks"][event][0]["hooks"][0]["command"]
+                    .as_str()
+                    .unwrap()
+                    .contains(" activity"),
+                "{event}"
+            );
+            assert!(hooks["hooks"][event][0].get("matcher").is_none(), "{event}");
+        }
+    }
     assert!(hooks["hooks"].get("UserPromptSubmit").is_none());
     assert!(hooks["hooks"].get("PreToolUse").is_none());
     assert!(hooks["hooks"].get("PermissionRequest").is_none());
@@ -1278,6 +1293,10 @@ fn install_codex_is_idempotent_for_hook_entries_and_feature_flag() {
     let config = fs::read_to_string(codex_dir.join("config.toml")).unwrap();
 
     assert_eq!(hooks["hooks"]["SessionStart"].as_array().unwrap().len(), 1);
+    if !cfg!(windows) {
+        assert_eq!(hooks["hooks"]["SubagentStart"].as_array().unwrap().len(), 1);
+        assert_eq!(hooks["hooks"]["SubagentStop"].as_array().unwrap().len(), 1);
+    }
     assert!(hooks["hooks"].get("UserPromptSubmit").is_none());
     assert!(hooks["hooks"].get("PreToolUse").is_none());
     assert!(hooks["hooks"].get("PermissionRequest").is_none());
@@ -1333,7 +1352,12 @@ fn uninstall_codex_removes_herdr_hooks_and_leaves_config_alone() {
             ]}],
             "PreToolUse": [{"hooks": [{"type": "command", "command": format!("bash '{}' working", hook_path.display()), "timeout": 10}]}],
             "PermissionRequest": [{"hooks": [{"type": "command", "command": format!("bash '{}' blocked", hook_path.display()), "timeout": 10}]}],
-            "Stop": [{"hooks": [{"type": "command", "command": format!("bash '{}' idle", hook_path.display()), "timeout": 10}]}]
+            "Stop": [{"hooks": [{"type": "command", "command": format!("bash '{}' idle", hook_path.display()), "timeout": 10}]}],
+            "SubagentStart": [{"hooks": [{"type": "command", "command": format!("bash '{}' activity", hook_path.display()), "timeout": 10}]}],
+            "SubagentStop": [{"hooks": [
+                {"type": "command", "command": format!("bash '{}' activity", hook_path.display()), "timeout": 10},
+                {"type": "command", "command": "echo keep-stop", "timeout": 10}
+            ]}]
         }
     });
     fs::write(
@@ -1360,6 +1384,18 @@ fn uninstall_codex_removes_herdr_hooks_and_leaves_config_alone() {
     assert!(hooks["hooks"].get("PreToolUse").is_none());
     assert!(hooks["hooks"].get("PermissionRequest").is_none());
     assert!(hooks["hooks"].get("Stop").is_none());
+    assert!(hooks["hooks"].get("SubagentStart").is_none());
+    assert_eq!(
+        hooks["hooks"]["SubagentStop"][0]["hooks"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(
+        hooks["hooks"]["SubagentStop"][0]["hooks"][0]["command"],
+        "echo keep-stop"
+    );
     assert_eq!(
         hooks["hooks"]["UserPromptSubmit"][0]["hooks"]
             .as_array()
