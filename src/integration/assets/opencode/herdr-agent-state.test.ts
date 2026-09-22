@@ -255,11 +255,12 @@ test("routes nested child prompts to their own root, not the last active root", 
   ]);
 });
 
-test("only a parentID naming another known session makes a child", async () => {
+test("any parentID naming another session makes a child, even an unseen parent", async () => {
   const plugin = await loadPlugin();
 
-  // A parentID equal to the session itself, or naming a session this process
-  // never saw, keeps the session a root: its prompts report as its own.
+  // A parentID equal to the session itself keeps it a root: its prompts report
+  // as its own. OpenCode never gives a root a parentID value, so only a broken
+  // self-reference can reach here.
   await plugin.event({
     event: {
       type: "session.created",
@@ -267,15 +268,28 @@ test("only a parentID naming another known session makes a child", async () => {
     },
   });
   await plugin["chat.message"]({ sessionID: "self-parent" });
+
+  // A child whose parent's events never reached this process is still a child:
+  // it must not report its own id as the pane's agent session. Its blocking
+  // events resolve to the named parent, which is this pane's root.
   await plugin.event({
     event: {
       type: "session.created",
       properties: { sessionID: "stray", info: { id: "stray", parentID: "never-seen" } },
     },
   });
+  await plugin.event({
+    event: {
+      type: "session.updated",
+      properties: { sessionID: "stray", info: { id: "stray", parentID: "never-seen" } },
+    },
+  });
   await plugin["chat.message"]({ sessionID: "stray" });
+  await plugin.event({
+    event: { type: "permission.asked", properties: { sessionID: "stray" } },
+  });
 
-  // A resumed root is known from any event carrying its id, not only creation.
+  // A root seen only through status events still owns its children's prompts.
   await plugin.event({
     event: {
       type: "session.status",
@@ -299,8 +313,15 @@ test("only a parentID naming another known session makes a child", async () => {
     "pane.report_agent",
     "pane.report_agent",
   ]);
-  expect(lifecycle().map(requestState)).toEqual(["working", "working", "working", "blocked"]);
-  expect(lifecycle().map(requestSessionID)).toEqual(["self-parent", "stray", "resumed", "resumed"]);
+  expect(lifecycle().map(requestState)).toEqual(["working", "blocked", "working", "blocked"]);
+  expect(lifecycle().map(requestSessionID)).toEqual([
+    "self-parent",
+    "never-seen",
+    "resumed",
+    "resumed",
+  ]);
+  // The child's own id never becomes the pane's agent session.
+  expect(lifecycle().map(requestSessionID)).not.toContain("stray");
 });
 
 // Activity hints ---------------------------------------------------------------

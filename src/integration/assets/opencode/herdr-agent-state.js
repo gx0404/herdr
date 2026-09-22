@@ -15,11 +15,12 @@ let reportedRootSessionID;
 
 // Track child sessions so their events cannot replace the pane's root session.
 // User prompts carry the root id to preserve its identity and cross-talk guard.
-// A session counts as a child only when its parentID names a different session
-// this process has already seen: OpenCode maps rows as `parentID: parent_id ??
-// undefined`, so root events carry the key too, and a stray or self parent
-// must not demote the pane's root.
-const knownSessions = new Set();
+// A session counts as a child when its parentID is a non-empty string naming a
+// different session. OpenCode maps rows as `parentID: parent_id ?? undefined`,
+// so a root's own events carry the key with no value and stay roots; requiring
+// the parent to be a session this process already saw would instead demote a
+// real child to a root whenever its parent's events arrived elsewhere first,
+// letting that child's id overwrite the pane's agent session.
 const childSessions = new Map();
 const CHILD_EVENT_STATES = new Map([
   ["permission.asked", "blocked"],
@@ -56,20 +57,13 @@ function sessionIDFromProperties(properties) {
     : undefined;
 }
 
-function rememberSession(sessionID) {
-  if (typeof sessionID === "string" && sessionID) {
-    knownSessions.add(sessionID);
-  }
-}
-
 function isChildInfo(info) {
   return (
     typeof info?.id === "string" &&
     info.id !== "" &&
     typeof info.parentID === "string" &&
     info.parentID !== "" &&
-    info.parentID !== info.id &&
-    knownSessions.has(info.parentID)
+    info.parentID !== info.id
   );
 }
 
@@ -194,7 +188,6 @@ export const HerdrAgentStatePlugin = async () => {
       if (sessionID && childSessions.has(sessionID)) {
         return;
       }
-      rememberSession(sessionID);
       await reportState("working", sessionID);
     },
     event: async ({ event }) => {
@@ -206,8 +199,6 @@ export const HerdrAgentStatePlugin = async () => {
       if (isChildInfo(info)) {
         childSessions.set(info.id, info.parentID);
       }
-      rememberSession(sessionID);
-      rememberSession(info?.id);
       if (ACTIVITY_EVENTS.has(type)) {
         await reportActivity(type);
       }
