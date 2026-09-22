@@ -160,7 +160,8 @@ impl ClientShellState {
     }
 
     /// agent 行 / 外部条目右键菜单的动作。条目由接缝在 `context_menu.rs` 定稿；
-    /// 重命名、用量、绑定账号、关闭由波 2 面板车道在这里接上。
+    /// 重命名、用量、绑定账号、关闭由波 2 面板车道在这里接上，接上时同步把
+    /// `context_menu.rs` 里对应条目的 `enabled` 从 false 翻回 true。
     pub(super) fn activate_agent_context_action(
         &mut self,
         endpoint_id: ClientEndpointId,
@@ -174,7 +175,8 @@ impl ClientShellState {
                 self.focus_agent_pane(endpoint_id, pane_id, outcome);
             }
             (Action::ViewAgentActivity, owner) => self.open_agent_activity(endpoint_id, owner),
-            // seam-stub(agent-panel)：其余动作暂为空操作。
+            // seam-stub(agent-panel)：其余动作的条目在菜单里已灰显、不可激活，
+            // 这里兜住键盘/程序化路径。
             _ => {}
         }
     }

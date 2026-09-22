@@ -123,19 +123,26 @@ impl ClientContextMenuOverlay {
                 ..
             } => {
                 let t = &crate::i18n::texts().agent_panel;
+                // seam-stub(agent-panel)：动作尚未接通的条目一律灰显——激活后
+                // `activate_agent_context_action` 只会落到空臂，菜单却已关掉。
+                // 波 2 面板车道接上动作时把对应的 `enabled` 翻回 true。
+                let stub = |label, action| ClientContextMenuItem {
+                    enabled: false,
+                    ..item(label, action)
+                };
                 let mut items = vec![
                     item(t.menu_focus, Action::FocusAgent),
                     ClientContextMenuItem {
                         enabled: *has_activity,
                         ..item(t.menu_view_activity, Action::ViewAgentActivity)
                     },
-                    item(t.menu_rename, Action::RenameAgent),
+                    stub(t.menu_rename, Action::RenameAgent),
                 ];
                 if agent.is_some() {
-                    items.push(item(t.menu_usage, Action::ShowAgentUsage));
-                    items.push(item(t.menu_bind_account, Action::BindAgentAccount));
+                    items.push(stub(t.menu_usage, Action::ShowAgentUsage));
+                    items.push(stub(t.menu_bind_account, Action::BindAgentAccount));
                 }
-                items.push(item(t.menu_close, Action::CloseAgentPane));
+                items.push(stub(t.menu_close, Action::CloseAgentPane));
                 items
             }
             ClientContextMenuTarget::ExternalAgent { .. } => vec![item(

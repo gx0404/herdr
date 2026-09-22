@@ -373,6 +373,19 @@ fn agent_row_context_menu_lists_seam_items_and_routes_stub_actions() {
         .position(|item| item.action == ClientContextMenuAction::ViewAgentActivity)
         .expect("查看活动项");
     assert!(!items[view_activity].enabled, "没有活动时禁用");
+    // 动作未接通的条目灰显：否则点了只会关掉菜单、什么都不发生。
+    for action in [
+        ClientContextMenuAction::RenameAgent,
+        ClientContextMenuAction::ShowAgentUsage,
+        ClientContextMenuAction::BindAgentAccount,
+        ClientContextMenuAction::CloseAgentPane,
+    ] {
+        let index = items
+            .iter()
+            .position(|item| item.action == action)
+            .unwrap_or_else(|| panic!("缺少条目: {action:?}"));
+        assert!(!items[index].enabled, "{action:?} 未接通时应禁用");
+    }
 
     // 禁用项：点击不激活，菜单保持打开。
     state.compose(106, 24).expect("context menu frame");
