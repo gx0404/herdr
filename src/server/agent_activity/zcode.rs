@@ -1405,6 +1405,8 @@ mod tests {
             cwd: None,
             home,
             now_ms: NOW,
+            agent_config_dir: None,
+            latest_hint: None,
         }
     }
 
