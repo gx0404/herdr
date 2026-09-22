@@ -93,34 +93,6 @@ impl PageLayout {
     }
 }
 
-pub(super) fn action_grid(area: Rect, labels: &[&str]) -> Vec<Rect> {
-    use unicode_width::UnicodeWidthStr;
-    let mut x = area.x;
-    let mut y = area.y;
-    let mut rects = Vec::with_capacity(labels.len());
-    for label in labels {
-        let width = (label.width().min(u16::MAX as usize) as u16)
-            .saturating_add(4)
-            .min(area.width);
-        if x > area.x && x.saturating_add(width) > area.right() {
-            x = area.x;
-            y = y.saturating_add(1);
-        }
-        if y >= area.bottom() || width == 0 {
-            break;
-        }
-        rects.push(Rect::new(x, y, width, 1));
-        x = x.saturating_add(width).saturating_add(2);
-    }
-    rects
-}
-
-pub(super) fn action_row_count(width: u16, labels: &[&str]) -> u16 {
-    action_grid(Rect::new(0, 0, width, u16::MAX), labels)
-        .last()
-        .map_or(0, |rect| rect.y.saturating_add(1))
-}
-
 pub(super) fn list_start(
     requested: usize,
     selected: usize,

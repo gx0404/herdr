@@ -528,9 +528,20 @@ fn detail_card_shows_structured_failure_and_review_entry() {
         text.contains(&compact(t.next_auth_required)),
         "frame: {text}"
     );
-    assert!(text.contains(&compact(t.review_button)), "frame: {text}");
+    // 复核入口在合并页脚里：显示 `v` 键位且可点。
+    let review = crate::i18n::texts().machines.hint_review;
+    assert!(text.contains(&compact(review)), "frame: {text}");
+    assert!(
+        state
+            .hits
+            .machines_actions
+            .iter()
+            .any(|(_, button)| *button == MachineOverlayButton::ReviewIssue),
+        "复核入口可点：{:?}",
+        state.hits.machines_actions
+    );
 
-    // The review button opens the matching recovery dialog.
+    // The review entry opens the matching recovery dialog.
     let mut outcome = ClientShellInput::default();
     state.activate_machine_button(MachineOverlayButton::ReviewIssue, &mut outcome);
     assert!(matches!(

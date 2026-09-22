@@ -52,29 +52,6 @@ fn key_hint_segment_width(key: &str, label: &str, last: bool) -> u16 {
         .saturating_add(if last { 0 } else { 2 })
 }
 
-/// 一组键提示按 `width` 列排版需要的行数（0 行表示放不下任何一项）。
-pub(super) fn key_hints_rows(hints: &[(String, String)], width: u16) -> u16 {
-    if width == 0 || hints.is_empty() {
-        return 0;
-    }
-    let mut rows = 1u16;
-    let mut used = 0u16;
-    for (index, (key, label)) in hints.iter().enumerate() {
-        let last = index + 1 == hints.len();
-        let segment = key_hint_segment_width(key, label, last);
-        if used.saturating_add(segment) > width {
-            if used == 0 {
-                // 单项就超宽：再换行也放不下，按当前行计。
-                return rows;
-            }
-            rows = rows.saturating_add(1);
-            used = 0;
-        }
-        used = used.saturating_add(segment);
-    }
-    rows
-}
-
 /// Keycap-style shortcut footer: each hint renders as a padded key cap
 /// (accent on surface0) followed by its description in the muted base color.
 /// 放不下的提示整项换行；`area` 的行用完后剩余项整项丢弃，并在末尾画省略号

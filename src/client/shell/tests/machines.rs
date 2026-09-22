@@ -1793,11 +1793,12 @@ fn wide_list_routes_the_machine_action_keys() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// dashboard 页脚必须和它自己的动作网格同一套键，否则用户看得到按钮却以为
-/// 只有 `↑↓ / Enter / / / Esc`。断言锚定在页脚那几行（整帧 contains 会被
-/// 动作网格按钮文案蒙对），并在三个现实宽度与两种语言上各跑一遍。
+/// dashboard 不再另画动作网格：页脚就是单机动作与页面动作的唯一入口，
+/// 每个动作键都得出现在页脚里（且可点，见
+/// `machine_pages_have_one_clickable_footer_instead_of_a_button_row`）。断言
+/// 锚定在页脚那几行，并在三个现实宽度与两种语言上各跑一遍。
 #[test]
-fn dashboard_footer_advertises_the_action_grid_keys() {
+fn dashboard_footer_lists_every_machine_action_key() {
     for lang in [crate::i18n::Lang::ZhCn, crate::i18n::Lang::En] {
         let _guard = crate::i18n::lang_guard(lang);
         for cols in [96u16, 116, 130] {
@@ -2715,4 +2716,273 @@ fn narrow_form_drops_the_preview_and_shows_test_steps_under_the_fields() {
     let text = compact(&frame_text(&mut state, 70, 32));
     let install = compact(crate::i18n::texts().machines.progress_install);
     assert!(text.contains(&install), "测试步骤在字段栏下方：{text}");
+}
+
+// ---------------------------------------------------------------------
+// 合并页脚、空状态与带预览的导入清单
+// ---------------------------------------------------------------------
+
+/// 可点的页脚项（按钮）集合。
+fn machine_buttons(state: &ClientShellState) -> Vec<MachineOverlayButton> {
+    state
+        .hits
+        .machines_actions
+        .iter()
+        .map(|(_, button)| *button)
+        .collect()
+}
+
+fn click_machine_button(state: &mut ClientShellState, button: MachineOverlayButton) {
+    let rect = state
+        .hits
+        .machines_actions
+        .iter()
+        .find(|(_, candidate)| *candidate == button)
+        .map(|(rect, _)| *rect)
+        .unwrap_or_else(|| panic!("{button:?} 不可点：{:?}", state.hits.machines_actions));
+    state.handle_mouse(left_click(rect.x, rect.y), &mut ClientShellInput::default());
+}
+
+/// 列表 / 工作台 / 详情的动作都在同一条页脚里：命中矩形全部落在页脚行内，
+/// 不再有单独的按钮行；点页脚项等同于按键。
+#[test]
+fn machine_pages_have_one_clickable_footer_instead_of_a_button_row() {
+    let _dir = with_temp_state_home("merged-footer");
+    let saved = profile("Build", "dev@build.example", "80");
+    for (cols, rows) in [(80u16, 30u16), (130, 40)] {
+        let mut state = state_with_profiles(std::slice::from_ref(&saved));
+        state.open_machines_overlay();
+        frame_text(&mut state, cols, rows);
+        let footer = state.hits.machines_footer;
+        assert!(!footer.is_empty(), "{cols} 列应有页脚");
+        for (rect, button) in &state.hits.machines_actions {
+            assert!(
+                rect.y >= footer.y && rect.bottom() <= footer.bottom(),
+                "{cols} 列 {button:?} 应在页脚行内：{rect:?} / {footer:?}"
+            );
+        }
+        let buttons = machine_buttons(&state);
+        for expected in [
+            MachineOverlayButton::Add,
+            MachineOverlayButton::Import,
+            MachineOverlayButton::Close,
+            MachineOverlayButton::Reconnect,
+            MachineOverlayButton::Edit,
+        ] {
+            assert!(buttons.contains(&expected), "{cols} 列：{buttons:?}");
+        }
+        // 点页脚的「编辑」进入选中机器的编辑表单。
+        click_machine_button(&mut state, MachineOverlayButton::Edit);
+        let form = machine_form(&state);
+        assert_eq!(form.editing.as_ref(), Some(&saved.id));
+    }
+
+    // 详情页同理：返回 / 单机动作都在页脚里。
+    let mut state = state_with_profiles(std::slice::from_ref(&saved));
+    state.open_machines_overlay_for(&saved.id);
+    frame_text(&mut state, 106, 36);
+    let footer = state.hits.machines_footer;
+    let buttons = machine_buttons(&state);
+    assert!(buttons.contains(&MachineOverlayButton::Back), "{buttons:?}");
+    assert!(
+        buttons.contains(&MachineOverlayButton::Forwards),
+        "{buttons:?}"
+    );
+    assert!(state
+        .hits
+        .machines_actions
+        .iter()
+        .all(|(rect, _)| rect.y >= footer.y && rect.bottom() <= footer.bottom()));
+    click_machine_button(&mut state, MachineOverlayButton::Back);
+    assert!(matches!(
+        state.overlay,
+        Some(ClientShellOverlay::Machines(
+            super::super::machines_overlay::ClientMachinesOverlay {
+                view: super::super::machines_overlay::ClientMachinesView::List,
+                ..
+            }
+        ))
+    ));
+}
+
+/// 停用的机器：页脚仍显示 `r 重连`（与按键表一致），但置灰且不可点。
+#[test]
+fn reconnect_hint_is_disabled_for_a_disabled_machine() {
+    let mut saved = profile("Build", "dev@build.example", "81");
+    saved.enabled = false;
+    let mut state = state_with_profiles(std::slice::from_ref(&saved));
+    state.open_machines_overlay_for(&saved.id);
+    let footer = compact(&machines_footer_text(&mut state, 106, 36));
+    let reconnect = compact(crate::i18n::texts().machines.hint_reconnect);
+    assert!(footer.contains(&reconnect), "{footer}");
+    assert!(
+        !machine_buttons(&state).contains(&MachineOverlayButton::Reconnect),
+        "停用机器的重连不可点"
+    );
+}
+
+/// 没有机器时列表画 kit 空状态，主按钮「添加」可点并打开表单；有机器但过滤
+/// 为空时只说没有匹配，不给添加按钮。
+#[test]
+fn empty_machine_list_uses_the_empty_state_with_an_add_action() {
+    let t = &crate::i18n::texts().machines;
+    for (cols, rows) in [(80u16, 30u16), (130, 40)] {
+        let mut state = state_with_profiles(&[]);
+        state.open_machines_overlay();
+        let text = compact(&frame_text(&mut state, cols, rows));
+        assert!(text.contains(&compact(t.empty)), "{cols} 列：{text}");
+        assert!(text.contains(&compact(t.empty_hint)), "{cols} 列：{text}");
+        let footer = state.hits.machines_footer;
+        let add = state
+            .hits
+            .machines_actions
+            .iter()
+            .find(|(rect, button)| {
+                *button == MachineOverlayButton::Add && rect.bottom() <= footer.y
+            })
+            .map(|(rect, _)| *rect)
+            .expect("空状态的添加按钮在正文里");
+        state.handle_mouse(left_click(add.x, add.y), &mut ClientShellInput::default());
+        assert!(machine_form(&state).editing.is_none(), "打开添加表单");
+    }
+
+    let saved = profile("Build", "dev@build.example", "82");
+    let mut state = state_with_profiles(std::slice::from_ref(&saved));
+    state.open_machines_overlay();
+    type_text(&mut state, "/zzz");
+    let text = compact(&frame_text(&mut state, 80, 30));
+    assert!(text.contains(&compact(t.no_matches)), "{text}");
+    assert!(!text.contains(&compact(t.empty)), "{text}");
+}
+
+/// 端口转发没有规则时同样用空状态，主按钮直接进入添加表单；`x 移除` 置灰。
+#[test]
+fn empty_forwards_editor_offers_an_add_action() {
+    let _dir = with_temp_home("forwards-empty");
+    let saved = seed_forward_profile(0);
+    let mut state = state_with_profiles(std::slice::from_ref(&saved));
+    state.open_machines_overlay_for(&saved.id);
+    state.open_machine_forwards(&saved.id);
+    let text = compact(&frame_text(&mut state, 106, 36));
+    let t = &crate::i18n::texts().machines;
+    assert!(text.contains(&compact(t.forward_none)), "{text}");
+    let buttons = machine_buttons(&state);
+    assert!(
+        !buttons.contains(&MachineOverlayButton::ForwardRemove),
+        "没有规则时移除不可点：{buttons:?}"
+    );
+    let footer = state.hits.machines_footer;
+    let add = state
+        .hits
+        .machines_actions
+        .iter()
+        .find(|(rect, button)| {
+            *button == MachineOverlayButton::ForwardAddStart && rect.bottom() <= footer.y
+        })
+        .map(|(rect, _)| *rect)
+        .expect("空状态的添加按钮");
+    state.handle_mouse(left_click(add.x, add.y), &mut ClientShellInput::default());
+    let Some(ClientShellOverlay::Machines(overlay)) = state.overlay.as_ref() else {
+        panic!("machines overlay");
+    };
+    let super::super::machines_overlay::ClientMachinesView::Forwards(view) = &overlay.view else {
+        panic!("forwards view");
+    };
+    assert!(view.adding, "点空状态按钮进入添加");
+}
+
+const IMPORT_PREVIEW_FIXTURE: &str = "\
+Host bastion
+    HostName bastion.internal
+
+Host web
+    HostName web.internal
+    User deploy
+    Port 2201
+    ProxyJump bastion
+    StrictHostKeyChecking no
+";
+
+/// 导入仍是三步，Select 是带预览的多选清单：表头给出空格 / Enter 提示，
+/// 右侧预览随焦点列出将写入的字段与被丢弃的设置；窄屏省去预览。
+#[test]
+fn import_select_is_a_checklist_with_a_live_preview() {
+    let dir = with_temp_home("import-preview");
+    std::fs::write(dir.join(".ssh").join("config"), IMPORT_PREVIEW_FIXTURE).unwrap();
+    let mut state = state_with_profiles(&[]);
+    state.open_machine_import_wizard();
+    state.route_machines_key(&key(KeyCode::Enter), &mut ClientShellInput::default());
+    let t = &crate::i18n::texts().machines;
+    let f = &crate::i18n::texts().machine_form;
+
+    let text = compact(&frame_text(&mut state, 110, 32));
+    assert!(text.contains(&compact(f.import_select_hint)), "{text}");
+    assert!(text.contains(&compact(f.preview_title)), "{text}");
+    assert!(text.contains("[x]bastion"), "{text}");
+    assert!(
+        !text.contains(&compact(t.detail_proxy_jump)),
+        "焦点在 bastion，预览不含 web 的跳板行：{text}"
+    );
+
+    // 焦点移到 web：预览列出用户、端口、跳板与被丢弃的设置。
+    state.route_machines_key(&key(KeyCode::Down), &mut ClientShellInput::default());
+    let text = compact(&frame_text(&mut state, 110, 32));
+    for expected in [
+        compact(t.detail_user),
+        "deploy".to_owned(),
+        compact(t.detail_port),
+        "2201".to_owned(),
+        compact(t.detail_proxy_jump),
+        compact(&crate::i18n::fill(t.import_notes_fmt, &[("count", "1")])),
+        "StrictHostKeyCheckingno".to_owned(),
+    ] {
+        assert!(text.contains(&expected), "预览缺少 {expected}：{text}");
+    }
+    // 预览跟随勾选状态。
+    state.route_machines_key(&key(KeyCode::Char(' ')), &mut ClientShellInput::default());
+    let text = compact(&frame_text(&mut state, 110, 32));
+    assert!(text.contains("[]web"), "取消勾选后清单与预览同步：{text}");
+    // 命中行只在左栏：预览栏不可点成候选。
+    let preview_x = state
+        .hits
+        .machines_wizard_rows
+        .iter()
+        .map(|(rect, _)| rect.right())
+        .max()
+        .expect("清单行");
+    assert!(preview_x < 110, "清单行不覆盖预览栏");
+
+    // 窄屏：没有预览栏，清单占满宽度。
+    let text = compact(&frame_text(&mut state, 70, 32));
+    assert!(!text.contains(&compact(f.preview_title)), "{text}");
+    // 页脚（窄屏可能两行）仍有返回。
+    let footer = compact(&machines_footer_text(&mut state, 70, 32));
+    assert!(footer.contains(&compact(t.hint_back)), "{footer}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// 导入的 discover 空状态走 kit 空状态：说明 + 配置路径，页脚只剩返回。
+#[test]
+fn import_discover_without_hosts_is_an_empty_state_with_the_path() {
+    let dir = with_temp_home("import-empty-state");
+    let mut state = state_with_profiles(&[]);
+    state.open_machine_import_wizard();
+    let text = compact(&frame_text(&mut state, 110, 30));
+    assert!(text.contains(".ssh/config"), "{text}");
+    let buttons = machine_buttons(&state);
+    assert!(
+        !buttons.contains(&MachineOverlayButton::ImportContinue),
+        "没有主机时继续不可点：{buttons:?}"
+    );
+    click_machine_button(&mut state, MachineOverlayButton::Back);
+    assert!(matches!(
+        state.overlay,
+        Some(ClientShellOverlay::Machines(
+            super::super::machines_overlay::ClientMachinesOverlay {
+                view: super::super::machines_overlay::ClientMachinesView::List,
+                ..
+            }
+        ))
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
 }

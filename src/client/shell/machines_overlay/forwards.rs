@@ -1,5 +1,6 @@
 //! 端口转发编辑器：规则列表、删除确认（武装 → 确认）、添加表单与存盘。
 
+use super::footer::{render_machine_footer, MachineHint};
 use super::*;
 
 /// Port-forward rules editor for one machine: lists the saved rules with
@@ -475,6 +476,12 @@ pub(in crate::client::shell) fn forward_rule_display(rule: &PortForwardRule) -> 
     }
 }
 
+/// 端口转发编辑器的纵向分区（标题、正文、单条合并页脚）：视图计算与渲染
+/// 共用（STATE-04）。
+pub(super) fn forwards_stack(inner: Rect) -> crate::ui::ModalStackAreas {
+    crate::ui::modal_stack_areas(inner, 1, 1, 0, 1)
+}
+
 pub(super) fn render_machine_forwards(
     b: &mut Buffer,
     view: &ClientForwardRulesView,
@@ -495,7 +502,7 @@ pub(super) fn render_machine_forwards(
             ..OverlayRender::default()
         });
     }
-    let stack = crate::ui::modal_stack_areas(inner, 1, 1, 1, 1);
+    let stack = forwards_stack(inner);
     let base = Style::default()
         .bg(p.panel_bg)
         .remove_modifier(Modifier::DIM);
@@ -546,23 +553,23 @@ pub(super) fn render_machine_forwards(
         visible_rows,
         view.reveal,
     );
+    let mut action_hits = Vec::new();
     if rules.is_empty() && !view.adding {
-        put_text(
+        // 空状态：说明规则跟随连接，主按钮直接开始添加。
+        let empty = Rect::new(body.x, body.y, body.width, list_height);
+        if let Some(rect) = crate::ui::kit::empty_state::render_empty_state(
             b,
-            body.x,
-            body.y,
-            body.width,
-            t.forward_none,
-            base.fg(p.overlay1),
-        );
-        put_text(
-            b,
-            body.x,
-            body.y + 1,
-            body.width,
-            t.forward_none_hint,
-            base.fg(p.overlay0),
-        );
+            empty,
+            &crate::ui::kit::empty_state::EmptyState {
+                glyph: None,
+                title: t.forward_none.trim(),
+                body: Some(t.forward_none_hint.trim()),
+                action: Some(t.add_button.trim()),
+            },
+            p,
+        ) {
+            action_hits.push((rect, MachineOverlayButton::ForwardAddStart));
+        }
     }
     for (index, rule) in rules
         .iter()
@@ -758,103 +765,41 @@ pub(super) fn render_machine_forwards(
         }
     }
 
-    if let Some(footer) = stack.footer {
-        let hints: Vec<(String, String)> = if view.adding {
-            vec![
-                ("tab/↑↓".to_owned(), t.hint_fields.to_owned()),
-                ("←→".to_owned(), t.hint_change.to_owned()),
-                ("enter".to_owned(), t.hint_confirm.to_owned()),
-                ("esc".to_owned(), t.hint_back.to_owned()),
-            ]
-        } else if pending_rule.is_some() {
-            vec![
-                ("enter".to_owned(), t.hint_confirm.to_owned()),
-                (
-                    "esc".to_owned(),
-                    crate::i18n::texts()
-                        .overlays
-                        .cancel_button
-                        .trim()
-                        .to_owned(),
-                ),
-            ]
-        } else {
-            vec![
-                ("↑↓".to_owned(), t.hint_select.to_owned()),
-                ("a".to_owned(), t.hint_add.to_owned()),
-                ("x".to_owned(), t.hint_remove.to_owned()),
-                ("esc".to_owned(), t.hint_back.to_owned()),
-            ]
-        };
-        render_key_hints(b, footer, &hints, p, cx.components);
-    }
-
-    let mut action_hits = Vec::new();
-    let back_label = crate::i18n::texts().overlays.back_button;
-    let (labels, buttons): (Vec<&str>, Vec<MachineOverlayButton>) = if view.adding {
-        (
-            vec![t.save_button, back_label],
-            vec![
-                MachineOverlayButton::ForwardSave,
-                MachineOverlayButton::ForwardCancel,
-            ],
-        )
+    // 合并页脚：键位即按钮，取代此前并排的键位行与按钮行。
+    let t_overlays = &crate::i18n::texts().overlays;
+    let hints: Vec<MachineHint<'static>> = if view.adding {
+        vec![
+            MachineHint::key("tab/↑↓", t.hint_fields),
+            MachineHint::key("←→", t.hint_change),
+            MachineHint::button("enter", t.hint_confirm, MachineOverlayButton::ForwardSave)
+                .primary(),
+            MachineHint::button("esc", t.hint_back, MachineOverlayButton::ForwardCancel),
+        ]
     } else if pending_rule.is_some() {
-        (
-            vec![
-                crate::i18n::texts().overlays.confirm_button,
-                crate::i18n::texts().overlays.cancel_button,
-                back_label,
-            ],
-            vec![
-                MachineOverlayButton::ForwardRemove,
+        vec![
+            MachineHint::button("enter", t.hint_confirm, MachineOverlayButton::ForwardRemove)
+                .primary(),
+            MachineHint::button(
+                "esc",
+                t_overlays.cancel_button,
                 MachineOverlayButton::ForwardCancelRemove,
-                MachineOverlayButton::Back,
-            ],
-        )
+            ),
+        ]
     } else {
-        (
-            vec![t.add_button, t.remove_button, back_label],
-            vec![
-                MachineOverlayButton::ForwardAddStart,
-                MachineOverlayButton::ForwardRemove,
-                MachineOverlayButton::Back,
-            ],
-        )
-    };
-    let rects = modal_button_row(stack.actions.unwrap_or_default(), &labels, 2);
-    if rects.len() == labels.len() {
-        for (index, rect) in rects.iter().enumerate() {
-            let button = buttons[index];
-            let enabled = button != MachineOverlayButton::ForwardRemove || !rules.is_empty();
-            let (tone, base_state) = match button {
-                MachineOverlayButton::ForwardAddStart | MachineOverlayButton::ForwardSave => (
-                    crate::ui::ModalButtonTone::Primary,
-                    crate::ui::ModalButtonState::Focused,
-                ),
-                MachineOverlayButton::ForwardRemove => (
-                    crate::ui::ModalButtonTone::Danger,
-                    crate::ui::ModalButtonState::Normal,
-                ),
-                _ => (
-                    crate::ui::ModalButtonTone::Secondary,
-                    crate::ui::ModalButtonState::Normal,
-                ),
-            };
-            let state = if enabled {
-                cx.button_state(
-                    &super::super::feedback::ChromeHover::MachineButton(button),
-                    base_state,
-                )
+        let remove = MachineHint::button("x", t.hint_remove, MachineOverlayButton::ForwardRemove);
+        vec![
+            MachineHint::key("↑↓", t.hint_select),
+            MachineHint::button("a", t.hint_add, MachineOverlayButton::ForwardAddStart).primary(),
+            if rules.is_empty() {
+                remove.disabled()
             } else {
-                crate::ui::ModalButtonState::Disabled
-            };
-            modal_button(b, *rect, labels[index], tone, state, p);
-            if enabled {
-                action_hits.push((*rect, button));
-            }
-        }
-    }
+                remove
+            },
+            MachineHint::button("esc", t.hint_back, MachineOverlayButton::Back),
+        ]
+    };
+    let footer = stack.footer.unwrap_or_default();
+    action_hits.extend(render_machine_footer(b, footer, &hints, cx));
 
     Some(OverlayRender {
         area: popup,
@@ -862,6 +807,7 @@ pub(super) fn render_machine_forwards(
         machines_wizard_rows: row_hits,
         machines_wizard_fields: field_hits,
         machines_actions: action_hits,
+        machines_toast: footer,
         cursor,
         ..OverlayRender::default()
     })

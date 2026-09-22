@@ -1,8 +1,6 @@
 //! 空状态：区域中央的「字形 / 标题 / 说明 / 动作按钮」竖排。高度不足时从最不
 //! 重要的开始省（先字形，再说明，最后动作），标题总在。
 
-#![allow(dead_code)] // seam-stub(machines)：波 2 机器车道接入机器列表空态后删除
-
 use ratatui::{
     buffer::Buffer,
     layout::Rect,

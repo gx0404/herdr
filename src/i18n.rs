@@ -629,6 +629,8 @@ pub struct MachinesTexts {
     pub count_fmt: &'static str, // args: count
     pub empty: &'static str,
     pub empty_hint: &'static str,
+    /// 有已保存的机器、但过滤后没有匹配时的空状态标题。
+    pub no_matches: &'static str,
     // Footer hint labels (rendered as key caps by `render_key_hints`).
     pub hint_select: &'static str,
     pub hint_scroll: &'static str,
@@ -679,12 +681,6 @@ pub struct MachinesTexts {
     pub fix_hint: &'static str,
     // Detail action buttons.
     pub add_button: &'static str,
-    pub edit_button: &'static str,
-    pub reconnect_button: &'static str,
-    pub enable_button: &'static str,
-    pub disable_button: &'static str,
-    pub remove_button: &'static str,
-    pub copy_fix_button: &'static str,
     pub copied_fix_command: &'static str,
     // Remove confirmation.
     pub remove_title_fmt: &'static str, // args: label
@@ -699,7 +695,6 @@ pub struct MachinesTexts {
     pub choice_default: &'static str,
     pub choice_yes: &'static str,
     pub choice_no: &'static str,
-    pub next_button: &'static str,
     pub save_button: &'static str,
     pub confirm_install_note: &'static str,
     pub confirm_auth_note: &'static str,
@@ -728,9 +723,7 @@ pub struct MachinesTexts {
     pub forward_remove_cancelled: &'static str,
     /// 武装与确认之间规则表被外部改写时的取消提示。
     pub forward_remove_stale: &'static str,
-    pub forwards_button: &'static str,
     // SSH config import wizard.
-    pub import_button: &'static str,
     pub import_title: &'static str,
     pub import_step_discover: &'static str,
     pub import_step_select: &'static str,
@@ -746,7 +739,6 @@ pub struct MachinesTexts {
     pub import_group_label: &'static str,
     pub import_selected_fmt: &'static str, // args: selected, total
     pub import_scroll_position_fmt: &'static str, // args: start, total
-    pub import_run_button: &'static str,
     pub import_result_imported: &'static str,
     pub import_result_skipped: &'static str,
     pub import_result_failed: &'static str,
@@ -763,9 +755,7 @@ pub struct MachinesTexts {
     pub hint_session_log_path: &'static str,
     // Detail entries into the broadcast set manager and the file browser.
     pub hint_broadcast: &'static str,
-    pub broadcast_button: &'static str,
     pub hint_browse_files: &'static str,
-    pub browse_files_button: &'static str,
 }
 
 /// Texts for the broadcast target-set manager: the overlay listing the
@@ -931,7 +921,6 @@ pub struct MachineAuthTexts {
     pub next_install: &'static str,
     pub next_protocol: &'static str,
     pub next_retry: &'static str,
-    pub review_button: &'static str,
     // Dialog keyboard footers (rendered as key caps by `render_key_hints`).
     pub hint_trust: &'static str,
     pub hint_trust_once: &'static str,
@@ -1181,8 +1170,7 @@ pub struct MachineFormTexts {
     pub err_port: &'static str,
     pub err_host: &'static str,
     pub err_duplicate_name: &'static str,
-    // seam-stub(machines)：导入 Select 步骤改成带预览的多选清单时接入，届时删除。
-    #[allow(dead_code)]
+    /// 导入 Select 步骤的清单表头提示。
     pub import_select_hint: &'static str,
     /// 目标字段的占位文字。
     pub target_placeholder: &'static str,

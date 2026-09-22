@@ -1,6 +1,7 @@
 //! 窄屏机器列表、详情卡与删除确认的渲染，以及 List / dashboard / Detail
 //! 共用的页脚键表。
 
+use super::footer::{render_machine_footer, MachineHint};
 use super::*;
 
 fn machine_color_tag(
@@ -27,114 +28,117 @@ pub(in crate::client::shell) fn machine_hash_color(
     hues[(hash as usize) % hues.len()]
 }
 
-/// List 与宽屏 dashboard 共用的页脚键表：与 `handle_machine_action_key` 的
-/// 动作表、dashboard 动作网格同序同集（HERDR-MACH-007）。
+/// List 与宽屏 dashboard 共用的页脚：键位与按钮合成一条（可点的提示就是
+/// 按钮），与 `handle_machine_action_key` 的动作表同序同集（HERDR-MACH-007）。
 ///
-/// 顺序就是「丢弃优先级」：`render_key_hints` 填满 `area` 的行之后整项丢弃
-/// 并画 `…`，所以页面级键（`/` 过滤、`esc` 关闭、`b` 广播——这三个在 List /
-/// dashboard 上没有等效按钮或搜索框以外的入口）排在所有单机动作键之前，
-/// 而末尾的 `a` 添加 / `i` 导入在两个视图里都有对应按钮兜底。`c` 的出现
-/// 条件与按键一致（有选中即可用），不再按 Attention 门禁——侧栏右键菜单的
-/// 「复制修复命令」同样不分状态。
-pub(super) fn machine_list_hints(has_selection: bool, has_review: bool) -> Vec<(String, String)> {
+/// 顺序就是「丢弃优先级」：放不下时 kit 从尾部丢（`primary` 最后丢），所以
+/// 页面级键（`/` 过滤、`esc` 关闭、`b` 广播）与添加 / 导入排在所有单机动作
+/// 键之前——页脚是它们唯一的可点入口。`reconnect_enabled` 为假（机器已停用）
+/// 时 `r` 置灰且不可点，与按键的空操作一致。
+pub(super) fn machine_list_hints(
+    has_selection: bool,
+    has_review: bool,
+    reconnect_enabled: bool,
+) -> Vec<MachineHint<'static>> {
     let t = &crate::i18n::texts().machines;
     let mut hints = vec![
-        ("↑↓".to_owned(), t.hint_select.to_owned()),
-        ("enter".to_owned(), t.hint_details.to_owned()),
-        ("/".to_owned(), t.hint_filter.to_owned()),
-        ("esc".to_owned(), t.hint_close.to_owned()),
-        ("b".to_owned(), t.hint_broadcast.to_owned()),
+        MachineHint::key("↑↓", t.hint_select),
+        MachineHint::key("enter", t.hint_details),
+        MachineHint::key("/", t.hint_filter),
+        MachineHint::button("esc", t.hint_close, MachineOverlayButton::Close),
+        MachineHint::button("b", t.hint_broadcast, MachineOverlayButton::Broadcast),
+        MachineHint::button("a", t.hint_add, MachineOverlayButton::Add).primary(),
+        MachineHint::button("i", t.hint_import, MachineOverlayButton::Import),
     ];
     if has_selection {
-        hints.extend(machine_action_hints(has_review));
+        hints.extend(machine_action_hints(has_review, reconnect_enabled));
     }
-    hints.extend([
-        ("a".to_owned(), t.hint_add.to_owned()),
-        ("i".to_owned(), t.hint_import.to_owned()),
-    ]);
     hints
 }
 
 /// Detail 页脚：与 List / dashboard 同一张单机动作表，只是把页面级键换成
 /// `esc 返回` 与 `b 广播`（Detail 没有列表导航与添加 / 导入）。
-/// 详情卡底部的动作标签：渲染与视图计算阶段共用——`action_row_count` 用它
-/// 决定给按钮留几行，两边必须同源（STATE-04）。
-pub(super) fn machine_detail_labels(
-    profile: &SavedSshEndpoint,
-    endpoints: &[ClientShellEndpoint],
-    connection_errors: &HashMap<ClientEndpointId, crate::remote::ConnectionErrorKind>,
-) -> Vec<&'static str> {
-    let t = &crate::i18n::texts().machines;
-    let status = endpoint_for(endpoints, &profile.id).map_or(
-        if profile.enabled {
-            ClientEndpointStatus::Connecting
-        } else {
-            ClientEndpointStatus::Disabled
-        },
-        |endpoint| endpoint.status,
-    );
-    let has_review = connection_errors
-        .get(&ClientEndpointId::Ssh(profile.id.clone()))
-        .is_some_and(super::super::machine_auth_overlay::failure_kind_has_review);
-    let mut labels: Vec<&'static str> = vec![t.reconnect_button, t.edit_button];
-    labels.push(if profile.enabled {
-        t.disable_button
-    } else {
-        t.enable_button
-    });
-    labels.push(t.forwards_button);
-    labels.push(t.browse_files_button);
-    labels.push(t.broadcast_button);
-    labels.push(t.remove_button);
-    if status == ClientEndpointStatus::Attention && has_review {
-        labels.push(crate::i18n::texts().machine_auth.review_button);
-    }
-    if status == ClientEndpointStatus::Attention {
-        labels.push(t.copy_fix_button);
-    }
-    labels.push(crate::ui::modal_close_button_text());
-    labels
-}
-
-pub(super) fn machine_detail_hints(has_review: bool) -> Vec<(String, String)> {
+pub(super) fn machine_detail_hints(
+    has_review: bool,
+    reconnect_enabled: bool,
+) -> Vec<MachineHint<'static>> {
     let t = &crate::i18n::texts().machines;
     let mut hints = vec![
-        ("esc".to_owned(), t.hint_back.to_owned()),
-        ("b".to_owned(), t.hint_broadcast.to_owned()),
+        MachineHint::button("esc", t.hint_back, MachineOverlayButton::Back),
+        MachineHint::button("b", t.hint_broadcast, MachineOverlayButton::Broadcast),
     ];
-    hints.extend(machine_action_hints(has_review));
+    hints.extend(machine_action_hints(has_review, reconnect_enabled));
     hints
 }
 
 /// 单机动作键：三个视图（List / 宽屏 dashboard / Detail）同序同集，出现
 /// 条件也只在这一处判定（HERDR-MACH-007）。`v` 只在失败类型真有界面内恢复
 /// 路径时出现（`open_machine_auth_for_endpoint` 否则是空操作）；`c` 与按键
-/// 一样不分状态，侧栏右键菜单的「复制修复命令」同样不分状态。
-fn machine_action_hints(has_review: bool) -> Vec<(String, String)> {
+/// 一样不分状态，侧栏右键菜单的「复制修复命令」同样不分状态。`R` 重命名走
+/// 独立的重命名浮层，没有对应按钮，只显示键位。
+fn machine_action_hints(has_review: bool, reconnect_enabled: bool) -> Vec<MachineHint<'static>> {
     let t = &crate::i18n::texts().machines;
     let mut hints = Vec::with_capacity(9);
     if has_review {
-        hints.push(("v".to_owned(), t.hint_review.to_owned()));
+        hints.push(MachineHint::button(
+            "v",
+            t.hint_review,
+            MachineOverlayButton::ReviewIssue,
+        ));
     }
+    let reconnect = MachineHint::button("r", t.hint_reconnect, MachineOverlayButton::Reconnect);
+    hints.push(if reconnect_enabled {
+        reconnect
+    } else {
+        reconnect.disabled()
+    });
     hints.extend([
-        ("r".to_owned(), t.hint_reconnect.to_owned()),
-        ("e".to_owned(), t.hint_edit.to_owned()),
-        ("f".to_owned(), t.hint_forwards.to_owned()),
-        ("o".to_owned(), t.hint_browse_files.to_owned()),
-        ("d".to_owned(), t.hint_toggle_enabled.to_owned()),
-        ("x".to_owned(), t.hint_remove.to_owned()),
-        ("R".to_owned(), t.hint_rename.to_owned()),
-        ("c".to_owned(), t.hint_copy_fix.to_owned()),
+        MachineHint::button("e", t.hint_edit, MachineOverlayButton::Edit),
+        MachineHint::button("f", t.hint_forwards, MachineOverlayButton::Forwards),
+        MachineHint::button("o", t.hint_browse_files, MachineOverlayButton::BrowseFiles),
+        MachineHint::button(
+            "d",
+            t.hint_toggle_enabled,
+            MachineOverlayButton::ToggleEnabled,
+        ),
+        MachineHint::button("x", t.hint_remove, MachineOverlayButton::Remove),
+        MachineHint::key("R", t.hint_rename),
+        MachineHint::button("c", t.hint_copy_fix, MachineOverlayButton::CopyFix),
     ]);
     hints
 }
 
 /// 机器页页脚（List / 宽屏 dashboard / Detail）要的行数：完整键表在单行里
-/// 必然被尾部截断，所以按实际宽度取，最多两行——再多会把列表可见行数吃掉。
-/// 两行仍放不下时按上面的顺序从尾部丢（`R` / `c` / `a` / `i`，这几个都还有
-/// 按钮或侧栏右键菜单兜底）。
-pub(super) fn machine_footer_rows(hints: &[(String, String)], width: u16) -> u16 {
-    super::super::render::key_hints_rows(hints, width).clamp(1, 2)
+/// 必然被尾部截断，所以按实际宽度取，最多三行（页脚兼作按钮后省下了原来的
+/// 按钮行与间隔，窄屏多给一行也不比从前更挤）。
+pub(super) fn machine_footer_rows(hints: &[MachineHint<'_>], width: u16) -> u16 {
+    super::footer::machine_footer_height(hints, width, 3)
+}
+
+/// 列表为空时的空状态：没有任何已保存的机器时给「添加」主按钮（命中写进
+/// `machines_actions`）；有机器但过滤后为空时只提示没有匹配。
+pub(super) fn render_machine_list_empty(
+    b: &mut Buffer,
+    area: Rect,
+    has_profiles: bool,
+    p: &Palette,
+) -> Option<(Rect, MachineOverlayButton)> {
+    let t = &crate::i18n::texts().machines;
+    let spec = if has_profiles {
+        crate::ui::kit::empty_state::EmptyState {
+            title: t.no_matches,
+            ..Default::default()
+        }
+    } else {
+        crate::ui::kit::empty_state::EmptyState {
+            glyph: None,
+            title: t.empty.trim(),
+            body: Some(t.empty_hint.trim()),
+            action: Some(t.add_button.trim()),
+        }
+    };
+    crate::ui::kit::empty_state::render_empty_state(b, area, &spec, p)
+        .map(|rect| (rect, MachineOverlayButton::Add))
 }
 
 pub(super) fn render_machine_list(
@@ -168,9 +172,11 @@ pub(super) fn render_machine_list(
             .get(&ClientEndpointId::Ssh(row.id.clone()))
             .is_some_and(super::super::machine_auth_overlay::failure_kind_has_review)
     });
-    let hints = machine_list_hints(!rows.is_empty(), has_review);
+    let reconnect_enabled = rows.get(selected).is_none_or(|row| row.enabled);
+    let hints = machine_list_hints(!rows.is_empty(), has_review, reconnect_enabled);
+    // 页脚即按钮：不再单独留一行动作按钮（HERDR-UI W5）。
     let stack =
-        crate::ui::modal_stack_areas(inner, 2, machine_footer_rows(&hints, inner.width), 1, 1);
+        crate::ui::modal_stack_areas(inner, 2, machine_footer_rows(&hints, inner.width), 0, 1);
     let base = Style::default()
         .bg(p.panel_bg)
         .remove_modifier(Modifier::DIM);
@@ -272,67 +278,17 @@ pub(super) fn render_machine_list(
             put_right_text(b, rect, rect.y + 1, &format!("v{version}"), meta_style);
         }
     }
+    let mut action_hits = Vec::new();
     if rows.is_empty() {
-        put_text(b, body.x, body.y, body.width, t.empty, base.fg(p.overlay1));
-        put_text(
+        action_hits.extend(render_machine_list_empty(
             b,
-            body.x,
-            body.y + 1,
-            body.width,
-            t.empty_hint,
-            base.fg(p.overlay0),
-        );
+            body,
+            !saved_profiles.is_empty(),
+            p,
+        ));
     }
     if let Some(footer) = stack.footer {
-        render_key_hints(b, footer, &hints, p, cx.components);
-    }
-
-    let mut action_hits = Vec::new();
-    let add_label = t.add_button;
-    let import_label = t.import_button;
-    let close_label = crate::ui::modal_close_button_text();
-    let buttons = modal_button_row(
-        stack.actions.unwrap_or_default(),
-        &[add_label, import_label, close_label],
-        2,
-    );
-    if let [add, import, close] = buttons.as_slice() {
-        modal_button(
-            b,
-            *add,
-            add_label,
-            crate::ui::ModalButtonTone::Primary,
-            cx.button_state(
-                &super::super::feedback::ChromeHover::MachineButton(MachineOverlayButton::Add),
-                crate::ui::ModalButtonState::Focused,
-            ),
-            p,
-        );
-        modal_button(
-            b,
-            *import,
-            import_label,
-            crate::ui::ModalButtonTone::Secondary,
-            cx.button_state(
-                &super::super::feedback::ChromeHover::MachineButton(MachineOverlayButton::Import),
-                crate::ui::ModalButtonState::Normal,
-            ),
-            p,
-        );
-        modal_button(
-            b,
-            *close,
-            close_label,
-            crate::ui::ModalButtonTone::Secondary,
-            cx.button_state(
-                &super::super::feedback::ChromeHover::MachineButton(MachineOverlayButton::Close),
-                crate::ui::ModalButtonState::Normal,
-            ),
-            p,
-        );
-        action_hits.push((*add, MachineOverlayButton::Add));
-        action_hits.push((*import, MachineOverlayButton::Import));
-        action_hits.push((*close, MachineOverlayButton::Close));
+        action_hits.extend(render_machine_footer(b, footer, &hints, cx));
     }
 
     Some(OverlayRender {
@@ -535,31 +491,14 @@ pub(super) fn render_machine_detail(
     }
     let has_review =
         error_kind.is_some_and(super::super::machine_auth_overlay::failure_kind_has_review);
-    let labels = machine_detail_labels(profile, endpoints, connection_errors);
-    let mut buttons: Vec<MachineOverlayButton> = vec![
-        MachineOverlayButton::Reconnect,
-        MachineOverlayButton::Edit,
-        MachineOverlayButton::ToggleEnabled,
-        MachineOverlayButton::Forwards,
-        MachineOverlayButton::BrowseFiles,
-        MachineOverlayButton::Broadcast,
-        MachineOverlayButton::Remove,
-    ];
-    if status == ClientEndpointStatus::Attention && has_review {
-        buttons.push(MachineOverlayButton::ReviewIssue);
-    }
-    if status == ClientEndpointStatus::Attention {
-        buttons.push(MachineOverlayButton::CopyFix);
-    }
-    buttons.push(MachineOverlayButton::Close);
-    // 页脚键表先算出来：Detail 的单机动作表同样在单行里必然被尾部截断
-    // （HERDR-MACH-007「同序同集」只有在页脚真的画得下时才成立）。
-    let hints = machine_detail_hints(has_review);
+    // 页脚键表先算出来：它的行数决定给页脚留几行（HERDR-MACH-007「同序
+    // 同集」只有在页脚真的画得下时才成立）。页脚即按钮，不再另画动作网格。
+    let hints = machine_detail_hints(has_review, profile.enabled);
     let stack = super::super::page::PageLayout::with_footer_rows(
         inner,
         0,
         false,
-        super::super::page::action_row_count(inner.width, &labels),
+        0,
         machine_footer_rows(&hints, inner.width),
     );
     let base = Style::default()
@@ -663,42 +602,7 @@ pub(super) fn render_machine_detail(
         );
     }
 
-    render_key_hints(b, stack.footer, &hints, p, cx.components);
-
-    let rects = super::super::page::action_grid(stack.actions, &labels);
-    if rects.len() == labels.len() {
-        for (index, rect) in rects.iter().enumerate() {
-            let button = buttons[index];
-            let (tone, state) = match button {
-                MachineOverlayButton::Reconnect if !profile.enabled => (
-                    crate::ui::ModalButtonTone::Secondary,
-                    crate::ui::ModalButtonState::Disabled,
-                ),
-                MachineOverlayButton::Reconnect | MachineOverlayButton::Edit => (
-                    crate::ui::ModalButtonTone::Primary,
-                    crate::ui::ModalButtonState::Focused,
-                ),
-                MachineOverlayButton::ReviewIssue => (
-                    crate::ui::ModalButtonTone::Primary,
-                    crate::ui::ModalButtonState::Focused,
-                ),
-                MachineOverlayButton::Remove => (
-                    crate::ui::ModalButtonTone::Danger,
-                    crate::ui::ModalButtonState::Normal,
-                ),
-                _ => (
-                    crate::ui::ModalButtonTone::Secondary,
-                    crate::ui::ModalButtonState::Normal,
-                ),
-            };
-            let state = cx.button_state(
-                &super::super::feedback::ChromeHover::MachineButton(button),
-                state,
-            );
-            modal_button(b, *rect, labels[index], tone, state, p);
-            action_hits.push((*rect, button));
-        }
-    }
+    action_hits.extend(render_machine_footer(b, stack.footer, &hints, cx));
 
     Some(OverlayRender {
         area: popup,
@@ -723,7 +627,7 @@ pub(super) fn render_machine_confirm_remove(
         .map(|profile| profile.label.clone())
         .unwrap_or_else(|| profile_id.to_string());
     let (popup, inner) = modal_panel(b, crate::ui::ModalSize::Medium.with_height(6), p.red, cx)?;
-    let stack = crate::ui::modal_stack_areas(inner, 2, 0, 1, 0);
+    let stack = crate::ui::modal_stack_areas(inner, 2, 1, 0, 0);
     put_text(
         b,
         stack.header.x,
@@ -746,47 +650,26 @@ pub(super) fn render_machine_confirm_remove(
         &format!(" {}", t.remove_detail),
         Style::default().fg(p.text).bg(p.panel_bg),
     );
-    let confirm_label = crate::i18n::texts().overlays.confirm_button;
-    let cancel_label = crate::i18n::texts().overlays.cancel_button;
-    let rects = modal_button_row(
-        stack.actions.unwrap_or_default(),
-        &[confirm_label, cancel_label],
-        2,
-    );
-    let [confirm, cancel] = rects.as_slice() else {
-        return None;
-    };
-    modal_button(
-        b,
-        *confirm,
-        confirm_label,
-        crate::ui::ModalButtonTone::Danger,
-        cx.button_state(
-            &super::super::feedback::ChromeHover::MachineButton(
-                MachineOverlayButton::ConfirmRemove,
-            ),
-            crate::ui::ModalButtonState::Focused,
+    // 与其它机器页同一套合并页脚：键位即按钮。
+    let overlays = &crate::i18n::texts().overlays;
+    let hints = [
+        MachineHint::button(
+            "enter",
+            overlays.confirm_button,
+            MachineOverlayButton::ConfirmRemove,
+        )
+        .primary(),
+        MachineHint::button(
+            "esc",
+            overlays.cancel_button,
+            MachineOverlayButton::CancelRemove,
         ),
-        p,
-    );
-    modal_button(
-        b,
-        *cancel,
-        cancel_label,
-        crate::ui::ModalButtonTone::Secondary,
-        cx.button_state(
-            &super::super::feedback::ChromeHover::MachineButton(MachineOverlayButton::CancelRemove),
-            crate::ui::ModalButtonState::Normal,
-        ),
-        p,
-    );
+    ];
+    let action_hits = render_machine_footer(b, stack.footer.unwrap_or_default(), &hints, cx);
     Some(OverlayRender {
         area: popup,
         machines_popup: popup,
-        machines_actions: vec![
-            (*confirm, MachineOverlayButton::ConfirmRemove),
-            (*cancel, MachineOverlayButton::CancelRemove),
-        ],
+        machines_actions: action_hits,
         ..OverlayRender::default()
     })
 }

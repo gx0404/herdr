@@ -88,6 +88,14 @@ fn split_rows(hints: &[MachineHint<'_>], width: u16, max_rows: u16) -> Vec<(usiz
     rows
 }
 
+/// 页脚占几行：按宽度贪心分行，至少一行、至多 `max_rows` 行。视图计算与
+/// 渲染共用同一口径（STATE-04），放不下的项由 kit 从尾部丢。
+pub(super) fn machine_footer_height(hints: &[MachineHint<'_>], width: u16, max_rows: u16) -> u16 {
+    let max_rows = max_rows.max(1);
+    let rows = split_rows(hints, width, max_rows).len();
+    u16::try_from(rows).unwrap_or(max_rows).clamp(1, max_rows)
+}
+
 /// 画页脚，返回可点项的 `(命中矩形, 按钮)`。
 pub(super) fn render_machine_footer(
     b: &mut Buffer,

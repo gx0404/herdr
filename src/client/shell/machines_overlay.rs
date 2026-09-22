@@ -38,8 +38,8 @@ pub(super) use list_detail::machine_hash_color;
 use list_detail::*;
 
 use super::render::{
-    display_width, modal_button, modal_button_row, modal_panel, put_right_text, put_text,
-    render_key_hints, render_search_bar, OverlayRender, SearchBar,
+    display_width, modal_panel, put_right_text, put_text, render_search_bar, OverlayRender,
+    SearchBar,
 };
 
 #[derive(Debug)]
@@ -1166,12 +1166,13 @@ pub(super) fn machines_body(
                     .get(&ClientEndpointId::Ssh(row.id.clone()))
                     .is_some_and(super::machine_auth_overlay::failure_kind_has_review)
             });
-            let hints = machine_list_hints(!rows.is_empty(), has_review);
+            let reconnect_enabled = rows.get(selected).is_none_or(|row| row.enabled);
+            let hints = machine_list_hints(!rows.is_empty(), has_review, reconnect_enabled);
             let stack = crate::ui::modal_stack_areas(
                 inner,
                 2,
                 machine_footer_rows(&hints, inner.width),
-                1,
+                0,
                 1,
             );
             Some(MachinesBody::List(stack.content))
@@ -1179,39 +1180,36 @@ pub(super) fn machines_body(
         ClientMachinesView::Detail(id) => {
             let (_, inner) = machines_panel(area, page_bounds, 26)?;
             let profile = saved_profiles.iter().find(|profile| &profile.id == id)?;
-            let has_review = saved_profiles.iter().any(|profile| {
-                connection_errors.contains_key(&ClientEndpointId::Ssh(profile.id.clone()))
-            });
-            let hints = machine_detail_hints(has_review);
-            let labels = machine_detail_labels(profile, endpoints, connection_errors);
+            // 与渲染同一口径：只看这台机器的失败类型有没有界面内恢复路径。
+            let has_review = connection_errors
+                .get(&ClientEndpointId::Ssh(id.clone()))
+                .is_some_and(super::machine_auth_overlay::failure_kind_has_review);
+            let hints = machine_detail_hints(has_review, profile.enabled);
             let stack = super::page::PageLayout::with_footer_rows(
                 inner,
                 0,
                 false,
-                super::page::action_row_count(inner.width, &labels),
+                0,
                 machine_footer_rows(&hints, inner.width),
             );
             Some(MachinesBody::Detail(stack.content))
         }
         ClientMachinesView::Forwards(_) => {
             let (_, inner) = machines_panel(area, page_bounds, 20)?;
-            let stack = crate::ui::modal_stack_areas(inner, 1, 1, 1, 1);
-            Some(MachinesBody::Forwards(stack.content))
+            Some(MachinesBody::Forwards(forwards_stack(inner).content))
         }
         ClientMachinesView::Import(view) => {
             let (_, inner) = machines_panel(area, page_bounds, 24)?;
-            let stack = crate::ui::modal_stack_areas(inner, 2, 1, 1, 1);
+            let stack = import_stack(inner, view);
             match view.step {
                 ClientImportStep::Discover => None,
                 ClientImportStep::Select => {
-                    // 候选列表要扣掉固定行（通配符开关 / 分组输入 / 计数行）。
-                    let list_height = stack
-                        .content
-                        .height
-                        .saturating_sub(IMPORT_SELECT_FIXED_ROWS);
+                    // 候选列表扣掉表头与固定行（通配符开关 / 分组输入 / 计数行），
+                    // 宽屏还要让出右侧预览栏：与渲染同一个版面函数。
+                    let list = import_select_layout(stack.content).list;
                     Some(MachinesBody::ImportSelect(
-                        stack.content,
-                        usize::from(list_height.max(1)),
+                        list,
+                        usize::from(list.height.max(1)),
                     ))
                 }
                 ClientImportStep::Done => Some(MachinesBody::ImportDone(stack.content)),
@@ -1441,7 +1439,13 @@ impl ClientShellState {
                     .iter()
                     .filter(|row| row.outcome == ClientImportOutcome::Imported)
                     .count();
-                let total_lines = view.results.len() + usize::from(imported > 0);
+                // 与渲染同口径：每条失败结果下面还有一行修复提示。
+                let failed_hints = view
+                    .results
+                    .iter()
+                    .filter(|row| row.outcome == ClientImportOutcome::Failed)
+                    .count();
+                let total_lines = view.results.len() + failed_hints + usize::from(imported > 0);
                 let visible = usize::from(rect.height.saturating_sub(1));
                 page.view_max_scroll = total_lines.saturating_sub(visible);
             }

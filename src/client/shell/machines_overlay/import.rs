@@ -1,5 +1,6 @@
 //! SSH config 导入向导：Discover / Select / Done 三步与导入计划执行。
 
+use super::footer::{render_machine_footer, MachineHint};
 use super::*;
 
 /// SSH config import wizard: discover → select → done. Discovery and
@@ -458,7 +459,104 @@ impl ClientShellState {
     }
 }
 
-pub(super) const IMPORT_SELECT_FIXED_ROWS: u16 = 3;
+/// 候选列表下方固定占住的行：通配符开关、分组输入、计数行。
+const IMPORT_SELECT_FIXED_ROWS: u16 = 3;
+/// 候选列表上方的表头行（「主机」+ 操作提示）。
+const IMPORT_SELECT_HEADER_ROWS: u16 = 1;
+/// body 宽于此才在右侧放预览栏；更窄时只画多选清单。
+const IMPORT_PREVIEW_MIN_WIDTH: u16 = 72;
+
+/// 导入向导弹窗的纵向分区（标题两行、正文、合并页脚）：视图计算与渲染共用
+/// （STATE-04）。页脚按当前步骤的提示与宽度取一到两行，窄屏时 `esc 返回`
+/// 不会被主动作挤掉。
+pub(super) fn import_stack(
+    inner: Rect,
+    view: &ClientMachineImportView,
+) -> crate::ui::ModalStackAreas {
+    let footer_rows = super::footer::machine_footer_height(&import_hints(view), inner.width, 2);
+    crate::ui::modal_stack_areas(inner, 2, footer_rows, 0, 1)
+}
+
+/// 各步骤的合并页脚：键位即按钮，取代此前并排的键位行与按钮行。
+fn import_hints(view: &ClientMachineImportView) -> Vec<MachineHint<'static>> {
+    let t = &crate::i18n::texts().machines;
+    match view.step {
+        ClientImportStep::Discover => {
+            let next = MachineHint::button(
+                "enter",
+                t.hint_continue,
+                MachineOverlayButton::ImportContinue,
+            )
+            .primary();
+            let continue_enabled = view.fatal.is_none() && !view.plan.ready.is_empty();
+            vec![
+                if continue_enabled {
+                    next
+                } else {
+                    next.disabled()
+                },
+                MachineHint::button("esc", t.hint_back, MachineOverlayButton::Back),
+            ]
+        }
+        ClientImportStep::Select => vec![
+            MachineHint::key("↑↓", t.hint_select),
+            MachineHint::key("space", t.hint_toggle),
+            MachineHint::key("a", t.hint_all_none),
+            MachineHint::button("enter", t.hint_import, MachineOverlayButton::ImportRun).primary(),
+            MachineHint::button("esc", t.hint_back, MachineOverlayButton::Back),
+        ],
+        ClientImportStep::Done => vec![
+            MachineHint::key("↑↓", t.hint_scroll),
+            MachineHint::button("esc/enter", t.hint_back, MachineOverlayButton::Back).primary(),
+        ],
+    }
+}
+
+/// select 步骤的版面：左侧多选清单（表头 + 可滚动候选 + 固定行），右侧预览。
+/// 视图计算与渲染共用（STATE-04）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct ImportSelectLayout {
+    pub(super) header: Rect,
+    pub(super) list: Rect,
+    pub(super) fixed: Rect,
+    pub(super) preview: Rect,
+}
+
+pub(super) fn import_select_layout(body: Rect) -> ImportSelectLayout {
+    let (left, preview) = if body.width >= IMPORT_PREVIEW_MIN_WIDTH {
+        let left_width = body.width * 11 / 20;
+        let preview_x = body.x.saturating_add(left_width).saturating_add(3);
+        (
+            Rect::new(body.x, body.y, left_width, body.height),
+            Rect::new(
+                preview_x,
+                body.y,
+                body.right().saturating_sub(preview_x),
+                body.height,
+            ),
+        )
+    } else {
+        (body, Rect::default())
+    };
+    let header_rows = IMPORT_SELECT_HEADER_ROWS.min(left.height);
+    let header = Rect::new(left.x, left.y, left.width, header_rows);
+    let list_height = left
+        .height
+        .saturating_sub(header_rows + IMPORT_SELECT_FIXED_ROWS);
+    let list = Rect::new(left.x, header.bottom(), left.width, list_height);
+    let fixed = Rect::new(
+        left.x,
+        list.bottom(),
+        left.width,
+        left.bottom().saturating_sub(list.bottom()),
+    );
+    ImportSelectLayout {
+        header,
+        list,
+        fixed,
+        preview,
+    }
+}
 
 /// user@target:port one-liner for a planned import (same shape as the CLI's
 /// interactive listing).
@@ -490,7 +588,7 @@ pub(super) fn render_machine_import(
             ..OverlayRender::default()
         });
     }
-    let stack = crate::ui::modal_stack_areas(inner, 2, 1, 1, 1);
+    let stack = import_stack(inner, view);
     let base = Style::default()
         .bg(p.panel_bg)
         .remove_modifier(Modifier::DIM);
@@ -537,6 +635,7 @@ pub(super) fn render_machine_import(
     let body = stack.content;
     let mut cursor = None;
     // discover 步骤没有可滚动列表：窗口由视图计算阶段按步骤给出（STATE-04）。
+    let mut action_hits = Vec::new();
     let wizard_rows: Vec<(Rect, usize)> = match view.step {
         ClientImportStep::Discover => {
             render_import_discover(b, body, view, base, p);
@@ -553,85 +652,22 @@ pub(super) fn render_machine_import(
         }
     };
 
-    if let Some(footer) = stack.footer {
-        let hints: Vec<(String, String)> = match view.step {
-            ClientImportStep::Discover => vec![
-                ("enter".to_owned(), t.hint_continue.to_owned()),
-                ("esc".to_owned(), t.hint_back.to_owned()),
-            ],
-            ClientImportStep::Select => vec![
-                ("↑↓".to_owned(), t.hint_select.to_owned()),
-                ("space".to_owned(), t.hint_toggle.to_owned()),
-                ("a".to_owned(), t.hint_all_none.to_owned()),
-                ("enter".to_owned(), t.hint_import.to_owned()),
-                ("esc".to_owned(), t.hint_back.to_owned()),
-            ],
-            ClientImportStep::Done => vec![
-                ("↑↓".to_owned(), t.hint_scroll.to_owned()),
-                ("esc/enter".to_owned(), t.hint_back.to_owned()),
-            ],
-        };
-        render_key_hints(b, footer, &hints, p, cx.components);
-    }
-
-    // Buttons per step.
-    let close_label = crate::ui::modal_close_button_text();
-    let back_label = crate::i18n::texts().overlays.back_button;
-    let continue_enabled = view.fatal.is_none() && !view.plan.ready.is_empty();
-    let (labels, buttons): (Vec<&str>, Vec<MachineOverlayButton>) = match view.step {
-        ClientImportStep::Discover => (
-            vec![t.next_button, close_label],
-            vec![
-                MachineOverlayButton::ImportContinue,
-                MachineOverlayButton::Close,
-            ],
-        ),
-        ClientImportStep::Select => (
-            vec![t.import_run_button, back_label],
-            vec![MachineOverlayButton::ImportRun, MachineOverlayButton::Back],
-        ),
-        ClientImportStep::Done => (vec![close_label], vec![MachineOverlayButton::Close]),
-    };
-    let rects = modal_button_row(stack.actions.unwrap_or_default(), &labels, 2);
-    let mut action_hits = Vec::new();
-    if rects.len() == labels.len() {
-        for (index, rect) in rects.iter().enumerate() {
-            let button = buttons[index];
-            let enabled = button != MachineOverlayButton::ImportContinue || continue_enabled;
-            let (tone, base_state) = match button {
-                MachineOverlayButton::ImportContinue | MachineOverlayButton::ImportRun => (
-                    crate::ui::ModalButtonTone::Primary,
-                    crate::ui::ModalButtonState::Focused,
-                ),
-                _ => (
-                    crate::ui::ModalButtonTone::Secondary,
-                    crate::ui::ModalButtonState::Normal,
-                ),
-            };
-            let state = if enabled {
-                cx.button_state(
-                    &super::super::feedback::ChromeHover::MachineButton(button),
-                    base_state,
-                )
-            } else {
-                crate::ui::ModalButtonState::Disabled
-            };
-            modal_button(b, *rect, labels[index], tone, state, p);
-            if enabled {
-                action_hits.push((*rect, button));
-            }
-        }
-    }
+    let hints = import_hints(view);
+    let footer = stack.footer.unwrap_or_default();
+    action_hits.extend(render_machine_footer(b, footer, &hints, cx));
     Some(OverlayRender {
         area: popup,
         machines_popup: popup,
         machines_wizard_rows: wizard_rows,
         machines_actions: action_hits,
+        machines_toast: footer,
         cursor,
         ..OverlayRender::default()
     })
 }
 
+/// discover 步骤。没有可导入的主机（无配置、读失败、没有 Host）时画成空
+/// 状态：说明文字 + 配置路径，不给动作按钮（页脚的 esc 返回即出口）。
 fn render_import_discover(
     b: &mut Buffer,
     body: Rect,
@@ -642,7 +678,17 @@ fn render_import_discover(
     let t = &crate::i18n::texts().machines;
     let mut y = body.y;
     if let Some(fatal) = view.fatal.as_deref() {
-        put_text(b, body.x, y, body.width, fatal, base.fg(p.overlay1));
+        let path = view.path.display().to_string();
+        crate::ui::kit::empty_state::render_empty_state(
+            b,
+            body,
+            &crate::ui::kit::empty_state::EmptyState {
+                title: fatal.trim(),
+                body: Some(&path),
+                ..Default::default()
+            },
+            p,
+        );
         return;
     }
     if view.warnings > 0 {
@@ -724,9 +770,10 @@ struct ImportSelectRender {
     cursor: Option<crate::protocol::CursorState>,
 }
 
-/// 候选列表在上方滚动，通配符开关 / 分组输入 / 计数行固定占据 body 底部三行，
-/// 主机多于一屏时它们仍然可见可点（HERDR-MACH-001）。只收录窗口内的候选行，
-/// 保证鼠标命中与画面一致。
+/// 带预览的多选清单：表头一行（「主机」+ 空格 / Enter 提示），候选列表在
+/// 其下滚动，通配符开关 / 分组输入 / 计数行固定在清单底部三行，主机多于一屏
+/// 时它们仍然可见可点（HERDR-MACH-001）。宽屏右侧预览聚焦候选将要写入的
+/// 字段与被丢弃的设置。只收录窗口内的候选行，保证鼠标命中与画面一致。
 fn render_import_select(
     b: &mut Buffer,
     body: Rect,
@@ -734,27 +781,45 @@ fn render_import_select(
     base: Style,
     p: &Palette,
 ) -> ImportSelectRender {
-    /// 通配符开关、分组输入、计数行。
-    const FIXED_ROWS: u16 = 3;
     let t = &crate::i18n::texts().machines;
+    let layout = import_select_layout(body);
     let mut hits = Vec::new();
     let candidates = view.plan.ready.len();
-    let list_height = body.height.saturating_sub(FIXED_ROWS);
+    let list = layout.list;
     // 窗口起点与滚动上界共用同一个提升后的行数，口径保持一致。
-    let visible_rows = usize::from(list_height).max(1);
+    let visible_rows = usize::from(list.height).max(1);
     let focus = view.focus_row.min(candidates.saturating_sub(1));
     let scroll =
         super::super::page::list_start(view.scroll, focus, candidates, visible_rows, view.reveal);
     let max_scroll = candidates.saturating_sub(visible_rows);
+
+    // 表头：左「主机」，右侧操作提示。
+    if !layout.header.is_empty() {
+        put_text(
+            b,
+            layout.header.x,
+            layout.header.y,
+            layout.header.width,
+            t.import_ready_header,
+            base.fg(p.overlay0),
+        );
+        put_right_text(
+            b,
+            layout.header,
+            layout.header.y,
+            crate::i18n::texts().machine_form.import_select_hint,
+            base.fg(p.overlay0),
+        );
+    }
     for (index, planned) in view
         .plan
         .ready
         .iter()
         .enumerate()
         .skip(scroll)
-        .take(usize::from(list_height))
+        .take(usize::from(list.height))
     {
-        let rect = Rect::new(body.x, body.y + (index - scroll) as u16, body.width, 1);
+        let rect = Rect::new(list.x, list.y + (index - scroll) as u16, list.width, 1);
         hits.push((rect, index));
         let focused = view.focus_row == index;
         let checked = view.selected.get(index).copied().unwrap_or(false);
@@ -780,11 +845,22 @@ fn render_import_select(
             ),
             style,
         );
+        // 有设置会被丢弃的主机在行尾标一个黄色记号，细节看预览。
+        if !planned.notes.is_empty() {
+            put_right_text(
+                b,
+                rect,
+                rect.y,
+                "! ",
+                if focused { style } else { base.fg(p.yellow) },
+            );
+        }
     }
-    let mut y = body.y + list_height;
+    let fixed = layout.fixed;
+    let mut y = fixed.y;
     // Wildcard toggle row.
-    if y < body.bottom() {
-        let rect = Rect::new(body.x, y, body.width, 1);
+    if y < fixed.bottom() {
+        let rect = Rect::new(fixed.x, y, fixed.width, 1);
         hits.push((rect, candidates));
         let focused = view.focus_row == candidates;
         let style = if focused {
@@ -812,11 +888,11 @@ fn render_import_select(
     }
     // Group input row.
     let mut cursor = None;
-    if y < body.bottom() {
-        let rect = Rect::new(body.x, y, body.width, 1);
+    if y < fixed.bottom() {
+        let rect = Rect::new(fixed.x, y, fixed.width, 1);
         hits.push((rect, candidates + 1));
         let focused = view.focus_row == candidates + 1;
-        let label_width = 10u16.min(body.width);
+        let label_width = 10u16.min(fixed.width);
         put_text(
             b,
             rect.x,
@@ -841,7 +917,7 @@ fn render_import_select(
         y += 1;
     }
     // Selection counter.
-    if y < body.bottom() {
+    if y < fixed.bottom() {
         let selected = view.selected.iter().filter(|selected| **selected).count();
         let mut counter = format!(
             " {}",
@@ -865,9 +941,180 @@ fn render_import_select(
                 ],
             ));
         }
-        put_text(b, body.x, y, body.width, &counter, base.fg(p.overlay0));
+        put_text(b, fixed.x, y, fixed.width, &counter, base.fg(p.overlay0));
+    }
+    if !layout.preview.is_empty() {
+        render_import_preview(b, layout.preview, view, base, p);
     }
     ImportSelectRender { rows: hits, cursor }
+}
+
+/// 预览栏：聚焦候选时列出它将写入目录的字段（与详情卡同一批标签）与被丢弃
+/// 的设置；焦点在通配符开关 / 分组输入上时给出本次导入的汇总。
+fn render_import_preview(
+    b: &mut Buffer,
+    area: Rect,
+    view: &ClientMachineImportView,
+    base: Style,
+    p: &Palette,
+) {
+    use ratatui::text::{Line, Span};
+    use ratatui::widgets::{Paragraph, Widget, Wrap};
+    let t = &crate::i18n::texts().machines;
+    for y in area.y..area.bottom() {
+        put_text(
+            b,
+            area.x.saturating_sub(2),
+            y,
+            1,
+            "│",
+            Style::default().fg(p.surface1).bg(p.panel_bg),
+        );
+    }
+    put_text(
+        b,
+        area.x,
+        area.y,
+        area.width,
+        crate::i18n::texts().machine_form.preview_title,
+        base.fg(p.text).add_modifier(Modifier::BOLD),
+    );
+    let group = view.group.trim();
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    match view.plan.ready.get(view.focus_row) {
+        Some(planned) => {
+            let checked = view.selected.get(view.focus_row).copied().unwrap_or(false);
+            lines.push(Line::styled(
+                format!("{} {}", if checked { "[x]" } else { "[ ]" }, planned.label),
+                base.fg(p.text).add_modifier(Modifier::BOLD),
+            ));
+            lines.push(Line::styled(
+                import_planned_summary(planned),
+                base.fg(p.accent),
+            ));
+            lines.push(Line::default());
+            let mut rows = import_option_rows(planned);
+            if !group.is_empty() {
+                rows.push((t.detail_group, group.to_owned()));
+            }
+            let label_width = rows
+                .iter()
+                .map(|(label, _)| usize::from(display_width(label)))
+                .max()
+                .unwrap_or(0)
+                .min(20);
+            for (label, value) in rows {
+                let pad = label_width.saturating_sub(usize::from(display_width(label)));
+                lines.push(Line::from(vec![
+                    Span::styled(format!("{label}{}  ", " ".repeat(pad)), base.fg(p.overlay0)),
+                    Span::styled(value, base.fg(p.text)),
+                ]));
+            }
+            if !planned.notes.is_empty() {
+                lines.push(Line::default());
+                lines.push(Line::styled(
+                    crate::i18n::fill(
+                        t.import_notes_fmt,
+                        &[("count", &planned.notes.len().to_string())],
+                    ),
+                    base.fg(p.yellow),
+                ));
+                for note in &planned.notes {
+                    lines.push(Line::styled(format!(" · {note}"), base.fg(p.overlay1)));
+                }
+            }
+        }
+        None => {
+            let selected = view.selected.iter().filter(|selected| **selected).count();
+            lines.push(Line::styled(
+                crate::i18n::fill(
+                    t.import_selected_fmt,
+                    &[
+                        ("selected", &selected.to_string()),
+                        ("total", &view.plan.ready.len().to_string()),
+                    ],
+                ),
+                base.fg(p.text).add_modifier(Modifier::BOLD),
+            ));
+            if !group.is_empty() {
+                lines.push(Line::from(vec![
+                    Span::styled(format!("{}  ", t.detail_group), base.fg(p.overlay0)),
+                    Span::styled(group.to_owned(), base.fg(p.text)),
+                ]));
+            }
+        }
+    }
+    let content = Rect::new(
+        area.x,
+        area.y.saturating_add(2),
+        area.width,
+        area.height.saturating_sub(2),
+    );
+    if !content.is_empty() {
+        Paragraph::new(lines)
+            .wrap(Wrap { trim: false })
+            .render(content, b);
+    }
+}
+
+/// 一个候选将写入目录的连接字段（只列出 SSH 配置里真正出现的项）。
+fn import_option_rows(planned: &crate::remote::PlannedImport) -> Vec<(&'static str, String)> {
+    let t = &crate::i18n::texts().machines;
+    let options = &planned.options;
+    let yes_no = |value: bool| {
+        if value {
+            t.choice_yes.to_owned()
+        } else {
+            t.choice_no.to_owned()
+        }
+    };
+    let mut rows = vec![(t.detail_target, planned.target.clone())];
+    if let Some(user) = &options.user {
+        rows.push((t.detail_user, user.clone()));
+    }
+    if let Some(port) = options.port {
+        rows.push((t.detail_port, port.to_string()));
+    }
+    if !options.identity_file.is_empty() {
+        rows.push((t.detail_identity_files, options.identity_file.join(", ")));
+    }
+    if let Some(value) = options.identities_only {
+        rows.push((t.detail_identities_only, yes_no(value)));
+    }
+    if let Some(agent) = &options.identity_agent {
+        rows.push((t.detail_identity_agent, agent.clone()));
+    }
+    if let Some(checking) = options.strict_host_key_checking {
+        rows.push((t.detail_strict_host_key, checking.as_ssh_value().to_owned()));
+    }
+    if !options.proxy_jump.is_empty() {
+        let hops = options
+            .proxy_jump
+            .iter()
+            .map(|hop| match hop {
+                ProxyJumpHop::Target(target) => target.clone(),
+                ProxyJumpHop::Profile(id) => format!("profile:{id}"),
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        rows.push((t.detail_proxy_jump, hops));
+    }
+    if let Some(value) = options.forward_agent {
+        rows.push((t.detail_forward_agent, yes_no(value)));
+    }
+    if let Some(interval) = options.server_alive_interval {
+        rows.push((t.detail_server_alive_interval, interval.to_string()));
+    }
+    if let Some(count) = options.server_alive_count_max {
+        rows.push((t.detail_server_alive_count_max, count.to_string()));
+    }
+    if let Some(persist) = &options.control_persist {
+        rows.push((t.detail_control_persist, persist.clone()));
+    }
+    if let Some(command) = &options.remote_command {
+        rows.push((t.detail_remote_command, command.clone()));
+    }
+    rows
 }
 
 /// done 步骤：汇总行固定在顶部，逐条结果（含失败提示与结尾说明）进入可滚动

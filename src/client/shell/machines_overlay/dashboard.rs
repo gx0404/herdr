@@ -1,7 +1,7 @@
 //! 宽屏机器工作台：左侧选择，右侧详情与动作；窄屏沿用分步导航。
 
 use super::*;
-use crate::client::shell::page::{action_grid, action_row_count, list_start, PageLayout};
+use crate::client::shell::page::{list_start, PageLayout};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Widget, Wrap};
 
@@ -39,12 +39,14 @@ pub(super) fn dashboard_layout(
             .get(&ClientEndpointId::Ssh(row.id.clone()))
             .is_some_and(super::super::machine_auth_overlay::failure_kind_has_review)
     });
-    let hints = super::machine_list_hints(!rows.is_empty(), has_review);
+    let reconnect_enabled = rows.get(selected).is_none_or(|row| row.enabled);
+    let hints = super::machine_list_hints(!rows.is_empty(), has_review, reconnect_enabled);
+    // 页脚即按钮：添加 / 导入 / 关闭与单机动作都在这一条里，不再另留动作行。
     Some(PageLayout::with_footer_rows(
         inner,
         0,
         true,
-        1,
+        0,
         super::machine_footer_rows(&hints, inner.width),
     ))
 }
@@ -87,7 +89,8 @@ pub(super) fn render_dashboard(
             .get(&ClientEndpointId::Ssh(row.id.clone()))
             .is_some_and(super::super::machine_auth_overlay::failure_kind_has_review)
     });
-    let hints = super::machine_list_hints(!rows.is_empty(), has_review);
+    let reconnect_enabled = rows.get(selected).is_none_or(|row| row.enabled);
+    let hints = super::machine_list_hints(!rows.is_empty(), has_review, reconnect_enabled);
     let layout = dashboard_layout(b.area, cx.page_bounds, overlay, profiles, endpoints, errors)?;
     put_text(
         b,
@@ -123,8 +126,19 @@ pub(super) fn render_dashboard(
         layout.content.width.saturating_sub(left_width + 2),
         left.height,
     );
-    for y in left.y..left.bottom() {
-        put_text(b, left.right(), y, 1, "│", Style::default().fg(p.surface1));
+    let mut action_hits = Vec::new();
+    if rows.is_empty() {
+        // 没有机器（或过滤后为空）：整块内容区给空状态，不画分栏线。
+        action_hits.extend(super::render_machine_list_empty(
+            b,
+            layout.content,
+            !profiles.is_empty(),
+            p,
+        ));
+    } else {
+        for y in left.y..left.bottom() {
+            put_text(b, left.right(), y, 1, "│", Style::default().fg(p.surface1));
+        }
     }
     let count = usize::from(left.height / 2);
     let scroll = list_start(overlay.scroll, selected, rows.len(), count, overlay.reveal);
@@ -204,40 +218,14 @@ pub(super) fn render_dashboard(
         }
         row_hits.push((rect, row.id.clone()));
     }
-    let mut action_hits = Vec::new();
     if let Some(profile) = rows
         .get(selected)
         .and_then(|row| profiles.iter().find(|profile| profile.id == row.id))
     {
         let endpoint = endpoint_for(endpoints, &profile.id);
         let endpoint_id = ClientEndpointId::Ssh(profile.id.clone());
-        let mut buttons = vec![
-            (t.reconnect_button, MachineOverlayButton::Reconnect),
-            (t.edit_button, MachineOverlayButton::Edit),
-            (t.browse_files_button, MachineOverlayButton::BrowseFiles),
-            (t.forwards_button, MachineOverlayButton::Forwards),
-            (
-                if profile.enabled {
-                    t.disable_button
-                } else {
-                    t.enable_button
-                },
-                MachineOverlayButton::ToggleEnabled,
-            ),
-            (t.remove_button, MachineOverlayButton::Remove),
-        ];
-        if has_review {
-            buttons.insert(
-                0,
-                (
-                    crate::i18n::texts().machine_auth.review_button,
-                    MachineOverlayButton::ReviewIssue,
-                ),
-            );
-        }
-        let labels = buttons.iter().map(|(label, _)| *label).collect::<Vec<_>>();
-        let details =
-            PageLayout::with_action_rows(right, 0, false, action_row_count(right.width, &labels));
+        // 单机动作都在合并页脚里（可点），详情栏只放信息。
+        let details = PageLayout::with_action_rows(right, 0, false, 0);
         put_text(
             b,
             details.header.x,
@@ -283,83 +271,13 @@ pub(super) fn render_dashboard(
             .wrap(Wrap { trim: false })
             .scroll((overlay.detail_scroll.min(detail_max_scroll) as u16, 0))
             .render(details.content, b);
-        for (rect, (label, action)) in action_grid(details.actions, &labels)
-            .into_iter()
-            .zip(buttons)
-        {
-            let disabled = action == MachineOverlayButton::Reconnect && !profile.enabled;
-            modal_button(
-                b,
-                rect,
-                label,
-                if action == MachineOverlayButton::Remove {
-                    crate::ui::ModalButtonTone::Danger
-                } else {
-                    crate::ui::ModalButtonTone::Secondary
-                },
-                cx.button_state(
-                    &super::super::feedback::ChromeHover::MachineButton(action),
-                    if disabled {
-                        crate::ui::ModalButtonState::Disabled
-                    } else {
-                        crate::ui::ModalButtonState::Normal
-                    },
-                ),
-                p,
-            );
-            if !disabled {
-                action_hits.push((rect, action));
-            }
-        }
-    } else {
-        put_text(
-            b,
-            right.x,
-            right.y,
-            right.width,
-            t.empty,
-            Style::default().fg(p.text),
-        );
-        put_text(
-            b,
-            right.x,
-            right.y.saturating_add(1),
-            right.width,
-            t.empty_hint,
-            Style::default().fg(p.overlay0),
-        );
     }
-    let labels = [
-        t.add_button,
-        t.import_button,
-        crate::ui::modal_close_button_text(),
-    ];
-    for (rect, (label, action)) in
-        action_grid(layout.actions, &labels)
-            .into_iter()
-            .zip(labels.into_iter().zip([
-                MachineOverlayButton::Add,
-                MachineOverlayButton::Import,
-                MachineOverlayButton::Close,
-            ]))
-    {
-        modal_button(
-            b,
-            rect,
-            label,
-            if action == MachineOverlayButton::Add {
-                crate::ui::ModalButtonTone::Primary
-            } else {
-                crate::ui::ModalButtonTone::Secondary
-            },
-            crate::ui::ModalButtonState::Normal,
-            p,
-        );
-        action_hits.push((rect, action));
-    }
-    // 页脚与动作网格同一套键：网格里有的按钮，页脚就有它的键
-    // （HERDR-MACH-007）。
-    render_key_hints(b, layout.footer, &hints, p, cx.components);
+    action_hits.extend(super::footer::render_machine_footer(
+        b,
+        layout.footer,
+        &hints,
+        cx,
+    ));
     Some(OverlayRender {
         area: popup,
         machines_popup: popup,
