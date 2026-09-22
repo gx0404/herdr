@@ -43,6 +43,8 @@
 //! `general-purpose`），不是 id；token 用量在 `message.usage`，键为
 //! `input_tokens` / `output_tokens` / `cache_creation_input_tokens` /
 //! `cache_read_input_tokens` 等。`timestamp` 是 RFC3339 毫秒 UTC。
+//! `message.content` 既可能是字符串，也可能是块数组（块 `type` 实测 `text` /
+//! `thinking` / `tool_use` / `tool_result`）。
 //!
 //! **一次 API 响应会被按内容块拆成多行 `assistant` 记录**：同一响应的各行共用
 //! 同一个 `message.id` 并逐行重复整份 `message.usage`。本机 60 份子 agent 转录
@@ -56,8 +58,9 @@
 //! `input_tokens` **不含**缓存：本机同一批样本里去重后 `input_tokens` 合计
 //! 5544，而 `cache_read_input_tokens` 合计 4.37 亿、`cache_creation_input_tokens`
 //! 合计 751 万 → 摘要里的 `in` 取三者之和才有意义。
-//! `message.content` 既可能是字符串，也可能是块数组（块 `type` 实测 `text` /
-//! `thinking` / `tool_use` / `tool_result`）。
+//!
+//! 转录文件实测 321/321 以换行结尾，没有换行的末行只会出现在正在写入的瞬间 →
+//! 分页读不消费半截末行，游标留在行首等下一次读到完整行。
 //!
 //! 主转录里派生子 agent 的工具名实测是 `Agent`（输入键 `description` /
 //! `subagent_type` / `model` / `prompt`），不是 `Task`；workflow 派生的子 agent 在
@@ -1028,7 +1031,9 @@ fn read_transcript_page(
         return Ok(ContentChunk {
             format: AgentActivityContentFormat::Text,
             text: String::new(),
-            next_cursor: None,
+            // eof 只表示「暂时读完」，游标照给，二级窗口拿它续读跟随新内容；
+            // 文件被截断（len < offset）时收回新末尾，否则永远追不上。
+            next_cursor: Some(offset.min(len).to_string()),
             eof: true,
             truncated: false,
         });
@@ -1043,14 +1048,25 @@ fn read_transcript_page(
     let mut position = offset;
     let mut text = String::new();
     let mut truncated = false;
+    let mut drained = false;
     let mut raw = Vec::new();
     while text.len() < budget {
         let line_start = position;
         raw.clear();
         match reader.read_until(b'\n', &mut raw) {
-            Ok(0) => break,
+            Ok(0) => {
+                drained = true;
+                break;
+            }
             Ok(read) => position = position.saturating_add(read as u64),
             Err(error) => return Err(SourceError::Io(error)),
+        }
+        if raw.last() != Some(&b'\n') {
+            // 没有换行符结尾 = 这一行还在写。不消费：游标退回行首，下一次读到
+            // 完整行再渲染，免得把半截 JSON 渲染成 `[unparsable line]`。
+            position = line_start;
+            drained = true;
+            break;
         }
         let Some(rendered) = render_transcript_line(&String::from_utf8_lossy(&raw)) else {
             continue;
@@ -1072,11 +1088,12 @@ fn read_transcript_page(
         text.push('\n');
     }
 
-    let eof = position >= len;
+    // `drained` 覆盖「半截末行不消费」这种 position 还没到 len 的读完。
+    let eof = drained || position >= len;
     Ok(ContentChunk {
         format: AgentActivityContentFormat::Text,
         text,
-        next_cursor: (!eof).then(|| position.to_string()),
+        next_cursor: Some(position.to_string()),
         eof,
         truncated,
     })
@@ -1335,6 +1352,7 @@ mod tests {
             [
                 "a0000000000000001",
                 "a0000000000000002",
+                "a0000000000000006",
                 "a0000000000000003",
                 "a0000000000000004",
                 "a0000000000000005",
@@ -1634,14 +1652,85 @@ mod tests {
         assert!(!page.text.contains("file_history"), "{}", page.text);
         assert!(!page.text.contains("/tmp/demo.rs"), "{}", page.text);
         assert!(page.eof);
-        assert!(page.next_cursor.is_none());
         assert!(!page.truncated);
+        // eof 只表示「暂时读完」：游标照给，二级窗口拿它续读跟随新内容。
+        let cursor = page.next_cursor.clone().expect("eof 也要给出游标");
+        let again = Claude
+            .read(&cx, "a0000000000000001", Some(&cursor), MIN_READ_BYTES)
+            .expect("用 eof 游标续读");
+        assert!(again.text.is_empty(), "{}", again.text);
+        assert!(again.eof);
+        assert_eq!(again.next_cursor.as_deref(), Some(cursor.as_str()));
 
         let beyond = Claude
             .read(&cx, "a0000000000000001", Some("999999"), MIN_READ_BYTES)
             .expect("越界游标回空页");
         assert!(beyond.eof);
         assert!(beyond.text.is_empty());
+        // 文件比游标短（被截断）时游标收回新末尾，否则永远追不上。
+        assert_eq!(beyond.next_cursor.as_deref(), Some(cursor.as_str()));
+    }
+
+    #[test]
+    fn a_half_written_tail_line_is_never_consumed() {
+        let home = fixture_home();
+        let session = session_ref(SESSION_ID);
+        let cx = context(&home, Some(&session), FIXTURE_LAST_MS);
+        let path = home.join(
+            ".claude/projects/-tmp-demo-project/5f000000-0000-4000-8000-000000000001/subagents/agent-a0000000000000006.jsonl",
+        );
+        let raw = std::fs::read(&path).expect("夹具可读");
+        assert_ne!(raw.last(), Some(&b'\n'), "夹具末行必须没有换行");
+        let complete = raw
+            .iter()
+            .rposition(|byte| *byte == b'\n')
+            .expect("夹具有完整行")
+            + 1;
+
+        let page = Claude
+            .read(&cx, "a0000000000000006", None, MIN_READ_BYTES)
+            .expect("可读");
+        assert_eq!(page.text, "[user] follow the tail\n[assistant] tailing\n");
+        assert!(!page.text.contains("[unparsable line]"), "{}", page.text);
+        assert!(page.eof);
+        // 游标停在半截行的行首，等它写完再消费。
+        assert_eq!(
+            page.next_cursor.as_deref(),
+            Some(complete.to_string().as_str())
+        );
+    }
+
+    #[test]
+    fn a_completed_tail_line_is_picked_up_by_the_eof_cursor() {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|elapsed| elapsed.as_nanos())
+            .unwrap_or_default();
+        let path = std::env::temp_dir().join(format!(
+            "herdr-claude-activity-tail-{}-{nanos}.jsonl",
+            std::process::id()
+        ));
+        let row = |text: &str| {
+            format!(
+                r#"{{"type":"assistant","message":{{"role":"assistant","content":[{{"type":"text","text":"{text}"}}]}}}}"#
+            )
+        };
+        // 末行已经是合法 JSON，但还没写换行 → 仍然不能消费，它可能还在长。
+        std::fs::write(&path, format!("{}\n{}", row("done"), row("half"))).expect("写临时转录");
+        let first = read_transcript_page(&path, 0, MIN_READ_BYTES).expect("首页可读");
+        assert_eq!(first.text, "[assistant] done\n");
+        assert!(first.eof);
+        let cursor: u64 = first
+            .next_cursor
+            .expect("eof 也要给出游标")
+            .parse()
+            .expect("游标是字节偏移");
+
+        std::fs::write(&path, format!("{}\n{}\n", row("done"), row("half"))).expect("补齐末行");
+        let second = read_transcript_page(&path, cursor, MIN_READ_BYTES).expect("续读");
+        assert_eq!(second.text, "[assistant] half\n", "不重不漏地接上");
+        assert!(second.eof);
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]
@@ -1663,7 +1752,7 @@ mod tests {
             truncated_pages += usize::from(page.truncated);
             assert!(pages < 64, "分页没有收敛");
             if page.eof {
-                assert!(page.next_cursor.is_none());
+                assert!(page.next_cursor.is_some(), "eof 也要给出续读游标");
                 break;
             }
             cursor = page.next_cursor.clone();
