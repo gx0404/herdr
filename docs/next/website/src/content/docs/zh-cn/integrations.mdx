@@ -130,6 +130,8 @@ herdr integration install kimi
 
 该钩子向 Herdr 上报 Kimi 的会话身份和生命周期状态,用于原生恢复和权威的 `idle`、`working`、`blocked` 状态。需要 Kimi Code CLI `0.14.0` 或更新版本。
 
+从集成版本 `8` 起,该钩子还订阅 `SubagentStart`、`SubagentStop`、`Notification`(`task.*`)和 `PostToolUse`(`TodoList`)。这些条目只告诉 Herdr 智能体活动树可能变了,不携带会话内容;活动树由 Herdr 自己读 Kimi 的会话文件得到。
+
 Herdr 默认使用 `~/.kimi-code`,设置了 `KIMI_CODE_HOME` 时使用后者。Kimi Code 配置目录必须已经存在。安装会写入 `hooks/herdr-agent-state.sh`,并在 `config.toml` 中追加 Herdr 管理的 `[[hooks]]` 条目。卸载会移除 Herdr 管理的配置块并删除钩子脚本。
 
 Herdr 用 `kimi --session <id>` 恢复保存的 Kimi 会话。

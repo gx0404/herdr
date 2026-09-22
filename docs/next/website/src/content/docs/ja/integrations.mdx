@@ -130,6 +130,8 @@ herdr integration install kimi
 
 このフックは、ネイティブ復元と権威ある `idle`、`working`、`blocked` 状態のために、Kimi のセッション識別とライフサイクル状態を Herdr に報告します。Kimi Code CLI `0.14.0` 以上が必要です。
 
+インテグレーションバージョン `8` からは、フックは `SubagentStart`、`SubagentStop`、`Notification`（`task.*`）、`PostToolUse`（`TodoList`）も購読します。これらのエントリはエージェントの活動ツリーが変化した可能性があることを Herdr に伝えるだけで、セッションの内容は含みません。活動ツリー自体は Herdr が Kimi のセッションファイルを読んで組み立てます。
+
 Herdr はデフォルトで `~/.kimi-code` を使い、`KIMI_CODE_HOME` が設定されていればそちらを使います。Kimi Code の設定ディレクトリはあらかじめ存在している必要があります。インストールは `hooks/herdr-agent-state.sh` を書き込み、`config.toml` に Herdr 管理の `[[hooks]]` エントリを追記します。アンインストールは Herdr 管理の設定ブロックを削除し、フックスクリプトを削除します。
 
 Herdr は保存された Kimi セッションを `kimi --session <id>` で resume します。

@@ -128,6 +128,8 @@ herdr integration install kimi
 
 The hook reports Kimi session identity and lifecycle state to Herdr for native restore and authoritative `idle`, `working`, and `blocked` status. It requires Kimi Code CLI `0.14.0` or newer.
 
+From integration version `8` the hook also subscribes to `SubagentStart`, `SubagentStop`, `Notification` (`task.*`), and `PostToolUse` (`TodoList`). Those entries only tell Herdr that the agent activity tree may have changed; they carry no session content, and Herdr reads the activity tree from the Kimi session files itself.
+
 Herdr uses `~/.kimi-code` by default, or `KIMI_CODE_HOME` when set. The Kimi Code config directory must already exist. Install writes `hooks/herdr-agent-state.sh` and appends Herdr-managed `[[hooks]]` entries to `config.toml`. Uninstall removes the Herdr-managed config block and deletes the hook script.
 
 Herdr resumes stored Kimi sessions with `kimi --session <id>`.
