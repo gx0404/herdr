@@ -12,13 +12,37 @@
 //! 本文件另放子模块共用的小工具：带裁剪 / 省略号的文本写入、整行填充、选中 /
 //! 悬浮行样式。父模块的私有项对子模块可见，不对 `kit` 之外导出。
 
-use ratatui::{buffer::Buffer, layout::Position, style::Style};
+use ratatui::{
+    buffer::Buffer,
+    layout::Position,
+    style::{Modifier, Style},
+};
 
-use super::display_width;
+use super::{display_width, display_width_u16};
+use crate::app::state::Palette;
 
 pub(crate) mod braille_chart;
+pub(crate) mod card;
+pub(crate) mod empty_state;
+pub(crate) mod footer_hints;
+pub(crate) mod form_field;
 pub(crate) mod gauge;
 pub(crate) mod meter_row;
+pub(crate) mod tabs;
+
+/// 单个字符的显示宽度：走 `display_width` 唯一真源，栈上编码、不分配。
+fn char_width(ch: char) -> usize {
+    let mut bytes = [0u8; 4];
+    display_width(ch.encode_utf8(&mut bytes))
+}
+
+/// 键盘选中 / 活动项：accent 反色 + 加粗，与浮层列表 `list_row_style` 同口径。
+fn selected_style(palette: &Palette) -> Style {
+    Style::default()
+        .bg(palette.accent)
+        .fg(super::panel_contrast_fg(palette))
+        .add_modifier(Modifier::BOLD)
+}
 
 /// 从 `(x, y)` 起写文本，最多占 `max_width` 列；起点落在缓冲区外或零宽直接
 /// 返回。宽字符放不下时停在它前面，不写半个字。返回实际占用的列数。
@@ -50,6 +74,29 @@ fn put_str_ellipsis(
     }
     let used = put_str(buffer, x, y, max_width - 1, text, style);
     used + put_str(buffer, x.saturating_add(used), y, 1, "…", style)
+}
+
+/// [`put_str_ellipsis`] 在 `max_width` 列内会写多少列，不写缓冲区——供右对齐
+/// 或「按真实宽度收口」的布局先量后画。零宽字符不占列（与 ratatui 写入一致）。
+fn ellipsis_width(text: &str, max_width: u16) -> u16 {
+    let full = display_width_u16(text);
+    if full <= max_width {
+        return full;
+    }
+    if max_width <= 1 {
+        return max_width;
+    }
+    let budget = usize::from(max_width - 1);
+    let mut used = 0usize;
+    for ch in text.chars() {
+        let width = char_width(ch);
+        if used + width > budget {
+            break;
+        }
+        used += width;
+    }
+    // used ≤ budget < u16::MAX，转换不会截断。
+    u16::try_from(used).unwrap_or(max_width - 1) + 1
 }
 
 /// 用同一个符号与样式填一行的 `width` 列；越出缓冲区的格跳过。
@@ -90,6 +137,18 @@ mod tests {
         assert_eq!(used, 2, "第二个宽字符放不下时停在它前面");
         assert_eq!(row_text(&buffer, 0), "中   ");
         assert_eq!(buffer[(1, 0)].symbol(), " ", "宽字符的第二格被 reset");
+        assert_eq!(char_width('中'), 2);
+        assert_eq!(char_width('a'), 1);
+    }
+
+    #[test]
+    fn selected_style_inverts_on_accent_with_a_readable_foreground() {
+        let palette = Palette::catppuccin();
+        let style = selected_style(&palette);
+        assert_eq!(style.bg, Some(palette.accent));
+        assert!(style.add_modifier.contains(Modifier::BOLD));
+        let fg = style.fg.expect("fg");
+        assert!(crate::ui::color::contrast_ratio(fg, palette.accent).expect("可比较") >= 4.5);
     }
 
     #[test]
@@ -104,6 +163,25 @@ mod tests {
         let mut buffer = Buffer::empty(Rect::new(0, 0, 8, 1));
         put_str_ellipsis(&mut buffer, 0, 0, 1, "long", Style::default());
         assert_eq!(row_text(&buffer, 0), "…       ");
+    }
+
+    #[test]
+    fn ellipsis_width_measures_exactly_what_put_str_ellipsis_writes() {
+        for (text, max) in [
+            ("提交反馈", 5),
+            ("提交反馈", 4),
+            ("提交反馈", 8),
+            ("abc", 2),
+            ("abc", 1),
+            ("abc", 0),
+            ("中a", 2),
+        ] {
+            let mut buffer = Buffer::empty(Rect::new(0, 0, 10, 1));
+            let written = put_str_ellipsis(&mut buffer, 0, 0, max, text, Style::default());
+            assert_eq!(ellipsis_width(text, max), written, "{text:?} @ {max}");
+        }
+        // 第二个宽字符放不下：只写「提」+「…」共 3 列，不是 4 列。
+        assert_eq!(ellipsis_width("提交反馈", 4), 3);
     }
 
     #[test]

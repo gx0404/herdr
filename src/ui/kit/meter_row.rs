@@ -1,7 +1,7 @@
 //! 单行「标签 + 条 + 数字 + 说明」：监控卡片与账号页的基本行。宽度预算按
 //! value（数字永不裁）> label > gauge > detail 分配——窄时先砍条形、保数字。
 
-#![allow(dead_code)] // seam-stub(监控)：波 2 监控车道接入系统页 / 账号页后删除
+#![allow(dead_code)] // seam-stub(monitor)：波 2 监控车道接入系统页 / 账号页后删除
 
 use ratatui::{
     buffer::Buffer,
