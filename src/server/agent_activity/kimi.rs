@@ -1505,6 +1505,8 @@ mod tests {
             cwd,
             home,
             now_ms,
+            agent_config_dir: None,
+            latest_hint: None,
         }
     }
 
