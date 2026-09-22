@@ -86,7 +86,6 @@
 
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
-use std::ffi::OsString;
 use std::fs::{self, File};
 use std::io::{self, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
@@ -103,8 +102,6 @@ use crate::api::schema::{
 
 pub(super) struct Kimi;
 
-/// 与 `integration::env::KIMI_CODE_HOME_ENV_VAR` 同值；集成模块未导出该常量。
-const KIMI_CODE_HOME_ENV_VAR: &str = "KIMI_CODE_HOME";
 const DEFAULT_ROOT_AGENT_ID: &str = "main";
 
 const AGENT_NODE_PREFIX: &str = "agent:";
@@ -167,7 +164,7 @@ impl ActivitySource for Kimi {
     }
 
     fn discover(&self, cx: &SourceContext<'_>) -> Result<Vec<AgentActivityNode>, SourceError> {
-        discover_in(&kimi_home(cx.home), cx)
+        discover_in(&kimi_root(cx), cx)
     }
 
     fn read(
@@ -177,26 +174,18 @@ impl ActivitySource for Kimi {
         cursor: Option<&str>,
         max_bytes: usize,
     ) -> Result<ContentChunk, SourceError> {
-        read_in(&kimi_home(cx.home), cx, node_id, cursor, max_bytes)
+        read_in(&kimi_root(cx), cx, node_id, cursor, max_bytes)
     }
 }
 
-/// Kimi 数据根：`KIMI_CODE_HOME`（开头的 `~` 按 `home` 展开）优先，否则
-/// `<home>/.kimi-code`，与 `integration::env::kimi_dir` 的口径一致。
-fn kimi_home(home: &Path) -> PathBuf {
-    kimi_home_from(home, std::env::var_os(KIMI_CODE_HOME_ENV_VAR))
-}
-
-fn kimi_home_from(home: &Path, override_dir: Option<OsString>) -> PathBuf {
-    match override_dir.filter(|value| !value.is_empty()) {
-        Some(value) => {
-            let path = PathBuf::from(value);
-            match path.strip_prefix("~") {
-                Ok(rest) => home.join(rest),
-                Err(_) => path,
-            }
-        }
-        None => home.join(".kimi-code"),
+/// Kimi 数据根，本适配器所有「按配置目录拼路径」的唯一出口：runtime 解析好的
+/// 配置目录（`SourceContext::agent_config_dir`，跟随 `KIMI_CODE_HOME` 并展开开头
+/// 的 `~`，口径同 `integration::env::kimi_dir`）优先，缺省才回退
+/// `<home>/.kimi-code`。给了配置目录就只认它、不再回头找 home。
+fn kimi_root(cx: &SourceContext<'_>) -> PathBuf {
+    match cx.agent_config_dir {
+        Some(config_dir) => config_dir.to_path_buf(),
+        None => cx.home.join(".kimi-code"),
     }
 }
 
@@ -2297,22 +2286,43 @@ mod tests {
         assert_eq!(utf8_prefix_len(&[0xFF, 0xFE]), 2);
     }
 
+    /// `KIMI_CODE_HOME` 把数据根挪出 home 时（环境变量与 `~` 的解析归 runtime 的
+    /// `agent_config_dir`）：给了配置目录就用它，home 下没有 `.kimi-code` 也能找到
+    /// 会话；不给则回退 `<home>/.kimi-code`；给了就只认它，不回退 home。
     #[test]
-    fn kimi_home_honours_the_override_and_tilde() {
-        let home = Path::new("/home/someone");
-        assert_eq!(kimi_home_from(home, None), home.join(".kimi-code"));
-        assert_eq!(
-            kimi_home_from(home, Some(OsString::new())),
-            home.join(".kimi-code")
-        );
-        assert_eq!(
-            kimi_home_from(home, Some(OsString::from("/data/kimi"))),
-            PathBuf::from("/data/kimi")
-        );
-        assert_eq!(
-            kimi_home_from(home, Some(OsString::from("~/alt-kimi"))),
-            home.join("alt-kimi")
-        );
+    fn the_runtime_config_dir_is_followed_instead_of_home() {
+        let empty_home = TempDir::new("config-dir");
+        let root = fixture_root();
+        let session = AgentSessionRef::id(SESSION_ID).expect("合法会话 id");
+
+        let relocated = SourceContext {
+            agent_config_dir: Some(&root),
+            ..context(empty_home.path(), Some(&session), None, FAR_FUTURE_MS)
+        };
+        let nodes = Kimi.discover(&relocated).expect("配置目录下的会话可发现");
+        assert!(!nodes.is_empty());
+        assert_eq!(nodes, discover_by_id(&root, SESSION_ID, FAR_FUTURE_MS));
+        let page = Kimi
+            .read(&relocated, "agent:agent-1", None, 64 * 1024)
+            .expect("配置目录下的 wire 可读");
+        assert!(!page.text.is_empty());
+
+        // 不给配置目录：回退 `<home>/.kimi-code`，空 home 下什么都没有。
+        let fallback = context(empty_home.path(), Some(&session), None, FAR_FUTURE_MS);
+        assert!(Kimi.discover(&fallback).expect("缺目录不报错").is_empty());
+        assert!(matches!(
+            Kimi.read(&fallback, "agent:agent-1", None, 1024),
+            Err(SourceError::Unavailable)
+        ));
+
+        // 给了配置目录就只认它：home 下明明有数据也不回头找。
+        let fixture_home = root.parent().expect("夹具数据根有父目录").to_path_buf();
+        let nowhere = empty_home.path().join("nowhere");
+        let pinned = SourceContext {
+            agent_config_dir: Some(&nowhere),
+            ..context(&fixture_home, Some(&session), None, FAR_FUTURE_MS)
+        };
+        assert!(Kimi.discover(&pinned).expect("缺目录不报错").is_empty());
     }
 
     #[test]

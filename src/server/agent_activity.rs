@@ -41,8 +41,9 @@ pub(crate) struct SourceContext<'a> {
     pub home: &'a Path,
     pub now_ms: u64,
     /// 该 CLI 的配置目录（见 `agent_config_dir`：环境变量覆盖优先，否则 `home`
-    /// 下的默认目录；claude / codex 借此跟随 `CLAUDE_CONFIG_DIR` / `CODEX_HOME`）。
-    /// 没有对应 CLI 时为 `None`，适配器回退 `home` 下的默认目录。
+    /// 下的默认目录；claude / codex / kimi 借此跟随 `CLAUDE_CONFIG_DIR` /
+    /// `CODEX_HOME` / `KIMI_CODE_HOME`）。没有对应 CLI 时为 `None`，适配器回退
+    /// `home` 下的默认目录。
     pub agent_config_dir: Option<&'a Path>,
     /// server 缓存的该 pane 最近一份 `pane.report_agent_activity` hint（pi 的树整份
     /// 装在里面，见 `pi::discover_from_hint`）；外部来源与从未报过提示的 pane 为
@@ -1268,6 +1269,7 @@ mod tests {
         {
             let _claude = EnvOverride::set("CLAUDE_CONFIG_DIR", Some("~/profiles/work"));
             let _codex = EnvOverride::set("CODEX_HOME", Some("/opt/codex-home"));
+            let _kimi = EnvOverride::set("KIMI_CODE_HOME", Some("~/alt-kimi"));
             let _pi = EnvOverride::set("PI_CODING_AGENT_DIR", Some(""));
             assert_eq!(
                 agent_config_dir("claude", home),
@@ -1277,6 +1279,11 @@ mod tests {
             assert_eq!(
                 agent_config_dir("codex", home),
                 Some(PathBuf::from("/opt/codex-home"))
+            );
+            assert_eq!(
+                agent_config_dir("kimi", home),
+                Some(home.join("alt-kimi")),
+                "kimi 适配器不再自己读环境变量，覆盖与 `~` 展开全靠这里"
             );
             assert_eq!(
                 agent_config_dir("pi", home),
