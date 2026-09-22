@@ -169,6 +169,44 @@ impl ClientRenderState {
         })
     }
 
+    /// 投影修订号前进而画面未变时，把已提交的 surface 改戳到新修订号重发，不重新
+    /// 渲染 pane。协商了复用编码的连接只发非单元格部分（单元格沿用客户端基线）。
+    /// 没有已提交基线时返回 `None`，由调用方回退整帧渲染。
+    pub(crate) fn prepare_projection_restamp(
+        &self,
+        projection_revision: u64,
+    ) -> Option<PreparedRender> {
+        let Self::Semantic {
+            last_surface,
+            surface_revision,
+            surface_reuse,
+        } = self
+        else {
+            return None;
+        };
+        let last = last_surface.as_deref()?;
+        let mut surface = last.clone();
+        surface.projection_revision = projection_revision;
+        surface.surface_revision = surface_revision.saturating_add(1);
+        // 与 `prepare_pane_surface` 的复用条件一致：popup 单元格不在可复用网格里。
+        let reused = (*surface_reuse && surface.popup.is_none())
+            .then(|| {
+                crate::protocol::surface_reuse::message(last.surface_revision, &mut surface)
+                    .map_err(|error| tracing::warn!(%error, "failed to encode surface reuse"))
+                    .ok()
+                    .flatten()
+            })
+            .flatten();
+        let message = match reused {
+            Some(message) => message,
+            None => ServerMessage::PaneSurface(surface.clone()),
+        };
+        Some(PreparedRender::Semantic {
+            message,
+            committed_surface: Box::new(surface),
+        })
+    }
+
     pub(crate) fn prepare_pane_surface_patch(
         &self,
         mut patch: PaneSurfacePatch,
@@ -647,6 +685,75 @@ mod tests {
                 state.prepare_pane_surface(surface).unwrap().message(),
                 ServerMessage::PaneSurface(_)
             ));
+        }
+    }
+
+    /// 投影改戳：不重渲染，只把已提交基线的投影修订号前移。复用连接的线上消息
+    /// 不带单元格，解码后与基线逐格一致；此后的补丁以改戳后的基线为准。
+    #[test]
+    fn projection_restamp_resends_the_committed_surface_under_the_new_revision() {
+        for enabled in [false, true] {
+            let mut state = ClientRenderState::new(RenderEncoding::SemanticFrame);
+            state.enable_surface_reuse(enabled);
+            assert!(
+                state.prepare_projection_restamp(2).is_none(),
+                "无基线不改戳"
+            );
+
+            let mut decoder = crate::protocol::surface_reuse::Decoder::default();
+            let mut surface = popup_surface("popup");
+            surface.popup = None;
+            let buffer = ratatui::buffer::Buffer::empty(Rect::new(0, 0, 240, 100));
+            surface.frame = FrameData::from_ratatui_buffer(&buffer, None);
+            let initial = state.prepare_pane_surface(surface.clone()).unwrap();
+            decoder.decode(initial.message().clone()).unwrap();
+            state.commit_sent_frame(initial);
+
+            let next_revision = surface.projection_revision + 1;
+            let restamp = state.prepare_projection_restamp(next_revision).unwrap();
+            let mut bytes = Vec::new();
+            crate::protocol::write_message(&mut bytes, restamp.message()).unwrap();
+            if enabled {
+                assert!(
+                    matches!(restamp.message(), ServerMessage::EndpointControl { kind, .. }
+                    if kind == crate::protocol::surface_reuse::MESSAGE_KIND)
+                );
+                assert!(bytes.len() < 2000, "改戳消息 {} 字节", bytes.len());
+            } else {
+                assert!(matches!(restamp.message(), ServerMessage::PaneSurface(_)));
+            }
+            let ServerMessage::PaneSurface(decoded) =
+                decoder.decode(restamp.message().clone()).unwrap()
+            else {
+                panic!("decoded restamped surface");
+            };
+            assert_eq!(decoded.frame, surface.frame);
+            assert_eq!(decoded.projection_revision, next_revision);
+            assert_eq!(decoded.surface_revision, 2);
+            state.commit_sent_frame(restamp);
+            let committed = state.last_pane_surface().unwrap();
+            assert_eq!(committed.projection_revision, next_revision);
+            assert_eq!(committed.surface_revision, 2);
+
+            let mut changed_cell = surface.frame.cells[0].clone();
+            changed_cell.symbol = "x".into();
+            let patch = state
+                .prepare_pane_surface_patch(PaneSurfacePatch {
+                    boot_id: surface.boot_id.clone(),
+                    projection_revision: next_revision,
+                    base_surface_revision: 2,
+                    surface_revision: 0,
+                    rows: vec![crate::protocol::PaneSurfacePatchRow {
+                        x: 0,
+                        y: 0,
+                        cells: vec![changed_cell],
+                    }],
+                    panes: Vec::new(),
+                    cursor: None,
+                    hyperlink_uris: Vec::new(),
+                })
+                .expect("补丁以改戳后的基线为准");
+            decoder.decode(patch.message().clone()).unwrap();
         }
     }
 

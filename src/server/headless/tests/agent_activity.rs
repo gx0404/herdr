@@ -387,18 +387,45 @@ fn recv_surface_within(
     }
 }
 
+/// 限时收下一条 retained 补丁。
+fn recv_patch_within(
+    render_rx: &std::sync::mpsc::Receiver<Vec<u8>>,
+    context: &str,
+) -> crate::protocol::PaneSurfacePatch {
+    let bytes = render_rx
+        .recv_timeout(Duration::from_secs(2))
+        .unwrap_or_else(|error| panic!("{context}: {error}"));
+    match read_server_message(bytes) {
+        ServerMessage::PaneSurfacePatch(patch) => patch,
+        other => panic!("{context}: expected pane surface patch, got {other:?}"),
+    }
+}
+
+fn patch_text(patch: &crate::protocol::PaneSurfacePatch) -> String {
+    patch
+        .rows
+        .iter()
+        .flat_map(|row| row.cells.iter().map(|cell| cell.symbol.as_str()))
+        .collect()
+}
+
 /// 客户端只画修订号与快照精确配对的 surface（workbench 下不配对就画「正在同步
 /// 终端…」）。外部条目落库让快照修订号前进时，同一 tick 必须补一帧新修订号的
 /// surface——否则空闲 pane 一直停在占位上，直到它下一次输出。
+///
+/// 补的是已提交基线的改戳帧，不重渲染 pane：终端内容先变但不标脏，改戳帧仍是
+/// 旧画面（整帧渲染会画出新内容）。此后的输出 tick 以改戳后的基线走 retained
+/// 补丁，不退化成整帧。
 #[tokio::test]
 async fn external_refresh_pairs_the_advanced_snapshot_with_a_surface() {
     let mut server = test_headless_server();
-    let _pane_id = install_shared_view_test_runtime(&mut server);
+    let pane_id = install_shared_view_test_runtime(&mut server);
     let (control_rx, render_rx) = connect_matching_test_shell(&mut server, 61);
     let _ = next_snapshot(&control_rx);
     server.render_and_stream();
     let baseline = recv_surface_within(&render_rx, "baseline");
 
+    write_shared_test_pane(&mut server, pane_id, b"\rLATE");
     assert!(!server.handle_internal_event_with_forwarding(zcode_refreshed("desktop session")));
     assert!(server.agent_activity.projection_dirty());
     server.dispatch_render_tick(true, false, &HashSet::new(), false);
@@ -408,13 +435,144 @@ async fn external_refresh_pairs_the_advanced_snapshot_with_a_surface() {
     assert!(snapshot.revision > baseline.projection_revision);
     let surface = recv_surface_within(&render_rx, "surface paired with the advanced snapshot");
     assert_eq!(surface.projection_revision, snapshot.revision);
-    assert!(frame_text(&surface.frame).contains("BASE"));
+    assert_eq!(
+        surface.frame, baseline.frame,
+        "改戳帧沿用已提交基线，不重渲染"
+    );
+    assert!(!frame_text(&surface.frame).contains("LATE"));
     assert!(!server.agent_activity.projection_dirty());
+
+    server.dispatch_render_tick(false, false, &HashSet::from([pane_id]), false);
+    let patch = recv_patch_within(&render_rx, "retained patch on the restamped baseline");
+    assert_eq!(patch.projection_revision, snapshot.revision);
+    assert_eq!(patch.base_surface_revision, surface.surface_revision);
+    assert!(patch_text(&patch).contains("LATE"));
 
     // 同一批条目再来一次：快照不变，不重发 surface（RS-12 的省略仍然成立）。
     assert!(!server.handle_internal_event_with_forwarding(zcode_refreshed("desktop session")));
     server.dispatch_render_tick(true, false, &HashSet::new(), false);
     assert!(render_rx.try_recv().is_err(), "投影未变时不应重发 surface");
+    shutdown_test_runtimes(&mut server);
+}
+
+/// 协商了复用编码的连接：改戳帧只带非单元格部分，客户端按基线补齐单元格。
+#[tokio::test]
+async fn projection_restamp_rides_the_surface_reuse_codec() {
+    let mut server = test_headless_server();
+    let _pane_id = install_shared_view_test_runtime(&mut server);
+    let (writer, control_rx, render_rx) = test_client_writer();
+    server.handle_server_event(ServerEvent::ClientShellConnected {
+        surface_reuse: true,
+        client_id: 64,
+        surface_cols: 80,
+        surface_rows: 23,
+        cell_width_px: 0,
+        cell_height_px: 0,
+        pixel_mouse: false,
+        direct_graphics: false,
+        endpoint_keybindings: false,
+        mouse_capture: false,
+        surface_active: true,
+        ssh_auth_sock: None,
+        writer,
+    });
+    let _ = next_snapshot(&control_rx);
+    server.render_and_stream();
+    let mut decoder = crate::protocol::surface_reuse::Decoder::default();
+    let ServerMessage::PaneSurface(baseline) = decoder
+        .decode(read_server_message(
+            render_rx
+                .recv_timeout(Duration::from_secs(2))
+                .expect("baseline"),
+        ))
+        .expect("decode baseline")
+    else {
+        panic!("baseline is a full surface");
+    };
+
+    assert!(!server.handle_internal_event_with_forwarding(zcode_refreshed("desktop session")));
+    server.dispatch_render_tick(true, false, &HashSet::new(), false);
+    let snapshot = next_snapshot(&control_rx);
+    let bytes = render_rx
+        .recv_timeout(Duration::from_secs(2))
+        .expect("restamped surface");
+    assert!(
+        bytes.len() < 4096,
+        "改戳帧 {} 字节，不应重发单元格",
+        bytes.len()
+    );
+    let message = read_server_message(bytes);
+    assert!(matches!(
+        &message,
+        ServerMessage::EndpointControl { kind, .. }
+            if kind == crate::protocol::surface_reuse::MESSAGE_KIND
+    ));
+    let ServerMessage::PaneSurface(decoded) = decoder.decode(message).expect("decode restamp")
+    else {
+        panic!("restamp decodes to a full surface");
+    };
+    assert_eq!(decoded.projection_revision, snapshot.revision);
+    assert_eq!(decoded.frame, baseline.frame);
+    shutdown_test_runtimes(&mut server);
+}
+
+/// 投影前进与可见 pane 输出同 tick：渲染槽已被改戳帧占住，脏源重新挂回渲染
+/// 信号，下一 tick 以改戳后的基线发 retained 补丁——不升级成整帧，也不丢输出。
+#[tokio::test]
+async fn coincident_output_follows_the_restamp_as_a_retained_patch() {
+    let mut server = test_headless_server();
+    let pane_id = install_shared_view_test_runtime(&mut server);
+    let (control_rx, render_rx) = connect_matching_test_shell(&mut server, 65);
+    let _ = next_snapshot(&control_rx);
+    server.render_and_stream();
+    let baseline = recv_surface_within(&render_rx, "baseline");
+    let _ = server.app.render_dirty.take();
+
+    assert!(!server.handle_internal_event_with_forwarding(zcode_refreshed("desktop session")));
+    write_shared_test_pane(&mut server, pane_id, b"\rCOINCIDENT");
+    let sources = HashSet::from([pane_id]);
+    assert!(server.pty_sources_visible_to_any_render_target(&sources));
+    server.dispatch_render_tick(true, false, &sources, false);
+
+    let snapshot = next_snapshot(&control_rx);
+    let restamped = recv_surface_within(&render_rx, "restamp");
+    assert_eq!(restamped.projection_revision, snapshot.revision);
+    assert_eq!(restamped.frame, baseline.frame, "同 tick 不升级成整帧");
+    let requeued = server.app.render_dirty.take();
+    assert!(
+        requeued.pty_sources.contains(&pane_id),
+        "脏源要挂回下一 tick"
+    );
+
+    server.dispatch_render_tick(false, false, &requeued.pty_sources, false);
+    let patch = recv_patch_within(&render_rx, "coincident output as a retained patch");
+    assert_eq!(patch.projection_revision, snapshot.revision);
+    assert!(patch_text(&patch).contains("COINCIDENT"));
+    shutdown_test_runtimes(&mut server);
+}
+
+/// 没有已提交基线（连接后还没画过）时改戳不适用：同 tick 回退整帧渲染，仍然
+/// 补上与新快照配对的 surface。
+#[tokio::test]
+async fn restamp_without_a_baseline_falls_back_to_a_full_render() {
+    let mut server = test_headless_server();
+    let pane_id = install_shared_view_test_runtime(&mut server);
+    let (control_rx, render_rx) = connect_matching_test_shell(&mut server, 66);
+    let initial = next_snapshot(&control_rx);
+    assert!(server.clients[&66]
+        .render_state
+        .last_pane_surface()
+        .is_none());
+
+    write_shared_test_pane(&mut server, pane_id, b"\rLIVE");
+    assert!(!server.handle_internal_event_with_forwarding(zcode_refreshed("desktop session")));
+    server.dispatch_render_tick(true, false, &HashSet::new(), false);
+
+    let snapshot = next_snapshot(&control_rx);
+    assert!(snapshot.revision > initial.revision);
+    let surface = recv_surface_within(&render_rx, "full render fallback");
+    assert_eq!(surface.projection_revision, snapshot.revision);
+    assert!(frame_text(&surface.frame).contains("LIVE"));
     shutdown_test_runtimes(&mut server);
 }
 

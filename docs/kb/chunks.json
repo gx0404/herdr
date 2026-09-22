@@ -1,5 +1,5 @@
 {
-  "chunk_count": 1017,
+  "chunk_count": 1018,
   "chunks": [
     {
       "anchor": "herdr",
@@ -6534,10 +6534,17 @@
     },
     {
       "anchor": "structure",
+      "doc": "src/server/headless/projection_restamp.rs",
+      "id": "src-server-headless-projection-restamp-rs-structure",
+      "source_sha256": "e3fcb8298c85760ff6e8fe06ac6df680f634d96c69eab67adfce6e18cdb0bf3a",
+      "text": "模块文档：投影改戳：纯 chrome 刷新让快照修订号前进时，把已提交的 pane surface 改戳到 新修订号重发，不重新渲染 pane。  客户端只画与快照修订号精确配对的 surface（workbench 下不配对就画「正在同步 终端…」），所以修订号前进后必须补一帧；但 chrome 变化不改 pane 画面，补的 这一帧沿用已提交基线即可——协商了复用编码的连接只发非单元格部分。只有基线 不适用（缺基线、boot / 几何不一致、popup、图形）时才由调用方回退整帧渲染。\n公开项：\nimpl HeadlessServer {\npub(super) fn restamp_client_shell_surfaces(&mut self, advanced: &[(u64, u64)]) -> bool { — 把快照修订号前进的客户端（`(client_id, 新修订号)`）已提交的 surface 改戳 重发。返回 `false` 表示至少一个客户端的基线不适用，调用方需补整帧渲染。"
+    },
+    {
+      "anchor": "structure",
       "doc": "src/server/headless/render.rs",
       "id": "src-server-headless-render-rs-structure",
-      "source_sha256": "153dd02739c6d7220aa46568498d57191229251ac45d0df2ab7b2ae88fcada74",
-      "text": "公开项：\nimpl HeadlessServer {\npub(super) fn stream_host_mouse_capture_mode(&mut self) {\npub(super) fn stream_direct_terminal_keyboard_mode(&mut self) {\npub(super) fn has_pending_presentation_work(\npub(super) fn sync_immediate_pty_sources(&self) {\npub(super) fn pty_sources_visible_to_any_render_target(\npub(super) fn stream_client_shell_projections(&mut self) -> bool { — RS-12：纯 chrome 变化只刷新客户端 shell 投影（快照 / agent view）， 不重发 pane surface。 \npub(super) fn render_and_stream(&mut self) {"
+      "source_sha256": "9584de11cdc55f77dccee2ceceb2a99b87aeec771315a95fbcf1f684291ed12b",
+      "text": "公开项：\nimpl HeadlessServer {\npub(super) fn stream_host_mouse_capture_mode(&mut self) {\npub(super) fn stream_direct_terminal_keyboard_mode(&mut self) {\npub(super) fn has_pending_presentation_work(\npub(super) fn sync_immediate_pty_sources(&self) {\npub(super) fn pty_sources_visible_to_any_render_target(\npub(super) fn stream_client_shell_projections(&mut self) -> Vec<(u64, u64)> { — RS-12：纯 chrome 变化只刷新客户端 shell 投影（快照 / agent view）， 不重发 pane surface。 \npub(super) fn render_and_stream(&mut self) {"
     },
     {
       "anchor": "structure",
@@ -6725,8 +6732,8 @@
       "anchor": "structure",
       "doc": "src/server/render_stream.rs",
       "id": "src-server-render-stream-rs-structure",
-      "source_sha256": "5d50229c4681621fdeb97513de5feae98c0ab4e50061c505e6077c5e24c4b5db",
-      "text": "模块文档：Virtual rendering helpers for headless client frame streaming.\n公开项：\npub(crate) enum ClientRenderState { — Per-client render baseline for the negotiated render encoding.\nimpl ClientRenderState {\npub(crate) fn new(render_encoding: RenderEncoding) -> Self {\npub(crate) fn enable_surface_reuse(&mut self, enabled: bool) {\npub(crate) fn reset_baseline(&mut self) {\npub(crate) fn request_repaint(&mut self) {\npub(crate) fn prepare_frame(&mut self, frame: FrameData) -> Option<PreparedRender> {\npub(crate) fn last_pane_surface(&self) -> Option<&PaneSurfaceFrame> {\npub(crate) fn prepare_pane_surface(\npub(crate) fn prepare_pane_surface_patch(\npub(crate) fn commit_sent_frame(&mut self, prepared: PreparedRender) {\npub(super) fn apply_pane_surface_patch(surface: &mut PaneSurfaceFrame, patch: &PaneSurfacePatch) {\npub(crate) enum PreparedRender { — A prepared client render message plus any baseline state needed after send.\nimpl PreparedRender {\npub(crate) fn message(&self) -> &ServerMessage {\npub(crate) fn strip_pane_surface_assets(&mut self) -> bool {\nimpl CursorTrackingBackend {\nimpl Backend for CursorTrackingBackend {\npub(crate) type RenderedTabSurface = (\npub(crate) fn render_tab_surface_virtual( — Renders only the active tab's pane surface at an origin-relative client viewport.\npub(crate) fn render_terminal_virtual( — Renders one server-owned terminal directly for `terminal attach` clients."
+      "source_sha256": "22d587b408bef5dc22bbcc965dd22a66f5c5dcd1158d63cb0109be3dc627568d",
+      "text": "模块文档：Virtual rendering helpers for headless client frame streaming.\n公开项：\npub(crate) enum ClientRenderState { — Per-client render baseline for the negotiated render encoding.\nimpl ClientRenderState {\npub(crate) fn new(render_encoding: RenderEncoding) -> Self {\npub(crate) fn enable_surface_reuse(&mut self, enabled: bool) {\npub(crate) fn reset_baseline(&mut self) {\npub(crate) fn request_repaint(&mut self) {\npub(crate) fn prepare_frame(&mut self, frame: FrameData) -> Option<PreparedRender> {\npub(crate) fn last_pane_surface(&self) -> Option<&PaneSurfaceFrame> {\npub(crate) fn prepare_pane_surface(\npub(crate) fn prepare_projection_restamp( — 投影修订号前进而画面未变时，把已提交的 surface 改戳到新修订号重发，不重新 渲染 pane。协商了复用编码的连接只发非单元格部分（单元格沿用客户端基线）。 没有已提交基线时返回 `None`，由调用方回退整帧渲染。\npub(crate) fn prepare_pane_surface_patch(\npub(crate) fn commit_sent_frame(&mut self, prepared: PreparedRender) {\npub(super) fn apply_pane_surface_patch(surface: &mut PaneSurfaceFrame, patch: &PaneSurfacePatch) {\npub(crate) enum PreparedRender { — A prepared client render message plus any baseline state needed after send.\nimpl PreparedRender {\npub(crate) fn message(&self) -> &ServerMessage {\npub(crate) fn strip_pane_surface_assets(&mut self) -> bool {\nimpl CursorTrackingBackend {\nimpl Backend for CursorTrackingBackend {\npub(crate) type RenderedTabSurface = (\npub(crate) fn render_tab_surface_virtual( — Renders only the active tab's pane surface at an origin-relative client viewport.\npub(crate) fn render_terminal_virtual( — Renders one server-owned terminal directly for `terminal attach` clients."
     },
     {
       "anchor": "structure",

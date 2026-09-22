@@ -397,6 +397,91 @@ fn print_surface_reuse_profiles() {
     }
 }
 
+/// 投影修订号前进（活动树 / 外部来源刷新）时补一帧配对 surface 的单客户端开销：
+/// 整帧渲染（重渲染 pane + 准备 + 编码）对比已提交基线改戳（准备 + 编码）。
+fn print_projection_restamp_profiles() {
+    println!("projection advance: full render vs committed-surface restamp at {COLS}x{ROWS}");
+    println!("       panes  reuse  full_median_us  restamp_median_us  restamp_bytes");
+    for count in CARDINALITIES {
+        for enabled in [false, true] {
+            let mut pipeline = RenderPipeline::new(active_panes(count));
+            pipeline.render_once();
+            let target = Some(crate::ui::TabSurfaceTarget {
+                workspace_index: 0,
+                tab_index: 0,
+            });
+            let area = Rect::new(0, 0, COLS, ROWS);
+            let mut state = super::render_stream::ClientRenderState::new(
+                crate::protocol::RenderEncoding::SemanticFrame,
+            );
+            state.enable_surface_reuse(enabled);
+            let render = |pipeline: &mut RenderPipeline, projection_revision: u64| {
+                let rendered = super::client_shell::render_pane_surface(
+                    &mut pipeline.app,
+                    target,
+                    area,
+                    false,
+                    false,
+                    HostCellSize::default(),
+                    &pipeline.graphics_delivery,
+                    1,
+                );
+                PaneSurfaceFrame {
+                    boot_id: "bench-boot".into(),
+                    projection_revision,
+                    surface_revision: 0,
+                    frame: rendered.frame,
+                    panes: rendered.panes,
+                    splits: rendered.splits,
+                    popup: rendered.popup,
+                    graphics: rendered.graphics,
+                }
+            };
+            let initial = state
+                .prepare_pane_surface(render(&mut pipeline, 1))
+                .expect("initial surface");
+            state.commit_sent_frame(initial);
+            let mut revision = 1;
+            let mut full = Vec::new();
+            for index in 0..WARMUP_COUNT + SAMPLE_COUNT {
+                revision += 1;
+                let started = Instant::now();
+                let prepared = state
+                    .prepare_pane_surface(render(&mut pipeline, revision))
+                    .expect("advanced projection surface");
+                let mut bytes = Vec::new();
+                crate::protocol::write_message(&mut bytes, prepared.message()).unwrap();
+                black_box(bytes.len());
+                state.commit_sent_frame(prepared);
+                if index >= WARMUP_COUNT {
+                    full.push(started.elapsed());
+                }
+            }
+            let mut restamp = Vec::new();
+            let mut restamp_bytes = 0;
+            for index in 0..WARMUP_COUNT + SAMPLE_COUNT {
+                revision += 1;
+                let started = Instant::now();
+                let prepared = state
+                    .prepare_projection_restamp(revision)
+                    .expect("committed baseline");
+                let mut bytes = Vec::new();
+                crate::protocol::write_message(&mut bytes, prepared.message()).unwrap();
+                restamp_bytes = bytes.len();
+                state.commit_sent_frame(prepared);
+                if index >= WARMUP_COUNT {
+                    restamp.push(started.elapsed());
+                }
+            }
+            println!(
+                "  {count:>10}  {enabled:>5}  {:>14}  {:>17}  {restamp_bytes:>13}",
+                summarize(full).median_us,
+                summarize(restamp).median_us
+            );
+        }
+    }
+}
+
 fn profile_same_tab_fanout(count: usize, client_count: usize) -> StageStats {
     let mut pipeline = RenderPipeline::new(active_panes(count));
     pipeline.app.state.ensure_test_terminals();
@@ -471,4 +556,11 @@ async fn render_scale_profile() {
     print_token_rule_profiles();
     print_surface_reuse_profiles();
     print_same_tab_fanout_profiles();
+    print_projection_restamp_profiles();
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "manual projection restamp scaling profile"]
+async fn projection_restamp_scale_profile() {
+    print_projection_restamp_profiles();
 }

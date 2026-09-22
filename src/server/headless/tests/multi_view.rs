@@ -424,3 +424,54 @@ async fn retained_patch_keeps_a_visible_ime_anchor_when_the_pane_hides_its_curso
     assert!(cursor.visible, "reveal keeps the anchor visible after ?25l");
     assert_eq!(cursor.shape, 5, "anchor uses the blinking-bar shape");
 }
+
+/// 多视图连接的投影改戳：每个 view 的已提交基线各自改戳，合成一次写入；解码后
+/// 与初始帧逐格一致，修订号与连接的新快照修订号配对。
+#[tokio::test]
+async fn projection_restamp_covers_every_view_in_one_batch() {
+    // 控制端要保活：投影刷新经它下发快照，接收端丢了客户端会被当成断开。
+    let (mut server, _control, output, _) = retained_test_server_with_control(b"first");
+    let mut second = crate::workspace::Workspace::test_new("second");
+    let second_id = second.tabs[0].root_pane;
+    second.insert_test_runtime(
+        second_id,
+        crate::terminal::TerminalRuntime::test_with_screen_bytes(50, 12, b"second"),
+    );
+    server.app.state.workspaces.push(second);
+    let tabs = vec![
+        server.app.public_tab_id(0, 0).unwrap(),
+        server.app.public_tab_id(1, 0).unwrap(),
+    ];
+    set_views(&mut server, 1, &tabs);
+    server.render_and_stream();
+    let mut decoder = protocol::views::Decoder::default();
+    let initial = decode_batch(output.recv().unwrap(), &mut decoder);
+    assert_eq!(initial.len(), 2);
+    let before = server.clients[&1].shell_projection_revision;
+
+    server.app.state.tab_bar_right = vec![crate::app::state::TabBarStatusSegment::Text(Some(
+        "12:00".into(),
+    ))];
+    server.app.state.bump_projection_epoch();
+    server.dispatch_render_tick(true, false, &HashSet::new(), false);
+
+    let revision = server.clients[&1].shell_projection_revision;
+    assert!(revision > before);
+    let restamped = decode_batch(
+        output
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("restamped views"),
+        &mut decoder,
+    );
+    assert_eq!(restamped.len(), 2);
+    for (view, first) in restamped.iter().zip(&initial) {
+        let (ServerMessage::PaneSurface(surface), ServerMessage::PaneSurface(original)) =
+            (&view.message, &first.message)
+        else {
+            panic!("views decode to full surfaces");
+        };
+        assert_eq!(view.view_id, first.view_id);
+        assert_eq!(surface.projection_revision, revision);
+        assert_eq!(surface.frame, original.frame);
+    }
+}

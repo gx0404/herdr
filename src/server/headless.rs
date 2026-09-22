@@ -78,6 +78,7 @@ mod lifecycle;
 mod multi_view;
 mod notifications;
 mod pane_graphics;
+mod projection_restamp;
 mod render;
 mod retained_surface;
 mod surface_interest;
@@ -1138,10 +1139,11 @@ impl HeadlessServer {
     /// （输出末帧撞上 chrome tick、此后 pane 静默时，画面会永久停在旧帧）。
     /// 同理，同 tick 的全量渲染需求（`full_render_pending`）也不能被吞掉。
     ///
-    /// 投影刷新让快照修订号前进时同样要走全量渲染：客户端只画与快照修订号精确
-    /// 配对的 surface（workbench 下不配对就画「正在同步终端…」），旧基线也不再
-    /// 适用于 retained 补丁。画面未变时 `prepare_pane_surface` 走复用编码，线上
-    /// 只是一条短消息。
+    /// 投影刷新让快照修订号前进时，客户端只画与快照修订号精确配对的 surface
+    /// （workbench 下不配对就画「正在同步终端…」），必须补一帧新修订号的
+    /// surface。chrome 变化不改 pane 画面，所以补的是已提交基线的改戳帧
+    /// （`restamp_client_shell_surfaces`，不重渲染 pane），只有基线不适用时才
+    /// 回退整帧渲染。
     pub(super) fn dispatch_render_tick(
         &mut self,
         projection_only: bool,
@@ -1150,13 +1152,27 @@ impl HeadlessServer {
         hidden_only: bool,
     ) {
         let surface_work = !pty_sources.is_empty() && !hidden_only;
-        let mut projection_advanced = false;
+        let mut restamp_fallback = false;
         if projection_only {
             crate::render_prof::event("projection_only.invoke");
-            projection_advanced = self.stream_client_shell_projections();
+            let advanced = self.stream_client_shell_projections();
             self.agent_activity.projection_synced();
-            if projection_advanced {
+            if !advanced.is_empty() && !full_render_pending {
                 crate::render_prof::event("projection_only.revision_advanced");
+                if self.restamp_client_shell_surfaces(&advanced) {
+                    crate::render_prof::event("projection_restamp.invoke");
+                    if surface_work {
+                        // 渲染槽容量为 1，已被改戳帧占住：同 tick 的脏源留到下一
+                        // tick 走 retained 补丁（基线已是新修订号），不升级成整帧。
+                        for &pane_id in pty_sources {
+                            self.app.render_dirty.request_pty(pane_id);
+                        }
+                        self.app.render_notify.notify_one();
+                    }
+                    return;
+                }
+                crate::render_prof::event("projection_restamp.fallback");
+                restamp_fallback = true;
             } else if !surface_work && !full_render_pending {
                 if hidden_only {
                     crate::render_prof::event("render.skipped.hidden_sources");
@@ -1168,7 +1184,7 @@ impl HeadlessServer {
             return;
         }
         if !full_render_pending
-            && !projection_advanced
+            && !restamp_fallback
             && self.render_retained_pane_surface_and_stream(pty_sources)
         {
             crate::render_prof::event("retained_surface.invoke");
