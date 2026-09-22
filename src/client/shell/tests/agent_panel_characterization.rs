@@ -1505,6 +1505,232 @@ fn tree_agent_rows_show_the_activity_summary_collapsed_by_default() {
     assert!(latest[0].starts_with("├── ◐ explore repo"), "{latest:?}");
 }
 
+/// 徽标在窄侧栏里的档位（审查发现 2）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BadgeTier {
+    /// 完整文案。
+    Full,
+    /// 只留数字 `2/5`。
+    Digits,
+    /// 不画。
+    Hidden,
+}
+
+/// 单工作区夹具，agent-0 带「2 个运行中 / 共 5 个」的活动摘要；`extra_tab` 给该
+/// 工作区加一个空标签页，让树多出标签页层。
+fn badged_snapshot(extra_tab: bool) -> ClientShellSnapshot {
+    let mut projected = activity_snapshot(0);
+    projected.agents[0].activity = ClientShellAgentActivity {
+        running: 2,
+        total: 5,
+        truncated: true,
+        nodes: Vec::new(),
+    };
+    if extra_tab {
+        let mut tab = projected.tabs[0].clone();
+        tab.tab_id = "tab_x".into();
+        tab.label = "x".into();
+        tab.focused = false;
+        projected.tabs.push(tab);
+    }
+    projected
+}
+
+/// 断言 `rect` 首行右端按 `tier` 画徽标：`Full` 是完整文案 `full`，`Digits` 只剩
+/// 数字 `2/5`（前一格是间隔），`Hidden` 整行不出现 `2/5`。数字逐格比对。
+fn assert_badge_tier(
+    state: &ClientShellState,
+    rect: Rect,
+    full: &str,
+    tier: BadgeTier,
+    case: &str,
+) {
+    let buffer = state.compose_buffer.as_ref().expect("缓冲");
+    let cell = |x: u16| buffer[(x, rect.y)].symbol().to_owned();
+    let line = rect_rows(state, rect)[0].clone();
+    let digits_at = |x: u16| [cell(x), cell(x + 1), cell(x + 2)];
+    match tier {
+        BadgeTier::Full => {
+            assert!(
+                compact(&line).ends_with(&compact(full)),
+                "{case}: 完整徽标: {line:?}"
+            );
+            assert_eq!(
+                digits_at(badge_digits_x(rect, full, "2/5")),
+                ["2", "/", "5"],
+                "{case}"
+            );
+        }
+        BadgeTier::Digits => {
+            let x = rect.right() - 3;
+            assert_eq!(digits_at(x), ["2", "/", "5"], "{case}: 只留数字: {line:?}");
+            assert_eq!(cell(x - 1), " ", "{case}: 徽标前留 1 列间隔: {line:?}");
+            assert!(
+                !compact(&line).contains(&compact(full)),
+                "{case}: 完整文案放不下: {line:?}"
+            );
+        }
+        BadgeTier::Hidden => {
+            assert!(!line.contains("2/5"), "{case}: 徽标让位: {line:?}");
+        }
+    }
+}
+
+/// 窄侧栏的宽度预算（审查发现 2）：状态图标与名称先保 8 列（图标 2 列 + 名称
+/// ≥ 6 列），徽标再按剩余宽度三档退化——完整文案 → 只留数字 → 不画。侧栏
+/// 18 / 26 / 36 列 × agent 深度 1–3（工作区 / +标签页 / +机器）逐格断言图标字符、
+/// 名称前缀与徽标数字；外部条目行同一预算。
+///
+/// 行宽 = 侧栏宽 − 1（右缘分隔线），内容区再扣树前缀（每层 2 列 + 开关 2 列），
+/// 徽标可用 = 内容区 − 8 − 1 列间隔。例：侧栏 18、深度 2 → 17 − 6 − 9 = 2 列，
+/// 连 `2/5` 都放不下，整个让位。中英文完整徽标差 1 列（`2/5 running` 11 列、
+/// 「运行中 2/5」10 列），侧栏 26、深度 2 恰好落在两档之间，两种语言各钉一遍。
+#[test]
+fn tree_badge_yields_to_the_status_icon_and_name_on_narrow_sidebars() {
+    use BadgeTier::{Digits, Full, Hidden};
+    for (lang, full_width, tiers) in [
+        (
+            crate::i18n::Lang::En,
+            11,
+            [
+                (18, 1, Digits),
+                (18, 2, Hidden),
+                (18, 3, Hidden),
+                (26, 1, Full),
+                (26, 2, Digits),
+                (26, 3, Digits),
+                (36, 1, Full),
+                (36, 2, Full),
+                (36, 3, Full),
+            ],
+        ),
+        (
+            crate::i18n::Lang::ZhCn,
+            10,
+            [
+                (18, 1, Digits),
+                (18, 2, Hidden),
+                (18, 3, Hidden),
+                (26, 1, Full),
+                (26, 2, Full),
+                (26, 3, Digits),
+                (36, 1, Full),
+                (36, 2, Full),
+                (36, 3, Full),
+            ],
+        ),
+    ] {
+        let _lang = crate::i18n::lang_guard(lang);
+        let full = running_badge(2, 5);
+        assert_eq!(
+            crate::ui::display_width(&full),
+            full_width,
+            "{lang:?}: 夹具前提：完整徽标 {full:?} 的宽度"
+        );
+        for (width, depth, tier) in tiers {
+            assert_narrow_agent_row(lang, &full, width, depth, tier);
+        }
+
+        // 外部条目行：同一预算（深度 1：外部分组头之下）。
+        for (width, tier) in [(18, Digits), (36, Full)] {
+            let mut projected = badged_snapshot(false);
+            projected.external_agents = vec![ClientShellExternalAgent {
+                external_id: "zcode:abc".into(),
+                source: "zcode".into(),
+                agent_status: AgentStatus::Working,
+                label: "fix login".into(),
+                readable: true,
+                agent: None,
+                cwd: None,
+                updated_at_ms: None,
+                activity: projected.agents[0].activity.clone(),
+            }];
+            let mut state = classic_state_with(AgentPanelSortConfig::Spaces, projected);
+            state.sidebar_width = width;
+            state.sidebar_width_manual = true;
+            state.compose(106, 40).expect("窄侧栏外部条目帧");
+            let case = format!("{lang:?}、外部条目、侧栏 {width}");
+            let rect = state
+                .hits
+                .external_agents
+                .first()
+                .unwrap_or_else(|| panic!("{case}: 外部条目不在命中表里"))
+                .0;
+            assert_eq!(
+                rect.width,
+                width - 1,
+                "{case}: 夹具前提：行宽 = 侧栏宽 − 右缘分隔线"
+            );
+            let buffer = state.compose_buffer.as_ref().expect("缓冲");
+            let cell = |x: u16| buffer[(x, rect.y)].symbol().to_owned();
+            let content_x = rect.x + 4;
+            assert_eq!(cell(content_x), "◐", "{case}: 状态图标");
+            let label = (content_x + 2..content_x + 8).map(cell).collect::<String>();
+            assert_eq!(label, "fix lo", "{case}: 标签至少保 6 列");
+            assert_badge_tier(&state, rect, &full, tier, &case);
+        }
+    }
+}
+
+/// 侧栏 `width` 列、agent 在树里深 `depth` 层时，agent-0 首行的图标、名称前缀与
+/// 徽标档位。深度 3 用联邦侧栏（机器 → 工作区 → 标签页 → agent）。
+fn assert_narrow_agent_row(
+    lang: crate::i18n::Lang,
+    full: &str,
+    width: u16,
+    depth: u16,
+    tier: BadgeTier,
+) {
+    let mut state = if depth == 3 {
+        let (mut state, _) = federated_state(AgentPanelSortConfig::Spaces);
+        // 换 boot：同一 boot 下新出现的 Idle agent 会被投影成未读的 Done（✓）。
+        let mut projected = badged_snapshot(true);
+        projected.boot_id = "badged-boot".into();
+        state.set_snapshot(Box::new(projected));
+        state
+    } else {
+        classic_state_with(AgentPanelSortConfig::Spaces, badged_snapshot(depth == 2))
+    };
+    state.sidebar_width = width;
+    state.sidebar_width_manual = true;
+    state.compose(106, 40).expect("窄侧栏帧");
+    let case = format!("{lang:?}、侧栏 {width}、深度 {depth}");
+    let rect = if depth == 3 {
+        state
+            .hits
+            .endpoint_agents
+            .iter()
+            .find(|(_, endpoint_id, pane_id)| endpoint_id.is_local() && pane_id == "pane_0")
+            .unwrap_or_else(|| panic!("{case}: 本机 agent 行不在命中表里"))
+            .0
+    } else {
+        classic_agent_rect(&state, "pane_0")
+    };
+    assert_eq!(
+        rect.width,
+        width - 1,
+        "{case}: 夹具前提：行宽 = 侧栏宽 − 右缘分隔线"
+    );
+    let buffer = state.compose_buffer.as_ref().expect("缓冲");
+    let cell = |x: u16| buffer[(x, rect.y)].symbol().to_owned();
+    // 前缀每层 2 列 + 开关与间隔 2 列。
+    let content_x = rect.x + 2 * depth + 2;
+    assert_eq!(cell(content_x - 2), "▸", "{case}: 活动摘要的折叠开关");
+    assert_eq!(cell(content_x), "○", "{case}: 状态图标");
+    // 名称保 6 列：整名放不下时第 6 列是省略号（例如中文侧栏 26、深度 2 恰好
+    // 只剩这 6 列给名称）。
+    let name = (content_x + 2..content_x + 8).map(cell).collect::<String>();
+    assert!(
+        name == "agent-" || name == "agent…",
+        "{case}: 名称至少保 6 列: {name:?}"
+    );
+    assert_badge_tier(&state, rect, full, tier, &case);
+    if tier == BadgeTier::Hidden {
+        let line = rect_rows(&state, rect)[0].clone();
+        assert!(line.contains("○ agent-0"), "{case}: 名称完整: {line:?}");
+    }
+}
+
 /// server 下发多个节点（整树形态，基准 / 旧行为）时同一套构建按 `parent_id`
 /// 前序展开：根节点平列，子节点默认折叠、点开关逐层展开（键在集合里 = 展开）。
 #[test]

@@ -128,8 +128,8 @@ pub(super) struct AgentTreeNode {
     count_label: String,
     /// 有运行中的活动节点：徽标用工作色。
     running: bool,
-    /// 活动徽标文本（见 `badge_text`），没有活动为 `None`。
-    badge: Option<String>,
+    /// 活动徽标（见 [`ActivityBadge`]），没有活动为 `None`。
+    badge: Option<ActivityBadge>,
     pub(super) kind: AgentTreeKind,
 }
 
@@ -151,7 +151,7 @@ impl AgentTreeNode {
                 String::new()
             },
             running: running > 0,
-            badge: badge_text(running, total),
+            badge: activity_badge(running, total),
             kind,
         }
     }
@@ -167,11 +167,6 @@ impl AgentTreeNode {
     /// 分组行右侧的计数文本（`· N`）。
     pub(super) fn count_label(&self) -> &str {
         &self.count_label
-    }
-
-    /// 活动徽标文本。
-    pub(super) fn badge(&self) -> Option<&str> {
-        self.badge.as_deref()
     }
 }
 
@@ -234,6 +229,57 @@ fn tab_key(tab_id: &str) -> String {
 
 fn external_group_key(source: &str) -> String {
     format!("agent-external:{source}")
+}
+
+/// 状态图标（字形 + 间隔共 2 列）与名称至少 6 列：行首这 8 列先于徽标分配，
+/// 徽标只拿剩下的宽度，窄侧栏里深层 agent 行不会只剩一截徽标。
+const PRIMARY_MIN_WIDTH: u16 = 8;
+
+/// agent / 外部条目行右侧的活动徽标：构建期算好完整文案与只留数字的紧凑形态
+/// （`2/5`；没有运行中时是总数 `5`）及各自宽度，渲染按可用宽度三档退化——
+/// 完整文案 → 只留数字 → 不画，循环里不再分配。
+#[derive(Debug)]
+struct ActivityBadge {
+    full: String,
+    full_width: u16,
+    compact: String,
+    compact_width: u16,
+}
+
+impl ActivityBadge {
+    /// 首行宽 `width` 列时要画的档位（文本, 宽度）：先扣 [`PRIMARY_MIN_WIDTH`]
+    /// 与徽标前的 1 列间隔，剩下的放得下哪档画哪档；都放不下为 `None`。
+    fn fit(&self, width: u16) -> Option<(&str, u16)> {
+        let room = width.saturating_sub(PRIMARY_MIN_WIDTH + 1);
+        if self.full_width <= room {
+            Some((self.full.as_str(), self.full_width))
+        } else if self.compact_width <= room {
+            Some((self.compact.as_str(), self.compact_width))
+        } else {
+            None
+        }
+    }
+}
+
+/// 活动徽标：完整文案见 [`badge_text`]，紧凑形态只留数字；没有活动为 `None`。
+fn activity_badge(running: u32, total: u32) -> Option<ActivityBadge> {
+    let full = badge_text(running, total)?;
+    let total = total.max(running);
+    let compact = if running > 0 {
+        format!("{running}/{total}")
+    } else {
+        total.to_string()
+    };
+    Some(ActivityBadge {
+        full_width: text_width(&full),
+        full,
+        compact_width: text_width(&compact),
+        compact,
+    })
+}
+
+fn text_width(text: &str) -> u16 {
+    u16::try_from(display_width(text)).unwrap_or(u16::MAX)
 }
 
 /// 活动徽标文案，三种情况：有运行中的节点写「运行中 / 总数」形态（`2/5
@@ -1143,9 +1189,10 @@ fn render_group_line(
 }
 
 /// agent 行：首行「前缀 + token 行 + 右侧活动徽标」，续行画祖先引导线并缩进两列
-/// 对齐名称；`status_line` 那一行在 token 之后补状态文案。宽度预算：徽标（值）>
-/// token 行（名称等，`resolved_token_spans` 自行按固定 / 弹性宽度裁剪）> 状态
-/// 文案（次要信息，整段放不下就不画）。
+/// 对齐名称；`status_line` 那一行在 token 之后补状态文案。宽度预算：状态图标与
+/// 名称先保 [`PRIMARY_MIN_WIDTH`] 列 > 徽标（完整 → 只留数字 → 不画）> token 行
+/// 其余部分（`resolved_token_spans` 自行按固定 / 弹性宽度裁剪）> 状态文案（次要
+/// 信息，整段放不下就不画）。
 #[allow(clippy::too_many_arguments)]
 fn render_agent_lines(
     buffer: &mut Buffer,
@@ -1179,30 +1226,8 @@ fn render_agent_lines(
         style: Default::default(),
     }];
     let lines: &[Vec<crate::ui::ResolvedToken>] = &agent.rows;
-    // 徽标只在首行右侧，宽度先扣（文本构建期已算好）。
-    let badge = row.kind.badge();
-    let badge_width = badge.map_or(0, |text| {
-        display_width(text).min(usize::from(content.width)) as u16
-    });
-    if let Some(text) = badge {
-        let x = content.right().saturating_sub(badge_width);
-        put_text(
-            buffer,
-            x,
-            content.y,
-            badge_width,
-            text,
-            Style::default().fg(if row.kind.running {
-                palette.yellow
-            } else {
-                palette.overlay0
-            }),
-        );
-    }
-    let first_width =
-        content
-            .width
-            .saturating_sub(if badge_width > 0 { badge_width + 1 } else { 0 });
+    // 徽标只在首行右侧，按宽度档位画，剩下的给 token 行。
+    let first_width = render_badge(buffer, content, &row.kind, cx);
     let continuation_indent = tree_prefix_width(depth).saturating_add(2);
     for index in 0..usize::from(rect.height) {
         let y = rect.y + index as u16;
@@ -1254,6 +1279,38 @@ fn render_agent_lines(
             }
         }
     }
+}
+
+/// 在 `content` 首行右侧画活动徽标（档位见 [`ActivityBadge::fit`]），返回首行
+/// 留给左侧内容（状态图标、名称等）的宽度：已扣掉徽标与它前面的 1 列间隔，
+/// 没画徽标时是整行宽。
+fn render_badge(
+    buffer: &mut Buffer,
+    content: Rect,
+    node: &AgentTreeNode,
+    cx: &RowContext<'_>,
+) -> u16 {
+    let Some((text, width)) = node
+        .badge
+        .as_ref()
+        .and_then(|badge| badge.fit(content.width))
+    else {
+        return content.width;
+    };
+    let palette = &cx.config.palette;
+    put_text(
+        buffer,
+        content.right().saturating_sub(width),
+        content.y,
+        width,
+        text,
+        Style::default().fg(if node.running {
+            palette.yellow
+        } else {
+            palette.overlay0
+        }),
+    );
+    content.width.saturating_sub(width + 1)
 }
 
 /// agent 行续行的引导线：祖先各层沿用末子掩码（`│ ` / 空白），本节点展开时在
@@ -1348,7 +1405,8 @@ fn render_activity_line(
     }
 }
 
-/// 外部条目行：`状态图标 标签 [agent] [暂不可读]`，右侧活动徽标。
+/// 外部条目行：`状态图标 标签 [agent] [暂不可读]`，右侧活动徽标；宽度预算同
+/// agent 行（状态图标与标签先保 [`PRIMARY_MIN_WIDTH`] 列，徽标三档退化）。
 #[allow(clippy::too_many_arguments)]
 fn render_external_line(
     buffer: &mut Buffer,
@@ -1361,28 +1419,7 @@ fn render_external_line(
     cx: &RowContext<'_>,
 ) {
     let palette = &cx.config.palette;
-    let badge = node.badge();
-    let badge_width = badge.map_or(0, |text| {
-        display_width(text).min(usize::from(content.width)) as u16
-    });
-    if let Some(text) = badge {
-        put_text(
-            buffer,
-            content.right().saturating_sub(badge_width),
-            content.y,
-            badge_width,
-            text,
-            Style::default().fg(if node.running {
-                palette.yellow
-            } else {
-                palette.overlay0
-            }),
-        );
-    }
-    let mut remaining =
-        content
-            .width
-            .saturating_sub(if badge_width > 0 { badge_width + 1 } else { 0 });
+    let mut remaining = render_badge(buffer, content, node, cx);
     let mut x = content.x;
     let icon = status_icon(status, cx.config.status_indicators);
     let icon_width = display_width(icon) as u16;
