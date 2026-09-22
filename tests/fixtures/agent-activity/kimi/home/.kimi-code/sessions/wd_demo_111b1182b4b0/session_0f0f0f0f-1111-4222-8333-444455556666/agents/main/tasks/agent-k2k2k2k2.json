@@ -1,0 +1,11 @@
+{
+  "taskId": "agent-k2k2k2k2",
+  "kind": "agent",
+  "status": "completed",
+  "description": "review diff (first run)",
+  "agentId": "agent-2",
+  "subagentType": "coder",
+  "detached": true,
+  "startedAt": 1790000150000,
+  "endedAt": 1790000250000
+}

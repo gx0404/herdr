@@ -1,0 +1,69 @@
+{
+  "id": "session_0f0f0f0f-1111-4222-8333-444455556666",
+  "version": 2,
+  "cwd": "/work/demo",
+  "createdAt": 1790000000000,
+  "updatedAt": 1790000900000,
+  "archived": false,
+  "title": "demo session",
+  "agents": {
+    "main": {
+      "type": "main",
+      "homedir": "/nonexistent/agents/main",
+      "parentAgentId": null
+    },
+    "agent-1": {
+      "type": "sub",
+      "homedir": "/nonexistent/agents/agent-1",
+      "parentAgentId": "main",
+      "labels": {
+        "parentAgentId": "main",
+        "profileName": "explore"
+      }
+    },
+    "agent-2": {
+      "type": "sub",
+      "homedir": "/nonexistent/agents/agent-2",
+      "parentAgentId": "main",
+      "labels": {
+        "parentAgentId": "main"
+      }
+    },
+    "agent-3": {
+      "type": "sub",
+      "homedir": "/nonexistent/agents/agent-3",
+      "parentAgentId": "agent-2",
+      "labels": {
+        "parentAgentId": "main",
+        "profileName": "coder"
+      }
+    },
+    "agent-4": {
+      "type": "sub",
+      "homedir": "/nonexistent/agents/agent-4",
+      "parentAgentId": "agent-3"
+    },
+    "agent-5": {
+      "type": "sub",
+      "homedir": "/nonexistent/agents/agent-5",
+      "labels": {
+        "parentAgentId": "main",
+        "swarmItem": "Check the parser module\nsecond line is ignored"
+      }
+    },
+    "agent-6": {
+      "type": "sub",
+      "homedir": "/nonexistent/agents/agent-6",
+      "parentAgentId": "agent-99"
+    },
+    "agent-7": {
+      "type": "hologram",
+      "parentAgentId": 42,
+      "labels": "not-an-object"
+    },
+    "../escape": {
+      "type": "sub",
+      "parentAgentId": "main"
+    }
+  }
+}

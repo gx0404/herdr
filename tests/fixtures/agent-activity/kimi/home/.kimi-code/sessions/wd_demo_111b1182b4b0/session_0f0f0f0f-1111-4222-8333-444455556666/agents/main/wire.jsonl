@@ -1,0 +1,8 @@
+{"type":"metadata","protocol_version":"1.5","created_at":1790000000000}
+{"type":"tools.update_store","key":"todo","value":[{"title":"old plan","status":"pending"}],"time":1790000100000}
+{"type":"turn.prompt","input":[{"type":"text","text":"(redacted)"}],"origin":{"kind":"user"},"time":1790000200000}
+{"type":"context.append_loop_event","event":{"type":"tool.call","name":"TodoList","args":{}},"time":1790000210000}
+{broken json line
+{"type":"tools.update_store","key":"todo","value":[{"title":"Write parser tests","status":"done"},{"title":"Fix\u001b[31m color\nleak","status":"in_progress"},{"title":"Ship it","status":"pending"},{"status":"exploding"},"not-an-object"],"time":1790000300000}
+{"type":"tools.update_store","key":"other","value":[],"time":1790000310000}
+{"type":"usage.record","model":"k3","usage":{},"time":1790000320000}

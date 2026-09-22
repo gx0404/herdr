@@ -1,0 +1,4 @@
+{"type":"metadata","protocol_version":"1.4","created_at":1790000720000}
+{"type":"turn.prompt","input":[],"time":1790000720001}
+{"type":"llm.request","kind":"loop","time":1790000720002}
+{"type":"context.append_loop_event","event":{"type":"step.begin"},"time":1790000720003}

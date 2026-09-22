@@ -1,0 +1,3 @@
+{"type":"metadata","protocol_version":"1.5","created_at":1790000740000}
+{"type":"agent.turn.started","turnId":"t5","kind":"event","time":1790000740001}
+{"turnId":"t5","outcome":"aborted","type":"agent.turn.ended","time":1790000745000,"kind":"event"}

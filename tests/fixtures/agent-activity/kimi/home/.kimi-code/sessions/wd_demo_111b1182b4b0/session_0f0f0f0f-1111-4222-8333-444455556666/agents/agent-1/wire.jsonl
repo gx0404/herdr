@@ -1,0 +1,6 @@
+{"type":"metadata","protocol_version":"1.5","created_at":1790000110000}
+{"type":"config.update","profileName":"explore","time":1790000110001}
+{"type":"turn.prompt","input":[{"type":"text","text":"(redacted)"}],"time":1790000110002}
+{"type":"context.append_loop_event","event":{"type":"step.begin"},"time":1790000110003}
+{"type":"turn.ended","turnId":"t1","reason":"completed","durationMs":5000,"time":1790000115000}
+{"type":"usage.record","model":"k3","usage":{},"time":1790000115001}

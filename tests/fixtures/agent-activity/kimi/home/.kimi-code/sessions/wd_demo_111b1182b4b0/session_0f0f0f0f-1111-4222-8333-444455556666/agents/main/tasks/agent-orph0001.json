@@ -1,0 +1,10 @@
+{
+  "taskId": "agent-orph0001",
+  "kind": "agent",
+  "status": "timed_out",
+  "description": "orphan helper",
+  "agentId": "agent-404",
+  "subagentType": "explore",
+  "startedAt": 1790000800000,
+  "endedAt": 1790000900000
+}

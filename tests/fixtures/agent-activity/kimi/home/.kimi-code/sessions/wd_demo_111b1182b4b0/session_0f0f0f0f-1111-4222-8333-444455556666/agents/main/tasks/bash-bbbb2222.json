@@ -1,0 +1,10 @@
+{
+  "taskId": "bash-bbbb2222",
+  "kind": "process",
+  "status": "running",
+  "command": "npm run dev\n--port 5173",
+  "detached": true,
+  "startedAt": 1790000500000,
+  "endedAt": null,
+  "exitCode": null
+}

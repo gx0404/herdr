@@ -1,0 +1,9 @@
+{
+  "taskId": "bash-bbbb0001",
+  "kind": "process",
+  "status": "completed",
+  "description": "build",
+  "startedAt": 1790001000100,
+  "endedAt": 1790001000200,
+  "exitCode": 0
+}

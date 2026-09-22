@@ -1,0 +1,12 @@
+{
+  "taskId": "bash-aaaa1111",
+  "kind": "process",
+  "status": "completed",
+  "description": "cargo test",
+  "command": "cargo test --all",
+  "detached": true,
+  "startedAt": 1790000400000,
+  "endedAt": 1790000460000,
+  "exitCode": 0,
+  "pid": 4242
+}

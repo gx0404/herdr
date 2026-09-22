@@ -1,0 +1,10 @@
+{
+  "taskId": "bash-cccc3333",
+  "kind": "process",
+  "status": "killed",
+  "description": "dev server",
+  "stopReason": "verification finished",
+  "exitCode": 143,
+  "startedAt": 1790000100000,
+  "endedAt": 1790000600000
+}

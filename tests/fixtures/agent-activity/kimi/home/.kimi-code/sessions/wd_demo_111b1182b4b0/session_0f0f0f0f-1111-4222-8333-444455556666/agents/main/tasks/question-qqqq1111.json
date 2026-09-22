@@ -1,0 +1,10 @@
+{
+  "taskId": "question-qqqq1111",
+  "kind": "question",
+  "status": "running",
+  "description": "Pick a database",
+  "questionCount": 1,
+  "detached": true,
+  "startedAt": 1790000850000,
+  "endedAt": null
+}

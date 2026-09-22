@@ -1,0 +1,9 @@
+{
+  "taskId": "bash-eeee5555",
+  "kind": "process",
+  "status": "failed",
+  "description": "lint",
+  "exitCode": 2,
+  "startedAt": 1790000450000,
+  "endedAt": 1790000455000
+}
