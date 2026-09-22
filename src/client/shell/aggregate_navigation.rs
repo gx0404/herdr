@@ -142,10 +142,17 @@ fn sort_aggregate_rows(
     sort: crate::config::AgentPanelSortConfig,
 ) {
     if sort == crate::config::AgentPanelSortConfig::Launch {
-        // 稳定排序：`launch_seq` 全为 0（旧 server）时保持快照顺序。
+        // 端点内按启动顺序：不同 server 各自计数 `launch_seq`，跨端点不可直接
+        // 比较，因此端点序排在 `launch_seq` 前面，先按端点分组再组内排序。
+        // 稳定排序：`launch_seq` 全为 0（旧 server 未下发）时组内保持快照顺序。
         rows.sort_by_key(|row| {
             let (unknown, launch_seq) = super::agent_sidebar::launch_order_key(row.agent);
-            (row.endpoint.stale(), unknown, launch_seq)
+            (
+                row.endpoint.stale(),
+                row.endpoint.endpoint_index,
+                unknown,
+                launch_seq,
+            )
         });
     }
 }

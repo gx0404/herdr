@@ -786,8 +786,10 @@ fn aggregate_names(state: &ClientShellState, sort: AgentPanelSortConfig) -> Vec<
 }
 
 /// (g) `aggregate_agent_rows` 是联邦面板与 mobile 的行序来源。Spaces：端点顺序 →
-/// 各端点快照顺序，不看状态；Launch：在线优先，再按 `launch_seq` 升序
-/// （Blocked > Working > Idle），同级按客户端观测到的新近度，跨端点混排。
+/// 各端点快照顺序，不看状态；Launch：stale 端点整体沉底，其余按端点序分组，
+/// 组内再按 `launch_seq` 升序（0，即旧 server 未下发，排最后），组内 launch_seq
+/// 打平时稳定排序保持快照序——语义是「端点内按启动顺序」，不同 server 各自计数
+/// `launch_seq`，不跨端点直接比较。
 #[test]
 fn characterization_aggregate_agent_rows_order_under_spaces_and_launch() {
     let (mut state, remote) = federated_state(AgentPanelSortConfig::Spaces);
@@ -812,10 +814,10 @@ fn characterization_aggregate_agent_rows_order_under_spaces_and_launch() {
             aggregate_names(&state, AgentPanelSortConfig::Launch),
             [
                 "Local/two",
-                "Build/r-two",
                 "Local/three",
-                "Build/r-one",
-                "Local/one"
+                "Local/one",
+                "Build/r-two",
+                "Build/r-one"
             ],
             "projection_supported={projection_supported}"
         );

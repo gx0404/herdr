@@ -1333,8 +1333,11 @@ fn selected_position_sort_uses_public_tab_and_pane_numbers() {
     assert_eq!(names, ["pane two", "pane nine", "tab nine"]);
 }
 
+/// 排序键前缀加了端点序（编排者 2026-09-22 决定，语义「端点内按启动顺序」）：
+/// 不同 server 各自计数 `launch_seq`，跨端点不可直接比较，端点序压过它；
+/// `launch_seq` 只在同一端点内部排序。
 #[test]
-fn aggregate_launch_orders_agents_by_launch_seq_across_machines() {
+fn aggregate_launch_orders_agents_within_each_machine_not_across() {
     use crate::api::schema::AgentStatus;
     use crate::config::AgentSidebarToken;
 
@@ -1376,29 +1379,63 @@ fn aggregate_launch_orders_agents_by_launch_seq_across_machines() {
             < text.find("Build · remote agent").expect("remote agent")
     );
 
-    // 远端 agent 先启动：跨机器按 launch_seq 升序，不看状态。本机快照保持
-    // revision 不变：表面（`surface()`）钉在 revision 1，换代会让帧不可用。
+    // 远端 agent 的 launch_seq 更小（「更早启动」）：端点序排在 launch_seq 前面，
+    // Local 仍排在 Build 前面，即使跨机器比较 launch_seq 会得出相反结论。本机
+    // 快照保持 revision 不变：表面（`surface()`）钉在 revision 1，换代会让帧
+    // 不可用。
     local.agents[0].launch_seq = 2;
     state.set_snapshot(Box::new(local));
     remote.revision += 1;
     remote.agents[0].launch_seq = 1;
-    state.set_endpoint_snapshot(&endpoint_id, Box::new(remote));
+    state.set_endpoint_snapshot(&endpoint_id, Box::new(remote.clone()));
     let text = frame_text(&mut state);
     assert!(
-        text.find("Build · remote agent").expect("remote agent")
-            < text.find("Local · local agent").expect("local agent")
+        text.find("Local · local agent").expect("local agent")
+            < text.find("Build · remote agent").expect("remote agent"),
+        "端点序应压过跨机器的 launch_seq 比较：{text}"
     );
+    // 端点序把 row 0 排到本机：客户端已在 Local 上，聚焦第 0 个 agent 因此走
+    // 「同端点内聚焦」的 `PaneFocus` 方法，而不是切端点的 `ActivateEndpoint`。
     let mut outcome = ClientShellInput::default();
     assert!(
         state.handle_endpoint_navigation(crate::input::KeybindAction::FocusAgent(0), &mut outcome,)
     );
+    let [ClientShellAction::Endpoint {
+        endpoint_id: focused,
+        request,
+        ..
+    }] = outcome.actions.as_slice()
+    else {
+        panic!("聚焦本机 agent 应走 Endpoint 方法：{:?}", outcome.actions);
+    };
+    assert_eq!(focused, &ClientEndpointId::Local);
     assert!(matches!(
-        outcome.actions.as_slice(),
-        [ClientShellAction::ActivateEndpoint {
-            endpoint_id: activated,
-            target: Some(ClientEndpointFocusTarget::Pane(pane_id)),
-        }] if activated == &endpoint_id && pane_id == "pane_1"
+        &request.method,
+        crate::api::schema::Method::PaneFocus(params) if params.pane_id == "pane_1"
     ));
+
+    // launch_seq 仍在同一端点内部生效：给 Build 加一个 launch_seq 更小的第二个
+    // agent，组内顺序仍按 launch_seq 升序（不经过完整 compose，直接读聚合行）。
+    let mut earlier_remote_agent = agent("remote earlier agent", AgentStatus::Idle, 1);
+    earlier_remote_agent.pane_id = "pane_2".into();
+    earlier_remote_agent.launch_seq = 1;
+    remote.agents[0].launch_seq = 2;
+    remote.agents.push(earlier_remote_agent);
+    remote.revision += 1;
+    state.set_endpoint_snapshot(&endpoint_id, Box::new(remote));
+    let names = aggregate_navigation::aggregate_agent_rows(
+        &state.endpoints,
+        &state.active_endpoint_id,
+        crate::config::AgentPanelSortConfig::Launch,
+    )
+    .into_iter()
+    .map(|row| row.agent.name.as_deref().expect("agent name"))
+    .collect::<Vec<_>>();
+    assert_eq!(
+        names,
+        ["local agent", "remote earlier agent", "remote agent"],
+        "端点内仍按 launch_seq 升序"
+    );
 }
 
 #[test]
