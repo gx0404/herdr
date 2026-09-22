@@ -1078,8 +1078,10 @@ fn scale_snapshot(agents: usize, activity: usize) -> ClientShellSnapshot {
 
 /// 非门禁扩展剖析（`just bench-render-scale` 的 `render_scale_profile` 过滤命中）：
 /// Agents 面板在 1 / 15 / 52 个 agent、各带 0 与 8 个活动节点下的每帧合成耗时。
-/// 三列：classic 稳态、workbench 稳态（行缓存命中）、workbench 每帧翻一次折叠
-/// 态（行缓存每帧重建，量的是构建成本）。
+/// 四列：classic 稳态、workbench 稳态（行缓存命中）、workbench 每帧翻一次折叠
+/// 态（行缓存每帧重建，量的是构建成本）、workbench 把每个 agent 的活动全部
+/// 展开后的稳态（活动行上屏的渲染成本；8 个节点是整树形态，比生产默认的摘要
+/// ——至多 1 个最新节点——重，按上界看）。
 #[test]
 #[ignore = "manual agents panel composition scaling profile"]
 fn agent_panel_render_scale_profile() {
@@ -1091,6 +1093,16 @@ fn agent_panel_render_scale_profile() {
         workbench.set_snapshot(Box::new(scale_snapshot(agents, activity)));
         workbench.set_pane_surface(surface());
         enable_workbench(&mut workbench);
+        let mut expanded = ClientShellState::new(panel_config(AgentPanelSortConfig::Spaces));
+        expanded.set_snapshot(Box::new(scale_snapshot(agents, activity)));
+        expanded.set_pane_surface(surface());
+        enable_workbench(&mut expanded);
+        for index in 0..agents {
+            expanded.toggle_collapsed_group(
+                &ClientEndpointId::Local,
+                format!("agent-activity:pane:pane_{index}"),
+            );
+        }
 
         let measure = |state: &mut ClientShellState, toggle: bool| {
             for _ in 0..20 {
@@ -1111,9 +1123,11 @@ fn agent_panel_render_scale_profile() {
         let classic_us = measure(&mut classic, false);
         let workbench_us = measure(&mut workbench, false);
         let rebuild_us = measure(&mut workbench, true);
+        let expanded_us = measure(&mut expanded, false);
         eprintln!(
             "agents panel: {agents} agents x {activity} nodes, classic {classic_us:.1} us/frame, \
-             workbench {workbench_us:.1} us/frame, workbench+rebuild {rebuild_us:.1} us/frame"
+             workbench {workbench_us:.1} us/frame, workbench+rebuild {rebuild_us:.1} us/frame, \
+             workbench+expanded {expanded_us:.1} us/frame"
         );
     }
 }

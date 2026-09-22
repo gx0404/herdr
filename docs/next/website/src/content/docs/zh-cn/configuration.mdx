@@ -507,7 +507,7 @@ herdr pane report-metadata <pane_id> \
 
 元数据上报方只提供值；样式由本地侧边栏配置控制。有关限制、清除、顺序和过期值的信息，请参阅 [CLI 参考：报告元数据](/docs/cli-reference/#panes)。
 
-侧边栏行设置仅影响展开的桌面侧边栏。折叠视图和移动视图仍使用紧凑布局。
+侧边栏行设置仅影响展开的桌面侧边栏。折叠视图和移动视图仍使用紧凑布局。在按分组显示的 agent 树里，上方分组头已经显示了机器、工作区和标签页，agent 行会省略 `machine`、`workspace`、`tab` 这几个 token；因此只剩 `state_icon` 的那一行会并入下一行。所有行都不含 `state_text` 时，放得下的话树会在 agent 名称后补上状态文字。
 
 ## 通知
 

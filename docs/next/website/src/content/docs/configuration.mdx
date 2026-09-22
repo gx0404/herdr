@@ -511,7 +511,7 @@ Use `herdr workspace report-metadata` in the same way for custom Space tokens. U
 
 Metadata reporters provide values only; styling stays in the local sidebar configuration. See [CLI reference: report metadata](/docs/cli-reference/#panes) for limits, clearing, sequencing, and expiry.
 
-Sidebar row settings affect only the expanded desktop sidebar. Collapsed and mobile views keep their compact layouts.
+Sidebar row settings affect only the expanded desktop sidebar. Collapsed and mobile views keep their compact layouts. In the grouped agent tree, `machine`, `workspace`, and `tab` tokens are left out of agent rows because the group headers above already show them; a line left with only `state_icon` joins the next line. When no row includes `state_text`, the tree adds the status text after the agent name if it fits.
 
 ## Notifications
 
