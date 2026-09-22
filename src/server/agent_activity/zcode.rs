@@ -38,7 +38,9 @@
 //!   任何动静 → Unknown，摘要 `stale`。
 //! - 待办：根会话的全部，外加仍在跑的子 agent 的，id 为 `todo:<会话 id>:<position>`。
 //! - `read` 只对子 agent 节点可用（其余节点 `Unsupported`）；游标是 `t:<偏移>`
-//!   （转录）或 `o:<偏移>`（output.txt），读到末尾时 `next_cursor` 为空。
+//!   （转录）或 `o:<偏移>`（output.txt）。读到末尾时 `eof=true` 只表示「暂时读完」，
+//!   `next_cursor` 仍给出当前位置供跟随续读；转录里不以换行结尾的半截末行不消费，
+//!   游标留在行首。
 //!
 //! # 本机取证（2026-09-22，只读核对结构、键名与枚举取值，未读取任何对话正文）
 //!
@@ -991,8 +993,9 @@ fn read_node(
     match cursor {
         Cursor::Start if transcript.is_file() => read_transcript_page(&transcript, 0, budget),
         Cursor::Start if output.is_file() => read_text_page(&output, 0, budget),
-        // 还没有任何输出（仍在跑，或当前版本不写转录且尚未结束）。
-        Cursor::Start => Ok(empty_chunk(AgentActivityContentFormat::Text)),
+        // 还没有任何输出（仍在跑，或当前版本不写转录且尚未结束）。两个文件都不在，
+        // 给不出有意义的位置：下一次仍从头读。
+        Cursor::Start => Ok(empty_chunk(AgentActivityContentFormat::Text, None)),
         Cursor::Transcript(offset) => read_transcript_page(&transcript, offset, budget),
         Cursor::Output(offset) => read_text_page(&output, offset, budget),
     }
@@ -1014,11 +1017,13 @@ fn locate_agent_dir(agents: &Path, session_hint: Option<&str>, agent_id: &str) -
         .find(|dir| dir.is_dir())
 }
 
-fn empty_chunk(format: AgentActivityContentFormat) -> ContentChunk {
+/// 空页。`next_cursor` 由调用方给出：能定位就原样回传当前位置（供跟随续读，
+/// 且不让游标倒退），只有连文件都不存在时才是 `None`。
+fn empty_chunk(format: AgentActivityContentFormat, next_cursor: Option<String>) -> ContentChunk {
     ContentChunk {
         format,
         text: String::new(),
-        next_cursor: None,
+        next_cursor,
         eof: true,
         truncated: false,
     }
@@ -1040,7 +1045,10 @@ fn read_transcript_page(
 ) -> Result<ContentChunk, SourceError> {
     let (file, len) = open_content(path)?;
     if offset >= len {
-        return Ok(empty_chunk(AgentActivityContentFormat::Text));
+        return Ok(empty_chunk(
+            AgentActivityContentFormat::Text,
+            Some(format!("t:{offset}")),
+        ));
     }
     let mut reader = BufReader::new(file);
     reader
@@ -1051,18 +1059,27 @@ fn read_transcript_page(
     let mut scanned = 0_u64;
     let mut text = String::new();
     let mut truncated = false;
+    let mut drained = false;
     let mut line = Vec::new();
     while text.len() < budget && scanned < SCAN_BUDGET_BYTES {
         let line_start = position;
         line.clear();
-        let (consumed, overflow) =
+        let raw =
             read_line_capped(&mut reader, &mut line, LINE_KEEP_BYTES).map_err(SourceError::Io)?;
-        if consumed == 0 {
+        if raw.consumed == 0 {
+            drained = true;
             break;
         }
-        position = position.saturating_add(consumed as u64);
-        scanned = scanned.saturating_add(consumed as u64);
-        let Some(entry) = render_transcript_line(&line, overflow) else {
+        if !raw.terminated {
+            // 没有换行符结尾 = 这一行 ZCode 还在写。不消费：游标退回行首，下一次
+            // 读到完整行再渲染，免得半截 JSON 被静默丢掉。
+            position = line_start;
+            drained = true;
+            break;
+        }
+        position = position.saturating_add(raw.consumed as u64);
+        scanned = scanned.saturating_add(raw.consumed as u64);
+        let Some(entry) = render_transcript_line(&line, raw.overflow) else {
             continue;
         };
         let remaining = budget.saturating_sub(text.len());
@@ -1082,29 +1099,42 @@ fn read_transcript_page(
         text.push('\n');
     }
 
-    let eof = position >= len;
+    // `drained` 覆盖「半截末行不消费」这种 position 还没到 len 的读完。
+    let eof = drained || position >= len;
     Ok(ContentChunk {
         format: AgentActivityContentFormat::Text,
         text,
-        next_cursor: (!eof).then(|| format!("t:{position}")),
+        next_cursor: Some(format!("t:{position}")),
         eof,
         truncated,
     })
 }
 
-/// 读一行（含换行符），只在 `out` 里留前 `cap` 字节；返回消耗的字节数与是否超长。
+/// 读一行的结果：消耗的字节数、是否超长截断、是否读到了行尾换行符。
+struct RawLine {
+    consumed: usize,
+    overflow: bool,
+    terminated: bool,
+}
+
+/// 读一行（含换行符），只在 `out` 里留前 `cap` 字节。文件末尾没有换行符时
+/// `terminated` 为 false，由调用方决定是否消费这半截行。
 fn read_line_capped<R: BufRead>(
     reader: &mut R,
     out: &mut Vec<u8>,
     cap: usize,
-) -> std::io::Result<(usize, bool)> {
+) -> std::io::Result<RawLine> {
     let mut consumed = 0;
     let mut overflow = false;
     loop {
         let (used, done) = {
             let buf = reader.fill_buf()?;
             if buf.is_empty() {
-                return Ok((consumed, overflow));
+                return Ok(RawLine {
+                    consumed,
+                    overflow,
+                    terminated: false,
+                });
             }
             let (chunk, done) = match buf.iter().position(|byte| *byte == b'\n') {
                 Some(end) => (&buf[..=end], true),
@@ -1120,7 +1150,11 @@ fn read_line_capped<R: BufRead>(
         reader.consume(used);
         consumed += used;
         if done {
-            return Ok((consumed, overflow));
+            return Ok(RawLine {
+                consumed,
+                overflow,
+                terminated: true,
+            });
         }
     }
 }
@@ -1267,7 +1301,10 @@ fn clip_bytes(text: &str, max_bytes: usize) -> &str {
 fn read_text_page(path: &Path, offset: u64, budget: usize) -> Result<ContentChunk, SourceError> {
     let (mut file, len) = open_content(path)?;
     if offset >= len {
-        return Ok(empty_chunk(AgentActivityContentFormat::Markdown));
+        return Ok(empty_chunk(
+            AgentActivityContentFormat::Markdown,
+            Some(format!("o:{offset}")),
+        ));
     }
     file.seek(SeekFrom::Start(offset))
         .map_err(SourceError::Io)?;
@@ -1288,7 +1325,7 @@ fn read_text_page(path: &Path, offset: u64, budget: usize) -> Result<ContentChun
     Ok(ContentChunk {
         format: AgentActivityContentFormat::Markdown,
         text,
-        next_cursor: (!eof).then(|| format!("o:{position}")),
+        next_cursor: Some(format!("o:{position}")),
         eof,
         truncated: false,
     })
@@ -1829,7 +1866,23 @@ mod tests {
         assert_eq!(chunk.text, S1_TRANSCRIPT_TEXT);
         assert!(chunk.eof);
         assert!(!chunk.truncated);
-        assert_eq!(chunk.next_cursor, None);
+        // eof 只表示「暂时读完」：游标仍指向当前末尾，供二级窗口跟随续读。
+        let len = std::fs::metadata(transcript_path(ROOT_A, "01"))
+            .expect("转录可读")
+            .len();
+        let at_end = format!("t:{len}");
+        assert_eq!(chunk.next_cursor.as_deref(), Some(at_end.as_str()));
+        // 拿它原地再读一次：空页，游标不倒退也不前进。
+        let again = ZCode
+            .read(
+                &context(&home, Some(&session)),
+                &sub("01"),
+                Some(&at_end),
+                64 * 1024,
+            )
+            .expect("原地续读");
+        assert!(again.text.is_empty() && again.eof);
+        assert_eq!(again.next_cursor.as_deref(), Some(at_end.as_str()));
     }
 
     #[test]
@@ -1866,7 +1919,12 @@ mod tests {
             assert!(chunk.text.len() <= 60);
             pages.push(chunk.text);
             if chunk.eof {
-                assert_eq!(chunk.next_cursor, None);
+                // eof 也给游标：位置停在已消费的末尾。
+                let Ok(Cursor::Transcript(next)) = parse_cursor(chunk.next_cursor.as_deref())
+                else {
+                    panic!("eof 也要给出转录游标：{:?}", chunk.next_cursor);
+                };
+                assert_eq!(next, std::fs::metadata(&path).expect("转录可读").len());
                 break;
             }
             match parse_cursor(chunk.next_cursor.as_deref()).expect("游标可解析") {
@@ -1928,17 +1986,92 @@ mod tests {
     }
 
     #[test]
+    fn a_growing_file_is_followed_from_the_cursor_returned_at_eof() {
+        let dir = TempDir::new("follow");
+        let path = dir.path().join(TRANSCRIPT_FILE);
+        std::fs::write(
+            &path,
+            transcript_line("model_complete", "{\"content\":\"first\"}"),
+        )
+        .expect("写转录");
+
+        let first = read_transcript_page(&path, 0, 4096).expect("可读");
+        assert_eq!(first.text, "first\n");
+        assert!(first.eof, "暂时读完");
+        let Ok(Cursor::Transcript(offset)) = parse_cursor(first.next_cursor.as_deref()) else {
+            panic!("eof 也要给出转录游标：{:?}", first.next_cursor);
+        };
+
+        // 子 agent 还在跑，转录又长了一条：拿上一轮游标续读，只看到新增内容。
+        let mut file = File::options().append(true).open(&path).expect("追加打开");
+        file.write_all(transcript_line("model_complete", "{\"content\":\"second\"}").as_bytes())
+            .expect("追加转录");
+        drop(file);
+        let second = read_transcript_page(&path, offset, 4096).expect("续读");
+        assert_eq!(second.text, "second\n", "不重复也不丢");
+        assert!(second.eof);
+
+        // output.txt 同理。
+        let output = dir.path().join(OUTPUT_FILE);
+        std::fs::write(&output, "alpha\n").expect("写输出");
+        let out_first = read_text_page(&output, 0, 4096).expect("可读");
+        assert_eq!(out_first.text, "alpha\n");
+        assert!(out_first.eof);
+        let Ok(Cursor::Output(out_offset)) = parse_cursor(out_first.next_cursor.as_deref()) else {
+            panic!("eof 也要给出输出游标：{:?}", out_first.next_cursor);
+        };
+        let mut file = File::options()
+            .append(true)
+            .open(&output)
+            .expect("追加打开");
+        file.write_all(b"beta\n").expect("追加输出");
+        drop(file);
+        let out_second = read_text_page(&output, out_offset, 4096).expect("续读");
+        assert_eq!(out_second.text, "beta\n");
+        assert!(out_second.eof);
+    }
+
+    #[test]
+    fn an_unterminated_final_line_is_left_for_the_next_read() {
+        let dir = TempDir::new("partial-line");
+        let path = dir.path().join(TRANSCRIPT_FILE);
+        let complete = transcript_line("model_complete", "{\"content\":\"done\"}");
+        let pending = transcript_line("model_complete", "{\"content\":\"still writing\"}");
+        // 读取正好撞上 ZCode 写到一半的那一行（全 ASCII，随便切）。
+        let (head, tail) = pending.split_at(pending.len() / 2);
+        std::fs::write(&path, format!("{complete}{head}")).expect("写半截转录");
+
+        let page = read_transcript_page(&path, 0, 4096).expect("可读");
+        assert_eq!(page.text, "done\n", "半截行既不渲染也不消费");
+        assert!(page.eof, "暂时读完");
+        let at_line_start = format!("t:{}", complete.len());
+        assert_eq!(page.next_cursor.as_deref(), Some(at_line_start.as_str()));
+
+        // 补齐后按该游标续读：完整条目出现一次。
+        let mut file = File::options().append(true).open(&path).expect("追加打开");
+        file.write_all(tail.as_bytes()).expect("补齐半截行");
+        drop(file);
+        let Ok(Cursor::Transcript(offset)) = parse_cursor(page.next_cursor.as_deref()) else {
+            panic!("游标可解析：{:?}", page.next_cursor);
+        };
+        let resumed = read_transcript_page(&path, offset, 4096).expect("续读");
+        assert_eq!(resumed.text, "still writing\n");
+        assert!(resumed.eof);
+    }
+
+    #[test]
     fn nodes_without_content_and_bad_requests_degrade() {
         let home = fixture_home();
         let cx = context(&home, None);
-        // 仍在跑、还没有任何输出：空页而不是报错。
+        // 仍在跑、还没有任何输出：空页而不是报错。两个文件都不在，给不出位置。
         let chunk = ZCode.read(&cx, &sub("03"), None, 4096).expect("空内容可读");
         assert!(chunk.text.is_empty() && chunk.eof && chunk.next_cursor.is_none());
-        // 游标越过文件末尾：空页。
+        // 游标越过文件末尾：空页，游标原样回传，不倒退。
         let chunk = ZCode
             .read(&cx, &sub("01"), Some("t:999999"), 4096)
             .expect("越界游标");
         assert!(chunk.text.is_empty() && chunk.eof);
+        assert_eq!(chunk.next_cursor.as_deref(), Some("t:999999"));
 
         // 子 agent 形状的 id 但目录不在：没有目录（S4）或本就不存在。
         for node_id in [
