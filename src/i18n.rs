@@ -446,6 +446,42 @@ pub struct MonitorTexts {
     pub select_account_first: &'static str,
     pub on: &'static str,
     pub off: &'static str,
+    // ---- 页签与页脚 ----
+    pub tab_system: &'static str,
+    pub tab_accounts: &'static str,
+    /// 第三个页签：监控偏好（不再叫「设置」，与全局设置浮层区分）。
+    pub tab_preferences: &'static str,
+    pub hint_refresh: &'static str,
+    pub hint_pause: &'static str,
+    pub hint_resume: &'static str,
+    pub hint_close: &'static str,
+    // ---- 系统页 ----
+    pub edit_layout: &'static str,
+    pub edit_layout_done: &'static str,
+    /// 编辑布局模式的页脚说明（↑↓ 键）。
+    pub edit_layout_hint: &'static str,
+    pub uptime_fmt: &'static str,       // args: span
+    pub interval_fmt: &'static str,     // args: ms
+    pub logical_cpus_fmt: &'static str, // args: n
+    pub mem_used: &'static str,
+    pub swap: &'static str,
+    pub cache_fmt: &'static str, // args: size
+    pub gpu_util: &'static str,
+    pub vram: &'static str,
+    pub col_mount: &'static str,
+    pub col_device: &'static str,
+    pub col_used: &'static str,
+    pub col_total: &'static str,
+    pub col_percent: &'static str,
+    pub no_disks: &'static str,
+    pub net_idle_one: &'static str,
+    pub net_idle_folded_fmt: &'static str, // args: n
+    pub temp_max_avg_fmt: &'static str,    // args: max, avg
+    pub proc_col_pid: &'static str,
+    pub proc_col_name: &'static str,
+    pub proc_col_cpu: &'static str,
+    pub proc_col_mem: &'static str,
+    pub no_matching_processes: &'static str,
 }
 
 pub struct SidebarTexts {

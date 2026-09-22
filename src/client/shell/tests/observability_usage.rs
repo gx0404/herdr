@@ -3496,6 +3496,44 @@ fn pin_agent_hover(state: &mut ClientShellState, pane_id: &str, agent: &str) {
     });
 }
 
+/// 系统页「编辑布局」：↑↓ 移动选中的卡片而不是滚动卡片内容，顺序写回偏好；
+/// Esc 先退出编辑，再按一次才关闭页面。
+#[test]
+fn edit_layout_mode_moves_the_selected_card_with_arrow_keys() {
+    use crossterm::event::KeyCode;
+    let mut state = docked();
+    state.open_observation_page(Page::Monitor, &mut ClientShellInput::default());
+    state.observability.selected_card = Some("memory".into());
+    let before = state.observability.monitor.visible.clone();
+    assert_eq!(before[2], "memory");
+    press_key(&mut state, KeyCode::Up);
+    assert_eq!(
+        state.observability.monitor.visible, before,
+        "非编辑模式 ↑ 不移动卡片"
+    );
+    state.observation_action(Action::EditLayout, &mut ClientShellInput::default());
+    assert!(state.observability.layout_editing);
+    press_key(&mut state, KeyCode::Up);
+    assert_eq!(state.observability.monitor.visible[1], "memory");
+    press_key(&mut state, KeyCode::Down);
+    assert_eq!(state.observability.monitor.visible[2], "memory");
+    assert_eq!(
+        state
+            .config
+            .preferences
+            .monitor
+            .as_ref()
+            .map(|monitor| monitor.visible.clone()),
+        Some(state.observability.monitor.visible.clone()),
+        "卡片顺序写回偏好"
+    );
+    press_key(&mut state, KeyCode::Esc);
+    assert!(!state.observability.layout_editing, "Esc 先退出编辑布局");
+    assert_eq!(state.observability.page, Some(Page::Monitor));
+    press_key(&mut state, KeyCode::Esc);
+    assert_eq!(state.observability.page, None, "再按 Esc 才关闭页面");
+}
+
 fn press_key(state: &mut ClientShellState, code: crossterm::event::KeyCode) -> ClientShellInput {
     state.handle_raw_events(vec![RawInputEvent::Key(crate::input::TerminalKey::new(
         code,
@@ -3625,13 +3663,11 @@ fn keyboard_navigation_never_activates_the_pinned_hover() {
     state.compose(120, 40).expect("页面 + 钉住的浮层同帧");
     let hover_rect = state.observability.hover_rect;
     assert!(!hover_rect.is_empty());
-    let inside = |rect: Rect| contains(hover_rect, (rect.x, rect.y));
-    let page_hits = state
-        .observability
-        .hits
-        .iter()
-        .filter(|(rect, _)| !inside(*rect))
-        .count();
+    // 「落进浮层」= 高亮到浮层自己的命中区；被浮层盖住的页面控件（如页脚
+    // 键位提示）仍是页面控件。
+    let hover_hits = state.observability.hover_hits.clone();
+    let inside = |rect: Rect| hover_hits.iter().any(|(hit, _)| *hit == rect);
+    let page_hits = state.observability.page_hits;
     assert!(page_hits > 0, "页面有可 Tab 的控件");
     assert!(
         state.observability.hits.len() > page_hits,

@@ -102,35 +102,60 @@ fn secondary_button(
     );
 }
 
-/// Page tab with an unambiguous active state: the selected page inverts into
-/// the accent color so it can never be confused with idle tabs. 反色的前景取
-/// 组件表（`panel_contrast_fg`），terminal 主题下不再是「终端默认前景压在
-/// accent 上」（ds-08）。
-fn page_tab(
+/// 页脚键位提示（kit `footer_hints`，可点）：系统页多一个「暂停 / 继续」；
+/// 编辑布局模式下换成移动卡片的说明与「完成」。
+fn footer_hints(
     buffer: &mut Buffer,
-    rect: Rect,
-    label: &str,
-    active: bool,
-    action: Action,
+    area: Rect,
+    state: &State,
+    page: Page,
     palette: &Palette,
     hits: &mut Vec<(Rect, Action)>,
 ) {
-    let label = format!(" {label} ");
-    let width = crate::ui::modal_button_width(&label).min(rect.width);
-    let rect = Rect::new(rect.x, rect.y, width, rect.height.min(1));
-    let style = crate::ui::modal_button_style(
-        palette,
-        if active {
-            crate::ui::ModalButtonTone::Primary
+    use crate::ui::kit::footer_hints::{render_footer_hints, FooterHint};
+    let texts = &crate::i18n::texts().monitor;
+    let hint = |key, label, enabled, primary| FooterHint {
+        key,
+        label,
+        enabled,
+        primary,
+    };
+    let (hints, actions): (Vec<FooterHint<'_>>, Vec<Option<Action>>) =
+        if page == Page::Monitor && state.layout_editing {
+            (
+                vec![
+                    hint(
+                        "↑↓",
+                        texts.edit_layout_hint,
+                        state.selected_card.is_some(),
+                        false,
+                    ),
+                    hint("Esc", texts.edit_layout_done, true, true),
+                ],
+                vec![None, Some(Action::EditLayout)],
+            )
         } else {
-            crate::ui::ModalButtonTone::Secondary
-        },
-        crate::ui::ModalButtonState::Normal,
-    );
-    buffer.set_style(rect, style);
-    text(buffer, rect, 0, &label, style);
-    if !rect.is_empty() {
-        hits.push((rect, action));
+            // 账号页的刷新与工具栏同一口径：刷新中 / 防抖期间置灰、不回填命中区。
+            let refresh = page != Page::Accounts || refresh_available(state);
+            let mut hints = vec![hint("r", texts.hint_refresh, refresh, false)];
+            let mut actions = vec![refresh.then_some(Action::Refresh)];
+            if page == Page::Monitor {
+                let label = if state.paused {
+                    texts.hint_resume
+                } else {
+                    texts.hint_pause
+                };
+                hints.push(hint("Space", label, true, false));
+                actions.push(Some(Action::Pause));
+            }
+            hints.push(hint("Esc", texts.hint_close, true, false));
+            actions.push(Some(Action::Close));
+            (hints, actions)
+        };
+    for (rect, index) in render_footer_hints(buffer, area, &hints, None, palette) {
+        if let Some(action) = actions.get(index).cloned().flatten() {
+            hits.push((rect, action));
+        }
     }
 }
 
@@ -279,29 +304,41 @@ pub(super) fn paint(
                 buffer[(x, y)].set_symbol(" ");
             }
         }
-        let inner = block(buffer, area, tr(" MONITOR ", " 监控 "), cx);
+        // 停靠面板的表头已经写了「监控」，边框上不再重复；只有经典布局（页面
+        // 铺满 pane 区、与悬浮层同一 pass 绘制，即 `draw_hover` 为真）没有别的
+        // 标题，才在边框上写一次。
+        let title = if draw_hover {
+            tr(" MONITOR ", " 监控 ")
+        } else {
+            ""
+        };
+        let inner = block(buffer, area, title, cx);
         // Single navigation level: page tabs only. Refresh/pause/close live
         // on keyboard shortcuts (see footer) so the row never mixes
-        // navigation with actions.
+        // navigation with actions. 页签走 kit `tabs`：活动页 accent 反色，
+        // 前景按对比度挑选（ds-08）。
+        let texts = &crate::i18n::texts().monitor;
+        let tabs = [
+            (texts.tab_system, Page::Monitor),
+            (texts.tab_accounts, Page::Accounts),
+            (texts.tab_preferences, Page::Settings),
+        ];
+        let items = tabs.map(|(label, _)| crate::ui::kit::tabs::TabItem::new(label));
+        let active = tabs.iter().position(|(_, tab)| *tab == page).unwrap_or(0);
+        let rects = crate::ui::kit::tabs::render_tabs(
+            buffer,
+            Rect::new(inner.x, inner.y, inner.width, inner.height.min(1)),
+            &items,
+            active,
+            None,
+            palette,
+        );
         let mut x = inner.x;
-        for (label, tab) in [
-            (tr("System", "系统"), Page::Monitor),
-            (tr("Accounts", "账号"), Page::Accounts),
-            (tr("Settings", "设置"), Page::Settings),
-        ] {
-            if x >= inner.right() {
-                break;
+        for (rect, (_, tab)) in rects.iter().zip(tabs) {
+            if !rect.is_empty() {
+                hits.push((*rect, Action::Page(tab)));
+                x = rect.right().saturating_add(1);
             }
-            page_tab(
-                buffer,
-                Rect::new(x, inner.y, inner.right() - x, 1),
-                label,
-                page == tab,
-                Action::Page(tab),
-                palette,
-                &mut hits,
-            );
-            x = x.saturating_add(UnicodeWidthStr::width(label) as u16 + 3);
         }
         if state.paused {
             let label = tr(" ‖ paused ", " ‖ 已暂停 ");
@@ -333,17 +370,18 @@ pub(super) fn paint(
             Page::Accounts => accounts(buffer, body, state, palette, &mut hits),
             Page::Settings => settings(buffer, body, state, palette, &mut hits),
         }
-        let footer = state.message.as_deref().unwrap_or(tr(
-            "1/2/3 pages · r refresh · Space pause · Esc close",
-            "1/2/3 切页 · r 刷新 · 空格 暂停 · Esc 关闭",
-        ));
-        text(
-            buffer,
-            Rect::new(inner.x, inner.bottom().saturating_sub(1), inner.width, 1),
-            0,
-            footer,
-            Style::default().fg(palette.overlay0),
-        );
+        // 页脚：一次性说明（`message`）优先，否则是可点的键位提示。
+        let footer = Rect::new(inner.x, inner.bottom().saturating_sub(1), inner.width, 1);
+        match state.message.as_deref() {
+            Some(message) => text(
+                buffer,
+                footer,
+                0,
+                message,
+                Style::default().fg(palette.overlay0),
+            ),
+            None => footer_hints(buffer, footer, state, page, palette, &mut hits),
+        }
     }
     let mut hover_hits = Vec::new();
     // agent 行悬浮只在没有页面时画（停靠面板的全局 pass / 经典布局无页面）。
@@ -379,16 +417,110 @@ fn clear(buffer: &mut Buffer, rect: Rect) {
     }
 }
 
+/// 各页测试共用的绘制与缓冲区断言辅助（`render/*.rs` 的测试用
+/// `super::super::test_support::*`）。
+#[cfg(test)]
+pub(super) mod test_support {
+    use super::*;
+    use crate::client::shell::ClientShellConfig;
+    use crate::config::Config;
+
+    pub(super) fn config() -> ClientShellConfig {
+        ClientShellConfig::from_config(&Config::default())
+    }
+
+    /// 测试用的组件上下文：只需要调色板、组件 token 与字形。
+    pub(super) fn chrome_context(config: &ClientShellConfig) -> ChromeContext<'_> {
+        ChromeContext {
+            page_bounds: None,
+            palette: &config.palette,
+            components: &config.components,
+            glyphs: config.border_glyphs,
+            hover: None,
+            spinner: "",
+            now: std::time::Instant::now(),
+        }
+    }
+
+    /// 按停靠面板 pass（不画悬浮层、边框无标题）画一页。
+    pub(super) fn paint_page(
+        state: &State,
+        page: Page,
+        width: u16,
+        height: u16,
+    ) -> (Buffer, PaintOutput) {
+        let area = Rect::new(0, 0, width, height);
+        let mut buffer = Buffer::empty(area);
+        let config = config();
+        let cx = chrome_context(&config);
+        let output = paint(&mut buffer, area, state, &cx, Some(page), false);
+        (buffer, output)
+    }
+
+    pub(super) fn row_text(buffer: &Buffer, y: u16) -> String {
+        (0..buffer.area.width)
+            .map(|x| buffer[(x, y)].symbol().to_owned())
+            .collect::<String>()
+    }
+
+    pub(super) fn buffer_text(buffer: &Buffer) -> String {
+        (0..buffer.area.height)
+            .map(|y| row_text(buffer, y))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// 某行是否含 `needle`：宽字符占两个单元格、续格是空格，两边都去掉空格再比。
+    pub(super) fn row_has(buffer: &Buffer, y: u16, needle: &str) -> bool {
+        row_text(buffer, y)
+            .replace(' ', "")
+            .contains(&needle.replace(' ', ""))
+    }
+
+    pub(super) fn buffer_has(buffer: &Buffer, needle: &str) -> bool {
+        (0..buffer.area.height).any(|y| row_has(buffer, y, needle))
+    }
+
+    /// 某行里 `needle` 首字符所在单元格的前景色（宽字符占两个单元格，按符号逐格找）。
+    pub(super) fn color_at(buffer: &Buffer, y: u16, needle: &str) -> Option<Color> {
+        let first = needle.chars().next()?.to_string();
+        let x = (0..buffer.area.width).find(|x| {
+            buffer[(*x, y)].symbol() == first
+                && row_text(buffer, y)
+                    .replace(' ', "")
+                    .contains(&needle.replace(' ', ""))
+        })?;
+        buffer[(x, y)].style().fg
+    }
+
+    pub(super) fn contains_rect(outer: Rect, inner: Rect) -> bool {
+        inner.x >= outer.x
+            && inner.y >= outer.y
+            && inner.right() <= outer.right()
+            && inner.bottom() <= outer.bottom()
+    }
+
+    pub(super) fn has(output: &PaintOutput, wanted: impl Fn(&Action) -> bool) -> bool {
+        output.hits.iter().any(|(_, action)| wanted(action))
+    }
+
+    /// `output` 里第一个满足 `wanted` 的命中矩形。
+    pub(super) fn hit_rect(output: &PaintOutput, wanted: impl Fn(&Action) -> bool) -> Option<Rect> {
+        output
+            .hits
+            .iter()
+            .find(|(_, action)| wanted(action))
+            .map(|(rect, _)| *rect)
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use super::test_support::*;
     use super::*;
     use crate::client::shell::ClientShellConfig;
     use crate::config::Config;
     use crate::i18n::{lang_guard, Lang};
-
-    fn config() -> ClientShellConfig {
-        ClientShellConfig::from_config(&Config::default())
-    }
 
     fn provider(agent: &str, label: &str, accounts: &[&str]) -> UsageProviderInfo {
         UsageProviderInfo {
@@ -452,64 +584,6 @@ mod tests {
         state
     }
 
-    /// 测试用的组件上下文：只需要调色板、组件 token 与字形。
-    fn chrome_context(config: &ClientShellConfig) -> ChromeContext<'_> {
-        ChromeContext {
-            page_bounds: None,
-            palette: &config.palette,
-            components: &config.components,
-            glyphs: config.border_glyphs,
-            hover: None,
-            spinner: "",
-            now: std::time::Instant::now(),
-        }
-    }
-
-    fn paint_page(state: &State, page: Page, width: u16, height: u16) -> (Buffer, PaintOutput) {
-        let area = Rect::new(0, 0, width, height);
-        let mut buffer = Buffer::empty(area);
-        let config = config();
-        let cx = chrome_context(&config);
-        let output = paint(&mut buffer, area, state, &cx, Some(page), false);
-        (buffer, output)
-    }
-
-    fn row_text(buffer: &Buffer, y: u16) -> String {
-        (0..buffer.area.width)
-            .map(|x| buffer[(x, y)].symbol().to_owned())
-            .collect::<String>()
-    }
-
-    fn buffer_text(buffer: &Buffer) -> String {
-        (0..buffer.area.height)
-            .map(|y| row_text(buffer, y))
-            .collect::<Vec<_>>()
-            .join("\n")
-    }
-
-    /// 某行是否含 `needle`：宽字符占两个单元格、续格是空格，两边都去掉空格再比。
-    fn row_has(buffer: &Buffer, y: u16, needle: &str) -> bool {
-        row_text(buffer, y)
-            .replace(' ', "")
-            .contains(&needle.replace(' ', ""))
-    }
-
-    fn buffer_has(buffer: &Buffer, needle: &str) -> bool {
-        (0..buffer.area.height).any(|y| row_has(buffer, y, needle))
-    }
-
-    /// 某行里 `needle` 首字符所在单元格的前景色（宽字符占两个单元格，按符号逐格找）。
-    fn color_at(buffer: &Buffer, y: u16, needle: &str) -> Option<Color> {
-        let first = needle.chars().next()?.to_string();
-        let x = (0..buffer.area.width).find(|x| {
-            buffer[(*x, y)].symbol() == first
-                && row_text(buffer, y)
-                    .replace(' ', "")
-                    .contains(&needle.replace(' ', ""))
-        })?;
-        buffer[(x, y)].style().fg
-    }
-
     /// 未确认的进程对话框：Terminate / Force 都该是破坏性语义。
     fn process_dialog_state() -> State {
         let mut state = State::new(&config());
@@ -560,6 +634,7 @@ mod tests {
             let config = ClientShellConfig::from_config(&raw);
             let cx = chrome_context(&config);
             let area = Rect::new(0, 0, 100, 30);
+            // 经典布局 pass（`draw_hover` 为真）：没有停靠表头，边框上写标题。
             let mut buffer = Buffer::empty(area);
             paint(
                 &mut buffer,
@@ -567,7 +642,7 @@ mod tests {
                 &populated(),
                 &cx,
                 Some(Page::Monitor),
-                false,
+                true,
             );
             let corner = buffer[(0, 0)].clone();
             assert_eq!(
@@ -597,6 +672,13 @@ mod tests {
                 row_text(&buffer, 0)
             );
             assert!(!expect_round || cx.glyphs.top_left == "╭");
+            // 停靠面板 pass：表头已写「监控」，边框上不再重复标题。
+            let (docked, _) = paint_page(&populated(), Page::Monitor, 100, 30);
+            assert!(
+                !row_text(&docked, 0).contains(first),
+                "停靠面板的边框不重复标题（{style:?}）：{:?}",
+                row_text(&docked, 0)
+            );
         }
     }
 
@@ -765,17 +847,6 @@ mod tests {
             terminate.right() < force.x || force.right() <= terminate.x,
             "固定列偏移下两个结束按钮不能重叠: {terminate:?} / {force:?}"
         );
-    }
-
-    fn contains_rect(outer: Rect, inner: Rect) -> bool {
-        inner.x >= outer.x
-            && inner.y >= outer.y
-            && inner.right() <= outer.right()
-            && inner.bottom() <= outer.bottom()
-    }
-
-    fn has(output: &PaintOutput, wanted: impl Fn(&Action) -> bool) -> bool {
-        output.hits.iter().any(|(_, action)| wanted(action))
     }
 
     #[test]
@@ -1255,17 +1326,15 @@ mod tests {
                 let palette = theme().with_color_depth(depth);
                 let area = Rect::new(0, 0, 20, 1);
                 let mut buffer = Buffer::empty(area);
-                let mut hits = Vec::new();
-                page_tab(
+                let rects = crate::ui::kit::tabs::render_tabs(
                     &mut buffer,
                     area,
-                    label,
-                    true,
-                    Action::Page(Page::Accounts),
+                    &[crate::ui::kit::tabs::TabItem::new(label)],
+                    0,
+                    None,
                     &palette,
-                    &mut hits,
                 );
-                let (rect, _) = hits.first().expect("选中页签登记命中区");
+                let rect = rects.first().expect("选中页签登记命中区");
                 assert_eq!(
                     rect.width as usize,
                     expected.chars().count(),

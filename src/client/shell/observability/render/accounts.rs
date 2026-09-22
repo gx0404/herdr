@@ -280,6 +280,13 @@ impl ToolbarItem {
     }
 }
 
+/// 账号页此刻能否接受显式刷新：与工具栏「刷新」项同一口径（强意图刷新在途或
+/// 被防抖 / 厂商退避时不行），页脚的刷新提示据此置灰。
+pub(super) fn refresh_available(state: &State) -> bool {
+    let scope = page_scope(state);
+    !scope.refreshing && scope.refresh_wait_secs(state.now_ms).is_none()
+}
+
 /// 「刷新」项：本地强意图刷新在途时原位变成「刷新中…」，显式刷新被防抖 / 厂商退避时
 /// 变成「N 秒后可刷新」；两者都是状态提示，不回填命中区。服务端探测在途（订阅期间
 /// 可能长期为真）只在标题行 / 状态列表达，不锁按钮。

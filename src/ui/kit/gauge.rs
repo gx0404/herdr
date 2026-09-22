@@ -1,8 +1,6 @@
 //! 额度 / 用量条：阈值色、溢出态、额度窗口进度刻度、分段填充与 ascii 降级。
 //! 只画 `area` 的第一行；数字由调用方另画（见 `meter_row`），条本身不带文字。
 
-#![allow(dead_code)] // seam-stub(monitor)：波 2 监控车道接入系统页 / 账号页后删除
-
 use ratatui::{
     buffer::Buffer,
     layout::Rect,

@@ -1,8 +1,6 @@
 //! 卡片：带标题与徽标的边框容器，是监控系统页 / 账号页 / 设置页的分区单元。
 //! 边框字形来自调用方的 `BorderGlyphs`（随 `ui.border_style` 解析一次）。
 
-#![allow(dead_code)] // seam-stub(monitor)：波 2 监控车道接入系统页 / 设置页后删除
-
 use ratatui::{
     buffer::Buffer,
     layout::Rect,

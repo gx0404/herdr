@@ -4,8 +4,6 @@
 //! 栈数组（最多 64 列），单元格文本由调用方的回调按需给出，原语本身只分配返回
 //! 的命中表。
 
-#![allow(dead_code)] // seam-stub(monitor)：波 2 监控车道接入进程表后删除
-
 use std::borrow::Cow;
 
 use ratatui::{

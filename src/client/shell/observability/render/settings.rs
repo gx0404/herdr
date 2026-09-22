@@ -135,7 +135,7 @@ impl SettingsRow<'_> {
             Self::Card(id) => format!(
                 "{} {}",
                 check(state.monitor.visible.iter().any(|item| item == id)),
-                section_title(id).trim()
+                section_title(id)
             ),
             Self::AlertThreshold(index) => {
                 state

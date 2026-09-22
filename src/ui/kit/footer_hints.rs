@@ -1,8 +1,6 @@
 //! 页脚键位提示：` key ` 键帽 + 标签，一行排开、可点。放不下时从尾部丢弃，
 //! `primary` 项最后才丢。
 
-#![allow(dead_code)] // seam-stub(machines)：波 2 机器车道接入机器浮层页脚后删除
-
 use ratatui::{
     buffer::Buffer,
     layout::Rect,

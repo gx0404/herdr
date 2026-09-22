@@ -55,6 +55,42 @@ pub(super) struct Workers {
     sensors: Option<Worker<Vec<SensorMetric>>>,
 }
 
+/// 伪文件系统与只读镜像挂载不进磁盘列表：它们要么没有容量，要么是 snap /
+/// AppImage 之类的 squashfs 快照（占用率恒为 100%），只会淹没真正的数据盘。
+pub(super) fn pseudo_filesystem(file_system: &str) -> bool {
+    matches!(
+        file_system,
+        "tmpfs"
+            | "devtmpfs"
+            | "squashfs"
+            | "overlay"
+            | "overlayfs"
+            | "proc"
+            | "sysfs"
+            | "cgroup"
+            | "cgroup2"
+            | "devpts"
+            | "efivarfs"
+            | "fusectl"
+            | "debugfs"
+            | "tracefs"
+            | "securityfs"
+            | "pstore"
+            | "hugetlbfs"
+            | "mqueue"
+            | "bpf"
+            | "autofs"
+            | "binfmt_misc"
+            | "configfs"
+            | "ramfs"
+            | "iso9660"
+            | "nsfs"
+            | "fuse.portal"
+            | "fuse.gvfsd-fuse"
+            | "fuse.snapfuse"
+    )
+}
+
 pub(super) fn mark(snapshot: &mut SystemMetricsSnapshot, name: &str, sampled: u64) {
     snapshot.group_sampled_at_ms.insert(name.into(), sampled);
     snapshot.group_status.insert(
@@ -81,6 +117,10 @@ impl Workers {
             let mut totals = HashMap::new();
             let mut result = disks
                 .iter()
+                .filter(|disk| {
+                    disk.total_space() > 0
+                        && !pseudo_filesystem(&disk.file_system().to_string_lossy())
+                })
                 .map(|disk| {
                     let id = format!(
                         "{}:{}",
@@ -219,6 +259,26 @@ impl Workers {
                 snapshot.sensors = values;
                 mark(snapshot, "sensors", at);
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::pseudo_filesystem;
+
+    /// 数据盘保留，tmpfs / squashfs / overlay 等伪文件系统与镜像挂载过滤掉。
+    #[test]
+    fn pseudo_filesystems_are_filtered_out_of_the_disk_list() {
+        for real in [
+            "ext4", "xfs", "btrfs", "zfs", "ntfs", "apfs", "vfat", "nfs", "exfat",
+        ] {
+            assert!(!pseudo_filesystem(real), "{real} 是真实数据盘");
+        }
+        for pseudo in [
+            "tmpfs", "squashfs", "overlay", "proc", "sysfs", "devtmpfs", "efivarfs",
+        ] {
+            assert!(pseudo_filesystem(pseudo), "{pseudo} 应被过滤");
         }
     }
 }

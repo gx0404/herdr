@@ -64,6 +64,34 @@ pub(super) enum Page {
     Settings,
 }
 
+/// 系统页迷你图 / 条形的字形档位，持久化为客户端偏好（wire 名固定 snake_case）。
+/// 默认盲文；宿主字体缺盲文时切方块，连方块都缺时切 ASCII。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(super) enum ChartGlyphsPreference {
+    #[default]
+    Braille,
+    Blocks,
+    Ascii,
+}
+
+impl ChartGlyphsPreference {
+    /// kit 迷你图用的字形集。
+    pub(super) fn chart(self) -> crate::ui::kit::braille_chart::ChartGlyphs {
+        use crate::ui::kit::braille_chart::ChartGlyphs;
+        match self {
+            Self::Braille => ChartGlyphs::Braille,
+            Self::Blocks => ChartGlyphs::Blocks,
+            Self::Ascii => ChartGlyphs::Ascii,
+        }
+    }
+
+    /// 条形 / 开关 / 表格排序标记是否降级为 ASCII：只有第三档。
+    pub(super) fn ascii(self) -> bool {
+        matches!(self, Self::Ascii)
+    }
+}
+
 #[derive(Clone, Debug)]
 pub(super) enum Purpose {
     Metrics,
@@ -338,6 +366,9 @@ pub(super) enum Action {
     Page(Page),
     Close,
     Pause,
+    /// 系统页「编辑布局」模式开关：卡片的 ↑↓ 按钮只在该模式下出现，↑↓ 键移动
+    /// 选中的卡片。
+    EditLayout,
     Configure,
     Refresh,
     ToggleAlerts,
@@ -368,7 +399,8 @@ pub(super) enum Action {
     CancelProcess,
     Terminate(bool),
     ConfirmProcess,
-    SortProcesses,
+    /// 进程表按列排序（表头点击）。
+    SortProcesses(ProcessSort),
     FilterProcesses,
     Card(String),
     Core(usize),
@@ -384,6 +416,10 @@ pub(super) enum Action {
 
 /// 每个账号保留的用量历史样本数（右栏 sparkline 的窗口）。
 pub(super) const USAGE_HISTORY_SAMPLES: usize = 120;
+
+/// 每个网络接口保留的速率样本数（网络卡堆叠迷你图的窗口；按默认 1 s 采样约
+/// 两分钟），也是渲染期栈上拷贝缓冲的上限。
+pub(super) const NET_HISTORY_SAMPLES: usize = 128;
 
 /// 一次账号用量采样：`percent` 取该账号各窗口里已用比例最高的一档（「最紧的
 /// 那一档」是用户扫一眼 sparkline 想看的压力信号）。
@@ -714,6 +750,14 @@ pub(super) struct State {
     pub selected_hit: usize,
     pub selected_card: Option<String>,
     pub selected_core: Option<usize>,
+    /// 系统页「编辑布局」模式：卡片带 ↑↓ 按钮，↑↓ 键移动选中的卡片；离开
+    /// 系统页或关闭面板即退出。
+    pub layout_editing: bool,
+    /// 系统页迷你图 / 条形的字形档位。
+    pub chart_glyphs: ChartGlyphsPreference,
+    /// 每个网络接口最近的 (收, 发) 速率样本（B/s）：网络卡堆叠迷你图与空闲
+    /// 判定的数据源；随主机 boot 变化清空，接口消失即丢弃。
+    pub net_history: HashMap<String, VecDeque<(f32, f32)>>,
     pub card_scroll: HashMap<String, usize>,
     pub account_scroll: usize,
     /// 系统页卡片列表的滚动位置；设置页用 `settings_scroll`，两页互不泄漏。
@@ -1245,6 +1289,9 @@ impl State {
             selected_hit: 0,
             selected_card: None,
             selected_core: None,
+            layout_editing: false,
+            chart_glyphs: ChartGlyphsPreference::default(),
+            net_history: HashMap::new(),
             card_scroll: HashMap::new(),
             account_scroll: 0,
             scroll: 0,
@@ -1385,9 +1432,35 @@ impl State {
             .is_some_and(|old| old.boot_id != snapshot.boot_id)
         {
             self.history.clear();
+            self.net_history.clear();
             self.alerts.clear();
         }
         if !self.paused && snapshot.sampled_at_ms > 0 {
+            // 网络接口速率：消失的接口随之丢弃；两个方向都未知（首次差分）时不记
+            // 样本，空闲判定才不会把「还没算出速率」当成活动。
+            self.net_history
+                .retain(|id, _| snapshot.networks.iter().any(|net| net.id == *id));
+            for net in &snapshot.networks {
+                let (Some(rx), Some(tx)) = (
+                    net.received_bytes_per_second,
+                    net.transmitted_bytes_per_second,
+                ) else {
+                    continue;
+                };
+                let sample = (rx.max(0.0) as f32, tx.max(0.0) as f32);
+                match self.net_history.get_mut(&net.id) {
+                    Some(samples) => {
+                        if samples.len() >= NET_HISTORY_SAMPLES {
+                            samples.pop_front();
+                        }
+                        samples.push_back(sample);
+                    }
+                    None => {
+                        self.net_history
+                            .insert(net.id.clone(), VecDeque::from([sample]));
+                    }
+                }
+            }
             let memory = (snapshot.memory.total_bytes > 0).then(|| {
                 snapshot.memory.used_bytes as f32 / snapshot.memory.total_bytes as f32 * 100.0
             });
@@ -1593,6 +1666,10 @@ impl ClientShellState {
             Page::Monitor => self.observability.scroll = 0,
             Page::Settings => self.observability.settings_scroll = 0,
             Page::Accounts => {}
+        }
+        // 编辑布局只属于系统页。
+        if page != Page::Monitor {
+            self.observability.layout_editing = false;
         }
         self.observability.next_metrics = Instant::now();
         self.observability.next_usage = Instant::now();
@@ -3038,9 +3115,13 @@ impl ClientShellState {
                 }
             }
             Action::Page(page) => self.open_observation_page(page, outcome),
+            Action::EditLayout => {
+                self.observability.layout_editing = !self.observability.layout_editing;
+            }
             Action::Close => {
                 self.observability.clear_hover();
                 self.observability.process_dialog = None;
+                self.observability.layout_editing = false;
                 if self.workbench.enabled {
                     // 关闭的是承载页面的面板（而非当前聚焦面板）：终端聚焦时
                     // 也能从命令面板关掉监控面板；锁定布局时给出反馈。
@@ -3302,13 +3383,7 @@ impl ClientShellState {
                     );
                 }
             }
-            Action::SortProcesses => {
-                self.observability.process_sort = match self.observability.process_sort {
-                    ProcessSort::Cpu => ProcessSort::Memory,
-                    ProcessSort::Memory => ProcessSort::Name,
-                    _ => ProcessSort::Cpu,
-                }
-            }
+            Action::SortProcesses(sort) => self.observability.process_sort = sort,
             Action::FilterProcesses => {
                 self.observability.filtering_processes = !self.observability.filtering_processes
             }
@@ -3694,6 +3769,13 @@ impl ClientShellState {
             && matches!(key.code, KeyCode::Up | KeyCode::Down)
         {
             if let Some(card) = &self.observability.selected_card {
+                // 编辑布局模式下 ↑↓ 移动选中的卡片，其余时候滚动卡片内容。
+                if self.observability.layout_editing {
+                    let card = card.clone();
+                    let delta = if key.code == KeyCode::Down { 1 } else { -1 };
+                    self.observation_action(Action::CardMove(card, delta), outcome);
+                    return true;
+                }
                 let count =
                     self.observability
                         .metrics
@@ -3745,6 +3827,8 @@ impl ClientShellState {
             KeyCode::Esc if self.observability.process_dialog.is_some() => {
                 Some(Action::CancelProcess)
             }
+            // 编辑布局模式下 Esc 先结束编辑，再按一次才关闭页面。
+            KeyCode::Esc if self.observability.layout_editing => Some(Action::EditLayout),
             KeyCode::Esc => Some(Action::Close),
             KeyCode::Char('1') => Some(Action::Page(Page::Monitor)),
             KeyCode::Char('2') => Some(Action::Page(Page::Accounts)),

@@ -2,8 +2,6 @@
 //! 八级，ascii 一格一列八级；宿主字体缺盲文时切 `Blocks`，连方块都缺时切
 //! `Ascii`。样本靠右对齐（最新在右），超出列数的旧样本丢弃；不分配。
 
-#![allow(dead_code)] // seam-stub(monitor)：波 2 监控车道接入系统页后删除
-
 use ratatui::{buffer::Buffer, layout::Rect, style::Color, style::Style};
 
 /// 字形集：决定每格容纳几个样本、每行分几级。
