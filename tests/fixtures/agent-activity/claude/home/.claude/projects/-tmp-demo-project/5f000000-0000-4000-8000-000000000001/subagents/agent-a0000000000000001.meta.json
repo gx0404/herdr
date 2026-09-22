@@ -1,0 +1,10 @@
+{
+  "agentType": "Explore",
+  "description": "map the render hot path",
+  "model": "sonnet",
+  "requestShape": "foreground",
+  "requestNonInteractive": false,
+  "spawnDepth": 1,
+  "spawnedWithWorktree": false,
+  "toolUseId": "t-demo-1"
+}

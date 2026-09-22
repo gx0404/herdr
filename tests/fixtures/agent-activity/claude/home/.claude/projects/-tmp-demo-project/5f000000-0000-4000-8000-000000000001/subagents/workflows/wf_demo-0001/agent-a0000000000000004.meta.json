@@ -1,0 +1,8 @@
+{
+  "agentType": "workflow-subagent",
+  "description": "critic:w2",
+  "model": "opus",
+  "requestShape": "background",
+  "workflowPhase": "Critic",
+  "spawnDepth": 2
+}

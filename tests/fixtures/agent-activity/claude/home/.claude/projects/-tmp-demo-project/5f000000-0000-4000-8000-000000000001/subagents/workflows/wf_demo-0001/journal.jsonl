@@ -1,0 +1,6 @@
+{"type":"launched"}
+{"type":"started","key":"design:w2#0","agentId":"a0000000000000003","label":"design:w2","phase":"Design"}
+{"type":"started","key":"critic:w2#0","agentId":"a0000000000000004","label":"critic:w2","phase":"Critic"}
+{"type":"failed","key":"critic:w2#0","agentId":"a0000000000000004"}
+{"type":"paused","key":"critic:w2#0","agentId":"a0000000000000004"}
+{ broken journal line
