@@ -13,9 +13,14 @@
 //!   `project_id`、`workspace_id`、`parent_id`、`slug`、`directory`、`path`、`title`、
 //!   `version`、`share_url`、`summary_*`、`metadata`、`cost`(real)、`tokens_input` /
 //!   `tokens_output` / `tokens_reasoning` / `tokens_cache_read` / `tokens_cache_write`、
-//!   `revert`、`permission`、`agent`、`model`（JSON 文本 `{providerID, modelID,
-//!   variant?}`）、`time_created` / `time_updated`（毫秒）、`time_compacting`、
-//!   `time_archived`。**没有状态列**。本机 26/41 带 `parent_id`，深度只有 0/1，但
+//!   `revert`、`permission`、`agent`、`model`、`time_created` / `time_updated`
+//!   （毫秒）、`time_compacting`、`time_archived`。**没有状态列**。
+//!   `model` 是 JSON 文本 `{providerID, id, variant?}`：1.17.20 主安装库上
+//!   `json_each` 枚举出的键集合恰是这三个，`$.id` 与 `$.providerID` 是 text、
+//!   `variant` 可缺；模型名走 `$.id`（25/25 非空），**不是 `$.modelID`**
+//!   （0/25——`modelID` 是 `message.data` 的顶层键，不是 `session.model` 的）。
+//!   [`MODEL_ID_PATH`] 之外保留 [`MODEL_ID_FALLBACK_PATH`] 只为兼容异版。
+//!   本机 26/41 带 `parent_id`，深度只有 0/1，但
 //!   上游明确不设深度上限 → 本适配器递归查询、深度只受 [`MAX_TREE_DEPTH`] 保护。
 //!   `agent` 实测 null 16 个，其余是自由文本（`explore`、`librarian` 与第三方 agent
 //!   名，含零宽字符）。子会话标题由二进制拼成 `<描述> (@<agent> subagent)`。
@@ -55,6 +60,19 @@
 //!   `session.status`（`{sessionID, status: {type: idle|busy|retry}}`）、`session.idle`
 //!   （已弃用）、`permission.asked` / `permission.replied`、`todo.updated`
 //!   （`{sessionID, todos}`）。
+//!
+//! # 键名漂移补验
+//!
+//! 上面的列名、别名与 json 路径是版本相关事实，单测喂的是「SQL 跑完之后」的行
+//! JSON，覆盖不到 SQL 本身。升级 opencode 后（或怀疑键名漂移时）在装有 opencode
+//! 的机器上跑只读探针，它把 [`tree_sql`] / [`todo_sql`] / [`parts_sql`] 原样打到
+//! 本机库上，核对别名全集与各 json 路径仍能解析：
+//!
+//! ```text
+//! cargo nextest run --run-ignored only -E 'test(live_schema_probe)'
+//! ```
+//!
+//! 探针只读、只看键名与非空计数，从不取回或打印任何正文。
 //!
 //! # 节点
 //!
@@ -123,6 +141,13 @@ const SQL_TITLE_CHARS: usize = 160;
 const MAX_LABEL_CHARS: usize = 120;
 const MAX_SUMMARY_CHARS: usize = 160;
 const MAX_ID_LEN: usize = 64;
+
+/// 模型名在 `session.model` 里的路径：1.17.20 实测 `{providerID, id, variant?}`，
+/// 模型名是 `$.id`。
+const MODEL_ID_PATH: &str = "$.id";
+/// 兼容回退：`$.modelID` 在实测的两个版本里都不是 `session.model` 的键（它是
+/// `message.data` 的顶层键），只为其他版本万一改名而保留。
+const MODEL_ID_FALLBACK_PATH: &str = "$.modelID";
 
 /// 单个部件的文本在 SQL 里截到这么多字符（CJK 最多 3 字节 / 字符）。
 const PART_TEXT_CLIP_CHARS: usize = 400;
@@ -342,7 +367,10 @@ fn tree_sql(root: &str, offset: usize) -> String {
            WHERE t.depth < {MAX_TREE_DEPTH}\
          ) \
          SELECT s.id, s.parent_id, t.depth, s.agent, \
-           CASE WHEN json_valid(s.model) THEN json_extract(s.model, '$.modelID') END AS model_id, \
+           CASE WHEN json_valid(s.model) THEN COALESCE(\
+             json_extract(s.model, '{MODEL_ID_PATH}'), \
+             json_extract(s.model, '{MODEL_ID_FALLBACK_PATH}')\
+           ) END AS model_id, \
            substr(s.title, 1, {SQL_TITLE_CHARS}) AS title, length(s.title) AS title_len, \
            s.time_created, s.time_updated, s.time_archived, \
            s.cost, s.tokens_input, s.tokens_output, s.tokens_reasoning, \
@@ -1844,11 +1872,209 @@ mod tests {
         assert!(sql.ends_with("LIMIT 48 OFFSET 96"));
         assert!(
             !sql.contains("s.model AS"),
-            "model 列只取 modelID，不整列取回"
+            "model 列只取模型名，不整列取回"
+        );
+        assert!(
+            sql.contains("json_extract(s.model, '$.id')")
+                && sql.contains("json_extract(s.model, '$.modelID')"),
+            "模型名走实测的 $.id，$.modelID 只作回退"
         );
         let parts = parts_sql("ses_abc", 7, 5);
         assert!(parts.contains("p.session_id = 'ses_abc'"));
         assert!(parts.ends_with("LIMIT 5 OFFSET 7"));
         assert!(!parts.contains("'$.system'"), "永不取回系统提示");
+    }
+
+    // -----------------------------------------------------------------------
+    // 只读键名探针（默认不跑，见文件头「键名漂移补验」）
+    // -----------------------------------------------------------------------
+
+    /// 探针把查询包成聚合时用的行上限：聚合后只有计数进 stdout，不受管道截断影响。
+    const PROBE_ROW_LIMIT: usize = 1_000_000;
+
+    /// 取一行的键集合（排序）；行值当场丢弃，正文不外泄。
+    fn alias_set(db: &dyn DbQuery, sql: &str) -> Option<Vec<String>> {
+        let output = db
+            .query(&format!("SELECT * FROM ({sql}) LIMIT 1"))
+            .expect("包装查询可执行");
+        let rows = parse_rows(&output).expect("包装查询返回 JSON 数组");
+        rows.first().map(|row| {
+            let mut keys: Vec<String> = row.keys().cloned().collect();
+            keys.sort();
+            keys
+        })
+    }
+
+    /// 把查询包成聚合，只取 `row_total` 与各列的非空计数；行值永远不进 stdout。
+    fn non_null_counts(db: &dyn DbQuery, sql: &str, columns: &[&str]) -> BTreeMap<String, u64> {
+        let projection: Vec<String> = columns
+            .iter()
+            .map(|column| format!("COUNT(\"{column}\") AS \"{column}\""))
+            .collect();
+        let output = db
+            .query(&format!(
+                "SELECT COUNT(*) AS row_total, {} FROM ({sql})",
+                projection.join(", ")
+            ))
+            .expect("聚合查询可执行");
+        let rows = parse_rows(&output).expect("聚合查询返回 JSON 数组");
+        let row = rows.first().expect("聚合查询恰好一行");
+        row.iter()
+            .filter_map(|(key, value)| {
+                non_negative_integer(value).map(|count| (key.clone(), count))
+            })
+            .collect()
+    }
+
+    fn count_of(counts: &BTreeMap<String, u64>, column: &str) -> u64 {
+        counts.get(column).copied().unwrap_or(0)
+    }
+
+    /// 取一列名为 `id` 的标量。
+    fn scalar_id(db: &dyn DbQuery, sql: &str) -> Option<String> {
+        let output = db.query(sql).expect("查询可执行");
+        let rows = parse_rows(&output).expect("查询返回 JSON 数组");
+        identifier(rows.first().and_then(|row| row.get("id")))
+    }
+
+    /// 把三条查询原样打到本机真实的 opencode 库上：核对列别名全集，并确认每条
+    /// `json_extract` 路径在真实数据上仍能解析（路径写错不会报错，只会全为 null，
+    /// 喂夹具的单测看不见——这正是 `$.modelID` 曾经漏网的原因）。
+    ///
+    /// 只读；只看键名与非空计数，不取回也不打印任何正文。升级 opencode 后手动跑：
+    /// `cargo nextest run --run-ignored only -E 'test(live_schema_probe)'`。
+    #[test]
+    #[ignore = "需要本机 opencode 与真实会话库；升级 opencode 后手动核对键名漂移"]
+    fn live_schema_probe_keeps_aliases_and_json_paths() {
+        let home = PathBuf::from(std::env::var_os("HOME").expect("HOME 已设置"));
+        assert!(
+            database_exists(&home, xdg_data_home()),
+            "本机没有 opencode 库：装好 opencode 并跑过一次会话再来"
+        );
+        let db = OfficialCli;
+
+        // 树：挑一个带 model 且有消息的会话当根，别名与路径一次查清。
+        let root = scalar_id(
+            &db,
+            "SELECT s.id AS id FROM session s WHERE json_valid(s.model) \
+             AND EXISTS (SELECT 1 FROM message m WHERE m.session_id = s.id) \
+             ORDER BY s.time_updated DESC LIMIT 1",
+        )
+        .expect("库里要有带 model 与消息的会话");
+        let tree = tree_sql(&root, 0);
+        assert_eq!(
+            alias_set(&db, &tree).expect("根会话至少有自己一行"),
+            [
+                "agent",
+                "cost",
+                "depth",
+                "id",
+                "last_completed",
+                "last_error",
+                "last_role",
+                "model_id",
+                "parent_id",
+                "time_archived",
+                "time_created",
+                "time_updated",
+                "title",
+                "title_len",
+                "tokens_input",
+                "tokens_output",
+                "tokens_reasoning",
+            ],
+            "session 查询的列别名漂移了"
+        );
+        let counts = non_null_counts(&db, &tree, &["model_id", "last_role", "title"]);
+        assert!(
+            count_of(&counts, "model_id") > 0,
+            "model_id 全为 null：session.model 里的模型名路径漂移了（实测是 $.id）"
+        );
+        assert!(
+            count_of(&counts, "last_role") > 0,
+            "last_role 全为 null：message.data 的 $.role 路径漂移了"
+        );
+
+        // 待办：优先挑真有待办的会话核对别名；库里一条都没有时，至少确认这条 SQL
+        // 能在真实 schema 上跑通（列名写错会直接报错）。
+        let todo_owner = scalar_id(
+            &db,
+            "SELECT session_id AS id FROM todo GROUP BY session_id \
+             ORDER BY COUNT(*) DESC LIMIT 1",
+        );
+        let todo = todo_sql(&format!(
+            "'{}'",
+            todo_owner.as_deref().unwrap_or(root.as_str())
+        ));
+        match alias_set(&db, &todo) {
+            Some(keys) => assert_eq!(
+                keys,
+                [
+                    "content",
+                    "content_len",
+                    "position",
+                    "priority",
+                    "session_id",
+                    "status",
+                    "time_created",
+                    "time_updated",
+                ],
+                "todo 查询的列别名漂移了"
+            ),
+            None => assert!(
+                todo_owner.is_none(),
+                "选中的会话有待办却查不到行：todo 查询的过滤条件漂移了"
+            ),
+        }
+
+        // 部件：挑部件最多的会话，别名看一行、路径看整段。
+        let chatty = scalar_id(
+            &db,
+            "SELECT session_id AS id FROM part WHERE json_valid(data) \
+             GROUP BY session_id ORDER BY COUNT(*) DESC LIMIT 1",
+        )
+        .expect("库里要有部件");
+        assert_eq!(
+            alias_set(&db, &parts_sql(&chatty, 0, MAX_PARTS_PER_PAGE)).expect("该会话有部件"),
+            [
+                "filename",
+                "id",
+                "message_completed",
+                "part_end",
+                "role",
+                "text",
+                "text_len",
+                "tool",
+                "tool_output",
+                "tool_output_len",
+                "tool_status",
+                "tool_title",
+                "type",
+            ],
+            "part 查询的列别名漂移了"
+        );
+        let columns = [
+            "type",
+            "role",
+            "message_completed",
+            "tool",
+            "tool_status",
+            "tool_title",
+            "tool_output",
+            "part_end",
+            "text",
+        ];
+        let counts = non_null_counts(&db, &parts_sql(&chatty, 0, PROBE_ROW_LIMIT), &columns);
+        assert_eq!(
+            count_of(&counts, "type"),
+            count_of(&counts, "row_total"),
+            "有部件的 $.type 解析不出来：类型路径漂移了"
+        );
+        for column in columns {
+            assert!(
+                count_of(&counts, column) > 0,
+                "{column} 在整段会话里全为 null：对应的 json 路径漂移了"
+            );
+        }
     }
 }
