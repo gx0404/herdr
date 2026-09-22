@@ -443,6 +443,11 @@ fn client_sees_headless_startup_config_diagnostic() {
 
     let mut cmd = CommandBuilder::new(env!("CARGO_BIN_EXE_herdr"));
     cmd.arg("server");
+    // HOME 隔离到测试目录：客户端连着时 server 会轮询外部来源（zcode 等按 HOME 读
+    // 真实数据），XDG_STATE_HOME 未设时 state_dir 也会回退到真实 HOME。
+    let home = runtime_dir.join("home");
+    let _ = std::fs::create_dir_all(&home);
+    cmd.env("HOME", &home);
     cmd.env("XDG_CONFIG_HOME", &config_home);
     cmd.env("XDG_RUNTIME_DIR", &runtime_dir);
     cmd.env("HERDR_SOCKET_PATH", &api_socket);
@@ -504,9 +509,13 @@ fn server_unreachable_shows_clear_error() {
     )
     .unwrap();
 
+    // HOME 隔离到测试目录，避免 client 读取开发机真实 HOME 下的数据。
+    let home = runtime_dir.join("home");
+    let _ = std::fs::create_dir_all(&home);
     let output = std::process::Command::new(env!("CARGO_BIN_EXE_herdr"))
         .arg("client")
         .env("HERDR_DISABLE_SOUND", "1")
+        .env("HOME", &home)
         .env("XDG_CONFIG_HOME", &config_home)
         .env("XDG_RUNTIME_DIR", &runtime_dir)
         .env("XDG_STATE_HOME", runtime_dir.join("state"))
@@ -1887,6 +1896,11 @@ fn client_receives_notify_on_agent_state_change() {
 
     let mut cmd = CommandBuilder::new(env!("CARGO_BIN_EXE_herdr"));
     cmd.arg("server");
+    // HOME 隔离到测试目录：客户端连着时 server 会轮询外部来源（zcode 等按 HOME 读
+    // 真实数据），XDG_STATE_HOME 未设时 state_dir 也会回退到真实 HOME。
+    let home = runtime_dir.join("home");
+    let _ = std::fs::create_dir_all(&home);
+    cmd.env("HOME", &home);
     cmd.env("XDG_CONFIG_HOME", &config_home);
     cmd.env("XDG_RUNTIME_DIR", &runtime_dir);
     cmd.env("HERDR_SOCKET_PATH", &api_socket);
