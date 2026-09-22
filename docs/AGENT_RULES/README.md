@@ -139,8 +139,9 @@ fork **照常同步上游**；本节只约束同步时怎样处理六家以外�
     通道。这类新增不触及冻结面，整块丢弃即可；fork 已把这条旁路整条删除，
     同步时这两个符号连同其调用点都不再合入。
 - **检查**：同步后跑 `python3 scripts/upstream_sync_drop_check.py`——清单命中的
-  路径仍是 Git 可见文件即退出码 1；`--list` 只列不判。物理删除在后续波次落地，
-  此刻这些路径还在，所以它**尚未接入** `just check` / `just maintenance-test`；
-  **删除落地后再接入**。脚本逻辑自测 `scripts/test_upstream_sync_drop_check.py`
-  已在 maintenance-test 清单内。清单里的注释记着删除时的硬阻塞（grok 的 staged
-  例外，详见 `release-channels.md` 的 fork 例外），按清单删文件前先读。
+  路径仍是 Git 可见文件即退出码 1；`--list` 只列不判。物理删除已落地，该检查
+  **已接入** `just maintenance-test`（因此在 `just ci` / `just check` 链上），
+  上游同步把清单路径带回来会直接红。脚本逻辑自测
+  `scripts/test_upstream_sync_drop_check.py` 同在 maintenance-test 清单内。清单
+  里的注释记着删除时处理过的硬阻塞（grok 的 staged 例外，详见
+  `release-channels.md` 的 fork 例外），同步上游时先读。
