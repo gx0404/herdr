@@ -1,0 +1,20 @@
+{
+  "runId": "run-demo-0002",
+  "taskId": "task-demo-0002",
+  "timestamp": "2026-09-20T10:27:40.000Z",
+  "workflowName": "demo-pipeline",
+  "status": "completed",
+  "startTime": 1789900000000,
+  "durationMs": 60000,
+  "agentCount": 1,
+  "totalTokens": 12345,
+  "totalToolCalls": 24,
+  "defaultModel": "demo-model",
+  "summary": "demo summary",
+  "script": "// demo script",
+  "scriptPath": "/tmp/demo-project/demo.js",
+  "phases": [],
+  "logs": [],
+  "workflowProgress": [],
+  "result": null
+}

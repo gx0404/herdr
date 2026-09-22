@@ -25,6 +25,14 @@
 //!   `Fix` / `Implement` / `Inventory` / `Map` / `Research` / `Review` / `Verify`。
 //!   `result` 的值是各 workflow 自定义的对象或字符串，没有稳定形状 → 只当作
 //!   「该 agent 已结束」的标记，不解析内容。整份 journal 解析失败静默降级。
+//! - `<session-uuid>/workflows/wf_<id>.json`（同为未文档化内部格式，实测 236 份，
+//!   与 `subagents/workflows/wf_<id>/` 按目录名一一对应，但只在 workflow 结束后
+//!   才出现：一个会话里 12 个 wf 目录只有 9 份）：顶层键 `workflowName`（人类
+//!   可读名）、`status`（实测只有 `completed` / `killed`）、`startTime`(ms)、
+//!   `durationMs`、`agentCount`、`totalTokens`、`totalToolCalls`、`summary`、
+//!   `phases`、`logs`、`script` 等。本适配器只取名字、状态、起止时间与 token
+//!   总数给分组节点；workflow 已结束时，其下仍被判为运行中 / 未知的子 agent
+//!   随之落到结束态（`killed` 的 workflow 不会再写 journal 的 `result`）。
 //!
 //! 子 agent 转录行（实测 40 个文件、15 053 行，0 条坏行）：顶层键 `agentId`、
 //! `type`、`timestamp`、`uuid`、`parentUuid`、`isSidechain`、`sessionId`、`cwd`、
@@ -67,14 +75,20 @@ use crate::api::schema::{
     AgentActivityContentFormat, AgentActivityKind, AgentActivityNode, AgentActivityStatus,
 };
 
-/// 一次 discover 产出的节点总上限；超出后按路径序丢弃其余子 agent。
+/// 一次 discover 最多收录的子 agent 数；超出后按路径序丢弃其余（分组与待办节点
+/// 另计，各自有界）。
 const MAX_NODES: usize = 256;
-/// 单个子 agent 转录的扫描字节上限。
+/// 单个子 agent 转录的完整扫描字节上限。
 const MAX_TRANSCRIPT_BYTES: u64 = 4 * 1024 * 1024;
-/// 一次 discover 扫描全部子 agent 转录的总字节预算。
+/// 一次 discover 完整扫描子 agent 转录的总字节预算，按最近修改优先分配。本机
+/// 一个会话就有 227 个约 1 MB 的转录，全扫不现实；预算外的转录只读头部。
 const MAX_DISCOVER_BYTES: u64 = 8 * 1024 * 1024;
+/// 预算外的转录只读这么多头部字节，取开始时间与首条用户文本。
+const HEAD_SCAN_BYTES: u64 = 64 * 1024;
 /// 单份 journal.jsonl 的读取上限。
 const MAX_JOURNAL_BYTES: u64 = 1024 * 1024;
+/// 单份 workflow 状态文件的读取上限（实测最大约 675 KB，含脚本与日志）。
+const MAX_WORKFLOW_STATE_BYTES: u64 = 2 * 1024 * 1024;
 /// 主转录只扫尾部这么多字节找最后一次待办写入。
 const MAX_MAIN_TAIL_BYTES: u64 = 256 * 1024;
 /// 单个 meta 边车的读取上限。
@@ -87,6 +101,9 @@ const MAX_LABEL_CHARS: usize = 120;
 const MAX_TODOS: usize = 32;
 /// 无 journal 记录时，最后一条转录早于这个窗口就不再算运行中。
 const RUNNING_WINDOW_MS: u64 = 120_000;
+/// journal 只记了开始时的宽限：workflow 被杀或崩溃且没写状态文件时不会补
+/// `result`，转录这么久不动就不再算运行中。取得宽，给长时间静默的工具调用留余量。
+const STALE_STARTED_MS: u64 = 30 * 60_000;
 /// read 的分页预算区间。
 const MIN_READ_BYTES: usize = 1024;
 const MAX_READ_BYTES: usize = 1024 * 1024;
@@ -212,6 +229,8 @@ struct SubagentFile {
     rel: String,
     /// 位于 `subagents/workflows/<name>/` 下时的 workflow 目录名。
     workflow: Option<String>,
+    /// 文件最后修改时间；决定扫描预算的分配顺序，也是头部扫描时的最后活动时间。
+    modified_ms: Option<u64>,
 }
 
 /// 递归收集 `subagents/**/agent-*.jsonl`，按相对路径排序保证结果确定。
@@ -243,11 +262,18 @@ fn collect_subagent_files(session_dir: &Path) -> Vec<SubagentFile> {
                 continue;
             };
             let workflow = workflow_of(&rel);
+            let modified_ms = entry
+                .metadata()
+                .ok()
+                .and_then(|metadata| metadata.modified().ok())
+                .and_then(|modified| modified.duration_since(std::time::UNIX_EPOCH).ok())
+                .and_then(|elapsed| u64::try_from(elapsed.as_millis()).ok());
             found.push(SubagentFile {
                 agent_id,
                 path,
                 rel,
                 workflow,
+                modified_ms,
             });
         }
     }
@@ -373,6 +399,49 @@ fn read_journal(path: &Path) -> BTreeMap<String, JournalRecord> {
     records
 }
 
+/// workflow 结束后写出的状态文件里本适配器用到的部分。
+#[derive(Default)]
+struct WorkflowState {
+    name: Option<String>,
+    status: Option<AgentActivityStatus>,
+    started_at_ms: Option<u64>,
+    ended_at_ms: Option<u64>,
+    total_tokens: Option<u64>,
+}
+
+/// 读 `<session>/workflows/<workflow>.json`。文件不存在（workflow 还在跑）、过大
+/// 或不是预期形状都返回 `None`，分组节点退回目录名与子节点统计。
+fn read_workflow_state(session_dir: &Path, workflow: &str) -> Option<WorkflowState> {
+    let path = session_dir
+        .join("workflows")
+        .join(format!("{workflow}.json"));
+    if std::fs::metadata(&path).ok()?.len() > MAX_WORKFLOW_STATE_BYTES {
+        return None;
+    }
+    let text = read_capped(&path, MAX_WORKFLOW_STATE_BYTES)?;
+    let value = serde_json::from_str::<Value>(&text).ok()?;
+    if !value.is_object() {
+        return None;
+    }
+    let started_at_ms = value.get("startTime").and_then(Value::as_u64);
+    let duration_ms = value.get("durationMs").and_then(Value::as_u64);
+    Some(WorkflowState {
+        name: trimmed_string(value.get("workflowName")),
+        status: match value.get("status").and_then(Value::as_str) {
+            Some("completed") => Some(AgentActivityStatus::Done),
+            Some("killed" | "failed" | "error") => Some(AgentActivityStatus::Failed),
+            Some("running") => Some(AgentActivityStatus::Running),
+            // 未知取值不猜，交给子节点统计。
+            _ => None,
+        },
+        started_at_ms,
+        ended_at_ms: started_at_ms
+            .zip(duration_ms)
+            .map(|(start, duration)| start.saturating_add(duration)),
+        total_tokens: value.get("totalTokens").and_then(Value::as_u64),
+    })
+}
+
 // ---------------------------------------------------------------------------
 // 转录扫描
 // ---------------------------------------------------------------------------
@@ -386,19 +455,33 @@ struct TranscriptScan {
     output_tokens: u64,
     first_user_text: Option<String>,
     attribution: Option<String>,
+    /// 是否完整扫到了文件末尾；只有这时消息数与 token 才是全量。
+    complete: bool,
 }
 
-/// 单趟流式扫描一个子 agent 转录，顺带把预算消耗记回 `budget`。坏行只跳过。
-fn scan_transcript(path: &Path, budget: &mut u64) -> TranscriptScan {
+/// 流式扫描一个子 agent 转录，坏行只跳过。
+///
+/// `budget` 还有余量时做完整扫描（单文件上限 `MAX_TRANSCRIPT_BYTES`）并扣减预算；
+/// 预算用尽后只读 `HEAD_SCAN_BYTES` 头部取开始时间与首条用户文本，拿到就停，
+/// 不扣预算。没扫到末尾时最后活动时间取文件修改时间，免得把还在写的转录误判
+/// 为早已停止。
+fn scan_transcript(path: &Path, modified_ms: Option<u64>, budget: &mut u64) -> TranscriptScan {
     let mut scan = TranscriptScan::default();
     let Ok(file) = File::open(path) else {
         return scan;
     };
-    let mut reader = BufReader::new(file);
+    let file_len = file.metadata().map(|metadata| metadata.len()).unwrap_or(0);
+    let full = *budget > 0;
+    let limit = if full {
+        MAX_TRANSCRIPT_BYTES.min(*budget)
+    } else {
+        HEAD_SCAN_BYTES
+    };
+    let mut reader = BufReader::new(std::io::Read::take(file, limit));
     let mut consumed = 0u64;
     let mut raw = Vec::new();
     loop {
-        if consumed >= MAX_TRANSCRIPT_BYTES || consumed >= *budget {
+        if !full && scan.started_at_ms.is_some() && scan.first_user_text.is_some() {
             break;
         }
         raw.clear();
@@ -439,7 +522,13 @@ fn scan_transcript(path: &Path, budget: &mut u64) -> TranscriptScan {
             scan.first_user_text = plain_text(message.get("content")).map(|text| clip(&text));
         }
     }
-    *budget = budget.saturating_sub(consumed);
+    if full {
+        *budget = budget.saturating_sub(consumed);
+    }
+    scan.complete = full && consumed >= file_len;
+    if !scan.complete {
+        scan.last_at_ms = scan.last_at_ms.max(modified_ms);
+    }
     scan
 }
 
@@ -448,10 +537,12 @@ fn scan_transcript(path: &Path, budget: &mut u64) -> TranscriptScan {
 // ---------------------------------------------------------------------------
 
 fn build_tree(session_dir: &Path, now_ms: u64) -> Vec<AgentActivityNode> {
-    let files = collect_subagent_files(session_dir);
+    let mut files = collect_subagent_files(session_dir);
+    files.truncate(MAX_NODES);
 
-    // 每个 workflow 目录读一次 journal；解析失败留空映射，只是少了增强。
+    // 每个 workflow 目录读一次 journal 与状态文件；读不动就只是少了增强。
     let mut journals: BTreeMap<String, BTreeMap<String, JournalRecord>> = BTreeMap::new();
+    let mut workflow_states: BTreeMap<String, Option<WorkflowState>> = BTreeMap::new();
     for workflow in files.iter().filter_map(|file| file.workflow.as_ref()) {
         if !journals.contains_key(workflow) {
             let path = session_dir
@@ -460,28 +551,59 @@ fn build_tree(session_dir: &Path, now_ms: u64) -> Vec<AgentActivityNode> {
                 .join(workflow)
                 .join("journal.jsonl");
             journals.insert(workflow.clone(), read_journal(&path));
+            workflow_states.insert(workflow.clone(), read_workflow_state(session_dir, workflow));
         }
+    }
+
+    // 完整扫描的预算先给最近修改的转录：正在跑的子 agent 最需要准确的用量与
+    // 时间，早已结束的只读头部也够用。
+    let mut scan_order: Vec<usize> = (0..files.len()).collect();
+    scan_order.sort_by_key(|&index| std::cmp::Reverse(files[index].modified_ms));
+    let mut scans: Vec<TranscriptScan> = Vec::new();
+    scans.resize_with(files.len(), TranscriptScan::default);
+    let mut budget = MAX_DISCOVER_BYTES;
+    for index in scan_order {
+        let file = &files[index];
+        scans[index] = scan_transcript(&file.path, file.modified_ms, &mut budget);
     }
 
     let mut nodes: Vec<AgentActivityNode> = Vec::new();
     // workflow / phase 分组节点在 `nodes` 里的下标，用来回填统计。
     let mut group_index: BTreeMap<String, usize> = BTreeMap::new();
     let mut group_tally: BTreeMap<String, Tally> = BTreeMap::new();
-    let mut budget = MAX_DISCOVER_BYTES;
 
-    for file in &files {
-        if nodes.len() >= MAX_NODES {
-            break;
-        }
+    for (file, scan) in files.iter().zip(&scans) {
         let meta = read_meta(&file.path);
         let journal = file
             .workflow
             .as_ref()
             .and_then(|workflow| journals.get(workflow))
             .and_then(|records| records.get(&file.agent_id));
-        let scan = scan_transcript(&file.path, &mut budget);
+        let workflow_state = file
+            .workflow
+            .as_ref()
+            .and_then(|workflow| workflow_states.get(workflow))
+            .and_then(Option::as_ref);
 
-        let status = subagent_status(journal.and_then(|record| record.state), &scan, now_ms);
+        let mut status = subagent_status(journal.and_then(|record| record.state), scan, now_ms);
+        // workflow 已结束：还挂着「运行中 / 未知」的子 agent 不可能再跑，随之落到
+        // 结束态（被 kill 的 workflow 不会再给子 agent 写 journal 的 result）。
+        if let Some(terminal) = workflow_state
+            .and_then(|state| state.status)
+            .filter(|status| {
+                matches!(
+                    status,
+                    AgentActivityStatus::Done | AgentActivityStatus::Failed
+                )
+            })
+        {
+            if !matches!(
+                status,
+                AgentActivityStatus::Done | AgentActivityStatus::Failed
+            ) {
+                status = terminal;
+            }
+        }
         let parent_id = match &file.workflow {
             None => None,
             Some(workflow) => {
@@ -531,12 +653,12 @@ fn build_tree(session_dir: &Path, now_ms: u64) -> Vec<AgentActivityNode> {
         nodes.push(AgentActivityNode {
             id: file.agent_id.clone(),
             kind: AgentActivityKind::Subagent,
-            label: subagent_label(&file.agent_id, &meta, journal, &scan),
+            label: subagent_label(&file.agent_id, &meta, journal, scan),
             status,
             parent_id,
             agent_type,
             content_ref: Some(file.rel.clone()),
-            summary: subagent_summary(&meta, &scan),
+            summary: subagent_summary(&meta, scan),
             started_at_ms: scan.started_at_ms,
             ended_at_ms: (status != AgentActivityStatus::Running)
                 .then_some(scan.last_at_ms)
@@ -550,6 +672,35 @@ fn build_tree(session_dir: &Path, now_ms: u64) -> Vec<AgentActivityNode> {
         };
         node.status = tally.status();
         node.summary = Some(tally.summary());
+    }
+
+    // workflow 状态文件给分组节点补人类可读名、终态、起止时间与 token 总数。
+    for (workflow, state) in &workflow_states {
+        let Some(state) = state else {
+            continue;
+        };
+        let Some(node) = group_index
+            .get(&format!("wf:{workflow}"))
+            .and_then(|index| nodes.get_mut(*index))
+        else {
+            continue;
+        };
+        if let Some(name) = &state.name {
+            node.label = clip(name);
+        }
+        if let Some(status) = state.status {
+            node.status = status;
+        }
+        node.started_at_ms = state.started_at_ms;
+        node.ended_at_ms = state.ended_at_ms;
+        if let Some(tokens) = state.total_tokens {
+            let tally = node.summary.take().unwrap_or_default();
+            node.summary = Some(if tally.is_empty() {
+                format!("{} tokens", compact_count(tokens))
+            } else {
+                format!("{tally} · {} tokens", compact_count(tokens))
+            });
+        }
     }
 
     nodes.extend(read_todos(session_dir));
@@ -617,8 +768,9 @@ fn ensure_group(
     });
 }
 
-/// journal 有记录时以它为准；没有就靠「最后一条转录距今多久」判定，判不出来落
-/// `Unknown` 而不是猜 `Done`——子 agent 转录里没有任何结束记录（本机实测）。
+/// journal 有终态记录时以它为准；只记了开始的，转录久未变化就不再算运行中；
+/// 没有 journal 就靠「最后一条转录距今多久」判定。判不出来落 `Unknown` 而不是猜
+/// `Done`——子 agent 转录里没有任何结束记录（本机实测）。
 fn subagent_status(
     journal: Option<JournalState>,
     scan: &TranscriptScan,
@@ -627,7 +779,14 @@ fn subagent_status(
     match journal {
         Some(JournalState::Done) => return AgentActivityStatus::Done,
         Some(JournalState::Failed) => return AgentActivityStatus::Failed,
-        Some(JournalState::Started) => return AgentActivityStatus::Running,
+        Some(JournalState::Started) => {
+            return match scan.last_at_ms {
+                Some(last) if now_ms.saturating_sub(last) > STALE_STARTED_MS => {
+                    AgentActivityStatus::Unknown
+                }
+                _ => AgentActivityStatus::Running,
+            };
+        }
         None => {}
     }
     match scan.last_at_ms {
@@ -660,14 +819,17 @@ fn subagent_summary(meta: &SubagentMeta, scan: &TranscriptScan) -> Option<String
     if let Some(model) = &meta.model {
         parts.push(clip(model));
     }
-    if scan.messages > 0 {
-        parts.push(format!("{} msg", scan.messages));
-    }
-    if scan.input_tokens > 0 {
-        parts.push(format!("in {}", compact_count(scan.input_tokens)));
-    }
-    if scan.output_tokens > 0 {
-        parts.push(format!("out {}", compact_count(scan.output_tokens)));
+    // 没扫完的转录只有部分计数，宁可不报也不报错数。
+    if scan.complete {
+        if scan.messages > 0 {
+            parts.push(format!("{} msg", scan.messages));
+        }
+        if scan.input_tokens > 0 {
+            parts.push(format!("in {}", compact_count(scan.input_tokens)));
+        }
+        if scan.output_tokens > 0 {
+            parts.push(format!("out {}", compact_count(scan.output_tokens)));
+        }
     }
     (!parts.is_empty()).then(|| parts.join(" · "))
 }
@@ -1150,6 +1312,74 @@ mod tests {
     }
 
     #[test]
+    fn a_finished_workflow_names_its_group_and_settles_its_children() {
+        let nodes = discover(SESSION_ID, FIXTURE_LAST_MS);
+        let workflow = node(&nodes, "wf:wf_demo-0002");
+        assert_eq!(workflow.label, "demo-pipeline");
+        assert_eq!(workflow.status, AgentActivityStatus::Done);
+        assert_eq!(workflow.started_at_ms, Some(1_789_900_000_000));
+        assert_eq!(workflow.ended_at_ms, Some(1_789_900_060_000));
+        assert_eq!(
+            workflow.summary.as_deref(),
+            Some("0/1 running · 12.3k tokens")
+        );
+        // a5 无 journal、按时间窗本应是 Unknown；workflow 已完成，随之落 Done。
+        let child = node(&nodes, "a0000000000000005");
+        assert_eq!(child.status, AgentActivityStatus::Done);
+        assert_eq!(child.ended_at_ms, Some(1_789_900_000_000));
+    }
+
+    #[test]
+    fn a_malformed_workflow_state_falls_back_to_the_directory_name() {
+        let nodes = discover(SESSION_ID, FIXTURE_LAST_MS);
+        // wf_demo-0001.json 是截断的坏文件：名字退回目录名，状态退回子节点统计。
+        let workflow = node(&nodes, "wf:wf_demo-0001");
+        assert_eq!(workflow.label, "wf_demo-0001");
+        assert_eq!(workflow.status, AgentActivityStatus::Running);
+        assert_eq!(workflow.started_at_ms, None);
+    }
+
+    #[test]
+    fn an_exhausted_scan_budget_falls_back_to_the_head_and_file_time() {
+        let path = fixture_home().join(
+            ".claude/projects/-tmp-demo-project/5f000000-0000-4000-8000-000000000001/subagents/agent-a0000000000000001.jsonl",
+        );
+        let later = FIXTURE_LAST_MS + 3_600_000;
+
+        // 预算用尽：只读头部，拿到开始时间与首条用户文本就停，不扣预算。
+        let mut budget = 0;
+        let head = scan_transcript(&path, Some(later), &mut budget);
+        assert_eq!(budget, 0);
+        assert!(!head.complete);
+        assert_eq!(head.started_at_ms, Some(1_790_071_440_000));
+        assert_eq!(
+            head.first_user_text.as_deref(),
+            Some("map the render hot path")
+        );
+        // 没扫到末尾时最后活动时间取文件修改时间。
+        assert_eq!(head.last_at_ms, Some(later));
+        assert_eq!(
+            subagent_summary(&SubagentMeta::default(), &head),
+            None,
+            "部分计数不进摘要"
+        );
+
+        // 预算只够半行：扣光预算，同样标记为未扫完。
+        let mut budget = 100;
+        let partial = scan_transcript(&path, Some(later), &mut budget);
+        assert_eq!(budget, 0);
+        assert!(!partial.complete);
+        assert_eq!(partial.last_at_ms, Some(later));
+
+        // 预算充足：完整扫描，按内容时间而不是文件时间。
+        let mut budget = MAX_DISCOVER_BYTES;
+        let full = scan_transcript(&path, Some(later), &mut budget);
+        assert!(full.complete);
+        assert_eq!(full.last_at_ms, Some(FIXTURE_LAST_MS));
+        assert!(budget < MAX_DISCOVER_BYTES);
+    }
+
+    #[test]
     fn an_unknown_journal_type_is_ignored_without_losing_the_agent() {
         let nodes = discover(SESSION_ID, FIXTURE_LAST_MS);
         // journal 里 a0000000000000004 之后有一条 type="paused" 的未知记录。
@@ -1169,6 +1399,27 @@ mod tests {
         let node = node(&stale, "a0000000000000001");
         assert_eq!(node.status, AgentActivityStatus::Unknown);
         assert_eq!(node.ended_at_ms, Some(FIXTURE_LAST_MS));
+    }
+
+    #[test]
+    fn a_journal_started_agent_goes_stale_when_its_transcript_stops() {
+        // a3 的 journal 只有 started；转录最后一条在 10:00。
+        let started_ms = 1_790_071_200_000;
+        let within = discover(SESSION_ID, started_ms + STALE_STARTED_MS);
+        assert_eq!(
+            node(&within, "a0000000000000003").status,
+            AgentActivityStatus::Running
+        );
+        // 超过宽限仍无动静：workflow 多半已被杀，不再算运行中，分组也不再计入。
+        let stale = discover(SESSION_ID, started_ms + STALE_STARTED_MS + 1);
+        assert_eq!(
+            node(&stale, "a0000000000000003").status,
+            AgentActivityStatus::Unknown
+        );
+        assert_eq!(
+            node(&stale, "wf:wf_demo-0001").summary.as_deref(),
+            Some("0/2 running")
+        );
     }
 
     #[test]
