@@ -66,13 +66,19 @@ const KIMI_HOOK_ASSET: &str = if cfg!(windows) {
 } else {
     include_str!("assets/kimi/herdr-agent-state.sh")
 };
-const KIMI_INTEGRATION_VERSION: u32 = 7;
+const KIMI_INTEGRATION_VERSION: u32 = 8;
 const KIMI_CONFIG_BLOCK_BEGIN: &str = "# >>> herdr kimi integration";
 const KIMI_CONFIG_BLOCK_END: &str = "# <<< herdr kimi integration";
 const KIMI_MIN_VERSION: &str = "0.14.0";
 const KIMI_ASK_USER_QUESTION_MATCHER: &str = "^AskUserQuestion$";
 const KIMI_OTHER_TOOL_MATCHER: &str = "^(?!AskUserQuestion$).*$";
-const KIMI_HOOK_EVENTS: [(&str, Option<&str>, &str); 12] = [
+/// Kimi 的 `Notification` 以通知类型作 matcher 值，后台任务收尾是 `task.<status>`。
+const KIMI_TASK_NOTIFICATION_MATCHER: &str = "^task\\.";
+const KIMI_TODO_TOOL_MATCHER: &str = "^TodoList$";
+/// 末尾五条 `activity` 只给活动树发「有变化」信号（`pane.report_agent_activity`）。
+/// Kimi Code 2.0.2 按固定事件名枚举严格校验整个 `hooks` 段，出现未知事件名会
+/// 整段忽略，新增事件名必须是该枚举里已有的。
+const KIMI_HOOK_EVENTS: [(&str, Option<&str>, &str); 17] = [
     ("SessionStart", None, "session"),
     ("UserPromptSubmit", None, "working"),
     ("PreToolUse", Some(KIMI_OTHER_TOOL_MATCHER), "working"),
@@ -97,6 +103,15 @@ const KIMI_HOOK_EVENTS: [(&str, Option<&str>, &str); 12] = [
     ("PermissionResult", None, "working"),
     ("Stop", None, "idle"),
     ("Interrupt", None, "idle"),
+    ("SubagentStart", None, "activity"),
+    ("SubagentStop", None, "activity"),
+    ("TaskStarted", None, "activity"),
+    (
+        "Notification",
+        Some(KIMI_TASK_NOTIFICATION_MATCHER),
+        "activity",
+    ),
+    ("PostToolUse", Some(KIMI_TODO_TOOL_MATCHER), "activity"),
 ];
 const OPENCODE_PLUGIN_INSTALL_NAME: &str = "herdr-agent-state.js";
 const OPENCODE_PLUGIN_ASSET: &str = include_str!("assets/opencode/herdr-agent-state.js");

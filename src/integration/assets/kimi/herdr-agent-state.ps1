@@ -2,10 +2,13 @@
 # managed by herdr; reinstalling or updating the integration overwrites this file.
 # add custom hooks beside this file instead of editing it.
 # HERDR_INTEGRATION_ID=kimi
-# HERDR_INTEGRATION_VERSION=7
+# HERDR_INTEGRATION_VERSION=8
 
 param([string]$Action = "")
 
+# activity hints need pane.report_agent_activity, which has no herdr CLI
+# subcommand yet; Windows relies on herdr polling the Kimi session files.
+if ($Action -eq "activity") { exit 0 }
 if (@("session", "working", "blocked", "idle") -notcontains $Action) { exit 0 }
 if ($env:HERDR_ENV -ne "1") { exit 0 }
 if ([string]::IsNullOrWhiteSpace($env:HERDR_PANE_ID)) { exit 0 }
