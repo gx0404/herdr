@@ -554,6 +554,15 @@ fn memory_card(
     }
 }
 
+/// GPU 卡实际会列出的设备：隐藏的不进卡。
+fn listed_gpus<'a>(state: &State, sample: &'a SystemMetricsSnapshot) -> Vec<&'a GpuMetric> {
+    sample
+        .gpus
+        .iter()
+        .filter(|gpu| !state.monitor.hidden_devices.contains(&gpu.id))
+        .collect()
+}
+
 /// GPU 卡：每块 GPU 三行——名称 + 温度、利用率 gauge、显存 gauge（无显存数据时
 /// 换成驱动说明）。
 fn gpu_card(
@@ -575,11 +584,13 @@ fn gpu_card(
         );
         return;
     }
+    let gpus = listed_gpus(state, sample);
+    // 滚动位置按卡片实际列出的条目钳一次：隐藏设备或快照变动都会让存量 offset
+    // 越界，越界就整块画空白（与 kit::table 的内部钳位同口径）。
+    let offset = offset.min(gpus.len().saturating_sub(1));
     let ascii = state.chart_glyphs.ascii();
-    for (index, gpu) in sample
-        .gpus
+    for (index, gpu) in gpus
         .iter()
-        .filter(|gpu| !state.monitor.hidden_devices.contains(&gpu.id))
         .skip(offset)
         .take((inner.height as usize).div_ceil(3))
         .enumerate()
@@ -656,6 +667,22 @@ fn gpu_card(
     }
 }
 
+/// 磁盘卡实际会列出的盘：没有容量的伪文件系统不进表，同一设备挂在多处只列
+/// 一次（服务端已按容量去重，这里再按设备名兜底），隐藏的设备不进表。
+fn listed_disks<'a>(state: &State, sample: &'a SystemMetricsSnapshot) -> Vec<&'a DiskMetric> {
+    let mut disks: Vec<&DiskMetric> = Vec::new();
+    for disk in &sample.disks {
+        if disk.total_bytes == 0 || state.monitor.hidden_devices.contains(&disk.id) {
+            continue;
+        }
+        if !disk.name.is_empty() && disks.iter().any(|seen| seen.name == disk.name) {
+            continue;
+        }
+        disks.push(disk);
+    }
+    disks
+}
+
 /// 磁盘卡：表格列出真实数据盘——没有容量的伪文件系统不进表，同一设备挂在多处
 /// 只列一次（服务端已按容量去重，这里再按设备名兜底）。
 fn disks_card(
@@ -667,16 +694,7 @@ fn disks_card(
     offset: usize,
 ) {
     let texts = &crate::i18n::texts().monitor;
-    let mut disks: Vec<&DiskMetric> = Vec::new();
-    for disk in &sample.disks {
-        if disk.total_bytes == 0 || state.monitor.hidden_devices.contains(&disk.id) {
-            continue;
-        }
-        if !disk.name.is_empty() && disks.iter().any(|seen| seen.name == disk.name) {
-            continue;
-        }
-        disks.push(disk);
-    }
+    let disks = listed_disks(state, sample);
     if disks.is_empty() {
         text(
             buffer,
@@ -794,6 +812,27 @@ fn net_rates_text(net: &NetworkMetric) -> String {
     )
 }
 
+/// 网络卡实际会画出的接口与被折叠的空闲接口数：隐藏的不进卡，空闲的折成末行
+/// 的一句说明。
+fn listed_networks<'a>(
+    state: &State,
+    sample: &'a SystemMetricsSnapshot,
+) -> (Vec<&'a NetworkMetric>, usize) {
+    let mut active = Vec::new();
+    let mut idle = 0;
+    for net in &sample.networks {
+        if state.monitor.hidden_devices.contains(&net.id) {
+            continue;
+        }
+        if net_idle(state, net) {
+            idle += 1;
+        } else {
+            active.push(net);
+        }
+    }
+    (active, idle)
+}
+
 /// 网络卡：每个活动接口两行——名称 + 速率、收 / 发堆叠迷你图；空闲接口折成
 /// 末行的一句说明。
 fn network_card(
@@ -805,15 +844,14 @@ fn network_card(
     offset: usize,
 ) {
     let texts = &crate::i18n::texts().monitor;
-    let listed = sample
-        .networks
-        .iter()
-        .filter(|net| !state.monitor.hidden_devices.contains(&net.id));
-    let idle = listed.clone().filter(|net| net_idle(state, net)).count();
+    let (active, idle) = listed_networks(state, sample);
+    // 折叠空闲接口后卡片的行数远少于快照里的接口数，存量 offset 越界就会把卡片
+    // 滚成空白，按实际列出的接口钳一次。
+    let offset = offset.min(active.len().saturating_sub(1));
     let bottom = inner.bottom() - u16::from(idle > 0 && inner.height > 1);
     let glyphs = state.chart_glyphs.chart();
     let mut y = inner.y;
-    for net in listed.filter(|net| !net_idle(state, net)).skip(offset) {
+    for net in active.iter().skip(offset) {
         if y >= bottom {
             break;
         }
@@ -876,30 +914,9 @@ struct Chip<'a> {
     critical: Option<f32>,
 }
 
-/// 温度卡：传感器按芯片汇总成一行（最高 / 平均），gauge 以临界温度（未知时
-/// 100 °C）定标。
-fn sensors_card(
-    buffer: &mut Buffer,
-    inner: Rect,
-    state: &State,
-    sample: &SystemMetricsSnapshot,
-    palette: &Palette,
-    offset: usize,
-) {
-    let texts = &crate::i18n::texts().monitor;
-    if sample.sensors.is_empty() {
-        text(
-            buffer,
-            inner,
-            0,
-            tr(
-                "Sensors unavailable in this environment",
-                "当前环境未提供温度传感器",
-            ),
-            Style::default().fg(palette.overlay0),
-        );
-        return;
-    }
+/// 温度卡实际会画出的行：传感器名的首个词相同的归为一颗芯片，隐藏的传感器
+/// 不参与汇总。
+fn sensor_chips<'a>(state: &State, sample: &'a SystemMetricsSnapshot) -> Vec<Chip<'a>> {
     let hidden = |name: &str| {
         state
             .monitor
@@ -937,6 +954,36 @@ fn sensors_card(
             }),
         }
     }
+    chips
+}
+
+/// 温度卡：传感器按芯片汇总成一行（最高 / 平均），gauge 以临界温度（未知时
+/// 100 °C）定标。
+fn sensors_card(
+    buffer: &mut Buffer,
+    inner: Rect,
+    state: &State,
+    sample: &SystemMetricsSnapshot,
+    palette: &Palette,
+    offset: usize,
+) {
+    let texts = &crate::i18n::texts().monitor;
+    if sample.sensors.is_empty() {
+        text(
+            buffer,
+            inner,
+            0,
+            tr(
+                "Sensors unavailable in this environment",
+                "当前环境未提供温度传感器",
+            ),
+            Style::default().fg(palette.overlay0),
+        );
+        return;
+    }
+    let chips = sensor_chips(state, sample);
+    // 汇总后的行数远少于传感器数，存量 offset 越界就会把卡片滚成空白。
+    let offset = offset.min(chips.len().saturating_sub(1));
     let ascii = state.chart_glyphs.ascii();
     for (index, chip) in chips
         .iter()
@@ -983,6 +1030,38 @@ const PROCESS_COLUMNS: [ProcessSort; 4] = [
     ProcessSort::Memory,
 ];
 
+/// 进程表实际会列出的进程：按筛选词过滤（排序不改变条数，排序在卡片里做）。
+fn listed_processes<'a>(
+    state: &State,
+    sample: &'a SystemMetricsSnapshot,
+) -> Vec<&'a ProcessMetric> {
+    let filter = state.process_filter.to_lowercase();
+    sample
+        .processes
+        .iter()
+        .filter(|process| process.name.to_lowercase().contains(&filter))
+        .collect()
+}
+
+/// 卡片内可滚动的条目数：与卡片**实际渲染**的条目同口径——温度按芯片汇总、
+/// 网络折叠空闲接口、磁盘去重、进程按筛选词过滤，都比快照里的原始条数少。
+/// 滚动上界必须用它，否则 ↑↓ 与滚轮能把卡片滚成空白。
+pub(in crate::client::shell::observability) fn card_scroll_len(
+    state: &State,
+    sample: &SystemMetricsSnapshot,
+    card: &str,
+) -> usize {
+    match card {
+        "cores" => sample.cores.len(),
+        "gpu" => listed_gpus(state, sample).len(),
+        "disks" => listed_disks(state, sample).len(),
+        "network" => listed_networks(state, sample).0.len(),
+        "sensors" => sensor_chips(state, sample).len(),
+        "processes" => listed_processes(state, sample).len(),
+        _ => 0,
+    }
+}
+
 /// 进程卡：首行是筛选入口 + 当前筛选词 + 可见范围，其下是带表头的可排序表格
 /// （点击表头按列排序，点击行打开详情）。
 fn processes_card(
@@ -995,12 +1074,7 @@ fn processes_card(
     hits: &mut Vec<(Rect, Action)>,
 ) {
     let texts = &crate::i18n::texts().monitor;
-    let filter = state.process_filter.to_lowercase();
-    let mut processes = sample
-        .processes
-        .iter()
-        .filter(|process| process.name.to_lowercase().contains(&filter))
-        .collect::<Vec<_>>();
+    let mut processes = listed_processes(state, sample);
     processes.sort_by(|a, b| match state.process_sort {
         ProcessSort::Memory => b.memory_bytes.cmp(&a.memory_bytes),
         ProcessSort::Name => a.name.cmp(&b.name),
@@ -1670,6 +1744,50 @@ mod tests {
         assert!(card_has("nvme"), "{text}");
         assert!(card_has("40°C"), "{text}");
         assert!(!card_has("Core 0"), "逐传感器行已汇总\n{text}");
+    }
+
+    /// 温度卡按芯片汇总、网络卡折叠空闲接口后，卡片行数远少于快照里的条目数：
+    /// 滚动上界与渲染钳位都要按实际条目算，否则卡片会被滚成空白。
+    #[test]
+    fn scrolling_temperature_and_network_cards_never_empties_them() {
+        let _guard = lang_guard(Lang::ZhCn);
+        let mut state = monitored();
+        let card_text = |buffer: &Buffer, rect: Rect| {
+            (rect.y..rect.bottom())
+                .map(|y| row_text(buffer, y))
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        // 3 个传感器汇成 2 颗芯片、3 个接口只有 eth0 非空闲：滚到底停在最后
+        // 一条渲染出来的条目上。
+        for _ in 0..8 {
+            state.scroll_card("sensors", 1);
+            state.scroll_card("network", 1);
+        }
+        assert_eq!(
+            state.card_scroll.get("sensors").copied(),
+            Some(1),
+            "芯片数 2"
+        );
+        assert_eq!(
+            state.card_scroll.get("network").copied(),
+            Some(0),
+            "非空闲接口只有 eth0"
+        );
+        let (buffer, output) = paint_page(&state, Page::Monitor, 120, 100);
+        let sensors = card_text(&buffer, card_rect(&output, "sensors"));
+        assert!(sensors.replace(' ', "").contains("nvme"), "{sensors}");
+        let network = card_text(&buffer, card_rect(&output, "network"));
+        assert!(network.replace(' ', "").contains("eth0"), "{network}");
+        // 接口刚转为空闲、传感器刚被隐藏时会留下越界的存量 offset，卡片自己
+        // 也要钳回来。
+        state.card_scroll.insert("sensors".into(), 9);
+        state.card_scroll.insert("network".into(), 9);
+        let (buffer, output) = paint_page(&state, Page::Monitor, 120, 100);
+        let sensors = card_text(&buffer, card_rect(&output, "sensors"));
+        assert!(sensors.replace(' ', "").contains("nvme"), "{sensors}");
+        let network = card_text(&buffer, card_rect(&output, "network"));
+        assert!(network.replace(' ', "").contains("eth0"), "{network}");
     }
 
     #[test]

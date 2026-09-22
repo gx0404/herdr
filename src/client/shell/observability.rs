@@ -872,6 +872,19 @@ impl State {
         *scroll = scroll.saturating_add_signed(delta).min(limit);
     }
 
+    /// 滚动系统页某张卡片的内容。上界按卡片**实际渲染**的条目数算：温度卡按
+    /// 芯片汇总、网络卡折叠空闲接口、磁盘去重、进程按筛选词过滤，用快照里的
+    /// 原始条数当上界会把卡片滚成空白。
+    pub(super) fn scroll_card(&mut self, card: &str, delta: isize) {
+        let limit = self
+            .metrics
+            .as_ref()
+            .map_or(0, |sample| render::card_scroll_len(self, sample, card))
+            .saturating_sub(1);
+        let scroll = self.card_scroll.entry(card.to_owned()).or_default();
+        *scroll = scroll.saturating_add_signed(delta).min(limit);
+    }
+
     /// 滚动当前页面自己的列表：系统页滚卡片、设置页滚设置行（账号页走
     /// `scroll_accounts`）。两个滚动位置分离，切页不互相泄漏。
     pub(super) fn scroll_page(&mut self, delta: isize) {
@@ -3571,25 +3584,12 @@ impl ClientShellState {
                     None
                 }
             }) {
-                let count =
-                    self.observability
-                        .metrics
-                        .as_ref()
-                        .map_or(0, |sample| match card.as_str() {
-                            "cores" => sample.cores.len(),
-                            "gpu" => sample.gpus.len(),
-                            "disks" => sample.disks.len(),
-                            "network" => sample.networks.len(),
-                            "sensors" => sample.sensors.len(),
-                            "processes" => sample.processes.len(),
-                            _ => 0,
-                        });
-                let scroll = self.observability.card_scroll.entry(card).or_default();
-                *scroll = if mouse.kind == MouseEventKind::ScrollDown {
-                    scroll.saturating_add(1).min(count.saturating_sub(1))
+                let delta = if mouse.kind == MouseEventKind::ScrollDown {
+                    1
                 } else {
-                    scroll.saturating_sub(1)
+                    -1
                 };
+                self.observability.scroll_card(&card, delta);
                 outcome.repaint = true;
                 return true;
             }
@@ -3789,29 +3789,9 @@ impl ClientShellState {
                     self.observation_action(Action::CardMove(card, delta), outcome);
                     return true;
                 }
-                let count =
-                    self.observability
-                        .metrics
-                        .as_ref()
-                        .map_or(0, |sample| match card.as_str() {
-                            "cores" => sample.cores.len(),
-                            "gpu" => sample.gpus.len(),
-                            "disks" => sample.disks.len(),
-                            "network" => sample.networks.len(),
-                            "sensors" => sample.sensors.len(),
-                            "processes" => sample.processes.len(),
-                            _ => 0,
-                        });
-                let scroll = self
-                    .observability
-                    .card_scroll
-                    .entry(card.clone())
-                    .or_default();
-                *scroll = if key.code == KeyCode::Down {
-                    scroll.saturating_add(1).min(count.saturating_sub(1))
-                } else {
-                    scroll.saturating_sub(1)
-                };
+                let card = card.clone();
+                let delta = if key.code == KeyCode::Down { 1 } else { -1 };
+                self.observability.scroll_card(&card, delta);
                 outcome.repaint = true;
                 return true;
             }

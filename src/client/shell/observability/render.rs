@@ -18,6 +18,7 @@ use settings::*;
 use system::*;
 
 pub(super) use accounts::{account_rows, metric_percent};
+pub(super) use system::card_scroll_len;
 
 fn text(buffer: &mut Buffer, rect: Rect, row: u16, value: &str, style: Style) {
     if row >= rect.height || rect.width == 0 {
