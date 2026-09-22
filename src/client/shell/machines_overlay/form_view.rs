@@ -273,21 +273,24 @@ fn form_hints(form: &ClientMachineForm) -> Vec<MachineHint<'static>> {
             MachineHint::button("enter", t.save_button, MachineOverlayButton::Save).primary(),
         );
     }
-    hints.push(MachineHint::button(
-        "ctrl+t",
-        f.test_connection,
-        MachineOverlayButton::TestConnection,
-    ));
-    if let Some(route) = form
-        .bootstrap
-        .as_ref()
-        .and_then(ClientMachineBootstrap::recovery)
-    {
+    // 测试连接与恢复入口只在添加时提供（见 `ClientMachineForm::can_test`）。
+    if form.can_test() {
         hints.push(MachineHint::button(
-            "ctrl+r",
-            recovery_label(route),
-            MachineOverlayButton::TestRecover,
+            "ctrl+t",
+            f.test_connection,
+            MachineOverlayButton::TestConnection,
         ));
+        if let Some(route) = form
+            .bootstrap
+            .as_ref()
+            .and_then(ClientMachineBootstrap::recovery)
+        {
+            hints.push(MachineHint::button(
+                "ctrl+r",
+                recovery_label(route),
+                MachineOverlayButton::TestRecover,
+            ));
+        }
     }
     hints.push(MachineHint::button(
         "esc",
@@ -474,7 +477,7 @@ fn test_lines(
             base.fg(p.red).add_modifier(Modifier::BOLD),
         ));
         lines.push(Line::styled(format!(" {failure}"), base.fg(p.red)));
-        match bootstrap.recovery() {
+        match bootstrap.recovery().filter(|_| form.can_test()) {
             Some(route) => lines.push(Line::styled(
                 format!(" ctrl+r · {}", recovery_label(route).trim()),
                 base.fg(p.yellow),
@@ -546,7 +549,7 @@ pub(super) fn ssh_command_preview(form: &ClientMachineForm) -> String {
 }
 
 /// 预览正文：等价 ssh 命令 + 各非空字段（与此前确认页同一批「标签 值」行）
-/// + 测试连接会做什么的说明。
+/// + 测试连接会做什么的说明（只在能测试的添加表单里）。
 fn preview_lines(form: &ClientMachineForm, base: Style, p: &Palette) -> Vec<Line<'static>> {
     let t = &crate::i18n::texts().machines;
     let mut lines = vec![
@@ -587,15 +590,17 @@ fn preview_lines(form: &ClientMachineForm, base: Style, p: &Palette) -> Vec<Line
             Span::styled(value, base.fg(p.text)),
         ]));
     }
-    lines.push(Line::default());
-    lines.push(Line::styled(
-        t.confirm_install_note.to_owned(),
-        base.fg(p.yellow),
-    ));
-    lines.push(Line::styled(
-        t.confirm_auth_note.to_owned(),
-        base.fg(p.overlay0),
-    ));
+    if form.can_test() {
+        lines.push(Line::default());
+        lines.push(Line::styled(
+            t.confirm_install_note.to_owned(),
+            base.fg(p.yellow),
+        ));
+        lines.push(Line::styled(
+            t.confirm_auth_note.to_owned(),
+            base.fg(p.overlay0),
+        ));
+    }
     lines
 }
 

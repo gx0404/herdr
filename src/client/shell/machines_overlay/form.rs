@@ -608,6 +608,14 @@ impl ClientMachineForm {
         self.fields().contains(&field)
     }
 
+    /// 这张表单是否提供「测试连接」及其恢复入口：只有添加时提供。编辑已保存
+    /// 的机器不跑 bootstrap（与旧向导一致）：测试走预先授权的安装链，恢复
+    /// 路径的临时档案带新 id，交互认证成功会按新机器落盘，编辑态走这条路会
+    /// 复制出第二条同目标档案而原档案收不到编辑。
+    pub(super) fn can_test(&self) -> bool {
+        self.editing.is_none()
+    }
+
     /// 测试连接正在跑：表单只读，只接受 Esc 取消。
     pub(super) fn running(&self) -> bool {
         self.bootstrap
@@ -1185,7 +1193,7 @@ impl ClientShellState {
         let ClientMachinesView::Form(form) = &mut overlay.view else {
             return;
         };
-        if form.running() || !form.submit_gate(saved) {
+        if !form.can_test() || form.running() || !form.submit_gate(saved) {
             return;
         }
         let options = match form.profile_options() {
@@ -1280,7 +1288,8 @@ impl ClientShellState {
     ) {
         let prepared = match self.overlay.as_ref() {
             Some(ClientShellOverlay::Machines(overlay)) => match &overlay.view {
-                ClientMachinesView::Form(form) => form
+                // 编辑态没有测试，也就没有恢复入口（见 `can_test`）。
+                ClientMachinesView::Form(form) if form.can_test() => form
                     .bootstrap
                     .as_ref()
                     .filter(|bootstrap| bootstrap.failure.is_some())

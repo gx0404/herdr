@@ -2718,6 +2718,91 @@ fn narrow_form_drops_the_preview_and_shows_test_steps_under_the_fields() {
     assert!(text.contains(&install), "测试步骤在字段栏下方：{text}");
 }
 
+/// 在临时状态目录里落一条档案并读回（带目录分配的真实 id）。
+fn seed_catalog_machine(label: &str, target: &str) -> SavedSshEndpoint {
+    let mut catalog = crate::client::endpoint::EndpointCatalog::default();
+    catalog
+        .add_ssh_with_options(
+            label,
+            target,
+            "default",
+            crate::client::endpoint::SshProfileOptions::default(),
+        )
+        .expect("seed profile");
+    catalog.store_profiles().expect("seed store");
+    crate::client::endpoint::EndpointCatalog::load()
+        .expect("catalog")
+        .ssh[0]
+        .clone()
+}
+
+/// 编辑已保存的机器不提供测试连接与恢复入口：恢复路径的临时档案带新 id，
+/// 交互认证成功会按新机器落盘，编辑态走这条路会复制出第二条同目标档案、
+/// 原档案却收不到编辑。键盘、页脚按钮与残留的失败结论都进不了这条路。
+#[test]
+fn edit_form_offers_no_test_connection_or_recovery() {
+    let dir = with_temp_state_home("edit-no-test");
+    let saved = seed_catalog_machine("Build", "build.example");
+    let mut state = state_with_profiles(std::slice::from_ref(&saved));
+    state.open_machine_edit_form(&saved.id);
+    focus_field(&mut state, MachineField::IdentityFiles);
+    type_text(&mut state, "~/.ssh/other");
+
+    let text = compact(&frame_text(&mut state, 120, 40));
+    let f = &crate::i18n::texts().machine_form;
+    assert!(!text.contains("ctrl+t"), "编辑态页脚无测试：{text}");
+    assert!(
+        !text.contains(&compact(crate::i18n::texts().machines.confirm_install_note)),
+        "编辑态预览不写测试会做什么：{text}"
+    );
+    let buttons = machine_buttons(&state);
+    assert!(
+        !buttons.contains(&MachineOverlayButton::TestConnection),
+        "{buttons:?}"
+    );
+
+    // Ctrl+T 与测试按钮都不下发 bootstrap。
+    let outcome = press(&mut state, ctrl('t'));
+    assert!(outcome.actions.is_empty(), "{:?}", outcome.actions);
+    let mut outcome = ClientShellInput::default();
+    state.activate_machine_button(MachineOverlayButton::TestConnection, &mut outcome);
+    assert!(outcome.actions.is_empty(), "{:?}", outcome.actions);
+    assert!(machine_form(&state).bootstrap.is_none());
+
+    // 即便表单里残留一次认证失败的结论，Ctrl+R 与恢复按钮也不进 MachineAuth。
+    machine_form_mut(&mut state).bootstrap =
+        Some(super::super::machines_overlay::ClientMachineBootstrap {
+            cancel: crate::remote::TaskCancellation::default(),
+            ticket: 1,
+            step: None,
+            failure: Some("Permission denied (publickey)".into()),
+            passed: false,
+        });
+    press(&mut state, ctrl('r'));
+    state.activate_machine_button(
+        MachineOverlayButton::TestRecover,
+        &mut ClientShellInput::default(),
+    );
+    assert!(
+        matches!(state.overlay, Some(ClientShellOverlay::Machines(_))),
+        "编辑态没有恢复入口"
+    );
+    let text = compact(&frame_text(&mut state, 120, 40));
+    assert!(!text.contains("ctrl+r"), "{text}");
+    assert!(!text.contains(&compact(f.review_host_key)), "{text}");
+
+    // Enter 保存的是原档案：目录里仍只有一条，编辑生效。
+    press(&mut state, key(KeyCode::Enter));
+    let catalog = crate::client::endpoint::EndpointCatalog::load().expect("catalog");
+    assert_eq!(catalog.ssh.len(), 1, "不会复制出第二条档案");
+    assert_eq!(catalog.ssh[0].id, saved.id);
+    assert_eq!(
+        catalog.ssh[0].identity_file,
+        vec!["~/.ssh/other".to_owned()]
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 // ---------------------------------------------------------------------
 // 合并页脚、空状态与带预览的导入清单
 // ---------------------------------------------------------------------
