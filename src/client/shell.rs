@@ -26,6 +26,7 @@ pub(in crate::client::shell) mod workbench;
 pub(super) use endpoints::*;
 mod feedback;
 mod floating_pages;
+mod form;
 mod frozen_selection;
 mod global_menu;
 mod graphics;

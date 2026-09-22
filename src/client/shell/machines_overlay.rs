@@ -14,6 +14,7 @@ mod forwards;
 mod import;
 mod list_detail;
 mod mouse;
+mod quick;
 use crate::client::endpoint::{
     EndpointCatalog, PortForwardKind, PortForwardRule, ProfileId, ProxyJumpHop, SessionLogProfile,
     SshProfileOptions, StrictHostKeyChecking,

@@ -1,5 +1,5 @@
 {
-  "chunk_count": 1021,
+  "chunk_count": 1023,
   "chunks": [
     {
       "anchor": "herdr",
@@ -4707,6 +4707,13 @@
     },
     {
       "anchor": "structure",
+      "doc": "src/client/shell/form.rs",
+      "id": "src-client-shell-form-rs-structure",
+      "source_sha256": "0bff2b3b439ff6ce48ca9cf9c818df06990038252c77533cf1ed6e32825e2a7b",
+      "text": "模块文档：表单原语适配：把客户端的 `TextEditor` 接到 `ui::kit::form_field`。  kit 原语不依赖客户端层，只认 `value` 与字符下标 `cursor_col`；这里负责 两头换算——渲染时取编辑器的字符光标，点击时把屏幕列换回字符下标。点击 换算与 kit 的水平滚动同口径：聚焦时按光标位置跳过前缀列，未聚焦从头画。\n公开项：\npub(super) fn field_spec<'a>( — 由编辑器生成字段描述。只有 `Focused` 才带光标（kit 也只在聚焦时画）。\npub(super) fn char_index_at_column( — 输入行上第 `column` 列（相对输入框左缘）对应的字符下标。`cursor_col` 是 这一帧交给 kit 的光标（未聚焦为 `None`）。点在字符上取该字符之前，点在 文本之后取末尾。"
+    },
+    {
+      "anchor": "structure",
       "doc": "src/client/shell/frozen_selection.rs",
       "id": "src-client-shell-frozen-selection-rs-structure",
       "source_sha256": "8563687179170ac42d4f0acd7b98e81142688ceace769614fcc169eede47d353",
@@ -4809,6 +4816,13 @@
       "id": "src-client-shell-machines-overlay-mouse-rs-structure",
       "source_sha256": "effc4ab817d38716fd68768af2bafacb5f1eab53429f801c5c6f0579b44a9f35",
       "text": "模块文档：机器浮层的鼠标分派：列表悬浮 / 选中、详情与列表滚动、导入向导与转发 编辑器的行与字段、表单字段与按钮、点窗外关闭。\n公开项：\nimpl ClientShellState {\npub(in crate::client::shell) fn handle_machines_mouse( — 机器浮层打开时的鼠标分派：不在该浮层时返回 `false`，由 `mouse.rs::handle_mouse` 继续往下走。"
+    },
+    {
+      "anchor": "structure",
+      "doc": "src/client/shell/machines_overlay/quick.rs",
+      "id": "src-client-shell-machines-overlay-quick-rs-structure",
+      "source_sha256": "cbe800fbc9564adfe6dea64137f89dae6eeff25b53efa6647d5b71c45781d9bd",
+      "text": "模块文档：「快速添加」输入解析：`user@host:port`、`ssh://user@host:port` 或整条 `ssh …` 命令 → 机器表单字段。纯函数，不做 I/O。  只认机器表单能表达的参数（`-p` `-l` `-i` `-J` `-A`/`-a` 与对应的 `-o Key=Value`）；其余 ssh 选项按 OpenSSH 的 getopt 表判断是否带参数后 跳过，目标之后的远程命令忽略（机器表单的 RemoteCommand 与命令行命令 互斥，照填会让 herdr 的桥接命令失效）。标量取值与 OpenSSH 一致：先出现 的生效，`-i` 可重复累加。\n公开项：\npub(in crate::client::shell) struct QuickInput {\npub(in crate::client::shell) enum QuickParseError {\npub(in crate::client::shell) fn flatten_pasted_command(text: &str) -> String { — 把粘贴进来的整段文本压成快速输入框的单行文本：去掉行尾续行符 （`\\` + 换行），其余换行变空格。编辑器本身也会把换行归一成空格，但那样 续行符会变成「转义的空格」，解析就错了，所以粘贴路径先过这一步。\npub(in crate::client::shell) fn parse_quick_input( — 解析快速输入框的内容。"
     },
     {
       "anchor": "structure",
@@ -5248,8 +5262,8 @@
       "anchor": "structure",
       "doc": "src/client/shell/text_editor.rs",
       "id": "src-client-shell-text-editor-rs-structure",
-      "source_sha256": "059a49c38508c2c5ac65f3051941fb68e62719699802b155f1b9af2fd253e427",
-      "text": "公开项：\npub(super) struct TextEditor {\nimpl std::ops::Deref for TextEditor {\nimpl std::fmt::Display for TextEditor {\nimpl From<&str> for TextEditor {\nimpl TextEditor {\npub fn new(text: &str, replace_on_type: bool) -> Self {\npub fn as_str(&self) -> &str {\npub fn clear(&mut self) {\npub fn trim_and_accept(&mut self) {\npub fn insert(&mut self, text: &str) -> bool {\npub fn handle_key(&mut self, key: &crate::input::TerminalKey) -> Option<bool> {\npub fn viewport(&self, width: u16) -> (&str, u16) {\npub(super) fn render("
+      "source_sha256": "9a53f18cf76c8d75b562da86b64e301b1fb03140bb0badf01494cbf9c135e1af",
+      "text": "公开项：\npub(super) struct TextEditor {\nimpl std::ops::Deref for TextEditor {\nimpl std::fmt::Display for TextEditor {\nimpl From<&str> for TextEditor {\nimpl TextEditor {\npub fn new(text: &str, replace_on_type: bool) -> Self {\npub fn as_str(&self) -> &str {\npub fn cursor_char_index(&self) -> usize {\npub fn set_cursor_char_index(&mut self, index: usize) {\npub fn clear(&mut self) {\npub fn trim_and_accept(&mut self) {\npub fn insert(&mut self, text: &str) -> bool {\npub fn handle_key(&mut self, key: &crate::input::TerminalKey) -> Option<bool> {\npub fn viewport(&self, width: u16) -> (&str, u16) {\npub(super) fn render("
     },
     {
       "anchor": "structure",

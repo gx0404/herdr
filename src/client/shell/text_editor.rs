@@ -41,6 +41,27 @@ impl TextEditor {
         &self.text
     }
 
+    /// 光标前的字符数（`ui::kit::form_field` 按字符下标定位光标）。
+    // 下一条提交（单页表单）接入后删除本 allow。
+    #[allow(dead_code)]
+    pub fn cursor_char_index(&self) -> usize {
+        self.text[..self.cursor].chars().count()
+    }
+
+    /// 把光标放到第 `index` 个字符之前（越界落到末尾），并吸附到字素边界。
+    /// 鼠标点击输入框时用；与键盘移动一样结束「整段替换」态。
+    // 下一条提交（单页表单）接入后删除本 allow。
+    #[allow(dead_code)]
+    pub fn set_cursor_char_index(&mut self, index: usize) {
+        self.cursor = self
+            .text
+            .char_indices()
+            .nth(index)
+            .map_or(self.text.len(), |(byte, _)| byte);
+        self.replace_on_type = false;
+        self.repair_cursor();
+    }
+
     pub fn clear(&mut self) {
         self.text.clear();
         self.cursor = 0;
@@ -524,5 +545,22 @@ mod tests {
         assert_eq!(editor.viewport(4), ("abcd", 2));
         editor.cursor = 0;
         assert_eq!(editor.viewport(4), ("abcd", 0));
+    }
+
+    #[test]
+    fn char_index_cursor_round_trips_and_snaps_to_graphemes() {
+        let mut editor = TextEditor::new("中a\u{301}b", true);
+        assert_eq!(editor.cursor_char_index(), 4, "构造后光标在末尾");
+        editor.set_cursor_char_index(1);
+        assert_eq!(editor.cursor_char_index(), 1, "「中」之后");
+        // 落在组合字符中间：吸附到字素之后，不拆开 a + 重音。
+        editor.set_cursor_char_index(2);
+        assert_eq!(editor.cursor_char_index(), 3);
+        editor.set_cursor_char_index(99);
+        assert_eq!(editor.cursor_char_index(), 4, "越界落到末尾");
+        // 点击定位后不再是「整段替换」：打字插在光标处。
+        editor.set_cursor_char_index(0);
+        editor.insert("x");
+        assert_eq!(editor.as_str(), "x中a\u{301}b");
     }
 }
