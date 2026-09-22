@@ -73,25 +73,14 @@ Herdr 只会恢复那些通过当前官方 Herdr 集成上报了原生会话引�
 | 智能体 | 最低 Herdr 集成版本 | 恢复命令 |
 | --- | --- | --- |
 | Pi | `2` | `pi --session <path-or-id>` |
-| OMP | `3` | `omp --resume=<path-or-id>` |
 | Claude Code | `6` | `claude --resume <id>` |
 | Codex | `5` | `codex resume <id>` |
-| Cursor Agent CLI | `1` | `cursor-agent --resume <id>` |
-| GitHub Copilot CLI | `2` | `copilot --resume=<id>` |
-| Devin CLI | `2` | `devin --resume <id>` |
-| Droid | `2` | `droid --resume <id>` |
-| Kimi Code CLI | `3` | `kimi --session <id>` |
-| Qoder CLI | `2` | `qodercli --resume <id>` |
-| Qwen Code | `1` | `qwen --resume <id>` |
-| Letta Code | `1` | `letta --conversation <id>`,或对 `default:<agent-id>` 使用 `letta --conversation default --agent <agent-id>` |
 | OpenCode | `5` | `opencode --session <id>` |
-| Kilo Code CLI | `1` | `kilo --session <id>` |
-| Hermes Agent | `2` | `hermes --resume <id>` |
-| MastraCode | `1` | `mastracode --thread <id>` |
+| Kimi Code CLI | `3` | `kimi --session <id>` |
 
 运行 `herdr integration status` 查看已安装的集成版本。用 `herdr integration install <agent>` 重新安装过期的集成。
 
-不受支持、缺失、无效、重复或过期的会话引用,会在保存的窗格目录中作为普通 shell 恢复。
+不受支持、缺失、无效、重复或过期的会话引用,会在保存的窗格目录中作为普通 shell 恢复。由[已退役的集成](/zh-cn/docs/integrations/#已退役的集成)上报的会话引用按不受支持处理。
 
 如果某个窗格适用智能体原生会话恢复,Herdr 会对该窗格恢复智能体会话,而不是回放保存的窗格历史。
 

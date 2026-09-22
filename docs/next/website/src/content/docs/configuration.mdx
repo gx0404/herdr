@@ -543,11 +543,11 @@ request_path = "sounds/request.mp3"
 
 `path` sets one sound for all sound notifications. `done_path` and `request_path` override only the finished and needs-input sounds.
 
-Per-agent sound overrides accept `default`, `on`, or `off`. Use detected agent labels such as `claude`, `codex`, `devin`, or `droid` as keys. Droid is muted by default.
+Per-agent sound overrides accept `default`, `on`, or `off`. The keys are the five official agent labels: `pi`, `claude`, `codex`, `open_code`, and `kimi`. Keys naming a [retired agent](/docs/integrations/#retired-integrations) are ignored with an `unknown config key` diagnostic; the rest of the section still applies.
 
 ```toml
 [ui.sound.agents]
-droid = "off"
+codex = "off"
 claude = "on"
 ```
 

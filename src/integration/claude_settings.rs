@@ -14,8 +14,9 @@ use super::config_edit::{
     is_matching_command_hook,
 };
 
-// Claude's documented SessionStart sources. Grok imports Claude hooks but uses
-// `new`/`load`; filter before it starts an unnecessary hook process.
+// Claude's documented SessionStart sources. Third-party tools that import Claude
+// hooks may fire other source names; filter before an unnecessary hook process
+// starts.
 const SESSION_START_MATCHER: &str = "^(startup|resume|clear|compact|fork)$";
 
 struct HookRemoval {

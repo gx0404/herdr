@@ -73,25 +73,14 @@ Herdr が resume するのは、現行の公式 Herdr インテグレーショ�
 | エージェント | 最低 Herdr インテグレーションバージョン | resume コマンド |
 | --- | --- | --- |
 | Pi | `2` | `pi --session <path-or-id>` |
-| OMP | `3` | `omp --resume=<path-or-id>` |
 | Claude Code | `6` | `claude --resume <id>` |
 | Codex | `5` | `codex resume <id>` |
-| Cursor Agent CLI | `1` | `cursor-agent --resume <id>` |
-| GitHub Copilot CLI | `2` | `copilot --resume=<id>` |
-| Devin CLI | `2` | `devin --resume <id>` |
-| Droid | `2` | `droid --resume <id>` |
-| Kimi Code CLI | `3` | `kimi --session <id>` |
-| Qoder CLI | `2` | `qodercli --resume <id>` |
-| Qwen Code | `1` | `qwen --resume <id>` |
-| Letta Code | `1` | `letta --conversation <id>`、または `default:<agent-id>` の場合は `letta --conversation default --agent <agent-id>` |
 | OpenCode | `5` | `opencode --session <id>` |
-| Kilo Code CLI | `1` | `kilo --session <id>` |
-| Hermes Agent | `2` | `hermes --resume <id>` |
-| MastraCode | `1` | `mastracode --thread <id>` |
+| Kimi Code CLI | `3` | `kimi --session <id>` |
 
 インストール済みインテグレーションのバージョンは `herdr integration status` で確認できます。古いインテグレーションは `herdr integration install <agent>` で再インストールしてください。
 
-未対応、欠落、無効、重複、または古くなったセッション参照は、保存されたペインディレクトリで通常のシェルとして復元されます。
+未対応、欠落、無効、重複、または古くなったセッション参照は、保存されたペインディレクトリで通常のシェルとして復元されます。[廃止されたインテグレーション](/ja/docs/integrations/#廃止されたインテグレーション)が報告したセッション参照は未対応として扱われます。
 
 あるペインにエージェントネイティブのセッション復元が適用される場合、Herdr はそのペインでは保存済みペイン履歴のリプレイではなくエージェントセッションの resume を行います。
 

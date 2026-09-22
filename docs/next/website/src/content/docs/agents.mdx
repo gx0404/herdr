@@ -14,29 +14,12 @@ Automatic detection works out of the box for common coding agents. The table sho
 | Agent | State authority | Integration role |
 | --- | --- | --- |
 | Pi | lifecycle hooks when installed; otherwise screen manifest | state and session |
-| OMP | lifecycle hooks when installed | state and session |
-| GitHub Copilot CLI | screen manifest | session |
-| Devin CLI | screen manifest | session |
-| Kimi Code CLI | lifecycle hooks when installed; otherwise screen manifest | state and session |
-| Hermes Agent | screen manifest | session |
-| Qoder CLI | screen manifest | session |
-| Qwen Code | screen manifest | session |
-| Letta Code | screen manifest | session |
-| Droid | screen manifest | session |
-| OpenCode | lifecycle plugin when installed; otherwise screen manifest | state and session |
-| Kilo Code CLI | lifecycle plugin when installed; otherwise screen manifest | state and session |
-| MastraCode | lifecycle hooks when installed | state and session |
 | Claude Code | screen manifest | session |
 | Codex | screen manifest | session |
-| Cursor Agent CLI | screen manifest | session |
-| Amp | screen manifest | none |
-| Grok CLI | screen manifest | session |
-| Antigravity CLI | screen manifest | session |
-| Kiro CLI | screen manifest | none |
-| Maki | screen manifest | none |
-| Muse | screen manifest | none |
+| OpenCode | lifecycle plugin when installed; otherwise screen manifest | state and session |
+| Kimi Code CLI | lifecycle hooks when installed; otherwise screen manifest | state and session |
 
-Detected but less thoroughly tested: Gemini CLI and Cline. Unsupported agents still run normally as terminal processes. They just may not get rich state unless you add an integration or report state over the socket API.
+These five are the only agents this fork detects and ships integrations for; see [Retired integrations](/docs/integrations/#retired-integrations) for what happened to the others. Unsupported agents still run normally as terminal processes. They just may not get rich state unless you add an integration or report state over the socket API.
 
 ## Status authority
 

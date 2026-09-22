@@ -539,11 +539,11 @@ request_path = "sounds/request.mp3"
 
 `path` 为所有声音通知设置同一种声音。`done_path` 和 `request_path` 只覆盖完成和需要输入时的声音。
 
-按智能体覆盖声音设置时，可使用 `default`、`on` 或 `off`。键应使用检测到的智能体标签，例如 `claude`、`codex`、`devin` 或 `droid`。Droid 默认静音。
+按智能体覆盖声音设置时，可使用 `default`、`on` 或 `off`。键是五家官方智能体的标签:`pi`、`claude`、`codex`、`open_code` 和 `kimi`。指向[已退役智能体](/zh-cn/docs/integrations/#已退役的集成)的键会被忽略并给出 `unknown config key` 诊断,同段其余设置照常生效。
 
 ```toml
 [ui.sound.agents]
-droid = "off"
+codex = "off"
 claude = "on"
 ```
 

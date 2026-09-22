@@ -1,5 +1,5 @@
 {
-  "chunk_count": 984,
+  "chunk_count": 970,
   "chunks": [
     {
       "anchor": "herdr",
@@ -950,15 +950,15 @@
       "anchor": "Three primitives > Agent identity and launch",
       "doc": "docs/next/website/src/content/docs/agent-automation.mdx",
       "id": "docs-next-website-src-content-docs-agent-automation-mdx-three-primitives-agent-identity-and-launch-part1",
-      "source_sha256": "f96eb4d8e84c7f9872670e08080a3b716173bcbedd7cb09387d0333439987ac3",
-      "text": "## Agent identity and launch\n\nA pane ID such as `w1:p2` identifies the terminal location. An agent name such as `reviewer` is a convenient alias for the current agent in that pane. Names must match `[a-z][a-z0-9_-]{0,31}` and be unique among live agents. The alias is cleared when that agent exits, is released, or is replaced; it does not permanently rename the pane.\n\nAgent commands accept either a unique live name or the pane ID that currently hosts the agent.\n\nAn available shell pane is at its interactive shell prompt: the shell itself owns the foreground, with no foreground command, editor, or agent running. Return the pane to its prompt before calling `agent start`.\n\n`--kind` selects a supported agent and its canonical executable. Supported kinds are `pi`, `claude`, `codex`, `gemini`, `cursor`, `devin`, `agy`, `cline`, `omp`, `mastracode`, `opencode`, `copilot`, `kimi`, `kiro`, `droid`, `amp`, `grok`, `hermes`, `kilo`, `qodercli`, `qwen`, `letta`, `maki`, and `muse`. Arguments after `--` are passed unchanged to that executable.\n"
+      "source_sha256": "8cf554b7c9c040b08392053f33ab121d780d9afcf34672113c52d502c8545574",
+      "text": "## Agent identity and launch\n\nA pane ID such as `w1:p2` identifies the terminal location. An agent name such as `reviewer` is a convenient alias for the current agent in that pane. Names must match `[a-z][a-z0-9_-]{0,31}` and be unique among live agents. The alias is cleared when that agent exits, is released, or is replaced; it does not permanently rename the pane.\n\nAgent commands accept either a unique live name or the pane ID that currently hosts the agent.\n\nAn available shell pane is at its interactive shell prompt: the shell itself owns the foreground, with no foreground command, editor, or agent running. Return the pane to its prompt before calling `agent start`.\n\n`--kind` selects a supported agent and its canonical executable. Supported kinds are `pi`, `claude`, `codex`, `opencode`, and `kimi`. Arguments after `--` are passed unchanged to that executable.\n\nSuccessful `agent start` returns only after Herdr detects the expected agent in the same terminal and marks it ready for interactive input. If detection reports `blocked` during startup, the command returns `agent_not_ready` immediately. The name remains available for `agent read` and `agent send-keys`, and becomes ready for prompts after detection reports `idle`. Startup waits for 30 seconds by default; `--timeout` must be greater than 3000 and no more than 300000 milliseconds.\n\n```bash\nherdr agent start reviewer --kind codex --pane \"$review_pane\" -- -m gpt-5.4\n```\n"
     },
     {
       "anchor": "Three primitives > Agent identity and launch",
       "doc": "docs/next/website/src/content/docs/agent-automation.mdx",
       "id": "docs-next-website-src-content-docs-agent-automation-mdx-three-primitives-agent-identity-and-launch-part2",
-      "source_sha256": "f96eb4d8e84c7f9872670e08080a3b716173bcbedd7cb09387d0333439987ac3",
-      "text": "Successful `agent start` returns only after Herdr detects the expected agent in the same terminal and marks it ready for interactive input. If detection reports `blocked` during startup, the command returns `agent_not_ready` immediately. The name remains available for `agent read` and `agent send-keys`, and becomes ready for prompts after detection reports `idle`. Startup waits for 30 seconds by default; `--timeout` must be greater than 3000 and no more than 300000 milliseconds.\n\n```bash\nherdr agent start reviewer --kind codex --pane \"$review_pane\" -- -m gpt-5.4\n```\n\nAgents launched manually are detected automatically and can be addressed by pane ID. Give one a name when a stable human-readable target is useful:\n\n```bash\nherdr agent get w1:p2\nherdr agent rename w1:p2 reviewer\n```"
+      "source_sha256": "8cf554b7c9c040b08392053f33ab121d780d9afcf34672113c52d502c8545574",
+      "text": "Agents launched manually are detected automatically and can be addressed by pane ID. Give one a name when a stable human-readable target is useful:\n\n```bash\nherdr agent get w1:p2\nherdr agent rename w1:p2 reviewer\n```"
     },
     {
       "anchor": "Three primitives > Alternate-screen history reads",
@@ -1066,6 +1066,13 @@
       "text": "## Safety rule\n\nThe skill starts with one guardrail: if `HERDR_ENV=1` is not set, the agent should stop and say it is not running inside a Herdr-managed pane.\n\nThis prevents an agent outside Herdr from trying to control a session it does not own."
     },
     {
+      "anchor": "Supported agents",
+      "doc": "docs/next/website/src/content/docs/agents.mdx",
+      "id": "docs-next-website-src-content-docs-agents-mdx-supported-agents",
+      "source_sha256": "7ea38787640fd02a30d3b176efd4e8197ff36ee1ff965d51c7a936664d980b79",
+      "text": "## Supported agents\n\nAutomatic detection works out of the box for common coding agents. The table shows which signal determines `idle`, `working`, and `blocked` for each one.\n\n| Agent | State authority | Integration role |\n| --- | --- | --- |\n| Pi | lifecycle hooks when installed; otherwise screen manifest | state and session |\n| Claude Code | screen manifest | session |\n| Codex | screen manifest | session |\n| OpenCode | lifecycle plugin when installed; otherwise screen manifest | state and session |\n| Kimi Code CLI | lifecycle hooks when installed; otherwise screen manifest | state and session |\n\nThese five are the only agents this fork detects and ships integrations for; see [Retired integrations](/docs/integrations/#retired-integrations) for what happened to the others. Unsupported agents still run normally as terminal processes. They just may not get rich state unless you add an integration or report state over the socket API."
+    },
+    {
       "anchor": "Supported agents > Attach directly to an agent",
       "doc": "docs/next/website/src/content/docs/agents.mdx",
       "id": "docs-next-website-src-content-docs-agents-mdx-supported-agents-attach-directly-to-an-agent",
@@ -1115,20 +1122,6 @@
       "text": "## Direct integrations\n\nInstall the integration for each agent you use to give Herdr hook or plugin reports instead of screen detection alone:\n\n```bash\nherdr integration install claude\nherdr integration status\n```\n\nEach supported agent has its own integration name and behavior. See [Integrations](/docs/integrations/) for the per-agent details and the full install list. If you are building an agent, the [custom integration guide](/docs/integrations/#integrate-your-own-agent) shows how to report lifecycle state without adding native support to Herdr."
     },
     {
-      "anchor": "Supported agents",
-      "doc": "docs/next/website/src/content/docs/agents.mdx",
-      "id": "docs-next-website-src-content-docs-agents-mdx-supported-agents-part1",
-      "source_sha256": "1ff7fb90b9c66218f849632ace2458c2f6687f4dc6a137e7a22cb6437197bfbd",
-      "text": "## Supported agents\n\nAutomatic detection works out of the box for common coding agents. The table shows which signal determines `idle`, `working`, and `blocked` for each one.\n\n| Agent | State authority | Integration role |\n| --- | --- | --- |\n| Pi | lifecycle hooks when installed; otherwise screen manifest | state and session |\n| OMP | lifecycle hooks when installed | state and session |\n| GitHub Copilot CLI | screen manifest | session |\n| Devin CLI | screen manifest | session |\n| Kimi Code CLI | lifecycle hooks when installed; otherwise screen manifest | state and session |\n| Hermes Agent | screen manifest | session |\n| Qoder CLI | screen manifest | session |\n| Qwen Code | screen manifest | session |\n| Letta Code | screen manifest | session |\n| Droid | screen manifest | session |\n| OpenCode | lifecycle plugin when installed; otherwise screen manifest | state and session |\n| Kilo Code CLI | lifecycle plugin when installed; otherwise screen manifest | state and session |\n| MastraCode | lifecycle hooks when installed | state and session |\n| Claude Code | screen manifest | session |\n| Codex | screen manifest | session |\n| Cursor Agent CLI | screen manifest | session |\n| Amp | screen manifest | none |\n| Grok CLI | screen manifest | session |\n| Antigravity CLI | screen manifest | session |\n| Kiro CLI | screen manifest | none |\n| Maki | screen manifest | none |\n| Muse | screen manifest | none |\n"
-    },
-    {
-      "anchor": "Supported agents",
-      "doc": "docs/next/website/src/content/docs/agents.mdx",
-      "id": "docs-next-website-src-content-docs-agents-mdx-supported-agents-part2",
-      "source_sha256": "1ff7fb90b9c66218f849632ace2458c2f6687f4dc6a137e7a22cb6437197bfbd",
-      "text": "Detected but less thoroughly tested: Gemini CLI and Cline. Unsupported agents still run normally as terminal processes. They just may not get rich state unless you add an integration or report state over the socket API."
-    },
-    {
       "anchor": "Supported agents > State rollups",
       "doc": "docs/next/website/src/content/docs/agents.mdx",
       "id": "docs-next-website-src-content-docs-agents-mdx-supported-agents-state-rollups",
@@ -1167,35 +1160,35 @@
       "anchor": "Launch and status > Agents",
       "doc": "docs/next/website/src/content/docs/cli-reference.mdx",
       "id": "docs-next-website-src-content-docs-cli-reference-mdx-launch-and-status-agents-part1",
-      "source_sha256": "2df63112549642c1d7ba438d0866c13c570928ef3c5d5f9a94da16004fd6ca10",
+      "source_sha256": "a5570e65f7c6d30d746cc1132b34bf51c4ced3b2da3c6f5c13d46c95d5298e09",
       "text": "## Agents\n\nFor the pane-versus-agent model and complete orchestration examples, see [Agent automation](/docs/agent-automation/).\n\n```bash\nherdr agent list\nherdr agent get <target>\nherdr agent read <target> [--source visible|recent|recent-unwrapped|detection] [--lines N] [--format text|ansi] [--ansi]\nherdr agent send-keys <target> <key> [key ...]\nherdr agent prompt <target> <text> [--wait] [--until STATUS]... [--timeout MS]\nherdr agent rename <target> <name>|--clear\nherdr agent focus <target>\nherdr agent wait <target> [--until STATUS]... [--timeout MS]\nherdr agent attach <target> [--takeover]\nherdr agent start <name> --kind KIND --pane ID [--timeout MS] [-- <agent-args...>]\nherdr agent explain <target> [--json|--verbose]\nherdr agent explain --file PATH --agent LABEL [--json|--verbose]\n```\n\nAgent targets are either a unique live agent name or the pane ID that currently hosts the agent. Terminal IDs and bare agent-kind labels are not agent targets. Agents started through `agent start` require a name; manually launched agents remain unnamed and use their pane ID.\n"
     },
     {
       "anchor": "Launch and status > Agents",
       "doc": "docs/next/website/src/content/docs/cli-reference.mdx",
       "id": "docs-next-website-src-content-docs-cli-reference-mdx-launch-and-status-agents-part2",
-      "source_sha256": "2df63112549642c1d7ba438d0866c13c570928ef3c5d5f9a94da16004fd6ca10",
-      "text": "`agent start` activates an existing available shell pane: the pane's interactive shell must own the foreground, with no foreground command, editor, or agent running. Topology must be created separately. Names are unique among live agents and must match `[a-z][a-z0-9_-]{0,31}`. The kind selects Herdr's canonical interactive executable, while arguments after `--` are passed to that executable. Supported kinds are `pi`, `claude`, `codex`, `gemini`, `cursor`, `devin`, `agy`, `cline`, `omp`, `mastracode`, `opencode`, `copilot`, `kimi`, `kiro`, `droid`, `amp`, `grok`, `hermes`, `kilo`, `qodercli`, `qwen`, `letta`, `maki`, and `muse`. A name follows the current pane occupant and is cleared when that agent exits, is released, or is replaced. Temporary detection uncertainty does not clear it.\n\nA successful start returns only after the expected agent owns the same terminal and is ready for interactive input. If detection reports `blocked` during startup, the command returns `agent_not_ready` immediately. The name remains available for `agent read` and `agent send-keys`, and becomes ready for prompts after detection reports `idle`. The default startup timeout is 30000 milliseconds; explicit values must be greater than 3000 and no more than 300000.\n"
+      "source_sha256": "a5570e65f7c6d30d746cc1132b34bf51c4ced3b2da3c6f5c13d46c95d5298e09",
+      "text": "`agent start` activates an existing available shell pane: the pane's interactive shell must own the foreground, with no foreground command, editor, or agent running. Topology must be created separately. Names are unique among live agents and must match `[a-z][a-z0-9_-]{0,31}`. The kind selects Herdr's canonical interactive executable, while arguments after `--` are passed to that executable. Supported kinds are `pi`, `claude`, `codex`, `opencode`, and `kimi`. A name follows the current pane occupant and is cleared when that agent exits, is released, or is replaced. Temporary detection uncertainty does not clear it.\n\nA successful start returns only after the expected agent owns the same terminal and is ready for interactive input. If detection reports `blocked` during startup, the command returns `agent_not_ready` immediately. The name remains available for `agent read` and `agent send-keys`, and becomes ready for prompts after detection reports `idle`. The default startup timeout is 30000 milliseconds; explicit values must be greater than 3000 and no more than 300000.\n"
     },
     {
       "anchor": "Launch and status > Agents",
       "doc": "docs/next/website/src/content/docs/cli-reference.mdx",
       "id": "docs-next-website-src-content-docs-cli-reference-mdx-launch-and-status-agents-part3",
-      "source_sha256": "2df63112549642c1d7ba438d0866c13c570928ef3c5d5f9a94da16004fd6ca10",
+      "source_sha256": "a5570e65f7c6d30d746cc1132b34bf51c4ced3b2da3c6f5c13d46c95d5298e09",
       "text": "`agent prompt` honors live bracketed-paste mode and writes text followed by delayed Enter as one ordered submission, including while the agent is working. Success without `--wait` acknowledges the writes, not the start of a turn. On Windows, Codex receives a paste boundary before Enter so submission does not depend on prompt size; the caller timeout includes submission time. If the agent is already `blocked`, it returns `agent_blocked` without sending input. With `--wait`, a prompt sent from another non-working state has up to five seconds after submission to produce an observed `working` or `blocked` state or Herdr returns `agent_prompt_stalled`; if the caller timeout expires first, Herdr returns the normal `timeout` error. This prevents unrelated `idle`, `done`, or session changes from completing the wait. After activity is observed, it waits for the first requested settled status. It does not track individual turns. If the agent is already working, completion of that active turn may satisfy the wait. `--until` narrows the matching states and is rejected unless `--wait` is also present. Standalone `agent wait` returns immediately when the current status matches. Both default to `idle`, `done`, or `blocked`; use `--until unknown` explicitly when needed.\n"
     },
     {
       "anchor": "Launch and status > Agents",
       "doc": "docs/next/website/src/content/docs/cli-reference.mdx",
       "id": "docs-next-website-src-content-docs-cli-reference-mdx-launch-and-status-agents-part4",
-      "source_sha256": "2df63112549642c1d7ba438d0866c13c570928ef3c5d5f9a94da16004fd6ca10",
+      "source_sha256": "a5570e65f7c6d30d746cc1132b34bf51c4ced3b2da3c6f5c13d46c95d5298e09",
       "text": "`idle` and `done` both mean ready for input. The CLI/API uses the server's seen state: `done` is idle but not yet marked seen, explicit `pane focus` / `agent focus` commands mark the target seen, and reads do not. Each TUI client tracks viewed completions independently, so its Done badge can differ from the CLI or another client. `blocked` means Herdr recognized an approval or question UI. `unknown` means an agent is present but Herdr cannot classify it confidently, not that its work succeeded.\n\n`agent send-keys` sends logical terminal keys such as `enter`, `up`, `esc`, or `ctrl+c`. Herdr validates every key before writing any bytes. `agent read` reads the resolved terminal stream, and `agent rename` names an already detected agent.\n"
     },
     {
       "anchor": "Launch and status > Agents",
       "doc": "docs/next/website/src/content/docs/cli-reference.mdx",
       "id": "docs-next-website-src-content-docs-cli-reference-mdx-launch-and-status-agents-part5",
-      "source_sha256": "2df63112549642c1d7ba438d0866c13c570928ef3c5d5f9a94da16004fd6ca10",
+      "source_sha256": "a5570e65f7c6d30d746cc1132b34bf51c4ced3b2da3c6f5c13d46c95d5298e09",
       "text": "`agent explain` asks the running server to classify the same bottom-buffer detection snapshot used by screen detection, so live output reflects the server's active manifest cache. Because this uses the `agent.explain` socket method, restart or hand off to an updated server after upgrading Herdr before using live explain. Use `--file PATH --agent LABEL` to explain a saved fixture locally instead. The default output shows the agent, final state, manifest source and version, matched rule with its region evidence, and any fallback, skip, or warning reasons. Add `--verbose` for visible evidence flags, cached remote version, local override shadowing, remote update status, and the full evaluated-rules list with matcher and region evidence. Add `--json` for issue reports or tests.\n\nUse `pane send-text`, `pane send-keys`, `pane run`, and `terminal attach` for ordinary terminals, servers, tests, shells, or low-level terminal control. Use `pane run` when you want to submit a command with Enter."
     },
     {
@@ -1230,8 +1223,8 @@
       "anchor": "Launch and status > Integrations",
       "doc": "docs/next/website/src/content/docs/cli-reference.mdx",
       "id": "docs-next-website-src-content-docs-cli-reference-mdx-launch-and-status-integrations",
-      "source_sha256": "295c67f0dab033cf34f7e3d5c19c8f6c9adfc984e7a1118a5b6fffdc331ab1b0",
-      "text": "## Integrations\n\n```bash\nherdr integration install pi\nherdr integration install omp\nherdr integration install claude\nherdr integration install codex\nherdr integration install copilot\nherdr integration install devin\nherdr integration install droid\nherdr integration install kimi\nherdr integration install opencode\nherdr integration install kilo\nherdr integration install hermes\nherdr integration install qodercli\nherdr integration install qwen\nherdr integration install letta\nherdr integration install cursor\nherdr integration install mastracode\nherdr integration install grok\nherdr integration uninstall pi\nherdr integration uninstall omp\nherdr integration uninstall claude\nherdr integration uninstall codex\nherdr integration uninstall copilot\nherdr integration uninstall devin\nherdr integration uninstall droid\nherdr integration uninstall kimi\nherdr integration uninstall opencode\nherdr integration uninstall kilo\nherdr integration uninstall hermes\nherdr integration uninstall qodercli\nherdr integration uninstall qwen\nherdr integration uninstall letta\nherdr integration uninstall cursor\nherdr integration uninstall mastracode\nherdr integration uninstall grok\nherdr integration status [--outdated-only]\n```"
+      "source_sha256": "1d0656cded80019c850c46ccbd4de07d8cb47e7895770947137849b9f5c676fd",
+      "text": "## Integrations\n\n```bash\nherdr integration install pi\nherdr integration install claude\nherdr integration install codex\nherdr integration install kimi\nherdr integration install opencode\nherdr integration uninstall pi\nherdr integration uninstall claude\nherdr integration uninstall codex\nherdr integration uninstall kimi\nherdr integration uninstall opencode\nherdr integration status [--outdated-only]\n```\n\nOnly the five official integrations are accepted. Retired names such as `cursor` or `omp` get a retirement notice; see [Retired integrations](/docs/integrations/#retired-integrations)."
     },
     {
       "anchor": "Launch and status > Notifications",
@@ -1664,8 +1657,8 @@
       "anchor": "Config file > Sound",
       "doc": "docs/next/website/src/content/docs/configuration.mdx",
       "id": "docs-next-website-src-content-docs-configuration-mdx-config-file-sound",
-      "source_sha256": "3c9dcee47857a1c73f0897e23b31c744b71dfe412ff54cfcc130173b8afe80b4",
-      "text": "## Sound\n\nSound notifications play through the local Herdr client. Custom sounds must be mp3 files; Herdr resolves relative paths from the config file's directory.\n\n```toml\n[ui.sound]\npath = \"sounds/notification.mp3\"\ndone_path = \"sounds/done.mp3\"\nrequest_path = \"sounds/request.mp3\"\n```\n\n`path` sets one sound for all sound notifications. `done_path` and `request_path` override only the finished and needs-input sounds.\n\nPer-agent sound overrides accept `default`, `on`, or `off`. Use detected agent labels such as `claude`, `codex`, `devin`, or `droid` as keys. Droid is muted by default.\n\n```toml\n[ui.sound.agents]\ndroid = \"off\"\nclaude = \"on\"\n```"
+      "source_sha256": "159549d19cd2c0b47431794e69b12e45ca4b0d30d0e2f663b68565fde686c84d",
+      "text": "## Sound\n\nSound notifications play through the local Herdr client. Custom sounds must be mp3 files; Herdr resolves relative paths from the config file's directory.\n\n```toml\n[ui.sound]\npath = \"sounds/notification.mp3\"\ndone_path = \"sounds/done.mp3\"\nrequest_path = \"sounds/request.mp3\"\n```\n\n`path` sets one sound for all sound notifications. `done_path` and `request_path` override only the finished and needs-input sounds.\n\nPer-agent sound overrides accept `default`, `on`, or `off`. The keys are the five official agent labels: `pi`, `claude`, `codex`, `open_code`, and `kimi`. Keys naming a [retired agent](/docs/integrations/#retired-integrations) are ignored with an `unknown config key` diagnostic; the rest of the section still applies.\n\n```toml\n[ui.sound.agents]\ncodex = \"off\"\nclaude = \"on\"\n```"
     },
     {
       "anchor": "Config file > Terminal defaults > Pane environment and cwd reporting",
@@ -2210,15 +2203,8 @@
       "anchor": "Install integrations",
       "doc": "docs/next/website/src/content/docs/integrations.mdx",
       "id": "docs-next-website-src-content-docs-integrations-mdx-install-integrations",
-      "source_sha256": "c172dd6b14adfde7154ebc60540934d1826807bce28a2c9a6a519039ad3430e0",
-      "text": "## Install integrations\n\nOpen settings inside Herdr and use the integrations tab to install integrations for agents found on your `PATH`, or run commands manually. In that tab `Enter` (and the primary button) installs **only the row you have selected** — the primary button is shown only while the selected row actually needs one, and the footer lists `a`, which installs every pending integration at once:\n\n```bash\nherdr integration install pi\nherdr integration install omp\nherdr integration install claude\nherdr integration install codex\nherdr integration install copilot\nherdr integration install devin\nherdr integration install droid\nherdr integration install kimi\nherdr integration install opencode\nherdr integration install kilo\nherdr integration install hermes\nherdr integration install qodercli\nherdr integration install qwen\nherdr integration install letta\nherdr integration install cursor\nherdr integration install mastracode\nherdr integration install antigravity-cli\nherdr integration install grok\n```"
-    },
-    {
-      "anchor": "Install integrations > Antigravity CLI",
-      "doc": "docs/next/website/src/content/docs/integrations.mdx",
-      "id": "docs-next-website-src-content-docs-integrations-mdx-install-integrations-antigravity-cli",
-      "source_sha256": "947f1d2b49ab05e51f3b0d8f53170736ac549fecf511c1c9e4c35ddd0a80b137",
-      "text": "## Antigravity CLI\n\nInstall the Antigravity CLI hook:\n\n```bash\nherdr integration install antigravity-cli\n```\n\nHerdr uses `~/.gemini/config/` by default, or `ANTIGRAVITY_CLI_CONFIG_DIR` when set. This is the directory Antigravity CLI reads global customizations from, and it must already exist. Install writes `hooks/herdr-agent-state.sh` (or `herdr-agent-state.ps1` on Windows) and adds a Herdr-owned `herdr` block to `hooks.json`. Antigravity CLI keys `hooks.json` by hook name, so install rewrites only that block and leaves other named hooks untouched. Uninstall removes the `herdr` block and deletes the hook script.\n\nThis session-only integration reports the pane's current conversation, but not agent state. Herdr keeps deriving working, idle, and blocked from what Antigravity CLI draws on screen.\n\nThe hook runs on `PreInvocation`, so Herdr learns the conversation once the first prompt is sent. From then on Herdr can resume the pane with `agy --conversation <id>` after a Herdr server restart."
+      "source_sha256": "21ed397c26ac33c0c96ac8d9dd4730e14f5ca2fc821da4ee640cccabd1613392",
+      "text": "## Install integrations\n\nOpen settings inside Herdr and use the integrations tab to install integrations for agents found on your `PATH`, or run commands manually. In that tab `Enter` (and the primary button) installs **only the row you have selected** — the primary button is shown only while the selected row actually needs one, and the footer lists `a`, which installs every pending integration at once:\n\n```bash\nherdr integration install pi\nherdr integration install claude\nherdr integration install codex\nherdr integration install kimi\nherdr integration install opencode\n```"
     },
     {
       "anchor": "Install integrations > Claude Code",
@@ -2235,13 +2221,6 @@
       "text": "## Codex\n\nInstall the Codex hook:\n\n```bash\nherdr integration install codex\n```\n\nThe Codex hook reports session identity through the same local socket API used by other integrations. Codex state comes from Herdr's screen manifest detection.\n\nHerdr uses `~/.codex` by default, or `CODEX_HOME` when set. The Codex config directory must already exist. Install writes `herdr-agent-state.sh`, updates `hooks.json`, and ensures `[features] hooks = true` in `config.toml`. It also removes the deprecated top-level `codex_hooks` flag when present. Uninstall removes Herdr entries from `hooks.json` and deletes the hook script, but leaves `config.toml` unchanged."
     },
     {
-      "anchor": "Install integrations > Cursor Agent CLI",
-      "doc": "docs/next/website/src/content/docs/integrations.mdx",
-      "id": "docs-next-website-src-content-docs-integrations-mdx-install-integrations-cursor-agent-cli",
-      "source_sha256": "be38f619d1753a2a4d71d03d636724601fb59b02267a94a33088c11a1736cb64",
-      "text": "## Cursor Agent CLI\n\nInstall the Cursor Agent CLI hook:\n\n```bash\nherdr integration install cursor\n```\n\nThe hook reports session identity through Cursor's `sessionStart` hook while Cursor Agent CLI runs inside a Herdr pane. Cursor state comes from Herdr's screen manifest detection.\n\nHerdr uses `~/.cursor` by default, or `CURSOR_CONFIG_DIR` when set. The Cursor config directory must already exist. Install writes `herdr-agent-state.sh` (`herdr-agent-state.ps1` on Windows) and adds a Herdr `sessionStart` entry to `hooks.json`. Uninstall removes the matching hook entry and deletes the hook script.\n\nAfter Cursor emits a session start event, Herdr can use the reported session id to resume the pane with `cursor-agent --resume <id>`. The `cursor-agent` command must be on `PATH` when Herdr restores the pane; Herdr does not launch the generic `agent` command."
-    },
-    {
       "anchor": "Install integrations > Custom status labels",
       "doc": "docs/next/website/src/content/docs/integrations.mdx",
       "id": "docs-next-website-src-content-docs-integrations-mdx-install-integrations-custom-status-labels",
@@ -2256,74 +2235,25 @@
       "text": "## Debug integration state\n\nList known agents:\n\n```bash\nherdr agent list\n```\n\nRead a pane when you need to verify what Herdr can see:\n\n```bash\nherdr pane read w1:p1 --source recent --lines 50\n```\n\nIf integration state looks wrong, first confirm the agent is running inside Herdr and that the relevant hook or plugin was installed for the same user account."
     },
     {
-      "anchor": "Install integrations > Devin CLI",
-      "doc": "docs/next/website/src/content/docs/integrations.mdx",
-      "id": "docs-next-website-src-content-docs-integrations-mdx-install-integrations-devin-cli",
-      "source_sha256": "5c31e041966d2fcfc7bdae3593c7dee471252f8d76b98dbe55bd08372b8766db",
-      "text": "## Devin CLI\n\nInstall the Devin CLI hook:\n\n```bash\nherdr integration install devin\n```\n\nThe hook reports native session identity from Devin session, prompt, tool-use, permission, and stop events. Devin state still comes from Herdr's screen manifest and OSC detection because Devin hooks do not emit a reliable state transition after every permission cancellation or user interrupt.\n\nHerdr uses `$XDG_CONFIG_HOME/devin` when `XDG_CONFIG_HOME` is set. Otherwise, it uses `~/.config/devin` on Linux and macOS or `%APPDATA%\\devin` on Windows. The Devin config directory must already exist. Install writes `herdr-agent-state.sh` on Unix or `herdr-agent-state.ps1` on Windows and updates `config.json` with Herdr hook entries. The hook refreshes the session reference while Devin runs. Uninstall removes Herdr entries from `config.json` and deletes the hook script.\n\nHerdr resumes stored Devin sessions with `devin --resume <id>`. Native screen manifest detection remains the state authority whether or not the hook is installed."
-    },
-    {
-      "anchor": "Install integrations > Droid",
-      "doc": "docs/next/website/src/content/docs/integrations.mdx",
-      "id": "docs-next-website-src-content-docs-integrations-mdx-install-integrations-droid",
-      "source_sha256": "b683c8d404c73abd32532fd5307c01b34f0d437befb205dcaadfe38927aad429",
-      "text": "## Droid\n\nInstall the Droid hook:\n\n```bash\nherdr integration install droid\n```\n\nThe Droid hook reports session identity through the same local socket API used by other integrations. Lifecycle state still comes from Herdr's screen manifest detection because Droid hooks do not cover every lifecycle transition.\n\nHerdr uses `~/.factory` for Droid hooks. The Factory config directory must already exist. Install writes `hooks/herdr-agent-state.sh`, updates `settings.json` with a Herdr `SessionStart` hook entry, and removes older Herdr Droid hook entries from `hooks.json` if present. Uninstall removes Herdr entries from both config files and deletes the hook script.\n\nAfter Droid emits a session start event, Herdr can use the reported session id to resume the pane with `droid --resume <id>`."
-    },
-    {
-      "anchor": "Install integrations > GitHub Copilot CLI",
-      "doc": "docs/next/website/src/content/docs/integrations.mdx",
-      "id": "docs-next-website-src-content-docs-integrations-mdx-install-integrations-github-copilot-cli",
-      "source_sha256": "d620b736a5c624e6222fbc2f225e41e68b2e8492a7893e7afe8e09d37890f163",
-      "text": "## GitHub Copilot CLI\n\nInstall the GitHub Copilot CLI hook:\n\n```bash\nherdr integration install copilot\n```\n\nThe Copilot hook reports session identity through the same local socket API used by other integrations. Copilot state comes from Herdr's screen manifest detection.\n\nHerdr uses `~/.copilot` by default, or `COPILOT_HOME` when set. The Copilot config directory must already exist. Install writes `hooks/herdr-agent-state.sh` and updates `settings.json` with a `SessionStart` hook entry. Uninstall removes Herdr entries from `settings.json` and deletes the hook script.\n\nAfter Copilot emits a session-bearing event, Herdr can use the reported session id to resume the pane with `copilot --resume=<id>`."
-    },
-    {
-      "anchor": "Install integrations > Grok CLI",
-      "doc": "docs/next/website/src/content/docs/integrations.mdx",
-      "id": "docs-next-website-src-content-docs-integrations-mdx-install-integrations-grok-cli",
-      "source_sha256": "86d71f030055ad7bb33544647d2702d8f3d9d1eb73e3bd29c72ba32971e60071",
-      "text": "## Grok CLI\n\nInstall the Grok CLI hook:\n\n```bash\nherdr integration install grok\n```\n\nThe hook reports session identity through Grok's `SessionStart` hook while Grok CLI runs inside a Herdr pane. Grok state comes from Herdr's screen manifest detection.\n\nHerdr uses `~/.grok` by default, or `GROK_HOME` when set. The Grok config directory must already exist. Grok merges every `hooks/*.json` file in that directory, so install writes a self-contained `hooks/herdr.json` with the Herdr `SessionStart` entry next to `hooks/herdr-agent-state.sh` (`hooks/herdr-agent-state.ps1` on Windows), and never edits other hook files. Uninstall removes exactly those two Herdr-owned files.\n\nAfter Grok emits a session start event, Herdr can use the reported session id to resume the pane with `grok --resume <id>`."
-    },
-    {
-      "anchor": "Install integrations > Hermes Agent",
-      "doc": "docs/next/website/src/content/docs/integrations.mdx",
-      "id": "docs-next-website-src-content-docs-integrations-mdx-install-integrations-hermes-agent",
-      "source_sha256": "267e2d48b1db2df0a502de58227bdf37f29c0f927e626f9f0f69202aae9f3ca8",
-      "text": "## Hermes Agent\n\nInstall the Hermes Agent plugin:\n\n```bash\nherdr integration install hermes\n```\n\nHerdr writes `plugins/herdr-agent-state/` under the Hermes home directory and enables `herdr-agent-state` in its `config.yaml`. `HERMES_HOME` defaults to `~/.hermes` on Unix and `%LOCALAPPDATA%\\hermes` on Windows. The Hermes config directory must already exist. Restart Hermes after installing so the plugin loads. Uninstall removes the plugin directory and removes `herdr-agent-state` from `plugins.enabled`.\n\nThe plugin reports the resumable session id while Hermes runs inside a Herdr pane. Herdr uses screen manifest detection for `working`, `idle`, and `blocked`, and can use the reported session id to resume the pane with `hermes --resume <id>`."
-    },
-    {
       "anchor": "Install integrations > How Herdr uses integrations",
       "doc": "docs/next/website/src/content/docs/integrations.mdx",
       "id": "docs-next-website-src-content-docs-integrations-mdx-install-integrations-how-herdr-uses-integrations",
-      "source_sha256": "096cb6a8cf320f8872b5a36b975201061b0c3c15f7f2c92f75ab37108480f444",
-      "text": "## How Herdr uses integrations\n\nHerdr uses integrations in two ways:\n\n| Integration type | Agents | Effect |\n| --- | --- | --- |\n| Lifecycle authority | Pi, OMP, Kimi Code CLI, OpenCode, Kilo Code CLI, MastraCode | When installed and actively reporting for the pane, hook or plugin events author `idle`, `working`, and `blocked`. Herdr does not also use screen manifest fallback for that same lifecycle authority. |\n| Session identity | Claude Code, Codex, GitHub Copilot CLI, Devin CLI, Droid, Qoder CLI, Qwen Code, Letta Code, Cursor Agent CLI, Hermes Agent, Antigravity CLI, Grok CLI | The integration reports native session references for restore. State still comes from Herdr's screen manifest detection. |\n\nCustom integrations can also report state that is not visible in the native terminal UI. They do not need to be built into Herdr or use a recognized agent executable."
+      "source_sha256": "2e0d53d186e52155f5f40f8807b775e4185387f6bc8435398173acce26578069",
+      "text": "## How Herdr uses integrations\n\nHerdr uses integrations in two ways:\n\n| Integration type | Agents | Effect |\n| --- | --- | --- |\n| Lifecycle authority | Pi, Kimi Code CLI, OpenCode | When installed and actively reporting for the pane, hook or plugin events author `idle`, `working`, and `blocked`. Herdr does not also use screen manifest fallback for that same lifecycle authority. |\n| Session identity | Claude Code, Codex | The integration reports native session references for restore. State still comes from Herdr's screen manifest detection. |\n\nCustom integrations can also report state that is not visible in the native terminal UI. They do not need to be built into Herdr or use a recognized agent executable."
     },
     {
       "anchor": "Install integrations > Integrate your own agent",
       "doc": "docs/next/website/src/content/docs/integrations.mdx",
       "id": "docs-next-website-src-content-docs-integrations-mdx-install-integrations-integrate-your-own-agent-part1",
-      "source_sha256": "c79dc2a646bd5967003eb0a152a8faca1e0be47e0fc1c5f6bb44769cfb06cac6",
+      "source_sha256": "10ee107e310e680bd81ed5d9544bb7c9a03d18e46efdc2b4e71b310230d3b0f2",
       "text": "## Integrate your own agent\n\nAn agent running in a Herdr pane inherits `HERDR_ENV`, `HERDR_PANE_ID`, `HERDR_BIN_PATH`, and `HERDR_SOCKET_PATH`. If the agent exposes lifecycle hooks, use those hooks to report semantic state through Herdr's CLI:\n\n```bash\n\"$HERDR_BIN_PATH\" pane report-agent \"$HERDR_PANE_ID\" \\\n  --source custom:my-agent \\\n  --agent my-agent \\\n  --state working\n```\n\nReport `idle` when the agent is ready for input and `blocked` when it needs a user decision. Use `--message` to describe a block. When the agent exits, release the same source's lifecycle authority:\n\n```bash\n\"$HERDR_BIN_PATH\" pane release-agent \"$HERDR_PANE_ID\" \\\n  --source custom:my-agent \\\n  --agent my-agent\n```\n\nReport only when `HERDR_ENV=1` and the required variables are present. This keeps the integration a no-op outside Herdr. Keep `--source` stable and unique to the integration. If reports can arrive out of order, include a strictly increasing `--seq`; Herdr ignores stale sequence numbers from the same source.\n\nYou can include `--agent-session-id` or `--agent-session-path` with `report-agent`, or use `pane report-agent-session` when session identity changes independently of state. Herdr exposes that reference through its pane and agent APIs. Automatic session restore also requires Herdr to know how to launch that agent and resume the referenced session.\n"
     },
     {
       "anchor": "Install integrations > Integrate your own agent",
       "doc": "docs/next/website/src/content/docs/integrations.mdx",
       "id": "docs-next-website-src-content-docs-integrations-mdx-install-integrations-integrate-your-own-agent-part2",
-      "source_sha256": "c79dc2a646bd5967003eb0a152a8faca1e0be47e0fc1c5f6bb44769cfb06cac6",
-      "text": "Use `HERDR_BIN_PATH` and the CLI wrappers for portable integrations. Code that needs direct IPC can send the equivalent `pane.report_agent`, `pane.report_agent_session`, and `pane.release_agent` requests described in the [Socket API](/docs/socket-api/#agent-state-reporting).\n\n[Prime Agent's built-in Herdr reporter](https://github.com/PrimeIntellect-ai/prime-agent/blob/main/packages/coding-agent/src/core/extensions/builtin/herdr-agent-state.ts) is a real-world example. It activates only inside Herdr, maps agent events to `working`, `idle`, and `blocked`, preserves report ordering across sessions, and releases authority on exit.\n\nSome integrations report native agent session references. Herdr uses official session references to resume Claude Code, Codex, Devin CLI, Droid, Kimi Code CLI, Qoder CLI, Qwen Code, Letta Code, Cursor Agent CLI, Grok CLI, GitHub Copilot CLI, Pi, OMP, Hermes Agent, OpenCode, Kilo Code CLI, MastraCode, and Antigravity CLI panes after a Herdr server restart unless `[session] resume_agents_on_restore = false` disables it.\n"
-    },
-    {
-      "anchor": "Install integrations > Integrate your own agent",
-      "doc": "docs/next/website/src/content/docs/integrations.mdx",
-      "id": "docs-next-website-src-content-docs-integrations-mdx-install-integrations-integrate-your-own-agent-part3",
-      "source_sha256": "c79dc2a646bd5967003eb0a152a8faca1e0be47e0fc1c5f6bb44769cfb06cac6",
-      "text": "Native session restore requires current Herdr integrations: Pi integration version `2`, OMP version `3`, Claude Code version `6`, Codex version `5`, GitHub Copilot CLI version `2`, Devin CLI version `2`, Droid version `2`, Kimi Code CLI version `3`, Qoder CLI version `2`, Qwen Code version `1`, Letta Code version `1`, Cursor Agent CLI version `1`, Grok CLI version `2`, OpenCode version `5`, Kilo Code CLI version `1`, Hermes Agent version `5`, MastraCode version `1`, or Antigravity CLI version `1`. Check installed versions with `herdr integration status`."
-    },
-    {
-      "anchor": "Install integrations > Kilo Code CLI",
-      "doc": "docs/next/website/src/content/docs/integrations.mdx",
-      "id": "docs-next-website-src-content-docs-integrations-mdx-install-integrations-kilo-code-cli",
-      "source_sha256": "725c8bf628ad018ec93b54b107691043fd88e89360f81100fea92733960e2d94",
-      "text": "## Kilo Code CLI\n\nInstall the Kilo Code CLI plugin:\n\n```bash\nherdr integration install kilo\n```\n\nHerdr writes the plugin to `~/.config/kilo/plugin/herdr-agent-state.js`. The Kilo config directory must already exist. Uninstall removes only that plugin file.\n\nThe plugin reports lifecycle state and session identity while Kilo runs inside a Herdr pane. After Kilo emits a session-bearing event, Herdr can use the reported session id to resume the pane with `kilo --session <id>`. Native screen manifest detection remains available when the plugin is not installed."
+      "source_sha256": "10ee107e310e680bd81ed5d9544bb7c9a03d18e46efdc2b4e71b310230d3b0f2",
+      "text": "Use `HERDR_BIN_PATH` and the CLI wrappers for portable integrations. Code that needs direct IPC can send the equivalent `pane.report_agent`, `pane.report_agent_session`, and `pane.release_agent` requests described in the [Socket API](/docs/socket-api/#agent-state-reporting).\n\n[Prime Agent's built-in Herdr reporter](https://github.com/PrimeIntellect-ai/prime-agent/blob/main/packages/coding-agent/src/core/extensions/builtin/herdr-agent-state.ts) is a real-world example. It activates only inside Herdr, maps agent events to `working`, `idle`, and `blocked`, preserves report ordering across sessions, and releases authority on exit.\n\nSome integrations report native agent session references. Herdr uses official session references to resume Claude Code, Codex, Kimi Code CLI, Pi, and OpenCode panes after a Herdr server restart unless `[session] resume_agents_on_restore = false` disables it.\n\nNative session restore requires current Herdr integrations: Pi integration version `2`, Claude Code version `6`, Codex version `5`, Kimi Code CLI version `3`, or OpenCode version `5`. Check installed versions with `herdr integration status`."
     },
     {
       "anchor": "Install integrations > Kimi Code CLI",
@@ -2331,27 +2261,6 @@
       "id": "docs-next-website-src-content-docs-integrations-mdx-install-integrations-kimi-code-cli",
       "source_sha256": "0e26ee2c7233f3295cb0f2c2e5e2cbc6fdfa0134035cc1459ee5a0855f8a0494",
       "text": "## Kimi Code CLI\n\nInstall the Kimi Code CLI hook:\n\n```bash\nherdr integration install kimi\n```\n\nThe hook reports Kimi session identity and lifecycle state to Herdr for native restore and authoritative `idle`, `working`, and `blocked` status. It requires Kimi Code CLI `0.14.0` or newer.\n\nHerdr uses `~/.kimi-code` by default, or `KIMI_CODE_HOME` when set. The Kimi Code config directory must already exist. Install writes `hooks/herdr-agent-state.sh` and appends Herdr-managed `[[hooks]]` entries to `config.toml`. Uninstall removes the Herdr-managed config block and deletes the hook script.\n\nHerdr resumes stored Kimi sessions with `kimi --session <id>`."
-    },
-    {
-      "anchor": "Install integrations > Letta Code",
-      "doc": "docs/next/website/src/content/docs/integrations.mdx",
-      "id": "docs-next-website-src-content-docs-integrations-mdx-install-integrations-letta-code",
-      "source_sha256": "9410b688edc1d7d17d86c5881cc6b1e6bb018c90a10190e345dbbf104d458c31",
-      "text": "## Letta Code\n\nInstall the Letta Code hook:\n\n```bash\nherdr integration install letta\n```\n\nThe quiet `SessionStart` hook reports the conversation ID for native restore. Letta Code state still comes from Herdr's screen manifest detection.\n\nHerdr uses `~/.letta`. The config directory must already exist. Install writes `hooks/herdr-agent-session.sh` (`hooks/herdr-agent-session.ps1` on Windows) and adds a Herdr entry to `settings.json`. Uninstall removes only the matching entry and managed script.\n\nHerdr resumes named conversations with `letta --conversation <id>`. It records the default conversation as `default:<agent-id>` and resumes it with `letta --conversation default --agent <agent-id>`."
-    },
-    {
-      "anchor": "Install integrations > MastraCode",
-      "doc": "docs/next/website/src/content/docs/integrations.mdx",
-      "id": "docs-next-website-src-content-docs-integrations-mdx-install-integrations-mastracode",
-      "source_sha256": "2e2a9f58e50c43ba57e475a36bf0107473a6292e0585f5b940bb89a65972ab88",
-      "text": "## MastraCode\n\nInstall the MastraCode hook:\n\n```bash\nherdr integration install mastracode\n```\n\nThe hook reports MastraCode lifecycle state and thread identity to Herdr for authoritative `idle`, `working`, and `blocked` status and native restore. MastraCode has no screen manifest fallback; state comes from the hook while MastraCode runs inside a Herdr pane.\n\nHerdr uses `~/.mastracode`. Install writes `hooks/herdr-agent-state.sh` (`hooks/herdr-agent-state.ps1` on Windows) and adds Herdr command entries to `hooks.json`, creating the directory when missing. Uninstall removes the matching hook entries and deletes the hook script.\n\nHerdr resumes stored MastraCode threads with `mastracode --thread <id>`."
-    },
-    {
-      "anchor": "Install integrations > OMP",
-      "doc": "docs/next/website/src/content/docs/integrations.mdx",
-      "id": "docs-next-website-src-content-docs-integrations-mdx-install-integrations-omp",
-      "source_sha256": "7eb350b3fba254c114828e9e24c500a37be91c3854bb258e3c33eba721c159a3",
-      "text": "## OMP\n\nInstall the OMP integration:\n\n```bash\nherdr integration install omp\n```\n\nHerdr writes the bundled extension to:\n\n```text\n~/.omp/agent/extensions/herdr-omp-agent-state.ts\n```\n\nHerdr uses `PI_CODING_AGENT_DIR` as the complete agent directory when set. Otherwise, it uses `$HOME/$PI_CONFIG_DIR/agent` when `PI_CONFIG_DIR` is set, falling back to `~/.omp/agent`. If Pi and OMP resolve to the same extension directory, Herdr refuses the OMP install so the OMP extension cannot be loaded by Pi. Configure separate agent directories before installing both integrations. Herdr creates the extensions directory when the resolved OMP agent directory already exists. Uninstall removes only that extension file.\n\nThe OMP integration reports `omp` as the agent label, lifecycle state, and native session identity through Herdr's socket API. It does not require native process detection for the `omp` executable, and Herdr can resume an OMP pane with `omp --resume=<session>` after a server restart."
     },
     {
       "anchor": "Install integrations > OpenCode",
@@ -2375,32 +2284,25 @@
       "text": "## Pi\n\nInstall the Pi integration:\n\n```bash\nherdr integration install pi\n```\n\nHerdr writes the bundled extension to:\n\n```text\n~/.pi/agent/extensions/herdr-agent-state.ts\n```\n\nIf `PI_CODING_AGENT_DIR` is set, Herdr writes to `$PI_CODING_AGENT_DIR/extensions/herdr-agent-state.ts` instead. Herdr creates the extensions directory when the Pi agent directory already exists. Uninstall removes only that extension file."
     },
     {
-      "anchor": "Install integrations > Qoder CLI",
+      "anchor": "Install integrations > Retired integrations",
       "doc": "docs/next/website/src/content/docs/integrations.mdx",
-      "id": "docs-next-website-src-content-docs-integrations-mdx-install-integrations-qoder-cli",
-      "source_sha256": "ff772774d8b80c162e50840dbb4bee2fbcb33efb5d0a33ee7beb2ba398a517f4",
-      "text": "## Qoder CLI\n\nInstall the Qoder CLI hook:\n\n```bash\nherdr integration install qodercli\n```\n\nThe hook reports Qoder CLI session identity to Herdr for native restore. Lifecycle state still comes from Herdr's screen manifest detection because Qoder hooks do not cover every lifecycle transition.\n\nHerdr uses `~/.qoder` by default, or `QODER_CONFIG_DIR` when set. The Qoder config directory must already exist. Install writes `hooks/herdr-agent-state.sh` and updates `settings.json` with Herdr hook entries. Uninstall removes the matching hook entries and deletes the hook script.\n\nHerdr resumes stored Qoder CLI sessions with `qodercli --resume <id>`.\n\nNative screen manifest detection remains available when the hook is not installed."
-    },
-    {
-      "anchor": "Install integrations > Qwen Code",
-      "doc": "docs/next/website/src/content/docs/integrations.mdx",
-      "id": "docs-next-website-src-content-docs-integrations-mdx-install-integrations-qwen-code",
-      "source_sha256": "3f25e5fdbc58280bfcd03ba3d843de53848555b8319f1620ae682750601e81a0",
-      "text": "## Qwen Code\n\nInstall the Qwen Code hook:\n\n```bash\nherdr integration install qwen\n```\n\nThe `SessionStart` hook reports only Qwen Code's session identity for native restore. Lifecycle state remains under Herdr's screen manifest detection.\n\nHerdr uses `~/.qwen` by default, or `QWEN_HOME` when set. The Qwen config directory must already exist. Install writes `hooks/herdr-agent-session.sh` (`hooks/herdr-agent-session.ps1` on Windows) and adds a Herdr entry to `settings.json`. Uninstall removes only the matching entry and managed script.\n\nHerdr resumes stored Qwen Code sessions with `qwen --resume <id>`."
+      "id": "docs-next-website-src-content-docs-integrations-mdx-install-integrations-retired-integrations",
+      "source_sha256": "2d6312054deef32bd48f6d92ed25704f053303cdd820c09fc1807b690fc51b7a",
+      "text": "## Retired integrations\n\nThis fork ships official integrations for Pi, Claude Code, Codex, Kimi Code CLI, and OpenCode only. Every other built-in integration has been retired, together with its bundled detection manifest:\n\n- The CLI no longer accepts the retired names. `herdr integration install` and `herdr integration uninstall` answer a retired name such as `cursor` or `omp` with a retirement notice and the list of supported targets, and `herdr integration status` no longer lists them.\n- Older clients can still send a retired target to the `integration.install` or `integration.uninstall` API methods. The request parses as before and is answered with the `integration_retired` error; `integration.list` no longer returns retired targets.\n- Hooks or plugins that an earlier build installed into a retired agent's config directory are left untouched. Remove them by hand if you no longer want them; their session reports are treated as unofficial and are not used for restore.\n- A retired agent running in a pane is an ordinary program: it is not detected automatically, and config keys that named it (such as `[ui.sound.agents]` overrides) are ignored.\n\nAny agent, retired or not, can still report state through the generic interface described in [Integrate your own agent](#integrate-your-own-agent). ZCode is planned to be supported as an external agent source rather than as a built-in integration."
     },
     {
       "anchor": "Install integrations > Uninstall integrations",
       "doc": "docs/next/website/src/content/docs/integrations.mdx",
       "id": "docs-next-website-src-content-docs-integrations-mdx-install-integrations-uninstall-integrations",
-      "source_sha256": "d5494b2dbc2f2ad53f702cf69e37d99d578f597b2d6763098c2c847a34acf249",
-      "text": "## Uninstall integrations\n\n```bash\nherdr integration uninstall pi\nherdr integration uninstall omp\nherdr integration uninstall claude\nherdr integration uninstall codex\nherdr integration uninstall copilot\nherdr integration uninstall devin\nherdr integration uninstall droid\nherdr integration uninstall kimi\nherdr integration uninstall opencode\nherdr integration uninstall kilo\nherdr integration uninstall hermes\nherdr integration uninstall qodercli\nherdr integration uninstall qwen\nherdr integration uninstall letta\nherdr integration uninstall cursor\nherdr integration uninstall mastracode\nherdr integration uninstall antigravity-cli\nherdr integration uninstall grok\n```\n\nHerdr saves integration configs atomically on Linux/macOS and for new files; existing Windows files keep their permissions through a backup-first, in-place update. If Windows reports a backup, close the agent and inspect the config before retrying: discard—not restore—an unfinished `.herdr-backup.pending` only after verifying the config, or restore completed `.herdr-backup` contents into the existing file if needed (if missing, establish its intended permissions first), then verify the config and remove the backup."
+      "source_sha256": "419d5750a155920052b8fb9ca62b15cfb6d24975f85b75198d81bf7e035aafbc",
+      "text": "## Uninstall integrations\n\n```bash\nherdr integration uninstall pi\nherdr integration uninstall claude\nherdr integration uninstall codex\nherdr integration uninstall kimi\nherdr integration uninstall opencode\n```\n\nHerdr saves integration configs atomically on Linux/macOS and for new files; existing Windows files keep their permissions through a backup-first, in-place update. If Windows reports a backup, close the agent and inspect the config before retrying: discard—not restore—an unfinished `.herdr-backup.pending` only after verifying the config, or restore completed `.herdr-backup` contents into the existing file if needed (if missing, establish its intended permissions first), then verify the config and remove the backup."
     },
     {
       "anchor": "_top",
       "doc": "docs/next/website/src/content/docs/integrations.mdx",
       "id": "docs-next-website-src-content-docs-integrations-mdx-top",
-      "source_sha256": "aff73d2b2c5b9ed4028849bcc4c662b479cd3cc862add2527f4d526caf22e570",
-      "text": "---\ntitle: Integrations\ndescription: Install Herdr integrations for Pi, OMP, Claude Code, Codex, GitHub Copilot CLI, Devin CLI, Droid, Kimi Code CLI, OpenCode, Kilo Code CLI, Hermes Agent, Qoder CLI, Qwen Code, Letta Code, Cursor Agent CLI, MastraCode, Antigravity CLI, and Grok CLI.\n---\n\nSee [Monitoring, account usage and docking](/docs/monitoring/) for host metrics, provider account bindings, and movable terminal groups.\n\n\nHerdr detects supported agents automatically. Install official integrations when you want native agent session restore, direct lifecycle reports, or both. See [Agents](/docs/agents/) for the full status authority model."
+      "source_sha256": "6319bdde12ef222d3f9d12652ea5b1dfc4a27d32f2f1b8cb99b64ad63effef08",
+      "text": "---\ntitle: Integrations\ndescription: Install Herdr integrations for Pi, Claude Code, Codex, Kimi Code CLI, and OpenCode.\n---\n\nSee [Monitoring, account usage and docking](/docs/monitoring/) for host metrics, provider account bindings, and movable terminal groups.\n\n\nHerdr detects supported agents automatically. Install official integrations when you want native agent session restore, direct lifecycle reports, or both. See [Agents](/docs/agents/) for the full status authority model."
     },
     {
       "anchor": "_top",
@@ -2966,15 +2868,15 @@
       "anchor": "What survives > Native agent session restore",
       "doc": "docs/next/website/src/content/docs/session-state.mdx",
       "id": "docs-next-website-src-content-docs-session-state-mdx-what-survives-native-agent-session-restore-part1",
-      "source_sha256": "9f0fd1c395d454da3d6ee3543e65463a283104fb9f38d1cd96f767919296ae72",
-      "text": "## Native agent session restore\n\nSome agents can resume their own conversation sessions. Herdr can use official integration-reported session references to restart supported agent panes after a Herdr server restart.\n\nNative agent session restore is enabled by default. Disable it with:\n\n```toml\n[session]\nresume_agents_on_restore = false\n```\n\nHerdr only resumes panes that reported a native session reference through a current official Herdr integration.\n\nAfter a client attaches and provides terminal size and theme context, Herdr resumes eligible restored agent panes across workspaces and tabs without waiting for each pane to be focused.\n\nNative session restore requires these Herdr integration versions or newer:\n\n| Agent | Minimum Herdr integration version | Resume command |\n| --- | --- | --- |\n| Pi | `2` | `pi --session <path-or-id>` |\n| Antigravity CLI | `1` | `agy --conversation <id>` |\n| OMP | `3` | `omp --resume=<path-or-id>` |\n| Claude Code | `6` | `claude --resume <id>` |\n| Codex | `5` | `codex resume <id>` |\n| Cursor Agent CLI | `1` | `cursor-agent --resume <id>` |\n| Grok CLI | `2` | `grok --resume <id>` |\n| GitHub Copilot CLI | `2` | `copilot --resume=<id>` |\n| Devin CLI | `2` | `devin --resume <id>` |\n| Droid | `2` | `droid --resume <id>` |\n| Kimi Code CLI | `3` | `kimi --session <id>` |\n| Qoder CLI | `2` | `qodercli --resume <id>` |\n| Qwen Code | `1` | `qwen --resume <id>` |"
+      "source_sha256": "39e1225ef17ea6fa350e1acca6ac48b803694836f2183684a4a519709f7d2912",
+      "text": "## Native agent session restore\n\nSome agents can resume their own conversation sessions. Herdr can use official integration-reported session references to restart supported agent panes after a Herdr server restart.\n\nNative agent session restore is enabled by default. Disable it with:\n\n```toml\n[session]\nresume_agents_on_restore = false\n```\n\nHerdr only resumes panes that reported a native session reference through a current official Herdr integration.\n\nAfter a client attaches and provides terminal size and theme context, Herdr resumes eligible restored agent panes across workspaces and tabs without waiting for each pane to be focused.\n\nNative session restore requires these Herdr integration versions or newer:\n\n| Agent | Minimum Herdr integration version | Resume command |\n| --- | --- | --- |\n| Pi | `2` | `pi --session <path-or-id>` |\n| Claude Code | `6` | `claude --resume <id>` |\n| Codex | `5` | `codex resume <id>` |\n| OpenCode | `5` | `opencode --session <id>` |\n| Kimi Code CLI | `3` | `kimi --session <id>` |\n\nRun `herdr integration status` to check installed integration versions. Reinstall outdated integrations with `herdr integration install <agent>`.\n\nUnsupported, missing, invalid, duplicated, or stale session references restore as normal shells in the saved pane directory. Session references reported by a [retired integration](/docs/integrations/#retired-integrations) count as unsupported.\n"
     },
     {
       "anchor": "What survives > Native agent session restore",
       "doc": "docs/next/website/src/content/docs/session-state.mdx",
       "id": "docs-next-website-src-content-docs-session-state-mdx-what-survives-native-agent-session-restore-part2",
-      "source_sha256": "9f0fd1c395d454da3d6ee3543e65463a283104fb9f38d1cd96f767919296ae72",
-      "text": "| Letta Code | `1` | `letta --conversation <id>` or `letta --conversation default --agent <agent-id>` for `default:<agent-id>` |\n| OpenCode | `5` | `opencode --session <id>` |\n| Kilo Code CLI | `1` | `kilo --session <id>` |\n| Hermes Agent | `2` | `hermes --resume <id>` |\n| MastraCode | `1` | `mastracode --thread <id>` |\n\nRun `herdr integration status` to check installed integration versions. Reinstall outdated integrations with `herdr integration install <agent>`.\n\nUnsupported, missing, invalid, duplicated, or stale session references restore as normal shells in the saved pane directory.\n\nIf native agent session restore applies to a pane, Herdr resumes the agent session instead of replaying saved pane history for that pane."
+      "source_sha256": "39e1225ef17ea6fa350e1acca6ac48b803694836f2183684a4a519709f7d2912",
+      "text": "If native agent session restore applies to a pane, Herdr resumes the agent session instead of replaying saved pane history for that pane."
     },
     {
       "anchor": "What survives > Pane screen history replay",
@@ -3281,14 +3183,14 @@
       "anchor": "Choose an integration layer > Response shapes",
       "doc": "docs/next/website/src/content/docs/socket-api.mdx",
       "id": "docs-next-website-src-content-docs-socket-api-mdx-choose-an-integration-layer-response-shapes-part1",
-      "source_sha256": "cafbd34b85941b03a75c96ea98f23e79fd26d6cd073aa836282f944e21969b8e",
-      "text": "## Response shapes\n\nSuccessful responses look like this:\n\n```json\n{\n  \"id\": \"req_1\",\n  \"result\": {\n    \"type\": \"pane_info\",\n    \"pane\": {\n      \"pane_id\": \"w1:p1\",\n      \"terminal_id\": \"term_abc123\",\n      \"workspace_id\": \"w1\",\n      \"tab_id\": \"w1:t1\",\n      \"focused\": true,\n      \"agent_status\": \"working\",\n      \"revision\": 42\n    }\n  }\n}\n```\n\n`server.agent_manifests` returns the active agent detection manifest sources and remote update diagnostics without reloading rules:\n\n```json\n{\n  \"id\": \"req_1\",\n  \"result\": {\n    \"type\": \"agent_manifest_status\",\n    \"last_check_unix\": 1781043522,\n    \"last_result\": \"checked\",\n    \"manifests\": [\n      {\n        \"agent\": \"cursor\",\n        \"source\": \"/home/me/.config/herdr/agent-detection/cursor.toml\",\n        \"source_kind\": \"local override\",\n        \"active_version\": \"2026.06.10.1\",\n        \"cached_remote_version\": \"2026.06.10.1\",\n        \"local_override_shadowing_remote\": true,\n        \"remote_update_result\": \"current\"\n      }\n    ]\n  }\n}\n```\n\nFields such as `last_check_unix`, `last_result`, `active_version`, `cached_remote_version`, `remote_update_result`, `remote_update_error`, `remote_last_checked_unix`, and `warning` are omitted when not available. `server.reload_agent_manifests` returns `agent_manifest_reload` with the same `manifests` item shape after reloading the in-memory rule cache.\n\n`agent.explain` evaluates the target pane's detection snapshot in the running server using the server's active manifest cache:\n\n```json\n{"
+      "source_sha256": "5c48b9bcd236571c133d2c1301cc54d0e148374bfa74fb0facab7f312cbf7e2e",
+      "text": "## Response shapes\n\nSuccessful responses look like this:\n\n```json\n{\n  \"id\": \"req_1\",\n  \"result\": {\n    \"type\": \"pane_info\",\n    \"pane\": {\n      \"pane_id\": \"w1:p1\",\n      \"terminal_id\": \"term_abc123\",\n      \"workspace_id\": \"w1\",\n      \"tab_id\": \"w1:t1\",\n      \"focused\": true,\n      \"agent_status\": \"working\",\n      \"revision\": 42\n    }\n  }\n}\n```\n\n`server.agent_manifests` returns the active agent detection manifest sources and remote update diagnostics without reloading rules:\n\n```json\n{\n  \"id\": \"req_1\",\n  \"result\": {\n    \"type\": \"agent_manifest_status\",\n    \"last_check_unix\": 1781043522,\n    \"last_result\": \"checked\",\n    \"manifests\": [\n      {\n        \"agent\": \"codex\",\n        \"source\": \"/home/me/.config/herdr/agent-detection/codex.toml\",\n        \"source_kind\": \"local override\",\n        \"active_version\": \"2026.06.10.1\",\n        \"cached_remote_version\": \"2026.06.10.1\",\n        \"local_override_shadowing_remote\": true,\n        \"remote_update_result\": \"current\"\n      }\n    ]\n  }\n}\n```\n\nFields such as `last_check_unix`, `last_result`, `active_version`, `cached_remote_version`, `remote_update_result`, `remote_update_error`, `remote_last_checked_unix`, and `warning` are omitted when not available. `server.reload_agent_manifests` returns `agent_manifest_reload` with the same `manifests` item shape after reloading the in-memory rule cache.\n\n`agent.explain` evaluates the target pane's detection snapshot in the running server using the server's active manifest cache:\n\n```json\n{"
     },
     {
       "anchor": "Choose an integration layer > Response shapes",
       "doc": "docs/next/website/src/content/docs/socket-api.mdx",
       "id": "docs-next-website-src-content-docs-socket-api-mdx-choose-an-integration-layer-response-shapes-part2",
-      "source_sha256": "cafbd34b85941b03a75c96ea98f23e79fd26d6cd073aa836282f944e21969b8e",
+      "source_sha256": "5c48b9bcd236571c133d2c1301cc54d0e148374bfa74fb0facab7f312cbf7e2e",
       "text": "  \"id\": \"req_2\",\n  \"method\": \"agent.explain\",\n  \"params\": { \"target\": \"w1:p1\" }\n}\n```\n\nThe response contains the same explain object printed by `herdr agent explain --json`, including the final state, manifest source and version, matched rule, evaluated rule evidence, skip-state reason, idle fallback reason, and `screen_detection_skip_reason` when a full lifecycle hook authority makes screen rules non-authoritative.\n\nClients need a running server that supports `agent.explain`; after upgrading Herdr, restart or live-handoff the server before relying on this method.\n\nErrors look like this:\n\n```json\n{\n  \"id\": \"req_1\",\n  \"error\": {\n    \"code\": \"not_found\",\n    \"message\": \"pane not found\"\n  }\n}\n```"
     },
     {
@@ -3449,15 +3351,15 @@
       "anchor": "Supported on Windows",
       "doc": "docs/next/website/src/content/docs/windows-beta.mdx",
       "id": "docs-next-website-src-content-docs-windows-beta-mdx-supported-on-windows-part1",
-      "source_sha256": "dc0aafa05ab7779cb7c88640076be52eb5efee057a0437fa1936a1f2b9c2da72",
+      "source_sha256": "a9bac8897498ae72394dad718fd76d0a91fbabb7165263f0633b7ce450f4ff7e",
       "text": "## Supported on Windows\n\n| Capability | Status |\n| --- | --- |\n| Local persistent sessions | supported |\n| Native panes through ConPTY | supported |\n| Windows Terminal / PowerShell app attach | supported |\n| `herdr --remote` and saved SSH machines to Linux/macOS/Windows hosts | supported; interactive attach and saved-machine setup can install or update Windows packages after confirmation; background reconnect only discovers installed packages |\n| Remote clipboard images and image-file drops | supported |\n| `cmd.exe` panes | supported |\n| Native keyboard and mouse input | supported |\n| Startup cwd and workspace labels | supported |\n| Pane launch cwd | supported |\n| Agent command discovery | supported |\n| Supported agent self-report integrations | supported |\n| Agent process-tree detection | supported |\n| Git/worktree detection from known cwd | supported |\n| System notifications and MP3 sounds | supported |\n| Plugins | preview |\n| Pane screen history | supported |\n| Nested launch override | supported |\n\nLocal persistent sessions continue running after the client detaches or its terminal window closes. Servers and pane processes launched through Windows OpenSSH also survive logout; run `herdr` again to reconnect.\n"
     },
     {
       "anchor": "Supported on Windows",
       "doc": "docs/next/website/src/content/docs/windows-beta.mdx",
       "id": "docs-next-website-src-content-docs-windows-beta-mdx-supported-on-windows-part2",
-      "source_sha256": "dc0aafa05ab7779cb7c88640076be52eb5efee057a0437fa1936a1f2b9c2da72",
-      "text": "Windows agent process detection scans descendants of the pane shell and recognizes direct agents plus common command wrappers, including npm/Node and Git Bash process chains. It follows Git Bash-launched agents across emulated `exec` boundaries, but it is not the same as Unix foreground process-group detection.\n\nWindows integration installation currently supports Pi, OMP, Claude Code, Codex, GitHub Copilot CLI, Devin CLI, OpenCode, Kilo Code CLI, Droid, Kimi Code CLI, Qoder CLI, and Antigravity CLI. Availability is narrower than on Unix; Herdr hides or rejects integrations whose install format is not supported on Windows.\n\nPlugins support `windows` as a manifest platform in preview. GitHub install, local link, build commands, actions, events, and plugin panes are best-effort on Windows. Commands are argv commands and must be Windows-compatible; Node package shims such as `npm`, `bun`, and `node` are expected to work when they are on `PATH`, while Unix-only examples using `sh` or Bash need Windows-specific alternatives. Platform filters skip unsupported build commands and return `platform_unsupported` for unsupported actions or panes."
+      "source_sha256": "a9bac8897498ae72394dad718fd76d0a91fbabb7165263f0633b7ce450f4ff7e",
+      "text": "Windows agent process detection scans descendants of the pane shell and recognizes direct agents plus common command wrappers, including npm/Node and Git Bash process chains. It follows Git Bash-launched agents across emulated `exec` boundaries, but it is not the same as Unix foreground process-group detection.\n\nWindows integration installation supports all five official integrations: Pi, Claude Code, Codex, OpenCode, and Kimi Code CLI. Herdr hides or rejects integrations whose install format is not supported on Windows.\n\nPlugins support `windows` as a manifest platform in preview. GitHub install, local link, build commands, actions, events, and plugin panes are best-effort on Windows. Commands are argv commands and must be Windows-compatible; Node package shims such as `npm`, `bun`, and `node` are expected to work when they are on `PATH`, while Unix-only examples using `sh` or Bash need Windows-specific alternatives. Platform filters skip unsupported build commands and return `platform_unsupported` for unsupported actions or panes."
     },
     {
       "anchor": "Supported on Windows > Partial support",
