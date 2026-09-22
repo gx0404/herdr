@@ -69,9 +69,12 @@ pub(crate) fn apply_agent_view(app: &AppState, entries: &mut Vec<AgentPanelEntry
 
     match app.agent_panel_sort {
         crate::app::state::AgentPanelSort::Spaces => {}
-        // seam-stub(activity-schema)：`launch_seq` 由波 1 活动树 schema 车道在
-        // server 侧分配后，这里按它稳定排序；在此之前保持 workspace 顺序。
-        crate::app::state::AgentPanelSort::Launch => {}
+        // 按 server 分配的启动序号稳定排序；序号未知（0）的排在最后并保持
+        // workspace 顺序（与客户端 `Launch` 键一致）。
+        crate::app::state::AgentPanelSort::Launch => entries.sort_by_key(|entry| {
+            let seq = app.agent_activity.launch_seq(entry.pane_id);
+            (seq == 0, seq)
+        }),
     }
 }
 
@@ -385,6 +388,28 @@ mod tests {
             }),
             sort: Vec::new(),
         }
+    }
+
+    #[test]
+    fn launch_sort_orders_entries_by_server_launch_seq() {
+        let mut state = state_with_agents();
+        let first = state.workspaces[0].tabs[0].root_pane;
+        let second = state.workspaces[1].tabs[0].root_pane;
+        state.agent_panel_sort = crate::app::state::AgentPanelSort::Launch;
+        // 没有序号：保持 workspace 顺序。
+        let order = |state: &AppState| {
+            projected_entries(state)
+                .iter()
+                .map(|entry| entry.pane_id)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(order(&state), [first, second]);
+        // 第二个先识别：启动序号在前。
+        state.agent_activity.ensure_launch_seq(second);
+        state.agent_activity.ensure_launch_seq(first);
+        assert_eq!(order(&state), [second, first]);
+        state.agent_panel_sort = crate::app::state::AgentPanelSort::Spaces;
+        assert_eq!(order(&state), [first, second]);
     }
 
     #[test]

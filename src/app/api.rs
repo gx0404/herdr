@@ -50,9 +50,74 @@ impl App {
                 let pane_updates = self.handle_internal_event_with_pane_updates(ev);
                 !pane_updates.is_empty() || self.state.toast != toast_before
             }
+            // 活动提示只进收件箱，不改投影；刷新结果只在树真的变了时才算有影响。
+            ev @ AppEvent::AgentActivityHinted { .. } => {
+                self.handle_internal_event(ev);
+                false
+            }
+            AppEvent::AgentActivityRefreshed { pane_id, result } => {
+                self.apply_agent_activity_refresh(pane_id, result)
+            }
+            AppEvent::ExternalAgentsRefreshed { source, result } => {
+                self.apply_external_agents_refresh(&source, result)
+            }
             ev => {
                 self.handle_internal_event(ev);
                 true
+            }
+        }
+    }
+
+    /// 一个 pane 的活动树后台刷新结果落库；树变化时发 `pane.agent_activity_changed`
+    /// （只带计数）。失败结果保留旧树，只记日志。返回投影是否变化。
+    pub(crate) fn apply_agent_activity_refresh(
+        &mut self,
+        pane_id: crate::layout::PaneId,
+        result: Result<Vec<crate::api::schema::AgentActivityNode>, String>,
+    ) -> bool {
+        let nodes = match result {
+            Ok(nodes) => nodes,
+            Err(error) => {
+                tracing::debug!(?pane_id, %error, "agent activity refresh failed");
+                return false;
+            }
+        };
+        let Some(counts) = self
+            .state
+            .apply_agent_activity(pane_id, nodes, Instant::now())
+        else {
+            return false;
+        };
+        if let Some(public_pane_id) = self
+            .find_pane(pane_id)
+            .and_then(|(ws_idx, _)| self.public_pane_id(ws_idx, pane_id))
+        {
+            self.emit_event(crate::api::schema::EventEnvelope {
+                event: crate::api::schema::EventKind::PaneAgentActivityChanged,
+                data: crate::api::schema::EventData::PaneAgentActivityChanged {
+                    pane_id: public_pane_id,
+                    running: counts.running,
+                    total: counts.total,
+                },
+            });
+        }
+        true
+    }
+
+    /// 一个外部来源的后台刷新结果整源落库。失败结果保留旧条目（过期由
+    /// `AppState::expire_agent_activity` 标为暂不可读）。返回投影是否变化。
+    pub(crate) fn apply_external_agents_refresh(
+        &mut self,
+        source: &str,
+        result: Result<Vec<crate::api::schema::ExternalAgentInfo>, String>,
+    ) -> bool {
+        match result {
+            Ok(agents) => self
+                .state
+                .apply_external_agents(source, agents, Instant::now()),
+            Err(error) => {
+                tracing::debug!(%source, %error, "external agents refresh failed");
+                false
             }
         }
     }
@@ -122,6 +187,16 @@ impl App {
         } = ev
         {
             self.handle_git_status_refreshed(results, cache_updates);
+            return Vec::new();
+        }
+
+        if let AppEvent::AgentActivityRefreshed { pane_id, result } = ev {
+            self.apply_agent_activity_refresh(pane_id, result);
+            return Vec::new();
+        }
+
+        if let AppEvent::ExternalAgentsRefreshed { source, result } = ev {
+            self.apply_external_agents_refresh(&source, result);
             return Vec::new();
         }
 
@@ -2524,5 +2599,210 @@ mod tests {
             app.state.toast.as_ref().map(|toast| toast.context.as_str()),
             Some("__herdr_original__ · 1")
         );
+    }
+}
+
+#[cfg(test)]
+mod agent_activity_event_tests {
+    use super::*;
+    use crate::api::schema::{
+        AgentActivityNode, AgentActivityStatus, EventData, EventKind, Method, Request,
+    };
+    use crate::detect::{Agent, AgentState};
+
+    fn app_with_panes() -> (
+        App,
+        crate::api::EventHub,
+        crate::layout::PaneId,
+        crate::layout::PaneId,
+    ) {
+        let event_hub = crate::api::EventHub::default();
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(
+            &crate::config::Config::default(),
+            crate::app::AppPolicy::TEST,
+            None,
+            api_rx,
+            event_hub.clone(),
+        );
+        app.state
+            .workspaces
+            .push(crate::workspace::Workspace::test_new("agent"));
+        app.state
+            .workspaces
+            .push(crate::workspace::Workspace::test_new("shell"));
+        app.state.ensure_test_terminals();
+        app.state.active = Some(0);
+        let agent_pane = app.state.workspaces[0].tabs[0].root_pane;
+        let shell_pane = app.state.workspaces[1].tabs[0].root_pane;
+        app.handle_internal_event(AppEvent::StateChanged {
+            pane_id: agent_pane,
+            agent: Some(Agent::Claude),
+            state: AgentState::Working,
+            visible_blocker: false,
+            visible_working: false,
+            process_exited: false,
+            observed_at: Instant::now(),
+        });
+        (app, event_hub, agent_pane, shell_pane)
+    }
+
+    fn node(id: &str, status: AgentActivityStatus) -> AgentActivityNode {
+        AgentActivityNode {
+            id: id.into(),
+            label: id.into(),
+            status,
+            ..AgentActivityNode::default()
+        }
+    }
+
+    fn activity_events(event_hub: &crate::api::EventHub) -> Vec<(String, u32, u32)> {
+        event_hub
+            .events_after(0)
+            .into_iter()
+            .filter(|(_, event)| event.event == EventKind::PaneAgentActivityChanged)
+            .map(|(_, event)| match event.data {
+                EventData::PaneAgentActivityChanged {
+                    pane_id,
+                    running,
+                    total,
+                } => (pane_id, running, total),
+                other => panic!("事件数据与种别不符：{other:?}"),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn report_agent_activity_only_leaves_a_hint_for_the_scheduler() {
+        let (mut app, event_hub, agent_pane, _) = app_with_panes();
+        let public = app.public_pane_id(0, agent_pane).expect("公开 id");
+        let response = app.handle_api_request(Request {
+            id: "hint".into(),
+            method: Method::PaneReportAgentActivity(
+                crate::api::schema::PaneReportAgentActivityParams {
+                    pane_id: public,
+                    source: "herdr:claude".into(),
+                    agent: "claude".into(),
+                    hint: Some("SubagentStart".into()),
+                    node_id: None,
+                    seq: Some(1),
+                },
+            ),
+        });
+        assert!(response.contains("\"result\""), "{response}");
+        assert!(app.state.agent_activity.has_hints());
+        assert!(
+            activity_events(&event_hub).is_empty(),
+            "提示本身不发变化事件"
+        );
+
+        let missing = app.handle_api_request(Request {
+            id: "hint-missing".into(),
+            method: Method::PaneReportAgentActivity(
+                crate::api::schema::PaneReportAgentActivityParams {
+                    pane_id: "w999:p999".into(),
+                    source: "herdr:claude".into(),
+                    agent: "claude".into(),
+                    hint: None,
+                    node_id: None,
+                    seq: None,
+                },
+            ),
+        });
+        assert!(missing.contains("pane_not_found"), "{missing}");
+    }
+
+    #[test]
+    fn activity_refresh_emits_one_changed_event_per_tree_change() {
+        let (mut app, event_hub, agent_pane, shell_pane) = app_with_panes();
+        let public = app.public_pane_id(0, agent_pane).expect("公开 id");
+        let tree = vec![
+            node("a", AgentActivityStatus::Running),
+            node("b", AgentActivityStatus::Done),
+        ];
+        assert!(
+            app.handle_internal_event_with_render_impact(AppEvent::AgentActivityRefreshed {
+                pane_id: agent_pane,
+                result: Ok(tree.clone()),
+            })
+        );
+        assert_eq!(activity_events(&event_hub), [(public.clone(), 1, 2)]);
+
+        // 同一棵树、失败结果、非 agent pane：都不发事件、不算渲染影响。
+        assert!(
+            !app.handle_internal_event_with_render_impact(AppEvent::AgentActivityRefreshed {
+                pane_id: agent_pane,
+                result: Ok(tree),
+            })
+        );
+        assert!(
+            !app.handle_internal_event_with_render_impact(AppEvent::AgentActivityRefreshed {
+                pane_id: agent_pane,
+                result: Err("unavailable".into()),
+            })
+        );
+        assert!(
+            !app.handle_internal_event_with_render_impact(AppEvent::AgentActivityRefreshed {
+                pane_id: shell_pane,
+                result: Ok(vec![node("x", AgentActivityStatus::Running)]),
+            })
+        );
+        assert_eq!(activity_events(&event_hub).len(), 1);
+        assert_eq!(
+            app.state
+                .agent_activity
+                .activity(agent_pane)
+                .map(|stored| stored.nodes.len()),
+            Some(2),
+            "失败结果保留旧树"
+        );
+
+        // 走通用入口（`handle_internal_event`）同样落库并发事件。
+        app.handle_internal_event(AppEvent::AgentActivityRefreshed {
+            pane_id: agent_pane,
+            result: Ok(vec![node("a", AgentActivityStatus::Done)]),
+        });
+        assert_eq!(
+            activity_events(&event_hub),
+            [(public.clone(), 1, 2), (public, 0, 1)]
+        );
+        let info = app.agent_info(0, agent_pane).expect("agent 信息");
+        assert_eq!(info.activity.len(), 1);
+        assert_eq!(info.launch_seq, 1);
+    }
+
+    #[test]
+    fn external_refresh_results_land_in_the_store() {
+        let (mut app, _, _, _) = app_with_panes();
+        let agent = crate::api::schema::ExternalAgentInfo {
+            external_id: "zcode:s-1".into(),
+            source: "zcode".into(),
+            agent_status: crate::api::schema::AgentStatus::Idle,
+            label: "session".into(),
+            readable: true,
+            agent: None,
+            cwd: None,
+            updated_at_ms: None,
+            activity: Vec::new(),
+        };
+        let epoch = app.state.projection_epoch;
+        assert!(
+            app.handle_internal_event_with_render_impact(AppEvent::ExternalAgentsRefreshed {
+                source: "zcode".into(),
+                result: Ok(vec![agent]),
+            })
+        );
+        assert_ne!(app.state.projection_epoch, epoch);
+        assert!(
+            !app.handle_internal_event_with_render_impact(AppEvent::ExternalAgentsRefreshed {
+                source: "zcode".into(),
+                result: Err("locked".into()),
+            })
+        );
+        app.handle_internal_event(AppEvent::ExternalAgentsRefreshed {
+            source: "zcode".into(),
+            result: Ok(Vec::new()),
+        });
+        assert!(app.state.agent_activity.external().is_empty());
     }
 }

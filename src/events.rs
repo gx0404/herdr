@@ -107,19 +107,18 @@ pub enum AppEvent {
         node_id: Option<String>,
         seq: Option<u64>,
     },
-    /// A background refresh produced the activity tree for a pane's agent.
-    // seam-stub(activity-schema)：波 1 活动树 schema 车道接通后台刷新后删除。
-    #[allow(dead_code)]
+    /// A background refresh finished for a pane's agent. `Err` keeps the
+    /// previously stored tree (the source was unreadable this time) and only
+    /// releases the in-flight slot.
     AgentActivityRefreshed {
         pane_id: PaneId,
-        nodes: Vec<crate::api::schema::AgentActivityNode>,
+        result: Result<Vec<crate::api::schema::AgentActivityNode>, String>,
     },
-    /// A background refresh produced the external agents of one source.
-    // seam-stub(activity-schema)：波 1 活动树 schema 车道接通后台刷新后删除。
-    #[allow(dead_code)]
+    /// A background refresh finished for one external source. `Err` keeps the
+    /// previously stored entries of that source.
     ExternalAgentsRefreshed {
         source: String,
-        agents: Vec<crate::api::schema::ExternalAgentInfo>,
+        result: Result<Vec<crate::api::schema::ExternalAgentInfo>, String>,
     },
     /// Display-only agent metadata was reported for a pane.
     HookMetadataReported {

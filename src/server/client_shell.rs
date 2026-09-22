@@ -135,7 +135,6 @@ pub(super) fn snapshot(
             let mut tokens = agent.tokens.into_iter().collect::<Vec<_>>();
             tokens.sort_by(|left, right| left.0.cmp(&right.0));
             protocol::ClientShellAgent {
-                pane_id,
                 workspace_id: agent.workspace_id,
                 tab_id: agent.tab_id,
                 name: agent.name,
@@ -150,7 +149,8 @@ pub(super) fn snapshot(
                 tokens,
                 focused,
                 launch_seq: agent.launch_seq,
-                activity: Default::default(),
+                activity: agent_activity_projection(app, &pane_id, agent.activity),
+                pane_id,
             }
         })
         .collect();
@@ -241,7 +241,87 @@ pub(super) fn snapshot(
         panes,
         agents,
         commands: app.client_shell_command_manifest(),
-        external_agents: Vec::new(),
+        external_agents: external_agents_projection(app),
+    }
+}
+
+/// 一个 agent 的活动树投影。`nodes` 是 `AgentInfo.activity`（已按上限截断的存储
+/// 副本，这里直接移入，不再复制）；截断前的计数取自存储。没有活动的 agent 不解析
+/// pane id、不分配。
+fn agent_activity_projection(
+    app: &app::App,
+    public_pane_id: &str,
+    nodes: Vec<crate::api::schema::AgentActivityNode>,
+) -> protocol::ClientShellAgentActivity {
+    if nodes.is_empty() {
+        return protocol::ClientShellAgentActivity::default();
+    }
+    let Some(stored) = app
+        .parse_pane_id(public_pane_id)
+        .and_then(|(_, pane_id)| app.state.agent_activity.activity(pane_id))
+    else {
+        return protocol::ClientShellAgentActivity::default();
+    };
+    activity_projection(stored.running, stored.total, stored.truncated, nodes)
+}
+
+/// 外部来源条目投影（不属于任何 pane）。
+fn external_agents_projection(app: &app::App) -> Vec<protocol::ClientShellExternalAgent> {
+    app.state
+        .agent_activity
+        .external()
+        .iter()
+        .map(|record| {
+            let info = &record.info;
+            protocol::ClientShellExternalAgent {
+                external_id: info.external_id.clone(),
+                source: info.source.clone(),
+                agent_status: info.agent_status,
+                label: info.label.clone(),
+                readable: info.readable,
+                agent: info.agent.clone(),
+                cwd: info.cwd.clone(),
+                updated_at_ms: info.updated_at_ms,
+                activity: activity_projection(
+                    record.running,
+                    record.total,
+                    record.truncated,
+                    info.activity.clone(),
+                ),
+            }
+        })
+        .collect()
+}
+
+fn activity_projection(
+    running: u32,
+    total: u32,
+    truncated: bool,
+    nodes: Vec<crate::api::schema::AgentActivityNode>,
+) -> protocol::ClientShellAgentActivity {
+    protocol::ClientShellAgentActivity {
+        running,
+        total,
+        truncated,
+        nodes: nodes.into_iter().map(activity_node_projection).collect(),
+    }
+}
+
+/// `AgentActivityNode` → wire 镜像（字段逐一移入）。
+fn activity_node_projection(
+    node: crate::api::schema::AgentActivityNode,
+) -> protocol::ClientShellActivityNode {
+    protocol::ClientShellActivityNode {
+        id: node.id,
+        kind: node.kind,
+        label: node.label,
+        status: node.status,
+        parent_id: node.parent_id,
+        agent_type: node.agent_type,
+        content_ref: node.content_ref,
+        summary: node.summary,
+        started_at_ms: node.started_at_ms,
+        ended_at_ms: node.ended_at_ms,
     }
 }
 
@@ -777,6 +857,117 @@ mod agent_activity_tests {
         assert_eq!(
             seqs,
             vec![(Some("claude".into()), 1), (Some("pi".into()), 2)]
+        );
+    }
+
+    fn snapshot_with_activity() -> crate::protocol::ClientShellSnapshot {
+        use crate::api::schema::{AgentActivityNode, AgentActivityStatus};
+        let mut app = app_with_panes(&["first"]);
+        let pane_id = app.state.workspaces[0].tabs[0].root_pane;
+        detect(&mut app, pane_id, Agent::Claude);
+        app.handle_internal_event(AppEvent::AgentActivityRefreshed {
+            pane_id,
+            result: Ok(vec![AgentActivityNode {
+                id: "a".into(),
+                label: "task a".into(),
+                status: AgentActivityStatus::Running,
+                started_at_ms: Some(10),
+                ..AgentActivityNode::default()
+            }]),
+        });
+        app.handle_internal_event(AppEvent::ExternalAgentsRefreshed {
+            source: "zcode".into(),
+            result: Ok(vec![crate::api::schema::ExternalAgentInfo {
+                external_id: "zcode:s-1".into(),
+                source: "zcode".into(),
+                agent_status: crate::api::schema::AgentStatus::Idle,
+                label: "desktop".into(),
+                readable: false,
+                agent: Some("zcode".into()),
+                cwd: None,
+                updated_at_ms: Some(5),
+                activity: Vec::new(),
+            }]),
+        });
+        snapshot(&app, "boot", 1, None, None)
+    }
+
+    /// 混版本：新 server 的快照对不认新字段的旧客户端仍可解码；旧 server 的快照
+    /// （缺新字段）对新客户端一律取默认，且新结构里每个子字段都单独有默认值。
+    #[test]
+    fn snapshot_activity_fields_survive_mixed_version_round_trips() {
+        let snapshot = snapshot_with_activity();
+        assert_eq!(snapshot.agents[0].launch_seq, 1);
+        assert_eq!(snapshot.agents[0].activity.nodes[0].id, "a");
+        assert_eq!(snapshot.external_agents[0].external_id, "zcode:s-1");
+        let json = serde_json::to_value(&snapshot).expect("编码快照");
+
+        // 旧客户端：只认旧字段的结构（serde 默认忽略未知字段）。
+        #[derive(serde::Deserialize)]
+        #[allow(dead_code)] // 字段只为解码形状存在
+        struct LegacyAgent {
+            pane_id: String,
+            agent_status: serde_json::Value,
+            state_change_seq: u64,
+            focused: bool,
+        }
+        #[derive(serde::Deserialize)]
+        #[allow(dead_code)] // 字段只为解码形状存在
+        struct LegacySnapshot {
+            boot_id: String,
+            revision: u64,
+            agents: Vec<LegacyAgent>,
+            commands: Vec<serde_json::Value>,
+        }
+        let legacy: LegacySnapshot =
+            serde_json::from_value(json.clone()).expect("旧客户端解码新快照");
+        assert_eq!(legacy.agents.len(), 1);
+
+        // 旧 server：去掉全部新键后，新客户端解码取默认。
+        let mut stripped = json.clone();
+        stripped
+            .as_object_mut()
+            .expect("对象")
+            .remove("external_agents");
+        for agent in stripped["agents"].as_array_mut().expect("数组") {
+            let agent = agent.as_object_mut().expect("对象");
+            agent.remove("launch_seq");
+            agent.remove("activity");
+        }
+        let decoded: crate::protocol::ClientShellSnapshot =
+            serde_json::from_value(stripped).expect("新客户端解码旧快照");
+        assert!(decoded.external_agents.is_empty());
+        assert_eq!(decoded.agents[0].launch_seq, 0);
+        assert_eq!(
+            decoded.agents[0].activity,
+            crate::protocol::ClientShellAgentActivity::default()
+        );
+
+        // 子字段各自带默认：只剩必填键也能解码。
+        let mut sparse = json;
+        sparse["agents"][0]["activity"] = serde_json::json!({ "nodes": [{ "id": "x" }] });
+        sparse["external_agents"] = serde_json::json!([{
+            "external_id": "zcode:s-2",
+            "source": "zcode",
+            "agent_status": "idle"
+        }]);
+        let decoded: crate::protocol::ClientShellSnapshot =
+            serde_json::from_value(sparse).expect("稀疏字段可解码");
+        let activity = &decoded.agents[0].activity;
+        assert_eq!(
+            (activity.running, activity.total, activity.truncated),
+            (0, 0, false)
+        );
+        assert_eq!(
+            activity.nodes[0].kind,
+            crate::api::schema::AgentActivityKind::Unknown
+        );
+        let external = &decoded.external_agents[0];
+        assert!(external.readable, "readable 缺省为可读");
+        assert_eq!(external.label, "");
+        assert_eq!(
+            external.activity,
+            crate::protocol::ClientShellAgentActivity::default()
         );
     }
 }

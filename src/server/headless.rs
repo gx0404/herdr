@@ -198,6 +198,8 @@ pub struct HeadlessServer {
     pub(super) app: app::App,
     observability: Option<crate::server::observability::Runtime>,
     observation_liveness: HashMap<u64, Arc<AtomicBool>>,
+    /// agent 活动树：刷新调度、后台读取与投影脏标记。
+    pub(super) agent_activity: crate::server::agent_activity::Service,
     #[cfg(unix)]
     api_tx: Option<api::ApiRequestSender>,
     // Kept on every platform so dropping HeadlessServer owns API server shutdown.
@@ -346,9 +348,11 @@ impl HeadlessServer {
             server_config_diagnostic_summaries(config_diagnostics);
         #[cfg(not(unix))]
         let _ = api_tx;
+        let agent_activity = crate::server::agent_activity::Service::new(app.event_tx.clone());
         Ok(Self {
             app,
             observability: None,
+            agent_activity,
             text_snapshots: super::text_snapshots::Store::default(),
             observation_liveness: HashMap::new(),
             #[cfg(unix)]
@@ -1143,6 +1147,7 @@ impl HeadlessServer {
         if projection_only {
             crate::render_prof::event("projection_only.invoke");
             self.stream_client_shell_projections();
+            self.agent_activity.projection_synced();
             if !surface_work {
                 if hidden_only {
                     crate::render_prof::event("render.skipped.hidden_sources");
@@ -1159,6 +1164,7 @@ impl HeadlessServer {
         }
         crate::render_prof::event("full_render.invoke");
         self.render_and_stream();
+        self.agent_activity.projection_synced();
     }
 
     /// Accepts pending client connections from the non-blocking listener.
@@ -3177,12 +3183,17 @@ impl HeadlessServer {
         }
 
         if super::agent_activity::handles(&msg.request.method) {
-            // seam-stub(activity-schema)：波 1 活动树 schema 车道在这里接后台读取。
-            let _ = msg.respond_to.send(super::client_commands::error_response(
-                msg.request.id.clone(),
-                super::agent_activity::NOT_IMPLEMENTED_CODE,
-                super::agent_activity::NOT_IMPLEMENTED_MESSAGE,
-            ));
+            // 读取在活动树后台线程执行，经请求自带的应答通道异步返回。
+            let id = msg.request.id.clone();
+            let respond_to = msg.respond_to.clone();
+            if let Err((code, message)) = self.agent_activity.submit_request(
+                &self.app,
+                msg.request,
+                super::agent_activity::Reply::Api(msg.respond_to),
+                Instant::now(),
+            ) {
+                let _ = respond_to.send(super::client_commands::error_response(id, code, message));
+            }
             return false;
         }
 
@@ -3632,6 +3643,15 @@ impl HeadlessServer {
 
         if self.has_app_client() {
             self.app.start_git_status_refresh_if_due(now);
+        }
+
+        // 活动树刷新调度：内部限流（每秒一轮，有新提示时立即）；外部来源只在有
+        // 客户端连接时轮询。落库后的投影变化只刷投影，直到真正同步给客户端。
+        let external_demand = self.has_app_client();
+        self.agent_activity
+            .tick(&mut self.app.state, now, external_demand);
+        if self.agent_activity.projection_dirty() {
+            impact.chrome = true;
         }
 
         if self

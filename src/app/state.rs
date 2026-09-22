@@ -1040,14 +1040,72 @@ pub(crate) struct PaneFocusTarget {
     pub pane_id: PaneId,
 }
 
+/// 每个 agent 保留的活动节点上限：超出的部分截断并置 `truncated`（运行中的节点
+/// 及其祖先优先保留），全量经 `agent.activity.read` 按需取。
+pub const MAX_AGENT_ACTIVITY_NODES: usize = 32;
+
+/// 外部来源连续这么久没有一次成功刷新，其条目标为「暂不可读」（`readable =
+/// false`），但不删除：来源恢复后整源替换回来。
+pub const EXTERNAL_AGENT_STALE_AFTER: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// 一个 agent（pane）的活动树快照：后台适配器一次发现的结果，截断后落库。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentActivitySnapshot {
+    /// 截断后的节点，保持来源顺序。
+    pub nodes: Vec<crate::api::schema::AgentActivityNode>,
+    /// 截断前的运行中节点数。
+    pub running: u32,
+    /// 截断前的节点总数。
+    pub total: u32,
+    pub truncated: bool,
+    /// 最近一次刷新（含内容未变的刷新）的时刻。
+    pub refreshed_at: std::time::Instant,
+    /// 内容每变化一次递增；同一 pane 内单调。
+    pub revision: u64,
+}
+
+/// 一次活动树变化后的计数，随 `pane.agent_activity_changed` 事件下发。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AgentActivityCounts {
+    pub running: u32,
+    pub total: u32,
+}
+
+/// 一个外部来源条目（不属于任何 pane）：`info.activity` 已截断，截断前的计数另存。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExternalAgentRecord {
+    pub info: crate::api::schema::ExternalAgentInfo,
+    pub running: u32,
+    pub total: u32,
+    pub truncated: bool,
+}
+
+/// 刷新一个 pane 的活动树所需的 agent 身份（交给后台适配器的入参，全部自有）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct AgentActivitySubject {
+    /// 规范化的 agent 名（`"claude"`、`"codex"` 等），用于查找来源适配器。
+    pub agent: String,
+    pub session: Option<crate::agent_resume::AgentSessionRef>,
+    pub cwd: Option<std::path::PathBuf>,
+}
+
 /// agent 启动序号与活动树的存储：纯数据，随 `AppState` 走，无 PTY 可测。
 ///
 /// 启动序号在 pane 首次获得 agent 身份时分配（进程内单调计数，不持久化、跨
 /// server 不可比），agent 释放或 pane 关闭后作废，重新识别取新号；`0` 表示未知。
+/// 活动树按 pane 存放，每个 agent 最多 [`MAX_AGENT_ACTIVITY_NODES`] 个节点；外部
+/// 来源条目按 `(source, external_id)` 排序存放，整源替换。`hinted` 是钩子提示的
+/// 收件箱：只记「哪个 pane 报过有变化」，刷新调度（限频、后台读取）在 server 侧
+/// 取走后执行。
 #[derive(Debug, Default)]
 pub struct AgentActivityStore {
     next_launch_seq: u64,
     launch_seqs: std::collections::HashMap<PaneId, u64>,
+    activity: std::collections::HashMap<PaneId, AgentActivitySnapshot>,
+    hinted: std::collections::HashSet<PaneId>,
+    external: Vec<ExternalAgentRecord>,
+    /// 各外部来源最近一次成功刷新的时刻。
+    external_refreshed_at: std::collections::HashMap<String, std::time::Instant>,
 }
 
 impl AgentActivityStore {
@@ -1066,10 +1124,287 @@ impl AgentActivityStore {
         true
     }
 
-    /// agent 释放或 pane 关闭：作废该 pane 的序号。返回是否有内容被移除。
+    /// agent 释放或 pane 关闭：作废该 pane 的序号、活动树与未处理的提示。返回
+    /// 投影可见的内容（序号或活动树）是否有被移除。
     pub fn forget_pane(&mut self, pane_id: PaneId) -> bool {
-        self.launch_seqs.remove(&pane_id).is_some()
+        self.hinted.remove(&pane_id);
+        let seq = self.launch_seqs.remove(&pane_id).is_some();
+        let activity = self.activity.remove(&pane_id).is_some();
+        seq || activity
     }
+
+    /// 只保留 `alive` 判定为真的 pane 的记录（过期清理）。返回投影可见的内容是否
+    /// 有被移除。
+    pub fn retain_panes(&mut self, mut alive: impl FnMut(PaneId) -> bool) -> bool {
+        let before = self.launch_seqs.len() + self.activity.len();
+        self.launch_seqs.retain(|pane_id, _| alive(*pane_id));
+        self.activity.retain(|pane_id, _| alive(*pane_id));
+        self.hinted.retain(|pane_id| alive(*pane_id));
+        before != self.launch_seqs.len() + self.activity.len()
+    }
+
+    /// 该 pane 当前的活动树快照。
+    pub fn activity(&self, pane_id: PaneId) -> Option<&AgentActivitySnapshot> {
+        self.activity.get(&pane_id)
+    }
+
+    /// 写入一次发现结果（截断到上限）。内容变化返回新计数；空结果写到没有记录的
+    /// pane 不算变化（轮询空树不刷事件）。无论是否变化都记下刷新时刻。
+    pub fn apply_activity(
+        &mut self,
+        pane_id: PaneId,
+        nodes: Vec<crate::api::schema::AgentActivityNode>,
+        now: std::time::Instant,
+    ) -> Option<AgentActivityCounts> {
+        let truncated = truncate_activity_nodes(nodes);
+        let counts = AgentActivityCounts {
+            running: truncated.running,
+            total: truncated.total,
+        };
+        match self.activity.get_mut(&pane_id) {
+            Some(existing) => {
+                existing.refreshed_at = now;
+                let unchanged = existing.nodes == truncated.nodes
+                    && existing.running == truncated.running
+                    && existing.total == truncated.total
+                    && existing.truncated == truncated.truncated;
+                if unchanged {
+                    return None;
+                }
+                existing.nodes = truncated.nodes;
+                existing.running = truncated.running;
+                existing.total = truncated.total;
+                existing.truncated = truncated.truncated;
+                existing.revision = existing.revision.saturating_add(1);
+                Some(counts)
+            }
+            None => {
+                if truncated.nodes.is_empty() {
+                    return None;
+                }
+                self.activity.insert(
+                    pane_id,
+                    AgentActivitySnapshot {
+                        nodes: truncated.nodes,
+                        running: truncated.running,
+                        total: truncated.total,
+                        truncated: truncated.truncated,
+                        refreshed_at: now,
+                        revision: 1,
+                    },
+                );
+                Some(counts)
+            }
+        }
+    }
+
+    /// 记一次钩子提示。返回是否是新提示（同一 pane 未取走前重复提示只算一次）。
+    pub fn note_hint(&mut self, pane_id: PaneId) -> bool {
+        self.hinted.insert(pane_id)
+    }
+
+    pub fn has_hints(&self) -> bool {
+        !self.hinted.is_empty()
+    }
+
+    /// 把全部未处理的提示交给刷新调度并清空收件箱。
+    pub fn drain_hints(&mut self, mut deliver: impl FnMut(PaneId)) {
+        for pane_id in self.hinted.drain() {
+            deliver(pane_id);
+        }
+    }
+
+    /// 当前外部来源条目，按 `(source, external_id)` 排序。
+    pub fn external(&self) -> &[ExternalAgentRecord] {
+        &self.external
+    }
+
+    /// 整源替换 `source` 的外部条目（其他来源保留）；每条的活动节点同样截断。
+    /// 返回条目集合是否变化。无论是否变化都记下该来源的成功刷新时刻。
+    pub fn apply_external(
+        &mut self,
+        source: &str,
+        agents: Vec<crate::api::schema::ExternalAgentInfo>,
+        now: std::time::Instant,
+    ) -> bool {
+        match self.external_refreshed_at.get_mut(source) {
+            Some(at) => *at = now,
+            None => {
+                self.external_refreshed_at.insert(source.to_owned(), now);
+            }
+        }
+        let mut next = self
+            .external
+            .iter()
+            .filter(|record| record.info.source != source)
+            .cloned()
+            .chain(agents.into_iter().map(|mut info| {
+                info.source = source.to_owned();
+                let truncated = truncate_activity_nodes(std::mem::take(&mut info.activity));
+                info.activity = truncated.nodes;
+                ExternalAgentRecord {
+                    info,
+                    running: truncated.running,
+                    total: truncated.total,
+                    truncated: truncated.truncated,
+                }
+            }))
+            .collect::<Vec<_>>();
+        next.sort_by(|left, right| {
+            left.info
+                .source
+                .cmp(&right.info.source)
+                .then_with(|| left.info.external_id.cmp(&right.info.external_id))
+        });
+        if next == self.external {
+            return false;
+        }
+        self.external = next;
+        true
+    }
+
+    /// 过期：超过 `stale_after` 没有成功刷新的来源，其条目标为暂不可读。返回是否
+    /// 有条目的状态变化。
+    pub fn expire_external(
+        &mut self,
+        now: std::time::Instant,
+        stale_after: std::time::Duration,
+    ) -> bool {
+        let mut changed = false;
+        for record in &mut self.external {
+            if !record.info.readable {
+                continue;
+            }
+            let stale = self
+                .external_refreshed_at
+                .get(&record.info.source)
+                .is_none_or(|at| now.saturating_duration_since(*at) >= stale_after);
+            if stale {
+                record.info.readable = false;
+                changed = true;
+            }
+        }
+        changed
+    }
+}
+
+/// [`truncate_activity_nodes`] 的结果。
+struct TruncatedActivity {
+    nodes: Vec<crate::api::schema::AgentActivityNode>,
+    running: u32,
+    total: u32,
+    truncated: bool,
+}
+
+/// 把一次发现结果截断到 [`MAX_AGENT_ACTIVITY_NODES`]。未超限时原样返回；超限时
+/// 先保留运行中的节点连同其祖先链（整条链放不下就跳过该节点，避免孤儿），再按
+/// 来源顺序补入父节点已保留（或无父节点）的其余节点；输出保持来源顺序。
+fn truncate_activity_nodes(nodes: Vec<crate::api::schema::AgentActivityNode>) -> TruncatedActivity {
+    use crate::api::schema::AgentActivityStatus;
+    let total = nodes.len();
+    let running = nodes
+        .iter()
+        .filter(|node| node.status == AgentActivityStatus::Running)
+        .count();
+    let running = u32::try_from(running).unwrap_or(u32::MAX);
+    let total_count = u32::try_from(total).unwrap_or(u32::MAX);
+    if total <= MAX_AGENT_ACTIVITY_NODES {
+        return TruncatedActivity {
+            nodes,
+            running,
+            total: total_count,
+            truncated: false,
+        };
+    }
+
+    let index_by_id = nodes
+        .iter()
+        .enumerate()
+        .map(|(index, node)| (node.id.as_str(), index))
+        .collect::<std::collections::HashMap<_, _>>();
+    let parent_index = |index: usize| -> Option<usize> {
+        nodes[index]
+            .parent_id
+            .as_deref()
+            .and_then(|parent| index_by_id.get(parent).copied())
+            .filter(|parent| *parent != index)
+    };
+    let mut keep = vec![false; total];
+    let mut kept = 0usize;
+    let mut chain = Vec::new();
+    for index in 0..total {
+        if kept >= MAX_AGENT_ACTIVITY_NODES {
+            break;
+        }
+        if keep[index] || nodes[index].status != AgentActivityStatus::Running {
+            continue;
+        }
+        chain.clear();
+        let mut cursor = Some(index);
+        while let Some(current) = cursor {
+            if keep[current] || chain.contains(&current) {
+                break;
+            }
+            chain.push(current);
+            cursor = parent_index(current);
+        }
+        if kept + chain.len() <= MAX_AGENT_ACTIVITY_NODES {
+            for &member in &chain {
+                keep[member] = true;
+            }
+            kept += chain.len();
+        }
+    }
+    for index in 0..total {
+        if kept >= MAX_AGENT_ACTIVITY_NODES {
+            break;
+        }
+        if keep[index] {
+            continue;
+        }
+        let attached = nodes[index].parent_id.is_none()
+            || parent_index(index).is_none_or(|parent| keep[parent]);
+        if attached {
+            keep[index] = true;
+            kept += 1;
+        }
+    }
+    drop(index_by_id);
+    let nodes = nodes
+        .into_iter()
+        .zip(keep)
+        .filter_map(|(node, keep)| keep.then_some(node))
+        .collect();
+    TruncatedActivity {
+        nodes,
+        running,
+        total: total_count,
+        truncated: true,
+    }
+}
+
+/// pane 是否仍持有 agent（存在且其终端是 agent 终端）。
+fn pane_hosts_agent(
+    workspaces: &[Workspace],
+    terminals: &std::collections::HashMap<
+        crate::terminal::TerminalId,
+        crate::terminal::TerminalState,
+    >,
+    pane_id: PaneId,
+) -> bool {
+    workspaces
+        .iter()
+        .find_map(|ws| ws.pane_state(pane_id))
+        .and_then(|pane| terminals.get(&pane.attached_terminal_id))
+        .is_some_and(crate::terminal::TerminalState::is_agent_terminal)
+}
+
+/// 活动来源适配器用的规范化 agent 名：已知 agent 取规范名，否则取原始标签。
+fn activity_agent_key(terminal: &crate::terminal::TerminalState) -> Option<&str> {
+    terminal
+        .effective_known_agent()
+        .map(crate::detect::agent_label)
+        .or_else(|| terminal.effective_agent_label())
 }
 
 /// All application state — pure data, no channels or async runtime.
@@ -1206,6 +1541,109 @@ pub struct AppState {
 impl AppState {
     pub(crate) fn bump_projection_epoch(&mut self) {
         self.projection_epoch = self.projection_epoch.wrapping_add(1);
+    }
+
+    /// 后台发现结果落库。pane 已不持有 agent（迟到的结果）则丢弃并清记录；内容
+    /// 变化返回新计数并递增投影纪元（活动摘要随快照下发，HSR-05 写入点）。
+    pub(crate) fn apply_agent_activity(
+        &mut self,
+        pane_id: PaneId,
+        nodes: Vec<crate::api::schema::AgentActivityNode>,
+        now: std::time::Instant,
+    ) -> Option<AgentActivityCounts> {
+        if !pane_hosts_agent(&self.workspaces, &self.terminals, pane_id) {
+            if self.agent_activity.forget_pane(pane_id) {
+                self.bump_projection_epoch();
+            }
+            return None;
+        }
+        let counts = self.agent_activity.apply_activity(pane_id, nodes, now)?;
+        self.bump_projection_epoch();
+        Some(counts)
+    }
+
+    /// 外部来源条目落库；集合变化时递增投影纪元。返回是否变化。
+    pub(crate) fn apply_external_agents(
+        &mut self,
+        source: &str,
+        agents: Vec<crate::api::schema::ExternalAgentInfo>,
+        now: std::time::Instant,
+    ) -> bool {
+        let changed = self.agent_activity.apply_external(source, agents, now);
+        if changed {
+            self.bump_projection_epoch();
+        }
+        changed
+    }
+
+    /// 过期清理：清掉已不持有 agent（或已关闭）的 pane 的启动序号与活动树，并把
+    /// 超过 [`EXTERNAL_AGENT_STALE_AFTER`] 没有成功刷新的外部条目标为暂不可读。
+    /// 返回是否有变化（已递增投影纪元）。
+    pub(crate) fn expire_agent_activity(&mut self, now: std::time::Instant) -> bool {
+        let AppState {
+            agent_activity,
+            workspaces,
+            terminals,
+            ..
+        } = self;
+        let panes_changed =
+            agent_activity.retain_panes(|pane_id| pane_hosts_agent(workspaces, terminals, pane_id));
+        let external_changed = agent_activity.expire_external(now, EXTERNAL_AGENT_STALE_AFTER);
+        let changed = panes_changed || external_changed;
+        if changed {
+            self.bump_projection_epoch();
+        }
+        changed
+    }
+
+    /// 逐个访问持有 agent 的 pane：`(pane_id, 规范化 agent 名, 是否 Working)`。
+    /// 刷新调度每秒最多走一遍；回调内不分配。
+    pub(crate) fn for_each_agent_pane(&self, mut visit: impl FnMut(PaneId, &str, bool)) {
+        for workspace in &self.workspaces {
+            for tab in &workspace.tabs {
+                for (pane_id, pane) in &tab.panes {
+                    let Some(terminal) = self.terminals.get(&pane.attached_terminal_id) else {
+                        continue;
+                    };
+                    if !terminal.is_agent_terminal() {
+                        continue;
+                    }
+                    let Some(agent) = activity_agent_key(terminal) else {
+                        continue;
+                    };
+                    visit(*pane_id, agent, terminal.state == AgentState::Working);
+                }
+            }
+        }
+    }
+
+    /// 刷新该 pane 活动树所需的 agent 身份；pane 不存在或不持有 agent 时为 `None`。
+    pub(crate) fn agent_activity_subject(&self, pane_id: PaneId) -> Option<AgentActivitySubject> {
+        let pane = self
+            .workspaces
+            .iter()
+            .find_map(|workspace| workspace.pane_state(pane_id))?;
+        let terminal = self.terminals.get(&pane.attached_terminal_id)?;
+        if !terminal.is_agent_terminal() {
+            return None;
+        }
+        let agent = activity_agent_key(terminal)?.to_owned();
+        let session = terminal
+            .hook_authority
+            .as_ref()
+            .and_then(|authority| authority.session_ref.clone())
+            .or_else(|| {
+                terminal
+                    .persisted_agent_session
+                    .as_ref()
+                    .map(|session| session.session_ref.clone())
+            });
+        let cwd = (!terminal.cwd.as_os_str().is_empty()).then(|| terminal.cwd.clone());
+        Some(AgentActivitySubject {
+            agent,
+            session,
+            cwd,
+        })
     }
 
     pub(crate) fn mark_session_dirty(&mut self) {
@@ -2087,5 +2525,342 @@ mod tests {
             crate::config::ColorDepth::Truecolor,
         );
         assert_eq!(components.hover_bg, Color::Rgb(1, 2, 3));
+    }
+}
+
+#[cfg(test)]
+mod agent_activity_store_tests {
+    use super::*;
+    use crate::api::schema::{
+        AgentActivityKind, AgentActivityNode, AgentActivityStatus, AgentStatus, ExternalAgentInfo,
+    };
+    use std::time::{Duration, Instant};
+
+    fn node(id: &str, parent: Option<&str>, status: AgentActivityStatus) -> AgentActivityNode {
+        AgentActivityNode {
+            id: id.into(),
+            kind: AgentActivityKind::Task,
+            label: id.into(),
+            status,
+            parent_id: parent.map(str::to_owned),
+            ..AgentActivityNode::default()
+        }
+    }
+
+    fn ids(nodes: &[AgentActivityNode]) -> Vec<&str> {
+        nodes.iter().map(|node| node.id.as_str()).collect()
+    }
+
+    fn external(id: &str) -> ExternalAgentInfo {
+        ExternalAgentInfo {
+            external_id: id.into(),
+            source: "ignored".into(),
+            agent_status: AgentStatus::Working,
+            label: id.into(),
+            readable: true,
+            agent: None,
+            cwd: None,
+            updated_at_ms: None,
+            activity: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn activity_writes_report_counts_only_when_the_tree_changes() {
+        let mut store = AgentActivityStore::default();
+        let pane = PaneId::from_raw(1);
+        let t0 = Instant::now();
+        assert_eq!(
+            store.apply_activity(pane, Vec::new(), t0),
+            None,
+            "空树不建记录"
+        );
+        assert!(store.activity(pane).is_none());
+
+        let tree = vec![
+            node("a", None, AgentActivityStatus::Running),
+            node("b", Some("a"), AgentActivityStatus::Done),
+        ];
+        assert_eq!(
+            store.apply_activity(pane, tree.clone(), t0),
+            Some(AgentActivityCounts {
+                running: 1,
+                total: 2
+            })
+        );
+        let first = store.activity(pane).expect("已落库").clone();
+        assert_eq!((first.revision, first.truncated), (1, false));
+
+        let t1 = t0 + Duration::from_secs(1);
+        assert_eq!(
+            store.apply_activity(pane, tree, t1),
+            None,
+            "内容未变不算变化"
+        );
+        let unchanged = store.activity(pane).expect("仍在");
+        assert_eq!(unchanged.revision, 1);
+        assert_eq!(unchanged.refreshed_at, t1, "刷新时刻照记");
+
+        assert_eq!(
+            store.apply_activity(pane, Vec::new(), t1),
+            Some(AgentActivityCounts {
+                running: 0,
+                total: 0
+            }),
+            "已有记录的树清空是变化"
+        );
+        assert_eq!(store.activity(pane).expect("仍在").revision, 2);
+    }
+
+    #[test]
+    fn truncation_keeps_running_nodes_with_their_ancestors_in_source_order() {
+        let mut store = AgentActivityStore::default();
+        let pane = PaneId::from_raw(1);
+        let mut tree = vec![node("root", None, AgentActivityStatus::Done)];
+        tree.extend((0..40).map(|index| {
+            node(
+                &format!("done-{index:02}"),
+                Some("root"),
+                AgentActivityStatus::Done,
+            )
+        }));
+        // 运行中的深层节点排在最后：父链 mid → root 必须一起保留，且不产生孤儿。
+        tree.push(node("mid", Some("root"), AgentActivityStatus::Blocked));
+        tree.push(node("leaf", Some("mid"), AgentActivityStatus::Running));
+        tree.push(node(
+            "orphan-parent-missing",
+            Some("gone"),
+            AgentActivityStatus::Running,
+        ));
+        let counts = store
+            .apply_activity(pane, tree, Instant::now())
+            .expect("落库");
+        assert_eq!(
+            counts,
+            AgentActivityCounts {
+                running: 2,
+                total: 44
+            },
+            "计数是截断前的"
+        );
+        let stored = store.activity(pane).expect("已落库");
+        assert!(stored.truncated);
+        assert_eq!(stored.nodes.len(), MAX_AGENT_ACTIVITY_NODES);
+        let kept = ids(&stored.nodes);
+        assert_eq!(kept[0], "root", "来源顺序不变");
+        for id in ["mid", "leaf", "orphan-parent-missing"] {
+            assert!(kept.contains(&id), "{id} 应优先保留");
+        }
+        let expected_tail = ["mid", "leaf", "orphan-parent-missing"];
+        assert_eq!(&kept[kept.len() - 3..], expected_tail);
+        for kept_node in &stored.nodes {
+            if let Some(parent) = kept_node.parent_id.as_deref().filter(|p| *p != "gone") {
+                assert!(
+                    kept.contains(&parent),
+                    "{} 的父节点 {parent} 被截掉",
+                    kept_node.id
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn truncation_skips_a_running_chain_that_cannot_fit_whole() {
+        let mut store = AgentActivityStore::default();
+        let pane = PaneId::from_raw(1);
+        // 一条 40 层的链，只有最深处在运行：整条链放不下 → 不保留它（不产生孤儿），
+        // 其余名额按来源顺序补入父节点已保留的节点。
+        let mut tree = vec![node("n00", None, AgentActivityStatus::Done)];
+        for depth in 1..40 {
+            let status = if depth == 39 {
+                AgentActivityStatus::Running
+            } else {
+                AgentActivityStatus::Done
+            };
+            tree.push(node(
+                &format!("n{depth:02}"),
+                Some(&format!("n{:02}", depth - 1)),
+                status,
+            ));
+        }
+        store.apply_activity(pane, tree, Instant::now());
+        let stored = store.activity(pane).expect("已落库");
+        assert_eq!(stored.nodes.len(), MAX_AGENT_ACTIVITY_NODES);
+        assert_eq!(ids(&stored.nodes)[..3], ["n00", "n01", "n02"]);
+        assert!(!ids(&stored.nodes).contains(&"n39"));
+    }
+
+    #[test]
+    fn forgetting_or_retaining_panes_drops_seq_tree_and_pending_hints() {
+        let mut store = AgentActivityStore::default();
+        let kept = PaneId::from_raw(1);
+        let gone = PaneId::from_raw(2);
+        let now = Instant::now();
+        for pane in [kept, gone] {
+            store.ensure_launch_seq(pane);
+            store.apply_activity(
+                pane,
+                vec![node("a", None, AgentActivityStatus::Running)],
+                now,
+            );
+            store.note_hint(pane);
+        }
+        assert!(store.retain_panes(|pane| pane == kept));
+        assert_eq!(store.launch_seq(gone), 0);
+        assert!(store.activity(gone).is_none());
+        let mut hinted = Vec::new();
+        store.drain_hints(|pane| hinted.push(pane));
+        assert_eq!(hinted, [kept], "被清掉的 pane 的提示一并丢弃");
+        assert!(!store.retain_panes(|pane| pane == kept), "无变化");
+
+        store.note_hint(kept);
+        assert!(!store.note_hint(kept), "未取走前重复提示只算一次");
+        assert!(store.forget_pane(kept));
+        assert!(!store.has_hints());
+        assert!(!store.forget_pane(kept));
+    }
+
+    #[test]
+    fn external_sources_are_replaced_whole_and_expire_to_unreadable() {
+        let mut store = AgentActivityStore::default();
+        let t0 = Instant::now();
+        assert!(store.apply_external("zcode", vec![external("zcode:b"), external("zcode:a")], t0));
+        assert!(store.apply_external("other", vec![external("other:x")], t0));
+        let listed = store
+            .external()
+            .iter()
+            .map(|record| {
+                (
+                    record.info.source.as_str(),
+                    record.info.external_id.as_str(),
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            listed,
+            [
+                ("other", "other:x"),
+                ("zcode", "zcode:a"),
+                ("zcode", "zcode:b")
+            ],
+            "按 (source, external_id) 排序，source 以登记名为准"
+        );
+        assert!(
+            !store.apply_external("zcode", vec![external("zcode:a"), external("zcode:b")], t0),
+            "同内容不算变化"
+        );
+        assert!(store.apply_external("zcode", vec![external("zcode:a")], t0));
+        assert_eq!(store.external().len(), 2, "整源替换，不影响其他来源");
+
+        // zcode 一直刷新成功，other 60 s 没有成功刷新 → 只有 other 变为暂不可读。
+        let later = t0 + EXTERNAL_AGENT_STALE_AFTER;
+        store.apply_external("zcode", vec![external("zcode:a")], later);
+        assert!(store.expire_external(later, EXTERNAL_AGENT_STALE_AFTER));
+        let readable = store
+            .external()
+            .iter()
+            .map(|record| (record.info.external_id.as_str(), record.info.readable))
+            .collect::<Vec<_>>();
+        assert_eq!(readable, [("other:x", false), ("zcode:a", true)]);
+        assert!(
+            !store.expire_external(later, EXTERNAL_AGENT_STALE_AFTER),
+            "已标记不重复变化"
+        );
+        // 来源恢复：整源替换回可读。
+        assert!(store.apply_external("other", vec![external("other:x")], later));
+        assert!(store.external().iter().all(|record| record.info.readable));
+    }
+
+    #[test]
+    fn external_activity_is_truncated_with_counts_kept_on_the_record() {
+        let mut store = AgentActivityStore::default();
+        let mut agent = external("zcode:a");
+        agent.activity = (0..40)
+            .map(|index| node(&format!("t{index}"), None, AgentActivityStatus::Running))
+            .collect();
+        store.apply_external("zcode", vec![agent], Instant::now());
+        let record = &store.external()[0];
+        assert_eq!(record.info.activity.len(), MAX_AGENT_ACTIVITY_NODES);
+        assert_eq!(
+            (record.running, record.total, record.truncated),
+            (40, 40, true)
+        );
+    }
+
+    fn state_with_agent_pane() -> (AppState, PaneId, PaneId) {
+        let mut state = AppState::test_new();
+        state.workspaces.push(Workspace::test_new("agent"));
+        state.workspaces.push(Workspace::test_new("shell"));
+        state.ensure_test_terminals();
+        let agent_pane = state.workspaces[0].tabs[0].root_pane;
+        let shell_pane = state.workspaces[1].tabs[0].root_pane;
+        let terminal_id = state.workspaces[0]
+            .pane_state(agent_pane)
+            .expect("pane")
+            .attached_terminal_id
+            .clone();
+        let terminal = state.terminals.get_mut(&terminal_id).expect("terminal");
+        terminal.detected_agent = Some(crate::detect::Agent::Claude);
+        terminal.state = AgentState::Working;
+        (state, agent_pane, shell_pane)
+    }
+
+    #[test]
+    fn app_state_accepts_activity_only_for_panes_that_host_an_agent() {
+        let (mut state, agent_pane, shell_pane) = state_with_agent_pane();
+        let tree = vec![node("a", None, AgentActivityStatus::Running)];
+        let epoch = state.projection_epoch;
+        assert!(state
+            .apply_agent_activity(shell_pane, tree.clone(), Instant::now())
+            .is_none());
+        assert_eq!(state.projection_epoch, epoch, "迟到结果不改投影");
+        assert!(state
+            .apply_agent_activity(agent_pane, tree.clone(), Instant::now())
+            .is_some());
+        assert_ne!(
+            state.projection_epoch, epoch,
+            "活动摘要进投影，写入点递增纪元"
+        );
+        let epoch = state.projection_epoch;
+        assert!(state
+            .apply_agent_activity(agent_pane, tree, Instant::now())
+            .is_none());
+        assert_eq!(state.projection_epoch, epoch, "无变化不递增纪元");
+
+        let mut visited = Vec::new();
+        state.for_each_agent_pane(|pane_id, agent, working| {
+            visited.push((pane_id, agent.to_owned(), working));
+        });
+        assert_eq!(visited, [(agent_pane, "claude".to_owned(), true)]);
+        let subject = state
+            .agent_activity_subject(agent_pane)
+            .expect("持有 agent");
+        assert_eq!(subject.agent, "claude");
+        assert!(state.agent_activity_subject(shell_pane).is_none());
+    }
+
+    #[test]
+    fn app_state_expiry_drops_panes_that_stopped_hosting_an_agent() {
+        let (mut state, agent_pane, _) = state_with_agent_pane();
+        state.apply_agent_activity(
+            agent_pane,
+            vec![node("a", None, AgentActivityStatus::Running)],
+            Instant::now(),
+        );
+        assert!(!state.expire_agent_activity(Instant::now()), "仍持有 agent");
+        let terminal_id = state.workspaces[0]
+            .pane_state(agent_pane)
+            .expect("pane")
+            .attached_terminal_id
+            .clone();
+        state
+            .terminals
+            .get_mut(&terminal_id)
+            .expect("terminal")
+            .detected_agent = None;
+        let epoch = state.projection_epoch;
+        assert!(state.expire_agent_activity(Instant::now()));
+        assert!(state.agent_activity.activity(agent_pane).is_none());
+        assert_ne!(state.projection_epoch, epoch);
     }
 }

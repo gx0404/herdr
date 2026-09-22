@@ -1621,8 +1621,8 @@ impl AppState {
                 node_id,
                 seq,
             } => {
-                // seam-stub(activity-schema)：提示先只记录；波 1 活动树 schema 车道
-                // 在这里接刷新调度（限频 + 后台读取）。
+                // 提示只进收件箱（不改投影）：刷新调度（限频 + 后台读取）在 server
+                // 侧取走后执行，见 `server::agent_activity::Service`。
                 tracing::debug!(
                     ?pane_id,
                     %source,
@@ -1632,16 +1632,29 @@ impl AppState {
                     ?seq,
                     "agent activity hint received"
                 );
+                self.agent_activity.note_hint(pane_id);
                 Vec::new()
             }
-            AppEvent::AgentActivityRefreshed { pane_id, nodes } => {
-                // seam-stub(activity-schema)：活动树落库由波 1 活动树 schema 车道实现。
-                tracing::debug!(?pane_id, nodes = nodes.len(), "agent activity refreshed");
+            AppEvent::AgentActivityRefreshed { pane_id, result } => {
+                match result {
+                    Ok(nodes) => {
+                        self.apply_agent_activity(pane_id, nodes, Instant::now());
+                    }
+                    Err(error) => {
+                        tracing::debug!(?pane_id, %error, "agent activity refresh failed");
+                    }
+                }
                 Vec::new()
             }
-            AppEvent::ExternalAgentsRefreshed { source, agents } => {
-                // seam-stub(activity-schema)：外部来源落库由波 1 活动树 schema 车道实现。
-                tracing::debug!(%source, agents = agents.len(), "external agents refreshed");
+            AppEvent::ExternalAgentsRefreshed { source, result } => {
+                match result {
+                    Ok(agents) => {
+                        self.apply_external_agents(&source, agents, Instant::now());
+                    }
+                    Err(error) => {
+                        tracing::debug!(%source, %error, "external agents refresh failed");
+                    }
+                }
                 Vec::new()
             }
             AppEvent::HookMetadataReported {

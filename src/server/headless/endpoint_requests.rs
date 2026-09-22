@@ -125,16 +125,24 @@ impl HeadlessServer {
             return result.unwrap_or(false);
         }
         if crate::server::agent_activity::handles(&request.method) {
-            // seam-stub(activity-schema)：波 1 活动树 schema 车道在这里接后台读取。
-            self.send_to_client(
+            // 与观测请求一样不占终端命令的焦点与 in-flight 名额：读取在活动树后台
+            // 线程执行，应答经 server 事件通道按分块回到本客户端。
+            let reply = crate::server::agent_activity::Reply::Endpoint {
                 client_id,
-                crate::server::client_commands::error_message(
-                    boot_id,
-                    request_id,
-                    crate::server::agent_activity::NOT_IMPLEMENTED_CODE,
-                    crate::server::agent_activity::NOT_IMPLEMENTED_MESSAGE,
-                ),
-            );
+                boot_id: boot_id.clone(),
+                events: self.server_event_tx.clone(),
+            };
+            if let Err((code, message)) =
+                self.agent_activity
+                    .submit_request(&self.app, *request, reply, Instant::now())
+            {
+                self.send_to_client(
+                    client_id,
+                    crate::server::client_commands::error_message(
+                        boot_id, request_id, code, message,
+                    ),
+                );
+            }
             return false;
         }
         if crate::server::observability::is_background_method(&request.method) {

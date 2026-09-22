@@ -1,5 +1,7 @@
 use super::*;
 
+#[path = "agent_activity.rs"]
+mod agent_activity_tests;
 mod multi_view;
 #[path = "pane_graphics.rs"]
 mod pane_graphics_tests;
@@ -64,10 +66,12 @@ fn test_headless_server_with_event_hub(event_hub: api::EventHub) -> HeadlessServ
     spawn_windows_client_accept_thread(listener, should_quit.clone(), server_event_tx.clone());
     let server_keybindings = app_keybindings(&app);
     let headless_size = app.state.headless_size;
+    let agent_activity = crate::server::agent_activity::Service::new(app.event_tx.clone());
 
     HeadlessServer {
         text_snapshots: crate::server::text_snapshots::Store::default(),
         observability: None,
+        agent_activity,
         observation_liveness: HashMap::new(),
         app,
         #[cfg(unix)]
