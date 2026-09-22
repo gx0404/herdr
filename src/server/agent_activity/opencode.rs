@@ -66,7 +66,8 @@
 //! 上面的列名、别名与 json 路径是版本相关事实，单测喂的是「SQL 跑完之后」的行
 //! JSON，覆盖不到 SQL 本身。升级 opencode 后（或怀疑键名漂移时）在装有 opencode
 //! 的机器上跑只读探针，它把 [`tree_sql`] / [`todo_sql`] / [`parts_sql`] 原样打到
-//! 本机库上，核对别名全集与各 json 路径仍能解析：
+//! 本机库上，核对别名全集与各 json 路径仍能解析，并逐行核对 `model` 非空的会话都
+//! 取得出模型名：
 //!
 //! ```text
 //! cargo nextest run --run-ignored only -E 'test(live_schema_probe)'
@@ -358,7 +359,19 @@ fn fetch_sessions(db: &dyn DbQuery, root: &str) -> Result<Vec<SessionRow>, Sourc
     Ok(sessions)
 }
 
+/// 从 `session.model` 列（`column` 是它在查询里的写法）取模型名的表达式：
+/// 先走实测路径，再走兼容回退；列不是合法 JSON 时为 null。
+fn model_id_sql(column: &str) -> String {
+    format!(
+        "CASE WHEN json_valid({column}) THEN COALESCE(\
+           json_extract({column}, '{MODEL_ID_PATH}'), \
+           json_extract({column}, '{MODEL_ID_FALLBACK_PATH}')\
+         ) END"
+    )
+}
+
 fn tree_sql(root: &str, offset: usize) -> String {
+    let model_id = model_id_sql("s.model");
     format!(
         "WITH RECURSIVE tree(id, depth) AS (\
            SELECT id, 0 FROM session WHERE id = '{root}' \
@@ -367,10 +380,7 @@ fn tree_sql(root: &str, offset: usize) -> String {
            WHERE t.depth < {MAX_TREE_DEPTH}\
          ) \
          SELECT s.id, s.parent_id, t.depth, s.agent, \
-           CASE WHEN json_valid(s.model) THEN COALESCE(\
-             json_extract(s.model, '{MODEL_ID_PATH}'), \
-             json_extract(s.model, '{MODEL_ID_FALLBACK_PATH}')\
-           ) END AS model_id, \
+           {model_id} AS model_id, \
            substr(s.title, 1, {SQL_TITLE_CHARS}) AS title, length(s.title) AS title_len, \
            s.time_created, s.time_updated, s.time_archived, \
            s.cost, s.tokens_input, s.tokens_output, s.tokens_reasoning, \
@@ -1953,12 +1963,14 @@ mod tests {
         );
         let db = OfficialCli;
 
-        // 树：挑一个带 model 且有消息的会话当根，别名与路径一次查清。
+        // 树：挑一个带 model 且有消息的会话当根（子会话最多的优先，覆盖的行更多），
+        // 别名与路径一次查清。
         let root = scalar_id(
             &db,
             "SELECT s.id AS id FROM session s WHERE json_valid(s.model) \
              AND EXISTS (SELECT 1 FROM message m WHERE m.session_id = s.id) \
-             ORDER BY s.time_updated DESC LIMIT 1",
+             ORDER BY (SELECT COUNT(*) FROM session c WHERE c.parent_id = s.id) DESC, \
+             s.time_updated DESC LIMIT 1",
         )
         .expect("库里要有带 model 与消息的会话");
         let tree = tree_sql(&root, 0);
@@ -1989,6 +2001,38 @@ mod tests {
         assert!(
             count_of(&counts, "model_id") > 0,
             "model_id 全为 null：session.model 里的模型名路径漂移了（实测是 $.id）"
+        );
+        // 逐行：树查询结果里 `session.model` 非空的每一行都要解析出模型名。
+        let with_model = non_null_counts(
+            &db,
+            &format!(
+                "SELECT t.model_id FROM ({tree}) t JOIN session s ON s.id = t.id \
+                 WHERE s.model IS NOT NULL"
+            ),
+            &["model_id"],
+        );
+        assert!(
+            count_of(&with_model, "row_total") > 0,
+            "选中的根会话带 model，树查询却没有带 model 的行"
+        );
+        assert_eq!(
+            count_of(&with_model, "model_id"),
+            count_of(&with_model, "row_total"),
+            "树查询里有 model 非空、model_id 却为 null 的行：模型名路径漂移了"
+        );
+        // 全库：同一表达式对所有 model 非空的会话都能取出模型名（异构行也算漂移）。
+        let whole_db = non_null_counts(
+            &db,
+            &format!(
+                "SELECT {} AS model_id FROM session WHERE model IS NOT NULL",
+                model_id_sql("model")
+            ),
+            &["model_id"],
+        );
+        assert_eq!(
+            count_of(&whole_db, "model_id"),
+            count_of(&whole_db, "row_total"),
+            "库里有 model 非空却取不出模型名的会话：session.model 的键名漂移了"
         );
         assert!(
             count_of(&counts, "last_role") > 0,
