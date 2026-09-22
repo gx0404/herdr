@@ -6536,8 +6536,8 @@
       "anchor": "structure",
       "doc": "src/server/headless/render.rs",
       "id": "src-server-headless-render-rs-structure",
-      "source_sha256": "aa657ad367a1859825a83fc9701035c404001c4105aa51b1221acdf27de012aa",
-      "text": "公开项：\nimpl HeadlessServer {\npub(super) fn stream_host_mouse_capture_mode(&mut self) {\npub(super) fn stream_direct_terminal_keyboard_mode(&mut self) {\npub(super) fn has_pending_presentation_work(\npub(super) fn sync_immediate_pty_sources(&self) {\npub(super) fn pty_sources_visible_to_any_render_target(\npub(super) fn stream_client_shell_projections(&mut self) { — RS-12：纯 chrome 变化只刷新客户端 shell 投影（快照 / agent view）， 不重发 pane surface。\npub(super) fn render_and_stream(&mut self) {"
+      "source_sha256": "153dd02739c6d7220aa46568498d57191229251ac45d0df2ab7b2ae88fcada74",
+      "text": "公开项：\nimpl HeadlessServer {\npub(super) fn stream_host_mouse_capture_mode(&mut self) {\npub(super) fn stream_direct_terminal_keyboard_mode(&mut self) {\npub(super) fn has_pending_presentation_work(\npub(super) fn sync_immediate_pty_sources(&self) {\npub(super) fn pty_sources_visible_to_any_render_target(\npub(super) fn stream_client_shell_projections(&mut self) -> bool { — RS-12：纯 chrome 变化只刷新客户端 shell 投影（快照 / agent view）， 不重发 pane surface。 \npub(super) fn render_and_stream(&mut self) {"
     },
     {
       "anchor": "structure",

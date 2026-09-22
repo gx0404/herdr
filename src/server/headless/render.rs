@@ -506,24 +506,32 @@ impl HeadlessServer {
 
     /// RS-12：纯 chrome 变化只刷新客户端 shell 投影（快照 / agent view），
     /// 不重发 pane surface。
-    pub(super) fn stream_client_shell_projections(&mut self) {
+    ///
+    /// 返回是否有客户端的快照修订号因此前进：客户端只画与快照修订号精确配对的
+    /// surface，修订号前进后调用方必须补一帧 surface（见 `dispatch_render_tick`）。
+    pub(super) fn stream_client_shell_projections(&mut self) -> bool {
         let mut broken_clients: Vec<u64> = Vec::new();
+        let mut advanced = false;
         for (client_id, _, _, _, mode) in render_targets(&self.clients, self.foreground_client_id) {
             if !matches!(mode, RenderTargetMode::ClientShell) {
                 continue;
             }
-            if !self
+            let Some(before) = self
                 .clients
                 .get(&client_id)
-                .is_some_and(|client| client.shell_surface_active)
-            {
+                .filter(|client| client.shell_surface_active)
+                .map(|client| client.shell_projection_revision)
+            else {
                 continue;
-            }
-            self.sync_client_shell_projection(client_id, &mut broken_clients);
+            };
+            advanced |= self
+                .sync_client_shell_projection(client_id, &mut broken_clients)
+                .is_some_and(|after| after != before);
         }
         for client_id in broken_clients {
             self.remove_client_and_resize_if_needed(client_id);
         }
+        advanced
     }
 
     pub(super) fn render_and_stream(&mut self) {

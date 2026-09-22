@@ -1517,6 +1517,23 @@ mod tests {
         assert_eq!(b.cwd.as_deref(), Some("/work/other"));
     }
 
+    /// 库没变时，相隔一轮轮询的两次发现结果逐字段相同：`now_ms` 只参与窗口与
+    /// 陈旧阈值判定，不进条目字段。否则 `apply_external` 每轮都判为变化，快照
+    /// 修订号随轮询空转、客户端每 10 s 重配一次画面。
+    #[test]
+    fn unchanged_db_yields_identical_entries_on_the_next_poll() {
+        let text = std::fs::read_to_string(fixture_dir().join("query-output.jsonl"))
+            .expect("读取录制的查询输出");
+        let snapshot = parse_query_output(&text);
+        let next_poll = NOW
+            + u64::try_from(crate::server::agent_activity::EXTERNAL_POLL_INTERVAL.as_millis())
+                .expect("轮询间隔放得进 u64");
+        assert_eq!(
+            build_external_agents(&snapshot, &fixture_agents(), NOW),
+            build_external_agents(&snapshot, &fixture_agents(), next_poll)
+        );
+    }
+
     #[test]
     fn subagents_carry_metadata_and_nest_to_any_depth() {
         let agents = recorded_agents();

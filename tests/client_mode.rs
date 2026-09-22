@@ -1132,6 +1132,292 @@ fn federated_client_starts_without_local_and_survives_its_restart() {
     cleanup_test_base(&base);
 }
 
+/// ZCode 夹具（`tests/fixtures/agent-activity/zcode/`）的时间基准。
+const ZCODE_FIXTURE_NOW_MS: u64 = 1_790_000_000_000;
+/// 夹具里在跑的根会话 A。
+const ZCODE_FIXTURE_ROOT_A: &str = "sess_a0000000-0000-4000-8000-000000000001";
+
+fn copy_dir_all(from: &std::path::Path, to: &std::path::Path) {
+    fs::create_dir_all(to).unwrap();
+    for entry in fs::read_dir(from).unwrap() {
+        let entry = entry.unwrap();
+        let target = to.join(entry.file_name());
+        if entry.file_type().unwrap().is_dir() {
+            copy_dir_all(&entry.path(), &target);
+        } else {
+            fs::copy(entry.path(), &target).unwrap();
+        }
+    }
+}
+
+fn zcode_db(home: &std::path::Path) -> PathBuf {
+    home.join(".zcode/cli/db/db.sqlite")
+}
+
+/// 用系统 sqlite3 对 `db` 执行 `script`（与 zcode 适配器同一个程序）。
+fn run_sqlite3(db: &std::path::Path, script: &str) {
+    let mut child = std::process::Command::new("sqlite3")
+        .arg(db)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("sqlite3 不在 PATH 上：外部来源 e2e 需要它建 ZCode 夹具库");
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(script.as_bytes())
+        .unwrap();
+    let output = child.wait_with_output().unwrap();
+    assert!(
+        output.status.success(),
+        "sqlite3 执行失败：{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// 把 ZCode 夹具种进 `home`，让 server 的 zcode 适配器像在装了 ZCode 的机器上
+/// 一样读到外部会话：metadata / 转录样本原样复制；库由 `db.sql` 经系统 sqlite3
+/// 建出，库里的时间整体平移到「现在」，近 72 h 窗口与 2 h 在跑判定按夹具的相对
+/// 时刻成立（根 A 在跑、根 B 空闲），不随日历过期。
+fn seed_zcode_home(home: &std::path::Path) {
+    let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/agent-activity/zcode");
+    copy_dir_all(&fixture.join("home"), home);
+    let db = zcode_db(home);
+    fs::create_dir_all(db.parent().unwrap()).unwrap();
+    let now_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap();
+    let shift = now_ms.saturating_sub(ZCODE_FIXTURE_NOW_MS);
+    let sql = fs::read_to_string(fixture.join("db.sql")).unwrap();
+    run_sqlite3(
+        &db,
+        &format!(
+            "PRAGMA synchronous = OFF;\nBEGIN;\n{sql}\n\
+             UPDATE session SET time_created = time_created + {shift}, \
+             time_updated = time_updated + {shift};\n\
+             UPDATE turn_usage SET started_at = started_at + {shift}, \
+             completed_at = completed_at + {shift};\n\
+             UPDATE todo SET time_created = time_created + {shift}, \
+             time_updated = time_updated + {shift};\n\
+             COMMIT;\n"
+        ),
+    );
+}
+
+/// 模拟 ZCode 里的会话在推进：改根会话 A 的标题，下一次外部来源发现就会读到
+/// 变化（条目标签变了），落库后客户端快照的修订号前进。
+fn advance_zcode_root(home: &std::path::Path, title: &str) {
+    run_sqlite3(
+        &zcode_db(home),
+        &format!("UPDATE session SET title = '{title}' WHERE id = '{ZCODE_FIXTURE_ROOT_A}';\n"),
+    );
+}
+
+/// 该 server 当前能列出的外部来源条目 id（`agent.external.list` 会同步跑一次发现，
+/// 并把结果落库）。
+fn external_agent_ids(api_socket: &PathBuf) -> Vec<String> {
+    let response = send_json_request(
+        api_socket,
+        r#"{"id":"external","method":"agent.external.list","params":{}}"#,
+    );
+    response["result"]["agents"]
+        .as_array()
+        .map(|agents| {
+            agents
+                .iter()
+                .filter_map(|agent| agent["external_id"].as_str().map(str::to_owned))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// 回归网：外部来源（ZCode）有数据且在变化时，联邦客户端照样能用远程机器。
+///
+/// 曾经 server 继承开发机真实 HOME、读到真实（仍在变化的）ZCode 库时，客户端停在
+/// 「正在同步终端…」：外部条目变化只刷新投影、让快照修订号前进却不补 surface，
+/// 客户端只画修订号精确配对的 surface；此后 retained 快路径又因唯一接收者基线陈旧
+/// 而全部剔除、却不安排全量渲染，pane 输出再也到不了客户端。这里用夹具复刻：
+/// 客户端连上后改一次夹具库并让变化落库，空闲画面与输入回显都必须还在。
+#[test]
+fn federated_client_with_changing_external_agents_keeps_remote_live() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let _lock = test_lock();
+    let base = unique_test_dir();
+    let config_home = base.join("config");
+    let runtime_dir = base.join("runtime");
+    let api_socket = runtime_dir.join("herdr.sock");
+    let client_socket = runtime_dir.join("herdr-client.sock");
+    let remote_config = base.join("remote-config");
+    let remote_runtime = base.join("remote-runtime");
+    let remote_api = remote_runtime.join("herdr.sock");
+    let remote_client = remote_runtime.join("herdr-client.sock");
+    // spawn 助手把 HOME 设成 `<runtime>/home`：本地与远程 server 都读到这份夹具。
+    let remote_home = remote_runtime.join("home");
+    seed_zcode_home(&runtime_dir.join("home"));
+    seed_zcode_home(&remote_home);
+
+    let remote_server = spawn_server(&remote_config, &remote_runtime, &remote_api, &remote_client);
+    wait_for_socket(&remote_api, Duration::from_secs(10));
+    wait_for_socket(&remote_client, Duration::from_secs(10));
+    let expected_external = [
+        "zcode:sess_a0000000-0000-4000-8000-000000000001",
+        "zcode:sess_b0000000-0000-4000-8000-000000000002",
+    ];
+    assert_eq!(
+        external_agent_ids(&remote_api),
+        expected_external,
+        "远程 server 应从种好的 HOME 读到 ZCode 夹具会话"
+    );
+    let created = send_json_request(
+        &remote_api,
+        &serde_json::json!({
+            "id": "remote-workspace", "method": "workspace.create",
+            "params": {"cwd": base, "focus": true, "label": "remote-ready"},
+        })
+        .to_string(),
+    );
+    let remote_pane = created["result"]["root_pane"]["pane_id"].as_str().unwrap();
+    send_pane_shell_command(&remote_api, remote_pane, "printf 'REMOTE_INITIAL_FRAME\\n'");
+
+    fs::create_dir_all(config_home.join(app_dir_name())).unwrap();
+    fs::write(
+        config_home.join(app_dir_name()).join("config.toml"),
+        "onboarding = false\n",
+    )
+    .unwrap();
+    let catalog_dir = runtime_dir
+        .join("state")
+        .join(app_dir_name())
+        .join("client");
+    fs::create_dir_all(&catalog_dir).unwrap();
+    let profile = "0123456789abcdef0123456789abcdef";
+    fs::write(catalog_dir.join("endpoints.json"), serde_json::json!({
+        "version": 1, "selected_profile": profile,
+        "ssh": [{"id": profile, "label": "Test remote", "target": "test-only", "session": "default", "enabled": true}],
+    }).to_string()).unwrap();
+
+    // 与 federated_client_starts_without_local_and_survives_its_restart 同一个私有 ssh：
+    // 桥接跑真二进制，连第二个一次性本地 server，不碰开发机保存的主机。
+    let bin = base.join("bin");
+    fs::create_dir_all(&bin).unwrap();
+    fs::create_dir_all(base.join("home")).unwrap();
+    std::os::unix::fs::symlink(env!("CARGO_BIN_EXE_herdr"), bin.join("herdr")).unwrap();
+    let quote =
+        |path: &std::path::Path| format!("'{}'", path.display().to_string().replace('\'', "'\\''"));
+    fs::write(bin.join("ssh"), format!(
+        "#!/bin/sh\nexport HOME={} XDG_CONFIG_HOME={} XDG_RUNTIME_DIR={} HERDR_SOCKET_PATH={}\nunset HERDR_CLIENT_SOCKET_PATH HERDR_SESSION\nfor arg do last=\"$arg\"; done\nexec /bin/sh -c \"$last\"\n",
+        quote(&base.join("home")), quote(&remote_config), quote(&remote_runtime), quote(&remote_api),
+    )).unwrap();
+    fs::set_permissions(bin.join("ssh"), fs::Permissions::from_mode(0o700)).unwrap();
+    let path = format!(
+        "{}:{}",
+        bin.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let client = spawn_client_process_with_args_and_env(
+        &config_home,
+        &runtime_dir,
+        &api_socket,
+        &["client"],
+        &[("PATH", &path)],
+    );
+    let output = spawn_pty_drain(client._master.as_ref().unwrap().try_clone_reader().unwrap());
+    let screen_text = || {
+        let bytes = output
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .bytes
+            .clone();
+        terminal_screen::text(&bytes, 80, 24)
+    };
+    assert!(
+        wait_until(Duration::from_secs(12), Duration::from_millis(20), || {
+            screen_text().contains("REMOTE_INITIAL_FRAME")
+        }),
+        "remote must be usable before Local exists: {}",
+        screen_text()
+    );
+
+    let mut input = client._master.as_ref().unwrap().take_writer().unwrap();
+    // 输入回显探针：一直重发同一条命令，直到屏幕出现它的回显。
+    let mut probe = |marker: &str, timeout: Duration| {
+        wait_until(timeout, Duration::from_millis(250), || {
+            if screen_text().contains(&format!("REMOTE_{marker}_OK")) {
+                return true;
+            }
+            write!(input, "printf 'REMOTE_%s_OK\\n' {marker}\r").unwrap();
+            false
+        })
+    };
+    assert!(
+        probe("READY", Duration::from_secs(8)),
+        "remote input must echo once the client is up: {}",
+        screen_text()
+    );
+
+    // 客户端连着、画面空闲时外部来源变化。`agent.external.list` 同步跑一次发现并
+    // 把结果经与轮询同一条 `ExternalAgentsRefreshed` 落库，不必等 10 s 一轮的轮询；
+    // 落库后的投影刷新在下一个调度 tick 里下发，留两秒让它到达客户端。
+    advance_zcode_root(&remote_home, "Refactor the parser (resumed)");
+    assert_eq!(external_agent_ids(&remote_api), expected_external);
+    thread::sleep(Duration::from_secs(2));
+    let idle = screen_text();
+    assert!(
+        idle.contains("REMOTE_READY_OK")
+            && !idle.contains("正在同步终端")
+            && !idle.contains("Waiting for terminal"),
+        "an external source change must not blank the idle remote pane: {idle}"
+    );
+    assert!(
+        probe("AFTER_EXTERNAL_CHANGE", Duration::from_secs(8)),
+        "remote input must keep echoing after an external source change: {}",
+        screen_text()
+    );
+
+    // 本地主机带着同一份外部来源数据上线、再丢失：远程照样可用。
+    let mut local = spawn_server(&config_home, &runtime_dir, &api_socket, &client_socket);
+    wait_for_socket(&api_socket, Duration::from_secs(10));
+    assert_eq!(
+        external_agent_ids(&api_socket),
+        expected_external,
+        "本地 server 应从种好的 HOME 读到 ZCode 夹具会话"
+    );
+    let created = send_json_request(
+        &api_socket,
+        &serde_json::json!({
+            "id": "local-workspace", "method": "workspace.create",
+            "params": {"cwd": base, "focus": true, "label": "local-online"},
+        })
+        .to_string(),
+    );
+    assert_eq!(created["result"]["type"], "workspace_created");
+    assert!(
+        wait_until(Duration::from_secs(10), Duration::from_millis(20), || {
+            screen_text().contains("local-online")
+        }),
+        "本地主机上线后应显示工作区：{}",
+        screen_text()
+    );
+    local.child.kill().unwrap();
+    local.close_master();
+    drop(local);
+    assert!(
+        probe("SURVIVED", Duration::from_secs(8)),
+        "Local loss must not interrupt remote input or output: {}",
+        screen_text()
+    );
+
+    drop(input);
+    drop(client);
+    drop(remote_server);
+    cleanup_test_base(&base);
+}
+
 #[test]
 fn client_shell_detaches_restores_and_freshly_reattaches_to_current_state() {
     let _lock = test_lock();

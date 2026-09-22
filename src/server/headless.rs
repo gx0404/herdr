@@ -1136,6 +1136,12 @@ impl HeadlessServer {
     /// （`pty_sources` 非空且对至少一个渲染目标可见），必须**继续**走 surface 路径——
     /// 本 tick 的 `render_request` 已经被取走，丢掉的脏帧不会再被补发
     /// （输出末帧撞上 chrome tick、此后 pane 静默时，画面会永久停在旧帧）。
+    /// 同理，同 tick 的全量渲染需求（`full_render_pending`）也不能被吞掉。
+    ///
+    /// 投影刷新让快照修订号前进时同样要走全量渲染：客户端只画与快照修订号精确
+    /// 配对的 surface（workbench 下不配对就画「正在同步终端…」），旧基线也不再
+    /// 适用于 retained 补丁。画面未变时 `prepare_pane_surface` 走复用编码，线上
+    /// 只是一条短消息。
     pub(super) fn dispatch_render_tick(
         &mut self,
         projection_only: bool,
@@ -1144,11 +1150,14 @@ impl HeadlessServer {
         hidden_only: bool,
     ) {
         let surface_work = !pty_sources.is_empty() && !hidden_only;
+        let mut projection_advanced = false;
         if projection_only {
             crate::render_prof::event("projection_only.invoke");
-            self.stream_client_shell_projections();
+            projection_advanced = self.stream_client_shell_projections();
             self.agent_activity.projection_synced();
-            if !surface_work {
+            if projection_advanced {
+                crate::render_prof::event("projection_only.revision_advanced");
+            } else if !surface_work && !full_render_pending {
                 if hidden_only {
                     crate::render_prof::event("render.skipped.hidden_sources");
                 }
@@ -1158,7 +1167,10 @@ impl HeadlessServer {
             crate::render_prof::event("render.skipped.hidden_sources");
             return;
         }
-        if !full_render_pending && self.render_retained_pane_surface_and_stream(pty_sources) {
+        if !full_render_pending
+            && !projection_advanced
+            && self.render_retained_pane_surface_and_stream(pty_sources)
+        {
             crate::render_prof::event("retained_surface.invoke");
             return;
         }

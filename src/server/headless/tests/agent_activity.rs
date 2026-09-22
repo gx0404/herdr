@@ -354,3 +354,123 @@ async fn client_endpoint_activity_reads_bypass_the_command_lane() {
     );
     shutdown_test_runtimes(&mut server);
 }
+
+/// 外部来源（ZCode）的一次刷新：一条桌面会话。
+fn zcode_refreshed(label: &str) -> AppEvent {
+    AppEvent::ExternalAgentsRefreshed {
+        source: "zcode".into(),
+        result: Ok(vec![crate::api::schema::ExternalAgentInfo {
+            external_id: "zcode:s-1".into(),
+            source: "zcode".into(),
+            agent_status: crate::api::schema::AgentStatus::Working,
+            label: label.into(),
+            readable: true,
+            agent: None,
+            cwd: Some("/tmp".into()),
+            updated_at_ms: Some(1),
+            activity: vec![node("t", AgentActivityStatus::Running)],
+        }]),
+    }
+}
+
+/// 限时收下一帧 surface：修复前这些用例里根本不会有帧，不能无限阻塞。
+fn recv_surface_within(
+    render_rx: &std::sync::mpsc::Receiver<Vec<u8>>,
+    context: &str,
+) -> crate::protocol::PaneSurfaceFrame {
+    let bytes = render_rx
+        .recv_timeout(Duration::from_secs(2))
+        .unwrap_or_else(|error| panic!("{context}: {error}"));
+    match read_server_message(bytes) {
+        ServerMessage::PaneSurface(surface) => surface,
+        other => panic!("{context}: expected pane surface, got {other:?}"),
+    }
+}
+
+/// 客户端只画修订号与快照精确配对的 surface（workbench 下不配对就画「正在同步
+/// 终端…」）。外部条目落库让快照修订号前进时，同一 tick 必须补一帧新修订号的
+/// surface——否则空闲 pane 一直停在占位上，直到它下一次输出。
+#[tokio::test]
+async fn external_refresh_pairs_the_advanced_snapshot_with_a_surface() {
+    let mut server = test_headless_server();
+    let _pane_id = install_shared_view_test_runtime(&mut server);
+    let (control_rx, render_rx) = connect_matching_test_shell(&mut server, 61);
+    let _ = next_snapshot(&control_rx);
+    server.render_and_stream();
+    let baseline = recv_surface_within(&render_rx, "baseline");
+
+    assert!(!server.handle_internal_event_with_forwarding(zcode_refreshed("desktop session")));
+    assert!(server.agent_activity.projection_dirty());
+    server.dispatch_render_tick(true, false, &HashSet::new(), false);
+
+    let snapshot = next_snapshot(&control_rx);
+    assert_eq!(snapshot.external_agents.len(), 1);
+    assert!(snapshot.revision > baseline.projection_revision);
+    let surface = recv_surface_within(&render_rx, "surface paired with the advanced snapshot");
+    assert_eq!(surface.projection_revision, snapshot.revision);
+    assert!(frame_text(&surface.frame).contains("BASE"));
+    assert!(!server.agent_activity.projection_dirty());
+
+    // 同一批条目再来一次：快照不变，不重发 surface（RS-12 的省略仍然成立）。
+    assert!(!server.handle_internal_event_with_forwarding(zcode_refreshed("desktop session")));
+    server.dispatch_render_tick(true, false, &HashSet::new(), false);
+    assert!(render_rx.try_recv().is_err(), "投影未变时不应重发 surface");
+    shutdown_test_runtimes(&mut server);
+}
+
+/// 基线陈旧（快照修订号已前进）时 retained 快路径剔除唯一的接收者：必须武装
+/// 延期全量渲染并唤醒渲染，否则此后每个输出 tick 都「全部剔除即成功」早退，
+/// pane 输出永远到不了客户端。
+#[tokio::test]
+async fn a_stale_sole_baseline_arms_a_full_render_instead_of_stalling() {
+    let mut server = test_headless_server();
+    let pane_id = install_shared_view_test_runtime(&mut server);
+    let (control_rx, render_rx) = connect_matching_test_shell(&mut server, 62);
+    let _ = next_snapshot(&control_rx);
+    server.render_and_stream();
+    let baseline = recv_surface_within(&render_rx, "baseline");
+
+    // 只刷投影、不补 surface：唯一接收者的基线随之陈旧。
+    assert!(!server.handle_internal_event_with_forwarding(zcode_refreshed("desktop session")));
+    server.stream_client_shell_projections();
+    let snapshot = next_snapshot(&control_rx);
+    assert!(snapshot.revision > baseline.projection_revision);
+    let _ = server.app.render_dirty.take();
+
+    write_shared_test_pane(&mut server, pane_id, b"\rAFTER");
+    assert!(server.render_retained_pane_surface_and_stream(&HashSet::from([pane_id])));
+    assert!(render_rx.try_recv().is_err(), "陈旧基线上不能发补丁");
+    assert_eq!(server.clients[&62].deferred_render(), DeferredRender::Full);
+    assert!(
+        server.app.render_dirty.is_pending(),
+        "延期必须安排一次全量渲染恢复基线"
+    );
+
+    server.render_and_stream();
+    let recovered = recv_surface_within(&render_rx, "recovery full render");
+    assert_eq!(recovered.projection_revision, snapshot.revision);
+    assert!(frame_text(&recovered.frame).contains("AFTER"));
+    assert_eq!(server.clients[&62].deferred_render(), DeferredRender::None);
+    shutdown_test_runtimes(&mut server);
+}
+
+/// 纯 chrome tick 撞上同 tick 的全量渲染需求（server 事件、无 pty 脏源）：投影
+/// 刷新之后仍要走全量渲染，不能被「无 surface 工作」早退吞掉。
+#[tokio::test]
+async fn projection_only_tick_keeps_a_coincident_full_render() {
+    let mut server = test_headless_server();
+    let pane_id = install_shared_view_test_runtime(&mut server);
+    let (control_rx, render_rx) = connect_matching_test_shell(&mut server, 63);
+    let _ = next_snapshot(&control_rx);
+    server.render_and_stream();
+    let _ = recv_surface_within(&render_rx, "baseline");
+
+    // 投影纪元递增但快照不变（修订号不前进），同时有一处需要全量渲染的变化。
+    server.app.state.bump_projection_epoch();
+    write_shared_test_pane(&mut server, pane_id, b"\rFULL");
+    server.dispatch_render_tick(true, true, &HashSet::new(), false);
+
+    let surface = recv_surface_within(&render_rx, "coincident full render");
+    assert!(frame_text(&surface.frame).contains("FULL"));
+    shutdown_test_runtimes(&mut server);
+}

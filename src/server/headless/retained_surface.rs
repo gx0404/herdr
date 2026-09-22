@@ -315,6 +315,23 @@ struct RetainedRecipientUpdate {
 }
 
 impl HeadlessServer {
+    /// 把本 tick 被剔除的接收者标为延期全量渲染，并显式唤醒一次渲染。
+    fn arm_deferred_full_render(&mut self, deferred_clients: &HashSet<u64>) {
+        let mut armed = false;
+        for client_id in deferred_clients {
+            if let Some(client) = self.clients.get_mut(client_id) {
+                client.defer_full_render();
+                armed = true;
+            }
+        }
+        if armed {
+            // 延期必须可靠唤醒：客户端写入侧没有待发帧时不会有
+            // ClientWriterDrained 事件，显式安排一次全量渲染恢复基线。
+            self.app.render_dirty.request_generic();
+            self.app.render_notify.notify_one();
+        }
+    }
+
     /// Applies terminal dirty rows to the committed origin-relative pane surface.
     /// Any presentation or geometry uncertainty falls back to the complete renderer.
     pub(super) fn render_retained_pane_surface_and_stream(
@@ -432,6 +449,10 @@ impl HeadlessServer {
             }
         }
         if recipients.is_empty() {
+            // 全部接收者都被剔除时同样要武装延期：否则陈旧基线（例如纯投影 tick
+            // 让快照修订号前进之后）永远没人修复，此后每个输出 tick 都在这里早退，
+            // 客户端一直停在旧帧 /「正在同步终端…」。
+            self.arm_deferred_full_render(&deferred_clients);
             success!("all_recipients_deferred");
         }
 
@@ -701,21 +722,7 @@ impl HeadlessServer {
                 graphics,
             });
         }
-        if !deferred_clients.is_empty() {
-            let mut armed = false;
-            for client_id in &deferred_clients {
-                if let Some(client) = self.clients.get_mut(client_id) {
-                    client.defer_full_render();
-                    armed = true;
-                }
-            }
-            if armed {
-                // 延期必须可靠唤醒：客户端写入侧没有待发帧时不会有
-                // ClientWriterDrained 事件，显式安排一次全量渲染恢复基线。
-                self.app.render_dirty.request_generic();
-                self.app.render_notify.notify_one();
-            }
-        }
+        self.arm_deferred_full_render(&deferred_clients);
         if updates.is_empty() {
             success!("unchanged");
         }
