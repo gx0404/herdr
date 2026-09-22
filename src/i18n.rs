@@ -1101,8 +1101,13 @@ pub struct AgentPanelTexts {
     pub sort_launch: &'static str,
     pub external_group: &'static str,
     pub external_unreadable: &'static str,
-    pub activity_badge_fmt: &'static str, // args: n
-    pub activity_more_fmt: &'static str,  // args: n
+    /// 有运行中的节点时的徽标。
+    pub activity_badge_running_fmt: &'static str, // args: running, total
+    /// 没有运行中的节点、总数为 1 时的徽标。
+    pub activity_badge_one: &'static str,
+    /// 没有运行中的节点时的徽标（总数）。
+    pub activity_badge_total_fmt: &'static str, // args: n
+    pub activity_more_fmt: &'static str, // args: n
     pub menu_focus: &'static str,
     pub menu_view_activity: &'static str,
     pub menu_rename: &'static str,

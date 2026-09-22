@@ -1146,13 +1146,10 @@ fn mobile_agent_targets(state: &ClientShellState) -> Vec<(Rect, String)> {
 
 /// (g) mobile 切换器的 agent 段：恒为平铺（无工作区头、无树前缀、折叠态无效），
 /// 行序与 `aggregate_agent_rows` 同源，随排序设置变化；有活动的 agent 在详情行
-/// 末尾带「N 个活动」徽标（与桌面树同一口径：运行中/总数）。
+/// 末尾带活动徽标（与桌面树同一口径：`badge_text` 的「运行中 / 总数」形态）。
 #[test]
 fn characterization_mobile_switcher_lists_agents_flat_in_aggregate_order() {
-    let badge = crate::i18n::fill(
-        crate::i18n::texts().agent_panel.activity_badge_fmt,
-        &[("n", "1/3")],
-    );
+    let badge = running_badge(1, 3);
     for (sort, expected) in [
         (AgentPanelSortConfig::Spaces, ["pane_1", "pane_2", "pane_3"]),
         (AgentPanelSortConfig::Launch, ["pane_2", "pane_3", "pane_1"]),
@@ -1208,6 +1205,65 @@ fn characterization_mobile_switcher_lists_agents_flat_in_aggregate_order() {
         }
         assert!(state.hits.agent_tree_toggles.is_empty());
     }
+}
+
+/// 活动徽标三种情况（审查发现 3）：有运行中的节点写「运行中 / 总数」（运行中
+/// 等于总数时同样如此），没有运行中的只写总数（总数为 1 用单数），没有活动不画。
+/// 中英文案逐字钉住，文档里写的就是这些。
+#[test]
+fn activity_badge_distinguishes_running_total_and_none() {
+    let agent = |running: u32, total: u32| {
+        let mut agent = panel_agent("pane_1", "ws_1", "tab_1", "one", AgentStatus::Idle, 1);
+        agent.activity.running = running;
+        agent.activity.total = total;
+        super::super::agent_tree::mobile_activity_badge(&agent)
+    };
+    for (lang, expected) in [
+        (
+            crate::i18n::Lang::En,
+            ["2/5 running", "3/3 running", "5 activities", "1 activity"],
+        ),
+        (
+            crate::i18n::Lang::ZhCn,
+            ["运行中 2/5", "运行中 3/3", "5 个活动", "1 个活动"],
+        ),
+    ] {
+        let _lang = crate::i18n::lang_guard(lang);
+        assert_eq!(agent(2, 5).as_deref(), Some(expected[0]), "{lang:?}");
+        assert_eq!(agent(3, 3).as_deref(), Some(expected[1]), "{lang:?}");
+        assert_eq!(agent(0, 5).as_deref(), Some(expected[2]), "{lang:?}");
+        assert_eq!(agent(0, 1).as_deref(), Some(expected[3]), "{lang:?}");
+        assert_eq!(agent(0, 0), None, "没有活动不画徽标");
+        // 总数比运行中小（上报不一致）时按运行中补齐总数。
+        assert_eq!(agent(2, 0), agent(2, 2), "{lang:?}");
+    }
+}
+
+/// 「运行中 / 总数」形态的活动徽标（有运行中的节点时）。
+fn running_badge(running: u32, total: u32) -> String {
+    crate::i18n::fill(
+        crate::i18n::texts().agent_panel.activity_badge_running_fmt,
+        &[
+            ("running", &running.to_string()),
+            ("total", &total.to_string()),
+        ],
+    )
+}
+
+/// 「总数」形态的活动徽标（没有运行中的节点，总数 > 1 时）。
+fn total_badge(total: u32) -> String {
+    crate::i18n::fill(
+        crate::i18n::texts().agent_panel.activity_badge_total_fmt,
+        &[("n", &total.to_string())],
+    )
+}
+
+/// 右对齐画在 `rect` 首行的徽标 `badge` 里，`digits` 首字符所在的列（徽标的
+/// 文字部分可能在数字前，例如中文「运行中 2/5」）。
+fn badge_digits_x(rect: Rect, badge: &str, digits: &str) -> u16 {
+    let offset = badge.find(digits).expect("徽标里有数字");
+    rect.right() - crate::ui::display_width(badge) as u16
+        + crate::ui::display_width(&badge[..offset]) as u16
 }
 
 /// 一个 agent 挂 `activity` 个活动节点（`node_0..` 为根，`node_k` 挂在
@@ -1296,9 +1352,9 @@ fn summary_snapshot() -> ClientShellSnapshot {
     projected
 }
 
-/// agent 行的活动摘要（W3 按摘要渲染）：默认折叠，行尾徽标写「运行中/总数 个
-/// 活动」；点开关展开出「最新节点」一行，被截断时再跟「还有 N 项」；点最新节点
-/// 行打开「Agent 活动」窗口并选中它，点「还有 N 项」打开窗口不预选。
+/// agent 行的活动摘要（W3 按摘要渲染）：默认折叠，行尾徽标写「运行中 / 总数」；
+/// 点开关展开出「最新节点」一行，被截断时再跟「还有 N 项」；点最新节点行打开
+/// 「Agent 活动」窗口并选中它，点「还有 N 项」打开窗口不预选。
 #[test]
 fn tree_agent_rows_show_the_activity_summary_collapsed_by_default() {
     let mut state = classic_state_with(AgentPanelSortConfig::Spaces, summary_snapshot());
@@ -1315,20 +1371,17 @@ fn tree_agent_rows_show_the_activity_summary_collapsed_by_default() {
         state.hits.agent_activity_rows.is_empty(),
         "活动摘要默认折叠"
     );
-    let badge = crate::i18n::fill(
-        crate::i18n::texts().agent_panel.activity_badge_fmt,
-        &[("n", "2/5")],
-    );
+    let badge = running_badge(2, 5);
     let agent = rect_rows(&state, classic_agent_rect(&state, "pane_0"));
     assert!(agent[0].starts_with("└─▸ ○ agent-0 "), "{agent:?}");
     assert!(
         compact(&agent[0]).ends_with(&compact(&badge)),
-        "行尾徽标 = 运行中/总数: {agent:?}"
+        "行尾徽标 = 运行中 / 总数: {agent:?}"
     );
     let rect = classic_agent_rect(&state, "pane_0");
     let buffer = state.compose_buffer.as_ref().expect("缓冲");
-    // 徽标右对齐：首格（宽字符的占位格不带样式，取首格）。
-    let badge_x = rect.right() - crate::ui::display_width(&badge) as u16;
+    // 徽标右对齐：取数字首格（宽字符的占位格不带样式）。
+    let badge_x = badge_digits_x(rect, &badge, "2/5");
     assert_eq!(buffer[(badge_x, rect.y)].symbol(), "2");
     assert_eq!(
         buffer[(badge_x, rect.y)].style().fg,
@@ -1418,13 +1471,10 @@ fn tree_agent_rows_show_the_activity_summary_collapsed_by_default() {
     state.compose(106, 30).expect("无运行中活动帧");
     let rect = classic_agent_rect(&state, "pane_0");
     let agent = rect_rows(&state, rect);
-    let badge = crate::i18n::fill(
-        crate::i18n::texts().agent_panel.activity_badge_fmt,
-        &[("n", "5")],
-    );
+    let badge = total_badge(5);
     assert!(compact(&agent[0]).ends_with(&compact(&badge)), "{agent:?}");
     let buffer = state.compose_buffer.as_ref().expect("缓冲");
-    let badge_x = rect.right() - crate::ui::display_width(&badge) as u16;
+    let badge_x = badge_digits_x(rect, &badge, "5");
     assert_eq!(buffer[(badge_x, rect.y)].symbol(), "5");
     assert_eq!(
         buffer[(badge_x, rect.y)].style().fg,
@@ -1679,7 +1729,7 @@ fn tree_external_agents_group_by_source_and_open_the_activity_window() {
         abc[0].starts_with("├─▸ ◐ fix login zcode"),
         "活动摘要默认折叠: {abc:?}"
     );
-    let badge = crate::i18n::fill(texts.activity_badge_fmt, &[("n", "1/2")]);
+    let badge = running_badge(1, 2);
     assert!(compact(&abc[0]).ends_with(&compact(&badge)), "{abc:?}");
     assert!(state.hits.agent_activity_rows.is_empty());
     let def = rect_rows(&state, state.hits.external_agents[1].0);

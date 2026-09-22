@@ -128,7 +128,7 @@ pub(super) struct AgentTreeNode {
     count_label: String,
     /// 有运行中的活动节点：徽标用工作色。
     running: bool,
-    /// 活动徽标文本（`N 个活动`），没有活动为 `None`。
+    /// 活动徽标文本（见 `badge_text`），没有活动为 `None`。
     badge: Option<String>,
     pub(super) kind: AgentTreeKind,
 }
@@ -236,22 +236,28 @@ fn external_group_key(source: &str) -> String {
     format!("agent-external:{source}")
 }
 
-/// 活动徽标文案（运行中 / 总数）：有运行中也有已结束的节点时写「运行中/总数 个
-/// 活动」，否则只写总数；没有活动为 `None`。运行中与否由徽标颜色区分。
+/// 活动徽标文案，三种情况：有运行中的节点写「运行中 / 总数」形态（`2/5
+/// running`，运行中等于总数时同样如此）；没有运行中的只写总数（`5 activities`，
+/// 总数为 1 用单数键）；没有活动为 `None`。运行中与否另由徽标颜色区分。
 fn badge_text(running: u32, total: u32) -> Option<String> {
+    let texts = &crate::i18n::texts().agent_panel;
     let total = total.max(running);
     if total == 0 {
         return None;
     }
-    let count = if running > 0 && running < total {
-        format!("{running}/{total}")
+    Some(if running > 0 {
+        crate::i18n::fill(
+            texts.activity_badge_running_fmt,
+            &[
+                ("running", &running.to_string()),
+                ("total", &total.to_string()),
+            ],
+        )
+    } else if total == 1 {
+        texts.activity_badge_one.to_owned()
     } else {
-        total.to_string()
-    };
-    Some(crate::i18n::fill(
-        crate::i18n::texts().agent_panel.activity_badge_fmt,
-        &[("n", &count)],
-    ))
+        crate::i18n::fill(texts.activity_badge_total_fmt, &[("n", &total.to_string())])
+    })
 }
 
 /// mobile 切换器 agent 行的活动徽标，与桌面树同一口径；没有活动为 `None`。
