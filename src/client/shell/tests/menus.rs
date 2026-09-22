@@ -576,6 +576,120 @@ fn context_menu_hover_uses_theme_hover_bg_and_opens_the_submenu() {
     )));
 }
 
+/// 80 列下右键：子菜单两侧都放不下，放在空间大的一侧、贴住屏幕边，压住顶层
+/// 菜单的一部分（x=15 翻到右侧，x=30 翻到左侧）。命中表只登记画出来的部分：
+/// 重叠区里点子菜单行执行子菜单动作；点子菜单边框什么都不做，不落到底下被
+/// 盖住的顶层行（比如「关闭窗格」）；悬浮重叠区不收起子菜单。
+#[test]
+fn overlapping_submenu_owns_the_cells_it_covers() {
+    let _lang = crate::i18n::lang_guard(crate::i18n::Lang::ZhCn);
+    let contains = |rect: Rect, (x, y): (u16, u16)| {
+        rect.x <= x && x < rect.right() && rect.y <= y && y < rect.bottom()
+    };
+    for anchor in [15, 30] {
+        let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
+        state.set_snapshot(Box::new(snapshot()));
+        state.set_pane_surface(surface());
+        state.compose(80, 30).expect("shell frame");
+        state.open_pane_context_menu("pane_1".into(), anchor, 3);
+        state.compose(80, 30).expect("context menu frame");
+        let main = state.hits.overlay_bounds;
+        let main_rows = state.hits.context_menu_rows.clone();
+        let parent = main_rows
+            .iter()
+            .find(|(_, index)| *index == super::super::context_menu::SUBMENU_ROW)
+            .expect("子菜单父项行")
+            .0;
+        state.handle_raw_events(vec![mouse_event(
+            MouseEventKind::Moved,
+            parent.x + 1,
+            parent.y,
+        )]);
+        state.compose(80, 30).expect("submenu frame");
+        assert!(context_menu(&state).submenu.is_some(), "悬浮展开子菜单");
+        let zoom = item_index(&state, ClientContextMenuAction::Zoom);
+        let zoom_row = state
+            .hits
+            .context_menu_rows
+            .iter()
+            .find(|(_, index)| *index == zoom)
+            .expect("子菜单行进命中表")
+            .0;
+
+        // 前提：子菜单压住了顶层菜单的行。重叠列取子菜单行与顶层行内容区的交集。
+        let overlap_x = zoom_row.x.max(main.x + 1);
+        assert!(
+            overlap_x < zoom_row.right().min(main.right() - 1),
+            "x={anchor}: 子菜单 {zoom_row:?} 应压住顶层菜单 {main:?}"
+        );
+        let glyphs = state.config.border_glyphs;
+        let buffer = state.compose_buffer.as_ref().expect("帧缓冲");
+        let border_y = (zoom_row.y..main.bottom())
+            .find(|y| buffer[(zoom_row.x - 1, *y)].symbol() == glyphs.bottom_left)
+            .expect("子菜单下边框");
+        let border = (overlap_x, border_y);
+        let hidden = main_rows
+            .iter()
+            .find(|(rect, _)| contains(*rect, border))
+            .map(|(_, index)| *index)
+            .expect("前提：下边框底下压着一条可激活的顶层行");
+        assert!(
+            state
+                .hits
+                .context_menu_rows
+                .iter()
+                .all(|(rect, _)| !rect.intersects(Rect::new(border.0, border.1, 1, 1))),
+            "x={anchor}: 子菜单边框格不进命中表（底下是第 {hidden} 项）"
+        );
+
+        // 悬浮重叠区里的子菜单行：悬浮落在子项上，子菜单不收起。
+        state.handle_raw_events(vec![mouse_event(
+            MouseEventKind::Moved,
+            overlap_x,
+            zoom_row.y,
+        )]);
+        let menu = context_menu(&state);
+        let submenu = menu.submenu.as_ref().expect("悬浮重叠区不收起子菜单");
+        assert_eq!(submenu.hovered, Some(zoom));
+        assert_eq!(menu.hovered, None);
+        state.handle_raw_events(vec![mouse_event(MouseEventKind::Moved, border.0, border.1)]);
+        assert!(
+            context_menu(&state).submenu.is_some(),
+            "x={anchor}: 悬浮子菜单边框不收起子菜单"
+        );
+
+        // 点子菜单边框：什么都不做，菜单保持打开。
+        let outcome = state.handle_raw_events(vec![mouse_event(
+            MouseEventKind::Down(MouseButton::Left),
+            border.0,
+            border.1,
+        )]);
+        assert!(
+            outcome.actions.is_empty(),
+            "x={anchor}: 点子菜单边框不应执行被盖住的第 {hidden} 项：{:?}",
+            outcome.actions
+        );
+        assert!(context_menu(&state).submenu.is_some());
+
+        // 点重叠区里的「缩放」：执行 PaneZoom。
+        let outcome = state.handle_raw_events(vec![mouse_event(
+            MouseEventKind::Down(MouseButton::Left),
+            overlap_x,
+            zoom_row.y,
+        )]);
+        assert!(state.overlay.is_none());
+        assert!(
+            outcome.actions.iter().any(|action| matches!(
+                action,
+                ClientShellAction::Endpoint { request, .. }
+                    if matches!(&request.method, crate::api::schema::Method::PaneZoom(_))
+            )),
+            "x={anchor}: {:?}",
+            outcome.actions
+        );
+    }
+}
+
 // ---- 命令面板目录视图：kit::menu ----
 
 fn open_catalog(state: &mut ClientShellState, cols: u16, rows: u16) {

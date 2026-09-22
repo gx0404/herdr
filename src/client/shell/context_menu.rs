@@ -642,10 +642,13 @@ impl ClientShellState {
         if !matches!(self.overlay, Some(ClientShellOverlay::ContextMenu(_))) {
             return false;
         }
+        // 命中表按绘制顺序登记（顶层在前、子菜单在后），后画的压在上面：从后
+        // 往前找。渲染阶段已把被子菜单盖住的顶层行裁掉，这里再兜一层底。
         let row_hit = self
             .hits
             .context_menu_rows
             .iter()
+            .rev()
             .find(|(rect, _)| super::contains(*rect, point))
             .map(|(_, row)| *row);
         let inside = super::contains(self.hits.overlay_bounds, point);
@@ -711,8 +714,11 @@ impl ClientShellState {
 }
 
 /// 画右键菜单（渲染只读状态）：顶层菜单锚在右键位置，放不下时平移贴边；展开
-/// 的子菜单贴在父项右侧，右侧放不下翻到左侧。返回的 `menu_rows` 覆盖两层的
-/// 可激活行，`area` 是两层的包围盒。
+/// 的子菜单贴在父项右侧，右侧放不下翻到左侧，两侧都放不下时放在空间大的一侧
+/// 并贴住屏幕边（此时会压住顶层菜单的一部分）。返回的 `menu_rows` 覆盖两层
+/// 画出来的可激活行——被子菜单盖住的顶层行只登记露在外面的部分，盖满的整行
+/// 不登记，点子菜单的边框或行不会落到底下看不见的顶层行上；`area` 是两层的
+/// 包围盒。
 pub(super) fn render_context_menu(
     buffer: &mut Buffer,
     menu: &ClientContextMenuOverlay,
@@ -752,11 +758,7 @@ pub(super) fn render_context_menu(
         if let Some((parent, _)) = main.rows.iter().find(|(_, index)| *index == open.parent) {
             let children = sub_menu(&model, kind);
             let (width, _) = menu_size(&children);
-            let x = if main.area.right().saturating_add(width) <= bounds.right() {
-                main.area.right()
-            } else {
-                main.area.x.saturating_sub(width)
-            };
+            let x = submenu_x(main.area, bounds, width);
             let sub_state = MenuState {
                 highlighted: child_kit_index(&model, open.highlighted),
                 hovered: open.hovered.map(|row| child_kit_index(&model, row)),
@@ -773,6 +775,14 @@ pub(super) fn render_context_menu(
                 false,
                 cx.palette,
             );
+            // 子菜单压住的顶层行只保留露在外面的部分，盖满的整行丢掉。
+            rows.retain_mut(|(rect, _)| match uncovered_part(*rect, sub.area) {
+                Some(visible) => {
+                    *rect = visible;
+                    true
+                }
+                None => false,
+            });
             rows.extend(
                 sub.rows
                     .iter()
@@ -786,4 +796,38 @@ pub(super) fn render_context_menu(
         menu_rows: rows,
         ..OverlayRender::default()
     })
+}
+
+/// 子菜单左上角的 x：右侧放得下贴父菜单右边，否则左侧放得下贴父菜单左边；
+/// 两侧都放不下时选空间大的一侧、贴住屏幕边，把两层的重叠压到最少（重叠
+/// 部分由 [`uncovered_part`] 从顶层命中表里裁掉）。
+fn submenu_x(main: Rect, bounds: Rect, width: u16) -> u16 {
+    let right_space = bounds.right().saturating_sub(main.right());
+    let left_space = main.x.saturating_sub(bounds.x);
+    if width <= right_space {
+        main.right()
+    } else if width <= left_space {
+        main.x - width
+    } else if right_space >= left_space {
+        bounds.right().saturating_sub(width).max(bounds.x)
+    } else {
+        bounds.x
+    }
+}
+
+/// 单行矩形 `row` 被 `cover` 盖住后露在外面的部分：不相交原样返回；被盖住
+/// 一段时取左右两段里较宽的那段；整行被盖满返回 `None`。
+fn uncovered_part(row: Rect, cover: Rect) -> Option<Rect> {
+    if !row.intersects(cover) {
+        return Some(row);
+    }
+    let left = cover.x.saturating_sub(row.x);
+    let right = row.right().saturating_sub(cover.right());
+    if left == 0 && right == 0 {
+        None
+    } else if left >= right {
+        Some(Rect::new(row.x, row.y, left, row.height))
+    } else {
+        Some(Rect::new(cover.right(), row.y, right, row.height))
+    }
 }
