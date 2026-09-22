@@ -475,13 +475,17 @@ fn wizard_bootstrap_failure_offers_recovery_entries() {
         ticket: 1,
         step: None,
         failure: Some("Permission denied (publickey)".into()),
+        passed: false,
     });
     let _ = machine;
 
-    // Keyboard entry starts the guided interactive auth against a throwaway
-    // profile.
+    // Keyboard entry (Ctrl+R: the recovery route classified from the failed
+    // test) starts the guided interactive auth against a throwaway profile.
     let mut outcome = ClientShellInput::default();
-    state.route_machines_key(&key(KeyCode::Char('i')), &mut outcome);
+    state.route_machines_key(
+        &crate::input::TerminalKey::new(KeyCode::Char('r'), KeyModifiers::CONTROL),
+        &mut outcome,
+    );
     assert!(matches!(
         state.overlay,
         Some(ClientShellOverlay::MachineAuth(_))

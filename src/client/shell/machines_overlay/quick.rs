@@ -7,9 +7,6 @@
 //! 互斥，照填会让 herdr 的桥接命令失效）。标量取值与 OpenSSH 一致：先出现
 //! 的生效，`-i` 可重复累加。
 
-// 下一条提交（单页表单）接入快速输入框后删除本 allow。
-#![allow(dead_code)]
-
 use crate::client::endpoint::StrictHostKeyChecking;
 
 /// 解析结果：除 `host` 外，每个字段只在输入里出现时才有值。

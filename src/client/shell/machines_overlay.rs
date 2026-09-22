@@ -9,7 +9,9 @@
 
 use super::*;
 mod dashboard;
+mod footer;
 mod form;
+mod form_view;
 mod forwards;
 mod import;
 mod list_detail;
@@ -21,10 +23,11 @@ use crate::client::endpoint::{
 };
 use crate::remote::SavedSshBootstrapStep;
 use crossterm::event::KeyModifiers;
-use form::*;
-pub(super) use form::{bootstrap_step_label, MachineField};
 #[cfg(test)]
-pub(super) use form::{ClientMachineBootstrap, ClientMachineForm, MachineFormStep, TriChoice};
+pub(super) use form::{ClientMachineBootstrap, TriChoice};
+pub(super) use form::{ClientMachineForm, MachineField};
+pub(super) use form_view::bootstrap_step_label;
+use form_view::*;
 use forwards::*;
 #[cfg(test)]
 pub(super) use forwards::{ClientForwardRuleForm, ClientForwardRulesView, PendingForwardRemoval};
@@ -101,13 +104,9 @@ impl ClientMachinesOverlay {
         });
     }
 
-    /// A wizard bootstrap is running (no failure yet): drives the spinner.
+    /// 表单里的测试连接正在跑（尚未通过或失败）：驱动 spinner。
     pub(super) fn bootstrap_running(&self) -> bool {
-        matches!(
-            &self.view,
-            ClientMachinesView::Form(form)
-                if form.bootstrap.as_ref().is_some_and(|bootstrap| bootstrap.failure.is_none())
-        )
+        matches!(&self.view, ClientMachinesView::Form(form) if form.running())
     }
 }
 
@@ -211,9 +210,13 @@ pub(super) enum MachineOverlayButton {
     Add,
     Close,
     Back,
-    Next,
     Save,
-    StartSetup,
+    /// 表单：测试连接（不落盘）。
+    TestConnection,
+    /// 表单：测试失败后按失败类型打开 host key / 认证二级浮层。
+    TestRecover,
+    /// 表单：解析快速输入并填入字段。
+    QuickApply,
     Edit,
     Reconnect,
     ToggleEnabled,
@@ -222,8 +225,6 @@ pub(super) enum MachineOverlayButton {
     ConfirmRemove,
     CancelRemove,
     ReviewIssue,
-    WizardInteractiveAuth,
-    WizardHostKeyReview,
     Import,
     ImportContinue,
     ImportRun,
@@ -474,8 +475,7 @@ impl ClientShellState {
             Close,
             List,
             Detail(ProfileId),
-            FormEdit,
-            FormStep,
+            CancelTest,
         }
         let action = match self.overlay.as_ref() {
             Some(ClientShellOverlay::Machines(overlay)) => match &overlay.view {
@@ -510,20 +510,15 @@ impl ClientShellState {
                     ClientImportStep::Discover | ClientImportStep::Done => Back::List,
                 },
                 ClientMachinesView::Form(form) => {
-                    if let Some(bootstrap) = form.bootstrap.as_ref() {
-                        bootstrap.cancel.cancel();
-                        Back::FormEdit
-                    } else if form.editing.is_some() {
+                    if form.running() {
+                        Back::CancelTest
+                    } else {
                         match &form.editing {
                             Some(id) if self.saved_profile(id).is_some() => {
                                 Back::Detail(id.clone())
                             }
                             _ => Back::List,
                         }
-                    } else if form.step == MachineFormStep::Target {
-                        Back::List
-                    } else {
-                        Back::FormStep
                     }
                 }
             },
@@ -541,19 +536,11 @@ impl ClientShellState {
                     overlay.view = ClientMachinesView::Detail(id);
                 }
             }
-            Back::FormEdit => {
+            Back::CancelTest => {
                 if let Some(ClientShellOverlay::Machines(overlay)) = self.overlay.as_mut() {
                     if let ClientMachinesView::Form(form) = &mut overlay.view {
+                        // 丢弃即取消（`Drop` 触发 cancel），表单回到可编辑。
                         form.bootstrap = None;
-                    }
-                }
-            }
-            Back::FormStep => {
-                if let Some(ClientShellOverlay::Machines(overlay)) = self.overlay.as_mut() {
-                    if let ClientMachinesView::Form(form) = &mut overlay.view {
-                        let previous = form.step.previous();
-                        form.step = previous;
-                        form.focused = form.fields().len().saturating_sub(1);
                     }
                 }
             }
@@ -586,15 +573,7 @@ impl ClientShellState {
             return false;
         };
         match &mut overlay.view {
-            ClientMachinesView::Form(form) if form.bootstrap.is_none() => {
-                let Some(field) = form.focused_field() else {
-                    return false;
-                };
-                let Some(editor) = form.editor_mut(field) else {
-                    return false;
-                };
-                editor.insert(text)
-            }
+            ClientMachinesView::Form(form) => form.insert_text(text),
             ClientMachinesView::Forwards(view) if view.adding => {
                 let editor = match view.form.focused {
                     1 => &mut view.form.listen_port,
@@ -877,10 +856,7 @@ impl ClientShellState {
                     ClientMachinesView::List => self.selected_machine_id(),
                     _ => None,
                 },
-                matches!(
-                    &overlay.view,
-                    ClientMachinesView::Form(form) if form.bootstrap.is_some()
-                ),
+                matches!(&overlay.view, ClientMachinesView::Form(form) if form.running()),
             ),
             _ => (None, false),
         };
@@ -893,7 +869,10 @@ impl ClientShellState {
                 self.overlay = None;
             }
             Btn::Back => self.machines_back(),
-            Btn::Next | Btn::Save | Btn::StartSetup => self.advance_machine_form(outcome),
+            Btn::Save => self.save_machine_form(),
+            Btn::TestConnection => self.start_machine_test(outcome),
+            Btn::TestRecover => self.open_machine_test_recovery(None, outcome),
+            Btn::QuickApply => self.apply_machine_quick_input(),
             Btn::Import => self.open_machine_import_wizard(),
             Btn::ImportContinue => {
                 if let Some(ClientShellOverlay::Machines(overlay)) = self.overlay.as_mut() {
@@ -987,52 +966,6 @@ impl ClientShellState {
                     self.open_machine_auth_for_endpoint(&id, outcome);
                 }
             }
-            Btn::WizardInteractiveAuth => {
-                let prepared = match self.overlay.as_ref() {
-                    Some(ClientShellOverlay::Machines(overlay)) => match &overlay.view {
-                        ClientMachinesView::Form(form)
-                            if form
-                                .bootstrap
-                                .as_ref()
-                                .is_some_and(|bootstrap| bootstrap.failure.is_some()) =>
-                        {
-                            Some(Self::wizard_temp_profile(form))
-                        }
-                        _ => None,
-                    },
-                    _ => None,
-                };
-                match prepared {
-                    Some(Ok(profile)) => self.open_machine_auth_guide(Box::new(profile), outcome),
-                    Some(Err(error)) => {
-                        if let Some(ClientShellOverlay::Machines(overlay)) = self.overlay.as_mut() {
-                            if let ClientMachinesView::Form(form) = &mut overlay.view {
-                                form.error = Some(error);
-                            }
-                        }
-                    }
-                    None => {}
-                }
-            }
-            Btn::WizardHostKeyReview => {
-                let target = match self.overlay.as_ref() {
-                    Some(ClientShellOverlay::Machines(overlay)) => match &overlay.view {
-                        ClientMachinesView::Form(form)
-                            if form
-                                .bootstrap
-                                .as_ref()
-                                .is_some_and(|bootstrap| bootstrap.failure.is_some()) =>
-                        {
-                            Self::wizard_temp_profile(form).ok()
-                        }
-                        _ => None,
-                    },
-                    _ => None,
-                };
-                if let Some(target) = target {
-                    self.open_machine_host_key_review(Box::new(target), outcome);
-                }
-            }
         }
         outcome.repaint = true;
     }
@@ -1101,16 +1034,7 @@ impl ClientShellState {
                 let max = self.machines_view_max_scroll();
                 if let Some(ClientShellOverlay::Machines(overlay)) = self.overlay.as_mut() {
                     if let ClientMachinesView::Form(form) = &mut overlay.view {
-                        if form.step == MachineFormStep::Confirm && form.editing.is_none() {
-                            form.scroll = form.scroll.saturating_add_signed(delta).min(max);
-                            return;
-                        }
-                        let count = form.fields().len();
-                        if count > 0 {
-                            form.focused = (form.focused as isize + delta)
-                                .clamp(0, count.saturating_sub(1) as isize)
-                                as usize;
-                        }
+                        form.scroll_rows(delta, max);
                     }
                 }
             }
@@ -1293,10 +1217,9 @@ pub(super) fn machines_body(
                 ClientImportStep::Done => Some(MachinesBody::ImportDone(stack.content)),
             }
         }
-        ClientMachinesView::Form(_) => {
-            let (_, inner) = machines_panel(area, page_bounds, 24)?;
-            let stack = crate::ui::modal_stack_areas(inner, 2, 1, 1, 1);
-            Some(MachinesBody::Form(stack.content))
+        ClientMachinesView::Form(form) => {
+            let (_, inner) = form_panel(area, page_bounds)?;
+            Some(MachinesBody::Form(form_layout(inner, form).fields))
         }
         _ => None,
     }
@@ -1331,11 +1254,9 @@ impl ClientShellState {
         let connection_errors = std::mem::take(&mut self.endpoint_connection_errors);
         let port_forwards = std::mem::take(&mut self.endpoint_port_forwards);
         let session_log_dropped = std::mem::take(&mut self.session_log_dropped);
-        let palette = self.config.palette.clone();
         self.compute_machines_view_with(
             area,
             page_bounds,
-            &palette,
             &endpoints,
             &saved_profiles,
             &connection_errors,
@@ -1354,7 +1275,6 @@ impl ClientShellState {
         &mut self,
         area: Rect,
         page_bounds: Option<Rect>,
-        palette: &Palette,
         endpoints: &[ClientShellEndpoint],
         saved_profiles: &[SavedSshEndpoint],
         connection_errors: &HashMap<ClientEndpointId, crate::remote::ConnectionErrorKind>,
@@ -1445,25 +1365,7 @@ impl ClientShellState {
                 let ClientMachinesView::Form(form) = &mut page.view else {
                     return;
                 };
-                if form.bootstrap.is_some() {
-                    page.view_max_scroll = 0;
-                    return;
-                }
-                if form.step == MachineFormStep::Confirm && form.editing.is_none() {
-                    page.view_max_scroll = form_confirm_max_scroll(form, rect, palette);
-                    return;
-                }
-                let fields = form.fields();
-                let visible = usize::from(rect.height).max(1);
-                let focused = form.focused.min(fields.len().saturating_sub(1));
-                // 表单没有独立的 reveal 位：聚焦字段必须始终可见（渲染与
-                // 输入路径都按同一口径夹紧）。
-                let window =
-                    super::page::list_window(rect, 1, fields.len(), form.scroll, focused, true);
-                if !fields.is_empty() && rect.height > 0 {
-                    form.scroll = window.start;
-                }
-                page.view_max_scroll = fields.len().saturating_sub(visible);
+                page.view_max_scroll = reveal_focused_field(form, rect, saved_profiles);
             }
             MachinesBody::Forwards(rect) => {
                 let ClientMachinesView::Forwards(view) = &mut page.view else {
@@ -1643,7 +1545,7 @@ fn render_machines_view(
             }
             render_machine_confirm_remove(b, id, saved_profiles, cx)
         }
-        ClientMachinesView::Form(form) => render_machine_form(b, form, cx),
+        ClientMachinesView::Form(form) => render_machine_form(b, form, saved_profiles, cx),
         ClientMachinesView::Forwards(view) => {
             if !saved_profiles
                 .iter()

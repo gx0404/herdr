@@ -290,6 +290,35 @@ impl ClientShellState {
         self.open_host_key_unknown_view(id, profile, host, port, None, ticket, outcome);
     }
 
+    /// 表单测试连接报「主机密钥已变化」：打开硬阻断的变更对话框，只提供清掉
+    /// 旧密钥后重试（临时档案未落盘，没有重连可做）。
+    pub(super) fn open_machine_host_key_changed_review(
+        &mut self,
+        profile: Box<SavedSshEndpoint>,
+        outcome: &mut ClientShellInput,
+    ) {
+        let ticket = self.next_machine_auth_ticket();
+        let (host, port) = parse_host_port(&profile.target);
+        let port = profile.port.or(port);
+        self.replace_machine_auth_overlay(ClientMachineAuthOverlay::new(
+            ClientMachineAuthView::HostKeyChanged(ClientHostKeyView {
+                profile_id: None,
+                profile,
+                reviewed: None,
+                host_display: host_display(&host, port),
+                host,
+                port,
+                fingerprint: None,
+                ticket,
+                busy: false,
+                error: None,
+                message: None,
+                completed: false,
+            }),
+        ));
+        outcome.repaint = true;
+    }
+
     /// Wizard entry after a failed setup: guide an approved interactive
     /// authentication attempt against the throwaway profile.
     pub(super) fn open_machine_auth_guide(

@@ -4,9 +4,6 @@
 //! 两头换算——渲染时取编辑器的字符光标，点击时把屏幕列换回字符下标。点击
 //! 换算与 kit 的水平滚动同口径：聚焦时按光标位置跳过前缀列，未聚焦从头画。
 
-// 下一条提交（单页表单）接入机器表单后删除本 allow。
-#![allow(dead_code)]
-
 use super::text_editor::TextEditor;
 use crate::ui::kit::form_field::{FieldState, FormFieldSpec};
 

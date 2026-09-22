@@ -623,8 +623,6 @@ pub struct EndpointTexts {
 pub struct MachinesTexts {
     pub title: &'static str,
     pub search_hint: &'static str,
-    /// 添加/编辑向导里目标主机为空时的提示（不是 CLI 的 `--label` 文案）。
-    pub target_required: &'static str,
     /// local/remote 转发的目标必填项提示（动态转发的这几个字段不参与）。
     pub forward_target_host_required: &'static str,
     pub forward_target_port_required: &'static str,
@@ -650,7 +648,6 @@ pub struct MachinesTexts {
     pub hint_copy_fix: &'static str,
     pub hint_fields: &'static str,
     pub hint_change: &'static str,
-    pub hint_next: &'static str,
     pub hint_confirm: &'static str,
     pub hint_toggle: &'static str,
     pub hint_all_none: &'static str,
@@ -695,10 +692,6 @@ pub struct MachinesTexts {
     // Add/edit form.
     pub add_title: &'static str,
     pub edit_title: &'static str,
-    pub step_target: &'static str,
-    pub step_connection: &'static str,
-    pub step_session: &'static str,
-    pub step_confirm: &'static str,
     pub field_label: &'static str,
     pub hint_identity_files: &'static str,
     pub hint_proxy_jump: &'static str,
@@ -707,7 +700,6 @@ pub struct MachinesTexts {
     pub choice_yes: &'static str,
     pub choice_no: &'static str,
     pub next_button: &'static str,
-    pub start_setup_button: &'static str,
     pub save_button: &'static str,
     pub confirm_install_note: &'static str,
     pub confirm_auth_note: &'static str,
@@ -716,8 +708,6 @@ pub struct MachinesTexts {
     pub progress_install: &'static str,
     pub progress_start: &'static str,
     pub progress_verify: &'static str,
-    pub progress_done_fmt: &'static str,   // args: label
-    pub progress_failed_fmt: &'static str, // args: error
     // Port forwards: detail section and the rules editor page.
     pub detail_port_forwards: &'static str,
     pub forward_status_active: &'static str,
@@ -1173,8 +1163,6 @@ pub struct MenuTexts {
 
 /// 机器表单（快速添加、分组、预览、连接测试与校验）的文案。
 /// `*_fmt` entries are `fill` templates; placeholders are documented inline.
-// seam-stub(machines)：接缝预落的文案，字段暂无读者；对应车道用上后删除本 allow。
-#[allow(dead_code)]
 pub struct MachineFormTexts {
     pub quick_label: &'static str,
     pub quick_placeholder: &'static str,
@@ -1193,7 +1181,22 @@ pub struct MachineFormTexts {
     pub err_port: &'static str,
     pub err_host: &'static str,
     pub err_duplicate_name: &'static str,
+    // seam-stub(machines)：导入 Select 步骤改成带预览的多选清单时接入，届时删除。
+    #[allow(dead_code)]
     pub import_select_hint: &'static str,
+    /// 目标字段的占位文字。
+    pub target_placeholder: &'static str,
+    /// 页脚：快速输入聚焦时 Enter 的含义。
+    pub hint_fill: &'static str,
+    /// 页脚：测试运行中 Esc 的含义。
+    pub cancel_test: &'static str,
+    /// 测试失败为主机密钥问题时的恢复入口。
+    pub review_host_key: &'static str,
+    /// 测试通过后的提醒：测试不保存。
+    pub test_not_saved: &'static str,
+    /// 保存 / 测试被字段校验拦下时的提示。
+    pub fix_fields: &'static str,
+    pub saved_fmt: &'static str, // args: label
 }
 
 /// Help/about strings for the clap CLI surface. Option and subcommand
@@ -1955,8 +1958,6 @@ pub struct Texts {
     #[allow(dead_code)]
     pub agent_activity: AgentActivityTexts,
     pub menu: MenuTexts,
-    // seam-stub(machines)：机器车道用上后删除本 allow。
-    #[allow(dead_code)]
     pub machine_form: MachineFormTexts,
     pub cli_help: CliHelpTexts,
     pub cli_output: CliOutputTexts,

@@ -114,14 +114,14 @@ impl ClientShellState {
                     .copied()
                 {
                     self.activate_machine_button(button, outcome);
-                } else if let Some((_, field)) = self
+                } else if let Some((rect, field)) = self
                     .hits
                     .machines_fields
                     .iter()
                     .find(|(rect, _)| contains(*rect, point))
                     .copied()
                 {
-                    self.focus_machine_form_field(field);
+                    self.click_machine_form_field(field, rect, point);
                     outcome.repaint = true;
                 } else if !contains(self.hits.machines_popup, point) {
                     let running = matches!(

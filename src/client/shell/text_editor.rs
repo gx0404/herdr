@@ -42,16 +42,12 @@ impl TextEditor {
     }
 
     /// 光标前的字符数（`ui::kit::form_field` 按字符下标定位光标）。
-    // 下一条提交（单页表单）接入后删除本 allow。
-    #[allow(dead_code)]
     pub fn cursor_char_index(&self) -> usize {
         self.text[..self.cursor].chars().count()
     }
 
     /// 把光标放到第 `index` 个字符之前（越界落到末尾），并吸附到字素边界。
     /// 鼠标点击输入框时用；与键盘移动一样结束「整段替换」态。
-    // 下一条提交（单页表单）接入后删除本 allow。
-    #[allow(dead_code)]
     pub fn set_cursor_char_index(&mut self, index: usize) {
         self.cursor = self
             .text

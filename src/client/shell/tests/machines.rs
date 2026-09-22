@@ -392,97 +392,6 @@ fn with_temp_state_home(name: &str) -> std::path::PathBuf {
     dir
 }
 
-fn add_form_overlay<'a>(
-    state: &'a mut ClientShellState,
-    target: &str,
-    label: &str,
-) -> &'a mut super::super::machines_overlay::ClientMachineForm {
-    state.open_machine_add_form();
-    let Some(ClientShellOverlay::Machines(overlay)) = state.overlay.as_mut() else {
-        panic!("machines overlay");
-    };
-    let super::super::machines_overlay::ClientMachinesView::Form(form) = &mut overlay.view else {
-        panic!("add form view");
-    };
-    form.target = TextEditor::new(target, false);
-    form.label = TextEditor::new(label, false);
-    form.step = super::super::machines_overlay::MachineFormStep::Confirm;
-    form
-}
-
-#[test]
-fn bootstrap_success_persists_profile_and_returns_to_list() {
-    let dir = with_temp_state_home("bootstrap-ok");
-    let mut state = state_with_profiles(&[]);
-    let ticket = {
-        let form = add_form_overlay(&mut state, "build.example", "Build");
-        form.bootstrap = Some(super::super::machines_overlay::ClientMachineBootstrap {
-            cancel: crate::remote::TaskCancellation::default(),
-            ticket: 41,
-            step: None,
-            failure: None,
-        });
-        41
-    };
-    state.handle_machine_bootstrap_update(ticket, MachineBootstrapUpdate::Finished(Ok(())));
-
-    let catalog = crate::client::endpoint::EndpointCatalog::load().expect("catalog");
-    assert_eq!(catalog.ssh.len(), 1);
-    assert_eq!(catalog.ssh[0].label, "Build");
-    assert_eq!(catalog.ssh[0].target, "build.example");
-    assert_eq!(catalog.ssh[0].session, "default");
-    assert!(matches!(
-        state.overlay,
-        Some(ClientShellOverlay::Machines(
-            super::super::machines_overlay::ClientMachinesOverlay {
-                view: super::super::machines_overlay::ClientMachinesView::List,
-                ..
-            }
-        ))
-    ));
-    assert_eq!(state.saved_profiles.len(), 1);
-    let _ = std::fs::remove_dir_all(&dir);
-}
-
-#[test]
-fn bootstrap_failure_keeps_form_with_structured_error() {
-    let dir = with_temp_state_home("bootstrap-fail");
-    let mut state = state_with_profiles(&[]);
-    let ticket = {
-        let form = add_form_overlay(&mut state, "build.example", "Build");
-        form.bootstrap = Some(super::super::machines_overlay::ClientMachineBootstrap {
-            cancel: crate::remote::TaskCancellation::default(),
-            ticket: 42,
-            step: Some(crate::remote::SavedSshBootstrapStep::Install),
-            failure: None,
-        });
-        42
-    };
-    state.handle_machine_bootstrap_update(
-        ticket,
-        MachineBootstrapUpdate::Finished(Err("Permission denied (publickey)".into())),
-    );
-
-    let Some(ClientShellOverlay::Machines(overlay)) = state.overlay.as_ref() else {
-        panic!("machines overlay stays open");
-    };
-    let super::super::machines_overlay::ClientMachinesView::Form(form) = &overlay.view else {
-        panic!("form view kept after failure");
-    };
-    assert_eq!(
-        form.bootstrap.as_ref().and_then(|b| b.failure.as_deref()),
-        Some("Permission denied (publickey)")
-    );
-    let text = frame_text(&mut state, 106, 32);
-    assert!(text.contains("Permission denied"), "frame: {text}");
-    assert!(text.contains("herdr --remote"), "frame: {text}");
-    assert!(crate::client::endpoint::EndpointCatalog::load()
-        .expect("catalog")
-        .ssh
-        .is_empty());
-    let _ = std::fs::remove_dir_all(&dir);
-}
-
 #[test]
 fn edit_form_updates_group_and_connection_fields() {
     let dir = with_temp_state_home("edit-save");
@@ -866,84 +775,6 @@ fn copy_fix_command_targets_the_clipboard() {
         String::from_utf8_lossy(bytes),
         "herdr --remote dev@build.example --session default"
     );
-}
-
-#[test]
-fn wizard_advances_steps_and_prefills_label() {
-    let mut state = state_with_profiles(&[]);
-    state.open_machine_add_form();
-    {
-        let Some(ClientShellOverlay::Machines(overlay)) = state.overlay.as_mut() else {
-            panic!("machines overlay");
-        };
-        let super::super::machines_overlay::ClientMachinesView::Form(form) = &mut overlay.view
-        else {
-            panic!("add form");
-        };
-        form.target = TextEditor::new("build.example", false);
-    }
-    let mut outcome = ClientShellInput::default();
-    state.route_machines_key(&key(KeyCode::Enter), &mut outcome);
-    let Some(ClientShellOverlay::Machines(overlay)) = state.overlay.as_ref() else {
-        panic!("machines overlay");
-    };
-    let super::super::machines_overlay::ClientMachinesView::Form(form) = &overlay.view else {
-        panic!("add form");
-    };
-    assert_eq!(
-        form.step,
-        super::super::machines_overlay::MachineFormStep::Connection
-    );
-    assert_eq!(form.label.as_str(), "build.example");
-
-    let mut outcome = ClientShellInput::default();
-    state.route_machines_key(&key(KeyCode::Enter), &mut outcome);
-    state.route_machines_key(&key(KeyCode::Enter), &mut outcome);
-    let Some(ClientShellOverlay::Machines(overlay)) = state.overlay.as_ref() else {
-        panic!("machines overlay");
-    };
-    let super::super::machines_overlay::ClientMachinesView::Form(form) = &overlay.view else {
-        panic!("add form");
-    };
-    assert_eq!(
-        form.step,
-        super::super::machines_overlay::MachineFormStep::Confirm
-    );
-
-    // Esc walks back one step per press.
-    state.route_machines_key(&key(KeyCode::Esc), &mut ClientShellInput::default());
-    let Some(ClientShellOverlay::Machines(overlay)) = state.overlay.as_ref() else {
-        panic!("machines overlay");
-    };
-    let super::super::machines_overlay::ClientMachinesView::Form(form) = &overlay.view else {
-        panic!("add form");
-    };
-    assert_eq!(
-        form.step,
-        super::super::machines_overlay::MachineFormStep::Session
-    );
-}
-
-#[test]
-fn wizard_rejects_invalid_port_before_bootstrap() {
-    let dir = with_temp_state_home("bad-port");
-    let mut state = state_with_profiles(&[]);
-    {
-        let form = add_form_overlay(&mut state, "build.example", "Build");
-        form.port = TextEditor::new("not-a-port", false);
-    }
-    let mut outcome = ClientShellInput::default();
-    state.route_machines_key(&key(KeyCode::Enter), &mut outcome);
-    assert!(outcome.actions.is_empty());
-    let Some(ClientShellOverlay::Machines(overlay)) = state.overlay.as_ref() else {
-        panic!("machines overlay");
-    };
-    let super::super::machines_overlay::ClientMachinesView::Form(form) = &overlay.view else {
-        panic!("add form");
-    };
-    assert!(form.error.is_some(), "port error must surface in the form");
-    assert!(form.bootstrap.is_none());
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
@@ -2121,4 +1952,767 @@ fn composing_twice_leaves_the_machine_list_scroll_untouched() {
         after_input,
         "重绘不得改写机器列表的滚动状态"
     );
+}
+
+// ---------------------------------------------------------------------
+// 单页添加 / 编辑表单：快速输入、分组字段、内联校验、测试连接与保存
+// ---------------------------------------------------------------------
+
+use super::super::machines_overlay::{ClientMachineForm, MachineField, MachineOverlayButton};
+
+fn ctrl(ch: char) -> crate::input::TerminalKey {
+    crate::input::TerminalKey::new(KeyCode::Char(ch), KeyModifiers::CONTROL)
+}
+
+fn machine_form(state: &ClientShellState) -> &ClientMachineForm {
+    let Some(ClientShellOverlay::Machines(overlay)) = state.overlay.as_ref() else {
+        panic!("machines overlay");
+    };
+    let super::super::machines_overlay::ClientMachinesView::Form(form) = &overlay.view else {
+        panic!("form view");
+    };
+    form
+}
+
+fn machine_form_mut(state: &mut ClientShellState) -> &mut ClientMachineForm {
+    let Some(ClientShellOverlay::Machines(overlay)) = state.overlay.as_mut() else {
+        panic!("machines overlay");
+    };
+    let super::super::machines_overlay::ClientMachinesView::Form(form) = &mut overlay.view else {
+        panic!("form view");
+    };
+    form
+}
+
+/// 打开添加表单并直接写好目标 / 标签（绕过快速输入），焦点放在目标上。
+fn add_form_overlay<'a>(
+    state: &'a mut ClientShellState,
+    target: &str,
+    label: &str,
+) -> &'a mut ClientMachineForm {
+    state.open_machine_add_form();
+    let form = machine_form_mut(state);
+    form.target = TextEditor::new(target, false);
+    form.label = TextEditor::new(label, false);
+    form.focused = 1;
+    form
+}
+
+fn focused(state: &ClientShellState) -> Option<MachineField> {
+    let form = machine_form(state);
+    form.fields().get(form.focused).copied()
+}
+
+fn press(state: &mut ClientShellState, key: crate::input::TerminalKey) -> ClientShellInput {
+    let mut outcome = ClientShellInput::default();
+    assert!(state.route_machines_key(&key, &mut outcome));
+    outcome
+}
+
+fn type_text(state: &mut ClientShellState, text: &str) {
+    for ch in text.chars() {
+        press(state, key(KeyCode::Char(ch)));
+    }
+}
+
+fn focus_field(state: &mut ClientShellState, field: MachineField) {
+    let form = machine_form_mut(state);
+    let index = form
+        .fields()
+        .iter()
+        .position(|candidate| *candidate == field)
+        .expect("focusable field");
+    form.set_focus(index);
+}
+
+fn field_hit(state: &ClientShellState, field: MachineField) -> Rect {
+    state
+        .hits
+        .machines_fields
+        .iter()
+        .find(|(_, candidate)| *candidate == field)
+        .map(|(rect, _)| *rect)
+        .unwrap_or_else(|| panic!("{field:?} not in hits: {:?}", state.hits.machines_fields))
+}
+
+fn left_click(col: u16, row: u16) -> crossterm::event::MouseEvent {
+    crossterm::event::MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: col,
+        row,
+        modifiers: KeyModifiers::empty(),
+    }
+}
+
+fn start_test(state: &mut ClientShellState) -> u64 {
+    let outcome = press(state, ctrl('t'));
+    let [ClientShellAction::BootstrapMachine { ticket, .. }] = &outcome.actions[..] else {
+        panic!("bootstrap action: {:?}", outcome.actions);
+    };
+    *ticket
+}
+
+#[test]
+fn add_form_is_one_page_with_quick_input_groups_preview_and_footer() {
+    let mut state = state_with_profiles(&[]);
+    state.open_machine_add_form();
+    let text = compact(&frame_text(&mut state, 120, 40));
+    let t = &crate::i18n::texts().machines;
+    let f = &crate::i18n::texts().machine_form;
+    for expected in [
+        t.add_title,
+        f.quick_label,
+        f.quick_placeholder,
+        f.group_connection,
+        f.group_auth,
+        f.group_session,
+        f.preview_title,
+        f.test_connection,
+        t.save_button,
+    ] {
+        assert!(
+            text.contains(&compact(expected)),
+            "单页表单缺少「{expected}」：{text}"
+        );
+    }
+    // 不再有分步向导的步骤条。
+    assert!(!text.contains("1目标"), "{text}");
+    assert_eq!(
+        focused(&state),
+        Some(MachineField::Quick),
+        "焦点从快速输入开始"
+    );
+    // 目标是必填：标签后带红星。
+    let target = field_hit(&state, MachineField::Target);
+    let frame = state.compose(120, 40).expect("frame");
+    let row: String = frame.cells[usize::from(target.y) * usize::from(frame.width)..]
+        .iter()
+        .take(usize::from(frame.width))
+        .map(|cell| cell.symbol.as_str())
+        .collect();
+    assert!(row.contains('*'), "必填星号：{row}");
+    // 页脚是一条可点的提示：测试连接、保存都在命中表里。
+    let buttons: Vec<_> = state
+        .hits
+        .machines_actions
+        .iter()
+        .map(|(_, button)| *button)
+        .collect();
+    assert!(
+        buttons.contains(&MachineOverlayButton::TestConnection),
+        "{buttons:?}"
+    );
+    assert!(buttons.contains(&MachineOverlayButton::Save), "{buttons:?}");
+    assert!(buttons.contains(&MachineOverlayButton::Back), "{buttons:?}");
+}
+
+#[test]
+fn pasting_an_ssh_command_fills_fields_and_the_live_preview() {
+    let mut state = state_with_profiles(&[]);
+    state.open_machine_add_form();
+    assert!(state
+        .insert_machines_overlay_text("ssh -p 2222 \\\n  -i ~/.ssh/k -J jump dev@build.example"));
+    let form = machine_form(&state);
+    assert_eq!(form.target.as_str(), "build.example");
+    assert_eq!(form.user.as_str(), "dev");
+    assert_eq!(form.port.as_str(), "2222");
+    assert_eq!(form.identity_files.as_str(), "~/.ssh/k");
+    assert_eq!(form.proxy_jump.as_str(), "jump");
+    let text = compact(&frame_text(&mut state, 120, 40));
+    let filled = crate::i18n::fill(
+        crate::i18n::texts().machine_form.quick_parsed_fmt,
+        &[("n", "5")],
+    );
+    assert!(text.contains(&compact(&filled)), "解析结论：{text}");
+    assert!(
+        text.contains("ssh-p2222-i~/.ssh/k-Jjumpdev@build.example"),
+        "右侧预览是等价的 ssh 命令：{text}"
+    );
+    // 粘贴即已解析：Enter 直接保存（这里只断言不再是「填入」）。
+    assert!(!machine_form(&state).quick_pending());
+}
+
+#[test]
+fn typed_quick_input_parses_on_enter_and_reports_malformed_input() {
+    let _dir = with_temp_state_home("form-quick-enter");
+    let mut state = state_with_profiles(&[]);
+    state.open_machine_add_form();
+    type_text(&mut state, "ops@10.0.0.5:2200");
+    assert!(machine_form(&state).quick_pending(), "打字不立即覆盖字段");
+    assert_eq!(machine_form(&state).target.as_str(), "");
+    press(&mut state, key(KeyCode::Enter));
+    let form = machine_form(&state);
+    assert_eq!(
+        (form.target.as_str(), form.user.as_str(), form.port.as_str()),
+        ("10.0.0.5", "ops", "2200")
+    );
+    assert!(
+        crate::client::endpoint::EndpointCatalog::load()
+            .expect("catalog")
+            .ssh
+            .is_empty(),
+        "Enter 只是填入，不保存"
+    );
+
+    // 畸形输入：内联报错，已填的字段不动。
+    machine_form_mut(&mut state).quick = TextEditor::default();
+    type_text(&mut state, "root:secret@host");
+    press(&mut state, key(KeyCode::Enter));
+    assert_eq!(machine_form(&state).target.as_str(), "10.0.0.5");
+    let text = compact(&frame_text(&mut state, 120, 40));
+    let failed = compact(crate::i18n::texts().machine_form.quick_parse_failed);
+    assert!(text.contains(&failed), "解析失败提示：{text}");
+    // 失焦同样触发解析（这里内容没变，只是离开）：焦点移到目标。
+    press(&mut state, key(KeyCode::Tab));
+    assert_eq!(focused(&state), Some(MachineField::Target));
+}
+
+#[test]
+fn keyboard_focus_moves_with_tab_shift_tab_and_arrows() {
+    let mut state = state_with_profiles(&[]);
+    state.open_machine_add_form();
+    press(&mut state, key(KeyCode::Tab));
+    assert_eq!(focused(&state), Some(MachineField::Target));
+    press(&mut state, key(KeyCode::Down));
+    assert_eq!(focused(&state), Some(MachineField::User));
+    press(&mut state, key(KeyCode::Up));
+    press(&mut state, key(KeyCode::Up));
+    assert_eq!(focused(&state), Some(MachineField::Quick));
+    press(&mut state, key(KeyCode::Up));
+    assert_eq!(focused(&state), Some(MachineField::Quick), "↑ 到顶不回绕");
+    press(
+        &mut state,
+        crate::input::TerminalKey::new(KeyCode::BackTab, KeyModifiers::SHIFT),
+    );
+    assert_eq!(
+        focused(&state),
+        Some(MachineField::SessionLogInterval),
+        "Shift+Tab 回绕到最后一项"
+    );
+    // 选择字段用 ←→ / 空格切换取值。
+    focus_field(&mut state, MachineField::ForwardAgent);
+    press(&mut state, key(KeyCode::Right));
+    assert!(matches!(
+        machine_form(&state).forward_agent,
+        super::super::machines_overlay::TriChoice::Yes
+    ));
+    // 编辑表单：没有快速输入，目标只读不聚焦。
+    let saved = profile("Build", "build.example", "70");
+    let mut state = state_with_profiles(std::slice::from_ref(&saved));
+    state.open_machine_edit_form(&saved.id);
+    assert_eq!(focused(&state), Some(MachineField::User));
+    let text = compact(&frame_text(&mut state, 120, 40));
+    assert!(text.contains("build.example"), "目标只读展示：{text}");
+    assert!(
+        !text.contains(&compact(crate::i18n::texts().machine_form.quick_label)),
+        "编辑表单没有快速输入：{text}"
+    );
+}
+
+#[test]
+fn inline_validation_waits_for_blur_or_submit_then_blocks_save() {
+    let _dir = with_temp_state_home("form-validation");
+    let mut state = state_with_profiles(&[]);
+    state.open_machine_add_form();
+    let t = &crate::i18n::texts().machine_form;
+    let text = compact(&frame_text(&mut state, 120, 40));
+    assert!(
+        !text.contains(&compact(t.err_required)),
+        "首屏不报错：{text}"
+    );
+
+    // 端口：输入时就校验（动过的字段）。
+    focus_field(&mut state, MachineField::Port);
+    type_text(&mut state, "99999");
+    let text = compact(&frame_text(&mut state, 120, 40));
+    assert!(text.contains(&compact(t.err_port)), "端口内联错误：{text}");
+    let port = field_hit(&state, MachineField::Port);
+    let frame = state.compose(120, 40).expect("frame");
+    let error_cell =
+        &frame.cells[usize::from(port.y + 2) * usize::from(frame.width) + usize::from(port.x)];
+    assert_eq!(
+        error_cell.fg,
+        crate::protocol::color_to_u32(state.config.palette.red),
+        "聚焦中的错误行染红"
+    );
+    assert!(frame.cursor.is_some(), "聚焦且有错时光标仍在");
+
+    // 目标没动过：失焦前不报；提交（Enter 保存）后全部现形、焦点跳到第一个错处。
+    press(&mut state, key(KeyCode::Enter));
+    assert_eq!(focused(&state), Some(MachineField::Target));
+    let text = compact(&frame_text(&mut state, 120, 40));
+    assert!(
+        text.contains(&compact(t.err_required)),
+        "提交后目标必填：{text}"
+    );
+    assert!(text.contains(&compact(t.fix_fields)), "表单级提示：{text}");
+    assert!(
+        crate::client::endpoint::EndpointCatalog::load()
+            .expect("catalog")
+            .ssh
+            .is_empty(),
+        "有错不落盘"
+    );
+    // 测试连接同样被拦下。
+    let outcome = press(&mut state, ctrl('t'));
+    assert!(outcome.actions.is_empty(), "{:?}", outcome.actions);
+    assert!(machine_form(&state).bootstrap.is_none());
+}
+
+#[test]
+fn single_field_validators_cover_each_rule() {
+    let taken = profile("Build", "build.example", "71");
+    let saved = std::slice::from_ref(&taken);
+    let mut form = ClientMachineForm::blank();
+    let check = |form: &ClientMachineForm, field: MachineField| form.validate_field(field, saved);
+    let t = &crate::i18n::texts().machine_form;
+    assert_eq!(
+        check(&form, MachineField::Target),
+        Err(t.err_required.to_owned())
+    );
+    for bad in ["-oProxyCommand=x", "bad host", "user:pw@host"] {
+        form.target = TextEditor::new(bad, false);
+        assert_eq!(
+            check(&form, MachineField::Target),
+            Err(t.err_host.to_owned()),
+            "{bad}"
+        );
+    }
+    form.target = TextEditor::new("dev@build.example", false);
+    assert_eq!(check(&form, MachineField::Target), Ok(()));
+    // 名称查重不分大小写；留空时按目标算。
+    form.label = TextEditor::new("build", false);
+    assert_eq!(
+        check(&form, MachineField::Label),
+        Err(t.err_duplicate_name.to_owned())
+    );
+    form.label = TextEditor::new("Stage", false);
+    assert_eq!(check(&form, MachineField::Label), Ok(()));
+    for (field, bad) in [
+        (MachineField::Port, "0"),
+        (MachineField::Port, "x"),
+        (MachineField::User, "a b"),
+        (MachineField::Color, "not-a-color"),
+        (MachineField::ControlPersist, "soon"),
+        (MachineField::ServerAliveInterval, "-1"),
+        (MachineField::ProxyJump, "profile:zz"),
+        (MachineField::Session, "bad/session"),
+    ] {
+        let editor = match field {
+            MachineField::Port => &mut form.port,
+            MachineField::User => &mut form.user,
+            MachineField::Color => &mut form.color,
+            MachineField::ControlPersist => &mut form.control_persist,
+            MachineField::ServerAliveInterval => &mut form.server_alive_interval,
+            MachineField::ProxyJump => &mut form.proxy_jump,
+            MachineField::Session => &mut form.session,
+            _ => unreachable!(),
+        };
+        *editor = TextEditor::new(bad, false);
+        assert!(check(&form, field).is_err(), "{field:?} 应拒绝 {bad:?}");
+        let editor = match field {
+            MachineField::Port => &mut form.port,
+            MachineField::User => &mut form.user,
+            MachineField::Color => &mut form.color,
+            MachineField::ControlPersist => &mut form.control_persist,
+            MachineField::ServerAliveInterval => &mut form.server_alive_interval,
+            MachineField::ProxyJump => &mut form.proxy_jump,
+            MachineField::Session => &mut form.session,
+            _ => unreachable!(),
+        };
+        *editor = TextEditor::default();
+        assert_eq!(check(&form, field), Ok(()), "{field:?} 留空合法");
+    }
+    form.port = TextEditor::new("65535", false);
+    form.color = TextEditor::new("#00ff00", false);
+    form.control_persist = TextEditor::new("10m", false);
+    for field in [
+        MachineField::Port,
+        MachineField::Color,
+        MachineField::ControlPersist,
+    ] {
+        assert_eq!(check(&form, field), Ok(()), "{field:?}");
+    }
+}
+
+#[test]
+fn mouse_click_focuses_a_field_and_maps_the_column_to_the_cursor() {
+    let mut state = state_with_profiles(&[]);
+    add_form_overlay(&mut state, "build.example", "");
+    machine_form_mut(&mut state).focused = 0;
+    frame_text(&mut state, 120, 40);
+    let target = field_hit(&state, MachineField::Target);
+    // 点输入行第 5 列：聚焦目标，光标落在第 5 个字符之前。
+    let mut outcome = ClientShellInput::default();
+    state.handle_mouse(left_click(target.x + 5, target.y + 1), &mut outcome);
+    assert_eq!(focused(&state), Some(MachineField::Target));
+    assert_eq!(machine_form(&state).target.cursor_char_index(), 5);
+    let frame = state.compose(120, 40).expect("frame");
+    let cursor = frame.cursor.expect("聚焦字段有光标");
+    assert_eq!((cursor.x, cursor.y), (target.x + 5, target.y + 1));
+    // 点在文本之后：落到末尾。
+    state.handle_mouse(left_click(target.x + 30, target.y + 1), &mut outcome);
+    assert_eq!(
+        machine_form(&state).target.cursor_char_index(),
+        "build.example".chars().count()
+    );
+    // 选择字段：第一次点只聚焦，再点才切换取值。
+    frame_text(&mut state, 120, 40);
+    let forward = field_hit(&state, MachineField::ForwardAgent);
+    state.handle_mouse(left_click(forward.x + 1, forward.y + 1), &mut outcome);
+    assert_eq!(focused(&state), Some(MachineField::ForwardAgent));
+    assert!(matches!(
+        machine_form(&state).forward_agent,
+        super::super::machines_overlay::TriChoice::Default
+    ));
+    frame_text(&mut state, 120, 40);
+    let forward = field_hit(&state, MachineField::ForwardAgent);
+    state.handle_mouse(left_click(forward.x + 1, forward.y + 1), &mut outcome);
+    assert!(matches!(
+        machine_form(&state).forward_agent,
+        super::super::machines_overlay::TriChoice::Yes
+    ));
+}
+
+#[test]
+fn wheel_scrolls_the_field_column_and_focus_changes_reveal_the_field() {
+    let mut state = state_with_profiles(&[]);
+    state.open_machine_add_form();
+    frame_text(&mut state, 120, 34);
+    assert_eq!(machine_form(&state).scroll, 0);
+    let target = field_hit(&state, MachineField::Target);
+    let mut outcome = ClientShellInput::default();
+    state.handle_mouse(
+        crossterm::event::MouseEvent {
+            kind: MouseEventKind::ScrollDown,
+            column: target.x + 2,
+            row: target.y,
+            modifiers: KeyModifiers::empty(),
+        },
+        &mut outcome,
+    );
+    frame_text(&mut state, 120, 34);
+    assert!(machine_form(&state).scroll > 0, "滚轮滚动字段栏");
+    assert_eq!(focused(&state), Some(MachineField::Quick), "滚轮不动焦点");
+    // 键盘把焦点移到最后一项：它必须被滚进窗口并出现在命中表里。
+    focus_field(&mut state, MachineField::SessionLogInterval);
+    frame_text(&mut state, 120, 34);
+    field_hit(&state, MachineField::SessionLogInterval);
+    // 渲染是纯函数：连续两帧滚动不变。
+    let scroll = machine_form(&state).scroll;
+    frame_text(&mut state, 120, 34);
+    assert_eq!(machine_form(&state).scroll, scroll);
+}
+
+#[test]
+fn save_persists_a_new_machine_without_testing() {
+    let dir = with_temp_state_home("form-save");
+    let mut state = state_with_profiles(&[]);
+    add_form_overlay(&mut state, "build.example", "");
+    let outcome = press(&mut state, key(KeyCode::Enter));
+    assert!(
+        outcome.actions.is_empty(),
+        "保存不跑 bootstrap：{:?}",
+        outcome.actions
+    );
+    let catalog = crate::client::endpoint::EndpointCatalog::load().expect("catalog");
+    assert_eq!(catalog.ssh.len(), 1);
+    assert_eq!(catalog.ssh[0].label, "build.example", "标签留空取目标");
+    assert_eq!(catalog.ssh[0].target, "build.example");
+    assert_eq!(catalog.ssh[0].session, "default");
+    assert!(matches!(
+        state.overlay,
+        Some(ClientShellOverlay::Machines(
+            super::super::machines_overlay::ClientMachinesOverlay {
+                view: super::super::machines_overlay::ClientMachinesView::List,
+                ..
+            }
+        ))
+    ));
+    let saved = crate::i18n::fill(
+        crate::i18n::texts().machine_form.saved_fmt,
+        &[("label", "build.example")],
+    );
+    let text = compact(&frame_text(&mut state, 106, 32));
+    assert!(text.contains(&compact(&saved)), "保存反馈：{text}");
+    assert_eq!(state.saved_profiles.len(), 1);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn test_connection_runs_the_bootstrap_chain_without_saving() {
+    let dir = with_temp_state_home("form-test-ok");
+    let mut state = state_with_profiles(&[]);
+    add_form_overlay(&mut state, "build.example", "Build");
+    let outcome = press(&mut state, ctrl('t'));
+    let [ClientShellAction::BootstrapMachine {
+        ticket,
+        target,
+        session,
+        ..
+    }] = &outcome.actions[..]
+    else {
+        panic!("bootstrap action: {:?}", outcome.actions);
+    };
+    assert_eq!(
+        (target.as_str(), session.as_str()),
+        ("build.example", "default")
+    );
+    let ticket = *ticket;
+    // 运行中：表单只读，打字无效。
+    type_text(&mut state, "x");
+    assert_eq!(machine_form(&state).target.as_str(), "build.example");
+    state.handle_machine_bootstrap_update(
+        ticket,
+        MachineBootstrapUpdate::Step(crate::remote::SavedSshBootstrapStep::StartServer),
+    );
+    let text = compact(&frame_text(&mut state, 120, 40));
+    let running = compact(crate::i18n::texts().machine_form.test_running);
+    assert!(text.contains(&running), "运行中：{text}");
+    // 过期票据不影响。
+    state.handle_machine_bootstrap_update(ticket + 9, MachineBootstrapUpdate::Finished(Ok(())));
+    assert!(
+        !machine_form(&state)
+            .bootstrap
+            .as_ref()
+            .expect("test")
+            .passed
+    );
+
+    state.handle_machine_bootstrap_update(ticket, MachineBootstrapUpdate::Finished(Ok(())));
+    let form = machine_form(&state);
+    assert!(form.bootstrap.as_ref().is_some_and(|test| test.passed));
+    assert!(
+        crate::client::endpoint::EndpointCatalog::load()
+            .expect("catalog")
+            .ssh
+            .is_empty(),
+        "测试不落盘"
+    );
+    let text = compact(&frame_text(&mut state, 120, 40));
+    let passed = compact(crate::i18n::texts().machine_form.test_passed);
+    assert!(text.contains(&passed), "测试通过：{text}");
+    assert!(text.matches('✓').count() >= 4, "四步都打勾：{text}");
+    // 改连接字段让结论作废；改标签不影响。
+    focus_field(&mut state, MachineField::Label);
+    type_text(&mut state, "!");
+    assert!(machine_form(&state).bootstrap.is_some(), "标签不影响连接");
+    focus_field(&mut state, MachineField::Port);
+    type_text(&mut state, "2");
+    assert!(
+        machine_form(&state).bootstrap.is_none(),
+        "端口改了，结论作废"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn esc_cancels_a_running_test_and_keeps_the_form() {
+    let _dir = with_temp_state_home("form-test-cancel");
+    let mut state = state_with_profiles(&[]);
+    add_form_overlay(&mut state, "build.example", "Build");
+    start_test(&mut state);
+    let cancel = machine_form(&state)
+        .bootstrap
+        .as_ref()
+        .expect("running")
+        .cancel
+        .clone();
+    press(&mut state, key(KeyCode::Esc));
+    assert!(cancel.is_cancelled(), "Esc 取消后台测试");
+    assert!(
+        machine_form(&state).bootstrap.is_none(),
+        "表单还在、回到可编辑"
+    );
+    press(&mut state, key(KeyCode::Esc));
+    assert!(matches!(
+        state.overlay,
+        Some(ClientShellOverlay::Machines(
+            super::super::machines_overlay::ClientMachinesOverlay {
+                view: super::super::machines_overlay::ClientMachinesView::List,
+                ..
+            }
+        ))
+    ));
+}
+
+#[test]
+fn failed_test_with_unknown_host_key_opens_the_host_key_review() {
+    let _dir = with_temp_state_home("form-test-hostkey");
+    let mut state = state_with_profiles(&[]);
+    add_form_overlay(&mut state, "build.example", "Build");
+    let ticket = start_test(&mut state);
+    state.handle_machine_bootstrap_update(
+        ticket,
+        MachineBootstrapUpdate::Finished(Err("Host key verification failed.".into())),
+    );
+    let text = compact(&frame_text(&mut state, 120, 40));
+    let f = &crate::i18n::texts().machine_form;
+    assert!(
+        text.contains(&compact(f.review_host_key)),
+        "恢复入口：{text}"
+    );
+    assert!(text.contains('✗'), "失败步骤打叉：{text}");
+    let outcome = press(&mut state, ctrl('r'));
+    let Some(ClientShellOverlay::MachineAuth(auth)) = state.overlay.as_ref() else {
+        panic!("host key 未知应进入 MachineAuth");
+    };
+    assert!(matches!(
+        auth.view,
+        Some(super::super::machine_auth_overlay::ClientMachineAuthView::HostKeyUnknown(_))
+    ));
+    assert!(outcome.actions.iter().any(|action| matches!(
+        action,
+        ClientShellAction::MachineHostKeyOp {
+            op: MachineHostKeyOp::Scan,
+            profile,
+            ..
+        } if profile.target == "build.example"
+    )));
+    // 放弃后回到表单，失败结论与字段都还在。
+    state.activate_machine_auth_button(
+        super::super::machine_auth_overlay::MachineAuthButton::Abort,
+        &mut ClientShellInput::default(),
+    );
+    let form = machine_form(&state);
+    assert_eq!(form.target.as_str(), "build.example");
+    assert!(form
+        .bootstrap
+        .as_ref()
+        .is_some_and(|test| test.failure.is_some()));
+}
+
+#[test]
+fn failed_test_with_a_changed_host_key_opens_the_blocking_review() {
+    let _dir = with_temp_state_home("form-test-hostkey-changed");
+    let mut state = state_with_profiles(&[]);
+    add_form_overlay(&mut state, "build.example", "Build");
+    let ticket = start_test(&mut state);
+    state.handle_machine_bootstrap_update(
+        ticket,
+        MachineBootstrapUpdate::Finished(Err(
+            "WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED!".into()
+        )),
+    );
+    let text = compact(&frame_text(&mut state, 120, 40));
+    let f = &crate::i18n::texts().machine_form;
+    assert!(
+        text.contains(&compact(f.review_host_key)),
+        "恢复入口：{text}"
+    );
+    let outcome = press(&mut state, ctrl('r'));
+    let Some(ClientShellOverlay::MachineAuth(auth)) = state.overlay.as_ref() else {
+        panic!("host key 变化应进入 MachineAuth");
+    };
+    let Some(super::super::machine_auth_overlay::ClientMachineAuthView::HostKeyChanged(view)) =
+        auth.view.as_ref()
+    else {
+        panic!("硬阻断的变更对话框");
+    };
+    assert!(view.profile_id.is_none(), "临时档案未落盘");
+    assert_eq!(view.profile.target, "build.example");
+    assert!(outcome.actions.is_empty(), "打开对话框本身不动 known_hosts");
+    assert!(
+        crate::client::endpoint::EndpointCatalog::load()
+            .expect("catalog")
+            .ssh
+            .is_empty(),
+        "测试失败与恢复入口都不落盘"
+    );
+}
+
+#[test]
+fn failed_test_with_auth_errors_opens_the_interactive_auth_guide() {
+    let _dir = with_temp_state_home("form-test-auth");
+    let mut state = state_with_profiles(&[]);
+    add_form_overlay(&mut state, "build.example", "Build");
+    machine_form_mut(&mut state).user = TextEditor::new("dev", false);
+    let ticket = start_test(&mut state);
+    state.handle_machine_bootstrap_update(
+        ticket,
+        MachineBootstrapUpdate::Step(crate::remote::SavedSshBootstrapStep::DetectPlatform),
+    );
+    state.handle_machine_bootstrap_update(
+        ticket,
+        MachineBootstrapUpdate::Finished(Err("Permission denied (publickey)".into())),
+    );
+    let text = compact(&frame_text(&mut state, 120, 40));
+    assert!(text.contains("Permissiondenied"), "失败原因：{text}");
+    let failed_at = crate::i18n::fill(
+        crate::i18n::texts().machine_form.test_failed_fmt,
+        &[("step", crate::i18n::texts().machines.progress_detect)],
+    );
+    assert!(text.contains(&compact(&failed_at)), "失败步骤：{text}");
+    // 点页脚的恢复入口（按钮与 Ctrl+R 同义）。
+    let recover = state
+        .hits
+        .machines_actions
+        .iter()
+        .find(|(_, button)| *button == MachineOverlayButton::TestRecover)
+        .map(|(rect, _)| *rect)
+        .expect("恢复入口可点");
+    let mut outcome = ClientShellInput::default();
+    state.handle_mouse(left_click(recover.x + 1, recover.y), &mut outcome);
+    let Some(ClientShellOverlay::MachineAuth(auth)) = state.overlay.as_ref() else {
+        panic!("认证失败应进入 MachineAuth");
+    };
+    let Some(super::super::machine_auth_overlay::ClientMachineAuthView::AuthGuide(guide)) =
+        auth.view.as_ref()
+    else {
+        panic!("交互认证引导");
+    };
+    assert!(guide.wizard, "临时档案走向导路径");
+    assert_eq!(guide.profile.target, "build.example");
+    assert_eq!(guide.profile.user.as_deref(), Some("dev"));
+}
+
+#[test]
+fn failed_test_without_an_interactive_fix_shows_the_command() {
+    let _dir = with_temp_state_home("form-test-dns");
+    let mut state = state_with_profiles(&[]);
+    add_form_overlay(&mut state, "build.example", "Build");
+    let ticket = start_test(&mut state);
+    state.handle_machine_bootstrap_update(
+        ticket,
+        MachineBootstrapUpdate::Finished(Err(
+            "ssh: Could not resolve hostname build.example".into()
+        )),
+    );
+    let text = compact(&frame_text(&mut state, 120, 40));
+    assert!(text.contains("herdr--remote"), "修复命令：{text}");
+    assert!(
+        !state
+            .hits
+            .machines_actions
+            .iter()
+            .any(|(_, button)| *button == MachineOverlayButton::TestRecover),
+        "DNS 失败没有交互恢复入口"
+    );
+    let outcome = press(&mut state, ctrl('r'));
+    assert!(outcome.actions.is_empty());
+    assert!(matches!(
+        state.overlay,
+        Some(ClientShellOverlay::Machines(_))
+    ));
+}
+
+#[test]
+fn narrow_form_drops_the_preview_and_shows_test_steps_under_the_fields() {
+    let _dir = with_temp_state_home("form-narrow");
+    let mut state = state_with_profiles(&[]);
+    add_form_overlay(&mut state, "build.example", "Build");
+    let text = compact(&frame_text(&mut state, 70, 32));
+    let f = &crate::i18n::texts().machine_form;
+    assert!(
+        !text.contains(&compact(f.preview_title)),
+        "窄屏无预览栏：{text}"
+    );
+    let ticket = start_test(&mut state);
+    state.handle_machine_bootstrap_update(
+        ticket,
+        MachineBootstrapUpdate::Step(crate::remote::SavedSshBootstrapStep::Install),
+    );
+    let text = compact(&frame_text(&mut state, 70, 32));
+    let install = compact(crate::i18n::texts().machines.progress_install);
+    assert!(text.contains(&install), "测试步骤在字段栏下方：{text}");
 }

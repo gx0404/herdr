@@ -1,38 +1,13 @@
-//! 机器表单：添加向导（Target / Connection / Session / Confirm）与编辑表单的
-//! 状态机、远程 bootstrap 进度与渲染。
+//! 机器表单：添加与编辑共用的单页表单——顶部「快速输入」、分组字段、逐字段
+//! 内联校验、「测试连接」与保存。
+//!
+//! 保存与测试是两个独立动作：保存只写目录（目录 watcher 随后建立连接，与导入
+//! 同一条路），测试连接复用远程 bootstrap 链（`BootstrapMachine`，按
+//! `BOOTSTRAP_STEPS` 报进度）而不落盘；测试失败按失败类型把 host key / 认证
+//! 问题交给 `MachineAuth` 二级浮层。版面与渲染在 `form_view`。
 
+use super::quick::{flatten_pasted_command, parse_quick_input, QuickInput};
 use super::*;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(in crate::client::shell) enum MachineFormStep {
-    Target,
-    Connection,
-    Session,
-    Confirm,
-}
-
-impl MachineFormStep {
-    const ALL: [Self; 4] = [Self::Target, Self::Connection, Self::Session, Self::Confirm];
-
-    fn label(self) -> &'static str {
-        let t = &crate::i18n::texts().machines;
-        match self {
-            Self::Target => t.step_target,
-            Self::Connection => t.step_connection,
-            Self::Session => t.step_session,
-            Self::Confirm => t.step_confirm,
-        }
-    }
-
-    pub(super) fn previous(self) -> Self {
-        match self {
-            Self::Target => Self::Target,
-            Self::Connection => Self::Target,
-            Self::Session => Self::Connection,
-            Self::Confirm => Self::Session,
-        }
-    }
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(in crate::client::shell) enum TriChoice {
@@ -74,8 +49,11 @@ impl TriChoice {
     }
 }
 
+/// 表单里的一个输入位。`Quick` 是顶部的快速输入框（只在添加时出现），其余
+/// 与机器档案字段一一对应。判别式同时是 `touched` 位掩码的位号。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(in crate::client::shell) enum MachineField {
+    Quick,
     Target,
     Label,
     Session,
@@ -101,9 +79,10 @@ pub(in crate::client::shell) enum MachineField {
 }
 
 impl MachineField {
-    fn label(self) -> &'static str {
+    pub(super) fn label(self) -> &'static str {
         let t = &crate::i18n::texts().machines;
         match self {
+            Self::Quick => crate::i18n::texts().machine_form.quick_label,
             Self::Target => t.detail_target,
             Self::Label => t.field_label,
             Self::Session => t.detail_session,
@@ -129,7 +108,7 @@ impl MachineField {
         }
     }
 
-    fn hint(self) -> Option<&'static str> {
+    pub(super) fn hint(self) -> Option<&'static str> {
         let t = &crate::i18n::texts().machines;
         match self {
             Self::IdentityFiles => Some(t.hint_identity_files),
@@ -140,7 +119,7 @@ impl MachineField {
         }
     }
 
-    fn is_choice(self) -> bool {
+    pub(super) fn is_choice(self) -> bool {
         matches!(
             self,
             Self::IdentitiesOnly
@@ -149,46 +128,114 @@ impl MachineField {
                 | Self::SessionLogEnabled
         )
     }
+
+    /// 改了它，上一次测试连接的结论就不再代表当前设置。标签、分组、标签页
+    /// 颜色与会话日志只影响呈现 / 记录，不影响连接。
+    fn affects_connection(self) -> bool {
+        !matches!(
+            self,
+            Self::Quick
+                | Self::Label
+                | Self::Group
+                | Self::Tags
+                | Self::Color
+                | Self::SessionLogEnabled
+                | Self::SessionLogPath
+                | Self::SessionLogMaxBytes
+                | Self::SessionLogInterval
+        )
+    }
+
+    fn bit(self) -> u32 {
+        1 << (self as u32)
+    }
 }
 
-const TARGET_STEP_FIELDS: &[MachineField] = &[MachineField::Target, MachineField::Label];
+/// 字段分组（渲染为组标题）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum FieldGroup {
+    Connection,
+    Auth,
+    Session,
+    Advanced,
+}
 
-const CONNECTION_STEP_FIELDS: &[MachineField] = &[
+impl FieldGroup {
+    pub(super) fn title(self) -> &'static str {
+        let t = &crate::i18n::texts().machine_form;
+        match self {
+            Self::Connection => t.group_connection,
+            Self::Auth => t.group_auth,
+            Self::Session => t.group_session,
+            Self::Advanced => t.group_advanced,
+        }
+    }
+}
+
+/// 分组与组内字段的展示顺序；键盘焦点顺序由它派生（见 `ADD_FOCUS_ORDER`）。
+pub(super) const FORM_GROUPS: [(FieldGroup, &[MachineField]); 4] = [
+    (
+        FieldGroup::Connection,
+        &[
+            MachineField::Target,
+            MachineField::User,
+            MachineField::Port,
+            MachineField::ProxyJump,
+        ],
+    ),
+    (
+        FieldGroup::Auth,
+        &[
+            MachineField::IdentityFiles,
+            MachineField::IdentityAgent,
+            MachineField::IdentitiesOnly,
+            MachineField::StrictHostKey,
+            MachineField::ForwardAgent,
+        ],
+    ),
+    (
+        FieldGroup::Session,
+        &[
+            MachineField::Label,
+            MachineField::Session,
+            MachineField::Group,
+            MachineField::Tags,
+            MachineField::Color,
+        ],
+    ),
+    (
+        FieldGroup::Advanced,
+        &[
+            MachineField::ServerAliveInterval,
+            MachineField::ServerAliveCountMax,
+            MachineField::ControlPersist,
+            MachineField::RemoteCommand,
+            MachineField::SessionLogEnabled,
+            MachineField::SessionLogPath,
+            MachineField::SessionLogMaxBytes,
+            MachineField::SessionLogInterval,
+        ],
+    ),
+];
+
+/// 添加时的键盘焦点顺序：快速输入 + 各组字段（与 `FORM_GROUPS` 同序）。编辑
+/// 时去掉前两项：没有快速输入，目标是档案身份、只读展示不聚焦。
+const ADD_FOCUS_ORDER: &[MachineField] = &[
+    MachineField::Quick,
+    MachineField::Target,
     MachineField::User,
     MachineField::Port,
+    MachineField::ProxyJump,
     MachineField::IdentityFiles,
     MachineField::IdentityAgent,
     MachineField::IdentitiesOnly,
     MachineField::StrictHostKey,
-    MachineField::ProxyJump,
     MachineField::ForwardAgent,
-    MachineField::ServerAliveInterval,
-    MachineField::ServerAliveCountMax,
-    MachineField::ControlPersist,
-    MachineField::RemoteCommand,
-];
-
-const SESSION_STEP_FIELDS: &[MachineField] = &[
-    MachineField::Session,
-    MachineField::Group,
-    MachineField::Tags,
-    MachineField::Color,
-];
-
-const EDIT_FIELDS: &[MachineField] = &[
     MachineField::Label,
     MachineField::Session,
     MachineField::Group,
     MachineField::Tags,
     MachineField::Color,
-    MachineField::User,
-    MachineField::Port,
-    MachineField::IdentityFiles,
-    MachineField::IdentityAgent,
-    MachineField::IdentitiesOnly,
-    MachineField::StrictHostKey,
-    MachineField::ProxyJump,
-    MachineField::ForwardAgent,
     MachineField::ServerAliveInterval,
     MachineField::ServerAliveCountMax,
     MachineField::ControlPersist,
@@ -199,12 +246,31 @@ const EDIT_FIELDS: &[MachineField] = &[
     MachineField::SessionLogInterval,
 ];
 
+/// 快速输入框最近一次解析的结论（显示在输入框下方）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum QuickStatus {
+    Filled(usize),
+    Failed,
+}
+
 #[derive(Debug)]
 pub(in crate::client::shell) struct ClientMachineForm {
     pub(in crate::client::shell) editing: Option<ProfileId>,
-    pub(in crate::client::shell) step: MachineFormStep,
+    /// 下标进 `fields()`（键盘焦点顺序）。
     pub(in crate::client::shell) focused: usize,
+    /// 字段栏的滚动起点（行）：视图计算阶段按 `reveal` 与版面写入，渲染只读。
     pub(in crate::client::shell) scroll: usize,
+    /// 一次性「把聚焦字段滚进窗口」请求：键盘 / 点击改焦点或输入时置位，
+    /// 视图计算阶段消费；滚轮滚动时清掉，免得下一帧又被拉回焦点。
+    pub(in crate::client::shell) reveal: bool,
+    pub(in crate::client::shell) quick: TextEditor,
+    pub(super) quick_status: Option<QuickStatus>,
+    /// 快速输入改过、还没解析：失焦或保存 / 测试前先解析一次。
+    pub(super) quick_dirty: bool,
+    /// 用户动过（输入或失焦）的字段位掩码：只有动过的字段才显示内联错误，
+    /// 首屏不会一片红；保存 / 测试尝试之后 `submitted` 让全部错误现形。
+    pub(super) touched: u32,
+    pub(super) submitted: bool,
     pub(in crate::client::shell) target: TextEditor,
     pub(in crate::client::shell) label: TextEditor,
     pub(in crate::client::shell) session: TextEditor,
@@ -234,16 +300,20 @@ pub(in crate::client::shell) struct ClientMachineForm {
     /// The value loaded from (and preserved by) the form when
     /// `session_log_enabled` stays `Default`.
     pub(in crate::client::shell) session_log: Option<SessionLogProfile>,
+    /// 目录层面的失败（落盘出错、字段之间的约束）：画在页脚上方。
     pub(in crate::client::shell) error: Option<String>,
+    /// 测试连接：运行中 / 通过 / 失败。
     pub(in crate::client::shell) bootstrap: Option<ClientMachineBootstrap>,
 }
 
+/// 一次「测试连接」：远程 bootstrap 链的进度与结论。只测不存。
 #[derive(Debug)]
 pub(in crate::client::shell) struct ClientMachineBootstrap {
     pub(in crate::client::shell) cancel: crate::remote::TaskCancellation,
     pub(in crate::client::shell) ticket: u64,
     pub(in crate::client::shell) step: Option<SavedSshBootstrapStep>,
     pub(in crate::client::shell) failure: Option<String>,
+    pub(in crate::client::shell) passed: bool,
 }
 
 impl Drop for ClientMachineBootstrap {
@@ -252,20 +322,164 @@ impl Drop for ClientMachineBootstrap {
     }
 }
 
-const STRICT_HOST_KEY_CHOICES: [Option<StrictHostKeyChecking>; 4] = [
+impl ClientMachineBootstrap {
+    pub(super) fn running(&self) -> bool {
+        self.failure.is_none() && !self.passed
+    }
+
+    /// 失败文本的结构化分类。bootstrap 链经 `classify_and_wrap` 保留了原始
+    /// `Display`，按文本重新分类与 supervisor 同口径。
+    pub(super) fn failure_kind(&self) -> Option<crate::remote::ConnectionErrorKind> {
+        self.failure.as_deref().map(|failure| {
+            crate::remote::classify_connection_error(&std::io::Error::other(failure.to_owned()))
+        })
+    }
+
+    /// 失败后可走的二级恢复入口。
+    pub(super) fn recovery(&self) -> Option<TestRecovery> {
+        self.failure_kind().as_ref().and_then(test_recovery)
+    }
+}
+
+/// 测试失败后的恢复入口：都在 `MachineAuth` 二级浮层里完成。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum TestRecovery {
+    /// 主机密钥未知：扫描指纹后确认信任。
+    HostKey,
+    /// 主机密钥变了：硬阻断，只提供清掉旧密钥后重试。
+    HostKeyChanged,
+    /// 认证：经批准的交互认证（也能应答 ssh 的主机密钥提问）。
+    Auth,
+}
+
+/// 失败类型 → 恢复入口。DNS / 超时 / 远程安装 / 协议问题不是交互能解决的，
+/// 只给修复提示与命令；未能归类的失败按认证处理（交互认证兼容 ssh 的
+/// 各种提问，最通用）。
+pub(super) fn test_recovery(kind: &crate::remote::ConnectionErrorKind) -> Option<TestRecovery> {
+    use crate::remote::ConnectionErrorKind as Kind;
+    match kind {
+        Kind::HostKeyUnknown { .. } => Some(TestRecovery::HostKey),
+        Kind::HostKeyChanged => Some(TestRecovery::HostKeyChanged),
+        Kind::AuthRequired { .. } | Kind::AuthDenied | Kind::Other => Some(TestRecovery::Auth),
+        Kind::Dns
+        | Kind::Timeout
+        | Kind::RemoteInstallRequired
+        | Kind::RemoteInstallFailed
+        | Kind::Protocol => None,
+    }
+}
+
+pub(super) const STRICT_HOST_KEY_CHOICES: [Option<StrictHostKeyChecking>; 4] = [
     None,
     Some(StrictHostKeyChecking::Ask),
     Some(StrictHostKeyChecking::AcceptNew),
     Some(StrictHostKeyChecking::Yes),
 ];
 
+fn invalid_value(flag: &str, raw: &str) -> String {
+    crate::i18n::fill(
+        crate::i18n::texts().cli_errors.invalid_flag_value_fmt,
+        &[("flag", flag), ("value", raw)],
+    )
+}
+
+fn parse_u16_field(editor: &TextEditor, flag: &str) -> Result<Option<u16>, String> {
+    let raw = editor.trim();
+    if raw.is_empty() {
+        return Ok(None);
+    }
+    raw.parse::<u16>()
+        .map(Some)
+        .map_err(|_| invalid_value(flag, raw))
+}
+
+fn parse_u64_field(editor: &TextEditor, flag: &str) -> Result<Option<u64>, String> {
+    let raw = editor.trim();
+    if raw.is_empty() {
+        return Ok(None);
+    }
+    raw.parse::<u64>()
+        .map(Some)
+        .map_err(|_| invalid_value(flag, raw))
+}
+
+fn parse_port_field(editor: &TextEditor) -> Result<Option<u16>, String> {
+    let raw = editor.trim();
+    if raw.is_empty() {
+        return Ok(None);
+    }
+    match raw.parse::<u16>() {
+        Ok(port) if port > 0 => Ok(Some(port)),
+        _ => Err(crate::i18n::texts().machine_form.err_port.to_owned()),
+    }
+}
+
+fn split_list(editor: &TextEditor) -> Vec<String> {
+    editor
+        .split(',')
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+        .map(str::to_owned)
+        .collect()
+}
+
+fn parse_proxy_jump(editor: &TextEditor) -> Result<Vec<ProxyJumpHop>, String> {
+    let mut hops = Vec::new();
+    for hop in split_list(editor) {
+        match hop.strip_prefix("profile:") {
+            Some(id) => hops.push(ProxyJumpHop::Profile(
+                ProfileId::parse(id).map_err(|error| error.to_string())?,
+            )),
+            None => hops.push(ProxyJumpHop::Target(hop)),
+        }
+    }
+    Ok(hops)
+}
+
+/// 与目录校验同口径（`catalog::is_valid_control_persist`）：yes / no / 数字加
+/// 可选单位。提前在字段上报，而不是存盘时才被目录挡回。
+fn valid_control_persist(value: &str) -> bool {
+    if matches!(value, "yes" | "no") {
+        return true;
+    }
+    let digits = value
+        .strip_suffix(['s', 'm', 'h', 'd', 'w'])
+        .unwrap_or(value);
+    !digits.is_empty() && digits.bytes().all(|byte| byte.is_ascii_digit())
+}
+
+/// 目标主机的字段级校验：必填、不以 `-` 开头、不含空白 / 控制字符、不带
+/// 密码。其余（长度上限等）交给目录校验。
+fn validate_target(raw: &str) -> Result<(), String> {
+    let t = &crate::i18n::texts().machine_form;
+    if raw.is_empty() {
+        return Err(t.err_required.to_owned());
+    }
+    let authority = raw.strip_prefix("ssh://").unwrap_or(raw);
+    let password = authority
+        .rsplit_once('@')
+        .is_some_and(|(userinfo, _)| userinfo.contains(':'));
+    if raw.starts_with('-')
+        || password
+        || raw.chars().any(|ch| ch.is_whitespace() || ch.is_control())
+    {
+        return Err(t.err_host.to_owned());
+    }
+    Ok(())
+}
+
 impl ClientMachineForm {
-    pub(super) fn blank() -> Self {
+    pub(in crate::client::shell) fn blank() -> Self {
         Self {
             editing: None,
-            step: MachineFormStep::Target,
             focused: 0,
             scroll: 0,
+            reveal: true,
+            quick: TextEditor::default(),
+            quick_status: None,
+            quick_dirty: false,
+            touched: 0,
+            submitted: false,
             target: TextEditor::default(),
             label: TextEditor::default(),
             session: TextEditor::default(),
@@ -376,15 +590,12 @@ impl ClientMachineForm {
         form
     }
 
-    pub(super) fn fields(&self) -> &'static [MachineField] {
+    /// 键盘焦点顺序。
+    pub(in crate::client::shell) fn fields(&self) -> &'static [MachineField] {
         if self.editing.is_some() {
-            return EDIT_FIELDS;
-        }
-        match self.step {
-            MachineFormStep::Target => TARGET_STEP_FIELDS,
-            MachineFormStep::Connection => CONNECTION_STEP_FIELDS,
-            MachineFormStep::Session => SESSION_STEP_FIELDS,
-            MachineFormStep::Confirm => &[],
+            &ADD_FOCUS_ORDER[2..]
+        } else {
+            ADD_FOCUS_ORDER
         }
     }
 
@@ -392,8 +603,21 @@ impl ClientMachineForm {
         self.fields().get(self.focused).copied()
     }
 
-    fn editor(&self, field: MachineField) -> Option<&TextEditor> {
+    /// 字段此刻能否聚焦 / 编辑：编辑时目标只读，快速输入只在添加时存在。
+    pub(super) fn is_editable(&self, field: MachineField) -> bool {
+        self.fields().contains(&field)
+    }
+
+    /// 测试连接正在跑：表单只读，只接受 Esc 取消。
+    pub(super) fn running(&self) -> bool {
+        self.bootstrap
+            .as_ref()
+            .is_some_and(ClientMachineBootstrap::running)
+    }
+
+    pub(super) fn editor(&self, field: MachineField) -> Option<&TextEditor> {
         Some(match field {
+            MachineField::Quick => &self.quick,
             MachineField::Target => &self.target,
             MachineField::Label => &self.label,
             MachineField::Session => &self.session,
@@ -421,6 +645,7 @@ impl ClientMachineForm {
 
     pub(super) fn editor_mut(&mut self, field: MachineField) -> Option<&mut TextEditor> {
         Some(match field {
+            MachineField::Quick => &mut self.quick,
             MachineField::Target => &mut self.target,
             MachineField::Label => &mut self.label,
             MachineField::Session => &mut self.session,
@@ -462,11 +687,12 @@ impl ClientMachineForm {
                 self.strict_host_key =
                     (self.strict_host_key as isize + delta).rem_euclid(count as isize) as usize;
             }
-            _ => {}
+            _ => return,
         }
+        self.mark_edited(field);
     }
 
-    fn choice_label(&self, field: MachineField) -> String {
+    pub(super) fn choice_label(&self, field: MachineField) -> String {
         match field {
             MachineField::IdentitiesOnly => self.identities_only.label().to_owned(),
             MachineField::ForwardAgent => self.forward_agent.label().to_owned(),
@@ -479,7 +705,7 @@ impl ClientMachineForm {
         }
     }
 
-    fn effective_label(&self) -> String {
+    pub(super) fn effective_label(&self) -> String {
         let label = self.label.trim();
         if label.is_empty() {
             self.target.trim().to_owned()
@@ -488,7 +714,7 @@ impl ClientMachineForm {
         }
     }
 
-    fn effective_session(&self) -> String {
+    pub(super) fn effective_session(&self) -> String {
         let session = self.session.trim();
         if session.is_empty() {
             crate::session::DEFAULT_SESSION_NAME.to_owned()
@@ -497,77 +723,333 @@ impl ClientMachineForm {
         }
     }
 
-    fn profile_options(&self) -> Result<SshProfileOptions, String> {
-        let parse_u16 = |editor: &TextEditor, flag: &str| -> Result<Option<u16>, String> {
-            let raw = editor.trim();
-            if raw.is_empty() {
-                return Ok(None);
-            }
-            raw.parse::<u16>().map(Some).map_err(|_| {
-                crate::i18n::fill(
-                    crate::i18n::texts().cli_errors.invalid_flag_value_fmt,
-                    &[("flag", flag), ("value", raw)],
-                )
-            })
-        };
-        let split_list = |editor: &TextEditor| -> Vec<String> {
-            editor
-                .split(',')
-                .map(str::trim)
-                .filter(|part| !part.is_empty())
-                .map(str::to_owned)
-                .collect()
-        };
-        let mut proxy_jump = Vec::new();
-        for hop in split_list(&self.proxy_jump) {
-            match hop.strip_prefix("profile:") {
-                Some(id) => proxy_jump.push(ProxyJumpHop::Profile(
-                    ProfileId::parse(id).map_err(|error| error.to_string())?,
-                )),
-                None => proxy_jump.push(ProxyJumpHop::Target(hop)),
+    /// 字段内容变了：记为动过；连接相关的改动让上一次测试结论作废（运行中
+    /// 表单只读，到不了这里）。
+    fn mark_edited(&mut self, field: MachineField) {
+        self.touched |= field.bit();
+        self.reveal = true;
+        if field == MachineField::Quick {
+            self.quick_dirty = true;
+            self.quick_status = None;
+        } else if field.affects_connection() && !self.running() {
+            self.bootstrap = None;
+        }
+    }
+
+    /// 改焦点：离开的字段记为动过（失焦校验），离开快速输入且内容没解析过就
+    /// 先解析。
+    pub(in crate::client::shell) fn set_focus(&mut self, index: usize) {
+        let count = self.fields().len();
+        if count == 0 {
+            return;
+        }
+        let index = index.min(count - 1);
+        if let Some(previous) = self.focused_field() {
+            if index != self.focused {
+                self.touched |= previous.bit();
+                if previous == MachineField::Quick && self.quick_dirty {
+                    self.apply_quick();
+                }
             }
         }
+        self.focused = index;
+        self.reveal = true;
+    }
+
+    fn move_focus(&mut self, delta: isize, wrap: bool) {
+        let count = self.fields().len() as isize;
+        if count == 0 {
+            return;
+        }
+        let next = self.focused as isize + delta;
+        let next = if wrap {
+            next.rem_euclid(count)
+        } else {
+            next.clamp(0, count - 1)
+        };
+        self.set_focus(next as usize);
+    }
+
+    /// 解析快速输入并填入字段。目标 / 用户 / 端口三项视作一体（对应同一个
+    /// `user@host:port`），总是整组覆盖；其余字段只在输入里出现时才填。
+    /// 返回是否成功。
+    pub(super) fn apply_quick(&mut self) -> bool {
+        self.quick_dirty = false;
+        if self.quick.trim().is_empty() {
+            self.quick_status = None;
+            return false;
+        }
+        match parse_quick_input(self.quick.as_str()) {
+            Ok(parsed) => {
+                let filled = self.fill_from_quick(&parsed);
+                self.quick_status = Some(QuickStatus::Filled(filled));
+                if !self.running() {
+                    self.bootstrap = None;
+                }
+                true
+            }
+            Err(_) => {
+                self.quick_status = Some(QuickStatus::Failed);
+                false
+            }
+        }
+    }
+
+    fn fill_from_quick(&mut self, parsed: &QuickInput) -> usize {
+        let mut filled = 0usize;
+        let mut set =
+            |editor: &mut TextEditor, value: &str, field: MachineField, touched: &mut u32| {
+                *editor = TextEditor::new(value, false);
+                *touched |= field.bit();
+                if !value.is_empty() {
+                    filled += 1;
+                }
+            };
+        let mut touched = self.touched;
+        set(
+            &mut self.target,
+            &parsed.host,
+            MachineField::Target,
+            &mut touched,
+        );
+        set(
+            &mut self.user,
+            parsed.user.as_deref().unwrap_or_default(),
+            MachineField::User,
+            &mut touched,
+        );
+        set(
+            &mut self.port,
+            &parsed.port.map(|port| port.to_string()).unwrap_or_default(),
+            MachineField::Port,
+            &mut touched,
+        );
+        if !parsed.identity_files.is_empty() {
+            set(
+                &mut self.identity_files,
+                &parsed.identity_files.join(", "),
+                MachineField::IdentityFiles,
+                &mut touched,
+            );
+        }
+        if let Some(hops) = &parsed.proxy_jump {
+            set(
+                &mut self.proxy_jump,
+                &hops.join(", "),
+                MachineField::ProxyJump,
+                &mut touched,
+            );
+        }
+        if let Some(agent) = &parsed.identity_agent {
+            set(
+                &mut self.identity_agent,
+                agent,
+                MachineField::IdentityAgent,
+                &mut touched,
+            );
+        }
+        if let Some(interval) = parsed.server_alive_interval {
+            set(
+                &mut self.server_alive_interval,
+                &interval.to_string(),
+                MachineField::ServerAliveInterval,
+                &mut touched,
+            );
+        }
+        if let Some(count) = parsed.server_alive_count_max {
+            set(
+                &mut self.server_alive_count_max,
+                &count.to_string(),
+                MachineField::ServerAliveCountMax,
+                &mut touched,
+            );
+        }
+        if let Some(persist) = &parsed.control_persist {
+            set(
+                &mut self.control_persist,
+                persist,
+                MachineField::ControlPersist,
+                &mut touched,
+            );
+        }
+        if let Some(flag) = parsed.forward_agent {
+            self.forward_agent = TriChoice::from_bool(Some(flag));
+            filled += 1;
+        }
+        if let Some(flag) = parsed.identities_only {
+            self.identities_only = TriChoice::from_bool(Some(flag));
+            filled += 1;
+        }
+        if let Some(checking) = parsed.strict_host_key {
+            if let Some(index) = STRICT_HOST_KEY_CHOICES
+                .iter()
+                .position(|choice| *choice == Some(checking))
+            {
+                self.strict_host_key = index;
+                filled += 1;
+            }
+        }
+        self.touched = touched;
+        filled
+    }
+
+    /// 单字段校验：`Ok` 表示该字段本身合法（可以为空）。`saved` 用于名称查重
+    /// （编辑时排除自己）。
+    pub(in crate::client::shell) fn validate_field(
+        &self,
+        field: MachineField,
+        saved: &[SavedSshEndpoint],
+    ) -> Result<(), String> {
+        match field {
+            MachineField::Quick => Ok(()),
+            MachineField::Target => {
+                if self.editing.is_some() {
+                    // 目标是档案身份，编辑时不可改，也就无从校验。
+                    Ok(())
+                } else {
+                    validate_target(self.target.trim())
+                }
+            }
+            MachineField::Label => {
+                let label = self.effective_label();
+                let taken = !label.is_empty()
+                    && saved.iter().any(|profile| {
+                        Some(&profile.id) != self.editing.as_ref()
+                            && profile.label.trim().eq_ignore_ascii_case(&label)
+                    });
+                if taken {
+                    Err(crate::i18n::texts()
+                        .machine_form
+                        .err_duplicate_name
+                        .to_owned())
+                } else {
+                    Ok(())
+                }
+            }
+            MachineField::Session => crate::session::validate_name(&self.effective_session()),
+            MachineField::Port => parse_port_field(&self.port).map(|_| ()),
+            MachineField::User => {
+                let user = self.user.trim();
+                if user.chars().any(|ch| ch.is_whitespace() || ch == '@') {
+                    Err(invalid_value("--user", user))
+                } else {
+                    Ok(())
+                }
+            }
+            MachineField::Color => {
+                let color = self.color.trim();
+                if color.is_empty() || crate::config::try_parse_color(color).is_some() {
+                    Ok(())
+                } else {
+                    Err(invalid_value("--color", color))
+                }
+            }
+            MachineField::ProxyJump => parse_proxy_jump(&self.proxy_jump).map(|_| ()),
+            MachineField::ServerAliveInterval => {
+                parse_u16_field(&self.server_alive_interval, "--server-alive-interval").map(|_| ())
+            }
+            MachineField::ServerAliveCountMax => {
+                parse_u16_field(&self.server_alive_count_max, "--server-alive-count-max")
+                    .map(|_| ())
+            }
+            MachineField::ControlPersist => {
+                let persist = self.control_persist.trim();
+                if persist.is_empty() || valid_control_persist(persist) {
+                    Ok(())
+                } else {
+                    Err(invalid_value("--control-persist", persist))
+                }
+            }
+            // 会话日志文本只在显式选了是 / 否时才参与档案（默认沿用已存值）。
+            MachineField::SessionLogMaxBytes if self.session_log_enabled != TriChoice::Default => {
+                parse_u64_field(&self.session_log_max_bytes, "--log-max-bytes").map(|_| ())
+            }
+            MachineField::SessionLogInterval if self.session_log_enabled != TriChoice::Default => {
+                parse_u16_field(&self.session_log_interval, "--log-interval").map(|_| ())
+            }
+            MachineField::Group
+            | MachineField::Tags
+            | MachineField::IdentityFiles
+            | MachineField::IdentityAgent
+            | MachineField::IdentitiesOnly
+            | MachineField::StrictHostKey
+            | MachineField::ForwardAgent
+            | MachineField::RemoteCommand
+            | MachineField::SessionLogEnabled
+            | MachineField::SessionLogPath
+            | MachineField::SessionLogMaxBytes
+            | MachineField::SessionLogInterval => Ok(()),
+        }
+    }
+
+    /// 字段此刻要显示的内联错误：动过的字段，或提交过一次之后的全部字段。
+    pub(super) fn visible_error(
+        &self,
+        field: MachineField,
+        saved: &[SavedSshEndpoint],
+    ) -> Option<String> {
+        if !self.submitted && self.touched & field.bit() == 0 {
+            return None;
+        }
+        self.validate_field(field, saved).err()
+    }
+
+    /// 焦点顺序里第一个不合法的字段。
+    fn first_invalid(&self, saved: &[SavedSshEndpoint]) -> Option<usize> {
+        self.fields()
+            .iter()
+            .position(|field| self.validate_field(*field, saved).is_err())
+    }
+
+    /// 保存 / 测试前的统一闸门：先解析没解析过的快速输入，再逐字段校验；
+    /// 有错就让全部错误现形并把焦点移到第一个错处。
+    fn submit_gate(&mut self, saved: &[SavedSshEndpoint]) -> bool {
+        if self.quick_dirty {
+            self.apply_quick();
+        }
+        self.submitted = true;
+        match self.first_invalid(saved) {
+            Some(index) => {
+                self.set_focus(index);
+                self.error = Some(crate::i18n::texts().machine_form.fix_fields.to_owned());
+                false
+            }
+            None => {
+                self.error = None;
+                true
+            }
+        }
+    }
+
+    /// 由各字段的解析函数组装档案选项（与 `validate_field` 共用同一批解析）。
+    fn profile_options(&self) -> Result<SshProfileOptions, String> {
         let session_log = match self.session_log_enabled {
             // Untouched: the saved value passes through verbatim.
             TriChoice::Default => self.session_log.clone(),
-            choice => {
-                let parse_u64 = |editor: &TextEditor, flag: &str| -> Result<Option<u64>, String> {
-                    let raw = editor.trim();
-                    if raw.is_empty() {
-                        return Ok(None);
-                    }
-                    raw.parse::<u64>().map(Some).map_err(|_| {
-                        crate::i18n::fill(
-                            crate::i18n::texts().cli_errors.invalid_flag_value_fmt,
-                            &[("flag", flag), ("value", raw)],
-                        )
-                    })
-                };
-                Some(SessionLogProfile {
-                    enabled: choice.as_bool() == Some(true),
-                    path_template: nonempty(self.session_log_path.trim()),
-                    max_bytes: parse_u64(&self.session_log_max_bytes, "--log-max-bytes")?,
-                    dump_interval_secs: parse_u16(&self.session_log_interval, "--log-interval")?,
-                })
-            }
+            choice => Some(SessionLogProfile {
+                enabled: choice.as_bool() == Some(true),
+                path_template: nonempty(self.session_log_path.trim()),
+                max_bytes: parse_u64_field(&self.session_log_max_bytes, "--log-max-bytes")?,
+                dump_interval_secs: parse_u16_field(&self.session_log_interval, "--log-interval")?,
+            }),
         };
         Ok(SshProfileOptions {
             group: nonempty(self.group.trim()),
             tags: split_list(&self.tags),
             color: nonempty(self.color.trim()),
-            port: parse_u16(&self.port, "--port")?,
+            port: parse_port_field(&self.port)?,
             user: nonempty(self.user.trim()),
             identity_file: split_list(&self.identity_files),
             identities_only: self.identities_only.as_bool(),
             identity_agent: nonempty(self.identity_agent.trim()),
             strict_host_key_checking: STRICT_HOST_KEY_CHOICES[self.strict_host_key],
-            proxy_jump,
+            proxy_jump: parse_proxy_jump(&self.proxy_jump)?,
             forward_agent: self.forward_agent.as_bool(),
-            server_alive_interval: parse_u16(
+            server_alive_interval: parse_u16_field(
                 &self.server_alive_interval,
                 "--server-alive-interval",
             )?,
-            server_alive_count_max: parse_u16(
+            server_alive_count_max: parse_u16_field(
                 &self.server_alive_count_max,
                 "--server-alive-count-max",
             )?,
@@ -576,134 +1058,134 @@ impl ClientMachineForm {
             session_log,
         })
     }
+
+    /// 粘贴 / 宿主插入文本到聚焦字段。快速输入先压平续行符，粘贴即解析。
+    pub(super) fn insert_text(&mut self, text: &str) -> bool {
+        if self.running() {
+            return false;
+        }
+        let Some(field) = self.focused_field() else {
+            return false;
+        };
+        if field == MachineField::Quick {
+            let flat = flatten_pasted_command(text);
+            if !self.quick.insert(&flat) {
+                return false;
+            }
+            self.mark_edited(field);
+            self.apply_quick();
+            return true;
+        }
+        let Some(editor) = self.editor_mut(field) else {
+            return false;
+        };
+        if !editor.insert(text) {
+            return false;
+        }
+        self.mark_edited(field);
+        true
+    }
+
+    /// 快速输入聚焦且有没解析的改动：此时 Enter 是「填入」而不是保存。
+    pub(in crate::client::shell) fn quick_pending(&self) -> bool {
+        self.quick_dirty && self.focused_field() == Some(MachineField::Quick)
+    }
+
+    /// 滚轮滚动字段栏（行）：不动焦点，也不再把焦点拉回窗口。
+    pub(super) fn scroll_rows(&mut self, delta: isize, max_scroll: usize) {
+        self.scroll = self.scroll.saturating_add_signed(delta).min(max_scroll);
+        self.reveal = false;
+    }
 }
 
 impl ClientShellState {
-    pub(super) fn advance_machine_form(&mut self, outcome: &mut ClientShellInput) {
-        enum Advance {
-            Save,
-            Bootstrap,
-            Done,
-        }
-        let advance = {
-            let Some(ClientShellOverlay::Machines(overlay)) = self.overlay.as_mut() else {
-                return;
-            };
-            let ClientMachinesView::Form(form) = &mut overlay.view else {
-                return;
-            };
-            if form.bootstrap.is_some() {
-                return;
-            }
-            if form.editing.is_some() {
-                Advance::Save
-            } else {
-                match form.step {
-                    MachineFormStep::Target => {
-                        if form.target.trim().is_empty() {
-                            form.error =
-                                Some(crate::i18n::texts().machines.target_required.to_owned());
-                        } else {
-                            if form.label.trim().is_empty() {
-                                let target = form.target.trim().to_owned();
-                                form.label = TextEditor::new(&target, false);
-                            }
-                            form.error = None;
-                            form.step = MachineFormStep::Connection;
-                            form.focused = 0;
-                        }
-                        Advance::Done
-                    }
-                    MachineFormStep::Connection => {
-                        match form.profile_options() {
-                            Ok(_) => {
-                                form.error = None;
-                                form.step = MachineFormStep::Session;
-                                form.focused = 0;
-                            }
-                            Err(error) => form.error = Some(error),
-                        }
-                        Advance::Done
-                    }
-                    MachineFormStep::Session => {
-                        if let Err(error) = crate::session::validate_name(&form.effective_session())
-                        {
-                            form.error = Some(error);
-                        } else {
-                            form.error = None;
-                            form.step = MachineFormStep::Confirm;
-                            form.focused = 0;
-                        }
-                        Advance::Done
-                    }
-                    MachineFormStep::Confirm => Advance::Bootstrap,
-                }
-            }
-        };
-        match advance {
-            Advance::Save => self.save_machine_edit(),
-            Advance::Bootstrap => self.start_machine_bootstrap(outcome),
-            Advance::Done => {}
+    fn machine_form_mut(&mut self) -> Option<&mut ClientMachineForm> {
+        match self.overlay.as_mut() {
+            Some(ClientShellOverlay::Machines(overlay)) => match &mut overlay.view {
+                ClientMachinesView::Form(form) => Some(form),
+                _ => None,
+            },
+            _ => None,
         }
     }
 
-    fn save_machine_edit(&mut self) {
+    /// 保存（Enter / 保存按钮）：逐字段校验通过后写目录。新机器直接落盘，
+    /// 回列表并选中它，由目录 watcher 建立连接；编辑回详情。
+    pub(super) fn save_machine_form(&mut self) {
         let prepared = {
+            let saved = &self.saved_profiles;
             let Some(ClientShellOverlay::Machines(overlay)) = self.overlay.as_mut() else {
                 return;
             };
             let ClientMachinesView::Form(form) = &mut overlay.view else {
                 return;
             };
-            let Some(profile_id) = form.editing.clone() else {
+            if form.running() || !form.submit_gate(saved) {
                 return;
-            };
-            let options = match form.profile_options() {
-                Ok(options) => options,
+            }
+            match form.profile_options() {
+                Ok(options) => (
+                    form.editing.clone(),
+                    options,
+                    form.effective_label(),
+                    form.target.trim().to_owned(),
+                    form.effective_session(),
+                ),
                 Err(error) => {
                     form.error = Some(error);
                     return;
                 }
-            };
-            let session = form.effective_session();
-            if let Err(error) = crate::session::validate_name(&session) {
-                form.error = Some(error);
-                return;
             }
-            (profile_id, options, form.effective_label(), session)
         };
-        let (profile_id, options, label, session) = prepared;
-        match self.mutate_machine_catalog(|catalog| {
-            catalog.update_ssh(&profile_id, label, session, options)
-        }) {
-            Ok(true) => {
-                if let Some(ClientShellOverlay::Machines(overlay)) = self.overlay.as_mut() {
-                    overlay.view = ClientMachinesView::Detail(profile_id);
-                }
+        let (editing, options, label, target, session) = prepared;
+        let result = match &editing {
+            Some(profile_id) => self
+                .mutate_machine_catalog(|catalog| {
+                    catalog.update_ssh(profile_id, label.clone(), session, options)
+                })
+                .map(|updated| updated.then(|| profile_id.clone())),
+            None => self
+                .persist_new_machine(options, &label, &target, &session)
+                .map(Some),
+        };
+        let Some(ClientShellOverlay::Machines(overlay)) = self.overlay.as_mut() else {
+            return;
+        };
+        match (result, editing.is_some()) {
+            (Ok(Some(profile_id)), true) => {
+                overlay.view = ClientMachinesView::Detail(profile_id);
             }
-            Ok(false) => {
-                if let Some(ClientShellOverlay::Machines(overlay)) = self.overlay.as_mut() {
-                    overlay.view = ClientMachinesView::List;
-                }
+            (Ok(Some(profile_id)), false) => {
+                overlay.view = ClientMachinesView::List;
+                overlay.set_message(crate::i18n::fill(
+                    crate::i18n::texts().machine_form.saved_fmt,
+                    &[("label", &label)],
+                ));
+                self.select_machine_row(&profile_id);
             }
-            Err(error) => {
-                if let Some(ClientShellOverlay::Machines(overlay)) = self.overlay.as_mut() {
-                    if let ClientMachinesView::Form(form) = &mut overlay.view {
-                        form.error = Some(error);
-                    }
+            // 编辑期间档案被外部删掉：回列表。
+            (Ok(None), _) => overlay.view = ClientMachinesView::List,
+            (Err(error), _) => {
+                if let ClientMachinesView::Form(form) = &mut overlay.view {
+                    form.error = Some(error);
                 }
             }
         }
     }
 
-    fn start_machine_bootstrap(&mut self, outcome: &mut ClientShellInput) {
+    /// 测试连接（Ctrl+T / 测试按钮）：与保存同一道校验，再按当前字段在内存
+    /// 目录里解析出 SSH 选项，跑一遍预先授权的 bootstrap（检测平台、必要时
+    /// 安装 / 更新并启动 server、验证）。只测不存。
+    pub(super) fn start_machine_test(&mut self, outcome: &mut ClientShellInput) {
+        let ticket = self.next_machine_bootstrap_ticket;
+        let saved = &self.saved_profiles;
         let Some(ClientShellOverlay::Machines(overlay)) = self.overlay.as_mut() else {
             return;
         };
         let ClientMachinesView::Form(form) = &mut overlay.view else {
             return;
         };
-        if form.bootstrap.is_some() {
+        if form.running() || !form.submit_gate(saved) {
             return;
         }
         let options = match form.profile_options() {
@@ -716,13 +1198,8 @@ impl ClientShellState {
         let label = form.effective_label();
         let target = form.target.trim().to_owned();
         let session = form.effective_session();
-        if let Err(error) = crate::session::validate_name(&session) {
-            form.error = Some(error);
-            return;
-        }
-        // Mirror the CLI: validate and resolve SSH options against a throwaway
-        // in-memory catalog add; the profile is only persisted after the
-        // remote bootstrap succeeds.
+        // 与 CLI 同一套选项解析：在临时目录里加一次（ProxyJump 的 profile:
+        // 引用要靠目录解析），不落盘。
         let mut catalog = match EndpointCatalog::load() {
             Ok(catalog) => catalog,
             Err(error) => {
@@ -747,8 +1224,6 @@ impl ClientShellState {
                 return;
             }
         };
-        let ticket = self.next_machine_bootstrap_ticket;
-        self.next_machine_bootstrap_ticket = self.next_machine_bootstrap_ticket.saturating_add(1);
         form.error = None;
         let cancel = crate::remote::TaskCancellation::default();
         form.bootstrap = Some(ClientMachineBootstrap {
@@ -756,7 +1231,9 @@ impl ClientShellState {
             ticket,
             step: None,
             failure: None,
+            passed: false,
         });
+        self.next_machine_bootstrap_ticket = ticket.saturating_add(1);
         outcome.actions.push(ClientShellAction::BootstrapMachine {
             cancel,
             ticket,
@@ -767,81 +1244,76 @@ impl ClientShellState {
         outcome.repaint = true;
     }
 
+    /// 测试连接的进度与结论。只更新表单里的测试状态，不落盘。
     pub(crate) fn handle_machine_bootstrap_update(
         &mut self,
         ticket: u64,
         update: MachineBootstrapUpdate,
     ) {
-        enum Prepared {
-            None,
-            Save(Box<(SshProfileOptions, String, String, String)>),
-        }
-        let prepared = {
-            let Some(ClientShellOverlay::Machines(overlay)) = self.content_page_mut() else {
-                return;
-            };
-            let ClientMachinesView::Form(form) = &mut overlay.view else {
-                return;
-            };
-            if form
-                .bootstrap
-                .as_ref()
-                .is_none_or(|bootstrap| bootstrap.ticket != ticket)
-            {
-                return;
-            }
-            match update {
-                MachineBootstrapUpdate::Step(step) => {
-                    if let Some(bootstrap) = form.bootstrap.as_mut() {
-                        bootstrap.step = Some(step);
-                    }
-                    Prepared::None
-                }
-                MachineBootstrapUpdate::Finished(Ok(())) => match form.profile_options() {
-                    Ok(options) => Prepared::Save(Box::new((
-                        options,
-                        form.effective_label(),
-                        form.target.trim().to_owned(),
-                        form.effective_session(),
-                    ))),
-                    Err(error) => {
-                        if let Some(bootstrap) = form.bootstrap.as_mut() {
-                            bootstrap.failure = Some(error);
-                        }
-                        Prepared::None
-                    }
-                },
-                MachineBootstrapUpdate::Finished(Err(error)) => {
-                    if let Some(bootstrap) = form.bootstrap.as_mut() {
-                        bootstrap.failure = Some(error);
-                    }
-                    Prepared::None
-                }
-            }
-        };
-        let Prepared::Save(pending) = prepared else {
+        let Some(ClientShellOverlay::Machines(overlay)) = self.content_page_mut() else {
             return;
         };
-        let (options, label, target, session) = *pending;
-        match self.persist_bootstrapped_machine(options, &label, &target, &session) {
-            Ok(profile_id) => {
-                if let Some(ClientShellOverlay::Machines(overlay)) = self.content_page_mut() {
-                    overlay.view = ClientMachinesView::List;
-                    overlay.set_message(crate::i18n::fill(
-                        crate::i18n::texts().machines.progress_done_fmt,
-                        &[("label", &label)],
-                    ));
-                }
-                self.select_machine_row(&profile_id);
+        let ClientMachinesView::Form(form) = &mut overlay.view else {
+            return;
+        };
+        let Some(bootstrap) = form
+            .bootstrap
+            .as_mut()
+            .filter(|bootstrap| bootstrap.ticket == ticket && bootstrap.running())
+        else {
+            return;
+        };
+        match update {
+            MachineBootstrapUpdate::Step(step) => bootstrap.step = Some(step),
+            MachineBootstrapUpdate::Finished(Ok(())) => bootstrap.passed = true,
+            MachineBootstrapUpdate::Finished(Err(error)) => bootstrap.failure = Some(error),
+        }
+    }
+
+    /// 测试失败后的恢复入口（Ctrl+R / 恢复按钮）：按失败类型打开 `MachineAuth`
+    /// 二级浮层；`route` 为 `None` 时取分类给出的入口。临时档案不落盘，交互
+    /// 认证成功时由 `complete_interactive_connection` 保存并接管连接。
+    pub(super) fn open_machine_test_recovery(
+        &mut self,
+        route: Option<TestRecovery>,
+        outcome: &mut ClientShellInput,
+    ) {
+        let prepared = match self.overlay.as_ref() {
+            Some(ClientShellOverlay::Machines(overlay)) => match &overlay.view {
+                ClientMachinesView::Form(form) => form
+                    .bootstrap
+                    .as_ref()
+                    .filter(|bootstrap| bootstrap.failure.is_some())
+                    .and_then(|bootstrap| route.or_else(|| bootstrap.recovery()))
+                    .map(|route| (route, Self::wizard_temp_profile(form))),
+                _ => None,
+            },
+            _ => None,
+        };
+        match prepared {
+            Some((TestRecovery::HostKey, Ok(profile))) => {
+                self.open_machine_host_key_review(Box::new(profile), outcome)
             }
-            Err(error) => {
-                if let Some(ClientShellOverlay::Machines(overlay)) = self.content_page_mut() {
-                    if let ClientMachinesView::Form(form) = &mut overlay.view {
-                        if let Some(bootstrap) = form.bootstrap.as_mut() {
-                            bootstrap.failure = Some(error);
-                        }
-                    }
+            Some((TestRecovery::HostKeyChanged, Ok(profile))) => {
+                self.open_machine_host_key_changed_review(Box::new(profile), outcome)
+            }
+            Some((TestRecovery::Auth, Ok(profile))) => {
+                self.open_machine_auth_guide(Box::new(profile), outcome)
+            }
+            Some((_, Err(error))) => {
+                if let Some(form) = self.machine_form_mut() {
+                    form.error = Some(error);
                 }
+            }
+            None => {}
+        }
+    }
+
+    /// 快速输入的「填入」（快速输入框里按 Enter / 点页脚）。
+    pub(super) fn apply_machine_quick_input(&mut self) {
+        if let Some(form) = self.machine_form_mut() {
+            if !form.running() {
+                form.apply_quick();
             }
         }
     }
@@ -868,15 +1340,10 @@ impl ClientShellState {
             remote_command: profile.remote_command.clone(),
             session_log: profile.session_log.clone(),
         };
-        self.persist_bootstrapped_machine(
-            options,
-            &profile.label,
-            &profile.target,
-            &profile.session,
-        )
+        self.persist_new_machine(options, &profile.label, &profile.target, &profile.session)
     }
 
-    fn persist_bootstrapped_machine(
+    fn persist_new_machine(
         &mut self,
         options: SshProfileOptions,
         label: &str,
@@ -898,108 +1365,57 @@ impl ClientShellState {
         outcome: &mut ClientShellInput,
     ) {
         let plain = modifiers.is_empty();
-        let bootstrap_state = match self.overlay.as_ref() {
-            Some(ClientShellOverlay::Machines(ClientMachinesOverlay {
-                view: ClientMachinesView::Form(form),
-                ..
-            })) => form
-                .bootstrap
-                .as_ref()
-                .map(|bootstrap| bootstrap.failure.is_some()),
-            _ => None,
-        };
-        if let Some(failed) = bootstrap_state {
-            // The bootstrap runs in the background; the page is read-only
-            // until it succeeds (returns to the list) or fails (Esc re-enters
-            // editing). A failure also offers the recovery dialogs.
-            if !failed {
-                if code == KeyCode::Esc {
-                    self.machines_back();
-                    outcome.repaint = true;
-                }
-                return;
-            }
-            match code {
-                KeyCode::Esc => {
-                    self.machines_back();
-                    outcome.repaint = true;
-                }
-                KeyCode::Char('i') if plain => {
-                    self.activate_machine_button(
-                        MachineOverlayButton::WizardInteractiveAuth,
-                        outcome,
-                    );
-                }
-                KeyCode::Char('k') if plain => {
-                    self.activate_machine_button(
-                        MachineOverlayButton::WizardHostKeyReview,
-                        outcome,
-                    );
-                }
-                _ => {}
-            }
-            return;
-        }
-
+        let ctrl = modifiers == KeyModifiers::CONTROL;
+        let running = self.machine_form_mut().is_some_and(|form| form.running());
         if code == KeyCode::Esc {
+            // 运行中的测试：Esc 只取消测试；否则离开表单。
             self.machines_back();
             outcome.repaint = true;
             return;
         }
-        if matches!(
-            code,
-            KeyCode::Up | KeyCode::Down | KeyCode::PageUp | KeyCode::PageDown
-        ) {
-            let max = self.machines_view_max_scroll();
-            if let Some(ClientShellOverlay::Machines(page)) = self.overlay.as_mut() {
-                if let ClientMachinesView::Form(form) = &mut page.view {
-                    if form.step == MachineFormStep::Confirm && form.editing.is_none() {
-                        let delta: isize = match code {
-                            KeyCode::Up => -1,
-                            KeyCode::PageUp => -5,
-                            KeyCode::PageDown => 5,
-                            _ => 1,
-                        };
-                        form.scroll = form.scroll.saturating_add_signed(delta).min(max);
-                        outcome.repaint = true;
-                        return;
-                    }
-                }
-            }
-        }
-        if code == KeyCode::Enter {
-            self.advance_machine_form(outcome);
-            outcome.repaint = true;
-            return;
-        }
-
-        let Some(ClientShellOverlay::Machines(overlay)) = self.overlay.as_mut() else {
-            return;
-        };
-        let ClientMachinesView::Form(form) = &mut overlay.view else {
-            return;
-        };
-        let field_count = form.fields().len();
-        if field_count == 0 {
+        if running {
+            // 测试在后台跑：表单只读，直到通过或失败。
             return;
         }
         match code {
-            KeyCode::Tab if plain => {
-                form.focused = (form.focused + 1) % field_count;
+            KeyCode::Char('t') if ctrl => {
+                self.start_machine_test(outcome);
                 outcome.repaint = true;
+                return;
             }
+            KeyCode::Char('r') if ctrl => {
+                self.open_machine_test_recovery(None, outcome);
+                outcome.repaint = true;
+                return;
+            }
+            KeyCode::Enter => {
+                // 快速输入里有没解析的改动：Enter 先填入；否则 Enter 就是保存
+                // （粘贴即已解析，粘完直接 Enter 保存）。
+                if self
+                    .machine_form_mut()
+                    .is_some_and(|form| form.quick_pending())
+                {
+                    self.apply_machine_quick_input();
+                } else {
+                    self.save_machine_form();
+                }
+                outcome.repaint = true;
+                return;
+            }
+            _ => {}
+        }
+        let Some(form) = self.machine_form_mut() else {
+            return;
+        };
+        match code {
+            KeyCode::Tab if plain => form.move_focus(1, true),
             KeyCode::BackTab if modifiers.difference(KeyModifiers::SHIFT).is_empty() => {
-                form.focused = (form.focused + field_count - 1) % field_count;
-                outcome.repaint = true;
+                form.move_focus(-1, true)
             }
-            KeyCode::Up if plain => {
-                form.focused = form.focused.saturating_sub(1);
-                outcome.repaint = true;
-            }
-            KeyCode::Down if plain => {
-                form.focused = (form.focused + 1).min(field_count - 1);
-                outcome.repaint = true;
-            }
+            KeyCode::Up if plain => form.move_focus(-1, false),
+            KeyCode::Down if plain => form.move_focus(1, false),
+            KeyCode::PageUp if plain => form.move_focus(-5, false),
+            KeyCode::PageDown if plain => form.move_focus(5, false),
             _ => {
                 let Some(field) = form.focused_field() else {
                     return;
@@ -1013,15 +1429,21 @@ impl ClientShellState {
                     outcome.repaint = true;
                     return;
                 }
-                if let Some(editor) = form.editor_mut(field) {
-                    outcome.repaint |= editor.handle_key(key).is_some();
+                let Some(editor) = form.editor_mut(field) else {
+                    return;
+                };
+                match editor.handle_key(key) {
+                    Some(true) => form.mark_edited(field),
+                    Some(false) => form.reveal = true,
+                    None => return,
                 }
             }
         }
+        outcome.repaint = true;
     }
 
-    /// Builds the throwaway profile an approved interactive auth attempt
-    /// runs against on the wizard path (never persisted).
+    /// Builds the throwaway profile a test-connection recovery runs against
+    /// (never persisted by the form itself).
     pub(super) fn wizard_temp_profile(
         form: &ClientMachineForm,
     ) -> Result<SavedSshEndpoint, String> {
@@ -1034,453 +1456,48 @@ impl ClientShellState {
         )
     }
 
-    /// Focus a form field by mouse; choice fields also cycle one step.
-    pub(in crate::client::shell) fn focus_machine_form_field(&mut self, field: MachineField) {
-        let Some(ClientShellOverlay::Machines(overlay)) = self.overlay.as_mut() else {
+    /// 鼠标点字段：聚焦（失焦校验照常）；点在输入行上按字符换算光标列；
+    /// 再点已聚焦的选择字段切到下一个取值。`rect` 是该字段的命中区（首行是
+    /// 标签，第二行是输入框）。
+    pub(super) fn click_machine_form_field(
+        &mut self,
+        field: MachineField,
+        rect: Rect,
+        point: (u16, u16),
+    ) {
+        let Some(form) = self.machine_form_mut() else {
             return;
         };
-        let ClientMachinesView::Form(form) = &mut overlay.view else {
-            return;
-        };
-        if form.bootstrap.is_some() {
+        if form.running() {
             return;
         }
-        if let Some(index) = form
+        let Some(index) = form
             .fields()
             .iter()
             .position(|candidate| *candidate == field)
-        {
-            if form.focused == index && field.is_choice() {
+        else {
+            return;
+        };
+        let was_focused = form.focused == index;
+        form.set_focus(index);
+        if field.is_choice() {
+            if was_focused {
                 form.cycle_choice(field, 1);
             }
-            form.focused = index;
+            return;
         }
-    }
-}
-
-const BOOTSTRAP_STEPS: [SavedSshBootstrapStep; 4] = [
-    SavedSshBootstrapStep::DetectPlatform,
-    SavedSshBootstrapStep::Install,
-    SavedSshBootstrapStep::StartServer,
-    SavedSshBootstrapStep::Verify,
-];
-
-pub(in crate::client::shell) fn bootstrap_step_label(step: SavedSshBootstrapStep) -> &'static str {
-    let t = &crate::i18n::texts().machines;
-    match step {
-        SavedSshBootstrapStep::DetectPlatform => t.progress_detect,
-        SavedSshBootstrapStep::Install => t.progress_install,
-        SavedSshBootstrapStep::StartServer => t.progress_start,
-        SavedSshBootstrapStep::Verify => t.progress_verify,
-    }
-}
-
-pub(super) fn render_machine_form(
-    b: &mut Buffer,
-    form: &ClientMachineForm,
-    cx: &super::super::feedback::ChromeContext<'_>,
-) -> Option<OverlayRender> {
-    let p = cx.palette;
-    let t = &crate::i18n::texts().machines;
-    let editing = form.editing.is_some();
-    let (popup, inner) = modal_panel(b, crate::ui::ModalSize::Large.with_height(24), p.accent, cx)?;
-    if inner.width < 24 || inner.height < 8 {
-        return Some(OverlayRender {
-            area: popup,
-            machines_popup: popup,
-            ..OverlayRender::default()
-        });
-    }
-    let stack = crate::ui::modal_stack_areas(inner, 2, 1, 1, 1);
-    let base = Style::default()
-        .bg(p.panel_bg)
-        .remove_modifier(Modifier::DIM);
-    put_text(
-        b,
-        stack.header.x,
-        stack.header.y,
-        stack.header.width,
-        &format!(" {}", if editing { t.edit_title } else { t.add_title }),
-        base.fg(p.text).add_modifier(Modifier::BOLD),
-    );
-    if !editing {
-        let mut x = stack.header.x;
-        for (index, step) in MachineFormStep::ALL.iter().enumerate() {
-            let label = format!(" {} {} ", index + 1, step.label());
-            let style = if *step == form.step {
-                base.fg(p.accent).add_modifier(Modifier::BOLD)
-            } else {
-                base.fg(p.overlay0)
-            };
-            let width = display_width(&label).min(stack.header.right().saturating_sub(x));
-            put_text(b, x, stack.header.y + 1, width, &label, style);
-            x = x.saturating_add(width);
+        let input_row = rect.y.saturating_add(1);
+        if point.1 != input_row || point.0 < rect.x {
+            return;
         }
-    }
-
-    let body = stack.content;
-    let mut field_hits = Vec::new();
-    let mut cursor = None;
-    if let Some(bootstrap) = form.bootstrap.as_ref() {
-        render_bootstrap_progress(b, body, form, bootstrap, base, cx);
-    } else if form.step == MachineFormStep::Confirm && !editing {
-        render_form_confirm(b, body, form, base, p);
-    } else {
-        let fields = form.fields();
-        let visible = usize::from(body.height).max(1);
-        let focused = form.focused.min(fields.len().saturating_sub(1));
-        let scroll = form
-            .scroll
-            .max(focused.saturating_sub(visible.saturating_sub(1)))
-            .min(focused)
-            .min(fields.len().saturating_sub(visible));
-        for (index, field) in fields.iter().enumerate().skip(scroll).take(visible) {
-            let y = body.y + (index - scroll) as u16;
-            let rect = Rect::new(body.x, y, body.width, 1);
-            field_hits.push((rect, *field));
-            let is_focused = index == focused;
-            let label = format!(" {}", field.label());
-            let label_width = fields
-                .iter()
-                .map(|field| display_width(field.label()) + 2)
-                .max()
-                .unwrap_or(12)
-                .min(body.width / 2)
-                .max(8.min(body.width));
-            put_text(
-                b,
-                rect.x,
-                rect.y,
-                label_width,
-                &label,
-                base.fg(if is_focused { p.text } else { p.overlay0 }),
-            );
-            let input = Rect::new(
-                rect.x + label_width,
-                rect.y,
-                rect.width.saturating_sub(label_width),
-                1,
-            );
-            if field.is_choice() {
-                let style = if is_focused {
-                    Style::default()
-                        .fg(panel_contrast_fg(p))
-                        .bg(p.accent)
-                        .add_modifier(Modifier::BOLD)
-                } else {
-                    crate::ui::input_field_style(p)
-                };
-                b.set_style(input, style);
-                put_text(
-                    b,
-                    input.x,
-                    input.y,
-                    input.width,
-                    &format!("‹ {} ›", form.choice_label(*field)),
-                    style,
-                );
-            } else if let Some(editor) = form.editor(*field) {
-                let field_style = crate::ui::input_field_style(p);
-                b.set_style(input, field_style);
-                let inner_input = Rect::new(input.x + 1, input.y, input.width.saturating_sub(1), 1);
-                let field_cursor = text_editor::render(b, inner_input, editor, field_style);
-                if is_focused {
-                    cursor = field_cursor;
-                    if let Some(hint) = field.hint() {
-                        let used = display_width(editor.as_str()) + 2;
-                        if used < input.width {
-                            put_text(
-                                b,
-                                input.x + used,
-                                input.y,
-                                input.width - used,
-                                hint,
-                                base.fg(p.overlay0),
-                            );
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    if let Some(footer) = stack.footer {
-        let hints: Vec<(String, String)> =
-            if form.bootstrap.is_some() || form.step == MachineFormStep::Confirm {
-                vec![
-                    ("enter".to_owned(), t.hint_confirm.to_owned()),
-                    ("esc".to_owned(), t.hint_back.to_owned()),
-                ]
-            } else {
-                vec![
-                    ("tab/↑↓".to_owned(), t.hint_fields.to_owned()),
-                    ("←→".to_owned(), t.hint_change.to_owned()),
-                    ("enter".to_owned(), t.hint_next.to_owned()),
-                    ("esc".to_owned(), t.hint_back.to_owned()),
-                ]
-            };
-        render_key_hints(b, footer, &hints, p, cx.components);
-    }
-    if let Some(error) = form.error.as_deref() {
-        let y = stack
-            .actions
-            .map(|actions| actions.y.saturating_sub(1))
-            .unwrap_or_else(|| body.bottom().saturating_sub(1));
-        if y >= body.y {
-            put_text(
-                b,
-                body.x,
-                y,
-                body.width,
-                &format!(" {error}"),
-                base.fg(p.red),
-            );
-        }
-    }
-
-    let mut action_hits = Vec::new();
-    let running = form
-        .bootstrap
-        .as_ref()
-        .is_some_and(|bootstrap| bootstrap.failure.is_none());
-    let failed = form
-        .bootstrap
-        .as_ref()
-        .is_some_and(|bootstrap| bootstrap.failure.is_some());
-    // (label, button, enabled, tone) — the first enabled button is focused.
-    let auth_texts = &crate::i18n::texts().machine_auth;
-    let back_label = crate::i18n::texts().overlays.cancel_button;
-    let mut buttons: Vec<(&str, MachineOverlayButton, bool, crate::ui::ModalButtonTone)> =
-        Vec::new();
-    if running {
-        buttons.push((
-            t.start_setup_button,
-            MachineOverlayButton::StartSetup,
-            false,
-            crate::ui::ModalButtonTone::Primary,
-        ));
-        buttons.push((
-            back_label,
-            MachineOverlayButton::Back,
-            true,
-            crate::ui::ModalButtonTone::Secondary,
-        ));
-    } else if failed {
-        // A failed setup offers the recovery entries next to the way back:
-        // interactive auth for AuthRequired-style failures and the host-key
-        // review for unknown/changed keys.
-        buttons.push((
-            t.next_button,
-            MachineOverlayButton::Back,
-            true,
-            crate::ui::ModalButtonTone::Secondary,
-        ));
-        buttons.push((
-            auth_texts.auth_interactive_button,
-            MachineOverlayButton::WizardInteractiveAuth,
-            true,
-            crate::ui::ModalButtonTone::Primary,
-        ));
-        buttons.push((
-            auth_texts.auth_precollect_button,
-            MachineOverlayButton::WizardHostKeyReview,
-            true,
-            crate::ui::ModalButtonTone::Secondary,
-        ));
-        buttons.push((
-            back_label,
-            MachineOverlayButton::Back,
-            true,
-            crate::ui::ModalButtonTone::Secondary,
-        ));
-    } else {
-        let (label, button) = if editing {
-            (t.save_button, MachineOverlayButton::Save)
-        } else if form.step == MachineFormStep::Confirm {
-            (t.start_setup_button, MachineOverlayButton::StartSetup)
-        } else {
-            (t.next_button, MachineOverlayButton::Next)
+        let Some(editor) = form.editor_mut(field) else {
+            return;
         };
-        buttons.push((label, button, true, crate::ui::ModalButtonTone::Primary));
-        buttons.push((
-            back_label,
-            MachineOverlayButton::Back,
-            true,
-            crate::ui::ModalButtonTone::Secondary,
-        ));
-    }
-    let labels: Vec<&str> = buttons.iter().map(|(label, ..)| *label).collect();
-    let rects = modal_button_row(stack.actions.unwrap_or_default(), &labels, 2);
-    if rects.len() == labels.len() {
-        let mut focused_consumed = false;
-        for (index, rect) in rects.iter().enumerate() {
-            let (label, button, enabled, tone) = buttons[index];
-            let base_state = if !enabled {
-                crate::ui::ModalButtonState::Disabled
-            } else if !focused_consumed {
-                focused_consumed = true;
-                crate::ui::ModalButtonState::Focused
-            } else {
-                crate::ui::ModalButtonState::Normal
-            };
-            let state = if enabled {
-                cx.button_state(
-                    &super::super::feedback::ChromeHover::MachineButton(button),
-                    base_state,
-                )
-            } else {
-                base_state
-            };
-            modal_button(b, *rect, label, tone, state, p);
-            if enabled {
-                action_hits.push((*rect, button));
-            }
-        }
-    }
-
-    Some(OverlayRender {
-        area: popup,
-        machines_popup: popup,
-        machines_fields: field_hits,
-        machines_actions: action_hits,
-        cursor,
-        ..OverlayRender::default()
-    })
-}
-
-fn render_form_confirm(
-    b: &mut Buffer,
-    area: Rect,
-    form: &ClientMachineForm,
-    base: Style,
-    p: &Palette,
-) -> usize {
-    use ratatui::widgets::{Paragraph, Widget, Wrap};
-    let lines = form_confirm_lines(form, base, p);
-    let measured = lines
-        .iter()
-        .cloned()
-        .map(|line| (line.width(), line))
-        .collect::<Vec<_>>();
-    let metrics = crate::ui::display_lines_scroll_metrics(
-        &measured,
-        form.scroll.min(u16::MAX as usize) as u16,
-        area,
-    );
-    Paragraph::new(lines)
-        .wrap(Wrap { trim: false })
-        .scroll((form.scroll.min(metrics.max_offset_from_bottom) as u16, 0))
-        .render(area, b);
-    metrics.max_offset_from_bottom
-}
-
-/// 确认步骤正文的最大滚动量：视图计算阶段与渲染阶段共用同一批行（STATE-04）。
-pub(super) fn form_confirm_max_scroll(
-    form: &ClientMachineForm,
-    area: Rect,
-    palette: &Palette,
-) -> usize {
-    let base = Style::default();
-    let lines = form_confirm_lines(form, base, palette);
-    let measured = lines
-        .iter()
-        .cloned()
-        .map(|line| (line.width(), line))
-        .collect::<Vec<_>>();
-    crate::ui::display_lines_scroll_metrics(&measured, 0, area).max_offset_from_bottom
-}
-
-/// 确认步骤的正文行：`render_form_confirm` 与 `form_confirm_max_scroll` 共用。
-fn form_confirm_lines<'a>(
-    form: &'a ClientMachineForm,
-    base: Style,
-    p: &Palette,
-) -> Vec<ratatui::text::Line<'a>> {
-    use ratatui::text::{Line, Span};
-    let t = &crate::i18n::texts().machines;
-    let mut lines = vec![
-        Line::styled(t.confirm_install_note, base.fg(p.yellow)),
-        Line::styled(t.confirm_auth_note, base.fg(p.overlay0)),
-        Line::default(),
-    ];
-    for field in std::iter::once(&MachineField::Target).chain(EDIT_FIELDS.iter()) {
-        let value = if field.is_choice() {
-            form.choice_label(*field).to_owned()
-        } else {
-            form.editor(*field)
-                .map(|editor| editor.as_str().to_owned())
-                .unwrap_or_default()
-        };
-        if !value.is_empty() {
-            lines.push(Line::from(vec![
-                Span::styled(format!("{}  ", field.label()), base.fg(p.overlay0)),
-                Span::styled(value, base.fg(p.text)),
-            ]));
-        }
-    }
-    lines
-}
-
-fn render_bootstrap_progress(
-    b: &mut Buffer,
-    area: Rect,
-    form: &ClientMachineForm,
-    bootstrap: &ClientMachineBootstrap,
-    base: Style,
-    cx: &super::super::feedback::ChromeContext<'_>,
-) {
-    let p = cx.palette;
-    let reached = bootstrap.step;
-    for (index, step) in BOOTSTRAP_STEPS.iter().enumerate() {
-        let y = area.y + index as u16;
-        if y >= area.bottom() {
-            break;
-        }
-        let (glyph, style) = match reached {
-            Some(reached) if *step < reached => ("✓", base.fg(p.green)),
-            Some(reached) if *step == reached => {
-                (cx.spinner, base.fg(p.yellow).add_modifier(Modifier::BOLD))
-            }
-            _ => ("·", base.fg(p.overlay0)),
-        };
-        put_text(
-            b,
-            area.x,
-            y,
-            area.width,
-            &format!(" {glyph} {}", bootstrap_step_label(*step)),
-            style,
-        );
-    }
-    if let Some(failure) = bootstrap.failure.as_deref() {
-        let t = &crate::i18n::texts().machines;
-        let y = area.y + BOOTSTRAP_STEPS.len() as u16 + 1;
-        if y < area.bottom() {
-            put_text(
-                b,
-                area.x,
-                y,
-                area.width,
-                &crate::i18n::fill(t.progress_failed_fmt, &[("error", failure)]),
-                base.fg(p.red),
-            );
-        }
-        if y + 1 < area.bottom() {
-            put_text(b, area.x, y + 1, area.width, t.fix_hint, base.fg(p.yellow));
-        }
-        if y + 2 < area.bottom() {
-            let command = crate::remote::saved_ssh_bootstrap_command(
-                form.target.trim(),
-                &form.effective_session(),
-            );
-            put_text(
-                b,
-                area.x,
-                y + 2,
-                area.width,
-                &format!("  {command}"),
-                base.fg(p.text).add_modifier(Modifier::BOLD),
-            );
-        }
+        // 聚焦之前这一帧 kit 是从头画的；已聚焦时按当时的光标滚动。
+        let cursor = was_focused.then(|| editor.cursor_char_index());
+        let column = point.0 - rect.x;
+        let index =
+            super::super::form::char_index_at_column(editor.as_str(), cursor, rect.width, column);
+        editor.set_cursor_char_index(index);
     }
 }

@@ -2,8 +2,6 @@
 //! `cursor_col`（字符下标），不依赖客户端层的 `TextEditor`；适配函数由机器车道在
 //! `client/shell/form.rs` 首用时建。输入框样式来自 `crate::ui::input_field_style`。
 
-#![allow(dead_code)] // seam-stub(machines)：波 2 机器车道接入 SSH 机器表单后删除
-
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
