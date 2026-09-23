@@ -89,7 +89,8 @@
 //! - 只认三种投递记录：`queue-operation` 且 `operation == "enqueue"`（`content` 是
 //!   正文，时刻最接近结束；随后的 `dequeue` / `remove` 不带正文）；`origin.kind ==
 //!   "task-notification"` 的 `user` 行（`message.content` 是正文）；回合中投递的
-//!   `attachment.type == "queued_command"`（`attachment.prompt` 是正文）。工具说明
+//!   `attachment.type == "queued_command"`（`attachment.prompt` 是正文，
+//!   `commandMode` 是 `task-notification`；排队的用户输入是 `prompt`）。工具说明
 //!   里的格式示例（`prompt_snapshot` 附件）、agent 读到的含通知字样的文件内容都不算。
 //! - 时序：本机 38 个有转录的通知对象，通知全部晚于子 agent 的最后一条转录（中位
 //!   48 ms、最多 1.3 s）。同一 task-id 可以多次通知（子 agent 被 SendMessage 唤起
@@ -617,6 +618,11 @@ fn settle(records: &[Notification], last_activity_ms: Option<u64>) -> Option<Set
 /// 标签做子串预筛，命中的行才解析 JSON：几 MB 的窗口也只是一次顺序读。
 fn read_notifications(session_dir: &Path, window: u64, known: &HashSet<&str>) -> Notifications {
     let mut notifications = Notifications::new();
+    // 会话没有子 agent（大多数会话）就没有要找的通知，不碰主转录：discover 在 agent
+    // 工作期间每 5 s 跑一次，白读几 MB 尾部不划算。
+    if known.is_empty() {
+        return notifications;
+    }
     let Some(path) = main_transcript_path(session_dir) else {
         return notifications;
     };
@@ -712,9 +718,15 @@ fn notification_carrier(value: &Value) -> Option<&Value> {
                 })
                 .flatten()
         }
+        // 回合中排队的用户输入同样是 queued_command，但 commandMode 是 prompt（本机
+        // 814 条通知附件全是 task-notification）；缺这个键的旧版本照收。
         "attachment" => value
             .get("attachment")
-            .filter(|attachment| str_field(attachment, "type") == Some("queued_command"))
+            .filter(|attachment| {
+                str_field(attachment, "type") == Some("queued_command")
+                    && str_field(attachment, "commandMode")
+                        .is_none_or(|mode| mode == "task-notification")
+            })
             .and_then(|attachment| attachment.get("prompt")),
         _ => None,
     }
@@ -2367,6 +2379,13 @@ mod tests {
         assert!(carrier(
             r#"{"type":"attachment","attachment":{"type":"queued_command","prompt":"x"}}"#
         ));
+        assert!(carrier(
+            r#"{"type":"attachment","attachment":{"type":"queued_command","commandMode":"task-notification","prompt":"x"}}"#
+        ));
+        // 回合中排队的用户输入：正文里就算贴了通知字样也不算。
+        assert!(!carrier(
+            r#"{"type":"attachment","attachment":{"type":"queued_command","commandMode":"prompt","prompt":"x"}}"#
+        ));
         assert!(!carrier(
             r#"{"type":"attachment","attachment":{"type":"prompt_snapshot","tools":[]}}"#
         ));
@@ -2397,7 +2416,7 @@ mod tests {
         assert_eq!(ids(u64::MAX), ["c1", "c2", "c3"]);
         // 窗口起点恰好是行首：那一行完整保留。
         assert_eq!(ids((cut.len() + kept.len()) as u64), ["c2", "c3"]);
-        // 起点落在行中间：那半行丢掉，不会被当成坏行以外的任何东西。
+        // 起点落在行中间：那半行整段丢掉，不当成记录解析。
         assert_eq!(ids((cut.len() + kept.len() - 1) as u64), ["c3"]);
         // 只收已知的子 agent。
         let only: HashSet<&str> = ["c2"].into_iter().collect();
@@ -2407,8 +2426,9 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["c2"]
         );
-        // 没有主转录：空。
+        // 没有主转录：空。会话没有子 agent：不读主转录，同样是空。
         assert!(read_notifications(&temp.path().join("nope"), u64::MAX, &known).is_empty());
+        assert!(read_notifications(&session_dir, u64::MAX, &HashSet::new()).is_empty());
     }
 
     #[test]
