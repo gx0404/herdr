@@ -1138,8 +1138,12 @@ pub(super) fn render_agent_activity_overlay(
     Some(render)
 }
 
+/// 标题栏里标题至少保留的列数（含前导空格与省略号）。
+const TITLE_MIN_WIDTH: u16 = 12;
+
 /// 标题栏：左侧标题与徽标，右侧 [跟随 ●/○] [刷新] [×]。按钮从右往左放，放不下
-/// 的（先丢跟随、再丢刷新）不画也不登记命中区。
+/// 的（先丢跟随、再丢刷新）不画也不登记命中区。标题按徽标留出的宽度截断，徽标
+/// 从不被长标题挤掉。
 fn render_title_bar(
     b: &mut Buffer,
     title_row: Rect,
@@ -1166,8 +1170,8 @@ fn render_title_bar(
     ];
     let mut hits = Vec::new();
     let mut right = title_row.right();
-    // 标题至少留 12 列，放不下的按钮整个不画。
-    let min_left = title_row.x.saturating_add(12);
+    // 标题至少留 TITLE_MIN_WIDTH 列，放不下的按钮整个不画。
+    let min_left = title_row.x.saturating_add(TITLE_MIN_WIDTH);
     for (button, label) in buttons {
         let width = display_width(label);
         let Some(x) = right.checked_sub(width) else {
@@ -1210,8 +1214,40 @@ fn render_title_bar(
     );
     let limit = right.saturating_sub(1);
     let mut x = title_row.x;
-    let title = crate::ui::truncate_end(&title, usize::from(limit.saturating_sub(x)));
-    let width = display_width(&title).min(limit.saturating_sub(x));
+    let room = limit.saturating_sub(x);
+    // 徽标紧跟标题，按显示顺序：只读（说明窗口性质，最后丢）、有更新（先丢）。
+    let mut badges = [
+        overlay
+            .is_external()
+            .then(|| format!(" {} ", texts.external_read_only)),
+        overlay
+            .has_updates
+            .then(|| format!(" {} ", texts.updates_badge)),
+    ];
+    let styles = [
+        base.fg(p.subtext0).bg(p.surface0),
+        base.fg(p.yellow).add_modifier(Modifier::BOLD),
+    ];
+    // 每个徽标前留一列间隔。
+    let badges_width = |badges: &[Option<String>; 2]| {
+        badges
+            .iter()
+            .flatten()
+            .map(|label| display_width(label).saturating_add(1))
+            .fold(0u16, u16::saturating_add)
+    };
+    // 标题先截到给徽标留出的宽度（至少 TITLE_MIN_WIDTH 列，带省略号）；实在放不下
+    // 时从后往前整个丢徽标。
+    let title_min = display_width(&title).min(TITLE_MIN_WIDTH);
+    for index in (0..badges.len()).rev() {
+        if title_min.saturating_add(badges_width(&badges)) <= room {
+            break;
+        }
+        badges[index] = None;
+    }
+    let title_room = room.saturating_sub(badges_width(&badges));
+    let title = crate::ui::truncate_end(&title, usize::from(title_room));
+    let width = display_width(&title).min(title_room);
     put_text(
         b,
         x,
@@ -1221,26 +1257,12 @@ fn render_title_bar(
         base.fg(p.text).add_modifier(Modifier::BOLD),
     );
     x = x.saturating_add(width);
-    let badges = [
-        (
-            overlay.is_external().then_some(texts.external_read_only),
-            base.fg(p.subtext0).bg(p.surface0),
-        ),
-        (
-            overlay.has_updates.then_some(texts.updates_badge),
-            base.fg(p.yellow).add_modifier(Modifier::BOLD),
-        ),
-    ];
-    for (badge, style) in badges {
-        let Some(badge) = badge else {
+    for (badge, style) in badges.iter().zip(styles) {
+        let Some(label) = badge else {
             continue;
         };
-        let label = format!(" {badge} ");
-        let width = display_width(&label);
-        if x.saturating_add(1).saturating_add(width) > limit {
-            break;
-        }
-        put_text(b, x + 1, title_row.y, width, &label, style);
+        let width = display_width(label);
+        put_text(b, x + 1, title_row.y, width, label, style);
         x = x + 1 + width;
     }
     hits

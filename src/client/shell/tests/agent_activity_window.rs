@@ -42,14 +42,21 @@ fn agent(pane_id: &str, running: u32, total: u32) -> ClientShellAgent {
 }
 
 fn state() -> ClientShellState {
+    state_named("claude-main", "zcode desktop")
+}
+
+/// 属主显示名可定制的初始状态：pane 里 agent 的名字、外部条目的标签。
+fn state_named(agent_name: &str, external_label: &str) -> ClientShellState {
     let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
     let mut projected = snapshot();
-    projected.agents = vec![agent("pane_1", 1, 4)];
+    let mut owner = agent("pane_1", 1, 4);
+    owner.name = Some(agent_name.into());
+    projected.agents = vec![owner];
     projected.external_agents = vec![crate::protocol::ClientShellExternalAgent {
         external_id: "zcode:s1".into(),
         source: "zcode".into(),
         agent_status: AgentStatus::Idle,
-        label: "zcode desktop".into(),
+        label: external_label.into(),
         readable: true,
         agent: Some("zcode".into()),
         cwd: None,
@@ -1462,5 +1469,52 @@ fn content_header_meta_is_dropped_whole_never_cut() {
                 assert!(header.contains('…'), "截断的标签带省略号: {context}");
             }
         }
+    }
+}
+
+/// 标题栏：属主名很长时先截标题（带省略号），徽标仍画出；外部来源的只读徽标
+/// 与未跟随时的「有更新」提示都不会被长标题挤掉。
+#[test]
+fn long_owner_names_keep_the_title_badges() {
+    let long = "Refactor the parser for streaming mode";
+    for (cols, rows) in [(120, 40), (90, 30), (56, 20)] {
+        let mut state = state_named("claude-main", long);
+        let outcome = open(
+            &mut state,
+            AgentActivityOwner::External {
+                external_id: "zcode:s1".into(),
+            },
+        );
+        let (id, _) = single_read(&outcome);
+        respond(&mut state, &id, tree_result(sample_nodes()));
+        state.compose(cols, rows).expect("frame");
+        let title = popup_text(&state)[1].clone();
+        assert!(
+            has(&title, texts().external_read_only),
+            "{cols}x{rows} 只读徽标: {title:?}"
+        );
+        assert!(title.contains('…'), "{cols}x{rows} 标题截断: {title:?}");
+        assert!(title.contains('×'), "{cols}x{rows} 关闭按钮: {title:?}");
+    }
+
+    let long_agent = "claude refactoring the streaming parser end to end";
+    for (cols, rows) in [(120, 40), (90, 30)] {
+        let mut state = state_named(long_agent, "zcode desktop");
+        open_with_tree(&mut state);
+        state.handle_raw_events(vec![key(KeyCode::Char('f'))]);
+        state.compose(cols, rows).expect("frame");
+        let mut projected = snapshot();
+        let mut owner = agent("pane_1", 2, 6);
+        owner.name = Some(long_agent.into());
+        projected.agents = vec![owner];
+        state.set_snapshot(Box::new(projected));
+        state.compose(cols, rows).expect("frame");
+        assert!(overlay(&state).has_updates);
+        let title = popup_text(&state)[1].clone();
+        assert!(
+            has(&title, texts().updates_badge),
+            "{cols}x{rows} 有更新徽标: {title:?}"
+        );
+        assert!(title.contains('…'), "{cols}x{rows} 标题截断: {title:?}");
     }
 }
