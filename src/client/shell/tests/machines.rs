@@ -2310,6 +2310,79 @@ fn preview_flags_invalid_field_values_instead_of_showing_them_as_if_valid() {
     assert!(found_red_port, "预览里的非法端口值应该标红");
 }
 
+/// 在整帧里按单元格找一段 ASCII 文本，返回 (行, 起始列)。宽字符的续格不参与
+/// 比较，行内有 CJK 时列号仍是真实的屏幕列。
+fn find_ascii_cells(frame: &crate::protocol::FrameData, needle: &str) -> Option<(usize, usize)> {
+    let width = usize::from(frame.width);
+    let needle: Vec<char> = needle.chars().collect();
+    frame
+        .cells
+        .chunks(width)
+        .enumerate()
+        .find_map(|(row, cells)| {
+            (0..cells.len().saturating_sub(needle.len() - 1)).find_map(|col| {
+                needle
+                    .iter()
+                    .enumerate()
+                    .all(|(offset, ch)| cells[col + offset].symbol.as_str() == ch.to_string())
+                    .then_some((row, col))
+            })
+        })
+}
+
+/// 复审 L15（中）：预览首行的等价 ssh 命令此前整行 accent 色，端口 99999 报错
+/// 后仍原样显示 `ssh -p 99999 user@203.0.113.5`，看着像已通过校验
+/// （`smoke-23627143` `84` 行 11；上一版只修了行 15 的字段清单）。非法字段
+/// 对应的那个词要单独标红并紧跟「（无效）」，其余词保持 accent。
+#[test]
+fn preview_ssh_line_marks_only_the_invalid_word() {
+    let _dir = with_temp_state_home("form-preview-ssh-invalid");
+    let mut state = state_with_profiles(&[]);
+    state.open_machine_add_form();
+    focus_field(&mut state, MachineField::Target);
+    type_text(&mut state, "203.0.113.5");
+    focus_field(&mut state, MachineField::User);
+    type_text(&mut state, "user");
+    focus_field(&mut state, MachineField::Port);
+    type_text(&mut state, "99999");
+    focus_field(&mut state, MachineField::ProxyJump);
+
+    let frame = state.compose(134, 32).expect("frame");
+    let width = usize::from(frame.width);
+    let red = crate::protocol::color_to_u32(state.config.palette.red);
+    let accent = crate::protocol::color_to_u32(state.config.palette.accent);
+    let (row, col) = find_ascii_cells(&frame, "ssh -p 99999").expect("预览首行是等价 ssh 命令");
+    let cells = &frame.cells[row * width..(row + 1) * width];
+    assert_eq!(cells[col].fg, accent, "命令本身保持 accent");
+    for offset in 4..12 {
+        assert_eq!(
+            cells[col + offset].fg,
+            red,
+            "非法端口所在的词 `-p 99999` 应当整个标红（第 {offset} 格）"
+        );
+    }
+    let rest: String = cells[col + 12..]
+        .iter()
+        .map(|c| c.symbol.as_str())
+        .collect();
+    let suffix = crate::i18n::texts().machine_form.preview_invalid_suffix;
+    assert!(
+        compact(&rest).starts_with(&compact(suffix)),
+        "非法的词后面紧跟「无效」标记，不只靠颜色：{rest:?}"
+    );
+    let suffix_col = (col + 12..width)
+        .find(|&index| !cells[index].symbol.trim().is_empty())
+        .expect("「无效」标记");
+    assert_eq!(cells[suffix_col].fg, red, "「无效」标记同样标红");
+    let (target_row, target_col) =
+        find_ascii_cells(&frame, "user@203.0.113.5").expect("目标仍在 ssh 行里");
+    assert_eq!(target_row, row, "目标与端口在同一行（134 列下不折行）");
+    assert_eq!(
+        cells[target_col].fg, accent,
+        "合法的目标保持 accent，不被一并标红"
+    );
+}
+
 /// 复审 M8（严重）：添加表单文本字段的 Normal / Focused / Invalid 三态在输入行
 /// 上必须肉眼可辨，占位符也不能被聚焦底色吞掉。对照 `smoke-23627143`：`81`
 /// 行 6（聚焦的快速添加：占位符 overlay0 叠 surface0，与常态逐字段相同）、

@@ -568,12 +568,18 @@ fn test_lines(
     lines
 }
 
-/// 把当前字段折成等价的一行 `ssh` 命令（只为预览核对，不参与连接）。
-pub(super) fn ssh_command_preview(form: &ClientMachineForm) -> String {
-    let mut parts = vec!["ssh".to_owned()];
+/// 等价 `ssh` 命令里的一个词。一个词可能由几段拼成（`user@target` 的用户与
+/// 目标来自不同字段），每段记下来源字段（`None` 是命令名、`@` 等固定部分），
+/// 预览据此只把校验失败的那一段标红（L15）。
+type SshWord = Vec<(String, Option<MachineField>)>;
+
+/// 把当前字段折成等价 `ssh` 命令的词序列（只为预览核对，不参与连接）。
+fn ssh_command_words(form: &ClientMachineForm) -> Vec<SshWord> {
+    let mut words: Vec<SshWord> = vec![vec![("ssh".to_owned(), None)]];
+    let mut push = |text: String, field: MachineField| words.push(vec![(text, Some(field))]);
     let port = form.port.trim();
     if !port.is_empty() {
-        parts.push(format!("-p {port}"));
+        push(format!("-p {port}"), MachineField::Port);
     }
     for identity in form
         .identity_files
@@ -581,42 +587,84 @@ pub(super) fn ssh_command_preview(form: &ClientMachineForm) -> String {
         .map(str::trim)
         .filter(|part| !part.is_empty())
     {
-        parts.push(format!("-i {identity}"));
+        push(format!("-i {identity}"), MachineField::IdentityFiles);
     }
     let jump = form.proxy_jump.trim();
     if !jump.is_empty() {
-        parts.push(format!("-J {}", jump.replace(' ', "")));
+        push(
+            format!("-J {}", jump.replace(' ', "")),
+            MachineField::ProxyJump,
+        );
     }
     match form.forward_agent {
-        TriChoice::Yes => parts.push("-A".to_owned()),
-        TriChoice::No => parts.push("-a".to_owned()),
+        TriChoice::Yes => push("-A".to_owned(), MachineField::ForwardAgent),
+        TriChoice::No => push("-a".to_owned(), MachineField::ForwardAgent),
         TriChoice::Default => {}
     }
     match form.identities_only {
-        TriChoice::Yes => parts.push("-o IdentitiesOnly=yes".to_owned()),
-        TriChoice::No => parts.push("-o IdentitiesOnly=no".to_owned()),
+        TriChoice::Yes => push(
+            "-o IdentitiesOnly=yes".to_owned(),
+            MachineField::IdentitiesOnly,
+        ),
+        TriChoice::No => push(
+            "-o IdentitiesOnly=no".to_owned(),
+            MachineField::IdentitiesOnly,
+        ),
         TriChoice::Default => {}
     }
     if let Some(checking) = STRICT_HOST_KEY_CHOICES[form.strict_host_key] {
-        parts.push(format!(
-            "-o StrictHostKeyChecking={}",
-            checking.as_ssh_value()
-        ));
+        push(
+            format!("-o StrictHostKeyChecking={}", checking.as_ssh_value()),
+            MachineField::StrictHostKey,
+        );
     }
     let user = form.user.trim();
     let target = form.target.trim();
-    parts.push(match (user.is_empty(), target.is_empty()) {
-        (_, true) => "…".to_owned(),
-        (true, false) => target.to_owned(),
-        (false, false) => format!("{user}@{target}"),
+    words.push(match (user.is_empty(), target.is_empty()) {
+        (_, true) => vec![("…".to_owned(), Some(MachineField::Target))],
+        (true, false) => vec![(target.to_owned(), Some(MachineField::Target))],
+        (false, false) => vec![
+            (user.to_owned(), Some(MachineField::User)),
+            ("@".to_owned(), None),
+            (target.to_owned(), Some(MachineField::Target)),
+        ],
     });
-    parts.join(" ")
+    words
+}
+
+/// 预览首行：等价 `ssh` 命令。校验失败的字段对应的那一段（如端口 99999 的
+/// `-p 99999`）单独标红，所在的词后紧跟「（无效）」，不只靠颜色区分；其余
+/// 部分保持 accent（L15 复审：此前整行 accent，非法值看着像已通过校验）。
+fn ssh_command_line(
+    form: &ClientMachineForm,
+    saved: &[SavedSshEndpoint],
+    base: Style,
+    p: &Palette,
+) -> Line<'static> {
+    let suffix = crate::i18n::texts().machine_form.preview_invalid_suffix;
+    let mut spans = Vec::new();
+    for (index, word) in ssh_command_words(form).into_iter().enumerate() {
+        if index > 0 {
+            spans.push(Span::styled(" ", base.fg(p.accent)));
+        }
+        let mut word_invalid = false;
+        for (text, field) in word {
+            let invalid = field.is_some_and(|field| form.visible_error(field, saved).is_some());
+            word_invalid |= invalid;
+            let color = if invalid { p.red } else { p.accent };
+            spans.push(Span::styled(text, base.fg(color)));
+        }
+        if word_invalid {
+            spans.push(Span::styled(suffix, base.fg(p.red)));
+        }
+    }
+    Line::from(spans)
 }
 
 /// 预览正文：等价 ssh 命令、各非空字段（与此前确认页同一批「标签 值」行），
 /// 以及测试连接会做什么的说明（只在能测试的添加表单里）。字段校验失败时
-/// （如端口报错），对应值标红并追加「（无效）」，不再原样显示非法值当作
-/// 什么事都没有（L15）。
+/// （如端口报错），ssh 命令里对应的词与字段清单里的值都标红并追加「（无效）」，
+/// 不再原样显示非法值当作什么事都没有（L15）。
 fn preview_lines(
     form: &ClientMachineForm,
     saved: &[SavedSshEndpoint],
@@ -625,10 +673,7 @@ fn preview_lines(
 ) -> Vec<Line<'static>> {
     let t = &crate::i18n::texts().machines;
     let f = &crate::i18n::texts().machine_form;
-    let mut lines = vec![
-        Line::styled(ssh_command_preview(form), base.fg(p.accent)),
-        Line::default(),
-    ];
+    let mut lines = vec![ssh_command_line(form, saved, base, p), Line::default()];
     let label_width = FORM_GROUPS
         .iter()
         .flat_map(|(_, fields)| fields.iter())
