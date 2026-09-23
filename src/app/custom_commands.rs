@@ -758,8 +758,12 @@ mod tests {
         );
         let success: crate::api::schema::SuccessResponse = serde_json::from_str(&response).unwrap();
         assert_eq!(success.result, crate::api::schema::ResponseResult::Ok {});
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
-        while !path.exists() && std::time::Instant::now() < deadline {
+        // 等到 shell 把内容写完（有上限，与负载无关）：负载高时 shell 要好几秒才起来，
+        // 固定 2 s 会误报；只看文件存在还会撞上「重定向已建文件、printf 还没写」的
+        // 空窗，所以按内容判定。
+        let written = || std::fs::read_to_string(&path).is_ok_and(|text| text == "invoked");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        while !written() && std::time::Instant::now() < deadline {
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "invoked");

@@ -539,6 +539,13 @@ mod tests {
         )
     }
 
+    /// 起 shell 子进程的用例在高负载下启动可能要好几秒（H1：负载 28 时 2 s 的命令超时
+    /// 与 0.5 s 的启动等待都会误报）。命令超时与等待都给与负载无关的宽上限：命令一
+    /// 结束事件就到、等待立即结束，正常情况下用例耗时不变，断言也不变。
+    const LOADED_COMMAND_TIMEOUT: Duration = Duration::from_secs(60);
+    /// 等命令事件的上限，比命令超时再宽一截：即使命令真的超时，也能收到那条事件。
+    const LOADED_EVENT_WAIT: Duration = Duration::from_secs(90);
+
     #[cfg(unix)]
     const MULTILINE_COMMAND: &str = "printf 'old\\nfinal\\n'";
     #[cfg(windows)]
@@ -567,23 +574,26 @@ mod tests {
             7,
             3,
             MULTILINE_COMMAND.into(),
-            Duration::from_secs(2),
+            LOADED_COMMAND_TIMEOUT,
             Vec::new(),
             None,
         );
 
-        let event = tokio::time::timeout(Duration::from_secs(3), event_rx.recv())
+        let event = tokio::time::timeout(LOADED_EVENT_WAIT, event_rx.recv())
             .await
             .expect("status command timed out")
             .expect("status command event channel closed");
-        assert!(matches!(
-            event,
-            AppEvent::TabBarCommandFinished {
-                generation: 7,
-                segment_index: 3,
-                result: Ok(Some(ref output)),
-            } if output == "final"
-        ));
+        assert!(
+            matches!(
+                event,
+                AppEvent::TabBarCommandFinished {
+                    generation: 7,
+                    segment_index: 3,
+                    result: Ok(Some(ref output)),
+                } if output == "final"
+            ),
+            "{event:?}"
+        );
     }
 
     #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -603,7 +613,7 @@ mod tests {
         );
 
         std::thread::sleep(Duration::from_millis(80));
-        let event = tokio::time::timeout(Duration::from_secs(1), event_rx.recv())
+        let event = tokio::time::timeout(LOADED_EVENT_WAIT, event_rx.recv())
             .await
             .expect("status command timed out")
             .expect("status command event channel closed");
@@ -628,22 +638,25 @@ mod tests {
             7,
             3,
             OVER_CAP_COMMAND.into(),
-            Duration::from_secs(2),
+            LOADED_COMMAND_TIMEOUT,
             Vec::new(),
             None,
         );
 
-        let event = tokio::time::timeout(Duration::from_secs(3), event_rx.recv())
+        let event = tokio::time::timeout(LOADED_EVENT_WAIT, event_rx.recv())
             .await
             .expect("status command timed out")
             .expect("status command event channel closed");
-        assert!(matches!(
-            event,
-            AppEvent::TabBarCommandFinished {
-                result: Ok(Some(ref output)),
-                ..
-            } if output == "READY"
-        ));
+        assert!(
+            matches!(
+                event,
+                AppEvent::TabBarCommandFinished {
+                    result: Ok(Some(ref output)),
+                    ..
+                } if output == "READY"
+            ),
+            "{event:?}"
+        );
     }
 
     #[test]
@@ -688,15 +701,15 @@ mod tests {
             &[TabBarRightEntryConfig::Command {
                 command,
                 interval_seconds: 5,
-                timeout_seconds: 20,
+                timeout_seconds: LOADED_COMMAND_TIMEOUT.as_secs(),
             }],
             " ",
         );
         app.handle_tab_bar_status_tasks(std::time::Instant::now());
-        for _ in 0..50 {
-            if descendant_started.exists() {
-                break;
-            }
+        // 等到后代真的起来（有上限，与负载无关），而不是固定轮询 50 × 10 ms：负载高时
+        // shell 与子进程要好几秒才起来，固定次数会误报「did not start」。
+        let started_deadline = tokio::time::Instant::now() + LOADED_COMMAND_TIMEOUT;
+        while !descendant_started.exists() && tokio::time::Instant::now() < started_deadline {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
         assert!(
@@ -714,8 +727,17 @@ mod tests {
         // Task cancellation is delivered when Tokio next polls the task. Block
         // this current-thread test runtime long enough for the descendant to
         // run, proving config reload kills its process group synchronously.
-        std::thread::sleep(Duration::from_millis(400));
-        let descendant_survived = survived.exists();
+        // 负载高时没被杀掉的后代也可能晚写：阻塞观察一段比 `sleep 0.3` 宽得多的窗口，
+        // 期间一出现 survived 就判失败。
+        let window = std::time::Instant::now() + Duration::from_millis(1500);
+        let mut descendant_survived = false;
+        while std::time::Instant::now() < window {
+            if survived.exists() {
+                descendant_survived = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
         let _ = std::fs::remove_file(&descendant_started);
         let _ = std::fs::remove_file(&survived);
         assert!(!descendant_survived, "status command descendant survived");
