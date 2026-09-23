@@ -4,6 +4,7 @@ mod render;
 use super::*;
 use crate::api::schema::*;
 use crate::config::{AccountUsageConfig, MonitorConfig, UsageDisplayFormat, UsageDisplayPosition};
+use crate::ui::kit::hover_card::{HoverState, HoverTiming};
 use crossterm::event::{KeyCode, MouseButton, MouseEvent, MouseEventKind};
 use std::time::{Duration, Instant};
 
@@ -521,16 +522,12 @@ pub(super) enum HoverTarget {
     },
 }
 
-pub(super) struct Hover {
-    pub target: HoverTarget,
-    pub anchor: Rect,
-    pub since: Instant,
-    pub visible: bool,
-    pub leave_at: Option<Instant>,
-    /// 钉住的浮层：指针离开不再关闭，Esc / 浮层外点击才关闭。目前没有入口会
-    /// 置位，留给「键盘钉住单 agent 用量卡」。
-    pub pinned: bool,
-}
+/// agent 行悬浮层的状态：计时（停留 `hover_delay_ms` 出现、离开宽限 250 ms）
+/// 与钉住态统一交给 `kit::hover_card` 的状态机，这里只是零成本别名，字段
+/// （`target` / `anchor` / `since` / `visible` / `leave_at` / `pinned`）不变。
+/// `pinned` = 钉住的浮层：指针离开不再关闭、也不被别的 agent 行悬浮替换，
+/// Esc / 浮层外点击才关闭；由 `pin_agent_usage_card`（右键菜单「用量」）置位。
+pub(super) type Hover = crate::ui::kit::hover_card::HoverState<HoverTarget>;
 
 /// 悬浮层独立的数据作用域：厂商 / pane / 端点 / 账号快照 / epoch / 刷新标志 /
 /// 滚动位置 / 轮询时刻，与账号页的 `selected_*` / `accounts` / `epoch` /
@@ -1224,6 +1221,41 @@ impl State {
     pub(super) fn clear_hover(&mut self) {
         self.hover = None;
         self.reset_hover_scope();
+    }
+
+    /// 悬浮层计时：停留 `hover_delay_ms`（夹在设置页档位的 200–2000 ms 内）出现，
+    /// 离开宽限沿用 kit 默认口径（250 ms）。
+    pub(super) fn hover_timing(&self) -> HoverTiming {
+        HoverTiming {
+            show_after: Duration::from_millis(self.usage.hover_delay_ms.clamp(200, 2000)),
+            ..HoverTiming::default()
+        }
+    }
+
+    /// 悬浮层下一次需要 tick 的时刻（出现或离开宽限到期），供事件循环定超时；
+    /// 已可见且指针在上、已钉住或没有悬浮层时为 `None`。O(1)。
+    pub(super) fn hover_deadline(&self) -> Option<Instant> {
+        self.hover
+            .as_ref()
+            .and_then(|hover| hover.next_deadline(&self.hover_timing()))
+    }
+
+    /// 悬浮层变为可见：把目标写进悬浮层作用域（页面作用域不动），并排队悬浮层
+    /// 自己的强意图刷新；页面的滚动位置与轮询节奏都不动。
+    fn begin_hover_scope(&mut self, target: HoverTarget) {
+        match target {
+            HoverTarget::Agent {
+                endpoint_id,
+                pane,
+                agent,
+            } => {
+                self.reset_hover_scope();
+                self.hover_scope.provider = Some(agent);
+                self.hover_scope.endpoint = Some(endpoint_id);
+                self.hover_scope.pane = Some(pane);
+                self.hover_scope.request_refresh();
+            }
+        }
     }
 
     /// 「切换账号」的候选：选中厂商时为其已配置账号；总览态为所有已列出
@@ -2056,52 +2088,20 @@ impl ClientShellState {
             .unwrap_or_default()
             .as_millis()
             .min(u128::from(u64::MAX)) as u64;
-        // 悬浮层状态机：离开延时到期即结束（钉住的浮层不设离开时刻）；停留满
-        // hover_delay_ms 则可见，并把目标写进悬浮层作用域（页面作用域不动）。
-        enum HoverStep {
-            Leave,
-            Show,
-        }
-        let hover_delay =
-            Duration::from_millis(self.observability.usage.hover_delay_ms.clamp(200, 2000));
-        let step = self.observability.hover.as_ref().and_then(|hover| {
-            if !hover.pinned && hover.leave_at.is_some_and(|at| now >= at) {
-                Some(HoverStep::Leave)
-            } else if !hover.visible && now.duration_since(hover.since) >= hover_delay {
-                Some(HoverStep::Show)
-            } else {
-                None
+        // 悬浮层状态机（`kit::hover_card`）：离开宽限到期即结束（钉住的浮层不计
+        // 离开）；停留满 hover_delay_ms 则可见，并把目标写进悬浮层作用域（页面
+        // 作用域不动）。每 tick 只看这一张卡，O(1)。
+        let timing = self.observability.hover_timing();
+        let was_visible = self.observability.hover.as_ref().map(|hover| hover.visible);
+        outcome.repaint |= HoverState::tick(&mut self.observability.hover, now, &timing);
+        match (was_visible, self.observability.hover.as_ref()) {
+            // 离开宽限到期：hover 与悬浮层作用域同生共死，统一走 clear_hover。
+            (Some(_), None) => self.observability.clear_hover(),
+            (Some(false), Some(hover)) if hover.visible => {
+                let target = hover.target.clone();
+                self.observability.begin_hover_scope(target);
             }
-        });
-        match step {
-            Some(HoverStep::Leave) => {
-                self.observability.clear_hover();
-                outcome.repaint = true;
-            }
-            Some(HoverStep::Show) => {
-                let target = self.observability.hover.as_mut().map(|hover| {
-                    hover.visible = true;
-                    hover.target.clone()
-                });
-                match target {
-                    Some(HoverTarget::Agent {
-                        endpoint_id,
-                        pane,
-                        agent,
-                    }) => {
-                        self.observability.reset_hover_scope();
-                        self.observability.hover_scope.provider = Some(agent);
-                        self.observability.hover_scope.endpoint = Some(endpoint_id);
-                        self.observability.hover_scope.pane = Some(pane);
-                        // 悬浮层首次可见 = 悬浮层自己的强意图刷新；页面的滚动位置与
-                        // 轮询节奏都不动。
-                        self.observability.hover_scope.request_refresh();
-                    }
-                    None => {}
-                }
-                outcome.repaint = true;
-            }
-            None => {}
+            _ => {}
         }
         let hover_visible = self
             .observability
@@ -3550,8 +3550,9 @@ impl ClientShellState {
         }
         // 浮层独占内部输入，空白和滚轮也不能穿透到底层卡片或进程行。
         if contains(self.observability.hover_rect, point) {
+            // 指针在卡上：撤销离开计时（卡片可交互，移过去时不能消失）。
             if let Some(hover) = &mut self.observability.hover {
-                hover.leave_at = None;
+                hover.hold();
             }
             match mouse.kind {
                 MouseEventKind::ScrollDown => {
@@ -3577,6 +3578,12 @@ impl ClientShellState {
                 _ => {}
             }
             return true;
+        }
+        // 浮层外按下即结束悬浮（含钉住的卡）。先于页面命中分派：经典布局下钉住的
+        // 卡可以画在页面之上，点页面控件同样算「点外」。
+        if matches!(mouse.kind, MouseEventKind::Down(_)) && self.observability.hover.is_some() {
+            self.observability.clear_hover();
+            outcome.repaint = true;
         }
         if matches!(
             mouse.kind,
@@ -3637,11 +3644,6 @@ impl ClientShellState {
             outcome.repaint = true;
             return true;
         }
-        // 浮层外按下即结束悬浮。
-        if matches!(mouse.kind, MouseEventKind::Down(_)) && self.observability.hover.is_some() {
-            self.observability.clear_hover();
-            outcome.repaint = true;
-        }
         let hover_moves = self.observability.usage.enabled
             && mouse.kind == MouseEventKind::Moved
             && self.chrome_drag.is_none()
@@ -3651,6 +3653,8 @@ impl ClientShellState {
             .hover
             .as_ref()
             .is_some_and(|hover| hover.pinned);
+        let now = Instant::now();
+        let timing = self.observability.hover_timing();
         if hover_moves && pinned {
             // 钉住的浮层不随指针离开关闭，也不被别的 agent 行悬浮替换。
         } else if hover_moves && self.observability.usage.position != UsageDisplayPosition::Page {
@@ -3698,47 +3702,31 @@ impl ClientShellState {
                     })
             });
             if let Some((anchor, endpoint_id, pane, agent)) = target {
-                let same = self.observability.hover.as_ref().is_some_and(|hover| {
-                    matches!(
-                        &hover.target,
-                        HoverTarget::Agent {
-                            endpoint_id: current_endpoint,
-                            pane: current_pane,
-                            ..
-                        } if *current_pane == pane && *current_endpoint == endpoint_id
-                    )
-                });
-                if !same {
-                    self.observability.hover = Some(Hover {
-                        target: HoverTarget::Agent {
-                            endpoint_id,
-                            pane,
-                            agent,
-                        },
-                        anchor,
-                        since: Instant::now(),
-                        visible: false,
-                        leave_at: None,
-                        pinned: false,
-                    });
+                let target = HoverTarget::Agent {
+                    endpoint_id,
+                    pane,
+                    agent,
+                };
+                let replaced = self
+                    .observability
+                    .hover
+                    .as_ref()
+                    .is_none_or(|hover| hover.target != target);
+                // 同一目标只撤销离开计时并跟随锚点；换目标重新计时、先不可见。
+                outcome.repaint |=
+                    HoverState::enter(&mut self.observability.hover, target, anchor, now);
+                if replaced {
+                    // 旧卡的矩形不再独占输入（新卡出现前没有浮层可点）。
                     self.observability.hover_rect = Rect::default();
                     outcome.repaint = true;
-                } else if let Some(hover) = &mut self.observability.hover {
-                    hover.leave_at = None;
                 }
-            } else if let Some(hover) = &mut self.observability.hover {
-                hover
-                    .leave_at
-                    .get_or_insert(Instant::now() + Duration::from_millis(250));
+            } else {
+                HoverState::leave(&mut self.observability.hover, now, &timing);
             }
         } else if hover_moves {
             // `usage.position = page` 关掉了 agent 行悬浮：设置切换前已存在的浮层仍
             // 按 250 ms 宽限关闭。
-            if let Some(hover) = &mut self.observability.hover {
-                hover
-                    .leave_at
-                    .get_or_insert(Instant::now() + Duration::from_millis(250));
-            }
+            HoverState::leave(&mut self.observability.hover, now, &timing);
         }
         false
     }

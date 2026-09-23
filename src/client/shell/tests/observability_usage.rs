@@ -3799,6 +3799,101 @@ fn agent_row_hover_is_on_by_default_and_honors_delay_and_leave_grace() {
     assert_eq!(agent_hover(&state), Some((true, false)));
 }
 
+/// 停留未满延时就离开：离开计时中的卡不再转可见（kit 状态机口径），也就不发
+/// 悬浮层请求；宽限到期后整张卡清掉。延时取最短档 200 ms，好让延时先于离开
+/// 宽限（250 ms）到期。
+#[test]
+fn leaving_before_the_hover_delay_never_shows_the_card() {
+    let mut state = usage_ready();
+    state.observability.usage.hover_delay_ms = 200;
+    state.compose(120, 40).expect("工作台");
+    let row = agent_row(&state, "pane_1");
+    moved(&mut state, row.x, row.y);
+    let since = state
+        .observability
+        .hover
+        .as_ref()
+        .expect("进入悬浮状态机")
+        .since;
+    let away = away_point(&state);
+    moved(&mut state, away.0, away.1);
+    let leave_at = state
+        .observability
+        .hover
+        .as_ref()
+        .and_then(|hover| hover.leave_at)
+        .expect("离开即开始宽限计时");
+    let before_leave = leave_at - Duration::from_millis(10);
+    assert!(
+        before_leave >= since + Duration::from_millis(200),
+        "用例前提：延时先于离开宽限到期"
+    );
+    let outcome = tick(&mut state, before_leave);
+    assert_eq!(
+        agent_hover(&state),
+        Some((false, false)),
+        "离开计时中不再出现"
+    );
+    assert!(usage_calls(&outcome).is_empty(), "从未可见就不发请求");
+    tick(&mut state, leave_at);
+    assert!(state.observability.hover.is_none(), "宽限到期清掉");
+}
+
+/// 悬浮层的下一个到期时刻（出现 / 离开宽限）进入客户端计时器：事件循环在
+/// 到期时醒来，而不是等固定的 100 ms 轮询；已可见且指针在上、钉住时不占计时器。
+#[test]
+fn hover_deadlines_drive_the_client_timer() {
+    let mut state = usage_ready();
+    state.compose(120, 40).expect("工作台");
+    let row = agent_row(&state, "pane_1");
+    moved(&mut state, row.x, row.y);
+    let since = state
+        .observability
+        .hover
+        .as_ref()
+        .expect("进入悬浮状态机")
+        .since;
+    assert_eq!(
+        state.observability.hover_deadline(),
+        Some(since + Duration::from_millis(400)),
+        "出现时刻 = 进入 + hover_delay_ms"
+    );
+    assert!(
+        state.timer_delay(since + Duration::from_millis(350)) <= Duration::from_millis(50),
+        "离出现还有 50 ms 时计时器不晚于那一刻醒来"
+    );
+    tick(&mut state, since + Duration::from_millis(400));
+    assert_eq!(agent_hover(&state), Some((true, false)));
+    assert_eq!(
+        state.observability.hover_deadline(),
+        None,
+        "已可见且指针在上"
+    );
+    state.compose(120, 40).expect("悬浮卡");
+    let away = away_point(&state);
+    moved(&mut state, away.0, away.1);
+    let leave_at = state
+        .observability
+        .hover
+        .as_ref()
+        .and_then(|hover| hover.leave_at)
+        .expect("离开宽限");
+    assert_eq!(state.observability.hover_deadline(), Some(leave_at));
+    // 指针移到卡片上：撤销离开计时（hold），计时器不再为它醒来。
+    let card = state.observability.hover_rect;
+    moved(&mut state, card.x + 1, card.y + 1);
+    assert_eq!(
+        state
+            .observability
+            .hover
+            .as_ref()
+            .and_then(|hover| hover.leave_at),
+        None,
+        "指针在卡上撤销离开计时"
+    );
+    assert_eq!(state.observability.hover_deadline(), None);
+}
+
 #[test]
 fn pinned_agent_hover_survives_leaving_and_closes_on_esc_or_outside_click() {
     let mut snapshot = snapshot();

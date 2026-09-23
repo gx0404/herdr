@@ -3,8 +3,6 @@
 //! → 两侧都放不下取大侧收缩；永不盖住锚点）。只管状态机与几何，卡片内容由调用方
 //! 画；状态放在调用方自己的 `Option<HoverState<T>>` 里，时间由调用方传入（可测）。
 
-#![allow(dead_code)] // seam-stub(hover-card)：波 3 悬停卡车道统一三套 hover 后删除
-
 use std::time::{Duration, Instant};
 
 use ratatui::layout::Rect;
@@ -122,6 +120,7 @@ impl<T> HoverState<T> {
 /// 向左平移）；下方高度不够就翻到上方；两侧都不够时取空间大的一侧并把高度收缩到
 /// 该侧可用高度。卡片与锚点在纵向上永不重叠。宽度超出 `bounds` 时收缩；没有任何
 /// 可用空间（或尺寸为零）时返回空 `Rect`。
+#[allow(dead_code)] // seam-stub(hover-card)：定位由悬停卡车道的下一条提交接入后删除
 pub(crate) fn place_hover_card(anchor: Rect, size: (u16, u16), bounds: Rect) -> Rect {
     let (want_w, want_h) = size;
     if want_w == 0 || want_h == 0 || bounds.is_empty() {

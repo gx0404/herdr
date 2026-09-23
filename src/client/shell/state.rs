@@ -2688,6 +2688,7 @@ impl ClientShellState {
             .chain(self.selection_repaint_deadline)
             .chain(self.chrome_feedback_deadline())
             .chain(self.preferences_flush_deadline())
+            .chain(self.observability.hover_deadline())
             .min()
             .map(|deadline| deadline.saturating_duration_since(now).min(default))
             .unwrap_or(default)
