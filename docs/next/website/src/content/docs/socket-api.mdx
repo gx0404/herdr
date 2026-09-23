@@ -844,8 +844,9 @@ Hooks signal with `pane.report_agent_activity`:
 a structured snapshot that the agent's source adapter understands: Herdr's Pi
 extension reports the whole tree as a `herdr.activity.snapshot` JSON document
 this way, because Pi keeps no activity on disk. The server keeps only the latest
-hint per pane and hands it to the source adapter on the next refresh. `node_id`
-and `seq` are accepted for diagnostics. The response is `ok` and never carries
+hint per pane, up to 1 MiB, and hands it to the source adapter on the next
+refresh; a larger hint still schedules a refresh, but the previous hint is kept.
+`node_id` and `seq` are accepted for diagnostics. The response is `ok` and never carries
 the tree; apart from a snapshot hint like Pi's, the request does not carry it
 either.
 
@@ -870,9 +871,9 @@ tree was before truncation.
 `summary`. Unknown enum values decode as `unknown`. `AgentInfo.activity_running`,
 `activity_total`, and `activity_truncated` describe the tree as the source
 reported it, before truncation; all three are omitted when the agent has no
-activity. When `activity_truncated` is set, `activity` holds only the running
-nodes and their ancestors — fetch the rest with `agent.activity.read` without
-`node_id`. `AgentInfo.launch_seq` is
+activity. When `activity_truncated` is set, `activity` holds only the 32 kept
+nodes — running nodes and their ancestors first, then the rest in source order —
+so fetch the whole tree with `agent.activity.read` without `node_id`. `AgentInfo.launch_seq` is
 the server-assigned launch order: a pane receives a new monotonic number when it
 first gains an agent identity, keeps it across state changes, and gets a new one
 after the agent is released or re-detected. `0` means unknown (older servers
@@ -910,23 +911,35 @@ background reader thread, so it may arrive after responses to later requests.
 
 Errors: `pane_not_found`, `agent_not_found` (the pane hosts no agent, the
 external source is unknown, or that source no longer lists the external
-session), `not_implemented` (this server has no source
-adapter for that agent), `activity_unavailable` (the source cannot be read right
-now, for example Pi has not reported a snapshot yet), `activity_malformed` (the
-source or the cursor is not in the expected format), `activity_io_error`, and
-`server_busy` when the reader queue is full. Today only Pi, through Herdr's Pi
-extension, provides a tree; other agents answer `not_implemented` until their
-source adapters exist.
+session), `not_implemented` (this server has no source adapter for that agent,
+or the adapter cannot answer the request, for example because Herdr has not
+received the agent's native session reference yet), `activity_unavailable` (the
+source cannot be read right now, for example Pi has not reported a snapshot
+yet), `activity_malformed` (the source or the cursor is not in the expected
+format), `activity_io_error`, and `server_busy` when the reader queue is full.
+
+Herdr ships source adapters for Claude Code, Codex, Kimi Code, and OpenCode,
+which read each agent's own local session data, and for Pi, which reads the
+snapshot from Herdr's Pi extension. An agent without an adapter, such as one
+reported under a custom name, answers `not_implemented`. Claude Code, Codex, and
+OpenCode locate their session through the native session reference Herdr has
+stored for the pane, normally reported by the Herdr integration when the session
+starts, so without one their tree stays empty; Kimi Code falls back to the most
+recently active session in the pane's working directory.
 
 `agent.external.list` (no params) lists agent sessions that belong to no pane,
 as `{"type":"external_agent_list","agents":[...]}` with `ExternalAgentInfo`
 entries: `external_id` (`<source>:<session id>`, usable as `external_id` in
 `agent.activity.read`), `source`, `agent_status`, `label`, `readable`, and
-optional `agent`, `cwd`, `updated_at_ms`, and `activity`. No external source
-adapter ships yet, so the call succeeds with an empty list; hide the external
-section of a client when the list comes back empty. `not_implemented` is
-returned only when every registered source reports that it cannot enumerate
-external sessions.
+optional `agent`, `cwd`, `updated_at_ms`, and `activity`. The one external
+source today is `zcode`, the ZCode desktop app: it lists up to 10 unarchived
+root sessions updated in the last 72 hours, read-only from ZCode's local
+database through the system `sqlite3` command, each with its subagent tree and
+todos. Without ZCode's database (ZCode not installed or never started) the call
+succeeds with an empty list; hide the external section of a client when the list
+comes back empty. When `sqlite3` is missing or the database cannot be read, the
+call fails with `activity_unavailable`. `not_implemented` is returned only when
+every registered source reports that it cannot enumerate external sessions.
 
 When a refresh changes a stored tree the server emits
 `pane.agent_activity_changed` with `pane_id`, `running`, and `total`. The event

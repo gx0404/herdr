@@ -653,7 +653,8 @@ workspace 的 get/list 响应会公开生成的 `tokens` 映射,空间侧边栏�
 `hint` 可选。它可以是钩子事件名之类的自由文本,也可以是该智能体的来源适配器能
 理解的结构化快照:Herdr 的 Pi 扩展就是这样把整棵树作为 `herdr.activity.snapshot`
 JSON 文档上报的,因为 Pi 不在磁盘上保留任何活动记录。服务器只保留每个窗格最近
-一份 hint,并在下一次刷新时交给来源适配器。`node_id` 与 `seq` 仅用于诊断。响应是
+一份不超过 1 MiB 的 hint,并在下一次刷新时交给来源适配器;更大的 hint 仍会安排
+一次刷新,但保留的仍是上一份。`node_id` 与 `seq` 仅用于诊断。响应是
 `ok`,从不携带树;除 Pi 这类快照 hint 外,请求里也不带树。
 
 一个 hint 会立即安排一次刷新,但同一窗格每秒最多刷新一次;约 2 秒后还会再补刷
@@ -672,8 +673,8 @@ JSON 文档上报的,因为 Pi 不在磁盘上保留任何活动记录。服务�
 `content_ref` 和 `summary`。未知枚举值解码为 `unknown`。
 `AgentInfo.activity_running`、`activity_total` 和 `activity_truncated` 描述的是
 来源报出的、截断前的那棵树;智能体没有活动时三者都省略。`activity_truncated`
-置位时 `activity` 里只剩运行中的节点及其祖先,其余用 `agent.activity.read`
-(不带 `node_id`)拉取。`AgentInfo.launch_seq` 是
+置位时 `activity` 里只有保留下来的 32 个节点(运行中的节点及其祖先优先,其余按
+来源顺序补足),整棵树用不带 `node_id` 的 `agent.activity.read` 拉取。`AgentInfo.launch_seq` 是
 服务器分配的启动顺序:窗格首次获得智能体身份时得到一个新的单调序号,状态变化
 不改号,智能体被释放或重新识别后取新号。`0` 表示未知(旧服务器不下发该字段);
 序号只在同一个服务器进程内可比。
@@ -706,19 +707,28 @@ JSON 文档上报的,因为 Pi 不在磁盘上保留任何活动记录。服务�
 因此可能晚于后续请求的响应到达。
 
 错误:`pane_not_found`;`agent_not_found`(窗格没有智能体、外部来源未知,或该来源已不再列出这个外部会话);
-`not_implemented`(本服务器没有该智能体的来源适配器);`activity_unavailable`
+`not_implemented`(本服务器没有该智能体的来源适配器,或适配器无法应答这次请求,
+例如 Herdr 还没有收到该智能体的原生会话引用);`activity_unavailable`
 (来源此刻不可读,例如 Pi 还没有上报过快照);`activity_malformed`(来源内容或
-游标不是预期格式);`activity_io_error`;读取队列已满时 `server_busy`。目前只有 Pi
-(通过 Herdr 的 Pi 扩展)提供树;其他智能体在各自的来源适配器落地前回
-`not_implemented`。
+游标不是预期格式);`activity_io_error`;读取队列已满时 `server_busy`。
+
+Herdr 为 Claude Code、Codex、Kimi Code 和 OpenCode 提供来源适配器,读取各智能体
+自己的本地会话数据;Pi 的适配器读取 Herdr 的 Pi 扩展上报的快照。没有适配器的
+智能体(例如以自定义名字上报的)回 `not_implemented`。Claude Code、Codex 和
+OpenCode 靠 Herdr 为该窗格存下的原生会话引用定位会话(通常由 Herdr 集成在会话
+开始时上报),没有引用时树保持为空;Kimi Code 则退而取窗格工作目录下最近活动的
+会话。
 
 `agent.external.list`(无参数)列出不属于任何窗格的智能体会话,响应为
 `{"type":"external_agent_list","agents":[...]}`,条目是 `ExternalAgentInfo`:
 `external_id`(`<source>:<会话 id>`,可作为 `agent.activity.read` 的
 `external_id`)、`source`、`agent_status`、`label`、`readable`,以及可选的 `agent`、
-`cwd`、`updated_at_ms` 和 `activity`。目前还没有任何外部来源适配器,该调用成功
-返回空列表;客户端拿到空列表就隐藏外部条目区。只有当所有已注册来源都报告无法
-枚举外部会话时才回 `not_implemented`。
+`cwd`、`updated_at_ms` 和 `activity`。目前唯一的外部来源是 `zcode`,即 ZCode
+桌面应用:它通过系统的 `sqlite3` 命令只读 ZCode 的本地数据库,列出最近 72 小时内
+更新过、未归档的根会话,最多 10 个,每个带其子智能体树与待办。没有 ZCode 的
+数据库(未安装或从未启动过 ZCode)时调用成功返回空列表;客户端拿到空列表就隐藏
+外部条目区。没有 `sqlite3` 或数据库读不了时,调用以 `activity_unavailable` 失败。
+只有当所有已注册来源都报告无法枚举外部会话时才回 `not_implemented`。
 
 刷新改变了已存储的树时,服务器发出 `pane.agent_activity_changed`,带 `pane_id`、
 `running` 和 `total`。该事件只带计数;树要用 `agent.get` 或 `agent.activity.read`
