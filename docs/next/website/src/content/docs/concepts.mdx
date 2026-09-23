@@ -56,6 +56,29 @@ Each client tracks which completions it has displayed. Viewing a completion in o
 
 The agents panel shows agents as a collapsible tree: machine (only when more than one machine is connected), then workspace, then tab (only when that workspace has more than one tab), then agent. Group headers aggregate status and agent count; click anywhere on a header to collapse or expand it. Collapsing a machine here also collapses it in the workspace list. Each agent row shows its status icon, name, status text when there is room, and, when the agent reports sub-agents or tasks, an activity badge: `2/5 running` (running / total) while any of them is still running, just the total such as `5 activities` (or `1 activity`) once none is running, and no badge when there is no activity. On a narrow sidebar the badge first shrinks to just the numbers, such as `2/5`, and then disappears, so the status icon and name always keep their room. The arrow on that row expands the latest activity item, followed by `+N more` when there are more; clicking either opens the agent activity window. Right-clicking an agent row offers focus, view activity, rename pane, bind account and close pane. The sort toggle switches between this tree and launch order, which lists agents flat in launch order while agent rows can still expand their activity. With multiple connected machines, launch order groups agents by machine first and orders them by launch sequence within each machine; it never interleaves launch sequences across machines. Status-filtered views are flat too. When the panel is too short to show group headers, it lists every agent flat with its workspace name instead, and the collapsed sidebar lists every agent too; collapsed workspace, tab, and External groups do not hide entries in these flat lists, because there is no header there to expand them. Agents that an external source reports outside any Herdr pane appear under an External group per source; clicking one opens its agent activity window. The mobile switcher keeps its flat agent list and adds the same activity badge after the agent's details; when the row has no room for it, the badge likewise shrinks to just the numbers and then disappears, instead of being cut off mid-count.
 
+### Agent activity window
+
+The agent activity window shows what an agent reports about its sub-agents, tasks, todos, and background processes. Open it by clicking an activity item (or `+N more`) under an agent row in the agents panel, by clicking an entry in an External group, or by choosing **View agent activity** from an agent row's right-click menu. Opening it from an activity item selects that item.
+
+The left column is the activity tree. Each item shows its branch in the tree, a status mark, its label, its kind, and how long it has run: running items use the accent color, failed items are red, and finished items are grey. Click the arrow on an item to collapse or expand its children. The right column shows the selected item's output under a header with the item's label, kind, status, and duration, plus its type and summary when the source reports them. Markdown output gets colored headings and list markers; JSON Lines output shows one record per line, prefixed with its `type`, `role`, and `name`. Long lines wrap at the column width, and a note at the top says when only the latest part of the output is shown.
+
+For an agent in a pane the window opens in follow mode: Herdr refreshes the tree and reads new output every second, and the output stays on the newest line until you scroll up. Scroll back to the bottom, or press `End`, to stick to new output again. Turn follow off with the **Follow** button or `f`; while it is off, the title shows a note when the agent's activity changes, and the **Refresh** button or `r` reloads the tree and the selected output. Entries from an external source are marked "External source, read-only" and never follow.
+
+The window is a floating page: drag its top border to move it, or its side and bottom borders to resize it, and Herdr remembers its position and size. A server that does not provide agent activity, such as an older Herdr server, shows a note instead of the tree. When the window is narrower than 60 columns inside its border it shows one column at a time; `Tab` switches between the tree and the output.
+
+| Key | Action |
+| --- | --- |
+| `↑` `↓` | Select the previous or next item; scroll the output when it has focus |
+| `←` `→` | Collapse or expand the selected item; `←` on a child selects its parent, and in the output moves focus back to the tree |
+| `Enter` | Reload the selected item's output from the start and move focus to it |
+| `Tab` | Switch focus between the tree and the output |
+| `PgUp` `PgDn` `Home` `End` | Scroll or jump in the focused column |
+| `f` | Turn follow on or off |
+| `r` | Refresh |
+| `Esc` | Close the window and return to the window it was opened from, if any |
+
+The mouse wheel scrolls whichever column the pointer is over, and clicking outside the window closes it.
+
 ## Session
 
 A session is a persistent Herdr server namespace. The default `herdr` command attaches to the default session.
