@@ -69,8 +69,11 @@ fn accounts_body(
     }
 }
 
-/// 画可见的 agent 行悬浮层（账号用量卡），返回其矩形；没有可见的悬浮层时
-/// 返回空矩形。浮层自己的命中区写进 `hover_hits`。
+/// 卡片最矮高度：上下边框 2 行 + 正文至少 1 行 + 间隔 1 行 + 「打开页面」1 行。
+const MIN_CARD_HEIGHT: u16 = 5;
+
+/// 画可见的 agent 行悬浮层（账号用量卡），返回其矩形；没有可见的悬浮层、或
+/// 可用空间矮于 `MIN_CARD_HEIGHT` 时返回空矩形。浮层自己的命中区写进 `hover_hits`。
 pub(super) fn hover_layer(
     buffer: &mut Buffer,
     state: &State,
@@ -91,7 +94,9 @@ pub(super) fn hover_layer(
                 buffer.area.height.saturating_sub(2).min(17),
             );
             let hover_rect = place_hover_card(hover.anchor, size, buffer.area);
-            if hover_rect.is_empty() {
+            // kit 在两侧都不够时会收缩高度；矮到放不下一行正文就整张不画，不留
+            // 看不见却独占鼠标输入的命中区。
+            if hover_rect.height < MIN_CARD_HEIGHT {
                 return Rect::default();
             }
             clear(buffer, hover_rect);

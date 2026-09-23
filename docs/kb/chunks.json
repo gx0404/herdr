@@ -4940,8 +4940,8 @@
       "anchor": "structure",
       "doc": "src/client/shell/observability/render/hover.rs",
       "id": "src-client-shell-observability-render-hover-rs-structure",
-      "source_sha256": "353501de575938f9c5fbb79757c417ab6da3df1cbb813d94ed9905f4125d1205",
-      "text": "模块文档：agent 行悬浮层（账号用量卡）：作用域视图、正文 + 底部动作行与浮层挂载。\n公开项：\npub(super) fn hover_scope(state: &State) -> AccountsScope<'_> { — 悬浮层作用域：账号与 pane 都来自 `hover_scope`，选中账号沿用页面的高亮 （仅当它在悬浮层的账号里）。\npub(super) fn hover_layer( — 画可见的 agent 行悬浮层（账号用量卡），返回其矩形；没有可见的悬浮层时 返回空矩形。浮层自己的命中区写进 `hover_hits`。"
+      "source_sha256": "a63bca512802de0330a72457b45090ca26530741ba2dfed087fa75d20f8a783e",
+      "text": "模块文档：agent 行悬浮层（账号用量卡）：作用域视图、正文 + 底部动作行与浮层挂载。\n公开项：\npub(super) fn hover_scope(state: &State) -> AccountsScope<'_> { — 悬浮层作用域：账号与 pane 都来自 `hover_scope`，选中账号沿用页面的高亮 （仅当它在悬浮层的账号里）。\npub(super) fn hover_layer( — 画可见的 agent 行悬浮层（账号用量卡），返回其矩形；没有可见的悬浮层、或 可用空间矮于 `MIN_CARD_HEIGHT` 时返回空矩形。浮层自己的命中区写进 `hover_hits`。"
     },
     {
       "anchor": "structure",

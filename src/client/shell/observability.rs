@@ -3672,13 +3672,15 @@ impl ClientShellState {
                         .map(|(rect, pane)| (*rect, self.active_endpoint_id.clone(), pane.clone()))
                 })
                 .or_else(|| {
+                    // CLI 标题：锚点只取标题行。整个 pane 作锚点时 kit 定位「永不盖
+                    // 住锚点」会把卡挤进 pane 上下剩下的一两行，或远离标题落进别的 pane。
                     self.hits
                         .panes
                         .iter()
                         .find(|hit| mouse.row == hit.rect.y && contains(hit.rect, point))
                         .map(|hit| {
                             (
-                                hit.rect,
+                                Rect::new(hit.rect.x, hit.rect.y, hit.rect.width, 1),
                                 self.active_endpoint_id.clone(),
                                 hit.pane_id.clone(),
                             )

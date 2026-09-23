@@ -3938,16 +3938,30 @@ fn cell_symbol(frame: &FrameData, x: u16, y: u16) -> &str {
 
 /// 卡片画在 `card` 上：四角是边框字形，顶边从左框后一格写标题「 claude · …」。
 fn assert_card_chrome(state: &ClientShellState, frame: &FrameData, card: Rect) {
+    assert_agent_card_chrome(state, frame, card, "claude");
+}
+
+/// 同 `assert_card_chrome`，标题是 `agent` 的卡。
+fn assert_agent_card_chrome(state: &ClientShellState, frame: &FrameData, card: Rect, agent: &str) {
     let glyphs = state.config.border_glyphs;
-    assert_eq!(cell_symbol(frame, card.x, card.y), glyphs.top_left);
-    assert_eq!(
-        cell_symbol(frame, card.right() - 1, card.bottom() - 1),
-        glyphs.bottom_right
-    );
-    let title = (card.x + 2..card.x + 8)
+    for (x, y, glyph) in [
+        (card.x, card.y, glyphs.top_left),
+        (card.right() - 1, card.y, glyphs.top_right),
+        (card.x, card.bottom() - 1, glyphs.bottom_left),
+        (card.right() - 1, card.bottom() - 1, glyphs.bottom_right),
+    ] {
+        assert_eq!(
+            cell_symbol(frame, x, y),
+            glyph,
+            "卡片 {card:?} 的角 ({x}, {y}): {:?}",
+            frame_row(frame, y)
+        );
+    }
+    let end = card.x + 2 + agent.len() as u16;
+    let title = (card.x + 2..end)
         .map(|x| cell_symbol(frame, x, card.y))
         .collect::<String>();
-    assert_eq!(title, "claude", "标题行: {:?}", frame_row(frame, card.y));
+    assert_eq!(title, agent, "标题行: {:?}", frame_row(frame, card.y));
 }
 
 /// 定位统一走 `kit::hover_card::place_hover_card`：锚点下方左对齐 → 放不下
@@ -4044,6 +4058,207 @@ fn agent_row_hover_card_never_covers_its_row_in_either_layout() {
         assert_eq!(card.x, row.x.min(120 - card.width), "{label}: 与行左对齐");
         assert_card_chrome(&state, &frame, card);
     }
+}
+
+/// 真实尺寸的 pane 表面：帧铺满 `size`，`panes` 是 `(pane_id, 相对表面区的矩形)`。
+/// 共用夹具 `surface()` 的 pane 只有 4x2，测不出「锚点是整个 pane」这类问题。
+fn sized_surface(size: (u16, u16), panes: &[(&str, Rect)]) -> PaneSurfaceFrame {
+    let mut frame = surface();
+    let buffer = Buffer::empty(Rect::new(0, 0, size.0, size.1));
+    frame.frame = FrameData::from_ratatui_buffer_with_hyperlinks(&buffer, None, &[]);
+    let template = frame.panes[0].clone();
+    frame.panes = panes
+        .iter()
+        .map(|(pane_id, rect)| crate::protocol::PaneSurfacePane {
+            pane_id: (*pane_id).into(),
+            rect: (*rect).into(),
+            inner_rect: Rect::new(
+                rect.x,
+                rect.y + 1,
+                rect.width,
+                rect.height.saturating_sub(1),
+            )
+            .into(),
+            focused: *pane_id == "pane_1",
+            ..template.clone()
+        })
+        .collect();
+    frame
+}
+
+/// 整屏单 pane（`split = false`）或上下两个 pane（`split = true`，pane_1 在上、
+/// pane_2 在下）铺满终端区；pane_1 跑 claude、pane_2 跑 codex。
+fn full_size_panes(size: (u16, u16), split: bool) -> PaneSurfaceFrame {
+    let (width, height) = size;
+    if split {
+        let top = height / 2;
+        sized_surface(
+            size,
+            &[
+                ("pane_1", Rect::new(0, 0, width, top)),
+                ("pane_2", Rect::new(0, top, width, height - top)),
+            ],
+        )
+    } else {
+        sized_surface(size, &[("pane_1", Rect::new(0, 0, width, height))])
+    }
+}
+
+/// 经典布局或停靠工作台，终端区铺满真实尺寸的 pane（见 `full_size_panes`）。
+fn title_hover_state(docked: bool, split: bool) -> ClientShellState {
+    let mut snapshot = snapshot();
+    snapshot.agents.push(agent_in_pane("pane_1", "claude"));
+    let mut codex = agent_in_pane("pane_2", "codex");
+    codex.focused = false;
+    snapshot.agents.push(codex);
+    let mut pane_2 = snapshot.panes[0].clone();
+    pane_2.pane_id = "pane_2".into();
+    pane_2.focused = false;
+    snapshot.panes.push(pane_2);
+    let mut state = if docked {
+        let mut state = docked_with(snapshot);
+        state.set_endpoint_methods(Some(vec![
+            "client.views.set".into(),
+            "tab.focus".into(),
+            "pane.focus".into(),
+            "account.usage.get".into(),
+            "account.usage.refresh".into(),
+            "account.usage.providers".into(),
+            "account.binding.set".into(),
+        ]));
+        let area = terminal_body(&state);
+        state.workbench.views.insert(
+            "1".into(),
+            View {
+                tab: "tab_1".into(),
+                surface: full_size_panes((area.width, area.height), split),
+                graphics: Default::default(),
+            },
+        );
+        state
+    } else {
+        let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
+        state.set_snapshot(Box::new(snapshot));
+        state.set_endpoint_methods(Some(vec![
+            "pane.focus".into(),
+            "account.usage.get".into(),
+            "account.usage.refresh".into(),
+            "account.usage.providers".into(),
+            "account.binding.set".into(),
+        ]));
+        let area = state.layout(120, 40).pane_surface;
+        state.set_pane_surface(full_size_panes((area.width, area.height), split));
+        state
+    };
+    tick(&mut state, Instant::now());
+    state.compose(120, 40).expect("画面");
+    assert_eq!(state.workbench.enabled, docked);
+    let expected = if split { 2 } else { 1 };
+    assert_eq!(state.hits.panes.len(), expected, "用例前提：pane 命中区");
+    assert!(
+        state.hits.panes.iter().all(|hit| hit.rect.height >= 15),
+        "用例前提：pane 是真实尺寸: {:?}",
+        state
+            .hits
+            .panes
+            .iter()
+            .map(|hit| hit.rect)
+            .collect::<Vec<_>>()
+    );
+    state
+}
+
+/// CLI 标题悬浮的锚点只是标题行，不是整个 pane：整屏单 pane 与上下分屏、经典
+/// 布局与停靠工作台下，卡片都是满尺寸（68x17），紧贴标题行的下方或上方，四角
+/// 边框可见；不会被挤成一两行、压到菜单栏上，也不会落到离标题很远的别的 pane 里。
+#[test]
+fn cli_title_hover_card_is_full_size_next_to_its_title_in_either_layout() {
+    for docked in [false, true] {
+        for split in [false, true] {
+            let label = format!(
+                "{} / {}",
+                if docked {
+                    "停靠工作台"
+                } else {
+                    "经典布局"
+                },
+                if split {
+                    "上下分屏"
+                } else {
+                    "整屏单 pane"
+                }
+            );
+            let mut state = title_hover_state(docked, split);
+            for hit in state.hits.panes.clone() {
+                let agent = if hit.pane_id == "pane_1" {
+                    "claude"
+                } else {
+                    "codex"
+                };
+                state.observability.clear_hover();
+                state.compose(120, 40).expect("清掉上一张卡");
+                let title = Rect::new(hit.rect.x, hit.rect.y, hit.rect.width, 1);
+                let t0 = Instant::now();
+                moved(&mut state, title.x + 2, title.y);
+                tick(&mut state, t0 + Duration::from_millis(450));
+                assert_eq!(
+                    agent_hover(&state),
+                    Some((true, false)),
+                    "{label}: {} 标题悬浮可见",
+                    hit.pane_id
+                );
+                assert_eq!(
+                    state.observability.hover.as_ref().map(|hover| hover.anchor),
+                    Some(title),
+                    "{label}: 锚点只是 {} 的标题行",
+                    hit.pane_id
+                );
+                let frame = state.compose(120, 40).expect("悬浮卡");
+                let card = state.observability.hover_rect;
+                assert_eq!(
+                    (card.width, card.height),
+                    (68, 17),
+                    "{label}: {} 的卡 {card:?} 是满尺寸",
+                    hit.pane_id
+                );
+                assert!(
+                    card.y == title.bottom() || card.bottom() == title.y,
+                    "{label}: 卡 {card:?} 紧贴标题行 {title:?} 的下方或上方"
+                );
+                assert!(!card.intersects(title), "{label}: 卡不盖标题行");
+                assert_agent_card_chrome(&state, &frame, card, agent);
+            }
+        }
+    }
+}
+
+/// 放不下一张可读的卡（上下边框 + 至少一行正文 + 间隔 + 「打开页面」= 5 行）
+/// 时整张不画：不留看不见却独占鼠标输入的命中区，也就不会平白发悬浮请求。
+#[test]
+fn hover_card_too_short_to_read_is_not_drawn() {
+    let mut state = classic_usage_ready();
+    // 锚点盖住除最底 4 行外的整屏：下方只有 4 行、上方没有空间。
+    show_hover_at(&mut state, Rect::new(0, 0, 120, 36));
+    let frame = state.compose(120, 40).expect("画面");
+    assert_eq!(state.observability.hover_rect, Rect::default(), "4 行不画");
+    assert!(state.observability.hover_hits.is_empty(), "不留命中区");
+    let glyphs = state.config.border_glyphs;
+    assert_ne!(
+        cell_symbol(&frame, 0, 36),
+        glyphs.top_left,
+        "底部没有残缺的卡片边框: {:?}",
+        frame_row(&frame, 36)
+    );
+    // 恰好 5 行：画得出，四角与标题都在。
+    show_hover_at(&mut state, Rect::new(0, 0, 120, 35));
+    let frame = state.compose(120, 40).expect("画面");
+    let card = state.observability.hover_rect;
+    assert_eq!(card, Rect::new(0, 35, 68, 5), "5 行照画");
+    assert_card_chrome(&state, &frame, card);
+    assert!(
+        !state.observability.hover_hits.is_empty(),
+        "「打开页面」可点"
+    );
 }
 
 #[test]
