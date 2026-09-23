@@ -422,7 +422,7 @@ fn render_field(
             MachineField::Target => t.target_placeholder,
             MachineField::Port => "22",
             MachineField::Session => crate::session::DEFAULT_SESSION_NAME,
-            // 标签留空时取目标：占位直接显示最终会用的名字。
+            // 名称（label）留空时取目标：占位直接显示最终会用的名字。
             MachineField::Label => {
                 label_placeholder = form.target.trim().to_owned();
                 label_placeholder.as_str()

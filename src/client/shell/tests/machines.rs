@@ -1329,6 +1329,47 @@ fn raw_key(state: &mut ClientShellState, code: KeyCode) {
     state.handle_raw_events(vec![RawInputEvent::Key(key(code))]);
 }
 
+/// 文档终审 D11：中文添加表单里 label（侧栏显示名）与 tags 两个字段都叫「标签」，
+/// 分不清。label 改称「名称」（与重名报错「名称已被使用」、导入跳过原因同一个
+/// 词），tags 仍叫「标签」。按 Tab 走遍全部字段、逐帧读出画面上的字段名：两种
+/// 语言下都互不相同。
+#[test]
+fn machine_form_field_names_are_distinct_in_both_languages() {
+    for lang in [crate::i18n::Lang::ZhCn, crate::i18n::Lang::En] {
+        let _guard = crate::i18n::lang_guard(lang);
+        let mut state = state_with_profiles(&[]);
+        state.open_machine_add_form();
+        let mut names: std::collections::BTreeMap<String, String> = Default::default();
+        for _ in 0..30 {
+            state.compose(93, 32).expect("添加表单帧");
+            let buffer = state.compose_buffer.as_ref().expect("保留帧缓冲");
+            for (rect, field) in &state.hits.machines_fields {
+                // 字段首行是名称（必填项带「 *」）；宽字符的续格是空格。
+                let name: String = (rect.x..rect.right())
+                    .map(|x| buffer[(x, rect.y)].symbol())
+                    .collect::<String>()
+                    .chars()
+                    .filter(|ch| !ch.is_whitespace() && *ch != '*')
+                    .collect();
+                names.insert(format!("{field:?}"), name);
+            }
+            raw_key(&mut state, KeyCode::Tab);
+        }
+        names.remove("Quick");
+        assert!(names.len() >= 20, "{lang:?}：Tab 应走遍字段：{names:?}");
+        let mut seen: std::collections::BTreeMap<&str, &str> = Default::default();
+        for (field, name) in &names {
+            if let Some(other) = seen.insert(name.as_str(), field.as_str()) {
+                panic!("{lang:?}：{other} 与 {field} 同名「{name}」：{names:?}");
+            }
+        }
+        if lang == crate::i18n::Lang::ZhCn {
+            assert_eq!(names["Label"], "名称");
+            assert_eq!(names["Tags"], "标签");
+        }
+    }
+}
+
 /// 文档终审 D3：发现阶段就被跳过的主机（通配符、标签或目标已存在、批内重复）
 /// 以前只计进「跳过 N 台」，结果页一条都不列；未勾选的主机也只有名字没有原因。
 /// 现在结果页逐条列出跳过项与原因，跳过行数与汇总一致。

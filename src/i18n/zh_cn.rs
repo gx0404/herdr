@@ -643,7 +643,7 @@ pub const TEXTS: Texts = Texts {
         remove_detail: "远程 server、会话与 agent 会继续运行。",
         add_title: "添加机器",
         edit_title: "编辑机器",
-        field_label: "标签",
+        field_label: "名称",
         hint_identity_files: "逗号分隔的路径",
         hint_proxy_jump: "逗号分隔的目标或 profile:<id>",
         hint_color: "#rrggbb 十六进制或颜色名",
