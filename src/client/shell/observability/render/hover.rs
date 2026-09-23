@@ -53,7 +53,8 @@ fn action_rows(items: &[ToolbarItem], width: u16) -> u16 {
     flow_positions(&widths, width, 2, 2).1
 }
 
-/// agent 行悬浮层的账号正文：正文 + 底部的动作行（`body_actions`）。
+/// agent 行悬浮层的账号正文：正文 + 底部的动作行（`body_actions`）。返回正文的
+/// 滚动上界（见 `accounts_content`）。
 fn accounts_body(
     buffer: &mut Buffer,
     area: Rect,
@@ -62,14 +63,14 @@ fn accounts_body(
     items: &[ToolbarItem],
     palette: &Palette,
     hits: &mut Vec<(Rect, Action)>,
-) {
+) -> Option<usize> {
     if area.is_empty() {
-        return;
+        return None;
     }
     // 正文至少留 1 行。
     let rows = action_rows(items, area.width).min(area.height.saturating_sub(1));
     let content = Rect::new(area.x, area.y, area.width, area.height.saturating_sub(rows));
-    accounts_content(buffer, content, state, scope, palette, hits);
+    let scroll_limit = accounts_content(buffer, content, state, scope, palette, hits);
     if rows > 0 {
         toolbar_rows(
             buffer,
@@ -79,6 +80,7 @@ fn accounts_body(
             hits,
         );
     }
+    scroll_limit
 }
 
 /// 卡片的外框与底部两行：上下边框 + 间隔 + 「打开页面」。
@@ -139,17 +141,18 @@ fn card_bounds(area: Rect, panel: Rect, card_width: u16) -> Rect {
     area
 }
 
-/// 画可见的 agent 行悬浮层（账号用量卡），返回其矩形；没有可见的悬浮层、或
-/// 可用空间矮于 `MIN_CARD_HEIGHT` 时返回空矩形。浮层自己的命中区写进 `hover_hits`。
+/// 画可见的 agent 行悬浮层（账号用量卡），返回其矩形与账号正文的滚动上界（见
+/// `accounts_content`）；没有可见的悬浮层、或可用空间矮于 `MIN_CARD_HEIGHT` 时返回
+/// 空矩形。浮层自己的命中区写进 `hover_hits`。
 pub(super) fn hover_layer(
     buffer: &mut Buffer,
     state: &State,
     cx: &ChromeContext<'_>,
     hover_hits: &mut Vec<(Rect, Action)>,
-) -> Rect {
+) -> (Rect, Option<usize>) {
     let palette = cx.palette;
     let Some(hover) = state.hover.as_ref().filter(|hover| hover.visible) else {
-        return Rect::default();
+        return (Rect::default(), None);
     };
     match &hover.target {
         HoverTarget::Agent { agent, .. } => {
@@ -174,7 +177,7 @@ pub(super) fn hover_layer(
             // kit 在两侧都不够时会收缩高度；矮到放不下一行正文就整张不画，不留
             // 看不见却独占鼠标输入的命中区。
             if hover_rect.height < MIN_CARD_HEIGHT {
-                return Rect::default();
+                return (Rect::default(), None);
             }
             clear(buffer, hover_rect);
             let texts = &crate::i18n::texts().agent_panel;
@@ -192,8 +195,8 @@ pub(super) fn hover_layer(
                 inner.width,
                 inner.height.saturating_sub(2),
             );
-            if state.usage.enabled {
-                accounts_body(buffer, body, state, &scope, &items, palette, hover_hits);
+            let scroll_limit = if state.usage.enabled {
+                accounts_body(buffer, body, state, &scope, &items, palette, hover_hits)
             } else {
                 // 用量在设置里关闭时不会发请求：照实说明，而不是停在「刷新中…」
                 // （钉住入口不看这个开关，指针悬浮则根本不会出现）。
@@ -207,7 +210,8 @@ pub(super) fn hover_layer(
                     ),
                     Style::default().fg(palette.overlay0),
                 );
-            }
+                None
+            };
             // 底行只留「打开页面」：绑定 / 刷新 / 回调等动作都在正文自带的动作行里，
             // 不再出现两个「绑定账号」（ACC-02）。
             let y = inner.bottom().saturating_sub(1);
@@ -219,7 +223,7 @@ pub(super) fn hover_layer(
                 palette,
                 hover_hits,
             );
-            hover_rect
+            (hover_rect, scroll_limit)
         }
     }
 }

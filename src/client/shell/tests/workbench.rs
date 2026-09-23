@@ -110,9 +110,23 @@ fn hover_blank_space_and_wheel_cannot_reach_background_processes_or_cards() {
         "client.views.set".into(),
         "system.process.get".into(),
     ]));
-    // 悬浮层滚动按悬浮层作用域的账号数夹取，数据注入 hover_scope 而非页面。
-    state.observability.hover_scope.accounts =
-        vec![crate::api::schema::AccountUsageSnapshot::default()];
+    // 悬浮层滚动按悬浮层作用域上一帧画出的上界夹取（冒烟 N5）：数据注入
+    // hover_scope 而非页面，且三张账号卡（各 6 个指标）合起来高过卡片上限，滚轮
+    // 才滚得动（单张卡在悬浮层里按视口封顶，一张卡滚不动）。
+    state.observability.hover_scope.accounts = (0..3)
+        .map(|account| crate::api::schema::AccountUsageSnapshot {
+            account_id: format!("claude:{account}"),
+            metrics: (0..6)
+                .map(|index| crate::api::schema::UsageMetric {
+                    label: format!("metric-{index:02}"),
+                    scope: "account".into(),
+                    used_percent: Some(50.0),
+                    ..Default::default()
+                })
+                .collect(),
+            ..Default::default()
+        })
+        .collect();
     state.workbench_open(PanelId::Monitor);
     state.observability.hover = Some(Hover {
         target: HoverTarget::Agent {

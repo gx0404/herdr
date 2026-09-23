@@ -4380,6 +4380,87 @@ fn preferences_page_scroll_is_clamped_on_write_so_reversing_moves_at_once() {
     assert_ne!(region_text(&state, page), bottom, "反向第一格画面就动");
 }
 
+/// 冒烟 N5（133×32，M1 同类）：账号卡片多于一屏时，滚动曾按「总行数 − 1」钳位而
+/// 渲染按「总行数 − 视口高」钳位，滚到底后多出的格数存成死格，反向要先耗掉它们
+/// 画面才动。现在与系统页同口径写回钳位：上界由上一帧的渲染给出，到底后多滚不
+/// 累加，反向第一格画面就动；键盘 ↓ / ↑（一次三行）同样。
+#[test]
+fn accounts_page_scroll_is_clamped_on_write_so_reversing_moves_at_once() {
+    use crossterm::event::KeyCode;
+    let _guard = crate::i18n::lang_guard(crate::i18n::Lang::ZhCn);
+    let mut state = docked();
+    state.open_observation_page(Page::Accounts, &mut ClientShellInput::default());
+    state.observability.now_ms = CARD_NOW_MS;
+    state.observability.accounts = (0..6)
+        .map(|index| AccountUsageSnapshot {
+            account_id: format!("claude:{index}"),
+            account_label: format!("claude:{index}"),
+            ..claude_card_account()
+        })
+        .collect();
+    state.compose(133, 32).expect("账号页");
+    let page = state.observability.page_rect;
+    let (column, row) = (page.x + page.width / 2, page.y + page.height / 2);
+    for _ in 0..200 {
+        sgr_mouse(&mut state, SGR_WHEEL_DOWN, column, row);
+    }
+    state.compose(133, 32).expect("重绘");
+    let bottom = region_text(&state, page);
+    let limit = state.observability.account_scroll;
+    assert!(limit > 0, "用例前提：卡片多于一屏\n{bottom}");
+    sgr_mouse(&mut state, SGR_WHEEL_DOWN, column, row);
+    assert_eq!(
+        state.observability.account_scroll, limit,
+        "到底后多滚不再累加"
+    );
+    sgr_mouse(&mut state, SGR_WHEEL_UP, column, row);
+    state.compose(133, 32).expect("重绘");
+    assert_ne!(region_text(&state, page), bottom, "反向第一格画面就动");
+
+    for _ in 0..100 {
+        press_key(&mut state, KeyCode::Down);
+    }
+    state.compose(133, 32).expect("重绘");
+    assert_eq!(state.observability.account_scroll, limit, "↓ 同样停在上界");
+    assert_eq!(region_text(&state, page), bottom);
+    press_key(&mut state, KeyCode::Up);
+    state.compose(133, 32).expect("重绘");
+    assert_ne!(region_text(&state, page), bottom, "↑ 反向第一次画面就动");
+}
+
+/// 冒烟 N5（悬浮层，133×32）：钉住的用量卡内容高过卡片上限时同样写回钳位——到底
+/// 后多滚不累加，反向第一格画面就动。
+#[test]
+fn pinned_usage_card_scroll_is_clamped_on_write_so_reversing_moves_at_once() {
+    let _guard = crate::i18n::lang_guard(crate::i18n::Lang::ZhCn);
+    let mut state = usage_ready();
+    state.compose(133, 32).expect("工作台");
+    let endpoint = state.active_endpoint_id.clone();
+    pin_usage_card(&mut state, endpoint, "claude");
+    fill_tall_hover_scope(&mut state);
+    state.observability.now_ms = CARD_NOW_MS;
+    state.compose(133, 32).expect("钉住的卡");
+    let card = state.observability.hover_rect;
+    assert!(!card.is_empty(), "用例前提：卡片上屏");
+    let (column, row) = (card.x + card.width / 2, card.y + card.height / 2);
+    for _ in 0..200 {
+        sgr_mouse(&mut state, SGR_WHEEL_DOWN, column, row);
+    }
+    state.compose(133, 32).expect("重绘");
+    assert_eq!(state.observability.hover_rect, card, "用例前提：卡片没挪");
+    let bottom = region_text(&state, card);
+    let limit = state.observability.hover_scope.scroll;
+    assert!(limit > 0, "用例前提：内容高过卡片\n{bottom}");
+    sgr_mouse(&mut state, SGR_WHEEL_DOWN, column, row);
+    assert_eq!(
+        state.observability.hover_scope.scroll, limit,
+        "到底后多滚不再累加"
+    );
+    sgr_mouse(&mut state, SGR_WHEEL_UP, column, row);
+    state.compose(133, 32).expect("重绘");
+    assert_ne!(region_text(&state, card), bottom, "反向第一格画面就动");
+}
+
 /// `rect` 这一行里 gauge 格（`━` 已用 / `░` 空槽）的 (相对 `rect.x` 的起点, 格数)。
 fn gauge_span(state: &ClientShellState, rect: Rect) -> (u16, u16) {
     let buffer = state.compose_buffer.as_ref().expect("帧缓冲");

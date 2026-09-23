@@ -41,8 +41,31 @@ pub(in crate::client::shell) struct PageScrollLimits {
     settings: Option<PageScroll>,
 }
 
+/// 账号列表本次绘制的滚动上界（行）：页面与悬浮层两个作用域各一个，没画出来的为
+/// `None`。`State::commit_paint` 写回，`State::scroll_accounts` 按它写回式钳位——与
+/// 渲染时的钳位是同一个值（`accounts_content` 返回）。定长、`Copy`，渲染期不分配。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(in crate::client::shell) struct AccountScrollLimits {
+    pub page: Option<usize>,
+    pub hover: Option<usize>,
+}
+
+impl AccountScrollLimits {
+    /// 合并同一帧里另一次绘制的上界（停靠面板逐个绘制、悬浮层走全局 pass）：只
+    /// 覆盖对方画出来的作用域。
+    pub(in crate::client::shell::observability) fn merge(&mut self, other: &Self) {
+        if other.page.is_some() {
+            self.page = other.page;
+        }
+        if other.hover.is_some() {
+            self.hover = other.hover;
+        }
+    }
+}
+
 impl PageScrollLimits {
-    /// `page` 本次绘制的滚动度量；账号页走自己的 `scroll_accounts`，恒为 `None`。
+    /// `page` 本次绘制的滚动度量；账号页走自己的 `scroll_accounts`（上界见
+    /// `AccountScrollLimits`），恒为 `None`。
     pub(in crate::client::shell) fn get(&self, page: Page) -> Option<PageScroll> {
         match page {
             Page::Monitor => self.monitor,
@@ -382,6 +405,8 @@ pub(super) struct PaintOutput {
     pub card_scroll_limits: CardScrollLimits,
     /// 本次画出的页面的页面级滚动度量（没画页面时全为 `None`）。
     pub page_scroll_limits: PageScrollLimits,
+    /// 本次画出的账号列表（账号页 / 悬浮层）的滚动上界。
+    pub account_scroll_limits: AccountScrollLimits,
 }
 
 /// 渲染纯函数：`page` 是本次要画的页面（停靠面板由调用方决定画哪个 tab），
@@ -401,6 +426,7 @@ pub(super) fn paint(
     let mut page_rect = Rect::default();
     let mut card_scroll_limits = CardScrollLimits::default();
     let mut page_scroll_limits = PageScrollLimits::default();
+    let mut account_scroll_limits = AccountScrollLimits::default();
     if let Some(page) = page {
         page_rect = area;
         buffer.set_style(area, Style::default().fg(palette.text).bg(palette.panel_bg));
@@ -482,7 +508,7 @@ pub(super) fn paint(
         let scroll = match page {
             Page::Monitor => monitor(buffer, body, state, cx, &mut hits, &mut card_scroll_limits),
             Page::Accounts => {
-                accounts(buffer, body, state, palette, &mut hits);
+                account_scroll_limits.page = accounts(buffer, body, state, palette, &mut hits);
                 None
             }
             Page::Settings => settings(buffer, body, state, palette, &mut hits),
@@ -506,7 +532,9 @@ pub(super) fn paint(
     // 钉住的卡是用户显式打开的（右键「用量」），经典布局页面之上也画。
     let pinned = state.hover.as_ref().is_some_and(|hover| hover.pinned);
     let mut hover_rect = if draw_hover && (page.is_none() || pinned) {
-        hover_layer(buffer, state, cx, &mut hover_hits)
+        let (rect, scroll_limit) = hover_layer(buffer, state, cx, &mut hover_hits);
+        account_scroll_limits.hover = scroll_limit;
+        rect
     } else {
         Rect::default()
     };
@@ -515,6 +543,7 @@ pub(super) fn paint(
         hover_rect = Rect::default();
         hover_hits.clear();
         hits.clear();
+        account_scroll_limits.hover = None;
         dialog_rect = process_dialog(buffer, dialog, state, cx, &mut hits);
     }
     PaintOutput {
@@ -525,6 +554,7 @@ pub(super) fn paint(
         dialog_rect,
         card_scroll_limits,
         page_scroll_limits,
+        account_scroll_limits,
     }
 }
 

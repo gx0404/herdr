@@ -744,6 +744,8 @@ pub(super) struct Painted {
     pub card_scroll_limits: render::CardScrollLimits,
     /// 本次画出的页面的页面级滚动度量，见 `render::PageScrollLimits`。
     pub page_scroll_limits: render::PageScrollLimits,
+    /// 本次画出的账号列表的滚动上界，见 `render::AccountScrollLimits`。
+    pub account_scroll_limits: render::AccountScrollLimits,
 }
 
 /// `State::scroll_page` 一步的单位。
@@ -841,6 +843,9 @@ pub(super) struct State {
     /// 上一帧画出的系统页 / 偏好页的页面级滚动度量（`commit_paint` 写回、
     /// `begin_paint` 复位）：`scroll_page` 按它钳位，与页面渲染时的钳位是同一个值。
     pub page_scroll_limits: render::PageScrollLimits,
+    /// 上一帧画出的账号页 / 悬浮层账号列表的滚动上界（`commit_paint` 写回、
+    /// `begin_paint` 复位）：`scroll_accounts` 按它钳位，与列表渲染时的钳位是同一个值。
+    pub account_scroll_limits: render::AccountScrollLimits,
     pub account_scroll: usize,
     /// 系统页卡片网格的滚动位置：首个可见的卡片行（单列一行一张卡、双列一行
     /// 两张）；设置页用 `settings_scroll`，两页互不泄漏。
@@ -901,22 +906,23 @@ impl State {
         self.refresh_usage || self.manual_in_flight
     }
 
-    /// 滚动账号列表；`hover` 为真时按悬浮层作用域的账号数夹取并写悬浮层自己的
-    /// 滚动位置，否则按页面。
+    /// 滚动账号列表；`hover` 为真时写悬浮层自己的滚动位置，否则写页面的。
+    ///
+    /// 与 `scroll_page` 同口径写回钳位（冒烟 N5）：按上一帧画出的该作用域上界
+    /// （`account_scroll_limits`，列表渲染时的钳位值）先把存量值钳回上界再走一步——
+    /// 滚到底后多滚的格数不会存进状态，反向第一格画面就动；上一帧没画出这个作用域
+    /// 时不知道上界，只许往回滚。
     pub(super) fn scroll_accounts(&mut self, delta: isize, hover: bool) {
-        let (accounts, refresh_states) = if hover {
-            (&self.hover_scope.accounts, &self.hover_scope.refresh_states)
+        let (scroll, limit) = if hover {
+            (
+                &mut self.hover_scope.scroll,
+                self.account_scroll_limits.hover,
+            )
         } else {
-            (&self.accounts, &self.refresh_states)
+            (&mut self.account_scroll, self.account_scroll_limits.page)
         };
-        let rows = render::account_rows(self, accounts, refresh_states);
-        let limit = rows.saturating_sub(1);
-        let scroll = if hover {
-            &mut self.hover_scope.scroll
-        } else {
-            &mut self.account_scroll
-        };
-        *scroll = scroll.saturating_add_signed(delta).min(limit);
+        let limit = limit.unwrap_or(*scroll);
+        *scroll = (*scroll).min(limit).saturating_add_signed(delta).min(limit);
     }
 
     /// 滚动系统页某张卡片的内容，按上一帧画出的该卡滚动上界
@@ -1455,6 +1461,7 @@ impl State {
             card_scroll: HashMap::new(),
             card_scroll_limits: render::CardScrollLimits::default(),
             page_scroll_limits: render::PageScrollLimits::default(),
+            account_scroll_limits: render::AccountScrollLimits::default(),
             account_scroll: 0,
             scroll: 0,
             settings_scroll: 0,
@@ -1494,6 +1501,7 @@ impl State {
         self.page_rect = Rect::default();
         self.card_scroll_limits = render::CardScrollLimits::default();
         self.page_scroll_limits = render::PageScrollLimits::default();
+        self.account_scroll_limits = render::AccountScrollLimits::default();
     }
 
     /// 渲染纯函数：把 `painting_page`（停靠面板传该面板的 tab，全局浮层传 `None`）、
@@ -1554,6 +1562,7 @@ impl State {
             dialog,
             card_scroll_limits: output.card_scroll_limits,
             page_scroll_limits: output.page_scroll_limits,
+            account_scroll_limits: output.account_scroll_limits,
         })
     }
 
@@ -1583,6 +1592,8 @@ impl State {
         }
         self.card_scroll_limits.merge(&painted.card_scroll_limits);
         self.page_scroll_limits.merge(&painted.page_scroll_limits);
+        self.account_scroll_limits
+            .merge(&painted.account_scroll_limits);
         self.selected_hit = self.selected_hit.min(self.page_hits.saturating_sub(1));
     }
 

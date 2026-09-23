@@ -10,7 +10,7 @@ mod cards;
 mod paint;
 mod slots;
 
-use paint::{account_cards, dashboard_rows, multi_vendor, overview_cards};
+use paint::{account_cards, dashboard_rows, multi_vendor, overview_cards, scroll_limit};
 
 /// 两种显示模式统一的已用百分比：官方 `used_percent` 优先，否则由 `used/limit`
 /// 推算（ACC-20）。只夹下限、不夹上限：`spend_limit` 超限后可大于 100，原样
@@ -612,16 +612,17 @@ fn summary_line(scope: &AccountsScope<'_>, now_ms: u64) -> String {
 
 /// 账号页（F-1）：工具栏（厂商 chip 行 + 动作区）、分隔线、正文（≥96 列双栏）、
 /// 绑定行、汇总状态行；<60 列 chip 行折成选择器，<40 列只留头行 + 正文。行数按
-/// 高度逐级让位（先让分隔线，再让绑定行，再让汇总行），正文至少保留 3 行。
+/// 高度逐级让位（先让分隔线，再让绑定行，再让汇总行），正文至少保留 3 行。返回
+/// 正文的滚动上界（见 `accounts_content`）。
 pub(super) fn accounts(
     buffer: &mut Buffer,
     area: Rect,
     state: &State,
     palette: &Palette,
     hits: &mut Vec<(Rect, Action)>,
-) {
+) -> Option<usize> {
     if area.is_empty() {
-        return;
+        return None;
     }
     if !state.usage.enabled {
         text(
@@ -634,7 +635,7 @@ pub(super) fn accounts(
             ),
             Style::default().fg(palette.overlay0),
         );
-        return;
+        return None;
     }
     // 设置里关掉的厂商不进 chip 行 / 选择器：选中它只会得到一个永不发请求的页面。
     let listed = state
@@ -732,7 +733,7 @@ pub(super) fn accounts(
     if sep == 1 {
         rule(buffer, sep_rect, state.glyphs, palette);
     }
-    accounts_content(buffer, content, state, &scope, palette, hits);
+    let scroll_limit = accounts_content(buffer, content, state, &scope, palette, hits);
     if binding == 1 && scope.chrome == BodyChrome::Page {
         binding_row(buffer, binding_rect, &scope, palette, hits);
     }
@@ -745,11 +746,15 @@ pub(super) fn accounts(
             Style::default().fg(palette.overlay1),
         );
     }
+    scroll_limit
 }
 
 /// 账号正文：空态（kit `empty_state`），或厂商专属卡片 / 表格（≥96 列时右栏显示
 /// 所选账号的详情）；页面的跨厂商总览在仪表盘格式下是每厂商一张紧凑卡。强意图
 /// 刷新在途时整块变暗。页面与 agent 行悬浮层共用（悬浮层 ≤68×17，卡片按视口封顶）。
+///
+/// 返回本次绘制的滚动上界（行）：各列表渲染时就按它钳位起始行，`State` 写回后
+/// `scroll_accounts` 按同一个值钳位（冒烟 N5）；空态与没画正文时为 `None`。
 pub(super) fn accounts_content(
     buffer: &mut Buffer,
     area: Rect,
@@ -757,9 +762,9 @@ pub(super) fn accounts_content(
     scope: &AccountsScope<'_>,
     palette: &Palette,
     hits: &mut Vec<(Rect, Action)>,
-) {
+) -> Option<usize> {
     if area.is_empty() {
-        return;
+        return None;
     }
     if scope.accounts.is_empty() {
         // 强意图刷新在途时显示「刷新中…」，而不是退回「请选择厂商」。
@@ -776,11 +781,12 @@ pub(super) fn accounts_content(
             }
         };
         crate::ui::kit::empty_state::render_empty_state(buffer, area, &spec, palette);
-        return;
+        return None;
     }
     let dashboard = state.usage.format == UsageDisplayFormat::Dashboard;
-    if dashboard && is_overview(scope) && multi_vendor(scope.accounts) {
-        overview_cards(buffer, area, state, scope, palette, hits);
+    let scroll_limit = if dashboard && is_overview(scope) && multi_vendor(scope.accounts) {
+        let total = overview_cards(buffer, area, state, scope, palette, hits);
+        scroll_limit(total, area.height)
     } else {
         let (main, detail) = if area.width >= 96 {
             let [main, detail] =
@@ -789,19 +795,22 @@ pub(super) fn accounts_content(
         } else {
             (area, None)
         };
-        if dashboard {
-            account_cards(buffer, main, state, scope, palette, hits);
+        let limit = if dashboard {
+            let total = account_cards(buffer, main, state, scope, palette, hits);
+            scroll_limit(total, main.height)
         } else {
-            usage_table(buffer, main, state, scope, palette, hits);
-        }
+            usage_table(buffer, main, state, scope, palette, hits)
+        };
         if let Some(detail) = detail {
             account_detail(buffer, detail, state, scope, palette);
         }
-    }
+        limit
+    };
     if scope.refreshing {
         // 切换厂商 / 账号后旧快照保留但变暗，直到新数据到达。
         buffer.set_style(area, Style::default().add_modifier(Modifier::DIM));
     }
+    Some(scroll_limit)
 }
 
 /// 账号正文为空时的说明（冒烟 L17）。跨厂商总览（「全部厂商」）本身就是全部
@@ -1368,6 +1377,8 @@ fn binding_row(
     );
 }
 
+/// 表格格式的账号正文：每指标一行。返回滚动上界——起始行最多到最后一行（沿用既有
+/// 口径），渲染按同一个值钳位。
 pub(super) fn usage_table(
     buffer: &mut Buffer,
     area: Rect,
@@ -1375,7 +1386,7 @@ pub(super) fn usage_table(
     scope: &AccountsScope<'_>,
     palette: &Palette,
     hits: &mut Vec<(Rect, Action)>,
-) {
+) -> usize {
     let texts = &crate::i18n::texts().monitor;
     // 每行：账号 / 指标 / 用量 / 重置 / 新鲜度（着色）/ 状态。
     let mut entries = Vec::new();
@@ -1430,7 +1441,8 @@ pub(super) fn usage_table(
             }
         }
     }
-    let start = scope.scroll.min(entries.len().saturating_sub(1));
+    let limit = entries.len().saturating_sub(1);
+    let start = scope.scroll.min(limit);
     let rows = entries
         .iter()
         .skip(start)
@@ -1492,13 +1504,15 @@ pub(super) fn usage_table(
     )
     .column_spacing(1)
     .render(area, buffer);
+    limit
 }
 
-/// 账号正文的滚动真源（行数）：表格每指标一行；仪表盘见 `paint::dashboard_rows`
+/// 账号正文按内容需要的行数：表格每指标一行；仪表盘见 `paint::dashboard_rows`
 /// （多厂商概览是每厂商一张紧凑卡的网格，否则逐账号卡片的自然高度）。页面与
 /// 悬浮层共用同一个入口：传进来的就是页面的 `state.accounts`（按切片身份判定，
 /// 悬浮层的账号在自己的 `hover_scope` 里）且没选厂商时才按概览算，与
-/// `accounts_content` 的判据一致。渲染期再按视口钳位。
+/// `accounts_content` 的判据一致。悬浮卡按它定高；滚动上界不看它，由渲染按视口
+/// 算出后写回（`AccountScrollLimits`）。
 pub(in crate::client::shell::observability) fn account_rows(
     state: &State,
     accounts: &[AccountUsageSnapshot],

@@ -582,6 +582,16 @@ fn card_height(card: &Card<'_>, viewport: Rect, chrome: BodyChrome) -> usize {
     }
 }
 
+/// 卡片列表按行滚动的上界：总行数减视口高，最后一行正好露在视口底边；内容放得下
+/// 时为 0。`account_cards` / `overview_cards` 按它钳位起始行，`accounts_content` 把
+/// 同一个值交给 `State` 写回（冒烟 N5）。
+pub(in crate::client::shell::observability::render) fn scroll_limit(
+    total: usize,
+    viewport: u16,
+) -> usize {
+    total.saturating_sub(usize::from(viewport))
+}
+
 /// 概览是否画成每厂商一张紧凑卡：只有一个厂商时紧凑卡没有信息增量，直接画该
 /// 厂商的账号卡片。不分配。
 pub(super) fn multi_vendor(accounts: &[AccountUsageSnapshot]) -> bool {
@@ -620,9 +630,7 @@ pub(super) fn account_cards(
         .map(|card| card_height(card, area, scope.chrome))
         .collect::<Vec<_>>();
     let total = heights.iter().sum::<usize>();
-    let start = scope
-        .scroll
-        .min(total.saturating_sub(usize::from(area.height)));
+    let start = scope.scroll.min(scroll_limit(total, area.height));
     let mut y = 0_usize;
     for (card, height) in cards.iter().zip(heights) {
         let top = y as i32 - start as i32;
@@ -723,9 +731,7 @@ pub(super) fn overview_cards(
     let columns = overview_columns(area.width);
     let grid_rows = groups.len().div_ceil(columns);
     let total = grid_rows * OVERVIEW_CARD_HEIGHT;
-    let start = scope
-        .scroll
-        .min(total.saturating_sub(usize::from(area.height)));
+    let start = scope.scroll.min(scroll_limit(total, area.height));
     let gap = u16::from(columns > 1);
     let column_width = (area.width - gap) / columns as u16;
     for (index, group) in groups.iter().enumerate() {
