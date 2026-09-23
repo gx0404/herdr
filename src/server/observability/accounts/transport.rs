@@ -257,8 +257,9 @@ fn spawn_error(error: io::Error) -> QueryError {
 }
 
 /// 启动非交互查询并读完 stdout / stderr 直到子进程退出。stderr 由独立线程排空：不排空时
-/// 话多的 CLI 会卡在管道上永不退出；两路都有 `MAX_OUTPUT` 上限。
-fn capture_raw(
+/// 话多的 CLI 会卡在管道上永不退出；两路都有 `MAX_OUTPUT` 上限。`zcode_local` 也经这里起
+/// 系统 `sqlite3`（`provider.command`），共用同一套进程隔离与环境清洗。
+pub(super) fn capture_raw(
     provider: &Provider,
     account: &UsageAccountConfig,
     args: &[&str],

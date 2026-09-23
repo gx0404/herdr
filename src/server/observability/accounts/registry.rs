@@ -25,6 +25,10 @@ pub(super) enum Query {
     /// herdr 自带集成扩展的推送（pi）：扩展在会话事件里取数，经 socket 调
     /// `account.usage.report`。没有可改写的官方 `settings.json`，接入与否取决于集成是否安装。
     ExtensionPush,
+    /// 本机数据库只读轮询（zcode）：桌面应用不跑在 pane 里、没有可起的 CLI，也不经推送；
+    /// 按 CLI 探测节奏用系统 `sqlite3` 只读聚合其本地库（见 `zcode_local`）。只有本地统计，
+    /// 不查询远端额度，也不接受 `account.usage.report`（见 `accepts_reports`）。
+    ZcodeLocal,
 }
 
 pub(super) struct Provider {
@@ -49,7 +53,9 @@ COALESCE(SUM(tokens_cache_read), 0) AS tokens_cache_read, \
 COALESCE(SUM(tokens_cache_write), 0) AS tokens_cache_write \
 FROM session";
 
-/// 官方来源只登记范围内的五家；zcode 的用量等其外部来源适配器，不在这里。
+/// 用量来源登记范围内的六家：五家 pane 型官方集成，加上外部来源 zcode（桌面应用，只读
+/// 本机数据库；`command` 是实际起的 `sqlite3`——`zcode` 命令会拉起桌面窗口，任何路径都
+/// 不得执行它）。
 pub(super) const PROVIDERS: &[Provider] = &[
     Provider { agent: "codex", label: "Codex", command: "codex", source: "https://learn.chatgpt.com/docs/app-server", method: "account/rateLimits/read; account/usage/read", scope: "account", query: Query::Codex },
     // claude 主路径是官方 statusline 回调；`/usage` 交互探测只在 `interactive_probe` 开启且
@@ -61,6 +67,9 @@ pub(super) const PROVIDERS: &[Provider] = &[
     // pi 是多服务商 CLI：RPC 模式是另起的 headless 进程，连不进正在跑的 TUI，所以用量由 herdr
     // 的 pi 扩展在会话内取数后推送；条目是会话级统计，不是账号额度。
     Provider { agent: "pi", label: "Pi", command: "pi", source: "https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/extensions.md", method: "herdr pi 扩展：ctx.getContextUsage() + 会话用量合计", scope: "session", query: Query::ExtensionPush },
+    // zcode 零凭据：只读 `~/.zcode/cli/db/db.sqlite` 的 `model_usage`，按主任务 / 子 agent
+    // 拆分最近 24 h 的 token；远端额度档（要读 ZCode 存的凭据）不实现。
+    Provider { agent: "zcode", label: "ZCode", command: "sqlite3", source: "https://github.com/zai-org/ZCode", method: "sqlite3 -readonly ~/.zcode/cli/db/db.sqlite：model_usage 最近 24 h 聚合", scope: "local", query: Query::ZcodeLocal },
 ];
 
 pub(super) fn provider(agent: &str) -> Option<&'static Provider> {
@@ -110,6 +119,21 @@ pub(super) fn supports_callback(provider: &Provider) -> bool {
 pub(super) fn supports_extension_push(provider: &Provider) -> bool {
     matches!(provider.query, Query::ExtensionPush)
         && crate::integration::usage_supports_extension_push(provider.agent)
+}
+
+/// 该厂商是否接受 `account.usage.report`：本机数据库轮询型（zcode）不跑在 pane 里也不推送，
+/// 外来上报一律拒收——否则一次上报就会置回调闩锁，把本地轮询压住 15 分钟。
+pub(super) fn accepts_reports(provider: &Provider) -> bool {
+    !matches!(provider.query, Query::ZcodeLocal)
+}
+
+/// 隐式默认账号（`<agent>:default`）的 `auth_mode`：本机数据库轮询型是 `local`（零凭据、
+/// 不经任何 CLI 登录态），其余是 `cli`。
+pub(super) fn implicit_auth_mode(provider: &Provider) -> &'static str {
+    match provider.query {
+        Query::ZcodeLocal => "local",
+        _ => "cli",
+    }
 }
 
 /// 支持官方 statusline 回调的厂商的账号：其官方 `settings.json` 是否已接入 herdr 用量回调；
@@ -206,9 +230,13 @@ pub(super) fn provider_installed(provider: &Provider) -> bool {
     }
     // Version-manager installs (nvm/volta/standalone) are invisible to a
     // detached server's PATH; the integration layout checks cover them.
-    let value = match integration_target_for(provider.agent) {
-        Some(target) => crate::integration::integration_target_available(target),
-        None => crate::integration::command_available(provider.command),
+    // zcode 没有 CLI 可找：本机有它的数据库文件才算已安装（HOME 取自环境）。
+    let value = match (provider.query, integration_target_for(provider.agent)) {
+        (Query::ZcodeLocal, _) => {
+            super::zcode_local::installed(super::zcode_local::home_dir().as_deref())
+        }
+        (_, Some(target)) => crate::integration::integration_target_available(target),
+        (_, None) => crate::integration::command_available(provider.command),
     };
     if let Ok(mut cache) = availability_cache().lock() {
         cache.insert(provider.agent, (now, value));
@@ -388,43 +416,72 @@ pub(super) fn probe_fingerprint(
 mod tests {
     use super::*;
 
-    /// 官方来源只登记范围内的五家：每一家都对应一个仍受支持的 `detect::Agent`，范围外的厂商
-    /// （含历史别名）一律查不到，不会再被探测或接受回调。
+    /// 用量来源只登记范围内的六家：五家 pane 型官方来源各对应一个仍受支持的
+    /// `detect::Agent`；zcode 是外部来源（桌面应用，没有屏幕可检测），不在检测层里。范围外的
+    /// 厂商（含历史别名）一律查不到，不会再被探测或接受回调。
     #[test]
     fn registry_lists_only_the_in_scope_providers() {
         assert_eq!(
             PROVIDERS.iter().map(|p| p.agent).collect::<Vec<_>>(),
-            vec!["codex", "claude", "kimi", "opencode", "pi"]
+            vec!["codex", "claude", "kimi", "opencode", "pi", "zcode"]
         );
         let detectable = crate::detect::Agent::ALL
             .into_iter()
             .map(crate::detect::agent_label)
             .collect::<std::collections::HashSet<_>>();
         for entry in PROVIDERS {
-            assert!(
-                detectable.contains(entry.agent),
-                "{} 必须是可识别的 agent",
-                entry.agent
-            );
             assert!(entry.source.starts_with("https://"));
         }
         assert!(provider("Claude Code").is_some(), "别名仍归一到 claude");
         assert!(provider("kimi-code").is_some(), "别名仍归一到 kimi");
-        // 五家官方来源与可识别的 agent 一一对应：检测层删掉的 agent 不会再有用量来源。
+        // pane 型来源与可识别的 agent 一一对应：检测层删掉的 agent 不会再有用量来源。
         assert_eq!(
             PROVIDERS
                 .iter()
+                .filter(|p| !matches!(p.query, Query::ZcodeLocal))
                 .map(|p| p.agent)
                 .collect::<std::collections::HashSet<_>>(),
             detectable
         );
-        for retired in crate::detect::RETIRED_AGENT_LABELS
-            .iter()
-            .copied()
-            .chain(["zcode"])
-        {
+        assert!(!detectable.contains("zcode"), "zcode 不做屏幕检测");
+        assert!(
+            provider("ZCode").is_some_and(|p| matches!(p.query, Query::ZcodeLocal)),
+            "zcode 走本机数据库只读轮询"
+        );
+        for retired in crate::detect::RETIRED_AGENT_LABELS.iter().copied() {
             assert!(provider(retired).is_none(), "{retired} 不在用量范围内");
         }
+    }
+
+    /// zcode 是零凭据的本地来源：登记的命令是实际起的 `sqlite3`（`zcode` 命令会拉起桌面
+    /// 窗口，任何探测路径都不得执行它），没有回调 / 推送 / 交互探测，不接受外来上报，
+    /// 隐式默认账号的认证方式是 `local`，终态指纹不跟踪任何凭据文件。
+    #[test]
+    fn zcode_is_a_local_database_source_that_never_runs_the_desktop_app() {
+        let zcode = provider("zcode").expect("zcode 已登记");
+        assert_eq!(zcode.command, "sqlite3");
+        assert_eq!(zcode.label, "ZCode");
+        assert_eq!(zcode.scope, "local", "本地统计，不是账号额度");
+        assert_eq!(zcode.source, "https://github.com/zai-org/ZCode");
+        assert!(PROVIDERS.iter().all(|p| p.command != "zcode"));
+        assert_eq!(implicit_auth_mode(zcode), "local");
+        assert!(!accepts_reports(zcode));
+        assert!(!supports_callback(zcode) && !supports_extension_push(zcode));
+        assert_eq!(interactive_fallback(zcode), None);
+        assert!(!callback_only(zcode, &AccountUsageConfig::default()));
+        for entry in PROVIDERS.iter().filter(|p| p.agent != "zcode") {
+            assert_eq!(implicit_auth_mode(entry), "cli");
+            assert!(accepts_reports(entry), "{} 仍接受上报", entry.agent);
+        }
+        let account = UsageAccountConfig {
+            id: "zcode:default".into(),
+            agent: "zcode".into(),
+            ..Default::default()
+        };
+        assert!(
+            probe_fingerprint(zcode, &account).credentials.is_empty(),
+            "零凭据：不跟踪任何凭据文件"
+        );
     }
 
     #[test]
@@ -475,7 +532,7 @@ mod tests {
             "claude 主路径是官方回调"
         );
         assert_eq!(interactive_fallback(claude), Some("/usage"));
-        for agent in ["codex", "kimi", "opencode", "pi"] {
+        for agent in ["codex", "kimi", "opencode", "pi", "zcode"] {
             assert_eq!(interactive_fallback(provider(agent).unwrap()), None);
         }
 
@@ -621,9 +678,14 @@ mod tests {
 
     #[test]
     fn integration_detection_covers_every_provider() {
-        // 五家都有对应的集成目标，安装判定与设置页共用同一套检测；冻结枚举里其余变体是
-        // 已退役的墓碑，这里不引用。
-        for provider in PROVIDERS {
+        // 五家 pane 型来源都有对应的集成目标，安装判定与设置页共用同一套检测；冻结枚举里
+        // 其余变体是已退役的墓碑，这里不引用。zcode 没有要安装的钩子 / 插件，安装判定是
+        // 本机数据库文件是否存在（见 `zcode_local::installed`）。
+        assert!(integration_target_for("zcode").is_none());
+        for provider in PROVIDERS
+            .iter()
+            .filter(|p| !matches!(p.query, Query::ZcodeLocal))
+        {
             let target = integration_target_for(provider.agent)
                 .unwrap_or_else(|| panic!("{} 缺少集成目标", provider.agent));
             assert_eq!(

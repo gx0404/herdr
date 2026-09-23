@@ -28,6 +28,8 @@ const AUTO_BOUND_MESSAGE: &str = "已按唯一账号自动绑定";
 const NO_QUOTA_MESSAGE: &str =
     "官方回调暂无额度字段（statusline 未提供 rate_limits），等待下一次回调或探测";
 const NO_PUSH_USAGE_MESSAGE: &str = "集成扩展的推送暂无用量字段，等待下一次推送";
+/// 本机数据库轮询型来源（zcode）收到上报时的拒绝说明。
+const LOCAL_SOURCE_REPORT_MESSAGE: &str = "此来源只由 server 只读本机数据库取数，不接受上报";
 const CALLBACK_SOURCE: &str = "官方 CLI 回调";
 const EXTENSION_PUSH_SOURCE: &str = "herdr 集成扩展推送 · 会话统计，非账号额度";
 
@@ -255,6 +257,24 @@ pub(super) fn apply_report(
             .and_then(|pane| bindings.get(pane))
             .cloned()
             .unwrap_or_default();
+    }
+    // 本机数据库轮询型来源（zcode）不跑在 pane 里、也没有推送：外来上报会置回调闩锁、把
+    // 本地轮询压住，也不该为它记绑定待办。报文的 agent 与目标账号的 agent 两头都判。
+    let target = accounts
+        .iter()
+        .find(|account| account.id == params.account_id)
+        .and_then(|account| registry::provider(&account.agent));
+    if provider
+        .into_iter()
+        .chain(target)
+        .any(|provider| !registry::accepts_reports(provider))
+    {
+        return Err(rejections.reject(
+            &origin,
+            "invalid_usage_report",
+            LOCAL_SOURCE_REPORT_MESSAGE.into(),
+            now_ms,
+        ));
     }
     // 唯一候选自动绑定：这里只选定候选；绑定要等报文解析出额度、全部校验通过后
     // 才写入，被拒的报文不得留下绑定。账号用量开关关闭时沿用旧的拒绝路径。
@@ -1284,6 +1304,58 @@ mod tests {
         assert_eq!(rejected.code, "usage_binding_required");
         assert!(fixture.bindings.is_empty());
         assert!(!fixture.cache["claude:default"].callback_latched());
+    }
+
+    /// zcode 只由 server 只读本机数据库取数：按 agent 或按目标账号指向它的上报一律拒收，
+    /// 不自动绑定、不记待办、不置闩锁，缓存里的本地统计原样保留。
+    #[test]
+    fn reports_for_the_local_database_source_are_refused() {
+        let mut fixture = Fixture::new(vec![
+            account("zcode:default", "zcode"),
+            account("claude:default", "claude"),
+        ]);
+        let before = fixture.cache["zcode:default"].snapshot.clone();
+
+        // 未绑定 pane、唯一候选、带官方报文：本来会自动绑定的形态。
+        let mut by_agent = report(Some("wT:p9"), "");
+        by_agent.agent = Some("zcode".into());
+        let refused = rejected(fixture.apply(by_agent));
+        assert_eq!(refused.code, "invalid_usage_report");
+        assert_eq!(refused.message, LOCAL_SOURCE_REPORT_MESSAGE);
+
+        // 显式指向 zcode 账号、只带快照指标（不经官方报文解析）。
+        let mut by_account = report(None, "zcode:default");
+        by_account.agent = None;
+        by_account.official_payload = None;
+        by_account.snapshot.metrics = vec![UsageMetric {
+            id: "session/tokens/total".into(),
+            label: "合计 token".into(),
+            unit: "tokens".into(),
+            scope: "local".into(),
+            used: Some(1.0),
+            ..Default::default()
+        }];
+        assert_eq!(code(&fixture.apply(by_account)), "invalid_usage_report");
+
+        // 经已有绑定指向 zcode 账号，报文却自称 claude：目标账号一侧同样拒收。
+        fixture
+            .bindings
+            .insert("pane-z".into(), "zcode:default".into());
+        assert_eq!(
+            code(&fixture.apply(report(Some("pane-z"), ""))),
+            "invalid_usage_report"
+        );
+
+        let entry = &fixture.cache["zcode:default"];
+        assert!(!entry.callback_latched());
+        assert_eq!(entry.snapshot, before);
+        assert_eq!(fixture.bindings.len(), 1, "只有测试自己写的那条绑定");
+        assert!(fixture.pending_panes().is_empty());
+        // 其它厂商不受影响。
+        fixture
+            .bindings
+            .insert("pane-1".into(), "claude:default".into());
+        assert_eq!(code(&fixture.apply(report(Some("pane-1"), ""))), "ok");
     }
 
     #[test]

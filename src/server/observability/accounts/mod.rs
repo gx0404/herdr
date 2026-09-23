@@ -4,6 +4,7 @@ mod parse;
 mod persistence;
 mod registry;
 mod transport;
+mod zcode_local;
 pub(crate) use transport::run_probe_helper;
 
 use std::collections::{HashMap, HashSet};
@@ -1085,7 +1086,7 @@ fn configured_accounts(
                 label: provider.label.into(),
                 agent: provider.agent.into(),
                 provider: provider.agent.into(),
-                auth_mode: "cli".into(),
+                auth_mode: registry::implicit_auth_mode(provider).into(),
                 ..Default::default()
             });
         }
@@ -1170,7 +1171,8 @@ fn uses_api(account: &UsageAccountConfig) -> bool {
 
 /// 对外播报的最小刷新间隔（秒）——`account.usage.providers` 的 `minimum_interval_seconds`
 /// 与自动轮询间隔的唯一真源。API 凭据按 `api_refresh_seconds`（≥60）；回调型与扩展推送型
-/// 厂商没有可轮询的官方接口，播报 0；其余 CLI 探测按 `cli_refresh_seconds`（≥300）。
+/// 厂商没有可轮询的官方接口，播报 0；其余 CLI 探测（含 zcode 的本机数据库只读轮询）按
+/// `cli_refresh_seconds`（≥300）。
 fn minimum_interval_seconds(
     provider: Option<&registry::Provider>,
     api: bool,
@@ -1615,6 +1617,8 @@ const PI_WAITING_MESSAGE: &str = "等待 herdr 的 pi 扩展推送会话用量�
 fn query(account: &UsageAccountConfig, timeout: Duration, options: ProbeOptions) -> ProbeOutcome {
     let mut snapshot = empty_snapshot(account);
     let mut flags = ClaudeProbeFlags::default();
+    // Ready 快照的说明：默认清空；本地统计型来源（zcode）保留「本地统计，非账号额度」声明。
+    let mut ready_message: Option<&'static str> = None;
     let result = if account.auth_mode == "api" || account.credential_env.is_some() {
         snapshot.source = "官方 API".into();
         http::query(account, timeout)
@@ -1696,6 +1700,17 @@ fn query(account: &UsageAccountConfig, timeout: Duration, options: ProbeOptions)
                 flags.slow_poll = true;
                 Err((ObservationStatus::NeedsBinding, PI_WAITING_MESSAGE.into()))
             }
+            registry::Query::ZcodeLocal => {
+                snapshot.source = zcode_local::SOURCE.into();
+                ready_message = Some(zcode_local::LOCAL_NOTICE);
+                zcode_local::probe(
+                    provider,
+                    account,
+                    zcode_local::home_dir().as_deref(),
+                    timeout,
+                    super::now_ms(),
+                )
+            }
         }
     } else {
         Err((
@@ -1703,6 +1718,24 @@ fn query(account: &UsageAccountConfig, timeout: Duration, options: ProbeOptions)
             "未登记此 Agent 的官方查询方案".into(),
         ))
     };
+    settle_result(&mut snapshot, &account.agent, result, ready_message);
+    snapshot.observed_at_ms = super::now_ms();
+    ProbeOutcome {
+        snapshot,
+        trust_required: flags.trust_required,
+        slow_poll: flags.slow_poll,
+    }
+}
+
+/// 把探测结果写进快照：指标先过 `retain_valid`，一条合规的都不剩按 Unsupported；Ready 时
+/// `message` 取 `ready_message`（多数来源为空，本地统计型来源带「非账号额度」声明）；失败
+/// 原样写入状态与说明。
+fn settle_result(
+    snapshot: &mut AccountUsageSnapshot,
+    agent: &str,
+    result: Result<Vec<UsageMetric>, transport::QueryError>,
+    ready_message: Option<&'static str>,
+) {
     match result {
         Ok(mut metrics) => {
             // 过滤语义：单条不合规的指标只丢它自己，不把整份结果推进 Unsupported 终态。
@@ -1712,7 +1745,7 @@ fn query(account: &UsageAccountConfig, timeout: Duration, options: ProbeOptions)
                     event = "account.probe.metrics_dropped",
                     subsystem = "account_usage",
                     outcome = "dropped",
-                    agent = %account.agent,
+                    agent = %agent,
                     dropped,
                     "丢弃不合规的用量指标"
                 );
@@ -1723,19 +1756,13 @@ fn query(account: &UsageAccountConfig, timeout: Duration, options: ProbeOptions)
             } else {
                 snapshot.metrics = metrics;
                 snapshot.status = ObservationStatus::Ready;
-                snapshot.message = None;
+                snapshot.message = ready_message.map(str::to_owned);
             }
         }
         Err((status, message)) => {
             snapshot.status = status;
             snapshot.message = Some(message);
         }
-    }
-    snapshot.observed_at_ms = super::now_ms();
-    ProbeOutcome {
-        snapshot,
-        trust_required: flags.trust_required,
-        slow_poll: flags.slow_poll,
     }
 }
 
@@ -2340,6 +2367,153 @@ mod tests {
         assert_eq!(refresh_interval(&account("opencode", "cli"), &config), 300);
         // 显式刷新防抖是固定 10 s，与厂商间隔无关。
         assert_eq!(MANUAL_DEBOUNCE, Duration::from_secs(10));
+    }
+
+    /// zcode 本地来源的账号与调度：本机有库才补 `zcode:default`（认证方式 `local`），按 CLI
+    /// 探测节奏自动轮询、不是纯推送；`disabled_providers` 含它时不派发探测。
+    #[test]
+    fn zcode_local_account_polls_on_the_cli_cadence_and_honours_disabled_providers() {
+        let config = AccountUsageConfig::default();
+        assert!(
+            !configured_accounts(&config, &|provider| provider.agent != "zcode")
+                .iter()
+                .any(|account| account.agent == "zcode"),
+            "库不存在 ⇒ 账号不出现"
+        );
+        assert!(
+            configured_accounts(&config, &|provider| provider.agent != "zcode")
+                .iter()
+                .all(|account| account.auth_mode == "cli")
+        );
+        let accounts = configured_accounts(&config, &|provider| provider.agent == "zcode");
+        let [zcode] = accounts.as_slice() else {
+            panic!("只补一个 zcode 默认账号：{accounts:?}");
+        };
+        assert_eq!(
+            (
+                zcode.id.as_str(),
+                zcode.label.as_str(),
+                zcode.agent.as_str(),
+                zcode.provider.as_str(),
+                zcode.auth_mode.as_str(),
+            ),
+            ("zcode:default", "ZCode", "zcode", "zcode", "local")
+        );
+        assert!(!uses_api(zcode), "零凭据，不走 API 路径");
+        assert!(known_account_id(&config, "zcode:default"));
+        assert_eq!(
+            minimum_interval_seconds(registry::provider("zcode"), false, &config),
+            300
+        );
+        assert_eq!(refresh_interval(zcode, &config), 300);
+
+        let (tasks, input) = mpsc::sync_channel(4);
+        let mut cache = HashMap::from([(zcode.id.clone(), fresh_entry(zcode))]);
+        let dispatched = request_accounts(
+            &UsageParams::default(),
+            false,
+            &accounts,
+            &config,
+            &HashMap::new(),
+            &mut cache,
+            &tasks,
+            &mut 1,
+        );
+        assert_eq!(dispatched, vec!["zcode:default".to_owned()], "总览自动轮询");
+        assert!(input.try_recv().is_ok());
+        assert!(
+            !refresh_state(&cache[&zcode.id], zcode, &config, Instant::now(), 0).callback_only,
+            "显式刷新能产生新样本"
+        );
+
+        let disabled = AccountUsageConfig {
+            disabled_providers: vec!["zcode".into()],
+            ..Default::default()
+        };
+        let mut cache = HashMap::from([(zcode.id.clone(), fresh_entry(zcode))]);
+        let dispatched = request_accounts(
+            &UsageParams::default(),
+            true,
+            &accounts,
+            &disabled,
+            &HashMap::new(),
+            &mut cache,
+            &tasks,
+            &mut 1,
+        );
+        assert!(dispatched.is_empty());
+        assert!(input.try_recv().is_err(), "关闭后连显式刷新也不起 sqlite3");
+        let snapshot = &cache[&zcode.id].snapshot;
+        assert_eq!(snapshot.status, ObservationStatus::Unavailable);
+        assert_eq!(snapshot.message.as_deref(), Some("已在设置中关闭此厂商"));
+    }
+
+    /// zcode 的探测结果落进缓存：Ready 带「本地统计、远端额度不查询」声明；之后库查询失败
+    /// 按 Error 计失败次数，保留上次样本标为缓存；sqlite3 缺失是 Unavailable，不计失败。
+    #[test]
+    fn zcode_local_results_settle_with_the_local_notice_and_keep_samples_on_failure() {
+        let account = configured_accounts(&AccountUsageConfig::default(), &|provider| {
+            provider.agent == "zcode"
+        })
+        .remove(0);
+        let mut ready = empty_snapshot(&account);
+        assert_eq!(ready.source_url, "https://github.com/zai-org/ZCode");
+        settle_result(
+            &mut ready,
+            &account.agent,
+            Ok(zcode_local::metrics(&zcode_local::Totals {
+                main_tokens: Some(100.0),
+                subagent_tokens: Some(20.0),
+                tool_uses: Some(3.0),
+                subagents: Some(1.0),
+            })),
+            Some(zcode_local::LOCAL_NOTICE),
+        );
+        assert_eq!(ready.status, ObservationStatus::Ready);
+        assert_eq!(ready.message.as_deref(), Some(zcode_local::LOCAL_NOTICE));
+        assert_eq!(ready.metrics.len(), 6);
+        assert_eq!(ready.plan, None, "本地统计没有套餐");
+        ready.observed_at_ms = 1_000;
+
+        let now = Instant::now();
+        let mut entry = fresh_entry(&account);
+        assert!(merge_result(&mut entry, ready, now));
+        assert_eq!(
+            entry.snapshot.message.as_deref(),
+            Some(zcode_local::LOCAL_NOTICE)
+        );
+
+        let mut failed = empty_snapshot(&account);
+        settle_result(
+            &mut failed,
+            &account.agent,
+            Err((ObservationStatus::Error, "读库失败".into())),
+            Some(zcode_local::LOCAL_NOTICE),
+        );
+        assert_eq!(
+            failed.message.as_deref(),
+            Some("读库失败"),
+            "失败时不挂本地统计声明"
+        );
+        failed.observed_at_ms = 2_000;
+        assert!(merge_result(&mut entry, failed, now));
+        assert_eq!(entry.snapshot.status, ObservationStatus::Stale);
+        assert_eq!(entry.snapshot.metrics.len(), 6, "沿用上次样本");
+        assert_eq!(entry.snapshot.observed_at_ms, 1_000);
+        assert_eq!(entry.failures, 1, "按失败次数指数退避");
+        assert!(entry.terminal.is_none(), "查询失败不是终态");
+
+        let mut missing = empty_snapshot(&account);
+        settle_result(
+            &mut missing,
+            &account.agent,
+            Err((ObservationStatus::Unavailable, "没有 sqlite3".into())),
+            Some(zcode_local::LOCAL_NOTICE),
+        );
+        assert!(merge_result(&mut entry, missing, now));
+        assert_eq!(entry.snapshot.status, ObservationStatus::Unavailable);
+        assert_eq!(entry.failures, 0);
+        assert!(entry.terminal.is_none());
     }
 
     #[test]
