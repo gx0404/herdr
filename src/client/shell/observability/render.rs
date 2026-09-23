@@ -435,8 +435,10 @@ pub(super) fn paint(
         }
     }
     let mut hover_hits = Vec::new();
-    // agent 行悬浮只在没有页面时画（停靠面板的全局 pass / 经典布局无页面）。
-    let mut hover_rect = if draw_hover && page.is_none() {
+    // agent 行悬浮只在没有页面时画（停靠面板的全局 pass / 经典布局无页面）；
+    // 钉住的卡是用户显式打开的（右键「用量」），经典布局页面之上也画。
+    let pinned = state.hover.as_ref().is_some_and(|hover| hover.pinned);
+    let mut hover_rect = if draw_hover && (page.is_none() || pinned) {
         hover_layer(buffer, state, cx, &mut hover_hits)
     } else {
         Rect::default()

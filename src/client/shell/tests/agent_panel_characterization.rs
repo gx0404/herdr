@@ -2290,7 +2290,7 @@ fn tree_rows_follow_the_machine_workspace_tab_agent_activity_hierarchy() {
 
 /// agent 行右键动作（W3 接上）：「重命名」沿用 pane 重命名浮层；「关闭窗格」发
 /// `pane.close`；「绑定账号」打开监控 → 账号页、选中该 agent 的厂商并把待绑定
-/// pane 设为它；「用量」待 observability 的公开入口，仍是空动作。其它端点的
+/// pane 设为它；「用量」打开并钉住该 agent 的用量卡。其它端点的
 /// agent：重命名先切端点并聚焦（不打开浮层），关闭直接发往该端点，绑定切过去
 /// 并打开账号页但不预设 pane。
 #[test]
@@ -2383,7 +2383,8 @@ fn tree_agent_context_actions_rename_bind_and_close_the_agent_pane() {
     ));
     assert!(state.active_endpoint_id.is_local());
 
-    // 用量：公开入口未就绪，空动作。
+    // 用量：打开并钉住该 agent 的用量卡（不发端点请求、不开浮层）；同一 agent
+    // 再来一次即关闭。
     let mut outcome = ClientShellInput::default();
     state.activate_agent_context_action(
         ClientEndpointId::Local,
@@ -2392,7 +2393,23 @@ fn tree_agent_context_actions_rename_bind_and_close_the_agent_pane() {
         &mut outcome,
     );
     assert!(state.overlay.is_none() && outcome.actions.is_empty());
-    assert!(state.observability.hover.is_none());
+    let hover = state.observability.hover.as_ref().expect("用量卡已打开");
+    assert!(hover.visible && hover.pinned);
+    assert!(matches!(
+        &hover.target,
+        super::super::observability::HoverTarget::Agent { endpoint_id, pane, agent }
+            if endpoint_id.is_local() && pane == "pane_1" && agent == "pi"
+    ));
+    state.activate_agent_context_action(
+        ClientEndpointId::Local,
+        pane("pane_1"),
+        ClientContextMenuAction::ShowAgentUsage,
+        &mut outcome,
+    );
+    assert!(
+        state.observability.hover.is_none(),
+        "同一 agent 再来一次即关闭"
+    );
 
     // 绑定账号（当前端点）：账号页 + 厂商 + 待绑定 pane。
     let mut outcome = ClientShellInput::default();

@@ -136,13 +136,9 @@ impl ClientContextMenuOverlay {
                     item(t.menu_rename, Action::RenameAgent),
                 ];
                 if agent.is_some() {
-                    // seam-stub(hover-card)：「用量」要打开并钉住该 agent 的用量悬停卡，
-                    // observability 还没有公开入口；接通前保持灰显（激活后
-                    // `activate_agent_context_action` 只会落到空臂，菜单却已关掉）。
-                    items.push(ClientContextMenuItem {
-                        enabled: false,
-                        ..item(t.menu_usage, Action::ShowAgentUsage)
-                    });
+                    // 「用量」打开并钉住该 agent 的用量悬停卡
+                    // （`ClientShellState::pin_agent_usage_card`）。
+                    items.push(item(t.menu_usage, Action::ShowAgentUsage));
                     items.push(item(t.menu_bind_account, Action::BindAgentAccount));
                 }
                 items.push(item(t.menu_close, Action::CloseAgentPane));

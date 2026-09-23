@@ -95,25 +95,44 @@ pub(super) fn hover_layer(
                 return Rect::default();
             }
             clear(buffer, hover_rect);
-            let inner = block(
-                buffer,
-                hover_rect,
-                &format!(" {} · {} ", agent, tr("Account usage", "账号用量")),
-                cx,
+            let texts = &crate::i18n::texts().agent_panel;
+            let title = format!(
+                " {} ",
+                crate::i18n::fill(texts.usage_card_title_fmt, &[("agent", agent)])
             );
-            accounts_body(
-                buffer,
-                Rect::new(
-                    inner.x,
-                    inner.y,
-                    inner.width,
-                    inner.height.saturating_sub(2),
-                ),
-                state,
-                &hover_scope(state),
-                palette,
-                hover_hits,
+            let inner = block(buffer, hover_rect, &title, cx);
+            if hover.pinned {
+                pinned_marker(buffer, hover_rect, &title, texts.usage_pinned, palette);
+            }
+            let body = Rect::new(
+                inner.x,
+                inner.y,
+                inner.width,
+                inner.height.saturating_sub(2),
             );
+            if state.usage.enabled {
+                accounts_body(
+                    buffer,
+                    body,
+                    state,
+                    &hover_scope(state),
+                    palette,
+                    hover_hits,
+                );
+            } else {
+                // 用量在设置里关闭时不会发请求：照实说明，而不是停在「刷新中…」
+                // （钉住入口不看这个开关，指针悬浮则根本不会出现）。
+                text(
+                    buffer,
+                    body,
+                    0,
+                    tr(
+                        "Account usage is disabled in settings.",
+                        "账号用量已在设置中关闭。",
+                    ),
+                    Style::default().fg(palette.overlay0),
+                );
+            }
             // 底行只留「打开页面」：绑定 / 刷新 / 回调等动作都在正文自带的动作行里，
             // 不再出现两个「绑定账号」（ACC-02）。
             let y = inner.bottom().saturating_sub(1);
@@ -128,4 +147,22 @@ pub(super) fn hover_layer(
             hover_rect
         }
     }
+}
+
+/// 钉住态标记：写在卡片顶边右侧（`─ 已钉住 ─┐`），放不下（会压到标题）就不画。
+fn pinned_marker(buffer: &mut Buffer, card: Rect, title: &str, label: &str, palette: &Palette) {
+    let title_width = UnicodeWidthStr::width(title) as u16;
+    let width = UnicodeWidthStr::width(label) as u16 + 2;
+    // 右上角留一格边框与一格横线；标题从左框后一格开始，两者之间至少隔一格。
+    let x = card.right().saturating_sub(width + 2);
+    if card.height == 0 || x <= card.x.saturating_add(1 + title_width) {
+        return;
+    }
+    let style = Style::default()
+        .fg(palette.accent)
+        .bg(palette.panel_bg)
+        .add_modifier(Modifier::BOLD);
+    buffer.set_stringn(x, card.y, " ", 1, style);
+    buffer.set_stringn(x + 1, card.y, label, usize::from(width - 2), style);
+    buffer.set_stringn(x + width - 1, card.y, " ", 1, style);
 }

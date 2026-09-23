@@ -895,6 +895,8 @@ pub const TEXTS: Texts = Texts {
         menu_usage: "用量",
         menu_bind_account: "绑定账号",
         menu_close: "关闭窗格",
+        usage_card_title_fmt: "{agent} · 用量",
+        usage_pinned: "已钉住",
     },
     agent_activity: AgentActivityTexts {
         title_fmt: "Agent 活动 — {name}",

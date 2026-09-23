@@ -1795,10 +1795,17 @@ impl ClientShellState {
             (Action::CloseAgentPane, AgentActivityOwner::Pane { pane_id }) => {
                 self.close_agent_pane(endpoint_id, pane_id, outcome);
             }
-            // seam-stub(hover-card)：「用量」要打开并钉住该 agent 的用量悬停卡，
-            // 悬停卡状态机归监控车道，observability 还没有可调用的公开入口；
-            // 条目在菜单里保持灰显，这里兜住键盘 / 程序化路径。
-            (Action::ShowAgentUsage, _) => {}
+            (Action::ShowAgentUsage, AgentActivityOwner::Pane { pane_id }) => {
+                // 打开并钉住该 agent 的用量卡；厂商取快照里的 agent 名，未识别
+                // （`None`）或不可绑定（muse）时没有用量可看，无动作。
+                let agent = self
+                    .endpoint_agent(&endpoint_id, &pane_id)
+                    .and_then(|agent| agent.agent.clone())
+                    .filter(|name| super::observability::is_bindable_agent(name));
+                if let Some(agent) = agent {
+                    self.pin_agent_usage_card(endpoint_id, pane_id, agent, outcome);
+                }
+            }
             _ => {}
         }
     }

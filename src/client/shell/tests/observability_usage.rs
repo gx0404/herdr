@@ -3480,22 +3480,16 @@ fn agent_row(state: &ClientShellState, pane_id: &str) -> Rect {
         .unwrap_or_else(|| panic!("Agents 面板列出 {pane_id}"))
 }
 
-/// 直接构造一个已可见、已钉住的 agent 行悬浮：目前没有入口会置位 `pinned`，
-/// 状态机对钉住态的处理（不随离开关闭、Esc / 浮层外点击关闭）仍要钉住。
+/// 经生产入口（右键菜单「用量」走的同一个 `pin_agent_usage_card`）打开并钉住
+/// 活动端点上某 agent 的用量卡。
 fn pin_agent_hover(state: &mut ClientShellState, pane_id: &str, agent: &str) {
-    let anchor = agent_row(state, pane_id);
-    state.observability.hover = Some(Hover {
-        target: HoverTarget::Agent {
-            endpoint_id: state.active_endpoint_id.clone(),
-            pane: pane_id.into(),
-            agent: agent.into(),
-        },
-        anchor,
-        since: Instant::now(),
-        visible: true,
-        leave_at: None,
-        pinned: true,
-    });
+    let endpoint_id = state.active_endpoint_id.clone();
+    state.pin_agent_usage_card(
+        endpoint_id,
+        pane_id.into(),
+        agent.into(),
+        &mut ClientShellInput::default(),
+    );
 }
 
 /// 系统页「编辑布局」：↑↓ 移动选中的卡片而不是滚动卡片内容，顺序写回偏好；
@@ -4092,6 +4086,280 @@ fn pinned_agent_hover_survives_leaving_and_closes_on_esc_or_outside_click() {
     let away = away_point(&state);
     click(&mut state, away.0, away.1);
     assert!(state.observability.hover.is_none(), "浮层外点击关闭");
+}
+
+/// 右键 agent 行打开菜单；返回菜单条目里「用量」的下标（断言它可点）。
+fn open_agent_menu_at_usage(state: &mut ClientShellState, pane_id: &str) -> usize {
+    let row = agent_row(state, pane_id);
+    state.handle_raw_events(vec![RawInputEvent::Mouse(MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Right),
+        column: row.x + 1,
+        row: row.y,
+        modifiers: KeyModifiers::NONE,
+    })]);
+    let Some(ClientShellOverlay::ContextMenu(menu)) = state.overlay.as_ref() else {
+        panic!("agent 行右键应打开菜单: {:?}", state.overlay);
+    };
+    let items = menu.items();
+    let usage = items
+        .iter()
+        .position(|item| item.action == ClientContextMenuAction::ShowAgentUsage)
+        .expect("菜单里有「用量」");
+    assert!(items[usage].enabled, "「用量」已接通，可点");
+    usage
+}
+
+/// 钉住的用量卡画在屏幕上：边框与标题字符、标题栏的「{agent} · 用量」与钉住
+/// 标记都在卡片顶边。
+fn assert_pinned_card_drawn(state: &mut ClientShellState, cols: u16, rows: u16) {
+    let frame = state.compose(cols, rows).expect("钉住的用量卡");
+    let card = state.observability.hover_rect;
+    assert!(!card.is_empty(), "{cols}x{rows}: 钉住的卡已画出");
+    assert_card_chrome(state, &frame, card);
+    let texts = &crate::i18n::texts().agent_panel;
+    let compact = |text: &str| {
+        text.chars()
+            .filter(|ch| !ch.is_whitespace())
+            .collect::<String>()
+    };
+    let top = compact(&frame_row(&frame, card.y));
+    let title = crate::i18n::fill(texts.usage_card_title_fmt, &[("agent", "claude")]);
+    assert!(
+        top.contains(&compact(&title)),
+        "{cols}x{rows}: 标题 {title:?} 在顶边: {top:?}"
+    );
+    if card.width >= 30 {
+        assert!(
+            top.contains(&compact(texts.usage_pinned)),
+            "{cols}x{rows}: 钉住标记 {:?} 在顶边: {top:?}",
+            texts.usage_pinned
+        );
+    }
+}
+
+/// 键盘路径：右键 agent 行 → ↓ 移到「用量」→ Enter：菜单关闭，卡片立即可见并
+/// 钉住，锚在该 agent 行；悬浮层随即发自己的用量请求（带该 pane）。停靠工作台。
+#[test]
+fn context_menu_usage_pins_the_agent_card_by_keyboard_in_the_docked_layout() {
+    let mut state = usage_ready();
+    state.compose(120, 40).expect("工作台");
+    let row = agent_row(&state, "pane_1");
+    let usage = open_agent_menu_at_usage(&mut state, "pane_1");
+    for _ in 0..8 {
+        let Some(ClientShellOverlay::ContextMenu(menu)) = state.overlay.as_ref() else {
+            panic!("菜单仍打开");
+        };
+        if menu.highlighted == usage {
+            break;
+        }
+        press_key(&mut state, crossterm::event::KeyCode::Down);
+    }
+    press_key(&mut state, crossterm::event::KeyCode::Enter);
+    assert!(state.overlay.is_none(), "激活后菜单关闭");
+    assert_eq!(agent_hover(&state), Some((true, true)), "立即可见并钉住");
+    let hover = state.observability.hover.as_ref().expect("钉住的卡");
+    assert_eq!(hover.anchor, row, "锚在该 agent 行");
+    assert!(matches!(
+        &hover.target,
+        HoverTarget::Agent { pane, agent, .. } if pane == "pane_1" && agent == "claude"
+    ));
+    let calls = usage_calls(&tick(&mut state, Instant::now()));
+    assert_eq!(calls.len(), 1, "钉住即发悬浮层自己的请求: {calls:?}");
+    assert_eq!(calls[0].1.pane_id.as_deref(), Some("pane_1"));
+    assert_pinned_card_drawn(&mut state, 120, 40);
+    assert!(!state.observability.hover_rect.intersects(row), "不盖住行");
+}
+
+/// 鼠标路径 + 经典布局：点菜单里的「用量」行同样钉住并画出卡片；宽 / 窄 / 极窄
+/// 三档都画得出。
+#[test]
+fn context_menu_usage_click_pins_the_agent_card_in_the_classic_layout() {
+    let mut state = classic_usage_ready();
+    let usage = open_agent_menu_at_usage(&mut state, "pane_1");
+    state.compose(120, 40).expect("菜单");
+    let usage_row = state
+        .hits
+        .context_menu_rows
+        .iter()
+        .find(|(_, index)| *index == usage)
+        .map(|(rect, _)| *rect)
+        .expect("「用量」行可点");
+    click(&mut state, usage_row.x + 1, usage_row.y);
+    assert!(state.overlay.is_none());
+    assert_eq!(agent_hover(&state), Some((true, true)));
+    for (cols, rows) in [(120, 40), (60, 24), (30, 12)] {
+        assert_pinned_card_drawn(&mut state, cols, rows);
+    }
+}
+
+/// 钉住入口是用户的显式动作：`usage.position = page`（关掉指针悬浮）时照样
+/// 打开；指针离开、扫过别的行都不关；换 agent 换卡；再对同一 agent 调用即关闭
+/// （toggle）。
+#[test]
+fn pinned_usage_card_ignores_page_position_and_toggles_on_the_same_agent() {
+    let mut snapshot = snapshot();
+    snapshot.agents.push(agent_in_pane("pane_1", "claude"));
+    let mut other = agent_in_pane("pane_2", "codex");
+    other.focused = false;
+    snapshot.agents.push(other);
+    let mut state = docked_with(snapshot);
+    tick(&mut state, Instant::now());
+    state.observability.usage.position = crate::config::UsageDisplayPosition::Page;
+    state.compose(120, 40).expect("工作台");
+    // 指针悬浮在 page 模式下关闭。
+    let row = agent_row(&state, "pane_1");
+    moved(&mut state, row.x, row.y);
+    assert!(state.observability.hover.is_none(), "page 模式没有指针悬浮");
+    let pin = |state: &mut ClientShellState, pane: &str| {
+        let mut outcome = ClientShellInput::default();
+        let endpoint_id = state.active_endpoint_id.clone();
+        state.activate_agent_context_action(
+            endpoint_id,
+            super::super::agent_activity_overlay::AgentActivityOwner::Pane {
+                pane_id: pane.into(),
+            },
+            ClientContextMenuAction::ShowAgentUsage,
+            &mut outcome,
+        );
+        outcome
+    };
+    let outcome = pin(&mut state, "pane_1");
+    assert!(outcome.repaint);
+    assert_eq!(agent_hover(&state), Some((true, true)), "page 模式照样钉住");
+    assert_pinned_card_drawn(&mut state, 120, 40);
+    let away = away_point(&state);
+    moved(&mut state, away.0, away.1);
+    let other_row = agent_row(&state, "pane_2");
+    if !state.observability.hover_rect.intersects(other_row) {
+        moved(&mut state, other_row.x, other_row.y);
+    }
+    tick(&mut state, Instant::now() + Duration::from_secs(2));
+    assert_eq!(
+        agent_hover(&state),
+        Some((true, true)),
+        "离开、扫过别的行都不关"
+    );
+    // 另一个 agent：换成它的卡（仍钉住），作用域跟着换。
+    pin(&mut state, "pane_2");
+    assert!(matches!(
+        state.observability.hover.as_ref().map(|hover| &hover.target),
+        Some(HoverTarget::Agent { pane, agent, .. }) if pane == "pane_2" && agent == "codex"
+    ));
+    assert_eq!(agent_hover(&state), Some((true, true)));
+    assert_eq!(
+        state.observability.hover_scope.provider.as_deref(),
+        Some("codex"),
+        "作用域跟着换"
+    );
+    // 同一 agent 再来一次：关闭。
+    let outcome = pin(&mut state, "pane_2");
+    assert!(outcome.repaint);
+    assert!(
+        state.observability.hover.is_none(),
+        "同一 agent 再次调用即关闭"
+    );
+    assert_eq!(
+        state.observability.hover_scope.provider, None,
+        "作用域一并复位"
+    );
+}
+
+/// 已被指针悬浮打开的同一张卡：原地钉住，不重置作用域（已拿到的数据与在途请求
+/// 保留）。
+#[test]
+fn pinning_the_card_already_under_the_pointer_keeps_its_scope() {
+    let mut state = usage_ready();
+    state.compose(120, 40).expect("工作台");
+    let row = agent_row(&state, "pane_1");
+    let t0 = Instant::now();
+    moved(&mut state, row.x, row.y);
+    tick(&mut state, t0 + Duration::from_millis(450));
+    assert_eq!(agent_hover(&state), Some((true, false)));
+    let epoch = state.observability.hover_scope.epoch;
+    pin_agent_hover(&mut state, "pane_1", "claude");
+    assert_eq!(agent_hover(&state), Some((true, true)), "原地钉住");
+    assert_eq!(state.observability.hover_scope.epoch, epoch, "作用域不换代");
+}
+
+/// 该 agent 的行不在画面上（滚出视口 / 面板折叠）：锚在 Agents 面板列表顶部
+/// （零高锚线），卡片按 kit 规则贴着这条线向下展开，下方放不下则翻到上方。
+#[test]
+fn pinning_an_agent_without_a_visible_row_anchors_at_the_panel_top() {
+    let mut state = usage_ready();
+    state.compose(120, 40).expect("工作台");
+    let body = state.hits.agent_body;
+    assert!(!body.is_empty(), "用例前提：Agents 面板列表区已画出");
+    pin_agent_hover(&mut state, "pane_9", "claude");
+    let hover = state.observability.hover.as_ref().expect("钉住的卡");
+    assert_eq!(hover.anchor, Rect::new(body.x, body.y, body.width, 0));
+    state.compose(120, 40).expect("钉住的卡");
+    let card = state.observability.hover_rect;
+    assert!(
+        card.y == body.y || card.bottom() == body.y,
+        "卡片 {card:?} 贴着面板顶边 {body:?} 展开"
+    );
+}
+
+/// 经典布局下监控页面打开时，钉住的卡照样画在页面之上（指针悬浮不画）；Esc
+/// 先关钉住的卡、页面不动；点页面控件也算点外。
+#[test]
+fn pinned_card_draws_over_the_classic_monitor_page_and_esc_closes_it_first() {
+    let mut state = classic_usage_ready();
+    state.open_observation_page(Page::Monitor, &mut ClientShellInput::default());
+    state.compose(120, 40).expect("监控页面");
+    assert!(
+        !state.observability.page_rect.is_empty(),
+        "经典布局页面已画出"
+    );
+    pin_agent_hover(&mut state, "pane_1", "claude");
+    assert_pinned_card_drawn(&mut state, 120, 40);
+    press_key(&mut state, crossterm::event::KeyCode::Esc);
+    assert!(state.observability.hover.is_none(), "Esc 先关钉住的卡");
+    assert_eq!(state.observability.page, Some(Page::Monitor), "页面不动");
+    // 点页面控件（页签）：同样关闭钉住的卡。
+    pin_agent_hover(&mut state, "pane_1", "claude");
+    state.compose(120, 40).expect("钉住的卡");
+    let hover_rect = state.observability.hover_rect;
+    let tab = page_hit(&state, |action| {
+        matches!(action, Action::Page(Page::Settings))
+    })
+    .expect("偏好页页签");
+    assert!(
+        !hover_rect.intersects(tab),
+        "用例前提：页签 {tab:?} 没被卡片 {hover_rect:?} 盖住"
+    );
+    click(&mut state, tab.x + 1, tab.y);
+    assert!(state.observability.hover.is_none(), "点页面控件即点外");
+}
+
+/// 账号用量在设置里关闭时，钉住的卡照实说明，而不是一直停在「刷新中…」。
+#[test]
+fn pinned_card_explains_that_usage_is_disabled() {
+    let mut state = usage_ready();
+    state.observability.usage.enabled = false;
+    state.compose(120, 40).expect("工作台");
+    pin_agent_hover(&mut state, "pane_1", "claude");
+    let calls = usage_calls(&tick(&mut state, Instant::now()));
+    assert!(calls.is_empty(), "关闭时不发请求");
+    let frame = state.compose(120, 40).expect("钉住的卡");
+    let card = state.observability.hover_rect;
+    let body = (card.y..card.bottom())
+        .map(|y| frame_row(&frame, y))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let compact = body
+        .chars()
+        .filter(|ch| !ch.is_whitespace())
+        .collect::<String>();
+    assert!(
+        body.contains("Account usage is disabled in settings.")
+            || compact.contains("账号用量已在设置中关闭。"),
+        "卡片说明用量已关闭:\n{body}"
+    );
+    assert!(
+        !body.contains("Refreshing…") && !compact.contains("刷新中…"),
+        "不停在刷新中:\n{body}"
+    );
 }
 
 #[test]

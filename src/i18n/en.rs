@@ -888,6 +888,8 @@ pub const TEXTS: Texts = Texts {
         menu_usage: "Usage",
         menu_bind_account: "Bind account",
         menu_close: "Close pane",
+        usage_card_title_fmt: "{agent} · Usage",
+        usage_pinned: "pinned",
     },
     agent_activity: AgentActivityTexts {
         title_fmt: "Agent activity — {name}",

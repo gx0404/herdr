@@ -3731,6 +3731,80 @@ impl ClientShellState {
         false
     }
 
+    /// 打开并钉住某 agent 的用量卡（右键菜单「用量」）：立即可见、钉住，与指针
+    /// 悬浮是同一张卡。用户的显式动作，不看 `usage.position`（`page` 只关掉指针
+    /// 悬浮）。锚点取该 agent 在 Agents 面板里的行（联邦面板 `hits.endpoint_agents`、
+    /// 本机面板 `hits.agents`），行不在画面上时锚在面板列表顶部。同一 agent 已钉住
+    /// 时再调用即关闭（toggle）；Esc / 浮层外点击关闭沿用状态机。
+    pub(super) fn pin_agent_usage_card(
+        &mut self,
+        endpoint_id: ClientEndpointId,
+        pane_id: String,
+        agent: String,
+        outcome: &mut ClientShellInput,
+    ) {
+        outcome.repaint = true;
+        let anchor = self.agent_usage_anchor(&endpoint_id, &pane_id);
+        let target = HoverTarget::Agent {
+            endpoint_id,
+            pane: pane_id,
+            agent,
+        };
+        if let Some(hover) = self
+            .observability
+            .hover
+            .as_mut()
+            .filter(|hover| hover.target == target)
+        {
+            if hover.pinned {
+                self.observability.clear_hover();
+                return;
+            }
+            if hover.visible {
+                // 指针悬浮已打开的同一张卡：原地钉住，作用域与在途请求保留。
+                hover.pinned = true;
+                hover.hold();
+                return;
+            }
+        }
+        self.observability.hover = Some(Hover {
+            target: target.clone(),
+            anchor,
+            since: Instant::now(),
+            visible: true,
+            leave_at: None,
+            pinned: true,
+        });
+        // 旧卡的矩形不再独占输入，下一帧按新锚点重画。
+        self.observability.hover_rect = Rect::default();
+        self.observability.begin_hover_scope(target);
+    }
+
+    /// 用量卡的锚点：该 agent 在 Agents 面板里的行；行不在画面上（滚出视口 /
+    /// 面板折叠）时是面板列表顶边的零高锚线，卡片从面板顶端向下展开。
+    fn agent_usage_anchor(&self, endpoint_id: &ClientEndpointId, pane_id: &str) -> Rect {
+        self.hits
+            .endpoint_agents
+            .iter()
+            .find(|(_, endpoint, pane)| endpoint == endpoint_id && pane == pane_id)
+            .map(|(rect, _, _)| *rect)
+            .or_else(|| {
+                (*endpoint_id == self.active_endpoint_id)
+                    .then(|| {
+                        self.hits
+                            .agents
+                            .iter()
+                            .find(|(_, pane)| pane == pane_id)
+                            .map(|(rect, _)| *rect)
+                    })
+                    .flatten()
+            })
+            .unwrap_or_else(|| {
+                let body = self.hits.agent_body;
+                Rect::new(body.x, body.y, body.width, 0)
+            })
+    }
+
     pub(super) fn observation_key(
         &mut self,
         key: &crate::input::TerminalKey,

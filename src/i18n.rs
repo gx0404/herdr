@@ -1095,6 +1095,10 @@ pub struct AgentPanelTexts {
     pub menu_usage: &'static str,
     pub menu_bind_account: &'static str,
     pub menu_close: &'static str,
+    /// agent 用量悬停卡的标题（指针悬浮与右键「用量」钉住的是同一张卡）。
+    pub usage_card_title_fmt: &'static str, // args: agent
+    /// 钉住的用量卡标题栏右侧的标记。
+    pub usage_pinned: &'static str,
 }
 
 /// 「Agent 活动」二级窗口的文案；节点种类 / 状态的标签 Agents 面板也读。
