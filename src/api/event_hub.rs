@@ -104,7 +104,9 @@ impl EventHub {
 
     /// 测试专用：一次持锁推入一批事件。生产路径逐条 `push`；批量推入让
     /// 「订阅轮询恰好落在推入中间」的竞态消失，端到端断层测试才是确定性的。
-    #[cfg(test)]
+    /// 唯一调用方是 `api::server` 里 unix 专属的 socket 端到端测试，所以同样只在
+    /// unix 测试构建里编译：否则 Windows 测试目标（`clippy --all-targets`）报 dead_code。
+    #[cfg(all(test, unix))]
     pub fn push_batch(&self, events: Vec<EventEnvelope>) {
         let Ok(mut state) = self.inner.lock() else {
             return;
