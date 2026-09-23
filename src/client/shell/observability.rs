@@ -405,6 +405,10 @@ const CARD_HEIGHT_STEPS: [u16; 4] = [7, 10, 16, 24];
 const HISTORY_STEPS: [u16; 5] = [1, 5, 15, 30, 60];
 const ALERT_DURATION_STEPS: [u64; 4] = [10, 30, 60, 300];
 const ALERT_COOLDOWN_STEPS: [u64; 3] = [60, 300, 900];
+/// 告警阈值：50–100%，每档 5 个点（文档写的范围）。
+const ALERT_THRESHOLD_STEPS: [f64; 11] = [
+    50.0, 55.0, 60.0, 65.0, 70.0, 75.0, 80.0, 85.0, 90.0, 95.0, 100.0,
+];
 
 #[derive(Clone, Debug)]
 pub(super) enum Action {
@@ -3254,19 +3258,11 @@ impl ClientShellState {
                 self.observability.reload_preferences(&self.config);
             }
             Action::AlertThreshold(index, delta) => {
-                // 50–100% 每步 5 个点，越过两端回绕。
+                // 与其它步进器一样走档位表（文档终审 D4）：档间值先走到相邻档，
+                // 越过两端回绕，结果永远落在 50–100%。以前固定 ±5，配置里的 30
+                // 会被加到 35。
                 if let Some(rule) = self.observability.monitor.alerts.get_mut(index) {
-                    rule.threshold = if delta < 0 {
-                        if rule.threshold <= 50.0 {
-                            100.0
-                        } else {
-                            rule.threshold - 5.0
-                        }
-                    } else if rule.threshold >= 100.0 {
-                        50.0
-                    } else {
-                        rule.threshold + 5.0
-                    };
+                    rule.threshold = step_ladder(&ALERT_THRESHOLD_STEPS, rule.threshold, delta);
                 }
             }
             Action::AlertDuration(index, delta) => {

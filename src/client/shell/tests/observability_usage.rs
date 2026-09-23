@@ -7780,3 +7780,70 @@ fn classic_page_holds_hover_usage_requests_until_the_hover_is_drawn() {
     state.compose(133, 32).expect("关掉页面后");
     assert!(!state.observability.hover_rect.is_empty(), "悬浮层画出来");
 }
+
+/// 文档终审 D4：告警阈值步进器以前固定 ±5、不走档位表，配置里的 30 会被加到
+/// 35（超出文档写的 50–100），52 这类档间值也跳不回档位。改为与其它步进器一样
+/// 走档位表（50–100，步长 5）：档间值先走到相邻档，越过两端回绕，结果永远在
+/// 档位表内；偏好页上画出的就是新值。
+#[test]
+fn alert_threshold_stepper_follows_its_ladder() {
+    let mut state = docked();
+    assert!(
+        !state.observability.monitor.alerts.is_empty(),
+        "用例前提：默认配置带告警规则"
+    );
+    for (start, delta, expected) in [
+        (30.0, 1, 50.0),
+        (30.0, -1, 100.0),
+        (52.0, 1, 55.0),
+        (52.0, -1, 50.0),
+        (95.0, 1, 100.0),
+        (100.0, 1, 50.0),
+        (50.0, -1, 100.0),
+        (101.0, -1, 100.0),
+    ] {
+        state.observability.monitor.alerts[0].threshold = start;
+        state.observation_action(
+            Action::AlertThreshold(0, delta),
+            &mut ClientShellInput::default(),
+        );
+        assert_eq!(
+            state.observability.monitor.alerts[0].threshold, expected,
+            "{start} 按 {delta:+} 应到 {expected}"
+        );
+    }
+
+    // 偏好页上的「+」：从配置值 30 起步，点一下落到 50。告警卡在页面靠下，
+    // 先把页面滚到能看见第一条规则的步进器。
+    state.observability.monitor.alerts[0].threshold = 30.0;
+    state.observability.monitor.alerts_enabled = true;
+    state.open_observation_page(Page::Settings, &mut ClientShellInput::default());
+    let find_plus = |state: &ClientShellState| {
+        state
+            .observability
+            .hits
+            .iter()
+            .find(|(_, action)| matches!(action, Action::AlertThreshold(0, 1)))
+            .map(|(rect, _)| *rect)
+    };
+    state.compose(133, 32).expect("偏好页");
+    let page = state.observability.page_rect;
+    for _ in 0..40 {
+        if find_plus(&state).is_some() {
+            break;
+        }
+        state.handle_mouse(
+            MouseEvent {
+                kind: MouseEventKind::ScrollDown,
+                column: page.x + 2,
+                row: page.y + page.height / 2,
+                modifiers: KeyModifiers::NONE,
+            },
+            &mut ClientShellInput::default(),
+        );
+        state.compose(133, 32).expect("滚动偏好页");
+    }
+    let plus = find_plus(&state).expect("告警阈值的「+」画在偏好页上");
+    click(&mut state, plus.x, plus.y);
+    assert_eq!(state.observability.monitor.alerts[0].threshold, 50.0);
+}
