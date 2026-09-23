@@ -141,7 +141,12 @@ impl ClientContextMenuOverlay {
                         ..item(t.menu_rename, Action::RenameAgent)
                     },
                 ];
-                if agent.is_some() {
+                // 已退役的 muse（herdr 自身的 agent）没有账号用量、也不能绑定
+                // 账号：两项都不列，免得点了没反应（文档终审 D13）。
+                if agent
+                    .as_deref()
+                    .is_some_and(super::observability::is_bindable_agent)
+                {
                     // 「用量」打开并钉住该 agent 的用量悬停卡
                     // （`ClientShellState::pin_agent_usage_card`）。
                     items.push(item(t.menu_usage, Action::ShowAgentUsage));

@@ -2976,6 +2976,58 @@ fn tree_row_labels_end_with_an_ellipsis_when_truncated() {
     );
 }
 
+/// classic 单端点：SGR 右键 `pane_id` 的 agent 行，取菜单条目的动作后关掉菜单。
+fn classic_agent_menu_actions(
+    state: &mut ClientShellState,
+    pane_id: &str,
+) -> Vec<ClientContextMenuAction> {
+    state.compose(106, 40).expect("classic 帧");
+    let rect = state
+        .hits
+        .agents
+        .iter()
+        .find(|(_, pane)| pane == pane_id)
+        .map(|(rect, _)| *rect)
+        .expect("agent 行在命中表里");
+    state.handle_input_bytes(format!("\x1b[<2;{};{}M", rect.x + 3, rect.y + 1).as_bytes());
+    let Some(ClientShellOverlay::ContextMenu(menu)) = state.overlay.as_ref() else {
+        panic!("右键 {pane_id} 应打开菜单：{:?}", state.overlay);
+    };
+    let actions = menu.items().iter().map(|item| item.action).collect();
+    state.overlay = None;
+    actions
+}
+
+/// 文档终审 D13：已退役的 muse（herdr 自身的 agent）没有账号用量可看、也不能绑定
+/// 账号，右键菜单以前照样列出「用量」「绑定账号」，点了没反应。现在不列出；其它
+/// 识别出的 agent 照常列出。
+#[test]
+fn muse_agent_menu_leaves_out_usage_and_bind_account() {
+    use ClientContextMenuAction as Action;
+    let mut projected = two_workspace_snapshot();
+    projected.agents[1].agent = Some("muse".into());
+    let mut state = classic_state_with(AgentPanelSortConfig::Spaces, projected);
+    let muse = classic_agent_menu_actions(&mut state, "pane_2");
+    assert!(
+        !muse.contains(&Action::ShowAgentUsage) && !muse.contains(&Action::BindAgentAccount),
+        "muse 不列用量 / 绑定账号：{muse:?}"
+    );
+    assert_eq!(
+        muse,
+        [
+            Action::FocusAgent,
+            Action::ViewAgentActivity,
+            Action::RenameAgent,
+            Action::CloseAgentPane,
+        ]
+    );
+    let pi = classic_agent_menu_actions(&mut state, "pane_1");
+    assert!(
+        pi.contains(&Action::ShowAgentUsage) && pi.contains(&Action::BindAgentAccount),
+        "其它识别出的 agent 照常列出：{pi:?}"
+    );
+}
+
 /// SGR 1006 右键某端点 agent 行（坐标取 0 起的单元格）。
 fn right_click_endpoint_agent(
     state: &mut ClientShellState,
