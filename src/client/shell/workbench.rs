@@ -37,6 +37,12 @@ pub(super) struct State {
     last_focus: Option<String>,
 }
 
+/// 工作台的整帧内容区：顶栏（首行）与页脚 / 模式条（末行）之间。停靠几何与
+/// 不属于任何面板的浮层（which-key）都以它为边界。
+pub(super) fn content_area(cols: u16, rows: u16) -> Rect {
+    Rect::new(0, 1.min(rows), cols, rows.saturating_sub(2))
+}
+
 pub(super) fn body(area: Rect, panel: &PanelId) -> Rect {
     let header = if matches!(panel, PanelId::Terminal(_)) {
         2
@@ -115,9 +121,7 @@ impl State {
     }
 
     pub fn layout(&self, cols: u16, rows: u16) -> ClientShellLayout {
-        let geometry = self
-            .dock
-            .geometry(Rect::new(0, 1.min(rows), cols, rows.saturating_sub(2)));
+        let geometry = self.dock.geometry(content_area(cols, rows));
         let area = geometry
             .panels
             .iter()
@@ -334,10 +338,7 @@ impl ClientShellState {
         let Some((cols, rows)) = self.last_composed_size else {
             return;
         };
-        let geometry =
-            self.workbench
-                .dock
-                .geometry(Rect::new(0, 1.min(rows), cols, rows.saturating_sub(2)));
+        let geometry = self.workbench.dock.geometry(content_area(cols, rows));
         let mut views = geometry
             .panels
             .iter()

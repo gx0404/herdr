@@ -1375,3 +1375,43 @@ fn tab_view_state_is_pruned_to_live_groups() {
         "现存分组的视口状态保留"
     );
 }
+
+/// 冒烟 M3：焦点停在 26 列宽的 Agents 面板时按前缀键，which-key 以前被夹在
+/// 聚焦面板的 body 里，只放得下「全局」一组；它应与其它浮层同口径占用整帧
+/// 内容区，三组快捷键完整列出。
+#[test]
+fn which_key_spans_the_content_area_when_the_agents_panel_is_focused() {
+    let mut state = ready();
+    state.workbench.dock.focused = PanelId::Agents;
+    state.compose(133, 32).expect("Agents 面板聚焦");
+    state.handle_input_bytes(b"\x02");
+    assert_eq!(state.mode, ClientShellMode::Prefix, "ctrl+b 进入前缀模式");
+    let frame = state.compose(133, 32).expect("前缀帧");
+    // 宽字符的续格是空格：去掉空白再比较 CJK 组名。
+    let compact = |text: &str| text.split_whitespace().collect::<String>();
+    let rows = frame_rows(&frame);
+    let texts = crate::i18n::texts();
+    let title_row = rows
+        .iter()
+        .position(|row| compact(row).contains(&compact(texts.keybinds.group_global)))
+        .unwrap_or_else(|| panic!("which-key 未画出：{rows:#?}"));
+    for group in [
+        texts.keybinds.group_workspaces_tabs,
+        texts.keybinds.group_panes,
+    ] {
+        assert!(
+            compact(&rows[title_row]).contains(&compact(group)),
+            "which-key 标题行缺少「{group}」组：{:?}",
+            rows[title_row]
+        );
+    }
+    // 浮层在顶栏与页脚（模式条）之间，二者都不被压住。
+    assert!(title_row > 1, "上边框不压顶栏");
+    let bottom = rows
+        .iter()
+        .skip(title_row)
+        .position(|row| row.contains('┘'))
+        .map(|offset| offset + title_row)
+        .expect("which-key 下边框");
+    assert!(bottom < 31, "下边框不压页脚：{bottom}");
+}

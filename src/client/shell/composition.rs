@@ -899,16 +899,24 @@ impl ClientShellState {
             now: compose_now,
         };
         let (frame_width, frame_height) = canvas.size();
-        let layout = self.layout(frame_width, frame_height);
         if self.mode == ClientShellMode::Prefix && self.config.which_key && self.overlay.is_none() {
+            // which-key 不属于任何面板：工作台下与其它浮层同口径占整帧内容区
+            // （顶栏与模式条之间），不再被夹进聚焦面板的 body（冒烟 M3）。经典
+            // 布局仍用终端区，末行留给模式条。
+            let area = if self.workbench.enabled {
+                super::workbench::content_area(frame_width, frame_height)
+            } else {
+                let surface = self.layout(frame_width, frame_height).pane_surface;
+                Rect::new(
+                    surface.x,
+                    surface.y,
+                    surface.width,
+                    surface.height.saturating_sub(1),
+                )
+            };
             super::which_key::render_which_key(
                 canvas.buffer(),
-                Rect::new(
-                    layout.pane_surface.x,
-                    layout.pane_surface.y,
-                    layout.pane_surface.width,
-                    layout.pane_surface.height.saturating_sub(1),
-                ),
+                area,
                 &self.config.keybinds,
                 &cx,
                 occlusion,

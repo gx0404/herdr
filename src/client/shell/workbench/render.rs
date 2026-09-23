@@ -108,10 +108,7 @@ impl ClientShellState {
             .set_style(full, Style::default().fg(palette.text).bg(palette.panel_bg));
         self.hits = ShellHitMap::default();
         self.workbench.hits.clear();
-        self.workbench.geometry =
-            self.workbench
-                .dock
-                .geometry(Rect::new(0, 1.min(rows), cols, rows.saturating_sub(2)));
+        self.workbench.geometry = self.workbench.dock.geometry(content_area(cols, rows));
         let menu_texts = &crate::i18n::texts().menu;
         // 顶栏：主菜单入口、监控、调整布局（模式开关，进入时反色）、锁定布局
         // （二态开关用勾选态，不再在「锁定 / 解锁」两套文案间切换）、复位（只在
