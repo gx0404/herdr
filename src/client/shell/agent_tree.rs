@@ -1810,8 +1810,9 @@ impl ClientShellState {
         }
     }
 
-    /// 「重命名窗格」：沿用 pane 重命名浮层（标题同 pane 右键菜单的重命名，走
-    /// i18n）与 `pane.rename`，改的是 pane 标签，菜单文案照实写「重命名窗格」。
+    /// 「重命名窗格」：沿用 pane 重命名浮层（标题同键盘重命名路径
+    /// `open_rename_pane_overlay`，即 `dialogs.rename_pane`）与 `pane.rename`，
+    /// 改的是 pane 标签，菜单文案照实写「重命名窗格」。
     /// 浮层提交发往当前端点（`ClientRenameTarget::Pane` 不带端点），所以只对
     /// 当前端点直接打开；其它端点的 agent 在菜单里该项应灰显，这里的兜底只是切
     /// 过去并聚焦该 pane（与「聚焦」相同），不在端点切换完成前打开浮层，免得

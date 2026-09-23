@@ -2319,7 +2319,7 @@ fn tree_agent_context_actions_rename_bind_and_close_the_agent_pane() {
             assert_eq!(
                 rename.title,
                 crate::i18n::texts().dialogs.rename_pane,
-                "浮层标题与 pane 右键菜单的重命名同一条 i18n 文案"
+                "浮层标题同键盘重命名路径（dialogs.rename_pane）"
             );
         }
         other => panic!("应打开 pane 重命名浮层: {other:?}"),
