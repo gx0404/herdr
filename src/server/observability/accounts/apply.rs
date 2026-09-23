@@ -279,6 +279,8 @@ pub(super) fn apply_report(
     // 唯一候选自动绑定：这里只选定候选；绑定要等报文解析出额度、全部校验通过后
     // 才写入，被拒的报文不得留下绑定。账号用量开关关闭时沿用旧的拒绝路径。
     let mut auto_bind_pane: Option<String> = None;
+    // 本次 claude 官方报文里真正出现的额度窗口：接受时记入 `claude_window_seen_secs`。
+    let mut claude_fresh_windows: Vec<String> = Vec::new();
     // pi 扩展报文里的当前服务商：账号配置没有钉死计费厂商时写进快照的 `provider`。
     let mut reported_provider: Option<String> = None;
     if params.account_id.is_empty() && enabled {
@@ -326,13 +328,20 @@ pub(super) fn apply_report(
         params.snapshot.metrics = match provider.map(|provider| provider.agent) {
             Some("claude") => {
                 let fresh = parse::claude(&payload);
+                claude_fresh_windows = fresh
+                    .iter()
+                    .filter(|metric| parse::is_claude_window(metric))
+                    .map(|metric| metric.id.clone())
+                    .collect();
                 // 官方 statusline 会把过了 `resets_at` 的窗口从 JSON 里去掉，会话首个响应之前
-                // 也整段缺省：缺席不是归零，沿用该账号上次的窗口（过期的标明）。报文本身什么
-                // 都没解析出来时不沿用，免得用旧数据刷新观测时间。
+                // 也整段缺省：缺席不是归零，沿用该账号上次的窗口（过期的标明；没有 `resets_at`
+                // 的按上次出现的时刻限期）。报文本身什么都没解析出来时不沿用，免得用旧数据
+                // 刷新观测时间。
                 match cache.get(&params.account_id) {
                     Some(entry) if !fresh.is_empty() => parse::claude_retain_missing_windows(
                         fresh,
                         &entry.snapshot.metrics,
+                        &entry.claude_window_seen_secs,
                         now_ms / 1000,
                     ),
                     _ => fresh,
@@ -493,6 +502,13 @@ pub(super) fn apply_report(
     entry.failures = 0;
     entry.terminal = None;
     entry.trust_required = false;
+    // 先记下本次真正出现的窗口，再收敛到快照里仍有的窗口（被校验丢掉的、限期到了的都不留）。
+    for id in claude_fresh_windows {
+        entry.claude_window_seen_secs.insert(id, now_ms / 1000);
+    }
+    entry
+        .claude_window_seen_secs
+        .retain(|id, _| snapshot.metrics.iter().any(|metric| metric.id == *id));
     entry.snapshot = snapshot;
     Ok(Accepted {
         account_id: params.account_id,
@@ -1135,6 +1151,58 @@ mod tests {
             metric(entry, "context_window/used_percentage").used,
             None,
             "首次请求前上下文未知，不是 0"
+        );
+    }
+
+    /// 没有 `resets_at` 的窗口（如网关的 `spend_limit`）在报文里缺席时按上次真正出现的时刻
+    /// 限期沿用：中间的沿用不刷新这个时刻，超过上限后不再沿用，不会被无限期留住。
+    #[test]
+    fn claude_window_without_resets_at_is_not_retained_forever() {
+        let mut fixture = Fixture::new(vec![account("claude:default", "claude")]);
+        fixture
+            .bindings
+            .insert("pane-1".into(), "claude:default".into());
+        let day_ms = 24 * 60 * 60 * 1000;
+        let with_five_hour = |now_ms: u64| {
+            json!({"rate_limits": {
+                "five_hour": {"used_percentage": 5, "resets_at": now_ms / 1000 + 3600}
+            }})
+        };
+        let mut first = report(Some("pane-1"), "");
+        first.official_payload = Some(json!({"rate_limits": {
+            "five_hour": {"used_percentage": 5, "resets_at": NOW_MS / 1000 + 3600},
+            "spend_limit": {"used_percentage": 120}
+        }}));
+        assert_eq!(code(&fixture.apply(first)), "ok");
+
+        // 六天后：spend_limit 不在报文里，仍在上限内，原样沿用。
+        fixture.now_ms = NOW_MS + 6 * day_ms;
+        let mut carried = report(Some("pane-1"), "");
+        carried.official_payload = Some(with_five_hour(fixture.now_ms));
+        assert_eq!(code(&fixture.apply(carried)), "ok");
+        let entry = &fixture.cache["claude:default"];
+        assert_eq!(metric(entry, "spend_limit").used_percent, Some(120.0));
+        assert_eq!(metric(entry, "spend_limit").text_value, None);
+
+        // 距上次真正出现超过七天：即使期间一直被沿用，也不再保留。
+        fixture.now_ms = NOW_MS + 7 * day_ms + 1000;
+        let mut expired = report(Some("pane-1"), "");
+        expired.official_payload = Some(with_five_hour(fixture.now_ms));
+        assert_eq!(code(&fixture.apply(expired)), "ok");
+        let entry = &fixture.cache["claude:default"];
+        assert!(
+            entry
+                .snapshot
+                .metrics
+                .iter()
+                .all(|metric| metric.id != "spend_limit"),
+            "{:#?}",
+            entry.snapshot.metrics
+        );
+        assert_eq!(metric(entry, "five_hour").used_percent, Some(5.0));
+        assert!(
+            !entry.claude_window_seen_secs.contains_key("spend_limit"),
+            "不再沿用的窗口不留出现时刻"
         );
     }
 

@@ -114,6 +114,10 @@ struct CacheEntry {
     /// `complete` 写入（回调闩锁下被保留的回调快照不会挂上它）；探测成功或得到其它结果、
     /// 以及官方回调被接受时清掉。
     trust_required: bool,
+    /// claude 额度窗口 id → 最近一次真正出现在被接受的官方报文里的时刻（秒）：报文缺席、又
+    /// 没有 `resets_at` 的窗口按它限期沿用（`parse::claude_retain_missing_windows`）。只在
+    /// 回调被接受时更新，并收敛到快照里仍有的窗口。
+    claude_window_seen_secs: HashMap<String, u64>,
 }
 
 impl CacheEntry {
@@ -131,6 +135,7 @@ impl CacheEntry {
             attempted_at_ms: 0,
             manual_requested_at_ms: None,
             trust_required: false,
+            claude_window_seen_secs: HashMap::new(),
         }
     }
 

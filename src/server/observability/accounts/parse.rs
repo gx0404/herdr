@@ -2,6 +2,7 @@
 
 use crate::api::schema::UsageMetric;
 use serde_json::Value;
+use std::collections::HashMap;
 
 fn finite(value: Option<&Value>) -> Option<f64> {
     value
@@ -153,7 +154,8 @@ pub(super) const CLAUDE_RATE_LIMIT_WINDOWS: [(&str, &str); 3] = [
 /// （客户端也可据「`resets_at` 不晚于当前时间」自行判定）。
 pub(super) const CLAUDE_STALE_WINDOW_TEXT: &str = "已过重置时间，沿用上次值";
 
-/// 过期窗口最多再保留这么久（秒）：超过最长的窗口周期（7 天）后上次值已无参考意义。
+/// 沿用窗口的上限（秒）：过了 `resets_at` 的从 `resets_at` 起算，没有 `resets_at` 的从最近
+/// 一次出现在报文里起算。超过最长的窗口周期（7 天）后上次值已无参考意义。
 const CLAUDE_STALE_WINDOW_MAX_AGE_SECS: u64 = 7 * 24 * 60 * 60;
 
 /// `context_window` 的数值为 `null`（会话首次 API 调用之前、`/compact` 之后）时的明示：未知
@@ -177,32 +179,48 @@ pub(super) fn claude(value: &Value) -> Vec<UsageMetric> {
     metrics
 }
 
+/// claude 的账号额度窗口指标（`CLAUDE_RATE_LIMIT_WINDOWS` 之一、`scope = account`）。
+pub(super) fn is_claude_window(metric: &UsageMetric) -> bool {
+    metric.scope == "account"
+        && CLAUDE_RATE_LIMIT_WINDOWS
+            .iter()
+            .any(|(id, _)| metric.id == *id)
+}
+
 /// 补回本次报文里缺席的额度窗口：官方 statusline 在窗口过了 `resets_at` 后把它去掉，会话的
 /// 首个 API 响应之前也整段缺省——两种缺席都不是归零。上次的窗口原样沿用；`resets_at` 已过
 /// 的标为过期（`CLAUDE_STALE_WINDOW_TEXT`），过期超过 `CLAUDE_STALE_WINDOW_MAX_AGE_SECS`
-/// 的不再沿用。结果里额度窗口按固定顺序排在会话级指标之前。
+/// 的不再沿用。没有 `resets_at` 的窗口无从判断是否已重置：按 `last_seen`（窗口 id → 最近
+/// 一次真正出现在报文里的秒级时刻）限期，超过同一上限或时刻未知的不再沿用，免得被无限期
+/// 沿用。结果里额度窗口按固定顺序排在会话级指标之前。
 pub(super) fn claude_retain_missing_windows(
     fresh: Vec<UsageMetric>,
     previous: &[UsageMetric],
+    last_seen: &HashMap<String, u64>,
     now_secs: u64,
 ) -> Vec<UsageMetric> {
-    let is_window = |metric: &UsageMetric| {
-        metric.scope == "account"
-            && CLAUDE_RATE_LIMIT_WINDOWS
-                .iter()
-                .any(|(id, _)| metric.id == *id)
-    };
-    let (mut windows, session): (Vec<_>, Vec<_>) = fresh.into_iter().partition(is_window);
-    for carried in previous.iter().filter(|metric| is_window(metric)) {
+    let (mut windows, session): (Vec<_>, Vec<_>) = fresh.into_iter().partition(is_claude_window);
+    for carried in previous.iter().filter(|metric| is_claude_window(metric)) {
         if windows.iter().any(|metric| metric.id == carried.id) {
             continue;
         }
         let mut carried = carried.clone();
-        if let Some(resets_at) = carried.resets_at.filter(|resets_at| *resets_at <= now_secs) {
-            if now_secs - resets_at > CLAUDE_STALE_WINDOW_MAX_AGE_SECS {
-                continue;
+        match carried.resets_at {
+            Some(resets_at) if resets_at <= now_secs => {
+                if now_secs - resets_at > CLAUDE_STALE_WINDOW_MAX_AGE_SECS {
+                    continue;
+                }
+                carried.text_value = Some(CLAUDE_STALE_WINDOW_TEXT.into());
             }
-            carried.text_value = Some(CLAUDE_STALE_WINDOW_TEXT.into());
+            Some(_) => {}
+            None => {
+                let expired = last_seen.get(&carried.id).is_none_or(|seen| {
+                    now_secs.saturating_sub(*seen) > CLAUDE_STALE_WINDOW_MAX_AGE_SECS
+                });
+                if expired {
+                    continue;
+                }
+            }
         }
         windows.push(carried);
     }
@@ -2062,7 +2080,8 @@ Done.
             "cost": {"total_cost_usd": 1.5},
             "rate_limits": {"seven_day": {"used_percentage": 42.0, "resets_at": now + 86_400}}
         }));
-        let merged = claude_retain_missing_windows(fresh, &previous, now);
+        let unseen = HashMap::new();
+        let merged = claude_retain_missing_windows(fresh, &previous, &unseen, now);
         let ids = merged
             .iter()
             .map(|metric| metric.id.as_str())
@@ -2088,6 +2107,7 @@ Done.
         let again = claude_retain_missing_windows(
             claude(&json!({"cost": {"total_cost_usd": 1.6}})),
             &merged,
+            &unseen,
             now + 30,
         );
         assert_eq!(again[0], merged[0]);
@@ -2103,6 +2123,7 @@ Done.
                 &json!({"rate_limits": {"five_hour": {"used_percentage": 1.0, "resets_at": now + 18_000}}}),
             ),
             &again,
+            &unseen,
             now + 60,
         );
         assert_eq!(recovered[0].used_percent, Some(1.0));
@@ -2116,9 +2137,81 @@ Done.
                 87.5,
                 now - CLAUDE_STALE_WINDOW_MAX_AGE_SECS - 1,
             )],
+            &unseen,
             now,
         );
         assert!(ancient.is_empty());
+    }
+
+    /// 没有 `resets_at` 的窗口无从判断是否已重置：沿用按最近一次出现在报文里的时刻限期，
+    /// 不能被无限期沿用；出现时刻未知的不沿用。
+    #[test]
+    fn claude_window_without_resets_at_is_retained_only_within_the_max_age() {
+        let now = 1_700_010_000;
+        let previous = vec![UsageMetric {
+            resets_at: None,
+            ..claude_window("spend_limit", 162.8, 0)
+        }];
+        let fresh = || {
+            claude(&json!({
+                "rate_limits": {"five_hour": {"used_percentage": 5.0, "resets_at": now + 3600}}
+            }))
+        };
+        let ids = |metrics: &[UsageMetric]| {
+            metrics
+                .iter()
+                .map(|metric| metric.id.clone())
+                .collect::<Vec<_>>()
+        };
+
+        let seen = HashMap::from([("spend_limit".to_string(), now - 60)]);
+        let kept = claude_retain_missing_windows(fresh(), &previous, &seen, now);
+        assert_eq!(ids(&kept), vec!["five_hour", "spend_limit"]);
+        assert_eq!(kept[1].used_percent, Some(162.8), "上限内原样沿用");
+        assert_eq!(
+            kept[1].text_value, None,
+            "没有 resets_at 就不能宣称已过重置时间"
+        );
+
+        let at_limit = HashMap::from([(
+            "spend_limit".to_string(),
+            now - CLAUDE_STALE_WINDOW_MAX_AGE_SECS,
+        )]);
+        assert_eq!(
+            ids(&claude_retain_missing_windows(
+                fresh(),
+                &previous,
+                &at_limit,
+                now
+            )),
+            vec!["five_hour", "spend_limit"],
+            "恰好到上限仍沿用"
+        );
+
+        let expired = HashMap::from([(
+            "spend_limit".to_string(),
+            now - CLAUDE_STALE_WINDOW_MAX_AGE_SECS - 1,
+        )]);
+        assert_eq!(
+            ids(&claude_retain_missing_windows(
+                fresh(),
+                &previous,
+                &expired,
+                now
+            )),
+            vec!["five_hour"],
+            "超过上限不再沿用"
+        );
+        assert_eq!(
+            ids(&claude_retain_missing_windows(
+                fresh(),
+                &previous,
+                &HashMap::new(),
+                now
+            )),
+            vec!["five_hour"],
+            "出现时刻未知的不沿用"
+        );
     }
 
     #[test]
