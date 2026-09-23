@@ -552,20 +552,25 @@ fn node_from_meta(meta: &RolloutMeta, parent_id: Option<String>) -> AgentActivit
     }
 }
 
-/// 显示名回退链：昵称 → 角色 → `agent_path` 末段 → 来源名 → 线程 id。
+/// 显示名：昵称与任务名（`agent_path` 末段，父 agent 派生时给的 `task_name`）都有时
+/// 拼成「昵称 · 任务名」，与 claude / opencode 子 agent 行显示任务的口径一致——
+/// 任务描述本身（`spawn_agent` 的 `message`）在 rollout 里是加密的，任务名是唯一的
+/// 明文。缺一个就用另一个，都没有再按 角色 → 来源名 → 线程 id 回退；角色另在
+/// `agent_type` 里，完整路径另在摘要里。
 fn label_for(meta: &RolloutMeta) -> String {
-    if let Some(nickname) = &meta.nickname {
-        return nickname.clone();
+    let task = meta.agent_path.as_deref().and_then(|path| {
+        path.rsplit('/')
+            .map(str::trim)
+            .find(|segment| !segment.is_empty())
+    });
+    match (&meta.nickname, task) {
+        (Some(nickname), Some(task)) => return format!("{nickname} · {task}"),
+        (Some(nickname), None) => return nickname.clone(),
+        (None, Some(task)) => return task.to_string(),
+        (None, None) => {}
     }
     if let Some(role) = &meta.role {
         return role.clone();
-    }
-    if let Some(segment) = meta
-        .agent_path
-        .as_deref()
-        .and_then(|path| path.rsplit('/').find(|segment| !segment.trim().is_empty()))
-    {
-        return segment.to_string();
     }
     if let ThreadOrigin::Named(name) = &meta.origin {
         return name.clone();
@@ -1455,7 +1460,7 @@ mod tests {
 
         let child_a = node(&nodes, CHILD_A);
         assert_eq!(child_a.kind, AgentActivityKind::Subagent);
-        assert_eq!(child_a.label, "Ada");
+        assert_eq!(child_a.label, "Ada · fix_login", "昵称 · 任务名");
         assert_eq!(child_a.agent_type.as_deref(), Some("worker"));
         assert_eq!(child_a.parent_id, None);
         assert_eq!(child_a.status, AgentActivityStatus::Done);
@@ -1465,15 +1470,16 @@ mod tests {
         assert_eq!(child_a.content_ref.as_deref(), Some(CHILD_A));
 
         let child_b = node(&nodes, CHILD_B);
-        assert_eq!(child_b.label, "explorer", "没有昵称时退到角色");
+        assert_eq!(
+            child_b.label, "survey_tests",
+            "没有昵称时只用任务名，角色在 agent_type 里"
+        );
+        assert_eq!(child_b.agent_type.as_deref(), Some("explorer"));
         assert_eq!(child_b.status, AgentActivityStatus::Running);
         assert_eq!(child_b.ended_at_ms, None);
 
         let child_c = node(&nodes, CHILD_C);
-        assert_eq!(
-            child_c.label, "audit_deb",
-            "没有昵称与角色时退到 agent_path 末段"
-        );
+        assert_eq!(child_c.label, "audit_deb", "只有任务名");
         assert_eq!(child_c.agent_type, None);
         assert_eq!(child_c.status, AgentActivityStatus::Failed);
         assert_eq!(child_c.summary.as_deref(), Some("interrupted"));
@@ -1481,7 +1487,7 @@ mod tests {
 
         let grandchild = node(&nodes, GRANDCHILD);
         assert_eq!(grandchild.parent_id.as_deref(), Some(CHILD_B));
-        assert_eq!(grandchild.label, "Bo");
+        assert_eq!(grandchild.label, "Bo · parse_cases", "深层路径取末段");
         let great = node(&nodes, GREAT_GRANDCHILD);
         assert_eq!(great.parent_id.as_deref(), Some(GRANDCHILD));
         assert_eq!(great.label, GREAT_GRANDCHILD, "全空时显示线程 id");
@@ -1517,6 +1523,23 @@ mod tests {
         assert_eq!(legacy.agent_type, None);
         assert_eq!(legacy.summary, None);
         assert_eq!(legacy.status, AgentActivityStatus::Pending);
+    }
+
+    /// 冒烟 L7（codex-11 行 25）：子 agent 行只有昵称「Boyle」，任务只在摘要里，
+    /// 面板上认不出是哪个任务；claude / opencode 的子 agent 行都是任务描述。
+    #[test]
+    fn a_subagent_row_names_both_its_nickname_and_its_task() {
+        let home = fixture_home();
+        let session = AgentSessionRef::id(PROBE_ROOT).expect("合法 id");
+        let nodes = discover(&home, Some(&session));
+        assert_eq!(nodes.len(), 1);
+        let child = node(&nodes, PROBE_CHILD);
+        assert_eq!(child.label, "Noor · print_probe");
+        assert_eq!(child.kind, AgentActivityKind::Subagent);
+        // 角色为空时 agent_type 为空；完整的任务路径仍在摘要里。
+        assert_eq!(child.agent_type, None);
+        assert_eq!(child.summary.as_deref(), Some("/root/print_probe"));
+        assert_eq!(child.status, AgentActivityStatus::Done);
     }
 
     #[test]
