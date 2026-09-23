@@ -1019,7 +1019,7 @@ pub const TEXTS: Texts = Texts {
         arrange_done: "done",
         unavailable_suffix: " (unavailable)",
         submenu_view: "View",
-        monitor: "Monitor (system · accounts · settings)",
+        monitor: "Monitor (System · Accounts · Monitor preferences)",
         monitor_short: "Monitor",
         close_monitor: "Close monitor panel",
         lock_layout: "Lock layout",

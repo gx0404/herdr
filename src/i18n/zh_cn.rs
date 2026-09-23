@@ -1025,7 +1025,7 @@ pub const TEXTS: Texts = Texts {
         arrange_done: "完成",
         unavailable_suffix: "（不可用）",
         submenu_view: "视图",
-        monitor: "监控（系统 · 账号 · 设置）",
+        monitor: "监控（系统 · 账号 · 监控偏好）",
         monitor_short: "监控",
         close_monitor: "关闭监控面板",
         lock_layout: "锁定布局",
