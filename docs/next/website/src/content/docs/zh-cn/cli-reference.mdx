@@ -41,9 +41,12 @@ API schema 命令:
 herdr api schema
 herdr api schema --json
 herdr api schema --output herdr-api.schema.json
+herdr api usage-report --agent AGENT [--account ID] [--passthrough]
 ```
 
 `herdr api schema` 会打印安装的二进制中包含的 socket 协议 schema 简短摘要。需要完整 JSON Schema 文档时使用 `--json`;要写入文件则使用 `--output PATH`。
+
+`herdr api usage-report` 从 stdin 读取智能体的官方用量 JSON(例如 Claude Code 的状态栏输入),为 `HERDR_PANE_ID` 所指的窗格或 `--account` 指定的账号上报。`--passthrough` 同时把输入原样写到 stdout,让已有的状态栏渲染器照常工作。绑定规则见[监控](/zh-cn/docs/monitoring/)。
 
 ## 已保存的 SSH 机器
 

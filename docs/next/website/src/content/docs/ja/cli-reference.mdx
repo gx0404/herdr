@@ -41,9 +41,12 @@ API スキーマコマンド:
 herdr api schema
 herdr api schema --json
 herdr api schema --output herdr-api.schema.json
+herdr api usage-report --agent AGENT [--account ID] [--passthrough]
 ```
 
 `herdr api schema` は、インストール済みバイナリに同梱されたソケットプロトコルスキーマの短い概要を表示します。完全な JSON Schema ドキュメントが欲しいときは `--json` を使い、ファイルに書き出すには `--output PATH` を使ってください。
+
+`herdr api usage-report` はエージェントの公式な使用量 JSON(たとえば Claude Code のステータスラインへの入力)を stdin から読み、`HERDR_PANE_ID` のペイン、または `--account` で指定したアカウントに報告します。`--passthrough` は入力を stdout にもそのまま書き出すので、既存のステータスラインの描画コマンドはそのまま動きます。関連付けの規則は[監視・アカウント使用量・ドック配置](/ja/docs/monitoring/)を参照してください。
 
 ## 保存済み SSH マシン
 

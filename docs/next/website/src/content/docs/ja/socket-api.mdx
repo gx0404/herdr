@@ -660,14 +660,15 @@ workspace の get/list 応答は結果の `tokens` マップを公開し、ス�
 ソースアダプターが理解できる構造化スナップショットでもかまいません。Pi はディスク上に
 アクティビティを残さないため、Herdr の Pi 拡張はツリー全体を `herdr.activity.snapshot`
 JSON ドキュメントとしてこの方法で報告します。サーバーはペインごとに最新の hint を 1 つ
-だけ(1 MiB まで)保持し、次回の更新時にソースアダプターへ渡します。これより大きい
-hint も更新をスケジュールしますが、保持されるのは前の hint のままです。`node_id` と
+だけ保持し、次回の更新時にソースアダプターへ渡します。hint を含むリクエスト全体は
+API の 1 MiB のリクエスト上限に収まる必要があり、それを超えるリクエストは応答なしで
+破棄され、更新もスケジュールされません。`node_id` と
 `seq` は診断用に受理されます。レスポンスは `ok` で、ツリーを含むことはありません。Pi のようなスナップショット
 hint を除き、リクエストにもツリーは含まれません。
 
 hint はすぐに更新をスケジュールしますが、同じペインの更新は毎秒 1 回に制限されます。
 フックはエージェントが変更をディスクへ書き込む前に発火することが多いため、約 2 秒後に
-もう 1 回更新します。hint とは独立に、サーバーはエージェントを最初に検出したときに
+もう 1 回更新します(それまでに別の更新が走った場合は行いません)。hint とは独立に、サーバーはエージェントを最初に検出したときに
 1 回、状態が `working` の間は 5 秒ごとに、作業が終わったときにもう 1 回(同じく約
 2 秒後にさらに 1 回)更新します。保存されたツリーに `kind` が `todo` 以外で状態が
 `pending`、`running`、`blocked` のノードが残っている間は、エージェントがアイドルに
@@ -683,10 +684,11 @@ hint はすぐに更新をスケジュールしますが、同じペインの更
 `ended_at_ms`、`content_ref`、`summary` を持ちます。未知の列挙値は `unknown` として
 デコードされます。`AgentInfo.activity_running`、`activity_total`、
 `activity_truncated` は、切り詰める前にソースが報告したツリーを表します。
-エージェントにアクティビティがなければ 3 つとも省略されます。
-`activity_truncated` が立っているとき `activity` には保持された 32 ノード(実行中の
-ノードとその祖先が優先され、残りはソースの順で補われます)しかないため、ツリー全体は
-`node_id` なしの `agent.activity.read` で取得してください。
+それぞれ 0 または false のときに省略されるため、エージェントにアクティビティが
+なければ 3 つとも現れません。
+`activity_truncated` が立っているとき `activity` にはソースの順で最大 32 ノードしか
+ありません(実行中のノードとその祖先を先に残し、次に親が残ったほかのノードを
+補います)。ツリー全体は `node_id` なしの `agent.activity.read` で取得してください。
 `AgentInfo.launch_seq` はサーバーが割り当てる起動順です。ペインが
 最初にエージェントの身元を得たときに新しい単調増加の番号を受け取り、状態が変わっても
 保持し、エージェントが解放または再検出されると新しい番号になります。`0` は不明を意味し
@@ -712,9 +714,9 @@ hint はすぐに更新をスケジュールしますが、同じペインの更
 `pane_id` と `external_id` はちょうど一方だけを指定します。そうでなければ呼び出しは
 `invalid_params` で失敗します。`node_id` を省くとレスポンスは `nodes` にツリー全体を
 含みます(この読み取りは保存されたツリーも更新するため、次のスナップショットはこれと
-一致します)。`node_id` を指定するとレスポンスは `content` チャンクを含みます:`format`
-(`text`、`markdown`、`jsonl`、`unknown`)、`text`、`eof`、`truncated`、そして次のページで
-`cursor` として返す `next_cursor` です。`cursor` は呼び出し側にとって不透明です。
+一致します)。`node_id` を指定すると `nodes` は空になり、レスポンスは `content` チャンクを
+含みます:`node_id`、`format`(`text`、`markdown`、`jsonl`、`unknown`)、`text`、`eof`、
+`truncated`、そして次のページで `cursor` として返す `next_cursor` です。`cursor` は呼び出し側にとって不透明です。
 `max_bytes` の既定値は 65536 で、上限は 524288 です。`follow: true` にすると、サーバーは
 その後 10 秒間、そのペインのツリーを毎秒更新するため、ポーリングするビューアーは
 実行中のノードを追跡できます。内容読み取りの開始位置は変わらないので続きは
@@ -723,13 +725,16 @@ hint はすぐに更新をスケジュールしますが、同じペインの更
 読み取りスレッドが生成するため、後続のリクエストへのレスポンスより遅れて届くことが
 あります。
 
-エラー:`pane_not_found`、`agent_not_found`(ペインにエージェントがいない、外部
-ソースが未知、またはそのソースがその外部セッションをもう列挙していない)、`not_implemented`(このサーバーにそのエージェントのソースアダプターが
+エラー:`invalid_params`(上記の対象の規則のほか、`node_id` が空、`max_bytes: 0`、
+`external_id` の形式が不正)、`pane_not_found`、`agent_not_found`(ペインにエージェントが
+いない、外部ソースが未知、またはツリー全体の読み取りでそのソースがその外部セッションを
+もう列挙していない)、`not_implemented`(このサーバーにそのエージェントのソースアダプターが
 ない、またはアダプターがこのリクエストに応答できない。たとえば Herdr がまだその
 エージェントのネイティブセッション参照を受け取っていない)、`activity_unavailable`(ソースを
-今は読めない。たとえば Pi がまだスナップショットを報告していない)、`activity_malformed`
+今は読めない。たとえば Pi がまだスナップショットを報告していないときのノードの読み取り)、`activity_malformed`
 (ソースの内容またはカーソルが期待した形式ではない)、`activity_io_error`、読み取り
-キューが満杯のときの `server_busy`。
+キューが満杯のときの `server_busy`、バックグラウンドの読み取りスレッドが動いていないときの
+`server_unavailable`。
 
 Herdr は Claude Code、Codex、Kimi Code、OpenCode 向けに各エージェント自身のローカル
 セッションデータを読むソースアダプターを、Pi 向けに Herdr の Pi 拡張が報告する
@@ -738,12 +743,15 @@ Herdr は Claude Code、Codex、Kimi Code、OpenCode 向けに各エージェン
 OpenCode は Herdr がそのペインに保存したネイティブセッション参照(通常はセッション開始時に
 Herdr インテグレーションが報告します)でセッションを特定するため、参照がなければツリーは
 空のままです。Kimi Code は代わりにペインの作業ディレクトリで最近アクティブだった
-セッションを使います。
+セッションを使います。OpenCode のアダプターはサーバーの `PATH` にある `opencode`
+コマンドを実行し、サーバー環境の `XDG_DATA_HOME` に従います。そのコマンドがなければ
+読み取りは `activity_io_error` で失敗します。
 
 `agent.external.list`(パラメーターなし)は、どのペインにも属さないエージェント
 セッションを `{"type":"external_agent_list","agents":[...]}` として列挙します。エントリーは
 `ExternalAgentInfo` で、`external_id`(`<source>:<セッション id>`。`agent.activity.read` の
-`external_id` として使えます)、`source`、`agent_status`、`label`、`readable` と、任意の
+`external_id` として使えます)、`source`、`agent_status`、`label`、`readable`(`false` はそのエントリーのソースを 60 秒間
+正常に読めていないことを示します)と、任意の
 `agent`、`cwd`、`updated_at_ms`、`activity` を持ちます。現在の外部ソースは ZCode
 デスクトップアプリの `zcode` だけです。システムの `sqlite3` コマンドで ZCode のローカル
 データベースを読み取り専用で読み、直近 72 時間に更新されたアーカイブされていない
@@ -756,7 +764,9 @@ ZCode のデータベースがない(ZCode が未インストール、または�
 
 更新によって保存されたツリーが変わると、サーバーは `pane_id`、`running`、`total` を持つ
 `pane.agent_activity_changed` を発行します。このイベントはカウントだけを運びます。
-ツリーは `agent.get` または `agent.activity.read` で読み取ってください。
+ツリーは `agent.get` または `agent.activity.read` で読み取ってください。このイベントの
+購読は `pane_id` による絞り込みを受け付けないため、イベントの `pane_id` で自分で
+絞り込んでください。
 
 ## イベント購読
 
@@ -802,7 +812,7 @@ worktree のイベント購読には `worktree.created`、`worktree.opened`、`w
 
 観測データは `events.subscribe` ではなく専用メソッドを使います。`account.usage.subscribe` は `account.usage.get` と同じパラメーターを取り、`subscription_id` を返した後、その接続に `account.usage.updated`（変化したアカウントスナップショットとその `refresh` 状態）と `account.usage.refreshing`（プローブ開始時の更新状態のみ）を `account.usage.unsubscribe` までプッシュします。`system.metrics.subscribe` も同様に `system.metrics.updated` をプッシュします。購読者がいる間は server がバックグラウンドでプローブを続けるため、データを表示しなくなったら購読を解除してください。購読は接続とともに終了し、再接続後は作り直す必要があります。generation-1 のクライアントエンドポイントはこれらのプッシュを、server の `boot_id` とイベントを含む `endpoint.observation.v1` 制御フレームとして受け取り、未知のイベント種別は拒否せず無視します。
 
-観測のプッシュは `events.subscribe` と同じ `{"event": "<名前>", "data": {...}}` エンベロープを使います。`account.usage.updated` は `accounts`（変化した `AccountUsageSnapshot` エントリ）と省略可能な `refresh` リストを、`account.usage.refreshing` は `refresh` だけを、`system.metrics.updated` は `snapshot` を運びます。`refresh` エントリ（`UsageRefreshState`）は `account.usage.get` と `account.usage.refresh` の応答にも含まれ、`account_id` で `accounts` と対応します。旧 server はこのリストを省略します。フィールドの意味: `in_flight` と `queued`（プローブが派遣済み / まだプローブスレッド待ち）、`requested_at_ms` と `attempted_at_ms`（デバウンスされたものを含む最後の明示的な更新と、実際に開始された最後のプローブ）、`next_allowed_at_ms`（次の明示的な更新が受け付けられる最も早い時刻。省略時は今すぐ可）、`retry_after_ms`（HTTP 429 などのベンダーバックオフ。明示的な更新でも回避しません）、`binding_inferred`（リクエストが未関連付けのペインを指定し、そのベンダーの唯一の設定済みアカウントからデータを返したが、関連付けは書き込んでいない）、`trust_required`（対話式プローブが CLI のディレクトリ信頼ダイアログで停止し、スナップショットの `message` にディレクトリが入る）、`callback_only`（サンプルはプッシュでのみ届く。公式コールバック、または Pi 向けの Herdr 統合拡張）、`pending_binding`（未関連付けペインのコールバックが拒否された後の `pane_id`、`agent`、`candidates`、`rejected_at_ms`）、`callback_enabled`（公式コールバックが herdr に接続済みか。不明なら省略）。`binding_inferred` と `pending_binding` はリクエスト単位で埋められ、イベントでは既定値のままなので、`account.usage.get` の応答から読み取ってください。
+観測のプッシュは `events.subscribe` と同じ `{"event": "<名前>", "data": {...}}` エンベロープを使います。`account.usage.updated` は `accounts`（変化した `AccountUsageSnapshot` エントリ）と省略可能な `refresh` リストを、`account.usage.refreshing` は `refresh` だけを、`system.metrics.updated` は `snapshot` を運びます。`refresh` エントリ（`UsageRefreshState`）は `account.usage.get` と `account.usage.refresh` の応答にも含まれ、`account_id` で `accounts` と対応します。旧 server はこのリストを省略します。フィールドの意味: `in_flight` と `queued`（プローブが派遣済み / まだプローブスレッド待ち）、`requested_at_ms` と `attempted_at_ms`（デバウンスされたものを含む最後の明示的な更新と、実際に開始された最後のプローブ）、`next_allowed_at_ms`（次の明示的な更新が受け付けられる最も早い時刻。省略時は今すぐ可）、`retry_after_ms`（HTTP 429 などのベンダーバックオフ。明示的な更新でも回避しません）、`binding_inferred`（リクエストが未関連付けのペインを指定し、そのベンダーの唯一の設定済みアカウントからデータを返したが、関連付けは書き込んでいない）、`trust_required`（対話式プローブが CLI のディレクトリ信頼ダイアログで停止し、スナップショットの `message` にディレクトリが入る）、`callback_only`（サンプルはプッシュでのみ届く。公式コールバック、または Pi 向けの Herdr 統合拡張）、`pending_binding`（未関連付けペインのコールバックが拒否された後の `pane_id`、`agent`、`candidates`、`rejected_at_ms`）、`callback_enabled`（公式コールバックが herdr に接続済みか。不明な場合や、Pi のようにベンダーにコールバックがない場合は省略）。`binding_inferred` と `pending_binding` はリクエスト単位で埋められ、イベントでは既定値のままなので、`account.usage.get` の応答から読み取ってください。
 
 ## ペインの読み取り
 

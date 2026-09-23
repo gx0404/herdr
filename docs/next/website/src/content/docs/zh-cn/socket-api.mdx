@@ -653,12 +653,13 @@ workspace 的 get/list 响应会公开生成的 `tokens` 映射,空间侧边栏�
 `hint` 可选。它可以是钩子事件名之类的自由文本,也可以是该智能体的来源适配器能
 理解的结构化快照:Herdr 的 Pi 扩展就是这样把整棵树作为 `herdr.activity.snapshot`
 JSON 文档上报的,因为 Pi 不在磁盘上保留任何活动记录。服务器只保留每个窗格最近
-一份不超过 1 MiB 的 hint,并在下一次刷新时交给来源适配器;更大的 hint 仍会安排
-一次刷新,但保留的仍是上一份。`node_id` 与 `seq` 仅用于诊断。响应是
+一份 hint,并在下一次刷新时交给来源适配器。整条请求(含 hint)必须在 API 的
+1 MiB 请求上限之内;超出的请求会被直接丢弃,没有响应,也不会安排刷新。`node_id` 与 `seq` 仅用于诊断。响应是
 `ok`,从不携带树;除 Pi 这类快照 hint 外,请求里也不带树。
 
 一个 hint 会立即安排一次刷新,但同一窗格每秒最多刷新一次;约 2 秒后还会再补刷
-一次,因为钩子往往在智能体把变化写入磁盘之前就已触发。与 hint 无关地,服务器在
+一次(期间若已有别的刷新则不再补刷),因为钩子往往在智能体把变化写入磁盘之前就已
+触发。与 hint 无关地,服务器在
 首次检测到智能体时刷新一次,在其状态为 `working` 期间每 5 秒刷新一次,并在工作
 结束时再补刷一次(约 2 秒后同样再补一次)。只要已存储的树里还有 `kind` 不是
 `todo`、状态为 `pending`、`running` 或 `blocked` 的节点,智能体空闲后服务器仍每
@@ -672,9 +673,10 @@ JSON 文档上报的,因为 Pi 不在磁盘上保留任何活动记录。服务�
 `unknown`),以及可选的 `parent_id`、`agent_type`、`started_at_ms`、`ended_at_ms`、
 `content_ref` 和 `summary`。未知枚举值解码为 `unknown`。
 `AgentInfo.activity_running`、`activity_total` 和 `activity_truncated` 描述的是
-来源报出的、截断前的那棵树;智能体没有活动时三者都省略。`activity_truncated`
-置位时 `activity` 里只有保留下来的 32 个节点(运行中的节点及其祖先优先,其余按
-来源顺序补足),整棵树用不带 `node_id` 的 `agent.activity.read` 拉取。`AgentInfo.launch_seq` 是
+来源报出的、截断前的那棵树;三者各自在为 0 或 false 时省略,所以智能体没有活动时
+三者都不出现。`activity_truncated`
+置位时 `activity` 里最多只有 32 个节点,按来源顺序排列:先保留运行中的节点及其祖先,
+再补父节点已被保留的其它节点;整棵树用不带 `node_id` 的 `agent.activity.read` 拉取。`AgentInfo.launch_seq` 是
 服务器分配的启动顺序:窗格首次获得智能体身份时得到一个新的单调序号,状态变化
 不改号,智能体被释放或重新识别后取新号。`0` 表示未知(旧服务器不下发该字段);
 序号只在同一个服务器进程内可比。
@@ -697,32 +699,37 @@ JSON 文档上报的,因为 Pi 不在磁盘上保留任何活动记录。服务�
 
 `pane_id` 与 `external_id` 恰好给一个,否则调用以 `invalid_params` 失败。不带
 `node_id` 时响应在 `nodes` 里带整棵树(这次读取同时刷新已存储的树,下一份快照与之
-一致);带 `node_id` 时响应带一个 `content` 片段:`format`(`text`、`markdown`、
-`jsonl`、`unknown`)、`text`、`eof`、`truncated`,以及下一页要作为 `cursor` 回传的
-`next_cursor`。`cursor` 对调用方不透明。`max_bytes` 默认 65536,上限 524288。
+一致);带 `node_id` 时 `nodes` 为空,响应带一个 `content` 片段:`node_id`、`format`
+(`text`、`markdown`、`jsonl`、`unknown`)、`text`、`eof`、`truncated`,以及下一页
+要作为 `cursor` 回传的 `next_cursor`。`cursor` 对调用方不透明。`max_bytes` 默认 65536,上限 524288。
 `follow: true` 让服务器在接下来的 10 秒内每秒刷新该窗格的树,轮询的查看器可以借此
 跟踪运行中的节点;它不改变内容读取的起始位置,续读仍靠 `cursor`,`external_id`
 目标忽略它。响应形如
 `{"type":"agent_activity","nodes":[...],"content":{...}}`,由后台读取线程产生,
 因此可能晚于后续请求的响应到达。
 
-错误:`pane_not_found`;`agent_not_found`(窗格没有智能体、外部来源未知,或该来源已不再列出这个外部会话);
+错误:`invalid_params`(除上面的目标规则外,还有 `node_id` 为空、`max_bytes: 0` 或
+`external_id` 格式不对);`pane_not_found`;`agent_not_found`(窗格没有智能体、外部来源
+未知,或读整棵树时该来源已不再列出这个外部会话);
 `not_implemented`(本服务器没有该智能体的来源适配器,或适配器无法应答这次请求,
 例如 Herdr 还没有收到该智能体的原生会话引用);`activity_unavailable`
-(来源此刻不可读,例如 Pi 还没有上报过快照);`activity_malformed`(来源内容或
-游标不是预期格式);`activity_io_error`;读取队列已满时 `server_busy`。
+(来源此刻不可读,例如 Pi 还没有上报过快照时读取某个节点);`activity_malformed`(来源内容或
+游标不是预期格式);`activity_io_error`;读取队列已满时 `server_busy`;后台读取线程没有运行时
+`server_unavailable`。
 
 Herdr 为 Claude Code、Codex、Kimi Code 和 OpenCode 提供来源适配器,读取各智能体
 自己的本地会话数据;Pi 的适配器读取 Herdr 的 Pi 扩展上报的快照。没有适配器的
 智能体(例如以自定义名字上报的)回 `not_implemented`。Claude Code、Codex 和
 OpenCode 靠 Herdr 为该窗格存下的原生会话引用定位会话(通常由 Herdr 集成在会话
 开始时上报),没有引用时树保持为空;Kimi Code 则退而取窗格工作目录下最近活动的
-会话。
+会话。OpenCode 适配器运行服务器 `PATH` 上的 `opencode` 命令,并跟随服务器环境的
+`XDG_DATA_HOME`;找不到该命令时读取以 `activity_io_error` 失败。
 
 `agent.external.list`(无参数)列出不属于任何窗格的智能体会话,响应为
 `{"type":"external_agent_list","agents":[...]}`,条目是 `ExternalAgentInfo`:
 `external_id`(`<source>:<会话 id>`,可作为 `agent.activity.read` 的
-`external_id`)、`source`、`agent_status`、`label`、`readable`,以及可选的 `agent`、
+`external_id`)、`source`、`agent_status`、`label`、`readable`(`false` 表示该条目的
+来源已有 60 秒没能成功读取),以及可选的 `agent`、
 `cwd`、`updated_at_ms` 和 `activity`。目前唯一的外部来源是 `zcode`,即 ZCode
 桌面应用:它通过系统的 `sqlite3` 命令只读 ZCode 的本地数据库,列出最近 72 小时内
 更新过、未归档的根会话,最多 10 个,每个带其子智能体树与待办。没有 ZCode 的
@@ -732,7 +739,7 @@ OpenCode 靠 Herdr 为该窗格存下的原生会话引用定位会话(通常由
 
 刷新改变了已存储的树时,服务器发出 `pane.agent_activity_changed`,带 `pane_id`、
 `running` 和 `total`。该事件只带计数;树要用 `agent.get` 或 `agent.activity.read`
-读取。
+读取。订阅该事件不接受 `pane_id` 过滤,请按事件里的 `pane_id` 自行筛选。
 
 ## 事件订阅
 
@@ -778,7 +785,7 @@ Worktree 事件订阅包括 `worktree.created`、`worktree.opened` 和 `worktree
 
 观测数据走专用方法而不是 `events.subscribe`：`account.usage.subscribe` 的参数与 `account.usage.get` 相同，响应返回 `subscription_id`，之后向该连接推送 `account.usage.updated`（变化的账号快照及其 `refresh` 状态）和 `account.usage.refreshing`（探测刚派发时只推刷新状态），直到 `account.usage.unsubscribe`；`system.metrics.subscribe` 同样推送 `system.metrics.updated`。订阅者会驱动服务端在后台持续探测，数据不再展示时请退订。订阅随连接消亡，重连后需要重新订阅。generation-1 客户端端点以 `endpoint.observation.v1` 控制帧接收这些推送，帧内带 server 的 `boot_id` 与事件；未知事件种类会被忽略而不是拒绝。
 
-观测推送使用与 `events.subscribe` 相同的 `{"event": "<名称>", "data": {...}}` 信封。`account.usage.updated` 携带 `accounts`（变化的 `AccountUsageSnapshot` 条目）和可选的 `refresh` 列表；`account.usage.refreshing` 只携带 `refresh`；`system.metrics.updated` 携带 `snapshot`。`refresh` 条目（`UsageRefreshState`）同样出现在 `account.usage.get` 与 `account.usage.refresh` 的响应里，按 `account_id` 与 `accounts` 对齐；旧版 server 省略该列表。字段含义：`in_flight` 与 `queued`（探测已派发 / 仍在等待查询线程）；`requested_at_ms` 与 `attempted_at_ms`（最近一次显式刷新——含被防抖的——与最近一次真正启动的探测）；`next_allowed_at_ms`（下一次显式刷新会被接受的最早时间，缺省表示现在即可）；`retry_after_ms`（HTTP 429 等厂商退避，显式刷新也不豁免）；`binding_inferred`（请求带了未绑定窗格，数据按该厂商唯一配置的账号返回，绑定并未写入）；`trust_required`（交互探测停在了 CLI 的目录信任对话上，快照 `message` 给出目录）；`callback_only`（样本只来自推送：官方回调，或 Pi 的 Herdr 集成扩展）；`pending_binding`（未绑定窗格的回调被拒后留下的 `pane_id`、`agent`、`candidates`、`rejected_at_ms`）；`callback_enabled`（官方回调是否已接入 herdr，未知时缺省）。`binding_inferred` 与 `pending_binding` 按请求填写，事件里保持缺省，以 `account.usage.get` 的响应为准。
+观测推送使用与 `events.subscribe` 相同的 `{"event": "<名称>", "data": {...}}` 信封。`account.usage.updated` 携带 `accounts`（变化的 `AccountUsageSnapshot` 条目）和可选的 `refresh` 列表；`account.usage.refreshing` 只携带 `refresh`；`system.metrics.updated` 携带 `snapshot`。`refresh` 条目（`UsageRefreshState`）同样出现在 `account.usage.get` 与 `account.usage.refresh` 的响应里，按 `account_id` 与 `accounts` 对齐；旧版 server 省略该列表。字段含义：`in_flight` 与 `queued`（探测已派发 / 仍在等待查询线程）；`requested_at_ms` 与 `attempted_at_ms`（最近一次显式刷新——含被防抖的——与最近一次真正启动的探测）；`next_allowed_at_ms`（下一次显式刷新会被接受的最早时间，缺省表示现在即可）；`retry_after_ms`（HTTP 429 等厂商退避，显式刷新也不豁免）；`binding_inferred`（请求带了未绑定窗格，数据按该厂商唯一配置的账号返回，绑定并未写入）；`trust_required`（交互探测停在了 CLI 的目录信任对话上，快照 `message` 给出目录）；`callback_only`（样本只来自推送：官方回调，或 Pi 的 Herdr 集成扩展）；`pending_binding`（未绑定窗格的回调被拒后留下的 `pane_id`、`agent`、`candidates`、`rejected_at_ms`）；`callback_enabled`（官方回调是否已接入 herdr，未知或厂商没有回调时——例如 Pi——缺省）。`binding_inferred` 与 `pending_binding` 按请求填写，事件里保持缺省，以 `account.usage.get` 的响应为准。
 
 ## 读取窗格
 
