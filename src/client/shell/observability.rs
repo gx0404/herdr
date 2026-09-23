@@ -510,6 +510,8 @@ pub(super) struct HistoryPoint {
     pub cpu: Option<f32>,
     pub memory: Option<f32>,
     pub cores: Vec<Option<f32>>,
+    /// 采样时未隐藏的传感器里最高的温度（°C）：温度卡的历史迷你图。
+    pub temperature: Option<f32>,
 }
 
 /// 悬浮层的目标：Agents 面板里某个 pane 的 agent（按 pane 查该厂商用量）。
@@ -1597,6 +1599,18 @@ impl State {
             let memory = (snapshot.memory.total_bytes > 0).then(|| {
                 snapshot.memory.used_bytes as f32 / snapshot.memory.total_bytes as f32 * 100.0
             });
+            // 与温度卡同口径：隐藏的传感器不参与。
+            let hidden = &self.monitor.hidden_devices;
+            let temperature = snapshot
+                .sensors
+                .iter()
+                .filter(|sensor| {
+                    !hidden
+                        .iter()
+                        .any(|id| id.strip_prefix("sensor:") == Some(sensor.name.as_str()))
+                })
+                .filter_map(|sensor| sensor.temperature_celsius.filter(|value| value.is_finite()))
+                .reduce(f32::max);
             self.history.push_back(HistoryPoint {
                 at: snapshot.sampled_at_ms,
                 cpu: snapshot.cpu_percent,
@@ -1606,6 +1620,7 @@ impl State {
                     .iter()
                     .map(|core| core.usage_percent)
                     .collect(),
+                temperature,
             });
             let cutoff = snapshot
                 .sampled_at_ms

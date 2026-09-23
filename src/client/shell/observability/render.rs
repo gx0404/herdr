@@ -404,15 +404,21 @@ pub(super) fn paint(
                 buffer[(x, y)].set_symbol(" ");
             }
         }
-        // 停靠面板的表头已经写了「监控」，边框上不再重复；只有经典布局（页面
-        // 铺满 pane 区、与悬浮层同一 pass 绘制，即 `draw_hover` 为真）没有别的
-        // 标题，才在边框上写一次。
-        let title = if draw_hover {
-            tr(" MONITOR ", " 监控 ")
+        // 经典布局（页面铺满 pane 区、与悬浮层同一 pass 绘制，即 `draw_hover`
+        // 为真）没有别的 chrome，页面自带外框并在边框上写一次标题。停靠面板已有
+        // 表头与分隔线：页面不再自带外框（否则分隔线、页面框、卡片框挤成
+        // 「│││」），左右各留一列内边距，原先边框占的顶边与底边两行让给正文。
+        let inner = if draw_hover {
+            block(buffer, area, tr(" MONITOR ", " 监控 "), cx)
         } else {
-            ""
+            buffer.set_style(area, Style::default().remove_modifier(Modifier::DIM));
+            Rect::new(
+                area.x.saturating_add(1),
+                area.y,
+                area.width.saturating_sub(2),
+                area.height,
+            )
         };
-        let inner = block(buffer, area, title, cx);
         // Single navigation level: page tabs only. Refresh/pause/close live
         // on keyboard shortcuts (see footer) so the row never mixes
         // navigation with actions. 页签走 kit `tabs`：活动页 accent 反色，
@@ -783,11 +789,26 @@ mod tests {
                 row_text(&buffer, 0)
             );
             assert!(!expect_round || cx.glyphs.top_left == "╭");
-            // 停靠面板 pass：表头已写「监控」，边框上不再重复标题。
+            // 停靠面板 pass：面板表头已写「监控」、左侧有分隔线，页面不再自带
+            // 外框（冒烟 L13），首行就是页签。
             let (docked, _) = paint_page(&populated(), Page::Monitor, 100, 30);
+            let frame = [
+                cx.glyphs.top_left,
+                cx.glyphs.top_right,
+                cx.glyphs.bottom_left,
+                cx.glyphs.bottom_right,
+                cx.glyphs.vertical,
+            ];
+            for (x, y) in [(0, 0), (99, 0), (0, 15), (99, 15), (0, 29), (99, 29)] {
+                let symbol = docked[(x, y)].symbol();
+                assert!(
+                    !frame.contains(&symbol),
+                    "停靠面板不画页面外框（{style:?}）：({x},{y}) = {symbol:?}"
+                );
+            }
             assert!(
-                !row_text(&docked, 0).contains(first),
-                "停靠面板的边框不重复标题（{style:?}）：{:?}",
+                row_has(&docked, 0, crate::i18n::texts().monitor.tab_system),
+                "页签在首行（{style:?}）：{:?}",
                 row_text(&docked, 0)
             );
         }

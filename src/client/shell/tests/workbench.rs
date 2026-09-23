@@ -352,7 +352,8 @@ fn workbench_drop_preview_border_follows_the_border_style() {
         super::super::workbench::body(area, &panel),
         "监控页铺满落点面板正文"
     );
-    let inner_row = page.y + 1;
+    // 停靠面板里页面不自带外框（冒烟 L13），页签就在正文第一行。
+    let inner_row = page.y;
     let text: String = frame_rows(&frame)
         .get(inner_row as usize)
         .cloned()

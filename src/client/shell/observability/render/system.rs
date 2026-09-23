@@ -518,11 +518,14 @@ fn cores_card(
     offset: usize,
     hits: &mut Vec<(Rect, Action)>,
 ) -> usize {
-    let slots = (inner.width / (CORE_SLOT_WIDTH + 1)).max(1);
+    // 每格至少 `CORE_SLOT_WIDTH` 列，放得下几格就排几格，再把富余均分给各格：
+    // 条形铺满卡片宽度，不在右侧留一大片空白（整除后的零头 < 格数，留在最右）。
+    let slots = (inner.width.saturating_add(1) / (CORE_SLOT_WIDTH + 1)).max(1);
+    let stride = inner.width.saturating_add(1) / slots;
     let slot_width = if slots == 1 {
         inner.width
     } else {
-        CORE_SLOT_WIDTH
+        stride.saturating_sub(1)
     };
     let per_row = usize::from(slots);
     let max = sample
@@ -547,7 +550,7 @@ fn cores_card(
         .enumerate()
     {
         let row = index as u16 / slots;
-        let x = inner.x + (index as u16 % slots) * (CORE_SLOT_WIDTH + 1);
+        let x = inner.x + (index as u16 % slots) * stride;
         let rect = Rect::new(
             x,
             inner.y + row,
@@ -1180,6 +1183,35 @@ fn sensors_card(
             },
             columns,
             palette,
+        );
+    }
+    // 芯片都放得下、卡片还空着至少两行时，与 CPU / 内存卡同一口径画历史：一行
+    // 说明 + 其余行画最高温度的迷你图（0–100 °C 定标），卡片不再留一大片空白。
+    let used = u16::try_from(chips.len()).unwrap_or(u16::MAX);
+    if max == 0 && inner.height >= used.saturating_add(2) {
+        let caption = inner.y + used;
+        text(
+            buffer,
+            Rect::new(inner.x, caption, inner.width, 1),
+            0,
+            &format!(
+                "{} · {} min",
+                tr("Hottest sensor", "最高温度"),
+                state.monitor.history_minutes
+            ),
+            Style::default().fg(palette.overlay0),
+        );
+        history_chart(
+            buffer,
+            Rect::new(
+                inner.x,
+                caption + 1,
+                inner.width,
+                inner.bottom() - caption - 1,
+            ),
+            state,
+            |point| point.temperature,
+            palette.peach,
         );
     }
     max
@@ -2280,6 +2312,7 @@ mod tests {
                 cpu: Some(50.0 + index as f32),
                 memory: Some(40.0),
                 cores: Vec::new(),
+                temperature: None,
             })
             .collect();
         for glyphs in [

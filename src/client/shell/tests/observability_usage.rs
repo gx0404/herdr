@@ -3644,14 +3644,16 @@ fn smoke_system_sample() -> Box<crate::api::schema::SystemMetricsSnapshot> {
     })
 }
 
-/// 本帧画出的系统页卡片 id，按从上到下、从左到右排列。
+/// 本帧完整画出的系统页卡片 id，按从上到下、从左到右排列；被页面底边裁掉、
+/// 只露出一截的卡片（卡高不足）不算。
 fn painted_cards(state: &ClientShellState) -> Vec<String> {
+    let full = state.observability.monitor.card_height;
     let mut cards = state
         .observability
         .hits
         .iter()
         .filter_map(|(rect, action)| match action {
-            Action::Card(id) => Some((rect.y, rect.x, id.clone())),
+            Action::Card(id) if rect.height == full => Some((rect.y, rect.x, id.clone())),
             _ => None,
         })
         .collect::<Vec<_>>();
@@ -4004,6 +4006,139 @@ fn gauge_empty_track_is_visible_on_the_card_background() {
         let ratio = contrast_ratio(fg, bg).expect("内置主题的颜色都可换算");
         assert!(ratio >= 1.5, "空槽对比度 {ratio:.2}:1（{fg:?} on {bg:?}）");
     }
+}
+
+/// 冒烟 L13（133×32）：停靠面板里页面不再自带一圈外框——面板左侧分隔线、
+/// 页面框、卡片框原先挤成「│││」；现在分隔线与卡片框之间隔一列空白，页面
+/// 顶边那一行让给页签。
+#[test]
+fn docked_monitor_page_draws_no_frame_of_its_own() {
+    let _guard = crate::i18n::lang_guard(crate::i18n::Lang::ZhCn);
+    let mut state = docked();
+    state.open_observation_page(Page::Monitor, &mut ClientShellInput::default());
+    state.observability.metrics = Some(smoke_system_sample());
+    state.compose(133, 32).expect("系统页");
+    let page = state.observability.page_rect;
+    let cpu = page_hit(
+        &state,
+        |action| matches!(action, Action::Card(card) if card == "cpu"),
+    )
+    .expect("CPU 卡");
+    let buffer = state.compose_buffer.as_ref().expect("帧缓冲");
+    let border = |x: u16, y: u16| {
+        let symbol = buffer[(x, y)].symbol();
+        !symbol.trim().is_empty()
+            && symbol
+                .chars()
+                .all(|ch| ('\u{2500}'..='\u{257F}').contains(&ch))
+    };
+    let row = cpu.y + 2;
+    assert!(border(cpu.x, row), "卡片左边框");
+    assert!(
+        cpu.x > page.x && !border(cpu.x - 1, row),
+        "卡片框与面板边缘之间留一列空白：{:?}",
+        region_row(buffer, page, row).0
+    );
+    assert!(
+        !border(page.x, page.y) && !border(page.right() - 1, page.bottom() - 1),
+        "页面四角不再画框：{:?}",
+        region_row(buffer, page, page.y).0
+    );
+    assert!(
+        find_in(&state, Rect::new(page.x, page.y, page.width, 1), "系统").is_some(),
+        "页签画在面板正文第一行\n{}",
+        region_text(&state, page)
+    );
+}
+
+/// 冒烟 L13（133×32）：逐核卡多列时条形铺满卡片宽度，不再只占左半。
+#[test]
+fn core_card_slots_fill_the_card_width() {
+    use crate::api::schema::CpuCoreMetric;
+    let _guard = crate::i18n::lang_guard(crate::i18n::Lang::ZhCn);
+    let mut state = docked();
+    state.open_observation_page(Page::Monitor, &mut ClientShellInput::default());
+    let mut sample = smoke_system_sample();
+    sample.cores = (0..16)
+        .map(|id| CpuCoreMetric {
+            id,
+            name: format!("cpu{id}"),
+            usage_percent: Some(50.0),
+            frequency_mhz: None,
+        })
+        .collect();
+    state.observability.metrics = Some(sample);
+    state.compose(133, 32).expect("系统页");
+    let card = page_hit(
+        &state,
+        |action| matches!(action, Action::Card(card) if card == "cores"),
+    )
+    .expect("逐核卡");
+    let slots = state
+        .observability
+        .hits
+        .iter()
+        .filter_map(|(rect, action)| matches!(action, Action::Core(_)).then_some(*rect))
+        .filter(|rect| rect.y == card.y + 1)
+        .collect::<Vec<_>>();
+    assert!(slots.len() > 1, "用例前提：一行多个核 {slots:?}");
+    let right = slots.iter().map(|rect| rect.right()).max().expect("核");
+    assert_eq!(
+        right,
+        card.right() - 1,
+        "最右一格贴到卡片内缘\n{}",
+        region_text(&state, card)
+    );
+}
+
+/// 冒烟 L13（133×32）：温度卡芯片不多时，空出的行画最高温度的历史迷你图，
+/// 不再留一大片空白。
+#[test]
+fn sparse_temperature_card_plots_the_hottest_sensor_history() {
+    use crate::api::schema::SensorMetric;
+    use crate::client::shell::observability::HistoryPoint;
+    let _guard = crate::i18n::lang_guard(crate::i18n::Lang::ZhCn);
+    let mut state = docked();
+    state.open_observation_page(Page::Monitor, &mut ClientShellInput::default());
+    state.observability.monitor.visible = vec!["sensors".into()];
+    let mut sample = smoke_system_sample();
+    sample.sensors = vec![
+        SensorMetric {
+            name: "acpitz temp1".into(),
+            temperature_celsius: Some(28.0),
+            critical_celsius: None,
+        },
+        SensorMetric {
+            name: "coretemp Core 0".into(),
+            temperature_celsius: Some(95.0),
+            critical_celsius: None,
+        },
+    ];
+    state.observability.metrics = Some(sample);
+    // 15 分钟窗口里均匀分布的 30 个点。
+    state.observability.now_ms = 900_000;
+    state.observability.history = (0..30)
+        .map(|index| HistoryPoint {
+            at: index * 30_000,
+            cpu: None,
+            memory: None,
+            cores: Vec::new(),
+            temperature: Some(60.0 + index as f32),
+        })
+        .collect();
+    state.compose(133, 32).expect("系统页");
+    let card = page_hit(
+        &state,
+        |action| matches!(action, Action::Card(card) if card == "sensors"),
+    )
+    .expect("温度卡");
+    let text = region_text(&state, card);
+    assert!(text.contains("最高温度"), "迷你图说明\n{text}");
+    assert!(
+        text.chars()
+            .any(|ch| ('\u{2801}'..='\u{28FF}').contains(&ch)),
+        "空出的行画出盲文迷你图\n{text}"
+    );
 }
 
 /// 监控偏好页的控件：点分段 / 步进器 / 开关只回写各自的偏好键（`PreferenceKey`），
