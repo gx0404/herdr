@@ -1400,3 +1400,67 @@ fn slow_tree_reads_do_not_starve_content_follow_reads() {
         .text()
         .ends_with("line 5\n"));
 }
+
+/// 右列头行的元信息（种类 · 状态 · 耗时）按整段取舍：耗时要么完整出现、要么
+/// 不出现，不留悬空的「·」；标签过长时先截标签（带省略号）给耗时与种类让位。
+#[test]
+fn content_header_meta_is_dropped_whole_never_cut() {
+    let elapsed = format_elapsed(725_000);
+    assert_eq!(elapsed, "12m05s");
+    let labels = [
+        "cargo test suite",
+        "cargo test suite!",
+        "run the cargo tests",
+        "run the whole cargo test suite across every crate in the workspace",
+    ];
+    for (cols, rows) in [(120, 40), (90, 30), (56, 20)] {
+        for label in labels {
+            let mut state = state();
+            let outcome = open(&mut state, pane_owner());
+            let (id, _) = single_read(&outcome);
+            let mut nodes = sample_nodes();
+            nodes[3].label = label.into();
+            nodes[3].started_at_ms = Some(0);
+            nodes[3].ended_at_ms = Some(725_000);
+            respond(&mut state, &id, tree_result(nodes));
+            select_with_content(&mut state, "b", "boom\n");
+            if cols < 60 {
+                state.handle_raw_events(vec![key(KeyCode::Tab)]);
+            }
+            state.compose(cols, rows).expect("frame");
+            let content = state.hits.agent_activity_content;
+            assert!(!content.is_empty(), "{cols}x{rows} 内容列可见");
+            let header =
+                rows_text(&state, Rect::new(content.x, content.y, content.width, 1)).join("");
+            let compact = header.chars().filter(|ch| *ch != ' ').collect::<String>();
+            let context = format!("{cols}x{rows} {label:?}: {header:?}");
+            if compact.contains("12m") || compact.contains("·1") {
+                assert!(compact.contains(&elapsed), "耗时不许截半: {context}");
+            }
+            let chars = compact.chars().collect::<Vec<_>>();
+            for (index, ch) in chars.iter().enumerate() {
+                if *ch == '·' {
+                    let next = chars.get(index + 1);
+                    assert!(
+                        next.is_some_and(|next| !matches!(next, '·' | '●' | '○' | '…')),
+                        "不留悬空的分隔符: {context}"
+                    );
+                }
+            }
+            if cols >= 90 {
+                assert!(compact.contains(&elapsed), "宽窗口放得下耗时: {context}");
+                assert!(
+                    has(&header, texts().kind_background),
+                    "宽窗口放得下种类: {context}"
+                );
+            }
+            let short = label.len() <= 20;
+            if cols == 120 && short {
+                assert!(has(&header, label), "短标签完整: {context}");
+            }
+            if !has(&header, label) {
+                assert!(header.contains('…'), "截断的标签带省略号: {context}");
+            }
+        }
+    }
+}

@@ -1423,6 +1423,61 @@ fn put_segment_until(b: &mut Buffer, x: u16, y: u16, right: u16, text: &str, sty
     x.saturating_add(width)
 }
 
+/// 右列头行里标签至少保留的列数（含省略号）；元信息只在这之外的宽度里取舍。
+const HEADER_LABEL_MIN_WIDTH: u16 = 8;
+
+/// 右列头行的宽度预算：`tokens` 是按显示顺序的 [种类, 状态, 耗时]，返回标签可用
+/// 的列数与要画的元信息（`  种类 · 状态 · 耗时` 的子集）。元信息按整段取舍、从不
+/// 画半截；优先级从高到低：标签的前 [`HEADER_LABEL_MIN_WIDTH`] 列、耗时、种类、
+/// 标签其余部分、状态（状态字形已经表达了它）。
+fn header_meta_budget(label: &str, room: u16, tokens: [Option<&str>; 3]) -> (u16, String) {
+    const KIND: usize = 0;
+    const STATUS: usize = 1;
+    const ELAPSED: usize = 2;
+    let mut keep = tokens.map(|token| token.is_some_and(|token| !token.is_empty()));
+    let meta_width = |keep: &[bool; 3]| {
+        let (count, width) = tokens.iter().zip(keep).filter(|(_, kept)| **kept).fold(
+            (0u16, 0u16),
+            |(count, width), (token, _)| {
+                (
+                    count + 1,
+                    width.saturating_add(display_width(token.unwrap_or_default())),
+                )
+            },
+        );
+        if count == 0 {
+            0
+        } else {
+            // 前导两空格 + 各段 + 段间「 · 」。
+            width.saturating_add(2 + 3 * (count - 1))
+        }
+    };
+    let label_width = display_width(label);
+    // 状态排在标签其余部分之后：整段标签连同全部元信息放不下时先让出状态。
+    if label_width.saturating_add(meta_width(&keep)) > room {
+        keep[STATUS] = false;
+    }
+    // 再保标签前几列：放不下时依次整段丢种类、耗时。
+    let label_min = label_width.min(HEADER_LABEL_MIN_WIDTH);
+    for drop in [KIND, ELAPSED] {
+        if label_min.saturating_add(meta_width(&keep)) <= room {
+            break;
+        }
+        keep[drop] = false;
+    }
+    let label_limit = room.saturating_sub(meta_width(&keep));
+    let mut meta = String::new();
+    for token in tokens
+        .iter()
+        .zip(keep)
+        .filter_map(|(token, kept)| kept.then_some(*token).flatten())
+    {
+        meta.push_str(if meta.is_empty() { "  " } else { " · " });
+        meta.push_str(token);
+    }
+    (label_limit, meta)
+}
+
 /// 右列：头行（节点标签 · 种类 · 状态 · 耗时 / 摘要 / 提示）+ 正文 + 滚动条。
 fn render_content_column(
     b: &mut Buffer,
@@ -1476,22 +1531,32 @@ fn render_content_column(
                     Style::default().fg(status_color(node.status, p)),
                 );
                 cursor = put_segment_until(b, cursor, y, limit, " ", title_style);
-                let label =
-                    crate::ui::truncate_end(&node.label, usize::from(limit.saturating_sub(cursor)));
-                cursor = put_segment_until(b, cursor, y, limit, &label, title_style);
-                let mut meta = format!(
-                    "  {} · {}",
-                    kind_label(node.kind),
-                    status_label(node.status)
+                let elapsed = node_elapsed_ms(node, overlay.now_ms).map(format_elapsed);
+                let (label_limit, meta) = header_meta_budget(
+                    &node.label,
+                    limit.saturating_sub(cursor),
+                    [
+                        Some(kind_label(node.kind)),
+                        Some(status_label(node.status)),
+                        elapsed.as_deref(),
+                    ],
                 );
-                if let Some(elapsed) = node_elapsed_ms(node, overlay.now_ms) {
-                    meta.push_str(" · ");
-                    meta.push_str(&format_elapsed(elapsed));
+                let label = crate::ui::truncate_end(&node.label, usize::from(label_limit));
+                cursor = put_segment_until(
+                    b,
+                    cursor,
+                    y,
+                    cursor.saturating_add(label_limit),
+                    &label,
+                    title_style,
+                );
+                if !meta.is_empty() {
+                    put_segment_until(b, cursor, y, limit, &meta, Style::default().fg(p.overlay1));
                 }
-                put_segment_until(b, cursor, y, limit, &meta, Style::default().fg(p.overlay1));
             }
             (None, Some(id)) => {
-                put_segment_until(b, x, y, limit, id, title_style);
+                let id = crate::ui::truncate_end(id, usize::from(limit.saturating_sub(x)));
+                put_segment_until(b, x, y, limit, &id, title_style);
             }
             (None, None) => {
                 put_segment_until(b, x, y, limit, texts.content_title, title_style);
@@ -1527,6 +1592,7 @@ fn render_content_column(
             _ => None,
         };
         if let Some((notice, style)) = notice {
+            let notice = crate::ui::truncate_end(&notice, usize::from(right.saturating_sub(x)));
             put_segment_until(b, x, y, right, &notice, style);
         }
     }
