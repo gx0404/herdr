@@ -56,9 +56,8 @@ use crate::config::UsageAccountConfig;
 
 /// 快照的 `source`。
 pub(super) const SOURCE: &str = "ZCode local database";
-/// Ready 快照的说明：本地统计，非账号额度，远端额度不查询。
-pub(super) const LOCAL_NOTICE: &str =
-    "本地统计：ZCode 本机数据库最近 24 小时的 token 与工具调用，非账号额度；远端额度不查询";
+// Ready 快照的说明（本地统计，非账号额度，远端额度不查询）在
+// `crate::i18n::UsageNoticeTexts::zcode_local`，按 server 语言取。
 
 const WINDOW_HOURS: u64 = 24;
 const WINDOW_MS: u64 = WINDOW_HOURS * 60 * 60 * 1000;

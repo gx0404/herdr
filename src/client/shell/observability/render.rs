@@ -1360,6 +1360,32 @@ mod tests {
         assert!(toolbar_row(&buffer, texts.callback_toggle).is_none());
     }
 
+    /// 文档终审 D7：表格格式的指标列曾直接写服务端标签（中文），英文界面下也是中文。
+    /// 认得的指标与卡片一样按界面语言写槽位名，认不出的沿用服务端标签。
+    #[test]
+    fn usage_table_names_known_metrics_in_the_ui_language() {
+        let mut state = populated();
+        state.usage.format = UsageDisplayFormat::Table;
+        let mut five_hour = metric("five_hour", Some(42.0));
+        five_hour.label = "5 小时额度".into();
+        let mut seven_day = metric("seven_day", Some(3.0));
+        seven_day.label = "7 天额度".into();
+        let mut other = metric("mystery", Some(1.0));
+        other.label = "vendor label".into();
+        state.accounts[0].metrics = vec![five_hour, seven_day, other];
+        let _guard = lang_guard(Lang::En);
+        let (buffer, _) = paint_page(&state, Page::Accounts, 200, 32);
+        let text = buffer_text(&buffer);
+        let texts = &crate::i18n::texts().monitor;
+        assert!(buffer_has(&buffer, texts.quota_5h), "{text}");
+        assert!(buffer_has(&buffer, texts.quota_weekly), "{text}");
+        assert!(buffer_has(&buffer, "vendor label"), "{text}");
+        assert!(
+            !text.contains("小时额度") && !text.contains("天额度"),
+            "{text}"
+        );
+    }
+
     /// 文档终审 D2：服务端按它自己的语言写说明——远端机器、或 `HERDR_LANG` 与客户端
     /// 不同的 server 会发来中文。认得的说明（这里是 claude 已登录、等待官方回调）在卡片
     /// 与表格里都按界面语言显示，指引写账号页上开关的真实名字。

@@ -699,17 +699,46 @@ pub(super) fn vendor_groups(accounts: &[AccountUsageSnapshot]) -> Vec<VendorGrou
 /// 额度槽位的显示标签：codex 主 / 次窗口知道长度时写「5h 窗口」，未进匹配表的
 /// 指标用服务端标签。
 fn quota_label<'a>(slot: Option<Slot>, metric: &'a UsageMetric, cx: Cx) -> Cow<'a, str> {
+    slot_label(slot, metric, cx.texts)
+}
+
+/// 表格格式等只要一个指标名的地方（文档终审 D7）：认得的指标写界面语言的槽位名，
+/// 认不出的沿用服务端标签——服务端标签随快照类型进了冻结摘要的线协议，旧客户端照原样
+/// 显示，所以不在服务端改写，映射表就是卡片共用的这张匹配表。codex 的多个限额桶在
+/// 表格里各占一行，桶名（服务端标签 `{limitName} · …` 的前半，没有就用桶 id）要保留，
+/// 否则各桶的行分不开。
+pub(super) fn metric_label<'a>(agent: &str, metric: &'a UsageMetric) -> Cow<'a, str> {
+    let slot = slot_of(agent, metric);
+    let label = slot_label(slot, metric, &crate::i18n::texts().monitor);
+    if agent == "codex" && slot.is_some() {
+        let bucket = metric
+            .label
+            .split_once(" · ")
+            .map(|(name, _)| name)
+            .or_else(|| codex_bucket(&metric.id));
+        if let Some(bucket) = bucket {
+            return Cow::Owned(format!("{bucket} · {label}"));
+        }
+    }
+    label
+}
+
+fn slot_label<'a>(
+    slot: Option<Slot>,
+    metric: &'a UsageMetric,
+    texts: &'static crate::i18n::MonitorTexts,
+) -> Cow<'a, str> {
     match slot {
         Some(slot @ (Slot::QuotaPrimary | Slot::QuotaSecondary)) => metric
             .window_seconds
             .filter(|secs| *secs > 0)
-            .map_or(Cow::Borrowed(slot.label(cx.texts)), |secs| {
+            .map_or(Cow::Borrowed(slot.label(texts)), |secs| {
                 Cow::Owned(crate::i18n::fill(
-                    cx.texts.window_fmt,
+                    texts.window_fmt,
                     &[("span", &short_span(secs))],
                 ))
             }),
-        Some(slot) => Cow::Borrowed(slot.label(cx.texts)),
+        Some(slot) => Cow::Borrowed(slot.label(texts)),
         None => Cow::Borrowed(&metric.label),
     }
 }

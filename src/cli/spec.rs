@@ -258,7 +258,7 @@ fn api_command() -> Command {
         .about(t.api_about)
         .subcommand(
             Command::new("usage-report")
-                .about("提交官方 CLI 用量回调 JSON")
+                .about(t.api_usage_report_about)
                 .arg(option("agent", "AGENT"))
                 .arg(option("account", "ID"))
                 .arg(flag("passthrough")),
@@ -1378,6 +1378,27 @@ mod tests {
             "--from-config 用法不需要 --label：{usage}"
         );
         assert!(usage.contains("--from-config <HOST>"), "{usage}");
+    }
+
+    /// 文档终审 D7：`herdr api usage-report --help` 的说明曾是写死的中文。
+    #[test]
+    fn api_usage_report_help_follows_the_cli_language() {
+        let _guard = crate::i18n::lang_guard(crate::i18n::Lang::En);
+        let mut help = Vec::new();
+        super::write_requested_help(
+            &[
+                "herdr".to_string(),
+                "api".to_string(),
+                "usage-report".to_string(),
+                "--help".to_string(),
+            ],
+            &mut help,
+            || {},
+        )
+        .unwrap();
+        let help = String::from_utf8(help).unwrap();
+        let about = help.lines().next().unwrap_or_default();
+        assert!(!about.is_empty() && about.is_ascii(), "{help}");
     }
 
     #[test]

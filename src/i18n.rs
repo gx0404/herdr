@@ -586,6 +586,42 @@ pub struct UsageNoticeTexts {
     pub trust_callback_hint: &'static str,
     /// 交互探测停在登录对话时的提示。
     pub sign_in_callback_hint: &'static str,
+    // ---- 账号卡与表格「说明」里的固定说明（文档终审 D7）----
+    /// 冷条目还没有查询过。
+    pub not_queried_yet: &'static str,
+    /// 该厂商在设置里被关闭。
+    pub provider_disabled: &'static str,
+    /// 官方回调超过闩锁时长没有更新，显示缓存样本。
+    pub callback_stale: &'static str,
+    /// 集成扩展（pi）超过闩锁时长没有推送，显示缓存的会话统计。
+    pub extension_push_stale: &'static str,
+    /// 未绑定窗格且无法推断账号时的占位。
+    pub binding_placeholder: &'static str,
+    /// claude 登录预检报告未登录。
+    pub claude_signed_out: &'static str,
+    /// pi 还没有推送会话用量。
+    pub pi_waiting: &'static str,
+    /// 官方输出里没有已验证的用量字段。
+    pub no_verified_fields: &'static str,
+    /// 官方账号身份变化、绑定已撤销。
+    pub identity_changed: &'static str,
+    /// zcode 本地统计卡的来源声明。
+    pub zcode_local: &'static str,
+    /// 按唯一账号自动绑定。
+    pub auto_bound: &'static str,
+    /// 官方回调暂无额度字段。
+    pub no_quota: &'static str,
+    /// 集成扩展的推送暂无用量字段。
+    pub no_push_usage: &'static str,
+    /// 上报被拒：窗格还没有绑定该厂商的账号（`account.usage.report` 的错误说明）。
+    pub binding_required: &'static str,
+    pub invalid_report: &'static str,
+    /// 本机数据库轮询型来源（zcode）收到上报时的拒绝说明。
+    pub local_source_report: &'static str,
+    pub binding_candidates_fmt: &'static str, // args: message, candidates
+    /// 候选账号之间的分隔符。
+    pub candidate_separator: &'static str,
+    pub binding_no_quota_fmt: &'static str, // args: message, account
 }
 
 /// 说明表里的一条说明：固定文案按下标，claude 的等待说明按登录态与回调接入态。
@@ -623,9 +659,26 @@ impl UsageNoticeTexts {
         fill(template, &[("login", login)])
     }
 
-    /// 没有参数的固定说明，按下标与各语言对齐。
-    fn fixed(&self) -> [&'static str; 2] {
-        [self.trust_callback_hint, self.sign_in_callback_hint]
+    /// 快照 `message` 里没有参数的固定说明，按下标与各语言对齐。只进上报应答的拒绝
+    /// 说明（`binding_required` 等）不在其中：客户端不显示它们。
+    fn fixed(&self) -> [&'static str; 15] {
+        [
+            self.trust_callback_hint,
+            self.sign_in_callback_hint,
+            self.not_queried_yet,
+            self.provider_disabled,
+            self.callback_stale,
+            self.extension_push_stale,
+            self.binding_placeholder,
+            self.claude_signed_out,
+            self.pi_waiting,
+            self.no_verified_fields,
+            self.identity_changed,
+            self.zcode_local,
+            self.auto_bound,
+            self.no_quota,
+            self.no_push_usage,
+        ]
     }
 
     fn render(&self, notice: UsageNotice) -> std::borrow::Cow<'static, str> {
@@ -1457,6 +1510,7 @@ pub struct CliHelpTexts {
     pub server_reload_agent_manifests_about: &'static str,
     pub api_about: &'static str,
     pub api_snapshot_about: &'static str,
+    pub api_usage_report_about: &'static str,
     pub api_schema_about: &'static str,
     pub workspace_about: &'static str,
     pub workspace_list_about: &'static str,
@@ -1915,6 +1969,9 @@ pub struct CliErrorTexts {
     // src/cli/api.rs
     pub api_schema_usage: &'static str,
     pub api_snapshot_usage: &'static str,
+    pub api_usage_report_usage: &'static str,
+    pub usage_report_too_large: &'static str,
+    pub usage_report_needs_json: &'static str,
 
     // src/cli/agent.rs
     pub agent_list_usage: &'static str,
@@ -2267,6 +2324,26 @@ mod tests {
         assert!(en.interactive_failure_sep.is_ascii());
     }
 
+    /// 同一语言里每条说明的原文互不相同，否则按原文反查会认错条目。
+    #[test]
+    fn usage_notice_catalog_is_unambiguous_per_language() {
+        for lang in [Lang::En, Lang::ZhCn] {
+            let texts: Vec<&str> = usage_notice_catalog()
+                .iter()
+                .filter(|(entry_lang, _, _)| *entry_lang == lang)
+                .map(|(_, _, text)| text.as_str())
+                .collect();
+            let unique: std::collections::HashSet<&str> = texts.iter().copied().collect();
+            assert_eq!(unique.len(), texts.len(), "{lang:?}: {texts:?}");
+            assert!(texts.iter().all(|text| !text.is_empty()), "{lang:?}");
+        }
+        let en = &texts_for(Lang::En).usage_notice;
+        assert!(
+            en.fixed().iter().all(|text| text.is_ascii()),
+            "英文表里不留中文"
+        );
+    }
+
     /// 服务端按它自己的语言写说明，客户端按界面语言显示：整条认得的直接换；等待说明后
     /// 拼了交互探测失败原因的两段各自换，原因认不出就原样保留；认不出的整条原样，且与
     /// 界面同语言时不重新分配。
@@ -2311,10 +2388,9 @@ mod tests {
                         "{server:?} → {ui:?}"
                     );
                 }
-                assert_eq!(
-                    localize_usage_notice(from.sign_in_callback_hint),
-                    to.sign_in_callback_hint
-                );
+                for (source, target) in from.fixed().iter().zip(to.fixed()) {
+                    assert_eq!(localize_usage_notice(source), target, "{server:?} → {ui:?}");
+                }
             }
         }
         let _guard = lang_guard(Lang::En);

@@ -28,12 +28,11 @@ const TERMINAL_AUTO_RETRY_LIMIT: u32 = 6;
 /// 官方回调闩锁时长：期内不回落探测；到期后快照降为缓存态并允许探测，但只有 Ready 结果
 /// 能覆盖回调快照。
 pub(super) const CALLBACK_LATCH_MS: u64 = 15 * 60 * 1000;
-/// 回调闩锁到期后写入快照的说明；样本与采样时间原样保留。
-const CALLBACK_STALE_MESSAGE: &str =
-    "官方回调已超过 15 分钟未更新，显示的是缓存样本；等待下一次回调";
-/// 同上，样本来自 herdr 集成扩展的推送（pi）时的说明：会话空闲时扩展不会推送。
-const EXTENSION_PUSH_STALE_MESSAGE: &str =
-    "集成扩展已超过 15 分钟未推送，显示的是缓存的会话统计；会话继续后更新";
+/// 写进快照 `message` 与上报应答的固定说明：按 server 的界面语言取（与 toast、通知
+/// 同一口径），客户端显示前再按自己的语言重排（`crate::i18n::localize_usage_notice`）。
+pub(super) fn notices() -> &'static crate::i18n::UsageNoticeTexts {
+    &crate::i18n::texts().usage_notice
+}
 /// 配置文件戳的复查周期；已安装厂商与终态指纹的复查对齐 `registry::AVAILABILITY_TTL`。
 const RELOAD_INTERVAL: Duration = Duration::from_secs(5);
 /// 隐式默认账号（`<agent>:default`）在官方 CLI 暂时检测不到时的保留时长：PATH 抖动、
@@ -565,10 +564,7 @@ impl ServiceState {
                 if selection.placeholder {
                     snapshot.status = ObservationStatus::NeedsBinding;
                     snapshot.metrics.clear();
-                    snapshot.message = Some(
-                        "请先确认此 Agent 使用的账号；该厂商只有一个账号时会在收到官方回调时自动绑定，多个账号请手动选择"
-                            .into(),
-                    );
+                    snapshot.message = Some(notices().binding_placeholder.into());
                 }
                 Some((snapshot, refresh))
             })
@@ -999,11 +995,12 @@ fn age_out_callbacks(cache: &mut HashMap<String, CacheEntry>, now_ms: u64) -> Ve
             entry.snapshot.status = ObservationStatus::Stale;
             let pushed_by_extension = registry::provider(&entry.snapshot.agent)
                 .is_some_and(registry::supports_extension_push);
+            // 样本来自 herdr 集成扩展的推送（pi）时另写一句：会话空闲时扩展不会推送。
             entry.snapshot.message = Some(
                 if pushed_by_extension {
-                    EXTENSION_PUSH_STALE_MESSAGE
+                    notices().extension_push_stale
                 } else {
-                    CALLBACK_STALE_MESSAGE
+                    notices().callback_stale
                 }
                 .into(),
             );
@@ -1112,7 +1109,7 @@ fn empty_snapshot(account: &UsageAccountConfig) -> AccountUsageSnapshot {
             .map(|p| p.source)
             .unwrap_or_default()
             .into(),
-        message: Some("尚未查询".into()),
+        message: Some(notices().not_queried_yet.into()),
         ..Default::default()
     }
 }
@@ -1348,7 +1345,7 @@ fn request_accounts(
             .any(|agent| agent == &account.agent)
         {
             entry.snapshot.status = ObservationStatus::Unavailable;
-            entry.snapshot.message = Some("已在设置中关闭此厂商".into());
+            entry.snapshot.message = Some(notices().provider_disabled.into());
             probe_skipped(Some(&account.id), "disabled_provider", manual);
             continue;
         }
@@ -1574,7 +1571,7 @@ fn claude_probe(
         if !status.logged_in {
             return Err((
                 ObservationStatus::NotAuthenticated,
-                "Claude Code 未登录；请在 CLI 中运行 /login（或 claude auth login）后再刷新".into(),
+                notices().claude_signed_out.into(),
             ));
         }
     }
@@ -1612,9 +1609,6 @@ fn json_query_source(provider: &registry::Provider, args: &[&str]) -> String {
         command
     }
 }
-
-/// pi 的占位说明：用量只由 herdr 的 pi 扩展在会话内推送，探测不起任何进程。
-const PI_WAITING_MESSAGE: &str = "等待 herdr 的 pi 扩展推送会话用量：请确认已安装并更新 pi 集成（herdr integration install pi），并在 herdr 窗格内运行 pi；每轮响应结束后推送一次。这是会话统计，不是账号额度";
 
 fn query(account: &UsageAccountConfig, timeout: Duration, options: ProbeOptions) -> ProbeOutcome {
     let mut snapshot = empty_snapshot(account);
@@ -1700,11 +1694,12 @@ fn query(account: &UsageAccountConfig, timeout: Duration, options: ProbeOptions)
                 // 稳定占位：没有可轮询的接口，样本只来自扩展推送，按慢 TTL 保持即可。
                 snapshot.source = "herdr 集成扩展推送".into();
                 flags.slow_poll = true;
-                Err((ObservationStatus::NeedsBinding, PI_WAITING_MESSAGE.into()))
+                // pi 的占位说明：用量只由 herdr 的 pi 扩展在会话内推送，探测不起任何进程。
+                Err((ObservationStatus::NeedsBinding, notices().pi_waiting.into()))
             }
             registry::Query::ZcodeLocal => {
                 snapshot.source = zcode_local::SOURCE.into();
-                ready_message = Some(zcode_local::LOCAL_NOTICE);
+                ready_message = Some(notices().zcode_local);
                 zcode_local::probe(
                     provider,
                     account,
@@ -1754,7 +1749,7 @@ fn settle_result(
             }
             if metrics.is_empty() {
                 snapshot.status = ObservationStatus::Unsupported;
-                snapshot.message = Some("官方输出没有已验证的用量字段；未推算账号剩余额度".into());
+                snapshot.message = Some(notices().no_verified_fields.into());
             } else {
                 snapshot.metrics = metrics;
                 snapshot.status = ObservationStatus::Ready;
@@ -1784,7 +1779,7 @@ fn invalidate_changed_identity(
     bindings.retain(|_, account| account != &next.account_id);
     next.metrics.clear();
     next.status = ObservationStatus::NeedsBinding;
-    next.message = Some("官方账号身份已改变，请重新确认窗格绑定".into());
+    next.message = Some(notices().identity_changed.into());
     true
 }
 
@@ -2470,10 +2465,10 @@ mod tests {
                 tool_uses: Some(3.0),
                 subagents: Some(1.0),
             })),
-            Some(zcode_local::LOCAL_NOTICE),
+            Some(notices().zcode_local),
         );
         assert_eq!(ready.status, ObservationStatus::Ready);
-        assert_eq!(ready.message.as_deref(), Some(zcode_local::LOCAL_NOTICE));
+        assert_eq!(ready.message.as_deref(), Some(notices().zcode_local));
         assert_eq!(ready.metrics.len(), 6);
         assert_eq!(ready.plan, None, "本地统计没有套餐");
         ready.observed_at_ms = 1_000;
@@ -2483,7 +2478,7 @@ mod tests {
         assert!(merge_result(&mut entry, ready, now));
         assert_eq!(
             entry.snapshot.message.as_deref(),
-            Some(zcode_local::LOCAL_NOTICE)
+            Some(notices().zcode_local)
         );
 
         let mut failed = empty_snapshot(&account);
@@ -2491,7 +2486,7 @@ mod tests {
             &mut failed,
             &account.agent,
             Err((ObservationStatus::Error, "读库失败".into())),
-            Some(zcode_local::LOCAL_NOTICE),
+            Some(notices().zcode_local),
         );
         assert_eq!(
             failed.message.as_deref(),
@@ -2511,7 +2506,7 @@ mod tests {
             &mut missing,
             &account.agent,
             Err((ObservationStatus::Unavailable, "没有 sqlite3".into())),
-            Some(zcode_local::LOCAL_NOTICE),
+            Some(notices().zcode_local),
         );
         assert!(merge_result(&mut entry, missing, now));
         assert_eq!(entry.snapshot.status, ObservationStatus::Unavailable);
@@ -3073,7 +3068,7 @@ mod tests {
         assert_eq!(entry.snapshot.observed_at_ms, now_ms - 1, "采样时间保留");
         assert_eq!(
             entry.snapshot.message.as_deref(),
-            Some(CALLBACK_STALE_MESSAGE)
+            Some(notices().callback_stale)
         );
         assert!(
             entry.callback_latched(),
@@ -3142,13 +3137,13 @@ mod tests {
         assert_eq!(entry.snapshot.status, ObservationStatus::Stale);
         assert_eq!(
             entry.snapshot.message.as_deref(),
-            Some(EXTENSION_PUSH_STALE_MESSAGE)
+            Some(notices().extension_push_stale)
         );
         let placeholder = AccountUsageSnapshot {
             account_id: "pi:default".into(),
             agent: "pi".into(),
             status: ObservationStatus::NeedsBinding,
-            message: Some(PI_WAITING_MESSAGE.into()),
+            message: Some(notices().pi_waiting.into()),
             ..Default::default()
         };
         assert!(!merge_result(entry, placeholder, Instant::now()));
@@ -4161,6 +4156,33 @@ mod tests {
         fn probe_dir(&self, account: &UsageAccountConfig) -> PathBuf {
             PathBuf::from("/state/probe").join(account.id.replace(':', "-"))
         }
+    }
+
+    /// 文档终审 D7：账号卡与表格的「说明」里常见的固定说明（尚未查询、回调过期等）同样
+    /// 按 server 的语言生成，英文界面下不再是中文。
+    #[test]
+    fn fixed_account_notices_follow_the_server_language() {
+        use crate::i18n::{lang_guard, Lang};
+        let _guard = lang_guard(Lang::En);
+        let account = claude_account();
+        let snapshot = empty_snapshot(&account);
+        let message = snapshot.message.expect("冷条目带说明");
+        assert!(message.is_ascii(), "{message}");
+
+        let mut cache = HashMap::new();
+        let mut entry = fresh_entry(&account);
+        entry.snapshot.status = ObservationStatus::Ready;
+        entry.callback_until_ms = Some(1);
+        cache.insert(account.id.clone(), entry);
+        let aged = age_out_callbacks(&mut cache, 2);
+        assert_eq!(aged.len(), 1);
+        assert_eq!(aged[0], account.id);
+        let stale = cache[&account.id]
+            .snapshot
+            .message
+            .clone()
+            .unwrap_or_default();
+        assert!(!stale.is_empty() && stale.is_ascii(), "{stale}");
     }
 
     /// 文档终审 D2：「等待回调」说明曾只有中文，且让用户去「监控 → 设置」启用——开关其实

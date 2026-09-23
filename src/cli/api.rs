@@ -153,9 +153,7 @@ fn usage_report_with_io(
             return Ok(2);
         }
         UsageReportArgs::Invalid { passthrough: false } => {
-            eprintln!(
-                "usage: herdr api usage-report --agent <AGENT> [--account <ID>] [--passthrough]"
-            );
+            eprintln!("{}", crate::i18n::texts().cli_errors.api_usage_report_usage);
             return Ok(2);
         }
         UsageReportArgs::Run {
@@ -183,13 +181,19 @@ fn usage_report_with_io(
         return if passthrough {
             Ok(0)
         } else {
-            Err(std::io::Error::other("官方用量报告超过大小限制"))
+            Err(std::io::Error::other(
+                crate::i18n::texts().cli_errors.usage_report_too_large,
+            ))
         };
     }
     let payload = match serde_json::from_slice(&bytes) {
         Ok(value) => value,
         Err(_) if passthrough => return Ok(0),
-        Err(_) => return Err(std::io::Error::other("需要官方 JSON 用量报文")),
+        Err(_) => {
+            return Err(std::io::Error::other(
+                crate::i18n::texts().cli_errors.usage_report_needs_json,
+            ))
+        }
     };
     if passthrough && pane_id.is_none() && account_id.is_empty() {
         return Ok(0);
@@ -327,6 +331,21 @@ mod tests {
 
     fn args(list: &[&str]) -> Vec<String> {
         list.iter().map(|arg| (*arg).to_owned()).collect()
+    }
+
+    /// 文档终审 D7：`herdr api usage-report` 的本地报错走 CLI 文案表，英文界面下不再
+    /// 是中文。
+    #[test]
+    fn usage_report_errors_follow_the_cli_language() {
+        let _guard = crate::i18n::lang_guard(crate::i18n::Lang::En);
+        let (code, _, _) = run(&["--agent", "claude"], b"not json", None, Ok(()));
+        let error = code.unwrap_err().to_string();
+        assert!(error.is_ascii(), "{error}");
+        assert!(error.contains("JSON"), "{error}");
+        let oversized = vec![b'x'; USAGE_REPORT_MAX_BYTES + 1];
+        let (code, _, _) = run(&["--agent", "claude"], &oversized, None, Ok(()));
+        let error = code.unwrap_err().to_string();
+        assert!(error.is_ascii(), "{error}");
     }
 
     /// 跑一次 `usage_report_with_io`，返回（退出码、stdout 字节、投递到的请求与是否 detached）。

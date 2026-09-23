@@ -22,14 +22,7 @@ pub(super) const MAX_PANE_ID_LEN: usize = 256;
 /// 日志字段里未知 agent 别名的最大长度；已知别名记规范化后的厂商名。
 const MAX_AGENT_LOG_LEN: usize = 64;
 
-const BINDING_REQUIRED_MESSAGE: &str = "请先在账号用量页面为此窗格绑定对应厂商账号";
-const INVALID_REPORT_MESSAGE: &str = "账号用量报告无效";
-const AUTO_BOUND_MESSAGE: &str = "已按唯一账号自动绑定";
-const NO_QUOTA_MESSAGE: &str =
-    "官方回调暂无额度字段（statusline 未提供 rate_limits），等待下一次回调或探测";
-const NO_PUSH_USAGE_MESSAGE: &str = "集成扩展的推送暂无用量字段，等待下一次推送";
-/// 本机数据库轮询型来源（zcode）收到上报时的拒绝说明。
-const LOCAL_SOURCE_REPORT_MESSAGE: &str = "此来源只由 server 只读本机数据库取数，不接受上报";
+use super::notices;
 const CALLBACK_SOURCE: &str = "官方 CLI 回调";
 const EXTENSION_PUSH_SOURCE: &str = "herdr 集成扩展推送 · 会话统计，非账号额度";
 
@@ -221,12 +214,16 @@ pub(super) struct Rejected {
 }
 
 fn binding_required_message(candidates: &[String]) -> String {
+    let notices = notices();
     if candidates.is_empty() {
-        BINDING_REQUIRED_MESSAGE.into()
+        notices.binding_required.into()
     } else {
-        format!(
-            "{BINDING_REQUIRED_MESSAGE}；候选账号：{}",
-            candidates.join("、")
+        crate::i18n::fill(
+            notices.binding_candidates_fmt,
+            &[
+                ("message", notices.binding_required),
+                ("candidates", &candidates.join(notices.candidate_separator)),
+            ],
         )
     }
 }
@@ -272,7 +269,7 @@ pub(super) fn apply_report(
         return Err(rejections.reject(
             &origin,
             "invalid_usage_report",
-            LOCAL_SOURCE_REPORT_MESSAGE.into(),
+            notices().local_source_report.into(),
             now_ms,
         ));
     }
@@ -321,7 +318,7 @@ pub(super) fn apply_report(
             return Err(rejections.reject(
                 &origin,
                 "usage_binding_required",
-                BINDING_REQUIRED_MESSAGE.into(),
+                notices().binding_required.into(),
                 now_ms,
             ));
         }
@@ -375,9 +372,12 @@ pub(super) fn apply_report(
             // 报文里解析不出额度字段（如旧版 statusline 无 rate_limits）：不写绑定、不置
             // callback，否则该账号会被回调闩锁卡在 Unavailable 且不再探测。留给用户显式绑定。
             let candidates = vec![params.account_id.clone()];
-            let message = format!(
-                "{BINDING_REQUIRED_MESSAGE}；官方报文暂无额度字段，未按唯一账号 {} 自动绑定",
-                params.account_id
+            let message = crate::i18n::fill(
+                notices().binding_no_quota_fmt,
+                &[
+                    ("message", notices().binding_required),
+                    ("account", &params.account_id),
+                ],
             );
             rejections.record_pending(pane, provider.agent, candidates, now_ms);
             return Err(rejections.reject(&origin, "usage_binding_required", message, now_ms));
@@ -408,7 +408,7 @@ pub(super) fn apply_report(
         return Err(rejections.reject(
             &origin,
             "invalid_usage_report",
-            INVALID_REPORT_MESSAGE.into(),
+            notices().invalid_report.into(),
             now_ms,
         ));
     }
@@ -422,9 +422,9 @@ pub(super) fn apply_report(
             {
                 entry.snapshot.message = Some(
                     if provider.is_some_and(registry::supports_extension_push) {
-                        NO_PUSH_USAGE_MESSAGE
+                        notices().no_push_usage
                     } else {
-                        NO_QUOTA_MESSAGE
+                        notices().no_quota
                     }
                     .into(),
                 );
@@ -476,7 +476,7 @@ pub(super) fn apply_report(
         return Err(rejections.reject(
             &origin,
             "invalid_usage_report",
-            INVALID_REPORT_MESSAGE.into(),
+            notices().invalid_report.into(),
             now_ms,
         ));
     };
@@ -487,7 +487,7 @@ pub(super) fn apply_report(
         Some(pane) => {
             bindings.insert(pane.clone(), params.account_id.clone());
             rejections.forget_pane(&pane);
-            snapshot.message = Some(AUTO_BOUND_MESSAGE.into());
+            snapshot.message = Some(notices().auto_bound.into());
             Some(pane)
         }
         None => None,
@@ -746,7 +746,7 @@ mod tests {
 
         let rejected = rejected(fixture.apply(report(None, "")));
         assert_eq!(rejected.code, "usage_binding_required");
-        assert_eq!(rejected.message, BINDING_REQUIRED_MESSAGE);
+        assert_eq!(rejected.message, notices().binding_required);
         assert!(fixture.bindings.is_empty());
     }
 
@@ -825,7 +825,7 @@ mod tests {
         assert!(!entry.callback_latched());
         assert!(entry.snapshot.metrics.is_empty());
         assert_eq!(entry.snapshot.status, ObservationStatus::Warming);
-        assert_eq!(entry.snapshot.message.as_deref(), Some(NO_QUOTA_MESSAGE));
+        assert_eq!(entry.snapshot.message.as_deref(), Some(notices().no_quota));
         assert_eq!(fixture.next_query, 7, "未改写缓存不消耗 generation");
 
         // 已有真实额度时，什么都解析不出来的报文连 message 都不碰。
@@ -897,7 +897,10 @@ mod tests {
         assert!(entry.callback_latched());
         assert_eq!(entry.snapshot.status, ObservationStatus::Ready);
         assert_eq!(entry.snapshot.metrics.len(), 2);
-        assert_eq!(entry.snapshot.message.as_deref(), Some(AUTO_BOUND_MESSAGE));
+        assert_eq!(
+            entry.snapshot.message.as_deref(),
+            Some(notices().auto_bound)
+        );
         assert!(!fixture.cache["kimi:default"].callback_latched());
         assert!(fixture.pending_panes().is_empty());
 
@@ -929,7 +932,10 @@ mod tests {
         assert_eq!(rejected.code, "usage_binding_required");
         assert_eq!(
             rejected.message,
-            format!("{BINDING_REQUIRED_MESSAGE}；候选账号：claude:work、claude:home")
+            format!(
+                "{}；候选账号：claude:work、claude:home",
+                notices().binding_required
+            )
         );
         assert!(!rejected.repeated);
         assert!(fixture.bindings.is_empty());
@@ -953,7 +959,7 @@ mod tests {
         let mut fixture = Fixture::new(vec![account("kimi:default", "kimi")]);
         let rejected = rejected(fixture.apply(report(Some("wT:p9"), "")));
         assert_eq!(rejected.code, "usage_binding_required");
-        assert_eq!(rejected.message, BINDING_REQUIRED_MESSAGE);
+        assert_eq!(rejected.message, notices().binding_required);
         assert!(fixture.bindings.is_empty());
         let pending = fixture.rejections.pending().collect::<Vec<_>>();
         assert_eq!(pending.len(), 1);
@@ -1059,7 +1065,10 @@ mod tests {
         assert!(fixture.bindings.is_empty());
         let entry = &fixture.cache["claude:default"];
         assert_eq!(entry.snapshot.status, ObservationStatus::NeedsBinding);
-        assert_ne!(entry.snapshot.message.as_deref(), Some(AUTO_BOUND_MESSAGE));
+        assert_ne!(
+            entry.snapshot.message.as_deref(),
+            Some(notices().auto_bound)
+        );
         assert_eq!(
             entry.snapshot.account_identity.as_deref(),
             Some("b@example.test")
@@ -1357,7 +1366,7 @@ mod tests {
         assert!(!entry.callback_latched());
         assert_eq!(
             entry.snapshot.message.as_deref(),
-            Some(NO_PUSH_USAGE_MESSAGE)
+            Some(notices().no_push_usage)
         );
     }
 
@@ -1389,7 +1398,7 @@ mod tests {
         by_agent.agent = Some("zcode".into());
         let refused = rejected(fixture.apply(by_agent));
         assert_eq!(refused.code, "invalid_usage_report");
-        assert_eq!(refused.message, LOCAL_SOURCE_REPORT_MESSAGE);
+        assert_eq!(refused.message, notices().local_source_report);
 
         // 显式指向 zcode 账号、只带快照指标（不经官方报文解析）。
         let mut by_account = report(None, "zcode:default");
@@ -1432,7 +1441,7 @@ mod tests {
         fixture.enabled = false;
         let rejected = rejected(fixture.apply(report(Some("wT:p9"), "")));
         assert_eq!(rejected.code, "usage_binding_required");
-        assert_eq!(rejected.message, BINDING_REQUIRED_MESSAGE);
+        assert_eq!(rejected.message, notices().binding_required);
         assert!(fixture.bindings.is_empty());
         assert!(fixture.pending_panes().is_empty());
         // 已显式绑定的窗格不受开关影响，回调照常接受。

@@ -1434,7 +1434,11 @@ pub(super) fn usage_table(
                     account,
                     [
                         account.account_label.clone(),
-                        format!("{} [{}]", metric.label, metric_scope(&metric.scope)),
+                        format!(
+                            "{} [{}]",
+                            cards::metric_label(&account.agent, metric),
+                            metric_scope(&metric.scope)
+                        ),
                         usage,
                         reset_text(metric, state.now_ms).unwrap_or_else(|| "—".into()),
                     ],
