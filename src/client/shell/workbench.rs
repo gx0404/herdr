@@ -25,6 +25,14 @@ pub(super) struct State {
     pub acknowledged: u64,
     pub requested: Vec<ClientViewSpec>,
     pub views: HashMap<String, View>,
+    /// 各视图当前 surface 的投影修订号与它首次到达的时刻（`view_id` → …）。视图帧
+    /// 与快照修订号不配对时，宽限从「快照前进」与「这一帧到达」里较晚的一刻起算。
+    pub(in crate::client::shell) stamps: HashMap<String, (u64, Instant)>,
+    /// 组合时最近看到的快照修订号与第一次看到它的时刻（视图计算阶段写）。
+    pub(in crate::client::shell) snapshot_seen: Option<(u64, Instant)>,
+    /// 正在沿用旧帧的视图里最早到期的宽限；到期由 `tick_workbench` 请求重绘，让
+    /// 仍未配对的视图回到占位。
+    pub(in crate::client::shell) stale_until: Option<Instant>,
     pub geometry: Geometry,
     pub(in crate::client::shell) hits: Vec<(Rect, interaction::Action)>,
     /// 「调整布局」页脚里可点提示的 `(命中矩形, 提示下标)`，每帧重建；鼠标移动
@@ -62,6 +70,60 @@ pub(super) fn body(area: Rect, panel: &PanelId) -> Rect {
     )
 }
 
+/// 视图帧与快照修订号不配对时沿用旧帧的上限（下一次配对到达即止）。
+pub(super) const UNPAIRED_GRACE: Duration = Duration::from_secs(1);
+
+/// 一帧里某个视图画什么（视图计算与渲染同一口径）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Presentation {
+    /// 与快照修订号精确配对。
+    Paired,
+    /// 暂不配对，但 surface 仍可用：沿用它，最晚到 `until`。
+    Stale { until: Instant },
+    /// 画「正在同步终端…」占位。
+    Unavailable,
+}
+
+/// 视图的 surface 这一帧能不能画。快照走控制连接、视图帧（含快照前进后同 tick
+/// 补的改戳帧）走渲染连接，两路到达先后不定：修订号暂时不配对、但 surface 仍可用
+/// ——同一 boot、它的标签页与画面里的窗格都还在快照里——时沿用它，从配对断开的那
+/// 一刻起最多 [`UNPAIRED_GRACE`]，不闪一帧占位；窗格结构变了就不沿用。
+pub(super) fn presentation(
+    view: &View,
+    stamp: Option<(u64, Instant)>,
+    snapshot_seen: Option<(u64, Instant)>,
+    snapshot: &ClientShellSnapshot,
+    now: Instant,
+) -> Presentation {
+    let surface = &view.surface;
+    if surface.projection_revision == snapshot.revision {
+        return Presentation::Paired;
+    }
+    let usable = surface.boot_id == snapshot.boot_id
+        && snapshot.tabs.iter().any(|tab| tab.tab_id == view.tab)
+        && surface.panes.iter().all(|pane| {
+            snapshot
+                .panes
+                .iter()
+                .any(|entry| entry.pane_id == pane.pane_id && entry.tab_id == view.tab)
+        });
+    if !usable {
+        return Presentation::Unavailable;
+    }
+    let since = [
+        snapshot_seen.filter(|(revision, _)| *revision == snapshot.revision),
+        stamp.filter(|(revision, _)| *revision == surface.projection_revision),
+    ]
+    .into_iter()
+    .flatten()
+    .map(|(_, at)| at)
+    .max();
+    match since.map(|since| since + UNPAIRED_GRACE) {
+        Some(until) if now < until => Presentation::Stale { until },
+        _ => Presentation::Unavailable,
+    }
+}
+
 impl State {
     pub fn new(config: &ClientShellConfig) -> Self {
         Self {
@@ -83,6 +145,9 @@ impl State {
             acknowledged: 0,
             requested: Vec::new(),
             views: HashMap::new(),
+            stamps: HashMap::new(),
+            snapshot_seen: None,
+            stale_until: None,
             geometry: Geometry::default(),
             hits: Vec::new(),
             footer_hits: Vec::new(),
@@ -125,6 +190,8 @@ impl State {
             view.graphics.set_scope("");
             self.cleanup.extend(view.graphics.take_pending_cleanup());
         }
+        self.stamps.clear();
+        self.stale_until = None;
     }
 
     pub fn layout(&self, cols: u16, rows: u16) -> ClientShellLayout {
@@ -262,6 +329,11 @@ impl ClientShellState {
     }
 
     pub(crate) fn tick_workbench(&mut self, now: Instant, outcome: &mut ClientShellInput) {
+        if self.workbench.stale_until.is_some_and(|until| now >= until) {
+            // 沿用旧帧的宽限到期：重画一次，仍未配对的视图回到占位。
+            self.workbench.stale_until = None;
+            outcome.repaint = true;
+        }
         if !self.endpoint_is_online(&self.active_endpoint_id) {
             return;
         }
@@ -442,6 +514,18 @@ impl ClientShellState {
                     self.workbench.source, self.workbench.boot, view.view_id
                 ));
                 graphics.set_scene(surface.graphics.clone());
+                // 同一投影修订号的新帧（内容更新）不重置到达时刻：宽限只从配对
+                // 断开的那一刻起算。每帧都走这里，已有视图不再分配键。
+                let revision = surface.projection_revision;
+                match self.workbench.stamps.get_mut(&view.view_id) {
+                    Some((seen, _)) if *seen == revision => {}
+                    Some(stamp) => *stamp = (revision, Instant::now()),
+                    None => {
+                        self.workbench
+                            .stamps
+                            .insert(view.view_id.clone(), (revision, Instant::now()));
+                    }
+                }
                 self.workbench.views.insert(
                     view.view_id,
                     View {

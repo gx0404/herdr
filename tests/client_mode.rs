@@ -1392,16 +1392,10 @@ fn federated_client_with_changing_external_agents_keeps_remote_live() {
         "the changed external title must reach the client: {}",
         screen_text()
     );
-    // 新快照走控制连接、同 tick 补的改戳帧走渲染连接，客户端可能先画出新快照、
-    // 下一帧才收到配对的 surface：这一瞬的占位不算回归，但必须很快恢复。补帧缺失
-    // （原回归）时占位不会消失，在这里超时。
-    assert!(
-        wait_until(Duration::from_secs(2), Duration::from_millis(20), || {
-            settled(&screen_text())
-        }),
-        "the idle remote pane must come back right after the snapshot advances: {}",
-        screen_text()
-    );
+    // 新快照走控制连接、同 tick 补的改戳帧走渲染连接，两路先后不定。客户端在修订号
+    // 暂不配对时沿用上一帧（最多 1 s，配对帧到达即止），所以标题一上屏就进入稳定
+    // 窗口、逐帧断言，不再容忍一瞬「正在同步终端…」。补帧缺失（原回归）时宽限过后
+    // 占位出现，在窗口内失败。
     let stable_until = Instant::now() + Duration::from_millis(1_500);
     loop {
         let idle = screen_text();

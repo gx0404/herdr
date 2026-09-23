@@ -1770,3 +1770,129 @@ fn unfocused_panel_titles_are_readable() {
     assert!(ratio >= 4.5, "非聚焦标题对比度 {ratio}");
     assert_ne!(cell.fg, state.config.palette.accent, "与聚焦标题仍可区分");
 }
+
+/// 视图帧（经渲染连接）：终端组 1 的 view、`tab_1`，投影修订号 `projection_revision`。
+fn view_frame(
+    state: &ClientShellState,
+    projection_revision: u64,
+) -> crate::protocol::views::DecodedView {
+    let mut frame = surface();
+    frame.projection_revision = projection_revision;
+    crate::protocol::views::DecodedView {
+        boot_id: frame.boot_id.clone(),
+        views_revision: state.workbench.revision,
+        view_id: "1".into(),
+        tab_id: "tab_1".into(),
+        message: ServerMessage::PaneSurface(frame),
+    }
+}
+
+/// 快照（经控制连接），换成给定的投影修订号；连接代次 1，与视图帧配套。
+fn advance_snapshot(state: &mut ClientShellState, revision: u64) {
+    let mut next = snapshot();
+    next.revision = revision;
+    state.set_endpoint_snapshot_for_generation(
+        &crate::client::endpoint::ClientEndpointId::Local,
+        1,
+        Box::new(next),
+    );
+}
+
+/// 整帧文本去掉空白：宽字符后的占位格是空格，「正在同步终端」按原样找不到。
+fn screen(state: &mut ClientShellState) -> String {
+    frame_rows(&state.compose(133, 32).expect("工作台帧"))
+        .join("\n")
+        .split_whitespace()
+        .collect()
+}
+
+const SYNCING: &str = "正在同步终端";
+
+/// 外部来源变化等纯 chrome 刷新让快照修订号前进时，新快照走控制连接、同 tick 补
+/// 的改戳帧走渲染连接，两路先后不定：快照先到时空闲窗格沿用上一帧，不闪一帧
+/// 「正在同步终端…」，配对的改戳帧到达后照常；改戳帧先到也一样。
+#[test]
+fn unpaired_snapshot_and_view_keep_the_last_frame_instead_of_the_placeholder() {
+    let mut state = ready();
+    advance_snapshot(&mut state, 1);
+    assert!(state.receive_view(1, view_frame(&state, 1)), "配对的视图帧");
+    assert!(
+        screen(&mut state).contains("LIVE"),
+        "夹具前提：画出终端内容"
+    );
+
+    // 快照先到、改戳帧后到。
+    advance_snapshot(&mut state, 2);
+    let text = screen(&mut state);
+    assert!(
+        text.contains("LIVE") && !text.contains(SYNCING),
+        "快照先到：沿用上一帧，不画占位：{text}"
+    );
+    assert!(state.receive_view(1, view_frame(&state, 2)), "改戳帧");
+    let text = screen(&mut state);
+    assert!(text.contains("LIVE") && !text.contains(SYNCING), "{text}");
+
+    // 改戳帧先到、快照后到。
+    assert!(state.receive_view(1, view_frame(&state, 3)), "改戳帧先到");
+    let text = screen(&mut state);
+    assert!(
+        text.contains("LIVE") && !text.contains(SYNCING),
+        "改戳帧先到：画面照常：{text}"
+    );
+    advance_snapshot(&mut state, 3);
+    let text = screen(&mut state);
+    assert!(text.contains("LIVE") && !text.contains(SYNCING), "{text}");
+}
+
+/// 不配对最多沿用 `UNPAIRED_GRACE`：配对帧迟迟不来（例如改戳帧丢了）就回到
+/// 占位；`tick_workbench` 在到期那一刻请求重绘，占位按时出现而不是等下一次输入。
+#[test]
+fn unpaired_view_falls_back_to_the_placeholder_once_the_grace_expires() {
+    use crate::client::shell::workbench::UNPAIRED_GRACE;
+    let mut state = ready();
+    advance_snapshot(&mut state, 1);
+    assert!(state.receive_view(1, view_frame(&state, 1)));
+    screen(&mut state);
+    advance_snapshot(&mut state, 2);
+    assert!(!screen(&mut state).contains(SYNCING), "宽限内沿用上一帧");
+    let until = state
+        .workbench
+        .stale_until
+        .expect("沿用旧帧时记下宽限到期时刻");
+    let mut due = ClientShellInput::default();
+    state.tick_workbench(until, &mut due);
+    assert!(due.repaint, "宽限到期要重绘");
+    assert!(state.workbench.stale_until.is_none(), "到期只触发一次");
+
+    // 组合读真实时钟：把配对断开的时刻挪到宽限之前，模拟宽限已过。
+    let past = std::time::Instant::now()
+        .checked_sub(UNPAIRED_GRACE + std::time::Duration::from_millis(10))
+        .expect("单调时钟足够早");
+    state.workbench.snapshot_seen = Some((2, past));
+    for stamp in state.workbench.stamps.values_mut() {
+        stamp.1 = past;
+    }
+    assert!(screen(&mut state).contains(SYNCING), "宽限过后回到占位");
+    assert!(state.workbench.stale_until.is_none(), "没有视图在沿用旧帧");
+}
+
+/// 窗格结构变了（快照里已经没有画面上的窗格）就不沿用旧帧：宁可画占位，也不让
+/// 已关闭的窗格留在屏幕上接收点击。
+#[test]
+fn unpaired_view_whose_pane_is_gone_shows_the_placeholder() {
+    let mut state = ready();
+    advance_snapshot(&mut state, 1);
+    assert!(state.receive_view(1, view_frame(&state, 1)));
+    screen(&mut state);
+    let mut next = snapshot();
+    next.revision = 2;
+    next.panes[0].pane_id = "pane_9".into();
+    next.focused_pane_id = Some("pane_9".into());
+    state.set_endpoint_snapshot_for_generation(
+        &crate::client::endpoint::ClientEndpointId::Local,
+        1,
+        Box::new(next),
+    );
+    let text = screen(&mut state);
+    assert!(text.contains(SYNCING), "画面上的窗格已不在快照里：{text}");
+}

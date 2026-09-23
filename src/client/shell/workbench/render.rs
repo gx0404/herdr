@@ -114,7 +114,35 @@ impl ClientShellState {
         rows: u16,
     ) -> Option<FrameData> {
         let snapshot = self.snapshot.as_deref()?;
-        let projection_revision = snapshot.revision;
+        let now = self
+            .last_composed_at
+            .unwrap_or_else(std::time::Instant::now);
+        // 视图计算：记下第一次看到这个快照修订号的时刻，算出沿用旧帧的视图里最早
+        // 到期的宽限（到期由 `tick_workbench` 请求重绘）。渲染只读这些结果。
+        if self
+            .workbench
+            .snapshot_seen
+            .is_none_or(|(revision, _)| revision != snapshot.revision)
+        {
+            self.workbench.snapshot_seen = Some((snapshot.revision, now));
+        }
+        self.workbench.stale_until = self
+            .workbench
+            .views
+            .iter()
+            .filter_map(|(id, view)| {
+                match super::presentation(
+                    view,
+                    self.workbench.stamps.get(id).copied(),
+                    self.workbench.snapshot_seen,
+                    snapshot,
+                    now,
+                ) {
+                    super::Presentation::Stale { until } => Some(until),
+                    _ => None,
+                }
+            })
+            .min();
         let spinner = self.spinner_glyph();
         let visual_bell = self.visual_bell_active();
         let broadcast_count = self.broadcast_indicator_count();
@@ -526,12 +554,16 @@ impl ClientShellState {
         for (panel, rect) in &self.workbench.geometry.panels {
             let area = body(*rect, panel);
             if let PanelId::Terminal(id) = panel {
-                let Some(view) = self
-                    .workbench
-                    .views
-                    .get(&id.to_string())
-                    .filter(|view| view.surface.projection_revision == projection_revision)
-                else {
+                let view_id = id.to_string();
+                let Some(view) = self.workbench.views.get(&view_id).filter(|view| {
+                    super::presentation(
+                        view,
+                        self.workbench.stamps.get(&view_id).copied(),
+                        self.workbench.snapshot_seen,
+                        snapshot,
+                        now,
+                    ) != super::Presentation::Unavailable
+                }) else {
                     // C-12 (a)：占位不再逐面板整帧往返，先收集区域，与把手/预览合并成一次。
                     stale_panel_areas.push(area);
                     continue;
@@ -805,10 +837,18 @@ impl ClientShellState {
         )?;
         self.paint_shell_overlays(&mut canvas, &mut occlusion)?;
         let mut graphics = std::mem::take(&mut self.workbench.cleanup);
+        // 组合期间快照不会变；上面的 `&mut self` 绘制段之后重新借用。
+        let snapshot = self.snapshot.as_deref();
+        let stamps = &self.workbench.stamps;
+        let snapshot_seen = self.workbench.snapshot_seen;
         for (id, view) in &mut self.workbench.views {
             let area = self.workbench.geometry.panels.iter().find(|(panel, _)| matches!(panel, PanelId::Terminal(group) if group.to_string() == *id)).map(|(panel, area)| body(*area, panel));
+            // 图形与画面同一口径：沿用旧帧期间图片照常显示，不跟着闪。
             let visible = area.is_some()
-                && view.surface.projection_revision == projection_revision
+                && snapshot.is_some_and(|snapshot| {
+                    super::presentation(view, stamps.get(id).copied(), snapshot_seen, snapshot, now)
+                        != super::Presentation::Unavailable
+                })
                 && self.endpoint_error.is_none();
             let area = area.unwrap_or_default();
             let popup = self
