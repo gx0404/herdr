@@ -114,8 +114,11 @@ const MAX_READ_BYTES: usize = 4 * 1024 * 1024;
 /// 一页最多扫这么多原始字节：隐藏的簿记记录（meta、world_state 动辄几十 KB）太多时
 /// 先交这一页，游标停在已扫到的位置，续读接着往后。
 const MAX_PAGE_SCAN_BYTES: u64 = 8 * 1024 * 1024;
-/// 单条记录的读取上限；更长的整条跳过、留一行占位，不把它读进内存。
-const MAX_RECORD_BYTES: u64 = 16 * 1024 * 1024;
+/// 单条记录的读取上限，取页预算的上限 [`MAX_READ_BYTES`]：不超过它的记录整条读入
+/// 并解析；更长的流式跳过——读到换行为止，已读部分随即丢掉、不解析，留一行占位
+/// （见 [`read_record`]）。单条记录因此在内存里至多占这么多原始字节（另加解析出的
+/// JSON 树）；上限与请求的页大小无关，同一条记录在大页小页里渲染结果一致。
+const MAX_RECORD_BYTES: u64 = MAX_READ_BYTES as u64;
 /// 消息正文（user / assistant / 协作消息）的字符上限。
 const MESSAGE_CHARS: usize = 2000;
 /// 工具调用摘要、结束消息等单行摘要的字符上限。
@@ -798,30 +801,23 @@ fn render_page(path: &Path, offset: u64, limits: PageLimits) -> Result<ContentCh
     let mut raw = Vec::new();
     while text.len() < limits.budget && position - offset < limits.scan_bytes {
         let line_start = position;
-        raw.clear();
-        let read = (&mut reader)
-            .take(limits.record_bytes)
-            .read_until(b'\n', &mut raw)
-            .map_err(SourceError::Io)?;
-        if read == 0 {
-            break;
-        }
-        let rendered = if raw.last() == Some(&b'\n') {
-            position += read as u64;
-            render_record(&String::from_utf8_lossy(&raw), history_start)
-        } else if (read as u64) < limits.record_bytes {
-            // 没有换行 = 这条还在写：不消费，游标留在行首，写完再渲染。
-            waiting = true;
-            break;
-        } else {
-            // 超长记录：不读进内存，跳到下一个换行；还没写完就同样等下一次。
-            let (skipped, complete) = skip_line(&mut reader).map_err(SourceError::Io)?;
-            if !complete {
+        let rendered = match read_record(&mut reader, limits.record_bytes, &mut raw)
+            .map_err(SourceError::Io)?
+        {
+            RecordRead::End => break,
+            // 没有换行 = 这条还在写（超长的也一样）：不消费，游标留在行首，写完再读。
+            RecordRead::Unfinished => {
                 waiting = true;
                 break;
             }
-            position += read as u64 + skipped;
-            Some("[oversized record]".to_string())
+            RecordRead::Line(read) => {
+                position += read;
+                render_record(&String::from_utf8_lossy(&raw), history_start)
+            }
+            RecordRead::Oversized(read) => {
+                position += read;
+                Some("[oversized record]".to_string())
+            }
         };
         let Some(rendered) = rendered else {
             continue;
@@ -856,21 +852,54 @@ fn render_page(path: &Path, offset: u64, limits: PageLimits) -> Result<ContentCh
     })
 }
 
-/// 跳过当前行余下的部分（不留在内存里）。返回跳过的字节数与是否遇到了换行。
-fn skip_line(reader: &mut impl BufRead) -> io::Result<(u64, bool)> {
-    let mut skipped = 0u64;
+/// [`read_record`] 读一条记录的结局；字节数都含结尾的换行。
+#[derive(Debug, PartialEq, Eq)]
+enum RecordRead {
+    /// 已在文件末尾，一个字节也没有。
+    End,
+    /// 读到文件末尾也没遇到换行：这条还在写。
+    Unfinished,
+    /// 完整的一条，内容在 `raw` 里。
+    Line(u64),
+    /// 超过上限的一条：已流式跳到换行之后，内容没有留下。
+    Oversized(u64),
+}
+
+/// 从 `reader` 读一条以换行结尾的记录进 `raw`，最多留 `cap` 字节：超过上限时丢掉
+/// 已读部分（连同缓冲的容量），之后只数字节、不再留存，一直读到换行为止。
+fn read_record(reader: &mut impl BufRead, cap: u64, raw: &mut Vec<u8>) -> io::Result<RecordRead> {
+    raw.clear();
+    let mut total = 0u64;
+    let mut oversized = false;
     loop {
         let buffer = reader.fill_buf()?;
         if buffer.is_empty() {
-            return Ok((skipped, false));
+            return Ok(if total == 0 {
+                RecordRead::End
+            } else {
+                RecordRead::Unfinished
+            });
         }
-        if let Some(newline) = buffer.iter().position(|byte| *byte == b'\n') {
-            reader.consume(newline + 1);
-            return Ok((skipped + newline as u64 + 1, true));
+        let newline = buffer.iter().position(|byte| *byte == b'\n');
+        let chunk = newline.map_or(buffer, |index| &buffer[..=index]);
+        let length = chunk.len();
+        total += length as u64;
+        if !oversized {
+            if total > cap {
+                oversized = true;
+                *raw = Vec::new();
+            } else {
+                raw.extend_from_slice(chunk);
+            }
         }
-        let length = buffer.len();
         reader.consume(length);
-        skipped += length as u64;
+        if newline.is_some() {
+            return Ok(if oversized {
+                RecordRead::Oversized(total)
+            } else {
+                RecordRead::Line(total)
+            });
+        }
     }
 }
 
@@ -1783,6 +1812,87 @@ mod tests {
         assert_eq!(page.next_cursor.as_deref(), Some(cap.to_string().as_str()));
 
         let _ = fs::remove_dir_all(&home);
+    }
+
+    /// 冒烟 N10：超过页预算上限的记录曾整条读进内存并解析（上限 16 MiB），与
+    /// 「不读进内存」的注释不符。经公开的 `read` 走生产上限：5 MiB 的记录只留一行
+    /// 占位，前后的记录照常可读，游标越过它。
+    #[test]
+    fn records_beyond_the_page_budget_are_skipped_without_being_parsed() {
+        let home = unique_temp_home("oversized-record");
+        let day = home.join(".codex/sessions/2026/09/22");
+        fs::create_dir_all(&day).expect("临时目录可建");
+        let path = day.join(format!("rollout-2026-09-22T10-01-00-{CHILD_A}.jsonl"));
+        let message = |text: &str| {
+            format!(
+                r#"{{"type":"response_item","payload":{{"type":"message","role":"assistant","content":[{{"type":"output_text","text":"{text}"}}]}}}}"#
+            ) + "\n"
+        };
+        let huge = message(&"a".repeat(5 * 1024 * 1024));
+        assert!(huge.len() as u64 > MAX_READ_BYTES as u64);
+        let rollout = format!("{}{huge}{}", message("before"), message("after"));
+        fs::write(&path, &rollout).expect("写临时 rollout");
+
+        let session = AgentSessionRef::id(ROOT).expect("合法 id");
+        let cx = context(&home, Some(&session));
+        for max_bytes in [0, MAX_READ_BYTES] {
+            let page = Codex.read(&cx, CHILD_A, None, max_bytes).expect("可读");
+            assert_eq!(page.text, "before\n[oversized record]\nafter\n");
+            assert!(page.eof);
+            assert!(!page.truncated);
+            assert_eq!(
+                page.next_cursor.as_deref(),
+                Some(rollout.len().to_string().as_str())
+            );
+        }
+
+        let _ = fs::remove_dir_all(&home);
+    }
+
+    /// 冒烟 N10：读记录时至多留 `cap` 字节；超过就丢掉已读部分、只数字节读到换行，
+    /// 后面的记录照读。缓冲只有 4 字节，逼出跨多次 `fill_buf` 的路径。
+    #[test]
+    fn the_record_reader_streams_past_oversized_records_without_keeping_them() {
+        let input: &[u8] = b"abc\nabcdefghij\nxy\n0123456\nabcdefghijkl";
+        let mut reader = BufReader::with_capacity(4, input);
+        let mut raw = Vec::new();
+        let cap = 8;
+        assert_eq!(
+            read_record(&mut reader, cap, &mut raw).expect("内存读取"),
+            RecordRead::Line(4)
+        );
+        assert_eq!(raw, b"abc\n");
+        assert_eq!(
+            read_record(&mut reader, cap, &mut raw).expect("内存读取"),
+            RecordRead::Oversized(11)
+        );
+        assert!(raw.is_empty());
+        assert_eq!(raw.capacity(), 0, "超长记录的已读部分不留在内存里");
+        assert_eq!(
+            read_record(&mut reader, cap, &mut raw).expect("内存读取"),
+            RecordRead::Line(3)
+        );
+        assert_eq!(raw, b"xy\n");
+        // 恰好 cap 字节（含换行）仍是完整的一条。
+        assert_eq!(
+            read_record(&mut reader, cap, &mut raw).expect("内存读取"),
+            RecordRead::Line(8)
+        );
+        assert_eq!(raw, b"0123456\n");
+        // 超长且还没写完：不算消费，由调用方把游标留在行首。
+        assert_eq!(
+            read_record(&mut reader, cap, &mut raw).expect("内存读取"),
+            RecordRead::Unfinished
+        );
+        assert_eq!(
+            read_record(&mut reader, cap, &mut raw).expect("内存读取"),
+            RecordRead::End
+        );
+        let mut short = BufReader::with_capacity(4, &b"abc"[..]);
+        assert_eq!(
+            read_record(&mut short, cap, &mut raw).expect("内存读取"),
+            RecordRead::Unfinished
+        );
     }
 
     /// 冒烟 M6（codex-13 / 17）：活动窗口右列是原始 rollout JSON，探针输出埋在
