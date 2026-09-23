@@ -6038,6 +6038,8 @@ fn claude_card_shows_three_windows_overflow_stale_and_session_row() {
         );
         let five = row_with(&state, region, "5 小时").unwrap_or_default();
         assert!(five.contains("42%"), "{host}: 5 小时窗口数字可见\n{text}");
+        // statusline 不带窗口长度（夹具与 `parse::claude` 一致）：按名义 5 小时画刻度。
+        assert!(five.contains('┃'), "{host}: 5 小时窗口进度刻度\n{text}");
         // 消费额度超限：数字原样（不截成 100%），条形末格是溢出标记且为红色。
         let spend = row_with(&state, region, "消费额度").unwrap_or_default();
         assert!(spend.contains("162.8%"), "{host}: 超限数字原样显示\n{text}");
@@ -6119,6 +6121,15 @@ fn kimi_card_shows_windows_balance_and_extra_usage() {
             assert!(
                 row_with(&state, region, label).is_some_and(|row| row.contains(value)),
                 "{host}: {label} {value}\n{text}"
+            );
+        }
+        // 5 小时 / 7 天窗口的报文不带窗口长度：按名义长度画刻度；月度周期不固定，不画。
+        for (label, tick) in [("5 小时", true), ("7 天", true), ("月度", false)] {
+            let row = row_with(&state, region, label).unwrap_or_default();
+            assert_eq!(
+                row.contains('┃'),
+                tick,
+                "{host}: {label} 窗口进度刻度\n{text}"
             );
         }
         assert!(

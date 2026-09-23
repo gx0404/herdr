@@ -174,10 +174,19 @@ fn short_span(seconds: u64) -> String {
     }
 }
 
-/// 额度窗口已过比例（0..=1）：`(now - (resets_at - window)) / window`，只有同时
-/// 知道 `window_seconds` 与 `resets_at` 才有意义。
-pub(super) fn window_progress(metric: &UsageMetric, now_ms: u64) -> Option<f32> {
-    let window = metric.window_seconds.filter(|window| *window > 0)?;
+/// 额度窗口已过比例（0..=1）：`(now - (resets_at - window)) / window`。窗口长度
+/// 取服务端的 `window_seconds`，报文不带时退到槽位的名义长度 `nominal`（claude /
+/// kimi 的 5 小时 / 每周 / 7 天窗口）；两者都没有或不知道 `resets_at` 时为 `None`。
+pub(super) fn window_progress(
+    metric: &UsageMetric,
+    nominal: Option<u64>,
+    now_ms: u64,
+) -> Option<f32> {
+    let window = metric
+        .window_seconds
+        .filter(|window| *window > 0)
+        .or(nominal)
+        .filter(|window| *window > 0)?;
     let remaining = reset_secs(metric, now_ms)?;
     Some((1.0 - remaining as f32 / window as f32).clamp(0.0, 1.0))
 }
@@ -197,8 +206,14 @@ pub(super) struct Cx {
 }
 
 /// 额度窗口 meter：数字是百分比（可超过 100），说明是用量（`used/limit`）与距重置；
-/// 过期窗口灰 + DIM 并写「已过重置 · 沿用上次值」。
-pub(super) fn quota_meter<'a>(label: Cow<'a, str>, metric: &'a UsageMetric, cx: Cx) -> Meter<'a> {
+/// 过期窗口灰 + DIM 并写「已过重置 · 沿用上次值」。`slot` 是匹配表给的
+/// 槽位（通用行为 `None`），固定窗口据它补名义长度画进度刻度。
+pub(super) fn quota_meter<'a>(
+    label: Cow<'a, str>,
+    slot: Option<Slot>,
+    metric: &'a UsageMetric,
+    cx: Cx,
+) -> Meter<'a> {
     let percent = metric_percent(metric);
     let expired = window_expired(metric, cx.now_ms);
     let quantity = metric_quantity(metric);
@@ -228,7 +243,7 @@ pub(super) fn quota_meter<'a>(label: Cow<'a, str>, metric: &'a UsageMetric, cx: 
         window: if expired {
             None
         } else {
-            window_progress(metric, cx.now_ms)
+            window_progress(metric, slot.and_then(Slot::nominal_window_secs), cx.now_ms)
         },
         stale: cx.live != Liveness::Live || expired || percent.is_none(),
         expired,
@@ -321,7 +336,7 @@ fn slot_stat<'a>(slot: Slot, metric: &'a UsageMetric, cx: Cx) -> Stat<'a> {
 /// （金额与厂商卡片同一种写法）。
 pub(super) fn generic_line<'a>(metric: &'a UsageMetric, cx: Cx) -> Line<'a> {
     if metric_percent(metric).is_some() {
-        return Line::Meter(quota_meter(Cow::Borrowed(&metric.label), metric, cx));
+        return Line::Meter(quota_meter(Cow::Borrowed(&metric.label), None, metric, cx));
     }
     let value = match (&metric.text_value, &metric.amount_decimal) {
         (None, Some(amount)) => money_text(amount, &metric.unit),
@@ -437,6 +452,7 @@ fn push_quota_meters<'a>(
     for (slot, metric) in picker.take_all(slots) {
         lines.push(Line::Meter(quota_meter(
             Cow::Borrowed(slot.label(cx.texts)),
+            Some(slot),
             metric,
             cx,
         )));
@@ -501,7 +517,7 @@ fn codex<'a>(lines: &mut Vec<Line<'a>>, picker: &mut Picker<'a>, cx: Cx) {
         ] {
             if let Some(metric) = metric {
                 let label = quota_label(Some(slot), metric, cx);
-                lines.push(Line::Meter(quota_meter(label, metric, cx)));
+                lines.push(Line::Meter(quota_meter(label, Some(slot), metric, cx)));
             }
         }
         if let Some(credits) = credits {
@@ -728,7 +744,7 @@ pub(super) fn headline<'a>(group: &VendorGroup<'a>, now_ms: u64) -> Line<'a> {
             } else {
                 label
             };
-            return Line::Meter(quota_meter(label, metric, cx));
+            return Line::Meter(quota_meter(label, slot, metric, cx));
         }
         // 没有额度窗口：退到第一条金额（credits / 余额）。
         let money = group.accounts.iter().find_map(|account| {
@@ -805,10 +821,11 @@ mod tests {
                     resets_at: Some(NOW_S - 60),
                     ..metric("seven_day", "account")
                 },
+                // 与 `parse::claude` 的真实输出一致：statusline 只有 used_percentage
+                // 与 resets_at，没有窗口长度。
                 UsageMetric {
                     used_percent: Some(42.0),
                     resets_at: Some(NOW_S + 3 * 3600),
-                    window_seconds: Some(5 * 3600),
                     ..metric("five_hour", "account")
                 },
                 metric("context_window/used_percentage", "session"),
@@ -862,9 +879,10 @@ mod tests {
         assert!(
             five.window
                 .is_some_and(|progress| (progress - 0.4).abs() < 0.01),
-            "5 小时窗口过了 2/5：{:?}",
+            "报文不带窗口长度时按名义 5 小时算：过了 2/5：{:?}",
             five.window
         );
+        assert!(spend.window.is_none(), "消费额度周期不固定，不画刻度");
         assert!(
             spend.ratio.is_some_and(|ratio| ratio > 1.6),
             "溢出比例不截断"
@@ -881,6 +899,64 @@ mod tests {
             matches!(card.lines.last(), Some(Line::Stats(stats)) if stats[0].label == "cli-0"),
             "未进匹配表的指标落到通用行"
         );
+    }
+
+    /// 窗口长度：服务端给了 `window_seconds` 就用它，没给时退到槽位的名义长度；
+    /// 两者都没有（或没有 `resets_at`）不画刻度。kimi 的 7 天窗口剩 3 天：过了 4/7。
+    #[test]
+    fn window_progress_prefers_the_reported_length_then_the_nominal_one() {
+        let week = Some(7 * 86_400);
+        let reported = UsageMetric {
+            resets_at: Some(NOW_S + 3600),
+            window_seconds: Some(2 * 3600),
+            ..metric("codex/primary", "account")
+        };
+        let progress = window_progress(&reported, week, NOW_MS);
+        assert!(progress.is_some_and(|progress| (progress - 0.5).abs() < 0.01));
+        let bare = UsageMetric {
+            resets_at: Some(NOW_S + 3 * 86_400),
+            window_seconds: Some(0),
+            ..metric("limit7d", "account")
+        };
+        let progress = window_progress(&bare, week, NOW_MS);
+        assert!(
+            progress.is_some_and(|progress| (progress - 4.0 / 7.0).abs() < 0.01),
+            "{progress:?}"
+        );
+        assert_eq!(window_progress(&bare, None, NOW_MS), None);
+        let no_reset = UsageMetric {
+            resets_at: None,
+            ..bare.clone()
+        };
+        assert_eq!(window_progress(&no_reset, week, NOW_MS), None);
+        // kimi 卡片里 5 小时 / 7 天窗口据名义长度带刻度。
+        let kimi = AccountUsageSnapshot {
+            agent: "kimi".into(),
+            status: ObservationStatus::Ready,
+            metrics: vec![
+                UsageMetric {
+                    used_percent: Some(25.0),
+                    resets_at: Some(NOW_S + 3600),
+                    ..metric("limit5h", "account")
+                },
+                UsageMetric {
+                    used_percent: Some(60.0),
+                    ..bare
+                },
+            ],
+            ..Default::default()
+        };
+        let card = build_card(&kimi, None, NOW_MS);
+        let windows = card
+            .lines
+            .iter()
+            .filter_map(|line| match line {
+                Line::Meter(meter) => meter.window,
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(windows.len(), 2, "两条窗口都有刻度");
+        assert!((windows[0] - 0.8).abs() < 0.01, "{windows:?}");
     }
 
     /// 失效账号（未登录等）的额度只画虚化占位（不给失效数据画确定的基线），

@@ -125,6 +125,19 @@ impl Slot {
         }
     }
 
+    /// 固定长度额度窗口的名义长度（秒）。服务端只在厂商报文带窗口长度时写
+    /// `window_seconds`（目前只有 codex 的 `windowDurationMins`）；claude 的
+    /// `five_hour` / `seven_day` 与 kimi 的 `limit5h` / `limit7d` 的长度写在 id
+    /// 里，报文不带，由这里补上，窗口进度刻度与按节奏预警才画得出来。月度、
+    /// 消费额度与套餐额度的周期不固定，不给名义长度。
+    pub(super) fn nominal_window_secs(self) -> Option<u64> {
+        match self {
+            Self::Quota5h => Some(5 * 3600),
+            Self::QuotaWeekly | Self::Quota7d => Some(7 * 86_400),
+            _ => None,
+        }
+    }
+
     /// 界面语言下的短标签。codex 的主 / 次窗口知道窗口长度时由卡片改写成
     /// 「5h 窗口」，这里给的是不知道长度时的兜底。
     pub(super) fn label(self, texts: &MonitorTexts) -> &'static str {
@@ -565,6 +578,30 @@ mod tests {
             .map(|(rule, _)| format!("{} {:?}", rule.agent, rule.id))
             .collect::<Vec<_>>();
         assert!(missed.is_empty(), "未钉进清单的规则: {missed:?}");
+    }
+
+    /// 名义窗口长度只给长度写在 id 里的固定窗口：5 小时 = 18000 秒，每周 / 7 天
+    /// = 604800 秒；codex 主 / 次窗口以服务端的 `window_seconds` 为准，月度 / 消费
+    /// 额度 / 套餐额度周期不固定。
+    #[test]
+    fn fixed_windows_have_a_nominal_length() {
+        let nominal = |agent: &str, id: &str| {
+            slot_of(agent, &metric(id, "account")).and_then(Slot::nominal_window_secs)
+        };
+        assert_eq!(nominal("claude", "five_hour"), Some(18_000));
+        assert_eq!(nominal("claude", "seven_day"), Some(604_800));
+        assert_eq!(nominal("kimi", "limit5h"), Some(18_000));
+        assert_eq!(nominal("kimi", "limit7d"), Some(604_800));
+        for (agent, id) in [
+            ("claude", "spend_limit"),
+            ("codex", "codex/primary"),
+            ("codex", "codex/secondary"),
+            ("kimi", "monthTotal"),
+            ("kimi", "monthCode"),
+            ("kimi", "summary"),
+        ] {
+            assert_eq!(nominal(agent, id), None, "{agent} {id}");
+        }
     }
 
     #[test]
