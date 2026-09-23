@@ -13,6 +13,40 @@ pub(crate) fn supports_statusline(agent: &str) -> bool {
     matches!(agent, "claude")
 }
 
+/// 已退役的 statusline 回调厂商（antigravity）：herdr 曾能为它们改写官方 `settings.json`，
+/// 退役后只保留识别与解除——只删不装。退役前用 herdr 开过回调的用户仍能经
+/// `configure(.., false)` 把包装剥掉、还原原渲染命令；启用、只读检测
+/// （`statusline_enabled` 的调用方只查受支持厂商）与 server 端宣告都不认它们。
+fn retired_statusline(agent: &str) -> bool {
+    matches!(agent, "antigravity")
+}
+
+/// 退役厂商的官方 `settings.json` 所在默认目录，只供解除用。
+fn retired_statusline_default_dir(agent: &str) -> io::Result<PathBuf> {
+    match agent {
+        // Antigravity CLI 的运行时数据目录：statusline 回调所在的官方 `settings.json` 在这里，
+        // 与承载 hooks 的 `~/.gemini/config` 不是同一个目录（退役前 `antigravity_runtime_dir`
+        // 的推导，原样保留）。
+        "antigravity" => Ok(super::env::home_dir()?
+            .join(".gemini")
+            .join("antigravity-cli")),
+        _ => Err(io::Error::other("此厂商未提供受支持的 statusline 配额回调")),
+    }
+}
+
+/// 解除用的 `settings.json` 路径：受支持厂商同 `settings_path`；退役厂商按退役前的推导
+/// 给出（`profile_dir` 同样优先），只用于解除。
+fn removal_settings_path(account: &crate::config::UsageAccountConfig) -> io::Result<PathBuf> {
+    if !retired_statusline(&account.agent) {
+        return settings_path(account);
+    }
+    let dir = match account.profile_dir.as_ref() {
+        Some(dir) => PathBuf::from(dir),
+        None => retired_statusline_default_dir(&account.agent)?,
+    };
+    Ok(dir.join("settings.json"))
+}
+
 /// 用量由 herdr 自带集成扩展推送的厂商：名单唯一真源。扩展（`assets/<agent>/`）在会话事件里
 /// 取数并经 socket 调 `account.usage.report`；这里没有可改写的官方 `settings.json`，所以
 /// `configure` / `settings_path` 不接受这些厂商，接入与否取决于集成是否已安装。
@@ -38,7 +72,12 @@ pub(crate) fn configure(
     account: &crate::config::UsageAccountConfig,
     enabled: bool,
 ) -> io::Result<()> {
-    let path = settings_path(account)?;
+    // 解除还认退役厂商（只删不装）；启用只认受支持厂商。
+    let path = if enabled {
+        settings_path(account)?
+    } else {
+        removal_settings_path(account)?
+    };
     super::config_file::check_config_target(&path)?;
     let content = match std::fs::read_to_string(&path) {
         Ok(content) => content,
@@ -84,7 +123,14 @@ pub(crate) fn statusline_enabled(content: &str, agent: &str) -> Option<bool> {
 
 fn edit(content: &str, agent: &str, enabled: bool) -> io::Result<String> {
     if !supports_statusline(agent) {
-        return Err(io::Error::other("不支持的 statusline 厂商"));
+        if !retired_statusline(agent) {
+            return Err(io::Error::other("不支持的 statusline 厂商"));
+        }
+        if enabled {
+            return Err(io::Error::other(
+                "该厂商的 statusline 回调已退役：只能解除，不能再启用",
+            ));
+        }
     }
     let root = CstRootNode::parse(content, &jsonc_parser::ParseOptions::default())
         .map_err(|_| io::Error::other("官方设置 JSON 无效"))?;
@@ -325,6 +371,116 @@ mod tests {
             };
             assert!(settings_path(&account).is_err(), "{agent}");
         }
+    }
+
+    /// 退役厂商（antigravity）只删不装：退役前 herdr 写下的包装（本平台形态）仍能识别并解除、
+    /// 还原原渲染命令；启用一律报错；没有包装时解除是 no-op。
+    #[test]
+    fn retired_antigravity_callback_can_only_be_removed() {
+        let wrapped =
+            crate::platform::usage_statusline_pipeline("antigravity", "python custom.py").unwrap();
+        let settings = format!(
+            "{{\n// 保留\n\"statusLine\":{{\"type\":\"command\",\"command\":{},\"padding\":2}}}}",
+            serde_json::Value::String(wrapped)
+        );
+        let restored = edit(&settings, "antigravity", false).unwrap();
+        assert!(restored.contains("// 保留"), "注释保留");
+        assert_eq!(command_of_jsonc(&restored), "python custom.py");
+        let restored_value = CstRootNode::parse(&restored, &Default::default())
+            .unwrap()
+            .value()
+            .unwrap()
+            .to_serde_value()
+            .unwrap();
+        assert_eq!(restored_value["statusLine"]["padding"], 2, "用户的键不动");
+        assert_eq!(
+            edit(&restored, "antigravity", false).unwrap(),
+            restored,
+            "解除幂等"
+        );
+
+        // 独立回调（没有原渲染命令）解除后整个 statusLine 移除。
+        let standalone = format!(
+            "{{\"theme\":\"dark\",\"statusLine\":{{\"type\":\"command\",\"command\":{}}}}}",
+            serde_json::Value::String(
+                crate::platform::usage_statusline_pipeline("antigravity", "").unwrap()
+            )
+        );
+        let removed: serde_json::Value =
+            serde_json::from_str(&edit(&standalone, "antigravity", false).unwrap()).unwrap();
+        assert_eq!(removed, serde_json::json!({"theme": "dark"}));
+
+        // 只删不装：启用报错，文件内容不变的前提由调用方保证（报错即不写）。
+        for content in ["{}", settings.as_str(), restored.as_str()] {
+            let error = edit(content, "antigravity", true).unwrap_err();
+            assert!(error.to_string().contains("退役"), "{error}");
+        }
+        // 其它从未支持的厂商照旧拒绝解除。
+        assert!(edit(&settings, "codex", false).is_err());
+    }
+
+    /// `configure` 的解除路径按退役前的推导找到退役厂商的 settings.json（`profile_dir` 优先，
+    /// 用临时目录隔离真实 HOME）：解除改写文件；启用报错且不动文件；文件不存在时解除不建文件。
+    #[test]
+    fn configure_removes_a_retired_antigravity_callback_without_installing() {
+        let dir = std::env::temp_dir().join(format!(
+            "herdr-usage-retired-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|elapsed| elapsed.as_nanos())
+                .unwrap_or_default()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let account = crate::config::UsageAccountConfig {
+            id: "antigravity:work".into(),
+            agent: "antigravity".into(),
+            profile_dir: Some(dir.clone()),
+            ..Default::default()
+        };
+        let path = dir.join("settings.json");
+        assert_eq!(removal_settings_path(&account).unwrap(), path);
+        assert!(
+            settings_path(&account).is_err(),
+            "只读检测与启用仍不认退役厂商"
+        );
+
+        // 文件不存在：解除是 no-op，不建文件。
+        configure(&account, false).unwrap();
+        assert!(!path.exists());
+
+        let wrapped =
+            crate::platform::usage_statusline_pipeline("antigravity", "bash line.sh").unwrap();
+        let settings = format!(
+            "{{\"statusLine\":{{\"type\":\"command\",\"command\":{}}}}}",
+            serde_json::Value::String(wrapped)
+        );
+        std::fs::write(&path, &settings).unwrap();
+        assert!(configure(&account, true).is_err());
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            settings,
+            "启用失败不写文件"
+        );
+
+        configure(&account, false).unwrap();
+        assert_eq!(
+            command_of_jsonc(&std::fs::read_to_string(&path).unwrap()),
+            "bash line.sh"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn command_of_jsonc(settings: &str) -> String {
+        CstRootNode::parse(settings, &Default::default())
+            .unwrap()
+            .value()
+            .unwrap()
+            .to_serde_value()
+            .unwrap()["statusLine"]["command"]
+            .as_str()
+            .unwrap_or_default()
+            .to_owned()
     }
 
     /// 文档推荐的手写集成（`herdr api usage-report --agent <agent>`）没有 herdr 包装特征：
