@@ -2225,3 +2225,87 @@ fn compact_fallback_title_has_no_drag_handle() {
     assert!(!dragged.contains("放到这里"), "不画停靠预览：{dragged}");
     assert_eq!(state.workbench.dock, layout, "布局不变");
 }
+
+/// `tab_1` 里两个窗格（`pane_1`、`pane_2`）的快照，`focused` 是聚焦窗格；`zoomed`
+/// 时标签页缩放，服务端只投影聚焦窗格。
+fn two_pane_snapshot(revision: u64, zoomed: bool, focused: &str) -> ClientShellSnapshot {
+    let mut next = snapshot();
+    next.revision = revision;
+    next.tabs[0].zoomed = zoomed;
+    let mut second = next.panes[0].clone();
+    second.pane_id = "pane_2".into();
+    next.panes.push(second);
+    for pane in &mut next.panes {
+        pane.focused = pane.pane_id == focused;
+    }
+    next.focused_pane_id = Some(focused.into());
+    next
+}
+
+/// 经控制连接换上 `next`（连接代次 1，与 `view_frame` 配套）。
+fn replace_snapshot(state: &mut ClientShellState, next: ClientShellSnapshot) {
+    state.set_endpoint_snapshot_for_generation(
+        &crate::client::endpoint::ClientEndpointId::Local,
+        1,
+        Box::new(next),
+    );
+}
+
+/// 复审轻级 W3（133×32）：拆分新增窗格后，快照里这个标签页多了一个窗格，而画面
+/// 上的窗格都还在快照里。以前只查「画面上的窗格 ⊆ 快照」，旧帧照样按不配对沿用
+/// 最长 1 s：旧帧的窗格命中区盖着新窗格的位置，点下去落到旧窗格。窗格集合要双向
+/// 一致才沿用，否则画占位，也不登记旧帧的窗格命中区。
+#[test]
+fn unpaired_view_after_a_split_shows_the_placeholder() {
+    let _guard = crate::i18n::lang_guard(crate::i18n::Lang::ZhCn);
+    let mut state = ready();
+    advance_snapshot(&mut state, 1);
+    assert!(state.receive_view(1, view_frame(&state, 1)), "配对的视图帧");
+    assert!(
+        screen(&mut state).contains("LIVE"),
+        "夹具前提：画出终端内容"
+    );
+    assert!(
+        state.hits.panes.iter().any(|hit| hit.pane_id == "pane_1"),
+        "夹具前提：登记了窗格命中区"
+    );
+
+    replace_snapshot(&mut state, two_pane_snapshot(2, false, "pane_2"));
+    let text = screen(&mut state);
+    assert!(
+        text.contains(SYNCING) && !text.contains("LIVE"),
+        "拆分后快照多了窗格：不沿用旧帧，画占位：{text}"
+    );
+    assert!(
+        state.hits.panes.iter().all(|hit| hit.pane_id != "pane_1"),
+        "旧帧的窗格命中区不登记，点击落不到旧窗格"
+    );
+}
+
+/// W3 的边界：缩放的标签页只投影它的聚焦窗格，快照里其余窗格本来就不在画面上。
+/// 缩放目标没变时照样沿用上一帧（不闪占位）；缩放目标换成别的窗格就画占位。
+#[test]
+fn unpaired_zoomed_view_keeps_the_frame_only_while_the_zoom_target_is_unchanged() {
+    let _guard = crate::i18n::lang_guard(crate::i18n::Lang::ZhCn);
+    let mut state = ready();
+    replace_snapshot(&mut state, two_pane_snapshot(1, true, "pane_1"));
+    assert!(
+        state.receive_view(1, view_frame(&state, 1)),
+        "配对的视图帧（只带缩放的 pane_1）"
+    );
+    assert!(screen(&mut state).contains("LIVE"), "夹具前提");
+
+    replace_snapshot(&mut state, two_pane_snapshot(2, true, "pane_1"));
+    let text = screen(&mut state);
+    assert!(
+        text.contains("LIVE") && !text.contains(SYNCING),
+        "缩放目标没变：沿用上一帧：{text}"
+    );
+
+    replace_snapshot(&mut state, two_pane_snapshot(3, true, "pane_2"));
+    let text = screen(&mut state);
+    assert!(
+        text.contains(SYNCING) && !text.contains("LIVE"),
+        "缩放目标换成 pane_2：旧帧画的是 pane_1，画占位：{text}"
+    );
+}

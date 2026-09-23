@@ -86,8 +86,9 @@ pub(super) enum Presentation {
 
 /// 视图的 surface 这一帧能不能画。快照走控制连接、视图帧（含快照前进后同 tick
 /// 补的改戳帧）走渲染连接，两路到达先后不定：修订号暂时不配对、但 surface 仍可用
-/// ——同一 boot、它的标签页与画面里的窗格都还在快照里——时沿用它，从配对断开的那
-/// 一刻起最多 [`UNPAIRED_GRACE`]，不闪一帧占位；窗格结构变了就不沿用。
+/// ——同一 boot、它的标签页还在快照里、画面上的窗格与快照里该标签页此刻投影的窗格
+/// 一致（见 [`surface_panes_match`]）——时沿用它，从配对断开的那一刻起最多
+/// [`UNPAIRED_GRACE`]，不闪一帧占位；窗格结构变了就不沿用。
 pub(super) fn presentation(
     view: &View,
     stamp: Option<(u64, Instant)>,
@@ -99,14 +100,7 @@ pub(super) fn presentation(
     if surface.projection_revision == snapshot.revision {
         return Presentation::Paired;
     }
-    let usable = surface.boot_id == snapshot.boot_id
-        && snapshot.tabs.iter().any(|tab| tab.tab_id == view.tab)
-        && surface.panes.iter().all(|pane| {
-            snapshot
-                .panes
-                .iter()
-                .any(|entry| entry.pane_id == pane.pane_id && entry.tab_id == view.tab)
-        });
+    let usable = surface.boot_id == snapshot.boot_id && surface_panes_match(view, snapshot);
     if !usable {
         return Presentation::Unavailable;
     }
@@ -122,6 +116,51 @@ pub(super) fn presentation(
         Some(until) if now < until => Presentation::Stale { until },
         _ => Presentation::Unavailable,
     }
+}
+
+/// 旧帧画面上的窗格与快照里该标签页此刻投影的窗格是否一致（双向），不一致就不能
+/// 沿用旧帧：旧帧的窗格命中区按旧结构登记，会盖住新结构里别的窗格。
+///
+/// - 画面上的窗格都还在这个标签页里：挡住关闭、移走的窗格。
+/// - 反方向（复审轻级 W3）：快照里这个标签页的窗格也都在画面上。拆分新增的窗格不在
+///   旧帧里，只查上一条挡不住，点击会落到盖在新窗格位置上的旧窗格。窗格 id 在布局
+///   里唯一，上一条成立时数量相等即集合相等。
+/// - 缩放的标签页只投影它的聚焦窗格（`ui::panes::compute_pane_infos_for_tab`），
+///   快照里其余窗格本来就不在画面上：只要求画面恰好一个窗格。快照只带全局聚焦窗格
+///   （`ClientShellPane::focused` 不是标签页内的聚焦），所以只有它是聚焦标签页时才
+///   能核对画面上的就是缩放目标。
+///
+/// 只在修订号不配对时走到（稳态配对帧提前返回），不分配。
+fn surface_panes_match(view: &View, snapshot: &ClientShellSnapshot) -> bool {
+    let Some(tab) = snapshot.tabs.iter().find(|tab| tab.tab_id == view.tab) else {
+        return false;
+    };
+    let panes = &view.surface.panes;
+    let listed = panes.iter().all(|pane| {
+        snapshot
+            .panes
+            .iter()
+            .any(|entry| entry.pane_id == pane.pane_id && entry.tab_id == view.tab)
+    });
+    if !listed {
+        return false;
+    }
+    if tab.zoomed {
+        let [shown] = panes.as_slice() else {
+            return false;
+        };
+        return !tab.focused
+            || snapshot
+                .focused_pane_id
+                .as_deref()
+                .is_none_or(|focused| shown.pane_id == focused);
+    }
+    snapshot
+        .panes
+        .iter()
+        .filter(|entry| entry.tab_id == view.tab)
+        .count()
+        == panes.len()
 }
 
 impl State {
