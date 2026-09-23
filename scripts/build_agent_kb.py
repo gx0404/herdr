@@ -120,14 +120,23 @@ def _emit_chunks(chunks: list[dict], doc: str, anchor: str, text: str, max_chars
     parts: list[str] = []
     current: list[str] = []
     size = 0
+
+    def flush() -> None:
+        # 切片点落在空行上时，新片可能只剩空白行（例如空行后紧跟一行超过
+        # max_chars 的文字，空行独占一片后立刻又被切走）。空白片没有检索价值，
+        # 还会让新鲜度锁的非空断言变红，所以直接丢弃，续编号只数有内容的片。
+        part = "\n".join(current)
+        if part.strip():
+            parts.append(part)
+
     for line in clean.splitlines():
         if size + len(line) + 1 > max_chars and current:
-            parts.append("\n".join(current))
+            flush()
             current, size = [], 0
         current.append(line)
         size += len(line) + 1
     if current:
-        parts.append("\n".join(current))
+        flush()
     # 保留 CJK：slug 只替换分隔类字符，否则中文标题会全部坍缩成同一 id。
     slug = re.sub(r"[^a-z0-9\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]+", "-", f"{doc}#{anchor}".lower()).strip("-")
     base_id = slug[:160].strip("-")

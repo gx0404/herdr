@@ -67,6 +67,34 @@ class KbCorpusTests(unittest.TestCase):
             self.assertTrue(chunk["text"].strip(), chunk["id"])
 
 
+class KbChunkingTests(unittest.TestCase):
+    """分片器边界：任何输入都不得产出空白分片（N6）。"""
+
+    def _emit(self, text: str, max_chars: int) -> list[dict]:
+        chunks: list[dict] = []
+        build_agent_kb._emit_chunks(chunks, "doc.md", "anchor", text, max_chars)
+        return chunks
+
+    def test_blank_line_after_split_then_overlong_line_emits_no_blank_chunk(self) -> None:
+        # 第一行恰好占满一片，空行触发切片后独占新片，紧接一行超长文字再次切片：
+        # 旧实现会把只含空行的那片原样产出，新鲜度锁里的非空断言随即变红。
+        chunks = self._emit("a" * 9 + "\n\n" + "x" * 20, 10)
+        texts = [chunk["text"] for chunk in chunks]
+        self.assertTrue(all(text.strip() for text in texts), texts)
+        self.assertEqual(texts, ["a" * 9, "x" * 20])
+        self.assertEqual([chunk["id"] for chunk in chunks], ["doc-md-anchor-part1", "doc-md-anchor-part2"])
+
+    def test_whitespace_only_lines_between_overlong_lines_are_not_emitted(self) -> None:
+        chunks = self._emit("x" * 12 + "\n  \n\t\n" + "y" * 12 + "\n   ", 10)
+        texts = [chunk["text"] for chunk in chunks]
+        self.assertTrue(all(text.strip() for text in texts), texts)
+        self.assertEqual([text.strip() for text in texts], ["x" * 12, "y" * 12])
+
+    def test_single_part_keeps_plain_id_and_blank_lines_inside_a_part(self) -> None:
+        chunks = self._emit("alpha\n\nbeta", 100)
+        self.assertEqual([(chunk["id"], chunk["text"]) for chunk in chunks], [("doc-md-anchor", "alpha\n\nbeta")])
+
+
 class KbRetrievalTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
