@@ -1011,8 +1011,11 @@ fn account_detail(
         } else {
             HISTORY_CHART_MAX_ROWS
         };
+        // 只画最近的 `inner.width` 个采样：`Sparkline` 从数据头起画、放不下的尾部
+        // 被丢掉，不截的话采样一多，图就停在最早那一段、再也不动。
         let data = samples
             .iter()
+            .skip(samples.len().saturating_sub(usize::from(inner.width)))
             .map(|sample| u64::from(sample.percent.clamp(0.0, 100.0).round() as u8))
             .collect::<Vec<_>>();
         Sparkline::default()

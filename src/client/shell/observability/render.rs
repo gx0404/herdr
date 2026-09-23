@@ -923,6 +923,39 @@ mod tests {
         );
     }
 
+    /// 采样比右栏宽时画最近的那一段：`Sparkline` 从数据头起画、放不下的尾部被
+    /// 丢掉，不截的话采样一多，图就停在最早那一段、再也不动。
+    #[test]
+    fn usage_history_plots_the_latest_samples() {
+        let _guard = lang_guard(Lang::ZhCn);
+        let mut state = populated();
+        state.accounts = vec![account("claude:default", ObservationStatus::Ready)];
+        state.selected_provider = Some("claude".into());
+        // 早先 60 个采样满额、最近 20 个为 0；右栏的图只有 28 列宽。
+        let mut percents = vec![100.0; 60];
+        percents.extend([0.0; 20]);
+        state
+            .usage_history
+            .insert("claude:default".into(), usage_samples(&percents));
+        let (buffer, _) = paint_page(&state, Page::Accounts, 101, 56);
+        let from = buffer.area.width - 30;
+        let full = |y: u16| {
+            (from..buffer.area.width)
+                .filter(|x| buffer[(*x, y)].symbol() == "█")
+                .count()
+        };
+        let bottom = (0..buffer.area.height)
+            .rev()
+            .find(|y| full(*y) > 0)
+            .unwrap_or_else(|| panic!("图的底行\n{}", buffer_text(&buffer)));
+        assert_eq!(
+            full(bottom),
+            28 - 20,
+            "最近 20 个采样为 0，满额的只剩更早的 8 列\n{}",
+            buffer_text(&buffer)
+        );
+    }
+
     /// ds-08：terminal 主题的 `panel_bg` 是 `Reset`，页签「反色」曾退化成
     /// 「终端默认前景压在 accent 上」。反色前景取组件表（与按钮同源）；组件表
     /// 现在按对比度挑颜色（`crate::ui::color::contrast_fg`），`Reset` 候选被跳过，
