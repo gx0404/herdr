@@ -5843,8 +5843,8 @@
       "anchor": "structure",
       "doc": "src/integration/actions.rs",
       "id": "src-integration-actions-rs-structure",
-      "source_sha256": "e5bba91a44faa4593376b4ee2c80b29e1c78faebc3d262473ebc60dde35f9129",
-      "text": "公开项：\npub(crate) const CODEX_HOOKS_REVIEW_HINT: &str = \"codex asks you to review new or changed hooks the next time it starts (\\\"Hooks need review\\\"): choose \\\"Trust all and continue\\\", or trust the herdr hooks under \\\"Review hooks\\\"; \\\"Continue without trusting\\\" leaves them disabled\"; — codex 还没信任（或信任后改过）herdr 的钩子时的安装提示；CLI 与设置页都原样显示。\npub(crate) const CODEX_HOOKS_DISABLED_HINT: &str = — 用户在 codex 里停用了 herdr 的钩子时的安装提示。\npub(crate) fn install_target(\npub(crate) fn uninstall_target("
+      "source_sha256": "0379512ff96c1f8c9d28d79ac59ae4573069817bb74fb83fd00097b919a07d98",
+      "text": "公开项：\npub(crate) const CODEX_HOOKS_REVIEW_HINTS: [&str; 2] = [ — codex 还没信任（或信任后改过）herdr 的钩子时的安装提示，逐条作为安装消息输出： 第一条是要做的选择，第二条是不选的后果。设置页集成页把安装消息逐条单行显示、 按宽度硬截断（80 列终端下消息区只有 74 列），所以动作放在最前、每条不超过 70 列。\npub(crate) const CODEX_HOOKS_DISABLED_HINT: &str = — 用户在 codex 里停用了 herdr 的钩子时的安装提示（同样不超过 70 列）。\npub(crate) fn install_target(\npub(crate) fn uninstall_target("
     },
     {
       "anchor": "structure",

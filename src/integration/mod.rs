@@ -20,6 +20,8 @@ pub(crate) use usage::supports_statusline as usage_supports_statusline;
 
 pub(crate) use actions::{install_target, uninstall_target};
 #[cfg(test)]
+pub(crate) use actions::{CODEX_HOOKS_DISABLED_HINT, CODEX_HOOKS_REVIEW_HINTS};
+#[cfg(test)]
 pub(crate) use env::integration_env_lock;
 pub(crate) use env::{
     apply_pane_base_env, claude_dir, claude_state_file, codex_dir, kimi_dir, opencode_data_dir,

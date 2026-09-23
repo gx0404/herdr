@@ -1069,3 +1069,69 @@ fn settings_footer_announces_install_all_in_the_integrations_section() {
         "Integrations 分区页脚必须提示 a: {text}"
     );
 }
+
+/// 对抗审查（中，冒烟 M5①）：设置页集成页把服务端返回的安装消息逐条单行显示、
+/// 按宽度硬截断，不折行也不加省略号。80 列终端下设置浮层是 `ModalSize::Large`
+/// 的 76 列，消息区只有 74 列；codex 钩子信任提示原先是 221 列的单行，真正要做的
+/// 「Trust all and continue」从第 93 列才开始，界面上看不到该选哪一项。
+#[test]
+fn settings_integration_messages_show_codex_trust_hints_in_full_at_80_columns() {
+    use crate::api::schema::{IntegrationState, IntegrationTarget};
+
+    let terminal = Rect::new(0, 0, 80, 32);
+    let modal = crate::ui::modal_rect(terminal, crate::ui::ModalSize::Large.with_height(22))
+        .expect("settings modal");
+    assert_eq!(modal.width, 76, "80 列终端下设置浮层是 76 列");
+
+    let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
+    state.set_snapshot(Box::new(snapshot()));
+    state.set_pane_surface(surface());
+    state.open_settings_overlay();
+    let mut outcome = ClientShellInput::default();
+    state.select_settings_section(ClientSettingsSection::Integrations, &mut outcome);
+    let Some(ClientShellOverlay::Settings(settings)) = state.overlay.as_mut() else {
+        panic!("settings overlay");
+    };
+    settings.loading_integrations = false;
+    settings.integrations = vec![crate::api::schema::IntegrationInfo {
+        target: IntegrationTarget::Codex,
+        label: "codex".into(),
+        command: "codex".into(),
+        available: true,
+        state: IntegrationState::Current,
+    }];
+    let [review, consequence] = crate::integration::CODEX_HOOKS_REVIEW_HINTS;
+    let hints = [
+        review,
+        consequence,
+        crate::integration::CODEX_HOOKS_DISABLED_HINT,
+    ];
+    // 与 `install_target(Codex)` 的输出同形：三行路径之后是信任提示。停用提示与
+    // 审阅提示互斥，这里一并摆上只为确认它同样放得下。
+    settings.integration_messages = [
+        "installed codex integration hook to ~/.codex/herdr-agent-state.sh",
+        "ensured codex hooks at ~/.codex/hooks.json",
+        "ensured codex config at ~/.codex/config.toml",
+    ]
+    .into_iter()
+    .chain(hints)
+    .map(str::to_owned)
+    .collect();
+
+    let frame = state
+        .compose(terminal.width, terminal.height)
+        .expect("settings frame");
+    let rows = frame_rows(&frame);
+    let screen = rows.join("\n");
+    assert!(
+        rows.iter()
+            .any(|row| row.contains("Trust all and continue")),
+        "设置页要能看到该选哪一项：\n{screen}"
+    );
+    for hint in hints {
+        assert!(
+            rows.iter().any(|row| row.contains(hint)),
+            "每条信任提示都要完整显示：{hint:?}\n{screen}"
+        );
+    }
+}

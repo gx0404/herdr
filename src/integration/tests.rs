@@ -1458,6 +1458,12 @@ fn install_codex_tells_the_user_to_trust_the_hooks_until_codex_does() {
                 && message.contains("Trust all and continue")),
         "{messages:?}"
     );
+    // 两条提示按「先动作、后后果」相邻输出。
+    let hints = super::actions::CODEX_HOOKS_REVIEW_HINTS.map(str::to_owned);
+    assert!(
+        messages.windows(hints.len()).any(|window| window == hints),
+        "{messages:?}"
+    );
     assert_eq!(
         codex_status().note,
         Some(IntegrationStatusNote::CodexHooksNeedReview)
@@ -1504,6 +1510,31 @@ fn install_codex_tells_the_user_to_trust_the_hooks_until_codex_does() {
 
     std::env::remove_var("HOME");
     let _ = fs::remove_dir_all(base);
+}
+
+/// 冒烟 M5① 的对抗审查（中）：设置页集成页把安装消息逐条单行显示、按宽度硬截断
+/// （80 列终端下消息区只有 74 列），原先 221 列的单行提示在那里看不到该选哪一项。
+/// 每条信任提示不超过 70 列，要做的选择写在第一条。
+#[test]
+fn codex_hook_trust_hints_fit_the_settings_message_column() {
+    use unicode_width::UnicodeWidthStr;
+
+    let [review, consequence] = super::actions::CODEX_HOOKS_REVIEW_HINTS;
+    for hint in [
+        review,
+        consequence,
+        super::actions::CODEX_HOOKS_DISABLED_HINT,
+    ] {
+        assert!(UnicodeWidthStr::width(hint) <= 70, "{hint:?} 超过 70 列");
+    }
+    assert!(
+        review.contains("Hooks need review") && review.contains("Trust all and continue"),
+        "{review}"
+    );
+    assert!(
+        consequence.contains("Continue without trusting"),
+        "{consequence}"
+    );
 }
 
 /// 更新提示（`herdr update` 之后、`status --outdated-only`）只看版本：信任提示行只在

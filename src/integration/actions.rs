@@ -9,9 +9,14 @@ use super::targets::{
 use super::version::{agent_version_requirement, enforce_agent_version};
 use super::KIMI_MIN_VERSION;
 
-/// codex 还没信任（或信任后改过）herdr 的钩子时的安装提示；CLI 与设置页都原样显示。
-pub(crate) const CODEX_HOOKS_REVIEW_HINT: &str = "codex asks you to review new or changed hooks the next time it starts (\"Hooks need review\"): choose \"Trust all and continue\", or trust the herdr hooks under \"Review hooks\"; \"Continue without trusting\" leaves them disabled";
-/// 用户在 codex 里停用了 herdr 的钩子时的安装提示。
+/// codex 还没信任（或信任后改过）herdr 的钩子时的安装提示，逐条作为安装消息输出：
+/// 第一条是要做的选择，第二条是不选的后果。设置页集成页把安装消息逐条单行显示、
+/// 按宽度硬截断（80 列终端下消息区只有 74 列），所以动作放在最前、每条不超过 70 列。
+pub(crate) const CODEX_HOOKS_REVIEW_HINTS: [&str; 2] = [
+    "codex: at \"Hooks need review\" choose \"Trust all and continue\"",
+    "codex: \"Continue without trusting\" leaves the herdr hooks disabled",
+];
+/// 用户在 codex 里停用了 herdr 的钩子时的安装提示（同样不超过 70 列）。
 pub(crate) const CODEX_HOOKS_DISABLED_HINT: &str =
     "codex has disabled the herdr hooks; enable them in codex with /hooks";
 
@@ -76,7 +81,7 @@ fn install_target_inner(target: crate::api::schema::IntegrationTarget) -> io::Re
                 &codex_managed_hooks(&installed.hook_path),
             );
             if trust.needs_review {
-                messages.push(CODEX_HOOKS_REVIEW_HINT.to_string());
+                messages.extend(CODEX_HOOKS_REVIEW_HINTS.map(str::to_owned));
             } else if trust.disabled {
                 messages.push(CODEX_HOOKS_DISABLED_HINT.to_string());
             }
