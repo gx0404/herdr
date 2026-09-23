@@ -2397,7 +2397,9 @@ fn tree_agent_context_actions_rename_bind_and_close_the_agent_pane() {
     assert!(outcome.actions.is_empty());
     state.overlay = None;
 
-    // 重命名（其它端点）：先切过去并聚焦，不打开浮层。
+    // 重命名（其它在线端点）：同一个浮层，目标带上端点，不切换当前端点
+    // （文档终审 D9；提交路径见
+    // `renaming_a_remote_agent_pane_goes_to_its_endpoint_and_dims_when_offline`）。
     let mut outcome = ClientShellInput::default();
     state.activate_agent_context_action(
         remote.clone(),
@@ -2405,14 +2407,16 @@ fn tree_agent_context_actions_rename_bind_and_close_the_agent_pane() {
         ClientContextMenuAction::RenameAgent,
         &mut outcome,
     );
-    assert!(state.overlay.is_none());
+    assert!(outcome.actions.is_empty(), "打开浮层不发请求、不切端点");
     assert!(matches!(
-        outcome.actions.as_slice(),
-        [ClientShellAction::ActivateEndpoint {
-            endpoint_id,
-            target: Some(ClientEndpointFocusTarget::Pane(pane_id)),
-        }] if endpoint_id == &remote && pane_id == "pane_1"
+        state.overlay.as_ref(),
+        Some(ClientShellOverlay::Rename(rename)) if matches!(
+            &rename.target,
+            ClientRenameTarget::EndpointPane { endpoint_id, pane_id }
+                if endpoint_id == &remote && pane_id == "pane_1"
+        )
     ));
+    state.overlay = None;
 
     // 关闭（当前端点）：pane.close。
     let mut outcome = ClientShellInput::default();
@@ -2970,4 +2974,124 @@ fn tree_row_labels_end_with_an_ellipsis_when_truncated() {
         external.contains("anexternal") && external.ends_with('…'),
         "外部条目标签截短带省略号：{external:?}"
     );
+}
+
+/// SGR 1006 右键某端点 agent 行（坐标取 0 起的单元格）。
+fn right_click_endpoint_agent(
+    state: &mut ClientShellState,
+    endpoint_id: &ClientEndpointId,
+    pane_id: &str,
+) {
+    let rect = state
+        .hits
+        .endpoint_agents
+        .iter()
+        .find(|(_, endpoint, pane)| endpoint == endpoint_id && pane == pane_id)
+        .map(|(rect, ..)| *rect)
+        .expect("该端点的 agent 行在命中表里");
+    let (x, y) = (rect.x + 2, rect.y);
+    state.handle_input_bytes(format!("\x1b[<2;{};{}M", x + 1, y + 1).as_bytes());
+}
+
+/// 打开中的右键菜单里某个动作的条目下标与是否可点。
+fn context_item(state: &ClientShellState, action: ClientContextMenuAction) -> (usize, bool) {
+    let Some(ClientShellOverlay::ContextMenu(menu)) = state.overlay.as_ref() else {
+        panic!("右键菜单应已打开：{:?}", state.overlay);
+    };
+    let items = menu.items();
+    let index = items
+        .iter()
+        .position(|item| item.action == action)
+        .unwrap_or_else(|| panic!("菜单缺少 {action:?}"));
+    (index, items[index].enabled)
+}
+
+/// 文档终审 D9：对其它端点（远端机器）上 agent 的右键「重命名窗格」以前既不置灰，
+/// 点了也只会切过去并聚焦。按现有 API 能力改为直接重命名：该端点在线且宣告了
+/// `pane.rename` 时打开同一个重命名浮层，提交经 `push_endpoint_method_for` 发往
+/// 该端点、不切换当前端点（与「关闭窗格」同口径）；端点离线时该项置灰、点不了。
+#[test]
+fn renaming_a_remote_agent_pane_goes_to_its_endpoint_and_dims_when_offline() {
+    let (mut state, remote) = federated_state(AgentPanelSortConfig::Spaces);
+    state.compose(106, 40).expect("联邦帧");
+    right_click_endpoint_agent(&mut state, &remote, "pane_1");
+    let (rename, enabled) = context_item(&state, ClientContextMenuAction::RenameAgent);
+    assert!(enabled, "在线远端的「重命名窗格」可用");
+
+    // 点这一项：打开重命名浮层，目标是远端的 pane_1。
+    state.compose(106, 40).expect("菜单帧");
+    let row = state
+        .hits
+        .context_menu_rows
+        .iter()
+        .find(|(_, index)| *index == rename)
+        .map(|(rect, _)| *rect)
+        .expect("可点的重命名行");
+    state.handle_input_bytes(format!("\x1b[<0;{};{}M", row.x + 2, row.y + 1).as_bytes());
+    state.handle_input_bytes(format!("\x1b[<0;{};{}m", row.x + 2, row.y + 1).as_bytes());
+    match state.overlay.as_ref() {
+        Some(ClientShellOverlay::Rename(overlay)) => {
+            assert_eq!(overlay.title, crate::i18n::texts().dialogs.rename_pane);
+            assert!(
+                matches!(
+                    &overlay.target,
+                    ClientRenameTarget::EndpointPane { endpoint_id, pane_id }
+                        if endpoint_id == &remote && pane_id == "pane_1"
+                ),
+                "浮层目标是远端的窗格：{:?}",
+                overlay.target
+            );
+        }
+        other => panic!("应打开重命名浮层：{other:?}"),
+    }
+
+    // 输入新名字回车：pane.rename 直接发往远端，当前端点不变。
+    assert!(state.insert_overlay_text("build-agent"));
+    let outcome = state.handle_raw_events(vec![RawInputEvent::Key(
+        crate::input::TerminalKey::new(KeyCode::Enter, KeyModifiers::empty()),
+    )]);
+    let [ClientShellAction::EndpointRequest {
+        endpoint_id,
+        request,
+        ..
+    }] = &outcome.actions[..]
+    else {
+        panic!("重命名应发往远端端点：{:?}", outcome.actions);
+    };
+    assert_eq!(endpoint_id, &remote);
+    assert!(matches!(
+        &request.method,
+        crate::api::schema::Method::PaneRename(params)
+            if params.pane_id == "pane_1" && params.label.as_deref() == Some("build-agent")
+    ));
+    assert!(state.active_endpoint_id.is_local(), "不切换当前端点");
+    assert!(state.overlay.is_none());
+
+    // 端点离线：该项置灰，不进命中表。
+    state.set_endpoint_status(&remote, ClientEndpointStatus::Reconnecting);
+    state.compose(106, 40).expect("离线帧");
+    right_click_endpoint_agent(&mut state, &remote, "pane_1");
+    let (rename, enabled) = context_item(&state, ClientContextMenuAction::RenameAgent);
+    assert!(!enabled, "离线远端的「重命名窗格」置灰");
+    state.compose(106, 40).expect("离线菜单帧");
+    assert!(
+        state
+            .hits
+            .context_menu_rows
+            .iter()
+            .all(|(_, index)| *index != rename),
+        "置灰项不可点"
+    );
+    // 本机端点的 agent 照常可重命名。
+    state.overlay = None;
+    state.compose(106, 40).expect("关菜单");
+    let (_, local_pane) = state
+        .hits
+        .endpoint_agents
+        .iter()
+        .find(|(_, endpoint, _)| endpoint.is_local())
+        .map(|(rect, endpoint, pane)| (*rect, (endpoint.clone(), pane.clone())))
+        .expect("本机 agent 行");
+    right_click_endpoint_agent(&mut state, &local_pane.0, &local_pane.1);
+    assert!(context_item(&state, ClientContextMenuAction::RenameAgent).1);
 }

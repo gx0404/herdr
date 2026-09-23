@@ -1862,11 +1862,15 @@ impl ClientShellState {
         let Some(agent) = self.endpoint_agent(&endpoint_id, &pane_id) else {
             return false;
         };
+        let agent_name = agent.agent.clone();
+        let has_activity = agent.activity.total > 0 || !agent.activity.nodes.is_empty();
+        let renamable = self.agent_pane_renamable(&endpoint_id, &pane_id);
         let target = ClientContextMenuTarget::Agent {
             endpoint_id,
             pane_id,
-            agent: agent.agent.clone(),
-            has_activity: agent.activity.total > 0 || !agent.activity.nodes.is_empty(),
+            agent: agent_name,
+            has_activity,
+            renamable,
         };
         self.overlay = Some(ClientShellOverlay::ContextMenu(ClientContextMenuOverlay {
             target,
@@ -1958,34 +1962,70 @@ impl ClientShellState {
         }
     }
 
+    /// 这个 agent 的窗格能否从这里重命名：当前端点照常；其它端点要在线且宣告了
+    /// `pane.rename`，提交才能经 `push_endpoint_method_for` 直接发过去。菜单据此
+    /// 置灰「重命名窗格」（文档终审 D9）。
+    fn agent_pane_renamable(&self, endpoint_id: &ClientEndpointId, pane_id: &str) -> bool {
+        *endpoint_id == self.active_endpoint_id
+            || (self.endpoint_is_online(endpoint_id)
+                && self.supports_endpoint_method_for(
+                    endpoint_id,
+                    &crate::api::schema::Method::PaneRename(crate::api::schema::PaneRenameParams {
+                        pane_id: pane_id.to_owned(),
+                        label: None,
+                    }),
+                ))
+    }
+
     /// 「重命名窗格」：沿用 pane 重命名浮层（标题同键盘重命名路径
     /// `open_rename_pane_overlay`，即 `dialogs.rename_pane`）与 `pane.rename`，
     /// 改的是 pane 标签，菜单文案照实写「重命名窗格」。
-    /// 浮层提交发往当前端点（`ClientRenameTarget::Pane` 不带端点），所以只对
-    /// 当前端点直接打开；其它端点的 agent 在菜单里该项应灰显，这里的兜底只是切
-    /// 过去并聚焦该 pane（与「聚焦」相同），不在端点切换完成前打开浮层，免得
-    /// 重命名落到同 id 的别处 pane 上。
+    /// 当前端点的 pane 走 `ClientRenameTarget::Pane`；其它端点的 pane 按现有 API
+    /// 能力直接重命名（文档终审 D9）：浮层目标带上端点，提交发往该端点、不切换
+    /// 当前端点，与「关闭窗格」同口径——以前这里只会切过去并聚焦。该端点此刻
+    /// 不可达（菜单里已置灰，这里兜底）时照「关闭窗格」的做法提示未就绪。
     fn rename_agent_pane(
         &mut self,
         endpoint_id: ClientEndpointId,
         pane_id: String,
         outcome: &mut ClientShellInput,
     ) {
-        if endpoint_id != self.active_endpoint_id {
-            self.focus_agent_pane(endpoint_id, pane_id, outcome);
+        if !self.agent_pane_renamable(&endpoint_id, &pane_id) {
+            let label = self.endpoint_label(&endpoint_id).to_owned();
+            self.receive_endpoint_unavailable(crate::i18n::fill(
+                crate::i18n::texts().mobile.not_ready_fmt,
+                &[("label", &label)],
+            ));
+            outcome.repaint = true;
             return;
         }
-        let label = self.snapshot.as_deref().and_then(|snapshot| {
+        let snapshot = if endpoint_id == self.active_endpoint_id {
+            self.snapshot.as_deref()
+        } else {
+            self.endpoints
+                .iter()
+                .find(|endpoint| endpoint.endpoint_id == endpoint_id)
+                .and_then(|endpoint| endpoint.snapshot.as_deref())
+        };
+        let label = snapshot.and_then(|snapshot| {
             snapshot
                 .panes
                 .iter()
                 .find(|pane| pane.pane_id == pane_id)
                 .and_then(|pane| pane.label.clone())
         });
+        let target = if endpoint_id == self.active_endpoint_id {
+            ClientRenameTarget::Pane { pane_id }
+        } else {
+            ClientRenameTarget::EndpointPane {
+                endpoint_id,
+                pane_id,
+            }
+        };
         self.overlay = Some(ClientShellOverlay::Rename(ClientRenameOverlay {
             title: crate::i18n::texts().dialogs.rename_pane,
             input: TextEditor::new(label.as_deref().unwrap_or_default(), label.is_none()),
-            target: ClientRenameTarget::Pane { pane_id },
+            target,
         }));
         outcome.repaint = true;
     }

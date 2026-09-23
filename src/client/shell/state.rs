@@ -712,6 +712,12 @@ pub(super) enum ClientRenameTarget {
     Pane {
         pane_id: String,
     },
+    /// 其它端点（机器）上的窗格：提交经 `push_endpoint_method_for` 直接发往该
+    /// 端点，不切换当前端点（Agents 面板右键远端 agent 的「重命名窗格」）。
+    EndpointPane {
+        endpoint_id: ClientEndpointId,
+        pane_id: String,
+    },
     Machine {
         profile_id: crate::client::endpoint::ProfileId,
     },
@@ -1011,6 +1017,9 @@ pub(super) enum ClientContextMenuTarget {
         /// 识别出的 agent 名；`None` 时不提供用量 / 绑定账号。
         agent: Option<String>,
         has_activity: bool,
+        /// 打开菜单时这个窗格能否从这里重命名：当前端点，或在线且宣告了
+        /// `pane.rename` 的其它端点。否则「重命名窗格」置灰。
+        renamable: bool,
     },
     /// 不属于任何 pane 的外部来源条目。
     ExternalAgent {

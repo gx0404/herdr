@@ -124,6 +124,7 @@ impl ClientContextMenuOverlay {
             ClientContextMenuTarget::Agent {
                 agent,
                 has_activity,
+                renamable,
                 ..
             } => {
                 let t = &crate::i18n::texts().agent_panel;
@@ -133,7 +134,12 @@ impl ClientContextMenuOverlay {
                         enabled: *has_activity,
                         ..item(t.menu_view_activity, Action::ViewAgentActivity)
                     },
-                    item(t.menu_rename, Action::RenameAgent),
+                    // 其它端点离线（或没宣告 `pane.rename`）时重命名发不出去：置灰
+                    // （文档终审 D9）。
+                    ClientContextMenuItem {
+                        enabled: *renamable,
+                        ..item(t.menu_rename, Action::RenameAgent)
+                    },
                 ];
                 if agent.is_some() {
                     // 「用量」打开并钉住该 agent 的用量悬停卡

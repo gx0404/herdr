@@ -1129,6 +1129,31 @@ impl ClientShellState {
                     label: Some(trimmed.to_owned()),
                 },
             )),
+            ClientRenameTarget::EndpointPane {
+                endpoint_id,
+                pane_id,
+            } => {
+                // 其它端点的窗格：直接发往该端点、不切换当前端点（文档终审 D9）；
+                // 打开浮层后端点掉线就照「关闭窗格」的做法提示未就绪。
+                let method =
+                    crate::api::schema::Method::PaneRename(crate::api::schema::PaneRenameParams {
+                        pane_id,
+                        label: Some(trimmed.to_owned()),
+                    });
+                if !self.push_endpoint_method_for(
+                    &endpoint_id,
+                    method,
+                    PendingEndpointKind::Generic,
+                    outcome,
+                ) {
+                    let label = self.endpoint_label(&endpoint_id).to_owned();
+                    self.receive_endpoint_unavailable(crate::i18n::fill(
+                        crate::i18n::texts().mobile.not_ready_fmt,
+                        &[("label", &label)],
+                    ));
+                }
+                None
+            }
             ClientRenameTarget::Machine { profile_id } => {
                 self.machine_rename(&profile_id, trimmed);
                 None
