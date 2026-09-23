@@ -1360,6 +1360,39 @@ mod tests {
         assert!(toolbar_row(&buffer, texts.callback_toggle).is_none());
     }
 
+    /// 文档终审 D2：服务端按它自己的语言写说明——远端机器、或 `HERDR_LANG` 与客户端
+    /// 不同的 server 会发来中文。认得的说明（这里是 claude 已登录、等待官方回调）在卡片
+    /// 与表格里都按界面语言显示，指引写账号页上开关的真实名字。
+    #[test]
+    fn known_usage_notices_follow_the_ui_language_on_cards_and_in_the_table() {
+        let server_notice = "已登录，等待官方回调：在账号页打开「官方回调」";
+        let mut state = populated();
+        state.accounts[1].status = ObservationStatus::NeedsBinding;
+        state.accounts[1].metrics.clear();
+        state.accounts[1].message = Some(server_notice.into());
+        let _guard = lang_guard(Lang::En);
+        let (buffer, _) = paint_page(&state, Page::Accounts, 133, 32);
+        let text = buffer_text(&buffer);
+        assert!(
+            buffer_has(&buffer, "Signed in; to get usage, turn on"),
+            "卡片说明按界面语言显示：\n{text}"
+        );
+        assert!(!text.contains("等待官方回调"), "{text}");
+
+        state.usage.format = UsageDisplayFormat::Table;
+        let (buffer, _) = paint_page(&state, Page::Accounts, 200, 32);
+        let row = (0..buffer.area.height)
+            .find(|y| row_has(&buffer, *y, "claude:work"))
+            .expect("无指标账号有一行");
+        let text = row_text(&buffer, row);
+        // 状态列按百分比分宽，长说明在列边界处截断；开头已换成界面语言即可。
+        assert!(
+            text.contains("· Signed"),
+            "表格状态列的说明同样换语言：{text}"
+        );
+        assert!(!text.contains("已登录"), "{text}");
+    }
+
     #[test]
     fn usage_table_keeps_status_in_the_status_column_for_accounts_without_metrics() {
         let mut state = populated();

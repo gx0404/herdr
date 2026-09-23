@@ -6,7 +6,7 @@ use super::{
     KeybindTexts, MachineAuthTexts, MachineFilesTexts, MachineFormTexts, MachinesTexts, MenuTexts,
     MobileTexts, ModeBarTexts, MonitorTexts, NotifyTexts, OnboardingTexts, OverlayTexts,
     ScenesTexts, SettingsTexts, SidebarTexts, SnippetsTexts, StatusTexts, Texts, UpdateTexts,
-    WorktreeTexts,
+    UsageNoticeTexts, WorktreeTexts,
 };
 
 /// 主题显示名（canonical → 中文）；未列出的主题回退到 canonical 值。
@@ -434,6 +434,17 @@ pub const TEXTS: Texts = Texts {
         no_session_data: "暂无会话数据",
         no_data_yet: "暂无数据",
         no_accounts: "暂无账号用量",
+    },
+    usage_notice: UsageNoticeTexts {
+        signed_in: "已登录",
+        login_unknown: "登录态未知（claude auth status 输出无法解析）",
+        callback_on_fmt:
+            "{login}，官方回调已启用；在 Claude Code 会话中产生一次输出后即可看到用量",
+        callback_off_fmt: "{login}，等待官方回调：在账号页打开「官方回调」",
+        callback_unknown_fmt: "{login}，无法判定官方回调是否已启用（settings.json 无法解析，或 statusLine 含无法识别的 herdr 回调）；请手动检查后再到账号页打开「官方回调」",
+        interactive_failure_sep: "。交互探测未取得额度：",
+        trust_callback_hint: "需在 CLI 中确认目录信任；herdr 不会代为应答。也可在账号页打开「官方回调」获取用量",
+        sign_in_callback_hint: "官方 CLI 需要登录；也可在账号页打开「官方回调」获取用量",
     },
     sidebar: SidebarTexts {
         spaces: " 工作区",

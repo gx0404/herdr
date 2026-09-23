@@ -1512,24 +1512,14 @@ struct ClaudeProbeFlags {
     slow_poll: bool,
 }
 
-/// 「已登录、等待回调」占位文案：回调已接入与否给不同的下一步指引。
+/// 「已登录、等待回调」占位文案：回调已接入与否给不同的下一步指引，指引写账号页上
+/// 「官方回调」开关的真实名字。settings.json 读不了 / 解析不了（`None`）时启用开关必然
+/// 失败，先请用户手动检查。按 server 的界面语言生成，客户端显示前再按自己的语言重排
+/// （`crate::i18n::localize_usage_notice`）。
 fn claude_waiting_message(statusline_enabled: Option<bool>, login_known: bool) -> String {
-    let login = if login_known {
-        "已登录"
-    } else {
-        "登录态未知（claude auth status 输出无法解析）"
-    };
-    match statusline_enabled {
-        Some(true) => format!(
-            "{login}，官方 statusline 回调已启用；在 Claude Code 会话中产生一次输出后即可看到用量"
-        ),
-        Some(false) => format!("{login}，等待官方 statusline 回调（去 监控 → 设置 启用）"),
-        // settings.json 读不了 / 解析不了，或 statusLine 含无法识别的 herdr 回调：启用开关必然
-        // 失败，先请用户手动检查，而不是引导去点它。
-        None => format!(
-            "{login}，无法判定官方 statusline 回调状态（settings.json 无法解析，或 statusLine 含无法识别的 herdr 回调）；请手动检查后再到 监控 → 设置 启用"
-        ),
-    }
+    crate::i18n::texts()
+        .usage_notice
+        .claude_waiting(login_known, statusline_enabled)
 }
 
 /// claude 的占位探测：主路径是官方 statusline 回调。显式刷新且 `interactive_probe` 开启时
@@ -1592,7 +1582,7 @@ fn claude_probe(
         claude_waiting_message(transport.statusline_enabled(account), status.is_some());
     if let Some(failure) = interactive_failure {
         flags.trust_required = failure.trust_required;
-        message.push_str("。交互探测未取得额度：");
+        message.push_str(crate::i18n::texts().usage_notice.interactive_failure_sep);
         message.push_str(&failure.message);
     }
     flags.slow_poll = true;
@@ -4173,6 +4163,36 @@ mod tests {
         }
     }
 
+    /// 文档终审 D2：「等待回调」说明曾只有中文，且让用户去「监控 → 设置」启用——开关其实
+    /// 在账号页，叫「官方回调」。说明按 server 的界面语言生成（与 toast、通知同一口径，随
+    /// config.toml 的 `language` 同步），指引写账号页与开关在该语言下的真实名字。
+    #[test]
+    fn claude_waiting_message_follows_the_language_and_names_the_accounts_toggle() {
+        use crate::i18n::{lang_guard, Lang};
+        for lang in [Lang::En, Lang::ZhCn] {
+            let _guard = lang_guard(lang);
+            let texts = crate::i18n::texts();
+            for (callback, login_known) in [(Some(false), true), (None, true), (Some(false), false)]
+            {
+                let message = claude_waiting_message(callback, login_known);
+                assert!(
+                    message.contains(texts.monitor.callback_toggle),
+                    "{lang:?}: {message}"
+                );
+                assert!(
+                    message.contains(texts.monitor.tab_accounts),
+                    "{lang:?}: {message}"
+                );
+                assert!(!message.contains("监控 → 设置"), "{lang:?}: {message}");
+            }
+        }
+        let _guard = lang_guard(Lang::En);
+        for (callback, login_known) in [(Some(true), true), (Some(false), true), (None, false)] {
+            let message = claude_waiting_message(callback, login_known);
+            assert!(message.is_ascii(), "英文界面下不留中文：{message}");
+        }
+    }
+
     #[test]
     fn claude_probe_only_opens_a_pty_on_manual_refresh_with_the_opt_in_and_falls_back_to_auth_status(
     ) {
@@ -4228,7 +4248,7 @@ mod tests {
                 interactive: trust_blocked(),
                 expect_calls: vec!["auth_status", "statusline_enabled"],
                 expect_status: ObservationStatus::NeedsBinding,
-                expect_message_contains: "已登录，等待官方 statusline 回调（去 监控 → 设置 启用）",
+                expect_message_contains: "已登录，等待官方回调：在账号页打开「官方回调」",
                 expect_flags: placeholder,
                 expect_identity: Some("me@example.test"),
             },
@@ -4268,7 +4288,7 @@ mod tests {
                 interactive: Ok("Weekly 20% used".into()),
                 expect_calls: vec!["auth_status", "statusline_enabled"],
                 expect_status: ObservationStatus::NeedsBinding,
-                expect_message_contains: "等待官方 statusline 回调",
+                expect_message_contains: "等待官方回调",
                 expect_flags: placeholder,
                 expect_identity: Some("me@example.test"),
             },
@@ -4281,7 +4301,7 @@ mod tests {
                 interactive: Ok("Weekly 20% used".into()),
                 expect_calls: vec!["auth_status", "statusline_enabled"],
                 expect_status: ObservationStatus::NeedsBinding,
-                expect_message_contains: "无法判定官方 statusline 回调状态",
+                expect_message_contains: "无法判定官方回调是否已启用",
                 expect_flags: placeholder,
                 expect_identity: Some("me@example.test"),
             },

@@ -1405,7 +1405,10 @@ pub(super) fn usage_table(
             // 无指标的账号：指标 / 用量 / 重置三列留空，状态落在真正的「状态」列，
             // 说明文字并入状态列尾（`状态 · 说明`），不再错位到指标列。
             let status_cell = match account.message.as_deref().filter(|m| !m.is_empty()) {
-                Some(message) => format!("{status_cell} · {message}"),
+                Some(message) => format!(
+                    "{status_cell} · {}",
+                    crate::i18n::localize_usage_notice(message)
+                ),
                 None => status_cell,
             };
             entries.push((

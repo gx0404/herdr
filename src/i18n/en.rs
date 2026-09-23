@@ -6,7 +6,7 @@ use super::{
     KeybindTexts, MachineAuthTexts, MachineFilesTexts, MachineFormTexts, MachinesTexts, MenuTexts,
     MobileTexts, ModeBarTexts, MonitorTexts, NotifyTexts, OnboardingTexts, OverlayTexts,
     ScenesTexts, SettingsTexts, SidebarTexts, SnippetsTexts, StatusTexts, Texts, UpdateTexts,
-    WorktreeTexts,
+    UsageNoticeTexts, WorktreeTexts,
 };
 
 pub const TEXTS: Texts = Texts {
@@ -413,6 +413,18 @@ pub const TEXTS: Texts = Texts {
         no_session_data: "No session data yet",
         no_data_yet: "no data yet",
         no_accounts: "No account usage to show",
+    },
+    usage_notice: UsageNoticeTexts {
+        signed_in: "Signed in",
+        login_unknown: "Login state unknown (claude auth status output unreadable)",
+        callback_on_fmt:
+            "{login}; official callback is on, usage appears after the next Claude Code output",
+        callback_off_fmt:
+            "{login}; to get usage, turn on \"official callback\" on the Accounts page",
+        callback_unknown_fmt: "{login}; can't tell whether the official callback is on (settings.json is unreadable or has an unrecognized herdr statusLine); check it, then turn on \"official callback\" on the Accounts page",
+        interactive_failure_sep: ". Interactive probe got no quota: ",
+        trust_callback_hint: "Confirm folder trust in the CLI; herdr won't answer that dialog. Or turn on \"official callback\" on the Accounts page to get usage",
+        sign_in_callback_hint: "The official CLI needs a sign-in; or turn on \"official callback\" on the Accounts page to get usage",
     },
     sidebar: SidebarTexts {
         spaces: " spaces",

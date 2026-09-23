@@ -624,7 +624,8 @@ pub(super) fn build_card<'a>(
         .as_deref()
         .filter(|message| !message.is_empty())
     {
-        lines.push(Line::Note(Cow::Borrowed(message)));
+        // 服务端按它自己的语言写说明；认得的换成界面语言（文档终审 D2）。
+        lines.push(Line::Note(crate::i18n::localize_usage_notice(message)));
     }
     if let Some(note) = refresh_note(refresh, now_ms) {
         lines.push(Line::Note(Cow::Owned(note)));

@@ -566,6 +566,144 @@ pub struct MonitorTexts {
     pub no_accounts: &'static str,
 }
 
+/// 服务端写进账号用量快照 `message` 的固定说明（文档终审 D2）。服务端按自己的语言
+/// 生成（`texts()`，与 toast、通知同一口径，随 config.toml 的 `language` 同步）；客户端
+/// 显示前经 [`localize_usage_notice`] 对照各语言的原文，认得的换成界面语言——远端机器
+/// 或 `HERDR_LANG` 不同的 server 发来的说明也跟着界面语言走；认不出的原样显示。
+pub struct UsageNoticeTexts {
+    pub signed_in: &'static str,
+    /// `claude auth status` 的输出解析不了时的登录态。
+    pub login_unknown: &'static str,
+    /// 官方回调已接入、等待第一次回调。
+    pub callback_on_fmt: &'static str, // args: login
+    /// 官方回调未接入：指引写账号页上「官方回调」开关的真实名字。
+    pub callback_off_fmt: &'static str, // args: login
+    /// 读不出官方回调的接入态（settings.json 无法解析等）。
+    pub callback_unknown_fmt: &'static str, // args: login
+    /// 交互探测的失败原因接在等待说明之后时的分隔语。
+    pub interactive_failure_sep: &'static str,
+    /// 交互探测停在目录信任对话、且没有稳定探测目录时的提示。
+    pub trust_callback_hint: &'static str,
+    /// 交互探测停在登录对话时的提示。
+    pub sign_in_callback_hint: &'static str,
+}
+
+/// 说明表里的一条说明：固定文案按下标，claude 的等待说明按登录态与回调接入态。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum UsageNotice {
+    Fixed(usize),
+    ClaudeWaiting {
+        login_known: bool,
+        callback: Option<bool>,
+    },
+}
+
+const CLAUDE_WAITING_VARIANTS: [(bool, Option<bool>); 6] = [
+    (true, Some(true)),
+    (true, Some(false)),
+    (true, None),
+    (false, Some(true)),
+    (false, Some(false)),
+    (false, None),
+];
+
+impl UsageNoticeTexts {
+    /// claude「已登录（或登录态未知）、等待官方回调」的占位说明。
+    pub fn claude_waiting(&self, login_known: bool, callback: Option<bool>) -> String {
+        let login = if login_known {
+            self.signed_in
+        } else {
+            self.login_unknown
+        };
+        let template = match callback {
+            Some(true) => self.callback_on_fmt,
+            Some(false) => self.callback_off_fmt,
+            None => self.callback_unknown_fmt,
+        };
+        fill(template, &[("login", login)])
+    }
+
+    /// 没有参数的固定说明，按下标与各语言对齐。
+    fn fixed(&self) -> [&'static str; 2] {
+        [self.trust_callback_hint, self.sign_in_callback_hint]
+    }
+
+    fn render(&self, notice: UsageNotice) -> std::borrow::Cow<'static, str> {
+        match notice {
+            UsageNotice::Fixed(index) => {
+                std::borrow::Cow::Borrowed(self.fixed().get(index).copied().unwrap_or_default())
+            }
+            UsageNotice::ClaudeWaiting {
+                login_known,
+                callback,
+            } => std::borrow::Cow::Owned(self.claude_waiting(login_known, callback)),
+        }
+    }
+}
+
+/// 各语言下每条说明的原文（进程内算一次）。
+fn usage_notice_catalog() -> &'static [(Lang, UsageNotice, String)] {
+    static CATALOG: std::sync::OnceLock<Vec<(Lang, UsageNotice, String)>> =
+        std::sync::OnceLock::new();
+    CATALOG.get_or_init(|| {
+        let mut entries = Vec::new();
+        for lang in [Lang::En, Lang::ZhCn] {
+            let texts = &texts_for(lang).usage_notice;
+            for (index, text) in texts.fixed().iter().enumerate() {
+                entries.push((lang, UsageNotice::Fixed(index), (*text).to_owned()));
+            }
+            for (login_known, callback) in CLAUDE_WAITING_VARIANTS {
+                entries.push((
+                    lang,
+                    UsageNotice::ClaudeWaiting {
+                        login_known,
+                        callback,
+                    },
+                    texts.claude_waiting(login_known, callback),
+                ));
+            }
+        }
+        entries
+    })
+}
+
+/// 把服务端生成的账号用量说明换成当前界面语言：整条认得的直接换；等待说明后面拼了
+/// 交互探测失败原因的，两段各自换（失败原因认不出就原样保留）；认不出的原样返回。
+pub fn localize_usage_notice(message: &str) -> std::borrow::Cow<'_, str> {
+    let target = &texts().usage_notice;
+    let current = lang();
+    let catalog = usage_notice_catalog();
+    if let Some((lang, notice, _)) = catalog.iter().find(|(_, _, text)| text == message) {
+        return if *lang == current {
+            std::borrow::Cow::Borrowed(message)
+        } else {
+            target.render(*notice)
+        };
+    }
+    for (lang, notice, text) in catalog {
+        if !matches!(notice, UsageNotice::ClaudeWaiting { .. }) {
+            continue;
+        }
+        let separator = texts_for(*lang).usage_notice.interactive_failure_sep;
+        let Some(failure) = message
+            .strip_prefix(text.as_str())
+            .and_then(|rest| rest.strip_prefix(separator))
+        else {
+            continue;
+        };
+        if *lang == current {
+            return std::borrow::Cow::Borrowed(message);
+        }
+        return std::borrow::Cow::Owned(format!(
+            "{}{}{}",
+            target.render(*notice),
+            target.interactive_failure_sep,
+            localize_usage_notice(failure)
+        ));
+    }
+    std::borrow::Cow::Borrowed(message)
+}
+
 pub struct SidebarTexts {
     pub spaces: &'static str,
     pub agents: &'static str,
@@ -2024,6 +2162,7 @@ pub struct Texts {
     pub worktree: WorktreeTexts,
     pub settings: SettingsTexts,
     pub monitor: MonitorTexts,
+    pub usage_notice: UsageNoticeTexts,
     pub sidebar: SidebarTexts,
     pub status: StatusTexts,
     pub mode_bar: ModeBarTexts,
@@ -2093,6 +2232,103 @@ pub fn texts_for(lang: Lang) -> &'static Texts {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 文档终审 D2：claude 等待说明与交互探测提示的指引，写账号页上「官方回调」开关在
+    /// 该语言下的真实名字，不再指向「监控 → 设置」；英文表里不留中文。
+    #[test]
+    fn usage_notices_point_at_the_accounts_page_callback_toggle() {
+        for lang in [Lang::En, Lang::ZhCn] {
+            let texts = texts_for(lang);
+            let notices = &texts.usage_notice;
+            let mut guided: Vec<String> = [(true, Some(false)), (false, Some(false)), (true, None)]
+                .into_iter()
+                .map(|(login_known, callback)| notices.claude_waiting(login_known, callback))
+                .collect();
+            guided.push(notices.trust_callback_hint.to_owned());
+            guided.push(notices.sign_in_callback_hint.to_owned());
+            for notice in &guided {
+                assert!(
+                    notice.contains(texts.monitor.callback_toggle),
+                    "{lang:?}: {notice}"
+                );
+                assert!(
+                    notice.contains(texts.monitor.tab_accounts),
+                    "{lang:?}: {notice}"
+                );
+                assert!(!notice.contains("监控 → 设置"), "{lang:?}: {notice}");
+            }
+        }
+        let en = &texts_for(Lang::En).usage_notice;
+        for (login_known, callback) in CLAUDE_WAITING_VARIANTS {
+            let notice = en.claude_waiting(login_known, callback);
+            assert!(notice.is_ascii(), "{notice}");
+        }
+        assert!(en.trust_callback_hint.is_ascii() && en.sign_in_callback_hint.is_ascii());
+        assert!(en.interactive_failure_sep.is_ascii());
+    }
+
+    /// 服务端按它自己的语言写说明，客户端按界面语言显示：整条认得的直接换；等待说明后
+    /// 拼了交互探测失败原因的两段各自换，原因认不出就原样保留；认不出的整条原样，且与
+    /// 界面同语言时不重新分配。
+    #[test]
+    fn usage_notices_follow_the_client_language_whatever_the_server_wrote() {
+        for server in [Lang::En, Lang::ZhCn] {
+            for ui in [Lang::En, Lang::ZhCn] {
+                let from = &texts_for(server).usage_notice;
+                let to = &texts_for(ui).usage_notice;
+                let _guard = lang_guard(ui);
+                for (login_known, callback) in CLAUDE_WAITING_VARIANTS {
+                    let waiting = from.claude_waiting(login_known, callback);
+                    let expected = to.claude_waiting(login_known, callback);
+                    assert_eq!(
+                        localize_usage_notice(&waiting),
+                        expected,
+                        "{server:?} → {ui:?}"
+                    );
+
+                    let with_hint = format!(
+                        "{waiting}{}{}",
+                        from.interactive_failure_sep, from.trust_callback_hint
+                    );
+                    assert_eq!(
+                        localize_usage_notice(&with_hint),
+                        format!(
+                            "{expected}{}{}",
+                            to.interactive_failure_sep, to.trust_callback_hint
+                        ),
+                        "{server:?} → {ui:?}"
+                    );
+                    let with_detail = format!(
+                        "{waiting}{}probe dir /x needs trust",
+                        from.interactive_failure_sep
+                    );
+                    assert_eq!(
+                        localize_usage_notice(&with_detail),
+                        format!(
+                            "{expected}{}probe dir /x needs trust",
+                            to.interactive_failure_sep
+                        ),
+                        "{server:?} → {ui:?}"
+                    );
+                }
+                assert_eq!(
+                    localize_usage_notice(from.sign_in_callback_hint),
+                    to.sign_in_callback_hint
+                );
+            }
+        }
+        let _guard = lang_guard(Lang::En);
+        let english = texts_for(Lang::En)
+            .usage_notice
+            .claude_waiting(true, Some(false));
+        assert!(matches!(
+            localize_usage_notice(&english),
+            std::borrow::Cow::Borrowed(_)
+        ));
+        for unknown in ["HTTP 429；retry_after=60", "", "Signed in"] {
+            assert_eq!(localize_usage_notice(unknown), unknown);
+        }
+    }
 
     #[test]
     fn lang_deserialize_falls_back_to_default_on_unknown_value() {

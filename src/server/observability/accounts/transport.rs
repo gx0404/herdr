@@ -1277,7 +1277,10 @@ pub(super) fn blocker_error(
                     dir.display(),
                     provider.command
                 ),
-                None if statusline => "需在 CLI 中确认目录信任；herdr 不会代为应答。建议在 监控 → 设置 启用官方 statusline 上报获取用量".into(),
+                None if statusline => crate::i18n::texts()
+                    .usage_notice
+                    .trust_callback_hint
+                    .into(),
                 None => "需在 CLI 中确认目录信任；herdr 不会代为应答，请先在正常会话完成一次确认".into(),
             },
             trust_required: true,
@@ -1285,7 +1288,10 @@ pub(super) fn blocker_error(
         ProbeBlocker::SignIn => InteractiveError {
             status: ObservationStatus::NotAuthenticated,
             message: if statusline {
-                "官方 CLI 需要登录；也可在 监控 → 设置 启用官方 statusline 上报获取用量".into()
+                crate::i18n::texts()
+                    .usage_notice
+                    .sign_in_callback_hint
+                    .into()
             } else {
                 "官方 CLI 需要登录，请先在正常会话完成登录".into()
             },
@@ -2812,11 +2818,17 @@ Options:
         );
         assert!(error.trust_required);
         assert!(error.message.contains("需在 CLI 中确认目录信任"));
-        assert!(error.message.contains("statusline"), "claude 给回调指引");
+        // 文档终审 D2：指引写账号页上「官方回调」开关的名字，不再指向「监控 → 设置」。
+        assert!(
+            error.message.contains("在账号页打开「官方回调」"),
+            "claude 给回调指引：{}",
+            error.message
+        );
+        assert!(!error.message.contains("监控 → 设置"));
         assert!(
             !blocker_error(kimi, trust, None)
                 .message
-                .contains("statusline"),
+                .contains("官方回调"),
             "没有 statusline 回调的厂商不给这条指引"
         );
         // 有稳定探测目录时给出可执行的确切路径：用户在自己的 CLI 里确认一次即可复用。
@@ -2838,6 +2850,11 @@ Options:
         let error = blocker_error(claude(), sign_in, None);
         assert_eq!(error.status, ObservationStatus::NotAuthenticated);
         assert!(!error.trust_required);
+        assert!(
+            error.message.contains("在账号页打开「官方回调」"),
+            "{}",
+            error.message
+        );
 
         // 空屏：没有阻塞对话，只能等到截止时间，归 transient。
         assert_eq!(parse::interactive_blocker(""), None);
