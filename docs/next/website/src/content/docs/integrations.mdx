@@ -90,6 +90,8 @@ Herdr writes the bundled extension to:
 
 If `PI_CODING_AGENT_DIR` is set, Herdr writes to `$PI_CODING_AGENT_DIR/extensions/herdr-agent-state.ts` instead. Herdr creates the extensions directory when the Pi agent directory already exists. Uninstall removes only that extension file.
 
+From integration version `10`, the extension also reports two things from interactive (TUI) sessions: the session's usage, shown on the accounts page (see [Monitoring](/docs/monitoring/)), and an activity tree for the agent activity window. Pi has no built-in sub-agents, todos, or background jobs; extensions provide them. Every call to a tool that is not one of Pi's built-in tools becomes an activity item, with the tool's streamed output as its content, and the official `subagent` extension adds one child item per delegated agent. Pi keeps none of this on disk, so the extension sends the whole tree to Herdr. Reinstall the Pi integration after upgrading to get them.
+
 ## Claude Code
 
 Install the Claude Code hook:
@@ -104,7 +106,7 @@ Claude integration v10 matches only the documented `SessionStart` sources: `star
 
 Claude integration v11 also subscribes to `SubagentStart` and `SubagentStop` (matcher `*`) and to `TaskCreated` and `TaskCompleted` on macOS and Linux. These hooks only tell the local Herdr socket that Claude Code's sub-agents or tasks changed; they do not report agent state. They are not installed on Windows. Reinstall the Claude integration after upgrading to add them.
 
-Herdr builds Claude Code's activity tree from Claude Code's own session files. A sub-agent that Claude Code runs in the background shows as done or failed once Claude Code records its completion notice for the agent that launched it; a sub-agent that was stopped shows as failed, with `stopped` at the start of its summary, and a finished sub-agent that is resumed counts as running again. A sub-agent without such a notice counts as running while its transcript changed in the last two minutes and as unknown after that. In a very long session Herdr only checks the most recent part of the main transcript for these notices, so a sub-agent from much earlier may show as unknown.
+Herdr builds Claude Code's activity tree from Claude Code's own session files. A sub-agent that Claude Code runs in the background shows as done or failed once Claude Code records its completion notice for the agent that launched it; a sub-agent that was stopped shows as failed, with `stopped` at the start of its summary, and a finished sub-agent that is resumed counts as running again. Sub-agents that a Claude Code workflow runs are grouped under the workflow and its phase and follow the workflow's journal instead: a recorded result shows as done and a recorded failure as failed, while a sub-agent that has only started counts as running until its transcript has not changed for 30 minutes and as unknown after that. Once the workflow itself has finished, its sub-agents that are still running or unknown take the workflow's final status. Any other sub-agent without such a record counts as running while its transcript changed in the last two minutes and as unknown after that. In a very long session Herdr only checks the most recent part of the main transcript for completion notices, so a background sub-agent from much earlier may show as unknown.
 
 In the agent activity window, a Claude Code sub-agent's output shows each tool call with its main argument, such as a Bash command, a file path, or a search query, and each tool result with the first five lines of its output, followed by a count of the remaining lines. Failed tool results are marked `[tool error]`.
 
@@ -166,6 +168,8 @@ With OpenCode V1, the server plugin reports `working` only while OpenCode itself
 
 The plugin reports lifecycle state and session identity while OpenCode runs inside a Herdr pane. After OpenCode emits a session-bearing event, Herdr can use the reported session id to resume the pane with `opencode --session <id>`. Native screen manifest detection remains available when the plugin is not installed.
 
+From integration version `13` the plugin also tells Herdr when a session or its todos change, sub-agent sessions included. Those notices carry no session content: Herdr reads the activity tree itself, read-only through `opencode db`, from the sub-agent sessions the session started (each with its messages and tool calls as content) and the session's todos.
+
 ## Retired integrations
 
 This fork ships official integrations for Pi, Claude Code, Codex, Kimi Code CLI, and OpenCode only. Every other built-in integration has been retired, together with its bundled detection manifest:
@@ -176,7 +180,7 @@ This fork ships official integrations for Pi, Claude Code, Codex, Kimi Code CLI,
 - The usage status line callback is the one exception. An earlier build could wrap the status line in Antigravity CLI's `~/.gemini/antigravity-cli/settings.json` (or the account's `profile_dir`) to report usage. Herdr still recognizes that wrapper and only removes it: calling `account.usage.integration` with `enabled: false` for an account configured with `agent = "antigravity"` restores the original status line command, while `enabled: true` is rejected.
 - A retired agent running in a pane is an ordinary program: it is not detected automatically, and config keys that named it (such as `[ui.sound.agents]` overrides) are ignored.
 
-Any agent, retired or not, can still report state through the generic interface described in [Integrate your own agent](#integrate-your-own-agent). ZCode is planned to be supported as an external agent source rather than as a built-in integration.
+Any agent, retired or not, can still report state through the generic interface described in [Integrate your own agent](#integrate-your-own-agent). ZCode is supported as an external agent source rather than as a built-in integration: it is a desktop app that never runs in a pane, so Herdr lists its recent sessions under the agents panel's External group (see [Agent](/docs/concepts/#agent)) and reads its local token usage (see [Monitoring](/docs/monitoring/)), without installing anything into ZCode.
 
 ## Custom status labels
 

@@ -92,6 +92,8 @@ Herdr 把内置扩展写入:
 
 如果设置了 `PI_CODING_AGENT_DIR`,Herdr 会改为写入 `$PI_CODING_AGENT_DIR/extensions/herdr-agent-state.ts`。如果 Pi agent 目录已经存在,Herdr 会创建 extensions 目录。卸载只删除那个扩展文件。
 
+从集成版本 `10` 起,扩展还会在交互式(TUI)会话里上报两样东西:会话用量,显示在账号页(见[监控](/zh-cn/docs/monitoring/));以及供 Agent 活动窗口使用的活动树。Pi 本身没有内置的子 agent、待办或后台任务,这些都由扩展提供。每次调用不属于 Pi 内置工具的工具都会成为一个活动项,内容是该工具的流式输出;官方 `subagent` 扩展还会为每个被委派的 agent 加一个子项。Pi 不在磁盘上保留这些记录,所以扩展把整棵树发给 Herdr。升级后请重新安装 Pi 集成以启用它们。
+
 ## Claude Code
 
 安装 Claude Code 钩子:
@@ -106,7 +108,7 @@ Claude 集成 v10 仅匹配文档列出的 `SessionStart` 来源: `startup`、`r
 
 Claude 集成 v11 在 macOS 和 Linux 上还会订阅 `SubagentStart`、`SubagentStop`(matcher 为 `*`)以及 `TaskCreated`、`TaskCompleted`。这些钩子只向本地 Herdr socket 通知 Claude Code 的子 agent 或任务发生了变化,不上报 agent 状态。Windows 上不安装这些钩子。升级后请重新安装 Claude 集成以添加它们。
 
-Herdr 从 Claude Code 自己的会话文件构建它的活动树。Claude Code 在后台运行的子 agent,在 Claude Code 为派生它的 agent 记下结束通知后显示为完成或失败;被停掉的子 agent 显示为失败,摘要开头注明 `stopped`;已结束的子 agent 被重新唤起后重新算作运行中。没有结束通知的子 agent,转录在最近两分钟内有变化时算运行中,之后显示为未知。会话很长时 Herdr 只在主转录较新的部分里查找这些通知,更早的子 agent 可能显示为未知。
+Herdr 从 Claude Code 自己的会话文件构建它的活动树。Claude Code 在后台运行的子 agent,在 Claude Code 为派生它的 agent 记下结束通知后显示为完成或失败;被停掉的子 agent 显示为失败,摘要开头注明 `stopped`;已结束的子 agent 被重新唤起后重新算作运行中。Claude Code 的 workflow 运行的子 agent 归在该 workflow 及其阶段之下,状态改看 workflow 的 journal:记有结果的显示为完成,记有失败的显示为失败;只记了开始的算运行中,直到其转录 30 分钟没有变化才显示为未知。workflow 本身结束后,其下仍在运行或未知的子 agent 随 workflow 的终态落定。其余没有这类记录的子 agent,转录在最近两分钟内有变化时算运行中,之后显示为未知。会话很长时 Herdr 只在主转录较新的部分里查找结束通知,更早的后台子 agent 可能显示为未知。
 
 在 Agent 活动窗口里,Claude Code 子 agent 的输出为每个工具调用附上主要参数,例如 Bash 命令、文件路径或搜索词;每个工具结果显示输出的前五行,其余只标出剩余行数。失败的工具结果标为 `[tool error]`。
 
@@ -168,6 +170,8 @@ V2 生命周期上报在窗格本地的 TUI 中运行。即使多个窗格共享
 
 该插件在 OpenCode 运行于 Herdr 窗格内时上报生命周期状态和会话身份。在 OpenCode 发出携带会话信息的事件后,Herdr 可以用上报的会话 id 通过 `opencode --session <id>` 恢复该窗格。插件未安装时,屏幕清单检测仍然可用。
 
+从集成版本 `13` 起,插件还会在会话或其待办变化时通知 Herdr,子 agent 会话也一样。这些通知不携带会话内容:活动树由 Herdr 自己经 `opencode db` 只读查得,来自该会话派生的子 agent 会话(各自的消息与工具调用作为内容)以及该会话的待办。
+
 ## 已退役的集成
 
 本 fork 只提供 Pi、Claude Code、Codex、Kimi Code CLI 和 OpenCode 五家官方集成。其余内置集成连同各自的捆绑检测清单都已退役:
@@ -178,7 +182,7 @@ V2 生命周期上报在窗格本地的 TUI 中运行。即使多个窗格共享
 - 用量 statusline 回调是唯一的例外。早先版本可能为上报用量包装过 Antigravity CLI 的 `~/.gemini/antigravity-cli/settings.json`(或该账号 `profile_dir` 下的同名文件)里的状态栏命令。Herdr 仍能识别这层包装,但只删不装:对配置了 `agent = "antigravity"` 的账号以 `enabled: false` 调用 `account.usage.integration` 会还原原来的状态栏命令,`enabled: true` 则被拒绝。
 - 在窗格里运行的已退役智能体只是普通程序:不会被自动检测,指向它的配置键(例如 `[ui.sound.agents]` 覆盖项)会被忽略。
 
-无论是否退役,任何智能体仍可通过[集成你自己的智能体](#集成你自己的智能体)中的通用接口上报状态。ZCode 计划以外部智能体来源的形式支持,而不是内置集成。
+无论是否退役,任何智能体仍可通过[集成你自己的智能体](#集成你自己的智能体)中的通用接口上报状态。ZCode 以外部智能体来源的形式支持,而不是内置集成:它是从不在窗格里运行的桌面应用,Herdr 把它最近的会话列在 Agents 面板的「外部」分组下(见[智能体](/zh-cn/docs/concepts/#智能体)),并读取它的本地 token 用量(见[监控](/zh-cn/docs/monitoring/)),不会往 ZCode 里安装任何东西。
 
 ## 自定义状态标签
 
