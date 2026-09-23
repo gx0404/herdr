@@ -901,7 +901,8 @@ Read a tree or one node's content with `agent.activity.read`:
 Give exactly one of `pane_id` or `external_id`, otherwise the call fails with
 `invalid_params`. Without `node_id` the response carries the full tree in
 `nodes` (this read also refreshes the stored tree, so the next snapshot matches
-it); with `node_id` it carries an empty `nodes` list and a `content` chunk:
+it; a background refresh of that pane still in progress when the read returns
+is discarded instead of overwriting it, and another refresh follows); with `node_id` it carries an empty `nodes` list and a `content` chunk:
 `node_id`, `format` (`text`, `markdown`, `jsonl`, `unknown`), `text`, `eof`,
 `truncated`, and `next_cursor` to pass back as `cursor` for the next page. `cursor` is opaque to the caller. `max_bytes`
 defaults to 65536 and is capped at 524288. `follow: true` keeps the server

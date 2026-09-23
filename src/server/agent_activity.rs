@@ -17,7 +17,7 @@ mod opencode;
 mod pi;
 mod zcode;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
@@ -318,6 +318,9 @@ struct InFlight {
     started: JobStarted,
     /// 主线程首次观察到任务已开始的时刻（最多迟一轮遍历）；`None` = 还在排队。
     started_at: Option<Instant>,
+    /// 它在途期间，交互式读整棵树的结果已先落库：它开始得更早、可能读到更旧的树，
+    /// 结果回来时作废（名额照常放行），由调度补刷一次。
+    superseded: bool,
 }
 
 impl InFlight {
@@ -328,6 +331,7 @@ impl InFlight {
             Self {
                 started: JobStarted::clone(&started),
                 started_at: None,
+                superseded: false,
             },
             started,
         )
@@ -437,6 +441,8 @@ pub(crate) struct Scheduler {
     next_pass: Option<Instant>,
     external_last_started: Option<Instant>,
     external_in_flight: Option<InFlight>,
+    /// 外部轮询在途期间，交互读取已先落库的来源：轮询给这些来源的结果作废。
+    external_superseded: HashSet<String>,
 }
 
 impl Scheduler {
@@ -527,14 +533,42 @@ impl Scheduler {
         self.panes.retain(|_, entry| entry.seen_pass == pass);
     }
 
-    /// 该 pane 的后台任务已结束（成功或失败）。期间到达过提示则让下一轮立即遍历。
+    /// 该 pane 的后台任务已结束（成功或失败）。期间到达过提示则让下一轮立即遍历；
+    /// 结果因读整棵树作废的（[`Self::supersede`]）按提示补刷一次，拿到比那次读取
+    /// 更新的树。
     pub(crate) fn finish(&mut self, pane_id: PaneId) {
         if let Some(entry) = self.panes.get_mut(&pane_id) {
-            entry.in_flight = None;
+            if entry
+                .in_flight
+                .take()
+                .is_some_and(|in_flight| in_flight.superseded)
+            {
+                entry.hinted = true;
+            }
             if entry.hinted {
                 self.next_pass = None;
             }
         }
+    }
+
+    /// 交互式读整棵树的结果已落库：此刻还在途的调度发现开始得更早，结果回来时作废。
+    /// 在途名额不动——那次发现还在跑，同一 pane 不能再投第二个。
+    pub(crate) fn supersede(&mut self, pane_id: PaneId) {
+        if let Some(in_flight) = self
+            .panes
+            .get_mut(&pane_id)
+            .and_then(|entry| entry.in_flight.as_mut())
+        {
+            in_flight.superseded = true;
+        }
+    }
+
+    /// 该 pane 在途的调度发现是否已被读整棵树取代。
+    pub(crate) fn superseded(&self, pane_id: PaneId) -> bool {
+        self.panes
+            .get(&pane_id)
+            .and_then(|entry| entry.in_flight.as_ref())
+            .is_some_and(|in_flight| in_flight.superseded)
     }
 
     #[cfg(test)]
@@ -563,11 +597,27 @@ impl Scheduler {
         self.external_last_started = Some(now);
         let (in_flight, started) = InFlight::start();
         self.external_in_flight = Some(in_flight);
+        self.external_superseded.clear();
         Some(started)
     }
 
+    /// 外部轮询的结果已回主线程（每个来源各回一次，第一次就放行名额）。作废标记
+    /// 留到下一次轮询开始（[`Self::external_due`]）才清，同一轮后回来的来源照样
+    /// 按它判定；作废的来源不补刷，外部来源按自己的轮询间隔刷新。
     pub(crate) fn finish_external(&mut self) {
         self.external_in_flight = None;
+    }
+
+    /// 交互读取（`agent.external.list` 或外部条目读整棵树）已先落库该来源：外部
+    /// 轮询在途时，它给这个来源的结果回来时作废；名额不动。
+    pub(crate) fn supersede_external(&mut self, source: &str) {
+        if self.external_in_flight.is_some() {
+            self.external_superseded.insert(source.to_owned());
+        }
+    }
+
+    pub(crate) fn external_superseded(&self, source: &str) -> bool {
+        self.external_superseded.contains(source)
     }
 }
 
@@ -834,9 +884,9 @@ impl Worker {
                                 agent.source = source.id().to_owned();
                                 agent
                             }));
-                            if !self.send_event(AppEvent::ExternalAgentsRefreshed {
+                            if !self.send_event(AppEvent::ExternalAgentsRead {
                                 source: source.id().to_owned(),
-                                result: Ok(found),
+                                agents: found,
                             }) {
                                 return false;
                             }
@@ -950,10 +1000,11 @@ impl Worker {
         };
         let mut alive = true;
         if let (ReadTarget::Pane { pane_id, .. }, Ok((nodes, None))) = (&target, &result) {
-            // 读整棵树顺带刷新落库，让快照与本次应答一致。
-            alive = self.send_event(AppEvent::AgentActivityRefreshed {
+            // 读整棵树顺带刷新落库，让快照与本次应答一致。走读取专用的事件：它不放
+            // 调度发现的在途名额，且让还在途的那次更早的发现结果作废。
+            alive = self.send_event(AppEvent::AgentActivityRead {
                 pane_id: *pane_id,
-                result: Ok(nodes.clone()),
+                nodes: nodes.clone(),
             });
         }
         reply.send(
@@ -991,9 +1042,9 @@ impl Worker {
             .iter()
             .find(|agent| agent.external_id == external_id)
             .map(|agent| agent.activity.clone());
-        let alive = self.send_event(AppEvent::ExternalAgentsRefreshed {
+        let alive = self.send_event(AppEvent::ExternalAgentsRead {
             source: source.id().to_owned(),
-            result: Ok(agents),
+            agents,
         });
         let not_listed = || {
             (
@@ -1166,8 +1217,38 @@ impl Service {
         self.projection_dirty |= projection_changed;
     }
 
+    /// 该 pane 在途的调度发现是否已被读整棵树取代：主循环据此丢弃它的结果。
+    pub(crate) fn discovery_superseded(&self, pane_id: PaneId) -> bool {
+        self.scheduler.superseded(pane_id)
+    }
+
+    /// 读整棵树的结果已落库（`projection_changed` 为投影是否变化）：不放调度发现的
+    /// 在途名额，此刻还在途的那次发现作废。
+    pub(crate) fn pane_read(&mut self, pane_id: PaneId, projection_changed: bool) {
+        self.scheduler.supersede(pane_id);
+        self.projection_dirty |= projection_changed;
+    }
+
+    /// 外部轮询在途期间，某来源已被交互读取重新列出并落库：主循环据此丢弃轮询给
+    /// 该来源的结果。
+    pub(crate) fn external_superseded(&self, source: &str) -> bool {
+        self.scheduler.external_superseded(source)
+    }
+
+    /// 交互读取列出的一个外部来源已落库：不放外部轮询的在途名额。
+    pub(crate) fn external_read(&mut self, source: &str, projection_changed: bool) {
+        self.scheduler.supersede_external(source);
+        self.projection_dirty |= projection_changed;
+    }
+
     pub(crate) fn projection_dirty(&self) -> bool {
         self.projection_dirty
+    }
+
+    /// 测试用：调度器是否认为该 pane 还有一次后台发现在途。
+    #[cfg(test)]
+    pub(crate) fn discovery_in_flight(&self, pane_id: PaneId) -> bool {
+        self.scheduler.in_flight(pane_id)
     }
 
     /// 投影已同步给客户端（快照重建路径跑过）。
@@ -1870,6 +1951,82 @@ mod tests {
         );
     }
 
+    /// D14：读整棵树的结果先落库时，在途的调度发现被作废，但名额不动——同一 pane
+    /// 不会再投第二个发现；它的结果回来后放行名额，并按提示补刷一次，拿到比那次
+    /// 读取更新的树。没有在途发现时读树不留任何标记。
+    #[test]
+    fn scheduler_keeps_the_slot_of_a_discovery_superseded_by_a_tree_read() {
+        let t0 = Instant::now();
+        let mut scheduler = Scheduler::default();
+        let agent = pane(1);
+        scheduler.supersede(agent);
+        assert!(!scheduler.superseded(agent), "还没有调度记录时不留标记");
+
+        assert_eq!(pass(&mut scheduler, t0, &[(agent, false)]), [agent]);
+        scheduler.supersede(agent);
+        assert!(scheduler.superseded(agent));
+        assert!(scheduler.in_flight(agent), "读树不放在途名额");
+        // 到期也不再投：Working 轮询到点、提示也在，但那次发现还在跑。
+        scheduler.note_hint(agent);
+        assert!(pass(&mut scheduler, t0 + secs(6.0), &[(agent, true)]).is_empty());
+
+        // 结果回来（被主循环丢弃）：放行名额，作废标记随之清掉，下一轮立即补刷。
+        scheduler.finish(agent);
+        assert!(!scheduler.in_flight(agent));
+        assert!(!scheduler.superseded(agent));
+        assert!(scheduler.pass_due(t0 + secs(6.1), false));
+        assert_eq!(
+            pass(&mut scheduler, t0 + secs(6.1), &[(agent, false)]),
+            [agent]
+        );
+
+        // 补刷沿用提示的口径：隔 HINT_SETTLE_DELAY 再收尾补刷一次，然后停下。
+        scheduler.finish(agent);
+        assert_eq!(
+            pass(
+                &mut scheduler,
+                t0 + secs(6.1) + HINT_SETTLE_DELAY,
+                &[(agent, false)]
+            ),
+            [agent]
+        );
+        scheduler.finish(agent);
+        assert!(pass(&mut scheduler, t0 + secs(14.0), &[(agent, false)]).is_empty());
+    }
+
+    /// 外部来源同理：交互读取先落库的来源，轮询在途时它给该来源的结果作废；名额不动，
+    /// 下一次轮询开始时清掉标记。轮询不在途时不留标记。
+    #[test]
+    fn scheduler_drops_an_external_poll_result_superseded_by_an_interactive_read() {
+        let t0 = Instant::now();
+        let mut scheduler = Scheduler::default();
+        scheduler.supersede_external("zcode");
+        assert!(
+            !scheduler.external_superseded("zcode"),
+            "轮询不在途时不留标记"
+        );
+
+        let started = scheduler.external_due(t0).expect("首次轮询到期");
+        scheduler.supersede_external("zcode");
+        assert!(scheduler.external_superseded("zcode"));
+        assert!(!scheduler.external_superseded("other"));
+        take_job(&started);
+        assert!(
+            scheduler
+                .external_due(t0 + EXTERNAL_POLL_INTERVAL)
+                .is_none(),
+            "读取不放外部轮询的在途名额"
+        );
+
+        // 轮询结果回来：放行名额；作废标记留到下一次轮询开始才清。
+        scheduler.finish_external();
+        assert!(scheduler.external_superseded("zcode"));
+        assert!(scheduler
+            .external_due(t0 + EXTERNAL_POLL_INTERVAL)
+            .is_some());
+        assert!(!scheduler.external_superseded("zcode"));
+    }
+
     /// 发现线程串行，一次冷缓存发现可达 10 s 量级：15 个 Working agent 排一轮就能
     /// 远超 [`IN_FLIGHT_TIMEOUT`]。排队中的任务不得被判成超时，否则会重复投递、
     /// 把队列压满，用户发起的读取跟着拿 `server_busy`。
@@ -2502,10 +2659,10 @@ mod tests {
         assert_eq!(tree["id"], "req-1");
         assert_eq!(tree["result"]["nodes"][1]["parent_id"], "a");
         assert!(tree["result"].get("content").is_none());
-        // 读整棵树顺带刷新落库。
+        // 读整棵树顺带刷新落库，走读取专用的事件（不放调度发现的在途名额）。
         assert!(matches!(
             recv_event(&mut received),
-            AppEvent::AgentActivityRefreshed { pane_id: refreshed, result: Ok(nodes) }
+            AppEvent::AgentActivityRead { pane_id: refreshed, nodes }
                 if refreshed == pane_id && nodes.len() == 2
         ));
 
@@ -2668,17 +2825,15 @@ mod tests {
         .expect("参数合法，异步应答")
     }
 
-    /// 外部来源刷新事件里的条目 id（没等到或不是该事件则 panic）。
-    fn external_refresh_ids(received: &mut tokio::sync::mpsc::Receiver<AppEvent>) -> Vec<String> {
+    /// 交互读取（外部条目读树 / 外部列表）落库事件里的条目 id（没等到或不是该事件
+    /// 则 panic）。它走读取专用的事件，不放外部轮询的在途名额。
+    fn external_read_ids(received: &mut tokio::sync::mpsc::Receiver<AppEvent>) -> Vec<String> {
         match recv_event(received) {
-            AppEvent::ExternalAgentsRefreshed {
-                source,
-                result: Ok(agents),
-            } => {
+            AppEvent::ExternalAgentsRead { source, agents } => {
                 assert_eq!(source, "zcode");
                 agents.into_iter().map(|agent| agent.external_id).collect()
             }
-            other => panic!("应为外部来源刷新事件：{other:?}"),
+            other => panic!("应为交互读取的外部来源落库事件：{other:?}"),
         }
     }
 
@@ -2695,7 +2850,7 @@ mod tests {
         assert_eq!(tree["result"]["nodes"][0]["id"], "s-1/a");
         assert_eq!(tree["result"]["nodes"][1]["parent_id"], "s-1/a");
         assert!(tree["result"].get("content").is_none());
-        assert_eq!(external_refresh_ids(&mut received), ["zcode:s-1"]);
+        assert_eq!(external_read_ids(&mut received), ["zcode:s-1"]);
 
         // 节点内容仍走来源的 `read`，会话引用取自 external_id。
         let content = external_read(&mut service, &app, "zcode:s-1", Some("s-1/b"));
@@ -2704,7 +2859,7 @@ mod tests {
         // 列表里没有的会话（已归档、滑出近期窗口）：agent_not_found，列表照样落库。
         let missing = external_read(&mut service, &app, "zcode:s-9", None);
         assert_eq!(missing["error"]["code"], "agent_not_found", "{missing}");
-        assert_eq!(external_refresh_ids(&mut received), ["zcode:s-1"]);
+        assert_eq!(external_read_ids(&mut received), ["zcode:s-1"]);
 
         let list = submit_api(
             &mut service,
@@ -2718,7 +2873,7 @@ mod tests {
         assert_eq!(list["id"], "req-2");
         assert_eq!(list["result"]["type"], "external_agent_list");
         assert_eq!(list["result"]["agents"][0]["source"], "zcode");
-        assert_eq!(external_refresh_ids(&mut received), ["zcode:s-1"]);
+        assert_eq!(external_read_ids(&mut received), ["zcode:s-1"]);
     }
 
     /// S1 回归（真机报告 §4 / §5.1，截屏 zcode-04 / 05 / 09 / 13）：外部条目按
@@ -2759,7 +2914,7 @@ mod tests {
             })
             .unwrap_or_else(|| panic!("根 A 应在外部列表里：{list}"))["activity"]
             .clone();
-        assert!(external_refresh_ids(&mut received).contains(&root_a));
+        assert!(external_read_ids(&mut received).contains(&root_a));
 
         let tree = external_read(&mut service, &app, &root_a, None);
         assert_eq!(tree["result"]["type"], "agent_activity", "{tree}");
@@ -2779,7 +2934,7 @@ mod tests {
             "根 A 的子 agent 与待办都在树里：{ids:?}"
         );
         assert!(
-            external_refresh_ids(&mut received).contains(&root_a),
+            external_read_ids(&mut received).contains(&root_a),
             "读树顺带落库"
         );
 
@@ -2926,7 +3081,7 @@ mod tests {
             None,
         );
         assert_eq!(response["error"]["code"], "agent_not_found", "{response}");
-        assert!(external_refresh_ids(&mut received).is_empty());
+        assert!(external_read_ids(&mut received).is_empty());
     }
 
     #[test]

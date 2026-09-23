@@ -58,8 +58,14 @@ impl App {
             AppEvent::AgentActivityRefreshed { pane_id, result } => {
                 self.apply_agent_activity_refresh(pane_id, result)
             }
+            AppEvent::AgentActivityRead { pane_id, nodes } => {
+                self.apply_agent_activity_refresh(pane_id, Ok(nodes))
+            }
             AppEvent::ExternalAgentsRefreshed { source, result } => {
                 self.apply_external_agents_refresh(&source, result)
+            }
+            AppEvent::ExternalAgentsRead { source, agents } => {
+                self.apply_external_agents_refresh(&source, Ok(agents))
             }
             ev => {
                 self.handle_internal_event(ev);
@@ -196,8 +202,18 @@ impl App {
             return Vec::new();
         }
 
+        if let AppEvent::AgentActivityRead { pane_id, nodes } = ev {
+            self.apply_agent_activity_refresh(pane_id, Ok(nodes));
+            return Vec::new();
+        }
+
         if let AppEvent::ExternalAgentsRefreshed { source, result } = ev {
             self.apply_external_agents_refresh(&source, result);
+            return Vec::new();
+        }
+
+        if let AppEvent::ExternalAgentsRead { source, agents } = ev {
+            self.apply_external_agents_refresh(&source, Ok(agents));
             return Vec::new();
         }
 

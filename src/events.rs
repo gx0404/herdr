@@ -107,18 +107,33 @@ pub enum AppEvent {
         node_id: Option<String>,
         seq: Option<u64>,
     },
-    /// A background refresh finished for a pane's agent. `Err` keeps the
-    /// previously stored tree (the source was unreadable this time) and only
-    /// releases the in-flight slot.
+    /// A scheduled background refresh finished for a pane's agent. `Err`
+    /// keeps the previously stored tree (the source was unreadable this time)
+    /// and only releases the in-flight slot.
     AgentActivityRefreshed {
         pane_id: PaneId,
         result: Result<Vec<crate::api::schema::AgentActivityNode>, String>,
     },
-    /// A background refresh finished for one external source. `Err` keeps the
-    /// previously stored entries of that source.
+    /// An interactive whole-tree read (`agent.activity.read` without a node)
+    /// finished for a pane. The tree is stored like a refresh result, but the
+    /// scheduler's in-flight slot stays with the discovery still running for
+    /// that pane; that discovery started earlier, so its result is dropped.
+    AgentActivityRead {
+        pane_id: PaneId,
+        nodes: Vec<crate::api::schema::AgentActivityNode>,
+    },
+    /// A scheduled background refresh finished for one external source. `Err`
+    /// keeps the previously stored entries of that source.
     ExternalAgentsRefreshed {
         source: String,
         result: Result<Vec<crate::api::schema::ExternalAgentInfo>, String>,
+    },
+    /// An interactive `agent.external.list` or external whole-tree read listed
+    /// one source. Stored like a refresh; the scheduled external poll keeps
+    /// its slot and its older in-flight result for that source is dropped.
+    ExternalAgentsRead {
+        source: String,
+        agents: Vec<crate::api::schema::ExternalAgentInfo>,
     },
     /// Display-only agent metadata was reported for a pane.
     HookMetadataReported {

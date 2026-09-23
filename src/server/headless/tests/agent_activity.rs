@@ -265,6 +265,144 @@ async fn json_api_activity_reads_answer_asynchronously() {
     shutdown_test_runtimes(&mut server);
 }
 
+/// D14 用的来源：第一次 `discover`（调度发现）停在闸门前、放行后回旧树（a 运行中）；
+/// 之后的调用（读整棵树）立即回新树（a 已完成）。
+static GATED_DISCOVER_CALLS: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+static GATED_DISCOVER_OPEN: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+struct GatedTree;
+
+impl crate::server::agent_activity::ActivitySource for GatedTree {
+    fn id(&self) -> &'static str {
+        "claude"
+    }
+
+    fn discover(
+        &self,
+        _cx: &crate::server::agent_activity::SourceContext<'_>,
+    ) -> Result<Vec<AgentActivityNode>, crate::server::agent_activity::SourceError> {
+        use std::sync::atomic::Ordering;
+        if GATED_DISCOVER_CALLS.fetch_add(1, Ordering::SeqCst) > 0 {
+            return Ok(vec![node("a", AgentActivityStatus::Done)]);
+        }
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while !GATED_DISCOVER_OPEN.load(Ordering::SeqCst) {
+            if Instant::now() >= deadline {
+                return Err(crate::server::agent_activity::SourceError::Unavailable);
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        Ok(vec![node("a", AgentActivityStatus::Running)])
+    }
+
+    fn read(
+        &self,
+        _cx: &crate::server::agent_activity::SourceContext<'_>,
+        _node_id: &str,
+        _cursor: Option<&str>,
+        _max_bytes: usize,
+    ) -> Result<
+        crate::server::agent_activity::ContentChunk,
+        crate::server::agent_activity::SourceError,
+    > {
+        Err(crate::server::agent_activity::SourceError::Unsupported)
+    }
+}
+
+fn gated_source_for(
+    agent: &str,
+) -> Option<&'static dyn crate::server::agent_activity::ActivitySource> {
+    (agent == "claude")
+        .then_some(&GatedTree as &'static dyn crate::server::agent_activity::ActivitySource)
+}
+
+fn no_external_sources() -> &'static [&'static dyn crate::server::agent_activity::ActivitySource] {
+    &[]
+}
+
+fn stored_statuses(
+    server: &HeadlessServer,
+    pane_id: crate::layout::PaneId,
+) -> Vec<AgentActivityStatus> {
+    server
+        .app
+        .state
+        .agent_activity
+        .activity(pane_id)
+        .map(|stored| stored.nodes.iter().map(|node| node.status).collect())
+        .unwrap_or_default()
+}
+
+/// D14（文档终审低置信项，经本用例确认）：调度发现 D1 先开始、慢慢跑；其间读整棵树
+/// 拿到更新的树并顺带落库。落库曾走与调度发现同一条事件，主循环据此放掉该 pane 的
+/// 在途名额——D1 明明还在跑，下一轮调度就会给同一 pane 再投一个发现；D1 回来时，它
+/// 更早读到的旧树又把读树落库的新树覆盖掉，快照与这次读取的应答不再一致。
+#[tokio::test]
+async fn a_whole_tree_read_keeps_the_discovery_slot_and_outlives_an_older_discovery() {
+    use std::sync::atomic::Ordering;
+    let (mut server, pane_id) = server_with_agent_pane();
+    server.agent_activity = crate::server::agent_activity::Service::with_sources(
+        server.app.event_tx.clone(),
+        crate::server::agent_activity::Sources {
+            source_for: gated_source_for,
+            external: no_external_sources,
+        },
+        Some(std::env::temp_dir()),
+    );
+    let public = server.app.public_pane_id(0, pane_id).expect("公开 id");
+
+    // 调度发现 D1 开始，停在闸门前。
+    let _ = server.handle_scheduled_tasks_headless(Instant::now(), false);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while GATED_DISCOVER_CALLS.load(Ordering::SeqCst) == 0 {
+        assert!(Instant::now() < deadline, "调度发现没有开始");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert!(server.agent_activity.discovery_in_flight(pane_id));
+
+    // 读整棵树：立即拿到新树，应答之前先经 app 事件通道回主循环落库。
+    let response = api_request(
+        &mut server,
+        api::schema::Method::AgentActivityRead(AgentActivityReadParams {
+            pane_id: Some(public),
+            ..AgentActivityReadParams::default()
+        }),
+    )
+    .recv_timeout(Duration::from_secs(5))
+    .expect("读树应答");
+    assert!(response.contains("\"done\""), "{response}");
+    let read_event = tokio::time::timeout(Duration::from_secs(5), server.app.event_rx.recv())
+        .await
+        .expect("读树落库事件")
+        .expect("通道未关闭");
+    server.handle_internal_event_with_forwarding(read_event);
+    assert_eq!(
+        stored_statuses(&server, pane_id),
+        [AgentActivityStatus::Done]
+    );
+    let slot_kept = server.agent_activity.discovery_in_flight(pane_id);
+
+    // 放行 D1：它更早读到的是旧树。
+    GATED_DISCOVER_OPEN.store(true, Ordering::SeqCst);
+    let discovery_event = tokio::time::timeout(Duration::from_secs(5), server.app.event_rx.recv())
+        .await
+        .expect("调度发现结果")
+        .expect("通道未关闭");
+    server.handle_internal_event_with_forwarding(discovery_event);
+    let final_statuses = stored_statuses(&server, pane_id);
+    assert!(
+        slot_kept && final_statuses == [AgentActivityStatus::Done],
+        "读树后在途名额仍在：{slot_kept}；D1 回来后落库的树：{final_statuses:?}（应仍是读树得到的 done）"
+    );
+    assert!(
+        !server.agent_activity.discovery_in_flight(pane_id),
+        "D1 的结果回来后名额放行"
+    );
+    shutdown_test_runtimes(&mut server);
+}
+
 fn endpoint_responses(
     control_rx: &std::sync::mpsc::Receiver<Vec<u8>>,
     request_id: &str,

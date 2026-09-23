@@ -730,15 +730,31 @@ impl HeadlessServer {
             AppEvent::AgentActivityRefreshed { pane_id, .. } => {
                 // 活动树只进投影：不触发整帧重绘，改由调度器的投影脏标记安排一次
                 // chrome tick——快照未变时只走投影；修订号前进时同 tick 补改戳帧
-                // （见 `dispatch_render_tick` / `projection_restamp.rs`）。
+                // （见 `dispatch_render_tick` / `projection_restamp.rs`）。在途期间
+                // 读整棵树已先落库时，这次更早开始的发现结果作废，由调度补刷。
                 let pane_id = *pane_id;
-                let changed = self.app.handle_internal_event_with_render_impact(ev);
+                let changed = !self.agent_activity.discovery_superseded(pane_id)
+                    && self.app.handle_internal_event_with_render_impact(ev);
                 self.agent_activity.pane_refreshed(pane_id, changed);
                 false
             }
-            AppEvent::ExternalAgentsRefreshed { .. } => {
+            AppEvent::AgentActivityRead { pane_id, .. } => {
+                // 读整棵树的结果同样只进投影，但不放调度发现的在途名额。
+                let pane_id = *pane_id;
                 let changed = self.app.handle_internal_event_with_render_impact(ev);
+                self.agent_activity.pane_read(pane_id, changed);
+                false
+            }
+            AppEvent::ExternalAgentsRefreshed { source, .. } => {
+                let changed = !self.agent_activity.external_superseded(source)
+                    && self.app.handle_internal_event_with_render_impact(ev);
                 self.agent_activity.external_refreshed(changed);
+                false
+            }
+            AppEvent::ExternalAgentsRead { source, .. } => {
+                let source = source.clone();
+                let changed = self.app.handle_internal_event_with_render_impact(ev);
+                self.agent_activity.external_read(&source, changed);
                 false
             }
             AppEvent::TerminalCwdReported { .. } => {

@@ -1656,6 +1656,10 @@ impl AppState {
                 }
                 Vec::new()
             }
+            AppEvent::AgentActivityRead { pane_id, nodes } => {
+                self.apply_agent_activity(pane_id, nodes, Instant::now());
+                Vec::new()
+            }
             AppEvent::ExternalAgentsRefreshed { source, result } => {
                 match result {
                     Ok(agents) => {
@@ -1665,6 +1669,10 @@ impl AppState {
                         tracing::debug!(%source, %error, "external agents refresh failed");
                     }
                 }
+                Vec::new()
+            }
+            AppEvent::ExternalAgentsRead { source, agents } => {
+                self.apply_external_agents(&source, agents, Instant::now());
                 Vec::new()
             }
             AppEvent::HookMetadataReported {
