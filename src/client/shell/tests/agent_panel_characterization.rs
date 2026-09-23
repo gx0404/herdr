@@ -2892,3 +2892,33 @@ fn blocked_rows_keep_a_non_color_cue_in_narrow_panels() {
     assert!(blocked.contains('×'), "符号图标：{blocked:?}");
     assert!(!blocked.contains('!'), "符号图标已按形状区分：{blocked:?}");
 }
+
+/// 冒烟 L8：Agents 树的工作区分组头右键打开与工作区列表同一份工作区菜单（截屏
+/// 23 里毫无反应，工作区列表里同一工作区右键有菜单，截屏 22）。classic 与
+/// workbench 两条路径都走同一个入口。
+#[test]
+fn right_clicking_a_workspace_group_header_opens_the_workspace_menu() {
+    let classic = classic_state(AgentPanelSortConfig::Spaces);
+    let workbench = workbench_state(AgentPanelSortConfig::Spaces);
+    for (path, mut state, (cols, rows)) in [
+        ("classic", classic, (106, 40)),
+        ("workbench", workbench, (133, 32)),
+    ] {
+        state.compose(cols, rows).expect("帧");
+        let header = group_rect(&state, "ws_2");
+        let press = format!("\x1b[<2;{};{}M", header.x + 4, header.y + 1);
+        let outcome = state.handle_input_bytes(press.as_bytes());
+        assert!(outcome.repaint, "{path}：右键分组头要重绘");
+        match &state.overlay {
+            Some(ClientShellOverlay::ContextMenu(menu)) => assert!(
+                matches!(
+                    &menu.target,
+                    ClientContextMenuTarget::Workspace { workspace_id, .. }
+                        if workspace_id == "ws_2"
+                ),
+                "{path}：打开的是 ws_2 的工作区菜单"
+            ),
+            _ => panic!("{path}：右键工作区分组头没有打开菜单"),
+        }
+    }
+}

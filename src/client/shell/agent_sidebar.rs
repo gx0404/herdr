@@ -58,7 +58,14 @@ pub(super) fn launch_order_key(agent: &crate::protocol::ClientShellAgent) -> (bo
 
 /// 工作区分组头的折叠键（`agent-panel:` 命名空间，存 `collapsed_groups`）。
 pub(super) fn agent_group_key(workspace_id: &str) -> String {
-    format!("agent-panel:{workspace_id}")
+    format!("{AGENT_GROUP_PREFIX}{workspace_id}")
+}
+
+const AGENT_GROUP_PREFIX: &str = "agent-panel:";
+
+/// [`agent_group_key`] 的反解：工作区分组头的折叠键 → 工作区 id；其它键为 `None`。
+pub(super) fn group_key_workspace(key: &str) -> Option<&str> {
+    key.strip_prefix(AGENT_GROUP_PREFIX)
 }
 
 /// classic 单端点侧栏的 Agents 面板：行来自视图计算阶段的统一树缓存

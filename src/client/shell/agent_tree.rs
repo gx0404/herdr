@@ -1821,6 +1821,21 @@ impl ClientShellState {
             self.open_external_agent_context_menu(endpoint_id, external_id, point.0, point.1);
             return true;
         }
+        // 工作区分组头（整行都是折叠开关）右键打开与工作区列表同一份工作区菜单
+        // （冒烟 L8）。与工作区列表同口径，只对当前端点的工作区。
+        let workspace = self
+            .hits
+            .agent_tree_toggles
+            .iter()
+            .find(|(rect, endpoint_id, _)| {
+                endpoint_id == &self.active_endpoint_id && super::contains(*rect, point)
+            })
+            .and_then(|(_, _, key)| super::agent_sidebar::group_key_workspace(key))
+            .map(str::to_owned);
+        if let Some(workspace_id) = workspace {
+            self.open_workspace_context_menu(workspace_id, point.0, point.1);
+            return matches!(self.overlay, Some(ClientShellOverlay::ContextMenu(_)));
+        }
         false
     }
 
