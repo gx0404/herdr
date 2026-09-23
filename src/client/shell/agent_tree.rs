@@ -1318,17 +1318,62 @@ fn render_agent_lines(
         style: Default::default(),
     }];
     let lines: &[Vec<crate::ui::ResolvedToken>] = &agent.rows;
+    // 行高放不下全部 token 行（矮面板的平铺视图只剩 1 行等）：先画含 agent 名的
+    // 那一行，名称才是这一行存在的理由，其余行保持原序（A2）。它自己不带状态图标
+    // 时在前面补画；只剩这一行时再在后面带上工作区名（平铺视图靠它交代上下文）。
+    let has = |line: &[crate::ui::ResolvedToken],
+               wanted: fn(&crate::ui::ResolvedTokenKind) -> bool| {
+        line.iter().any(|token| wanted(&token.kind))
+    };
+    let name_line = (usize::from(rect.height) < lines.len())
+        .then(|| {
+            lines.iter().position(|line| {
+                has(line, |kind| {
+                    matches!(kind, crate::ui::ResolvedTokenKind::Agent(_))
+                })
+            })
+        })
+        .flatten();
+    let is_icon = |kind: &crate::ui::ResolvedTokenKind| {
+        matches!(kind, crate::ui::ResolvedTokenKind::StateIcon)
+    };
+    let lead_icon = name_line.is_some_and(|name| {
+        !has(&lines[name], is_icon) && lines.iter().any(|line| has(line, is_icon))
+    });
+    let workspace_suffix = name_line.filter(|_| rect.height == 1).and_then(|name| {
+        lines
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| *index != name)
+            .flat_map(|(_, line)| line.iter())
+            .find_map(|token| match &token.kind {
+                crate::ui::ResolvedTokenKind::Workspace(label) => Some(label.as_str()),
+                _ => None,
+            })
+    });
+    // 第 `slot` 个画出的行对应的 token 行下标：名称行提到最前，其余顺延。
+    let line_at = |slot: usize| match name_line {
+        Some(name) if slot == 0 => name,
+        Some(name) if slot <= name => slot - 1,
+        _ => slot,
+    };
     // 徽标只在首行右侧，按宽度档位画，剩下的给 token 行。
     let first_width = render_badge(buffer, content, &row.kind, cx);
     let continuation_indent = tree_prefix_width(depth).saturating_add(2);
-    for index in 0..usize::from(rect.height) {
-        let y = rect.y + index as u16;
+    for slot in 0..usize::from(rect.height) {
+        let y = rect.y + slot as u16;
+        let index = line_at(slot);
         let tokens: &[crate::ui::ResolvedToken] = match lines.get(index) {
             Some(tokens) => tokens.as_slice(),
-            None if index == 0 => &fallback,
+            None if slot == 0 => &fallback,
             None => break,
         };
-        let (x, width) = if index == 0 {
+        let (x, width) = if slot == 0 && lead_icon {
+            let icon_width = display_width(icon.0) as u16;
+            put_text(buffer, content.x, y, first_width, icon.0, icon.1);
+            let shift = icon_width.saturating_add(1).min(first_width);
+            (content.x.saturating_add(shift), first_width - shift)
+        } else if slot == 0 {
             (content.x, first_width)
         } else {
             render_continuation_guides(
@@ -1361,8 +1406,20 @@ fn render_agent_lines(
             usize::from(width),
         );
         let line = Line::from(spans);
-        let used = u16::try_from(line.width()).unwrap_or(u16::MAX).min(width);
+        let mut used = u16::try_from(line.width()).unwrap_or(u16::MAX).min(width);
         Paragraph::new(line).render(Rect::new(x, y, width, 1), buffer);
+        if let Some(workspace) = workspace_suffix.filter(|_| slot == 0) {
+            // ` · 工作区`：分隔符 3 列，名称至少留 2 列（放不下带省略号）。
+            let room = width.saturating_sub(used);
+            let label_room = room.saturating_sub(3);
+            if label_room >= 2 {
+                let label = crate::ui::truncate_end(workspace, usize::from(label_room));
+                let label_width = display_width(&label) as u16;
+                put_text(buffer, x + used, y, 3, " · ", secondary);
+                put_text(buffer, x + used + 3, y, label_width, &label, secondary);
+                used = used.saturating_add(3).saturating_add(label_width);
+            }
+        }
         if status_line == Some(index) {
             let text = agent.state_text.as_str();
             let text_width = display_width(text) as u16;

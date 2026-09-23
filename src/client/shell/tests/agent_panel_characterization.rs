@@ -2658,3 +2658,41 @@ fn flat_view_rows_do_not_depend_on_the_first_tree_row() {
         "只拿到后半段树行也列出全部 agent"
     );
 }
+
+/// 复审轻级 A2：矮到列表区只剩 1 行时，平铺行默认的两行（「图标 工作区」/
+/// 「agent 名」）只画得下第一行，agent 名反而看不见。行高不够时优先画含 agent
+/// 名的那一行：前面补状态图标，后面带上工作区名（平铺视图靠它交代上下文）。
+#[test]
+fn one_row_agent_list_keeps_the_agent_name_visible() {
+    let mut state = classic_state(AgentPanelSortConfig::Spaces);
+    let one_row = (6..=30).find(|rows| {
+        state.agent_scroll = 0;
+        state.compose(106, *rows).expect("classic 帧");
+        state.hits.agent_body.height == 1
+    });
+    assert!(one_row.is_some(), "夹具前提：存在列表区恰好 1 行的终端高度");
+    assert!(
+        state.hits.agent_tree_toggles.is_empty(),
+        "1 行列表区走平铺视图"
+    );
+    let rect = classic_agent_rect(&state, "pane_1");
+    assert_eq!(rect.height, 1);
+    let line = compact(&rect_rows(&state, rect)[0]);
+    assert!(line.starts_with('○'), "状态图标仍在行首：{line}");
+    assert!(line.contains("one"), "agent 名可见：{line}");
+    assert!(line.contains("client-shell"), "带上工作区名：{line}");
+
+    // 列表区够两行时照旧按行配置分两行画，不受影响。
+    let two_rows = (6..=30).find(|rows| {
+        state.agent_scroll = 0;
+        state.compose(106, *rows).expect("classic 帧");
+        state.hits.agent_body.height == 2
+    });
+    assert!(
+        two_rows.is_some(),
+        "夹具前提：存在列表区恰好 2 行的终端高度"
+    );
+    let lines = rect_rows(&state, classic_agent_rect(&state, "pane_1"));
+    assert!(lines[0].starts_with("  ○ client-shell"), "{lines:?}");
+    assert!(compact(&lines[1]).starts_with("one"), "{lines:?}");
+}
