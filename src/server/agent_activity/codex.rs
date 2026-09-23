@@ -1,7 +1,7 @@
 //! Codex CLI 的活动来源适配器：从 `<config>/sessions/YYYY/MM/DD/rollout-*.jsonl`
 //! （`<config>` 跟随 `CODEX_HOME`，缺省 `<home>/.codex`）读出以本 pane 线程为祖先的
 //! 子线程（`thread_spawn` 子 agent、guardian 审核等），`read` 按字节游标分页返回
-//! 子线程自己的 rollout（JSONL 原文）。
+//! 子线程 rollout 的可读转写（文本，见下文「内容转写」）。
 //!
 //! # 本机取证（codex-cli 0.155.1，2026-09-22，267 个 rollout；只看 type 与键名）
 //!
@@ -59,6 +59,33 @@
 //!   `session_id`、`transcript_path`、`turn_id`；`SubagentStop` 另有
 //!   `agent_transcript_path`、`last_assistant_message`、`stop_hook_active`。
 //!   `agent_id` 即子线程 id，可直接作本适配器的节点 id。
+//!
+//! # 内容转写（codex-cli 0.156.1，2026-09-23 本机 12 个 rollout，含真机探针的 1 个
+//! 子线程；只看类型、键名与枚举取值，另做二进制只读字符串检索）
+//!
+//! - 每条记录是 `{ordinal, timestamp, type, payload}`，`ordinal` 等于 0 起的行号；
+//!   子线程自己的 `session_meta` 带 `subagent_history_start_ordinal`，它之前的记录
+//!   （第 1 行起的父 meta 副本与父历史前缀，含用户给父线程的原始提示）不属于子线程，
+//!   转写跳过。早期版本没有 `ordinal` 时不跳。
+//! - 顶层类型：`session_meta`、`turn_context`、`world_state`、`token_usage_record`、
+//!   `inter_agent_communication_metadata` 是簿记，不进转写；二进制里另有
+//!   `inter_agent_communication`、`compacted`、`realtime_item`。
+//! - `response_item`：`message`（role developer / user / assistant；developer 是
+//!   给模型的指令，不进转写；assistant 带 `phase` commentary / final_answer）、
+//!   `agent_message`（`author` / `recipient`，正文 `input_text` 是任务头，负载在
+//!   `encrypted_content` 里加密）、`reasoning`（本机 43 条的 `summary` 全为空，只有
+//!   加密内容）、`function_call`（`arguments` 是 JSON 字符串；`spawn_agent` 的
+//!   `message` 同样加密，明文只有 `task_name`）、`custom_tool_call`（`exec` 的 `input`
+//!   是自由文本脚本）、`function_call_output` / `custom_tool_call_output`（`output` 是
+//!   字符串或 `input_text` 块数组）；二进制里另有 `local_shell_call`、
+//!   `web_search_call`、`image_generation_call`、`tool_search_*`、`compaction*` 等。
+//! - `event_msg`：`item_completed`（Reasoning / CommandExecution / AgentMessage /
+//!   UserMessage / SubAgentActivity / FileChange，都是 `response_item` 的镜像，只有
+//!   Plan 条目只以它落盘）、`token_count`（遥测，含 rate_limits）、`task_started` /
+//!   `thread_settings_applied`（簿记）、`task_complete`、`turn_aborted`。
+//! - 转写口径与 opencode 一致：`user: …`、助手正文原样、`(thinking)`、`[工具名] 参数
+//!   摘要` 加缩进的输出前几行、`[task complete] 最后一条消息`；认不出的类型只留一行
+//!   `[类型名]`，不整条倒出 JSON。
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
@@ -80,9 +107,36 @@ const MAX_ROLLOUTS_SCANNED: usize = 2048;
 const MAX_META_LINE_BYTES: u64 = 1024 * 1024;
 /// 状态推断只看文件尾部这么多字节。
 const STATUS_TAIL_BYTES: u64 = 256 * 1024;
-/// `read` 的默认页与页上限。
+/// `read` 的默认页与页大小区间。
 const DEFAULT_READ_BYTES: usize = 64 * 1024;
+const MIN_READ_BYTES: usize = 256;
 const MAX_READ_BYTES: usize = 4 * 1024 * 1024;
+/// 一页最多扫这么多原始字节：隐藏的簿记记录（meta、world_state 动辄几十 KB）太多时
+/// 先交这一页，游标停在已扫到的位置，续读接着往后。
+const MAX_PAGE_SCAN_BYTES: u64 = 8 * 1024 * 1024;
+/// 单条记录的读取上限；更长的整条跳过、留一行占位，不把它读进内存。
+const MAX_RECORD_BYTES: u64 = 16 * 1024 * 1024;
+/// 消息正文（user / assistant / 协作消息）的字符上限。
+const MESSAGE_CHARS: usize = 2000;
+/// 工具调用摘要、结束消息等单行摘要的字符上限。
+const SUMMARY_CHARS: usize = 160;
+/// 工具输出只显示前几行，其余只计数。
+const OUTPUT_LINES: usize = 5;
+/// 工具输出每行的字符上限。
+const OUTPUT_LINE_CHARS: usize = 200;
+/// 类型名、工具名的字符上限。
+const NAME_CHARS: usize = 60;
+/// `function_call` 参数里拿来当摘要的键，按优先级；都没有就给截断的紧凑 JSON。
+const CALL_ARGUMENT_KEYS: [&str; 8] = [
+    "cmd",
+    "command",
+    "task_name",
+    "path",
+    "file_path",
+    "query",
+    "pattern",
+    "url",
+];
 /// 树深度上限，只用来防父链成环。
 const MAX_TREE_DEPTH: usize = 32;
 const ROLLOUT_PREFIX: &str = "rollout-";
@@ -143,7 +197,7 @@ impl ActivitySource for Codex {
         }
         let sessions = sessions_dir(cx);
         let path = find_rollout(&sessions, node_id)?;
-        read_page(&path, cursor, max_bytes)
+        read_transcript_page(&path, cursor, max_bytes)
     }
 }
 
@@ -291,6 +345,9 @@ struct RolloutMeta {
     nickname: Option<String>,
     role: Option<String>,
     agent_path: Option<String>,
+    /// `subagent_history_start_ordinal`：子线程自己的历史从这个 ordinal 开始，之前是
+    /// 继承的父历史前缀。
+    history_start: Option<u64>,
 }
 
 /// 只读首行；任何一步失败都只是跳过这个文件。
@@ -372,6 +429,9 @@ fn parse_meta(payload: &Value, path: &Path) -> Option<RolloutMeta> {
         nickname: text("agent_nickname"),
         role: text("agent_role"),
         agent_path: text("agent_path"),
+        history_start: payload
+            .get("subagent_history_start_ordinal")
+            .and_then(Value::as_u64),
     })
 }
 
@@ -676,10 +736,20 @@ fn find_rollout(sessions: &Path, id: &str) -> Result<PathBuf, SourceError> {
     Err(SourceError::Unavailable)
 }
 
-/// 游标是字节偏移；页尾对齐到最后一个换行，单行超过页大小时截在字符边界并标记
-/// `truncated`。`next_cursor` 总是给出（含 `eof`），`eof` 只表示这次已读到文件末尾；
-/// 末尾不以换行结尾的半截行不消费，游标停在它的行首，跟随增长时用同一游标再读。
-fn read_page(
+/// 一页的上限：渲染文本的字节预算、单页扫描的原始字节、单条记录的原始字节。
+#[derive(Clone, Copy, Debug)]
+struct PageLimits {
+    budget: usize,
+    scan_bytes: u64,
+    record_bytes: u64,
+}
+
+/// 游标是 rollout 的字节偏移，页尾总在记录边界上；每条记录渲染成可读转写（见
+/// [`render_record`]），隐藏的记录照样推进游标。`next_cursor` 总是给出（含 `eof`），
+/// `eof` 只表示这次已读到文件末尾；末尾不以换行结尾的半截记录不消费，游标停在它的
+/// 行首，跟随增长时用同一游标再读。单条渲染结果比整页预算还大时截在字符边界并标记
+/// `truncated`。
+fn read_transcript_page(
     path: &Path,
     cursor: Option<&str>,
     max_bytes: usize,
@@ -693,40 +763,578 @@ fn read_page(
     let budget = if max_bytes == 0 {
         DEFAULT_READ_BYTES
     } else {
-        max_bytes.min(MAX_READ_BYTES)
+        max_bytes.clamp(MIN_READ_BYTES, MAX_READ_BYTES)
     };
+    render_page(
+        path,
+        offset,
+        PageLimits {
+            budget,
+            scan_bytes: MAX_PAGE_SCAN_BYTES,
+            record_bytes: MAX_RECORD_BYTES,
+        },
+    )
+}
+
+fn render_page(path: &Path, offset: u64, limits: PageLimits) -> Result<ContentChunk, SourceError> {
+    // 子线程开头继承的父历史前缀：ordinal 小于它的记录不属于这个子线程。
+    let history_start = read_meta(path).and_then(|meta| meta.history_start);
     let mut file = fs::File::open(path).map_err(SourceError::Io)?;
     let length = file.metadata().map_err(SourceError::Io)?.len();
     let offset = offset.min(length);
     file.seek(SeekFrom::Start(offset))
         .map_err(SourceError::Io)?;
-    let mut buffer = Vec::with_capacity(budget.min((length - offset) as usize));
-    (&mut file)
-        .take(budget as u64)
-        .read_to_end(&mut buffer)
-        .map_err(SourceError::Io)?;
-    let read = buffer.len();
-    let at_end = offset + (read as u64) >= length;
+    let mut reader = BufReader::new(file);
+    let mut position = offset;
+    let mut text = String::new();
     let mut truncated = false;
-    let end = match buffer.iter().rposition(|byte| *byte == b'\n') {
-        // 页尾对齐到最后一个换行；文件末尾的半截行留给下一次。
-        Some(newline) => newline + 1,
-        // 整页只是尾部的半截行：不消费，等它写完。
-        None if at_end => 0,
-        // 一行比页还长：截在字符边界，继续读能拼回原文。
-        None => {
-            truncated = true;
-            floor_char_boundary(&buffer, read)
+    // 停在还没写完的末条记录上：这一次已经读到头了。
+    let mut waiting = false;
+    let mut raw = Vec::new();
+    while text.len() < limits.budget && position - offset < limits.scan_bytes {
+        let line_start = position;
+        raw.clear();
+        let read = (&mut reader)
+            .take(limits.record_bytes)
+            .read_until(b'\n', &mut raw)
+            .map_err(SourceError::Io)?;
+        if read == 0 {
+            break;
         }
-    };
-    let next = offset + end as u64;
+        let rendered = if raw.last() == Some(&b'\n') {
+            position += read as u64;
+            render_record(&String::from_utf8_lossy(&raw), history_start)
+        } else if (read as u64) < limits.record_bytes {
+            // 没有换行 = 这条还在写：不消费，游标留在行首，写完再渲染。
+            waiting = true;
+            break;
+        } else {
+            // 超长记录：不读进内存，跳到下一个换行；还没写完就同样等下一次。
+            let (skipped, complete) = skip_line(&mut reader).map_err(SourceError::Io)?;
+            if !complete {
+                waiting = true;
+                break;
+            }
+            position += read as u64 + skipped;
+            Some("[oversized record]".to_string())
+        };
+        let Some(rendered) = rendered else {
+            continue;
+        };
+        let remaining = limits.budget.saturating_sub(text.len());
+        if rendered.len() + 1 > remaining {
+            if !text.is_empty() {
+                // 本页装不下就整条留给下一页：游标退回行首，内容不丢。
+                position = line_start;
+                break;
+            }
+            // 单条本身超过整页预算，只能截到字符边界并标记。
+            const MARK: &str = " …\n";
+            let end = floor_char_boundary(
+                rendered.as_bytes(),
+                limits.budget.saturating_sub(MARK.len()),
+            );
+            text.push_str(&rendered[..end]);
+            text.push_str(MARK);
+            truncated = true;
+            break;
+        }
+        text.push_str(&rendered);
+        text.push('\n');
+    }
     Ok(ContentChunk {
-        format: AgentActivityContentFormat::Jsonl,
-        text: String::from_utf8_lossy(&buffer[..end]).into_owned(),
-        next_cursor: Some(next.to_string()),
-        eof: at_end,
+        format: AgentActivityContentFormat::Text,
+        text,
+        next_cursor: Some(position.to_string()),
+        eof: waiting || position >= length,
         truncated,
     })
+}
+
+/// 跳过当前行余下的部分（不留在内存里）。返回跳过的字节数与是否遇到了换行。
+fn skip_line(reader: &mut impl BufRead) -> io::Result<(u64, bool)> {
+    let mut skipped = 0u64;
+    loop {
+        let buffer = reader.fill_buf()?;
+        if buffer.is_empty() {
+            return Ok((skipped, false));
+        }
+        if let Some(newline) = buffer.iter().position(|byte| *byte == b'\n') {
+            reader.consume(newline + 1);
+            return Ok((skipped + newline as u64 + 1, true));
+        }
+        let length = buffer.len();
+        reader.consume(length);
+        skipped += length as u64;
+    }
+}
+
+// ---- 转写渲染 ----
+
+/// 把一条 rollout 记录渲染成转写文本；簿记与遥测记录、继承的父历史前缀返回
+/// `None`。认不出的类型只留一行类型名，不整条倒出 JSON。这是用户自己的会话内容，
+/// 只进本地内容片段，不进日志。
+fn render_record(line: &str, history_start: Option<u64>) -> Option<String> {
+    let line = line.trim();
+    if line.is_empty() {
+        return None;
+    }
+    let Ok(record) = serde_json::from_str::<Value>(line) else {
+        return Some("[unparsable line]".to_string());
+    };
+    if let (Some(start), Some(ordinal)) =
+        (history_start, record.get("ordinal").and_then(Value::as_u64))
+    {
+        if ordinal < start {
+            return None;
+        }
+    }
+    let payload = record.get("payload");
+    match record.get("type").and_then(Value::as_str)? {
+        "response_item" => render_response_item(payload?),
+        "event_msg" => render_event(payload?),
+        "compacted" => Some("[compacted]".to_string()),
+        // 会话元数据、回合上下文、世界状态、用量记录、协作元数据：簿记，不进转写。
+        "session_meta"
+        | "turn_context"
+        | "world_state"
+        | "token_usage_record"
+        | "inter_agent_communication_metadata" => None,
+        other => Some(type_line(other)),
+    }
+}
+
+fn render_response_item(payload: &Value) -> Option<String> {
+    match payload.get("type").and_then(Value::as_str)? {
+        "message" => render_message(payload),
+        "agent_message" => Some(render_agent_message(payload)),
+        "reasoning" => Some(render_reasoning(payload)),
+        "function_call" => Some(call_line(
+            &tool_name(payload),
+            arguments_summary(payload.get("arguments")),
+        )),
+        "custom_tool_call" => Some(call_line(
+            &tool_name(payload),
+            payload
+                .get("input")
+                .and_then(Value::as_str)
+                .and_then(single_line),
+        )),
+        "function_call_output" | "custom_tool_call_output" => render_output(payload.get("output")),
+        "local_shell_call" => Some(call_line(
+            "shell",
+            payload
+                .get("action")
+                .and_then(|action| action.get("command"))
+                .and_then(words),
+        )),
+        "web_search_call" => Some(call_line(
+            "web_search",
+            payload.get("action").and_then(|action| {
+                ["query", "queries", "url", "pattern"]
+                    .iter()
+                    .find_map(|key| action.get(*key).and_then(words))
+            }),
+        )),
+        "image_generation_call" => Some(call_line(
+            "image_generation",
+            payload
+                .get("revised_prompt")
+                .and_then(Value::as_str)
+                .and_then(single_line),
+        )),
+        other => Some(type_line(other)),
+    }
+}
+
+/// user / assistant 的对话正文；developer / system 是给模型的指令，不进转写。
+fn render_message(payload: &Value) -> Option<String> {
+    let role = payload.get("role").and_then(Value::as_str);
+    if !matches!(role, Some("user" | "assistant")) {
+        return None;
+    }
+    let text = content_text(payload.get("content"));
+    let text = text.trim();
+    if text.is_empty() {
+        return None;
+    }
+    if role == Some("assistant") {
+        return Some(clean_text(text, MESSAGE_CHARS, true));
+    }
+    // `<environment_context>…</environment_context>` 这类内部包装只留标签名。
+    if let Some(tag) = wrapper_tag(text) {
+        return Some(format!("[{tag}]"));
+    }
+    Some(format!("user: {}", clean_text(text, MESSAGE_CHARS, true)))
+}
+
+/// agent 之间的协作消息：发送方 + 明文部分，负载加密时注明。
+fn render_agent_message(payload: &Value) -> String {
+    let mut line = match payload
+        .get("author")
+        .and_then(Value::as_str)
+        .map(collapse)
+        .filter(|author| !author.is_empty())
+    {
+        Some(author) => format!("[message from {}]", clip_chars(&author, NAME_CHARS)),
+        None => "[message]".to_string(),
+    };
+    let mut parts = Vec::new();
+    let mut encrypted = false;
+    for block in payload
+        .get("content")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        match block.get("type").and_then(Value::as_str) {
+            Some("input_text" | "output_text" | "text") => {
+                if let Some(text) = block.get("text").and_then(Value::as_str) {
+                    let text = collapse(text);
+                    if !text.is_empty() {
+                        parts.push(text);
+                    }
+                }
+            }
+            Some("encrypted_content") => encrypted = true,
+            _ => {}
+        }
+    }
+    if !parts.is_empty() {
+        line.push(' ');
+        line.push_str(&clip_chars(&parts.join(" "), MESSAGE_CHARS));
+    }
+    if encrypted {
+        line.push_str(" (encrypted)");
+    }
+    line
+}
+
+/// 推理：有摘要就带上，只有加密内容时只留标记。
+fn render_reasoning(payload: &Value) -> String {
+    let summary: Vec<String> = payload
+        .get("summary")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|block| block.get("text").and_then(Value::as_str))
+        .map(collapse)
+        .filter(|text| !text.is_empty())
+        .collect();
+    if summary.is_empty() {
+        "(thinking)".to_string()
+    } else {
+        format!(
+            "(thinking) {}",
+            clip_chars(&summary.join(" "), MESSAGE_CHARS)
+        )
+    }
+}
+
+fn render_event(payload: &Value) -> Option<String> {
+    match payload.get("type").and_then(Value::as_str)? {
+        "task_complete" => Some(
+            match payload.get("error").filter(|error| !error.is_null()) {
+                Some(error) => tagged_line("[task failed]", Some(&error_message(error))),
+                None => tagged_line(
+                    "[task complete]",
+                    payload.get("last_agent_message").and_then(Value::as_str),
+                ),
+            },
+        ),
+        "turn_aborted" => Some(tagged_line(
+            "[turn aborted]",
+            payload.get("reason").and_then(Value::as_str),
+        )),
+        "error" | "stream_error" => Some(tagged_line(
+            "[error]",
+            payload.get("message").and_then(Value::as_str),
+        )),
+        "context_compacted" => Some("[context compacted]".to_string()),
+        "item_completed" => render_plan(payload.get("item")?),
+        // 遥测、回合起始与设置、以及和 response_item 重复的镜像事件：不进转写。
+        "token_count"
+        | "task_started"
+        | "thread_settings_applied"
+        | "session_configured"
+        | "item_started"
+        | "user_message"
+        | "agent_message"
+        | "agent_reasoning"
+        | "agent_reasoning_raw_content"
+        | "agent_reasoning_section_break" => None,
+        other => Some(type_line(other)),
+    }
+}
+
+/// 计划只以 `item_completed` 落盘；其余完成条目都是 response_item 的镜像。
+fn render_plan(item: &Value) -> Option<String> {
+    if item.get("type").and_then(Value::as_str) != Some("Plan") {
+        return None;
+    }
+    let mut out = "[plan]".to_string();
+    push_output_lines(
+        &mut out,
+        item.get("text").and_then(Value::as_str).unwrap_or_default(),
+    );
+    Some(out)
+}
+
+/// 工具输出：去掉开头空行后的前几行缩进显示，其余只计数；没有内容时不出行。
+fn render_output(output: Option<&Value>) -> Option<String> {
+    let mut text = String::new();
+    let mut append = |part: &str| {
+        if !text.is_empty() && !text.ends_with('\n') {
+            text.push('\n');
+        }
+        text.push_str(part);
+    };
+    match output? {
+        Value::String(output) => append(output),
+        Value::Array(blocks) => {
+            for block in blocks {
+                match block.get("type").and_then(Value::as_str) {
+                    Some("input_text" | "output_text" | "text") => {
+                        if let Some(output) = block.get("text").and_then(Value::as_str) {
+                            append(output);
+                        }
+                    }
+                    Some("input_image" | "image") => append("[image]"),
+                    _ => {}
+                }
+            }
+        }
+        // 旧版的 `{content, success}` 形态。
+        Value::Object(fields) => {
+            if let Some(output) = fields.get("content").and_then(Value::as_str) {
+                append(output);
+            }
+        }
+        _ => {}
+    }
+    let mut out = String::new();
+    push_output_lines(&mut out, &text);
+    // 去掉 push_output_lines 补在最前面的换行。
+    out.strip_prefix('\n').map(str::to_string)
+}
+
+/// 把输出的前 [`OUTPUT_LINES`] 行（去掉开头空行、ANSI 序列与控制字符，逐行截断）
+/// 以缩进行接在 `out` 后面，其余只计数；末尾空行不计，中间的空行不补缩进。
+fn push_output_lines(out: &mut String, text: &str) {
+    let mut shown: Vec<String> = Vec::new();
+    let mut hidden = 0usize;
+    let mut trailing_blank = 0usize;
+    for raw in text.lines() {
+        if shown.len() < OUTPUT_LINES {
+            let line = clean_text(raw, OUTPUT_LINE_CHARS, false);
+            let blank = line.trim().is_empty();
+            if !(shown.is_empty() && blank) {
+                shown.push(if blank { String::new() } else { line });
+            }
+            continue;
+        }
+        // 显示满之后只数行，不再逐字符清洗。
+        if raw.trim().is_empty() {
+            trailing_blank += 1;
+        } else {
+            hidden += trailing_blank + 1;
+            trailing_blank = 0;
+        }
+    }
+    if hidden == 0 {
+        while shown.last().is_some_and(String::is_empty) {
+            shown.pop();
+        }
+    } else {
+        shown.push(format!("… +{hidden} lines"));
+    }
+    for line in shown {
+        out.push('\n');
+        if !line.is_empty() {
+            out.push_str("    ");
+            out.push_str(&line);
+        }
+    }
+}
+
+/// `[名字] 摘要`；没有摘要时只留名字。
+fn call_line(name: &str, summary: Option<String>) -> String {
+    match summary {
+        Some(summary) => format!("[{name}] {summary}"),
+        None => format!("[{name}]"),
+    }
+}
+
+/// `标签 单行摘要`；没有内容时只留标签。
+fn tagged_line(tag: &str, text: Option<&str>) -> String {
+    match text.and_then(single_line) {
+        Some(summary) => format!("{tag} {summary}"),
+        None => tag.to_string(),
+    }
+}
+
+fn tool_name(payload: &Value) -> String {
+    payload
+        .get("name")
+        .and_then(Value::as_str)
+        .map(collapse)
+        .filter(|name| !name.is_empty())
+        .map(|name| clip_chars(&name, NAME_CHARS))
+        .unwrap_or_else(|| "tool".to_string())
+}
+
+fn type_line(kind: &str) -> String {
+    let name = collapse(kind);
+    if name.is_empty() {
+        return "[record]".to_string();
+    }
+    format!("[{}]", clip_chars(&name, NAME_CHARS))
+}
+
+/// `function_call` 的参数摘要：参数（JSON 字符串）里按 [`CALL_ARGUMENT_KEYS`] 取第一个
+/// 有值的键；都没有就给截断的紧凑 JSON，不是 JSON 就当自由文本。
+fn arguments_summary(arguments: Option<&Value>) -> Option<String> {
+    let parsed = match arguments? {
+        Value::String(text) => match serde_json::from_str::<Value>(text) {
+            Ok(parsed) => parsed,
+            Err(_) => return single_line(text),
+        },
+        other => other.clone(),
+    };
+    let Value::Object(fields) = &parsed else {
+        return words(&parsed);
+    };
+    if let Some(summary) = CALL_ARGUMENT_KEYS
+        .iter()
+        .find_map(|key| fields.get(*key).and_then(words))
+    {
+        return Some(summary);
+    }
+    if fields.is_empty() {
+        return None;
+    }
+    serde_json::to_string(&parsed)
+        .ok()
+        .and_then(|json| single_line(&json))
+}
+
+/// 字符串，或字符串数组（命令行参数）用空格连起来，折成单行摘要。
+fn words(value: &Value) -> Option<String> {
+    match value {
+        Value::String(text) => single_line(text),
+        Value::Array(items) => {
+            let joined: Vec<&str> = items.iter().filter_map(Value::as_str).collect();
+            single_line(&joined.join(" "))
+        }
+        _ => None,
+    }
+}
+
+/// 折成单行并截到 [`SUMMARY_CHARS`]；空的返回 `None`。
+fn single_line(text: &str) -> Option<String> {
+    let line = collapse(text);
+    (!line.is_empty()).then(|| clip_chars(&line, SUMMARY_CHARS))
+}
+
+/// 块数组里的文本块用换行连起来，图片留占位；字符串原样。
+fn content_text(content: Option<&Value>) -> String {
+    match content {
+        Some(Value::String(text)) => text.clone(),
+        Some(Value::Array(blocks)) => blocks
+            .iter()
+            .filter_map(|block| match block.get("type").and_then(Value::as_str) {
+                Some("input_text" | "output_text" | "text") => block
+                    .get("text")
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+                Some("input_image" | "image") => Some("[image]".to_string()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n"),
+        _ => String::new(),
+    }
+}
+
+/// `<tag>…</tag>` 形式的内部包装（`<environment_context>`、`<user_instructions>` 等），
+/// 返回标签名。
+fn wrapper_tag(text: &str) -> Option<&str> {
+    let rest = text.strip_prefix('<')?;
+    let name = &rest[..rest.find('>')?];
+    let plausible = !name.is_empty()
+        && name.len() <= NAME_CHARS
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-');
+    (plausible && text.ends_with(&format!("</{name}>"))).then_some(name)
+}
+
+/// 折叠换行与连续空白，保证摘要是单行。
+fn collapse(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut pending_space = false;
+    for ch in text.chars() {
+        if ch.is_whitespace() || ch.is_control() {
+            pending_space = !out.is_empty();
+            continue;
+        }
+        if pending_space {
+            out.push(' ');
+            pending_space = false;
+        }
+        out.push(ch);
+    }
+    out
+}
+
+/// 取前 `max_chars` 个字符，超出以省略号结尾。
+fn clip_chars(text: &str, max_chars: usize) -> String {
+    let mut chars = text.chars();
+    let mut out: String = chars.by_ref().take(max_chars).collect();
+    if chars.next().is_some() {
+        out.push('…');
+    }
+    out
+}
+
+/// 去掉 ANSI 转义序列与控制字符（制表符留给客户端展开；`keep_newlines` 时保留换行
+/// 并去掉行尾空白），取前 `max_chars` 个字符，超出以省略号结尾。逐字符处理，读到
+/// 上限就停。
+fn clean_text(text: &str, max_chars: usize, keep_newlines: bool) -> String {
+    let mut out = String::new();
+    let mut kept = 0usize;
+    let mut chars = text.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '\u{1b}' {
+            // CSI（ESC [ … 终止字节 0x40–0x7e）整段丢；其余 ESC 连同下一个字符丢。
+            if chars.peek() == Some(&'[') {
+                chars.next();
+                for next in chars.by_ref() {
+                    if ('\u{40}'..='\u{7e}').contains(&next) {
+                        break;
+                    }
+                }
+            } else {
+                chars.next();
+            }
+            continue;
+        }
+        let keep = ch == '\t' || (keep_newlines && ch == '\n');
+        if ch.is_control() && !keep {
+            continue;
+        }
+        if kept == max_chars {
+            out.push('…');
+            break;
+        }
+        if ch == '\n' {
+            out.truncate(out.trim_end_matches([' ', '\t']).len());
+        }
+        out.push(ch);
+        kept += 1;
+    }
+    out.truncate(out.trim_end().len());
+    out
 }
 
 /// `index` 若落在一个多字节字符中间，退到该字符的起点；否则原样返回。
@@ -776,6 +1384,9 @@ mod tests {
     const IDLE: &str = "01a0c6e1-7720-7000-8000-0000000000b3";
     const COMPRESSED: &str = "01a0c6e2-6180-7000-8000-0000000000b4";
     const LEGACY: &str = "legacy-child-0001";
+    /// 0.156.1 结构的根线程与它的子线程（昵称 Noor，任务 /root/print_probe）。
+    const PROBE_ROOT: &str = "01a0c6f0-0000-7000-8000-0000000000c1";
+    const PROBE_CHILD: &str = "01a0c6f0-2710-7000-8000-0000000000c2";
 
     fn fixture_home() -> PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -995,16 +1606,19 @@ mod tests {
             discover(&fixture_home(), Some(&session)),
             "与默认布局同一棵树"
         );
-        let expected = fs::read_to_string(
-            fixture_home()
-                .join(".codex/sessions/2026/09/22")
-                .join(format!("rollout-2026-09-22T10-01-00-{CHILD_A}.jsonl")),
-        )
-        .expect("夹具可读");
+        let expected = Codex
+            .read(
+                &context(&fixture_home(), Some(&session)),
+                CHILD_A,
+                None,
+                MAX_READ_BYTES,
+            )
+            .expect("默认布局可读");
         let page = Codex
             .read(&relocated, CHILD_A, None, MAX_READ_BYTES)
             .expect("配置目录下的 rollout 可读");
-        assert_eq!(page.text, expected);
+        assert!(!page.text.is_empty());
+        assert_eq!(page.text, expected.text);
 
         // 不给配置目录：回退 `<home>/.codex`，空 home 下是空树，读取稍后重试。
         assert!(discover(&empty_home, Some(&session)).is_empty());
@@ -1026,36 +1640,32 @@ mod tests {
     }
 
     #[test]
-    fn read_pages_through_a_child_rollout_by_byte_cursor() {
+    fn read_pages_through_a_child_transcript_by_byte_cursor() {
         let home = fixture_home();
-        let session = AgentSessionRef::id(ROOT).expect("合法 id");
+        let session = AgentSessionRef::id(PROBE_ROOT).expect("合法 id");
         let cx = context(&home, Some(&session));
         let path = home
             .join(".codex/sessions/2026/09/22")
-            .join(format!("rollout-2026-09-22T10-01-00-{CHILD_A}.jsonl"));
-        let expected = fs::read_to_string(&path).expect("夹具可读");
+            .join(format!("rollout-2026-09-22T10-30-05-{PROBE_CHILD}.jsonl"));
+        let length = fs::metadata(&path).expect("夹具可读").len().to_string();
 
         let whole = Codex
-            .read(&cx, CHILD_A, None, MAX_READ_BYTES)
+            .read(&cx, PROBE_CHILD, None, MAX_READ_BYTES)
             .expect("整页可读");
-        assert_eq!(whole.format, AgentActivityContentFormat::Jsonl);
-        assert_eq!(whole.text, expected);
         assert!(whole.eof);
         assert!(!whole.truncated);
-        assert_eq!(
-            whole.next_cursor.as_deref(),
-            Some(expected.len().to_string().as_str())
-        );
+        assert_eq!(whole.next_cursor.as_deref(), Some(length.as_str()));
 
-        // 按 800 字节分页（夹具最长行 747 字节）：页尾对齐换行，拼起来等于原文。
+        // 按最小页分页：页尾总在记录边界上，一条都不重不漏，拼起来等于整页。
         let mut cursor: Option<String> = None;
         let mut pages = 0;
         let mut joined = String::new();
         loop {
             let chunk = Codex
-                .read(&cx, CHILD_A, cursor.as_deref(), 800)
+                .read(&cx, PROBE_CHILD, cursor.as_deref(), MIN_READ_BYTES)
                 .expect("分页可读");
             assert!(!chunk.truncated);
+            assert!(chunk.text.len() <= MIN_READ_BYTES);
             assert!(chunk.text.is_empty() || chunk.text.ends_with('\n'));
             joined.push_str(&chunk.text);
             pages += 1;
@@ -1065,42 +1675,134 @@ mod tests {
             cursor = chunk.next_cursor;
             assert!(pages < 1000, "分页不收敛");
         }
-        assert!(pages > 2);
-        assert_eq!(joined, expected);
+        assert!(pages > 2, "应当跨页，实际 {pages} 页");
+        assert_eq!(joined, whole.text);
 
-        // 页比一行还小：截断标记为真，继续读仍能拼出原文。
-        let mut cursor: Option<String> = None;
-        let mut joined = String::new();
-        let mut truncated_pages = 0;
-        loop {
-            let chunk = Codex
-                .read(&cx, CHILD_A, cursor.as_deref(), 16)
-                .expect("小页可读");
-            assert!(chunk.text.len() <= 16);
-            truncated_pages += usize::from(chunk.truncated);
-            joined.push_str(&chunk.text);
-            if chunk.eof {
-                break;
-            }
-            cursor = chunk.next_cursor;
-        }
-        assert!(truncated_pages > 0);
-        assert_eq!(joined, expected);
+        // 过小的页按最小页算。
+        let tiny = Codex.read(&cx, PROBE_CHILD, None, 16).expect("小页可读");
+        let minimum = Codex
+            .read(&cx, PROBE_CHILD, None, MIN_READ_BYTES)
+            .expect("最小页可读");
+        assert_eq!(tiny.text, minimum.text);
 
         // 游标越过文件末尾（文件被截断或跟随时）：空页、eof、游标夹回长度。
         let beyond = Codex
-            .read(&cx, CHILD_A, Some("999999999"), 300)
+            .read(&cx, PROBE_CHILD, Some("999999999"), 300)
             .expect("越界游标不报错");
         assert!(beyond.text.is_empty());
         assert!(beyond.eof);
-        assert_eq!(
-            beyond.next_cursor.as_deref(),
-            Some(expected.len().to_string().as_str())
-        );
+        assert_eq!(beyond.next_cursor.as_deref(), Some(length.as_str()));
 
         // max_bytes = 0 用默认页。
-        let default_page = Codex.read(&cx, CHILD_A, None, 0).expect("默认页可读");
-        assert_eq!(default_page.text, expected);
+        let default_page = Codex.read(&cx, PROBE_CHILD, None, 0).expect("默认页可读");
+        assert_eq!(default_page.text, whole.text);
+    }
+
+    #[test]
+    fn page_limits_bound_oversized_records_and_long_hidden_runs() {
+        let home = unique_temp_home("page-limits");
+        let day = home.join(".codex/sessions/2026/09/22");
+        fs::create_dir_all(&day).expect("临时目录可建");
+        let path = day.join(format!("rollout-2026-09-22T10-01-00-{CHILD_A}.jsonl"));
+        let message = |text: &str| {
+            format!(
+                r#"{{"type":"response_item","payload":{{"type":"message","role":"assistant","content":[{{"type":"output_text","text":"{text}"}}]}}}}"#
+            ) + "\n"
+        };
+        let hidden = r#"{"type":"event_msg","payload":{"type":"token_count"}}"#.to_string() + "\n";
+        let big = message(&"a".repeat(600));
+        let small = message("small");
+        let limits = |budget, scan_bytes, record_bytes| PageLimits {
+            budget,
+            scan_bytes,
+            record_bytes,
+        };
+
+        // 单条渲染结果比整页还大：截在页内并标记，游标越过这一条。
+        fs::write(&path, format!("{big}{small}")).expect("写临时 rollout");
+        let page = render_page(&path, 0, limits(256, u64::MAX, u64::MAX)).expect("可读");
+        assert!(page.truncated);
+        assert!(page.text.ends_with(" …\n"), "{}", page.text);
+        assert!(page.text.len() <= 256);
+        assert_eq!(
+            page.next_cursor.as_deref(),
+            Some(big.len().to_string().as_str())
+        );
+        assert!(!page.eof);
+        let rest =
+            render_page(&path, big.len() as u64, limits(256, u64::MAX, u64::MAX)).expect("可读");
+        assert_eq!(rest.text, "small\n");
+        assert!(rest.eof);
+
+        // 超过单条上限的记录不读进内存：整条跳过，留一行占位。
+        let cap = 150;
+        assert!(small.len() < cap && big.len() > cap);
+        let page = render_page(&path, 0, limits(4096, u64::MAX, cap as u64)).expect("可读");
+        assert_eq!(page.text, "[oversized record]\nsmall\n");
+        assert!(page.eof);
+
+        // 还没写完的超长记录不消费，游标停在它的行首。
+        fs::write(&path, format!("{small}{}", "b".repeat(2 * cap))).expect("写半截超长行");
+        let page = render_page(&path, 0, limits(4096, u64::MAX, cap as u64)).expect("可读");
+        assert_eq!(page.text, "small\n");
+        assert!(page.eof);
+        assert_eq!(
+            page.next_cursor.as_deref(),
+            Some(small.len().to_string().as_str())
+        );
+
+        // 一页扫的原始字节有上限：隐藏记录再多也先交页，游标记在扫到的位置。
+        fs::write(&path, format!("{}{small}", hidden.repeat(10))).expect("写隐藏记录");
+        let cap = (hidden.len() * 3) as u64;
+        let page = render_page(&path, 0, limits(4096, cap, u64::MAX)).expect("可读");
+        assert!(page.text.is_empty());
+        assert!(!page.eof);
+        assert_eq!(page.next_cursor.as_deref(), Some(cap.to_string().as_str()));
+
+        let _ = fs::remove_dir_all(&home);
+    }
+
+    /// 冒烟 M6（codex-13 / 17）：活动窗口右列是原始 rollout JSON，探针输出埋在
+    /// JSON 字段里，token_count / rate_limits 这类遥测整条倒出来。
+    #[test]
+    fn read_renders_a_readable_transcript_instead_of_raw_rollout_json() {
+        let home = fixture_home();
+        let session = AgentSessionRef::id(PROBE_ROOT).expect("合法 id");
+        let cx = context(&home, Some(&session));
+        let page = Codex.read(&cx, PROBE_CHILD, None, 64 * 1024).expect("可读");
+        assert_eq!(page.format, AgentActivityContentFormat::Text);
+        assert_eq!(
+            page.text,
+            "[message from /root] Message Type: NEW_TASK Task name: /root/print_probe \
+             Sender: /root Payload: (encrypted)\n\
+             (thinking)\n\
+             [exec] const result = await tools.exec_command({cmd:\"echo fake-probe\"}); \
+             text(result.output);\n\
+             \x20   Script completed\n\
+             \x20   Wall time 0.1 seconds\n\
+             \x20   Output:\n\
+             \x20   fake-probe\n\
+             [shell] ls -la\n\
+             \x20   total 0\n\
+             \x20   drwx fake .\n\
+             [wait] {\"cell_id\":\"7\",\"yield_time_ms\":500}\n\
+             \x20   still waiting\n\
+             fake-probe\n\
+             [plan]\n\
+             \x20   1. print the probe\n\
+             \x20   2. report back\n\
+             [mystery_event]\n\
+             [future_record]\n\
+             [hologram_call]\n\
+             [task complete] fake-probe\n\
+             [unparsable line]\n"
+        );
+        // 继承的父历史前缀、开发者指令与遥测都不进转写。
+        assert!(!page.text.contains("inherited"), "{}", page.text);
+        assert!(!page.text.contains("developer notes"), "{}", page.text);
+        assert!(!page.text.contains("rate_limits"), "{}", page.text);
+        assert!(page.eof);
+        assert!(!page.truncated);
     }
 
     #[test]
@@ -1144,16 +1846,19 @@ mod tests {
         let day = home.join(".codex/sessions/2026/09/22");
         fs::create_dir_all(&day).expect("临时目录可建");
         let path = day.join(format!("rollout-2026-09-22T10-01-00-{CHILD_A}.jsonl"));
-        let head =
-            "{\"type\":\"session_meta\",\"payload\":{\"id\":\"x\"}}\n{\"type\":\"turn_context\"}\n";
-        let partial = "{\"type\":\"event_msg\",\"payload\":{\"type\":\"task_st";
+        let head = "{\"type\":\"session_meta\",\"payload\":{\"id\":\"x\"}}\n\
+                    {\"type\":\"turn_context\"}\n\
+                    {\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"user\",\
+                    \"content\":[{\"type\":\"input_text\",\"text\":\"go\"}]}}\n";
+        let partial = "{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\
+                       \"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"hal";
         fs::write(&path, format!("{head}{partial}")).expect("临时文件可写");
         let session = AgentSessionRef::id(ROOT).expect("合法 id");
         let cx = context(&home, Some(&session));
 
-        // 半截行不消费：游标停在它的行首，eof 表示暂时读完。
+        // 半截行不消费：游标停在它的行首，eof 表示暂时读完。簿记记录照样推进游标。
         let first = Codex.read(&cx, CHILD_A, None, 4096).expect("可读");
-        assert_eq!(first.text, head);
+        assert_eq!(first.text, "user: go\n");
         assert!(first.eof);
         assert!(!first.truncated);
         assert_eq!(
@@ -1170,21 +1875,9 @@ mod tests {
         assert!(!waiting.truncated);
         assert_eq!(waiting.next_cursor, first.next_cursor);
 
-        // 页比半截行还短：读不到文件末尾就分不清「半截」与「超长」，按超长行截断
-        // 消费；最后一片到了末尾仍会等换行。
-        let tiny = Codex
-            .read(&cx, CHILD_A, first.next_cursor.as_deref(), 8)
-            .expect("可读");
-        assert_eq!(tiny.text, &partial[..8]);
-        assert!(tiny.truncated);
-        assert!(!tiny.eof);
-        assert_eq!(
-            tiny.next_cursor.as_deref(),
-            Some((head.len() + 8).to_string().as_str())
-        );
-
-        // 这一行写完并追加新行后，从同一游标续读拿到完整内容。
-        let rest = "arted\"}}\n{\"type\":\"event_msg\",\"payload\":{\"type\":\"task_complete\"}}\n";
+        // 这一行写完并追加新行后，从同一游标续读拿到完整内容，不重不漏。
+        let rest =
+            "f done\"}]}}\n{\"type\":\"event_msg\",\"payload\":{\"type\":\"task_complete\"}}\n";
         {
             use std::io::Write;
             let mut file = fs::OpenOptions::new()
@@ -1196,7 +1889,7 @@ mod tests {
         let followed = Codex
             .read(&cx, CHILD_A, first.next_cursor.as_deref(), 4096)
             .expect("可读");
-        assert_eq!(followed.text, format!("{partial}{rest}"));
+        assert_eq!(followed.text, "half done\n[task complete]\n");
         assert!(followed.eof);
         assert_eq!(
             followed.next_cursor.as_deref(),
@@ -1208,6 +1901,145 @@ mod tests {
         );
 
         let _ = fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn record_rendering_stays_total_on_odd_input() {
+        let render = |line: &str| render_record(line, None);
+        let item = |payload: &str| format!(r#"{{"type":"response_item","payload":{payload}}}"#);
+        let event = |payload: &str| format!(r#"{{"type":"event_msg","payload":{payload}}}"#);
+
+        // 内部包装只留标签名；developer 指令与空消息不进转写。
+        assert_eq!(
+            render(&item(
+                r#"{"type":"message","role":"user","content":[{"type":"input_text","text":"<environment_context>\n  <cwd>/w</cwd>\n</environment_context>"}]}"#
+            ))
+            .as_deref(),
+            Some("[environment_context]")
+        );
+        assert_eq!(
+            render(&item(
+                r#"{"type":"message","role":"developer","content":[{"type":"input_text","text":"rules"}]}"#
+            )),
+            None
+        );
+        assert_eq!(
+            render(&item(
+                r#"{"type":"message","role":"assistant","content":[]}"#
+            )),
+            None
+        );
+        // 多行正文保留换行、去掉 ANSI 与行尾空白；图片留占位。
+        assert_eq!(
+            render(&item(
+                r#"{"type":"message","role":"user","content":[{"type":"input_text","text":"line one  \r\n\u001b[1mline two\u001b[0m"},{"type":"input_image","image_url":"x"}]}"#
+            ))
+            .as_deref(),
+            Some("user: line one\nline two\n[image]")
+        );
+        // 推理摘要、协作消息缺字段、各类工具调用与非 JSON 参数。
+        assert_eq!(
+            render(&item(
+                r#"{"type":"reasoning","summary":[{"type":"summary_text","text":"weigh  options"}]}"#
+            ))
+            .as_deref(),
+            Some("(thinking) weigh options")
+        );
+        assert_eq!(
+            render(&item(r#"{"type":"agent_message","content":"odd"}"#)).as_deref(),
+            Some("[message]")
+        );
+        assert_eq!(
+            render(&item(
+                r#"{"type":"local_shell_call","action":{"type":"exec","command":["git","status"]}}"#
+            ))
+            .as_deref(),
+            Some("[shell] git status")
+        );
+        assert_eq!(
+            render(&item(
+                r#"{"type":"web_search_call","action":{"type":"search","query":"rust  bufread"}}"#
+            ))
+            .as_deref(),
+            Some("[web_search] rust bufread")
+        );
+        assert_eq!(
+            render(&item(
+                r#"{"type":"function_call","name":"apply","arguments":"not json at all"}"#
+            ))
+            .as_deref(),
+            Some("[apply] not json at all")
+        );
+        assert_eq!(
+            render(&item(r#"{"type":"function_call","arguments":"{}"}"#)).as_deref(),
+            Some("[tool]")
+        );
+        // 输出：旧版 {content, success} 形态、图片块、空输出。
+        assert_eq!(
+            render(&item(
+                r#"{"type":"function_call_output","output":{"content":"ok\n","success":true}}"#
+            ))
+            .as_deref(),
+            Some("    ok")
+        );
+        assert_eq!(
+            render(&item(
+                r#"{"type":"custom_tool_call_output","output":[{"type":"input_image","image_url":"x"}]}"#
+            ))
+            .as_deref(),
+            Some("    [image]")
+        );
+        assert_eq!(
+            render(&item(r#"{"type":"function_call_output","output":"\n\n"}"#)),
+            None
+        );
+        // 生命周期事件与错误。
+        assert_eq!(
+            render(&event(
+                r#"{"type":"task_complete","error":{"message":"model refused"},"last_agent_message":null}"#
+            ))
+            .as_deref(),
+            Some("[task failed] model refused")
+        );
+        assert_eq!(
+            render(&event(
+                r#"{"type":"task_complete","last_agent_message":null}"#
+            ))
+            .as_deref(),
+            Some("[task complete]")
+        );
+        assert_eq!(
+            render(&event(r#"{"type":"turn_aborted","reason":"interrupted"}"#)).as_deref(),
+            Some("[turn aborted] interrupted")
+        );
+        assert_eq!(
+            render(&event(r#"{"type":"error","message":"stream closed"}"#)).as_deref(),
+            Some("[error] stream closed")
+        );
+        // 镜像事件与非计划的完成条目不进转写。
+        assert_eq!(
+            render(&event(r#"{"type":"agent_message","message":"dup"}"#)),
+            None
+        );
+        assert_eq!(
+            render(&event(
+                r#"{"type":"item_completed","item":{"type":"AgentMessage","content":[]}}"#
+            )),
+            None
+        );
+        // 没有类型、空类型名与空行。
+        assert_eq!(render(r#"{"payload":{}}"#), None);
+        assert_eq!(render(r#"{"type":"   "}"#).as_deref(), Some("[record]"));
+        assert_eq!(render("   "), None);
+        // 继承前缀按 ordinal 跳过；没有 ordinal 的不跳。
+        let prefixed = r#"{"ordinal":3,"type":"response_item","payload":{"type":"message","role":"user","content":"old"}}"#;
+        assert_eq!(render_record(prefixed, Some(4)), None);
+        assert_eq!(
+            render_record(prefixed, Some(3)).as_deref(),
+            Some("user: old")
+        );
+        assert_eq!(wrapper_tag("<a b>x</a b>"), None);
+        assert_eq!(wrapper_tag("<ctx>open only"), None);
     }
 
     #[test]

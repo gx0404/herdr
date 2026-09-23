@@ -1,8 +1,11 @@
 # codex 活动树夹具
 
-手写脱敏样本：目录与键名照 codex-cli 0.155.1 的真实 rollout 结构，内容全是假的。
-`tree/` 当作 `home` 注入 `src/server/agent_activity/codex.rs` 的测试；根线程
-`01a0c6d7-6500-7000-8000-0000000000a1`。
+手写脱敏样本：目录与键名照 codex-cli 0.155.1 的真实 rollout 结构，内容全是假的；
+`c1` / `c2` 两个文件照 0.156.1 的结构（每条带 `ordinal`，另有 `world_state`、
+`token_usage_record`、`agent_message`、`custom_tool_call` 等）。`tree/` 当作 `home`
+注入 `src/server/agent_activity/codex.rs` 的测试；根线程
+`01a0c6d7-6500-7000-8000-0000000000a1`，转写夹具的根线程
+`01a0c6f0-0000-7000-8000-0000000000c1`。
 
 | 文件（`tree/.codex/sessions/2026/09/22/` 下，日期目录与文件名是本地时间） | 用途 |
 |---|---|
@@ -23,3 +26,5 @@
 | `…-0000000000b7.jsonl` | 父线程不在树里（孤儿），不进树 |
 | `…-legacy-child-0001.jsonl` | 非 UUID id、meta 只有 `id` 与 `parent_thread_id` → 缺字段全 None |
 | `2026/09/19/…-0000000000b5.jsonl` | 声称父 = 根但日期早于根：日期下界把它排除 |
+| `…-0000000000c1.jsonl` | 0.156.1 结构的根线程（`source: "cli"`），本身不是节点 |
+| `…-0000000000c2.jsonl` | c1 的子线程（昵称 Noor，任务 `/root/print_probe`）：前 6 条是自己的 meta、父 meta 副本与继承的父历史前缀（`subagent_history_start_ordinal = 6`），其后覆盖协作消息、推理、`exec` 自定义工具与输出、`shell` / `wait` 函数调用与输出、助手正文、计划、未知事件 / 顶层类型 / 条目类型各一条、`task_complete` 与一行坏 JSON，用来核对可读转写 |
