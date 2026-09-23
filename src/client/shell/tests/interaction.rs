@@ -59,10 +59,14 @@ fn search_click_and_wheel_preserve_the_browser_and_unicode_matches() {
     state.move_palette_selection(1);
     state.compose(80, 24).unwrap();
     assert!(palette_overlay(&state).scroll <= 1);
-    // 冒烟 L6：子序列匹配收紧为首字符须落在分词前缀上，"İİB" 里的 "B" 紧贴
-    // 在土耳其语 "İ"（`to_lowercase()` 会展开成 "i" + 组合重音，验证的正是
-    // 这种 Unicode 展开不打乱下标）后面、不是词开头，改用 "İİ B" 让 "B" 落
-    // 在空格之后的合法起点，同时保留原本要验证的 Unicode 下标行为。
+    // Unicode 下标：`İ` 的小写展开成 "i" + 组合点两个字符，命中下标仍按原文
+    // 字符计。夹具保持 "İİB" 不变；冒烟 L6 起首字符必须落在词首，B 与前面
+    // 的 İ 同属一个全大写词、不是词首，单查 "b" 从词中间起步不再命中（L6
+    // 要去掉的正是这种命中）。改为从词首连续穿过两个展开字符，下标去重后
+    // 仍是每个原文字符一个；词首上的 B 照样按原文下标报告。
+    assert!(super::command_palette::fuzzy_match("b", "İİB").is_none());
+    let (_, indices) = super::command_palette::fuzzy_match("İİb", "İİB").unwrap();
+    assert_eq!(indices, vec![0, 1, 2]);
     let (_, indices) = super::command_palette::fuzzy_match("b", "İİ B").unwrap();
     assert_eq!(indices, vec![3]);
     assert!(state.insert_overlay_text("settings"));

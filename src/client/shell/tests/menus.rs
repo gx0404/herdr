@@ -1084,6 +1084,41 @@ fn palette_search_scrollbar_thumb_length_matches_the_visible_ratio() {
     assert!(thumb_rows > 1, "夹具前提：这个比例下滑块该有不止 1 行");
 }
 
+/// 搜索态下输入 `query` 后命中的条目 id，按列出顺序。
+fn palette_search_ids(state: &mut ClientShellState, query: &str) -> Vec<String> {
+    state.open_command_search();
+    assert!(state.insert_overlay_text(query));
+    palette_rows(palette_overlay(state))
+        .iter()
+        .map(|row| row.item.id.clone())
+        .collect()
+}
+
+/// 浮层复审 1（严重）：L6 收紧后中文标题整段失配——「窗格」「标签页」
+/// 「工作树」落在标题中间，搜不到「关闭窗格」「新建标签页」「删除工作树
+/// 检出」。截屏 36 的「机器」两条结果照旧。
+#[test]
+fn palette_search_finds_cjk_words_inside_titles() {
+    let _guard = crate::i18n::lang_guard(crate::i18n::Lang::ZhCn);
+    let mut state = state_with_profiles(&[]);
+    for (query, expected) in [
+        ("窗格", "binding:ClosePane"),
+        ("标签页", "binding:NewTab"),
+        ("工作树", "binding:RemoveWorktree"),
+    ] {
+        let ids = palette_search_ids(&mut state, query);
+        assert!(
+            ids.iter().any(|id| id == expected),
+            "「{query}」应命中 {expected}：{ids:?}"
+        );
+    }
+    assert_eq!(
+        palette_search_ids(&mut state, "机器"),
+        ["binding:ManageMachines", "machine:import"],
+        "截屏 36：机器 / 从 SSH 配置导入机器"
+    );
+}
+
 // ---- 入口去重、「«」与「调整布局」 ----
 
 /// 与 `workbench::ready()` 同构：宣告 `client.views.set` 后 tick 一次启用停靠工作台。

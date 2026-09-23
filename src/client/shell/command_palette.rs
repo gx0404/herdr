@@ -89,6 +89,49 @@ pub(super) struct ClientPaletteRow<'a> {
     pub(super) recent: bool,
 }
 
+/// 汉字与日文假名不用空格分词：逐字算词首，否则词中间的中文词（「关闭
+/// 窗格」里的「窗格」）永远搜不到（浮层复审 1）。
+fn is_unspaced_letter(ch: char) -> bool {
+    matches!(
+        u32::from(ch),
+        0x3040..=0x30FF // 平假名、片假名
+            | 0x31F0..=0x31FF // 片假名语音扩展
+            | 0x3400..=0x4DBF // CJK 扩展 A
+            | 0x4E00..=0x9FFF // CJK 基本区
+            | 0xF900..=0xFAFF // CJK 兼容表意文字
+            | 0xFF66..=0xFF9F // 半角片假名
+            | 0x20000..=0x3134F // CJK 扩展 B–G 与兼容补充
+    )
+}
+
+/// `chars[index]` 是否是一个词的开头：文本开头；汉字 / 假名（逐字成词）及
+/// 紧跟其后的字符；非字母数字（空白、标点、`-_/:.` 等）之后；字母与数字
+/// 之间；camelCase 的小写转大写（`moveTab` 的 T）；连写缩写后的新词
+/// （`SSHImport` 的 I）。
+fn is_word_start(chars: &[char], index: usize) -> bool {
+    let Some(&current) = chars.get(index) else {
+        return false;
+    };
+    let Some(&previous) = index
+        .checked_sub(1)
+        .and_then(|previous| chars.get(previous))
+    else {
+        return true;
+    };
+    if is_unspaced_letter(current) || is_unspaced_letter(previous) || !previous.is_alphanumeric() {
+        return true;
+    }
+    if previous.is_numeric() != current.is_numeric() {
+        return true;
+    }
+    if previous.is_lowercase() && current.is_uppercase() {
+        return true;
+    }
+    previous.is_uppercase()
+        && current.is_uppercase()
+        && chars.get(index + 1).is_some_and(|next| next.is_lowercase())
+}
+
 /// Subsequence matcher over characters, case-insensitive. Returns a score
 /// (higher is better) and the matched character indices in `text`.
 /// Consecutive runs and word-start hits score highest.
@@ -96,7 +139,7 @@ pub(super) struct ClientPaletteRow<'a> {
 /// 冒烟 L6（收紧）：只要求子序列按顺序出现太宽——查询 "at" 会命中
 /// "SSH import" 里毫不相关的 a…t（跨在 "SSH" 的 "S" 之后、"import" 的
 /// "t" 上，两者语义无关）。收紧为：子序列的**首字符**必须命中文本开头或
-/// 某个分词前缀（空白 / `-_/:.` 之后），不允许整段匹配从词中间起步；
+/// 某个词首（见 [`is_word_start`]），不允许整段匹配从词中间起步；
 /// 之后的字符仍按原算法贪心找子序列，一致或分词命中额外加分。多个候选
 /// 起点时取分数最高的一个。
 pub(super) fn fuzzy_match(query: &str, text: &str) -> Option<(i64, Vec<usize>)> {
@@ -110,15 +153,11 @@ pub(super) fn fuzzy_match(query: &str, text: &str) -> Option<(i64, Vec<usize>)> 
         .enumerate()
         .flat_map(|(index, c)| c.to_lowercase().map(move |ch| (index, ch)))
         .collect();
-    let is_word_start = |index: usize| {
-        index == 0
-            || text_chars[index - 1].is_whitespace()
-            || matches!(text_chars[index - 1], '-' | '_' | '/' | ':' | '.')
-    };
+    let word_start = |index: usize| is_word_start(&text_chars, index);
     let mut best: Option<(i64, Vec<usize>)> = None;
     for start in lowered
         .iter()
-        .filter(|&&(index, ch)| ch == query_chars[0] && is_word_start(index))
+        .filter(|&&(index, ch)| ch == query_chars[0] && word_start(index))
         .map(|&(index, _)| index)
     {
         let mut query_index = 0;
@@ -136,7 +175,7 @@ pub(super) fn fuzzy_match(query: &str, text: &str) -> Option<(i64, Vec<usize>)> 
             if previous_match == text_index.checked_sub(1) {
                 score += 8;
             }
-            if is_word_start(text_index) {
+            if word_start(text_index) {
                 score += 6;
             }
             previous_match = Some(text_index);
@@ -1336,5 +1375,36 @@ mod tests {
         // 首字符正好是某个词的开头、后续字符跨到别的词：不该被首字符检查
         // 误伤，只要子序列本身仍成立。
         assert!(fuzzy_match("am", "attach machine").is_some());
+    }
+
+    fn indices(query: &str, text: &str) -> Option<Vec<usize>> {
+        fuzzy_match(query, text).map(|(_, indices)| indices)
+    }
+
+    /// 浮层复审 1（严重）：L6 收紧后首字符只认空白 / `-_/:.` 之后的位置，
+    /// 而中文标题不用空格分词——「窗格」「标签页」「工作树」落在标题中间，
+    /// 整段失配，中文界面下核心词几乎搜不到命令。汉字与假名逐字算词首。
+    #[test]
+    fn fuzzy_match_treats_each_cjk_character_as_a_word_start() {
+        assert_eq!(indices("窗格", "关闭窗格"), Some(vec![2, 3]));
+        assert_eq!(indices("标签页", "新建标签页"), Some(vec![2, 3, 4]));
+        assert_eq!(indices("工作树", "删除工作树检出"), Some(vec![2, 3, 4]));
+        // 截屏 36：「机器」同时命中标题开头与标题末尾两处。
+        assert_eq!(indices("机器", "机器"), Some(vec![0, 1]));
+        assert_eq!(indices("机器", "从 SSH 配置导入机器"), Some(vec![10, 11]));
+        assert_eq!(indices("ツール", "開発ツール"), Some(vec![2, 3, 4]));
+    }
+
+    /// 词首除了空白与标点之后，还包括 camelCase 边界、连写缩写后的新词与
+    /// 汉字和拉丁字母之间的文字切换；同一个词中间的字母不算。
+    #[test]
+    fn fuzzy_match_word_starts_cover_camel_case_and_script_changes() {
+        assert_eq!(indices("mtp", "MoveTabPrevious"), Some(vec![0, 4, 7]));
+        assert_eq!(indices("ove", "MoveTabPrevious"), None);
+        assert_eq!(indices("imp", "SSHImport"), Some(vec![3, 4, 5]));
+        assert_eq!(indices("h", "SSH"), None);
+        assert_eq!(indices("kimi", "账号Kimi"), Some(vec![2, 3, 4, 5]));
+        assert_eq!(indices("12", "F12"), Some(vec![1, 2]));
+        assert_eq!(indices("s", "(system)"), Some(vec![1]));
     }
 }
