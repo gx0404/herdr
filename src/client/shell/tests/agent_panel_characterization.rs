@@ -610,6 +610,76 @@ fn characterization_federated_collapsed_sidebar_keeps_agents_of_collapsed_worksp
     );
 }
 
+/// 文档口径（concepts「Agents 面板」段）：平铺列表里的机器层折叠只在树排序下
+/// 生效——启动顺序本来就不按机器分组，折叠了的机器照样列出它的 agent；折叠侧栏
+/// 只列 Herdr 窗格里的 agent，外部来源条目只在展开的面板里出现（单机与联邦两条
+/// 渲染路径都一样）。
+#[test]
+fn characterization_collapsed_sidebar_machine_collapse_and_external_entries() {
+    // 启动顺序：远端机器折叠了，折叠侧栏仍列出全部 5 个 agent。
+    let (mut state, remote) = federated_state(AgentPanelSortConfig::Launch);
+    state.collapsed_endpoints.insert(remote.clone());
+    state.bump_tree_collapse_epoch();
+    state.sidebar_collapsed = true;
+    state.compose(106, 40).expect("启动顺序折叠侧栏帧");
+    let ids = endpoint_hit_ids(&state);
+    assert_eq!(ids.len(), 5, "启动顺序不看机器折叠：{ids:?}");
+    assert_eq!(
+        ids.iter()
+            .filter(|(endpoint_id, _)| endpoint_id == &remote)
+            .count(),
+        2,
+        "{ids:?}"
+    );
+
+    let external = ClientShellExternalAgent {
+        external_id: "zcode:abc".into(),
+        source: "zcode".into(),
+        agent_status: AgentStatus::Working,
+        label: "fix login".into(),
+        readable: true,
+        agent: Some("zcode".into()),
+        cwd: None,
+        updated_at_ms: None,
+        activity: Default::default(),
+    };
+    let mut projected = two_workspace_snapshot();
+    projected.external_agents = vec![external];
+
+    // 单机：展开的面板列出外部条目，折叠侧栏只列 3 个窗格 agent。
+    let mut state = classic_state_with(AgentPanelSortConfig::Spaces, projected.clone());
+    state.compose(106, 40).expect("单机展开帧");
+    assert_eq!(state.hits.external_agents.len(), 1, "展开的面板有外部条目");
+    state.sidebar_collapsed = true;
+    state.compose(106, 40).expect("单机折叠侧栏帧");
+    assert!(
+        state.hits.external_agents.is_empty(),
+        "折叠侧栏不列外部条目"
+    );
+    let mut panes = classic_hit_ids(&state);
+    panes.sort_unstable();
+    assert_eq!(panes, ["pane_1", "pane_2", "pane_3"]);
+
+    // 联邦：同上，外部条目挂在本机上。
+    let mut state = ClientShellState::new(panel_config(AgentPanelSortConfig::Spaces));
+    let profile = remote_profile();
+    let remote = ClientEndpointId::Ssh(profile.id.clone());
+    state.set_endpoint_catalog(&[profile]);
+    state.set_endpoint_status(&remote, ClientEndpointStatus::Online);
+    state.set_snapshot(Box::new(projected));
+    state.set_pane_surface(surface());
+    state.set_endpoint_snapshot(&remote, Box::new(remote_snapshot()));
+    state.compose(106, 40).expect("联邦展开帧");
+    assert_eq!(state.hits.external_agents.len(), 1, "展开的面板有外部条目");
+    state.sidebar_collapsed = true;
+    state.compose(106, 40).expect("联邦折叠侧栏帧");
+    assert!(
+        state.hits.external_agents.is_empty(),
+        "折叠侧栏不列外部条目"
+    );
+    assert_eq!(endpoint_hit_ids(&state).len(), 5, "只列窗格里的 agent");
+}
+
 /// (c) 退化阈值：逐个终端高度扫一遍，「无分组头」当且仅当列表区不足 3 行。
 #[test]
 fn characterization_classic_tree_degrades_exactly_below_three_body_rows() {
