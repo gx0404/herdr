@@ -3734,6 +3734,76 @@ fn system_page_scrolls_one_card_row_per_notch_and_reaches_every_card() {
     assert_eq!(painted_cards(&state), order[1..3], "↓ 露出内存卡");
 }
 
+/// H2：滚轮落在内容不可滚的卡片上（CPU / 内存卡没有可滚内容，逐核卡 4 个核
+/// 放得下）时交给页面，不再吃掉整页滚动；内容放不下的卡片（40 个进程）照旧
+/// 滚自己的内容，页面不动。
+#[test]
+fn wheel_over_a_card_with_nothing_to_scroll_scrolls_the_page() {
+    use crate::api::schema::{ProcessIdentity, ProcessMetric};
+    let _guard = crate::i18n::lang_guard(crate::i18n::Lang::ZhCn);
+    let mut state = docked();
+    state.open_observation_page(Page::Monitor, &mut ClientShellInput::default());
+    let mut sample = smoke_system_sample();
+    sample.processes = (1..=40)
+        .map(|pid| ProcessMetric {
+            identity: ProcessIdentity {
+                pid,
+                ..Default::default()
+            },
+            name: format!("proc{pid:02}"),
+            ..Default::default()
+        })
+        .collect();
+    state.observability.metrics = Some(sample);
+    state.compose(133, 32).expect("系统页");
+    let order = state.observability.monitor.visible.clone();
+    let card = |state: &ClientShellState, id: &str| {
+        page_hit(
+            state,
+            |action| matches!(action, Action::Card(card) if card == id),
+        )
+        .unwrap_or_else(|| panic!("{id} 卡已画出"))
+    };
+    // CPU 卡：不在可滚卡片之列。
+    let cpu = card(&state, "cpu");
+    sgr_mouse(&mut state, SGR_WHEEL_DOWN, cpu.x + 3, cpu.y + 3);
+    state.compose(133, 32).expect("重绘");
+    assert_eq!(painted_cards(&state), order[1..3], "CPU 卡上的滚轮滚动页面");
+    // 逐核卡：4 个核放得下，上界 0。
+    assert_eq!(
+        state.observability.card_scroll_limits.get("cores"),
+        Some(0),
+        "用例前提：逐核卡内容放得下"
+    );
+    let cores = card(&state, "cores");
+    sgr_mouse(&mut state, SGR_WHEEL_DOWN, cores.x + 3, cores.y + 2);
+    state.compose(133, 32).expect("重绘");
+    assert_eq!(painted_cards(&state), order[2..4], "逐核卡上的滚轮滚动页面");
+    sgr_mouse(&mut state, SGR_WHEEL_UP, cores.x + 3, cores.y + 2);
+    state.compose(133, 32).expect("重绘");
+    assert_eq!(painted_cards(&state), order[1..3], "反向同样交给页面");
+    // 进程卡：40 个进程放不下，滚轮滚卡片内容，页面不动。
+    for _ in 0..4 {
+        press_key(&mut state, crossterm::event::KeyCode::PageDown);
+    }
+    state.compose(133, 32).expect("重绘");
+    assert_eq!(
+        painted_cards(&state),
+        order[6..],
+        "用例前提：进程卡在画面里"
+    );
+    let before = painted_cards(&state);
+    let processes = card(&state, "processes");
+    sgr_mouse(&mut state, SGR_WHEEL_DOWN, processes.x + 3, processes.y + 3);
+    state.compose(133, 32).expect("重绘");
+    assert_eq!(painted_cards(&state), before, "页面不动");
+    assert_eq!(
+        state.observability.card_scroll.get("processes").copied(),
+        Some(1),
+        "进程卡内容滚一格"
+    );
+}
+
 /// 冒烟 M1（偏好页）：向下滚过底后多出的格数不留存，反向第一格画面立刻变化。
 #[test]
 fn preferences_page_scroll_is_clamped_on_write_so_reversing_moves_at_once() {

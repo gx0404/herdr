@@ -3647,7 +3647,20 @@ impl ClientShellState {
                 } else {
                     -1
                 };
-                self.observability.scroll_card(&card, delta);
+                // 卡片内容放得下（上界 0）或根本不可滚（CPU / 内存卡、上一帧没画出
+                // 内容）时滚轮交给页面，否则落在卡片上的滚轮会吃掉整页滚动。卡片
+                // 命中区只在系统页上登记，面板未聚焦时同样成立。
+                if self
+                    .observability
+                    .card_scroll_limits
+                    .get(&card)
+                    .is_some_and(|limit| limit > 0)
+                {
+                    self.observability.scroll_card(&card, delta);
+                } else {
+                    self.observability
+                        .scroll_page(Page::Monitor, PageStep::Notch, delta);
+                }
                 outcome.repaint = true;
                 return true;
             }
