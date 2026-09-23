@@ -69,7 +69,7 @@ herdr machine status <profile> [--json]
 herdr machine exec <profile> -- <command> [args...]
 ```
 
-By default, `machine add` uses the remote default session. Add `--remote-session <name>` only for a named session. `machine list` accepts optional `--json` for scripts. Every `machine add` flag is described in `herdr machine add --help`. See [Connecting machines](/docs/connecting-machines/) for the full setup and connection guide. Machines can also be added and managed inside the UI: open the machines page from the global menu or with `prefix+m` for the list, detail cards, the single-page add form with its test-connection action, rename and edit forms, enable/disable, removal, and immediate reconnect.
+By default, `machine add` uses the remote default session. Add `--remote-session <name>` only for a named session. `machine list` accepts optional `--json` for scripts. Every `machine add` flag is described in `herdr machine add --help`. See [Connecting machines](/docs/connecting-machines/) for the full setup and connection guide. Machines can also be added and managed inside the UI: open the machines page from the main menu or with `prefix+m` for the list, detail cards, the single-page add form with its test-connection action, rename and edit forms, enable/disable, removal, and immediate reconnect.
 
 `machine status` reports one machine in a single view: the profile fields, a live connection probe through the machine's SSH API bridge (`online`, `disabled`, or `unreachable` with the structured failure kind and message), the remote server version and protocol compatibility when the probe succeeds, the saved port forward rules, and the session-log preferences. The selector accepts a label or profile id, including disabled machines.
 

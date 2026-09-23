@@ -63,7 +63,7 @@ herdr machine status <profile> [--json]
 herdr machine exec <profile> -- <command> [args...]
 ```
 
-`machine add` はリモートのデフォルトセッションを使います。名前付きセッションを使う場合だけ `--remote-session <name>` を追加します。スクリプトでは `machine list` に `--json` を追加できます。詳しくは[マシンへの接続](/ja/docs/connecting-machines/)を参照してください。
+`machine add` はリモートのデフォルトセッションを使います。名前付きセッションを使う場合だけ `--remote-session <name>` を追加します。スクリプトでは `machine list` に `--json` を追加できます。`machine add` のすべてのフラグは `herdr machine add --help` で説明されています。詳しくは[マシンへの接続](/ja/docs/connecting-machines/)を参照してください。マシンは UI からも追加・管理できます。メインメニューまたは `prefix+m` でマシンページを開くと、一覧、詳細カード、**Test connection** 付きの 1 ページの追加フォーム、名前の変更と編集のフォーム、有効化/無効化、削除、即時再接続を使えます。
 
 `machine status` は 1 台のマシンを 1 つのビューで報告します。プロファイルの各フィールド、マシンの SSH API ブリッジ経由のライブ接続プローブ（`online`、`disabled`、または構造化された失敗種別とメッセージ付きの `unreachable`）、プローブ成功時のリモートサーバーバージョンとプロトコル互換性、保存済みポートフォワードルール、セッションログ設定です。セレクタはラベルまたはプロファイル ID を受け付け、無効なマシンも指定できます。
 

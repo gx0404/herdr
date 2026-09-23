@@ -63,7 +63,7 @@ herdr machine status <profile> [--json]
 herdr machine exec <profile> -- <command> [args...]
 ```
 
-`machine add` 默认使用远程默认会话。只有需要命名会话时才添加 `--remote-session <name>`。`machine list` 支持可选的 `--json` 供脚本使用。完整流程见[连接机器](/zh-cn/docs/connecting-machines/)。
+`machine add` 默认使用远程默认会话。只有需要命名会话时才添加 `--remote-session <name>`。`machine list` 支持可选的 `--json` 供脚本使用。`machine add` 的全部标志见 `herdr machine add --help`。完整流程见[连接机器](/zh-cn/docs/connecting-machines/)。也可以在界面里添加和管理机器：从主菜单或按 `prefix+m` 打开机器页面，即可使用机器列表、详情卡、带**测试连接**的单页添加表单、重命名与编辑表单、启用 / 禁用、移除和立即重连。
 
 `machine status` 在一份报告中展示单台机器：profile 字段、经机器 SSH API 桥的实时连接探测（`online`、`disabled`，或 `unreachable` 并附结构化失败类型与信息）、探测成功时的远程 server 版本与协议兼容性、已保存的端口转发规则，以及会话日志偏好。选择器接受标签或 profile id，包括已禁用机器。
 
