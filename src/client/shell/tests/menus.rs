@@ -1119,6 +1119,70 @@ fn palette_search_finds_cjk_words_inside_titles() {
     );
 }
 
+/// 浮层复审 2：冒烟截屏 35 里 "mon" 列出 14 条，除「监控」外都是把 id、
+/// 别名与分类拼成一串后跨字段凑出来的（左移标签页：id 的 Mo + 分类
+/// "panes" 的 n）。按字段分别匹配后只剩真正以 "mon" 起词的条目。
+#[test]
+fn palette_search_does_not_stitch_a_query_across_fields() {
+    let _guard = crate::i18n::lang_guard(crate::i18n::Lang::ZhCn);
+    let mut state = state_with_profiles(&[]);
+    let ids = palette_search_ids(&mut state, "mon");
+    assert_eq!(
+        ids.first().map(String::as_str),
+        Some("observation:monitor"),
+        "{ids:?}"
+    );
+    for stitched in [
+        "binding:MoveTabPrevious",
+        "binding:MoveTabNext",
+        "machine:import",
+        "binding:RemoveWorktree",
+        "binding:CopyMode",
+        "binding:EnterResizeMode",
+        "snippets:list",
+        "snippets:run",
+        "scene:save",
+        "scene:list",
+        "broadcast",
+        "binding:RenameWorkspace",
+        "binding:Zoom",
+    ] {
+        assert!(
+            ids.iter().all(|id| id != stitched),
+            "截屏 35 的跨字段拼凑命中 {stitched} 不该再出现：{ids:?}"
+        );
+    }
+    // 英文别名照常可搜：中文界面下输入英文词也能找到。
+    let ids = palette_search_ids(&mut state, "move tab");
+    assert!(
+        ids.iter().any(|id| id == "binding:MoveTabPrevious"),
+        "{ids:?}"
+    );
+    assert!(ids.iter().any(|id| id == "binding:MoveTabNext"), "{ids:?}");
+}
+
+/// 浮层复审 2：id 不再参与匹配后，按机器铺开的条目靠中英两种标题的别名
+/// 照样能用另一种语言搜到——以前中文界面输入英文 "connect" 只能经 id
+/// `machine:connect:…` 命中。
+#[test]
+fn palette_search_finds_machine_actions_in_the_other_language() {
+    let prod = profile("prod", 'a');
+    let connect = format!("machine:connect:{}", prod.id.as_str());
+    let edit = format!("machine:edit:{}", prod.id.as_str());
+    {
+        let _guard = crate::i18n::lang_guard(crate::i18n::Lang::ZhCn);
+        let mut state = state_with_profiles(std::slice::from_ref(&prod));
+        let ids = palette_search_ids(&mut state, "connect prod");
+        assert!(ids.contains(&connect), "中文界面按英文标题搜：{ids:?}");
+        assert!(!ids.contains(&edit), "{ids:?}");
+    }
+    let _guard = crate::i18n::lang_guard(crate::i18n::Lang::En);
+    let mut state = state_with_profiles(std::slice::from_ref(&prod));
+    let ids = palette_search_ids(&mut state, "连接");
+    assert!(ids.contains(&connect), "英文界面按中文标题搜：{ids:?}");
+    assert!(!ids.contains(&edit), "{ids:?}");
+}
+
 // ---- 入口去重、「«」与「调整布局」 ----
 
 /// 与 `workbench::ready()` 同构：宣告 `client.views.set` 后 tick 一次启用停靠工作台。

@@ -1,6 +1,6 @@
 use super::action_table::{
-    action_spec, global_action_state, machine_action_state, ActionCategory, ActionId, ActionTarget,
-    PaletteMode, ACTIONS,
+    action_spec, global_action_state, machine_action_state, ActionCategory, ActionId, ActionSpec,
+    ActionTarget, PaletteMode, ACTIONS,
 };
 use super::feedback::ChromeContext;
 use super::render::{
@@ -16,6 +16,11 @@ pub(super) const PALETTE_RECENT_LIMIT: usize = 5;
 
 /// 按机器铺开的条目的组号起点：每台机器一组，排在动作表的组号（`u8`）之后。
 const MACHINE_GROUP_BASE: u16 = 0x100;
+
+/// 按机器铺开的条目 id（最近使用列表按它持久化）。
+fn machine_item_id(spec: &ActionSpec, profile: &SavedSshEndpoint) -> String {
+    format!("{}:{}", spec.key, profile.id.as_str())
+}
 
 /// One executable row of the command palette.
 #[derive(Debug, Clone)]
@@ -75,7 +80,9 @@ pub(super) struct ClientCommandPaletteOverlay {
     pub(super) scroll: usize,
     pub(super) items: Vec<ClientPaletteItem>,
     pub(super) recent_ids: Vec<String>,
-    pub(super) aliases: HashMap<String, String>,
+    /// 条目 id → 中英两种语言（含交替态）的标题，去重后逐个存放；搜索时
+    /// 每个别名单独匹配（见 `ClientShellState::palette_aliases`）。
+    pub(super) aliases: HashMap<String, Vec<String>>,
     /// 打开时入口（顶栏「herdr ≡」/ 侧栏「菜单」）所在的矩形：目录视图的下拉
     /// 菜单贴着它展开（入口在上半屏向下、在下半屏向上）；没有可见入口时居中。
     pub(super) anchor: Option<Rect>,
@@ -132,64 +139,160 @@ fn is_word_start(chars: &[char], index: usize) -> bool {
         && chars.get(index + 1).is_some_and(|next| next.is_lowercase())
 }
 
-/// Subsequence matcher over characters, case-insensitive. Returns a score
-/// (higher is better) and the matched character indices in `text`.
-/// Consecutive runs and word-start hits score highest.
+/// 命中一个字符的得分：基础 1 分，紧接上一个命中 +8，落在词首 +6。
+const MATCH_SCORE: i64 = 1;
+const CONTIGUOUS_BONUS: i64 = 8;
+const WORD_START_BONUS: i64 = 6;
+
+/// 按词匹配，不区分大小写。返回得分（越高越好）与命中字符在 `text` 里的
+/// 下标（按字符计，供标题高亮）。
 ///
-/// 冒烟 L6（收紧）：只要求子序列按顺序出现太宽——查询 "at" 会命中
-/// "SSH import" 里毫不相关的 a…t（跨在 "SSH" 的 "S" 之后、"import" 的
-/// "t" 上，两者语义无关）。收紧为：子序列的**首字符**必须命中文本开头或
-/// 某个词首（见 [`is_word_start`]），不允许整段匹配从词中间起步；
-/// 之后的字符仍按原算法贪心找子序列，一致或分词命中额外加分。多个候选
-/// 起点时取分数最高的一个。
+/// 规则（冒烟 L6 收紧 + 浮层复审 1 / 2）：
+/// - 第一个查询字符必须落在词首（见 `is_word_start`）；
+/// - 之后每个字符要么紧接上一个命中，要么另起一个更靠后的词首——不能像
+///   纯子序列那样跳到某个词中间，"mon" 不再由 "Move" 的 m、o 加上别处
+///   随便一个 n 拼成；
+/// - 查询里的空白不参与匹配，只要求下一个字符另起一词（"mon sys" 命中
+///   "Monitor (system …)"）。
+///
+/// 满足规则的对齐可能不止一种（"abc" 对 "ab bc"：贪心先吃掉紧邻的 b 就再
+/// 也接不上 c），这里用动态规划取得分最高的一种。
 pub(super) fn fuzzy_match(query: &str, text: &str) -> Option<(i64, Vec<usize>)> {
-    let query_chars: Vec<char> = query.chars().flat_map(char::to_lowercase).collect();
-    if query_chars.is_empty() {
+    // 查询逐字小写展开：(字符, 是否必须另起一词)。
+    let mut needles: Vec<(char, bool)> = Vec::new();
+    let mut new_word = false;
+    for ch in query.chars() {
+        if ch.is_whitespace() {
+            new_word = !needles.is_empty();
+            continue;
+        }
+        for (offset, lower) in ch.to_lowercase().enumerate() {
+            needles.push((lower, new_word && offset == 0));
+        }
+        new_word = false;
+    }
+    if needles.is_empty() {
         return Some((0, Vec::new()));
     }
     let text_chars: Vec<char> = text.chars().collect();
-    let lowered: Vec<(usize, char)> = text_chars
+    // 文本逐字小写展开：(原文字符下标, 小写字符, 是否词首)。一个原文字符
+    // 展开出的第 2 个及以后的小写字符不是词首，只能靠连续命中接上。
+    let haystack: Vec<(usize, char, bool)> = text_chars
         .iter()
         .enumerate()
-        .flat_map(|(index, c)| c.to_lowercase().map(move |ch| (index, ch)))
+        .flat_map(|(index, ch)| {
+            let word_start = is_word_start(&text_chars, index);
+            ch.to_lowercase()
+                .enumerate()
+                .map(move |(offset, lower)| (index, lower, word_start && offset == 0))
+        })
         .collect();
-    let word_start = |index: usize| is_word_start(&text_chars, index);
-    let mut best: Option<(i64, Vec<usize>)> = None;
-    for start in lowered
+    // 先做一次不分配的子序列检查：连子序列都不成立就不必动态规划。
+    let mut remaining = haystack.iter();
+    if !needles
         .iter()
-        .filter(|&&(index, ch)| ch == query_chars[0] && word_start(index))
-        .map(|&(index, _)| index)
+        .all(|(needle, _)| remaining.any(|(_, ch, _)| ch == needle))
     {
-        let mut query_index = 0;
-        let mut indices = Vec::with_capacity(query_chars.len());
-        let mut score = 0i64;
-        let mut previous_match = None;
-        for &(text_index, ch) in lowered.iter().filter(|&(index, _)| *index >= start) {
-            if query_index >= query_chars.len() || ch != query_chars[query_index] {
+        return None;
+    }
+    let width = haystack.len();
+    // best[q * width + p]：needles[..=q] 且 needles[q] 落在 haystack[p] 时的
+    // 最高分，以及 needles[q - 1] 落在哪里（回溯高亮下标用）。
+    let mut best: Vec<Option<(i64, usize)>> = vec![None; needles.len() * width];
+    for (q, &(needle, must_start_word)) in needles.iter().enumerate() {
+        // 上一个查询字符在 p 之前的最高分落点：跳到新词首时从这里接上。
+        let mut earlier: Option<(i64, usize)> = None;
+        for (p, &(_, ch, word_start)) in haystack.iter().enumerate() {
+            let previous = q
+                .checked_sub(1)
+                .zip(p.checked_sub(1))
+                .and_then(|(q, p)| best[q * width + p].map(|(score, _)| (score, p)));
+            if let Some((score, at)) = previous {
+                if earlier.is_none_or(|(best_score, _)| score > best_score) {
+                    earlier = Some((score, at));
+                }
+            }
+            if ch != needle {
                 continue;
             }
-            if indices.last() != Some(&text_index) {
-                indices.push(text_index);
-            }
-            score += 1;
-            if previous_match == text_index.checked_sub(1) {
-                score += 8;
-            }
-            if word_start(text_index) {
-                score += 6;
-            }
-            previous_match = Some(text_index);
-            query_index += 1;
-        }
-        if query_index == query_chars.len()
-            && best
-                .as_ref()
-                .is_none_or(|(best_score, _)| score > *best_score)
-        {
-            best = Some((score, indices));
+            let hit = MATCH_SCORE + if word_start { WORD_START_BONUS } else { 0 };
+            let candidate = if q == 0 {
+                word_start.then_some((hit, 0))
+            } else {
+                let contiguous = previous
+                    .filter(|_| !must_start_word)
+                    .map(|(score, at)| (score + hit + CONTIGUOUS_BONUS, at));
+                let jump = earlier
+                    .filter(|_| word_start)
+                    .map(|(score, at)| (score + hit, at));
+                match (contiguous, jump) {
+                    (Some(contiguous), Some(jump)) if jump.0 > contiguous.0 => Some(jump),
+                    (Some(contiguous), _) => Some(contiguous),
+                    (None, jump) => jump,
+                }
+            };
+            best[q * width + p] = candidate;
         }
     }
-    best
+    let last = needles.len() - 1;
+    let (mut position, score) = (0..width)
+        .filter_map(|p| best[last * width + p].map(|(score, _)| (p, score)))
+        .fold(
+            None,
+            |winner: Option<(usize, i64)>, (p, score)| match winner {
+                Some((_, winning)) if winning >= score => winner,
+                _ => Some((p, score)),
+            },
+        )?;
+    let mut positions = vec![0; needles.len()];
+    for q in (0..needles.len()).rev() {
+        positions[q] = position;
+        if let Some((_, at)) = best[q * width + position] {
+            position = at;
+        }
+    }
+    let mut indices: Vec<usize> = Vec::with_capacity(needles.len());
+    for p in positions {
+        let index = haystack[p].0;
+        if indices.last() != Some(&index) {
+            indices.push(index);
+        }
+    }
+    Some((score, indices))
+}
+
+/// 标题之外可供搜索的字段，每个字段单独匹配、取最高分。
+///
+/// 浮层复审 2：以前把 id、副标题、别名与分类拼成一串整体匹配，子序列会
+/// 跨字段拼凑（"mon" = id `binding:MoveTabPrevious` 的 Mo + 分类
+/// "Tabs & panes" 的 n）。id 是内部标识、从不显示，不再参与匹配；自定义
+/// 命令的命令本身以前只能经 id 搜到，这里单列一项。
+fn search_aliases<'a>(
+    palette: &'a ClientCommandPaletteOverlay,
+    item: &'a ClientPaletteItem,
+) -> impl Iterator<Item = &'a str> + 'a {
+    let command = match &item.action {
+        ClientPaletteAction::Run(_, ActionTarget::Command(command)) => {
+            Some(command.command.as_str())
+        }
+        _ => None,
+    };
+    std::iter::once(item.subtitle.as_str())
+        .chain(
+            palette
+                .aliases
+                .get(&item.id)
+                .into_iter()
+                .flatten()
+                .map(String::as_str),
+        )
+        .chain(command)
+        .chain([
+            crate::i18n::en::TEXTS.global_menu.categories[item.category],
+            crate::i18n::zh_cn::TEXTS.global_menu.categories[item.category],
+        ])
+        // 与标题相同的别名（当前界面语言那一份）已经先按标题匹配过。
+        .filter(|alias| !alias.is_empty() && *alias != item.title)
 }
 
 /// The rows currently visible in the palette. With an empty query the MRU
@@ -247,21 +350,15 @@ pub(super) fn palette_rows(palette: &ClientCommandPaletteOverlay) -> Vec<ClientP
             if navigation(item) || !item.enabled {
                 return None;
             }
-            let aliases = format!(
-                "{} {} {} {} {}",
-                item.id,
-                item.subtitle,
-                palette
-                    .aliases
-                    .get(&item.id)
-                    .map(String::as_str)
-                    .unwrap_or_default(),
-                crate::i18n::en::TEXTS.global_menu.categories[item.category],
-                crate::i18n::zh_cn::TEXTS.global_menu.categories[item.category]
-            );
             fuzzy_match(query, &item.title)
                 .map(|(score, indices)| (score + 50, indices))
-                .or_else(|| fuzzy_match(query, &aliases).map(|(score, _)| (score, Vec::new())))
+                .or_else(|| {
+                    search_aliases(palette, item)
+                        .filter_map(|alias| fuzzy_match(query, alias))
+                        .map(|(score, _)| score)
+                        .max()
+                        .map(|score| (score, Vec::new()))
+                })
                 .map(|(score, indices)| {
                     (
                         score,
@@ -624,7 +721,7 @@ impl ClientShellState {
             {
                 let state = machine_action_state(spec.id, profile.enabled, online, active);
                 items.push(ClientPaletteItem {
-                    id: format!("{}:{}", spec.key, profile.id.as_str()),
+                    id: machine_item_id(spec, profile),
                     title: crate::i18n::fill(
                         spec.title_text(texts, state.alternate),
                         &[("label", &profile.label)],
@@ -644,6 +741,40 @@ impl ClientShellState {
         }
     }
 
+    /// 搜索别名：动作在中英两种语言下的标题（含交替态），去重后逐个存放；
+    /// 按机器铺开的条目填好机器名。界面是中文时照样能用英文词搜到，反之
+    /// 亦然。以前按机器的条目只能经 id（`machine:connect:…`）搜到英文词，
+    /// id 不再参与匹配后由这里补上（浮层复审 2）。
+    fn palette_aliases(&self) -> HashMap<String, Vec<String>> {
+        let mut aliases = HashMap::<String, Vec<String>>::new();
+        let mut add = |id: String, title: String| {
+            let entry = aliases.entry(id).or_default();
+            if !entry.contains(&title) {
+                entry.push(title);
+            }
+        };
+        for texts in [&crate::i18n::en::TEXTS, &crate::i18n::zh_cn::TEXTS] {
+            for spec in ACTIONS {
+                for alternate in [false, true] {
+                    let title = spec.title_text(texts, alternate);
+                    match spec.palette {
+                        PaletteMode::Focused => add(spec.key.to_owned(), title.to_owned()),
+                        PaletteMode::PerMachine => {
+                            for profile in &self.saved_profiles {
+                                add(
+                                    machine_item_id(spec, profile),
+                                    crate::i18n::fill(title, &[("label", &profile.label)]),
+                                );
+                            }
+                        }
+                        PaletteMode::Hidden | PaletteMode::PerCommand => {}
+                    }
+                }
+            }
+        }
+        aliases
+    }
+
     pub(super) fn toggle_global_menu(&mut self) {
         if matches!(self.overlay, Some(ClientShellOverlay::CommandPalette(_))) {
             self.close_command_browser();
@@ -661,20 +792,7 @@ impl ClientShellState {
         if !matches!(self.overlay, Some(ClientShellOverlay::CommandPalette(_))) {
             self.browser_return = self.overlay.take().map(Box::new);
         }
-        // 两种语言的标题互为别名：界面是中文时照样能用英文词搜到，反之亦然。
-        let mut aliases = HashMap::<String, String>::new();
-        for texts in [&crate::i18n::en::TEXTS, &crate::i18n::zh_cn::TEXTS] {
-            for spec in ACTIONS
-                .iter()
-                .filter(|spec| spec.palette == PaletteMode::Focused)
-            {
-                let entry = aliases.entry(spec.key.to_owned()).or_default();
-                for alternate in [false, true] {
-                    entry.push(' ');
-                    entry.push_str(spec.title_text(texts, alternate));
-                }
-            }
-        }
+        let aliases = self.palette_aliases();
         self.overlay = Some(ClientShellOverlay::CommandPalette(
             ClientCommandPaletteOverlay {
                 focus: if view == BrowserView::Search {
@@ -1228,9 +1346,6 @@ pub(crate) fn render_command_palette(
     // 冒烟 L16：滑块长度按可视比例——之前恒为 1 行，与 `release_notes` /
     // `help` 等浮层的滚动条观感不一致，长列表里看不出还剩多少内容。复用
     // 与它们相同的 `ScrollMetrics` + `render_scrollbar_buffer`。
-    // 冒烟 L16：滑块长度按可视比例——之前恒为 1 行，与 `release_notes` /
-    // `help` 等浮层的滚动条观感不一致，长列表里看不出还剩多少内容。复用
-    // 与它们相同的 `ScrollMetrics` + `render_scrollbar_buffer`。
     if visual.len() > usize::from(body.height) && body.width > 0 && body.height > 0 {
         let track = Rect::new(body.right() - 1, body.y, 1, body.height);
         let viewport_rows = usize::from(body.height);
@@ -1358,9 +1473,9 @@ mod tests {
     /// 冒烟 L6：收紧前，纯子序列匹配对"首字符落在哪"没有任何要求——
     /// 查询 "ta" 会命中 "attach machine" 里 "aTtAch" 词中间的 t（下标 1）
     /// 与随后的 a（下标 3），两者都不是词的开头，观感是"什么都能命中"。
-    /// 收紧后：子序列的首字符必须落在文本开头或某个分词前缀（空白 /
-    /// `-_/:.` 之后）上，这类词中间起步的命中不再算数；真正的分词前缀
-    /// （如 "im" 命中 "import" 的开头）依然命中。
+    /// 收紧后：首字符必须落在词首（见 `is_word_start`），这类词中间起步
+    /// 的命中不再算数；真正的词前缀（如 "im" 命中 "import" 的开头）依然
+    /// 命中。
     #[test]
     fn fuzzy_match_requires_the_first_character_to_land_on_a_token_boundary() {
         // 收紧前：`fuzzy_match("ta", "attach machine")` 是 `Some`（旧算法
@@ -1372,8 +1487,8 @@ mod tests {
         // 分词前缀依然命中：查询是某个词的真实前缀。
         assert!(fuzzy_match("im", "ssh import").is_some());
         assert!(fuzzy_match("mac", "attach machine").is_some());
-        // 首字符正好是某个词的开头、后续字符跨到别的词：不该被首字符检查
-        // 误伤，只要子序列本身仍成立。
+        // 首字符正好是某个词的开头、后续字符另起一个词首（m 落在
+        // "machine" 开头）：照常命中。
         assert!(fuzzy_match("am", "attach machine").is_some());
     }
 
@@ -1406,5 +1521,37 @@ mod tests {
         assert_eq!(indices("kimi", "账号Kimi"), Some(vec![2, 3, 4, 5]));
         assert_eq!(indices("12", "F12"), Some(vec![1, 2]));
         assert_eq!(indices("s", "(system)"), Some(vec![1]));
+    }
+
+    /// 浮层复审 2：首字符落在词首后，后续字符曾可以跳到任意位置——"mon"
+    /// 由 "Move" 的 m、o 加上后面随便一个 n 拼成。后续字符必须紧接上一个
+    /// 命中，或者另起一个词首。
+    #[test]
+    fn fuzzy_match_continuations_are_contiguous_or_word_starts() {
+        assert_eq!(indices("mon", "Move tab left"), None);
+        assert_eq!(indices("mon", "Import machines from SSH config"), None);
+        assert_eq!(indices("mon", "Monitor & usage"), Some(vec![0, 1, 2]));
+        // 首字母缩写、词前缀接词前缀照常命中。
+        assert_eq!(indices("mtl", "Move tab left"), Some(vec![0, 5, 9]));
+        assert_eq!(indices("movta", "Move tab left"), Some(vec![0, 1, 2, 5, 6]));
+        // 贪心会先吃掉紧邻的 b、随后找不到 c；要回头改用词首的 b 才能命中。
+        assert_eq!(indices("abc", "ab bc"), Some(vec![0, 3, 4]));
+        // 连续命中比拆散到几个词首得分高。
+        let (run, _) = fuzzy_match("tab", "tab").expect("run");
+        let (acronym, _) = fuzzy_match("tab", "t a b").expect("acronym");
+        assert!(run > acronym);
+    }
+
+    /// 查询里的空白表示「下一个字符另起一词」：多词查询不要求文本在同一
+    /// 位置也有空格，只要求每段落在词首。
+    #[test]
+    fn fuzzy_match_query_whitespace_starts_a_new_word() {
+        assert_eq!(
+            indices("mon sys", "Monitor (system · accounts · settings)"),
+            Some(vec![0, 1, 2, 9, 10, 11])
+        );
+        assert_eq!(indices("new tab", "New tab"), Some(vec![0, 1, 2, 4, 5, 6]));
+        assert_eq!(indices("ne ab", "New tab"), None);
+        assert_eq!(fuzzy_match("   ", "anything"), Some((0, Vec::new())));
     }
 }
