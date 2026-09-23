@@ -1152,7 +1152,13 @@ fn help_lines(
             )),
         ));
         for (key, label) in entries {
-            let padded_key = format!(" {key:<key_width$} ");
+            // 冒烟 M5：`{:<width$}` 按 `.chars().count()` 补齐，CJK 键名
+            // （如「未设置」，3 字符占 6 显示列）会被多垫 `key_width - 3`
+            // 个空格，实际显示宽度超出 `key_width`，动作列整体右移。改按
+            // `display_width` 手写补齐空格数。
+            let key_columns = usize::from(display_width(&key));
+            let pad = " ".repeat(key_width.saturating_sub(key_columns));
+            let padded_key = format!(" {key}{pad} ");
             let width =
                 usize::from(display_width(&padded_key)) + usize::from(display_width(&label));
             lines.push((
@@ -1642,6 +1648,39 @@ mod tests {
         assert!(
             !title_style.add_modifier.contains(Modifier::DIM),
             "但不带残留 DIM"
+        );
+    }
+
+    /// 冒烟 M5：帮助筛选结果里 CJK 键名（「未设置」，3 字符 / 6 显示列）不能
+    /// 把动作列挤右——所有行的键名列显示宽度必须一致，与键名本身是否是 CJK
+    /// 无关。
+    #[test]
+    fn help_lines_align_the_action_column_for_cjk_key_labels() {
+        let mut keybinds = crate::config::Config::default()
+            .live_keybinds_with_diagnostics()
+            .map(|(keybinds, _)| keybinds)
+            .expect("default keybinds");
+        // 强制一条绑定为空，让键名列真实出现「未设置」。
+        keybinds.keybinds.detach = crate::config::ActionKeybinds::default();
+        let palette = Palette::catppuccin();
+        let lines = help_lines(&keybinds, "", &palette);
+        let unset = crate::i18n::texts().keybinds.unset;
+        let mut key_column_widths = Vec::new();
+        let mut found_unset = false;
+        for (_, line) in &lines {
+            let [key_span, _label_span] = line.spans.as_slice() else {
+                continue;
+            };
+            if key_span.content.trim() == unset {
+                found_unset = true;
+            }
+            key_column_widths.push(usize::from(display_width(&key_span.content)));
+        }
+        assert!(found_unset, "「未设置」这一行应该出现在帮助列表里");
+        let first = key_column_widths[0];
+        assert!(
+            key_column_widths.iter().all(|width| *width == first),
+            "键名列显示宽度必须整齐对齐，不因 CJK 键名多垫空格：{key_column_widths:?}"
         );
     }
 

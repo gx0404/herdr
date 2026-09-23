@@ -195,7 +195,7 @@ pub const TEXTS: Texts = Texts {
         navigator_search_footer: " 搜索类型 · 移动 ↑↓/ctrl+n/p · 打开 enter · 后退 esc",
         navigator_footer:
             " 移动 j/k · 展开 space · 筛选 a/b/w/i/d · 搜索 / · 打开 enter · 关闭 esc",
-        help_filter_hint: " / 按 / 按命令或快捷键筛选",
+        help_filter_hint: " / 按 / 筛选命令或快捷键",
         edit_footer: " 编辑 ←→/home/end · 删除 ^u/^k · 粘贴 ^y · 滚动 ↑↓ · 后退 esc",
         search_footer: " 搜索 / · 滚动 j/k/↑↓/pgup/pgdn · 关闭 esc/enter",
         no_matching_keybinds: " 没有匹配的快捷键",
