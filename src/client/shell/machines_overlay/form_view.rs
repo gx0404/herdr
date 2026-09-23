@@ -311,11 +311,9 @@ fn form_hints(form: &ClientMachineForm) -> Vec<MachineHint<'static>> {
             ],
         };
     }
-    let focused = form.focused_field();
-    let mut hints = vec![MachineHint::key("tab", t.hint_fields)];
-    if focused.is_some_and(MachineField::is_choice) {
-        hints.push(MachineHint::key("←→", t.hint_change));
-    }
+    // 先动作后导航：kit 放不下时从尾部丢非 primary 项，排在最后的纯导航键
+    // （tab / ←→）最先让位，「esc 返回」与测试 / 恢复入口留到最后。
+    let mut hints = Vec::with_capacity(6);
     if form.quick_pending() {
         hints.push(
             MachineHint::button("enter", f.hint_fill, MachineOverlayButton::QuickApply).primary(),
@@ -349,6 +347,10 @@ fn form_hints(form: &ClientMachineForm) -> Vec<MachineHint<'static>> {
         t.hint_back,
         MachineOverlayButton::Back,
     ));
+    hints.push(MachineHint::key("tab", t.hint_fields));
+    if form.focused_field().is_some_and(MachineField::is_choice) {
+        hints.push(MachineHint::key("←→", t.hint_change));
+    }
     hints
 }
 

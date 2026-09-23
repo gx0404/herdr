@@ -2729,6 +2729,46 @@ fn narrow_form_drops_the_preview_and_shows_test_steps_under_the_fields() {
     assert!(text.contains(&install), "测试步骤在字段栏下方：{text}");
 }
 
+/// 表单页脚先动作后导航：保存、测试连接、返回在前，tab / ←→ 在最后。放不下时
+/// kit 从尾部丢非 primary 项，纯导航键最先让位，「esc 返回」一直留到导航键
+/// 丢完之后。
+#[test]
+fn form_footer_puts_actions_first_and_drops_navigation_keys_first() {
+    let _dir = with_temp_state_home("form-footer-order");
+    let _lang = crate::i18n::lang_guard(crate::i18n::Lang::En);
+    let mut state = state_with_profiles(&[]);
+    add_form_overlay(&mut state, "build.example", "Build");
+    let wide = machines_footer_text(&mut state, 140, 40);
+    let at = |needle: &str| {
+        wide.find(needle)
+            .unwrap_or_else(|| panic!("页脚缺 {needle:?}：{wide}"))
+    };
+    assert!(
+        at(" enter ") < at(" ctrl+t ") && at(" ctrl+t ") < at(" esc ") && at(" esc ") < at(" tab "),
+        "先动作后导航：{wide}"
+    );
+    // 聚焦选择类字段时多一项 ←→，同样排在最后。
+    focus_field(&mut state, MachineField::StrictHostKey);
+    let choice = machines_footer_text(&mut state, 140, 40);
+    let tab = choice.find(" tab ").expect("tab 提示");
+    let arrows = choice.find(" ←→ ").expect("←→ 提示");
+    let esc = choice.find(" esc ").expect("esc 提示");
+    assert!(esc < tab && tab < arrows, "{choice}");
+
+    let mut navigation_dropped_first = false;
+    for cols in (50..=140).rev() {
+        let footer = machines_footer_text(&mut state, cols, 40);
+        let has_navigation = footer.contains(" tab ") || footer.contains(" ←→ ");
+        let has_back = machine_buttons(&state).contains(&MachineOverlayButton::Back);
+        assert!(
+            !has_navigation || has_back,
+            "{cols} 列：导航键不能比「esc 返回」留得久：{footer}"
+        );
+        navigation_dropped_first |= has_back && !has_navigation;
+    }
+    assert!(navigation_dropped_first, "扫描应覆盖只丢导航键的宽度");
+}
+
 /// 在临时状态目录里落一条档案并读回（带目录分配的真实 id）。
 fn seed_catalog_machine(label: &str, target: &str) -> SavedSshEndpoint {
     let mut catalog = crate::client::endpoint::EndpointCatalog::default();
