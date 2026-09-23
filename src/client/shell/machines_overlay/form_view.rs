@@ -75,13 +75,11 @@ fn prompt_text(prompt: FormPrompt) -> &'static str {
     }
 }
 
-/// 确认条折行后的行数：与渲染同一个 Paragraph 折行口径。
+/// 确认条折行后的行数：与渲染（`render_lines`）同一个折行函数，两边不会
+/// 一个按 ratatui 分词、一个按 `wrap_lines_for_display` 断行而差出一行。
 fn prompt_rows(prompt: FormPrompt, width: u16) -> u16 {
-    use ratatui::widgets::{Paragraph, Wrap};
     let line = Line::from(vec![Span::raw(PROMPT_ICON), Span::raw(prompt_text(prompt))]);
-    let rows = Paragraph::new(line)
-        .wrap(Wrap { trim: false })
-        .line_count(width.max(1));
+    let rows = wrap_lines_for_display(vec![line], width).len();
     u16::try_from(rows)
         .unwrap_or(PROMPT_MAX_ROWS)
         .clamp(1, PROMPT_MAX_ROWS)
@@ -750,42 +748,103 @@ fn char_display_width(ch: char) -> usize {
 /// 合并成一个 `Span`，避免每个字符单独一个 span）。
 fn build_wrapped_span_line(chars: &[(char, Style)]) -> Line<'static> {
     let mut spans: Vec<Span<'static>> = Vec::new();
-    let mut current = String::new();
-    let mut current_style: Option<Style> = None;
-    for (ch, style) in chars {
-        if current_style != Some(*style) {
-            if !current.is_empty() {
-                spans.push(Span::styled(
-                    std::mem::take(&mut current),
-                    current_style.expect("current 非空时已设过 style"),
-                ));
-            }
-            current_style = Some(*style);
+    for &(ch, style) in chars {
+        match spans.last_mut() {
+            Some(span) if span.style == style => span.content.to_mut().push(ch),
+            _ => spans.push(Span::styled(ch.to_string(), style)),
         }
-        current.push(*ch);
-    }
-    if !current.is_empty() {
-        spans.push(Span::styled(current, current_style.expect("已推入过字符")));
     }
     Line::from(spans)
 }
 
-/// 按显示宽度折行，优先在空白或标点之后断；CJK 长句没有空格，标点是唯一
-/// 自然的断点，找不到断点（单个「词」本身就超宽）才按字符硬断。ratatui
-/// 自带的 `Wrap` 只按空白分词，纯 CJK 长句会在任意字符间断开，看起来生硬
-/// （L14）；这里保留原有的按段样式。
+/// 不能出现在行首的字符（避头）：中文逗句号、闭括号、省略号，以及 ASCII 的
+/// 收尾标点。
+fn no_break_before(ch: char) -> bool {
+    matches!(
+        ch,
+        '，' | '。'
+            | '；'
+            | '：'
+            | '、'
+            | '！'
+            | '？'
+            | '）'
+            | '」'
+            | '』'
+            | '】'
+            | '》'
+            | '〉'
+            | '…'
+            | ')'
+            | ']'
+            | '}'
+            | '.'
+            | ','
+            | ';'
+            | ':'
+            | '!'
+            | '?'
+    )
+}
+
+/// 全角开括号：不能出现在行尾（避尾）；括号里的短语（如「（无效）」）整体不拆。
+fn is_wide_open(ch: char) -> bool {
+    matches!(ch, '（' | '「' | '『' | '【' | '《' | '〈')
+}
+
+fn is_wide_close(ch: char) -> bool {
+    matches!(ch, '）' | '」' | '』' | '】' | '》' | '〉')
+}
+
+/// 词内的 ASCII 分隔标点。它们**不是**正常断点；只有一个词本身比整行还宽、
+/// 行内找不到别的断点时，才退而在它们之后断（主机名、路径被迫折行时至少断在
+/// `.` `/` `-` 之后，而不是任意字符中间）。
+fn is_word_separator(ch: char) -> bool {
+    matches!(
+        ch,
+        '.' | '/' | '-' | '_' | '@' | ':' | ',' | ';' | '=' | '&' | '?' | '!'
+    )
+}
+
+/// `next` 能否起新的一行（在 `prev` 与 `next` 之间折行）。按 UAX #14 的思路
+/// 简化：空白之后可断；CJK 等宽字符前后可断（中文不靠空格分词）；避头 / 避尾
+/// 字符两侧不断；全角括号内不断，字母数字后紧跟的全角开括号也不断（值与
+/// 「（无效）」保持在一起）；ASCII 标点在词内不算断点——主机名、IP、路径只会
+/// 整体换到下一行（L14 复审）。
+fn can_break_between(prev: char, next: char, in_bracket: bool) -> bool {
+    let prev_opens = is_wide_open(prev) || matches!(prev, '(' | '[' | '{');
+    if next == ' ' || no_break_before(next) || prev_opens {
+        return false;
+    }
+    if prev == ' ' {
+        return true;
+    }
+    if in_bracket {
+        return false;
+    }
+    let prev_wide = char_display_width(prev) >= 2;
+    if is_wide_open(next) {
+        return prev_wide;
+    }
+    prev_wide || char_display_width(next) >= 2
+}
+
+/// 按显示宽度折行，保留每段样式（行级样式并进每个 span，`Line::styled` 的颜色
+/// 不会在折行后丢失）。断点见 [`can_break_between`]；一个词本身比整行还宽时，
+/// 退而在词内的 `.` `/` `-` 等之后断，还不行才按字符硬断。L14 复审：旧实现把
+/// 词内的 `.` `:` 也当断点、取溢出前最后一个，主机名被拦腰折成
+/// `…corp.` / `example.com`；纯 CJK 长句也只在标点处断，留下「此处 SSH」这样
+/// 的短行。
 fn wrap_lines_for_display(lines: Vec<Line<'static>>, width: u16) -> Vec<Line<'static>> {
-    const BREAK_AFTER: &[char] = &[
-        ' ', '，', '。', '；', '：', '、', '！', '？', ',', '.', ';', ':', '!', '?',
-    ];
     let width = usize::from(width.max(1));
     let mut out = Vec::with_capacity(lines.len());
     for line in lines {
+        let line_style = line.style;
         let chars: Vec<(char, Style)> = line
             .spans
             .iter()
             .flat_map(|span| {
-                let style = span.style;
+                let style = line_style.patch(span.style);
                 span.content.chars().map(move |ch| (ch, style))
             })
             .collect();
@@ -793,37 +852,60 @@ fn wrap_lines_for_display(lines: Vec<Line<'static>>, width: u16) -> Vec<Line<'st
             out.push(Line::default());
             continue;
         }
-        let mut row_start = 0usize;
-        let mut col = 0usize;
-        let mut last_break: Option<usize> = None;
-        let mut index = 0usize;
-        while index < chars.len() {
-            let (ch, _) = chars[index];
-            let w = char_display_width(ch);
-            if col + w > width && index > row_start {
-                let split_at = last_break.filter(|&b| b > row_start).unwrap_or(index);
-                let mut end = split_at;
-                while end > row_start && chars[end - 1].0 == ' ' {
-                    end -= 1;
-                }
-                out.push(build_wrapped_span_line(&chars[row_start..end]));
-                let mut next_start = split_at;
-                while next_start < chars.len() && chars[next_start].0 == ' ' {
-                    next_start += 1;
-                }
-                row_start = next_start;
-                last_break = None;
-                col = 0;
-                index = row_start;
-                continue;
+        // 先按整行上下文算好每个位置之前能否折行：`breakable` 是正常断点，
+        // `fallback` 是词内分隔符之后的应急断点。
+        let mut breakable = vec![false; chars.len()];
+        let mut fallback = vec![false; chars.len()];
+        let mut bracket_depth = 0usize;
+        let mut prev: Option<char> = None;
+        for (index, &(ch, _)) in chars.iter().enumerate() {
+            if let Some(prev) = prev {
+                breakable[index] = can_break_between(prev, ch, bracket_depth > 0);
+                fallback[index] = is_word_separator(prev) && ch != ' ' && !no_break_before(ch);
             }
-            col += w;
-            if BREAK_AFTER.contains(&ch) {
-                last_break = Some(index + 1);
+            if is_wide_open(ch) {
+                bracket_depth += 1;
+            } else if is_wide_close(ch) {
+                bracket_depth = bracket_depth.saturating_sub(1);
             }
-            index += 1;
+            prev = Some(ch);
         }
-        out.push(build_wrapped_span_line(&chars[row_start..]));
+        let mut row_start = 0usize;
+        while row_start < chars.len() {
+            let mut col = 0usize;
+            let mut last_break = None;
+            let mut last_fallback = None;
+            let mut split = None;
+            for (index, &(ch, _)) in chars.iter().enumerate().skip(row_start) {
+                if index > row_start {
+                    if breakable[index] {
+                        last_break = Some(index);
+                    }
+                    if fallback[index] {
+                        last_fallback = Some(index);
+                    }
+                }
+                let ch_width = char_display_width(ch);
+                if col + ch_width > width && index > row_start {
+                    split = Some(last_break.or(last_fallback).unwrap_or(index));
+                    break;
+                }
+                col += ch_width;
+            }
+            let row_end = split.unwrap_or(chars.len());
+            let mut trimmed = row_end;
+            while trimmed > row_start && chars[trimmed - 1].0 == ' ' {
+                trimmed -= 1;
+            }
+            out.push(build_wrapped_span_line(&chars[row_start..trimmed]));
+            let Some(split) = split else {
+                break;
+            };
+            row_start = split;
+            while row_start < chars.len() && chars[row_start].0 == ' ' {
+                row_start += 1;
+            }
+        }
     }
     out
 }
@@ -1077,73 +1159,144 @@ mod wrap_tests {
             .collect()
     }
 
-    /// L14：默认 `Paragraph` wrap 按空白分词，纯 CJK 长句里没有空格，会把
-    /// 整句当成一个不可断的「词」，超宽时在任意字符间硬断（冒烟截屏「已
-    /// 可」/「用。」被从中间断开）。标点应该是天然断点。
+    fn wrap_text(text: &str, width: u16) -> Vec<String> {
+        row_texts(&wrap_lines_for_display(
+            vec![Line::raw(text.to_owned())],
+            width,
+        ))
+    }
+
+    /// L14 复审：词内的 ASCII 标点不是断点。预览栏 43 列（130 列终端）下，含
+    /// 点分主机名 / IP / 路径的 ssh 命令只在空白处折行，主机名整体换到下一行；
+    /// 旧实现折成 `…build-server.corp.` / `example.com`。
     #[test]
-    fn wraps_a_long_cjk_sentence_at_punctuation_not_mid_character() {
-        let t = &crate::i18n::texts().machines;
-        let line = Line::styled(t.confirm_auth_note.to_owned(), Style::default());
-        let wrapped = wrap_lines_for_display(vec![line], 20);
-        let rows = row_texts(&wrapped);
-        assert!(rows.len() > 1, "这句话在 20 列下必须折行：{rows:?}");
-        for row in &rows {
-            assert!(
-                display_width(row) <= 20,
-                "每行不能超过给定宽度：{row:?} in {rows:?}"
-            );
-        }
-        // 至少有一行在中文标点后收尾，证明断点是标点而不是任意字符。
-        assert!(
-            rows.iter().any(|row| ['；', '，', '、', '。', ' ']
-                .iter()
-                .any(|p| row.ends_with(*p))),
-            "应当在标点或空白后断行，而不是硬断在字符中间：{rows:?}"
-        );
-        // 折行不能丢字：去掉折行插入的空白后应当能拼回原文。
-        let rebuilt: String = rows.concat();
+    fn ssh_commands_wrap_only_at_whitespace() {
         assert_eq!(
-            rebuilt
-                .chars()
-                .filter(|c| !c.is_whitespace())
-                .collect::<String>(),
-            t.confirm_auth_note
-                .chars()
-                .filter(|c| !c.is_whitespace())
-                .collect::<String>(),
-            "折行不能丢字：{rows:?}"
+            wrap_text("ssh -p 2222 deploy@build-server.corp.example.com", 43),
+            ["ssh -p 2222", "deploy@build-server.corp.example.com"]
+        );
+        assert_eq!(
+            wrap_text("ssh -p 2222 -i ~/.ssh/id_ed25519 deploy@203.0.113.5", 30),
+            ["ssh -p 2222 -i", "~/.ssh/id_ed25519", "deploy@203.0.113.5"]
+        );
+        // 字段清单行：标签后的长主机名整体换行，不在 `.` 后拦腰断开。
+        let row = format!("目标{}build-server.corp.example.com", " ".repeat(16));
+        assert_eq!(
+            wrap_text(&row, 43),
+            ["目标", "build-server.corp.example.com"]
         );
     }
 
+    /// 一个词本身比整行还宽时只能在词内断：退而断在 `.` `/` 等分隔符之后，
+    /// 连分隔符都没有才按字符硬断。
     #[test]
-    fn wraps_the_mixed_cjk_ascii_install_note_without_exceeding_width() {
-        let t = &crate::i18n::texts().machines;
-        for width in [12, 20, 30, 51, 100] {
-            let line = Line::styled(t.confirm_install_note.to_owned(), Style::default());
-            let wrapped = wrap_lines_for_display(vec![line], width);
-            for row in row_texts(&wrapped) {
-                assert!(
-                    display_width(&row) <= width,
-                    "宽度 {width} 下这一行超宽：{row:?}"
-                );
+    fn an_oversized_word_breaks_after_a_separator() {
+        assert_eq!(
+            wrap_text("deploy@build-server.corp.example.com", 20),
+            ["deploy@build-server.", "corp.example.com"]
+        );
+        assert_eq!(wrap_text("abcdefghij", 4), ["abcd", "efgh", "ij"]);
+    }
+
+    /// L14：CJK 句子按字符可断（UAX #14），行尽量填满，不再出现「此处 SSH」
+    /// 独占一行的短行；中文标点不落到行首（避头），「（无效）」这样的括号
+    /// 短语不拆开。
+    #[test]
+    fn cjk_sentences_fill_rows_and_keep_punctuation_off_row_starts() {
+        let t = &crate::i18n::texts_for(crate::i18n::Lang::ZhCn).machines;
+        // 冒烟 `81` 行 16–20 的两段说明在 43 列预览栏下的折行。
+        assert_eq!(
+            wrap_text(t.confirm_auth_note, 43),
+            [
+                "此处 SSH 不会交互提问；请确保密钥认证与主机",
+                "密钥已可用。"
+            ]
+        );
+        assert_eq!(
+            wrap_text(t.confirm_install_note, 43),
+            [
+                "Herdr 会检查远程机器，并在必要时安装、更新",
+                "或重启其 server。"
+            ]
+        );
+        for note in [t.confirm_auth_note, t.confirm_install_note] {
+            for width in [8u16, 12, 20, 26, 30, 43] {
+                let rows = wrap_text(note, width);
+                for row in &rows {
+                    assert!(
+                        display_width(row) <= width,
+                        "宽度 {width} 下这一行超宽：{row:?}"
+                    );
+                    assert!(
+                        !row.starts_with(no_break_before),
+                        "宽度 {width} 下标点落到了行首：{rows:?}"
+                    );
+                }
+                let rebuilt: String = rows
+                    .concat()
+                    .chars()
+                    .filter(|c| !c.is_whitespace())
+                    .collect();
+                let original: String = note.chars().filter(|c| !c.is_whitespace()).collect();
+                assert_eq!(rebuilt, original, "折行不能丢字：{rows:?}");
             }
         }
     }
 
-    /// 折行要保留原来每段的样式（红色的非法值标记不能被折行冲掉颜色）。
+    /// 值与紧跟的「（无效）」保持在同一行：标签后的空白处换行，括号不拆。
     #[test]
-    fn wrapping_preserves_per_span_styles() {
+    fn a_value_keeps_its_invalid_suffix_on_the_same_row() {
         let red = Style::default().fg(crate::app::state::Palette::catppuccin().red);
         let line = Line::from(vec![
-            Span::styled("标签  ", Style::default()),
+            Span::raw(format!("端口{}", " ".repeat(14))),
             Span::styled("99999（无效）", red),
         ]);
-        let wrapped = wrap_lines_for_display(vec![line], 6);
-        assert!(wrapped.len() > 1, "6 列下这一行必须折行");
-        let last = wrapped.last().expect("至少一行");
+        let wrapped = wrap_lines_for_display(vec![line], 30);
+        assert_eq!(row_texts(&wrapped), ["端口", "99999（无效）"]);
         assert!(
-            last.spans.iter().any(|s| s.style == red),
-            "折行后红色样式仍要在：{last:?}"
+            wrapped[1].spans.iter().all(|span| span.style == red),
+            "折行后红色样式仍要在：{wrapped:?}"
         );
+    }
+
+    /// 回归：旧实现只读 span 自己的样式，`Line::styled` 的行级颜色（安装说明
+    /// 的 yellow、测试步骤的绿 / 红）折行后全部丢成终端默认色。
+    #[test]
+    fn line_level_styles_survive_wrapping() {
+        let palette = crate::app::state::Palette::catppuccin();
+        let yellow = Style::default().fg(palette.yellow);
+        let wrapped = wrap_lines_for_display(
+            vec![Line::styled("Herdr 会检查远程机器，并在必要时安装", yellow)],
+            12,
+        );
+        assert!(wrapped.len() > 1, "12 列下必须折行");
+        for line in &wrapped {
+            for span in &line.spans {
+                assert_eq!(span.style.fg, Some(palette.yellow), "{wrapped:?}");
+            }
+        }
+        // span 自己的样式叠在行级样式之上。
+        let red = Style::default().fg(palette.red);
+        let wrapped = wrap_lines_for_display(
+            vec![Line::from(vec![Span::raw("ok "), Span::styled("bad", red)]).style(yellow)],
+            40,
+        );
+        assert_eq!(wrapped[0].spans[0].style.fg, Some(palette.yellow));
+        assert_eq!(wrapped[0].spans[1].style.fg, Some(palette.red));
+    }
+
+    /// 确认条的行数与渲染同一个折行函数：两边口径不一致会让最后一行被裁掉。
+    #[test]
+    fn prompt_rows_match_the_rendered_wrap() {
+        for prompt in [FormPrompt::ConfirmTest, FormPrompt::Discard] {
+            for width in [24u16, 30, 40, 60, 100] {
+                let line = Line::from(vec![Span::raw(PROMPT_ICON), Span::raw(prompt_text(prompt))]);
+                let rendered = wrap_lines_for_display(vec![line], width).len();
+                let expected = u16::try_from(rendered)
+                    .unwrap_or(PROMPT_MAX_ROWS)
+                    .clamp(1, PROMPT_MAX_ROWS);
+                assert_eq!(prompt_rows(prompt, width), expected, "{prompt:?} @ {width}");
+            }
+        }
     }
 }

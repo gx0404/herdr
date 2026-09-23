@@ -2383,6 +2383,31 @@ fn preview_ssh_line_marks_only_the_invalid_word() {
     );
 }
 
+/// 复审 L14 附带：`wrap_lines_for_display` 只读 span 自己的样式，`Line::styled`
+/// 的行级颜色在折行后全部丢成终端默认色——冒烟 `81` 行 16 的安装说明原本是
+/// yellow，上一版之后变成默认前景（测试步骤的绿 / 红同理）。
+#[test]
+fn preview_notes_keep_their_colors_after_wrapping() {
+    let mut state = state_with_profiles(&[]);
+    state.open_machine_add_form();
+    let frame = state.compose(134, 32).expect("frame");
+    let width = usize::from(frame.width);
+    let yellow = crate::protocol::color_to_u32(state.config.palette.yellow);
+    let (row, col) = find_ascii_cells(&frame, "Herdr").expect("预览里的安装说明");
+    assert_eq!(
+        frame.cells[row * width + col].fg,
+        yellow,
+        "安装说明应当是 yellow"
+    );
+    let (next_row, next_col) = find_ascii_cells(&frame, "server").expect("安装说明折行后的下半句");
+    assert!(next_row > row, "43 列预览栏下安装说明要折成两行");
+    assert_eq!(
+        frame.cells[next_row * width + next_col].fg,
+        yellow,
+        "折到下一行的部分同样是 yellow"
+    );
+}
+
 /// 复审 M8（严重）：添加表单文本字段的 Normal / Focused / Invalid 三态在输入行
 /// 上必须肉眼可辨，占位符也不能被聚焦底色吞掉。对照 `smoke-23627143`：`81`
 /// 行 6（聚焦的快速添加：占位符 overlay0 叠 surface0，与常态逐字段相同）、
