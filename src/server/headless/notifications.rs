@@ -729,7 +729,8 @@ impl HeadlessServer {
             }
             AppEvent::AgentActivityRefreshed { pane_id, .. } => {
                 // 活动树只进投影：不触发整帧重绘，改由调度器的投影脏标记安排一次
-                // 只刷投影的渲染。
+                // chrome tick——快照未变时只走投影；修订号前进时同 tick 补改戳帧
+                // （见 `dispatch_render_tick` / `projection_restamp.rs`）。
                 let pane_id = *pane_id;
                 let changed = self.app.handle_internal_event_with_render_impact(ev);
                 self.agent_activity.pane_refreshed(pane_id, changed);

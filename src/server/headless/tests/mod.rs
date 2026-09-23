@@ -1724,9 +1724,12 @@ async fn projection_only_tick_still_streams_a_coincident_dirty_surface() {
     shutdown_test_runtimes(&mut server);
 }
 
-/// RS-12：纯 chrome 变化（tab-bar 文本）只刷新客户端 shell 投影，不重发
-/// pane surface。/// RS-12：纯 chrome 变化（tab-bar 文本）只刷新客户端 shell 投影，不重发
-/// pane surface。
+/// RS-12：纯 chrome 变化（tab-bar 文本）经 `stream_client_shell_projections`
+/// 只下发投影，该函数本身不发 pane surface。
+///
+/// 本用例只覆盖 `stream_client_shell_projections`：修订号前进后由
+/// `dispatch_render_tick` 同 tick 补改戳帧的路径见 `tests/agent_activity.rs`
+/// 的 `external_refresh_pairs_the_advanced_snapshot_with_a_surface` 等用例。
 #[tokio::test]
 async fn chrome_only_change_streams_the_projection_without_a_pane_surface() {
     let mut server = test_headless_server();

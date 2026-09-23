@@ -529,8 +529,9 @@ impl HeadlessServer {
                 needs_graphics_render = false;
                 crate::render_prof::event("full_render_cause.scheduled_tasks");
             } else if scheduled.chrome {
-                // RS-12：纯 chrome（tab-bar 文本、配置诊断、toast 过期）只刷新
-                // 客户端投影，不把整面 pane surface 重发一遍。
+                // RS-12：纯 chrome（tab-bar 文本、配置诊断、toast 过期）不重渲染
+                // pane：快照未变时只走投影；修订号前进时同 tick 补改戳帧（见
+                // `dispatch_render_tick` / `projection_restamp.rs`）。
                 needs_render = true;
                 projection_only_render = true;
                 crate::render_prof::event("projection_only.scheduled_chrome");
@@ -3674,7 +3675,8 @@ impl HeadlessServer {
         }
 
         // 活动树刷新调度：内部限流（每秒一轮，有新提示时立即）；外部来源只在有
-        // 客户端连接时轮询。落库后的投影变化只刷投影，直到真正同步给客户端。
+        // 客户端连接时轮询。落库后的投影变化按 chrome 处理（不重渲染 pane），
+        // 脏标记保持到真正同步给客户端为止。
         let external_demand = self.has_app_client();
         self.agent_activity
             .tick(&mut self.app.state, now, external_demand);
@@ -3739,7 +3741,9 @@ impl HeadlessServer {
 }
 
 /// RS-12：定时任务变化的影响面。`surface` 需要整帧重绘；`chrome` 只影响客户端
-/// 投影（快照 / agent view）与客户端本地 chrome，不必重发 pane surface。
+/// 投影（快照 / agent view）与客户端本地 chrome，不必重渲染 pane：快照未变时
+/// 只走投影；修订号前进时同 tick 补一帧已提交基线的改戳帧（见
+/// `dispatch_render_tick` / `projection_restamp.rs`）。
 #[derive(Debug, Clone, Copy, Default)]
 struct ScheduledTaskImpact {
     surface: bool,
