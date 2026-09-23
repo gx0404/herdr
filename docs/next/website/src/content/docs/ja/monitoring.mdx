@@ -122,7 +122,7 @@ auth_mode = "api"
 credential_env = "ANTHROPIC_ADMIN_KEY"
 ```
 
-OpenAI の API アカウントでは、`organization` で組織を選びます（`OpenAI-Organization` ヘッダーとして送られます）。`account_user` は今も受け付けますが、現在これを使うプロバイダーはありません。API キーのアカウントは OpenAI、Anthropic、Moonshot、OpenRouter に対応します。OpenRouter では管理キーと `billing_scope = "account"` を使い、既定のスコープは現在の API キーです。`base_url` は登録済みの公式ホストだけを受け付け、Kimi のローカル API は loopback に限られます。
+OpenAI の API アカウントでは、`organization` で組織を選びます（`OpenAI-Organization` ヘッダーとして送られます）。`account_user` は非推奨です。これを使うプロバイダーはないため無視され、設定したままのアカウントには削除を促す設定診断が表示されます。API キーのアカウントは OpenAI、Anthropic、Moonshot、OpenRouter に対応します。OpenRouter では管理キーと `billing_scope = "account"` を使い、既定のスコープは現在の API キーです。`base_url` は登録済みの公式ホストだけを受け付け、Kimi のローカル API は loopback に限られます。
 
 ## 公式コールバック
 

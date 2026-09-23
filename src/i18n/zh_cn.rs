@@ -1184,6 +1184,7 @@ pub const TEXTS: Texts = Texts {
         machine_list_about: "列出已保存的 SSH 机器",
         machine_add_about: "准备远程 Herdr server 并保存一台 SSH 机器",
         machine_label_help: "设置侧栏中显示的机器标签",
+        machine_add_label_help: "设置侧栏中显示的机器标签（给了 SSH_TARGET 时必填；用 --from-config 时缺省取 HOST）",
         machine_remote_session_help: "设置远程机器上显式的 Herdr 会话",
         machine_group_help: "设置机器在侧栏中所属的分组",
         machine_tag_help: "添加组织标签（可重复）",
@@ -1205,7 +1206,7 @@ pub const TEXTS: Texts = Texts {
         machine_remove_about: "移除已保存的 SSH 机器",
         machine_enable_about: "启用已保存的 SSH 机器",
         machine_disable_about: "禁用已保存的 SSH 机器",
-        machine_from_config_help: "从 SSH 配置注册 HOST，并带上其全部指令",
+        machine_from_config_help: "从 SSH 配置注册 HOST，并带上其全部指令；取代 SSH_TARGET 与连接选项",
         machine_import_about: "从 SSH 配置（~/.ssh/config）导入机器",
         machine_import_file_help: "读取指定的 SSH 配置，而不是默认的 ~/.ssh/config",
         machine_import_host_help: "只导入匹配 PATTERN 的主机（可重复）",
@@ -1442,7 +1443,7 @@ pub const TEXTS: Texts = Texts {
 
         machine_list_usage: "用法：herdr machine list [--json]",
         machine_add_usage:
-            "用法：herdr machine add <ssh-target> --label <label> [--remote-session <name>] [--group <group>] [--tag <tag>]...\n  [--color <color>] [--port <port>] [--user <user>] [--identity-file <path>]... [--identities-only]\n  [--identity-agent <path>] [--strict-host-key-checking ask|accept-new|yes] [--proxy-jump <target|profile:id>]...\n  [--forward-agent] [--server-alive-interval <secs>] [--server-alive-count-max <count>]\n  [--control-persist <value>] [--remote-command <command>]",
+            "用法：herdr machine add <ssh-target> --label <label> [--remote-session <name>] [--group <group>] [--tag <tag>]...\n  [--color <color>] [--port <port>] [--user <user>] [--identity-file <path>]... [--identities-only]\n  [--identity-agent <path>] [--strict-host-key-checking ask|accept-new|yes] [--proxy-jump <target|profile:id>]...\n  [--forward-agent] [--server-alive-interval <secs>] [--server-alive-count-max <count>]\n  [--control-persist <value>] [--remote-command <command>]\n  或：herdr machine add --from-config <host> [--label <label>] [--remote-session <name>] [--group <group>]\n  [--tag <tag>]... [--color <color>]",
         machine_rename_usage: "用法：herdr machine rename <profile-id> --label <label>",
         machine_remove_usage: "用法：herdr machine remove <profile-id>",
         machine_set_enabled_usage_fmt: "用法：herdr machine {action} <profile-id>",

@@ -1298,6 +1298,88 @@ mod tests {
             .contains("Usage: herdr agent rename <TARGET> <NAME>|--clear"));
     }
 
+    /// 文档终审 D13：`machine add --from-config HOST` 既不带目标也不必带 `--label`
+    /// （标签缺省取 HOST），帮助却把两者都标成必填。规格与
+    /// `cli/machine.rs::parse_add_args` 同口径：目标与 `--from-config` 二选一且必有
+    /// 其一；`--label` 只在给了目标时必填；`--from-config` 不能与 SSH 连接选项同用。
+    #[test]
+    fn machine_add_spec_matches_the_from_config_form() {
+        for valid in [
+            &["herdr", "machine", "add", "--from-config", "devbox"][..],
+            &[
+                "herdr",
+                "machine",
+                "add",
+                "--from-config",
+                "devbox",
+                "--label",
+                "Dev",
+                "--group",
+                "lab",
+            ][..],
+            &[
+                "herdr", "machine", "add", "me@host", "--label", "Dev", "--port", "2222",
+            ][..],
+        ] {
+            assert!(
+                super::command().try_get_matches_from(valid).is_ok(),
+                "{valid:?}"
+            );
+        }
+        for invalid in [
+            &["herdr", "machine", "add"][..],
+            &["herdr", "machine", "add", "me@host"][..],
+            &[
+                "herdr",
+                "machine",
+                "add",
+                "me@host",
+                "--label",
+                "Dev",
+                "--from-config",
+                "devbox",
+            ][..],
+            &[
+                "herdr",
+                "machine",
+                "add",
+                "--from-config",
+                "devbox",
+                "--port",
+                "2222",
+            ][..],
+        ] {
+            assert!(
+                super::command().try_get_matches_from(invalid).is_err(),
+                "{invalid:?}"
+            );
+        }
+
+        let _guard = crate::i18n::lang_guard(crate::i18n::Lang::En);
+        let mut help = Vec::new();
+        super::write_requested_help(
+            &[
+                "herdr".to_string(),
+                "machine".to_string(),
+                "add".to_string(),
+                "--help".to_string(),
+            ],
+            &mut help,
+            || {},
+        )
+        .unwrap();
+        let help = String::from_utf8(help).unwrap();
+        let usage = help
+            .lines()
+            .find(|line| line.starts_with("Usage:"))
+            .expect("帮助有 Usage 行");
+        assert!(
+            !usage.contains("--label <LABEL>"),
+            "--from-config 用法不需要 --label：{usage}"
+        );
+        assert!(usage.contains("--from-config <HOST>"), "{usage}");
+    }
+
     #[test]
     fn worktree_json_compatibility_flag_stays_out_of_public_spec() {
         let cmd = super::command();

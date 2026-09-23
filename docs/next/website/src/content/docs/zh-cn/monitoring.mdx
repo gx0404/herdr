@@ -124,7 +124,7 @@ auth_mode = "api"
 credential_env = "ANTHROPIC_ADMIN_KEY"
 ```
 
-对 OpenAI 的 API 账号，`organization` 用来选择组织（作为 `OpenAI-Organization` 请求头发送）；`account_user` 仍可填写，但目前没有厂商使用它。API 密钥账号覆盖 OpenAI、Anthropic、Moonshot 与 OpenRouter；OpenRouter 使用管理密钥并设 `billing_scope = "account"` 查询账号总额，默认只查询当前 API 密钥。`base_url` 只接受已登记的官方地址；Kimi 本地 API 只允许回环地址。
+对 OpenAI 的 API 账号，`organization` 用来选择组织（作为 `OpenAI-Organization` 请求头发送）；`account_user` 已弃用：没有厂商使用它，填写后被忽略，并给出一条提示删掉它的配置诊断。API 密钥账号覆盖 OpenAI、Anthropic、Moonshot 与 OpenRouter；OpenRouter 使用管理密钥并设 `billing_scope = "account"` 查询账号总额，默认只查询当前 API 密钥。`base_url` 只接受已登记的官方地址；Kimi 本地 API 只允许回环地址。
 
 ## 官方回调
 

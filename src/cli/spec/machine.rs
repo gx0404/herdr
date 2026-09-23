@@ -1,6 +1,22 @@
-use clap::{Arg, Command};
+use clap::{Arg, ArgGroup, Command};
 
 use super::{flag, json_flag, option, path_option, repeatable_option};
+
+/// `machine add` 里描述 SSH 连接的选项：`--from-config` 时它们全部取自 SSH 配置。
+const ADD_CONNECTION_OPTIONS: [&str; 12] = [
+    "port",
+    "user",
+    "identity-file",
+    "identities-only",
+    "identity-agent",
+    "strict-host-key-checking",
+    "proxy-jump",
+    "forward-agent",
+    "server-alive-interval",
+    "server-alive-count-max",
+    "control-persist",
+    "remote-command",
+];
 
 pub(super) fn command() -> Command {
     let t = &crate::i18n::texts().cli_help;
@@ -14,15 +30,12 @@ pub(super) fn command() -> Command {
         .subcommand(
             Command::new("add")
                 .about(t.machine_add_about)
+                .arg(Arg::new("ssh-target").value_name("SSH_TARGET"))
                 .arg(
-                    Arg::new("ssh-target")
-                        .value_name("SSH_TARGET")
-                        .required(true),
-                )
-                .arg(
+                    // 给了目标才必填；`--from-config` 时缺省取 HOST（`parse_add_args`）。
                     option("label", "LABEL")
-                        .required(true)
-                        .help(t.machine_label_help),
+                        .required_unless_present("from-config")
+                        .help(t.machine_add_label_help),
                 )
                 .arg(option("remote-session", "NAME").help(t.machine_remote_session_help))
                 .arg(option("group", "GROUP").help(t.machine_group_help))
@@ -57,7 +70,20 @@ pub(super) fn command() -> Command {
                 )
                 .arg(option("control-persist", "VALUE").help(t.machine_control_persist_help))
                 .arg(option("remote-command", "COMMAND").help(t.machine_remote_command_help))
-                .arg(option("from-config", "HOST").help(t.machine_from_config_help)),
+                .arg(option("from-config", "HOST").help(t.machine_from_config_help))
+                // 目标与 `--from-config` 二选一且必有其一；后者的连接指令全来自 SSH 配置，
+                // 不能再叠加连接选项（与 `cli/machine.rs::parse_add_args` 同口径）。
+                .group(
+                    ArgGroup::new("source")
+                        .args(["ssh-target", "from-config"])
+                        .required(true),
+                )
+                .group(
+                    ArgGroup::new("connection")
+                        .args(ADD_CONNECTION_OPTIONS)
+                        .multiple(true)
+                        .conflicts_with("from-config"),
+                ),
         )
         .subcommand(import_command())
         .subcommand(

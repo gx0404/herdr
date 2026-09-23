@@ -137,6 +137,8 @@ pub struct UsageAccountConfig {
     pub profile_dir: Option<std::path::PathBuf>,
     pub credential_env: Option<String>,
     pub organization: Option<String>,
+    /// 已弃用：没有任何厂商再用它。仍接受以免旧配置被整段拒收，填了它的账号在
+    /// [`diagnostics`] 里得到一条弃用提示。
     pub account_user: Option<String>,
     pub billing_scope: Option<String>,
     pub base_url: Option<String>,
@@ -160,6 +162,12 @@ pub(crate) fn diagnostics(monitor: &MonitorConfig, usage: &AccountUsageConfig) -
         }) {
             messages.push("account_usage.accounts.credential_env 必须是环境变量名称".into());
         }
+        if account.account_user.is_some() {
+            messages.push(format!(
+                "account_usage.accounts.account_user is deprecated and ignored (account '{}'); no provider uses it, remove it",
+                account.id
+            ));
+        }
     }
     messages
 }
@@ -180,6 +188,30 @@ mod tests {
         assert!(!AccountUsageConfig::default().interactive_probe);
         let opted_in: AccountUsageConfig = toml::from_str("interactive_probe = true").unwrap();
         assert!(opted_in.interactive_probe);
+    }
+
+    /// 文档终审 D13：`account_user` 已没有任何厂商使用。字段仍保留，旧配置不会因它被
+    /// 整段拒收；填了它的账号给一条弃用诊断，提示删掉。没填的不报。
+    #[test]
+    fn account_user_is_accepted_but_reported_as_deprecated() {
+        let mut config: AccountUsageConfig = toml::from_str(
+            r#"
+[[accounts]]
+id = "work"
+agent = "codex"
+account_user = "me"
+"#,
+        )
+        .unwrap();
+        assert_eq!(config.accounts[0].account_user.as_deref(), Some("me"));
+        let messages = diagnostics(&MonitorConfig::default(), &config);
+        assert_eq!(messages.len(), 1, "{messages:?}");
+        assert!(
+            messages[0].contains("account_user") && messages[0].contains("work"),
+            "{messages:?}"
+        );
+        config.accounts[0].account_user = None;
+        assert!(diagnostics(&MonitorConfig::default(), &config).is_empty());
     }
 
     #[test]

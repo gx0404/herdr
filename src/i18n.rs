@@ -1434,6 +1434,8 @@ pub struct CliHelpTexts {
     pub machine_list_about: &'static str,
     pub machine_add_about: &'static str,
     pub machine_label_help: &'static str,
+    /// `machine add --label`：给了目标时必填，`--from-config` 时缺省取 HOST。
+    pub machine_add_label_help: &'static str,
     pub machine_remote_session_help: &'static str,
     pub machine_group_help: &'static str,
     pub machine_tag_help: &'static str,

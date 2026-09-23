@@ -1177,6 +1177,8 @@ pub const TEXTS: Texts = Texts {
         machine_list_about: "List saved SSH machines",
         machine_add_about: "Prepare the remote Herdr server and save an SSH machine",
         machine_label_help: "Set the machine label shown in the sidebar",
+        machine_add_label_help:
+            "Set the machine label shown in the sidebar (required with SSH_TARGET; defaults to HOST with --from-config)",
         machine_remote_session_help: "Set the explicit Herdr session on the remote machine",
         machine_group_help: "Set the sidebar group the machine is listed under",
         machine_tag_help: "Add an organization tag (repeatable)",
@@ -1199,7 +1201,7 @@ pub const TEXTS: Texts = Texts {
         machine_remove_about: "Remove a saved SSH machine",
         machine_enable_about: "Enable a saved SSH machine",
         machine_disable_about: "Disable a saved SSH machine",
-        machine_from_config_help: "Register HOST from your SSH config with its full directives",
+        machine_from_config_help: "Register HOST from your SSH config with its full directives, in place of SSH_TARGET and the connection options",
         machine_import_about: "Import machines from your SSH config (~/.ssh/config)",
         machine_import_file_help: "Read this SSH config instead of the default ~/.ssh/config",
         machine_import_host_help: "Import only hosts matching PATTERN (repeatable)",
@@ -1445,7 +1447,7 @@ pub const TEXTS: Texts = Texts {
 
         machine_list_usage: "usage: herdr machine list [--json]",
         machine_add_usage:
-            "usage: herdr machine add <ssh-target> --label <label> [--remote-session <name>] [--group <group>] [--tag <tag>]...\n  [--color <color>] [--port <port>] [--user <user>] [--identity-file <path>]... [--identities-only]\n  [--identity-agent <path>] [--strict-host-key-checking ask|accept-new|yes] [--proxy-jump <target|profile:id>]...\n  [--forward-agent] [--server-alive-interval <secs>] [--server-alive-count-max <count>]\n  [--control-persist <value>] [--remote-command <command>]",
+            "usage: herdr machine add <ssh-target> --label <label> [--remote-session <name>] [--group <group>] [--tag <tag>]...\n  [--color <color>] [--port <port>] [--user <user>] [--identity-file <path>]... [--identities-only]\n  [--identity-agent <path>] [--strict-host-key-checking ask|accept-new|yes] [--proxy-jump <target|profile:id>]...\n  [--forward-agent] [--server-alive-interval <secs>] [--server-alive-count-max <count>]\n  [--control-persist <value>] [--remote-command <command>]\n   or: herdr machine add --from-config <host> [--label <label>] [--remote-session <name>] [--group <group>]\n  [--tag <tag>]... [--color <color>]",
         machine_rename_usage: "usage: herdr machine rename <profile-id> --label <label>",
         machine_remove_usage: "usage: herdr machine remove <profile-id>",
         machine_set_enabled_usage_fmt: "usage: herdr machine {action} <profile-id>",

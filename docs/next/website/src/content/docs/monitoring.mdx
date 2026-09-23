@@ -122,7 +122,7 @@ auth_mode = "api"
 credential_env = "ANTHROPIC_ADMIN_KEY"
 ```
 
-For OpenAI API accounts, `organization` selects the organization (sent as the `OpenAI-Organization` header); `account_user` is still accepted but no current provider uses it. API-key accounts cover OpenAI, Anthropic, Moonshot and OpenRouter. OpenRouter uses a management key with `billing_scope = "account"`; its default scope is the current API key. `base_url` only accepts registered official hosts; Kimi's local API is restricted to loopback.
+For OpenAI API accounts, `organization` selects the organization (sent as the `OpenAI-Organization` header); `account_user` is deprecated: no provider uses it, so it is ignored, and an account that still sets it gets a config diagnostic asking you to remove it. API-key accounts cover OpenAI, Anthropic, Moonshot and OpenRouter. OpenRouter uses a management key with `billing_scope = "account"`; its default scope is the current API key. `base_url` only accepts registered official hosts; Kimi's local API is restricted to loopback.
 
 ## Official callbacks
 
