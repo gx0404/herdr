@@ -285,6 +285,11 @@ impl ClientShellState {
                 Action::Menu if launcher_hovered => {
                     base.fg(palette.text).bg(self.config.components.hover_bg)
                 }
+                // 锁定布局时复位点了也无效（文档终审 D1），与页脚里锁定后置灰的
+                // 提示用同一种灰、不加粗。
+                Action::Reset if self.workbench.dock.locked => {
+                    Style::default().fg(palette.overlay0).bg(palette.surface0)
+                }
                 _ => base,
             };
             put(canvas.buffer(), rect, &label, style);

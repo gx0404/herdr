@@ -402,14 +402,18 @@ impl ClientShellState {
             .map(|(_, action)| action.clone());
         if let Some(action) = action {
             let creates_tab = matches!(&action, Action::NewTab(_));
+            // 锁定布局时顶栏的复位置灰且无效（文档终审 D1）：换成默认布局会顺带
+            // 解除锁定、关掉已停靠的监控面板。命中照样消费，不落到其它点击。
+            let inert = matches!(action, Action::Reset) && self.workbench.dock.locked;
             // 判据是「是否会写入 `ClientChromePreferences`」而不是「是否呈现
             // 状态」：标签滚动、全局菜单、`arranging` 开关与开始拖 pane 都不进
             // `DockLayout` / `saved_layouts()`，标脏只会换来一次无效全量写
             // （PERF-01）。
-            let dirty = !matches!(
-                action,
-                Action::ScrollTabs(..) | Action::Menu | Action::Arrange | Action::Pane(_)
-            );
+            let dirty = !inert
+                && !matches!(
+                    action,
+                    Action::ScrollTabs(..) | Action::Menu | Action::Arrange | Action::Pane(_)
+                );
             match action {
                 Action::ScrollTabs(group, delta) => {
                     let scroll = self.workbench.tab_scroll.entry(group).or_default();
@@ -431,8 +435,10 @@ impl ClientShellState {
                 Action::Arrange => self.workbench.arranging = !self.workbench.arranging,
                 Action::Lock => self.workbench.dock.locked = !self.workbench.dock.locked,
                 Action::Reset => {
-                    self.workbench.dock = self.default_dock();
-                    self.workbench.last_focus = None;
+                    if !inert {
+                        self.workbench.dock = self.default_dock();
+                        self.workbench.last_focus = None;
+                    }
                 }
                 Action::Maximize(panel) => {
                     self.focus_workbench_panel(panel.clone());

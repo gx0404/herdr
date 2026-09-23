@@ -2309,3 +2309,78 @@ fn unpaired_zoomed_view_keeps_the_frame_only_while_the_zoom_target_is_unchanged(
         "缩放目标换成 pane_2：旧帧画的是 pane_1，画占位：{text}"
     );
 }
+
+/// 文档终审 D1：锁定布局时，调整布局模式里的「复位」置灰、点击无效。以前照样
+/// 可点：换成默认布局，顺带解除锁定并关掉已停靠的监控面板，还标脏落盘。
+/// 解锁后同一按钮恢复可用（accent 加粗），点它才恢复默认布局。
+#[test]
+fn locked_layout_dims_reset_and_ignores_its_clicks() {
+    use crate::client::shell::workbench::interaction::Action;
+    let reset_rect = |state: &ClientShellState| {
+        state
+            .workbench
+            .hits
+            .iter()
+            .find(|(_, action)| matches!(action, Action::Reset))
+            .map(|(rect, _)| *rect)
+            .expect("调整布局模式的顶栏有复位按钮")
+    };
+    let path = preferences_path("locked-reset");
+    let mut state = ready();
+    state.config.mouse_capture = true;
+    state.workbench_open(PanelId::Monitor);
+    state.workbench.arranging = true;
+    state.workbench.dock.locked = true;
+    state.config.preferences_path = Some(path.clone());
+    state.compose(133, 32).expect("锁定下的调整布局");
+    let palette = state.config.palette.clone();
+    let reset = reset_rect(&state);
+    {
+        let buffer = state.compose_buffer.as_ref().expect("保留帧缓冲");
+        let label: String = (reset.x..reset.right())
+            .map(|x| buffer[(x, reset.y)].symbol().to_owned())
+            .collect();
+        assert!(label.contains('复'), "复位按钮仍在顶栏：{label:?}");
+        // 宽字符的续格被 ratatui 复位成默认样式，只看画了字的格。
+        for x in
+            (reset.x..reset.right()).filter(|x| !buffer[(*x, reset.y)].symbol().trim().is_empty())
+        {
+            let cell = &buffer[(x, reset.y)];
+            assert_eq!(cell.fg, palette.overlay0, "锁定时复位置灰（第 {x} 列）");
+            assert!(
+                !cell.modifier.contains(Modifier::BOLD),
+                "置灰的复位不加粗（第 {x} 列）"
+            );
+        }
+    }
+
+    let layout = state.workbench.dock.clone();
+    sgr_click(&mut state, reset.x + 1, reset.y);
+    assert_eq!(state.workbench.dock, layout, "锁定时点复位不改布局");
+    assert!(state.workbench.dock.locked, "锁定不被复位解除");
+    assert!(
+        state.workbench.dock.root.contains(&PanelId::Monitor),
+        "已停靠的监控面板保留"
+    );
+    assert!(
+        state.preferences_dirty_since.is_none(),
+        "无效点击不标脏、不落盘"
+    );
+
+    state.workbench.dock.locked = false;
+    state.compose(133, 32).expect("解锁后的调整布局");
+    let reset = reset_rect(&state);
+    {
+        let buffer = state.compose_buffer.as_ref().expect("保留帧缓冲");
+        let cell = &buffer[(reset.x + 1, reset.y)];
+        assert_eq!(cell.fg, palette.accent, "解锁后复位恢复可用");
+        assert!(cell.modifier.contains(Modifier::BOLD));
+    }
+    sgr_click(&mut state, reset.x + 1, reset.y);
+    assert!(
+        !state.workbench.dock.root.contains(&PanelId::Monitor),
+        "解锁后复位恢复默认布局"
+    );
+    assert!(state.preferences_dirty_since.is_some(), "改了布局才标脏");
+    let _ = std::fs::remove_file(&path);
+}
