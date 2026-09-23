@@ -80,10 +80,21 @@
 //! 根会话就是 pane 本身，不出节点；它的直接子项 `parent_id` 为空。
 //! - `session:<会话 id>`：子会话（`Subagent`）。`agent_type` 取 `agent` 列（缺省从标题
 //!   的 `(@name subagent)` 后缀取），`summary` 是模型、本地费用与 token 用量（本地
-//!   统计，非账号额度）。状态：最后一条 assistant 消息带 `error` → Failed；带
-//!   `time.completed` → Done；否则（或最后一条是 user）→ Running，但 `time_updated`
-//!   超过 [`RUNNING_STALE_MS`] 不再变化时降为 Unknown；没有消息 → Pending；
-//!   `time_archived` 非空 → Done。`read` 返回该会话的部件流（`Text`）。
+//!   统计，非账号额度）。状态：最后一条 assistant 消息带 `error` → Failed，摘要以
+//!   `错误名: 说明` 开头；带 `time.completed` → Done；否则（或最后一条是 user）→
+//!   Running，但 `time_updated` 超过 [`RUNNING_STALE_MS`] 不再变化时降为 Unknown；
+//!   没有消息 → Pending；`time_archived` 非空 → Done。`read` 返回该会话的部件流
+//!   （`Text`）。
+//!
+//!   `error` 的形状按 1.18.32 捆绑源码核实：`{name, data}`，`name` ∈ `APIError` /
+//!   `ProviderAuthError` / `UnknownError` / `MessageOutputLengthError` /
+//!   `MessageAbortedError` / `StructuredOutputError` / `ContextOverflowError` /
+//!   `ContentFilterError`，除 `MessageOutputLengthError` 外 `data.message` 都是字符串；
+//!   `APIError` 另带响应头与响应体 → 只取 `name` 与截断后的 `data.message`。**库里看不出
+//!   的失败**：默认模型已不在提供商目录时（`ProviderModelNotFoundError`），
+//!   `SessionPrompt.getModel` 只经 Bus 发不落库的 `session.error`（没有 `durable`
+//!   标记，不进 `event` 表），随即在建 assistant 消息之前退出——库里最后一条仍是 user
+//!   消息、没有任何错误字段，节点只能按上面的时间规则从 Running 降为 Unknown。
 //! - `todo:<会话 id>:<position>`：待办（`Todo`），没有可读内容；`pending` → Pending、
 //!   `in_progress` → Running、`completed` / `cancelled` → Done（摘要注明 cancelled）。
 //!
@@ -141,6 +152,10 @@ const MAX_TODO_ROWS: usize = 128;
 const SQL_TITLE_CHARS: usize = 160;
 const MAX_LABEL_CHARS: usize = 120;
 const MAX_SUMMARY_CHARS: usize = 160;
+/// 失败子会话的错误说明在 SQL 里先截到这么多字符（APIError 等还带响应体，永不取回），
+/// 再由 `clean_line` 裁到 [`MAX_ERROR_CHARS`]，给摘要里的模型与用量留出位置。
+const SQL_ERROR_CHARS: usize = 120;
+const MAX_ERROR_CHARS: usize = 100;
 const MAX_ID_LEN: usize = 64;
 
 /// 模型名在 `session.model` 里的路径：1.17.20 实测 `{providerID, id, variant?}`，
@@ -317,6 +332,9 @@ struct SessionRow {
     last_role: Option<String>,
     last_completed: Option<u64>,
     last_error: bool,
+    /// 最后一条消息 `error.name`（如 `APIError`）与 `error.data.message`（SQL 里已截断）。
+    last_error_name: Option<String>,
+    last_error_message: Option<String>,
 }
 
 struct TodoRow {
@@ -386,7 +404,9 @@ fn tree_sql(root: &str, offset: usize) -> String {
            s.cost, s.tokens_input, s.tokens_output, s.tokens_reasoning, \
            CASE WHEN json_valid(lm.data) THEN json_extract(lm.data, '$.role') END AS last_role, \
            CASE WHEN json_valid(lm.data) THEN json_extract(lm.data, '$.time.completed') END AS last_completed, \
-           CASE WHEN json_valid(lm.data) THEN json_type(lm.data, '$.error') END AS last_error \
+           CASE WHEN json_valid(lm.data) THEN json_type(lm.data, '$.error') END AS last_error, \
+           CASE WHEN json_valid(lm.data) THEN json_extract(lm.data, '$.error.name') END AS last_error_name, \
+           CASE WHEN json_valid(lm.data) THEN substr(json_extract(lm.data, '$.error.data.message'), 1, {SQL_ERROR_CHARS}) END AS last_error_message \
          FROM tree t JOIN session s ON s.id = t.id \
          LEFT JOIN message lm ON lm.id = (\
            SELECT id FROM message WHERE session_id = s.id \
@@ -433,6 +453,8 @@ fn session_row(row: &Map<String, Value>) -> Option<SessionRow> {
             .get("last_error")
             .and_then(Value::as_str)
             .is_some_and(|kind| kind != "null"),
+        last_error_name: text_field(row, "last_error_name"),
+        last_error_message: text_field(row, "last_error_message"),
         id,
     })
 }
@@ -614,9 +636,12 @@ fn session_status(session: &SessionRow, now_ms: u64) -> AgentActivityStatus {
     }
 }
 
-/// 摘要：模型、本地费用与 token 用量（本地统计，不是账号额度）。
+/// 摘要：失败时先写错误，然后是模型、本地费用与 token 用量（本地统计，不是账号额度）。
 fn session_summary(session: &SessionRow, status: AgentActivityStatus) -> Option<String> {
     let mut parts: Vec<String> = Vec::new();
+    if status == AgentActivityStatus::Failed {
+        parts.extend(error_summary(session));
+    }
     if let Some(model) = session
         .model_id
         .as_deref()
@@ -647,6 +672,23 @@ fn session_summary(session: &SessionRow, status: AgentActivityStatus) -> Option<
         return None;
     }
     clean_line(&parts.join(" · "), MAX_SUMMARY_CHARS)
+}
+
+/// 失败原因：`错误名: 说明`；只有其一时只写其一。说明压成单行并截到
+/// [`MAX_ERROR_CHARS`]，免得一条长报错把模型与用量挤出摘要。
+fn error_summary(session: &SessionRow) -> Option<String> {
+    let name = session
+        .last_error_name
+        .as_deref()
+        .and_then(|name| clean_line(name, MAX_LABEL_CHARS));
+    let message = session
+        .last_error_message
+        .as_deref()
+        .and_then(|message| clean_line(message, MAX_ERROR_CHARS));
+    match (name, message) {
+        (Some(name), Some(message)) => Some(format!("{name}: {message}")),
+        (name, message) => name.or(message),
+    }
 }
 
 fn format_tokens(count: u64) -> String {
@@ -1582,6 +1624,87 @@ mod tests {
         assert_eq!(numeric.summary, None);
     }
 
+    /// 复验 N15：子会话最后一条 assistant 消息带 `error` 时节点落 failed，摘要以错误名
+    /// 与说明开头，排在模型与用量之前。`error` 的形状按 opencode 1.18.32 捆绑源码核实
+    /// （`{name, data: {message?}}`，见模块文档），夹具是手写的行，不来自任何真实会话。
+    /// 说明压成单行、过长截断带省略号；没有说明时只写错误名，没有错误名时只写说明。
+    #[test]
+    fn failed_sessions_lead_their_summary_with_the_error() {
+        let db = FakeDb::new(vec![
+            ("WITH RECURSIVE", Ok(fixture("sessions-errors.json"))),
+            ("FROM todo", Ok("[]".to_owned())),
+        ]);
+        let nodes = discover(&db);
+
+        let api = node(&nodes, "session:ses_apierror000000000000000000");
+        assert_eq!(api.status, AgentActivityStatus::Failed);
+        assert_eq!(
+            api.summary.as_deref(),
+            Some("APIError: Rate limit exceeded, retry after 60s · glm-4.7 · $0.01 · 1.2k in · 0 out")
+        );
+        assert_eq!(api.ended_at_ms, Some(1_726_989_060_000));
+
+        let auth = node(&nodes, "session:ses_autherror00000000000000000");
+        assert_eq!(
+            auth.status,
+            AgentActivityStatus::Failed,
+            "没有 time.completed 也按错误落 failed"
+        );
+        assert_eq!(
+            auth.summary.as_deref(),
+            Some("ProviderAuthError: Invalid API key · glm-4.7")
+        );
+
+        let length = node(&nodes, "session:ses_lengthcap00000000000000000");
+        assert_eq!(length.status, AgentActivityStatus::Failed);
+        assert_eq!(
+            length.summary.as_deref(),
+            Some("MessageOutputLengthError · glm-4.7 · 900 in · 8.2k out"),
+            "没有说明的错误只写错误名"
+        );
+
+        let noisy = node(&nodes, "session:ses_noisyerror000000000000000");
+        assert_eq!(noisy.status, AgentActivityStatus::Failed);
+        let summary = noisy.summary.as_deref().expect("失败节点带摘要");
+        assert!(
+            summary.starts_with("UnknownError: upstream said: 502 Bad Gateway while streaming"),
+            "控制字符与换行压成空格：{summary}"
+        );
+        assert!(
+            summary.ends_with("… · glm-4.7"),
+            "过长的说明截断带省略号，模型仍在：{summary}"
+        );
+        assert!(!summary.contains('\n') && !summary.contains('\u{7}'));
+
+        let nameless = node(&nodes, "session:ses_namelesserror0000000000000");
+        assert_eq!(nameless.status, AgentActivityStatus::Failed);
+        assert_eq!(nameless.summary.as_deref(), Some("no name on this error"));
+
+        // 真机 N15 的形态（默认模型已不在提供商目录）：opencode 1.18.32 在
+        // `SessionPrompt.getModel` 里只经 Bus 发不落库的 `session.error`，然后在建
+        // assistant 消息之前退出，库里最后一条仍是 user 消息、没有任何错误字段。
+        // 库里看不出失败，只能按最后活动时间：30 分钟内算运行中，之后降为未知。
+        let gone = node(&nodes, "session:ses_modelgone0000000000000000");
+        assert_eq!(gone.status, AgentActivityStatus::Running);
+        assert_eq!(gone.summary.as_deref(), Some("glm-4.6"));
+    }
+
+    #[test]
+    fn tree_sql_clips_the_last_error_instead_of_fetching_it_whole() {
+        let sql = tree_sql("ses_abc", 0);
+        assert!(
+            sql.contains("json_extract(lm.data, '$.error.name') END AS last_error_name"),
+            "{sql}"
+        );
+        assert!(
+            sql.contains(&format!(
+                "substr(json_extract(lm.data, '$.error.data.message'), 1, {SQL_ERROR_CHARS}) END AS last_error_message"
+            )),
+            "错误说明在 SQL 里先截断，响应体等大字段永不取回：{sql}"
+        );
+        assert!(!sql.contains("responseBody"));
+    }
+
     #[test]
     fn broken_cli_output_is_reported_without_a_tree() {
         let home = Home::with_database();
@@ -1985,6 +2108,8 @@ mod tests {
                 "id",
                 "last_completed",
                 "last_error",
+                "last_error_message",
+                "last_error_name",
                 "last_role",
                 "model_id",
                 "parent_id",
@@ -2039,6 +2164,19 @@ mod tests {
         assert!(
             count_of(&counts, "last_role") > 0,
             "last_role 全为 null：message.data 的 $.role 路径漂移了"
+        );
+        // 全库：带错误对象的消息都要取得出错误名（摘要里的失败原因靠它）。库里一条
+        // 带错误的消息都没有时两边都是 0，只证明查询能跑。
+        let errors = non_null_counts(
+            &db,
+            "SELECT json_extract(data, '$.error.name') AS error_name FROM message \
+             WHERE json_valid(data) AND json_type(data, '$.error') = 'object'",
+            &["error_name"],
+        );
+        assert_eq!(
+            count_of(&errors, "error_name"),
+            count_of(&errors, "row_total"),
+            "有错误对象却取不出 $.error.name：message.data 的错误形状漂移了"
         );
 
         // 待办：优先挑真有待办的会话核对别名；库里一条都没有时，至少确认这条 SQL

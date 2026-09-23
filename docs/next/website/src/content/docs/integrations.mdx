@@ -168,7 +168,7 @@ With OpenCode V1, the server plugin reports `working` only while OpenCode itself
 
 The plugin reports lifecycle state and session identity while OpenCode runs inside a Herdr pane. After OpenCode emits a session-bearing event, Herdr can use the reported session id to resume the pane with `opencode --session <id>`. Native screen manifest detection remains available when the plugin is not installed.
 
-From integration version `13` the V1 server plugin also tells Herdr when a session or its todos change, sub-agent sessions included; the V2 TUI plugin does not send these notices. Those notices carry no session content: Herdr reads the activity tree itself, read-only through `opencode db`, from the sub-agent sessions the session started (each with its messages and tool calls as content) and the session's todos.
+From integration version `13` the V1 server plugin also tells Herdr when a session or its todos change, sub-agent sessions included; the V2 TUI plugin does not send these notices. Those notices carry no session content: Herdr reads the activity tree itself, read-only through `opencode db`, from the sub-agent sessions the session started (each with its messages and tool calls as content) and the session's todos. A sub-agent session whose last reply ended in an error shows as failed, with the error's name and message at the start of its summary, for example `APIError: Rate limit exceeded`. OpenCode does not save every error: when the configured model no longer exists, it reports the failure only in its own interface and the session keeps nothing but the prompt, so Herdr shows that sub-agent as running until 30 minutes after its last update and as unknown after that.
 
 ## Retired integrations
 
