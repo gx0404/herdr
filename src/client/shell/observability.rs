@@ -757,6 +757,10 @@ pub(super) struct State {
     /// 页面作用域的用量订阅，见 `UsageSubscription`。
     pub subscription: UsageSubscription,
     pub hover: Option<Hover>,
+    /// 悬浮卡锚点所在的 Agents 面板列表区：锚点来自 agent 行（指针悬浮 / 钉住入口）
+    /// 时与锚点一起写入，CLI 标题锚点为空。绘制时据此把卡片摆到面板旁边，不从行的
+    /// 正下 / 正上方展开去盖住相邻的 agent 行（见 `render::hover::card_bounds`）。
+    pub hover_panel: Rect,
     /// 悬浮层作用域，见 `HoverScope`。
     pub hover_scope: HoverScope,
     /// usage_* 偏好键里是否有本机覆盖（`ClientChromePreferences::usage_overridden`
@@ -1220,6 +1224,7 @@ impl State {
     /// （`selected_*` / `accounts` / `epoch` / `account_scroll`）保持不动。
     pub(super) fn clear_hover(&mut self) {
         self.hover = None;
+        self.hover_panel = Rect::default();
         self.reset_hover_scope();
     }
 
@@ -1362,6 +1367,7 @@ impl State {
             refresh_states: Vec::new(),
             subscription: UsageSubscription::default(),
             hover: None,
+            hover_panel: Rect::default(),
             hover_scope: HoverScope::default(),
             usage_overridden: config.preferences.usage_overridden(),
             queued_binding: None,
@@ -3658,18 +3664,33 @@ impl ClientShellState {
         if hover_moves && pinned {
             // 钉住的浮层不随指针离开关闭，也不被别的 agent 行悬浮替换。
         } else if hover_moves && self.observability.usage.position != UsageDisplayPosition::Page {
+            // (锚点, 锚点所在的 Agents 面板列表区, 端点, pane)。
             let pane = self
                 .hits
                 .endpoint_agents
                 .iter()
                 .find(|(rect, _, _)| contains(*rect, point))
-                .cloned()
+                .map(|(rect, endpoint, pane)| {
+                    (
+                        *rect,
+                        self.agent_panel_area(*rect),
+                        endpoint.clone(),
+                        pane.clone(),
+                    )
+                })
                 .or_else(|| {
                     self.hits
                         .agents
                         .iter()
                         .find(|(rect, _)| contains(*rect, point))
-                        .map(|(rect, pane)| (*rect, self.active_endpoint_id.clone(), pane.clone()))
+                        .map(|(rect, pane)| {
+                            (
+                                *rect,
+                                self.agent_panel_area(*rect),
+                                self.active_endpoint_id.clone(),
+                                pane.clone(),
+                            )
+                        })
                 })
                 .or_else(|| {
                     // CLI 标题：锚点只取标题行。整个 pane 作锚点时 kit 定位「永不盖
@@ -3681,12 +3702,13 @@ impl ClientShellState {
                         .map(|hit| {
                             (
                                 Rect::new(hit.rect.x, hit.rect.y, hit.rect.width, 1),
+                                Rect::default(),
                                 self.active_endpoint_id.clone(),
                                 hit.pane_id.clone(),
                             )
                         })
                 });
-            let target = pane.and_then(|(rect, endpoint, pane)| {
+            let target = pane.and_then(|(rect, panel, endpoint, pane)| {
                 self.endpoints
                     .iter()
                     .find(|entry| entry.endpoint_id == endpoint)?
@@ -3700,10 +3722,10 @@ impl ClientShellState {
                             .agent
                             .clone()
                             .filter(|agent| is_bindable_agent(agent))
-                            .map(|agent| (rect, endpoint, pane, agent))
+                            .map(|agent| (rect, panel, endpoint, pane, agent))
                     })
             });
-            if let Some((anchor, endpoint_id, pane, agent)) = target {
+            if let Some((anchor, panel, endpoint_id, pane, agent)) = target {
                 let target = HoverTarget::Agent {
                     endpoint_id,
                     pane,
@@ -3717,6 +3739,11 @@ impl ClientShellState {
                 // 同一目标只撤销离开计时并跟随锚点；换目标重新计时、先不可见。
                 outcome.repaint |=
                     HoverState::enter(&mut self.observability.hover, target, anchor, now);
+                if self.observability.hover_panel != panel {
+                    // 同一 agent 从行移到 CLI 标题（或反过来）：摆放区域跟着换。
+                    self.observability.hover_panel = panel;
+                    outcome.repaint = true;
+                }
                 if replaced {
                     // 旧卡的矩形不再独占输入（新卡出现前没有浮层可点）。
                     self.observability.hover_rect = Rect::default();
@@ -3777,9 +3804,21 @@ impl ClientShellState {
             leave_at: None,
             pinned: true,
         });
+        self.observability.hover_panel = self.agent_panel_area(anchor);
         // 旧卡的矩形不再独占输入，下一帧按新锚点重画。
         self.observability.hover_rect = Rect::default();
         self.observability.begin_hover_scope(target);
+    }
+
+    /// agent 行锚点所在的 Agents 面板列表区（上一帧的 `hits.agent_body`，与锚点取
+    /// 并集以防行越出列表区；列表区没画出时就是锚点本身）。
+    fn agent_panel_area(&self, anchor: Rect) -> Rect {
+        let body = self.hits.agent_body;
+        if body.is_empty() {
+            anchor
+        } else {
+            body.union(anchor)
+        }
     }
 
     /// 用量卡的锚点：该 agent 在 Agents 面板里的行；行不在画面上（滚出视口 /

@@ -72,6 +72,33 @@ fn accounts_body(
 /// 卡片最矮高度：上下边框 2 行 + 正文至少 1 行 + 间隔 1 行 + 「打开页面」1 行。
 const MIN_CARD_HEIGHT: u16 = 5;
 
+/// 卡片摆在 Agents 面板旁边时，旁侧至少要这么宽（卡片本身更窄时以卡宽为准）；
+/// 再窄正文折行过多，不如退回整屏摆放。
+const MIN_SIDE_WIDTH: u16 = 40;
+
+/// 卡片的摆放区域（交给 kit 的 `bounds`，kit 算法不变）。锚点是 Agents 面板里的
+/// 行（`panel` 非空）时收窄到面板右侧、与面板隔一列；右侧不够 `MIN_SIDE_WIDTH`
+/// 再试左侧（面板停靠在右边）；两侧都不够才退回整屏 `area`。卡片宽 68、远宽于
+/// 面板，从行的正下 / 正上方展开会盖住相邻 agent 行：上下扫行时指针落进卡片被
+/// hold，得先横向移出、再等离开宽限。CLI 标题锚点（`panel` 为空）用整屏。
+fn card_bounds(area: Rect, panel: Rect, card_width: u16) -> Rect {
+    if panel.is_empty() {
+        return area;
+    }
+    let need = card_width.clamp(1, MIN_SIDE_WIDTH);
+    let right_x = panel.right().saturating_add(1).clamp(area.x, area.right());
+    let right = Rect::new(right_x, area.y, area.right() - right_x, area.height);
+    if right.width >= need {
+        return right;
+    }
+    let left_end = panel.x.saturating_sub(1).clamp(area.x, area.right());
+    let left = Rect::new(area.x, area.y, left_end - area.x, area.height);
+    if left.width >= need {
+        return left;
+    }
+    area
+}
+
 /// 画可见的 agent 行悬浮层（账号用量卡），返回其矩形；没有可见的悬浮层、或
 /// 可用空间矮于 `MIN_CARD_HEIGHT` 时返回空矩形。浮层自己的命中区写进 `hover_hits`。
 pub(super) fn hover_layer(
@@ -88,12 +115,14 @@ pub(super) fn hover_layer(
         HoverTarget::Agent { agent, .. } => {
             // 尺寸不变（宽 ≤68、高 ≤17，屏幕小时各让出 2 格）；定位统一走 kit：
             // 锚点（agent 行 / CLI 标题）下方左对齐 → 放不下上翻 → 两侧都不够取
-            // 大侧收缩，永不盖住锚点。经典布局与停靠工作台的两条绘制 pass 同源。
+            // 大侧收缩，永不盖住锚点。宿主只收窄摆放区域（agent 行 → Agents 面板
+            // 旁边，见 `card_bounds`）。经典布局与停靠工作台的两条绘制 pass 同源。
             let size = (
                 buffer.area.width.saturating_sub(2).min(68),
                 buffer.area.height.saturating_sub(2).min(17),
             );
-            let hover_rect = place_hover_card(hover.anchor, size, buffer.area);
+            let bounds = card_bounds(buffer.area, state.hover_panel, size.0);
+            let hover_rect = place_hover_card(hover.anchor, size, bounds);
             // kit 在两侧都不够时会收缩高度；矮到放不下一行正文就整张不画，不留
             // 看不见却独占鼠标输入的命中区。
             if hover_rect.height < MIN_CARD_HEIGHT {

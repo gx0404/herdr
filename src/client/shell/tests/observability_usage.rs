@@ -577,6 +577,11 @@ fn add_agent_pane(state: &mut ClientShellState, pane_id: &str, agent: &str) {
 fn usage_ready() -> ClientShellState {
     let mut snapshot = snapshot();
     snapshot.agents.push(agent_in_pane("pane_1", "claude"));
+    usage_ready_with(snapshot)
+}
+
+/// 同 `usage_ready`，快照由调用方给。
+fn usage_ready_with(snapshot: ClientShellSnapshot) -> ClientShellState {
     let mut state = docked_with(snapshot);
     state.set_endpoint_methods(Some(vec![
         "client.views.set".into(),
@@ -3895,6 +3900,11 @@ fn hover_deadlines_drive_the_client_timer() {
 fn classic_usage_ready() -> ClientShellState {
     let mut snapshot = snapshot();
     snapshot.agents.push(agent_in_pane("pane_1", "claude"));
+    classic_usage_ready_with(snapshot)
+}
+
+/// 同 `classic_usage_ready`，快照由调用方给。
+fn classic_usage_ready_with(snapshot: ClientShellSnapshot) -> ClientShellState {
     let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
     state.set_snapshot(Box::new(snapshot));
     state.set_endpoint_methods(Some(vec![
@@ -4030,34 +4040,136 @@ fn agent_hover_card_placement_follows_the_kit_rules_at_every_width() {
     }
 }
 
-/// 两条绘制路径（经典布局的观测 pass、停靠工作台的全局悬浮 pass）都按 agent
-/// 行定位：真实悬浮（移动 + 延时）后卡片不盖住该行，且在行的正下方或正上方。
-#[test]
-fn agent_row_hover_card_never_covers_its_row_in_either_layout() {
-    for (label, mut state) in [
-        ("经典布局", classic_usage_ready()),
-        ("停靠工作台", usage_ready()),
-    ] {
-        state.compose(120, 40).expect("画面");
-        let row = agent_row(&state, "pane_1");
-        let t0 = Instant::now();
-        moved(&mut state, row.x, row.y);
-        tick(&mut state, t0 + Duration::from_millis(450));
-        assert_eq!(agent_hover(&state), Some((true, false)), "{label}: 可见");
-        let frame = state.compose(120, 40).expect("悬浮卡");
-        let card = state.observability.hover_rect;
-        assert!(!card.is_empty(), "{label}: 画出了悬浮卡");
+/// Agents 面板里全部 agent 行的命中矩形（经典布局 `agents`、停靠工作台
+/// `endpoint_agents`）。
+fn all_agent_rows(state: &ClientShellState) -> Vec<Rect> {
+    state
+        .hits
+        .agents
+        .iter()
+        .map(|(rect, _)| *rect)
+        .chain(state.hits.endpoint_agents.iter().map(|(rect, _, _)| *rect))
+        .collect()
+}
+
+/// 卡片不与任何 agent 行相交：卡宽 68、远宽于 Agents 面板，从行的正下 / 正上方
+/// 展开会盖住相邻的行，上下扫行时指针会落进卡片被 hold。
+fn assert_clear_of_agent_rows(state: &ClientShellState, card: Rect, label: &str) {
+    let rows = all_agent_rows(state);
+    assert!(rows.len() >= 2, "{label}: 用例前提：面板里有多行");
+    for row in rows {
         assert!(
             !card.intersects(row),
-            "{label}: 卡片 {card:?} 盖住了行 {row:?}"
+            "{label}: 卡片 {card:?} 盖住了 agent 行 {row:?}"
         );
-        assert!(
-            card.y == row.bottom() || card.bottom() == row.y,
-            "{label}: 卡片 {card:?} 紧贴行 {row:?} 的下方或上方"
-        );
-        assert_eq!(card.x, row.x.min(120 - card.width), "{label}: 与行左对齐");
-        assert_card_chrome(&state, &frame, card);
     }
+}
+
+/// 两条绘制路径（经典布局的观测 pass、停靠工作台的全局悬浮 pass）下，agent 行
+/// 的卡片都放在 Agents 面板右侧：宿主把 kit 的摆放区域收窄到面板右边，纵向仍按
+/// kit 规则（紧贴行的下方，放不下上翻），卡片满尺寸且不与任何 agent 行相交。
+#[test]
+fn agent_row_hover_card_sits_beside_the_agents_panel_in_either_layout() {
+    for (label, mut state) in [
+        (
+            "经典布局",
+            classic_usage_ready_with(three_agents_snapshot()),
+        ),
+        ("停靠工作台", usage_ready_with(three_agents_snapshot())),
+    ] {
+        state.compose(120, 40).expect("画面");
+        let panel = state.hits.agent_body;
+        for pane_id in ["pane_1", "pane_2", "pane_3"] {
+            let agent = if pane_id == "pane_2" {
+                "codex"
+            } else {
+                "claude"
+            };
+            state.observability.clear_hover();
+            state.compose(120, 40).expect("清掉上一张卡");
+            let row = agent_row(&state, pane_id);
+            assert!(
+                panel.x <= row.x && row.right() <= panel.right(),
+                "{label}: 用例前提：行 {row:?} 在面板列表区 {panel:?} 内"
+            );
+            let t0 = Instant::now();
+            moved(&mut state, row.x, row.y);
+            tick(&mut state, t0 + Duration::from_millis(450));
+            assert_eq!(agent_hover(&state), Some((true, false)), "{label}: 可见");
+            let frame = state.compose(120, 40).expect("悬浮卡");
+            let card = state.observability.hover_rect;
+            assert_eq!(
+                (card.width, card.height),
+                (68, 17),
+                "{label}: {pane_id} 的卡 {card:?} 满尺寸"
+            );
+            assert!(
+                card.x > panel.right(),
+                "{label}: 卡片 {card:?} 在面板 {panel:?} 右侧（隔一列）"
+            );
+            assert!(
+                card.y == row.bottom() || card.bottom() == row.y,
+                "{label}: 卡片 {card:?} 紧贴行 {row:?} 的下方或上方"
+            );
+            assert_clear_of_agent_rows(&state, card, label);
+            assert_agent_card_chrome(&state, &frame, card, agent);
+        }
+    }
+}
+
+/// 停靠工作台里 Agents 面板停靠到最右侧：右边没有位置，卡片改放面板左侧，
+/// 同样不与任何 agent 行相交。
+#[test]
+fn agent_row_hover_card_opens_left_of_an_agents_panel_docked_on_the_right() {
+    let mut state = usage_ready_with(three_agents_snapshot());
+    assert!(state
+        .workbench
+        .dock
+        .dock(PanelId::Agents, &PanelId::Terminal(1), Edge::Right));
+    state.compose(120, 40).expect("Agents 面板停靠右侧");
+    let panel = state.hits.agent_body;
+    assert!(
+        panel.right() + 40 > 120 && panel.x > 40,
+        "用例前提：面板 {panel:?} 贴右、左侧够宽"
+    );
+    let row = agent_row(&state, "pane_2");
+    let t0 = Instant::now();
+    moved(&mut state, row.x, row.y);
+    tick(&mut state, t0 + Duration::from_millis(450));
+    let frame = state.compose(120, 40).expect("悬浮卡");
+    let card = state.observability.hover_rect;
+    assert!(!card.is_empty(), "画出了悬浮卡");
+    assert!(
+        card.right() < panel.x,
+        "卡片 {card:?} 在面板 {panel:?} 左侧（隔一列）"
+    );
+    assert!(card.y == row.bottom() || card.bottom() == row.y);
+    assert_clear_of_agent_rows(&state, card, "面板停靠右侧");
+    assert_agent_card_chrome(&state, &frame, card, "codex");
+}
+
+/// 面板两侧都放不下（旁侧不足 40 列）时退回整屏摆放：卡片仍按 kit 规则紧贴
+/// 所属行的下方或上方、不盖住该行。65 列是经典布局还有侧栏的最窄宽度（≤64
+/// 列走移动布局）。
+#[test]
+fn agent_row_hover_card_falls_back_to_the_full_screen_when_no_side_fits() {
+    let mut state = classic_usage_ready_with(three_agents_snapshot());
+    state.compose(65, 24).expect("窄屏");
+    let panel = state.hits.agent_body;
+    assert!(
+        !panel.is_empty() && 65 - (panel.right() + 1) < 40 && panel.x < 40,
+        "用例前提：面板 {panel:?} 两侧都不足 40 列"
+    );
+    let row = agent_row(&state, "pane_1");
+    let t0 = Instant::now();
+    moved(&mut state, row.x, row.y);
+    tick(&mut state, t0 + Duration::from_millis(450));
+    let frame = state.compose(65, 24).expect("悬浮卡");
+    let card = state.observability.hover_rect;
+    assert_eq!(card.width, 63, "整屏宽度让出 2 格");
+    assert!(!card.intersects(row), "卡片 {card:?} 不盖所属行 {row:?}");
+    assert!(card.y == row.bottom() || card.bottom() == row.y);
+    assert_card_chrome(&state, &frame, card);
 }
 
 /// 真实尺寸的 pane 表面：帧铺满 `size`，`panes` 是 `(pane_id, 相对表面区的矩形)`。
@@ -4104,28 +4216,27 @@ fn full_size_panes(size: (u16, u16), split: bool) -> PaneSurfaceFrame {
     }
 }
 
-/// 经典布局或停靠工作台，终端区铺满真实尺寸的 pane（见 `full_size_panes`）。
-fn title_hover_state(docked: bool, split: bool) -> ClientShellState {
+/// 快照：pane_1 跑 claude（聚焦）、pane_2 跑 codex、pane_3 跑 claude，三个 pane
+/// 都在同一 tab 里，Agents 面板列出相邻的三行。
+fn three_agents_snapshot() -> ClientShellSnapshot {
     let mut snapshot = snapshot();
     snapshot.agents.push(agent_in_pane("pane_1", "claude"));
-    let mut codex = agent_in_pane("pane_2", "codex");
-    codex.focused = false;
-    snapshot.agents.push(codex);
-    let mut pane_2 = snapshot.panes[0].clone();
-    pane_2.pane_id = "pane_2".into();
-    pane_2.focused = false;
-    snapshot.panes.push(pane_2);
+    for (pane_id, agent) in [("pane_2", "codex"), ("pane_3", "claude")] {
+        let mut entry = agent_in_pane(pane_id, agent);
+        entry.focused = false;
+        snapshot.agents.push(entry);
+        let mut pane = snapshot.panes[0].clone();
+        pane.pane_id = pane_id.into();
+        pane.focused = false;
+        snapshot.panes.push(pane);
+    }
+    snapshot
+}
+
+/// 经典布局或停靠工作台，终端区铺满真实尺寸的 pane（见 `full_size_panes`）。
+fn title_hover_state(docked: bool, split: bool) -> ClientShellState {
     let mut state = if docked {
-        let mut state = docked_with(snapshot);
-        state.set_endpoint_methods(Some(vec![
-            "client.views.set".into(),
-            "tab.focus".into(),
-            "pane.focus".into(),
-            "account.usage.get".into(),
-            "account.usage.refresh".into(),
-            "account.usage.providers".into(),
-            "account.binding.set".into(),
-        ]));
+        let mut state = usage_ready_with(three_agents_snapshot());
         let area = terminal_body(&state);
         state.workbench.views.insert(
             "1".into(),
@@ -4137,20 +4248,11 @@ fn title_hover_state(docked: bool, split: bool) -> ClientShellState {
         );
         state
     } else {
-        let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
-        state.set_snapshot(Box::new(snapshot));
-        state.set_endpoint_methods(Some(vec![
-            "pane.focus".into(),
-            "account.usage.get".into(),
-            "account.usage.refresh".into(),
-            "account.usage.providers".into(),
-            "account.binding.set".into(),
-        ]));
+        let mut state = classic_usage_ready_with(three_agents_snapshot());
         let area = state.layout(120, 40).pane_surface;
         state.set_pane_surface(full_size_panes((area.width, area.height), split));
         state
     };
-    tick(&mut state, Instant::now());
     state.compose(120, 40).expect("画面");
     assert_eq!(state.workbench.enabled, docked);
     let expected = if split { 2 } else { 1 };
@@ -4383,6 +4485,11 @@ fn context_menu_usage_pins_the_agent_card_by_keyboard_in_the_docked_layout() {
     assert_eq!(calls[0].1.pane_id.as_deref(), Some("pane_1"));
     assert_pinned_card_drawn(&mut state, 120, 40);
     assert!(!state.observability.hover_rect.intersects(row), "不盖住行");
+    let panel = state.hits.agent_body;
+    assert!(
+        state.observability.hover_rect.x > panel.right(),
+        "钉住的卡同样放在 Agents 面板右侧"
+    );
 }
 
 /// 鼠标路径 + 经典布局：点菜单里的「用量」行同样钉住并画出卡片；宽 / 窄 / 极窄
