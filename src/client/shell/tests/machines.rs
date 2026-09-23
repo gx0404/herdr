@@ -3908,10 +3908,46 @@ fn import_footer_hides_the_continue_hint_when_there_are_no_hosts() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// M4：导入页步骤条与配置路径重叠（`smoke-23627143` `86` 行 7：路径首字符
-/// 「/」被吃掉）。窄浮层（`ModalSize::Large` 固定 76 列）下配一条足够长的
-/// 路径，步骤条三个徽标（"1 发现 2 选择 3 完成"）加起来已经占了不少列，
-/// 路径必须紧跟其后另起一段留白，而不是右对齐硬叠上去。
+/// 把一行单元格还原成 (列, 字形) 序列：宽字符占两格，续格不单独列出——被
+/// 别的字符写进续格的内容（M4 的症状）在屏幕上看不见，这里同样看不见。
+fn row_graphemes(
+    cells: &[crate::protocol::CellData],
+    from: usize,
+    to: usize,
+) -> Vec<(usize, &str)> {
+    let mut out = Vec::new();
+    let mut col = from;
+    while col < to {
+        let symbol = cells[col].symbol.as_str();
+        out.push((col, symbol));
+        col += usize::from(crate::ui::display_width_u16(symbol).max(1));
+    }
+    out
+}
+
+/// 在字形序列里找 `needle`，返回 (起始列, 结束列)（结束列不含）。
+fn find_graphemes(graphemes: &[(usize, &str)], needle: &str) -> Option<(usize, usize)> {
+    let needle: Vec<String> = needle.chars().map(String::from).collect();
+    (0..graphemes.len()).find_map(|start| {
+        let matched = needle
+            .iter()
+            .enumerate()
+            .all(|(offset, ch)| graphemes.get(start + offset).is_some_and(|(_, g)| g == ch));
+        matched.then(|| {
+            let (last_col, last) = graphemes[start + needle.len() - 1];
+            (
+                graphemes[start].0,
+                last_col + usize::from(crate::ui::display_width_u16(last).max(1)),
+            )
+        })
+    })
+}
+
+/// M4：导入页步骤条与配置路径重叠（`smoke-23627143` `86` 行 7：「3 完成var/
+/// tmp/…」，路径首字符「/」被吃掉）。在 80 列终端下跑：导入浮层是
+/// `ModalSize::Large` 的 76 列，内框 74 列，三个步骤徽标占去 24 列，52 字符的
+/// 路径放不下——步骤条与路径之间至少留 1 列空白，路径以「/」开头，放不下的
+/// 部分以「…」收尾；而不是右对齐硬叠上去，把「/」写进「成」的续格。
 #[test]
 fn import_header_reserves_room_for_the_path_next_to_the_step_indicator() {
     let dir = with_temp_home("m4-path-overlap");
@@ -3924,41 +3960,58 @@ fn import_header_reserves_room_for_the_path_next_to_the_step_indicator() {
             view.path = std::path::PathBuf::from(long_path);
         }
     }
-    let frame = state.compose(90, 26).expect("composed");
-    let rows: Vec<String> = frame
-        .cells
-        .chunks(frame.width as usize)
-        .map(|row| row.iter().map(|c| c.symbol.as_str()).collect::<String>())
-        .collect();
-    // 标题行（`从 SSH 配置导入`）的下一行就是步骤条 + 路径共用的那一行；宽
-    // 字符在缓冲区里拆成两格，比对时去掉空白（与本文件 `compact_frame` 同
-    // 口径），避免 CJK 续格里插入的空格误判。
-    let title = crate::i18n::texts().machines.import_title;
-    let title_index = rows
-        .iter()
-        .position(|row| compact(row).contains(&compact(title)))
-        .expect("标题行");
-    let header_row = rows.get(title_index + 1).expect("步骤条所在行").as_str();
+    let frame = state.compose(80, 32).expect("composed");
+    let popup = state.hits.machines_popup;
+    assert_eq!(popup.width, 76, "80 列终端下导入浮层是 76 列");
+    let width = usize::from(frame.width);
+    // 上边框、标题行之后就是步骤条与路径共用的那一行；只看内框（去掉左右边框）。
+    let y = usize::from(popup.y) + 2;
+    let cells = &frame.cells[y * width..(y + 1) * width];
+    let inner_left = usize::from(popup.x) + 1;
+    let inner_right = usize::from(popup.right()) - 1;
+    let graphemes = row_graphemes(cells, inner_left, inner_right);
+    let text: String = graphemes.iter().map(|(_, g)| *g).collect();
 
-    // 三个步骤徽标完整无损。
+    let texts = &crate::i18n::texts().machines;
     for label in [
-        crate::i18n::texts().machines.import_step_discover,
-        crate::i18n::texts().machines.import_step_select,
-        crate::i18n::texts().machines.import_step_done,
+        texts.import_step_discover,
+        texts.import_step_select,
+        texts.import_step_done,
     ] {
         assert!(
-            compact(header_row).contains(&compact(label)),
-            "步骤条被吃掉：{header_row:?}"
+            find_graphemes(&graphemes, label).is_some(),
+            "步骤条被吃掉：{text:?}"
         );
     }
-    // 路径必须原样出现（含首字符「/」），且前面至少留了 1 格空白，证明它
-    // 不是紧贴着步骤条画上去的（HERDR smoke 86 的重叠症状）。
-    let path_at = header_row
-        .find("/var/tmp/herdr-smoke-20260923121719")
-        .unwrap_or_else(|| panic!("路径缺失或首字符被吃掉：{header_row:?}"));
+    let (_, steps_end) =
+        find_graphemes(&graphemes, texts.import_step_done).expect("最后一个步骤徽标");
+    let (path_col, _) = find_graphemes(&graphemes, "/var/tmp/herdr-smoke")
+        .unwrap_or_else(|| panic!("路径缺失或首字符「/」被吃掉：{text:?}"));
     assert!(
-        header_row[..path_at].ends_with(' '),
-        "步骤条与路径之间没有留白，判定重叠：{header_row:?}"
+        path_col > steps_end,
+        "步骤条与路径之间没有留白，判定重叠：{text:?}"
+    );
+    assert!(
+        graphemes
+            .iter()
+            .filter(|(col, _)| (steps_end..path_col).contains(col))
+            .all(|(_, g)| *g == " "),
+        "步骤条与路径之间只能是空白：{text:?}"
+    );
+    // 放不下的路径以省略号收尾，且省略号之前是路径的原样前缀。
+    let path_text: String = graphemes
+        .iter()
+        .filter(|(col, _)| *col >= path_col)
+        .map(|(_, g)| *g)
+        .collect::<String>()
+        .trim_end()
+        .to_owned();
+    let kept = path_text
+        .strip_suffix('…')
+        .unwrap_or_else(|| panic!("超宽的路径应当以「…」收尾：{path_text:?}"));
+    assert!(
+        long_path.starts_with(kept) && kept.len() < long_path.len(),
+        "省略号之前应当是路径的原样前缀：{path_text:?}"
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
