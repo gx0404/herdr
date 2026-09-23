@@ -982,7 +982,7 @@
           "key": "ui.mobile_width_threshold",
           "type": "integer",
           "default": "64",
-          "description": "Terminal width at or below which Herdr uses the mobile single-column layout."
+          "description": "Terminal width at or below which Herdr uses the mobile single-column layout. Applies only to the classic layout, used when the server does not support `client.views.set` (such as an older Herdr server); the docked layout switches to a compact view instead."
         },
         {
           "key": "ui.mouse_capture",

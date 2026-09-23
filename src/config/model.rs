@@ -1040,7 +1040,10 @@ pub struct UiConfig {
     pub sidebar_start_collapsed: bool,
     /// Collapsed sidebar presentation. Default: compact.
     pub sidebar_collapsed_mode: SidebarCollapsedModeConfig,
-    /// Terminal width at or below which Herdr uses the mobile single-column layout. Default: 64.
+    /// Terminal width at or below which Herdr uses the mobile single-column layout. Applies only
+    /// to the classic layout, used when the server does not support `client.views.set` (such
+    /// as an older Herdr server); the docked layout switches to a compact view instead.
+    /// Default: 64.
     pub mobile_width_threshold: u16,
     /// Capture mouse input for Herdr's mouse UI. Default: true.
     pub mouse_capture: bool,

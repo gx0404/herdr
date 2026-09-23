@@ -53,7 +53,7 @@ ssh you@server
 herdr
 ```
 
-The same persistent Herdr session opens in your phone terminal. The TUI adapts to narrow screens, so you can inspect agents, switch workspaces, and check panes without leaving SSH.
+The same persistent Herdr session opens in your phone terminal. When the screen is smaller than the docked layout's minimum size, Herdr switches to a compact view that shows one panel at a time, so you can inspect agents, switch workspaces, and check panes without leaving SSH. The compact view's title bar lists the panels; click a name to switch to that panel, or, when the names do not fit, use **Arrange layout** and `Tab`. See [Mouse UI](/docs/concepts/#mouse-ui) for the minimum sizes. The mobile switcher and `ui.mobile_width_threshold` belong to the classic layout, which Herdr uses only when the server is too old for the docked layout.
 
 On iPhone, apps like [moshi](https://getmoshi.app/) work well.
 
@@ -63,8 +63,8 @@ On iPhone, apps like [moshi](https://getmoshi.app/) work well.
     <figcaption>agent session over SSH</figcaption>
   </figure>
   <figure>
-    <img src="/assets/mobile-switch-menu-v2.jpeg" alt="Herdr responsive switch menu on a phone" loading="lazy" />
-    <figcaption>responsive switch menu</figcaption>
+    <img src="/assets/mobile-switch-menu-v2.jpeg" alt="Herdr mobile switcher of the classic layout on a phone" loading="lazy" />
+    <figcaption>mobile switcher (classic layout, older servers)</figcaption>
   </figure>
 </div>
 
