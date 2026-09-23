@@ -2207,11 +2207,16 @@ impl ClientShellState {
             }
             _ => {}
         }
-        let hover_visible = self
-            .observability
-            .hover
-            .as_ref()
-            .is_some_and(|hover| hover.visible);
+        // 悬浮层真正画得出来才算可见（文档终审 D13）：经典布局打开页面时页面铺满
+        // 窗格区，非钉住的悬浮层不画、进程对话框之上也不画（与 `render::paint`
+        // 同一判据），就不该按它的作用域发用量请求；画得出来后再发。
+        let classic_page_open = !self.workbench.enabled && self.observability.page.is_some();
+        let hover_visible = self.observability.process_dialog.is_none()
+            && self
+                .observability
+                .hover
+                .as_ref()
+                .is_some_and(|hover| hover.visible && (hover.pinned || !classic_page_open));
         // 账号页（经典布局页面 / 停靠面板的账号 tab / legacy 账号面板）可见。
         let accounts_page_visible = self.observability.page == Some(Page::Accounts)
             || (self.workbench.visible(&dock::PanelId::Monitor)

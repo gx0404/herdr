@@ -7713,3 +7713,70 @@ fn hover_card_folds_rows_beyond_its_height_into_a_plus_marker() {
         region_text(&page, region)
     );
 }
+
+/// 文档终审 D13：经典布局打开监控页时页面铺满窗格区，非钉住的悬浮层不画
+/// （`render::paint` 只在没有页面时画它），以前却照样按悬浮层作用域发用量请求。
+/// 不画就不请求；关掉页面、悬浮层画得出来之后才发。
+#[test]
+fn classic_page_holds_hover_usage_requests_until_the_hover_is_drawn() {
+    let mut snapshot = snapshot();
+    snapshot.agents.push(agent_in_pane("pane_1", "claude"));
+    let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
+    state.set_snapshot(Box::new(snapshot));
+    state.set_pane_surface(surface());
+    state.set_endpoint_methods(Some(vec![
+        "pane.focus".into(),
+        "account.usage.get".into(),
+        "account.usage.refresh".into(),
+        "account.usage.providers".into(),
+    ]));
+    let t0 = Instant::now();
+    tick(&mut state, t0);
+    assert!(!state.workbench.enabled, "用例前提：经典布局");
+    state.open_observation_page(Page::Monitor, &mut ClientShellInput::default());
+    state.observability.hover = Some(Hover {
+        target: HoverTarget::Agent {
+            endpoint_id: state.active_endpoint_id.clone(),
+            pane: "pane_1".into(),
+            agent: "claude".into(),
+        },
+        anchor: Rect::new(0, 20, 24, 2),
+        since: t0,
+        visible: false,
+        leave_at: None,
+        pinned: false,
+    });
+    let hover_calls = |outcome: &ClientShellInput| {
+        usage_calls(outcome)
+            .into_iter()
+            .filter(|(_, params)| params.pane_id.as_deref() == Some("pane_1"))
+            .count()
+    };
+    let shown = tick(&mut state, t0 + Duration::from_millis(450));
+    assert!(
+        state
+            .observability
+            .hover
+            .as_ref()
+            .is_some_and(|hover| hover.visible),
+        "用例前提：悬浮层计时已到"
+    );
+    state.compose(133, 32).expect("经典布局监控页");
+    assert!(
+        state.observability.hover_rect.is_empty(),
+        "经典布局页面之上不画非钉住的悬浮层"
+    );
+    assert_eq!(hover_calls(&shown), 0, "不画就不发悬浮层的用量请求");
+    assert_eq!(
+        hover_calls(&tick(&mut state, t0 + Duration::from_secs(3))),
+        0,
+        "页面开着时一直不发"
+    );
+
+    // 关掉页面：悬浮层画得出来了，随即按悬浮层作用域请求。
+    state.observability.page = None;
+    let after = tick(&mut state, t0 + Duration::from_secs(4));
+    assert_eq!(hover_calls(&after), 1, "画得出来才请求");
+    state.compose(133, 32).expect("关掉页面后");
+    assert!(!state.observability.hover_rect.is_empty(), "悬浮层画出来");
+}
