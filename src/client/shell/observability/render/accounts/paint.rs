@@ -405,23 +405,35 @@ fn section_line(buffer: &mut Buffer, rect: Rect, title: &str, paint: Paint<'_>) 
     }
 }
 
-/// 卡片状态行：（徽标没写状态时）状态 · 探测在途 · 新鲜度 · 套餐与身份。
+/// 卡片上「状态」这一项：探测在途时写「刷新中…」（与表格状态列、汇总行同一口径），
+/// 否则是快照状态。它只出现在一个位置——额度卡的徽标、本地 / 会话统计卡的状态行——
+/// 在途与「已更新」不会同时出现在一张卡上（真机 L9：徽标写「已更新」、状态行写
+/// 「刷新中…」并存，读起来互相矛盾）。数据的新鲜度另写在状态行里。
+fn card_status(
+    status_value: ObservationStatus,
+    in_flight: bool,
+    palette: &Palette,
+) -> (&'static str, Color) {
+    if in_flight {
+        (
+            tr("Refreshing…", "刷新中…"),
+            status_color(ObservationStatus::Warming, palette),
+        )
+    } else {
+        (status(status_value), status_color(status_value, palette))
+    }
+}
+
+/// 卡片状态行：（徽标没写状态时）状态或「刷新中…」· 新鲜度 · 套餐与身份。
 fn meta_line(buffer: &mut Buffer, rect: Rect, card: &Card<'_>, in_flight: bool, paint: Paint<'_>) {
     let account = card.account;
     let palette = paint.palette;
-    let mut parts: Vec<(Cow<'_, str>, Style)> = Vec::with_capacity(4);
+    let mut parts: Vec<(Cow<'_, str>, Style)> = Vec::with_capacity(3);
     if card.family != Family::Quota {
+        let (label, color) = card_status(account.status, in_flight, palette);
         parts.push((
-            Cow::Borrowed(status(account.status)),
-            Style::default()
-                .fg(status_color(account.status, palette))
-                .add_modifier(Modifier::BOLD),
-        ));
-    }
-    if in_flight {
-        parts.push((
-            Cow::Borrowed(tr("refreshing…", "刷新中…")),
-            Style::default().fg(palette.overlay1),
+            Cow::Borrowed(label),
+            Style::default().fg(color).add_modifier(Modifier::BOLD),
         ));
     }
     parts.push((
@@ -486,15 +498,17 @@ fn body_line(
     }
 }
 
-/// 卡片右上角的徽标：额度厂商写状态；本地 / 会话统计写声明（状态移到状态行）。
+/// 卡片右上角的徽标：额度厂商写状态（探测在途时是「刷新中…」，见 `card_status`）；
+/// 本地 / 会话统计写声明（状态移到状态行）。
 fn badge(
     family: Family,
     status_value: ObservationStatus,
+    in_flight: bool,
     palette: &Palette,
 ) -> (&'static str, Color) {
     let texts = &crate::i18n::texts().monitor;
     match family {
-        Family::Quota => (status(status_value), status_color(status_value, palette)),
+        Family::Quota => card_status(status_value, in_flight, palette),
         Family::Local => (texts.local_stats_badge, palette.blue),
         Family::Session => (texts.session_stats_badge, palette.blue),
     }
@@ -528,7 +542,7 @@ fn paint_card(
     paint: Paint<'_>,
 ) {
     let account = card.account;
-    let (badge_text, badge_color) = badge(card.family, account.status, paint.palette);
+    let (badge_text, badge_color) = badge(card.family, account.status, in_flight, paint.palette);
     let inner = render_card(
         buffer,
         rect,
@@ -733,7 +747,8 @@ pub(super) fn overview_cards(
             .find(|provider| provider.agent == group.agent)
             .map_or(group.agent, |provider| provider.label.as_str());
         let worst = group.worst_status();
-        let (badge_text, badge_color) = badge(family(group.agent), worst, palette);
+        // 概览紧凑卡汇总整个厂商，不跟单个账号的探测在途。
+        let (badge_text, badge_color) = badge(family(group.agent), worst, false, palette);
         let line = headline(group, state.now_ms);
         draw_clipped(
             buffer,
@@ -1037,6 +1052,58 @@ mod tests {
             "条形被砍掉时没有 DIM: {}",
             row_text(&buffer, 0)
         );
+    }
+
+    /// 真机 L9（codex-21 行 8–9）：探测在途时卡片不能一边在徽标写「已更新」、一边在
+    /// 状态行写「刷新中…」。在途时「刷新中…」取代状态出现在状态本来的位置（额度卡的
+    /// 徽标、本地统计卡的状态行），数据的新鲜度照常写；探测结束恢复快照状态。
+    #[test]
+    fn in_flight_probe_replaces_the_status_instead_of_contradicting_it() {
+        let _guard = crate::i18n::lang_guard(crate::i18n::Lang::ZhCn);
+        for agent in ["codex", "opencode"] {
+            let mut state = State::new(&config());
+            state.now_ms = 1_000 + 3 * 60 * 1000;
+            state.selected_provider = Some(agent.into());
+            state.accounts = vec![account(
+                agent,
+                &format!("{agent}:default"),
+                ObservationStatus::Ready,
+            )];
+            state.refresh_states = vec![UsageRefreshState {
+                account_id: format!("{agent}:default"),
+                in_flight: true,
+                ..Default::default()
+            }];
+            let (buffer, _, _) = draw_cards(&state, Rect::new(0, 0, 66, 8));
+            let card = (0..4)
+                .map(|y| row_text(&buffer, y))
+                .collect::<Vec<_>>()
+                .join("\n");
+            let stripped = card.replace(' ', "");
+            assert!(stripped.contains("刷新中…"), "{agent}: 在途要说明\n{card}");
+            assert!(
+                !stripped.contains("已更新"),
+                "{agent}: 在途不再同时写「已更新」\n{card}"
+            );
+            assert!(stripped.contains("3m前更新"), "{agent}: 新鲜度照写\n{card}");
+            if agent == "codex" {
+                assert!(
+                    row_has(&buffer, 0, "刷新中…"),
+                    "额度卡的状态在徽标上：{}",
+                    row_text(&buffer, 0)
+                );
+            }
+            // 探测结束：恢复快照状态，不再提「刷新中…」。
+            state.refresh_states[0].in_flight = false;
+            let (buffer, _, _) = draw_cards(&state, Rect::new(0, 0, 66, 8));
+            let card = (0..4)
+                .map(|y| row_text(&buffer, y))
+                .collect::<Vec<_>>()
+                .join("\n");
+            let stripped = card.replace(' ', "");
+            assert!(stripped.contains("已更新"), "{agent}\n{card}");
+            assert!(!stripped.contains("刷新中"), "{agent}\n{card}");
+        }
     }
 
     /// 带本会话费用 / 时长 / API 时长的 claude 账号（与 `parse::claude_session` 同形：
