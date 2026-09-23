@@ -95,7 +95,9 @@
 //! - 时序：本机 38 个有转录的通知对象，通知全部晚于子 agent 的最后一条转录（中位
 //!   48 ms、最多 1.3 s）。同一 task-id 可以多次通知（子 agent 被 SendMessage 唤起
 //!   续跑后再次结束），所以通知之后转录又有活动（超过宽限）视为续跑，回到时间窗
-//!   判定。
+//!   判定。例外是恢复会话时替上一个进程补发的通知（摘要写「… the previous session
+//!   …」，见 `is_after_restart`）：投递时刻是恢复会话的时刻，可以晚几个小时，结束
+//!   时间改取子 agent 转录的最后活动。
 //! - 位置：父 agent 是主会话时通知在主转录里——只扫尾部窗口，逐行先按开标签预筛、
 //!   命中才解析（本机主转录中位 270 KB、p99 21.8 MB），窗口外的旧子 agent 落回
 //!   时间窗判定；嵌套派生的通知在父子 agent 的转录里，随转录扫描顺带收集。
@@ -574,6 +576,9 @@ impl NotifiedStatus {
 struct Notification {
     status: NotifiedStatus,
     at_ms: u64,
+    /// 恢复会话时替上一个进程补发的（见 [`is_after_restart`]）：投递时刻是恢复会话
+    /// 的时刻，不是子 agent 停下的时刻。
+    after_restart: bool,
 }
 
 /// 按 task-id（后台子 agent 的 agentId）归集的投递记录，按转录顺序。
@@ -591,6 +596,8 @@ struct Settled {
 ///
 /// 状态取最后一条记录的。结束时间取「本轮」（不早于最后活动减宽限）的第一条记录
 /// ——入队时刻最接近真正的结束；子 agent 在通知之后还补写了收尾行时取最后活动。
+/// 最后一条是恢复会话时补发的（[`Notification::after_restart`]）时，投递时刻与
+/// 子 agent 何时停下无关（可以晚几个小时），结束时间取它转录的最后活动。
 fn settle(records: &[Notification], last_activity_ms: Option<u64>) -> Option<Settled> {
     // 同一时刻的多条取后出现的（转录只追加）。
     let latest = records
@@ -600,6 +607,12 @@ fn settle(records: &[Notification], last_activity_ms: Option<u64>) -> Option<Set
         .map(|(_, record)| *record)?;
     if last_activity_ms.is_some_and(|last| last > latest.at_ms.saturating_add(RESUME_GRACE_MS)) {
         return None;
+    }
+    if let (true, Some(last)) = (latest.after_restart, last_activity_ms) {
+        return Some(Settled {
+            status: latest.status,
+            ended_at_ms: last,
+        });
     }
     let floor = last_activity_ms.map_or(0, |last| last.saturating_sub(RESUME_GRACE_MS));
     let first = records
@@ -749,13 +762,35 @@ fn parse_notification_text(text: &str, at_ms: u64, sink: &mut dyn FnMut(&str, No
         else {
             continue;
         };
+        let after_restart = is_after_restart(body);
         for id in tag_values(body, "task-id") {
             let id = id.trim();
             if !id.is_empty() {
-                sink(id, Notification { status, at_ms });
+                sink(
+                    id,
+                    Notification {
+                        status,
+                        at_ms,
+                        after_restart,
+                    },
+                );
             }
         }
     }
+}
+
+/// 通知是否是恢复会话时替上一个进程补发的。claude 2.1.280 在恢复会话时给上一个
+/// 进程没来得及报结束的后台子 agent 补发通知，`<summary>` 的措辞（二进制只读
+/// 字符串检索）：「… didn't finish before the previous session ended」（孤儿，单条
+/// 或汇总，状态 stopped / failed）、「… finished before the previous session ended,
+/// but its result was never reported」（早已结束、只丢了通知，状态 completed）、
+/// 「… from the previous session couldn't be restarted: …」（状态 stopped）。普通
+/// 通知的摘要是「Agent "<描述>" finished / failed …」；描述里恰好写了这几个词时会
+/// 误判，代价只是结束时间取最后活动而不是紧随其后（通常晚不到 1.3 s）的入队时刻。
+fn is_after_restart(body: &str) -> bool {
+    tag_values(body, "summary")
+        .iter()
+        .any(|summary| summary.contains("the previous session"))
 }
 
 /// `<name>值</name>` 的全部取值，按出现顺序；缺闭标签的残段不算。
@@ -2239,9 +2274,12 @@ mod tests {
         assert_eq!(failed.ended_at_ms, Some(ASYNC_BASE_MS + 7_000));
 
         // 重启后的孤儿汇总：一条通知里多个 task-id、状态 stopped → 失败并注明停止。
+        // 冒烟 N7：这类通知是恢复会话时补发的（10:00:30），结束时间取该子 agent 转录
+        // 的最后活动（10:00:06，实跑 3 s），不是补发时刻（曾显示 27 s）。
         let stopped = node(&nodes, "b0000000000000003");
         assert_eq!(stopped.status, AgentActivityStatus::Failed);
-        assert_eq!(stopped.ended_at_ms, Some(ASYNC_BASE_MS + 30_000));
+        assert_eq!(stopped.started_at_ms, Some(ASYNC_BASE_MS + 3_000));
+        assert_eq!(stopped.ended_at_ms, Some(ASYNC_BASE_MS + 6_000));
         assert!(
             stopped
                 .summary
@@ -2288,7 +2326,11 @@ mod tests {
 
     #[test]
     fn settling_prefers_the_latest_run_and_its_first_notification() {
-        let record = |status, at_ms| Notification { status, at_ms };
+        let record = |status, at_ms| Notification {
+            status,
+            at_ms,
+            after_restart: false,
+        };
         use NotifiedStatus::{Blocked, Completed, Failed, Stopped};
         assert_eq!(settle(&[], Some(10)), None);
         // 没有转录时间：取第一条记录作结束时间。
@@ -2322,6 +2364,44 @@ mod tests {
             settle(&[record(Blocked, 50), record(Completed, 50)], Some(40))
                 .map(|settled| settled.status),
             Some(Completed)
+        );
+
+        // 冒烟 N7：恢复会话时补发的通知（重启在 3 小时后）：结束时间取转录的最后
+        // 活动；同样的时刻换成普通通知仍取通知时刻。没有转录时间时退回通知时刻。
+        let late = 3 * 60 * 60 * 1000;
+        let restart = |status, at_ms| Notification {
+            status,
+            at_ms,
+            after_restart: true,
+        };
+        assert_eq!(
+            settle(
+                &[restart(Stopped, late), restart(Stopped, late + 10)],
+                Some(6_000)
+            ),
+            Some(Settled {
+                status: Stopped,
+                ended_at_ms: 6_000
+            })
+        );
+        assert_eq!(
+            settle(&[record(Stopped, late)], Some(6_000)).map(|settled| settled.ended_at_ms),
+            Some(late)
+        );
+        assert_eq!(
+            settle(&[restart(Completed, late)], None).map(|settled| settled.ended_at_ms),
+            Some(late)
+        );
+        // 补发之后又被 SendMessage 唤起并正常结束：按最后一轮的普通通知算。
+        assert_eq!(
+            settle(
+                &[restart(Stopped, late), record(Completed, late + 60_000)],
+                Some(late + 59_500)
+            ),
+            Some(Settled {
+                status: Completed,
+                ended_at_ms: late + 60_000
+            })
         );
 
         assert_eq!(NotifiedStatus::parse(" killed "), Some(Stopped));
@@ -2392,6 +2472,75 @@ mod tests {
         assert!(!carrier(
             r#"{"type":"assistant","message":{"content":"x"}}"#
         ));
+    }
+
+    /// 冒烟 N7：恢复会话时补发的通知按摘要措辞认出（claude 2.1.280 的三种写法，
+    /// 汇总型带多个 task-id 与内部标记），普通通知不算。
+    #[test]
+    fn notifications_sent_after_a_restart_are_recognized_by_their_summary() {
+        let parse = |status: &str, ids: &[&str], summary: &str| {
+            let text = format!(
+                "<task-notification>\n{}\n<status>{status}</status>\n<summary>{summary}\
+                 </summary>\n<note>n</note>\n</task-notification>",
+                ids.iter()
+                    .map(|id| format!("<task-id>{id}</task-id>"))
+                    .collect::<String>()
+            );
+            let mut seen = Vec::new();
+            parse_notification_text(&text, 9, &mut |id, notification| {
+                seen.push((
+                    id.to_string(),
+                    notification.status,
+                    notification.after_restart,
+                ));
+            });
+            seen
+        };
+        use NotifiedStatus::{Completed, Failed, Stopped};
+        let owned = |id: &str, status, after| (id.to_string(), status, after);
+        assert_eq!(
+            parse(
+                "stopped",
+                &["a1"],
+                "Background agent \"print gamma\" didn't finish before the previous session ended"
+            ),
+            [owned("a1", Stopped, true)]
+        );
+        assert_eq!(
+            parse(
+                "failed",
+                &["a1", "a2", "__orphan_summary__:agent"],
+                "3 background agent tasks didn't finish before the previous session ended. \
+                 Task ids: a1, a2."
+            ),
+            [
+                owned("a1", Failed, true),
+                owned("a2", Failed, true),
+                owned("__orphan_summary__:agent", Failed, true),
+            ]
+        );
+        assert_eq!(
+            parse(
+                "completed",
+                &["a1"],
+                "Background agent \"print gamma\" finished before the previous session ended, \
+                 but its result was never reported"
+            ),
+            [owned("a1", Completed, true)]
+        );
+        assert_eq!(
+            parse(
+                "stopped",
+                &["a1"],
+                "Background agent \"print gamma\" from the previous session couldn't be \
+                 restarted: no transcript"
+            ),
+            [owned("a1", Stopped, true)]
+        );
+        assert_eq!(
+            parse("completed", &["a1"], "Agent \"print gamma\" finished"),
+            [owned("a1", Completed, false)]
+        );
     }
 
     #[test]
