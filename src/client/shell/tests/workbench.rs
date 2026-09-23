@@ -1896,3 +1896,177 @@ fn unpaired_view_whose_pane_is_gone_shows_the_placeholder() {
     let text = screen(&mut state);
     assert!(text.contains(SYNCING), "画面上的窗格已不在快照里：{text}");
 }
+
+/// 标题栏（第 1 行）去掉空白后的文字：宽字符后的占位格是空格。
+fn title_text(state: &ClientShellState) -> String {
+    let buffer = state.compose_buffer.as_ref().expect("保留帧缓冲");
+    (0..buffer.area.width)
+        .map(|x| buffer[(x, 1)].symbol())
+        .collect::<String>()
+        .split_whitespace()
+        .collect()
+}
+
+/// 标题栏里第一个 `needle` 字符所在的列（找不到就失败）。
+fn title_x(state: &ClientShellState, needle: &str) -> u16 {
+    let buffer = state.compose_buffer.as_ref().expect("保留帧缓冲");
+    (0..buffer.area.width)
+        .find(|x| buffer[(*x, 1)].symbol() == needle)
+        .unwrap_or_else(|| panic!("标题栏没有 {needle:?}：{}", title_text(state)))
+}
+
+/// SGR 1006 左键按下再松开，坐标取 0 起的单元格。
+fn sgr_click(state: &mut ClientShellState, x: u16, y: u16) {
+    state.handle_input_bytes(format!("\x1b[<0;{};{}M", x + 1, y + 1).as_bytes());
+    state.handle_input_bytes(format!("\x1b[<0;{};{}m", x + 1, y + 1).as_bytes());
+}
+
+/// 冒烟 L18：workbench 不走 mobile 单列布局，窗口小于停靠布局的最小尺寸时改用
+/// 「紧凑视图」只投影聚焦面板，以前切面板只能进「调整布局」再按 Tab。紧凑视图的
+/// 标题栏改成面板切换条：按布局顺序列出全部面板，当前面板反色，点别的名字直接
+/// 切过去；页脚随之说明。
+#[test]
+fn compact_view_title_bar_switches_panels_with_one_click() {
+    // 文档里的阈值：默认布局需要 37 列、13 行；终端旁停靠监控面板后需要 66 列。
+    let mut state = ready();
+    for (cols, rows, compact) in [(37, 13, false), (36, 32, true), (37, 12, true)] {
+        state.compose(cols, rows).expect("默认布局");
+        assert_eq!(
+            state.workbench.geometry.compact, compact,
+            "默认布局 {cols}×{rows}"
+        );
+    }
+    state.workbench_open(PanelId::Monitor);
+    for (cols, compact) in [(66, false), (65, true)] {
+        state.compose(cols, 32).expect("停靠监控面板");
+        assert_eq!(
+            state.workbench.geometry.compact, compact,
+            "带监控面板 {cols} 列"
+        );
+    }
+    let mut state = ready();
+    state.config.mouse_capture = true;
+    // 监控面板让布局最小宽度超过 62 列：62 列时只投影聚焦面板（截屏 93）。
+    state.workbench_open(PanelId::Monitor);
+    state.workbench.dock.focused = PanelId::Agents;
+    state.compose(62, 32).expect("紧凑视图");
+    assert!(
+        state.workbench.geometry.compact,
+        "用例前提：62 列是紧凑视图"
+    );
+    let title = title_text(&state);
+    for name in ["工作区", "Agents", "client-shell", "监控"] {
+        assert!(title.contains(name), "切换条列出「{name}」：{title}");
+    }
+    assert!(
+        !title.contains('⠿'),
+        "紧凑视图没有可停靠的目标，不画拖动把手"
+    );
+    let buffer = state.compose_buffer.as_ref().expect("保留帧缓冲");
+    let current = &buffer[(title_x(&state, "A"), 1)];
+    assert_eq!(current.bg, state.config.palette.accent, "当前面板反色");
+    let other = &buffer[(title_x(&state, "工"), 1)];
+    assert_ne!(other.bg, state.config.palette.accent, "其它面板不反色");
+    let ratio = crate::ui::color::contrast_ratio(other.fg, other.bg).expect("可比较");
+    assert!(ratio >= 4.5, "其它面板名对标题栏底色的对比度 {ratio}");
+    let footer = frame_rows(&state.compose(62, 32).expect("页脚"))[31]
+        .split_whitespace()
+        .collect::<String>();
+    assert!(
+        footer.contains("点上方的面板名"),
+        "页脚说明点名字切换：{footer}"
+    );
+
+    // 按住名字拖进面板中部再松开：只切换，不开始停靠拖动（紧凑视图只投影一个
+    // 面板，没有可停靠的目标），不画「放到这里」预览。
+    let x = title_x(&state, "c");
+    state.handle_input_bytes(format!("\x1b[<0;{};2M", x + 1).as_bytes());
+    assert!(
+        matches!(state.workbench.dock.focused, PanelId::Terminal(_)),
+        "点终端组的名字切到终端：{:?}",
+        state.workbench.dock.focused
+    );
+    state.handle_input_bytes(b"\x1b[<32;31;16M");
+    let dragged = frame_rows(&state.compose(62, 32).expect("拖动中"))
+        .concat()
+        .split_whitespace()
+        .collect::<String>();
+    assert!(!dragged.contains("放到这里"), "没有停靠预览：{dragged}");
+    state.handle_input_bytes(b"\x1b[<0;31;16m");
+    state.compose(62, 32).expect("切换后");
+    assert!(
+        matches!(
+            state.workbench.geometry.panels.as_slice(),
+            [(PanelId::Terminal(_), _)]
+        ),
+        "紧凑视图改投影终端组"
+    );
+    let buffer = state.compose_buffer.as_ref().expect("保留帧缓冲");
+    assert_eq!(
+        buffer[(title_x(&state, "c"), 1)].bg,
+        state.config.palette.accent,
+        "反色跟到终端组"
+    );
+}
+
+/// 最大化后再变窄：紧凑投影画的是最大化面板。点切换条的名字时最大化随之移过去
+/// （同调整布局模式的 Tab），否则画面不变、键盘却落到看不见的面板上。
+#[test]
+fn compact_switcher_moves_the_maximized_panel_with_the_focus() {
+    let mut state = ready();
+    state.config.mouse_capture = true;
+    state.workbench_open(PanelId::Monitor);
+    let terminal = PanelId::Terminal(1);
+    state.workbench.dock.focused = terminal.clone();
+    state.workbench.dock.maximized = Some(terminal.clone());
+    state.compose(62, 32).expect("最大化后的紧凑视图");
+    assert!(
+        matches!(state.workbench.geometry.panels.as_slice(), [(panel, _)] if *panel == terminal),
+        "用例前提：只投影最大化的终端组"
+    );
+
+    let x = title_x(&state, "A");
+    sgr_click(&mut state, x, 1);
+    assert_eq!(state.workbench.dock.focused, PanelId::Agents);
+    assert_eq!(
+        state.workbench.dock.maximized,
+        Some(PanelId::Agents),
+        "最大化跟随新焦点"
+    );
+    state.compose(62, 32).expect("切换后");
+    assert!(
+        matches!(
+            state.workbench.geometry.panels.as_slice(),
+            [(PanelId::Agents, _)]
+        ),
+        "画面换成 Agents 面板"
+    );
+}
+
+/// 面板名整排放不下时退回只画聚焦面板的标题，页脚仍指向「调整布局」；页脚放不下
+/// 时截短并以省略号收尾，不在字中间硬切。
+#[test]
+fn compact_switcher_falls_back_to_the_focused_title_when_names_do_not_fit() {
+    use crate::client::shell::workbench::interaction::Action;
+    let mut state = ready();
+    state.workbench_open(PanelId::Monitor);
+    state.workbench.dock.focused = PanelId::Agents;
+    let rows = frame_rows(&state.compose(24, 32).expect("很窄的紧凑视图"));
+    assert!(state.workbench.geometry.compact, "用例前提：紧凑视图");
+    let title = rows[1].split_whitespace().collect::<String>();
+    assert!(
+        title.contains("Agents") && !title.contains("工作区"),
+        "只画聚焦面板的标题：{title}"
+    );
+    assert!(
+        state
+            .workbench
+            .hits
+            .iter()
+            .all(|(_, action)| !matches!(action, Action::Switch(_))),
+        "没有切换条命中区"
+    );
+    let footer = rows[31].split_whitespace().collect::<String>();
+    assert!(footer.starts_with("紧凑视图"), "页脚说明紧凑视图：{footer}");
+    assert!(footer.ends_with('…'), "放不下的页脚以省略号收尾：{footer}");
+}

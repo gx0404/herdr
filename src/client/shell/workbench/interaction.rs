@@ -13,11 +13,17 @@ pub(in crate::client::shell) enum Action {
     Lock,
     Reset,
     Header(PanelId),
+    /// 紧凑视图标题栏切换条上的面板名：只切焦点（最大化随之移过去），不开始拖动
+    /// ——紧凑视图只投影一个面板，没有可停靠的目标。
+    Switch(PanelId),
     Maximize(PanelId),
     NewTab(u64),
     ScrollTabs(u64, isize),
     Pane(String),
-    Tab { group: u64, tab: String },
+    Tab {
+        group: u64,
+        tab: String,
+    },
 }
 
 pub(super) enum Drag {
@@ -435,6 +441,14 @@ impl ClientShellState {
                     } else {
                         Some(panel)
                     };
+                }
+                Action::Switch(panel) => {
+                    self.focus_workbench_panel(panel.clone());
+                    if self.workbench.dock.maximized.is_some() {
+                        // 与调整布局模式的 Tab 同口径：最大化跟随新焦点，否则
+                        // 投影的仍是旧面板，键盘却已落到看不见的面板上。
+                        self.workbench.dock.maximized = Some(panel);
+                    }
                 }
                 Action::Header(panel) => {
                     self.focus_workbench_panel(panel.clone());

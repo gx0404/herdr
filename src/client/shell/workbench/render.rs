@@ -88,6 +88,81 @@ fn borderless_pane_handle(
         })
 }
 
+/// 面板标题文字（不含拖动把手）。终端组按它当前那一栏标签所属的工作区命名，
+/// 同名工作区带上编号。
+fn panel_title(dock: &DockLayout, snapshot: &ClientShellSnapshot, panel: &PanelId) -> String {
+    match panel {
+        PanelId::Workspaces => tr("WORKSPACES", "工作区").to_owned(),
+        PanelId::Agents => "Agents".to_owned(),
+        PanelId::Monitor => tr("MONITOR", "监控").to_owned(),
+        PanelId::Accounts => tr("ACCOUNTS", "账号用量").to_owned(),
+        PanelId::Terminal(id) => {
+            // The strip holds one workspace's tabs; name the panel after that
+            // workspace so each terminal page is identifiable. Same-named
+            // workspaces get their number.
+            let workspace = dock
+                .groups
+                .iter()
+                .find(|group| group.id == *id)
+                .and_then(|group| group.tabs.first())
+                .and_then(|tab| snapshot.tabs.iter().find(|entry| &entry.tab_id == tab))
+                .and_then(|tab| {
+                    snapshot
+                        .workspaces
+                        .iter()
+                        .find(|ws| ws.workspace_id == tab.workspace_id)
+                });
+            match workspace {
+                Some(ws) => {
+                    let duplicated = snapshot
+                        .workspaces
+                        .iter()
+                        .filter(|other| other.label == ws.label)
+                        .count()
+                        > 1;
+                    if duplicated {
+                        format!("{} #{}", ws.label, ws.number)
+                    } else {
+                        ws.label.clone()
+                    }
+                }
+                None => format!("{} {id}", tr("TERMINALS", "终端组")),
+            }
+        }
+    }
+}
+
+/// 紧凑视图标题栏的面板切换条：按布局顺序（与调整布局模式里 Tab 轮转同序）每个
+/// 面板一段 ` 名称 `，段间留 1 列。整排超过 `width` 返回空，调用方退回只画聚焦
+/// 面板的标题。
+fn compact_switcher(
+    dock: &DockLayout,
+    snapshot: &ClientShellSnapshot,
+    width: u16,
+) -> Vec<(PanelId, String)> {
+    // 与 Tab 轮转同一取法：去最大化投影，足够大的区域不会触发紧凑投影。
+    let panels = dock.layout_geometry(Rect::new(0, 0, 4096, 4096)).panels;
+    if panels.len() < 2 {
+        return Vec::new();
+    }
+    let segments = panels
+        .into_iter()
+        .map(|(panel, _)| {
+            let segment = format!(" {} ", panel_title(dock, snapshot, &panel));
+            (panel, segment)
+        })
+        .collect::<Vec<_>>();
+    let total = segments
+        .iter()
+        .map(|(_, segment)| segment.width())
+        .sum::<usize>()
+        + segments.len().saturating_sub(1);
+    if total > usize::from(width) {
+        return Vec::new();
+    }
+    segments
+}
+
 pub(super) fn pane_hit(pane: &crate::protocol::PaneSurfacePane, area: Rect) -> PaneHit {
     PaneHit {
         rect: translated(pane.rect, area),
@@ -280,6 +355,7 @@ impl ClientShellState {
         // 非聚焦面板的标题与按钮按对标题栏底色的对比度选色（冒烟 L3：overlay0 叠
         // surface0 只有 2.57:1），聚焦面板仍用 accent 区分。
         let unfocused_title = super::super::render::readable_muted_fg(palette, palette.surface0);
+        let mut compact_switcher_shown = false;
         for (panel, area) in &self.workbench.geometry.panels {
             if area.is_empty() {
                 continue;
@@ -297,47 +373,6 @@ impl ClientShellState {
             } else {
                 "⠿ "
             };
-            let label = match panel {
-                PanelId::Workspaces => format!("{handle}{}", tr("WORKSPACES", "工作区")),
-                PanelId::Agents => format!("{handle}Agents"),
-                PanelId::Monitor => format!("{handle}{}", tr("MONITOR", "监控")),
-                PanelId::Accounts => format!("{handle}{}", tr("ACCOUNTS", "账号用量")),
-                PanelId::Terminal(id) => {
-                    // The strip holds one workspace's tabs; name the panel
-                    // after that workspace so each terminal page is
-                    // identifiable. Same-named workspaces get their number.
-                    let workspace = self
-                        .workbench
-                        .dock
-                        .groups
-                        .iter()
-                        .find(|group| group.id == *id)
-                        .and_then(|group| group.tabs.first())
-                        .and_then(|tab| snapshot.tabs.iter().find(|entry| &entry.tab_id == tab))
-                        .and_then(|tab| {
-                            snapshot
-                                .workspaces
-                                .iter()
-                                .find(|ws| ws.workspace_id == tab.workspace_id)
-                        });
-                    match workspace {
-                        Some(ws) => {
-                            let duplicated = snapshot
-                                .workspaces
-                                .iter()
-                                .filter(|other| other.label == ws.label)
-                                .count()
-                                > 1;
-                            if duplicated {
-                                format!("{handle}{} #{}", ws.label, ws.number)
-                            } else {
-                                format!("{handle}{}", ws.label)
-                            }
-                        }
-                        None => format!("{handle}{} {id}", tr("TERMINALS", "终端组")),
-                    }
-                }
-            };
             let header = Rect::new(area.x, area.y, area.width, 1);
             canvas
                 .buffer()
@@ -346,18 +381,50 @@ impl ClientShellState {
             // 用户仍能一键关掉停靠面板。
             let closable = matches!(panel, PanelId::Monitor | PanelId::Accounts);
             let controls = if closable { 6 } else { 3 };
-            put(
-                canvas.buffer(),
-                Rect::new(area.x, area.y, area.width.saturating_sub(controls), 1),
-                &label,
-                Style::default()
-                    .fg(color)
-                    .bg(palette.surface0)
-                    .add_modifier(Modifier::BOLD),
-            );
             self.workbench
                 .hits
                 .push((header, Action::Header(panel.clone())));
+            let title_area = Rect::new(area.x, area.y, area.width.saturating_sub(controls), 1);
+            // 紧凑视图只投影聚焦面板：标题栏改成面板切换条，按布局顺序列出全部面板，
+            // 点名字就切过去（L18）；整排放不下才退回只画聚焦面板的标题。
+            let switcher = if self.workbench.geometry.compact {
+                compact_switcher(&self.workbench.dock, snapshot, title_area.width)
+            } else {
+                Vec::new()
+            };
+            compact_switcher_shown |= !switcher.is_empty();
+            if switcher.is_empty() {
+                put(
+                    canvas.buffer(),
+                    title_area,
+                    &format!(
+                        "{handle}{}",
+                        panel_title(&self.workbench.dock, snapshot, panel)
+                    ),
+                    Style::default()
+                        .fg(color)
+                        .bg(palette.surface0)
+                        .add_modifier(Modifier::BOLD),
+                );
+            }
+            let mut x = title_area.x;
+            for (candidate, segment) in &switcher {
+                let width = segment.width() as u16;
+                let rect = Rect::new(x, area.y, width, 1);
+                let style = if candidate == panel {
+                    Style::default()
+                        .fg(crate::ui::color::contrast_fg(palette, palette.accent))
+                        .bg(palette.accent)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(unfocused_title).bg(palette.surface0)
+                };
+                put(canvas.buffer(), rect, segment, style);
+                self.workbench
+                    .hits
+                    .push((rect, Action::Switch(candidate.clone())));
+                x = x.saturating_add(width).saturating_add(1);
+            }
             let toggle = Rect::new(
                 area.right().saturating_sub(3).max(area.x),
                 area.y,
@@ -523,7 +590,13 @@ impl ClientShellState {
                 }
             }
         } else {
-            let hint = if self.workbench.geometry.compact {
+            let hint = if compact_switcher_shown {
+                // 紧凑视图本来就窄，提示写短。
+                tr(
+                    "Compact view · click a name above to switch panels",
+                    "紧凑视图 · 点上方的面板名切换面板",
+                )
+            } else if self.workbench.geometry.compact {
                 tr(
                     "Compact view · use Arrange layout / Tab to switch panels",
                     "紧凑视图 · 在「调整布局」模式用 Tab 切换面板",
@@ -541,10 +614,11 @@ impl ClientShellState {
                     "拖动 ⠿ 停靠 · 拖动分隔线调尺寸 · 拖动标签拆分或归组",
                 )
             };
+            // 放不下时截短并以省略号收尾，看得出后面还有字。
             put(
                 canvas.buffer(),
                 footer,
-                hint,
+                &crate::ui::truncate_end(hint, usize::from(footer.width)),
                 Style::default().fg(palette.overlay0),
             );
         }
