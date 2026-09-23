@@ -196,8 +196,8 @@ fn fit_tab_labels<'a, const N: usize>(labels: [&'a str; N], width: u16) -> [Cow<
     })
 }
 
-/// 页脚键位提示（kit `footer_hints`，可点）：系统页多一个「暂停 / 继续」；
-/// 编辑布局模式下换成移动卡片的说明与「完成」。
+/// 页脚键位提示（kit `footer_hints`，可点）：系统页与账号页有「刷新」，系统页再
+/// 多一个「暂停 / 继续」；编辑布局模式下换成移动卡片的说明与「完成」。
 fn footer_hints(
     buffer: &mut Buffer,
     area: Rect,
@@ -229,10 +229,15 @@ fn footer_hints(
                 vec![None, Some(Action::EditLayout)],
             )
         } else {
-            // 账号页的刷新与工具栏同一口径：刷新中 / 防抖期间置灰、不回填命中区。
-            let refresh = page != Page::Accounts || refresh_available(state);
-            let mut hints = vec![hint("r", texts.hint_refresh, refresh, false)];
-            let mut actions = vec![refresh.then_some(Action::Refresh)];
+            let mut hints = Vec::with_capacity(3);
+            let mut actions = Vec::with_capacity(3);
+            // 监控偏好页只有本机偏好控件，没有可刷新的内容，不提示「r 刷新」（冒烟
+            // L7）。账号页的刷新与工具栏同一口径：刷新中 / 防抖期间置灰、不回填命中区。
+            if page != Page::Settings {
+                let refresh = page != Page::Accounts || refresh_available(state);
+                hints.push(hint("r", texts.hint_refresh, refresh, false));
+                actions.push(refresh.then_some(Action::Refresh));
+            }
             if page == Page::Monitor {
                 let label = if state.paused {
                     texts.hint_resume
@@ -1210,6 +1215,33 @@ mod tests {
             "{:?}",
             tiny.hits
         );
+    }
+
+    /// 冒烟 L7：监控偏好页没有可刷新的内容，页脚不再提示「r 刷新」（也不登记
+    /// 刷新命中区）；系统页与账号页照旧提示。
+    #[test]
+    fn preferences_footer_omits_the_refresh_hint() {
+        let _guard = lang_guard(Lang::ZhCn);
+        let state = populated();
+        let (buffer, output) = paint_page(&state, Page::Settings, 133, 32);
+        let footer = row_text(&buffer, 31);
+        assert!(row_has(&buffer, 31, "Esc关闭"), "{footer}");
+        assert!(
+            !row_has(&buffer, 31, "刷新"),
+            "偏好页页脚不提示刷新：{footer}"
+        );
+        assert!(
+            !has(&output, |a| matches!(a, Action::Refresh)),
+            "偏好页没有刷新命中区"
+        );
+        for page in [Page::Monitor, Page::Accounts] {
+            let (buffer, _) = paint_page(&state, page, 133, 32);
+            assert!(
+                row_has(&buffer, 31, "r刷新"),
+                "{page:?} 页脚仍提示刷新：{}",
+                row_text(&buffer, 31)
+            );
+        }
     }
 
     /// 冒烟 L11：账号页绑定行与其它界面同一套术语——中文写「窗格」，不再混写

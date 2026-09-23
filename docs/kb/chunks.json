@@ -2693,8 +2693,8 @@
       "anchor": "_top",
       "doc": "docs/next/website/src/content/docs/monitoring.mdx",
       "id": "docs-next-website-src-content-docs-monitoring-mdx-top",
-      "source_sha256": "955665cf7d94cfe505a16d1a82820263a8c2c595b094576be6085fe086cb7f10",
-      "text": "---\ntitle: Monitoring, account usage and docking\ndescription: Arrange terminal groups and inspect host resources and official provider usage.\n---\n\nOpen **Monitor** from the top bar, the global menu, or command search. A single panel hosts three pages — System, Accounts and Monitor preferences — switched with the in-panel tabs or `1`/`2`/`3`; `r` refreshes, `Space` pauses history, and `Esc` closes, and the panel footer lists refresh, pause and close as clickable hints. Hardware metrics belong to the connected host; hovering a remote agent queries its own host."
+      "source_sha256": "48a0f24fbcb981c996d5e5d5ffc191c6086e38d81abe01f7c1fdb462ae01c6b3",
+      "text": "---\ntitle: Monitoring, account usage and docking\ndescription: Arrange terminal groups and inspect host resources and official provider usage.\n---\n\nOpen **Monitor** from the top bar, the global menu, or command search. A single panel hosts three pages — System, Accounts and Monitor preferences — switched with the in-panel tabs or `1`/`2`/`3`; `r` refreshes, `Space` pauses history, and `Esc` closes, and the panel footer lists them as clickable hints — refresh on the System and Accounts pages, pause on the System page, close everywhere; the Monitor preferences page holds only local preferences, so its footer offers no refresh. Hardware metrics belong to the connected host; hovering a remote agent queries its own host."
     },
     {
       "anchor": "Detach and reattach",
