@@ -102,6 +102,10 @@ impl EndpointCommands {
         } else if name.starts_with("system.")
             || name.starts_with("account.")
             || name == "client.views.set"
+            // 「Agent 活动」窗口跟随时每秒读取，server 在后台线程作答；走后台泳道，
+            // 慢读取（opencode / zcode 走外部 CLI）不堵用户动作泳道。
+            || name.starts_with("agent.activity.")
+            || name == "agent.external.list"
         {
             &mut self.background
         } else {
@@ -670,6 +674,33 @@ mod tests {
                 .get(&endpoint())
                 .is_some_and(|lane| lane.queued.is_empty()),
             "过期后队列清空"
+        );
+    }
+
+    /// 「Agent 活动」窗口的读取走后台泳道：跟随轮询与慢读取不排在用户动作前面。
+    #[test]
+    fn agent_activity_reads_ride_the_background_lane() {
+        let mut commands = EndpointCommands::default();
+        let superseded = commands.enqueue(
+            endpoint(),
+            1,
+            "boot-a".into(),
+            Box::new(Request {
+                id: "activity-read".into(),
+                method: crate::api::schema::Method::AgentActivityRead(
+                    crate::api::schema::AgentActivityReadParams::default(),
+                ),
+            }),
+            false,
+        );
+        assert!(superseded.is_empty());
+        assert!(commands
+            .background
+            .get(&endpoint())
+            .is_some_and(|lane| lane.queued.len() == 1));
+        assert!(
+            !commands.lanes.contains_key(&endpoint()),
+            "不进用户动作泳道"
         );
     }
 
