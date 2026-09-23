@@ -1506,6 +1506,41 @@ fn install_codex_tells_the_user_to_trust_the_hooks_until_codex_does() {
     let _ = fs::remove_dir_all(base);
 }
 
+/// 更新提示（`herdr update` 之后、`status --outdated-only`）只看版本：信任提示行只在
+/// `herdr integration status` 里算，不为它在每次更新后去读 codex 的配置。
+#[test]
+fn outdated_notice_leaves_codex_hook_trust_to_the_status_command() {
+    let _lock = integration_env_lock();
+    let base = unique_base();
+    let home = base.join("home");
+    let codex_dir = home.join(".codex");
+    fs::create_dir_all(&codex_dir).unwrap();
+    std::env::set_var("HOME", &home);
+    install_codex().unwrap();
+    fs::write(
+        codex_dir.join(CODEX_HOOK_INSTALL_NAME),
+        "#!/bin/sh\n# HERDR_INTEGRATION_ID=codex\n# HERDR_INTEGRATION_VERSION=2\n",
+    )
+    .unwrap();
+    let is_codex =
+        |status: &IntegrationStatus| status.target == crate::api::schema::IntegrationTarget::Codex;
+
+    let outdated = outdated_installed_integrations();
+    let codex = outdated.iter().find(|status| is_codex(status)).unwrap();
+    assert_eq!(codex.state, IntegrationStatusKind::Outdated);
+    assert_eq!(codex.note, None);
+
+    let statuses = installed_integration_statuses();
+    let codex = statuses.iter().find(|status| is_codex(status)).unwrap();
+    assert_eq!(
+        codex.note,
+        Some(IntegrationStatusNote::CodexHooksNeedReview)
+    );
+
+    std::env::remove_var("HOME");
+    let _ = fs::remove_dir_all(base);
+}
+
 #[test]
 fn install_kimi_writes_hook_and_updates_config() {
     let _lock = integration_env_lock();

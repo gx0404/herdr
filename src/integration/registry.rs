@@ -242,22 +242,33 @@ pub(crate) fn codex_executable_name() -> &'static str {
     }
 }
 
+/// `herdr integration status` 的完整状态，含版本之外的提示行。
 pub(crate) fn installed_integration_statuses() -> Vec<super::IntegrationStatus> {
+    installed_integration_versions()
+        .into_iter()
+        .map(|mut status| {
+            status.note = integration_status_note(&status);
+            status
+        })
+        .collect()
+}
+
+/// 只看集成资产版本，`note` 恒为 `None`：更新提示（`herdr update` 之后、
+/// `--outdated-only`）只关心版本，不为提示行去读宿主配置。
+fn installed_integration_versions() -> Vec<super::IntegrationStatus> {
     integration_specs()
         .into_iter()
         .filter_map(|(target, path, expected_version)| {
             if !integration_target_supported(target) {
                 return None;
             }
-            let mut status = integration_status_at(target, path.ok()?, expected_version);
-            status.note = integration_status_note(&status);
-            Some(status)
+            Some(integration_status_at(target, path.ok()?, expected_version))
         })
         .collect()
 }
 
 /// 只在 `herdr integration status` 这条路径上读宿主配置：推荐列表（设置页、API）
-/// 不需要这项，不为它多做文件 I/O。
+/// 与更新提示都不需要这项，不为它多做文件 I/O。
 fn integration_status_note(
     status: &super::IntegrationStatus,
 ) -> Option<super::IntegrationStatusNote> {
@@ -304,7 +315,7 @@ pub(crate) fn integration_recommendations() -> Vec<super::IntegrationRecommendat
 }
 
 pub(crate) fn outdated_installed_integrations() -> Vec<super::IntegrationStatus> {
-    installed_integration_statuses()
+    installed_integration_versions()
         .into_iter()
         .filter(|status| status.state == super::IntegrationStatusKind::Outdated)
         .collect()
