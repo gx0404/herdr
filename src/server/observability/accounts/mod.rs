@@ -1594,13 +1594,20 @@ fn claude_probe(
     Err((ObservationStatus::NeedsBinding, message))
 }
 
-/// 非交互查询的来源说明：实际选用的命令形态（查询体之类带空白的参数不进文案）；`local`
-/// 作用域的厂商（opencode）无论走哪种形态都标明是本地会话统计、不是账号额度。
+/// 非交互查询的来源说明：实际选用的命令形态。查询体之类带空白的参数不原样进文案，换成
+/// `<query>` 占位——直接省掉会把文案变成另一条命令：`opencode db --format json` 不带查询时
+/// 进入交互式 sqlite3 shell，照抄的用户会被卡在里面。`local` 作用域的厂商（opencode）无论
+/// 走哪种形态都标明是本地会话统计、不是账号额度。
 fn json_query_source(provider: &registry::Provider, args: &[&str]) -> String {
     let shown = args
         .iter()
-        .filter(|arg| !arg.contains(char::is_whitespace))
-        .copied()
+        .map(|arg| {
+            if arg.contains(char::is_whitespace) {
+                "<query>"
+            } else {
+                arg
+            }
+        })
         .collect::<Vec<_>>()
         .join(" ");
     let command = format!("{} {shown}", provider.command);
@@ -2006,8 +2013,9 @@ mod tests {
         };
         assert_eq!(
             json_query_source(opencode, args),
-            "opencode db --format json · 本地会话统计，非账号额度",
-            "首选形态：查询体不进文案，但「本地统计、非账号额度」必须明示"
+            "opencode db <query> --format json · 本地会话统计，非账号额度",
+            "首选形态：查询体换成占位（省掉会变成进交互式 shell 的另一条命令），且「本地统计、\
+             非账号额度」必须明示"
         );
         assert_eq!(
             json_query_source(opencode, fallback_args.expect("opencode 有回退形态")),
