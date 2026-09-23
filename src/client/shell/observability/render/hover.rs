@@ -26,19 +26,9 @@ pub(super) fn hover_scope(state: &State) -> AccountsScope<'_> {
     }
 }
 
-/// agent 行悬浮层的账号正文：正文 + 底部流式动作行（刷新 · 切换账号 · 官方查询说明 ·
-/// 官方回调 · 绑定账号，最多两行）。页面的动作在工具栏里，不走这里。
-fn accounts_body(
-    buffer: &mut Buffer,
-    area: Rect,
-    state: &State,
-    scope: &AccountsScope<'_>,
-    palette: &Palette,
-    hits: &mut Vec<(Rect, Action)>,
-) {
-    if area.is_empty() {
-        return;
-    }
+/// 悬浮层正文底部的流式动作行（刷新 · 切换账号 · 官方查询说明 · 官方回调 · 绑定账号，
+/// 最多两行）：绘制与定高共用这一份。页面的动作在工具栏里，不走这里。
+fn body_actions(state: &State, scope: &AccountsScope<'_>) -> Vec<ToolbarItem> {
     let mut items = vec![
         refresh_item(scope, state.now_ms),
         cycle_item(state, scope.provider),
@@ -52,21 +42,69 @@ fn accounts_body(
             action: Some(Action::Bind),
         });
     }
+    items
+}
+
+/// 动作行在 `width` 列里折成几行（最多两行）。
+fn action_rows(items: &[ToolbarItem], width: u16) -> u16 {
     let widths = items.iter().map(ToolbarItem::width).collect::<Vec<_>>();
-    let (_, rows) = flow_positions(&widths, area.width, 2, 2);
+    flow_positions(&widths, width, 2, 2).1
+}
+
+/// agent 行悬浮层的账号正文：正文 + 底部的动作行（`body_actions`）。
+fn accounts_body(
+    buffer: &mut Buffer,
+    area: Rect,
+    state: &State,
+    scope: &AccountsScope<'_>,
+    items: &[ToolbarItem],
+    palette: &Palette,
+    hits: &mut Vec<(Rect, Action)>,
+) {
+    if area.is_empty() {
+        return;
+    }
     // 正文至少留 1 行。
-    let rows = rows.min(area.height.saturating_sub(1));
+    let rows = action_rows(items, area.width).min(area.height.saturating_sub(1));
     let content = Rect::new(area.x, area.y, area.width, area.height.saturating_sub(rows));
     accounts_content(buffer, content, state, scope, palette, hits);
     if rows > 0 {
         toolbar_rows(
             buffer,
             Rect::new(area.x, content.bottom(), area.width, rows),
-            &items,
+            items,
             palette,
             hits,
         );
     }
+}
+
+/// 卡片的外框与底部两行：上下边框 + 间隔 + 「打开页面」。
+const CARD_CHROME_ROWS: u16 = 4;
+
+/// 卡片按内容需要的高度（真机 L5：固定 17 行时内容只有四五行，下方空出一大片）：
+/// 外框与底部两行 + 正文 + 动作行。正文与 `accounts_content` 同口径——空态是标题
+/// （在途时只有「刷新中…」）与说明、上下各留一行；卡片与表格按滚动真源
+/// `account_rows` 计行（表格另加表头）。上限由调用方封顶。
+fn content_height(
+    state: &State,
+    scope: &AccountsScope<'_>,
+    items: &[ToolbarItem],
+    inner_width: u16,
+) -> u16 {
+    if !state.usage.enabled {
+        return CARD_CHROME_ROWS + 1;
+    }
+    let body = if scope.accounts.is_empty() {
+        usize::from(!scope.refreshing) + 3
+    } else {
+        account_rows(state, scope.accounts, scope.refresh_states)
+            + usize::from(state.usage.format == UsageDisplayFormat::Table)
+    };
+    u16::try_from(body)
+        .unwrap_or(u16::MAX)
+        .saturating_add(action_rows(items, inner_width))
+        .saturating_add(CARD_CHROME_ROWS)
 }
 
 /// 卡片最矮高度：上下边框 2 行 + 正文至少 1 行 + 间隔 1 行 + 「打开页面」1 行。
@@ -113,16 +151,24 @@ pub(super) fn hover_layer(
     };
     match &hover.target {
         HoverTarget::Agent { agent, .. } => {
-            // 尺寸不变（宽 ≤68、高 ≤17，屏幕小时各让出 2 格）；定位统一走 kit：
+            // 宽 ≤68、高按内容收缩到 ≤17（屏幕小时各让出 2 格）；定位统一走 kit：
             // 锚点（agent 行 / CLI 标题）下方左对齐 → 放不下上翻 → 两侧都不够取
             // 大侧收缩，永不盖住锚点。宿主只收窄摆放区域（agent 行 → Agents 面板
             // 旁边，见 `card_bounds`）。经典布局与停靠工作台的两条绘制 pass 同源。
-            let size = (
-                buffer.area.width.saturating_sub(2).min(68),
-                buffer.area.height.saturating_sub(2).min(17),
-            );
-            let bounds = card_bounds(buffer.area, state.hover_panel, size.0);
-            let hover_rect = place_hover_card(hover.anchor, size, bounds);
+            let width = buffer.area.width.saturating_sub(2).min(68);
+            let bounds = card_bounds(buffer.area, state.hover_panel, width);
+            let scope = hover_scope(state);
+            let items = if state.usage.enabled {
+                body_actions(state, &scope)
+            } else {
+                Vec::new()
+            };
+            // kit 会把宽度收进摆放区域：动作行按实际内宽折行。
+            let inner_width = width.min(bounds.width).saturating_sub(2);
+            let height = content_height(state, &scope, &items, inner_width)
+                .max(MIN_CARD_HEIGHT)
+                .min(buffer.area.height.saturating_sub(2).min(17));
+            let hover_rect = place_hover_card(hover.anchor, (width, height), bounds);
             // kit 在两侧都不够时会收缩高度；矮到放不下一行正文就整张不画，不留
             // 看不见却独占鼠标输入的命中区。
             if hover_rect.height < MIN_CARD_HEIGHT {
@@ -145,14 +191,7 @@ pub(super) fn hover_layer(
                 inner.height.saturating_sub(2),
             );
             if state.usage.enabled {
-                accounts_body(
-                    buffer,
-                    body,
-                    state,
-                    &hover_scope(state),
-                    palette,
-                    hover_hits,
-                );
+                accounts_body(buffer, body, state, &scope, &items, palette, hover_hits);
             } else {
                 // 用量在设置里关闭时不会发请求：照实说明，而不是停在「刷新中…」
                 // （钉住入口不看这个开关，指针悬浮则根本不会出现）。

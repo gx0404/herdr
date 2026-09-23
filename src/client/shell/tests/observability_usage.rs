@@ -4442,8 +4442,23 @@ fn classic_usage_ready_with(snapshot: ClientShellSnapshot) -> ClientShellState {
     state
 }
 
-/// 直接放一张已可见的 pane_1 / claude 悬浮卡，锚在 `anchor`。
+/// 让悬浮层作用域的内容高过悬浮层上限（三个 claude 账号的整卡）：卡片按内容收缩
+/// （真机 L5）之后，测满尺寸（68×17）摆放的用例要有足够高的内容。
+fn fill_tall_hover_scope(state: &mut ClientShellState) {
+    let scope = &mut state.observability.hover_scope;
+    scope.provider = Some("claude".into());
+    scope.accounts = (0..3)
+        .map(|index| AccountUsageSnapshot {
+            account_id: format!("claude:{index}"),
+            ..claude_card_account()
+        })
+        .collect();
+}
+
+/// 直接放一张已可见的 pane_1 / claude 悬浮卡，锚在 `anchor`；内容高过上限，卡片是
+/// 满尺寸。
 fn show_hover_at(state: &mut ClientShellState, anchor: Rect) {
+    fill_tall_hover_scope(state);
     state.observability.hover = Some(Hover {
         target: HoverTarget::Agent {
             endpoint_id: state.active_endpoint_id.clone(),
@@ -4614,6 +4629,7 @@ fn agent_row_hover_card_sits_beside_the_agents_panel_in_either_layout() {
             moved(&mut state, row.x, row.y);
             tick(&mut state, t0 + Duration::from_millis(450));
             assert_eq!(agent_hover(&state), Some((true, false)), "{label}: 可见");
+            fill_tall_hover_scope(&mut state);
             let frame = state.compose(120, 40).expect("悬浮卡");
             let card = state.observability.hover_rect;
             assert_eq!(
@@ -4833,6 +4849,7 @@ fn cli_title_hover_card_is_full_size_next_to_its_title_in_either_layout() {
                     "{label}: 锚点只是 {} 的标题行",
                     hit.pane_id
                 );
+                fill_tall_hover_scope(&mut state);
                 let frame = state.compose(120, 40).expect("悬浮卡");
                 let card = state.observability.hover_rect;
                 assert_eq!(
@@ -6449,7 +6466,7 @@ fn cards_page(
 }
 
 /// agent 行悬浮层（账号用量卡）：账号快照放进悬浮层作用域，终端 120×40 时悬浮层
-/// 正好是上限 68×17。
+/// 宽是上限 68，高按内容收缩（≤17，真机 L5）。
 fn cards_hover(agent: &str, accounts: Vec<AccountUsageSnapshot>) -> ClientShellState {
     let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
     state.set_snapshot(Box::new(snapshot()));
@@ -6471,10 +6488,9 @@ fn cards_hover(agent: &str, accounts: Vec<AccountUsageSnapshot>) -> ClientShellS
     });
     state.compose(120, 40).expect("悬浮层");
     let hover = state.observability.hover_rect;
-    assert_eq!(
-        (hover.width, hover.height),
-        (68, 17),
-        "用例前提：悬浮层是上限尺寸"
+    assert!(
+        hover.width == 68 && (5..=17).contains(&hover.height),
+        "用例前提：悬浮层宽 68、高按内容不超过 17：{hover:?}"
     );
     state
 }

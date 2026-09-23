@@ -956,6 +956,128 @@ mod tests {
         );
     }
 
+    /// 钉住的 codex 用量卡（真机 codex-21 的情形）：悬浮层作用域里的账号与刷新状态。
+    fn pinned_usage_card(
+        accounts: Vec<AccountUsageSnapshot>,
+        refresh_states: Vec<UsageRefreshState>,
+    ) -> State {
+        let mut state = State::new(&config());
+        state.now_ms = 14_000;
+        state.hover_scope.provider = Some("codex".into());
+        state.hover_scope.pane = Some("pane_1".into());
+        state.hover_scope.accounts = accounts;
+        state.hover_scope.refresh_states = refresh_states;
+        state.hover = Some(Hover {
+            target: HoverTarget::Agent {
+                endpoint_id: crate::client::endpoint::ClientEndpointId::Local,
+                pane: "pane_1".into(),
+                agent: "codex".into(),
+            },
+            anchor: Rect::new(2, 6, 20, 1),
+            since: std::time::Instant::now(),
+            visible: true,
+            leave_at: None,
+            pinned: true,
+        });
+        state
+    }
+
+    /// codex-21 的账号：7d 窗口 6% 与额外余额 0.00 credits。
+    fn codex_usage_account(id: &str) -> AccountUsageSnapshot {
+        AccountUsageSnapshot {
+            account_id: id.into(),
+            account_label: "Codex".into(),
+            agent: "codex".into(),
+            provider: "codex".into(),
+            status: ObservationStatus::Ready,
+            observed_at_ms: 1_000,
+            metrics: vec![
+                UsageMetric {
+                    id: "codex/secondary".into(),
+                    label: "Codex · 次级额度".into(),
+                    unit: "%".into(),
+                    scope: "account".into(),
+                    used_percent: Some(6.0),
+                    window_seconds: Some(7 * 86_400),
+                    resets_at: Some(5 * 86_400),
+                    ..Default::default()
+                },
+                UsageMetric {
+                    id: "codex/credits".into(),
+                    label: "额外余额".into(),
+                    unit: "credits".into(),
+                    scope: "account".into(),
+                    amount_decimal: Some("0.00".into()),
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        }
+    }
+
+    /// 经典布局 pass（没有页面、画悬浮层）画整屏。
+    fn paint_hover(state: &State, width: u16, height: u16) -> (Buffer, PaintOutput) {
+        let area = Rect::new(0, 0, width, height);
+        let mut buffer = Buffer::empty(area);
+        let config = config();
+        let cx = chrome_context(&config);
+        let output = paint(&mut buffer, area, state, &cx, None, true);
+        (buffer, output)
+    }
+
+    /// 卡片里除上下边框外整行空白的行数。
+    fn blank_card_rows(buffer: &Buffer, card: Rect) -> usize {
+        (card.y + 1..card.bottom() - 1)
+            .filter(|y| {
+                (card.x + 1..card.right() - 1).all(|x| buffer[(x, *y)].symbol().trim().is_empty())
+            })
+            .count()
+    }
+
+    /// 真机 L5（codex-21 / kimi-07 行 13–19）：用量卡外框曾固定 17 行高，内容只有
+    /// 四五行时下方空出五六行。卡高按内容收缩：外框 2 + 账号卡 6（状态行、推断绑定
+    /// 说明、7d 窗口、额外余额）+ 动作行 1 + 间隔 1 +「打开页面」1 = 11 行；空态 9 行；
+    /// 内容更多时仍封顶 17 行（多出的在卡片下边框记「+N」）。
+    #[test]
+    fn usage_card_height_follows_its_content() {
+        let _guard = lang_guard(Lang::ZhCn);
+        let inferred = |id: &str| UsageRefreshState {
+            account_id: id.into(),
+            binding_inferred: true,
+            ..Default::default()
+        };
+        let state = pinned_usage_card(
+            vec![codex_usage_account("codex:default")],
+            vec![inferred("codex:default")],
+        );
+        let (buffer, output) = paint_hover(&state, 133, 32);
+        let card = output.hover_rect;
+        let text = buffer_text(&buffer);
+        assert_eq!((card.width, card.height), (68, 11), "{text}");
+        assert!(row_has(&buffer, card.bottom() - 2, "打开页面"), "{text}");
+        assert_eq!(
+            blank_card_rows(&buffer, card),
+            1,
+            "只有「打开页面」上方一行间隔\n{text}"
+        );
+        // 空态（作用域里还没有账号）。
+        let state = pinned_usage_card(Vec::new(), Vec::new());
+        let (buffer, output) = paint_hover(&state, 133, 32);
+        assert_eq!(output.hover_rect.height, 9, "{}", buffer_text(&buffer));
+        // 三个账号：高过上限，封顶 17 行。
+        let accounts = ["codex:a", "codex:b", "codex:c"]
+            .map(codex_usage_account)
+            .to_vec();
+        let state = pinned_usage_card(accounts, Vec::new());
+        let (buffer, output) = paint_hover(&state, 133, 32);
+        assert_eq!(
+            (output.hover_rect.width, output.hover_rect.height),
+            (68, 17),
+            "{}",
+            buffer_text(&buffer)
+        );
+    }
+
     /// ds-08：terminal 主题的 `panel_bg` 是 `Reset`，页签「反色」曾退化成
     /// 「终端默认前景压在 accent 上」。反色前景取组件表（与按钮同源）；组件表
     /// 现在按对比度挑颜色（`crate::ui::color::contrast_fg`），`Reset` 候选被跳过，
