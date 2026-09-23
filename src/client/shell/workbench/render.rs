@@ -420,9 +420,13 @@ impl ClientShellState {
                     Style::default().fg(unfocused_title).bg(palette.surface0)
                 };
                 put(canvas.buffer(), rect, segment, style);
-                self.workbench
-                    .hits
-                    .push((rect, Action::Switch(candidate.clone())));
+                // 不接鼠标（`mouse_capture = false`）时工作台整体不收鼠标事件，点不到
+                // 的切换区不登记；切换条照画，只标出当前在哪个面板（W1）。
+                if self.config.mouse_capture {
+                    self.workbench
+                        .hits
+                        .push((rect, Action::Switch(candidate.clone())));
+                }
                 x = x.saturating_add(width).saturating_add(1);
             }
             let toggle = Rect::new(
@@ -590,7 +594,9 @@ impl ClientShellState {
                 }
             }
         } else {
-            let hint = if compact_switcher_shown {
+            // 点名字切换只在接鼠标时成立；不接鼠标时保留键盘唯一的切换路径「调整布局
+            // + Tab」（W1）。
+            let hint = if compact_switcher_shown && self.config.mouse_capture {
                 // 紧凑视图本来就窄，提示写短。
                 tr(
                     "Compact view · click a name above to switch panels",

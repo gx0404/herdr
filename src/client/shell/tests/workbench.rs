@@ -2085,3 +2085,51 @@ fn compact_switcher_falls_back_to_the_focused_title_when_names_do_not_fit() {
     assert!(footer.starts_with("紧凑视图"), "页脚说明紧凑视图：{footer}");
     assert!(footer.ends_with('…'), "放不下的页脚以省略号收尾：{footer}");
 }
+
+/// 复审轻级 W1（62×32，截屏 93 同尺寸）：`mouse_capture = false` 时工作台根本不接
+/// 鼠标（`workbench_mouse` 开头就放行），点切换条上的面板名到不了。页脚不能再
+/// 提示「点上方的面板名」、把键盘用户唯一可见的「调整布局 + Tab」提示换掉，也不
+/// 登记点不到的切换命中区；切换条照画，标出当前在哪个面板。
+#[test]
+fn compact_switcher_without_mouse_capture_keeps_the_keyboard_hint() {
+    use crate::client::shell::workbench::interaction::Action;
+    let _guard = crate::i18n::lang_guard(crate::i18n::Lang::ZhCn);
+    let mut state = ready();
+    state.config.mouse_capture = false;
+    state.workbench_open(PanelId::Monitor);
+    state.workbench.dock.focused = PanelId::Agents;
+    let rows = frame_rows(&state.compose(62, 32).expect("紧凑视图"));
+    assert!(
+        state.workbench.geometry.compact,
+        "用例前提：62 列是紧凑视图"
+    );
+    let title = title_text(&state);
+    for name in ["工作区", "Agents", "client-shell", "监控"] {
+        assert!(title.contains(name), "切换条照画「{name}」：{title}");
+    }
+    assert!(
+        state
+            .workbench
+            .hits
+            .iter()
+            .all(|(_, action)| !matches!(action, Action::Switch(_))),
+        "不接鼠标时不登记切换条命中区"
+    );
+    let footer = rows[31].split_whitespace().collect::<String>();
+    assert!(
+        footer.contains("在「调整布局」模式用Tab切换面板"),
+        "页脚保留键盘切换提示：{footer}"
+    );
+    assert!(
+        !footer.contains("点上方的面板名"),
+        "点不到就不提示点击：{footer}"
+    );
+
+    let x = title_x(&state, "工");
+    sgr_click(&mut state, x, 1);
+    assert_eq!(
+        state.workbench.dock.focused,
+        PanelId::Agents,
+        "不接鼠标：点名字不切换"
+    );
+}
