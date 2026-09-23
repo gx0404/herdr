@@ -2118,6 +2118,19 @@ mod tests {
         assert_eq!(lang(), Lang::ZhCn);
     }
 
+    /// 冒烟 L11：术语统一为「窗格」——中文文案里不应该混用英文单词
+    /// "pane" 指代同一个概念（`test_confirm_note` 曾经写「全部 pane
+    /// 进程」，与仓库里其它地方一律用「窗格」不一致）。
+    #[test]
+    fn zh_cn_test_confirm_note_uses_the_pane_translation_consistently() {
+        let note = zh_cn::TEXTS.machine_form.test_confirm_note;
+        assert!(
+            !note.to_lowercase().contains("pane"),
+            "中文文案不该混用英文单词 pane：{note}"
+        );
+        assert!(note.contains("窗格"), "术语要用「窗格」：{note}");
+    }
+
     #[test]
     fn texts_switch_with_language() {
         assert_eq!(texts_for(Lang::En).chrome.close_button, " esc close ");
