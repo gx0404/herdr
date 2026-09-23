@@ -1,6 +1,7 @@
 //! 系统页：主机摘要条、资源卡片（kit 原语：card / meter_row / gauge /
 //! braille_chart / table）与进程详情对话框。布局与命中计算全在这里完成，
-//! 状态只读；历史迷你图的桶与网络样本都拷进栈上缓冲，不在渲染期分配。
+//! 状态只读；历史迷你图的桶与网络样本都拷进栈上缓冲，不在渲染期分配（被页面
+//! 底边裁到的卡片例外：借一块一卡大小的暂存缓冲，见 `cut_system_card`）。
 
 use std::borrow::Cow;
 
@@ -382,67 +383,135 @@ pub(super) fn monitor(
         if y >= area.bottom() {
             break;
         }
-        let rect = Rect::new(x, y, width, card_height.min(area.bottom() - y));
-        let id = section.as_str();
-        let selected = state.selected_card.as_deref() == Some(id);
-        let group_status = sample
-            .group_status
-            .get(id)
-            .copied()
-            .unwrap_or(ObservationStatus::Ready);
-        // 非 Ready 的分组在顶边右侧挂状态徽标；编辑布局时那里放 ↑↓，不挂徽标。
-        let badge = (group_status != ObservationStatus::Ready && !state.layout_editing)
-            .then(|| (status(group_status), status_color(group_status, palette)));
-        let spec = CardSpec {
-            title: section_title(id),
-            badge,
-            focused: selected,
-            hovered: false,
-            dimmed: state.layout_editing && state.selected_card.is_some() && !selected,
-        };
-        let inner = render_card(buffer, rect, &spec, cx.glyphs, palette);
-        hits.push((rect, Action::Card(id.to_owned())));
-        if state.layout_editing && rect.width > 18 {
-            secondary_button(
-                buffer,
-                Rect::new(rect.right() - 8, rect.y, 3, 1),
-                "↑",
-                Action::CardMove(id.to_owned(), -1),
-                palette,
-                hits,
-            );
-            secondary_button(
-                buffer,
-                Rect::new(rect.right() - 4, rect.y, 3, 1),
-                "↓",
-                Action::CardMove(id.to_owned(), 1),
-                palette,
-                hits,
+        let rect = Rect::new(x, y, width, card_height);
+        let visible = Rect::new(x, y, width, card_height.min(area.bottom() - y));
+        if visible == rect {
+            system_card(buffer, rect, section, state, sample, cx, hits, limits);
+        } else {
+            cut_system_card(
+                buffer, rect, visible, section, state, sample, cx, hits, limits,
             );
         }
-        if inner.is_empty() {
-            continue;
-        }
-        let offset = state.card_scroll.get(id).copied().unwrap_or(0);
-        let max = match id {
-            "cpu" => {
-                cpu_card(buffer, inner, state, sample, palette);
-                continue;
-            }
-            "memory" => {
-                memory_card(buffer, inner, state, sample, palette);
-                continue;
-            }
-            "cores" => cores_card(buffer, inner, state, sample, palette, offset, hits),
-            "gpu" => gpu_card(buffer, inner, state, sample, palette, offset),
-            "disks" => disks_card(buffer, inner, state, sample, palette, offset),
-            "network" => network_card(buffer, inner, state, sample, palette, offset),
-            "sensors" => sensors_card(buffer, inner, state, sample, palette, offset),
-            _ => processes_card(buffer, inner, state, sample, palette, offset, hits),
-        };
-        limits.set(id, max);
     }
     Some(scroll)
+}
+
+/// 页面底边只露出一截的卡片（最后一行卡片）：整张卡按完整卡高画进同位置的
+/// 暂存缓冲，再只拷回可见的几行——与账号页、偏好页一样裁在视口边缘，露出的是
+/// 卡片的标题与真实的首几行、没有下边框。把卡压扁画进剩下的几行会画出一张
+/// 「完整的矮卡」：只剩两行时是一张只有上下边框的空卡，高一点时正文按矮卡重排、
+/// 像是卡里没有更多数据，卡内滚动上界也按压扁后的高度算。命中区裁到可见部分；
+/// 暂存缓冲每帧至多一行卡片、每张一卡大小。
+fn cut_system_card(
+    buffer: &mut Buffer,
+    rect: Rect,
+    visible: Rect,
+    id: &str,
+    state: &State,
+    sample: &SystemMetricsSnapshot,
+    cx: &ChromeContext<'_>,
+    hits: &mut Vec<(Rect, Action)>,
+    limits: &mut CardScrollLimits,
+) {
+    let mut scratch = Buffer::empty(rect);
+    // 可见部分先照搬页面上已有的单元格：卡片没写到的样式与直接画时一致。
+    copy_cells(buffer, &mut scratch, visible);
+    let first = hits.len();
+    system_card(&mut scratch, rect, id, state, sample, cx, hits, limits);
+    copy_cells(&scratch, buffer, visible);
+    let mut index = first;
+    while index < hits.len() {
+        let clipped = hits[index].0.intersection(visible);
+        if clipped.is_empty() {
+            hits.remove(index);
+        } else {
+            hits[index].0 = clipped;
+            index += 1;
+        }
+    }
+}
+
+/// 把 `area` 内的单元格从 `from` 拷到 `to`（两边都有的格才拷）。
+fn copy_cells(from: &Buffer, to: &mut Buffer, area: Rect) {
+    for y in area.y..area.bottom() {
+        for x in area.x..area.right() {
+            if let (Some(source), Some(target)) = (from.cell((x, y)), to.cell_mut((x, y))) {
+                *target = source.clone();
+            }
+        }
+    }
+}
+
+/// 画一张系统页卡片：kit `card` 外框（编辑布局时顶边带 ↑↓）与卡片正文；卡片与
+/// 按钮的命中区写进 `hits`，可滚动卡片的滚动上界写进 `limits`。
+fn system_card(
+    buffer: &mut Buffer,
+    rect: Rect,
+    id: &str,
+    state: &State,
+    sample: &SystemMetricsSnapshot,
+    cx: &ChromeContext<'_>,
+    hits: &mut Vec<(Rect, Action)>,
+    limits: &mut CardScrollLimits,
+) {
+    let palette = cx.palette;
+    let selected = state.selected_card.as_deref() == Some(id);
+    let group_status = sample
+        .group_status
+        .get(id)
+        .copied()
+        .unwrap_or(ObservationStatus::Ready);
+    // 非 Ready 的分组在顶边右侧挂状态徽标；编辑布局时那里放 ↑↓，不挂徽标。
+    let badge = (group_status != ObservationStatus::Ready && !state.layout_editing)
+        .then(|| (status(group_status), status_color(group_status, palette)));
+    let spec = CardSpec {
+        title: section_title(id),
+        badge,
+        focused: selected,
+        hovered: false,
+        dimmed: state.layout_editing && state.selected_card.is_some() && !selected,
+    };
+    let inner = render_card(buffer, rect, &spec, cx.glyphs, palette);
+    hits.push((rect, Action::Card(id.to_owned())));
+    if state.layout_editing && rect.width > 18 {
+        secondary_button(
+            buffer,
+            Rect::new(rect.right() - 8, rect.y, 3, 1),
+            "↑",
+            Action::CardMove(id.to_owned(), -1),
+            palette,
+            hits,
+        );
+        secondary_button(
+            buffer,
+            Rect::new(rect.right() - 4, rect.y, 3, 1),
+            "↓",
+            Action::CardMove(id.to_owned(), 1),
+            palette,
+            hits,
+        );
+    }
+    if inner.is_empty() {
+        return;
+    }
+    let offset = state.card_scroll.get(id).copied().unwrap_or(0);
+    let max = match id {
+        "cpu" => {
+            cpu_card(buffer, inner, state, sample, palette);
+            return;
+        }
+        "memory" => {
+            memory_card(buffer, inner, state, sample, palette);
+            return;
+        }
+        "cores" => cores_card(buffer, inner, state, sample, palette, offset, hits),
+        "gpu" => gpu_card(buffer, inner, state, sample, palette, offset),
+        "disks" => disks_card(buffer, inner, state, sample, palette, offset),
+        "network" => network_card(buffer, inner, state, sample, palette, offset),
+        "sensors" => sensors_card(buffer, inner, state, sample, palette, offset),
+        _ => processes_card(buffer, inner, state, sample, palette, offset, hits),
+    };
+    limits.set(id, max);
 }
 
 /// CPU 卡：总体 gauge（数字永不裁）、型号 / 选中核说明、历史迷你图。
@@ -1832,6 +1901,60 @@ mod tests {
         state.scroll = 9;
         let (_, output) = paint_page(&state, Page::Monitor, 120, 40);
         assert_eq!(cards(&output), scrolled, "越界存量钳到上界");
+    }
+
+    /// 页面底边只露出一截的卡片按完整卡高排版、裁在视口边缘：露出部分没有下
+    /// 边框，卡内滚动上界与它完整露出时相同（三个接口放得下，上界 0，滚轮交给
+    /// 页面），命中区不越过可见部分。压扁成 5 行的矮卡只放得下一个接口，上界会
+    /// 变成 2、滚轮被一张看不全的卡吃掉。
+    #[test]
+    fn a_card_cut_by_the_page_bottom_is_laid_out_at_full_height() {
+        let _guard = lang_guard(Lang::ZhCn);
+        let mut state = monitored();
+        assert_eq!(
+            state.monitor.visible[5], "network",
+            "用例前提：默认卡片顺序"
+        );
+        if let Some(sample) = state.metrics.as_mut() {
+            sample.networks = (0..3)
+                .map(|id| network(&format!("eth{id}"), Some(1_048_576.0), Some(2048.0)))
+                .collect();
+        }
+        // 60×32：单列、卡高 10，两行卡片之下露出第三张卡的 5 行；滚 3 行后
+        // GPU / 磁盘完整，网络卡露出一截。
+        state.scroll = 3;
+        let (buffer, output) = paint_page(&state, Page::Monitor, 60, 32);
+        let text = buffer_text(&buffer);
+        let network = card_rect(&output, "network");
+        assert_eq!(network.height, 5, "{text}");
+        assert_eq!(network.bottom(), 31, "露出部分贴着页脚\n{text}");
+        assert_eq!(buffer[(network.x, network.y)].symbol(), "┌", "{text}");
+        for y in network.y + 1..network.bottom() {
+            assert_eq!(
+                buffer[(network.x, y)].symbol(),
+                "│",
+                "第 {y} 行：裁在视口边缘、没有下边框\n{text}"
+            );
+        }
+        assert!(row_has(&buffer, network.y + 1, "eth0"), "{text}");
+        assert!(row_has(&buffer, network.y + 3, "eth1"), "{text}");
+        assert_eq!(
+            output.card_scroll_limits.get("network"),
+            Some(0),
+            "按完整卡高算：三个接口放得下"
+        );
+        // 页脚自己的命中区从页脚行开始；页面正文里的命中区都不越过页脚。
+        for (rect, action) in output.hits.iter().filter(|(rect, _)| rect.y < 31) {
+            assert!(
+                rect.bottom() <= network.bottom(),
+                "命中区 {rect:?}（{action:?}）越过可见部分"
+            );
+        }
+        // 滚一行后完整露出：同一个上界。
+        state.scroll = 4;
+        let (_, output) = paint_page(&state, Page::Monitor, 60, 32);
+        assert_eq!(card_rect(&output, "network").height, 10);
+        assert_eq!(output.card_scroll_limits.get("network"), Some(0));
     }
 
     #[test]

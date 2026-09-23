@@ -3736,6 +3736,167 @@ fn system_page_scrolls_one_card_row_per_notch_and_reaches_every_card() {
     assert_eq!(painted_cards(&state), order[1..3], "↓ 露出内存卡");
 }
 
+/// 每张卡都有数据的主机快照：卡片被页面底边裁掉时，露出的一截能看出真实首行。
+fn populated_system_sample() -> Box<crate::api::schema::SystemMetricsSnapshot> {
+    use crate::api::schema::{
+        DiskMetric, GpuMetric, MemoryMetric, NetworkMetric, ProcessIdentity, ProcessMetric,
+        SensorMetric,
+    };
+    const GIB: u64 = 1024 * 1024 * 1024;
+    let mut sample = smoke_system_sample();
+    sample.memory = MemoryMetric {
+        total_bytes: 16 * GIB,
+        used_bytes: 6 * GIB,
+        available_bytes: 8 * GIB,
+        swap_total_bytes: 2 * GIB,
+        swap_used_bytes: 0,
+    };
+    sample.gpus = vec![GpuMetric {
+        id: "gpu0".into(),
+        name: "Test GPU".into(),
+        usage_percent: Some(30.0),
+        memory_used_bytes: Some(2 * GIB),
+        memory_total_bytes: Some(8 * GIB),
+        temperature_celsius: Some(65.0),
+        ..Default::default()
+    }];
+    sample.disks = vec![DiskMetric {
+        id: "/dev/sda1:/".into(),
+        name: "/dev/sda1".into(),
+        mount_point: "/".into(),
+        total_bytes: 500 * GIB,
+        available_bytes: 100 * GIB,
+        ..Default::default()
+    }];
+    sample.networks = vec![NetworkMetric {
+        id: "eth0".into(),
+        received_bytes_per_second: Some(1_048_576.0),
+        transmitted_bytes_per_second: Some(2048.0),
+        ..Default::default()
+    }];
+    sample.sensors = vec![SensorMetric {
+        name: "coretemp Core 0".into(),
+        temperature_celsius: Some(60.0),
+        critical_celsius: None,
+    }];
+    sample.processes = (1..=3)
+        .map(|pid| ProcessMetric {
+            identity: ProcessIdentity {
+                pid,
+                ..Default::default()
+            },
+            name: format!("proc{pid}"),
+            cpu_percent: Some(1.0),
+            memory_bytes: 1024 * 1024,
+            ..Default::default()
+        })
+        .collect();
+    sample
+}
+
+/// 复审（L13 回归）：停靠面板的页面去掉自带外框后正文多出两行，冒烟尺寸下（新
+/// 会话默认停靠布局：工作区 | 终端 | 监控三栏，监控面板占满正文高度）除最后一屏
+/// 外，页面底边都会露出下一行卡片的一截。露出的一截是那张卡的上半部分、裁在
+/// 视口边缘——标题加真实的首行内容、没有下边框——而不是压扁成一张只有上下边框
+/// 的「空卡」；它的命中区只含可见部分、不压页脚。
+#[test]
+fn a_card_cut_by_the_page_bottom_shows_its_top_rows_instead_of_an_empty_frame() {
+    let _guard = crate::i18n::lang_guard(crate::i18n::Lang::ZhCn);
+    for (width, height) in [(133_u16, 32_u16), (93, 32)] {
+        let mut state = docked();
+        state.open_observation_page(Page::Monitor, &mut ClientShellInput::default());
+        state.observability.metrics = Some(populated_system_sample());
+        state.compose(width, height).expect("系统页");
+        // 前提：真实默认停靠布局——三栏，监控面板与终端同高（占满正文）。
+        let panel = |wanted: &dyn Fn(&PanelId) -> bool| {
+            state
+                .workbench
+                .geometry
+                .panels
+                .iter()
+                .find(|(panel, _)| wanted(panel))
+                .map(|(_, area)| *area)
+                .expect("面板在布局中")
+        };
+        let workspaces = panel(&|panel| *panel == PanelId::Workspaces);
+        let terminal = panel(&|panel| matches!(panel, PanelId::Terminal(_)));
+        let monitor = panel(&|panel| *panel == PanelId::Monitor);
+        assert!(
+            workspaces.right() <= terminal.x && terminal.right() <= monitor.x,
+            "{width}×{height}：工作区 | 终端 | 监控三栏"
+        );
+        assert_eq!(
+            (monitor.y, monitor.height),
+            (terminal.y, terminal.height),
+            "{width}×{height}：监控面板占满正文高度"
+        );
+        let full = state.observability.monitor.card_height;
+        let footer = state.observability.page_rect.bottom() - 1;
+        let glyphs = state.config.border_glyphs;
+        let max = state
+            .observability
+            .page_scroll_limits
+            .get(Page::Monitor)
+            .expect("系统页滚动度量")
+            .max;
+        let mut cut = Vec::new();
+        for scroll in 0..=max {
+            state.observability.scroll = scroll;
+            state.compose(width, height).expect("重绘");
+            let page = region_text(&state, state.observability.page_rect);
+            let buffer = state.compose_buffer.as_ref().expect("帧缓冲");
+            for (rect, action) in &state.observability.hits {
+                let Action::Card(id) = action else {
+                    continue;
+                };
+                let at = format!("{width}×{height} 第 {scroll} 行：{id} 卡 {rect:?}");
+                assert!(rect.bottom() <= footer, "{at} 不压页脚\n{page}");
+                if rect.height == full {
+                    continue;
+                }
+                assert_eq!(
+                    rect.bottom(),
+                    footer,
+                    "{at} 只有页面底边的卡片露出一截\n{page}"
+                );
+                assert_eq!(
+                    buffer[(rect.x, rect.y)].symbol(),
+                    glyphs.top_left,
+                    "{at} 露出的是卡片顶边\n{page}"
+                );
+                for y in rect.y + 1..rect.bottom() {
+                    assert_eq!(
+                        buffer[(rect.x, y)].symbol(),
+                        glyphs.vertical,
+                        "{at} 裁在视口边缘、没有下边框（不是压扁的空卡）\n{page}"
+                    );
+                    let (row, _) =
+                        region_row(buffer, Rect::new(rect.x + 1, y, rect.width - 2, 1), y);
+                    assert!(!row.trim().is_empty(), "{at} 露出真实的首行内容\n{page}");
+                }
+                cut.push((scroll, id.clone(), rect.height));
+            }
+        }
+        // 冒烟尺寸：两行卡片之下剩 3 行（1 行间隔 + 2 行），除最后一屏外都露出
+        // 下一张卡的顶边与首行；页顶露出的是内存卡的「已用」gauge。
+        assert_eq!(cut.len(), max, "{width}×{height}：{cut:?}");
+        assert!(cut.iter().all(|(.., rows)| *rows == 2), "{cut:?}");
+        state.observability.scroll = 0;
+        state.compose(width, height).expect("回到页顶");
+        let memory = page_hit(
+            &state,
+            |action| matches!(action, Action::Card(id) if id == "memory"),
+        )
+        .expect("内存卡露出一截");
+        let first = region_text(&state, Rect::new(memory.x, memory.y, memory.width, 2));
+        let compact = first.replace(' ', "");
+        assert!(
+            compact.contains("内存") && compact.contains("已用") && compact.contains("GiB"),
+            "{width}×{height}：{first}"
+        );
+    }
+}
+
 /// H2：滚轮落在内容不可滚的卡片上（CPU / 内存卡没有可滚内容，逐核卡 4 个核
 /// 放得下）时交给页面，不再吃掉整页滚动；内容放不下的卡片（40 个进程）照旧
 /// 滚自己的内容，页面不动。
