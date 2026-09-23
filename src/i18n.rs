@@ -480,7 +480,7 @@ pub struct MonitorTexts {
     pub no_disks: &'static str,
     pub net_idle_one: &'static str,
     pub net_idle_folded_fmt: &'static str, // args: n
-    pub temp_max_avg_fmt: &'static str,    // args: max, avg
+    pub temp_avg_fmt: &'static str,        // args: avg
     pub proc_col_pid: &'static str,
     pub proc_col_name: &'static str,
     pub proc_col_cpu: &'static str,

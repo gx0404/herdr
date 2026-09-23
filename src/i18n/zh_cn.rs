@@ -361,7 +361,7 @@ pub const TEXTS: Texts = Texts {
         no_disks: "没有可报告的数据盘",
         net_idle_one: "1 个空闲接口",
         net_idle_folded_fmt: "{n} 个空闲接口",
-        temp_max_avg_fmt: "最高 {max} · 平均 {avg}",
+        temp_avg_fmt: "平均 {avg}",
         proc_col_pid: "PID",
         proc_col_name: "名称",
         proc_col_cpu: "CPU",

@@ -8,7 +8,9 @@ use super::*;
 use crate::ui::kit::braille_chart::{render_area_chart, render_sparkline, ChartGlyphs};
 use crate::ui::kit::card::{render_card, CardSpec};
 use crate::ui::kit::gauge::{gauge_color, GaugeSpec, GaugeThresholds};
-use crate::ui::kit::meter_row::{render_meter_row, MeterRow};
+use crate::ui::kit::meter_row::{
+    render_meter_row, render_meter_row_aligned, MeterColumns, MeterRow,
+};
 use crate::ui::kit::table::{
     render_table, Column, ColumnWidth, SortState, TableCell, TableRender, TableState,
 };
@@ -184,6 +186,16 @@ fn label_value_row(
             label_style,
         );
     }
+}
+
+/// 十进制整数的位数（即其文本的显示宽度），不经格式化、不分配。
+fn decimal_width(mut value: usize) -> u16 {
+    let mut width = 1;
+    while value >= 10 {
+        value /= 10;
+        width += 1;
+    }
+    width
 }
 
 /// 阈值着色：≥90% 红、≥75% 黄，其余不改色。
@@ -520,6 +532,13 @@ fn cores_card(
         .saturating_sub(usize::from(inner.height));
     let offset = offset.min(max);
     let ascii = state.chart_glyphs.ascii();
+    // 全卡统一列宽：标签按最大核号的位数、数字按「100%」预留，每格条形等长且
+    // 起点对齐，滚动换屏时也不跳。
+    let columns = MeterColumns {
+        label: decimal_width(sample.cores.iter().map(|core| core.id).max().unwrap_or(0)),
+        value: crate::ui::display_width_u16("100%"),
+        detail: 0,
+    };
     for (index, core) in sample
         .cores
         .iter()
@@ -539,7 +558,7 @@ fn cores_card(
         let value = core
             .usage_percent
             .map_or_else(|| "—".to_owned(), |value| format!("{value:.0}%"));
-        render_meter_row(
+        render_meter_row_aligned(
             buffer,
             rect,
             &MeterRow {
@@ -553,6 +572,7 @@ fn cores_card(
                 },
                 stale: false,
             },
+            columns,
             palette,
         );
         if state.selected_core == Some(core.id) {
@@ -597,7 +617,16 @@ fn memory_card(
     let value = format!("{} / {}", bytes(memory.used_bytes), bytes(total));
     let detail =
         (cache > 0).then(|| crate::i18n::fill(texts.cache_fmt, &[("size", &bytes(cache))]));
-    render_meter_row(
+    let swap = format!(
+        "{} / {}",
+        bytes(memory.swap_used_bytes),
+        bytes(memory.swap_total_bytes)
+    );
+    // 已用与 Swap 两行共用列宽：条形起止对齐（Swap 行也占住缓存说明那一列）。
+    let mut columns = MeterColumns::default();
+    columns.fit(texts.mem_used, &value, detail.as_deref());
+    columns.fit(texts.swap, &swap, None);
+    render_meter_row_aligned(
         buffer,
         Rect::new(inner.x, inner.y, inner.width, 1),
         &MeterRow {
@@ -612,15 +641,11 @@ fn memory_card(
             },
             stale,
         },
+        columns,
         palette,
     );
     if inner.height > 1 {
-        let swap = format!(
-            "{} / {}",
-            bytes(memory.swap_used_bytes),
-            bytes(memory.swap_total_bytes)
-        );
-        render_meter_row(
+        render_meter_row_aligned(
             buffer,
             Rect::new(inner.x, inner.y + 1, inner.width, 1),
             &MeterRow {
@@ -635,6 +660,7 @@ fn memory_card(
                 },
                 stale,
             },
+            columns,
             palette,
         );
     }
@@ -687,6 +713,20 @@ fn gpu_card(
         .saturating_sub(usize::from(inner.height / 3).max(1));
     let offset = offset.min(max);
     let ascii = state.chart_glyphs.ascii();
+    // 利用率与显存两种行、所有 GPU 共用列宽：条形起止对齐，滚动换设备时也不跳。
+    let vram_text = |gpu: &GpuMetric| match (gpu.memory_used_bytes, gpu.memory_total_bytes) {
+        (Some(used), Some(total)) if total > 0 => {
+            Some((format!("{} / {}", bytes(used), bytes(total)), used, total))
+        }
+        _ => None,
+    };
+    let mut columns = MeterColumns::default();
+    for gpu in &gpus {
+        columns.fit(texts.gpu_util, &percent(gpu.usage_percent), None);
+        if let Some((value, ..)) = vram_text(gpu) {
+            columns.fit(texts.vram, &value, None);
+        }
+    }
     for (index, gpu) in gpus
         .iter()
         .skip(offset)
@@ -710,7 +750,7 @@ fn gpu_card(
         );
         if row + 1 < inner.height {
             let value = percent(gpu.usage_percent);
-            render_meter_row(
+            render_meter_row_aligned(
                 buffer,
                 Rect::new(inner.x, inner.y + row + 1, inner.width, 1),
                 &MeterRow {
@@ -724,15 +764,15 @@ fn gpu_card(
                     },
                     stale,
                 },
+                columns,
                 palette,
             );
         }
         if row + 2 < inner.height {
             let rect = Rect::new(inner.x, inner.y + row + 2, inner.width, 1);
-            match (gpu.memory_used_bytes, gpu.memory_total_bytes) {
-                (Some(used), Some(total)) if total > 0 => {
-                    let value = format!("{} / {}", bytes(used), bytes(total));
-                    render_meter_row(
+            match vram_text(gpu) {
+                Some((value, used, total)) => {
+                    render_meter_row_aligned(
                         buffer,
                         rect,
                         &MeterRow {
@@ -746,6 +786,7 @@ fn gpu_card(
                             },
                             stale,
                         },
+                        columns,
                         palette,
                     );
                 }
@@ -1090,31 +1131,46 @@ fn sensors_card(
     let max = chips.len().saturating_sub(usize::from(inner.height));
     let offset = offset.min(max);
     let ascii = state.chart_glyphs.ascii();
-    for (index, chip) in chips
+    // 数字是芯片里最热的传感器（条形也按它定标），多个传感器时平均温度作说明，
+    // 窄时说明先让位、条形与数字保住。全部芯片（含滚出视口的）先格式化并量出
+    // 统一列宽：各行条形起止对齐，滚动时也不跳。芯片数很少，这里分配不在 pane
+    // 规模路径上。
+    let values = chips
         .iter()
+        .map(|chip| {
+            let value = if chip.count == 0 {
+                "—".to_owned()
+            } else {
+                format!("{:.0}°C", chip.max)
+            };
+            let detail = (chip.count > 1).then(|| {
+                crate::i18n::fill(
+                    texts.temp_avg_fmt,
+                    &[("avg", &format!("{:.0}°C", chip.sum / chip.count as f32))],
+                )
+            });
+            (value, detail)
+        })
+        .collect::<Vec<_>>();
+    let mut columns = MeterColumns::default();
+    for (chip, (value, detail)) in chips.iter().zip(&values) {
+        columns.fit(chip.name, value, detail.as_deref());
+    }
+    for (index, (chip, (value, detail))) in chips
+        .iter()
+        .zip(&values)
         .skip(offset)
         .take(usize::from(inner.height))
         .enumerate()
     {
-        let value = match chip.count {
-            0 => "—".to_owned(),
-            1 => format!("{:.0}°C", chip.max),
-            count => crate::i18n::fill(
-                texts.temp_max_avg_fmt,
-                &[
-                    ("max", &format!("{:.0}°C", chip.max)),
-                    ("avg", &format!("{:.0}°C", chip.sum / count as f32)),
-                ],
-            ),
-        };
         let limit = chip.critical.unwrap_or(100.0);
-        render_meter_row(
+        render_meter_row_aligned(
             buffer,
             Rect::new(inner.x, inner.y + index as u16, inner.width, 1),
             &MeterRow {
                 label: chip.name,
-                value: &value,
-                detail: None,
+                value,
+                detail: detail.as_deref(),
                 gauge: GaugeSpec {
                     ratio: (chip.count > 0).then(|| chip.max / limit),
                     ascii,
@@ -1122,6 +1178,7 @@ fn sensors_card(
                 },
                 stale: false,
             },
+            columns,
             palette,
         );
     }
@@ -1878,10 +1935,20 @@ mod tests {
         let card_has =
             |needle: &str| (sensors.y..sensors.bottom()).any(|y| row_has(&buffer, y, needle));
         assert!(card_has("coretemp"), "{text}");
-        assert!(card_has("最高 70°C · 平均 65°C"), "{text}");
+        // 数字是最热的传感器，多传感器芯片的平均温度作说明跟在后面。
+        assert!(card_has("70°C 平均 65°C"), "{text}");
         assert!(card_has("nvme"), "{text}");
         assert!(card_has("40°C"), "{text}");
         assert!(!card_has("Core 0"), "逐传感器行已汇总\n{text}");
+        // 窄卡片：说明先让位，条形与最高温度保住。
+        let (buffer, output) = paint_page(&state, Page::Monitor, 30, 100);
+        let sensors = card_rect(&output, "sensors");
+        let row = (sensors.y..sensors.bottom())
+            .map(|y| row_text(&buffer, y))
+            .find(|row| row.contains("coretemp"))
+            .expect("coretemp 行");
+        assert!(row.contains("70°C") && row.contains('━'), "{row}");
+        assert!(!row.contains("平均"), "{row}");
     }
 
     /// 画一帧系统页，并像 `State::commit_paint` 那样把各卡的滚动上界写回状态。

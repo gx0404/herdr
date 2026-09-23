@@ -3831,6 +3831,109 @@ fn preferences_page_scroll_is_clamped_on_write_so_reversing_moves_at_once() {
     assert_ne!(region_text(&state, page), bottom, "反向第一格画面就动");
 }
 
+/// `rect` 这一行里 gauge 格（`━` 已用 / `░` 空槽）的 (相对 `rect.x` 的起点, 格数)。
+fn gauge_span(state: &ClientShellState, rect: Rect) -> (u16, u16) {
+    let buffer = state.compose_buffer.as_ref().expect("帧缓冲");
+    let cells = (rect.x..rect.right())
+        .filter(|x| matches!(buffer[(*x, rect.y)].symbol(), "━" | "░"))
+        .collect::<Vec<_>>();
+    let (Some(first), Some(last)) = (cells.first(), cells.last()) else {
+        panic!(
+            "{rect:?} 这一行没有 gauge：{:?}",
+            region_row(buffer, rect, rect.y).0
+        );
+    };
+    assert_eq!(
+        usize::from(last - first) + 1,
+        cells.len(),
+        "gauge 连续：{:?}",
+        region_row(buffer, rect, rect.y).0
+    );
+    (first - rect.x, last - first + 1)
+}
+
+/// 冒烟 M6（133×32 与 93×32）：同一张卡里多行 meter 的标签列 / 数字列按全卡最宽
+/// 的一项统一预算，条形起点与长度一致——逐核卡「0」与「10」、温度卡
+/// 「acpitz」与「coretemp」两行不再因为标签或数字宽度不同而长短不一。
+#[test]
+fn meter_rows_in_one_card_share_the_gauge_column() {
+    use crate::api::schema::{CpuCoreMetric, SensorMetric};
+    let _guard = crate::i18n::lang_guard(crate::i18n::Lang::ZhCn);
+    for (cols, rows) in [(133, 32), (93, 32)] {
+        let mut state = docked();
+        state.open_observation_page(Page::Monitor, &mut ClientShellInput::default());
+        state.observability.monitor.visible = vec!["cores".into(), "sensors".into()];
+        let mut sample = smoke_system_sample();
+        sample.cores = (0..16)
+            .map(|id| CpuCoreMetric {
+                id,
+                name: format!("cpu{id}"),
+                usage_percent: Some(if id % 4 == 2 { 100.0 } else { 40.0 + id as f32 }),
+                frequency_mhz: None,
+            })
+            .collect();
+        sample.sensors = vec![
+            SensorMetric {
+                name: "acpitz temp1".into(),
+                temperature_celsius: Some(28.0),
+                critical_celsius: None,
+            },
+            SensorMetric {
+                name: "coretemp Core 0".into(),
+                temperature_celsius: Some(95.0),
+                critical_celsius: None,
+            },
+            SensorMetric {
+                name: "coretemp Core 1".into(),
+                temperature_celsius: Some(79.0),
+                critical_celsius: None,
+            },
+        ];
+        state.observability.metrics = Some(sample);
+        // 窄面板单列一行一个核：先把卡片内容滚到 4 号核，让一位数与两位数的核
+        // 同屏（宽面板一行两个核，16 个核本来就都在画面里）。
+        state.observability.card_scroll.insert("cores".into(), 4);
+        state.compose(cols, rows).expect("系统页");
+        let cores = state
+            .observability
+            .hits
+            .iter()
+            .filter_map(|(rect, action)| match action {
+                Action::Core(id) => Some((*id, *rect)),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            cores.iter().any(|(id, _)| *id < 10) && cores.iter().any(|(id, _)| *id >= 10),
+            "{cols}x{rows}: 用例前提：一位数与两位数的核同屏 {cores:?}"
+        );
+        let (first, reference) = (cores[0].0, gauge_span(&state, cores[0].1));
+        for (id, rect) in &cores {
+            assert_eq!(
+                gauge_span(&state, *rect),
+                reference,
+                "{cols}x{rows}: 核 {id} 与核 {first} 的条形起点、长度一致"
+            );
+        }
+        let sensors = page_hit(
+            &state,
+            |action| matches!(action, Action::Card(card) if card == "sensors"),
+        )
+        .expect("温度卡");
+        let row = |needle: &str| {
+            let (_, y) = find_in(&state, sensors, needle)
+                .unwrap_or_else(|| panic!("{cols}x{rows}: 温度卡有 {needle}"));
+            Rect::new(sensors.x + 1, y, sensors.width - 2, 1)
+        };
+        assert_eq!(
+            gauge_span(&state, row("acpitz")),
+            gauge_span(&state, row("coretemp")),
+            "{cols}x{rows}: 温度卡两行条形对齐\n{}",
+            region_text(&state, sensors)
+        );
+    }
+}
+
 /// 监控偏好页的控件：点分段 / 步进器 / 开关只回写各自的偏好键（`PreferenceKey`），
 /// 落盘后重启可恢复；图表字形是独立的客户端偏好键 `monitor_chart_glyphs`。
 #[test]

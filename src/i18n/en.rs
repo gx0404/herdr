@@ -340,7 +340,7 @@ pub const TEXTS: Texts = Texts {
         no_disks: "No data disks reported",
         net_idle_one: "1 idle interface",
         net_idle_folded_fmt: "{n} idle interfaces",
-        temp_max_avg_fmt: "max {max} · avg {avg}",
+        temp_avg_fmt: "avg {avg}",
         proc_col_pid: "PID",
         proc_col_name: "Name",
         proc_col_cpu: "CPU",

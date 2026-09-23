@@ -23,6 +23,26 @@ pub(crate) struct MeterRow<'a> {
     pub stale: bool,
 }
 
+/// 同一张卡里多条 meter row 共用的列宽（显示列）：标签左对齐补到 `label`、数字
+/// 右对齐补到 `value`、说明补到 `detail`，各行条形因此起止对齐——逐行各自预算时
+/// 「0」与「10」、「57%」与「100%」会让条形长短不一。0 = 该列按本行自身宽度
+/// （`Default` 即逐行预算）。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct MeterColumns {
+    pub label: u16,
+    pub value: u16,
+    pub detail: u16,
+}
+
+impl MeterColumns {
+    /// 把一行的各段宽度并进列宽（逐列取最大）。
+    pub(crate) fn fit(&mut self, label: &str, value: &str, detail: Option<&str>) {
+        self.label = self.label.max(display_width_u16(label));
+        self.value = self.value.max(display_width_u16(value));
+        self.detail = self.detail.max(detail.map_or(0, display_width_u16));
+    }
+}
+
 /// 条形最窄画几格；再窄就整条砍掉，把列让给数字与标签。
 const GAUGE_MIN: u16 = 4;
 
@@ -58,11 +78,25 @@ fn budget(width: u16, label: u16, value: u16, detail: u16) -> (u16, u16, u16, u1
 }
 
 /// 在 `area` 的第一行画一条 meter row。条形吸收全部富余宽度；没有条形时富余
-/// 留在标签与数字之间，数字（连同其后的说明）靠右。
+/// 留在标签与数字之间，数字（连同其后的说明）靠右。逐行预算，同卡多行要对齐时
+/// 用 `render_meter_row_aligned`。
 pub(crate) fn render_meter_row(
     buffer: &mut Buffer,
     area: Rect,
     row: &MeterRow<'_>,
+    palette: &Palette,
+) {
+    render_meter_row_aligned(buffer, area, row, MeterColumns::default(), palette);
+}
+
+/// 同 `render_meter_row`，但标签 / 数字 / 说明各占 `columns` 给出的列宽（不足按
+/// 本行自身宽度）：同一张卡的各行传同一份 `columns`，条形起止就对齐。标签左对齐、
+/// 数字右对齐，说明左对齐；列宽参与同一套宽度预算，窄时照样先砍条形、保数字。
+pub(crate) fn render_meter_row_aligned(
+    buffer: &mut Buffer,
+    area: Rect,
+    row: &MeterRow<'_>,
+    columns: MeterColumns,
     palette: &Palette,
 ) {
     if area.is_empty() {
@@ -70,11 +104,12 @@ pub(crate) fn render_meter_row(
     }
     let y = area.y;
     let detail = row.detail.unwrap_or("");
+    let value_own = display_width_u16(row.value);
     let (label_w, gauge_w, value_w, detail_w) = budget(
         area.width,
-        display_width_u16(row.label),
-        display_width_u16(row.value),
-        display_width_u16(detail),
+        display_width_u16(row.label).max(columns.label),
+        value_own.max(columns.value),
+        display_width_u16(detail).max(columns.detail),
     );
 
     let (label_style, value_style, detail_style) = if row.stale {
@@ -120,7 +155,17 @@ pub(crate) fn render_meter_row(
 
     let detail_span = if detail_w > 0 { detail_w + 1 } else { 0 };
     let value_x = area.right().saturating_sub(detail_span + value_w);
-    put_str(buffer, value_x, y, value_w, row.value, value_style);
+    // 数字在自己的列里右对齐：列比数字宽时左侧留空，比数字窄（整行都放不下）时
+    // 从列首开始画、尾部被裁，与逐行预算一致。
+    let shown = value_own.min(value_w);
+    put_str(
+        buffer,
+        value_x + (value_w - shown),
+        y,
+        shown,
+        row.value,
+        value_style,
+    );
     if detail_w > 0 {
         put_str(
             buffer,
@@ -214,6 +259,63 @@ mod tests {
         let value = buffer[(13, 0)].style();
         assert_eq!(value.fg, Some(palette.overlay0));
         assert!(!value.add_modifier.contains(Modifier::BOLD));
+    }
+
+    /// 同卡多行共用列宽：标签「0」「10」、数字「57%」「100%」宽度不同，条形起点
+    /// 与长度仍一致；数字右对齐，没有说明的行也占住说明列。
+    #[test]
+    fn aligned_rows_share_the_gauge_column() {
+        let palette = Palette::catppuccin();
+        let rows = [("0", "57%", None), ("10", "100%", Some("hot"))];
+        let mut columns = MeterColumns::default();
+        for (label, value, detail) in rows {
+            columns.fit(label, value, detail);
+        }
+        assert_eq!(
+            columns,
+            MeterColumns {
+                label: 2,
+                value: 4,
+                detail: 3
+            }
+        );
+        let area = Rect::new(0, 0, 20, 2);
+        let mut buffer = Buffer::empty(area);
+        for (y, (label, value, detail)) in rows.into_iter().enumerate() {
+            let row = MeterRow {
+                label,
+                value,
+                detail,
+                gauge: GaugeSpec {
+                    ratio: Some(0.5),
+                    ..GaugeSpec::default()
+                },
+                stale: false,
+            };
+            render_meter_row_aligned(
+                &mut buffer,
+                Rect::new(0, y as u16, 20, 1),
+                &row,
+                columns,
+                &palette,
+            );
+        }
+        assert_eq!(row_text(&buffer, 0), "0  ━━━━░░░░  57%    ");
+        assert_eq!(row_text(&buffer, 1), "10 ━━━━░░░░ 100% hot");
+        // 窄到放不下条形时仍先砍条形、保数字，与逐行预算同口径。
+        let mut buffer = Buffer::empty(Rect::new(0, 0, 8, 1));
+        render_meter_row_aligned(
+            &mut buffer,
+            Rect::new(0, 0, 8, 1),
+            &MeterRow {
+                label: "0",
+                value: "57%",
+                ..sample(None)
+            },
+            columns,
+            &palette,
+        );
+        assert_eq!(row_text(&buffer, 0), "0    57%");
     }
 
     #[test]
