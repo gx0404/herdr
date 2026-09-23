@@ -7,11 +7,16 @@ id = "codex"
 id = "startup_hooks_review"
 state = "blocked"
 priority = 950
-region = "whole_recent"
+region = "bottom_non_empty_lines(24)"
 visible_blocker = true
 # codex 0.156 发现新增或变更的钩子时，先在清空的屏幕上请用户审阅，选完才进会话。
 # 标题、两个信任选项与页脚按键提示各占一行（证据：真机截屏 codex-02）。
+# 弹窗是屏幕上最后的内容，页脚必须是最后一个非空行（同上游 startup_update）：
+# 回答或工具输出原样引用这段弹窗时，下面总有输入框与状态行，不算。不锚定屏幕
+# 顶端：--no-alt-screen 时检测窗口会带上被推进 scrollback 的 shell 行。
+# 24 个非空行盖得住窄屏折行、信任失败多一段报错时的整个弹窗。
 contains = ["enter confirm"]
+regex = ['(?m)^[ \t]*enter confirm\b[^\r\n]*\s*\z']
 line_regex = [
   '^\s*Hooks need review\s*$',
   '^\s*(?:›\s*)?[0-9]+\.\s+Trust all and continue\s*$',

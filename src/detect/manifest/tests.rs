@@ -1054,8 +1054,11 @@ fn codex_startup_hooks_review_is_blocked() {
         1. Review hooks\n› 2. Trust all and continue\n  \
         3. Continue without trusting (hooks\n     won't run)\n\n  \
         enter confirm · esc skip\n";
+    // codex --no-alt-screen 时弹窗同样撑满整屏，原先的 shell 行被推进 scrollback；检测
+    // 窗口从最后一行内容往上取满一屏，会把这几行一起带上（ghostty 回放实验）。
+    let inline = format!("earlier output\n╰─❯ codex -m gpt-6-luna\n{evidence}");
 
-    for screen in [evidence, narrow] {
+    for screen in [evidence, narrow, inline.as_str()] {
         let result = osc_explain(Agent::Codex, screen, "project", "");
         assert_eq!(result.state, AgentState::Blocked, "{screen}");
         assert_eq!(
@@ -1073,6 +1076,41 @@ fn codex_startup_hooks_review_is_blocked() {
     ] {
         let result = osc_explain(Agent::Codex, screen, "project", "");
         assert_eq!(result.state, AgentState::Idle, "{screen}");
+        assert!(!result.visible_blocker);
+    }
+}
+
+/// 按行加前缀（空行保持为空），模拟 agent 在回答或工具输出里原样引用一段屏幕。
+fn indent_lines(text: &str, prefix: &str) -> String {
+    text.lines()
+        .map(|line| {
+            if line.is_empty() {
+                String::new()
+            } else {
+                format!("{prefix}{line}")
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// 审查 N11：codex 在回答或工具输出里以两格缩进原样引用整段弹窗时，空闲的 codex
+/// 不能报 blocked。引用下面总有输入框与状态行；引用滚到屏幕顶端、标题正好是第一个
+/// 非空行时也一样。
+#[test]
+fn codex_startup_hooks_review_ignores_quoted_prompt() {
+    let quoted = indent_lines(CODEX_HOOKS_REVIEW_SCREEN, "  ");
+    let composer = "\n› Ask Codex to do anything\n\n  gpt-6-luna low · /work\n";
+    let in_reply = format!(
+        "› What does the hooks prompt look like?\n\n\
+         • Codex shows this before the session starts:\n{quoted}\n{composer}"
+    );
+    let scrolled_to_top = format!("{}\n{composer}", quoted.trim_start_matches('\n'));
+
+    for screen in [in_reply, scrolled_to_top] {
+        let result = osc_explain(Agent::Codex, &screen, "project", "");
+        assert_eq!(result.state, AgentState::Idle, "{screen}");
+        assert_ne!(matched_rule_id(&result), Some("startup_hooks_review"));
         assert!(!result.visible_blocker);
     }
 }
@@ -1114,6 +1152,21 @@ fn kimi_trust_folder_prompt_is_blocked() {
     assert!(!result.visible_blocker);
 }
 
+/// 审查 N11 同类问题：kimi 在回答或工具输出里原样引用整个信任弹窗（连同上下分隔线）
+/// 时，下面还有输入框与状态行，不算弹窗。
+#[test]
+fn kimi_trust_folder_prompt_ignores_quoted_prompt() {
+    let quoted = indent_lines(KIMI_TRUST_FOLDER_SCREEN, "   ");
+    let screen = format!(
+        " ✨ What does the trust prompt look like?\n\n • Kimi Code asks this on first launch:\n\
+         {quoted}\n\n ╭────╮\n │ >  │\n ╰────╯\n Zhipu GLM · GLM-4.5-Air thinking  …/work\n"
+    );
+    let result = explain(Agent::Kimi, &screen);
+    assert_eq!(result.state, AgentState::Idle, "{screen}");
+    assert_ne!(matched_rule_id(&result), Some("trust_folder_prompt"));
+    assert!(!result.visible_blocker);
+}
+
 // ---------------------------------------------------------------------------
 // fork 规则叠加层：fork 自有的检测规则不进上游发布的 manifest，加载时叠加到选定的
 // 捆绑或远端 manifest 上。捆绑版本不再为 fork 规则抬高，两个方向都不互相遮蔽：
@@ -1127,11 +1180,13 @@ const CODEX_HOOKS_REVIEW_SCREEN: &str = "\n  Hooks need review\n  3 hooks are ne
     3. Continue without trusting (hooks won't run)\n\n  \
     enter confirm · esc skip\n";
 
-/// 真机截屏 kimi-02 的弹窗正文（Kimi Code 2.0.2，去掉上方的 shell 行与分隔线）。
-const KIMI_TRUST_FOLDER_SCREEN: &str = "  Trust this folder?\n  \
-    ↑↓ navigate · Enter select · Esc exit\n\n  /var/tmp/project\n\n   \
+/// 真机截屏 kimi-02 的弹窗（Kimi Code 2.0.2，去掉上方的 shell 行；上下两条分隔线在
+/// 真机上占满整行，这里截短）。
+const KIMI_TRUST_FOLDER_SCREEN: &str = " ────────────────────────────────────────\n  \
+    Trust this folder?\n  ↑↓ navigate · Enter select · Esc exit\n\n  /var/tmp/project\n\n   \
     ❯ Trust this folder\n     Enable project MCP servers. Remembered for this folder.\n\n     \
-    Don't trust\n     Exit Kimi Code. Asked again next launch.\n";
+    Don't trust\n     Exit Kimi Code. Asked again next launch.\n\n \
+    ────────────────────────────────────────\n";
 
 /// 各 fork 规则与能触发它的真机弹窗。
 const FORK_RULE_SCREENS: [(Agent, &str, &str); 2] = [

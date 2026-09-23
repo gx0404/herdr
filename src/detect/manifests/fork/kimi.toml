@@ -7,12 +7,14 @@ id = "kimi"
 id = "trust_folder_prompt"
 state = "blocked"
 priority = 410
-region = "whole_recent"
+region = "bottom_non_empty_lines(24)"
 visible_blocker = true
 # Kimi Code 2.x 在新目录首启时先问是否信任该目录，此时会话还没建、钩子一条都
-# 没报。标题、按键提示与两个选项各占一行，指针可以停在任一选项上（证据：真机
-# 截屏 kimi-02）。
+# 没报。标题、按键提示与两个选项各占一行，指针可以停在任一选项上；弹窗上下各有
+# 一条整行分隔线，画在屏幕最底部（证据：真机截屏 kimi-02）。下分隔线必须是最后
+# 一个非空行：回答或工具输出原样引用这段弹窗时，下面总有输入框与状态行，不算。
 contains = ["enter select", "esc exit"]
+regex = ['(?m)^[ \t]*─{3,}\s*\z']
 line_regex = [
   '^\s*Trust this folder\?\s*$',
   '^\s*(?:[^\w\s]\s*)?Trust this folder\s*$',
