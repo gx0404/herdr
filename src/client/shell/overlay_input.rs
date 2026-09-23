@@ -661,9 +661,11 @@ impl ClientShellState {
                     outcome.repaint = true;
                 }
                 KeyCode::Enter => {
-                    let selected = match self.overlay.as_ref() {
-                        Some(ClientShellOverlay::CommandPalette(palette)) => palette.selected,
-                        _ => return,
+                    // 冒烟 B1：目录视图滚轮滚走键盘高亮后，`palette.selected`
+                    // 本身仍是画面上看不见的下标；改用
+                    // `palette_enter_target` 落到当前可见窗口内的项。
+                    let Some(selected) = self.palette_enter_target() else {
+                        return;
                     };
                     self.activate_palette_item(selected, outcome);
                 }

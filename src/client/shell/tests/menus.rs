@@ -950,6 +950,140 @@ fn catalog_scroll_follows_the_keyboard_highlight() {
         .all(|(_, index)| *index != selected));
 }
 
+/// 冒烟 B1：目录视图滚轮把窗口移开键盘高亮后，`selected` 仍是画面上看不见
+/// 的下标；此时按回车不能激活那个看不见的项，应改为落到当前可见窗口内的
+/// 一项。
+#[test]
+fn enter_after_wheel_scroll_activates_a_visible_row_not_the_hidden_selection() {
+    use crossterm::event::KeyCode;
+    let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
+    state.set_snapshot(Box::new(snapshot()));
+    state.set_pane_surface(surface());
+    state.compose(100, 16).expect("shell frame");
+    state.toggle_global_menu();
+    let tabs = palette_row_index(&state, "category:1");
+    state.activate_palette_item(tabs, &mut ClientShellInput::default());
+    state.compose(100, 16).expect("catalog frame");
+
+    // 与 `catalog_scroll_follows_the_keyboard_highlight` 同构：先把高亮移到
+    // 顶部，再用滚轮把窗口移开，制造「selected 不在可见窗口内」的局面。
+    state.handle_raw_events(vec![key_event(KeyCode::Home)]);
+    state.compose(100, 16).expect("top");
+    state.scroll_palette(3);
+    state.compose(100, 16).expect("wheel");
+
+    let palette = palette_overlay(&state);
+    let hidden_selection = palette.selected;
+    assert!(
+        state
+            .hits
+            .global_menu_rows
+            .iter()
+            .all(|(_, index)| *index != hidden_selection),
+        "夹具前提：selected 被滚出窗口"
+    );
+
+    let target = state
+        .palette_enter_target()
+        .expect("catalog view has an enter target");
+    assert_ne!(target, hidden_selection, "不能激活画面上看不见的 selected");
+    assert!(
+        state
+            .hits
+            .global_menu_rows
+            .iter()
+            .any(|(_, index)| *index == target),
+        "回车目标必须是当前可见窗口内的一行：{target}"
+    );
+
+    // 高亮本来就在窗口内时，目标就是它自己（不无谓改写选中）。
+    state.handle_raw_events(vec![key_event(KeyCode::Home)]);
+    state.compose(100, 16).expect("home again");
+    let palette = palette_overlay(&state);
+    let visible_selection = palette.selected;
+    assert_eq!(
+        state.palette_enter_target(),
+        Some(visible_selection),
+        "高亮可见时直接用它自己"
+    );
+}
+
+/// 冒烟 L6：已经在搜索态时页脚不该再提示「/ 搜索命令」——用户已经在打字
+/// 搜索，这条提示只会让人怀疑自己还没进入搜索。搜索态的列表视图
+/// （`render_command_palette` 非目录分支）里，`enter`/`↑↓`/`esc` 这些跟
+/// 搜索无关的键位提示要照常显示。
+#[test]
+fn search_footer_drops_the_press_slash_to_search_hint() {
+    let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
+    state.set_snapshot(Box::new(snapshot()));
+    state.set_pane_surface(surface());
+    let t = crate::i18n::texts();
+
+    state.open_command_search();
+    let frame = state.compose(100, 24).expect("search frame");
+    let text = compact_text(&frame);
+    let slash_hint = format!("/{}", compact(t.global_menu.command_search));
+    assert!(
+        !text.contains(&slash_hint),
+        "搜索态页脚不该再提示按 / 搜索：{text}"
+    );
+    let other_hints = format!(
+        "{}{}{}{}{}",
+        compact("enter"),
+        compact(t.global_menu.footer_run),
+        compact("↑↓"),
+        compact(t.global_menu.footer_select),
+        compact("esc")
+    );
+    assert!(
+        text.contains(&other_hints),
+        "跟搜索无关的键位提示要保留：{text}"
+    );
+}
+
+/// 冒烟 L16：命令面板搜索结果列表的滚动条滑块长度要按可视比例算，不是
+/// 恒为 1 行——列表足够长时，滑块应该明显短于整条轨道。
+#[test]
+fn palette_search_scrollbar_thumb_length_matches_the_visible_ratio() {
+    let hex_digits: Vec<char> = "0123456789abcdef".chars().collect();
+    let profiles: Vec<_> = (0..14)
+        .map(|i| profile(&format!("m{i}"), hex_digits[i % hex_digits.len()]))
+        .collect();
+    let mut state = state_with_profiles(&profiles);
+    state.open_command_search();
+    state.compose(100, 30).expect("search frame");
+
+    let rows = state.hits.global_menu_rows.clone();
+    assert!(!rows.is_empty(), "夹具前提：搜索态列表非空");
+    let body_y = rows.iter().map(|(rect, _)| rect.y).min().expect("min y");
+    let viewport_rows = rows.len();
+    let (row_x, row_width) = {
+        let (rect, _) = rows[0];
+        (rect.x, rect.width)
+    };
+    let scrollbar_x = row_x + row_width;
+
+    let total_rows = palette_rows(palette_overlay(&state)).len();
+    assert!(
+        total_rows > viewport_rows,
+        "夹具前提：条目数超过一屏才需要滚动条（{total_rows} vs {viewport_rows}）"
+    );
+
+    let buffer = state.compose_buffer.as_ref().expect("帧缓冲");
+    let thumb_rows = (body_y..body_y + viewport_rows as u16)
+        .filter(|&y| buffer[(scrollbar_x, y)].symbol() == "┃")
+        .count();
+
+    let expected = ((viewport_rows * viewport_rows) as f32 / total_rows as f32)
+        .round()
+        .max(1.0) as usize;
+    assert_eq!(
+        thumb_rows, expected,
+        "滑块长度要按可视比例算，不能恒为 1 行"
+    );
+    assert!(thumb_rows > 1, "夹具前提：这个比例下滑块该有不止 1 行");
+}
+
 // ---- 入口去重、「«」与「调整布局」 ----
 
 /// 与 `workbench::ready()` 同构：宣告 `client.views.set` 后 tick 一次启用停靠工作台。

@@ -59,8 +59,12 @@ fn search_click_and_wheel_preserve_the_browser_and_unicode_matches() {
     state.move_palette_selection(1);
     state.compose(80, 24).unwrap();
     assert!(palette_overlay(&state).scroll <= 1);
-    let (_, indices) = super::command_palette::fuzzy_match("b", "İİB").unwrap();
-    assert_eq!(indices, vec![2]);
+    // 冒烟 L6：子序列匹配收紧为首字符须落在分词前缀上，"İİB" 里的 "B" 紧贴
+    // 在土耳其语 "İ"（`to_lowercase()` 会展开成 "i" + 组合重音，验证的正是
+    // 这种 Unicode 展开不打乱下标）后面、不是词开头，改用 "İİ B" 让 "B" 落
+    // 在空格之后的合法起点，同时保留原本要验证的 Unicode 下标行为。
+    let (_, indices) = super::command_palette::fuzzy_match("b", "İİ B").unwrap();
+    assert_eq!(indices, vec![3]);
     assert!(state.insert_overlay_text("settings"));
     let rows = super::command_palette::palette_rows(palette_overlay(&state));
     assert!(rows.iter().any(|row| row.item.id == "binding:Settings"));

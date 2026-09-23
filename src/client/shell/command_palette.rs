@@ -89,9 +89,16 @@ pub(super) struct ClientPaletteRow<'a> {
     pub(super) recent: bool,
 }
 
-/// Greedy subsequence matcher over characters, case-insensitive. Returns a
-/// score (higher is better) and the matched character indices in `text`.
+/// Subsequence matcher over characters, case-insensitive. Returns a score
+/// (higher is better) and the matched character indices in `text`.
 /// Consecutive runs and word-start hits score highest.
+///
+/// 冒烟 L6（收紧）：只要求子序列按顺序出现太宽——查询 "at" 会命中
+/// "SSH import" 里毫不相关的 a…t（跨在 "SSH" 的 "S" 之后、"import" 的
+/// "t" 上，两者语义无关）。收紧为：子序列的**首字符**必须命中文本开头或
+/// 某个分词前缀（空白 / `-_/:.` 之后），不允许整段匹配从词中间起步；
+/// 之后的字符仍按原算法贪心找子序列，一致或分词命中额外加分。多个候选
+/// 起点时取分数最高的一个。
 pub(super) fn fuzzy_match(query: &str, text: &str) -> Option<(i64, Vec<usize>)> {
     let query_chars: Vec<char> = query.chars().flat_map(char::to_lowercase).collect();
     if query_chars.is_empty() {
@@ -103,31 +110,47 @@ pub(super) fn fuzzy_match(query: &str, text: &str) -> Option<(i64, Vec<usize>)> 
         .enumerate()
         .flat_map(|(index, c)| c.to_lowercase().map(move |ch| (index, ch)))
         .collect();
-    let mut query_index = 0;
-    let mut indices = Vec::with_capacity(query_chars.len());
-    let mut score = 0i64;
-    let mut previous_match = None;
-    for &(text_index, ch) in &lowered {
-        if query_index >= query_chars.len() || ch != query_chars[query_index] {
-            continue;
+    let is_word_start = |index: usize| {
+        index == 0
+            || text_chars[index - 1].is_whitespace()
+            || matches!(text_chars[index - 1], '-' | '_' | '/' | ':' | '.')
+    };
+    let mut best: Option<(i64, Vec<usize>)> = None;
+    for start in lowered
+        .iter()
+        .filter(|&&(index, ch)| ch == query_chars[0] && is_word_start(index))
+        .map(|&(index, _)| index)
+    {
+        let mut query_index = 0;
+        let mut indices = Vec::with_capacity(query_chars.len());
+        let mut score = 0i64;
+        let mut previous_match = None;
+        for &(text_index, ch) in lowered.iter().filter(|&(index, _)| *index >= start) {
+            if query_index >= query_chars.len() || ch != query_chars[query_index] {
+                continue;
+            }
+            if indices.last() != Some(&text_index) {
+                indices.push(text_index);
+            }
+            score += 1;
+            if previous_match == text_index.checked_sub(1) {
+                score += 8;
+            }
+            if is_word_start(text_index) {
+                score += 6;
+            }
+            previous_match = Some(text_index);
+            query_index += 1;
         }
-        if indices.last() != Some(&text_index) {
-            indices.push(text_index);
+        if query_index == query_chars.len()
+            && best
+                .as_ref()
+                .is_none_or(|(best_score, _)| score > *best_score)
+        {
+            best = Some((score, indices));
         }
-        score += 1;
-        if previous_match == text_index.checked_sub(1) {
-            score += 8;
-        }
-        let word_start = text_index == 0
-            || text_chars[text_index - 1].is_whitespace()
-            || matches!(text_chars[text_index - 1], '-' | '_' | '/' | ':' | '.');
-        if word_start {
-            score += 6;
-        }
-        previous_match = Some(text_index);
-        query_index += 1;
     }
-    (query_index == query_chars.len()).then_some((score, indices))
+    best
 }
 
 /// The rows currently visible in the palette. With an empty query the MRU
@@ -786,6 +809,44 @@ impl ClientShellState {
         true
     }
 
+    /// 目录视图里 Enter 应该激活的行：`selected` 是键盘上一次移动或点击
+    /// 落下的项，滚轮（`scroll_palette`）只挪 `scroll`、不跟着挪
+    /// `selected`（放弃键盘高亮，见 `kit::menu::menu_scroll` 文档），于是
+    /// `selected` 可能落在当前可见窗口外——`render_catalog` 那时不画任何
+    /// 高亮，但 `selected` 本身仍是一个"看不见"的有效下标，Enter 照样会
+    /// 激活它。这里按渲染同一套窗口口径重新判断：还在窗口内就用它自己，
+    /// 否则改用窗口内离原位置最近的可激活项（冒烟 B1）。非目录视图（搜索
+    /// 结果列表）不受此限制，直接用当前选中。
+    pub(super) fn palette_enter_target(&self) -> Option<usize> {
+        let Some(ClientShellOverlay::CommandPalette(palette)) = self.overlay.as_ref() else {
+            return None;
+        };
+        if !is_catalog(palette) {
+            return Some(palette.selected);
+        }
+        let (cols, rows) = self.last_composed_size?;
+        let rows_data = palette_rows(palette);
+        let menu = catalog_menu(palette, &rows_data);
+        let geometry = catalog_geometry(palette, &menu.items, Rect::new(0, 0, cols, rows));
+        let selected_kit = menu.kit_index(palette.selected);
+        let window_end = palette.scroll.saturating_add(geometry.visible.max(1));
+        if selected_kit >= palette.scroll && selected_kit < window_end {
+            return Some(palette.selected);
+        }
+        let lo = palette.scroll.min(menu.items.len());
+        let hi = window_end.min(menu.items.len());
+        let fallback = if selected_kit < palette.scroll {
+            (lo..hi).find(|&kit| menu.items[kit].is_activatable())
+        } else {
+            (lo..hi).rev().find(|&kit| menu.items[kit].is_activatable())
+        };
+        Some(
+            fallback
+                .and_then(|kit| menu.row(kit))
+                .unwrap_or(palette.selected),
+        )
+    }
+
     pub(super) fn activate_palette_item(&mut self, index: usize, outcome: &mut ClientShellInput) {
         let (id, action) = {
             let Some(ClientShellOverlay::CommandPalette(palette)) = self.overlay.as_ref() else {
@@ -1125,39 +1186,42 @@ pub(crate) fn render_command_palette(
         }
         row_hits.push((rect, index));
     }
+    // 冒烟 L16：滑块长度按可视比例——之前恒为 1 行，与 `release_notes` /
+    // `help` 等浮层的滚动条观感不一致，长列表里看不出还剩多少内容。复用
+    // 与它们相同的 `ScrollMetrics` + `render_scrollbar_buffer`。
+    // 冒烟 L16：滑块长度按可视比例——之前恒为 1 行，与 `release_notes` /
+    // `help` 等浮层的滚动条观感不一致，长列表里看不出还剩多少内容。复用
+    // 与它们相同的 `ScrollMetrics` + `render_scrollbar_buffer`。
     if visual.len() > usize::from(body.height) && body.width > 0 && body.height > 0 {
-        let y = body.y
-            + ((scroll * usize::from(body.height)) / visual.len()).min(usize::from(body.height - 1))
-                as u16;
-        put_text(
-            b,
-            body.right() - 1,
-            y,
-            1,
-            "┃",
-            Style::default().fg(p.accent),
-        );
+        let track = Rect::new(body.right() - 1, body.y, 1, body.height);
+        let viewport_rows = usize::from(body.height);
+        let max_offset_from_bottom = visual.len().saturating_sub(viewport_rows);
+        let metrics = crate::pane::ScrollMetrics {
+            offset_from_bottom: max_offset_from_bottom.saturating_sub(scroll),
+            max_offset_from_bottom,
+            viewport_rows,
+        };
+        crate::ui::render_scrollbar_buffer(b, metrics, track, p.overlay0, p.accent, "┃");
     }
-    render_key_hints(
-        b,
-        layout.footer,
-        &[
-            ("enter".into(), t.footer_run.into()),
-            ("↑↓".into(), t.footer_select.into()),
-            ("/".into(), t.command_search.into()),
-            (
-                "esc".into(),
-                if matches!(palette.view, BrowserView::Menu(Some(_))) {
-                    t.back
-                } else {
-                    t.footer_close
-                }
-                .into(),
-            ),
-        ],
-        p,
-        cx.components,
-    );
+    let mut hints = vec![
+        ("enter".into(), t.footer_run.into()),
+        ("↑↓".into(), t.footer_select.into()),
+    ];
+    // 冒烟 L6：已经在搜索态时页脚不再提示「/ 搜索命令」——用户已经在搜索
+    // 框里打字，这条提示只会让人以为还没进入搜索。
+    if !searching {
+        hints.push(("/".into(), t.command_search.into()));
+    }
+    hints.push((
+        "esc".into(),
+        if matches!(palette.view, BrowserView::Menu(Some(_))) {
+            t.back
+        } else {
+            t.footer_close
+        }
+        .into(),
+    ));
+    render_key_hints(b, layout.footer, &hints, p, cx.components);
     Some(OverlayRender {
         area: outer,
         menu_popup: outer,
@@ -1250,5 +1314,27 @@ mod tests {
         let (_, indices) = fuzzy_match("机器", "连接 机器 面板").expect("cjk match");
         assert_eq!(indices.len(), 2);
         assert!(fuzzy_match("不存在xyz", "连接 机器 面板").is_none());
+    }
+
+    /// 冒烟 L6：收紧前，纯子序列匹配对"首字符落在哪"没有任何要求——
+    /// 查询 "ta" 会命中 "attach machine" 里 "aTtAch" 词中间的 t（下标 1）
+    /// 与随后的 a（下标 3），两者都不是词的开头，观感是"什么都能命中"。
+    /// 收紧后：子序列的首字符必须落在文本开头或某个分词前缀（空白 /
+    /// `-_/:.` 之后）上，这类词中间起步的命中不再算数；真正的分词前缀
+    /// （如 "im" 命中 "import" 的开头）依然命中。
+    #[test]
+    fn fuzzy_match_requires_the_first_character_to_land_on_a_token_boundary() {
+        // 收紧前：`fuzzy_match("ta", "attach machine")` 是 `Some`（旧算法
+        // 从 "attach" 词中间随便找到的 t/a，与任何词的开头都无关）。
+        assert!(
+            fuzzy_match("ta", "attach machine").is_none(),
+            "首字符不落在词开头的子序列不该再命中"
+        );
+        // 分词前缀依然命中：查询是某个词的真实前缀。
+        assert!(fuzzy_match("im", "ssh import").is_some());
+        assert!(fuzzy_match("mac", "attach machine").is_some());
+        // 首字符正好是某个词的开头、后续字符跨到别的词：不该被首字符检查
+        // 误伤，只要子序列本身仍成立。
+        assert!(fuzzy_match("am", "attach machine").is_some());
     }
 }
