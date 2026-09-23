@@ -189,8 +189,16 @@ fn read_node(
 
 /// 该 CLI 的配置目录，与 `integration::env` 的 `claude_dir` / `codex_dir` /
 /// `kimi_dir` 同一套规则：环境变量覆盖优先（支持 `~` 前缀），否则 `home` 下的
-/// 默认目录。opencode 与 zcode 没有覆盖变量；未知 agent 为 `None`。`integration`
-/// 没有导出这些常量与 `~` 展开，此处按同一规则镜像，等价性由测试钉住。
+/// 默认目录；未知 agent 为 `None`。`integration` 没有导出这些常量与 `~` 展开，
+/// 此处按同一规则镜像，等价性由测试钉住。
+///
+/// opencode 与 zcode 不接覆盖变量（2026-09 按官方文档与源码核实）：
+/// - opencode 官方的 `OPENCODE_CONFIG_DIR` 只额外叠加一个 agents / commands / modes /
+///   plugins 目录，不搬动全局配置目录；活动适配器也不读配置目录，读的是数据目录里的
+///   库（经 `opencode db`，跟随 `XDG_DATA_HOME`）。
+/// - zcode 没有面向用户的目录变量：会话库 `~/.zcode/cli/db/db.sqlite` 按 HOME 展开，
+///   README 里的 `ZCODE_DATA_BASE_DIR` 管不到 `cli/` 这一支；它又是 pane 外的桌面
+///   应用，环境与 server 无关。
 ///
 /// 覆盖变量读的是 herdr server 进程自己的环境（server 启动时继承的那份），不是
 /// pane 里 CLI 进程的环境：只在某个 pane 里导出的覆盖（如 `CLAUDE_CONFIG_DIR=/x
