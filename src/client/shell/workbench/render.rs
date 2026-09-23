@@ -249,6 +249,9 @@ impl ClientShellState {
         self.hits.sidebar_divider = Rect::default();
         self.hits.sidebar_section_divider = Rect::default();
         self.hits.sidebar_toggle = Rect::default();
+        // 非聚焦面板的标题与按钮按对标题栏底色的对比度选色（冒烟 L3：overlay0 叠
+        // surface0 只有 2.57:1），聚焦面板仍用 accent 区分。
+        let unfocused_title = super::super::render::readable_muted_fg(palette, palette.surface0);
         for (panel, area) in &self.workbench.geometry.panels {
             if area.is_empty() {
                 continue;
@@ -257,7 +260,7 @@ impl ClientShellState {
             let color = if focused {
                 palette.accent
             } else {
-                palette.overlay0
+                unfocused_title
             };
             // 标题前的 `⠿` 是拖动停靠的把手：锁定布局后拖动被拒绝，就不再画它
             // （冒烟 L1），标题文字左移占位。

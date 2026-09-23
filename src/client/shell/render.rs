@@ -41,6 +41,40 @@ pub(in crate::client::shell) fn render_sidebar_background(
     }
 }
 
+/// 叠在 `bg` 上的次要文字色（冒烟 L3）：按「弱 → 强」依次试 overlay0、overlay1、
+/// subtext0、text，取第一个与 `bg` 对比度 ≥ 4.5:1 的，保住层级又读得清；都不够
+/// 就取对比度最大的。`bg` 是 `Reset`（跟随终端底色）时拿 `panel_bg` 近似，仍换算
+/// 不出 sRGB 就维持主题原本的 overlay0。纯函数、不分配。
+pub(in crate::client::shell) fn readable_muted_fg(
+    palette: &Palette,
+    bg: ratatui::style::Color,
+) -> ratatui::style::Color {
+    const READABLE: f32 = 4.5;
+    let bg = if crate::ui::color::color_to_rgb(bg).is_some() {
+        bg
+    } else {
+        palette.panel_bg
+    };
+    let mut best: Option<(ratatui::style::Color, f32)> = None;
+    for candidate in [
+        palette.overlay0,
+        palette.overlay1,
+        palette.subtext0,
+        palette.text,
+    ] {
+        let Some(ratio) = crate::ui::color::contrast_ratio(candidate, bg) else {
+            continue;
+        };
+        if ratio >= READABLE {
+            return candidate;
+        }
+        if best.is_none_or(|(_, best_ratio)| ratio > best_ratio) {
+            best = Some((candidate, ratio));
+        }
+    }
+    best.map_or(palette.overlay0, |(color, _)| color)
+}
+
 /// 一段键提示在 `render_key_hints` 里占用的列宽：键帽（左右各一个空格）+
 /// 一个间隔 + 文案，非末项再加两列分隔。页脚要在绘制前判断能否放下时必须
 /// 用这个函数，避免两处各写一份宽度公式。

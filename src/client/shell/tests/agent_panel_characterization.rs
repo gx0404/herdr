@@ -2696,3 +2696,199 @@ fn one_row_agent_list_keeps_the_agent_name_visible() {
     assert!(lines[0].starts_with("  ○ client-shell"), "{lines:?}");
     assert!(compact(&lines[1]).starts_with("one"), "{lines:?}");
 }
+
+/// `rect` 里从某格起依次拼出 `text` 的第一个单元格（找不到就失败），用来断言
+/// 一段 ASCII 文字的样式；CJK 文案传首字即可。
+fn text_cell(state: &ClientShellState, rect: Rect, text: &str) -> ratatui::buffer::Cell {
+    let buffer = state.compose_buffer.as_ref().expect("保留帧缓冲");
+    let wanted = text.chars().map(|ch| ch.to_string()).collect::<Vec<_>>();
+    for y in rect.y..rect.bottom() {
+        for x in rect.x..rect.right() {
+            let spelled = wanted.iter().enumerate().all(|(offset, symbol)| {
+                let column = x + offset as u16;
+                column < rect.right() && buffer[(column, y)].symbol() == symbol
+            });
+            if spelled {
+                return buffer[(x, y)].clone();
+            }
+        }
+    }
+    panic!("{rect:?} 里没有 {text:?}：{:?}", rect_rows(state, rect));
+}
+
+fn readable(cell: &ratatui::buffer::Cell) -> f32 {
+    crate::ui::color::contrast_ratio(cell.fg, cell.bg).expect("前景与底色都可换算")
+}
+
+/// 冒烟 L3：agent 叶子行的名称与状态文案对行底色的对比度 ≥ 4.5:1（原先 muted 色
+/// 只有 3.36–3.59:1）；「已阻塞」除颜色外还有文字与粗体，汇总为阻塞的分组头在
+/// 计数前多一个粗体「!」——默认的圆点图标下阻塞与工作中同是「●」，不能只靠颜色。
+#[test]
+fn agent_leaf_rows_are_readable_and_blocked_is_not_color_only() {
+    let mut config = Config::default();
+    config.ui.agent_panel_sort = AgentPanelSortConfig::Spaces;
+    let mut state = ClientShellState::new(ClientShellConfig::from_config(&config));
+    state.set_snapshot(Box::new(two_workspace_snapshot()));
+    state.set_pane_surface(surface());
+    enable_workbench(&mut state);
+    state.compose(133, 32).expect("workbench 帧");
+    let status = &crate::i18n::texts().status;
+    let row = |pane: &str| {
+        state
+            .hits
+            .endpoint_agents
+            .iter()
+            .find(|(_, _, id)| id == pane)
+            .map(|(rect, _, _)| *rect)
+            .unwrap_or_else(|| panic!("agent 行 {pane}"))
+    };
+    for (pane, name, label, blocked) in [
+        ("pane_1", "one", status.idle, false),
+        ("pane_2", "two", status.blocked, true),
+        ("pane_3", "three", status.working, false),
+    ] {
+        let rect = row(pane);
+        let name_cell = text_cell(&state, rect, name);
+        assert!(
+            readable(&name_cell) >= 4.5,
+            "{name} 名称对比度 {}",
+            readable(&name_cell)
+        );
+        let first = label.chars().next().expect("状态文案").to_string();
+        let label_cell = text_cell(&state, rect, &first);
+        assert!(
+            readable(&label_cell) >= 4.5,
+            "{label} 对比度 {}",
+            readable(&label_cell)
+        );
+        assert_eq!(
+            label_cell.modifier.contains(Modifier::BOLD),
+            blocked,
+            "只有「{}」加粗：{label}",
+            status.blocked
+        );
+    }
+    let mark = text_cell(&state, group_rect(&state, "ws_1"), "!");
+    assert!(
+        mark.modifier.contains(Modifier::BOLD),
+        "阻塞分组头的「!」加粗"
+    );
+    assert!(
+        !rect_rows(&state, group_rect(&state, "ws_2"))[0].contains('!'),
+        "没有阻塞的分组头不带「!」"
+    );
+}
+
+/// 按给定宽度直接画统一树，返回每个 agent 行的 `(pane_id, 行文本, 行矩形)` 与缓冲。
+fn render_tree_at(state: &ClientShellState, width: u16) -> (Vec<(String, String, Rect)>, Buffer) {
+    let cache = state.federated_agent_rows.as_ref().expect("行缓存");
+    let area = Rect::new(0, 0, width, 12);
+    let mut buffer = Buffer::empty(area);
+    let mut hits = ShellHitMap::default();
+    let mut scroll = 0;
+    crate::client::shell::agent_tree::render_agent_tree_rows(
+        &mut buffer,
+        area,
+        None,
+        crate::client::shell::agent_tree::AgentRowsView {
+            tree: cache.rows(),
+            flat: cache.flat_rows(),
+        },
+        &state.config,
+        &mut scroll,
+        None,
+        &mut hits,
+        false,
+    );
+    let rows = hits
+        .agents
+        .iter()
+        .map(|(rect, pane)| {
+            let text = (rect.x..rect.right())
+                .map(|x| buffer[(x, rect.y)].symbol())
+                .collect::<String>();
+            (pane.clone(), text, *rect)
+        })
+        .collect();
+    (rows, buffer)
+}
+
+fn dots_state(
+    long_names: bool,
+    indicators: crate::config::StatusIndicatorStyle,
+) -> ClientShellState {
+    let mut projected = two_workspace_snapshot();
+    if long_names {
+        for agent in &mut projected.agents {
+            let name = agent.name.take().unwrap_or_default();
+            agent.name = Some(format!("{name}-with-a-long-name"));
+        }
+    }
+    let mut config = Config::default();
+    config.ui.agent_panel_sort = AgentPanelSortConfig::Spaces;
+    config.ui.status_indicators = indicators;
+    let mut state = ClientShellState::new(ClientShellConfig::from_config(&config));
+    state.set_snapshot(Box::new(projected));
+    state.set_pane_surface(surface());
+    state.compose(106, 40).expect("classic 帧");
+    state
+}
+
+/// 冒烟 L3（续）：窄面板里名称这类弹性 token 会占满大半行。圆点图标下阻塞行放得下
+/// 就画加粗的「已阻塞」，放不下整段就退成粗体「!」；其它状态照旧把状态文案当
+/// 次要信息先丢。符号图标的「×」已按形状区分，不加「!」。
+#[test]
+fn blocked_rows_keep_a_non_color_cue_in_narrow_panels() {
+    use crate::config::StatusIndicatorStyle;
+    let status = &crate::i18n::texts().status;
+    for (long_names, width, cue, name) in [
+        (false, 30u16, status.blocked, "two"),
+        (true, 30, "!", "two-with-a-long-name"),
+    ] {
+        let state = dots_state(long_names, StatusIndicatorStyle::Dots);
+        let (rows, buffer) = render_tree_at(&state, width);
+        let row = |pane: &str| {
+            rows.iter()
+                .find(|(id, _, _)| id == pane)
+                .unwrap_or_else(|| panic!("{width} 列：agent 行 {pane}：{rows:?}"))
+        };
+        let (_, blocked, rect) = row("pane_2");
+        assert!(
+            compact(blocked).contains(name),
+            "{width} 列：名称仍在：{blocked:?}"
+        );
+        assert!(
+            compact(blocked).ends_with(&compact(cue)),
+            "{width} 列：阻塞行保留「{cue}」：{blocked:?}"
+        );
+        let first = cue.chars().next().expect("提示").to_string();
+        let cue_cell = (rect.x..rect.right())
+            .map(|x| &buffer[(x, rect.y)])
+            .find(|cell| cell.symbol() == first)
+            .expect("提示单元格");
+        assert!(
+            cue_cell.modifier.contains(Modifier::BOLD),
+            "{width} 列：提示加粗"
+        );
+        let (_, working, _) = row("pane_3");
+        assert!(
+            !working.contains('!'),
+            "{width} 列：工作中不加「!」：{working:?}"
+        );
+        if long_names {
+            assert!(
+                !compact(working).contains(&compact(status.working)),
+                "{width} 列：其它状态照旧先丢状态文案：{working:?}"
+            );
+        }
+    }
+
+    let state = dots_state(true, StatusIndicatorStyle::Symbols);
+    let (rows, _) = render_tree_at(&state, 30);
+    let (_, blocked, _) = rows
+        .iter()
+        .find(|(id, _, _)| id == "pane_2")
+        .expect("阻塞行");
+    assert!(blocked.contains('×'), "符号图标：{blocked:?}");
+    assert!(!blocked.contains('!'), "符号图标已按形状区分：{blocked:?}");
+}

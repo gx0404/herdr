@@ -1749,3 +1749,24 @@ fn arrange_footer_done_hint_shows_hover_feedback() {
         "不可点的提示不给悬浮反馈"
     );
 }
+
+/// 冒烟 L3：非聚焦面板标题（截屏 10 里 overlay0 叠 surface0 只有 2.57:1）按对比度
+/// 选色，对标题栏底色 ≥ 4.5:1；聚焦面板仍用 accent 区分。
+#[test]
+fn unfocused_panel_titles_are_readable() {
+    let mut state = ready();
+    state.compose(133, 32).expect("工作台");
+    let buffer = state.compose_buffer.as_ref().expect("保留帧缓冲");
+    let title = (0..133)
+        .find(|x| buffer[(*x, 1)].symbol() == "工")
+        .expect("工作区面板标题");
+    let cell = &buffer[(title, 1)];
+    assert_ne!(
+        state.workbench.dock.focused,
+        crate::client::shell::dock::PanelId::Workspaces,
+        "夹具前提：工作区面板未聚焦"
+    );
+    let ratio = crate::ui::color::contrast_ratio(cell.fg, cell.bg).expect("可比较");
+    assert!(ratio >= 4.5, "非聚焦标题对比度 {ratio}");
+    assert_ne!(cell.fg, state.config.palette.accent, "与聚焦标题仍可区分");
+}

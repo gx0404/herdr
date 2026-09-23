@@ -257,6 +257,12 @@ fn external_group_key(source: &str) -> String {
 /// 徽标只拿剩下的宽度，窄侧栏里深层 agent 行不会只剩一截徽标。
 const PRIMARY_MIN_WIDTH: u16 = 8;
 
+/// 当前图标风格下阻塞是否与工作中同形（圆点风格都是「●」）：同形时阻塞要另加
+/// 「!」这类非颜色记号（冒烟 L3），符号风格的「×」本身就够了。
+fn blocked_shares_icon(style: crate::config::StatusIndicatorStyle) -> bool {
+    status_icon(AgentStatus::Blocked, style) == status_icon(AgentStatus::Working, style)
+}
+
 /// agent / 外部条目行右侧的活动徽标：构建期算好完整文案与只留数字的紧凑形态
 /// （`2/5`；没有运行中时是总数 `5`）及各自宽度，渲染按可用宽度三档退化——
 /// 完整文案 → 只留数字 → 不画，循环里不再分配。
@@ -1053,6 +1059,14 @@ fn render_tree_row(
     } else if row_hovered {
         buffer.set_style(rect, Style::default().bg(palette.hover_row_bg()));
     }
+    // 叶子行的次要文字（agent 名、状态文案等）按这一行实际的底色选色，对比度
+    // ≥ 4.5:1（冒烟 L3：overlay0 在常态 / 聚焦行上只有 3.59 / 3.36:1）。
+    let muted = super::render::readable_muted_fg(
+        palette,
+        buffer
+            .cell((rect.x, rect.y))
+            .map_or(palette.panel_bg, |cell| cell.bg),
+    );
 
     let prefix_style = Style::default().fg(palette.overlay0);
     let (used, toggle) = render_tree_prefix(
@@ -1097,6 +1111,7 @@ fn render_tree_row(
                 agent,
                 *status_line,
                 cx,
+                muted,
                 depth,
                 mask,
                 &prefix,
@@ -1119,7 +1134,7 @@ fn render_tree_row(
             kind,
             status,
         } => {
-            render_activity_line(buffer, content, label, *kind, *status, cx);
+            render_activity_line(buffer, content, label, *kind, *status, cx, muted);
             if has_children && !toggle.is_empty() {
                 hits.agent_tree_toggles
                     .push((toggle, node.endpoint_id.clone(), row.key.clone()));
@@ -1165,6 +1180,7 @@ fn render_tree_row(
                 *status,
                 *readable,
                 cx,
+                muted,
             );
             if has_children && !toggle.is_empty() {
                 hits.agent_tree_toggles
@@ -1235,8 +1251,35 @@ fn render_group_line(
         count,
         Style::default().fg(palette.overlay0),
     );
+    // 汇总为阻塞的工作区 / 标签页分组头在计数前加一个粗体「!」（冒烟 L3）：折叠后
+    // 只剩这一行，圆点图标下阻塞与工作中同形，不能只靠颜色。标签为它让位。
+    let blocked = blocked_shares_icon(cx.config.status_indicators)
+        && matches!(
+            node.kind,
+            AgentTreeKind::Workspace {
+                status: AgentStatus::Blocked,
+                ..
+            } | AgentTreeKind::Tab {
+                status: AgentStatus::Blocked,
+                ..
+            }
+        );
+    let label_end = if blocked && count_x >= content.x.saturating_add(2) {
+        let mark_x = count_x - 2;
+        put_text(
+            buffer,
+            mark_x,
+            content.y,
+            1,
+            "!",
+            Style::default().fg(icon_color).add_modifier(Modifier::BOLD),
+        );
+        mark_x
+    } else {
+        count_x
+    };
     let mut x = content.x;
-    let mut remaining = count_x.saturating_sub(content.x).saturating_sub(1);
+    let mut remaining = label_end.saturating_sub(content.x).saturating_sub(1);
     if !icon.is_empty() {
         let icon_width = display_width(icon) as u16;
         if remaining < icon_width + 1 {
@@ -1267,7 +1310,7 @@ fn render_group_line(
     if let Some(secondary) = secondary {
         let x = x.saturating_add(label_width + 1);
         let width = display_width(secondary) as u16;
-        if x.saturating_add(width) <= count_x.saturating_sub(1) {
+        if x.saturating_add(width) <= label_end.saturating_sub(1) {
             put_text(
                 buffer,
                 x,
@@ -1284,7 +1327,11 @@ fn render_group_line(
 /// 对齐名称；`status_line` 那一行在 token 之后补状态文案。宽度预算：状态图标与
 /// 名称先保 [`PRIMARY_MIN_WIDTH`] 列 > 徽标（完整 → 只留数字 → 不画）> token 行
 /// 其余部分（`resolved_token_spans` 自行按固定 / 弹性宽度裁剪）> 状态文案（次要
-/// 信息，整段放不下就不画）。
+/// 信息，整段放不下就不画）。次要文字用 `muted`（按行底色选出的可读色）。
+///
+/// 阻塞不只靠颜色（冒烟 L3）：阻塞行的状态图标与状态文案改用状态色加粗；默认的
+/// 圆点图标下阻塞与工作中同是「●」，整段状态文案放不下时退成一个粗体「!」。
+/// 符号图标（×）本身已按形状区分，不加「!」。
 #[allow(clippy::too_many_arguments)]
 fn render_agent_lines(
     buffer: &mut Buffer,
@@ -1294,6 +1341,7 @@ fn render_agent_lines(
     agent: &AgentRow,
     status_line: Option<usize>,
     cx: &RowContext<'_>,
+    muted: ratatui::style::Color,
     depth: u8,
     mask: u64,
     prefix: &Prefix,
@@ -1306,8 +1354,15 @@ fn render_agent_lines(
             palette.subtext0
         })
         .add_modifier(Modifier::BOLD);
+    let blocked = agent.status == AgentStatus::Blocked;
+    let blocked_cue = blocked && blocked_shares_icon(cx.config.status_indicators);
     let status_style = Style::default().fg(status_color(agent.status, palette));
-    let secondary = Style::default().fg(palette.overlay0);
+    let status_style = if blocked {
+        status_style.add_modifier(Modifier::BOLD)
+    } else {
+        status_style
+    };
+    let secondary = Style::default().fg(muted);
     let icon = (
         status_icon(agent.status, cx.config.status_indicators),
         status_style,
@@ -1423,8 +1478,11 @@ fn render_agent_lines(
         if status_line == Some(index) {
             let text = agent.state_text.as_str();
             let text_width = display_width(text) as u16;
+            let style = if blocked { status_style } else { secondary };
             if !text.is_empty() && used.saturating_add(1).saturating_add(text_width) <= width {
-                put_text(buffer, x + used + 1, y, text_width, text, secondary);
+                put_text(buffer, x + used + 1, y, text_width, text, style);
+            } else if blocked_cue && used.saturating_add(2) <= width {
+                put_text(buffer, x + used + 1, y, 1, "!", style);
             }
         }
     }
@@ -1503,6 +1561,7 @@ fn render_activity_line(
     kind: AgentActivityKind,
     status: AgentActivityStatus,
     cx: &RowContext<'_>,
+    muted: ratatui::style::Color,
 ) {
     let palette = &cx.config.palette;
     let mapped = activity_status_as_agent(status);
@@ -1549,7 +1608,7 @@ fn render_activity_line(
             content.y,
             kind_width,
             kind_label,
-            Style::default().fg(palette.overlay0),
+            Style::default().fg(muted),
         );
     }
 }
@@ -1566,6 +1625,7 @@ fn render_external_line(
     status: AgentStatus,
     readable: bool,
     cx: &RowContext<'_>,
+    muted: ratatui::style::Color,
 ) {
     let palette = &cx.config.palette;
     let mut remaining = render_badge(buffer, content, node, cx);
@@ -1598,7 +1658,7 @@ fn render_external_line(
     );
     x = x.saturating_add(label_width + 1);
     remaining = remaining.saturating_sub(label_width + 1);
-    let secondary = Style::default().fg(palette.overlay0);
+    let secondary = Style::default().fg(muted);
     for extra in [
         agent,
         (!readable).then_some(crate::i18n::texts().agent_panel.external_unreadable),
