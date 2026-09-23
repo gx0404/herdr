@@ -1259,8 +1259,6 @@ pub(super) enum PendingEndpointKind {
         machine: String,
     },
     /// 「Agent 活动」窗口的 `agent.activity.read`；`epoch` 对不上的响应被丢弃。
-    // seam-stub(activity-window)：由波 3 二级窗口车道发出请求后删除本 allow。
-    #[allow(dead_code)]
     AgentActivityRead {
         epoch: u64,
         node_id: Option<String>,

@@ -254,6 +254,7 @@ fn chrome_hover_resolves_agent_activity_window_hits_when_the_overlay_is_open() {
         AgentActivityOwner::Pane {
             pane_id: "pane_2".into(),
         },
+        &mut ClientShellInput::default(),
     );
     state.compose(106, 24).expect("activity overlay frame");
     let popup = state.hits.agent_activity_popup;
@@ -546,6 +547,7 @@ fn agent_activity_window_opens_from_the_menu_and_closes_on_esc_or_outside_click(
         AgentActivityOwner::External {
             external_id: "zcode:abc".into(),
         },
+        &mut ClientShellInput::default(),
     );
     state.handle_raw_events(vec![key(KeyCode::Char('x'))]);
     assert!(
@@ -556,40 +558,56 @@ fn agent_activity_window_opens_from_the_menu_and_closes_on_esc_or_outside_click(
     assert!(matches!(state.overlay, Some(ClientShellOverlay::Help(_))));
     state.overlay = None;
 
-    // 读取响应：代际对不上丢弃，对上才写入。
+    // 读取响应：对不上在途读取的丢弃，对上才写入（数据通道的完整行为见
+    // `tests/agent_activity_window.rs`）。
     state.open_agent_activity(
         ClientEndpointId::Local,
         AgentActivityOwner::Pane {
             pane_id: "pane_2".into(),
         },
+        &mut ClientShellInput::default(),
     );
-    let content = crate::api::schema::AgentActivityContent {
-        node_id: "n1".into(),
-        text: "hello".into(),
-        ..Default::default()
+    let epoch = match state.overlay.as_ref() {
+        Some(ClientShellOverlay::AgentActivity(overlay)) => {
+            overlay.in_flight.as_ref().expect("打开即读树").epoch
+        }
+        other => panic!("应打开 Agent 活动窗口: {other:?}"),
     };
-    let response = |content: &crate::api::schema::AgentActivityContent| {
+    let tree = || {
         Ok(crate::api::schema::ResponseResult::AgentActivity {
-            nodes: Vec::new(),
-            content: Some(content.clone()),
+            nodes: vec![crate::api::schema::AgentActivityNode {
+                id: "n1".into(),
+                label: "explore".into(),
+                ..Default::default()
+            }],
+            content: None,
         })
     };
-    let (repaint, actions) = state.receive_agent_activity_read(99, None, response(&content));
+    let (repaint, actions) = state.receive_agent_activity_read(epoch + 99, None, tree());
     assert!(!repaint && actions.is_empty(), "过期代际被丢弃");
-    let (repaint, _) = state.receive_agent_activity_read(0, None, response(&content));
+    let (repaint, _) = state.receive_agent_activity_read(epoch, None, tree());
     assert!(repaint);
     match state.overlay.as_ref() {
         Some(ClientShellOverlay::AgentActivity(overlay)) => {
-            assert_eq!(overlay.content.as_ref(), Some(&content));
-            assert!(overlay.error.is_none());
+            assert!(overlay.tree_loaded);
+            assert_eq!(overlay.nodes.len(), 1);
+            assert!(overlay.tree_error.is_none());
         }
         other => panic!("窗口仍应打开: {other:?}"),
     }
+    let mut outcome = ClientShellInput::default();
+    state.select_agent_activity_node("n1".into(), &mut outcome);
+    let epoch = match state.overlay.as_ref() {
+        Some(ClientShellOverlay::AgentActivity(overlay)) => {
+            overlay.in_flight.as_ref().expect("选中即读内容").epoch
+        }
+        other => panic!("窗口仍应打开: {other:?}"),
+    };
     let (repaint, _) = state.receive_agent_activity_read(
-        0,
-        None,
+        epoch,
+        Some("n1".into()),
         Err(ClientShellEndpointError {
-            code: Some("not_implemented".into()),
+            code: Some("activity_unavailable".into()),
             message: "no activity".into(),
         }),
     );

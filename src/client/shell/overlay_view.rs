@@ -23,6 +23,7 @@ impl ClientShellState {
         self.compute_scrollback_scrolls(area, page_bounds);
         self.compute_machine_files_scroll(area, page_bounds);
         self.compute_machines_view(area, page_bounds);
+        self.compute_agent_activity_view(area, page_bounds);
     }
 
     fn compute_palette_scroll(&mut self, area: Rect, page_bounds: Option<Rect>) {

@@ -285,6 +285,7 @@ pub(super) fn palette_overlay(
     palette
 }
 
+mod agent_activity_window;
 mod agent_panel_characterization;
 mod agent_tree_seam;
 mod agents_worktrees_notifications;

@@ -1099,8 +1099,6 @@ pub struct AgentPanelTexts {
 
 /// 「Agent 活动」二级窗口的文案；节点种类 / 状态的标签 Agents 面板也读。
 /// `*_fmt` entries are `fill` templates; placeholders are documented inline.
-// seam-stub(activity-window)：接缝预落的文案，字段暂无读者；对应车道用上后删除本 allow。
-#[allow(dead_code)]
 pub struct AgentActivityTexts {
     pub title_fmt: &'static str, // args: name
     pub tree_title: &'static str,
@@ -1117,6 +1115,19 @@ pub struct AgentActivityTexts {
     pub hint_select: &'static str,
     pub hint_follow: &'static str,
     pub hint_close: &'static str,
+    /// 页脚：`r` 重新读取树与内容。
+    pub hint_refresh: &'static str,
+    /// 页脚：`←→` 折叠 / 展开树节点。
+    pub hint_collapse: &'static str,
+    /// 页脚：`Tab` 在活动树与内容之间切换（窄窗口只显示其中一列）。
+    pub hint_switch_column: &'static str,
+    /// 标题栏按钮（后接跟随状态的 `●` / `○`）。
+    pub follow_button: &'static str,
+    pub refresh_button: &'static str,
+    /// 未跟随时属主的活动摘要变了：标题旁的提示。
+    pub updates_badge: &'static str,
+    /// 已选节点读完但没有任何输出。
+    pub no_output: &'static str,
     pub kind_subagent: &'static str,
     pub kind_task: &'static str,
     pub kind_todo: &'static str,
@@ -1954,8 +1965,6 @@ pub struct Texts {
     pub broadcast: BroadcastTexts,
     pub machine_files: MachineFilesTexts,
     pub agent_panel: AgentPanelTexts,
-    // seam-stub(activity-window)：二级窗口车道用上后删除本 allow。
-    #[allow(dead_code)]
     pub agent_activity: AgentActivityTexts,
     pub menu: MenuTexts,
     pub machine_form: MachineFormTexts,

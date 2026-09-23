@@ -1611,12 +1611,9 @@ impl ClientShellState {
             })
         {
             if let Some(owner) = parse_owner_key(&owner_key) {
-                self.open_agent_activity(endpoint_id, owner);
+                self.open_agent_activity(endpoint_id, owner, outcome);
                 if !node_id.is_empty() {
-                    if let Some(ClientShellOverlay::AgentActivity(overlay)) = self.overlay.as_mut()
-                    {
-                        overlay.selected_node = Some(node_id);
-                    }
+                    self.select_agent_activity_node(node_id, outcome);
                 }
                 outcome.repaint = true;
             }
@@ -1629,7 +1626,11 @@ impl ClientShellState {
             .find(|(rect, _, _)| super::contains(*rect, point))
             .map(|(_, endpoint_id, external_id)| (endpoint_id.clone(), external_id.clone()))
         {
-            self.open_agent_activity(endpoint_id, AgentActivityOwner::External { external_id });
+            self.open_agent_activity(
+                endpoint_id,
+                AgentActivityOwner::External { external_id },
+                outcome,
+            );
             outcome.repaint = true;
             return true;
         }
@@ -1782,7 +1783,9 @@ impl ClientShellState {
             (Action::FocusAgent, AgentActivityOwner::Pane { pane_id }) => {
                 self.focus_agent_pane(endpoint_id, pane_id, outcome);
             }
-            (Action::ViewAgentActivity, owner) => self.open_agent_activity(endpoint_id, owner),
+            (Action::ViewAgentActivity, owner) => {
+                self.open_agent_activity(endpoint_id, owner, outcome);
+            }
             (Action::RenameAgent, AgentActivityOwner::Pane { pane_id }) => {
                 self.rename_agent_pane(endpoint_id, pane_id, outcome);
             }
