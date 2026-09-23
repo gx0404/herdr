@@ -313,7 +313,6 @@ mod tests {
     use std::io::Write;
     use std::process::{Command, Stdio};
     use std::sync::atomic::{AtomicU64, Ordering};
-    use std::time::Instant;
 
     use super::*;
 
@@ -641,6 +640,8 @@ mod tests {
     #[test]
     fn a_hung_sqlite3_is_killed_at_the_deadline() {
         use std::os::unix::fs::PermissionsExt;
+        // 只有这个 unix 用例计时；放模块级会在 Windows 测试目标上成为未使用导入。
+        use std::time::Instant;
 
         let home = TempHome::new("hung");
         let db = database_path(home.path());
