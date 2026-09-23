@@ -24,6 +24,7 @@ pub(super) fn field_spec<'a>(
         state,
         required,
         hint,
+        is_choice: false,
     }
 }
 

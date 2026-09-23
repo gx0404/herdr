@@ -10,7 +10,7 @@ use ratatui::{
 
 use super::{char_width, fill_row, put_str, put_str_ellipsis};
 use crate::app::state::Palette;
-use crate::ui::{display_width_u16, input_field_style};
+use crate::ui::{display_width_u16, input_field_focused_bg, input_field_style, panel_contrast_fg};
 
 /// 字段状态。`Invalid` 携带的错误文案占用提示行（替换 `hint`）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -33,6 +33,9 @@ pub(crate) struct FormFieldSpec<'a> {
     pub state: FieldState<'a>,
     pub required: bool,
     pub hint: Option<&'a str>,
+    /// 下拉选择字段（如「身份 agent」「仅用身份文件」）：`Focused` 时用
+    /// accent 反色强调，与文本字段的聚焦态区分开（M8，恢复合并前的行为）。
+    pub is_choice: bool,
 }
 
 /// 渲染结果：输入行矩形（点击聚焦用）、光标屏幕坐标（仅 `Focused`）、实际占用
@@ -118,13 +121,24 @@ pub(crate) fn render_form_field(
     if height >= 2 {
         let input = Rect::new(area.x, area.y + 1, width, 1);
         render.input = input;
-        let style = if matches!(spec.state, FieldState::Disabled) {
-            Style::default()
+        let style = match spec.state {
+            FieldState::Disabled => Style::default()
                 .fg(palette.overlay0)
                 .bg(palette.surface_dim)
-                .remove_modifier(Modifier::DIM)
-        } else {
-            input_field_style(palette)
+                .remove_modifier(Modifier::DIM),
+            // choice 字段（下拉选择）聚焦时用 accent 反色强调，与合并前的
+            // 专属高亮态一致，和文本字段的聚焦态区分开（M8）。
+            FieldState::Focused if spec.is_choice => Style::default()
+                .fg(panel_contrast_fg(palette))
+                .bg(palette.accent)
+                .add_modifier(Modifier::BOLD),
+            // 文本字段聚焦时底色比 Normal 更亮一档，肉眼可辨（M8：合并前后
+            // 两者一直同色，不是回归，但要修）。
+            FieldState::Focused => Style::default()
+                .fg(palette.text)
+                .bg(input_field_focused_bg(palette))
+                .remove_modifier(Modifier::DIM),
+            FieldState::Normal | FieldState::Invalid(_) => input_field_style(palette),
         };
         fill_row(buffer, input.x, input.y, width, " ", style);
         if spec.value.is_empty() {
@@ -354,6 +368,52 @@ mod tests {
         assert_eq!(buffer[(0, 1)].style().fg, Some(palette.overlay0));
         assert_eq!(buffer[(0, 1)].style().bg, Some(palette.surface_dim));
         assert_eq!(render.cursor, None);
+    }
+
+    /// M8：合并进 `render_form_field` 之前，choice 字段（下拉选择）聚焦时
+    /// 用 accent 反色强调；合并后与文本字段共用 `input_field_style`，丢了
+    /// 这个专属高亮态。`is_choice` 恢复它。
+    #[test]
+    fn focused_choice_field_keeps_the_accent_highlight() {
+        let (buffer, _, palette) = paint(
+            Rect::new(0, 0, 10, 2),
+            FormFieldSpec {
+                label: "身份 agent",
+                value: "‹ 默认 ›",
+                state: FieldState::Focused,
+                is_choice: true,
+                ..FormFieldSpec::default()
+            },
+        );
+        assert_eq!(
+            buffer[(0, 1)].style().bg,
+            Some(palette.accent),
+            "choice 聚焦态应该用 accent 反色，不是普通输入框底色"
+        );
+        assert!(
+            buffer[(0, 1)].style().add_modifier.contains(Modifier::BOLD),
+            "choice 聚焦态应该加粗"
+        );
+    }
+
+    /// M8：文本字段的 `Focused` 与 `Normal` 底色完全相同，肉眼看不出聚焦
+    /// 在哪个字段上；`Focused` 要比 `Normal` 更亮一档。
+    #[test]
+    fn focused_text_field_uses_a_brighter_background_than_normal() {
+        let spec = |state| FormFieldSpec {
+            label: "用户",
+            value: "root",
+            cursor_col: Some(4),
+            state,
+            ..FormFieldSpec::default()
+        };
+        let (normal_buffer, _, _) = paint(Rect::new(0, 0, 10, 2), spec(FieldState::Normal));
+        let (focused_buffer, _, _) = paint(Rect::new(0, 0, 10, 2), spec(FieldState::Focused));
+        assert_ne!(
+            normal_buffer[(0, 1)].style().bg,
+            focused_buffer[(0, 1)].style().bg,
+            "Focused 应该比 Normal 更亮，不能是同一个底色"
+        );
     }
 
     #[test]

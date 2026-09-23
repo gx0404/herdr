@@ -1245,6 +1245,8 @@ pub struct MachineFormTexts {
     pub err_duplicate_name: &'static str,
     /// 导入 Select 步骤的清单表头提示。
     pub import_select_hint: &'static str,
+    /// 预览里字段校验失败时追加在值后面的标记（配合标红，不只靠颜色区分，L15）。
+    pub preview_invalid_suffix: &'static str,
     /// 目标字段的占位文字。
     pub target_placeholder: &'static str,
     /// 页脚：快速输入聚焦时 Enter 的含义。

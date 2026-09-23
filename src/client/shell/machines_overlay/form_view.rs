@@ -408,6 +408,7 @@ fn render_field(
             value: &choice_value,
             state,
             hint,
+            is_choice: true,
             ..FormFieldSpec::default()
         }
     } else {
@@ -420,7 +421,9 @@ fn render_field(
                 label_placeholder = form.target.trim().to_owned();
                 label_placeholder.as_str()
             }
-            _ => "",
+            // 其余可选字段空着时画一个通用占位符，而不是留白（M8：肉眼
+            // 分不清是空字段还是没画出来）。
+            _ => crate::i18n::texts().machines.value_not_set,
         };
         let Some(editor) = form.editor(field) else {
             return (Rect::default(), None);
@@ -602,10 +605,18 @@ pub(super) fn ssh_command_preview(form: &ClientMachineForm) -> String {
     parts.join(" ")
 }
 
-/// 预览正文：等价 ssh 命令 + 各非空字段（与此前确认页同一批「标签 值」行）
-/// + 测试连接会做什么的说明（只在能测试的添加表单里）。
-fn preview_lines(form: &ClientMachineForm, base: Style, p: &Palette) -> Vec<Line<'static>> {
+/// 预览正文：等价 ssh 命令、各非空字段（与此前确认页同一批「标签 值」行），
+/// 以及测试连接会做什么的说明（只在能测试的添加表单里）。字段校验失败时
+/// （如端口报错），对应值标红并追加「（无效）」，不再原样显示非法值当作
+/// 什么事都没有（L15）。
+fn preview_lines(
+    form: &ClientMachineForm,
+    saved: &[SavedSshEndpoint],
+    base: Style,
+    p: &Palette,
+) -> Vec<Line<'static>> {
     let t = &crate::i18n::texts().machines;
+    let f = &crate::i18n::texts().machine_form;
     let mut lines = vec![
         Line::styled(ssh_command_preview(form), base.fg(p.accent)),
         Line::default(),
@@ -639,9 +650,20 @@ fn preview_lines(form: &ClientMachineForm, base: Style, p: &Palette) -> Vec<Line
         }
         let label = field.label();
         let pad = usize::from(label_width.saturating_sub(display_width(label)));
+        let invalid = form.visible_error(*field, saved).is_some();
+        let value = if invalid {
+            format!("{value}{}", f.preview_invalid_suffix)
+        } else {
+            value
+        };
+        let value_style = if invalid {
+            base.fg(p.red)
+        } else {
+            base.fg(p.text)
+        };
         lines.push(Line::from(vec![
             Span::styled(format!("{label}{}  ", " ".repeat(pad)), base.fg(p.overlay0)),
-            Span::styled(value, base.fg(p.text)),
+            Span::styled(value, value_style),
         ]));
     }
     if form.can_test() {
@@ -659,13 +681,98 @@ fn preview_lines(form: &ClientMachineForm, base: Style, p: &Palette) -> Vec<Line
 }
 
 fn render_lines(b: &mut Buffer, area: Rect, lines: Vec<Line<'static>>) {
-    use ratatui::widgets::{Paragraph, Widget, Wrap};
+    use ratatui::widgets::{Paragraph, Widget};
     if area.is_empty() {
         return;
     }
-    Paragraph::new(lines)
-        .wrap(Wrap { trim: false })
-        .render(area, b);
+    Paragraph::new(wrap_lines_for_display(lines, area.width)).render(area, b);
+}
+
+fn char_display_width(ch: char) -> usize {
+    let mut buf = [0u8; 4];
+    usize::from(display_width(ch.encode_utf8(&mut buf)))
+}
+
+/// 一行折出的若干视觉行拼回 `Line`，保留每段原来的样式（相邻同样式的字符
+/// 合并成一个 `Span`，避免每个字符单独一个 span）。
+fn build_wrapped_span_line(chars: &[(char, Style)]) -> Line<'static> {
+    let mut spans: Vec<Span<'static>> = Vec::new();
+    let mut current = String::new();
+    let mut current_style: Option<Style> = None;
+    for (ch, style) in chars {
+        if current_style != Some(*style) {
+            if !current.is_empty() {
+                spans.push(Span::styled(
+                    std::mem::take(&mut current),
+                    current_style.expect("current 非空时已设过 style"),
+                ));
+            }
+            current_style = Some(*style);
+        }
+        current.push(*ch);
+    }
+    if !current.is_empty() {
+        spans.push(Span::styled(current, current_style.expect("已推入过字符")));
+    }
+    Line::from(spans)
+}
+
+/// 按显示宽度折行，优先在空白或标点之后断；CJK 长句没有空格，标点是唯一
+/// 自然的断点，找不到断点（单个「词」本身就超宽）才按字符硬断。ratatui
+/// 自带的 `Wrap` 只按空白分词，纯 CJK 长句会在任意字符间断开，看起来生硬
+/// （L14）；这里保留原有的按段样式。
+fn wrap_lines_for_display(lines: Vec<Line<'static>>, width: u16) -> Vec<Line<'static>> {
+    const BREAK_AFTER: &[char] = &[
+        ' ', '，', '。', '；', '：', '、', '！', '？', ',', '.', ';', ':', '!', '?',
+    ];
+    let width = usize::from(width.max(1));
+    let mut out = Vec::with_capacity(lines.len());
+    for line in lines {
+        let chars: Vec<(char, Style)> = line
+            .spans
+            .iter()
+            .flat_map(|span| {
+                let style = span.style;
+                span.content.chars().map(move |ch| (ch, style))
+            })
+            .collect();
+        if chars.is_empty() {
+            out.push(Line::default());
+            continue;
+        }
+        let mut row_start = 0usize;
+        let mut col = 0usize;
+        let mut last_break: Option<usize> = None;
+        let mut index = 0usize;
+        while index < chars.len() {
+            let (ch, _) = chars[index];
+            let w = char_display_width(ch);
+            if col + w > width && index > row_start {
+                let split_at = last_break.filter(|&b| b > row_start).unwrap_or(index);
+                let mut end = split_at;
+                while end > row_start && chars[end - 1].0 == ' ' {
+                    end -= 1;
+                }
+                out.push(build_wrapped_span_line(&chars[row_start..end]));
+                let mut next_start = split_at;
+                while next_start < chars.len() && chars[next_start].0 == ' ' {
+                    next_start += 1;
+                }
+                row_start = next_start;
+                last_break = None;
+                col = 0;
+                index = row_start;
+                continue;
+            }
+            col += w;
+            if BREAK_AFTER.contains(&ch) {
+                last_break = Some(index + 1);
+            }
+            index += 1;
+        }
+        out.push(build_wrapped_span_line(&chars[row_start..]));
+    }
+    out
 }
 
 pub(super) fn render_machine_form(
@@ -854,7 +961,7 @@ pub(super) fn render_machine_form(
             lines.extend(test_lines(form, bootstrap, base, cx));
             lines.push(Line::default());
         }
-        lines.extend(preview_lines(form, base, p));
+        lines.extend(preview_lines(form, saved, base, p));
         render_lines(
             b,
             Rect::new(
@@ -904,4 +1011,86 @@ pub(super) fn render_machine_form(
         cursor,
         ..OverlayRender::default()
     })
+}
+
+#[cfg(test)]
+mod wrap_tests {
+    use super::*;
+
+    fn row_texts(lines: &[Line<'static>]) -> Vec<String> {
+        lines
+            .iter()
+            .map(|line| line.spans.iter().map(|s| s.content.as_ref()).collect())
+            .collect()
+    }
+
+    /// L14：默认 `Paragraph` wrap 按空白分词，纯 CJK 长句里没有空格，会把
+    /// 整句当成一个不可断的「词」，超宽时在任意字符间硬断（冒烟截屏「已
+    /// 可」/「用。」被从中间断开）。标点应该是天然断点。
+    #[test]
+    fn wraps_a_long_cjk_sentence_at_punctuation_not_mid_character() {
+        let t = &crate::i18n::texts().machines;
+        let line = Line::styled(t.confirm_auth_note.to_owned(), Style::default());
+        let wrapped = wrap_lines_for_display(vec![line], 20);
+        let rows = row_texts(&wrapped);
+        assert!(rows.len() > 1, "这句话在 20 列下必须折行：{rows:?}");
+        for row in &rows {
+            assert!(
+                display_width(row) <= 20,
+                "每行不能超过给定宽度：{row:?} in {rows:?}"
+            );
+        }
+        // 至少有一行在中文标点后收尾，证明断点是标点而不是任意字符。
+        assert!(
+            rows.iter().any(|row| ['；', '，', '、', '。', ' ']
+                .iter()
+                .any(|p| row.ends_with(*p))),
+            "应当在标点或空白后断行，而不是硬断在字符中间：{rows:?}"
+        );
+        // 折行不能丢字：去掉折行插入的空白后应当能拼回原文。
+        let rebuilt: String = rows.concat();
+        assert_eq!(
+            rebuilt
+                .chars()
+                .filter(|c| !c.is_whitespace())
+                .collect::<String>(),
+            t.confirm_auth_note
+                .chars()
+                .filter(|c| !c.is_whitespace())
+                .collect::<String>(),
+            "折行不能丢字：{rows:?}"
+        );
+    }
+
+    #[test]
+    fn wraps_the_mixed_cjk_ascii_install_note_without_exceeding_width() {
+        let t = &crate::i18n::texts().machines;
+        for width in [12, 20, 30, 51, 100] {
+            let line = Line::styled(t.confirm_install_note.to_owned(), Style::default());
+            let wrapped = wrap_lines_for_display(vec![line], width);
+            for row in row_texts(&wrapped) {
+                assert!(
+                    display_width(&row) <= width,
+                    "宽度 {width} 下这一行超宽：{row:?}"
+                );
+            }
+        }
+    }
+
+    /// 折行要保留原来每段的样式（红色的非法值标记不能被折行冲掉颜色）。
+    #[test]
+    fn wrapping_preserves_per_span_styles() {
+        let red = Style::default().fg(crate::app::state::Palette::catppuccin().red);
+        let line = Line::from(vec![
+            Span::styled("标签  ", Style::default()),
+            Span::styled("99999（无效）", red),
+        ]);
+        let wrapped = wrap_lines_for_display(vec![line], 6);
+        assert!(wrapped.len() > 1, "6 列下这一行必须折行");
+        let last = wrapped.last().expect("至少一行");
+        assert!(
+            last.spans.iter().any(|s| s.style == red),
+            "折行后红色样式仍要在：{last:?}"
+        );
+    }
 }

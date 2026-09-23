@@ -2268,6 +2268,48 @@ fn inline_validation_waits_for_blur_or_submit_then_blocks_save() {
     assert!(machine_form(&state).prompt.is_none());
 }
 
+/// L15：端口报错后，右侧实时预览此前原样显示非法值（字段清单里的「端口
+/// 99999」一行）没有任何标记，像是校验通过了。
+#[test]
+fn preview_flags_invalid_field_values_instead_of_showing_them_as_if_valid() {
+    let _dir = with_temp_state_home("form-preview-invalid");
+    let mut state = state_with_profiles(&[]);
+    state.open_machine_add_form();
+    let t = &crate::i18n::texts().machine_form;
+    focus_field(&mut state, MachineField::Target);
+    type_text(&mut state, "db.example");
+    focus_field(&mut state, MachineField::Port);
+    type_text(&mut state, "99999");
+
+    // 宽屏下预览栏可见，字段仍处于校验失败状态（动过、未失焦）。
+    let text = compact(&frame_text(&mut state, 130, 40));
+    assert!(
+        text.contains(&compact(t.err_port)),
+        "端口内联错误仍在：{text}"
+    );
+    let expected_value = format!("99999{}", t.preview_invalid_suffix);
+    assert!(
+        text.contains(&compact(&expected_value)),
+        "预览应该把非法端口标成「99999（无效）」：{text}"
+    );
+
+    // 预览栏里带端口号的那一行要标红，不能和其它正常字段同色。
+    let frame = state.compose(130, 40).expect("frame");
+    let width = usize::from(frame.width);
+    let red = crate::protocol::color_to_u32(state.config.palette.red);
+    let found_red_port = frame.cells.chunks(width).any(|cells| {
+        let row: String = cells.iter().map(|c| c.symbol.as_str()).collect();
+        match row.find("99999") {
+            Some(byte_offset) => {
+                let column = row[..byte_offset].chars().count();
+                cells.get(column).is_some_and(|cell| cell.fg == red)
+            }
+            None => false,
+        }
+    });
+    assert!(found_red_port, "预览里的非法端口值应该标红");
+}
+
 #[test]
 fn single_field_validators_cover_each_rule() {
     let taken = profile("Build", "build.example", "71");

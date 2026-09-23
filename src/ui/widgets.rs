@@ -193,6 +193,20 @@ pub(crate) fn input_field_bg(palette: &Palette) -> Color {
     Color::Reset
 }
 
+/// 聚焦态输入框底色：比 [`input_field_bg`] 亮一档，让文本字段的 `Focused`
+/// 与 `Normal` 在肉眼上可分辨（M8：合并前两者本就同色，不是回归但要修）。
+/// 与 `input_field_bg` 同一套回退结构面 token，只是从下一档开始找，找不到
+/// 更亮的就退回普通底色（不会比 `input_field_bg` 更难看）。
+pub(crate) fn input_field_focused_bg(palette: &Palette) -> Color {
+    let normal = input_field_bg(palette);
+    for candidate in [palette.surface1, palette.overlay0] {
+        if candidate != Color::Reset && candidate != normal {
+            return candidate;
+        }
+    }
+    normal
+}
+
 /// 唯一的文本输入框样式：浮层输入框、过滤框与表单行都从这里取样式，字段边界
 /// 与光标底色因此保持一致。连回退结构面都未定义时用下划线划出输入区——没有
 /// 颜色可用时，文字属性是最后的边界。
