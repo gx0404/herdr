@@ -1499,3 +1499,56 @@ fn which_key_spans_the_content_area_when_the_agents_panel_is_focused() {
         .expect("which-key 下边框");
     assert!(bottom < 31, "下边框不压页脚：{bottom}");
 }
+
+/// 页脚行里某个字符所在的单元格（找不到就失败），按字符定位样式断言。
+fn footer_cell(state: &ClientShellState, needle: &str) -> ratatui::buffer::Cell {
+    let buffer = state.compose_buffer.as_ref().expect("保留帧缓冲");
+    let y = buffer.area.bottom() - 1;
+    (0..buffer.area.width)
+        .map(|x| buffer[(x, y)].clone())
+        .find(|cell| cell.symbol() == needle)
+        .unwrap_or_else(|| panic!("页脚没有 {needle:?}"))
+}
+
+/// 冒烟 L1：锁定布局后拖动已被拒绝，状态栏不再提示拖动、面板标题也不再显示
+/// `⠿` 把手；调整布局模式里「调尺寸 / 移动」两条提示随之置灰，切换面板等
+/// 锁定下仍可用的提示照常。
+#[test]
+fn locked_layout_stops_advertising_drag_affordances() {
+    let compact = |text: &str| text.split_whitespace().collect::<String>();
+    let mut state = ready();
+    let rows = frame_rows(&state.compose(133, 32).expect("未锁定"));
+    assert!(rows[1].contains('⠿'), "未锁定：面板标题带拖动把手");
+    assert!(compact(&rows[31]).contains("拖动"), "未锁定：页脚提示拖动");
+
+    state.workbench.dock.locked = true;
+    let rows = frame_rows(&state.compose(133, 32).expect("已锁定"));
+    assert!(
+        rows.iter().all(|row| !row.contains('⠿')),
+        "锁定后不再显示把手：{rows:#?}"
+    );
+    assert!(
+        compact(&rows[1]).contains("工作区"),
+        "标题文字仍在：{:?}",
+        rows[1]
+    );
+    let footer = compact(&rows[31]);
+    assert!(!footer.contains("拖动"), "锁定后页脚不再提示拖动：{footer}");
+    assert!(footer.contains("已锁定"), "页脚说明布局已锁定：{footer}");
+
+    state.workbench.arranging = true;
+    state.compose(133, 32).expect("锁定下的调整布局");
+    let palette = state.config.palette.clone();
+    for disabled in ["尺", "移"] {
+        assert_eq!(
+            footer_cell(&state, disabled).fg,
+            palette.overlay0,
+            "锁定时「{disabled}」所在提示置灰"
+        );
+    }
+    assert_eq!(
+        footer_cell(&state, "切").fg,
+        palette.subtext0,
+        "切换面板在锁定时照常可用"
+    );
+}

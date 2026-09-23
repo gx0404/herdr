@@ -1517,8 +1517,8 @@
       "anchor": "Workspace > Mouse UI",
       "doc": "docs/next/website/src/content/docs/concepts.mdx",
       "id": "docs-next-website-src-content-docs-concepts-mdx-workspace-mouse-ui",
-      "source_sha256": "4d5a07e920bc7f9e47c400ec80ed60c3c8796a6bb58854348b7b9d838fc1f0ea",
-      "text": "## Mouse UI\n\nHerdr is mouse-native. You can click panes, tabs, workspaces, and agents. You can drag split borders, select text, and use right-click menus. Everything below is also reachable by mouse; keyboard bindings are an optional layer.\n\nIf you prefer keyboard-only control, or you want Herdr to stop capturing mouse input, disable mouse capture:\n\n```toml\n[ui]\nmouse_capture = false\n```"
+      "source_sha256": "cc10b11dac7c368b72d8dafbfb52b6087556616463adc7393607fbff803fe8f5",
+      "text": "## Mouse UI\n\nHerdr is mouse-native. You can click panes, tabs, workspaces, and agents. You can drag split borders, select text, and use right-click menus. Everything below is also reachable by mouse; keyboard bindings are an optional layer.\n\nIf you prefer keyboard-only control, or you want Herdr to stop capturing mouse input, disable mouse capture:\n\n```toml\n[ui]\nmouse_capture = false\n```\n\nIn the docked layout, drag a panel's `⠿` title handle to rearrange panels. While **Lock layout** is on, panel titles drop the `⠿` handle, the footer says the layout is locked instead of suggesting drags, and the resize and move hints of **Arrange layout** are dimmed."
     },
     {
       "anchor": "Workspace > Pane",

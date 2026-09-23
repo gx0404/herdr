@@ -230,11 +230,18 @@ impl ClientShellState {
             } else {
                 palette.overlay0
             };
+            // 标题前的 `⠿` 是拖动停靠的把手：锁定布局后拖动被拒绝，就不再画它
+            // （冒烟 L1），标题文字左移占位。
+            let handle = if self.workbench.dock.locked {
+                ""
+            } else {
+                "⠿ "
+            };
             let label = match panel {
-                PanelId::Workspaces => tr("⠿ WORKSPACES", "⠿ 工作区").to_string(),
-                PanelId::Agents => "⠿ Agents".into(),
-                PanelId::Monitor => tr("⠿ MONITOR", "⠿ 监控").to_string(),
-                PanelId::Accounts => tr("⠿ ACCOUNTS", "⠿ 账号用量").to_string(),
+                PanelId::Workspaces => format!("{handle}{}", tr("WORKSPACES", "工作区")),
+                PanelId::Agents => format!("{handle}Agents"),
+                PanelId::Monitor => format!("{handle}{}", tr("MONITOR", "监控")),
+                PanelId::Accounts => format!("{handle}{}", tr("ACCOUNTS", "账号用量")),
                 PanelId::Terminal(id) => {
                     // The strip holds one workspace's tabs; name the panel
                     // after that workspace so each terminal page is
@@ -262,12 +269,12 @@ impl ClientShellState {
                                 .count()
                                 > 1;
                             if duplicated {
-                                format!("⠿ {} #{}", ws.label, ws.number)
+                                format!("{handle}{} #{}", ws.label, ws.number)
                             } else {
-                                format!("⠿ {}", ws.label)
+                                format!("{handle}{}", ws.label)
                             }
                         }
-                        None => format!("⠿ {} {id}", tr("TERMINALS", "终端组")),
+                        None => format!("{handle}{} {id}", tr("TERMINALS", "终端组")),
                     }
                 }
             };
@@ -400,6 +407,9 @@ impl ClientShellState {
                     .fg(palette.accent)
                     .add_modifier(Modifier::BOLD),
             );
+            // 锁定布局时调尺寸 / 移动都会被拒绝，这两条提示置灰（冒烟 L1）；
+            // 切换面板、最大化不改布局，照常可用。
+            let unlocked = !self.workbench.dock.locked;
             let hints = [
                 FooterHint {
                     key: "Tab",
@@ -410,13 +420,13 @@ impl ClientShellState {
                 FooterHint {
                     key: "←↑↓→",
                     label: menu_texts.arrange_resize,
-                    enabled: true,
+                    enabled: unlocked,
                     primary: false,
                 },
                 FooterHint {
                     key: "Shift+←↑↓→",
                     label: menu_texts.arrange_move,
-                    enabled: true,
+                    enabled: unlocked,
                     primary: false,
                 },
                 FooterHint {
@@ -450,6 +460,13 @@ impl ClientShellState {
                 tr(
                     "Compact view · use Arrange layout / Tab to switch panels",
                     "紧凑视图 · 在「调整布局」模式用 Tab 切换面板",
+                )
+            } else if self.workbench.dock.locked {
+                // 锁定后拖动停靠 / 调尺寸都被拒绝：不再提示拖动，改为说明怎么解锁
+                // （冒烟 L1）。
+                tr(
+                    "Layout locked · turn off Lock layout in the top bar to rearrange",
+                    "布局已锁定 · 在顶栏取消「锁定布局」后可重新排布",
                 )
             } else {
                 tr(
