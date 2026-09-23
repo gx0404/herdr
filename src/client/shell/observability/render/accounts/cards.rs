@@ -45,14 +45,15 @@ pub(super) fn liveness(status: ObservationStatus) -> Liveness {
     }
 }
 
-/// 数值项的语气。
+/// 数值项的语气。标签与值按 token 整段取舍（`paint::stat_cell`）。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Tone {
-    /// 数字：永不截断，列宽不够先丢标签。
+    /// 数字（含服务端格式化好的时长 `4m19s`）：永不截断，放不下「标签 值」先整段
+    /// 丢标签，连值都放不下就整项不画。
     Number,
     /// 未知 / 暂无数据：灰字，同样不截断。
     Muted,
-    /// 服务端文本（模型名等）：放不下时带省略号截断，标签保留。
+    /// 服务端自由文本（模型名等）：标签之后仍有余量时值带省略号截断。
     Text,
 }
 
@@ -317,10 +318,16 @@ fn slot_stat<'a>(slot: Slot, metric: &'a UsageMetric, cx: Cx) -> Stat<'a> {
             .used
             .map_or_else(unknown, |used| known(format!("{:.0}", used.max(0.0)))),
         SlotKind::Text => match metric.text_value.as_deref().filter(|text| !text.is_empty()) {
+            // 时长 / 统计窗口是服务端格式化好的数字（`4m19s`），与数字同样整段显示、
+            // 永不截成半截；只有模型名是可以带省略号截断的自由文本（真机 L3）。
             Some(text) => Stat {
                 label: label.clone(),
                 value: text.to_owned(),
-                tone: Tone::Text,
+                tone: if slot == Slot::Model {
+                    Tone::Text
+                } else {
+                    Tone::Number
+                },
             },
             None => metric
                 .used

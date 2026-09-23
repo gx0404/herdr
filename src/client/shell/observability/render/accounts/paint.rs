@@ -124,8 +124,37 @@ fn spans(buffer: &mut Buffer, rect: Rect, parts: &[(Cow<'_, str>, Style)], palet
     }
 }
 
-/// 一个数值项：数字（`Number` / `Muted`）永不截断，列宽不够先截再丢标签；
-/// 文本（`Text`）保留标签、值带省略号截断。值靠右。
+/// 服务端文本（模型名）截断时至少留给值的列数：再少省略号前只剩一两个字，不如
+/// 先整段让出标签。
+const TEXT_MIN_WIDTH: u16 = 8;
+
+/// 值最少要占的列：数字（`Number` / `Muted`）是整段；服务端文本可以带省略号截到
+/// `TEXT_MIN_WIDTH`。
+fn stat_value_min(stat: &Stat<'_>) -> u16 {
+    let value = crate::ui::display_width_u16(&stat.value);
+    match stat.tone {
+        Tone::Text => value.min(TEXT_MIN_WIDTH),
+        Tone::Number | Tone::Muted => value,
+    }
+}
+
+/// 「标签 值」整项最少要占的列：标签整段 + 一格空白 + 值的最小宽度。
+fn stat_min_width(stat: &Stat<'_>) -> u16 {
+    crate::ui::display_width_u16(&stat.label)
+        .saturating_add(1)
+        .saturating_add(stat_value_min(stat))
+}
+
+/// 「标签 值」整项的自然宽度。
+fn stat_full_width(stat: &Stat<'_>) -> u16 {
+    crate::ui::display_width_u16(&stat.label)
+        .saturating_add(1)
+        .saturating_add(crate::ui::display_width_u16(&stat.value))
+}
+
+/// 一个数值项落在 `rect` 里，标签靠左、值靠右，按 token 整段取舍（真机 L3）：放得下
+/// 「标签 值」才画标签，否则整段丢掉标签只画值；数字连自己都放不下就整项不画，
+/// 不留半截。服务端文本（`Text`）在标签之后还有 `TEXT_MIN_WIDTH` 列时带省略号截断。
 fn stat_cell(buffer: &mut Buffer, rect: Rect, stat: &Stat<'_>, palette: &Palette) {
     if rect.is_empty() {
         return;
@@ -140,30 +169,19 @@ fn stat_cell(buffer: &mut Buffer, rect: Rect, stat: &Stat<'_>, palette: &Palette
     };
     let label_width = crate::ui::display_width_u16(&stat.label);
     let value_width = crate::ui::display_width_u16(&stat.value);
-    let (label_w, value_w) = match stat.tone {
-        Tone::Text => {
-            let label_w = label_width.min(rect.width.saturating_sub(4));
-            let value_w = value_width.min(rect.width.saturating_sub(label_w + 1));
-            (label_w, value_w)
-        }
-        Tone::Number | Tone::Muted => {
-            let value_w = value_width.min(rect.width);
-            let spare = rect.width - value_w;
-            // 标签至少留 2 列才画（1 列只剩省略号，没有信息量）。
-            let label_w = if spare >= 3 {
-                label_width.min(spare - 1)
-            } else {
-                0
-            };
-            (label_w, value_w)
-        }
+    let (label_w, value_w) = if stat_min_width(stat) <= rect.width {
+        (label_width, value_width.min(rect.width - label_width - 1))
+    } else if stat_value_min(stat) <= rect.width {
+        (0, value_width.min(rect.width))
+    } else {
+        return;
     };
     if label_w > 0 {
         put(buffer, rect.x, rect.y, label_w, &stat.label, label_style);
     }
     put(
         buffer,
-        rect.right().saturating_sub(value_w),
+        rect.right() - value_w,
         rect.y,
         value_w,
         &stat.value,
@@ -175,14 +193,19 @@ fn stat_cell(buffer: &mut Buffer, rect: Rect, stat: &Stat<'_>, palette: &Palette
 const STAT_COLUMNS: u16 = 3;
 /// 数值列最宽多少：宽卡片上标签与数字不至于隔得太远，网格靠左排。
 const STAT_COLUMN_MAX: u16 = 28;
+/// 紧凑排布里项与项之间的空白列数。
+const STAT_FLOW_GAP: u16 = 2;
 
-/// 一行 1–3 个数值项，落在固定的三列网格上（列间 ` │ `，窄时退成一格空白）。
-/// 行末那一项可以向右延伸到放得下「标签 值」（例如模型名），再长的文本才截断。
+/// 一行 1–3 个数值项。每项都放得下「标签 值」时落在固定的三列网格上（列间 ` │ `，
+/// 窄时退成一格空白），行末一项可以向右延伸（例如模型名）；网格放不下任何一项时
+/// 改为紧凑排布：按顺序整项摆放、项间两格，放不下的整项不画；一项都放不下时只画
+/// 第一项的值。标签与数字从不被截成半截（真机 L3：窄面板曾截成「时… 4m…」）。
 fn stats_row(buffer: &mut Buffer, rect: Rect, stats: &[Stat<'_>], paint: Paint<'_>) {
-    let count = stats.len().min(usize::from(STAT_COLUMNS)) as u16;
-    if rect.is_empty() || count == 0 {
+    let stats = &stats[..stats.len().min(usize::from(STAT_COLUMNS))];
+    if rect.is_empty() || stats.is_empty() {
         return;
     }
+    let count = stats.len() as u16;
     let gap = if rect.width >= STAT_COLUMNS * 14 {
         3
     } else {
@@ -190,30 +213,60 @@ fn stats_row(buffer: &mut Buffer, rect: Rect, stats: &[Stat<'_>], paint: Paint<'
     };
     let column =
         (rect.width.saturating_sub(gap * (STAT_COLUMNS - 1)) / STAT_COLUMNS).min(STAT_COLUMN_MAX);
-    if column == 0 {
-        return;
-    }
-    for (index, stat) in stats.iter().take(usize::from(count)).enumerate() {
-        let index = index as u16;
+    let grid_cell = |index: u16, stat: &Stat<'_>| {
         let x = rect.x + index * (column + gap);
-        if x >= rect.right() {
-            break;
+        if column == 0 || x >= rect.right() {
+            return None;
         }
         let width = if index + 1 < count {
             column
         } else {
-            let needed = crate::ui::display_width_u16(&stat.label)
-                .saturating_add(1)
-                .saturating_add(crate::ui::display_width_u16(&stat.value));
-            column.max(needed).min(rect.right() - x)
+            column.max(stat_full_width(stat)).min(rect.right() - x)
         };
-        if index > 0 && gap == 3 {
-            if let Some(cell) = buffer.cell_mut((x - 2, rect.y)) {
-                cell.set_symbol(paint.glyphs.vertical)
-                    .set_style(Style::default().fg(paint.palette.surface_dim));
+        Some(Rect::new(x, rect.y, width, 1))
+    };
+    let grid = stats.iter().enumerate().all(|(index, stat)| {
+        grid_cell(index as u16, stat).is_some_and(|cell| stat_min_width(stat) <= cell.width)
+    });
+    if grid {
+        for (index, stat) in stats.iter().enumerate() {
+            let Some(cell) = grid_cell(index as u16, stat) else {
+                continue;
+            };
+            if index > 0 && gap == 3 {
+                if let Some(separator) = buffer.cell_mut((cell.x - 2, rect.y)) {
+                    separator
+                        .set_symbol(paint.glyphs.vertical)
+                        .set_style(Style::default().fg(paint.palette.surface_dim));
+                }
             }
+            stat_cell(buffer, cell, stat, paint.palette);
         }
+        return;
+    }
+    let mut x = rect.x;
+    let mut placed = false;
+    for stat in stats {
+        let remaining = rect.right().saturating_sub(x);
+        if stat_min_width(stat) > remaining {
+            continue;
+        }
+        let width = stat_full_width(stat).min(remaining);
         stat_cell(buffer, Rect::new(x, rect.y, width, 1), stat, paint.palette);
+        placed = true;
+        x = x.saturating_add(width).saturating_add(STAT_FLOW_GAP);
+        if x >= rect.right() {
+            break;
+        }
+    }
+    if let Some(first) = stats.first().filter(|_| !placed) {
+        let width = crate::ui::display_width_u16(&first.value).min(rect.width);
+        stat_cell(
+            buffer,
+            Rect::new(rect.x, rect.y, width, 1),
+            first,
+            paint.palette,
+        );
     }
 }
 
@@ -986,7 +1039,97 @@ mod tests {
         );
     }
 
-    /// 数值项：数字永不截断，列宽不够先截再丢标签。
+    /// 带本会话费用 / 时长 / API 时长的 claude 账号（与 `parse::claude_session` 同形：
+    /// 时长是服务端格式化好的 `text_value`）。
+    fn session_account() -> AccountUsageSnapshot {
+        let session = |id: &str, unit: &str| UsageMetric {
+            id: id.into(),
+            label: id.into(),
+            unit: unit.into(),
+            scope: "session".into(),
+            ..Default::default()
+        };
+        AccountUsageSnapshot {
+            account_id: "claude:default".into(),
+            account_label: "Claude Code".into(),
+            agent: "claude".into(),
+            provider: "claude".into(),
+            status: ObservationStatus::Ready,
+            observed_at_ms: 1_000,
+            metrics: vec![
+                UsageMetric {
+                    amount_decimal: Some("0.1082".into()),
+                    ..session("cost/total_cost_usd", "USD")
+                },
+                UsageMetric {
+                    used: Some(259_000.0),
+                    text_value: Some("4m19s".into()),
+                    ..session("cost/total_duration_ms", "ms")
+                },
+                UsageMetric {
+                    used: Some(14_000.0),
+                    text_value: Some("14s".into()),
+                    ..session("cost/total_api_duration_ms", "ms")
+                },
+            ],
+            ..Default::default()
+        }
+    }
+
+    /// 真机 L3：窄卡片（claude-24 的内宽 24）一行放不下三个「标签 数值」时按 token
+    /// 整段取舍——标签与数字要么完整出现、要么整项不画，不再截成「时… 4m… API…」；
+    /// 宽卡片仍是三列网格。
+    #[test]
+    fn narrow_stats_rows_keep_or_drop_whole_tokens() {
+        let _guard = crate::i18n::lang_guard(crate::i18n::Lang::ZhCn);
+        let mut state = State::new(&config());
+        state.now_ms = 14_000;
+        state.selected_provider = Some("claude".into());
+        state.accounts = vec![session_account()];
+        // 卡片：上边框、状态行，第 3 行是数值行。
+        let stats_row = |width: u16| {
+            let (buffer, _, _) = draw_cards(&state, Rect::new(0, 0, width, 6));
+            row_text(&buffer, 2).replace(' ', "")
+        };
+        // 卡宽 26（内宽 24）：费用与时长整项放得下，API 时长整项放不下就不画。
+        assert_eq!(stats_row(26), "│费用$0.1082时长4m19s│");
+        // 内宽 18：只放得下第一项；内宽 12 恰好放下「费用 $0.1082」。
+        assert_eq!(stats_row(20), "│费用$0.1082│");
+        assert_eq!(stats_row(14), "│费用$0.1082│");
+        // 内宽 10：费用整项放不下就整项让位，放得下的时长整项照画。
+        assert_eq!(stats_row(12), "│时长4m19s│");
+        // 内宽 7：哪一项的「标签 值」都放不下，只画第一项的值。
+        assert_eq!(stats_row(9), "│$0.1082│");
+        for width in [26_u16, 24, 22, 20, 18, 16, 14, 12, 10, 9] {
+            let row = stats_row(width);
+            assert!(!row.contains('…'), "宽 {width}: 不截成半截：{row}");
+            if row.contains("4m") {
+                assert!(row.contains("4m19s"), "宽 {width}: 时长整段：{row}");
+            }
+            if row.contains("API") {
+                assert!(
+                    row.contains("API时长14s"),
+                    "宽 {width}: API 时长整项：{row}"
+                );
+            }
+        }
+        // 宽卡片：三列网格，列间竖线，时长与数字同样加粗。
+        let (buffer, _, _) = draw_cards(&state, Rect::new(0, 0, 100, 6));
+        let y = (0..buffer.area.height)
+            .find(|y| row_has(&buffer, *y, "API时长"))
+            .expect("宽卡片的数值行");
+        let row = row_text(&buffer, y).replace(' ', "");
+        assert!(row.contains("费用$0.1082│时长4m19s│API时长14s"), "{row}");
+        let x = (0..buffer.area.width)
+            .find(|x| buffer[(*x, y)].symbol() == "4")
+            .expect("时长数字");
+        assert!(
+            buffer[(x, y)].modifier.contains(Modifier::BOLD),
+            "时长与数字同一语气"
+        );
+    }
+
+    /// 数值项：数字永不截断，列宽不够先整段丢标签，连数值都放不下就不画。
     #[test]
     fn stat_cells_keep_numbers_and_drop_labels_first() {
         let palette = config().palette;
@@ -997,9 +1140,13 @@ mod tests {
         };
         for (width, expected) in [
             (20, "Sessions       12345"),
-            (9, "Se… 12345"),
-            (6, " 12345"),
+            (14, "Sessions 12345"),
+            // 放不下「标签 数值」时标签整段丢掉，不截成「Se…」（真机 L3）。
+            (13, "        12345"),
+            (9, "    12345"),
             (5, "12345"),
+            // 连数值都放不下：不画半截数字。
+            (4, ""),
         ] {
             let area = Rect::new(0, 0, width, 1);
             let mut buffer = Buffer::empty(area);
