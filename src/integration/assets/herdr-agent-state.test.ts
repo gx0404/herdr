@@ -124,6 +124,44 @@ async function startRecordingServer(name: string): Promise<unknown[]> {
   return requests;
 }
 
+// Like `startRecordingServer`, but the first `dropActivity` activity requests
+// are closed without an answer (Herdr unreachable mid-send). Every attempt is
+// recorded, answered or not.
+async function startFlakyActivityServer(name: string, dropActivity: number): Promise<unknown[]> {
+  const recordingSocketPath = join(tmpdir(), `herdr-${name}-${process.pid}.sock`);
+  socketPath = recordingSocketPath;
+  await rm(recordingSocketPath, { force: true });
+
+  const requests: unknown[] = [];
+  let dropped = 0;
+  const recordingServer = createServer((socket) => {
+    let input = "";
+    socket.setEncoding("utf8");
+    socket.on("data", (chunk) => {
+      input += chunk;
+      const newline = input.indexOf("\n");
+      if (newline === -1) {
+        return;
+      }
+      const request = JSON.parse(input.slice(0, newline));
+      requests.push(request);
+      if (request.method === "pane.report_agent_activity" && dropped < dropActivity) {
+        dropped += 1;
+        socket.end();
+        return;
+      }
+      socket.end("{}\n");
+    });
+  });
+  server = recordingServer;
+  await new Promise<void>((resolve, reject) => {
+    recordingServer.once("error", reject);
+    recordingServer.listen(recordingSocketPath, resolve);
+  });
+  configureIntegrationEnvironment(recordingSocketPath);
+  return requests;
+}
+
 for (const socketPlugin of socketPlugins) {
   test(`${socketPlugin.name} maps the Windows socket marker path to a named pipe endpoint`, async () => {
     const markerPath = `herdr-${socketPlugin.name.toLowerCase()}-${process.pid}.sock`;
@@ -1086,6 +1124,66 @@ test("Pi drops a pending activity snapshot when the session shuts down", async (
   await Bun.sleep(25);
   expect(activityRequests(requests)).toHaveLength(1);
 });
+
+async function startPiActivitySession(name: string, dropActivity: number) {
+  const requests = await startFlakyActivityServer(name, dropActivity);
+  const { handlers, pi } = createExtensionHarness();
+  const { default: install } = await importFresh("./pi/herdr-agent-state.ts");
+  install(pi);
+  const context = piContext(() => false);
+  await handlers.get("session_start")?.({ reason: "startup" }, context);
+  const call = { toolCallId: "r1", toolName: "subagent", args: { agent: "scout", task: "Scan" } };
+  handlers.get("tool_execution_start")?.(call, context);
+  return { requests, handlers, context, call };
+}
+
+test("Pi resends an undelivered activity snapshot once", async () => {
+  // Both attempts of the first snapshot go unanswered.
+  const { requests } = await startPiActivitySession("pi-activity-retry", 2);
+  await waitFor(() => activityRequests(requests).length === 2);
+  await waitFor(() => activityRequests(requests).length === 3, 3_500);
+  const [first, second, retry] = activityRequests(requests);
+  expect(second.hint).toBe(first.hint);
+  expect(second.seq).toBe(first.seq);
+  // The retry is the same snapshot under a newer `seq`.
+  expect(retry.hint).toBe(first.hint);
+  expect(retry.seq as number).toBeGreaterThan(first.seq as number);
+  // Delivered: nothing more is sent.
+  await Bun.sleep(2_300);
+  expect(activityRequests(requests)).toHaveLength(3);
+}, 10_000);
+
+test("Pi retries an undelivered activity snapshot at most once", async () => {
+  // The first snapshot and its retry both go unanswered.
+  const { requests, handlers, context, call } = await startPiActivitySession("pi-activity-give-up", 4);
+  await waitFor(() => activityRequests(requests).length === 4, 3_500);
+  await Bun.sleep(2_300);
+  expect(activityRequests(requests)).toHaveLength(4);
+  expect(new Set(activityRequests(requests).map((params) => params.hint)).size).toBe(1);
+  // The next change is still sent.
+  handlers.get("tool_execution_end")?.({ ...call, result: {}, isError: false }, context);
+  await waitFor(() => activityRequests(requests).length === 5);
+  expect(activityNodes(activityRequests(requests)[4])[0]).toMatchObject({ id: "r1", status: "done" });
+}, 10_000);
+
+test("Pi skips the activity retry once a newer snapshot supersedes it", async () => {
+  // A newer snapshot queued while the failing one is in flight supersedes it.
+  const newer = await startPiActivitySession("pi-activity-superseded", 2);
+  newer.handlers.get("tool_execution_end")?.({ ...newer.call, result: {}, isError: false }, newer.context);
+  await waitFor(() => activityRequests(newer.requests).length === 3);
+  await Bun.sleep(2_300);
+  const sent = activityRequests(newer.requests);
+  expect(sent).toHaveLength(3);
+  expect(activityNodes(sent[2])[0]).toMatchObject({ status: "done" });
+}, 10_000);
+
+test("Pi drops a pending activity retry when the session shuts down", async () => {
+  const { requests, handlers, context } = await startPiActivitySession("pi-activity-retry-shutdown", 2);
+  await waitFor(() => activityRequests(requests).length === 2);
+  handlers.get("session_shutdown")?.({}, context);
+  await Bun.sleep(2_300);
+  expect(activityRequests(requests)).toHaveLength(2);
+}, 10_000);
 
 test("Pi never reports activity from headless modes", async () => {
   const requests = await startRecordingServer("pi-activity-rpc");

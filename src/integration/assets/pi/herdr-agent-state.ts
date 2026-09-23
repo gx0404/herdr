@@ -54,11 +54,12 @@ function sendRequestAttempt(request: unknown, timeoutMs: number): Promise<boolea
   });
 }
 
-async function sendRequest(request: unknown): Promise<void> {
+// Resolves to whether Herdr answered either attempt.
+async function sendRequest(request: unknown): Promise<boolean> {
   if (await sendRequestAttempt(request, 500)) {
-    return;
+    return true;
   }
-  await sendRequestAttempt(request, 1500);
+  return sendRequestAttempt(request, 1500);
 }
 
 type AgentState = "working" | "blocked" | "idle";
@@ -339,8 +340,9 @@ function pushUsage(ctx: any, force: boolean): void {
 // is dropped past a fixed tail, so Herdr can page it with byte cursors.
 //
 // The whole bounded tree is sent as a snapshot in the `hint` of
-// `pane.report_agent_activity`; each snapshot replaces the previous one (the
-// higher `seq` wins). Format, version 1 (reader:
+// `pane.report_agent_activity`; each snapshot replaces the previous one (at
+// most one is in flight, so the latest sent is the latest received; `seq`
+// still grows with every send). Format, version 1 (reader:
 // `src/server/agent_activity/pi.rs`; later versions stay additive):
 //
 //   { "type": "herdr.activity.snapshot", "version": 1,
@@ -364,6 +366,9 @@ const ACTIVITY_OUTPUT_TAIL_CHARS = 2_000;
 const ACTIVITY_LABEL_CHARS = 120;
 const ACTIVITY_SUMMARY_CHARS = 160;
 const ACTIVITY_HINT_MAX_CHARS = 64 * 1024;
+// A snapshot Herdr did not answer (both attempts failed, e.g. the server was
+// restarting) is sent once more after this pause unless a newer one replaced it.
+const ACTIVITY_RETRY_DELAY_MS = 2_000;
 // Pi 0.87 built-in tool names (`allToolNames`). An extension that overrides
 // one of them (a sandboxed `bash`) is still the same everyday tool, so these
 // never become activity nodes.
@@ -883,23 +888,54 @@ function activitySession(): ActivitySession {
 type QueuedActivity = {
   hint: string;
   seq: number;
+  // This send is already the one retry of an undelivered snapshot.
+  retry: boolean;
 };
 
 let activityInFlight = false;
 let queuedActivity: QueuedActivity | undefined;
 let lastActivityHint: string | undefined;
+let activityRetryTimer: ReturnType<typeof setTimeout> | undefined;
 
 // Latest snapshot wins: at most one request in flight, identical snapshots are
 // not sent twice.
-function queueActivity(hint: string): void {
+function queueActivity(hint: string, retry = false): void {
   if (hint === lastActivityHint) {
     return;
   }
+  cancelActivityRetry();
   lastActivityHint = hint;
-  queuedActivity = { hint, seq: nextReportSeq() };
+  queuedActivity = { hint, seq: nextReportSeq(), retry };
   if (!activityInFlight) {
     void drainActivityQueue();
   }
+}
+
+function cancelActivityRetry(): void {
+  if (activityRetryTimer) {
+    clearTimeout(activityRetryTimer);
+    activityRetryTimer = undefined;
+  }
+}
+
+// The last snapshot never reached Herdr. Without this its tree would stay stale
+// (a finished tool still "running") until the next change, and an identical
+// later snapshot would be deduplicated away. A newer queued snapshot already
+// supersedes it; otherwise it becomes sendable again and is retried once, with
+// a fresh `seq`. Nothing is written to the console: it is Pi's TUI.
+function activityUndelivered(failed: QueuedActivity): void {
+  if (queuedActivity || lastActivityHint !== failed.hint) {
+    return;
+  }
+  lastActivityHint = undefined;
+  if (failed.retry) {
+    return;
+  }
+  activityRetryTimer = setTimeout(() => {
+    activityRetryTimer = undefined;
+    queueActivity(failed.hint, true);
+  }, ACTIVITY_RETRY_DELAY_MS);
+  activityRetryTimer.unref?.();
 }
 
 async function drainActivityQueue(): Promise<void> {
@@ -912,7 +948,7 @@ async function drainActivityQueue(): Promise<void> {
     while (queuedActivity) {
       const next = queuedActivity;
       queuedActivity = undefined;
-      await sendRequest({
+      const delivered = await sendRequest({
         id: `${source}:activity:${Date.now()}:${Math.random().toString(36).slice(2)}`,
         method: "pane.report_agent_activity",
         params: {
@@ -923,6 +959,9 @@ async function drainActivityQueue(): Promise<void> {
           seq: next.seq,
         },
       });
+      if (!delivered) {
+        activityUndelivered(next);
+      }
     }
   } finally {
     activityInFlight = false;
@@ -1128,6 +1167,7 @@ export default function (pi) {
   // snapshot must not be sent under the next session's identity.
   pi.on("session_shutdown", () => {
     cancelActivityTimer();
+    cancelActivityRetry();
     rootSession = false;
   });
 }
