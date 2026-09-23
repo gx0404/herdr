@@ -476,16 +476,18 @@ pub struct PaneReportAgentSessionParams {
 }
 
 /// 钩子上报「该 pane 的 agent 活动可能变了」的提示：server 据此刷新活动树（收到
-/// 后立即刷，同一 pane 至少隔 1 s）。树不出现在请求或响应里；来源适配器读不到本地
-/// 状态的 agent（pi）可以把结构化快照整份放进 `hint`。
+/// 后立即刷，同一 pane 至少隔 1 s）。响应里不带树。多数 agent 的树由 server 的来源
+/// 适配器从该 agent 自己的本地状态读取，请求只作信号；读不到本地状态的 agent（pi）
+/// 由 herdr 扩展把整棵树写成结构化快照放进 `hint`。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct PaneReportAgentActivityParams {
     pub pane_id: String,
     pub source: String,
     pub agent: String,
     /// 触发提示的钩子事件名等自由文本，或该 agent 的来源适配器能理解的结构化快照
-    /// （pi 扩展上报 `herdr.activity.snapshot` v1 JSON）。server 只缓存每个 pane 最近
-    /// 一份（上限 1 MiB），下一次刷新时交给来源适配器；不带 `hint` 的上报只作信号。
+    /// （pi 扩展把整棵活动树写成 `herdr.activity.snapshot` v1 JSON 放在这里）。server
+    /// 只缓存每个 pane 最近到达的一份（上限 1 MiB，超限的不缓存、保留上一份），下一次
+    /// 刷新时交给来源适配器；不带 `hint` 的上报只作信号。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hint: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

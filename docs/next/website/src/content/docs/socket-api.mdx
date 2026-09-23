@@ -837,8 +837,9 @@ a structured snapshot that the agent's source adapter understands: Herdr's Pi
 extension reports the whole tree as a `herdr.activity.snapshot` JSON document
 this way, because Pi keeps no activity on disk. The server keeps only the latest
 hint per pane and hands it to the source adapter on the next refresh. `node_id`
-and `seq` are accepted for diagnostics. The response is `ok`; the tree itself is
-never part of the request or the response.
+and `seq` are accepted for diagnostics. The response is `ok` and never carries
+the tree; apart from a snapshot hint like Pi's, the request does not carry it
+either.
 
 A hint schedules a refresh right away, rate limited to one refresh per pane per
 second. Independently of hints, the server refreshes an agent once when it is

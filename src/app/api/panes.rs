@@ -1620,7 +1620,8 @@ impl App {
     }
 
     /// `pane.report_agent_activity`：钩子提示该 pane 的 agent 活动可能变了。
-    /// 提示不携带树内容，只转成内部事件交给活动树刷新策略。
+    /// 这里只转成内部事件交给活动树刷新策略；`hint` 可能整份装着树（pi），由刷新时的
+    /// 来源适配器解析，这里不解析。
     pub(super) fn handle_pane_report_agent_activity(
         &mut self,
         id: String,
