@@ -92,7 +92,7 @@ Herdr 把内置扩展写入:
 
 如果设置了 `PI_CODING_AGENT_DIR`,Herdr 会改为写入 `$PI_CODING_AGENT_DIR/extensions/herdr-agent-state.ts`。如果 Pi agent 目录已经存在,Herdr 会创建 extensions 目录。卸载只删除那个扩展文件。
 
-从集成版本 `10` 起,扩展还会在交互式(TUI)会话里上报两样东西:会话用量,显示在账号页(见[监控](/zh-cn/docs/monitoring/));以及供 Agent 活动窗口使用的活动树。Pi 本身没有内置的子 agent、待办或后台任务,这些都由扩展提供。每次调用不属于 Pi 内置工具的工具都会成为一个活动项,内容是该工具的流式输出;官方 `subagent` 扩展还会为每个被委派的 agent 加一个子项。Pi 不在磁盘上保留这些记录,所以扩展把整棵树发给 Herdr。升级后请重新安装 Pi 集成以启用它们。
+从集成版本 `10` 起,扩展还会在交互式(TUI)会话里上报两样东西:会话用量,显示在账号页(见[监控](/zh-cn/docs/monitoring/));以及供 Agent 活动窗口使用的活动树。Pi 本身没有内置的子 agent、待办或后台任务,这些都由扩展提供。每次调用不属于 Pi 内置工具的工具都会成为一个活动项,内容是该工具的流式输出;官方 `subagent` 扩展还会为每个被委派的 agent 加一个子项。这棵树最多保留八个工具调用项(有新项时先丢已结束的)、每项之下最多八个子项,每项的输出只保留最后 2,000 个字符。Pi 不在磁盘上保留这些记录,所以扩展把整棵树发给 Herdr。升级后请重新安装 Pi 集成以启用它们。
 
 ## Claude Code
 
@@ -130,7 +130,7 @@ Codex 子 agent 以「昵称 · 任务名」标注,任务名取 agent 路径的�
 
 在 Agent 活动窗口里,Codex 子 agent 的输出是它自己线程的可读转写:来自父 agent 的消息、`user:` 与助手消息、`(thinking)` 标记、带主要参数的工具调用及其输出的前五行、计划,以及带该回合最后一条消息的 `[task complete]`。开发者指令、子 agent 从父 agent 继承的历史、token 计数、额度限制等簿记记录不显示;Herdr 认不出的记录只在方括号里显示其类型。
 
-Codex 只运行你信任过的钩子。安装集成后,或更新改动了钩子后,Codex 下次启动会显示「Hooks need review」。请选「Trust all and continue」,或进入「Review hooks」信任 Herdr 的钩子。如果选「Continue without trusting」,Herdr 的钩子不会运行,Herdr 也拿不到 Codex 的会话身份和活动信号。Codex 还没信任当前的 Herdr 钩子时,`herdr integration install codex` 会输出这条提醒,`herdr integration status` 也会在 Codex 那一行下面附一条提示;你在 Codex 里用 `/hooks` 停用了 Herdr 的钩子时,状态里同样会有提示。
+Codex 只运行你信任过的钩子。安装集成后,或更新改动了钩子后,Codex 下次启动会显示「Hooks need review」。请选「Trust all and continue」,或进入「Review hooks」信任 Herdr 的钩子。如果选「Continue without trusting」,Herdr 的钩子不会运行,Herdr 也拿不到 Codex 的会话身份和活动信号。Codex 还没信任当前的 Herdr 钩子时,`herdr integration install codex` 会输出这条提醒,`herdr integration status` 也会在 Codex 那一行下面附一条提示;你在 Codex 里用 `/hooks` 停用了 Herdr 的钩子时,这两条命令同样会提示。
 
 Herdr 默认使用 `~/.codex`,设置了 `CODEX_HOME` 时使用后者。Codex 配置目录必须已经存在。安装会写入 `herdr-agent-state.sh`、更新 `hooks.json`,并确保 `config.toml` 中有 `[features] hooks = true`。如果存在已弃用的顶层 `codex_hooks` 标志,它也会一并移除。卸载会从 `hooks.json` 中移除 Herdr 条目并删除钩子脚本,但不改动 `config.toml`。
 
@@ -144,7 +144,7 @@ herdr integration install kimi
 
 该钩子向 Herdr 上报 Kimi 的会话身份和生命周期状态,用于原生恢复和权威的 `idle`、`working`、`blocked` 状态。需要 Kimi Code CLI `0.14.0` 或更新版本。
 
-从集成版本 `8` 起,该钩子还订阅 `SubagentStart`、`SubagentStop`、`Notification`(`task.*`)和 `PostToolUse`(`TodoList`)。这些条目只告诉 Herdr 智能体活动树可能变了,不携带会话内容;活动树由 Herdr 自己读 Kimi 的会话文件得到。
+从集成版本 `8` 起,该钩子还订阅 `SubagentStart`、`SubagentStop`、`Notification`(`task.*`)和 `PostToolUse`(`TodoList`)。这些条目只告诉 Herdr 活动树可能变了,不携带会话内容;活动树由 Herdr 自己读 Kimi 的会话文件得到。
 
 集成版本 `8` 还把 Kimi 回合的每种结束方式都映射为 `idle`:回合完成时的 `Stop`、被打断时的 `Interrupt`,以及回合出错(例如 provider 报错或鉴权失败)时的 `StopFailure`。因此出错的回合不会再让窗格一直停在 `working`,直到 Kimi 退出。Herdr 支持的所有 Kimi Code CLI 版本都有 `StopFailure`;升级后请重新安装 Kimi 集成以添加它。
 
@@ -170,13 +170,13 @@ V2 生命周期上报在窗格本地的 TUI 中运行。即使多个窗格共享
 
 该插件在 OpenCode 运行于 Herdr 窗格内时上报生命周期状态和会话身份。在 OpenCode 发出携带会话信息的事件后,Herdr 可以用上报的会话 id 通过 `opencode --session <id>` 恢复该窗格。插件未安装时,屏幕清单检测仍然可用。
 
-从集成版本 `13` 起,插件还会在会话或其待办变化时通知 Herdr,子 agent 会话也一样。这些通知不携带会话内容:活动树由 Herdr 自己经 `opencode db` 只读查得,来自该会话派生的子 agent 会话(各自的消息与工具调用作为内容)以及该会话的待办。
+从集成版本 `13` 起,V1 的服务端插件还会在会话或其待办变化时通知 Herdr,子 agent 会话也一样;V2 的 TUI 插件不发这类通知。这些通知不携带会话内容:活动树由 Herdr 自己经 `opencode db` 只读查得,来自该会话派生的子 agent 会话(各自的消息与工具调用作为内容)以及该会话的待办。
 
 ## 已退役的集成
 
 本 fork 只提供 Pi、Claude Code、Codex、Kimi Code CLI 和 OpenCode 五家官方集成。其余内置集成连同各自的捆绑检测清单都已退役:
 
-- CLI 不再接受这些名字。对 `cursor`、`omp` 这类已退役的名字,`herdr integration install` 与 `herdr integration uninstall` 会给出退役提示和当前支持的目标列表,`herdr integration status` 也不再列出它们。
+- CLI 不再接受这些名字。对 `cursor`、`omp` 这类已退役的名字,`herdr integration install` 与 `herdr integration uninstall` 会给出退役提示和当前支持的目标列表,`herdr integration status` 也不再列出它们。原先实验性的 `letta` 目标从来没有 API 名称,所以得到的是「未知的集成目标」错误和同样的列表。
 - 旧客户端仍可能向 `integration.install` 或 `integration.uninstall` API 方法传入已退役的目标。请求照常解析,并得到 `integration_retired` 错误;`integration.list` 不再返回已退役的目标。
 - 早先版本写进已退役智能体配置目录的钩子或插件不会被改动。不再需要时请手动删除;它们上报的会话按非官方来源处理,不用于恢复。由于 `herdr integration uninstall` 同样拒绝已退役的名字,本 fork 无法替你清理:请自行打开该智能体自己的配置目录,查阅它自己的文档定位钩子或插件文件的确切位置并删除。
 - 用量 statusline 回调是唯一的例外。早先版本可能为上报用量包装过 Antigravity CLI 的 `~/.gemini/antigravity-cli/settings.json`(或该账号 `profile_dir` 下的同名文件)里的状态栏命令。Herdr 仍能识别这层包装,但只删不装:对配置了 `agent = "antigravity"` 的账号以 `enabled: false` 调用 `account.usage.integration` 会还原原来的状态栏命令,`enabled: true` 则被拒绝。

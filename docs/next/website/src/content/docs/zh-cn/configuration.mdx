@@ -507,7 +507,7 @@ herdr pane report-metadata <pane_id> \
 
 元数据上报方只提供值；样式由本地侧边栏配置控制。有关限制、清除、顺序和过期值的信息，请参阅 [CLI 参考：报告元数据](/docs/cli-reference/#panes)。
 
-侧边栏行设置仅影响展开的桌面侧边栏。折叠视图和移动视图仍使用紧凑布局。在按分组显示的 agent 树里，上方分组头已经显示了机器、工作区和标签页，agent 行会省略 `machine`、`workspace`、`tab` 这几个 token；因此只剩 `state_icon` 的那一行会并入下一行。所有行都不含 `state_text` 时，放得下的话树会在 agent 名称后补上状态文字。
+侧边栏行设置仅影响展开的桌面侧边栏。折叠视图和移动视图仍使用紧凑布局。在按分组显示的 agent 树里，上方分组头已经显示的机器、工作区或标签页，agent 行不再重复，即省略对应的 `machine`、`workspace`、`tab` token；因此只剩 `state_icon` 的那一行会并入下一行。所有行都不含 `state_text` 时，放得下的话树会在 agent 名称后补上状态文字。
 
 ## 通知
 
@@ -539,7 +539,7 @@ request_path = "sounds/request.mp3"
 
 `path` 为所有声音通知设置同一种声音。`done_path` 和 `request_path` 只覆盖完成和需要输入时的声音。
 
-按智能体覆盖声音设置时，可使用 `default`、`on` 或 `off`。键是五家官方智能体的标签:`pi`、`claude`、`codex`、`open_code` 和 `kimi`。指向[已退役智能体](/zh-cn/docs/integrations/#已退役的集成)的键会被忽略并给出 `unknown config key` 诊断,同段其余设置照常生效。
+按智能体覆盖声音设置时，可使用 `default`、`on` 或 `off`。每家官方智能体一个键:`pi`、`claude`、`codex`、`open_code`(OpenCode,注意带下划线)和 `kimi`。指向[已退役智能体](/zh-cn/docs/integrations/#已退役的集成)的键会被忽略并给出 `unknown config key` 诊断,同段其余设置照常生效。
 
 ```toml
 [ui.sound.agents]

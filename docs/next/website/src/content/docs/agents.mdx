@@ -45,7 +45,7 @@ Blocked detection is deliberately strict for screen-manifest agents. Herdr only 
 
 This means unusual new agent prompts may initially show as `idle` instead of `blocked` until Herdr learns that screen shape. The misclassification affects only the visible status and waits. It should not make Herdr send input or take destructive action.
 
-Startup prompts that wait for a decision before the agent session begins count as blocking UI too, for example the Codex "Hooks need review" chooser and the Kimi Code CLI "Trust this folder?" prompt. While such a prompt is open the pane is `blocked`, and `herdr agent start` reports that the agent is not ready instead of succeeding.
+Startup prompts that wait for a decision before the agent session begins count as blocking UI too, for example the Codex "Hooks need review" chooser and the Kimi Code CLI "Trust this folder?" prompt. While such a prompt is open the pane is `blocked`, and `herdr agent start` reports that the agent is not ready instead of succeeding. Herdr counts such a prompt only while it is the last thing on the screen, so an agent that quotes the prompt's text in its output is not marked `blocked`.
 
 ## Detection manifests
 
@@ -59,7 +59,7 @@ Local overrides can replace a remote or bundled manifest from the platform confi
 
 Local overrides always win. Without a local override, Herdr uses the newer compatible manifest between the cached remote manifest and the bundled manifest in the running binary. On debug builds, the same config helper may use a development directory such as `herdr-dev`. Invalid override files are ignored with a warning and Herdr falls back to the cached remote or bundled manifest for that agent.
 
-The startup prompt rules described above are kept separate from the bundled and remote manifests. Herdr adds them on top of whichever of the two is active, so a remote manifest update does not drop them; if the active manifest already has a rule with the same id, that rule wins. A local override replaces the whole manifest, so only the rules in the override file run.
+The rules for these two prompts are kept separate from the bundled and remote manifests. Herdr adds them on top of whichever of the two is active, so a remote manifest update does not drop them; if the active manifest already has a rule with the same id, that rule wins. A local override replaces the whole manifest, so only the rules in the override file run.
 
 Remote manifests patch detection rules for agents Herdr already knows how to identify. Adding a completely new agent still requires a Herdr binary update for process detection, labels, and integration behavior.
 
