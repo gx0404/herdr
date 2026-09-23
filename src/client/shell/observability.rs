@@ -2293,7 +2293,7 @@ impl ClientShellState {
                         self.observability.message = Some(
                             tr(
                                 "The pane's host is offline; the pane was not bound. Bind it from the accounts page later.",
-                                "pane 所在主机不在线，未绑定；稍后可在账号页手动绑定。",
+                                "窗格所在主机不在线，未绑定；稍后可在账号页手动绑定。",
                             )
                             .into(),
                         );
@@ -2704,7 +2704,7 @@ impl ClientShellState {
                     if bind_after.is_some() {
                         tr(
                             "Official statusline integration updated; binding the active pane to this account.",
-                            "官方状态栏回调已更新，正在把当前 pane 绑定到该账号。",
+                            "官方状态栏回调已更新，正在把当前窗格绑定到该账号。",
                         )
                     } else {
                         tr(
@@ -3360,7 +3360,7 @@ impl ClientShellState {
                         self.observability.message = Some(
                             tr(
                                 "Pick a pane before binding: use the pane picker or \"Bind focused pane\".",
-                                "请先选择要绑定的 pane：用 pane 选择器或「绑定到聚焦 pane」。",
+                                "先选要绑定的窗格：用 ‹ › 或「绑定到聚焦窗格」。",
                             )
                             .into(),
                         );
@@ -3395,7 +3395,7 @@ impl ClientShellState {
                             self.observability.message = Some(
                                 tr(
                                     "The focused pane is not running this provider's agent; use the pane picker.",
-                                    "当前聚焦的 pane 没有运行该厂商的 agent，请用 pane 选择器。",
+                                    "聚焦窗格没有运行该厂商的 agent，请用 ‹ › 挑选。",
                                 )
                                 .into(),
                             );
@@ -3428,7 +3428,7 @@ impl ClientShellState {
                     self.observability.message = Some(
                         tr(
                             "No running agent pane to bind for this provider.",
-                            "没有正在运行该厂商 agent 的 pane 可供绑定。",
+                            "没有运行该厂商 agent 的窗格可供绑定。",
                         )
                         .into(),
                     );
@@ -3576,7 +3576,7 @@ impl ClientShellState {
             self.observability.message = Some(match account_agent {
                 Some(agent) => {
                     if zh() {
-                        format!("{pane_id} 没有运行 {agent} 的 agent，未绑定；请选择运行该厂商 agent 的 pane。")
+                        format!("窗格 {pane_id} 没有运行 {agent} 的 agent，未绑定；请选择运行该厂商 agent 的窗格。")
                     } else {
                         format!("{pane_id} is not running a {agent} agent; pick a pane running that provider's agent.")
                     }
@@ -3607,7 +3607,7 @@ impl ClientShellState {
             self.observability.message = Some(
                 tr(
                     "The pane's host is offline; the pane was not bound.",
-                    "pane 所在主机不在线，未绑定。",
+                    "窗格所在主机不在线，未绑定。",
                 )
                 .into(),
             );

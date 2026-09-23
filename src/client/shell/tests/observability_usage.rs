@@ -2718,6 +2718,129 @@ fn binding_without_a_pane_or_account_explains_instead_of_staying_silent() {
     assert_eq!(calls[0].2, "claude:home");
 }
 
+/// 复审（冒烟 L11 余项）：绑定流程的页脚反馈与绑定行同一套术语——中文写
+/// 「窗格」，不混写英文 pane（pane id 本身除外）；引用的按钮名与 ‹ › 选择器都
+/// 是界面上真有的。覆盖：聚焦窗格跑的不是所选厂商、没有候选窗格、未选窗格就
+/// 确认绑定、窗格与账号厂商不一致、启用官方回调后顺手绑定、窗格所在主机离线。
+#[test]
+fn binding_feedback_names_panes_like_the_binding_row() {
+    let _guard = crate::i18n::lang_guard(crate::i18n::Lang::ZhCn);
+    let mut state = usage_ready();
+    deliver_providers(
+        &mut state,
+        vec![
+            provider("claude", &["claude:default"]),
+            provider("codex", &["codex:default"]),
+        ],
+    );
+    state.open_observation_page(Page::Accounts, &mut ClientShellInput::default());
+    let t0 = Instant::now() + Duration::from_secs(1);
+    tick(&mut state, t0);
+    // 选 codex：聚焦的 pane_1 跑的是 claude，也没有别的窗格跑 codex。
+    state.observation_action(
+        Action::Provider("codex".into()),
+        &mut ClientShellInput::default(),
+    );
+    tick(&mut state, t0 + Duration::from_millis(10));
+    assert!(deliver_usage(
+        &mut state,
+        vec![account("codex", "codex:default")]
+    ));
+    state.compose(133, 32).expect("账号页");
+    let ui = region_text(&state, state.observability.page_rect);
+    assert!(ui.contains("绑定到聚焦窗格"), "用例前提：绑定行\n{ui}");
+    let check = |state: &ClientShellState, what: &str| {
+        let message = state
+            .observability
+            .message
+            .clone()
+            .unwrap_or_else(|| panic!("{what}：应写页脚说明"));
+        assert!(
+            !message
+                .replace("pane_1", "")
+                .to_lowercase()
+                .contains("pane"),
+            "{what}：中文说明不混写 pane：{message}"
+        );
+        for quoted in message
+            .split('「')
+            .skip(1)
+            .filter_map(|rest| rest.split_once('」').map(|(name, _)| name))
+        {
+            assert!(
+                ui.contains(quoted),
+                "{what}：引用的「{quoted}」要在界面上：{message}\n{ui}"
+            );
+        }
+        if message.contains('‹') {
+            assert!(ui.contains('‹') && ui.contains('›'), "{what}：{message}");
+        }
+    };
+    let focused = page_hit(&state, |action| matches!(action, Action::BindFocused))
+        .expect("「绑定到聚焦窗格」");
+    click(&mut state, focused.x, focused.y);
+    check(&state, "聚焦窗格跑的不是所选厂商");
+    state.observability.message = None;
+    let previous =
+        page_hit(&state, |action| matches!(action, Action::CyclePane(-1))).expect("‹ 选择器");
+    click(&mut state, previous.x, previous.y);
+    check(&state, "没有候选窗格");
+    state.observability.message = None;
+    state.observation_action(Action::Bind, &mut ClientShellInput::default());
+    check(&state, "未选窗格就确认绑定");
+    state.observability.message = None;
+    state.observation_action(
+        Action::BindTo("pane_1".into(), "codex:default".into()),
+        &mut ClientShellInput::default(),
+    );
+    check(&state, "窗格与账号厂商不一致");
+    // 启用官方回调后顺手绑定：先说明正在绑定，窗格所在主机离线时说明未绑定。
+    let remote = add_remote_usage_endpoint(&mut state);
+    hover_on(&mut state, Some(remote.clone()), "pane_1", "claude");
+    tick(&mut state, t0 + Duration::from_millis(20));
+    assert!(
+        state
+            .observability
+            .hover
+            .as_ref()
+            .is_some_and(|hover| hover.visible),
+        "用例前提：远端悬浮卡可见"
+    );
+    state.observability.message = None;
+    let epoch = state.observability.hover_scope.epoch;
+    state.receive_observation_from(
+        &remote,
+        epoch,
+        Purpose::HoverIntegration {
+            bind_after: Some(("pane_1".into(), "claude:default".into())),
+        },
+        Ok(ResponseResult::Ok {}),
+    );
+    check(&state, "启用官方回调后顺手绑定");
+    state.set_endpoint_status(&remote, ClientEndpointStatus::Reconnecting);
+    state.observability.message = None;
+    let outcome = tick(&mut state, t0 + Duration::from_millis(30));
+    assert!(binding_calls(&outcome).is_empty(), "离线主机不发绑定");
+    check(&state, "排队绑定时窗格所在主机离线");
+    // 页面直接绑定时活动主机离线（严格目标，不回退）。
+    state.observation_action(
+        Action::Provider("claude".into()),
+        &mut ClientShellInput::default(),
+    );
+    tick(&mut state, t0 + Duration::from_millis(40));
+    assert!(deliver_usage(
+        &mut state,
+        vec![account("claude", "claude:default")]
+    ));
+    let active = state.active_endpoint_id.clone();
+    state.set_endpoint_status(&active, ClientEndpointStatus::Reconnecting);
+    state.observability.message = None;
+    let mut outcome = ClientShellInput::default();
+    state.observation_action(Action::BindFocused, &mut outcome);
+    assert!(binding_calls(&outcome).is_empty(), "离线主机不发绑定");
+    check(&state, "页面绑定时窗格所在主机离线");
+}
+
 #[test]
 fn enabling_the_official_callback_binds_the_active_pane_afterwards() {
     let mut state = subscribing_ready();
