@@ -408,9 +408,15 @@ const LINE_CONTROLS = /[\u0000-\u001f\u007f-\u009f]+/g;
 const OUTPUT_CONTROLS = /[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/g;
 
 // Lone surrogates would serialize as `\udXXX` escapes that Herdr's JSON parser
-// rejects, dropping the whole snapshot.
+// rejects, dropping the whole snapshot. Every string that reaches the snapshot
+// goes through here (directly, or via `oneLine` / `cleanOutput`).
 function wellFormed(text: string): string {
   return typeof text.toWellFormed === "function" ? text.toWellFormed() : text;
+}
+
+// The agent name of a delegated agent, shown next to its label.
+function agentTypeOf(value: unknown): string | undefined {
+  return oneLine(value, ACTIVITY_LABEL_CHARS);
 }
 
 function cleanOutput(text: string): string {
@@ -673,7 +679,11 @@ export function createActivityTracker(pi: any) {
     event: any,
     startedAt: number | undefined,
   ): { node: ActivityNode; created: boolean } | undefined {
-    const id = nonEmptyString(event?.toolCallId);
+    // The id is replayed verbatim on every snapshot (and prefixes the child ids),
+    // so it is made well-formed too; the mapping is deterministic, so start,
+    // update and end events of one call still meet on the same node.
+    const rawId = nonEmptyString(event?.toolCallId);
+    const id = rawId === undefined ? undefined : wellFormed(rawId);
     const toolName = nonEmptyString(event?.toolName);
     if (!id || !toolName) {
       return undefined;
@@ -691,7 +701,7 @@ export function createActivityTracker(pi: any) {
       kind: subagent ? "subagent" : "task",
       label: oneLine(`${toolName} ${argsSummary(event.args) ?? ""}`, ACTIVITY_LABEL_CHARS) ?? toolName,
       status: "running",
-      agentType: nonEmptyString(event.args?.agent),
+      agentType: agentTypeOf(event.args?.agent),
       startedAt,
       output: newOutput(subagent ? "markdown" : "text"),
       children: [],
@@ -735,7 +745,7 @@ export function createActivityTracker(pi: any) {
           kind: "subagent",
           label: delegatedLabel(result),
           status,
-          agentType: nonEmptyString(result.agent),
+          agentType: agentTypeOf(result.agent),
           output: newOutput("markdown"),
           children: [],
         };

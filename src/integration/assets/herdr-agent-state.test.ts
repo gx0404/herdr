@@ -1005,6 +1005,28 @@ test("Pi activity log appends growth and keeps replaced text", async () => {
   });
 });
 
+test("Pi activity snapshot never carries a lone surrogate", async () => {
+  const { createActivityTracker } = await importFresh("./pi/herdr-agent-state.ts");
+  const tracker = createActivityTracker({});
+  // Lone halves in the call id, the agent name and a delegated agent's name.
+  const call = { toolCallId: "call_\ud800x", toolName: "subagent", args: { agent: "sc\udc00out\u001b[1m", tasks: [{}] } };
+  tracker.start(call, 1);
+  tracker.update(
+    { ...call, partialResult: { content: [], details: { mode: "parallel", results: [delegated("rev\ud83dewer", "Review")] } } },
+    2,
+  );
+  tracker.end({ ...call, result: { content: [{ type: "text", text: "ok" }] }, isError: false }, 3);
+
+  const hint = tracker.snapshot({});
+  // A well-formed pair is written as-is; any `\udXXX` escape would be a lone half.
+  expect(hint).not.toMatch(/\\u[dD][89a-fA-F][0-9a-fA-F]{2}/);
+  const nodes = JSON.parse(hint).nodes;
+  // Start, update and end of the call still meet on one node.
+  expect(nodes).toHaveLength(2);
+  expect(nodes[0]).toMatchObject({ id: "call_\ufffdx", agent_type: "sc\ufffdout", status: "done" });
+  expect(nodes[1]).toMatchObject({ id: "call_\ufffdx/0", parent_id: "call_\ufffdx", agent_type: "rev\ufffdewer" });
+});
+
 test("Pi activity adopts a tool first seen after a reload", async () => {
   const { createActivityTracker } = await importFresh("./pi/herdr-agent-state.ts");
   const tracker = createActivityTracker({});
