@@ -126,6 +126,8 @@ A Codex sub-agent is labeled with its nickname and its task name, which is the l
 
 In the agent activity window, a Codex sub-agent's output is a readable transcript of its own thread: messages from its parent agent, `user:` and assistant messages, `(thinking)` markers, tool calls with their main argument followed by the first five lines of their output, plans, and `[task complete]` with the turn's final message. Developer instructions, the history the sub-agent inherited from its parent, token counts, rate limits, and other bookkeeping records are left out, and a record Herdr does not recognize shows only its type in brackets.
 
+Codex only runs hooks that you have trusted. After the integration is installed, or after an update changes its hooks, Codex shows "Hooks need review" the next time it starts. Choose "Trust all and continue", or open "Review hooks" and trust the Herdr hooks there. If you choose "Continue without trusting", the Herdr hooks do not run and Herdr gets no session identity or activity signals from Codex. While Codex has not trusted the current Herdr hooks, `herdr integration install codex` prints this reminder and `herdr integration status` adds a note under the Codex line; the status note also appears when you have disabled the Herdr hooks in Codex with `/hooks`.
+
 Herdr uses `~/.codex` by default, or `CODEX_HOME` when set. The Codex config directory must already exist. Install writes `herdr-agent-state.sh`, updates `hooks.json`, and ensures `[features] hooks = true` in `config.toml`. It also removes the deprecated top-level `codex_hooks` flag when present. Uninstall removes Herdr entries from `hooks.json` and deletes the hook script, but leaves `config.toml` unchanged.
 
 ## Kimi Code CLI

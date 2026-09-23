@@ -34,6 +34,18 @@ pub(crate) struct IntegrationStatus {
     pub state: IntegrationStatusKind,
     pub installed_version: Option<u32>,
     pub expected_version: u32,
+    /// 版本之外还需要用户处理的事，`herdr integration status` 另起一行提示。
+    pub note: Option<IntegrationStatusNote>,
+}
+
+/// 集成装好了但宿主还没让它生效的情形。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum IntegrationStatusNote {
+    /// codex 还没信任 herdr 的钩子（或信任后钩子改过）：下次启动会弹「Hooks need
+    /// review」，信任前钩子不运行。
+    CodexHooksNeedReview,
+    /// 用户在 codex 里停用了 herdr 的钩子。
+    CodexHooksDisabled,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

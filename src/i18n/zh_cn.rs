@@ -1321,6 +1321,8 @@ pub const TEXTS: Texts = Texts {
         integration_current_fmt: "当前（{version}）",
         integration_needs_repair_fmt: "需要修复（{version}）",
         integration_outdated_fmt: "已过期（{version} < {expected}）",
+        integration_codex_hooks_need_review_note: "  codex 尚未信任这些钩子，信任前不会运行：启动 codex，在要求审阅钩子时选「Trust all and continue」",
+        integration_codex_hooks_disabled_note: "  codex 已停用这些钩子：在 codex 里用 /hooks 重新启用",
         explain_agent_label: "agent：",
         explain_state_label: "状态：",
         explain_manifest_label: "manifest：",

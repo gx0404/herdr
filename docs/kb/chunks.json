@@ -1,5 +1,5 @@
 {
-  "chunk_count": 1049,
+  "chunk_count": 1051,
   "chunks": [
     {
       "anchor": "herdr",
@@ -2287,15 +2287,22 @@
       "anchor": "Install integrations > Codex",
       "doc": "docs/next/website/src/content/docs/integrations.mdx",
       "id": "docs-next-website-src-content-docs-integrations-mdx-install-integrations-codex-part1",
-      "source_sha256": "d440e33e02a8f402ef400b271482b9edba52d4b0155456bb996ca3148fa196cd",
+      "source_sha256": "9f4bac289a8294a4e766867a3078026dffbc92be882e718d11397337f5951b1d",
       "text": "## Codex\n\nInstall the Codex hook:\n\n```bash\nherdr integration install codex\n```\n\nThe Codex hook reports session identity through the same local socket API used by other integrations. Codex state comes from Herdr's screen manifest detection.\n\nCodex integration v9 also subscribes to `SubagentStart` and `SubagentStop` on macOS and Linux. These hooks only tell the local Herdr socket that a Codex sub-agent thread started or stopped; they do not report agent state, and Herdr rebuilds the activity tree from Codex's own session files. Codex only runs hooks with `[features] hooks = true`, which the install already writes. The activity hooks are not installed on Windows. Reinstall the Codex integration after upgrading to add them.\n\nA Codex sub-agent is labeled with its nickname and its task name, which is the last part of its agent path, for example `Boyle · herdr_probe`. Its summary shows the full agent path, or the reason when the sub-agent failed or was interrupted. A sub-agent without a nickname shows just the task name.\n"
     },
     {
       "anchor": "Install integrations > Codex",
       "doc": "docs/next/website/src/content/docs/integrations.mdx",
       "id": "docs-next-website-src-content-docs-integrations-mdx-install-integrations-codex-part2",
-      "source_sha256": "d440e33e02a8f402ef400b271482b9edba52d4b0155456bb996ca3148fa196cd",
-      "text": "In the agent activity window, a Codex sub-agent's output is a readable transcript of its own thread: messages from its parent agent, `user:` and assistant messages, `(thinking)` markers, tool calls with their main argument followed by the first five lines of their output, plans, and `[task complete]` with the turn's final message. Developer instructions, the history the sub-agent inherited from its parent, token counts, rate limits, and other bookkeeping records are left out, and a record Herdr does not recognize shows only its type in brackets.\n\nHerdr uses `~/.codex` by default, or `CODEX_HOME` when set. The Codex config directory must already exist. Install writes `herdr-agent-state.sh`, updates `hooks.json`, and ensures `[features] hooks = true` in `config.toml`. It also removes the deprecated top-level `codex_hooks` flag when present. Uninstall removes Herdr entries from `hooks.json` and deletes the hook script, but leaves `config.toml` unchanged."
+      "source_sha256": "9f4bac289a8294a4e766867a3078026dffbc92be882e718d11397337f5951b1d",
+      "text": "In the agent activity window, a Codex sub-agent's output is a readable transcript of its own thread: messages from its parent agent, `user:` and assistant messages, `(thinking)` markers, tool calls with their main argument followed by the first five lines of their output, plans, and `[task complete]` with the turn's final message. Developer instructions, the history the sub-agent inherited from its parent, token counts, rate limits, and other bookkeeping records are left out, and a record Herdr does not recognize shows only its type in brackets.\n\nCodex only runs hooks that you have trusted. After the integration is installed, or after an update changes its hooks, Codex shows \"Hooks need review\" the next time it starts. Choose \"Trust all and continue\", or open \"Review hooks\" and trust the Herdr hooks there. If you choose \"Continue without trusting\", the Herdr hooks do not run and Herdr gets no session identity or activity signals from Codex. While Codex has not trusted the current Herdr hooks, `herdr integration install codex` prints this reminder and `herdr integration status` adds a note under the Codex line; the status note also appears when you have disabled the Herdr hooks in Codex with `/hooks`.\n"
+    },
+    {
+      "anchor": "Install integrations > Codex",
+      "doc": "docs/next/website/src/content/docs/integrations.mdx",
+      "id": "docs-next-website-src-content-docs-integrations-mdx-install-integrations-codex-part3",
+      "source_sha256": "9f4bac289a8294a4e766867a3078026dffbc92be882e718d11397337f5951b1d",
+      "text": "Herdr uses `~/.codex` by default, or `CODEX_HOME` when set. The Codex config directory must already exist. Install writes `herdr-agent-state.sh`, updates `hooks.json`, and ensures `[features] hooks = true` in `config.toml`. It also removes the deprecated top-level `codex_hooks` flag when present. Uninstall removes Herdr entries from `hooks.json` and deletes the hook script, but leaves `config.toml` unchanged."
     },
     {
       "anchor": "Install integrations > Custom status labels",
@@ -5822,8 +5829,8 @@
       "anchor": "structure",
       "doc": "src/integration/actions.rs",
       "id": "src-integration-actions-rs-structure",
-      "source_sha256": "15228162c86b6241bc50058722341e25ab171b9da81f3506a28bb01ee1bbf5a7",
-      "text": "公开项：\npub(crate) fn install_target(\npub(crate) fn uninstall_target("
+      "source_sha256": "e5bba91a44faa4593376b4ee2c80b29e1c78faebc3d262473ebc60dde35f9129",
+      "text": "公开项：\npub(crate) const CODEX_HOOKS_REVIEW_HINT: &str = \"codex asks you to review new or changed hooks the next time it starts (\\\"Hooks need review\\\"): choose \\\"Trust all and continue\\\", or trust the herdr hooks under \\\"Review hooks\\\"; \\\"Continue without trusting\\\" leaves them disabled\"; — codex 还没信任（或信任后改过）herdr 的钩子时的安装提示；CLI 与设置页都原样显示。\npub(crate) const CODEX_HOOKS_DISABLED_HINT: &str = — 用户在 codex 里停用了 herdr 的钩子时的安装提示。\npub(crate) fn install_target(\npub(crate) fn uninstall_target("
     },
     {
       "anchor": "structure",
@@ -5831,6 +5838,13 @@
       "id": "src-integration-claude-settings-rs-structure",
       "source_sha256": "969c194fb6c7bffe777a15c6baf1948c6c0c313338ad092db48f3db1c3b589d2",
       "text": "公开项：\npub(crate) fn install(content: &str, settings_path: &Path, hook_path: &Path) -> io::Result<String> {\npub(crate) fn uninstall(\npub(super) fn reject_duplicate_keys(node: &CstNode, settings_path: &Path) -> io::Result<()> {"
+    },
+    {
+      "anchor": "structure",
+      "doc": "src/integration/codex_trust.rs",
+      "id": "src-integration-codex-trust-rs-structure",
+      "source_sha256": "bf48d817b42c2fd6837d002e535cc52da8008ca209f2b1ee0dbd325d96da3555",
+      "text": "模块文档：codex 钩子的信任状态。  codex 只运行用户信任过的钩子：`hooks.json` 里有新增或改过的钩子时，首启先弹 「Hooks need review」，选「Continue without trusting」则这些钩子静默不跑， herdr 拿不到会话身份与活动信号。信任记录写在 codex 的 `config.toml`： `[hooks.state.\"<hooks.json 路径>:<事件>:<组序号>:<钩子序号>\"]` 下的 `trusted_hash`；`enabled = false` 表示用户在 codex 的 `/hooks` 里停用了它。  取证基线：codex 0.156.1（官方仓库 tag `rust-v0.156.1`，只读核对）。 - 键：`codex-rs/hooks/src/lib.rs::hook_key`，事件名取 `hook_event_key_label`   （`SessionStart` → `session_start`）；路径取 `hooks.json` 的完整路径，   `CODEX_HOME` 设了时 codex 会先 canonicalize。 - 哈希：`codex-rs/hooks/src/engine/discovery.rs::hook_hash` 把规范化的钩子身份   `{event_name, matcher?, hooks: [handler]}` 转成 TOML 值，再由   `codex-rs/config/src/fingerprint.rs::version_for_toml` 转 JSON、按键排序、紧凑   序列化后取 sha256，写成 `sha256:<hex>`。command 型 handler 的规范化字段是   `type`、`command`、`timeout`（缺省 600 秒）与 `async`，其余可选字段为空时不出现。 - 真机核对：按本算法重算 herdr 三条钩子的哈希，与 codex 在用户选「Trust all and   continue」后写入的 `trusted_hash` 逐一相同（见本文件测试）。  只对 herdr 自己写的形状（组里只有 `hooks`，handler 只有 `type`/`command`/ `timeout`/`async: false`）下结论；条目被改成别的形状时不猜，宁可不提示也不误报。\n公开项：\npub(crate) enum CodexHookTrust {\npub(crate) struct CodexHooksTrustSummary {\npub(crate) fn codex_hooks_trust_summary( — 读 `hooks.json` 与 `config.toml`，汇总 herdr 管理的钩子（`managed`：事件名与命令） 在 codex 里的信任状态。\npub(crate) fn managed_hooks_trust( — 逐条给出 `managed` 里每条钩子的状态；在 `hooks.json` 里找不到、形状认不出或 `config.toml` 解析失败时该条为 `None`。`key_sources` 是 codex 可能用作键前缀的 `hooks.json` 路径写法。\npub(crate) fn codex_hook_trust_hash( — codex 为一条无 matcher 的 command 钩子记的信任哈希。`event` 用 `hooks.json` 里的 事件名（`SessionStart`）；codex 不认识的事件、以及超时会被 codex 另行夹紧的 `SessionEnd` / `Interrupt` 返回 `None`。"
     },
     {
       "anchor": "structure",
@@ -5899,8 +5913,8 @@
       "anchor": "structure",
       "doc": "src/integration/targets.rs",
       "id": "src-integration-targets-rs-structure",
-      "source_sha256": "e57674770ec36265d587a9ec96d0eb2b1e2829905b77430130b9859d6d365f28",
-      "text": "公开项：\npub(crate) fn install_pi() -> io::Result<PathBuf> {\npub(crate) fn install_claude() -> io::Result<ClaudeInstallPaths> {\npub(crate) fn install_codex() -> io::Result<CodexInstallPaths> {\npub(crate) fn install_kimi() -> io::Result<KimiInstallPaths> {\npub(crate) fn install_opencode() -> io::Result<OpenCodeInstallPaths> {\npub(crate) fn uninstall_pi() -> io::Result<PiUninstallResult> {\npub(crate) fn uninstall_claude() -> io::Result<ClaudeUninstallResult> {\npub(crate) fn uninstall_codex() -> io::Result<CodexUninstallResult> {\npub(crate) fn uninstall_kimi() -> io::Result<KimiUninstallResult> {\npub(crate) fn uninstall_opencode() -> io::Result<OpenCodeUninstallResult> {"
+      "source_sha256": "21ca1fff9c88def57739522cde5f6c879944fb48ee185a1e428e33a53225ab75",
+      "text": "公开项：\npub(crate) fn install_pi() -> io::Result<PathBuf> {\npub(crate) fn install_claude() -> io::Result<ClaudeInstallPaths> {\npub(crate) fn codex_managed_hooks(hook_path: &Path) -> Vec<(&'static str, String)> { — herdr 在 codex `hooks.json` 里应当装好的钩子（事件名、命令），按写入顺序。\npub(crate) fn install_codex() -> io::Result<CodexInstallPaths> {\npub(crate) fn install_kimi() -> io::Result<KimiInstallPaths> {\npub(crate) fn install_opencode() -> io::Result<OpenCodeInstallPaths> {\npub(crate) fn uninstall_pi() -> io::Result<PiUninstallResult> {\npub(crate) fn uninstall_claude() -> io::Result<ClaudeUninstallResult> {\npub(crate) fn uninstall_codex() -> io::Result<CodexUninstallResult> {\npub(crate) fn uninstall_kimi() -> io::Result<KimiUninstallResult> {\npub(crate) fn uninstall_opencode() -> io::Result<OpenCodeUninstallResult> {"
     },
     {
       "anchor": "structure",
@@ -5913,8 +5927,8 @@
       "anchor": "structure",
       "doc": "src/integration/types.rs",
       "id": "src-integration-types-rs-structure",
-      "source_sha256": "6010ad3a4285e9679de13d06c43573c4c77b99be4d9cd75d93cbd22c58b16f2d",
-      "text": "公开项：\npub(crate) struct ClaudeInstallPaths {\npub(crate) struct CodexInstallPaths {\npub(crate) struct KimiInstallPaths {\npub(crate) struct OpenCodeInstallPaths {\npub(crate) struct IntegrationStatus {\npub(crate) enum IntegrationStatusKind {\npub(crate) struct IntegrationRecommendation {\nimpl IntegrationRecommendation {\npub fn needs_install(&self) -> bool {\npub(crate) struct PiUninstallResult {\npub(crate) struct ClaudeUninstallResult {\npub(crate) struct CodexUninstallResult {\npub(crate) struct KimiUninstallResult {\npub(crate) struct OpenCodeUninstallResult {"
+      "source_sha256": "bb31f7261a11963d4ab41198c1c203f667f954d825020ea58c0348b8dfdf5e41",
+      "text": "公开项：\npub(crate) struct ClaudeInstallPaths {\npub(crate) struct CodexInstallPaths {\npub(crate) struct KimiInstallPaths {\npub(crate) struct OpenCodeInstallPaths {\npub(crate) struct IntegrationStatus {\npub(crate) enum IntegrationStatusNote {\npub(crate) enum IntegrationStatusKind {\npub(crate) struct IntegrationRecommendation {\nimpl IntegrationRecommendation {\npub fn needs_install(&self) -> bool {\npub(crate) struct PiUninstallResult {\npub(crate) struct ClaudeUninstallResult {\npub(crate) struct CodexUninstallResult {\npub(crate) struct KimiUninstallResult {\npub(crate) struct OpenCodeUninstallResult {"
     },
     {
       "anchor": "structure",

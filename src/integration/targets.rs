@@ -93,6 +93,23 @@ pub(crate) fn install_claude() -> io::Result<ClaudeInstallPaths> {
     })
 }
 
+/// 活动钩子只告诉 herdr「这个 pane 的子 agent 线程变了」，树由 server 读 rollout
+/// 重建；codex 的钩子本就要求 `[features] hooks = true`，安装时一并写入。Windows
+/// 资产走 herdr CLI 而 CLI 没有活动信号子命令，所以活动钩子只在 Unix 安装。
+const CODEX_ACTIVITY_HOOK_EVENTS: [&str; 2] = ["SubagentStart", "SubagentStop"];
+const INSTALL_CODEX_ACTIVITY_HOOKS: bool = !cfg!(windows);
+
+/// herdr 在 codex `hooks.json` 里应当装好的钩子（事件名、命令），按写入顺序。
+pub(crate) fn codex_managed_hooks(hook_path: &Path) -> Vec<(&'static str, String)> {
+    let mut hooks = vec![("SessionStart", hook_command(hook_path, Some("session")))];
+    if INSTALL_CODEX_ACTIVITY_HOOKS {
+        for event in CODEX_ACTIVITY_HOOK_EVENTS {
+            hooks.push((event, hook_command(hook_path, Some("activity"))));
+        }
+    }
+    hooks
+}
+
 pub(crate) fn install_codex() -> io::Result<CodexInstallPaths> {
     let dir = codex_dir()?;
     check_config_targets(&dir, &["hooks.json", "config.toml"])?;
@@ -128,30 +145,13 @@ pub(crate) fn install_codex() -> io::Result<CodexInstallPaths> {
     remove_hook_commands(hooks, "PreToolUse", &hook_path, Some("working"))?;
     remove_hook_commands(hooks, "Stop", &hook_path, Some("idle"))?;
     remove_hook_commands(hooks, "SessionStart", &hook_path, Some("session"))?;
-    ensure_command_hook(
-        hooks,
-        "SessionStart",
-        hook_command(&hook_path, Some("session")),
-        10,
-        None,
-    )?;
-    // 活动钩子只告诉 herdr「这个 pane 的子 agent 线程变了」，树由 server 读 rollout
-    // 重建；codex 的钩子本就要求 `[features] hooks = true`，下面会一并写入。Windows
-    // 资产走 herdr CLI 而 CLI 没有活动信号子命令，所以活动钩子只在 Unix 安装。
-    const CODEX_ACTIVITY_HOOK_EVENTS: [&str; 2] = ["SubagentStart", "SubagentStop"];
-    const INSTALL_CODEX_ACTIVITY_HOOKS: bool = !cfg!(windows);
-    for event in CODEX_ACTIVITY_HOOK_EVENTS {
-        if INSTALL_CODEX_ACTIVITY_HOOKS {
-            ensure_command_hook(
-                hooks,
-                event,
-                hook_command(&hook_path, Some("activity")),
-                10,
-                None,
-            )?;
-        } else {
+    if !INSTALL_CODEX_ACTIVITY_HOOKS {
+        for event in CODEX_ACTIVITY_HOOK_EVENTS {
             remove_hook_commands(hooks, event, &hook_path, Some("activity"))?;
         }
+    }
+    for (event, command) in codex_managed_hooks(&hook_path) {
+        ensure_command_hook(hooks, event, command, 10, None)?;
     }
     remove_legacy_bash_hook_file(&hook_path)?;
 

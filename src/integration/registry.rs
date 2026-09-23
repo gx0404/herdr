@@ -249,9 +249,36 @@ pub(crate) fn installed_integration_statuses() -> Vec<super::IntegrationStatus> 
             if !integration_target_supported(target) {
                 return None;
             }
-            Some(integration_status_at(target, path.ok()?, expected_version))
+            let mut status = integration_status_at(target, path.ok()?, expected_version);
+            status.note = integration_status_note(&status);
+            Some(status)
         })
         .collect()
+}
+
+/// 只在 `herdr integration status` 这条路径上读宿主配置：推荐列表（设置页、API）
+/// 不需要这项，不为它多做文件 I/O。
+fn integration_status_note(
+    status: &super::IntegrationStatus,
+) -> Option<super::IntegrationStatusNote> {
+    if status.target != crate::api::schema::IntegrationTarget::Codex
+        || status.state == super::IntegrationStatusKind::NotInstalled
+    {
+        return None;
+    }
+    let dir = codex_dir().ok()?;
+    let summary = super::codex_trust::codex_hooks_trust_summary(
+        &dir.join("hooks.json"),
+        &dir.join("config.toml"),
+        &super::targets::codex_managed_hooks(&status.path),
+    );
+    if summary.needs_review {
+        Some(super::IntegrationStatusNote::CodexHooksNeedReview)
+    } else if summary.disabled {
+        Some(super::IntegrationStatusNote::CodexHooksDisabled)
+    } else {
+        None
+    }
 }
 
 pub(crate) fn integration_recommendations() -> Vec<super::IntegrationRecommendation> {
@@ -440,6 +467,7 @@ pub(crate) fn integration_status_at(
         state,
         installed_version,
         expected_version,
+        note: None,
     }
 }
 

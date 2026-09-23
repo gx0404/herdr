@@ -1430,6 +1430,82 @@ fn install_codex_errors_when_config_dir_missing() {
     let _ = fs::remove_dir_all(base);
 }
 
+/// 冒烟 M5①：codex 只运行用户信任过的钩子。装完 herdr 的钩子后首启会弹
+/// 「Hooks need review」，选「Continue without trusting」钩子就静默失效；此前安装
+/// 输出与状态都不提这件事。
+#[test]
+fn install_codex_tells_the_user_to_trust_the_hooks_until_codex_does() {
+    let _lock = integration_env_lock();
+    let base = unique_base();
+    let home = base.join("home");
+    let codex_dir = home.join(".codex");
+    fs::create_dir_all(&codex_dir).unwrap();
+    fs::write(codex_dir.join("config.toml"), "model = \"gpt-5.4\"\n").unwrap();
+    std::env::set_var("HOME", &home);
+
+    let codex_status = || {
+        installed_integration_statuses()
+            .into_iter()
+            .find(|status| status.target == crate::api::schema::IntegrationTarget::Codex)
+            .unwrap()
+    };
+
+    let messages = install_target(crate::api::schema::IntegrationTarget::Codex).unwrap();
+    assert!(
+        messages
+            .iter()
+            .any(|message| message.contains("Hooks need review")
+                && message.contains("Trust all and continue")),
+        "{messages:?}"
+    );
+    assert_eq!(
+        codex_status().note,
+        Some(IntegrationStatusNote::CodexHooksNeedReview)
+    );
+
+    // 用户在 codex 里选了「Trust all and continue」：codex 按「hooks.json 路径:事件:
+    // 组序号:钩子序号」写下各钩子的哈希。重装不再提示，状态也不再带提示行。
+    let hooks_path = codex_dir.join("hooks.json");
+    let hook_path = codex_dir.join(CODEX_HOOK_INSTALL_NAME);
+    let mut config = fs::read_to_string(codex_dir.join("config.toml")).unwrap();
+    for (event, command) in codex_managed_hooks(&hook_path) {
+        let label = match event {
+            "SessionStart" => "session_start",
+            "SubagentStart" => "subagent_start",
+            _ => "subagent_stop",
+        };
+        let hash = super::codex_trust::codex_hook_trust_hash(event, &command, 10).unwrap();
+        config.push_str(&format!(
+            "\n[hooks.state.{}]\ntrusted_hash = \"{hash}\"\n",
+            super::config_edit::toml_basic_string(&format!("{}:{label}:0:0", hooks_path.display()))
+        ));
+    }
+    fs::write(codex_dir.join("config.toml"), &config).unwrap();
+
+    let messages = install_target(crate::api::schema::IntegrationTarget::Codex).unwrap();
+    assert!(
+        !messages
+            .iter()
+            .any(|message| message.contains("Hooks need review")),
+        "{messages:?}"
+    );
+    assert_eq!(codex_status().note, None);
+
+    // 用户随后在 codex 的 /hooks 里停用了它们。
+    fs::write(
+        codex_dir.join("config.toml"),
+        config.replace("trusted_hash", "enabled = false\ntrusted_hash"),
+    )
+    .unwrap();
+    assert_eq!(
+        codex_status().note,
+        Some(IntegrationStatusNote::CodexHooksDisabled)
+    );
+
+    std::env::remove_var("HOME");
+    let _ = fs::remove_dir_all(base);
+}
+
 #[test]
 fn install_kimi_writes_hook_and_updates_config() {
     let _lock = integration_env_lock();

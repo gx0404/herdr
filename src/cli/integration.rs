@@ -49,9 +49,24 @@ fn integration_status(args: &[String]) -> std::io::Result<i32> {
             status.expected_version,
         );
         println!("{target}: {state} ({})", status.path.display());
+        if let Some(note) = status.note {
+            println!("{}", describe_integration_note(note));
+        }
     }
 
     Ok(0)
+}
+
+fn describe_integration_note(note: crate::integration::IntegrationStatusNote) -> &'static str {
+    let t = &crate::i18n::texts().cli_output;
+    match note {
+        crate::integration::IntegrationStatusNote::CodexHooksNeedReview => {
+            t.integration_codex_hooks_need_review_note
+        }
+        crate::integration::IntegrationStatusNote::CodexHooksDisabled => {
+            t.integration_codex_hooks_disabled_note
+        }
+    }
 }
 
 fn describe_integration_state(

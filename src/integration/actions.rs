@@ -1,12 +1,19 @@
 use std::io;
 
+use super::codex_trust::codex_hooks_trust_summary;
 use super::registry::{integration_target_label, retired_integration_error};
 use super::targets::{
-    install_claude, install_codex, install_kimi, install_opencode, install_pi, uninstall_claude,
-    uninstall_codex, uninstall_kimi, uninstall_opencode, uninstall_pi,
+    codex_managed_hooks, install_claude, install_codex, install_kimi, install_opencode, install_pi,
+    uninstall_claude, uninstall_codex, uninstall_kimi, uninstall_opencode, uninstall_pi,
 };
 use super::version::{agent_version_requirement, enforce_agent_version};
 use super::KIMI_MIN_VERSION;
+
+/// codex 还没信任（或信任后改过）herdr 的钩子时的安装提示；CLI 与设置页都原样显示。
+pub(crate) const CODEX_HOOKS_REVIEW_HINT: &str = "codex asks you to review new or changed hooks the next time it starts (\"Hooks need review\"): choose \"Trust all and continue\", or trust the herdr hooks under \"Review hooks\"; \"Continue without trusting\" leaves them disabled";
+/// 用户在 codex 里停用了 herdr 的钩子时的安装提示。
+pub(crate) const CODEX_HOOKS_DISABLED_HINT: &str =
+    "codex has disabled the herdr hooks; enable them in codex with /hooks";
 
 pub(crate) fn install_target(
     target: crate::api::schema::IntegrationTarget,
@@ -50,7 +57,7 @@ fn install_target_inner(target: crate::api::schema::IntegrationTarget) -> io::Re
         }
         crate::api::schema::IntegrationTarget::Codex => {
             let installed = install_codex()?;
-            vec![
+            let mut messages = vec![
                 format!(
                     "installed codex integration hook to {}",
                     installed.hook_path.display()
@@ -60,7 +67,20 @@ fn install_target_inner(target: crate::api::schema::IntegrationTarget) -> io::Re
                     "ensured codex config at {}",
                     installed.config_path.display()
                 ),
-            ]
+            ];
+            // codex 只运行用户信任过的钩子：新装或改过的钩子要在它下次启动时的
+            // 「Hooks need review」里信任，否则静默不跑。
+            let trust = codex_hooks_trust_summary(
+                &installed.hooks_path,
+                &installed.config_path,
+                &codex_managed_hooks(&installed.hook_path),
+            );
+            if trust.needs_review {
+                messages.push(CODEX_HOOKS_REVIEW_HINT.to_string());
+            } else if trust.disabled {
+                messages.push(CODEX_HOOKS_DISABLED_HINT.to_string());
+            }
+            messages
         }
         crate::api::schema::IntegrationTarget::Kimi => {
             let installed = install_kimi()?;

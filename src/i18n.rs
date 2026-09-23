@@ -1576,6 +1576,8 @@ pub struct CliOutputTexts {
     pub integration_current_fmt: &'static str,
     pub integration_needs_repair_fmt: &'static str,
     pub integration_outdated_fmt: &'static str,
+    pub integration_codex_hooks_need_review_note: &'static str,
+    pub integration_codex_hooks_disabled_note: &'static str,
     pub explain_agent_label: &'static str,
     pub explain_state_label: &'static str,
     pub explain_manifest_label: &'static str,

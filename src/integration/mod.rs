@@ -1,5 +1,6 @@
 mod actions;
 mod claude_settings;
+mod codex_trust;
 mod command;
 mod config_edit;
 mod config_file;
@@ -29,7 +30,9 @@ pub(crate) use registry::{
     installed_integration_statuses, integration_recommendations, integration_target_available,
     integration_target_label, print_outdated_update_notice, retired_integration_error,
 };
-pub(crate) use types::{IntegrationRecommendation, IntegrationStatus, IntegrationStatusKind};
+pub(crate) use types::{
+    IntegrationRecommendation, IntegrationStatus, IntegrationStatusKind, IntegrationStatusNote,
+};
 
 const PI_EXTENSION_INSTALL_NAME: &str = "herdr-agent-state.ts";
 const PI_EXTENSION_ASSET: &str = include_str!("assets/pi/herdr-agent-state.ts");

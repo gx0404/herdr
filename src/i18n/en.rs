@@ -1320,6 +1320,8 @@ pub const TEXTS: Texts = Texts {
         integration_current_fmt: "current ({version})",
         integration_needs_repair_fmt: "needs repair ({version})",
         integration_outdated_fmt: "outdated ({version} < {expected})",
+        integration_codex_hooks_need_review_note: "  codex has not trusted these hooks yet, so they do not run: start codex and choose \"Trust all and continue\" when it asks you to review hooks",
+        integration_codex_hooks_disabled_note: "  codex has disabled these hooks: enable them in codex with /hooks",
         explain_agent_label: "agent: ",
         explain_state_label: "state: ",
         explain_manifest_label: "manifest: ",

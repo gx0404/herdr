@@ -128,6 +128,8 @@ Codex のサブエージェントは「ニックネーム · タスク名」で�
 
 エージェントアクティビティウィンドウでは、Codex のサブエージェントの出力は自身のスレッドの読みやすいトランスクリプトになります。親エージェントからのメッセージ、`user:` とアシスタントのメッセージ、`(thinking)` の印、主な引数付きのツール呼び出しとその出力の先頭 5 行、プラン、そのターンの最後のメッセージを添えた `[task complete]` が表示されます。開発者向けの指示、サブエージェントが親から引き継いだ履歴、トークン数、レート制限などの記録は表示されず、Herdr が認識できない記録は種類だけを角かっこで示します。
 
+Codex は信頼済みのフックだけを実行します。統合をインストールした後や、アップデートでフックが変わった後は、次回の起動時に Codex が「Hooks need review」を表示します。「Trust all and continue」を選ぶか、「Review hooks」を開いて Herdr のフックを信頼してください。「Continue without trusting」を選ぶと Herdr のフックは実行されず、Herdr は Codex からセッション識別やアクティビティのシグナルを受け取れません。Codex が現在の Herdr フックをまだ信頼していない間は、`herdr integration install codex` がこの案内を出力し、`herdr integration status` も Codex の行の下に注記を表示します。Codex の `/hooks` で Herdr のフックを無効にした場合も、status に注記が表示されます。
+
 Herdr はデフォルトで `~/.codex` を使い、`CODEX_HOME` が設定されていればそちらを使います。Codex の設定ディレクトリはあらかじめ存在している必要があります。インストールは `herdr-agent-state.sh` を書き込み、`hooks.json` を更新し、`config.toml` に `[features] hooks = true` があることを保証します。非推奨のトップレベル `codex_hooks` フラグが存在すれば削除もします。アンインストールは `hooks.json` から Herdr のエントリを削除してフックスクリプトを削除しますが、`config.toml` は変更しません。
 
 ## Kimi Code CLI

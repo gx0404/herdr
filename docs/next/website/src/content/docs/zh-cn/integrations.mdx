@@ -128,6 +128,8 @@ Codex 子 agent 以「昵称 · 任务名」标注,任务名取 agent 路径的�
 
 在 Agent 活动窗口里,Codex 子 agent 的输出是它自己线程的可读转写:来自父 agent 的消息、`user:` 与助手消息、`(thinking)` 标记、带主要参数的工具调用及其输出的前五行、计划,以及带该回合最后一条消息的 `[task complete]`。开发者指令、子 agent 从父 agent 继承的历史、token 计数、额度限制等簿记记录不显示;Herdr 认不出的记录只在方括号里显示其类型。
 
+Codex 只运行你信任过的钩子。安装集成后,或更新改动了钩子后,Codex 下次启动会显示「Hooks need review」。请选「Trust all and continue」,或进入「Review hooks」信任 Herdr 的钩子。如果选「Continue without trusting」,Herdr 的钩子不会运行,Herdr 也拿不到 Codex 的会话身份和活动信号。Codex 还没信任当前的 Herdr 钩子时,`herdr integration install codex` 会输出这条提醒,`herdr integration status` 也会在 Codex 那一行下面附一条提示;你在 Codex 里用 `/hooks` 停用了 Herdr 的钩子时,状态里同样会有提示。
+
 Herdr 默认使用 `~/.codex`,设置了 `CODEX_HOME` 时使用后者。Codex 配置目录必须已经存在。安装会写入 `herdr-agent-state.sh`、更新 `hooks.json`,并确保 `config.toml` 中有 `[features] hooks = true`。如果存在已弃用的顶层 `codex_hooks` 标志,它也会一并移除。卸载会从 `hooks.json` 中移除 Herdr 条目并删除钩子脚本,但不改动 `config.toml`。
 
 ## Kimi Code CLI
