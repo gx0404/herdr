@@ -19,15 +19,7 @@ pub(super) fn dashboard_layout(
 ) -> Option<PageLayout> {
     let outer = page_bounds
         .map(|rect| rect.intersection(area))
-        .or_else(|| {
-            crate::ui::modal_rect(
-                area,
-                crate::ui::ModalSize::Content {
-                    width: super::DASHBOARD_MODAL_WIDTH,
-                    height: 34,
-                },
-            )
-        })?;
+        .or_else(|| crate::ui::modal_rect(area, super::DASHBOARD_MODAL_SIZE))?;
     let inner = super::super::render::panel_inner(outer)?;
     if inner.height < 8 || inner.width < 32 {
         return None;
@@ -63,15 +55,7 @@ pub(super) fn render_dashboard(
 ) -> Option<OverlayRender> {
     let p = cx.palette;
     let t = &crate::i18n::texts().machines;
-    let (popup, inner) = modal_panel(
-        b,
-        crate::ui::ModalSize::Content {
-            width: super::DASHBOARD_MODAL_WIDTH,
-            height: 34,
-        },
-        p.accent,
-        cx,
-    )?;
+    let (popup, inner) = modal_panel(b, super::DASHBOARD_MODAL_SIZE, p.accent, cx)?;
     if inner.height < 8 || inner.width < 32 {
         return Some(OverlayRender {
             area: popup,

@@ -163,7 +163,7 @@ pub(super) fn render_machine_list(
 ) -> Option<OverlayRender> {
     let p = cx.palette;
     let t = &crate::i18n::texts().machines;
-    let (popup, inner) = modal_panel(b, crate::ui::ModalSize::Large.with_height(24), p.accent, cx)?;
+    let (popup, inner) = modal_panel(b, super::NARROW_LIST_MODAL_SIZE, p.accent, cx)?;
     if inner.width < 24 || inner.height < 8 {
         return Some(OverlayRender {
             area: popup,

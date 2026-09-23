@@ -3858,29 +3858,32 @@ fn import_discover_without_hosts_is_an_empty_state_with_the_path() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// L19（尺寸）：宽屏下机器页走 dashboard（116 列），但导入向导固定用
-/// `ModalSize::Large`（76 列），从机器页按 `i` 打开导入会看到浮层突然
-/// 变窄。导入向导应当和它出发的机器页用同一档宽度（在窄终端仍会被
-/// `centered_rect` 按边距钳位，行为不变）。
+/// L19（尺寸）：导入向导与它出发的机器页必须同尺寸，按 `i` 打开导入时浮层
+/// 不能突然变宽 / 变窄 / 变矮。机器页 page 宽 ≥96 列走 116×34 的 dashboard，
+/// 以下走 76×24 的朴素列表；上一版让导入无条件请求 116×24，结果 86–95 列时
+/// 导入反而比机器页宽（82–91 对 76），≥96 列宽度一致了高度仍是 24 对 34。
+/// 两页改用同一个尺寸函数后，扫 80–140 列、两种行高逐一核对宽高。
 #[test]
-fn import_wizard_matches_the_machines_dashboard_width_on_wide_terminals() {
+fn import_wizard_matches_the_machines_page_size_at_every_width() {
+    let dir = with_temp_home("l19-import-size");
     let build = profile("Build", "dev@build.example", "1");
-    let mut state = state_with_profiles(&[build]);
-    state.open_machines_overlay();
-    state.compose(140, 40).expect("宽屏机器页（dashboard）");
-    let dashboard_popup_width = state.hits.machines_popup.width;
-    assert!(
-        dashboard_popup_width >= 100,
-        "宽屏机器页应当是加宽的 dashboard：{dashboard_popup_width}"
-    );
-
-    state.open_machine_import_wizard();
-    state.compose(140, 40).expect("导入向导");
-    let import_popup_width = state.hits.machines_popup.width;
-    assert_eq!(
-        import_popup_width, dashboard_popup_width,
-        "导入向导浮层宽度应当与机器页一致，而不是固定 76 列"
-    );
+    for rows in [32u16, 40] {
+        for cols in 80u16..=140 {
+            let mut state = state_with_profiles(std::slice::from_ref(&build));
+            state.open_machines_overlay();
+            state.compose(cols, rows).expect("机器页");
+            let page = state.hits.machines_popup;
+            state.open_machine_import_wizard();
+            state.compose(cols, rows).expect("导入向导");
+            let import = state.hits.machines_popup;
+            assert_eq!(
+                (import.width, import.height),
+                (page.width, page.height),
+                "{cols}×{rows}：导入向导与机器页尺寸不一致"
+            );
+        }
+    }
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// L19（无主机时的「继续」）：discover 没有可导入的主机时，「enter 继续」

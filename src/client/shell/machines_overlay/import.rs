@@ -586,14 +586,11 @@ pub(super) fn render_machine_import(
 ) -> Option<OverlayRender> {
     let p = cx.palette;
     let t = &crate::i18n::texts().machines;
-    // 与机器页 dashboard 同宽（L19）：从宽屏机器页打开导入不会突然变窄；
-    // 窄终端仍按 `centered_rect` 的边距钳位，行为与之前一致。
+    // 与机器列表页同一档尺寸（L19）：宽屏同 dashboard，窄屏同朴素列表，从机器
+    // 页按 `i` 打开导入时浮层宽高都不跳变；视图计算（`machines_body`）同口径。
     let (popup, inner) = modal_panel(
         b,
-        crate::ui::ModalSize::Content {
-            width: super::DASHBOARD_MODAL_WIDTH,
-            height: 24,
-        },
+        super::machines_page_size(b.area, cx.page_bounds),
         p.accent,
         cx,
     )?;

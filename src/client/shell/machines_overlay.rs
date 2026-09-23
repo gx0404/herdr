@@ -76,10 +76,33 @@ pub(super) struct MachineToast {
 /// toast 在屏时长；到期由 feedback tick 清除并请求一次重绘。
 pub(super) const MACHINE_TOAST_DURATION: std::time::Duration = std::time::Duration::from_secs(4);
 
-/// 宽屏 dashboard 的目标内容宽度；导入向导（`import.rs`）复用同一档，避免
-/// 从机器页打开导入时浮层突然变窄（L19）。窄终端仍会被 `centered_rect`
-/// 按边距钳位，行为与之前一致。
-pub(super) const DASHBOARD_MODAL_WIDTH: u16 = 116;
+/// 宽屏 dashboard 的浮层尺寸；窄终端仍会被 `centered_rect` 按边距钳位。
+pub(super) const DASHBOARD_MODAL_SIZE: crate::ui::ModalSize = crate::ui::ModalSize::Content {
+    width: 116,
+    height: 34,
+};
+/// 窄屏朴素机器列表的浮层尺寸（`ModalSize::Large` 的 76 列，配 24 行）。
+pub(super) const NARROW_LIST_MODAL_SIZE: crate::ui::ModalSize =
+    crate::ui::ModalSize::Large.with_height(24);
+/// page 宽度达到这一档，机器列表才走宽屏 dashboard。
+const DASHBOARD_MIN_PAGE_WIDTH: u16 = 96;
+
+/// 机器列表是否走宽屏 dashboard：视图计算（`machines_body`）与渲染
+/// （`render_machines_view`）共用同一判定（STATE-04）。
+pub(super) fn machines_page_is_wide(area: Rect, page_bounds: Option<Rect>) -> bool {
+    page_bounds.unwrap_or(area).width >= DASHBOARD_MIN_PAGE_WIDTH
+}
+
+/// 机器列表页与导入向导共用的浮层尺寸（L19）：宽屏与 dashboard 同为 116×34，
+/// 窄屏与朴素列表同为 76×24。两页按同一判定取同一档，从机器页按 `i` 打开导入
+/// 时浮层的宽高都不跳变。
+pub(super) fn machines_page_size(area: Rect, page_bounds: Option<Rect>) -> crate::ui::ModalSize {
+    if machines_page_is_wide(area, page_bounds) {
+        DASHBOARD_MODAL_SIZE
+    } else {
+        NARROW_LIST_MODAL_SIZE
+    }
+}
 
 impl ClientMachinesOverlay {
     fn blank() -> Self {
@@ -1193,7 +1216,7 @@ pub(super) fn machines_body(
 ) -> Option<MachinesBody> {
     match &overlay.view {
         ClientMachinesView::List => {
-            if page_bounds.unwrap_or(area).width >= 96 {
+            if machines_page_is_wide(area, page_bounds) {
                 let layout = dashboard::dashboard_layout(
                     area,
                     page_bounds,
@@ -1210,7 +1233,7 @@ pub(super) fn machines_body(
                     layout.content.height,
                 )));
             }
-            let (_, inner) = machines_panel(area, page_bounds, 24)?;
+            let (_, inner) = machines_panel(area, page_bounds, NARROW_LIST_MODAL_SIZE)?;
             let rows = machine_list_rows(saved_profiles, endpoints, overlay.query.as_str());
             let selected = if rows.is_empty() {
                 0
@@ -1234,7 +1257,11 @@ pub(super) fn machines_body(
             Some(MachinesBody::List(stack.content))
         }
         ClientMachinesView::Detail(id) => {
-            let (_, inner) = machines_panel(area, page_bounds, 26)?;
+            let (_, inner) = machines_panel(
+                area,
+                page_bounds,
+                crate::ui::ModalSize::Large.with_height(26),
+            )?;
             let profile = saved_profiles.iter().find(|profile| &profile.id == id)?;
             // 与渲染同一口径：只看这台机器的失败类型有没有界面内恢复路径。
             let has_review = connection_errors
@@ -1251,11 +1278,17 @@ pub(super) fn machines_body(
             Some(MachinesBody::Detail(stack.content))
         }
         ClientMachinesView::Forwards(_) => {
-            let (_, inner) = machines_panel(area, page_bounds, 20)?;
+            let (_, inner) = machines_panel(
+                area,
+                page_bounds,
+                crate::ui::ModalSize::Large.with_height(20),
+            )?;
             Some(MachinesBody::Forwards(forwards_stack(inner).content))
         }
         ClientMachinesView::Import(view) => {
-            let (_, inner) = machines_panel(area, page_bounds, 24)?;
+            // 与机器列表页同一档尺寸（L19），渲染端 `render_machine_import` 同口径。
+            let (_, inner) =
+                machines_panel(area, page_bounds, machines_page_size(area, page_bounds))?;
             let stack = import_stack(inner, view);
             match view.step {
                 ClientImportStep::Discover => None,
@@ -1279,11 +1312,15 @@ pub(super) fn machines_body(
     }
 }
 
-/// 机器面板的弹窗与内框，视图计算与渲染共用（各视图高度不同）。
-fn machines_panel(area: Rect, page_bounds: Option<Rect>, height: u16) -> Option<(Rect, Rect)> {
+/// 机器面板的弹窗与内框，视图计算与渲染共用（各视图尺寸不同）。
+fn machines_panel(
+    area: Rect,
+    page_bounds: Option<Rect>,
+    size: crate::ui::ModalSize,
+) -> Option<(Rect, Rect)> {
     let outer = page_bounds
         .map(|rect| rect.intersection(area))
-        .or_else(|| crate::ui::modal_rect(area, crate::ui::ModalSize::Large.with_height(height)))?;
+        .or_else(|| crate::ui::modal_rect(area, size))?;
     let inner = super::render::panel_inner(outer)?;
     (inner.width >= 24 && inner.height >= 8).then_some((outer, inner))
 }
@@ -1560,7 +1597,7 @@ fn render_machines_view(
     cx: &super::feedback::ChromeContext<'_>,
 ) -> Option<OverlayRender> {
     if matches!(overlay.view, ClientMachinesView::List)
-        && cx.page_bounds.unwrap_or(b.area).width >= 96
+        && machines_page_is_wide(b.area, cx.page_bounds)
     {
         return dashboard::render_dashboard(
             b,
