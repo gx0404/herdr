@@ -84,7 +84,15 @@ const KIMI_TODO_TOOL_MATCHER: &str = "^TodoList$";
 /// 按较窄的那份取交集。`TaskStarted` 只在 20 项里，因此暂不订阅——后台任务开始靠
 /// `Notification`（`task.*`，实测通知类型是 `task.<终态>`）与轮询兜底；待
 /// `KIMI_MIN_VERSION` 提到含 `TaskStarted` 的版本后再加回。
-const KIMI_HOOK_EVENTS: [(&str, Option<&str>, &str); 16] = [
+///
+/// 回合的三种收尾各发一个事件且互斥：正常结束 `Stop`、用户打断 `Interrupt`、回合出错
+/// `StopFailure`（provider 报错、鉴权失败等，载荷是 `errorType` / `errorMessage`）。
+/// 三者都要映射到 `idle`，否则出错的回合会让 pane 停在 working 直到 kimi 退出。
+/// `StopFailure` 与 `SessionEnd` 自官方仓库最早的 tag（0.2.0）起就在枚举里，
+/// 0.14.0 的 legacy 引擎也会在回合出错时触发 `StopFailure`，无需按版本门控。
+/// `SessionEnd` 不订阅：它只在 kimi 退出时触发，而 herdr 观察到 agent 进程退出时
+/// 本就会收回该 pane 的 hook 权威。
+const KIMI_HOOK_EVENTS: [(&str, Option<&str>, &str); 17] = [
     ("SessionStart", None, "session"),
     ("UserPromptSubmit", None, "working"),
     ("PreToolUse", Some(KIMI_OTHER_TOOL_MATCHER), "working"),
@@ -108,6 +116,7 @@ const KIMI_HOOK_EVENTS: [(&str, Option<&str>, &str); 16] = [
     ("PermissionRequest", None, "blocked"),
     ("PermissionResult", None, "working"),
     ("Stop", None, "idle"),
+    ("StopFailure", None, "idle"),
     ("Interrupt", None, "idle"),
     ("SubagentStart", None, "activity"),
     ("SubagentStop", None, "activity"),

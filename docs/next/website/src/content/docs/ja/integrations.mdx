@@ -142,6 +142,8 @@ herdr integration install kimi
 
 インテグレーションバージョン `8` からは、フックは `SubagentStart`、`SubagentStop`、`Notification`（`task.*`）、`PostToolUse`（`TodoList`）も購読します。これらのエントリはエージェントの活動ツリーが変化した可能性があることを Herdr に伝えるだけで、セッションの内容は含みません。活動ツリー自体は Herdr が Kimi のセッションファイルを読んで組み立てます。
 
+インテグレーションバージョン `8` は、Kimi のターンの終わり方をすべて `idle` に対応付けます。ターンが完了したときの `Stop`、中断したときの `Interrupt`、そしてプロバイダーのエラーや認証エラーなどでターンが失敗したときの `StopFailure` です。そのため、失敗したターンのあと Kimi が終了するまでペインが `working` のまま残ることはなくなります。Herdr がサポートするすべての Kimi Code CLI バージョンに `StopFailure` があります。アップグレード後に Kimi インテグレーションを再インストールして追加してください。
+
 Herdr はデフォルトで `~/.kimi-code` を使い、`KIMI_CODE_HOME` が設定されていればそちらを使います。Kimi Code の設定ディレクトリはあらかじめ存在している必要があります。インストールは `hooks/herdr-agent-state.sh` を書き込み、`config.toml` に Herdr 管理の `[[hooks]]` エントリを追記します。アンインストールは Herdr 管理の設定ブロックを削除し、フックスクリプトを削除します。
 
 Herdr は保存された Kimi セッションを `kimi --session <id>` で resume します。

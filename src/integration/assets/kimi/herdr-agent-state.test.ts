@@ -60,10 +60,12 @@ function herdrEnv(socketPath: string) {
 
 // Kimi validates the whole `config.toml` against a fixed hook-event enum, so an
 // event name that the minimum supported Kimi does not know invalidates the file
-// and takes the lifecycle hooks down with it. The narrower of the two enums that
-// parse the same file is the node-sdk one (Kimi Code 2.0.2, read-only inspection
-// of the shipped bundle); agent-core-v2 adds UserPromptQueued, TurnStarted,
-// SessionHeartbeat and TaskStarted on top of it.
+// and takes the lifecycle hooks down with it. This is the enum of the minimum
+// version itself: `HOOK_EVENT_TYPES` in packages/agent-core/src/session/hooks/
+// types.ts at the official MoonshotAI/kimi-code tag `@moonshot-ai/kimi-code@0.14.0`,
+// which `HookDefSchema` validates `[[hooks]]` against. Kimi Code 2.0.2 keeps the
+// same 16 names in node-sdk and adds UserPromptQueued, TurnStarted,
+// SessionHeartbeat and TaskStarted (0.32.0) only in agent-core-v2.
 const HOOK_EVENTS_AT_MIN_VERSION = new Set([
   "PreToolUse",
   "PostToolUse",
@@ -173,6 +175,42 @@ test("lifecycle actions keep their existing request shapes", async () => {
   expect(requests.map((request) => request.method)).toEqual(["pane.report_agent", "pane.report_agent_session"]);
   expect(requests[0].params).toMatchObject({ state: "working", agent_session_id: sessionId });
   expect(requests[1].params).toMatchObject({ session_start_source: "startup", agent_session_id: sessionId });
+});
+
+test("a turn that ends with an error reports idle, like a completed turn", async () => {
+  const { socketPath, requests } = await listen();
+  const sessionId = "session_0f0f0f0f-1111-4222-8333-444455556666";
+  // Kimi fires StopFailure instead of Stop when a turn fails (smoke M3: a
+  // provider 401). The payload is the camelCase-to-snake_case hook input.
+  const payload = {
+    hook_event_name: "StopFailure",
+    session_id: sessionId,
+    cwd: "/tmp/project",
+    error_type: "APIStatusError",
+    error_message: "401 invalid api key",
+  };
+
+  expect(await runHook("idle", JSON.stringify(payload), herdrEnv(socketPath))).toBe(0);
+
+  expect(requests).toHaveLength(1);
+  expect(requests[0].method).toBe("pane.report_agent");
+  expect(requests[0].params).toEqual({
+    pane_id: "test:p1",
+    source: "herdr:kimi",
+    agent: "kimi",
+    seq: expect.any(Number),
+    state: "idle",
+    agent_session_id: sessionId,
+  });
+});
+
+test("the installed hook table maps every turn-ending event to idle", async () => {
+  const source = await readFile(join(import.meta.dir, "..", "..", "mod.rs"), "utf8");
+  const table = source.match(/const KIMI_HOOK_EVENTS: \[\(&str, Option<&str>, &str\); \d+\] = \[([\s\S]*?)\n\];/);
+  expect(table).not.toBeNull();
+  const idleEvents = [...table![1].matchAll(/\(\s*"([A-Za-z]+)",\s*None,\s*"idle"\s*\)/g)].map((match) => match[1]);
+
+  expect(idleEvents.sort()).toEqual(["Interrupt", "Stop", "StopFailure"]);
 });
 
 test("the hook stays silent outside Herdr and for unknown actions", async () => {

@@ -1488,6 +1488,19 @@ fn kimi_question_hooks_report_blocked_until_the_question_finishes() {
     assert!(KIMI_HOOK_EVENTS.contains(&("PreToolUse", Some(KIMI_OTHER_TOOL_MATCHER), "working",)));
 }
 
+/// 冒烟 M3：Kimi 的回合有三种收尾，各自只发一个事件——正常结束发 `Stop`、用户打断发
+/// `Interrupt`、回合出错（真机里是 provider 401）发 `StopFailure`。钩子是 kimi 的完整
+/// 生命周期权威，屏幕检测不再兜底，漏掉任何一种都会让 pane 停在 working 直到退出。
+#[test]
+fn kimi_every_turn_ending_event_reports_idle() {
+    for event in ["Stop", "Interrupt", "StopFailure"] {
+        assert!(
+            KIMI_HOOK_EVENTS.contains(&(event, None, "idle")),
+            "kimi turn-ending event {event} must report idle"
+        );
+    }
+}
+
 #[test]
 fn install_kimi_uses_kimi_code_home_env() {
     let _lock = integration_env_lock();

@@ -142,6 +142,8 @@ herdr integration install kimi
 
 从集成版本 `8` 起,该钩子还订阅 `SubagentStart`、`SubagentStop`、`Notification`(`task.*`)和 `PostToolUse`(`TodoList`)。这些条目只告诉 Herdr 智能体活动树可能变了,不携带会话内容;活动树由 Herdr 自己读 Kimi 的会话文件得到。
 
+集成版本 `8` 还把 Kimi 回合的每种结束方式都映射为 `idle`:回合完成时的 `Stop`、被打断时的 `Interrupt`,以及回合出错(例如 provider 报错或鉴权失败)时的 `StopFailure`。因此出错的回合不会再让窗格一直停在 `working`,直到 Kimi 退出。Herdr 支持的所有 Kimi Code CLI 版本都有 `StopFailure`;升级后请重新安装 Kimi 集成以添加它。
+
 Herdr 默认使用 `~/.kimi-code`,设置了 `KIMI_CODE_HOME` 时使用后者。Kimi Code 配置目录必须已经存在。安装会写入 `hooks/herdr-agent-state.sh`,并在 `config.toml` 中追加 Herdr 管理的 `[[hooks]]` 条目。卸载会移除 Herdr 管理的配置块并删除钩子脚本。
 
 Herdr 用 `kimi --session <id>` 恢复保存的 Kimi 会话。
