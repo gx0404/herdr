@@ -1139,9 +1139,11 @@ impl ClientShellState {
                 match step {
                     // select 步骤滚轮走焦点：reveal 会把窗口带过去，焦点不脱屏。
                     Some(ClientImportStep::Select) => self.move_import_focus(delta),
-                    Some(ClientImportStep::Done) => self.scroll_import_results(delta),
-                    // discover 步骤不消费 `view.scroll`，滚轮在这里没有目标。
-                    Some(ClientImportStep::Discover) | None => {}
+                    // discover 的主机清单与 done 的结果列表都按行滚动（文档终审 D3）。
+                    Some(ClientImportStep::Discover | ClientImportStep::Done) => {
+                        self.scroll_import_view(delta)
+                    }
+                    None => {}
                 }
             }
             ScrollTarget::None => {}
@@ -1198,6 +1200,8 @@ pub(super) enum MachinesBody {
     Detail(Rect),
     /// 转发规则编辑器：正文 + 可见行数。
     Forwards(Rect),
+    /// 导入向导发现步骤的主机清单（可滚动，文档终审 D3）。
+    ImportDiscover(Rect),
     /// 导入向导的候选 / 目标选择列表：正文 + 可见行数。
     ImportSelect(Rect, usize),
     /// 导入向导的结果列表。
@@ -1291,7 +1295,7 @@ pub(super) fn machines_body(
                 machines_panel(area, page_bounds, machines_page_size(area, page_bounds))?;
             let stack = import_stack(inner, view);
             match view.step {
-                ClientImportStep::Discover => None,
+                ClientImportStep::Discover => Some(MachinesBody::ImportDiscover(stack.content)),
                 ClientImportStep::Select => {
                     // 候选列表扣掉表头与固定行（通配符开关 / 分组输入 / 计数行），
                     // 宽屏还要让出右侧预览栏：与渲染同一个版面函数。
@@ -1496,6 +1500,16 @@ impl ClientShellState {
                 }
                 view.reveal = false;
                 page.view_max_scroll = rules.len().saturating_sub(visible_rows);
+            }
+            MachinesBody::ImportDiscover(rect) => {
+                let ClientMachinesView::Import(view) = &mut page.view else {
+                    return;
+                };
+                // 与渲染同一个行模型：滚过头（窗口变高、滚轮连滚）在这里收回，
+                // 反向第一格就动。
+                let max_scroll = discover_max_scroll(view, rect.height);
+                view.scroll = view.scroll.min(max_scroll);
+                page.view_max_scroll = max_scroll;
             }
             MachinesBody::ImportSelect(rect, visible_rows) => {
                 let ClientMachinesView::Import(view) = &mut page.view else {

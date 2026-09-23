@@ -692,6 +692,7 @@ pub const TEXTS: Texts = Texts {
         import_scroll_position_fmt: "顶部第 {start} 条 / 共 {total} 条",
         import_result_imported: "已导入",
         import_result_skipped: "已跳过",
+        import_skip_unselected: "未勾选",
         import_result_failed: "失败",
         import_failed_hint: "修复原因后重试导入，或手动添加机器",
         import_summary_fmt: "已导入 {imported} 台，跳过 {skipped} 台，失败 {failed} 台",

@@ -658,6 +658,7 @@ pub const TEXTS: Texts = Texts {
         import_scroll_position_fmt: "top row {start} of {total}",
         import_result_imported: "imported",
         import_result_skipped: "skipped",
+        import_skip_unselected: "not selected",
         import_result_failed: "failed",
         import_failed_hint: "fix the cause, then retry the import or add the machine manually",
         import_summary_fmt: "imported {imported}, skipped {skipped}, failed {failed}",

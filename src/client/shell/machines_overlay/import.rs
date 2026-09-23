@@ -21,8 +21,8 @@ pub(in crate::client::shell) struct ClientMachineImportView {
     /// Focus across candidate rows, then the wildcard toggle, then the group
     /// input (last two positions).
     pub(in crate::client::shell) focus_row: usize,
-    /// 候选列表（select 步骤）与结果列表（done 步骤）共用的滚动窗口起点，
-    /// 由渲染经 `OverlayRender::machines_scroll` 回写；换步骤时归零。
+    /// 主机清单（discover 步骤）、候选列表（select 步骤）与结果列表（done 步骤）
+    /// 共用的滚动窗口起点，由视图计算阶段钳位回写；换步骤时归零。
     pub(in crate::client::shell) scroll: usize,
     /// 一次性「把聚焦行滚进窗口」请求：焦点移动置位，compose 后清零。
     pub(in crate::client::shell) reveal: bool,
@@ -249,14 +249,24 @@ impl ClientShellState {
             }
         }
         // Hosts the user unchecked report as skipped alongside the plan skips.
+        let unselected = crate::i18n::texts().machines.import_skip_unselected;
         for (index, planned) in view.plan.ready.iter().enumerate() {
             if !view.selected.get(index).copied().unwrap_or(false) {
                 view.results.push(ClientImportResultRow {
                     label: planned.label.clone(),
-                    detail: String::new(),
+                    detail: unselected.to_owned(),
                     outcome: ClientImportOutcome::Skipped,
                 });
             }
+        }
+        // 发现阶段就跳过的主机（通配符、已存在、批内重复）也逐条列出并带原因
+        // （文档终审 D3）：以前只计进汇总里的「跳过 N 台」，结果页看不到是哪几台。
+        for skip in &view.plan.skipped {
+            view.results.push(ClientImportResultRow {
+                label: skip.label.clone(),
+                detail: skip.reason.clone(),
+                outcome: ClientImportOutcome::Skipped,
+            });
         }
         let deselected = view
             .plan
@@ -298,8 +308,9 @@ impl ClientShellState {
         }
     }
 
-    /// done 步骤的结果列表滚动：上界由渲染回填（`machines_max_scroll`）。
-    pub(super) fn scroll_import_results(&mut self, delta: isize) {
+    /// discover 步骤的主机清单与 done 步骤的结果列表共用的滚动：上界由视图计算
+    /// 阶段写入（`view_max_scroll`），这里只按它钳位。
+    pub(super) fn scroll_import_view(&mut self, delta: isize) {
         let max_scroll = self.machines_view_max_scroll();
         if let Some(ClientShellOverlay::Machines(overlay)) = self.overlay.as_mut() {
             if let ClientMachinesView::Import(view) = &mut overlay.view {
@@ -382,6 +393,18 @@ impl ClientShellState {
                             }
                         }
                     }
+                    // 主机多于一屏时发现页可滚动（文档终审 D3），键位与 done 步骤
+                    // 一致，另补翻页与首尾；上界由视图计算阶段给出。
+                    KeyCode::Up | KeyCode::Char('k') if plain => self.scroll_import_view(-1),
+                    KeyCode::Down | KeyCode::Char('j') if plain => self.scroll_import_view(1),
+                    KeyCode::PageUp if plain => self.scroll_import_view(-10),
+                    KeyCode::PageDown if plain => self.scroll_import_view(10),
+                    KeyCode::Home | KeyCode::Char('g') if plain => {
+                        self.scroll_import_view(isize::MIN)
+                    }
+                    KeyCode::End | KeyCode::Char('G') if plain => {
+                        self.scroll_import_view(isize::MAX)
+                    }
                     _ => {}
                 }
                 outcome.repaint = true;
@@ -446,11 +469,11 @@ impl ClientShellState {
                     outcome.repaint = true;
                 }
                 KeyCode::Up | KeyCode::Char('k') if plain => {
-                    self.scroll_import_results(-1);
+                    self.scroll_import_view(-1);
                     outcome.repaint = true;
                 }
                 KeyCode::Down | KeyCode::Char('j') if plain => {
-                    self.scroll_import_results(1);
+                    self.scroll_import_view(1);
                     outcome.repaint = true;
                 }
                 _ => {}
@@ -483,7 +506,7 @@ fn import_hints(view: &ClientMachineImportView) -> Vec<MachineHint<'static>> {
     match view.step {
         ClientImportStep::Discover => {
             let continue_enabled = view.fatal.is_none() && !view.plan.ready.is_empty();
-            let mut hints = Vec::with_capacity(2);
+            let mut hints = Vec::with_capacity(3);
             // 没有可导入的主机时「继续」无处可去：不画成灰态按钮，直接不
             // 显示，页脚只剩返回（L19：空态下仍显示「enter 继续」容易让人
             // 以为按了会有反应）。
@@ -502,6 +525,10 @@ fn import_hints(view: &ClientMachineImportView) -> Vec<MachineHint<'static>> {
                 t.hint_back,
                 MachineOverlayButton::Back,
             ));
+            // 有主机清单时可滚动（文档终审 D3）：导航提示排在动作之后，窄时先丢。
+            if view.fatal.is_none() {
+                hints.push(MachineHint::key("↑↓", t.hint_scroll));
+            }
             hints
         }
         ClientImportStep::Select => vec![
@@ -657,7 +684,7 @@ pub(super) fn render_machine_import(
 
     let body = stack.content;
     let mut cursor = None;
-    // discover 步骤没有可滚动列表：窗口由视图计算阶段按步骤给出（STATE-04）。
+    // 各步骤的滚动窗口由视图计算阶段按步骤给出（STATE-04），渲染只读。
     let mut action_hits = Vec::new();
     let wizard_rows: Vec<(Rect, usize)> = match view.step {
         ClientImportStep::Discover => {
@@ -699,7 +726,6 @@ fn render_import_discover(
     p: &Palette,
 ) {
     let t = &crate::i18n::texts().machines;
-    let mut y = body.y;
     if let Some(fatal) = view.fatal.as_deref() {
         let path = view.path.display().to_string();
         crate::ui::kit::empty_state::render_empty_state(
@@ -714,76 +740,100 @@ fn render_import_discover(
         );
         return;
     }
-    if view.warnings > 0 {
-        put_text(
-            b,
-            body.x,
-            y,
-            body.width,
-            &format!(
-                " {}",
-                crate::i18n::fill(
-                    t.import_warnings_fmt,
-                    &[("count", &view.warnings.to_string())]
-                )
+    // 一屏放不下时按 `view.scroll` 滚动（文档终审 D3）；上界与视图计算阶段同一
+    // 口径，这里只做只读钳位。只格式化落在窗口里的行：发现页随每次重绘都画，
+    // 主机数可达几十上百。
+    let visible = usize::from(body.height);
+    let scroll = view.scroll.min(discover_max_scroll(view, body.height));
+    let end = discover_line_count(view).min(scroll.saturating_add(visible));
+    for (y, index) in (body.y..).zip(scroll..end) {
+        let Some(line) = discover_line(view, index) else {
+            break;
+        };
+        let (text, color) = match line {
+            DiscoverLine::Warnings => (
+                format!(
+                    " {}",
+                    crate::i18n::fill(
+                        t.import_warnings_fmt,
+                        &[("count", &view.warnings.to_string())]
+                    )
+                ),
+                p.yellow,
             ),
-            base.fg(p.yellow),
-        );
-        y += 1;
+            DiscoverLine::ReadyHeader => (t.import_ready_header.to_owned(), p.overlay0),
+            DiscoverLine::Ready(planned) => {
+                let mut text = format!(" {} → {}", planned.label, import_planned_summary(planned));
+                if !planned.notes.is_empty() {
+                    text.push_str(&format!(
+                        " ({})",
+                        crate::i18n::fill(
+                            t.import_notes_fmt,
+                            &[("count", &planned.notes.len().to_string())]
+                        )
+                    ));
+                }
+                (text, p.text)
+            }
+            DiscoverLine::SkipHeader => (t.import_skip_header.to_owned(), p.overlay0),
+            DiscoverLine::Skip(skip) => (format!(" {} — {}", skip.label, skip.reason), p.overlay1),
+        };
+        put_text(b, body.x, y, body.width, &text, base.fg(color));
+    }
+}
+
+/// discover 步骤的行模型：解析告警行（有告警时）、「主机：」表头与每个候选一行、
+/// 「跳过：」表头与每个跳过项一行。视图计算（滚动上界）与渲染共用同一口径
+/// （STATE-04）。
+enum DiscoverLine<'a> {
+    Warnings,
+    ReadyHeader,
+    Ready(&'a crate::remote::PlannedImport),
+    SkipHeader,
+    Skip(&'a crate::remote::ImportSkip),
+}
+
+/// discover 步骤的总行数；空状态（`fatal`）没有可滚动的清单。
+pub(super) fn discover_line_count(view: &ClientMachineImportView) -> usize {
+    if view.fatal.is_some() {
+        return 0;
+    }
+    let section = |len: usize| if len == 0 { 0 } else { len + 1 };
+    usize::from(view.warnings > 0)
+        + section(view.plan.ready.len())
+        + section(view.plan.skipped.len())
+}
+
+/// discover 步骤在 `height` 行正文里的滚动上界。
+pub(super) fn discover_max_scroll(view: &ClientMachineImportView, height: u16) -> usize {
+    discover_line_count(view).saturating_sub(usize::from(height))
+}
+
+/// 第 `index` 行的内容，按 [`discover_line_count`] 的顺序逐段扣减，不分配。
+fn discover_line(view: &ClientMachineImportView, mut index: usize) -> Option<DiscoverLine<'_>> {
+    if view.warnings > 0 {
+        if index == 0 {
+            return Some(DiscoverLine::Warnings);
+        }
+        index -= 1;
     }
     if !view.plan.ready.is_empty() {
-        put_text(
-            b,
-            body.x,
-            y,
-            body.width,
-            t.import_ready_header,
-            base.fg(p.overlay0),
-        );
-        y += 1;
-        for planned in &view.plan.ready {
-            if y >= body.bottom() {
-                break;
-            }
-            let mut text = format!(" {} → {}", planned.label, import_planned_summary(planned));
-            if !planned.notes.is_empty() {
-                text.push_str(&format!(
-                    " ({})",
-                    crate::i18n::fill(
-                        t.import_notes_fmt,
-                        &[("count", &planned.notes.len().to_string())]
-                    )
-                ));
-            }
-            put_text(b, body.x, y, body.width, &text, base.fg(p.text));
-            y += 1;
+        if index == 0 {
+            return Some(DiscoverLine::ReadyHeader);
         }
-    }
-    if !view.plan.skipped.is_empty() && y < body.bottom() {
-        put_text(
-            b,
-            body.x,
-            y,
-            body.width,
-            t.import_skip_header,
-            base.fg(p.overlay0),
-        );
-        y += 1;
-        for skip in &view.plan.skipped {
-            if y >= body.bottom() {
-                break;
-            }
-            put_text(
-                b,
-                body.x,
-                y,
-                body.width,
-                &format!(" {} — {}", skip.label, skip.reason),
-                base.fg(p.overlay1),
-            );
-            y += 1;
+        index -= 1;
+        if let Some(planned) = view.plan.ready.get(index) {
+            return Some(DiscoverLine::Ready(planned));
         }
+        index -= view.plan.ready.len();
     }
+    if !view.plan.skipped.is_empty() {
+        if index == 0 {
+            return Some(DiscoverLine::SkipHeader);
+        }
+        return view.plan.skipped.get(index - 1).map(DiscoverLine::Skip);
+    }
+    None
 }
 
 /// select 步骤的渲染产物：窗口内的可点击行（候选、通配符开关、分组输入）、

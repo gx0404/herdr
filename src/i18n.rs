@@ -996,6 +996,8 @@ pub struct MachinesTexts {
     pub import_scroll_position_fmt: &'static str, // args: start, total
     pub import_result_imported: &'static str,
     pub import_result_skipped: &'static str,
+    /// 结果页里未勾选主机的跳过原因。
+    pub import_skip_unselected: &'static str,
     pub import_result_failed: &'static str,
     pub import_failed_hint: &'static str,
     pub import_summary_fmt: &'static str, // args: imported, skipped, failed
