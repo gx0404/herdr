@@ -1,0 +1,8 @@
+{
+  "agentType": "general-purpose",
+  "description": "print beta",
+  "requestShape": "background",
+  "requestNonInteractive": false,
+  "spawnDepth": 1,
+  "toolUseId": "toolu_b0000000000000002"
+}

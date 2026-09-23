@@ -39,7 +39,8 @@
 //! `type`、`timestamp`、`uuid`、`parentUuid`、`isSidechain`、`sessionId`、`cwd`、
 //! `gitBranch`、`slug`、`version`、`message`、`attributionAgent`、`promptId`、
 //! `toolUseResult` 等；`type` 只出现 `user` / `attachment` / `assistant`，**没有**
-//! `result` 之类的结束记录 → 结束与否只能靠 journal 或时间窗判定。
+//! `result` 之类的结束记录 → 结束与否靠 journal、父 agent 转录里的结束通知（见下文
+//! 「后台子 agent 的结束通知」）或时间窗判定。
 //! `attributionAgent` 是子 agent 的**类型**字符串（实测 `Explore` / `Plan` /
 //! `general-purpose`），不是 id；token 用量在 `message.usage`，键为
 //! `input_tokens` / `output_tokens` / `cache_creation_input_tokens` /
@@ -68,6 +69,36 @@
 //! 父转录里只有一条 `Workflow` 工具调用 → 反查父转录得不到完整树，目录扫描是
 //! 主力。
 //!
+//! # 后台子 agent 的结束通知（claude 2.1.280）
+//!
+//! 取证：真机探针会话 1 份 + 本机 241 份主转录的结构统计（只看键名、标签名与
+//! 状态取值，不读正文）+ 二进制只读字符串检索。
+//!
+//! - `Agent` 工具默认后台派生：本机 38 个非 workflow 子 agent 的 meta 边车全是
+//!   `requestShape: background`（workflow 下的 935 个是 `foreground`，由 journal
+//!   管）；父转录里的工具结果 `toolUseResult` 是 `{agentId, status:
+//!   "async_launched", isAsync, description, prompt, outputFile, …}`。
+//! - 结束靠 Claude Code 写给父 agent 的**结束通知**：`<task-notification>` 包着的
+//!   类 XML 正文，含一个或多个 `<task-id>`（后台子 agent 的就是它的 agentId）与
+//!   `<status>`，另有 `<tool-use-id>` / `<output-file>` / `<summary>` / `<note>` /
+//!   `<result>` / `<usage>`，自由文本经 XML 转义。`<status>` 的取值（二进制）：
+//!   `completed`、`failed`、`killed`（被用户或主 agent 停掉）、`stopped`（上一个
+//!   进程退出时没跑完的孤儿，重启后汇总成一条、带多个 task-id）、`blocked`；本机
+//!   实测只见 completed / failed。没有 task-id 的汇总通知（「N background commands
+//!   completed」）与 task-id 对不上子 agent 的（后台命令、workflow）一律忽略。
+//! - 只认三种投递记录：`queue-operation` 且 `operation == "enqueue"`（`content` 是
+//!   正文，时刻最接近结束；随后的 `dequeue` / `remove` 不带正文）；`origin.kind ==
+//!   "task-notification"` 的 `user` 行（`message.content` 是正文）；回合中投递的
+//!   `attachment.type == "queued_command"`（`attachment.prompt` 是正文）。工具说明
+//!   里的格式示例（`prompt_snapshot` 附件）、agent 读到的含通知字样的文件内容都不算。
+//! - 时序：本机 38 个有转录的通知对象，通知全部晚于子 agent 的最后一条转录（中位
+//!   48 ms、最多 1.3 s）。同一 task-id 可以多次通知（子 agent 被 SendMessage 唤起
+//!   续跑后再次结束），所以通知之后转录又有活动（超过宽限）视为续跑，回到时间窗
+//!   判定。
+//! - 位置：父 agent 是主会话时通知在主转录里——只扫尾部窗口，逐行先按开标签预筛、
+//!   命中才解析（本机主转录中位 270 KB、p99 21.8 MB），窗口外的旧子 agent 落回
+//!   时间窗判定；嵌套派生的通知在父子 agent 的转录里，随转录扫描顺带收集。
+//!
 //! 待办：**本机 25 份主转录里没有任何 `TodoWrite` / `TaskCreate` 调用**，形状取自
 //! 2.1.278 二进制内嵌的输入 schema（只读字符串检索）：`TodoWrite` 的
 //! `input.todos[]` 为 `{content, status, activeForm}`，`status` ∈ `pending` /
@@ -79,7 +110,7 @@
 //! 会话 id，没有可靠的会话→清单映射；`TaskCreated` / `TaskCompleted` 钩子只负责
 //! 触发刷新信号。
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::fs::File;
 use std::io::{BufRead, BufReader, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
@@ -116,8 +147,16 @@ const MAX_WALK_DEPTH: usize = 8;
 const MAX_LABEL_CHARS: usize = 120;
 /// 待办条目上限。
 const MAX_TODOS: usize = 32;
-/// 无 journal 记录时，最后一条转录早于这个窗口就不再算运行中。
+/// 既无 journal 终态也无结束通知时，最后一条转录早于这个窗口就不再算运行中。
 const RUNNING_WINDOW_MS: u64 = 120_000;
+/// 主转录只扫尾部这么多字节找结束通知（模块文档「后台子 agent 的结束通知」）。
+const MAX_NOTIFICATION_SCAN_BYTES: u64 = 4 * 1024 * 1024;
+/// 结束通知之后子 agent 转录又有活动、且晚于最后一条通知超过这个宽限，视为被唤起
+/// 续跑。宽限吸收被停掉的瞬间在通知之后补写的收尾行。
+const RESUME_GRACE_MS: u64 = 5_000;
+/// 结束通知正文的开闭标签。
+const NOTIFICATION_OPEN: &str = "<task-notification>";
+const NOTIFICATION_CLOSE: &str = "</task-notification>";
 /// journal 只记了开始时的宽限：workflow 被杀或崩溃且没写状态文件时不会补
 /// `result`，转录这么久不动就不再算运行中。取得宽，给长时间静默的工具调用留余量。
 const STALE_STARTED_MS: u64 = 30 * 60_000;
@@ -488,6 +527,237 @@ fn read_workflow_state(session_dir: &Path, workflow: &str) -> Option<WorkflowSta
 }
 
 // ---------------------------------------------------------------------------
+// 后台子 agent 的结束通知
+// ---------------------------------------------------------------------------
+
+/// 结束通知里的 `<status>`（取值见模块文档）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum NotifiedStatus {
+    Completed,
+    Failed,
+    /// `killed`（被用户或主 agent 停掉）与 `stopped`（上一个进程退出时的孤儿）。
+    Stopped,
+    /// `blocked`：停下来等用户处理，不是终态；之后续跑会写出新的转录活动。
+    Blocked,
+}
+
+impl NotifiedStatus {
+    fn parse(raw: &str) -> Option<Self> {
+        match raw.trim() {
+            "completed" => Some(Self::Completed),
+            "failed" => Some(Self::Failed),
+            "killed" | "stopped" => Some(Self::Stopped),
+            "blocked" => Some(Self::Blocked),
+            // 未知取值不猜，交给时间窗。
+            _ => None,
+        }
+    }
+
+    fn activity_status(self) -> AgentActivityStatus {
+        match self {
+            Self::Completed => AgentActivityStatus::Done,
+            Self::Failed | Self::Stopped => AgentActivityStatus::Failed,
+            Self::Blocked => AgentActivityStatus::Blocked,
+        }
+    }
+}
+
+/// 一条带状态的结束通知投递记录。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Notification {
+    status: NotifiedStatus,
+    at_ms: u64,
+}
+
+/// 按 task-id（后台子 agent 的 agentId）归集的投递记录，按转录顺序。
+type Notifications = BTreeMap<String, Vec<Notification>>;
+
+/// 一个子 agent 由结束通知得出的终局。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Settled {
+    status: NotifiedStatus,
+    ended_at_ms: u64,
+}
+
+/// 由投递记录与子 agent 转录的最后活动时间得出终局；没有记录，或通知之后转录又有
+/// 活动（晚于最后一条通知超过 [`RESUME_GRACE_MS`]，即被唤起续跑）时返回 `None`。
+///
+/// 状态取最后一条记录的。结束时间取「本轮」（不早于最后活动减宽限）的第一条记录
+/// ——入队时刻最接近真正的结束；子 agent 在通知之后还补写了收尾行时取最后活动。
+fn settle(records: &[Notification], last_activity_ms: Option<u64>) -> Option<Settled> {
+    // 同一时刻的多条取后出现的（转录只追加）。
+    let latest = records
+        .iter()
+        .enumerate()
+        .max_by_key(|(index, record)| (record.at_ms, *index))
+        .map(|(_, record)| *record)?;
+    if last_activity_ms.is_some_and(|last| last > latest.at_ms.saturating_add(RESUME_GRACE_MS)) {
+        return None;
+    }
+    let floor = last_activity_ms.map_or(0, |last| last.saturating_sub(RESUME_GRACE_MS));
+    let first = records
+        .iter()
+        .map(|record| record.at_ms)
+        .filter(|at| *at >= floor)
+        .min()
+        .unwrap_or(latest.at_ms);
+    Some(Settled {
+        status: latest.status,
+        ended_at_ms: last_activity_ms.map_or(first, |last| first.max(last)),
+    })
+}
+
+/// 扫主转录尾部 `window` 字节里的结束通知，只留 `known` 里的 task-id。逐行先按开
+/// 标签做子串预筛，命中的行才解析 JSON：几 MB 的窗口也只是一次顺序读。
+fn read_notifications(session_dir: &Path, window: u64, known: &HashSet<&str>) -> Notifications {
+    let mut notifications = Notifications::new();
+    let Some(path) = main_transcript_path(session_dir) else {
+        return notifications;
+    };
+    let Ok(mut file) = File::open(&path) else {
+        return notifications;
+    };
+    let len = file.metadata().map(|metadata| metadata.len()).unwrap_or(0);
+    let start = len.saturating_sub(window);
+    // 从窗口起点的前一字节读起并丢掉第一段：起点落在行中间时丢的是半行，恰好在行首
+    // 时丢的只是上一行的换行符，完整的行一条不丢。
+    let skip_first = start > 0;
+    if file
+        .seek(SeekFrom::Start(start - u64::from(skip_first)))
+        .is_err()
+    {
+        return notifications;
+    }
+    let mut reader = BufReader::new(std::io::Read::take(
+        file,
+        window.saturating_add(u64::from(skip_first)),
+    ));
+    let mut skip = skip_first;
+    let mut raw = Vec::new();
+    loop {
+        raw.clear();
+        match reader.read_until(b'\n', &mut raw) {
+            Ok(0) | Err(_) => break,
+            Ok(_) => {}
+        }
+        if std::mem::take(&mut skip) {
+            continue;
+        }
+        let line = String::from_utf8_lossy(&raw);
+        if !line.contains(NOTIFICATION_OPEN) {
+            continue;
+        }
+        let Ok(value) = serde_json::from_str::<Value>(line.trim()) else {
+            continue;
+        };
+        let Some(stamp) = rfc3339_ms(value.get("timestamp")) else {
+            continue;
+        };
+        collect_notifications(&value, stamp, &mut |id, notification| {
+            if known.contains(id) {
+                notifications
+                    .entry(id.to_string())
+                    .or_default()
+                    .push(notification);
+            }
+        });
+    }
+    notifications
+}
+
+/// 一条转录记录若是结束通知的投递记录，把其中每条带状态的通知按 task-id 交给
+/// `sink`。
+fn collect_notifications(value: &Value, at_ms: u64, sink: &mut dyn FnMut(&str, Notification)) {
+    let Some(carrier) = notification_carrier(value) else {
+        return;
+    };
+    match carrier {
+        Value::String(text) => parse_notification_text(text, at_ms, sink),
+        Value::Array(blocks) => {
+            for text in blocks
+                .iter()
+                .filter_map(|block| block.get("text").and_then(Value::as_str))
+            {
+                parse_notification_text(text, at_ms, sink);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// 只认三种投递记录（模块文档），返回装着通知正文的字段。
+fn notification_carrier(value: &Value) -> Option<&Value> {
+    fn str_field<'a>(object: &'a Value, key: &str) -> Option<&'a str> {
+        object.get(key).and_then(Value::as_str)
+    }
+    match str_field(value, "type")? {
+        "queue-operation" => (str_field(value, "operation") == Some("enqueue"))
+            .then(|| value.get("content"))
+            .flatten(),
+        "user" => {
+            let kind = value
+                .get("origin")
+                .and_then(|origin| str_field(origin, "kind"));
+            (kind == Some("task-notification"))
+                .then(|| {
+                    value
+                        .get("message")
+                        .and_then(|message| message.get("content"))
+                })
+                .flatten()
+        }
+        "attachment" => value
+            .get("attachment")
+            .filter(|attachment| str_field(attachment, "type") == Some("queued_command"))
+            .and_then(|attachment| attachment.get("prompt")),
+        _ => None,
+    }
+}
+
+/// 从正文里逐个取出 `<task-notification>` 块；没有可识别 `<status>` 的块（汇总、
+/// 「已被唤起」之类的提示）跳过，块里的每个 `<task-id>` 各记一条。
+fn parse_notification_text(text: &str, at_ms: u64, sink: &mut dyn FnMut(&str, Notification)) {
+    let mut rest = text;
+    while let Some(open) = rest.find(NOTIFICATION_OPEN) {
+        let body = &rest[open + NOTIFICATION_OPEN.len()..];
+        let (body, next) = match body.find(NOTIFICATION_CLOSE) {
+            Some(close) => (&body[..close], &body[close + NOTIFICATION_CLOSE.len()..]),
+            None => (body, ""),
+        };
+        rest = next;
+        let Some(status) = tag_values(body, "status")
+            .first()
+            .and_then(|raw| NotifiedStatus::parse(raw))
+        else {
+            continue;
+        };
+        for id in tag_values(body, "task-id") {
+            let id = id.trim();
+            if !id.is_empty() {
+                sink(id, Notification { status, at_ms });
+            }
+        }
+    }
+}
+
+/// `<name>值</name>` 的全部取值，按出现顺序；缺闭标签的残段不算。
+fn tag_values<'a>(body: &'a str, name: &str) -> Vec<&'a str> {
+    let open = format!("<{name}>");
+    let close = format!("</{name}>");
+    let mut values = Vec::new();
+    let mut rest = body;
+    while let Some(start) = rest.find(&open) {
+        let after = &rest[start + open.len()..];
+        let Some(end) = after.find(&close) else {
+            break;
+        };
+        values.push(&after[..end]);
+        rest = &after[end + close.len()..];
+    }
+    values
+}
+
+// ---------------------------------------------------------------------------
 // 转录扫描
 // ---------------------------------------------------------------------------
 
@@ -504,6 +774,8 @@ struct TranscriptScan {
     attribution: Option<String>,
     /// 是否完整扫到了文件末尾；只有这时消息数与 token 才是全量。
     complete: bool,
+    /// 投递给这个子 agent 的结束通知（它自己派的后台子 agent 结束了），按 task-id。
+    notifications: Vec<(String, Notification)>,
 }
 
 /// 按 `message.id` 归并同一次 API 响应拆出的多行：同 id 只算一条消息，用量取该组
@@ -604,6 +876,9 @@ fn scan_transcript(path: &Path, modified_ms: Option<u64>, budget: &mut u64) -> T
         if let Some(stamp) = rfc3339_ms(value.get("timestamp")) {
             scan.started_at_ms.get_or_insert(stamp);
             scan.last_at_ms = Some(stamp);
+            collect_notifications(&value, stamp, &mut |id, notification| {
+                scan.notifications.push((id.to_string(), notification));
+            });
         }
         if scan.attribution.is_none() {
             scan.attribution = trimmed_string(value.get("attributionAgent"));
@@ -670,6 +945,19 @@ fn build_tree(session_dir: &Path, now_ms: u64) -> Vec<AgentActivityNode> {
         scans[index] = scan_transcript(&file.path, file.modified_ms, &mut budget);
     }
 
+    // 结束通知：主会话派的在主转录里，嵌套派生的在父子 agent 的转录里（上面的扫描
+    // 顺带收了）。只留对得上本会话子 agent 的，后台命令与 workflow 的通知不占内存。
+    let known: HashSet<&str> = files.iter().map(|file| file.agent_id.as_str()).collect();
+    let mut notifications = read_notifications(session_dir, MAX_NOTIFICATION_SCAN_BYTES, &known);
+    for (id, notification) in scans.iter().flat_map(|scan| &scan.notifications) {
+        if known.contains(id.as_str()) {
+            notifications
+                .entry(id.clone())
+                .or_default()
+                .push(*notification);
+        }
+    }
+
     let mut nodes: Vec<AgentActivityNode> = Vec::new();
     // workflow / phase 分组节点在 `nodes` 里的下标，用来回填统计。
     let mut group_index: BTreeMap<String, usize> = BTreeMap::new();
@@ -688,7 +976,19 @@ fn build_tree(session_dir: &Path, now_ms: u64) -> Vec<AgentActivityNode> {
             .and_then(|workflow| workflow_states.get(workflow))
             .and_then(Option::as_ref);
 
-        let mut status = subagent_status(journal.and_then(|record| record.state), scan, now_ms);
+        let journal_state = journal.and_then(|record| record.state);
+        // journal 的终态记录最权威（workflow 子 agent 不发结束通知）；否则结束通知给出
+        // 终局，这是后台子 agent 唯一可靠的结束信号；都没有才按时间窗判定。
+        let settled = match journal_state {
+            Some(JournalState::Done | JournalState::Failed) => None,
+            _ => notifications
+                .get(&file.agent_id)
+                .and_then(|records| settle(records, scan.last_at_ms)),
+        };
+        let mut status = match settled {
+            Some(settled) => settled.status.activity_status(),
+            None => subagent_status(journal_state, scan, now_ms),
+        };
         // workflow 已结束：还挂着「运行中 / 未知」的子 agent 不可能再跑，随之落到
         // 结束态（被 kill 的 workflow 不会再给子 agent 写 journal 的 result）。
         if let Some(terminal) = workflow_state
@@ -753,6 +1053,14 @@ fn build_tree(session_dir: &Path, now_ms: u64) -> Vec<AgentActivityNode> {
         }
 
         let agent_type = meta.agent_type.clone().or_else(|| scan.attribution.clone());
+        let mut summary = subagent_summary(&meta, scan);
+        if settled.is_some_and(|settled| settled.status == NotifiedStatus::Stopped) {
+            // 被停掉与出错都呈现为失败，摘要注明是停掉的。
+            summary = Some(match summary {
+                Some(summary) => format!("stopped · {summary}"),
+                None => "stopped".to_string(),
+            });
+        }
         nodes.push(AgentActivityNode {
             id: file.agent_id.clone(),
             kind: AgentActivityKind::Subagent,
@@ -761,11 +1069,14 @@ fn build_tree(session_dir: &Path, now_ms: u64) -> Vec<AgentActivityNode> {
             parent_id,
             agent_type,
             content_ref: Some(file.rel.clone()),
-            summary: subagent_summary(&meta, scan),
+            summary,
             started_at_ms: scan.started_at_ms,
-            ended_at_ms: (status != AgentActivityStatus::Running)
-                .then_some(scan.last_at_ms)
-                .flatten(),
+            ended_at_ms: match settled {
+                Some(settled) => Some(settled.ended_at_ms),
+                None => (status != AgentActivityStatus::Running)
+                    .then_some(scan.last_at_ms)
+                    .flatten(),
+            },
         });
     }
 
@@ -1688,6 +1999,216 @@ mod tests {
         let node = node(&stale, "a0000000000000001");
         assert_eq!(node.status, AgentActivityStatus::Unknown);
         assert_eq!(node.ended_at_ms, Some(FIXTURE_LAST_MS));
+    }
+
+    /// 后台（异步）子 agent 的会话夹具：主转录里有结束通知的各种投递记录。
+    const ASYNC_SESSION_ID: &str = "5f000000-0000-4000-8000-000000000002";
+    /// 该夹具的 2026-09-23T10:00:00.000Z；各子 agent 的最后一条转录都在 10:00:25 之前。
+    const ASYNC_BASE_MS: u64 = 1_790_157_600_000;
+
+    /// 冒烟 M1（claude-04 / 09 / 15）：后台子 agent 早已结束，只看时间窗时 120 s 内
+    /// 一直算运行中、过窗落「未知」；主转录里的结束通知才是它的终局。
+    #[test]
+    fn async_subagents_settle_from_their_task_notifications() {
+        // 10:01:00：每个子 agent 的最后一条转录都还在 120 s 窗口内。
+        let nodes = discover(ASYNC_SESSION_ID, ASYNC_BASE_MS + 60_000);
+
+        // 入队 → 出队 → user 行投递的 completed：完成，结束时间取最后活动之后的第一条
+        // 通知（入队时刻），不是 user 行的投递时刻。
+        let completed = node(&nodes, "b0000000000000001");
+        assert_eq!(completed.status, AgentActivityStatus::Done);
+        assert_eq!(completed.ended_at_ms, Some(ASYNC_BASE_MS + 4_500));
+        assert_eq!(completed.started_at_ms, Some(ASYNC_BASE_MS + 1_000));
+
+        // 回合中投递（入队 → 移出 → queued_command 附件）的 failed；通知之后宽限内
+        // 补写的收尾行不算被唤起，结束时间取那条收尾行。
+        let failed = node(&nodes, "b0000000000000002");
+        assert_eq!(failed.status, AgentActivityStatus::Failed);
+        assert_eq!(failed.ended_at_ms, Some(ASYNC_BASE_MS + 7_000));
+
+        // 重启后的孤儿汇总：一条通知里多个 task-id、状态 stopped → 失败并注明停止。
+        let stopped = node(&nodes, "b0000000000000003");
+        assert_eq!(stopped.status, AgentActivityStatus::Failed);
+        assert_eq!(stopped.ended_at_ms, Some(ASYNC_BASE_MS + 30_000));
+        assert!(
+            stopped
+                .summary
+                .as_deref()
+                .is_some_and(|summary| summary.starts_with("stopped")),
+            "{:?}",
+            stopped.summary
+        );
+
+        // 嵌套：b1 自己派的后台子 agent，结束通知投递在 b1 的转录里。
+        let nested = node(&nodes, "b0000000000000006");
+        assert_eq!(nested.status, AgentActivityStatus::Done);
+        assert_eq!(nested.ended_at_ms, Some(ASYNC_BASE_MS + 3_300));
+    }
+
+    #[test]
+    fn subagents_without_a_final_notification_keep_the_freshness_window() {
+        let fresh = discover(ASYNC_SESSION_ID, ASYNC_BASE_MS + 60_000);
+        // b4 没有结束通知；工具说明里的通知格式示例点了它的名也不算。
+        let silent = node(&fresh, "b0000000000000004");
+        assert_eq!(silent.status, AgentActivityStatus::Running);
+        assert_eq!(silent.ended_at_ms, None);
+        // b5 收到 completed 之后又被 SendMessage 唤起：通知之后的活动晚于宽限，
+        // 回到时间窗判定。
+        let resumed = node(&fresh, "b0000000000000005");
+        assert_eq!(resumed.status, AgentActivityStatus::Running);
+        assert_eq!(resumed.ended_at_ms, None);
+
+        // 10:05:00 过窗：没有终局的两个落「未知」，有终局的不受时间窗影响。
+        let stale = discover(ASYNC_SESSION_ID, ASYNC_BASE_MS + 300_000);
+        assert_eq!(
+            node(&stale, "b0000000000000004").status,
+            AgentActivityStatus::Unknown
+        );
+        assert_eq!(
+            node(&stale, "b0000000000000005").status,
+            AgentActivityStatus::Unknown
+        );
+        assert_eq!(
+            node(&stale, "b0000000000000001").status,
+            AgentActivityStatus::Done
+        );
+    }
+
+    #[test]
+    fn settling_prefers_the_latest_run_and_its_first_notification() {
+        let record = |status, at_ms| Notification { status, at_ms };
+        use NotifiedStatus::{Blocked, Completed, Failed, Stopped};
+        assert_eq!(settle(&[], Some(10)), None);
+        // 没有转录时间：取第一条记录作结束时间。
+        assert_eq!(
+            settle(&[record(Completed, 100), record(Completed, 105)], None),
+            Some(Settled {
+                status: Completed,
+                ended_at_ms: 100
+            })
+        );
+        // 续跑后再次结束：状态取最后一条，结束时间取第二轮的入队时刻。
+        let twice = [
+            record(Completed, 8_500),
+            record(Completed, 8_510),
+            record(Failed, 30_000),
+            record(Failed, 30_010),
+        ];
+        assert_eq!(
+            settle(&twice, Some(29_500)),
+            Some(Settled {
+                status: Failed,
+                ended_at_ms: 30_000
+            })
+        );
+        // 宽限边界：恰好晚 5 s 仍算收尾，再晚 1 ms 才算续跑。
+        let once = [record(Stopped, 1_000)];
+        assert!(settle(&once, Some(1_000 + RESUME_GRACE_MS)).is_some());
+        assert_eq!(settle(&once, Some(1_001 + RESUME_GRACE_MS)), None);
+        // 同一时刻的两条取后出现的。
+        assert_eq!(
+            settle(&[record(Blocked, 50), record(Completed, 50)], Some(40))
+                .map(|settled| settled.status),
+            Some(Completed)
+        );
+
+        assert_eq!(NotifiedStatus::parse(" killed "), Some(Stopped));
+        assert_eq!(NotifiedStatus::parse("stopped"), Some(Stopped));
+        assert_eq!(NotifiedStatus::parse("blocked"), Some(Blocked));
+        assert_eq!(NotifiedStatus::parse("paused"), None);
+        assert_eq!(Blocked.activity_status(), AgentActivityStatus::Blocked);
+        assert_eq!(Stopped.activity_status(), AgentActivityStatus::Failed);
+    }
+
+    #[test]
+    fn notification_text_parsing_stays_total_on_odd_input() {
+        let mut seen: Vec<(String, NotifiedStatus)> = Vec::new();
+        let text = "noise <task-notification><task-id>a1</task-id><status>completed</status>\
+                    </task-notification> between <task-notification>\n<summary>2 background \
+                    commands completed</summary>\n<status>completed</status>\n</task-notification>\
+                    <task-notification><task-id> a2 </task-id><task-id></task-id>\
+                    <status>failed</status><result>x &lt;task-id&gt;a9&lt;/task-id&gt;</result>\
+                    </task-notification><task-notification><task-id>a3</task-id>\
+                    <summary>resumed</summary></task-notification><task-notification>\
+                    <task-id>a4</task-id><status>killed";
+        parse_notification_text(text, 7, &mut |id, notification| {
+            assert_eq!(notification.at_ms, 7);
+            seen.push((id.to_string(), notification.status));
+        });
+        // 汇总（无 task-id）、「已被唤起」（无 status）、转义过的正文与空 id 都不产出；
+        // 缺闭标签的末块照样按已有字段解析。
+        assert_eq!(
+            seen,
+            [
+                ("a1".to_string(), NotifiedStatus::Completed),
+                ("a2".to_string(), NotifiedStatus::Failed),
+            ]
+        );
+        assert_eq!(tag_values("<x>1</x><x>2", "x"), ["1"]);
+        assert!(tag_values("", "x").is_empty());
+
+        // 只认三种投递记录。
+        let carrier = |line: &str| {
+            let value: Value = serde_json::from_str(line).expect("测试行是 JSON");
+            notification_carrier(&value).is_some()
+        };
+        assert!(carrier(
+            r#"{"type":"queue-operation","operation":"enqueue","content":"x"}"#
+        ));
+        assert!(!carrier(
+            r#"{"type":"queue-operation","operation":"remove","content":"x"}"#
+        ));
+        assert!(carrier(
+            r#"{"type":"user","origin":{"kind":"task-notification"},"message":{"content":"x"}}"#
+        ));
+        assert!(!carrier(
+            r#"{"type":"user","origin":{"kind":"human"},"message":{"content":"x"}}"#
+        ));
+        assert!(carrier(
+            r#"{"type":"attachment","attachment":{"type":"queued_command","prompt":"x"}}"#
+        ));
+        assert!(!carrier(
+            r#"{"type":"attachment","attachment":{"type":"prompt_snapshot","tools":[]}}"#
+        ));
+        assert!(!carrier(
+            r#"{"type":"assistant","message":{"content":"x"}}"#
+        ));
+    }
+
+    #[test]
+    fn the_main_transcript_is_only_scanned_within_its_tail_window() {
+        let temp = TempDir::new("notification-window");
+        let session_dir = temp.path().join("s1");
+        std::fs::create_dir_all(&session_dir).expect("建会话目录");
+        let row = |id: &str, second: u32| {
+            format!(
+                r#"{{"type":"queue-operation","operation":"enqueue","timestamp":"2026-09-23T10:00:{second:02}.000Z","content":"<task-notification><task-id>{id}</task-id><status>completed</status></task-notification>"}}"#
+            ) + "\n"
+        };
+        let (old, cut, kept) = (row("c1", 1), row("c2", 2), row("c3", 3));
+        std::fs::write(temp.path().join("s1.jsonl"), format!("{old}{cut}{kept}"))
+            .expect("写主转录");
+        let known: HashSet<&str> = ["c1", "c2", "c3"].into_iter().collect();
+        let ids = |window: u64| {
+            read_notifications(&session_dir, window, &known)
+                .into_keys()
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(ids(u64::MAX), ["c1", "c2", "c3"]);
+        // 窗口起点恰好是行首：那一行完整保留。
+        assert_eq!(ids((cut.len() + kept.len()) as u64), ["c2", "c3"]);
+        // 起点落在行中间：那半行丢掉，不会被当成坏行以外的任何东西。
+        assert_eq!(ids((cut.len() + kept.len() - 1) as u64), ["c3"]);
+        // 只收已知的子 agent。
+        let only: HashSet<&str> = ["c2"].into_iter().collect();
+        assert_eq!(
+            read_notifications(&session_dir, u64::MAX, &only)
+                .into_keys()
+                .collect::<Vec<_>>(),
+            ["c2"]
+        );
+        // 没有主转录：空。
+        assert!(read_notifications(&temp.path().join("nope"), u64::MAX, &known).is_empty());
     }
 
     #[test]

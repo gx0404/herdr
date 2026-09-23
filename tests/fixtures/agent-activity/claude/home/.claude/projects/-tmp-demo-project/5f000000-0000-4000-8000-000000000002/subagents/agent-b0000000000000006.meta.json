@@ -1,0 +1,8 @@
+{
+  "agentType": "general-purpose",
+  "description": "print zeta",
+  "requestShape": "background",
+  "requestNonInteractive": false,
+  "spawnDepth": 2,
+  "toolUseId": "toolu_b0000000000000006"
+}
