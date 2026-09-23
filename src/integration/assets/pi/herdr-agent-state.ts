@@ -367,7 +367,8 @@ const ACTIVITY_LABEL_CHARS = 120;
 const ACTIVITY_SUMMARY_CHARS = 160;
 const ACTIVITY_HINT_MAX_CHARS = 64 * 1024;
 // A snapshot Herdr did not answer (both attempts failed, e.g. the server was
-// restarting) is sent once more after this pause unless a newer one replaced it.
+// restarting) is sent once more after this pause unless a newer one replaced it
+// or its session shut down.
 const ACTIVITY_RETRY_DELAY_MS = 2_000;
 // Pi 0.87 built-in tool names (`allToolNames`). An extension that overrides
 // one of them (a sandboxed `bash`) is still the same everyday tool, so these
@@ -900,12 +901,17 @@ type QueuedActivity = {
   seq: number;
   // This send is already the one retry of an undelivered snapshot.
   retry: boolean;
+  // `activityEpoch` when it was queued.
+  epoch: number;
 };
 
 let activityInFlight = false;
 let queuedActivity: QueuedActivity | undefined;
 let lastActivityHint: string | undefined;
 let activityRetryTimer: ReturnType<typeof setTimeout> | undefined;
+// Advances when a session shuts down: a snapshot queued before that belongs to
+// the ended session and is never retried.
+let activityEpoch = 0;
 
 // Latest snapshot wins: at most one request in flight, identical snapshots are
 // not sent twice.
@@ -915,7 +921,7 @@ function queueActivity(hint: string, retry = false): void {
   }
   cancelActivityRetry();
   lastActivityHint = hint;
-  queuedActivity = { hint, seq: nextReportSeq(), retry };
+  queuedActivity = { hint, seq: nextReportSeq(), retry, epoch: activityEpoch };
   if (!activityInFlight) {
     void drainActivityQueue();
   }
@@ -932,18 +938,24 @@ function cancelActivityRetry(): void {
 // (a finished tool still "running") until the next change, and an identical
 // later snapshot would be deduplicated away. A newer queued snapshot already
 // supersedes it; otherwise it becomes sendable again and is retried once, with
-// a fresh `seq`. Nothing is written to the console: it is Pi's TUI.
+// a fresh `seq`, unless its session has shut down since it was queued (shutdown
+// cancels a scheduled retry, but a send still in flight fails only afterwards).
+// Nothing is written to the console: it is Pi's TUI.
 function activityUndelivered(failed: QueuedActivity): void {
   if (queuedActivity || lastActivityHint !== failed.hint) {
     return;
   }
   lastActivityHint = undefined;
-  if (failed.retry) {
+  if (failed.retry || failed.epoch !== activityEpoch) {
     return;
   }
   activityRetryTimer = setTimeout(() => {
     activityRetryTimer = undefined;
-    queueActivity(failed.hint, true);
+    // Shutdown also cancels this timer; the epoch check keeps the ended
+    // session's snapshot from being resent should the timer fire anyway.
+    if (failed.epoch === activityEpoch) {
+      queueActivity(failed.hint, true);
+    }
   }, ACTIVITY_RETRY_DELAY_MS);
   activityRetryTimer.unref?.();
 }
@@ -1174,10 +1186,13 @@ export default function (pi) {
   });
 
   // This instance is being replaced (session switch, fork, reload): a pending
-  // snapshot must not be sent under the next session's identity.
+  // snapshot must not be sent under the next session's identity, and the ended
+  // session's snapshots are no longer retried. Cancelling the retry timer covers
+  // a send that already failed; advancing the epoch covers one still in flight.
   pi.on("session_shutdown", () => {
     cancelActivityTimer();
     cancelActivityRetry();
+    activityEpoch += 1;
     rootSession = false;
   });
 }

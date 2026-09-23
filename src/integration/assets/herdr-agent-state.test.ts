@@ -125,9 +125,10 @@ async function startRecordingServer(name: string): Promise<unknown[]> {
 }
 
 // Like `startRecordingServer`, but the first `dropActivity` activity requests
-// are closed without an answer (Herdr unreachable mid-send). Every attempt is
+// are closed without an answer (Herdr unreachable mid-send), `dropDelayMs`
+// after they arrive (the request stays in flight until then). Every attempt is
 // recorded, answered or not.
-async function startFlakyActivityServer(name: string, dropActivity: number): Promise<unknown[]> {
+async function startFlakyActivityServer(name: string, dropActivity: number, dropDelayMs = 0): Promise<unknown[]> {
   const recordingSocketPath = join(tmpdir(), `herdr-${name}-${process.pid}.sock`);
   socketPath = recordingSocketPath;
   await rm(recordingSocketPath, { force: true });
@@ -147,7 +148,11 @@ async function startFlakyActivityServer(name: string, dropActivity: number): Pro
       requests.push(request);
       if (request.method === "pane.report_agent_activity" && dropped < dropActivity) {
         dropped += 1;
-        socket.end();
+        if (dropDelayMs > 0) {
+          setTimeout(() => socket.end(), dropDelayMs);
+        } else {
+          socket.end();
+        }
         return;
       }
       socket.end("{}\n");
@@ -1147,8 +1152,8 @@ test("Pi drops a pending activity snapshot when the session shuts down", async (
   expect(activityRequests(requests)).toHaveLength(1);
 });
 
-async function startPiActivitySession(name: string, dropActivity: number) {
-  const requests = await startFlakyActivityServer(name, dropActivity);
+async function startPiActivitySession(name: string, dropActivity: number, dropDelayMs = 0) {
+  const requests = await startFlakyActivityServer(name, dropActivity, dropDelayMs);
   const { handlers, pi } = createExtensionHarness();
   const { default: install } = await importFresh("./pi/herdr-agent-state.ts");
   install(pi);
@@ -1205,6 +1210,48 @@ test("Pi drops a pending activity retry when the session shuts down", async () =
   handlers.get("session_shutdown")?.({}, context);
   await Bun.sleep(2_300);
   expect(activityRequests(requests)).toHaveLength(2);
+}, 10_000);
+
+test("Pi never retries a snapshot whose send fails after the session shut down", async () => {
+  // Both attempts are held open for 300 ms, then closed unanswered.
+  const { requests, handlers, context } = await startPiActivitySession("pi-activity-late-failure", 2, 300);
+  await waitFor(() => activityRequests(requests).length === 1);
+  // The first attempt is still in flight: it has not failed yet, so there is
+  // no retry for shutdown to cancel.
+  handlers.get("session_shutdown")?.({}, context);
+  const shutdownAt = Date.now();
+  expect(activityRequests(requests)).toHaveLength(1);
+  // The send still makes its second attempt under the same `seq`; it fails
+  // 300 ms later, about 0.6 s after shutdown. A retry would follow 2 s after
+  // that, so none may arrive within 3.5 s of shutdown.
+  await waitFor(() => activityRequests(requests).length === 2);
+  await Bun.sleep(Math.max(0, shutdownAt + 3_500 - Date.now()));
+  const sent = activityRequests(requests);
+  expect(sent).toHaveLength(2);
+  expect(sent[1].seq).toBe(sent[0].seq);
+}, 10_000);
+
+test("Pi still retries the next session's snapshots after a shutdown", async () => {
+  const requests = await startFlakyActivityServer("pi-activity-next-session", 2);
+  const { default: install } = await importFresh("./pi/herdr-agent-state.ts");
+  const ended = createExtensionHarness();
+  install(ended.pi);
+  const context = piContext(() => false);
+  await ended.handlers.get("session_start")?.({ reason: "startup" }, context);
+  ended.handlers.get("session_shutdown")?.({}, context);
+
+  // The replacing instance shares the module state with the ended one.
+  const next = createExtensionHarness();
+  install(next.pi);
+  await next.handlers.get("session_start")?.({ reason: "new" }, context);
+  next.handlers.get("tool_execution_start")?.(
+    { toolCallId: "n1", toolName: "subagent", args: { agent: "scout", task: "Scan" } },
+    context,
+  );
+  await waitFor(() => activityRequests(requests).length === 3, 3_500);
+  const [first, , retry] = activityRequests(requests);
+  expect(retry.hint).toBe(first.hint);
+  expect(retry.seq as number).toBeGreaterThan(first.seq as number);
 }, 10_000);
 
 test("Pi never reports activity from headless modes", async () => {
