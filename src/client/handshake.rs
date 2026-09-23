@@ -293,11 +293,14 @@ fn read_handshake_welcome(
                 {
                     return Err(io::Error::new(
                         io::ErrorKind::ConnectionAborted,
-                        "连接任务已取消",
+                        crate::i18n::texts().runtime.connection_cancelled,
                     ));
                 }
                 if Instant::now() >= self.deadline {
-                    return Err(io::Error::new(io::ErrorKind::TimedOut, "连接握手超时"));
+                    return Err(io::Error::new(
+                        io::ErrorKind::TimedOut,
+                        crate::i18n::texts().runtime.handshake_timed_out,
+                    ));
                 }
                 match crate::ipc::poll_local_stream_read_count(self.stream, buffer)? {
                     crate::ipc::LocalStreamReadCount::Data(count) => return Ok(count),

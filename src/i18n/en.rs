@@ -5,8 +5,8 @@ use super::{
     CliOutputTexts, ContextMenuTexts, DialogTexts, EndpointTexts, GlobalMenuTexts, HistoryTexts,
     KeybindTexts, MachineAuthTexts, MachineFilesTexts, MachineFormTexts, MachinesTexts, MenuTexts,
     MobileTexts, ModeBarTexts, MonitorTexts, NotifyTexts, OnboardingTexts, OverlayTexts,
-    ScenesTexts, SettingsTexts, SidebarTexts, SnippetsTexts, StatusTexts, Texts, UpdateTexts,
-    UsageNoticeTexts, WorktreeTexts,
+    RuntimeMessageTexts, ScenesTexts, SettingsTexts, SidebarTexts, SnippetsTexts, StatusTexts,
+    Texts, UpdateTexts, UsageNoticeTexts, WorktreeTexts,
 };
 
 pub const TEXTS: Texts = Texts {
@@ -1061,6 +1061,21 @@ pub const TEXTS: Texts = Texts {
         discard_confirm: "discard",
         keep_editing: "keep editing",
         saved_fmt: "Saved {label}",
+    },
+    runtime: RuntimeMessageTexts {
+        selection_history_unreadable: "Could not read the frozen history rows; select again",
+        selection_changed_before_copy:
+            "The screen changed before the capture finished; check the frozen selection, then press Ctrl+C to copy",
+        selection_resized: "The screen size changed; select again",
+        selection_capture_failed: "Could not read the frozen screen",
+        selection_copy_mismatch: "The copy response did not match the snapshot",
+        selection_timed_out: "The reading snapshot timed out; select again",
+        views_update_failed: "Could not update the panel views; try again",
+        connection_settings_changed: "The connection settings changed; reconnect",
+        host_key_review_required: "Review and confirm the host fingerprint first",
+        terminal_size_not_ready: "The terminal size is not ready yet; retry the connection",
+        connection_cancelled: "The connection task was cancelled",
+        handshake_timed_out: "The connection handshake timed out",
     },
     cli_help: CliHelpTexts {
         about: "terminal workspace manager for AI coding agents",

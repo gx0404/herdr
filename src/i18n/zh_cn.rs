@@ -5,8 +5,8 @@ use super::{
     CliOutputTexts, ContextMenuTexts, DialogTexts, EndpointTexts, GlobalMenuTexts, HistoryTexts,
     KeybindTexts, MachineAuthTexts, MachineFilesTexts, MachineFormTexts, MachinesTexts, MenuTexts,
     MobileTexts, ModeBarTexts, MonitorTexts, NotifyTexts, OnboardingTexts, OverlayTexts,
-    ScenesTexts, SettingsTexts, SidebarTexts, SnippetsTexts, StatusTexts, Texts, UpdateTexts,
-    UsageNoticeTexts, WorktreeTexts,
+    RuntimeMessageTexts, ScenesTexts, SettingsTexts, SidebarTexts, SnippetsTexts, StatusTexts,
+    Texts, UpdateTexts, UsageNoticeTexts, WorktreeTexts,
 };
 
 /// 主题显示名（canonical → 中文）；未列出的主题回退到 canonical 值。
@@ -1066,6 +1066,20 @@ pub const TEXTS: Texts = Texts {
         discard_confirm: "放弃更改",
         keep_editing: "继续编辑",
         saved_fmt: "已保存 {label}",
+    },
+    runtime: RuntimeMessageTexts {
+        selection_history_unreadable: "无法读取冻结的历史行，请重新选择",
+        selection_changed_before_copy: "画面在捕获完成前已更新；请确认固定选区后按 Ctrl+C 复制",
+        selection_resized: "画面尺寸已变化，请重新选择",
+        selection_capture_failed: "无法读取固定画面",
+        selection_copy_mismatch: "复制快照响应不匹配",
+        selection_timed_out: "阅读快照已超时，请重新选择",
+        views_update_failed: "标签视图更新失败，请重试",
+        connection_settings_changed: "连接设置已变化，请重新连接",
+        host_key_review_required: "请先查看并确认主机指纹",
+        terminal_size_not_ready: "终端尺寸尚未准备好，请重试连接",
+        connection_cancelled: "连接任务已取消",
+        handshake_timed_out: "连接握手超时",
     },
     cli_help: CliHelpTexts {
         about: "面向 AI coding agent 的终端工作区管理器",

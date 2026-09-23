@@ -436,7 +436,7 @@ impl ClientShellState {
         };
         if !valid {
             self.cancel_frozen_selection();
-            self.set_endpoint_error("无法读取冻结的历史行，请重新选择");
+            self.set_endpoint_error(crate::i18n::texts().runtime.selection_history_unreadable);
             return (true, Vec::new());
         }
         if let Ok(ResponseResult::PaneTextSnapshot { text, .. }) = result {
@@ -509,7 +509,7 @@ impl ClientShellState {
         };
         if capture.want_copy && capture.changed_before_release {
             capture.want_copy = false;
-            self.set_endpoint_error("画面在捕获完成前已更新；请确认固定选区后按 Ctrl+C 复制");
+            self.set_endpoint_error(crate::i18n::texts().runtime.selection_changed_before_copy);
             outcome.repaint = true;
             return;
         }
@@ -596,7 +596,7 @@ impl ClientShellState {
                         .is_none()
                 {
                     self.cancel_frozen_selection();
-                    self.set_endpoint_error("画面尺寸已变化，请重新选择");
+                    self.set_endpoint_error(crate::i18n::texts().runtime.selection_resized);
                     return (true, Vec::new());
                 }
                 capture.changed_before_release = (0..text.viewport_rows).any(|row| {
@@ -647,12 +647,9 @@ impl ClientShellState {
             }
             error if valid => {
                 self.cancel_frozen_selection();
-                self.set_endpoint_error(
-                    error
-                        .err()
-                        .map(|error| error.message)
-                        .unwrap_or_else(|| "无法读取固定画面".into()),
-                );
+                self.set_endpoint_error(error.err().map(|error| error.message).unwrap_or_else(
+                    || crate::i18n::texts().runtime.selection_capture_failed.into(),
+                ));
                 (true, Vec::new())
             }
             _ => (false, Vec::new()),
@@ -692,12 +689,9 @@ impl ClientShellState {
                 )
             }
             other => {
-                self.set_endpoint_error(
-                    other
-                        .err()
-                        .map(|error| error.message)
-                        .unwrap_or_else(|| "复制快照响应不匹配".into()),
-                );
+                self.set_endpoint_error(other.err().map(|error| error.message).unwrap_or_else(
+                    || crate::i18n::texts().runtime.selection_copy_mismatch.into(),
+                ));
                 (true, Vec::new())
             }
         }
@@ -725,7 +719,7 @@ impl ClientShellState {
             if invalid || timed_out {
                 self.cancel_frozen_selection();
                 if timed_out {
-                    self.set_endpoint_error("阅读快照已超时，请重新选择");
+                    self.set_endpoint_error(crate::i18n::texts().runtime.selection_timed_out);
                 }
                 outcome.repaint = true;
             } else if !capture.released && capture.dragged && now >= capture.next_scroll {

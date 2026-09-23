@@ -629,7 +629,7 @@ impl ClientShellState {
                 .iter()
                 .find(|current| current.id == profile.id && current.enabled)?;
             if !current.same_connection(&profile) {
-                self.set_endpoint_error("连接设置已变化，请重新连接");
+                self.set_endpoint_error(crate::i18n::texts().runtime.connection_settings_changed);
                 return None;
             }
             current.clone()

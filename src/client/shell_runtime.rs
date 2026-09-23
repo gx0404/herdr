@@ -102,9 +102,11 @@ pub(super) fn dispatch_client_shell_actions(
                                     .map(shell::MachineHostKeyOutcome::Scanned)
                             }
                             shell::MachineHostKeyOp::Precollect => {
-                                let (target, key) = reviewed
-                                    .as_ref()
-                                    .ok_or_else(|| io::Error::other("请先查看并确认主机指纹"))?;
+                                let (target, key) = reviewed.as_ref().ok_or_else(|| {
+                                    io::Error::other(
+                                        crate::i18n::texts().runtime.host_key_review_required,
+                                    )
+                                })?;
                                 crate::remote::remember_reviewed_host_key(&profile, target, key)
                                     .map(shell::MachineHostKeyOutcome::Precollected)
                             }
@@ -168,7 +170,9 @@ pub(super) fn dispatch_client_shell_actions(
                         endpoint::prepare_interactive_connection(
                             connected,
                             options.ok_or_else(|| {
-                                io::Error::other("终端尺寸尚未准备好，请重试连接")
+                                io::Error::other(
+                                    crate::i18n::texts().runtime.terminal_size_not_ready,
+                                )
                             })?,
                             &cancel,
                         )

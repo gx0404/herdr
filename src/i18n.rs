@@ -92,6 +92,21 @@ impl Drop for LangGuard {
     }
 }
 
+/// Test helper: whether `text` has CJK ideographs or full-width punctuation —
+/// the English interface must not show any (docs audit D7).
+#[cfg(test)]
+pub fn has_cjk(text: &str) -> bool {
+    text.chars().any(|ch| {
+        matches!(
+            ch,
+            '\u{3000}'..='\u{303f}'
+                | '\u{3400}'..='\u{4dbf}'
+                | '\u{4e00}'..='\u{9fff}'
+                | '\u{ff00}'..='\u{ffef}'
+        )
+    })
+}
+
 /// Resolve the language before any user-visible output: `HERDR_LANG` wins so
 /// a broken config cannot pin the wrong language, then a minimal peek at
 /// config.toml's `language` key (full config load happens later, with
@@ -1479,6 +1494,25 @@ pub struct MachineFormTexts {
     pub saved_fmt: &'static str, // args: label
 }
 
+/// 运行期提示与错误里原来只有中文的文案（文档终审 D7）：选区与阅读快照、连接等。
+/// 服务端产出的条目按 server 进程的界面语言给出。
+pub struct RuntimeMessageTexts {
+    // 选区与阅读快照（客户端）。
+    pub selection_history_unreadable: &'static str,
+    pub selection_changed_before_copy: &'static str,
+    pub selection_resized: &'static str,
+    pub selection_capture_failed: &'static str,
+    pub selection_copy_mismatch: &'static str,
+    pub selection_timed_out: &'static str,
+    // 连接（客户端）。
+    pub views_update_failed: &'static str,
+    pub connection_settings_changed: &'static str,
+    pub host_key_review_required: &'static str,
+    pub terminal_size_not_ready: &'static str,
+    pub connection_cancelled: &'static str,
+    pub handshake_timed_out: &'static str,
+}
+
 /// Help/about strings for the clap CLI surface. Option and subcommand
 /// names, value placeholders and parsed values stay untranslated; only
 /// the descriptive text differs per language.
@@ -2246,6 +2280,7 @@ pub struct Texts {
     pub agent_activity: AgentActivityTexts,
     pub menu: MenuTexts,
     pub machine_form: MachineFormTexts,
+    pub runtime: RuntimeMessageTexts,
     pub cli_help: CliHelpTexts,
     pub cli_output: CliOutputTexts,
     pub cli_errors: CliErrorTexts,
@@ -2461,6 +2496,50 @@ mod tests {
             "中文文案不该混用英文单词 pane：{note}"
         );
         assert!(note.contains("窗格"), "术语要用「窗格」：{note}");
+    }
+
+    /// `RuntimeMessageTexts` 的全部条目（穷尽解构：新增字段不列进来就编译不过）。
+    fn runtime_messages(t: &RuntimeMessageTexts) -> Vec<&'static str> {
+        let RuntimeMessageTexts {
+            selection_history_unreadable,
+            selection_changed_before_copy,
+            selection_resized,
+            selection_capture_failed,
+            selection_copy_mismatch,
+            selection_timed_out,
+            views_update_failed,
+            connection_settings_changed,
+            host_key_review_required,
+            terminal_size_not_ready,
+            connection_cancelled,
+            handshake_timed_out,
+        } = t;
+        vec![
+            selection_history_unreadable,
+            selection_changed_before_copy,
+            selection_resized,
+            selection_capture_failed,
+            selection_copy_mismatch,
+            selection_timed_out,
+            views_update_failed,
+            connection_settings_changed,
+            host_key_review_required,
+            terminal_size_not_ready,
+            connection_cancelled,
+            handshake_timed_out,
+        ]
+    }
+
+    /// 文档终审 D7：运行期提示原来只有中文。英文表的每一条都不含 CJK 字符，中文表
+    /// 每一条都有译文（不是照抄英文）。
+    #[test]
+    fn runtime_messages_are_translated_in_both_tables() {
+        let en = runtime_messages(&en::TEXTS.runtime);
+        let zh = runtime_messages(&zh_cn::TEXTS.runtime);
+        for (en, zh) in en.iter().zip(&zh) {
+            assert!(!en.is_empty() && !has_cjk(en), "英文表混入中文：{en}");
+            assert!(has_cjk(zh), "中文表缺译文：{zh}");
+        }
     }
 
     #[test]

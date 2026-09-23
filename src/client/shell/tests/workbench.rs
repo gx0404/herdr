@@ -2384,3 +2384,41 @@ fn locked_layout_dims_reset_and_ignores_its_clicks() {
     assert!(state.preferences_dirty_since.is_some(), "改了布局才标脏");
     let _ = std::fs::remove_file(&path);
 }
+
+/// 文档终审 D7：停靠视图（`client.views.set`）更新失败的提示以前写死中文。改走
+/// i18n：英文界面下按表给出、不含 CJK 字符。
+#[test]
+fn views_update_failure_notice_follows_the_interface_language() {
+    let _guard = crate::i18n::lang_guard(crate::i18n::Lang::En);
+    let mut state = ready();
+    let mut outcome = ClientShellInput::default();
+    state.last_composed_size = Some((180, 60));
+    state.workbench.pending = false;
+    state.tick_workbench(
+        std::time::Instant::now() + std::time::Duration::from_secs(1),
+        &mut outcome,
+    );
+    let id = outcome
+        .actions
+        .iter()
+        .find_map(|action| match action {
+            ClientShellAction::Endpoint { request, .. }
+                if matches!(request.method, Method::ClientViewsSet(_)) =>
+            {
+                Some(request.id.clone())
+            }
+            _ => None,
+        })
+        .expect("尺寸变化后重发视图请求");
+    state.handle_endpoint_result(
+        "boot-1",
+        &id,
+        Err(ClientShellEndpointError {
+            code: Some("invalid_request".into()),
+            message: "rejected".into(),
+        }),
+    );
+    let error = state.endpoint_error.clone().unwrap_or_default();
+    assert_eq!(error, crate::i18n::texts().runtime.views_update_failed);
+    assert!(!crate::i18n::has_cjk(&error), "{error}");
+}

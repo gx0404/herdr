@@ -731,7 +731,7 @@ impl ClientShellState {
                     self.workbench.acknowledged = revision;
                 } else {
                     self.workbench.requested.clear();
-                    self.set_endpoint_error("标签视图更新失败，请重试");
+                    self.set_endpoint_error(crate::i18n::texts().runtime.views_update_failed);
                 }
             }
             return (true, Vec::new());

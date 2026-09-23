@@ -426,3 +426,52 @@ fn local_workbench_focus_waits_for_server_confirmation_during_selection() {
     assert!(released.actions.iter().any(|action| matches!(action,
         ClientShellAction::Endpoint { request, .. } if matches!(request.method, Method::PaneTextSnapshotSelection(_)))));
 }
+
+/// 文档终审 D7：选区与阅读快照的提示以前写死中文，英文界面也显示中文。改走
+/// i18n：英文界面下这几处提示按表给出、不含 CJK 字符。
+#[test]
+fn selection_notices_follow_the_interface_language() {
+    let _guard = crate::i18n::lang_guard(crate::i18n::Lang::En);
+    let t = &crate::i18n::texts().runtime;
+    let error = |state: &ClientShellState| state.endpoint_error.clone().unwrap_or_default();
+
+    // 捕获完成前画面已变：释放后提示先确认再复制。
+    let (mut state, mut mouse) = ready();
+    let id = capture_id(&state.handle_raw_events(vec![RawInputEvent::Mouse(mouse)]));
+    mouse.kind = MouseEventKind::Drag(MouseButton::Left);
+    mouse.column += 2;
+    state.handle_raw_events(vec![RawInputEvent::Mouse(mouse)]);
+    mouse.kind = MouseEventKind::Up(MouseButton::Left);
+    state.handle_raw_events(vec![RawInputEvent::Mouse(mouse)]);
+    let mut result = captured();
+    if let ResponseResult::PaneTextSnapshot { text, .. } = &mut result {
+        text.rows[0].cells[0].text = "X".into();
+        text.content_revision = 2;
+    }
+    state.handle_endpoint_result("boot-1", &id, Ok(result));
+    assert_eq!(error(&state), t.selection_changed_before_copy);
+    assert!(!crate::i18n::has_cjk(&error(&state)), "{}", error(&state));
+
+    // 捕获响应既不是快照、也没带错误说明：兜底提示。
+    let (mut state, mouse) = ready();
+    let id = capture_id(&state.handle_raw_events(vec![RawInputEvent::Mouse(mouse)]));
+    state.handle_endpoint_result(
+        "boot-1",
+        &id,
+        Ok(ResponseResult::PaneTextSnapshotReleased {
+            snapshot_id: "frozen-1".into(),
+        }),
+    );
+    assert_eq!(error(&state), t.selection_capture_failed);
+    assert!(!crate::i18n::has_cjk(&error(&state)), "{}", error(&state));
+
+    // 阅读快照迟迟不到：15 秒后超时。
+    let (mut state, mouse) = ready();
+    capture_id(&state.handle_raw_events(vec![RawInputEvent::Mouse(mouse)]));
+    state.tick_frozen_selection(
+        std::time::Instant::now() + std::time::Duration::from_secs(16),
+        &mut ClientShellInput::default(),
+    );
+    assert_eq!(error(&state), t.selection_timed_out);
+    assert!(!crate::i18n::has_cjk(&error(&state)), "{}", error(&state));
+}
