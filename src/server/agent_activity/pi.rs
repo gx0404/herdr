@@ -64,10 +64,13 @@
 //!
 //! # 接入点
 //!
-//! `SourceContext` 目前没有 hint 缓存入口，trait 的 `discover` / `read` 如实回
-//! `Unsupported`；持有缓存的一方（server 侧活动树刷新）对 pi 改调
-//! [`discover_from_hint`] / [`read_from_hint`]，传入该 pane 最近一次（`seq`
-//! 最大）且能解析的 hint。
+//! server 缓存该 pane 最近到达的一份 hint（超过 1 MiB 的不缓存，保留上一份）：
+//! 按到达先后覆盖，不比较 `seq`，也不先解析（`AgentActivityStore::store_hint`），
+//! 刷新时经 `SourceContext::latest_hint` 交给适配器。runtime 对 pi 不走 trait
+//! （trait 的 `discover` / `read` 如实回 `Unsupported`），直接调
+//! [`discover_from_hint`] / [`read_from_hint`]；还没有 hint 时发现回空树、读取回
+//! `Unavailable`（`agent_activity::discover_nodes` / `read_node`）。解析失败时由
+//! 调用方保留上一份树。
 
 use std::collections::{HashMap, HashSet};
 
@@ -98,7 +101,8 @@ impl ActivitySource for Pi {
         "pi"
     }
 
-    /// pi 的树只存在于扩展上报的 hint 里；没有 hint 缓存入口时无从发现。
+    /// pi 的树只存在于扩展上报的 hint 里；runtime 直接调 [`discover_from_hint`]
+    /// （见模块文档「接入点」），不经此入口。
     fn discover(&self, _cx: &SourceContext<'_>) -> Result<Vec<AgentActivityNode>, SourceError> {
         Err(SourceError::Unsupported)
     }
@@ -116,7 +120,7 @@ impl ActivitySource for Pi {
 }
 
 /// 由一次 hint 快照发现活动节点，按父先子后排列。快照属于别的会话时回空树；
-/// hint 不是本格式或不是 JSON 时回 `Malformed`（调用方应保留上一份可用快照）。
+/// hint 不是本格式或不是 JSON 时回 `Malformed`（调用方保留上一份树）。
 pub(super) fn discover_from_hint(
     cx: &SourceContext<'_>,
     hint: &str,
