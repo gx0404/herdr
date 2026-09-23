@@ -63,7 +63,7 @@ cooldown_seconds = 60
 
 ## 账号绑定与展示
 
-账号页只列出本机已安装官方 CLI 的厂商——检测与设置页的集成检测同源（多别名 PATH 扫描 + codex 的 standalone/nvm/volta/bun 等安装布局），两处结论一致；显式配置了账号的厂商始终保留。`account.usage.providers` 为每个厂商返回 `installed` 标记；旧版 server 缺少该字段时仍显示完整注册表。自动刷新由服务端在有客户端展示数据期间执行：API 账号按 `api_refresh_seconds`（不低于 60 s），CLI 探测按 `cli_refresh_seconds`（不低于 300 s；`account.usage.providers` 以 `minimum_interval_seconds` 播报实际生效值），失败后带上限的退避。由官方回调（Claude Code）或 Herdr 自带集成扩展（Pi）推送数据的厂商不播报轮询间隔，由这些推送驱动刷新。账号页打开时若尚未选厂商，按聚焦窗格正在运行的 agent 选，否则选第一个已列出的厂商。切换厂商或账号时旧快照保留并变暗，直到新数据到达；当前作用域配置的账号不足两个时「切换账号」为禁用态；在设置里关闭的厂商会同时离开厂商标签、切换候选和总览。codex 通过安装布局定位时，探测子进程会把该布局的 bin 目录前置到 `PATH`，使 npm shim 脚本能解析到自身的 node 解释器。
+账号页只列出本机已安装官方 CLI 的厂商——检测与设置页的集成检测同源（多别名 PATH 扫描 + codex 的 standalone/nvm/volta/bun 等安装布局），两处结论一致；ZCode 没有 CLI 可找，连接的主机上存在它的本地数据库 `~/.zcode/cli/db/db.sqlite` 时才列出；显式配置了账号的厂商始终保留。`account.usage.providers` 为每个厂商返回 `installed` 标记；旧版 server 缺少该字段时仍显示完整注册表。自动刷新由服务端在有客户端展示数据期间执行：API 账号按 `api_refresh_seconds`（不低于 60 s），CLI 探测按 `cli_refresh_seconds`（不低于 300 s；`account.usage.providers` 以 `minimum_interval_seconds` 播报实际生效值；ZCode 的本地数据库读取也按这个周期），失败后带上限的退避。由官方回调（Claude Code）或 Herdr 自带集成扩展（Pi）推送数据的厂商不播报轮询间隔，由这些推送驱动刷新。账号页打开时若尚未选厂商，按聚焦窗格正在运行的 agent 选，否则选第一个已列出的厂商。切换厂商或账号时旧快照保留并变暗，直到新数据到达；当前作用域配置的账号不足两个时「切换账号」为禁用态；在设置里关闭的厂商会同时离开厂商标签、切换候选和总览。codex 通过安装布局定位时，探测子进程会把该布局的 bin 目录前置到 `PATH`，使 npm shim 脚本能解析到自身的 node 解释器。
 
 Agent 行或 CLI 标题上的账号用量浮层在停留满 `hover_delay_ms`（默认 400 ms）后出现，指针离开该行与浮层 250 ms 后自动关闭。它有自己的作用域，不会改写账号页的选择；浮层里的「打开页面」按钮打开账号页。跨厂商总览在账号页里：首个标签「全部厂商」一次列出所有已列出的厂商。
 
@@ -133,7 +133,7 @@ Pi 没有 statusline 契约，它的 RPC 模式又是另起的 headless 进程�
 
 ## 厂商能力与官方依据
 
-账号用量覆盖五个 Agent：Codex、Claude Code、Kimi Code、OpenCode 与 Pi。官方依据最近一次复核于 2026-09-22（Codex 为 2026-09-16）。官方未公开个人额度 API、权限不足或 CLI 输出变化时，显示可用性说明和官方入口；为其它 Agent 配置的账号会提示未登记官方来源。表中的会话统计与本地统计不代表账号剩余额度。
+账号用量覆盖六个 Agent：Codex、Claude Code、Kimi Code、OpenCode、Pi 与 ZCode。官方依据最近一次复核于 2026-09-22（Codex 为 2026-09-16，ZCode 数据库结构为 2026-09-23）。官方未公开个人额度 API、权限不足或 CLI 输出变化时，显示可用性说明和官方入口；为其它 Agent 配置的账号会提示未登记官方来源。表中的会话统计与本地统计不代表账号剩余额度。
 
 | Agent | 官方查询与范围 |
 | --- | --- |
@@ -142,10 +142,13 @@ Pi 没有 statusline 契约，它的 RPC 模式又是另起的 headless 进程�
 | Kimi Code | [本地 Server API](https://www.kimi.com/code/docs/en/kimi-code-cli/reference/server-api.html)（官方标为 experimental）：`quota.usages` 的 5 小时、7 天、月度窗口及月度窗口里的 Code 部分；`quota.extraUsage` 超额按量钱包以金额显示（余额、总额、本月费用，以及开启时的每月上限）。Moonshot API 余额另查。 |
 | OpenCode | [`opencode db <query> --format json`](https://opencode.ai/docs/cli/)：对 `session` 表的只读聚合——会话数、子 agent 会话数、费用，以及输入 / 输出 / 推理 / 缓存 token。本地统计，非账号额度。 |
 | Pi | Herdr 的 Pi 扩展，基于官方[扩展 API](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/extensions.md)：上下文用量、本会话 token 与费用、当前服务商 / 模型。会话统计，非账号额度。 |
+| ZCode | [ZCode 桌面应用](https://github.com/zai-org/ZCode)的本地数据库 `~/.zcode/cli/db/db.sqlite`，用系统 `sqlite3 -readonly` 只读查询 `model_usage` 表最近 24 小时的数据：按主任务与子 agent 拆分的 token 及合计、工具调用次数、子 agent 会话数。不需要也不读取任何凭据。只有本地统计，非账号额度；远端额度不查询。 |
 
 OpenCode 没有任何账号额度接口，所以它的两种形态都在指标范围与来源说明里标明是本地会话统计。`db` 查询只读计数与合计，不读会话标题或路径。没有 `db` 子命令或其 `--format` 选项的 CLI 版本，以及查询失败的情况（例如旧版数据库结构），回退到解析 `opencode stats` 的表格。OpenRouter 的密钥预算与账号总额是两回事。
 
 账号页上 OpenCode 与 ZCode 带「本地统计，非账号额度」徽标，Pi 带「会话统计」徽标，都不会被当成账号额度。ZCode 的本地统计来自 ZCode 桌面版数据库，远端额度不查询。
+
+ZCode 是桌面应用，从不在窗格里运行，Herdr 也从不启动它（它的命令会打开窗口）。server 用自身 `PATH` 上的 `sqlite3` 命令读它的数据库；没有这个命令时，ZCode 账号会说明原因而不显示数字。查询只按请求开始时间对请求行计数与求和，从不读取提示词、消息或错误文本。`query_source` 为 `subagent` 或 `task_type` 为 `subagent_child` 的请求记到子 agent，其余请求（主轮次、标题生成、压缩）都记到主任务。数据库被占用、无法读取或结构变化时，保留上次样本并显示为缓存数据，按退避重试。ZCode 账号拒收 `herdr api usage-report` 推送，也不支持 `profile_dir`；把 `"zcode"` 加进 `disabled_providers` 即可停止轮询。
 
 ## API
 
