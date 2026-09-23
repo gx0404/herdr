@@ -22,6 +22,8 @@ pub(super) fn hover_scope(state: &State) -> AccountsScope<'_> {
         pane_label: None,
         chrome: BodyChrome::Hover,
         refreshing: state.hover_scope.refreshing(),
+        answered: state.hover_scope.answered,
+        local_providers: state.hover_uses_active_endpoint(),
         scroll: state.hover_scope.scroll,
     }
 }

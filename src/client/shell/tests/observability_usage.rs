@@ -1808,6 +1808,167 @@ fn hover_shows_refreshing_until_its_own_response_arrives() {
     assert_eq!(calls[0].1.pane_id.as_deref(), Some("pane_1"));
 }
 
+/// 钉住活动端点或 `endpoint` 上 pane_1 的 `agent` 用量卡（右键「用量」）并上屏。
+fn pin_usage_card(state: &mut ClientShellState, endpoint: ClientEndpointId, agent: &str) {
+    state.pin_agent_usage_card(
+        endpoint,
+        "pane_1".into(),
+        agent.into(),
+        &mut ClientShellInput::default(),
+    );
+    state.compose(133, 32).expect("钉住的卡上屏");
+}
+
+/// 复审（冒烟 L17 / 真机 L4 同源）：厂商作用域的空态不能永远写「正在查询…」。
+/// 服务端只给已安装的厂商建隐式账号：此主机没装 pi、也没为它配账号时，钉住的
+/// pi 卡直接照实说明，轮询多少轮都不会变成「查询中」；装了的厂商只有在该作用域
+/// 还没收到过响应时才是「正在查询」，收到空响应后写「暂无可查询的账号」。悬浮层
+/// 定向到别的主机时，活动端点的厂商列表不代表那台主机，不据此下结论。
+#[test]
+fn provider_scoped_empty_state_does_not_claim_a_query_that_never_ends() {
+    let _guard = crate::i18n::lang_guard(crate::i18n::Lang::ZhCn);
+    let mut projection = snapshot();
+    projection.agents.push(agent_in_pane("pane_1", "pi"));
+    let mut state = usage_ready_with(projection);
+    let mut pi = provider("pi", &[]);
+    pi.installed = Some(false);
+    deliver_providers(
+        &mut state,
+        vec![provider("claude", &["claude:default"]), pi],
+    );
+    assert!(
+        !state
+            .observability
+            .usage
+            .disabled_providers
+            .iter()
+            .any(|agent| agent == "pi"),
+        "用例前提：pi 没在监控偏好里关闭"
+    );
+    let active = state.active_endpoint_id.clone();
+    pin_usage_card(&mut state, active.clone(), "pi");
+    let mut now = Instant::now() + Duration::from_secs(1);
+    // 首个请求（强意图刷新）与之后的每一轮轮询都回空列表。
+    for round in 0..3 {
+        let calls = usage_calls(&tick(&mut state, now));
+        assert_eq!(calls.len(), 1, "第 {round} 轮：悬浮层照常轮询 {calls:?}");
+        assert!(deliver_hover_usage(&mut state, Vec::new()));
+        state.compose(133, 32).expect("重绘");
+        let card = state.observability.hover_rect;
+        let text = region_text(&state, card);
+        assert!(find_in(&state, card, "暂无账号用量").is_some(), "{text}");
+        assert!(
+            find_in(
+                &state,
+                card,
+                "此主机未检测到该厂商的 CLI，也没有为它配置账号"
+            )
+            .is_some(),
+            "第 {round} 轮：照实说明\n{text}"
+        );
+        assert!(
+            find_in(&state, card, "正在查询").is_none(),
+            "第 {round} 轮：不再写「正在查询」\n{text}"
+        );
+        now += Duration::from_secs(20);
+    }
+    state.observability.clear_hover();
+
+    // 装了的厂商：还没收到响应时是「刷新中…」（强意图刷新在途），不下结论；
+    // 收到空响应后照实写暂无账号。
+    let mut projection = snapshot();
+    projection.agents.push(agent_in_pane("pane_1", "claude"));
+    state.set_snapshot(Box::new(projection));
+    pin_usage_card(&mut state, active, "claude");
+    let calls = usage_calls(&tick(&mut state, now));
+    assert_eq!(calls.len(), 1, "{calls:?}");
+    state.compose(133, 32).expect("在途");
+    let card = state.observability.hover_rect;
+    let text = region_text(&state, card);
+    assert!(find_in(&state, card, "刷新中").is_some(), "{text}");
+    assert!(find_in(&state, card, "暂无可查询").is_none(), "{text}");
+    assert!(deliver_hover_usage(&mut state, Vec::new()));
+    state.compose(133, 32).expect("空响应");
+    let card = state.observability.hover_rect;
+    let text = region_text(&state, card);
+    assert!(
+        find_in(&state, card, "该厂商暂无可查询的账号").is_some(),
+        "收到空响应：照实说明\n{text}"
+    );
+    assert!(find_in(&state, card, "正在查询").is_none(), "{text}");
+    state.observability.clear_hover();
+
+    // 悬浮层定向到远端主机：本地厂商列表说 pi 没装，但那台主机不一定，不下结论。
+    let remote = add_remote_usage_endpoint(&mut state);
+    pin_usage_card(&mut state, remote, "pi");
+    let calls = usage_calls(&tick(&mut state, now + Duration::from_secs(1)));
+    assert_eq!(calls.len(), 1, "{calls:?}");
+    assert!(deliver_hover_usage(&mut state, Vec::new()));
+    state.compose(133, 32).expect("远端空响应");
+    let card = state.observability.hover_rect;
+    let text = region_text(&state, card);
+    assert!(
+        find_in(&state, card, "此主机未检测到").is_none(),
+        "活动端点的厂商列表不代表远端主机\n{text}"
+    );
+    assert!(
+        find_in(&state, card, "该厂商暂无可查询的账号").is_some(),
+        "{text}"
+    );
+}
+
+/// 页面作用域同一口径：选中厂商收到空应答后照实写「暂无可查询的账号」，换厂商
+/// 换代后不沿用旧作用域的应答；总览要等这一轮逐厂商请求全部应答，之后同样不再
+/// 写「正在查询全部厂商…」。
+#[test]
+fn page_empty_state_turns_definite_once_its_scope_is_answered() {
+    let _guard = crate::i18n::lang_guard(crate::i18n::Lang::ZhCn);
+    let mut state = usage_ready();
+    deliver_providers(
+        &mut state,
+        vec![provider("claude", &[]), provider("codex", &[])],
+    );
+    state.open_observation_page(Page::Accounts, &mut ClientShellInput::default());
+    let t0 = Instant::now() + Duration::from_secs(1);
+    assert_eq!(usage_calls(&tick(&mut state, t0)).len(), 1);
+    assert_eq!(
+        state.observability.selected_provider.as_deref(),
+        Some("claude"),
+        "用例前提：自动选中聚焦 pane 的厂商"
+    );
+    let page_text = |state: &mut ClientShellState| {
+        state.compose(133, 32).expect("账号页");
+        region_text(state, state.observability.page_rect)
+    };
+    let text = page_text(&mut state);
+    assert!(
+        !text.contains("暂无可查询"),
+        "还没收到应答：不下结论\n{text}"
+    );
+    assert!(deliver_usage(&mut state, Vec::new()));
+    let text = page_text(&mut state);
+    assert!(text.contains("该厂商暂无可查询的账号"), "{text}");
+    assert!(!text.contains("正在查询"), "{text}");
+    // 换厂商 = 换代：新作用域还没收到应答。
+    state.observation_action(
+        Action::Provider("codex".into()),
+        &mut ClientShellInput::default(),
+    );
+    let text = page_text(&mut state);
+    assert!(!text.contains("暂无可查询"), "换代后不沿用旧应答\n{text}");
+    // 总览逐厂商扇出：第一份应答到了还不算，全部到齐才照实说明。
+    state.observation_action(Action::Overview, &mut ClientShellInput::default());
+    let calls = usage_calls(&tick(&mut state, t0 + Duration::from_millis(10)));
+    assert_eq!(calls.len(), 2, "逐厂商扇出 {calls:?}");
+    assert!(deliver_usage_for(&mut state, "claude", Vec::new()));
+    let text = page_text(&mut state);
+    assert!(!text.contains("暂无可查询"), "codex 还在途\n{text}");
+    assert!(deliver_usage_for(&mut state, "codex", Vec::new()));
+    let text = page_text(&mut state);
+    assert!(text.contains("已列出的厂商暂无可查询的账号"), "{text}");
+    assert!(!text.contains("正在查询"), "{text}");
+}
+
 #[test]
 fn offline_fallback_note_is_written_once_per_target() {
     let mut state = usage_ready();

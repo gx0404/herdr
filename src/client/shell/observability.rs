@@ -562,6 +562,8 @@ pub(super) struct HoverScope {
     pub refresh: bool,
     /// 悬浮层的 `account.usage.refresh` 在途；响应到达即清除。
     manual_in_flight: bool,
+    /// 悬浮层作用域已应答（语义同 `State::page_answered`）；`reset_hover_scope` 复位。
+    pub answered: bool,
     /// 本轮强意图刷新已发出 `refresh` 的厂商（语义同 `State::manual_sent`）。
     manual_sent: Vec<Option<String>>,
     /// 悬浮层自己的账号列表滚动位置。
@@ -583,6 +585,7 @@ impl Default for HoverScope {
             epoch: 0,
             refresh: false,
             manual_in_flight: false,
+            answered: false,
             manual_sent: Vec::new(),
             scroll: 0,
             next_usage: Instant::now(),
@@ -805,6 +808,11 @@ pub(super) struct State {
     /// 页面作用域的 `account.usage.refresh` 在途；响应到达即清除。与
     /// `refresh_usage`（排队）一起构成 `refreshing()`。
     manual_in_flight: bool,
+    /// 页面作用域已应答：本代际里收到过一份成功的用量应答，且到达时该作用域已
+    /// 没有在途的用量请求（逐厂商扇出要等到齐）；换代即复位。空态据此区分「正在
+    /// 查询…」与照实说明「暂无可查询的账号」——不看某一时刻的在途请求，否则每
+    /// 2 秒一轮的轮询会让说明来回闪。
+    pub page_answered: bool,
     pub hover_rect: Rect,
     pub hover_hits: Vec<(Rect, Action)>,
     pub page_rect: Rect,
@@ -1247,8 +1255,19 @@ impl State {
         self.pending
             .retain(|key| Purpose::is_page_independent_key(key));
         self.manual_in_flight = false;
+        self.page_answered = false;
         self.manual_sent.clear();
         self.refresh_states.clear();
+    }
+
+    /// 厂商列表（`providers`，取自活动端点）是否描述悬浮层作用域所查的主机：
+    /// 悬浮层定向到别的主机时不是（与 `usage_targets` 的 `remote_hover` 同一口径）。
+    pub(super) fn hover_uses_active_endpoint(&self) -> bool {
+        match (&self.hover_scope.endpoint, &self.source) {
+            (None, _) => true,
+            (Some(endpoint), Some((active, _))) => endpoint == active,
+            (Some(_), None) => false,
+        }
     }
 
     /// 页面作用域的强意图刷新：下一次 tick 立即发 `account.usage.refresh`。
@@ -1421,6 +1440,7 @@ impl State {
             event_repaint: false,
             page_seen: false,
             manual_in_flight: false,
+            page_answered: false,
             hover_rect: Rect::default(),
             hover_hits: Vec::new(),
             page_rect: Rect::default(),
@@ -2143,6 +2163,7 @@ impl ClientShellState {
             self.observability.clear_hover();
             self.observability.refresh_usage = false;
             self.observability.manual_in_flight = false;
+            self.observability.page_answered = false;
             self.observability.refresh_states.clear();
             // 订阅归属于旧 (端点, boot)：已确认的进入退订队列（发回旧端点），
             // 在途的订阅请求在响应到达时再排队退订。
@@ -2525,6 +2546,14 @@ impl ClientShellState {
                 };
                 self.observability
                     .merge_usage_response(hover, agent, accounts, refresh);
+                // 本作用域这一轮在途的用量请求全部到齐：空态不再是「正在查询…」。
+                if !self.observability.usage_in_flight(hover) {
+                    if hover {
+                        self.observability.hover_scope.answered = true;
+                    } else {
+                        self.observability.page_answered = true;
+                    }
+                }
                 if !in_flight {
                     // 无在途探测：不收紧轮询。
                 } else if hover {

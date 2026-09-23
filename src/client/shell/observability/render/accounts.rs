@@ -807,7 +807,10 @@ pub(super) fn accounts_content(
 /// 账号正文为空时的说明（冒烟 L17）。跨厂商总览（「全部厂商」）本身就是全部
 /// 厂商，不再让用户「选择厂商」，而是按厂商列表的真实状态说明：列表到了却一个
 /// 都没列出（此主机没装 agent CLI、也没配账号）/ 列出的厂商全在监控偏好里关闭 /
-/// 其余情况是正在查询。选中具体厂商（含悬浮层）时说明它被关闭或仍在查询。
+/// 还没收到应答时是正在查询。选中具体厂商（含悬浮层）时依次说明：它被关闭 /
+/// 此主机没装它的 CLI 也没为它配账号（服务端只给已安装的厂商建隐式账号，这种
+/// 厂商永远回空列表）/ 此主机不提供它的用量 / 还没收到应答时正在查询。「正在
+/// 查询…」只在作用域还没收到应答时出现；应答到了仍为空就照实说明没有账号。
 fn empty_accounts_hint(state: &State, scope: &AccountsScope<'_>) -> &'static str {
     let disabled = |agent: &str| {
         state
@@ -817,10 +820,34 @@ fn empty_accounts_hint(state: &State, scope: &AccountsScope<'_>) -> &'static str
             .any(|item| item == agent)
     };
     if let Some(provider) = scope.provider {
-        return if disabled(provider) {
-            tr(
+        if disabled(provider) {
+            return tr(
                 "This provider is turned off in Monitor preferences.",
                 "此厂商已在「监控偏好」中关闭。",
+            );
+        }
+        // 厂商列表到了且描述的正是这台主机，才据此下结论（列表为空 = 还没到）。
+        if scope.local_providers && !state.providers.is_empty() {
+            match state.providers.iter().find(|info| info.agent == provider) {
+                None => {
+                    return tr(
+                        "This host reports no usage for this provider.",
+                        "此主机不提供该厂商的用量查询。",
+                    )
+                }
+                Some(info) if !provider_listed(info) => {
+                    return tr(
+                        "No CLI or account for this provider on this host.",
+                        "此主机未检测到该厂商的 CLI，也没有为它配置账号。",
+                    )
+                }
+                Some(_) => {}
+            }
+        }
+        return if scope.answered {
+            tr(
+                "This provider has no account to query.",
+                "该厂商暂无可查询的账号。",
             )
         } else {
             tr(
@@ -846,10 +873,17 @@ fn empty_accounts_hint(state: &State, scope: &AccountsScope<'_>) -> &'static str
             "所有厂商都已在「监控偏好」中关闭，可在那里重新启用。",
         );
     }
-    tr(
-        "Querying the official usage of every listed provider…",
-        "正在查询全部厂商的官方用量…",
-    )
+    if scope.answered {
+        tr(
+            "No listed provider has an account to query.",
+            "已列出的厂商暂无可查询的账号。",
+        )
+    } else {
+        tr(
+            "Querying the official usage of every listed provider…",
+            "正在查询全部厂商的官方用量…",
+        )
+    }
 }
 
 /// 页面的跨厂商总览：页面作用域且没选厂商（悬浮层总有自己的厂商）。仪表盘格式下
@@ -1077,6 +1111,12 @@ pub(super) struct AccountsScope<'a> {
     pub chrome: BodyChrome,
     /// 本作用域有强意图刷新排队或在途：旧数据变暗，空态显示「刷新中…」。
     pub refreshing: bool,
+    /// 本作用域已应答（见 `State::page_answered`）：空态据此照实说明，而不是一直
+    /// 写「正在查询…」。
+    pub answered: bool,
+    /// 厂商列表（取自活动端点）描述的就是本作用域所查的主机：页面恒为真，悬浮层
+    /// 定向到别的主机时为假，空态不拿活动端点的列表替那台主机下结论。
+    pub local_providers: bool,
     /// 本作用域的账号列表滚动位置。
     pub scroll: usize,
 }
@@ -1177,6 +1217,8 @@ pub(super) fn page_scope(state: &State) -> AccountsScope<'_> {
         pane_label: state.selected_pane_label.as_deref(),
         chrome: BodyChrome::Page,
         refreshing: state.refreshing(),
+        answered: state.page_answered,
+        local_providers: true,
         scroll: state.account_scroll,
     }
 }
