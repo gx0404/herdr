@@ -1362,17 +1362,45 @@ fn federated_client_with_changing_external_agents_keeps_remote_live() {
 
     // 客户端连着、画面空闲时外部来源变化。`agent.external.list` 同步跑一次发现并
     // 把结果经与轮询同一条 `ExternalAgentsRefreshed` 落库，不必等 10 s 一轮的轮询；
-    // 落库后的投影刷新在下一个调度 tick 里下发，留两秒让它到达客户端。
-    advance_zcode_root(&remote_home, "Refactor the parser (resumed)");
-    assert_eq!(external_agent_ids(&remote_api), expected_external);
-    thread::sleep(Duration::from_secs(2));
-    let idle = screen_text();
+    // 落库后的投影刷新在下一个调度 tick 里下发。先等正面信号——改后的标题上屏，
+    // 即修订号前进的新快照已到达客户端——再在稳定窗口里反复确认空闲画面没被
+    // 「正在同步终端…」占位替换（否定式断言只在快照确已前进之后才有意义）。
+    // 80 列下外部条目标签按剩余宽度硬截断，只露出前 5–6 格（原标题显示为
+    // 「Refact」），所以改后的标题换一个开头，让变化本身在画面上可见。
+    let original_label = "Refact";
+    let changed_title = "Resumed parser refactor";
+    let changed_label = "Resum";
     assert!(
-        idle.contains("REMOTE_READY_OK")
-            && !idle.contains("正在同步终端")
-            && !idle.contains("Waiting for terminal"),
-        "an external source change must not blank the idle remote pane: {idle}"
+        wait_until(Duration::from_secs(8), Duration::from_millis(20), || {
+            screen_text().contains(original_label)
+        }),
+        "the external entry must be on screen before it changes: {}",
+        screen_text()
     );
+    advance_zcode_root(&remote_home, changed_title);
+    assert_eq!(external_agent_ids(&remote_api), expected_external);
+    assert!(
+        wait_until(Duration::from_secs(8), Duration::from_millis(20), || {
+            screen_text().contains(changed_label)
+        }),
+        "the changed external title must reach the client: {}",
+        screen_text()
+    );
+    let stable_until = Instant::now() + Duration::from_millis(1_500);
+    loop {
+        let idle = screen_text();
+        assert!(
+            idle.contains(changed_label)
+                && idle.contains("REMOTE_READY_OK")
+                && !idle.contains("正在同步终端")
+                && !idle.contains("Waiting for terminal"),
+            "an external source change must not blank the idle remote pane: {idle}"
+        );
+        if Instant::now() >= stable_until {
+            break;
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
     assert!(
         probe("AFTER_EXTERNAL_CHANGE", Duration::from_secs(8)),
         "remote input must keep echoing after an external source change: {}",
