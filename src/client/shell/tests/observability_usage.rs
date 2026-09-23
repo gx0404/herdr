@@ -6931,11 +6931,74 @@ fn empty_accounts_page_uses_the_kit_empty_state() {
                 .contains(ratatui::style::Modifier::BOLD),
             "kit 空态标题加粗\n{text}"
         );
+        // 总览（「全部厂商」）本身就是全部厂商：厂商列表还没到时是在查询，而不是
+        // 让用户「选择厂商」（冒烟 L17）。
         assert!(
-            find_in(&state, region, "请选择厂商以查询对应的官方用量。").is_some(),
+            find_in(&state, region, "正在查询全部厂商的官方用量…").is_some(),
             "{cols}x{rows}: 空态说明\n{text}"
         );
     }
+}
+
+/// 冒烟 L17（133×32）：选中「全部厂商」却提示「请选择厂商」——总览的空态按厂商
+/// 列表的真实状态说明：已列出的厂商全部在监控偏好里关闭（冒烟现场）/ 此主机没有
+/// 可列出的厂商；选中具体厂商时说明它被关闭或仍在查询。
+#[test]
+fn all_providers_overview_explains_why_it_is_empty() {
+    let _guard = crate::i18n::lang_guard(crate::i18n::Lang::ZhCn);
+    let page = |providers: Vec<UsageProviderInfo>, disabled: &[&str], selected: Option<&str>| {
+        let mut state = docked();
+        state.open_observation_page(Page::Accounts, &mut ClientShellInput::default());
+        state.observability.providers = providers;
+        state.observability.usage.disabled_providers =
+            disabled.iter().map(|agent| (*agent).to_owned()).collect();
+        state.observability.selected_provider = selected.map(str::to_owned);
+        state.observability.accounts = Vec::new();
+        state.compose(133, 32).expect("账号页");
+        assert!(
+            !state.observability.refreshing(),
+            "用例前提：没有强意图刷新（空态不是「刷新中…」）"
+        );
+        let region = state.observability.page_rect;
+        let text = region_text(&state, region);
+        assert!(
+            find_in(&state, region, "请选择厂商").is_none(),
+            "不再提示「请选择厂商」\n{text}"
+        );
+        (state, region, text)
+    };
+    let listed = || vec![provider("claude", &[]), provider("kimi", &[])];
+    // 冒烟现场：已列出的厂商都在监控偏好里关掉了。
+    let (state, region, text) = page(listed(), &["claude", "kimi", "codex"], None);
+    assert!(
+        find_in(&state, region, "所有厂商都已在「监控偏好」中关闭").is_some(),
+        "{text}"
+    );
+    // 厂商列表到了，但此主机一个都没装、也没配账号。
+    let mut missing = provider("codex", &[]);
+    missing.installed = Some(false);
+    let (state, region, text) = page(vec![missing], &[], None);
+    assert!(
+        find_in(&state, region, "此主机未检测到已安装的 agent CLI").is_some(),
+        "{text}"
+    );
+    // 有可查询的厂商：在查询。
+    let (state, region, text) = page(listed(), &["kimi"], None);
+    assert!(
+        find_in(&state, region, "正在查询全部厂商的官方用量…").is_some(),
+        "{text}"
+    );
+    // 选中具体厂商：未关闭时在查询，关闭时说明。
+    let (state, region, text) = page(listed(), &[], Some("claude"));
+    assert!(
+        find_in(&state, region, "正在查询该厂商的官方用量…").is_some(),
+        "{text}"
+    );
+    let (state, region, text) = page(listed(), &["claude"], Some("claude"));
+    assert!(
+        find_in(&state, region, "此厂商已在「监控偏好」中关闭").is_some(),
+        "{text}"
+    );
 }
 
 #[test]

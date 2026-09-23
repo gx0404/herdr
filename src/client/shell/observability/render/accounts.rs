@@ -771,10 +771,7 @@ pub(super) fn accounts_content(
         } else {
             crate::ui::kit::empty_state::EmptyState {
                 title: crate::i18n::texts().monitor.no_accounts,
-                body: Some(tr(
-                    "Select a provider to inspect its official usage source.",
-                    "请选择厂商以查询对应的官方用量。",
-                )),
+                body: Some(empty_accounts_hint(state, scope)),
                 ..Default::default()
             }
         };
@@ -805,6 +802,54 @@ pub(super) fn accounts_content(
         // 切换厂商 / 账号后旧快照保留但变暗，直到新数据到达。
         buffer.set_style(area, Style::default().add_modifier(Modifier::DIM));
     }
+}
+
+/// 账号正文为空时的说明（冒烟 L17）。跨厂商总览（「全部厂商」）本身就是全部
+/// 厂商，不再让用户「选择厂商」，而是按厂商列表的真实状态说明：列表到了却一个
+/// 都没列出（此主机没装 agent CLI、也没配账号）/ 列出的厂商全在监控偏好里关闭 /
+/// 其余情况是正在查询。选中具体厂商（含悬浮层）时说明它被关闭或仍在查询。
+fn empty_accounts_hint(state: &State, scope: &AccountsScope<'_>) -> &'static str {
+    let disabled = |agent: &str| {
+        state
+            .usage
+            .disabled_providers
+            .iter()
+            .any(|item| item == agent)
+    };
+    if let Some(provider) = scope.provider {
+        return if disabled(provider) {
+            tr(
+                "This provider is turned off in Monitor preferences.",
+                "此厂商已在「监控偏好」中关闭。",
+            )
+        } else {
+            tr(
+                "Querying this provider's official usage…",
+                "正在查询该厂商的官方用量…",
+            )
+        };
+    }
+    let mut listed = state
+        .providers
+        .iter()
+        .filter(|provider| provider_listed(provider))
+        .peekable();
+    if !state.providers.is_empty() && listed.peek().is_none() {
+        return tr(
+            "No installed agent CLI or configured account was found on this host.",
+            "此主机未检测到已安装的 agent CLI，也没有配置账号。",
+        );
+    }
+    if listed.peek().is_some() && listed.all(|provider| disabled(&provider.agent)) {
+        return tr(
+            "Every provider is turned off in Monitor preferences; turn them back on there.",
+            "所有厂商都已在「监控偏好」中关闭，可在那里重新启用。",
+        );
+    }
+    tr(
+        "Querying the official usage of every listed provider…",
+        "正在查询全部厂商的官方用量…",
+    )
 }
 
 /// 页面的跨厂商总览：页面作用域且没选厂商（悬浮层总有自己的厂商）。仪表盘格式下
