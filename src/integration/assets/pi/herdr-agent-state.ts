@@ -885,13 +885,15 @@ export function createActivityTracker(pi: any) {
   };
 }
 
+// Only the snapshot's copy of the session reference is made well-formed; the
+// lifecycle reports keep Pi's value, which `pi --session` resumes.
 function activitySession(): ActivitySession {
   const session: ActivitySession = {};
   if (currentAgentSessionPath) {
-    session.session_path = currentAgentSessionPath;
+    session.session_path = wellFormed(currentAgentSessionPath);
   }
   if (currentAgentSessionId) {
-    session.session_id = currentAgentSessionId;
+    session.session_id = wellFormed(currentAgentSessionId);
   }
   return session;
 }

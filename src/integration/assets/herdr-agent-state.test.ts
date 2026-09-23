@@ -1132,6 +1132,36 @@ test("Pi reports extension tool activity as snapshots from TUI sessions", async 
   expect(activityNodes(third)[0]).toMatchObject({ status: "done" });
 });
 
+test("Pi activity snapshot never carries a lone surrogate from the session reference", async () => {
+  const requests = await startRecordingServer("pi-activity-session-ref");
+  const { handlers, pi } = createExtensionHarness();
+  const { default: install } = await importFresh("./pi/herdr-agent-state.ts");
+  install(pi);
+
+  // Lone halves in the session file and id (a Windows file name may hold one).
+  const context = {
+    ...piContext(() => false),
+    sessionManager: {
+      getSessionFile: () => "/tmp/pi-\ud800-activity.jsonl",
+      getSessionId: () => "pi-\udc00-activity",
+    },
+  };
+  await handlers.get("session_start")?.({ reason: "startup" }, context);
+  handlers.get("tool_execution_start")?.(
+    { toolCallId: "s5", toolName: "subagent", args: { agent: "scout", task: "Scan" } },
+    context,
+  );
+  await waitFor(() => activityRequests(requests).length === 1);
+  const hint = activityRequests(requests)[0].hint as string;
+  // Any `\udXXX` escape would be a lone half, which makes Herdr reject the
+  // whole snapshot.
+  expect(hint).not.toMatch(/\\u[dD][89a-fA-F][0-9a-fA-F]{2}/);
+  expect(JSON.parse(hint)).toMatchObject({
+    session_path: "/tmp/pi-\ufffd-activity.jsonl",
+    session_id: "pi-\ufffd-activity",
+  });
+});
+
 test("Pi drops a pending activity snapshot when the session shuts down", async () => {
   const requests = await startRecordingServer("pi-activity-shutdown");
   const { handlers, pi } = createExtensionHarness();
