@@ -2131,6 +2131,15 @@ mod tests {
         Ok(serde_json::from_str(&text).expect("应答是 JSON"))
     }
 
+    /// 调度对一个 pane 的最近决定：最近一轮遍历是否看过它、最近一次提交后台发现
+    /// 的时刻（时钟由测试注入）。「不刷新」一律看它，不靠等 worker 的事件判空：
+    /// 负载下 worker 可以慢过任何固定等待，判空会假绿。
+    fn last_decision(service: &Service, pane_id: PaneId) -> (bool, Option<Instant>) {
+        let scheduler = &service.scheduler;
+        let entry = scheduler.panes.get(&pane_id).expect("pane 有调度记录");
+        (entry.seen_pass == scheduler.pass, entry.last_started)
+    }
+
     #[test]
     fn tick_submits_discovery_and_the_result_comes_back_as_an_app_event() {
         let (mut service, mut received) = fake_service();
@@ -2156,7 +2165,11 @@ mod tests {
         // 结果未回主线程前（在途）不重复提交，即使有提示。
         app.state.agent_activity.note_hint(pane_id);
         service.tick(&mut app.state, t0 + secs(2.0), false);
-        assert!(received.try_recv().is_err());
+        assert_eq!(
+            last_decision(&service, pane_id),
+            (true, Some(t0)),
+            "在途时遍历到了也不重复提交"
+        );
         assert!(!app.state.agent_activity.has_hints(), "提示已被取走");
         // 回主线程后，保留的提示触发下一次刷新。
         service.pane_refreshed(pane_id, true);
@@ -2170,7 +2183,8 @@ mod tests {
 
     /// M2 回归（真机报告 §5.2，codex-03-timeline）：主 agent 先于子 agent 结束
     /// 回合、已回到空闲，落库树里子 agent 仍是 running。调度只在 Working 时轮询，
-    /// 树就停在 running，直到有人读取；现在按落库树照常每 5 s 刷一次。
+    /// 树就停在 running，直到有人读取；现在按落库树照常每 5 s 刷一次。「不刷新」
+    /// 直接断言调度的决定（[`last_decision`]），不等 worker 事件判空。
     #[test]
     fn tick_keeps_refreshing_an_idle_agent_whose_stored_tree_is_still_running() {
         let (mut service, mut received) = fake_service();
@@ -2187,12 +2201,20 @@ mod tests {
             .activity(pane_id)
             .is_some_and(|tree| tree.running == 1));
 
-        // 每轮遍历至少隔 1 s（SCHEDULER_PASS_INTERVAL）：4 s 这一轮遍历了但还不到
-        // 5 s，5 s 这一轮才到期。
+        // 每轮遍历至少隔 1 s（SCHEDULER_PASS_INTERVAL）：4 s 这一轮遍历到了该 pane
+        // 但还不到 5 s，不提交；5 s 这一轮才到期。
         service.tick(&mut app.state, t0 + secs(4.0), false);
-        std::thread::sleep(Duration::from_millis(50));
-        assert!(received.try_recv().is_err(), "5 s 内不重复刷新");
+        assert_eq!(
+            last_decision(&service, pane_id),
+            (true, Some(t0)),
+            "5 s 内不重复刷新"
+        );
+        assert!(!service.scheduler.in_flight(pane_id));
         service.tick(&mut app.state, t0 + secs(5.0), false);
+        assert_eq!(
+            last_decision(&service, pane_id),
+            (true, Some(t0 + secs(5.0)))
+        );
         assert!(matches!(
             recv_event(&mut received),
             AppEvent::AgentActivityRefreshed { pane_id: refreshed, .. } if refreshed == pane_id
@@ -2201,14 +2223,15 @@ mod tests {
 
     #[test]
     fn tick_skips_panes_without_an_agent_or_without_a_source() {
-        let (mut service, mut received) = fake_service();
+        let (mut service, _received) = fake_service();
         let (mut shell, _, _) = app_with_agent(None);
         service.tick(&mut shell.state, Instant::now(), false);
         // pi 没有（假）来源适配器：不提交。
         let (mut pi, _, _) = app_with_agent(Some(Agent::Pi));
         service.tick(&mut pi.state, Instant::now() + secs(1.0), false);
-        std::thread::sleep(Duration::from_millis(50));
-        assert!(received.try_recv().is_err());
+        // 两个 pane 都没进调度；后台线程在首次提交时才起，没起就说明一个任务也没提交。
+        assert!(service.scheduler.panes.is_empty());
+        assert!(service.runtime.is_none());
     }
 
     fn pi_fixture(name: &str) -> String {
@@ -2331,8 +2354,9 @@ mod tests {
         let (mut app, _, _) = app_with_agent(None);
         let t0 = Instant::now();
         service.tick(&mut app.state, t0, false);
-        std::thread::sleep(Duration::from_millis(50));
-        assert!(received.try_recv().is_err(), "无客户端时不轮询外部来源");
+        // 无客户端时不轮询外部来源：调度没记下轮询，后台线程也没起。
+        assert!(service.scheduler.external_last_started.is_none());
+        assert!(service.runtime.is_none(), "无客户端时不轮询外部来源");
         service.tick(&mut app.state, t0 + secs(1.0), true);
         let AppEvent::ExternalAgentsRefreshed { source, result } = recv_event(&mut received) else {
             panic!("应为外部来源刷新事件");
