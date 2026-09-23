@@ -368,6 +368,10 @@ pub struct SettingsTexts {
     pub install_button: &'static str,
     pub apply_button: &'static str,
     pub footer: &'static str,
+    /// Integrations 分区专用页脚：与 `integrations_hint` 用同一套动词
+    /// （Enter 安装选中），不重用通用 `footer` 的「应用」措辞——两者原本
+    /// 各写各的，Enter 的效果在头部与页脚间自相矛盾（冒烟 L7）。
+    pub footer_integrations: &'static str,
     /// Appended to the footer in the Integrations section: `a` installs every
     /// pending target without a confirmation, so it belongs in the key hints.
     pub footer_install_all: &'static str,

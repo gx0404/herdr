@@ -140,10 +140,18 @@ impl ClientShellState {
             settings.selected = 0;
             return;
         }
-        settings.focus = super::page::PageFocus::Content;
         settings.reveal = true;
-        settings.selected = (settings.selected as isize + delta)
-            .clamp(0, count.saturating_sub(1) as isize) as usize;
+        // 冒烟 M9：切换分区后 focus 是 Navigation，`draw_choice` 只在
+        // Content 焦点时画键盘高亮，于是"刚进分区看不到光标"；第一次
+        // ↓/↑ 只把焦点切到 Content、显示当前 `selected` 的光标，不叠加
+        // delta，避免第一下直接跳到第 2 项。
+        let entering_content = settings.focus == super::page::PageFocus::Navigation;
+        settings.focus = super::page::PageFocus::Content;
+        if !entering_content {
+            settings.selected = (settings.selected as isize + delta)
+                .clamp(0, count.saturating_sub(1) as isize)
+                as usize;
+        }
         if settings.section == ClientSettingsSection::Theme {
             self.preview_selected_theme();
         }
@@ -527,5 +535,69 @@ impl ClientShellState {
             return true;
         }
         true
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn open_indicators_settings() -> ClientShellState {
+        let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
+        state.open_settings_overlay();
+        let mut outcome = ClientShellInput::default();
+        state.select_settings_section(ClientSettingsSection::Indicators, &mut outcome);
+        state
+    }
+
+    fn settings(state: &ClientShellState) -> &ClientSettingsOverlay {
+        match state.overlay.as_ref() {
+            Some(ClientShellOverlay::Settings(settings)) => settings,
+            _ => panic!("settings overlay not open"),
+        }
+    }
+
+    /// 冒烟 M9：切换分区后 `focus` 是 Navigation（`draw_choice` 只在
+    /// Content 焦点时画键盘高亮，进页面看不到光标）；第一次 ↓ 应该只把
+    /// 焦点切到 Content、不移动 `selected`，否则会同时出现「看不到光标」
+    /// 和「第一下直接跳到第 2 项」两个问题。
+    #[test]
+    fn first_arrow_after_entering_a_section_only_moves_focus_not_selection() {
+        let mut state = open_indicators_settings();
+        assert_eq!(
+            settings(&state).focus,
+            super::super::page::PageFocus::Navigation,
+            "刚进分区时焦点还在 Navigation"
+        );
+        let before = settings(&state).selected;
+        state.move_settings_selection(1);
+        let after = settings(&state);
+        assert_eq!(
+            after.focus,
+            super::super::page::PageFocus::Content,
+            "第一次按键切到 Content 焦点"
+        );
+        assert_eq!(after.selected, before, "第一次按键不叠加位移");
+        // 第二次按键才真正移动选中项。
+        state.move_settings_selection(1);
+        assert_eq!(
+            settings(&state).selected,
+            before + 1,
+            "第二次按键才移动选中项"
+        );
+    }
+
+    /// 焦点已经在 Content 时（比如鼠标点过一次选项），↓/↑ 照常逐项移动，
+    /// 不会每次都被「第一下吞掉」。
+    #[test]
+    fn arrow_moves_selection_normally_once_content_is_already_focused() {
+        let mut state = open_indicators_settings();
+        state.select_settings_choice(0);
+        assert_eq!(
+            settings(&state).focus,
+            super::super::page::PageFocus::Content
+        );
+        state.move_settings_selection(1);
+        assert_eq!(settings(&state).selected, 1);
     }
 }
