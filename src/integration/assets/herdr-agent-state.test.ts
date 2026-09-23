@@ -1,4 +1,4 @@
-import { afterEach, expect, test } from "bun:test";
+import { afterEach, expect, setDefaultTimeout, test } from "bun:test";
 import { rm } from "node:fs/promises";
 import net, { createServer, type Server } from "node:net";
 import { tmpdir } from "node:os";
@@ -15,6 +15,15 @@ const originalEnvironment = {
 let server: Server | undefined;
 let socketPath: string | undefined;
 let importCounter = 0;
+
+// T1：负载 25–35 时 bun 事件循环、本地 socket 往返与扩展里的计时器都可能被拖慢
+// 好几秒，固定 1–3.5 s 的等待会误报。等「终会成立」的条件一律用这个与负载无关的
+// 宽上限：条件一满足立即往下走，只在真的失败时才等满。单个用例的超时相应放宽，
+// 容得下一个用例里的多段等待；「不应发生」的否定窗口（固定时长的 Bun.sleep 之后
+// 断言没有新请求）不受负载误报，保持原样。
+const LOADED_WAIT_MS = 20_000;
+const LOADED_TEST_TIMEOUT_MS = 120_000;
+setDefaultTimeout(LOADED_TEST_TIMEOUT_MS);
 
 afterEach(async () => {
   await new Promise<void>((resolve, reject) => {
@@ -260,10 +269,7 @@ for (const integration of integrations) {
       return undefined;
     };
 
-    const deadline = Date.now() + 1_000;
-    while (Date.now() < deadline && reportedState() === undefined) {
-      await Bun.sleep(5);
-    }
+    await waitUntil(() => reportedState() !== undefined);
 
     expect(reportedState()).toBe("working");
   });
@@ -390,10 +396,7 @@ test("Pi reports the session replacement source", async () => {
 
   const reportedSession = () =>
     requests.find((request) => isRecord(request) && request.method === "pane.report_agent_session");
-  const deadline = Date.now() + 1_000;
-  while (Date.now() < deadline && reportedSession() === undefined) {
-    await Bun.sleep(5);
-  }
+  await waitUntil(() => reportedSession() !== undefined);
 
   const request = reportedSession();
   expect(request).toBeDefined();
@@ -452,10 +455,7 @@ test("Pi waits for a replacement session report before publishing state", async 
     },
   );
 
-  const deadline = Date.now() + 1_000;
-  while (Date.now() < deadline && acknowledgeSessionReport === undefined) {
-    await Bun.sleep(5);
-  }
+  await waitUntil(() => acknowledgeSessionReport !== undefined);
   expect(acknowledgeSessionReport).toBeDefined();
   expect(
     requests.some((request) => isRecord(request) && request.method === "pane.report_agent"),
@@ -464,13 +464,9 @@ test("Pi waits for a replacement session report before publishing state", async 
   acknowledgeSessionReport?.();
   await sessionStartResult;
 
-  const stateDeadline = Date.now() + 1_000;
-  while (
-    Date.now() < stateDeadline &&
-    !requests.some((request) => isRecord(request) && request.method === "pane.report_agent")
-  ) {
-    await Bun.sleep(5);
-  }
+  await waitUntil(() =>
+    requests.some((request) => isRecord(request) && request.method === "pane.report_agent"),
+  );
   expect(requests.map((request) => (isRecord(request) ? request.method : undefined))).toEqual([
     "pane.report_agent_session",
     "pane.report_agent",
@@ -551,10 +547,7 @@ test("Pi retries working state after an unanswered socket attempt", async () => 
       return isRecord(params) && params.state === "working";
     });
 
-  const deadline = Date.now() + 2_500;
-  while (Date.now() < deadline && !reportedWorking()) {
-    await Bun.sleep(5);
-  }
+  await waitUntil(reportedWorking);
 
   expect(connectionCount()).toBeGreaterThanOrEqual(2);
   expect(attemptedRequests.length).toBeGreaterThanOrEqual(2);
@@ -1118,7 +1111,7 @@ test("Pi reports extension tool activity as snapshots from TUI sessions", async 
   update("one two three");
   await Bun.sleep(50);
   expect(activityRequests(requests)).toHaveLength(1);
-  await waitFor(() => activityRequests(requests).length === 2, 2_000);
+  await waitFor(() => activityRequests(requests).length === 2);
   expect(activityNodes(activityRequests(requests)[1])[0]).toMatchObject({
     summary: "one two three",
     output: { text: "one two three", start: 0 },
@@ -1198,7 +1191,7 @@ test("Pi resends an undelivered activity snapshot once", async () => {
   // Both attempts of the first snapshot go unanswered.
   const { requests } = await startPiActivitySession("pi-activity-retry", 2);
   await waitFor(() => activityRequests(requests).length === 2);
-  await waitFor(() => activityRequests(requests).length === 3, 3_500);
+  await waitFor(() => activityRequests(requests).length === 3);
   const [first, second, retry] = activityRequests(requests);
   expect(second.hint).toBe(first.hint);
   expect(second.seq).toBe(first.seq);
@@ -1208,12 +1201,12 @@ test("Pi resends an undelivered activity snapshot once", async () => {
   // Delivered: nothing more is sent.
   await Bun.sleep(2_300);
   expect(activityRequests(requests)).toHaveLength(3);
-}, 10_000);
+}, LOADED_TEST_TIMEOUT_MS);
 
 test("Pi retries an undelivered activity snapshot at most once", async () => {
   // The first snapshot and its retry both go unanswered.
   const { requests, handlers, context, call } = await startPiActivitySession("pi-activity-give-up", 4);
-  await waitFor(() => activityRequests(requests).length === 4, 3_500);
+  await waitFor(() => activityRequests(requests).length === 4);
   await Bun.sleep(2_300);
   expect(activityRequests(requests)).toHaveLength(4);
   expect(new Set(activityRequests(requests).map((params) => params.hint)).size).toBe(1);
@@ -1221,7 +1214,7 @@ test("Pi retries an undelivered activity snapshot at most once", async () => {
   handlers.get("tool_execution_end")?.({ ...call, result: {}, isError: false }, context);
   await waitFor(() => activityRequests(requests).length === 5);
   expect(activityNodes(activityRequests(requests)[4])[0]).toMatchObject({ id: "r1", status: "done" });
-}, 10_000);
+}, LOADED_TEST_TIMEOUT_MS);
 
 test("Pi skips the activity retry once a newer snapshot supersedes it", async () => {
   // A newer snapshot queued while the failing one is in flight supersedes it.
@@ -1232,7 +1225,7 @@ test("Pi skips the activity retry once a newer snapshot supersedes it", async ()
   const sent = activityRequests(newer.requests);
   expect(sent).toHaveLength(3);
   expect(activityNodes(sent[2])[0]).toMatchObject({ status: "done" });
-}, 10_000);
+}, LOADED_TEST_TIMEOUT_MS);
 
 test("Pi drops a pending activity retry when the session shuts down", async () => {
   const { requests, handlers, context } = await startPiActivitySession("pi-activity-retry-shutdown", 2);
@@ -1240,7 +1233,7 @@ test("Pi drops a pending activity retry when the session shuts down", async () =
   handlers.get("session_shutdown")?.({}, context);
   await Bun.sleep(2_300);
   expect(activityRequests(requests)).toHaveLength(2);
-}, 10_000);
+}, LOADED_TEST_TIMEOUT_MS);
 
 test("Pi never retries a snapshot whose send fails after the session shut down", async () => {
   // Both attempts are held open for 300 ms, then closed unanswered.
@@ -1259,7 +1252,7 @@ test("Pi never retries a snapshot whose send fails after the session shut down",
   const sent = activityRequests(requests);
   expect(sent).toHaveLength(2);
   expect(sent[1].seq).toBe(sent[0].seq);
-}, 10_000);
+}, LOADED_TEST_TIMEOUT_MS);
 
 test("Pi still retries the next session's snapshots after a shutdown", async () => {
   const requests = await startFlakyActivityServer("pi-activity-next-session", 2);
@@ -1278,11 +1271,11 @@ test("Pi still retries the next session's snapshots after a shutdown", async () 
     { toolCallId: "n1", toolName: "subagent", args: { agent: "scout", task: "Scan" } },
     context,
   );
-  await waitFor(() => activityRequests(requests).length === 3, 3_500);
+  await waitFor(() => activityRequests(requests).length === 3);
   const [first, , retry] = activityRequests(requests);
   expect(retry.hint).toBe(first.hint);
   expect(retry.seq as number).toBeGreaterThan(first.seq as number);
-}, 10_000);
+}, LOADED_TEST_TIMEOUT_MS);
 
 test("Pi never reports activity from headless modes", async () => {
   const requests = await startRecordingServer("pi-activity-rpc");
@@ -1324,11 +1317,16 @@ function requestStates(requests: unknown[]): unknown[] {
     .map(requestState);
 }
 
-async function waitFor(predicate: () => boolean, timeoutMs = 1_000): Promise<void> {
+// 等到 `predicate` 成立或等满 `timeoutMs`，不断言（调用方自己断言结果）。
+async function waitUntil(predicate: () => boolean, timeoutMs = LOADED_WAIT_MS): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline && !predicate()) {
     await Bun.sleep(5);
   }
+}
+
+async function waitFor(predicate: () => boolean, timeoutMs = LOADED_WAIT_MS): Promise<void> {
+  await waitUntil(predicate, timeoutMs);
   expect(predicate()).toBe(true);
 }
 

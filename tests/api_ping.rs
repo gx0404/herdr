@@ -56,6 +56,11 @@ fn cleanup_spawned_herdr(spawned: SpawnedHerdr, base: PathBuf) {
     cleanup_test_base(&base);
 }
 
+/// 等「终会成立」的条件用的与负载无关的宽上限（T1）：负载 25–35 时起 server、起
+/// shell 与假 agent、检测 tick（300 ms 一轮）都可能被拖慢好几秒，固定 1–3 s 的等待
+/// 会误报。条件一满足立即往下走，只在真的失败时才等满。
+const LOADED_WAIT: Duration = Duration::from_secs(30);
+
 fn test_lock() -> MutexGuard<'static, ()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
     LOCK.get_or_init(|| Mutex::new(()))
@@ -1422,9 +1427,15 @@ fn events_subscribe_streams_workspace_tab_and_agent_events() {
 
     fs::create_dir_all(&bin_dir).unwrap();
     let fake_pi = bin_dir.join("pi");
+    // 假 pi 停在「Working...」直到测试看到检测事件（T1）：以前只活 1 s，负载高时检测
+    // 还没轮到它就退出了，检测事件永远等不到。
+    let stop_file = base.join("pi-stop");
     fs::write(
         &fake_pi,
-        "#!/bin/sh\nprintf 'Working...\\n'\nsleep 1\nprintf '\\033[2J\\033[Hdone\\n'\n",
+        format!(
+            "#!/bin/sh\nprintf 'Working...\\n'\nwhile [ ! -f '{}' ]; do sleep 0.05; done\nprintf '\\033[2J\\033[Hdone\\n'\n",
+            stop_file.display()
+        ),
     )
     .unwrap();
     #[cfg(unix)]
@@ -1443,14 +1454,14 @@ fn events_subscribe_streams_workspace_tab_and_agent_events() {
         &socket_path,
         Some(Path::new(&path_override)),
     );
-    wait_for_socket(&socket_path, Duration::from_secs(5));
+    wait_for_socket(&socket_path, LOADED_WAIT);
 
     let mut reader = open_subscription(
         &socket_path,
         r#"{"id":"sub_life_a","method":"events.subscribe","params":{"subscriptions":[{"type":"workspace.created"},{"type":"workspace.focused"},{"type":"tab.created"},{"type":"tab.focused"},{"type":"tab.renamed"},{"type":"pane.created"},{"type":"pane.focused"},{"type":"pane.agent_detected"}]}}"#,
     );
 
-    let ack = reader.read_json_line(Duration::from_secs(2));
+    let ack = reader.read_json_line(LOADED_WAIT);
     assert_eq!(ack["id"], "sub_life_a");
     assert_eq!(ack["result"]["type"], "subscription_started");
 
@@ -1476,7 +1487,7 @@ fn events_subscribe_streams_workspace_tab_and_agent_events() {
             "pane_created",
             "pane_focused",
         ],
-        Duration::from_secs(2),
+        LOADED_WAIT,
     );
 
     let workspace_created = event_by_kind(&initial_events, "workspace_created");
@@ -1518,9 +1529,10 @@ fn events_subscribe_streams_workspace_tab_and_agent_events() {
     );
     assert_eq!(send_enter["result"]["type"], "ok");
 
-    let agent_detected = wait_for_event(&mut reader, "pane_agent_detected", Duration::from_secs(3));
+    let agent_detected = wait_for_event(&mut reader, "pane_agent_detected", LOADED_WAIT);
     assert_eq!(agent_detected["data"]["pane_id"], pane_id);
     assert_eq!(agent_detected["data"]["agent"], "pi");
+    fs::write(&stop_file, "stop").unwrap();
 
     let new_tab = send_request(
         &socket_path,
@@ -1535,9 +1547,9 @@ fn events_subscribe_streams_workspace_tab_and_agent_events() {
         .to_string();
     assert_eq!(second_tab_id, format!("{workspace_id}:t2"));
 
-    let created_tab_event = wait_for_event(&mut reader, "tab_created", Duration::from_secs(2));
+    let created_tab_event = wait_for_event(&mut reader, "tab_created", LOADED_WAIT);
     assert_eq!(created_tab_event["data"]["tab"]["tab_id"], second_tab_id);
-    let focused_tab_event = wait_for_event(&mut reader, "tab_focused", Duration::from_secs(2));
+    let focused_tab_event = wait_for_event(&mut reader, "tab_focused", LOADED_WAIT);
     assert_eq!(focused_tab_event["data"]["tab_id"], second_tab_id);
 
     let renamed_tab = send_request(
@@ -1548,7 +1560,7 @@ fn events_subscribe_streams_workspace_tab_and_agent_events() {
         ),
     );
     assert_eq!(renamed_tab["result"]["tab"]["label"], "logs");
-    let renamed_event = wait_for_event(&mut reader, "tab_renamed", Duration::from_secs(2));
+    let renamed_event = wait_for_event(&mut reader, "tab_renamed", LOADED_WAIT);
     assert_eq!(renamed_event["data"]["tab_id"], second_tab_id);
     assert_eq!(renamed_event["data"]["label"], "logs");
 
@@ -2022,7 +2034,7 @@ fn official_release_waits_for_confirmed_process_exit() {
         &socket_path,
         Some(Path::new(&path_override)),
     );
-    wait_for_socket(&socket_path, Duration::from_secs(5));
+    wait_for_socket(&socket_path, LOADED_WAIT);
 
     let created = send_request(
         &socket_path,
@@ -2053,7 +2065,7 @@ fn official_release_waits_for_confirmed_process_exit() {
     );
     assert_eq!(send_enter["result"]["type"], "ok");
 
-    let deadline = Instant::now() + Duration::from_secs(3);
+    let deadline = Instant::now() + LOADED_WAIT;
     loop {
         let pane = send_request(
             &socket_path,
@@ -2120,7 +2132,11 @@ fn official_release_waits_for_confirmed_process_exit() {
 
     fs::write(&stop_file, "stop").unwrap();
 
-    let cleared_deadline = Instant::now() + Duration::from_secs(1);
+    // 这里守「进程退出后终会清除」，等待用与负载无关的宽上限（T1）。前台进程组一变
+    // 就探测、不等 5 s 的定期复查，由单测
+    // `pane::tests::pending_release_probes_when_foreground_group_changes` 与
+    // `pane::tests::identified_agent_probes_when_foreground_group_disappears` 确定性地守住。
+    let cleared_deadline = Instant::now() + LOADED_WAIT;
     loop {
         let pane = send_request(
             &socket_path,
@@ -2136,7 +2152,7 @@ fn official_release_waits_for_confirmed_process_exit() {
         }
         assert!(
             Instant::now() < cleared_deadline,
-            "pi agent was not cleared promptly after process exit: {pane}"
+            "pi agent was not cleared after process exit: {pane}"
         );
         thread::sleep(Duration::from_millis(50));
     }

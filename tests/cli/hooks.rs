@@ -1,4 +1,6 @@
 use super::harness::*;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 fn run_claude_hook(action: &str, hook_input: &str) -> Option<serde_json::Value> {
     run_shell_hook(
@@ -20,6 +22,21 @@ fn run_shell_hook(asset_path: &str, args: &[&str], hook_input: &str) -> Option<s
     run_shell_hook_with_env(asset_path, args, hook_input, &[])
 }
 
+/// 等钩子请求的兜底上限：判定「没有上报」看的是钩子已经退出，不是时间（见
+/// `run_shell_hook_with_env`）；这个上限只防主线程永远等不到退出标记，正常用不到。
+const HOOK_SAFETY_WAIT: Duration = Duration::from_secs(60);
+
+/// 收下 `stream` 上的一行请求并回一行 ok。
+fn answer_hook_request(mut stream: UnixStream) -> String {
+    let mut line = String::new();
+    let mut reader = BufReader::new(stream.try_clone().unwrap());
+    reader.read_line(&mut line).unwrap();
+    let _ = stream.write_all(br#"{"id":"test","result":{"type":"ok"}}"#);
+    let _ = stream.write_all(b"\n");
+    let _ = stream.flush();
+    line
+}
+
 fn run_shell_hook_with_env(
     asset_path: &str,
     args: &[&str],
@@ -30,28 +47,31 @@ fn run_shell_hook_with_env(
     fs::create_dir_all(&base).unwrap();
     let socket_path = base.join("herdr.sock");
     let listener = UnixListener::bind(&socket_path).unwrap();
+    // 钩子进程已退出（主线程等到它结束后置位）。
+    let hook_exited = Arc::new(AtomicBool::new(false));
+    let server_hook_exited = Arc::clone(&hook_exited);
 
+    // T1：以前只收 700 ms，负载 25–35 时 bash 与 python 起得慢，要上报的钩子还没
+    // 连上就被判成「没有请求」。钩子里的 python 同步发请求，connect 在进程退出前就已
+    // 完成、连接留在 listener 的 backlog 里，所以改为收到钩子退出为止：先读退出标记
+    // 再 accept，标记为真时这次 accept 一定能拿到退出前入队的连接，拿不到就是没有
+    // 上报。判定与负载无关。
     let server = thread::spawn(move || {
         listener.set_nonblocking(true).unwrap();
-        let deadline = Instant::now() + Duration::from_millis(700);
-        while Instant::now() < deadline {
+        let deadline = Instant::now() + HOOK_SAFETY_WAIT;
+        loop {
+            let exited = server_hook_exited.load(Ordering::Acquire);
             match listener.accept() {
-                Ok((mut stream, _)) => {
-                    let mut line = String::new();
-                    let mut reader = BufReader::new(stream.try_clone().unwrap());
-                    reader.read_line(&mut line).unwrap();
-                    let _ = stream.write_all(br#"{"id":"test","result":{"type":"ok"}}"#);
-                    let _ = stream.write_all(b"\n");
-                    let _ = stream.flush();
-                    return Some(line);
-                }
+                Ok((stream, _)) => return Some(answer_hook_request(stream)),
                 Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                    if exited || Instant::now() >= deadline {
+                        return None;
+                    }
                     thread::sleep(Duration::from_millis(10));
                 }
                 Err(err) => panic!("accept failed: {err}"),
             }
         }
-        None
     });
 
     let hook_path = Path::new(env!("CARGO_MANIFEST_DIR")).join(asset_path);
@@ -76,6 +96,7 @@ fn run_shell_hook_with_env(
     drop(stdin);
 
     let output = child.wait_with_output().unwrap();
+    hook_exited.store(true, Ordering::Release);
     assert!(
         output.status.success(),
         "hook failed: status={:?} stderr={} stdout={}",
