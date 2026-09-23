@@ -375,13 +375,24 @@ fn agent_row_context_menu_lists_seam_items_and_routes_stub_actions() {
     assert!(!items[view_activity].enabled, "没有活动时禁用");
     // 动作未接通的条目灰显：否则点了只会关掉菜单、什么都不发生。重命名 / 绑定
     // 账号 / 关闭已在 `agent_tree.rs` 接上（见 `agent_panel_characterization.rs`
-    // 的 `tree_agent_context_actions_*`），可点与否由菜单条目决定；「用量」仍待
-    // observability 的公开入口。
+    // 的 `tree_agent_context_actions_*`），菜单条目随之可点；「用量」仍待
+    // observability 的公开入口（seam-stub(hover-card)）。
     let usage = items
         .iter()
         .position(|item| item.action == ClientContextMenuAction::ShowAgentUsage)
         .expect("缺少条目: ShowAgentUsage");
     assert!(!items[usage].enabled, "「用量」未接通时应禁用");
+    for action in [
+        ClientContextMenuAction::RenameAgent,
+        ClientContextMenuAction::BindAgentAccount,
+        ClientContextMenuAction::CloseAgentPane,
+    ] {
+        let index = items
+            .iter()
+            .position(|item| item.action == action)
+            .expect("缺少已接通的条目");
+        assert!(items[index].enabled, "已接通的 {action:?} 应可点");
+    }
 
     // 禁用项：不进命中表（kit::menu 只登记可激活行），点它所在的行不激活，
     // 菜单保持打开。agent 菜单没有分隔线，行位 = 首行 + 条目下标。

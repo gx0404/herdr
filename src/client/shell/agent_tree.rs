@@ -65,12 +65,6 @@ use crate::ui::kit::tree::{
 /// `collapsed_groups`，点击时改写 `collapsed_endpoints`。
 pub(super) const MACHINE_TOGGLE_KEY: &str = "agent-machine";
 
-/// 面板车道的私有状态持有者：`ClientShellState` 不再为它加字段，新状态放这里。
-/// 统一树本身没有跨帧私有状态（行序列在 `AgentRowsCache`，折叠态在既有集合），
-/// 目前为空。
-#[derive(Default)]
-pub(super) struct AgentTreeState {}
-
 /// 一行的节点种类与该种类的负载。
 #[derive(Debug)]
 pub(super) enum AgentTreeKind {
@@ -1722,9 +1716,7 @@ impl ClientShellState {
         let target = ClientContextMenuTarget::Agent {
             endpoint_id,
             pane_id,
-            workspace_id: agent.workspace_id.clone(),
             agent: agent.agent.clone(),
-            has_manual_name: agent.name.is_some(),
             has_activity: agent.activity.total > 0 || !agent.activity.nodes.is_empty(),
         };
         self.overlay = Some(ClientShellOverlay::ContextMenu(ClientContextMenuOverlay {
@@ -1800,7 +1792,7 @@ impl ClientShellState {
             (Action::CloseAgentPane, AgentActivityOwner::Pane { pane_id }) => {
                 self.close_agent_pane(endpoint_id, pane_id, outcome);
             }
-            // seam-stub(agent-panel)：「用量」要打开并钉住该 agent 的用量悬停卡，
+            // seam-stub(hover-card)：「用量」要打开并钉住该 agent 的用量悬停卡，
             // 悬停卡状态机归监控车道，observability 还没有可调用的公开入口；
             // 条目在菜单里保持灰显，这里兜住键盘 / 程序化路径。
             (Action::ShowAgentUsage, _) => {}

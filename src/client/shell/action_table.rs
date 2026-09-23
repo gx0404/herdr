@@ -1496,7 +1496,8 @@ impl ClientShellState {
                         .and_then(|pane| pane.label.clone())
                 });
                 self.overlay = Some(ClientShellOverlay::Rename(ClientRenameOverlay {
-                    title: "rename pane",
+                    // 同键盘重命名路径（`open_rename_pane_overlay`）：走 i18n。
+                    title: crate::i18n::texts().dialogs.rename_pane,
                     input: TextEditor::new(label.as_deref().unwrap_or_default(), label.is_none()),
                     target: ClientRenameTarget::Pane { pane_id },
                 }));

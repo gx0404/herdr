@@ -1008,13 +1008,8 @@ pub(super) enum ClientContextMenuTarget {
     Agent {
         endpoint_id: ClientEndpointId,
         pane_id: String,
-        // seam-stub(agent-panel)：重命名 / 关闭由波 2 面板车道接上后删除这两个 allow。
-        #[allow(dead_code)]
-        workspace_id: String,
         /// 识别出的 agent 名；`None` 时不提供用量 / 绑定账号。
         agent: Option<String>,
-        #[allow(dead_code)]
-        has_manual_name: bool,
         has_activity: bool,
     },
     /// 不属于任何 pane 的外部来源条目。
@@ -1548,10 +1543,6 @@ pub(crate) struct ClientShellState {
     /// 下发、已被 `(revision, boot)` 覆盖，本字段恒为 0；为带外通道预留，启用者
     /// 须给上述守门脚本加一条同形规则。
     pub(super) agent_activity_epoch: u64,
-    /// 面板车道的私有状态（统一树）。
-    // seam-stub(agent-panel)：波 2 面板车道读写后删除本 allow。
-    #[allow(dead_code)]
-    pub(super) agent_tree: super::agent_tree::AgentTreeState,
     /// 在途的片段运行，按 run id 索引：并发运行互不覆盖（TOOL-06）。
     pub(super) snippet_runs: HashMap<u64, super::snippets_overlay::ClientSnippetRunState>,
     /// 下一个 run id（单调递增，跨运行不重复）。
@@ -1785,7 +1776,6 @@ impl ClientShellState {
             agent_rows_epoch: 0,
             tree_collapse_epoch: 0,
             agent_activity_epoch: 0,
-            agent_tree: Default::default(),
             snippet_runs: HashMap::new(),
             next_snippet_run_id: 0,
             broadcast: crate::client::endpoint::BroadcastSet::load().unwrap_or_default(),
