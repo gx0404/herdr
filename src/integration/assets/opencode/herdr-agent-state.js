@@ -175,9 +175,13 @@ function reportActivity(hint) {
   });
 }
 
+// Stops at the first repeated session so a parent cycle in bad session data
+// cannot spin forever inside OpenCode's event dispatch.
 function rootSessionOf(sessionID) {
+  const seen = new Set();
   let rootSessionID = sessionID;
-  while (childSessions.has(rootSessionID)) {
+  while (childSessions.has(rootSessionID) && !seen.has(rootSessionID)) {
+    seen.add(rootSessionID);
     rootSessionID = childSessions.get(rootSessionID);
   }
   return rootSessionID;
@@ -271,8 +275,12 @@ export const HerdrAgentStatePlugin = async () => {
   // `noReply: true` (plugins use it to leave a note for the next turn) stores
   // the message and returns without running the loop, so no idle would follow
   // a `working` reported there.
+  //
+  // `async` keeps failures off OpenCode's dispatch loop, which calls every
+  // plugin's hook without awaiting it; the body still queues its reports
+  // before the first await, so event order is preserved.
   return {
-    event: ({ event }) => handleEvent(event),
+    event: async ({ event }) => handleEvent(event),
   };
 };
 

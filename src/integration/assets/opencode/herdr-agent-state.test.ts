@@ -168,6 +168,40 @@ test("a message stored without starting a turn keeps the pane idle", async () =>
   expect(lifecycle().map(requestState)).toEqual(["working", "idle", "idle"]);
 });
 
+// OpenCode calls every plugin's event hook in one loop without awaiting it, so
+// a hook that throws synchronously would keep the event from later plugins.
+test("the event hook reports failures asynchronously, never by throwing", async () => {
+  const plugin = await loadPlugin();
+  const broken = new Proxy(
+    {},
+    {
+      get() {
+        throw new Error("unreadable event");
+      },
+    },
+  );
+
+  let result: Promise<unknown> | undefined;
+  expect(() => {
+    result = plugin.event({ event: broken });
+  }).not.toThrow();
+  await expect(result).rejects.toThrow("unreadable event");
+});
+
+test("a parent cycle in session data cannot hang the event handler", async () => {
+  const plugin = await loadPlugin();
+  await plugin.event({
+    event: { type: "session.created", properties: { info: { id: "cycle-a", parentID: "cycle-b" } } },
+  });
+  await plugin.event({
+    event: { type: "session.created", properties: { info: { id: "cycle-b", parentID: "cycle-a" } } },
+  });
+
+  await plugin.event({ event: { type: "permission.asked", properties: { sessionID: "cycle-a" } } });
+
+  expect(lifecycle().map(requestState)).toEqual(["blocked"]);
+});
+
 test("suppresses redundant same-session updates", async () => {
   const plugin = await loadPlugin();
 
