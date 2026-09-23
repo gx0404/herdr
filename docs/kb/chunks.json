@@ -1678,8 +1678,8 @@
       "anchor": "Config file > Language",
       "doc": "docs/next/website/src/content/docs/configuration.mdx",
       "id": "docs-next-website-src-content-docs-configuration-mdx-config-file-language",
-      "source_sha256": "0b4368c858a9995f7f6da1a464cb362af5565dff79890d186f53a26cf3e356b7",
-      "text": "## Language\n\n`language` picks the language for Herdr's own TUI and CLI messages; `\"zh-CN\"` (the default) and `\"en\"` are supported.\n\n```toml\nlanguage = \"en\"\n```\n\nThe `HERDR_LANG` environment variable overrides it for a single run. Client settings — including this one — reload live: `reload config` (or the global menu's `reload config`) applies a new value without restarting panes."
+      "source_sha256": "51ce628316a15efdf3cd5c652df1961e8518d398e8adcab0b28464eb1a051f71",
+      "text": "## Language\n\n`language` picks the language for Herdr's own TUI and CLI messages; `\"zh-CN\"` (the default) and `\"en\"` are supported.\n\n```toml\nlanguage = \"en\"\n```\n\nThe `HERDR_LANG` environment variable overrides it for a single run. Client settings — including this one — reload live: `reload config` (or the main menu's `reload config`) applies a new value without restarting panes."
     },
     {
       "anchor": "Config file > Logs",
@@ -1706,8 +1706,8 @@
       "anchor": "Config file > Reload config",
       "doc": "docs/next/website/src/content/docs/configuration.mdx",
       "id": "docs-next-website-src-content-docs-configuration-mdx-config-file-reload-config",
-      "source_sha256": "8e594d4a6b1d29ee934495271f1a465925793a251c10bdf3273c9e14d1519217",
-      "text": "## Reload config\n\nReload a running server after editing `config.toml`:\n\n```bash\nherdr server reload-config\n```\n\nYou can also open the global menu in Herdr and choose `reload config`.\n\nReload applies most UI settings without restarting panes. Startup-only settings still need a restart.\n\nThemes, sidebar layouts, copy behavior, and other presentation settings come from the client's local config, including when viewing an SSH machine. Pane defaults, worktrees, integrations, and custom commands belong to the server where the panes run. The UI's `reload config` action reloads both the client's local settings and the selected server's config. Local keybindings reload too; `--remote-keybindings server` instead uses the selected server's keybindings."
+      "source_sha256": "d3229c414b16dfba3dbce0efdf3a4185706da8a8b8ddef8d02901f3362b9e237",
+      "text": "## Reload config\n\nReload a running server after editing `config.toml`:\n\n```bash\nherdr server reload-config\n```\n\nYou can also open the main menu in Herdr and choose `reload config`.\n\nReload applies most UI settings without restarting panes. Startup-only settings still need a restart.\n\nThemes, sidebar layouts, copy behavior, and other presentation settings come from the client's local config, including when viewing an SSH machine. Pane defaults, worktrees, integrations, and custom commands belong to the server where the panes run. The UI's `reload config` action reloads both the client's local settings and the selected server's config. Local keybindings reload too; `--remote-keybindings server` instead uses the selected server's keybindings."
     },
     {
       "anchor": "Config file > Remote attach",
