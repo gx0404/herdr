@@ -244,8 +244,14 @@ pub(in crate::client::shell) fn panel(
     glyphs: crate::ui::BorderGlyphs,
 ) -> Option<Rect> {
     let inner = panel_inner(a)?;
-    let background = Style::default().bg(bg).remove_modifier(Modifier::DIM);
-    let border = Style::default().fg(c).bg(bg).remove_modifier(Modifier::DIM);
+    // 清全部 modifier 而不止 DIM：底层内容（终端字符、其它已画的浮层残留）
+    // 可能带 BOLD/ITALIC/UNDERLINED，只清 DIM 会让这些位泄漏进面板背景与边框
+    // （冒烟 M2）。
+    let background = Style::default().bg(bg).remove_modifier(Modifier::all());
+    let border = Style::default()
+        .fg(c)
+        .bg(bg)
+        .remove_modifier(Modifier::all());
     for y in a.y..a.bottom() {
         for x in a.x..a.right() {
             b[(x, y)].set_symbol(" ").set_style(background);
@@ -297,11 +303,13 @@ pub(in crate::client::shell) fn titled_panel(
         a.y,
         a.width.saturating_sub(2),
         title,
+        // 先清全部 modifier 再加自己的 BOLD：顺序反过来会连刚加的 BOLD 一起
+        // 清掉（`remove_modifier` 会把参数里的位从 `add_modifier` 减掉）。
         Style::default()
             .fg(border)
             .bg(bg)
-            .add_modifier(Modifier::BOLD)
-            .remove_modifier(Modifier::DIM),
+            .remove_modifier(Modifier::all())
+            .add_modifier(Modifier::BOLD),
     );
     Some(inner)
 }
@@ -1578,6 +1586,63 @@ mod tests {
         assert_eq!(rects[0].x, (40 - total) / 2);
         assert_eq!(rects[1].x, rects[0].x + 6 + 2);
         assert_eq!(rects[0].y, 5);
+    }
+
+    /// 冒烟 M2：`panel` / `titled_panel` 画在已经带 BOLD + DIM 的单元格上时，
+    /// 背景、边框与标题都要清干净——只清 DIM 会让 BOLD 泄漏进设置 / 帮助等
+    /// 浮层的背景。
+    #[test]
+    fn panel_and_titled_panel_clear_bold_and_dim_from_the_underlying_cells() {
+        let palette = Palette::catppuccin();
+        let area = Rect::new(0, 0, 12, 6);
+        let mut buffer = Buffer::empty(area);
+        let dirty = Style::default().add_modifier(Modifier::BOLD | Modifier::DIM);
+        for y in area.y..area.bottom() {
+            for x in area.x..area.right() {
+                buffer[(x, y)].set_style(dirty);
+            }
+        }
+        let inner = panel(
+            &mut buffer,
+            area,
+            palette.accent,
+            palette.panel_bg,
+            crate::ui::BorderGlyphs::SINGLE,
+        )
+        .expect("panel fits");
+        let background = buffer[(inner.x, inner.y)].style();
+        assert!(!background
+            .add_modifier
+            .intersects(Modifier::BOLD | Modifier::DIM));
+        let border = buffer[(0, 0)].style();
+        assert!(!border
+            .add_modifier
+            .intersects(Modifier::BOLD | Modifier::DIM));
+
+        let mut buffer = Buffer::empty(area);
+        for y in area.y..area.bottom() {
+            for x in area.x..area.right() {
+                buffer[(x, y)].set_style(dirty);
+            }
+        }
+        titled_panel(
+            &mut buffer,
+            area,
+            "Title",
+            palette.accent,
+            palette.panel_bg,
+            crate::ui::BorderGlyphs::SINGLE,
+        )
+        .expect("titled panel fits");
+        let title_style = buffer[(area.x + 1, area.y)].style();
+        assert!(
+            title_style.add_modifier.contains(Modifier::BOLD),
+            "标题保留自己的 BOLD"
+        );
+        assert!(
+            !title_style.add_modifier.contains(Modifier::DIM),
+            "但不带残留 DIM"
+        );
     }
 
     #[test]

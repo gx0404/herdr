@@ -263,7 +263,14 @@ pub(crate) fn render_menu(
     let area = Rect::new(x, y, width, height);
     render.area = area;
 
-    let base = Style::default().bg(palette.panel_bg).fg(palette.text);
+    // 先清底层单元格全部 modifier（BOLD/DIM/…）再铺自己的样式：命令面板 /
+    // 右键菜单画在已经被上层浮层压暗（DIM）或本就带 BOLD 的屏幕内容之上，
+    // `Cell::set_style` 对 modifier 是增量合并（只加 add_modifier、只减
+    // sub_modifier），不显式清零就会把底层残留的位泄漏进菜单（冒烟 M2）。
+    let base = Style::default()
+        .bg(palette.panel_bg)
+        .fg(palette.text)
+        .remove_modifier(Modifier::all());
     let border = base.fg(palette.accent);
     for row in area.y..area.bottom() {
         fill_row(buffer, area.x, row, area.width, " ", base);
@@ -584,6 +591,58 @@ mod tests {
             Some(palette.accent),
             "分隔线接边框"
         );
+    }
+
+    /// 冒烟 M2：命令面板 / 右键菜单画在已经被上层浮层压暗（DIM）、且底层内容
+    /// 本身带 BOLD 的屏幕之上；`render_menu` 必须先清掉这些残留位，背景、
+    /// 边框与未高亮行都不能带任何底层 modifier，高亮行只保留自己的 BOLD。
+    #[test]
+    fn render_menu_clears_stale_modifiers_from_the_underlying_screen() {
+        let palette = Palette::catppuccin();
+        let bounds = Rect::new(0, 0, 20, 9);
+        let mut buffer = Buffer::empty(bounds);
+        let dirty = Style::default().add_modifier(Modifier::BOLD | Modifier::DIM);
+        for y in bounds.y..bounds.bottom() {
+            for x in bounds.x..bounds.right() {
+                buffer[(x, y)].set_style(dirty);
+            }
+        }
+        let items = sample();
+        let state = MenuState {
+            highlighted: 1,
+            ..MenuState::default()
+        };
+        let render = render_menu(
+            &mut buffer,
+            (0, 0),
+            bounds,
+            &items,
+            &state,
+            BorderGlyphs::SINGLE,
+            false,
+            &palette,
+        );
+        assert!(!render.rows.is_empty());
+        // 边框：不残留 BOLD / DIM。
+        let border = buffer[(0, 0)].style();
+        assert!(!border
+            .add_modifier
+            .intersects(Modifier::BOLD | Modifier::DIM));
+        // 未高亮的可激活行（"Follow"）：底色干净，不带 BOLD / DIM。
+        let plain = buffer[(4, 3)].style();
+        assert!(!plain
+            .add_modifier
+            .intersects(Modifier::BOLD | Modifier::DIM));
+        assert_eq!(plain.bg, Some(palette.panel_bg));
+        // 高亮行（"Focus"）：保留自己的 BOLD，但没有残留 DIM。
+        let focus = buffer[(4, 2)].style();
+        assert!(focus.add_modifier.contains(Modifier::BOLD));
+        assert!(!focus.add_modifier.contains(Modifier::DIM));
+        assert_eq!(focus.bg, Some(palette.accent));
+        // 分组标题行同样清干净（只保留自己的 BOLD）。
+        let header = buffer[(2, 1)].style();
+        assert!(header.add_modifier.contains(Modifier::BOLD));
+        assert!(!header.add_modifier.contains(Modifier::DIM));
     }
 
     #[test]
