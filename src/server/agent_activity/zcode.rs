@@ -1,7 +1,8 @@
 //! ZCode（智谱 Z.ai 桌面应用，开源仓库 `zai-org/ZCode`）的外部来源适配器：把桌面
 //! 会话读成不属于任何 pane 的外部条目（`ExternalAgentInfo`）及其活动树，并按节点
 //! 分页读出子 agent 的内容。ZCode 不跑在 pane 里，所以 `discover` 恒为
-//! `Unsupported`，只实现 `discover_external` 与 `read`。
+//! `Unsupported`，只实现 `discover_external` 与 `read`；按 `external_id` 读整棵树时，
+//! runtime 从 `discover_external` 的结果里取该条目，与快照同一口径。
 //!
 //! # 读取方式
 //!
@@ -179,7 +180,8 @@ impl ActivitySource for ZCode {
     }
 
     fn discover(&self, _cx: &SourceContext<'_>) -> Result<Vec<AgentActivityNode>, SourceError> {
-        // ZCode 是桌面应用，不跑在任何 pane 里；它的树只经 `discover_external` 给出。
+        // ZCode 是桌面应用，不跑在任何 pane 里；它的树只经 `discover_external` 给出
+        // （按 `external_id` 读树也由 runtime 从那里取）。
         Err(SourceError::Unsupported)
     }
 
@@ -1331,6 +1333,149 @@ fn read_text_page(path: &Path, offset: u64, budget: usize) -> Result<ContentChun
     })
 }
 
+/// 夹具（`tests/fixtures/agent-activity/zcode/`）的共享入口：本模块的用例与 runtime
+/// 的端到端用例（`agent_activity::tests`）用同一份手写脱敏夹具、同一种建库方式。
+#[cfg(test)]
+pub(super) mod fixture {
+    use std::io::Write;
+    use std::path::{Path, PathBuf};
+    use std::process::{Command, Stdio};
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    use super::SQLITE_PROGRAM;
+
+    /// 夹具时间基准：2026-09-21T14:13:20Z。
+    pub(in crate::server::agent_activity) const NOW: u64 = 1_790_000_000_000;
+    /// 近期、在跑的根会话，下面挂齐各种子节点与待办。
+    pub(in crate::server::agent_activity) const ROOT_A: &str =
+        "sess_a0000000-0000-4000-8000-000000000001";
+    /// 近期、空闲的根会话（最后一轮是 5 小时前崩掉留下的 running）。
+    pub(in crate::server::agent_activity) const ROOT_B: &str =
+        "sess_b0000000-0000-4000-8000-000000000002";
+    /// 5 天前的根会话，落在近期窗口之外，不进外部列表。
+    pub(in crate::server::agent_activity) const OLD_ROOT: &str =
+        "sess_c0000000-0000-4000-8000-000000000003";
+
+    /// `sub("01")` → `sess_subagent_agent_10000000-0000-4000-8000-000000000001`。
+    pub(in crate::server::agent_activity) fn sub(suffix: &str) -> String {
+        format!("sess_subagent_agent_10000000-0000-4000-8000-0000000000{suffix}")
+    }
+
+    pub(in crate::server::agent_activity) fn dir() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/agent-activity/zcode")
+    }
+
+    /// 测试用临时目录，析构时删除。
+    pub(in crate::server::agent_activity) struct TempDir(PathBuf);
+
+    impl TempDir {
+        pub(in crate::server::agent_activity) fn new(tag: &str) -> Self {
+            static NEXT: AtomicU64 = AtomicU64::new(0);
+            let dir = std::env::temp_dir().join(format!(
+                "herdr-zcode-{tag}-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, Ordering::Relaxed)
+            ));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).expect("建临时目录");
+            Self(dir)
+        }
+
+        pub(in crate::server::agent_activity) fn path(&self) -> &Path {
+            &self.0
+        }
+    }
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// 端到端用例要真实的 sqlite3。Linux / macOS 构建机都自带；只有 Windows 构建机
+    /// 允许缺省跳过，其余平台缺它直接失败，免得整族静默跳过后报绿。
+    pub(in crate::server::agent_activity) fn sqlite3_available() -> bool {
+        let available = Command::new(SQLITE_PROGRAM)
+            .arg("-version")
+            .output()
+            .is_ok_and(|output| output.status.success());
+        if !available {
+            if !cfg!(windows) {
+                panic!("sqlite3 不在 PATH 上：zcode 端到端用例需要它");
+            }
+            eprintln!("跳过：Windows 构建机没有 sqlite3");
+        }
+        available
+    }
+
+    /// 用系统 sqlite3 在 `db` 建库（已存在则追加）。
+    pub(in crate::server::agent_activity) fn build_db_at(db: &Path, sql: &str) {
+        let mut child = Command::new(SQLITE_PROGRAM)
+            .arg(db)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("启动 sqlite3");
+        // 一个事务、不落盘同步：机器忙时逐条 fsync 能拖到秒级。
+        let script = format!("PRAGMA synchronous = OFF;\nBEGIN;\n{sql}\nCOMMIT;\n");
+        child
+            .stdin
+            .take()
+            .expect("sqlite3 stdin")
+            .write_all(script.as_bytes())
+            .expect("写入建库 SQL");
+        let output = child.wait_with_output().expect("等待 sqlite3");
+        assert!(
+            output.status.success(),
+            "建库失败：{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    pub(in crate::server::agent_activity) fn sql() -> String {
+        std::fs::read_to_string(dir().join("db.sql")).expect("读取夹具 SQL")
+    }
+
+    /// 把夹具种进 `home`，让适配器像在装了 ZCode 的机器上一样读到外部会话：
+    /// metadata / 转录 / output 样本原样复制到 `.zcode/cli/agents`；库由 `db.sql` 建在
+    /// `.zcode/cli/db/db.sqlite`，库里的时间整体平移到 `now_ms`，近 72 h 窗口与 2 h
+    /// 在跑判定按夹具的相对时刻成立（根 A 在跑、根 B 空闲、OLD 在窗口外），不随日历
+    /// 过期。调用方先用 [`sqlite3_available`] 确认有 sqlite3。
+    pub(in crate::server::agent_activity) fn seed_home(home: &Path, now_ms: u64) {
+        copy_dir_all(&dir().join("home"), home);
+        let db = super::db_path(home);
+        std::fs::create_dir_all(db.parent().expect("库路径有父目录")).expect("建库目录");
+        let shift = now_ms.saturating_sub(NOW);
+        build_db_at(
+            &db,
+            &format!(
+                "{}\n\
+                 UPDATE session SET time_created = time_created + {shift}, \
+                 time_updated = time_updated + {shift};\n\
+                 UPDATE turn_usage SET started_at = started_at + {shift}, \
+                 completed_at = completed_at + {shift};\n\
+                 UPDATE todo SET time_created = time_created + {shift}, \
+                 time_updated = time_updated + {shift};",
+                sql()
+            ),
+        );
+    }
+
+    fn copy_dir_all(from: &Path, to: &Path) {
+        std::fs::create_dir_all(to).expect("建目标目录");
+        for entry in std::fs::read_dir(from).expect("读夹具目录") {
+            let entry = entry.expect("夹具目录项");
+            let target = to.join(entry.file_name());
+            if entry.file_type().expect("夹具文件类型").is_dir() {
+                copy_dir_all(&entry.path(), &target);
+            } else {
+                std::fs::copy(entry.path(), &target).expect("复制夹具文件");
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     //! 夹具在 `tests/fixtures/agent-activity/zcode/`：`db.sql` 是按本机 schema 手写的
@@ -1339,26 +1484,15 @@ mod tests {
     //! metadata.json / transcript.jsonl / output.txt 样本。
 
     use std::io::Write;
-    use std::sync::atomic::{AtomicU64, Ordering};
 
+    use super::fixture::{
+        dir as fixture_dir, sqlite3_available, sub, TempDir, NOW, ROOT_A, ROOT_B,
+    };
     use super::*;
     use crate::agent_resume::AgentSessionRef;
 
-    /// 夹具时间基准：2026-09-21T14:13:20Z。
-    const NOW: u64 = 1_790_000_000_000;
-    const ROOT_A: &str = "sess_a0000000-0000-4000-8000-000000000001";
-    const ROOT_B: &str = "sess_b0000000-0000-4000-8000-000000000002";
     const SIDE_CHAT: &str = "sess_e0000000-0000-4000-8000-000000000005";
     const FUTURE_STEP: &str = "sess_f0000000-0000-4000-8000-000000000006";
-
-    /// `sub("01")` → `sess_subagent_agent_10000000-0000-4000-8000-000000000001`。
-    fn sub(suffix: &str) -> String {
-        format!("sess_subagent_agent_10000000-0000-4000-8000-0000000000{suffix}")
-    }
-
-    fn fixture_dir() -> PathBuf {
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/agent-activity/zcode")
-    }
 
     fn fixture_home() -> PathBuf {
         fixture_dir().join("home")
@@ -1410,77 +1544,14 @@ mod tests {
         }
     }
 
-    /// 测试用临时目录，析构时删除。
-    struct TempDir(PathBuf);
-
-    impl TempDir {
-        fn new(tag: &str) -> Self {
-            static NEXT: AtomicU64 = AtomicU64::new(0);
-            let dir = std::env::temp_dir().join(format!(
-                "herdr-zcode-{tag}-{}-{}",
-                std::process::id(),
-                NEXT.fetch_add(1, Ordering::Relaxed)
-            ));
-            let _ = std::fs::remove_dir_all(&dir);
-            std::fs::create_dir_all(&dir).expect("建临时目录");
-            Self(dir)
-        }
-
-        fn path(&self) -> &Path {
-            &self.0
-        }
-    }
-
-    impl Drop for TempDir {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.0);
-        }
-    }
-
-    /// 端到端用例要真实的 sqlite3。Linux / macOS 构建机都自带；只有 Windows 构建机
-    /// 允许缺省跳过，其余平台缺它直接失败，免得整族静默跳过后报绿。
-    fn sqlite3_available() -> bool {
-        let available = Command::new(SQLITE_PROGRAM)
-            .arg("-version")
-            .output()
-            .is_ok_and(|output| output.status.success());
-        if !available {
-            if !cfg!(windows) {
-                panic!("sqlite3 不在 PATH 上：zcode 端到端用例需要它");
-            }
-            eprintln!("跳过：Windows 构建机没有 sqlite3");
-        }
-        available
-    }
-
     fn build_db(dir: &Path, sql: &str) -> PathBuf {
         let db = dir.join("db.sqlite");
-        let mut child = Command::new(SQLITE_PROGRAM)
-            .arg(&db)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::null())
-            .stderr(Stdio::piped())
-            .spawn()
-            .expect("启动 sqlite3");
-        // 一个事务、不落盘同步：机器忙时逐条 fsync 能拖到秒级。
-        let script = format!("PRAGMA synchronous = OFF;\nBEGIN;\n{sql}\nCOMMIT;\n");
-        child
-            .stdin
-            .take()
-            .expect("sqlite3 stdin")
-            .write_all(script.as_bytes())
-            .expect("写入建库 SQL");
-        let output = child.wait_with_output().expect("等待 sqlite3");
-        assert!(
-            output.status.success(),
-            "建库失败：{}",
-            String::from_utf8_lossy(&output.stderr)
-        );
+        fixture::build_db_at(&db, sql);
         db
     }
 
     fn fixture_sql() -> String {
-        std::fs::read_to_string(fixture_dir().join("db.sql")).expect("读取夹具 SQL")
+        fixture::sql()
     }
 
     // --- 发现 ---------------------------------------------------------------

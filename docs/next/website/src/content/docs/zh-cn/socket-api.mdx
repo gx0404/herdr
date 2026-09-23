@@ -701,7 +701,7 @@ JSON 文档上报的,因为 Pi 不在磁盘上保留任何活动记录。服务�
 `{"type":"agent_activity","nodes":[...],"content":{...}}`,由后台读取线程产生,
 因此可能晚于后续请求的响应到达。
 
-错误:`pane_not_found`;`agent_not_found`(窗格没有智能体,或外部来源未知);
+错误:`pane_not_found`;`agent_not_found`(窗格没有智能体、外部来源未知,或该来源已不再列出这个外部会话);
 `not_implemented`(本服务器没有该智能体的来源适配器);`activity_unavailable`
 (来源此刻不可读,例如 Pi 还没有上报过快照);`activity_malformed`(来源内容或
 游标不是预期格式);`activity_io_error`;读取队列已满时 `server_busy`。目前只有 Pi

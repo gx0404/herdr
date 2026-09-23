@@ -901,8 +901,9 @@ response is
 `{"type":"agent_activity","nodes":[...],"content":{...}}` and is produced on the
 background reader thread, so it may arrive after responses to later requests.
 
-Errors: `pane_not_found`, `agent_not_found` (the pane hosts no agent, or the
-external source is unknown), `not_implemented` (this server has no source
+Errors: `pane_not_found`, `agent_not_found` (the pane hosts no agent, the
+external source is unknown, or that source no longer lists the external
+session), `not_implemented` (this server has no source
 adapter for that agent), `activity_unavailable` (the source cannot be read right
 now, for example Pi has not reported a snapshot yet), `activity_malformed` (the
 source or the cursor is not in the expected format), `activity_io_error`, and

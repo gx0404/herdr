@@ -118,7 +118,9 @@ pub(crate) trait ActivitySource: Send + Sync {
         max_bytes: usize,
     ) -> Result<ContentChunk, SourceError>;
 
-    /// 仅外部来源实现；pane 型来源用默认空实现。
+    /// 仅外部来源实现；pane 型来源用默认空实现。外部条目的整棵树也只从这里来：
+    /// `agent.activity.read {external_id}` 不带 `node_id` 时，runtime 取其中
+    /// `external_id` 相符的条目的 `activity`，不调 `discover`。
     fn discover_external(
         &self,
         _home: &Path,
@@ -564,6 +566,8 @@ enum ReadTarget {
         subject: AgentActivitySubject,
     },
     External {
+        /// 调用方给的 `<source>:<会话 id>`，读整棵树时按它在外部列表里找条目。
+        external_id: String,
         session: crate::agent_resume::AgentSessionRef,
     },
 }
@@ -806,6 +810,9 @@ impl Worker {
             max_bytes,
             reply,
         } = job;
+        if let (ReadTarget::External { external_id, .. }, None) = (&target, &node_id) {
+            return self.read_external_tree(&request_id, source, external_id, home, now_ms, &reply);
+        }
         let external_agent = source.id();
         let config_dir = match &target {
             ReadTarget::Pane { subject, .. } => agent_config_dir(&subject.agent, home),
@@ -815,7 +822,7 @@ impl Worker {
             ReadTarget::Pane { subject, .. } => {
                 pane_context(subject, home, config_dir.as_deref(), now_ms)
             }
-            ReadTarget::External { session } => SourceContext {
+            ReadTarget::External { session, .. } => SourceContext {
                 agent: external_agent,
                 session: Some(session),
                 cwd: None,
@@ -855,6 +862,50 @@ impl Worker {
                 .map(|(nodes, content)| ResponseResult::AgentActivity { nodes, content })
                 .map_err(|error| error.code_and_message()),
         );
+        alive
+    }
+
+    /// 外部条目读整棵树。外部来源的树只经 `discover_external` 给出（ZCode 的
+    /// `discover` 恒为 `Unsupported`）：跑一次与轮询同一口径的发现（同一条查询、
+    /// 同样的近期窗口与行数上限），取 `external_id` 相符的条目；整源结果顺带落库，
+    /// 让下一次快照与本次应答一致（与 pane 读树同一约定）。条目不在列表里（已归档、
+    /// 滑出近期窗口或排不进前几个）回 `agent_not_found`。
+    fn read_external_tree(
+        &self,
+        request_id: &str,
+        source: &'static dyn ActivitySource,
+        external_id: &str,
+        home: &Path,
+        now_ms: u64,
+        reply: &Reply,
+    ) -> bool {
+        let agents = match source.discover_external(home, now_ms) {
+            Ok(agents) => agents,
+            Err(error) => {
+                reply.send(request_id, Err(error.code_and_message()));
+                return true;
+            }
+        };
+        let nodes = agents
+            .iter()
+            .find(|agent| agent.external_id == external_id)
+            .map(|agent| agent.activity.clone());
+        let alive = self.send_event(AppEvent::ExternalAgentsRefreshed {
+            source: source.id().to_owned(),
+            result: Ok(agents),
+        });
+        let result = nodes
+            .map(|nodes| ResponseResult::AgentActivity {
+                nodes,
+                content: None,
+            })
+            .ok_or_else(|| {
+                (
+                    "agent_not_found",
+                    format!("external agent {external_id} is not listed by its source"),
+                )
+            });
+        reply.send(request_id, result);
         alive
     }
 
@@ -1125,7 +1176,13 @@ impl Service {
                 "external_id carries an invalid session id".to_owned(),
             )
         })?;
-        Ok((source, ReadTarget::External { session }))
+        Ok((
+            source,
+            ReadTarget::External {
+                external_id: external_id.to_owned(),
+                session,
+            },
+        ))
     }
 
     fn submit(&mut self, job: Job) -> Result<(), SubmitError> {
@@ -1607,7 +1664,8 @@ mod tests {
         }
     }
 
-    /// 外部来源：一个会话，内容读取回显会话 id。
+    /// 外部来源：一个会话，树只经 `discover_external` 给出（与 ZCode 同一契约：
+    /// `discover` 回 `Unsupported`）；内容读取回显会话 id 与节点 id。
     struct FakeExternal;
 
     impl ActivitySource for FakeExternal {
@@ -1615,23 +1673,27 @@ mod tests {
             "zcode"
         }
 
-        fn discover(&self, cx: &SourceContext<'_>) -> Result<Vec<AgentActivityNode>, SourceError> {
-            let session = cx.session.map(|session| session.value.clone());
-            Ok(vec![node(
-                &session.unwrap_or_default(),
-                None,
-                AgentActivityStatus::Running,
-            )])
+        fn discover(&self, _cx: &SourceContext<'_>) -> Result<Vec<AgentActivityNode>, SourceError> {
+            Err(SourceError::Unsupported)
         }
 
         fn read(
             &self,
-            _cx: &SourceContext<'_>,
-            _node_id: &str,
+            cx: &SourceContext<'_>,
+            node_id: &str,
             _cursor: Option<&str>,
             _max_bytes: usize,
         ) -> Result<ContentChunk, SourceError> {
-            Err(SourceError::Unsupported)
+            Ok(ContentChunk {
+                format: AgentActivityContentFormat::Text,
+                text: format!(
+                    "{}|{node_id}",
+                    cx.session.map_or("-", |session| session.value.as_str())
+                ),
+                next_cursor: None,
+                eof: true,
+                truncated: false,
+            })
         }
 
         fn discover_external(
@@ -1648,7 +1710,10 @@ mod tests {
                 agent: None,
                 cwd: None,
                 updated_at_ms: Some(now_ms),
-                activity: Vec::new(),
+                activity: vec![
+                    node("s-1/a", None, AgentActivityStatus::Running),
+                    node("s-1/b", Some("s-1/a"), AgentActivityStatus::Done),
+                ],
             }])
         }
     }
@@ -2182,21 +2247,61 @@ mod tests {
         assert_eq!(response["error"]["code"], NOT_IMPLEMENTED_CODE);
     }
 
-    #[test]
-    fn external_read_and_list_go_through_the_external_sources() {
-        use crate::api::schema::{AgentActivityReadParams, EmptyParams};
-        let (mut service, mut received) = fake_service();
-        let (app, _, _) = app_with_agent(None);
-        let tree = submit_api(
-            &mut service,
-            &app,
-            read_request(AgentActivityReadParams {
-                external_id: Some("zcode:s-1".into()),
-                ..AgentActivityReadParams::default()
+    fn external_read(
+        service: &mut Service,
+        app: &crate::app::App,
+        external_id: &str,
+        node_id: Option<&str>,
+    ) -> serde_json::Value {
+        submit_api(
+            service,
+            app,
+            read_request(crate::api::schema::AgentActivityReadParams {
+                external_id: Some(external_id.into()),
+                node_id: node_id.map(str::to_owned),
+                ..Default::default()
             }),
         )
-        .expect("受理");
-        assert_eq!(tree["result"]["nodes"][0]["id"], "s-1");
+        .expect("参数合法，异步应答")
+    }
+
+    /// 外部来源刷新事件里的条目 id（没等到或不是该事件则 panic）。
+    fn external_refresh_ids(received: &mut tokio::sync::mpsc::Receiver<AppEvent>) -> Vec<String> {
+        match recv_event(received) {
+            AppEvent::ExternalAgentsRefreshed {
+                source,
+                result: Ok(agents),
+            } => {
+                assert_eq!(source, "zcode");
+                agents.into_iter().map(|agent| agent.external_id).collect()
+            }
+            other => panic!("应为外部来源刷新事件：{other:?}"),
+        }
+    }
+
+    #[test]
+    fn external_read_and_list_go_through_the_external_sources() {
+        use crate::api::schema::EmptyParams;
+        let (mut service, mut received) = fake_service();
+        let (app, _, _) = app_with_agent(None);
+
+        // 整棵树取自该条目在外部列表里的活动（来源的 `discover` 不参与），与快照同源；
+        // 读树顺带整源落库，让下一次快照与本次应答一致。
+        let tree = external_read(&mut service, &app, "zcode:s-1", None);
+        assert_eq!(tree["result"]["type"], "agent_activity", "{tree}");
+        assert_eq!(tree["result"]["nodes"][0]["id"], "s-1/a");
+        assert_eq!(tree["result"]["nodes"][1]["parent_id"], "s-1/a");
+        assert!(tree["result"].get("content").is_none());
+        assert_eq!(external_refresh_ids(&mut received), ["zcode:s-1"]);
+
+        // 节点内容仍走来源的 `read`，会话引用取自 external_id。
+        let content = external_read(&mut service, &app, "zcode:s-1", Some("s-1/b"));
+        assert_eq!(content["result"]["content"]["text"], "s-1|s-1/b");
+
+        // 列表里没有的会话（已归档、滑出近期窗口）：agent_not_found，列表照样落库。
+        let missing = external_read(&mut service, &app, "zcode:s-9", None);
+        assert_eq!(missing["error"]["code"], "agent_not_found", "{missing}");
+        assert_eq!(external_refresh_ids(&mut received), ["zcode:s-1"]);
 
         let list = submit_api(
             &mut service,
@@ -2210,11 +2315,98 @@ mod tests {
         assert_eq!(list["id"], "req-2");
         assert_eq!(list["result"]["type"], "external_agent_list");
         assert_eq!(list["result"]["agents"][0]["source"], "zcode");
-        assert!(matches!(
-            recv_event(&mut received),
-            AppEvent::ExternalAgentsRefreshed { source, result: Ok(agents) }
-                if source == "zcode" && agents.len() == 1
-        ));
+        assert_eq!(external_refresh_ids(&mut received), ["zcode:s-1"]);
+    }
+
+    /// S1 回归（真机报告 §4 / §5.1，截屏 zcode-04 / 05 / 09 / 13）：外部条目按
+    /// `external_id` 读整棵树曾 10/10 回 `not_implemented`，活动窗口左列恒为「读取
+    /// 失败」——runtime 把不带 `node_id` 的读取交给来源的 `discover`，而 ZCode 的树
+    /// 只经 `discover_external` 给出。走真实注册表，HOME 隔离到种了手写夹具库的临时
+    /// 目录（库里的时间平移到现在）。
+    #[test]
+    fn zcode_external_tree_reads_match_the_external_listing() {
+        use crate::api::schema::EmptyParams;
+        use zcode::fixture;
+        if !fixture::sqlite3_available() {
+            return;
+        }
+        let home = fixture::TempDir::new("external-tree-read");
+        fixture::seed_home(home.path(), crate::server::observability::now_ms());
+        let (events, mut received) = tokio::sync::mpsc::channel(32);
+        let mut service =
+            Service::with_sources(events, Sources::REGISTERED, Some(home.path().to_path_buf()));
+        let (app, _, _) = app_with_agent(None);
+
+        let root_a = format!("zcode:{}", fixture::ROOT_A);
+        let list = submit_api(
+            &mut service,
+            &app,
+            Request {
+                id: "list".into(),
+                method: Method::AgentExternalList(EmptyParams::default()),
+            },
+        )
+        .expect("受理");
+        let listed = list["result"]["agents"]
+            .as_array()
+            .and_then(|agents| {
+                agents
+                    .iter()
+                    .find(|agent| agent["external_id"] == root_a.as_str())
+            })
+            .unwrap_or_else(|| panic!("根 A 应在外部列表里：{list}"))["activity"]
+            .clone();
+        assert!(external_refresh_ids(&mut received).contains(&root_a));
+
+        let tree = external_read(&mut service, &app, &root_a, None);
+        assert_eq!(tree["result"]["type"], "agent_activity", "{tree}");
+        assert_eq!(
+            tree["result"]["nodes"], listed,
+            "与外部列表（快照的来源）同一口径"
+        );
+        let ids: Vec<&str> = tree["result"]["nodes"]
+            .as_array()
+            .expect("节点数组")
+            .iter()
+            .filter_map(|node| node["id"].as_str())
+            .collect();
+        let todo = format!("todo:{}:1", fixture::ROOT_A);
+        assert!(
+            ids.contains(&fixture::sub("01").as_str()) && ids.contains(&todo.as_str()),
+            "根 A 的子 agent 与待办都在树里：{ids:?}"
+        );
+        assert!(
+            external_refresh_ids(&mut received).contains(&root_a),
+            "读树顺带落库"
+        );
+
+        // 5 天前的根会话不在近期窗口里：agent_not_found，而不是空树或 not_implemented。
+        let old = external_read(
+            &mut service,
+            &app,
+            &format!("zcode:{}", fixture::OLD_ROOT),
+            None,
+        );
+        assert_eq!(old["error"]["code"], "agent_not_found", "{old}");
+    }
+
+    /// 没装 ZCode（HOME 里没有它的库）：外部列表为空，按 external_id 读树回
+    /// agent_not_found。不需要 sqlite3。
+    #[test]
+    fn zcode_external_tree_read_without_a_database_is_not_found() {
+        let home = zcode::fixture::TempDir::new("external-tree-no-db");
+        let (events, mut received) = tokio::sync::mpsc::channel(32);
+        let mut service =
+            Service::with_sources(events, Sources::REGISTERED, Some(home.path().to_path_buf()));
+        let (app, _, _) = app_with_agent(None);
+        let response = external_read(
+            &mut service,
+            &app,
+            &format!("zcode:{}", zcode::fixture::ROOT_A),
+            None,
+        );
+        assert_eq!(response["error"]["code"], "agent_not_found", "{response}");
+        assert!(external_refresh_ids(&mut received).is_empty());
     }
 
     #[test]
