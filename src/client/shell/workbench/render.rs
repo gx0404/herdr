@@ -366,9 +366,9 @@ impl ClientShellState {
             } else {
                 unfocused_title
             };
-            // 标题前的 `⠿` 是拖动停靠的把手：锁定布局后拖动被拒绝，就不再画它
-            // （冒烟 L1），标题文字左移占位。
-            let handle = if self.workbench.dock.locked {
+            // 标题前的 `⠿` 是拖动停靠的把手：锁定布局后拖动被拒绝（冒烟 L1）、紧凑
+            // 视图只投影一个面板没有停靠目标（W2），都不画它，标题文字左移占位。
+            let handle = if self.workbench.dock.locked || self.workbench.geometry.compact {
                 ""
             } else {
                 "⠿ "

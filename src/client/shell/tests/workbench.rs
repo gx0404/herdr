@@ -2133,3 +2133,95 @@ fn compact_switcher_without_mouse_capture_keeps_the_keyboard_hint() {
         "不接鼠标：点名字不切换"
     );
 }
+
+/// 标题栏（第 1 行）里只落在面板标题命中区（`Action::Header`）上的列：段间空隙、
+/// 名字右侧的空白、放不下时的回退标题。按命中表自后向前取最上层，与分派同口径。
+fn header_only_columns(state: &ClientShellState) -> Vec<u16> {
+    use crate::client::shell::workbench::interaction::Action;
+    let width = state
+        .compose_buffer
+        .as_ref()
+        .expect("保留帧缓冲")
+        .area
+        .width;
+    (0..width)
+        .filter(|x| {
+            let hit = state.workbench.hits.iter().rev().find(|(rect, _)| {
+                *x >= rect.x && *x < rect.right() && 1 >= rect.y && 1 < rect.bottom()
+            });
+            matches!(hit, Some((_, Action::Header(_))))
+        })
+        .collect()
+}
+
+/// 在标题栏 `x` 列按下、拖进面板中部，返回拖动中那一帧去掉空白的文字；最后松开。
+fn drag_from_title_into_the_panel(state: &mut ClientShellState, x: u16, cols: u16) -> String {
+    state.handle_input_bytes(format!("\x1b[<0;{};2M", x + 1).as_bytes());
+    let (to_x, to_y) = (cols / 2, 16);
+    state.handle_input_bytes(format!("\x1b[<32;{};{}M", to_x + 1, to_y + 1).as_bytes());
+    let dragged = frame_rows(&state.compose(cols, 32).expect("拖动中"))
+        .concat()
+        .split_whitespace()
+        .collect::<String>();
+    state.handle_input_bytes(format!("\x1b[<0;{};{}m", to_x + 1, to_y + 1).as_bytes());
+    dragged
+}
+
+/// 复审轻级 W2（62×32）：紧凑视图只投影一个面板，没有可停靠的目标。标题栏上只有
+/// 面板名段是切换命中区，段间空隙与名字右侧的空白仍是面板标题：以前在那里按下
+/// 拖动会开始停靠拖动，画出无意义的「放到这里」预览。现在只切焦点，不开始拖动。
+#[test]
+fn compact_title_bar_blank_space_never_starts_a_dock_drag() {
+    let _guard = crate::i18n::lang_guard(crate::i18n::Lang::ZhCn);
+    let mut state = ready();
+    state.config.mouse_capture = true;
+    state.workbench_open(PanelId::Monitor);
+    state.workbench.dock.focused = PanelId::Agents;
+    state.compose(62, 32).expect("紧凑视图");
+    assert!(
+        state.workbench.geometry.compact,
+        "用例前提：62 列是紧凑视图"
+    );
+    let layout = state.workbench.dock.clone();
+    let columns = header_only_columns(&state);
+    let (Some(&gap), Some(&blank)) = (columns.first(), columns.last()) else {
+        panic!("用例前提：标题栏有面板标题命中区：{}", title_text(&state));
+    };
+    assert!(
+        gap < title_x(&state, "A"),
+        "用例前提：第一处是名字之间的空隙（{gap}）"
+    );
+    for x in [gap, blank] {
+        let dragged = drag_from_title_into_the_panel(&mut state, x, 62);
+        assert!(
+            !dragged.contains("放到这里"),
+            "第 {x} 列按下拖动：不画停靠预览：{dragged}"
+        );
+        assert_eq!(state.workbench.dock, layout, "第 {x} 列按下拖动：布局不变");
+        assert_eq!(state.workbench.dock.focused, PanelId::Agents);
+    }
+}
+
+/// 复审轻级 W2（24×32）：面板名整排放不下时退回只画聚焦面板的标题。紧凑视图没有
+/// 停靠目标，回退标题不画 `⠿` 拖动把手，按住它拖进面板也不画「放到这里」。
+#[test]
+fn compact_fallback_title_has_no_drag_handle() {
+    let _guard = crate::i18n::lang_guard(crate::i18n::Lang::ZhCn);
+    let mut state = ready();
+    state.config.mouse_capture = true;
+    state.workbench_open(PanelId::Monitor);
+    state.workbench.dock.focused = PanelId::Agents;
+    let rows = frame_rows(&state.compose(24, 32).expect("很窄的紧凑视图"));
+    assert!(state.workbench.geometry.compact, "用例前提：紧凑视图");
+    assert!(
+        rows[1].contains("Agents") && !rows[1].contains("工作区"),
+        "用例前提：回退为只画聚焦面板的标题：{}",
+        rows[1]
+    );
+    assert!(!rows[1].contains('⠿'), "回退标题不画拖动把手：{}", rows[1]);
+    let layout = state.workbench.dock.clone();
+    let x = title_x(&state, "A");
+    let dragged = drag_from_title_into_the_panel(&mut state, x, 24);
+    assert!(!dragged.contains("放到这里"), "不画停靠预览：{dragged}");
+    assert_eq!(state.workbench.dock, layout, "布局不变");
+}
