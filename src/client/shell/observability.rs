@@ -4068,7 +4068,8 @@ mod usage_history_tests {
         assert_eq!(samples[0].percent, 40.0, "过期快照不追加");
     }
 
-    /// 压力值取各窗口里最高的一档，并夹在 0..100。
+    /// 压力值取各窗口里最高的一档；超过 100（spend_limit 超限）原样保留，sparkline
+    /// 绘制时再夹到 0..100。
     #[test]
     fn pressure_percent_takes_the_tightest_window() {
         let mut account = sampled("claude:default", 1_000, Some(12.0));
@@ -4081,7 +4082,7 @@ mod usage_history_tests {
         assert_eq!(usage_pressure_percent(&account), Some(90.0));
         let mut over = sampled("claude:default", 1_000, Some(1_000.0));
         over.metrics[0].used_percent = Some(250.0);
-        assert_eq!(usage_pressure_percent(&over), Some(100.0));
+        assert_eq!(usage_pressure_percent(&over), Some(250.0));
     }
 
     /// 上限：旧点先出队。

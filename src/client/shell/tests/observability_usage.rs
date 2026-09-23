@@ -5660,3 +5660,451 @@ fn overview_subscription_is_broad_and_merges_every_provider() {
         "codex 的推送同样落进页面"
     );
 }
+
+// ---------------------------------------------------------------------------
+// 账号页厂商专属卡片：每厂商在 120×40 / 80×24 页面与 68×17 悬浮层三档断言字符
+// （数字可见、溢出标记、徽标文字、DIM）与空态。
+// 夹具全部手写、脱敏，不读任何真实凭据或用量文件。
+// ---------------------------------------------------------------------------
+
+/// 卡片用例的固定「现在」：窗口进度、距重置与新鲜度都据此计算。
+const CARD_NOW_MS: u64 = 1_800_000_000_000;
+const CARD_NOW_S: u64 = CARD_NOW_MS / 1000;
+
+fn usage_metric(id: &str, label: &str, unit: &str, scope: &str) -> crate::api::schema::UsageMetric {
+    crate::api::schema::UsageMetric {
+        id: id.into(),
+        label: label.into(),
+        unit: unit.into(),
+        scope: scope.into(),
+        ..Default::default()
+    }
+}
+
+fn vendor_account(
+    agent: &str,
+    metrics: Vec<crate::api::schema::UsageMetric>,
+) -> AccountUsageSnapshot {
+    AccountUsageSnapshot {
+        metrics,
+        observed_at_ms: CARD_NOW_MS - 13_000,
+        ..account(agent, &format!("{agent}:default"))
+    }
+}
+
+/// claude：5 小时 42%、每周 91%（已过重置，服务端沿用上次值）、消费额度 162.8%
+/// （超限），本会话费用 / 时长，上下文在首次请求前为 null。
+fn claude_card_account() -> AccountUsageSnapshot {
+    use crate::api::schema::UsageMetric;
+    vendor_account(
+        "claude",
+        vec![
+            UsageMetric {
+                used_percent: Some(42.0),
+                resets_at: Some(CARD_NOW_S + 3 * 3600),
+                ..usage_metric("five_hour", "5 小时额度", "%", "account")
+            },
+            UsageMetric {
+                used_percent: Some(91.0),
+                resets_at: Some(CARD_NOW_S - 60),
+                text_value: Some("已过重置时间，沿用上次值".into()),
+                ..usage_metric("seven_day", "每周额度", "%", "account")
+            },
+            UsageMetric {
+                used_percent: Some(162.8),
+                resets_at: Some(CARD_NOW_S + 20 * 86_400),
+                ..usage_metric("spend_limit", "网关消费额度", "%", "account")
+            },
+            UsageMetric {
+                amount_decimal: Some("1.234567".into()),
+                ..usage_metric("cost/total_cost_usd", "本会话估算费用", "USD", "session")
+            },
+            UsageMetric {
+                used: Some(3_720_000.0),
+                text_value: Some("1h02m".into()),
+                ..usage_metric("cost/total_duration_ms", "本会话时长", "ms", "session")
+            },
+            UsageMetric {
+                text_value: Some("暂无数据（首次请求前或 /compact 后）".into()),
+                ..usage_metric(
+                    "context_window/used_percentage",
+                    "上下文占用",
+                    "%",
+                    "session",
+                )
+            },
+            UsageMetric {
+                used: Some(200_000.0),
+                ..usage_metric(
+                    "context_window/context_window_size",
+                    "上下文窗口大小",
+                    "tokens",
+                    "session",
+                )
+            },
+        ],
+    )
+}
+
+/// codex：两个限额桶（Codex 的 5h / 7d 窗口 + credits，GPT-5 Pro 的 5h 窗口）。
+fn codex_card_account() -> AccountUsageSnapshot {
+    use crate::api::schema::UsageMetric;
+    vendor_account(
+        "codex",
+        vec![
+            UsageMetric {
+                used_percent: Some(30.0),
+                window_seconds: Some(5 * 3600),
+                resets_at: Some(CARD_NOW_S + 2 * 3600),
+                ..usage_metric("codex/primary", "Codex · 主要额度", "%", "account")
+            },
+            UsageMetric {
+                used_percent: Some(75.0),
+                window_seconds: Some(7 * 86_400),
+                resets_at: Some(CARD_NOW_S + 86_400),
+                ..usage_metric("codex/secondary", "Codex · 次级额度", "%", "account")
+            },
+            UsageMetric {
+                amount_decimal: Some("12.5".into()),
+                ..usage_metric("codex/credits", "额外余额", "credits", "account")
+            },
+            UsageMetric {
+                used_percent: Some(5.0),
+                window_seconds: Some(5 * 3600),
+                resets_at: Some(CARD_NOW_S + 4 * 3600),
+                ..usage_metric("pro/primary", "GPT-5 Pro · 主要额度", "%", "account")
+            },
+        ],
+    )
+}
+
+/// kimi：5 小时 / 7 天 / 月度窗口、可用余额（CNY）与额外用量钱包（USD）。
+fn kimi_card_account() -> AccountUsageSnapshot {
+    use crate::api::schema::UsageMetric;
+    let money = |id: &str, label: &str, unit: &str, amount: &str| UsageMetric {
+        amount_decimal: Some(amount.into()),
+        ..usage_metric(id, label, unit, "account")
+    };
+    vendor_account(
+        "kimi",
+        vec![
+            UsageMetric {
+                used_percent: Some(25.0),
+                resets_at: Some(CARD_NOW_S + 3600),
+                ..usage_metric("limit5h", "5 小时额度", "%", "account")
+            },
+            UsageMetric {
+                used_percent: Some(60.0),
+                resets_at: Some(CARD_NOW_S + 3 * 86_400),
+                ..usage_metric("limit7d", "7 天额度", "%", "account")
+            },
+            UsageMetric {
+                used_percent: Some(10.0),
+                ..usage_metric("monthTotal", "月度额度", "%", "account")
+            },
+            money("available_balance", "可用余额", "CNY", "12.3"),
+            money("extra_usage/balance", "额外用量余额", "USD", "3.20"),
+            money(
+                "extra_usage/monthly_used",
+                "本月额外用量费用",
+                "USD",
+                "1.00",
+            ),
+            money(
+                "extra_usage/monthly_limit",
+                "每月额外用量上限",
+                "USD",
+                "10.00",
+            ),
+        ],
+    )
+}
+
+/// 经典布局（未通告 `client.views.set`）的账号页：直接写入厂商选择与账号快照后
+/// 合成 `cols×rows`。页面铺满 pane 区，`observability.page_rect` 就是页面矩形。
+fn cards_page(
+    agent: Option<&str>,
+    accounts: Vec<AccountUsageSnapshot>,
+    cols: u16,
+    rows: u16,
+) -> ClientShellState {
+    let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
+    state.set_snapshot(Box::new(snapshot()));
+    state.set_pane_surface(surface());
+    state.open_observation_page(Page::Accounts, &mut ClientShellInput::default());
+    state.observability.selected_provider = agent.map(str::to_owned);
+    state.observability.accounts = accounts;
+    state.observability.now_ms = CARD_NOW_MS;
+    state.compose(cols, rows).expect("账号页");
+    assert!(
+        !state.observability.refreshing(),
+        "用例前提：没有强意图刷新，卡片不变暗"
+    );
+    state
+}
+
+/// agent 行悬浮层（账号用量卡）：账号快照放进悬浮层作用域，终端 120×40 时悬浮层
+/// 正好是上限 68×17。
+fn cards_hover(agent: &str, accounts: Vec<AccountUsageSnapshot>) -> ClientShellState {
+    let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
+    state.set_snapshot(Box::new(snapshot()));
+    state.set_pane_surface(surface());
+    state.observability.hover_scope.provider = Some(agent.into());
+    state.observability.hover_scope.accounts = accounts;
+    state.observability.now_ms = CARD_NOW_MS;
+    state.observability.hover = Some(Hover {
+        target: HoverTarget::Agent {
+            endpoint_id: state.active_endpoint_id.clone(),
+            pane: "pane_1".into(),
+            agent: agent.into(),
+        },
+        anchor: Rect::new(0, 2, 20, 1),
+        since: Instant::now(),
+        visible: true,
+        leave_at: None,
+        pinned: false,
+    });
+    state.compose(120, 40).expect("悬浮层");
+    let hover = state.observability.hover_rect;
+    assert_eq!(
+        (hover.width, hover.height),
+        (68, 17),
+        "用例前提：悬浮层是上限尺寸"
+    );
+    state
+}
+
+/// 三档宿主：页面 120×40、页面 80×24、悬浮层 68×17；返回 (档名, 状态, 正文所在矩形)。
+fn card_hosts(
+    agent: &str,
+    accounts: impl Fn() -> Vec<AccountUsageSnapshot>,
+) -> Vec<(&'static str, ClientShellState, Rect)> {
+    let mut hosts = Vec::new();
+    for (name, cols, rows) in [("page 120x40", 120, 40), ("page 80x24", 80, 24)] {
+        let state = cards_page(Some(agent), accounts(), cols, rows);
+        let region = state.observability.page_rect;
+        hosts.push((name, state, region));
+    }
+    let state = cards_hover(agent, accounts());
+    let region = state.observability.hover_rect;
+    hosts.push(("hover 68x17", state, region));
+    hosts
+}
+
+/// 区域里一行的文本与每个字符所在的列（宽字符的续格不重复计入）。
+fn region_row(buffer: &ratatui::buffer::Buffer, region: Rect, y: u16) -> (String, Vec<u16>) {
+    let mut text = String::new();
+    let mut columns = Vec::new();
+    let mut x = region.x;
+    while x < region.right() {
+        let symbol = buffer[(x, y)].symbol();
+        for ch in symbol.chars() {
+            text.push(ch);
+            columns.push(x);
+        }
+        x += (crate::ui::display_width(symbol) as u16).max(1);
+    }
+    (text, columns)
+}
+
+/// `needle` 在区域里首次出现的单元格。
+fn find_in(state: &ClientShellState, region: Rect, needle: &str) -> Option<(u16, u16)> {
+    let buffer = state.compose_buffer.as_ref().expect("帧缓冲");
+    (region.y..region.bottom()).find_map(|y| {
+        let (text, columns) = region_row(buffer, region, y);
+        text.find(needle)
+            .map(|byte| (columns[text[..byte].chars().count()], y))
+    })
+}
+
+/// 区域里 `needle` 所在的那一行文本。
+fn row_with(state: &ClientShellState, region: Rect, needle: &str) -> Option<String> {
+    let buffer = state.compose_buffer.as_ref().expect("帧缓冲");
+    find_in(state, region, needle).map(|(_, y)| region_row(buffer, region, y).0)
+}
+
+fn region_text(state: &ClientShellState, region: Rect) -> String {
+    let buffer = state.compose_buffer.as_ref().expect("帧缓冲");
+    (region.y..region.bottom())
+        .map(|y| region_row(buffer, region, y).0)
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn cell_style(state: &ClientShellState, (x, y): (u16, u16)) -> ratatui::style::Style {
+    state.compose_buffer.as_ref().expect("帧缓冲")[(x, y)].style()
+}
+
+fn palette() -> crate::app::state::Palette {
+    ClientShellConfig::from_config(&Config::default()).palette
+}
+
+#[test]
+fn claude_card_shows_three_windows_overflow_stale_and_session_row() {
+    let _guard = crate::i18n::lang_guard(crate::i18n::Lang::ZhCn);
+    let palette = palette();
+    for (host, state, region) in card_hosts("claude", || vec![claude_card_account()]) {
+        let text = region_text(&state, region);
+        assert!(
+            row_with(&state, region, "claude:default").is_some_and(|row| row.contains("已更新")),
+            "{host}: 卡头是账号标签 + 状态徽标\n{text}"
+        );
+        let five = row_with(&state, region, "5 小时").unwrap_or_default();
+        assert!(five.contains("42%"), "{host}: 5 小时窗口数字可见\n{text}");
+        // 消费额度超限：数字原样（不截成 100%），条形末格是溢出标记且为红色。
+        let spend = row_with(&state, region, "消费额度").unwrap_or_default();
+        assert!(spend.contains("162.8%"), "{host}: 超限数字原样显示\n{text}");
+        let overflow = find_in(&state, region, "▸").expect("溢出标记");
+        assert_eq!(
+            cell_style(&state, overflow).fg,
+            Some(palette.red),
+            "{host}: 溢出标记是红色"
+        );
+        // 每周窗口已过重置时间：沿用上次值、整行 DIM，窄档至少保住数字。
+        let weekly = find_in(&state, region, "每周").expect("每周窗口");
+        assert!(
+            row_with(&state, region, "每周").is_some_and(|row| row.contains("91%")),
+            "{host}: 过期窗口仍显示上次值\n{text}"
+        );
+        assert!(
+            cell_style(&state, weekly)
+                .add_modifier
+                .contains(ratatui::style::Modifier::DIM),
+            "{host}: 过期窗口整行 DIM"
+        );
+        // 上下文为 null：「暂无数据」灰字，不当成 0%。
+        let pending = find_in(&state, region, "暂无数据").expect("上下文暂无数据");
+        assert_eq!(cell_style(&state, pending).fg, Some(palette.overlay0));
+        assert!(
+            row_with(&state, region, "上下文").is_some_and(|row| !row.contains("0%")),
+            "{host}: 上下文未知不画成 0%\n{text}"
+        );
+        // 会话行：本会话费用。
+        assert!(
+            row_with(&state, region, "费用").is_some_and(|row| row.contains("$1.23")),
+            "{host}: 本会话费用\n{text}"
+        );
+    }
+    // 宽页面上过期窗口写明原因。
+    let state = cards_page(Some("claude"), vec![claude_card_account()], 120, 40);
+    let region = state.observability.page_rect;
+    assert!(
+        row_with(&state, region, "每周").is_some_and(|row| row.contains("已过重置")),
+        "{}",
+        region_text(&state, region)
+    );
+}
+
+#[test]
+fn codex_card_splits_buckets_and_keeps_credits() {
+    let _guard = crate::i18n::lang_guard(crate::i18n::Lang::ZhCn);
+    for (host, state, region) in card_hosts("codex", || vec![codex_card_account()]) {
+        let text = region_text(&state, region);
+        // 多桶分小节：两个桶名都作为小节标题出现。
+        assert!(
+            find_in(&state, region, "Codex ─").is_some(),
+            "{host}\n{text}"
+        );
+        assert!(
+            find_in(&state, region, "GPT-5 Pro ─").is_some(),
+            "{host}\n{text}"
+        );
+        // 窗口按长度命名，数字可见。
+        let primary = row_with(&state, region, "5h 窗口").unwrap_or_default();
+        assert!(primary.contains("30%"), "{host}\n{text}");
+        let secondary = row_with(&state, region, "7d 窗口").unwrap_or_default();
+        assert!(secondary.contains("75%"), "{host}\n{text}");
+        // 窗口进度刻度：5h 窗口过了 60%，条形里有刻度字形。
+        assert!(primary.contains('┃'), "{host}: 窗口进度刻度\n{text}");
+        // credits 余额只画数值。
+        let credits = row_with(&state, region, "额外余额").unwrap_or_default();
+        assert!(credits.contains("12.50 credits"), "{host}\n{text}");
+        assert!(!credits.contains('━') && !credits.contains('░'), "{host}");
+    }
+}
+
+#[test]
+fn kimi_card_shows_windows_balance_and_extra_usage() {
+    let _guard = crate::i18n::lang_guard(crate::i18n::Lang::ZhCn);
+    for (host, state, region) in card_hosts("kimi", || vec![kimi_card_account()]) {
+        let text = region_text(&state, region);
+        for (label, value) in [("5 小时", "25%"), ("7 天", "60%"), ("月度", "10%")] {
+            assert!(
+                row_with(&state, region, label).is_some_and(|row| row.contains(value)),
+                "{host}: {label} {value}\n{text}"
+            );
+        }
+        assert!(
+            row_with(&state, region, "可用余额").is_some_and(|row| row.contains("¥12.30")),
+            "{host}: 余额按人民币显示\n{text}"
+        );
+        assert!(
+            find_in(&state, region, "额外用量").is_some(),
+            "{host}\n{text}"
+        );
+        let extra = row_with(&state, region, "$3.20").unwrap_or_default();
+        assert!(
+            extra.contains("$1.00") && extra.contains("$10.00"),
+            "{host}: 额外用量余额 / 本月 / 上限\n{text}"
+        );
+    }
+}
+
+#[test]
+fn unknown_vendor_falls_back_to_generic_rows() {
+    let _guard = crate::i18n::lang_guard(crate::i18n::Lang::ZhCn);
+    use crate::api::schema::UsageMetric;
+    let accounts = || {
+        vec![vendor_account(
+            "future-agent",
+            vec![
+                UsageMetric {
+                    used_percent: Some(33.0),
+                    ..usage_metric("window-a", "Window A", "%", "account")
+                },
+                UsageMetric {
+                    amount_decimal: Some("7.5".into()),
+                    ..usage_metric("wallet", "Wallet", "USD", "account")
+                },
+            ],
+        )]
+    };
+    for (host, state, region) in card_hosts("future-agent", accounts) {
+        let text = region_text(&state, region);
+        assert!(
+            row_with(&state, region, "Window A")
+                .is_some_and(|row| row.contains("33%") && row.contains('━')),
+            "{host}: 未知厂商的百分比指标画通用 meter\n{text}"
+        );
+        assert!(
+            row_with(&state, region, "Wallet").is_some_and(|row| row.contains("$7.50")),
+            "{host}: 金额画成数值项\n{text}"
+        );
+        assert!(
+            row_with(&state, region, "future-agent:default")
+                .is_some_and(|row| row.contains("已更新")),
+            "{host}\n{text}"
+        );
+    }
+}
+
+#[test]
+fn empty_accounts_page_uses_the_kit_empty_state() {
+    let _guard = crate::i18n::lang_guard(crate::i18n::Lang::ZhCn);
+    for (cols, rows) in [(120, 40), (80, 24)] {
+        let state = cards_page(None, Vec::new(), cols, rows);
+        let region = state.observability.page_rect;
+        let text = region_text(&state, region);
+        let title = find_in(&state, region, "暂无账号用量").expect("空态标题");
+        assert!(
+            cell_style(&state, title)
+                .add_modifier
+                .contains(ratatui::style::Modifier::BOLD),
+            "kit 空态标题加粗\n{text}"
+        );
+        assert!(
+            find_in(&state, region, "请选择厂商以查询对应的官方用量。").is_some(),
+            "{cols}x{rows}: 空态说明\n{text}"
+        );
+    }
+}

@@ -1,0 +1,739 @@
+//! 账号卡片的内容模型：每个账号按 `account.agent` 分派到厂商专属排布，产出一组
+//! 与宽度无关的卡片行（行数即滚动真源）。
+//! 只算不画，绘制在 `paint.rs`。
+
+use std::borrow::Cow;
+
+use super::slots::{codex_bucket, slot_of, Slot, SlotKind};
+use super::*;
+
+/// 厂商卡片的家族：决定徽标写账号状态，还是「本地统计 / 会话统计」声明。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Family {
+    /// 账号额度（claude / codex / kimi / 未知厂商）：徽标是状态。
+    Quota,
+    /// 本机统计，不是账号额度（opencode / zcode）。
+    Local,
+    /// 会话统计，不是账号额度（pi）。
+    Session,
+}
+
+pub(super) fn family(agent: &str) -> Family {
+    match agent {
+        "opencode" | "zcode" => Family::Local,
+        "pi" => Family::Session,
+        _ => Family::Quota,
+    }
+}
+
+/// 数据的可信度：决定条形是否着语义色。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Liveness {
+    /// 已更新 / 采集中：正常画。
+    Live,
+    /// 缓存数据：保留量值，条形转灰。
+    Cached,
+    /// 失效（未登录、查询失败等）：只画虚化占位，不给失效数据画确定的基线（F-2）。
+    Dead,
+}
+
+pub(super) fn liveness(status: ObservationStatus) -> Liveness {
+    match status {
+        ObservationStatus::Ready | ObservationStatus::Warming => Liveness::Live,
+        ObservationStatus::Stale => Liveness::Cached,
+        _ => Liveness::Dead,
+    }
+}
+
+/// 数值项的语气。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Tone {
+    /// 数字：永不截断，列宽不够先丢标签。
+    Number,
+    /// 未知 / 暂无数据：灰字，同样不截断。
+    Muted,
+    /// 服务端文本（模型名等）：放不下时带省略号截断，标签保留。
+    Text,
+}
+
+/// 一个「标签 数值」项；一行最多三项等分列宽。
+pub(super) struct Stat<'a> {
+    pub label: Cow<'a, str>,
+    pub value: String,
+    pub tone: Tone,
+}
+
+/// 一条 meter（kit `meter_row` + `gauge`）。
+pub(super) struct Meter<'a> {
+    pub label: Cow<'a, str>,
+    pub value: String,
+    pub detail: Option<String>,
+    /// 已用比例；`> 1.0` 画溢出态，`None` 画虚化占位。
+    pub ratio: Option<f32>,
+    /// 额度窗口已过比例（刻度）。
+    pub window: Option<f32>,
+    /// 灰色：缓存 / 失效数据，或未知值。
+    pub stale: bool,
+    /// 额度窗口已过重置时间：整行 DIM，沿用上次值。
+    pub expired: bool,
+}
+
+/// 卡片里的一行。
+pub(super) enum Line<'a> {
+    /// 状态 / 在途 / 新鲜度 / 套餐与身份；绘制时按宿主现算。
+    Meta,
+    /// 服务端说明（`message`、目录信任、推断绑定、厂商退避）。
+    Note(Cow<'a, str>),
+    /// 小节标题（codex 多桶、token 明细）。
+    Section(Cow<'a, str>),
+    Meter(Meter<'a>),
+    Stats(Vec<Stat<'a>>),
+    /// 没有任何可显示的用量（kit `empty_state`）。
+    Empty(&'static str),
+}
+
+/// 一个账号的卡片。
+pub(super) struct Card<'a> {
+    pub account: &'a AccountUsageSnapshot,
+    pub family: Family,
+    pub lines: Vec<Line<'a>>,
+}
+
+impl Card<'_> {
+    /// 不受视口限制时的高度：上下边框 + 全部行。
+    pub(super) fn natural_height(&self) -> usize {
+        self.lines.len() + 2
+    }
+}
+
+/// 百分比文案：整数不带小数，其余一位；超过 100 原样显示（溢出态）。
+pub(super) fn percent_text(percent: f32) -> String {
+    if (percent - percent.round()).abs() < 0.05 {
+        format!("{percent:.0}%")
+    } else {
+        format!("{percent:.1}%")
+    }
+}
+
+/// token / 计数的紧凑写法：`950` / `12.3k` / `1.5M` / `2.1B`。
+pub(super) fn compact_count(value: f64) -> String {
+    let value = value.max(0.0);
+    let scaled = |divisor: f64, suffix: &str| {
+        let text = format!("{:.1}", value / divisor);
+        let text = text.strip_suffix(".0").unwrap_or(&text).to_owned();
+        format!("{text}{suffix}")
+    };
+    if value >= 1e9 {
+        scaled(1e9, "B")
+    } else if value >= 1e6 {
+        scaled(1e6, "M")
+    } else if value >= 1e3 {
+        scaled(1e3, "k")
+    } else {
+        format!("{value:.0}")
+    }
+}
+
+/// 金额：`USD` → `$1.23`、`CNY` → `¥12.30`、`{币种} cents` 折成主单位；其它单位
+/// 写在数字后。≥1 保留两位小数，更小的金额保留到四位（`$0.0042` 不写成 `$0.00`）。
+pub(super) fn money_text(amount: &str, unit: &str) -> String {
+    let (unit, divisor) = match unit.strip_suffix(" cents") {
+        Some(currency) => (currency, 100.0),
+        None => (unit, 1.0),
+    };
+    let rendered = match amount.trim().parse::<f64>() {
+        Ok(value) if value.is_finite() => {
+            let value = value / divisor;
+            if value.abs() >= 1.0 || value == 0.0 {
+                format!("{value:.2}")
+            } else {
+                let text = format!("{value:.4}");
+                text.trim_end_matches('0').to_owned()
+            }
+        }
+        _ => amount.trim().to_owned(),
+    };
+    match unit {
+        "USD" => format!("${rendered}"),
+        "CNY" => format!("¥{rendered}"),
+        "" => rendered,
+        other => format!("{rendered} {other}"),
+    }
+}
+
+/// 额度窗口的短时长：`5h` / `7d` / `90m`（整天 / 整小时优先）。
+fn short_span(seconds: u64) -> String {
+    if seconds >= 86_400 && seconds.is_multiple_of(86_400) {
+        format!("{}d", seconds / 86_400)
+    } else if seconds >= 3600 && seconds.is_multiple_of(3600) {
+        format!("{}h", seconds / 3600)
+    } else if seconds >= 60 && seconds.is_multiple_of(60) {
+        format!("{}m", seconds / 60)
+    } else {
+        span_text(seconds)
+    }
+}
+
+/// 额度窗口已过比例（0..=1）：`(now - (resets_at - window)) / window`，只有同时
+/// 知道 `window_seconds` 与 `resets_at` 才有意义。
+pub(super) fn window_progress(metric: &UsageMetric, now_ms: u64) -> Option<f32> {
+    let window = metric.window_seconds.filter(|window| *window > 0)?;
+    let remaining = reset_secs(metric, now_ms)?;
+    Some((1.0 - remaining as f32 / window as f32).clamp(0.0, 1.0))
+}
+
+/// 额度窗口是否已过重置时间：官方 statusline 在窗口过期后把它从 JSON 里去掉，
+/// 服务端沿用上次值；客户端据 `resets_at` 不晚于当前时间判定，其余厂商同理。
+fn window_expired(metric: &UsageMetric, now_ms: u64) -> bool {
+    metric.resets_at.is_some_and(|reset| reset <= now_ms / 1000)
+}
+
+/// 构建卡片所需的上下文。
+#[derive(Clone, Copy)]
+pub(super) struct Cx {
+    pub now_ms: u64,
+    pub live: Liveness,
+    pub texts: &'static crate::i18n::MonitorTexts,
+}
+
+/// 额度窗口 meter：数字是百分比（可超过 100），说明是用量（`used/limit`）与距重置；
+/// 过期窗口灰 + DIM 并写「已过重置 · 沿用上次值」。
+pub(super) fn quota_meter<'a>(label: Cow<'a, str>, metric: &'a UsageMetric, cx: Cx) -> Meter<'a> {
+    let percent = metric_percent(metric);
+    let expired = window_expired(metric, cx.now_ms);
+    let quantity = metric_quantity(metric);
+    let value = match percent {
+        Some(percent) => percent_text(percent),
+        None => quantity.clone(),
+    };
+    let mut detail = Vec::with_capacity(2);
+    if percent.is_some() && quantity != "—" && metric.text_value.is_none() {
+        detail.push(quantity);
+    }
+    if expired {
+        detail.push(cx.texts.window_expired.to_owned());
+    } else if let Some(reset) = reset_text(metric, cx.now_ms) {
+        detail.push(reset);
+    }
+    let ratio = percent.map(|percent| percent / 100.0);
+    Meter {
+        label,
+        value,
+        detail: (!detail.is_empty()).then(|| detail.join(" · ")),
+        ratio: if cx.live == Liveness::Dead {
+            None
+        } else {
+            ratio
+        },
+        window: if expired {
+            None
+        } else {
+            window_progress(metric, cx.now_ms)
+        },
+        stale: cx.live != Liveness::Live || expired || percent.is_none(),
+        expired,
+    }
+}
+
+/// 会话上下文占用 meter：百分比在 `unit = "%"` 的 `used` 里；未知（首次请求前 /
+/// 压缩后）写「暂无数据」灰字，不当成 0。说明是上下文 token / 窗口大小。
+fn context_meter<'a>(
+    metric: &'a UsageMetric,
+    tokens: Option<&'a UsageMetric>,
+    window: Option<&'a UsageMetric>,
+    cx: Cx,
+) -> Meter<'a> {
+    let percent = metric
+        .used
+        .filter(|used| used.is_finite() && metric.unit == "%")
+        .map(|used| used.max(0.0) as f32);
+    let detail = match (
+        tokens.and_then(|metric| metric.used),
+        window.and_then(|metric| metric.used),
+    ) {
+        (Some(tokens), Some(window)) => Some(format!(
+            "{} / {}",
+            compact_count(tokens),
+            compact_count(window)
+        )),
+        (Some(tokens), None) => Some(compact_count(tokens)),
+        (None, Some(window)) => Some(format!("— / {}", compact_count(window))),
+        (None, None) => None,
+    };
+    Meter {
+        label: Cow::Borrowed(cx.texts.context),
+        value: percent.map_or_else(|| cx.texts.no_data_yet.to_owned(), percent_text),
+        detail,
+        ratio: percent
+            .filter(|_| cx.live != Liveness::Dead)
+            .map(|percent| percent / 100.0),
+        window: None,
+        stale: cx.live != Liveness::Live || percent.is_none(),
+        expired: false,
+    }
+}
+
+/// 槽位指标的数值项。
+fn slot_stat<'a>(slot: Slot, metric: &'a UsageMetric, cx: Cx) -> Stat<'a> {
+    let label = Cow::Borrowed(slot.label(cx.texts));
+    let known = |value: String| Stat {
+        label: label.clone(),
+        value,
+        tone: Tone::Number,
+    };
+    // 数值缺席（例如上下文 token 在首次请求前为 null）：写「暂无数据」灰字，不当成 0。
+    let unknown = || Stat {
+        label: label.clone(),
+        value: cx.texts.no_data_yet.to_owned(),
+        tone: Tone::Muted,
+    };
+    match slot.kind() {
+        SlotKind::Money => match &metric.amount_decimal {
+            Some(amount) => known(money_text(amount, &metric.unit)),
+            None => metric.used.map_or_else(unknown, |used| {
+                known(money_text(&used.to_string(), &metric.unit))
+            }),
+        },
+        SlotKind::Tokens => metric
+            .used
+            .map_or_else(unknown, |used| known(compact_count(used))),
+        SlotKind::Count => metric
+            .used
+            .map_or_else(unknown, |used| known(format!("{:.0}", used.max(0.0)))),
+        SlotKind::Text => match metric.text_value.as_deref().filter(|text| !text.is_empty()) {
+            Some(text) => Stat {
+                label: label.clone(),
+                value: text.to_owned(),
+                tone: Tone::Text,
+            },
+            None => metric
+                .used
+                .map_or_else(unknown, |used| known(trim_number(used))),
+        },
+        // 额度 / 百分比槽位不走数值项（由 meter 画）；兜底写百分比。
+        SlotKind::Quota | SlotKind::Percent => {
+            metric_percent(metric).map_or_else(unknown, |percent| known(percent_text(percent)))
+        }
+    }
+}
+
+/// 未进匹配表的指标：有百分比画额度 meter，否则写一个「服务端标签 数量」项
+/// （金额与厂商卡片同一种写法）。
+pub(super) fn generic_line<'a>(metric: &'a UsageMetric, cx: Cx) -> Line<'a> {
+    if metric_percent(metric).is_some() {
+        return Line::Meter(quota_meter(Cow::Borrowed(&metric.label), metric, cx));
+    }
+    let value = match (&metric.text_value, &metric.amount_decimal) {
+        (None, Some(amount)) => money_text(amount, &metric.unit),
+        _ => metric_quantity(metric),
+    };
+    let tone = if value == "—" {
+        Tone::Muted
+    } else if metric.text_value.is_some() {
+        Tone::Text
+    } else {
+        Tone::Number
+    };
+    Line::Stats(vec![Stat {
+        label: Cow::Borrowed(&metric.label),
+        value,
+        tone,
+    }])
+}
+
+/// 按匹配表逐条取用账号的指标；没被厂商排布取走的留给通用行兜底。
+struct Picker<'a> {
+    metrics: &'a [UsageMetric],
+    slots: Vec<Option<Slot>>,
+    taken: Vec<bool>,
+}
+
+impl<'a> Picker<'a> {
+    fn new(account: &'a AccountUsageSnapshot) -> Self {
+        Self {
+            metrics: &account.metrics,
+            slots: account
+                .metrics
+                .iter()
+                .map(|metric| slot_of(&account.agent, metric))
+                .collect(),
+            taken: vec![false; account.metrics.len()],
+        }
+    }
+
+    /// 第一条未取用且满足条件的指标。
+    fn take_where(
+        &mut self,
+        wanted: impl Fn(Slot, &UsageMetric) -> bool,
+    ) -> Option<&'a UsageMetric> {
+        let index = (0..self.metrics.len()).find(|index| {
+            !self.taken[*index]
+                && self.slots[*index].is_some_and(|slot| wanted(slot, &self.metrics[*index]))
+        })?;
+        self.taken[index] = true;
+        Some(&self.metrics[index])
+    }
+
+    fn take(&mut self, slot: Slot) -> Option<&'a UsageMetric> {
+        self.take_where(|candidate, _| candidate == slot)
+    }
+
+    /// 依次取这些槽位（同一槽位可出现多次，例如两种额外用量钱包）。
+    fn take_all(&mut self, slots: &[Slot]) -> Vec<(Slot, &'a UsageMetric)> {
+        let mut taken = Vec::new();
+        for slot in slots {
+            while let Some(metric) = self.take(*slot) {
+                taken.push((*slot, metric));
+            }
+        }
+        taken
+    }
+
+    /// 剩下的指标（未进匹配表，或厂商排布没用到）。
+    fn rest(&self) -> impl Iterator<Item = &'a UsageMetric> + '_ {
+        let metrics = self.metrics;
+        self.taken
+            .iter()
+            .enumerate()
+            .filter(|(_, taken)| !**taken)
+            .map(move |(index, _)| &metrics[index])
+    }
+}
+
+/// 数值项按三项一行排开。
+fn push_stats<'a>(lines: &mut Vec<Line<'a>>, stats: Vec<Stat<'a>>) {
+    let mut stats = stats.into_iter().peekable();
+    while stats.peek().is_some() {
+        lines.push(Line::Stats(stats.by_ref().take(3).collect()));
+    }
+}
+
+/// 槽位 → 数值项，按三项一行排开；`section` 在两项及以上时加小节标题。
+fn push_slot_stats<'a>(
+    lines: &mut Vec<Line<'a>>,
+    picked: Vec<(Slot, &'a UsageMetric)>,
+    section: Option<&'static str>,
+    cx: Cx,
+) {
+    if let Some(section) = section.filter(|_| picked.len() >= 2) {
+        lines.push(Line::Section(Cow::Borrowed(section)));
+    }
+    push_stats(
+        lines,
+        picked
+            .into_iter()
+            .map(|(slot, metric)| slot_stat(slot, metric, cx))
+            .collect(),
+    );
+}
+
+/// 额度槽位依次画 meter。
+fn push_quota_meters<'a>(
+    lines: &mut Vec<Line<'a>>,
+    picker: &mut Picker<'a>,
+    slots: &[Slot],
+    cx: Cx,
+) {
+    for (slot, metric) in picker.take_all(slots) {
+        lines.push(Line::Meter(quota_meter(
+            Cow::Borrowed(slot.label(cx.texts)),
+            metric,
+            cx,
+        )));
+    }
+}
+
+/// 会话上下文：占用 meter（说明里带 token / 窗口大小）。
+fn push_context<'a>(lines: &mut Vec<Line<'a>>, picker: &mut Picker<'a>, cx: Cx) {
+    if let Some(percent) = picker.take(Slot::ContextPercent) {
+        let tokens = picker.take(Slot::ContextTokens);
+        let window = picker.take(Slot::ContextWindow);
+        lines.push(Line::Meter(context_meter(percent, tokens, window, cx)));
+    }
+}
+
+/// claude：5 小时 / 每周 / 消费额度三条 meter（消费额度可超过 100%，画溢出态），
+/// 之后是本会话的上下文占用与费用 / 时长。
+fn claude<'a>(lines: &mut Vec<Line<'a>>, picker: &mut Picker<'a>, cx: Cx) {
+    push_quota_meters(
+        lines,
+        picker,
+        &[Slot::Quota5h, Slot::QuotaWeekly, Slot::QuotaSpend],
+        cx,
+    );
+    push_context(lines, picker, cx);
+    let session = picker.take_all(&[Slot::Cost, Slot::Duration, Slot::ApiDuration]);
+    push_slot_stats(lines, session, None, cx);
+}
+
+/// codex：每个限额桶一组主 / 次窗口 meter 与额外余额；多个桶分小节。
+fn codex<'a>(lines: &mut Vec<Line<'a>>, picker: &mut Picker<'a>, cx: Cx) {
+    let mut buckets: Vec<&'a str> = Vec::new();
+    for (metric, slot) in picker.metrics.iter().zip(&picker.slots) {
+        if slot.is_some() {
+            if let Some(bucket) = codex_bucket(&metric.id) {
+                if !buckets.contains(&bucket) {
+                    buckets.push(bucket);
+                }
+            }
+        }
+    }
+    let sections = buckets.len() > 1;
+    for bucket in buckets {
+        let in_bucket = |slot: Slot, metric: &UsageMetric, wanted: Slot| {
+            slot == wanted && codex_bucket(&metric.id) == Some(bucket)
+        };
+        let primary = picker.take_where(|slot, metric| in_bucket(slot, metric, Slot::QuotaPrimary));
+        let secondary =
+            picker.take_where(|slot, metric| in_bucket(slot, metric, Slot::QuotaSecondary));
+        let credits = picker.take_where(|slot, metric| in_bucket(slot, metric, Slot::Credits));
+        if sections {
+            // 桶名取服务端标签 `{limitName} · 主要额度` 的前半，没有就用桶 id。
+            let name = primary
+                .or(secondary)
+                .and_then(|metric| metric.label.split_once(" · ").map(|(name, _)| name))
+                .unwrap_or(bucket);
+            lines.push(Line::Section(Cow::Borrowed(name)));
+        }
+        for (slot, metric) in [
+            (Slot::QuotaPrimary, primary),
+            (Slot::QuotaSecondary, secondary),
+        ] {
+            if let Some(metric) = metric {
+                let label = quota_label(Some(slot), metric, cx);
+                lines.push(Line::Meter(quota_meter(label, metric, cx)));
+            }
+        }
+        if let Some(credits) = credits {
+            lines.push(Line::Stats(vec![slot_stat(Slot::Credits, credits, cx)]));
+        }
+    }
+}
+
+/// kimi：5 小时 / 7 天 / 月度（及其 Code 部分）/ 套餐额度 meter，余额一行，额外
+/// 用量钱包一个小节。
+fn kimi<'a>(lines: &mut Vec<Line<'a>>, picker: &mut Picker<'a>, cx: Cx) {
+    push_quota_meters(
+        lines,
+        picker,
+        &[
+            Slot::Quota5h,
+            Slot::Quota7d,
+            Slot::QuotaMonthly,
+            Slot::QuotaMonthlyCode,
+            Slot::QuotaPlan,
+        ],
+        cx,
+    );
+    let balances = picker.take_all(&[
+        Slot::BalanceAvailable,
+        Slot::BalanceVoucher,
+        Slot::BalanceCash,
+    ]);
+    push_slot_stats(lines, balances, None, cx);
+    let extra = picker.take_all(&[
+        Slot::ExtraBalance,
+        Slot::ExtraMonthUsed,
+        Slot::ExtraMonthCap,
+        Slot::ExtraTotal,
+    ]);
+    if !extra.is_empty() {
+        lines.push(Line::Section(Cow::Borrowed(cx.texts.section_extra_usage)));
+    }
+    push_slot_stats(lines, extra, None, cx);
+}
+
+/// 一个账号的卡片：状态行、说明行，然后按 `account.agent` 分派的厂商排布；排布
+/// 没用到的指标逐条画通用行，没有任何可显示内容时画空态。
+pub(super) fn build_card<'a>(
+    account: &'a AccountUsageSnapshot,
+    refresh: Option<&UsageRefreshState>,
+    now_ms: u64,
+) -> Card<'a> {
+    let cx = Cx {
+        now_ms,
+        live: liveness(account.status),
+        texts: &crate::i18n::texts().monitor,
+    };
+    let family = family(&account.agent);
+    let mut lines = vec![Line::Meta];
+    if let Some(message) = account
+        .message
+        .as_deref()
+        .filter(|message| !message.is_empty())
+    {
+        lines.push(Line::Note(Cow::Borrowed(message)));
+    }
+    if let Some(note) = refresh_note(refresh, now_ms) {
+        lines.push(Line::Note(Cow::Owned(note)));
+    }
+    let noted = lines.len();
+    let mut picker = Picker::new(account);
+    match account.agent.as_str() {
+        "claude" => claude(&mut lines, &mut picker, cx),
+        "codex" => codex(&mut lines, &mut picker, cx),
+        "kimi" => kimi(&mut lines, &mut picker, cx),
+        _ => {}
+    }
+    lines.extend(picker.rest().map(|metric| generic_line(metric, cx)));
+    if lines.len() == noted && account.message.is_none() {
+        lines.push(Line::Empty(if family == Family::Session {
+            cx.texts.no_session_data
+        } else {
+            cx.texts.no_usage_data
+        }));
+    }
+    Card {
+        account,
+        family,
+        lines,
+    }
+}
+
+/// 额度槽位的显示标签：codex 主 / 次窗口知道长度时写「5h 窗口」，未进匹配表的
+/// 指标用服务端标签。
+fn quota_label<'a>(slot: Option<Slot>, metric: &'a UsageMetric, cx: Cx) -> Cow<'a, str> {
+    match slot {
+        Some(slot @ (Slot::QuotaPrimary | Slot::QuotaSecondary)) => metric
+            .window_seconds
+            .filter(|secs| *secs > 0)
+            .map_or(Cow::Borrowed(slot.label(cx.texts)), |secs| {
+                Cow::Owned(crate::i18n::fill(
+                    cx.texts.window_fmt,
+                    &[("span", &short_span(secs))],
+                ))
+            }),
+        Some(slot) => Cow::Borrowed(slot.label(cx.texts)),
+        None => Cow::Borrowed(&metric.label),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const NOW_MS: u64 = 1_800_000_000_000;
+    const NOW_S: u64 = NOW_MS / 1000;
+
+    fn metric(id: &str, scope: &str) -> UsageMetric {
+        UsageMetric {
+            id: id.into(),
+            label: id.into(),
+            unit: "%".into(),
+            scope: scope.into(),
+            ..Default::default()
+        }
+    }
+
+    fn claude_account() -> AccountUsageSnapshot {
+        AccountUsageSnapshot {
+            agent: "claude".into(),
+            status: ObservationStatus::Ready,
+            metrics: vec![
+                UsageMetric {
+                    used_percent: Some(162.8),
+                    resets_at: Some(NOW_S + 3600),
+                    ..metric("spend_limit", "account")
+                },
+                UsageMetric {
+                    used_percent: Some(91.0),
+                    resets_at: Some(NOW_S - 60),
+                    ..metric("seven_day", "account")
+                },
+                UsageMetric {
+                    used_percent: Some(42.0),
+                    resets_at: Some(NOW_S + 3 * 3600),
+                    window_seconds: Some(5 * 3600),
+                    ..metric("five_hour", "account")
+                },
+                metric("context_window/used_percentage", "session"),
+                metric("cli-0", "account"),
+            ],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn number_formats_are_compact_and_never_hide_small_amounts() {
+        assert_eq!(percent_text(42.0), "42%");
+        assert_eq!(percent_text(162.8), "162.8%");
+        assert_eq!(compact_count(950.0), "950");
+        assert_eq!(compact_count(12_345.0), "12.3k");
+        assert_eq!(compact_count(1_000_000.0), "1M");
+        assert_eq!(compact_count(1_500_000.0), "1.5M");
+        assert_eq!(money_text("1.234567", "USD"), "$1.23");
+        assert_eq!(money_text("0.0042", "USD"), "$0.0042");
+        assert_eq!(money_text("12345", "CNY cents"), "¥123.45");
+        assert_eq!(money_text("12.5", "credits"), "12.50 credits");
+        assert_eq!(money_text("n/a", "USD"), "$n/a");
+        assert_eq!(short_span(5 * 3600), "5h");
+        assert_eq!(short_span(7 * 86_400), "7d");
+        assert_eq!(short_span(90 * 60), "90m");
+    }
+
+    /// claude 卡片：额度窗口按 5 小时 / 每周 / 消费额度的固定顺序（与报文顺序无关），
+    /// 消费额度保留溢出比例，过期窗口灰 + DIM 并换成说明，上下文未知是「暂无数据」，
+    /// 未进匹配表的指标落到末尾的通用行。
+    #[test]
+    fn claude_card_orders_windows_and_keeps_overflow_and_expiry() {
+        let _guard = crate::i18n::lang_guard(crate::i18n::Lang::ZhCn);
+        let account = claude_account();
+        let card = build_card(&account, None, NOW_MS);
+        let meters = card
+            .lines
+            .iter()
+            .filter_map(|line| match line {
+                Line::Meter(meter) => Some(meter),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let labels = meters
+            .iter()
+            .map(|meter| meter.label.as_ref())
+            .collect::<Vec<_>>();
+        assert_eq!(labels, ["5 小时", "每周", "消费额度", "上下文"]);
+        let (five, weekly, spend, context) = (meters[0], meters[1], meters[2], meters[3]);
+        assert!(!five.stale && !five.expired);
+        assert!(
+            five.window
+                .is_some_and(|progress| (progress - 0.4).abs() < 0.01),
+            "5 小时窗口过了 2/5：{:?}",
+            five.window
+        );
+        assert!(
+            spend.ratio.is_some_and(|ratio| ratio > 1.6),
+            "溢出比例不截断"
+        );
+        assert_eq!(spend.value, "162.8%");
+        assert!(weekly.expired && weekly.stale && weekly.window.is_none());
+        assert!(weekly
+            .detail
+            .as_deref()
+            .is_some_and(|detail| detail.contains("已过重置")));
+        assert_eq!(context.value, "暂无数据");
+        assert!(context.stale && context.ratio.is_none());
+        assert!(
+            matches!(card.lines.last(), Some(Line::Stats(stats)) if stats[0].label == "cli-0"),
+            "未进匹配表的指标落到通用行"
+        );
+    }
+
+    /// 失效账号（未登录等）的额度只画虚化占位（不给失效数据画确定的基线），
+    /// 缓存数据保留量值但转灰。
+    #[test]
+    fn dead_and_cached_accounts_do_not_paint_live_bars() {
+        let mut account = claude_account();
+        account.status = ObservationStatus::NotAuthenticated;
+        let card = build_card(&account, None, NOW_MS);
+        let Some(Line::Meter(dead)) = card.lines.get(1) else {
+            panic!("首条 meter");
+        };
+        assert!(dead.ratio.is_none() && dead.stale);
+        account.status = ObservationStatus::Stale;
+        let card = build_card(&account, None, NOW_MS);
+        let Some(Line::Meter(cached)) = card.lines.get(1) else {
+            panic!("首条 meter");
+        };
+        assert!(cached.ratio.is_some() && cached.stale);
+    }
+}

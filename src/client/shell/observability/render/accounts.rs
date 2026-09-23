@@ -1,12 +1,20 @@
-//! 账号页：厂商 chip / 选择器、工具栏、仪表盘与表格、右栏详情、绑定行，
-//! 以及账号正文的作用域视图（页面与悬浮层共用）。
+//! 账号页：厂商 chip / 选择器、工具栏、厂商专属卡片与表格、右栏详情、绑定行，
+//! 以及账号正文的作用域视图（页面与悬浮层共用）。卡片的匹配表、内容模型与绘制
+//! 在 `accounts/{slots,cards,paint}.rs`。
 
 use super::*;
 use ratatui::layout::{Constraint, Layout};
 use ratatui::widgets::{Cell, Row, Sparkline, Table, Widget};
 
+mod cards;
+mod paint;
+mod slots;
+
+use paint::{account_cards, dashboard_rows};
+
 /// 两种显示模式统一的已用百分比：官方 `used_percent` 优先，否则由 `used/limit`
-/// 推算；统一夹取到 0..=100（ACC-20）。
+/// 推算（ACC-20）。只夹下限、不夹上限：`spend_limit` 超限后可大于 100，原样
+/// 显示并画溢出态，不截成 100%。
 pub(in crate::client::shell::observability) fn metric_percent(metric: &UsageMetric) -> Option<f32> {
     metric
         .used_percent
@@ -15,7 +23,7 @@ pub(in crate::client::shell::observability) fn metric_percent(metric: &UsageMetr
             _ => None,
         })
         .filter(|value| value.is_finite())
-        .map(|value| value.clamp(0.0, 100.0) as f32)
+        .map(|value| value.max(0.0) as f32)
 }
 
 /// 数值去掉无意义的小数位：`100` / `42.5` / `0.33`。
@@ -80,56 +88,6 @@ fn reset_text(metric: &UsageMetric, now_ms: u64) -> Option<String> {
     })
 }
 
-/// 额度窗口已过比例（0..=1）：只有同时知道 `window_seconds` 与 `resets_at` 才有意义。
-fn window_elapsed(metric: &UsageMetric, now_ms: u64) -> Option<f32> {
-    let window = metric.window_seconds.filter(|window| *window > 0)?;
-    let remaining = reset_secs(metric, now_ms)?;
-    Some((1.0 - remaining as f32 / window as f32).clamp(0.0, 1.0))
-}
-
-/// 额度条颜色：知道窗口已过比例时按「超前于时间」判色（用得比时间快 25 个点以上
-/// 为红、10 个点以上为黄），否则回退 90 / 75 阈值。
-pub(super) fn quota_color(percent: f32, elapsed: Option<f32>, palette: &Palette) -> Color {
-    let expected = elapsed.map(|elapsed| elapsed * 100.0);
-    if percent >= 90.0 || expected.is_some_and(|expected| percent >= expected + 25.0) {
-        palette.red
-    } else if percent >= 75.0 || expected.is_some_and(|expected| percent > expected + 10.0) {
-        palette.yellow
-    } else {
-        palette.teal
-    }
-}
-
-/// 定宽额度条：已用 `━`、未用 `░`（surface_dim，永远与边框线区分开）；非 Ready /
-/// Warming 状态只画虚化占位，不给失效数据画确定的基线（F-2）。不改 Monitor 的满宽 `bar`。
-pub(super) fn quota_bar(
-    buffer: &mut Buffer,
-    rect: Rect,
-    percent: Option<f32>,
-    elapsed: Option<f32>,
-    status: ObservationStatus,
-    palette: &Palette,
-) {
-    if rect.is_empty() {
-        return;
-    }
-    let live = matches!(
-        status,
-        ObservationStatus::Ready | ObservationStatus::Warming
-    );
-    let fill = percent.filter(|_| live).map_or(0, |percent| {
-        (rect.width as f32 * percent / 100.0).round() as u16
-    });
-    let color = quota_color(percent.unwrap_or(0.0), elapsed, palette);
-    for x in 0..rect.width {
-        if let Some(cell) = buffer.cell_mut((rect.x + x, rect.y)) {
-            let filled = x < fill;
-            cell.set_symbol(if filled { "━" } else { "░" })
-                .set_style(Style::default().fg(if filled { color } else { palette.surface_dim }));
-        }
-    }
-}
-
 /// 流式排布：项从左到右摆放（项间 1 列间距），放不下换行，最多 `max_rows` 行；末行
 /// 右侧保留 `reserve` 列给折叠标记。返回每项的 (x, row)（折叠掉的项为 `None`，一旦
 /// 开始折叠后面全部折叠、保持顺序）与实际占用行数。单项比行宽还宽时原地放下、由绘制方
@@ -172,31 +130,9 @@ pub(super) fn flow_positions(
     (positions, rows)
 }
 
-/// 卡片左缘的状态槽 `▌`：一眼分出每张卡的健康度。
-fn status_slot(buffer: &mut Buffer, x: u16, y: u16, color: Color) {
-    if let Some(cell) = buffer.cell_mut((x, y)) {
-        cell.set_symbol("▌").set_style(Style::default().fg(color));
-    }
-}
-
-/// 指标行之间的竖线分隔 ` │ `，返回占用的列数。
-fn column_separator(
-    buffer: &mut Buffer,
-    x: u16,
-    y: u16,
-    glyphs: crate::ui::BorderGlyphs,
-    palette: &Palette,
-) -> u16 {
-    if let Some(cell) = buffer.cell_mut((x + 1, y)) {
-        cell.set_symbol(glyphs.vertical)
-            .set_style(Style::default().fg(palette.surface_dim));
-    }
-    3
-}
-
 /// 厂商 chip 的外观。
 struct ChipStyle {
-    /// 已选中：反色成 accent（与 `page_tab` 同一套语言）。
+    /// 已选中：反色成 accent（与页签同一套语言），前景按对比度择色。
     active: bool,
     /// 官方 CLI 未安装（仅因显式配置账号而列出）：降色。
     dimmed: bool,
@@ -226,7 +162,7 @@ fn chip(
     }
     let base = if style.active {
         Style::default()
-            .fg(palette.panel_bg)
+            .fg(crate::ui::color::contrast_fg(palette, palette.accent))
             .bg(palette.accent)
             .add_modifier(Modifier::BOLD)
     } else if style.dimmed {
@@ -811,8 +747,8 @@ pub(super) fn accounts(
     }
 }
 
-/// 账号正文：空态提示，或仪表盘 / 表格（≥96 列时右栏显示所选账号的详情）；
-/// 强意图刷新在途时整块变暗。页面与 agent 行悬浮层共用。
+/// 账号正文：空态（kit `empty_state`），或厂商专属卡片 / 表格（≥96 列时右栏显示
+/// 所选账号的详情）；强意图刷新在途时整块变暗。页面与 agent 行悬浮层共用。
 pub(super) fn accounts_content(
     buffer: &mut Buffer,
     area: Rect,
@@ -826,20 +762,22 @@ pub(super) fn accounts_content(
     }
     if scope.accounts.is_empty() {
         // 强意图刷新在途时显示「刷新中…」，而不是退回「请选择厂商」。
-        text(
-            buffer,
-            area,
-            0,
-            if scope.refreshing {
-                tr("Refreshing…", "刷新中…")
-            } else {
-                tr(
+        let spec = if scope.refreshing {
+            crate::ui::kit::empty_state::EmptyState {
+                title: tr("Refreshing…", "刷新中…"),
+                ..Default::default()
+            }
+        } else {
+            crate::ui::kit::empty_state::EmptyState {
+                title: crate::i18n::texts().monitor.no_accounts,
+                body: Some(tr(
                     "Select a provider to inspect its official usage source.",
                     "请选择厂商以查询对应的官方用量。",
-                )
-            },
-            Style::default().fg(palette.overlay0),
-        );
+                )),
+                ..Default::default()
+            }
+        };
+        crate::ui::kit::empty_state::render_empty_state(buffer, area, &spec, palette);
         return;
     }
     let (main, detail) = if area.width >= 96 {
@@ -852,7 +790,7 @@ pub(super) fn accounts_content(
     if state.usage.format == UsageDisplayFormat::Table {
         usage_table(buffer, main, state, scope, palette, hits);
     } else {
-        usage_dashboard(buffer, main, state, scope, palette, hits);
+        account_cards(buffer, main, state, scope, palette, hits);
     }
     if let Some(detail) = detail {
         account_detail(buffer, detail, state, scope, palette);
@@ -1015,9 +953,10 @@ fn account_detail(
         Sparkline::default()
             .data(&data)
             .max(100)
-            .style(Style::default().fg(quota_color(
-                samples.last().map_or(0.0, |sample| sample.percent),
+            .style(Style::default().fg(crate::ui::kit::gauge::gauge_color(
+                samples.last().map_or(0.0, |sample| sample.percent) / 100.0,
                 None,
+                crate::ui::kit::gauge::GaugeThresholds::default(),
                 palette,
             )))
             .render(
@@ -1439,294 +1378,18 @@ pub(super) fn usage_table(
     .render(area, buffer);
 }
 
-/// 仪表盘模式下每个账号占用的行数：头行 + 说明行（message / 服务端说明 / 套餐·身份）
-/// + 每指标 1 行 + 卡间分隔线。这是滚动的真源：改行数必须同步 `usage_dashboard`。
+/// 账号正文的滚动真源（行数）：表格每指标一行，仪表盘是逐账号卡片的自然高度
+/// （`paint::dashboard_rows`）。页面与悬浮层共用；渲染期再按视口钳位。
 pub(in crate::client::shell::observability) fn account_rows(
     state: &State,
     accounts: &[AccountUsageSnapshot],
     refresh_states: &[UsageRefreshState],
 ) -> usize {
-    accounts
-        .iter()
-        .map(|account| {
-            if state.usage.format == UsageDisplayFormat::Table {
-                return account.metrics.len().max(1);
-            }
-            // 与 `usage_dashboard` 里 `refresh_note` 出现的条件一致，滚动夹取不分配。
-            let noted = refresh_states
-                .iter()
-                .find(|refresh| refresh.account_id == account.account_id)
-                .is_some_and(|refresh| {
-                    refresh.trust_required
-                        || refresh.binding_inferred
-                        || long_backoff_secs(refresh, state.now_ms).is_some()
-                });
-            2 + usize::from(account.message.is_some())
-                + usize::from(noted)
-                + usize::from(account.plan.is_some() || account.account_identity.is_some())
-                + account.metrics.len()
-        })
-        .sum()
-}
-
-/// 指标一行：`label [scope] │ 定宽额度条 │ 42.0% │ used/limit │ 距重置 6d21h`；从左到右
-/// 按剩余宽度依次放下，放不下的尾段省略（窄面板先保标签与百分比，额度条 8-24 列）。
-fn metric_row(
-    buffer: &mut Buffer,
-    rect: Rect,
-    metric: &UsageMetric,
-    status: ObservationStatus,
-    now_ms: u64,
-    glyphs: crate::ui::BorderGlyphs,
-    palette: &Palette,
-) {
-    if rect.is_empty() {
-        return;
+    if state.usage.format == UsageDisplayFormat::Table {
+        return accounts
+            .iter()
+            .map(|account| account.metrics.len().max(1))
+            .sum();
     }
-    let name = format!("{} [{}]", metric.label, metric_scope(&metric.scope));
-    let percent = metric_percent(metric);
-    let elapsed = window_elapsed(metric, now_ms);
-    let quantity = metric_quantity(metric);
-    let reset = reset_text(metric, now_ms);
-    let right = rect.right();
-    let mut x = rect.x;
-    let name_width = (UnicodeWidthStr::width(name.as_str()) as u16)
-        .min(18)
-        .min(right.saturating_sub(x));
-    text(
-        buffer,
-        Rect::new(x, rect.y, name_width, 1),
-        0,
-        &name,
-        Style::default().fg(palette.text),
-    );
-    x = x.saturating_add(name_width);
-    const SEP: u16 = 3;
-    const PCT: u16 = 6;
-    if percent.is_some() {
-        // 额度条只在放得下「分隔 + 条 + 分隔 + 百分比」时出现。
-        let available = right.saturating_sub(x);
-        if available >= SEP * 2 + 8 + PCT {
-            let bar_width = ((available - SEP * 2 - PCT) / 2).clamp(8, 24);
-            x += column_separator(buffer, x, rect.y, glyphs, palette);
-            quota_bar(
-                buffer,
-                Rect::new(x, rect.y, bar_width, 1),
-                percent,
-                elapsed,
-                status,
-                palette,
-            );
-            x = x.saturating_add(bar_width);
-        }
-    }
-    if let Some(percent) = percent {
-        if right.saturating_sub(x) >= SEP + PCT {
-            x += column_separator(buffer, x, rect.y, glyphs, palette);
-            let live = matches!(
-                status,
-                ObservationStatus::Ready | ObservationStatus::Warming
-            );
-            text(
-                buffer,
-                Rect::new(x, rect.y, PCT, 1),
-                0,
-                &format!("{percent:>5.1}%"),
-                Style::default().fg(if live {
-                    quota_color(percent, elapsed, palette)
-                } else {
-                    palette.overlay0
-                }),
-            );
-            x = x.saturating_add(PCT);
-        }
-    }
-    for (value, color) in [
-        ((quantity != "—").then_some(quantity.as_str()), palette.teal),
-        (reset.as_deref(), palette.overlay0),
-    ] {
-        let Some(value) = value else {
-            continue;
-        };
-        let width = UnicodeWidthStr::width(value) as u16;
-        if right.saturating_sub(x) < SEP + width {
-            break;
-        }
-        x += column_separator(buffer, x, rect.y, glyphs, palette);
-        text(
-            buffer,
-            Rect::new(x, rect.y, width, 1),
-            0,
-            value,
-            Style::default().fg(color),
-        );
-        x = x.saturating_add(width);
-    }
-}
-
-/// 仪表盘：每账号一张卡——左缘状态槽 `▌`、头行「› 账号 · 状态」右对齐新鲜度、说明行、
-/// 每指标一行（定宽额度条）、卡间 `surface_dim` 分隔线。返回走过的总行数（视口内
-/// 提前结束时为部分值），与 `account_rows` 同口径。
-pub(super) fn usage_dashboard(
-    buffer: &mut Buffer,
-    area: Rect,
-    state: &State,
-    scope: &AccountsScope<'_>,
-    palette: &Palette,
-    hits: &mut Vec<(Rect, Action)>,
-) -> usize {
-    let glyphs = state.glyphs;
-    let start = scope.scroll.min(
-        account_rows(state, scope.accounts, scope.refresh_states)
-            .saturating_sub(area.height.max(1) as usize),
-    );
-    let viewport_row = |row: usize| {
-        row.checked_sub(start)
-            .filter(|row| *row < area.height as usize)
-            .map(|row| Rect::new(area.x, area.y + row as u16, area.width, 1))
-    };
-    // 卡片内容缩进状态槽之后。
-    let indented = |rect: Rect| {
-        Rect::new(
-            rect.x.saturating_add(2),
-            rect.y,
-            rect.width.saturating_sub(2),
-            1,
-        )
-    };
-    let mut row = 0;
-    for account in scope.accounts {
-        if row >= start + area.height as usize {
-            break;
-        }
-        let color = status_color(account.status, palette);
-        if let Some(header) = viewport_row(row) {
-            status_slot(buffer, header.x, header.y, color);
-            let selected = scope.account == Some(account.account_id.as_str());
-            let label = format!(
-                "{}{}",
-                if selected { "› " } else { "  " },
-                account.account_label
-            );
-            let body = Rect::new(
-                header.x.saturating_add(1),
-                header.y,
-                header.width.saturating_sub(1),
-                1,
-            );
-            text(
-                buffer,
-                body,
-                0,
-                &label,
-                Style::default()
-                    .fg(if selected {
-                        palette.accent
-                    } else {
-                        palette.text
-                    })
-                    .add_modifier(Modifier::BOLD),
-            );
-            let mut offset = UnicodeWidthStr::width(label.as_str()) as u16;
-            let status_text = format!(" · {}", status(account.status));
-            text(
-                buffer,
-                Rect::new(
-                    body.x.saturating_add(offset),
-                    body.y,
-                    body.width.saturating_sub(offset),
-                    1,
-                ),
-                0,
-                &status_text,
-                Style::default().fg(color).add_modifier(Modifier::BOLD),
-            );
-            offset = offset.saturating_add(UnicodeWidthStr::width(status_text.as_str()) as u16);
-            // 服务端报告探测在途：标题行尾追加「刷新中…」。
-            if scope
-                .refresh_of(&account.account_id)
-                .is_some_and(|state| state.in_flight)
-            {
-                let note = format!(" · {}", tr("refreshing…", "刷新中…"));
-                text(
-                    buffer,
-                    Rect::new(
-                        body.x.saturating_add(offset),
-                        body.y,
-                        body.width.saturating_sub(offset),
-                        1,
-                    ),
-                    0,
-                    &note,
-                    Style::default().fg(palette.overlay1),
-                );
-                offset = offset.saturating_add(UnicodeWidthStr::width(note.as_str()) as u16);
-            }
-            // 右对齐新鲜度（放得下才画）。
-            let age = age_text(state.now_ms, account.observed_at_ms, account.status);
-            let age_width = UnicodeWidthStr::width(age.as_str()) as u16;
-            if body.width > offset.saturating_add(1).saturating_add(age_width) {
-                text(
-                    buffer,
-                    Rect::new(body.right().saturating_sub(age_width), body.y, age_width, 1),
-                    0,
-                    &age,
-                    Style::default().fg(age_color(
-                        state.now_ms,
-                        account.observed_at_ms,
-                        account.status,
-                        palette,
-                    )),
-                );
-            }
-            hits.push((header, Action::Account(account.account_id.clone())));
-        }
-        row += 1;
-        let note = refresh_note(scope.refresh_of(&account.account_id), state.now_ms);
-        let identity = match (account.plan.as_deref(), account.account_identity.as_deref()) {
-            (Some(plan), Some(identity)) => Some(format!("{plan} · {identity}")),
-            (Some(plan), None) => Some(plan.to_owned()),
-            (None, Some(identity)) => Some(identity.to_owned()),
-            (None, None) => None,
-        };
-        for (value, note_color) in [
-            (account.message.as_deref(), palette.yellow),
-            (note.as_deref(), palette.yellow),
-            (identity.as_deref(), palette.overlay1),
-        ] {
-            if let Some(value) = value {
-                if let Some(rect) = viewport_row(row) {
-                    status_slot(buffer, rect.x, rect.y, color);
-                    text(
-                        buffer,
-                        indented(rect),
-                        0,
-                        value,
-                        Style::default().fg(note_color),
-                    );
-                }
-                row += 1;
-            }
-        }
-        for metric in &account.metrics {
-            if let Some(rect) = viewport_row(row) {
-                status_slot(buffer, rect.x, rect.y, color);
-                metric_row(
-                    buffer,
-                    indented(rect),
-                    metric,
-                    account.status,
-                    state.now_ms,
-                    glyphs,
-                    palette,
-                );
-            }
-            row += 1;
-        }
-        if let Some(rect) = viewport_row(row) {
-            rule(buffer, rect, glyphs, palette);
-        }
-        row += 1;
-    }
-    row
+    dashboard_rows(accounts, refresh_states, state.now_ms)
 }

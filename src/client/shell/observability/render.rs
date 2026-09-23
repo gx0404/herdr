@@ -1134,58 +1134,25 @@ mod tests {
         );
     }
 
-    #[test]
-    fn dashboard_rows_match_the_scroll_source_of_truth() {
-        let mut state = populated();
-        state.accounts[0].message = Some("hello".into());
-        state.accounts[0].plan = Some("Max".into());
-        state.accounts[1].account_identity = Some("me@example.invalid".into());
-        state.accounts.push(AccountUsageSnapshot {
-            metrics: Vec::new(),
-            ..account("claude:empty", ObservationStatus::Warming)
-        });
-        state.refresh_states = vec![UsageRefreshState {
-            account_id: "claude:work".into(),
-            trust_required: true,
-            ..Default::default()
-        }];
-        let scope = page_scope(&state);
-        let area = Rect::new(0, 0, 100, 200);
-        let mut buffer = Buffer::empty(area);
-        let mut hits = Vec::new();
-        let drawn = usage_dashboard(
-            &mut buffer,
-            area,
-            &state,
-            &scope,
-            &config().palette,
-            &mut hits,
-        );
-        assert_eq!(
-            drawn,
-            account_rows(&state, &state.accounts, &state.refresh_states),
-            "仪表盘实际行数与滚动真源一致"
-        );
-        assert_eq!(hits.len(), 3, "每账号一个标题行命中区");
-    }
-
+    /// 每账号一张 kit 卡片：上边框写账号标签与状态徽标（已更新绿 / 需要登录黄），
+    /// 卡内首行是新鲜度，其后是额度 meter；失效账号的条形只画虚化占位。
     #[test]
     fn ready_and_not_authenticated_accounts_differ_in_text_and_color() {
         let _guard = lang_guard(Lang::ZhCn);
         let state = populated();
         let (buffer, output) = paint_page(&state, Page::Accounts, 120, 40);
-        let header_of = |id: &str| {
+        let card_of = |id: &str| {
             output
                 .hits
                 .iter()
                 .find(|(_, action)| matches!(action, Action::Account(account) if account == id))
                 .map(|(rect, _)| *rect)
-                .unwrap_or_else(|| panic!("账号 {id} 的标题行命中区"))
+                .unwrap_or_else(|| panic!("账号 {id} 的卡片命中区"))
         };
-        let ready = header_of("claude:default");
-        let blocked = header_of("claude:work");
+        let ready = card_of("claude:default");
+        let blocked = card_of("claude:work");
         assert!(
-            row_has(&buffer, ready.y, "已更新"),
+            row_has(&buffer, ready.y, "claude:default") && row_has(&buffer, ready.y, "已更新"),
             "{}",
             row_text(&buffer, ready.y)
         );
@@ -1200,22 +1167,23 @@ mod tests {
             color_at(&buffer, blocked.y, "需要登录"),
             Some(palette.yellow)
         );
-        // 头行右侧是新鲜度：13 秒前 → 绿色。
+        // 卡内首行是新鲜度：13 秒前 → 绿色。
         assert!(
-            row_has(&buffer, ready.y, "13s 前更新"),
+            row_has(&buffer, ready.y + 1, "13s 前更新"),
             "{}",
-            row_text(&buffer, ready.y)
+            row_text(&buffer, ready.y + 1)
         );
-        assert_eq!(color_at(&buffer, ready.y, "13s"), Some(palette.green));
-        // 指标行：定宽额度条只在 Ready 账号上着色，需登录的账号是虚化占位。
-        let ready_metric = row_text(&buffer, ready.y + 1);
+        assert_eq!(color_at(&buffer, ready.y + 1, "13s"), Some(palette.green));
+        // 额度 meter：已更新的账号着色并写用量与距重置，需登录的账号是虚化占位。
+        let ready_metric = row_text(&buffer, ready.y + 2);
         assert!(ready_metric.contains("━"), "{ready_metric}");
+        assert!(ready_metric.contains("42%"), "{ready_metric}");
         assert!(
-            row_has(&buffer, ready.y + 1, "距重置 7d20h"),
+            row_has(&buffer, ready.y + 2, "距重置 7d20h"),
             "{ready_metric}"
         );
         assert!(ready_metric.contains("42/100"), "{ready_metric}");
-        let blocked_metric = row_text(&buffer, blocked.y + 1);
+        let blocked_metric = row_text(&buffer, blocked.y + 2);
         assert!(!blocked_metric.contains("━"), "{blocked_metric}");
         assert!(blocked_metric.contains("░"), "{blocked_metric}");
         // ≥96 列右栏显示详情。
@@ -1238,8 +1206,8 @@ mod tests {
         let text = buffer_text(&buffer);
         assert!(buffer_has(&buffer, "新鲜度"), "{text}");
         assert!(
-            buffer_has(&buffer, "100.0%"),
-            "used/limit 推算并夹取到 100: {text}"
+            buffer_has(&buffer, "150.0%"),
+            "used/limit 推算，超过 100 原样显示（不再夹取）: {text}"
         );
         assert!(has(&output, |a| matches!(a, Action::Account(_))));
     }
@@ -1271,40 +1239,6 @@ mod tests {
         assert_eq!(span_text(7 * 86_400 + 21 * 3600 + 5), "7d21h");
         assert_eq!(span_text(3 * 3600 + 120), "3h02m");
         assert_eq!(span_text(780), "13m");
-    }
-
-    #[test]
-    fn quota_bar_colors_by_window_pace_and_placeholders_dead_data() {
-        let palette = config().palette;
-        // 无窗口：90 / 75 阈值。
-        assert_eq!(quota_color(50.0, None, &palette), palette.teal);
-        assert_eq!(quota_color(80.0, None, &palette), palette.yellow);
-        assert_eq!(quota_color(95.0, None, &palette), palette.red);
-        // 有窗口：用得比时间快才变色。
-        assert_eq!(quota_color(50.0, Some(0.6), &palette), palette.teal);
-        assert_eq!(quota_color(50.0, Some(0.3), &palette), palette.yellow);
-        assert_eq!(quota_color(50.0, Some(0.1), &palette), palette.red);
-        let area = Rect::new(0, 0, 10, 1);
-        let mut buffer = Buffer::empty(area);
-        quota_bar(
-            &mut buffer,
-            area,
-            Some(50.0),
-            None,
-            ObservationStatus::Ready,
-            &palette,
-        );
-        assert_eq!(row_text(&buffer, 0), "━━━━━░░░░░");
-        let mut buffer = Buffer::empty(area);
-        quota_bar(
-            &mut buffer,
-            area,
-            Some(50.0),
-            None,
-            ObservationStatus::Error,
-            &palette,
-        );
-        assert_eq!(row_text(&buffer, 0), "░░░░░░░░░░", "失效数据不画确定基线");
     }
 
     #[test]

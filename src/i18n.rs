@@ -500,6 +500,59 @@ pub struct MonitorTexts {
     pub alert_rule_fmt: &'static str, // args: metric
     pub alert_duration: &'static str,
     pub alert_cooldown: &'static str,
+    // ---- 账号页厂商卡片 ----
+    /// 账号卡片（厂商专属）：额度窗口短标签。
+    pub quota_5h: &'static str,
+    pub quota_weekly: &'static str,
+    pub quota_spend: &'static str,
+    pub quota_primary: &'static str,
+    pub quota_secondary: &'static str,
+    pub quota_7d: &'static str,
+    pub quota_monthly: &'static str,
+    pub quota_monthly_code: &'static str,
+    pub quota_plan: &'static str,
+    /// codex 主 / 次窗口知道长度时的标签（`5h` / `7d`）。
+    pub window_fmt: &'static str, // args: span
+    /// 额度窗口已过重置时间、沿用上次值时的说明。
+    pub window_expired: &'static str,
+    /// 余额与钱包。
+    pub credits: &'static str,
+    pub balance_available: &'static str,
+    pub balance_voucher: &'static str,
+    pub balance_cash: &'static str,
+    pub section_extra_usage: &'static str,
+    pub extra_balance: &'static str,
+    pub extra_total: &'static str,
+    pub extra_month_used: &'static str,
+    pub extra_month_cap: &'static str,
+    /// 会话与本地统计。
+    pub cost: &'static str,
+    pub duration: &'static str,
+    pub api_duration: &'static str,
+    pub context: &'static str,
+    pub context_tokens: &'static str,
+    pub context_window: &'static str,
+    pub sessions: &'static str,
+    pub subagents: &'static str,
+    pub tokens_input: &'static str,
+    pub tokens_output: &'static str,
+    pub tokens_reasoning: &'static str,
+    pub tokens_cache_read: &'static str,
+    pub tokens_cache_write: &'static str,
+    pub tokens_total: &'static str,
+    pub tokens_main: &'static str,
+    pub tokens_subagents: &'static str,
+    pub tool_uses: &'static str,
+    pub stats_window: &'static str,
+    pub model: &'static str,
+    /// 卡片徽标：本机统计 / 会话统计不是账号额度。
+    pub local_stats_badge: &'static str,
+    pub session_stats_badge: &'static str,
+    /// 空态与未知值。
+    pub no_usage_data: &'static str,
+    pub no_session_data: &'static str,
+    pub no_data_yet: &'static str,
+    pub no_accounts: &'static str,
 }
 
 pub struct SidebarTexts {
