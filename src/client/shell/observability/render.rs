@@ -1212,6 +1212,27 @@ mod tests {
         );
     }
 
+    /// 冒烟 L11：账号页绑定行与其它界面同一套术语——中文写「窗格」，不再混写
+    /// 英文 pane；英文界面保持原文。
+    #[test]
+    fn binding_row_names_panes_in_the_ui_language() {
+        let state = populated();
+        {
+            let _guard = lang_guard(Lang::ZhCn);
+            let (buffer, output) = paint_page(&state, Page::Accounts, 133, 32);
+            let rect = hit_rect(&output, |a| matches!(a, Action::BindFocused)).expect("绑定行");
+            let row = row_text(&buffer, rect.y);
+            assert!(row_has(&buffer, rect.y, "绑定窗格"), "{row}");
+            assert!(row_has(&buffer, rect.y, "绑定到聚焦窗格"), "{row}");
+            assert!(!row.contains("pane"), "中文绑定行不混写 pane：{row}");
+        }
+        let _guard = lang_guard(Lang::En);
+        let (buffer, output) = paint_page(&state, Page::Accounts, 133, 32);
+        let rect = hit_rect(&output, |a| matches!(a, Action::BindFocused)).expect("binding row");
+        assert!(row_has(&buffer, rect.y, "Pane"));
+        assert!(row_has(&buffer, rect.y, "Bind focused pane"));
+    }
+
     /// 每账号一张 kit 卡片：上边框写账号标签与状态徽标（已更新绿 / 需要登录黄），
     /// 卡内首行是新鲜度，其后是额度 meter；失效账号的条形只画虚化占位。
     #[test]

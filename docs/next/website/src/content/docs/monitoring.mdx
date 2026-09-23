@@ -41,7 +41,7 @@ Card order is changed in **Edit layout** mode, entered from the button at the ri
 
 Process details pin the process instance. Termination requires confirmation; force is a separate choice. Expired confirmations, reused PIDs and protected processes are rejected. Windows termination requires the force option and appropriate permission.
 
-Alerts default to off and operate only while a TUI is connected. Configure threshold, duration and cooldown; alerts never kill processes.
+Alerts default to off and operate only while a TUI is connected. Configure threshold, duration and cooldown; alerts never kill processes. The Monitor preferences rows and the alert notification name each rule by its metric — CPU, Memory, GPU or Disk — rather than by its config id.
 
 The **Monitor preferences** page groups its controls into cards. Steppers set the sampling interval (500 / 1000 / 2000 / 5000 ms), card height (7 / 10 / 16 / 24 rows), history range (1 / 5 / 15 / 30 / 60 min), the hover delay and each alert rule's threshold (50–100 % in steps of 5), duration and cooldown; toggles switch alerts, provider account usage, the visible cards, the listed providers and the sampled devices; segmented controls pick the usage format, the usage placement and the chart glyphs. A stepper moves to the neighbouring step of its fixed ladder and wraps at both ends, so a config value that sits between two steps moves to the next step first instead of skipping one. **Chart glyphs** selects the alphabet of the System page's sparklines and bars — Braille (default), Blocks, or ASCII for terminals without those glyphs — and is stored as the client preference `monitor_chart_glyphs`.
 

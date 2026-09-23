@@ -42,6 +42,19 @@ pub(super) fn tr(en: &'static str, zh_text: &'static str) -> &'static str {
     }
 }
 
+/// 告警规则指标的显示名：偏好页告警行与资源告警通知共用一份。配置里写了不认识
+/// 的 id 时原样显示（`State::alert` 也不会为它取值），不猜测含义。
+pub(super) fn alert_metric_label(metric: &str) -> &str {
+    let texts = &crate::i18n::texts().monitor;
+    match metric {
+        "cpu" => texts.alert_metric_cpu,
+        "memory" => texts.alert_metric_memory,
+        "gpu" => texts.alert_metric_gpu,
+        "disk" => texts.alert_metric_disk,
+        other => other,
+    }
+}
+
 /// 可作为绑定候选 / 悬浮目标的 agent：排除 herdr 自身的 agent（muse）。悬浮层
 /// 判据与账号页 pane 选择器共用同一处，避免两个入口漂移。
 pub(super) fn is_bindable_agent(name: &str) -> bool {
@@ -1710,7 +1723,9 @@ impl State {
                     state.last_fired = Some(self.now_ms);
                     return Some(format!(
                         "{} · {} {:.1}%",
-                        metrics.hostname, rule.metric, value
+                        metrics.hostname,
+                        alert_metric_label(&rule.metric),
+                        value
                     ));
                 }
             } else {
@@ -4174,5 +4189,54 @@ mod usage_history_tests {
         }
         assert_eq!(samples.len(), USAGE_HISTORY_SAMPLES);
         assert_eq!(samples.front().map(|sample| sample.at_ms), Some(11));
+    }
+}
+
+#[cfg(test)]
+mod alert_tests {
+    use super::*;
+    use crate::i18n::{lang_guard, Lang};
+
+    /// 内存规则立即触发（持续 0 s）、内存占用 95% 的状态。
+    fn memory_alert_state() -> State {
+        let mut state = State::new(&ClientShellConfig::from_config(
+            &crate::config::Config::default(),
+        ));
+        state.monitor.alerts_enabled = true;
+        let mut rule = crate::config::MonitorConfig::default()
+            .alerts
+            .into_iter()
+            .find(|rule| rule.metric == "memory")
+            .expect("默认规则里有内存");
+        rule.duration_seconds = 0;
+        state.monitor.alerts = vec![rule];
+        state.now_ms = 100_000;
+        state.metrics = Some(Box::new(SystemMetricsSnapshot {
+            status: ObservationStatus::Ready,
+            sampled_at_ms: 100_000,
+            hostname: "host".into(),
+            memory: MemoryMetric {
+                total_bytes: 100,
+                used_bytes: 95,
+                ..Default::default()
+            },
+            ..Default::default()
+        }));
+        state
+    }
+
+    /// 冒烟 L11：资源告警通知与偏好页告警行同一份指标显示名，不把配置里的原始
+    /// id（memory / disk）拼进正文。
+    #[test]
+    fn alert_body_names_the_metric_in_the_ui_language() {
+        {
+            let _guard = lang_guard(Lang::ZhCn);
+            let body = memory_alert_state().alert().expect("超过阈值即告警");
+            assert!(body.contains("内存"), "{body}");
+            assert!(!body.contains("memory"), "{body}");
+        }
+        let _guard = lang_guard(Lang::En);
+        let body = memory_alert_state().alert().expect("alert fires");
+        assert!(body.contains("Memory"), "{body}");
     }
 }

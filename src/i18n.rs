@@ -504,6 +504,12 @@ pub struct MonitorTexts {
     pub alert_rule_fmt: &'static str, // args: metric
     pub alert_duration: &'static str,
     pub alert_cooldown: &'static str,
+    /// 告警规则的指标显示名（偏好页告警行与资源告警通知共用）：配置里的
+    /// `cpu` / `memory` / `gpu` / `disk` 是 id，不直接给人看。
+    pub alert_metric_cpu: &'static str,
+    pub alert_metric_memory: &'static str,
+    pub alert_metric_gpu: &'static str,
+    pub alert_metric_disk: &'static str,
     // ---- 账号页厂商卡片 ----
     /// 账号卡片（厂商专属）：额度窗口短标签。
     pub quota_5h: &'static str,

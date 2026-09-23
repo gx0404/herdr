@@ -246,7 +246,10 @@ fn build_cards(state: &State) -> Vec<Card<'_>> {
         let mut rows = Vec::with_capacity(monitor.alerts.len() * 3);
         for (index, rule) in monitor.alerts.iter().enumerate() {
             rows.push(stepper(
-                crate::i18n::fill(texts.alert_rule_fmt, &[("metric", &rule.metric)]),
+                crate::i18n::fill(
+                    texts.alert_rule_fmt,
+                    &[("metric", alert_metric_label(&rule.metric))],
+                ),
                 format!("{:.0}%", rule.threshold),
                 Action::AlertThreshold(index, -1),
                 Action::AlertThreshold(index, 1),
@@ -655,7 +658,10 @@ mod tests {
         let text = buffer_text(&buffer);
         for needle in [
             "告警",
-            "告警 cpu ≥",
+            "告警 CPU ≥",
+            "告警 内存 ≥",
+            "告警 GPU ≥",
+            "告警 磁盘 ≥",
             "90%",
             "持续",
             "30 s",
@@ -668,6 +674,10 @@ mod tests {
             "coretemp Core 0",
         ] {
             assert!(buffer_has(&buffer, needle), "{needle}\n{text}");
+        }
+        // 冒烟 L11：告警行写界面语言的指标名，不把配置里的原始 id 拼进标签。
+        for raw in ["告警 cpu", "告警 memory", "告警 gpu", "告警 disk"] {
+            assert!(!buffer_has(&buffer, raw), "{raw}\n{text}");
         }
         assert!(has(&output, |a| matches!(a, Action::AlertThreshold(0, 1))));
         assert!(has(&output, |a| matches!(a, Action::AlertDuration(0, -1))));
@@ -684,6 +694,24 @@ mod tests {
             &output,
             |a| matches!(a, Action::Device(id) if id == "sensor:coretemp Core 0")
         ));
+    }
+
+    /// 冒烟 L11（英文界面）：告警行同样写指标的显示名。
+    #[test]
+    fn alert_rows_name_metrics_in_english_too() {
+        let _guard = lang_guard(Lang::En);
+        let state = populated_state();
+        let (buffer, _) = paint_page(&state, Page::Settings, 120, 80);
+        let text = buffer_text(&buffer);
+        for needle in [
+            "Alert CPU ≥",
+            "Alert Memory ≥",
+            "Alert GPU ≥",
+            "Alert Disk ≥",
+        ] {
+            assert!(buffer_has(&buffer, needle), "{needle}\n{text}");
+        }
+        assert!(!buffer_has(&buffer, "Alert memory"), "{text}");
     }
 
     #[test]

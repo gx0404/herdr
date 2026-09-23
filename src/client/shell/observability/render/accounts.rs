@@ -1214,7 +1214,7 @@ fn flow_text(buffer: &mut Buffer, x: &mut u16, row: Rect, value: &str, style: St
 }
 
 /// 账号页的绑定行：有待办绑定时给出一键绑定（服务端被拒的回调 pane → 候选账号），
-/// 否则是 pane 选择器 +「绑定到聚焦 pane」。
+/// 否则是 pane 选择器 +「绑定到聚焦窗格」。
 fn binding_row(
     buffer: &mut Buffer,
     row: Rect,
@@ -1253,7 +1253,7 @@ fn binding_row(
         buffer,
         &mut x,
         row,
-        tr("Pane", "绑定 pane"),
+        tr("Pane", "绑定窗格"),
         Style::default().fg(palette.overlay1),
     );
     flow_button(
@@ -1302,7 +1302,7 @@ fn binding_row(
         buffer,
         &mut x,
         row,
-        tr("Bind focused pane", "绑定到聚焦 pane"),
+        tr("Bind focused pane", "绑定到聚焦窗格"),
         Action::BindFocused,
         palette,
         hits,
