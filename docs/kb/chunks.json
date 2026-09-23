@@ -2567,22 +2567,22 @@
       "anchor": "Menus, pages, and stable selection > Docking",
       "doc": "docs/next/website/src/content/docs/monitoring.mdx",
       "id": "docs-next-website-src-content-docs-monitoring-mdx-menus-pages-and-stable-selection-docking-part1",
-      "source_sha256": "2987b44c657c2410e3e7c9da7642200005fc3a08d3a7c07f82fb42fe4cf786f7",
+      "source_sha256": "03010d139461bd202260183362a01d8f3c54d6c8a9bf5c58fa8af6407dd9e358",
       "text": "## Docking\n\nDrag a panel's `⠿` title handle to another panel's edge. The drop preview shows the destination. Drag dividers to resize, tabs to reorder or create another terminal group, and pane handles to swap panes or move them between tabs without restarting their processes. Borderless panes show their handles only in **Arrange layout** mode, keeping normal terminal text unobstructed. Right-click tab menus remain available.\n\nThe primary terminal page belongs to the focused workspace: clicking a workspace in the sidebar swaps both the tab strip and the terminal content to that workspace's tabs, numbered from 1 per workspace. Tabs dragged into their own panel stay visible regardless of workspace focus.\n"
     },
     {
       "anchor": "Menus, pages, and stable selection > Docking",
       "doc": "docs/next/website/src/content/docs/monitoring.mdx",
       "id": "docs-next-website-src-content-docs-monitoring-mdx-menus-pages-and-stable-selection-docking-part2",
-      "source_sha256": "2987b44c657c2410e3e7c9da7642200005fc3a08d3a7c07f82fb42fe4cf786f7",
+      "source_sha256": "03010d139461bd202260183362a01d8f3c54d6c8a9bf5c58fa8af6407dd9e358",
       "text": "`□` maximizes/restores a panel. **Arrange layout** in the top bar enters arrange mode and stays highlighted while it is on; the footer then names the mode and lists its keys: `Tab` / `Shift+Tab` selects a panel, arrows resize, `Shift+arrows` move, `Enter` maximizes, and `Esc` finishes (the footer's **Esc done** hint is clickable too). While a panel is maximized the whole layout still responds: `Tab` moves the maximized panel along with the focus, and arrows or `Shift+arrows` leave maximize first so the resize or move is visible. **Lock layout** is an on/off toggle that carries a check mark while the layout is locked and prevents accidental rearrangement; **Reset**, shown in arrange mode, restores the default layout. Layouts persist per client and endpoint. Small terminals project the focused panel without discarding the saved layout. Older servers retain the previous single-view UI.\n"
     },
     {
       "anchor": "Menus, pages, and stable selection > Docking",
       "doc": "docs/next/website/src/content/docs/monitoring.mdx",
       "id": "docs-next-website-src-content-docs-monitoring-mdx-menus-pages-and-stable-selection-docking-part3",
-      "source_sha256": "2987b44c657c2410e3e7c9da7642200005fc3a08d3a7c07f82fb42fe4cf786f7",
-      "text": "Monitor and Accounts panels carry a ` × ` button in their header next to `□`. When the panel is focused, `Esc` closes the panel hosting the page; when a terminal is focused, `Esc` goes to the terminal, so use the header button or **Close monitor panel** in command search (listed only while the Monitor panel is docked). With the layout locked, closing is refused and the panel footer says so. The monitor tab you last selected — System, Accounts or Monitor preferences — is kept in client preferences and restored when the panel regains focus or reopens. A docked Monitor or Accounts panel no longer hides the focused terminal's cursor: the cursor disappears only where a panel, a usage popover or a dialog actually covers it."
+      "source_sha256": "03010d139461bd202260183362a01d8f3c54d6c8a9bf5c58fa8af6407dd9e358",
+      "text": "Monitor and Accounts panels carry a ` × ` button in their header next to `□`. When the panel is focused, `Esc` closes the panel hosting the page; when a terminal is focused, `Esc` goes to the terminal, so use the header button or **Close monitor panel** in command search (listed only while the Monitor panel is docked). With the layout locked, closing is refused and the panel footer says so. The monitor tab you last selected — System, Accounts or Monitor preferences — is kept in client preferences and restored when the panel regains focus or reopens. A docked Monitor or Accounts panel no longer hides the focused terminal's cursor: the cursor disappears only where a panel, a usage popover or a dialog actually covers it.\n\nWhen the terminal is too narrow for the whole top bar, buttons are hidden whole instead of being cut off: **Monitor** goes first, then **Lock layout**, then **Arrange layout** (all three remain in the main menu and command search), while **Reset**, which exists only in the top bar, is kept after them."
     },
     {
       "anchor": "Menus, pages, and stable selection > Host resources",

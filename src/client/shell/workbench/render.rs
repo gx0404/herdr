@@ -22,6 +22,48 @@ fn translated(rect: crate::protocol::SurfaceRect, area: Rect) -> Rect {
     .intersection(area)
 }
 
+/// 顶栏放不下整排按钮时先丢的排在前面：监控、锁定布局、调整布局在主菜单
+/// 与命令搜索里都有对应条目（调整布局模式还能按 Esc 退出）；复位只有顶栏
+/// 这一个入口；主菜单是其余一切的入口，最后才丢。
+fn top_bar_drop_rank(action: &Action) -> u8 {
+    match action {
+        Action::Open(_) => 0,
+        Action::Lock => 1,
+        Action::Arrange => 2,
+        Action::Reset => 3,
+        _ => 4,
+    }
+}
+
+/// 顶栏每个按钮画不画：按钮之间留 1 列，整排超过 `cols` 时按
+/// [`top_bar_drop_rank`] 整项丢弃，至少留一个。冒烟 B3：以前按剩余宽度
+/// 硬截，英文调整布局模式（整排 58 列）窄时「 Reset 」被截成「 Res」。
+fn fit_top_bar(buttons: &[(String, Action)], cols: u16) -> Vec<bool> {
+    let mut shown = vec![true; buttons.len()];
+    loop {
+        let widths: Vec<usize> = buttons
+            .iter()
+            .zip(&shown)
+            .filter(|(_, shown)| **shown)
+            .map(|((label, _), _)| label.width())
+            .collect();
+        let width = widths.iter().sum::<usize>() + widths.len().saturating_sub(1);
+        if width <= usize::from(cols) || widths.len() <= 1 {
+            return shown;
+        }
+        let Some(drop) = buttons
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| shown[*index])
+            .min_by_key(|(_, (_, action))| top_bar_drop_rank(action))
+            .map(|(index, _)| index)
+        else {
+            return shown;
+        };
+        shown[drop] = false;
+    }
+}
+
 pub(super) fn pane_hit(pane: &crate::protocol::PaneSurfacePane, area: Rect) -> PaneHit {
     PaneHit {
         rect: translated(pane.rect, area),
@@ -80,8 +122,7 @@ impl ClientShellState {
         } else {
             format!(" {} ", menu_texts.lock_layout)
         };
-        let mut x = 0;
-        for (label, action) in [
+        let buttons: Vec<(String, Action)> = [
             (" herdr ≡ ".to_owned(), Action::Menu),
             (
                 format!(" {} ", menu_texts.monitor_short),
@@ -93,7 +134,14 @@ impl ClientShellState {
         ]
         .into_iter()
         .filter(|(_, action)| self.workbench.arranging || !matches!(action, Action::Reset))
-        {
+        .collect();
+        let shown = fit_top_bar(&buttons, cols);
+        let mut x = 0;
+        for ((label, action), shown) in buttons.into_iter().zip(shown) {
+            if !shown {
+                continue;
+            }
+            // 只剩主菜单仍放不下（不到 9 列）时照旧按屏宽裁。
             let width = (label.width() as u16).min(cols.saturating_sub(x));
             let rect = Rect::new(x, 0, width, u16::from(rows > 0));
             let base = Style::default()

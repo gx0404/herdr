@@ -1375,3 +1375,118 @@ fn arrange_layout_button_enters_the_mode_with_footer_hints() {
     ));
     assert!(!state.workbench.arranging);
 }
+
+/// 冒烟 B3：英文调整布局模式下顶栏整排 58 列（herdr ≡ / Monitor / Arrange
+/// layout / Lock layout / Reset，按钮间 1 列）。以前按剩余宽度硬截，窄于
+/// 58 列时「 Reset 」被截成「 Res」这类半个按钮。改为整项丢弃：监控、锁定
+/// 布局、调整布局在主菜单与命令搜索里都有对应条目，先丢；复位只有顶栏这一
+/// 个入口，保留到它们之后。
+#[test]
+fn narrow_english_top_bar_drops_whole_buttons_and_keeps_reset() {
+    use super::super::workbench::interaction::Action;
+    let _guard = crate::i18n::lang_guard(crate::i18n::Lang::En);
+    let mut state = workbench_state();
+    state.config.mouse_capture = true;
+    state.workbench.arranging = true;
+    let t = &crate::i18n::texts().menu;
+    let full = [
+        " herdr ≡ ".to_owned(),
+        format!(" {} ", t.monitor_short),
+        format!(" {} ", t.arrange_layout),
+        format!(" {} ", t.lock_layout),
+        " Reset ".to_owned(),
+    ];
+    for (cols, expected) in [
+        (58, vec![0, 1, 2, 3, 4]),
+        (55, vec![0, 2, 3, 4]),
+        (40, vec![0, 2, 4]),
+        (20, vec![0, 4]),
+    ] {
+        let frame = state.compose(cols, 32).expect("workbench frame");
+        let top: Vec<char> = frame_rows(&frame)[0].chars().collect();
+        let buttons: Vec<String> = state
+            .workbench
+            .hits
+            .iter()
+            .filter(|(rect, _)| rect.y == 0)
+            .map(|(rect, _)| {
+                assert!(rect.right() <= cols, "{cols} 列：按钮越出屏幕 {rect:?}");
+                top[usize::from(rect.x)..usize::from(rect.right())]
+                    .iter()
+                    .collect()
+            })
+            .collect();
+        let expected: Vec<String> = expected.iter().map(|&index| full[index].clone()).collect();
+        assert_eq!(buttons, expected, "{cols} 列：顶栏只画完整按钮");
+    }
+
+    // 最窄时复位仍可点：点它恢复默认布局。
+    state.workbench.dock.maximized = Some(super::super::dock::PanelId::Workspaces);
+    state.compose(20, 32).expect("narrow frame");
+    let reset = workbench_action_rect(&state, |action| matches!(action, Action::Reset));
+    let mut outcome = ClientShellInput::default();
+    assert!(state.workbench_mouse(
+        MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: reset.x + 1,
+            row: reset.y,
+            modifiers: KeyModifiers::empty(),
+        },
+        &mut outcome,
+    ));
+    assert_eq!(state.workbench.dock.maximized, None, "复位恢复默认布局");
+}
+
+/// 同一规则按显示宽度算：中文顶栏整排 45 列（汉字各占 2 列），窄时同样
+/// 整项丢弃，留下的按钮命中区都是完整文案宽度。
+#[test]
+fn narrow_chinese_top_bar_measures_buttons_by_display_width() {
+    use super::super::workbench::interaction::Action;
+    use unicode_width::UnicodeWidthStr;
+    let _guard = crate::i18n::lang_guard(crate::i18n::Lang::ZhCn);
+    let mut state = workbench_state();
+    state.workbench.arranging = true;
+    let t = &crate::i18n::texts().menu;
+    let labels = [
+        " herdr ≡ ".to_owned(),
+        format!(" {} ", t.monitor_short),
+        format!(" {} ", t.arrange_layout),
+        format!(" {} ", t.lock_layout),
+        " 复位 ".to_owned(),
+    ];
+    let rank = |action: &Action| match action {
+        Action::Menu => 0,
+        Action::Open(_) => 1,
+        Action::Arrange => 2,
+        Action::Lock => 3,
+        Action::Reset => 4,
+        _ => usize::MAX,
+    };
+    for (cols, expected) in [
+        (45, vec![0, 1, 2, 3, 4]),
+        (44, vec![0, 2, 3, 4]),
+        (30, vec![0, 2, 4]),
+    ] {
+        state.compose(cols, 32).expect("workbench frame");
+        let top: Vec<(Rect, usize)> = state
+            .workbench
+            .hits
+            .iter()
+            .filter(|(rect, _)| rect.y == 0)
+            .map(|(rect, action)| (*rect, rank(action)))
+            .collect();
+        assert_eq!(
+            top.iter().map(|(_, index)| *index).collect::<Vec<_>>(),
+            expected,
+            "{cols} 列"
+        );
+        for (rect, index) in top {
+            assert_eq!(
+                usize::from(rect.width),
+                labels[index].width(),
+                "{cols} 列：{} 不该被截",
+                labels[index]
+            );
+        }
+    }
+}

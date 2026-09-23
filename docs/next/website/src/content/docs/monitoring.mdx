@@ -27,6 +27,8 @@ The primary terminal page belongs to the focused workspace: clicking a workspace
 
 Monitor and Accounts panels carry a ` × ` button in their header next to `□`. When the panel is focused, `Esc` closes the panel hosting the page; when a terminal is focused, `Esc` goes to the terminal, so use the header button or **Close monitor panel** in command search (listed only while the Monitor panel is docked). With the layout locked, closing is refused and the panel footer says so. The monitor tab you last selected — System, Accounts or Monitor preferences — is kept in client preferences and restored when the panel regains focus or reopens. A docked Monitor or Accounts panel no longer hides the focused terminal's cursor: the cursor disappears only where a panel, a usage popover or a dialog actually covers it.
 
+When the terminal is too narrow for the whole top bar, buttons are hidden whole instead of being cut off: **Monitor** goes first, then **Lock layout**, then **Arrange layout** (all three remain in the main menu and command search), while **Reset**, which exists only in the top bar, is kept after them.
+
 ## Host resources
 
 Choose total/per-core CPU, RAM/swap, GPUs, disks, network interfaces, temperatures and processes. Sampling supports 500, 1000, 2000 and 5000 ms. Slow collectors run independently. Initial differential samples, unavailable drivers and permission failures display a status or `—`, rather than zero.
