@@ -3977,6 +3977,35 @@ fn process_table_shows_seven_digit_pids_in_full() {
     }
 }
 
+/// 冒烟 L12（133×32，默认主题）：仪表空槽「░」与卡片底色的对比度不低于
+/// 1.5:1——原先用 `surface_dim`，与面板底色只有 1.07:1，条形总长看不出来。
+#[test]
+fn gauge_empty_track_is_visible_on_the_card_background() {
+    use crate::ui::color::contrast_ratio;
+    let _guard = crate::i18n::lang_guard(crate::i18n::Lang::ZhCn);
+    let mut state = docked();
+    state.open_observation_page(Page::Monitor, &mut ClientShellInput::default());
+    state.observability.metrics = Some(smoke_system_sample());
+    state.compose(133, 32).expect("系统页");
+    let cpu = page_hit(
+        &state,
+        |action| matches!(action, Action::Card(card) if card == "cpu"),
+    )
+    .expect("CPU 卡");
+    let buffer = state.compose_buffer.as_ref().expect("帧缓冲");
+    let track = (cpu.x..cpu.right())
+        .map(|x| &buffer[(x, cpu.y + 1)])
+        .filter(|cell| cell.symbol() == "░")
+        .collect::<Vec<_>>();
+    assert!(!track.is_empty(), "CPU 42%：条形后半段是空槽");
+    for cell in track {
+        let style = cell.style();
+        let (fg, bg) = (style.fg.expect("空槽前景色"), style.bg.expect("空槽底色"));
+        let ratio = contrast_ratio(fg, bg).expect("内置主题的颜色都可换算");
+        assert!(ratio >= 1.5, "空槽对比度 {ratio:.2}:1（{fg:?} on {bg:?}）");
+    }
+}
+
 /// 监控偏好页的控件：点分段 / 步进器 / 开关只回写各自的偏好键（`PreferenceKey`），
 /// 落盘后重启可恢复；图表字形是独立的客户端偏好键 `monitor_chart_glyphs`。
 #[test]

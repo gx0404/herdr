@@ -85,6 +85,33 @@ pub(crate) fn gauge_color(
     }
 }
 
+/// 空槽与底色的最低对比度：看得出条形总长，又不抢已用段的风头。
+const TRACK_CONTRAST: f32 = 1.5;
+
+/// 空槽的颜色：从最弱的 `surface_dim` 起按「越来越显眼」的顺序挑第一个与
+/// 底色 `bg` 对比度达到 `TRACK_CONTRAST` 的主题色，都不够就取对比度最高的；
+/// 底色取不到 sRGB（终端默认底色）时无从比较，沿用 `surface_dim`。
+fn track_color(palette: &Palette, bg: Color) -> Color {
+    let mut best: Option<(Color, f32)> = None;
+    for candidate in [
+        palette.surface_dim,
+        palette.surface0,
+        palette.surface1,
+        palette.overlay0,
+    ] {
+        let Some(ratio) = crate::ui::color::contrast_ratio(candidate, bg) else {
+            continue;
+        };
+        if ratio >= TRACK_CONTRAST {
+            return candidate;
+        }
+        if best.is_none_or(|(_, best_ratio)| ratio > best_ratio) {
+            best = Some((candidate, ratio));
+        }
+    }
+    best.map_or(palette.surface_dim, |(color, _)| color)
+}
+
 /// 比例换成格数：非零比例至少占一格（有用量就看得见），上限为 `width`。
 fn cells_for(share: f32, width: u16) -> u16 {
     if share.is_nan() || share <= 0.0 {
@@ -107,13 +134,18 @@ pub(crate) fn render_gauge(
     let glyphs = if spec.ascii { ASCII } else { UNICODE };
     let width = area.width;
     let y = area.y;
+    // 空槽按条形所在格的实际底色挑色（卡片底、悬浮行底各不相同）。
+    let bg = buffer
+        .cell((area.x, y))
+        .and_then(|cell| cell.style().bg)
+        .unwrap_or(Color::Reset);
     fill_row(
         buffer,
         area.x,
         y,
         width,
         glyphs.empty,
-        Style::default().fg(palette.surface_dim),
+        Style::default().fg(track_color(palette, bg)),
     );
 
     match spec.segments {
@@ -350,6 +382,34 @@ mod tests {
             },
         );
         assert_eq!(row_text(&buffer, 0), "━━━━━░░░░░");
+    }
+
+    /// 空槽按所在格的底色挑色：每个内置主题的面板底上对比度都不低于 1.5:1
+    /// （原先的 `surface_dim` 在 Catppuccin 上只有 1.07:1）；底色是终端默认色
+    /// （`Reset`，无从比较）时沿用 `surface_dim`。
+    #[test]
+    fn empty_track_stays_visible_on_every_builtin_theme() {
+        for name in crate::config::THEME_NAMES {
+            let palette = Palette::from_name(name).expect("内置主题");
+            let area = Rect::new(0, 0, 10, 1);
+            let mut buffer = Buffer::empty(area);
+            buffer.set_style(area, Style::default().bg(palette.panel_bg));
+            render_gauge(
+                &mut buffer,
+                area,
+                &GaugeSpec {
+                    ratio: Some(0.3),
+                    ..GaugeSpec::default()
+                },
+                &palette,
+            );
+            let track = buffer[(9, 0)].style();
+            assert_eq!(buffer[(9, 0)].symbol(), "░", "{name}");
+            match crate::ui::color::contrast_ratio(track.fg.expect("前景"), palette.panel_bg) {
+                Some(ratio) => assert!(ratio >= 1.5, "{name}: 空槽对比度 {ratio:.2}:1"),
+                None => assert_eq!(track.fg, Some(palette.surface_dim), "{name}: 无从比较"),
+            }
+        }
     }
 
     #[test]
