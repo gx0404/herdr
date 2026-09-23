@@ -87,11 +87,16 @@
 //!   实测只见 completed / failed。没有 task-id 的汇总通知（「N background commands
 //!   completed」）与 task-id 对不上子 agent 的（后台命令、workflow）一律忽略。
 //! - 只认三种投递记录：`queue-operation` 且 `operation == "enqueue"`（`content` 是
-//!   正文，时刻最接近结束；随后的 `dequeue` / `remove` 不带正文）；`origin.kind ==
-//!   "task-notification"` 的 `user` 行（`message.content` 是正文）；回合中投递的
-//!   `attachment.type == "queued_command"`（`attachment.prompt` 是正文，
+//!   正文，时刻最接近结束；随后的 `dequeue` / `remove` 不带正文。回合中排队的用户
+//!   输入也落成 enqueue、没有区分字段，所以只收以 `<task-notification>` 开头的字符串
+//!   正文：本机 1155 条含开标签的 enqueue 里 1152 条以它开头（单块，1 条块后另附
+//!   system-reminder），其余 3 条是贴了通知字样的用户输入，开标签在正文中间、块里
+//!   带 task-id 与 status）；
+//!   `origin.kind == "task-notification"` 的 `user` 行（`message.content` 是正文）；
+//!   回合中投递的 `attachment.type == "queued_command"`（`attachment.prompt` 是正文，
 //!   `commandMode` 是 `task-notification`；排队的用户输入是 `prompt`）。工具说明
-//!   里的格式示例（`prompt_snapshot` 附件）、agent 读到的含通知字样的文件内容都不算。
+//!   里的格式示例（`prompt_snapshot` 附件）、agent 读到的含通知字样的文件内容都不算；
+//!   用户输入恰好以开标签开头时分不出来，代价同修前。
 //! - 时序：本机 38 个有转录的通知对象，通知全部晚于子 agent 的最后一条转录（中位
 //!   48 ms、最多 1.3 s）。同一 task-id 可以多次通知（子 agent 被 SendMessage 唤起
 //!   续跑后再次结束），所以通知之后转录又有活动（超过宽限）视为续跑，回到时间窗
@@ -716,9 +721,17 @@ fn notification_carrier(value: &Value) -> Option<&Value> {
         object.get(key).and_then(Value::as_str)
     }
     match str_field(value, "type")? {
+        // 回合中排队的用户输入同样落成 enqueue，且没有区分字段；系统拼装的通知正文
+        // 以开标签开头，用户贴进来的通知字样在正文中间 → 只收以开标签开头的字符串
+        // 正文（取证见模块文档）。
         "queue-operation" => (str_field(value, "operation") == Some("enqueue"))
             .then(|| value.get("content"))
-            .flatten(),
+            .flatten()
+            .filter(|content| {
+                content
+                    .as_str()
+                    .is_some_and(|text| text.starts_with(NOTIFICATION_OPEN))
+            }),
         "user" => {
             let kind = value
                 .get("origin")
@@ -2298,7 +2311,8 @@ mod tests {
     #[test]
     fn subagents_without_a_final_notification_keep_the_freshness_window() {
         let fresh = discover(ASYNC_SESSION_ID, ASYNC_BASE_MS + 60_000);
-        // b4 没有结束通知；工具说明里的通知格式示例点了它的名也不算。
+        // b4 没有结束通知；工具说明里的通知格式示例点了它的名也不算，用户在回合中
+        // 排队贴进来的通知字样（冒烟 N8：同样落成 enqueue，task-id 恰是 b4）也不算。
         let silent = node(&fresh, "b0000000000000004");
         assert_eq!(silent.status, AgentActivityStatus::Running);
         assert_eq!(silent.ended_at_ms, None);
@@ -2445,7 +2459,18 @@ mod tests {
             notification_carrier(&value).is_some()
         };
         assert!(carrier(
-            r#"{"type":"queue-operation","operation":"enqueue","content":"x"}"#
+            r#"{"type":"queue-operation","operation":"enqueue","content":"<task-notification>x"}"#
+        ));
+        // 冒烟 N8：回合中排队的用户输入同样落成 enqueue、没有区分字段；正文不以开标签
+        // 开头（通知字样贴在句中、前面有空白）或不是字符串，就不是系统拼装的通知。
+        assert!(!carrier(
+            r#"{"type":"queue-operation","operation":"enqueue","content":"see <task-notification>x"}"#
+        ));
+        assert!(!carrier(
+            r#"{"type":"queue-operation","operation":"enqueue","content":" <task-notification>x"}"#
+        ));
+        assert!(!carrier(
+            r#"{"type":"queue-operation","operation":"enqueue","content":[{"type":"text","text":"<task-notification>x"}]}"#
         ));
         assert!(!carrier(
             r#"{"type":"queue-operation","operation":"remove","content":"x"}"#
