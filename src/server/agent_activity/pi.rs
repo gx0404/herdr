@@ -359,7 +359,7 @@ fn clean_content(text: &str) -> String {
 }
 
 /// 修复父子关系并排成父先子后：父节点缺失或指向自己的挂到根；环上最先出现的
-/// 节点切断回边成为根。深度不设上限，遍历是迭代的。
+/// 节点切断回边成为根，挂在环下的节点保留原父子关系。深度不设上限，遍历是迭代的。
 fn into_tree_order(mut nodes: Vec<SnapshotNode>) -> Vec<SnapshotNode> {
     let index: HashMap<String, usize> = nodes
         .iter()
@@ -376,27 +376,45 @@ fn into_tree_order(mut nodes: Vec<SnapshotNode>) -> Vec<SnapshotNode> {
             entry.node.parent_id = None;
         }
     }
+    let parents: Vec<Option<usize>> = nodes
+        .iter()
+        .map(|entry| {
+            entry
+                .node
+                .parent_id
+                .as_ref()
+                .and_then(|id| index.get(id))
+                .copied()
+        })
+        .collect();
     let mut children = vec![Vec::new(); nodes.len()];
-    for (position, entry) in nodes.iter().enumerate() {
-        if let Some(&parent) = entry.node.parent_id.as_ref().and_then(|id| index.get(id)) {
+    for (position, parent) in parents.iter().enumerate() {
+        if let Some(parent) = *parent {
             children[parent].push(position);
         }
     }
 
     let roots: Vec<usize> = (0..nodes.len())
-        .filter(|&position| nodes[position].node.parent_id.is_none())
+        .filter(|&position| parents[position].is_none())
         .collect();
     let mut visited = vec![false; nodes.len()];
     let mut order = Vec::with_capacity(nodes.len());
     let mut cut = Vec::new();
-    // 第二轮只会遇到环上（或挂在环下）的节点。
+    let mut path_step = vec![usize::MAX; nodes.len()];
+    let mut path = Vec::new();
+    // 第二轮只会遇到环上（或挂在环下）的节点：从根出发的一轮已访问全部可达节点，
+    // 未访问节点的父节点也必然未访问，沿父链上溯终会回到自己走过的环。
     for start in roots.into_iter().chain(0..nodes.len()) {
         if visited[start] {
             continue;
         }
-        if nodes[start].node.parent_id.is_some() {
-            cut.push(start);
-        }
+        let start = if parents[start].is_some() {
+            let head = cycle_head(&parents, start, &mut path_step, &mut path);
+            cut.push(head);
+            head
+        } else {
+            start
+        };
         let mut stack = vec![start];
         while let Some(position) = stack.pop() {
             if visited[position] {
@@ -422,6 +440,35 @@ fn into_tree_order(mut nodes: Vec<SnapshotNode>) -> Vec<SnapshotNode> {
         .into_iter()
         .filter_map(|position| slots[position].take())
         .collect()
+}
+
+/// 从 `start` 沿父链上溯直到走回已走过的节点，返回该环上快照位置最小（最先出现）
+/// 的节点。`path_step` / `path` 是调用方复用的暂存区，返回前复原。
+fn cycle_head(
+    parents: &[Option<usize>],
+    start: usize,
+    path_step: &mut [usize],
+    path: &mut Vec<usize>,
+) -> usize {
+    let mut position = start;
+    let cycle_from = loop {
+        if path_step[position] != usize::MAX {
+            break path_step[position];
+        }
+        path_step[position] = path.len();
+        path.push(position);
+        match parents[position] {
+            Some(parent) => position = parent,
+            // 上溯到了根：调用约定下不会发生，按「本节点即切断点」兜底。
+            None => break path.len() - 1,
+        }
+    };
+    let head = path[cycle_from..].iter().copied().min().unwrap_or(start);
+    for &step in path.iter() {
+        path_step[step] = usize::MAX;
+    }
+    path.clear();
+    head
 }
 
 fn parse_cursor(cursor: &str) -> Result<u64, SourceError> {
@@ -771,6 +818,94 @@ mod tests {
             node(&nodes, "call_cycle_b").parent_id.as_deref(),
             Some("call_cycle_a")
         );
+    }
+
+    /// 挂在环下的节点先于环出现时，只切断环上最先出现的节点；挂在下面的节点保留
+    /// 原父节点，不被当成切断点挂到根。
+    #[test]
+    fn a_cycle_is_cut_at_its_first_node_and_keeps_what_hangs_below() {
+        let snapshot = |nodes: &[String]| {
+            format!(
+                "{{\"type\":\"herdr.activity.snapshot\",\"version\":1,\"nodes\":[{}]}}",
+                nodes.join(",")
+            )
+        };
+        let entry = |id: &str, parent: &str| {
+            format!(
+                "{{\"id\":\"{id}\",\"kind\":\"subagent\",\"status\":\"running\",\"parent_id\":\"{parent}\"}}"
+            )
+        };
+        let parents = |nodes: &[AgentActivityNode]| {
+            nodes
+                .iter()
+                .map(|node| (node.id.clone(), node.parent_id.clone()))
+                .collect::<Vec<_>>()
+        };
+        let some = |id: &str| Some(id.to_owned());
+
+        // below 挂在 a 下，先于环 a ⇄ b 出现。
+        let nodes = discover(&snapshot(&[
+            entry("below", "a"),
+            entry("a", "b"),
+            entry("b", "a"),
+        ]));
+        assert_eq!(
+            parents(&nodes),
+            [
+                ("a".to_owned(), None),
+                ("below".to_owned(), some("a")),
+                ("b".to_owned(), some("a")),
+            ],
+            "环在最先出现的 a 处切断，below 仍挂在 a 下"
+        );
+
+        // 环上最先出现的是 b（a 在它之后）：切断 b，a 与挂在 b 下的 x 都保留父节点。
+        let nodes = discover(&snapshot(&[
+            entry("x", "b"),
+            entry("b", "a"),
+            entry("a", "b"),
+        ]));
+        assert_eq!(
+            parents(&nodes),
+            [
+                ("b".to_owned(), None),
+                ("x".to_owned(), some("b")),
+                ("a".to_owned(), some("b")),
+            ]
+        );
+
+        // 更长的链挂在三节点环下：只有环头变成根，其余父子关系不变且父先子后。
+        let nodes = discover(&snapshot(&[
+            entry("leaf", "mid"),
+            entry("mid", "c2"),
+            entry("c1", "c3"),
+            entry("c2", "c1"),
+            entry("c3", "c2"),
+        ]));
+        let roots: Vec<&str> = nodes
+            .iter()
+            .filter(|node| node.parent_id.is_none())
+            .map(|node| node.id.as_str())
+            .collect();
+        assert_eq!(roots, ["c1"]);
+        assert_eq!(node(&nodes, "mid").parent_id, some("c2"));
+        assert_eq!(node(&nodes, "leaf").parent_id, some("mid"));
+        assert_eq!(node(&nodes, "c3").parent_id, some("c2"));
+        let position = |id: &str| {
+            nodes
+                .iter()
+                .position(|node| node.id == id)
+                .expect("节点在快照里")
+        };
+        for node in &nodes {
+            if let Some(parent) = &node.parent_id {
+                assert!(
+                    position(parent) < position(&node.id),
+                    "父先子后：{}",
+                    node.id
+                );
+            }
+        }
     }
 
     #[test]
