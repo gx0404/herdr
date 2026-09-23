@@ -4017,11 +4017,21 @@ impl ClientShellState {
                     self.observation_action(Action::CardMove(card, delta), outcome);
                     return true;
                 }
-                let card = card.clone();
-                let delta = if key.code == KeyCode::Down { 1 } else { -1 };
-                self.observability.scroll_card(&card, delta);
-                outcome.repaint = true;
-                return true;
+                // 与滚轮同口径：卡片内容放得下（上界 0）或根本不可滚（CPU / 内存卡、
+                // 上一帧没画出内容）时落到下面的页面滚动，否则选中这类卡片后 ↑↓
+                // 空转、页面不动。
+                if self
+                    .observability
+                    .card_scroll_limits
+                    .get(card)
+                    .is_some_and(|limit| limit > 0)
+                {
+                    let card = card.clone();
+                    let delta = if key.code == KeyCode::Down { 1 } else { -1 };
+                    self.observability.scroll_card(&card, delta);
+                    outcome.repaint = true;
+                    return true;
+                }
             }
         }
         // 键盘只在页面命中区（`hits[..page_hits]`）内循环；悬浮层与页面同帧时
