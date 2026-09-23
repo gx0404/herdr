@@ -2310,6 +2310,26 @@ fn preview_flags_invalid_field_values_instead_of_showing_them_as_if_valid() {
     assert!(found_red_port, "预览里的非法端口值应该标红");
 }
 
+/// L10：窄宽度下添加表单的页脚固定只有一行，放不下的项被直接丢掉而不是
+/// 换到下一行——`esc 返回` 消失了。页脚应该跟列表页一样按宽度换行。
+#[test]
+fn narrow_add_form_footer_wraps_instead_of_dropping_the_back_hint() {
+    let mut state = state_with_profiles(&[]);
+    state.open_machine_add_form();
+    let t = &crate::i18n::texts().machines;
+    let footer = compact(&machines_footer_text(&mut state, 62, 32));
+    assert!(
+        footer.contains(&compact(t.hint_back)),
+        "窄宽度下「esc 返回」不该被丢掉：{footer}"
+    );
+    assert!(footer.contains("esc"), "「esc」键帽也不该被丢掉：{footer}");
+    // 页脚确实换成了不止一行（否则这条测试没测到东西）。
+    assert!(
+        state.hits.machines_footer.height > 1,
+        "62 列下页脚应该换行，不能还是 1 行"
+    );
+}
+
 #[test]
 fn single_field_validators_cover_each_rule() {
     let taken = profile("Build", "build.example", "71");
@@ -2797,8 +2817,13 @@ fn form_footer_puts_actions_first_and_drops_navigation_keys_first() {
     let esc = choice.find(" esc ").expect("esc 提示");
     assert!(esc < tab && tab < arrows, "{choice}");
 
-    let mut navigation_dropped_first = false;
-    for cols in (50..=140).rev() {
+    // L10：页脚按宽度换行而不是把放不下的项丢掉，所以窄宽度下「esc 返回」
+    // 与导航键应该都还在（换到下一行），不再是「先丢导航键」。
+    let mut wrapped_to_multiple_rows = false;
+    for cols in (30..=140).rev() {
+        if state.compose(cols, 40).is_none() {
+            continue;
+        }
         let footer = machines_footer_text(&mut state, cols, 40);
         let has_navigation = footer.contains(" tab ") || footer.contains(" ←→ ");
         let has_back = machine_buttons(&state).contains(&MachineOverlayButton::Back);
@@ -2806,9 +2831,13 @@ fn form_footer_puts_actions_first_and_drops_navigation_keys_first() {
             !has_navigation || has_back,
             "{cols} 列：导航键不能比「esc 返回」留得久：{footer}"
         );
-        navigation_dropped_first |= has_back && !has_navigation;
+        assert!(
+            has_navigation,
+            "{cols} 列：导航键不该被丢掉，应该换到下一行：{footer}"
+        );
+        wrapped_to_multiple_rows |= state.hits.machines_footer.height > 1;
     }
-    assert!(navigation_dropped_first, "扫描应覆盖只丢导航键的宽度");
+    assert!(wrapped_to_multiple_rows, "扫描应覆盖触发换行的宽度");
 }
 
 /// 在临时状态目录里落一条档案并读回（带目录分配的真实 id）。
@@ -3389,6 +3418,45 @@ fn empty_machine_list_uses_the_empty_state_with_an_add_action() {
     let text = compact(&frame_text(&mut state, 80, 30));
     assert!(text.contains(&compact(t.no_matches)), "{text}");
     assert!(!text.contains(&compact(t.empty)), "{text}");
+}
+
+/// L9：空列表没有可选中 / 查看详情的行，页脚「↑↓ 选择」「enter 详情」应该
+/// 置灰，不能和「esc 关闭」「a 添加」这些真的可点的项同一个亮度。
+#[test]
+fn empty_machine_list_footer_greys_out_selection_and_details_hints() {
+    let t = &crate::i18n::texts().machines;
+    let mut state = state_with_profiles(&[]);
+    state.open_machines_overlay();
+    let frame = state.compose(80, 30).expect("空列表机器页");
+    let footer = state.hits.machines_footer;
+    let width = usize::from(frame.width);
+    let footer_row: Vec<&crate::protocol::CellData> = (footer.y..footer.bottom())
+        .flat_map(|y| {
+            let row = &frame.cells[usize::from(y) * width..usize::from(y) * width + width];
+            row[usize::from(footer.x)..].iter()
+        })
+        .collect();
+    let footer_text: String = footer_row.iter().map(|c| c.symbol.as_str()).collect();
+    assert!(
+        compact(&footer_text).contains(&compact(t.hint_select)),
+        "页脚应该有「↑↓ 选择」：{footer_text}"
+    );
+
+    let disabled_bg = crate::protocol::color_to_u32(state.config.palette.surface_dim);
+    let enabled_bg = crate::protocol::color_to_u32(state.config.palette.surface0);
+    // 每个 cell 在拼接串里贡献恰好一个字符（宽字符续格是单个空格），字节
+    // 偏移量按字符数换算成 cell 下标即可，不能直接当字节下标用。
+    let cell_index_of = |byte_offset: usize| footer_text[..byte_offset].chars().count();
+    let select_key_at = cell_index_of(footer_text.find('↑').expect("↑↓ 键帽位置"));
+    let close_key_at = cell_index_of(footer_text.find("esc").expect("esc 关闭键帽位置"));
+    assert_eq!(
+        footer_row[select_key_at].bg, disabled_bg,
+        "「↑↓」键帽空列表下应该置灰：{footer_text}"
+    );
+    assert_eq!(
+        footer_row[close_key_at].bg, enabled_bg,
+        "「esc」仍然可点，不该被一起置灰：{footer_text}"
+    );
 }
 
 /// 端口转发没有规则时同样用空状态，主按钮直接进入添加表单；`x 移除` 置灰。

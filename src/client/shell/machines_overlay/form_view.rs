@@ -88,9 +88,17 @@ fn prompt_rows(prompt: FormPrompt, width: u16) -> u16 {
 }
 
 pub(super) fn form_layout(inner: Rect, form: &ClientMachineForm) -> FormLayout {
+    // 页脚按实际宽度换行，最多三行——与机器列表页同一口径（L10：窄宽度下
+    // 固定一行会把放不下的项（「esc 返回」）直接丢掉，而不是换到下一行）。
+    let footer_rows = super::footer::machine_footer_height(&form_hints(form), inner.width, 3);
     let mut layout = FormLayout {
         header: Rect::new(inner.x, inner.y, inner.width, 1),
-        footer: Rect::new(inner.x, inner.bottom().saturating_sub(1), inner.width, 1),
+        footer: Rect::new(
+            inner.x,
+            inner.bottom().saturating_sub(footer_rows),
+            inner.width,
+            footer_rows,
+        ),
         ..FormLayout::default()
     };
     let mut bottom = layout.footer.y;

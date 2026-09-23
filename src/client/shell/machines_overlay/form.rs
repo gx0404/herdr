@@ -376,12 +376,16 @@ pub(super) fn test_recovery(kind: &crate::remote::ConnectionErrorKind) -> Option
     match kind {
         Kind::HostKeyUnknown { .. } => Some(TestRecovery::HostKey),
         Kind::HostKeyChanged => Some(TestRecovery::HostKeyChanged),
-        Kind::AuthRequired { .. } | Kind::AuthDenied | Kind::Other => Some(TestRecovery::Auth),
+        // 认证被拒或需要认证：交互认证仍是有意义的恢复动作。`Other` 是完全
+        // 未归类的失败，和 `machine_auth_overlay::failure_kind_has_review`
+        // 一样不给交互入口，只留修复提示与独立命令（C3）。
+        Kind::AuthRequired { .. } | Kind::AuthDenied => Some(TestRecovery::Auth),
         Kind::Dns
         | Kind::Timeout
         | Kind::RemoteInstallRequired
         | Kind::RemoteInstallFailed
-        | Kind::Protocol => None,
+        | Kind::Protocol
+        | Kind::Other => None,
     }
 }
 
@@ -1595,5 +1599,57 @@ impl ClientShellState {
         let index =
             super::super::form::char_index_at_column(editor.as_str(), cursor, rect.width, column);
         editor.set_cursor_char_index(index);
+    }
+}
+
+#[cfg(test)]
+mod recovery_tests {
+    use super::*;
+    use crate::remote::ConnectionErrorKind as Kind;
+
+    /// C3：`Other` 是完全未归类的失败，和 `machine_auth_overlay::
+    /// failure_kind_has_review` 一样不给交互恢复入口——只留修复提示与
+    /// 独立命令，不假装「走一遍交互认证」就能解决一个连原因都不知道的
+    /// 失败。
+    #[test]
+    fn other_failures_get_no_interactive_recovery_route() {
+        assert_eq!(test_recovery(&Kind::Other), None);
+    }
+
+    /// `AuthDenied` 是「凭据被明确拒绝」，交互认证仍是有意义的恢复动作
+    /// （重新走一遍密码/密钥问答可能就通过了），与 `Other` 不同，保持
+    /// `Auth` 分支；这里钉住这个决定，避免以后顺手把它和 `Other` 一起
+    /// 挪走。
+    #[test]
+    fn auth_denied_keeps_the_interactive_auth_recovery_route() {
+        assert_eq!(test_recovery(&Kind::AuthDenied), Some(TestRecovery::Auth));
+    }
+
+    #[test]
+    fn known_recoverable_kinds_are_unaffected() {
+        assert_eq!(
+            test_recovery(&Kind::HostKeyUnknown { fingerprint: None }),
+            Some(TestRecovery::HostKey)
+        );
+        assert_eq!(
+            test_recovery(&Kind::HostKeyChanged),
+            Some(TestRecovery::HostKeyChanged)
+        );
+        assert_eq!(
+            test_recovery(&Kind::AuthRequired {
+                methods: Vec::new(),
+                identity_file: None,
+            }),
+            Some(TestRecovery::Auth)
+        );
+        for kind in [
+            Kind::Dns,
+            Kind::Timeout,
+            Kind::RemoteInstallRequired,
+            Kind::RemoteInstallFailed,
+            Kind::Protocol,
+        ] {
+            assert_eq!(test_recovery(&kind), None, "{kind:?}");
+        }
     }
 }

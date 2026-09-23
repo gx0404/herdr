@@ -41,9 +41,21 @@ pub(super) fn machine_list_hints(
     reconnect_enabled: bool,
 ) -> Vec<MachineHint<'static>> {
     let t = &crate::i18n::texts().machines;
+    // 空列表没有可选中 / 查看详情的行：「↑↓ 选择」「enter 详情」置灰，不
+    // 显示成和「esc 关闭」「a 添加」一样可点却什么都不会发生（L9）。
+    let select = MachineHint::key("↑↓", t.hint_select);
+    let details = MachineHint::key("enter", t.hint_details);
     let mut hints = vec![
-        MachineHint::key("↑↓", t.hint_select),
-        MachineHint::key("enter", t.hint_details),
+        if has_selection {
+            select
+        } else {
+            select.disabled()
+        },
+        if has_selection {
+            details
+        } else {
+            details.disabled()
+        },
         MachineHint::key("/", t.hint_filter),
         MachineHint::button("esc", t.hint_close, MachineOverlayButton::Close),
         MachineHint::button("b", t.hint_broadcast, MachineOverlayButton::Broadcast),
