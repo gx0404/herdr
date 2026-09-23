@@ -10,7 +10,7 @@ mod cards;
 mod paint;
 mod slots;
 
-use paint::{account_cards, dashboard_rows};
+use paint::{account_cards, dashboard_rows, multi_vendor, overview_cards};
 
 /// 两种显示模式统一的已用百分比：官方 `used_percent` 优先，否则由 `used/limit`
 /// 推算（ACC-20）。只夹下限、不夹上限：`spend_limit` 超限后可大于 100，原样
@@ -748,7 +748,8 @@ pub(super) fn accounts(
 }
 
 /// 账号正文：空态（kit `empty_state`），或厂商专属卡片 / 表格（≥96 列时右栏显示
-/// 所选账号的详情）；强意图刷新在途时整块变暗。页面与 agent 行悬浮层共用。
+/// 所选账号的详情）；页面的跨厂商总览在仪表盘格式下是每厂商一张紧凑卡。强意图
+/// 刷新在途时整块变暗。页面与 agent 行悬浮层共用（悬浮层 ≤68×17，卡片按视口封顶）。
 pub(super) fn accounts_content(
     buffer: &mut Buffer,
     area: Rect,
@@ -780,25 +781,36 @@ pub(super) fn accounts_content(
         crate::ui::kit::empty_state::render_empty_state(buffer, area, &spec, palette);
         return;
     }
-    let (main, detail) = if area.width >= 96 {
-        let [main, detail] =
-            Layout::horizontal([Constraint::Min(40), Constraint::Length(30)]).areas(area);
-        (main, Some(detail))
+    let dashboard = state.usage.format == UsageDisplayFormat::Dashboard;
+    if dashboard && is_overview(scope) && multi_vendor(scope.accounts) {
+        overview_cards(buffer, area, state, scope, palette, hits);
     } else {
-        (area, None)
-    };
-    if state.usage.format == UsageDisplayFormat::Table {
-        usage_table(buffer, main, state, scope, palette, hits);
-    } else {
-        account_cards(buffer, main, state, scope, palette, hits);
-    }
-    if let Some(detail) = detail {
-        account_detail(buffer, detail, state, scope, palette);
+        let (main, detail) = if area.width >= 96 {
+            let [main, detail] =
+                Layout::horizontal([Constraint::Min(40), Constraint::Length(30)]).areas(area);
+            (main, Some(detail))
+        } else {
+            (area, None)
+        };
+        if dashboard {
+            account_cards(buffer, main, state, scope, palette, hits);
+        } else {
+            usage_table(buffer, main, state, scope, palette, hits);
+        }
+        if let Some(detail) = detail {
+            account_detail(buffer, detail, state, scope, palette);
+        }
     }
     if scope.refreshing {
         // 切换厂商 / 账号后旧快照保留但变暗，直到新数据到达。
         buffer.set_style(area, Style::default().add_modifier(Modifier::DIM));
     }
+}
+
+/// 页面的跨厂商总览：页面作用域且没选厂商（悬浮层总有自己的厂商）。仪表盘格式下
+/// 有两个及以上厂商时画每厂商一张紧凑卡（`paint::multi_vendor`）。
+fn is_overview(scope: &AccountsScope<'_>) -> bool {
+    scope.chrome == BodyChrome::Page && scope.provider.is_none()
 }
 
 /// 右栏详情（≥96 列）：所选账号（否则第一个）的认证方式 / 厂商 / 来源 / 窗口 /
@@ -1378,8 +1390,11 @@ pub(super) fn usage_table(
     .render(area, buffer);
 }
 
-/// 账号正文的滚动真源（行数）：表格每指标一行，仪表盘是逐账号卡片的自然高度
-/// （`paint::dashboard_rows`）。页面与悬浮层共用；渲染期再按视口钳位。
+/// 账号正文的滚动真源（行数）：表格每指标一行；仪表盘见 `paint::dashboard_rows`
+/// （多厂商概览是每厂商一张紧凑卡的网格，否则逐账号卡片的自然高度）。页面与
+/// 悬浮层共用同一个入口：传进来的就是页面的 `state.accounts`（按切片身份判定，
+/// 悬浮层的账号在自己的 `hover_scope` 里）且没选厂商时才按概览算，与
+/// `accounts_content` 的判据一致。渲染期再按视口钳位。
 pub(in crate::client::shell::observability) fn account_rows(
     state: &State,
     accounts: &[AccountUsageSnapshot],
@@ -1391,5 +1406,10 @@ pub(in crate::client::shell::observability) fn account_rows(
             .map(|account| account.metrics.len().max(1))
             .sum();
     }
-    dashboard_rows(accounts, refresh_states, state.now_ms)
+    let page_overview = state.selected_provider.is_none()
+        && std::ptr::eq(accounts, state.accounts.as_slice())
+        && multi_vendor(accounts);
+    // 概览列数按上一帧页面正文宽度（页面矩形去掉左右边框）算，与渲染同口径。
+    let overview_width = page_overview.then(|| state.page_rect.width.saturating_sub(2));
+    dashboard_rows(accounts, refresh_states, state.now_ms, overview_width)
 }

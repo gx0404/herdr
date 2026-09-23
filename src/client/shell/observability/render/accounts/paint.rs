@@ -1,17 +1,32 @@
 //! 账号卡片的绘制：kit `card` 外框 + `meter_row` / `gauge` 额度行 + 数值项行，
-//! 按行滚动并裁剪到视口。只读状态，命中区由调用方收集。
+//! 按行滚动并裁剪到视口；卡片比视口高时只画前 N 行、在下边框写「+N」。概览
+//! （全部厂商）每厂商一张紧凑卡，≥96 列双栏。只读状态，命中区由调用方收集。
 
 use std::borrow::Cow;
 
-use super::cards::{build_card, Card, Family, Line, Meter, Stat, Tone};
+use super::cards::{
+    build_card, family, headline, vendor_groups, Card, Family, Line, Meter, Stat, Tone, VendorGroup,
+};
 use super::*;
 use crate::ui::kit::card::{render_card, CardSpec};
 use crate::ui::kit::empty_state::{render_empty_state, EmptyState};
 use crate::ui::kit::gauge::GaugeSpec;
 use crate::ui::kit::meter_row::{render_meter_row, MeterRow};
 
+/// 概览紧凑卡的高度：上下边框 + 首行（最紧张的额度）+ 汇总行。
+pub(super) const OVERVIEW_CARD_HEIGHT: usize = 4;
+
 /// 账号卡片的卡头行数（上边框标题行 + 状态行），即「选中该账号」的命中区高度。
 const CARD_HEADER_ROWS: u16 = 2;
+
+/// 概览的列数：≥96 列双栏。
+pub(super) fn overview_columns(width: u16) -> usize {
+    if width >= 96 {
+        2
+    } else {
+        1
+    }
+}
 
 /// 绘制期共用的只读输入。
 #[derive(Clone, Copy)]
@@ -394,8 +409,25 @@ fn badge(
     }
 }
 
+/// 画在下边框右侧的「+N」：卡片高度不够，还有 N 行没画。
+fn hidden_marker(buffer: &mut Buffer, rect: Rect, hidden: usize, palette: &Palette) {
+    let label = format!(" +{hidden} ");
+    let width = crate::ui::display_width_u16(&label);
+    if rect.width < width + 4 || rect.height < 2 {
+        return;
+    }
+    put(
+        buffer,
+        rect.right() - 2 - width,
+        rect.bottom() - 1,
+        width,
+        &label,
+        Style::default().fg(palette.overlay1).bg(palette.panel_bg),
+    );
+}
+
 /// 画一张账号卡片：标题是账号标签、徽标是状态或统计声明，选中的卡片边框取
-/// accent。
+/// accent；`rect` 比全部行矮时只画前 N 行，下边框写「+N」。
 fn paint_card(
     buffer: &mut Buffer,
     rect: Rect,
@@ -419,23 +451,43 @@ fn paint_card(
         paint.glyphs,
         paint.palette,
     );
-    let columns = MeterColumns::of(&card.lines);
-    for (index, line) in card
-        .lines
-        .iter()
-        .take(usize::from(inner.height))
-        .enumerate()
-    {
+    let visible = usize::from(inner.height);
+    let columns = MeterColumns::of(card.lines.iter().take(visible));
+    for (index, line) in card.lines.iter().take(visible).enumerate() {
         let row = Rect::new(inner.x, inner.y + index as u16, inner.width, 1);
         match line {
             Line::Meta => meta_line(buffer, row, card, in_flight, paint),
             other => body_line(buffer, row, other, columns, paint),
         }
     }
+    let hidden = card.lines.len().saturating_sub(visible);
+    if hidden > 0 {
+        hidden_marker(buffer, rect, hidden, paint.palette);
+    }
+}
+
+/// 卡片画多高。页面上是自然高度（按行滚动能看到每一条额度）；悬浮层（≤68×17，
+/// 另有「打开页面」）里一张卡不超过视口高度（至少 3 行，放得下边框 + 状态行），
+/// 多出的行折成下边框上的「+N」。
+fn card_height(card: &Card<'_>, viewport: Rect, chrome: BodyChrome) -> usize {
+    let natural = card.natural_height().min(usize::from(u16::MAX));
+    match chrome {
+        BodyChrome::Page => natural,
+        BodyChrome::Hover => natural.min(usize::from(viewport.height).max(3)),
+    }
+}
+
+/// 概览是否画成每厂商一张紧凑卡：只有一个厂商时紧凑卡没有信息增量，直接画该
+/// 厂商的账号卡片。不分配。
+pub(super) fn multi_vendor(accounts: &[AccountUsageSnapshot]) -> bool {
+    accounts
+        .first()
+        .is_some_and(|first| accounts.iter().any(|account| account.agent != first.agent))
 }
 
 /// 账号卡片列表：每账号一张厂商专属卡（`cards::build_card`），按行滚动并裁剪到
-/// 视口；点卡头选中该账号。返回全部卡片的总行数，与 `account_rows` 同口径。
+/// 视口；点卡头选中该账号。返回全部卡片的总行数，页面上与 `account_rows` 同口径
+/// （悬浮层里卡片按视口封顶，实际行数可能更少，滚动在渲染期再钳位）。
 pub(super) fn account_cards(
     buffer: &mut Buffer,
     area: Rect,
@@ -458,7 +510,10 @@ pub(super) fn account_cards(
         .iter()
         .map(|account| build_card(account, scope.refresh_of(&account.account_id), state.now_ms))
         .collect::<Vec<_>>();
-    let heights = cards.iter().map(Card::natural_height).collect::<Vec<_>>();
+    let heights = cards
+        .iter()
+        .map(|card| card_height(card, area, scope.chrome))
+        .collect::<Vec<_>>();
     let total = heights.iter().sum::<usize>();
     let start = scope
         .scroll
@@ -500,13 +555,157 @@ pub(super) fn account_cards(
     total
 }
 
-/// 仪表盘格式下的滚动真源（行数）：逐账号的卡片自然高度，与 `account_cards`
-/// 同口径。
+/// 概览紧凑卡的汇总行：（徽标没写状态时）状态 · 账号数 · 最近更新。
+fn overview_summary(
+    buffer: &mut Buffer,
+    rect: Rect,
+    group: &VendorGroup<'_>,
+    worst: ObservationStatus,
+    paint: Paint<'_>,
+) {
+    let texts = &crate::i18n::texts().monitor;
+    let palette = paint.palette;
+    let mut parts: Vec<(Cow<'_, str>, Style)> = Vec::with_capacity(3);
+    if family(group.agent) != Family::Quota {
+        parts.push((
+            Cow::Borrowed(status(worst)),
+            Style::default()
+                .fg(status_color(worst, palette))
+                .add_modifier(Modifier::BOLD),
+        ));
+    }
+    let count = group.accounts.len();
+    parts.push((
+        if count == 1 {
+            Cow::Borrowed(texts.account_one)
+        } else {
+            Cow::Owned(crate::i18n::fill(
+                texts.accounts_fmt,
+                &[("n", &count.to_string())],
+            ))
+        },
+        Style::default().fg(palette.overlay1),
+    ));
+    let latest = group.latest_ms();
+    parts.push((
+        Cow::Owned(age_text(paint.now_ms, latest, worst)),
+        Style::default().fg(age_color(paint.now_ms, latest, worst, palette)),
+    ));
+    spans(buffer, rect, &parts, palette);
+}
+
+/// 概览（全部厂商、仪表盘格式）：每厂商一张紧凑卡——首行是最紧张的一条额度
+/// meter（本地 / 会话统计是关键数值），次行是状态与更新时间；≥96 列双栏。点卡片
+/// 进入该厂商。返回总行数，与 `account_rows` 同口径。
+pub(super) fn overview_cards(
+    buffer: &mut Buffer,
+    area: Rect,
+    state: &State,
+    scope: &AccountsScope<'_>,
+    palette: &Palette,
+    hits: &mut Vec<(Rect, Action)>,
+) -> usize {
+    if area.is_empty() {
+        return 0;
+    }
+    let paint = Paint {
+        palette,
+        glyphs: state.glyphs,
+        ascii: state.chart_glyphs.ascii(),
+        now_ms: state.now_ms,
+    };
+    let groups = vendor_groups(scope.accounts);
+    let columns = overview_columns(area.width);
+    let grid_rows = groups.len().div_ceil(columns);
+    let total = grid_rows * OVERVIEW_CARD_HEIGHT;
+    let start = scope
+        .scroll
+        .min(total.saturating_sub(usize::from(area.height)));
+    let gap = u16::from(columns > 1);
+    let column_width = (area.width - gap) / columns as u16;
+    for (index, group) in groups.iter().enumerate() {
+        let top = (index / columns * OVERVIEW_CARD_HEIGHT) as i32 - start as i32;
+        if top + OVERVIEW_CARD_HEIGHT as i32 <= 0 || top >= i32::from(area.height) {
+            continue;
+        }
+        let column = (index % columns) as u16;
+        let x = area.x + column * (column_width + gap);
+        // 末列吃掉除不尽的余数，双栏右缘与页面对齐。
+        let width = if column + 1 == columns as u16 {
+            area.right() - x
+        } else {
+            column_width
+        };
+        let label = state
+            .providers
+            .iter()
+            .find(|provider| provider.agent == group.agent)
+            .map_or(group.agent, |provider| provider.label.as_str());
+        let worst = group.worst_status();
+        let (badge_text, badge_color) = badge(family(group.agent), worst, palette);
+        let line = headline(group, state.now_ms);
+        draw_clipped(
+            buffer,
+            area,
+            x,
+            top,
+            width,
+            OVERVIEW_CARD_HEIGHT as u16,
+            |buffer, rect| {
+                let inner = render_card(
+                    buffer,
+                    rect,
+                    &CardSpec {
+                        title: label,
+                        badge: Some((badge_text, badge_color)),
+                        ..CardSpec::default()
+                    },
+                    paint.glyphs,
+                    paint.palette,
+                );
+                if inner.height >= 1 {
+                    body_line(
+                        buffer,
+                        Rect::new(inner.x, inner.y, inner.width, 1),
+                        &line,
+                        MeterColumns::default(),
+                        paint,
+                    );
+                }
+                if inner.height >= 2 {
+                    overview_summary(
+                        buffer,
+                        Rect::new(inner.x, inner.y + 1, inner.width, 1),
+                        group,
+                        worst,
+                        paint,
+                    );
+                }
+            },
+        );
+        let visible = visible_rect(area, x, top, width, OVERVIEW_CARD_HEIGHT as u16);
+        if !visible.is_empty() {
+            hits.push((visible, Action::Provider(group.agent.to_owned())));
+        }
+    }
+    total
+}
+
+/// 仪表盘格式下的滚动真源（行数）：概览按紧凑卡网格（列数取上一帧页面宽度），
+/// 否则逐账号的卡片自然高度。与 `account_cards` / `overview_cards` 同口径；卡片被
+/// 视口封顶时实际行数更少，渲染期再按实际行数钳位。
 pub(super) fn dashboard_rows(
     accounts: &[AccountUsageSnapshot],
     refresh_states: &[UsageRefreshState],
     now_ms: u64,
+    overview_width: Option<u16>,
 ) -> usize {
+    if let Some(width) = overview_width {
+        return vendor_groups(accounts)
+            .len()
+            .div_ceil(overview_columns(width))
+            * OVERVIEW_CARD_HEIGHT;
+    }
     accounts
         .iter()
         .map(|account| {
@@ -629,6 +828,55 @@ mod tests {
         // 视口外一行不写。
         assert!(row_text(&buffer, area.bottom()).trim().is_empty());
         assert!(row_text(&buffer, area.y - 1).trim().is_empty());
+    }
+
+    /// 多厂商概览：紧凑卡网格的行数与滚动真源一致（列数取上一帧页面宽度）；
+    /// 单厂商时不画紧凑卡。
+    #[test]
+    fn overview_rows_follow_the_grid_and_single_vendor_uses_cards() {
+        let mut state = State::new(&config());
+        state.now_ms = 14_000;
+        state.accounts = vec![
+            account("claude", "claude:default", ObservationStatus::Ready),
+            account("codex", "codex:default", ObservationStatus::Ready),
+            account("kimi", "kimi:default", ObservationStatus::Error),
+        ];
+        for (page_width, columns) in [(122_u16, 2_usize), (80, 1)] {
+            state.page_rect = Rect::new(0, 0, page_width, 40);
+            let area = Rect::new(0, 0, page_width - 2, 30);
+            let scope = page_scope(&state);
+            let mut buffer = Buffer::empty(area);
+            let mut hits = Vec::new();
+            let rows = overview_cards(
+                &mut buffer,
+                area,
+                &state,
+                &scope,
+                &config().palette,
+                &mut hits,
+            );
+            assert_eq!(rows, 3_usize.div_ceil(columns) * OVERVIEW_CARD_HEIGHT);
+            assert_eq!(
+                rows,
+                account_rows(&state, &state.accounts, &state.refresh_states)
+            );
+            assert_eq!(hits.len(), 3, "每厂商一张可点的紧凑卡");
+        }
+        assert!(multi_vendor(&state.accounts));
+        state.accounts.truncate(1);
+        assert!(!multi_vendor(&state.accounts));
+        assert_eq!(
+            account_rows(&state, &state.accounts, &state.refresh_states),
+            5,
+            "单厂商按账号卡片计行"
+        );
+        // 悬浮层的账号不按概览算（切片不是页面的 `accounts`）。
+        let hover = state.accounts.clone();
+        state.accounts = vec![
+            account("claude", "claude:default", ObservationStatus::Ready),
+            account("codex", "codex:default", ObservationStatus::Ready),
+        ];
+        assert_eq!(account_rows(&state, &hover, &[]), 5);
     }
 
     /// 数值项：数字永不截断，列宽不够先截再丢标签。

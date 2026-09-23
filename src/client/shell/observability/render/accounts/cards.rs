@@ -1,5 +1,5 @@
 //! 账号卡片的内容模型：每个账号按 `account.agent` 分派到厂商专属排布，产出一组
-//! 与宽度无关的卡片行（行数即滚动真源）。
+//! 与宽度无关的卡片行（行数即滚动真源）；概览（全部厂商）每厂商一张紧凑卡。
 //! 只算不画，绘制在 `paint.rs`。
 
 use std::borrow::Cow;
@@ -631,6 +631,46 @@ pub(super) fn build_card<'a>(
     }
 }
 
+/// 概览里的一个厂商：按账号在作用域里首次出现的顺序排。
+pub(super) struct VendorGroup<'a> {
+    pub agent: &'a str,
+    pub accounts: Vec<&'a AccountUsageSnapshot>,
+}
+
+impl VendorGroup<'_> {
+    /// 该厂商已加载账号里最需要注意的状态（与厂商 chip 的圆点同一口径）。
+    pub(super) fn worst_status(&self) -> ObservationStatus {
+        self.accounts
+            .iter()
+            .map(|account| account.status)
+            .max_by_key(|status| status_severity(*status))
+            .unwrap_or_default()
+    }
+
+    /// 最近一次观测时刻（0 = 从未更新）。
+    pub(super) fn latest_ms(&self) -> u64 {
+        self.accounts
+            .iter()
+            .map(|account| account.observed_at_ms)
+            .max()
+            .unwrap_or(0)
+    }
+}
+
+pub(super) fn vendor_groups(accounts: &[AccountUsageSnapshot]) -> Vec<VendorGroup<'_>> {
+    let mut groups: Vec<VendorGroup<'_>> = Vec::new();
+    for account in accounts {
+        match groups.iter_mut().find(|group| group.agent == account.agent) {
+            Some(group) => group.accounts.push(account),
+            None => groups.push(VendorGroup {
+                agent: &account.agent,
+                accounts: vec![account],
+            }),
+        }
+    }
+    groups
+}
+
 /// 额度槽位的显示标签：codex 主 / 次窗口知道长度时写「5h 窗口」，未进匹配表的
 /// 指标用服务端标签。
 fn quota_label<'a>(slot: Option<Slot>, metric: &'a UsageMetric, cx: Cx) -> Cow<'a, str> {
@@ -647,6 +687,90 @@ fn quota_label<'a>(slot: Option<Slot>, metric: &'a UsageMetric, cx: Cx) -> Cow<'
         Some(slot) => Cow::Borrowed(slot.label(cx.texts)),
         None => Cow::Borrowed(&metric.label),
     }
+}
+
+/// 概览紧凑卡的首行。额度厂商取所有账号里最紧张（未过期优先、已用比例最高）的
+/// 一条额度 meter；pi 是上下文占用；本地统计是关键数值。什么都没有时是空态。
+pub(super) fn headline<'a>(group: &VendorGroup<'a>, now_ms: u64) -> Line<'a> {
+    let texts = &crate::i18n::texts().monitor;
+    let cx_of = |account: &AccountUsageSnapshot| Cx {
+        now_ms,
+        live: liveness(account.status),
+        texts,
+    };
+    let family = family(group.agent);
+    if family == Family::Quota {
+        let tightest = group
+            .accounts
+            .iter()
+            .flat_map(|account| {
+                account.metrics.iter().filter_map(move |metric| {
+                    let slot = slot_of(&account.agent, metric);
+                    if slot.is_some_and(|slot| slot.kind() != SlotKind::Quota) {
+                        return None;
+                    }
+                    let percent = metric_percent(metric)?;
+                    Some((*account, slot, metric, percent))
+                })
+            })
+            .max_by(|a, b| {
+                let key = |(_, _, metric, percent): &(_, _, &UsageMetric, f32)| {
+                    (!window_expired(metric, now_ms), *percent)
+                };
+                let (a, b) = (key(a), key(b));
+                a.0.cmp(&b.0).then(a.1.total_cmp(&b.1))
+            });
+        if let Some((account, slot, metric, _)) = tightest {
+            let cx = cx_of(account);
+            let label = quota_label(slot, metric, cx);
+            let label = if group.accounts.len() > 1 {
+                Cow::Owned(format!("{} · {label}", account.account_label))
+            } else {
+                label
+            };
+            return Line::Meter(quota_meter(label, metric, cx));
+        }
+        // 没有额度窗口：退到第一条金额（credits / 余额）。
+        let money = group.accounts.iter().find_map(|account| {
+            account.metrics.iter().find_map(|metric| {
+                slot_of(&account.agent, metric)
+                    .filter(|slot| slot.kind() == SlotKind::Money)
+                    .map(|slot| slot_stat(slot, metric, cx_of(account)))
+            })
+        });
+        return money.map_or(Line::Empty(texts.no_usage_data), |stat| {
+            Line::Stats(vec![stat])
+        });
+    }
+    let wanted: &[Slot] = match group.agent {
+        "zcode" => &[Slot::TokensTotal, Slot::Subagents],
+        "pi" => &[Slot::Cost, Slot::TokensTotal],
+        _ => &[Slot::Cost, Slot::Sessions],
+    };
+    for account in &group.accounts {
+        let cx = cx_of(account);
+        let mut picker = Picker::new(account);
+        if family == Family::Session {
+            let mut lines = Vec::new();
+            push_context(&mut lines, &mut picker, cx);
+            if let Some(line) = lines.pop() {
+                return line;
+            }
+        }
+        let stats = picker
+            .take_all(wanted)
+            .into_iter()
+            .map(|(slot, metric)| slot_stat(slot, metric, cx))
+            .collect::<Vec<_>>();
+        if !stats.is_empty() {
+            return Line::Stats(stats);
+        }
+    }
+    Line::Empty(if family == Family::Session {
+        texts.no_session_data
+    } else {
+        texts.no_usage_data
+    })
 }
 
 #[cfg(test)]
@@ -776,5 +900,35 @@ mod tests {
             panic!("首条 meter");
         };
         assert!(cached.ratio.is_some() && cached.stale);
+    }
+
+    /// 概览首行：取未过期窗口里最紧张的一条（过期窗口的旧值不抢首行）。
+    #[test]
+    fn overview_headline_prefers_the_tightest_live_window() {
+        let _guard = crate::i18n::lang_guard(crate::i18n::Lang::ZhCn);
+        let mut account = claude_account();
+        account.metrics[0].used_percent = Some(50.0);
+        let accounts = [account];
+        let groups = vendor_groups(&accounts);
+        let Line::Meter(meter) = headline(&groups[0], NOW_MS) else {
+            panic!("额度厂商的首行是 meter");
+        };
+        assert_eq!(meter.label, "消费额度");
+        assert_eq!(meter.value, "50%");
+        // 本地统计厂商没有额度：首行是关键数值。
+        let local = [AccountUsageSnapshot {
+            agent: "opencode".into(),
+            metrics: vec![UsageMetric {
+                amount_decimal: Some("4.5".into()),
+                unit: "USD".into(),
+                ..metric("total_cost", "local")
+            }],
+            ..Default::default()
+        }];
+        let groups = vendor_groups(&local);
+        let Line::Stats(stats) = headline(&groups[0], NOW_MS) else {
+            panic!("本地统计的首行是数值项");
+        };
+        assert_eq!(stats[0].value, "$4.50");
     }
 }

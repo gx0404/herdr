@@ -5663,7 +5663,7 @@ fn overview_subscription_is_broad_and_merges_every_provider() {
 
 // ---------------------------------------------------------------------------
 // 账号页厂商专属卡片：每厂商在 120×40 / 80×24 页面与 68×17 悬浮层三档断言字符
-// （数字可见、溢出标记、徽标文字、DIM）与空态。
+// （数字可见、溢出标记、徽标文字、DIM）；概览紧凑卡、空态、悬浮层「+N」退化。
 // 夹具全部手写、脱敏，不读任何真实凭据或用量文件。
 // ---------------------------------------------------------------------------
 
@@ -6282,6 +6282,89 @@ fn unknown_vendor_falls_back_to_generic_rows() {
 }
 
 #[test]
+fn overview_is_one_compact_card_per_vendor_and_drills_down() {
+    let _guard = crate::i18n::lang_guard(crate::i18n::Lang::ZhCn);
+    let accounts = || {
+        vec![
+            claude_card_account(),
+            codex_card_account(),
+            opencode_card_account(),
+        ]
+    };
+    // 宽页面（经典布局减去侧栏后正文仍 ≥96 列）：双栏，每厂商一张紧凑卡（最紧张的
+    // 额度 + 状态）。
+    let state = cards_page(None, accounts(), 150, 40);
+    let region = state.observability.page_rect;
+    let text = region_text(&state, region);
+    assert!(
+        region.width >= 98,
+        "用例前提：正文 ≥96 列（页面 {region:?}）"
+    );
+    let claude = find_in(&state, region, "消费额度").expect("claude 的最紧张额度");
+    let codex = find_in(&state, region, "7d 窗口").expect("codex 的最紧张额度");
+    assert_eq!(claude.1, codex.1, "≥96 列双栏：前两个厂商并排\n{text}");
+    assert!(
+        row_with(&state, region, "消费额度").is_some_and(|row| row.contains("162.8%")),
+        "{text}"
+    );
+    assert!(
+        row_with(&state, region, "┌ opencode ").is_some_and(|row| row.contains("本地统计")),
+        "紧凑卡标题取厂商名（没有厂商列表时回退 agent 名），本地统计照样声明\n{text}"
+    );
+    assert!(find_in(&state, region, "$4.56").is_some(), "{text}");
+    assert!(
+        find_in(&state, region, "12.50 credits").is_none(),
+        "紧凑卡只有首行额度与汇总，不画明细\n{text}"
+    );
+    // 窄页面：单栏。
+    let narrow = cards_page(None, accounts(), 80, 24);
+    let region = narrow.observability.page_rect;
+    let claude = find_in(&narrow, region, "消费额度").expect("窄页面也有 claude");
+    let codex = find_in(&narrow, region, "7d 窗口").expect("窄页面也有 codex");
+    assert!(codex.1 > claude.1, "<96 列单栏：卡片上下排");
+
+    // 鼠标：点紧凑卡进入该厂商。
+    let mut state = cards_page(None, accounts(), 120, 40);
+    let rect = page_hit(
+        &state,
+        |action| matches!(action, Action::Provider(agent) if agent == "codex"),
+    )
+    .expect("codex 紧凑卡可点");
+    click(&mut state, rect.x + 2, rect.y + 1);
+    assert_eq!(
+        state.observability.selected_provider.as_deref(),
+        Some("codex")
+    );
+    // 键盘：Tab 到紧凑卡、Enter 进入。
+    let mut state = cards_page(None, accounts(), 120, 40);
+    let target = state
+        .observability
+        .hits
+        .iter()
+        .position(|(_, action)| matches!(action, Action::Provider(agent) if agent == "claude"))
+        .expect("claude 紧凑卡在命中表里");
+    let chips = state
+        .observability
+        .hits
+        .iter()
+        .filter(|(_, action)| matches!(action, Action::Provider(agent) if agent == "claude"))
+        .count();
+    assert_eq!(chips, 1, "用例前提：没有厂商 chip 抢同一个动作");
+    for _ in 0..state.observability.page_hits {
+        if state.observability.selected_hit == target {
+            break;
+        }
+        press_key(&mut state, crossterm::event::KeyCode::Tab);
+    }
+    assert_eq!(state.observability.selected_hit, target);
+    press_key(&mut state, crossterm::event::KeyCode::Enter);
+    assert_eq!(
+        state.observability.selected_provider.as_deref(),
+        Some("claude")
+    );
+}
+
+#[test]
 fn empty_accounts_page_uses_the_kit_empty_state() {
     let _guard = crate::i18n::lang_guard(crate::i18n::Lang::ZhCn);
     for (cols, rows) in [(120, 40), (80, 24)] {
@@ -6300,4 +6383,73 @@ fn empty_accounts_page_uses_the_kit_empty_state() {
             "{cols}x{rows}: 空态说明\n{text}"
         );
     }
+}
+
+#[test]
+fn hover_card_folds_rows_beyond_its_height_into_a_plus_marker() {
+    let _guard = crate::i18n::lang_guard(crate::i18n::Lang::ZhCn);
+    use crate::api::schema::UsageMetric;
+    // 一张比悬浮层还高的卡：多条额度窗口。
+    let mut account = kimi_card_account();
+    for index in 0..8 {
+        account.metrics.push(UsageMetric {
+            used_percent: Some(10.0 + f64::from(index)),
+            ..usage_metric(
+                &format!("window-{index}"),
+                &format!("额度窗口 {index}"),
+                "%",
+                "account",
+            )
+        });
+    }
+    let state = cards_hover("kimi", vec![account.clone()]);
+    let region = state.observability.hover_rect;
+    let text = region_text(&state, region);
+    // 卡片被悬浮层高度封顶：下边框写「+N」，前几条额度的数字照样可见。
+    let marker = (region.y..region.bottom()).find_map(|y| {
+        let buffer = state.compose_buffer.as_ref().expect("帧缓冲");
+        let (row, _) = region_row(buffer, region, y);
+        let start = row.find(" +")?;
+        let digits = row[start + 2..]
+            .chars()
+            .take_while(char::is_ascii_digit)
+            .collect::<String>();
+        (!digits.is_empty() && row.contains('┘')).then_some(digits)
+    });
+    let hidden = marker.expect("下边框的「+N」");
+    assert!(hidden.parse::<usize>().is_ok_and(|n| n > 0), "{text}");
+    assert!(
+        row_with(&state, region, "5 小时").is_some_and(|row| row.contains("25%")),
+        "{text}"
+    );
+    assert!(
+        find_in(&state, region, "打开页面").is_some(),
+        "悬浮层底部的「打开页面」仍在\n{text}"
+    );
+    // 同一张卡在页面上不封顶：放不下时滚轮往下能看到最后一条窗口。
+    let mut page = cards_page(Some("kimi"), vec![account], 80, 24);
+    let region = page.observability.page_rect;
+    assert!(
+        find_in(&page, region, "额度窗口 7").is_none(),
+        "用例前提：80×24 放不下整张卡\n{}",
+        region_text(&page, region)
+    );
+    let point = find_in(&page, region, "5 小时").expect("卡片在页面上");
+    for _ in 0..40 {
+        page.handle_mouse(
+            MouseEvent {
+                kind: MouseEventKind::ScrollDown,
+                column: point.0,
+                row: point.1,
+                modifiers: KeyModifiers::NONE,
+            },
+            &mut ClientShellInput::default(),
+        );
+    }
+    page.compose(80, 24).expect("滚动后");
+    assert!(
+        find_in(&page, region, "额度窗口 7").is_some(),
+        "页面上滚动能看到每一条额度\n{}",
+        region_text(&page, region)
+    );
 }
