@@ -7,9 +7,10 @@
 //! （`follow = true`，让 server 在 `FOLLOW_TTL` 内保持跟随）并按上次的
 //! `next_cursor` 续读内容；`eof` 且没有游标（pi）时下次从头重读并整体替换。
 //! 每个请求的 `epoch` 取全局递增的请求序号，响应对不上在途请求即丢弃；内容读取
-//! 另带内容代际，选中节点或刷新之后到达的旧内容也丢弃。窗口关闭后不再发起任何
-//! 读取。外部来源属主忽略跟随（server 也忽略）。旧 server 未宣告或拒绝该方法时
-//! 显示「不提供」文案并不再重试。
+//! 另带内容代际，选中节点或刷新之后到达的旧内容也丢弃。只有成功应答立即续发
+//! 下一个读取；错误结局交给下一次 tick，被取消的读取（断线等）放回队列、不算
+//! 读取失败。窗口关闭后不再发起任何读取。外部来源属主忽略跟随（server 也
+//! 忽略）。旧 server 未宣告或拒绝该方法时显示「不提供」文案并不再重试。
 //!
 //! 阶段划分（STATE-04）：输入阶段改选中 / 折叠 / 滚动意图并排队读取；视图计算
 //! 阶段（[`ClientShellState::compute_agent_activity_view`]）按当前几何夹紧滚动、
@@ -704,6 +705,22 @@ impl ClientAgentActivityOverlay {
         // pi：读完后不给游标，下一次（跟随）从头重读并整体替换。
         if content.eof && content.next_cursor.is_none() {
             self.restart_content = true;
+        }
+    }
+
+    /// 被取消的读取放回队列：树读取重新排队；内容读取仍对得上当前目标时重新排队。
+    /// 续读的游标与追加语义由 `next_read` 按未变的内容状态重新算出，与被取消的
+    /// 那次一致；对不上的（已换选中 / 已刷新）由新目标自己的排队接手。
+    fn requeue(&mut self, read: &AgentActivityRead) {
+        match read.node_id.as_deref() {
+            None => self.want_tree = true,
+            Some(node) => {
+                if read.generation == self.content_generation
+                    && self.selected_node.as_deref() == Some(node)
+                {
+                    self.want_content = true;
+                }
+            }
         }
     }
 
@@ -2201,8 +2218,11 @@ impl ClientShellState {
         };
     }
 
-    /// `agent.activity.read` 的响应：窗口已关、对不上在途读取的一律丢弃；应用后
-    /// 立即发出下一个排队的读取（续读 / 先树后内容）。
+    /// `agent.activity.read` 的响应：窗口已关、对不上在途读取的一律丢弃。只有成功
+    /// 应答立即发出下一个排队的读取（续读 / 先树后内容）；错误结局不在这里续发，
+    /// 排队的读取交给下一次 tick（≤ 100 ms）。取消路径（断线、代际不符、泳道退役）
+    /// 经 `cancel_endpoint_request` 进来，那里不允许再产生动作；被取消的读取也不是
+    /// 读取失败，意图放回队列，端点恢复后由 tick 重发。
     pub(super) fn receive_agent_activity_read(
         &mut self,
         epoch: u64,
@@ -2218,7 +2238,18 @@ impl ClientShellState {
         else {
             return (false, Vec::new());
         };
+        let succeeded = match &result {
+            Ok(_) => true,
+            Err(error) if error.code.as_deref() == Some("endpoint_cancelled") => {
+                overlay.requeue(&read);
+                return (false, Vec::new());
+            }
+            Err(_) => false,
+        };
         let repaint = overlay.apply_read(read, result);
+        if !succeeded {
+            return (repaint, Vec::new());
+        }
         let mut outcome = ClientShellInput::default();
         self.pump_agent_activity(&mut outcome);
         (repaint || outcome.repaint, outcome.actions)

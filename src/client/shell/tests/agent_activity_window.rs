@@ -1263,3 +1263,85 @@ fn follow_ticks_are_spaced_by_the_interval() {
     state.tick_agent_activity(start + FOLLOW_INTERVAL, &mut outcome);
     assert_eq!(reads(&outcome).len(), 1, "满一个间隔再读");
 }
+
+/// 取消（断线、代际不符、泳道退役）不是读取失败：取消路径不许再产生动作
+/// （`cancel_endpoint_request` 在 debug 构建里断言），被取消的读取意图放回去，
+/// 下一次 tick 重发；内容续读保留原游标与追加语义。其它错误结局也不在应答里
+/// 续发，交给下一次 tick。
+#[test]
+fn cancelled_reads_are_requeued_for_the_next_tick() {
+    let mut state = state();
+    let outcome = open(&mut state, pane_owner());
+    let (tree_id, _) = single_read(&outcome);
+    // 树读取在途时选中节点：单飞，内容读取排队。
+    let mut outcome = ClientShellInput::default();
+    state.select_agent_activity_node("a".into(), &mut outcome);
+    assert!(reads(&outcome).is_empty(), "单飞");
+
+    state.cancel_endpoint_request(&tree_id);
+    assert!(overlay(&state).in_flight.is_none(), "取消后没有在途读取");
+    assert!(overlay(&state).tree_error.is_none(), "取消不是读取失败");
+    let mut outcome = ClientShellInput::default();
+    state.tick_agent_activity(Instant::now(), &mut outcome);
+    let (tree_id, params) = single_read(&outcome);
+    assert_eq!(params.node_id, None, "下一次 tick 重发树读取");
+    let (_, next) = respond(&mut state, &tree_id, tree_result(sample_nodes()));
+    let (content_id, params) = single_read(&next);
+    assert_eq!(params.node_id.as_deref(), Some("a"), "树回来后读内容");
+    assert_eq!(params.cursor, None);
+
+    // 续读被取消：重发时保留原游标，应答仍追加在已有内容后面。
+    let (_, next) = respond(
+        &mut state,
+        &content_id,
+        content_result("a", "page one\n", false, Some("c1")),
+    );
+    let (continue_id, params) = single_read(&next);
+    assert_eq!(params.cursor.as_deref(), Some("c1"));
+    state.cancel_endpoint_request(&continue_id);
+    assert!(overlay(&state).in_flight.is_none());
+    assert!(overlay(&state).error.is_none(), "取消不是读取失败");
+    let mut outcome = ClientShellInput::default();
+    state.tick_agent_activity(Instant::now(), &mut outcome);
+    let (continue_id, params) = single_read(&outcome);
+    assert_eq!(params.node_id.as_deref(), Some("a"));
+    assert_eq!(params.cursor.as_deref(), Some("c1"), "保留原游标");
+    assert!(
+        !overlay(&state).in_flight.as_ref().expect("在途").replace,
+        "仍是追加"
+    );
+    respond(
+        &mut state,
+        &continue_id,
+        content_result("a", "page two\n", true, Some("c2")),
+    );
+    assert_eq!(
+        overlay(&state).content.as_ref().expect("内容").text(),
+        "page one\npage two\n"
+    );
+
+    // 其它错误结局（如超时）同样不在应答里续发：刷新时树读取超时，排队的内容
+    // 读取留给下一次 tick。
+    let outcome = state.handle_raw_events(vec![key(KeyCode::Char('r'))]);
+    let (tree_id, _) = single_read(&outcome);
+    let (repaint, next) = respond(
+        &mut state,
+        &tree_id,
+        Err(ClientShellEndpointError {
+            code: Some("endpoint_timeout".into()),
+            message: "timed out".into(),
+        }),
+    );
+    assert!(repaint, "读取失败要重绘");
+    assert!(next.actions.is_empty(), "错误结局不在应答里续发");
+    assert!(overlay(&state).tree_error.is_some());
+    let mut outcome = ClientShellInput::default();
+    state.tick_agent_activity(Instant::now(), &mut outcome);
+    let (_, params) = single_read(&outcome);
+    assert_eq!(
+        params.node_id.as_deref(),
+        Some("a"),
+        "下一次 tick 发内容读取"
+    );
+    assert_eq!(params.cursor, None, "刷新从头重读");
+}
