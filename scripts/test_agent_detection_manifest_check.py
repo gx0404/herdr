@@ -66,30 +66,6 @@ UNPUBLISHED_TEST_EXCEPTION = {
 }
 
 
-# A fork-local rule lives only in the bundled manifest: the published copy stays
-# upstream's, one version behind, and the exception pins both sides exactly.
-FORK_AHEAD_TEST_BUNDLED = manifest("testagent", "2026.06.10.2", "fork-rule")
-FORK_AHEAD_TEST_PUBLISHED = manifest("testagent", "2026.06.10.1")
-FORK_AHEAD_TEST_EXCEPTION = {
-    "testagent": (
-        "2026.06.10.2",
-        hashlib.sha256(FORK_AHEAD_TEST_BUNDLED.encode()).hexdigest(),
-        "2026.06.10.1",
-    ),
-}
-
-
-def fork_ahead_manifest_dirs(root: Path, published: str = FORK_AHEAD_TEST_PUBLISHED) -> tuple[Path, Path]:
-    bundled_dir = root / "bundled"
-    published_dir = root / "published"
-    bundled_dir.mkdir()
-    published_dir.mkdir()
-    (bundled_dir / "testagent.toml").write_text(FORK_AHEAD_TEST_BUNDLED, encoding="utf-8", newline="\n")
-    (published_dir / "testagent.toml").write_text(published, encoding="utf-8", newline="\n")
-    (published_dir / "index.toml").write_text(catalog("testagent", "testagent.toml"))
-    return bundled_dir, published_dir
-
-
 def unpublished_manifest_dirs(root: Path) -> tuple[Path, Path]:
     bundled = root / "bundled"
     published = root / "published"
@@ -101,9 +77,11 @@ def unpublished_manifest_dirs(root: Path) -> tuple[Path, Path]:
 
 
 class RepositoryManifestTests(unittest.TestCase):
-    # The fork's exact exceptions pin real files, so the repository itself must
-    # pass the check that CI and the release gate run; a manifest edit without
-    # a matching exception update fails here instead of only in CI.
+    # The bundled manifests must stay upstream's published copies: fork-owned
+    # detection rules live in src/detect/manifests/fork/ and are layered on at
+    # load time (docs/AGENT_RULES/detection.md). Run the check that CI and the
+    # release gate run against the repository itself, so a bundled manifest that
+    # drifts from its published copy fails `just check` instead of only CI.
     def test_repository_manifests_match_the_published_catalog(self):
         engine_version = check.read_engine_version(None)
         bundled = check.load_manifest_dir(check.DEFAULT_BUNDLED_DIR, engine_version)
@@ -116,13 +94,6 @@ class RepositoryManifestTests(unittest.TestCase):
 
 
 class AgentDetectionManifestCheckTests(unittest.TestCase):
-    def setUp(self):
-        # Self-made manifests reuse real agent ids; keep the repository's own
-        # fork exceptions out of their way unless a test patches its own.
-        patcher = patch.dict(check.FORK_AHEAD_BUNDLED_MANIFESTS, {}, clear=True)
-        patcher.start()
-        self.addCleanup(patcher.stop)
-
     def test_validates_bundled_and_matching_published_catalog(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -247,67 +218,6 @@ class AgentDetectionManifestCheckTests(unittest.TestCase):
                     engine_version=3,
                     allow_unpublished=True,
                 )
-
-    @patch.dict(check.FORK_AHEAD_BUNDLED_MANIFESTS, FORK_AHEAD_TEST_EXCEPTION, clear=True)
-    def test_allows_exact_fork_ahead_bundled_manifest_including_release_gate(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            bundled, published = fork_ahead_manifest_dirs(Path(tmp))
-            bundled_manifests = check.load_manifest_dir(bundled, engine_version=1)
-            for allow_unpublished in (True, False):
-                check.validate_catalog(
-                    published,
-                    bundled_manifests,
-                    engine_version=1,
-                    allow_unpublished=allow_unpublished,
-                )
-
-    def test_rejects_fork_ahead_bundled_manifest_without_an_exception(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            bundled, published = fork_ahead_manifest_dirs(Path(tmp))
-            bundled_manifests = check.load_manifest_dir(bundled, engine_version=1)
-            with self.assertRaisesRegex(check.CheckError, "lower than bundled"):
-                check.validate_catalog(published, bundled_manifests, engine_version=1)
-
-    @patch.dict(check.FORK_AHEAD_BUNDLED_MANIFESTS, FORK_AHEAD_TEST_EXCEPTION, clear=True)
-    def test_rejects_mutated_fork_ahead_bundled_manifest(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            bundled, published = fork_ahead_manifest_dirs(Path(tmp))
-            with (bundled / "testagent.toml").open("a") as manifest_file:
-                manifest_file.write("\n# unexpected mutation\n")
-            bundled_manifests = check.load_manifest_dir(bundled, engine_version=1)
-            with self.assertRaisesRegex(check.CheckError, "lower than bundled"):
-                check.validate_catalog(published, bundled_manifests, engine_version=1)
-
-    @patch.dict(check.FORK_AHEAD_BUNDLED_MANIFESTS, FORK_AHEAD_TEST_EXCEPTION, clear=True)
-    def test_rejects_fork_ahead_exception_once_published_catches_up(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            bundled, published = fork_ahead_manifest_dirs(
-                Path(tmp), published=manifest("testagent", "2026.06.10.3")
-            )
-            bundled_manifests = check.load_manifest_dir(bundled, engine_version=1)
-            with self.assertRaisesRegex(check.CheckError, "stale FORK_AHEAD_BUNDLED_MANIFESTS"):
-                check.validate_catalog(published, bundled_manifests, engine_version=1)
-
-    @patch.dict(
-        check.FORK_AHEAD_BUNDLED_MANIFESTS,
-        {"otheragent": FORK_AHEAD_TEST_EXCEPTION["testagent"]},
-        clear=True,
-    )
-    def test_rejects_fork_ahead_exception_for_an_agent_outside_the_catalog(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            bundled = root / "bundled"
-            website = root / "website"
-            bundled.mkdir()
-            website.mkdir()
-            content = manifest("codex", "2026.06.10.1")
-            (bundled / "codex.toml").write_text(content)
-            (website / "codex.toml").write_text(content)
-            (website / "index.toml").write_text(catalog())
-
-            bundled_manifests = check.load_manifest_dir(bundled, engine_version=1)
-            with self.assertRaisesRegex(check.CheckError, "stale FORK_AHEAD_BUNDLED_MANIFESTS"):
-                check.validate_catalog(website, bundled_manifests, engine_version=1)
 
     def test_rejects_unknown_catalog_agent(self):
         with tempfile.TemporaryDirectory() as tmp:

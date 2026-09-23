@@ -59,6 +59,8 @@ Local overrides can replace a remote or bundled manifest from the platform confi
 
 Local overrides always win. Without a local override, Herdr uses the newer compatible manifest between the cached remote manifest and the bundled manifest in the running binary. On debug builds, the same config helper may use a development directory such as `herdr-dev`. Invalid override files are ignored with a warning and Herdr falls back to the cached remote or bundled manifest for that agent.
 
+The startup prompt rules described above are kept separate from the bundled and remote manifests. Herdr adds them on top of whichever of the two is active, so a remote manifest update does not drop them; if the active manifest already has a rule with the same id, that rule wins. A local override replaces the whole manifest, so only the rules in the override file run.
+
 Remote manifests patch detection rules for agents Herdr already knows how to identify. Adding a completely new agent still requires a Herdr binary update for process detection, labels, and integration behavior.
 
 The running server loads active manifests into memory on startup. Automatic remote manifest updates reload that in-memory cache after new rules are written. Run `herdr server update-agent-manifests` to fetch remote manifest updates immediately and reload the running server. After editing a local override manually, restart Herdr or run `herdr server reload-agent-manifests` to apply the file to the running server.

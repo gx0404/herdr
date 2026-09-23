@@ -40,11 +40,15 @@ stable 客户端无法识别的新捆绑 agent 可暂不发布（挂在精确例
 不存在未发布例外。`scripts/agent_detection_manifest_check.py`（`just
 maintenance-test` 内）校验捆绑与发布副本一致性。
 
-fork 自有的检测规则只进捆绑 manifest（发布副本保持上游原样，见
-`release-channels.md`）：捆绑版本必须高于发布副本，否则缓存的远端副本会遮住它；
-同时在 `scripts/agent_detection_manifest_check.py::FORK_AHEAD_BUNDLED_MANIFESTS`
-登记（捆绑版本、捆绑 sha256、发布版本）精确例外，捆绑文件每改一次都要更新；
-发布副本追上捆绑版本后校验会要求删除该例外。
+fork 自有的检测规则不进上游发布的 manifest：捆绑 `src/detect/manifests/<agent>.toml`
+与发布副本保持上游原样，不为 fork 规则抬版本——抬了会遮住 herdr.dev 上更新的上游
+规则，上游再发更高版本时又反过来遮住 fork 规则。fork 规则写在
+`src/detect/manifests/fork/<agent>.toml` 并登记到
+`src/detect/manifest.rs::FORK_RULE_OVERLAYS`，加载时由 `with_fork_rules` 追加到选定的
+捆绑或远端 manifest 末尾：生效 manifest 已有同 id 规则时让位，本地覆盖（用户写的整份
+manifest）不叠加。改 fork 规则同样走上面的证据流程，第 3 步改叠加文件，验证用的本地
+覆盖要连同该规则一起写入；同步上游后捆绑 manifest 出现同 id 规则时测试会失败，删掉
+或改名 fork 那条。
 
 官方集成仅六家：其余 agent 的捆绑 manifest 与 `src/detect/mod.rs::Agent` 变体已
 删除（`Agent` 不派生 serde、不进 wire 结构，对外只以 `agent_label` 字符串出现），

@@ -1,5 +1,5 @@
 {
-  "chunk_count": 1051,
+  "chunk_count": 1053,
   "chunks": [
     {
       "anchor": "herdr",
@@ -326,9 +326,16 @@
     {
       "anchor": "detection（agent 状态检测与 manifest） > 发布目录",
       "doc": "docs/AGENT_RULES/detection.md",
-      "id": "docs-agent-rules-detection-md-detection-agent-状态检测与-manifest-发布目录",
-      "source_sha256": "8ec40b0e7d33622c9787e2ed967a57e3acd96215a49db45c7276bafb700a8ef9",
-      "text": "## 发布目录\n\n`distribution/agent-detection/` 是已发布客户端的远端目录。已发布 agent 的改动\n必须与其捆绑 manifest 对齐，除非 validator 记录了精确的版本+摘要例外。当前\nstable 客户端无法识别的新捆绑 agent 可暂不发布（挂在精确例外后），但必须在\n首个携带它的 stable 发布前加入目录并移除例外；`just release-docs-check` 强制\n不存在未发布例外。`scripts/agent_detection_manifest_check.py`（`just\nmaintenance-test` 内）校验捆绑与发布副本一致性。\n\nfork 自有的检测规则只进捆绑 manifest（发布副本保持上游原样，见\n`release-channels.md`）：捆绑版本必须高于发布副本，否则缓存的远端副本会遮住它；\n同时在 `scripts/agent_detection_manifest_check.py::FORK_AHEAD_BUNDLED_MANIFESTS`\n登记（捆绑版本、捆绑 sha256、发布版本）精确例外，捆绑文件每改一次都要更新；\n发布副本追上捆绑版本后校验会要求删除该例外。\n\n官方集成仅六家：其余 agent 的捆绑 manifest 与 `src/detect/mod.rs::Agent` 变体已\n删除（`Agent` 不派生 serde、不进 wire 结构，对外只以 `agent_label` 字符串出现），\n不新增，同步上游时也不合入，发布目录里的对应副本随之删减；名单与口径见\n`README.md` 的「fork 已删除的集成」，目录归属的 fork 例外登记在\n`release-channels.md`。\n\n删除后的兼容不变量：\n\n- **远程目录回流**：上游发布目录仍会列出已删 agent。\n  `src/detect/manifest_update.rs::parse_catalog` 对未知 id 只 `warn` 并跳过，整份\n  目录照常接受，不进状态、不落缓存、不写本地覆盖。\n- **用户配置**：`src/detect/mod.rs::RETIRED_AGENT_LABELS` 登记删除前的规范 id，只\n  服务配置兼容，不参与识别。`src/config/sidebar.rs::deserialize_rows_by_agent` 据此\n  忽略并告警已删 agent 的 `rows_by_agent` 键（否则启动会整份回退默认、热重载会\n  拒收整个 ui 段）；`src/config/sound.rs::AgentSoundOverrides` 的旧键按未知键处理，\n  只产生 `unknown config key` 诊断。上游日后新增、fork 不收的 agent 不需要登记。\n- **残留 hook 与旧快照**：`src/agent_resume.rs::is_official_agent_source` 只认五家，\n  已删集成残留 hook 的会话上报与旧快照里的会话一律按非官方来源丢弃。"
+      "id": "docs-agent-rules-detection-md-detection-agent-状态检测与-manifest-发布目录-part1",
+      "source_sha256": "1e040579c7a956d60f5cd818ac776112636596bb08e7a147eb5432bf99f6b0c3",
+      "text": "## 发布目录\n\n`distribution/agent-detection/` 是已发布客户端的远端目录。已发布 agent 的改动\n必须与其捆绑 manifest 对齐，除非 validator 记录了精确的版本+摘要例外。当前\nstable 客户端无法识别的新捆绑 agent 可暂不发布（挂在精确例外后），但必须在\n首个携带它的 stable 发布前加入目录并移除例外；`just release-docs-check` 强制\n不存在未发布例外。`scripts/agent_detection_manifest_check.py`（`just\nmaintenance-test` 内）校验捆绑与发布副本一致性。\n\nfork 自有的检测规则不进上游发布的 manifest：捆绑 `src/detect/manifests/<agent>.toml`\n与发布副本保持上游原样，不为 fork 规则抬版本——抬了会遮住 herdr.dev 上更新的上游\n规则，上游再发更高版本时又反过来遮住 fork 规则。fork 规则写在\n`src/detect/manifests/fork/<agent>.toml` 并登记到\n`src/detect/manifest.rs::FORK_RULE_OVERLAYS`，加载时由 `with_fork_rules` 追加到选定的\n捆绑或远端 manifest 末尾：生效 manifest 已有同 id 规则时让位，本地覆盖（用户写的整份\nmanifest）不叠加。改 fork 规则同样走上面的证据流程，第 3 步改叠加文件，验证用的本地\n覆盖要连同该规则一起写入；同步上游后捆绑 manifest 出现同 id 规则时测试会失败，删掉\n或改名 fork 那条。\n\n官方集成仅六家：其余 agent 的捆绑 manifest 与 `src/detect/mod.rs::Agent` 变体已\n删除（`Agent` 不派生 serde、不进 wire 结构，对外只以 `agent_label` 字符串出现），\n不新增，同步上游时也不合入，发布目录里的对应副本随之删减；名单与口径见\n`README.md` 的「fork 已删除的集成」，目录归属的 fork 例外登记在\n`release-channels.md`。\n\n删除后的兼容不变量：\n\n- **远程目录回流**：上游发布目录仍会列出已删 agent。\n  `src/detect/manifest_update.rs::parse_catalog` 对未知 id 只 `warn` 并跳过，整份\n  目录照常接受，不进状态、不落缓存、不写本地覆盖。\n- **用户配置**：`src/detect/mod.rs::RETIRED_AGENT_LABELS` 登记删除前的规范 id，只\n  服务配置兼容，不参与识别。`src/config/sidebar.rs::deserialize_rows_by_agent` 据此\n  忽略并告警已删 agent 的 `rows_by_agent` 键（否则启动会整份回退默认、热重载会\n  拒收整个 ui 段）；`src/config/sound.rs::AgentSoundOverrides` 的旧键按未知键处理，\n  只产生 `unknown config key` 诊断。上游日后新增、fork 不收的 agent 不需要登记。"
+    },
+    {
+      "anchor": "detection（agent 状态检测与 manifest） > 发布目录",
+      "doc": "docs/AGENT_RULES/detection.md",
+      "id": "docs-agent-rules-detection-md-detection-agent-状态检测与-manifest-发布目录-part2",
+      "source_sha256": "1e040579c7a956d60f5cd818ac776112636596bb08e7a147eb5432bf99f6b0c3",
+      "text": "- **残留 hook 与旧快照**：`src/agent_resume.rs::is_official_agent_source` 只认五家，\n  已删集成残留 hook 的会话上报与旧快照里的会话一律按非官方来源丢弃。"
     },
     {
       "anchor": "detection（agent 状态检测与 manifest） > 架构不变量（上游 Principles）",
@@ -670,8 +677,8 @@
       "anchor": "release-channels（发布渠道与版本真源） > fork 例外：agent-detection 发布目录",
       "doc": "docs/AGENT_RULES/release-channels.md",
       "id": "docs-agent-rules-release-channels-md-release-channels-发布渠道与版本真源-fork-例外-agent-detection-发布目录",
-      "source_sha256": "b535b20a255a827628107c7f7d3624db1074a728332305bdcb79b205eff5ad36",
-      "text": "## fork 例外：agent-detection 发布目录\n\n`distribution/agent-detection/` 的归属**不变**：仍是上游发布目录（语义见\n`detection.md`「发布目录」），fork 不自行发布它。唯一例外是 fork 删除六家以外\n的捆绑 manifest 时，随之删减该目录里对应的 `<agent>.toml` 与 `index.toml`\n条目——只为让 `scripts/agent_detection_manifest_check.py` 的捆绑↔发布一致性\n继续成立；不借此改动六家自身的发布副本，也不触碰 `distribution/*.json` 等其他\n渠道文件。名单与同步口径见 `README.md` 的「fork 已删除的集成」。fork 自有的检测\n规则只改捆绑 manifest，按 `detection.md` 登记精确例外。\n\n删减已落地：目录里只剩五家的副本与 `index.toml` 的五个条目。上游曾在\n`scripts/agent_detection_manifest_check.py::STAGED_PUBLISHED_MANIFESTS` 为 grok 钉\n（捆绑版本、发布版本、sha256）例外，fork 删 grok 时已清空该表，\n`scripts/test_agent_detection_manifest_check.py` 的 staged 用例改用自造 manifest\n并 patch 例外表，不再读取任何真实清单文件。同步上游时不要把 grok 条目与读取真实\n`grok.toml` 的用例合回来；同一提示也写在 `scripts/upstream_sync_drop_paths.txt` 的\ngrok 行上方。"
+      "source_sha256": "299d939154be6ec3142654c32267bf790bc5f1bf1d60f0c9d4a85b490beac29a",
+      "text": "## fork 例外：agent-detection 发布目录\n\n`distribution/agent-detection/` 的归属**不变**：仍是上游发布目录（语义见\n`detection.md`「发布目录」），fork 不自行发布它。唯一例外是 fork 删除六家以外\n的捆绑 manifest 时，随之删减该目录里对应的 `<agent>.toml` 与 `index.toml`\n条目——只为让 `scripts/agent_detection_manifest_check.py` 的捆绑↔发布一致性\n继续成立；不借此改动六家自身的发布副本，也不触碰 `distribution/*.json` 等其他\n渠道文件。名单与同步口径见 `README.md` 的「fork 已删除的集成」。\n\n删减已落地：目录里只剩五家的副本与 `index.toml` 的五个条目。上游曾在\n`scripts/agent_detection_manifest_check.py::STAGED_PUBLISHED_MANIFESTS` 为 grok 钉\n（捆绑版本、发布版本、sha256）例外，fork 删 grok 时已清空该表，\n`scripts/test_agent_detection_manifest_check.py` 的 staged 用例改用自造 manifest\n并 patch 例外表，不再读取任何真实清单文件。同步上游时不要把 grok 条目与读取真实\n`grok.toml` 的用例合回来；同一提示也写在 `scripts/upstream_sync_drop_paths.txt` 的\ngrok 行上方。"
     },
     {
       "anchor": "release-channels（发布渠道与版本真源） > 性能 smoke",
@@ -1111,15 +1118,22 @@
       "anchor": "Supported agents > Detection manifests",
       "doc": "docs/next/website/src/content/docs/agents.mdx",
       "id": "docs-next-website-src-content-docs-agents-mdx-supported-agents-detection-manifests-part1",
-      "source_sha256": "d6311f884e01694b6cf677d192384076f86cc0f38cfd3738edc18716bfa99c07",
-      "text": "## Detection manifests\n\nBundled manifests live inside Herdr. Herdr also checks herdr.dev for remote manifest updates and applies valid per-agent rule updates automatically without requiring a Herdr restart. Background checks run at most once every 6 hours and only after the first frame renders; `herdr server update-agent-manifests` always fetches immediately and is not throttled. Remote manifests are stored in Herdr's state directory. Set `[update] manifest_check = false` to disable background remote manifest checks.\n\nLocal overrides can replace a remote or bundled manifest from the platform config directory:\n\n```text\n~/.config/herdr/agent-detection/<agent>.toml\n```\n\nLocal overrides always win. Without a local override, Herdr uses the newer compatible manifest between the cached remote manifest and the bundled manifest in the running binary. On debug builds, the same config helper may use a development directory such as `herdr-dev`. Invalid override files are ignored with a warning and Herdr falls back to the cached remote or bundled manifest for that agent.\n\nRemote manifests patch detection rules for agents Herdr already knows how to identify. Adding a completely new agent still requires a Herdr binary update for process detection, labels, and integration behavior.\n"
+      "source_sha256": "95049e4308bd6dd77d12b62d898300fc75be42414dd74935cda9a3646a0d4fed",
+      "text": "## Detection manifests\n\nBundled manifests live inside Herdr. Herdr also checks herdr.dev for remote manifest updates and applies valid per-agent rule updates automatically without requiring a Herdr restart. Background checks run at most once every 6 hours and only after the first frame renders; `herdr server update-agent-manifests` always fetches immediately and is not throttled. Remote manifests are stored in Herdr's state directory. Set `[update] manifest_check = false` to disable background remote manifest checks.\n\nLocal overrides can replace a remote or bundled manifest from the platform config directory:\n\n```text\n~/.config/herdr/agent-detection/<agent>.toml\n```\n\nLocal overrides always win. Without a local override, Herdr uses the newer compatible manifest between the cached remote manifest and the bundled manifest in the running binary. On debug builds, the same config helper may use a development directory such as `herdr-dev`. Invalid override files are ignored with a warning and Herdr falls back to the cached remote or bundled manifest for that agent.\n\nThe startup prompt rules described above are kept separate from the bundled and remote manifests. Herdr adds them on top of whichever of the two is active, so a remote manifest update does not drop them; if the active manifest already has a rule with the same id, that rule wins. A local override replaces the whole manifest, so only the rules in the override file run.\n"
     },
     {
       "anchor": "Supported agents > Detection manifests",
       "doc": "docs/next/website/src/content/docs/agents.mdx",
       "id": "docs-next-website-src-content-docs-agents-mdx-supported-agents-detection-manifests-part2",
-      "source_sha256": "d6311f884e01694b6cf677d192384076f86cc0f38cfd3738edc18716bfa99c07",
-      "text": "The running server loads active manifests into memory on startup. Automatic remote manifest updates reload that in-memory cache after new rules are written. Run `herdr server update-agent-manifests` to fetch remote manifest updates immediately and reload the running server. After editing a local override manually, restart Herdr or run `herdr server reload-agent-manifests` to apply the file to the running server.\n\nUse `herdr agent explain` when a pane shows the wrong state:\n\n```bash\nherdr agent explain <target>\nherdr agent explain --file screen.txt --agent codex --json\n```\n\nLive explain is evaluated by the running server, so it reflects the active manifest cache. The explain output shows the agent, final state, whether screen detection was skipped by a full lifecycle authority, manifest source and version, cached remote version, local override shadowing, remote update status, matched rule, visible evidence flags, matcher and region evidence for evaluated rules, skipped-update reason for transcript viewers, and the idle fallback reason when no rule matched.\n\nHerdr can run inside tmux as the outer terminal environment. Agent detection does not inspect tmux sessions launched inside a Herdr pane. If a shell framework auto-enters tmux inside Herdr, Herdr sees `tmux` as the pane process instead of the agent behind it."
+      "source_sha256": "95049e4308bd6dd77d12b62d898300fc75be42414dd74935cda9a3646a0d4fed",
+      "text": "Remote manifests patch detection rules for agents Herdr already knows how to identify. Adding a completely new agent still requires a Herdr binary update for process detection, labels, and integration behavior.\n\nThe running server loads active manifests into memory on startup. Automatic remote manifest updates reload that in-memory cache after new rules are written. Run `herdr server update-agent-manifests` to fetch remote manifest updates immediately and reload the running server. After editing a local override manually, restart Herdr or run `herdr server reload-agent-manifests` to apply the file to the running server.\n\nUse `herdr agent explain` when a pane shows the wrong state:\n\n```bash\nherdr agent explain <target>\nherdr agent explain --file screen.txt --agent codex --json\n```\n\nLive explain is evaluated by the running server, so it reflects the active manifest cache. The explain output shows the agent, final state, whether screen detection was skipped by a full lifecycle authority, manifest source and version, cached remote version, local override shadowing, remote update status, matched rule, visible evidence flags, matcher and region evidence for evaluated rules, skipped-update reason for transcript viewers, and the idle fallback reason when no rule matched.\n"
+    },
+    {
+      "anchor": "Supported agents > Detection manifests",
+      "doc": "docs/next/website/src/content/docs/agents.mdx",
+      "id": "docs-next-website-src-content-docs-agents-mdx-supported-agents-detection-manifests-part3",
+      "source_sha256": "95049e4308bd6dd77d12b62d898300fc75be42414dd74935cda9a3646a0d4fed",
+      "text": "Herdr can run inside tmux as the outer terminal environment. Agent detection does not inspect tmux sessions launched inside a Herdr pane. If a shell framework auto-enters tmux inside Herdr, Herdr sees `tmux` as the pane process instead of the agent behind it."
     },
     {
       "anchor": "Supported agents > Direct integrations",
@@ -5675,15 +5689,15 @@
       "anchor": "summary",
       "doc": "src/detect/manifests/codex.toml",
       "id": "src-detect-manifests-codex-toml-summary",
-      "source_sha256": "91accf35708f6f6ec896a578d0074949e8ea5d453ca14ce01b6331090e5e8dc5",
-      "text": "agent 检测 manifest：src/detect/manifests/codex.toml\nid = \"codex\"\nversion = \"2026.09.23.1\"\nmin_engine_version = 3\n[[rules]]\nid = \"osc_title_blocked\"\nstate = \"blocked\"\npriority = 1100\n[[rules]]\nid = \"osc_title_working\"\nstate = \"working\"\npriority = 1050\n[[rules]]\nid = \"transcript_viewer\"\nstate = \"unknown\"\npriority = 1000\n[[rules]]\nid = \"trust_directory\"\nstate = \"blocked\"\npriority = 950\n[[rules]]\nid = \"startup_hooks_review\"\nstate = \"blocked\"\npriority = 950\n[[rules]]\nid = \"startup_update\"\nstate = \"blocked\"\npriority = 950\n[[rules]]\nid = \"live_strong_blocker\"\nstate = \"blocked\"\npriority = 900\n[[rules]]\nid = \"weak_blocker\"\nstate = \"blocked\"\npriority = 600\n[[rules]]\nid = \"screen_working_fallback\"\nstate = \"working\"\npriority = 500\n[[rules]]\nid = \"osc_title_idle\"\nstate = \"idle\"\npriority = 100"
+      "source_sha256": "f01873e8197722e9dd641584e7b0e46751e4ab7154bca91029064ab27acb97a5",
+      "text": "agent 检测 manifest：src/detect/manifests/codex.toml\nid = \"codex\"\nversion = \"2026.09.14.1\"\nmin_engine_version = 3\n[[rules]]\nid = \"osc_title_blocked\"\nstate = \"blocked\"\npriority = 1100\n[[rules]]\nid = \"osc_title_working\"\nstate = \"working\"\npriority = 1050\n[[rules]]\nid = \"transcript_viewer\"\nstate = \"unknown\"\npriority = 1000\n[[rules]]\nid = \"trust_directory\"\nstate = \"blocked\"\npriority = 950\n[[rules]]\nid = \"startup_update\"\nstate = \"blocked\"\npriority = 950\n[[rules]]\nid = \"live_strong_blocker\"\nstate = \"blocked\"\npriority = 900\n[[rules]]\nid = \"weak_blocker\"\nstate = \"blocked\"\npriority = 600\n[[rules]]\nid = \"screen_working_fallback\"\nstate = \"working\"\npriority = 500\n[[rules]]\nid = \"osc_title_idle\"\nstate = \"idle\"\npriority = 100"
     },
     {
       "anchor": "summary",
       "doc": "src/detect/manifests/kimi.toml",
       "id": "src-detect-manifests-kimi-toml-summary",
-      "source_sha256": "c4b0d322a47ca6206ad1ab36d58425f200038df7444b878fd606ab7dba3c1ca7",
-      "text": "agent 检测 manifest：src/detect/manifests/kimi.toml\nid = \"kimi\"\nversion = \"2026.09.23.1\"\nmin_engine_version = 1\n[[rules]]\nid = \"trust_folder_prompt\"\nstate = \"blocked\"\npriority = 410\n[[rules]]\nid = \"current_approval_panel\"\nstate = \"blocked\"\npriority = 400\n[[rules]]\nid = \"question_panel\"\nstate = \"blocked\"\npriority = 390\n[[rules]]\nid = \"legacy_approval_panel\"\nstate = \"blocked\"\npriority = 300\n[[rules]]\nid = \"background_agent_status_working\"\nstate = \"working\"\npriority = 120\n[[rules]]\nid = \"moon_spinner_working\"\nstate = \"working\"\npriority = 100\n[[rules]]\nid = \"braille_spinner_working\"\nstate = \"working\"\npriority = 90"
+      "source_sha256": "9526bcb9f15760bba1b8583bca93a27d94bc114776f1dd55f925566af03b3b69",
+      "text": "agent 检测 manifest：src/detect/manifests/kimi.toml\nid = \"kimi\"\nversion = \"2026.06.10.1\"\nmin_engine_version = 1\n[[rules]]\nid = \"current_approval_panel\"\nstate = \"blocked\"\npriority = 400\n[[rules]]\nid = \"question_panel\"\nstate = \"blocked\"\npriority = 390\n[[rules]]\nid = \"legacy_approval_panel\"\nstate = \"blocked\"\npriority = 300\n[[rules]]\nid = \"background_agent_status_working\"\nstate = \"working\"\npriority = 120\n[[rules]]\nid = \"moon_spinner_working\"\nstate = \"working\"\npriority = 100\n[[rules]]\nid = \"braille_spinner_working\"\nstate = \"working\"\npriority = 90"
     },
     {
       "anchor": "summary",

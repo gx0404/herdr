@@ -42,8 +42,7 @@ Windows 归档必须含 `herdr.exe` 与其 app-local ConPTY 运行时（`platfor
 的捆绑 manifest 时，随之删减该目录里对应的 `<agent>.toml` 与 `index.toml`
 条目——只为让 `scripts/agent_detection_manifest_check.py` 的捆绑↔发布一致性
 继续成立；不借此改动六家自身的发布副本，也不触碰 `distribution/*.json` 等其他
-渠道文件。名单与同步口径见 `README.md` 的「fork 已删除的集成」。fork 自有的检测
-规则只改捆绑 manifest，按 `detection.md` 登记精确例外。
+渠道文件。名单与同步口径见 `README.md` 的「fork 已删除的集成」。
 
 删减已落地：目录里只剩五家的副本与 `index.toml` 的五个条目。上游曾在
 `scripts/agent_detection_manifest_check.py::STAGED_PUBLISHED_MANIFESTS` 为 grok 钉

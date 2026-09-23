@@ -1,0 +1,19 @@
+# fork 自有的 codex 检测规则（叠加层）。加载时追加到选定的捆绑或远端 codex
+# manifest 之后；生效 manifest 已有同 id 规则时以它为准，本地覆盖不叠加。
+# 上游发布的 manifest 保持原样，口径见 docs/AGENT_RULES/detection.md。
+id = "codex"
+
+[[rules]]
+id = "startup_hooks_review"
+state = "blocked"
+priority = 950
+region = "whole_recent"
+visible_blocker = true
+# codex 0.156 发现新增或变更的钩子时，先在清空的屏幕上请用户审阅，选完才进会话。
+# 标题、两个信任选项与页脚按键提示各占一行（证据：真机截屏 codex-02）。
+contains = ["enter confirm"]
+line_regex = [
+  '^\s*Hooks need review\s*$',
+  '^\s*(?:›\s*)?[0-9]+\.\s+Trust all and continue\s*$',
+  '^\s*(?:›\s*)?[0-9]+\.\s+Continue without trusting\b',
+]

@@ -67,27 +67,6 @@ STAGED_PUBLISHED_MANIFESTS: dict[str, tuple[str, str, str]] = {}
 
 UNPUBLISHED_BUNDLED_MANIFESTS: dict[str, tuple[str, str]] = {}
 
-# Exact (bundled version, bundled sha256, published version) exceptions for this
-# fork's own detection rules. distribution/agent-detection/ stays byte-for-byte
-# upstream's published catalog (docs/AGENT_RULES/release-channels.md), so a
-# fork-local rule can only live in the bundled manifest, whose version must be
-# newer than the published one for clients to prefer it over a cached remote
-# copy. Remove an entry once the published copy reaches the bundled version.
-FORK_AHEAD_BUNDLED_MANIFESTS: dict[str, tuple[str, str, str]] = {
-    # Blocked while Codex asks to review new or changed hooks at startup.
-    "codex": (
-        "2026.09.23.1",
-        "08d3dc0952e973fa8808412460baaa00611504d10d1234fe63f97e8cd94a8070",
-        "2026.09.14.1",
-    ),
-    # Blocked while Kimi Code asks whether to trust a new folder.
-    "kimi": (
-        "2026.09.23.1",
-        "aa1844d80e023a934d9d434c8a574c35558f0ff376501b4ce4b9ba954d127534",
-        "2026.06.10.1",
-    ),
-}
-
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
@@ -361,34 +340,15 @@ def validate_catalog(
             and bundled_manifest["min_engine_version"] == engine_version
             and manifest["min_engine_version"] < bundled_manifest["min_engine_version"]
         )
-        fork_ahead = FORK_AHEAD_BUNDLED_MANIFESTS.get(agent_id)
-        fork_ahead_matches = fork_ahead == (
-            bundled_manifest["version"],
-            hashlib.sha256(bundled_path.read_bytes()).hexdigest(),
-            manifest["version"],
-        )
-        if cmp < 0 and not stages_new_engine_manifest and not fork_ahead_matches:
+        if cmp < 0 and not stages_new_engine_manifest:
             raise CheckError(
                 f"{manifest_path}: published version {manifest['version']} is lower than bundled "
                 f"{bundled_manifest['version']} in {bundled_path}"
-            )
-        if cmp >= 0 and fork_ahead is not None:
-            raise CheckError(
-                f"{manifest_path}: published version {manifest['version']} caught up with bundled "
-                f"{bundled_manifest['version']}; remove the stale FORK_AHEAD_BUNDLED_MANIFESTS "
-                f"entry for {agent_id}"
             )
         if cmp == 0 and manifest_path.read_text(encoding="utf-8") != bundled_path.read_text(encoding="utf-8"):
             raise CheckError(
                 f"{manifest_path}: same version as bundled {bundled_manifest['version']} but content differs"
             )
-
-    outside_catalog = sorted(set(FORK_AHEAD_BUNDLED_MANIFESTS) - set(seen))
-    if outside_catalog:
-        raise CheckError(
-            f"{catalog_path}: stale FORK_AHEAD_BUNDLED_MANIFESTS entry for agent(s) outside "
-            f"the published catalog: {', '.join(outside_catalog)}"
-        )
 
     missing = sorted(set(bundled) - set(seen))
     unexpected_missing = []

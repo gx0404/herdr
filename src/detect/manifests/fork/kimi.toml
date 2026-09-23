@@ -1,0 +1,20 @@
+# fork 自有的 kimi 检测规则（叠加层）。加载时追加到选定的捆绑或远端 kimi
+# manifest 之后；生效 manifest 已有同 id 规则时以它为准，本地覆盖不叠加。
+# 上游发布的 manifest 保持原样，口径见 docs/AGENT_RULES/detection.md。
+id = "kimi"
+
+[[rules]]
+id = "trust_folder_prompt"
+state = "blocked"
+priority = 410
+region = "whole_recent"
+visible_blocker = true
+# Kimi Code 2.x 在新目录首启时先问是否信任该目录，此时会话还没建、钩子一条都
+# 没报。标题、按键提示与两个选项各占一行，指针可以停在任一选项上（证据：真机
+# 截屏 kimi-02）。
+contains = ["enter select", "esc exit"]
+line_regex = [
+  '^\s*Trust this folder\?\s*$',
+  '^\s*(?:[^\w\s]\s*)?Trust this folder\s*$',
+  '^\s*(?:[^\w\s]\s*)?Don.t trust\s*$',
+]

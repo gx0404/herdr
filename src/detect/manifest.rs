@@ -266,6 +266,42 @@ const BUNDLED_MANIFESTS: &[(&str, &str)] = &[
     ("pi", include_str!("manifests/pi.toml")),
 ];
 
+/// fork 自有检测规则（叠加层）。上游发布的 manifest（捆绑副本与 herdr.dev 远端缓存）
+/// 保持原样、不为 fork 规则抬版本，fork 规则单独存放在 `manifests/fork/`，由
+/// `with_fork_rules` 叠加到选定的捆绑或远端 manifest 上，两个方向都不互相遮蔽。
+/// 口径见 `docs/AGENT_RULES/detection.md`。
+const FORK_RULE_OVERLAYS: &[(&str, &str)] = &[
+    ("codex", include_str!("manifests/fork/codex.toml")),
+    ("kimi", include_str!("manifests/fork/kimi.toml")),
+];
+
+/// 把 `agent` 的 fork 规则追加到选定的捆绑或远端 manifest 末尾。生效 manifest 已有
+/// 同 id 规则时跳过该条（上游收编后以上游为准，explain 里也不出现重名）；追加在
+/// 末尾，同优先级并列时上游规则先命中。本地覆盖是用户写的整份 manifest，不经过
+/// 这里。叠加层随二进制编进来并有测试守门；万一解析失败只告警、照常用上游规则。
+fn with_fork_rules(agent: Agent, mut manifest: AgentManifest) -> AgentManifest {
+    let id = agent_label(agent);
+    let Some((_, content)) = FORK_RULE_OVERLAYS
+        .iter()
+        .find(|(overlay_id, _)| *overlay_id == id)
+    else {
+        return manifest;
+    };
+    let overlay = match parse_manifest(content) {
+        Ok(overlay) => overlay,
+        Err(err) => {
+            tracing::warn!(agent = id, error = %err, "fork 检测规则叠加层无法解析，已跳过");
+            return manifest;
+        }
+    };
+    for rule in overlay.rules {
+        if manifest.rules.iter().all(|existing| existing.id != rule.id) {
+            manifest.rules.push(rule);
+        }
+    }
+    manifest
+}
+
 static MANIFEST_CACHE: OnceLock<RwLock<ManifestCache>> = OnceLock::new();
 static MANIFEST_RELOAD_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
@@ -713,7 +749,7 @@ fn bundled_loaded_manifest(
     local_override_shadowing_remote: bool,
 ) -> LoadedManifest {
     loaded_manifest(
-        manifest,
+        with_fork_rules(agent, manifest),
         ManifestSource::Bundled,
         warning,
         cached_remote_version,
@@ -776,7 +812,7 @@ fn read_remote_manifest(agent: Agent, bundled: &AgentManifest) -> Option<LoadedM
                 }
             }
             match loaded_manifest(
-                manifest,
+                with_fork_rules(agent, manifest),
                 ManifestSource::Remote {
                     path: path.clone(),
                     version,

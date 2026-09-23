@@ -1114,6 +1114,220 @@ fn kimi_trust_folder_prompt_is_blocked() {
     assert!(!result.visible_blocker);
 }
 
+// ---------------------------------------------------------------------------
+// fork 规则叠加层：fork 自有的检测规则不进上游发布的 manifest，加载时叠加到选定的
+// 捆绑或远端 manifest 上。捆绑版本不再为 fork 规则抬高，两个方向都不互相遮蔽：
+// 远端较新时上游新规则照常生效、fork 规则仍在；远端较旧时回落捆绑、fork 规则仍在。
+// ---------------------------------------------------------------------------
+
+/// 真机截屏 codex-02 的弹窗正文（codex 0.156.1）。
+const CODEX_HOOKS_REVIEW_SCREEN: &str = "\n  Hooks need review\n  3 hooks are new or changed.\n  \
+    Hooks can run outside the sandbox after you trust them.\n\n\n\
+    › 1. Review hooks\n  2. Trust all and continue\n  \
+    3. Continue without trusting (hooks won't run)\n\n  \
+    enter confirm · esc skip\n";
+
+/// 真机截屏 kimi-02 的弹窗正文（Kimi Code 2.0.2，去掉上方的 shell 行与分隔线）。
+const KIMI_TRUST_FOLDER_SCREEN: &str = "  Trust this folder?\n  \
+    ↑↓ navigate · Enter select · Esc exit\n\n  /var/tmp/project\n\n   \
+    ❯ Trust this folder\n     Enable project MCP servers. Remembered for this folder.\n\n     \
+    Don't trust\n     Exit Kimi Code. Asked again next launch.\n";
+
+/// 各 fork 规则与能触发它的真机弹窗。
+const FORK_RULE_SCREENS: [(Agent, &str, &str); 2] = [
+    (
+        Agent::Codex,
+        "startup_hooks_review",
+        CODEX_HOOKS_REVIEW_SCREEN,
+    ),
+    (Agent::Kimi, "trust_folder_prompt", KIMI_TRUST_FOLDER_SCREEN),
+];
+
+/// 上游在 fork 同步之后才发布的新规则（herdr.dev 上的较新版本才有）。
+const UPSTREAM_ONLY_RULE: &str = r#"
+[[rules]]
+id = "upstream_only_working"
+state = "working"
+priority = 800
+region = "whole_recent"
+visible_working = true
+contains = ["upstream-only-marker"]
+"#;
+
+fn write_remote_manifest(agent: Agent, content: &str) {
+    let path = crate::detect::manifest_update::remote_manifest_path(agent);
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(path, content).unwrap();
+    reload_manifests();
+}
+
+fn bundled_version(agent: Agent) -> String {
+    bundled_manifest(agent)
+        .and_then(|manifest| manifest.version)
+        .map(|version| version.to_string())
+        .unwrap()
+}
+
+/// 模拟上游随后发布到 herdr.dev 的版本：捆绑原文换成 `version`，再追加 `extra_rules`。
+fn upstream_remote_manifest(agent: Agent, version: &str, extra_rules: &str) -> String {
+    let (_, content) = BUNDLED_MANIFESTS
+        .iter()
+        .find(|(id, _)| *id == agent_label(agent))
+        .unwrap();
+    let current = format!("version = \"{}\"", bundled_version(agent));
+    assert!(content.contains(&current), "{content}");
+    format!(
+        "{}\n{extra_rules}",
+        content.replacen(&current, &format!("version = \"{version}\""), 1)
+    )
+}
+
+fn explain_for_screen(agent: Agent, screen: &str) -> DetectionExplain {
+    osc_explain(agent, screen, "project", "")
+}
+
+fn matched_rule_id(result: &DetectionExplain) -> Option<&str> {
+    result.matched_rule.as_ref().map(|rule| rule.id.as_str())
+}
+
+#[test]
+fn fork_rules_stay_active_when_a_newer_remote_manifest_wins() {
+    for (agent, rule_id, screen) in FORK_RULE_SCREENS {
+        with_manifest_dirs(&format!("fork-rules-newer-remote-{rule_id}"), || {
+            // 比捆绑新一档的上游版本：远端生效，它独有的规则不能被捆绑遮住。
+            let version = format!("{}.1", bundled_version(agent));
+            let remote = upstream_remote_manifest(agent, &version, UPSTREAM_ONLY_RULE);
+            assert!(!remote.contains(rule_id), "{remote}");
+            write_remote_manifest(agent, &remote);
+
+            let upstream = explain_for_screen(agent, "upstream-only-marker\n");
+            assert_eq!(upstream.state, AgentState::Working, "{agent:?}");
+            assert_eq!(matched_rule_id(&upstream), Some("upstream_only_working"));
+            assert!(matches!(
+                upstream.source,
+                Some(ManifestSource::Remote { .. })
+            ));
+            assert_eq!(upstream.manifest_version.as_deref(), Some(version.as_str()));
+
+            // 远端里没有 fork 规则，叠加层仍让启动弹窗报 blocked。
+            let blocked = explain_for_screen(agent, screen);
+            assert_eq!(blocked.state, AgentState::Blocked, "{agent:?}");
+            assert_eq!(matched_rule_id(&blocked), Some(rule_id));
+            assert!(blocked.visible_blocker);
+            assert!(matches!(
+                blocked.source,
+                Some(ManifestSource::Remote { .. })
+            ));
+        });
+    }
+}
+
+#[test]
+fn fork_rules_stay_active_when_an_older_remote_manifest_falls_back_to_bundled() {
+    for (agent, rule_id, screen) in FORK_RULE_SCREENS {
+        with_manifest_dirs(&format!("fork-rules-older-remote-{rule_id}"), || {
+            write_remote_manifest(
+                agent,
+                &upstream_remote_manifest(agent, "2000.01.01.1", UPSTREAM_ONLY_RULE),
+            );
+
+            let blocked = explain_for_screen(agent, screen);
+            assert_eq!(blocked.state, AgentState::Blocked, "{agent:?}");
+            assert_eq!(matched_rule_id(&blocked), Some(rule_id));
+            assert!(matches!(blocked.source, Some(ManifestSource::Bundled)));
+            assert!(blocked
+                .warning
+                .as_deref()
+                .is_some_and(|warning| warning.contains("older than bundled")));
+
+            // 较旧远端独有的规则不生效：生效的是捆绑。
+            let fallback = explain_for_screen(agent, "upstream-only-marker\n");
+            assert_ne!(matched_rule_id(&fallback), Some("upstream_only_working"));
+        });
+    }
+}
+
+#[test]
+fn remote_rule_with_a_fork_rule_id_takes_precedence_over_the_fork_rule() {
+    with_manifest_dirs("fork-rule-id-owned-by-remote", || {
+        // 上游日后收编同名规则时以上游为准，fork 规则让位且不重复出现。
+        let version = format!("{}.1", bundled_version(Agent::Codex));
+        let remote_rule = r#"
+[[rules]]
+id = "startup_hooks_review"
+state = "working"
+priority = 950
+region = "whole_recent"
+contains = ["Hooks need review"]
+"#;
+        write_remote_manifest(
+            Agent::Codex,
+            &upstream_remote_manifest(Agent::Codex, &version, remote_rule),
+        );
+
+        let result = explain_for_screen(Agent::Codex, CODEX_HOOKS_REVIEW_SCREEN);
+        assert_eq!(result.state, AgentState::Working);
+        assert_eq!(matched_rule_id(&result), Some("startup_hooks_review"));
+        assert_eq!(
+            result
+                .evaluated_rules
+                .iter()
+                .filter(|rule| rule.id == "startup_hooks_review")
+                .count(),
+            1
+        );
+    });
+}
+
+#[test]
+fn local_override_replaces_the_manifest_without_fork_rules() {
+    with_manifest_dirs("fork-rules-not-in-override", || {
+        // 本地覆盖是用户写的整份 manifest：只跑文件里的规则。
+        write_local_codex(&local_manifest("idle", "local-ready"));
+
+        let result = explain_for_screen(Agent::Codex, CODEX_HOOKS_REVIEW_SCREEN);
+        assert!(matches!(result.source, Some(ManifestSource::Override(_))));
+        assert_eq!(result.state, AgentState::Idle);
+        assert_eq!(
+            result.fallback_reason.as_deref(),
+            Some(DEFAULT_KNOWN_AGENT_IDLE_FALLBACK)
+        );
+        assert!(result
+            .evaluated_rules
+            .iter()
+            .all(|rule| rule.id != "startup_hooks_review"));
+    });
+}
+
+/// fork 规则 id 与捆绑 manifest 撞名时叠加层整条让位，规则就成了死代码；同步上游
+/// 后若撞名，删掉 fork 那条（或改名）。
+#[test]
+fn fork_rule_overlays_parse_compile_and_do_not_shadow_bundled_rule_ids() {
+    assert!(!FORK_RULE_OVERLAYS.is_empty());
+    for (id, content) in FORK_RULE_OVERLAYS {
+        let overlay = parse_manifest(content)
+            .unwrap_or_else(|err| panic!("fork {id} rule overlay is invalid: {err}"));
+        assert_eq!(overlay.id.as_str(), *id);
+        let agent = parse_agent_label(id).unwrap();
+        assert!(Agent::SCREEN_MANIFEST_AGENTS.contains(&agent), "{id}");
+        let bundled = bundled_manifest(agent).unwrap();
+        for rule in &overlay.rules {
+            assert!(
+                bundled.rules.iter().all(|existing| existing.id != rule.id),
+                "fork rule {} is shadowed by the bundled {id} manifest",
+                rule.id
+            );
+        }
+        let merged = with_fork_rules(agent, bundled.clone());
+        assert_eq!(
+            merged.rules.len(),
+            bundled.rules.len() + overlay.rules.len()
+        );
+        loaded_manifest(merged, ManifestSource::Bundled, None, None, false)
+            .unwrap_or_else(|err| panic!("fork {id} rule overlay could not be compiled: {err}"));
+    }
+}
+
 #[test]
 fn codex_background_terminal_screen_does_not_override_osc_idle() {
     // Background terminal tasks can be long-lived helpers such as dev servers.
