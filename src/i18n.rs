@@ -534,6 +534,7 @@ pub struct MonitorTexts {
     pub context_window: &'static str,
     pub sessions: &'static str,
     pub subagents: &'static str,
+    pub section_tokens: &'static str,
     pub tokens_input: &'static str,
     pub tokens_output: &'static str,
     pub tokens_reasoning: &'static str,

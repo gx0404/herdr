@@ -5820,6 +5820,93 @@ fn kimi_card_account() -> AccountUsageSnapshot {
     )
 }
 
+/// opencode：本机会话统计（scope = local）。
+fn opencode_card_account() -> AccountUsageSnapshot {
+    use crate::api::schema::UsageMetric;
+    let count = |id: &str, label: &str, unit: &str, value: f64| UsageMetric {
+        used: Some(value),
+        ..usage_metric(id, label, unit, "local")
+    };
+    vendor_account(
+        "opencode",
+        vec![
+            count("sessions", "会话数", "sessions", 42.0),
+            count("child_sessions", "子 agent 会话数", "sessions", 7.0),
+            UsageMetric {
+                amount_decimal: Some("4.5600".into()),
+                ..usage_metric("total_cost", "累计费用", "USD", "local")
+            },
+            count("input_tokens", "输入 token", "tokens", 1_234_567.0),
+            count("output_tokens", "输出 token", "tokens", 345_678.0),
+            count("reasoning_tokens", "推理 token", "tokens", 12_345.0),
+            count("cache_read_tokens", "缓存读取 token", "tokens", 2_000_000.0),
+            count("cache_write_tokens", "缓存写入 token", "tokens", 45_000.0),
+        ],
+    )
+}
+
+/// pi：扩展推送的会话统计（scope = session）。
+fn pi_card_account() -> AccountUsageSnapshot {
+    use crate::api::schema::UsageMetric;
+    let tokens = |id: &str, label: &str, value: f64| UsageMetric {
+        used: Some(value),
+        ..usage_metric(id, label, "tokens", "session")
+    };
+    vendor_account(
+        "pi",
+        vec![
+            UsageMetric {
+                used: Some(45.0),
+                text_value: Some("45%".into()),
+                ..usage_metric("context/percent", "上下文占用", "%", "session")
+            },
+            tokens("context/tokens", "上下文 token", 90_000.0),
+            tokens("context/context_window", "上下文窗口大小", 200_000.0),
+            UsageMetric {
+                amount_decimal: Some("0.1234".into()),
+                ..usage_metric("session/cost_usd", "本会话费用", "USD", "session")
+            },
+            tokens("session/tokens/input", "输入 token", 80_000.0),
+            tokens("session/tokens/output", "输出 token", 12_000.0),
+            tokens("session/tokens/cache_read", "缓存读取 token", 5_000.0),
+            tokens("session/tokens/cache_write", "缓存写入 token", 1_000.0),
+            tokens("session/tokens/total", "合计 token", 98_000.0),
+            UsageMetric {
+                text_value: Some("vendor/model-x".into()),
+                ..usage_metric("session/model", "当前模型", "", "session")
+            },
+        ],
+    )
+}
+
+/// zcode：ZCode 桌面版数据库的本地统计（id 约定见匹配表）。
+fn zcode_card_account() -> AccountUsageSnapshot {
+    use crate::api::schema::UsageMetric;
+    let local = |id: &str, label: &str, unit: &str, value: f64| UsageMetric {
+        used: Some(value),
+        ..usage_metric(id, label, unit, "local")
+    };
+    vendor_account(
+        "zcode",
+        vec![
+            local("session/tokens/main", "主任务 token", "tokens", 1_500_000.0),
+            local(
+                "session/tokens/subagents",
+                "子 agent token",
+                "tokens",
+                300_000.0,
+            ),
+            local("session/tokens/total", "合计 token", "tokens", 1_800_000.0),
+            local("session/tool_uses", "工具调用", "count", 120.0),
+            local("session/subagents", "子 agent", "count", 4.0),
+            UsageMetric {
+                text_value: Some("24h".into()),
+                ..usage_metric("session/window_hours", "统计窗口", "", "local")
+            },
+        ],
+    )
+}
+
 /// 经典布局（未通告 `client.views.set`）的账号页：直接写入厂商选择与账号快照后
 /// 合成 `cols×rows`。页面铺满 pane 区，`observability.page_rect` 就是页面矩形。
 fn cards_page(
@@ -6048,6 +6135,112 @@ fn kimi_card_shows_windows_balance_and_extra_usage() {
             "{host}: 额外用量余额 / 本月 / 上限\n{text}"
         );
     }
+}
+
+#[test]
+fn opencode_card_is_labelled_local_stats_without_gauges() {
+    let _guard = crate::i18n::lang_guard(crate::i18n::Lang::ZhCn);
+    let palette = palette();
+    for (host, state, region) in card_hosts("opencode", || vec![opencode_card_account()]) {
+        let text = region_text(&state, region);
+        let header = row_with(&state, region, "opencode:default").unwrap_or_default();
+        assert!(
+            header.contains("本地统计，非账号额度"),
+            "{host}: 徽标声明本地统计\n{text}"
+        );
+        // 状态移到卡内首行。
+        let status = find_in(&state, region, "已更新").expect("状态行");
+        assert_eq!(cell_style(&state, status).fg, Some(palette.green));
+        for value in ["42", "$4.56", "1.2M", "345.7k", "12.3k", "2M", "45k"] {
+            assert!(
+                find_in(&state, region, value).is_some(),
+                "{host}: {value}\n{text}"
+            );
+        }
+        // token 与费用只画数值，整张卡没有 gauge。
+        assert!(!text.contains('━') && !text.contains('░'), "{host}\n{text}");
+    }
+}
+
+#[test]
+fn pi_card_shows_context_gauge_cost_tokens_and_model() {
+    let _guard = crate::i18n::lang_guard(crate::i18n::Lang::ZhCn);
+    for (host, state, region) in card_hosts("pi", || vec![pi_card_account()]) {
+        let text = region_text(&state, region);
+        assert!(
+            row_with(&state, region, "pi:default").is_some_and(|row| row.contains("会话统计")),
+            "{host}: 徽标声明会话统计\n{text}"
+        );
+        let context = row_with(&state, region, "上下文").unwrap_or_default();
+        assert!(
+            context.contains("45%") && context.contains('━'),
+            "{host}: 上下文占用 gauge\n{text}"
+        );
+        assert!(
+            row_with(&state, region, "费用").is_some_and(|row| row.contains("$0.1234")),
+            "{host}\n{text}"
+        );
+        assert!(
+            row_with(&state, region, "模型").is_some_and(|row| row.contains("vendor/model-x")),
+            "{host}\n{text}"
+        );
+        for value in ["80k", "12k", "98k", "5k", "1k"] {
+            assert!(
+                find_in(&state, region, value).is_some(),
+                "{host}: token {value}\n{text}"
+            );
+        }
+    }
+}
+
+#[test]
+fn pi_card_without_data_is_an_empty_state() {
+    let _guard = crate::i18n::lang_guard(crate::i18n::Lang::ZhCn);
+    for (host, state, region) in card_hosts("pi", || vec![vendor_account("pi", Vec::new())]) {
+        let text = region_text(&state, region);
+        assert!(
+            find_in(&state, region, "暂无会话数据").is_some(),
+            "{host}: 没有推送时是空态\n{text}"
+        );
+        assert!(
+            find_in(&state, region, "pi:default").is_some(),
+            "{host}\n{text}"
+        );
+    }
+}
+
+#[test]
+fn zcode_card_appears_only_for_a_zcode_account() {
+    let _guard = crate::i18n::lang_guard(crate::i18n::Lang::ZhCn);
+    for (host, state, region) in card_hosts("zcode", || vec![zcode_card_account()]) {
+        let text = region_text(&state, region);
+        assert!(
+            row_with(&state, region, "zcode:default")
+                .is_some_and(|row| row.contains("本地统计，非账号额度")),
+            "{host}: 徽标声明本地统计\n{text}"
+        );
+        for (label, value) in [("主任务", "1.5M"), ("合计", "1.8M"), ("工具调用", "120")] {
+            assert!(
+                row_with(&state, region, label).is_some_and(|row| row.contains(value)),
+                "{host}: {label} {value}\n{text}"
+            );
+        }
+        assert!(find_in(&state, region, "24h").is_some(), "{host}\n{text}");
+        assert!(!text.contains('━'), "{host}: 本地统计不画 gauge\n{text}");
+    }
+    // 快照里没有 zcode 账号：不画 zcode 卡片（客户端不凭空造厂商）。
+    let state = cards_page(
+        None,
+        vec![claude_card_account(), codex_card_account()],
+        120,
+        40,
+    );
+    let region = state.observability.page_rect;
+    assert!(
+        find_in(&state, region, "zcode").is_none(),
+        "{}",
+        region_text(&state, region)
+    );
 }
 
 #[test]

@@ -543,6 +543,44 @@ fn kimi<'a>(lines: &mut Vec<Line<'a>>, picker: &mut Picker<'a>, cx: Cx) {
     push_slot_stats(lines, extra, None, cx);
 }
 
+/// opencode：本机会话统计——会话数 / 子 agent 会话 / 累计费用，token 五项只画
+/// 数值（不是账号额度，不画 gauge）。
+fn opencode<'a>(lines: &mut Vec<Line<'a>>, picker: &mut Picker<'a>, cx: Cx) {
+    let top = picker.take_all(&[Slot::Sessions, Slot::SubagentSessions, Slot::Cost]);
+    push_slot_stats(lines, top, None, cx);
+    let tokens = picker.take_all(&[
+        Slot::TokensInput,
+        Slot::TokensOutput,
+        Slot::TokensReasoning,
+        Slot::TokensCacheRead,
+        Slot::TokensCacheWrite,
+    ]);
+    push_slot_stats(lines, tokens, Some(cx.texts.section_tokens), cx);
+}
+
+/// pi：会话卡——上下文占用 gauge、本会话费用与模型、token 明细。
+fn pi<'a>(lines: &mut Vec<Line<'a>>, picker: &mut Picker<'a>, cx: Cx) {
+    push_context(lines, picker, cx);
+    let head = picker.take_all(&[Slot::Cost, Slot::Model]);
+    push_slot_stats(lines, head, None, cx);
+    let tokens = picker.take_all(&[
+        Slot::TokensInput,
+        Slot::TokensOutput,
+        Slot::TokensTotal,
+        Slot::TokensCacheRead,
+        Slot::TokensCacheWrite,
+    ]);
+    push_slot_stats(lines, tokens, Some(cx.texts.section_tokens), cx);
+}
+
+/// zcode：本地统计卡——主任务 / 子 agent / 合计 token，工具调用、子 agent 数与统计窗口。
+fn zcode<'a>(lines: &mut Vec<Line<'a>>, picker: &mut Picker<'a>, cx: Cx) {
+    let tokens = picker.take_all(&[Slot::TokensMain, Slot::TokensSubagents, Slot::TokensTotal]);
+    push_slot_stats(lines, tokens, Some(cx.texts.section_tokens), cx);
+    let counts = picker.take_all(&[Slot::ToolUses, Slot::Subagents, Slot::WindowHours]);
+    push_slot_stats(lines, counts, None, cx);
+}
+
 /// 一个账号的卡片：状态行、说明行，然后按 `account.agent` 分派的厂商排布；排布
 /// 没用到的指标逐条画通用行，没有任何可显示内容时画空态。
 pub(super) fn build_card<'a>(
@@ -573,6 +611,9 @@ pub(super) fn build_card<'a>(
         "claude" => claude(&mut lines, &mut picker, cx),
         "codex" => codex(&mut lines, &mut picker, cx),
         "kimi" => kimi(&mut lines, &mut picker, cx),
+        "opencode" => opencode(&mut lines, &mut picker, cx),
+        "pi" => pi(&mut lines, &mut picker, cx),
+        "zcode" => zcode(&mut lines, &mut picker, cx),
         _ => {}
     }
     lines.extend(picker.rest().map(|metric| generic_line(metric, cx)));

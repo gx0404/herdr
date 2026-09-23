@@ -390,6 +390,7 @@ pub const TEXTS: Texts = Texts {
         context_window: "Context window",
         sessions: "Sessions",
         subagents: "Sub-agents",
+        section_tokens: "Tokens",
         tokens_input: "Input",
         tokens_output: "Output",
         tokens_reasoning: "Reasoning",

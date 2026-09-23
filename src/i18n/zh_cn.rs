@@ -411,6 +411,7 @@ pub const TEXTS: Texts = Texts {
         context_window: "上下文窗口",
         sessions: "会话",
         subagents: "子 agent",
+        section_tokens: "Token 用量",
         tokens_input: "输入",
         tokens_output: "输出",
         tokens_reasoning: "推理",
