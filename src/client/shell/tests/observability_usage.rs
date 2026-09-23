@@ -6030,6 +6030,7 @@ fn palette() -> crate::app::state::Palette {
 fn claude_card_shows_three_windows_overflow_stale_and_session_row() {
     let _guard = crate::i18n::lang_guard(crate::i18n::Lang::ZhCn);
     let palette = palette();
+    let dim = ratatui::style::Modifier::DIM;
     for (host, state, region) in card_hosts("claude", || vec![claude_card_account()]) {
         let text = region_text(&state, region);
         assert!(
@@ -6049,17 +6050,34 @@ fn claude_card_shows_three_windows_overflow_stale_and_session_row() {
             Some(palette.red),
             "{host}: 溢出标记是红色"
         );
-        // 每周窗口已过重置时间：沿用上次值、整行 DIM，窄档至少保住数字。
+        // 每周窗口已过重置时间：沿用上次值。只弱化一次——文字按 stale 转灰，DIM 只
+        // 叠在条形格上；数字与标签不能既是 overlay0 又带 DIM（半亮渲染 DIM 的终端上
+        // 看不清）。窄档至少保住数字。
         let weekly = find_in(&state, region, "每周").expect("每周窗口");
         assert!(
             row_with(&state, region, "每周").is_some_and(|row| row.contains("91%")),
             "{host}: 过期窗口仍显示上次值\n{text}"
         );
+        let number = find_in(&state, region, "91%").expect("过期窗口的数字");
+        for (what, cell) in [("数字", number), ("标签", weekly)] {
+            let style = cell_style(&state, cell);
+            assert!(
+                !(style.fg == Some(palette.overlay0) && style.add_modifier.contains(dim)),
+                "{host}: 过期窗口的{what}不被弱化两次: {style:?}"
+            );
+        }
+        let bar = (region.x..region.right())
+            .filter(|x| {
+                let buffer = state.compose_buffer.as_ref().expect("帧缓冲");
+                matches!(buffer[(*x, number.1)].symbol(), "━" | "░" | "┃" | "▸")
+            })
+            .collect::<Vec<_>>();
+        assert!(!bar.is_empty(), "{host}: 过期窗口仍画条形\n{text}");
         assert!(
-            cell_style(&state, weekly)
+            bar.iter().all(|x| cell_style(&state, (*x, number.1))
                 .add_modifier
-                .contains(ratatui::style::Modifier::DIM),
-            "{host}: 过期窗口整行 DIM"
+                .contains(dim)),
+            "{host}: 过期窗口的条形 DIM"
         );
         // 上下文为 null：「暂无数据」灰字，不当成 0%。
         let pending = find_in(&state, region, "暂无数据").expect("上下文暂无数据");
@@ -6074,13 +6092,19 @@ fn claude_card_shows_three_windows_overflow_stale_and_session_row() {
             "{host}: 本会话费用\n{text}"
         );
     }
-    // 宽页面上过期窗口写明原因。
+    // 宽页面上过期窗口写明原因，说明同样只弱化一次。
     let state = cards_page(Some("claude"), vec![claude_card_account()], 120, 40);
     let region = state.observability.page_rect;
     assert!(
         row_with(&state, region, "每周").is_some_and(|row| row.contains("已过重置")),
         "{}",
         region_text(&state, region)
+    );
+    let note = find_in(&state, region, "已过重置").expect("过期说明");
+    let style = cell_style(&state, note);
+    assert!(
+        !(style.fg == Some(palette.overlay0) && style.add_modifier.contains(dim)),
+        "过期说明不被弱化两次: {style:?}"
     );
 }
 

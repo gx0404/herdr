@@ -74,7 +74,8 @@ pub(super) struct Meter<'a> {
     pub window: Option<f32>,
     /// 灰色：缓存 / 失效数据，或未知值。
     pub stale: bool,
-    /// 额度窗口已过重置时间：整行 DIM，沿用上次值。
+    /// 额度窗口已过重置时间：沿用上次值，文字随 `stale` 转灰，条形再叠 DIM
+    /// （只弱化一次，数字与说明不叠 DIM）。
     pub expired: bool,
 }
 
@@ -206,7 +207,7 @@ pub(super) struct Cx {
 }
 
 /// 额度窗口 meter：数字是百分比（可超过 100），说明是用量（`used/limit`）与距重置；
-/// 过期窗口灰 + DIM 并写「已过重置 · 沿用上次值」。`slot` 是匹配表给的
+/// 过期窗口灰字、条形 DIM，并写「已过重置 · 沿用上次值」。`slot` 是匹配表给的
 /// 槽位（通用行为 `None`），固定窗口据它补名义长度画进度刻度。
 pub(super) fn quota_meter<'a>(
     label: Cow<'a, str>,

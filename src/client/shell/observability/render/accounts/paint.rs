@@ -255,8 +255,8 @@ fn pad(text: &str, width: u16, end: bool) -> Cow<'_, str> {
     }
 }
 
-/// 一条额度 meter：kit `meter_row`（数字永不裁，窄时先砍条形）+ 过期窗口 DIM。
-/// 按卡片的列宽补齐，同卡的条形起止对齐。
+/// 一条额度 meter：kit `meter_row`（数字永不裁，窄时先砍条形）；过期窗口的条形
+/// 再叠 DIM。按卡片的列宽补齐，同卡的条形起止对齐。
 fn meter_line(
     buffer: &mut Buffer,
     rect: Rect,
@@ -272,25 +272,63 @@ fn meter_line(
         None if columns.detail > 0 => Some(pad("", columns.detail, true)),
         None => None,
     };
-    render_meter_row(
-        buffer,
-        rect,
-        &MeterRow {
-            label: &label,
-            value: &value,
-            detail: detail.as_deref(),
-            gauge: GaugeSpec {
-                ratio: meter.ratio,
-                window_progress: meter.window,
-                ascii: paint.ascii,
-                ..GaugeSpec::default()
-            },
-            stale: meter.stale,
+    let row = MeterRow {
+        label: &label,
+        value: &value,
+        detail: detail.as_deref(),
+        gauge: GaugeSpec {
+            ratio: meter.ratio,
+            window_progress: meter.window,
+            ascii: paint.ascii,
+            ..GaugeSpec::default()
         },
-        paint.palette,
-    );
+        stale: meter.stale,
+    };
+    render_meter_row(buffer, rect, &row, paint.palette);
     if meter.expired {
-        buffer.set_style(rect, Style::default().add_modifier(Modifier::DIM));
+        dim_gauge_cells(buffer, rect, &row, paint.palette);
+    }
+}
+
+/// 过期窗口只弱化一次：文字已按 stale 转成 overlay0，整行再叠 DIM 会让沿用的
+/// 数字与「已过重置 · 沿用上次值」在把 DIM 渲染成半亮的终端上几乎看不清，所以
+/// DIM 只加在条形格上（与仅是缓存的 stale 行区分开）。条形的起止由 kit 的宽度
+/// 预算决定：用同宽的空白文字在暂存行里画两遍（空条 / 满条），两遍不同的格子
+/// 就是条形——不依赖字形与主题色，标签被截断时的省略号也不会被误认。只在过期
+/// 窗口上走，不在 pane 规模路径上。
+fn dim_gauge_cells(buffer: &mut Buffer, rect: Rect, row: &MeterRow<'_>, palette: &Palette) {
+    let blank = |text: &str| " ".repeat(usize::from(crate::ui::display_width_u16(text)));
+    let (label, value) = (blank(row.label), blank(row.value));
+    let detail = row.detail.map(blank);
+    let area = Rect::new(0, 0, rect.width, 1);
+    let scratch = |ratio: Option<f32>| {
+        let mut scratch = Buffer::empty(area);
+        render_meter_row(
+            &mut scratch,
+            area,
+            &MeterRow {
+                label: &label,
+                value: &value,
+                detail: detail.as_deref(),
+                gauge: GaugeSpec {
+                    ratio,
+                    ascii: row.gauge.ascii,
+                    ..GaugeSpec::default()
+                },
+                stale: row.stale,
+            },
+            palette,
+        );
+        scratch
+    };
+    let (empty, full) = (scratch(None), scratch(Some(1.0)));
+    for offset in 0..rect.width {
+        if empty[(offset, 0)] == full[(offset, 0)] {
+            continue;
+        }
+        if let Some(cell) = buffer.cell_mut((rect.x + offset, rect.y)) {
+            cell.set_style(Style::default().add_modifier(Modifier::DIM));
+        }
     }
 }
 
@@ -877,6 +915,75 @@ mod tests {
             account("codex", "codex:default", ObservationStatus::Ready),
         ];
         assert_eq!(account_rows(&state, &hover, &[]), 5);
+    }
+
+    /// 过期窗口只弱化一次：文字随 stale 转灰，DIM 只落在条形格上（ascii 字形同理，
+    /// 数字里的 `.` 不会被当成空条）；窄到条形被砍掉时整行都不带 DIM。
+    #[test]
+    fn expired_meter_dims_only_the_bar() {
+        let palette = config().palette;
+        let meter = Meter {
+            label: Cow::Borrowed("Weekly"),
+            value: "91.5%".into(),
+            detail: Some("past reset".into()),
+            ratio: Some(0.915),
+            window: None,
+            stale: true,
+            expired: true,
+        };
+        let columns = MeterColumns {
+            label: 6,
+            value: 5,
+            detail: 10,
+        };
+        let dim = |buffer: &Buffer, x: u16| buffer[(x, 0)].modifier.contains(Modifier::DIM);
+        for ascii in [false, true] {
+            let paint = Paint {
+                palette: &palette,
+                glyphs: crate::ui::BorderGlyphs::SINGLE,
+                ascii,
+                now_ms: 0,
+            };
+            let area = Rect::new(0, 0, 40, 1);
+            let mut buffer = Buffer::empty(area);
+            meter_line(&mut buffer, area, &meter, columns, paint);
+            let text = row_text(&buffer, 0);
+            let column = |needle: &str| {
+                let byte = text.find(needle).expect("文字可见");
+                text[..byte].chars().count() as u16
+            };
+            for needle in ["Weekly", "91.5%", "past reset"] {
+                let start = column(needle);
+                for x in start..start + needle.len() as u16 {
+                    assert!(!dim(&buffer, x), "ascii={ascii}: {needle} 不叠 DIM: {text}");
+                    assert_eq!(buffer[(x, 0)].fg, palette.overlay0, "文字按 stale 转灰");
+                }
+            }
+            let (filled, empty) = if ascii { ("#", ".") } else { ("━", "░") };
+            let bar = (0..area.width)
+                .filter(|x| matches!(buffer[(*x, 0)].symbol(), s if s == filled || s == empty))
+                .filter(|x| *x < column("91.5%"))
+                .collect::<Vec<_>>();
+            assert!(!bar.is_empty(), "ascii={ascii}: 有条形: {text}");
+            assert!(bar.iter().all(|x| dim(&buffer, *x)), "条形格 DIM: {text}");
+            let dimmed = (0..area.width).filter(|x| dim(&buffer, *x)).count();
+            assert_eq!(dimmed, bar.len(), "只有条形格带 DIM: {text}");
+        }
+        let area = Rect::new(0, 0, 10, 1);
+        let mut buffer = Buffer::empty(area);
+        let paint = Paint {
+            palette: &palette,
+            glyphs: crate::ui::BorderGlyphs::SINGLE,
+            ascii: false,
+            now_ms: 0,
+        };
+        meter_line(&mut buffer, area, &meter, columns, paint);
+        assert!(row_text(&buffer, 0).contains("91.5%"));
+        assert!(
+            (0..area.width).all(|x| !dim(&buffer, x)),
+            "条形被砍掉时没有 DIM: {}",
+            row_text(&buffer, 0)
+        );
     }
 
     /// 数值项：数字永不截断，列宽不够先截再丢标签。
