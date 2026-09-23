@@ -162,6 +162,8 @@ herdr integration install opencode
 
 V2 生命周期上报在窗格本地的 TUI 中运行。即使多个窗格共享同一个 OpenCode 服务端，事件也只归属于该 TUI 选中的根会话。完成和中断会清除工作状态；待处理的权限请求、表单以及执行失败会使窗格保持阻塞。V2 Mini 和无界面客户端不运行 TUI 插件，因此不提供此生命周期上报。
 
+在 OpenCode V1 下，服务端插件只在 OpenCode 自己报告会话忙碌（`session.status`）时上报 `working`，并按 OpenCode 发出事件的顺序发送上报，因此回合结束后窗格总会回到 `idle`。其他插件只添加消息、不启动回合时（`noReply` 提示，例如后台任务的通知），窗格状态不会改变。
+
 该插件在 OpenCode 运行于 Herdr 窗格内时上报生命周期状态和会话身份。在 OpenCode 发出携带会话信息的事件后,Herdr 可以用上报的会话 id 通过 `opencode --session <id>` 恢复该窗格。插件未安装时,屏幕清单检测仍然可用。
 
 ## 已退役的集成

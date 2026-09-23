@@ -14,7 +14,8 @@ let requestChain = Promise.resolve();
 let reportedRootSessionID;
 
 // Track child sessions so their events cannot replace the pane's root session.
-// User prompts carry the root id to preserve its identity and cross-talk guard.
+// Root status reports carry the root id to preserve its identity and
+// cross-talk guard; child prompts that block report against their root.
 // A session counts as a child when its parentID is a non-empty string naming a
 // different session. OpenCode maps rows as `parentID: parent_id ?? undefined`,
 // so a root's own events carry the key with no value and stay roots; requiring
@@ -174,6 +175,88 @@ function reportActivity(hint) {
   });
 }
 
+function rootSessionOf(sessionID) {
+  let rootSessionID = sessionID;
+  while (childSessions.has(rootSessionID)) {
+    rootSessionID = childSessions.get(rootSessionID);
+  }
+  return rootSessionID;
+}
+
+// Every report an event causes is queued before this returns, so reports
+// leave in event order. OpenCode delivers events without awaiting handlers,
+// and a turn ends in one burst: the last loop step publishes busy, then the
+// runner publishes idle and session.idle. Awaiting anything before queueing
+// the state report let that busy report overtake the idle ones and strand the
+// pane on working.
+function handleEvent(event) {
+  const type = event?.type;
+  const properties = event?.properties ?? {};
+  const sessionID = sessionIDFromProperties(properties);
+  const reports = [];
+
+  const info = properties.info;
+  if (isChildInfo(info)) {
+    childSessions.set(info.id, info.parentID);
+  }
+  if (ACTIVITY_EVENTS.has(type)) {
+    reports.push(reportActivity(type));
+  }
+  if (sessionID && childSessions.has(sessionID)) {
+    const state = CHILD_EVENT_STATES.get(type);
+    if (state) {
+      reports.push(reportState(state, rootSessionOf(sessionID)));
+    }
+    return settle(reports);
+  }
+
+  switch (type) {
+    case "session.created":
+      // Creation is server-global, so an attached client may own it. The
+      // TUI plugin separately reports the root selected in this pane.
+      reportedRootSessionID = sessionID;
+      break;
+    case "session.updated":
+      if (sessionID && sessionID !== reportedRootSessionID) {
+        reports.push(reportSession(sessionID));
+      }
+      break;
+    case "session.status": {
+      // A turn starts `working` only here: OpenCode's session runner sets busy
+      // whenever a turn actually runs and idle when it ends. The replies below
+      // only resume a turn that is already running.
+      const state = stateFromSessionStatus(properties.status);
+      reports.push(state ? reportState(state, sessionID) : reportSession(sessionID));
+      break;
+    }
+    case "tool.execute.before":
+    case "tool.execute.after":
+    case "permission.replied":
+    case "question.replied":
+    case "question.rejected":
+    case "session.compacted":
+      reports.push(reportState("working", sessionID));
+      break;
+    case "permission.asked":
+    case "question.asked":
+    case "session.error":
+      reports.push(reportState("blocked", sessionID));
+      break;
+    case "session.idle":
+      reports.push(reportState("idle", sessionID));
+      break;
+    case "session.deleted":
+      break;
+    default:
+      break;
+  }
+  return settle(reports);
+}
+
+function settle(reports) {
+  return Promise.all(reports).then(() => undefined);
+}
+
 export const HerdrAgentStatePlugin = async () => {
   if (
     process.env.HERDR_ENV !== "1" ||
@@ -183,79 +266,13 @@ export const HerdrAgentStatePlugin = async () => {
     return {};
   }
 
+  // No `chat.message` hook: OpenCode runs it for every message it stores,
+  // including ones that never start a turn. `session.prompt` with
+  // `noReply: true` (plugins use it to leave a note for the next turn) stores
+  // the message and returns without running the loop, so no idle would follow
+  // a `working` reported there.
   return {
-    "chat.message": async ({ sessionID }) => {
-      if (sessionID && childSessions.has(sessionID)) {
-        return;
-      }
-      await reportState("working", sessionID);
-    },
-    event: async ({ event }) => {
-      const type = event?.type;
-      const properties = event?.properties ?? {};
-      const sessionID = sessionIDFromProperties(properties);
-
-      const info = properties.info;
-      if (isChildInfo(info)) {
-        childSessions.set(info.id, info.parentID);
-      }
-      if (ACTIVITY_EVENTS.has(type)) {
-        await reportActivity(type);
-      }
-      if (sessionID && childSessions.has(sessionID)) {
-        const state = CHILD_EVENT_STATES.get(type);
-        if (state) {
-          let rootSessionID = sessionID;
-          while (childSessions.has(rootSessionID)) {
-            rootSessionID = childSessions.get(rootSessionID);
-          }
-          await reportState(state, rootSessionID);
-        }
-        return;
-      }
-
-      switch (type) {
-        case "session.created":
-          // Creation is server-global, so an attached client may own it. The
-          // TUI plugin separately reports the root selected in this pane.
-          reportedRootSessionID = sessionID;
-          break;
-        case "session.updated":
-          if (sessionID && sessionID !== reportedRootSessionID) {
-            await reportSession(sessionID);
-          }
-          break;
-        case "session.status": {
-          const state = stateFromSessionStatus(properties.status);
-          if (state) {
-            await reportState(state, sessionID);
-          } else {
-            await reportSession(sessionID);
-          }
-          break;
-        }
-        case "tool.execute.before":
-        case "tool.execute.after":
-        case "permission.replied":
-        case "question.replied":
-        case "question.rejected":
-        case "session.compacted":
-          await reportState("working", sessionID);
-          break;
-        case "permission.asked":
-        case "question.asked":
-        case "session.error":
-          await reportState("blocked", sessionID);
-          break;
-        case "session.idle":
-          await reportState("idle", sessionID);
-          break;
-        case "session.deleted":
-          break;
-        default:
-          break;
-      }
-    },
+    event: ({ event }) => handleEvent(event),
   };
 };
 

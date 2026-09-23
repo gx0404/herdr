@@ -111,6 +111,63 @@ test("serializes lifecycle reports", async () => {
   expect(activityHints()).toEqual(["session.status", "session.status"]);
 });
 
+// Smoke M4. OpenCode delivers events without awaiting plugin handlers, and a
+// turn ends in one burst: the last loop step publishes busy, then the runner
+// publishes idle and session.idle. The pane must end idle, in event order.
+test("a turn that ends with a busy/idle burst leaves the pane idle", async () => {
+  const plugin = await loadPlugin();
+
+  await Promise.all([
+    plugin.event({
+      event: {
+        type: "session.status",
+        properties: { sessionID: "root-session", status: { type: "busy" } },
+      },
+    }),
+    plugin.event({
+      event: {
+        type: "session.status",
+        properties: { sessionID: "root-session", status: { type: "idle" } },
+      },
+    }),
+    plugin.event({
+      event: { type: "session.idle", properties: { sessionID: "root-session" } },
+    }),
+  ]);
+
+  expect(lifecycle().map(requestState)).toEqual(["working", "idle", "idle"]);
+  const sequences = lifecycle().map(requestSeq) as number[];
+  expect(sequences[1]).toBeGreaterThan(sequences[0]);
+  expect(sequences[2]).toBeGreaterThan(sequences[1]);
+});
+
+// Smoke M4. A plugin can store a message without starting a turn
+// (`session.prompt` with `noReply: true`, e.g. oh-my-openagent's silent
+// background-task wake). OpenCode still runs the `chat.message` hook and
+// publishes message events for it, but no busy/idle status follows, so nothing
+// about that message may put an idle pane back to working.
+test("a message stored without starting a turn keeps the pane idle", async () => {
+  const plugin = await loadPlugin();
+  const status = (type: string) =>
+    plugin.event({
+      event: { type: "session.status", properties: { sessionID: "root-session", status: { type } } },
+    });
+
+  await status("busy");
+  await status("idle");
+  await plugin.event({ event: { type: "session.idle", properties: { sessionID: "root-session" } } });
+
+  const message = { id: "msg-injected", sessionID: "root-session", role: "user" };
+  const parts = [{ id: "prt-injected", type: "text", text: "background task finished" }];
+  await plugin["chat.message"]?.({ sessionID: "root-session" }, { message, parts });
+  await plugin.event({ event: { type: "message.updated", properties: { info: message } } });
+  await plugin.event({
+    event: { type: "message.part.updated", properties: { part: { ...parts[0], sessionID: "root-session" } } },
+  });
+
+  expect(lifecycle().map(requestState)).toEqual(["working", "idle", "idle"]);
+});
+
 test("suppresses redundant same-session updates", async () => {
   const plugin = await loadPlugin();
 
@@ -137,14 +194,14 @@ test("suppresses redundant same-session updates", async () => {
 test("does not classify server activity in another root session as a selection", async () => {
   const plugin = await loadPlugin();
 
-  await plugin["chat.message"]({ sessionID: "visible-session" });
-  await plugin["chat.message"]({ sessionID: "attached-client-session" });
+  await busy(plugin, "visible-session");
+  await busy(plugin, "attached-client-session");
 
-  expect(requests.map(requestMethod)).toEqual([
+  expect(lifecycle().map(requestMethod)).toEqual([
     "pane.report_agent",
     "pane.report_agent",
   ]);
-  expect(requests.map(requestSessionID)).toEqual([
+  expect(lifecycle().map(requestSessionID)).toEqual([
     "visible-session",
     "attached-client-session",
   ]);
@@ -159,7 +216,7 @@ test("does not classify server-global root creation as a local selection", async
   await plugin.event({
     event: { type: "session.updated", properties: { sessionID: "attached-session" } },
   });
-  await plugin["chat.message"]({ sessionID: "attached-session" });
+  await busy(plugin, "attached-session");
 
   expect(lifecycle().map(requestMethod)).toEqual(["pane.report_agent"]);
   expect(lifecycle().map(requestSessionID)).toEqual(["attached-session"]);
@@ -235,7 +292,7 @@ test("routes nested child prompts to their own root, not the last active root", 
   ]) {
     await plugin.event({ event: { type: "session.created", properties: { info } } });
   }
-  await plugin["chat.message"]({ sessionID: "other-root" });
+  await busy(plugin, "other-root");
   await plugin.event({
     event: { type: "permission.asked", properties: { sessionID: "nested-session" } },
   });
@@ -245,7 +302,7 @@ test("routes nested child prompts to their own root, not the last active root", 
   await plugin.event({
     event: { type: "session.idle", properties: { sessionID: "nested-session" } },
   });
-  await plugin["chat.message"]({ sessionID: "nested-session" });
+  await busy(plugin, "nested-session");
 
   expect(lifecycle().map(requestState)).toEqual(["working", "blocked", "working"]);
   expect(lifecycle().map(requestSessionID)).toEqual([
@@ -258,7 +315,7 @@ test("routes nested child prompts to their own root, not the last active root", 
 test("any parentID naming another session makes a child, even an unseen parent", async () => {
   const plugin = await loadPlugin();
 
-  // A parentID equal to the session itself keeps it a root: its prompts report
+  // A parentID equal to the session itself keeps it a root: its turns report
   // as its own. OpenCode never gives a root a parentID value, so only a broken
   // self-reference can reach here.
   await plugin.event({
@@ -267,7 +324,7 @@ test("any parentID naming another session makes a child, even an unseen parent",
       properties: { sessionID: "self-parent", info: { id: "self-parent", parentID: "self-parent" } },
     },
   });
-  await plugin["chat.message"]({ sessionID: "self-parent" });
+  await busy(plugin, "self-parent");
 
   // A child whose parent's events never reached this process is still a child:
   // it must not report its own id as the pane's agent session. Its blocking
@@ -284,7 +341,7 @@ test("any parentID naming another session makes a child, even an unseen parent",
       properties: { sessionID: "stray", info: { id: "stray", parentID: "never-seen" } },
     },
   });
-  await plugin["chat.message"]({ sessionID: "stray" });
+  await busy(plugin, "stray");
   await plugin.event({
     event: { type: "permission.asked", properties: { sessionID: "stray" } },
   });
@@ -305,7 +362,7 @@ test("any parentID naming another session makes a child, even an unseen parent",
   await plugin.event({
     event: { type: "permission.asked", properties: { sessionID: "resumed-child" } },
   });
-  await plugin["chat.message"]({ sessionID: "resumed-child" });
+  await busy(plugin, "resumed-child");
 
   expect(lifecycle().map(requestMethod)).toEqual([
     "pane.report_agent",
@@ -441,9 +498,18 @@ test("dual server entrypoint keeps V1 hooks and never reports from the V2 shared
   expect(await module.default.setup({})).toBeUndefined();
   expect(requests).toHaveLength(0);
   const hooks = await module.default.server();
-  await hooks["chat.message"]({ sessionID: "v1-root" });
-  expect(requests.map(requestState)).toEqual(["working"]);
+  expect(Object.keys(hooks)).toEqual(["event"]);
+  await busy(hooks, "v1-root");
+  expect(lifecycle().map(requestState)).toEqual(["working"]);
+  expect(lifecycle().map(requestSessionID)).toEqual(["v1-root"]);
 });
+
+// Drives `working` the way OpenCode does when a turn runs in `sessionID`.
+function busy(plugin: { event: (input: unknown) => Promise<unknown> }, sessionID: string) {
+  return plugin.event({
+    event: { type: "session.status", properties: { sessionID, status: { type: "busy" } } },
+  });
+}
 
 function requestState(request: unknown): unknown {
   return requestParam(request, "state");

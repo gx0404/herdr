@@ -2343,15 +2343,15 @@
       "anchor": "Install integrations > OpenCode",
       "doc": "docs/next/website/src/content/docs/integrations.mdx",
       "id": "docs-next-website-src-content-docs-integrations-mdx-install-integrations-opencode-part1",
-      "source_sha256": "ccef21d21fc337e36513173c4577cf229d0f1bf232df2d34447771be008e3238",
+      "source_sha256": "ac09c2a77bc1d424047cc45fb65db461185cf20112cde2d1e01bcc78465475b7",
       "text": "## OpenCode\n\nInstall the OpenCode plugin:\n\n```bash\nherdr integration install opencode\n```\n\nThe integration supports OpenCode V1 `1.18.29` or later and OpenCode V2 (tested with beta `19242`). The OpenCode config directory must already exist. Herdr installs the server entrypoint at `~/.config/opencode/plugins/herdr-agent-state.js`, the shared TUI plugin at `herdr-tui-session.js`, and a V2 TUI entrypoint at `herdr-opencode/tui.js` in that config directory.\n\nInstall registers the V1 TUI plugin in `tui.jsonc` and the V2 TUI plugin in `cli.json`, preserving other preferences and plugins. If OpenCode still has V1 TUI preferences to import (`tui.json` or `kv.json`), Herdr defers registration so the first-start migration can run; start `opencode2` once and reinstall the integration afterward. Otherwise Herdr creates `cli.json` with the plugin registration. Restart the OpenCode TUI after installation. Uninstall removes the managed plugin files and their configuration entries.\n\nV2 lifecycle reporting runs in the pane-local TUI, which associates events with its selected root session even when multiple panes share one OpenCode server. Completion and interruption clear the working state; pending permission requests, pending forms, and failed executions keep the pane blocked. V2 Mini and headless clients do not run the TUI plugin and therefore do not provide this lifecycle reporting.\n"
     },
     {
       "anchor": "Install integrations > OpenCode",
       "doc": "docs/next/website/src/content/docs/integrations.mdx",
       "id": "docs-next-website-src-content-docs-integrations-mdx-install-integrations-opencode-part2",
-      "source_sha256": "ccef21d21fc337e36513173c4577cf229d0f1bf232df2d34447771be008e3238",
-      "text": "The plugin reports lifecycle state and session identity while OpenCode runs inside a Herdr pane. After OpenCode emits a session-bearing event, Herdr can use the reported session id to resume the pane with `opencode --session <id>`. Native screen manifest detection remains available when the plugin is not installed."
+      "source_sha256": "ac09c2a77bc1d424047cc45fb65db461185cf20112cde2d1e01bcc78465475b7",
+      "text": "With OpenCode V1, the server plugin reports `working` only while OpenCode itself reports the session as busy (`session.status`), and it sends its reports in the order OpenCode emits the events, so a finished turn always leaves the pane `idle`. A message that another plugin adds without starting a turn (a `noReply` prompt, for example a background-task note) does not change the pane's state.\n\nThe plugin reports lifecycle state and session identity while OpenCode runs inside a Herdr pane. After OpenCode emits a session-bearing event, Herdr can use the reported session id to resume the pane with `opencode --session <id>`. Native screen manifest detection remains available when the plugin is not installed."
     },
     {
       "anchor": "Install integrations > Pi",
