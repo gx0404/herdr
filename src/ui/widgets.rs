@@ -193,18 +193,77 @@ pub(crate) fn input_field_bg(palette: &Palette) -> Color {
     Color::Reset
 }
 
-/// 聚焦态输入框底色：比 [`input_field_bg`] 亮一档，让文本字段的 `Focused`
-/// 与 `Normal` 在肉眼上可分辨（M8：合并前两者本就同色，不是回归但要修）。
-/// 与 `input_field_bg` 同一套回退结构面 token，只是从下一档开始找，找不到
-/// 更亮的就退回普通底色（不会比 `input_field_bg` 更难看）。
-pub(crate) fn input_field_focused_bg(palette: &Palette) -> Color {
+/// 正文叠在输入框底色上的对比度目标（WCAG AA 正文 4.5:1）。主题常态本身就
+/// 达不到时以常态为准：聚焦态只要求「不比常态更难读」。
+const INPUT_TEXT_MIN_CONTRAST: f32 = 4.5;
+
+/// 输入框占位符的候选前景，按「弱 → 强」排列：默认 `overlay0`，底色吞掉它时
+/// 依次换更亮的一档。
+fn placeholder_candidates(palette: &Palette) -> [Color; 3] {
+    [palette.overlay0, palette.overlay1, palette.subtext0]
+}
+
+/// 叠在 `bg` 上、且不比常态输入框里的占位符（`overlay0` 叠 [`input_field_bg`]）
+/// 更难读的占位符前景；没有这样的候选时为 `None`。亮度取不到（`Reset` 等）
+/// 时无从比较，只保证不与底色同色。
+fn legible_placeholder_fg(palette: &Palette, bg: Color) -> Option<Color> {
+    let baseline = super::color::contrast_ratio(palette.overlay0, input_field_bg(palette));
+    placeholder_candidates(palette)
+        .into_iter()
+        .find(|&candidate| {
+            candidate != bg
+                && match (baseline, super::color::contrast_ratio(candidate, bg)) {
+                    (Some(baseline), Some(ratio)) => ratio >= baseline,
+                    _ => true,
+                }
+        })
+}
+
+/// 输入框占位符前景：默认 `overlay0`；它与 `bg` 同色、或在 `bg` 上比常态更难读
+/// 时依次换 `overlay1`、`subtext0`，都不够就取对比度最高的候选（M8 复审：聚焦
+/// 换了底色后，catppuccin 的占位符对比度曾从 2.57 掉到 1.87，terminal 主题则
+/// 与 Gray 底色同色、整行不可见）。
+pub(crate) fn input_placeholder_fg(palette: &Palette, bg: Color) -> Color {
+    legible_placeholder_fg(palette, bg).unwrap_or_else(|| {
+        placeholder_candidates(palette)
+            .into_iter()
+            .filter(|&candidate| candidate != bg)
+            .max_by(|a, b| {
+                let a = super::color::contrast_ratio(*a, bg).unwrap_or(0.0);
+                let b = super::color::contrast_ratio(*b, bg).unwrap_or(0.0);
+                a.total_cmp(&b)
+            })
+            .unwrap_or(palette.text)
+    })
+}
+
+/// 聚焦态输入框底色：比 [`input_field_bg`] 强一档的结构面，只有「换了确实看得
+/// 出、又不伤可读性」时才用，否则为 `None`，由 [`input_field_focused_style`]
+/// 改用非颜色标记（M8 复审）。候选依次是 `surface1`、`selection_bg`，要同时满足：
+/// - 与常态底色、面板底色都肉眼可辨（`Palette::row_bg_is_distinct` 同一口径：
+///   vesper / rose-pine 的 `surface1` 与 `surface0` 只差 1.07 / 1.09，不算）；
+/// - 不与正文 `text`、占位符 `overlay0` 同色（terminal / dracula / solarized
+///   的 `surface1` 就是 `overlay0`）；
+/// - 正文在它上面的对比度不低于常态（上限 4.5:1）；正文是 `Reset`（跟随终端
+///   前景、亮度未知）时无从保证，不换；
+/// - 仍有占位符前景能保持常态的可读性。
+pub(crate) fn input_field_focused_bg(palette: &Palette) -> Option<Color> {
     let normal = input_field_bg(palette);
-    for candidate in [palette.surface1, palette.overlay0] {
-        if candidate != Color::Reset && candidate != normal {
-            return candidate;
-        }
-    }
-    normal
+    let text_target = super::color::contrast_ratio(palette.text, normal)
+        .map_or(INPUT_TEXT_MIN_CONTRAST, |ratio| {
+            ratio.min(INPUT_TEXT_MIN_CONTRAST)
+        });
+    [palette.surface1, palette.selection_bg]
+        .into_iter()
+        .find(|&candidate| {
+            Palette::row_bg_is_distinct(normal, candidate)
+                && Palette::row_bg_is_distinct(palette.panel_bg, candidate)
+                && candidate != palette.text
+                && candidate != palette.overlay0
+                && super::color::contrast_ratio(palette.text, candidate)
+                    .is_some_and(|ratio| ratio >= text_target)
+                && legible_placeholder_fg(palette, candidate).is_some()
+        })
 }
 
 /// 唯一的文本输入框样式：浮层输入框、过滤框与表单行都从这里取样式，字段边界
@@ -220,6 +279,21 @@ pub(crate) fn input_field_style(palette: &Palette) -> Style {
         base.add_modifier(Modifier::UNDERLINED)
     } else {
         base
+    }
+}
+
+/// 文本输入框聚焦态样式：在 [`input_field_style`] 上叠加聚焦标记，保证与常态
+/// 肉眼可辨（M8）。底色能安全地强一档（[`input_field_focused_bg`]）就换底色；
+/// 否则保持常态底色、加下划线作为非颜色标记。常态已经靠下划线划出输入区
+/// （结构面全是 `Reset`）时下划线保留，再加粗与常态区分。
+pub(crate) fn input_field_focused_style(palette: &Palette) -> Style {
+    let normal = input_field_style(palette);
+    match input_field_focused_bg(palette) {
+        Some(background) => normal.bg(background),
+        None if normal.add_modifier.contains(Modifier::UNDERLINED) => {
+            normal.add_modifier(Modifier::BOLD)
+        }
+        None => normal.add_modifier(Modifier::UNDERLINED),
     }
 }
 
@@ -386,6 +460,108 @@ mod tests {
         palette.surface_dim = Color::Reset;
         palette.surface1 = Color::Gray;
         assert_eq!(input_field_bg(&palette), Color::Gray);
+    }
+
+    /// M8 复审（严重）：聚焦态输入框在每个内置主题（真彩色与 256 色）下都要
+    /// 与常态肉眼可辨；换底色时要过 `row_bg_is_distinct` 门槛、不与占位符 /
+    /// 正文同色、正文不比常态难读；占位符在两态都不能与底色同色，聚焦态也不能
+    /// 比常态更难读。
+    #[test]
+    fn focused_input_field_is_distinct_and_legible_for_every_built_in_theme() {
+        use crate::config::ColorDepth;
+        use crate::ui::color::contrast_ratio;
+        for name in crate::config::THEME_NAMES {
+            for depth in [ColorDepth::Truecolor, ColorDepth::Color256] {
+                let palette = Palette::from_name(name)
+                    .expect("built-in theme")
+                    .with_color_depth(depth);
+                let normal = input_field_style(&palette);
+                let focused = input_field_focused_style(&palette);
+                let normal_bg = normal.bg.expect("常态有底色");
+                let focused_bg = focused.bg.expect("聚焦态有底色");
+                if focused_bg == normal_bg {
+                    assert!(
+                        focused.add_modifier.contains(Modifier::UNDERLINED)
+                            && focused.add_modifier != normal.add_modifier,
+                        "{name}/{depth:?}：底色没换时必须有非颜色标记"
+                    );
+                } else {
+                    assert!(
+                        Palette::row_bg_is_distinct(normal_bg, focused_bg)
+                            && Palette::row_bg_is_distinct(palette.panel_bg, focused_bg),
+                        "{name}/{depth:?}：聚焦底色 {focused_bg:?} 与常态 / 面板不可辨"
+                    );
+                    assert_ne!(focused_bg, palette.overlay0, "{name}/{depth:?}");
+                    assert_ne!(focused_bg, palette.text, "{name}/{depth:?}");
+                    let normal_text = contrast_ratio(palette.text, normal_bg);
+                    let focused_text = contrast_ratio(palette.text, focused_bg);
+                    if let (Some(normal_text), Some(focused_text)) = (normal_text, focused_text) {
+                        assert!(
+                            focused_text >= normal_text.min(4.5),
+                            "{name}/{depth:?}：聚焦态正文对比度 {focused_text:.2} 过低"
+                        );
+                    }
+                }
+                let normal_placeholder = input_placeholder_fg(&palette, normal_bg);
+                let focused_placeholder = input_placeholder_fg(&palette, focused_bg);
+                assert_ne!(
+                    normal_placeholder, normal_bg,
+                    "{name}/{depth:?}：常态占位符与底色同色"
+                );
+                assert_ne!(
+                    focused_placeholder, focused_bg,
+                    "{name}/{depth:?}：聚焦态占位符与底色同色"
+                );
+                if let (Some(normal_ratio), Some(focused_ratio)) = (
+                    contrast_ratio(normal_placeholder, normal_bg),
+                    contrast_ratio(focused_placeholder, focused_bg),
+                ) {
+                    assert!(
+                        focused_ratio + 1e-4 >= normal_ratio,
+                        "{name}/{depth:?}：聚焦态占位符对比度 {focused_ratio:.2} 低于常态 {normal_ratio:.2}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// 复审点名的几个主题：terminal 的 `surface1` 与占位符同为 Gray、正文是
+    /// `Reset`；vesper 的 `surface1` 与 `surface0` 只差 1.07——都改用下划线；
+    /// rose-pine 的 `surface1` 不够，`selection_bg` 够；catppuccin 仍换 `surface1`，
+    /// 占位符换成不比常态难读的一档。
+    #[test]
+    fn focused_input_field_picks_the_documented_marker_per_theme() {
+        use crate::ui::color::contrast_ratio;
+        let terminal = Palette::terminal();
+        assert_eq!(input_field_focused_bg(&terminal), None);
+        let style = input_field_focused_style(&terminal);
+        assert_eq!(style.bg, Some(Color::DarkGray));
+        assert!(style.add_modifier.contains(Modifier::UNDERLINED));
+        assert_eq!(
+            input_placeholder_fg(&terminal, Color::DarkGray),
+            terminal.overlay0
+        );
+
+        assert_eq!(input_field_focused_bg(&Palette::vesper()), None);
+
+        let rose_pine = Palette::rose_pine();
+        assert_eq!(
+            input_field_focused_bg(&rose_pine),
+            Some(rose_pine.selection_bg)
+        );
+
+        let catppuccin = Palette::catppuccin();
+        assert_eq!(
+            input_field_focused_bg(&catppuccin),
+            Some(catppuccin.surface1)
+        );
+        let placeholder = input_placeholder_fg(&catppuccin, catppuccin.surface1);
+        assert_ne!(
+            placeholder, catppuccin.overlay0,
+            "overlay0 叠 surface1 只有 1.87"
+        );
+        let ratio = contrast_ratio(placeholder, catppuccin.surface1).expect("真彩色");
+        assert!(ratio >= 2.57, "聚焦态占位符对比度 {ratio:.2}");
     }
 
     #[test]

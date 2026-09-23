@@ -2310,6 +2310,130 @@ fn preview_flags_invalid_field_values_instead_of_showing_them_as_if_valid() {
     assert!(found_red_port, "预览里的非法端口值应该标红");
 }
 
+/// 复审 M8（严重）：添加表单文本字段的 Normal / Focused / Invalid 三态在输入行
+/// 上必须肉眼可辨，占位符也不能被聚焦底色吞掉。对照 `smoke-23627143`：`81`
+/// 行 6（聚焦的快速添加：占位符 overlay0 叠 surface0，与常态逐字段相同）、
+/// `81` 行 13（空的可选字段「用户」只剩一行底色）、`84` 行 15–16（端口 99999
+/// 报错：标签与错误行标红，输入行仍是常态底色）。上一版修复给聚焦态换的
+/// 「更亮底色」在 terminal 主题下与占位符同为 Gray（整行占位符不可见）、在
+/// vesper / rose-pine 下与常态的对比度不足 1.10，所以逐主题扫一遍。
+#[test]
+fn add_form_text_field_states_stay_distinct_across_themes() {
+    use crate::app::state::Palette;
+    use crate::protocol::{u16_to_modifier, u32_to_color};
+    use crate::ui::color::contrast_ratio;
+    use ratatui::style::Modifier;
+
+    let _dir = with_temp_state_home("form-field-states");
+    let texts = crate::i18n::texts();
+    let marks = Modifier::UNDERLINED | Modifier::BOLD;
+    for (name, palette) in [
+        ("catppuccin", Palette::catppuccin()),
+        ("terminal", Palette::terminal()),
+        ("vesper", Palette::vesper()),
+        ("rose-pine", Palette::rose_pine()),
+        ("dracula", Palette::dracula()),
+    ] {
+        let mut state = state_with_profiles(&[]);
+        state.config.palette = palette.clone();
+        state.open_machine_add_form();
+        let frame = state.compose(134, 32).expect("frame");
+        let width = usize::from(frame.width);
+        let cell = |x: u16, y: u16| &frame.cells[usize::from(y) * width + usize::from(x)];
+        let row_from = |x: u16, y: u16| -> String {
+            frame.cells[usize::from(y) * width + usize::from(x)..(usize::from(y) + 1) * width]
+                .iter()
+                .map(|c| c.symbol.as_str())
+                .collect()
+        };
+
+        // Focused：打开即聚焦快速添加，输入行首格是占位符的首字符。
+        let quick = field_hit(&state, MachineField::Quick);
+        let focused = cell(quick.x, quick.y + 1);
+        assert!(
+            compact(&row_from(quick.x, quick.y + 1))
+                .starts_with(&compact(texts.machine_form.quick_placeholder)),
+            "{name}：聚焦的快速添加应当画占位符"
+        );
+        assert_ne!(
+            focused.fg, focused.bg,
+            "{name}：聚焦态占位符与底色同色，整行不可见"
+        );
+
+        // Normal：空的可选字段「用户」画「未设置」占位符，不再只剩一行底色。
+        let user = field_hit(&state, MachineField::User);
+        let normal = cell(user.x, user.y + 1);
+        assert!(
+            compact(&row_from(user.x, user.y + 1))
+                .starts_with(&compact(texts.machines.value_not_set)),
+            "{name}：空的可选字段应当画「未设置」占位符：{:?}",
+            row_from(user.x, user.y + 1)
+        );
+        assert_ne!(normal.fg, normal.bg, "{name}：常态占位符与底色同色");
+        assert_ne!(
+            normal.bg,
+            crate::protocol::color_to_u32(palette.panel_bg),
+            "{name}：常态输入行与面板同色，字段没有边界"
+        );
+
+        // 聚焦与常态可辨：底色换了一档且过 1.10 门槛，或加了非颜色标记。
+        let focused_marks = u16_to_modifier(focused.modifier) & marks;
+        let normal_marks = u16_to_modifier(normal.modifier) & marks;
+        if focused.bg == normal.bg {
+            assert_ne!(
+                focused_marks, normal_marks,
+                "{name}：聚焦态与常态底色相同，又没有非颜色标记，看不出聚焦"
+            );
+        } else {
+            let step = contrast_ratio(u32_to_color(focused.bg), u32_to_color(normal.bg));
+            assert!(
+                step.is_none_or(|ratio| ratio >= 1.10),
+                "{name}：聚焦底色与常态只差 {step:?}，肉眼不可辨"
+            );
+            // 换了底色时占位符不能比常态更难读（catppuccin 曾从 2.57 掉到 1.87）。
+            let focused_ratio = contrast_ratio(u32_to_color(focused.fg), u32_to_color(focused.bg));
+            let normal_ratio = contrast_ratio(u32_to_color(normal.fg), u32_to_color(normal.bg));
+            if let (Some(focused_ratio), Some(normal_ratio)) = (focused_ratio, normal_ratio) {
+                assert!(
+                    focused_ratio + 0.01 >= normal_ratio,
+                    "{name}：聚焦态占位符对比度 {focused_ratio:.2} 低于常态 {normal_ratio:.2}"
+                );
+            }
+        }
+    }
+
+    // Invalid（`84` 行 15–16）：端口 99999 失焦后标签与错误行标红，输入行仍是
+    // 常态底色，值照常显示。
+    let mut state = state_with_profiles(&[]);
+    state.open_machine_add_form();
+    focus_field(&mut state, MachineField::Port);
+    type_text(&mut state, "99999");
+    focus_field(&mut state, MachineField::ProxyJump);
+    let frame = state.compose(134, 32).expect("frame");
+    let width = usize::from(frame.width);
+    let cell = |x: u16, y: u16| &frame.cells[usize::from(y) * width + usize::from(x)];
+    let red = crate::protocol::color_to_u32(state.config.palette.red);
+    let port = field_hit(&state, MachineField::Port);
+    let user = field_hit(&state, MachineField::User);
+    assert_eq!(cell(port.x, port.y).fg, red, "非法字段的标签应当标红");
+    assert_eq!(cell(port.x, port.y + 1).symbol, "9", "输入行照常显示值");
+    assert_eq!(
+        cell(port.x, port.y + 1).bg,
+        cell(user.x, user.y + 1).bg,
+        "非法字段的输入行保持常态底色"
+    );
+    let error_row: String = frame.cells
+        [usize::from(port.y + 2) * width + usize::from(port.x)..usize::from(port.y + 3) * width]
+        .iter()
+        .map(|c| c.symbol.as_str())
+        .collect();
+    assert!(
+        compact(&error_row).starts_with(&compact(texts.machine_form.err_port)),
+        "错误行应当是端口校验文案：{error_row:?}"
+    );
+    assert_eq!(cell(port.x, port.y + 2).fg, red, "错误行应当标红");
+}
+
 /// L10：窄宽度下添加表单的页脚固定只有一行，放不下的项被直接丢掉而不是
 /// 换到下一行——`esc 返回` 消失了。页脚应该跟列表页一样按宽度换行。
 #[test]

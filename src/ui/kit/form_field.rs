@@ -5,12 +5,15 @@
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
-    style::{Modifier, Style},
+    style::{Color, Modifier, Style},
 };
 
 use super::{char_width, fill_row, put_str, put_str_ellipsis};
 use crate::app::state::Palette;
-use crate::ui::{display_width_u16, input_field_focused_bg, input_field_style, panel_contrast_fg};
+use crate::ui::{
+    display_width_u16, input_field_focused_style, input_field_style, input_placeholder_fg,
+    panel_contrast_fg,
+};
 
 /// 字段状态。`Invalid` 携带的错误文案占用提示行（替换 `hint`）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -132,23 +135,37 @@ pub(crate) fn render_form_field(
                 .fg(panel_contrast_fg(palette))
                 .bg(palette.accent)
                 .add_modifier(Modifier::BOLD),
-            // 文本字段聚焦时底色比 Normal 更亮一档，肉眼可辨（M8：合并前后
-            // 两者一直同色，不是回归，但要修）。
-            FieldState::Focused => Style::default()
-                .fg(palette.text)
-                .bg(input_field_focused_bg(palette))
-                .remove_modifier(Modifier::DIM),
+            // 文本字段聚焦态必须与常态肉眼可辨（M8）：底色能安全地强一档就换，
+            // 否则保持常态底色、加下划线（样式真源在 `input_field_focused_style`）。
+            FieldState::Focused => input_field_focused_style(palette),
             FieldState::Normal | FieldState::Invalid(_) => input_field_style(palette),
         };
-        fill_row(buffer, input.x, input.y, width, " ", style);
-        if spec.value.is_empty() {
+        let empty = spec.value.is_empty();
+        // 占位符前景按实际底色挑，聚焦换了底色也不会被吞掉；禁用态本就该暗。
+        let placeholder_style = match spec.state {
+            FieldState::Disabled => style.fg(palette.overlay0),
+            _ => style.fg(input_placeholder_fg(
+                palette,
+                style.bg.unwrap_or(Color::Reset),
+            )),
+        };
+        // 空值时整行用占位符前景填：下划线标记的颜色从头到尾一致。
+        fill_row(
+            buffer,
+            input.x,
+            input.y,
+            width,
+            " ",
+            if empty { placeholder_style } else { style },
+        );
+        if empty {
             put_str_ellipsis(
                 buffer,
                 input.x,
                 input.y,
                 width,
                 spec.placeholder,
-                style.fg(palette.overlay0),
+                placeholder_style,
             );
             if matches!(spec.state, FieldState::Focused) && spec.cursor_col.is_some() {
                 render.cursor = Some((input.x, input.y));
@@ -334,10 +351,19 @@ mod tests {
             },
         );
         assert_eq!(row_text(&buffer, 1), "22        ");
+        let placeholder = buffer[(0, 1)].style();
         assert_eq!(
-            buffer[(0, 1)].style().fg,
-            Some(palette.overlay0),
-            "占位文字灰"
+            placeholder.fg,
+            Some(input_placeholder_fg(
+                &palette,
+                placeholder.bg.expect("输入行有底色")
+            )),
+            "占位文字按实际底色挑前景"
+        );
+        assert_ne!(
+            placeholder.fg,
+            Some(palette.text),
+            "占位文字比正文暗，不会被当成已填的值"
         );
         assert_eq!(render.cursor, Some((0, 1)), "空值时光标在开头");
 
@@ -396,10 +422,20 @@ mod tests {
         );
     }
 
-    /// M8：文本字段的 `Focused` 与 `Normal` 底色完全相同，肉眼看不出聚焦
-    /// 在哪个字段上；`Focused` 要比 `Normal` 更亮一档。
+    fn paint_with(
+        palette: &Palette,
+        area: Rect,
+        spec: FormFieldSpec<'_>,
+    ) -> (Buffer, FormFieldRender) {
+        let mut buffer = Buffer::empty(area);
+        let render = render_form_field(&mut buffer, area, &spec, palette);
+        (buffer, render)
+    }
+
+    /// M8：文本字段的 `Focused` 与 `Normal` 输入行完全相同，肉眼看不出聚焦
+    /// 在哪个字段上。默认主题下聚焦态换强一档的底色，值照常可读。
     #[test]
-    fn focused_text_field_uses_a_brighter_background_than_normal() {
+    fn focused_text_field_is_distinguishable_from_normal() {
         let spec = |state| FormFieldSpec {
             label: "用户",
             value: "root",
@@ -407,12 +443,95 @@ mod tests {
             state,
             ..FormFieldSpec::default()
         };
-        let (normal_buffer, _, _) = paint(Rect::new(0, 0, 10, 2), spec(FieldState::Normal));
+        let (normal_buffer, _, palette) = paint(Rect::new(0, 0, 10, 2), spec(FieldState::Normal));
         let (focused_buffer, _, _) = paint(Rect::new(0, 0, 10, 2), spec(FieldState::Focused));
+        let normal = normal_buffer[(0, 1)].style();
+        let focused = focused_buffer[(0, 1)].style();
+        let expected = input_field_focused_style(&palette);
+        assert_eq!(
+            (focused.fg, focused.bg, focused.add_modifier),
+            (expected.fg, expected.bg, expected.add_modifier)
+        );
         assert_ne!(
-            normal_buffer[(0, 1)].style().bg,
-            focused_buffer[(0, 1)].style().bg,
-            "Focused 应该比 Normal 更亮，不能是同一个底色"
+            (normal.bg, normal.add_modifier),
+            (focused.bg, focused.add_modifier),
+            "Focused 与 Normal 的输入行不能逐字段相同"
+        );
+        assert_eq!(
+            focused.bg,
+            Some(palette.surface1),
+            "catppuccin 聚焦换强一档底色"
+        );
+        assert_eq!(focused.fg, Some(palette.text), "值仍用正文色");
+    }
+
+    /// M8 复审（严重）：terminal 主题的 `surface1` 与占位符 `overlay0` 同为 Gray，
+    /// 旧实现把聚焦底色换成 Gray 后整行占位符不可见（探针：首格 fg=bg=Gray）。
+    /// 找不到安全的底色时保持常态底色、用下划线标记聚焦，占位符照常可见。
+    #[test]
+    fn focused_empty_field_keeps_the_placeholder_visible_on_the_terminal_theme() {
+        let palette = Palette::terminal();
+        let spec = |state| FormFieldSpec {
+            label: "快速添加",
+            placeholder: "user@host:port",
+            cursor_col: Some(0),
+            state,
+            ..FormFieldSpec::default()
+        };
+        let (focused, render) =
+            paint_with(&palette, Rect::new(0, 0, 20, 2), spec(FieldState::Focused));
+        let (normal, _) = paint_with(&palette, Rect::new(0, 0, 20, 2), spec(FieldState::Normal));
+        let cell = focused[(0, 1)].style();
+        assert_eq!(focused[(0, 1)].symbol(), "u");
+        assert_ne!(cell.fg, cell.bg, "占位符不能与聚焦底色同色");
+        assert_eq!(
+            cell.bg,
+            normal[(0, 1)].style().bg,
+            "没有安全的强一档底色时保持常态底色"
+        );
+        assert!(
+            cell.add_modifier.contains(Modifier::UNDERLINED),
+            "聚焦态要有非颜色标记"
+        );
+        assert!(
+            !normal[(0, 1)]
+                .style()
+                .add_modifier
+                .contains(Modifier::UNDERLINED),
+            "常态不带下划线，聚焦才看得出来"
+        );
+        // 空值时整行（含占位符之后的空白）用同一前景，下划线颜色一致。
+        assert_eq!(focused[(19, 1)].style().fg, cell.fg);
+        assert_eq!(render.cursor, Some((0, 1)));
+    }
+
+    /// M8 复审：结构面全是 `Reset` 的自定义主题，常态靠下划线划出输入区；聚焦态
+    /// 不能丢掉这条下划线，还要再加一个标记与常态区分。
+    #[test]
+    fn focused_field_keeps_the_underline_fallback_when_surfaces_are_unset() {
+        let mut palette = Palette::terminal();
+        palette.surface0 = Color::Reset;
+        palette.surface1 = Color::Reset;
+        palette.surface_dim = Color::Reset;
+        let spec = |state| FormFieldSpec {
+            label: "用户",
+            value: "root",
+            cursor_col: Some(4),
+            state,
+            ..FormFieldSpec::default()
+        };
+        let (focused, _) = paint_with(&palette, Rect::new(0, 0, 10, 2), spec(FieldState::Focused));
+        let (normal, _) = paint_with(&palette, Rect::new(0, 0, 10, 2), spec(FieldState::Normal));
+        let focused = focused[(0, 1)].style();
+        let normal = normal[(0, 1)].style();
+        assert!(normal.add_modifier.contains(Modifier::UNDERLINED));
+        assert!(
+            focused.add_modifier.contains(Modifier::UNDERLINED),
+            "聚焦态保留常态的下划线边界"
+        );
+        assert_ne!(
+            focused.add_modifier, normal.add_modifier,
+            "聚焦态还要有额外标记"
         );
     }
 

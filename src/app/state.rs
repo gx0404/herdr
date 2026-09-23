@@ -788,7 +788,9 @@ impl Palette {
     /// 两个行底色在终端上是否肉眼可辨。真彩色按 WCAG 对比度判定；16 色 /
     /// 索引色的实际亮度由终端配置决定，无法计算，只能退化成「不是同一个
     /// 色号」——这与 `selection_row_bg` 对 terminal 主题的既有取舍一致。
-    fn row_bg_is_distinct(base: Color, candidate: Color) -> bool {
+    /// 输入框聚焦态的底色挑选（`ui::widgets::input_field_focused_bg`）复用
+    /// 同一口径。
+    pub(crate) fn row_bg_is_distinct(base: Color, candidate: Color) -> bool {
         if candidate == Color::Reset || base == candidate {
             return false;
         }
