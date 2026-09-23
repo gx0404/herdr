@@ -106,6 +106,8 @@ Claude integration v11 also subscribes to `SubagentStart` and `SubagentStop` (ma
 
 Herdr builds Claude Code's activity tree from Claude Code's own session files. A sub-agent that Claude Code runs in the background shows as done or failed once Claude Code records its completion notice for the agent that launched it; a sub-agent that was stopped shows as failed, with `stopped` at the start of its summary, and a finished sub-agent that is resumed counts as running again. A sub-agent without such a notice counts as running while its transcript changed in the last two minutes and as unknown after that. In a very long session Herdr only checks the most recent part of the main transcript for these notices, so a sub-agent from much earlier may show as unknown.
 
+In the agent activity window, a Claude Code sub-agent's output shows each tool call with its main argument, such as a Bash command, a file path, or a search query, and each tool result with the first five lines of its output, followed by a count of the remaining lines. Failed tool results are marked `[tool error]`.
+
 Herdr uses `~/.claude` by default, or `CLAUDE_CONFIG_DIR` when set. The Claude config directory must already exist. Install writes `hooks/herdr-agent-state.sh` and updates `settings.json` with Herdr hook entries. Uninstall removes the matching hook entries and deletes the hook script.
 
 ## Codex

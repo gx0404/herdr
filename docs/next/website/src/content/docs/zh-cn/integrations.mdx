@@ -108,6 +108,8 @@ Claude 集成 v11 在 macOS 和 Linux 上还会订阅 `SubagentStart`、`Subagen
 
 Herdr 从 Claude Code 自己的会话文件构建它的活动树。Claude Code 在后台运行的子 agent,在 Claude Code 为派生它的 agent 记下结束通知后显示为完成或失败;被停掉的子 agent 显示为失败,摘要开头注明 `stopped`;已结束的子 agent 被重新唤起后重新算作运行中。没有结束通知的子 agent,转录在最近两分钟内有变化时算运行中,之后显示为未知。会话很长时 Herdr 只在主转录较新的部分里查找这些通知,更早的子 agent 可能显示为未知。
 
+在 Agent 活动窗口里,Claude Code 子 agent 的输出为每个工具调用附上主要参数,例如 Bash 命令、文件路径或搜索词;每个工具结果显示输出的前五行,其余只标出剩余行数。失败的工具结果标为 `[tool error]`。
+
 Herdr 默认使用 `~/.claude`,设置了 `CLAUDE_CONFIG_DIR` 时使用后者。Claude 配置目录必须已经存在。安装会写入 `hooks/herdr-agent-state.sh`,并向 `settings.json` 添加 Herdr 钩子条目。卸载会移除匹配的钩子条目并删除钩子脚本。
 
 ## Codex

@@ -166,6 +166,12 @@ const MAX_READ_BYTES: usize = 1024 * 1024;
 
 /// 主转录里整份覆写待办清单的工具名（输入形状见模块文档）。
 const TODO_TOOL_NAME: &str = "TodoWrite";
+/// 工具调用行的参数摘要字符上限。
+const TOOL_SUMMARY_CHARS: usize = 160;
+/// 工具结果只显示输出的前几行，其余只计数。
+const TOOL_RESULT_LINES: usize = 5;
+/// 工具结果每行的字符上限。
+const TOOL_RESULT_LINE_CHARS: usize = 200;
 
 pub(super) struct Claude;
 
@@ -1411,7 +1417,31 @@ fn read_transcript_page(
     })
 }
 
-/// 把一条转录行折叠成可读的一行：角色 + 文本摘要，工具调用只留名字。
+/// 工具调用参数里拿来当摘要的键，按优先级（本机子 agent 转录实测：Bash / Monitor
+/// 的 `command`，Read / Edit / Write 的 `file_path`，WebFetch 的 `url`，WebSearch /
+/// ToolSearch 的 `query`，TaskCreate 的 `subject`，Agent 的 `description` 等）。
+/// 都没有就只留工具名，不把整份入参（Write 的 `content`、Edit 的 `old_string`）倒出来。
+const TOOL_INPUT_KEYS: [&str; 15] = [
+    "command",
+    "file_path",
+    "notebook_path",
+    "pattern",
+    "url",
+    "query",
+    "search_query",
+    "path",
+    "dir_path",
+    "subject",
+    "description",
+    "skill",
+    "taskId",
+    "task_id",
+    "prompt",
+];
+
+/// 把一条转录行渲染成可读文本：角色 + 内容。文本折成单行；工具调用带工具名与主要
+/// 参数摘要；工具结果另起缩进行给出输出的前几行。这是用户自己的会话内容，只进
+/// 本地内容片段，不进日志。
 fn render_transcript_line(line: &str) -> Option<String> {
     let line = line.trim();
     if line.is_empty() {
@@ -1429,41 +1459,205 @@ fn render_transcript_line(line: &str) -> Option<String> {
     let content = value
         .get("message")
         .and_then(|message| message.get("content"));
-    let body = render_content(content);
-    Some(format!("[{role}] {body}"))
-}
-
-fn render_content(content: Option<&Value>) -> String {
+    let mut rendered = Rendered::new(format!("[{role}]"));
     match content {
-        Some(Value::String(text)) => collapse(text),
+        Some(Value::String(text)) => rendered.inline(&collapse(text)),
         Some(Value::Array(blocks)) => {
-            let rendered: Vec<String> = blocks.iter().map(render_block).collect();
-            rendered
-                .into_iter()
-                .filter(|part| !part.is_empty())
-                .collect::<Vec<_>>()
-                .join(" ")
+            for block in blocks {
+                render_block(block, &mut rendered);
+            }
         }
-        _ => String::new(),
+        _ => {}
+    }
+    Some(rendered.finish())
+}
+
+/// 一条记录渲染出的行：行内片段接在当前行后面，输出块另起缩进行，之后的行内片段
+/// 再另起一行。
+struct Rendered {
+    lines: Vec<String>,
+    /// 最后一行还能接行内片段（输出块之后不能）。
+    open: bool,
+}
+
+impl Rendered {
+    fn new(head: String) -> Self {
+        Self {
+            lines: vec![head],
+            open: true,
+        }
+    }
+
+    fn inline(&mut self, part: &str) {
+        if part.is_empty() {
+            return;
+        }
+        match self.lines.last_mut() {
+            Some(last) if self.open => {
+                last.push(' ');
+                last.push_str(part);
+            }
+            _ => {
+                self.lines.push(part.to_string());
+                self.open = true;
+            }
+        }
+    }
+
+    /// 输出块的一行：缩进 4 格，空行不补缩进。
+    fn detail(&mut self, line: &str) {
+        self.lines.push(if line.is_empty() {
+            String::new()
+        } else {
+            format!("    {line}")
+        });
+        self.open = false;
+    }
+
+    fn finish(self) -> String {
+        self.lines.join("\n")
     }
 }
 
-fn render_block(block: &Value) -> String {
+fn render_block(block: &Value, rendered: &mut Rendered) {
     match block.get("type").and_then(Value::as_str) {
-        Some("text") => block
-            .get("text")
-            .and_then(Value::as_str)
-            .map(collapse)
-            .unwrap_or_default(),
-        Some("thinking") => "[thinking]".to_string(),
+        Some("text") => rendered.inline(
+            &block
+                .get("text")
+                .and_then(Value::as_str)
+                .map(collapse)
+                .unwrap_or_default(),
+        ),
+        Some("thinking") => rendered.inline("[thinking]"),
         Some("tool_use") => {
-            let name = block.get("name").and_then(Value::as_str).unwrap_or("tool");
-            format!("[tool {}]", collapse(name))
+            let name = block
+                .get("name")
+                .and_then(Value::as_str)
+                .map(collapse)
+                .filter(|name| !name.is_empty())
+                .unwrap_or_else(|| "tool".to_string());
+            let part = match tool_input_summary(block.get("input")) {
+                Some(summary) => format!("[tool {name}] {summary}"),
+                None => format!("[tool {name}]"),
+            };
+            rendered.inline(&part);
         }
-        Some("tool_result") => "[tool result]".to_string(),
-        Some(other) => format!("[{}]", collapse(other)),
-        None => String::new(),
+        Some("tool_result") => {
+            let failed = block.get("is_error").and_then(Value::as_bool) == Some(true);
+            rendered.inline(if failed {
+                "[tool error]"
+            } else {
+                "[tool result]"
+            });
+            for line in tool_result_lines(block.get("content")) {
+                rendered.detail(&line);
+            }
+        }
+        Some(other) => rendered.inline(&format!("[{}]", collapse(other))),
+        None => {}
     }
+}
+
+/// 工具调用的主要参数，折成单行并截断。
+fn tool_input_summary(input: Option<&Value>) -> Option<String> {
+    let input = input?.as_object()?;
+    TOOL_INPUT_KEYS.iter().find_map(|key| {
+        let text = collapse(input.get(*key)?.as_str()?);
+        (!text.is_empty()).then(|| clip_chars(&text, TOOL_SUMMARY_CHARS))
+    })
+}
+
+/// 工具结果输出的前 [`TOOL_RESULT_LINES`] 行（去掉开头空行、ANSI 序列与控制字符，
+/// 逐行截断），其余只计数；末尾空行不计。块数组里文本块依次拼接，图片留占位。
+fn tool_result_lines(content: Option<&Value>) -> Vec<String> {
+    let mut text = String::new();
+    let mut append = |part: &str| {
+        if !text.is_empty() {
+            text.push('\n');
+        }
+        text.push_str(part);
+    };
+    match content {
+        Some(Value::String(output)) => append(output),
+        Some(Value::Array(blocks)) => {
+            for block in blocks {
+                match block.get("type").and_then(Value::as_str) {
+                    Some("text") => {
+                        if let Some(output) = block.get("text").and_then(Value::as_str) {
+                            append(output);
+                        }
+                    }
+                    Some("image") => append("[image]"),
+                    // tool_reference 等没有可读内容。
+                    _ => {}
+                }
+            }
+        }
+        _ => {}
+    }
+    let mut shown: Vec<String> = Vec::new();
+    let mut hidden = 0usize;
+    let mut trailing_blank = 0usize;
+    for raw in text.lines() {
+        if shown.len() < TOOL_RESULT_LINES {
+            let line = clean_output_line(raw, TOOL_RESULT_LINE_CHARS);
+            let blank = line.trim().is_empty();
+            if !(shown.is_empty() && blank) {
+                shown.push(if blank { String::new() } else { line });
+            }
+            continue;
+        }
+        // 显示满之后只数行，不再逐字符清洗（几千行的读文件结果也只是一次扫描）。
+        if raw.trim().is_empty() {
+            trailing_blank += 1;
+        } else {
+            hidden += trailing_blank + 1;
+            trailing_blank = 0;
+        }
+    }
+    if hidden == 0 {
+        while shown.last().is_some_and(String::is_empty) {
+            shown.pop();
+        }
+    } else {
+        shown.push(format!("… +{hidden} lines"));
+    }
+    shown
+}
+
+/// 输出行去掉 ANSI 转义序列与控制字符（制表符留给客户端展开），取前 `max_chars`
+/// 个字符，超出以省略号结尾。逐字符处理，超长行读到上限就停。
+fn clean_output_line(line: &str, max_chars: usize) -> String {
+    let mut out = String::new();
+    let mut kept = 0usize;
+    let mut chars = line.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '\u{1b}' {
+            // CSI（ESC [ … 终止字节 0x40–0x7e）整段丢；其余 ESC 连同下一个字符丢。
+            if chars.peek() == Some(&'[') {
+                chars.next();
+                for next in chars.by_ref() {
+                    if ('\u{40}'..='\u{7e}').contains(&next) {
+                        break;
+                    }
+                }
+            } else {
+                chars.next();
+            }
+            continue;
+        }
+        if ch.is_control() && ch != '\t' {
+            continue;
+        }
+        if kept == max_chars {
+            out.push('…');
+            break;
+        }
+        out.push(ch);
+        kept += 1;
+    }
+    out.truncate(out.trim_end().len());
+    out
 }
 
 // ---------------------------------------------------------------------------
@@ -1549,8 +1743,14 @@ fn collapse(text: &str) -> String {
 }
 
 fn clip(text: &str) -> String {
-    let mut out: String = text.chars().take(MAX_LABEL_CHARS).collect();
-    if out.chars().count() < text.chars().count() {
+    clip_chars(text, MAX_LABEL_CHARS)
+}
+
+/// 取前 `max_chars` 个字符，超出以省略号结尾。
+fn clip_chars(text: &str, max_chars: usize) -> String {
+    let mut chars = text.chars();
+    let mut out: String = chars.by_ref().take(max_chars).collect();
+    if chars.next().is_some() {
         out.push('…');
     }
     out
@@ -2252,7 +2452,7 @@ mod tests {
     }
 
     #[test]
-    fn read_renders_roles_and_folds_tool_calls() {
+    fn read_renders_roles_and_tool_calls_with_their_main_argument() {
         let home = fixture_home();
         let session = session_ref(SESSION_ID);
         let cx = context(&home, Some(&session), FIXTURE_LAST_MS);
@@ -2264,10 +2464,13 @@ mod tests {
         assert!(page.text.starts_with("[user] map the render hot path"));
         assert!(page.text.contains("[assistant]"), "{}", page.text);
         assert!(page.text.contains("[thinking]"), "{}", page.text);
-        assert!(page.text.contains("[tool Read]"), "{}", page.text);
-        // attachment 行不进内容，工具入参被折叠掉。
+        // 工具调用带上主要参数（Read 的 file_path）；attachment 行不进内容。
+        assert!(
+            page.text.contains("[tool Read] /tmp/demo.rs"),
+            "{}",
+            page.text
+        );
         assert!(!page.text.contains("file_history"), "{}", page.text);
-        assert!(!page.text.contains("/tmp/demo.rs"), "{}", page.text);
         assert!(page.eof);
         assert!(!page.truncated);
         // eof 只表示「暂时读完」：游标照给，二级窗口拿它续读跟随新内容。
@@ -2286,6 +2489,102 @@ mod tests {
         assert!(beyond.text.is_empty());
         // 文件比游标短（被截断）时游标收回新末尾，否则永远追不上。
         assert_eq!(beyond.next_cursor.as_deref(), Some(cursor.as_str()));
+    }
+
+    /// 冒烟 L6（claude-09 行 26–27）：内容只有「[tool Bash]」「[tool result]」标签，
+    /// 看不到命令与输出；opencode 同场景能看到 `[bash] echo …` 与输出。
+    #[test]
+    fn read_shows_the_command_and_the_first_lines_of_its_result() {
+        let home = fixture_home();
+        let session = session_ref(ASYNC_SESSION_ID);
+        let cx = context(&home, Some(&session), ASYNC_BASE_MS + 60_000);
+        let page = Claude
+            .read(&cx, "b0000000000000001", None, 64 * 1024)
+            .expect("可读");
+        assert_eq!(
+            page.text,
+            "[user] run `echo alpha` and report\n\
+             [assistant] [tool Bash] echo alpha\n\
+             [user] [tool result]\n    alpha\n\
+             [assistant] alpha\n"
+        );
+    }
+
+    #[test]
+    fn tool_results_keep_a_few_clean_lines_and_count_the_rest() {
+        let row = |role: &str, content: &str| {
+            format!(r#"{{"type":"{role}","message":{{"role":"{role}","content":{content}}}}}"#)
+        };
+        let long_command = "x".repeat(400);
+        let rows = [
+            // 多行命令折成一行并截断；没有可识别参数的工具只留名字。
+            row(
+                "assistant",
+                &format!(
+                    r#"[{{"type":"tool_use","name":"Bash","input":{{"command":"cd /tmp &&\n  {long_command}"}}}},{{"type":"tool_use","name":"TodoWrite","input":{{"todos":[]}}}}]"#
+                ),
+            ),
+            // 输出只留前 5 行（去掉开头空行、ANSI 序列与控制字符），其余计数。
+            row(
+                "user",
+                r#"[{"type":"tool_result","content":"\n\n\u001b[31mline 1\u001b[0m\r\nline\u0007 2\nline 3\n\nline 5\nline 6\nline 7\n\n"}]"#,
+            ),
+            // 块数组：文本块拼起来，图片留占位；出错的结果标成 tool error。
+            row(
+                "user",
+                r#"[{"type":"tool_result","is_error":true,"content":[{"type":"text","text":"no such file"},{"type":"image","source":{}},{"type":"tool_reference","tool_name":"x"}]}]"#,
+            ),
+            // 同一行里结果之后的文本另起一行，不接在输出行后面。
+            row(
+                "user",
+                r#"[{"type":"tool_result","content":"ok"},{"type":"text","text":"and then"}]"#,
+            ),
+            // 空输出只有标签。
+            row("user", r#"[{"type":"tool_result","content":""}]"#),
+        ];
+        let rendered: Vec<String> = rows
+            .iter()
+            .map(|line| render_transcript_line(line).expect("可渲染"))
+            .collect();
+        let summary_chars = rendered[0]
+            .strip_prefix("[assistant] [tool Bash] ")
+            .and_then(|rest| rest.split(" [tool TodoWrite]").next())
+            .expect("命令摘要");
+        assert!(
+            summary_chars.starts_with("cd /tmp && xxx"),
+            "{summary_chars}"
+        );
+        assert!(summary_chars.ends_with('…'), "{summary_chars}");
+        assert_eq!(summary_chars.chars().count(), TOOL_SUMMARY_CHARS + 1);
+        assert!(
+            rendered[0].ends_with(" [tool TodoWrite]"),
+            "{}",
+            rendered[0]
+        );
+        // 输出中间的空行照留（不补缩进），末尾空行不计数。
+        assert_eq!(
+            rendered[1],
+            "[user] [tool result]\n    line 1\n    line 2\n    line 3\n\n    line 5\n    … +2 lines"
+        );
+        assert_eq!(
+            rendered[2],
+            "[user] [tool error]\n    no such file\n    [image]"
+        );
+        assert_eq!(rendered[3], "[user] [tool result]\n    ok\nand then");
+        assert_eq!(rendered[4], "[user] [tool result]");
+
+        // 超长输出行按字符截断。
+        let wide = row(
+            "user",
+            &format!(
+                r#"[{{"type":"tool_result","content":"{}"}}]"#,
+                "中".repeat(TOOL_RESULT_LINE_CHARS + 10)
+            ),
+        );
+        let wide = render_transcript_line(&wide).expect("可渲染");
+        let output = wide.split('\n').nth(1).expect("有输出行");
+        assert_eq!(output.chars().count(), 4 + TOOL_RESULT_LINE_CHARS + 1);
+        assert!(output.ends_with('…'));
     }
 
     #[test]
