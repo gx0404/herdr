@@ -86,6 +86,11 @@
 //! - 转写口径与 opencode 一致：`user: …`、助手正文原样、`(thinking)`、`[工具名] 参数
 //!   摘要` 加缩进的输出前几行、`[task complete] 最后一条消息`；认不出的类型只留一行
 //!   `[类型名]`，不整条倒出 JSON。
+//! - 多 agent 工具（二进制里的工具说明核实参数名）：`send_message` / `followup_task`
+//!   是 `{target, message}`，旧版 `send_input` 是 `{id, message, interrupt}`，
+//!   `interrupt_agent` / `close_agent` / `resume_agent` 只有目标，`wait_agent` 是 id
+//!   数组；摘要写 `→ 目标: 消息`。消息与 `spawn_agent` 的正文一样可能是加密令牌
+//!   （`gAAAA` 开头），这时只写 `(encrypted)`。
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
@@ -140,6 +145,15 @@ const CALL_ARGUMENT_KEYS: [&str; 8] = [
     "pattern",
     "url",
 ];
+/// 多 agent 工具里指明目标 agent 的参数（codex-cli 0.156.1 二进制里的工具说明核实：
+/// `send_message` / `followup_task` / `interrupt_agent` 用 `target`，旧版
+/// `send_input` / `close_agent` / `resume_agent` 用 `id`）。
+const AGENT_TARGET_KEYS: [&str; 3] = ["target", "id", "agent_id"];
+/// `wait_agent` 等的 agent 列表参数（id 数组，也兼容单个字符串）。
+const AGENT_LIST_KEYS: [&str; 4] = ["ids", "targets", "target", "id"];
+/// 与 `spawn_agent` 同形的加密正文：Fernet 令牌以 `gAAAA` 开头、只含 base64 字符。
+const ENCRYPTED_PREFIX: &str = "gAAAA";
+const MIN_ENCRYPTED_CHARS: usize = 24;
 /// 树深度上限，只用来防父链成环。
 const MAX_TREE_DEPTH: usize = 32;
 const ROLLOUT_PREFIX: &str = "rollout-";
@@ -943,10 +957,11 @@ fn render_response_item(payload: &Value) -> Option<String> {
         "message" => render_message(payload),
         "agent_message" => Some(render_agent_message(payload)),
         "reasoning" => Some(render_reasoning(payload)),
-        "function_call" => Some(call_line(
-            &tool_name(payload),
-            arguments_summary(payload.get("arguments")),
-        )),
+        "function_call" => {
+            let name = tool_name(payload);
+            let summary = arguments_summary(&name, payload.get("arguments"));
+            Some(call_line(&name, summary))
+        }
         "custom_tool_call" => Some(call_line(
             &tool_name(payload),
             payload
@@ -1225,9 +1240,10 @@ fn type_line(kind: &str) -> String {
     format!("[{}]", clip_chars(&name, NAME_CHARS))
 }
 
-/// `function_call` 的参数摘要：参数（JSON 字符串）里按 [`CALL_ARGUMENT_KEYS`] 取第一个
-/// 有值的键；都没有就给截断的紧凑 JSON，不是 JSON 就当自由文本。
-fn arguments_summary(arguments: Option<&Value>) -> Option<String> {
+/// `function_call` 的参数摘要：多 agent 工具写目标与消息（[`multi_agent_summary`]）；
+/// 其余按 [`CALL_ARGUMENT_KEYS`] 取第一个有值的键；都没有就给截断的紧凑 JSON，不是
+/// JSON 就当自由文本。
+fn arguments_summary(name: &str, arguments: Option<&Value>) -> Option<String> {
     let parsed = match arguments? {
         Value::String(text) => match serde_json::from_str::<Value>(text) {
             Ok(parsed) => parsed,
@@ -1238,6 +1254,9 @@ fn arguments_summary(arguments: Option<&Value>) -> Option<String> {
     let Value::Object(fields) = &parsed else {
         return words(&parsed);
     };
+    if let Some(summary) = multi_agent_summary(name, fields) {
+        return summary;
+    }
     if let Some(summary) = CALL_ARGUMENT_KEYS
         .iter()
         .find_map(|key| fields.get(*key).and_then(words))
@@ -1250,6 +1269,73 @@ fn arguments_summary(arguments: Option<&Value>) -> Option<String> {
     serde_json::to_string(&parsed)
         .ok()
         .and_then(|json| single_line(&json))
+}
+
+/// 多 agent 工具的摘要：`→ 目标`，带消息的再接 `: 消息`（加密正文写 `(encrypted)`），
+/// `wait_agent` 列出要等的 agent。外层 `None` = 不是这几个工具、或缺目标，交回通用
+/// 口径；`Some(None)` = 认得但没有可写的（只等超时的 `wait_agent`），只留工具名。
+fn multi_agent_summary(
+    name: &str,
+    fields: &serde_json::Map<String, Value>,
+) -> Option<Option<String>> {
+    match name {
+        "wait_agent" => Some(
+            AGENT_LIST_KEYS
+                .iter()
+                .find_map(|key| fields.get(*key).and_then(agent_list))
+                .and_then(|agents| single_line(&format!("→ {agents}"))),
+        ),
+        "send_message" | "followup_task" | "send_input" | "interrupt_agent" | "close_agent"
+        | "resume_agent" => {
+            let target = AGENT_TARGET_KEYS.iter().find_map(|key| {
+                fields
+                    .get(*key)
+                    .and_then(Value::as_str)
+                    .map(collapse)
+                    .filter(|target| !target.is_empty())
+            })?;
+            let message = fields
+                .get("message")
+                .and_then(Value::as_str)
+                .map(|message| {
+                    if looks_encrypted(message) {
+                        "(encrypted)".to_string()
+                    } else {
+                        collapse(message)
+                    }
+                })
+                .filter(|message| !message.is_empty());
+            Some(single_line(&match message {
+                Some(message) => format!("→ {target}: {message}"),
+                None => format!("→ {target}"),
+            }))
+        }
+        _ => None,
+    }
+}
+
+/// agent 列表：字符串数组用 `, ` 连起来，单个字符串原样；空的返回 `None`。
+fn agent_list(value: &Value) -> Option<String> {
+    let joined = match value {
+        Value::String(text) => collapse(text),
+        Value::Array(items) => items
+            .iter()
+            .filter_map(Value::as_str)
+            .map(collapse)
+            .filter(|item| !item.is_empty())
+            .collect::<Vec<_>>()
+            .join(", "),
+        _ => return None,
+    };
+    (!joined.is_empty()).then_some(joined)
+}
+
+fn looks_encrypted(text: &str) -> bool {
+    text.starts_with(ENCRYPTED_PREFIX)
+        && text.len() >= MIN_ENCRYPTED_CHARS
+        && text.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'=' | b'+' | b'/')
+        })
 }
 
 /// 字符串，或字符串数组（命令行参数）用空格连起来，折成单行摘要。
@@ -2034,6 +2120,98 @@ mod tests {
         );
 
         let _ = fs::remove_dir_all(&home);
+    }
+
+    /// 复验 N16（r2-codex-06）：多 agent 工具的参数不再整段倒出 JSON。参数名按
+    /// codex-cli 0.156.1 二进制里的工具说明核实：`send_message` / `followup_task` 是
+    /// `{target, message}`，旧版 `send_input` 是 `{id, message, interrupt}`，
+    /// `interrupt_agent` / `close_agent` / `resume_agent` 只有目标，`wait_agent` 是 id
+    /// 数组。与 `spawn_agent` 同形的加密正文（`gAAAA` 开头的令牌）只写 `(encrypted)`；
+    /// 认不出的工具与缺目标的调用保持原来的口径。
+    #[test]
+    fn multi_agent_tool_calls_summarise_target_and_message() {
+        let render = |name: &str, arguments: &str| {
+            let record = serde_json::json!({
+                "type": "response_item",
+                "payload": {"type": "function_call", "name": name, "arguments": arguments},
+            });
+            render_record(&record.to_string(), None)
+        };
+        assert_eq!(
+            render(
+                "send_message",
+                r#"{"message":"also run  the tests\nthen report","target":"print_probe"}"#
+            )
+            .as_deref(),
+            Some("[send_message] → print_probe: also run the tests then report")
+        );
+        assert_eq!(
+            render(
+                "followup_task",
+                r#"{"target":"/root/print_probe","message":"now fix it"}"#
+            )
+            .as_deref(),
+            Some("[followup_task] → /root/print_probe: now fix it")
+        );
+        assert_eq!(
+            render(
+                "send_input",
+                r#"{"id":"01a0c6f0-2710-7000-8000-0000000000c2","message":"hi","interrupt":true}"#
+            )
+            .as_deref(),
+            Some("[send_input] → 01a0c6f0-2710-7000-8000-0000000000c2: hi")
+        );
+        assert_eq!(
+            render(
+                "send_message",
+                r#"{"target":"print_probe","message":"gAAAAABmFakeToken0123456789abcdefABCDEF_-=="}"#
+            )
+            .as_deref(),
+            Some("[send_message] → print_probe: (encrypted)")
+        );
+        assert_eq!(
+            render("interrupt_agent", r#"{"target":"print_probe"}"#).as_deref(),
+            Some("[interrupt_agent] → print_probe")
+        );
+        assert_eq!(
+            render("close_agent", r#"{"id":"01a0c6f0"}"#).as_deref(),
+            Some("[close_agent] → 01a0c6f0")
+        );
+        assert_eq!(
+            render("wait_agent", r#"{"ids":["a1","b2"],"timeout_ms":30000}"#).as_deref(),
+            Some("[wait_agent] → a1, b2")
+        );
+        assert_eq!(
+            render("wait_agent", r#"{"timeout_ms":30000}"#).as_deref(),
+            Some("[wait_agent]"),
+            "只等超时、没有目标时只留工具名"
+        );
+        // 过长的消息与其它摘要一样折成单行并截到上限。
+        let long = format!(r#"{{"target":"t","message":"{}"}}"#, "word ".repeat(80));
+        let summary = render("send_message", &long).expect("有摘要");
+        assert!(
+            summary.starts_with("[send_message] → t: word word"),
+            "{summary}"
+        );
+        assert!(summary.ends_with('…'), "{summary}");
+        // 缺目标的调用与认不出的工具保持原口径：没有已知主参数时给截断的紧凑 JSON。
+        assert_eq!(
+            render("send_message", r#"{"message":"orphan"}"#).as_deref(),
+            Some(r#"[send_message] {"message":"orphan"}"#)
+        );
+        assert_eq!(
+            render("mystery_tool", r#"{"target":"x","message":"y"}"#).as_deref(),
+            Some(r#"[mystery_tool] {"message":"y","target":"x"}"#)
+        );
+        // spawn_agent 仍取任务名，加密正文不出现。
+        assert_eq!(
+            render(
+                "spawn_agent",
+                r#"{"task_name":"print_probe","fork_turns":"all","message":"gAAAAfake"}"#
+            )
+            .as_deref(),
+            Some("[spawn_agent] print_probe")
+        );
     }
 
     #[test]
