@@ -496,6 +496,44 @@ fn context_menu_keyboard_navigation_skips_disabled_rows_and_jumps_by_letter() {
     )));
 }
 
+/// 字母键一律按首字母跳转：`j` / `k` / `g` / `G` 不再像旧版那样上下移动或
+/// 到首尾——没有以该字母开头的可用条目时高亮原地不动，有则跳过去（文档
+/// quick-start「右键菜单」一段）。
+#[test]
+fn context_menu_vi_letters_only_jump_by_first_letter() {
+    use crossterm::event::KeyCode;
+    let _lang = crate::i18n::lang_guard(crate::i18n::Lang::En);
+    let mut state = pane_menu_state(false);
+    // 从中间一项出发，上下移动与到首尾都会让高亮变化。
+    state.handle_raw_events(vec![key_event(KeyCode::Down)]);
+    for letter in ['j', 'k', 'g', 'G'] {
+        let before = context_menu(&state).highlighted;
+        state.handle_raw_events(vec![key_event(KeyCode::Char(letter))]);
+        let menu = context_menu(&state);
+        let items = menu.items();
+        let starts_with = |index: usize| {
+            items[index]
+                .label
+                .chars()
+                .next()
+                .is_some_and(|ch| ch.eq_ignore_ascii_case(&letter))
+        };
+        let target = (0..items.len()).any(|index| items[index].enabled && starts_with(index));
+        if target {
+            assert!(
+                starts_with(menu.highlighted),
+                "{letter}：跳到同首字母的条目"
+            );
+        } else {
+            assert_eq!(
+                menu.highlighted, before,
+                "{letter}：没有同首字母的条目，高亮不动"
+            );
+        }
+        assert!(state.overlay.is_some(), "{letter}：菜单保持打开");
+    }
+}
+
 /// 指针：悬浮行用主题的 `hover_bg`（与键盘高亮分离）；悬到子菜单父项上展开
 /// 子菜单，点子项执行对应动作。
 #[test]
