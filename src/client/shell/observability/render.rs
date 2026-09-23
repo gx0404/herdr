@@ -866,6 +866,63 @@ mod tests {
         );
     }
 
+    /// 右栏用量历史图里画着 sparkline 字形的行数（右栏是页面最右 30 列）。
+    fn history_chart_rows(buffer: &Buffer) -> usize {
+        let from = buffer.area.width.saturating_sub(30);
+        (0..buffer.area.height)
+            .filter(|y| {
+                (from..buffer.area.width).any(|x| {
+                    let symbol = buffer[(x, *y)].symbol();
+                    !symbol.is_empty() && "▁▂▃▄▅▆▇█".contains(symbol)
+                })
+            })
+            .count()
+    }
+
+    /// `percents` 依次作为逐秒的用量采样。
+    fn usage_samples(percents: &[f32]) -> std::collections::VecDeque<UsageSample> {
+        percents
+            .iter()
+            .enumerate()
+            .map(|(index, percent)| UsageSample {
+                at_ms: 1_000 + index as u64 * 1_000,
+                percent: *percent,
+            })
+            .collect()
+    }
+
+    /// 真机 L8（claude-25 行 16、23–51）：只有两三个采样时右栏画成一根约 29 行高的
+    /// 单柱。采样不足时只画一行迷你条；采样够了也只是封顶的小图，不按右栏剩余高度
+    /// 拉成一整列。
+    #[test]
+    fn usage_history_with_few_samples_is_a_single_mini_row() {
+        let _guard = lang_guard(Lang::ZhCn);
+        let mut state = populated();
+        state.accounts = vec![account("claude:default", ObservationStatus::Ready)];
+        state.selected_provider = Some("claude".into());
+        // claude-25 的尺寸：101×56 的停靠面板，右栏有三十多行空着。
+        state
+            .usage_history
+            .insert("claude:default".into(), usage_samples(&[22.0, 83.0]));
+        let (buffer, _) = paint_page(&state, Page::Accounts, 101, 56);
+        assert_eq!(
+            history_chart_rows(&buffer),
+            1,
+            "两个采样只画一行迷你条\n{}",
+            buffer_text(&buffer)
+        );
+        state
+            .usage_history
+            .insert("claude:default".into(), usage_samples(&[83.0; 40]));
+        let (buffer, _) = paint_page(&state, Page::Accounts, 101, 56);
+        let rows = history_chart_rows(&buffer);
+        assert!(
+            (2..=6).contains(&rows),
+            "采样充足时是封顶的小图：{rows} 行\n{}",
+            buffer_text(&buffer)
+        );
+    }
+
     /// ds-08：terminal 主题的 `panel_bg` 是 `Reset`，页签「反色」曾退化成
     /// 「终端默认前景压在 accent 上」。反色前景取组件表（与按钮同源）；组件表
     /// 现在按对比度挑颜色（`crate::ui::color::contrast_fg`），`Reset` 候选被跳过，

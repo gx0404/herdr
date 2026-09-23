@@ -1002,7 +1002,15 @@ fn account_detail(
         Style::default().fg(palette.overlay0),
     );
     if samples.len() >= 2 && inner.height > history_row + 1 {
-        // 不足采样数的列由 `Sparkline` 自己留白；`max(100)` 与柱高口径一致。
+        // 不足采样数的列由 `Sparkline` 自己留白；`max(100)` 与柱高口径一致。采样
+        // 不足 `HISTORY_CHART_MIN_SAMPLES` 时只画一行迷你条，够了也封顶在
+        // `HISTORY_CHART_MAX_ROWS` 行：按右栏剩余高度拉满时，两三个采样会画成一根
+        // 三十来行高的单柱（真机 L8）。
+        let rows = if samples.len() < HISTORY_CHART_MIN_SAMPLES {
+            1
+        } else {
+            HISTORY_CHART_MAX_ROWS
+        };
         let data = samples
             .iter()
             .map(|sample| u64::from(sample.percent.clamp(0.0, 100.0).round() as u8))
@@ -1021,12 +1029,18 @@ fn account_detail(
                     inner.x,
                     inner.y.saturating_add(history_row + 1),
                     inner.width,
-                    inner.height.saturating_sub(history_row + 1),
+                    inner.height.saturating_sub(history_row + 1).min(rows),
                 ),
                 buffer,
             );
     }
 }
+
+/// 用量历史少于这么多采样时只画一行迷你条：几个点连不成趋势，画成多行高的
+/// 柱子只会显得夸张。
+const HISTORY_CHART_MIN_SAMPLES: usize = 8;
+/// 用量历史图最多几行：右栏再高也只画一张小图。
+const HISTORY_CHART_MAX_ROWS: u16 = 6;
 
 fn metric_scope(scope: &str) -> &str {
     match scope {
