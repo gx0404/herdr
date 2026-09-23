@@ -118,28 +118,48 @@ pub(super) fn render_agent_panel_header(
     if area.height < 2 {
         return false;
     }
+    let texts = crate::i18n::texts();
     put_text(
         buffer,
         area.x,
         area.y + 1,
         area.width,
-        crate::i18n::texts().sidebar.agents,
+        texts.sidebar.agents,
         Style::default()
             .fg(config.palette.overlay0)
             .add_modifier(Modifier::BOLD),
     );
-    let texts = crate::i18n::texts();
     let sort_label = agent_view_label.unwrap_or(match config.agent_panel_sort {
         crate::config::AgentPanelSortConfig::Spaces => texts.sidebar.sort_grouped,
         crate::config::AgentPanelSortConfig::Launch => texts.agent_panel.sort_launch,
     });
+    // 宽度仲裁（冒烟 M11）：排序标签右对齐，最左只能从标题右侧留 2 列间距处
+    // 开始，不再与标题粘连；放不下整个标签就截短带省略号，连「字 + …」都放不下
+    // 时整个让出（命中区一并清空）。沿用拆掉「用量」按钮前 `min_usage_x` 的口径。
+    let min_sort_x = area
+        .x
+        .saturating_add(crate::ui::display_width_u16(texts.sidebar.agents))
+        .saturating_add(2);
+    let room = usize::from(area.right().saturating_sub(min_sort_x));
+    let fitted = if display_width(sort_label) <= room {
+        std::borrow::Cow::Borrowed(sort_label)
+    } else if room >= 3 {
+        std::borrow::Cow::Owned(crate::ui::truncate_end(sort_label, room))
+    } else {
+        std::borrow::Cow::Borrowed("")
+    };
+    let sort_label = fitted.as_ref();
     let sort_width = display_width(sort_label).min(area.width as usize) as u16;
-    let sort_rect = Rect::new(
-        area.right().saturating_sub(sort_width),
-        area.y + 1,
-        sort_width,
-        1,
-    );
+    let sort_rect = if sort_width == 0 {
+        Rect::default()
+    } else {
+        Rect::new(
+            area.right().saturating_sub(sort_width),
+            area.y + 1,
+            sort_width,
+            1,
+        )
+    };
     hits.agent_sort_toggle = if config.mouse_capture && agent_view_label.is_none() {
         sort_rect
     } else {

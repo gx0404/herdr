@@ -2563,3 +2563,55 @@ fn empty_agent_panel_draws_the_no_agents_empty_state() {
     );
     assert!(!text.contains(&no_agents), "{text}");
 }
+
+/// 冒烟 M11：窄面板上表头标题与排序切换粘成「 agent按工作区分组」。排序标签
+/// 右对齐，但最左只能从标题右侧留 2 列处开始；放不下整个标签就截短带省略号，
+/// 仍可点。与冒烟同口径：在 133 列终端上启用停靠工作台（侧栏占比由此而定），
+/// 93 列时 Agents 面板放不下完整标签，133 列时完整显示。
+#[test]
+fn agent_panel_header_keeps_a_gap_between_title_and_sort_toggle() {
+    let mut state = classic_state(AgentPanelSortConfig::Spaces);
+    state.set_endpoint_methods(Some(vec!["client.views.set".into(), "tab.focus".into()]));
+    state.compose(133, 32).expect("初始画面");
+    state.tick_workbench(std::time::Instant::now(), &mut ClientShellInput::default());
+    state.workbench.pending = false;
+    state.workbench.acknowledged = state.workbench.revision;
+    assert!(state.workbench.enabled, "夹具前提：workbench 布局已启用");
+
+    let texts = crate::i18n::texts();
+    let title_width = crate::ui::display_width_u16(texts.sidebar.agents);
+    let full = crate::ui::display_width_u16(texts.sidebar.sort_grouped);
+    let mut seen_truncated = false;
+    let mut seen_full = false;
+    for cols in [93, 133] {
+        state.compose(cols, 32).expect("workbench 帧");
+        let panel = state.hits.agent_body;
+        let toggle = state.hits.agent_sort_toggle;
+        assert!(!toggle.is_empty(), "{cols} 列：排序标签仍可点");
+        assert!(
+            toggle.x >= panel.x + title_width + 2,
+            "{cols} 列：标题右侧至少留 2 列间距：toggle {toggle:?} 面板 {panel:?}"
+        );
+        assert_eq!(toggle.right(), panel.right(), "{cols} 列：排序标签右对齐");
+        let header = rect_rows(
+            &state,
+            Rect::new(panel.x, toggle.y, toggle.right() - panel.x, 1),
+        )
+        .remove(0);
+        let label = sort_label(&state);
+        if panel.width < title_width + 2 + full {
+            seen_truncated = true;
+            assert!(
+                label.ends_with('…'),
+                "{cols} 列：放不下就截短带省略号：{header:?}"
+            );
+        } else {
+            seen_full = true;
+            assert_eq!(label, compact(texts.sidebar.sort_grouped), "{header:?}");
+        }
+    }
+    assert!(
+        seen_truncated && seen_full,
+        "两个宽度应分别覆盖截短与完整两种情形"
+    );
+}
