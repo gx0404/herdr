@@ -1370,6 +1370,12 @@ fn federated_client_with_changing_external_agents_keeps_remote_live() {
     let original_label = "Refact";
     let changed_title = "Resumed parser refactor";
     let changed_label = "Resum";
+    let settled = |screen: &str| {
+        screen.contains(changed_label)
+            && screen.contains("REMOTE_READY_OK")
+            && !screen.contains("正在同步终端")
+            && !screen.contains("Waiting for terminal")
+    };
     assert!(
         wait_until(Duration::from_secs(8), Duration::from_millis(20), || {
             screen_text().contains(original_label)
@@ -1386,14 +1392,21 @@ fn federated_client_with_changing_external_agents_keeps_remote_live() {
         "the changed external title must reach the client: {}",
         screen_text()
     );
+    // 新快照走控制连接、同 tick 补的改戳帧走渲染连接，客户端可能先画出新快照、
+    // 下一帧才收到配对的 surface：这一瞬的占位不算回归，但必须很快恢复。补帧缺失
+    // （原回归）时占位不会消失，在这里超时。
+    assert!(
+        wait_until(Duration::from_secs(2), Duration::from_millis(20), || {
+            settled(&screen_text())
+        }),
+        "the idle remote pane must come back right after the snapshot advances: {}",
+        screen_text()
+    );
     let stable_until = Instant::now() + Duration::from_millis(1_500);
     loop {
         let idle = screen_text();
         assert!(
-            idle.contains(changed_label)
-                && idle.contains("REMOTE_READY_OK")
-                && !idle.contains("正在同步终端")
-                && !idle.contains("Waiting for terminal"),
+            settled(&idle),
             "an external source change must not blank the idle remote pane: {idle}"
         );
         if Instant::now() >= stable_until {
