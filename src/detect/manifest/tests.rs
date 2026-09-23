@@ -1037,6 +1037,83 @@ fn codex_startup_update_requires_complete_live_chooser() {
     }
 }
 
+/// 冒烟 M5：codex 首启发现新增 / 变更的钩子时，先在清空的屏幕顶端弹「Hooks need
+/// review」，选完才进会话。弹窗期间 herdr 曾按 OSC 标题报 idle，`agent start`
+/// 直接返回成功。`evidence` 是真机截屏 `evidence/realcli-729a9b0f/
+/// codex-02-hooks-review-prompt.txt`（codex 0.156.1），`narrow` 是 codex 自带的
+/// 40 列快照（`startup_hooks_review_prompt.snap`），选项行在窄屏下会折行。
+#[test]
+fn codex_startup_hooks_review_is_blocked() {
+    let evidence = "\n  Hooks need review\n  3 hooks are new or changed.\n  \
+        Hooks can run outside the sandbox after you trust them.\n\n\n\
+        › 1. Review hooks\n  2. Trust all and continue\n  \
+        3. Continue without trusting (hooks won't run)\n\n  \
+        enter confirm · esc skip\n";
+    let narrow = "\n  Hooks need review\n  2 hooks are new or changed.\n  \
+        Hooks can run outside the sandbox\n  after you trust them.\n\n\n  \
+        1. Review hooks\n› 2. Trust all and continue\n  \
+        3. Continue without trusting (hooks\n     won't run)\n\n  \
+        enter confirm · esc skip\n";
+
+    for screen in [evidence, narrow] {
+        let result = osc_explain(Agent::Codex, screen, "project", "");
+        assert_eq!(result.state, AgentState::Blocked, "{screen}");
+        assert_eq!(
+            result.matched_rule.as_ref().map(|rule| rule.id.as_str()),
+            Some("startup_hooks_review")
+        );
+        assert!(result.visible_blocker);
+    }
+
+    // 选完进入会话后弹窗已清掉；对话里提到这几个字也不算弹窗。
+    for screen in [
+        "› Ask Codex to do anything\n\n  gpt-6-luna low · /work\n",
+        "› Hooks need review\n\n• Codex asks first; pick \"2. Trust all and continue\".\n\n\
+         › Ask Codex to do anything\n\n  gpt-6-luna low · /work\n",
+    ] {
+        let result = osc_explain(Agent::Codex, screen, "project", "");
+        assert_eq!(result.state, AgentState::Idle, "{screen}");
+        assert!(!result.visible_blocker);
+    }
+}
+
+/// 冒烟 M5：kimi 2.x 在新目录首启时先问「Trust this folder?」，此时会话还没建、
+/// 钩子一条都没报，只能看屏幕；herdr 曾按兜底报 idle。`evidence` 取自真机截屏
+/// `evidence/realcli-729a9b0f/kimi-02-trust-prompt.txt`（Kimi Code 2.0.2，含上方的
+/// shell 命令行与分隔线），指针可以停在任一选项上。
+#[test]
+fn kimi_trust_folder_prompt_is_blocked() {
+    let rule = "─".repeat(60);
+    let evidence = format!(
+        "❯ kimi -m glm-4.5-air\n {rule}\n  Trust this folder?\n  \
+         ↑↓ navigate · Enter select · Esc exit\n\n  /var/tmp/project\n\n  \
+         Project-level MCP servers are disabled until you explicitly choose Trust. \
+         Trust starts the listed project MCP targets and remembers this folder.\n\n   \
+         ❯ Trust this folder\n     Enable project MCP servers. Remembered for this folder.\n\n     \
+         Don't trust\n     Exit Kimi Code. Asked again next launch.\n\n {rule}\n"
+    );
+    let pointer_on_distrust = evidence
+        .replace("   ❯ Trust this folder\n", "     Trust this folder\n")
+        .replace("     Don't trust\n", "   ❯ Don't trust\n");
+
+    for screen in [evidence.as_str(), pointer_on_distrust.as_str()] {
+        let result = explain(Agent::Kimi, screen);
+        assert_eq!(result.state, AgentState::Blocked, "{screen}");
+        assert_eq!(
+            result.matched_rule.as_ref().map(|rule| rule.id.as_str()),
+            Some("trust_folder_prompt")
+        );
+        assert!(result.visible_blocker);
+    }
+
+    // 信任之后进入输入框；把问题原样打进输入框也不构成弹窗。
+    let prompt = "   No session yet — one will be created on your first message.\n\n \
+        ╭────╮\n │ > Trust this folder?\n ╰────╯\n Zhipu GLM · GLM-4.5-Air thinking\n";
+    let result = explain(Agent::Kimi, prompt);
+    assert_eq!(result.state, AgentState::Idle);
+    assert!(!result.visible_blocker);
+}
+
 #[test]
 fn codex_background_terminal_screen_does_not_override_osc_idle() {
     // Background terminal tasks can be long-lived helpers such as dev servers.

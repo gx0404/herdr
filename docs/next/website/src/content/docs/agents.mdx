@@ -45,6 +45,8 @@ Blocked detection is deliberately strict for screen-manifest agents. Herdr only 
 
 This means unusual new agent prompts may initially show as `idle` instead of `blocked` until Herdr learns that screen shape. The misclassification affects only the visible status and waits. It should not make Herdr send input or take destructive action.
 
+Startup prompts that wait for a decision before the agent session begins count as blocking UI too, for example the Codex "Hooks need review" chooser and the Kimi Code CLI "Trust this folder?" prompt. While such a prompt is open the pane is `blocked`, and `herdr agent start` reports that the agent is not ready instead of succeeding.
+
 ## Detection manifests
 
 Bundled manifests live inside Herdr. Herdr also checks herdr.dev for remote manifest updates and applies valid per-agent rule updates automatically without requiring a Herdr restart. Background checks run at most once every 6 hours and only after the first frame renders; `herdr server update-agent-manifests` always fetches immediately and is not throttled. Remote manifests are stored in Herdr's state directory. Set `[update] manifest_check = false` to disable background remote manifest checks.
