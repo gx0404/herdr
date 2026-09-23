@@ -2519,3 +2519,47 @@ fn tree_agent_context_actions_rename_bind_and_close_the_agent_pane() {
     assert_eq!(state.observability.selected_provider.as_deref(), Some("pi"));
     assert_eq!(state.observability.selected_pane, None);
 }
+
+/// 冒烟 M10：没有任何 agent、也没有状态筛选时，列表区不再一片空白——kit 空状态
+/// 在列表区正中画「暂无 agent」（与 mobile 同一文案键），标题是正文色加粗；有筛选
+/// 而无匹配时仍是左上角暗淡的「没有匹配的 agent」。classic 与 workbench 同一路径。
+#[test]
+fn empty_agent_panel_draws_the_no_agents_empty_state() {
+    let no_agents = compact(crate::i18n::texts().mobile.no_agents);
+    let mut workbench = classic_state_with(AgentPanelSortConfig::Spaces, snapshot());
+    enable_workbench(&mut workbench);
+    let mut classic = classic_state_with(AgentPanelSortConfig::Spaces, snapshot());
+    for (name, state, cols) in [
+        ("workbench", &mut workbench, 133),
+        ("classic", &mut classic, 106),
+    ] {
+        state.compose(cols, 32).expect("空 Agents 面板");
+        let body = state.hits.agent_body;
+        assert!(body.height >= 3, "{name}：夹具前提，列表区够高 {body:?}");
+        let rows = rect_rows(state, body);
+        let (y, line) = rows
+            .iter()
+            .enumerate()
+            .find(|(_, line)| compact(line).contains(&no_agents))
+            .unwrap_or_else(|| panic!("{name}：列表区没有「暂无 agent」：{rows:?}"));
+        assert!(y > 0, "{name}：空状态垂直居中，不贴在首行：{rows:?}");
+        let x = body.x + line.chars().take_while(|ch| ch.is_whitespace()).count() as u16;
+        assert!(x > body.x, "{name}：空状态水平居中：{line:?}");
+        let buffer = state.compose_buffer.as_ref().expect("保留帧缓冲");
+        let cell = &buffer[(x, body.y + y as u16)];
+        assert_eq!(cell.fg, state.config.palette.text, "{name}：标题用正文色");
+        assert!(cell.modifier.contains(Modifier::BOLD), "{name}：标题加粗");
+    }
+
+    // 有筛选而无匹配：仍是「没有匹配的 agent」，不画「暂无 agent」。
+    let mut filtered = snapshot();
+    filtered.agent_view_label = Some("working".into());
+    let mut state = classic_state_with(AgentPanelSortConfig::Spaces, filtered);
+    state.compose(106, 32).expect("筛选无匹配");
+    let text = compact(&body_text(&state));
+    assert!(
+        text.contains(&compact(crate::i18n::texts().sidebar.no_matching_agents)),
+        "{text}"
+    );
+    assert!(!text.contains(&no_agents), "{text}");
+}

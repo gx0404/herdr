@@ -942,33 +942,35 @@ pub(super) fn render_agent_tree_rows(
         chrome_hover,
         endpoint_qualified,
     };
-    if area.height.saturating_sub(3) < 3 {
-        render_agent_list(
-            buffer,
-            area,
-            flat_view_rows(rows),
-            empty_message,
-            config,
-            agent_scroll,
-            thumb_hovered,
-            hits,
-            row_lines,
-            |buffer, rect, row, hits| render_tree_row(buffer, rect, row, &cx, hits, true),
-        );
-        return;
-    }
+    let flat = area.height.saturating_sub(3) < 3;
+    let listed = if flat { flat_view_rows(rows) } else { rows };
     render_agent_list(
         buffer,
         area,
-        rows,
+        listed,
         empty_message,
         config,
         agent_scroll,
         thumb_hovered,
         hits,
         row_lines,
-        |buffer, rect, row, hits| render_tree_row(buffer, rect, row, &cx, hits, false),
+        |buffer, rect, row, hits| render_tree_row(buffer, rect, row, &cx, hits, flat),
     );
+    if listed.is_empty() && agent_view_label.is_none() {
+        // 没有任何 agent 也没有筛选：列表区正中画空状态，不留一片空白（冒烟
+        // M10）。文案与 mobile 的空列表同一键；筛选无匹配仍走上面的提示行。
+        crate::ui::kit::empty_state::render_empty_state(
+            buffer,
+            hits.agent_body,
+            &crate::ui::kit::empty_state::EmptyState {
+                glyph: None,
+                title: crate::i18n::texts().mobile.no_agents.trim(),
+                body: None,
+                action: None,
+            },
+            &config.palette,
+        );
+    }
 }
 
 fn row_lines(row: &AgentTreeRow) -> usize {
