@@ -1147,7 +1147,7 @@ fn render_tree_row(
             });
         }
         AgentTreeKind::ActivityMore { owner_key, label } => {
-            put_text(
+            put_label(
                 buffer,
                 content.x,
                 content.y,
@@ -1296,12 +1296,11 @@ fn render_group_line(
         x = x.saturating_add(icon_width + 1);
         remaining = remaining.saturating_sub(icon_width + 1);
     }
-    let label_width = (display_width(label) as u16).min(remaining);
-    put_text(
+    let label_width = put_label(
         buffer,
         x,
         content.y,
-        label_width,
+        remaining,
         label,
         Style::default()
             .fg(palette.text)
@@ -1591,12 +1590,11 @@ fn render_activity_line(
     );
     x = x.saturating_add(icon_width + 1);
     remaining = remaining.saturating_sub(icon_width + 1);
-    let label_width = (display_width(label) as u16).min(remaining);
-    put_text(
+    let label_width = put_label(
         buffer,
         x,
         content.y,
-        label_width,
+        remaining,
         label,
         Style::default().fg(palette.subtext0),
     );
@@ -1645,12 +1643,11 @@ fn render_external_line(
     );
     x = x.saturating_add(icon_width + 1);
     remaining = remaining.saturating_sub(icon_width + 1);
-    let label_width = (display_width(label) as u16).min(remaining);
-    put_text(
+    let label_width = put_label(
         buffer,
         x,
         content.y,
-        label_width,
+        remaining,
         label,
         Style::default()
             .fg(palette.subtext0)
@@ -1690,6 +1687,22 @@ fn activity_status_as_agent(status: AgentActivityStatus) -> AgentStatus {
 fn put_text(buffer: &mut Buffer, x: u16, y: u16, width: u16, text: &str, style: Style) {
     // set_stringn 按显示宽度截断并给宽字符补占位格，逐字符写会弄坏 CJK。
     buffer.set_stringn(x, y, text, usize::from(width), style);
+}
+
+/// 同 [`put_text`]，放不下时截短并以「…」收尾（与 agent 名的 `truncate_end` 同
+/// 口径；真机 L1：活动子行硬截成「执行 echo 命令并返」，看不出被截断）。宽字符
+/// 放不下时停在它前面。直接写缓冲区、不分配，返回实际占用的列数。
+fn put_label(buffer: &mut Buffer, x: u16, y: u16, width: u16, text: &str, style: Style) -> u16 {
+    if width == 0 || !buffer.area.contains(ratatui::layout::Position::new(x, y)) {
+        return 0;
+    }
+    if display_width(text) <= usize::from(width) {
+        let (end, _) = buffer.set_stringn(x, y, text, usize::from(width), style);
+        return end.saturating_sub(x);
+    }
+    let (end, _) = buffer.set_stringn(x, y, text, usize::from(width - 1), style);
+    let (end, _) = buffer.set_stringn(end, y, "…", 1, style);
+    end.saturating_sub(x)
 }
 
 impl ClientShellState {

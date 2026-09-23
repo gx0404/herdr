@@ -2922,3 +2922,52 @@ fn right_clicking_a_workspace_group_header_opens_the_workspace_menu() {
         }
     }
 }
+
+/// 真机 L1（realcli claude-08 行 41）：Agents 面板里活动子行的标签放不下时硬截成
+/// 「执行 echo 命令并返」，看不出被截断。agent 名早已按 `truncate_end` 带省略号；
+/// 活动节点、外部条目与分组头的标签同口径，放不下就截短并以「…」收尾。宽度与
+/// 真机一致：侧栏 26 列。
+#[test]
+fn tree_row_labels_end_with_an_ellipsis_when_truncated() {
+    let mut projected = summary_snapshot();
+    projected.agents[0].activity.nodes[0].label = "执行 echo 命令并返回 herdr-probe".into();
+    projected.workspaces[0].label = "a-workspace-with-a-long-name".into();
+    projected.external_agents = vec![ClientShellExternalAgent {
+        external_id: "zcode:abc".into(),
+        source: "zcode".into(),
+        agent_status: AgentStatus::Working,
+        label: "an external session with a long title".into(),
+        readable: true,
+        agent: None,
+        cwd: None,
+        updated_at_ms: None,
+        activity: Default::default(),
+    }];
+    let mut state = classic_state_with(AgentPanelSortConfig::Spaces, projected);
+    state.sidebar_width = 26;
+    state.sidebar_width_manual = true;
+    state.compose(106, 30).expect("窄侧栏帧");
+    state.handle_raw_events(vec![click(toggle_rect(
+        &state,
+        &ClientEndpointId::Local,
+        "agent-activity:pane:pane_0",
+    ))]);
+    state.compose(106, 30).expect("展开活动摘要帧");
+
+    // 宽字符后的占位格是空格：比对前去掉空白。
+    let activity = compact(&rect_rows(&state, state.hits.agent_activity_rows[0].rect)[0]);
+    assert!(
+        activity.contains("执行echo") && activity.ends_with('…'),
+        "活动节点标签截短带省略号：{activity:?}"
+    );
+    let group = rect_rows(&state, group_rect(&state, "ws_0"));
+    assert!(
+        compact(&group[0]).contains("a-workspace") && compact(&group[0]).contains("…·"),
+        "分组头标签截短带省略号，计数照常：{group:?}"
+    );
+    let external = compact(&rect_rows(&state, state.hits.external_agents[0].0)[0]);
+    assert!(
+        external.contains("anexternal") && external.ends_with('…'),
+        "外部条目标签截短带省略号：{external:?}"
+    );
+}

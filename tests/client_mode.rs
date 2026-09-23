@@ -1365,9 +1365,9 @@ fn federated_client_with_changing_external_agents_keeps_remote_live() {
     // 落库后的投影刷新在下一个调度 tick 里下发。先等正面信号——改后的标题上屏，
     // 即修订号前进的新快照已到达客户端——再在稳定窗口里反复确认空闲画面没被
     // 「正在同步终端…」占位替换（否定式断言只在快照确已前进之后才有意义）。
-    // 80 列下外部条目标签按剩余宽度硬截断，只露出前 5–6 格（原标题显示为
-    // 「Refact」），所以改后的标题换一个开头，让变化本身在画面上可见。
-    let original_label = "Refact";
+    // 80 列下外部条目标签按剩余宽度截短并以「…」收尾，只露出前 5 格（原标题
+    // 显示为「Refac…」），所以改后的标题换一个开头，让变化本身在画面上可见。
+    let original_label = "Refac";
     let changed_title = "Resumed parser refactor";
     let changed_label = "Resum";
     let settled = |screen: &str| {
