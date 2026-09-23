@@ -42,8 +42,9 @@ pub(crate) struct SourceContext<'a> {
     pub now_ms: u64,
     /// 该 CLI 的配置目录（见 `agent_config_dir`：环境变量覆盖优先，否则 `home`
     /// 下的默认目录；claude / codex / kimi 借此跟随 `CLAUDE_CONFIG_DIR` /
-    /// `CODEX_HOME` / `KIMI_CODE_HOME`）。没有对应 CLI 时为 `None`，适配器回退
-    /// `home` 下的默认目录。
+    /// `CODEX_HOME` / `KIMI_CODE_HOME`）。覆盖变量取自 server 进程的环境，不是
+    /// pane 里 CLI 的环境。没有对应 CLI 时为 `None`，适配器回退 `home` 下的默认
+    /// 目录。
     pub agent_config_dir: Option<&'a Path>,
     /// server 缓存的该 pane 最近一份 `pane.report_agent_activity` hint（pi 的树整份
     /// 装在里面，见 `pi::discover_from_hint`）；外部来源与从未报过提示的 pane 为
@@ -190,6 +191,13 @@ fn read_node(
 /// `kimi_dir` 同一套规则：环境变量覆盖优先（支持 `~` 前缀），否则 `home` 下的
 /// 默认目录。opencode 与 zcode 没有覆盖变量；未知 agent 为 `None`。`integration`
 /// 没有导出这些常量与 `~` 展开，此处按同一规则镜像，等价性由测试钉住。
+///
+/// 覆盖变量读的是 herdr server 进程自己的环境（server 启动时继承的那份），不是
+/// pane 里 CLI 进程的环境：只在某个 pane 里导出的覆盖（如 `CLAUDE_CONFIG_DIR=/x
+/// claude`）这里看不到，会去默认目录找该 agent 的会话文件而找不到。要跟随 pane 的
+/// 实际环境，得读 agent 进程的环境块（平台相关，Windows 没有对等手段），或保留钩子
+/// 上报的转录路径（`agent_resume::session_ref_from_report` 目前只给 pi 留路径），
+/// 都不在这里做；用户文档（socket-api「Agent activity」）写明了这一点。
 fn agent_config_dir(agent: &str, home: &Path) -> Option<PathBuf> {
     let (env_var, segments): (Option<&str>, &[&str]) = match agent {
         "claude" => (Some("CLAUDE_CONFIG_DIR"), &[".claude"]),

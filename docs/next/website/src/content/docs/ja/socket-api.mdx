@@ -634,6 +634,13 @@ workspace の get/list 応答は結果の `tokens` マップを公開し、ス�
 通じてバックグラウンドスレッドでそれを読み取り、フックは「変わったかもしれない」という
 合図を送るだけです。
 
+エージェント自身のセッションファイルを読むアダプター(Claude Code、Codex、Kimi Code)は、
+設定ディレクトリを Herdr サーバーの環境で解決します。サーバーの環境に
+`CLAUDE_CONFIG_DIR`、`CODEX_HOME`、`KIMI_CODE_HOME` があればそれを使い、なければ
+`~/.claude`、`~/.codex`、`~/.kimi-code` を使います。ペインの中だけで設定した上書き
+(例: `CLAUDE_CONFIG_DIR=/path claude`)はサーバーからは見えず、そのエージェントの
+アクティビティは見つかりません。サーバーを起動する環境でも同じ変数を設定してください。
+
 フックは `pane.report_agent_activity` で合図します:
 
 ```json

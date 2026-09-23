@@ -629,6 +629,12 @@ workspace 的 get/list 响应会公开生成的 `tokens` 映射,空间侧边栏�
 后台线程里通过每种智能体各自的来源适配器读取它;钩子只负责发出「可能变了」的
 信号。
 
+读取智能体自身会话文件的适配器(Claude Code、Codex、Kimi Code)按 Herdr 服务器
+进程的环境解析配置目录:服务器环境里有 `CLAUDE_CONFIG_DIR`、`CODEX_HOME` 或
+`KIMI_CODE_HOME` 就用它,否则用 `~/.claude`、`~/.codex` 或 `~/.kimi-code`。只在某个
+窗格里设置的覆盖(例如 `CLAUDE_CONFIG_DIR=/path claude`)服务器看不到,也就找不到
+该智能体的活动;请同时在启动服务器的环境里设置该变量。
+
 钩子用 `pane.report_agent_activity` 发信号:
 
 ```json

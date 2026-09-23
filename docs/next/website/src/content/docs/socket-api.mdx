@@ -817,6 +817,14 @@ An agent's activity tree (subagents, tasks, todos, background processes) is a
 server-owned fact. The server reads it from a per-agent source adapter on a
 background thread; hooks only signal that something may have changed.
 
+Adapters that read an agent's own session files (Claude Code, Codex, Kimi Code)
+resolve its configuration directory from the Herdr server's environment:
+`CLAUDE_CONFIG_DIR`, `CODEX_HOME`, or `KIMI_CODE_HOME` when the server has it,
+otherwise `~/.claude`, `~/.codex`, or `~/.kimi-code`. An override set only inside
+a pane, such as `CLAUDE_CONFIG_DIR=/path claude`, is not visible to the server,
+so that agent's activity is not found; set the variable in the environment the
+server starts from as well.
+
 Hooks signal with `pane.report_agent_activity`:
 
 ```json
