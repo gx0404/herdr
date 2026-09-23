@@ -122,7 +122,7 @@ The Codex hook reports session identity through the same local socket API used b
 
 Codex integration v9 also subscribes to `SubagentStart` and `SubagentStop` on macOS and Linux. These hooks only tell the local Herdr socket that a Codex sub-agent thread started or stopped; they do not report agent state, and Herdr rebuilds the activity tree from Codex's own session files. Codex only runs hooks with `[features] hooks = true`, which the install already writes. The activity hooks are not installed on Windows. Reinstall the Codex integration after upgrading to add them.
 
-A Codex sub-agent is labeled with its nickname and its task name, which is the last part of its agent path, for example `Boyle · herdr_probe`; the full agent path is its summary. A sub-agent without a nickname shows just the task name.
+A Codex sub-agent is labeled with its nickname and its task name, which is the last part of its agent path, for example `Boyle · herdr_probe`. Its summary shows the full agent path, or the reason when the sub-agent failed or was interrupted. A sub-agent without a nickname shows just the task name.
 
 In the agent activity window, a Codex sub-agent's output is a readable transcript of its own thread: messages from its parent agent, `user:` and assistant messages, `(thinking)` markers, tool calls with their main argument followed by the first five lines of their output, plans, and `[task complete]` with the turn's final message. Developer instructions, the history the sub-agent inherited from its parent, token counts, rate limits, and other bookkeeping records are left out, and a record Herdr does not recognize shows only its type in brackets.
 
