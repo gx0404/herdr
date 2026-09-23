@@ -2615,3 +2615,46 @@ fn agent_panel_header_keeps_a_gap_between_title_and_sort_toggle() {
         "两个宽度应分别覆盖截短与完整两种情形"
     );
 }
+
+/// A4：平铺行不再挂在树第 0 行的负载上旁路传递。渲染拿到的树行切片不一定从
+/// 第 0 行开始，矮面板的平铺视图也必须照样逐个列出全部 agent（折叠了的工作区
+/// 也不例外）。
+#[test]
+fn flat_view_rows_do_not_depend_on_the_first_tree_row() {
+    let mut state = classic_state(AgentPanelSortConfig::Spaces);
+    state.toggle_collapsed_group(&ClientEndpointId::Local, agent_group_key("ws_1"));
+    state.compose(106, 40).expect("classic 帧");
+    let cache = state.federated_agent_rows.as_ref().expect("行缓存");
+    let tree = cache.rows();
+    assert!(tree.len() > 1, "夹具前提：树不止一行");
+    assert_eq!(cache.flat_rows().len(), 3, "平铺行是缓存上独立的一片");
+    // 矮面板：表头 3 行 + 列表区 2 行，走平铺视图。
+    let area = Rect::new(0, 0, 30, 5);
+    let mut listed = Vec::new();
+    for start in 0..3 {
+        let mut buffer = Buffer::empty(area);
+        let mut hits = ShellHitMap::default();
+        let mut scroll = start;
+        crate::client::shell::agent_tree::render_agent_tree_rows(
+            &mut buffer,
+            area,
+            None,
+            crate::client::shell::agent_tree::AgentRowsView {
+                tree: &tree[1..],
+                flat: cache.flat_rows(),
+            },
+            &state.config,
+            &mut scroll,
+            None,
+            &mut hits,
+            false,
+        );
+        assert!(hits.agent_tree_toggles.is_empty(), "矮面板走平铺视图");
+        listed.extend(hits.agents.first().map(|(_, id)| id.clone()));
+    }
+    assert_eq!(
+        listed,
+        ["pane_1", "pane_2", "pane_3"],
+        "只拿到后半段树行也列出全部 agent"
+    );
+}

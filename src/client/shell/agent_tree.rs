@@ -13,7 +13,7 @@
 //! 分组（状态过滤视图不列），点击其行打开「Agent 活动」窗口。
 //!
 //! 平铺视图：列表区不足 3 行的退化视图与联邦折叠侧栏不画分组头，改用构建期
-//! 一并产出的平铺行（[`flat_view_rows`]）——忽略面板内的折叠态、保留完整
+//! 一并产出的平铺行（[`AgentTree::flat`]）——忽略面板内的折叠态、保留完整
 //! token、按聚合顺序列出全部 agent，被折叠分组里的 agent 仍可见可点。
 //!
 //! 活动摘要：快照默认只带每个 agent 的 running / total 计数与至多 1 个最新节点
@@ -130,9 +130,6 @@ pub(super) struct AgentTreeNode {
     running: bool,
     /// 活动徽标（见 [`ActivityBadge`]），没有活动为 `None`。
     badge: Option<ActivityBadge>,
-    /// 平铺视图的行，只挂在整棵树的第 0 行上（见 [`flat_view_rows`]）；其余行与
-    /// 平铺视图自己的行都是 `None`。
-    flat_view: Option<Box<[AgentTreeRow]>>,
     pub(super) kind: AgentTreeKind,
 }
 
@@ -155,7 +152,6 @@ impl AgentTreeNode {
             },
             running: running > 0,
             badge: activity_badge(running, total),
-            flat_view: None,
             kind,
         }
     }
@@ -177,19 +173,26 @@ impl AgentTreeNode {
 /// 统一树展平后的一行：`TreeEntry` 的深度 / 折叠键 / 末子掩码 + 客户端负载。
 pub(super) type AgentTreeRow = TreeEntry<AgentTreeNode>;
 
-/// 退化视图（列表区不足 3 行）与联邦折叠侧栏用的平铺行。这两种视图不画分组头，
-/// 面板内折叠了的分组在这里展不开，所以平铺行忽略面板内的折叠态、保留完整 token
-/// （工作区名等不再由分组头承载），按 `aggregate_agent_rows` 的顺序列出全部
-/// agent，再跟外部条目（状态过滤视图不列）；机器层折叠（`collapsed_endpoints`，
-/// 工作区区的机器行照样能切换）在树里生效时这里同样生效。
-///
-/// 平铺行在视图计算阶段与树一起构建，挂在树的第 0 行上随行切片传给渲染：
-/// `ShellRenderState` 只带一个行切片（共享热文件，不为它加字段）。有 agent 或外部
-/// 条目时树至少有一个分组头或 agent 行，所以树为空时平铺视图也为空。
-pub(super) fn flat_view_rows(rows: &[AgentTreeRow]) -> &[AgentTreeRow] {
-    rows.first()
-        .and_then(|row| row.kind.flat_view.as_deref())
-        .unwrap_or(&[])
+/// 视图计算阶段一次构建出的两套行（进 `endpoint_agents::AgentRowsCache`）。
+pub(super) struct AgentTree {
+    /// 统一树展平后的行（分组头、agent、活动节点、外部条目）。
+    pub(super) rows: Vec<AgentTreeRow>,
+    /// 退化视图（列表区不足 3 行）与联邦折叠侧栏用的平铺行。这两种视图不画分组
+    /// 头，面板内折叠了的分组在这里展不开，所以平铺行忽略面板内的折叠态、保留
+    /// 完整 token（工作区名等不再由分组头承载），按 `aggregate_agent_rows` 的顺序
+    /// 列出全部 agent，再跟外部条目（状态过滤视图不列）；机器层折叠
+    /// （`collapsed_endpoints`，工作区区的机器行照样能切换）在树里生效时这里同样
+    /// 生效。
+    pub(super) flat: Vec<AgentTreeRow>,
+}
+
+/// 渲染阶段拿到的两套行，经 `ShellRenderState::federated_agent_rows` 并列传递：
+/// 平铺行是独立的切片，不再挂在树第 0 行的负载上旁路传递，渲染也就不要求调用方
+/// 一定传整棵树（A4）。
+#[derive(Clone, Copy, Default)]
+pub(super) struct AgentRowsView<'a> {
+    pub(super) tree: &'a [AgentTreeRow],
+    pub(super) flat: &'a [AgentTreeRow],
 }
 
 /// 构建树时的折叠态只读视图（三个集合都在 `ClientShellState` 上）。
@@ -345,7 +348,7 @@ pub(super) fn build_agent_tree(
     active_endpoint_id: &ClientEndpointId,
     config: &ClientShellConfig,
     collapse: &CollapseState<'_>,
-) -> Vec<AgentTreeRow> {
+) -> AgentTree {
     let ordered = aggregate_agent_rows(endpoints, active_endpoint_id, config.agent_panel_sort);
     let view_label = endpoints
         .iter()
@@ -503,7 +506,7 @@ pub(super) fn build_agent_tree(
     }
     fill_last_child_masks(&mut rows);
 
-    // 平铺视图（见 `flat_view_rows`）：机器层折叠只在树按机器分组时生效，与树
+    // 平铺视图（见 `AgentTree::flat`）：机器层折叠只在树按机器分组时生效，与树
     // 一致（`Launch` / 状态过滤的平铺树本来就不看机器折叠）。
     let honor_machine_collapse = federated && !flat;
     let visible = |endpoint_id: &ClientEndpointId| {
@@ -536,12 +539,10 @@ pub(super) fn build_agent_tree(
             flat_builder.push_external_entries(0, endpoint);
         }
     }
-    if let Some(first) = rows.first_mut() {
-        if !flat_rows.is_empty() {
-            first.kind.flat_view = Some(flat_rows.into_boxed_slice());
-        }
+    AgentTree {
+        rows,
+        flat: flat_rows,
     }
-    rows
 }
 
 /// 分组头的汇总：agent 数与最高优先级状态。
@@ -911,14 +912,14 @@ fn child_indices<'n>(
 /// 渲染阶段：表头 + 统一树的行列表。`endpoint_qualified` 决定 agent 行写进
 /// `hits.agents`（classic 单端点，端点隐含为本机）还是 `hits.endpoint_agents`
 /// （联邦 / workbench）。列表区不足 3 行（放不下「分组头 + 一个 agent 行」）时退化
-/// 为 [`flat_view_rows`] 的平铺视图：没有分组头，被折叠分组里的 agent 也列出，
+/// 为 [`AgentRowsView::flat`] 的平铺视图：没有分组头，被折叠分组里的 agent 也列出，
 /// 仍可见可点。
 #[allow(clippy::too_many_arguments)]
 pub(super) fn render_agent_tree_rows(
     buffer: &mut Buffer,
     area: Rect,
     agent_view_label: Option<&str>,
-    rows: &[AgentTreeRow],
+    rows: AgentRowsView<'_>,
     config: &ClientShellConfig,
     agent_scroll: &mut usize,
     chrome_hover: Option<&ChromeHover>,
@@ -943,7 +944,7 @@ pub(super) fn render_agent_tree_rows(
         endpoint_qualified,
     };
     let flat = area.height.saturating_sub(3) < 3;
-    let listed = if flat { flat_view_rows(rows) } else { rows };
+    let listed = if flat { rows.flat } else { rows.tree };
     render_agent_list(
         buffer,
         area,

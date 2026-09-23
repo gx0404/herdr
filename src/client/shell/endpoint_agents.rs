@@ -1,31 +1,29 @@
 use super::agent_tree::{
-    build_agent_tree, flat_view_rows, AgentTreeKind, AgentTreeRow, CollapseState,
+    build_agent_tree, AgentRowsView, AgentTreeKind, AgentTreeRow, CollapseState,
 };
 use super::render::put_text;
 use super::*;
 
 /// 折叠侧栏的单列视图：每个 agent 一行（机器首字母 + 状态图标），取统一树的
-/// 平铺行（`agent_tree::flat_view_rows`）。这里不画分组头，面板内折叠了的分组
+/// 平铺行（`AgentRowsView::flat`）。这里不画分组头，面板内折叠了的分组
 /// 在这里展不开，所以按聚合顺序列出全部 agent；机器层折叠照旧藏起该端点的
 /// agent（上方工作区区的机器行可切换）。
 pub(super) fn render_collapsed(
     buffer: &mut Buffer,
     area: Rect,
-    rows: &[AgentTreeRow],
+    rows: AgentRowsView<'_>,
     config: &ClientShellConfig,
     chrome_hover: Option<&super::feedback::ChromeHover>,
     hits: &mut ShellHitMap,
 ) {
-    let agents = flat_view_rows(rows)
-        .iter()
-        .filter_map(|row| match &row.kind.kind {
-            AgentTreeKind::Agent {
-                agent,
-                machine_initial,
-                ..
-            } => Some((&row.kind, agent, *machine_initial)),
-            _ => None,
-        });
+    let agents = rows.flat.iter().filter_map(|row| match &row.kind.kind {
+        AgentTreeKind::Agent {
+            agent,
+            machine_initial,
+            ..
+        } => Some((&row.kind, agent, *machine_initial)),
+        _ => None,
+    });
     for (index, (node, agent, initial)) in agents.take(area.height as usize).enumerate() {
         let rect = Rect::new(area.x, area.y + index as u16, area.width, 1);
         let hovered = matches!(
@@ -71,7 +69,7 @@ pub(super) fn render_expanded(
     buffer: &mut Buffer,
     area: Rect,
     agent_view_label: Option<&str>,
-    rows: &[AgentTreeRow],
+    rows: AgentRowsView<'_>,
     config: &ClientShellConfig,
     agent_scroll: &mut usize,
     chrome_hover: Option<&super::feedback::ChromeHover>,
@@ -89,10 +87,6 @@ pub(super) fn render_expanded(
         true,
     );
 }
-
-/// 缓存行的类型名沿用旧名，`render.rs::ShellRenderState` 仍按它引用；实际类型是
-/// 统一树的行。
-pub(super) type EndpointAgentRow = AgentTreeRow;
 
 /// 联邦 agents 面板行的缓存键：端点集合与各自快照分代、排序、过滤标签、配置
 /// 代际。任何一项变化才重算（PERF-02）。
@@ -119,6 +113,8 @@ pub(super) struct AgentRowsKey {
 pub(super) struct AgentRowsCache {
     key: AgentRowsKey,
     rows: Vec<AgentTreeRow>,
+    /// 平铺视图的行（见 `agent_tree::AgentTree::flat`）。
+    flat_rows: Vec<AgentTreeRow>,
 }
 
 impl AgentRowsCache {
@@ -157,8 +153,24 @@ impl AgentRowsCache {
         }
     }
 
+    /// 树行（测试按行序核对缓存内容用；渲染一律经 [`Self::view`]）。
+    #[cfg(test)]
     pub(super) fn rows(&self) -> &[AgentTreeRow] {
         &self.rows
+    }
+
+    /// 平铺行（同上，只供测试）。
+    #[cfg(test)]
+    pub(super) fn flat_rows(&self) -> &[AgentTreeRow] {
+        &self.flat_rows
+    }
+
+    /// 渲染用的两套行：树行与平铺行各自成片，经 `ShellRenderState` 并列传递。
+    pub(super) fn view(&self) -> AgentRowsView<'_> {
+        AgentRowsView {
+            tree: &self.rows,
+            flat: &self.flat_rows,
+        }
     }
 
     pub(super) fn key_matches(&self, key: &AgentRowsKey) -> bool {
@@ -172,8 +184,10 @@ impl AgentRowsCache {
         config: &ClientShellConfig,
         collapse: &CollapseState<'_>,
     ) -> Self {
+        let tree = build_agent_tree(endpoints, active, config, collapse);
         Self {
-            rows: build_agent_tree(endpoints, active, config, collapse),
+            rows: tree.rows,
+            flat_rows: tree.flat,
             key,
         }
     }

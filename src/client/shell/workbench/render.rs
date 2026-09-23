@@ -181,8 +181,8 @@ impl ClientShellState {
         let federated_agent_rows = self
             .federated_agent_rows
             .as_ref()
-            .map(|cache| cache.rows())
-            .unwrap_or(&[]);
+            .map(|cache| cache.view())
+            .unwrap_or_default();
         let mut sidebar_state = super::super::render::ShellRenderState {
             federated_agent_rows,
             endpoints: &self.endpoints,

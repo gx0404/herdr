@@ -86,8 +86,8 @@ impl ClientShellState {
         let federated_agent_rows = self
             .federated_agent_rows
             .as_ref()
-            .map(|cache| cache.rows())
-            .unwrap_or(&[]);
+            .map(|cache| cache.view())
+            .unwrap_or_default();
         let mut render_state = render::ShellRenderState {
             federated_agent_rows,
             endpoints: &self.endpoints,
@@ -268,8 +268,8 @@ impl ClientShellState {
         let federated_agent_rows = self
             .federated_agent_rows
             .as_ref()
-            .map(|cache| cache.rows())
-            .unwrap_or(&[]);
+            .map(|cache| cache.view())
+            .unwrap_or_default();
         self.hits = render::render_shell(
             canvas.buffer(),
             layout,

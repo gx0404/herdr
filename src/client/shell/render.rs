@@ -372,8 +372,9 @@ pub(super) fn render_mode_bar(
 
 pub(super) struct ShellRenderState<'a> {
     pub(super) endpoints: &'a [ClientShellEndpoint],
-    /// 联邦 agents 面板的行：由视图计算阶段按端点分代缓存（PERF-02），渲染只读。
-    pub(super) federated_agent_rows: &'a [super::endpoint_agents::EndpointAgentRow],
+    /// Agents 面板的行：由视图计算阶段按端点分代缓存（PERF-02），渲染只读。树行与
+    /// 平铺行是两份并列的切片（`AgentRowsCache::view`）。
+    pub(super) federated_agent_rows: super::agent_tree::AgentRowsView<'a>,
     pub(super) machine_chrome: &'a HashMap<crate::client::endpoint::ProfileId, MachineChrome>,
     pub(super) active_endpoint_id: &'a ClientEndpointId,
     pub(super) collapsed_endpoints: &'a HashSet<ClientEndpointId>,

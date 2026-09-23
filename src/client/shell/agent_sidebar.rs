@@ -69,7 +69,7 @@ pub(super) fn render_agent_panel(
     buffer: &mut Buffer,
     area: Rect,
     agent_view_label: Option<&str>,
-    rows: &[super::agent_tree::AgentTreeRow],
+    rows: super::agent_tree::AgentRowsView<'_>,
     config: &ClientShellConfig,
     agent_scroll: &mut usize,
     chrome_hover: Option<&super::feedback::ChromeHover>,
