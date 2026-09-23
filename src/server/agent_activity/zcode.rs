@@ -38,10 +38,11 @@
 //!   Failed 呈现、摘要写明原因），没有 metadata 退回最新一轮；running 超过 2 h 没有
 //!   任何动静 → Unknown，摘要 `stale`。
 //! - 待办：根会话的全部，外加仍在跑的子 agent 的，id 为 `todo:<会话 id>:<position>`。
-//! - `read` 只对子 agent 节点可用（其余节点 `Unsupported`）；游标是 `t:<偏移>`
-//!   （转录）或 `o:<偏移>`（output.txt）。读到末尾时 `eof=true` 只表示「暂时读完」，
-//!   `next_cursor` 仍给出当前位置供跟随续读；转录里不以换行结尾的半截末行不消费，
-//!   游标留在行首。
+//! - `read` 只有子 agent 节点有内容；游标是 `t:<偏移>`（转录）或 `o:<偏移>`
+//!   （output.txt）。读到末尾时 `eof=true` 只表示「暂时读完」，`next_cursor` 仍给出
+//!   当前位置供跟随续读；转录里不以换行结尾的半截末行不消费，游标留在行首。待办与
+//!   其余会话节点（旁支对话等）没有内容，回空页（`eof=true`、无游标，查看器显示
+//!   「无输出」），不当读取失败；认不出形状的节点 id 回 `Malformed`。
 //!
 //! # 本机取证（2026-09-22，只读核对结构、键名与枚举取值，未读取任何对话正文）
 //!
@@ -140,7 +141,11 @@ const STALE_RUNNING_MS: u64 = 2 * 60 * 60 * 1000;
 /// 本机核实过的最新迁移序号（`0022_backfilled_session_reasoning`）。
 const LATEST_VERIFIED_MIGRATION: u32 = 22;
 
+/// ZCode 会话 id 的前缀：根会话与旁支对话实测都是 `sess_…`，子 agent 是
+/// `sess_subagent_…`（见模块文档的 id 规则）。
+const SESSION_ID_PREFIX: &str = "sess_";
 const SUBAGENT_SESSION_PREFIX: &str = "sess_subagent_";
+const TODO_NODE_PREFIX: &str = "todo:";
 const SUBAGENT_TASK_TYPE: &str = "subagent_child";
 const METADATA_FILE: &str = "metadata.json";
 const TRANSCRIPT_FILE: &str = "transcript.jsonl";
@@ -745,7 +750,7 @@ fn subagent_node(
 
 fn todo_node(todo: &TodoRow, root_id: &str) -> AgentActivityNode {
     AgentActivityNode {
-        id: format!("todo:{}:{}", todo.session, todo.position),
+        id: format!("{TODO_NODE_PREFIX}{}:{}", todo.session, todo.position),
         kind: AgentActivityKind::Todo,
         label: first_line(&todo.content)
             .map(|content| clip_chars(content, TODO_CHARS))
@@ -976,9 +981,16 @@ fn read_node(
     max_bytes: usize,
 ) -> Result<ContentChunk, SourceError> {
     let cursor = parse_cursor(cursor)?;
-    // 只有子 agent 节点有内容；待办、旁支对话等节点本来就不提供读取。
     let Some(agent_id) = node_id.strip_prefix(SUBAGENT_SESSION_PREFIX) else {
-        return Err(SourceError::Unsupported);
+        // 只有子 agent 节点有内容。待办与旁支对话等会话节点本来就没有：回空页让
+        // 查看器显示「无输出」，不当读取失败。只核对 id 形状，不查库。
+        return if is_contentless_node(node_id) {
+            Ok(empty_chunk(AgentActivityContentFormat::Text, None))
+        } else {
+            Err(SourceError::Malformed(format!(
+                "invalid zcode node id: {node_id}"
+            )))
+        };
     };
     if !is_safe_id(agent_id) {
         return Err(SourceError::Malformed(format!(
@@ -1000,6 +1012,17 @@ fn read_node(
         Cursor::Start => Ok(empty_chunk(AgentActivityContentFormat::Text, None)),
         Cursor::Transcript(offset) => read_transcript_page(&transcript, offset, budget),
         Cursor::Output(offset) => read_text_page(&output, offset, budget),
+    }
+}
+
+/// 本适配器产出、但没有内容文件的节点：待办 `todo:<会话 id>:<序号>`，以及子 agent
+/// 以外的会话节点（旁支对话与未来的新会话类型，id 就是 `sess_…` 会话 id）。
+fn is_contentless_node(node_id: &str) -> bool {
+    match node_id.strip_prefix(TODO_NODE_PREFIX) {
+        Some(rest) => rest.rsplit_once(':').is_some_and(|(session, position)| {
+            is_safe_id(session) && position.parse::<u64>().is_ok()
+        }),
+        None => node_id.starts_with(SESSION_ID_PREFIX) && is_safe_id(node_id),
     }
 }
 
@@ -1355,6 +1378,9 @@ pub(super) mod fixture {
     /// 5 天前的根会话，落在近期窗口之外，不进外部列表。
     pub(in crate::server::agent_activity) const OLD_ROOT: &str =
         "sess_c0000000-0000-4000-8000-000000000003";
+    /// 根 A 下的旁支对话（`selection_side_chat`）：会话节点，没有内容文件。
+    pub(in crate::server::agent_activity) const SIDE_CHAT: &str =
+        "sess_e0000000-0000-4000-8000-000000000005";
 
     /// `sub("01")` → `sess_subagent_agent_10000000-0000-4000-8000-000000000001`。
     pub(in crate::server::agent_activity) fn sub(suffix: &str) -> String {
@@ -1486,12 +1512,11 @@ mod tests {
     use std::io::Write;
 
     use super::fixture::{
-        dir as fixture_dir, sqlite3_available, sub, TempDir, NOW, ROOT_A, ROOT_B,
+        dir as fixture_dir, sqlite3_available, sub, TempDir, NOW, ROOT_A, ROOT_B, SIDE_CHAT,
     };
     use super::*;
     use crate::agent_resume::AgentSessionRef;
 
-    const SIDE_CHAT: &str = "sess_e0000000-0000-4000-8000-000000000005";
     const FUTURE_STEP: &str = "sess_f0000000-0000-4000-8000-000000000006";
 
     fn fixture_home() -> PathBuf {
@@ -2176,21 +2201,45 @@ mod tests {
                 "{node_id}"
             );
         }
-        // 待办、旁支对话等节点本来就不提供内容。
-        for node_id in [format!("todo:{ROOT_A}:0"), SIDE_CHAT.to_string()] {
+        // 待办、旁支对话等节点本来就没有内容：空页（eof、无游标），查看器显示「无
+        // 输出」，不当读取失败（真机报告 zcode-10）。游标对它们不起作用。
+        for node_id in [
+            format!("todo:{ROOT_A}:0"),
+            format!("todo:{}:0", sub("03")),
+            SIDE_CHAT.to_string(),
+            FUTURE_STEP.to_string(),
+        ] {
+            for cursor in [None, Some("t:10")] {
+                let chunk = ZCode
+                    .read(&cx, &node_id, cursor, 4096)
+                    .unwrap_or_else(|error| panic!("{node_id} 应回空页：{error}"));
+                assert_eq!(chunk.format, AgentActivityContentFormat::Text, "{node_id}");
+                assert!(
+                    chunk.text.is_empty() && chunk.eof && !chunk.truncated,
+                    "{node_id}"
+                );
+                assert_eq!(chunk.next_cursor, None, "{node_id}：没有可续读的位置");
+            }
+        }
+        // 认不出的 id 一律 Malformed：拼路径前就拦下越界 id，形状不对的待办与不是
+        // 会话 id 的节点同样拦下。
+        for node_id in [
+            "sess_subagent_../../etc",
+            "sess_../x",
+            "todo:",
+            "todo:sess_x",
+            "todo:sess_x:first",
+            "todo:../x:0",
+            "node",
+        ] {
             assert!(
                 matches!(
-                    ZCode.read(&cx, &node_id, None, 4096),
-                    Err(SourceError::Unsupported)
+                    ZCode.read(&cx, node_id, None, 4096),
+                    Err(SourceError::Malformed(_))
                 ),
                 "{node_id}"
             );
         }
-        // 拼路径前就拦下越界 id。
-        assert!(matches!(
-            ZCode.read(&cx, "sess_subagent_../../etc", None, 4096),
-            Err(SourceError::Malformed(_))
-        ));
         for cursor in ["garbage", "x:1", "t:abc", "o:-1"] {
             assert!(
                 matches!(

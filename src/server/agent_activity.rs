@@ -1255,10 +1255,14 @@ mod tests {
                 source.discover(&cx),
                 Err(SourceError::Unsupported)
             ));
-            assert!(matches!(
-                source.read(&cx, "node", None, 1024),
-                Err(SourceError::Unsupported)
-            ));
+            let read = source.read(&cx, "node", None, 1024);
+            if agent == "zcode" {
+                // ZCode 按节点 id 在自己的目录里找内容，不靠会话引用；不是它产出的
+                // id 形状一律 Malformed。
+                assert!(matches!(read, Err(SourceError::Malformed(_))), "{agent}");
+            } else {
+                assert!(matches!(read, Err(SourceError::Unsupported)), "{agent}");
+            }
         }
     }
 
@@ -2388,6 +2392,45 @@ mod tests {
             None,
         );
         assert_eq!(old["error"]["code"], "agent_not_found", "{old}");
+    }
+
+    /// 真机报告 zcode-09 / zcode-10：外部条目的待办节点带 `node_id` 读取曾回
+    /// `not_implemented`，活动窗口右列显示「读取失败」。没有内容的节点（待办、旁支
+    /// 对话）回空片段（`eof`、无游标），窗口显示「无输出」；子 agent 节点照常读出
+    /// 转录。节点读取不碰库，HOME 直接指向夹具目录，不需要 sqlite3。
+    #[test]
+    fn zcode_external_nodes_without_output_read_as_empty_content() {
+        use zcode::fixture;
+        let (events, _received) = tokio::sync::mpsc::channel(32);
+        let mut service = Service::with_sources(
+            events,
+            Sources::REGISTERED,
+            Some(fixture::dir().join("home")),
+        );
+        let (app, _, _) = app_with_agent(None);
+        let root_a = format!("zcode:{}", fixture::ROOT_A);
+        for node_id in [
+            format!("todo:{}:1", fixture::ROOT_A),
+            format!("todo:{}:0", fixture::sub("03")),
+            fixture::SIDE_CHAT.to_string(),
+        ] {
+            let response = external_read(&mut service, &app, &root_a, Some(&node_id));
+            let content = &response["result"]["content"];
+            assert_eq!(content["node_id"], node_id.as_str(), "{response}");
+            assert_eq!(content["text"], "", "{response}");
+            assert_eq!(content["eof"], true, "{response}");
+            assert!(content.get("next_cursor").is_none(), "{response}");
+        }
+        let transcript = external_read(&mut service, &app, &root_a, Some(&fixture::sub("01")));
+        assert!(
+            transcript["result"]["content"]["text"]
+                .as_str()
+                .is_some_and(|text| text.starts_with("── turn 1 ──")),
+            "{transcript}"
+        );
+        // 不是 ZCode 产出的节点 id：activity_malformed，而不是 not_implemented。
+        let bogus = external_read(&mut service, &app, &root_a, Some("bogus"));
+        assert_eq!(bogus["error"]["code"], "activity_malformed", "{bogus}");
     }
 
     /// 没装 ZCode（HOME 里没有它的库）：外部列表为空，按 external_id 读树回
