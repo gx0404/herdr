@@ -193,14 +193,16 @@ fn account_hover_covering_the_terminal_cursor_hides_it() {
     let mut state = docked();
     let before = state.compose(120, 40).expect("打开前画面");
     let cursor = before.cursor.clone().expect("终端光标");
-    // 锚点放在光标左侧，悬浮层从锚点右侧展开即覆盖光标坐标。
+    // 锚点放在光标正上方一行：悬浮层按 kit 定位从锚点下方展开（左对齐），即覆盖
+    // 光标坐标。
+    assert!(cursor.y > 0, "用例前提：光标上方还有一行放锚点");
     state.observability.hover = Some(Hover {
         target: HoverTarget::Agent {
             endpoint_id: state.active_endpoint_id.clone(),
             pane: "pane_1".into(),
             agent: "claude".into(),
         },
-        anchor: Rect::new(cursor.x.saturating_sub(2), cursor.y, 1, 1),
+        anchor: Rect::new(cursor.x, cursor.y - 1, 1, 1),
         since: std::time::Instant::now(),
         visible: true,
         leave_at: None,
@@ -3892,6 +3894,162 @@ fn hover_deadlines_drive_the_client_timer() {
         "指针在卡上撤销离开计时"
     );
     assert_eq!(state.observability.hover_deadline(), None);
+}
+
+/// 经典布局（端点不宣告 `client.views.set`，停靠工作台不启用）+ 聚焦 pane 运行
+/// claude + 用量方法：悬浮卡走 `composition.rs` 的观测 pass。
+fn classic_usage_ready() -> ClientShellState {
+    let mut snapshot = snapshot();
+    snapshot.agents.push(agent_in_pane("pane_1", "claude"));
+    let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
+    state.set_snapshot(Box::new(snapshot));
+    state.set_endpoint_methods(Some(vec![
+        "pane.focus".into(),
+        "account.usage.get".into(),
+        "account.usage.refresh".into(),
+        "account.usage.providers".into(),
+        "account.binding.set".into(),
+    ]));
+    state.set_pane_surface(surface());
+    state.compose(120, 40).expect("经典布局");
+    tick(&mut state, Instant::now());
+    assert!(
+        !state.workbench.enabled,
+        "未宣告 client.views.set 即经典布局"
+    );
+    state
+}
+
+/// 直接放一张已可见的 pane_1 / claude 悬浮卡，锚在 `anchor`。
+fn show_hover_at(state: &mut ClientShellState, anchor: Rect) {
+    state.observability.hover = Some(Hover {
+        target: HoverTarget::Agent {
+            endpoint_id: state.active_endpoint_id.clone(),
+            pane: "pane_1".into(),
+            agent: "claude".into(),
+        },
+        anchor,
+        since: Instant::now(),
+        visible: true,
+        leave_at: None,
+        pinned: false,
+    });
+}
+
+fn cell_symbol(frame: &FrameData, x: u16, y: u16) -> &str {
+    frame.cells[usize::from(y) * usize::from(frame.width) + usize::from(x)]
+        .symbol
+        .as_str()
+}
+
+/// 卡片画在 `card` 上：四角是边框字形，顶边从左框后一格写标题「 claude · …」。
+fn assert_card_chrome(state: &ClientShellState, frame: &FrameData, card: Rect) {
+    let glyphs = state.config.border_glyphs;
+    assert_eq!(cell_symbol(frame, card.x, card.y), glyphs.top_left);
+    assert_eq!(
+        cell_symbol(frame, card.right() - 1, card.bottom() - 1),
+        glyphs.bottom_right
+    );
+    let title = (card.x + 2..card.x + 8)
+        .map(|x| cell_symbol(frame, x, card.y))
+        .collect::<String>();
+    assert_eq!(title, "claude", "标题行: {:?}", frame_row(frame, card.y));
+}
+
+/// 定位统一走 `kit::hover_card::place_hover_card`：锚点下方左对齐 → 放不下
+/// 上翻 → 两侧都不够取大侧收缩；右侧放不下向左平移；永不盖住锚点。宽 / 窄 /
+/// 极窄三档都成立（卡片宽 ≤68、高 ≤17，屏幕小时各让出 2 格）。
+#[test]
+fn agent_hover_card_placement_follows_the_kit_rules_at_every_width() {
+    for (cols, rows) in [(120u16, 40u16), (60, 24), (24, 10)] {
+        let mut state = classic_usage_ready();
+        let size = (
+            cols.saturating_sub(2).min(68),
+            rows.saturating_sub(2).min(17),
+        );
+        // 下方放得下：锚点正下方、左对齐。
+        let anchor = Rect::new(1, 1, 10, 1);
+        show_hover_at(&mut state, anchor);
+        let frame = state.compose(cols, rows).expect("悬浮卡");
+        let card = state.observability.hover_rect;
+        assert_eq!(
+            card,
+            Rect::new(1, 2, size.0, size.1),
+            "{cols}x{rows}: 卡片在锚点正下方、与锚点左对齐"
+        );
+        assert_card_chrome(&state, &frame, card);
+        // 锚点贴底：翻到上方，底边贴住锚点。
+        let low = Rect::new(1, rows - 1, 10, 1);
+        show_hover_at(&mut state, low);
+        let frame = state.compose(cols, rows).expect("上翻的悬浮卡");
+        let card = state.observability.hover_rect;
+        assert_eq!(card.bottom(), low.y, "{cols}x{rows}: 下方没空间 → 上翻");
+        assert_eq!(card.height, size.1);
+        assert_card_chrome(&state, &frame, card);
+        // 锚点贴右缘：卡片向左平移到右缘内。
+        let right = Rect::new(cols - 3, 1, 3, 1);
+        show_hover_at(&mut state, right);
+        let frame = state.compose(cols, rows).expect("贴右缘的悬浮卡");
+        let card = state.observability.hover_rect;
+        assert_eq!(card.right(), cols, "{cols}x{rows}: 右侧放不下向左平移");
+        assert_eq!(card.width, size.0);
+        assert_card_chrome(&state, &frame, card);
+        // 锚点在中间、上下都不够：取大侧并收缩高度。
+        let middle = Rect::new(1, rows / 2, 10, 1);
+        show_hover_at(&mut state, middle);
+        state.compose(cols, rows).expect("收缩的悬浮卡");
+        let card = state.observability.hover_rect;
+        let below = rows - middle.bottom();
+        let above = middle.y;
+        if size.1 > below && size.1 > above {
+            assert_eq!(card.height, below.max(above), "{cols}x{rows}: 取大侧收缩");
+        }
+        for anchor in [anchor, low, right, middle] {
+            show_hover_at(&mut state, anchor);
+            state.compose(cols, rows).expect("悬浮卡");
+            let card = state.observability.hover_rect;
+            assert!(!card.is_empty(), "{cols}x{rows}: {anchor:?} 有卡");
+            assert!(
+                !card.intersects(anchor),
+                "{cols}x{rows}: 卡片 {card:?} 盖住了锚点 {anchor:?}"
+            );
+            assert_eq!(
+                Rect::new(0, 0, cols, rows).intersection(card),
+                card,
+                "{cols}x{rows}: 卡片越界"
+            );
+        }
+    }
+}
+
+/// 两条绘制路径（经典布局的观测 pass、停靠工作台的全局悬浮 pass）都按 agent
+/// 行定位：真实悬浮（移动 + 延时）后卡片不盖住该行，且在行的正下方或正上方。
+#[test]
+fn agent_row_hover_card_never_covers_its_row_in_either_layout() {
+    for (label, mut state) in [
+        ("经典布局", classic_usage_ready()),
+        ("停靠工作台", usage_ready()),
+    ] {
+        state.compose(120, 40).expect("画面");
+        let row = agent_row(&state, "pane_1");
+        let t0 = Instant::now();
+        moved(&mut state, row.x, row.y);
+        tick(&mut state, t0 + Duration::from_millis(450));
+        assert_eq!(agent_hover(&state), Some((true, false)), "{label}: 可见");
+        let frame = state.compose(120, 40).expect("悬浮卡");
+        let card = state.observability.hover_rect;
+        assert!(!card.is_empty(), "{label}: 画出了悬浮卡");
+        assert!(
+            !card.intersects(row),
+            "{label}: 卡片 {card:?} 盖住了行 {row:?}"
+        );
+        assert!(
+            card.y == row.bottom() || card.bottom() == row.y,
+            "{label}: 卡片 {card:?} 紧贴行 {row:?} 的下方或上方"
+        );
+        assert_eq!(card.x, row.x.min(120 - card.width), "{label}: 与行左对齐");
+        assert_card_chrome(&state, &frame, card);
+    }
 }
 
 #[test]

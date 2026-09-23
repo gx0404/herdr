@@ -1,6 +1,7 @@
 //! agent 行悬浮层（账号用量卡）：作用域视图、正文 + 底部动作行与浮层挂载。
 
 use super::*;
+use crate::ui::kit::hover_card::place_hover_card;
 
 /// 悬浮层作用域：账号与 pane 都来自 `hover_scope`，选中账号沿用页面的高亮
 /// （仅当它在悬浮层的账号里）。
@@ -82,18 +83,17 @@ pub(super) fn hover_layer(
     };
     match &hover.target {
         HoverTarget::Agent { agent, .. } => {
-            let width = buffer.area.width.saturating_sub(2).min(68);
-            let height = buffer.area.height.saturating_sub(2).min(17);
-            let x = hover
-                .anchor
-                .right()
-                .saturating_add(1)
-                .min(buffer.area.right().saturating_sub(width));
-            let y = hover
-                .anchor
-                .y
-                .min(buffer.area.bottom().saturating_sub(height));
-            let hover_rect = Rect::new(x, y, width, height);
+            // 尺寸不变（宽 ≤68、高 ≤17，屏幕小时各让出 2 格）；定位统一走 kit：
+            // 锚点（agent 行 / CLI 标题）下方左对齐 → 放不下上翻 → 两侧都不够取
+            // 大侧收缩，永不盖住锚点。经典布局与停靠工作台的两条绘制 pass 同源。
+            let size = (
+                buffer.area.width.saturating_sub(2).min(68),
+                buffer.area.height.saturating_sub(2).min(17),
+            );
+            let hover_rect = place_hover_card(hover.anchor, size, buffer.area);
+            if hover_rect.is_empty() {
+                return Rect::default();
+            }
             clear(buffer, hover_rect);
             let inner = block(
                 buffer,

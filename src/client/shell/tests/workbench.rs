@@ -42,13 +42,18 @@ fn account_hover_remains_visible_over_a_focused_monitor_panel() {
     use crate::client::shell::observability::{Hover, HoverTarget, Page};
     let mut state = ready();
     state.workbench_open(PanelId::Monitor);
+    state.compose(120, 40).expect("监控面板");
+    let page = state.observability.page_rect;
+    assert!(!page.is_empty(), "用例前提：监控面板已画出");
+    // 悬浮层按 kit 定位从锚点下方左对齐展开：锚点放在监控面板左上角，卡片
+    // 必然与面板重叠。
     state.observability.hover = Some(Hover {
         target: HoverTarget::Agent {
             endpoint_id: state.active_endpoint_id.clone(),
             pane: "pane_1".into(),
             agent: "claude".into(),
         },
-        anchor: Rect::new(0, 20, 24, 2),
+        anchor: Rect::new(page.x, page.y, 24, 1),
         since: std::time::Instant::now(),
         visible: true,
         leave_at: None,
