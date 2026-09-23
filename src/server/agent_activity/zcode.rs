@@ -1,8 +1,9 @@
 //! ZCode（智谱 Z.ai 桌面应用，开源仓库 `zai-org/ZCode`）的外部来源适配器：把桌面
 //! 会话读成不属于任何 pane 的外部条目（`ExternalAgentInfo`）及其活动树，并按节点
 //! 分页读出子 agent 的内容。ZCode 不跑在 pane 里，所以 `discover` 恒为
-//! `Unsupported`，只实现 `discover_external` 与 `read`；按 `external_id` 读整棵树时，
-//! runtime 从 `discover_external` 的结果里取该条目，与快照同一口径。
+//! `Unsupported`，只实现 `discover_external`、`external_tree` 与 `read`；按
+//! `external_id` 读整棵树时，runtime 用 `discover_external` 的结果判定条目仍在列表
+//! 里，树由 `external_tree` 单独查询该根（不与列表里的其它根分摊行数上限）。
 //!
 //! # 读取方式
 //!
@@ -20,7 +21,10 @@
 //! - 只查近期：根会话限 `parent_id is null`（走 `session_parent_idx`）、未归档、
 //!   `time_updated` 在最近 72 h 内，按其倒序取前 10 个；子树用递归 CTE 沿
 //!   `parent_id` 下行（同样走 `session_parent_idx`），深度 ≤ 8、总行数 ≤ 300。
-//!   本机实测该查询 63 ms。
+//!   本机实测该查询 63 ms。300 行由这 10 个根共用、按根先后展开，排在前面的根
+//!   子树很大时，靠后的根在列表里只剩根自己；按 `external_id` 读树时换成只展开
+//!   该根的同一条查询（同样的窗口、深度与行数上限，独享 300 行）。两种查询撞到
+//!   行数上限时都记一条 debug 日志。
 //! - 子 agent 节点的详情读 `agents/<父会话 id>/<agentId>/metadata.json`；内容读同
 //!   目录的 `transcript.jsonl`（结构化事件流，格式化成可读文本），没有就退
 //!   `output.txt`。树以 DB 的 `parent_id` 为准；metadata 缺失、坏 JSON 或字段类型
@@ -220,6 +224,30 @@ impl ActivitySource for ZCode {
     ) -> Result<Vec<ExternalAgentInfo>, SourceError> {
         discover_sessions(&db_path(home), &agents_dir(home), SQLITE_PROGRAM, now_ms)
     }
+
+    fn external_tree(
+        &self,
+        home: &Path,
+        now_ms: u64,
+        external_id: &str,
+        _listed: Vec<AgentActivityNode>,
+    ) -> Result<Option<Vec<AgentActivityNode>>, SourceError> {
+        // 列表里的根共用 TREE_ROW_LIMIT、按根先后展开，`_listed` 可能被排在前面的大根
+        // 挤掉一截：单独查询这一个根。
+        let Some(root) = external_id
+            .strip_prefix(SOURCE_ID)
+            .and_then(|rest| rest.strip_prefix(':'))
+        else {
+            return Ok(None);
+        };
+        session_tree(
+            &db_path(home),
+            &agents_dir(home),
+            SQLITE_PROGRAM,
+            now_ms,
+            root,
+        )
+    }
 }
 
 fn data_root(home: &Path) -> PathBuf {
@@ -248,23 +276,62 @@ fn is_safe_id(value: &str) -> bool {
 // 发现：sqlite3 子进程 → 快照 → 外部条目
 // ---------------------------------------------------------------------------
 
+/// 外部列表：近期的根会话（见 [`Roots::Recent`]）。
 fn discover_sessions(
     db: &Path,
     agents: &Path,
     sqlite: &str,
     now_ms: u64,
 ) -> Result<Vec<ExternalAgentInfo>, SourceError> {
+    query_sessions(db, agents, sqlite, now_ms, Roots::Recent)
+}
+
+/// 单独展开一个根会话的整棵树（见 [`Roots::One`]）。`Ok(None)` = 没有这个近期、
+/// 未归档的根会话（或 id 不是 ZCode 会话 id 的形状）。
+fn session_tree(
+    db: &Path,
+    agents: &Path,
+    sqlite: &str,
+    now_ms: u64,
+    root: &str,
+) -> Result<Option<Vec<AgentActivityNode>>, SourceError> {
+    // 拼进 SQL 之前的闸：只有字母数字与 `-` `_`，不可能带引号。
+    if !is_safe_id(root) || !root.starts_with(SESSION_ID_PREFIX) {
+        return Ok(None);
+    }
+    let external_id = format!("{SOURCE_ID}:{root}");
+    let found = query_sessions(db, agents, sqlite, now_ms, Roots::One(root))?;
+    Ok(found
+        .into_iter()
+        .find(|agent| agent.external_id == external_id)
+        .map(|agent| agent.activity))
+}
+
+fn query_sessions(
+    db: &Path,
+    agents: &Path,
+    sqlite: &str,
+    now_ms: u64,
+    roots: Roots<'_>,
+) -> Result<Vec<ExternalAgentInfo>, SourceError> {
     if !db.is_file() {
         // 没装或从没启动过 ZCode：没有外部会话，不算不可读。
         return Ok(Vec::new());
     }
-    let output = run_sqlite(sqlite, db, &tree_statements(now_ms), SQLITE_TIMEOUT)?;
+    let output = run_sqlite(sqlite, db, &tree_statements(now_ms, roots), SQLITE_TIMEOUT)?;
     let snapshot = parse_query_output(&output.stdout);
     if !snapshot.sessions_ok {
         tracing::debug!(stderr = %output.stderr, "zcode: session query failed, source unreadable");
         return Err(SourceError::Unavailable);
     }
     note_degradations(&snapshot, &output.stderr);
+    if snapshot.sessions.len() >= TREE_ROW_LIMIT {
+        tracing::debug!(
+            rows = snapshot.sessions.len(),
+            single_root = matches!(roots, Roots::One(_)),
+            "zcode: session tree hit the row limit, later sessions are omitted"
+        );
+    }
     Ok(build_external_agents(&snapshot, agents, now_ms))
 }
 
@@ -294,13 +361,32 @@ fn migration_number(id: &str) -> Option<u32> {
     id.split('_').next()?.parse().ok()
 }
 
+/// 递归查询从哪些根会话展开。两种都只认近期（[`RECENT_WINDOW_MS`]）、未归档的根。
+#[derive(Clone, Copy)]
+enum Roots<'a> {
+    /// 外部列表：最新的 [`ROOT_LIMIT`] 个根。递归 CTE 的 [`TREE_ROW_LIMIT`] 是整条
+    /// 查询的上限，这些根共用、按根先后展开（先展开的根的子会话先入队），排在前面
+    /// 的根子树很大时，靠后的根只剩根自己。上限是为限住每轮轮询的工作量（每个子
+    /// agent 节点还要读一次 metadata.json）。
+    Recent,
+    /// 按 `external_id` 读整棵树：只展开这一个根，独享 [`TREE_ROW_LIMIT`]。调用方
+    /// 保证 id 过了 [`is_safe_id`]，可以直接拼进 SQL。
+    One(&'a str),
+}
+
 /// 四条语句，顺序即降级顺序：会话树必需，其余可选（见模块文档）。
-fn tree_statements(now_ms: u64) -> [String; 4] {
+fn tree_statements(now_ms: u64, roots: Roots<'_>) -> [String; 4] {
     let since = now_ms.saturating_sub(RECENT_WINDOW_MS);
+    let recent = format!(
+        "select id from session where parent_id is null \
+         and time_archived is null and time_updated >= {since}"
+    );
+    let roots = match roots {
+        Roots::Recent => format!("{recent} order by time_updated desc limit {ROOT_LIMIT}"),
+        Roots::One(id) => format!("{recent} and id = '{id}'"),
+    };
     let tree = format!(
-        "with recursive roots(id) as (select id from session where parent_id is null \
-         and time_archived is null and time_updated >= {since} \
-         order by time_updated desc limit {ROOT_LIMIT}), \
+        "with recursive roots(id) as ({roots}), \
          tree(id, root_id, depth) as (select id, id, 0 from roots union all \
          select s.id, t.root_id, t.depth + 1 from session s join tree t on s.parent_id = t.id \
          where t.depth < {MAX_TREE_DEPTH} limit {TREE_ROW_LIMIT}) "
@@ -1488,6 +1574,38 @@ pub(super) mod fixture {
         );
     }
 
+    /// 比根 A 更新的大根会话（[`seed_big_root`] 追加）。
+    pub(in crate::server::agent_activity) const BIG_ROOT: &str =
+        "sess_b1600000-0000-4000-8000-000000000007";
+
+    /// 在已种好的 `home` 里追加 [`BIG_ROOT`]（比根 A 新 50 s），下面挂 `children` 个
+    /// 旁支对话（没有内容文件，建树不读盘）。子会话数超过列表的行数上限时，按根
+    /// 先后展开的递归查询把排在后面的根的子树整个挤掉。
+    pub(in crate::server::agent_activity) fn seed_big_root(
+        home: &Path,
+        now_ms: u64,
+        children: usize,
+    ) {
+        let created = now_ms.saturating_sub(20_000);
+        let updated = now_ms.saturating_sub(10_000);
+        build_db_at(
+            &super::db_path(home),
+            &format!(
+                "INSERT INTO session (id, project_id, parent_id, slug, directory, title, \
+                 version, time_created, time_updated, task_type) VALUES ('{BIG_ROOT}', \
+                 'proj_demo', NULL, 'big', '/work/big', 'Big fan-out', '0.16.9', {created}, \
+                 {updated}, 'interactive');\n\
+                 WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n \
+                 WHERE i < {children}) \
+                 INSERT INTO session (id, project_id, parent_id, slug, directory, title, \
+                 version, time_created, time_updated, task_type) \
+                 SELECT printf('sess_big_%04d', i), 'proj_demo', '{BIG_ROOT}', 'big' || i, \
+                 '/work/big', 'Side chat ' || i, '0.16.9', {created}, {created}, \
+                 'selection_side_chat' FROM n;"
+            ),
+        );
+    }
+
     fn copy_dir_all(from: &Path, to: &Path) {
         std::fs::create_dir_all(to).expect("建目标目录");
         for entry in std::fs::read_dir(from).expect("读夹具目录") {
@@ -1505,9 +1623,10 @@ pub(super) mod fixture {
 #[cfg(test)]
 mod tests {
     //! 夹具在 `tests/fixtures/agent-activity/zcode/`：`db.sql` 是按本机 schema 手写的
-    //! 脱敏库，`query-output.jsonl` 是对它跑 `tree_statements(NOW)` 的真实输出（让
-    //! 没有 sqlite3 的构建机也能测建树逻辑），`home/.zcode/cli/agents/**` 是
-    //! metadata.json / transcript.jsonl / output.txt 样本。
+    //! 脱敏库，`query-output.jsonl` 是对它跑 `tree_statements(NOW, Roots::Recent)`
+    //! 的真实输出（让没有 sqlite3 的构建机也能测建树逻辑），
+    //! `home/.zcode/cli/agents/**` 是 metadata.json / transcript.jsonl / output.txt
+    //! 样本。
 
     use std::io::Write;
 
@@ -1853,6 +1972,44 @@ mod tests {
         assert!(matches!(
             discover_sessions(&db, &fixture_agents(), "herdr-test-no-such-sqlite3", NOW),
             Err(SourceError::Unavailable)
+        ));
+    }
+
+    /// 单根读树要把会话 id 拼进 SQL：不是 ZCode 会话 id 形状的（带引号、别的来源
+    /// 前缀、非 `sess_` 开头）一律当作不在，根本不起 sqlite3（这里给的是不存在的
+    /// 程序，真起了就会是 `Unavailable`）。
+    #[test]
+    fn single_root_reads_reject_ids_that_are_not_session_ids() {
+        let dir = TempDir::new("single-root-guard");
+        let db = dir.path().join("db.sqlite");
+        std::fs::write(&db, b"not really a database").expect("写假库");
+        for root in [
+            "sess_x' or '1'='1",
+            "sess_a/../b",
+            "agent_10000000-0000-4000-8000-000000000001",
+            "",
+        ] {
+            assert!(
+                matches!(
+                    session_tree(
+                        &db,
+                        &fixture_agents(),
+                        "herdr-test-no-such-sqlite3",
+                        NOW,
+                        root
+                    ),
+                    Ok(None)
+                ),
+                "{root}"
+            );
+        }
+        // 别的来源的 external_id：同样不碰库（这里的库是坏文件，真查了就是 Unavailable）。
+        let fake_db = db_path(dir.path());
+        std::fs::create_dir_all(fake_db.parent().expect("库路径有父目录")).expect("建库目录");
+        std::fs::write(&fake_db, b"not really a database").expect("写假库");
+        assert!(matches!(
+            ZCode.external_tree(dir.path(), NOW, &format!("claude:{ROOT_A}"), Vec::new()),
+            Ok(None)
         ));
     }
 

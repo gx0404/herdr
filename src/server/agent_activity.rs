@@ -119,15 +119,30 @@ pub(crate) trait ActivitySource: Send + Sync {
         max_bytes: usize,
     ) -> Result<ContentChunk, SourceError>;
 
-    /// 仅外部来源实现；pane 型来源用默认空实现。外部条目的整棵树也只从这里来：
-    /// `agent.activity.read {external_id}` 不带 `node_id` 时，runtime 取其中
-    /// `external_id` 相符的条目的 `activity`，不调 `discover`。
+    /// 仅外部来源实现；pane 型来源用默认空实现。外部条目的树只经它与
+    /// [`Self::external_tree`] 给出，不调 `discover`。
     fn discover_external(
         &self,
         _home: &Path,
         _now_ms: u64,
     ) -> Result<Vec<ExternalAgentInfo>, SourceError> {
         Ok(Vec::new())
+    }
+
+    /// 仅外部来源实现：`agent.activity.read {external_id}` 不带 `node_id` 时该条目的
+    /// 整棵树。runtime 先跑一次 [`Self::discover_external`]（判定条目仍在列表里，并
+    /// 整源刷新落库），`listed` 是该条目在这份列表里的树。列表为限住每轮轮询的工作
+    /// 量而让各条目分摊行数上限的来源（ZCode），在这里单独查询该条目，让它独享上限；
+    /// 默认直接用 `listed`。`Ok(None)` = 单独查询时条目已不在（两次查询之间被归档
+    /// 等），按不在列表处理。
+    fn external_tree(
+        &self,
+        _home: &Path,
+        _now_ms: u64,
+        _external_id: &str,
+        listed: Vec<AgentActivityNode>,
+    ) -> Result<Option<Vec<AgentActivityNode>>, SourceError> {
+        Ok(Some(listed))
     }
 }
 
@@ -950,11 +965,12 @@ impl Worker {
         alive
     }
 
-    /// 外部条目读整棵树。外部来源的树只经 `discover_external` 给出（ZCode 的
-    /// `discover` 恒为 `Unsupported`）：跑一次与轮询同一口径的发现（同一条查询、
-    /// 同样的近期窗口与行数上限），取 `external_id` 相符的条目；整源结果顺带落库，
-    /// 让下一次快照与本次应答一致（与 pane 读树同一约定）。条目不在列表里（已归档、
-    /// 滑出近期窗口或排不进前几个）回 `agent_not_found`。
+    /// 外部条目读整棵树。外部来源的树只经 `discover_external` / `external_tree`
+    /// 给出（ZCode 的 `discover` 恒为 `Unsupported`）：先跑一次与轮询同一口径的发现
+    /// （同一条查询、同样的近期窗口），整源结果顺带落库，让下一次快照与本次应答
+    /// 一致（与 pane 读树同一约定）；条目不在列表里（已归档、滑出近期窗口或排不进
+    /// 前几个）回 `agent_not_found`。树本身取 `external_tree`：列表让各条目分摊行数
+    /// 上限的来源在那里单独查询该条目，排在后面的条目不会只拿到被挤掉一截的树。
     fn read_external_tree(
         &self,
         request_id: &str,
@@ -971,7 +987,7 @@ impl Worker {
                 return true;
             }
         };
-        let nodes = agents
+        let listed = agents
             .iter()
             .find(|agent| agent.external_id == external_id)
             .map(|agent| agent.activity.clone());
@@ -979,17 +995,23 @@ impl Worker {
             source: source.id().to_owned(),
             result: Ok(agents),
         });
-        let result = nodes
-            .map(|nodes| ResponseResult::AgentActivity {
-                nodes,
-                content: None,
-            })
-            .ok_or_else(|| {
-                (
-                    "agent_not_found",
-                    format!("external agent {external_id} is not listed by its source"),
-                )
-            });
+        let not_listed = || {
+            (
+                "agent_not_found",
+                format!("external agent {external_id} is not listed by its source"),
+            )
+        };
+        let result = match listed {
+            None => Err(not_listed()),
+            Some(listed) => match source.external_tree(home, now_ms, external_id, listed) {
+                Ok(Some(nodes)) => Ok(ResponseResult::AgentActivity {
+                    nodes,
+                    content: None,
+                }),
+                Ok(None) => Err(not_listed()),
+                Err(error) => Err(error.code_and_message()),
+            },
+        };
         reply.send(request_id, result);
         alive
     }
@@ -2808,6 +2830,84 @@ mod tests {
         // 不是 ZCode 产出的节点 id：activity_malformed，而不是 not_implemented。
         let bogus = external_read(&mut service, &app, &root_a, Some("bogus"));
         assert_eq!(bogus["error"]["code"], "activity_malformed", "{bogus}");
+    }
+
+    /// 冒烟 N2：外部列表的递归查询让近期的根分摊同一个行数上限、按根先后展开。
+    /// 排在前面的根子树很大时，靠后的根在列表里只剩根自己与待办，子 agent 全被
+    /// 挤掉且没有截断信号；按 `external_id` 读树曾直接取列表里的这棵残树。现在单独
+    /// 查询该根，读出的树与没有大根挤占时列表里的整棵树相同。
+    #[test]
+    fn zcode_external_tree_read_is_not_starved_by_a_larger_root() {
+        use crate::api::schema::EmptyParams;
+        use zcode::fixture;
+        if !fixture::sqlite3_available() {
+            return;
+        }
+        let now = crate::server::observability::now_ms();
+        let root_a = format!("zcode:{}", fixture::ROOT_A);
+        let list = |home: &Path| {
+            let (events, _received) = tokio::sync::mpsc::channel(32);
+            let mut service =
+                Service::with_sources(events, Sources::REGISTERED, Some(home.to_path_buf()));
+            let (app, _, _) = app_with_agent(None);
+            let list = submit_api(
+                &mut service,
+                &app,
+                Request {
+                    id: "list".into(),
+                    method: Method::AgentExternalList(EmptyParams::default()),
+                },
+            )
+            .expect("受理");
+            list["result"]["agents"]
+                .as_array()
+                .and_then(|agents| {
+                    agents
+                        .iter()
+                        .find(|agent| agent["external_id"] == root_a.as_str())
+                })
+                .unwrap_or_else(|| panic!("根 A 应在外部列表里：{list}"))["activity"]
+                .clone()
+        };
+        let ids = |nodes: &serde_json::Value| -> Vec<String> {
+            nodes
+                .as_array()
+                .map(|nodes| {
+                    nodes
+                        .iter()
+                        .filter_map(|node| node["id"].as_str().map(str::to_owned))
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
+
+        // 参照：没有大根时，列表里根 A 的整棵树。
+        let plain = fixture::TempDir::new("external-tree-plain");
+        fixture::seed_home(plain.path(), now);
+        let whole = list(plain.path());
+        assert!(ids(&whole).contains(&fixture::sub("09")), "{whole}");
+
+        // 前提：比根 A 新的大根挂 320 个子会话，列表里根 A 的子 agent 被整个挤掉。
+        let crowded = fixture::TempDir::new("external-tree-crowded");
+        fixture::seed_home(crowded.path(), now);
+        fixture::seed_big_root(crowded.path(), now, 320);
+        let starved = list(crowded.path());
+        assert!(
+            !ids(&starved).contains(&fixture::sub("01")),
+            "前提：列表里根 A 的子树被大根挤掉：{starved}"
+        );
+
+        // 按 external_id 读树：单独查询根 A，不与大根分摊上限。
+        let (events, _received) = tokio::sync::mpsc::channel(32);
+        let mut service = Service::with_sources(
+            events,
+            Sources::REGISTERED,
+            Some(crowded.path().to_path_buf()),
+        );
+        let (app, _, _) = app_with_agent(None);
+        let tree = external_read(&mut service, &app, &root_a, None);
+        assert_eq!(tree["result"]["type"], "agent_activity", "{tree}");
+        assert_eq!(tree["result"]["nodes"], whole, "读出根 A 的整棵树");
     }
 
     /// 没装 ZCode（HOME 里没有它的库）：外部列表为空，按 external_id 读树回
