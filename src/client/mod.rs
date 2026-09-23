@@ -1155,15 +1155,13 @@ async fn run_client_loop(
                         host_sgr_pixels_active.load(Ordering::Acquire),
                     );
                 }
-                state.reported_size = (new_cols, new_rows);
-                state.reported_cell_size = (cell_width_px, cell_height_px);
-                state.pixel_geometry_exact = pixel_geometry_exact;
-                // Resizing invalidates both the host-side blit baseline and pane hit geometry.
-                state.request_repaint();
-                if let Some(shell) = state.shell.as_mut() {
-                    shell.set_graphics_cell_size(cell_width_px, cell_height_px);
-                    shell.invalidate_pane_surface();
-                }
+                state.apply_terminal_resize(
+                    new_cols,
+                    new_rows,
+                    cell_width_px,
+                    cell_height_px,
+                    pixel_geometry_exact,
+                );
                 let msg = if let Some(shell) = &state.shell {
                     client_shell_resize_message(
                         shell,
@@ -1194,6 +1192,11 @@ async fn run_client_loop(
                     }
                 } else if let Err(e) = write_to_server(&mut write_stream, &msg) {
                     return Err(ClientError::ConnectionLost(e));
+                }
+                // 与 Timer 里的 `tick_workbench` 同一守卫：端点切换进行中由激活
+                // 完成时的组合出帧。
+                if pending_activation.is_none() {
+                    state.present_after_resize();
                 }
             }
             ClientLoopEvent::EndpointSupervisor(event) => match event {

@@ -230,6 +230,12 @@ impl ClientShellState {
             .or_else(|| snapshot.focused_workspace_id.clone())
     }
 
+    /// 宿主终端 resize 后是否要立即在本地组合一帧：停靠工作台的几何只取决于
+    /// 终端尺寸，不等服务端（见 `ClientState::present_after_resize`）。
+    pub(crate) fn composes_on_host_resize(&self) -> bool {
+        self.workbench.enabled
+    }
+
     pub(crate) fn renew_workbench_surface(&mut self) {
         self.workbench.disconnect();
     }

@@ -1376,6 +1376,90 @@ fn tab_view_state_is_pruned_to_live_groups() {
     );
 }
 
+/// 冒烟 M12：紧凑视图（62 列、焦点在 Agents 面板，没有任何终端 view）拉回 134
+/// 列后，服务端这次 resize 没有东西可推，tick 又按上一次组合的尺寸算 views，
+/// 画面停在旧尺寸直到下一次输入。宿主 resize 之后工作台必须立即按新尺寸出帧，
+/// 下一次 tick 再按新几何重发 views。
+#[test]
+fn widening_out_of_the_compact_agents_view_repaints_at_the_new_size() {
+    let mut shell = ready();
+    // 监控面板让布局最小宽度超过 62 列：62 列时只投影聚焦面板。
+    shell.workbench_open(PanelId::Monitor);
+    shell.workbench.dock.focused = PanelId::Agents;
+    shell.compose(62, 32).expect("紧凑视图");
+    assert!(
+        shell.workbench.geometry.compact,
+        "用例前提：62 列是紧凑视图"
+    );
+    // 越过请求节流（75 ms）再 tick，确保 views 真按紧凑几何重发。
+    let now = std::time::Instant::now() + std::time::Duration::from_secs(1);
+    shell.tick_workbench(now, &mut ClientShellInput::default());
+    shell.workbench.pending = false;
+    shell.workbench.acknowledged = shell.workbench.revision;
+    assert!(
+        shell.workbench.requested.is_empty(),
+        "用例前提：只剩 Agents 面板，没有终端 view"
+    );
+
+    let mut client = crate::client::state::test_client_state();
+    client.shell = Some(shell);
+    client.reported_size = (62, 32);
+    client.apply_terminal_resize(134, 32, 0, 0, false);
+    client.present_after_resize();
+    assert!(!client.repaint_pending, "resize 后的整帧重绘已经呈现");
+
+    let shell = client.shell.as_mut().expect("shell 模式");
+    assert_eq!(
+        shell.last_composed_size,
+        Some((134, 32)),
+        "resize 后立即按新尺寸出帧"
+    );
+    assert!(!shell.workbench.geometry.compact, "134 列退出紧凑视图");
+    let mut outcome = ClientShellInput::default();
+    shell.tick_workbench(now + std::time::Duration::from_secs(1), &mut outcome);
+    assert!(outcome.repaint, "新几何的 views 请求要求重绘");
+    let terminal = shell
+        .workbench
+        .geometry
+        .panels
+        .iter()
+        .find(|(panel, _)| matches!(panel, PanelId::Terminal(_)))
+        .map(|(panel, area)| crate::client::shell::workbench::body(*area, panel))
+        .expect("134 列时终端面板可见");
+    assert_eq!(
+        shell
+            .workbench
+            .requested
+            .iter()
+            .map(|view| (view.cols, view.rows))
+            .collect::<Vec<_>>(),
+        vec![(terminal.width, terminal.height)],
+        "按 134 列的几何重发终端 view"
+    );
+}
+
+/// 经典布局的 resize 仍等服务端按新尺寸推来配对的 surface：本地不抢先出帧
+/// （此时组合只会画「不可用」占位）。
+#[test]
+fn classic_resize_waits_for_the_server_surface_before_presenting() {
+    let mut client = crate::client::state::test_client_state();
+    let shell = client.shell.as_mut().expect("shell 模式");
+    shell.set_snapshot(Box::new(snapshot()));
+    shell.set_pane_surface(surface());
+    shell.compose(100, 30).expect("经典画面");
+    client.apply_terminal_resize(120, 40, 0, 0, false);
+    client.present_after_resize();
+    assert!(client.repaint_pending, "等服务端的 surface，重绘挂起");
+    assert_eq!(
+        client
+            .shell
+            .as_ref()
+            .and_then(|shell| shell.last_composed_size),
+        Some((100, 30)),
+        "经典布局不在 resize 事件里组合"
+    );
+}
+
 /// 冒烟 M3：焦点停在 26 列宽的 Agents 面板时按前缀键，which-key 以前被夹在
 /// 聚焦面板的 body 里，只放得下「全局」一组；它应与其它浮层同口径占用整帧
 /// 内容区，三组快捷键完整列出。

@@ -76,6 +76,43 @@ impl ClientState {
         self.repaint_pending = true;
     }
 
+    /// 宿主终端尺寸变化：记下新尺寸，作废主机侧 blit 基线与 pane 命中几何。
+    pub(super) fn apply_terminal_resize(
+        &mut self,
+        cols: u16,
+        rows: u16,
+        cell_width_px: u32,
+        cell_height_px: u32,
+        pixel_geometry_exact: bool,
+    ) {
+        self.reported_size = (cols, rows);
+        self.reported_cell_size = (cell_width_px, cell_height_px);
+        self.pixel_geometry_exact = pixel_geometry_exact;
+        // Resizing invalidates both the host-side blit baseline and pane hit geometry.
+        self.request_repaint();
+        if let Some(shell) = self.shell.as_mut() {
+            shell.set_graphics_cell_size(cell_width_px, cell_height_px);
+            shell.invalidate_pane_surface();
+        }
+    }
+
+    /// 宿主 resize 之后，停靠工作台立即按新尺寸组合并呈现一帧（冒烟 M12）。
+    ///
+    /// 经典布局等服务端按新尺寸推来配对的 surface（此刻组合只会画「不可用」
+    /// 占位），这里不动。工作台的几何只取决于终端尺寸：服务端为这次 resize
+    /// 没有东西可推（views 只随 `client.views.set` 变），而 `tick_workbench` 按
+    /// 上一次组合的尺寸算 views——不在这里出帧，画面与 views 都停在旧尺寸，
+    /// 直到下一次输入或服务端碰巧推帧（紧凑视图只剩 Agents 面板时什么都不来）。
+    pub(super) fn present_after_resize(&mut self) {
+        if self
+            .shell
+            .as_ref()
+            .is_some_and(|shell| shell.composes_on_host_resize())
+        {
+            self.compose_and_present();
+        }
+    }
+
     /// compose 并呈现一帧；`compose` 返回 `None`（等待配对的快照 / surface
     /// 分代）时记下「还欠一帧」：否则这次 repaint 请求被静默吞掉，后续补丁会
     /// 走快路径一直不补画这次变化（CFP-12）。
