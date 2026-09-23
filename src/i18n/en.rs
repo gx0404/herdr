@@ -607,6 +607,7 @@ pub const TEXTS: Texts = Texts {
         remove_detail: "The remote server, sessions, and agents keep running.",
         add_title: "add machine",
         edit_title: "edit machine",
+        rename_title: "rename machine",
         field_label: "label",
         hint_identity_files: "comma-separated paths",
         hint_proxy_jump: "comma-separated targets or profile:<id>",
@@ -761,6 +762,8 @@ pub const TEXTS: Texts = Texts {
         trust_once_button: " this time only ",
         abort_button: " abort ",
         trusted_fmt: "{count} host key(s) recorded; reconnecting",
+        trusted_retest_fmt:
+            "{count} host key(s) recorded; close this dialog and test the connection again",
         changed_title: "host key changed",
         changed_warning: "The host key differs from the one recorded for this machine.",
         changed_reinstall_hint:
@@ -769,6 +772,7 @@ pub const TEXTS: Texts = Texts {
             "If not, this may be a man-in-the-middle attack — abort and investigate.",
         remove_retry_button: " remove old key & retry ",
         removed: "old host key record removed; reconnecting",
+        removed_retest: "old host key record removed; close this dialog and test the connection again",
         auth_title: "authentication needed",
         auth_methods_fmt: "server offered: {methods}",
         auth_identity_fmt: "identity file: {path}",

@@ -528,8 +528,16 @@ impl ClientShellState {
                         Ok(MachineHostKeyOutcome::Precollected(count)),
                     ) => {
                         view.completed = true;
+                        // 只有已保存的机器会重连；添加表单（测试连接）的临时档案
+                        // 没有端点可连，照实请用户关掉对话框后重新测试（文档终审
+                        // D12）。
+                        let template = if view.profile_id.is_some() {
+                            t.trusted_fmt
+                        } else {
+                            t.trusted_retest_fmt
+                        };
                         view.message = Some(crate::i18n::fill(
-                            t.trusted_fmt,
+                            template,
                             &[("count", count.to_string().as_str())],
                         ));
                         if let Some(profile_id) = view.profile_id.clone() {
@@ -540,7 +548,14 @@ impl ClientShellState {
                     }
                     (MachineHostKeyOp::Remove, Ok(MachineHostKeyOutcome::Removed)) => {
                         view.completed = true;
-                        view.message = Some(t.removed.to_owned());
+                        view.message = Some(
+                            if view.profile_id.is_some() {
+                                t.removed
+                            } else {
+                                t.removed_retest
+                            }
+                            .to_owned(),
+                        );
                         if let Some(profile_id) = view.profile_id.clone() {
                             outcome.actions.push(ClientShellAction::ReconnectEndpoint {
                                 endpoint_id: ClientEndpointId::Ssh(profile_id),

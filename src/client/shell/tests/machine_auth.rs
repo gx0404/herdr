@@ -458,6 +458,81 @@ fn wizard_host_key_review_scans_and_skips_trust_once() {
     assert!(outcome.actions.is_empty());
 }
 
+/// 文档终审 D12：添加表单（测试连接）打开的主机密钥对话框没有已保存的机器，
+/// 信任新密钥或移除旧记录之后并不会重连，对话框以前却照样写「正在重连」。现在
+/// 照实说明：关掉对话框后重新测试连接；不发重连动作。
+#[test]
+fn wizard_host_key_dialogs_do_not_promise_a_reconnect() {
+    let t = &crate::i18n::texts().machine_auth;
+    let compact = |s: &str| {
+        s.chars()
+            .filter(|ch| !ch.is_whitespace())
+            .collect::<String>()
+    };
+    let cases = [
+        (
+            MachineHostKeyOp::Precollect,
+            MachineHostKeyOutcome::Precollected(1),
+            crate::i18n::fill(t.trusted_retest_fmt, &[("count", "1")]),
+            crate::i18n::fill(t.trusted_fmt, &[("count", "1")]),
+        ),
+        (
+            MachineHostKeyOp::Remove,
+            MachineHostKeyOutcome::Removed,
+            t.removed_retest.to_owned(),
+            t.removed.to_owned(),
+        ),
+    ];
+    for (op, result, expected, reconnecting) in cases {
+        let mut state = state_with_profiles(&[]);
+        let mut outcome = ClientShellInput::default();
+        if op == MachineHostKeyOp::Remove {
+            state.open_machine_host_key_changed_review(
+                Box::new(profile("Stage", "stage.example", "3")),
+                &mut outcome,
+            );
+        } else {
+            state.open_machine_host_key_review(
+                Box::new(profile("Stage", "stage.example", "3")),
+                &mut outcome,
+            );
+        }
+        let ticket = outcome
+            .actions
+            .iter()
+            .find_map(|action| match action {
+                ClientShellAction::MachineHostKeyOp { ticket, .. } => Some(*ticket),
+                _ => None,
+            })
+            .unwrap_or(1);
+        let mut outcome = ClientShellInput::default();
+        state.handle_machine_auth_update(
+            MachineAuthUpdate::HostKeyOpFinished {
+                ticket,
+                op,
+                result: Ok(result),
+            },
+            &mut outcome,
+        );
+        assert!(
+            !outcome
+                .actions
+                .iter()
+                .any(|action| matches!(action, ClientShellAction::ReconnectEndpoint { .. })),
+            "{op:?}：没有已保存的机器，不发重连"
+        );
+        let text = compact_frame_text(&mut state, 93, 32);
+        assert!(
+            text.contains(&compact(&expected)),
+            "{op:?}：对话框照实说明要重新测试：{text}"
+        );
+        assert!(
+            !text.contains(&compact(&reconnecting)),
+            "{op:?}：不再写「正在重连」：{text}"
+        );
+    }
+}
+
 #[test]
 fn wizard_bootstrap_failure_offers_recovery_entries() {
     let machine = profile("Build", "dev@build.example", "1");

@@ -1329,6 +1329,48 @@ fn raw_key(state: &mut ClientShellState, code: KeyCode) {
     state.handle_raw_events(vec![RawInputEvent::Key(key(code))]);
 }
 
+/// 文档终审 D12：机器页按 `R`（以及侧栏右键「重命名」）打开的重命名浮层，标题
+/// 以前是编辑表单的「编辑机器 / edit machine」。改为「重命名机器 / rename machine」。
+#[test]
+fn machine_rename_overlay_is_titled_rename_machine() {
+    let build = profile("Build", "dev@build.example", "1");
+    for lang in [crate::i18n::Lang::ZhCn, crate::i18n::Lang::En] {
+        let _guard = crate::i18n::lang_guard(lang);
+        let t = &crate::i18n::texts().machines;
+        let mut state = state_with_profiles(std::slice::from_ref(&build));
+        state.open_machines_overlay();
+        let _ = frame_text(&mut state, 93, 32);
+        state.handle_raw_events(vec![RawInputEvent::Key(crate::input::TerminalKey::new(
+            KeyCode::Char('R'),
+            KeyModifiers::SHIFT,
+        ))]);
+        match state.overlay.as_ref() {
+            Some(ClientShellOverlay::Rename(rename)) => {
+                assert_eq!(rename.title, t.rename_title, "{lang:?}");
+            }
+            other => panic!("{lang:?}：R 应打开重命名浮层：{other:?}"),
+        }
+        let text = compact_frame(&mut state, 93, 32);
+        assert!(text.contains(&compact(t.rename_title)), "{lang:?}：{text}");
+        assert!(!text.contains(&compact(t.edit_title)), "{lang:?}：{text}");
+
+        // 侧栏右键「重命名」同一个标题。
+        state.overlay = None;
+        let mut outcome = ClientShellInput::default();
+        state.run_action(
+            super::super::action_table::ActionId::MachineRename,
+            super::super::action_table::ActionTarget::Machine(ClientEndpointId::Ssh(
+                build.id.clone(),
+            )),
+            &mut outcome,
+        );
+        assert!(matches!(
+            state.overlay.as_ref(),
+            Some(ClientShellOverlay::Rename(rename)) if rename.title == t.rename_title
+        ));
+    }
+}
+
 /// 文档终审 D11：中文添加表单里 label（侧栏显示名）与 tags 两个字段都叫「标签」，
 /// 分不清。label 改称「名称」（与重名报错「名称已被使用」、导入跳过原因同一个
 /// 词），tags 仍叫「标签」。按 Tab 走遍全部字段、逐帧读出画面上的字段名：两种

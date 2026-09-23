@@ -1654,7 +1654,7 @@ impl ClientShellState {
                     .map(|profile| profile.label.clone());
                 if let Some(label) = label {
                     self.overlay = Some(ClientShellOverlay::Rename(ClientRenameOverlay {
-                        title: crate::i18n::texts().machines.edit_title,
+                        title: crate::i18n::texts().machines.rename_title,
                         input: TextEditor::new(&label, false),
                         target: ClientRenameTarget::Machine { profile_id },
                     }));

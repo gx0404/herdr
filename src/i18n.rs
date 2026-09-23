@@ -943,6 +943,8 @@ pub struct MachinesTexts {
     // Add/edit form.
     pub add_title: &'static str,
     pub edit_title: &'static str,
+    /// 重命名浮层（机器页 `R`、侧栏右键「重命名」）的标题。
+    pub rename_title: &'static str,
     pub field_label: &'static str,
     pub hint_identity_files: &'static str,
     pub hint_proxy_jump: &'static str,
@@ -1126,6 +1128,8 @@ pub struct MachineAuthTexts {
     pub trust_once_button: &'static str,
     pub abort_button: &'static str,
     pub trusted_fmt: &'static str, // args: count
+    /// 添加表单（测试连接）路径信任后的说明：没有已保存的机器，不会重连。
+    pub trusted_retest_fmt: &'static str, // args: count
     // Changed host key (hard blocker).
     pub changed_title: &'static str,
     pub changed_warning: &'static str,
@@ -1133,6 +1137,8 @@ pub struct MachineAuthTexts {
     pub changed_mitm_hint: &'static str,
     pub remove_retry_button: &'static str,
     pub removed: &'static str,
+    /// 添加表单（测试连接）路径移除旧记录后的说明：不会重连，需重新测试。
+    pub removed_retest: &'static str,
     // Authentication guide.
     pub auth_title: &'static str,
     pub auth_methods_fmt: &'static str,  // args: methods

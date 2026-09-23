@@ -909,7 +909,7 @@ impl ClientShellState {
             return;
         };
         self.overlay = Some(ClientShellOverlay::Rename(ClientRenameOverlay {
-            title: crate::i18n::texts().machines.edit_title,
+            title: crate::i18n::texts().machines.rename_title,
             input: TextEditor::new(&profile.label, false),
             target: ClientRenameTarget::Machine {
                 profile_id: profile_id.clone(),
