@@ -3,9 +3,10 @@
 //!
 //! 数据通道（单飞）：窗口同时至多一个在途读取。打开时先读树（`node_id` 省略），
 //! 选中节点后读内容（`node_id` 给出、从头读）；内容没读完（`eof = false`）就按
-//! `next_cursor` 立即续读。跟随模式下每 [`FOLLOW_INTERVAL`] 重发一次树读取
-//! （`follow = true`，让 server 在 `FOLLOW_TTL` 内保持跟随）并按上次的
-//! `next_cursor` 续读内容；`eof` 且没有游标（pi）时下次从头重读并整体替换。
+//! `next_cursor` 立即续读。跟随模式下树应答落地后每隔 [`FOLLOW_INTERVAL`] 重发
+//! 一次树读取（`follow = true`，让 server 在 `FOLLOW_TTL` 内保持跟随），树回来
+//! 后按上次的 `next_cursor` 续读内容；`eof` 且没有游标（pi）时下次从头重读并
+//! 整体替换。树读取已排队或在途时不再追加，树往返慢于间隔也饿不死内容续读。
 //! 每个请求的 `epoch` 取全局递增的请求序号，响应对不上在途请求即丢弃；内容读取
 //! 另带内容代际，选中节点或刷新之后到达的旧内容也丢弃。只有成功应答立即续发
 //! 下一个读取；错误结局交给下一次 tick，被取消的读取（断线等）放回队列、不算
@@ -30,8 +31,9 @@ use crate::ui::kit::footer_hints::{render_footer_hints, FooterHint};
 use crate::ui::kit::tree::{fill_last_child_masks, render_tree_prefix, TreeEntry, MAX_TREE_DEPTH};
 use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
 
-/// 跟随时重发树读取（并续读内容）的间隔，与 server 的 `FOLLOW_INTERVAL` 对齐；
-/// 远小于 server 的 `FOLLOW_TTL`（10 s），跟随态因此持续有效。
+/// 跟随时重发树读取（并续读内容）的间隔，从上一次树应答落地时起算；与 server
+/// 的 `FOLLOW_INTERVAL` 对齐，远小于 server 的 `FOLLOW_TTL`（10 s），跟随态
+/// 因此持续有效。
 pub(super) const FOLLOW_INTERVAL: Duration = Duration::from_secs(1);
 /// 一次内容读取的字节上限（server 会再压到它自己的上限）。
 const READ_MAX_BYTES: u32 = 256 * 1024;
@@ -459,7 +461,7 @@ pub(super) struct ClientAgentActivityOverlay {
     restart_content: bool,
     /// 内容目标（选中节点 / 刷新）的代际。
     content_generation: u64,
-    /// 跟随模式下一次重发树读取的时刻。
+    /// 跟随模式下一次重发树读取的时刻（树应答落地时重置）；`None` = 立即。
     next_follow_at: Option<Instant>,
     pub(super) nodes: Vec<AgentActivityNode>,
     /// 按父子前序展开、跳过折叠子树的可见行（`kind` = `nodes` 下标）。
@@ -1783,8 +1785,10 @@ impl ClientShellState {
         }
     }
 
-    /// 客户端定时器（约 100 ms 一次）：跟随模式下每 [`FOLLOW_INTERVAL`] 排一次树
-    /// 读取与内容续读，并把排队的读取发出去。窗口没开时什么也不做。
+    /// 客户端定时器（约 100 ms 一次）：跟随模式下树应答落地满 [`FOLLOW_INTERVAL`]
+    /// 排一次树读取与内容续读，并把排队的读取发出去。树读取已排队或在途时不再
+    /// 追加：否则树往返慢于间隔时每次树应答回来都又排上了树读取，内容续读永远
+    /// 轮不到。窗口没开时什么也不做。
     pub(crate) fn tick_agent_activity(&mut self, now: Instant, outcome: &mut ClientShellInput) {
         let Some(overlay) = self.agent_activity_mut() else {
             return;
@@ -1792,7 +1796,15 @@ impl ClientShellState {
         if overlay.unsupported {
             return;
         }
-        if overlay.follow_active() && overlay.next_follow_at.is_none_or(|at| now >= at) {
+        let tree_pending = overlay.want_tree
+            || overlay
+                .in_flight
+                .as_ref()
+                .is_some_and(|read| read.node_id.is_none());
+        if overlay.follow_active()
+            && !tree_pending
+            && overlay.next_follow_at.is_none_or(|at| now >= at)
+        {
             overlay.next_follow_at = Some(now + FOLLOW_INTERVAL);
             overlay.want_tree = true;
             if overlay.selected_node.is_some() {
@@ -2246,7 +2258,12 @@ impl ClientShellState {
             }
             Err(_) => false,
         };
+        let tree_read = read.node_id.is_none();
         let repaint = overlay.apply_read(read, result);
+        if tree_read {
+            // 跟随间隔从树应答落地（成功或失败）时起算。
+            overlay.next_follow_at = Some(Instant::now() + FOLLOW_INTERVAL);
+        }
         if !succeeded {
             return (repaint, Vec::new());
         }

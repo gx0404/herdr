@@ -1246,22 +1246,22 @@ fn clicking_an_activity_row_in_the_panel_opens_the_window_on_that_node() {
     assert_eq!(params.node_id.as_deref(), Some("a.1"), "再读选中节点");
 }
 
-/// 树的跟随刷新之外，跟随 tick 的节奏由 `FOLLOW_INTERVAL` 决定（不在 1 s 内重复）。
+/// 跟随节奏：间隔从树应答落地时起算，1 s 内不重复。
 #[test]
 fn follow_ticks_are_spaced_by_the_interval() {
     let mut state = state();
     open_with_tree(&mut state);
-    let start = Instant::now() + FOLLOW_INTERVAL * 2;
     let mut outcome = ClientShellInput::default();
-    state.tick_agent_activity(start, &mut outcome);
+    state.tick_agent_activity(Instant::now() + FOLLOW_INTERVAL * 2, &mut outcome);
     let (id, _) = single_read(&outcome);
     respond(&mut state, &id, tree_result(sample_nodes()));
+    let landed = Instant::now();
     let mut outcome = ClientShellInput::default();
-    state.tick_agent_activity(start + Duration::from_millis(500), &mut outcome);
+    state.tick_agent_activity(landed + Duration::from_millis(500), &mut outcome);
     assert!(reads(&outcome).is_empty(), "间隔内不重复");
     let mut outcome = ClientShellInput::default();
-    state.tick_agent_activity(start + FOLLOW_INTERVAL, &mut outcome);
-    assert_eq!(reads(&outcome).len(), 1, "满一个间隔再读");
+    state.tick_agent_activity(landed + FOLLOW_INTERVAL, &mut outcome);
+    assert_eq!(reads(&outcome).len(), 1, "树应答落地满一个间隔再读");
 }
 
 /// 取消（断线、代际不符、泳道退役）不是读取失败：取消路径不许再产生动作
@@ -1344,4 +1344,59 @@ fn cancelled_reads_are_requeued_for_the_next_tick() {
         "下一次 tick 发内容读取"
     );
     assert_eq!(params.cursor, None, "刷新从头重读");
+}
+
+/// 树读取往返超过跟随间隔时内容续读不被饿死：树读取在途时 tick 不再追加树
+/// 读取，树应答回来后先续读内容，下一轮间隔从落地时起算。
+#[test]
+fn slow_tree_reads_do_not_starve_content_follow_reads() {
+    let mut state = state();
+    open_with_tree(&mut state);
+    let mut outcome = ClientShellInput::default();
+    state.select_agent_activity_node("a".into(), &mut outcome);
+    let (id, _) = single_read(&outcome);
+    respond(
+        &mut state,
+        &id,
+        content_result("a", "line 0\n", true, Some("c0")),
+    );
+    let mut clock = Instant::now() + FOLLOW_INTERVAL * 2;
+    let mut content_reads = 0;
+    for round in 1..=5 {
+        let mut outcome = ClientShellInput::default();
+        state.tick_agent_activity(clock, &mut outcome);
+        let (tree_id, params) = single_read(&outcome);
+        assert_eq!(params.node_id, None, "第 {round} 轮先读树");
+        // 树往返 1.1 s：期间的 tick 早已过了间隔，但不再排树读取。
+        for step in 1..=11u64 {
+            let mut outcome = ClientShellInput::default();
+            state.tick_agent_activity(clock + Duration::from_millis(100 * step), &mut outcome);
+            assert!(reads(&outcome).is_empty(), "单飞");
+        }
+        let (_, next) = respond(&mut state, &tree_id, tree_result(sample_nodes()));
+        let (content_id, params) = single_read(&next);
+        assert_eq!(
+            params.node_id.as_deref(),
+            Some("a"),
+            "第 {round} 轮：树回来后续读内容"
+        );
+        let previous = format!("c{}", round - 1);
+        assert_eq!(params.cursor.as_deref(), Some(previous.as_str()));
+        content_reads += 1;
+        let cursor = format!("c{round}");
+        let (_, next) = respond(
+            &mut state,
+            &content_id,
+            content_result("a", &format!("line {round}\n"), true, Some(&cursor)),
+        );
+        assert!(reads(&next).is_empty());
+        clock = Instant::now() + FOLLOW_INTERVAL;
+    }
+    assert_eq!(content_reads, 5);
+    assert!(overlay(&state)
+        .content
+        .as_ref()
+        .expect("内容")
+        .text()
+        .ends_with("line 5\n"));
 }
