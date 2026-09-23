@@ -429,16 +429,17 @@ fn draw_row(
 }
 
 /// 监控偏好页：分区卡片竖排，整页离屏绘制后按 `settings_scroll`（行）搬进
-/// 视口，越界的滚动收回到最后一屏；命中区随之平移，视口外的丢弃。
+/// 视口，越界的滚动收回到最后一屏；命中区随之平移，视口外的丢弃。返回页面级
+/// 滚动度量：上界是总行数 − 视口高，一屏留一行上下文。
 pub(super) fn settings(
     buffer: &mut Buffer,
     area: Rect,
     state: &State,
     palette: &Palette,
     hits: &mut Vec<(Rect, Action)>,
-) {
+) -> Option<PageScroll> {
     if area.is_empty() {
-        return;
+        return None;
     }
     let cards = build_cards(state);
     let card_height = |card: &Card<'_>| {
@@ -484,9 +485,10 @@ pub(super) fn settings(
         y = y.saturating_add(height).saturating_add(1);
     }
     let visible = area.height.min(total);
+    let max = total.saturating_sub(area.height);
     let scroll = u16::try_from(state.settings_scroll)
         .unwrap_or(u16::MAX)
-        .min(total.saturating_sub(area.height));
+        .min(max);
     for row in 0..visible {
         for x in 0..area.width {
             buffer[(area.x + x, area.y + row)] = page[(x, scroll + row)].clone();
@@ -505,6 +507,10 @@ pub(super) fn settings(
             ));
         }
     }
+    Some(PageScroll {
+        max: usize::from(max),
+        screen: usize::from(area.height.saturating_sub(1)).max(1),
+    })
 }
 
 #[cfg(test)]

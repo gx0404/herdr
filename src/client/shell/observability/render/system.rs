@@ -268,9 +268,23 @@ fn summary_bar(
     );
 }
 
+/// 卡片网格的页面滚动度量：`cards` 张卡按 `columns` 列排成行，每行占
+/// `card_height` 行、行与行之间隔 1 行（最后一行不需要间隔），卡片区可用高度
+/// `height`。上界是让最后一行卡片完整露出的最小起始行；卡片比可用高度还高时
+/// 一屏按一行算。
+fn card_grid_scroll(cards: usize, columns: u16, height: u16, card_height: u16) -> PageScroll {
+    let rows = cards.div_ceil(usize::from(columns.max(1)));
+    let visible = usize::from(height.saturating_add(1) / card_height.saturating_add(1)).max(1);
+    PageScroll {
+        max: rows.saturating_sub(visible),
+        screen: visible,
+    }
+}
+
 /// 系统页：摘要条 + 卡片网格（`TWO_COLUMN_MIN_WIDTH` 起双列）。每张卡片走 kit
 /// `card`；编辑布局模式下卡片顶边带 ↑↓，未选中的卡片转灰。可滚动卡片的滚动
-/// 上界写进 `limits`（见 `CardScrollLimits`）。
+/// 上界写进 `limits`（见 `CardScrollLimits`）；返回页面级滚动度量（见
+/// `card_grid_scroll`），还没有采样时不画卡片、返回 `None`。
 pub(super) fn monitor(
     buffer: &mut Buffer,
     area: Rect,
@@ -278,7 +292,7 @@ pub(super) fn monitor(
     cx: &ChromeContext<'_>,
     hits: &mut Vec<(Rect, Action)>,
     limits: &mut CardScrollLimits,
-) {
+) -> Option<PageScroll> {
     let palette = cx.palette;
     let Some(sample) = state.metrics.as_ref() else {
         text(
@@ -288,7 +302,7 @@ pub(super) fn monitor(
             tr("Connecting to the host sampler…", "正在连接主机采样器…"),
             Style::default().fg(palette.overlay0),
         );
-        return;
+        return None;
     };
     if sample.sampled_at_ms == 0 {
         text(
@@ -298,7 +312,7 @@ pub(super) fn monitor(
             tr("Waiting for the first sample…", "等待第一份有效采样…"),
             Style::default().fg(palette.overlay0),
         );
-        return;
+        return None;
     }
     summary_bar(
         buffer,
@@ -337,7 +351,18 @@ pub(super) fn monitor(
         .card_height
         .clamp(7, 24)
         .min(area.height.saturating_sub(2).max(7));
-    let start = state.scroll.min(sections.len().saturating_sub(1));
+    // 页面按整行卡片滚动（`state.scroll` 是首个可见行）：双列时一次换一整行，
+    // 卡片不会在两列之间来回换位；钳到让最后一行完整露出的起始行，不留空屏。
+    let scroll = card_grid_scroll(
+        sections.len(),
+        columns,
+        area.height.saturating_sub(2),
+        card_height,
+    );
+    let start = state
+        .scroll
+        .min(scroll.max)
+        .saturating_mul(usize::from(columns));
     for (index, section) in sections.iter().enumerate().skip(start) {
         let position = (index - start) as u16;
         let x = area.x + (position % columns) * (width + gap);
@@ -405,6 +430,7 @@ pub(super) fn monitor(
         };
         limits.set(id, max);
     }
+    Some(scroll)
 }
 
 /// CPU 卡：总体 gauge（数字永不裁）、型号 / 选中核说明、历史迷你图。
@@ -1658,6 +1684,56 @@ mod tests {
         assert_eq!(columns(60), 1);
         assert_eq!(columns(95), 1, "< 96 列单列");
         assert_eq!(columns(96), 2, "≥ 96 列双列");
+    }
+
+    /// 双列时页面按整行卡片滚动：卡片不在两列之间换位；越界的存量滚动位置按
+    /// 「最后一行完整露出」的上界钳回，不留空屏。
+    #[test]
+    fn two_column_grid_scrolls_by_whole_card_rows() {
+        let mut state = monitored();
+        let order = state.monitor.visible.clone();
+        let cards = |output: &PaintOutput| {
+            let mut cards = output
+                .hits
+                .iter()
+                .filter_map(|(rect, action)| match action {
+                    Action::Card(id) => Some((rect.y, rect.x, id.clone())),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            cards.sort();
+            cards
+        };
+        // 120×40：卡片区 33 行放得下 3 行卡片，4 行卡片的上界是 1。
+        let (_, output) = paint_page(&state, Page::Monitor, 120, 40);
+        assert_eq!(
+            output.page_scroll_limits.get(Page::Monitor),
+            Some(PageScroll { max: 1, screen: 3 })
+        );
+        let top = cards(&output);
+        state.scroll = 1;
+        let (_, output) = paint_page(&state, Page::Monitor, 120, 40);
+        let scrolled = cards(&output);
+        assert_eq!(
+            scrolled.iter().map(|(.., id)| id).collect::<Vec<_>>(),
+            order[2..].iter().collect::<Vec<_>>(),
+            "滚一格换一整行"
+        );
+        // 内存卡原本在第二行左列，滚一行后到第一行左列：列不变。
+        let column_of = |cards: &[(u16, u16, String)], id: &str| {
+            cards
+                .iter()
+                .find(|(.., card)| card == id)
+                .map(|(_, x, _)| *x)
+        };
+        for id in &order[2..6] {
+            let before = column_of(&top, id);
+            assert!(before.is_some(), "{id} 滚动前可见");
+            assert_eq!(before, column_of(&scrolled, id), "{id} 不换列");
+        }
+        state.scroll = 9;
+        let (_, output) = paint_page(&state, Page::Monitor, 120, 40);
+        assert_eq!(cards(&output), scrolled, "越界存量钳到上界");
     }
 
     #[test]

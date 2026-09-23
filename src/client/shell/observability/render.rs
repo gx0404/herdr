@@ -22,6 +22,55 @@ use system::*;
 pub(super) use accounts::{account_rows, metric_percent};
 pub(super) use system::CardScrollLimits;
 
+/// 页面级滚动的度量：本次绘制算出，`State::commit_paint` 写回，`State::scroll_page`
+/// 按它写回式钳位——与渲染时的钳位是同一个值。系统页的单位是「卡片行」（单列
+/// 一行一张卡、双列一行两张），偏好页的单位是文本行。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(in crate::client::shell) struct PageScroll {
+    /// 滚动位置上界：系统页是让最后一行卡片完整露出的最小起始行，偏好页是
+    /// 总行数 − 视口高；内容放得下时为 0。
+    pub max: usize,
+    /// 一屏的步长（PageUp / PageDown），至少 1。
+    pub screen: usize,
+}
+
+/// 各页本次绘制的 `PageScroll`；没画出来的页为 `None`。定长、`Copy`，渲染期不分配。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(in crate::client::shell) struct PageScrollLimits {
+    monitor: Option<PageScroll>,
+    settings: Option<PageScroll>,
+}
+
+impl PageScrollLimits {
+    /// `page` 本次绘制的滚动度量；账号页走自己的 `scroll_accounts`，恒为 `None`。
+    pub(in crate::client::shell) fn get(&self, page: Page) -> Option<PageScroll> {
+        match page {
+            Page::Monitor => self.monitor,
+            Page::Settings => self.settings,
+            Page::Accounts => None,
+        }
+    }
+
+    fn set(&mut self, page: Page, scroll: Option<PageScroll>) {
+        match page {
+            Page::Monitor => self.monitor = scroll,
+            Page::Settings => self.settings = scroll,
+            Page::Accounts => {}
+        }
+    }
+
+    /// 合并同一帧里另一次绘制的度量（多个停靠面板依次绘制）：只覆盖对方画出
+    /// 来的页。
+    pub(in crate::client::shell::observability) fn merge(&mut self, other: &Self) {
+        if other.monitor.is_some() {
+            self.monitor = other.monitor;
+        }
+        if other.settings.is_some() {
+            self.settings = other.settings;
+        }
+    }
+}
+
 fn text(buffer: &mut Buffer, rect: Rect, row: u16, value: &str, style: Style) {
     if row >= rect.height || rect.width == 0 {
         return;
@@ -326,6 +375,8 @@ pub(super) struct PaintOutput {
     pub dialog_rect: Rect,
     /// 系统页各可滚动卡片的滚动上界（本次没画系统页时全为 `None`）。
     pub card_scroll_limits: CardScrollLimits,
+    /// 本次画出的页面的页面级滚动度量（没画页面时全为 `None`）。
+    pub page_scroll_limits: PageScrollLimits,
 }
 
 /// 渲染纯函数：`page` 是本次要画的页面（停靠面板由调用方决定画哪个 tab），
@@ -344,6 +395,7 @@ pub(super) fn paint(
     let mut hits = Vec::new();
     let mut page_rect = Rect::default();
     let mut card_scroll_limits = CardScrollLimits::default();
+    let mut page_scroll_limits = PageScrollLimits::default();
     if let Some(page) = page {
         page_rect = area;
         buffer.set_style(area, Style::default().fg(palette.text).bg(palette.panel_bg));
@@ -416,11 +468,15 @@ pub(super) fn paint(
             inner.width,
             inner.height.saturating_sub(3),
         );
-        match page {
+        let scroll = match page {
             Page::Monitor => monitor(buffer, body, state, cx, &mut hits, &mut card_scroll_limits),
-            Page::Accounts => accounts(buffer, body, state, palette, &mut hits),
+            Page::Accounts => {
+                accounts(buffer, body, state, palette, &mut hits);
+                None
+            }
             Page::Settings => settings(buffer, body, state, palette, &mut hits),
-        }
+        };
+        page_scroll_limits.set(page, scroll);
         // 页脚：一次性说明（`message`）优先，否则是可点的键位提示。
         let footer = Rect::new(inner.x, inner.bottom().saturating_sub(1), inner.width, 1);
         match state.message.as_deref() {
@@ -457,6 +513,7 @@ pub(super) fn paint(
         hover_rect,
         dialog_rect,
         card_scroll_limits,
+        page_scroll_limits,
     }
 }
 

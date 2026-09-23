@@ -3623,6 +3623,144 @@ fn process_card_wheel_scroll_is_bounded_by_the_painted_table() {
     assert!(!after.contains("proc40"), "反向第一格画面就变\n{after}");
 }
 
+/// 冒烟尺寸下的主机快照：只要采样时刻有效、带几项数据，系统页就画出全部卡片。
+fn smoke_system_sample() -> Box<crate::api::schema::SystemMetricsSnapshot> {
+    use crate::api::schema::{CpuCoreMetric, SystemMetricsSnapshot};
+    Box::new(SystemMetricsSnapshot {
+        boot_id: "boot".into(),
+        sequence: 1,
+        sampled_at_ms: 1_000,
+        hostname: "devbox".into(),
+        cpu_percent: Some(42.0),
+        cores: (0..4)
+            .map(|id| CpuCoreMetric {
+                id,
+                name: format!("cpu{id}"),
+                usage_percent: Some(40.0),
+                frequency_mhz: None,
+            })
+            .collect(),
+        ..Default::default()
+    })
+}
+
+/// 本帧画出的系统页卡片 id，按从上到下、从左到右排列。
+fn painted_cards(state: &ClientShellState) -> Vec<String> {
+    let mut cards = state
+        .observability
+        .hits
+        .iter()
+        .filter_map(|(rect, action)| match action {
+            Action::Card(id) => Some((rect.y, rect.x, id.clone())),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    cards.sort();
+    cards.into_iter().map(|(_, _, id)| id).collect()
+}
+
+/// 像真实终端那样注入一个 SGR-1006 鼠标事件（参数坐标 0 起，序列里 1 起）。
+fn sgr_mouse(state: &mut ClientShellState, button: u16, column: u16, row: u16) {
+    let report = format!("\x1b[<{button};{};{}M", column + 1, row + 1);
+    let events = crate::raw_input::parse_raw_input_bytes_sync(report.as_bytes());
+    assert!(!events.is_empty(), "SGR 序列可解析");
+    state.handle_raw_events(events);
+}
+
+const SGR_WHEEL_UP: u16 = 64;
+const SGR_WHEEL_DOWN: u16 = 65;
+
+/// 冒烟 S1 / M1（133×32：停靠面板约 53 列宽，系统页单列、一屏两张卡）：滚轮与
+/// ↓ 每格前进一行卡片，依次露出全部 8 张卡（含曾经不可达的「内存」「网络」）；
+/// 滚到底后多滚的格数不留存（写回钳位），反向第一格画面立刻变化；PageDown /
+/// PageUp 一次一屏。
+#[test]
+fn system_page_scrolls_one_card_row_per_notch_and_reaches_every_card() {
+    use crossterm::event::KeyCode;
+    let _guard = crate::i18n::lang_guard(crate::i18n::Lang::ZhCn);
+    let mut state = docked();
+    state.open_observation_page(Page::Monitor, &mut ClientShellInput::default());
+    state.observability.metrics = Some(smoke_system_sample());
+    state.compose(133, 32).expect("系统页");
+    let order = state.observability.monitor.visible.clone();
+    assert_eq!(order.len(), 8, "默认 8 张卡");
+    assert_eq!(
+        painted_cards(&state),
+        order[..2],
+        "用例前提：单列、一屏两张卡"
+    );
+    let cpu = page_hit(
+        &state,
+        |action| matches!(action, Action::Card(id) if id == "cpu"),
+    )
+    .expect("CPU 卡");
+    // 摘要条与首张卡之间的空行：在页面里、不在任何卡片上。
+    let (column, row) = (cpu.x + 2, cpu.y - 1);
+    let mut seen = painted_cards(&state);
+    for step in 1..=6 {
+        sgr_mouse(&mut state, SGR_WHEEL_DOWN, column, row);
+        state.compose(133, 32).expect("重绘");
+        let cards = painted_cards(&state);
+        assert_eq!(cards, order[step..step + 2], "第 {step} 格前进一张卡");
+        seen.extend(cards);
+    }
+    for id in &order {
+        assert!(seen.contains(id), "{id} 卡可以滚到");
+    }
+    // 到底后多滚：位置钳在上界，不存「死格」。
+    for _ in 0..5 {
+        sgr_mouse(&mut state, SGR_WHEEL_DOWN, column, row);
+    }
+    state.compose(133, 32).expect("重绘");
+    assert_eq!(painted_cards(&state), order[6..], "最后一张卡完整露出");
+    assert_eq!(state.observability.scroll, 6, "滚动位置写回钳位");
+    sgr_mouse(&mut state, SGR_WHEEL_UP, column, row);
+    state.compose(133, 32).expect("重绘");
+    assert_eq!(painted_cards(&state), order[5..7], "反向第一格画面就动");
+    // 键盘同口径：↑ / ↓ 一行卡片，PageUp / PageDown 一屏（两行）。
+    press_key(&mut state, KeyCode::Up);
+    state.compose(133, 32).expect("重绘");
+    assert_eq!(painted_cards(&state), order[4..6]);
+    press_key(&mut state, KeyCode::PageUp);
+    state.compose(133, 32).expect("重绘");
+    assert_eq!(painted_cards(&state), order[2..4], "一屏两张卡");
+    press_key(&mut state, KeyCode::PageUp);
+    press_key(&mut state, KeyCode::PageUp);
+    state.compose(133, 32).expect("重绘");
+    assert_eq!(painted_cards(&state), order[..2]);
+    assert_eq!(state.observability.scroll, 0, "顶端同样钳位");
+    press_key(&mut state, KeyCode::Down);
+    state.compose(133, 32).expect("重绘");
+    assert_eq!(painted_cards(&state), order[1..3], "↓ 露出内存卡");
+}
+
+/// 冒烟 M1（偏好页）：向下滚过底后多出的格数不留存，反向第一格画面立刻变化。
+#[test]
+fn preferences_page_scroll_is_clamped_on_write_so_reversing_moves_at_once() {
+    let _guard = crate::i18n::lang_guard(crate::i18n::Lang::ZhCn);
+    let mut state = docked();
+    state.open_observation_page(Page::Settings, &mut ClientShellInput::default());
+    state.compose(133, 32).expect("监控偏好页");
+    let page = state.observability.page_rect;
+    let (column, row) = (page.x + page.width / 2, page.y + page.height / 2);
+    for _ in 0..25 {
+        sgr_mouse(&mut state, SGR_WHEEL_DOWN, column, row);
+    }
+    state.compose(133, 32).expect("重绘");
+    let bottom = region_text(&state, page);
+    let limit = state.observability.settings_scroll;
+    assert!(limit > 0, "用例前提：偏好页比面板高\n{bottom}");
+    sgr_mouse(&mut state, SGR_WHEEL_DOWN, column, row);
+    assert_eq!(
+        state.observability.settings_scroll, limit,
+        "到底后多滚不再累加\n{bottom}"
+    );
+    sgr_mouse(&mut state, SGR_WHEEL_UP, column, row);
+    state.compose(133, 32).expect("重绘");
+    assert!(state.observability.settings_scroll < limit);
+    assert_ne!(region_text(&state, page), bottom, "反向第一格画面就动");
+}
+
 /// 监控偏好页的控件：点分段 / 步进器 / 开关只回写各自的偏好键（`PreferenceKey`），
 /// 落盘后重启可恢复；图表字形是独立的客户端偏好键 `monitor_chart_glyphs`。
 #[test]

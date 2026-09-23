@@ -724,7 +724,21 @@ pub(super) struct Painted {
     pub dialog: bool,
     /// 系统页各可滚动卡片的滚动上界，见 `render::CardScrollLimits`。
     pub card_scroll_limits: render::CardScrollLimits,
+    /// 本次画出的页面的页面级滚动度量，见 `render::PageScrollLimits`。
+    pub page_scroll_limits: render::PageScrollLimits,
 }
+
+/// `State::scroll_page` 一步的单位。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum PageStep {
+    /// 滚轮一格 / 方向键：系统页一行卡片，偏好页 `SETTINGS_NOTCH_LINES` 行。
+    Notch,
+    /// PageUp / PageDown：一屏（`render::PageScroll::screen`）。
+    Screen,
+}
+
+/// 偏好页滚轮一格 / 方向键滚动的行数。
+const SETTINGS_NOTCH_LINES: usize = 3;
 
 pub(super) struct State {
     /// 当前拥有键盘输入的页面：经典布局下即打开的页面；停靠工作台下仅当
@@ -801,10 +815,14 @@ pub(super) struct State {
     /// 上一帧各可滚动卡片的滚动上界（`commit_paint` 写回、`begin_paint` 复位）：
     /// `scroll_card` 按它钳位，与卡片渲染时的钳位是同一个值。
     pub card_scroll_limits: render::CardScrollLimits,
+    /// 上一帧画出的系统页 / 偏好页的页面级滚动度量（`commit_paint` 写回、
+    /// `begin_paint` 复位）：`scroll_page` 按它钳位，与页面渲染时的钳位是同一个值。
+    pub page_scroll_limits: render::PageScrollLimits,
     pub account_scroll: usize,
-    /// 系统页卡片列表的滚动位置；设置页用 `settings_scroll`，两页互不泄漏。
+    /// 系统页卡片网格的滚动位置：首个可见的卡片行（单列一行一张卡、双列一行
+    /// 两张）；设置页用 `settings_scroll`，两页互不泄漏。
     pub scroll: usize,
-    /// 设置页行列表的滚动位置。
+    /// 设置页的滚动位置（文本行）。
     pub settings_scroll: usize,
     /// 面板边框 / 分隔线的字形表（尊重 `ui.border_style`），随配置重载刷新。
     pub glyphs: crate::ui::BorderGlyphs,
@@ -891,14 +909,28 @@ impl State {
         self.card_scroll.insert(card.to_owned(), next);
     }
 
-    /// 滚动当前页面自己的列表：系统页滚卡片、设置页滚设置行（账号页走
-    /// `scroll_accounts`）。两个滚动位置分离，切页不互相泄漏。
-    pub(super) fn scroll_page(&mut self, delta: isize) {
-        let scroll = match self.page {
-            Some(Page::Settings) => &mut self.settings_scroll,
-            _ => &mut self.scroll,
+    /// 滚动 `page` 自己的列表：系统页按卡片行、设置页按文本行（账号页走
+    /// `scroll_accounts`，这里不动）。两个滚动位置分离，切页不互相泄漏。
+    ///
+    /// 与 `scroll_card` 同口径写回钳位：按上一帧画出的该页上界
+    /// （`page_scroll_limits`）先把存量值钳回上界再走一步——多滚的格数不会
+    /// 存进状态，反向第一格画面就动；上一帧没画出这一页时不知道上界，只许
+    /// 往回滚。
+    pub(super) fn scroll_page(&mut self, page: Page, step: PageStep, delta: isize) {
+        let limits = self.page_scroll_limits.get(page);
+        let scroll = match page {
+            Page::Monitor => &mut self.scroll,
+            Page::Settings => &mut self.settings_scroll,
+            Page::Accounts => return,
         };
-        *scroll = scroll.saturating_add_signed(delta);
+        let unit = match step {
+            PageStep::Screen => limits.map_or(1, |limits| limits.screen.max(1)),
+            PageStep::Notch if page == Page::Settings => SETTINGS_NOTCH_LINES,
+            PageStep::Notch => 1,
+        };
+        let limit = limits.map_or(*scroll, |limits| limits.max);
+        let delta = delta.saturating_mul(isize::try_from(unit).unwrap_or(isize::MAX));
+        *scroll = (*scroll).min(limit).saturating_add_signed(delta).min(limit);
     }
 
     /// 页面当前的 (厂商, 账号) 选择是否已由订阅覆盖（已确认或等待确认）。
@@ -1387,6 +1419,7 @@ impl State {
             net_history: HashMap::new(),
             card_scroll: HashMap::new(),
             card_scroll_limits: render::CardScrollLimits::default(),
+            page_scroll_limits: render::PageScrollLimits::default(),
             account_scroll: 0,
             scroll: 0,
             settings_scroll: 0,
@@ -1425,6 +1458,7 @@ impl State {
         self.hover_rect = Rect::default();
         self.page_rect = Rect::default();
         self.card_scroll_limits = render::CardScrollLimits::default();
+        self.page_scroll_limits = render::PageScrollLimits::default();
     }
 
     /// 渲染纯函数：把 `painting_page`（停靠面板传该面板的 tab，全局浮层传 `None`）、
@@ -1484,6 +1518,7 @@ impl State {
             hover_rect: output.hover_rect,
             dialog,
             card_scroll_limits: output.card_scroll_limits,
+            page_scroll_limits: output.page_scroll_limits,
         })
     }
 
@@ -1512,6 +1547,7 @@ impl State {
             self.page_rect = painted.page_rect;
         }
         self.card_scroll_limits.merge(&painted.card_scroll_limits);
+        self.page_scroll_limits.merge(&painted.page_scroll_limits);
         self.selected_hit = self.selected_hit.min(self.page_hits.saturating_sub(1));
     }
 
@@ -3641,10 +3677,18 @@ impl ClientShellState {
                 return true;
             }
         }
-        if self.observability.page.is_some() && contains(self.observability.page_rect, point) {
+        if let Some(page) = self
+            .observability
+            .page
+            .filter(|_| contains(self.observability.page_rect, point))
+        {
             match mouse.kind {
-                MouseEventKind::ScrollDown => self.observability.scroll_page(3),
-                MouseEventKind::ScrollUp => self.observability.scroll_page(-3),
+                MouseEventKind::ScrollDown => {
+                    self.observability.scroll_page(page, PageStep::Notch, 1);
+                }
+                MouseEventKind::ScrollUp => {
+                    self.observability.scroll_page(page, PageStep::Notch, -1);
+                }
                 _ => {}
             }
             outcome.repaint = true;
@@ -3955,12 +3999,20 @@ impl ClientShellState {
                 self.observability.scroll_accounts(-3, false);
                 None
             }
-            KeyCode::Down | KeyCode::PageDown => {
-                self.observability.scroll_page(3);
-                None
-            }
-            KeyCode::Up | KeyCode::PageUp => {
-                self.observability.scroll_page(-3);
+            KeyCode::Down | KeyCode::Up | KeyCode::PageDown | KeyCode::PageUp => {
+                if let Some(page) = self.observability.page {
+                    let step = if matches!(key.code, KeyCode::PageDown | KeyCode::PageUp) {
+                        PageStep::Screen
+                    } else {
+                        PageStep::Notch
+                    };
+                    let delta = if matches!(key.code, KeyCode::Down | KeyCode::PageDown) {
+                        1
+                    } else {
+                        -1
+                    };
+                    self.observability.scroll_page(page, step, delta);
+                }
                 None
             }
             _ => None,
