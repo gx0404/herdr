@@ -3934,6 +3934,49 @@ fn meter_rows_in_one_card_share_the_gauge_column() {
     }
 }
 
+/// 冒烟 M7（133×32 与 93×32）：进程表 PID 列按快照里最长的 PID 定宽，7 位
+/// PID 完整显示，不再截成「40905…」让几行 rustc 无法区分。
+#[test]
+fn process_table_shows_seven_digit_pids_in_full() {
+    use crate::api::schema::{ProcessIdentity, ProcessMetric};
+    let _guard = crate::i18n::lang_guard(crate::i18n::Lang::ZhCn);
+    let pids = [4_090_512_u32, 4_086_001, 4_086_002, 3_969_912, 2_559];
+    for (cols, rows) in [(133, 32), (93, 32)] {
+        let mut state = docked();
+        state.open_observation_page(Page::Monitor, &mut ClientShellInput::default());
+        state.observability.monitor.visible = vec!["processes".into()];
+        let mut sample = smoke_system_sample();
+        sample.processes = pids
+            .iter()
+            .zip(["python3", "rustc", "rustc", "ToDesk_Session", "Xorg"])
+            .map(|(pid, name)| ProcessMetric {
+                identity: ProcessIdentity {
+                    pid: *pid,
+                    ..Default::default()
+                },
+                name: name.into(),
+                cpu_percent: Some(5.0),
+                memory_bytes: 2 * 1024 * 1024 * 1024,
+                ..Default::default()
+            })
+            .collect();
+        state.observability.metrics = Some(sample);
+        state.compose(cols, rows).expect("系统页");
+        let card = page_hit(
+            &state,
+            |action| matches!(action, Action::Card(card) if card == "processes"),
+        )
+        .expect("进程卡");
+        let text = region_text(&state, card);
+        for pid in pids {
+            assert!(
+                row_with(&state, card, &pid.to_string()).is_some(),
+                "{cols}x{rows}: PID {pid} 完整显示，没有被截成省略号\n{text}"
+            );
+        }
+    }
+}
+
 /// 监控偏好页的控件：点分段 / 步进器 / 开关只回写各自的偏好键（`PreferenceKey`），
 /// 落盘后重启可恢复；图表字形是独立的客户端偏好键 `monitor_chart_glyphs`。
 #[test]

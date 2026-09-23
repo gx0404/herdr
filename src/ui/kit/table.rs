@@ -19,8 +19,11 @@ use crate::ui::display_width_u16;
 /// 参与布局的最多列数；更多的列不画。
 pub(crate) const MAX_COLUMNS: usize = 64;
 
-/// 列宽规则。`Fixed(n)` 恒为 n；`Min(n)` 至少 n，没有 `Fill` 列时平分富余；
-/// `Fill(w)` 至少容下表头标题，富余按权重 w 分配（w = 0 不分）。
+/// 列宽规则。`Fixed(n)` 恒为 n；`Min(n)` 至少 n，有富余时先长到容下表头与
+/// 画面上的单元格（数字列不被 `Fill` 列抢光而截断），没有 `Fill` 列时再平分
+/// 剩下的富余；`Fill(w)` 至少容下表头标题，富余按权重 w 分配（w = 0 不分）。
+/// 丢列只按声明的基础宽度（`Min` 取 n）判断：内容要保证完整时，调用方把 n
+/// 定成内容宽度。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ColumnWidth {
     Fixed(u16),
@@ -112,7 +115,8 @@ fn base_width(column: &Column<'_>) -> u16 {
     }
 }
 
-fn layout(columns: &[Column<'_>], width: u16) -> Layout {
+/// `content[i]` 是第 i 列（只量 `Min` 列）表头与可见单元格的最大显示宽度。
+fn layout(columns: &[Column<'_>], width: u16, content: &[u16; MAX_COLUMNS]) -> Layout {
     let count = columns.len().min(MAX_COLUMNS);
     let mut shown = if count == MAX_COLUMNS {
         u64::MAX
@@ -156,8 +160,18 @@ fn layout(columns: &[Column<'_>], width: u16) -> Layout {
         }
         return Layout { shown, widths };
     }
-    // 富余：先按权重给 Fill 列，没有 Fill 权重时平分给 Min 列；取整余数给最后一列。
-    let extra = u32::from(width) - used;
+    // 富余：先让 Min 列长到容下自己的内容（从左到右，不超过富余），再按权重给
+    // Fill 列，没有 Fill 权重时平分给 Min 列；取整余数给最后一列。
+    let mut extra = u32::from(width) - used;
+    for index in (0..count).filter(|&index| is_shown(shown, index)) {
+        if matches!(columns[index].width, ColumnWidth::Min(_)) {
+            let want = u32::from(content[index].saturating_sub(widths[index]));
+            let add = want.min(extra);
+            widths[index] = widths[index].saturating_add(u16::try_from(add).unwrap_or(u16::MAX));
+            extra -= add;
+        }
+    }
+    let extra = extra;
     let fill_weight: u32 = (0..count)
         .filter(|&index| is_shown(shown, index))
         .filter_map(|index| match columns[index].width {
@@ -216,8 +230,9 @@ fn put_cell(
     put_str_ellipsis(buffer, x + offset, y, width - offset, text, style);
 }
 
-/// 画表格：第一行表头，其余是表体。`cell(row, column)` 只对画出来的格调用。
-/// 返回可排序表头格与数据行的命中矩形、表体区域与生效的 `scroll`。
+/// 画表格：第一行表头，其余是表体。`cell(row, column)` 只对画出来的格调用
+/// （`Min` 列的可见格在布局前先量一次宽度，会被调用两次）。返回可排序表头格与
+/// 数据行的命中矩形、表体区域与生效的 `scroll`。
 pub(crate) fn render_table<'c, C>(
     buffer: &mut Buffer,
     area: Rect,
@@ -233,8 +248,25 @@ where
     if area.is_empty() || columns.is_empty() {
         return render;
     }
-    let Layout { shown, widths } = layout(columns, area.width);
     let count = columns.len().min(MAX_COLUMNS);
+    // 可见行与布局无关（只看表体高度），先定下来，供 Min 列量内容宽度。
+    let visible = usize::from(area.height - 1);
+    let scroll = state.scroll.min(state.row_count.saturating_sub(visible));
+    let mut content = [0u16; MAX_COLUMNS];
+    for (index, column) in columns.iter().enumerate().take(count) {
+        if !matches!(column.width, ColumnWidth::Min(_)) {
+            continue;
+        }
+        // 排序列的表头多占「标记 + 空格」两列。
+        let sorted = state.sort.is_some_and(|sort| sort.column == index);
+        let mut widest = display_width_u16(column.title).saturating_add(if sorted { 2 } else { 0 });
+        for row in (scroll..state.row_count).take(visible) {
+            let value: TableCell<'c> = cell(row, index).into();
+            widest = widest.max(display_width_u16(&value.text));
+        }
+        content[index] = widest;
+    }
+    let Layout { shown, widths } = layout(columns, area.width, &content);
     let (ascending, descending) = if state.ascii {
         ("^", "v")
     } else {
@@ -297,8 +329,6 @@ where
     // 表体。
     let body = Rect::new(area.x, area.y + 1, area.width, area.height - 1);
     render.body = body;
-    let visible = usize::from(body.height);
-    let scroll = state.scroll.min(state.row_count.saturating_sub(visible));
     render.scroll = scroll;
     let hover_bg = palette.hover_row_bg();
     for (offset, row) in (scroll..state.row_count).take(visible).enumerate() {
@@ -515,6 +545,64 @@ mod tests {
             "A  B  ",
             "同优先级先丢最右的 C，余数给 B"
         );
+    }
+
+    /// 有 Fill 列时 Min 列也先长到容下表头与画面上的单元格，剩下的富余才给 Fill
+    /// 列——7 位 PID 不被截断；富余不够时退回声明的基础宽度（丢列也只看它）。
+    #[test]
+    fn min_columns_fit_visible_content_before_fill_takes_the_rest() {
+        let columns = [
+            Column {
+                title: "PID",
+                width: ColumnWidth::Min(3),
+                align_right: true,
+                sortable: true,
+                priority: 1,
+            },
+            Column {
+                title: "Name",
+                width: ColumnWidth::Fill(1),
+                align_right: false,
+                sortable: false,
+                priority: 0,
+            },
+        ];
+        let rows = [["4090512", "python3"], ["2559", "Xorg"]];
+        let palette = Palette::catppuccin();
+        let paint = |width: u16| {
+            let area = Rect::new(0, 0, width, 3);
+            let mut buffer = Buffer::empty(area);
+            render_table(
+                &mut buffer,
+                area,
+                &columns,
+                &state(2),
+                |row, column| rows[row][column],
+                &palette,
+            );
+            buffer
+        };
+        let buffer = paint(20);
+        assert_eq!(row_text(&buffer, 0), "    PID Name        ");
+        assert_eq!(row_text(&buffer, 1), "4090512 python3     ");
+        assert_eq!(row_text(&buffer, 2), "   2559 Xorg        ");
+        let buffer = paint(8);
+        assert_eq!(row_text(&buffer, 1), "40… pyt…", "没有富余时按基础宽度截断");
+        // 只量可见行：滚出画面的长 PID 不撑宽列。
+        let area = Rect::new(0, 0, 20, 2);
+        let mut buffer = Buffer::empty(area);
+        render_table(
+            &mut buffer,
+            area,
+            &columns,
+            &TableState {
+                scroll: 1,
+                ..state(2)
+            },
+            |row, column| rows[row][column],
+            &palette,
+        );
+        assert_eq!(row_text(&buffer, 1), "2559 Xorg           ");
     }
 
     #[test]

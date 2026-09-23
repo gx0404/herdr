@@ -1241,10 +1241,19 @@ fn processes_card(
     if inner.height < 2 {
         return 0;
     }
+    // PID 列按快照里最长的 PID 定宽（至少 6 列，放得下排序标记 + 表头）：Linux
+    // 的 PID 可达 7 位，截成「40905…」后几行同名进程无法区分；按全表而不是
+    // 可见行取宽，滚动时列宽不跳。
+    let pid_width = processes
+        .iter()
+        .map(|process| decimal_width(usize::try_from(process.identity.pid).unwrap_or(usize::MAX)))
+        .max()
+        .unwrap_or(0)
+        .max(6);
     let columns = [
         Column {
             title: texts.proc_col_pid,
-            width: ColumnWidth::Min(6),
+            width: ColumnWidth::Min(pid_width),
             align_right: true,
             sortable: true,
             priority: 2,
