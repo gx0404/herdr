@@ -1517,8 +1517,8 @@
       "anchor": "Workspace > Mouse UI",
       "doc": "docs/next/website/src/content/docs/concepts.mdx",
       "id": "docs-next-website-src-content-docs-concepts-mdx-workspace-mouse-ui",
-      "source_sha256": "cc10b11dac7c368b72d8dafbfb52b6087556616463adc7393607fbff803fe8f5",
-      "text": "## Mouse UI\n\nHerdr is mouse-native. You can click panes, tabs, workspaces, and agents. You can drag split borders, select text, and use right-click menus. Everything below is also reachable by mouse; keyboard bindings are an optional layer.\n\nIf you prefer keyboard-only control, or you want Herdr to stop capturing mouse input, disable mouse capture:\n\n```toml\n[ui]\nmouse_capture = false\n```\n\nIn the docked layout, drag a panel's `⠿` title handle to rearrange panels. While **Lock layout** is on, panel titles drop the `⠿` handle, the footer says the layout is locked instead of suggesting drags, and the resize and move hints of **Arrange layout** are dimmed."
+      "source_sha256": "84b10e94891ea871c41947236df94fbab9cf30d9863fc805df147599468a91c3",
+      "text": "## Mouse UI\n\nHerdr is mouse-native. You can click panes, tabs, workspaces, and agents. You can drag split borders, select text, and use right-click menus. Everything below is also reachable by mouse; keyboard bindings are an optional layer.\n\nIf you prefer keyboard-only control, or you want Herdr to stop capturing mouse input, disable mouse capture:\n\n```toml\n[ui]\nmouse_capture = false\n```\n\nIn the docked layout, drag a panel's `⠿` title handle to rearrange panels. While **Lock layout** is on, panel titles drop the `⠿` handle, the footer says the layout is locked instead of suggesting drags, and the resize and move hints of **Arrange layout** are dimmed. In **Arrange layout** mode, a borderless pane's `⠿` handle sits in the row just above the pane, which is the tab bar or the gap between panes, instead of covering the terminal's first line; it stays on the pane's first line only when that row has no room."
     },
     {
       "anchor": "Workspace > Pane",

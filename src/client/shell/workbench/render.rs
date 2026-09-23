@@ -64,6 +64,30 @@ fn fit_top_bar(buttons: &[(String, Action)], cols: u16) -> Vec<bool> {
     }
 }
 
+/// 无边框窗格的拖动把手落点（冒烟 L2）：窗格首行就是终端内容，把手改放到正上方
+/// 那一行的空位——面板顶部的窗格是标签栏行，其余是窗格间的空隙行。在窗格列宽内
+/// 从左往右找 2 列把手 + 左侧 1 列间隔都满足的位置：不压标签 / 按钮 / 标题等命中
+/// 区与已放的把手，不落进任何窗格矩形（无空隙堆叠时正上方是另一个窗格的内容），
+/// 画面上是空白格（避开标签栏右侧的状态段落与省略号）。找不到返回 `None`。
+fn borderless_pane_handle(
+    composed: &Buffer,
+    pane: Rect,
+    taken: &[(Rect, Action)],
+    panes: &[PaneHit],
+) -> Option<Rect> {
+    let y = pane.y.checked_sub(1)?;
+    let last = pane.right().checked_sub(2)?;
+    (pane.x.saturating_add(1)..=last)
+        .map(|x| Rect::new(x, y, 2, 1))
+        .find(|slot| {
+            let padded = Rect::new(slot.x - 1, y, slot.width + 1, 1);
+            padded.intersection(composed.area) == padded
+                && !taken.iter().any(|(rect, _)| rect.intersects(padded))
+                && !panes.iter().any(|hit| hit.rect.intersects(padded))
+                && (padded.x..padded.right()).all(|x| composed[(x, y)].symbol() == " ")
+        })
+}
+
 pub(super) fn pane_hit(pane: &crate::protocol::PaneSurfacePane, area: Rect) -> PaneHit {
     PaneHit {
         rect: translated(pane.rect, area),
@@ -589,7 +613,22 @@ impl ClientShellState {
                         && !self.workbench.dock.locked
                         && (hit.inner_rect.y > hit.rect.y || self.workbench.arranging)
                     {
-                        let handle = Rect::new(hit.rect.x + 1, hit.rect.y, 2, 1);
+                        // 有上边框：把手压在边框行上。无边框（只在调整布局模式画）：
+                        // 首行是终端内容，把手挪到正上方那一行的空位（冒烟 L2）；
+                        // 上方没有 chrome 行可用（无空隙堆叠在另一个窗格下面、或
+                        // 标签占满窗格列宽）才退回原位，保住拖动能力。
+                        let on_border = Rect::new(hit.rect.x + 1, hit.rect.y, 2, 1);
+                        let handle = if hit.inner_rect.y > hit.rect.y {
+                            on_border
+                        } else {
+                            borderless_pane_handle(
+                                composed,
+                                hit.rect,
+                                &self.workbench.hits,
+                                &self.hits.panes,
+                            )
+                            .unwrap_or(on_border)
+                        };
                         put(composed, handle, "⠿", Style::default().fg(palette.accent));
                         self.workbench
                             .hits

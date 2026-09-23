@@ -1552,3 +1552,156 @@ fn locked_layout_stops_advertising_drag_affordances() {
         "切换面板在锁定时照常可用"
     );
 }
+
+/// 调整布局模式下，把一组无边框窗格（相对面板 body 的矩形）与若干行文字铺进
+/// 133×32 的工作台：终端面板 body 是 (30, 3) 起 103×28。
+fn arranged_borderless_panes(
+    panes: &[(SurfaceRect, &str)],
+    texts: &[(u16, &str)],
+) -> ClientShellState {
+    let mut state = ready();
+    let mut view = surface();
+    let mut buffer = ratatui::buffer::Buffer::empty(Rect::new(0, 0, 103, 28));
+    for (y, text) in texts {
+        buffer.set_string(0, *y, *text, ratatui::style::Style::default());
+    }
+    view.frame = FrameData::from_ratatui_buffer_with_hyperlinks(&buffer, None, &[]);
+    view.panes = panes
+        .iter()
+        .map(|(rect, id)| PaneSurfacePane {
+            pane_id: (*id).into(),
+            rect: *rect,
+            inner_rect: *rect,
+            focused: false,
+            ..view.panes[0].clone()
+        })
+        .collect();
+    state.workbench.views.insert(
+        "1".into(),
+        crate::client::shell::workbench::View {
+            tab: "tab_1".into(),
+            surface: view,
+            graphics: Default::default(),
+        },
+    );
+    state.workbench.arranging = true;
+    state
+}
+
+fn pane_handles(state: &ClientShellState) -> Vec<(String, Rect)> {
+    use crate::client::shell::workbench::interaction::Action;
+    state
+        .workbench
+        .hits
+        .iter()
+        .filter_map(|(rect, action)| match action {
+            Action::Pane(pane) => Some((pane.clone(), *rect)),
+            _ => None,
+        })
+        .collect()
+}
+
+/// 终端面板 body（x = 30 起）里第 `y` 行的前 `len` 个字符。
+fn body_text(rows: &[String], y: u16, len: usize) -> String {
+    rows[usize::from(y)].chars().skip(30).take(len).collect()
+}
+
+/// 冒烟 L2：调整布局模式下无边框窗格的 `⠿` 把手不再压住终端首行（截屏 40 里
+/// 是「x⠿z%」），改放到正上方标签栏行里不压标签与按钮的空位；把手照样可拖。
+#[test]
+fn arrange_mode_pane_handle_leaves_the_first_terminal_row_intact() {
+    use crate::client::shell::workbench::interaction::Action;
+    let full = SurfaceRect {
+        x: 0,
+        y: 0,
+        width: 103,
+        height: 28,
+    };
+    let mut state = arranged_borderless_panes(&[(full, "pane_1")], &[(0, "xyz% FIRST TEXT")]);
+    let rows = frame_rows(&state.compose(133, 32).expect("调整布局模式"));
+    let pane = state.hits.panes[0].rect;
+    assert_eq!(pane, Rect::new(30, 3, 103, 28), "终端面板 body 起点");
+    assert_eq!(
+        body_text(&rows, pane.y, 15),
+        "xyz% FIRST TEXT",
+        "把手不压终端首行"
+    );
+    let handles = pane_handles(&state);
+    let [(id, handle)] = handles.as_slice() else {
+        panic!("调整布局模式为无边框窗格画一个把手：{handles:?}");
+    };
+    assert_eq!(id, "pane_1");
+    assert_eq!(handle.y + 1, pane.y, "把手在正上方的标签栏行");
+    assert!(
+        handle.x > pane.x && handle.right() <= pane.right(),
+        "把手在窗格列宽内：{handle:?}"
+    );
+    assert!(
+        state
+            .workbench
+            .hits
+            .iter()
+            .filter(|(_, action)| matches!(
+                action,
+                Action::Tab { .. } | Action::NewTab(_) | Action::ScrollTabs(..)
+            ))
+            .all(|(rect, _)| !rect.intersects(*handle)),
+        "把手不压标签与按钮：{handle:?}"
+    );
+    let buffer = state.compose_buffer.as_ref().expect("保留帧缓冲");
+    let cell = &buffer[(handle.x, handle.y)];
+    assert_eq!(cell.symbol(), "⠿");
+    assert_eq!(cell.fg, state.config.palette.accent);
+}
+
+/// 冒烟 L2（续）：上下堆叠的无边框窗格。有 1 行空隙时下方窗格的把手落在空隙
+/// 行，两个窗格的内容都不被压；没有空隙时正上方是另一个窗格的内容，把手不去
+/// 压它，退回自己的首行——没有 chrome 行可用时宁可盖住一格也保住拖动能力。
+#[test]
+fn stacked_borderless_pane_handles_never_cover_the_pane_above() {
+    let upper = SurfaceRect {
+        x: 0,
+        y: 0,
+        width: 103,
+        height: 13,
+    };
+    let lower = SurfaceRect {
+        x: 0,
+        y: 14,
+        width: 103,
+        height: 14,
+    };
+    let texts = [(0, "UPPER TOP"), (12, "UPPER LAST"), (14, "LOWER TOP")];
+    let mut state = arranged_borderless_panes(&[(upper, "pane_1"), (lower, "pane_2")], &texts);
+    let rows = frame_rows(&state.compose(133, 32).expect("有空隙"));
+    assert_eq!(body_text(&rows, 3, 9), "UPPER TOP");
+    assert_eq!(body_text(&rows, 15, 10), "UPPER LAST");
+    assert_eq!(body_text(&rows, 17, 9), "LOWER TOP");
+    let handles = pane_handles(&state);
+    let handle_of = |id: &str| {
+        handles
+            .iter()
+            .find(|(pane, _)| pane == id)
+            .map(|(_, rect)| *rect)
+            .unwrap_or_else(|| panic!("{id} 的把手：{handles:?}"))
+    };
+    assert_eq!(handle_of("pane_1").y, 2, "上方窗格的把手在标签栏行");
+    assert_eq!(handle_of("pane_2").y, 16, "下方窗格的把手在空隙行");
+
+    let flush = SurfaceRect {
+        y: 13,
+        height: 15,
+        ..lower
+    };
+    let texts = [(12, "UPPER LAST"), (13, "LOWER TOP")];
+    let mut state = arranged_borderless_panes(&[(upper, "pane_1"), (flush, "pane_2")], &texts);
+    let rows = frame_rows(&state.compose(133, 32).expect("无空隙"));
+    assert_eq!(body_text(&rows, 15, 10), "UPPER LAST", "不压上方窗格的内容");
+    let handles = pane_handles(&state);
+    let lower_handle = handles
+        .iter()
+        .find(|(pane, _)| pane == "pane_2")
+        .map(|(_, rect)| *rect)
+        .expect("没有 chrome 行也保留把手");
+    assert_eq!(lower_handle.y, 16, "退回自己的首行");
+}
