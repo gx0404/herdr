@@ -132,6 +132,11 @@ impl ClientShellState {
             .set_style(full, Style::default().fg(palette.text).bg(palette.panel_bg));
         self.hits = ShellHitMap::default();
         self.workbench.hits.clear();
+        self.workbench.footer_hits.clear();
+        if !self.workbench.arranging {
+            // 页脚提示只在调整布局模式出现：退出后不留悬浮态，下次进入不闪旧高亮。
+            self.workbench.footer_hover = None;
+        }
         self.workbench.geometry = self.workbench.dock.geometry(content_area(cols, rows));
         let menu_texts = &crate::i18n::texts().menu;
         // 顶栏：主菜单入口、监控、调整布局（模式开关，进入时反色）、锁定布局
@@ -472,11 +477,18 @@ impl ClientShellState {
                 footer.width.saturating_sub(status_width.saturating_add(1)),
                 footer.height,
             );
-            for (rect, index) in
-                render_footer_hints(canvas.buffer(), hint_area, &hints, None, palette)
-            {
+            // 悬浮下标由鼠标移动按上一帧的 `footer_hits` 算出，只落在可点项上
+            // （复审轻级 B2），与机器页等其它可点页脚同一套悬浮反馈。
+            for (rect, index) in render_footer_hints(
+                canvas.buffer(),
+                hint_area,
+                &hints,
+                self.workbench.footer_hover,
+                palette,
+            ) {
                 if index == hints.len() - 1 {
                     self.workbench.hits.push((rect, Action::Arrange));
+                    self.workbench.footer_hits.push((rect, index));
                 }
             }
         } else {

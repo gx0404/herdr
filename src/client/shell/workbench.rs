@@ -27,6 +27,11 @@ pub(super) struct State {
     pub views: HashMap<String, View>,
     pub geometry: Geometry,
     pub(in crate::client::shell) hits: Vec<(Rect, interaction::Action)>,
+    /// 「调整布局」页脚里可点提示的 `(命中矩形, 提示下标)`，每帧重建；鼠标移动
+    /// 据此算出 `footer_hover`（复审轻级 B2）。
+    pub(in crate::client::shell) footer_hits: Vec<(Rect, usize)>,
+    /// 指针悬浮的页脚提示下标，只会是 `footer_hits` 里的可点项。
+    pub(in crate::client::shell) footer_hover: Option<usize>,
     drag: Option<interaction::Drag>,
     pub arranging: bool,
     pub tab_scroll: HashMap<u64, usize>,
@@ -80,6 +85,8 @@ impl State {
             views: HashMap::new(),
             geometry: Geometry::default(),
             hits: Vec::new(),
+            footer_hits: Vec::new(),
+            footer_hover: None,
             drag: None,
             arranging: false,
             tab_scroll: HashMap::new(),

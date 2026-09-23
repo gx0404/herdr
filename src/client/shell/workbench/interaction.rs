@@ -323,6 +323,25 @@ impl ClientShellState {
             outcome.repaint = true;
             return true;
         }
+        if mouse.kind == MouseEventKind::Moved {
+            // 调整布局页脚可点提示的悬浮（复审轻级 B2）：按上一帧记下的命中区算
+            // 下标，变了才重绘；移动事件照常往下传给其它悬浮逻辑。
+            let hovered = (self.workbench.arranging
+                && self.config.feedback.hover_effects
+                && !contains(self.observability.hover_rect, point))
+            .then(|| {
+                self.workbench
+                    .footer_hits
+                    .iter()
+                    .find(|(rect, _)| contains(*rect, point))
+                    .map(|(_, index)| *index)
+            })
+            .flatten();
+            if hovered != self.workbench.footer_hover {
+                self.workbench.footer_hover = hovered;
+                outcome.repaint = true;
+            }
+        }
         // 悬浮层内部的事件透传给 observability：不能在这里清 hover，也不能落到
         // 下方的面板聚焦兜底（那会顺带把监控页 `page` 清空）。
         if contains(self.observability.hover_rect, point) {

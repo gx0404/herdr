@@ -1705,3 +1705,47 @@ fn stacked_borderless_pane_handles_never_cover_the_pane_above() {
         .expect("没有 chrome 行也保留把手");
     assert_eq!(lower_handle.y, 16, "退回自己的首行");
 }
+
+/// 页脚行里某个字符所在的列（找不到就失败），用来往那一格发鼠标事件。
+fn footer_x(state: &ClientShellState, needle: &str) -> u16 {
+    let buffer = state.compose_buffer.as_ref().expect("保留帧缓冲");
+    let y = buffer.area.bottom() - 1;
+    (0..buffer.area.width)
+        .find(|x| buffer[(*x, y)].symbol() == needle)
+        .unwrap_or_else(|| panic!("页脚没有 {needle:?}"))
+}
+
+/// SGR 1006 鼠标移动（无按键）报告，坐标取 0 起的单元格。
+fn sgr_move(x: u16, y: u16) -> Vec<u8> {
+    format!("\x1b[<35;{};{}M", x + 1, y + 1).into_bytes()
+}
+
+/// 复审轻级 B2：「调整布局」页脚里可点的「Esc 完成」悬浮时标签换底（与其它
+/// 可点页脚同一套悬浮反馈），移开即恢复；不可点的提示不给悬浮反馈。
+#[test]
+fn arrange_footer_done_hint_shows_hover_feedback() {
+    let mut state = ready();
+    state.workbench.arranging = true;
+    state.compose(133, 32).expect("调整布局模式");
+    let palette = state.config.palette.clone();
+    let footer = 31;
+    let plain = footer_cell(&state, "完");
+    assert_ne!(plain.bg, palette.hover_row_bg(), "未悬浮时是常态底色");
+
+    let moved = state.handle_input_bytes(&sgr_move(footer_x(&state, "完"), footer));
+    assert!(moved.repaint, "指针移到可点提示上要重绘");
+    state.compose(133, 32).expect("悬浮");
+    let hovered = footer_cell(&state, "完");
+    assert_eq!(hovered.bg, palette.hover_row_bg(), "悬浮标签换底");
+    assert_eq!(hovered.fg, palette.text, "悬浮标签提亮");
+
+    let moved = state.handle_input_bytes(&sgr_move(footer_x(&state, "切"), footer));
+    assert!(moved.repaint, "移开可点提示要重绘");
+    state.compose(133, 32).expect("移到不可点提示");
+    assert_eq!(footer_cell(&state, "完").bg, plain.bg, "移开后恢复常态");
+    assert_ne!(
+        footer_cell(&state, "切").bg,
+        palette.hover_row_bg(),
+        "不可点的提示不给悬浮反馈"
+    );
+}
