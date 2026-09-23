@@ -76,6 +76,11 @@ pub(super) struct MachineToast {
 /// toast 在屏时长；到期由 feedback tick 清除并请求一次重绘。
 pub(super) const MACHINE_TOAST_DURATION: std::time::Duration = std::time::Duration::from_secs(4);
 
+/// 宽屏 dashboard 的目标内容宽度；导入向导（`import.rs`）复用同一档，避免
+/// 从机器页打开导入时浮层突然变窄（L19）。窄终端仍会被 `centered_rect`
+/// 按边距钳位，行为与之前一致。
+pub(super) const DASHBOARD_MODAL_WIDTH: u16 = 116;
+
 impl ClientMachinesOverlay {
     fn blank() -> Self {
         Self {

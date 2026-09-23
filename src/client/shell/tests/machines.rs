@@ -3397,6 +3397,51 @@ Host web
     StrictHostKeyChecking no
 ";
 
+/// C2：导入 select 候选行有 notes（会被丢弃的设置）时右侧画一个 `!`
+/// 记号；旧实现先按整行宽度画正文、再用 `put_right_text` 在行尾硬叠上
+/// 记号，会把最后 2 列的正文原地砍掉——数字因此可能被砍成另一个合法值
+/// （`:2222` 变成 `:22!`，读起来像端口真的是 22）。正文应当只在
+/// `rect.width - 2` 列里画，超出用省略号收尾。
+#[test]
+fn import_select_row_reserves_the_notes_marker_column_and_ellipsizes() {
+    let dir = with_temp_home("c2-notes-marker");
+    // HostName 长度精确算过：候选行在 64 列外层终端下宽 58 列，`" [x] "
+    // + 标签 + " → " + 37 个 a + ":2222"` 正好把最后 4 位端口号推到行尾，
+    // 旧实现会把 "2222" 砍成 "22!"。
+    let fixture = "\
+Host longhost
+    HostName aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+    Port 2222
+    StrictHostKeyChecking no
+";
+    std::fs::write(dir.join(".ssh").join("config"), fixture).unwrap();
+    let mut state = state_with_profiles(&[]);
+    state.open_machine_import_wizard();
+    state.route_machines_key(&key(KeyCode::Enter), &mut ClientShellInput::default());
+    let frame = state.compose(64, 30).expect("composed");
+    let row: String = frame
+        .cells
+        .chunks(frame.width as usize)
+        .map(|row| row.iter().map(|c| c.symbol.as_str()).collect::<String>())
+        .find(|row| row.contains("longhost"))
+        .expect("候选行");
+
+    assert!(
+        !row.contains("22!"),
+        "端口号被硬截断砍成了另一个合法值：{row:?}"
+    );
+    assert!(row.contains('…'), "超出的正文应当用省略号收尾：{row:?}");
+    assert!(row.contains('!'), "notes 记号仍应可见：{row:?}");
+    // 省略号与记号之间不能挨着——记号有独立的 2 列预算。
+    let ellipsis_at = row.find('…').expect("省略号位置");
+    let mark_at = row.rfind('!').expect("记号位置");
+    assert!(
+        mark_at > ellipsis_at + 1,
+        "notes 记号紧贴在省略号后面，判定仍在争抢同一列：{row:?}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// 导入仍是三步，Select 是带预览的多选清单：表头给出空格 / Enter 提示，
 /// 右侧预览随焦点列出将写入的字段与被丢弃的设置；窄屏省去预览。
 #[test]
@@ -3478,5 +3523,107 @@ fn import_discover_without_hosts_is_an_empty_state_with_the_path() {
             }
         ))
     ));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// L19（尺寸）：宽屏下机器页走 dashboard（116 列），但导入向导固定用
+/// `ModalSize::Large`（76 列），从机器页按 `i` 打开导入会看到浮层突然
+/// 变窄。导入向导应当和它出发的机器页用同一档宽度（在窄终端仍会被
+/// `centered_rect` 按边距钳位，行为不变）。
+#[test]
+fn import_wizard_matches_the_machines_dashboard_width_on_wide_terminals() {
+    let build = profile("Build", "dev@build.example", "1");
+    let mut state = state_with_profiles(&[build]);
+    state.open_machines_overlay();
+    state.compose(140, 40).expect("宽屏机器页（dashboard）");
+    let dashboard_popup_width = state.hits.machines_popup.width;
+    assert!(
+        dashboard_popup_width >= 100,
+        "宽屏机器页应当是加宽的 dashboard：{dashboard_popup_width}"
+    );
+
+    state.open_machine_import_wizard();
+    state.compose(140, 40).expect("导入向导");
+    let import_popup_width = state.hits.machines_popup.width;
+    assert_eq!(
+        import_popup_width, dashboard_popup_width,
+        "导入向导浮层宽度应当与机器页一致，而不是固定 76 列"
+    );
+}
+
+/// L19（无主机时的「继续」）：discover 没有可导入的主机时，「enter 继续」
+/// 已经不可点（`import_discover_without_hosts_is_an_empty_state_with_the_path`
+/// 覆盖），但仍然画在页脚里，容易让人以为按了会有反应。没有主机可继续时
+/// 干脆不画这一项，页脚只剩「esc 返回」。
+#[test]
+fn import_footer_hides_the_continue_hint_when_there_are_no_hosts() {
+    let dir = with_temp_home("l19-no-continue-hint");
+    let mut state = state_with_profiles(&[]);
+    state.open_machine_import_wizard();
+    let footer = compact(&machines_footer_text(&mut state, 90, 26));
+    let t = &crate::i18n::texts().machines;
+    assert!(
+        !footer.contains(&compact(t.hint_continue)),
+        "没有主机可继续时不该再画「继续」提示：{footer}"
+    );
+    assert!(
+        footer.contains(&compact(t.hint_back)),
+        "返回提示仍要在：{footer}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// M4：导入页步骤条与配置路径重叠（`smoke-23627143` `86` 行 7：路径首字符
+/// 「/」被吃掉）。窄浮层（`ModalSize::Large` 固定 76 列）下配一条足够长的
+/// 路径，步骤条三个徽标（"1 发现 2 选择 3 完成"）加起来已经占了不少列，
+/// 路径必须紧跟其后另起一段留白，而不是右对齐硬叠上去。
+#[test]
+fn import_header_reserves_room_for_the_path_next_to_the_step_indicator() {
+    let dir = with_temp_home("m4-path-overlap");
+    let mut state = state_with_profiles(&[]);
+    state.open_machine_import_wizard();
+    let long_path = "/var/tmp/herdr-smoke-20260923121719/home/.ssh/config";
+    if let Some(ClientShellOverlay::Machines(overlay)) = state.overlay.as_mut() {
+        if let super::super::machines_overlay::ClientMachinesView::Import(view) = &mut overlay.view
+        {
+            view.path = std::path::PathBuf::from(long_path);
+        }
+    }
+    let frame = state.compose(90, 26).expect("composed");
+    let rows: Vec<String> = frame
+        .cells
+        .chunks(frame.width as usize)
+        .map(|row| row.iter().map(|c| c.symbol.as_str()).collect::<String>())
+        .collect();
+    // 标题行（`从 SSH 配置导入`）的下一行就是步骤条 + 路径共用的那一行；宽
+    // 字符在缓冲区里拆成两格，比对时去掉空白（与本文件 `compact_frame` 同
+    // 口径），避免 CJK 续格里插入的空格误判。
+    let title = crate::i18n::texts().machines.import_title;
+    let title_index = rows
+        .iter()
+        .position(|row| compact(row).contains(&compact(title)))
+        .expect("标题行");
+    let header_row = rows.get(title_index + 1).expect("步骤条所在行").as_str();
+
+    // 三个步骤徽标完整无损。
+    for label in [
+        crate::i18n::texts().machines.import_step_discover,
+        crate::i18n::texts().machines.import_step_select,
+        crate::i18n::texts().machines.import_step_done,
+    ] {
+        assert!(
+            compact(header_row).contains(&compact(label)),
+            "步骤条被吃掉：{header_row:?}"
+        );
+    }
+    // 路径必须原样出现（含首字符「/」），且前面至少留了 1 格空白，证明它
+    // 不是紧贴着步骤条画上去的（HERDR smoke 86 的重叠症状）。
+    let path_at = header_row
+        .find("/var/tmp/herdr-smoke-20260923121719")
+        .unwrap_or_else(|| panic!("路径缺失或首字符被吃掉：{header_row:?}"));
+    assert!(
+        header_row[..path_at].ends_with(' '),
+        "步骤条与路径之间没有留白，判定重叠：{header_row:?}"
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }

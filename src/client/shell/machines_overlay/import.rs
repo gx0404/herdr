@@ -482,21 +482,27 @@ fn import_hints(view: &ClientMachineImportView) -> Vec<MachineHint<'static>> {
     let t = &crate::i18n::texts().machines;
     match view.step {
         ClientImportStep::Discover => {
-            let next = MachineHint::button(
-                "enter",
-                t.hint_continue,
-                MachineOverlayButton::ImportContinue,
-            )
-            .primary();
             let continue_enabled = view.fatal.is_none() && !view.plan.ready.is_empty();
-            vec![
-                if continue_enabled {
-                    next
-                } else {
-                    next.disabled()
-                },
-                MachineHint::button("esc", t.hint_back, MachineOverlayButton::Back),
-            ]
+            let mut hints = Vec::with_capacity(2);
+            // 没有可导入的主机时「继续」无处可去：不画成灰态按钮，直接不
+            // 显示，页脚只剩返回（L19：空态下仍显示「enter 继续」容易让人
+            // 以为按了会有反应）。
+            if continue_enabled {
+                hints.push(
+                    MachineHint::button(
+                        "enter",
+                        t.hint_continue,
+                        MachineOverlayButton::ImportContinue,
+                    )
+                    .primary(),
+                );
+            }
+            hints.push(MachineHint::button(
+                "esc",
+                t.hint_back,
+                MachineOverlayButton::Back,
+            ));
+            hints
         }
         ClientImportStep::Select => vec![
             MachineHint::key("↑↓", t.hint_select),
@@ -580,7 +586,17 @@ pub(super) fn render_machine_import(
 ) -> Option<OverlayRender> {
     let p = cx.palette;
     let t = &crate::i18n::texts().machines;
-    let (popup, inner) = modal_panel(b, crate::ui::ModalSize::Large.with_height(24), p.accent, cx)?;
+    // 与机器页 dashboard 同宽（L19）：从宽屏机器页打开导入不会突然变窄；
+    // 窄终端仍按 `centered_rect` 的边距钳位，行为与之前一致。
+    let (popup, inner) = modal_panel(
+        b,
+        crate::ui::ModalSize::Content {
+            width: super::DASHBOARD_MODAL_WIDTH,
+            height: 24,
+        },
+        p.accent,
+        cx,
+    )?;
     if inner.width < 24 || inner.height < 8 {
         return Some(OverlayRender {
             area: popup,
@@ -624,13 +640,23 @@ pub(super) fn render_machine_import(
         put_text(b, x, stack.header.y + 1, width, &text, style);
         x = x.saturating_add(width);
     }
-    put_right_text(
-        b,
-        Rect::new(stack.header.x, stack.header.y + 1, stack.header.width, 1),
-        stack.header.y + 1,
-        &view.path.display().to_string(),
-        base.fg(p.overlay0),
-    );
+    // 路径紧跟步骤条之后画（留 1 列空隙），而不是与步骤条共享同一矩形右对齐：
+    // 两者各自的宽度先协商好，路径超出剩余宽度时用省略号收尾（保留开头，
+    // 不会像 `put_right_text` 硬截断那样吃掉路径的首字符）（M4）。
+    let path_x = x.saturating_add(1).min(stack.header.right());
+    let path_width = stack.header.right().saturating_sub(path_x);
+    if path_width > 0 {
+        let path_text =
+            crate::ui::truncate_end(&view.path.display().to_string(), usize::from(path_width));
+        put_text(
+            b,
+            path_x,
+            stack.header.y + 1,
+            path_width,
+            &path_text,
+            base.fg(p.overlay0),
+        );
+    }
 
     let body = stack.content;
     let mut cursor = None;
@@ -832,21 +858,23 @@ fn render_import_select(
             Style::default().fg(p.text).bg(p.panel_bg)
         };
         b.set_style(rect, style);
-        put_text(
-            b,
-            rect.x,
-            rect.y,
-            rect.width,
+        // 有 notes（会被丢弃的设置）时行尾要留 2 列给黄色记号；正文只在
+        // 剩下的列里画，超出的部分用省略号收尾，不能让硬截断把数字砍成
+        // 另一个合法值（如 `:2222` 被砍成 `:22!`，C2）。
+        let has_notes = !planned.notes.is_empty();
+        let mark_width = if has_notes { 2 } else { 0 };
+        let content_width = rect.width.saturating_sub(mark_width);
+        let text = crate::ui::truncate_end(
             &format!(
                 " {} {} → {}",
                 if checked { "[x]" } else { "[ ]" },
                 planned.label,
                 import_planned_summary(planned)
             ),
-            style,
+            usize::from(content_width),
         );
-        // 有设置会被丢弃的主机在行尾标一个黄色记号，细节看预览。
-        if !planned.notes.is_empty() {
+        put_text(b, rect.x, rect.y, content_width, &text, style);
+        if has_notes {
             put_right_text(
                 b,
                 rect,

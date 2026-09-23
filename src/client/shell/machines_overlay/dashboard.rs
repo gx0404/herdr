@@ -23,7 +23,7 @@ pub(super) fn dashboard_layout(
             crate::ui::modal_rect(
                 area,
                 crate::ui::ModalSize::Content {
-                    width: 116,
+                    width: super::DASHBOARD_MODAL_WIDTH,
                     height: 34,
                 },
             )
@@ -66,7 +66,7 @@ pub(super) fn render_dashboard(
     let (popup, inner) = modal_panel(
         b,
         crate::ui::ModalSize::Content {
-            width: 116,
+            width: super::DASHBOARD_MODAL_WIDTH,
             height: 34,
         },
         p.accent,
