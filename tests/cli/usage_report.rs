@@ -20,6 +20,16 @@ fn claude_statusline_pipeline(renderer: &str) -> String {
 /// 回放的 stdout 丢弃，statusline 不显示任何内容。
 const CLAUDE_STATUSLINE_STANDALONE: &str = "# herdr-usage v1\n(if [ \"${HERDR_ENV:-}\" = 1 ] && [ -n \"${HERDR_BIN_PATH:-}\" ]; then exec \"$HERDR_BIN_PATH\" api usage-report --agent claude --passthrough >/dev/null; else :; fi)";
 
+/// 子进程会不会读 stdin：决定写 stdin 时对 `BrokenPipe` 的容忍度。
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum StdinUse {
+    /// 包装串一定读 stdin（透传给 herdr 或 `exec cat`）：写失败就是缺陷。
+    Read,
+    /// 包装串按设计不读 stdin（herdr 之外的独立形态只跑 `:`）：bash 可能在测试写入前
+    /// 就退出、关掉管道读端，写入得到 `BrokenPipe` 属于预期。
+    MayIgnore,
+}
+
 /// 用真实 bash 跑包装串（Claude Code 用 shell 执行 statusLine 命令）；`herdr_env` 决定是否
 /// 模拟在 herdr 会话内（`HERDR_ENV=1` + `HERDR_BIN_PATH` 指向测试二进制）。返回子进程与
 /// 写完 stdin 的时刻。
@@ -29,6 +39,17 @@ fn spawn_statusline_shell(
     socket_path: Option<&Path>,
     input: &[u8],
 ) -> (std::process::Child, Instant) {
+    let mut child = spawn_statusline_process(command, herdr_env, socket_path);
+    feed_statusline_stdin(&mut child, input, StdinUse::Read);
+    (child, Instant::now())
+}
+
+/// 只起进程、不写 stdin：调用方按 [`StdinUse`] 自己喂输入。
+fn spawn_statusline_process(
+    command: &str,
+    herdr_env: bool,
+    socket_path: Option<&Path>,
+) -> std::process::Child {
     let mut shell = Command::new("bash");
     shell.arg("-c").arg(command);
     shell.env("HERDR_LANG", "en");
@@ -52,11 +73,21 @@ fn spawn_statusline_shell(
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    let mut child = shell.spawn().unwrap();
+    shell.spawn().unwrap()
+}
+
+/// 把 Claude Code 写给 statusLine 命令的 JSON 写进子进程 stdin 并关闭写端。子进程按设计
+/// 不读 stdin 时（[`StdinUse::MayIgnore`]），它先退出造成的 `BrokenPipe` 不算失败；其它
+/// 写入错误照样让用例失败。
+fn feed_statusline_stdin(child: &mut std::process::Child, input: &[u8], usage: StdinUse) {
     let mut stdin = child.stdin.take().unwrap();
-    stdin.write_all(input).unwrap();
+    match stdin.write_all(input) {
+        Ok(()) => {}
+        Err(error)
+            if usage == StdinUse::MayIgnore && error.kind() == std::io::ErrorKind::BrokenPipe => {}
+        Err(error) => panic!("写 statusline 命令的 stdin 失败：{error}"),
+    }
     drop(stdin);
-    (child, Instant::now())
 }
 
 /// 把监听 socket 的 backlog 压到 0 并塞进一个未被 accept 的连接：之后的 `connect()` 会
@@ -428,13 +459,37 @@ fn usage_statusline_standalone_wrapper_stays_silent_and_does_not_wait_for_the_se
     assert_eq!(request["method"], "account.usage.report");
     assert_eq!(request["params"]["agent"], "claude");
 
-    // herdr 之外：什么都不做，也不读 stdin。
-    let (child, _) = spawn_statusline_shell(CLAUDE_STATUSLINE_STANDALONE, false, None, input);
+    // herdr 之外：什么都不做，也不读 stdin。bash 可能抢在写入前退出（负载高时常见），
+    // 写入端的 BrokenPipe 由 `StdinUse::MayIgnore` 兜住。
+    let mut child = spawn_statusline_process(CLAUDE_STATUSLINE_STANDALONE, false, None);
+    feed_statusline_stdin(&mut child, input, StdinUse::MayIgnore);
     let output = child.wait_with_output().unwrap();
     assert!(output.stdout.is_empty());
     assert!(output.stderr.is_empty());
     assert_eq!(output.status.code(), Some(0));
     let _ = fs::remove_dir_all(base);
+}
+
+/// D15：herdr 之外的独立形态按设计不读 stdin，bash 可能在测试写入前就退出并关掉管道
+/// 读端——负载高时这正是上面用例偶发 BrokenPipe 的时序。这里先等 bash 退出再写，把它
+/// 钉成必现：写入失败不算缺陷，输出与退出码照常断言。
+#[test]
+fn usage_statusline_standalone_wrapper_outside_herdr_tolerates_a_closed_stdin() {
+    let input = b"{\"model\":{\"display_name\":\"Opus\"}}";
+    let mut child = spawn_statusline_process(CLAUDE_STATUSLINE_STANDALONE, false, None);
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while child.try_wait().unwrap().is_none() {
+        assert!(
+            Instant::now() < deadline,
+            "herdr 之外的独立形态只跑 `:`，bash 应立即退出"
+        );
+        thread::sleep(Duration::from_millis(5));
+    }
+    feed_statusline_stdin(&mut child, input, StdinUse::MayIgnore);
+    let output = child.wait_with_output().unwrap();
+    assert!(output.stdout.is_empty());
+    assert!(output.stderr.is_empty());
+    assert_eq!(output.status.code(), Some(0));
 }
 
 /// 热路径跳过了会话参数解析，但 socket 归属必须与完整路径一致：只设 `HERDR_SESSION`（不设
