@@ -23,8 +23,9 @@ use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use crate::api::schema::{
-    AgentActivityContent, AgentActivityContentFormat, AgentActivityNode, ErrorBody, ErrorResponse,
-    ExternalAgentInfo, Method, Request, ResponseResult, SuccessResponse,
+    AgentActivityContent, AgentActivityContentFormat, AgentActivityKind, AgentActivityNode,
+    AgentActivityStatus, ErrorBody, ErrorResponse, ExternalAgentInfo, Method, Request,
+    ResponseResult, SuccessResponse,
 };
 use crate::app::state::AgentActivitySubject;
 use crate::events::AppEvent;
@@ -253,8 +254,17 @@ pub(crate) const NOT_IMPLEMENTED_MESSAGE: &str = "agent activity is not implemen
 
 /// 收到钩子提示后，同一 pane 两次刷新的最小间隔（限频）。
 pub(crate) const HINT_MIN_INTERVAL: Duration = Duration::from_secs(1);
-/// agent 处于 Working 时的低频轮询间隔。
+/// 提示（含 Working 结束的收尾补刷）触发的刷新之后，再补刷一次的延迟：钩子常先于
+/// CLI 把结果写进会话文件（codex 的 SubagentStop 比 rollout 里的 task_complete 早
+/// 到），紧跟提示的那次刷新读到的还是旧状态。
+pub(crate) const HINT_SETTLE_DELAY: Duration = Duration::from_secs(2);
+/// agent 处于 Working、或落库树里还有未结束节点时的低频轮询间隔。
 pub(crate) const WORKING_POLL_INTERVAL: Duration = Duration::from_secs(5);
+/// 落库树里还有未结束节点时按 [`WORKING_POLL_INTERVAL`] 轮询的时限，从树的内容
+/// 最近一次变化起算。子 agent 常比主 agent 晚结束（codex 主回合先收尾），主 agent
+/// 已不在 Working 时靠它拿到终态；超过时限仍没变化的未结束节点（中断残留、僵尸
+/// 节点）不再驱动轮询，免得 worker 永转。
+pub(crate) const OPEN_TREE_POLL_WINDOW: Duration = Duration::from_secs(10 * 60);
 /// 二级窗口跟随（`agent.activity.read` 带 `follow = true`）时的树刷新间隔。
 pub(crate) const FOLLOW_INTERVAL: Duration = Duration::from_secs(1);
 /// 一次跟随读取让该 pane 保持跟随的时长；客户端持续读取即持续跟随。
@@ -319,25 +329,92 @@ impl InFlight {
     }
 }
 
+/// 调度看的落库活动树（`AgentActivitySnapshot` 的只读视图，不复制节点）。
+#[derive(Clone, Copy)]
+pub(crate) struct StoredTree<'a> {
+    /// 内容每变化一次递增。
+    pub revision: u64,
+    pub nodes: &'a [AgentActivityNode],
+}
+
+/// 调度对一个 pane 落库树的观察。修订号变了才重扫节点，所以每轮遍历对每个 pane
+/// 只多一次整数比较。
+#[derive(Debug, Clone, Copy)]
+struct TreeWatch {
+    revision: u64,
+    /// 还有会在主 agent 的回合之外自行结束的节点（见 [`has_open_nodes`]）。
+    open: bool,
+    /// 首次看到该修订号的时刻，即树的内容最近一次变化（最多晚一轮遍历）。
+    since: Instant,
+}
+
+/// 树里是否还有会在主 agent 的回合之外自行结束的节点：子 agent、任务、后台进程等
+/// 处于等待、运行或阻塞。待办不算：它只随 agent 自己的回合变化，回合已由 Working
+/// 轮询与收尾补刷覆盖；空闲 agent 又常留着没做完的待办，算进来只会白白轮询。
+fn has_open_nodes(nodes: &[AgentActivityNode]) -> bool {
+    nodes.iter().any(|node| {
+        node.kind != AgentActivityKind::Todo
+            && matches!(
+                node.status,
+                AgentActivityStatus::Pending
+                    | AgentActivityStatus::Running
+                    | AgentActivityStatus::Blocked
+            )
+    })
+}
+
 #[derive(Debug, Default)]
 struct PaneSchedule {
     last_started: Option<Instant>,
     in_flight: Option<InFlight>,
     hinted: bool,
+    /// 提示触发的那次刷新之后的补刷时刻（[`HINT_SETTLE_DELAY`]）；在它之前别的原因
+    /// 先刷了就作废。
+    settle_at: Option<Instant>,
     follow_until: Option<Instant>,
     was_working: bool,
+    tree: Option<TreeWatch>,
     seen_pass: u64,
+}
+
+impl PaneSchedule {
+    /// 记下本轮看到的落库树；修订号没变就沿用上次的判定与时刻。
+    fn watch_tree(&mut self, tree: Option<StoredTree<'_>>, now: Instant) {
+        self.tree = match (self.tree, tree) {
+            (_, None) => None,
+            (Some(watch), Some(tree)) if watch.revision == tree.revision => Some(watch),
+            (_, Some(tree)) => Some(TreeWatch {
+                revision: tree.revision,
+                open: has_open_nodes(tree.nodes),
+                since: now,
+            }),
+        };
+    }
+
+    /// 落库树里还有未结束的节点，且树在 [`OPEN_TREE_POLL_WINDOW`] 之内变过。
+    fn tree_open(&self, now: Instant) -> bool {
+        self.tree.is_some_and(|watch| {
+            watch.open && now.saturating_duration_since(watch.since) < OPEN_TREE_POLL_WINDOW
+        })
+    }
 }
 
 /// 活动树刷新调度：决定哪个 pane 何时交给后台发现。触发条件：
 ///
 /// - 首次见到该 agent：立即发现一次；
-/// - 钩子提示：立即刷，但同一 pane 两次刷新至少隔 [`HINT_MIN_INTERVAL`]；
-/// - Working：每 [`WORKING_POLL_INTERVAL`] 轮询一次；Working 结束时补刷一次；
+/// - 钩子提示：立即刷，但同一 pane 两次刷新至少隔 [`HINT_MIN_INTERVAL`]；提示触发
+///   的那次刷新之后过 [`HINT_SETTLE_DELAY`] 再补刷一次；
+/// - Working：每 [`WORKING_POLL_INTERVAL`] 轮询一次；Working 结束时按提示补刷；
+/// - 落库树里还有未结束的节点（待办除外）：同样每 [`WORKING_POLL_INTERVAL`] 轮询，
+///   直到它们结束，或树的内容 [`OPEN_TREE_POLL_WINDOW`] 没有变化；
 /// - 跟随：[`FOLLOW_TTL`] 内每 [`FOLLOW_INTERVAL`] 刷一次。
 ///
 /// 同一 pane 同时最多一个在途任务；结果回来（或任务开始后 [`IN_FLIGHT_TIMEOUT`]
 /// 过去）才放行下一次，期间到达的提示保留到放行后。
+///
+/// 扩展成本：每轮遍历（每秒至多一轮，不在渲染路径）对每个持有 agent 的 pane 只多
+/// 一次修订号比较；修订号变了才重扫落库的节点（每个 agent 至多
+/// `MAX_AGENT_ACTIVITY_NODES` 个）。
 #[derive(Debug, Default)]
 pub(crate) struct Scheduler {
     panes: HashMap<PaneId, PaneSchedule>,
@@ -367,18 +444,21 @@ impl Scheduler {
         self.next_pass = Some(now + SCHEDULER_PASS_INTERVAL);
     }
 
-    /// 对一个持有 agent 的 pane 做决定；到期记为在途并返回交给后台任务的开始标记。
+    /// 对一个持有 agent 的 pane 做决定；`tree` 是它当前落库的活动树。到期记为在途
+    /// 并返回交给后台任务的开始标记。
     pub(crate) fn should_refresh(
         &mut self,
         pane_id: PaneId,
         working: bool,
+        tree: Option<StoredTree<'_>>,
         now: Instant,
     ) -> Option<JobStarted> {
         let pass = self.pass;
         let entry = self.panes.entry(pane_id).or_default();
         entry.seen_pass = pass;
+        entry.watch_tree(tree, now);
         if entry.was_working && !working {
-            // Working 结束：补刷一次，拿到任务的最终状态。
+            // Working 结束：按提示补刷，拿到任务的最终状态。
             entry.hinted = true;
         }
         entry.was_working = working;
@@ -394,16 +474,21 @@ impl Scheduler {
         if !following {
             entry.follow_until = None;
         }
+        let polling = working || entry.tree_open(now);
         let due = match entry.last_started {
             None => true,
             Some(at) => {
                 let elapsed = now.saturating_duration_since(at);
                 (entry.hinted && elapsed >= HINT_MIN_INTERVAL)
                     || (following && elapsed >= FOLLOW_INTERVAL)
-                    || (working && elapsed >= WORKING_POLL_INTERVAL)
+                    || (polling && elapsed >= WORKING_POLL_INTERVAL)
+                    || entry.settle_at.is_some_and(|settle| now >= settle)
             }
         };
         if due {
+            // 这次刷新吃掉了提示：过一会儿再补刷一次。别的原因的刷新顶替掉未到期的
+            // 补刷，自己不再安排，所以补刷不会连环。
+            entry.settle_at = entry.hinted.then(|| now + HINT_SETTLE_DELAY);
             entry.hinted = false;
             entry.last_started = Some(now);
             let (in_flight, started) = InFlight::start();
@@ -999,9 +1084,14 @@ impl Service {
         scheduler.begin_pass(now);
         let source_for = self.sources.source_for;
         let mut due = Vec::new();
+        let store = &state.agent_activity;
         state.for_each_agent_pane(|pane_id, agent, working| {
             if let Some(source) = source_for(agent) {
-                if let Some(started) = scheduler.should_refresh(pane_id, working, now) {
+                let tree = store.activity(pane_id).map(|stored| StoredTree {
+                    revision: stored.revision,
+                    nodes: &stored.nodes,
+                });
+                if let Some(started) = scheduler.should_refresh(pane_id, working, tree, now) {
                     due.push((pane_id, source, started));
                 }
             }
@@ -1399,12 +1489,35 @@ mod tests {
             .iter()
             .filter_map(|(pane_id, working)| {
                 scheduler
-                    .should_refresh(*pane_id, *working, now)
+                    .should_refresh(*pane_id, *working, None, now)
                     .map(|started| (*pane_id, started))
             })
             .collect();
         scheduler.end_pass();
         due
+    }
+
+    /// 同 [`pass`]，逐 pane 带上各自的落库树。
+    fn pass_trees(
+        scheduler: &mut Scheduler,
+        now: Instant,
+        panes: &[(PaneId, bool, Option<StoredTree<'_>>)],
+    ) -> Vec<PaneId> {
+        scheduler.begin_pass(now);
+        let due = panes
+            .iter()
+            .filter_map(|&(pane_id, working, tree)| {
+                scheduler
+                    .should_refresh(pane_id, working, tree, now)
+                    .map(|_| pane_id)
+            })
+            .collect();
+        scheduler.end_pass();
+        due
+    }
+
+    fn stored(revision: u64, nodes: &[AgentActivityNode]) -> Option<StoredTree<'_>> {
+        Some(StoredTree { revision, nodes })
     }
 
     /// 同上，只看到期的 pane。
@@ -1494,7 +1607,209 @@ mod tests {
             [agent]
         );
         scheduler.finish(agent);
-        assert!(pass(&mut scheduler, t0 + secs(7.0), &[(agent, false)]).is_empty());
+        // 收尾补刷与提示同一待遇：2 s 后再补一次（子 agent 的终态可能还没写盘），
+        // 之后不再刷。
+        assert!(pass(&mut scheduler, t0 + secs(2.9), &[(agent, false)]).is_empty());
+        assert_eq!(
+            pass(&mut scheduler, t0 + secs(3.0), &[(agent, false)]),
+            [agent]
+        );
+        scheduler.finish(agent);
+        assert!(pass(&mut scheduler, t0 + secs(9.0), &[(agent, false)]).is_empty());
+    }
+
+    /// 钩子常先于 CLI 把结果写进会话文件（codex 的 SubagentStop 比 rollout 里的
+    /// task_complete 早到）：提示触发的刷新之后，过 [`HINT_SETTLE_DELAY`] 再补刷
+    /// 一次；只补一次，不连环。
+    #[test]
+    fn scheduler_refreshes_once_more_after_a_hinted_refresh_settles() {
+        let t0 = Instant::now();
+        let mut scheduler = Scheduler::default();
+        let agent = pane(1);
+        assert_eq!(pass(&mut scheduler, t0, &[(agent, false)]), [agent]);
+        scheduler.finish(agent);
+        scheduler.note_hint(agent);
+        assert_eq!(
+            pass(&mut scheduler, t0 + secs(3.0), &[(agent, false)]),
+            [agent]
+        );
+        scheduler.finish(agent);
+        assert!(pass(&mut scheduler, t0 + secs(4.9), &[(agent, false)]).is_empty());
+        assert_eq!(
+            pass(&mut scheduler, t0 + secs(5.0), &[(agent, false)]),
+            [agent]
+        );
+        scheduler.finish(agent);
+        for offset in [7.0, 10.0, 60.0] {
+            assert!(
+                pass(&mut scheduler, t0 + secs(offset), &[(agent, false)]).is_empty(),
+                "补刷只有一次：{offset}"
+            );
+        }
+    }
+
+    /// M2 回归（真机报告 codex-03-timeline）：主 agent 先于子 agent 结束回合后，
+    /// 落库树里子 agent 仍是 running。只要还有这样的节点，空闲的 agent 也照常每
+    /// 5 s 刷一次；全部终态后停止。
+    #[test]
+    fn scheduler_keeps_polling_an_idle_agent_while_its_tree_has_open_nodes() {
+        let t0 = Instant::now();
+        let mut scheduler = Scheduler::default();
+        let agent = pane(1);
+        let running = [node("sub", None, AgentActivityStatus::Running)];
+        assert_eq!(
+            pass_trees(&mut scheduler, t0, &[(agent, false, None)]),
+            [agent]
+        );
+        scheduler.finish(agent);
+        for (offset, due) in [(4.9, false), (5.0, true), (9.9, false), (10.0, true)] {
+            let refreshed = pass_trees(
+                &mut scheduler,
+                t0 + secs(offset),
+                &[(agent, false, stored(1, &running))],
+            );
+            assert_eq!(!refreshed.is_empty(), due, "{offset}");
+            scheduler.finish(agent);
+        }
+        // 子 agent 结束：树里全是终态，不再轮询。
+        let finished = [
+            node("sub", None, AgentActivityStatus::Done),
+            node("sub.2", Some("sub"), AgentActivityStatus::Failed),
+        ];
+        for offset in [15.0, 20.0, 60.0] {
+            assert!(
+                pass_trees(
+                    &mut scheduler,
+                    t0 + secs(offset),
+                    &[(agent, false, stored(2, &finished))]
+                )
+                .is_empty(),
+                "{offset}"
+            );
+        }
+    }
+
+    /// 等待与阻塞的节点同样会自行结束；待办只随 agent 自己的回合变化，unknown 不
+    /// 知道是否还在跑，都不驱动轮询。
+    #[test]
+    fn scheduler_polls_for_pending_and_blocked_nodes_but_not_for_todos() {
+        for (kind, status, polls) in [
+            (
+                AgentActivityKind::Subagent,
+                AgentActivityStatus::Pending,
+                true,
+            ),
+            (AgentActivityKind::Task, AgentActivityStatus::Blocked, true),
+            (
+                AgentActivityKind::Background,
+                AgentActivityStatus::Running,
+                true,
+            ),
+            (AgentActivityKind::Todo, AgentActivityStatus::Running, false),
+            (AgentActivityKind::Todo, AgentActivityStatus::Pending, false),
+            (
+                AgentActivityKind::Subagent,
+                AgentActivityStatus::Unknown,
+                false,
+            ),
+        ] {
+            let t0 = Instant::now();
+            let mut scheduler = Scheduler::default();
+            let agent = pane(1);
+            let nodes = [AgentActivityNode {
+                kind,
+                ..node("n", None, status)
+            }];
+            assert_eq!(
+                pass_trees(&mut scheduler, t0, &[(agent, false, stored(1, &nodes))]),
+                [agent]
+            );
+            scheduler.finish(agent);
+            let refreshed = pass_trees(
+                &mut scheduler,
+                t0 + secs(5.0),
+                &[(agent, false, stored(1, &nodes))],
+            );
+            assert_eq!(!refreshed.is_empty(), polls, "{kind:?} {status:?}");
+        }
+    }
+
+    /// 上限：同一修订号的未结束节点（中断残留、僵尸节点）只在
+    /// [`OPEN_TREE_POLL_WINDOW`] 之内驱动轮询；树的内容一变，窗口从头算。
+    #[test]
+    fn scheduler_stops_polling_open_nodes_that_stop_changing() {
+        let t0 = Instant::now();
+        let mut scheduler = Scheduler::default();
+        let agent = pane(1);
+        let running = [node("sub", None, AgentActivityStatus::Running)];
+        // 首次见到就带着这棵树：窗口从 t0 起算。
+        assert_eq!(
+            pass_trees(&mut scheduler, t0, &[(agent, false, stored(1, &running))]),
+            [agent]
+        );
+        scheduler.finish(agent);
+        let mut refreshed = Vec::new();
+        for second in (5..=900).step_by(5) {
+            let now = t0 + Duration::from_secs(second);
+            if !pass_trees(&mut scheduler, now, &[(agent, false, stored(1, &running))]).is_empty() {
+                refreshed.push(second);
+                scheduler.finish(agent);
+            }
+        }
+        assert_eq!(refreshed.len(), 119, "5 s 一次，直到窗口关闭");
+        assert_eq!(refreshed.last(), Some(&595));
+        // 内容变了（修订号前进）：窗口重开。
+        assert_eq!(
+            pass_trees(
+                &mut scheduler,
+                t0 + Duration::from_secs(905),
+                &[(agent, false, stored(2, &running))]
+            ),
+            [agent]
+        );
+        scheduler.finish(agent);
+        assert_eq!(
+            pass_trees(
+                &mut scheduler,
+                t0 + Duration::from_secs(910),
+                &[(agent, false, stored(2, &running))]
+            ),
+            [agent]
+        );
+    }
+
+    /// 修订号没变就不重扫节点：每轮对每个 pane 只比一次整数。这里故意在同一修订号
+    /// 下换成全终态的节点，调度沿用上次「仍有未结束节点」的判定。
+    #[test]
+    fn scheduler_rescans_the_stored_tree_only_when_its_revision_changes() {
+        let t0 = Instant::now();
+        let mut scheduler = Scheduler::default();
+        let agent = pane(1);
+        let running = [node("sub", None, AgentActivityStatus::Running)];
+        let finished = [node("sub", None, AgentActivityStatus::Done)];
+        assert_eq!(
+            pass_trees(&mut scheduler, t0, &[(agent, false, stored(7, &running))]),
+            [agent]
+        );
+        scheduler.finish(agent);
+        assert_eq!(
+            pass_trees(
+                &mut scheduler,
+                t0 + secs(5.0),
+                &[(agent, false, stored(7, &finished))]
+            ),
+            [agent],
+            "同一修订号沿用旧判定"
+        );
+        scheduler.finish(agent);
+        assert!(pass_trees(
+            &mut scheduler,
+            t0 + secs(10.0),
+            &[(agent, false, stored(8, &finished))]
+        )
+        .is_empty());
+        // 树从存储里消失（agent 释放后又识别等）：没有树就不按树轮询。
+        assert!(pass_trees(&mut scheduler, t0 + secs(20.0), &[(agent, false, None)]).is_empty());
     }
 
     #[test]
@@ -1760,6 +2075,13 @@ mod tests {
     }
 
     fn app_with_agent(agent: Option<Agent>) -> (crate::app::App, PaneId, String) {
+        app_with_agent_in(agent, AgentState::Working)
+    }
+
+    fn app_with_agent_in(
+        agent: Option<Agent>,
+        state: AgentState,
+    ) -> (crate::app::App, PaneId, String) {
         let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
         let mut app = crate::app::App::new(
             &crate::config::Config::default(),
@@ -1778,7 +2100,7 @@ mod tests {
             app.handle_internal_event(AppEvent::StateChanged {
                 pane_id,
                 agent: Some(agent),
-                state: AgentState::Working,
+                state,
                 visible_blocker: false,
                 visible_working: false,
                 process_exited: false,
@@ -1843,6 +2165,37 @@ mod tests {
         assert!(matches!(
             recv_event(&mut received),
             AppEvent::AgentActivityRefreshed { .. }
+        ));
+    }
+
+    /// M2 回归（真机报告 §5.2，codex-03-timeline）：主 agent 先于子 agent 结束
+    /// 回合、已回到空闲，落库树里子 agent 仍是 running。调度只在 Working 时轮询，
+    /// 树就停在 running，直到有人读取；现在按落库树照常每 5 s 刷一次。
+    #[test]
+    fn tick_keeps_refreshing_an_idle_agent_whose_stored_tree_is_still_running() {
+        let (mut service, mut received) = fake_service();
+        let (mut app, pane_id, _) = app_with_agent_in(Some(Agent::Claude), AgentState::Idle);
+        let t0 = Instant::now();
+        // 首次见到：发现一次，结果（假来源：a 仍在跑）落库。
+        service.tick(&mut app.state, t0, false);
+        let refreshed = recv_event(&mut received);
+        app.handle_internal_event(refreshed);
+        service.pane_refreshed(pane_id, true);
+        assert!(app
+            .state
+            .agent_activity
+            .activity(pane_id)
+            .is_some_and(|tree| tree.running == 1));
+
+        // 每轮遍历至少隔 1 s（SCHEDULER_PASS_INTERVAL）：4 s 这一轮遍历了但还不到
+        // 5 s，5 s 这一轮才到期。
+        service.tick(&mut app.state, t0 + secs(4.0), false);
+        std::thread::sleep(Duration::from_millis(50));
+        assert!(received.try_recv().is_err(), "5 s 内不重复刷新");
+        service.tick(&mut app.state, t0 + secs(5.0), false);
+        assert!(matches!(
+            recv_event(&mut received),
+            AppEvent::AgentActivityRefreshed { pane_id: refreshed, .. } if refreshed == pane_id
         ));
     }
 

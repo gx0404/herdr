@@ -850,10 +850,17 @@ the tree; apart from a snapshot hint like Pi's, the request does not carry it
 either.
 
 A hint schedules a refresh right away, rate limited to one refresh per pane per
-second. Independently of hints, the server refreshes an agent once when it is
-first detected, every 5 seconds while its status is `working`, and once more
-when work ends. Each refresh keeps at most 32 nodes per agent (running nodes and
-their ancestors first) and records how large the tree was before truncation.
+second, plus one follow-up refresh about 2 seconds later, because hooks often
+fire before the agent has written the change to disk. Independently of hints,
+the server refreshes an agent once when it is first detected, every 5 seconds
+while its status is `working`, and once more when work ends (with the same
+follow-up). While the stored tree still has a `pending`, `running`, or `blocked`
+node whose `kind` is not `todo`, the server also keeps refreshing every 5
+seconds after the agent goes idle, so a sub-agent that finishes after its
+parent's turn still reaches its final status; this stops once those nodes end
+or the tree has not changed for 10 minutes. Each refresh keeps at most 32 nodes
+per agent (running nodes and their ancestors first) and records how large the
+tree was before truncation.
 
 `agent.get`, `agent.list`, and `session.snapshot` expose the stored tree as
 `AgentInfo.activity`, omitted when empty. Each node carries `id`, `kind`
