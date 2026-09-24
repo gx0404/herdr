@@ -332,6 +332,76 @@ pub(in crate::client::shell) fn titled_panel(
     Some(inner)
 }
 
+/// 单个字符的显示宽度，栈上编码、不分配（与 `kit::char_width` 同口径）。
+fn char_width(ch: char) -> usize {
+    let mut bytes = [0u8; 4];
+    usize::from(display_width(ch.encode_utf8(&mut bytes)))
+}
+
+/// 按显示宽度把一段文字折成若干行，逐行回调字节区间 `[start, end)`：首行宽
+/// `first` 列，续行宽 `rest` 列。优先断在本行最后一个空格之后（空格留在上一行
+/// 末尾），没有空格时按列硬断（长路径）；溢出的恰好是空格时就在它前面断，这个
+/// 空格（连同紧跟的空格）不带到下一行行首，行首空格也不记作断点。消息里的
+/// 换行符强制断行。空文字也占一行。设置页安装消息与欢迎页正文共用。
+fn wrap_text(text: &str, first: usize, rest: usize, mut emit: impl FnMut(usize, usize)) {
+    let mut width = first.max(1);
+    let mut start = 0usize;
+    let mut used = 0usize;
+    // 本行里最近一个空格之后的位置，及到它为止占用的列数。
+    let mut soft_break: Option<(usize, usize)> = None;
+    // 刚在空格处断开：下一行行首的空格跳过不画。
+    let mut skip_spaces = false;
+    for (offset, ch) in text.char_indices() {
+        if ch == '\n' {
+            emit(start, offset);
+            start = offset + ch.len_utf8();
+            used = 0;
+            soft_break = None;
+            width = rest.max(1);
+            skip_spaces = false;
+            continue;
+        }
+        if ch == ' ' && skip_spaces {
+            start = offset + ch.len_utf8();
+            continue;
+        }
+        skip_spaces = false;
+        let cell = char_width(ch);
+        if ch == ' ' && used + cell > width && offset > start {
+            emit(start, offset);
+            start = offset + ch.len_utf8();
+            used = 0;
+            soft_break = None;
+            width = rest.max(1);
+            skip_spaces = true;
+            continue;
+        }
+        while used + cell > width && offset > start {
+            match soft_break
+                .take()
+                .filter(|(at, _)| *at > start && *at <= offset)
+            {
+                Some((at, used_at)) => {
+                    emit(start, at);
+                    start = at;
+                    used -= used_at;
+                }
+                None => {
+                    emit(start, offset);
+                    start = offset;
+                    used = 0;
+                }
+            }
+            width = rest.max(1);
+        }
+        used += cell;
+        if ch == ' ' && offset > start {
+            soft_break = Some((offset + ch.len_utf8(), used));
+        }
+    }
+    emit(start, text.len());
+}
+
 /// Centered modal of a size tier plus its painted panel: the shared frame
 /// every overlay starts from.
 pub(in crate::client::shell) fn modal_panel(
@@ -697,7 +767,8 @@ fn render_product_announcement_overlay(
 
 fn render_onboarding_overlay(b: &mut Buffer, cx: &ChromeContext<'_>) -> Option<OverlayRender> {
     let p = cx.palette;
-    let (outer, inner) = modal_panel(b, crate::ui::ModalSize::Medium, p.accent, cx)?;
+    let size = onboarding_modal_size(b.area);
+    let (outer, inner) = modal_panel(b, size, p.accent, cx)?;
     if inner.height < 11 {
         return Some(OverlayRender {
             area: outer,
@@ -713,69 +784,72 @@ fn render_onboarding_overlay(b: &mut Buffer, cx: &ChromeContext<'_>) -> Option<O
     let text = base.fg(p.overlay1);
     let accent = base.fg(p.accent).add_modifier(Modifier::BOLD);
 
-    let header = text_inset(stack.header);
+    // 欢迎页文案自带 2 列前导空格，已离边框留白，这里不再让列（L4 复审）。
     put_text(
         b,
-        header.x,
-        header.y,
-        header.width,
+        stack.header.x,
+        stack.header.y,
+        stack.header.width,
         crate::ui::ONBOARDING_TITLE,
         title,
     );
     put_text(
         b,
-        header.x,
-        header.y.saturating_add(1),
-        header.width,
+        stack.header.x,
+        stack.header.y.saturating_add(1),
+        stack.header.width,
         crate::i18n::texts().onboarding.subtitle,
         muted,
     );
 
-    let content = text_inset(stack.content);
-    for (offset, line) in crate::i18n::texts()
-        .onboarding
-        .description
-        .iter()
-        .enumerate()
-    {
-        put_text(
-            b,
-            content.x,
-            content.y.saturating_add(offset as u16),
-            content.width,
-            line,
-            text,
-        );
+    // 正文按宽度折行，不在词中截断（L4 复审）：说明各行、空一行、键位提示、下一步。
+    let content = stack.content;
+    let texts = &crate::i18n::texts().onboarding;
+    let mut y = content.y;
+    for line in texts.description {
+        y = put_wrapped(b, content, y, line, text);
     }
-
-    let key_y = content.y.saturating_add(4);
-    let mut key_x = content.x;
-    for (value, style) in [
-        ("  ", base),
-        (crate::ui::ONBOARDING_PREFIX_LABEL, accent),
-        (crate::i18n::texts().onboarding.prefix_suffix, text),
-        (crate::ui::ONBOARDING_HELP_LABEL, accent),
-        (crate::i18n::texts().onboarding.help_suffix, text),
-    ] {
-        let width = display_width(value);
-        put_text(
-            b,
-            key_x,
-            key_y,
-            content.right().saturating_sub(key_x),
-            value,
-            style,
-        );
-        key_x = key_x.saturating_add(width);
+    y = y.saturating_add(1);
+    // 键位提示：一行放得下就一行；放不下在「·」处分成两行（两个键各带说明）。
+    let pairs = onboarding_key_pairs();
+    let rows: &[&[(&str, &str)]] = if onboarding_key_rows(content.width) == 1 {
+        &[&pairs]
+    } else {
+        &[&pairs[..1], &pairs[1..]]
+    };
+    for row in rows {
+        if y >= content.bottom() {
+            break;
+        }
+        let mut key_x = content.x;
+        let last = row.len() - 1;
+        for (index, (key, suffix)) in row.iter().enumerate() {
+            let suffix = if rows.len() > 1 && index == last {
+                // 分两行时行尾的「 · 」分隔符不画。
+                suffix.trim_end_matches([' ', '·'])
+            } else {
+                suffix
+            };
+            for (value, style) in [
+                (if index == 0 { ONBOARDING_KEY_LEAD } else { "" }, base),
+                (*key, accent),
+                (suffix, text),
+            ] {
+                let width = display_width(value);
+                put_text(
+                    b,
+                    key_x,
+                    y,
+                    content.right().saturating_sub(key_x),
+                    value,
+                    style,
+                );
+                key_x = key_x.saturating_add(width);
+            }
+        }
+        y = y.saturating_add(1);
     }
-    put_text(
-        b,
-        content.x,
-        content.y.saturating_add(5),
-        content.width,
-        crate::i18n::texts().onboarding.next,
-        text,
-    );
+    put_wrapped(b, content, y, texts.next, text);
 
     let primary = crate::ui::onboarding_welcome_continue_rect(stack.actions.unwrap_or_default());
     modal_button(
@@ -794,6 +868,87 @@ fn render_onboarding_overlay(b: &mut Buffer, cx: &ChromeContext<'_>) -> Option<O
         primary,
         ..OverlayRender::default()
     })
+}
+
+/// 带前导空格的一段文字按 `width` 列折行：前导空格当作缩进（续行同缩进），逐行
+/// 回调（缩进列数, 这一行的文字）。欢迎页量行数与绘制共用这一份折行。
+fn wrap_indented<'a>(line: &'a str, width: u16, mut emit: impl FnMut(u16, &'a str)) {
+    let body = line.trim_start();
+    let indent = display_width(&line[..line.len() - body.len()]).min(width);
+    let room = usize::from(width - indent);
+    let body = body.trim_end();
+    wrap_text(body, room, room, |start, end| {
+        emit(indent, &body[start..end])
+    });
+}
+
+/// 在 `area` 里从第 `y` 行起画一段带前导空格的文字（见 [`wrap_indented`]），超出
+/// `area` 底部的行不画。返回下一行的 y。
+fn put_wrapped(b: &mut Buffer, area: Rect, y: u16, line: &str, style: Style) -> u16 {
+    let mut y = y;
+    wrap_indented(line, area.width, |indent, text| {
+        if y < area.bottom() {
+            put_text(b, area.x + indent, y, area.width - indent, text, style);
+        }
+        y = y.saturating_add(1);
+    });
+    y
+}
+
+/// 欢迎页键位提示的两对（键, 说明）与行首缩进。
+const ONBOARDING_KEY_LEAD: &str = "  ";
+
+fn onboarding_key_pairs() -> [(&'static str, &'static str); 2] {
+    let texts = &crate::i18n::texts().onboarding;
+    [
+        (crate::ui::ONBOARDING_PREFIX_LABEL, texts.prefix_suffix),
+        (crate::ui::ONBOARDING_HELP_LABEL, texts.help_suffix),
+    ]
+}
+
+/// 键位提示在 `width` 列里要几行：一行放得下就一行，否则在「·」处分成两行。
+fn onboarding_key_rows(width: u16) -> u16 {
+    let one_line = display_width(ONBOARDING_KEY_LEAD)
+        + onboarding_key_pairs()
+            .iter()
+            .map(|(key, suffix)| display_width(key) + display_width(suffix))
+            .sum::<u16>();
+    if one_line <= width {
+        1
+    } else {
+        2
+    }
+}
+
+/// 欢迎页正文在 `width` 列里排开要占的行数（与绘制同一套折行）：说明各行、空一
+/// 行、键位提示、下一步。
+fn onboarding_body_rows(width: u16) -> u16 {
+    let texts = &crate::i18n::texts().onboarding;
+    let rows = |line: &str| {
+        let mut rows = 0u16;
+        wrap_indented(line, width, |_, _| rows = rows.saturating_add(1));
+        rows
+    };
+    texts
+        .description
+        .iter()
+        .map(|line| rows(line))
+        .sum::<u16>()
+        .saturating_add(1)
+        .saturating_add(onboarding_key_rows(width))
+        .saturating_add(rows(texts.next))
+}
+
+/// 欢迎页浮层尺寸：默认中号；正文折行后默认高度放不下时加高（仍受终端高度
+/// 限制）。宽度与高度无关，先按默认高度取宽度，再按这个宽度量正文。
+fn onboarding_modal_size(area: Rect) -> crate::ui::ModalSize {
+    let base = crate::ui::ModalSize::Medium;
+    let Some(inner) = crate::ui::modal_rect(area, base).and_then(panel_inner) else {
+        return base;
+    };
+    // 标题 2 行 + 间隔 1 行 + 正文 + 间隔 1 行 + 按钮 1 行 + 上下边框 2 行。
+    let needed = onboarding_body_rows(inner.width).saturating_add(7);
+    base.with_height(needed.max(base.cells().1))
 }
 
 fn render_rename_overlay(

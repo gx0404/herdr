@@ -1,11 +1,5 @@
 use super::*;
 
-/// 单个字符的显示宽度，栈上编码、不分配（与 `kit::char_width` 同口径）。
-fn char_width(ch: char) -> usize {
-    let mut bytes = [0u8; 4];
-    usize::from(display_width(ch.encode_utf8(&mut bytes)))
-}
-
 /// 按显示宽度截断，放不下时以 `…` 收尾（冒烟 M13：集成页头部说明改用这个
 /// 而不是 `put_text` 的硬截断）。
 fn truncate_with_ellipsis(text: &str, max_width: u16) -> String {
@@ -564,7 +558,7 @@ fn integration_lines(settings: &ClientSettingsOverlay, list: Rect) -> Vec<Integr
         let entry = settings.integrations.len() + index;
         // 首尾空白不画：首行与其它消息同列起笔。区间换算回原消息里的字节。
         let lead = message.len() - message.trim_start().len();
-        wrap_message(message.trim(), first, rest, |start, end| {
+        wrap_text(message.trim(), first, rest, |start, end| {
             lines.push(IntegrationLine {
                 entry,
                 start: lead + start,
@@ -589,70 +583,6 @@ fn entry_rows(lines: &[IntegrationLine], entry: usize) -> (usize, usize) {
         ),
         None => (lines.len().saturating_sub(1), 1),
     }
-}
-
-/// 按显示宽度把一条消息折成若干行，逐行回调字节区间 `[start, end)`：首行宽
-/// `first` 列，续行宽 `rest` 列。优先断在本行最后一个空格之后（空格留在上一行
-/// 末尾），没有空格时按列硬断（长路径）；溢出的恰好是空格时就在它前面断，这个
-/// 空格（连同紧跟的空格）不带到下一行行首，行首空格也不记作断点。消息里的
-/// 换行符强制断行。空消息也占一行。
-fn wrap_message(text: &str, first: usize, rest: usize, mut emit: impl FnMut(usize, usize)) {
-    let mut width = first.max(1);
-    let mut start = 0usize;
-    let mut used = 0usize;
-    // 本行里最近一个空格之后的位置，及到它为止占用的列数。
-    let mut soft_break: Option<(usize, usize)> = None;
-    // 刚在空格处断开：下一行行首的空格跳过不画。
-    let mut skip_spaces = false;
-    for (offset, ch) in text.char_indices() {
-        if ch == '\n' {
-            emit(start, offset);
-            start = offset + ch.len_utf8();
-            used = 0;
-            soft_break = None;
-            width = rest.max(1);
-            skip_spaces = false;
-            continue;
-        }
-        if ch == ' ' && skip_spaces {
-            start = offset + ch.len_utf8();
-            continue;
-        }
-        skip_spaces = false;
-        let cell = char_width(ch);
-        if ch == ' ' && used + cell > width && offset > start {
-            emit(start, offset);
-            start = offset + ch.len_utf8();
-            used = 0;
-            soft_break = None;
-            width = rest.max(1);
-            skip_spaces = true;
-            continue;
-        }
-        while used + cell > width && offset > start {
-            match soft_break
-                .take()
-                .filter(|(at, _)| *at > start && *at <= offset)
-            {
-                Some((at, used_at)) => {
-                    emit(start, at);
-                    start = at;
-                    used -= used_at;
-                }
-                None => {
-                    emit(start, offset);
-                    start = offset;
-                    used = 0;
-                }
-            }
-            width = rest.max(1);
-        }
-        used += cell;
-        if ch == ' ' && offset > start {
-            soft_break = Some((offset + ch.len_utf8(), used));
-        }
-    }
-    emit(start, text.len());
 }
 
 fn render_integrations(
@@ -863,7 +793,7 @@ mod tests {
 
     fn wrapped(text: &str, first: usize, rest: usize) -> Vec<&str> {
         let mut lines = Vec::new();
-        wrap_message(text, first, rest, |start, end| {
+        wrap_text(text, first, rest, |start, end| {
             lines.push(&text[start..end])
         });
         lines
@@ -872,7 +802,7 @@ mod tests {
     /// N13：安装消息折行优先断在空格后，长路径按列硬断，续行按续行宽度折；
     /// CJK 按显示宽度计，换行符强制断行，空消息也占一行。
     #[test]
-    fn wrap_message_prefers_spaces_and_hard_breaks_long_paths() {
+    fn wrap_text_prefers_spaces_and_hard_breaks_long_paths() {
         assert_eq!(
             wrapped("start opencode2 once, then reinstall", 16, 14),
             vec!["start opencode2 ", "once, then ", "reinstall"]
@@ -894,7 +824,7 @@ mod tests {
     /// 缩进 1 列，后接超宽长路径时还会单出一行空白）；整词恰好填满一行时，其后
     /// 的空格不再让这一行提前断开；连续空格在断行处一并跳过。
     #[test]
-    fn wrap_message_breaks_before_an_overflowing_space() {
+    fn wrap_text_breaks_before_an_overflowing_space() {
         assert_eq!(
             wrapped("abcdefghij klmnopqrstu", 10, 8),
             vec!["abcdefghij", "klmnopqr", "stu"]

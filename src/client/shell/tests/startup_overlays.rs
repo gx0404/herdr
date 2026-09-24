@@ -1583,3 +1583,78 @@ fn projected_release_notes_geometry_matches_the_rendered_hits() {
         state.hits.release_notes_scrollbar
     );
 }
+
+/// L4 复审（轻）：欢迎页正文不在词中截断。英文「next: … reliable state」较长，
+/// 正文区放不下时折到下一行；说明各行与键位提示同样整句可见（键位提示放不下
+/// 就在「·」处分成两行）。正文沿用文案自带的 2 列缩进，不再额外让 1 列。
+/// 宽 / 中 / 窄三档。
+#[test]
+fn onboarding_body_wraps_instead_of_cutting_words() {
+    let _lang = crate::i18n::lang_guard(crate::i18n::Lang::En);
+    let texts = &crate::i18n::texts().onboarding;
+    let squeeze = |text: &str| text.split_whitespace().collect::<String>();
+    for (cols, rows) in [(120u16, 32u16), (64, 32), (54, 32)] {
+        let config =
+            ClientShellConfig::from_config(&Config::default()).with_startup_onboarding(true);
+        let mut state = ClientShellState::new(config);
+        state.set_snapshot(Box::new(snapshot()));
+        state.set_pane_surface(surface());
+        assert!(matches!(
+            state.overlay,
+            Some(ClientShellOverlay::Onboarding)
+        ));
+        let frame = state.compose(cols, rows).expect("onboarding frame");
+        // 浮层边框：左上「┌」、同一行的「┐」、同一列往下的「└」（正文放不下时浮层会
+        // 加高，不能按默认尺寸推算）。
+        let screen = frame_rows(&frame)
+            .iter()
+            .map(|row| row.chars().collect::<Vec<_>>())
+            .collect::<Vec<_>>();
+        let (top, left) = screen
+            .iter()
+            .enumerate()
+            .find_map(|(y, row)| row.iter().position(|ch| *ch == '┌').map(|x| (y, x)))
+            .expect("欢迎页边框");
+        let right = left
+            + screen[top][left..]
+                .iter()
+                .position(|ch| *ch == '┐')
+                .expect("右上角");
+        let bottom = (top..screen.len())
+            .find(|y| screen[*y][left] == '└')
+            .expect("左下角");
+        let inner = screen[top + 1..bottom]
+            .iter()
+            .map(|row| row[left + 1..right].iter().collect::<String>())
+            .collect::<Vec<_>>();
+        let body = squeeze(&inner.join("\n"));
+        let case = format!("{cols} 列（正文 {} 列）", right - left - 1);
+        for sentence in texts.description.iter().chain([&texts.next]) {
+            assert!(
+                body.contains(&squeeze(sentence)),
+                "{case}: 整句可见 {sentence:?}\n{}",
+                inner.join("\n")
+            );
+        }
+        for part in [
+            crate::ui::ONBOARDING_PREFIX_LABEL,
+            texts.prefix_suffix.trim_end_matches([' ', '·']),
+            crate::ui::ONBOARDING_HELP_LABEL,
+            texts.help_suffix,
+        ] {
+            assert!(
+                body.contains(&squeeze(part)),
+                "{case}: 键位提示 {part:?} 可见\n{}",
+                inner.join("\n")
+            );
+        }
+        let next = inner
+            .iter()
+            .find(|row| row.contains("next:"))
+            .unwrap_or_else(|| panic!("{case}: 没有 next 行\n{}", inner.join("\n")));
+        assert!(
+            next.starts_with("  next:"),
+            "{case}: 正文沿用文案自带的 2 列缩进：{next:?}"
+        );
+    }
+}
