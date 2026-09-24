@@ -90,7 +90,8 @@
 //!   `ProviderAuthError` / `UnknownError` / `MessageOutputLengthError` /
 //!   `MessageAbortedError` / `StructuredOutputError` / `ContextOverflowError` /
 //!   `ContentFilterError`，除 `MessageOutputLengthError` 外 `data.message` 都是字符串；
-//!   `APIError` 另带响应头与响应体 → 只取 `name` 与截断后的 `data.message`。**库里看不出
+//!   `APIError` 另带响应头与响应体 → 只取 `name` 与截断后的 `data.message`（另在 SQL 里
+//!   算原长，截断过的说明显示时以省略号结尾）。**库里看不出
 //!   的失败**：默认模型已不在提供商目录时（`ProviderModelNotFoundError`），
 //!   `SessionPrompt.getModel` 只经 Bus 发不落库的 `session.error`（没有 `durable`
 //!   标记，不进 `event` 表），随即在建 assistant 消息之前退出——库里最后一条仍是 user
@@ -332,9 +333,11 @@ struct SessionRow {
     last_role: Option<String>,
     last_completed: Option<u64>,
     last_error: bool,
-    /// 最后一条消息 `error.name`（如 `APIError`）与 `error.data.message`（SQL 里已截断）。
+    /// 最后一条消息 `error.name`（如 `APIError`）与 `error.data.message`（SQL 里已截断，
+    /// 截断前的字符数另见 `last_error_message_len`）。
     last_error_name: Option<String>,
     last_error_message: Option<String>,
+    last_error_message_len: Option<u64>,
 }
 
 struct TodoRow {
@@ -406,7 +409,8 @@ fn tree_sql(root: &str, offset: usize) -> String {
            CASE WHEN json_valid(lm.data) THEN json_extract(lm.data, '$.time.completed') END AS last_completed, \
            CASE WHEN json_valid(lm.data) THEN json_type(lm.data, '$.error') END AS last_error, \
            CASE WHEN json_valid(lm.data) THEN json_extract(lm.data, '$.error.name') END AS last_error_name, \
-           CASE WHEN json_valid(lm.data) THEN substr(json_extract(lm.data, '$.error.data.message'), 1, {SQL_ERROR_CHARS}) END AS last_error_message \
+           CASE WHEN json_valid(lm.data) THEN substr(json_extract(lm.data, '$.error.data.message'), 1, {SQL_ERROR_CHARS}) END AS last_error_message, \
+           CASE WHEN json_valid(lm.data) THEN length(json_extract(lm.data, '$.error.data.message')) END AS last_error_message_len \
          FROM tree t JOIN session s ON s.id = t.id \
          LEFT JOIN message lm ON lm.id = (\
            SELECT id FROM message WHERE session_id = s.id \
@@ -455,6 +459,9 @@ fn session_row(row: &Map<String, Value>) -> Option<SessionRow> {
             .is_some_and(|kind| kind != "null"),
         last_error_name: text_field(row, "last_error_name"),
         last_error_message: text_field(row, "last_error_message"),
+        last_error_message_len: row
+            .get("last_error_message_len")
+            .and_then(non_negative_integer),
         id,
     })
 }
@@ -594,7 +601,7 @@ fn split_title(session: &SessionRow) -> (Option<String>, Option<String>) {
     }
     let mut label = clean_line(title, MAX_LABEL_CHARS);
     if clipped {
-        label = label.map(|label| ensure_ellipsis(label, MAX_LABEL_CHARS));
+        label = label.map(|label| clipped_line(label, MAX_LABEL_CHARS));
     }
     (label, None)
 }
@@ -675,16 +682,28 @@ fn session_summary(session: &SessionRow, status: AgentActivityStatus) -> Option<
 }
 
 /// 失败原因：`错误名: 说明`；只有其一时只写其一。说明压成单行并截到
-/// [`MAX_ERROR_CHARS`]，免得一条长报错把模型与用量挤出摘要。
+/// [`MAX_ERROR_CHARS`]，免得一条长报错把模型与用量挤出摘要；在 SQL 里已被截断的说明
+/// 总以省略号结尾（按 `last_error_message_len` 判定）。
 fn error_summary(session: &SessionRow) -> Option<String> {
     let name = session
         .last_error_name
         .as_deref()
         .and_then(|name| clean_line(name, MAX_LABEL_CHARS));
+    let clipped = session
+        .last_error_message_len
+        .zip(session.last_error_message.as_deref())
+        .is_some_and(|(len, message)| len > message.chars().count() as u64);
     let message = session
         .last_error_message
         .as_deref()
-        .and_then(|message| clean_line(message, MAX_ERROR_CHARS));
+        .and_then(|message| clean_line(message, MAX_ERROR_CHARS))
+        .map(|message| {
+            if clipped {
+                clipped_line(message, MAX_ERROR_CHARS)
+            } else {
+                message
+            }
+        });
     match (name, message) {
         (Some(name), Some(message)) => Some(format!("{name}: {message}")),
         (name, message) => name.or(message),
@@ -719,7 +738,7 @@ fn todo_node(todo: &TodoRow, parent_id: Option<String>) -> AgentActivityNode {
         .zip(todo.content.as_deref())
         .is_some_and(|(len, content)| len > content.chars().count() as u64)
     {
-        label = label.map(|label| ensure_ellipsis(label, MAX_LABEL_CHARS));
+        label = label.map(|label| clipped_line(label, MAX_LABEL_CHARS));
     }
     let mut summary: Vec<String> = Vec::new();
     if cancelled {
@@ -1168,6 +1187,18 @@ fn ensure_ellipsis(line: String, max_chars: usize) -> String {
         return clipped;
     }
     line
+}
+
+/// 上游（SQL 的 `substr`）已截断的一行：保证以省略号结尾且不超过 `max_chars`。清洗
+/// 压掉连续空白后这一行可能短于上限，这时 [`ensure_ellipsis`] 不补省略号，截断的痕迹
+/// 就丢了。
+fn clipped_line(line: String, max_chars: usize) -> String {
+    if line.ends_with('…') {
+        return ensure_ellipsis(line, max_chars);
+    }
+    let mut clipped: String = line.chars().take(max_chars.saturating_sub(1)).collect();
+    clipped.push('…');
+    clipped
 }
 
 /// 内容片段只保留换行与制表符两种控制字符。
@@ -1689,6 +1720,67 @@ mod tests {
         assert_eq!(gone.summary.as_deref(), Some("glm-4.6"));
     }
 
+    /// 审查轻 5：错误说明在 SQL 里先截到 [`SQL_ERROR_CHARS`]、再由 `clean_line` 裁到
+    /// [`MAX_ERROR_CHARS`]；压掉连续空白后不足显示上限时，截断的痕迹（省略号）曾经丢掉。
+    /// 现在按 SQL 给出的原长判定截断，截过就以省略号结尾；标题（SQL 截 160、显示 120）
+    /// 同理。没截过、或旧形状的行没有原长时照旧不加。
+    #[test]
+    fn text_clipped_in_sql_keeps_its_ellipsis_after_whitespace_collapses() {
+        let spaced_error = format!("upstream{}timed out", " ".repeat(103));
+        assert_eq!(spaced_error.chars().count(), SQL_ERROR_CHARS);
+        let spaced_title = format!("Fix{}the flaky tests", " ".repeat(142));
+        assert_eq!(spaced_title.chars().count(), SQL_TITLE_CHARS);
+        let failed = |id: &str, message: &str, message_len: Option<u64>| {
+            serde_json::json!({
+                "id": id, "parent_id": ROOT, "depth": 1, "model_id": "glm-4.7",
+                "title": "t", "title_len": 1, "time_updated": NOW_MS,
+                "last_role": "assistant", "last_completed": NOW_MS,
+                "last_error": "object", "last_error_name": "UnknownError",
+                "last_error_message": message, "last_error_message_len": message_len,
+            })
+        };
+        let sessions = serde_json::json!([
+            {"id": ROOT, "depth": 0},
+            failed("ses_clipped00000000000000000000", &spaced_error, Some(4000)),
+            failed("ses_whole0000000000000000000000", "short and whole", Some(15)),
+            failed("ses_oldshape000000000000000000", "no length column", None),
+            {
+                "id": "ses_title0000000000000000000000", "parent_id": ROOT, "depth": 1,
+                "title": spaced_title, "title_len": 900, "time_updated": NOW_MS,
+            },
+        ])
+        .to_string();
+        let db = FakeDb::new(vec![
+            ("WITH RECURSIVE", Ok(sessions)),
+            ("FROM todo", Ok("[]".into())),
+        ]);
+        let nodes = discover(&db);
+
+        let clipped = node(&nodes, "session:ses_clipped00000000000000000000");
+        assert_eq!(
+            clipped.summary.as_deref(),
+            Some("UnknownError: upstream timed out… · glm-4.7")
+        );
+        let whole = node(&nodes, "session:ses_whole0000000000000000000000");
+        assert_eq!(
+            whole.summary.as_deref(),
+            Some("UnknownError: short and whole · glm-4.7")
+        );
+        let old = node(&nodes, "session:ses_oldshape000000000000000000");
+        assert_eq!(
+            old.summary.as_deref(),
+            Some("UnknownError: no length column · glm-4.7")
+        );
+        let title = node(&nodes, "session:ses_title0000000000000000000000");
+        assert_eq!(title.label, "Fix the flaky tests…");
+        assert!(
+            tree_sql(ROOT, 0).contains(
+                "length(json_extract(lm.data, '$.error.data.message')) END AS last_error_message_len"
+            ),
+            "原长在 SQL 里算，说明本身仍只取回截断后的一段"
+        );
+    }
+
     #[test]
     fn tree_sql_clips_the_last_error_instead_of_fetching_it_whole() {
         let sql = tree_sql("ses_abc", 0);
@@ -2109,6 +2201,7 @@ mod tests {
                 "last_completed",
                 "last_error",
                 "last_error_message",
+                "last_error_message_len",
                 "last_error_name",
                 "last_role",
                 "model_id",
