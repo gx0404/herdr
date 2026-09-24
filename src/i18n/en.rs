@@ -990,8 +990,7 @@ pub const TEXTS: Texts = Texts {
         trust_once_button: " this time only ",
         abort_button: " abort ",
         trusted_fmt: "{count} host key(s) recorded; reconnecting",
-        trusted_retest_fmt:
-            "{count} host key(s) recorded; close this dialog and test the connection again",
+        trusted_retest_fmt: "{count} host key(s) recorded; close, then test the connection",
         changed_title: "host key changed",
         changed_warning: "The host key differs from the one recorded for this machine.",
         changed_reinstall_hint:
@@ -1001,7 +1000,7 @@ pub const TEXTS: Texts = Texts {
         remove_retry_button: " remove old key & retry ",
         remove_button: " remove old key ",
         removed: "old host key record removed; reconnecting",
-        removed_retest: "old host key record removed; close this dialog and test the connection again",
+        removed_retest: "old host key removed; close, then test the connection",
         auth_title: "authentication needed",
         auth_methods_fmt: "server offered: {methods}",
         auth_identity_fmt: "identity file: {path}",

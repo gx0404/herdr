@@ -460,76 +460,87 @@ fn wizard_host_key_review_scans_and_skips_trust_once() {
 
 /// 文档终审 D12：添加表单（测试连接）打开的主机密钥对话框没有已保存的机器，
 /// 信任新密钥或移除旧记录之后并不会重连，对话框以前却照样写「正在重连」。现在
-/// 照实说明：关掉对话框后重新测试连接；不发重连动作。
+/// 照实说明：关掉对话框后重新测试连接；不发重连动作。中英两种界面、窄 / 中 / 宽
+/// 三档，整句说明都要画在对话框里（T1 审查轻 6）。
 #[test]
 fn wizard_host_key_dialogs_do_not_promise_a_reconnect() {
-    let t = &crate::i18n::texts().machine_auth;
     let compact = |s: &str| {
         s.chars()
             .filter(|ch| !ch.is_whitespace())
             .collect::<String>()
     };
-    let cases = [
-        (
-            MachineHostKeyOp::Precollect,
-            MachineHostKeyOutcome::Precollected(1),
-            crate::i18n::fill(t.trusted_retest_fmt, &[("count", "1")]),
-            crate::i18n::fill(t.trusted_fmt, &[("count", "1")]),
-        ),
-        (
-            MachineHostKeyOp::Remove,
-            MachineHostKeyOutcome::Removed,
-            t.removed_retest.to_owned(),
-            t.removed.to_owned(),
-        ),
-    ];
-    for (op, result, expected, reconnecting) in cases {
-        let mut state = state_with_profiles(&[]);
-        let mut outcome = ClientShellInput::default();
-        if op == MachineHostKeyOp::Remove {
-            state.open_machine_host_key_changed_review(
-                Box::new(profile("Stage", "stage.example", "3")),
-                &mut outcome,
-            );
-        } else {
-            state.open_machine_host_key_review(
-                Box::new(profile("Stage", "stage.example", "3")),
-                &mut outcome,
-            );
+    for lang in [crate::i18n::Lang::ZhCn, crate::i18n::Lang::En] {
+        let _guard = crate::i18n::lang_guard(lang);
+        let t = &crate::i18n::texts().machine_auth;
+        let cases = [
+            (
+                MachineHostKeyOp::Precollect,
+                crate::i18n::fill(t.trusted_retest_fmt, &[("count", "1")]),
+                crate::i18n::fill(t.trusted_fmt, &[("count", "1")]),
+            ),
+            (
+                MachineHostKeyOp::Remove,
+                t.removed_retest.to_owned(),
+                t.removed.to_owned(),
+            ),
+        ];
+        for (op, expected, reconnecting) in cases {
+            for (cols, rows) in [(80, 24), (93, 32), (160, 48)] {
+                let case = format!("{lang:?} {op:?} {cols}x{rows}");
+                let mut state = state_with_profiles(&[]);
+                let mut outcome = ClientShellInput::default();
+                if op == MachineHostKeyOp::Remove {
+                    state.open_machine_host_key_changed_review(
+                        Box::new(profile("Stage", "stage.example", "3")),
+                        &mut outcome,
+                    );
+                } else {
+                    state.open_machine_host_key_review(
+                        Box::new(profile("Stage", "stage.example", "3")),
+                        &mut outcome,
+                    );
+                }
+                let ticket = outcome
+                    .actions
+                    .iter()
+                    .find_map(|action| match action {
+                        ClientShellAction::MachineHostKeyOp { ticket, .. } => Some(*ticket),
+                        _ => None,
+                    })
+                    .unwrap_or(1);
+                let mut outcome = ClientShellInput::default();
+                state.handle_machine_auth_update(
+                    MachineAuthUpdate::HostKeyOpFinished {
+                        ticket,
+                        op,
+                        result: Ok(if op == MachineHostKeyOp::Remove {
+                            MachineHostKeyOutcome::Removed
+                        } else {
+                            MachineHostKeyOutcome::Precollected(1)
+                        }),
+                    },
+                    &mut outcome,
+                );
+                assert!(
+                    !outcome.actions.iter().any(|action| matches!(
+                        action,
+                        ClientShellAction::ReconnectEndpoint { .. }
+                    )),
+                    "{case}：没有已保存的机器，不发重连"
+                );
+                let text = compact_frame_text(&mut state, cols, rows);
+                // 整句都要画得下：对话框最宽 64 列，英文说明以前被截在半句
+                // （「close this dialog an」），「重新测试」丢了。
+                assert!(
+                    text.contains(&compact(&expected)),
+                    "{case}：对话框照实说明要重新测试：{text}"
+                );
+                assert!(
+                    !text.contains(&compact(&reconnecting)),
+                    "{case}：不再写「正在重连」：{text}"
+                );
+            }
         }
-        let ticket = outcome
-            .actions
-            .iter()
-            .find_map(|action| match action {
-                ClientShellAction::MachineHostKeyOp { ticket, .. } => Some(*ticket),
-                _ => None,
-            })
-            .unwrap_or(1);
-        let mut outcome = ClientShellInput::default();
-        state.handle_machine_auth_update(
-            MachineAuthUpdate::HostKeyOpFinished {
-                ticket,
-                op,
-                result: Ok(result),
-            },
-            &mut outcome,
-        );
-        assert!(
-            !outcome
-                .actions
-                .iter()
-                .any(|action| matches!(action, ClientShellAction::ReconnectEndpoint { .. })),
-            "{op:?}：没有已保存的机器，不发重连"
-        );
-        let text = compact_frame_text(&mut state, 93, 32);
-        assert!(
-            text.contains(&compact(&expected)),
-            "{op:?}：对话框照实说明要重新测试：{text}"
-        );
-        assert!(
-            !text.contains(&compact(&reconnecting)),
-            "{op:?}：不再写「正在重连」：{text}"
-        );
     }
 }
 
