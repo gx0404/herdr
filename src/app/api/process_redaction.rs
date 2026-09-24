@@ -183,13 +183,13 @@ fn redact_word(
         return redact_option(word, depth, user_password);
     }
     match pending {
-        Pending::Value => return (Some(redacted_secret(word)), Pending::None),
+        Pending::Value => return (redacted_secret_word(word), Pending::None),
         Pending::Header => return redact_header(word, depth),
         Pending::UserPassword(separator) => {
             return (redact_user_password(word, separator), Pending::None);
         }
         Pending::Credential if is_auth_scheme(word) => return (None, Pending::Credential),
-        Pending::Credential => return (Some(redacted_secret(word)), Pending::None),
+        Pending::Credential => return (redacted_secret_word(word), Pending::None),
         Pending::Assignment if word == "=" => return (None, Pending::Value),
         Pending::Assignment | Pending::None => {}
     }
@@ -308,10 +308,7 @@ fn redact_option_value(
     let redacted = if let Some(rule) = user_password.filter(|rule| rule.options.contains(&name)) {
         redact_user_password(value, rule.separator)?
     } else if is_credential_name(name.trim_start_matches('/')) {
-        if value.is_empty() {
-            return None;
-        }
-        redacted_secret(value)
+        redacted_secret_word(value)?
     } else {
         redact_embedded(value, depth)?
     };
@@ -357,9 +354,22 @@ fn redact_header(header: &str, depth: usize) -> (Option<String>, Pending) {
     }
     let lead = &rest[..rest.len() - value.len()];
     (
-        Some(format!("{name}:{lead}{}", redacted_secret(value))),
+        redacted_secret_word(value).map(|value| format!("{name}:{lead}{value}")),
         Pending::None,
     )
+}
+
+/// 值后面紧跟的收尾符号（PowerShell 哈希表的 `}`、命令替换的 `)`，以及 `;`、`,`）
+/// 不属于凭据：分出来留在原处。
+fn split_closing(value: &str) -> (&str, &str) {
+    let core = value.trim_end_matches(['}', ')', ';', ',']);
+    (core, &value[core.len()..])
+}
+
+/// 整个值是凭据时的打码：收尾符号留着；只剩收尾符号时不动。
+fn redacted_secret_word(value: &str) -> Option<String> {
+    let (core, tail) = split_closing(value);
+    (!core.is_empty()).then(|| format!("{}{tail}", redacted_secret(core)))
 }
 
 /// 凭据值打码：`Bearer xxx` 这类「认证方案 + 凭据」保留方案名。
@@ -414,21 +424,15 @@ fn redact_assignment(
             Pending::None,
         );
     }
-    // httpie 的 `名字==值`（查询参数）保留第二个 `=`；PowerShell 哈希表收尾的
-    // `}`、`;` 留在值后面。
+    // httpie 的 `名字==值`（查询参数）保留第二个 `=`；收尾符号留在值后面。
     let secret = value.trim_start_matches('=');
     let eq = &value[..value.len() - secret.len()];
-    let secret_end = secret.trim_end_matches(['}', ';', ',', ')']);
-    let tail = &secret[secret_end.len()..];
-    if secret_end.is_empty() {
-        return (None, Pending::None);
-    }
     // 值只剩认证方案名：凭据被切到了下一个词（`AUTH="Bearer x"` 在命令行里切开后）。
-    if is_auth_scheme(secret_end) {
+    if is_auth_scheme(split_closing(secret).0) {
         return (None, Pending::Credential);
     }
     (
-        Some(format!("{key}={eq}{}{tail}", redacted_secret(secret_end))),
+        redacted_secret_word(secret).map(|secret| format!("{key}={eq}{secret}")),
         Pending::None,
     )
 }
@@ -1179,6 +1183,28 @@ mod tests {
         assert_redacted(
             &["env", "AUTH_HEADER=Bearer s3cr3t-2", "tool"],
             &["env", "AUTH_HEADER=Bearer [REDACTED]", "tool"],
+        );
+    }
+
+    /// 复审轻级：值后面紧跟的收尾符号（PowerShell 哈希表的 `}`、命令替换的 `)`）
+    /// 不属于凭据，打码后留在原处。
+    #[test]
+    fn closing_punctuation_after_a_secret_is_kept() {
+        assert_redacted(
+            &[
+                "pwsh",
+                "-c",
+                "Invoke-RestMethod -Headers @{Authorization='Bearer s3cr3t-1'} https://example.invalid",
+            ],
+            &[
+                "pwsh",
+                "-c",
+                "Invoke-RestMethod -Headers @{Authorization='Bearer [REDACTED]'} https://example.invalid",
+            ],
+        );
+        assert_redacted(
+            &["sh", "-c", "echo $(curl --token s3cr3t-2)"],
+            &["sh", "-c", "echo $(curl --token [REDACTED])"],
         );
     }
 
