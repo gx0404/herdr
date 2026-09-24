@@ -2294,8 +2294,8 @@
       "anchor": "Install integrations",
       "doc": "docs/next/website/src/content/docs/integrations.mdx",
       "id": "docs-next-website-src-content-docs-integrations-mdx-install-integrations",
-      "source_sha256": "21ed397c26ac33c0c96ac8d9dd4730e14f5ca2fc821da4ee640cccabd1613392",
-      "text": "## Install integrations\n\nOpen settings inside Herdr and use the integrations tab to install integrations for agents found on your `PATH`, or run commands manually. In that tab `Enter` (and the primary button) installs **only the row you have selected** — the primary button is shown only while the selected row actually needs one, and the footer lists `a`, which installs every pending integration at once:\n\n```bash\nherdr integration install pi\nherdr integration install claude\nherdr integration install codex\nherdr integration install kimi\nherdr integration install opencode\n```"
+      "source_sha256": "8640f41e486bc1267848ac96a36b4156cb3a5ee7901bf7965559fca62e3a89bf",
+      "text": "## Install integrations\n\nOpen settings inside Herdr and use the integrations tab to install integrations for agents found on your `PATH`, or run commands manually. In that tab `Enter` (and the primary button) installs **only the row you have selected** — the primary button is shown only while the selected row actually needs one, and the footer lists `a`, which installs every pending integration at once:\n\n```bash\nherdr integration install pi\nherdr integration install claude\nherdr integration install codex\nherdr integration install kimi\nherdr integration install opencode\n```\n\nAfter an install, the tab lists what each integration wrote, plus any warnings, below the rows. Long messages wrap to the width of the panel instead of being cut off, and the list scrolls with the mouse wheel or `↑`/`↓`. Clicking a row selects it."
     },
     {
       "anchor": "Install integrations > Claude Code",
@@ -5220,8 +5220,8 @@
       "anchor": "structure",
       "doc": "src/client/shell/settings_overlay.rs",
       "id": "src-client-shell-settings-overlay-rs-structure",
-      "source_sha256": "bd4eaa37ce3024916ff08742495d36db5477cd6128e8543d24021cbc7db5709b",
-      "text": "公开项：\npub(in crate::client::shell) fn settings_list_window( — 设置浮层的正文几何与（列表型分区的）行数：视图计算阶段与渲染阶段共用 （STATE-04）。非列表分区返回 `None`，滚动位置保持不动。\npub(super) fn render_settings_overlay("
+      "source_sha256": "69046f01a5a6725f2ef29125b1482089c9721004a7591825da5429790e5d6e0c",
+      "text": "公开项：\npub(in crate::client::shell) struct SettingsListWindow {\nimpl SettingsListWindow {\npub(in crate::client::shell) fn start(&self, requested: usize, reveal: bool) -> usize { — 列表首个可见行：先夹到最后一屏；`reveal` 时再把选中条目整条滚进视野， 条目比视野还高时保证它的首行可见。\npub(in crate::client::shell) fn settings_list_window( — 设置浮层列表型分区的滚动窗口：视图计算阶段与渲染阶段共用同一份几何与 行展开（STATE-04）。非列表分区返回 `None`，滚动位置保持不动。\npub(super) fn render_settings_overlay("
     },
     {
       "anchor": "structure",

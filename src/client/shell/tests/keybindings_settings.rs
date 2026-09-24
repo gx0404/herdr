@@ -1135,3 +1135,266 @@ fn settings_integration_messages_show_codex_trust_hints_in_full_at_80_columns() 
         );
     }
 }
+
+/// 设置页集成页的状态：`labels` 是集成行（全部已安装），`messages` 是服务端返回
+/// 的安装消息。夹具路径一律手写脱敏，不读真实 HOME。
+fn settings_integrations_state(labels: &[&str], messages: &[&str]) -> ClientShellState {
+    use crate::api::schema::{IntegrationInfo, IntegrationState, IntegrationTarget};
+
+    let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
+    state.set_snapshot(Box::new(snapshot()));
+    state.set_pane_surface(surface());
+    state.open_settings_overlay();
+    let mut outcome = ClientShellInput::default();
+    state.select_settings_section(ClientSettingsSection::Integrations, &mut outcome);
+    let Some(ClientShellOverlay::Settings(settings)) = state.overlay.as_mut() else {
+        panic!("settings overlay");
+    };
+    settings.loading_integrations = false;
+    settings.integrations = labels
+        .iter()
+        .map(|label| IntegrationInfo {
+            target: IntegrationTarget::Codex,
+            label: (*label).into(),
+            command: (*label).into(),
+            available: true,
+            state: IntegrationState::Current,
+        })
+        .collect();
+    settings.integration_messages = messages
+        .iter()
+        .map(|message| (*message).to_owned())
+        .collect();
+    state
+}
+
+/// 设置浮层边框以内的文字行（去掉左右边框列），按屏幕行序。
+fn settings_popup_rows(state: &ClientShellState, frame: &FrameData) -> Vec<String> {
+    let popup = state.hits.settings_popup;
+    assert!(!popup.is_empty(), "设置浮层必须画出来");
+    let rows = frame_rows(frame);
+    (popup.y + 1..popup.bottom().saturating_sub(1))
+        .map(|y| {
+            rows[usize::from(y)]
+                .chars()
+                .skip(usize::from(popup.x) + 1)
+                .take(usize::from(popup.width.saturating_sub(2)))
+                .collect()
+        })
+        .collect()
+}
+
+fn without_whitespace(text: &str) -> String {
+    text.chars().filter(|ch| !ch.is_whitespace()).collect()
+}
+
+/// N13 的三类长消息（冒烟 / 真机实测的原文形状，路径手写脱敏）：opencode V2 提示
+/// 约 76 列，kimi 版本告警约 110 列，带长 HOME 的安装路径行。
+const LONG_INSTALL_MESSAGES: [&str; 3] = [
+    "installed opencode integration plugin to /home/a-rather-long-user-name/.config/opencode/plugins/herdr-agent-state.js",
+    "to enable OpenCode V2, start opencode2 once, then reinstall this integration",
+    "warning: could not run `kimi --version` to verify the installed version; hooks require kimi 0.14.0 or newer",
+];
+
+/// N13：集成页的安装消息按正文宽度折行，不再逐条单行硬截断。宽 / 中 / 窄三档
+/// 终端下：消息首行放不下整条时折到下一行，续行悬挂缩进 2 列；键盘逐条选中时
+/// 这条消息折出来的每一行都滚进视野，全部字符都看得到（折行处可能断在词中，
+/// 比较时去掉空白）。
+#[test]
+fn settings_integration_messages_wrap_instead_of_truncating_at_every_width() {
+    for (cols, rows) in [(120, 32), (64, 32), (44, 32)] {
+        let mut state = settings_integrations_state(&["codex", "opencode"], &LONG_INSTALL_MESSAGES);
+        let frame = state.compose(cols, rows).expect("settings frame");
+        let popup_rows = settings_popup_rows(&state, &frame);
+        // V2 提示 76 列，三档的正文都比它窄：首行放不下整条，续行比首行多缩进
+        // 2 列（悬挂缩进，一眼看出是上一条消息的延续）。
+        let first = popup_rows
+            .iter()
+            .position(|row| row.contains("to enable OpenCode V2"))
+            .unwrap_or_else(|| panic!("{cols} 列：V2 提示首行\n{}", popup_rows.join("\n")));
+        let inner_width = usize::from(state.hits.settings_popup.width.saturating_sub(2));
+        assert!(inner_width < 76, "{cols} 列：夹具前提：正文比 V2 提示窄");
+        assert!(
+            !popup_rows[first].contains("this integration"),
+            "{cols} 列（正文 {inner_width} 列）：V2 提示必须折行\n{}",
+            popup_rows.join("\n")
+        );
+        let leading = |row: &str| row.chars().take_while(|ch| *ch == ' ').count();
+        let next = &popup_rows[first + 1];
+        assert_eq!(
+            leading(next),
+            leading(&popup_rows[first]) + 2,
+            "{cols} 列：续行悬挂缩进 2 列：{next:?}"
+        );
+        assert!(
+            next.trim_start()
+                .starts_with(|ch: char| ch.is_ascii_alphanumeric()),
+            "{cols} 列：续行接着 V2 提示的下文：{next:?}"
+        );
+
+        // 第一次 ↓ 只把焦点切进正文（冒烟 M9），之后逐条往下选。
+        state.handle_input_bytes(b"\x1b[B");
+        for (index, message) in LONG_INSTALL_MESSAGES.iter().enumerate() {
+            let entry = 2 + index;
+            while settings_selected(&state) < entry {
+                state.handle_input_bytes(b"\x1b[B");
+            }
+            let frame = state.compose(cols, rows).expect("selected message frame");
+            let popup_rows = settings_popup_rows(&state, &frame);
+            assert!(
+                without_whitespace(&popup_rows.join("\n")).contains(&without_whitespace(message)),
+                "{cols} 列：选中第 {index} 条消息时整条可见 {message:?}\n{}",
+                popup_rows.join("\n")
+            );
+        }
+    }
+}
+
+fn settings_selected(state: &ClientShellState) -> usize {
+    match state.overlay.as_ref() {
+        Some(ClientShellOverlay::Settings(settings)) => settings.selected,
+        _ => panic!("settings overlay"),
+    }
+}
+
+/// N13：折行后列表仍可滚动，键盘、滚轮两条路径都能把最后一条消息的最后一行
+/// 滚进视野（视图计算与渲染用同一份行几何：此前视图计算按整块正文高度夹取、
+/// 渲染少一行说明行，键盘选到最后一条时它正好落在视野外）；集成行的命中区就是
+/// 画出来的那一行，滚动后跟着移动。
+#[test]
+fn settings_integration_messages_scroll_and_hits_follow_the_wrapped_rows() {
+    use crate::client::shell::ClientSettingsSection;
+
+    let labels = ["pi", "claude", "codex", "kimi", "opencode"];
+    let mut messages = Vec::new();
+    for index in 0..6 {
+        messages.push(format!(
+            "installed integration {index} hook to /home/a-rather-long-user-name/.config/agent-{index}/hooks/herdr-agent-state.sh"
+        ));
+    }
+    messages.push(
+        "final message: every wrapped line of this one must become visible, including the part that only fits on a later row"
+            .to_owned(),
+    );
+    let message_refs = messages.iter().map(String::as_str).collect::<Vec<_>>();
+    let last_message = without_whitespace(messages.last().expect("last message"));
+
+    for (cols, rows) in [(120, 24), (80, 24), (48, 24)] {
+        // 键盘：一路 ↓ 到最后一条消息。
+        let mut state = settings_integrations_state(&labels, &message_refs);
+        state.compose(cols, rows).expect("settings frame");
+        for _ in 0..labels.len() + messages.len() + 2 {
+            state.handle_input_bytes(b"\x1b[B");
+        }
+        let frame = state.compose(cols, rows).expect("scrolled by keys");
+        let popup_rows = settings_popup_rows(&state, &frame);
+        assert!(
+            without_whitespace(&popup_rows.join("\n")).contains(&last_message),
+            "{cols}×{rows} 键盘：最后一条消息要整条可见\n{}",
+            popup_rows.join("\n")
+        );
+        assert!(
+            !popup_rows.iter().any(|row| row.contains(" pi ")),
+            "{cols}×{rows} 用例前提：列表放不下，已滚离首行\n{}",
+            popup_rows.join("\n")
+        );
+        assert!(
+            state
+                .hits
+                .settings_choices
+                .iter()
+                .all(|(_, index)| *index != 0),
+            "{cols}×{rows}：滚出视野的 pi 行不留命中区"
+        );
+        assert_hits_on_drawn_rows(&state, &frame, &labels, cols, rows);
+
+        // 滚轮：从顶部一直往下滚，到底后夹住；反向一格画面立刻动（无死格）。
+        let mut state = settings_integrations_state(&labels, &message_refs);
+        let frame = state.compose(cols, rows).expect("settings frame");
+        let popup = state.hits.settings_popup;
+        let top_rows = settings_popup_rows(&state, &frame);
+        assert_eq!(
+            state.hits.settings_choices.len(),
+            labels.len(),
+            "{cols}×{rows}：每个集成行一个命中区"
+        );
+        assert_hits_on_drawn_rows(&state, &frame, &labels, cols, rows);
+        let wheel = |state: &mut ClientShellState, kind: MouseEventKind| {
+            state.handle_raw_events(vec![RawInputEvent::Mouse(MouseEvent {
+                kind,
+                column: popup.x + 2,
+                row: popup.y + popup.height / 2,
+                modifiers: KeyModifiers::NONE,
+            })]);
+        };
+        for _ in 0..40 {
+            wheel(&mut state, MouseEventKind::ScrollDown);
+            state.compose(cols, rows).expect("wheel frame");
+        }
+        let frame = state.compose(cols, rows).expect("bottom frame");
+        let bottom_rows = settings_popup_rows(&state, &frame);
+        assert!(
+            without_whitespace(&bottom_rows.join("\n")).contains(&last_message),
+            "{cols}×{rows} 滚轮：滚到底后最后一条消息整条可见\n{}",
+            bottom_rows.join("\n")
+        );
+        assert_ne!(top_rows, bottom_rows, "{cols}×{rows}：滚轮推动了列表");
+        wheel(&mut state, MouseEventKind::ScrollUp);
+        let frame = state.compose(cols, rows).expect("one notch up");
+        assert_ne!(
+            settings_popup_rows(&state, &frame),
+            bottom_rows,
+            "{cols}×{rows}：到底后反向一格画面就要动"
+        );
+
+        // 鼠标点集成行 = 选中这一行（与主题等分区同一交互）。
+        let mut state = settings_integrations_state(&labels, &message_refs);
+        state.compose(cols, rows).expect("settings frame");
+        let (rect, index) = state
+            .hits
+            .settings_choices
+            .iter()
+            .find(|(_, index)| *index == 3)
+            .copied()
+            .expect("kimi 行命中区");
+        state.handle_raw_events(vec![RawInputEvent::Mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: rect.x + 1,
+            row: rect.y,
+            modifiers: KeyModifiers::NONE,
+        })]);
+        let Some(ClientShellOverlay::Settings(settings)) = state.overlay.as_ref() else {
+            panic!("settings overlay");
+        };
+        assert_eq!(settings.section, ClientSettingsSection::Integrations);
+        assert_eq!(settings.selected, index, "{cols}×{rows}：点中哪行选中哪行");
+    }
+}
+
+/// 集成行的命中区就是画出这一集成的那一行（列宽与画面一致）。
+fn assert_hits_on_drawn_rows(
+    state: &ClientShellState,
+    frame: &FrameData,
+    labels: &[&str],
+    cols: u16,
+    rows: u16,
+) {
+    let screen = frame_rows(frame);
+    let popup = state.hits.settings_popup;
+    for (rect, index) in &state.hits.settings_choices {
+        assert!(
+            rect.x > popup.x && rect.right() < popup.right(),
+            "{cols}×{rows}：命中区在浮层边框以内：{rect:?} / {popup:?}"
+        );
+        let text = screen[usize::from(rect.y)]
+            .chars()
+            .skip(usize::from(rect.x))
+            .take(usize::from(rect.width))
+            .collect::<String>();
+        assert!(
+            text.contains(&format!(" {} ", labels[*index])),
+            "{cols}×{rows}：命中区 {index} 落在画出 {:?} 的那一行：{text:?}",
+            labels[*index]
+        );
+    }
+}

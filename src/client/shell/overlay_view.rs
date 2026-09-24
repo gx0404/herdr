@@ -42,16 +42,8 @@ impl ClientShellState {
         let Some(ClientShellOverlay::Settings(settings)) = overlay.as_mut() else {
             return;
         };
-        if let Some((body, count)) =
-            super::render::settings_list_window(area, page_bounds, settings)
-        {
-            settings.scroll = page::list_start(
-                settings.scroll,
-                settings.selected,
-                count,
-                usize::from(body.height),
-                settings.reveal,
-            );
+        if let Some(window) = super::render::settings_list_window(area, page_bounds, settings) {
+            settings.scroll = window.start(settings.scroll, settings.reveal);
         }
         settings.reveal = false;
     }

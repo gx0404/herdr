@@ -69,24 +69,64 @@ fn draw_choice(
     );
 }
 
-/// 设置浮层的正文几何与（列表型分区的）行数：视图计算阶段与渲染阶段共用
-/// （STATE-04）。非列表分区返回 `None`，滚动位置保持不动。
+/// 设置浮层的尺寸：视图计算与渲染共用（STATE-04）。集成页按集成数与安装消息
+/// 折行后的行数加高（消息最多加 6 行，再多就在列表里滚动），其余分区固定 22 行。
+/// 浮层宽度与高度无关，先按默认高度取宽度，再按这个宽度算消息折成几行（N13）。
+fn settings_modal_size(area: Rect, settings: &ClientSettingsOverlay) -> crate::ui::ModalSize {
+    let base = crate::ui::ModalSize::Large.with_height(22);
+    if settings.section != ClientSettingsSection::Integrations {
+        return base;
+    }
+    let message_rows = crate::ui::modal_rect(area, base)
+        .and_then(super::render::panel_inner)
+        .map_or(settings.integration_messages.len(), |inner| {
+            integration_lines(settings, integrations_layout(inner).1.width)
+                .iter()
+                .filter(|line| line.entry >= settings.integrations.len())
+                .count()
+        });
+    let height = 14u16
+        .saturating_add(settings.integrations.len().max(1) as u16)
+        .saturating_add(message_rows.min(6) as u16);
+    crate::ui::ModalSize::Large.with_height(height.max(22))
+}
+
+/// 列表型分区（主题、集成）的滚动口径：列表区矩形、总行数、选中条目占的
+/// 行区间（首行下标, 行数）。集成页的安装消息折行后一条可能占多行（N13），
+/// 滚动按行计，键盘选中仍按条目计。
+#[derive(Debug, Clone, Copy)]
+pub(in crate::client::shell) struct SettingsListWindow {
+    body: Rect,
+    rows: usize,
+    selected: (usize, usize),
+}
+
+impl SettingsListWindow {
+    /// 列表首个可见行：先夹到最后一屏；`reveal` 时再把选中条目整条滚进视野，
+    /// 条目比视野还高时保证它的首行可见。
+    pub(in crate::client::shell) fn start(&self, requested: usize, reveal: bool) -> usize {
+        let height = usize::from(self.body.height).max(1);
+        let start = requested.min(self.rows.saturating_sub(height));
+        if !reveal {
+            return start;
+        }
+        let (first, span) = self.selected;
+        start
+            .max(first.saturating_add(span.max(1)).saturating_sub(height))
+            .min(first)
+    }
+}
+
+/// 设置浮层列表型分区的滚动窗口：视图计算阶段与渲染阶段共用同一份几何与
+/// 行展开（STATE-04）。非列表分区返回 `None`，滚动位置保持不动。
 pub(in crate::client::shell) fn settings_list_window(
     area: Rect,
     page_bounds: Option<Rect>,
     settings: &ClientSettingsOverlay,
-) -> Option<(Rect, usize)> {
-    let integration_height = 14u16
-        .saturating_add(settings.integrations.len().max(1) as u16)
-        .saturating_add(settings.integration_messages.len().min(6) as u16);
-    let height = if settings.section == ClientSettingsSection::Integrations {
-        integration_height.max(22)
-    } else {
-        22
-    };
+) -> Option<SettingsListWindow> {
     let outer = page_bounds
         .map(|rect| rect.intersection(area))
-        .or_else(|| crate::ui::modal_rect(area, crate::ui::ModalSize::Large.with_height(height)))?;
+        .or_else(|| crate::ui::modal_rect(area, settings_modal_size(area, settings)))?;
     let inner = super::render::panel_inner(outer)?;
     if inner.width < 20 || inner.height < 8 {
         return None;
@@ -97,14 +137,23 @@ pub(in crate::client::shell) fn settings_list_window(
         .collect::<Vec<_>>();
     let nav_rows = super::super::page::navigation_rows(inner.width, &labels);
     let layout = super::super::page::PageLayout::new(inner, nav_rows, false, true);
-    let count = match settings.section {
-        ClientSettingsSection::Theme => crate::config::THEME_NAMES.len(),
+    match settings.section {
+        ClientSettingsSection::Theme => Some(SettingsListWindow {
+            body: layout.content,
+            rows: crate::config::THEME_NAMES.len(),
+            selected: (settings.selected, 1),
+        }),
         ClientSettingsSection::Integrations => {
-            settings.integrations.len() + settings.integration_messages.len()
+            let (_, list) = integrations_layout(layout.content);
+            let lines = integration_lines(settings, list.width);
+            Some(SettingsListWindow {
+                body: list,
+                rows: lines.len(),
+                selected: entry_rows(&lines, settings.selected),
+            })
         }
-        _ => return None,
-    };
-    Some((layout.content, count))
+        _ => None,
+    }
 }
 
 pub(super) fn render_settings_overlay(
@@ -114,21 +163,9 @@ pub(super) fn render_settings_overlay(
     cx: &super::feedback::ChromeContext<'_>,
 ) -> Option<OverlayRender> {
     let palette = cx.palette;
-    let integration_height = 14u16
-        .saturating_add(settings.integrations.len().max(1) as u16)
-        .saturating_add(settings.integration_messages.len().min(6) as u16);
-    let height = if settings.section == ClientSettingsSection::Integrations {
-        integration_height.max(22)
-    } else {
-        22
-    };
     let t = &crate::i18n::texts().settings;
-    let (popup, inner) = modal_panel(
-        buffer,
-        crate::ui::ModalSize::Large.with_height(height),
-        palette.accent,
-        cx,
-    )?;
+    let size = settings_modal_size(buffer.area, settings);
+    let (popup, inner) = modal_panel(buffer, size, palette.accent, cx)?;
     if inner.width < 20 || inner.height < 8 {
         return None;
     }
@@ -315,7 +352,7 @@ pub(super) fn render_settings_overlay(
             );
         }
         ClientSettingsSection::Integrations => {
-            render_integrations(buffer, content, settings, cx);
+            render_integrations(buffer, content, settings, cx, &mut choice_hits);
         }
     }
 
@@ -477,12 +514,130 @@ fn installed_count(settings: &ClientSettingsOverlay) -> usize {
         .count()
 }
 
+/// 集成页正文的几何：说明行（正文至少 4 行时才有）与其下的列表区。视图计算、
+/// 渲染与命中区共用这一份（STATE-04）。
+fn integrations_layout(content: Rect) -> (Option<Rect>, Rect) {
+    if content.height >= 4 {
+        (
+            Some(Rect::new(content.x, content.y, content.width, 1)),
+            Rect::new(content.x, content.y + 1, content.width, content.height - 1),
+        )
+    } else {
+        (None, content)
+    }
+}
+
+/// 集成页列表的一行（N13）：集成各占一行；服务端返回的安装消息按列表宽度折行，
+/// 一条消息可能占多行。`entry` 与键盘选中同一编号（集成在前、消息在后），
+/// `start..end` 是这一行在消息里的字节区间（集成行为空区间）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct IntegrationLine {
+    entry: usize,
+    start: usize,
+    end: usize,
+    continuation: bool,
+}
+
+/// 消息续行比首行多缩进的列数：一眼看出它接着上一行，不是新的一条消息。
+const MESSAGE_CONTINUATION_INDENT: u16 = 2;
+
+/// 集成页列表按 `width` 列展开成行。加载中或没有集成时列表区只画一行提示，
+/// 不列行，滚动归零。
+fn integration_lines(settings: &ClientSettingsOverlay, width: u16) -> Vec<IntegrationLine> {
+    if settings.loading_integrations || settings.integrations.is_empty() {
+        return Vec::new();
+    }
+    let mut lines = (0..settings.integrations.len())
+        .map(|entry| IntegrationLine {
+            entry,
+            start: 0,
+            end: 0,
+            continuation: false,
+        })
+        .collect::<Vec<_>>();
+    let first = usize::from(width);
+    let rest = usize::from(width.saturating_sub(MESSAGE_CONTINUATION_INDENT));
+    for (index, message) in settings.integration_messages.iter().enumerate() {
+        let entry = settings.integrations.len() + index;
+        wrap_message(message.trim_end(), first, rest, |start, end| {
+            lines.push(IntegrationLine {
+                entry,
+                start,
+                end,
+                continuation: start > 0,
+            });
+        });
+    }
+    lines
+}
+
+/// 条目 `entry` 占的行区间（首行下标, 行数）；不在列表里（越界或列表为空）时
+/// 取最后一行。
+fn entry_rows(lines: &[IntegrationLine], entry: usize) -> (usize, usize) {
+    match lines.iter().position(|line| line.entry == entry) {
+        Some(first) => (
+            first,
+            lines[first..]
+                .iter()
+                .take_while(|line| line.entry == entry)
+                .count(),
+        ),
+        None => (lines.len().saturating_sub(1), 1),
+    }
+}
+
+/// 按显示宽度把一条消息折成若干行，逐行回调字节区间 `[start, end)`：首行宽
+/// `first` 列，续行宽 `rest` 列。优先断在本行最后一个空格之后（空格留在上一行
+/// 末尾），没有空格时按列硬断（长路径）；消息里的换行符强制断行。空消息也占一行。
+fn wrap_message(text: &str, first: usize, rest: usize, mut emit: impl FnMut(usize, usize)) {
+    let mut width = first.max(1);
+    let mut start = 0usize;
+    let mut used = 0usize;
+    // 本行里最近一个空格之后的位置，及到它为止占用的列数。
+    let mut soft_break: Option<(usize, usize)> = None;
+    for (offset, ch) in text.char_indices() {
+        if ch == '\n' {
+            emit(start, offset);
+            start = offset + ch.len_utf8();
+            used = 0;
+            soft_break = None;
+            width = rest.max(1);
+            continue;
+        }
+        let cell = char_width(ch);
+        while used + cell > width && offset > start {
+            match soft_break
+                .take()
+                .filter(|(at, _)| *at > start && *at <= offset)
+            {
+                Some((at, used_at)) => {
+                    emit(start, at);
+                    start = at;
+                    used -= used_at;
+                }
+                None => {
+                    emit(start, offset);
+                    start = offset;
+                    used = 0;
+                }
+            }
+            width = rest.max(1);
+        }
+        used += cell;
+        if ch == ' ' {
+            soft_break = Some((offset + ch.len_utf8(), used));
+        }
+    }
+    emit(start, text.len());
+}
+
 fn render_integrations(
     buffer: &mut Buffer,
     area: Rect,
     settings: &ClientSettingsOverlay,
     cx: &super::feedback::ChromeContext<'_>,
-) -> usize {
+    hits: &mut Vec<(Rect, usize)>,
+) {
     let p = cx.palette;
     let t = &crate::i18n::texts().settings;
     if settings.loading_integrations || settings.integrations.is_empty() {
@@ -498,9 +653,10 @@ fn render_integrations(
             },
             Style::default().fg(p.overlay0),
         );
-        return 0;
+        return;
     }
-    let area = if area.height >= 4 {
+    let (header, list) = integrations_layout(area);
+    if let Some(header) = header {
         // 一次性提示（「选中的集成无需安装」）占用说明行，不挤掉下方承载
         // 服务端安装结果的消息区。
         let (line, style) = match settings.integration_notice.as_deref() {
@@ -520,17 +676,14 @@ fn render_integrations(
         // 宽度截到 `…` 收尾（与其它浮层的省略号风格一致）。
         put_text(
             buffer,
-            area.x,
-            area.y,
-            area.width,
-            &truncate_with_ellipsis(&line, area.width),
+            header.x,
+            header.y,
+            header.width,
+            &truncate_with_ellipsis(&line, header.width),
             style,
         );
-        Rect::new(area.x, area.y + 1, area.width, area.height - 1)
-    } else {
-        area
-    };
-    let count = settings.integrations.len() + settings.integration_messages.len();
+    }
+    let lines = integration_lines(settings, list.width);
     // Fixed status column: labels longer than the old hard-coded 12 columns
     // (antigravity-cli) otherwise pushed their status out of alignment.
     let label_width = settings
@@ -540,16 +693,21 @@ fn render_integrations(
         .max()
         .unwrap_or(12)
         .clamp(10, 18);
-    let scroll = super::super::page::list_start(
-        settings.scroll,
-        settings.selected,
-        count,
-        usize::from(area.height),
-        settings.reveal,
-    );
-    for (offset, index) in (scroll..count).take(usize::from(area.height)).enumerate() {
-        let rect = Rect::new(area.x, area.y + offset as u16, area.width, 1);
-        if let Some(integration) = settings.integrations.get(index) {
+    // 起点由视图计算阶段写好的 `scroll` 决定（STATE-04），这里只夹到最后一屏。
+    let window = SettingsListWindow {
+        body: list,
+        rows: lines.len(),
+        selected: entry_rows(&lines, settings.selected),
+    };
+    let start = window.start(settings.scroll, false);
+    for (offset, line) in lines
+        .iter()
+        .skip(start)
+        .take(usize::from(list.height))
+        .enumerate()
+    {
+        let rect = Rect::new(list.x, list.y + offset as u16, list.width, 1);
+        if let Some(integration) = settings.integrations.get(line.entry) {
             let (marker, color, status) = match integration.state {
                 crate::api::schema::IntegrationState::Current => ("✓", p.green, t.state_installed),
                 crate::api::schema::IntegrationState::Outdated => {
@@ -560,7 +718,7 @@ fn render_integrations(
                 }
                 _ => ("–", p.overlay0, t.state_not_found),
             };
-            let style = if index == settings.selected {
+            let style = if line.entry == settings.selected {
                 choice_style(true, p)
             } else {
                 Style::default().fg(color).bg(p.panel_bg)
@@ -578,21 +736,28 @@ fn render_integrations(
                 ),
                 style,
             );
-        } else if let Some(message) = settings
+            // 命中区就是画出来的这一行：滚出视野的集成行不留命中区（N13）。
+            hits.push((rect, line.entry));
+        } else if let Some(text) = settings
             .integration_messages
-            .get(index - settings.integrations.len())
+            .get(line.entry - settings.integrations.len())
+            .and_then(|message| message.get(line.start..line.end))
         {
+            let indent = if line.continuation {
+                MESSAGE_CONTINUATION_INDENT.min(rect.width)
+            } else {
+                0
+            };
             put_text(
                 buffer,
-                rect.x,
+                rect.x + indent,
                 rect.y,
-                rect.width,
-                message,
+                rect.width - indent,
+                text,
                 Style::default().fg(p.subtext0),
             );
         }
     }
-    scroll
 }
 
 #[cfg(test)]
@@ -659,7 +824,7 @@ mod tests {
         let settings = settings_overlay_with_integrations(&palette);
         let area = Rect::new(0, 0, 24, 6);
         let mut buffer = Buffer::empty(area);
-        render_integrations(&mut buffer, area, &settings, &cx);
+        render_integrations(&mut buffer, area, &settings, &cx, &mut Vec::new());
         let header: String = (area.x..area.right())
             .map(|x| buffer[(x, area.y)].symbol().to_string())
             .collect();
@@ -667,6 +832,35 @@ mod tests {
             header.trim_end().ends_with('…'),
             "窄面板下头部说明要带省略号收尾：{header:?}"
         );
+    }
+
+    fn wrapped(text: &str, first: usize, rest: usize) -> Vec<&str> {
+        let mut lines = Vec::new();
+        wrap_message(text, first, rest, |start, end| {
+            lines.push(&text[start..end])
+        });
+        lines
+    }
+
+    /// N13：安装消息折行优先断在空格后，长路径按列硬断，续行按续行宽度折；
+    /// CJK 按显示宽度计，换行符强制断行，空消息也占一行。
+    #[test]
+    fn wrap_message_prefers_spaces_and_hard_breaks_long_paths() {
+        assert_eq!(
+            wrapped("start opencode2 once, then reinstall", 16, 14),
+            vec!["start opencode2 ", "once, then ", "reinstall"]
+        );
+        assert_eq!(
+            wrapped("to /home/user/.config/opencode/x.js", 12, 10),
+            vec!["to ", "/home/user", "/.config/o", "pencode/x.", "js"]
+        );
+        assert_eq!(
+            wrapped("安装完成请重启", 6, 4),
+            vec!["安装完", "成请", "重启"]
+        );
+        assert_eq!(wrapped("first\nsecond", 20, 18), vec!["first", "second"]);
+        assert_eq!(wrapped("", 10, 8), vec![""]);
+        assert_eq!(wrapped("fits", 10, 8), vec!["fits"]);
     }
 
     /// 冒烟 L7：设置页脚同一个 Enter 键不能一边说「应用」一边说「保存」；
