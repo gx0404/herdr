@@ -1875,6 +1875,37 @@ pub struct MonitorConfigTexts {
     pub account_user_deprecated_fmt: &'static str, // args: account
 }
 
+/// 远端连接层（`src/remote`）写给用户看的错误说明（文档终审 D7）：主机密钥核对、远端安装
+/// 上传与远端任务。随调用进程（客户端）的界面语言；ssh / scp 的原始输出原样接在后面。
+pub struct RemoteTexts {
+    // ---- 主机密钥核对（known_hosts） ----
+    pub ssh_config_unreadable: &'static str,
+    pub ssh_config_no_hostname: &'static str,
+    pub ssh_config_bad_port: &'static str,
+    pub ssh_host_unparsable: &'static str,
+    pub host_alias_not_single: &'static str,
+    pub ssh_home_missing: &'static str,
+    pub known_hosts_ambiguous: &'static str,
+    pub known_hosts_token_unsupported: &'static str,
+    pub known_hosts_disabled: &'static str,
+    pub host_key_proxied: &'static str,
+    pub ssh_config_changed_review: &'static str,
+    pub host_key_mismatch: &'static str,
+    pub known_hosts_unwritable: &'static str,
+    pub host_key_remove_failed: &'static str,
+    pub ssh_config_changed_confirm: &'static str,
+    // ---- 临时信任配置与远端安装上传 ----
+    pub trust_config_failed: &'static str,
+    pub trust_config_no_dir: &'static str,
+    pub install_upload_failed: &'static str,
+    pub scp_upload_failed: &'static str,
+    // ---- 远端任务 ----
+    pub task_cancelled: &'static str,
+    pub task_input_closed: &'static str,
+    pub upload_timed_out: &'static str,
+    pub task_output_timed_out: &'static str,
+}
+
 /// Help/about strings for the clap CLI surface. Option and subcommand
 /// names, value placeholders and parsed values stay untranslated; only
 /// the descriptive text differs per language.
@@ -2630,6 +2661,7 @@ pub struct Texts {
     pub usage_probe: UsageProbeTexts,
     pub usage_metric: UsageMetricTexts,
     pub monitor_config: MonitorConfigTexts,
+    pub remote: RemoteTexts,
     pub sidebar: SidebarTexts,
     pub status: StatusTexts,
     pub mode_bar: ModeBarTexts,
@@ -3227,6 +3259,38 @@ mod tests {
         )
     }
 
+    /// `RemoteTexts` 的全部条目。
+    fn remote_texts(t: &RemoteTexts) -> Vec<&'static str> {
+        all_entries!(
+            t,
+            RemoteTexts {
+                ssh_config_unreadable,
+                ssh_config_no_hostname,
+                ssh_config_bad_port,
+                ssh_host_unparsable,
+                host_alias_not_single,
+                ssh_home_missing,
+                known_hosts_ambiguous,
+                known_hosts_token_unsupported,
+                known_hosts_disabled,
+                host_key_proxied,
+                ssh_config_changed_review,
+                host_key_mismatch,
+                known_hosts_unwritable,
+                host_key_remove_failed,
+                ssh_config_changed_confirm,
+                trust_config_failed,
+                trust_config_no_dir,
+                install_upload_failed,
+                scp_upload_failed,
+                task_cancelled,
+                task_input_closed,
+                upload_timed_out,
+                task_output_timed_out,
+            }
+        )
+    }
+
     /// 两张表逐条对照：英文表每条都不含 CJK 字符，中文表每条都有译文（不是照抄英文）。
     fn assert_translated(en: &[&str], zh: &[&str]) {
         assert_eq!(en.len(), zh.len());
@@ -3259,6 +3323,10 @@ mod tests {
         assert_translated(
             &monitor_config_texts(&en::TEXTS.monitor_config),
             &monitor_config_texts(&zh_cn::TEXTS.monitor_config),
+        );
+        assert_translated(
+            &remote_texts(&en::TEXTS.remote),
+            &remote_texts(&zh_cn::TEXTS.remote),
         );
     }
 

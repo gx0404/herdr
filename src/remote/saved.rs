@@ -87,7 +87,9 @@ fn connect_saved_ssh_with(
         let mut ssh = validated_saved_ssh(profile, askpass_environment)?;
         if let Some((target, key)) = pin {
             if super::known_hosts::effective_host_key_target(profile)? != *target {
-                return Err(io::Error::other("SSH 配置已变化，请重新确认主机指纹"));
+                return Err(io::Error::other(
+                    crate::i18n::texts().remote.ssh_config_changed_confirm,
+                ));
             }
             ssh.pin_host_key(target, key)?;
         }

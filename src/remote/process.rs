@@ -56,7 +56,7 @@ pub(super) fn check_cancelled() -> io::Result<()> {
     }) {
         Err(io::Error::new(
             io::ErrorKind::Interrupted,
-            "任务已取消；已完成的远端操作不会回滚",
+            crate::i18n::texts().remote.task_cancelled,
         ))
     } else {
         Ok(())
@@ -137,7 +137,7 @@ pub(super) fn copy_input(
     let mut stdin = child
         .stdin
         .take()
-        .ok_or_else(|| io::Error::other("远端任务输入管道未打开"))?;
+        .ok_or_else(|| io::Error::other(crate::i18n::texts().remote.task_input_closed))?;
     let (done, copied) = std::sync::mpsc::sync_channel(1);
     std::thread::spawn(move || {
         let _ = done.send(io::copy(&mut input, &mut stdin));
@@ -150,9 +150,12 @@ pub(super) fn copy_input(
     let remaining = timeout
         .saturating_sub(started.elapsed())
         .max(Duration::from_millis(1));
-    copied
-        .recv_timeout(remaining)
-        .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "远端上传未在期限内完成"))??;
+    copied.recv_timeout(remaining).map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::TimedOut,
+            crate::i18n::texts().remote.upload_timed_out,
+        )
+    })??;
     Ok(output)
 }
 
@@ -236,7 +239,10 @@ pub(super) fn wait_with_output_timeout_bounded(
         }
         if started.elapsed() >= timeout {
             child.terminate();
-            return Err(io::Error::new(io::ErrorKind::TimedOut, "远端任务输出超时"));
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                crate::i18n::texts().remote.task_output_timed_out,
+            ));
         }
         thread::sleep(POLL_INTERVAL);
     }
@@ -359,5 +365,27 @@ mod tests {
         assert!(output.status.success());
         assert_eq!(output.stdout.len(), 128);
         assert!(output.stdout.iter().all(|byte| *byte == b'x'));
+    }
+}
+
+/// 与平台无关的文案用例（上面的 `tests` 只在 unix 上跑真实子进程）。
+#[cfg(test)]
+mod message_tests {
+    use super::*;
+
+    /// 文档终审 D7：取消远端任务的说明按客户端的界面语言给出——英文界面不含 CJK，中文
+    /// 界面是中文。
+    #[test]
+    fn cancelled_task_note_follows_the_interface_language() {
+        use crate::i18n::{has_cjk, lang_guard, Lang};
+        let task = TaskCancellation::default();
+        task.cancel();
+        for (lang, chinese) in [(Lang::En, false), (Lang::ZhCn, true)] {
+            let _guard = lang_guard(lang);
+            let error = task.run(|| Ok(())).unwrap_err();
+            assert_eq!(error.kind(), io::ErrorKind::Interrupted);
+            let message = error.to_string();
+            assert_eq!(has_cjk(&message), chinese, "{lang:?}: {message}");
+        }
     }
 }

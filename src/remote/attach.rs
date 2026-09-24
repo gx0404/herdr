@@ -803,12 +803,12 @@ impl RemoteSsh {
         let config = self
             .managed_config
             .as_mut()
-            .ok_or_else(|| io::Error::other("无法创建临时信任配置"))?;
+            .ok_or_else(|| io::Error::other(crate::i18n::texts().remote.trust_config_failed))?;
         let path = config
             .options
             .config_path
             .parent()
-            .ok_or_else(|| io::Error::other("临时配置缺少目录"))?
+            .ok_or_else(|| io::Error::other(crate::i18n::texts().remote.trust_config_no_dir))?
             .join("known_hosts");
         let mut pinned = target.clone();
         pinned.files = vec![path.clone()];
@@ -985,7 +985,10 @@ impl RemoteSsh {
                 Err(command_failed("remote install commit failed", &output))
             }
         } else {
-            Err(command_failed("远端安装上传失败", &output))
+            Err(command_failed(
+                crate::i18n::texts().remote.install_upload_failed,
+                &output,
+            ))
         }
     }
 
@@ -1004,7 +1007,10 @@ impl RemoteSsh {
         if output.status.success() {
             Ok(())
         } else {
-            Err(command_failed("SCP 上传失败", &output))
+            Err(command_failed(
+                crate::i18n::texts().remote.scp_upload_failed,
+                &output,
+            ))
         }
     }
 

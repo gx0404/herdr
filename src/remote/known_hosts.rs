@@ -72,7 +72,10 @@ pub(crate) fn effective_host_key_target(
         KNOWN_HOSTS_STDERR_LIMIT,
     )?;
     if !output.status.success() {
-        return Err(tool_failed("无法解析 SSH 配置", &output));
+        return Err(tool_failed(
+            crate::i18n::texts().remote.ssh_config_unreadable,
+            &output,
+        ));
     }
     parse_effective_target(&String::from_utf8_lossy(&output.stdout), &profile.target)
 }
@@ -89,17 +92,18 @@ fn parse_effective_target(output: &str, original: &str) -> io::Result<EffectiveH
             .copied()
             .filter(|value| !value.is_empty() && *value != "none")
     };
+    let texts = &crate::i18n::texts().remote;
     let invalid = |message: &str| io::Error::new(io::ErrorKind::Unsupported, message);
     let host = field("hostname")
-        .ok_or_else(|| invalid("SSH 配置缺少 HostName"))?
+        .ok_or_else(|| invalid(texts.ssh_config_no_hostname))?
         .to_owned();
     let port = field("port")
         .and_then(|value| value.parse::<u16>().ok())
         .filter(|port| *port > 0)
-        .ok_or_else(|| invalid("SSH 配置端口无效"))?;
+        .ok_or_else(|| invalid(texts.ssh_config_bad_port))?;
     let original_host = parse_ssh_host_port(original)
         .map(|(host, _)| host)
-        .ok_or_else(|| invalid("无法解析原始 SSH 主机名"))?;
+        .ok_or_else(|| invalid(texts.ssh_host_unparsable))?;
     let alias = field("hostkeyalias");
     let lookup = alias.map(str::to_owned).unwrap_or_else(|| {
         if port == 22 {
@@ -114,12 +118,10 @@ fn parse_effective_target(output: &str, original: &str) -> io::Result<EffectiveH
             .chars()
             .any(|ch| ch.is_control() || ch.is_whitespace() || matches!(ch, '*' | '?' | ',' | '!'))
     {
-        return Err(invalid(
-            "主机名或 HostKeyAlias 无法作为单一主机记录，请使用交互认证",
-        ));
+        return Err(invalid(texts.host_alias_not_single));
     }
     let home =
-        crate::platform::ssh_config_home_dir().ok_or_else(|| invalid("无法定位 SSH 用户目录"))?;
+        crate::platform::ssh_config_home_dir().ok_or_else(|| invalid(texts.ssh_home_missing))?;
     let home = home.to_string_lossy();
     let user = field("user").unwrap_or_default();
     let local_user = std::env::var("USER")
@@ -133,9 +135,7 @@ fn parse_effective_target(output: &str, original: &str) -> io::Result<EffectiveH
     {
         if !(raw.starts_with('/') || raw.starts_with("~/") || raw.as_bytes().get(1) == Some(&b':'))
         {
-            return Err(invalid(
-                "known_hosts 路径存在歧义，请使用交互认证确认主机密钥",
-            ));
+            return Err(invalid(texts.known_hosts_ambiguous));
         }
         let mut expanded = String::new();
         let mut chars = raw.chars();
@@ -156,11 +156,7 @@ fn parse_effective_target(output: &str, original: &str) -> io::Result<EffectiveH
                 Some('u') => &local_user,
                 Some('n') => original_host.as_str(),
                 Some('k') => alias.unwrap_or(&original_host),
-                _ => {
-                    return Err(invalid(
-                        "known_hosts 路径包含未支持的替换符，请使用交互认证",
-                    ))
-                }
+                _ => return Err(invalid(texts.known_hosts_token_unsupported)),
             };
             expanded.push_str(value);
         }
@@ -170,9 +166,7 @@ fn parse_effective_target(output: &str, original: &str) -> io::Result<EffectiveH
         files.push(std::path::PathBuf::from(expanded));
     }
     if files.is_empty() {
-        return Err(invalid(
-            "此 SSH 配置未启用用户 known_hosts 文件，请使用交互认证",
-        ));
+        return Err(invalid(texts.known_hosts_disabled));
     }
     Ok(EffectiveHostKeyTarget {
         host,
@@ -190,7 +184,7 @@ pub(crate) fn review_profile_host_key(
     if target.proxied {
         return Err(io::Error::new(
             io::ErrorKind::Unsupported,
-            "此连接经过跳板机或代理，请使用交互认证确认指纹；不会绕过代理直接扫描",
+            crate::i18n::texts().remote.host_key_proxied,
         ));
     }
     let keys = scan_host_keys(&target.host, Some(target.port))?;
@@ -203,7 +197,9 @@ pub(crate) fn remember_reviewed_host_key(
     key: &KnownHostKey,
 ) -> io::Result<usize> {
     if effective_host_key_target(profile)? != *target {
-        return Err(io::Error::other("SSH 配置已变化，请重新查看并确认指纹"));
+        return Err(io::Error::other(
+            crate::i18n::texts().remote.ssh_config_changed_review,
+        ));
     }
     append_reviewed_key(target, key)
 }
@@ -216,13 +212,13 @@ pub(super) fn append_reviewed_key(
     if parts.len() != 2 || key_line_to_known_host_key(parts[0], parts[1]).as_ref() != Some(key) {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
-            "主机密钥与已展示的指纹不一致",
+            crate::i18n::texts().remote.host_key_mismatch,
         ));
     }
     let path = target
         .files
         .first()
-        .ok_or_else(|| io::Error::other("没有可写入的 known_hosts 路径"))?;
+        .ok_or_else(|| io::Error::other(crate::i18n::texts().remote.known_hosts_unwritable))?;
     if path.is_file() {
         let existing = run_tool(
             "ssh-keygen",
@@ -269,7 +265,10 @@ pub(crate) fn remove_profile_host_key(
             ],
         )?;
         if !output.status.success() {
-            return Err(tool_failed("清理该主机的旧密钥失败", &output));
+            return Err(tool_failed(
+                crate::i18n::texts().remote.host_key_remove_failed,
+                &output,
+            ));
         }
     }
     Ok(())
@@ -677,5 +676,40 @@ banner line without enough fields
         assert_eq!(keys[1].key_type, "ecdsa-sha2-nistp256");
         assert!(keys[0].fingerprint.fingerprint.starts_with("SHA256:"));
         assert!(keys[0].key_line.starts_with("ssh-ed25519 AAAA"));
+    }
+
+    /// 文档终审 D7：主机密钥核对被拒的说明按客户端的界面语言给出——英文界面不含 CJK，
+    /// 中文界面是中文。
+    #[test]
+    fn host_key_rejections_follow_the_interface_language() {
+        use crate::i18n::{has_cjk, lang_guard, Lang};
+        let cases = [
+            ("port 22\nuserknownhostsfile /tmp/known\n", "build"),
+            (
+                "hostname host.example\nport 0\nuserknownhostsfile /tmp/known\n",
+                "build",
+            ),
+            (
+                "hostname host.example\nport 22\nhostkeyalias *\nuserknownhostsfile /tmp/known\n",
+                "build",
+            ),
+            (
+                "hostname host.example\nport 22\nuserknownhostsfile relative/known\n",
+                "build",
+            ),
+            (
+                "hostname host.example\nport 22\nuserknownhostsfile /tmp/%x\n",
+                "build",
+            ),
+        ];
+        for (lang, chinese) in [(Lang::En, false), (Lang::ZhCn, true)] {
+            let _guard = lang_guard(lang);
+            for (output, original) in cases {
+                let message = parse_effective_target(output, original)
+                    .unwrap_err()
+                    .to_string();
+                assert_eq!(has_cjk(&message), chinese, "{lang:?} {output:?}: {message}");
+            }
+        }
     }
 }
