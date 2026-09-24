@@ -84,6 +84,9 @@ pub struct ReportedTranscript {
 /// CLI 自己给的，`CLAUDE_CONFIG_DIR` 只在 pane 里设置时活动树也能找到会话文件。其余
 /// agent 不收：codex 钩子拿到了转录路径但没有转发，kimi 的钩子载荷里没有路径，pi 的
 /// 路径本身就是会话引用。
+///
+/// 来源名是上报方自报的，所以路径也要像 claude 的主转录：绝对路径、文件名恰是
+/// `<会话 id>.jsonl`，不以分隔符结尾（目录写法）；指向目录的在适配器里再拒一次。
 pub fn transcript_from_report(
     source: &str,
     agent: &str,
@@ -94,7 +97,13 @@ pub fn transcript_from_report(
         return None;
     }
     let session_id = agent_session_id.filter(|id| valid_session_id(id))?;
-    let path = AgentSessionRef::path(agent_session_path?)?;
+    let raw = agent_session_path?;
+    let named = Path::new(raw).file_name().and_then(|name| name.to_str())
+        == Some(format!("{session_id}.jsonl").as_str());
+    if !named || raw.ends_with(['/', '\\']) {
+        return None;
+    }
+    let path = AgentSessionRef::path(raw)?;
     Some(ReportedTranscript {
         session_id: session_id.to_owned(),
         path,
@@ -468,7 +477,29 @@ mod tests {
             "恢复仍按 id"
         );
 
+        // 文件名必须恰是 `<会话 id>.jsonl`：别的文件、别的扩展名、以分隔符结尾的都不收。
+        let other = absolute_test_path("other.jsonl");
+        let json = absolute_test_path("session-id.json");
+        let trailing = format!("{transcript}{}", std::path::MAIN_SEPARATOR);
         for (source, agent, id, path) in [
+            (
+                "herdr:claude",
+                "claude",
+                Some("session-id"),
+                Some(other.as_str()),
+            ),
+            (
+                "herdr:claude",
+                "claude",
+                Some("session-id"),
+                Some(json.as_str()),
+            ),
+            (
+                "herdr:claude",
+                "claude",
+                Some("session-id"),
+                Some(trailing.as_str()),
+            ),
             ("herdr:claude", "claude", None, Some(transcript.as_str())),
             (
                 "herdr:claude",

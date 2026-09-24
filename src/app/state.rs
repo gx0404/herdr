@@ -1318,13 +1318,17 @@ impl AgentActivityStore {
         newer
     }
 
-    /// 该 pane 上报过的、属于会话 `session_id` 的转录路径；会话已换（id 对不上）时为
-    /// `None`。
+    /// 该 pane 上报过的、属于会话 `session_id` 的转录路径；会话已换（id 对不上）或
+    /// agent 不是 claude（只有它的钩子上报转录路径、适配器按转录布局解读）时为 `None`。
     pub fn transcript(
         &self,
         pane_id: PaneId,
+        agent: &str,
         session_id: &str,
     ) -> Option<&crate::agent_resume::AgentSessionRef> {
+        if agent != "claude" {
+            return None;
+        }
         self.transcripts
             .get(&pane_id)
             .map(|(_, transcript)| transcript)
@@ -1794,7 +1798,7 @@ impl AppState {
                 match session.kind {
                     crate::agent_resume::AgentSessionRefKind::Id => self
                         .agent_activity
-                        .transcript(pane_id, &session.value)
+                        .transcript(pane_id, &agent, &session.value)
                         .cloned()
                         .unwrap_or(session),
                     crate::agent_resume::AgentSessionRefKind::Path => session,

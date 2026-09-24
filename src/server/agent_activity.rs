@@ -2563,7 +2563,7 @@ mod tests {
         assert!(
             idle.state
                 .agent_activity
-                .transcript(idle_pane, "s-3")
+                .transcript(idle_pane, "claude", "s-3")
                 .is_some(),
             "agent 还没识别出来：路径留着"
         );
@@ -2572,7 +2572,7 @@ mod tests {
         assert!(
             idle.state
                 .agent_activity
-                .transcript(idle_pane, "s-3")
+                .transcript(idle_pane, "claude", "s-3")
                 .is_none(),
             "pane 关掉后清理"
         );
@@ -2656,10 +2656,14 @@ mod tests {
             !store.note_transcript(agent, None, transcript("f")),
             "记下过带序号的上报：不带序号的不收"
         );
-        assert!(store.transcript(agent, "c").is_some());
+        assert!(store.transcript(agent, "claude", "c").is_some());
+        assert!(
+            store.transcript(agent, "codex", "c").is_none(),
+            "只给 claude 的活动树用"
+        );
         assert!(store.note_transcript(agent, Some(6), transcript("g")));
-        assert!(store.transcript(agent, "c").is_none());
-        assert!(store.transcript(agent, "g").is_some());
+        assert!(store.transcript(agent, "claude", "c").is_none());
+        assert!(store.transcript(agent, "claude", "g").is_some());
     }
 
     #[test]

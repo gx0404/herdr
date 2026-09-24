@@ -254,10 +254,11 @@ fn locate_session(cx: &SourceContext<'_>) -> Located {
     }
 }
 
-/// `<...>/<session-uuid>.jsonl` → `<...>/<session-uuid>/`；已经是目录则原样返回。
+/// `<...>/<session-uuid>.jsonl` → `<...>/<session-uuid>/`。只认存在的转录文件：路径
+/// 来自钩子上报，指向目录或不存在的路径都不当会话来源。
 fn session_dir_from_transcript(path: &Path) -> Option<PathBuf> {
-    if path.is_dir() {
-        return Some(path.to_path_buf());
+    if !path.is_file() {
+        return None;
     }
     let parent = path.parent()?;
     let stem = path.file_stem()?.to_str()?;
@@ -1865,6 +1866,37 @@ mod tests {
             now_ms,
             agent_config_dir: None,
             latest_hint: None,
+        }
+    }
+
+    /// B 车道审查轻 3：`Path` 引用只认转录文件，由它推出同名的会话目录；指向目录（或
+    /// 不存在的文件）时不当会话目录用，免得上报一条路径就能把活动树指到任意目录。
+    #[test]
+    fn a_path_reference_must_name_the_transcript_file() {
+        let project = fixture_home().join(".claude/projects/-tmp-demo-project");
+        let transcript = AgentSessionRef::path(
+            project
+                .join(format!("{SESSION_ID}.jsonl"))
+                .to_string_lossy()
+                .into_owned(),
+        )
+        .expect("绝对路径");
+        let empty = std::env::temp_dir();
+        let nodes = Claude
+            .discover(&context(&empty, Some(&transcript), FIXTURE_LAST_MS))
+            .expect("转录文件可读");
+        assert!(!nodes.is_empty(), "由转录文件推出会话目录");
+
+        for path in [
+            project.join(SESSION_ID),
+            project.join("5f000000-0000-4000-8000-00000000ffff.jsonl"),
+        ] {
+            let session =
+                AgentSessionRef::path(path.to_string_lossy().into_owned()).expect("绝对路径");
+            let nodes = Claude
+                .discover(&context(&empty, Some(&session), FIXTURE_LAST_MS))
+                .expect("找不到会话时回空树");
+            assert!(nodes.is_empty(), "{}", path.display());
         }
     }
 
