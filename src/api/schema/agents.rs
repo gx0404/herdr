@@ -209,8 +209,10 @@ pub struct AgentInfo {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_session: Option<AgentSessionInfo>,
     /// 该 agent 的活动树（子 agent / 任务 / 待办 / 后台进程）；没有活动时省略。
-    /// 节点数有上限，超出时只保留运行中的节点及其祖先，截断前的规模见
-    /// `activity_running` / `activity_total` / `activity_truncated`。
+    /// 节点数有上限，超出时先保留活跃（等待 / 运行中 / 受阻）的节点，再保留最近
+    /// 结束的完成 / 失败节点，状态未知的最后，都连同祖先；截断前的规模见
+    /// `activity_running` / `activity_total` / `activity_done` / `activity_failed` /
+    /// `activity_truncated`。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub activity: Vec<AgentActivityNode>,
     /// 截断前的运行中节点数；没有活动树时为 `0`（省略）。
@@ -219,6 +221,12 @@ pub struct AgentInfo {
     /// 截断前的节点总数；没有活动树时为 `0`（省略）。
     #[serde(default, skip_serializing_if = "super::is_zero_u32")]
     pub activity_total: u32,
+    /// 截断前的已完成节点数；为 `0` 时省略，旧 server 不下发。
+    #[serde(default, skip_serializing_if = "super::is_zero_u32")]
+    pub activity_done: u32,
+    /// 截断前的失败节点数；为 `0` 时省略，旧 server 不下发。
+    #[serde(default, skip_serializing_if = "super::is_zero_u32")]
+    pub activity_failed: u32,
     /// 来源给出的节点超过上限、`activity` 已被截断。完整树用
     /// `agent.activity.read`（省略 `node_id`）拉取。
     #[serde(default, skip_serializing_if = "super::is_false")]
@@ -450,10 +458,17 @@ mod tests {
             "activity",
             "activity_running",
             "activity_total",
+            "activity_done",
+            "activity_failed",
             "activity_truncated",
         ] {
             assert!(json.get(field).is_none(), "无活动时省略 {field}");
         }
+        assert_eq!(
+            (info.activity_done, info.activity_failed),
+            (0, 0),
+            "旧 server 不下发完成 / 失败计数，解码取 0"
+        );
 
         info.activity = vec![AgentActivityNode {
             id: "a".into(),
@@ -462,10 +477,14 @@ mod tests {
         }];
         info.activity_running = 3;
         info.activity_total = 40;
+        info.activity_done = 30;
+        info.activity_failed = 2;
         info.activity_truncated = true;
         let json = serde_json::to_value(&info).expect("序列化");
         assert_eq!(json["activity_running"], 3);
         assert_eq!(json["activity_total"], 40);
+        assert_eq!(json["activity_done"], 30);
+        assert_eq!(json["activity_failed"], 2);
         assert_eq!(json["activity_truncated"], true);
         let round_trip: AgentInfo = serde_json::from_value(json).expect("往返");
         assert_eq!(round_trip, info);

@@ -905,6 +905,8 @@ mod tests {
             activity: Vec::new(),
             activity_running: 0,
             activity_total: 0,
+            activity_done: 0,
+            activity_failed: 0,
             activity_truncated: false,
             launch_seq: 0,
         }

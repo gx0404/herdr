@@ -349,8 +349,8 @@ fn agent_activity_projection(
         return protocol::ClientShellAgentActivity::default();
     };
     activity_projection(
-        stored.running,
-        stored.total,
+        stored.counts.running,
+        stored.counts.total,
         stored.truncated,
         &stored.nodes,
         mode,
@@ -378,8 +378,8 @@ fn external_agents_projection(
                 cwd: info.cwd.clone(),
                 updated_at_ms: info.updated_at_ms,
                 activity: activity_projection(
-                    record.running,
-                    record.total,
+                    record.counts.running,
+                    record.counts.total,
                     record.truncated,
                     &info.activity,
                     mode,

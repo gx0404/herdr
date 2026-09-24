@@ -1042,8 +1042,9 @@ pub(crate) struct PaneFocusTarget {
     pub pane_id: PaneId,
 }
 
-/// 每个 agent 保留的活动节点上限：超出的部分截断并置 `truncated`（运行中的节点
-/// 及其祖先优先保留），全量经 `agent.activity.read` 按需取。
+/// 每个 agent 保留的活动节点上限：超出的部分截断并置 `truncated`（选点优先级见
+/// [`truncate_activity_nodes`]：活跃节点 → 最近结束的完成 / 失败节点 → 状态未知的
+/// 节点，都连同祖先链），全量经 `agent.activity.read` 按需取。
 pub const MAX_AGENT_ACTIVITY_NODES: usize = 32;
 
 /// 外部来源连续这么久没有一次成功刷新，其条目标为「暂不可读」（`readable =
@@ -1059,15 +1060,54 @@ pub const MAX_AGENT_ACTIVITY_HINT_BYTES: usize = 1024 * 1024;
 pub struct AgentActivitySnapshot {
     /// 截断后的节点，保持来源顺序。
     pub nodes: Vec<crate::api::schema::AgentActivityNode>,
-    /// 截断前的运行中节点数。
-    pub running: u32,
-    /// 截断前的节点总数。
-    pub total: u32,
+    /// 截断前的计数（运行中 / 活跃 / 完成 / 失败 / 总数）。
+    pub counts: ActivityCounts,
     pub truncated: bool,
     /// 最近一次刷新（含内容未变的刷新）的时刻。
     pub refreshed_at: std::time::Instant,
     /// 内容每变化一次递增；同一 pane 内单调。
     pub revision: u64,
+}
+
+/// 一棵活动树按状态的计数，都是截断前的（来源给出的整棵树）。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ActivityCounts {
+    /// 状态为运行中（`running`）的节点数；等待与受阻不算。
+    pub running: u32,
+    /// 活跃（等待 / 运行中 / 受阻）的节点数。
+    pub active: u32,
+    /// 已完成的节点数。
+    pub done: u32,
+    /// 失败的节点数。
+    pub failed: u32,
+    /// 节点总数。
+    pub total: u32,
+}
+
+impl ActivityCounts {
+    fn of(nodes: &[crate::api::schema::AgentActivityNode]) -> Self {
+        use crate::api::schema::AgentActivityStatus;
+        let clamp = |count: usize| u32::try_from(count).unwrap_or(u32::MAX);
+        let count = |wanted: fn(AgentActivityStatus) -> bool| {
+            clamp(nodes.iter().filter(|node| wanted(node.status)).count())
+        };
+        Self {
+            running: count(|status| status == AgentActivityStatus::Running),
+            active: count(activity_status_is_active),
+            done: count(|status| status == AgentActivityStatus::Done),
+            failed: count(|status| status == AgentActivityStatus::Failed),
+            total: clamp(nodes.len()),
+        }
+    }
+}
+
+/// 活跃状态：等待、运行中、受阻——节点还没结束。
+pub(crate) fn activity_status_is_active(status: crate::api::schema::AgentActivityStatus) -> bool {
+    use crate::api::schema::AgentActivityStatus;
+    matches!(
+        status,
+        AgentActivityStatus::Pending | AgentActivityStatus::Running | AgentActivityStatus::Blocked
+    )
 }
 
 /// 一次活动树变化后的计数，随 `pane.agent_activity_changed` 事件下发。
@@ -1122,8 +1162,7 @@ pub(crate) fn activity_summary_truncated(
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExternalAgentRecord {
     pub info: crate::api::schema::ExternalAgentInfo,
-    pub running: u32,
-    pub total: u32,
+    pub counts: ActivityCounts,
     pub truncated: bool,
 }
 
@@ -1222,30 +1261,28 @@ impl AgentActivityStore {
     ) -> Option<AgentActivityApplied> {
         let truncated = truncate_activity_nodes(nodes);
         let counts = AgentActivityCounts {
-            running: truncated.running,
-            total: truncated.total,
+            running: truncated.counts.running,
+            total: truncated.counts.total,
         };
         match self.activity.get_mut(&pane_id) {
             Some(existing) => {
                 existing.refreshed_at = now;
                 let unchanged = existing.nodes == truncated.nodes
-                    && existing.running == truncated.running
-                    && existing.total == truncated.total
+                    && existing.counts == truncated.counts
                     && existing.truncated == truncated.truncated;
                 if unchanged {
                     return None;
                 }
                 // 摘要只带计数、截断标记与最新一个节点：深层节点（结束时间、摘要
                 // 文本等）变化不进投影，不必让每个客户端整份重建快照。
-                let summary_changed = existing.running != truncated.running
-                    || existing.total != truncated.total
+                let summary_changed = existing.counts.running != truncated.counts.running
+                    || existing.counts.total != truncated.counts.total
                     || activity_summary_truncated(existing.truncated, &existing.nodes)
                         != activity_summary_truncated(truncated.truncated, &truncated.nodes)
                     || latest_activity_node(&existing.nodes)
                         != latest_activity_node(&truncated.nodes);
                 existing.nodes = truncated.nodes;
-                existing.running = truncated.running;
-                existing.total = truncated.total;
+                existing.counts = truncated.counts;
                 existing.truncated = truncated.truncated;
                 existing.revision = existing.revision.saturating_add(1);
                 Some(AgentActivityApplied {
@@ -1261,8 +1298,7 @@ impl AgentActivityStore {
                     pane_id,
                     AgentActivitySnapshot {
                         nodes: truncated.nodes,
-                        running: truncated.running,
-                        total: truncated.total,
+                        counts: truncated.counts,
                         truncated: truncated.truncated,
                         refreshed_at: now,
                         revision: 1,
@@ -1379,8 +1415,7 @@ impl AgentActivityStore {
                 info.activity = truncated.nodes;
                 ExternalAgentRecord {
                     info,
-                    running: truncated.running,
-                    total: truncated.total,
+                    counts: truncated.counts,
                     truncated: truncated.truncated,
                 }
             }))
@@ -1426,94 +1461,142 @@ impl AgentActivityStore {
 /// [`truncate_activity_nodes`] 的结果。
 struct TruncatedActivity {
     nodes: Vec<crate::api::schema::AgentActivityNode>,
-    running: u32,
-    total: u32,
+    counts: ActivityCounts,
     truncated: bool,
 }
 
-/// 把一次发现结果截断到 [`MAX_AGENT_ACTIVITY_NODES`]。未超限时原样返回；超限时
-/// 先保留运行中的节点连同其祖先链（整条链放不下就跳过该节点，避免孤儿），再按
-/// 来源顺序补入父节点已保留（或无父节点）的其余节点；输出保持来源顺序。
-fn truncate_activity_nodes(nodes: Vec<crate::api::schema::AgentActivityNode>) -> TruncatedActivity {
-    use crate::api::schema::AgentActivityStatus;
-    let total = nodes.len();
-    let running = nodes
-        .iter()
-        .filter(|node| node.status == AgentActivityStatus::Running)
-        .count();
-    let running = u32::try_from(running).unwrap_or(u32::MAX);
-    let total_count = u32::try_from(total).unwrap_or(u32::MAX);
-    if total <= MAX_AGENT_ACTIVITY_NODES {
-        return TruncatedActivity {
-            nodes,
-            running,
-            total: total_count,
-            truncated: false,
-        };
-    }
-
+/// 各节点的父节点下标：父节点不在列表里或指向自己时为 `None`（id 重复时认最后
+/// 一个）。
+fn activity_parent_indices(nodes: &[crate::api::schema::AgentActivityNode]) -> Vec<Option<usize>> {
     let index_by_id = nodes
         .iter()
         .enumerate()
         .map(|(index, node)| (node.id.as_str(), index))
         .collect::<std::collections::HashMap<_, _>>();
-    let parent_index = |index: usize| -> Option<usize> {
-        nodes[index]
-            .parent_id
-            .as_deref()
-            .and_then(|parent| index_by_id.get(parent).copied())
-            .filter(|parent| *parent != index)
-    };
-    let mut keep = vec![false; total];
-    let mut kept = 0usize;
-    let mut chain = Vec::new();
-    for index in 0..total {
-        if kept >= MAX_AGENT_ACTIVITY_NODES {
-            break;
+    nodes
+        .iter()
+        .enumerate()
+        .map(|(index, node)| {
+            node.parent_id
+                .as_deref()
+                .and_then(|parent| index_by_id.get(parent).copied())
+                .filter(|parent| *parent != index)
+        })
+        .collect()
+}
+
+/// 截断选点的优先次序（节点下标）：先活跃节点（按开始时间），再完成 / 失败节点
+/// （按结束时间，缺则开始时间），状态未知的最后（同样按结束 / 开始时间）；同档内
+/// 待办排在其余种类之后、时间晚的在前、缺时间的最后，再按来源顺序（稳定排序）。
+fn activity_priority_order(nodes: &[crate::api::schema::AgentActivityNode]) -> Vec<usize> {
+    use crate::api::schema::{AgentActivityKind, AgentActivityStatus};
+    let mut order = (0..nodes.len()).collect::<Vec<_>>();
+    order.sort_by_key(|&index| {
+        let node = &nodes[index];
+        let active = activity_status_is_active(node.status);
+        let tier = if active {
+            0u8
+        } else if matches!(
+            node.status,
+            AgentActivityStatus::Done | AgentActivityStatus::Failed
+        ) {
+            1
+        } else {
+            2
+        };
+        let at = if active {
+            node.started_at_ms
+        } else {
+            node.ended_at_ms.or(node.started_at_ms)
+        };
+        // `Reverse(Option)`：时间晚的在前，`None` 排在所有时间之后。
+        (
+            tier,
+            node.kind == AgentActivityKind::Todo,
+            std::cmp::Reverse(at),
+        )
+    });
+    order
+}
+
+/// 带祖先链的限额选点：按调用方给的次序逐个 [`Self::offer`]，节点连同尚未选入的
+/// 祖先链一起选入；整条链放不下名额时跳过该节点（不产生孤儿），记下有节点被跳过。
+struct AncestorSelection {
+    keep: Vec<bool>,
+    kept: usize,
+    cap: usize,
+    chain: Vec<usize>,
+    skipped: bool,
+}
+
+impl AncestorSelection {
+    fn new(len: usize, cap: usize) -> Self {
+        Self {
+            keep: vec![false; len],
+            kept: 0,
+            cap,
+            chain: Vec::new(),
+            skipped: false,
         }
-        if keep[index] || nodes[index].status != AgentActivityStatus::Running {
-            continue;
+    }
+
+    fn full(&self) -> bool {
+        self.kept >= self.cap
+    }
+
+    fn offer(&mut self, index: usize, parent_of: &[Option<usize>]) {
+        if self.keep[index] {
+            return;
         }
-        chain.clear();
+        self.chain.clear();
         let mut cursor = Some(index);
         while let Some(current) = cursor {
-            if keep[current] || chain.contains(&current) {
+            if self.keep[current] || self.chain.contains(&current) {
                 break;
             }
-            chain.push(current);
-            cursor = parent_index(current);
+            self.chain.push(current);
+            cursor = parent_of[current];
         }
-        if kept + chain.len() <= MAX_AGENT_ACTIVITY_NODES {
-            for &member in &chain {
-                keep[member] = true;
+        if self.kept + self.chain.len() <= self.cap {
+            for &member in &self.chain {
+                self.keep[member] = true;
             }
-            kept += chain.len();
+            self.kept += self.chain.len();
+        } else {
+            self.skipped = true;
         }
     }
-    for index in 0..total {
-        if kept >= MAX_AGENT_ACTIVITY_NODES {
+}
+
+/// 把一次发现结果截断到 [`MAX_AGENT_ACTIVITY_NODES`]。未超限时原样返回；超限时按
+/// [`activity_priority_order`] 的次序逐个选入节点连同其祖先链（整条链放不下就跳过
+/// 该节点，避免孤儿）：活跃节点全部优先，其次是最近结束的完成 / 失败节点，状态
+/// 未知的（多是没有结束记录的旧节点）最后。输出保持来源顺序。
+fn truncate_activity_nodes(nodes: Vec<crate::api::schema::AgentActivityNode>) -> TruncatedActivity {
+    let counts = ActivityCounts::of(&nodes);
+    if nodes.len() <= MAX_AGENT_ACTIVITY_NODES {
+        return TruncatedActivity {
+            nodes,
+            counts,
+            truncated: false,
+        };
+    }
+    let parent_of = activity_parent_indices(&nodes);
+    let mut selection = AncestorSelection::new(nodes.len(), MAX_AGENT_ACTIVITY_NODES);
+    for index in activity_priority_order(&nodes) {
+        if selection.full() {
             break;
         }
-        if keep[index] {
-            continue;
-        }
-        let attached = nodes[index].parent_id.is_none()
-            || parent_index(index).is_none_or(|parent| keep[parent]);
-        if attached {
-            keep[index] = true;
-            kept += 1;
-        }
+        selection.offer(index, &parent_of);
     }
-    drop(index_by_id);
     let nodes = nodes
         .into_iter()
-        .zip(keep)
+        .zip(selection.keep)
         .filter_map(|(node, keep)| keep.then_some(node))
         .collect();
     TruncatedActivity {
         nodes,
-        running,
-        total: total_count,
+        counts,
         truncated: true,
     }
 }
@@ -2815,6 +2898,17 @@ mod agent_activity_store_tests {
         );
         let stored = store.activity(pane).expect("已落库");
         assert!(stored.truncated);
+        assert_eq!(
+            stored.counts,
+            ActivityCounts {
+                running: 2,
+                active: 3,
+                done: 41,
+                failed: 0,
+                total: 44
+            },
+            "存储的计数同样是截断前的；活跃含受阻"
+        );
         assert_eq!(stored.nodes.len(), MAX_AGENT_ACTIVITY_NODES);
         let kept = ids(&stored.nodes);
         assert_eq!(kept[0], "root", "来源顺序不变");
@@ -2832,6 +2926,114 @@ mod agent_activity_store_tests {
                 );
             }
         }
+    }
+
+    fn timed(
+        id: &str,
+        parent: Option<&str>,
+        status: AgentActivityStatus,
+        started: Option<u64>,
+        ended: Option<u64>,
+    ) -> AgentActivityNode {
+        AgentActivityNode {
+            started_at_ms: started,
+            ended_at_ms: ended,
+            ..node(id, parent, status)
+        }
+    }
+
+    /// 选点优先级：活跃节点（含等待、受阻）全部先入；其余名额给最近结束的完成 /
+    /// 失败节点（结束时间缺失时按开始时间），它们的祖先链一并带上；状态未知的旧
+    /// 节点（没有结束记录）排在最后，哪怕它们在来源里排在前面。
+    #[test]
+    fn truncation_prefers_active_then_recently_finished_then_unknown() {
+        use AgentActivityStatus::{Blocked, Done, Failed, Pending, Running, Unknown};
+        let mut store = AgentActivityStore::default();
+        let pane = PaneId::from_raw(1);
+        // 来源前部是 20 个状态未知的旧节点，再是 20 个按时间递增结束的完成节点。
+        let mut tree = (0..20)
+            .map(|index| timed(&format!("old-{index:02}"), None, Unknown, Some(index), None))
+            .collect::<Vec<_>>();
+        tree.push(timed("wf", None, Done, Some(100), Some(900)));
+        tree.push(timed("phase", Some("wf"), Done, Some(100), Some(900)));
+        tree.extend((0..30).map(|index| {
+            timed(
+                &format!("done-{index:02}"),
+                Some("phase"),
+                Done,
+                Some(100 + index),
+                Some(200 + index),
+            )
+        }));
+        tree.push(timed("failed-late", None, Failed, Some(500), None));
+        tree.push(timed("pending", None, Pending, None, None));
+        tree.push(timed("blocked", None, Blocked, Some(5), None));
+        tree.push(timed("running", None, Running, Some(7), None));
+        let source_order = tree.iter().map(|node| node.id.clone()).collect::<Vec<_>>();
+        store.apply_activity(pane, tree, Instant::now());
+        let stored = store.activity(pane).expect("已落库");
+        assert_eq!(
+            stored.counts,
+            ActivityCounts {
+                running: 1,
+                active: 3,
+                done: 32,
+                failed: 1,
+                total: 56
+            }
+        );
+        let kept = ids(&stored.nodes);
+        assert_eq!(kept.len(), MAX_AGENT_ACTIVITY_NODES);
+        for id in ["pending", "blocked", "running"] {
+            assert!(kept.contains(&id), "活跃节点 {id} 全部保留");
+        }
+        assert!(
+            kept.iter().all(|id| !id.starts_with("old-")),
+            "状态未知的节点排在完成 / 失败之后，名额用尽时被截掉: {kept:?}"
+        );
+        // 3 个活跃 + wf、phase、failed-late + 26 个完成节点：结束节点按结束（缺则
+        // 开始）时间倒序，最早结束的 4 个被截掉。
+        assert!(
+            kept.contains(&"wf") && kept.contains(&"phase"),
+            "祖先链完整"
+        );
+        assert!(kept.contains(&"failed-late"), "缺结束时间按开始时间排");
+        assert!(kept.contains(&"done-29") && kept.contains(&"done-04"));
+        assert!(!kept.contains(&"done-03") && !kept.contains(&"done-00"));
+        for kept_node in &stored.nodes {
+            if let Some(parent) = kept_node.parent_id.as_deref() {
+                assert!(kept.contains(&parent), "{} 的父节点被截掉", kept_node.id);
+            }
+        }
+        let expected = source_order
+            .iter()
+            .map(String::as_str)
+            .filter(|id| kept.contains(id))
+            .collect::<Vec<_>>();
+        assert_eq!(kept, expected, "输出保持来源顺序");
+    }
+
+    /// 选点时祖先链与活跃节点一样完整：完成节点被选中会把它尚未选入的祖先一并
+    /// 带上，整条链放不下名额就跳过它，不产生孤儿。
+    #[test]
+    fn truncation_brings_the_ancestors_of_finished_nodes_along() {
+        use AgentActivityStatus::{Done, Unknown};
+        let mut store = AgentActivityStore::default();
+        let pane = PaneId::from_raw(1);
+        // 31 个状态未知的根节点占满来源前部；最近结束的完成节点挂在一个状态未知
+        // 的父节点下：选中它时父节点随之保留。
+        let mut tree = (0..31)
+            .map(|index| timed(&format!("u{index:02}"), None, Unknown, Some(index), None))
+            .collect::<Vec<_>>();
+        tree.push(timed("parent", None, Unknown, Some(0), None));
+        tree.push(timed("child", Some("parent"), Done, Some(1), Some(50)));
+        store.apply_activity(pane, tree, Instant::now());
+        let kept = ids(&store.activity(pane).expect("已落库").nodes).join(",");
+        assert!(kept.contains("parent,child"), "{kept}");
+        assert!(
+            !kept.contains("u00"),
+            "状态未知的名额让给结束节点及其祖先: {kept}"
+        );
     }
 
     #[test]
@@ -2984,8 +3186,16 @@ mod agent_activity_store_tests {
         let record = &store.external()[0];
         assert_eq!(record.info.activity.len(), MAX_AGENT_ACTIVITY_NODES);
         assert_eq!(
-            (record.running, record.total, record.truncated),
+            (record.counts.running, record.counts.total, record.truncated),
             (40, 40, true)
+        );
+        assert_eq!(
+            (
+                record.counts.active,
+                record.counts.done,
+                record.counts.failed
+            ),
+            (40, 0, 0)
         );
     }
 

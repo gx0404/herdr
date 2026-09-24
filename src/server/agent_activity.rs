@@ -2821,7 +2821,7 @@ mod tests {
             .state
             .agent_activity
             .activity(pane_id)
-            .is_some_and(|tree| tree.running == 1));
+            .is_some_and(|tree| tree.counts.running == 1));
 
         // 每轮遍历至少隔 1 s（SCHEDULER_PASS_INTERVAL）：4 s 这一轮遍历到了该 pane
         // 但还不到 5 s，不提交；5 s 这一轮才到期。

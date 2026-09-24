@@ -419,8 +419,10 @@ impl App {
             activity: activity
                 .map(|snapshot| snapshot.nodes.clone())
                 .unwrap_or_default(),
-            activity_running: activity.map_or(0, |snapshot| snapshot.running),
-            activity_total: activity.map_or(0, |snapshot| snapshot.total),
+            activity_running: activity.map_or(0, |snapshot| snapshot.counts.running),
+            activity_total: activity.map_or(0, |snapshot| snapshot.counts.total),
+            activity_done: activity.map_or(0, |snapshot| snapshot.counts.done),
+            activity_failed: activity.map_or(0, |snapshot| snapshot.counts.failed),
             activity_truncated: activity.is_some_and(|snapshot| snapshot.truncated),
             launch_seq: self.state.agent_activity.launch_seq(pane_id),
             workspace_id: pane.workspace_id,
