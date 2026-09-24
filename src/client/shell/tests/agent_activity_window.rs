@@ -1163,10 +1163,10 @@ fn summary_change_without_follow_shows_the_updates_badge() {
 /// N17：外部条目的快照摘要来自来源的列表查询，列表让各条目分摊行数上限，被挤掉
 /// 的条目在快照里只剩一截残树；窗口读到的却是只针对该条目的单独查询（整树）。
 /// 两者对不上不说明有变化：列表随别的条目变来变去时不提示「有更新」。快照与树
-/// 对上过之后再偏离，照常提示（宽 / 窄窗口都画出徽标）。
+/// 对上过之后再偏离，照常提示（宽、中两档画出徽标；窄档放不下时按取舍先丢它）。
 #[test]
 fn external_updates_badge_ignores_a_listed_tree_cut_short_by_the_list() {
-    for (cols, rows) in [(120, 40), (90, 30)] {
+    for (cols, rows) in [(120, 40), (90, 30), (56, 20)] {
         let mut state = state();
         let outcome = open(
             &mut state,
@@ -1198,10 +1198,19 @@ fn external_updates_badge_ignores_a_listed_tree_cut_short_by_the_list() {
         state.compose(cols, rows).expect("frame");
         assert!(overlay(&state).has_updates, "{cols}x{rows} 对上之后的变化");
         let title = popup_text(&state)[1].clone();
-        assert!(
-            has(&title, texts().updates_badge),
-            "{cols}x{rows} 有更新徽标: {title:?}"
-        );
+        if cols >= 90 {
+            assert!(
+                has(&title, texts().updates_badge),
+                "{cols}x{rows} 有更新徽标: {title:?}"
+            );
+        } else {
+            // 窄窗口的标题栏放不下两个徽标：按取舍顺序「有更新」先丢、「只读」最后丢，
+            // 判定本身照常（上面已断言 has_updates）。
+            assert!(
+                has(&title, texts().external_read_only) && !has(&title, texts().updates_badge),
+                "{cols}x{rows} 只留只读徽标: {title:?}"
+            );
+        }
 
         // r 刷新：读到的新树与快照不同（又被挤掉）时，重新等快照对上。
         let outcome = state.handle_raw_events(vec![key(KeyCode::Char('r'))]);
