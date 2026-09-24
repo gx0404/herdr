@@ -410,8 +410,8 @@ pub(super) struct PaintOutput {
 }
 
 /// 渲染纯函数：`page` 是本次要画的页面（停靠面板由调用方决定画哪个 tab），
-/// 状态只读；`draw_hover` 为真时画可见的悬浮层（agent 行悬浮只在没有页面时），
-/// 进程对话框总是最后覆盖。调色板、组件 token 与
+/// 状态只读；`draw_hover` 为真时按 `State::hover_card_drawn` 画悬浮层（agent 行
+/// 悬浮只在没有页面时，钉住的卡除外），进程对话框总是最后覆盖。调色板、组件 token 与
 /// 边框字形都来自 `ChromeContext`（与浮层同源，C-29）。
 pub(super) fn paint(
     buffer: &mut Buffer,
@@ -529,9 +529,10 @@ pub(super) fn paint(
     }
     let mut hover_hits = Vec::new();
     // agent 行悬浮只在没有页面时画（停靠面板的全局 pass / 经典布局无页面）；
-    // 钉住的卡是用户显式打开的（右键「用量」），经典布局页面之上也画。
-    let pinned = state.hover.as_ref().is_some_and(|hover| hover.pinned);
-    let mut hover_rect = if draw_hover && (page.is_none() || pinned) {
+    // 钉住的卡是用户显式打开的（右键「用量」），经典布局页面之上也画；进程
+    // 对话框在时不画。判据与 `tick_observability` 发不发悬浮层的用量请求共用
+    // `State::hover_card_drawn`。
+    let hover_rect = if draw_hover && state.hover_card_drawn(page) {
         let (rect, scroll_limit) = hover_layer(buffer, state, cx, &mut hover_hits);
         account_scroll_limits.hover = scroll_limit;
         rect
@@ -540,10 +541,7 @@ pub(super) fn paint(
     };
     let mut dialog_rect = Rect::default();
     if let Some(dialog) = &state.process_dialog {
-        hover_rect = Rect::default();
-        hover_hits.clear();
         hits.clear();
-        account_scroll_limits.hover = None;
         dialog_rect = process_dialog(buffer, dialog, state, cx, &mut hits);
     }
     PaintOutput {

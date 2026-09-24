@@ -8228,6 +8228,99 @@ fn classic_page_holds_hover_usage_requests_until_the_hover_is_drawn() {
     assert!(!state.observability.hover_rect.is_empty(), "悬浮层画出来");
 }
 
+/// T1 审查轻 7：悬浮层「画不画」（`render::paint`）与「按悬浮层作用域发不发用量
+/// 请求」（`tick_observability`）以前各写一份判据，进程对话框压着悬浮层时两边
+/// 走样：卡片照画（对话框只盖住屏幕中间），用量却不再请求。现在两处共用
+/// `State::hover_card_drawn`。逐个组合核对（经典 / 停靠布局 × 监控页开关 × 钉住
+/// 与否 × 进程对话框有无）：画面上有卡片标题 ⇔ 发了悬浮层的用量请求。
+#[test]
+fn hover_usage_requests_follow_exactly_what_is_drawn() {
+    use crate::client::shell::observability::ProcessDialog;
+    let title: String = crate::i18n::fill(
+        crate::i18n::texts().agent_panel.usage_card_title_fmt,
+        &[("agent", "claude")],
+    )
+    .chars()
+    .filter(|ch| !ch.is_whitespace())
+    .collect();
+    let methods = [
+        "client.views.set",
+        "tab.focus",
+        "pane.focus",
+        "account.usage.get",
+        "account.usage.refresh",
+        "account.usage.providers",
+    ];
+    for docked in [false, true] {
+        for page_open in [false, true] {
+            for pinned in [false, true] {
+                for dialog in [false, true] {
+                    let case = format!(
+                        "docked={docked} page_open={page_open} pinned={pinned} dialog={dialog}"
+                    );
+                    let mut snapshot = snapshot();
+                    snapshot.agents.push(agent_in_pane("pane_1", "claude"));
+                    let mut state = if docked {
+                        docked_with(snapshot)
+                    } else {
+                        let mut state = ClientShellState::new(ClientShellConfig::from_config(
+                            &Config::default(),
+                        ));
+                        state.set_snapshot(Box::new(snapshot));
+                        state.set_pane_surface(surface());
+                        state
+                    };
+                    state.set_endpoint_methods(Some(
+                        methods.iter().map(|method| (*method).to_owned()).collect(),
+                    ));
+                    let t0 = Instant::now();
+                    tick(&mut state, t0);
+                    assert_eq!(state.workbench.enabled, docked, "{case}：用例前提");
+                    if page_open {
+                        state
+                            .open_observation_page(Page::Monitor, &mut ClientShellInput::default());
+                    }
+                    state.observability.hover = Some(Hover {
+                        target: HoverTarget::Agent {
+                            endpoint_id: state.active_endpoint_id.clone(),
+                            pane: "pane_1".into(),
+                            agent: "claude".into(),
+                        },
+                        anchor: Rect::new(0, 20, 24, 2),
+                        since: t0,
+                        visible: false,
+                        leave_at: None,
+                        pinned,
+                    });
+                    if dialog {
+                        state.observability.process_dialog = Some(ProcessDialog {
+                            process: Default::default(),
+                            force: false,
+                            confirm: false,
+                            pending: false,
+                        });
+                    }
+                    let shown = tick(&mut state, t0 + Duration::from_millis(450));
+                    let requested = usage_calls(&shown)
+                        .into_iter()
+                        .any(|(_, params)| params.pane_id.as_deref() == Some("pane_1"));
+                    let frame = state.compose(133, 32).expect("悬浮层帧");
+                    let drawn = frame_rows(&frame)
+                        .concat()
+                        .chars()
+                        .filter(|ch| !ch.is_whitespace())
+                        .collect::<String>()
+                        .contains(&title);
+                    // 停靠布局的悬浮层在全局 pass 里画，不与页面同一 pass。
+                    let expected = !dialog && (pinned || docked || !page_open);
+                    assert_eq!(drawn, expected, "{case}：画不画");
+                    assert_eq!(requested, drawn, "{case}：画出来才请求，请求的就画了");
+                }
+            }
+        }
+    }
+}
+
 /// 文档终审 D4：告警阈值步进器以前固定 ±5、不走档位表，配置里的 30 会被加到
 /// 35（超出文档写的 50–100），52 这类档间值也跳不回档位。改为与其它步进器一样
 /// 走档位表（50–100，步长 5）：档间值先走到相邻档，越过两端回绕，结果永远在

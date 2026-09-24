@@ -1318,6 +1318,19 @@ impl State {
         }
     }
 
+    /// 悬浮层这一帧画不画得出来：已可见（停留满延时）、没有进程对话框压着，且与它
+    /// 同一 pass 绘制的页面不会盖住它——钉住的卡是用户显式打开的（右键「用量」），
+    /// 页面之上也画。`page` 是同一 pass 里的页面：经典布局传打开着的页面，停靠工作台
+    /// 的全局 pass 传 `None`。`render::paint` 据此决定画不画，`tick_observability`
+    /// 据此决定按悬浮层作用域发不发用量请求，两处同一判据（T1 审查轻 7）。
+    pub(super) fn hover_card_drawn(&self, page: Option<Page>) -> bool {
+        self.process_dialog.is_none()
+            && self
+                .hover
+                .as_ref()
+                .is_some_and(|hover| hover.visible && (hover.pinned || page.is_none()))
+    }
+
     /// 悬浮层下一次需要 tick 的时刻（出现或离开宽限到期），供事件循环定超时；
     /// 已可见且指针在上、已钉住或没有悬浮层时为 `None`。O(1)。
     pub(super) fn hover_deadline(&self) -> Option<Instant> {
@@ -2217,15 +2230,15 @@ impl ClientShellState {
             _ => {}
         }
         // 悬浮层真正画得出来才算可见（文档终审 D13）：经典布局打开页面时页面铺满
-        // 窗格区，非钉住的悬浮层不画、进程对话框之上也不画（与 `render::paint`
-        // 同一判据），就不该按它的作用域发用量请求；画得出来后再发。
-        let classic_page_open = !self.workbench.enabled && self.observability.page.is_some();
-        let hover_visible = self.observability.process_dialog.is_none()
-            && self
-                .observability
-                .hover
-                .as_ref()
-                .is_some_and(|hover| hover.visible && (hover.pinned || !classic_page_open));
+        // 窗格区，非钉住的悬浮层不画、进程对话框在时也不画，就不该按它的作用域发
+        // 用量请求；画得出来后再发。与 `render::paint` 共用 `State::hover_card_drawn`：
+        // 经典布局的页面与悬浮层同一 pass 绘制，停靠工作台的全局 pass 不带页面。
+        let hover_pass_page = if self.workbench.enabled {
+            None
+        } else {
+            self.observability.page
+        };
+        let hover_visible = self.observability.hover_card_drawn(hover_pass_page);
         // 账号页（经典布局页面 / 停靠面板的账号 tab / legacy 账号面板）可见。
         let accounts_page_visible = self.observability.page == Some(Page::Accounts)
             || (self.workbench.visible(&dock::PanelId::Monitor)
