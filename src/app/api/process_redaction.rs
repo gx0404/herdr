@@ -57,8 +57,9 @@ pub(super) fn redact_command(
             // Unix 的 cmdline 就是 argv 用空格拼起来的：直接拼打码后的 argv。拼起来
             // 之后已分不清参数边界（带空格的值会被切开），不能对它重新切词。
             (Some(original), Some(redacted)) if cmdline == original.join(" ") => redacted.join(" "),
-            // Windows 的 cmdline 是进程自己的原始命令行：按引号切词、原位替换要打码的词。
-            _ => redact_line(&cmdline, 1, 0),
+            // Windows 的 cmdline 是进程自己的原始命令行：按 CommandLineToArgvW 的引号
+            // 规则切词、原位替换要打码的词。
+            _ => redact_line(&cmdline, 1, 0, Quotes::Windows),
         },
     );
     (redacted_argv, cmdline)
@@ -200,7 +201,7 @@ fn ends_with_sensitive_header_name(word: &str) -> bool {
 /// 带空格的参数），否则只看其中的 URL。
 fn redact_text(text: &str, depth: usize) -> Option<String> {
     if depth < MAX_NESTING && text.contains(char::is_whitespace) {
-        let redacted = redact_line(text, 0, depth + 1);
+        let redacted = redact_line(text, 0, depth + 1, Quotes::Shell);
         return (redacted != text).then_some(redacted);
     }
     redact_urls(text)
@@ -310,6 +311,25 @@ fn is_auth_scheme(word: &str) -> bool {
         .any(|scheme| word.eq_ignore_ascii_case(scheme))
 }
 
+/// 切词时认哪些引号。
+#[derive(Clone, Copy)]
+enum Quotes {
+    /// Windows 进程的原始命令行：CommandLineToArgvW 只认 `"`，路径里的 `'`（如
+    /// `C:\Users\O'Brien\…`）是普通字符。
+    Windows,
+    /// 参数里套的一段 shell 命令行（`sh -c '…'`）：`'` 与 `"` 都是引号。
+    Shell,
+}
+
+impl Quotes {
+    fn opens(self, ch: char) -> bool {
+        match self {
+            Quotes::Windows => ch == '"',
+            Quotes::Shell => ch == '"' || ch == '\'',
+        }
+    }
+}
+
 /// 一段命令行里的一个词：原文范围、去掉引号后的内容、最先出现的引号。
 struct Word {
     span: std::ops::Range<usize>,
@@ -317,9 +337,9 @@ struct Word {
     quote: Option<char>,
 }
 
-/// 按空白切词：`'…'` 与 `"…"` 里的空白不切、引号本身去掉；反斜杠按字面处理
-/// （Windows 路径里到处是反斜杠）。只用来找出要打码的词，不求还原 shell 语义。
-fn split_words(line: &str) -> Vec<Word> {
+/// 按空白切词：引号里的空白不切、引号本身去掉；反斜杠按字面处理（Windows 路径里
+/// 到处是反斜杠）。只用来找出要打码的词，不求还原 shell 语义。
+fn split_words(line: &str, quotes: Quotes) -> Vec<Word> {
     let mut words = Vec::new();
     let mut current: Option<Word> = None;
     let mut open_quote: Option<char> = None;
@@ -337,7 +357,7 @@ fn split_words(line: &str) -> Vec<Word> {
         match open_quote {
             Some(quote) if ch == quote => open_quote = None,
             Some(_) => word.text.push(ch),
-            None if ch == '"' || ch == '\'' => {
+            None if quotes.opens(ch) => {
                 open_quote = Some(ch);
                 word.quote.get_or_insert(ch);
             }
@@ -350,9 +370,19 @@ fn split_words(line: &str) -> Vec<Word> {
 
 /// 一段命令行打码：从第 `first` 个词起按规则处理，只替换要打码的词，其余原文
 /// （空白、引号写法）保持不动。
-fn redact_line(line: &str, first: usize, depth: usize) -> String {
-    let words = split_words(line);
+fn redact_line(line: &str, first: usize, depth: usize, quotes: Quotes) -> String {
+    let words = split_words(line, quotes);
     let mut texts: Vec<String> = words.iter().map(|word| word.text.clone()).collect();
+    // 跳过的第 0 个词（程序本身）带空白：要么是带空格的路径，要么是没配对的引号把
+    // 后面的参数一起吞了进来。当一段命令行再过一遍——带空格的路径切开后没有可打码的，
+    // 被吞进来的参数则照常打码。
+    if first > 0 && depth < MAX_NESTING {
+        if let Some(program) = texts.first_mut() {
+            if program.contains(char::is_whitespace) {
+                *program = redact_line(program, 1, depth + 1, quotes);
+            }
+        }
+    }
     redact_words(&mut texts, first, depth);
     let mut redacted = String::with_capacity(line.len());
     let mut copied = 0;
@@ -633,5 +663,31 @@ mod tests {
         // 平台没给 argv 时同样按原始命令行处理。
         let (_, cmdline) = redact_command(None, Some(raw.to_owned()));
         assert_eq!(cmdline.as_deref(), Some(expected));
+
+        // M1：CommandLineToArgvW 只认 `"`。程序路径里的撇号不是引号，不能把整行吞成
+        // 第 0 个词（第 0 个词不打码，凭据会原样漏出）。
+        let raw = r#"C:\Users\O'Brien\bin\tool.exe --token s3cr3t-4 --name "a b""#;
+        let expected = r#"C:\Users\O'Brien\bin\tool.exe --token [REDACTED] --name "a b""#;
+        let argv = words(&[
+            r"C:\Users\O'Brien\bin\tool.exe",
+            "--token",
+            "s3cr3t-4",
+            "--name",
+            "a b",
+        ]);
+        let (redacted, cmdline) = redact_command(Some(argv), Some(raw.to_owned()));
+        assert_eq!(cmdline.as_deref(), Some(expected));
+        assert!(redacted.is_some_and(|argv| !argv.join(" ").contains("s3cr3t")));
+        let (_, cmdline) = redact_command(None, Some(raw.to_owned()));
+        assert_eq!(cmdline.as_deref(), Some(expected));
+        // 引号没配对、整行都进了第 0 个词：同样要找出里面的参数。
+        let (_, cmdline) =
+            redact_command(None, Some(r#""C:\tools\x.exe --token s3cr3t-5"#.to_owned()));
+        assert!(
+            cmdline
+                .as_deref()
+                .is_some_and(|line| !line.contains("s3cr3t")),
+            "{cmdline:?}"
+        );
     }
 }
