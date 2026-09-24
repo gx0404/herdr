@@ -581,6 +581,132 @@ fn api_snapshot_prints_live_session_snapshot() {
     cleanup_test_base(&base);
 }
 
+/// 交接 T8 RL11：`herdr api activity-read` 是 `agent.activity.read` 的 CLI 入口。
+/// `--agent` 先经 `agent.get` 解析成 pane id（名字与 pane id 都可），再读；`--flag=value`
+/// 形态同样接受；应答整份以 JSON 打到 stdout。
+#[test]
+fn api_activity_read_resolves_an_agent_target_and_prints_json() {
+    let base = unique_test_dir();
+    fs::create_dir_all(&base).unwrap();
+    let socket_path = base.join("herdr.sock");
+    let listener = UnixListener::bind(&socket_path).unwrap();
+
+    let server = thread::spawn(move || {
+        let (mut stream, line) = accept_fake_cli_operation(&listener);
+        let request: serde_json::Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(request["method"], "agent.get");
+        assert_eq!(request["params"]["target"], "claude-main");
+        let response = serde_json::json!({
+            "id": request["id"],
+            "result": {"type": "agent_info", "agent": {"pane_id": "w1:p2"}},
+        });
+        writeln!(stream, "{response}").unwrap();
+        stream.flush().unwrap();
+
+        let (mut stream, line) = accept_fake_cli_operation(&listener);
+        let request: serde_json::Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(request["method"], "agent.activity.read");
+        let response = serde_json::json!({
+            "id": request["id"],
+            "result": {
+                "type": "agent_activity",
+                "nodes": [],
+                "content": {"node_id": "task:1", "format": "text", "text": "done\n", "eof": true},
+            },
+        });
+        writeln!(stream, "{response}").unwrap();
+        stream.flush().unwrap();
+        request
+    });
+
+    let value = run_cli_json(
+        &socket_path,
+        &[
+            "api",
+            "activity-read",
+            "--agent",
+            "claude-main",
+            "--node-id=task:1",
+            "--cursor",
+            "7",
+            "--max-bytes",
+            "2048",
+        ],
+    );
+    assert_eq!(value["result"]["type"], "agent_activity");
+    assert_eq!(value["result"]["content"]["text"], "done\n");
+    let request = server.join().unwrap();
+    assert_eq!(request["params"]["pane_id"], "w1:p2");
+    assert_eq!(request["params"]["node_id"], "task:1");
+    assert_eq!(request["params"]["cursor"], "7");
+    assert_eq!(request["params"]["max_bytes"], 2048);
+    assert!(request["params"].get("external_id").is_none());
+    assert!(
+        request["params"].get("follow").is_none(),
+        "CLI 一次性读取不跟随"
+    );
+    cleanup_test_base(&base);
+}
+
+/// `--external-id` 直接读外部来源条目的树（不经 `agent.get`）；server 的错误应答原样
+/// 打到 stderr、退出码 1。缺目标或两个目标都给时按用法错误退出 2。
+#[test]
+fn api_activity_read_reads_external_entries_and_reports_errors() {
+    let base = unique_test_dir();
+    fs::create_dir_all(&base).unwrap();
+    let socket_path = base.join("herdr.sock");
+    let listener = UnixListener::bind(&socket_path).unwrap();
+
+    let server = thread::spawn(move || {
+        let (mut stream, line) = accept_fake_cli_operation(&listener);
+        let request: serde_json::Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(request["method"], "agent.activity.read");
+        let response = serde_json::json!({
+            "id": request["id"],
+            "error": {"code": "agent_not_found", "message": "external agent zcode:s1 is not listed by its source"},
+        });
+        writeln!(stream, "{response}").unwrap();
+        stream.flush().unwrap();
+        request
+    });
+
+    let output = run_cli(
+        &socket_path,
+        &["api", "activity-read", "--external-id", "zcode:s1"],
+    );
+    assert_eq!(output.status.code(), Some(1));
+    let stderr: serde_json::Value = serde_json::from_slice(&output.stderr).unwrap();
+    assert_eq!(stderr["error"]["code"], "agent_not_found");
+    let request = server.join().unwrap();
+    assert_eq!(request["params"]["external_id"], "zcode:s1");
+    assert!(request["params"].get("pane_id").is_none());
+    assert!(
+        request["params"].get("node_id").is_none(),
+        "不给节点时读整棵树"
+    );
+
+    for args in [
+        &["api", "activity-read"][..],
+        &[
+            "api",
+            "activity-read",
+            "--agent",
+            "a",
+            "--external-id",
+            "zcode:s1",
+        ][..],
+    ] {
+        let output = run_cli(&socket_path, args);
+        assert_eq!(output.status.code(), Some(2), "{args:?}");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("usage: herdr api activity-read"),
+            "{args:?}: {stderr}"
+        );
+    }
+    cleanup_test_base(&base);
+}
+
 #[test]
 fn api_schema_output_writes_bundled_schema_to_file() {
     let base = unique_test_dir();

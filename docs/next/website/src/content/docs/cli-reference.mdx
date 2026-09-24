@@ -42,6 +42,8 @@ herdr api schema
 herdr api schema --json
 herdr api schema --output herdr-api.schema.json
 herdr api usage-report --agent AGENT [--account ID] [--passthrough]
+herdr api activity-read --agent TARGET [--node-id ID] [--cursor CURSOR] [--max-bytes N]
+herdr api activity-read --external-id ID [--node-id ID] [--cursor CURSOR] [--max-bytes N]
 ```
 
 `herdr api schema` prints a short summary of the socket protocol schema bundled
@@ -53,6 +55,15 @@ Code's status line input, from stdin and reports it for the pane in
 `HERDR_PANE_ID` or for the account named with `--account`. `--passthrough`
 also writes the input to stdout so an existing status line renderer keeps
 working. See [Monitoring](/docs/monitoring/) for binding rules.
+
+`herdr api activity-read` reads an agent's activity tree through the
+`agent.activity.read` socket method and prints the JSON response. Give exactly
+one target: `--agent` takes a unique agent name or the pane ID that hosts the
+agent, and `--external-id` takes an entry listed by `agent.external.list`, such
+as `zcode:<session id>`. Without `--node-id` it prints the whole tree; with it,
+one page of that item's output, and passing the page's `next_cursor` back as
+`--cursor` reads the next page. `--max-bytes` sets the page size. See
+[Socket API](/docs/socket-api/) for the response fields and error codes.
 
 ## Saved SSH machines
 

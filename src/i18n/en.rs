@@ -1396,6 +1396,16 @@ pub const TEXTS: Texts = Texts {
             "Account ID to report to; defaults to the account bound to the current pane",
         api_usage_report_passthrough_help: "Statusline wrapper mode: replay stdin to stdout for the original renderer, send the report without waiting and stay silent on errors",
         api_schema_about: "Print or write the bundled API schema",
+        api_activity_read_about:
+            "Read an agent's activity tree or one item's output (agent.activity.read)",
+        api_activity_read_agent_help:
+            "Agent to read: a unique agent name or the pane ID that hosts it",
+        api_activity_read_external_help:
+            "External entry to read, as listed by agent.external.list (<source>:<session id>)",
+        api_activity_read_node_help: "Read this item's output instead of the whole tree",
+        api_activity_read_cursor_help: "Continue from the next_cursor of the previous page",
+        api_activity_read_max_bytes_help:
+            "Output page size in bytes (server default 65536, capped at 524288)",
         workspace_about: "Manage workspaces over the socket API",
         workspace_list_about: "List workspaces",
         workspace_create_about: "Create a workspace",
@@ -1864,6 +1874,9 @@ pub const TEXTS: Texts = Texts {
 
         api_schema_usage: "usage: herdr api schema [--json | --output PATH]",
         api_snapshot_usage: "usage: herdr api snapshot",
+        api_activity_read_usage:
+            "usage: herdr api activity-read (--agent <TARGET> | --external-id <ID>) [--node-id <ID>] [--cursor <CURSOR>] [--max-bytes <N>]",
+        api_activity_read_no_pane_id: "agent lookup failed: response did not include pane_id",
         api_usage_report_usage:
             "usage: herdr api usage-report --agent <AGENT> [--account <ID>] [--passthrough]",
         usage_report_too_large: "the official usage report exceeds the size limit",

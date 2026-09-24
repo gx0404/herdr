@@ -265,6 +265,20 @@ fn api_command() -> Command {
         )
         .subcommand(Command::new("snapshot").about(t.api_snapshot_about))
         .subcommand(
+            Command::new("activity-read")
+                .about(t.api_activity_read_about)
+                .arg(option("agent", "TARGET").help(t.api_activity_read_agent_help))
+                .arg(option("external-id", "ID").help(t.api_activity_read_external_help))
+                .arg(option("node-id", "ID").help(t.api_activity_read_node_help))
+                .arg(option("cursor", "CURSOR").help(t.api_activity_read_cursor_help))
+                .arg(option("max-bytes", "N").help(t.api_activity_read_max_bytes_help))
+                .group(
+                    ArgGroup::new("activity_target")
+                        .args(["agent", "external-id"])
+                        .required(true),
+                ),
+        )
+        .subcommand(
             Command::new("schema")
                 .about(t.api_schema_about)
                 .arg(json_flag())
@@ -1478,6 +1492,66 @@ mod tests {
                 assert_eq!(has_cjk(text), chinese, "{lang:?}: {text}");
             }
         }
+    }
+
+    /// 交接 T8 RL11：`herdr api activity-read --help` 两种界面语言都有说明，参数与 JSON
+    /// API 的 `agent.activity.read` 对应，`--agent` / `--external-id` 恰给其一。
+    #[test]
+    fn api_activity_read_help_is_translated_and_mirrors_the_method() {
+        let help = |lang| {
+            let _guard = crate::i18n::lang_guard(lang);
+            let mut help = Vec::new();
+            super::write_requested_help(
+                &[
+                    "herdr".to_string(),
+                    "api".to_string(),
+                    "activity-read".to_string(),
+                    "--help".to_string(),
+                ],
+                &mut help,
+                || {},
+            )
+            .unwrap();
+            String::from_utf8(help).unwrap()
+        };
+        let english = help(crate::i18n::Lang::En);
+        let about = english.lines().next().unwrap_or_default();
+        assert!(
+            about.is_ascii() && about.contains("agent.activity.read"),
+            "{english}"
+        );
+        for flag in [
+            "--agent <TARGET>",
+            "--external-id <ID>",
+            "--node-id <ID>",
+            "--cursor <CURSOR>",
+            "--max-bytes <N>",
+        ] {
+            assert!(english.contains(flag), "缺 {flag}：{english}");
+        }
+        let chinese = help(crate::i18n::Lang::ZhCn);
+        let about = chinese.lines().next().unwrap_or_default();
+        assert!(
+            about.contains("活动树") && about.contains("agent.activity.read"),
+            "{chinese}"
+        );
+        assert!(chinese.contains("外部条目"), "{chinese}");
+
+        let cmd = super::command();
+        let read = command_path(&cmd, &["api", "activity-read"]);
+        let group = read
+            .get_groups()
+            .find(|group| group.get_id() == "activity_target")
+            .expect("目标参数组");
+        assert!(group.is_required_set());
+        assert!(
+            !group.clone().is_multiple(),
+            "--agent 与 --external-id 互斥"
+        );
+        assert_eq!(
+            group.get_args().map(|id| id.as_str()).collect::<Vec<_>>(),
+            ["agent", "external-id"]
+        );
     }
 
     #[test]

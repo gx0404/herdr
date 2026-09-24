@@ -1397,6 +1397,13 @@ pub const TEXTS: Texts = Texts {
         api_usage_report_account_help: "报到哪个账号 ID；默认用当前窗格绑定的账号",
         api_usage_report_passthrough_help: "statusline 包装模式：把 stdin 原样回放到 stdout 交给原渲染器，上报只发不等、出错也不出声",
         api_schema_about: "打印或写入内置 API schema",
+        api_activity_read_about: "读取 agent 的活动树或其中一项的输出（agent.activity.read）",
+        api_activity_read_agent_help: "要读的 agent：唯一的 agent 名，或持有它的 pane ID",
+        api_activity_read_external_help:
+            "要读的外部条目，取 agent.external.list 列出的 ID（<来源>:<会话 id>）",
+        api_activity_read_node_help: "读这一项的输出，而不是整棵树",
+        api_activity_read_cursor_help: "从上一页的 next_cursor 接着读",
+        api_activity_read_max_bytes_help: "一页输出的字节数（server 默认 65536，上限 524288）",
         workspace_about: "通过 socket API 管理工作区",
         workspace_list_about: "列出工作区",
         workspace_create_about: "创建工作区",
@@ -1846,6 +1853,9 @@ pub const TEXTS: Texts = Texts {
 
         api_schema_usage: "用法：herdr api schema [--json | --output PATH]",
         api_snapshot_usage: "用法：herdr api snapshot",
+        api_activity_read_usage:
+            "用法：herdr api activity-read (--agent <TARGET> | --external-id <ID>) [--node-id <ID>] [--cursor <CURSOR>] [--max-bytes <N>]",
+        api_activity_read_no_pane_id: "查找 agent 失败：响应未包含 pane_id",
         api_usage_report_usage:
             "用法：herdr api usage-report --agent <AGENT> [--account <ID>] [--passthrough]",
         usage_report_too_large: "官方用量报告超过大小限制",

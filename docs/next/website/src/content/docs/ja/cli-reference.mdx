@@ -42,11 +42,15 @@ herdr api schema
 herdr api schema --json
 herdr api schema --output herdr-api.schema.json
 herdr api usage-report --agent AGENT [--account ID] [--passthrough]
+herdr api activity-read --agent TARGET [--node-id ID] [--cursor CURSOR] [--max-bytes N]
+herdr api activity-read --external-id ID [--node-id ID] [--cursor CURSOR] [--max-bytes N]
 ```
 
 `herdr api schema` は、インストール済みバイナリに同梱されたソケットプロトコルスキーマの短い概要を表示します。完全な JSON Schema ドキュメントが欲しいときは `--json` を使い、ファイルに書き出すには `--output PATH` を使ってください。
 
 `herdr api usage-report` はエージェントの公式な使用量 JSON(たとえば Claude Code のステータスラインへの入力)を stdin から読み、`HERDR_PANE_ID` のペイン、または `--account` で指定したアカウントに報告します。`--passthrough` は入力を stdout にもそのまま書き出すので、既存のステータスラインの描画コマンドはそのまま動きます。関連付けの規則は[監視・アカウント使用量・ドック配置](/ja/docs/monitoring/)を参照してください。
+
+`herdr api activity-read` はソケットメソッド `agent.activity.read` でエージェントのアクティビティツリーを読み、JSON のレスポンスを表示します。対象はちょうど一つ指定します。`--agent` には一意なエージェント名か、そのエージェントがいるペイン ID を、`--external-id` には `agent.external.list` が返す項目(`zcode:<セッション ID>` など)を渡します。`--node-id` を省くとツリー全体を、指定するとその項目の出力を 1 ページ表示し、そのページの `next_cursor` を `--cursor` に渡すと次のページを読みます。`--max-bytes` はページの大きさです。レスポンスのフィールドとエラーコードは[ソケット API](/ja/docs/socket-api/)を参照してください。
 
 ## 保存済み SSH マシン
 
