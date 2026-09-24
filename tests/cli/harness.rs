@@ -23,6 +23,55 @@ pub(super) fn unique_test_dir() -> PathBuf {
     PathBuf::from(format!("/tmp/hcli-{}-{nanos}", std::process::id()))
 }
 
+/// 等「终会成立」的条件用的与负载无关的宽上限（N21，做法同 `93621e2c`）：负载
+/// 25–35 时起进程、线程调度都可能被拖慢好几秒，固定的短时限会误报。条件一满足
+/// 立即往下走，只在真的失败时才等满。
+pub(super) const LOADED_WAIT: Duration = Duration::from_secs(30);
+
+/// 设成非空且不是 `0` 时，[`TestDirGuard`] 不删测试目录、只在 stderr 报路径，
+/// 方便用例失败后进去看现场。
+pub(super) const KEEP_TEST_DIRS_ENV: &str = "HERDR_TEST_KEEP_DIRS";
+
+/// 测试目录守卫：离开作用域时（含断言失败的 panic 展开）删掉整个测试目录。
+/// 给不拉起 server 的用例用——它们只经 `run_named_cli*` 顺手建出
+/// `runtime/home`，以前没有收尾，每次全量都在 /tmp 留一个空目录（N21）。拉起
+/// server 的用例仍走 `cleanup_test_base`：要先按 runtime 目录收掉 server 再删。
+pub(super) struct TestDirGuard {
+    path: PathBuf,
+    keep: bool,
+}
+
+impl TestDirGuard {
+    pub(super) fn new(path: &Path) -> Self {
+        let keep = keep_test_dirs(std::env::var_os(KEEP_TEST_DIRS_ENV).as_deref());
+        Self::with_keep(path, keep)
+    }
+
+    fn with_keep(path: &Path, keep: bool) -> Self {
+        Self {
+            path: path.to_path_buf(),
+            keep,
+        }
+    }
+}
+
+impl Drop for TestDirGuard {
+    fn drop(&mut self) {
+        if self.keep {
+            eprintln!(
+                "{KEEP_TEST_DIRS_ENV} is set; keeping test dir {}",
+                self.path.display()
+            );
+            return;
+        }
+        let _ = fs::remove_dir_all(&self.path);
+    }
+}
+
+fn keep_test_dirs(value: Option<&std::ffi::OsStr>) -> bool {
+    value.is_some_and(|value| !value.is_empty() && value != "0")
+}
+
 /// 写 insteadOf 离线重定向配置并返回 GIT_CONFIG_GLOBAL 路径。
 /// git >= 2.32 读 GIT_CONFIG_GLOBAL；更老的 git（如 Ubuntu 20.04 的 2.25）忽略该
 /// 变量、改读 HOME/.gitconfig，因此同内容双写，调用方须把 HOME 指向测试目录。
@@ -490,9 +539,10 @@ pub(super) fn wait_for_pid_exit(pid: u32, timeout: Duration) -> bool {
     !process_exists(pid)
 }
 
-pub(super) fn wait_for_pid_file(pid_file: &Path, timeout: Duration) -> Result<u32, String> {
-    const STABLE_PID_CONTENT_WINDOW: Duration = Duration::from_millis(250);
+/// pid 文件内容要保持不变这么久才算写完。
+const STABLE_PID_CONTENT_WINDOW: Duration = Duration::from_millis(250);
 
+pub(super) fn wait_for_pid_file(pid_file: &Path, timeout: Duration) -> Result<u32, String> {
     let deadline = Instant::now() + timeout;
     let mut last_contents = String::new();
     let mut stable_candidate: Option<(String, u32, Instant)> = None;
@@ -573,31 +623,59 @@ fn wait_for_pid_file_rejects_unparseable_partial_write_until_stable_contents() {
     let base = unique_test_dir();
     fs::create_dir_all(&base).unwrap();
     let pid_file = base.join("partial-race.pid");
-    fs::write(&pid_file, "").unwrap();
+    // 调用前就落盘半截内容：helper 第一次读到的必然是不可解析的 `pid=`。
+    fs::write(&pid_file, "pid=").unwrap();
 
     let writer = thread::spawn({
         let pid_file = pid_file.clone();
         move || {
             thread::sleep(Duration::from_millis(40));
-            fs::write(&pid_file, "pid=").unwrap();
-            thread::sleep(Duration::from_millis(40));
             fs::write(&pid_file, "pid=424242").unwrap();
             thread::sleep(Duration::from_millis(40));
+            // 先记时刻再写完整内容：helper 最早也只能在这之后读到可解析的 pid。
+            let complete_written_at = Instant::now();
             fs::write(&pid_file, "424242\n").unwrap();
+            complete_written_at
         }
     });
 
-    let start = Instant::now();
-    let pid = wait_for_pid_file(&pid_file, Duration::from_secs(2)).unwrap();
+    let pid = wait_for_pid_file(&pid_file, LOADED_WAIT).unwrap();
+    let returned_at = Instant::now();
+    let complete_written_at = writer.join().unwrap();
     assert_eq!(pid, 424242);
+    // N21：以前从调用 helper 起量「≥300 ms」，负载下主线程在 spawn 之后被晚调度、
+    // 写线程已经写完时，起点落在完整内容之后，量出来不足 300 ms 而误报。改为从完整
+    // 内容落盘时刻量起：helper 看到它稳定满一个窗口才返回，与调度快慢无关；若它
+    // 接受了半截内容，会在完整内容之前返回，差值为零同样失败。
+    let waited = returned_at.saturating_duration_since(complete_written_at);
     assert!(
-        start.elapsed() >= Duration::from_millis(300),
-        "helper should wait for stable complete contents, elapsed={:?}",
-        start.elapsed()
+        waited >= STABLE_PID_CONTENT_WINDOW,
+        "helper should wait for stable complete contents, returned {waited:?} after the complete write"
     );
 
-    writer.join().unwrap();
     cleanup_test_base(&base);
+}
+
+#[test]
+fn test_dir_guard_removes_the_test_dir_unless_asked_to_keep_it() {
+    let removed = unique_test_dir();
+    fs::create_dir_all(removed.join("runtime").join("home")).unwrap();
+    drop(TestDirGuard::with_keep(&removed, false));
+    assert!(!removed.exists(), "guard left {}", removed.display());
+
+    let kept = unique_test_dir();
+    fs::create_dir_all(kept.join("runtime").join("home")).unwrap();
+    drop(TestDirGuard::with_keep(&kept, true));
+    assert!(
+        kept.join("runtime").join("home").is_dir(),
+        "kept dir was removed"
+    );
+    fs::remove_dir_all(&kept).unwrap();
+
+    assert!(!keep_test_dirs(None));
+    assert!(!keep_test_dirs(Some(std::ffi::OsStr::new(""))));
+    assert!(!keep_test_dirs(Some(std::ffi::OsStr::new("0"))));
+    assert!(keep_test_dirs(Some(std::ffi::OsStr::new("1"))));
 }
 
 pub(super) fn send_request(socket_path: &Path, json: &str) -> serde_json::Value {

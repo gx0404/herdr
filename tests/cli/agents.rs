@@ -3,6 +3,8 @@ use super::harness::*;
 #[test]
 fn agent_explain_missing_file_reports_json_error() {
     let base = unique_test_dir();
+    // 不拉起 server，只经 run_named_cli 顺手建出 runtime/home：由守卫收尾（N21）。
+    let _dir = TestDirGuard::new(&base);
     let missing = base.join("missing-screen.txt");
     let output = run_named_cli(
         &base.join("config"),
@@ -29,10 +31,9 @@ fn agent_explain_missing_file_reports_json_error() {
         .contains(missing.to_str().unwrap()));
 }
 
-fn write_delayed_shell_and_fake_pi(
-    base: &Path,
-    shell_delay_seconds: &str,
-) -> (PathBuf, PathBuf, PathBuf) {
+/// 假的窗格 shell 先跑 `hold_command`（期间 server 判窗格忙、CLI 判 shell 在初始化），
+/// 结束后才 exec 成真正的 /bin/sh。
+fn write_delayed_shell_and_fake_pi(base: &Path, hold_command: &str) -> (PathBuf, PathBuf, PathBuf) {
     use std::os::unix::fs::PermissionsExt;
 
     let bin = base.join("bin");
@@ -42,7 +43,7 @@ fn write_delayed_shell_and_fake_pi(
     fs::create_dir_all(&bin).unwrap();
     fs::write(
         &delayed_shell,
-        format!("#!/bin/sh\n/bin/sleep {shell_delay_seconds}\nexec /bin/sh\n"),
+        format!("#!/bin/sh\n{hold_command}\nexec /bin/sh\n"),
     )
     .unwrap();
     fs::write(
@@ -65,7 +66,8 @@ fn agent_start_waits_for_a_new_pane_shell_to_finish_initializing() {
     let config_home = base.join("config");
     let runtime_dir = base.join("runtime");
     let socket_path = runtime_dir.join("herdr.sock");
-    let (bin, delayed_shell, invocations) = write_delayed_shell_and_fake_pi(&base, "0.4");
+    let (bin, delayed_shell, invocations) =
+        write_delayed_shell_and_fake_pi(&base, "/bin/sleep 0.4");
     let config = format!(
         "onboarding = false\n[terminal]\ndefault_shell = {:?}\nshell_mode = \"non_login\"\n",
         delayed_shell.to_str().unwrap()
@@ -140,13 +142,32 @@ fn agent_start_waits_for_a_new_pane_shell_to_finish_initializing() {
     cleanup_spawned_herdr(herdr, base);
 }
 
+/// 占住窗格 shell 直到 `release` 出现（N21）。门控循环是 shell 的子进程：它在，
+/// server 就一直判窗格忙；循环有上限（约 2 分钟），用例中途失败也不会留下常驻进程。
+fn shell_hold_until_released(release: &Path) -> String {
+    format!(
+        "/bin/sh -c 'i=0; while [ ! -e \"$1\" ] && [ \"$i\" -lt 2400 ]; do /bin/sleep 0.05; i=$((i+1)); done' gate '{}'",
+        release.display()
+    )
+}
+
+/// `agent start` 的 agent 超时：远大于 CLI 在 shell 初始化期间的 2 s 重试窗口
+/// （`cli::agent::PANE_SHELL_READINESS_RETRY_TIMEOUT`），放弃早于它的一半才说明
+/// CLI 是按重试窗口停手，而不是一直重试到超时。
+const BUSY_AGENT_START_TIMEOUT: Duration = Duration::from_secs(60);
+
 #[test]
 fn agent_start_stops_retrying_when_the_pane_shell_stays_busy() {
     let base = unique_test_dir();
     let config_home = base.join("config");
     let runtime_dir = base.join("runtime");
     let socket_path = runtime_dir.join("herdr.sock");
-    let (bin, delayed_shell, invocations) = write_delayed_shell_and_fake_pi(&base, "2.3");
+    // N21：以前用固定 2.3 s 的延时 shell，只比 CLI 2 s 的重试窗口多 0.3 s；负载下
+    // 第一次 `agent start` 晚到 0.3 s 以上，shell 就在重试窗口内就绪、agent 真的起来
+    // 了，用例误报。改为 shell 一直忙到测试放行，判定与负载无关。
+    let release = base.join("release-shell");
+    let (bin, delayed_shell, invocations) =
+        write_delayed_shell_and_fake_pi(&base, &shell_hold_until_released(&release));
     let config = format!(
         "onboarding = false\n[terminal]\ndefault_shell = {:?}\nshell_mode = \"non_login\"\n",
         delayed_shell.to_str().unwrap()
@@ -158,49 +179,62 @@ fn agent_start_stops_retrying_when_the_pane_shell_stays_busy() {
         Some(&bin),
         &config,
     );
-    wait_for_socket(&socket_path, Duration::from_secs(5));
+    wait_for_socket(&socket_path, LOADED_WAIT);
     let created = run_cli_json(
         &socket_path,
         &["workspace", "create", "--cwd", base.to_str().unwrap()],
     );
     let pane_id = created["result"]["root_pane"]["pane_id"].as_str().unwrap();
+    let timeout_ms = BUSY_AGENT_START_TIMEOUT.as_millis().to_string();
+    let start_args = [
+        "agent",
+        "start",
+        "worker",
+        "--kind",
+        "pi",
+        "--pane",
+        pane_id,
+        "--timeout",
+        timeout_ms.as_str(),
+    ];
 
     let started_at = Instant::now();
-    let unavailable = run_cli(
-        &socket_path,
-        &[
-            "agent",
-            "start",
-            "worker",
-            "--kind",
-            "pi",
-            "--pane",
-            pane_id,
-            "--timeout",
-            "8000",
-        ],
+    let unavailable = run_cli(&socket_path, &start_args);
+    let elapsed = started_at.elapsed();
+    assert_eq!(
+        unavailable.status.code(),
+        Some(1),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&unavailable.stdout),
+        String::from_utf8_lossy(&unavailable.stderr)
     );
-    assert_eq!(unavailable.status.code(), Some(1));
     let error: serde_json::Value = serde_json::from_slice(&unavailable.stderr).unwrap();
     assert_eq!(error["error"]["code"], "agent_pane_busy");
-    assert!(started_at.elapsed() >= Duration::from_secs(2));
-    assert!(started_at.elapsed() < Duration::from_secs(4));
+    assert!(
+        elapsed >= Duration::from_secs(2),
+        "gave up before the shell readiness retry window: {elapsed:?}"
+    );
+    assert!(
+        elapsed < BUSY_AGENT_START_TIMEOUT / 2,
+        "kept retrying toward the agent timeout: {elapsed:?}"
+    );
     assert!(!invocations.exists());
 
-    let retried = run_cli_json(
-        &socket_path,
-        &[
-            "agent",
-            "start",
-            "worker",
-            "--kind",
-            "pi",
-            "--pane",
-            pane_id,
-            "--timeout",
-            "8000",
-        ],
-    );
+    // 放行后 shell 就绪，同一窗格照常可用；就绪前的「忙」只重试，不算失败。
+    fs::write(&release, "").unwrap();
+    let deadline = Instant::now() + LOADED_WAIT;
+    let retried = loop {
+        let output = run_cli(&socket_path, &start_args);
+        if output.status.success() {
+            break parse_cli_json_output(&start_args, output);
+        }
+        let error: serde_json::Value = serde_json::from_slice(&output.stderr).unwrap();
+        assert_eq!(error["error"]["code"], "agent_pane_busy", "{error}");
+        assert!(
+            Instant::now() < deadline,
+            "pane shell never became ready after release: {error}"
+        );
+    };
     assert_eq!(retried["result"]["type"], "agent_started");
     assert_eq!(fs::read_to_string(&invocations).unwrap(), "\n");
 
