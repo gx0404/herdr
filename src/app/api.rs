@@ -55,16 +55,16 @@ impl App {
                 self.handle_internal_event(ev);
                 false
             }
-            AppEvent::AgentActivityRefreshed { pane_id, result } => {
-                self.apply_agent_activity_refresh(pane_id, result)
-            }
-            AppEvent::AgentActivityRead { pane_id, nodes } => {
+            AppEvent::AgentActivityRefreshed {
+                pane_id, result, ..
+            } => self.apply_agent_activity_refresh(pane_id, result),
+            AppEvent::AgentActivityRead { pane_id, nodes, .. } => {
                 self.apply_agent_activity_refresh(pane_id, Ok(nodes))
             }
-            AppEvent::ExternalAgentsRefreshed { source, result } => {
+            AppEvent::ExternalAgentsRefreshed { source, result, .. } => {
                 self.apply_external_agents_refresh(&source, result)
             }
-            AppEvent::ExternalAgentsRead { source, agents } => {
+            AppEvent::ExternalAgentsRead { source, agents, .. } => {
                 self.apply_external_agents_refresh(&source, Ok(agents))
             }
             ev => {
@@ -197,22 +197,25 @@ impl App {
             return Vec::new();
         }
 
-        if let AppEvent::AgentActivityRefreshed { pane_id, result } = ev {
+        if let AppEvent::AgentActivityRefreshed {
+            pane_id, result, ..
+        } = ev
+        {
             self.apply_agent_activity_refresh(pane_id, result);
             return Vec::new();
         }
 
-        if let AppEvent::AgentActivityRead { pane_id, nodes } = ev {
+        if let AppEvent::AgentActivityRead { pane_id, nodes, .. } = ev {
             self.apply_agent_activity_refresh(pane_id, Ok(nodes));
             return Vec::new();
         }
 
-        if let AppEvent::ExternalAgentsRefreshed { source, result } = ev {
+        if let AppEvent::ExternalAgentsRefreshed { source, result, .. } = ev {
             self.apply_external_agents_refresh(&source, result);
             return Vec::new();
         }
 
-        if let AppEvent::ExternalAgentsRead { source, agents } = ev {
+        if let AppEvent::ExternalAgentsRead { source, agents, .. } = ev {
             self.apply_external_agents_refresh(&source, Ok(agents));
             return Vec::new();
         }
@@ -2745,6 +2748,7 @@ mod agent_activity_event_tests {
         assert!(
             app.handle_internal_event_with_render_impact(AppEvent::AgentActivityRefreshed {
                 pane_id: agent_pane,
+                ticket: 1,
                 result: Ok(tree.clone()),
             })
         );
@@ -2754,18 +2758,21 @@ mod agent_activity_event_tests {
         assert!(
             !app.handle_internal_event_with_render_impact(AppEvent::AgentActivityRefreshed {
                 pane_id: agent_pane,
+                ticket: 2,
                 result: Ok(tree),
             })
         );
         assert!(
             !app.handle_internal_event_with_render_impact(AppEvent::AgentActivityRefreshed {
                 pane_id: agent_pane,
+                ticket: 3,
                 result: Err("unavailable".into()),
             })
         );
         assert!(
             !app.handle_internal_event_with_render_impact(AppEvent::AgentActivityRefreshed {
                 pane_id: shell_pane,
+                ticket: 4,
                 result: Ok(vec![node("x", AgentActivityStatus::Running)]),
             })
         );
@@ -2782,6 +2789,7 @@ mod agent_activity_event_tests {
         // 走通用入口（`handle_internal_event`）同样落库并发事件。
         app.handle_internal_event(AppEvent::AgentActivityRefreshed {
             pane_id: agent_pane,
+            ticket: 5,
             result: Ok(vec![node("a", AgentActivityStatus::Done)]),
         });
         assert_eq!(
@@ -2820,6 +2828,7 @@ mod agent_activity_event_tests {
         assert!(
             app.handle_internal_event_with_render_impact(AppEvent::AgentActivityRefreshed {
                 pane_id: agent_pane,
+                ticket: 6,
                 result: Ok(vec![running.clone(), done.clone()]),
             })
         );
@@ -2828,6 +2837,7 @@ mod agent_activity_event_tests {
         assert!(
             !app.handle_internal_event_with_render_impact(AppEvent::AgentActivityRefreshed {
                 pane_id: agent_pane,
+                ticket: 7,
                 result: Ok(vec![running, done]),
             }),
             "只有深层节点变了：不重建投影"
@@ -2860,6 +2870,7 @@ mod agent_activity_event_tests {
         assert!(
             app.handle_internal_event_with_render_impact(AppEvent::ExternalAgentsRefreshed {
                 source: "zcode".into(),
+                ticket: 8,
                 result: Ok(vec![agent]),
             })
         );
@@ -2867,11 +2878,13 @@ mod agent_activity_event_tests {
         assert!(
             !app.handle_internal_event_with_render_impact(AppEvent::ExternalAgentsRefreshed {
                 source: "zcode".into(),
+                ticket: 9,
                 result: Err("locked".into()),
             })
         );
         app.handle_internal_event(AppEvent::ExternalAgentsRefreshed {
             source: "zcode".into(),
+            ticket: 10,
             result: Ok(Vec::new()),
         });
         assert!(app.state.agent_activity.external().is_empty());

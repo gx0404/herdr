@@ -8,7 +8,9 @@
 //! 限流）取走提示并按触发条件挑出到期的 pane → 后台线程调适配器 → 结果经
 //! `AppEvent::{AgentActivityRefreshed, ExternalAgentsRefreshed}` 回主线程落库。
 //! `agent.activity.read` / `agent.external.list` 也在同一后台线程执行，响应异步
-//! 返回（JSON API 走请求自带的应答通道，客户端端点走 `ServerEvent`）。
+//! 返回（JSON API 走请求自带的应答通道，客户端端点走 `ServerEvent`）。后台结果都带
+//! 开始顺序号（`Tickets`）回主线程：同一 pane 的树、同一外部来源的列表，只落库比
+//! 已落库那份开始得更晚的结果。
 
 mod claude;
 mod codex;
@@ -17,7 +19,7 @@ mod opencode;
 mod pi;
 mod zcode;
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
@@ -312,15 +314,28 @@ const ENDPOINT_RESPONSE_CHUNK_BYTES: usize = 512 * 1024;
 /// 在途后台任务的开始标记：worker 取走任务时置位（[`Job::mark_started`]）。
 type JobStarted = std::sync::Arc<std::sync::atomic::AtomicBool>;
 
+/// 后台读取的开始顺序号：worker 开始读一个 pane 的活动树或一个外部来源的列表之前
+/// 取一个号，结果事件带着它回主线程（`AppEvent::AgentActivityRefreshed` 等的
+/// `ticket`）。两条 worker 线程共用同一个计数，号越大开始得越晚、读到的来源越新；
+/// 主线程只落库比已落库那份号更大的结果（[`Scheduler::accept_pane`] /
+/// [`Scheduler::accept_external`]）。调度发现与交互读取谁先开始谁算旧，与谁先回来、
+/// 发现当时是否还在排队（排队的任务开始时才取号）都无关。
+#[derive(Clone, Debug, Default)]
+struct Tickets(std::sync::Arc<std::sync::atomic::AtomicU64>);
+
+impl Tickets {
+    /// 取下一个号，从 1 起；0 留给没有读来源的结果（取不到 home 等），它们不落库。
+    fn take(&self) -> u64 {
+        self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1
+    }
+}
+
 /// 一个已提交、结果尚未回来的后台发现任务。
 #[derive(Debug)]
 struct InFlight {
     started: JobStarted,
     /// 主线程首次观察到任务已开始的时刻（最多迟一轮遍历）；`None` = 还在排队。
     started_at: Option<Instant>,
-    /// 它在途期间，交互式读整棵树的结果已先落库：它开始得更早、可能读到更旧的树，
-    /// 结果回来时作废（名额照常放行），由调度补刷一次。
-    superseded: bool,
 }
 
 impl InFlight {
@@ -331,7 +346,6 @@ impl InFlight {
             Self {
                 started: JobStarted::clone(&started),
                 started_at: None,
-                superseded: false,
             },
             started,
         )
@@ -394,6 +408,8 @@ struct PaneSchedule {
     was_working: bool,
     tree: Option<TreeWatch>,
     seen_pass: u64,
+    /// 已落库那份树的开始顺序号（[`Tickets`]）；号不比它大的结果晚到时作废。
+    applied_ticket: u64,
 }
 
 impl PaneSchedule {
@@ -429,7 +445,8 @@ impl PaneSchedule {
 /// - 跟随：[`FOLLOW_TTL`] 内每 [`FOLLOW_INTERVAL`] 刷一次。
 ///
 /// 同一 pane 同时最多一个在途任务；结果回来（或任务开始后 [`IN_FLIGHT_TIMEOUT`]
-/// 过去）才放行下一次，期间到达的提示保留到放行后。
+/// 过去）才放行下一次，期间到达的提示保留到放行后。在途名额只管不重复投递，不管
+/// 新旧：结果能否落库按开始顺序号判定（[`Self::accept_pane`]、[`Self::accept_external`]）。
 ///
 /// 扩展成本：每轮遍历（每秒至多一轮，不在渲染路径）对每个持有 agent 的 pane 只多
 /// 一次修订号比较；修订号变了才重扫落库的节点（每个 agent 至多
@@ -441,8 +458,8 @@ pub(crate) struct Scheduler {
     next_pass: Option<Instant>,
     external_last_started: Option<Instant>,
     external_in_flight: Option<InFlight>,
-    /// 外部轮询在途期间，交互读取已先落库的来源：轮询给这些来源的结果作废。
-    external_superseded: HashSet<String>,
+    /// 各外部来源已落库那份列表的开始顺序号（[`Tickets`]）。
+    external_applied: HashMap<String, u64>,
 }
 
 impl Scheduler {
@@ -533,42 +550,27 @@ impl Scheduler {
         self.panes.retain(|_, entry| entry.seen_pass == pass);
     }
 
-    /// 该 pane 的后台任务已结束（成功或失败）。期间到达过提示则让下一轮立即遍历；
-    /// 结果因读整棵树作废的（[`Self::supersede`]）按提示补刷一次，拿到比那次读取
-    /// 更新的树。
+    /// 该 pane 的后台任务已结束（成功或失败，结果落库与否）。期间到达过提示则让下一轮
+    /// 立即遍历。
     pub(crate) fn finish(&mut self, pane_id: PaneId) {
         if let Some(entry) = self.panes.get_mut(&pane_id) {
-            if entry
-                .in_flight
-                .take()
-                .is_some_and(|in_flight| in_flight.superseded)
-            {
-                entry.hinted = true;
-            }
+            entry.in_flight = None;
             if entry.hinted {
                 self.next_pass = None;
             }
         }
     }
 
-    /// 交互式读整棵树的结果已落库：此刻还在途的调度发现开始得更早，结果回来时作废。
-    /// 在途名额不动——那次发现还在跑，同一 pane 不能再投第二个。
-    pub(crate) fn supersede(&mut self, pane_id: PaneId) {
-        if let Some(in_flight) = self
-            .panes
-            .get_mut(&pane_id)
-            .and_then(|entry| entry.in_flight.as_mut())
-        {
-            in_flight.superseded = true;
+    /// 一份该 pane 的活动树（调度发现或读整棵树的结果）能否落库：开始顺序号比已落库
+    /// 那份大才收，并记下它。开始得更早的结果晚到时作废，此时已落库的树更新，不必
+    /// 补刷。在途名额不动——读整棵树落库时那次发现可能还在跑，同一 pane 不能再投第二个。
+    pub(crate) fn accept_pane(&mut self, pane_id: PaneId, ticket: u64) -> bool {
+        let entry = self.panes.entry(pane_id).or_default();
+        if ticket <= entry.applied_ticket {
+            return false;
         }
-    }
-
-    /// 该 pane 在途的调度发现是否已被读整棵树取代。
-    pub(crate) fn superseded(&self, pane_id: PaneId) -> bool {
-        self.panes
-            .get(&pane_id)
-            .and_then(|entry| entry.in_flight.as_ref())
-            .is_some_and(|in_flight| in_flight.superseded)
+        entry.applied_ticket = ticket;
+        true
     }
 
     #[cfg(test)]
@@ -597,27 +599,30 @@ impl Scheduler {
         self.external_last_started = Some(now);
         let (in_flight, started) = InFlight::start();
         self.external_in_flight = Some(in_flight);
-        self.external_superseded.clear();
         Some(started)
     }
 
-    /// 外部轮询的结果已回主线程（每个来源各回一次，第一次就放行名额）。作废标记
-    /// 留到下一次轮询开始（[`Self::external_due`]）才清，同一轮后回来的来源照样
-    /// 按它判定；作废的来源不补刷，外部来源按自己的轮询间隔刷新。
+    /// 外部轮询的结果已回主线程（每个来源各回一次，第一次就放行名额）。名额只管
+    /// 不重复投递；各来源的结果能否落库另按开始顺序号判定（[`Self::accept_external`]），
+    /// 与名额是否已放行无关。
     pub(crate) fn finish_external(&mut self) {
         self.external_in_flight = None;
     }
 
-    /// 交互读取（`agent.external.list` 或外部条目读整棵树）已先落库该来源：外部
-    /// 轮询在途时，它给这个来源的结果回来时作废；名额不动。
-    pub(crate) fn supersede_external(&mut self, source: &str) {
-        if self.external_in_flight.is_some() {
-            self.external_superseded.insert(source.to_owned());
+    /// 一份外部来源的列表（外部轮询、`agent.external.list` 或外部条目读整棵树的结果）
+    /// 能否落库：同 [`Self::accept_pane`]，按来源各自比较，开始得更早的晚到时作废。
+    pub(crate) fn accept_external(&mut self, source: &str, ticket: u64) -> bool {
+        match self.external_applied.get_mut(source) {
+            Some(applied) if ticket <= *applied => false,
+            Some(applied) => {
+                *applied = ticket;
+                true
+            }
+            None => {
+                self.external_applied.insert(source.to_owned(), ticket);
+                true
+            }
         }
-    }
-
-    pub(crate) fn external_superseded(&self, source: &str) -> bool {
-        self.external_superseded.contains(source)
     }
 }
 
@@ -777,17 +782,24 @@ impl Runtime {
         events: tokio::sync::mpsc::Sender<AppEvent>,
         home: Option<PathBuf>,
     ) -> std::io::Result<Self> {
+        let tickets = Tickets::default();
         let discovery = Self::spawn(
             "herdr-agent-activity",
             DISCOVERY_QUEUE_CAPACITY,
-            events.clone(),
-            home.clone(),
+            Worker {
+                events: events.clone(),
+                home: home.clone(),
+                tickets: tickets.clone(),
+            },
         )?;
         let requests = Self::spawn(
             "herdr-agent-activity-read",
             REQUEST_QUEUE_CAPACITY,
-            events,
-            home,
+            Worker {
+                events,
+                home,
+                tickets,
+            },
         )?;
         Ok(Self {
             discovery,
@@ -798,14 +810,12 @@ impl Runtime {
     fn spawn(
         name: &str,
         capacity: usize,
-        events: tokio::sync::mpsc::Sender<AppEvent>,
-        home: Option<PathBuf>,
+        worker: Worker,
     ) -> std::io::Result<mpsc::SyncSender<Job>> {
         let (jobs, queue) = mpsc::sync_channel::<Job>(capacity);
         std::thread::Builder::new()
             .name(name.into())
             .spawn(move || {
-                let worker = Worker { events, home };
                 while let Ok(job) = queue.recv() {
                     job.mark_started();
                     if !worker.run(job) {
@@ -832,6 +842,8 @@ struct Worker {
     events: tokio::sync::mpsc::Sender<AppEvent>,
     /// `None` = 取系统 home；测试注入临时目录。
     home: Option<PathBuf>,
+    /// 与另一条 worker 线程共用的开始顺序号。
+    tickets: Tickets,
 }
 
 impl Worker {
@@ -850,16 +862,23 @@ impl Worker {
             } => {
                 let config_dir = agent_config_dir(&subject.agent, &home);
                 let cx = pane_context(&subject, &home, config_dir.as_deref(), now_ms);
+                let ticket = self.tickets.take();
                 let result = discover_nodes(source, &cx).map_err(|error| error.to_string());
-                self.send_event(AppEvent::AgentActivityRefreshed { pane_id, result })
+                self.send_event(AppEvent::AgentActivityRefreshed {
+                    pane_id,
+                    ticket,
+                    result,
+                })
             }
             Job::DiscoverExternal { sources, .. } => {
                 for source in sources {
+                    let ticket = self.tickets.take();
                     let result = source
                         .discover_external(&home, now_ms)
                         .map_err(|error| error.to_string());
                     if !self.send_event(AppEvent::ExternalAgentsRefreshed {
                         source: source.id().to_owned(),
+                        ticket,
                         result,
                     }) {
                         return false;
@@ -877,6 +896,7 @@ impl Worker {
                 let mut first_error: Option<SourceError> = None;
                 let mut any_supported = false;
                 for source in sources {
+                    let ticket = self.tickets.take();
                     match source.discover_external(&home, now_ms) {
                         Ok(found) => {
                             any_supported = true;
@@ -886,6 +906,7 @@ impl Worker {
                             }));
                             if !self.send_event(AppEvent::ExternalAgentsRead {
                                 source: source.id().to_owned(),
+                                ticket,
                                 agents: found,
                             }) {
                                 return false;
@@ -920,17 +941,20 @@ impl Worker {
         }
     }
 
-    /// 取不到 home 目录：发现任务按失败回报（释放在途名额），请求回 `activity_unavailable`。
+    /// 取不到 home 目录：发现任务按失败回报（释放在途名额；没读来源，开始顺序号记 0，
+    /// 失败结果本来也不落库），请求回 `activity_unavailable`。
     fn run_without_home(&self, job: Job) -> bool {
         const NO_HOME: &str = "home directory is not available";
         match job {
             Job::Discover { pane_id, .. } => self.send_event(AppEvent::AgentActivityRefreshed {
                 pane_id,
+                ticket: 0,
                 result: Err(NO_HOME.into()),
             }),
             Job::DiscoverExternal { sources, .. } => sources.iter().all(|source| {
                 self.send_event(AppEvent::ExternalAgentsRefreshed {
                     source: source.id().to_owned(),
+                    ticket: 0,
                     result: Err(NO_HOME.into()),
                 })
             }),
@@ -982,6 +1006,8 @@ impl Worker {
                 latest_hint: None,
             },
         };
+        // 读整棵树开始读来源前取开始顺序号，落库时据此与调度发现的结果比新旧。
+        let ticket = node_id.is_none().then(|| self.tickets.take());
         let result = match node_id {
             None => discover_nodes(source, &cx).map(|nodes| (nodes, None)),
             Some(node_id) => {
@@ -999,11 +1025,14 @@ impl Worker {
             }
         };
         let mut alive = true;
-        if let (ReadTarget::Pane { pane_id, .. }, Ok((nodes, None))) = (&target, &result) {
-            // 读整棵树顺带刷新落库，让快照与本次应答一致。走读取专用的事件：它不放
-            // 调度发现的在途名额，且让还在途的那次更早的发现结果作废。
+        if let (ReadTarget::Pane { pane_id, .. }, Some(ticket), Ok((nodes, None))) =
+            (&target, ticket, &result)
+        {
+            // 读整棵树顺带刷新落库：比它开始得早的调度发现晚到时作废，比它开始得晚的
+            // 照常覆盖它（开始顺序号）。走读取专用的事件：它不放调度发现的在途名额。
             alive = self.send_event(AppEvent::AgentActivityRead {
                 pane_id: *pane_id,
+                ticket,
                 nodes: nodes.clone(),
             });
         }
@@ -1037,6 +1066,7 @@ impl Worker {
         now_ms: u64,
         reply: &Reply,
     ) -> bool {
+        let ticket = self.tickets.take();
         let agents = match source.discover_external(home, now_ms) {
             Ok(agents) => agents,
             Err(error) => {
@@ -1050,6 +1080,7 @@ impl Worker {
             .map(|agent| agent.activity.clone());
         let alive = self.send_event(AppEvent::ExternalAgentsRead {
             source: source.id().to_owned(),
+            ticket,
             agents,
         });
         let not_listed = || {
@@ -1223,27 +1254,25 @@ impl Service {
         self.projection_dirty |= projection_changed;
     }
 
-    /// 该 pane 在途的调度发现是否已被读整棵树取代：主循环据此丢弃它的结果。
-    pub(crate) fn discovery_superseded(&self, pane_id: PaneId) -> bool {
-        self.scheduler.superseded(pane_id)
+    /// 一份 pane 活动树（调度发现或读整棵树的结果，开始顺序号 `ticket`）能否落库：
+    /// 主循环据此丢弃开始得更早、却晚到的结果（[`Scheduler::accept_pane`]）。
+    pub(crate) fn accept_pane_tree(&mut self, pane_id: PaneId, ticket: u64) -> bool {
+        self.scheduler.accept_pane(pane_id, ticket)
     }
 
-    /// 读整棵树的结果已落库（`projection_changed` 为投影是否变化）：不放调度发现的
-    /// 在途名额，此刻还在途的那次发现作废。
-    pub(crate) fn pane_read(&mut self, pane_id: PaneId, projection_changed: bool) {
-        self.scheduler.supersede(pane_id);
+    /// 读整棵树的结果已处理（`projection_changed` 为落库后投影是否变化）：不放调度
+    /// 发现的在途名额。
+    pub(crate) fn pane_read(&mut self, projection_changed: bool) {
         self.projection_dirty |= projection_changed;
     }
 
-    /// 外部轮询在途期间，某来源已被交互读取重新列出并落库：主循环据此丢弃轮询给
-    /// 该来源的结果。
-    pub(crate) fn external_superseded(&self, source: &str) -> bool {
-        self.scheduler.external_superseded(source)
+    /// 一份外部来源的列表能否落库（[`Scheduler::accept_external`]）。
+    pub(crate) fn accept_external_list(&mut self, source: &str, ticket: u64) -> bool {
+        self.scheduler.accept_external(source, ticket)
     }
 
-    /// 交互读取列出的一个外部来源已落库：不放外部轮询的在途名额。
-    pub(crate) fn external_read(&mut self, source: &str, projection_changed: bool) {
-        self.scheduler.supersede_external(source);
+    /// 交互读取列出的一个外部来源已处理：不放外部轮询的在途名额。
+    pub(crate) fn external_read(&mut self, projection_changed: bool) {
         self.projection_dirty |= projection_changed;
     }
 
@@ -1957,80 +1986,160 @@ mod tests {
         );
     }
 
-    /// D14：读整棵树的结果先落库时，在途的调度发现被作废，但名额不动——同一 pane
-    /// 不会再投第二个发现；它的结果回来后放行名额，并按提示补刷一次，拿到比那次
-    /// 读取更新的树。没有在途发现时读树不留任何标记。
+    /// D14 / 审查轻 2（c）：两份树谁能落库只看开始顺序号，与谁先回来无关。调度发现先
+    /// 开始、读树后开始却先回来：读树落库，名额不动（同一 pane 不投第二个），发现晚到
+    /// 作废。反过来读树先开始、后开始的发现先回来：发现落库，读树晚到作废（旧实现让
+    /// 读树的旧树盖掉新树）。
     #[test]
-    fn scheduler_keeps_the_slot_of_a_discovery_superseded_by_a_tree_read() {
+    fn scheduler_orders_trees_by_start_ticket_and_keeps_the_discovery_slot() {
         let t0 = Instant::now();
         let mut scheduler = Scheduler::default();
         let agent = pane(1);
-        scheduler.supersede(agent);
-        assert!(!scheduler.superseded(agent), "还没有调度记录时不留标记");
+        assert!(scheduler.accept_pane(agent, 1), "还没有调度记录时照常收");
 
-        assert_eq!(pass(&mut scheduler, t0, &[(agent, false)]), [agent]);
-        scheduler.supersede(agent);
-        assert!(scheduler.superseded(agent));
+        // 发现 D1 开始（号 2）；读树（号 3）先回来。
+        let due = pass_tokens(&mut scheduler, t0, &[(agent, false)]);
+        assert_eq!(due.len(), 1);
+        take_job(&due[0].1);
+        assert!(scheduler.accept_pane(agent, 3));
         assert!(scheduler.in_flight(agent), "读树不放在途名额");
-        // 到期也不再投：Working 轮询到点、提示也在，但那次发现还在跑。
         scheduler.note_hint(agent);
-        assert!(pass(&mut scheduler, t0 + secs(6.0), &[(agent, true)]).is_empty());
-
-        // 结果回来（被主循环丢弃）：放行名额，作废标记随之清掉，下一轮立即补刷。
+        assert!(
+            pass(&mut scheduler, t0 + secs(2.0), &[(agent, false)]).is_empty(),
+            "提示到期也不投第二个：D1 还在"
+        );
+        assert!(!scheduler.accept_pane(agent, 2), "D1 开始得更早，晚到作废");
         scheduler.finish(agent);
         assert!(!scheduler.in_flight(agent));
-        assert!(!scheduler.superseded(agent));
-        assert!(scheduler.pass_due(t0 + secs(6.1), false));
-        assert_eq!(
-            pass(&mut scheduler, t0 + secs(6.1), &[(agent, false)]),
-            [agent]
-        );
 
-        // 补刷沿用提示的口径：隔 HINT_SETTLE_DELAY 再收尾补刷一次，然后停下。
+        // 读树先开始（号 4）；提示触发的发现 D2 后开始（号 5）却先回来。
+        let due = pass_tokens(&mut scheduler, t0 + secs(2.1), &[(agent, false)]);
+        assert_eq!(due.len(), 1, "放行后按提示刷新");
+        take_job(&due[0].1);
+        assert!(scheduler.accept_pane(agent, 5), "后开始的发现落库");
         scheduler.finish(agent);
-        assert_eq!(
-            pass(
-                &mut scheduler,
-                t0 + secs(6.1) + HINT_SETTLE_DELAY,
-                &[(agent, false)]
-            ),
-            [agent]
+        assert!(!scheduler.accept_pane(agent, 4), "更早开始的读树晚到：作废");
+        assert!(
+            !scheduler.accept_pane(agent, 5),
+            "同一份结果重复送达：不再收"
         );
-        scheduler.finish(agent);
-        assert!(pass(&mut scheduler, t0 + secs(14.0), &[(agent, false)]).is_empty());
     }
 
-    /// 外部来源同理：交互读取先落库的来源，轮询在途时它给该来源的结果作废；名额不动，
-    /// 下一次轮询开始时清掉标记。轮询不在途时不留标记。
+    /// 审查轻 2（b）：还在排队的调度发现不因读整棵树先落库而作废——它开始时才取号，比
+    /// 那次读树新，照常落库；放行后也不补刷。旧实现把排队的发现也作废：结果被丢，还
+    /// 多出一次补刷和一次收尾补刷。
     #[test]
-    fn scheduler_drops_an_external_poll_result_superseded_by_an_interactive_read() {
+    fn scheduler_keeps_a_queued_discovery_that_starts_after_a_tree_read() {
         let t0 = Instant::now();
         let mut scheduler = Scheduler::default();
-        scheduler.supersede_external("zcode");
-        assert!(
-            !scheduler.external_superseded("zcode"),
-            "轮询不在途时不留标记"
-        );
+        let agent = pane(1);
+        let due = pass_tokens(&mut scheduler, t0, &[(agent, false)]);
+        assert_eq!(due.len(), 1, "首次见到：发现排队");
+        assert!(scheduler.accept_pane(agent, 1), "读树先落库");
+        assert!(scheduler.in_flight(agent), "读树不放在途名额");
+        take_job(&due[0].1);
+        assert!(scheduler.accept_pane(agent, 2), "排队后才开始的发现不作废");
+        scheduler.finish(agent);
+        assert!(!scheduler.in_flight(agent));
+        for at in [0.5, 1.5, 3.0, 4.9] {
+            assert!(
+                pass(&mut scheduler, t0 + secs(at), &[(agent, false)]).is_empty(),
+                "{at} s：不补刷、不收尾补刷"
+            );
+        }
+    }
 
+    /// 审查轻 2（a）：外部来源的新旧按来源各自比开始顺序号，与轮询的在途名额无关。
+    /// 旧实现只在名额在途时记作废，而名额在第一个来源回结果时就放行：有两个来源时，
+    /// 两次结果之间落库的交互读取挡不住轮询给第二个来源的更早结果。
+    #[test]
+    fn scheduler_orders_external_lists_per_source_regardless_of_the_poll_slot() {
+        let t0 = Instant::now();
+        let mut scheduler = Scheduler::default();
         let started = scheduler.external_due(t0).expect("首次轮询到期");
-        scheduler.supersede_external("zcode");
-        assert!(scheduler.external_superseded("zcode"));
-        assert!(!scheduler.external_superseded("other"));
         take_job(&started);
-        assert!(
-            scheduler
-                .external_due(t0 + EXTERNAL_POLL_INTERVAL)
-                .is_none(),
-            "读取不放外部轮询的在途名额"
-        );
-
-        // 轮询结果回来：放行名额；作废标记留到下一次轮询开始才清。
+        // 轮询依次读两个来源：first 取号 1、second 取号 2；first 先回来并放行名额。
+        assert!(scheduler.accept_external("first", 1));
         scheduler.finish_external();
-        assert!(scheduler.external_superseded("zcode"));
+        // 交互读取（号 3）在轮询给 second 的结果之前落库。
+        assert!(scheduler.accept_external("second", 3));
+        assert!(
+            !scheduler.accept_external("second", 2),
+            "轮询更早读到的 second 晚到：作废"
+        );
+        // 各来源互不影响；同号不重复收。
+        assert!(scheduler.accept_external("first", 4));
+        assert!(!scheduler.accept_external("first", 4));
+        // 读取不占轮询名额，下一次轮询照常到期。
         assert!(scheduler
             .external_due(t0 + EXTERNAL_POLL_INTERVAL)
             .is_some());
-        assert!(!scheduler.external_superseded("zcode"));
+    }
+
+    /// 开始顺序号由 worker 在读来源之前取，两条 worker 线程共用一个计数，结果事件带着
+    /// 它回主线程。手动驱动 worker（不起线程）：先开始的读树拿到小号，后开始的调度
+    /// 发现拿到大号；外部轮询每个来源各取一个号。
+    #[test]
+    fn workers_stamp_results_with_a_shared_start_ticket() {
+        let (events, mut received) = tokio::sync::mpsc::channel(8);
+        let tickets = Tickets::default();
+        let home = std::env::temp_dir();
+        let reader = Worker {
+            events: events.clone(),
+            home: Some(home.clone()),
+            tickets: tickets.clone(),
+        };
+        let discoverer = Worker {
+            events,
+            home: Some(home),
+            tickets,
+        };
+        let subject = AgentActivitySubject {
+            agent: "claude".into(),
+            session: None,
+            cwd: None,
+            latest_hint: None,
+        };
+        let agent = pane(7);
+        let (reply, _answers) = mpsc::channel();
+        assert!(reader.run(Job::Read(Box::new(ReadJob {
+            request_id: "read".into(),
+            source: &FakeTree,
+            target: ReadTarget::Pane {
+                pane_id: agent,
+                subject: subject.clone(),
+            },
+            node_id: None,
+            cursor: None,
+            max_bytes: 1024,
+            reply: Reply::Api(reply),
+        }))));
+        let AppEvent::AgentActivityRead { ticket: read, .. } = recv_event(&mut received) else {
+            panic!("应为读树落库事件");
+        };
+        assert!(discoverer.run(Job::Discover {
+            pane_id: agent,
+            source: &FakeTree,
+            subject,
+            started: JobStarted::default(),
+        }));
+        let AppEvent::AgentActivityRefreshed {
+            ticket: discovered, ..
+        } = recv_event(&mut received)
+        else {
+            panic!("应为调度发现事件");
+        };
+        assert!(read >= 1 && discovered > read, "{read} < {discovered}");
+
+        assert!(discoverer.run(Job::DiscoverExternal {
+            sources: fake_external(),
+            started: JobStarted::default(),
+        }));
+        let AppEvent::ExternalAgentsRefreshed { ticket: polled, .. } = recv_event(&mut received)
+        else {
+            panic!("应为外部轮询事件");
+        };
+        assert!(polled > discovered);
     }
 
     /// 发现线程串行，一次冷缓存发现可达 10 s 量级：15 个 Working agent 排一轮就能
@@ -2334,6 +2443,7 @@ mod tests {
         let AppEvent::AgentActivityRefreshed {
             pane_id: refreshed,
             result,
+            ..
         } = recv_event(&mut received)
         else {
             panic!("应为活动树刷新事件");
@@ -2543,7 +2653,8 @@ mod tests {
         assert!(service.scheduler.external_last_started.is_none());
         assert!(service.runtime.is_none(), "无客户端时不轮询外部来源");
         service.tick(&mut app.state, t0 + secs(1.0), true);
-        let AppEvent::ExternalAgentsRefreshed { source, result } = recv_event(&mut received) else {
+        let AppEvent::ExternalAgentsRefreshed { source, result, .. } = recv_event(&mut received)
+        else {
             panic!("应为外部来源刷新事件");
         };
         assert_eq!(source, "zcode");
@@ -2668,7 +2779,7 @@ mod tests {
         // 读整棵树顺带刷新落库，走读取专用的事件（不放调度发现的在途名额）。
         assert!(matches!(
             recv_event(&mut received),
-            AppEvent::AgentActivityRead { pane_id: refreshed, nodes }
+            AppEvent::AgentActivityRead { pane_id: refreshed, nodes, .. }
                 if refreshed == pane_id && nodes.len() == 2
         ));
 
@@ -2791,7 +2902,7 @@ mod tests {
         DISCOVER_GATE.store(true, Ordering::Relaxed);
         assert!(matches!(
             recv_event(&mut received),
-            AppEvent::AgentActivityRefreshed { pane_id: refreshed, result: Ok(nodes) }
+            AppEvent::AgentActivityRefreshed { pane_id: refreshed, result: Ok(nodes), .. }
                 if refreshed == pane_id && nodes.len() == 1
         ));
     }
@@ -2835,7 +2946,7 @@ mod tests {
     /// 则 panic）。它走读取专用的事件，不放外部轮询的在途名额。
     fn external_read_ids(received: &mut tokio::sync::mpsc::Receiver<AppEvent>) -> Vec<String> {
         match recv_event(received) {
-            AppEvent::ExternalAgentsRead { source, agents } => {
+            AppEvent::ExternalAgentsRead { source, agents, .. } => {
                 assert_eq!(source, "zcode");
                 agents.into_iter().map(|agent| agent.external_id).collect()
             }

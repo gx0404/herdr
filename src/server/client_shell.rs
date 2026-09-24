@@ -936,6 +936,7 @@ mod agent_activity_tests {
         detect(&mut app, pane_id, Agent::Claude);
         app.handle_internal_event(AppEvent::AgentActivityRefreshed {
             pane_id,
+            ticket: 1,
             result: Ok(vec![AgentActivityNode {
                 id: "a".into(),
                 label: "task a".into(),
@@ -946,6 +947,7 @@ mod agent_activity_tests {
         });
         app.handle_internal_event(AppEvent::ExternalAgentsRefreshed {
             source: "zcode".into(),
+            ticket: 1,
             result: Ok(vec![crate::api::schema::ExternalAgentInfo {
                 external_id: "zcode:s-1".into(),
                 source: "zcode".into(),
@@ -1181,6 +1183,7 @@ mod agent_activity_tests {
         detect(&mut app, pane_id, Agent::Claude);
         app.handle_internal_event(AppEvent::AgentActivityRefreshed {
             pane_id,
+            ticket: 1,
             result: Ok(vec![
                 timed_node("a", Running, Some(10), None),
                 timed_node("b", Done, Some(1), Some(2)),
@@ -1237,6 +1240,7 @@ mod agent_activity_tests {
         // 单节点树的摘要不算截断。
         app.handle_internal_event(AppEvent::AgentActivityRefreshed {
             pane_id,
+            ticket: 1,
             result: Ok(vec![timed_node("only", Running, Some(1), None)]),
         });
         let single = snapshot(&app, "boot", 1, None, None);

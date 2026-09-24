@@ -1645,7 +1645,9 @@ impl AppState {
                 self.agent_activity.note_hint(pane_id);
                 Vec::new()
             }
-            AppEvent::AgentActivityRefreshed { pane_id, result } => {
+            AppEvent::AgentActivityRefreshed {
+                pane_id, result, ..
+            } => {
                 match result {
                     Ok(nodes) => {
                         self.apply_agent_activity(pane_id, nodes, Instant::now());
@@ -1656,11 +1658,11 @@ impl AppState {
                 }
                 Vec::new()
             }
-            AppEvent::AgentActivityRead { pane_id, nodes } => {
+            AppEvent::AgentActivityRead { pane_id, nodes, .. } => {
                 self.apply_agent_activity(pane_id, nodes, Instant::now());
                 Vec::new()
             }
-            AppEvent::ExternalAgentsRefreshed { source, result } => {
+            AppEvent::ExternalAgentsRefreshed { source, result, .. } => {
                 match result {
                     Ok(agents) => {
                         self.apply_external_agents(&source, agents, Instant::now());
@@ -1671,7 +1673,7 @@ impl AppState {
                 }
                 Vec::new()
             }
-            AppEvent::ExternalAgentsRead { source, agents } => {
+            AppEvent::ExternalAgentsRead { source, agents, .. } => {
                 self.apply_external_agents(&source, agents, Instant::now());
                 Vec::new()
             }

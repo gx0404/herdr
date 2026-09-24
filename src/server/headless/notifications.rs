@@ -727,34 +727,52 @@ impl HeadlessServer {
 
                 true
             }
-            AppEvent::AgentActivityRefreshed { pane_id, .. } => {
+            AppEvent::AgentActivityRefreshed {
+                pane_id,
+                ticket,
+                result,
+            } => {
                 // 活动树只进投影：不触发整帧重绘，改由调度器的投影脏标记安排一次
                 // chrome tick——快照未变时只走投影；修订号前进时同 tick 补改戳帧
-                // （见 `dispatch_render_tick` / `projection_restamp.rs`）。在途期间
-                // 读整棵树已先落库时，这次更早开始的发现结果作废，由调度补刷。
+                // （见 `dispatch_render_tick` / `projection_restamp.rs`）。比已落库
+                // 那份开始得更早的结果（读整棵树先开始、先落了更新的树）作废；失败
+                // 结果照常交给 app 记日志，它不改落库的树。
                 let pane_id = *pane_id;
-                let changed = !self.agent_activity.discovery_superseded(pane_id)
-                    && self.app.handle_internal_event_with_render_impact(ev);
+                let store = match result {
+                    Ok(_) => self.agent_activity.accept_pane_tree(pane_id, *ticket),
+                    Err(_) => true,
+                };
+                let changed = store && self.app.handle_internal_event_with_render_impact(ev);
                 self.agent_activity.pane_refreshed(pane_id, changed);
                 false
             }
-            AppEvent::AgentActivityRead { pane_id, .. } => {
-                // 读整棵树的结果同样只进投影，但不放调度发现的在途名额。
-                let pane_id = *pane_id;
-                let changed = self.app.handle_internal_event_with_render_impact(ev);
-                self.agent_activity.pane_read(pane_id, changed);
+            AppEvent::AgentActivityRead {
+                pane_id, ticket, ..
+            } => {
+                // 读整棵树的结果同样只进投影、按开始顺序号比新旧，但不放调度发现的
+                // 在途名额。
+                let store = self.agent_activity.accept_pane_tree(*pane_id, *ticket);
+                let changed = store && self.app.handle_internal_event_with_render_impact(ev);
+                self.agent_activity.pane_read(changed);
                 false
             }
-            AppEvent::ExternalAgentsRefreshed { source, .. } => {
-                let changed = !self.agent_activity.external_superseded(source)
-                    && self.app.handle_internal_event_with_render_impact(ev);
+            AppEvent::ExternalAgentsRefreshed {
+                source,
+                ticket,
+                result,
+            } => {
+                let store = match result {
+                    Ok(_) => self.agent_activity.accept_external_list(source, *ticket),
+                    Err(_) => true,
+                };
+                let changed = store && self.app.handle_internal_event_with_render_impact(ev);
                 self.agent_activity.external_refreshed(changed);
                 false
             }
-            AppEvent::ExternalAgentsRead { source, .. } => {
-                let source = source.clone();
-                let changed = self.app.handle_internal_event_with_render_impact(ev);
-                self.agent_activity.external_read(&source, changed);
+            AppEvent::ExternalAgentsRead { source, ticket, .. } => {
+                let store = self.agent_activity.accept_external_list(source, *ticket);
+                let changed = store && self.app.handle_internal_event_with_render_impact(ev);
+                self.agent_activity.external_read(changed);
                 false
             }
             AppEvent::TerminalCwdReported { .. } => {

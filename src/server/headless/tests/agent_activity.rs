@@ -95,6 +95,7 @@ async fn activity_refresh_only_touches_the_projection_until_it_reaches_clients()
 
     let changed = server.handle_internal_event_with_forwarding(AppEvent::AgentActivityRefreshed {
         pane_id,
+        ticket: 1,
         result: Ok(vec![
             node("a", AgentActivityStatus::Running),
             node("b", AgentActivityStatus::Done),
@@ -131,6 +132,7 @@ async fn activity_refresh_only_touches_the_projection_until_it_reaches_clients()
     assert!(
         !server.handle_internal_event_with_forwarding(AppEvent::AgentActivityRefreshed {
             pane_id,
+            ticket: 2,
             result: Ok(vec![
                 node("a", AgentActivityStatus::Running),
                 node("b", AgentActivityStatus::Done),
@@ -149,6 +151,7 @@ async fn external_agents_ride_the_snapshot() {
     assert!(
         !server.handle_internal_event_with_forwarding(AppEvent::ExternalAgentsRefreshed {
             source: "zcode".into(),
+            ticket: 1,
             result: Ok(vec![crate::api::schema::ExternalAgentInfo {
                 external_id: "zcode:s-1".into(),
                 source: "zcode".into(),
@@ -184,6 +187,7 @@ async fn scheduled_tasks_submit_discovery_and_release_the_slot_on_the_result() {
     let AppEvent::AgentActivityRefreshed {
         pane_id: refreshed,
         result,
+        ..
     } = &event
     else {
         panic!("应为活动树刷新事件：{event:?}");
@@ -403,6 +407,105 @@ async fn a_whole_tree_read_keeps_the_discovery_slot_and_outlives_an_older_discov
     shutdown_test_runtimes(&mut server);
 }
 
+/// 审查轻 2：主循环按开始顺序号落库。事件按指定次序直接喂给主循环，不靠线程时序：
+/// （c）更早开始的读树晚到，不盖掉后开始的调度发现落下的树；（b）读树之后才开始的
+/// 发现照常覆盖它；失败结果照常交给 app，只记日志、不改落库的树，也不推进顺序；
+/// （a）外部来源按来源各自比较，与轮询名额无关。
+#[tokio::test]
+async fn activity_results_land_in_start_order_whatever_order_they_arrive_in() {
+    use AgentActivityStatus::{Done, Running};
+    let (mut server, pane_id) = server_with_agent_pane();
+    let tree = |statuses: &[AgentActivityStatus]| {
+        statuses
+            .iter()
+            .enumerate()
+            .map(|(index, status)| node(&format!("n{index}"), *status))
+            .collect::<Vec<_>>()
+    };
+
+    server.handle_internal_event_with_forwarding(AppEvent::AgentActivityRefreshed {
+        pane_id,
+        ticket: 7,
+        result: Ok(tree(&[Done])),
+    });
+    assert_eq!(stored_statuses(&server, pane_id), [Done]);
+    server.handle_internal_event_with_forwarding(AppEvent::AgentActivityRead {
+        pane_id,
+        ticket: 5,
+        nodes: tree(&[Running]),
+    });
+    assert_eq!(
+        stored_statuses(&server, pane_id),
+        [Done],
+        "更早开始的读树晚到：作废"
+    );
+    server.handle_internal_event_with_forwarding(AppEvent::AgentActivityRead {
+        pane_id,
+        ticket: 9,
+        nodes: tree(&[Done, Running]),
+    });
+    assert_eq!(stored_statuses(&server, pane_id), [Done, Running]);
+    server.handle_internal_event_with_forwarding(AppEvent::AgentActivityRefreshed {
+        pane_id,
+        ticket: 11,
+        result: Err("unavailable".into()),
+    });
+    assert_eq!(
+        stored_statuses(&server, pane_id),
+        [Done, Running],
+        "失败结果不改落库的树"
+    );
+    server.handle_internal_event_with_forwarding(AppEvent::AgentActivityRefreshed {
+        pane_id,
+        ticket: 10,
+        result: Ok(tree(&[Done, Done])),
+    });
+    assert_eq!(
+        stored_statuses(&server, pane_id),
+        [Done, Done],
+        "读树之后才开始的发现照常落库；失败结果不推进顺序"
+    );
+
+    let labels = |server: &HeadlessServer| {
+        server
+            .app
+            .state
+            .agent_activity
+            .external()
+            .iter()
+            .map(|record| record.info.label.clone())
+            .collect::<Vec<_>>()
+    };
+    let listed = |ticket: u64, label: &str| {
+        let AppEvent::ExternalAgentsRefreshed { result, .. } = zcode_refreshed(label) else {
+            unreachable!("zcode_refreshed 只造外部来源刷新事件");
+        };
+        (ticket, result.unwrap_or_default())
+    };
+    let (ticket, agents) = listed(3, "polled");
+    server.handle_internal_event_with_forwarding(AppEvent::ExternalAgentsRefreshed {
+        source: "zcode".into(),
+        ticket,
+        result: Ok(agents),
+    });
+    assert_eq!(labels(&server), ["polled"]);
+    let (ticket, agents) = listed(2, "older read");
+    server.handle_internal_event_with_forwarding(AppEvent::ExternalAgentsRead {
+        source: "zcode".into(),
+        ticket,
+        agents,
+    });
+    assert_eq!(labels(&server), ["polled"], "更早开始的列表晚到：作废");
+    let (ticket, agents) = listed(4, "newer read");
+    server.handle_internal_event_with_forwarding(AppEvent::ExternalAgentsRead {
+        source: "zcode".into(),
+        ticket,
+        agents,
+    });
+    assert_eq!(labels(&server), ["newer read"]);
+    shutdown_test_runtimes(&mut server);
+}
+
 fn endpoint_responses(
     control_rx: &std::sync::mpsc::Receiver<Vec<u8>>,
     request_id: &str,
@@ -497,6 +600,7 @@ async fn client_endpoint_activity_reads_bypass_the_command_lane() {
 fn zcode_refreshed(label: &str) -> AppEvent {
     AppEvent::ExternalAgentsRefreshed {
         source: "zcode".into(),
+        ticket: 1,
         result: Ok(vec![crate::api::schema::ExternalAgentInfo {
             external_id: "zcode:s-1".into(),
             source: "zcode".into(),

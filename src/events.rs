@@ -109,30 +109,38 @@ pub enum AppEvent {
     },
     /// A scheduled background refresh finished for a pane's agent. `Err`
     /// keeps the previously stored tree (the source was unreadable this time)
-    /// and only releases the in-flight slot.
+    /// and only releases the in-flight slot. `ticket` is the start-order
+    /// number the worker took before reading the source
+    /// (`server::agent_activity::Tickets`): a tree is stored only when its
+    /// ticket is newer than the one already stored for that pane.
     AgentActivityRefreshed {
         pane_id: PaneId,
+        ticket: u64,
         result: Result<Vec<crate::api::schema::AgentActivityNode>, String>,
     },
     /// An interactive whole-tree read (`agent.activity.read` without a node)
-    /// finished for a pane. The tree is stored like a refresh result, but the
-    /// scheduler's in-flight slot stays with the discovery still running for
-    /// that pane; that discovery started earlier, so its result is dropped.
+    /// finished for a pane. The tree is stored like a refresh result, ordered
+    /// by the same start ticket, but the scheduler's in-flight slot stays with
+    /// the discovery still running for that pane.
     AgentActivityRead {
         pane_id: PaneId,
+        ticket: u64,
         nodes: Vec<crate::api::schema::AgentActivityNode>,
     },
     /// A scheduled background refresh finished for one external source. `Err`
-    /// keeps the previously stored entries of that source.
+    /// keeps the previously stored entries of that source. Lists are ordered
+    /// per source by their start ticket, like pane trees.
     ExternalAgentsRefreshed {
         source: String,
+        ticket: u64,
         result: Result<Vec<crate::api::schema::ExternalAgentInfo>, String>,
     },
     /// An interactive `agent.external.list` or external whole-tree read listed
-    /// one source. Stored like a refresh; the scheduled external poll keeps
-    /// its slot and its older in-flight result for that source is dropped.
+    /// one source. Stored like a refresh, ordered per source by its start
+    /// ticket; the scheduled external poll keeps its slot.
     ExternalAgentsRead {
         source: String,
+        ticket: u64,
         agents: Vec<crate::api::schema::ExternalAgentInfo>,
     },
     /// Display-only agent metadata was reported for a pane.
