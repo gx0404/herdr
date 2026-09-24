@@ -472,6 +472,12 @@ pub(super) struct ClientAgentActivityOverlay {
     tree_summary: (u32, u32),
     /// 上一帧看到的快照摘要；变化且与树不符时提示「有更新」。
     last_snapshot_summary: Option<(u32, u32)>,
+    /// 读到这棵树之后，快照摘要是否与它对上过；只有外部条目看它。外部条目的快照
+    /// 摘要来自来源的列表查询，列表让各条目分摊行数上限，被挤掉的条目在快照里只剩
+    /// 一截残树，而读树是只针对该条目的单独查询（整树，见
+    /// `server::agent_activity::Worker::read_external_tree`），两者对不上不说明有
+    /// 变化。pane 属主的快照与读树同一口径，不看它。
+    snapshot_matched_tree: bool,
     pub(super) has_updates: bool,
     /// 内容读取的错误。
     pub(super) error: Option<String>,
@@ -515,6 +521,7 @@ impl ClientAgentActivityOverlay {
             tree_error: None,
             tree_summary: (0, 0),
             last_snapshot_summary: None,
+            snapshot_matched_tree: false,
             has_updates: false,
             error: None,
             content: None,
@@ -671,6 +678,7 @@ impl ClientAgentActivityOverlay {
             u32::try_from(running).unwrap_or(u32::MAX),
             u32::try_from(nodes.len()).unwrap_or(u32::MAX),
         );
+        self.snapshot_matched_tree = self.last_snapshot_summary == Some(self.tree_summary);
         self.nodes = nodes;
         self.tree_loaded = true;
         self.tree_error = None;
@@ -726,17 +734,25 @@ impl ClientAgentActivityOverlay {
         }
     }
 
-    /// 快照摘要变化且与已读到的树不符：未跟随时提示「有更新」。
+    /// 快照摘要变化且与已读到的树不符：未跟随时提示「有更新」。外部条目另要求快照
+    /// 此前与这棵树对上过（`snapshot_matched_tree`）：被列表挤掉行数的条目，快照里
+    /// 的残树与整树恒不相等，不这样限定就会随列表的每次变化误报。
     fn observe_summary(&mut self, summary: Option<(u32, u32)>) {
         if summary == self.last_snapshot_summary {
             return;
         }
         let first = self.last_snapshot_summary.is_none();
         self.last_snapshot_summary = summary;
-        if first || !self.tree_loaded || self.follow_active() {
+        if !self.tree_loaded {
             return;
         }
-        if summary.is_some_and(|summary| summary != self.tree_summary) {
+        let matches_tree = summary == Some(self.tree_summary);
+        let comparable = !self.is_external() || self.snapshot_matched_tree;
+        self.snapshot_matched_tree |= matches_tree;
+        if first || self.follow_active() {
+            return;
+        }
+        if summary.is_some() && !matches_tree && comparable {
             self.has_updates = true;
         }
     }

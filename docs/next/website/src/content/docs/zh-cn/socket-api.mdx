@@ -698,8 +698,9 @@ JSON 文档上报的,因为 Pi 不在磁盘上保留任何活动记录。服务�
 ```
 
 `pane_id` 与 `external_id` 恰好给一个,否则调用以 `invalid_params` 失败。不带
-`node_id` 时响应在 `nodes` 里带整棵树(这次读取同时刷新已存储的树,下一份快照与之
-一致;读取返回时该窗格仍在进行的后台刷新作废而不会覆盖它,随后再补刷一次);带 `node_id` 时 `nodes` 为空,响应带一个 `content` 片段:`node_id`、`format`
+`node_id` 时响应在 `nodes` 里带整棵树(目标是 `pane_id` 时这次读取同时刷新已存储的树,
+下一份快照与之一致;读取返回时该窗格仍在进行的后台刷新作废而不会覆盖它,随后再补刷一次。
+目标是 `external_id` 时刷新的是该来源的列表,列表里这个条目可能仍只有这棵树的一部分);带 `node_id` 时 `nodes` 为空,响应带一个 `content` 片段:`node_id`、`format`
 (`text`、`markdown`、`jsonl`、`unknown`)、`text`、`eof`、`truncated`,以及下一页
 要作为 `cursor` 回传的 `next_cursor`。`cursor` 对调用方不透明。`max_bytes` 默认 65536,上限 524288。
 `follow: true` 让服务器在接下来的 10 秒内每秒刷新该窗格的树,轮询的查看器可以借此

@@ -48,6 +48,13 @@ fn state() -> ClientShellState {
 /// 属主显示名可定制的初始状态：pane 里 agent 的名字、外部条目的标签。
 fn state_named(agent_name: &str, external_label: &str) -> ClientShellState {
     let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
+    state.set_snapshot(Box::new(named_snapshot(agent_name, external_label)));
+    state.set_pane_surface(surface());
+    state
+}
+
+/// 初始状态的快照：pane_1 里的 agent（1/4）与一个没有活动的外部条目 zcode:s1。
+fn named_snapshot(agent_name: &str, external_label: &str) -> ClientShellSnapshot {
     let mut projected = snapshot();
     let mut owner = agent("pane_1", 1, 4);
     owner.name = Some(agent_name.into());
@@ -63,9 +70,19 @@ fn state_named(agent_name: &str, external_label: &str) -> ClientShellState {
         updated_at_ms: None,
         activity: crate::protocol::ClientShellAgentActivity::default(),
     }];
-    state.set_snapshot(Box::new(projected));
-    state.set_pane_surface(surface());
-    state
+    projected
+}
+
+/// 外部条目 zcode:s1 在快照里的活动摘要换成 `running / total`，其余同初始状态。
+fn external_summary_snapshot(running: u32, total: u32) -> ClientShellSnapshot {
+    let mut projected = named_snapshot("claude-main", "zcode desktop");
+    projected.external_agents[0].activity = crate::protocol::ClientShellAgentActivity {
+        running,
+        total,
+        truncated: total > 1,
+        nodes: Vec::new(),
+    };
+    projected
 }
 
 fn pane_owner() -> AgentActivityOwner {
@@ -1141,6 +1158,60 @@ fn summary_change_without_follow_shows_the_updates_badge() {
     respond(&mut state, &id, tree_result(sample_nodes()));
     state.compose(120, 40).expect("frame");
     assert!(!has(&popup_text(&state).join("\n"), texts().updates_badge));
+}
+
+/// N17：外部条目的快照摘要来自来源的列表查询，列表让各条目分摊行数上限，被挤掉
+/// 的条目在快照里只剩一截残树；窗口读到的却是只针对该条目的单独查询（整树）。
+/// 两者对不上不说明有变化：列表随别的条目变来变去时不提示「有更新」。快照与树
+/// 对上过之后再偏离，照常提示（宽 / 窄窗口都画出徽标）。
+#[test]
+fn external_updates_badge_ignores_a_listed_tree_cut_short_by_the_list() {
+    for (cols, rows) in [(120, 40), (90, 30)] {
+        let mut state = state();
+        let outcome = open(
+            &mut state,
+            AgentActivityOwner::External {
+                external_id: "zcode:s1".into(),
+            },
+        );
+        state.compose(cols, rows).expect("frame");
+        let (id, _) = single_read(&outcome);
+        respond(&mut state, &id, tree_result(sample_nodes()));
+        state.compose(cols, rows).expect("frame");
+        assert!(!overlay(&state).has_updates);
+
+        for (running, total) in [(0, 2), (1, 3), (0, 1)] {
+            state.set_snapshot(Box::new(external_summary_snapshot(running, total)));
+            state.compose(cols, rows).expect("frame");
+            assert!(
+                !overlay(&state).has_updates,
+                "{cols}x{rows} 列表里的残树 {running}/{total} 不算更新"
+            );
+        }
+        assert!(!has(&popup_text(&state).join("\n"), texts().updates_badge));
+
+        // 列表放得下整棵树了：与读到的树对上，不提示；之后再变才提示。
+        state.set_snapshot(Box::new(external_summary_snapshot(1, 4)));
+        state.compose(cols, rows).expect("frame");
+        assert!(!overlay(&state).has_updates, "{cols}x{rows} 对上了");
+        state.set_snapshot(Box::new(external_summary_snapshot(2, 5)));
+        state.compose(cols, rows).expect("frame");
+        assert!(overlay(&state).has_updates, "{cols}x{rows} 对上之后的变化");
+        let title = popup_text(&state)[1].clone();
+        assert!(
+            has(&title, texts().updates_badge),
+            "{cols}x{rows} 有更新徽标: {title:?}"
+        );
+
+        // r 刷新：读到的新树与快照不同（又被挤掉）时，重新等快照对上。
+        let outcome = state.handle_raw_events(vec![key(KeyCode::Char('r'))]);
+        assert!(!overlay(&state).has_updates);
+        let (id, _) = single_read(&outcome);
+        respond(&mut state, &id, tree_result(sample_nodes()));
+        state.set_snapshot(Box::new(external_summary_snapshot(0, 2)));
+        state.compose(cols, rows).expect("frame");
+        assert!(!overlay(&state).has_updates, "{cols}x{rows} 刷新后仍是残树");
+    }
 }
 
 /// markdown 只给标题与列表记号着色；jsonl 取 type / role / name 做前缀。
