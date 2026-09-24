@@ -170,7 +170,7 @@ CLI 的 `herdr api snapshot` 会把当前 `session.snapshot` 响应输出为 JSO
 
 `pane.layout` 返回标签页布局快照,包含 `workspace_id`、`tab_id`、`zoomed`、外层 `area`、`focused_pane_id`、窗格矩形和分割矩形/比例。`pane.neighbor` 和 `pane.edges` 也包含同一份布局快照,让客户端不需要私有布局状态就能做出下一步决策。
 
-`pane.process_info` 返回窗格的 shell pid、可用时的前台进程组 id,以及平台暴露时带有 pid、名称、argv/cmdline 和 cwd 的前台进程。argv/cmdline 里疑似凭据的值会替换成 `[REDACTED]`:`--token`、`--api-key` 等选项的值,`Authorization:` 等敏感请求头(保留 `Bearer`/`Basic` 等认证方案名),`Bearer` 令牌,`*_KEY=`、`*_TOKEN=` 这类赋值,以及 URL 里的口令与凭据类查询参数。程序名与参数结构保持原样,调用方仍能看出在运行什么。
+`pane.process_info` 返回窗格的 shell pid、可用时的前台进程组 id,以及平台暴露时带有 pid、名称、argv/cmdline 和 cwd 的前台进程。argv/cmdline 里疑似凭据的值会替换成 `[REDACTED]`:`--token`、`--api-key` 等选项的值,`Authorization:` 等敏感请求头(保留 `Bearer`/`Basic` 等认证方案名),`Bearer` 令牌,`*_KEY=`、`*_TOKEN=` 这类赋值,以及 URL 里的口令与凭据类查询参数。http(s) URL 里不带口令的用户信息通常就是令牌,会整段打码(`https://user@bitbucket.org/…` 显示为 `https://[REDACTED]@bitbucket.org/…`);`ssh://git@…` 等其它协议保留用户名。curl 的 `-u 名:口令` 这类写法只打口令部分。程序名与参数结构保持原样,调用方仍能看出在运行什么。
 
 `layout.export` 返回可移植的标签页布局树。省略 `tab_id` 和 `pane_id` 导出活动标签页,传 `tab_id` 导出该标签页,或传 `pane_id` 导出包含该窗格的标签页。
 

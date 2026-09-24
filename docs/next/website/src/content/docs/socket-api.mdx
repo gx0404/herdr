@@ -260,8 +260,13 @@ when the platform exposes them. Values in argv/cmdline that look like
 credentials are replaced with `[REDACTED]`: values of options such as
 `--token` and `--api-key`, sensitive headers such as `Authorization:` (the
 `Bearer`/`Basic` scheme is kept), `Bearer` tokens, `*_KEY=`/`*_TOKEN=`
-assignments, and passwords or credential query parameters in URLs. The program
-name and argument layout are kept, so callers can still tell what is running.
+assignments, and passwords or credential query parameters in URLs. For http(s)
+URLs, user info without a password is redacted as a whole because it is usually
+a token (`https://user@bitbucket.org/…` becomes
+`https://[REDACTED]@bitbucket.org/…`); other schemes such as `ssh://git@…`
+keep the user name. For curl-style `-u name:password` options only the
+password part is redacted. The program name and argument layout are kept, so
+callers can still tell what is running.
 
 `layout.export` returns a portable tab layout tree. Omit `tab_id` and `pane_id`
 to export the active tab, pass `tab_id` to export that tab, or pass `pane_id` to
