@@ -407,13 +407,25 @@ impl Quotes {
             Quotes::Shell => ch == '"' || ch == '\'',
         }
     }
+
+    /// 引号外把一条命令与下一条分开的字符：shell 里的 `;`、`&`、`|` 与换行
+    /// （`&&`、`||` 就是连着两个）。Windows 原始命令行交给 CommandLineToArgvW，
+    /// 这些都是普通字符。
+    fn separates_commands(self, ch: char) -> bool {
+        match self {
+            Quotes::Windows => false,
+            Quotes::Shell => matches!(ch, ';' | '&' | '|' | '\n'),
+        }
+    }
 }
 
-/// 一段命令行里的一个词：原文范围、去掉引号后的内容、最先出现的引号。
+/// 一段命令行里的一个词：原文范围、去掉引号后的内容、最先出现的引号、是否一条
+/// 命令的第一个词。
 struct Word {
     span: std::ops::Range<usize>,
     text: String,
     quote: Option<char>,
+    starts_command: bool,
 }
 
 /// 按空白切词：引号里的空白不切、引号本身去掉；反斜杠按字面处理（Windows 路径里
@@ -422,15 +434,25 @@ fn split_words(line: &str, quotes: Quotes) -> Vec<Word> {
     let mut words = Vec::new();
     let mut current: Option<Word> = None;
     let mut open_quote: Option<char> = None;
+    let mut next_starts_command = true;
     for (index, ch) in line.char_indices() {
-        if open_quote.is_none() && ch.is_whitespace() {
-            words.extend(current.take());
-            continue;
+        if open_quote.is_none() {
+            // 命令分隔符不进任何词：原文里留在词与词之间，打码时原样保留。
+            if quotes.separates_commands(ch) {
+                words.extend(current.take());
+                next_starts_command = true;
+                continue;
+            }
+            if ch.is_whitespace() {
+                words.extend(current.take());
+                continue;
+            }
         }
         let word = current.get_or_insert_with(|| Word {
             span: index..index,
             text: String::new(),
             quote: None,
+            starts_command: std::mem::take(&mut next_starts_command),
         });
         word.span.end = index + ch.len_utf8();
         match open_quote {
@@ -462,7 +484,18 @@ fn redact_line(line: &str, first: usize, depth: usize, quotes: Quotes) -> String
             }
         }
     }
-    redact_words(&mut texts, first, depth);
+    // 每条命令单独处理：上一条命令里等着的值不会落到下一条命令的第一个词上。
+    let mut start = 0;
+    for end in 1..=words.len() {
+        if end == words.len() || words[end].starts_command {
+            redact_words(
+                &mut texts[start..end],
+                if start == 0 { first } else { 0 },
+                depth,
+            );
+            start = end;
+        }
+    }
     let mut redacted = String::with_capacity(line.len());
     let mut copied = 0;
     for (word, text) in words.iter().zip(&texts) {
@@ -745,6 +778,35 @@ mod tests {
                 "ftp://anonymous@ftp.example.invalid/pub",
             ],
         );
+    }
+
+    /// 复审 L1 / L2：参数里套的 shell 命令行按 `;`、`&&`、`||`、`|`、换行分成几条
+    /// 命令：运算符两侧没有空格也照常打码，打码不吞运算符，上一条命令里等着的值
+    /// 不会落到下一条命令的第一个词上。
+    #[test]
+    fn shell_operators_split_commands_even_without_spaces() {
+        assert_redacted(
+            &["sh", "-c", "cd /x&&TOKEN=s3cr3t-1 codex"],
+            &["sh", "-c", "cd /x&&TOKEN=[REDACTED] codex"],
+        );
+        assert_redacted(
+            &[
+                "sh",
+                "-c",
+                "foo;API_KEY=s3cr3t-2 bar|curl --token s3cr3t-3||true",
+            ],
+            &[
+                "sh",
+                "-c",
+                "foo;API_KEY=[REDACTED] bar|curl --token [REDACTED]||true",
+            ],
+        );
+        assert_redacted(
+            &["sh", "-c", "export API_KEY=s3cr3t-4; codex"],
+            &["sh", "-c", "export API_KEY=[REDACTED]; codex"],
+        );
+        let plain = ["sh", "-c", "tool --api-key; ls -la\nbearer-check done"];
+        assert_redacted(&plain, &plain);
     }
 
     #[test]
