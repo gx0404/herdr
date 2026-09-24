@@ -4,10 +4,10 @@ use super::{
     AgentActivityTexts, AgentPanelTexts, BroadcastTexts, ChromeTexts, CliErrorTexts, CliHelpTexts,
     CliOutputTexts, ContextMenuTexts, DialogTexts, EndpointTexts, GlobalMenuTexts, HistoryTexts,
     KeybindTexts, MachineAuthTexts, MachineFilesTexts, MachineFormTexts, MachinesTexts, MenuTexts,
-    MobileTexts, ModeBarTexts, MonitorTexts, NotifyTexts, OnboardingTexts, OverlayTexts,
-    PlatformMessageTexts, RuntimeMessageTexts, ScenesTexts, SettingsTexts, SidebarTexts,
-    SnippetsTexts, StatusTexts, Texts, UpdateTexts, UsageMetricTexts, UsageNoticeTexts,
-    UsageProbeTexts, WorktreeTexts,
+    MobileTexts, ModeBarTexts, MonitorConfigTexts, MonitorTexts, NotifyTexts, OnboardingTexts,
+    OverlayTexts, PlatformMessageTexts, RuntimeMessageTexts, ScenesTexts, SettingsTexts,
+    SidebarTexts, SnippetsTexts, StatusTexts, Texts, UpdateTexts, UsageMetricTexts,
+    UsageNoticeTexts, UsageProbeTexts, WorktreeTexts,
 };
 
 /// 主题显示名（canonical → 中文）；未列出的主题回退到 canonical 值。
@@ -658,6 +658,13 @@ pub const TEXTS: Texts = Texts {
         stale_window: "已过重置时间，沿用上次值",
         claude_context_pending: "暂无数据（首次请求前或 /compact 后）",
         pi_context_pending: "暂无数据（压缩后等待下一次响应）",
+    },
+    monitor_config: MonitorConfigTexts {
+        interval_invalid: "monitor.interval_ms 必须为 500、1000、2000 或 5000",
+        history_invalid: "monitor.history_minutes 必须介于 1 和 60",
+        account_id_invalid: "account_usage.accounts 的 id 必须非空且唯一，长度不超过 128",
+        credential_env_invalid: "account_usage.accounts.credential_env 必须是环境变量名称",
+        account_user_deprecated_fmt: "account_usage.accounts.account_user 已弃用并被忽略（账号 '{account}'）；没有厂商再用它，请删除",
     },
     sidebar: SidebarTexts {
         spaces: " 工作区",
@@ -1358,6 +1365,9 @@ pub const TEXTS: Texts = Texts {
         api_about: "查看 socket API 元数据与实时 runtime 状态",
         api_snapshot_about: "打印实时会话快照",
         api_usage_report_about: "提交官方 CLI 用量回调 JSON",
+        api_usage_report_agent_help: "所报官方 statusline JSON 来自哪个 agent，如 claude",
+        api_usage_report_account_help: "报到哪个账号 ID；默认用当前窗格绑定的账号",
+        api_usage_report_passthrough_help: "statusline 包装模式：把 stdin 原样回放到 stdout 交给原渲染器，上报只发不等、出错也不出声",
         api_schema_about: "打印或写入内置 API schema",
         workspace_about: "通过 socket API 管理工作区",
         workspace_list_about: "列出工作区",

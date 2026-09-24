@@ -144,28 +144,30 @@ pub struct UsageAccountConfig {
     pub base_url: Option<String>,
 }
 
+/// 诊断文案按调用进程的界面语言给出（`herdr config check` 与界面共用）。
 pub(crate) fn diagnostics(monitor: &MonitorConfig, usage: &AccountUsageConfig) -> Vec<String> {
+    let texts = &crate::i18n::texts().monitor_config;
     let mut messages = Vec::new();
     if ![500, 1000, 2000, 5000].contains(&monitor.interval_ms) {
-        messages.push("monitor.interval_ms 必须为 500、1000、2000 或 5000".into());
+        messages.push(texts.interval_invalid.into());
     }
     if !(1..=60).contains(&monitor.history_minutes) {
-        messages.push("monitor.history_minutes 必须介于 1 和 60".into());
+        messages.push(texts.history_invalid.into());
     }
     let mut ids = std::collections::HashSet::new();
     for account in &usage.accounts {
         if account.id.is_empty() || account.id.len() > 128 || !ids.insert(&account.id) {
-            messages.push("account_usage.accounts 的 id 必须非空且唯一，长度不超过 128".into());
+            messages.push(texts.account_id_invalid.into());
         }
         if account.credential_env.as_ref().is_some_and(|name| {
             name.is_empty() || !name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
         }) {
-            messages.push("account_usage.accounts.credential_env 必须是环境变量名称".into());
+            messages.push(texts.credential_env_invalid.into());
         }
         if account.account_user.is_some() {
-            messages.push(format!(
-                "account_usage.accounts.account_user is deprecated and ignored (account '{}'); no provider uses it, remove it",
-                account.id
+            messages.push(crate::i18n::fill(
+                texts.account_user_deprecated_fmt,
+                &[("account", &account.id)],
             ));
         }
     }
@@ -212,6 +214,37 @@ account_user = "me"
         );
         config.accounts[0].account_user = None;
         assert!(diagnostics(&MonitorConfig::default(), &config).is_empty());
+    }
+
+    /// T1 服务端审查轻 3：同一份诊断曾中英混杂（弃用提示英文、其余中文）。现在全部按界面
+    /// 语言给出：英文界面不含 CJK，中文界面是中文。
+    #[test]
+    fn diagnostics_follow_the_interface_language() {
+        use crate::i18n::{has_cjk, lang_guard, Lang};
+        let monitor = MonitorConfig {
+            interval_ms: 3,
+            history_minutes: 0,
+            ..MonitorConfig::default()
+        };
+        let account = UsageAccountConfig {
+            id: "work".into(),
+            credential_env: Some("not an env var".into()),
+            account_user: Some("me".into()),
+            ..Default::default()
+        };
+        let usage = AccountUsageConfig {
+            accounts: vec![account.clone(), account],
+            ..AccountUsageConfig::default()
+        };
+        for (lang, chinese) in [(Lang::En, false), (Lang::ZhCn, true)] {
+            let _guard = lang_guard(lang);
+            let messages = diagnostics(&monitor, &usage);
+            assert_eq!(messages.len(), 7, "{messages:?}");
+            for message in &messages {
+                assert_eq!(has_cjk(message), chinese, "{lang:?}: {message}");
+            }
+            assert!(messages.iter().any(|message| message.contains("'work'")));
+        }
     }
 
     #[test]

@@ -1865,6 +1865,16 @@ pub struct UsageMetricTexts {
     pub pi_context_pending: &'static str,
 }
 
+/// `[monitor]` 与 `[account_usage]` 配置的诊断（`herdr config check` 与界面的配置诊断共用）：
+/// 按调用进程的界面语言给出，同一份诊断里不再中英混杂（T1 服务端审查轻 3）。
+pub struct MonitorConfigTexts {
+    pub interval_invalid: &'static str,
+    pub history_invalid: &'static str,
+    pub account_id_invalid: &'static str,
+    pub credential_env_invalid: &'static str,
+    pub account_user_deprecated_fmt: &'static str, // args: account
+}
+
 /// Help/about strings for the clap CLI surface. Option and subcommand
 /// names, value placeholders and parsed values stay untranslated; only
 /// the descriptive text differs per language.
@@ -1905,6 +1915,9 @@ pub struct CliHelpTexts {
     pub api_about: &'static str,
     pub api_snapshot_about: &'static str,
     pub api_usage_report_about: &'static str,
+    pub api_usage_report_agent_help: &'static str,
+    pub api_usage_report_account_help: &'static str,
+    pub api_usage_report_passthrough_help: &'static str,
     pub api_schema_about: &'static str,
     pub workspace_about: &'static str,
     pub workspace_list_about: &'static str,
@@ -2616,6 +2629,7 @@ pub struct Texts {
     pub usage_notice: UsageNoticeTexts,
     pub usage_probe: UsageProbeTexts,
     pub usage_metric: UsageMetricTexts,
+    pub monitor_config: MonitorConfigTexts,
     pub sidebar: SidebarTexts,
     pub status: StatusTexts,
     pub mode_bar: ModeBarTexts,
@@ -3199,6 +3213,20 @@ mod tests {
         )
     }
 
+    /// `MonitorConfigTexts` 的全部条目。
+    fn monitor_config_texts(t: &MonitorConfigTexts) -> Vec<&'static str> {
+        all_entries!(
+            t,
+            MonitorConfigTexts {
+                interval_invalid,
+                history_invalid,
+                account_id_invalid,
+                credential_env_invalid,
+                account_user_deprecated_fmt,
+            }
+        )
+    }
+
     /// 两张表逐条对照：英文表每条都不含 CJK 字符，中文表每条都有译文（不是照抄英文）。
     fn assert_translated(en: &[&str], zh: &[&str]) {
         assert_eq!(en.len(), zh.len());
@@ -3227,6 +3255,10 @@ mod tests {
         assert_translated(
             &usage_metric_texts(&en::TEXTS.usage_metric),
             &usage_metric_texts(&zh_cn::TEXTS.usage_metric),
+        );
+        assert_translated(
+            &monitor_config_texts(&en::TEXTS.monitor_config),
+            &monitor_config_texts(&zh_cn::TEXTS.monitor_config),
         );
     }
 

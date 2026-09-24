@@ -4,10 +4,10 @@ use super::{
     AgentActivityTexts, AgentPanelTexts, BroadcastTexts, ChromeTexts, CliErrorTexts, CliHelpTexts,
     CliOutputTexts, ContextMenuTexts, DialogTexts, EndpointTexts, GlobalMenuTexts, HistoryTexts,
     KeybindTexts, MachineAuthTexts, MachineFilesTexts, MachineFormTexts, MachinesTexts, MenuTexts,
-    MobileTexts, ModeBarTexts, MonitorTexts, NotifyTexts, OnboardingTexts, OverlayTexts,
-    PlatformMessageTexts, RuntimeMessageTexts, ScenesTexts, SettingsTexts, SidebarTexts,
-    SnippetsTexts, StatusTexts, Texts, UpdateTexts, UsageMetricTexts, UsageNoticeTexts,
-    UsageProbeTexts, WorktreeTexts,
+    MobileTexts, ModeBarTexts, MonitorConfigTexts, MonitorTexts, NotifyTexts, OnboardingTexts,
+    OverlayTexts, PlatformMessageTexts, RuntimeMessageTexts, ScenesTexts, SettingsTexts,
+    SidebarTexts, SnippetsTexts, StatusTexts, Texts, UpdateTexts, UsageMetricTexts,
+    UsageNoticeTexts, UsageProbeTexts, WorktreeTexts,
 };
 
 pub const TEXTS: Texts = Texts {
@@ -638,6 +638,15 @@ pub const TEXTS: Texts = Texts {
         stale_window: "Past its reset time; showing the last value",
         claude_context_pending: "No data yet (before the first request or after /compact)",
         pi_context_pending: "No data yet (waiting for the next response after compaction)",
+    },
+    monitor_config: MonitorConfigTexts {
+        interval_invalid: "monitor.interval_ms must be 500, 1000, 2000 or 5000",
+        history_invalid: "monitor.history_minutes must be between 1 and 60",
+        account_id_invalid:
+            "account_usage.accounts ids must be non-empty, unique and at most 128 characters",
+        credential_env_invalid:
+            "account_usage.accounts.credential_env must be an environment variable name",
+        account_user_deprecated_fmt: "account_usage.accounts.account_user is deprecated and ignored (account '{account}'); no provider uses it, remove it",
     },
     sidebar: SidebarTexts {
         spaces: " spaces",
@@ -1357,6 +1366,10 @@ pub const TEXTS: Texts = Texts {
         api_about: "Inspect socket API metadata and live runtime state",
         api_snapshot_about: "Print the live session snapshot",
         api_usage_report_about: "Submit an official CLI usage callback JSON",
+        api_usage_report_agent_help: "Agent whose official statusline JSON this is, such as claude",
+        api_usage_report_account_help:
+            "Account ID to report to; defaults to the account bound to the current pane",
+        api_usage_report_passthrough_help: "Statusline wrapper mode: replay stdin to stdout for the original renderer, send the report without waiting and stay silent on errors",
         api_schema_about: "Print or write the bundled API schema",
         workspace_about: "Manage workspaces over the socket API",
         workspace_list_about: "List workspaces",
