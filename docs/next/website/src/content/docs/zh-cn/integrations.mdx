@@ -110,6 +110,8 @@ Claude 集成 v10 仅匹配文档列出的 `SessionStart` 来源: `startup`、`r
 
 Claude 集成 v11 在 macOS 和 Linux 上还会订阅 `SubagentStart`、`SubagentStop`(matcher 为 `*`)以及 `TaskCreated`、`TaskCompleted`。这些钩子只向本地 Herdr socket 通知 Claude Code 的子 agent 或任务发生了变化,不上报 agent 状态。Windows 上不安装这些钩子。升级后请重新安装 Claude 集成以添加它们。
 
+Claude Code 后台会话(用 `claude --bg` 启动或由 Claude Code daemon 托管的会话)不向 Herdr 上报。它们继承了启动 daemon 的那个窗格的变量,上报会被显示成那个窗格的 agent。钩子根据 daemon 设置的 `CLAUDE_JOB_DIR` 或 `CLAUDE_CODE_SESSION_KIND=bg` 变量识别后台会话。如仍要上报,在它们的环境中设置 `HERDR_REPORT_BG_SESSIONS=1`。Herdr 会从新窗格的环境中去掉这两个变量,因此即使 Herdr server 是从后台会话中启动的,窗格里的 Claude Code 仍会上报。
+
 Herdr 从 Claude Code 自己的会话文件构建它的活动树。Claude Code 在后台运行的子 agent,在 Claude Code 为派生它的 agent 记下结束通知后显示为完成或失败;被停掉的子 agent 显示为失败,摘要开头注明 `stopped`;已结束的子 agent 被重新唤起后重新算作运行中。Claude Code 的 workflow 运行的子 agent 归在该 workflow 及其阶段之下,状态改看 workflow 的 journal:记有结果的显示为完成,记有失败的显示为失败;只记了开始的算运行中,直到其转录 30 分钟没有变化才显示为未知。workflow 本身结束后,其下仍在运行或未知的子 agent 随 workflow 的终态落定。其余没有这类记录的子 agent,转录在最近两分钟内有变化时算运行中,之后显示为未知。会话很长时 Herdr 只在主转录较新的部分里查找结束通知,更早的后台子 agent 可能显示为未知。
 
 在 Agent 活动窗口里,Claude Code 子 agent 的输出为每个工具调用附上主要参数,例如 Bash 命令、文件路径或搜索词;每个工具结果显示输出的前五行,其余只标出剩余行数。失败的工具结果标为 `[tool error]`。

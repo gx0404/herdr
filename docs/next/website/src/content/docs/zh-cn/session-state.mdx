@@ -91,6 +91,8 @@ resume_agents_on_restore = false
 
 Herdr 只会恢复那些通过当前官方 Herdr 集成上报了原生会话引用的窗格。
 
+默认情况下,Claude Code 后台会话不上报会话引用,所以 Herdr 不会恢复它们。见 [Claude Code](/zh-cn/docs/integrations/#claude-code)。
+
 当客户端连接并提供终端尺寸和主题上下文后,Herdr 会跨工作区和标签页恢复符合条件的智能体窗格,不需要等每个窗格被聚焦。
 
 智能体原生会话恢复需要以下版本或更新的 Herdr 集成:

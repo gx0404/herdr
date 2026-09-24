@@ -1,5 +1,5 @@
 {
-  "chunk_count": 1096,
+  "chunk_count": 1097,
   "chunks": [
     {
       "anchor": "herdr",
@@ -2343,21 +2343,28 @@
       "anchor": "Install integrations > Claude Code",
       "doc": "docs/next/website/src/content/docs/integrations.mdx",
       "id": "docs-next-website-src-content-docs-integrations-mdx-install-integrations-claude-code-part1",
-      "source_sha256": "3b09074590b34f06ec76a6912b8d9424d87193693277c4b2ad42973131bcccb4",
+      "source_sha256": "86cae260f795bb5bec2d816958620030f907d58ac1cea59927f74fdeec4cbe75",
       "text": "## Claude Code\n\nInstall the Claude Code hook:\n\n```bash\nherdr integration install claude\n```\n\nThe hook reports Claude Code session identity to the local Herdr socket on session start. Claude Code state comes from Herdr's screen manifest detection.\n\nClaude integration v10 matches only the documented `SessionStart` sources: `startup`, `resume`, `clear`, `compact`, and `fork`. This prevents third-party tools that import Claude hooks from firing the imported Herdr Claude hook on other source names, without disabling unrelated Claude-compatible hooks. Reinstall the Claude integration after upgrading to migrate the previous wildcard matcher. New Claude source values require an integration update.\n\nClaude integration v11 also subscribes to `SubagentStart` and `SubagentStop` (matcher `*`) and to `TaskCreated` and `TaskCompleted` on macOS and Linux. These hooks only tell the local Herdr socket that Claude Code's sub-agents or tasks changed; they do not report agent state. They are not installed on Windows. Reinstall the Claude integration after upgrading to add them.\n"
     },
     {
       "anchor": "Install integrations > Claude Code",
       "doc": "docs/next/website/src/content/docs/integrations.mdx",
       "id": "docs-next-website-src-content-docs-integrations-mdx-install-integrations-claude-code-part2",
-      "source_sha256": "3b09074590b34f06ec76a6912b8d9424d87193693277c4b2ad42973131bcccb4",
-      "text": "Herdr builds Claude Code's activity tree from Claude Code's own session files. A sub-agent that Claude Code runs in the background shows as done or failed once Claude Code records its completion notice for the agent that launched it; a sub-agent that was stopped shows as failed, with `stopped` at the start of its summary, and a finished sub-agent that is resumed counts as running again. Sub-agents that a Claude Code workflow runs are grouped under the workflow and its phase and follow the workflow's journal instead: a recorded result shows as done and a recorded failure as failed, while a sub-agent that has only started counts as running until its transcript has not changed for 30 minutes and as unknown after that. Once the workflow itself has finished, its sub-agents that are still running or unknown take the workflow's final status. Any other sub-agent without such a record counts as running while its transcript changed in the last two minutes and as unknown after that. In a very long session Herdr only checks the most recent part of the main transcript for completion notices, so a background sub-agent from much earlier may show as unknown.\n\nIn the agent activity window, a Claude Code sub-agent's output shows each tool call with its main argument, such as a Bash command, a file path, or a search query, and each tool result with the first five lines of its output, followed by a count of the remaining lines. Failed tool results are marked `[tool error]`.\n"
+      "source_sha256": "86cae260f795bb5bec2d816958620030f907d58ac1cea59927f74fdeec4cbe75",
+      "text": "Claude Code background sessions, started with `claude --bg` or hosted by the Claude Code daemon, do not report to Herdr. They inherit the pane variables of the pane that started the daemon, so their reports would show up as that pane's agent. The hook recognizes them by the `CLAUDE_JOB_DIR` or `CLAUDE_CODE_SESSION_KIND=bg` variable that the daemon sets. To report them anyway, set `HERDR_REPORT_BG_SESSIONS=1` in their environment. Herdr removes both variables from the environment of new panes, so Claude Code in a pane still reports when the Herdr server was started from a background session.\n"
     },
     {
       "anchor": "Install integrations > Claude Code",
       "doc": "docs/next/website/src/content/docs/integrations.mdx",
       "id": "docs-next-website-src-content-docs-integrations-mdx-install-integrations-claude-code-part3",
-      "source_sha256": "3b09074590b34f06ec76a6912b8d9424d87193693277c4b2ad42973131bcccb4",
+      "source_sha256": "86cae260f795bb5bec2d816958620030f907d58ac1cea59927f74fdeec4cbe75",
+      "text": "Herdr builds Claude Code's activity tree from Claude Code's own session files. A sub-agent that Claude Code runs in the background shows as done or failed once Claude Code records its completion notice for the agent that launched it; a sub-agent that was stopped shows as failed, with `stopped` at the start of its summary, and a finished sub-agent that is resumed counts as running again. Sub-agents that a Claude Code workflow runs are grouped under the workflow and its phase and follow the workflow's journal instead: a recorded result shows as done and a recorded failure as failed, while a sub-agent that has only started counts as running until its transcript has not changed for 30 minutes and as unknown after that. Once the workflow itself has finished, its sub-agents that are still running or unknown take the workflow's final status. Any other sub-agent without such a record counts as running while its transcript changed in the last two minutes and as unknown after that. In a very long session Herdr only checks the most recent part of the main transcript for completion notices, so a background sub-agent from much earlier may show as unknown.\n\nIn the agent activity window, a Claude Code sub-agent's output shows each tool call with its main argument, such as a Bash command, a file path, or a search query, and each tool result with the first five lines of its output, followed by a count of the remaining lines. Failed tool results are marked `[tool error]`.\n"
+    },
+    {
+      "anchor": "Install integrations > Claude Code",
+      "doc": "docs/next/website/src/content/docs/integrations.mdx",
+      "id": "docs-next-website-src-content-docs-integrations-mdx-install-integrations-claude-code-part4",
+      "source_sha256": "86cae260f795bb5bec2d816958620030f907d58ac1cea59927f74fdeec4cbe75",
       "text": "Herdr uses `~/.claude` by default, or `CLAUDE_CONFIG_DIR` when set. The Claude config directory must already exist. Install writes `hooks/herdr-agent-state.sh` and updates `settings.json` with Herdr hook entries. Uninstall removes the matching hook entries and deletes the hook script."
     },
     {
@@ -3148,15 +3155,15 @@
       "anchor": "What survives > Native agent session restore",
       "doc": "docs/next/website/src/content/docs/session-state.mdx",
       "id": "docs-next-website-src-content-docs-session-state-mdx-what-survives-native-agent-session-restore-part1",
-      "source_sha256": "39e1225ef17ea6fa350e1acca6ac48b803694836f2183684a4a519709f7d2912",
-      "text": "## Native agent session restore\n\nSome agents can resume their own conversation sessions. Herdr can use official integration-reported session references to restart supported agent panes after a Herdr server restart.\n\nNative agent session restore is enabled by default. Disable it with:\n\n```toml\n[session]\nresume_agents_on_restore = false\n```\n\nHerdr only resumes panes that reported a native session reference through a current official Herdr integration.\n\nAfter a client attaches and provides terminal size and theme context, Herdr resumes eligible restored agent panes across workspaces and tabs without waiting for each pane to be focused.\n\nNative session restore requires these Herdr integration versions or newer:\n\n| Agent | Minimum Herdr integration version | Resume command |\n| --- | --- | --- |\n| Pi | `2` | `pi --session <path-or-id>` |\n| Claude Code | `6` | `claude --resume <id>` |\n| Codex | `5` | `codex resume <id>` |\n| OpenCode | `5` | `opencode --session <id>` |\n| Kimi Code CLI | `3` | `kimi --session <id>` |\n\nRun `herdr integration status` to check installed integration versions. Reinstall outdated integrations with `herdr integration install <agent>`.\n\nUnsupported, missing, invalid, duplicated, or stale session references restore as normal shells in the saved pane directory. Session references reported by a [retired integration](/docs/integrations/#retired-integrations) count as unsupported.\n"
+      "source_sha256": "41d64544f47cdd60e78ab1ac0222778c129641d60bf0dbd8eb08f578e796b821",
+      "text": "## Native agent session restore\n\nSome agents can resume their own conversation sessions. Herdr can use official integration-reported session references to restart supported agent panes after a Herdr server restart.\n\nNative agent session restore is enabled by default. Disable it with:\n\n```toml\n[session]\nresume_agents_on_restore = false\n```\n\nHerdr only resumes panes that reported a native session reference through a current official Herdr integration.\n\nBy default, Claude Code background sessions do not report session references, so Herdr does not resume them. See [Claude Code](/docs/integrations/#claude-code).\n\nAfter a client attaches and provides terminal size and theme context, Herdr resumes eligible restored agent panes across workspaces and tabs without waiting for each pane to be focused.\n\nNative session restore requires these Herdr integration versions or newer:\n\n| Agent | Minimum Herdr integration version | Resume command |\n| --- | --- | --- |\n| Pi | `2` | `pi --session <path-or-id>` |\n| Claude Code | `6` | `claude --resume <id>` |\n| Codex | `5` | `codex resume <id>` |\n| OpenCode | `5` | `opencode --session <id>` |\n| Kimi Code CLI | `3` | `kimi --session <id>` |\n\nRun `herdr integration status` to check installed integration versions. Reinstall outdated integrations with `herdr integration install <agent>`.\n"
     },
     {
       "anchor": "What survives > Native agent session restore",
       "doc": "docs/next/website/src/content/docs/session-state.mdx",
       "id": "docs-next-website-src-content-docs-session-state-mdx-what-survives-native-agent-session-restore-part2",
-      "source_sha256": "39e1225ef17ea6fa350e1acca6ac48b803694836f2183684a4a519709f7d2912",
-      "text": "If native agent session restore applies to a pane, Herdr resumes the agent session instead of replaying saved pane history for that pane."
+      "source_sha256": "41d64544f47cdd60e78ab1ac0222778c129641d60bf0dbd8eb08f578e796b821",
+      "text": "Unsupported, missing, invalid, duplicated, or stale session references restore as normal shells in the saved pane directory. Session references reported by a [retired integration](/docs/integrations/#retired-integrations) count as unsupported.\n\nIf native agent session restore applies to a pane, Herdr resumes the agent session instead of replaying saved pane history for that pane."
     },
     {
       "anchor": "What survives > Pane screen history replay",
