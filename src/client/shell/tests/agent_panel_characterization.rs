@@ -3127,94 +3127,173 @@ fn context_item(state: &ClientShellState, action: ClientContextMenuAction) -> (u
     (index, items[index].enabled)
 }
 
-/// 文档终审 D9：对其它端点（远端机器）上 agent 的右键「重命名窗格」以前既不置灰，
-/// 点了也只会切过去并聚焦。按现有 API 能力改为直接重命名：该端点在线且宣告了
-/// `pane.rename` 时打开同一个重命名浮层，提交经 `push_endpoint_method_for` 发往
-/// 该端点、不切换当前端点（与「关闭窗格」同口径）；端点离线时该项置灰、点不了。
-#[test]
-fn renaming_a_remote_agent_pane_goes_to_its_endpoint_and_dims_when_offline() {
-    let (mut state, remote) = federated_state(AgentPanelSortConfig::Spaces);
-    state.compose(106, 40).expect("联邦帧");
-    right_click_endpoint_agent(&mut state, &remote, "pane_1");
-    let (rename, enabled) = context_item(&state, ClientContextMenuAction::RenameAgent);
-    assert!(enabled, "在线远端的「重命名窗格」可用");
+/// 画面上某段文字（去掉空白比较）第一次出现的那几格。CJK 宽字符的续格是空白，
+/// 逐行跳过空白格再比，相邻两个字最多隔一格。
+fn text_cells(state: &ClientShellState, text: &str) -> Vec<(u16, u16)> {
+    let buffer = state.compose_buffer.as_ref().expect("保留帧缓冲");
+    let needle: Vec<String> = text
+        .chars()
+        .filter(|ch| !ch.is_whitespace())
+        .map(String::from)
+        .collect();
+    let area = buffer.area;
+    for y in area.y..area.bottom() {
+        let cells: Vec<(u16, &str)> = (area.x..area.right())
+            .map(|x| (x, buffer[(x, y)].symbol()))
+            .filter(|(_, symbol)| !symbol.trim().is_empty())
+            .collect();
+        let found = cells.windows(needle.len()).find(|window| {
+            window
+                .iter()
+                .zip(&needle)
+                .all(|((_, symbol), ch)| symbol == ch)
+                && window.windows(2).all(|pair| pair[1].0 - pair[0].0 <= 2)
+        });
+        if let Some(window) = found {
+            return window.iter().map(|(x, _)| (*x, y)).collect();
+        }
+    }
+    Vec::new()
+}
 
-    // 点这一项：打开重命名浮层，目标是远端的 pane_1。
-    state.compose(106, 40).expect("菜单帧");
-    let row = state
+/// 右键 `endpoint_id` 上 `pane_id` 的 agent 行，读出「重命名窗格」：模型里可不可点、
+/// 画面上每个字是不是 overlay0 灰、在不在可点命中表里。随后关掉菜单。
+fn rename_item_on_screen(
+    state: &mut ClientShellState,
+    endpoint_id: &ClientEndpointId,
+    pane_id: &str,
+    (cols, rows): (u16, u16),
+) -> (bool, bool, bool) {
+    state.overlay = None;
+    state.compose(cols, rows).expect("右键前的帧");
+    right_click_endpoint_agent(state, endpoint_id, pane_id);
+    let (rename, enabled) = context_item(state, ClientContextMenuAction::RenameAgent);
+    state.compose(cols, rows).expect("菜单帧");
+    let label = crate::i18n::texts().agent_panel.menu_rename;
+    let cells = text_cells(state, label);
+    assert!(!cells.is_empty(), "{cols}x{rows}：菜单画出「{label}」");
+    let overlay0 = state.config.palette.overlay0;
+    let buffer = state.compose_buffer.as_ref().expect("保留帧缓冲");
+    let gray = cells.iter().all(|&(x, y)| buffer[(x, y)].fg == overlay0);
+    let clickable = state
         .hits
         .context_menu_rows
         .iter()
-        .find(|(_, index)| *index == rename)
-        .map(|(rect, _)| *rect)
-        .expect("可点的重命名行");
-    state.handle_input_bytes(format!("\x1b[<0;{};{}M", row.x + 2, row.y + 1).as_bytes());
-    state.handle_input_bytes(format!("\x1b[<0;{};{}m", row.x + 2, row.y + 1).as_bytes());
-    match state.overlay.as_ref() {
-        Some(ClientShellOverlay::Rename(overlay)) => {
-            assert_eq!(overlay.title, crate::i18n::texts().dialogs.rename_pane);
-            assert!(
-                matches!(
-                    &overlay.target,
-                    ClientRenameTarget::EndpointPane { endpoint_id, pane_id }
-                        if endpoint_id == &remote && pane_id == "pane_1"
-                ),
-                "浮层目标是远端的窗格：{:?}",
-                overlay.target
-            );
-        }
-        other => panic!("应打开重命名浮层：{other:?}"),
-    }
+        .any(|(_, index)| *index == rename);
+    state.overlay = None;
+    (enabled, gray, clickable)
+}
 
-    // 输入新名字回车：pane.rename 直接发往远端，当前端点不变。
-    assert!(state.insert_overlay_text("build-agent"));
-    let outcome = state.handle_raw_events(vec![RawInputEvent::Key(
-        crate::input::TerminalKey::new(KeyCode::Enter, KeyModifiers::empty()),
-    )]);
-    let [ClientShellAction::EndpointRequest {
-        endpoint_id,
-        request,
-        ..
-    }] = &outcome.actions[..]
-    else {
-        panic!("重命名应发往远端端点：{:?}", outcome.actions);
-    };
-    assert_eq!(endpoint_id, &remote);
-    assert!(matches!(
-        &request.method,
-        crate::api::schema::Method::PaneRename(params)
-            if params.pane_id == "pane_1" && params.label.as_deref() == Some("build-agent")
-    ));
-    assert!(state.active_endpoint_id.is_local(), "不切换当前端点");
-    assert!(state.overlay.is_none());
+/// 文档终审 D9：对其它端点（远端机器）上 agent 的右键「重命名窗格」以前既不置灰，
+/// 点了也只会切过去并聚焦。按现有 API 能力改为直接重命名：该端点在线且宣告了
+/// `pane.rename` 时打开同一个重命名浮层，提交经 `push_endpoint_method_for` 发往
+/// 该端点、不切换当前端点（与「关闭窗格」同口径）；端点离线、或在线但没宣告
+/// `pane.rename`（旧版 server）时该项置灰、点不了。窄 / 中 / 宽三档逐格读出该项的
+/// 字与颜色：可用时不是灰色，置灰时每个字都是 overlay0 灰（T1 审查轻 6）。
+#[test]
+fn renaming_a_remote_agent_pane_goes_to_its_endpoint_and_dims_when_unavailable() {
+    for size in [(80, 24), (106, 40), (180, 50)] {
+        let (cols, rows) = size;
+        let (mut state, remote) = federated_state(AgentPanelSortConfig::Spaces);
+        let (enabled, gray, clickable) = rename_item_on_screen(&mut state, &remote, "pane_1", size);
+        assert!(
+            enabled && !gray && clickable,
+            "{size:?}：在线远端的「重命名窗格」可用、不是灰色"
+        );
 
-    // 端点离线：该项置灰，不进命中表。
-    state.set_endpoint_status(&remote, ClientEndpointStatus::Reconnecting);
-    state.compose(106, 40).expect("离线帧");
-    right_click_endpoint_agent(&mut state, &remote, "pane_1");
-    let (rename, enabled) = context_item(&state, ClientContextMenuAction::RenameAgent);
-    assert!(!enabled, "离线远端的「重命名窗格」置灰");
-    state.compose(106, 40).expect("离线菜单帧");
-    assert!(
-        state
+        // 点这一项：打开重命名浮层，目标是远端的 pane_1。
+        state.compose(cols, rows).expect("联邦帧");
+        right_click_endpoint_agent(&mut state, &remote, "pane_1");
+        let (rename, _) = context_item(&state, ClientContextMenuAction::RenameAgent);
+        state.compose(cols, rows).expect("菜单帧");
+        let row = state
             .hits
             .context_menu_rows
             .iter()
-            .all(|(_, index)| *index != rename),
-        "置灰项不可点"
-    );
-    // 本机端点的 agent 照常可重命名。
-    state.overlay = None;
-    state.compose(106, 40).expect("关菜单");
-    let (_, local_pane) = state
-        .hits
-        .endpoint_agents
-        .iter()
-        .find(|(_, endpoint, _)| endpoint.is_local())
-        .map(|(rect, endpoint, pane)| (*rect, (endpoint.clone(), pane.clone())))
-        .expect("本机 agent 行");
-    right_click_endpoint_agent(&mut state, &local_pane.0, &local_pane.1);
-    assert!(context_item(&state, ClientContextMenuAction::RenameAgent).1);
+            .find(|(_, index)| *index == rename)
+            .map(|(rect, _)| *rect)
+            .expect("可点的重命名行");
+        state.handle_input_bytes(format!("\x1b[<0;{};{}M", row.x + 2, row.y + 1).as_bytes());
+        state.handle_input_bytes(format!("\x1b[<0;{};{}m", row.x + 2, row.y + 1).as_bytes());
+        match state.overlay.as_ref() {
+            Some(ClientShellOverlay::Rename(overlay)) => {
+                assert_eq!(overlay.title, crate::i18n::texts().dialogs.rename_pane);
+                assert!(
+                    matches!(
+                        &overlay.target,
+                        ClientRenameTarget::EndpointPane { endpoint_id, pane_id }
+                            if endpoint_id == &remote && pane_id == "pane_1"
+                    ),
+                    "{size:?}：浮层目标是远端的窗格：{:?}",
+                    overlay.target
+                );
+            }
+            other => panic!("{size:?}：应打开重命名浮层：{other:?}"),
+        }
+
+        // 输入新名字回车：pane.rename 直接发往远端，当前端点不变。
+        assert!(state.insert_overlay_text("build-agent"));
+        let outcome = state.handle_raw_events(vec![RawInputEvent::Key(
+            crate::input::TerminalKey::new(KeyCode::Enter, KeyModifiers::empty()),
+        )]);
+        let [ClientShellAction::EndpointRequest {
+            endpoint_id,
+            request,
+            ..
+        }] = &outcome.actions[..]
+        else {
+            panic!("{size:?}：重命名应发往远端端点：{:?}", outcome.actions);
+        };
+        assert_eq!(endpoint_id, &remote);
+        assert!(matches!(
+            &request.method,
+            crate::api::schema::Method::PaneRename(params)
+                if params.pane_id == "pane_1" && params.label.as_deref() == Some("build-agent")
+        ));
+        assert!(
+            state.active_endpoint_id.is_local(),
+            "{size:?}：不切换当前端点"
+        );
+        assert!(state.overlay.is_none());
+
+        // 在线但没宣告 `pane.rename`（旧版 server）：置灰、画成灰色、点不了。
+        state.set_endpoint_methods_for(&remote, Some(vec!["pane.close".into()]));
+        let (enabled, gray, clickable) = rename_item_on_screen(&mut state, &remote, "pane_1", size);
+        assert!(
+            !enabled && gray && !clickable,
+            "{size:?}：在线但未宣告 pane.rename 时置灰：{enabled} {gray} {clickable}"
+        );
+        // 宣告了就恢复可用。
+        state.set_endpoint_methods_for(&remote, Some(vec!["pane.rename".into()]));
+        let (enabled, gray, clickable) = rename_item_on_screen(&mut state, &remote, "pane_1", size);
+        assert!(
+            enabled && !gray && clickable,
+            "{size:?}：宣告了 pane.rename 就可用"
+        );
+
+        // 端点离线：置灰、画成灰色、点不了。
+        state.set_endpoint_status(&remote, ClientEndpointStatus::Reconnecting);
+        let (enabled, gray, clickable) = rename_item_on_screen(&mut state, &remote, "pane_1", size);
+        assert!(
+            !enabled && gray && !clickable,
+            "{size:?}：离线远端的「重命名窗格」置灰：{enabled} {gray} {clickable}"
+        );
+
+        // 本机端点的 agent 照常可重命名。
+        state.compose(cols, rows).expect("关菜单");
+        let (local, pane) = state
+            .hits
+            .endpoint_agents
+            .iter()
+            .find(|(_, endpoint, _)| endpoint.is_local())
+            .map(|(_, endpoint, pane)| (endpoint.clone(), pane.clone()))
+            .expect("本机 agent 行");
+        let (enabled, gray, clickable) = rename_item_on_screen(&mut state, &local, &pane, size);
+        assert!(
+            enabled && !gray && clickable,
+            "{size:?}：本机 agent 照常可重命名"
+        );
+    }
 }
 
 /// 对远端 agent 的窗格发起「重命名窗格」（输入新名字回车）或「关闭窗格」，返回

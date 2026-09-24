@@ -1336,43 +1336,47 @@ fn raw_key(state: &mut ClientShellState, code: KeyCode) {
 
 /// 文档终审 D12：机器页按 `R`（以及侧栏右键「重命名」）打开的重命名浮层，标题
 /// 以前是编辑表单的「编辑机器 / edit machine」。改为「重命名机器 / rename machine」。
+/// 中英两种界面、窄 / 中 / 宽三档；`R` 用终端真实送来的裸字节（T1 审查轻 6）。
 #[test]
 fn machine_rename_overlay_is_titled_rename_machine() {
     let build = profile("Build", "dev@build.example", "1");
     for lang in [crate::i18n::Lang::ZhCn, crate::i18n::Lang::En] {
         let _guard = crate::i18n::lang_guard(lang);
         let t = &crate::i18n::texts().machines;
-        let mut state = state_with_profiles(std::slice::from_ref(&build));
-        state.open_machines_overlay();
-        let _ = frame_text(&mut state, 93, 32);
-        state.handle_raw_events(vec![RawInputEvent::Key(crate::input::TerminalKey::new(
-            KeyCode::Char('R'),
-            KeyModifiers::SHIFT,
-        ))]);
-        match state.overlay.as_ref() {
-            Some(ClientShellOverlay::Rename(rename)) => {
-                assert_eq!(rename.title, t.rename_title, "{lang:?}");
+        for (cols, rows) in [(80, 24), (93, 32), (160, 48)] {
+            let case = format!("{lang:?} {cols}x{rows}");
+            let mut state = state_with_profiles(std::slice::from_ref(&build));
+            state.open_machines_overlay();
+            let _ = frame_text(&mut state, cols, rows);
+            state.handle_input_bytes(b"R");
+            match state.overlay.as_ref() {
+                Some(ClientShellOverlay::Rename(rename)) => {
+                    assert_eq!(rename.title, t.rename_title, "{case}");
+                }
+                other => panic!("{case}：R 应打开重命名浮层：{other:?}"),
             }
-            other => panic!("{lang:?}：R 应打开重命名浮层：{other:?}"),
-        }
-        let text = compact_frame(&mut state, 93, 32);
-        assert!(text.contains(&compact(t.rename_title)), "{lang:?}：{text}");
-        assert!(!text.contains(&compact(t.edit_title)), "{lang:?}：{text}");
+            let text = compact_frame(&mut state, cols, rows);
+            assert!(text.contains(&compact(t.rename_title)), "{case}：{text}");
+            assert!(!text.contains(&compact(t.edit_title)), "{case}：{text}");
 
-        // 侧栏右键「重命名」同一个标题。
-        state.overlay = None;
-        let mut outcome = ClientShellInput::default();
-        state.run_action(
-            super::super::action_table::ActionId::MachineRename,
-            super::super::action_table::ActionTarget::Machine(ClientEndpointId::Ssh(
-                build.id.clone(),
-            )),
-            &mut outcome,
-        );
-        assert!(matches!(
-            state.overlay.as_ref(),
-            Some(ClientShellOverlay::Rename(rename)) if rename.title == t.rename_title
-        ));
+            // 侧栏右键「重命名」同一个标题。
+            state.overlay = None;
+            let mut outcome = ClientShellInput::default();
+            state.run_action(
+                super::super::action_table::ActionId::MachineRename,
+                super::super::action_table::ActionTarget::Machine(ClientEndpointId::Ssh(
+                    build.id.clone(),
+                )),
+                &mut outcome,
+            );
+            assert!(matches!(
+                state.overlay.as_ref(),
+                Some(ClientShellOverlay::Rename(rename)) if rename.title == t.rename_title
+            ));
+            let text = compact_frame(&mut state, cols, rows);
+            assert!(text.contains(&compact(t.rename_title)), "{case}：{text}");
+            assert!(!text.contains(&compact(t.edit_title)), "{case}：{text}");
+        }
     }
 }
 
@@ -1417,93 +1421,137 @@ fn machine_form_field_names_are_distinct_in_both_languages() {
     }
 }
 
-/// 文档终审 D3：发现阶段就被跳过的主机（通配符、标签或目标已存在、批内重复）
+/// 文档终审 D3：发现阶段就被跳过的主机（通配符、名称或目标已存在、批内重复）
 /// 以前只计进「跳过 N 台」，结果页一条都不列；未勾选的主机也只有名字没有原因。
-/// 现在结果页逐条列出跳过项与原因，跳过行数与汇总一致。
+/// 现在结果页逐条列出跳过项与原因，跳过行数与汇总一致。中英两种界面、窄 / 中 /
+/// 宽三档都读出画面上的跳过行与原因（T1 审查轻 6）。
 #[test]
 fn import_done_lists_discovery_skips_with_their_reasons() {
-    let dir = with_temp_home("import-done-skips");
-    std::fs::write(dir.join(".ssh").join("config"), IMPORT_FIXTURE).unwrap();
-    let mut state = state_with_profiles(&[]);
-    state.open_machine_import_wizard();
-    // discover → select；焦点从首个候选 bastion 下移到 web 并取消勾选，再导入。
-    raw_key(&mut state, KeyCode::Enter);
-    raw_key(&mut state, KeyCode::Down);
-    raw_key(&mut state, KeyCode::Char(' '));
-    raw_key(&mut state, KeyCode::Enter);
-    let t = crate::i18n::texts();
-    let probe = import_probe(&state);
-    assert_eq!(
-        probe.step,
-        super::super::machines_overlay::ClientImportStep::Done
-    );
-    assert_eq!(probe.summary, (1, 2, 0));
-    let skipped = probe.skipped;
-    assert_eq!(skipped.len(), probe.summary.1, "跳过行数与汇总一致");
-    assert!(
-        skipped.contains(&("*.wild".into(), t.cli_errors.import_skip_wildcard.into())),
-        "发现阶段跳过的通配符主机带原因：{skipped:?}"
-    );
-    assert!(
-        skipped.contains(&("web".into(), t.machines.import_skip_unselected.into())),
-        "未勾选的主机也写明原因：{skipped:?}"
-    );
-    let (text, _) = frame_compact(&mut state, 93, 32);
-    let reason = compact(t.cli_errors.import_skip_wildcard);
-    let reason_head: String = reason.chars().take(6).collect();
-    assert!(text.contains("*.wild"), "结果页列出通配符主机：{text}");
-    assert!(text.contains(&reason_head), "结果页写出跳过原因：{text}");
-    let _ = std::fs::remove_dir_all(&dir);
+    for lang in [crate::i18n::Lang::ZhCn, crate::i18n::Lang::En] {
+        let _guard = crate::i18n::lang_guard(lang);
+        for (cols, rows) in [(80, 24), (93, 32), (160, 48)] {
+            let case = format!("{lang:?} {cols}x{rows}");
+            let dir = with_temp_home(&format!("import-done-skips-{lang:?}-{cols}"));
+            std::fs::write(dir.join(".ssh").join("config"), IMPORT_FIXTURE).unwrap();
+            let mut state = state_with_profiles(&[]);
+            state.open_machine_import_wizard();
+            // discover → select；焦点从首个候选 bastion 下移到 web 并取消勾选，再导入。
+            raw_key(&mut state, KeyCode::Enter);
+            raw_key(&mut state, KeyCode::Down);
+            raw_key(&mut state, KeyCode::Char(' '));
+            raw_key(&mut state, KeyCode::Enter);
+            let t = crate::i18n::texts();
+            let probe = import_probe(&state);
+            assert_eq!(
+                probe.step,
+                super::super::machines_overlay::ClientImportStep::Done,
+                "{case}"
+            );
+            assert_eq!(probe.summary, (1, 2, 0), "{case}");
+            let skipped = probe.skipped;
+            assert_eq!(skipped.len(), probe.summary.1, "{case}：跳过行数与汇总一致");
+            assert!(
+                skipped.contains(&("*.wild".into(), t.cli_errors.import_skip_wildcard.into())),
+                "{case}：发现阶段跳过的通配符主机带原因：{skipped:?}"
+            );
+            assert!(
+                skipped.contains(&("web".into(), t.machines.import_skip_unselected.into())),
+                "{case}：未勾选的主机也写明原因：{skipped:?}"
+            );
+            let (text, _) = frame_compact(&mut state, cols, rows);
+            let reason_head: String = compact(t.cli_errors.import_skip_wildcard)
+                .chars()
+                .take(6)
+                .collect();
+            assert!(
+                text.contains("*.wild"),
+                "{case}：结果页列出通配符主机：{text}"
+            );
+            assert!(
+                text.contains(&reason_head),
+                "{case}：结果页写出跳过原因：{text}"
+            );
+            assert!(
+                text.contains(&compact(t.machines.import_skip_unselected)),
+                "{case}：结果页写出未勾选：{text}"
+            );
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+    }
 }
 
 /// 文档终审 D3：发现页一屏放不下时以前不能滚动，靠后的主机与跳过原因永远看不
 /// 到。现在滚轮与 ↑↓ / Home / End 滚动发现页，滚动上界在视图计算阶段算：滚到底
-/// 就停住，反向第一格就动；页脚提示可滚动。
+/// 就停住，反向第一格就动；页脚提示可滚动。窄 / 中 / 宽三档（T1 审查轻 6）。
 #[test]
 fn import_discover_scrolls_to_the_last_host_and_skip_reason() {
     let dir = with_temp_home("import-discover-scroll");
-    let mut config = many_hosts_config(30);
+    let mut config = many_hosts_config(60);
     config.push_str("Host *.wild\n");
     std::fs::write(dir.join(".ssh").join("config"), config).unwrap();
-    let mut state = state_with_profiles(&[]);
-    state.open_machine_import_wizard();
     let t = crate::i18n::texts();
-    let (text, _) = frame_compact(&mut state, 93, 32);
-    assert!(text.contains("host00"), "首个主机可见：{text}");
-    assert!(!text.contains("host29"), "用例前提：一屏放不下：{text}");
-    assert!(!text.contains("*.wild"), "用例前提：跳过段在屏外：{text}");
-    assert!(
-        text.contains(&compact(t.machines.hint_scroll)),
-        "页脚提示可滚动：{text}"
-    );
-
-    // SGR 1006 滚轮在弹窗里向下滚，远超内容也停在底部。
-    let popup = state.hits.machines_popup;
-    for _ in 0..30 {
-        state.handle_input_bytes(format!("\x1b[<65;{};{}M", popup.x + 4, popup.y + 6).as_bytes());
-    }
-    let (text, _) = frame_compact(&mut state, 93, 32);
     let reason_head: String = compact(t.cli_errors.import_skip_wildcard)
         .chars()
         .take(6)
         .collect();
-    assert!(text.contains("host29"), "滚到底后末个主机可见：{text}");
-    assert!(text.contains("*.wild"), "滚到底后跳过的主机可见：{text}");
-    assert!(text.contains(&reason_head), "跳过原因可见：{text}");
-    let probe = import_probe(&state);
-    let max = probe.max_scroll;
-    assert!(max > 0, "用例前提：发现页有滚动余量");
-    assert_eq!(probe.scroll, max, "滚过头也停在上界，不留死格");
+    for (cols, rows) in [(80, 24), (93, 32), (160, 48)] {
+        let size = (cols, rows);
+        let mut state = state_with_profiles(&[]);
+        state.open_machine_import_wizard();
+        let (text, _) = frame_compact(&mut state, cols, rows);
+        assert!(text.contains("host00"), "{size:?}：首个主机可见：{text}");
+        assert!(
+            !text.contains("host59"),
+            "{size:?}：用例前提：一屏放不下：{text}"
+        );
+        assert!(
+            !text.contains("*.wild"),
+            "{size:?}：用例前提：跳过段在屏外：{text}"
+        );
+        assert!(
+            text.contains(&compact(t.machines.hint_scroll)),
+            "{size:?}：页脚提示可滚动：{text}"
+        );
 
-    raw_key(&mut state, KeyCode::Up);
-    assert_eq!(import_probe(&state).scroll, max - 1, "反向第一格就动");
-    raw_key(&mut state, KeyCode::Home);
-    let (text, _) = frame_compact(&mut state, 93, 32);
-    assert_eq!(import_probe(&state).scroll, 0);
-    assert!(text.contains("host00"), "Home 回到顶部：{text}");
-    raw_key(&mut state, KeyCode::End);
-    let _ = frame_compact(&mut state, 93, 32);
-    assert_eq!(import_probe(&state).scroll, max, "End 到底");
+        // SGR 1006 滚轮在弹窗里向下滚，远超内容也停在底部。
+        let popup = state.hits.machines_popup;
+        for _ in 0..80 {
+            state.handle_input_bytes(
+                format!("\x1b[<65;{};{}M", popup.x + 4, popup.y + 6).as_bytes(),
+            );
+        }
+        let (text, _) = frame_compact(&mut state, cols, rows);
+        assert!(
+            text.contains("host59"),
+            "{size:?}：滚到底后末个主机可见：{text}"
+        );
+        assert!(
+            text.contains("*.wild"),
+            "{size:?}：滚到底后跳过的主机可见：{text}"
+        );
+        assert!(
+            text.contains(&reason_head),
+            "{size:?}：跳过原因可见：{text}"
+        );
+        let probe = import_probe(&state);
+        let max = probe.max_scroll;
+        assert!(max > 0, "{size:?}：用例前提：发现页有滚动余量");
+        assert_eq!(probe.scroll, max, "{size:?}：滚过头也停在上界，不留死格");
+
+        raw_key(&mut state, KeyCode::Up);
+        assert_eq!(
+            import_probe(&state).scroll,
+            max - 1,
+            "{size:?}：反向第一格就动"
+        );
+        raw_key(&mut state, KeyCode::Home);
+        let (text, _) = frame_compact(&mut state, cols, rows);
+        assert_eq!(import_probe(&state).scroll, 0, "{size:?}");
+        assert!(text.contains("host00"), "{size:?}：Home 回到顶部：{text}");
+        raw_key(&mut state, KeyCode::End);
+        let _ = frame_compact(&mut state, cols, rows);
+        assert_eq!(import_probe(&state).scroll, max, "{size:?}：End 到底");
+    }
     let _ = std::fs::remove_dir_all(&dir);
 }
 
