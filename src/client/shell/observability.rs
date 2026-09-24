@@ -55,10 +55,15 @@ pub(super) fn alert_metric_label(metric: &str) -> &str {
     }
 }
 
-/// 可作为绑定候选 / 悬浮目标的 agent：排除 herdr 自身的 agent（muse）。悬浮层
-/// 判据与账号页 pane 选择器共用同一处，避免两个入口漂移。
+/// 可作为绑定候选 / 悬浮目标、右键菜单列「用量」「绑定账号」的 agent：herdr 能
+/// 跟踪账号用量的 agent，即 `detect::parse_agent_label` 认得的五家官方 agent（大小写
+/// 与别名都归一）。判据是正向的：已退役的名字（`detect::RETIRED_AGENT_LABELS`，含
+/// herdr 自身的 muse 与旧上游钩子仍会上报的 gemini、droid 等）和任意未知名都没有
+/// 用量可看。用量厂商表里 pane 型来源与这五家一一对应（服务端 `registry` 的测试
+/// 钉住）；zcode 是外部来源，不以 pane agent 出现。悬浮层、账号页 pane 选择器、
+/// 右键菜单与动作处理共用这一处，避免几个入口漂移。
 pub(super) fn is_bindable_agent(name: &str) -> bool {
-    !name.eq_ignore_ascii_case("muse")
+    crate::detect::parse_agent_label(name).is_some()
 }
 
 /// Whether the accounts surface lists a provider: hidden only when the

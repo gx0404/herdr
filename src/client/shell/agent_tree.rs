@@ -1949,7 +1949,7 @@ impl ClientShellState {
             }
             (Action::ShowAgentUsage, AgentActivityOwner::Pane { pane_id }) => {
                 // 打开并钉住该 agent 的用量卡；厂商取快照里的 agent 名，未识别
-                // （`None`）或不可绑定（muse）时没有用量可看，无动作。
+                // （`None`）或不可绑定（退役名、未知名）时没有用量可看，无动作。
                 let agent = self
                     .endpoint_agent(&endpoint_id, &pane_id)
                     .and_then(|agent| agent.agent.clone())

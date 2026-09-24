@@ -141,8 +141,9 @@ impl ClientContextMenuOverlay {
                         ..item(t.menu_rename, Action::RenameAgent)
                     },
                 ];
-                // 已退役的 muse（herdr 自身的 agent）没有账号用量、也不能绑定
-                // 账号：两项都不列，免得点了没反应（文档终审 D13）。
+                // 只有 herdr 能跟踪账号用量的 agent 才列这两项（正向判据，与
+                // 动作处理同一处）：muse 等已退役的 agent 与未知名没有用量可看、
+                // 也不能绑定，列出来点了没反应（文档终审 D13、T1 审查轻 1）。
                 if agent
                     .as_deref()
                     .is_some_and(super::observability::is_bindable_agent)
