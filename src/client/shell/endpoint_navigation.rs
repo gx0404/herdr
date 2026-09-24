@@ -231,6 +231,8 @@ impl ClientShellState {
                 _ => unreachable!("endpoint agent navigation"),
             };
             let target = &agents[next];
+            // 多机折叠侧栏的 agent 区跟着键盘走：目标在窗口外就滚进视野（D10）。
+            self.reveal_collapsed_endpoint_agent(&target.endpoint_id, &target.pane_id);
             self.focus_or_activate(
                 target.endpoint_id.clone(),
                 ClientEndpointFocusTarget::Pane(target.pane_id.clone()),

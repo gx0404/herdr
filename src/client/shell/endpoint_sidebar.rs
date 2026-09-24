@@ -294,11 +294,20 @@ pub(super) fn render_collapsed(
             Style::default().fg(palette.surface_dim),
         );
     }
+    // agent 区让出底格：折叠开关 » 画在侧栏最后一行，与单机折叠侧栏的
+    // `detail_content` 同一口径——滚轮、揭示与命中区都不压住开关（D10）。
+    let detail_content = Rect::new(
+        detail_area.x,
+        detail_area.y,
+        detail_area.width,
+        detail_area.height.saturating_sub(1),
+    );
     super::endpoint_agents::render_collapsed(
         buffer,
-        detail_area,
+        detail_content,
         state.federated_agent_rows,
         config,
+        *state.agent_scroll,
         state.chrome_hover,
         hits,
     );

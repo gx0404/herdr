@@ -2326,8 +2326,12 @@ impl ClientShellState {
                 );
             }
             MouseEventKind::ScrollUp if super::contains(self.hits.agent_body, point) => {
+                // 钳位写回（D10）：多机折叠侧栏的渲染只读、不回写越界的滚动位置
+                // （例如从展开视图带过来的），先按上一帧的上界夹住再滚，反向第一格
+                // 画面就动。
                 let next = self
                     .agent_scroll
+                    .min(self.hits.agent_max_scroll)
                     .saturating_sub(self.config.mouse_scroll_lines);
                 if next != self.agent_scroll {
                     self.agent_scroll = next;

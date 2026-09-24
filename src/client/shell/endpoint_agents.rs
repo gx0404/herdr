@@ -1,30 +1,57 @@
+use super::agent_sidebar::AgentRow;
 use super::agent_tree::{
-    build_agent_tree, AgentRowsView, AgentTreeKind, AgentTreeRow, CollapseState,
+    build_agent_tree, AgentRowsView, AgentTreeKind, AgentTreeNode, AgentTreeRow, CollapseState,
 };
 use super::render::put_text;
 use super::*;
 
-/// 折叠侧栏的单列视图：每个 agent 一行（机器首字母 + 状态图标），取统一树的
-/// 平铺行（`AgentRowsView::flat`）。这里不画分组头，面板内折叠了的分组
-/// 在这里展不开，所以按聚合顺序列出全部 agent；机器层折叠照旧藏起该端点的
-/// agent（上方工作区区的机器行可切换）。
-pub(super) fn render_collapsed(
-    buffer: &mut Buffer,
-    area: Rect,
+/// 折叠侧栏（多机）agent 区的行：统一树平铺行里的 agent，按画面顺序（节点、
+/// 行数据、机器首字母）。渲染与输入阶段的键盘揭示共用这一个取法（D10）。
+fn collapsed_agents(
     rows: AgentRowsView<'_>,
-    config: &ClientShellConfig,
-    chrome_hover: Option<&super::feedback::ChromeHover>,
-    hits: &mut ShellHitMap,
-) {
-    let agents = rows.flat.iter().filter_map(|row| match &row.kind.kind {
+) -> impl Iterator<Item = (&AgentTreeNode, &AgentRow, char)> {
+    rows.flat.iter().filter_map(|row| match &row.kind.kind {
         AgentTreeKind::Agent {
             agent,
             machine_initial,
             ..
         } => Some((&row.kind, agent, *machine_initial)),
         _ => None,
-    });
-    for (index, (node, agent, initial)) in agents.take(area.height as usize).enumerate() {
+    })
+}
+
+/// 折叠侧栏的单列视图：每个 agent 一行（机器首字母 + 状态图标），取统一树的
+/// 平铺行（`AgentRowsView::flat`）。这里不画分组头，面板内折叠了的分组
+/// 在这里展不开，所以按聚合顺序列出全部 agent；机器层折叠照旧藏起该端点的
+/// agent（上方工作区区的机器行可切换）。
+///
+/// 行数超过 agent 区时按 `agent_scroll` 滚动（D10）：回写 `hits.agent_body` 与
+/// `hits.agent_max_scroll` 供滚轮与键盘揭示使用。渲染只读，越界的滚动位置在这里
+/// 按上界夹住来画、不写回——钳位写回在输入阶段。
+pub(super) fn render_collapsed(
+    buffer: &mut Buffer,
+    area: Rect,
+    rows: AgentRowsView<'_>,
+    config: &ClientShellConfig,
+    agent_scroll: usize,
+    chrome_hover: Option<&super::feedback::ChromeHover>,
+    hits: &mut ShellHitMap,
+) {
+    let metrics = super::scroll::uniform_scroll_metrics(
+        collapsed_agents(rows).count(),
+        area.height,
+        agent_scroll,
+    );
+    let start = metrics
+        .max_offset_from_bottom
+        .saturating_sub(metrics.offset_from_bottom);
+    hits.agent_body = area;
+    hits.agent_max_scroll = metrics.max_offset_from_bottom;
+    for (index, (node, agent, initial)) in collapsed_agents(rows)
+        .skip(start)
+        .take(area.height as usize)
+        .enumerate()
+    {
         let rect = Rect::new(area.x, area.y + index as u16, area.width, 1);
         let hovered = matches!(
             chrome_hover,
@@ -194,6 +221,36 @@ impl AgentRowsCache {
 }
 
 impl ClientShellState {
+    /// 输入阶段（D10）：键盘切到的 agent 在多机折叠侧栏的 agent 区外时，把
+    /// `agent_scroll` 改到恰好露出它的位置，并按当前行数钳位写回。视口高度取上一帧
+    /// 的 `hits.agent_body`，行序取视图计算阶段的行缓存（与 [`render_collapsed`]
+    /// 同一取法）；侧栏没折叠、工作台布局或上一帧没有 agent 区时不动——那些视图的
+    /// `agent_scroll` 按树行计，口径不同。
+    pub(super) fn reveal_collapsed_endpoint_agent(
+        &mut self,
+        endpoint_id: &ClientEndpointId,
+        pane_id: &str,
+    ) {
+        let body = self.hits.agent_body;
+        if !self.sidebar_collapsed || self.workbench.enabled || body.is_empty() {
+            return;
+        }
+        let Some(rows) = self.federated_agent_rows.as_ref().map(AgentRowsCache::view) else {
+            return;
+        };
+        let Some(target) = collapsed_agents(rows).position(|(node, agent, _)| {
+            &node.endpoint_id == endpoint_id && agent.pane_id == pane_id
+        }) else {
+            return;
+        };
+        self.agent_scroll = super::scroll::uniform_scroll_start_to_reveal(
+            collapsed_agents(rows).count(),
+            body.height,
+            self.agent_scroll,
+            target,
+        );
+    }
+
     /// 视图计算阶段刷新 agents 面板的行缓存（PERF-02）：键未变则复用上一帧的行。
     pub(super) fn refresh_federated_agent_rows(&mut self) {
         let key = AgentRowsCache::key_for(

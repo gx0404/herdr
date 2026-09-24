@@ -1308,3 +1308,272 @@ fn short_collapsed_sidebar_keeps_the_toggle_row_out_of_the_workspace_body() {
         "不得把工作区行画到折叠开关那一行"
     );
 }
+
+/// D10 的夹具：本机 `local` 个、远端 Build `remote` 个 agent（各自一个窗格），侧栏
+/// 折叠成 4 列的单列视图。聚焦的是本机第一个 agent。
+fn collapsed_endpoint_agents_state(
+    local: usize,
+    remote: usize,
+) -> (ClientShellState, ClientEndpointId) {
+    let (mut state, remote_id) = state_with_remote();
+    let with_agents = |count: usize, boot: &str, focused: bool| {
+        let mut projected = snapshot();
+        projected.boot_id = boot.into();
+        projected.agents = (1..=count)
+            .map(|index| ClientShellAgent {
+                pane_id: format!("pane_{index}"),
+                focused: focused && index == 1,
+                ..agent(&format!("agent-{index}"), AgentStatus::Idle, index as u64)
+            })
+            .collect();
+        projected.panes = projected
+            .agents
+            .iter()
+            .map(|agent| ClientShellPane {
+                pane_id: agent.pane_id.clone(),
+                focused: agent.focused,
+                ..projected.panes[0].clone()
+            })
+            .collect();
+        projected.focused_pane_id = focused.then(|| "pane_1".to_owned());
+        projected
+    };
+    state.set_snapshot(Box::new(with_agents(local, "boot-1", true)));
+    state.set_endpoint_snapshot(
+        &remote_id,
+        Box::new(with_agents(remote, "remote-boot", false)),
+    );
+    state.sidebar_collapsed = true;
+    (state, remote_id)
+}
+
+/// 折叠侧栏 agent 区的完整行序（与渲染同一份行缓存）：(端点, 窗格, 机器首字母)。
+fn collapsed_agent_order(state: &ClientShellState) -> Vec<(ClientEndpointId, String, char)> {
+    state
+        .federated_agent_rows
+        .as_ref()
+        .expect("行缓存")
+        .flat_rows()
+        .iter()
+        .filter_map(|row| match &row.kind.kind {
+            crate::client::shell::agent_tree::AgentTreeKind::Agent {
+                agent,
+                machine_initial,
+                ..
+            } => Some((
+                row.kind.endpoint_id.clone(),
+                agent.pane_id.clone(),
+                *machine_initial,
+            )),
+            _ => None,
+        })
+        .collect()
+}
+
+/// 当前画在折叠 agent 区里的行（命中区即画面），并逐行核对画出来的字符：
+/// 每行首格是该 agent 所在机器的首字母。
+fn visible_collapsed_agents(
+    state: &ClientShellState,
+    order: &[(ClientEndpointId, String, char)],
+    case: &str,
+) -> Vec<(ClientEndpointId, String)> {
+    let buffer = state.compose_buffer.as_ref().expect("保留帧缓冲");
+    let body = state.hits.agent_body;
+    state
+        .hits
+        .endpoint_agents
+        .iter()
+        .map(|(rect, endpoint_id, pane_id)| {
+            assert!(
+                body.contains((rect.x, rect.y).into()),
+                "{case}: 命中区在 agent 区里：{rect:?} / {body:?}"
+            );
+            let (_, _, initial) = order
+                .iter()
+                .find(|(endpoint, pane, _)| endpoint == endpoint_id && pane == pane_id)
+                .unwrap_or_else(|| panic!("{case}: {pane_id} 不在行序里"));
+            assert_eq!(
+                buffer[(rect.x, rect.y)].symbol(),
+                initial.to_string(),
+                "{case}: 第 {} 行画的是 {pane_id} 所在机器的首字母",
+                rect.y
+            );
+            (endpoint_id.clone(), pane_id.clone())
+        })
+        .collect()
+}
+
+fn wheel_at(
+    state: &mut ClientShellState,
+    kind: MouseEventKind,
+    point: (u16, u16),
+) -> ClientShellInput {
+    state.handle_raw_events(vec![RawInputEvent::Mouse(MouseEvent {
+        kind,
+        column: point.0,
+        row: point.1,
+        modifiers: KeyModifiers::NONE,
+    })])
+}
+
+/// 点击输出里的聚焦目标窗格：本机 agent 走 `pane.focus`，远端 agent 走激活端点。
+fn clicked_pane(outcome: &ClientShellInput) -> Option<String> {
+    outcome.actions.iter().find_map(|action| match action {
+        ClientShellAction::Endpoint { request, .. } => match &request.method {
+            crate::api::schema::Method::PaneFocus(target) => Some(target.pane_id.clone()),
+            _ => None,
+        },
+        ClientShellAction::ActivateEndpoint {
+            target: Some(ClientEndpointFocusTarget::Pane(pane_id)),
+            ..
+        } => Some(pane_id.clone()),
+        _ => None,
+    })
+}
+
+/// D10：多机时折叠侧栏的 agent 区此前 `take(height)`，没有回写 `hits.agent_body`，
+/// 滚轮推不动、溢出的 agent 永远看不到。宽 / 中 / 窄三档（agent 区高度不同）：
+/// 滚轮按 `ui.mouse_scroll_lines` 步进推动列表；滚到底夹住，最后一个 agent 可见；
+/// 越界的存量（例如从展开视图带过来的滚动位置）在输入阶段先钳位再滚，反向一格
+/// 画面就动；agent 区让出右下角的 » 开关；点滚动后的行聚焦的就是画出来的那个。
+#[test]
+fn collapsed_endpoint_sidebar_scrolls_agents_with_the_wheel() {
+    for (cols, rows) in [(120u16, 40u16), (100, 28), (80, 20)] {
+        let case = format!("{cols}×{rows}");
+        let (mut state, _remote) = collapsed_endpoint_agents_state(18, 12);
+        state.compose(cols, rows).expect("折叠多机侧栏");
+        let order = collapsed_agent_order(&state);
+        assert_eq!(order.len(), 30, "{case}: 夹具前提：30 个 agent 都在行序里");
+        let body = state.hits.agent_body;
+        assert!(
+            body.height > 0,
+            "{case}: 折叠多机侧栏必须回写 hits.agent_body"
+        );
+        let height = usize::from(body.height);
+        let max = order.len() - height;
+        assert_eq!(
+            state.hits.agent_max_scroll, max,
+            "{case}: 滚动上界 = 行数 − 可见行"
+        );
+        let toggle = state.hits.sidebar_toggle;
+        assert!(
+            !body.contains((toggle.x, toggle.y).into()),
+            "{case}: agent 区让出 » 开关所在的底格：{body:?} / {toggle:?}"
+        );
+        let point = (body.x, body.y + 1);
+        let key = |entry: &(ClientEndpointId, String, char)| (entry.0.clone(), entry.1.clone());
+        let visible = visible_collapsed_agents(&state, &order, &case);
+        assert_eq!(visible.len(), height, "{case}: agent 区画满");
+        assert_eq!(visible[0], key(&order[0]), "{case}: 从第一个 agent 开始");
+
+        let step = state.config.mouse_scroll_lines;
+        let down = wheel_at(&mut state, MouseEventKind::ScrollDown, point);
+        assert!(down.repaint, "{case}: 滚轮请求重绘");
+        assert_eq!(state.agent_scroll, step, "{case}: 按配置步进");
+        state.compose(cols, rows).expect("滚动后");
+        let visible = visible_collapsed_agents(&state, &order, &case);
+        assert_eq!(visible[0], key(&order[step]), "{case}: 首行后移 {step} 个");
+
+        // 点滚动后的第一行：聚焦的正是画在那一行的 agent。
+        let first = state.hits.endpoint_agents[0].0;
+        let click = state.handle_raw_events(vec![RawInputEvent::Mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: first.x,
+            row: first.y,
+            modifiers: KeyModifiers::NONE,
+        })]);
+        assert_eq!(
+            clicked_pane(&click).as_deref(),
+            Some(order[step].1.as_str()),
+            "{case}: 点中哪行聚焦哪个"
+        );
+
+        for _ in 0..order.len() {
+            wheel_at(&mut state, MouseEventKind::ScrollDown, point);
+        }
+        assert_eq!(state.agent_scroll, max, "{case}: 滚到底夹住");
+        state.compose(cols, rows).expect("到底");
+        let visible = visible_collapsed_agents(&state, &order, &case);
+        assert_eq!(
+            visible.last(),
+            order.last().map(key).as_ref(),
+            "{case}: 最后一个 agent 滚进视野"
+        );
+        wheel_at(&mut state, MouseEventKind::ScrollUp, point);
+        state.compose(cols, rows).expect("反向一格");
+        let visible = visible_collapsed_agents(&state, &order, &case);
+        assert_eq!(
+            visible[0],
+            key(&order[max - step]),
+            "{case}: 到底后反向一格画面就动"
+        );
+
+        // 越界的存量：画面按上界夹住，第一次上滚就从上界往回滚（没有死格）。
+        state.agent_scroll = 999;
+        state.compose(cols, rows).expect("越界存量");
+        let visible = visible_collapsed_agents(&state, &order, &case);
+        assert_eq!(visible[0], key(&order[max]), "{case}: 画面按上界夹住");
+        wheel_at(&mut state, MouseEventKind::ScrollUp, point);
+        assert_eq!(state.agent_scroll, max - step, "{case}: 输入阶段先钳位再滚");
+        state.compose(cols, rows).expect("钳位后");
+        let visible = visible_collapsed_agents(&state, &order, &case);
+        assert_eq!(visible[0], key(&order[max - step]), "{case}: 画面随即上移");
+    }
+}
+
+/// D10：键盘在多机之间切 agent（PreviousAgent / NextAgent / FocusAgent）时，目标
+/// 不在折叠侧栏的可见窗口里就把它滚进来：输入阶段按上一帧的 agent 区高度与
+/// 当前行序钳位写回 `agent_scroll`。宽 / 中 / 窄三档。
+#[test]
+fn collapsed_endpoint_sidebar_reveals_the_keyboard_target_agent() {
+    use crate::input::{KeybindAction, KeybindMatch};
+    for (cols, rows) in [(120u16, 40u16), (100, 28), (80, 20)] {
+        let case = format!("{cols}×{rows}");
+        let (mut state, remote) = collapsed_endpoint_agents_state(18, 12);
+        state.compose(cols, rows).expect("折叠多机侧栏");
+        let order = collapsed_agent_order(&state);
+        let visible = |state: &ClientShellState| visible_collapsed_agents(state, &order, &case);
+        assert!(
+            !visible(&state).contains(&(remote.clone(), "pane_12".to_owned())),
+            "{case}: 用例前提：远端最后一个 agent 在窗口外"
+        );
+
+        // 聚焦的是第一个 agent：PreviousAgent 绕到行尾的远端 pane_12。
+        let mut input = ClientShellInput::default();
+        state.record_binding(
+            KeybindMatch::Action(KeybindAction::PreviousAgent),
+            &mut input,
+        );
+        assert!(
+            state.agent_scroll <= state.hits.agent_max_scroll,
+            "{case}: 写回的滚动位置在上界以内"
+        );
+        state.compose(cols, rows).expect("揭示行尾");
+        assert!(
+            visible(&state).contains(&(remote.clone(), "pane_12".to_owned())),
+            "{case}: PreviousAgent 把窗口外的目标滚进视野"
+        );
+
+        // 聚焦仍在本机第一个（测试里没有服务端回写焦点）：NextAgent 的目标是本机
+        // pane_2，此时已滚出窗口上方。
+        let mut input = ClientShellInput::default();
+        state.record_binding(KeybindMatch::Action(KeybindAction::NextAgent), &mut input);
+        state.compose(cols, rows).expect("揭示第二个");
+        assert!(
+            visible(&state).contains(&(ClientEndpointId::Local, "pane_2".to_owned())),
+            "{case}: NextAgent 把窗口外的目标滚进视野"
+        );
+
+        // FocusAgent 直达第 21 个（远端 pane_3）。
+        let mut input = ClientShellInput::default();
+        state.record_binding(
+            KeybindMatch::Action(KeybindAction::FocusAgent(20)),
+            &mut input,
+        );
+        state.compose(cols, rows).expect("揭示第 21 个");
+        assert!(
+            visible(&state).contains(&(remote.clone(), "pane_3".to_owned())),
+            "{case}: FocusAgent 同样揭示目标"
+        );
+    }
+}
