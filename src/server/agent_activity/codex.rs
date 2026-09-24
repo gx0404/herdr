@@ -140,6 +140,23 @@ const BOOKKEEPING_RECORDS: [&str; 5] = [
     "token_usage_record",
     "inter_agent_communication_metadata",
 ];
+/// 要看正文才能渲染的 `response_item` 负载类型（[`render_response_item`] 逐一处理的）；
+/// 其余认不出的只画一行类型名，超长时也照样画（[`render_oversized`]）。
+const CONTENT_RESPONSE_ITEMS: [&str; 10] = [
+    "message",
+    "agent_message",
+    "reasoning",
+    "function_call",
+    "custom_tool_call",
+    "function_call_output",
+    "custom_tool_call_output",
+    "local_shell_call",
+    "web_search_call",
+    "image_generation_call",
+];
+/// 要看正文才能渲染的 `event_msg` 类型（[`render_event`] 逐一处理的；`context_compacted`
+/// 不看正文，`item_completed` 另按条目类型判定）。
+const CONTENT_EVENTS: [&str; 4] = ["task_complete", "turn_aborted", "error", "stream_error"];
 /// 不进转写的 `event_msg`：遥测、回合起始与设置、以及和 response_item 重复的镜像事件。
 const HIDDEN_EVENTS: [&str; 10] = [
     "token_count",
@@ -985,8 +1002,12 @@ fn render_record(line: &str, history_start: Option<u64>) -> Option<String> {
 
 /// 超长记录（超过单条上限，只留了开头）的转写，取舍与 [`render_record`] 一致：继承
 /// 的父历史前缀、簿记、不进转写的事件与 developer / system 消息照样跳过；不看正文
-/// 就能渲染的（`compacted`、`context_compacted`、认不出的顶层类型）照常渲染；只有要
-/// 展示正文的才留一行占位。开头里认不出顶层类型时也留占位。
+/// 就能渲染的（`compacted`、`context_compacted`、认不出的顶层类型、event_msg 类型与
+/// response_item 负载类型）照常渲染；只有要展示正文的才留一行占位。
+///
+/// 与正常长度唯一的不同：开头里认不出顶层 type（或负载类型）时留占位，而不是像
+/// [`render_record`] 对缺 type 的记录那样不出行——超长记录的键可能只是排在留下的开头
+/// 之外，不能当它没有。
 fn render_oversized(head: &[u8], history_start: Option<u64>) -> Option<String> {
     let head = sniff_record_head(head);
     if let (Some(start), Some(ordinal)) = (history_start, head.ordinal) {
@@ -1001,6 +1022,7 @@ fn render_oversized(head: &[u8], history_start: Option<u64>) -> Option<String> {
     match kind {
         "response_item" => match (head.payload_kind.as_deref(), head.role.as_deref()) {
             (Some("message"), Some(role)) if !matches!(role, "user" | "assistant") => None,
+            (Some(kind), _) if !CONTENT_RESPONSE_ITEMS.contains(&kind) => Some(type_line(kind)),
             _ => placeholder(),
         },
         "event_msg" => match head.payload_kind.as_deref() {
@@ -1011,6 +1033,9 @@ fn render_oversized(head: &[u8], history_start: Option<u64>) -> Option<String> {
                 if head.item_kind.as_deref().is_some_and(|item| item != "Plan") =>
             {
                 None
+            }
+            Some(event) if event != "item_completed" && !CONTENT_EVENTS.contains(&event) => {
+                Some(type_line(event))
             }
             _ => placeholder(),
         },
@@ -2194,6 +2219,63 @@ mod tests {
         let _ = fs::remove_dir_all(&home);
     }
 
+    /// B 车道审查轻 5：超长记录的兜底与正常长度一致——认不出的 event_msg / response_item
+    /// 负载类型只画一行类型名；开头截在多字节字符中间时，截断处之前的键照常认出（认出
+    /// 的是助手消息，要看正文，留占位），顶层 type 本身被截断时留占位，都不 panic。
+    #[test]
+    fn oversized_records_of_unknown_kinds_render_like_normal_ones() {
+        let home = unique_temp_home("oversized-unknown");
+        let day = home.join(".codex/sessions/2026/09/22");
+        fs::create_dir_all(&day).expect("临时目录可建");
+        let path = day.join(format!("rollout-2026-09-22T10-01-00-{CHILD_A}.jsonl"));
+        let cap: usize = 256;
+        let pad = "p".repeat(600);
+        // 让一个三字节的「中」从第 cap - 1 个字节开始：开头只留下它的第一个字节。
+        let straddle = |prefix: &str, suffix: &str| {
+            assert!(prefix.len() < cap - 1);
+            format!(
+                "{prefix}{}{}{suffix}\n",
+                "a".repeat(cap - 1 - prefix.len()),
+                "中".repeat(300)
+            )
+        };
+        let lines = [
+            format!(
+                r#"{{"type":"event_msg","payload":{{"type":"mystery_event","blob":"{pad}"}}}}"#
+            ) + "\n",
+            format!(
+                r#"{{"type":"response_item","payload":{{"type":"hologram_call","blob":"{pad}"}}}}"#
+            ) + "\n",
+            straddle(
+                r#"{"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":""#,
+                r#""}]}}"#,
+            ),
+            straddle(r#"{"ordinal":1,"type":""#, r#"","payload":{}}"#),
+        ];
+        for line in &lines {
+            assert!(line.len() > cap, "夹具记录应超过单条上限");
+        }
+        let rollout = lines.concat();
+        fs::write(&path, &rollout).expect("写临时 rollout");
+        let page = render_page(
+            &path,
+            0,
+            PageLimits {
+                budget: 64 * 1024,
+                scan_bytes: u64::MAX,
+                record_bytes: cap as u64,
+            },
+        )
+        .expect("可读");
+        assert_eq!(
+            page.text,
+            "[mystery_event]\n[hologram_call]\n[oversized record]\n[oversized record]\n"
+        );
+        assert!(page.eof);
+
+        let _ = fs::remove_dir_all(&home);
+    }
+
     /// N18：经公开的 `read` 走生产上限（4 MiB）：5 MiB 的 compacted 照常画
     /// `[compacted]`，5 MiB 的簿记记录不出行，都不画占位。
     #[test]
@@ -2234,6 +2316,90 @@ mod tests {
         assert!(rest.eof);
 
         let _ = fs::remove_dir_all(&home);
+    }
+
+    /// 超长记录按「要看正文」的清单决定画占位还是类型名，清单须与正常长度的渲染一致：
+    /// 清单里的每一种，正常长度下都有自己的渲染（不是只画类型名）；清单外的只画类型名。
+    #[test]
+    fn content_kind_lists_match_the_normal_renderers() {
+        let item = |payload: &str| {
+            render_record(
+                &format!(r#"{{"type":"response_item","payload":{payload}}}"#),
+                None,
+            )
+        };
+        let event = |payload: &str| {
+            render_record(
+                &format!(r#"{{"type":"event_msg","payload":{payload}}}"#),
+                None,
+            )
+        };
+        let samples = [
+            (
+                "message",
+                r#"{"type":"message","role":"assistant","content":[{"type":"output_text","text":"hi"}]}"#,
+            ),
+            (
+                "agent_message",
+                r#"{"type":"agent_message","author":"a","content":[]}"#,
+            ),
+            ("reasoning", r#"{"type":"reasoning"}"#),
+            (
+                "function_call",
+                r#"{"type":"function_call","name":"exec","arguments":"{}"}"#,
+            ),
+            (
+                "custom_tool_call",
+                r#"{"type":"custom_tool_call","name":"exec","input":"ls"}"#,
+            ),
+            (
+                "function_call_output",
+                r#"{"type":"function_call_output","output":"out"}"#,
+            ),
+            (
+                "custom_tool_call_output",
+                r#"{"type":"custom_tool_call_output","output":"out"}"#,
+            ),
+            (
+                "local_shell_call",
+                r#"{"type":"local_shell_call","action":{"command":["ls"]}}"#,
+            ),
+            (
+                "web_search_call",
+                r#"{"type":"web_search_call","action":{"query":"q"}}"#,
+            ),
+            (
+                "image_generation_call",
+                r#"{"type":"image_generation_call","revised_prompt":"p"}"#,
+            ),
+        ];
+        assert_eq!(samples.len(), CONTENT_RESPONSE_ITEMS.len());
+        for (kind, payload) in samples {
+            assert!(CONTENT_RESPONSE_ITEMS.contains(&kind), "{kind}");
+            assert_ne!(item(payload), Some(type_line(kind)), "{kind} 有自己的渲染");
+        }
+        let samples = [
+            (
+                "task_complete",
+                r#"{"type":"task_complete","last_agent_message":"m"}"#,
+            ),
+            ("turn_aborted", r#"{"type":"turn_aborted","reason":"r"}"#),
+            ("error", r#"{"type":"error","message":"m"}"#),
+            ("stream_error", r#"{"type":"stream_error","message":"m"}"#),
+        ];
+        assert_eq!(samples.len(), CONTENT_EVENTS.len());
+        for (kind, payload) in samples {
+            assert!(CONTENT_EVENTS.contains(&kind), "{kind}");
+            assert_ne!(event(payload), Some(type_line(kind)), "{kind} 有自己的渲染");
+        }
+        assert_eq!(
+            item(r#"{"type":"hologram_call"}"#),
+            Some("[hologram_call]".to_string())
+        );
+        assert_eq!(
+            event(r#"{"type":"mystery_event"}"#),
+            Some("[mystery_event]".to_string())
+        );
     }
 
     /// 超长记录的开头在任意字节处截断：截断前认出的字段保留，截在键里、值里都不
