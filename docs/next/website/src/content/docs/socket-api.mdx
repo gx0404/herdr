@@ -906,7 +906,8 @@ Read a tree or one node's content with `agent.activity.read`:
 Give exactly one of `pane_id` or `external_id`, otherwise the call fails with
 `invalid_params`. Without `node_id` the response carries the full tree in
 `nodes` (for a `pane_id` target this read also refreshes the stored tree, so the
-next snapshot matches it. Stored trees and lists are ordered by when their read
+next snapshot matches it unless a refresh that started later is already stored.
+Stored trees and lists are ordered by when their read
 started, not by when they arrive: a background refresh of that pane that
 started before this read is discarded when it lands later, and one that
 started after it replaces it as usual. For an `external_id` target it refreshes
