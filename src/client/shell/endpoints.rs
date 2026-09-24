@@ -136,6 +136,9 @@ impl ClientShellState {
     }
 
     pub(crate) fn retire_endpoint(&mut self, endpoint_id: &ClientEndpointId) {
+        if endpoint_id == &self.active_endpoint_id {
+            self.pending_workspace_highlight = None;
+        }
         self.retire_endpoint_notifications(endpoint_id);
         self.endpoint_connection_errors.remove(endpoint_id);
         self.endpoint_port_forwards.remove(endpoint_id);
@@ -164,6 +167,9 @@ impl ClientShellState {
         status: ClientEndpointStatus,
     ) {
         self.agent_rows_epoch = self.agent_rows_epoch.saturating_add(1);
+        if endpoint_id == &self.active_endpoint_id && status != ClientEndpointStatus::Online {
+            self.pending_workspace_highlight = None;
+        }
         if let Some(endpoint) = self
             .endpoints
             .iter_mut()
@@ -391,6 +397,10 @@ impl ClientShellState {
     }
 
     pub(crate) fn activate_endpoint_projection(&mut self, endpoint_id: &ClientEndpointId) -> bool {
+        let pending_agent_reveal = self
+            .pending_agent_reveal
+            .take_if(|(target_endpoint, _)| target_endpoint == endpoint_id);
+        let agent_body_height = self.hits.agent_body.height;
         let Some(endpoint) = self
             .endpoints
             .iter()
@@ -416,6 +426,9 @@ impl ClientShellState {
         if switching_endpoint {
             // The aggregate agent list belongs to the client, not one endpoint.
             self.agent_scroll = agent_scroll;
+        }
+        if let Some((_, pane_id)) = pending_agent_reveal {
+            self.reveal_endpoint_agent(endpoint_id, &pane_id, agent_body_height);
         }
         true
     }
@@ -490,6 +503,23 @@ impl ClientShellState {
             .snapshot
             .as_deref()
             .map(|snapshot| (snapshot.boot_id.as_str(), snapshot.revision))
+    }
+
+    pub(crate) fn set_endpoint_agent_completions(
+        &mut self,
+        endpoint_id: &ClientEndpointId,
+        generation: u64,
+        projection: crate::protocol::endpoint::EndpointAgentCompletions,
+    ) {
+        if let Some(endpoint) = self
+            .endpoints
+            .iter_mut()
+            .find(|endpoint| &endpoint.endpoint_id == endpoint_id)
+        {
+            endpoint
+                .agent_presentation
+                .receive_completions(Some(generation), projection);
+        }
     }
 
     pub(crate) fn set_endpoint_agent_view_projection_for_generation(
@@ -740,7 +770,7 @@ impl ClientShellState {
         }
         self.endpoints[index]
             .agent_presentation
-            .project_snapshot(&mut snapshot);
+            .project_snapshot_for_generation(&mut snapshot, generation);
         let presented_surface = if acknowledge_surface && endpoint_id == &self.active_endpoint_id {
             // workbench 下没有单一镜像：确认聚焦 view 的画面（HERDR-BUG-006）。
             if self.workbench.enabled {

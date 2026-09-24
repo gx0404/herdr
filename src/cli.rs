@@ -885,7 +885,7 @@ pub(super) fn send_ok_request(method: Method) -> std::io::Result<i32> {
 
 pub(super) fn send_request(request: &Request) -> std::io::Result<serde_json::Value> {
     let client = target::api_client()?;
-    ensure_server_protocol_compatible(&client, &request.id)?;
+    ensure_target_server_protocol_compatible(&client, &request.id)?;
     client
         .request_value(request)
         .map_err(|err| map_server_not_running_or_io(err, &request.id, &client))
@@ -898,13 +898,30 @@ pub(super) fn send_request_unchecked(request: &Request) -> std::io::Result<serde
         .map_err(|err| map_server_not_running_or_io(err, &request.id, &client))
 }
 
+/// 显式传入的客户端（snippet / broadcast 的逐机器桥）只做一次只读探测；按缓存
+/// 元数据失效重试只属于当前命令目标的客户端（`ensure_target_server_protocol_compatible`）。
 pub(super) fn ensure_server_protocol_compatible(
     client: &ApiClient,
     request_id: &str,
 ) -> std::io::Result<()> {
-    let status = client
-        .status()
-        .map_err(|err| map_server_not_running_or_io(err, request_id, client))?;
+    check_server_protocol(client.status(), client, request_id)
+}
+
+/// 当前命令目标（`--machine` 前缀或本机）的协议检查：远端探测带超时，桥用了
+/// 已失效的缓存元数据时重新发现一次再探测（`target::server_status`）。
+fn ensure_target_server_protocol_compatible(
+    client: &ApiClient,
+    request_id: &str,
+) -> std::io::Result<()> {
+    check_server_protocol(target::server_status(client), client, request_id)
+}
+
+fn check_server_protocol(
+    status: Result<crate::api::RuntimeStatus, ApiClientError>,
+    client: &ApiClient,
+    request_id: &str,
+) -> std::io::Result<()> {
+    let status = status.map_err(|err| map_server_not_running_or_io(err, request_id, client))?;
     let server_protocol = status.protocol.ok_or_else(|| {
         std::io::Error::other(crate::i18n::texts().cli_errors.server_ping_no_protocol)
     })?;

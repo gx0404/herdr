@@ -12,6 +12,8 @@ pub(crate) use process::TaskCancellation;
 mod profile;
 mod restart_policy;
 mod saved;
+#[cfg(unix)]
+mod ssh_agent;
 mod ssh_config;
 
 pub(crate) use args::*;

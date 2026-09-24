@@ -1,4 +1,3 @@
-use std::borrow::Cow;
 use std::path::{Path, PathBuf};
 
 use tracing::info;
@@ -89,12 +88,17 @@ impl DefaultColorOscTracker {
     pub(super) fn observe(&mut self, bytes: &[u8]) -> bool {
         let mut saw_default_color_set = false;
 
-        // PTY-04：Ground 态快路径——Ground 只响应 0x1b，用 std 的等值扫描
-        // （release 下自动向量化）跳到下一个 ESC，中间字节在 Ground 无迁移。
+        // PTY-04：Ground 与 IgnoreString 快路径——Ground 只响应 0x1b；
+        // IgnoreString 只响应 0x1b 与 CAN/SUB（PTY-14 中止语义），用 std 的等值
+        // 扫描（release 下自动向量化）跳到下一个命中点。上游 c411883e 同样为
+        // IgnoreString 引入了批量扫描。
         let mut index = 0;
         while index < bytes.len() {
-            if matches!(self.state, DefaultColorOscTrackerState::Ground) {
-                match bytes[index..].iter().position(|&byte| byte == 0x1b) {
+            let in_ignored_string = matches!(self.state, DefaultColorOscTrackerState::IgnoreString);
+            if in_ignored_string || matches!(self.state, DefaultColorOscTrackerState::Ground) {
+                match bytes[index..].iter().position(|&byte| {
+                    byte == 0x1b || (in_ignored_string && matches!(byte, 0x18 | 0x1a))
+                }) {
                     Some(offset) => index += offset,
                     None => break,
                 }
@@ -202,12 +206,14 @@ pub(super) struct DefaultColorEventTracker {
 
 impl DefaultColorEventTracker {
     pub(super) fn observe(&mut self, bytes: &[u8]) {
-        // PTY-04：Ground 态快路径——Ground 只响应 0x1b，用 std 的等值扫描
-        // （release 下自动向量化）跳到下一个 ESC，中间字节在 Ground 无迁移。
+        // PTY-04：Ground 与 IgnoreString 快路径（同 `DefaultColorOscTracker`）。
         let mut index = 0;
         while index < bytes.len() {
-            if matches!(self.state, DefaultColorOscTrackerState::Ground) {
-                match bytes[index..].iter().position(|&byte| byte == 0x1b) {
+            let in_ignored_string = matches!(self.state, DefaultColorOscTrackerState::IgnoreString);
+            if in_ignored_string || matches!(self.state, DefaultColorOscTrackerState::Ground) {
+                match bytes[index..].iter().position(|&byte| {
+                    byte == 0x1b || (in_ignored_string && matches!(byte, 0x18 | 0x1a))
+                }) {
                     Some(offset) => index += offset,
                     None => break,
                 }
@@ -417,12 +423,14 @@ impl OscStreamCollector {
     const MAX_BODY_BYTES: usize = 4096;
 
     fn observe(&mut self, bytes: &[u8], mut receive: impl FnMut(&[u8])) {
-        // PTY-04：Ground 态快路径——Ground 只响应 0x1b，用 std 的等值扫描
-        // （release 下自动向量化）跳到下一个 ESC，中间字节在 Ground 无迁移。
+        // PTY-04：Ground 与 IgnoringString 快路径（同 `DefaultColorOscTracker`）。
         let mut index = 0;
         while index < bytes.len() {
-            if matches!(self.state, OscStreamState::Ground) {
-                match bytes[index..].iter().position(|&byte| byte == 0x1b) {
+            let in_ignored_string = matches!(self.state, OscStreamState::IgnoringString);
+            if in_ignored_string || matches!(self.state, OscStreamState::Ground) {
+                match bytes[index..].iter().position(|&byte| {
+                    byte == 0x1b || (in_ignored_string && matches!(byte, 0x18 | 0x1a))
+                }) {
                     Some(offset) => index += offset,
                     None => break,
                 }
@@ -843,79 +851,6 @@ fn hex_value(byte: u8) -> Option<u8> {
     }
 }
 
-pub(super) fn foreground_job_uses_droid_scrollback_compat(
-    job: &crate::platform::ForegroundJob,
-) -> bool {
-    job.processes.iter().any(|process| {
-        process.name.eq_ignore_ascii_case("droid")
-            || process
-                .argv0
-                .as_deref()
-                .is_some_and(|argv0| argv0.eq_ignore_ascii_case("droid"))
-            || process.cmdline.as_deref().is_some_and(|cmdline| {
-                cmdline.eq_ignore_ascii_case("droid")
-                    || cmdline.starts_with("droid ")
-                    || cmdline.to_ascii_lowercase().contains("/droid")
-            })
-    })
-}
-
-pub(super) fn contains_scrollback_clear_sequence(bytes: &[u8]) -> bool {
-    // PTY-04：单遍化——等值扫描（release 下自动向量化）找 ESC，命中处做
-    // 前缀匹配，替代两遍 windows() 扫描。
-    let mut offset = 0;
-    while let Some(found) = bytes[offset..].iter().position(|&byte| byte == 0x1b) {
-        let rest = &bytes[offset + found..];
-        if rest.starts_with(b"\x1b[3J") || rest.starts_with(b"\x1b[?3J") {
-            return true;
-        }
-        offset += found + 1;
-    }
-    false
-}
-
-fn strip_scrollback_clear_sequences<'a>(bytes: &'a [u8]) -> Cow<'a, [u8]> {
-    if !contains_scrollback_clear_sequence(bytes) {
-        return Cow::Borrowed(bytes);
-    }
-
-    let mut filtered = Vec::with_capacity(bytes.len());
-    let mut index = 0;
-    while index < bytes.len() {
-        let remaining = &bytes[index..];
-        if remaining.starts_with(b"\x1b[3J") {
-            index += 4;
-            continue;
-        }
-        if remaining.starts_with(b"\x1b[?3J") {
-            index += 5;
-            continue;
-        }
-        filtered.push(bytes[index]);
-        index += 1;
-    }
-
-    Cow::Owned(filtered)
-}
-
-pub(super) fn maybe_filter_primary_screen_scrollback_clear<'a>(
-    bytes: &'a [u8],
-    alternate_screen: bool,
-    uses_droid_scrollback_compat: bool,
-    contains_scrollback_clear: bool,
-) -> Cow<'a, [u8]> {
-    // Droid redraws its primary-screen TUI with CSI 3 J, which erases pane
-    // scrollback inside herdr. Keep the hack scoped to Droid on the primary
-    // screen so normal terminal clear-history behavior still works elsewhere.
-    // PTY-05：判定值由检测 tick 写入的缓存供给，解析路径不读进程树。
-    // PTY-04：序列存在性由调用方单遍扫描供给，本函数不重复扫描。
-    if alternate_screen || !uses_droid_scrollback_compat || !contains_scrollback_clear {
-        return Cow::Borrowed(bytes);
-    }
-
-    strip_scrollback_clear_sequences(bytes)
-}
-
 #[cfg(target_os = "macos")]
 pub(super) fn should_restore_host_terminal_theme(
     owner_pgid: u32,
@@ -1025,6 +960,59 @@ pub(super) fn restore_host_terminal_theme_if_needed(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn bulk_osc_scans_match_bytewise_state_and_response_offsets() {
+        use super::*;
+        let mut input = b"text\x1b_Gm=1;".to_vec();
+        input.extend(std::iter::repeat_n(b'A', 8192));
+        input.extend_from_slice(b"\x1b\\\x1b]10;?\x07\x1b]11;red\x1b\\\x1bPignored");
+        input.extend(0u8..=255);
+        input.extend_from_slice(b"\x1b\\\x1b]12;");
+        input.extend(std::iter::repeat_n(b'B', 4200));
+        input.extend_from_slice(b"\x07\x1b]10;?\x1b\\\x1b]11;?\x07\x1b");
+        for chunk_size in [1, 2, 3, 17, 4096, input.len()] {
+            let mut bulk = DefaultColorOscTracker::default();
+            let mut scalar = DefaultColorOscTracker::default();
+            let mut bulk_events = DefaultColorEventTracker::default();
+            let mut scalar_events = DefaultColorEventTracker::default();
+            let mut bulk_stream = OscStreamCollector::default();
+            let mut scalar_stream = OscStreamCollector::default();
+            for chunk in input.chunks(chunk_size) {
+                let changed = bulk.observe(chunk);
+                let mut scalar_changed = false;
+                let mut expected_events = Vec::new();
+                let mut expected_bodies = Vec::new();
+                for (offset, byte) in chunk.iter().enumerate() {
+                    let byte = std::slice::from_ref(byte);
+                    scalar_changed |= scalar.observe(byte);
+                    scalar_events.observe(byte);
+                    expected_events.extend(scalar_events.drain_pending().into_iter().map(
+                        |mut event| {
+                            event.end_offset += offset;
+                            event
+                        },
+                    ));
+                    scalar_stream.observe(byte, |body| expected_bodies.push(body.to_vec()));
+                }
+                bulk_events.observe(chunk);
+                let mut bodies = Vec::new();
+                bulk_stream.observe(chunk, |body| bodies.push(body.to_vec()));
+                assert_eq!(changed, scalar_changed);
+                assert_eq!((bulk.state, &bulk.body), (scalar.state, &scalar.body));
+                assert_eq!(bulk_events.drain_pending(), expected_events);
+                assert_eq!(
+                    (bulk_events.state, &bulk_events.body),
+                    (scalar_events.state, &scalar_events.body)
+                );
+                assert_eq!(bodies, expected_bodies);
+                assert_eq!(
+                    (bulk_stream.state, &bulk_stream.body),
+                    (scalar_stream.state, &scalar_stream.body)
+                );
+            }
+        }
+    }
+
     use tokio::sync::mpsc;
 
     use super::*;
@@ -1053,19 +1041,6 @@ mod tests {
                 b: colors.background.b,
             }),
             ..Default::default()
-        }
-    }
-
-    fn shell_job(shell_pid: u32) -> crate::platform::ForegroundJob {
-        crate::platform::ForegroundJob {
-            process_group_id: shell_pid,
-            processes: vec![crate::platform::ForegroundProcess {
-                pid: shell_pid,
-                name: "zsh".to_string(),
-                argv0: Some("zsh".to_string()),
-                argv: Some(vec!["zsh".to_string()]),
-                cmdline: Some("zsh".to_string()),
-            }],
         }
     }
 
@@ -1599,89 +1574,6 @@ mod tests {
             tracked_default_color_events(tracker.drain_pending()),
             vec![DefaultColorEvent::Query(DefaultColorQuery::Background)]
         );
-    }
-
-    #[test]
-    fn droid_scrollback_compat_matches_process_name_and_cmdline() {
-        let name_only = crate::platform::ForegroundJob {
-            process_group_id: 42,
-            processes: vec![crate::platform::ForegroundProcess {
-                pid: 42,
-                name: "droid".to_string(),
-                argv0: None,
-                argv: Some(vec![
-                    "/opt/factory/droid".to_string(),
-                    "--resume".to_string(),
-                ]),
-                cmdline: Some("/opt/factory/droid --resume".to_string()),
-            }],
-        };
-        assert!(foreground_job_uses_droid_scrollback_compat(&name_only));
-
-        let cmdline_only = crate::platform::ForegroundJob {
-            process_group_id: 42,
-            processes: vec![crate::platform::ForegroundProcess {
-                pid: 42,
-                name: "bun".to_string(),
-                argv0: Some("bun".to_string()),
-                argv: Some(vec![
-                    "bun".to_string(),
-                    "/home/can/.local/bin/droid".to_string(),
-                    "--resume".to_string(),
-                ]),
-                cmdline: Some("/home/can/.local/bin/droid --resume".to_string()),
-            }],
-        };
-        assert!(foreground_job_uses_droid_scrollback_compat(&cmdline_only));
-
-        let shell = shell_job(7);
-        assert!(!foreground_job_uses_droid_scrollback_compat(&shell));
-    }
-
-    #[test]
-    fn strip_scrollback_clear_sequences_removes_ed3_only() {
-        let filtered = strip_scrollback_clear_sequences(b"a\x1b[3Jb\x1b[?3Jc\x1b[2Jd");
-        assert_eq!(filtered.as_ref(), b"abc\x1b[2Jd");
-    }
-
-    #[test]
-    fn primary_screen_droid_compat_ignores_scrollback_clear_only_for_droid() {
-        // 判定值来自检测 tick 缓存（见 foreground_job_uses_droid_scrollback_compat
-        // 的匹配测试）；序列存在性由调用方单遍扫描供给（见
-        // contains_scrollback_clear_sequence 的测试）。这里钉住消费语义。
-        let clear = contains_scrollback_clear_sequence(b"\x1b[3J\x1b[2J");
-        assert!(clear);
-        let filtered =
-            maybe_filter_primary_screen_scrollback_clear(b"\x1b[3J\x1b[2J", false, true, clear);
-        assert_eq!(filtered.as_ref(), b"\x1b[2J");
-
-        let shell =
-            maybe_filter_primary_screen_scrollback_clear(b"\x1b[3J\x1b[2J", false, false, clear);
-        assert_eq!(shell.as_ref(), b"\x1b[3J\x1b[2J");
-
-        let alternate =
-            maybe_filter_primary_screen_scrollback_clear(b"\x1b[3J\x1b[2J", true, true, clear);
-        assert_eq!(alternate.as_ref(), b"\x1b[3J\x1b[2J");
-    }
-
-    #[test]
-    fn scrollback_clear_detection_is_a_single_vectorized_pass() {
-        // 长 Ground 前缀 + 序列在末尾：等值扫描跳转后前缀匹配命中。
-        let mut bytes = vec![b'x'; 4096];
-        bytes.extend_from_slice(b"\x1b[3J");
-        assert!(contains_scrollback_clear_sequence(&bytes));
-
-        // 部分前缀（ESC [ 3 后不是 J）不命中；紧邻的完整序列命中。
-        let mut bytes = vec![b'x'; 128];
-        bytes.extend_from_slice(b"\x1b[3X");
-        bytes.extend_from_slice(b"\x1b[?3J");
-        assert!(contains_scrollback_clear_sequence(&bytes));
-
-        // 重叠 ESC：`\x1b\x1b[3J` 命中（第二个 ESC 引导）。
-        assert!(contains_scrollback_clear_sequence(b"\x1b\x1b[3J"));
-        assert!(!contains_scrollback_clear_sequence(b"\x1b[3x\x1b[3"));
-        assert!(!contains_scrollback_clear_sequence(b"\x1b"));
-        assert!(!contains_scrollback_clear_sequence(b""));
     }
 
     #[test]

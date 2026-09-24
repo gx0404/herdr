@@ -46,6 +46,7 @@ fn connect_shell(
         mouse_capture: false,
         surface_active: true,
         ssh_auth_sock: None,
+        surface_delta: false,
         writer,
     });
     (control_rx, render_rx)
@@ -218,6 +219,7 @@ fn api_request(
             observation_events: None,
             stream_active: None,
         },
+        false,
         false,
     ));
     response_rx
@@ -716,6 +718,7 @@ async fn projection_restamp_rides_the_surface_reuse_codec() {
         mouse_capture: false,
         surface_active: true,
         ssh_auth_sock: None,
+        surface_delta: false,
         writer,
     });
     let _ = next_snapshot(&control_rx);

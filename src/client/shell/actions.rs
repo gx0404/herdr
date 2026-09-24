@@ -153,6 +153,16 @@ impl ClientShellState {
                     outcome.repaint = true;
                     return;
                 }
+                if action == crate::input::KeybindAction::CloseTab {
+                    if let Some(tab_id) = self
+                        .snapshot
+                        .as_deref()
+                        .and_then(|snapshot| snapshot.focused_tab_id.clone())
+                    {
+                        self.request_tab_close(tab_id, outcome);
+                    }
+                    return;
+                }
                 if action == crate::input::KeybindAction::NewTab && self.config.prompt_new_tab_name
                 {
                     self.open_new_tab_overlay();
@@ -170,6 +180,7 @@ impl ClientShellState {
                     return;
                 }
                 if action == crate::input::KeybindAction::WorkspacePicker {
+                    self.pending_workspace_highlight = None;
                     self.mobile_switcher_scroll = 0;
                     self.reveal_mobile_workspace = false;
                     self.mode = ClientShellMode::Navigate;
@@ -323,7 +334,7 @@ impl ClientShellState {
             .as_ref()
             .and_then(|surface| surface.panes.iter().find(|pane| pane.pane_id == pane_id))
             .map(|pane| pane.content_revision)
-            // Read a manual mouse selection atomically from the live terminal. Output
+            // Read an explicit selection atomically from the live terminal. Output
             // between the displayed frame and this request must not reject the copy.
             .filter(|_| !live);
         let (anchor, cursor) = selection.ordered_cells();
@@ -438,6 +449,20 @@ impl ClientShellState {
         coalesce: bool,
         outcome: &mut ClientShellInput,
     ) -> bool {
+        // 改变焦点的请求释放导航确认后的工作区高亮（上游 #4408）。
+        let changes_focus = match &method {
+            crate::api::schema::Method::WorkspaceFocus(_)
+            | crate::api::schema::Method::TabFocus(_)
+            | crate::api::schema::Method::PaneFocus(_)
+            | crate::api::schema::Method::PaneFocusDirection(_) => true,
+            crate::api::schema::Method::WorkspaceCreate(params) => params.focus,
+            crate::api::schema::Method::TabCreate(params) => params.focus,
+            crate::api::schema::Method::PaneSplit(params) => params.focus,
+            _ => false,
+        };
+        if changes_focus {
+            outcome.repaint |= self.pending_workspace_highlight.take().is_some();
+        }
         if !self.endpoint_is_online(&self.active_endpoint_id) {
             let label = self.active_endpoint_label().to_owned();
             outcome.repaint |= self.receive_endpoint_unavailable(crate::i18n::fill(
@@ -749,6 +774,13 @@ impl ClientShellState {
             self.endpoint_notice_seen.remove(&timeout_key);
         }
         if let Err(error) = &result {
+            if self
+                .pending_workspace_highlight
+                .as_ref()
+                .is_some_and(|pending| pending.request_id == request_id)
+            {
+                self.pending_workspace_highlight = None;
+            }
             let code = error.code.as_deref().unwrap_or("invalid_response");
             // `confirmation_required` 平时由确认浮层接手；另一台机器的动作没法替
             // 它的工作区弹确认框，照常提示原因（T1 审查轻 5）。
@@ -1322,9 +1354,6 @@ impl ClientShellState {
                     env: Default::default(),
                 }))
             }
-            KeybindAction::CloseTab => Some(Method::TabClose(TabTarget {
-                tab_id: focused_tab?,
-            })),
             KeybindAction::ClosePane => Some(Method::PaneClose(PaneTarget {
                 pane_id: focused_pane.clone()?,
             })),
@@ -1366,6 +1395,9 @@ impl ClientShellState {
             KeybindAction::Zoom => Some(Method::PaneZoom(PaneZoomParams {
                 pane_id: focused_pane,
                 mode: PaneZoomMode::Toggle,
+            })),
+            KeybindAction::ClearPane => Some(Method::PaneClear(PaneTarget {
+                pane_id: focused_pane?,
             })),
             KeybindAction::EditScrollback => Some(Method::PaneEditScrollback(PaneTarget {
                 pane_id: focused_pane?,

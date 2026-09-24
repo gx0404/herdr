@@ -23,6 +23,7 @@ pub(crate) enum SnapshotActivity {
 /// 25% 门槛；摘要形态 +14% 字节、中位耗时 +16%（1 个 agent 时 +2% / 持平）。
 pub(crate) const SNAPSHOT_ACTIVITY: SnapshotActivity = SnapshotActivity::Summary;
 
+#[cfg(test)]
 pub(super) fn snapshot(
     app: &app::App,
     boot_id: &str,
@@ -30,7 +31,21 @@ pub(super) fn snapshot(
     config_diagnostic: Option<&str>,
     location: Option<&crate::server::clients::ClientShellLocation>,
 ) -> protocol::ClientShellSnapshot {
-    snapshot_with_activity(
+    snapshot_with_completions(app, boot_id, revision, config_diagnostic, location).0
+}
+
+/// 生产投影入口：快照按默认下发形态 `SNAPSHOT_ACTIVITY`，同时产出完成序号投影。
+pub(super) fn snapshot_with_completions(
+    app: &app::App,
+    boot_id: &str,
+    revision: u64,
+    config_diagnostic: Option<&str>,
+    location: Option<&crate::server::clients::ClientShellLocation>,
+) -> (
+    protocol::ClientShellSnapshot,
+    protocol::endpoint::EndpointAgentCompletions,
+) {
+    snapshot_parts(
         app,
         boot_id,
         revision,
@@ -40,6 +55,8 @@ pub(super) fn snapshot(
     )
 }
 
+/// 指定活动树下发形态的快照（基准与测试比较 `Full` / `Summary` 用）。
+#[cfg(test)]
 pub(super) fn snapshot_with_activity(
     app: &app::App,
     boot_id: &str,
@@ -48,7 +65,38 @@ pub(super) fn snapshot_with_activity(
     location: Option<&crate::server::clients::ClientShellLocation>,
     activity: SnapshotActivity,
 ) -> protocol::ClientShellSnapshot {
+    snapshot_parts(
+        app,
+        boot_id,
+        revision,
+        config_diagnostic,
+        location,
+        activity,
+    )
+    .0
+}
+
+fn snapshot_parts(
+    app: &app::App,
+    boot_id: &str,
+    revision: u64,
+    config_diagnostic: Option<&str>,
+    location: Option<&crate::server::clients::ClientShellLocation>,
+    activity: SnapshotActivity,
+) -> (
+    protocol::ClientShellSnapshot,
+    protocol::endpoint::EndpointAgentCompletions,
+) {
     let snapshot = app.session_snapshot_for_projection();
+    let completions = protocol::endpoint::EndpointAgentCompletions {
+        boot_id: boot_id.to_owned(),
+        revision,
+        completions: snapshot
+            .agents
+            .iter()
+            .filter_map(|agent| agent.completion_seq.map(|seq| (agent.pane_id.clone(), seq)))
+            .collect(),
+    };
     let focused_workspace_id = location
         .and_then(|location| location.focused_workspace_id.clone())
         .or_else(|| snapshot.focused_workspace_id.clone());
@@ -255,7 +303,7 @@ pub(super) fn snapshot_with_activity(
                 preview: notes.preview,
             });
 
-    protocol::ClientShellSnapshot {
+    let shell = protocol::ClientShellSnapshot {
         boot_id: boot_id.to_owned(),
         revision,
         config_diagnostic: config_diagnostic.map(str::to_owned),
@@ -280,7 +328,8 @@ pub(super) fn snapshot_with_activity(
         agents,
         commands: app.client_shell_command_manifest(),
         external_agents: external_agents_projection(app, activity),
-    }
+    };
+    (shell, completions)
 }
 
 /// 一个 agent 的活动树投影，直接读存储（投影路径的 `AgentInfo` 不复制活动树）。
@@ -403,6 +452,13 @@ pub(super) struct RenderedPaneSurface {
     pub(super) popup: Option<Box<protocol::ClientShellPopupSurface>>,
     pub(super) graphics: protocol::SurfaceGraphicsScene,
     pub(super) graphics_delivery: crate::kitty_graphics::surface::DeliveryCache,
+    pub(super) graphics_sources: crate::kitty_graphics::surface::SourceFiles,
+}
+
+#[derive(Debug)]
+pub(super) enum SurfaceRenderDeferred {
+    Synchronized,
+    Changed,
 }
 
 /// RS-06：单次 render_and_stream 内按（tab、面积、cell 尺寸、popup）复用
@@ -469,36 +525,54 @@ pub(super) fn render_pane_surface(
     cell_size: crate::kitty_graphics::HostCellSize,
     graphics_delivery: &crate::kitty_graphics::surface::DeliveryCache,
     client_id: u64,
-) -> RenderedPaneSurface {
-    let content_revisions_before = target
-        .and_then(|target| {
-            let workspace = app.state.workspaces.get(target.workspace_index)?;
-            let tab = workspace.tabs.get(target.tab_index)?;
-            Some(
-                tab.layout
-                    .pane_ids()
-                    .into_iter()
-                    .filter_map(|pane_id| {
-                        app.state
-                            .runtime_for_pane_in_workspace(
-                                &app.terminal_runtimes,
-                                target.workspace_index,
-                                pane_id,
-                            )
-                            .map(|runtime| (pane_id, runtime.content_seq()))
-                    })
-                    .collect::<std::collections::HashMap<_, _>>(),
-            )
-        })
-        .unwrap_or_default();
+) -> Result<RenderedPaneSurface, SurfaceRenderDeferred> {
+    let layout = crate::ui::compute_tab_surface_for(
+        &app.state,
+        &app.terminal_runtimes,
+        target,
+        area,
+        resize_panes,
+        cell_size,
+    );
+    let mut content_revisions_before = std::collections::HashMap::new();
+    if let Some(target) = target {
+        for pane in &layout.pane_infos {
+            if let Some(runtime) = app.state.runtime_for_pane_in_workspace(
+                &app.terminal_runtimes,
+                target.workspace_index,
+                pane.id,
+            ) {
+                let (synchronized, epoch) = runtime.synchronized_output_state();
+                if synchronized {
+                    return Err(SurfaceRenderDeferred::Synchronized);
+                }
+                let revision = runtime.content_seq();
+                content_revisions_before.insert(pane.id, (epoch, revision));
+            }
+        }
+    }
+    let popup_revision_before = if show_popup {
+        app.state
+            .popup_pane
+            .as_ref()
+            .and_then(|popup| app.terminal_runtimes.get(&popup.terminal_id))
+            .map(|runtime| {
+                let (synchronized, epoch) = runtime.synchronized_output_state();
+                if synchronized {
+                    return Err(SurfaceRenderDeferred::Synchronized);
+                }
+                Ok(epoch)
+            })
+            .transpose()?
+    } else {
+        None
+    };
     let (buffer, cursor, hyperlinks, layout) =
         crate::server::render_stream::render_tab_surface_virtual(
             &app.state,
             &app.terminal_runtimes,
-            target,
+            layout,
             area,
-            resize_panes,
-            cell_size,
         );
     let panes = target
         .map(|target| {
@@ -527,7 +601,9 @@ pub(super) fn render_pane_surface(
                         };
                         let content_revision = runtime.map_or(0, |runtime| {
                             let after = runtime.content_seq();
-                            if content_revisions_before.get(&pane.id).copied() == Some(after)
+                            if content_revisions_before
+                                .get(&pane.id)
+                                .is_some_and(|&(_, before)| before == after)
                                 && after.is_multiple_of(2)
                             {
                                 after
@@ -595,24 +671,59 @@ pub(super) fn render_pane_surface(
     let popup = show_popup
         .then(|| render_popup_surface(app, area, resize_panes, cell_size))
         .flatten();
-    let (graphics, next_graphics_delivery) = crate::server::client_shell_graphics::collect(
-        app,
-        &layout.pane_infos,
-        &layout.split_borders,
-        popup.as_deref(),
-        target,
-        cell_size,
-        graphics_delivery,
-        client_id,
-    );
-    RenderedPaneSurface {
+    let (graphics, next_graphics_delivery, graphics_sources) =
+        crate::server::client_shell_graphics::collect(
+            app,
+            &layout.pane_infos,
+            &layout.split_borders,
+            popup.as_deref(),
+            target,
+            cell_size,
+            graphics_delivery,
+            client_id,
+        );
+    if let Some(target) = target {
+        for (&pane_id, &(epoch, _)) in &content_revisions_before {
+            if let Some(runtime) = app.state.runtime_for_pane_in_workspace(
+                &app.terminal_runtimes,
+                target.workspace_index,
+                pane_id,
+            ) {
+                let (synchronized, after_epoch) = runtime.synchronized_output_state();
+                if synchronized {
+                    return Err(SurfaceRenderDeferred::Synchronized);
+                }
+                if after_epoch != epoch {
+                    return Err(SurfaceRenderDeferred::Changed);
+                }
+            }
+        }
+    }
+    if let Some(before) = popup_revision_before {
+        if let Some(runtime) = app
+            .state
+            .popup_pane
+            .as_ref()
+            .and_then(|popup| app.terminal_runtimes.get(&popup.terminal_id))
+        {
+            let (synchronized, after_epoch) = runtime.synchronized_output_state();
+            if synchronized {
+                return Err(SurfaceRenderDeferred::Synchronized);
+            }
+            if after_epoch != before {
+                return Err(SurfaceRenderDeferred::Changed);
+            }
+        }
+    }
+    Ok(RenderedPaneSurface {
         frame: FrameData::from_ratatui_buffer_with_hyperlinks(&buffer, cursor, &hyperlinks),
         panes,
         splits,
         popup,
         graphics,
         graphics_delivery: next_graphics_delivery,
-    }
+        graphics_sources,
+    })
 }
 
 fn render_popup_surface(

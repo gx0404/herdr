@@ -46,6 +46,20 @@ fn exit_code_suspects_host_shutdown(code: u32) -> bool {
     code == 1
 }
 
+pub(crate) fn windows_virtual_terminal_input_active() -> bool {
+    use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
+    use windows_sys::Win32::System::Console::{
+        GetConsoleMode, GetStdHandle, ENABLE_VIRTUAL_TERMINAL_INPUT, STD_INPUT_HANDLE,
+    };
+
+    let handle = unsafe { GetStdHandle(STD_INPUT_HANDLE) };
+    if handle.is_null() || handle == INVALID_HANDLE_VALUE {
+        return false;
+    }
+    let mut mode = 0;
+    (unsafe { GetConsoleMode(handle, &mut mode) } != 0) && mode & ENABLE_VIRTUAL_TERMINAL_INPUT != 0
+}
+
 pub(crate) fn classify_child_exit(status: &portable_pty::ExitStatus) -> super::ChildExitReason {
     // STATUS_CONTROL_C_EXIT is reported without a Unix signal by portable-pty.
     if status.exit_code() == 0xC000013A {
@@ -369,11 +383,11 @@ use windows_sys::{
             },
             Ole::{CF_DIB, CF_DIBV5, CF_UNICODETEXT},
             Threading::{
-                GetCurrentProcess, GetExitCodeProcess, GetProcessTimes, OpenProcess, OpenThread,
-                QueryFullProcessImageNameW, ResumeThread, TerminateProcess, CREATE_NO_WINDOW,
-                CREATE_SUSPENDED, DETACHED_PROCESS, PROCESS_BASIC_INFORMATION,
-                PROCESS_QUERY_INFORMATION, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_VM_READ,
-                THREAD_SUSPEND_RESUME,
+                GetCurrentProcess, GetExitCodeProcess, GetProcessTimes, IsWow64Process2,
+                OpenProcess, OpenThread, QueryFullProcessImageNameW, ResumeThread,
+                TerminateProcess, CREATE_NO_WINDOW, CREATE_SUSPENDED, DETACHED_PROCESS,
+                PROCESS_BASIC_INFORMATION, PROCESS_QUERY_INFORMATION,
+                PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_VM_READ, THREAD_SUSPEND_RESUME,
             },
         },
         UI::{
@@ -405,12 +419,83 @@ const FOREGROUND_SELECTION_CACHE_CAPACITY: usize = 1_024;
 const FOREGROUND_SELECTION_CACHE_RETENTION: Duration = Duration::from_secs(60);
 const PANE_RUNTIME_MARKER_ENV_VAR: &str = "HERDR_PANE_RUNTIME_ID";
 
+/// Native processor architecture of the Windows host as an
+/// `IMAGE_FILE_MACHINE_*` value. `IsWow64Process2` reports the native machine
+/// even when an x64 Herdr runs under emulation on Windows ARM64, which the
+/// build target alone cannot reveal.
+pub(crate) fn native_machine_type() -> u16 {
+    let mut process_machine = 0u16;
+    let mut native_machine = 0u16;
+    // SAFETY: `GetCurrentProcess` returns a pseudo-handle and both out-pointers
+    // are valid for the duration of the call.
+    let ok = unsafe {
+        IsWow64Process2(
+            GetCurrentProcess(),
+            &mut process_machine,
+            &mut native_machine,
+        )
+    };
+    if ok != 0 && native_machine != 0 {
+        native_machine
+    } else {
+        process_machine
+    }
+}
+
 pub(crate) fn terminal_title_for_presentation(title: &str) -> &str {
     title.strip_prefix("Administrator: ").unwrap_or(title)
 }
 
 pub(crate) fn prepare_paste_text_for_pty_platform(text: String) -> String {
     text.replace("\r\n", "\n").replace('\n', "\r\n")
+}
+
+pub(crate) fn normalize_cwd_for_launch_platform(path: &std::path::Path) -> PathBuf {
+    use std::os::windows::ffi::{OsStrExt, OsStringExt};
+    use std::path::{Component, Prefix};
+    use windows_sys::Win32::{
+        Foundation::INVALID_HANDLE_VALUE,
+        Storage::FileSystem::{FindClose, FindFirstFileW, WIN32_FIND_DATAW},
+    };
+
+    fn stored_name(path: &std::path::Path) -> Option<std::ffi::OsString> {
+        let input = path
+            .as_os_str()
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect::<Vec<_>>();
+        let mut data = std::mem::MaybeUninit::<WIN32_FIND_DATAW>::uninit();
+        let handle = unsafe { FindFirstFileW(input.as_ptr(), data.as_mut_ptr()) };
+        if handle == INVALID_HANDLE_VALUE {
+            return None;
+        }
+        let data = unsafe { data.assume_init() };
+        unsafe { FindClose(handle) };
+        let len = data
+            .cFileName
+            .iter()
+            .position(|&ch| ch == 0)
+            .unwrap_or(data.cFileName.len());
+        Some(std::ffi::OsString::from_wide(&data.cFileName[..len]))
+    }
+
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::Prefix(prefix) => match prefix.kind() {
+                Prefix::Disk(drive) => {
+                    normalized.push(format!("{}:", char::from(drive).to_ascii_uppercase()))
+                }
+                _ => normalized.push(prefix.as_os_str()),
+            },
+            Component::Normal(name) => {
+                let candidate = normalized.join(name);
+                normalized.push(stored_name(&candidate).unwrap_or_else(|| name.to_os_string()));
+            }
+            _ => normalized.push(component.as_os_str()),
+        }
+    }
+    normalized
 }
 
 pub(crate) fn plugin_runtime_path_platform(path: &std::path::Path) -> PathBuf {
@@ -1367,7 +1452,8 @@ pub fn current_process_is_detached_server_daemon() -> bool {
         return false;
     }
 
-    matches!(current_process_is_in_job(), Ok(false))
+    // Job membership alone does not tie the daemon lifetime to its launcher.
+    matches!(current_job_kills_processes_on_close(), Ok(false))
 }
 
 pub fn foreground_job(child_pid: u32) -> Option<ForegroundJob> {
@@ -3282,6 +3368,67 @@ mod tests {
     const WMI_DAEMON_TEST_CHILD_ENV: &str = "HERDR_TEST_WMI_DAEMON_CHILD";
 
     #[test]
+    fn windows_daemon_readiness_checks_job_limits_and_console() {
+        const CHILD_ENV: &str = "HERDR_TEST_DAEMON_READINESS_CHILD";
+        if std::env::var_os(CHILD_ENV).is_some() {
+            use super::*;
+
+            let job = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };
+            assert!(!job.is_null(), "create test job");
+            let job = unsafe { OwnedHandle::from_raw_handle(job) };
+            assert_ne!(
+                unsafe { AssignProcessToJobObject(job.as_raw_handle(), GetCurrentProcess()) },
+                0,
+                "assign child to test job"
+            );
+            assert!(current_process_is_in_job().unwrap());
+            assert!(
+                current_process_is_detached_server_daemon(),
+                "a console-free process in a non-killing job must be ready"
+            );
+
+            for (flags, ready) in [(JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE, false), (0, true)] {
+                let mut limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
+                limits.BasicLimitInformation.LimitFlags = flags;
+                assert_ne!(
+                    unsafe {
+                        SetInformationJobObject(
+                            job.as_raw_handle(),
+                            JobObjectExtendedLimitInformation,
+                            std::ptr::from_ref(&limits).cast(),
+                            size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+                        )
+                    },
+                    0,
+                    "set test job limits"
+                );
+                assert_eq!(current_process_is_detached_server_daemon(), ready);
+            }
+            assert_ne!(unsafe { AllocConsole() }, 0, "allocate test console");
+            assert!(!current_process_is_detached_server_daemon());
+            assert_ne!(unsafe { FreeConsole() }, 0, "release test console");
+            return;
+        }
+
+        let mut child = Command::new(std::env::current_exe().unwrap());
+        child
+            .args([
+                "--exact",
+                "platform::windows::tests::windows_daemon_readiness_checks_job_limits_and_console",
+                "--nocapture",
+            ])
+            .env(CHILD_ENV, "1");
+        super::detach_server_daemon_command(&mut child);
+        let output = child.output().expect("run daemon readiness child");
+        assert!(
+            output.status.success(),
+            "daemon readiness child failed: {}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[test]
     fn windows_environment_keys_use_unicode_case_insensitive_ordering() {
         assert_eq!(
             super::windows_environment_key_cmp("hérdr", "HÉRDR"),
@@ -3299,7 +3446,7 @@ mod tests {
                     "{}\n{}\n{}",
                     cwd.display(),
                     unsafe { GetConsoleWindow() }.is_null(),
-                    !super::current_job_kills_processes_on_close().expect("inspect WMI daemon job")
+                    super::current_process_is_detached_server_daemon()
                 ),
             )
             .expect("write WMI daemon test capture");
@@ -3508,15 +3655,17 @@ mod tests {
     }
 
     #[test]
-    fn windows_process_cwd_reads_child_launch_directory() {
-        let cwd = std::env::temp_dir().join(format!("herdr-cwd-test-{}", std::process::id()));
+    fn windows_process_cwd_reads_normalized_child_launch_directory() {
+        let name = format!("Herdr-Cwd-Case-{}", std::process::id());
+        let cwd = std::env::temp_dir().join(&name);
         fs::create_dir_all(&cwd).expect("create cwd fixture");
+        let launch_cwd = cwd.with_file_name(name.to_ascii_lowercase());
 
         let shell =
             std::env::var_os("ComSpec").unwrap_or_else(|| r"C:\Windows\System32\cmd.exe".into());
         let mut child = Command::new(shell)
             .args(["/D", "/Q", "/C", "ping -n 11 127.0.0.1 > NUL"])
-            .current_dir(&cwd)
+            .current_dir(super::normalize_cwd_for_launch_platform(&launch_cwd))
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -3527,7 +3676,7 @@ mod tests {
         let mut observed = None;
         while Instant::now() < deadline {
             observed = super::process_cwd(child.id());
-            if observed.as_deref() == Some(cwd.as_path()) {
+            if observed.as_ref().and_then(|path| path.file_name()) == Some(name.as_ref()) {
                 break;
             }
             thread::sleep(Duration::from_millis(100));
@@ -3537,7 +3686,10 @@ mod tests {
         let _ = child.wait();
         let _ = fs::remove_dir_all(&cwd);
 
-        assert_eq!(observed.as_deref(), Some(cwd.as_path()));
+        assert_eq!(
+            observed.as_ref().and_then(|path| path.file_name()),
+            Some(name.as_ref())
+        );
     }
 
     #[test]

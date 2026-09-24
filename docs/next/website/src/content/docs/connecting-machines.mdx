@@ -7,6 +7,8 @@ Keep your local work and remote agents in one Herdr window. Save an SSH machine 
 
 Each machine keeps its own Herdr server, sessions, and running processes. A lost connection to one machine does not disconnect the others.
 
+Herdr requests SSH compression to reduce screen-update traffic on limited connections. This works with older compatible Herdr servers and does not change how typing or other input is delivered. Herdr's `-C` option overrides `Compression no` in your SSH config. If SSH reuses an existing connection through an external ControlMaster, that connection keeps its original compression setting.
+
 ## Before you connect
 
 You need normal SSH access to the remote machine. Verify it first:
@@ -17,7 +19,7 @@ ssh workbox
 
 `workbox` can be a host from your SSH config. You can also use a target such as `ssh://you@server:2222`.
 
-Multi-machine connections are supported on Linux and macOS clients, connecting to Linux and macOS servers on x86_64 or aarch64. Multi-machine connections are not yet verified or supported on Windows; standalone `herdr --remote` remains supported on Windows. Native Windows servers are not supported as SSH targets. See [Remote attach over SSH](/docs/persistence-remote/#remote-attach-over-ssh) for SSH configuration, authentication, and custom binaries.
+Multi-machine connections support Linux, macOS, and Windows clients connecting to Linux or macOS servers on x86_64 or aarch64, or Windows servers on x86_64. Interactive setup can install or update the complete remote package after confirmation; background reconnects only discover installed packages. See [Remote attach over SSH](/docs/persistence-remote/#remote-attach-over-ssh) for SSH configuration, authentication, and custom binaries.
 
 ## Add a machine
 
@@ -105,7 +107,7 @@ For keyboard navigation, press `prefix+w`, then use the workspace navigation key
 
 When highlighting a workspace on another machine, press Enter before using other keyboard actions. This prevents pane, tab, workspace, or custom-command shortcuts from acting on the current machine by mistake. Clicking cancels a remote desktop keyboard preview. Expanded sidebars respect each machine's collapsed worktree groups.
 
-Local opens immediately on startup without waiting for SSH connections. A stalled machine cannot hold up another machine's input. Multiple Herdr clients can also view different tabs on the same server independently; see [Client and server](/docs/concepts/#client-and-server) for shared-tab sizing.
+Local opens immediately on startup without waiting for SSH connections. Selecting Local also cancels an unfinished remote switch without waiting for the remote machine to reply. If Local itself is reconnecting, your selection resumes when it is ready. Local accepts input once its fresh screen and terminal settings are ready. A stalled machine cannot hold up another machine's input. Multiple Herdr clients can also view different tabs on the same server independently; see [Client and server](/docs/concepts/#client-and-server) for shared-tab sizing.
 
 When a connection is lost, the last workspace and agent state remains visible but dimmed. That is cached information, not live state. Input and navigation into those cached panes stay disabled until a fresh connection and matching screen arrive. Reconnecting never takes selection away from the machine you are using.
 
@@ -243,9 +245,13 @@ Background connections never answer prompts or install, update, restart, or hand
 herdr --remote workbox
 ```
 
-Use your profile's target. If you chose a named session when adding it, include the optional `--session <name>` here too. Follow any approval prompts, then restart the client to retry the Attention connection. Do not stop a running server merely because its version differs from the client.
+Use your profile's target. If you chose a named session when adding it, include the optional `--session <name>` here too. Follow any approval prompts, then reconnect the machine from its detail card or restart the client; Herdr does not retry an Attention connection on its own. Do not stop a running server merely because its version differs from the client.
 
 If authentication fails, check ordinary SSH first. For a passphrase-protected key, load it with `ssh-add` before starting Herdr's non-interactive background connections.
+
+For Git authentication or SSH signing inside remote panes, enable `ForwardAgent yes` for the trusted host in your SSH config. Herdr does not enable forwarding for you. When a session starts with an agent, updated Linux and macOS servers give panes a stable agent address, so existing and new panes can use the forwarded agent after `--remote` or a saved machine reconnects. A working inherited agent or earlier connection keeps priority over later clients and temporary setup checks; if it disappears, another live attachment can supply the agent.
+
+This requires an updated remote server, not just an updated local client. Local sessions started without an agent leave `SSH_AUTH_SOCK` alone. Panes created before the server update, or before an agent was first supplied to the session, keep their original environment and need to be recreated once to inherit the stable address. Older compatible servers and connections without agent forwarding can still attach normally.
 
 ## Settings and automation
 
@@ -258,6 +264,8 @@ Workspace, tab, pane IDs, and agent names are scoped to one server. Two machines
 ## Updates and saved data
 
 Saved profiles contain an opaque ID, label, SSH target, explicit remote session, and enabled state, plus any optional organization metadata (group, tags, color), SSH connection options (port, user, identity files, proxy jumps, and similar) set at `machine add` time, port forward rules, and session-log preferences. Herdr does not store passwords, private keys, agent tickets, or SSH control sockets in the catalog. Authentication stays with OpenSSH. The catalog file is versioned; this release upgrades it from version 1 to version 2 automatically on first load, and older Herdr versions cannot read a version 2 catalog.
+
+Herdr separately remembers each machine's remote OS and resolved executable path so repeated `--machine` commands can skip discovery. Existing profiles learn missing information on first use. This cache is optional: missing, invalid, or unwritable cache files do not prevent commands from working. Commands still check live server compatibility. If a cached executable is missing or no longer supports API forwarding, Herdr rediscovers it during the initial read-only check; it never automatically repeats a command that may already have changed remote state.
 
 The client and server negotiate compatibility rather than requiring identical versions. Saved-machine connections additionally need the server's `surface_interest` and `health_check` capabilities. Older servers without those capabilities show Attention until explicitly updated, even if a standalone attach works. Other missing server methods disable only their corresponding actions.
 

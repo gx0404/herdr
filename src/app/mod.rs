@@ -17,7 +17,6 @@ mod creation;
 mod custom_commands;
 mod git_refresh;
 mod ids;
-pub(crate) mod pane_graphics;
 mod popup;
 mod runtime;
 mod session;
@@ -103,9 +102,6 @@ impl AppPolicy {
 
 pub struct App {
     pub state: AppState,
-    pub(crate) pane_graphics: pane_graphics::Runtime,
-    pub(crate) pane_graphics_files: Arc<crate::pane_graphics_files::FileStore>,
-    pub(crate) direct_graphics_available: bool,
     pub(crate) pixel_mouse_available: bool,
     pub(crate) terminal_runtimes: crate::terminal::TerminalRuntimeRegistry,
     pub event_tx: mpsc::Sender<AppEvent>,
@@ -129,6 +125,7 @@ pub struct App {
     /// APP-008：常驻的 git 刷新 worker（首次需要时创建），替代每 1.5 s 新建 OS 线程。
     pub(crate) git_refresh_worker: Option<git_refresh::GitRefreshWorker>,
     pub(crate) pending_api_worktree_creates: HashMap<std::path::PathBuf, u64>,
+    pub(crate) worktree_read_slots: std::sync::Arc<tokio::sync::Semaphore>,
     pub(crate) pending_api_worktree_removes: HashMap<String, u64>,
     pub(crate) pending_api_worktree_remove_paths: HashMap<std::path::PathBuf, u64>,
     pub(crate) pending_worktree_remove_runtime_exits: HashMap<crate::layout::PaneId, usize>,
@@ -142,8 +139,11 @@ pub struct App {
     pub(crate) loaded_host_cursor: crate::config::HostCursorModeConfig,
     pub(crate) agent_metadata_deadline: Option<Instant>,
     pub(crate) pending_agent_resume_deadline: Option<Instant>,
+    startup_per_agent_delay: Duration,
+    next_agent_resume_at: Option<Instant>,
     pub(crate) session_save_deadline: Option<Instant>,
     pub(crate) session_save_thread: Option<std::thread::JoinHandle<()>>,
+    session_writer: Arc<std::sync::Mutex<crate::persist::SessionWriter>>,
     pane_exit_checkpoint_pending: bool,
     /// 最近几次真实 pane 退出的时刻，用于识别「短窗口批量退出」。
     /// 定长 ≤ `PANE_EXIT_BURST_THRESHOLD`。
@@ -425,9 +425,11 @@ impl App {
         // Try to restore previous session
         let mut restored_terminals = std::collections::HashMap::new();
         let mut restored_terminal_runtimes = crate::terminal::TerminalRuntimeRegistry::new();
-        let (workspaces, active, selected) = if !policy.restore_session {
-            (Vec::new(), None, 0)
-        } else if let Some(snap) = crate::persist::load() {
+        let snapshot = policy.restore_session.then(crate::persist::load).flatten();
+        let session_writer = Arc::new(std::sync::Mutex::new(crate::persist::SessionWriter::new(
+            policy.restore_session && snapshot.is_none(),
+        )));
+        let (workspaces, active, selected) = if let Some(snap) = snapshot {
             let history = config
                 .experimental
                 .pane_history
@@ -629,9 +631,6 @@ impl App {
             toast_deadline: None,
             last_api_notification_at: None,
             state,
-            pane_graphics: pane_graphics::Runtime::default(),
-            pane_graphics_files: Arc::new(crate::pane_graphics_files::FileStore::default()),
-            direct_graphics_available: false,
             pixel_mouse_available: false,
             terminal_runtimes: restored_terminal_runtimes,
             event_tx,
@@ -644,6 +643,7 @@ impl App {
             git_status_cache: Arc::new(HashMap::new()),
             git_refresh_worker: None,
             pending_api_worktree_creates: HashMap::new(),
+            worktree_read_slots: std::sync::Arc::new(tokio::sync::Semaphore::new(8)),
             pending_api_worktree_removes: HashMap::new(),
             pending_api_worktree_remove_paths: HashMap::new(),
             pending_worktree_remove_runtime_exits: HashMap::new(),
@@ -660,8 +660,13 @@ impl App {
             loaded_host_cursor: config.ui.host_cursor,
             agent_metadata_deadline: None,
             pending_agent_resume_deadline: None,
+            startup_per_agent_delay: Duration::from_millis(
+                config.session.startup_per_agent_delay_ms.into(),
+            ),
+            next_agent_resume_at: None,
             session_save_deadline: None,
             session_save_thread: None,
+            session_writer,
             pane_exit_checkpoint_pending: false,
             recent_pane_exits: Vec::new(),
             pane_exit_cascade_until: None,
@@ -936,6 +941,16 @@ impl App {
                 self.state.sound = config.ui.sound.clone();
                 self.state.toast_config = config.ui.toast.clone();
             }
+        }
+
+        if !invalid_section("session")
+            && Duration::from_millis(config.session.startup_per_agent_delay_ms.into())
+                != self.startup_per_agent_delay
+        {
+            diagnostics.push(
+                "session.startup_per_agent_delay_ms changes require restarting Herdr; kept current setting"
+                    .into(),
+            );
         }
 
         let graphics_config_valid = !invalid_section("terminal")
@@ -2175,6 +2190,26 @@ selection_mix_ratio = 0.5
 
         std::env::remove_var(crate::config::CONFIG_PATH_ENV_VAR);
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn reload_config_reports_startup_delay_requires_restart() {
+        let mut app = test_app();
+        let mut config = Config::default();
+        let report = app.apply_live_config(&config, &[], &[], false);
+        assert_eq!(report.status, crate::config::ConfigReloadStatus::Applied);
+
+        config.session.startup_per_agent_delay_ms = 250;
+        let report = app.apply_live_config(&config, &[], &[], false);
+        assert_eq!(report.status, crate::config::ConfigReloadStatus::Partial);
+        assert_eq!(app.startup_per_agent_delay, Duration::from_millis(100));
+        assert_eq!(report.diagnostics, vec![
+            "session.startup_per_agent_delay_ms changes require restarting Herdr; kept current setting"
+        ]);
+
+        let report = app.apply_live_config(&config, &[], &["session".into()], false);
+        assert!(report.diagnostics.is_empty());
+        assert_eq!(app.startup_per_agent_delay, Duration::from_millis(100));
     }
 
     #[test]
@@ -3844,7 +3879,8 @@ selection_mix_ratio = 0.5
         std::env::remove_var(crate::session::SESSION_ENV_VAR);
 
         for workspaces in [1usize, 15] {
-            crate::persist::clear();
+            // 上游 0ff0f27e 把会话写盘收进 SessionWriter，不再有模块级 clear。
+            crate::persist::SessionWriter::new(false).clear();
             let mut app = test_app();
             app.policy.persist_session = true;
             app.state.workspaces = (0..workspaces)

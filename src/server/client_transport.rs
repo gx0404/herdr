@@ -92,6 +92,7 @@ struct ClientShellHelloOptions {
     mouse_capture: bool,
     surface_active: bool,
     surface_reuse: bool,
+    surface_delta: bool,
     ssh_auth_sock: Option<String>,
 }
 
@@ -155,6 +156,24 @@ impl ClientWriter {
     /// Drops render-lane work that has not yet been claimed by the writer.
     pub(crate) fn discard_pending_render(&self) {
         self.render.queue.discard_pending_render();
+    }
+
+    #[cfg(all(test, unix))]
+    pub(crate) fn test_paused() -> Self {
+        let queue = ClientWriterQueue::new();
+        Self {
+            control: ClientControlWriter::queue(queue.clone()),
+            render: ClientRenderWriter::queue(queue),
+        }
+    }
+
+    #[cfg(all(test, unix))]
+    pub(crate) fn test_drain(&self) -> Vec<Vec<u8>> {
+        let mut state = self.render.queue.lock_state();
+        let mut frames = state.control.drain(..).collect::<Vec<_>>();
+        frames.extend(state.ordered.drain(..));
+        frames.extend(state.render.take());
+        frames
     }
 
     #[cfg(test)]
@@ -447,6 +466,7 @@ pub(crate) enum ServerEvent {
         mouse_capture: bool,
         surface_active: bool,
         surface_reuse: bool,
+        surface_delta: bool,
         /// 前台 client 宿主环境上报的 `SSH_AUTH_SOCK`（WEZ-INT-01 自愈链兜底源）。
         ssh_auth_sock: Option<String>,
         writer: ClientWriter,
@@ -842,6 +862,7 @@ pub(crate) fn handle_client_handshake(
                     mouse_capture: hello.mouse_capture,
                     surface_active: hello.surface_active,
                     surface_reuse: hello.surface_reuse,
+                    surface_delta: hello.surface_delta,
                     ssh_auth_sock: hello.ssh_auth_sock,
                 }),
             )
@@ -948,6 +969,7 @@ pub(crate) fn handle_client_handshake(
             mouse_capture: shell_options.mouse_capture,
             surface_active: shell_options.surface_active,
             surface_reuse: shell_options.surface_reuse,
+            surface_delta: shell_options.surface_delta,
             ssh_auth_sock: shell_options.ssh_auth_sock,
             writer,
         }
@@ -1541,6 +1563,7 @@ mod tests {
             mouse_capture: true,
             surface_active: true,
             surface_reuse: false,
+            surface_delta: false,
             snapshot_codecs: vec![crate::protocol::endpoint::SNAPSHOT_CODEC_V1.into()],
             surface_codecs: vec![crate::protocol::endpoint::SURFACE_CODEC_V1.into()],
             input_codecs: vec![crate::protocol::endpoint::INPUT_CODEC_V1.into()],
@@ -2169,10 +2192,12 @@ mod tests {
                 mouse_capture,
                 surface_active,
                 surface_reuse,
+                surface_delta,
                 ssh_auth_sock,
                 writer,
             } => {
                 assert!(!surface_reuse);
+                assert!(!surface_delta);
                 assert_eq!(ssh_auth_sock, None);
                 assert_eq!(client_id, 43);
                 assert_eq!((surface_cols, surface_rows), (80, 29));

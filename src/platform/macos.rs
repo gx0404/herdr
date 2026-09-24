@@ -23,6 +23,9 @@ pub(crate) use super::unix_common::{
     write_client_stream, write_remote_ssh_config_file, ClientStreamReader, StatusCommandGuard,
 };
 
+mod bootstrap;
+pub(crate) use bootstrap::{configure_server_daemon_context, prepare_server_process};
+
 #[cfg(test)]
 mod config_file_tests;
 

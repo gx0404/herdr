@@ -27,9 +27,18 @@
 4. 对受测会话执行 `herdr server reload-agent-manifests` 验证。
 5. 规则正确后删除临时覆盖或精确还原旧覆盖，保证入库的捆绑 manifest 是真源。
 
-不要为日常 manifest 调优添加大体积 agent 专属整屏 fixture 套件；Rust 测试聚焦
-manifest 解析、规则语义、skip-state 语义、来源优先级、缓存重载与更新流程；
-agent 专属屏幕证据用真实 pane 读取。
+## 测试边界（上游全文语义）
+
+- 单测只测 herdr 的检测引擎，不测各 CLI agent 的屏幕或标题约定：用合成
+  manifest 与最小输入串覆盖解析、区域、匹配、AND/OR/NOT 门、规则优先级、
+  skip-state 语义、来源优先级、缓存重载与更新流程。
+- 保留捆绑 manifest 的 schema 校验、进程识别与集成 hook/协议测试。
+- 不新增把抓取或编造的 CLI 屏幕拿去对捆绑规则分类的测试，也不冻结某个 agent
+  的具体规则 id 与优先级。
+- agent 专属行为用上面的热重载环做真实 smoke：覆盖改动的状态及其邻近转换
+  （idle、working、blocked，支持时含后台工作），连同相关的可选 OSC 设置；
+  记录 CLI 版本、观察到的信号与结果。引擎测试通过只证明规则按所写执行，
+  不证明与当前 CLI 兼容。
 
 ## 发布目录
 

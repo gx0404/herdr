@@ -35,26 +35,11 @@ impl ClientShellState {
         press: ClientWorkspacePress,
         outcome: &mut ClientShellInput,
     ) {
-        if press.endpoint_id == self.active_endpoint_id {
-            self.push_endpoint_method(
-                crate::api::schema::Method::WorkspaceFocus(crate::api::schema::WorkspaceTarget {
-                    workspace_id: press.workspace_id,
-                }),
-                outcome,
-            );
-        } else if self.endpoint_is_online(&press.endpoint_id) {
-            outcome.actions.push(ClientShellAction::ActivateEndpoint {
-                endpoint_id: press.endpoint_id,
-                target: Some(ClientEndpointFocusTarget::Workspace(press.workspace_id)),
-            });
-        } else {
-            let label = self.endpoint_label(&press.endpoint_id).to_owned();
-            self.receive_endpoint_unavailable(crate::i18n::fill(
-                crate::i18n::texts().mobile.not_ready_fmt,
-                &[("label", &label)],
-            ));
-            outcome.repaint = true;
-        }
+        self.focus_or_activate(
+            press.endpoint_id,
+            ClientEndpointFocusTarget::Workspace(press.workspace_id),
+            outcome,
+        );
     }
 
     pub(super) fn handle_endpoint_machine_click(
@@ -71,15 +56,19 @@ impl ClientShellState {
             return false;
         };
         let endpoint_id = hit.endpoint_id.clone();
-        if super::contains(hit.collapse_toggle, point) || endpoint_id == self.active_endpoint_id {
+        let collapse_toggle = super::contains(hit.collapse_toggle, point);
+        if collapse_toggle || endpoint_id == self.active_endpoint_id {
             if !self.collapsed_endpoints.remove(&endpoint_id) {
-                self.collapsed_endpoints.insert(endpoint_id);
+                self.collapsed_endpoints.insert(endpoint_id.clone());
             }
             self.bump_tree_collapse_epoch();
             // 折叠状态跟着偏好走：下次 attach 还要是这个样子（STATE-05）。
             self.schedule_chrome_preferences(std::time::Instant::now());
             outcome.repaint = true;
-        } else if self.endpoint_is_online(&endpoint_id) {
+            if !collapse_toggle && endpoint_id.is_local() {
+                self.activate_endpoint(endpoint_id, outcome);
+            }
+        } else if endpoint_id.is_local() || self.endpoint_is_online(&endpoint_id) {
             outcome.actions.push(ClientShellAction::ActivateEndpoint {
                 endpoint_id,
                 target: None,
@@ -118,7 +107,13 @@ impl ClientShellState {
         else {
             return false;
         };
-        self.focus_agent_pane(endpoint_id, pane_id, outcome);
+        // 经 `focus_or_activate`：本机 agent 在远端切换进行中被点时也要走 runtime 的
+        // 激活路径，才能取消那次 handoff（上游 #4236）。
+        self.focus_or_activate(
+            endpoint_id,
+            ClientEndpointFocusTarget::Pane(pane_id),
+            outcome,
+        );
         true
     }
 
@@ -231,13 +226,26 @@ impl ClientShellState {
                 _ => unreachable!("endpoint agent navigation"),
             };
             let target = &agents[next];
-            // 多机折叠侧栏的 agent 区跟着键盘走：目标在窗口外就滚进视野（D10）。
-            self.reveal_collapsed_endpoint_agent(&target.endpoint_id, &target.pane_id);
-            self.focus_or_activate(
+            if self.focus_or_activate(
                 target.endpoint_id.clone(),
                 ClientEndpointFocusTarget::Pane(target.pane_id.clone()),
                 outcome,
-            );
+            ) {
+                if target.endpoint_id == self.active_endpoint_id {
+                    self.reveal_endpoint_agent(
+                        &target.endpoint_id,
+                        &target.pane_id,
+                        self.hits.agent_body.height,
+                    );
+                } else {
+                    // 多机折叠侧栏的 agent 区跟着键盘走：目标在窗口外就先按当前行序
+                    // 滚进视野（D10）；激活后再按目的端点的行序揭示一次（上游 #4355）。
+                    self.reveal_collapsed_endpoint_agent(&target.endpoint_id, &target.pane_id);
+                    self.pending_agent_reveal =
+                        Some((target.endpoint_id.clone(), target.pane_id.clone()));
+                }
+                outcome.repaint = true;
+            }
             return true;
         }
         false
@@ -248,7 +256,10 @@ impl ClientShellState {
         endpoint_id: ClientEndpointId,
         outcome: &mut ClientShellInput,
     ) -> bool {
-        if !self.endpoint_is_online(&endpoint_id) {
+        self.pending_workspace_highlight = None;
+        self.pending_agent_reveal = None;
+        let online = self.endpoint_is_online(&endpoint_id);
+        if !online && !endpoint_id.is_local() {
             let label = self.endpoint_label(&endpoint_id).to_owned();
             self.receive_endpoint_unavailable(crate::i18n::fill(
                 crate::i18n::texts().mobile.not_ready_fmt,
@@ -257,7 +268,9 @@ impl ClientShellState {
             outcome.repaint = true;
             return false;
         }
-        if endpoint_id != self.active_endpoint_id {
+        if (endpoint_id.is_local() && (self.multi_endpoint_active() || !online))
+            || endpoint_id != self.active_endpoint_id
+        {
             outcome.actions.push(ClientShellAction::ActivateEndpoint {
                 endpoint_id,
                 target: None,
@@ -272,7 +285,10 @@ impl ClientShellState {
         target: ClientEndpointFocusTarget,
         outcome: &mut ClientShellInput,
     ) -> bool {
-        if !self.endpoint_is_online(&endpoint_id) {
+        self.pending_workspace_highlight = None;
+        self.pending_agent_reveal = None;
+        let online = self.endpoint_is_online(&endpoint_id);
+        if !online && !endpoint_id.is_local() {
             let label = self.endpoint_label(&endpoint_id).to_owned();
             self.receive_endpoint_unavailable(crate::i18n::fill(
                 crate::i18n::texts().mobile.not_ready_fmt,
@@ -281,7 +297,11 @@ impl ClientShellState {
             outcome.repaint = true;
             return false;
         }
-        if endpoint_id == self.active_endpoint_id {
+        // Local can still be displayed while a remote activation is pending.
+        // Route explicit selections through the runtime so they can cancel that handoff.
+        if endpoint_id == self.active_endpoint_id
+            && !(endpoint_id.is_local() && (self.multi_endpoint_active() || !online))
+        {
             let method = match target {
                 ClientEndpointFocusTarget::Workspace(workspace_id) => {
                     crate::api::schema::Method::WorkspaceFocus(

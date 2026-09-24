@@ -29,6 +29,7 @@ const CLIENT_SHELL_METHODS: &[&str] = &[
     "integration.install",
     "integration.list",
     "layout.set_split_ratio",
+    "pane.clear",
     "pane.close",
     "pane.copy_motion",
     "pane.copy_search",
@@ -361,7 +362,11 @@ mod tests {
             )))
             .expect("活动树方法的独立契约");
         assert_eq!(activity_shapes, expected_activity);
-        // Freeze the additive method separately without rewriting the published fixture.
+        // Freeze additive methods separately without rewriting the published fixture.
+        assert_eq!(
+            actual.remove("pane.clear").as_deref(),
+            Some("0301d288ba198ddaa427dd7421c71911cccaf4ea03544531efa8b67ca21b08f6")
+        );
         assert_eq!(
             actual.remove("pane.link.resolve").as_deref(),
             Some("f5e4a3e01453ae7b188f127ce951c12c20e0bebcc17cc364eeb6d1a01fd5bf81")

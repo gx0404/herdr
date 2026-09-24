@@ -356,6 +356,10 @@ impl EndpointSupervisors {
                 state.next_attempt = None;
                 lock_error_kinds(&self.error_kinds).remove(endpoint_id);
             }
+            // Attention stops retries: recovery runs in-UI (approved interactive
+            // authentication or a manual reconnect via `reconnect_now`), and a
+            // background BatchMode retry must not interleave with an approved
+            // interactive attempt for the same machine.
             ClientEndpointStatus::Attention | ClientEndpointStatus::Disabled => {
                 state.online_since = None;
                 state.next_attempt = None;
@@ -481,6 +485,9 @@ fn prepare_endpoint_connection(
         options.endpoint_keybindings,
         options.mouse_capture,
         false,
+        // Only the Local endpoint shares this client's filesystem; SSH bridges
+        // expose a local socket but never server-owned graphics files.
+        !remote,
         cancel,
     )
     .map_err(handshake_error)?;

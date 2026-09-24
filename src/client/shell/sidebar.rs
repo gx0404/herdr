@@ -4,6 +4,27 @@ use ratatui::{
     widgets::{Paragraph, Widget},
 };
 
+/// 工作区导航光标（选中行）的底色。沿用 fork 的 `Palette::selection_row_bg`：主题
+/// 没给 selection_bg（terminal 主题为 Reset）时退到 accent，而不是退到聚焦行同色的
+/// active_row_bg（上游 #4300 的同一问题，fork 先以此修复）。
+fn workspace_selection_background(palette: &Palette) -> ratatui::style::Color {
+    palette.selection_row_bg()
+}
+
+/// 聚焦行底色。导航（或导航确认后等待权威焦点）期间，若导航光标的底色仍与聚焦行
+/// 同色（主题 token 重复、accent 也没给），聚焦行不再填底，只留光标可见——上游
+/// #4300 的回退，在 fork 的 accent 回退之后兜底。
+pub(in crate::client::shell) fn workspace_active_background(
+    palette: &Palette,
+    navigating: bool,
+) -> ratatui::style::Color {
+    if navigating && workspace_selection_background(palette) == palette.active_row_bg {
+        palette.sidebar_bg
+    } else {
+        palette.active_row_bg
+    }
+}
+
 pub(in crate::client::shell) fn collapsed_sidebar_sections(
     area: Rect,
 ) -> (Rect, Option<u16>, Rect) {
@@ -37,6 +58,8 @@ pub(crate) fn render_collapsed_sidebar(
     let selected_workspace_id = state
         .selected_workspace_id
         .map(|target| target.workspace_id.as_str());
+    let selection_background = workspace_selection_background(palette);
+    let active_background = workspace_active_background(palette, selected_workspace_id.is_some());
     render_sidebar_background(
         buffer,
         area,
@@ -135,11 +158,10 @@ pub(crate) fn render_collapsed_sidebar(
                 workspace_id,
             }) if endpoint_id.is_local() && workspace_id == &workspace.workspace_id
         );
-        let selection_background = palette.selection_row_bg();
         if selected {
             buffer.set_style(rect, Style::default().bg(selection_background));
         } else if workspace.focused {
-            buffer.set_style(rect, Style::default().bg(palette.active_row_bg));
+            buffer.set_style(rect, Style::default().bg(active_background));
         } else if hovered {
             buffer.set_style(rect, Style::default().bg(palette.surface0));
         }
@@ -148,7 +170,7 @@ pub(crate) fn render_collapsed_sidebar(
                 .fg(palette.overlay1)
                 .bg(selection_background)
         } else if workspace.focused {
-            Style::default().fg(palette.text).bg(palette.active_row_bg)
+            Style::default().fg(palette.text).bg(active_background)
         } else {
             Style::default().fg(palette.overlay0)
         };
@@ -440,22 +462,31 @@ pub(crate) fn render_sidebar_regions(
             }) if endpoint_id.is_local() && workspace_id == &workspace.workspace_id
         );
         if selected {
-            buffer.set_style(rect, Style::default().bg(palette.selection_row_bg()));
+            buffer.set_style(
+                rect,
+                Style::default().bg(workspace_selection_background(palette)),
+            );
         } else if dragged {
             buffer.set_style(rect, Style::default().bg(palette.surface1));
         } else if workspace.focused {
-            buffer.set_style(rect, Style::default().bg(palette.active_row_bg));
+            buffer.set_style(
+                rect,
+                Style::default().bg(workspace_active_background(
+                    palette,
+                    state.selected_workspace_id.is_some(),
+                )),
+            );
         }
         render_workspace_rows(
             buffer,
             rect,
-            workspace,
             status,
             config.status_indicators,
             entry,
             rows,
-            true,
+            workspace.focused,
             selected,
+            state.selected_workspace_id.is_some(),
             dragged,
             hovered,
             palette,
@@ -817,13 +848,13 @@ pub(in crate::client::shell) fn workspace_rows(
 pub(in crate::client::shell) fn render_workspace_rows(
     buffer: &mut Buffer,
     area: Rect,
-    workspace: &ClientShellWorkspace,
     status: crate::api::schema::AgentStatus,
     indicators: crate::config::StatusIndicatorStyle,
     entry: &WorkspaceEntry,
     rows: Vec<Vec<crate::ui::ResolvedToken>>,
-    endpoint_active: bool,
+    focused: bool,
     selected: bool,
+    navigating: bool,
     dragged: bool,
     hovered: bool,
     palette: &Palette,
@@ -859,7 +890,7 @@ pub(in crate::client::shell) fn render_workspace_rows(
         } else {
             x = x.saturating_add(3);
         }
-        let highlighted = endpoint_active && workspace.focused || dragged;
+        let highlighted = focused || dragged;
         let workspace_style = Style::default()
             .fg(if highlighted {
                 palette.text
@@ -871,7 +902,7 @@ pub(in crate::client::shell) fn render_workspace_rows(
             } else {
                 Modifier::empty()
             });
-        let secondary_style = Style::default().fg(if endpoint_active && workspace.focused {
+        let secondary_style = Style::default().fg(if focused {
             palette.mauve
         } else {
             palette.overlay0
@@ -896,11 +927,11 @@ pub(in crate::client::shell) fn render_workspace_rows(
     }
 
     let background = if selected {
-        Some(palette.selection_row_bg())
+        Some(workspace_selection_background(palette))
     } else if dragged {
         Some(palette.surface1)
-    } else if endpoint_active && workspace.focused {
-        Some(palette.active_row_bg)
+    } else if focused {
+        Some(workspace_active_background(palette, navigating))
     } else if hovered {
         Some(palette.surface0)
     } else {

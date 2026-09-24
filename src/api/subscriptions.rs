@@ -105,15 +105,23 @@ pub(super) fn poll_subscriptions_round(
     api_tx: &ApiRequestSender,
     event_hub: &EventHub,
     notices: bool,
-) -> Vec<serde_json::Value> {
+) -> Result<Vec<serde_json::Value>, ErrorBody> {
     let mut gaps: Vec<EventGap> = Vec::new();
     let mut events = Vec::new();
     for subscription in subscriptions.iter_mut() {
         let round = subscription.poll(api_tx, event_hub);
-        // 断层判据来自同一个 hub 游标窗口，同一连接上的多个订阅常常报出**完全
-        // 相同**的区间。通知帧里没有订阅标识，重复下发客户端也无从区分，
-        // 所以这里按区间去重：一轮一个连接对同一个区间只发一帧。
         if let Some(gap) = round.gap {
+            // 没开 notices 的订阅方（含所有既有客户端）不能从保留窗口最旧处静默
+            // 续传（上游 65927cef，#4178）：回 `events_lost` 错误并关闭本订阅，不先
+            // 发本轮残缺的事件，也不再 poll 后面的订阅（快照类各是一次 app 往返）；
+            // 由客户端重订阅并用 `session.snapshot` 重新同步。断层判据仍按订阅种别
+            // 给（`EventHub::retained_after`），无关种别被挤掉不算丢失。
+            if !notices {
+                return Err(events_lost_error());
+            }
+            // 断层判据来自同一个 hub 游标窗口，同一连接上的多个订阅常常报出**完全
+            // 相同**的区间。通知帧里没有订阅标识，重复下发客户端也无从区分，
+            // 所以这里按区间去重：一轮一个连接对同一个区间只发一帧。
             if !gaps.contains(&gap) {
                 gaps.push(gap);
             }
@@ -123,13 +131,16 @@ pub(super) fn poll_subscriptions_round(
     // 断层通知排在本轮全部事件之前：客户端先重拉快照，再应用幸存的增量。
     // `notices` 是订阅方显式开启的（`events.subscribe` 的 `notices: true`）：
     // 通知帧的 `event` 名不在 `EventKind` 里，不能无条件塞进既有的流。
-    let mut round: Vec<serde_json::Value> = if notices {
-        gaps.into_iter().filter_map(gap_notice_value).collect()
-    } else {
-        Vec::new()
-    };
+    let mut round: Vec<serde_json::Value> = gaps.into_iter().filter_map(gap_notice_value).collect();
     round.extend(events);
-    round
+    Ok(round)
+}
+
+fn events_lost_error() -> ErrorBody {
+    ErrorBody {
+        code: "events_lost".into(),
+        message: "event subscription fell behind retained history; resubscribe and resync with session.snapshot".into(),
+    }
 }
 
 /// 一个订阅在一轮里产出的东西：幸存事件帧，外加（可能的）断层。
@@ -841,6 +852,7 @@ mod tests {
             focused: true,
             cwd: None,
             foreground_cwd: None,
+            restore_error: None,
             label: None,
             agent: None,
             title: None,
@@ -968,7 +980,8 @@ mod tests {
             event_hub.push(workspace_focused_event(&format!("workspace_{index}")));
         }
 
-        let delivered = poll_subscriptions_round(&mut subscriptions, &api_tx, &event_hub, true);
+        let delivered =
+            poll_subscriptions_round(&mut subscriptions, &api_tx, &event_hub, true).unwrap();
         let notice = delivered.first().expect("断层通知帧");
         assert_eq!(notice["event"], "events.lost");
         assert_eq!(notice["data"]["from"], 1);
@@ -982,14 +995,14 @@ mod tests {
 
         // 断层只报一次：游标已经跟上，下一轮不再重复通知。
         event_hub.push(workspace_focused_event("fresh"));
-        let next = poll_subscriptions_round(&mut subscriptions, &api_tx, &event_hub, true);
+        let next = poll_subscriptions_round(&mut subscriptions, &api_tx, &event_hub, true).unwrap();
         assert_eq!(next.len(), 1);
         assert_eq!(next[0]["data"]["workspace_id"], "fresh");
     }
 
-    /// 通知帧是显式可选面：没开 `notices` 的订阅方（含所有既有客户端）拿到的
-    /// 仍然只有事件行，`events.lost` 这个 `EventKind` 之外的 `event` 名不会
-    /// 凭空出现在流上。
+    /// 通知帧是显式可选面：没开 `notices` 的订阅方（含所有既有客户端）不会在流上
+    /// 见到 `events.lost` 这个 `EventKind` 之外的 `event` 名；遇到断层时改回上游的
+    /// `events_lost` 错误（65927cef），且不先发本轮残缺的事件。
     #[test]
     fn gap_notices_stay_off_unless_the_subscriber_opts_in() {
         let event_hub = EventHub::default();
@@ -1000,14 +1013,21 @@ mod tests {
             event_hub.push(workspace_focused_event(&format!("workspace_{index}")));
         }
 
-        let delivered = poll_subscriptions_round(&mut subscriptions, &api_tx, &event_hub, false);
-        assert_eq!(delivered.len(), 512, "只投递幸存事件，不加通知帧");
-        assert!(
-            delivered
-                .iter()
-                .all(|frame| frame["event"] != "events.lost"),
-            "未开启 notices 时流上不得出现通知帧"
-        );
+        let error = poll_subscriptions_round(&mut subscriptions, &api_tx, &event_hub, false)
+            .expect_err("未开启 notices 的订阅方遇到断层收到 events_lost");
+        assert_eq!(error.code, "events_lost");
+
+        // 无关种别被挤掉不算丢失：订阅照常投递幸存事件，没有错误也没有通知帧。
+        let event_hub = EventHub::with_test_capacity(4);
+        let mut subscriptions = vec![focus_subscription(&api_tx, &event_hub, 0)];
+        for index in 0..20 {
+            event_hub.push(presentation_event(Some(&format!("noise_{index}"))));
+        }
+        event_hub.push(workspace_focused_event("kept"));
+        let delivered =
+            poll_subscriptions_round(&mut subscriptions, &api_tx, &event_hub, false).unwrap();
+        assert_eq!(delivered.len(), 1);
+        assert_eq!(delivered[0]["data"]["workspace_id"], "kept");
     }
 
     /// 同一连接上的多个订阅共用一个 hub 游标窗口，断层区间往往完全相同。
@@ -1025,7 +1045,8 @@ mod tests {
             event_hub.push(workspace_focused_event(&format!("workspace_{index}")));
         }
 
-        let delivered = poll_subscriptions_round(&mut subscriptions, &api_tx, &event_hub, true);
+        let delivered =
+            poll_subscriptions_round(&mut subscriptions, &api_tx, &event_hub, true).unwrap();
         let notices = delivered
             .iter()
             .filter(|frame| frame["event"] == "events.lost")
@@ -1049,7 +1070,8 @@ mod tests {
             event_hub.push(presentation_event(Some(&format!("noise_{index}"))));
         }
 
-        let delivered = poll_subscriptions_round(&mut subscriptions, &api_tx, &event_hub, true);
+        let delivered =
+            poll_subscriptions_round(&mut subscriptions, &api_tx, &event_hub, true).unwrap();
         assert!(
             delivered.is_empty(),
             "与订阅无关的事件被挤掉不构成这条订阅的断层：{delivered:?}"
@@ -1059,7 +1081,8 @@ mod tests {
         for index in 0..20 {
             event_hub.push(workspace_focused_event(&format!("workspace_{index}")));
         }
-        let delivered = poll_subscriptions_round(&mut subscriptions, &api_tx, &event_hub, true);
+        let delivered =
+            poll_subscriptions_round(&mut subscriptions, &api_tx, &event_hub, true).unwrap();
         assert_eq!(delivered[0]["event"], "events.lost");
     }
 
@@ -1146,7 +1169,8 @@ mod tests {
             event_hub.push(presentation_event(Some(&format!("title_{index}"))));
         }
 
-        let delivered = poll_subscriptions_round(&mut subscriptions, &api_tx, &event_hub, true);
+        let delivered =
+            poll_subscriptions_round(&mut subscriptions, &api_tx, &event_hub, true).unwrap();
         let notice = delivered.first().expect("断层通知帧");
         assert_eq!(notice["event"], "events.lost");
         assert_eq!(notice["data"]["from"], 1);
@@ -1177,7 +1201,8 @@ mod tests {
         event_hub.push(workspace_focused_event("first"));
         event_hub.push(workspace_focused_event("second"));
 
-        let round = poll_subscriptions_round(&mut subscriptions, &api_tx, &event_hub, true);
+        let round =
+            poll_subscriptions_round(&mut subscriptions, &api_tx, &event_hub, true).unwrap();
         assert_eq!(round.len(), 4, "两个订阅各投递两条事件");
         assert_eq!(round[0]["data"]["workspace_id"], "first");
         assert_eq!(round[1]["data"]["workspace_id"], "second");
@@ -1185,7 +1210,9 @@ mod tests {
         assert_eq!(round[3]["data"]["workspace_id"], "second");
 
         assert!(
-            poll_subscriptions_round(&mut subscriptions, &api_tx, &event_hub, true).is_empty(),
+            poll_subscriptions_round(&mut subscriptions, &api_tx, &event_hub, true)
+                .unwrap()
+                .is_empty(),
             "无新事件时本轮为空"
         );
     }
@@ -1484,5 +1511,95 @@ mod tests {
         };
         assert_eq!(data.title.as_deref(), Some("short lived"));
         assert!(subscription.initial_event.is_none());
+    }
+
+    /// 上游 65927cef：生命周期订阅一轮取完保留批次，按序投递并越过不匹配的事件。
+    #[test]
+    fn lifecycle_batch_drains_in_order_and_advances_past_unmatched_events() {
+        let event_hub = EventHub::default();
+        event_hub.push(workspace_focused_event("old"));
+        let start = event_hub.current_sequence();
+        event_hub.push(workspace_focused_event("setup"));
+        let (api_tx, _api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut subscription = ActiveSubscription::new(
+            Subscription::WorkspaceFocused {},
+            "batch",
+            0,
+            &api_tx,
+            &event_hub,
+            start,
+        )
+        .unwrap();
+        event_hub.push(presentation_event(None));
+        event_hub.push(workspace_focused_event("live"));
+        let events = subscription.poll(&api_tx, &event_hub).events;
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0]["data"]["workspace_id"], "setup");
+        assert_eq!(events[1]["data"]["workspace_id"], "live");
+        assert!(subscription.poll(&api_tx, &event_hub).events.is_empty());
+        let ActiveSubscription::Event(subscription) = subscription else {
+            panic!("expected lifecycle subscription");
+        };
+        assert_eq!(subscription.last_sequence, event_hub.current_sequence());
+    }
+
+    /// 上游 65927cef：状态订阅一轮保留全部转换、过滤与初始快照的先后。
+    #[test]
+    fn agent_status_batch_preserves_transitions_filters_and_initial_state_ordering() {
+        for filtered in [false, true] {
+            let event_hub = EventHub::default();
+            let mut subscription = ActiveSubscription::AgentStatusChanged(Box::new(
+                ActiveAgentStatusChangedSubscription {
+                    pane_id: "pane_1".into(),
+                    status_filter: filtered.then_some(AgentStatus::Working),
+                    last_status: Some(AgentStatus::Working),
+                    last_presentation: None,
+                    last_sequence: event_hub.current_sequence(),
+                    initial_event: Some(PaneAgentStatusChangedEvent {
+                        pane_id: "pane_1".into(),
+                        workspace_id: "workspace_1".into(),
+                        agent_status: AgentStatus::Working,
+                        agent: Some("pi".into()),
+                        title: Some("stale initial snapshot".into()),
+                        display_agent: None,
+                        state_labels: HashMap::new(),
+                    }),
+                    pending: std::collections::VecDeque::new(),
+                    request_prefix: "batch".into(),
+                },
+            ));
+            for (status, title) in [
+                (AgentStatus::Working, "started"),
+                (AgentStatus::Blocked, "approval"),
+                (AgentStatus::Idle, "finished"),
+                (AgentStatus::Working, "restarted"),
+            ] {
+                let mut event = presentation_event(Some(title));
+                let EventData::PaneAgentStatusChanged { agent_status, .. } = &mut event.data else {
+                    panic!("expected status data");
+                };
+                *agent_status = status;
+                event_hub.push(event);
+            }
+            let (api_tx, _api_rx) = tokio::sync::mpsc::unbounded_channel();
+            let events = subscription.poll(&api_tx, &event_hub).events;
+            let titles = events
+                .iter()
+                .map(|event| event["data"]["title"].as_str().unwrap())
+                .collect::<Vec<_>>();
+            assert_eq!(
+                titles,
+                if filtered {
+                    vec!["started", "restarted"]
+                } else {
+                    vec!["started", "approval", "finished", "restarted"]
+                }
+            );
+            let ActiveSubscription::AgentStatusChanged(subscription) = subscription else {
+                panic!("expected agent subscription");
+            };
+            assert_eq!(subscription.last_sequence, event_hub.current_sequence());
+            assert!(subscription.initial_event.is_none());
+        }
     }
 }

@@ -684,6 +684,12 @@ fn wait_for_named_agent(
                         &[("name", name)],
                     ),
                 ))),
+                Some("unknown")
+                    if expected_kind == "codex"
+                        && agent["interactive_ready"].as_bool() == Some(true) =>
+                {
+                    Some(Ok(agent.clone()))
+                }
                 Some("working" | "unknown") => None,
                 Some("idle" | "done") if agent["interactive_ready"].as_bool() == Some(true) => {
                     Some(Ok(agent.clone()))

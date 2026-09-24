@@ -2950,7 +2950,7 @@ fn mouse_click_focuses_a_field_and_maps_the_column_to_the_cursor() {
     assert_eq!(focused(&state), Some(MachineField::Target));
     assert_eq!(machine_form(&state).target.cursor_char_index(), 5);
     let frame = state.compose(120, 40).expect("frame");
-    let cursor = frame.cursor.expect("聚焦字段有光标");
+    let cursor = frame.cursor.clone().expect("聚焦字段有光标");
     assert_eq!((cursor.x, cursor.y), (target.x + 5, target.y + 1));
     // 点在文本之后：落到末尾。
     state.handle_mouse(left_click(target.x + 30, target.y + 1), &mut outcome);

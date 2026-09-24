@@ -134,6 +134,7 @@ pub const TEXTS: Texts = Texts {
         close_pane: "close pane",
         rename_pane: "rename pane",
         edit_scrollback: "edit scrollback",
+        clear_pane: "clear pane",
         copy_mode: "copy mode",
         zoom_pane: "zoom pane",
         resize_mode: "resize mode",

@@ -74,6 +74,12 @@ impl ClientShellState {
                 .navigate_workspace_id
                 .as_ref()
                 .is_some_and(|target| self.navigation_target_valid(target));
+        let pending_workspace_highlight =
+            self.pending_workspace_highlight.as_ref().filter(|pending| {
+                self.mode != ClientShellMode::Navigate
+                    && pending.target.endpoint_id == self.active_endpoint_id
+                    && self.navigation_target_valid(&pending.target)
+            });
         // A resize invalidates pane geometry, not the healthy Local workspace chrome.
         let local_snapshot = self.snapshot.as_deref().filter(|_| {
             self.endpoints.len() == 1
@@ -107,7 +113,8 @@ impl ClientShellState {
             selected_workspace_id: self
                 .navigate_workspace_id
                 .as_ref()
-                .filter(|_| valid_navigation_target),
+                .filter(|_| valid_navigation_target)
+                .or_else(|| pending_workspace_highlight.map(|pending| &pending.target)),
             reveal_navigation_workspace: &mut self.reveal_navigation_workspace,
             dragged_workspace_id: None,
             workspace_drop_indicator_row: None,
@@ -177,10 +184,18 @@ impl ClientShellState {
             &self.config.palette,
             &self.config.components,
         );
+        // 上游 #4490 在不可用帧里补画端点通知；fork 的不可用路径由 `compose` 随后
+        // 调 `paint_shell_feedback` 统一画通知与生命周期横幅，这里不重复画。
         canvas
     }
 
-    pub(crate) fn compose(&mut self, cols: u16, rows: u16) -> Option<FrameData> {
+    /// 帧与图形分开返回（上游 #4561）：kitty 图形由 `frame_output` 按输出通道
+    /// （内联字节或文件传输）写出，不再塞进 `FrameData::graphics`。
+    pub(crate) fn compose(
+        &mut self,
+        cols: u16,
+        rows: u16,
+    ) -> Option<crate::client::frame_output::ComposedFrame> {
         let compose_now = std::time::Instant::now();
         self.last_composed_at = Some(compose_now);
         if self
@@ -214,6 +229,12 @@ impl ClientShellState {
                 .navigate_workspace_id
                 .as_ref()
                 .is_some_and(|target| self.navigation_target_valid(target));
+        let pending_workspace_highlight =
+            self.pending_workspace_highlight.as_ref().filter(|pending| {
+                self.mode != ClientShellMode::Navigate
+                    && pending.target.endpoint_id == self.active_endpoint_id
+                    && self.navigation_target_valid(&pending.target)
+            });
         if self.snapshot.is_none() || self.pane_surface.is_none() {
             let mut canvas = self.compose_unavailable(cols, rows);
             let area = self.layout(cols, rows).pane_surface;
@@ -223,7 +244,7 @@ impl ClientShellState {
             self.paint_shell_overlays(&mut canvas, &mut occlusion)?;
             let (frame, buffer) = canvas.finish(Vec::new());
             self.compose_buffer = Some(buffer);
-            return Some(frame);
+            return Some(frame.into());
         }
         let snapshot = self.snapshot.as_deref()?;
         // Do not compose a retained surface while waiting for its matching snapshot or
@@ -294,7 +315,8 @@ impl ClientShellState {
                 selected_workspace_id: self
                     .navigate_workspace_id
                     .as_ref()
-                    .filter(|_| valid_navigation_target),
+                    .filter(|_| valid_navigation_target)
+                    .or_else(|| pending_workspace_highlight.map(|pending| &pending.target)),
                 reveal_navigation_workspace: &mut self.reveal_navigation_workspace,
                 dragged_workspace_id,
                 workspace_drop_indicator_row,
@@ -572,11 +594,11 @@ impl ClientShellState {
             self.hits.pane_splits.clear();
             self.hits.popup = None;
         }
-        let (mut frame, buffer) = canvas.finish(Vec::new());
+        let (frame, buffer) = canvas.finish(Vec::new());
         self.compose_buffer = Some(buffer);
-        self.compose_graphics(&mut frame, layout, &occlusion);
+        let graphics = self.compose_graphics(layout, &occlusion);
         self.hits.rebuild_chrome_bounds();
-        Some(frame)
+        Some(crate::client::frame_output::ComposedFrame { frame, graphics })
     }
     pub(super) fn paint_shell_feedback(
         &mut self,
@@ -962,6 +984,8 @@ impl ClientShellState {
                 self.hits.navigator_popup = rendered.navigator_popup;
                 self.hits.navigator_search = rendered.navigator_search;
                 self.hits.navigator_rows = rendered.navigator_rows;
+                self.hits.navigator_scrollbar = rendered.navigator_scrollbar;
+                self.hits.navigator_scroll_metrics = rendered.navigator_scroll_metrics;
                 self.hits.worktree_search = rendered.worktree_search;
                 self.hits.worktree_rows = rendered.worktree_rows;
                 self.hits.help_popup = rendered.help_popup;

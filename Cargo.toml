@@ -1,6 +1,6 @@
 [package]
 name = "herdr"
-version = "0.9.0"
+version = "0.9.1"
 edition = "2021"
 build = "build.rs"
 description = "terminal workspace manager for AI coding agents"
@@ -62,6 +62,11 @@ portable-pty = { path = "vendor/portable-pty" }
 [profile.dev]
 debug = "line-tables-only"
 
+[target.'cfg(target_os = "linux")'.dependencies]
+# logind's delay inhibitor lets the server save before host shutdown kills panes.
+zbus = { version = "5.19", default-features = false, features = ["tokio"] }
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
+
 [target.'cfg(windows)'.dependencies]
 # Windows 使用系统 TLS，保留现有无需 MSVC C 编译器的交叉检查流程。
 reqwest = { version = "0.12", default-features = false, features = ["native-tls"] }
@@ -84,6 +89,7 @@ windows-sys = { version = "0.61.2", features = [
     "Win32_System_Ole",
     "Win32_System_Performance",
     "Win32_System_Pipes",
+    "Win32_System_SystemInformation",
     "Win32_System_Threading",
     "Win32_UI_Input_Ime",
     "Win32_UI_Input_KeyboardAndMouse",

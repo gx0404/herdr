@@ -73,6 +73,77 @@ fn workspace_rect(state: &ClientShellState, endpoint: &ClientEndpointId, workspa
 }
 
 #[test]
+fn local_navigation_highlight_stays_visible_with_terminal_theme() {
+    use ratatui::style::Color;
+
+    for compact in [false, true] {
+        for selection_bg in [Color::Reset, Color::Rgb(70, 63, 93)] {
+            let mut config = ClientShellConfig::from_config(&Config::default());
+            config.palette = Palette::terminal();
+            config.palette.selection_bg = selection_bg;
+            // fork 语义：导航光标走 `selection_row_bg`（Reset 时退到 accent），不与
+            // 聚焦行的 active_row_bg 同色；只有两者仍同色时聚焦行才不填底。
+            let expected_bg = config.palette.selection_row_bg();
+            let focused_while_navigating = if expected_bg == config.palette.active_row_bg {
+                config.palette.sidebar_bg
+            } else {
+                config.palette.active_row_bg
+            };
+            let mut state = ClientShellState::new(config);
+            state.set_snapshot(Box::new(workspaces(3)));
+            state.set_pane_surface(surface());
+            state.sidebar_collapsed = compact;
+            state.compose(100, 28).unwrap();
+            enter_navigation(&mut state);
+
+            for workspace_id in ["ws_1", "ws_2"] {
+                assert_selected(&state, &ClientEndpointId::Local, workspace_id);
+                let buffer = state.compose(100, 28).unwrap().to_ratatui_buffer().unwrap();
+                let selected = workspace_rect(&state, &ClientEndpointId::Local, workspace_id);
+                for y in selected.y..selected.bottom() {
+                    for x in selected.x..selected.right() {
+                        assert_eq!(
+                            buffer[(x, y)].bg,
+                            expected_bg,
+                            "compact={compact}, {workspace_id}, ({x}, {y})"
+                        );
+                    }
+                }
+                let untouched = workspace_rect(&state, &ClientEndpointId::Local, "ws_3");
+                assert_ne!(buffer[(untouched.x, untouched.y)].bg, expected_bg);
+                if workspace_id != "ws_1" {
+                    let focused = workspace_rect(&state, &ClientEndpointId::Local, "ws_1");
+                    assert_eq!(buffer[(focused.x, focused.y)].bg, focused_while_navigating);
+                    assert_ne!(buffer[(focused.x, focused.y)].bg, expected_bg);
+                }
+                preview_key(&mut state, b"\x1b[B");
+            }
+            assert_eq!(
+                state
+                    .snapshot
+                    .as_ref()
+                    .unwrap()
+                    .focused_workspace_id
+                    .as_deref(),
+                Some("ws_1")
+            );
+            preview_key(&mut state, b"\x1b");
+            let buffer = state.compose(100, 28).unwrap().to_ratatui_buffer().unwrap();
+            let focused = workspace_rect(&state, &ClientEndpointId::Local, "ws_1");
+            assert_eq!(
+                buffer[(focused.x, focused.y)].bg,
+                state.config.palette.active_row_bg
+            );
+            let cancelled = workspace_rect(&state, &ClientEndpointId::Local, "ws_3");
+            assert_eq!(
+                buffer[(cancelled.x, cancelled.y)].bg,
+                state.config.palette.sidebar_bg
+            );
+        }
+    }
+}
+
+#[test]
 fn navigation_highlights_only_the_preview_and_activates_on_enter() {
     for (compact, cols) in [(true, 100), (false, 100), (false, 44)] {
         for terminal_theme in [false, true] {
@@ -673,14 +744,14 @@ fn navigator_search_matches_tokens_in_any_order() {
     for query in ["server web", "web server", "  SERVER   web "] {
         let rows = navigator_rows_for(&mut state, query);
         assert!(
-            rows.iter().any(|row| row.label == "web server"),
+            rows.iter().any(|row| row.label.starts_with("web server")),
             "query={query:?} 应当命中 web server，实得 {:?}",
             rows.iter()
                 .map(|row| row.label.as_str())
                 .collect::<Vec<_>>()
         );
         assert!(
-            !rows.iter().any(|row| row.label == "database"),
+            !rows.iter().any(|row| row.label.starts_with("database")),
             "query={query:?} 不应命中 database"
         );
     }
@@ -699,27 +770,45 @@ fn navigator_search_defaults_the_selection_to_the_matched_pane() {
     let index =
         crate::client::shell::aggregate_navigation::navigator_selected_index(&rows, navigator)
             .expect("默认选中");
-    assert_eq!(rows[index].label, "web server");
+    assert!(rows[index].label.starts_with("web server"));
     assert!(matches!(
         rows[index].target,
         ClientNavigatorTarget::Pane { .. }
     ));
 
-    // 无查询无过滤时仍然默认第 0 行，不改变既有行为。
+    // 无查询无过滤时落在第一个终端上（上游 #4384：「Go to」列的是终端，工作区行
+    // 只是分组头），而不是第 0 行的工作区分组头。
     let rows = navigator_rows_for(&mut state, "");
     let Some(ClientShellOverlay::Navigator(navigator)) = state.overlay.as_ref() else {
         panic!("expected navigator");
     };
-    assert_eq!(
-        crate::client::shell::aggregate_navigation::navigator_selected_index(&rows, navigator),
-        Some(0)
-    );
+    let index =
+        crate::client::shell::aggregate_navigation::navigator_selected_index(&rows, navigator)
+            .expect("默认选中");
+    assert!(matches!(
+        &rows[index].target,
+        ClientNavigatorTarget::Pane { pane_id, .. } if pane_id == "pane_1"
+    ));
+    assert!(rows[..index]
+        .iter()
+        .all(|row| !matches!(row.target, ClientNavigatorTarget::Pane { .. })));
 }
 
 /// 两个 workspace：`web-app` 自身命中 `web` 但底下没有命中的 pane，`other`
 /// 自身不命中却带着命中的 `web server`。用来分辨「第一个命中行」与
 /// 「第一个命中的 pane」两种默认选中规则。
 fn navigator_state_with_two_workspaces() -> ClientShellState {
+    navigator_state_from(two_workspace_projection())
+}
+
+fn navigator_state_from(projected: ClientShellSnapshot) -> ClientShellState {
+    let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
+    state.set_snapshot(Box::new(projected));
+    state.set_pane_surface(surface());
+    state
+}
+
+fn two_workspace_projection() -> ClientShellSnapshot {
     let mut projected = snapshot();
     projected.workspaces[0].label = "web-app".into();
     let mut second_workspace = projected.workspaces[0].clone();
@@ -746,11 +835,7 @@ fn navigator_state_with_two_workspaces() -> ClientShellState {
     second_pane.label = Some("web server".into());
     second_pane.focused = false;
     projected.panes.push(second_pane);
-
-    let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
-    state.set_snapshot(Box::new(projected));
-    state.set_pane_surface(surface());
-    state
+    projected
 }
 
 fn navigator_rows_now(state: &ClientShellState) -> Vec<ClientNavigatorRow> {
@@ -840,8 +925,10 @@ fn navigator_hover_does_not_move_the_keyboard_selection() {
 
 #[test]
 fn navigator_search_does_not_skip_an_earlier_matched_row() {
-    // 默认选中必须是**文档序第一个自身命中的行**。偏好叶子 pane 会跳过排在
-    // 前面、同样命中的 workspace 行，回车打开的是另一个 workspace 深处的 pane。
+    // 默认选中不能越过文档序更靠前、自身命中的分组，跳进另一个工作区深处的终端。
+    // 上游 #4384 起终端直接挂在工作区下、祖先上下文进每个终端的 haystack：命中
+    // 的 web-app 分组其下终端一并命中，默认落在该分组里第一个终端（仍在 web-app），
+    // 而不是 other 里的 web server。
     let mut state = navigator_state_with_two_workspaces();
     state.open_navigator_overlay();
     let rows = navigator_rows_for(&mut state, "web");
@@ -849,10 +936,40 @@ fn navigator_search_does_not_skip_an_earlier_matched_row() {
         .iter()
         .map(|row| row.label.as_str())
         .collect::<Vec<_>>();
-    assert_eq!(labels, ["web-app", "other", "2", "web server"]);
+    assert_eq!(labels, ["web-app", "database", "other", "web server"]);
     assert!(rows[0].matched, "web-app 自身命中");
-    assert!(!rows[1].matched, "other 只是被后代带出来");
+    assert!(rows[1].matched, "web-app 下的终端经祖先上下文命中");
+    assert!(!rows[2].matched, "other 只是被后代带出来");
 
+    let Some(ClientShellOverlay::Navigator(navigator)) = state.overlay.as_ref() else {
+        panic!("expected navigator");
+    };
+    let index =
+        crate::client::shell::aggregate_navigation::navigator_selected_index(&rows, navigator)
+            .expect("默认选中");
+    assert_eq!(index, 1, "实得 {:?}", rows[index].label);
+    assert!(matches!(
+        &rows[index].target,
+        ClientNavigatorTarget::Pane { pane_id, .. } if pane_id == "pane_1"
+    ));
+}
+
+#[test]
+fn navigator_search_stays_on_a_matched_group_without_matched_terminals() {
+    // 自身命中的分组里没有命中的终端（空工作区）时停在分组头，不越过它跳进后面
+    // 另一个分组的终端。
+    let mut projected = two_workspace_projection();
+    projected.panes.retain(|pane| pane.workspace_id != "ws_1");
+    projected.tabs.retain(|tab| tab.workspace_id != "ws_1");
+    projected.focused_pane_id = Some("pane_2".into());
+    let mut state = navigator_state_from(projected);
+    state.open_navigator_overlay();
+    let rows = navigator_rows_for(&mut state, "web");
+    let labels = rows
+        .iter()
+        .map(|row| row.label.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(labels, ["web-app", "other", "web server"]);
     let Some(ClientShellOverlay::Navigator(navigator)) = state.overlay.as_ref() else {
         panic!("expected navigator");
     };
@@ -877,7 +994,7 @@ fn navigator_search_enter_opens_the_matched_pane_through_the_key_path() {
         .iter()
         .map(|row| row.label.clone())
         .collect::<Vec<_>>();
-    assert_eq!(labels, ["other", "2", "web server"]);
+    assert_eq!(labels, ["other", "web server"]);
 
     let outcome = state.handle_input_bytes(b"\r");
     let [ClientShellAction::Endpoint { request, .. }] = &outcome.actions[..] else {
@@ -938,7 +1055,7 @@ fn navigator_search_folds_case_the_same_way_on_both_sides() {
     for query in ["ΟΔΟΣ", "οδος", "ΟΔΟΣ"] {
         let rows = navigator_rows_for(&mut state, query);
         assert!(
-            rows.iter().any(|row| row.label == "ΟΔΟΣ"),
+            rows.iter().any(|row| row.label.starts_with("ΟΔΟΣ")),
             "query={query:?} 应当命中 ΟΔΟΣ，实得 {:?}",
             rows.iter()
                 .map(|row| row.label.as_str())
@@ -948,10 +1065,11 @@ fn navigator_search_folds_case_the_same_way_on_both_sides() {
 }
 
 #[test]
-fn navigator_search_on_a_machine_name_keeps_the_machine_row_selected() {
+fn navigator_search_on_a_machine_name_selects_a_terminal_on_that_machine() {
     // 端点名进了该端点每一行的 haystack：整串查询落在机器名里时全端点行都自身
-    // 命中。默认选中取文档序第一个命中行 → Machine 行，「搜机器名 + 回车 = 切到
-    // 那台机器」的老行为得以保留。
+    // 命中。首个命中行是 Machine 行；它的分组里有命中的终端，默认落在其中第一个
+    // （上游 #4384：「Go to」的目标是终端），「搜机器名 + 回车 = 切到那台机器」
+    // 仍然成立。
     let (mut state, remote) = navigation_state(workspaces(2));
     state.open_navigator_overlay();
     let rows = navigator_rows_for(&mut state, "Build");
@@ -966,9 +1084,16 @@ fn navigator_search_on_a_machine_name_keeps_the_machine_row_selected() {
     let Some(ClientShellOverlay::Navigator(navigator)) = state.overlay.as_ref() else {
         panic!("expected navigator");
     };
-    assert_eq!(
-        crate::client::shell::aggregate_navigation::navigator_selected_index(&rows, navigator),
-        Some(0)
+    let index =
+        crate::client::shell::aggregate_navigation::navigator_selected_index(&rows, navigator)
+            .expect("默认选中");
+    assert!(
+        matches!(
+            &rows[index].target,
+            ClientNavigatorTarget::Pane { endpoint_id, .. } if *endpoint_id == remote
+        ),
+        "应当落在 Build 上的终端，实得 {:?}",
+        rows[index].label
     );
 }
 
@@ -1279,6 +1404,337 @@ fn toggling_the_sidebar_reanchors_the_workspace_list_on_the_focused_row() {
     }
 }
 
+fn local_navigation_state(compact: bool) -> ClientShellState {
+    let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
+    state.config.palette = Palette::terminal();
+    state.sidebar_collapsed = compact;
+    state.set_snapshot(Box::new(workspaces(3)));
+    state.set_pane_surface(surface());
+    state.compose(100, 28).unwrap();
+    state
+}
+
+fn request_local_navigation(state: &mut ClientShellState, down: usize) -> String {
+    enter_navigation(state);
+    for _ in 0..down {
+        preview_key(state, b"\x1b[B");
+    }
+    let outcome = state.handle_input_bytes(b"\r");
+    let [ClientShellAction::Endpoint { request, .. }] = outcome.actions.as_slice() else {
+        panic!("expected a local workspace focus request");
+    };
+    assert!(matches!(
+        request.method,
+        crate::api::schema::Method::WorkspaceFocus(_)
+    ));
+    request.id.clone()
+}
+
+/// 画面上「被标出」的工作区：有导航光标（导航中或确认后等待权威焦点）时是光标所在
+/// 行，否则是聚焦行。fork 的光标底色是 `selection_row_bg`（terminal 主题退到
+/// accent），聚焦行保留 active_row_bg，两者可同时出现，所以先看光标。
+fn assert_local_highlight(state: &mut ClientShellState, selected_id: &str) {
+    let buffer = state.compose(100, 28).unwrap().to_ratatui_buffer().unwrap();
+    let cursor_bg = state.config.palette.selection_row_bg();
+    let focused_bg = state.config.palette.active_row_bg;
+    let rows_with = |bg| {
+        ["ws_1", "ws_2", "ws_3"]
+            .into_iter()
+            .filter(|workspace_id| {
+                let rect = workspace_rect(state, &ClientEndpointId::Local, workspace_id);
+                (rect.x..rect.right()).any(|x| buffer[(x, rect.y)].bg == bg)
+            })
+            .collect::<Vec<_>>()
+    };
+    let cursor = rows_with(cursor_bg);
+    let highlighted = if cursor.is_empty() {
+        rows_with(focused_bg)
+    } else {
+        cursor
+    };
+    assert_eq!(
+        highlighted,
+        [selected_id],
+        "expected only {selected_id} highlighted"
+    );
+}
+
+fn set_local_focus(state: &mut ClientShellState, workspace_id: &str, revision: u64) {
+    let mut snapshot = workspaces(3);
+    snapshot.revision = revision;
+    snapshot.focused_workspace_id = Some(workspace_id.into());
+    for workspace in &mut snapshot.workspaces {
+        workspace.focused = workspace.workspace_id == workspace_id;
+    }
+    state.set_snapshot(Box::new(snapshot));
+    let mut frame = surface();
+    frame.projection_revision = revision;
+    state.set_pane_surface(frame);
+}
+
+#[test]
+fn accepted_local_navigation_keeps_highlight_until_authoritative_focus() {
+    for compact in [false, true] {
+        for response_first in [false, true] {
+            let mut state = local_navigation_state(compact);
+            let request_id = request_local_navigation(&mut state, 2);
+            assert_eq!(state.mode, ClientShellMode::Terminal);
+            assert!(state.navigate_workspace_id.is_none());
+            assert_eq!(
+                state
+                    .snapshot
+                    .as_ref()
+                    .unwrap()
+                    .focused_workspace_id
+                    .as_deref(),
+                Some("ws_1")
+            );
+            assert_eq!(state.focused_pane_id().as_deref(), Some("pane_1"));
+            assert_local_highlight(&mut state, "ws_3");
+            state.invalidate_pane_surface();
+            assert_local_highlight(&mut state, "ws_3");
+            state.set_pane_surface(surface());
+            if response_first {
+                state.handle_endpoint_result(
+                    "boot-1",
+                    &request_id,
+                    Ok(crate::api::schema::ResponseResult::Ok {}),
+                );
+                assert_local_highlight(&mut state, "ws_3");
+            }
+            set_local_focus(&mut state, "ws_1", 2);
+            assert_local_highlight(&mut state, "ws_3");
+            set_local_focus(&mut state, "ws_3", 3);
+            assert_local_highlight(&mut state, "ws_3");
+            if !response_first {
+                state.handle_endpoint_result(
+                    "boot-1",
+                    &request_id,
+                    Ok(crate::api::schema::ResponseResult::Ok {}),
+                );
+            }
+            set_local_focus(&mut state, "ws_2", 4);
+            assert_local_highlight(&mut state, "ws_2");
+        }
+    }
+}
+
+#[test]
+fn failed_local_navigation_releases_only_its_own_highlight() {
+    for failure in ["rejected", "endpoint_timeout", "cancelled"] {
+        let mut state = local_navigation_state(false);
+        let request_id = request_local_navigation(&mut state, 2);
+        assert_local_highlight(&mut state, "ws_3");
+        if failure == "cancelled" {
+            assert!(state.cancel_endpoint_request(&request_id));
+        } else {
+            state.handle_endpoint_result(
+                "boot-1",
+                &request_id,
+                Err(ClientShellEndpointError {
+                    code: Some(failure.into()),
+                    message: "focus failed".into(),
+                }),
+            );
+        }
+        assert_local_highlight(&mut state, "ws_1");
+        state.handle_endpoint_result(
+            "boot-1",
+            &request_id,
+            Ok(crate::api::schema::ResponseResult::Ok {}),
+        );
+        assert_local_highlight(&mut state, "ws_1");
+    }
+    for old_down in [1, 2] {
+        let mut state = local_navigation_state(false);
+        let old_request = request_local_navigation(&mut state, old_down);
+        let latest_request = request_local_navigation(&mut state, 2);
+        state.cancel_endpoint_request(&old_request);
+        assert_local_highlight(&mut state, "ws_3");
+        state.cancel_endpoint_request(&latest_request);
+        assert_local_highlight(&mut state, "ws_1");
+    }
+}
+
+#[test]
+fn pending_navigation_highlight_does_not_survive_identity_changes() {
+    for change in [
+        "disconnect",
+        "retire",
+        "boot",
+        "generation",
+        "deleted",
+        "endpoint",
+    ] {
+        let mut state = local_navigation_state(false);
+        let request_id = request_local_navigation(&mut state, 2);
+        state.handle_endpoint_result(
+            "boot-1",
+            &request_id,
+            Ok(crate::api::schema::ResponseResult::Ok {}),
+        );
+        assert_local_highlight(&mut state, "ws_3");
+        let mut snapshot = workspaces(3);
+        match change {
+            "disconnect" => {
+                state.mark_endpoint_disconnected(&ClientEndpointId::Local);
+                state.set_endpoint_status(&ClientEndpointId::Local, ClientEndpointStatus::Online);
+                state.set_snapshot(Box::new(snapshot));
+            }
+            "retire" => {
+                state.retire_endpoint(&ClientEndpointId::Local);
+                state.set_endpoint_status(&ClientEndpointId::Local, ClientEndpointStatus::Online);
+                state.set_snapshot(Box::new(snapshot));
+            }
+            "boot" => {
+                snapshot.boot_id = "replacement-boot".into();
+                state.set_snapshot(Box::new(snapshot));
+            }
+            "generation" => state.set_endpoint_snapshot_for_generation(
+                &ClientEndpointId::Local,
+                1,
+                Box::new(snapshot),
+            ),
+            "deleted" => {
+                snapshot.workspaces.pop();
+                state.set_snapshot(Box::new(snapshot));
+                state.set_snapshot(Box::new(workspaces(3)));
+            }
+            "endpoint" => {
+                let profile = remote_profile();
+                let remote = ClientEndpointId::Ssh(profile.id.clone());
+                state.set_endpoint_catalog(&[profile]);
+                state.set_endpoint_status(&remote, ClientEndpointStatus::Online);
+                state.set_endpoint_snapshot(&remote, Box::new(snapshot));
+                assert!(state.activate_endpoint_projection(&remote));
+                assert!(state.pending_workspace_highlight.is_none());
+                assert!(state.activate_endpoint_projection(&ClientEndpointId::Local));
+                state.set_endpoint_catalog(&[]);
+            }
+            _ => unreachable!(),
+        }
+        assert!(state.pending_workspace_highlight.is_none(), "{change}");
+        let mut frame = surface();
+        frame.boot_id = state.snapshot.as_ref().unwrap().boot_id.clone();
+        state.set_pane_surface(frame);
+        assert_local_highlight(&mut state, "ws_1");
+    }
+}
+
+#[test]
+fn navigation_highlight_requires_enqueued_focus_and_yields_to_new_intent() {
+    let mut state = local_navigation_state(false);
+    state.set_endpoint_methods(Some(Vec::new()));
+    enter_navigation(&mut state);
+    preview_key(&mut state, b"\x1b[B");
+    let refused = state.handle_input_bytes(b"\r");
+    assert!(refused.actions.is_empty());
+    assert_eq!(state.mode, ClientShellMode::Terminal);
+    assert!(state.pending_workspace_highlight.is_none());
+    // The unsupported-action notice spans the sidebar on this narrow frame.
+    assert!(state.visible_endpoint_notice.take().is_some());
+    assert_local_highlight(&mut state, "ws_1");
+
+    state.set_endpoint_methods(None);
+    request_local_navigation(&mut state, 2);
+    enter_navigation(&mut state);
+    preview_key(&mut state, b"\x1b");
+    assert_local_highlight(&mut state, "ws_1");
+
+    request_local_navigation(&mut state, 2);
+    let mut unrelated = ClientShellInput::default();
+    state.push_endpoint_method(
+        crate::api::schema::Method::ServerReloadConfig(crate::api::schema::EmptyParams::default()),
+        &mut unrelated,
+    );
+    let [ClientShellAction::Endpoint { request, .. }] = unrelated.actions.as_slice() else {
+        panic!("expected unrelated request");
+    };
+    state.cancel_endpoint_request(&request.id);
+    assert_local_highlight(&mut state, "ws_3");
+    let mut focus = ClientShellInput::default();
+    state.focus_or_activate(
+        ClientEndpointId::Local,
+        ClientEndpointFocusTarget::Workspace("ws_2".into()),
+        &mut focus,
+    );
+    assert!(state.pending_workspace_highlight.is_none());
+}
+
+#[test]
+fn directional_pane_focus_releases_an_accepted_workspace_highlight() {
+    use crate::api::schema::{Method, PaneDirection, ResponseResult};
+
+    for (key, direction) in [
+        (b'h', PaneDirection::Left),
+        (b'j', PaneDirection::Down),
+        (b'k', PaneDirection::Up),
+        (b'l', PaneDirection::Right),
+    ] {
+        for rejected in [false, true] {
+            let mut state = local_navigation_state(false);
+            let pending_request = request_local_navigation(&mut state, 2);
+            assert_local_highlight(&mut state, "ws_3");
+            preview_key(&mut state, &[0x02]);
+            let outcome = state.handle_input_bytes(&[key]);
+            let [ClientShellAction::Endpoint { request, .. }] = outcome.actions.as_slice() else {
+                panic!("expected a directional pane focus request");
+            };
+            let Method::PaneFocusDirection(params) = &request.method else {
+                panic!("expected PaneFocusDirection");
+            };
+            assert_eq!(params.direction, direction);
+            assert_eq!(params.pane_id.as_deref(), Some("pane_1"));
+            assert!(state.pending_workspace_highlight.is_none());
+            assert_local_highlight(&mut state, "ws_1");
+            let result = if rejected {
+                Err(ClientShellEndpointError {
+                    code: Some("rejected".into()),
+                    message: "focus rejected".into(),
+                })
+            } else {
+                Ok(ResponseResult::Ok {})
+            };
+            state.handle_endpoint_result("boot-1", &pending_request, result);
+            assert_local_highlight(&mut state, "ws_1");
+        }
+    }
+}
+
+#[test]
+fn direct_agent_focus_repaints_when_releasing_a_workspace_highlight() {
+    let mut config = Config::default();
+    config.keys.focus_agent = crate::config::BindingConfig::one("ctrl+alt+1");
+    let mut projected = workspaces(3);
+    projected.agents.push(agent("agent", AgentStatus::Idle, 1));
+
+    for pending in [false, true] {
+        let mut state = local_navigation_state(false);
+        state.config.keybinds = ClientShellConfig::from_config(&config).keybinds;
+        state.set_snapshot(Box::new(projected.clone()));
+        state.compose(100, 28).unwrap();
+        if pending {
+            request_local_navigation(&mut state, 2);
+            assert_local_highlight(&mut state, "ws_3");
+        }
+
+        // Direct bindings do not inherit the repaint from leaving prefix mode.
+        let outcome =
+            state.handle_raw_events(vec![RawInputEvent::Key(crate::input::TerminalKey::new(
+                KeyCode::Char('1'),
+                KeyModifiers::CONTROL | KeyModifiers::ALT,
+            ))]);
+        assert!(
+            matches!(outcome.actions.as_slice(), [ClientShellAction::Endpoint { request, .. }]
+            if matches!(&request.method, crate::api::schema::Method::PaneFocus(params)
+                if params.pane_id == "pane_1"))
+        );
+        assert!(state.pending_workspace_highlight.is_none());
+        assert_eq!(outcome.repaint, pending);
+        assert_local_highlight(&mut state, "ws_1");
+    }
+}
+
 #[test]
 fn short_collapsed_sidebar_keeps_the_toggle_row_out_of_the_workspace_body() {
     // 矮侧栏（`content.height < 7`，无 detail 区）的工作区段一路铺到 area 底格，而
@@ -1585,5 +2041,74 @@ fn collapsed_endpoint_sidebar_reveals_the_keyboard_target_agent() {
             visible(&state).contains(&(remote.clone(), "pane_3".to_owned())),
             "{case}: FocusAgent 同样揭示目标"
         );
+    }
+}
+
+#[test]
+fn cancelled_close_does_not_restore_an_older_navigation_highlight() {
+    let mut state = local_navigation_state(false);
+    request_local_navigation(&mut state, 2);
+    state.open_confirm_close_overlay("ws_1".into());
+    preview_key(&mut state, b"\x1b");
+    assert_eq!(state.mode, ClientShellMode::Navigate);
+    preview_key(&mut state, b"\x1b");
+    assert_eq!(state.mode, ClientShellMode::Terminal);
+    assert_local_highlight(&mut state, "ws_1");
+}
+
+#[test]
+fn coalesced_navigation_focus_does_not_leave_a_permanent_highlight() {
+    let mut state = local_navigation_state(false);
+    let before_request = std::time::Instant::now();
+    let request_id = request_local_navigation(&mut state, 2);
+    state.handle_endpoint_result(
+        "boot-1",
+        &request_id,
+        Ok(crate::api::schema::ResponseResult::Ok {}),
+    );
+    // Another client can focus the original workspace before the server projects
+    // either change, so a successful request need not produce a new snapshot.
+    assert!(!state.tick_workspace_highlight(before_request));
+    assert_local_highlight(&mut state, "ws_3");
+    let now = std::time::Instant::now();
+    assert!(state.tick_workspace_highlight(now + std::time::Duration::from_secs(2)));
+    assert_local_highlight(&mut state, "ws_1");
+    assert!(!state.tick_workspace_highlight(now + std::time::Duration::from_secs(3)));
+}
+
+#[test]
+fn navigation_highlight_ends_for_noop_focus_and_focused_creation() {
+    let mut state = local_navigation_state(false);
+    request_local_navigation(&mut state, 0);
+    assert!(state.pending_workspace_highlight.is_none());
+    set_local_focus(&mut state, "ws_2", 2);
+    assert_local_highlight(&mut state, "ws_2");
+
+    for focus in [false, true] {
+        for method in [
+            crate::api::schema::Method::WorkspaceCreate(
+                crate::api::schema::WorkspaceCreateParams {
+                    source_workspace_id: None,
+                    cwd: None,
+                    focus,
+                    label: None,
+                    env: Default::default(),
+                },
+            ),
+            crate::api::schema::Method::TabCreate(crate::api::schema::TabCreateParams {
+                workspace_id: Some("ws_1".into()),
+                cwd: None,
+                focus,
+                label: None,
+                env: Default::default(),
+            }),
+        ] {
+            let mut state = local_navigation_state(false);
+            request_local_navigation(&mut state, 2);
+            let mut outcome = ClientShellInput::default();
+            state.push_endpoint_method(method, &mut outcome);
+            assert_eq!(state.pending_workspace_highlight.is_none(), focus);
+            assert_local_highlight(&mut state, if focus { "ws_1" } else { "ws_3" });
+        }
     }
 }

@@ -311,7 +311,22 @@ struct RetainedRecipientUpdate {
     graphics: Option<(
         protocol::PaneSurfaceFrame,
         crate::kitty_graphics::surface::DeliveryCache,
+        crate::kitty_graphics::surface::SourceFiles,
     )>,
+}
+
+fn has_synchronized_pane(app: &app::App, surface: &protocol::PaneSurfaceFrame) -> bool {
+    surface.panes.iter().any(|pane| {
+        app.parse_pane_id(&pane.pane_id)
+            .and_then(|(workspace_index, pane_id)| {
+                app.state.runtime_for_pane_in_workspace(
+                    &app.terminal_runtimes,
+                    workspace_index,
+                    pane_id,
+                )
+            })
+            .is_some_and(|runtime| runtime.synchronized_output_active())
+    })
 }
 
 impl HeadlessServer {
@@ -399,6 +414,18 @@ impl HeadlessServer {
                 crate::render_prof::event("retained_surface.recipient_deferred");
                 continue;
             }
+            // 上游 #4508：上一次完整渲染因同步输出 / 渲染期内容变化而推迟时，
+            // 基线不能再打补丁——整 tick 回退到完整渲染（它会继续推迟直到帧完整）。
+            if client.render_state.requires_recompute()
+                || client.views.as_ref().is_some_and(|views| {
+                    views
+                        .views
+                        .iter()
+                        .any(|view| view.render_state.requires_recompute())
+                })
+            {
+                fallback!("recompute_pending");
+            }
             let mut surfaces = Vec::new();
             if let Some(views) = &client.views {
                 for (index, view) in views.views.iter().enumerate() {
@@ -440,6 +467,11 @@ impl HeadlessServer {
                     crate::render_prof::event("retained_surface.defer.baseline_mismatch");
                     deferred_clients.insert(*client_id);
                     continue;
+                }
+                // 上游 #4508：可见 pane 处于同步输出批次中，补丁会发布半帧；整
+                // tick 回退，完整渲染路径负责推迟到批次结束。
+                if has_synchronized_pane(&self.app, surface) {
+                    fallback!("synchronized_visible");
                 }
                 recipients.push(RetainedRecipient {
                     client_id: *client_id,
@@ -552,7 +584,7 @@ impl HeadlessServer {
         }
 
         let mut updates = Vec::with_capacity(recipients.len());
-        'recipient: for recipient in recipients {
+        'recipient: for recipient in &recipients {
             let client_id = recipient.client_id;
             let surface = recipient.surface;
             let mut panes = surface.panes.clone();
@@ -687,7 +719,7 @@ impl HeadlessServer {
                 let client = &self.clients[&client_id];
                 let mut next_surface = surface.clone();
                 crate::server::render_stream::apply_pane_surface_patch(&mut next_surface, &patch);
-                let Some((graphics, delivery)) =
+                let Some((graphics, delivery, sources)) =
                     crate::server::client_shell_graphics::collect_retained(
                         &self.app,
                         &next_surface,
@@ -708,7 +740,7 @@ impl HeadlessServer {
                 };
                 graphics_changed = graphics != surface.graphics;
                 next_surface.graphics = graphics;
-                Some((next_surface, delivery))
+                Some((next_surface, delivery, sources))
             } else {
                 None
             };
@@ -717,14 +749,23 @@ impl HeadlessServer {
             }
             updates.push(RetainedRecipientUpdate {
                 client_id,
-                view: recipient.view,
+                view: recipient.view.clone(),
                 patch,
                 graphics,
             });
         }
+        // 上游 #4508：收集补丁期间有接收者的可见 pane 进入同步输出批次——整 tick
+        // 回退，由完整渲染推迟到批次结束。先求值再释放对接收者基线的借用。
+        let synchronized_during_patch = recipients
+            .iter()
+            .any(|recipient| has_synchronized_pane(&self.app, recipient.surface));
+        drop(recipients);
         self.arm_deferred_full_render(&deferred_clients);
         if updates.is_empty() {
             success!("unchanged");
+        }
+        if synchronized_during_patch {
+            fallback!("synchronized_during_patch");
         }
 
         let mut sent = 0u64;
@@ -734,7 +775,35 @@ impl HeadlessServer {
         for update in updates {
             grouped.entry(update.client_id).or_default().push(update);
         }
-        for (client_id, updates) in grouped {
+        for (client_id, mut updates) in grouped {
+            // 上游 #4561：原生 kitty 图形状态按客户端单槽，只服务主 surface；多视图
+            // 客户端的 view 仍走内联资产，源文件就地物化。
+            let mut native_upload = None;
+            let mut native_geometry_deferred = false;
+            for update in &mut updates {
+                let Some((surface, delivery, sources)) = update.graphics.as_mut() else {
+                    continue;
+                };
+                if update.view.is_some() {
+                    self.materialize_native_sources(
+                        client_id,
+                        &mut surface.graphics,
+                        delivery,
+                        sources,
+                    );
+                    continue;
+                }
+                if self.defer_changed_native_geometry(client_id, &surface.graphics) {
+                    native_geometry_deferred = true;
+                    break;
+                }
+                native_upload =
+                    self.prepare_native_scene(client_id, &mut surface.graphics, delivery, sources);
+            }
+            if native_geometry_deferred {
+                deferred += 1;
+                continue;
+            }
             let Some(client) = self.clients.get_mut(&client_id) else {
                 continue;
             };
@@ -746,7 +815,9 @@ impl HeadlessServer {
             let mut batch = Vec::new();
             let mut commits = Vec::new();
             let mut needs_retry = false;
+            let mut main_committed = false;
             for update in updates {
+                let is_main = update.view.is_none();
                 let state = if let Some(identity) = &update.view {
                     client
                         .views
@@ -761,8 +832,16 @@ impl HeadlessServer {
                     needs_retry = true;
                     continue;
                 };
-                let (prepared, delivery) = if let Some((surface, delivery)) = update.graphics {
-                    (state.prepare_pane_surface(surface), Some(delivery))
+                // The published row patch cannot carry images. Reuse the retained
+                // text/layout in a graphics-capable surface message rather than
+                // invoking the full renderer.
+                let (prepared, delivery) = if let Some((surface, delivery, _)) = update.graphics {
+                    let prepared = if is_main {
+                        state.prepare_pane_surface_with_file(surface, native_upload.is_some())
+                    } else {
+                        state.prepare_pane_surface(surface)
+                    };
+                    (prepared, Some(delivery))
                 } else {
                     (state.prepare_pane_surface_patch(update.patch), None)
                 };
@@ -795,6 +874,10 @@ impl HeadlessServer {
                     .map_err(io::Error::other)
                 };
                 let Ok(serialized) = serialized else {
+                    warn!(client_id, "failed to serialize retained pane surface patch");
+                    // A delta may own an encoded graphics payload that cannot be
+                    // trimmed in place. Force the bounded full-surface recovery path.
+                    state.request_repaint();
                     needs_retry = true;
                     continue;
                 };
@@ -803,7 +886,20 @@ impl HeadlessServer {
                     continue;
                 }
                 batch.extend_from_slice(&serialized);
+                main_committed |= is_main;
                 commits.push((update.view, prepared, delivery));
+            }
+            // 主 surface 未进本批时不发原生上传（上传必须紧跟它引用的场景）。
+            let native_upload = native_upload.filter(|_| main_committed);
+            if let Some((_, message)) = &native_upload {
+                let Ok(file_frame) =
+                    Self::frame_server_message_with_max(message, MAX_GRAPHICS_FRAME_SIZE)
+                else {
+                    client.defer_full_render();
+                    deferred += 1;
+                    continue;
+                };
+                batch.extend_from_slice(&file_frame);
             }
             crate::render_prof::counter("retained_surface.bytes", batch.len() as u64);
             if batch.is_empty() {
@@ -813,7 +909,12 @@ impl HeadlessServer {
                 }
                 continue;
             }
-            match writer.render.try_send(batch) {
+            let send = if native_upload.is_some() || self.native_graphics.is_pending(client_id) {
+                writer.render.send_ordered(batch)
+            } else {
+                writer.render.try_send(batch)
+            };
+            match send {
                 Ok(()) => {
                     for (identity, prepared, delivery) in commits {
                         needs_retry |= delivery.as_ref().is_some_and(
@@ -831,12 +932,24 @@ impl HeadlessServer {
                                 }
                             }
                         } else {
+                            if let Some((graphics, inline_assets)) =
+                                prepared.queued_surface_graphics()
+                            {
+                                self.native_graphics.commit_scene(
+                                    client_id,
+                                    graphics,
+                                    inline_assets,
+                                );
+                            }
                             client.render_state.commit_sent_frame(prepared);
                             if let Some(delivery) = delivery {
                                 client.shell_graphics_delivery = delivery;
                             }
                         }
                         sent += 1;
+                    }
+                    if let Some((pending, _)) = native_upload {
+                        self.native_graphics.commit(client_id, pending);
                     }
                     if needs_retry {
                         client.defer_full_render();

@@ -484,15 +484,18 @@ fn save_prepared_machine(
                 return Ok(2);
             }
         };
-    if let Err(error) = crate::remote::prepare_saved_ssh(target, &session, profile_options.as_ref())
-    {
-        eprintln!(
-            "{}",
-            crate::i18n::fill(t.machine_not_saved_fmt, &[("error", &error.to_string())])
-        );
-        crate::remote::print_saved_ssh_error_hint(&error, target);
-        return Ok(1);
-    }
+    let metadata =
+        match crate::remote::prepare_saved_ssh(target, &session, profile_options.as_ref()) {
+            Ok(metadata) => metadata,
+            Err(error) => {
+                eprintln!(
+                    "{}",
+                    crate::i18n::fill(t.machine_not_saved_fmt, &[("error", &error.to_string())])
+                );
+                crate::remote::print_saved_ssh_error_hint(&error, target);
+                return Ok(1);
+            }
+        };
     // Setup can wait for human approval. Do not overwrite catalog edits made meanwhile.
     let mut catalog = load_catalog().map_err(|error| {
         std::io::Error::other(crate::i18n::fill(
@@ -500,7 +503,7 @@ fn save_prepared_machine(
             &[("error", &error.to_string())],
         ))
     })?;
-    let id = match catalog.add_ssh_with_options(label, target, session, options) {
+    let id = match catalog.add_ssh_with_options(label, target, session.clone(), options) {
         Ok(id) => id,
         Err(error) => {
             eprintln!("{}{error}", t.error_prefix);
@@ -513,6 +516,11 @@ fn save_prepared_machine(
             &[("error", &error.to_string())],
         ))
     })?;
+    // 预热远端 herdr 路径缓存：之后 `--machine` 形态的 CLI 不必每次重新探测。
+    if let Some(metadata) = metadata {
+        crate::client::endpoint::SshMetadataCache::new(id.as_str(), target, &session)?
+            .store(&metadata);
+    }
     let t = &crate::i18n::texts().cli_output;
     println!(
         "{}",
@@ -573,6 +581,18 @@ fn remove(args: &[String]) -> std::io::Result<i32> {
     };
     let mut catalog = load_catalog()?;
     let previous_selection = catalog.selected_profile.clone();
+    let metadata_cache = catalog
+        .ssh
+        .iter()
+        .find(|profile| profile.id == id)
+        .map(|profile| {
+            crate::client::endpoint::SshMetadataCache::new(
+                id.as_str(),
+                &profile.target,
+                &profile.session,
+            )
+        })
+        .transpose()?;
     if !catalog.remove_ssh(&id) {
         eprintln!(
             "{}",
@@ -586,6 +606,9 @@ fn remove(args: &[String]) -> std::io::Result<i32> {
         return Ok(1);
     }
     store_catalog(&catalog)?;
+    if let Some(cache) = metadata_cache {
+        cache.invalidate();
+    }
     if catalog.selected_profile != previous_selection {
         catalog.store_selection().map_err(std::io::Error::other)?;
     }

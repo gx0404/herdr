@@ -261,6 +261,27 @@ function settle(reports) {
   return Promise.all(reports).then(() => undefined);
 }
 
+// Processes that do not own lifecycle still hint the activity tree: a hint only
+// names the event, and the server re-reads the tree from opencode.db.
+function handleActivityEvent(event) {
+  const type = event?.type;
+  return settle(ACTIVITY_EVENTS.has(type) ? [reportActivity(type)] : []);
+}
+
+function ownsLocalLifecycle() {
+  const args = process.argv.slice(2);
+  const separator = args.indexOf("--");
+  if (separator !== -1) args.splice(separator);
+  if (args.some((arg) => arg === "--attach" || arg.startsWith("--attach="))) return false;
+  while (args[0] === "--print-logs" || args[0] === "--log-level" || args[0]?.startsWith("--log-level=")) {
+    args.splice(0, args[0] === "--log-level" ? 2 : 1);
+  }
+  // These local clients have no TUI plugin. Shared servers and the TUI worker
+  // cannot identify their attached panes; their lifecycle belongs to each TUI.
+  return args[0] === "run" ||
+    (!["serve", "web", "attach"].includes(args[0]) && args.includes("--mini"));
+}
+
 export const HerdrAgentStatePlugin = async () => {
   if (
     process.env.HERDR_ENV !== "1" ||
@@ -268,6 +289,13 @@ export const HerdrAgentStatePlugin = async () => {
     !process.env.HERDR_PANE_ID
   ) {
     return {};
+  }
+  // Full TUIs report lifecycle from the pane-local TUI plugin; this server
+  // hook only keeps the activity-tree hints there.
+  if (!ownsLocalLifecycle()) {
+    return {
+      event: async ({ event }) => handleActivityEvent(event),
+    };
   }
 
   // No `chat.message` hook: OpenCode runs it for every message it stores,
@@ -287,10 +315,9 @@ export const HerdrAgentStatePlugin = async () => {
 // The loader takes `default` first: an object carrying `id`/`server`/`tui`
 // only has its `server()` called, and named exports are ignored; a module
 // without such a default falls back to every export. Keep both so either
-// loader path reaches the same factory. V2 calls setup() instead. Its shared
-// server cannot attribute sessions using its process environment: the
-// pane-local TUI owns both selection and lifecycle reporting there, including
-// remote servers.
+// loader path reaches the same factory. V1 local run/Mini retain their server
+// lifecycle hooks. V1/V2 full TUIs own both selection and lifecycle, including
+// when attached to a shared remote server; V2 calls setup() instead.
 export default {
   id: "herdr.opencode",
   server: HerdrAgentStatePlugin,

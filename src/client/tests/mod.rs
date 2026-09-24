@@ -69,6 +69,21 @@ fn direct_graphics_profile_is_narrow_and_transport_safe() {
     ));
 }
 
+#[test]
+fn server_graphics_files_require_local_filesystem_not_just_local_terminal() {
+    let local = endpoint::ClientEndpointId::Local;
+    let ssh = endpoint::ClientEndpointId::Ssh(
+        endpoint::ProfileId::parse("0123456789abcdef0123456789abcdef").unwrap(),
+    );
+    // Keep old local peers working without requiring a negotiated capability.
+    assert!(server_graphics_files_allowed(&local, false));
+    // Saved SSH endpoints run in the normal local client process.
+    assert!(!server_graphics_files_allowed(&ssh, false));
+    // A standalone --remote bridge can retain the Local endpoint identity.
+    assert!(!server_graphics_files_allowed(&local, true));
+    assert!(!server_graphics_files_allowed(&ssh, true));
+}
+
 fn restore_env_var(key: &str, value: Option<OsString>) {
     if let Some(value) = value {
         std::env::set_var(key, value);
@@ -103,21 +118,21 @@ fn windows_virtual_terminal_input_mode_sets_only_vti_bit() {
 }
 
 #[test]
-fn windows_win32_input_mode_defaults_to_vt_and_honors_probe() {
+fn windows_win32_input_mode_defaults_to_win32_and_honors_probe() {
     let _guard = env_lock().lock().unwrap();
     let _removed =
         EnvVarsRemovedGuard::new(&["HERDR_WINDOWS_INPUT_PROBE", "SSH_CONNECTION", "SSH_TTY"]);
 
-    assert!(!windows_win32_input_mode_enabled());
+    assert!(windows_win32_input_mode_enabled());
     {
         let _ssh = EnvVarGuard::set("SSH_CONNECTION", "1 2 3 4");
-        assert!(!windows_win32_input_mode_enabled());
+        assert!(windows_win32_input_mode_enabled());
         let _probe = EnvVarGuard::set("HERDR_WINDOWS_INPUT_PROBE", "WiN32");
         assert!(windows_win32_input_mode_enabled());
     }
     {
         let _ssh = EnvVarGuard::set("SSH_TTY", "terminal");
-        assert!(!windows_win32_input_mode_enabled());
+        assert!(windows_win32_input_mode_enabled());
         let _probe = EnvVarGuard::set("HERDR_WINDOWS_INPUT_PROBE", "vT");
         assert!(!windows_win32_input_mode_enabled());
     }

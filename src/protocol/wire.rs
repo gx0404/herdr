@@ -699,11 +699,13 @@ pub enum AttachScrollSource {
 
 /// A single cell in a rendered frame, serialized independently from ratatui's
 /// `Cell` type to keep the wire protocol stable.
-#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, PartialEq, Eq, Serialize, Deserialize, bincode::Decode)]
 pub struct CellData {
     /// Grapheme cluster displayed in this cell (usually 1–2 chars).
     /// CompactString 与 String 的 bincode 编码逐字节一致（有测试守门），
-    /// ≤24 字节的符号内联零堆分配（C-14）。
+    /// ≤24 字节的符号内联零堆分配（C-14）。上游 surface-delta 的原生
+    /// `bincode::Decode` 对该字段走 serde 兼容层：线格式同为「varint 长度 + UTF-8」。
+    #[bincode(with_serde)]
     pub symbol: compact_str::CompactString,
     /// Foreground color as a packed u32 (0xAARRGGBB or ratatui Color index).
     pub fg: u32,
@@ -766,7 +768,7 @@ fn blank_cell() -> CellData {
 pub type CursorShapeParam = u8;
 
 /// Cursor position within a rendered frame.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, bincode::Decode)]
 pub struct CursorState {
     /// Column offset (0-based) of the cursor.
     pub x: u16,
@@ -1166,7 +1168,7 @@ fn client_shell_default_true() -> bool {
 }
 
 /// Origin-relative geometry for one pane in a rendered pane surface.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, bincode::Decode)]
 pub struct PaneSurfacePane {
     pub pane_id: String,
     pub content_revision: u64,
@@ -1182,7 +1184,7 @@ pub struct PaneSurfacePane {
     pub pixel_height: u32,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, bincode::Decode)]
 pub struct PaneSurfaceScrollMetrics {
     pub offset_from_bottom: u64,
     pub max_offset_from_bottom: u64,
@@ -1199,14 +1201,14 @@ pub struct PaneSurfaceSplit {
     pub path: Vec<bool>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, bincode::Decode)]
 pub enum PaneSurfaceSplitDirection {
     Horizontal,
     Vertical,
 }
 
 /// Wire-safe rectangle relative to a pane surface.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, bincode::Decode)]
 pub struct SurfaceRect {
     pub x: u16,
     pub y: u16,
@@ -1225,13 +1227,13 @@ impl From<ratatui::layout::Rect> for SurfaceRect {
     }
 }
 
-#[derive(Debug, Clone, Hash, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Hash, PartialEq, Eq, Serialize, Deserialize, bincode::Decode)]
 pub enum SurfaceGraphicsTarget {
     Pane { pane_id: String },
     Popup { terminal_id: String },
 }
 
-#[derive(Debug, Clone, Hash, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Hash, PartialEq, Eq, Serialize, Deserialize, bincode::Decode)]
 pub enum SurfaceGraphicsSource {
     Terminal {
         target: SurfaceGraphicsTarget,
@@ -1243,14 +1245,14 @@ pub enum SurfaceGraphicsSource {
     },
 }
 
-#[derive(Debug, Clone, Copy, Hash, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Hash, PartialEq, Eq, Serialize, Deserialize, bincode::Decode)]
 pub enum SurfaceGraphicsFormat {
     Rgb,
     Rgba,
     Png,
 }
 
-#[derive(Debug, Clone, Hash, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Hash, PartialEq, Eq, Serialize, Deserialize, bincode::Decode)]
 pub struct SurfaceGraphicsAssetKey {
     pub source: SurfaceGraphicsSource,
     pub image_width: u32,
@@ -1264,11 +1266,57 @@ pub struct SurfaceGraphicsAssetKey {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SurfaceGraphicsAsset {
     pub key: SurfaceGraphicsAssetKey,
+    #[serde(
+        serialize_with = "serialize_graphics_bytes",
+        deserialize_with = "deserialize_graphics_bytes"
+    )]
     pub data: Vec<u8>,
 }
 
+fn serialize_graphics_bytes<S: serde::Serializer>(
+    data: &[u8],
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    // Bincode's byte slice has the same length+bytes layout as Vec<u8>,
+    // but avoids per-byte serialization. Keep human-readable codecs unchanged.
+    if serializer.is_human_readable() {
+        data.serialize(serializer)
+    } else {
+        serializer.serialize_bytes(data)
+    }
+}
+
+fn deserialize_graphics_bytes<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Vec<u8>, D::Error> {
+    if deserializer.is_human_readable() {
+        return Vec::<u8>::deserialize(deserializer);
+    }
+
+    struct BytesVisitor;
+    impl<'de> serde::de::Visitor<'de> for BytesVisitor {
+        type Value = Vec<u8>;
+
+        fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            formatter.write_str("image bytes")
+        }
+
+        fn visit_bytes<E: serde::de::Error>(self, bytes: &[u8]) -> Result<Self::Value, E> {
+            Ok(bytes.to_vec())
+        }
+
+        fn visit_byte_buf<E: serde::de::Error>(self, bytes: Vec<u8>) -> Result<Self::Value, E> {
+            Ok(bytes)
+        }
+    }
+
+    // The framed slice decoder checks the length against available input before
+    // handing bytes to the visitor, so a forged length cannot cause an allocation.
+    deserializer.deserialize_bytes(BytesVisitor)
+}
+
 /// One already-clipped desired placement relative to its target surface.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, bincode::Decode)]
 pub struct SurfaceGraphicsPlacement {
     pub asset: SurfaceGraphicsAssetKey,
     pub logical_placement_id: u32,
@@ -1313,7 +1361,7 @@ pub struct PaneSurfaceFrame {
     pub graphics: SurfaceGraphicsScene,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, bincode::Decode)]
 pub enum ClientShellPopupSize {
     Cells(u16),
     Percent(u8),
@@ -1821,6 +1869,85 @@ pub fn check_client_version(client_version: u32) -> VersionCheck {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn graphics_bulk_codec_preserves_legacy_wire_and_json() {
+        #[derive(Serialize, Deserialize)]
+        struct LegacyAsset {
+            key: SurfaceGraphicsAssetKey,
+            data: Vec<u8>,
+        }
+        for len in [0, 1, 250, 251, 65535, 65536, 800 * 480 * 4] {
+            let asset = SurfaceGraphicsAsset {
+                key: SurfaceGraphicsAssetKey {
+                    source: SurfaceGraphicsSource::Terminal {
+                        target: SurfaceGraphicsTarget::Pane {
+                            pane_id: "pane-1".into(),
+                        },
+                        image_id: 7,
+                    },
+                    image_width: 800,
+                    image_height: 480,
+                    format: SurfaceGraphicsFormat::Rgba,
+                    data_len: len as u64,
+                    data_fingerprint: 42,
+                },
+                data: (0..len).map(|i| (i % 256) as u8).collect(),
+            };
+            let legacy = LegacyAsset {
+                key: asset.key.clone(),
+                data: asset.data.clone(),
+            };
+            let config = bincode::config::standard();
+            let before = bincode::serde::encode_to_vec(&legacy, config).unwrap();
+            let after = bincode::serde::encode_to_vec(&asset, config).unwrap();
+            assert_eq!(after, before);
+            let (decoded, used): (SurfaceGraphicsAsset, _) =
+                bincode::serde::decode_from_slice(&before, config).unwrap();
+            assert_eq!(decoded, asset);
+            assert_eq!(used, before.len());
+            let (decoded, used): (LegacyAsset, _) =
+                bincode::serde::decode_from_slice(&after, config).unwrap();
+            assert_eq!(decoded.data, asset.data);
+            assert_eq!(decoded.key, asset.key);
+            assert_eq!(used, after.len());
+            let json = serde_json::to_value(&legacy).unwrap();
+            assert_eq!(serde_json::to_value(&asset).unwrap(), json);
+            assert_eq!(
+                serde_json::from_value::<SurfaceGraphicsAsset>(json).unwrap(),
+                asset
+            );
+            assert!(
+                bincode::serde::decode_from_slice::<SurfaceGraphicsAsset, _>(
+                    &before[..before.len() - 1],
+                    config
+                )
+                .is_err()
+            );
+        }
+    }
+    #[test]
+    fn graphics_bulk_decode_rejects_truncated_and_forged_lengths() {
+        #[derive(Debug, Deserialize)]
+        struct Bytes(#[serde(deserialize_with = "deserialize_graphics_bytes")] Vec<u8>);
+        let config = bincode::config::standard();
+        let original: Vec<u8> = (0..=255).collect();
+        let encoded = bincode::serde::encode_to_vec(&original, config).unwrap();
+        for end in 0..encoded.len() {
+            assert!(
+                bincode::serde::decode_from_slice::<Bytes, _>(&encoded[..end], config).is_err()
+            );
+        }
+        let (decoded, consumed): (Bytes, _) =
+            bincode::serde::decode_from_slice(&encoded, config).unwrap();
+        assert_eq!(decoded.0, original);
+        assert_eq!(consumed, encoded.len());
+        for length in [MAX_GRAPHICS_FRAME_SIZE as u64 + 1, u64::MAX] {
+            let forged = bincode::serde::encode_to_vec(length, config).unwrap();
+            assert!(bincode::serde::decode_from_slice::<Bytes, _>(&forged, config).is_err());
+        }
+    }
+
     use ratatui::style::{Color, Modifier};
     use sha2::{Digest, Sha256};
 

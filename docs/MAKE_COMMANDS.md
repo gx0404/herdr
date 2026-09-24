@@ -10,7 +10,8 @@
 | `just test` | 全量验证：编排器并行跑 nextest + maintenance + 热路径架构 + 资产 + docs 契约（阶段日志在 `target/test-suite-logs/`） | Rust/Python/Bun 工具链 | 编译产物、临时目录 | 退出码 0；阶段汇总各子命令状态 |
 | `just nextest-all` | 单独跑全量 nextest（编排器 nextest 阶段的命令真源） | Rust | 编译产物 | 退出码 0 |
 | `just test-one <filter>` | 单个 nextest 过滤器 | 同上 | 同上 | 退出码 0 |
-| `just maintenance-test` | 维护脚本 unittest 清单（新脚本测试须登记进清单）+ fork 上游同步丢弃路径门禁（`scripts/upstream_sync_drop_check.py`，清单命中的路径重新出现即失败） | Python3（3.10 需 tomli） | 无 | `unittest` OK + 丢弃检查 `OK: … 均无命中` |
+| `just maintenance-test` | 维护脚本 unittest 清单（新脚本测试须登记进清单）+ 发布工作流契约（`bun test scripts/release-workflows.test.ts`）+ fork 上游同步丢弃路径门禁（`scripts/upstream_sync_drop_check.py`，清单命中的路径重新出现即失败） | Python3（3.10 需 tomli）、Bun | 无 | `unittest` OK + bun test OK + 丢弃检查 `OK: … 均无命中` |
+| `just test-windows-input [args..]` | 仅 Windows：本机交互式 Windows Terminal 输入资格测试（`scripts/test_windows_input.ps1`，注入输入并清空剪贴板；普通 CI 不跑） | Windows、pwsh | 注入键鼠输入、清空剪贴板 | 报告中各输入路径的覆盖结论 |
 | `just ui-hot-path-architecture-test` | UI 热路径架构边界（确定性） | Python3 | 无 | `unittest` OK |
 | `just lint` | fmt --check + clippy -D warnings | Rust | 无 | 退出码 0 |
 | `just ci [filter]` / `just ci-tests [filter]` | PR CI 等效链（ci 含 lint） | 同上 | 编译产物 | 退出码 0 |
@@ -55,9 +56,10 @@
 |---|---|---|
 | `just release-docs-check` | docs/changelog/manifest/config-reference 终稿校验 | diff CHANGELOG、翻译完整、`--require-all-published` |
 | `just pre-release-check` | release-docs-check + 两个 bench + skill 提醒 | 全部通过 |
-| `just release-prepare <ver>` | 准备 release commit（工作树须干净、tag 未存在、跑 pre-release-check、bump Cargo.toml、同步 changelog） | 产出待审 commit |
-| `just release-publish <ver>` | 校验后打 tag 推送（须 master、干净树、origin/master 是祖先） | tag `v<ver>` 触发 release.yml |
-| `just release <ver>` | prepare + publish | 同上 |
+| `just preview [ref]` | 校验源提交（默认 HEAD，须可从 master 或 `release/*` 到达）后创建并推送带注释的 `preview-<提交日期>-<短 sha>` tag | tag 推送触发 preview.yml |
+| `just release-prepare <ver> <preview-tag>` | 在基于所选 preview tag 的检出里准备 release commit（工作树须干净、tag 未存在、`scripts/release.py check-source` 前后各校验一次、跑 pre-release-check、bump Cargo.toml、同步 changelog） | 产出待审 commit |
+| `just release-publish <ver> <preview-tag>` | 校验 preview→release 差异后打带 `Preview` / `Previous-Stable` trailer 的 tag 并只推 tag（不移动 master） | tag `v<ver>` 触发 release.yml |
+| `just release <ver> <preview-tag>` | prepare + publish（晋升已发布的 preview，不取最新 master） | 同上 |
 
 ## 构建辅助
 

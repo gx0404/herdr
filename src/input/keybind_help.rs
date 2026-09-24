@@ -172,6 +172,7 @@ pub(crate) fn keybind_help_groups(
                 entry(binding_label(&keybinds.close_pane), t.close_pane),
                 entry(binding_label(&keybinds.rename_pane), t.rename_pane),
                 entry(binding_label(&keybinds.edit_scrollback), t.edit_scrollback),
+                entry(binding_label(&keybinds.clear_pane), t.clear_pane),
                 entry(binding_label(&keybinds.copy_mode), t.copy_mode),
                 entry(binding_label(&keybinds.link_hints), t.link_hints),
                 entry(binding_label(&keybinds.zoom), t.zoom_pane),

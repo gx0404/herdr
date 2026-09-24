@@ -187,7 +187,7 @@ impl ClientShellState {
         &mut self,
         cols: u16,
         rows: u16,
-    ) -> Option<FrameData> {
+    ) -> Option<crate::client::frame_output::ComposedFrame> {
         let snapshot = self.snapshot.as_deref()?;
         let now = self
             .last_composed_at
@@ -320,6 +320,14 @@ impl ClientShellState {
             .as_ref()
             .map(|cache| cache.view())
             .unwrap_or_default();
+        // 导航确认后等待权威焦点期间，工作区面板同样保留目标行高亮（上游 #4408），
+        // 取法与经典布局的 `compose` 一致。
+        let pending_workspace_highlight =
+            self.pending_workspace_highlight.as_ref().filter(|pending| {
+                self.mode != ClientShellMode::Navigate
+                    && pending.target.endpoint_id == self.active_endpoint_id
+                    && self.navigation_target_valid(&pending.target)
+            });
         let mut sidebar_state = super::super::render::ShellRenderState {
             federated_agent_rows,
             endpoints: &self.endpoints,
@@ -336,7 +344,10 @@ impl ClientShellState {
             sidebar_collapsed: false,
             sidebar_section_split: 0.5,
             tab_drag_insert_index: None,
-            selected_workspace_id: self.navigate_workspace_id.as_ref(),
+            selected_workspace_id: self
+                .navigate_workspace_id
+                .as_ref()
+                .or_else(|| pending_workspace_highlight.map(|pending| &pending.target)),
             reveal_navigation_workspace: &mut self.reveal_navigation_workspace,
             dragged_workspace_id: None,
             workspace_drop_indicator_row: None,
@@ -966,7 +977,10 @@ impl ClientShellState {
             &mut occlusion,
         )?;
         self.paint_shell_overlays(&mut canvas, &mut occlusion)?;
-        let mut graphics = std::mem::take(&mut self.workbench.cleanup);
+        // 图形与帧分开交出（上游 #4561）：由 `frame_output` 按输出通道写出。
+        let mut graphics = crate::kitty_graphics::GraphicsOutput::from_bytes(std::mem::take(
+            &mut self.workbench.cleanup,
+        ));
         // 组合期间快照不会变；上面的 `&mut self` 绘制段之后重新借用。
         let snapshot = self.snapshot.as_deref();
         let stamps = &self.workbench.stamps;
@@ -996,7 +1010,7 @@ impl ClientShellState {
             } else {
                 crate::kitty_graphics::surface::Visibility::Main
             };
-            graphics.extend(view.graphics.encode(
+            graphics.extend(view.graphics.encode_output(
                 visibility,
                 (area.x, area.y),
                 popup,
@@ -1004,9 +1018,9 @@ impl ClientShellState {
                 &occlusion,
             ));
         }
-        let (frame, buffer) = canvas.finish(graphics);
+        let (frame, buffer) = canvas.finish(Vec::new());
         self.compose_buffer = Some(buffer);
         self.hits.rebuild_chrome_bounds();
-        Some(frame)
+        Some(crate::client::frame_output::ComposedFrame { frame, graphics })
     }
 }

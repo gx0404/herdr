@@ -1481,7 +1481,8 @@ impl ClientShellState {
                 match id {
                     ActionId::NewTab => self.new_tab_in(workspace_id, outcome),
                     ActionId::RenameTab => self.open_tab_rename(tab_id),
-                    _ => self.push_endpoint_method(Method::TabClose(TabTarget { tab_id }), outcome),
+                    // 关工作区最后一个标签页与快捷键同一条确认路径（上游 #4409）。
+                    _ => self.request_tab_close(tab_id, outcome),
                 }
             }
             ActionId::RenamePane => {

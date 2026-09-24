@@ -226,6 +226,29 @@ impl HeadlessServer {
                 &view.graphics_delivery,
                 client_id,
             );
+            // 上游 #4508：同步输出批次未完成（或渲染期间内容变化）时该 view 推迟，
+            // 整客户端延期到下一次完整渲染。
+            let mut rendered = match rendered {
+                Ok(rendered) => rendered,
+                Err(reason) => {
+                    if matches!(
+                        reason,
+                        crate::server::client_shell::SurfaceRenderDeferred::Changed
+                    ) {
+                        self.app.render_dirty.request_generic();
+                    }
+                    pending = true;
+                    continue;
+                }
+            };
+            // 上游 #4561：原生图形按客户端单槽只服务主 surface；view 走内联资产，
+            // 源文件在这里物化成像素载荷。
+            self.materialize_native_sources(
+                client_id,
+                &mut rendered.graphics,
+                &mut rendered.graphics_delivery,
+                &mut rendered.graphics_sources,
+            );
             let frame = protocol::PaneSurfaceFrame {
                 boot_id: self.client_shell_boot_id.clone(),
                 projection_revision: projection,
@@ -251,15 +274,23 @@ impl HeadlessServer {
                 Self::frame_server_message_with_max(&message, MAX_GRAPHICS_FRAME_SIZE)
                     .map_err(io::Error::other)
             };
+            // 超限时按上游做法逐个剔除最大的内联载荷（保留放置元数据）直到装得下；
+            // 剔除过的 view 不更新 delivery，下一次完整渲染重发。
             let mut stripped = false;
-            let framed = encode(&prepared).or_else(|error| {
-                stripped = prepared.strip_pane_surface_assets();
-                if stripped {
-                    encode(&prepared)
-                } else {
-                    Err(error)
+            let framed = match encode(&prepared) {
+                Ok(framed) => Ok(framed),
+                Err(error) => {
+                    let mut result = Err(error);
+                    while prepared.pop_pane_surface_asset().is_some() {
+                        stripped = true;
+                        if let Ok(framed) = encode(&prepared) {
+                            result = Ok(framed);
+                            break;
+                        }
+                    }
+                    result
                 }
-            });
+            };
             let Ok(framed) = framed else {
                 pending = true;
                 continue;

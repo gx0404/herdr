@@ -160,6 +160,7 @@ pub(crate) struct RawInputByteFramer {
     split_coalesced_escape: bool,
     // 最近一次解析出鼠标报文的时刻：孤立 ESC 是否值得多等一个短窗口的证据。
     last_mouse_report_at: Option<std::time::Instant>,
+    host_escape_disambiguation_active: bool,
 }
 
 const HOST_COLOR_QUERY_REPLIES: u16 = 258;
@@ -270,6 +271,11 @@ impl RawInputByteFramer {
         !self.buffer.is_empty()
     }
 
+    #[cfg(any(unix, test))]
+    pub(crate) fn set_host_escape_disambiguation_active(&mut self, active: bool) {
+        self.host_escape_disambiguation_active = active;
+    }
+
     #[cfg(unix)]
     pub(crate) fn has_pending_lone_escape(&self) -> bool {
         self.buffer.as_slice() == [ESC]
@@ -343,6 +349,16 @@ impl RawInputByteFramer {
         }
 
         if self.buffer.is_empty() {
+            return chunks;
+        }
+
+        if self.host_escape_disambiguation_active
+            && starts_with_bounded_incomplete_escape_sequence(&self.buffer)
+        {
+            tracing::trace!(
+                len = self.buffer.len(),
+                "holding incomplete host escape sequence with disambiguation active"
+            );
             return chunks;
         }
 
@@ -667,6 +683,15 @@ impl RawInputByteFramer {
 
             if self.split_coalesced_escape && self.buffer.starts_with(b"\x1b\x1b") {
                 chunks.push(vec![ESC]);
+                self.buffer.drain(..1);
+                continue;
+            }
+
+            if self.host_escape_disambiguation_active
+                && self.buffer.first() == Some(&ESC)
+                && self.buffer.len() > 1
+                && !starts_with_known_escape_introducer(&self.buffer)
+            {
                 self.buffer.drain(..1);
                 continue;
             }
@@ -1040,6 +1065,25 @@ fn starts_with_incomplete_csi(buffer: &[u8]) -> bool {
         Some(body) => !body.is_empty() && body.iter().all(|byte| (0x20..=0x3f).contains(byte)),
         None => false,
     }
+}
+
+fn starts_with_known_escape_introducer(buffer: &[u8]) -> bool {
+    buffer
+        .get(1)
+        .is_some_and(|byte| matches!(*byte, b'[' | b'O' | b']' | b'P' | b'_' | b'^' | b'X' | ESC))
+}
+
+fn starts_with_bounded_incomplete_escape_sequence(buffer: &[u8]) -> bool {
+    if buffer.len() >= MAX_DISCARDED_CONTROL_TAIL_BYTES {
+        return false;
+    }
+    if buffer == [ESC] || buffer == b"\x1bO" {
+        return true;
+    }
+    let Some(body) = buffer.strip_prefix(b"\x1b[") else {
+        return false;
+    };
+    body.iter().all(|byte| matches!(*byte, 0x20..=0x3f))
 }
 
 #[cfg(any(unix, windows, test))]
@@ -2240,6 +2284,71 @@ mod tests {
         tail.extend_from_slice(b"01M");
         assert_eq!(framer.push(b"01M").concat(), tail);
         assert!(framer.timed_out_mouse_prefix.is_none());
+    }
+
+    #[test]
+    fn confirmed_host_disambiguation_retains_split_sgr_mouse_without_escape() {
+        for (prefix, tail) in [
+            (b"\x1b".as_slice(), b"[<0;5;5M".as_slice()),
+            (b"\x1b[".as_slice(), b"<0;5;5M".as_slice()),
+            (b"\x1b[<0;".as_slice(), b"5;5M".as_slice()),
+        ] {
+            let mut framer = RawInputFramer::default();
+            framer
+                .byte_framer
+                .set_host_escape_disambiguation_active(true);
+
+            assert!(framer.push(prefix).is_empty());
+            assert!(framer.flush_timeout().is_empty());
+            assert!(framer.flush_timeout().is_empty());
+            let events = framer.push(tail);
+
+            assert!(matches!(
+                events.as_slice(),
+                [RawInputEvent::Mouse(MouseEvent {
+                    kind: MouseEventKind::Down(MouseButton::Left),
+                    column: 4,
+                    row: 4,
+                    ..
+                })]
+            ));
+        }
+    }
+
+    #[test]
+    fn confirmed_host_disambiguation_drops_stale_escape_before_plain_input() {
+        let mut framer = RawInputFramer::default();
+        framer
+            .byte_framer
+            .set_host_escape_disambiguation_active(true);
+
+        assert!(framer.push(b"\x1b").is_empty());
+        assert!(framer.flush_timeout().is_empty());
+        let events = framer.push(b"x");
+
+        assert_eq!(events.len(), 1);
+        assert_raw_key(
+            events.into_iter().next().unwrap(),
+            KeyCode::Char('x'),
+            KeyModifiers::empty(),
+        );
+    }
+
+    #[test]
+    fn confirmed_host_disambiguation_keeps_kitty_escape_immediate() {
+        let mut framer = RawInputFramer::default();
+        framer
+            .byte_framer
+            .set_host_escape_disambiguation_active(true);
+
+        let events = framer.push(b"\x1b[27u");
+
+        assert_eq!(events.len(), 1);
+        assert_raw_key(
+            events.into_iter().next().unwrap(),
+            KeyCode::Esc,
+            KeyModifiers::empty(),
+        );
     }
 
     #[test]

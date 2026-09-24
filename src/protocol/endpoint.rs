@@ -34,6 +34,15 @@ pub const OBSERVATION_EVENT_KIND: &str = "endpoint.observation.v1";
 /// 前台焦点 pane 的 cwd 上送（WEZ-INT-02）：server 只在焦点或 cwd 变化时推送，
 /// 客户端据此向宿主终端写 OSC 7。可选控制帧，旧客户端忽略。
 pub const TERMINAL_CWD_KIND: &str = "endpoint.terminal-cwd.v1";
+pub const AGENT_COMPLETIONS_CAPABILITY: &str = "agent_completions";
+pub const AGENT_COMPLETIONS_KIND: &str = "endpoint.agent-completions.v1";
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EndpointAgentCompletions {
+    pub boot_id: String,
+    pub revision: u64,
+    pub completions: std::collections::BTreeMap<String, u64>,
+}
 
 fn default_true() -> bool {
     true
@@ -54,6 +63,9 @@ pub struct EndpointClientHello {
     /// Accept the optional cell-retaining surface encoding on this connection.
     #[serde(default)]
     pub surface_reuse: bool,
+    /// Accept the optional surface-delta encoding on this connection.
+    #[serde(default)]
+    pub surface_delta: bool,
     #[serde(default)]
     pub snapshot_codecs: Vec<String>,
     #[serde(default)]
@@ -131,6 +143,15 @@ pub fn snapshot_message(snapshot: &ClientShellSnapshot) -> serde_json::Result<Se
     })
 }
 
+pub fn agent_completions_message(
+    projection: &EndpointAgentCompletions,
+) -> serde_json::Result<ServerMessage> {
+    Ok(ServerMessage::EndpointControl {
+        kind: AGENT_COMPLETIONS_KIND.into(),
+        data: serde_json::to_string(projection)?,
+    })
+}
+
 pub fn agent_view_projection_message(
     boot_id: &str,
     revision: u64,
@@ -177,10 +198,12 @@ impl EndpointServerWelcome {
             capabilities: vec![
                 super::views::CAPABILITY.into(),
                 super::surface_reuse::CAPABILITY.into(),
+                super::surface_delta::CAPABILITY.into(),
                 SURFACE_INTEREST_CAPABILITY.into(),
                 PRESENTATION_EFFECTS_FENCE_CAPABILITY.into(),
                 HEALTH_CHECK_CAPABILITY.into(),
                 AGENT_VIEW_PROJECTION_CAPABILITY.into(),
+                AGENT_COMPLETIONS_CAPABILITY.into(),
             ],
             error: None,
         }
@@ -251,6 +274,7 @@ mod tests {
             mouse_capture: true,
             surface_active: true,
             surface_reuse: false,
+            surface_delta: false,
             snapshot_codecs: vec![SNAPSHOT_CODEC_V1.into()],
             surface_codecs: vec![SURFACE_CODEC_V1.into()],
             input_codecs: vec![INPUT_CODEC_V1.into()],
@@ -526,9 +550,11 @@ mod tests {
         let mut value = serde_json::to_value(hello()).unwrap();
         value.as_object_mut().unwrap().remove("surface_active");
         value.as_object_mut().unwrap().remove("surface_reuse");
+        value.as_object_mut().unwrap().remove("surface_delta");
         let decoded: EndpointClientHello = serde_json::from_value(value).unwrap();
         assert!(decoded.surface_active);
         assert!(!decoded.surface_reuse);
+        assert!(!decoded.surface_delta);
     }
 
     #[test]
@@ -539,10 +565,12 @@ mod tests {
             vec![
                 super::super::views::CAPABILITY.to_string(),
                 super::super::surface_reuse::CAPABILITY.to_string(),
+                super::super::surface_delta::CAPABILITY.to_string(),
                 SURFACE_INTEREST_CAPABILITY.to_string(),
                 PRESENTATION_EFFECTS_FENCE_CAPABILITY.to_string(),
                 HEALTH_CHECK_CAPABILITY.to_string(),
                 AGENT_VIEW_PROJECTION_CAPABILITY.to_string(),
+                AGENT_COMPLETIONS_CAPABILITY.to_string(),
             ]
         );
     }

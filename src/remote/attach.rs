@@ -149,7 +149,7 @@ pub(crate) fn prepare_saved_ssh(
     target: &str,
     session_name: &str,
     profile_options: Option<&ProfileSshOptions>,
-) -> io::Result<()> {
+) -> io::Result<Option<crate::client::endpoint::SshMachineMetadata>> {
     super::validate_remote_target(target)
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
     crate::session::validate_name(session_name)
@@ -198,6 +198,9 @@ pub(crate) fn prepare_saved_ssh_unattended(
             progress: Some(progress),
         },
     )
+    // 向导此时还没有档案 id，无处落元数据缓存；首次连接成功时由
+    // `connect_saved_ssh` 补写。
+    .map(|_metadata| ())
     .map_err(|error| {
         error::classify_and_wrap(
             error,
@@ -221,13 +224,17 @@ pub(super) fn prepare_approved_saved_ssh(
             progress: Some(progress),
         },
     )
+    .map(|_metadata| ())
 }
 
+/// Prepares and verifies the remote server; on success returns the remote
+/// Herdr location when it is known, so callers holding a profile id can warm
+/// the machine metadata cache (`SshMetadataCache`).
 fn prepare_saved_ssh_with(
     ssh: &RemoteSsh,
     session_name: &str,
     ctx: PrepareContext<'_>,
-) -> io::Result<()> {
+) -> io::Result<Option<crate::client::endpoint::SshMachineMetadata>> {
     let prepared = prepare_remote_herdr_ctx(ssh, false, true, ctx)?;
     ctx.step(SavedSshBootstrapStep::StartServer);
     ensure_remote_server_ready(
@@ -266,7 +273,13 @@ fn prepare_saved_ssh_with(
         )
         .is_none() =>
         {
-            Ok(())
+            Ok(prepared.remote_herdr.machine_metadata().or_else(|| {
+                discover_remote_api_metadata(ssh, session_name)
+                    .inspect_err(
+                        |error| tracing::debug!(%error, "could not capture SSH setup metadata"),
+                    )
+                    .ok()
+            }))
         }
         _ => Err(io::Error::other(
             "remote server is not ready for saved machines",
@@ -449,11 +462,21 @@ impl RemoteExecutable {
 pub(super) struct RemoteHerdr {
     install_suffix: String,
     executable: RemoteExecutable,
+    resolved_executable: Option<String>,
     platform: RemotePlatform,
     bridge_idle_timeout: bool,
 }
 
 impl RemoteHerdr {
+    pub(super) fn machine_metadata(&self) -> Option<crate::client::endpoint::SshMachineMetadata> {
+        let executable = self.resolved_executable.clone()?;
+        let metadata = crate::client::endpoint::SshMachineMetadata {
+            os: self.platform.os.to_owned(),
+            executable,
+        };
+        metadata.is_valid().then_some(metadata)
+    }
+
     fn for_platform(platform: RemotePlatform) -> Self {
         let (install_suffix, executable) = if platform.is_windows() {
             (
@@ -468,17 +491,20 @@ impl RemoteHerdr {
         Self {
             install_suffix,
             executable,
+            resolved_executable: None,
             platform,
             bridge_idle_timeout: false,
         }
     }
 
-    fn with_shell_path(mut self, shell_path: String) -> Self {
-        self.executable = RemoteExecutable::PosixShellPath(shell_path);
+    fn with_posix_path(mut self, path: &str) -> Self {
+        self.executable = RemoteExecutable::PosixShellPath(shell_quote(path));
+        self.resolved_executable = Some(path.to_owned());
         self
     }
 
     fn with_windows_path(mut self, path: String) -> Self {
+        self.resolved_executable = Some(path.clone());
         self.executable = RemoteExecutable::WindowsPath(path);
         self
     }
@@ -495,6 +521,10 @@ fn windows_powershell_application_script(path: &str, args: &[&str]) -> String {
 }
 
 fn windows_powershell_streaming_application_command(path: &str, args: &[&str]) -> String {
+    windows_powershell_script_command(&windows_powershell_streaming_application_script(path, args))
+}
+
+fn windows_powershell_streaming_application_script(path: &str, args: &[&str]) -> String {
     let command_line = args
         .iter()
         .map(|arg| crate::platform::quote_windows_command_line_arg(arg))
@@ -502,11 +532,11 @@ fn windows_powershell_streaming_application_command(path: &str, args: &[&str]) -
         .join(" ");
     // Start-Process -Wait waits for descendants, including a cold-started server.
     // Retain the handle so Windows PowerShell 5.1 keeps the application's exit code.
-    windows_powershell_script_command(&format!(
+    format!(
         "$process = Start-Process -FilePath {} -ArgumentList {} -NoNewWindow -PassThru -ErrorAction Stop; $null = $process.Handle; $process.WaitForExit(); exit $process.ExitCode",
         crate::platform::quote_powershell_arg(path),
         crate::platform::quote_powershell_arg(&command_line),
-    ))
+    )
 }
 
 fn posix_remote_output_command(command: &str) -> String {
@@ -1389,6 +1419,8 @@ pub(super) fn apply_managed_ssh_options(
     command: &mut Command,
     options: Option<&ManagedSshOptions>,
 ) {
+    // Compress the first connection too: multiplexed bridges inherit the master's transport.
+    command.arg("-C");
     let Some(options) = options else {
         return;
     };
@@ -1415,6 +1447,8 @@ pub(super) fn apply_managed_channel_options(
     command: &mut Command,
     options: Option<&ManagedSshOptions>,
 ) {
+    // ssh、scp 与 sftp 的 `-C` 同义（请求压缩），与 `apply_managed_ssh_options` 同口径。
+    command.arg("-C");
     let Some(options) = options else {
         return;
     };
@@ -1654,11 +1688,29 @@ fn prepare_windows_remote_herdr(
     })
 }
 
-pub(super) fn find_installed_remote_api_herdr(
+pub(super) fn discover_remote_api_metadata(
     ssh: &RemoteSsh,
     session: &str,
-) -> io::Result<RemoteHerdr> {
+) -> io::Result<crate::client::endpoint::SshMachineMetadata> {
     let platform = detect_remote_platform(ssh)?;
+    if !platform.is_windows() {
+        let output =
+            ssh.framed_user_shell_output(&posix_remote_api_discovery_command(&platform, session))?;
+        if !output.status.success() {
+            return Err(command_failed("remote binary discovery failed", &output));
+        }
+        let metadata = crate::client::endpoint::SshMachineMetadata {
+            os: platform.os.to_owned(),
+            executable: String::from_utf8_lossy(&output.stdout).trim().to_owned(),
+        };
+        if !metadata.is_valid() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "invalid remote Herdr executable path",
+            ));
+        }
+        return Ok(metadata);
+    }
     let remote_herdr = RemoteHerdr::for_platform(platform);
     let candidates = remote_binary_candidates(ssh, &remote_herdr)?;
     for candidate in candidates {
@@ -1670,7 +1722,10 @@ pub(super) fn find_installed_remote_api_herdr(
         if probe.status.success()
             && String::from_utf8_lossy(&probe.stdout).trim() == "herdr-api-bridge-v1"
         {
-            return Ok(candidate);
+            return Ok(crate::client::endpoint::SshMachineMetadata {
+                os: "windows".into(),
+                executable: candidate.executable.display().to_owned(),
+            });
         }
     }
     Err(io::Error::new(
@@ -1917,7 +1972,7 @@ fn remote_herdr_from_path(remote_herdr: &RemoteHerdr, path: &str) -> Option<Remo
     if is_mise_shim_path(path) {
         return None;
     }
-    Some(remote_herdr.clone().with_shell_path(shell_quote(path)))
+    Some(remote_herdr.clone().with_posix_path(path))
 }
 
 fn is_mise_shim_path(path: &str) -> bool {
@@ -2818,6 +2873,67 @@ fn confirm_remote_install(
     }
 
     Ok(())
+}
+
+fn posix_remote_api_discovery_command(platform: &RemotePlatform, session: &str) -> String {
+    let script = format!(
+        r#"set -f
+candidates=$(
+command -v herdr
+{discovery}
+)
+IFS='
+'
+for candidate in $candidates; do
+    case "$candidate" in
+        */mise/shims/herdr) continue ;;
+        /*) ;;
+        *) continue ;;
+    esac
+    [ -x "$candidate" ] || continue
+    if capability=$("$candidate" --session {session} remote-api-bridge --check </dev/null 2>/dev/null) && [ "$capability" = herdr-api-bridge-v1 ]; then
+        printf '%s\n' "$candidate"
+        exit 0
+    fi
+done
+printf '%s\n' 'remote Herdr does not support machine API forwarding; update Herdr on this machine' >&2
+exit 2"#,
+        discovery = known_remote_binary_candidate_script(platform),
+        session = shell_quote(session),
+    );
+    format!(
+        "/bin/sh -c {}",
+        shell_quote(&posix_remote_output_command(&script))
+    )
+}
+
+pub(super) const STALE_API_METADATA: &str = "herdr-machine-metadata-stale-v1";
+
+pub(super) fn cached_remote_api_command(
+    metadata: &crate::client::endpoint::SshMachineMetadata,
+    session: &str,
+) -> String {
+    if metadata.os == "windows" {
+        let path = crate::platform::quote_powershell_arg(&metadata.executable);
+        let session_arg = crate::platform::quote_powershell_arg(session);
+        let probe = format!(
+            "$capability = & {path} --session {session_arg} remote-api-bridge --check 2>$null; if ($LASTEXITCODE -ne 0 -or $capability -ne 'herdr-api-bridge-v1') {{ [Console]::Error.WriteLine('{STALE_API_METADATA}'); exit 78 }}; "
+        );
+        return windows_powershell_script_command(&format!(
+            "{probe}{}",
+            windows_powershell_streaming_application_script(
+                &metadata.executable,
+                &["--session", session, "remote-api-bridge"]
+            ),
+        ));
+    }
+    let path = shell_quote(&metadata.executable);
+    let session = shell_quote(session);
+    let script = format!(
+        "if capability=$({path} --session {session} remote-api-bridge --check </dev/null 2>/dev/null) && [ \"$capability\" = herdr-api-bridge-v1 ]; then\n{}\nelse\n    printf '%s\\n' '{STALE_API_METADATA}' >&2\n    exit 78\nfi",
+        posix_remote_output_command(&format!("exec {path} --session {session} remote-api-bridge")),
+    );
+    format!("/bin/sh -c {}", shell_quote(&script))
 }
 
 pub(super) fn remote_api_bridge_command(
@@ -4068,6 +4184,24 @@ mod tests {
     }
 
     #[test]
+    fn bridge_options_keep_temporary_config_alive_after_helper_drop() {
+        let config = write_managed_ssh_config(None).unwrap();
+        let path = config.options.config_path.clone();
+        let worker_options = config.options.clone();
+        drop(config);
+        assert!(path.is_file());
+        drop(worker_options);
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn unmanaged_ssh_setup_preserves_plain_transport() {
+        let ssh = RemoteSsh::new("example".into(), false, "main".into());
+        assert!(ssh.options().is_none());
+        assert!(!ssh.command().get_args().any(|arg| arg == "-F"));
+    }
+
+    #[test]
     fn ssh_config_quote_wraps_path_with_spaces() {
         assert_eq!(
             ssh_config_quote("/home/a b/.ssh/config"),
@@ -4111,11 +4245,7 @@ mod tests {
         let mut managed_config = write_managed_ssh_config(None).expect("write managed config");
         managed_config.options.control_path = Some(PathBuf::from("/tmp/herdr test/control"));
         let config_path = managed_config.options.config_path.clone();
-        let control_path = managed_config
-            .options
-            .control_path
-            .clone()
-            .expect("Unix managed config has a control path");
+        let control_path = managed_config.options.control_path.clone().unwrap();
         let ssh = RemoteSsh {
             target: "example".to_string(),
             session_name: crate::session::DEFAULT_SESSION_NAME.into(),
@@ -4134,6 +4264,7 @@ mod tests {
         assert_eq!(
             args,
             vec![
+                "-C".to_string(),
                 "-F".to_string(),
                 config_path.to_string_lossy().into_owned(),
                 "-S".to_string(),
@@ -4155,6 +4286,7 @@ mod tests {
         assert_eq!(
             scp_args,
             vec![
+                "-C".to_string(),
                 "-F".to_string(),
                 config_path.to_string_lossy().into_owned(),
                 "-o".to_string(),
@@ -4203,6 +4335,7 @@ mod tests {
         assert_eq!(
             args,
             vec![
+                "-C".to_string(),
                 "-F".to_string(),
                 config_path.to_string_lossy().into_owned(),
                 "-T".to_string(),
@@ -4216,7 +4349,11 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(
             scp_args,
-            vec!["-F".to_string(), config_path.to_string_lossy().into_owned(),]
+            vec![
+                "-C".to_string(),
+                "-F".to_string(),
+                config_path.to_string_lossy().into_owned(),
+            ]
         );
     }
 
@@ -4244,6 +4381,46 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn endpoint_probe_preserves_setup_ssh_options() {
+        let managed_config = write_managed_ssh_config(None).expect("write managed config");
+        let marker = managed_config
+            .options
+            .config_path
+            .with_file_name("probe-ran");
+        fs::write(
+            &managed_config.options.config_path,
+            format!(
+                "Host *\n  ProxyCommand /bin/sh -c {}\n",
+                shell_quote(&format!(
+                    ": > {}; exit 1",
+                    shell_quote(&marker.to_string_lossy())
+                ))
+            ),
+        )
+        .expect("write isolated probe config");
+        let ssh = RemoteSsh {
+            target: "herdr-probe.invalid".into(),
+            session_name: "probe-options".into(),
+            managed_config: Some(managed_config),
+            noninteractive: false,
+            profile_options: None,
+            askpass: None,
+        };
+        let remote = RemoteHerdr::for_platform(RemotePlatform {
+            os: "linux",
+            arch: "x86_64",
+        });
+
+        let error = probe_remote_endpoint(&ssh, &remote).expect_err("proxy refuses connection");
+
+        assert!(
+            marker.exists(),
+            "endpoint probe discarded the authenticated setup's SSH options: {error}"
+        );
+    }
+
     #[test]
     fn noninteractive_ssh_stderr_capture_is_bounded() {
         let stderr = vec![b'x'; NONINTERACTIVE_SSH_STDERR_LIMIT + 4096];
@@ -4260,6 +4437,7 @@ mod tests {
             .map(|arg| arg.to_string_lossy().into_owned())
             .collect::<Vec<_>>();
         for required in [
+            "-C",
             "BatchMode=yes",
             "NumberOfPasswordPrompts=0",
             "StrictHostKeyChecking=yes",
@@ -4270,8 +4448,7 @@ mod tests {
         ] {
             assert!(args.iter().any(|arg| arg == required), "missing {required}");
         }
-        assert!(!args.iter().any(|arg| arg == "-F"));
-        assert!(ssh.options().is_none());
+        assert_eq!(args.iter().any(|arg| arg == "-F"), ssh.options().is_some());
     }
 
     /// 只被 `#[cfg(unix)]` 的 ssh 参数测试使用；Windows 测试目标下同样门控，避免 dead_code。
@@ -4639,7 +4816,7 @@ mod tests {
     }
 
     #[test]
-    fn remote_ssh_command_is_plain_without_managed_config() {
+    fn remote_ssh_commands_compress_without_managed_config() {
         let ssh = RemoteSsh {
             target: "example".to_string(),
             session_name: crate::session::DEFAULT_SESSION_NAME.into(),
@@ -4655,8 +4832,8 @@ mod tests {
             .map(|arg| arg.to_string_lossy().into_owned())
             .collect::<Vec<_>>();
 
-        assert_eq!(args, vec!["-T".to_string(), "example".to_string()]);
-        assert!(ssh.scp_command().get_args().next().is_none());
+        assert_eq!(args, vec!["-C", "-T", "example"]);
+        assert_eq!(ssh.scp_command().get_args().collect::<Vec<_>>(), vec!["-C"]);
     }
 
     #[test]
@@ -4974,6 +5151,63 @@ mod tests {
             "descendant must outlive the application"
         );
         assert_eq!(status.and_then(|status| status.code()), Some(23));
+    }
+
+    #[test]
+    fn machine_metadata_keeps_raw_resolved_paths_not_shell_expressions() {
+        let remote = RemoteHerdr::for_platform(RemotePlatform {
+            os: "linux",
+            arch: "x86_64",
+        });
+        assert!(remote.machine_metadata().is_none());
+        let path = "/home/user's files/$literal/herdr";
+        let resolved = remote.with_posix_path(path);
+        assert_eq!(resolved.machine_metadata().unwrap().executable, path);
+        assert_eq!(resolved.executable.display(), shell_quote(path));
+        let remote = RemoteHerdr::for_platform(RemotePlatform {
+            os: "windows",
+            arch: "x86_64",
+        });
+        assert!(remote.machine_metadata().is_none());
+        let path = r"C:\Users\A B\herdr.exe";
+        assert_eq!(
+            remote
+                .with_windows_path(path.into())
+                .machine_metadata()
+                .unwrap()
+                .executable,
+            path
+        );
+    }
+
+    #[test]
+    fn cached_windows_api_command_checks_before_starting_the_stream() {
+        let path = r"C:\Users\A'B\herdr.exe";
+        let command = cached_remote_api_command(
+            &crate::client::endpoint::SshMachineMetadata {
+                os: "windows".into(),
+                executable: path.into(),
+            },
+            "fleet",
+        );
+        let encoded = command.split_whitespace().last().unwrap();
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(encoded)
+            .unwrap();
+        let words = bytes
+            .chunks_exact(2)
+            .map(|chunk| u16::from_le_bytes([chunk[0], chunk[1]]))
+            .collect::<Vec<_>>();
+        let script = String::from_utf16(&words).unwrap();
+        assert!(script.contains(&crate::platform::quote_powershell_arg(path)));
+        assert!(script.contains(STALE_API_METADATA));
+        assert!(
+            script.find("remote-api-bridge --check").unwrap()
+                < script.find("Start-Process").unwrap()
+        );
+        assert!(script.contains("$LASTEXITCODE -ne 0"));
+        assert!(script.contains("-NoNewWindow -PassThru"));
+        assert!(script.contains("--session fleet remote-api-bridge"));
     }
 
     #[test]

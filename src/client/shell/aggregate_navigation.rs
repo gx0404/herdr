@@ -323,52 +323,127 @@ pub(super) fn navigator_rows(
             !tokens.is_empty() && tokens_match(&tokens, &mut haystack, &[endpoint.label.as_str()]);
         let mut endpoint_rows = Vec::new();
         if let Some(snapshot) = endpoint.snapshot.as_deref() {
+            let agents = snapshot
+                .agents
+                .iter()
+                .map(|agent| (agent.pane_id.as_str(), agent))
+                .collect::<HashMap<_, _>>();
+            // Build endpoint-local indexes once. Walk each bucket in snapshot
+            // order so interleaved input and overlapping IDs on other endpoints
+            // retain their existing navigation order and targets.
+            let mut tabs_by_workspace = HashMap::new();
+            for tab in &snapshot.tabs {
+                tabs_by_workspace
+                    .entry(tab.workspace_id.as_str())
+                    .or_insert_with(Vec::new)
+                    .push(tab);
+            }
+            let mut panes_by_tab = HashMap::new();
+            for pane in &snapshot.panes {
+                panes_by_tab
+                    .entry(pane.tab_id.as_str())
+                    .or_insert_with(Vec::new)
+                    .push(pane);
+            }
             for workspace in &snapshot.workspaces {
-                let workspace_meta = workspace.branch.clone().unwrap_or_default();
+                let branch = workspace.branch.as_deref().unwrap_or_default();
+                // 工作区行自身命中：没有状态过滤时查询落在机器名 / 工作区名 / 分支上。
+                // 没有终端的工作区因此仍可搜到（上游 #4384）；有状态过滤时工作区只作
+                // 命中终端的分组头出现。
+                let workspace_matches = navigator.filter.is_none()
+                    && !tokens.is_empty()
+                    && tokens_match(
+                        &tokens,
+                        &mut haystack,
+                        &[endpoint.label.as_str(), workspace.label.as_str(), branch],
+                    );
                 let mut children = Vec::new();
-                for tab in snapshot
-                    .tabs
-                    .iter()
-                    .filter(|tab| tab.workspace_id == workspace.workspace_id)
-                {
-                    let mut panes = Vec::new();
-                    for (index, pane) in snapshot
-                        .panes
-                        .iter()
-                        .filter(|pane| pane.tab_id == tab.tab_id)
-                        .enumerate()
-                    {
-                        let agent = snapshot
-                            .agents
-                            .iter()
-                            .find(|agent| agent.pane_id == pane.pane_id);
+                let workspace_tabs = tabs_by_workspace
+                    .get(workspace.workspace_id.as_str())
+                    .map(Vec::as_slice)
+                    .unwrap_or_default();
+                let multiple_tabs = workspace_tabs.len() > 1;
+                for tab in workspace_tabs {
+                    let tab_panes = panes_by_tab
+                        .get(tab.tab_id.as_str())
+                        .map(Vec::as_slice)
+                        .unwrap_or_default();
+                    for (index, pane) in tab_panes.iter().enumerate() {
+                        let agent = agents.get(pane.pane_id.as_str()).copied();
                         let status = agent
                             .map_or(crate::api::schema::AgentStatus::Unknown, |agent| {
                                 agent.agent_status
                             });
-                        let label = pane
+                        let agent_kind = agent.and_then(|agent| {
+                            agent.agent.as_deref().or(agent.display_agent.as_deref())
+                        });
+                        let name = pane
                             .label
-                            .clone()
-                            .or_else(|| agent.and_then(|agent| agent.name.clone()))
-                            .or_else(|| agent.and_then(|agent| agent.display_agent.clone()))
-                            .or_else(|| agent.and_then(|agent| agent.title.clone()))
-                            .unwrap_or_else(|| format!("pane {}", index + 1));
+                            .as_deref()
+                            .or_else(|| agent.and_then(|agent| agent.name.as_deref()));
+                        let title = agent.and_then(|agent| {
+                            agent
+                                .title
+                                .as_deref()
+                                .or(agent.terminal_title_stripped.as_deref())
+                        });
+                        let tab_name = (tab.custom_label || tab.label.parse::<usize>().is_err())
+                            .then_some(tab.label.as_str());
+                        let label = if tab_panes.len() == 1 {
+                            match name.or(tab_name).or(title) {
+                                Some(label) => label.to_owned(),
+                                None if multiple_tabs => {
+                                    format!("{} · {}", agent_kind.unwrap_or("terminal"), tab.label)
+                                }
+                                None => workspace.label.clone(),
+                            }
+                        } else {
+                            let pane_name = name.or(title).or(agent_kind).unwrap_or("terminal");
+                            match tab_name {
+                                Some(tab_name) if tab_name != pane_name => {
+                                    format!("{tab_name} · {pane_name} · {}", index + 1)
+                                }
+                                _ => format!("{pane_name} · {}", index + 1),
+                            }
+                        };
                         let meta = pane
                             .foreground_cwd
-                            .clone()
-                            .or_else(|| pane.cwd.clone())
+                            .as_deref()
+                            .or(pane.cwd.as_deref())
                             .unwrap_or_default();
+                        // 祖先上下文（机器、工作区、分支、标签页）与本行字段拼进同一个
+                        // haystack：多词可以跨字段、乱序命中（fork NAV，上游 #4535 的
+                        // 同一问题），工作区或标签页命中时其下每个终端都命中（上游 #4384）。
                         let matched = filter(status)
                             && tokens_match(
                                 &tokens,
                                 &mut haystack,
-                                &[endpoint.label.as_str(), label.as_str(), meta.as_str()],
+                                &[
+                                    endpoint.label.as_str(),
+                                    workspace.label.as_str(),
+                                    branch,
+                                    tab.label.as_str(),
+                                    label.as_str(),
+                                    meta,
+                                    pane.cwd.as_deref().unwrap_or_default(),
+                                    agent_kind.unwrap_or_default(),
+                                    title.unwrap_or_default(),
+                                    agent
+                                        .and_then(|agent| agent.display_agent.as_deref())
+                                        .unwrap_or_default(),
+                                    pane.pane_id.as_str(),
+                                ],
                             );
                         if !filtering || matched {
-                            panes.push(ClientNavigatorRow {
-                                depth: 2 + depth_offset,
+                            children.push(ClientNavigatorRow {
+                                depth: 1 + depth_offset,
                                 label,
-                                meta,
+                                meta: meta.to_owned(),
+                                detail: format!(
+                                    "{} / {} / {}",
+                                    workspace.label, tab.label, pane.pane_id
+                                ),
+                                agent: agent_kind.map(str::to_owned),
                                 status: Some(status),
                                 stale,
                                 current: endpoint.endpoint_id == *active_endpoint_id
@@ -381,52 +456,14 @@ pub(super) fn navigator_rows(
                             });
                         }
                     }
-                    let tab_matched = filter(tab.agent_status)
-                        && tokens_match(
-                            &tokens,
-                            &mut haystack,
-                            &[endpoint.label.as_str(), tab.label.as_str()],
-                        );
-                    if !filtering || tab_matched || !panes.is_empty() {
-                        children.push(ClientNavigatorRow {
-                            depth: 1 + depth_offset,
-                            label: tab.label.clone(),
-                            meta: format!(
-                                "{} panes",
-                                snapshot
-                                    .panes
-                                    .iter()
-                                    .filter(|pane| pane.tab_id == tab.tab_id)
-                                    .count()
-                            ),
-                            status: None,
-                            stale,
-                            current: false,
-                            matched: filtering && tab_matched,
-                            target: ClientNavigatorTarget::Tab {
-                                endpoint_id: endpoint.endpoint_id.clone(),
-                                tab_id: tab.tab_id.clone(),
-                            },
-                        });
-                        children.extend(panes);
-                    }
                 }
-                let workspace_matches = filter(workspace.agent_status)
-                    && tokens_match(
-                        &tokens,
-                        &mut haystack,
-                        &[
-                            endpoint.label.as_str(),
-                            workspace.label.as_str(),
-                            workspace_meta.as_str(),
-                        ],
-                    );
-                if !filtering || workspace_matches || !children.is_empty() {
-                    let key = (endpoint.endpoint_id.clone(), workspace.workspace_id.clone());
+                if !filtering || !children.is_empty() || workspace_matches {
                     endpoint_rows.push(ClientNavigatorRow {
                         depth: depth_offset,
                         label: workspace.label.clone(),
-                        meta: workspace_meta,
+                        meta: branch.to_owned(),
+                        detail: workspace.new_workspace_cwd.clone(),
+                        agent: None,
                         status: None,
                         stale,
                         current: false,
@@ -436,9 +473,7 @@ pub(super) fn navigator_rows(
                             workspace_id: workspace.workspace_id.clone(),
                         },
                     });
-                    if navigator.expanded_workspaces.contains(&key) || filtering {
-                        endpoint_rows.extend(children);
-                    }
+                    endpoint_rows.extend(children);
                 }
             }
         }
@@ -448,6 +483,8 @@ pub(super) fn navigator_rows(
                     depth: 0,
                     label: endpoint.label.to_owned(),
                     meta: String::new(),
+                    detail: String::new(),
+                    agent: None,
                     status: None,
                     stale,
                     current: false,
@@ -470,16 +507,37 @@ pub(super) fn navigator_selected_index(
     match navigator.selected.as_ref() {
         Some(target) => rows.iter().position(|row| row.target == *target),
         None => {
-            if rows.is_empty() {
-                return None;
+            // 「Go to」列出的是终端（上游 #4384），默认落在终端上：
+            // - 搜索 / 过滤时取文档序第一个自身命中的行（fork NAV-02：不停在只为容纳
+            //   命中行才被带出来的祖先上）。它若是机器或工作区分组头，且自己的分组
+            //   里有命中的终端，就落到其中第一个终端——分组头命中时其下终端经
+            //   haystack 一并命中，停在头上回车只会切到分组而不是终端。分组里没有
+            //   命中终端（空工作区、离线机器）时停在分组头，不越过它跳进后面另一个
+            //   分组的终端。
+            // - 无查询无过滤时取第一个终端，没有终端时取第 0 行。
+            let is_pane =
+                |row: &ClientNavigatorRow| matches!(row.target, ClientNavigatorTarget::Pane { .. });
+            match rows.iter().position(|row| row.matched) {
+                Some(first) if !is_pane(&rows[first]) => {
+                    let depth = rows[first].depth;
+                    let section = &rows[first + 1..];
+                    let end = section
+                        .iter()
+                        .position(|row| row.depth <= depth)
+                        .unwrap_or(section.len());
+                    Some(
+                        section[..end]
+                            .iter()
+                            .position(|row| row.matched && is_pane(row))
+                            .map_or(first, |offset| first + 1 + offset),
+                    )
+                }
+                Some(first) => Some(first),
+                None => rows
+                    .iter()
+                    .position(is_pane)
+                    .or_else(|| (!rows.is_empty()).then_some(0)),
             }
-            // 搜索/过滤下第 0 行通常是被 `endpoint_rows.extend(children)` 一并带
-            // 出来的 workspace（或机器）祖先，自身并未命中，直接回车会跳到祖先而
-            // 不是命中的 pane：落在**文档序第一个自身命中的行**上。不再额外偏好
-            // 叶子 pane——那样会跳过排在前面、同样命中的 workspace/tab/机器行
-            // （例如查机器名时该端点每行都命中，本该停在机器行）。无查询无过滤时
-            // `matched` 恒 false，回到第 0 行，既有语义原样保留。
-            Some(rows.iter().position(|row| row.matched).unwrap_or(0))
         }
     }
 }

@@ -98,6 +98,7 @@ fn connect_saved_ssh_with(
         }
         super::process::check_cancelled()?;
         let remote_herdr = find_installed_remote_herdr(&ssh)?;
+        let metadata = remote_herdr.machine_metadata();
         let path = saved_bridge_path(profile.id.as_str());
         let bridge = SshStdioBridge::start(
             profile.target.to_owned(),
@@ -109,6 +110,16 @@ fn connect_saved_ssh_with(
             askpass.as_ref().map(|channel| channel.environment()),
         )?;
         let stream = crate::ipc::connect_local_stream(&path)?;
+        // 连上即说明远端 herdr 位置有效：写入元数据缓存，之后 `--machine` 形态的
+        // CLI 可跳过远端发现（`SavedSshApiBridge::start_with_metadata`）。
+        if let Some(metadata) = metadata {
+            crate::client::endpoint::SshMetadataCache::new(
+                profile.id.as_str(),
+                &profile.target,
+                &profile.session,
+            )?
+            .store(&metadata);
+        }
         Ok(SavedSshStream {
             stream,
             bridge: SavedSshBridge {
@@ -123,17 +134,45 @@ fn connect_saved_ssh_with(
 pub(crate) struct SavedSshApiBridge {
     path: PathBuf,
     bridge: SshStdioBridge,
+    metadata_cache: crate::client::endpoint::SshMetadataCache,
+    pub(crate) used_cached_metadata: bool,
 }
 
 impl SavedSshApiBridge {
+    /// Starts an API bridge after a fresh remote discovery; the discovered
+    /// location refreshes the metadata cache.
     pub(crate) fn start(profile: &SavedSshEndpoint) -> io::Result<Self> {
+        Self::start_with_metadata(profile, false)
+    }
+
+    /// `use_cached_metadata` skips remote discovery when the cache holds the
+    /// remote Herdr location. A stale cached location fails with
+    /// `STALE_API_METADATA` (see [`Self::stale_metadata_failure`]); only a
+    /// read-only probe may then invalidate the cache and start again.
+    pub(crate) fn start_with_metadata(
+        profile: &SavedSshEndpoint,
+        use_cached_metadata: bool,
+    ) -> io::Result<Self> {
         let result = (|| {
             let ssh = validated_saved_ssh(profile, None)?;
-            let remote_herdr =
-                super::attach::find_installed_remote_api_herdr(&ssh, &profile.session)?;
-            let command =
-                super::attach::remote_api_bridge_command(&remote_herdr, &profile.session, false);
             let profile_id = profile.id.as_str();
+            let metadata_cache = crate::client::endpoint::SshMetadataCache::new(
+                profile_id,
+                &profile.target,
+                &profile.session,
+            )?;
+            let cached = use_cached_metadata.then(|| metadata_cache.load()).flatten();
+            let used_cached_metadata = cached.is_some();
+            let metadata = match cached {
+                Some(metadata) => metadata,
+                None => {
+                    let metadata =
+                        super::attach::discover_remote_api_metadata(&ssh, &profile.session)?;
+                    metadata_cache.store(&metadata);
+                    metadata
+                }
+            };
+            let command = super::attach::cached_remote_api_command(&metadata, &profile.session);
             let path = crate::platform::remote_bridge_endpoint_path(
                 &format!("herdr-api-ssh-{}-{profile_id}.sock", std::process::id()),
                 &format!(
@@ -150,7 +189,12 @@ impl SavedSshApiBridge {
                 true,
                 None,
             )?;
-            Ok(Self { path, bridge })
+            Ok(Self {
+                path,
+                bridge,
+                metadata_cache,
+                used_cached_metadata,
+            })
         })();
         result.map_err(|error| classify_saved_ssh_error(error, profile))
     }
@@ -161,6 +205,16 @@ impl SavedSshApiBridge {
 
     pub(crate) fn reported_failure(&self) -> Option<io::Error> {
         self.bridge.reported_failure()
+    }
+
+    pub(crate) fn invalidate_metadata(&self) {
+        self.metadata_cache.invalidate();
+    }
+
+    pub(crate) fn stale_metadata_failure(error: &io::Error) -> bool {
+        error
+            .to_string()
+            .contains(super::attach::STALE_API_METADATA)
     }
 }
 

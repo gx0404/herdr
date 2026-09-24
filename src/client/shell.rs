@@ -7,7 +7,7 @@ mod agent_sidebar;
 mod agent_tree;
 mod aggregate_navigation;
 mod workspace_navigation;
-use workspace_navigation::WorkspaceNavigationTarget;
+use workspace_navigation::{PendingWorkspaceHighlight, WorkspaceNavigationTarget};
 mod broadcast;
 mod command_palette;
 mod compose_canvas;

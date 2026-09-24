@@ -7,7 +7,7 @@ pub mod manifest;
 pub mod manifest_update;
 
 /// The detected state of a terminal pane.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum AgentState {
     /// Agent finished, prompt visible, nothing happening.
     Idle,
@@ -595,14 +595,6 @@ mod tests {
                 .as_nanos()
         );
         std::env::temp_dir().join(unique)
-    }
-
-    #[test]
-    fn moved_agent_detection_routes_through_production_dispatch() {
-        let detection = detect_agent(Some(Agent::Pi), "Working...");
-
-        assert_eq!(detection.state, AgentState::Working);
-        assert!(detection.visible_working);
     }
 
     // ---- Agent identification ----

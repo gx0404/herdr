@@ -1,4 +1,7 @@
-import { beforeEach, expect, mock, test } from "bun:test";
+import { afterEach, beforeEach, expect, mock, test } from "bun:test";
+
+const originalArgv = process.argv;
+afterEach(() => { process.argv = originalArgv; });
 
 const requests: unknown[] = [];
 const clients: FakeClient[] = [];
@@ -43,6 +46,7 @@ beforeEach(() => {
   clients.length = 0;
   requestWaiters.length = 0;
   autoAcknowledge = true;
+  process.argv = ["bun", "/$bunfs/root/src/index.js", "run"];
   process.env.HERDR_ENV = "1";
   process.env.HERDR_SOCKET_PATH = "test.sock";
   process.env.HERDR_PANE_ID = "test:p1";
@@ -520,6 +524,43 @@ test("collapses activity hints that arrive while a report is in flight", async (
     "pane.report_agent_activity",
     "pane.report_agent",
   ]);
+});
+
+test("only local run and Mini own server lifecycle, never shared servers or TUI workers", async () => {
+  for (const args of [
+    ["run"], ["run", "--session", "existing"], ["--mini"], ["--mini", "--session", "existing"],
+    ["--print-logs", "--log-level", "DEBUG", "run"], ["run", "--", "--attach"],
+  ]) {
+    process.argv = ["bun", "/$bunfs/root/src/index.js", ...args];
+    expect((await loadPlugin()).event).toBeFunction();
+  }
+  expect(requests).toHaveLength(0);
+
+  // Everything else leaves lifecycle to the pane-local TUI plugin. fork: these
+  // processes still send activity-tree hints (event names only), never state or
+  // session reports.
+  const nonOwners = [
+    [], ["--session", "existing"], ["serve"], ["web"], ["attach", "http://localhost:4096"],
+    ["run", "--attach", "http://localhost:4096"], ["--mini", "--attach=http://localhost:4096"],
+    ["serve", "--", "--mini"],
+  ].map((args) => ["bun", "/$bunfs/root/src/index.js", ...args]);
+  nonOwners.push(["bun", "/$bunfs/root/src/cli/tui/worker.js"]);
+  for (const argv of nonOwners) {
+    process.argv = argv;
+    const plugin = await loadPlugin();
+    await plugin.event({
+      event: {
+        type: "session.status",
+        properties: { sessionID: "root-session", status: { type: "busy" } },
+      },
+    });
+    await plugin.event({
+      event: { type: "permission.asked", properties: { sessionID: "root-session" } },
+    });
+    await plugin.event({ event: { type: "session.idle", properties: { sessionID: "root-session" } } });
+  }
+  expect(lifecycle()).toHaveLength(0);
+  expect(activityHints()).toEqual(nonOwners.flatMap(() => ["session.status", "session.idle"]));
 });
 
 function requestMethod(request: unknown): unknown {

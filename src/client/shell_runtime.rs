@@ -6,6 +6,7 @@ pub(super) fn dispatch_client_shell_actions(
     endpoints: &mut endpoint::EndpointRegistry,
     mut shell: Option<&mut shell::ClientShellState>,
     detached_process_children: &mut Vec<std::process::Child>,
+    scheduled_activation: &mut Option<ClientLoopEvent>,
     event_tx: &tokio::sync::mpsc::Sender<ClientLoopEvent>,
 ) -> Result<(Vec<crossterm::event::MouseEvent>, bool), ClientError> {
     let mut replay_mouse = Vec::new();
@@ -77,7 +78,7 @@ pub(super) fn dispatch_client_shell_actions(
                 endpoint_id,
                 target,
             } => {
-                let _ = event_tx.try_send(ClientLoopEvent::ActivateEndpoint {
+                *scheduled_activation = Some(ClientLoopEvent::ActivateEndpoint {
                     endpoint_id,
                     target,
                     force: false,
@@ -458,6 +459,41 @@ fn install_pending_activation(
     *pending = Some(activation);
 }
 
+fn local_activation_metadata_ready(
+    state: &ClientState,
+    endpoints: &endpoint::EndpointRegistry,
+) -> bool {
+    endpoints
+        .connection(&endpoint::ClientEndpointId::Local)
+        .is_some_and(|connection| {
+            state.shell.as_ref().is_some_and(|shell| {
+                shell
+                    .endpoint_snapshot_identity(
+                        &endpoint::ClientEndpointId::Local,
+                        connection.generation,
+                    )
+                    .is_some()
+            })
+        })
+}
+
+pub(super) fn take_ready_local_activation(
+    state: &mut ClientState,
+    endpoints: &endpoint::EndpointRegistry,
+) -> Option<ClientLoopEvent> {
+    if !local_activation_metadata_ready(state, endpoints) {
+        return None;
+    }
+    state
+        .deferred_local_activation
+        .take()
+        .map(|intent| ClientLoopEvent::ActivateEndpoint {
+            endpoint_id: intent.endpoint_id,
+            target: intent.target,
+            force: false,
+        })
+}
+
 pub(super) fn begin_endpoint_activation(
     state: &mut ClientState,
     endpoints: &mut endpoint::EndpointRegistry,
@@ -468,26 +504,47 @@ pub(super) fn begin_endpoint_activation(
     target: Option<shell::ClientEndpointFocusTarget>,
     force: bool,
     now: std::time::Instant,
+    scheduled_activation: &mut Option<ClientLoopEvent>,
     event_tx: &tokio::sync::mpsc::Sender<ClientLoopEvent>,
 ) -> Result<(), ClientError> {
-    if let Some(activation) = pending.as_mut() {
-        if activation.can_retarget(&endpoint_id) {
-            let retarget_error = activation.retarget(target, endpoints).err();
-            if let Some(error) = retarget_error {
-                rollback_endpoint_activation(state, endpoints, pending, error, false);
-            }
-        } else {
-            // Once rollback starts, even a request for the original target is a new intent. It
-            // replaces the retained successor instead of mutating the transaction being retired.
-            let outcome = activation.supersede(endpoint_id, target, endpoints);
-            if let endpoint::ActivationRollback::Unavailable(message) = outcome {
-                *pending = None;
-                present_handoff_unavailable(state, message);
-            }
+    state.deferred_local_activation = None;
+    if endpoint_id.is_local() && !local_activation_metadata_ready(state, endpoints) {
+        state.deferred_local_activation = Some(endpoint::EndpointActivationIntent {
+            endpoint_id,
+            target,
+        });
+        if let Some(shell) = state.shell.as_mut() {
+            shell.receive_endpoint_unavailable(
+                "Local is reconnecting; selection will resume when it is ready".into(),
+            );
         }
         return Ok(());
     }
-    let already_active = !force
+    let replace_pending = endpoint_id.is_local()
+        && pending
+            .as_ref()
+            .is_some_and(|activation| !activation.can_retarget(&endpoint_id));
+    if !replace_pending {
+        if let Some(activation) = pending.as_mut() {
+            if activation.can_retarget(&endpoint_id) {
+                let retarget_error = activation.retarget(target, endpoints).err();
+                if let Some(error) = retarget_error {
+                    rollback_endpoint_activation(state, endpoints, pending, error, false);
+                }
+            } else {
+                // Once rollback starts, even a request for the original target is a new intent.
+                // Retain it until restoration finishes; Local can instead abandon this handoff.
+                let outcome = activation.supersede(endpoint_id, target, endpoints);
+                if let endpoint::ActivationRollback::Unavailable(message) = outcome {
+                    *pending = None;
+                    present_handoff_unavailable(state, message);
+                }
+            }
+            return Ok(());
+        }
+    }
+    let already_active = !replace_pending
+        && !force
         && endpoints.active_id() == &endpoint_id
         && endpoints
             .connection(&endpoint_id)
@@ -501,6 +558,7 @@ pub(super) fn begin_endpoint_activation(
                 endpoints,
                 Some(shell),
                 &mut state.detached_process_children,
+                scheduled_activation,
                 event_tx,
             )?;
             if repaint {
@@ -522,7 +580,7 @@ pub(super) fn begin_endpoint_activation(
         state.reported_cell_size.1,
         state.pixel_geometry_exact,
     );
-    match endpoint::PendingEndpointActivation::begin(
+    match endpoint::PendingEndpointActivation::prepare(
         shell,
         endpoints,
         endpoint_id.clone(),
@@ -530,7 +588,17 @@ pub(super) fn begin_endpoint_activation(
         resize,
         *next_surface_serial,
         now,
-    ) {
+    )
+    .and_then(|activation| {
+        // Preserve the old transaction if Local fails preflight. After retiring it,
+        // all send failures belong to the prepared replacement's rollback path.
+        if replace_pending {
+            if let Some(previous) = pending.take() {
+                previous.abandon(endpoints);
+            }
+        }
+        activation.start(endpoints)
+    }) {
         Ok(activation) => install_pending_activation(
             state,
             endpoint_commands,
@@ -609,14 +677,6 @@ pub(super) fn complete_endpoint_activation(
         completion,
         endpoint::ActivationCompletion::AwaitingPresentationSync { .. }
     ) {
-        #[cfg(unix)]
-        if let endpoint::ActivationCompletion::AwaitingPresentationSync { previous, endpoint } =
-            &completion
-        {
-            if previous != endpoint {
-                state.retire_endpoint_graphics(previous);
-            }
-        }
         // The coherent target frame can replace the frozen source now, but the registry keeps
         // pane input disabled until a second projection epoch has replayed host modes/effects.
         state.unfreeze_presentation();
@@ -684,7 +744,8 @@ pub(super) fn complete_endpoint_activation(
     } else {
         state.flush_pending_graphics();
     }
-    if let Some(intent) = successor {
+    // A Local selection made while reconnecting is newer than this transaction's successor.
+    if let Some(intent) = successor.filter(|_| state.deferred_local_activation.is_none()) {
         return Ok(Some(ClientLoopEvent::ActivateEndpoint {
             endpoint_id: intent.endpoint_id,
             target: intent.target,
@@ -741,7 +802,7 @@ pub(super) fn handle_endpoint_disconnect(
 ) -> bool {
     supervisors.disconnected(endpoint_id, generation, now);
     #[cfg(unix)]
-    state.retire_endpoint_graphics(endpoint_id);
+    state.retire_endpoint_graphics(endpoint_id, generation);
     if pending_activation
         .as_ref()
         .is_some_and(|pending| pending.involves_endpoint(endpoint_id))
@@ -803,7 +864,7 @@ pub(super) fn handle_endpoint_attention(
         now,
     );
     #[cfg(unix)]
-    state.retire_endpoint_graphics(endpoint_id);
+    state.retire_endpoint_graphics(endpoint_id, generation);
     if pending_activation
         .as_ref()
         .is_some_and(|pending| pending.involves_endpoint(endpoint_id))
@@ -921,11 +982,12 @@ pub(super) fn flush_client_chrome_preferences(state: &mut ClientState) {
 pub(super) fn finish_client_shell_input(
     state: &mut ClientState,
     outcome: shell::ClientShellInput,
-    frame: Option<FrameData>,
+    frame: Option<super::frame_output::ComposedFrame>,
     endpoints: &mut endpoint::EndpointRegistry,
     pending_activation: &mut Option<endpoint::PendingEndpointActivation>,
     endpoint_commands: &mut endpoint_commands::EndpointCommands,
     prefix_input_source: &mut impl crate::platform::PrefixInputSource,
+    scheduled_activation: &mut Option<ClientLoopEvent>,
     event_tx: &tokio::sync::mpsc::Sender<ClientLoopEvent>,
 ) -> Result<bool, ClientError> {
     apply_client_shell_input_source_changes(state, prefix_input_source);
@@ -966,6 +1028,7 @@ pub(super) fn finish_client_shell_input(
         endpoints,
         state.shell.as_mut(),
         &mut state.detached_process_children,
+        scheduled_activation,
         event_tx,
     )?;
     let frame = if dispatch_repaint {

@@ -1,3 +1,6 @@
+mod native_image_sources;
+pub(crate) use native_image_sources::clone_native_image_source;
+
 use std::{
     collections::{HashSet, VecDeque},
     io::{Read, Write},
@@ -25,6 +28,9 @@ pub(crate) use super::unix_common::{
 
 #[cfg(test)]
 mod config_file_tests;
+
+mod shutdown;
+pub(crate) use shutdown::monitor_host_shutdown;
 
 const WSL_MARKER_ENV_VARS: &[&str] = &["WSL_DISTRO_NAME", "WSL_INTEROP"];
 const PROCESS_DETECTION_ENV_VAR: &str = "HERDR_PROCESS_DETECTION";

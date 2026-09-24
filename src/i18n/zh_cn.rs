@@ -156,6 +156,7 @@ pub const TEXTS: Texts = Texts {
         close_pane: "关闭窗格",
         rename_pane: "重命名窗格",
         edit_scrollback: "编辑回滚缓冲",
+        clear_pane: "清空窗格",
         copy_mode: "复制模式",
         zoom_pane: "缩放窗格",
         resize_mode: "调整大小模式",

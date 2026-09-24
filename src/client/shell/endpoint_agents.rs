@@ -227,6 +227,67 @@ impl AgentRowsCache {
 }
 
 impl ClientShellState {
+    /// 输入阶段：键盘在多机之间切到的 agent 在 Agents 面板可见窗口外时，把
+    /// `agent_scroll` 改到恰好露出它的位置（上游 #4355）。行序与行高取法与
+    /// `agent_tree::render_agent_tree_rows` 一致：列表区不足 3 行时画平铺行，否则画
+    /// 树行；目标藏在折叠分组里（不在所画的行里）时不动。多机折叠侧栏的 agent 区
+    /// 按平铺行等高计（D10），交给 [`Self::reveal_collapsed_endpoint_agent`]。
+    ///
+    /// 行缓存先按当前状态刷新：切换端点后行序跟着活动端点变（`AgentRowsKey` 含活动
+    /// 端点），上游在激活后才揭示正是为了用目的端点的排序。
+    pub(super) fn reveal_endpoint_agent(
+        &mut self,
+        endpoint_id: &ClientEndpointId,
+        pane_id: &str,
+        body_height: u16,
+    ) {
+        if body_height == 0 {
+            return;
+        }
+        self.refresh_federated_agent_rows();
+        if self.sidebar_collapsed && !self.workbench.enabled {
+            self.reveal_collapsed_endpoint_agent(endpoint_id, pane_id);
+            return;
+        }
+        let Some(rows) = self.federated_agent_rows.as_ref().map(AgentRowsCache::view) else {
+            return;
+        };
+        let listed = if body_height < 3 {
+            rows.flat
+        } else {
+            rows.tree
+        };
+        let Some(target) = listed.iter().position(|row| {
+            &row.kind.endpoint_id == endpoint_id
+                && row
+                    .kind
+                    .agent()
+                    .is_some_and(|agent| agent.pane_id == pane_id)
+        }) else {
+            return;
+        };
+        let heights = listed
+            .iter()
+            .map(|row| {
+                row.kind
+                    .agent()
+                    .map_or(1, |agent| agent.rows.len().max(1))
+                    .min(u16::MAX as usize) as u16
+            })
+            .collect::<Vec<_>>();
+        let mut gaps = vec![self.config.agents.row_gap; listed.len()];
+        if let Some(last) = gaps.last_mut() {
+            *last = 0;
+        }
+        self.agent_scroll = super::scroll::list_scroll_start_to_reveal(
+            &heights,
+            &gaps,
+            body_height,
+            self.agent_scroll,
+            target,
+        );
+    }
+
     /// 输入阶段（D10）：键盘切到的 agent 在多机折叠侧栏的 agent 区外时，把
     /// `agent_scroll` 改到恰好露出它的位置，并按当前行数钳位写回。视口高度取上一帧
     /// 的 `hits.agent_body`，行序取视图计算阶段的行缓存（与 [`render_collapsed`]

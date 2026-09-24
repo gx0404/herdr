@@ -114,6 +114,39 @@ impl UsageProbeExit {
     }
 }
 
+#[cfg(unix)]
+pub(crate) mod ssh_agent;
+
+pub(crate) struct HostShutdownMonitor {
+    task: Option<tokio::task::JoinHandle<()>>,
+}
+
+impl HostShutdownMonitor {
+    pub(crate) fn start(
+        requested: std::sync::Arc<std::sync::atomic::AtomicBool>,
+        wake: impl Fn() + Send + Sync + 'static,
+    ) -> Self {
+        let task = monitor_host_shutdown(requested, wake);
+        Self { task }
+    }
+}
+
+impl Drop for HostShutdownMonitor {
+    fn drop(&mut self) {
+        if let Some(task) = self.task.take() {
+            task.abort();
+        }
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn monitor_host_shutdown(
+    _requested: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    _wake: impl Fn() + Send + Sync + 'static,
+) -> Option<tokio::task::JoinHandle<()>> {
+    None
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ForegroundProcess {
     pub pid: u32,
@@ -173,7 +206,7 @@ impl ChildExitReason {
 }
 
 #[cfg(unix)]
-pub(crate) use unix_common::classify_child_exit;
+pub(crate) use unix_common::{classify_child_exit, poll_fd_readable, read_fd};
 
 /// 没有平台实现时只认「正常退出」：可疑退出码表是 OS 专属语义，各
 /// `src/platform/<os>.rs` 自己维护（见 `docs/AGENT_RULES/platform.md`）。
@@ -207,6 +240,15 @@ pub(crate) fn prepare_paste_text_for_pty(text: String) -> String {
 
 pub(crate) fn plugin_runtime_path(path: &std::path::Path) -> std::path::PathBuf {
     plugin_runtime_path_platform(path)
+}
+
+pub(crate) fn normalize_cwd_for_launch(path: &std::path::Path) -> std::path::PathBuf {
+    normalize_cwd_for_launch_platform(path)
+}
+
+#[cfg(not(windows))]
+fn normalize_cwd_for_launch_platform(path: &std::path::Path) -> std::path::PathBuf {
+    path.to_path_buf()
 }
 
 #[cfg(not(windows))]
@@ -271,9 +313,17 @@ pub fn launch_server_daemon_command(command: &mut std::process::Command) -> std:
     command.spawn().map(|child| child.id())
 }
 
+#[cfg(not(target_os = "macos"))]
+pub(crate) fn prepare_server_process(_handoff_import: bool) -> std::io::Result<bool> {
+    Ok(false)
+}
+
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub fn detach_server_daemon_command(command: &mut std::process::Command) {
     use std::os::unix::process::CommandExt;
+
+    #[cfg(target_os = "macos")]
+    macos::configure_server_daemon_context(command);
 
     unsafe {
         command.pre_exec(|| {
@@ -447,6 +497,8 @@ mod remote_bridge;
 mod remote_bridge_tests;
 #[cfg(unix)]
 mod unix_common;
+#[cfg(unix)]
+pub(crate) mod unix_image_files;
 #[cfg(unix)]
 pub(crate) use unix_common::{
     begin_cli_output, default_known_hosts_path, detach_stdout, end_cli_output,
@@ -962,4 +1014,17 @@ mod tests {
         assert!(!looks_like_usage_wrapper("python custom.py"));
         assert!(!looks_like_usage_wrapper(""));
     }
+}
+
+/// Kernel CoW snapshots are deliberately unsupported outside Linux.
+#[cfg(not(target_os = "linux"))]
+pub(crate) fn clone_native_image_source(
+    _source_fd: i64,
+    _destination: &std::fs::File,
+    _expected_len: usize,
+) -> std::io::Result<()> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "native source cloning requires Linux",
+    ))
 }

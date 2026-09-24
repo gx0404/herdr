@@ -265,6 +265,7 @@ pub struct KeybindTexts {
     pub close_pane: &'static str,
     pub rename_pane: &'static str,
     pub edit_scrollback: &'static str,
+    pub clear_pane: &'static str,
     pub copy_mode: &'static str,
     pub zoom_pane: &'static str,
     pub resize_mode: &'static str,

@@ -882,6 +882,7 @@ mod tests {
             launch_pending: false,
             interactive_ready: true,
             state_change_seq: 0,
+            completion_seq: None,
             cwd: None,
             foreground_cwd: None,
             revision: 1,

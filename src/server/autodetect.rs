@@ -310,6 +310,14 @@ pub fn auto_detect_launch(
     saved_federation: bool,
     startup_config: crate::config::LoadedConfig,
 ) -> io::Result<()> {
+    // The client requires terminal geometry before it can attach. Reject an
+    // unusable terminal before socket lookup creates directories or starts a daemon.
+    crate::platform::terminal_grid_size().map_err(|err| {
+        io::Error::new(
+            err.kind(),
+            format!("cannot attach without a usable terminal: {err}; run inside a terminal"),
+        )
+    })?;
     let socket_path = client_socket_path();
     info!(path = %socket_path.display(), "auto-detect launch starting");
 
