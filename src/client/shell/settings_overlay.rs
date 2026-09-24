@@ -562,11 +562,13 @@ fn integration_lines(settings: &ClientSettingsOverlay, list: Rect) -> Vec<Integr
     let rest = usize::from(width.saturating_sub(MESSAGE_CONTINUATION_INDENT));
     for (index, message) in settings.integration_messages.iter().enumerate() {
         let entry = settings.integrations.len() + index;
-        wrap_message(message.trim_end(), first, rest, |start, end| {
+        // 首尾空白不画：首行与其它消息同列起笔。区间换算回原消息里的字节。
+        let lead = message.len() - message.trim_start().len();
+        wrap_message(message.trim(), first, rest, |start, end| {
             lines.push(IntegrationLine {
                 entry,
-                start,
-                end,
+                start: lead + start,
+                end: lead + end,
                 continuation: start > 0,
             });
         });
@@ -591,13 +593,17 @@ fn entry_rows(lines: &[IntegrationLine], entry: usize) -> (usize, usize) {
 
 /// 按显示宽度把一条消息折成若干行，逐行回调字节区间 `[start, end)`：首行宽
 /// `first` 列，续行宽 `rest` 列。优先断在本行最后一个空格之后（空格留在上一行
-/// 末尾），没有空格时按列硬断（长路径）；消息里的换行符强制断行。空消息也占一行。
+/// 末尾），没有空格时按列硬断（长路径）；溢出的恰好是空格时就在它前面断，这个
+/// 空格（连同紧跟的空格）不带到下一行行首，行首空格也不记作断点。消息里的
+/// 换行符强制断行。空消息也占一行。
 fn wrap_message(text: &str, first: usize, rest: usize, mut emit: impl FnMut(usize, usize)) {
     let mut width = first.max(1);
     let mut start = 0usize;
     let mut used = 0usize;
     // 本行里最近一个空格之后的位置，及到它为止占用的列数。
     let mut soft_break: Option<(usize, usize)> = None;
+    // 刚在空格处断开：下一行行首的空格跳过不画。
+    let mut skip_spaces = false;
     for (offset, ch) in text.char_indices() {
         if ch == '\n' {
             emit(start, offset);
@@ -605,9 +611,24 @@ fn wrap_message(text: &str, first: usize, rest: usize, mut emit: impl FnMut(usiz
             used = 0;
             soft_break = None;
             width = rest.max(1);
+            skip_spaces = false;
             continue;
         }
+        if ch == ' ' && skip_spaces {
+            start = offset + ch.len_utf8();
+            continue;
+        }
+        skip_spaces = false;
         let cell = char_width(ch);
+        if ch == ' ' && used + cell > width && offset > start {
+            emit(start, offset);
+            start = offset + ch.len_utf8();
+            used = 0;
+            soft_break = None;
+            width = rest.max(1);
+            skip_spaces = true;
+            continue;
+        }
         while used + cell > width && offset > start {
             match soft_break
                 .take()
@@ -627,7 +648,7 @@ fn wrap_message(text: &str, first: usize, rest: usize, mut emit: impl FnMut(usiz
             width = rest.max(1);
         }
         used += cell;
-        if ch == ' ' {
+        if ch == ' ' && offset > start {
             soft_break = Some((offset + ch.len_utf8(), used));
         }
     }
@@ -867,6 +888,38 @@ mod tests {
         assert_eq!(wrapped("first\nsecond", 20, 18), vec!["first", "second"]);
         assert_eq!(wrapped("", 10, 8), vec![""]);
         assert_eq!(wrapped("fits", 10, 8), vec!["fits"]);
+    }
+
+    /// 审查（轻）：溢出的恰好是空格时就在它前面断、空格不带到下一行（此前续行多
+    /// 缩进 1 列，后接超宽长路径时还会单出一行空白）；整词恰好填满一行时，其后
+    /// 的空格不再让这一行提前断开；连续空格在断行处一并跳过。
+    #[test]
+    fn wrap_message_breaks_before_an_overflowing_space() {
+        assert_eq!(
+            wrapped("abcdefghij klmnopqrstu", 10, 8),
+            vec!["abcdefghij", "klmnopqr", "stu"]
+        );
+        assert_eq!(
+            wrapped("start opencode2 once", 15, 13),
+            vec!["start opencode2", "once"]
+        );
+        assert_eq!(wrapped("abcde   fgh", 5, 5), vec!["abcde", "fgh"]);
+    }
+
+    /// 审查（轻）：以空白开头或结尾的安装消息画出来与其它消息同列起笔——折行前
+    /// 先去掉首尾空白，行区间仍指向原消息里的字节。
+    #[test]
+    fn integration_lines_trim_messages_before_wrapping() {
+        let palette = Palette::catppuccin();
+        let mut settings = settings_overlay_with_integrations(&palette);
+        settings.integration_messages = vec!["  indented message  ".to_owned()];
+        let lines = integration_lines(&settings, Rect::new(0, 0, 40, 10));
+        let texts = lines
+            .iter()
+            .filter(|line| line.entry >= settings.integrations.len())
+            .map(|line| &settings.integration_messages[0][line.start..line.end])
+            .collect::<Vec<_>>();
+        assert_eq!(texts, vec!["indented message"]);
     }
 
     /// 冒烟 L7：设置页脚同一个 Enter 键不能一边说「应用」一边说「保存」；
