@@ -391,9 +391,13 @@ fn redact_url_passwords(text: &str) -> Option<String> {
     let mut rest = text;
     let mut changed = false;
     while let Some(index) = rest.find("://") {
+        // 协议名是 `://` 前面连着的一串协议字符；前面紧挨的可能是多字节字符，
+        // 按字符而不是按字节往回找。
         let scheme_start = rest[..index]
-            .rfind(|c: char| !(c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.')))
-            .map_or(0, |position| position + 1);
+            .char_indices()
+            .rev()
+            .find(|(_, c)| !(c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.')))
+            .map_or(0, |(position, c)| position + c.len_utf8());
         let http = is_http_scheme(&rest[scheme_start..index]);
         let (head, tail) = rest.split_at(index + 3);
         redacted.push_str(head);
@@ -1088,6 +1092,78 @@ mod tests {
                 "-debug",
             ],
         );
+    }
+
+    /// URL 前面紧挨着多字节字符时照常打码，找协议名不能按字节切到字符中间。
+    #[test]
+    fn urls_after_multibyte_text_are_redacted_without_panicking() {
+        assert_redacted(
+            &[
+                "echo",
+                "见https://s3cr3t-1@example.invalid/x",
+                "链接：https://u:s3cr3t-2@example.invalid",
+            ],
+            &[
+                "echo",
+                "见https://[REDACTED]@example.invalid/x",
+                "链接：https://u:[REDACTED]@example.invalid",
+            ],
+        );
+    }
+
+    /// 进程命令行是任意文本：打码对任何输入都不能 panic（它跑在 server 的 API 路径上）。
+    /// 用固定种子的伪随机串覆盖引号、分隔符、多字节字符与各种标点的组合。
+    #[test]
+    fn redaction_never_panics_on_arbitrary_text() {
+        const PIECES: [&str; 32] = [
+            "a",
+            "Z",
+            "0",
+            "=",
+            ":",
+            "/",
+            "@",
+            "'",
+            "\"",
+            " ",
+            ";",
+            "&",
+            "|",
+            "-",
+            "--",
+            "见",
+            "：",
+            "\n",
+            "?",
+            "#",
+            "{",
+            "}",
+            "$env:",
+            "\\",
+            "token",
+            "Bearer",
+            "https://",
+            "-H",
+            "Authorization:",
+            "-u",
+            "\t",
+            ",",
+        ];
+        let mut state: u64 = 0x9e37_79b9_7f4a_7c15;
+        let mut next = || {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (state >> 33) as usize
+        };
+        for _ in 0..20_000 {
+            let len = 1 + next() % 12;
+            let text: String = (0..len).map(|_| PIECES[next() % PIECES.len()]).collect();
+            let argv = vec!["prog".to_owned(), text.clone(), text.clone()];
+            let _ = redact_command(Some(argv.clone()), Some(argv.join(" ")));
+            let _ = redact_command(None, Some(text.clone()));
+            let _ = redact_command(Some(vec![text.clone()]), Some(format!("\"{text}")));
+        }
     }
 
     #[test]
