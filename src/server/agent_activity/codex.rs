@@ -1415,17 +1415,24 @@ fn arguments_summary(name: &str, arguments: Option<&Value>) -> Option<String> {
 /// 多 agent 工具的摘要：`→ 目标`，带消息的再接 `: 消息`（加密正文写 `(encrypted)`），
 /// `wait_agent` 列出要等的 agent。外层 `None` = 不是这几个工具、或缺目标，交回通用
 /// 口径；`Some(None)` = 认得但没有可写的（只等超时的 `wait_agent`），只留工具名。
+///
+/// 等待工具在 openai/codex#14631（2026-03-13 合入）之前注册为 `wait`，参数相同，旧版
+/// rollout 里带 agent 列表的 `wait` 按同一口径摘要。新版 code mode 另有同名的 `wait`
+/// （等 exec 单元，参数 `cell_id` / `yield_time_ms`，见 openai/codex 的
+/// `core/src/tools/code_mode/wait_handler.rs`），不带 agent 列表的 `wait` 交回通用口径。
 fn multi_agent_summary(
     name: &str,
     fields: &serde_json::Map<String, Value>,
 ) -> Option<Option<String>> {
+    let waited = || {
+        AGENT_LIST_KEYS
+            .iter()
+            .find_map(|key| fields.get(*key).and_then(agent_list))
+            .and_then(|agents| single_line(&format!("→ {agents}")))
+    };
     match name {
-        "wait_agent" => Some(
-            AGENT_LIST_KEYS
-                .iter()
-                .find_map(|key| fields.get(*key).and_then(agent_list))
-                .and_then(|agents| single_line(&format!("→ {agents}"))),
-        ),
+        "wait_agent" => Some(waited()),
+        "wait" => waited().map(Some),
         "send_message" | "followup_task" | "send_input" | "interrupt_agent" | "close_agent"
         | "resume_agent" => {
             let target = AGENT_TARGET_KEYS.iter().find_map(|key| {
@@ -2536,6 +2543,34 @@ mod tests {
             )
             .as_deref(),
             Some("[spawn_agent] print_probe")
+        );
+    }
+
+    /// 审查轻 6：openai/codex#14631（2026-03-13 合入）之前，多 agent 的等待工具注册名
+    /// 是 `wait`（参数同为 `ids` / `timeout_ms`），之后才改叫 `wait_agent`。旧版写下的
+    /// rollout 里带 agent 列表的 `wait` 与 `wait_agent` 同一口径摘要，不整段显示 JSON；
+    /// code mode 同名的 `wait`（等 exec 单元）与只带超时的调用仍走通用口径。
+    #[test]
+    fn the_pre_rename_wait_tool_is_summarised_like_wait_agent() {
+        let render = |name: &str, arguments: &str| {
+            let record = serde_json::json!({
+                "type": "response_item",
+                "payload": {"type": "function_call", "name": name, "arguments": arguments},
+            });
+            render_record(&record.to_string(), None)
+        };
+        assert_eq!(
+            render("wait", r#"{"ids":["a1","b2"],"timeout_ms":30000}"#).as_deref(),
+            Some("[wait] → a1, b2")
+        );
+        assert_eq!(
+            render("wait", r#"{"cell_id":"7","yield_time_ms":500}"#).as_deref(),
+            Some(r#"[wait] {"cell_id":"7","yield_time_ms":500}"#),
+            "code mode 的 wait 不是多 agent 工具"
+        );
+        assert_eq!(
+            render("wait", r#"{"timeout_ms":30000}"#).as_deref(),
+            Some(r#"[wait] {"timeout_ms":30000}"#)
         );
     }
 
