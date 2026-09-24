@@ -821,6 +821,18 @@ async fn promoted_client_window_title_uses_its_own_view() {
     shutdown_test_runtimes(&mut server);
 }
 
+/// 等测试写端转发来的下一条消息用的与负载无关的宽上限（N21c，做法同 `93621e2c`）：
+/// `ClientWriter::test_channel` 由一条转发线程把消息搬进通道，负载高时它可能好一阵
+/// 才被调度到，固定 100 ms 会误报 Timeout。消息一到立即返回，只在真的没发时才等满；
+/// 「不应收到」的否定窗口不受负载误报，保持原样。
+const FORWARDED_MESSAGE_WAIT: Duration = Duration::from_secs(30);
+
+/// 收下测试写端转发来的下一条消息；等不到就以 `what` 报错。
+fn recv_forwarded(rx: &std::sync::mpsc::Receiver<Vec<u8>>, what: &str) -> Vec<u8> {
+    rx.recv_timeout(FORWARDED_MESSAGE_WAIT)
+        .unwrap_or_else(|err| panic!("{what}: {err:?}"))
+}
+
 fn test_client_writer() -> (
     ClientWriter,
     std::sync::mpsc::Receiver<Vec<u8>>,
@@ -6277,11 +6289,10 @@ fn client_shell_streams_focused_pane_report_all_demand() {
         server.stream_direct_terminal_keyboard_mode();
 
         assert!(matches!(
-            read_server_message(
-                client_control_rx
-                    .recv_timeout(Duration::from_millis(100))
-                    .expect("shell keyboard mode message")
-            ),
+            read_server_message(recv_forwarded(
+                &client_control_rx,
+                "shell keyboard mode message"
+            )),
             ServerMessage::ClientShellKeyboardReportAll { enabled: true }
         ));
     });
@@ -6522,11 +6533,7 @@ fn direct_terminal_streams_child_keyboard_and_mouse_modes() {
 
         server.stream_direct_terminal_keyboard_mode();
         assert!(matches!(
-            read_server_message(
-                client_control_rx
-                    .recv_timeout(Duration::from_millis(100))
-                    .expect("keyboard mode message")
-            ),
+            read_server_message(recv_forwarded(&client_control_rx, "keyboard mode message")),
             ServerMessage::DirectTerminalKeyboardProtocol {
                 flags: 15,
                 modify_other_keys_level: 0
@@ -6539,11 +6546,10 @@ fn direct_terminal_streams_child_keyboard_and_mouse_modes() {
             .test_process_pty_bytes(b"\x1b[<u\x1b[>3u\x1b[>4;1m");
         server.stream_direct_terminal_keyboard_mode();
         assert!(matches!(
-            read_server_message(
-                client_control_rx
-                    .recv_timeout(Duration::from_millis(100))
-                    .expect("modifyOtherKeys mode-one keyboard message")
-            ),
+            read_server_message(recv_forwarded(
+                &client_control_rx,
+                "modifyOtherKeys mode-one keyboard message"
+            )),
             ServerMessage::DirectTerminalKeyboardProtocol {
                 flags: 3,
                 modify_other_keys_level: 1
@@ -6556,11 +6562,10 @@ fn direct_terminal_streams_child_keyboard_and_mouse_modes() {
             .test_process_pty_bytes(b"\x1b[>4;2m");
         server.stream_direct_terminal_keyboard_mode();
         assert!(matches!(
-            read_server_message(
-                client_control_rx
-                    .recv_timeout(Duration::from_millis(100))
-                    .expect("modifyOtherKeys mode-two keyboard message")
-            ),
+            read_server_message(recv_forwarded(
+                &client_control_rx,
+                "modifyOtherKeys mode-two keyboard message"
+            )),
             ServerMessage::DirectTerminalKeyboardProtocol {
                 flags: 3,
                 modify_other_keys_level: 2
@@ -6573,11 +6578,10 @@ fn direct_terminal_streams_child_keyboard_and_mouse_modes() {
             .test_process_pty_bytes(b"\x1b[<u");
         server.stream_direct_terminal_keyboard_mode();
         assert!(matches!(
-            read_server_message(
-                client_control_rx
-                    .recv_timeout(Duration::from_millis(100))
-                    .expect("modifyOtherKeys-only keyboard mode message")
-            ),
+            read_server_message(recv_forwarded(
+                &client_control_rx,
+                "modifyOtherKeys-only keyboard mode message"
+            )),
             ServerMessage::DirectTerminalKeyboardProtocol {
                 flags: 0,
                 modify_other_keys_level: 2
@@ -6586,11 +6590,7 @@ fn direct_terminal_streams_child_keyboard_and_mouse_modes() {
 
         server.stream_host_mouse_capture_mode();
         assert!(matches!(
-            read_server_message(
-                client_control_rx
-                    .recv_timeout(Duration::from_millis(100))
-                    .expect("mouse capture message")
-            ),
+            read_server_message(recv_forwarded(&client_control_rx, "mouse capture message")),
             ServerMessage::MouseCapture {
                 enabled: true,
                 sgr_pixels: false
@@ -6603,11 +6603,10 @@ fn direct_terminal_streams_child_keyboard_and_mouse_modes() {
             .test_process_pty_bytes(b"\x1b[?1016h");
         server.stream_host_mouse_capture_mode();
         assert!(matches!(
-            read_server_message(
-                client_control_rx
-                    .recv_timeout(Duration::from_millis(100))
-                    .expect("pixel mouse capture message")
-            ),
+            read_server_message(recv_forwarded(
+                &client_control_rx,
+                "pixel mouse capture message"
+            )),
             ServerMessage::MouseCapture {
                 enabled: true,
                 sgr_pixels: true
@@ -6620,11 +6619,10 @@ fn direct_terminal_streams_child_keyboard_and_mouse_modes() {
             .test_process_pty_bytes(b"\x1b[?1000l\x1b[?1016l");
         server.stream_host_mouse_capture_mode();
         assert!(matches!(
-            read_server_message(
-                client_control_rx
-                    .recv_timeout(Duration::from_millis(100))
-                    .expect("child mouse disable message")
-            ),
+            read_server_message(recv_forwarded(
+                &client_control_rx,
+                "child mouse disable message"
+            )),
             ServerMessage::MouseCapture {
                 enabled: false,
                 sgr_pixels: false
@@ -6824,11 +6822,10 @@ fn client_config_reload_request_refreshes_attached_clients() {
 
     server.drain_client_config_reload_request();
 
-    match read_server_message(
-        client_control_rx
-            .recv_timeout(Duration::from_millis(100))
-            .expect("client config reload message"),
-    ) {
+    match read_server_message(recv_forwarded(
+        &client_control_rx,
+        "client config reload message",
+    )) {
         ServerMessage::ReloadSoundConfig => {}
         other => panic!("expected ReloadSoundConfig, got {other:?}"),
     }
@@ -6869,11 +6866,10 @@ fn terminal_bell_targets_foreground_client_only() {
     });
 
     assert!(!changed);
-    match read_server_message(
-        foreground_control_rx
-            .recv_timeout(Duration::from_millis(100))
-            .expect("foreground terminal bell message"),
-    ) {
+    match read_server_message(recv_forwarded(
+        &foreground_control_rx,
+        "foreground terminal bell message",
+    )) {
         ServerMessage::TerminalBell { count } => assert_eq!(count, 3),
         other => panic!("expected terminal bell message, got {other:?}"),
     }
@@ -6931,11 +6927,10 @@ fn clipboard_write_targets_foreground_client_only() {
     });
 
     assert!(!changed);
-    match read_server_message(
-        foreground_control_rx
-            .recv_timeout(Duration::from_millis(100))
-            .expect("foreground clipboard message"),
-    ) {
+    match read_server_message(recv_forwarded(
+        &foreground_control_rx,
+        "foreground clipboard message",
+    )) {
         ServerMessage::Clipboard { data } => assert_eq!(data, "dGVzdA=="),
         other => panic!("expected clipboard message, got {other:?}"),
     }
@@ -7033,11 +7028,7 @@ fn semantic_notifications_broadcast_only_to_client_shells() {
     assert!(server.send_to_client_shells(ServerMessage::SemanticNotification(event.clone())));
     for receiver in [shell_one_control, shell_two_control] {
         assert_eq!(
-            read_server_message(
-                receiver
-                    .recv_timeout(Duration::from_millis(100))
-                    .expect("semantic notification")
-            ),
+            read_server_message(recv_forwarded(&receiver, "semantic notification")),
             ServerMessage::SemanticNotification(event.clone())
         );
     }
@@ -7077,11 +7068,10 @@ fn notification_show_uses_client_shell_policy_independent_of_server_delivery() {
         api::schema::ResponseResult::NotificationShow { shown: true, .. }
     ));
     assert_eq!(
-        read_server_message(
-            shell_control
-                .recv_timeout(Duration::from_millis(100))
-                .expect("semantic plugin notification")
-        ),
+        read_server_message(recv_forwarded(
+            &shell_control,
+            "semantic plugin notification"
+        )),
         ServerMessage::SemanticNotification(protocol::SemanticNotification {
             kind: protocol::SemanticNotificationKind::Custom,
             title: "plugin title".into(),
@@ -7131,11 +7121,10 @@ fn client_local_notifications_target_foreground_client_only() {
         body: Some("workspace 1".to_string()),
     }));
 
-    match read_server_message(
-        foreground_control_rx
-            .recv_timeout(Duration::from_millis(100))
-            .expect("foreground toast message"),
-    ) {
+    match read_server_message(recv_forwarded(
+        &foreground_control_rx,
+        "foreground toast message",
+    )) {
         ServerMessage::Notify {
             kind,
             message,
@@ -7192,11 +7181,10 @@ fn oversized_paste_rejection_notifies_only_the_sending_client() {
         })
     );
 
-    match read_server_message(
-        sender_control_rx
-            .recv_timeout(Duration::from_millis(100))
-            .expect("sending client rejection notification"),
-    ) {
+    match read_server_message(recv_forwarded(
+        &sender_control_rx,
+        "sending client rejection notification",
+    )) {
         ServerMessage::ClientShellError { message } => assert_eq!(
             message,
             "Paste rejected: Input message is 5000012 bytes; Herdr's limit is 1048576 bytes"
@@ -7222,11 +7210,10 @@ fn oversized_paste_rejection_notifies_only_the_sending_client() {
             max: 1_048_576,
         })
     );
-    match read_server_message(
-        shell_control_rx
-            .recv_timeout(Duration::from_millis(100))
-            .expect("client shell rejection error"),
-    ) {
+    match read_server_message(recv_forwarded(
+        &shell_control_rx,
+        "client shell rejection error",
+    )) {
         ServerMessage::ClientShellError { message } => assert_eq!(
             message,
             "Paste rejected: Input message is 7000000 bytes; Herdr's limit is 1048576 bytes"
@@ -7269,11 +7256,10 @@ fn update_notification_reaches_client_shell_independent_of_delivery() {
 
     assert!(changed);
     assert!(matches!(
-        read_server_message(
-            client_control_rx
-                .recv_timeout(Duration::from_millis(100))
-                .expect("semantic update notification")
-        ),
+        read_server_message(recv_forwarded(
+            &client_control_rx,
+            "semantic update notification"
+        )),
         ServerMessage::SemanticNotification(protocol::SemanticNotification {
             kind: protocol::SemanticNotificationKind::UpdateInstalled,
             ..
@@ -7305,11 +7291,10 @@ fn update_notification_is_semantic_for_system_delivery() {
     });
 
     assert!(changed);
-    match read_server_message(
-        client_control_rx
-            .recv_timeout(Duration::from_millis(100))
-            .expect("semantic update notification"),
-    ) {
+    match read_server_message(recv_forwarded(
+        &client_control_rx,
+        "semantic update notification",
+    )) {
         ServerMessage::SemanticNotification(notification) => {
             assert_eq!(
                 notification.kind,
@@ -7372,11 +7357,10 @@ fn notification_show_api_forwards_one_semantic_client_notification() {
             reason: api::schema::NotificationShowReason::Shown,
         }
     );
-    match read_server_message(
-        client_control_rx
-            .recv_timeout(Duration::from_millis(100))
-            .expect("semantic api notification"),
-    ) {
+    match read_server_message(recv_forwarded(
+        &client_control_rx,
+        "semantic api notification",
+    )) {
         ServerMessage::SemanticNotification(notification) => {
             assert_eq!(notification.title, "build failed");
             assert_eq!(notification.body.as_deref(), Some("api workspace"));
@@ -7436,11 +7420,10 @@ fn notification_show_api_preserves_colon_in_forwarded_title() {
             reason: api::schema::NotificationShowReason::Shown,
         }
     );
-    match read_server_message(
-        client_control_rx
-            .recv_timeout(Duration::from_millis(100))
-            .expect("semantic api notification"),
-    ) {
+    match read_server_message(recv_forwarded(
+        &client_control_rx,
+        "semantic api notification",
+    )) {
         ServerMessage::SemanticNotification(notification) => {
             assert_eq!(notification.title, "build: failed");
             assert_eq!(notification.body.as_deref(), Some("api workspace"));
@@ -7567,11 +7550,10 @@ fn notification_show_api_includes_sound_in_semantic_event() {
             reason: api::schema::NotificationShowReason::Shown,
         }
     );
-    match read_server_message(
-        client_control_rx
-            .recv_timeout(Duration::from_millis(100))
-            .expect("semantic api notification"),
-    ) {
+    match read_server_message(recv_forwarded(
+        &client_control_rx,
+        "semantic api notification",
+    )) {
         ServerMessage::SemanticNotification(notification) => {
             assert_eq!(notification.title, "build failed");
             assert_eq!(

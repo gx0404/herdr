@@ -614,7 +614,7 @@ async fn pixel_mouse_activation_follows_child_1016_without_graphics_demand() {
 
     server.stream_host_mouse_capture_mode();
     assert!(matches!(
-        read_server_message(control_rx.recv_timeout(Duration::from_millis(100)).unwrap()),
+        read_server_message(recv_forwarded(&control_rx, "mouse capture message")),
         ServerMessage::MouseCapture {
             enabled: true,
             sgr_pixels: true
@@ -1373,9 +1373,7 @@ fn eligibility_loss_cancels_the_queued_direct_upload() {
 
     assert!(matches!(
         read_server_message(
-            control_rx
-                .recv_timeout(Duration::from_millis(100))
-                .expect("direct retirement")
+            recv_forwarded(&control_rx, "direct retirement")
         ),
         ServerMessage::GraphicsTransmissionRetired {
             transfer_id: retired_transfer,
@@ -1436,9 +1434,7 @@ fn pane_removal_cancels_the_pending_client_upload() {
 
     assert!(matches!(
         read_server_message(
-            control_rx
-                .recv_timeout(Duration::from_millis(100))
-                .expect("pane removal retirement")
+            recv_forwarded(&control_rx, "pane removal retirement")
         ),
         ServerMessage::GraphicsTransmissionRetired {
             transfer_id: retired_transfer,
