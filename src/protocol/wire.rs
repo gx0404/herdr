@@ -1103,18 +1103,32 @@ pub struct ClientShellAgent {
 // `ServerMessage::ClientShellSnapshot` 被 bincode 可达，跳过序列化会让编解码
 // 不对称；新字段一律只靠 `#[serde(default)]` 对旧 JSON 兼容。
 
-/// 一个 agent 的活动树摘要。
+/// 一个 agent 的活动树摘要。计数都是截断前的（来源给出的整棵树）。
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ClientShellAgentActivity {
+    /// 状态为运行中的节点数。
     #[serde(default)]
     pub running: u32,
     #[serde(default)]
     pub total: u32,
-    /// `nodes` 被每 agent 的上限截断；全量经 `agent.activity.read` 取。
+    /// 还有节点没下发，全量经 `agent.activity.read` 取。摘要形态（生产默认）下是
+    /// 还有活跃节点不在 `nodes` 里；旧 server 的摘要形态下是「不止最新这一个」；
+    /// 整树形态下是存储已截断。
     #[serde(default)]
     pub truncated: bool,
+    /// 摘要形态（生产默认）下是活跃（等待 / 运行中 / 受阻）节点连同祖先链，没有
+    /// 活跃节点时为空；旧 server 的摘要形态下是最新的一个节点。
     #[serde(default)]
     pub nodes: Vec<ClientShellActivityNode>,
+    /// 活跃（等待 / 运行中 / 受阻）节点数；旧 server 不下发（缺省 0）。
+    #[serde(default)]
+    pub active: u32,
+    /// 已完成节点数；旧 server 不下发（缺省 0）。
+    #[serde(default)]
+    pub done: u32,
+    /// 失败节点数；旧 server 不下发（缺省 0）。
+    #[serde(default)]
+    pub failed: u32,
 }
 
 /// `AgentActivityNode` 的 wire 镜像。
@@ -3025,6 +3039,9 @@ mod tests {
                     ..ClientShellActivityNode::default()
                 },
             ],
+            active: 2,
+            done: 3,
+            failed: 4,
         };
         let external = ClientShellExternalAgent {
             external_id: "zcode:abc".into(),

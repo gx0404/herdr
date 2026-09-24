@@ -37,6 +37,7 @@ fn agent(pane_id: &str, running: u32, total: u32) -> ClientShellAgent {
             total,
             truncated: true,
             nodes: Vec::new(),
+            ..Default::default()
         },
     }
 }
@@ -81,6 +82,7 @@ fn external_summary_snapshot(running: u32, total: u32) -> ClientShellSnapshot {
         total,
         truncated: total > 1,
         nodes: Vec::new(),
+        ..Default::default()
     };
     projected
 }

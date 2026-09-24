@@ -12,15 +12,20 @@ pub(crate) enum SnapshotActivity {
     // 时切换 `SNAPSHOT_ACTIVITY` 即可启用，不必改客户端。
     #[cfg_attr(not(test), allow(dead_code))]
     Full,
-    /// 每 agent 只下发计数 + 最新一个节点（`truncated` 表示还有更多）；整棵树经
-    /// `agent.activity.read` 按需拉取。
+    /// 每 agent 只下发计数 + 活跃子集（活跃节点连同祖先链，每属主至多
+    /// `app::state::SUMMARY_ACTIVITY_NODES` 个、全快照共用
+    /// `app::state::summary_node_budget` 的总预算；节点只带面板要画的字段，见
+    /// `app::state::SummaryNodeView`；`truncated` 表示还有活跃节点没下发）；整棵
+    /// 树经 `agent.activity.read` 按需拉取。
     Summary,
 }
 
 /// 默认下发形态：摘要。实测（`render_scale_profile_agent_activity_snapshot`，
-/// release，每 agent 32 节点；字节确定，耗时随机器浮动）：15 个 agent 时整树下发
-/// 让快照 JSON 从 28.5 KB 涨到 163 KB（+472%），投影 + 编码中位耗时 +230%，远超
-/// 25% 门槛；摘要形态 +14% 字节、中位耗时 +16%（1 个 agent 时 +2% / 持平）。
+/// release，每 agent 32 节点、其中 12 个是活跃子集；字节确定，耗时随机器浮动）：
+/// 15 个 agent 时整树下发让快照 JSON 从 29.2 KB 涨到 164 KB（+460%），远超 25% 门槛；
+/// 摘要形态 39.8 KB（+36%）。摘要形态上一版（计数 + 最新一个节点）是 32.7 KB，
+/// 改为活跃子集后增量 +21.5%（1 个 agent +19%，50 个 +21%），在 25% 门槛内——
+/// 总预算按属主数线性放宽，就是为了在人人都跑深树时守住这条线。
 pub(crate) const SNAPSHOT_ACTIVITY: SnapshotActivity = SnapshotActivity::Summary;
 
 #[cfg(test)]
@@ -210,10 +215,34 @@ fn snapshot_parts(
             }
         })
         .collect();
+    // 摘要形态下全部属主（pane 里的 agent 与外部条目，按快照顺序）共用一份节点
+    // 总预算：先取各属主落库的活动树，再按预算分给各属主可下发的步数。
+    let stored_activity = snapshot
+        .agents
+        .iter()
+        .map(|agent| stored_agent_activity(app, &agent.pane_id))
+        .collect::<Vec<_>>();
+    let externals = app.state.agent_activity.external();
+    let summary_steps = match activity {
+        SnapshotActivity::Full => Vec::new(),
+        SnapshotActivity::Summary => {
+            let summaries = stored_activity
+                .iter()
+                .map(|stored| stored.map(|stored| &stored.summary))
+                .chain(externals.iter().map(|record| Some(&record.summary)))
+                .collect::<Vec<_>>();
+            app::state::allot_summary_steps(
+                &summaries,
+                app::state::summary_node_budget(summaries.len()),
+            )
+        }
+    };
+    let steps_of = |owner: usize| summary_steps.get(owner).copied().unwrap_or(0);
     let agents = snapshot
         .agents
         .into_iter()
-        .map(|agent| {
+        .enumerate()
+        .map(|(owner, agent)| {
             let pane_id = agent.pane_id;
             let focused = focused_pane_id.as_deref() == Some(pane_id.as_str());
             let mut state_labels = agent.state_labels.into_iter().collect::<Vec<_>>();
@@ -235,7 +264,16 @@ fn snapshot_parts(
                 tokens,
                 focused,
                 launch_seq: agent.launch_seq,
-                activity: agent_activity_projection(app, &pane_id, activity),
+                activity: stored_activity[owner].map_or_else(Default::default, |stored| {
+                    activity_projection(
+                        &stored.counts,
+                        stored.truncated,
+                        &stored.summary,
+                        &stored.nodes,
+                        steps_of(owner),
+                        activity,
+                    )
+                }),
                 pane_id,
             }
         })
@@ -327,46 +365,39 @@ fn snapshot_parts(
         panes,
         agents,
         commands: app.client_shell_command_manifest(),
-        external_agents: external_agents_projection(app, activity),
+        external_agents: external_agents_projection(
+            externals,
+            |index| steps_of(stored_activity.len() + index),
+            activity,
+        ),
     };
     (shell, completions)
 }
 
-/// 一个 agent 的活动树投影，直接读存储（投影路径的 `AgentInfo` 不复制活动树）。
+/// 一个 agent 落库的活动树，直接读存储（投影路径的 `AgentInfo` 不复制活动树）。
 /// 存储里没有任何活动树时不解析 pane id。
-fn agent_activity_projection(
-    app: &app::App,
+fn stored_agent_activity<'a>(
+    app: &'a app::App,
     public_pane_id: &str,
-    mode: SnapshotActivity,
-) -> protocol::ClientShellAgentActivity {
+) -> Option<&'a app::state::AgentActivitySnapshot> {
     if !app.state.agent_activity.has_activity() {
-        return protocol::ClientShellAgentActivity::default();
+        return None;
     }
-    let Some(stored) = app
-        .parse_pane_id(public_pane_id)
+    app.parse_pane_id(public_pane_id)
         .and_then(|(_, pane_id)| app.state.agent_activity.activity(pane_id))
-    else {
-        return protocol::ClientShellAgentActivity::default();
-    };
-    activity_projection(
-        stored.counts.running,
-        stored.counts.total,
-        stored.truncated,
-        &stored.nodes,
-        mode,
-    )
 }
 
-/// 外部来源条目投影（不属于任何 pane）。
+/// 外部来源条目投影（不属于任何 pane）；`steps_of(i)` 是第 i 个条目摘要可下发的
+/// 步数。
 fn external_agents_projection(
-    app: &app::App,
+    records: &[app::state::ExternalAgentRecord],
+    steps_of: impl Fn(usize) -> usize,
     mode: SnapshotActivity,
 ) -> Vec<protocol::ClientShellExternalAgent> {
-    app.state
-        .agent_activity
-        .external()
+    records
         .iter()
-        .map(|record| {
+        .enumerate()
+        .map(|(index, record)| {
             let info = &record.info;
             protocol::ClientShellExternalAgent {
                 external_id: info.external_id.clone(),
@@ -378,10 +409,11 @@ fn external_agents_projection(
                 cwd: info.cwd.clone(),
                 updated_at_ms: info.updated_at_ms,
                 activity: activity_projection(
-                    record.counts.running,
-                    record.counts.total,
+                    &record.counts,
                     record.truncated,
+                    &record.summary,
                     &info.activity,
+                    steps_of(index),
                     mode,
                 ),
             }
@@ -389,39 +421,61 @@ fn external_agents_projection(
         .collect()
 }
 
+/// 一个属主的活动投影。摘要形态只下发 `summary` 的前 `steps` 步（快照总预算分到
+/// 的份额，见 `app::state::allot_summary_steps`）。
 fn activity_projection(
-    running: u32,
-    total: u32,
+    counts: &app::state::ActivityCounts,
     truncated: bool,
+    summary: &app::state::ActivitySummary,
     nodes: &[crate::api::schema::AgentActivityNode],
+    steps: usize,
     mode: SnapshotActivity,
 ) -> protocol::ClientShellAgentActivity {
-    match mode {
-        SnapshotActivity::Full => protocol::ClientShellAgentActivity {
-            running,
-            total,
+    let (truncated, nodes) = match mode {
+        SnapshotActivity::Full => (
             truncated,
-            nodes: nodes
+            nodes
                 .iter()
                 .cloned()
                 .map(activity_node_projection)
                 .collect(),
-        },
-        // 摘要的选点与截断口径是 `AppState::apply_agent_activity` 判定「投影是否
-        // 变化」的同一套规则，真源在 `app::state`，两边不得各写一份。
-        SnapshotActivity::Summary => {
-            let latest = app::state::latest_activity_node(nodes);
-            protocol::ClientShellAgentActivity {
-                running,
-                total,
-                truncated: app::state::activity_summary_truncated(truncated, nodes),
-                nodes: latest
-                    .cloned()
-                    .map(activity_node_projection)
-                    .into_iter()
-                    .collect(),
-            }
-        }
+        ),
+        // 摘要的选点、截断口径与下发字段是 `AppState::apply_agent_activity` 判定
+        // 「投影是否变化」的同一套规则，真源在 `app::state`（写入存储时算好的
+        // `ActivitySummary` 与 `SummaryNodeView`），两边不得各写一份。
+        SnapshotActivity::Summary => (
+            app::state::summary_truncated(nodes, summary, steps, counts.active),
+            app::state::summary_nodes(nodes, summary, steps)
+                .map(summary_node_projection)
+                .collect(),
+        ),
+    };
+    protocol::ClientShellAgentActivity {
+        running: counts.running,
+        total: counts.total,
+        truncated,
+        nodes,
+        active: counts.active,
+        done: counts.done,
+        failed: counts.failed,
+    }
+}
+
+/// 摘要节点视图 → wire 镜像：只带视图里的字段，其余为空。
+fn summary_node_projection(
+    view: app::state::SummaryNodeView<'_>,
+) -> protocol::ClientShellActivityNode {
+    protocol::ClientShellActivityNode {
+        id: view.id.to_owned(),
+        kind: view.kind,
+        label: view.label.to_owned(),
+        status: view.status,
+        parent_id: view.parent_id.map(str::to_owned),
+        agent_type: view.agent_type.map(str::to_owned),
+        content_ref: None,
+        summary: view.summary.map(str::to_owned),
+        started_at_ms: None,
+        ended_at_ms: None,
     }
 }
 
@@ -1178,7 +1232,8 @@ mod agent_activity_tests {
 
     /// 体积护栏的实测依据（`just bench-render-scale` 会跑到它）：每个 pane 一个
     /// agent，比较「无活动」（与接入活动树之前的快照同形）、每 agent 32 节点整树
-    /// 下发、每 agent 摘要（计数 + 最新节点）三种形态的快照字节与编码耗时。
+    /// 下发、每 agent 摘要（计数 + 活跃子集，全快照共用节点总预算）三种形态的
+    /// 快照字节与编码耗时。夹具每 agent 有 12 个节点属于活跃子集，是摘要的上界。
     #[test]
     #[ignore = "manual snapshot size / encoding profile for agent activity"]
     fn render_scale_profile_agent_activity_snapshot() {
@@ -1240,40 +1295,319 @@ mod agent_activity_tests {
         }
     }
 
-    /// 摘要选点的真源在 `app::state`（投影与「投影是否变化」的判定共用它）；
-    /// 这里从投影侧钉住它的行为。
+    fn child(
+        id: &str,
+        parent: &str,
+        status: crate::api::schema::AgentActivityStatus,
+    ) -> crate::api::schema::AgentActivityNode {
+        crate::api::schema::AgentActivityNode {
+            parent_id: Some(parent.into()),
+            ..timed_node(id, status, None, None)
+        }
+    }
+
+    /// 一个 pane 里 claude 的活动树落库后，默认（摘要）快照里它的活动投影。
+    fn summary_projection(
+        nodes: Vec<crate::api::schema::AgentActivityNode>,
+    ) -> crate::protocol::ClientShellAgentActivity {
+        let mut app = app_with_panes(&["first"]);
+        let pane_id = app.state.workspaces[0].tabs[0].root_pane;
+        detect(&mut app, pane_id, Agent::Claude);
+        app.handle_internal_event(AppEvent::AgentActivityRefreshed {
+            pane_id,
+            ticket: 1,
+            result: Ok(nodes),
+        });
+        snapshot(&app, "boot", 1, None, None).agents[0]
+            .activity
+            .clone()
+    }
+
+    fn projected_ids(activity: &crate::protocol::ClientShellAgentActivity) -> Vec<&str> {
+        activity.nodes.iter().map(|node| node.id.as_str()).collect()
+    }
+
+    /// 摘要下发活跃子集：活跃（等待 / 运行中 / 受阻）节点连同祖先链，按来源顺序；
+    /// 已结束的节点只作为活跃节点的祖先出现。分组节点（workflow / phase）只带
+    /// 摘要首段 `<活跃>/<总数> running`，其余节点不带摘要、内容引用与起止时间。
     #[test]
-    fn latest_node_prefers_running_then_the_most_recent_time() {
-        use crate::api::schema::AgentActivityStatus::{Done, Pending, Running};
-        let nodes = vec![
-            timed_node("old-running", Running, Some(10), None),
-            timed_node("new-running", Running, Some(30), None),
-            timed_node("done-late", Done, Some(5), Some(99)),
-        ];
+    fn summary_sends_the_active_subset_with_complete_ancestor_chains() {
+        use crate::api::schema::AgentActivityKind;
+        use crate::api::schema::AgentActivityStatus::{
+            Blocked, Done, Failed, Pending, Running, Unknown,
+        };
+        let group = |id: &str, parent: Option<&str>, agent_type: &str, summary: &str| {
+            crate::api::schema::AgentActivityNode {
+                kind: AgentActivityKind::Task,
+                parent_id: parent.map(str::to_owned),
+                agent_type: Some(agent_type.into()),
+                summary: Some(summary.into()),
+                started_at_ms: Some(1),
+                ..timed_node(id, Running, None, None)
+            }
+        };
+        let activity = summary_projection(vec![
+            timed_node("old", Unknown, Some(1), None),
+            group(
+                "wf:1",
+                None,
+                crate::api::schema::ACTIVITY_GROUP_WORKFLOW,
+                "2/3 running · 12.3k tokens",
+            ),
+            group(
+                "phase:1:Build",
+                Some("wf:1"),
+                crate::api::schema::ACTIVITY_GROUP_PHASE,
+                "2/3 running",
+            ),
+            crate::api::schema::AgentActivityNode {
+                kind: AgentActivityKind::Subagent,
+                agent_type: Some("Explore".into()),
+                content_ref: Some("subagents/agent-1.jsonl".into()),
+                summary: Some("in 12k · out 3k".into()),
+                started_at_ms: Some(5),
+                ..child("sub-1", "phase:1:Build", Running)
+            },
+            child("sub-2", "phase:1:Build", Pending),
+            child("sub-3", "phase:1:Build", Done),
+            timed_node("parent-done", Done, Some(2), Some(3)),
+            child("blocked", "parent-done", Blocked),
+            timed_node("failed", Failed, Some(2), Some(4)),
+        ]);
         assert_eq!(
-            crate::app::state::latest_activity_node(&nodes).map(|node| node.id.as_str()),
-            Some("new-running")
+            projected_ids(&activity),
+            [
+                "wf:1",
+                "phase:1:Build",
+                "sub-1",
+                "sub-2",
+                "parent-done",
+                "blocked"
+            ]
         );
-        let nodes = vec![
-            timed_node("done-early", Done, Some(1), Some(20)),
-            timed_node("pending", Pending, Some(25), None),
-            timed_node("no-time", Done, None, None),
-        ];
+        assert!(!activity.truncated, "活跃节点都下发了");
         assert_eq!(
-            crate::app::state::latest_activity_node(&nodes).map(|node| node.id.as_str()),
-            Some("pending"),
-            "结束时间缺失时按开始时间比"
+            (
+                activity.running,
+                activity.active,
+                activity.done,
+                activity.failed,
+                activity.total
+            ),
+            (3, 5, 2, 1, 9),
+            "计数是整棵树的"
         );
-        let nodes = vec![
-            timed_node("first", Done, None, None),
-            timed_node("second", Done, None, None),
-        ];
+        let node = |id: &str| {
+            activity
+                .nodes
+                .iter()
+                .find(|node| node.id == id)
+                .expect("节点在摘要里")
+        };
         assert_eq!(
-            crate::app::state::latest_activity_node(&nodes).map(|node| node.id.as_str()),
-            Some("second"),
-            "同分取来源顺序靠后者"
+            node("wf:1").summary.as_deref(),
+            Some("2/3 running"),
+            "分组节点只带摘要首段"
         );
-        assert!(crate::app::state::latest_activity_node(&[]).is_none());
+        assert_eq!(
+            node("phase:1:Build").summary.as_deref(),
+            Some("2/3 running")
+        );
+        assert_eq!(
+            node("phase:1:Build").agent_type.as_deref(),
+            Some(crate::api::schema::ACTIVITY_GROUP_PHASE),
+            "分组节点带类型"
+        );
+        let sub = node("sub-1");
+        assert_eq!(sub.parent_id.as_deref(), Some("phase:1:Build"));
+        assert_eq!(
+            (
+                sub.agent_type.as_deref(),
+                sub.summary.as_deref(),
+                sub.content_ref.as_deref(),
+                sub.started_at_ms,
+                sub.ended_at_ms
+            ),
+            (None, None, None, None, None),
+            "面板用不到的字段不下发"
+        );
+    }
+
+    /// 没有活跃节点：摘要不带节点，也不算截断；计数照常给出。
+    #[test]
+    fn summary_without_active_nodes_sends_counts_only() {
+        use crate::api::schema::AgentActivityStatus::{Done, Failed, Unknown};
+        let activity = summary_projection(vec![
+            timed_node("a", Done, Some(1), Some(2)),
+            timed_node("b", Failed, Some(1), Some(3)),
+            timed_node("c", Unknown, Some(1), None),
+        ]);
+        assert!(activity.nodes.is_empty());
+        assert!(!activity.truncated);
+        assert_eq!(
+            (
+                activity.running,
+                activity.active,
+                activity.done,
+                activity.failed,
+                activity.total
+            ),
+            (0, 0, 1, 1, 3)
+        );
+    }
+
+    /// 活跃子集超过名额：非待办优先、开始时间晚的优先，整条祖先链放不下的跳过；
+    /// 还有活跃节点没下发时置 `truncated`（含存储上限已截掉的）。
+    #[test]
+    fn summary_caps_the_active_subset_and_marks_it_truncated() {
+        use crate::api::schema::AgentActivityKind;
+        use crate::api::schema::AgentActivityStatus::Running;
+        let cap = crate::app::state::SUMMARY_ACTIVITY_NODES;
+        let mut nodes = (0..cap as u64 + 3)
+            .map(|index| timed_node(&format!("r{index:02}"), Running, Some(index), None))
+            .collect::<Vec<_>>();
+        nodes.push(crate::api::schema::AgentActivityNode {
+            kind: AgentActivityKind::Todo,
+            ..timed_node("todo", Running, Some(999), None)
+        });
+        let activity = summary_projection(nodes);
+        assert_eq!(activity.nodes.len(), cap);
+        assert!(activity.truncated);
+        let ids = projected_ids(&activity);
+        assert!(!ids.contains(&"todo"), "待办排在其余活跃节点之后");
+        assert!(ids.contains(&"r14") && !ids.contains(&"r02"), "{ids:?}");
+        assert_eq!(activity.active, cap as u32 + 4);
+
+        // 存储上限已截掉活跃节点：摘要即使没满也算截断。
+        let many = (0..crate::app::state::MAX_AGENT_ACTIVITY_NODES as u64 + 8)
+            .map(|index| timed_node(&format!("n{index:02}"), Running, Some(index), None))
+            .collect::<Vec<_>>();
+        let activity = summary_projection(many);
+        assert!(activity.truncated);
+        assert_eq!(activity.nodes.len(), cap);
+    }
+
+    /// 摘要节点总预算按属主数线性放宽、所有属主共用：只有少数属主在跑深树时它们
+    /// 各能用满每属主上限；人人都在跑深树时总数封顶在预算内，每个属主至少分到
+    /// 按次序的前几步，其余置 `truncated`。
+    #[test]
+    fn summary_budget_is_shared_by_every_owner_in_the_snapshot() {
+        use crate::api::schema::AgentActivityStatus::Running;
+        let cap = crate::app::state::SUMMARY_ACTIVITY_NODES;
+        let deep = || {
+            (0..cap as u64 + 4)
+                .map(|index| timed_node(&format!("n{index:02}"), Running, Some(index), None))
+                .collect::<Vec<_>>()
+        };
+        let names = (0..15)
+            .map(|index| format!("ws-{index}"))
+            .collect::<Vec<_>>();
+        let names = names.iter().map(String::as_str).collect::<Vec<_>>();
+        let build = |deep_owners: usize| {
+            let mut app = app_with_panes(&names);
+            let panes = app
+                .state
+                .workspaces
+                .iter()
+                .map(|workspace| workspace.tabs[0].root_pane)
+                .collect::<Vec<_>>();
+            for (index, pane_id) in panes.into_iter().enumerate() {
+                detect(&mut app, pane_id, Agent::Claude);
+                let tree = if index < deep_owners {
+                    deep()
+                } else {
+                    vec![timed_node(
+                        "idle",
+                        crate::api::schema::AgentActivityStatus::Done,
+                        Some(1),
+                        Some(2),
+                    )]
+                };
+                app.state
+                    .apply_agent_activity(pane_id, tree, std::time::Instant::now());
+            }
+            snapshot(&app, "boot", 1, None, None)
+        };
+
+        let few = build(2);
+        let sizes = few
+            .agents
+            .iter()
+            .map(|agent| agent.activity.nodes.len())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            sizes.iter().filter(|size| **size == cap).count(),
+            2,
+            "少数属主跑深树：各用满每属主上限: {sizes:?}"
+        );
+
+        let all = build(15);
+        let total = all
+            .agents
+            .iter()
+            .map(|agent| agent.activity.nodes.len())
+            .sum::<usize>();
+        assert_eq!(
+            total,
+            crate::app::state::summary_node_budget(15),
+            "总数封顶在预算内"
+        );
+        for agent in &all.agents {
+            assert!(agent.activity.nodes.len() >= 2, "每个属主至少分到两步");
+            assert!(agent.activity.truncated, "没下发完的活跃节点置截断");
+        }
+    }
+
+    /// 摘要只看活跃子集的下发字段：子 agent 的摘要文本（token 数）、已结束节点的
+    /// 结束时间、分组摘要的 token 尾段变化都不递增投影纪元；活跃节点的状态或
+    /// 分组进度变化才递增。
+    #[test]
+    fn summary_epoch_ignores_fields_the_summary_does_not_carry() {
+        use crate::api::schema::AgentActivityStatus::{Done, Running};
+        let mut app = app_with_panes(&["first"]);
+        let pane_id = app.state.workspaces[0].tabs[0].root_pane;
+        detect(&mut app, pane_id, Agent::Claude);
+        let tree = |tokens: &str, group: &str, ended: u64| {
+            vec![
+                crate::api::schema::AgentActivityNode {
+                    agent_type: Some(crate::api::schema::ACTIVITY_GROUP_WORKFLOW.into()),
+                    summary: Some(format!("{group} · {tokens}")),
+                    ..timed_node("wf:1", Running, Some(1), None)
+                },
+                crate::api::schema::AgentActivityNode {
+                    summary: Some(tokens.into()),
+                    ..child("sub", "wf:1", Running)
+                },
+                timed_node("done", Done, Some(1), Some(ended)),
+            ]
+        };
+        let applied = app
+            .state
+            .apply_agent_activity(
+                pane_id,
+                tree("1k", "1/2 running", 5),
+                std::time::Instant::now(),
+            )
+            .expect("首次落库");
+        assert!(applied.summary_changed);
+        let applied = app
+            .state
+            .apply_agent_activity(
+                pane_id,
+                tree("9k", "1/2 running", 50),
+                std::time::Instant::now(),
+            )
+            .expect("内容变了");
+        assert!(!applied.summary_changed, "摘要不带的字段变化不进投影");
+        let applied = app
+            .state
+            .apply_agent_activity(
+                pane_id,
+                tree("9k", "2/2 running", 50),
+                std::time::Instant::now(),
+            )
+            .expect("内容变了");
+        assert!(applied.summary_changed, "分组进度变化进投影");
     }
 
     /// 生产默认下发摘要，`AppState::apply_agent_activity` 的投影纪元规则（只在
@@ -1284,8 +1618,8 @@ mod agent_activity_tests {
         assert_eq!(super::SNAPSHOT_ACTIVITY, super::SnapshotActivity::Summary);
     }
 
-    /// 两种下发形态都只用既有 wire 字段（客户端不改就能消费）：整树带全部节点；
-    /// 摘要只带计数 + 最新节点，`truncated` 告诉客户端去 `agent.activity.read` 取全量。
+    /// 两种下发形态共用同一个 wire 结构：整树带全部节点；摘要只带计数 + 活跃
+    /// 子集，`truncated` 告诉客户端还有活跃节点要去 `agent.activity.read` 取。
     #[test]
     fn snapshot_activity_shapes_share_the_wire_fields() {
         use crate::api::schema::AgentActivityStatus::{Done, Running};
@@ -1335,15 +1669,18 @@ mod agent_activity_tests {
         let activity = &summary.agents[0].activity;
         assert_eq!(
             (activity.running, activity.total, activity.truncated),
-            (2, 3, true)
+            (2, 3, false),
+            "活跃节点都在摘要里：不算截断"
         );
+        assert_eq!((activity.active, activity.done, activity.failed), (2, 1, 0));
         assert_eq!(
             activity
                 .nodes
                 .iter()
                 .map(|node| node.id.as_str())
                 .collect::<Vec<_>>(),
-            ["c"]
+            ["a", "c"],
+            "摘要只带活跃子集，来源顺序"
         );
         assert_eq!(super::SNAPSHOT_ACTIVITY, super::SnapshotActivity::Summary);
         assert_eq!(snapshot(&app, "boot", 1, None, None), summary, "默认走摘要");
@@ -1429,6 +1766,11 @@ mod agent_activity_tests {
         assert_eq!(
             (activity.running, activity.total, activity.truncated),
             (0, 0, false)
+        );
+        assert_eq!(
+            (activity.active, activity.done, activity.failed),
+            (0, 0, 0),
+            "旧 server 不下发活跃 / 完成 / 失败计数：缺省 0"
         );
         assert_eq!(
             activity.nodes[0].kind,

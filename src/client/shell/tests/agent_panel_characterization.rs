@@ -1327,6 +1327,7 @@ fn characterization_mobile_switcher_lists_agents_flat_in_aggregate_order() {
             total: 3,
             truncated: true,
             nodes: Vec::new(),
+            ..Default::default()
         };
         let mut state = classic_state_with(sort, projected);
         state.toggle_collapsed_group(&ClientEndpointId::Local, agent_group_key("ws_1"));
@@ -1437,6 +1438,7 @@ fn mobile_activity_badge_degrades_instead_of_truncating_digits() {
                     total: 5,
                     truncated: false,
                     nodes: Vec::new(),
+                    ..Default::default()
                 };
                 let mut state = classic_state_with(AgentPanelSortConfig::Spaces, projected);
                 state.compose(cols, 40).expect("mobile 头部");
@@ -1619,6 +1621,7 @@ fn summary_snapshot() -> ClientShellSnapshot {
             parent_id: Some("sub-1".into()),
             ..Default::default()
         }],
+        ..Default::default()
     };
     projected
 }
@@ -1796,6 +1799,7 @@ fn badged_snapshot(extra_tab: bool) -> ClientShellSnapshot {
         total: 5,
         truncated: true,
         nodes: Vec::new(),
+        ..Default::default()
     };
     if extra_tab {
         let mut tab = projected.tabs[0].clone();
@@ -2179,6 +2183,7 @@ fn tree_external_agents_group_by_source_and_open_the_activity_window() {
                     label: "sub".into(),
                     ..Default::default()
                 }],
+                ..Default::default()
             },
         },
         ClientShellExternalAgent {

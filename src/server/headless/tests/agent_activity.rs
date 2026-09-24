@@ -114,11 +114,12 @@ async fn activity_refresh_only_touches_the_projection_until_it_reaches_clients()
 
     let snapshot = next_snapshot(&control_rx);
     let activity = &snapshot.agents[0].activity;
-    // 默认摘要形态：计数 + 最新节点，整树经 agent.activity.read 取。
+    // 默认摘要形态：计数 + 活跃子集，整树经 agent.activity.read 取。
     assert_eq!(
         (activity.running, activity.total, activity.truncated),
-        (1, 2, true)
+        (1, 2, false)
     );
+    assert_eq!((activity.active, activity.done), (1, 1));
     assert_eq!(
         activity
             .nodes

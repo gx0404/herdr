@@ -1063,6 +1063,8 @@ pub struct AgentActivitySnapshot {
     /// 截断前的计数（运行中 / 活跃 / 完成 / 失败 / 总数）。
     pub counts: ActivityCounts,
     pub truncated: bool,
+    /// 客户端快照摘要下发的活跃子集。
+    pub summary: ActivitySummary,
     /// 最近一次刷新（含内容未变的刷新）的时刻。
     pub refreshed_at: std::time::Instant,
     /// 内容每变化一次递增；同一 pane 内单调。
@@ -1093,7 +1095,7 @@ impl ActivityCounts {
         };
         Self {
             running: count(|status| status == AgentActivityStatus::Running),
-            active: count(activity_status_is_active),
+            active: count(AgentActivityStatus::is_active),
             done: count(|status| status == AgentActivityStatus::Done),
             failed: count(|status| status == AgentActivityStatus::Failed),
             total: clamp(nodes.len()),
@@ -1101,13 +1103,217 @@ impl ActivityCounts {
     }
 }
 
-/// 活跃状态：等待、运行中、受阻——节点还没结束。
-pub(crate) fn activity_status_is_active(status: crate::api::schema::AgentActivityStatus) -> bool {
-    use crate::api::schema::AgentActivityStatus;
-    matches!(
-        status,
-        AgentActivityStatus::Pending | AgentActivityStatus::Running | AgentActivityStatus::Blocked
-    )
+/// 客户端快照摘要（`server::client_shell::SnapshotActivity::Summary`）每个属主至多
+/// 下发的活动节点数（活跃子集连同祖先链，见 [`ActivitySummary`]）。
+pub(crate) const SUMMARY_ACTIVITY_NODES: usize = 12;
+
+/// 一份快照里每个属主（pane 里的 agent 与外部条目，不论有没有活动）给摘要节点
+/// 总预算添的名额；总预算见 [`summary_node_budget`]。快照是逐客户端扇出路径：
+/// 按属主数线性放宽，快照体积的增量就与属主数成比例、有上界，只有少数几个属主
+/// 在跑深树时它们仍各能用满 [`SUMMARY_ACTIVITY_NODES`]。
+pub(crate) const SUMMARY_NODES_PER_OWNER: usize = 2;
+
+/// 一份快照里全部属主的摘要节点总预算：[`SUMMARY_ACTIVITY_NODES`] +
+/// 属主数 × [`SUMMARY_NODES_PER_OWNER`]。
+pub(crate) fn summary_node_budget(owners: usize) -> usize {
+    SUMMARY_ACTIVITY_NODES.saturating_add(owners.saturating_mul(SUMMARY_NODES_PER_OWNER))
+}
+
+/// 客户端快照摘要下发的活跃子集，按选入次序记下：每一步选入一个活跃节点连同尚未
+/// 选入的祖先链（祖先在前），所以任意前几步都是祖先链完整的子集。写入存储时算好
+/// （[`summarize_activity`]）；快照投影按总预算决定每个属主用前几步
+/// （[`allot_summary_steps`]）、按下标取节点（[`summary_nodes`]）；「摘要是否
+/// 变化」也按它判定——真源只有这一处。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ActivitySummary {
+    /// 选入次序的节点下标。
+    order: Vec<usize>,
+    /// 第 k 步选入后 `order` 的累计长度。
+    step_ends: Vec<usize>,
+}
+
+impl ActivitySummary {
+    /// 步数（每步一个活跃节点连同祖先链）。
+    pub fn steps(&self) -> usize {
+        self.step_ends.len()
+    }
+
+    /// 第 `step` 步选入的节点数。
+    fn step_len(&self, step: usize) -> usize {
+        let start = step
+            .checked_sub(1)
+            .and_then(|previous| self.step_ends.get(previous))
+            .copied()
+            .unwrap_or(0);
+        self.step_ends
+            .get(step)
+            .map_or(0, |end| end.saturating_sub(start))
+    }
+
+    /// 前 `steps` 步选入的节点下标，升序（即来源顺序）。
+    fn indices(&self, steps: usize) -> Vec<usize> {
+        let end = steps
+            .checked_sub(1)
+            .and_then(|last| self.step_ends.get(last))
+            .copied()
+            .unwrap_or(0);
+        let mut indices = self.order[..end.min(self.order.len())].to_vec();
+        indices.sort_unstable();
+        indices
+    }
+}
+
+/// 选出摘要的活跃子集：按 [`activity_priority_order`] 的次序（非待办优先、开始
+/// 时间晚的优先）逐个选入活跃节点连同祖先链，至多 [`SUMMARY_ACTIVITY_NODES`] 个，
+/// 整条链放不下的跳过。没有活跃节点时为空。
+fn summarize_activity(nodes: &[crate::api::schema::AgentActivityNode]) -> ActivitySummary {
+    if !nodes.iter().any(|node| node.status.is_active()) {
+        return ActivitySummary::default();
+    }
+    let parent_of = activity_parent_indices(nodes);
+    let mut selection = AncestorSelection::new(nodes.len(), SUMMARY_ACTIVITY_NODES);
+    let mut summary = ActivitySummary::default();
+    for index in activity_priority_order(nodes) {
+        if !nodes[index].status.is_active() {
+            // 活跃节点排在最前，其后的都不进摘要。
+            break;
+        }
+        let added = selection.offer(index, &parent_of);
+        if !added.is_empty() {
+            summary.order.extend(added.iter().rev());
+            summary.step_ends.push(summary.order.len());
+        }
+    }
+    summary
+}
+
+/// 把一份快照的摘要节点总预算分给各属主（`None` = 没有活动树）：轮流让每个属主
+/// 再选入一步，这一步放不下剩余预算的属主停在原处。返回每个属主可下发的步数。
+pub(crate) fn allot_summary_steps(
+    summaries: &[Option<&ActivitySummary>],
+    budget: usize,
+) -> Vec<usize> {
+    let mut steps = vec![0usize; summaries.len()];
+    let mut open = summaries
+        .iter()
+        .map(|summary| summary.is_some_and(|summary| summary.steps() > 0))
+        .collect::<Vec<_>>();
+    let mut left = budget;
+    while open.iter().any(|open| *open) {
+        for (owner, summary) in summaries.iter().enumerate() {
+            let Some(summary) = summary.filter(|_| open[owner]) else {
+                continue;
+            };
+            let step = steps[owner];
+            let size = summary.step_len(step);
+            if step >= summary.steps() || size > left {
+                open[owner] = false;
+                continue;
+            }
+            left -= size;
+            steps[owner] += 1;
+        }
+    }
+    steps
+}
+
+/// 前 `steps` 步下发的节点，来源顺序。
+pub(crate) fn summary_nodes<'a>(
+    nodes: &'a [crate::api::schema::AgentActivityNode],
+    summary: &ActivitySummary,
+    steps: usize,
+) -> impl Iterator<Item = SummaryNodeView<'a>> + 'a {
+    summary
+        .indices(steps)
+        .into_iter()
+        .filter_map(|index| nodes.get(index))
+        .map(SummaryNodeView::of)
+}
+
+/// 下发前 `steps` 步时是否还有活跃节点没下发（`active` 是截断前的活跃数，含存储
+/// 上限已截掉的）。
+pub(crate) fn summary_truncated(
+    nodes: &[crate::api::schema::AgentActivityNode],
+    summary: &ActivitySummary,
+    steps: usize,
+    active: u32,
+) -> bool {
+    let shown = summary
+        .indices(steps)
+        .into_iter()
+        .filter(|index| {
+            nodes
+                .get(*index)
+                .is_some_and(|node| node.status.is_active())
+        })
+        .count();
+    u32::try_from(shown).unwrap_or(u32::MAX) < active
+}
+
+/// 摘要里一个节点下发的字段：id、种类、标签、状态与父节点；分组节点
+/// （`api::schema::is_activity_group_type`）另带类型与摘要文本的首段
+/// （`<活跃>/<总数> running`，去掉随 token 数变化的 ` · …` 尾段）。其余节点的类型
+/// 与摘要、内容引用、起止时间都不下发：面板用不到，窗口经 `agent.activity.read`
+/// 读整树，它们的变化（子 agent 的 token 数等）也就不必让每个客户端重建快照。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct SummaryNodeView<'a> {
+    pub id: &'a str,
+    pub kind: crate::api::schema::AgentActivityKind,
+    pub label: &'a str,
+    pub status: crate::api::schema::AgentActivityStatus,
+    pub parent_id: Option<&'a str>,
+    pub agent_type: Option<&'a str>,
+    pub summary: Option<&'a str>,
+}
+
+impl<'a> SummaryNodeView<'a> {
+    fn of(node: &'a crate::api::schema::AgentActivityNode) -> Self {
+        let group = node
+            .agent_type
+            .as_deref()
+            .filter(|agent_type| crate::api::schema::is_activity_group_type(Some(agent_type)));
+        Self {
+            id: &node.id,
+            kind: node.kind,
+            label: &node.label,
+            status: node.status,
+            parent_id: node.parent_id.as_deref(),
+            agent_type: group,
+            summary: node
+                .summary
+                .as_deref()
+                .filter(|_| group.is_some())
+                .map(|summary| summary.split(" · ").next().unwrap_or(summary)),
+        }
+    }
+}
+
+/// 两份存储的客户端摘要是否不同：计数、步的划分或按选入次序的节点下发字段
+/// 任一不同。两边相同时，任意预算下投影出的节点与截断标记都相同。
+fn summary_differs(
+    before: (
+        &ActivityCounts,
+        &ActivitySummary,
+        &[crate::api::schema::AgentActivityNode],
+    ),
+    after: (
+        &ActivityCounts,
+        &ActivitySummary,
+        &[crate::api::schema::AgentActivityNode],
+    ),
+) -> bool {
+    fn views<'a>(
+        summary: &'a ActivitySummary,
+        nodes: &'a [crate::api::schema::AgentActivityNode],
+    ) -> impl Iterator<Item = Option<SummaryNodeView<'a>>> + 'a {
+        summary
+            .order
+            .iter()
+            .map(move |index| nodes.get(*index).map(SummaryNodeView::of))
+    }
+    before.0 != after.0
+        || before.1.step_ends != after.1.step_ends
+        || !views(before.1, before.2).eq(views(after.1, after.2))
 }
 
 /// 一次活动树变化后的计数，随 `pane.agent_activity_changed` 事件下发。
@@ -1122,48 +1328,21 @@ pub struct AgentActivityCounts {
 pub struct AgentActivityApplied {
     /// 截断前的计数，进 `pane.agent_activity_changed`。
     pub counts: AgentActivityCounts,
-    /// 客户端快照里可见的那部分（计数、截断标记、最新节点）是否变化。只有它为真
-    /// 才需要重建每客户端投影：整棵树照常落库，深层节点的变化走
-    /// `agent.activity.read` / `agent.get`，不值得让每个挂载客户端整份重建快照。
+    /// 客户端快照里可见的那部分（计数、截断标记、活跃子集的下发字段，见
+    /// [`SummaryNodeView`]）是否变化。只有它为真才需要重建每客户端投影：整棵树
+    /// 照常落库，其余节点与字段的变化走 `agent.activity.read` / `agent.get`，不值得
+    /// 让每个挂载客户端整份重建快照。
     pub summary_changed: bool,
 }
 
-/// 客户端快照摘要里的「最新节点」（`server::client_shell::SnapshotActivity::
-/// Summary`）：优先运行中的节点、取开始时间最晚者；没有运行中的节点时取结束
-/// （缺失则开始）时间最晚者。时间缺失视为最早，同分取来源顺序靠后者。
-pub(crate) fn latest_activity_node(
-    nodes: &[crate::api::schema::AgentActivityNode],
-) -> Option<&crate::api::schema::AgentActivityNode> {
-    nodes
-        .iter()
-        .enumerate()
-        .max_by_key(|(index, node)| {
-            let running = node.status == crate::api::schema::AgentActivityStatus::Running;
-            let at = if running {
-                node.started_at_ms
-            } else {
-                node.ended_at_ms.or(node.started_at_ms)
-            };
-            (running, at, *index)
-        })
-        .map(|(_, node)| node)
-}
-
-/// 摘要形态下发的 `truncated`：存储本身已截断，或整棵树在摘要里放不下（摘要只带
-/// 最新一个节点）。
-pub(crate) fn activity_summary_truncated(
-    truncated: bool,
-    nodes: &[crate::api::schema::AgentActivityNode],
-) -> bool {
-    truncated || nodes.len() > 1
-}
-
-/// 一个外部来源条目（不属于任何 pane）：`info.activity` 已截断，截断前的计数另存。
+/// 一个外部来源条目（不属于任何 pane）：`info.activity` 已截断，截断前的计数与
+/// 客户端摘要的活跃子集另存。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExternalAgentRecord {
     pub info: crate::api::schema::ExternalAgentInfo,
     pub counts: ActivityCounts,
     pub truncated: bool,
+    pub summary: ActivitySummary,
 }
 
 /// 刷新一个 pane 的活动树所需的 agent 身份（交给后台适配器的入参，全部自有）。
@@ -1267,23 +1446,24 @@ impl AgentActivityStore {
         match self.activity.get_mut(&pane_id) {
             Some(existing) => {
                 existing.refreshed_at = now;
+                // 摘要由节点与计数决定，节点与计数都没变时它也不变。
                 let unchanged = existing.nodes == truncated.nodes
                     && existing.counts == truncated.counts
                     && existing.truncated == truncated.truncated;
                 if unchanged {
                     return None;
                 }
-                // 摘要只带计数、截断标记与最新一个节点：深层节点（结束时间、摘要
-                // 文本等）变化不进投影，不必让每个客户端整份重建快照。
-                let summary_changed = existing.counts.running != truncated.counts.running
-                    || existing.counts.total != truncated.counts.total
-                    || activity_summary_truncated(existing.truncated, &existing.nodes)
-                        != activity_summary_truncated(truncated.truncated, &truncated.nodes)
-                    || latest_activity_node(&existing.nodes)
-                        != latest_activity_node(&truncated.nodes);
+                // 摘要只带计数、截断标记与活跃子集的部分字段：已结束节点与其余
+                // 字段（结束时间、摘要文本等）的变化不进投影，不必让每个客户端整份
+                // 重建快照。
+                let summary_changed = summary_differs(
+                    (&existing.counts, &existing.summary, &existing.nodes),
+                    (&truncated.counts, &truncated.summary, &truncated.nodes),
+                );
                 existing.nodes = truncated.nodes;
                 existing.counts = truncated.counts;
                 existing.truncated = truncated.truncated;
+                existing.summary = truncated.summary;
                 existing.revision = existing.revision.saturating_add(1);
                 Some(AgentActivityApplied {
                     counts,
@@ -1300,6 +1480,7 @@ impl AgentActivityStore {
                         nodes: truncated.nodes,
                         counts: truncated.counts,
                         truncated: truncated.truncated,
+                        summary: truncated.summary,
                         refreshed_at: now,
                         revision: 1,
                     },
@@ -1417,6 +1598,7 @@ impl AgentActivityStore {
                     info,
                     counts: truncated.counts,
                     truncated: truncated.truncated,
+                    summary: truncated.summary,
                 }
             }))
             .collect::<Vec<_>>();
@@ -1463,6 +1645,7 @@ struct TruncatedActivity {
     nodes: Vec<crate::api::schema::AgentActivityNode>,
     counts: ActivityCounts,
     truncated: bool,
+    summary: ActivitySummary,
 }
 
 /// 各节点的父节点下标：父节点不在列表里或指向自己时为 `None`（id 重复时认最后
@@ -1493,7 +1676,7 @@ fn activity_priority_order(nodes: &[crate::api::schema::AgentActivityNode]) -> V
     let mut order = (0..nodes.len()).collect::<Vec<_>>();
     order.sort_by_key(|&index| {
         let node = &nodes[index];
-        let active = activity_status_is_active(node.status);
+        let active = node.status.is_active();
         let tier = if active {
             0u8
         } else if matches!(
@@ -1520,13 +1703,12 @@ fn activity_priority_order(nodes: &[crate::api::schema::AgentActivityNode]) -> V
 }
 
 /// 带祖先链的限额选点：按调用方给的次序逐个 [`Self::offer`]，节点连同尚未选入的
-/// 祖先链一起选入；整条链放不下名额时跳过该节点（不产生孤儿），记下有节点被跳过。
+/// 祖先链一起选入；整条链放不下名额时跳过该节点（不产生孤儿）。
 struct AncestorSelection {
     keep: Vec<bool>,
     kept: usize,
     cap: usize,
     chain: Vec<usize>,
-    skipped: bool,
 }
 
 impl AncestorSelection {
@@ -1536,7 +1718,6 @@ impl AncestorSelection {
             kept: 0,
             cap,
             chain: Vec::new(),
-            skipped: false,
         }
     }
 
@@ -1544,11 +1725,13 @@ impl AncestorSelection {
         self.kept >= self.cap
     }
 
-    fn offer(&mut self, index: usize, parent_of: &[Option<usize>]) {
-        if self.keep[index] {
-            return;
-        }
+    /// 选入 `index` 连同尚未选入的祖先链；返回这次选入的节点（自身在前、祖先在
+    /// 后），已选入过或整条链放不下时为空。
+    fn offer(&mut self, index: usize, parent_of: &[Option<usize>]) -> &[usize] {
         self.chain.clear();
+        if self.keep[index] {
+            return &self.chain;
+        }
         let mut cursor = Some(index);
         while let Some(current) = cursor {
             if self.keep[current] || self.chain.contains(&current) {
@@ -1557,14 +1740,15 @@ impl AncestorSelection {
             self.chain.push(current);
             cursor = parent_of[current];
         }
-        if self.kept + self.chain.len() <= self.cap {
-            for &member in &self.chain {
-                self.keep[member] = true;
-            }
-            self.kept += self.chain.len();
-        } else {
-            self.skipped = true;
+        if self.kept + self.chain.len() > self.cap {
+            self.chain.clear();
+            return &self.chain;
         }
+        for &member in &self.chain {
+            self.keep[member] = true;
+        }
+        self.kept += self.chain.len();
+        &self.chain
     }
 }
 
@@ -1576,6 +1760,7 @@ fn truncate_activity_nodes(nodes: Vec<crate::api::schema::AgentActivityNode>) ->
     let counts = ActivityCounts::of(&nodes);
     if nodes.len() <= MAX_AGENT_ACTIVITY_NODES {
         return TruncatedActivity {
+            summary: summarize_activity(&nodes),
             nodes,
             counts,
             truncated: false,
@@ -1593,8 +1778,9 @@ fn truncate_activity_nodes(nodes: Vec<crate::api::schema::AgentActivityNode>) ->
         .into_iter()
         .zip(selection.keep)
         .filter_map(|(node, keep)| keep.then_some(node))
-        .collect();
+        .collect::<Vec<_>>();
     TruncatedActivity {
+        summary: summarize_activity(&nodes),
         nodes,
         counts,
         truncated: true,
@@ -3036,6 +3222,54 @@ mod agent_activity_store_tests {
         );
     }
 
+    /// 摘要按步记下选入次序：每步一个活跃节点连同尚未选入的祖先链，任意前几步都
+    /// 祖先链完整；总预算按步轮流分给各属主，某属主下一步放不下剩余预算就停住。
+    #[test]
+    fn summary_steps_keep_ancestor_chains_and_share_the_budget_round_robin() {
+        use AgentActivityStatus::{Done, Running};
+        let tree = vec![
+            timed("wf", None, Running, Some(1), None),
+            timed("phase", Some("wf"), Running, Some(1), None),
+            timed("old", Some("phase"), Running, Some(2), None),
+            timed("new", Some("phase"), Running, Some(9), None),
+            timed("done", Some("phase"), Done, Some(1), Some(3)),
+        ];
+        let summary = summarize_activity(&tree);
+        // 最新开始的 `new` 带上 wf、phase 成第一步；`old` 单独一步；wf / phase
+        // 已选入，不再单独成步。
+        assert_eq!(summary.steps(), 2);
+        let names = |steps: usize| {
+            summary_nodes(&tree, &summary, steps)
+                .map(|view| view.id)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(names(1), ["wf", "phase", "new"], "来源顺序、祖先完整");
+        assert_eq!(names(2), ["wf", "phase", "old", "new"]);
+        assert!(summary_truncated(&tree, &summary, 1, 4));
+        assert!(!summary_truncated(&tree, &summary, 2, 4));
+
+        let flat = (0..3)
+            .map(|index| timed(&format!("r{index}"), None, Running, Some(index), None))
+            .collect::<Vec<_>>();
+        let flat = summarize_activity(&flat);
+        let empty = ActivitySummary::default();
+        // 预算 5：deep 的第一步占 3，flat 轮到一步占 1，第二轮 deep 再 1 → 用尽。
+        assert_eq!(
+            allot_summary_steps(&[Some(&summary), None, Some(&empty), Some(&flat)], 5),
+            [2, 0, 0, 1]
+        );
+        // 预算 2：deep 的第一步放不下就停住，flat 照常分到两步。
+        assert_eq!(
+            allot_summary_steps(&[Some(&summary), Some(&flat)], 2),
+            [0, 2]
+        );
+        assert_eq!(summary_node_budget(0), SUMMARY_ACTIVITY_NODES);
+        assert_eq!(
+            summary_node_budget(15),
+            SUMMARY_ACTIVITY_NODES + 15 * SUMMARY_NODES_PER_OWNER
+        );
+    }
+
     #[test]
     fn truncation_skips_a_running_chain_that_cannot_fit_whole() {
         let mut store = AgentActivityStore::default();
@@ -3252,9 +3486,9 @@ mod agent_activity_store_tests {
     }
 
     /// 客户端帧扇出是乘法路径：投影纪元是每客户端投影复用的键，而快照只带计数、
-    /// 截断标记与最新节点。深层节点（这里是 `ended_at_ms`）变化必须落库供
-    /// `agent.activity.read` / `agent.get` 读到，但不得递增纪元——否则每个挂载
-    /// 客户端都要整份重建快照再深比较，产出逐字节相同。
+    /// 截断标记与活跃子集。不进摘要的节点（这里是已完成节点的 `ended_at_ms`）变化
+    /// 必须落库供 `agent.activity.read` / `agent.get` 读到，但不得递增纪元——否则
+    /// 每个挂载客户端都要整份重建快照再深比较，产出逐字节相同。
     #[test]
     fn deep_node_changes_keep_the_projection_epoch_but_still_land_in_the_store() {
         let (mut state, agent_pane, _) = state_with_agent_pane();
@@ -3297,7 +3531,7 @@ mod agent_activity_store_tests {
         assert_eq!(stored.revision, 2, "整棵树照常落库");
         assert_eq!(stored.nodes[1].ended_at_ms, Some(500));
 
-        // 最新节点本身变了（运行中的节点结束）：摘要变化，纪元递增。
+        // 活跃子集变了（运行中的节点结束）：摘要变化，纪元递增。
         let applied = state
             .apply_agent_activity(
                 agent_pane,

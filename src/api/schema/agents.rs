@@ -294,6 +294,13 @@ pub enum AgentActivityStatus {
     Unknown,
 }
 
+impl AgentActivityStatus {
+    /// 活跃：等待、运行中或受阻——节点还没结束。
+    pub fn is_active(self) -> bool {
+        matches!(self, Self::Pending | Self::Running | Self::Blocked)
+    }
+}
+
 /// 活动节点内容片段的格式。未知字符串落 `Unknown`。
 #[derive(
     Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema,
@@ -315,6 +322,15 @@ pub const ACTIVITY_GROUP_WORKFLOW: &str = "workflow";
 /// 分组节点的 `agent_type`：workflow 下的一个 phase（节点 id
 /// `phase:<目录>:<phase>`），约定同 [`ACTIVITY_GROUP_WORKFLOW`]。
 pub const ACTIVITY_GROUP_PHASE: &str = "phase";
+
+/// `agent_type` 是否标明分组节点（[`ACTIVITY_GROUP_WORKFLOW`] /
+/// [`ACTIVITY_GROUP_PHASE`]）。
+pub fn is_activity_group_type(agent_type: Option<&str>) -> bool {
+    matches!(
+        agent_type,
+        Some(ACTIVITY_GROUP_WORKFLOW | ACTIVITY_GROUP_PHASE)
+    )
+}
 
 /// agent 活动树的一个节点。`AgentInfo` 派生 `Eq`，这里不得出现浮点；时间一律
 /// 用毫秒时间戳。

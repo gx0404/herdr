@@ -29,6 +29,7 @@ fn agent(pane_id: &str, activity_total: u32) -> ClientShellAgent {
             total: activity_total,
             truncated: false,
             nodes: Vec::new(),
+            ..Default::default()
         },
     }
 }
