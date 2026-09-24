@@ -1,57 +1,128 @@
 //! 宽字符在行尾、折行与 resize 前后的回归：网格、纯文本 / ANSI 快照与渲染单元格必须一致，
-//! 且渲染单元格不得把 2 宽字形放进窗格最后一列（会越界盖住边框或相邻窗格）。
+//! 且渲染单元格不得把 2 宽字形放进窗格最后一列（会越界盖住边框或相邻窗格）。整帧渲染与脏行
+//! 补丁两条显示路径分别用独立窗格对照，补丁逐行拼回的画面必须与整帧渲染逐格相同。
 //!
 //! 字节流全部手写合成：自动换行时宽字符恰好落在最后一列、TUI 用 CUP 逐行写满到最后一列、
-//! 覆盖已有宽字符的半边、inline 程序擦行重绘。网格期望按 xterm 语义给出，并用 tmux 3.0a
-//! 重放同一批字节核对过；其中「覆盖半边」用例就是 opencode（opentui）折行缺字时实际写出的字节。
+//! 覆盖已有宽字符的半边、inline 程序擦行重绘。期望按 xterm 语义给出；其中宽字符写到宽字符
+//! 右半格、窄字符写到宽字符首格、以及折行位置，已用 tmux 3.0a 重放同一批字节核对一致。
+//! 窄字符写到宽字符尾格时 tmux 3.0a 保留首格（「中x文」），这里按 xterm 清空首格（「 x文」）；
+//! 主屏重排后的视口位置两者也不同，不作对照。「宽字符写到右半格」就是 opencode（opentui）
+//! 折行缺字时实际写出的字节。
 use super::*;
 
 struct WidePane {
+    /// 整帧渲染与各类读取都走这个窗格；整帧渲染会清空它的脏标记。
     pane: PaneTerminal,
+    /// 只收脏行补丁、从不整帧渲染：与 `pane` 喂同样的字节与 resize，补丁路径因此不会被整帧
+    /// 渲染清空脏标记（做法同 `migration_tests::incremental_rows_reconstruct_full_render`）。
+    incremental: PaneTerminal,
     tx: mpsc::Sender<Bytes>,
     width: u16,
     height: u16,
+    /// 由补丁逐行拼回的画面，每格一个符号。
+    retained: Vec<Vec<String>>,
+    /// 最近一次补丁带来的行：行号与每格符号。
+    last_patch: Vec<(u16, Vec<String>)>,
 }
 
 impl WidePane {
     fn new(width: u16, height: u16) -> Self {
         let (tx, _rx) = mpsc::channel(16);
-        let terminal = crate::ghostty::Terminal::new(width, height, 4096).unwrap();
+        let new_pane = || {
+            let terminal = crate::ghostty::Terminal::new(width, height, 4096).unwrap();
+            PaneTerminal::new(GhosttyPaneTerminal::new(terminal, tx.clone()).unwrap())
+        };
         Self {
-            pane: PaneTerminal::new(GhosttyPaneTerminal::new(terminal, tx.clone()).unwrap()),
+            pane: new_pane(),
+            incremental: new_pane(),
             tx,
             width,
             height,
+            retained: placeholder_rows(width, height),
+            last_patch: Vec::new(),
         }
     }
 
     fn write(&mut self, bytes: &[u8]) {
-        let _ = self
-            .pane
-            .process_pty_bytes(PaneId::from_raw(1), 0, bytes, &self.tx);
-        self.assert_patch_matches_full_render();
+        for pane in [&self.pane, &self.incremental] {
+            let _ = pane.process_pty_bytes(PaneId::from_raw(1), 0, bytes, &self.tx);
+        }
+        self.sync_patch(false);
     }
 
     fn resize(&mut self, width: u16, height: u16) {
-        self.pane.resize(height, width, 8, 16).unwrap();
+        for pane in [&self.pane, &self.incremental] {
+            pane.resize(height, width, 8, 16).unwrap();
+        }
         self.width = width;
         self.height = height;
-        self.assert_patch_matches_full_render();
+        // 几何变了，补丁必须重发每一行：先填占位符，漏发的行在对照时现形。
+        self.retained = placeholder_rows(width, height);
+        self.sync_patch(true);
+    }
+
+    /// 收一次补丁并逐行拼进 `retained`，再与整帧渲染逐格对照。每次 write / resize 都至少
+    /// 要比对到一行，补丁空转或回退都算失败。
+    fn sync_patch(&mut self, expect_every_row: bool) {
+        let patch = match self
+            .incremental
+            .collect_dirty_patch(self.width, self.height)
+        {
+            TerminalDirtyPatchOutcome::Patch(patch) => patch,
+            outcome => panic!("每次 write / resize 都应产出脏行补丁，得到 {outcome:?}"),
+        };
+        self.last_patch = patch_symbols(patch);
+        assert!(!self.last_patch.is_empty(), "补丁至少应带一行");
+        if expect_every_row {
+            let rows: Vec<u16> = self.last_patch.iter().map(|(row, _)| *row).collect();
+            assert_eq!(
+                rows,
+                (0..self.height).collect::<Vec<_>>(),
+                "resize 后补丁应重发每一行"
+            );
+        }
+        for (row, symbols) in &self.last_patch {
+            assert_eq!(
+                symbols.len(),
+                usize::from(self.width),
+                "补丁第 {row} 行宽度"
+            );
+            self.retained[usize::from(*row)] = symbols.clone();
+        }
+        assert_eq!(
+            self.retained,
+            self.render(),
+            "补丁拼回的画面与整帧渲染不一致"
+        );
+    }
+
+    /// 最近一次补丁里指定行的每格符号。
+    fn patch_row(&self, y: u16) -> &[String] {
+        self.last_patch
+            .iter()
+            .find(|(row, _)| *row == y)
+            .map(|(_, symbols)| symbols.as_slice())
+            .expect("最近一次补丁应带这一行")
     }
 
     /// 整帧渲染：每行每格的符号（宽字符尾格为空串）。
     fn render(&self) -> Vec<Vec<String>> {
-        let backend = ratatui::backend::TestBackend::new(self.width, self.height);
+        self.render_area(self.width)
+    }
+
+    /// 把窗格画进宽 `area_width` 的区域；比网格窄时只画左边这几列。
+    fn render_area(&self, area_width: u16) -> Vec<Vec<String>> {
+        let backend = ratatui::backend::TestBackend::new(area_width, self.height);
         let mut terminal = ratatui::Terminal::new(backend).unwrap();
         let mut rows = Vec::new();
         terminal
             .draw(|frame| {
                 self.pane
-                    .render(frame, Rect::new(0, 0, self.width, self.height), false);
+                    .render(frame, Rect::new(0, 0, area_width, self.height), false);
                 let buffer = frame.buffer_mut();
                 for y in 0..self.height {
                     rows.push(
-                        (0..self.width)
+                        (0..area_width)
                             .map(|x| buffer[(x, y)].symbol().to_string())
                             .collect(),
                     );
@@ -63,22 +134,6 @@ impl WidePane {
 
     fn render_row(&self, y: usize) -> Vec<String> {
         self.render().swap_remove(y)
-    }
-
-    /// 脏行补丁路径与整帧渲染逐格一致（补丁只含脏行，逐行比对）。
-    fn assert_patch_matches_full_render(&self) {
-        let full = self.render();
-        match self.pane.collect_dirty_patch(self.width, self.height) {
-            TerminalDirtyPatchOutcome::Clean => {}
-            TerminalDirtyPatchOutcome::Patch(patch) => {
-                for (row, cells) in patch.rows {
-                    let symbols: Vec<String> =
-                        cells.iter().map(|cell| cell.symbol.to_string()).collect();
-                    assert_eq!(symbols, full[usize::from(row)], "补丁第 {row} 行");
-                }
-            }
-            TerminalDirtyPatchOutcome::Fallback => panic!("宽字符用例不应回退整帧"),
-        }
     }
 
     /// 网格：宽字符首格给出字符、尾格跳过，软换行占位格记作 ⏎，空格子为空格；去掉行尾空格。
@@ -136,19 +191,59 @@ impl WidePane {
             .to_string()
     }
 
-    /// 渲染单元格不得让 2 宽字形越过右边界：它必须至少还有一列给右半边。
+    /// 渲染单元格不得让 2 宽字形越过右边界。
     fn assert_no_wide_glyph_past_right_edge(&self) {
-        for (y, row) in self.render().iter().enumerate() {
-            for (x, symbol) in row.iter().enumerate() {
-                if symbol.width() > 1 {
-                    assert!(
-                        x + 1 < usize::from(self.width),
-                        "第 {y} 行第 {x} 列的 {symbol:?} 越过右边界：{row:?}"
-                    );
-                }
+        assert_no_wide_glyph_past_right_edge(&self.render());
+    }
+}
+
+/// 每个 2 宽字形都必须还有一列给右半边。
+fn assert_no_wide_glyph_past_right_edge(rows: &[Vec<String>]) {
+    for (y, row) in rows.iter().enumerate() {
+        for (x, symbol) in row.iter().enumerate() {
+            if symbol.width() > 1 {
+                assert!(
+                    x + 1 < row.len(),
+                    "第 {y} 行第 {x} 列的 {symbol:?} 越过右边界：{row:?}"
+                );
             }
         }
     }
+}
+
+fn placeholder_rows(width: u16, height: u16) -> Vec<Vec<String>> {
+    vec![vec!["?".to_string(); usize::from(width)]; usize::from(height)]
+}
+
+fn patch_symbols(patch: TerminalDirtyPatch) -> Vec<(u16, Vec<String>)> {
+    patch
+        .rows
+        .into_iter()
+        .map(|(row, cells)| {
+            (
+                row,
+                cells.iter().map(|cell| cell.symbol.to_string()).collect(),
+            )
+        })
+        .collect()
+}
+
+/// 在从未收过补丁的新窗格上，按给定可绘宽度收第一次补丁（第一次收集带全部行）。
+fn first_patch_in_area(width: u16, height: u16, bytes: &[u8], area_width: u16) -> Vec<Vec<String>> {
+    let (tx, _rx) = mpsc::channel(16);
+    let terminal = crate::ghostty::Terminal::new(width, height, 4096).unwrap();
+    let pane = PaneTerminal::new(GhosttyPaneTerminal::new(terminal, tx.clone()).unwrap());
+    let _ = pane.process_pty_bytes(PaneId::from_raw(1), 0, bytes, &tx);
+    let patch = match pane.collect_dirty_patch(area_width, height) {
+        TerminalDirtyPatchOutcome::Patch(patch) => patch_symbols(patch),
+        outcome => panic!("第一次收集应产出补丁，得到 {outcome:?}"),
+    };
+    assert_eq!(
+        patch.iter().map(|(row, _)| *row).collect::<Vec<_>>(),
+        (0..height).collect::<Vec<_>>(),
+        "第一次收集应带全部行"
+    );
+    patch.into_iter().map(|(_, symbols)| symbols).collect()
 }
 
 fn cells(symbols: &[&str]) -> Vec<String> {
@@ -260,28 +355,68 @@ fn overwriting_half_of_a_wide_char_blanks_its_other_half() {
 
 #[test]
 fn alt_screen_shrink_that_cuts_a_wide_char_draws_a_blank_at_the_edge() {
-    // 备用屏不重排：8 列缩到 7 列时，最后两列上的「字」只剩首格留在第 7 列。
+    // 备用屏不重排：8 列缩到 7 列时，最后两列上的「字」只剩首格留在第 6 列（0 基）。
     let mut pane = WidePane::new(8, 3);
-    pane.write("\x1b[?1049h\x1b[1;1Hab中文字\x1b[2;1H下一行".as_bytes());
+    pane.write("\x1b[?1049h\x1b[1;1Hab中文字\x1b[2;1H下一行\x1b[3;1Habcdefgh".as_bytes());
     pane.resize(7, 3);
 
-    // 网格与文本读取保留这个字（tmux capture-pane 同样保留），变回原宽时还能完整显示。
-    assert_eq!(pane.grid(), ["ab中文字", "下一行", ""]);
-    assert_eq!(pane.pane.visible_text(), "ab中文字\n下一行\n");
-    // 显示层把放不下的首格画成空白，不让 2 宽字形越出窗格（tmux 画窗格时同样补空白）。
+    // 网格与文本读取保留这个字（tmux 3.0a 的 capture-pane 同样保留），变回原宽时还能显示。
+    assert_eq!(pane.grid(), ["ab中文字", "下一行", "abcdefg"]);
+    assert_eq!(pane.pane.visible_text(), "ab中文字\n下一行\nabcdefg\n");
+    // 两条显示路径都把放不下的首格画成空白，不让 2 宽字形越出窗格；末格的普通窄字符照画。
+    // tmux 3.0a 客户端画这一格时同样输出空格（已录客户端输出核对）。
     assert_eq!(
         pane.render_row(0),
         cells(&["a", "b", "中", "", "文", "", " "])
     );
+    assert_eq!(pane.patch_row(0).last().map(String::as_str), Some(" "));
+    assert_eq!(pane.render_row(2).last().map(String::as_str), Some("g"));
+    assert_eq!(pane.patch_row(2).last().map(String::as_str), Some("g"));
     pane.assert_no_wide_glyph_past_right_edge();
 
+    // vendored libghostty-vt 的既有行为（0 基列）：缩窄截掉第 7 列的尾格后，变宽时不补回尾格，
+    // 第 6 列仍是没有尾格的宽字符首格、第 7 列是普通空格，所以这里钉住第 7 列为空格。另据
+    // `Terminal.zig::printCell` 推断：之后若只往第 7 列写窄字符，它不回看左侧首格，该字会被
+    // 第 6 列的 2 宽字形盖住，直到应用重写第 6 列。
     pane.resize(8, 3);
     assert_eq!(pane.grid()[0], "ab中文字");
     assert_eq!(
         pane.render_row(0),
         cells(&["a", "b", "中", "", "文", "", "字", " "])
     );
+    assert_eq!(pane.patch_row(0), pane.render_row(0).as_slice());
     pane.assert_no_wide_glyph_past_right_edge();
+}
+
+#[test]
+fn drawable_area_narrower_than_the_grid_blanks_only_a_cut_wide_char() {
+    // 可绘区域比网格窄（虚拟渲染，或窗格已缩小而终端 resize 尚未生效）：按可绘列数判断右边缘，
+    // 只把右半格落在区域外的宽字符首格画成空白，末格的普通窄字符照画。
+    let bytes = "\x1b[?1049h\x1b[1;1Hab中文字\x1b[2;1Habcdefgh".as_bytes();
+    let mut pane = WidePane::new(8, 2);
+    pane.write(bytes);
+    for (area_width, expected) in [
+        (
+            7,
+            [
+                cells(&["a", "b", "中", "", "文", "", " "]),
+                cells(&["a", "b", "c", "d", "e", "f", "g"]),
+            ],
+        ),
+        (
+            5,
+            [
+                cells(&["a", "b", "中", "", " "]),
+                cells(&["a", "b", "c", "d", "e"]),
+            ],
+        ),
+    ] {
+        let rendered = pane.render_area(area_width);
+        assert_eq!(rendered, expected, "整帧渲染，可绘 {area_width} 列");
+        assert_no_wide_glyph_past_right_edge(&rendered);
+        let patched = first_patch_in_area(8, 2, bytes, area_width);
+        assert_eq!(patched, expected, "脏行补丁，可绘 {area_width} 列");
+    }
 }
 
 #[test]

@@ -6193,8 +6193,8 @@
       "anchor": "structure",
       "doc": "src/pane/terminal/wide_char_tests.rs",
       "id": "src-pane-terminal-wide-char-tests-rs-structure",
-      "source_sha256": "f67633c7a9d5cb09684b763d3991c37ebd0ed07571b4da6c5a3477289eb026b3",
-      "text": "模块文档：宽字符在行尾、折行与 resize 前后的回归：网格、纯文本 / ANSI 快照与渲染单元格必须一致， 且渲染单元格不得把 2 宽字形放进窗格最后一列（会越界盖住边框或相邻窗格）。  字节流全部手写合成：自动换行时宽字符恰好落在最后一列、TUI 用 CUP 逐行写满到最后一列、 覆盖已有宽字符的半边、inline 程序擦行重绘。网格期望按 xterm 语义给出，并用 tmux 3.0a 重放同一批字节核对过；其中「覆盖半边」用例就是 opencode（opentui）折行缺字时实际写出的字节。\n公开项：\nimpl WidePane {"
+      "source_sha256": "b95609400bd5dbf757e0ed48f1c232cfce258fcb7c2bfccca1d4e9383b39e9b8",
+      "text": "模块文档：宽字符在行尾、折行与 resize 前后的回归：网格、纯文本 / ANSI 快照与渲染单元格必须一致， 且渲染单元格不得把 2 宽字形放进窗格最后一列（会越界盖住边框或相邻窗格）。整帧渲染与脏行 补丁两条显示路径分别用独立窗格对照，补丁逐行拼回的画面必须与整帧渲染逐格相同。  字节流全部手写合成：自动换行时宽字符恰好落在最后一列、TUI 用 CUP 逐行写满到最后一列、 覆盖已有宽字符的半边、inline 程序擦行重绘。期望按 xterm 语义给出；其中宽字符写到宽字符 右半格、窄字符写到宽字符首格、以及折行位置，已用 tmux 3.0a 重放同一批字节核对一致。 窄字符写到宽字符尾格时 tmux 3.0a 保留首格（「中x文」），这里按 xterm 清空首格（「 x文」）； 主屏重排后的视口位置两者也不同，不作对照。「宽字符写到右半格」就是 opencode（opentui） 折行缺字时实际写出的字节。\n公开项：\nimpl WidePane {"
     },
     {
       "anchor": "structure",
