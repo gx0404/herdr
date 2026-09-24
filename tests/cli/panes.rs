@@ -805,3 +805,96 @@ fn pane_read_rejects_invalid_value_with_usage_error() {
     assert!(stderr.contains("invalid read source: bogus"));
     assert!(!stderr.contains("Error: Custom"));
 }
+
+/// RL12：`pane process-info` 能查任何窗格，前台进程命令行里疑似凭据的值要打码，
+/// 程序名与参数结构原样保留。
+#[test]
+fn pane_process_info_redacts_credentials_in_foreground_command_lines() {
+    let base = unique_test_dir();
+    let config_home = base.join("config");
+    let runtime_dir = base.join("runtime");
+    let socket_path = runtime_dir.join("herdr.sock");
+
+    let herdr = spawn_herdr(&config_home, &runtime_dir, &socket_path);
+    wait_for_socket(&socket_path, LOADED_WAIT);
+    let created = run_cli_json(
+        &socket_path,
+        &["workspace", "create", "--cwd", base.to_str().unwrap()],
+    );
+    let pane_id = created["result"]["root_pane"]["pane_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // `sleep; :` 让 sh 留在前台当 sleep 的父进程，argv 里带着手写的假凭据。
+    let ready = base.join("probe-ready");
+    let script = "touch \"$0\"; sleep 60; :";
+    let command = format!(
+        "/bin/sh -c '{script}' '{}' --token=fake-s3cr3t-1 --api-key fake-s3cr3t-2 -H 'Authorization: Bearer fake-s3cr3t-3' OPENAI_API_KEY=fake-s3cr3t-4 https://user:fake-s3cr3t-5@example.invalid/repo",
+        ready.display()
+    );
+    let ran = run_cli(&socket_path, &["pane", "run", &pane_id, &command]);
+    assert!(
+        ran.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&ran.stderr)
+    );
+    assert!(
+        wait_until(LOADED_WAIT, Duration::from_millis(25), || ready.exists()),
+        "probe command did not start"
+    );
+
+    // 前台进程组可能晚一拍才换成这条命令：轮询到它出现为止。
+    let deadline = Instant::now() + LOADED_WAIT;
+    let (stdout, probe) = loop {
+        let output = run_cli(&socket_path, &["pane", "process-info", "--pane", &pane_id]);
+        assert!(
+            output.status.success(),
+            "stderr: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let stdout = String::from_utf8(output.stdout).unwrap();
+        let info: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+        let probe = info["result"]["process_info"]["foreground_processes"]
+            .as_array()
+            .and_then(|processes| {
+                processes.iter().find(|process| {
+                    process["argv"]
+                        .as_array()
+                        .is_some_and(|argv| argv.iter().any(|arg| arg == "--api-key"))
+                })
+            })
+            .cloned();
+        if let Some(probe) = probe {
+            break (stdout, probe);
+        }
+        assert!(
+            Instant::now() < deadline,
+            "probe never showed up as a foreground process: {stdout}"
+        );
+        thread::sleep(Duration::from_millis(50));
+    };
+
+    assert!(
+        !stdout.contains("fake-s3cr3t"),
+        "credential leaked: {stdout}"
+    );
+    let ready_arg = ready.display().to_string();
+    let expected = [
+        "/bin/sh",
+        "-c",
+        script,
+        ready_arg.as_str(),
+        "--token=[REDACTED]",
+        "--api-key",
+        "[REDACTED]",
+        "-H",
+        "Authorization: Bearer [REDACTED]",
+        "OPENAI_API_KEY=[REDACTED]",
+        "https://user:[REDACTED]@example.invalid/repo",
+    ];
+    assert_eq!(probe["argv"], serde_json::json!(expected), "{probe}");
+    assert_eq!(probe["cmdline"], expected.join(" "), "{probe}");
+
+    cleanup_spawned_herdr(herdr, base);
+}

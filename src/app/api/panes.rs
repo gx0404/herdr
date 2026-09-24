@@ -549,14 +549,19 @@ impl App {
             .map(|job| {
                 job.processes
                     .into_iter()
-                    .map(|process| PaneProcessInfoProcess {
-                        pid: process.pid,
-                        name: process.name,
-                        argv0: process.argv0,
-                        argv: process.argv,
-                        cmdline: process.cmdline,
-                        cwd: crate::platform::process_cwd(process.pid)
-                            .map(|cwd| cwd.display().to_string()),
+                    .map(|process| {
+                        // 其它窗格的命令行可能带凭据：只在应答里打码，采集原样（RL12）。
+                        let (argv, cmdline) =
+                            super::process_redaction::redact_command(process.argv, process.cmdline);
+                        PaneProcessInfoProcess {
+                            pid: process.pid,
+                            name: process.name,
+                            argv0: process.argv0,
+                            argv,
+                            cmdline,
+                            cwd: crate::platform::process_cwd(process.pid)
+                                .map(|cwd| cwd.display().to_string()),
+                        }
                     })
                     .collect()
             })
