@@ -1198,6 +1198,11 @@ pub(super) enum PendingEndpointKind {
         purpose: super::observability::Purpose,
     },
     Generic,
+    /// 发往指定端点（不必是当前端点）的一次性动作：其它机器上窗格的重命名与
+    /// 关闭（`ClientRenameTarget::EndpointPane`、agent 右键「关闭窗格」）。应答
+    /// 回来时该端点不是当前端点也放行（`pending_request_allows_inactive_endpoint`），
+    /// 失败与 `Generic` 同一个「操作被拒绝」提示，不再被静默丢弃（T1 审查轻 5）。
+    CrossEndpointAction,
     ProductAnnouncementDismiss {
         version: String,
         id: String,

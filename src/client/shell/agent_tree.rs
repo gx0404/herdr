@@ -2031,7 +2031,8 @@ impl ClientShellState {
     }
 
     /// 「关闭窗格」：发 `pane.close`，与 pane 右键菜单的「关闭窗格」同一请求；
-    /// 其它在线端点直接发往该端点（不切换当前端点），不在线则提示。
+    /// 其它在线端点直接发往该端点（不切换当前端点），应答在该端点不是当前端点时
+    /// 也放行、失败照常提示（T1 审查轻 5）；不在线则提示。
     fn close_agent_pane(
         &mut self,
         endpoint_id: ClientEndpointId,
@@ -2045,7 +2046,7 @@ impl ClientShellState {
         } else if !self.push_endpoint_method_for(
             &endpoint_id,
             method,
-            PendingEndpointKind::Generic,
+            PendingEndpointKind::CrossEndpointAction,
             outcome,
         ) {
             let label = self.endpoint_label(&endpoint_id).to_owned();

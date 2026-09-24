@@ -3216,3 +3216,114 @@ fn renaming_a_remote_agent_pane_goes_to_its_endpoint_and_dims_when_offline() {
     right_click_endpoint_agent(&mut state, &local_pane.0, &local_pane.1);
     assert!(context_item(&state, ClientContextMenuAction::RenameAgent).1);
 }
+
+/// 对远端 agent 的窗格发起「重命名窗格」（输入新名字回车）或「关闭窗格」，返回
+/// 发往远端的那一个请求。
+fn fire_remote_pane_action(
+    state: &mut ClientShellState,
+    remote: &ClientEndpointId,
+    action: ClientContextMenuAction,
+) -> (String, crate::api::schema::Request) {
+    use super::super::agent_activity_overlay::AgentActivityOwner;
+    let mut outcome = ClientShellInput::default();
+    state.activate_agent_context_action(
+        remote.clone(),
+        AgentActivityOwner::Pane {
+            pane_id: "pane_1".into(),
+        },
+        action,
+        &mut outcome,
+    );
+    if action == ClientContextMenuAction::RenameAgent {
+        assert!(state.insert_overlay_text("build-agent"));
+        outcome = state.handle_raw_events(vec![RawInputEvent::Key(
+            crate::input::TerminalKey::new(KeyCode::Enter, KeyModifiers::empty()),
+        )]);
+    }
+    let [ClientShellAction::EndpointRequest {
+        endpoint_id,
+        boot_id,
+        request,
+    }] = &outcome.actions[..]
+    else {
+        panic!("{action:?} 应发往远端端点：{:?}", outcome.actions);
+    };
+    assert_eq!(endpoint_id, remote);
+    (boot_id.clone(), (**request).clone())
+}
+
+/// T1 审查轻 5：对其它机器上的窗格「重命名窗格」「关闭窗格」，请求直接发往该端点、
+/// 不切换当前端点（D9）。应答回来时该端点仍不是当前端点：以前这类请求不在
+/// `pending_request_allows_inactive_endpoint` 白名单里，应答被当作过期请求取消、
+/// 静默丢弃，`pane_not_found` 这类失败用户毫无提示。现在放行，失败与当前端点的
+/// 动作同一个「操作被拒绝」提示并写出服务端的原因；关闭需要确认时（没法替另一台
+/// 机器弹确认框）同样提示；成功不提示。
+#[test]
+fn remote_pane_rename_and_close_failures_show_a_notice() {
+    let texts = &crate::i18n::texts().endpoint;
+    for action in [
+        ClientContextMenuAction::RenameAgent,
+        ClientContextMenuAction::CloseAgentPane,
+    ] {
+        for (code, message) in [
+            ("pane_not_found", "pane pane_1 not found"),
+            (
+                "confirmation_required",
+                "closing this pane would close a worktree group",
+            ),
+        ] {
+            let (mut state, remote) = federated_state(AgentPanelSortConfig::Spaces);
+            state.compose(106, 40).expect("联邦帧");
+            let (boot_id, request) = fire_remote_pane_action(&mut state, &remote, action);
+            assert!(
+                !state.endpoint_is_active(&remote),
+                "用例前提：远端不是当前端点"
+            );
+            assert!(
+                state.pending_request_allows_inactive_endpoint(&request.id),
+                "{action:?}：远端不是当前端点也放行应答"
+            );
+            let (repaint, actions) = state.handle_endpoint_result(
+                &boot_id,
+                &request.id,
+                Err(ClientShellEndpointError {
+                    code: Some(code.into()),
+                    message: message.into(),
+                }),
+            );
+            assert!(repaint && actions.is_empty(), "{action:?} {code}");
+            let notice = state
+                .visible_endpoint_notice
+                .as_ref()
+                .unwrap_or_else(|| panic!("{action:?} {code}：失败要提示"));
+            assert_eq!(notice.title, texts.notice_action_rejected);
+            assert_eq!(notice.body, message);
+            assert!(
+                !matches!(state.overlay, Some(ClientShellOverlay::ConfirmClose(_))),
+                "不替另一台机器的工作区弹确认框"
+            );
+            let text = compact(&frame_rows(&state.compose(106, 40).expect("提示帧")).join(""));
+            assert!(
+                text.contains(&compact(texts.notice_action_rejected))
+                    && text.contains(&compact(message)),
+                "{action:?} {code}：提示画在画面上：{text}"
+            );
+        }
+
+        // 成功：不提示，在途记录清掉。
+        let (mut state, remote) = federated_state(AgentPanelSortConfig::Spaces);
+        state.compose(106, 40).expect("联邦帧");
+        let (boot_id, request) = fire_remote_pane_action(&mut state, &remote, action);
+        let (_, actions) = state.handle_endpoint_result(
+            &boot_id,
+            &request.id,
+            Ok(crate::api::schema::ResponseResult::Ok {}),
+        );
+        assert!(actions.is_empty());
+        assert!(
+            state.visible_endpoint_notice.is_none(),
+            "{action:?}：成功不提示"
+        );
+        assert!(!state.pending_requests.contains_key(&request.id));
+    }
+}

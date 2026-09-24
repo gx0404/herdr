@@ -1134,6 +1134,7 @@ impl ClientShellState {
                 pane_id,
             } => {
                 // 其它端点的窗格：直接发往该端点、不切换当前端点（文档终审 D9）；
+                // 应答在该端点不是当前端点时也放行，失败照常提示（T1 审查轻 5）。
                 // 打开浮层后端点掉线就照「关闭窗格」的做法提示未就绪。
                 let method =
                     crate::api::schema::Method::PaneRename(crate::api::schema::PaneRenameParams {
@@ -1143,7 +1144,7 @@ impl ClientShellState {
                 if !self.push_endpoint_method_for(
                     &endpoint_id,
                     method,
-                    PendingEndpointKind::Generic,
+                    PendingEndpointKind::CrossEndpointAction,
                     outcome,
                 ) {
                     let label = self.endpoint_label(&endpoint_id).to_owned();

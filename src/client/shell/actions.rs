@@ -542,8 +542,8 @@ impl ClientShellState {
     }
 
     /// Whether a pending request is allowed to resolve while its endpoint is
-    /// not the active one (snippet runs and broadcast fan-out fire without
-    /// switching surfaces).
+    /// not the active one (snippet runs, broadcast fan-out and pane actions on
+    /// another machine fire without switching surfaces).
     pub(crate) fn pending_request_allows_inactive_endpoint(&self, request_id: &str) -> bool {
         self.pending_requests
             .get(request_id)
@@ -554,6 +554,7 @@ impl ClientShellState {
                         | PendingEndpointKind::TextRelease
                         | PendingEndpointKind::SnippetRun { .. }
                         | PendingEndpointKind::BroadcastSend { .. }
+                        | PendingEndpointKind::CrossEndpointAction
                         | PendingEndpointKind::Observation { .. }
                         | PendingEndpointKind::AgentActivityRead { .. }
                 )
@@ -685,12 +686,15 @@ impl ClientShellState {
                 Vec::new(),
             );
         }
-        // Cross-endpoint requests (snippet runs, broadcast fan-out) carry
-        // their target endpoint's boot id; the active-snapshot comparison
-        // only applies to requests fired at the active endpoint.
+        // Cross-endpoint requests (snippet runs, broadcast fan-out, pane
+        // actions on another machine) carry their target endpoint's boot id;
+        // the active-snapshot comparison only applies to requests fired at the
+        // active endpoint.
         let cross_endpoint = matches!(
             pending.kind,
-            PendingEndpointKind::SnippetRun { .. } | PendingEndpointKind::BroadcastSend { .. }
+            PendingEndpointKind::SnippetRun { .. }
+                | PendingEndpointKind::BroadcastSend { .. }
+                | PendingEndpointKind::CrossEndpointAction
         );
         if pending.boot_id != boot_id
             || (!cross_endpoint
@@ -746,10 +750,11 @@ impl ClientShellState {
         }
         if let Err(error) = &result {
             let code = error.code.as_deref().unwrap_or("invalid_response");
-            if !matches!(
-                code,
-                "confirmation_required" | "stale_content" | "stale_target"
-            ) {
+            // `confirmation_required` 平时由确认浮层接手；另一台机器的动作没法替
+            // 它的工作区弹确认框，照常提示原因（T1 审查轻 5）。
+            let confirmation_handled = code == "confirmation_required"
+                && !matches!(pending.kind, PendingEndpointKind::CrossEndpointAction);
+            if !confirmation_handled && !matches!(code, "stale_content" | "stale_target") {
                 let endpoint_texts = &crate::i18n::texts().endpoint;
                 let (kind, notice_code, title, body) = match code {
                     "endpoint_timeout" => (
@@ -793,7 +798,7 @@ impl ClientShellState {
             | PendingEndpointKind::Views { .. } => {
                 unreachable!("后台响应已提前处理")
             }
-            PendingEndpointKind::Generic => {}
+            PendingEndpointKind::Generic | PendingEndpointKind::CrossEndpointAction => {}
             PendingEndpointKind::PaneLinkResolve { .. }
             | PendingEndpointKind::SnippetRun { .. } => {
                 unreachable!("handled above")
