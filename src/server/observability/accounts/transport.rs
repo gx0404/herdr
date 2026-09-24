@@ -1261,40 +1261,39 @@ pub(super) fn interactive(
 
 /// 阻塞对话的判定 → 探测错误：登录组是终态；信任组是可重试的 transient `Error` 并置
 /// `trust_required`。herdr 不会替用户应答信任对话（那属代用户授权，且会写用户的官方状态
-/// 文件）；有稳定探测目录时文案给出确切路径，用户在自己的 CLI 里确认一次即可复用。
+/// 文件）；有稳定探测目录时文案给出确切路径，用户在自己的 CLI 里确认一次即可复用。文案都在
+/// 说明表里（按 server 语言生成，客户端显示前再按界面语言重排，带目录的一句按模板反解）。
 pub(super) fn blocker_error(
     provider: &Provider,
     blocker: ProbeBlocker,
     stable_dir: Option<&Path>,
 ) -> InteractiveError {
     let statusline = crate::integration::usage_supports_statusline(provider.agent);
+    let notices = super::notices();
     match blocker {
         ProbeBlocker::Trust => InteractiveError {
             status: ObservationStatus::Error,
             message: match stable_dir {
-                Some(dir) => format!(
-                    "需在 CLI 中确认目录信任：在终端运行 `cd {} && {}` 并选择「Yes, I trust this folder」一次；herdr 不会代为应答",
-                    dir.display(),
-                    provider.command
+                Some(dir) => crate::i18n::fill(
+                    notices.trust_dir_fmt,
+                    &[
+                        ("dir", &dir.display().to_string()),
+                        ("command", provider.command),
+                    ],
                 ),
-                None if statusline => crate::i18n::texts()
-                    .usage_notice
-                    .trust_callback_hint
-                    .into(),
-                None => "需在 CLI 中确认目录信任；herdr 不会代为应答，请先在正常会话完成一次确认".into(),
+                None if statusline => notices.trust_callback_hint.into(),
+                None => notices.trust_hint.into(),
             },
             trust_required: true,
         },
         ProbeBlocker::SignIn => InteractiveError {
             status: ObservationStatus::NotAuthenticated,
             message: if statusline {
-                crate::i18n::texts()
-                    .usage_notice
-                    .sign_in_callback_hint
-                    .into()
+                notices.sign_in_callback_hint
             } else {
-                "官方 CLI 需要登录，请先在正常会话完成登录".into()
-            },
+                notices.sign_in_hint
+            }
+            .into(),
             trust_required: false,
         },
     }
@@ -1304,7 +1303,7 @@ pub(super) fn blocker_error(
 fn probe_timeout() -> InteractiveError {
     InteractiveError {
         status: ObservationStatus::Error,
-        message: "官方用量查询超时；未发送模型任务".into(),
+        message: super::notices().probe_timeout.into(),
         trust_required: false,
     }
 }
@@ -2808,33 +2807,30 @@ Options:
     #[test]
     fn trust_screen_is_retryable_and_sign_in_screen_is_terminal() {
         let kimi = super::super::registry::provider("kimi").expect("kimi 已登记");
+        let monitor = &crate::i18n::texts().monitor;
         let trust = parse::interactive_blocker(" ❯ 1. Yes, I trust this folder\n   2. No, exit\n")
             .expect("信任对话");
-        let error = blocker_error(claude(), trust, None);
+        // 生产路径：claude 的交互探测总在稳定探测目录里跑（`RealClaudeTransport::interactive`
+        // 与 Windows 辅助进程都传 `Some(probe_dir)`），文案给出可以照抄的确切路径——用户在
+        // 自己的 CLI 里确认一次即可复用。
+        let dir = std::path::Path::new("/state/account-usage/probe/claude-default");
+        let error = blocker_error(claude(), trust, Some(dir));
         assert_eq!(
             error.status,
             ObservationStatus::Error,
             "信任态可重试，不进终态集合"
         );
         assert!(error.trust_required);
-        assert!(error.message.contains("需在 CLI 中确认目录信任"));
-        // 文档终审 D2：指引写账号页上「官方回调」开关的名字，不再指向「监控 → 设置」。
-        assert!(
-            error.message.contains("在账号页打开「官方回调」"),
-            "claude 给回调指引：{}",
-            error.message
+        assert_eq!(
+            error.message,
+            crate::i18n::fill(
+                super::super::notices().trust_dir_fmt,
+                &[
+                    ("dir", "/state/account-usage/probe/claude-default"),
+                    ("command", "claude"),
+                ],
+            )
         );
-        assert!(!error.message.contains("监控 → 设置"));
-        assert!(
-            !blocker_error(kimi, trust, None)
-                .message
-                .contains("官方回调"),
-            "没有 statusline 回调的厂商不给这条指引"
-        );
-        // 有稳定探测目录时给出可执行的确切路径：用户在自己的 CLI 里确认一次即可复用。
-        let dir = std::path::Path::new("/state/account-usage/probe/claude-default");
-        let error = blocker_error(claude(), trust, Some(dir));
-        assert!(error.trust_required);
         assert!(
             error
                 .message
@@ -2842,25 +2838,66 @@ Options:
             "{}",
             error.message
         );
+        // 没有稳定目录时：支持官方回调的厂商给账号页上开关的指引（文档终审 D2，不再指向
+        // 「监控 → 设置」），其余厂商只请用户先在正常会话里确认。
+        let hint = blocker_error(claude(), trust, None).message;
+        assert!(
+            hint.contains(monitor.callback_toggle) && hint.contains(monitor.tab_accounts),
+            "claude 给回调指引：{hint}"
+        );
+        assert!(!hint.contains("监控 → 设置"));
+        let plain = blocker_error(kimi, trust, None);
+        assert!(plain.trust_required);
+        assert!(
+            !plain.message.contains(monitor.callback_toggle),
+            "没有 statusline 回调的厂商不给这条指引：{}",
+            plain.message
+        );
 
         let sign_in = parse::interactive_blocker(
             " Select login method:\n ❯ 1. Claude account with subscription\n",
         )
         .expect("登录对话");
-        let error = blocker_error(claude(), sign_in, None);
-        assert_eq!(error.status, ObservationStatus::NotAuthenticated);
-        assert!(!error.trust_required);
-        assert!(
-            error.message.contains("在账号页打开「官方回调」"),
-            "{}",
-            error.message
-        );
+        for stable_dir in [Some(dir), None] {
+            let error = blocker_error(claude(), sign_in, stable_dir);
+            assert_eq!(error.status, ObservationStatus::NotAuthenticated);
+            assert!(!error.trust_required);
+            assert!(
+                error.message.contains(monitor.callback_toggle),
+                "{}",
+                error.message
+            );
+        }
+        assert!(!blocker_error(kimi, sign_in, None)
+            .message
+            .contains(monitor.callback_toggle));
 
         // 空屏：没有阻塞对话，只能等到截止时间，归 transient。
         assert_eq!(parse::interactive_blocker(""), None);
         let timeout = probe_timeout();
         assert_eq!(timeout.status, ObservationStatus::Error);
         assert!(!timeout.trust_required);
+    }
+
+    /// 审查中级（文档终审 D7）：生产路径上带目录的信任提示、登录提示与探测超时都按 server
+    /// 语言生成——英文界面整句是 ASCII，目录与命令原样；中文界面是中文。
+    #[test]
+    fn interactive_probe_notices_follow_the_interface_language() {
+        use crate::i18n::{has_cjk, lang_guard, Lang};
+        let dir = std::path::Path::new("/p");
+        for (lang, chinese) in [(Lang::En, false), (Lang::ZhCn, true)] {
+            let _guard = lang_guard(lang);
+            let trust = blocker_error(claude(), ProbeBlocker::Trust, Some(dir)).message;
+            assert!(trust.contains("cd /p && claude"), "{lang:?}: {trust}");
+            let sign_in = blocker_error(claude(), ProbeBlocker::SignIn, Some(dir)).message;
+            let timeout = probe_timeout().message;
+            for message in [&trust, &sign_in, &timeout] {
+                assert_eq!(has_cjk(message), chinese, "{lang:?}: {message}");
+                if !chinese {
+                    assert!(message.is_ascii(), "{message}");
+                }
+            }
+        }
     }
 
     #[test]

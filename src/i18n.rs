@@ -597,10 +597,19 @@ pub struct UsageNoticeTexts {
     pub callback_unknown_fmt: &'static str, // args: login
     /// 交互探测的失败原因接在等待说明之后时的分隔语。
     pub interactive_failure_sep: &'static str,
-    /// 交互探测停在目录信任对话、且没有稳定探测目录时的提示。
+    /// 支持官方回调的厂商停在目录信任对话、且没有稳定探测目录时的提示。
     pub trust_callback_hint: &'static str,
-    /// 交互探测停在登录对话时的提示。
+    /// 支持官方回调的厂商停在登录对话时的提示。
     pub sign_in_callback_hint: &'static str,
+    /// 交互探测停在目录信任对话、有稳定探测目录时（claude 的生产路径）的提示：给出可以
+    /// 照抄的目录与命令。带参数，客户端按模板反解后换成界面语言（见 `templates`）。
+    pub trust_dir_fmt: &'static str, // args: dir, command
+    /// 不支持官方回调的厂商停在目录信任对话、且没有稳定探测目录时的提示。
+    pub trust_hint: &'static str,
+    /// 不支持官方回调的厂商停在登录对话时的提示。
+    pub sign_in_hint: &'static str,
+    /// 交互探测在截止时间前没等到就绪提示或用量输出。
+    pub probe_timeout: &'static str,
     // ---- 账号卡与表格「说明」里的固定说明（文档终审 D7）----
     /// 冷条目还没有查询过。
     pub not_queried_yet: &'static str,
@@ -676,10 +685,13 @@ impl UsageNoticeTexts {
 
     /// 快照 `message` 里没有参数的固定说明，按下标与各语言对齐。只进上报应答的拒绝
     /// 说明（`binding_required` 等）不在其中：客户端不显示它们。
-    fn fixed(&self) -> [&'static str; 15] {
+    fn fixed(&self) -> [&'static str; 18] {
         [
             self.trust_callback_hint,
             self.sign_in_callback_hint,
+            self.trust_hint,
+            self.sign_in_hint,
+            self.probe_timeout,
             self.not_queried_yet,
             self.provider_disabled,
             self.callback_stale,
@@ -694,6 +706,12 @@ impl UsageNoticeTexts {
             self.no_quota,
             self.no_push_usage,
         ]
+    }
+
+    /// 快照 `message` 里带参数的说明模板，按下标与各语言对齐：客户端按原语言的模板反解
+    /// 出参数，再用界面语言的同一模板重填。
+    fn templates(&self) -> [&'static str; 1] {
+        [self.trust_dir_fmt]
     }
 
     fn render(&self, notice: UsageNotice) -> std::borrow::Cow<'static, str> {
@@ -748,6 +766,9 @@ pub fn localize_usage_notice(message: &str) -> std::borrow::Cow<'_, str> {
             target.render(*notice)
         };
     }
+    if let Some(localized) = localize_templated_notice(message, current) {
+        return localized;
+    }
     for (lang, notice, text) in catalog {
         if !matches!(notice, UsageNotice::ClaudeWaiting { .. }) {
             continue;
@@ -770,6 +791,56 @@ pub fn localize_usage_notice(message: &str) -> std::borrow::Cow<'_, str> {
         ));
     }
     std::borrow::Cow::Borrowed(message)
+}
+
+/// 带参数的说明（`UsageNoticeTexts::templates`）：按各语言的模板反解出参数；与界面同语言
+/// 的原样返回，否则用界面语言的同一模板重填。哪个模板都对不上返回 `None`。
+fn localize_templated_notice(message: &str, current: Lang) -> Option<std::borrow::Cow<'_, str>> {
+    for lang in [Lang::En, Lang::ZhCn] {
+        for (index, template) in texts_for(lang).usage_notice.templates().iter().enumerate() {
+            let Some(args) = unfill(template, message) else {
+                continue;
+            };
+            if lang == current {
+                return Some(std::borrow::Cow::Borrowed(message));
+            }
+            let target = texts_for(current).usage_notice.templates()[index];
+            return Some(std::borrow::Cow::Owned(fill(target, &args)));
+        }
+    }
+    None
+}
+
+/// [`fill`] 的逆运算：按模板的字面段切开 `message`，依次取出各占位（`{name}`）的值。字面段
+/// 对不上、或两个占位之间没有字面段（切分有歧义）时返回 `None`；值里又出现后一个字面段时按
+/// 第一次出现切分。
+fn unfill<'t, 'm>(template: &'t str, message: &'m str) -> Option<Vec<(&'t str, &'m str)>> {
+    let mut literals = Vec::new();
+    let mut names = Vec::new();
+    let mut rest = template;
+    while let Some(open) = rest.find('{') {
+        let close = open + rest[open..].find('}')?;
+        literals.push(&rest[..open]);
+        names.push(&rest[open + 1..close]);
+        rest = &rest[close + 1..];
+    }
+    if names.is_empty() {
+        return (message == template).then(Vec::new);
+    }
+    let mut body = message.strip_prefix(literals[0])?.strip_suffix(rest)?;
+    let mut values = Vec::with_capacity(names.len());
+    for (index, name) in names.iter().enumerate() {
+        match literals.get(index + 1) {
+            Some(&"") => return None,
+            Some(separator) => {
+                let (value, remainder) = body.split_once(separator)?;
+                values.push((*name, value));
+                body = remainder;
+            }
+            None => values.push((*name, body)),
+        }
+    }
+    Some(values)
 }
 
 pub struct SidebarTexts {
@@ -2447,6 +2518,66 @@ mod tests {
         for unknown in ["HTTP 429；retry_after=60", "", "Signed in"] {
             assert_eq!(localize_usage_notice(unknown), unknown);
         }
+    }
+
+    /// 审查中级：生产路径上带目录的信任提示是模板句。中文 server 写的「等待说明 + 分隔语 +
+    /// 带目录的信任句」在英文界面整句不含中文，目录与命令原样保留；反过来同理；与界面同
+    /// 语言时原样返回。
+    #[test]
+    fn templated_trust_notice_follows_the_client_language() {
+        let dir = "/home/u/.local/state/herdr/probe/claude default";
+        for server in [Lang::En, Lang::ZhCn] {
+            for ui in [Lang::En, Lang::ZhCn] {
+                let from = &texts_for(server).usage_notice;
+                let to = &texts_for(ui).usage_notice;
+                let _guard = lang_guard(ui);
+                let args = [("dir", dir), ("command", "claude")];
+                let trust = fill(from.trust_dir_fmt, &args);
+                let expected = fill(to.trust_dir_fmt, &args);
+                assert_eq!(
+                    localize_usage_notice(&trust),
+                    expected,
+                    "{server:?} → {ui:?}"
+                );
+                let waiting = from.claude_waiting(true, Some(false));
+                let composite = format!("{waiting}{}{trust}", from.interactive_failure_sep);
+                let localized = localize_usage_notice(&composite);
+                assert_eq!(
+                    localized,
+                    format!(
+                        "{}{}{expected}",
+                        to.claude_waiting(true, Some(false)),
+                        to.interactive_failure_sep
+                    ),
+                    "{server:?} → {ui:?}"
+                );
+                assert!(localized.contains(&format!("cd {dir} && claude")));
+                if ui == Lang::En {
+                    assert!(!has_cjk(&localized), "{localized}");
+                }
+                if server == ui {
+                    assert!(matches!(
+                        localize_usage_notice(&trust),
+                        std::borrow::Cow::Borrowed(_)
+                    ));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn unfill_reverses_fill_and_rejects_other_text() {
+        let template = "run `cd {dir} && {command}` once";
+        let args = [("dir", "/a b"), ("command", "claude")];
+        assert_eq!(
+            unfill(template, &fill(template, &args)),
+            Some(args.to_vec())
+        );
+        assert_eq!(unfill(template, "run `cd /a b` once"), None);
+        assert_eq!(unfill(template, "something else"), None);
+        assert_eq!(unfill("{a}{b}", "xy"), None, "相邻占位无法切分");
+        assert_eq!(unfill("plain", "plain"), Some(Vec::new()));
+        assert_eq!(unfill("plain", "plain!"), None);
     }
 
     #[test]
