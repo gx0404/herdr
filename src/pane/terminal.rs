@@ -2843,6 +2843,9 @@ impl GhosttyPaneTerminal {
             .zip(terminal.default_palette().ok())
             .and_then(|(colors, default)| PaletteOverrides::new(&colors.palette, &default));
         let hide_kitty_placeholders = crate::kitty_graphics::is_enabled();
+        let drawable_cols = render_state
+            .cols()
+            .map_or(area.width, |cols| cols.min(area.width));
 
         let mut row_iterator = match crate::ghostty::RowIterator::new() {
             Ok(iterator) => iterator,
@@ -2878,18 +2881,22 @@ impl GhosttyPaneTerminal {
                         resolved_bg,
                         palette_overrides.as_ref(),
                     );
-                    let symbol = match ghostty_buffer_symbol_into(
-                        &cells,
-                        basic.wide,
-                        hide_kitty_placeholders,
-                        &mut grapheme_bytes,
-                        &mut symbol_scratch,
-                    ) {
-                        Ok(symbol) => symbol,
-                        Err(_) => {
-                            symbol_scratch.clear();
-                            symbol_scratch.push_str(ghostty_blank_symbol_for_width(basic.wide));
-                            symbol_scratch.as_str()
+                    let symbol = if ghostty_wide_cell_cut_at_edge(basic.wide, x, drawable_cols) {
+                        " "
+                    } else {
+                        match ghostty_buffer_symbol_into(
+                            &cells,
+                            basic.wide,
+                            hide_kitty_placeholders,
+                            &mut grapheme_bytes,
+                            &mut symbol_scratch,
+                        ) {
+                            Ok(symbol) => symbol,
+                            Err(_) => {
+                                symbol_scratch.clear();
+                                symbol_scratch.push_str(ghostty_blank_symbol_for_width(basic.wide));
+                                symbol_scratch.as_str()
+                            }
                         }
                     };
                     let cell = &mut buf[(area.x + x, area.y + y)];
@@ -3119,6 +3126,9 @@ fn ghostty_collect_dirty_patch(
         .zip(terminal.default_palette().ok())
         .and_then(|(colors, default)| PaletteOverrides::new(&colors.palette, &default));
     let hide_kitty_placeholders = crate::kitty_graphics::is_enabled();
+    let drawable_cols = render_state
+        .cols()
+        .map_or(area_width, |cols| cols.min(area_width));
 
     let Ok(mut row_iterator) = crate::ghostty::RowIterator::new() else {
         fallback!("row_iterator_new_error");
@@ -3185,15 +3195,19 @@ fn ghostty_collect_dirty_patch(
             );
             // PTY-10：符号留在复用的 scratch 里，直接构造 `CompactString`
             // （≤24 字节内联零堆分配），不再每格 `to_owned()` 出一个临时 String。
-            let symbol = match ghostty_buffer_symbol_into(
-                &cells,
-                basic.wide,
-                hide_kitty_placeholders,
-                &mut grapheme_bytes,
-                &mut symbol_scratch,
-            ) {
-                Ok(symbol) => symbol,
-                Err(_) => ghostty_blank_symbol_for_width(basic.wide),
+            let symbol = if ghostty_wide_cell_cut_at_edge(basic.wide, x, drawable_cols) {
+                " "
+            } else {
+                match ghostty_buffer_symbol_into(
+                    &cells,
+                    basic.wide,
+                    hide_kitty_placeholders,
+                    &mut grapheme_bytes,
+                    &mut symbol_scratch,
+                ) {
+                    Ok(symbol) => symbol,
+                    Err(_) => ghostty_blank_symbol_for_width(basic.wide),
+                }
             };
             let mut cell = cell_data_from_style(symbol, style);
             cell.hyperlink = hyperlink;
@@ -3625,6 +3639,18 @@ fn ghostty_cell_symbol(
         return Ok(" ".to_string());
     }
     Ok(text)
+}
+
+/// 宽字符首格落在可绘区域最后一列、右半格没有位置。备用屏缩窄不重排，会截掉占位格、只把
+/// 首格留在新的最后一列；绘制区域比网格窄时同理。原样输出 2 宽字形会越过窗格右边界、盖住
+/// 边框或相邻窗格（tmux 画窗格时这里同样补空白），所以显示层按空白画；网格、文本读取与
+/// ANSI 快照仍保留该字符，窗格变回原宽时它完整显示。
+fn ghostty_wide_cell_cut_at_edge(
+    wide: crate::ghostty::CellWide,
+    x: u16,
+    drawable_cols: u16,
+) -> bool {
+    wide == crate::ghostty::CellWide::Wide && x.saturating_add(1) >= drawable_cols
 }
 
 pub(super) fn ghostty_blank_symbol_for_width(wide: crate::ghostty::CellWide) -> &'static str {

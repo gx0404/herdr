@@ -785,7 +785,11 @@ impl ClientShellState {
                         .map(|cell| {
                             (
                                 crate::protocol::CellData {
-                                    symbol: if cell.width == 0 {
+                                    // 右半格没有位置的宽字符首格（备用屏缩窄后被截断）按空白画，
+                                    // 不让 2 宽字形越出窗格，与服务端渲染一致。
+                                    symbol: if cell.width == 0
+                                        || (cell.width == 2 && x.saturating_add(1) >= area.width)
+                                    {
                                         " ".into()
                                     } else {
                                         cell.text.clone().into()

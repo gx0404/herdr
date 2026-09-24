@@ -259,6 +259,32 @@ fn overwriting_half_of_a_wide_char_blanks_its_other_half() {
 }
 
 #[test]
+fn alt_screen_shrink_that_cuts_a_wide_char_draws_a_blank_at_the_edge() {
+    // 备用屏不重排：8 列缩到 7 列时，最后两列上的「字」只剩首格留在第 7 列。
+    let mut pane = WidePane::new(8, 3);
+    pane.write("\x1b[?1049h\x1b[1;1Hab中文字\x1b[2;1H下一行".as_bytes());
+    pane.resize(7, 3);
+
+    // 网格与文本读取保留这个字（tmux capture-pane 同样保留），变回原宽时还能完整显示。
+    assert_eq!(pane.grid(), ["ab中文字", "下一行", ""]);
+    assert_eq!(pane.pane.visible_text(), "ab中文字\n下一行\n");
+    // 显示层把放不下的首格画成空白，不让 2 宽字形越出窗格（tmux 画窗格时同样补空白）。
+    assert_eq!(
+        pane.render_row(0),
+        cells(&["a", "b", "中", "", "文", "", " "])
+    );
+    pane.assert_no_wide_glyph_past_right_edge();
+
+    pane.resize(8, 3);
+    assert_eq!(pane.grid()[0], "ab中文字");
+    assert_eq!(
+        pane.render_row(0),
+        cells(&["a", "b", "中", "", "文", "", "字", " "])
+    );
+    pane.assert_no_wide_glyph_past_right_edge();
+}
+
+#[test]
 fn inline_redraw_of_cjk_lines_that_fill_the_width_leaves_no_residue() {
     // Claude Code 这类 inline 程序（Ink）：自己按显示宽度折行，行与行之间写换行，
     // 重绘时逐行 EL + CUU 擦掉上一帧再整帧重写，从不依赖终端自动换行。

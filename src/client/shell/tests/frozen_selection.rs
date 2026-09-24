@@ -475,3 +475,39 @@ fn selection_notices_follow_the_interface_language() {
     assert_eq!(error(&state), t.selection_timed_out);
     assert!(!crate::i18n::has_cjk(&error(&state)), "{}", error(&state));
 }
+
+#[test]
+fn frozen_preview_blanks_a_wide_cell_cut_at_the_pane_edge() {
+    let (mut state, mouse) = ready();
+    state.config.copy_on_select = false;
+    let id = capture_id(&state.handle_raw_events(vec![RawInputEvent::Mouse(mouse)]));
+    // 备用屏缩窄后，第 2 行最后一列只剩「字」的首格（宽度 2、没有尾格）；第 1 行的「中」完整。
+    let cell = |text: &str, width: u8| FrozenCell {
+        text: text.into(),
+        fg: 0,
+        bg: 0,
+        modifier: 0,
+        width,
+        hyperlink: None,
+    };
+    let mut result = captured();
+    let ResponseResult::PaneTextSnapshot { text, .. } = &mut result else {
+        panic!("captured() 应返回文本快照");
+    };
+    text.rows[0].cells = vec![cell("中", 2), cell(" ", 0), cell("V", 1), cell("E", 1)];
+    text.rows[1].cells = vec![cell("P", 1), cell("A", 1), cell("N", 1), cell("字", 2)];
+    state.handle_endpoint_result("boot-1", &id, Ok(result));
+
+    let frame = state.compose(106, 20).unwrap();
+    let hit = &state.hits.panes[0];
+    let symbol = |x: u16, y: u16| {
+        frame.cells[usize::from(hit.inner_rect.y + y) * usize::from(frame.width)
+            + usize::from(hit.inner_rect.x + x)]
+        .symbol
+        .to_string()
+    };
+    assert_eq!(symbol(0, 0), "中");
+    assert_eq!(symbol(3, 0), "E");
+    // 放不下的首格画成空白，2 宽字形不越出窗格。
+    assert_eq!(symbol(3, 1), " ");
+}
