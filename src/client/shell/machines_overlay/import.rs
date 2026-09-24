@@ -364,6 +364,9 @@ impl ClientShellState {
         outcome: &mut ClientShellInput,
     ) {
         let plain = modifiers.is_empty();
+        // 大写字母由终端带 SHIFT 报上来（`normalize_key_combo` 不去掉它）：`G` 只看
+        // SHIFT 以外的修饰键，否则只认无修饰键的分支永远不命中（T1 审查轻 4）。
+        let shifted_letter = modifiers.difference(KeyModifiers::SHIFT).is_empty();
         let step = match self.overlay.as_ref() {
             Some(ClientShellOverlay::Machines(overlay)) => match &overlay.view {
                 ClientMachinesView::Import(view) => view.step,
@@ -402,9 +405,8 @@ impl ClientShellState {
                     KeyCode::Home | KeyCode::Char('g') if plain => {
                         self.scroll_import_view(isize::MIN)
                     }
-                    KeyCode::End | KeyCode::Char('G') if plain => {
-                        self.scroll_import_view(isize::MAX)
-                    }
+                    KeyCode::End if plain => self.scroll_import_view(isize::MAX),
+                    KeyCode::Char('G') if shifted_letter => self.scroll_import_view(isize::MAX),
                     _ => {}
                 }
                 outcome.repaint = true;
@@ -451,7 +453,8 @@ impl ClientShellState {
                     KeyCode::PageUp if plain => self.move_import_focus(-10),
                     KeyCode::PageDown if plain => self.move_import_focus(10),
                     KeyCode::Home | KeyCode::Char('g') if plain => self.move_import_focus(-1000),
-                    KeyCode::End | KeyCode::Char('G') if plain => self.move_import_focus(1000),
+                    KeyCode::End if plain => self.move_import_focus(1000),
+                    KeyCode::Char('G') if shifted_letter => self.move_import_focus(1000),
                     KeyCode::Tab if plain => self.move_import_focus(1),
                     KeyCode::BackTab if modifiers.difference(KeyModifiers::SHIFT).is_empty() => {
                         self.move_import_focus(-1)

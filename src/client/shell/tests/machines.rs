@@ -1302,6 +1302,9 @@ struct ImportProbe {
     max_scroll: usize,
     summary: (usize, usize, usize),
     skipped: Vec<(String, String)>,
+    /// 选择页的焦点行与候选数（其后依次是通配符开关、分组输入两行）。
+    focus_row: usize,
+    candidates: usize,
 }
 
 fn import_probe(state: &ClientShellState) -> ImportProbe {
@@ -1322,6 +1325,8 @@ fn import_probe(state: &ClientShellState) -> ImportProbe {
             .filter(|row| format!("{:?}", row.outcome) == "Skipped")
             .map(|row| (row.label.clone(), row.detail.clone()))
             .collect(),
+        focus_row: view.focus_row,
+        candidates: view.plan.ready.len(),
     }
 }
 
@@ -1499,6 +1504,54 @@ fn import_discover_scrolls_to_the_last_host_and_skip_reason() {
     raw_key(&mut state, KeyCode::End);
     let _ = frame_compact(&mut state, 93, 32);
     assert_eq!(import_probe(&state).scroll, max, "End 到底");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// T1 审查轻 4：导入页的 `G`（到末尾，与 End 同义）以前是死分支——终端把大写 G
+/// 报成带 SHIFT 的 `Char('G')`，只认无修饰键的守卫永远不命中。发现页与选择页都
+/// 用真实按键序列（旧式终端送来的裸字节 `G` / `g`）测：G 到末尾、g 回开头，
+/// 落点与 End / Home 一致。
+#[test]
+fn import_capital_g_jumps_to_the_end_on_discover_and_select() {
+    use super::super::machines_overlay::ClientImportStep;
+    let dir = with_temp_home("import-capital-g");
+    let mut config = many_hosts_config(30);
+    config.push_str("Host *.wild\n");
+    std::fs::write(dir.join(".ssh").join("config"), config).unwrap();
+    let mut state = state_with_profiles(&[]);
+    state.open_machine_import_wizard();
+
+    // 发现页：G 滚到底，g 回到顶。
+    let (text, _) = frame_compact(&mut state, 93, 32);
+    assert!(!text.contains("host29"), "用例前提：一屏放不下：{text}");
+    let max = import_probe(&state).max_scroll;
+    assert!(max > 0, "用例前提：发现页有滚动余量");
+    state.handle_input_bytes(b"G");
+    assert_eq!(import_probe(&state).scroll, max, "G 滚到底");
+    let (text, _) = frame_compact(&mut state, 93, 32);
+    assert!(text.contains("host29"), "G 之后末个主机可见：{text}");
+    state.handle_input_bytes(b"g");
+    assert_eq!(import_probe(&state).scroll, 0, "g 回到顶部");
+
+    // 选择页：G 把焦点移到最后一行（分组输入），与 End 同一落点；g 回首个候选。
+    raw_key(&mut state, KeyCode::Enter);
+    let _ = frame_compact(&mut state, 93, 32);
+    let probe = import_probe(&state);
+    assert_eq!(probe.step, ClientImportStep::Select);
+    let last = probe.candidates + 1;
+    raw_key(&mut state, KeyCode::Down);
+    raw_key(&mut state, KeyCode::Down);
+    assert_eq!(import_probe(&state).focus_row, 2);
+    state.handle_input_bytes(b"g");
+    assert_eq!(import_probe(&state).focus_row, 0, "g 回到首个候选");
+    state.handle_input_bytes(b"G");
+    let _ = frame_compact(&mut state, 93, 32);
+    assert_eq!(import_probe(&state).focus_row, last, "G 到最后一行");
+    // 分组输入聚焦时 Tab 回到首个候选；End 与 G 同一落点。
+    raw_key(&mut state, KeyCode::Tab);
+    assert_eq!(import_probe(&state).focus_row, 0);
+    raw_key(&mut state, KeyCode::End);
+    assert_eq!(import_probe(&state).focus_row, last, "End 与 G 同一落点");
     let _ = std::fs::remove_dir_all(&dir);
 }
 
