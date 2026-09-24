@@ -4020,6 +4020,179 @@ fn system_page_scrolls_one_card_row_per_notch_and_reaches_every_card() {
     assert_eq!(painted_cards(&state), order[1..3], "↓ 露出内存卡");
 }
 
+/// 把焦点交给终端（点终端正文）并重绘：停靠的监控面板照画 `monitor_tab`，键盘归终端。
+/// 宣告 `pane.focus`：点窗格会发这个请求，未宣告时的「操作不可用」浮条会盖住面板头。
+fn focus_terminal(state: &mut ClientShellState, cols: u16, rows: u16) {
+    state.set_endpoint_methods(Some(vec![
+        "client.views.set".into(),
+        "tab.focus".into(),
+        "pane.focus".into(),
+    ]));
+    let terminal = terminal_body(state);
+    click(state, terminal.x + 1, terminal.y + 1);
+    assert_eq!(state.workbench.dock.focused, PanelId::Terminal(1));
+    assert_eq!(state.observability.page, None, "键盘归终端");
+    state.compose(cols, rows).expect("终端聚焦、监控面板照画");
+}
+
+/// D5（文档终审轻级，与 H2 / N4 同一规则；三档：250×40 双列、133×32 与 80×24 单列，
+/// 都停靠在终端旁）：监控面板停靠但没聚焦（键盘在终端上）时，卡片之间的空隙、偏好页
+/// 与账号页上的滚轮不响应——页面滚动只认聚焦的页面。现在滚轮按指针落点滚面板画着的
+/// 那一页，不要求先聚焦，焦点与键盘都不动：空隙与内容放得下的卡片滚页面、放不下的
+/// 卡片滚自己；偏好页按行、账号页按账号列表滚。反过来，账号页聚焦时指针在终端上的
+/// 滚轮也不再滚账号列表。
+#[test]
+fn wheel_scrolls_the_docked_monitor_page_without_focusing_it() {
+    use crossterm::event::KeyCode;
+    let _guard = crate::i18n::lang_guard(crate::i18n::Lang::ZhCn);
+    for (cols, rows) in [(250, 40), (133, 32), (80, 24)] {
+        let size = format!("{cols}×{rows}");
+        // 系统页：卡片之间的空隙。
+        let mut state = docked();
+        state.open_observation_page(Page::Monitor, &mut ClientShellInput::default());
+        state.observability.metrics = Some(smoke_system_sample());
+        state.compose(cols, rows).expect("系统页");
+        focus_terminal(&mut state, cols, rows);
+        let card = |state: &ClientShellState, id: &str| {
+            page_hit(
+                state,
+                |action| matches!(action, Action::Card(card) if card == id),
+            )
+            .unwrap_or_else(|| panic!("{size}：{id} 卡已画出"))
+        };
+        let cpu = card(&state, "cpu");
+        let mut gaps = vec![
+            // 摘要条与首张卡之间的空行。
+            (cpu.x + 2, cpu.y - 1),
+            // 首行卡片与下一行之间的空行。
+            (cpu.x + 2, cpu.bottom()),
+        ];
+        if cpu.right() < state.observability.page_rect.right() - 2 {
+            // 双列：两张卡之间的那一列。
+            gaps.push((cpu.right(), cpu.y + 2));
+        }
+        let first = painted_cards(&state);
+        for (column, row) in gaps {
+            sgr_mouse(&mut state, SGR_WHEEL_DOWN, column, row);
+            assert_eq!(
+                state.observability.scroll, 1,
+                "{size}：({column}, {row}) 空隙上的滚轮滚动页面"
+            );
+            state.compose(cols, rows).expect("滚一格");
+            assert_ne!(painted_cards(&state), first, "{size}：画面跟着动");
+            sgr_mouse(&mut state, SGR_WHEEL_UP, column, row);
+            assert_eq!(state.observability.scroll, 0, "{size}：反向滚回");
+            state.compose(cols, rows).expect("滚回");
+            assert_eq!(painted_cards(&state), first);
+        }
+        // 放得下的卡片（CPU）把滚轮交给页面（H2），同样不要求聚焦。
+        let cpu = card(&state, "cpu");
+        sgr_mouse(&mut state, SGR_WHEEL_DOWN, cpu.x + 3, cpu.y + 2);
+        assert_eq!(
+            state.observability.scroll, 1,
+            "{size}：CPU 卡上的滚轮滚页面"
+        );
+        assert_eq!(
+            state.workbench.dock.focused,
+            PanelId::Terminal(1),
+            "{size}：滚轮不抢焦点"
+        );
+        assert_eq!(state.observability.page, None, "{size}：键盘仍归终端");
+        // 键盘路径：焦点在终端时 ↓ 落到终端，不滚页面。
+        press_key(&mut state, KeyCode::Down);
+        assert_eq!(state.observability.scroll, 1, "{size}：↓ 不滚未聚焦的页面");
+
+        // 偏好页：面板任意内容区。
+        let mut state = docked();
+        state.open_observation_page(Page::Settings, &mut ClientShellInput::default());
+        state.compose(cols, rows).expect("偏好页");
+        focus_terminal(&mut state, cols, rows);
+        let page = state.observability.page_rect;
+        let before = region_text(&state, page);
+        let (column, row) = (page.x + page.width / 2, page.y + page.height / 2);
+        sgr_mouse(&mut state, SGR_WHEEL_DOWN, column, row);
+        assert_eq!(
+            state.observability.settings_scroll, 3,
+            "{size}：偏好页上的滚轮一格三行"
+        );
+        state.compose(cols, rows).expect("滚一格");
+        assert_ne!(
+            region_text(&state, page),
+            before,
+            "{size}：偏好页画面跟着动"
+        );
+        assert_eq!(state.workbench.dock.focused, PanelId::Terminal(1));
+        press_key(&mut state, KeyCode::Down);
+        assert_eq!(
+            state.observability.settings_scroll, 3,
+            "{size}：↓ 不滚未聚焦的偏好页"
+        );
+
+        // 账号页：账号卡片多于一屏。
+        let mut state = docked();
+        state.open_observation_page(Page::Accounts, &mut ClientShellInput::default());
+        state.observability.now_ms = CARD_NOW_MS;
+        state.observability.accounts = (0..6)
+            .map(|index| AccountUsageSnapshot {
+                account_id: format!("claude:{index}"),
+                account_label: format!("claude:{index}"),
+                ..claude_card_account()
+            })
+            .collect();
+        state.compose(cols, rows).expect("账号页");
+        focus_terminal(&mut state, cols, rows);
+        assert!(
+            state
+                .observability
+                .account_scroll_limits
+                .page
+                .is_some_and(|limit| limit > 0),
+            "{size}：用例前提：账号卡片多于一屏"
+        );
+        let page = state.observability.page_rect;
+        let before = region_text(&state, page);
+        let (column, row) = (page.x + page.width / 2, page.y + page.height / 2);
+        sgr_mouse(&mut state, SGR_WHEEL_DOWN, column, row);
+        assert_eq!(
+            state.observability.account_scroll, 1,
+            "{size}：账号页上的滚轮滚账号列表"
+        );
+        state.compose(cols, rows).expect("滚一格");
+        assert_ne!(
+            region_text(&state, page),
+            before,
+            "{size}：账号页画面跟着动"
+        );
+        assert_eq!(state.workbench.dock.focused, PanelId::Terminal(1));
+        press_key(&mut state, KeyCode::Down);
+        assert_eq!(
+            state.observability.account_scroll, 1,
+            "{size}：↓ 不滚未聚焦的账号页"
+        );
+
+        // 反过来：账号页聚焦时，指针在终端上的滚轮不滚账号列表。
+        let header = monitor_header(&state);
+        click(&mut state, header.x + header.width / 2, header.y);
+        assert_eq!(
+            state.observability.page,
+            Some(Page::Accounts),
+            "{size}：点面板头把焦点交回监控面板"
+        );
+        let terminal = terminal_body(&state);
+        sgr_mouse(&mut state, SGR_WHEEL_DOWN, terminal.x + 1, terminal.y + 1);
+        assert_eq!(
+            state.observability.account_scroll, 1,
+            "{size}：终端上的滚轮不滚账号列表"
+        );
+        // 聚焦后 ↓ 照旧滚账号页（一次三行）。
+        press_key(&mut state, KeyCode::Down);
+        assert!(
+            state.observability.account_scroll > 1,
+            "{size}：聚焦后 ↓ 滚账号页"
+        );
+    }
+}
+
 /// 每张卡都有数据的主机快照：卡片被页面底边裁掉时，露出的一截能看出真实首行。
 fn populated_system_sample() -> Box<crate::api::schema::SystemMetricsSnapshot> {
     use crate::api::schema::{

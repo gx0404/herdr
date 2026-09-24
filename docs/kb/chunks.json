@@ -1,5 +1,5 @@
 {
-  "chunk_count": 1059,
+  "chunk_count": 1060,
   "chunks": [
     {
       "anchor": "herdr",
@@ -2644,22 +2644,29 @@
       "anchor": "Menus, pages, and stable selection > Docking",
       "doc": "docs/next/website/src/content/docs/monitoring.mdx",
       "id": "docs-next-website-src-content-docs-monitoring-mdx-menus-pages-and-stable-selection-docking-part1",
-      "source_sha256": "fc565e9c46021423073e948dc34f3823e516cf7d0cb5a9f57871d98aea4ebf1d",
+      "source_sha256": "c0d739aa04e21ee07b933929c3cc38cb469d321ea2af3e452d0c0f66f3763677",
       "text": "## Docking\n\nDrag a panel's `⠿` title handle to another panel's edge. The drop preview shows the destination. Drag dividers to resize, tabs to reorder or create another terminal group, and pane handles to swap panes or move them between tabs without restarting their processes. Borderless panes show their handles only in **Arrange layout** mode, keeping normal terminal text unobstructed. Right-click tab menus remain available.\n\nThe primary terminal page belongs to the focused workspace: clicking a workspace in the sidebar swaps both the tab strip and the terminal content to that workspace's tabs, numbered from 1 per workspace. Tabs dragged into their own panel stay visible regardless of workspace focus.\n"
     },
     {
       "anchor": "Menus, pages, and stable selection > Docking",
       "doc": "docs/next/website/src/content/docs/monitoring.mdx",
       "id": "docs-next-website-src-content-docs-monitoring-mdx-menus-pages-and-stable-selection-docking-part2",
-      "source_sha256": "fc565e9c46021423073e948dc34f3823e516cf7d0cb5a9f57871d98aea4ebf1d",
+      "source_sha256": "c0d739aa04e21ee07b933929c3cc38cb469d321ea2af3e452d0c0f66f3763677",
       "text": "`□` maximizes a panel; while one is maximized the button shows `◫` and restores the layout. **Arrange layout** in the top bar enters arrange mode and stays highlighted while it is on; the footer then names the mode and lists its keys: `Tab` selects a panel (`Shift+Tab` goes back), arrows resize, `Shift+arrows` move, `Enter` maximizes, and `Esc` finishes (the footer's **Esc done** hint is clickable too). While a panel is maximized the whole layout still responds: `Tab` moves the maximized panel along with the focus, and arrows or `Shift+arrows` leave maximize first so the resize or move is visible. **Lock layout** is an on/off toggle that carries a check mark while the layout is locked and prevents accidental rearrangement; **Reset**, shown in arrange mode, restores the default layout; while the layout is locked it is dimmed and clicking it does nothing. Layouts persist per client and endpoint. Small terminals project the focused panel without discarding the saved layout. Older servers retain the previous single-view UI.\n"
     },
     {
       "anchor": "Menus, pages, and stable selection > Docking",
       "doc": "docs/next/website/src/content/docs/monitoring.mdx",
       "id": "docs-next-website-src-content-docs-monitoring-mdx-menus-pages-and-stable-selection-docking-part3",
-      "source_sha256": "fc565e9c46021423073e948dc34f3823e516cf7d0cb5a9f57871d98aea4ebf1d",
-      "text": "The Monitor panel carries a ` × ` button in its header next to `□`. Inside the docked panel the page draws no frame of its own — the panel header and divider already frame it — so its tabs sit on the first line below the panel header and its cards one column in from the panel edge. When the panel is focused, `Esc` closes the panel hosting the page; when a terminal is focused, `Esc` goes to the terminal, so use the header button or **Close monitor panel** in command search (listed only while the Monitor panel is docked). With the layout locked, closing is refused and the panel footer says so. The monitor tab you last selected — System, Accounts or Monitor preferences — is kept in client preferences and restored when the panel regains focus or the client restarts; opening **Monitor** from the top bar, the main menu, or command search starts on the System page. A docked Monitor panel no longer hides the focused terminal's cursor: the cursor disappears only where a panel, a usage popover or a dialog actually covers it.\n\nWhen the terminal is too narrow for the whole top bar, buttons are hidden whole instead of being cut off: **Monitor** goes first, then **Lock layout**, then **Arrange layout** (all three remain in the main menu and command search), while **Reset**, which exists only in the top bar, is kept after them."
+      "source_sha256": "c0d739aa04e21ee07b933929c3cc38cb469d321ea2af3e452d0c0f66f3763677",
+      "text": "The Monitor panel carries a ` × ` button in its header next to `□`. Inside the docked panel the page draws no frame of its own — the panel header and divider already frame it — so its tabs sit on the first line below the panel header and its cards one column in from the panel edge. When the panel is focused, `Esc` closes the panel hosting the page; when a terminal is focused, `Esc` goes to the terminal, so use the header button or **Close monitor panel** in command search (listed only while the Monitor panel is docked). With the layout locked, closing is refused and the panel footer says so. The monitor tab you last selected — System, Accounts or Monitor preferences — is kept in client preferences and restored when the panel regains focus or the client restarts; opening **Monitor** from the top bar, the main menu, or command search starts on the System page. A docked Monitor panel no longer hides the focused terminal's cursor: the cursor disappears only where a panel, a usage popover or a dialog actually covers it. The wheel does not need the panel to be focused: anywhere over a docked Monitor panel's content it scrolls the page the panel shows — a card whose content does not fit scrolls itself, anywhere else the page moves — while the keyboard stays with the focused panel, and a wheel over another panel never scrolls the page.\n"
+    },
+    {
+      "anchor": "Menus, pages, and stable selection > Docking",
+      "doc": "docs/next/website/src/content/docs/monitoring.mdx",
+      "id": "docs-next-website-src-content-docs-monitoring-mdx-menus-pages-and-stable-selection-docking-part4",
+      "source_sha256": "c0d739aa04e21ee07b933929c3cc38cb469d321ea2af3e452d0c0f66f3763677",
+      "text": "When the terminal is too narrow for the whole top bar, buttons are hidden whole instead of being cut off: **Monitor** goes first, then **Lock layout**, then **Arrange layout** (all three remain in the main menu and command search), while **Reset**, which exists only in the top bar, is kept after them."
     },
     {
       "anchor": "Menus, pages, and stable selection > Host resources",

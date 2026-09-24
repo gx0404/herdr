@@ -3626,6 +3626,30 @@ impl ClientShellState {
         }
     }
 
+    /// 指针下画着的监控页（D5）：经典布局是打开的页面（铺在 pane 区）；停靠工作台按
+    /// 指针所在的面板取它画的那一页——监控面板画 `monitor_tab`（没聚焦也照画，渲染
+    /// 不改写 `page`），旧版独立的账号面板画账号页。输入阶段按上一帧的几何命中。
+    fn observation_page_at(&self, point: (u16, u16)) -> Option<Page> {
+        if !self.workbench.enabled {
+            return self
+                .observability
+                .page
+                .filter(|_| contains(self.observability.page_rect, point));
+        }
+        self.workbench
+            .geometry
+            .panels
+            .iter()
+            .find_map(|(panel, area)| {
+                let page = match panel {
+                    dock::PanelId::Monitor => self.observability.monitor_tab,
+                    dock::PanelId::Accounts => Page::Accounts,
+                    _ => return None,
+                };
+                contains(super::workbench::body(*area, panel), point).then_some(page)
+            })
+    }
+
     pub(super) fn observation_mouse(
         &mut self,
         mouse: MouseEvent,
@@ -3702,6 +3726,11 @@ impl ClientShellState {
             mouse.kind,
             MouseEventKind::ScrollDown | MouseEventKind::ScrollUp
         ) {
+            let delta = if mouse.kind == MouseEventKind::ScrollDown {
+                1
+            } else {
+                -1
+            };
             if let Some(card) = self.observability.hits.iter().find_map(|(rect, action)| {
                 if contains(*rect, point) {
                     if let Action::Card(id) = action {
@@ -3713,11 +3742,6 @@ impl ClientShellState {
                     None
                 }
             }) {
-                let delta = if mouse.kind == MouseEventKind::ScrollDown {
-                    1
-                } else {
-                    -1
-                };
                 // 卡片内容放得下（上界 0）或根本不可滚（CPU / 内存卡、上一帧没画出
                 // 内容）时滚轮交给页面，否则落在卡片上的滚轮会吃掉整页滚动。卡片
                 // 命中区只在系统页上登记，面板未聚焦时同样成立。
@@ -3735,15 +3759,14 @@ impl ClientShellState {
                 outcome.repaint = true;
                 return true;
             }
-            if self.observability.page == Some(Page::Accounts) {
-                self.observability.scroll_accounts(
-                    if mouse.kind == MouseEventKind::ScrollDown {
-                        1
-                    } else {
-                        -1
-                    },
-                    false,
-                );
+            // 其余落点按指针下画着的那一页滚（D5）：停靠的监控面板没聚焦也照画
+            // `monitor_tab`，卡片之间的空隙、偏好页与账号页上的滚轮都不要求先聚焦，
+            // 也不改焦点；指针不在页面上（例如账号页聚焦时指在终端上）就不归页面。
+            if let Some(page) = self.observation_page_at(point) {
+                match page {
+                    Page::Accounts => self.observability.scroll_accounts(delta, false),
+                    page => self.observability.scroll_page(page, PageStep::Notch, delta),
+                }
                 outcome.repaint = true;
                 return true;
             }
@@ -3761,20 +3784,8 @@ impl ClientShellState {
                 return true;
             }
         }
-        if let Some(page) = self
-            .observability
-            .page
-            .filter(|_| contains(self.observability.page_rect, point))
-        {
-            match mouse.kind {
-                MouseEventKind::ScrollDown => {
-                    self.observability.scroll_page(page, PageStep::Notch, 1);
-                }
-                MouseEventKind::ScrollUp => {
-                    self.observability.scroll_page(page, PageStep::Notch, -1);
-                }
-                _ => {}
-            }
+        // 拥有键盘的页面独占落在页面矩形里的其余指针事件（滚轮已在上面按落点分派）。
+        if self.observability.page.is_some() && contains(self.observability.page_rect, point) {
             outcome.repaint = true;
             return true;
         }
