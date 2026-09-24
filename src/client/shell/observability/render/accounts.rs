@@ -1377,8 +1377,9 @@ fn binding_row(
     );
 }
 
-/// 表格格式的账号正文：每指标一行。返回滚动上界——起始行最多到最后一行（沿用既有
-/// 口径），渲染按同一个值钳位。
+/// 表格格式的账号正文：每指标一行。返回滚动上界——总行数减可视行数（表头占一行），
+/// 滚到底时最后一行正好落在表格底边、表格仍是满的（N20，与卡片列表的
+/// `scroll_limit` 同口径）；渲染按同一个值钳位。
 pub(super) fn usage_table(
     buffer: &mut Buffer,
     area: Rect,
@@ -1448,12 +1449,13 @@ pub(super) fn usage_table(
             }
         }
     }
-    let limit = entries.len().saturating_sub(1);
+    let visible = area.height.saturating_sub(1);
+    let limit = scroll_limit(entries.len(), visible);
     let start = scope.scroll.min(limit);
     let rows = entries
         .iter()
         .skip(start)
-        .take(area.height.saturating_sub(1) as usize)
+        .take(usize::from(visible))
         .enumerate()
         .map(
             |(index, (account, columns, (age, age_color), status_cell))| {

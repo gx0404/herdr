@@ -4428,6 +4428,193 @@ fn accounts_page_scroll_is_clamped_on_write_so_reversing_moves_at_once() {
     assert_ne!(region_text(&state, page), bottom, "↑ 反向第一次画面就动");
 }
 
+/// 表格格式下本帧画出的账号表格数据行（自上而下的 (行 y, 该行文字)）：表格每个
+/// 数据行登记一条 `Action::Account` 命中区。`hover` 为真时取悬浮层（钉住的用量卡）
+/// 自己的命中区，否则取页面的。
+fn table_rows(state: &ClientShellState, hover: bool) -> Vec<(u16, String)> {
+    let buffer = state.compose_buffer.as_ref().expect("帧缓冲");
+    let hits = if hover {
+        &state.observability.hover_hits
+    } else {
+        &state.observability.hits[..state.observability.page_hits]
+    };
+    let mut rows = hits
+        .iter()
+        .filter(|(_, action)| matches!(action, Action::Account(_)))
+        .map(|(rect, _)| (rect.y, region_row(buffer, *rect, rect.y).0))
+        .collect::<Vec<_>>();
+    rows.sort();
+    rows
+}
+
+/// N20（N5 同类；三档：200×50 与 133×32 停靠在终端旁、62×32 紧凑视图只投影监控
+/// 面板）：表格格式的滚动上界曾是「起始行最多到最后一行」，滚到底时表头下只剩最后
+/// 一行、下面整片空白。现在上界按可视行数钳位：最后一行落到表格底边即停，表格仍是
+/// 满的；写回式钳位不变——到底后多滚不累加，反向第一格画面就动。滚轮与 ↑↓（一次
+/// 三行）同口径。
+#[test]
+fn accounts_table_scroll_stops_once_the_last_row_reaches_the_bottom() {
+    use crossterm::event::KeyCode;
+    const METRICS: usize = 64;
+    let _guard = crate::i18n::lang_guard(crate::i18n::Lang::ZhCn);
+    // 指标名取短：133×32 的停靠面板里表格的指标列只有 8 列宽。
+    let metric = |index: usize| format!("m{index:02}");
+    for (cols, rows) in [(200, 50), (133, 32), (62, 32)] {
+        let size = format!("{cols}×{rows}");
+        let mut state = docked();
+        state.observability.usage.format = crate::config::UsageDisplayFormat::Table;
+        state.open_observation_page(Page::Accounts, &mut ClientShellInput::default());
+        state.observability.now_ms = CARD_NOW_MS;
+        state.observability.accounts = vec![AccountUsageSnapshot {
+            observed_at_ms: CARD_NOW_MS - 13_000,
+            metrics: (0..METRICS)
+                .map(|index| crate::api::schema::UsageMetric {
+                    used_percent: Some(50.0),
+                    ..usage_metric(&metric(index), &metric(index), "%", "account")
+                })
+                .collect(),
+            ..account("claude", "claude:default")
+        }];
+        state.compose(cols, rows).expect("表格格式的账号页");
+        let top = table_rows(&state, false);
+        let visible = top.len();
+        assert!(
+            (3..METRICS).contains(&visible),
+            "{size}：用例前提：表格放不下 {METRICS} 行（可视 {visible} 行）"
+        );
+        assert!(
+            top[0].1.contains(&metric(0)),
+            "{size}：用例前提：从第一行起"
+        );
+        let page = state.observability.page_rect;
+        let (column, row) = (page.x + page.width / 2, top[visible / 2].0);
+        for _ in 0..METRICS * 2 {
+            sgr_mouse(&mut state, SGR_WHEEL_DOWN, column, row);
+        }
+        state.compose(cols, rows).expect("滚到底");
+        let bottom = table_rows(&state, false);
+        assert_eq!(
+            bottom.len(),
+            visible,
+            "{size}：滚到底表格仍是满的，不只剩最后一行：{bottom:#?}"
+        );
+        assert_eq!(bottom.last().map(|(y, _)| *y), top.last().map(|(y, _)| *y));
+        assert!(
+            bottom[visible - 1].1.contains(&metric(METRICS - 1)),
+            "{size}：最后一行落在表格底边：{bottom:#?}"
+        );
+        assert!(
+            bottom[0].1.contains(&metric(METRICS - visible)),
+            "{size}：首行随之停在倒数第 {visible} 行：{bottom:#?}"
+        );
+        let limit = state.observability.account_scroll;
+        assert_eq!(limit, METRICS - visible, "{size}：滚动位置写回钳位到上界");
+        sgr_mouse(&mut state, SGR_WHEEL_DOWN, column, row);
+        assert_eq!(
+            state.observability.account_scroll, limit,
+            "{size}：到底后多滚不再累加"
+        );
+        sgr_mouse(&mut state, SGR_WHEEL_UP, column, row);
+        state.compose(cols, rows).expect("反向一格");
+        assert!(
+            table_rows(&state, false)[0]
+                .1
+                .contains(&metric(METRICS - visible - 1)),
+            "{size}：反向第一格画面就动"
+        );
+
+        // 键盘同口径：↓ 一次三行，到底停住；↑ 反向第一次画面就动。
+        for _ in 0..METRICS {
+            press_key(&mut state, KeyCode::Down);
+        }
+        state.compose(cols, rows).expect("↓ 到底");
+        assert_eq!(
+            state.observability.account_scroll, limit,
+            "{size}：↓ 同样停在上界"
+        );
+        assert_eq!(
+            table_rows(&state, false),
+            bottom,
+            "{size}：↓ 到底的画面相同"
+        );
+        press_key(&mut state, KeyCode::Up);
+        state.compose(cols, rows).expect("↑ 一次");
+        assert!(
+            table_rows(&state, false)[0]
+                .1
+                .contains(&metric(METRICS - visible - 3)),
+            "{size}：↑ 反向第一次画面就动（三行）"
+        );
+    }
+}
+
+/// N20（悬浮层，133×32）：钉住的用量卡在表格格式下同样按可视行数钳位——滚到底时卡里
+/// 的表格仍是满的、最后一行落在表格底边，到底后多滚不累加，反向第一格画面就动。
+#[test]
+fn pinned_usage_card_table_scroll_stops_once_the_last_row_reaches_the_bottom() {
+    const METRICS: usize = 64;
+    let _guard = crate::i18n::lang_guard(crate::i18n::Lang::ZhCn);
+    // 指标名取短：133×32 的停靠面板里表格的指标列只有 8 列宽。
+    let metric = |index: usize| format!("m{index:02}");
+    let mut state = usage_ready();
+    state.observability.usage.format = crate::config::UsageDisplayFormat::Table;
+    state.compose(133, 32).expect("工作台");
+    let endpoint = state.active_endpoint_id.clone();
+    pin_usage_card(&mut state, endpoint, "claude");
+    let scope = &mut state.observability.hover_scope;
+    scope.provider = Some("claude".into());
+    scope.accounts = vec![AccountUsageSnapshot {
+        observed_at_ms: CARD_NOW_MS - 13_000,
+        metrics: (0..METRICS)
+            .map(|index| crate::api::schema::UsageMetric {
+                used_percent: Some(50.0),
+                ..usage_metric(&metric(index), &metric(index), "%", "account")
+            })
+            .collect(),
+        ..account("claude", "claude:default")
+    }];
+    state.observability.now_ms = CARD_NOW_MS;
+    state.compose(133, 32).expect("钉住的卡");
+    let card = state.observability.hover_rect;
+    let top = table_rows(&state, true);
+    let visible = top.len();
+    assert!(
+        (2..METRICS).contains(&visible),
+        "用例前提：卡里的表格放不下 {METRICS} 行（可视 {visible} 行）"
+    );
+    let (column, row) = (card.x + card.width / 2, top[0].0);
+    for _ in 0..METRICS * 2 {
+        sgr_mouse(&mut state, SGR_WHEEL_DOWN, column, row);
+    }
+    state.compose(133, 32).expect("滚到底");
+    assert_eq!(state.observability.hover_rect, card, "用例前提：卡片没挪");
+    let bottom = table_rows(&state, true);
+    assert_eq!(
+        bottom.len(),
+        visible,
+        "滚到底卡里的表格仍是满的：{bottom:#?}"
+    );
+    assert!(
+        bottom[visible - 1].1.contains(&metric(METRICS - 1)),
+        "最后一行落在表格底边：{bottom:#?}"
+    );
+    let limit = state.observability.hover_scope.scroll;
+    assert_eq!(limit, METRICS - visible, "写回钳位到上界");
+    sgr_mouse(&mut state, SGR_WHEEL_DOWN, column, row);
+    assert_eq!(
+        state.observability.hover_scope.scroll, limit,
+        "到底后多滚不再累加"
+    );
+    sgr_mouse(&mut state, SGR_WHEEL_UP, column, row);
+    state.compose(133, 32).expect("反向一格");
+    assert!(
+        table_rows(&state, true)[0]
+            .1
+            .contains(&metric(METRICS - visible - 1)),
+        "反向第一格画面就动"
+    );
+}
+
 /// 冒烟 N5（悬浮层，133×32）：钉住的用量卡内容高过卡片上限时同样写回钳位——到底
 /// 后多滚不累加，反向第一格画面就动。
 #[test]
