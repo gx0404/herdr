@@ -12,10 +12,13 @@
 //!   `-HX-Api-Key: …`，以及 httpie / xh 的位置参数 `Authorization:Bearer …`；
 //!   保留 `Bearer` / `Basic` 等认证方案名；
 //! - 独立出现的 `Bearer <token>`；
-//! - 凭据类环境变量赋值：`OPENAI_API_KEY=…`、`GITHUB_TOKEN=…`；
+//! - 凭据类变量赋值：`OPENAI_API_KEY=…`、`GITHUB_TOKEN=…`、PowerShell 的
+//!   `$env:NAME=…` 与 `-Headers @{Authorization=…}`、npm 的 `…/:_authToken=…`；
+//! - PowerShell 冒号参数 `-Token:…` 与 Windows 风格开关 `/token:…`、`/p:Password=…`；
 //! - URL 里的口令与凭据类查询参数：`https://user:pass@host`、`?api_key=…`；http(s)
 //!   URL 的 userinfo 只有令牌时整段（`https://TOKEN@host`，`ssh://git@` 保留）；
-//! - 整段命令行形态的参数（`sh -c '…'`）按以上规则递归处理。
+//! - 整段命令行形态的参数（`sh -c '…'`）按以上规则递归处理，`;`、`&&`、`|` 两侧
+//!   不带空格也分得开。
 //!
 //! 只认形态、不认程序：`-p<口令>` 这类短选项的含义随程序而异，不在覆盖范围内。
 
@@ -28,12 +31,13 @@ const MAX_NESTING: usize = 3;
 /// 名字以这些词结尾即视为凭据（不分大小写，`-` 与 `_` 等价）。请求头名也用这张
 /// 表判断：`Authorization`、`Proxy-Authorization`、`X-Auth-Token`、`Cookie` 命中，
 /// `X-Author` 不命中。
-const CREDENTIAL_SUFFIXES: [&str; 14] = [
+const CREDENTIAL_SUFFIXES: [&str; 15] = [
     "token",
     "secret",
     "password",
     "passwd",
     "passphrase",
+    "passcode",
     "apikey",
     "credential",
     "credentials",
@@ -47,7 +51,12 @@ const CREDENTIAL_SUFFIXES: [&str; 14] = [
 
 /// 这些词要独立成词（整个名字，或前面是 `_`）才算凭据：`--api-key`、`DB_PASS`、
 /// `--auth` 算，`MONKEY`、`--bypass` 不算。
-const CREDENTIAL_WORDS: [&str; 4] = ["key", "pass", "auth", "sig"];
+const CREDENTIAL_WORDS: [&str; 8] = [
+    "key", "pass", "auth", "sig", "pw", "jwt", "passin", "passout",
+];
+
+/// 这些词只在前面是 `_` 时才算：`MYSQL_PWD` 算，当前目录 `PWD`、`OLDPWD` 不算。
+const CREDENTIAL_TAILS: [&str; 1] = ["pwd"];
 
 /// 敏感请求头里保留、不打码的认证方案名。
 const AUTH_SCHEMES: [&str; 6] = ["bearer", "basic", "token", "digest", "negotiate", "ntlm"];
@@ -88,6 +97,9 @@ enum Pending {
     Header,
     /// 上一个词是 `--user` / `-u` 一类：当前词是 `名:口令`。
     UserPassword,
+    /// 上一个词是 PowerShell 的 `$env:NAME`（NAME 像凭据）：当前词若是 `=`，再下一个
+    /// 词就是值（`$env:GH_TOKEN = '…'`）。
+    Assignment,
     /// 上一个词是 `Bearer`，或值被 shell 拆到后面去的敏感头名（`Authorization:`）：
     /// 当前词若是认证方案名就保留、接着等下一个，否则它就是凭据本身。
     Credential,
@@ -107,8 +119,10 @@ fn redact_words(words: &mut [String], first: usize, depth: usize) {
 
 /// 打码一个词：返回替换值（不用打码时为 `None`）与它对下一个词的约定。
 fn redact_word(word: &str, pending: Pending, depth: usize) -> (Option<String>, Pending) {
-    // 值的位置上出现选项，说明前一个词只是开关：约定作废，按选项处理。
-    if looks_like_option(word) {
+    // 值的位置上出现选项，说明前一个词只是开关：约定作废，按选项处理。等着凭据时，
+    // 以 `-` 开头的随机串（`--token -Xk9…`）仍是值。
+    let awaits_secret = matches!(pending, Pending::Value | Pending::Credential);
+    if looks_like_option(word) && !(awaits_secret && looks_like_dash_secret(word)) {
         return redact_option(word, depth);
     }
     match pending {
@@ -116,11 +130,32 @@ fn redact_word(word: &str, pending: Pending, depth: usize) -> (Option<String>, P
         Pending::Header => return redact_header(word, depth),
         Pending::UserPassword => return (redact_user_password(word), Pending::None),
         Pending::Credential if is_auth_scheme(word) => return (None, Pending::Credential),
-        Pending::Credential => return (Some(REDACTED.to_owned()), Pending::None),
-        Pending::None => {}
+        Pending::Credential => return (Some(redacted_secret(word)), Pending::None),
+        Pending::Assignment if word == "=" => return (None, Pending::Value),
+        Pending::Assignment | Pending::None => {}
     }
-    if let Some((name, value)) = split_assignment(word) {
-        return (redact_assignment(name, value, depth), Pending::None);
+    // 带空白的参数是一段命令行（`sh -c 'TOKEN=… codex'`、`pwsh -Command '…'`），不能
+    // 整个当成一个赋值或请求头：逐词再过一遍。
+    if word.contains(char::is_whitespace) {
+        return (redact_text(word, depth), Pending::None);
+    }
+    // Windows 风格开关：`/token:…`、`/p:Password=…`。
+    if let Some((name, separator, value)) = split_switch(word) {
+        return (
+            redact_option_value(name, separator, value, depth),
+            Pending::None,
+        );
+    }
+    if let Some((name, key, value)) = split_assignment(word) {
+        return redact_assignment(name, key, value, depth);
+    }
+    // PowerShell 带空格的赋值：`$env:GH_TOKEN = '…'`。
+    if word
+        .get(..5)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("$env:"))
+        && is_credential_name(&word[5..])
+    {
+        return (None, Pending::Assignment);
     }
     // httpie / xh 的请求头是位置参数：`Authorization:Bearer …`、`x-api-key:…`。
     if is_positional_header(word) {
@@ -130,6 +165,15 @@ fn redact_word(word: &str, pending: Pending, depth: usize) -> (Option<String>, P
         return (None, Pending::Credential);
     }
     (redact_text(word, depth), Pending::None)
+}
+
+/// 等着凭据时出现的 `-…`：不是 `--长选项`，也不是全小写字母的开关（`-v`、`-debug`），
+/// 那多半就是以 `-` 开头的随机串。
+fn looks_like_dash_secret(word: &str) -> bool {
+    !word.starts_with("--")
+        && !word[1..]
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c == '-')
 }
 
 /// `-x` / `--xx` 形式的选项；单独的 `-`（标准输入）与负数不算。
@@ -166,26 +210,62 @@ fn redact_option(word: &str, depth: usize) -> (Option<String>, Pending) {
             }
         }
     }
-    match word.split_once('=') {
-        Some(("--header", header)) => {
-            let (redacted, next) = redact_header(header, depth);
-            (redacted.map(|header| format!("--header={header}")), next)
+    // `--name=value`，以及 PowerShell 的冒号参数 `-Token:value`。
+    match word.find(['=', ':']) {
+        Some(index) => {
+            let (name, rest) = word.split_at(index);
+            let (separator, value) = rest.split_at(1);
+            if name == "--header" && separator == "=" {
+                let (redacted, next) = redact_header(value, depth);
+                return (redacted.map(|header| format!("--header={header}")), next);
+            }
+            (
+                redact_option_value(name, separator, value, depth),
+                Pending::None,
+            )
         }
-        Some((name, value)) if USER_PASSWORD_OPTIONS.contains(&name) => (
-            redact_user_password(value).map(|value| format!("{name}={value}")),
-            Pending::None,
-        ),
-        Some((name, value)) if is_credential_name(name) => (
-            (!value.is_empty()).then(|| format!("{name}={}", redacted_secret(value))),
-            Pending::None,
-        ),
-        Some((name, value)) => (
-            redact_text(value, depth).map(|value| format!("{name}={value}")),
-            Pending::None,
-        ),
         None if is_credential_name(word) => (None, Pending::Value),
         None => (None, Pending::None),
     }
+}
+
+/// 选项或开关与值写在一起（`--token=…`、`-Token:…`、`/p:Password=…`）：凭据类
+/// 名字整个值打码，`--user=` 一类只打冒号后，其余的值再按赋值 / 普通文本看一遍。
+fn redact_option_value(name: &str, separator: &str, value: &str, depth: usize) -> Option<String> {
+    let redacted = if USER_PASSWORD_OPTIONS.contains(&name) {
+        redact_user_password(value)?
+    } else if is_credential_name(name.trim_start_matches('/')) {
+        if value.is_empty() {
+            return None;
+        }
+        redacted_secret(value)
+    } else {
+        redact_embedded(value, depth)?
+    };
+    Some(format!("{name}{separator}{redacted}"))
+}
+
+/// 选项值里再套一层 `名字=值`（`-p:Password=…`、`--env=API_KEY=…`）或普通文本。
+fn redact_embedded(value: &str, depth: usize) -> Option<String> {
+    match split_assignment(value) {
+        Some((name, key, value)) => redact_assignment(name, key, value, depth).0,
+        None => redact_text(value, depth),
+    }
+}
+
+/// Windows 风格开关 `/名字:值`、`/名字=值`；Unix 路径（`/usr/bin/env`）不算。
+fn split_switch(word: &str) -> Option<(&str, &str, &str)> {
+    let rest = word.strip_prefix('/')?;
+    let index = rest.find([':', '='])?;
+    let name = &rest[..index];
+    let mut chars = name.chars();
+    let valid = chars.next().is_some_and(|c| c.is_ascii_alphabetic())
+        && chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_'));
+    valid.then(|| {
+        let (switch, rest) = word.split_at(index + 1);
+        let (separator, value) = rest.split_at(1);
+        (switch, separator, value)
+    })
 }
 
 /// `名字: 值` 形式的请求头：敏感头的值打码（保留认证方案名），其它头当普通文本。
@@ -236,24 +316,48 @@ fn is_positional_header(word: &str) -> bool {
     })
 }
 
-/// `NAME=value` 形式的环境变量赋值（NAME 是合法的 shell 变量名）。
-fn split_assignment(word: &str) -> Option<(&str, &str)> {
-    let (name, value) = word.split_once('=')?;
+/// `键=值`：shell 变量赋值（`NAME=…`），以及键尾是个名字的写法——PowerShell 的
+/// `$env:NAME=…` 与哈希表 `@{Authorization=…`、npm 的 `//registry/:_authToken=…`。
+/// 返回（用来判断的名字，原样的键，值）；URL 查询串这类键尾不是名字的不算。
+fn split_assignment(word: &str) -> Option<(&str, &str, &str)> {
+    let (key, value) = word.split_once('=')?;
+    let name = key.rsplit([':', '/', '.', '{', '$', '@']).next()?;
     let mut chars = name.chars();
     let first = chars.next()?;
     ((first.is_ascii_alphabetic() || first == '_')
-        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_'))
-    .then_some((name, value))
+        && chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-')))
+    .then_some((name, key, value))
 }
 
-fn redact_assignment(name: &str, value: &str, depth: usize) -> Option<String> {
-    if is_credential_name(name) {
-        // httpie 的 `名字==值`（查询参数）保留第二个 `=`。
-        let secret = value.trim_start_matches('=');
-        let eq = &value[..value.len() - secret.len()];
-        return (!secret.is_empty()).then(|| format!("{name}={eq}{}", redacted_secret(secret)));
+fn redact_assignment(
+    name: &str,
+    key: &str,
+    value: &str,
+    depth: usize,
+) -> (Option<String>, Pending) {
+    if !is_credential_name(name) {
+        return (
+            redact_text(value, depth).map(|value| format!("{key}={value}")),
+            Pending::None,
+        );
     }
-    redact_text(value, depth).map(|value| format!("{name}={value}"))
+    // httpie 的 `名字==值`（查询参数）保留第二个 `=`；PowerShell 哈希表收尾的
+    // `}`、`;` 留在值后面。
+    let secret = value.trim_start_matches('=');
+    let eq = &value[..value.len() - secret.len()];
+    let secret_end = secret.trim_end_matches(['}', ';', ',', ')']);
+    let tail = &secret[secret_end.len()..];
+    if secret_end.is_empty() {
+        return (None, Pending::None);
+    }
+    // 值只剩认证方案名：凭据被切到了下一个词（`AUTH="Bearer x"` 在命令行里切开后）。
+    if is_auth_scheme(secret_end) {
+        return (None, Pending::Credential);
+    }
+    (
+        Some(format!("{key}={eq}{}{tail}", redacted_secret(secret_end))),
+        Pending::None,
+    )
 }
 
 /// 值被拆到后面词里的敏感头名：`Authorization:`、`http.extraHeader=Authorization:`。
@@ -365,15 +469,17 @@ fn is_credential_name(name: &str) -> bool {
             }
         })
         .collect();
+    let separated = |word: &str| {
+        name.strip_suffix(word)
+            .is_some_and(|head| head.ends_with('_'))
+    };
     CREDENTIAL_SUFFIXES
         .iter()
         .any(|suffix| name.ends_with(suffix))
-        || CREDENTIAL_WORDS.iter().any(|word| {
-            name == *word
-                || name
-                    .strip_suffix(word)
-                    .is_some_and(|head| head.ends_with('_'))
-        })
+        || CREDENTIAL_WORDS
+            .iter()
+            .any(|word| name == *word || separated(word))
+        || CREDENTIAL_TAILS.iter().any(|word| separated(word))
 }
 
 /// `http`、`https` 以及 `git+https` 这类套在 http(s) 上的协议。
@@ -424,6 +530,8 @@ impl Quotes {
 struct Word {
     span: std::ops::Range<usize>,
     text: String,
+    /// `text` 里每个字符的（在 `text` 里的字节位置，在原文里的字节位置）。
+    offsets: Vec<(usize, usize)>,
     quote: Option<char>,
     starts_command: bool,
 }
@@ -451,18 +559,21 @@ fn split_words(line: &str, quotes: Quotes) -> Vec<Word> {
         let word = current.get_or_insert_with(|| Word {
             span: index..index,
             text: String::new(),
+            offsets: Vec::new(),
             quote: None,
             starts_command: std::mem::take(&mut next_starts_command),
         });
         word.span.end = index + ch.len_utf8();
         match open_quote {
             Some(quote) if ch == quote => open_quote = None,
-            Some(_) => word.text.push(ch),
             None if quotes.opens(ch) => {
                 open_quote = Some(ch);
                 word.quote.get_or_insert(ch);
             }
-            None => word.text.push(ch),
+            Some(_) | None => {
+                word.offsets.push((word.text.len(), index));
+                word.text.push(ch);
+            }
         }
     }
     words.extend(current);
@@ -503,21 +614,64 @@ fn redact_line(line: &str, first: usize, depth: usize, quotes: Quotes) -> String
             continue;
         }
         redacted.push_str(&line[copied..word.span.start]);
-        match word
-            .quote
-            .or_else(|| text.contains(char::is_whitespace).then_some('"'))
-        {
-            Some(quote) => {
-                redacted.push(quote);
-                redacted.push_str(text);
-                redacted.push(quote);
-            }
-            None => redacted.push_str(text),
-        }
+        splice_word(&mut redacted, line, word, text);
         copied = word.span.end;
     }
     redacted.push_str(&line[copied..]);
     redacted
+}
+
+/// 把改过的词写回原文：只换掉改动的那一段，引号写法原样保留
+/// （`$env:X='…'` → `$env:X='[REDACTED]'`）；改动跨过引号时整词重写。
+fn splice_word(out: &mut String, line: &str, word: &Word, text: &str) {
+    let old = word.text.as_str();
+    let prefix: usize = old
+        .chars()
+        .zip(text.chars())
+        .take_while(|(a, b)| a == b)
+        .map(|(c, _)| c.len_utf8())
+        .sum();
+    let suffix: usize = old[prefix..]
+        .chars()
+        .rev()
+        .zip(text[prefix..].chars().rev())
+        .take_while(|(a, b)| a == b)
+        .map(|(c, _)| c.len_utf8())
+        .sum();
+    let old_mid = prefix..old.len() - suffix;
+    let raw_start = word
+        .offsets
+        .iter()
+        .find(|(text_at, _)| *text_at == old_mid.start)
+        .map(|(_, raw_at)| *raw_at);
+    let raw_end = word
+        .offsets
+        .iter()
+        .take_while(|(text_at, _)| *text_at < old_mid.end)
+        .last()
+        .and_then(|(text_at, raw_at)| {
+            let len = old[*text_at..].chars().next()?.len_utf8();
+            Some(raw_at + len)
+        });
+    if let (false, Some(start), Some(end)) = (old_mid.is_empty(), raw_start, raw_end) {
+        if line.get(start..end) == Some(&old[old_mid.clone()]) {
+            out.push_str(&line[word.span.start..start]);
+            out.push_str(&text[prefix..text.len() - suffix]);
+            out.push_str(&line[end..word.span.end]);
+            return;
+        }
+    }
+    match word
+        .quote
+        .or_else(|| text.contains(char::is_whitespace).then_some('"'))
+    {
+        Some(quote) => {
+            out.push(quote);
+            out.push_str(text);
+            out.push(quote);
+        }
+        None => out.push_str(text),
+    }
 }
 
 #[cfg(test)]
@@ -807,6 +961,133 @@ mod tests {
         );
         let plain = ["sh", "-c", "tool --api-key; ls -la\nbearer-check done"];
         assert_redacted(&plain, &plain);
+    }
+
+    /// 复审 L1：PowerShell 的 `$env:NAME=…`（含带空格的 `$env:NAME = …`）、
+    /// `-Headers @{Authorization='Bearer …'}`、冒号参数 `-Token:…`，以及 Windows 风格
+    /// 开关 `/token:…`、`/p:Password=…`。引号写法原样保留，只换掉值本身。
+    #[test]
+    fn powershell_and_windows_switch_spellings_are_redacted() {
+        assert_redacted(
+            &[
+                "pwsh",
+                "-Command",
+                "$env:OPENAI_API_KEY='s3cr3t-1'; $env:GH_TOKEN = \"s3cr3t-2\"; codex",
+            ],
+            &[
+                "pwsh",
+                "-Command",
+                "$env:OPENAI_API_KEY='[REDACTED]'; $env:GH_TOKEN = \"[REDACTED]\"; codex",
+            ],
+        );
+        assert_redacted(
+            &[
+                "pwsh",
+                "-c",
+                "Invoke-RestMethod -Headers @{Authorization='Bearer s3cr3t-3'; 'X-Api-Key'='s3cr3t-4'} https://example.invalid",
+            ],
+            &[
+                "pwsh",
+                "-c",
+                "Invoke-RestMethod -Headers @{Authorization='Bearer [REDACTED]'; 'X-Api-Key'='[REDACTED]'} https://example.invalid",
+            ],
+        );
+        assert_redacted(
+            &[
+                "tool.exe",
+                "-Token:s3cr3t-5",
+                "/token:s3cr3t-6",
+                "/p:Password=s3cr3t-7",
+                "/p:Configuration=Release",
+                "/usr/bin/env",
+            ],
+            &[
+                "tool.exe",
+                "-Token:[REDACTED]",
+                "/token:[REDACTED]",
+                "/p:Password=[REDACTED]",
+                "/p:Configuration=Release",
+                "/usr/bin/env",
+            ],
+        );
+    }
+
+    /// 带空白的参数按一段命令行逐词处理：开头的赋值不会把后面的命令一起吞掉；
+    /// 值被切开时（`"AUTH_HEADER=Bearer …"`）方案名留着、凭据照打。
+    #[test]
+    fn assignments_inside_command_lines_keep_the_rest_of_the_command() {
+        assert_redacted(
+            &["sh", "-c", "TOKEN=s3cr3t-1 codex --model opus"],
+            &["sh", "-c", "TOKEN=[REDACTED] codex --model opus"],
+        );
+        assert_redacted(
+            &["env", "AUTH_HEADER=Bearer s3cr3t-2", "tool"],
+            &["env", "AUTH_HEADER=Bearer [REDACTED]", "tool"],
+        );
+    }
+
+    /// 复审 L1：词表补上 MYSQL_PWD（`PWD` / `OLDPWD` 是目录，不动）、`--pw`、
+    /// `--passcode`、`--jwt`，以及 npm 的 `//registry/:_authToken=`。
+    #[test]
+    fn extra_credential_names_are_recognised() {
+        assert_redacted(
+            &[
+                "env",
+                "MYSQL_PWD=s3cr3t-1",
+                "PWD=/home/me",
+                "OLDPWD=/tmp",
+                "tool",
+                "--pw",
+                "s3cr3t-2",
+                "--passcode=s3cr3t-3",
+                "--jwt",
+                "s3cr3t-4",
+                "//registry.npmjs.org/:_authToken=s3cr3t-5",
+            ],
+            &[
+                "env",
+                "MYSQL_PWD=[REDACTED]",
+                "PWD=/home/me",
+                "OLDPWD=/tmp",
+                "tool",
+                "--pw",
+                "[REDACTED]",
+                "--passcode=[REDACTED]",
+                "--jwt",
+                "[REDACTED]",
+                "//registry.npmjs.org/:_authToken=[REDACTED]",
+            ],
+        );
+    }
+
+    /// 复审 L1：跟在凭据选项或 `Bearer` 后面、以 `-` 开头的随机串是凭据本身；
+    /// 像选项的（`--verbose`、全小写的 `-debug`）仍按选项处理。
+    #[test]
+    fn dash_leading_secrets_after_credential_options_are_redacted() {
+        assert_redacted(
+            &[
+                "tool",
+                "--token",
+                "-s3cr3tXk9",
+                "Bearer",
+                "-s3cr3tQ2",
+                "--api-key",
+                "--verbose",
+                "--token",
+                "-debug",
+            ],
+            &[
+                "tool",
+                "--token",
+                "[REDACTED]",
+                "Bearer",
+                "[REDACTED]",
+                "--api-key",
+                "--verbose",
+                "--token",
+                "-debug",
+            ],
+        );
     }
 
     #[test]
