@@ -259,7 +259,13 @@ impl Runtime {
                                 subscription_sequence = subscription_sequence.saturating_add(1);
                                 let subscription_id = format!("system-{subscription_sequence}");
                                 if subscribers.len() >= 256 {
-                                    Err(("subscription_limit", "监控订阅数量超过限制".into()))
+                                    Err((
+                                        "subscription_limit",
+                                        crate::i18n::texts()
+                                            .runtime
+                                            .monitor_subscription_limit
+                                            .into(),
+                                    ))
                                 } else {
                                     subscribers.insert(
                                         subscription_id.clone(),
@@ -290,7 +296,13 @@ impl Runtime {
                                     active: false,
                                 })
                             }
-                            _ => Err(("unsupported_method", "不支持的监控请求".into())),
+                            _ => Err((
+                                "unsupported_method",
+                                crate::i18n::texts()
+                                    .runtime
+                                    .monitor_request_unsupported
+                                    .into(),
+                            )),
                         };
                         job.reply.response(&id, result);
                     }
@@ -385,9 +397,10 @@ impl Runtime {
                     reply: reply.clone(),
                 })))
             {
+                let texts = &crate::i18n::texts().runtime;
                 let message = match error {
-                    mpsc::TrySendError::Full(_) => "监控查询繁忙，请稍后重试",
-                    mpsc::TrySendError::Disconnected(_) => "监控服务不可用",
+                    mpsc::TrySendError::Full(_) => texts.monitor_busy,
+                    mpsc::TrySendError::Disconnected(_) => texts.monitor_unavailable,
                 };
                 reply.response(&id, Err(("server_busy", message.into())));
             }

@@ -68,7 +68,7 @@ impl GpuWorker {
         {
             for gpu in &mut values {
                 gpu.status = ObservationStatus::Stale;
-                gpu.message = Some("显卡驱动响应超时，显示上次有效数据".into());
+                gpu.message = Some(crate::i18n::texts().runtime.gpu_driver_timeout.into());
             }
         }
         (
@@ -117,11 +117,41 @@ fn nvidia_metrics(nvml: &nvml_wrapper::Nvml) -> Vec<GpuMetric> {
                 .ok()
                 .map(|value| value as f32),
             power_watts: device.power_usage().ok().map(|value| value as f32 / 1000.0),
-            message: utilization
-                .is_none()
-                .then(|| "设备未提供利用率；其余指标按能力显示".into()),
+            message: utilization.is_none().then(|| {
+                crate::i18n::texts()
+                    .runtime
+                    .gpu_utilization_unavailable
+                    .into()
+            }),
             ..Default::default()
         });
     }
     metrics
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 文档终审 D7：驱动超过 15 秒没有应答时的说明按界面语言给出：英文界面不含 CJK，
+    /// 中文界面是中文。
+    #[test]
+    fn stale_gpu_note_follows_the_interface_language() {
+        use crate::i18n::{has_cjk, lang_guard, texts, Lang};
+        let (request, _requests) = mpsc::sync_channel(1);
+        let stale_at = Instant::now().checked_sub(Duration::from_secs(20));
+        assert!(stale_at.is_some(), "用例前提：单调时钟已走过 20 秒");
+        let worker = GpuWorker {
+            request,
+            latest: Arc::new(Mutex::new((stale_at, vec![GpuMetric::default()]))),
+        };
+        for (lang, chinese) in [(Lang::En, false), (Lang::ZhCn, true)] {
+            let _guard = lang_guard(lang);
+            let (_, values) = worker.request_and_read();
+            assert_eq!(values[0].status, ObservationStatus::Stale);
+            let message = values[0].message.clone().unwrap_or_default();
+            assert_eq!(message, texts().runtime.gpu_driver_timeout);
+            assert_eq!(has_cjk(&message), chinese, "{lang:?}: {message}");
+        }
+    }
 }

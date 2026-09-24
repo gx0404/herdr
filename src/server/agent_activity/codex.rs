@@ -209,7 +209,7 @@ impl ActivitySource for Codex {
         }
         if !is_plausible_thread_id(node_id) {
             return Err(SourceError::Malformed(format!(
-                "codex node id 不像线程 id：{node_id:?}"
+                "codex node id is not a thread id: {node_id:?}"
             )));
         }
         let sessions = sessions_dir(cx);
@@ -779,7 +779,9 @@ fn read_transcript_page(
     let offset = match cursor {
         None => 0,
         Some(cursor) => cursor.trim().parse::<u64>().map_err(|_| {
-            SourceError::Malformed(format!("codex 内容游标不是字节偏移：{cursor:?}"))
+            SourceError::Malformed(format!(
+                "codex content cursor is not a byte offset: {cursor:?}"
+            ))
         })?,
     };
     let budget = if max_bytes == 0 {

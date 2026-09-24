@@ -42,7 +42,8 @@ impl Sampler {
             processes,
             snapshot: SystemMetricsSnapshot {
                 boot_id,
-                hostname: System::host_name().unwrap_or_else(|| "本机".into()),
+                hostname: System::host_name()
+                    .unwrap_or_else(|| crate::i18n::texts().runtime.hostname_unknown.into()),
                 operating_system: System::long_os_version()
                     .unwrap_or_else(|| std::env::consts::OS.into()),
                 environment: crate::platform::monitor_environment(),
@@ -82,6 +83,9 @@ impl Sampler {
             self.inventory = inventory;
             self.system.refresh_cpu_frequency();
             self.last_inventory = Some(now);
+            // 主机环境说明随 server 的界面语言（文档终审 D7）：随盘点重算，改语言后最迟一轮
+            // 盘点就跟上。
+            self.snapshot.environment = crate::platform::monitor_environment();
         }
         self.system.refresh_memory();
         self.snapshot.cpu_brand = self

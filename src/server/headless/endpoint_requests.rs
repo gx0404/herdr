@@ -17,7 +17,10 @@ impl HeadlessServer {
         if pane.is_some_and(|pane| self.app.parse_pane_id(pane).is_none()) {
             reply.response(
                 &request.id,
-                Err(("pane_not_found", "账号查询目标窗格已不存在".into())),
+                Err((
+                    "pane_not_found",
+                    crate::i18n::texts().runtime.observation_pane_gone.into(),
+                )),
             );
             return;
         }
@@ -25,10 +28,11 @@ impl HeadlessServer {
             match crate::server::observability::Runtime::start(self.client_shell_boot_id.clone()) {
                 Ok(runtime) => self.observability = Some(runtime),
                 Err(error) => {
-                    reply.response(
-                        &request.id,
-                        Err(("server_unavailable", format!("无法启动观测服务：{error}"))),
+                    let message = crate::i18n::fill(
+                        crate::i18n::texts().runtime.observation_start_failed_fmt,
+                        &[("error", &error.to_string())],
                     );
+                    reply.response(&request.id, Err(("server_unavailable", message)));
                     return;
                 }
             }

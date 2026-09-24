@@ -48,7 +48,7 @@ pub(crate) fn terminate_usage_pty(child: &mut dyn portable_pty::Child) {
 pub(crate) fn process_instance_token(_pid: u32) -> std::io::Result<String> {
     Err(std::io::Error::new(
         std::io::ErrorKind::Unsupported,
-        "本平台尚未提供安全进程实例句柄",
+        crate::i18n::texts().platform.process_handle_unsupported,
     ))
 }
 
@@ -60,13 +60,13 @@ impl MonitoredProcess {
     pub(crate) fn open(_pid: u32) -> std::io::Result<Self> {
         Err(std::io::Error::new(
             std::io::ErrorKind::Unsupported,
-            "此平台尚无稳定进程句柄",
+            crate::i18n::texts().platform.process_handle_unsupported,
         ))
     }
     pub(crate) fn terminate(&self, _force: bool) -> std::io::Result<()> {
         Err(std::io::Error::new(
             std::io::ErrorKind::Unsupported,
-            "此平台尚无稳定进程句柄",
+            crate::i18n::texts().platform.process_handle_unsupported,
         ))
     }
 }

@@ -7,6 +7,11 @@ use std::sync::{mpsc, Arc, Mutex};
 use std::time::{Duration, Instant};
 use sysinfo::{CpuRefreshKind, ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind, Users};
 
+/// 进程请求的错误说明按 server 的界面语言给出（文档终审 D7）；错误码不变。
+fn texts() -> &'static crate::i18n::RuntimeMessageTexts {
+    &crate::i18n::texts().runtime
+}
+
 enum Job {
     Sample,
     Request(Box<Request>, Reply),
@@ -76,7 +81,10 @@ impl ProcessWorker {
                                         identity: params.identity,
                                         force: params.force,
                                     }),
-                                _ => Err(("unsupported_method", "不支持的进程查询".into())),
+                                _ => Err((
+                                    "unsupported_method",
+                                    texts().process_request_unsupported.into(),
+                                )),
                             };
                             reply.response(&id, result);
                         }
@@ -104,7 +112,7 @@ impl ProcessWorker {
             .try_send(Job::Request(Box::new(request), reply.clone()))
             .is_err()
         {
-            reply.response(&id, Err(("server_busy", "进程查询繁忙，请稍后重试".into())));
+            reply.response(&id, Err(("server_busy", texts().process_busy.into())));
         }
     }
 }
@@ -180,19 +188,19 @@ impl ProcessSampler {
         identity: &ProcessIdentity,
     ) -> Result<ProcessMetric, (&'static str, String)> {
         if identity.boot_id != self.boot_id {
-            return Err(("stale_boot", "主机连接已更新，请重新选择进程".into()));
+            return Err(("stale_boot", texts().process_host_changed.into()));
         }
         let before = crate::platform::process_instance_token(identity.pid)
             .map_err(|error| ("process_identity_unavailable", error.to_string()))?;
         if identity.instance_token.as_deref() != Some(before.as_str()) {
-            return Err(("stale_process", "进程实例已经变化，请刷新列表".into()));
+            return Err(("stale_process", texts().process_changed_refresh.into()));
         }
         let native = crate::platform::MonitoredProcess::open(identity.pid).ok();
         if native
             .as_ref()
             .is_some_and(|process| process.instance_token != before)
         {
-            return Err(("stale_process", "进程实例已经变化".into()));
+            return Err(("stale_process", texts().process_changed.into()));
         }
         let pid = sysinfo::Pid::from_u32(identity.pid);
         self.system.refresh_processes_specifics(
@@ -205,14 +213,14 @@ impl ProcessSampler {
         let process = self
             .system
             .process(pid)
-            .ok_or_else(|| ("not_found", "进程已退出或无法读取".into()))?;
+            .ok_or_else(|| ("not_found", texts().process_gone.into()))?;
         if process.start_time() != identity.started_at {
-            return Err(("stale_process", "PID 已被其他进程使用，请重新选择".into()));
+            return Err(("stale_process", texts().process_pid_reused.into()));
         }
         let token = crate::platform::process_instance_token(identity.pid)
             .map_err(|error| ("process_identity_unavailable", error.to_string()))?;
         if token != before {
-            return Err(("stale_process", "进程身份已经变化".into()));
+            return Err(("stale_process", texts().process_identity_changed.into()));
         }
         let name = native
             .as_ref()
@@ -266,21 +274,81 @@ impl ProcessSampler {
         let ticket = params
             .action_token
             .as_deref()
-            .ok_or_else(|| ("identity_required", "请先打开进程详情并确认".into()))?;
+            .ok_or_else(|| ("identity_required", texts().process_confirm_first.into()))?;
         let Some((identity, process, created)) = self.process_actions.remove(ticket) else {
-            return Err(("stale_process", "进程确认已过期，请重新打开详情".into()));
+            return Err(("stale_process", texts().process_confirm_expired.into()));
         };
         if identity != params.identity || created.elapsed() >= Duration::from_secs(60) {
-            return Err(("stale_process", "进程确认与当前请求不匹配".into()));
+            return Err(("stale_process", texts().process_confirm_mismatch.into()));
         }
         if protected_process(identity.pid, &process.name) {
-            return Err((
-                "protected_process",
-                "不能结束系统或当前 Herdr 连接进程".into(),
-            ));
+            return Err(("protected_process", texts().process_protected.into()));
         }
         process
             .terminate(params.force)
             .map_err(|error| ("terminate_failed", error.to_string()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::i18n::{has_cjk, lang_guard, Lang};
+
+    fn sampler() -> ProcessSampler {
+        ProcessSampler {
+            system: System::new(),
+            users: Users::new(),
+            boot_id: "boot-1".into(),
+            snapshot: SystemMetricsSnapshot::default(),
+            process_actions: HashMap::new(),
+            next_action: 0,
+        }
+    }
+
+    /// 文档终审 D7：进程详情与结束进程的错误说明按界面语言给出——英文界面不含 CJK，
+    /// 中文界面是中文；错误码不随语言变化。
+    #[test]
+    fn process_errors_follow_the_interface_language() {
+        let mut sampler = sampler();
+        let stale_boot = ProcessIdentity {
+            boot_id: "other-boot".into(),
+            ..Default::default()
+        };
+        // 本进程还活着，但请求里没有实例标识：服务端按「实例已变化」拒绝（平台拿不到标识
+        // 时按「标识不可用」拒绝），都不会去碰真实进程。
+        let unconfirmed_instance = ProcessIdentity {
+            pid: std::process::id(),
+            boot_id: "boot-1".into(),
+            ..Default::default()
+        };
+        let unconfirmed = ProcessTerminateParams {
+            identity: ProcessIdentity::default(),
+            action_token: None,
+            force: false,
+        };
+        let expired = ProcessTerminateParams {
+            action_token: Some("gone".into()),
+            ..unconfirmed.clone()
+        };
+        for (lang, chinese) in [(Lang::En, false), (Lang::ZhCn, true)] {
+            let _guard = lang_guard(lang);
+            let cases = [
+                (sampler.process(&stale_boot).err(), Some("stale_boot")),
+                (sampler.process(&unconfirmed_instance).err(), None),
+                (
+                    sampler.terminate(&unconfirmed).err(),
+                    Some("identity_required"),
+                ),
+                (sampler.terminate(&expired).err(), Some("stale_process")),
+            ];
+            for (error, expected_code) in cases {
+                let (code, message) = error.expect("这些请求都应被拒绝");
+                if let Some(expected) = expected_code {
+                    assert_eq!(code, expected);
+                }
+                assert_eq!(has_cjk(&message), chinese, "{lang:?} {code}: {message}");
+            }
+        }
     }
 }

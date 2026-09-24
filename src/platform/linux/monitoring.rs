@@ -4,6 +4,11 @@ use std::path::Path;
 
 use crate::api::schema::{GpuMetric, ObservationStatus};
 
+/// 本平台会进入 API 应答与监控快照的文案，按 server 的界面语言给出（文档终审 D7）。
+fn texts() -> &'static crate::i18n::PlatformMessageTexts {
+    &crate::i18n::texts().platform
+}
+
 #[derive(Default)]
 pub(crate) struct NativeGpuCollector;
 
@@ -69,7 +74,7 @@ impl NativeGpuCollector {
                 }
             }
             if gpu.usage_percent.is_none() {
-                gpu.message = Some("驱动未公开可读取的全卡利用率；可用传感器仍正常显示".into());
+                gpu.message = Some(texts().gpu_utilization_unexposed.into());
             }
             result.push(gpu);
         }
@@ -82,11 +87,11 @@ pub(crate) fn monitor_environment() -> String {
         .unwrap_or_default()
         .to_lowercase();
     if release.contains("microsoft") {
-        "WSL（当前 Linux 环境）".into()
+        texts().environment_wsl.into()
     } else if Path::new("/.dockerenv").exists() || Path::new("/run/.containerenv").exists() {
-        "容器（当前可见资源）".into()
+        texts().environment_container.into()
     } else {
-        "Linux 主机".into()
+        texts().environment_linux.into()
     }
 }
 
@@ -160,18 +165,24 @@ pub(crate) fn terminate_usage_pty(child: &mut dyn portable_pty::Child) {
 
 pub(crate) fn process_instance_token(pid: u32) -> io::Result<String> {
     let stat = std::fs::read_to_string(format!("/proc/{pid}/stat"))?;
+    stat_start_marker(&stat).map(str::to_owned)
+}
+
+/// `/proc/<pid>/stat` 第 22 列（启动时刻，时钟滴答）：同一 PID 上的进程实例标识。进程名
+/// 可含空格与括号，所以从最后一个 `)` 之后数列。
+fn stat_start_marker(stat: &str) -> io::Result<&str> {
     let tail = stat
         .rsplit_once(')')
-        .ok_or_else(|| io::Error::other("进程状态格式无效"))?
+        .ok_or_else(|| io::Error::other(texts().process_status_invalid))?
         .1;
     let started = tail
         .split_whitespace()
         .nth(19)
-        .ok_or_else(|| io::Error::other("进程启动标识缺失"))?;
+        .ok_or_else(|| io::Error::other(texts().process_start_missing))?;
     if !started.bytes().all(|b| b.is_ascii_digit()) {
-        return Err(io::Error::other("进程启动标识无效"));
+        return Err(io::Error::other(texts().process_start_invalid));
     }
-    Ok(started.into())
+    Ok(started)
 }
 
 pub(crate) struct MonitoredProcess {
@@ -190,16 +201,16 @@ impl MonitoredProcess {
         let stat = std::fs::read_to_string(format!("/proc/{pid}/stat"))?;
         let (head, tail) = stat
             .rsplit_once(')')
-            .ok_or_else(|| io::Error::other("进程状态无效"))?;
+            .ok_or_else(|| io::Error::other(texts().process_status_invalid))?;
         let name = head
             .split_once('(')
-            .ok_or_else(|| io::Error::other("进程名称缺失"))?
+            .ok_or_else(|| io::Error::other(texts().process_name_missing))?
             .1
             .to_owned();
         let instance_token = tail
             .split_whitespace()
             .nth(19)
-            .ok_or_else(|| io::Error::other("进程实例缺失"))?
+            .ok_or_else(|| io::Error::other(texts().process_start_missing))?
             .to_owned();
         let mut descriptor = libc::pollfd {
             fd: handle.as_raw_fd(),
@@ -207,7 +218,7 @@ impl MonitoredProcess {
             revents: 0,
         };
         if unsafe { libc::poll(&mut descriptor, 1, 0) } != 0 {
-            return Err(io::Error::other("进程已退出"));
+            return Err(io::Error::other(crate::i18n::texts().runtime.process_gone));
         }
         Ok(Self {
             handle,
@@ -341,5 +352,33 @@ mod tests {
         let token = process_instance_token(pid).unwrap();
         assert_eq!(process_instance_token(pid).unwrap(), token);
         assert!(terminate_monitored_process(pid, &token, true).is_err());
+    }
+
+    /// 文档终审 D7：`system.metrics` 快照里的主机环境说明与进程实例标识的解析错误（经
+    /// `system.process.get` 的错误说明到达监控页）按界面语言给出：英文界面不含 CJK，中文
+    /// 界面是中文。
+    #[test]
+    fn environment_and_stat_errors_follow_the_interface_language() {
+        use crate::i18n::{has_cjk, lang_guard, Lang};
+        let stat = |text: &str| stat_start_marker(text).unwrap_err().to_string();
+        // 状态列之后第 19 列才是启动时刻：`)` 缺失、列不够、启动时刻不是数字各一例。
+        let columns = "0 ".repeat(18);
+        let malformed = [
+            "no closing parenthesis".to_owned(),
+            "1 (sh) S 0".to_owned(),
+            format!("1 (sh) S {columns}x"),
+        ];
+        for (lang, chinese) in [(Lang::En, false), (Lang::ZhCn, true)] {
+            let _guard = lang_guard(lang);
+            let environment = monitor_environment();
+            assert!(!environment.is_empty());
+            assert_eq!(has_cjk(&environment), chinese, "{lang:?}: {environment}");
+            for text in &malformed {
+                let message = stat(text);
+                assert_eq!(has_cjk(&message), chinese, "{lang:?}: {message}");
+            }
+        }
+        let valid = format!("1 (a) b) S {columns}42 7");
+        assert_eq!(stat_start_marker(&valid).ok(), Some("42"));
     }
 }

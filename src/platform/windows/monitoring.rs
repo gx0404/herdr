@@ -13,6 +13,11 @@ use windows_sys::Win32::System::Threading::{
 
 use crate::api::schema::{GpuMetric, ObservationStatus};
 
+/// 本平台会进入 API 应答与监控快照的文案，按 server 的界面语言给出（文档终审 D7）。
+fn texts() -> &'static crate::i18n::PlatformMessageTexts {
+    &crate::i18n::texts().platform
+}
+
 pub(crate) struct NativeGpuCollector {
     query: PDH_HQUERY,
     engines: PDH_HCOUNTER,
@@ -195,9 +200,7 @@ impl NativeGpuCollector {
                 memory_total_bytes: (desc.DedicatedVideoMemory > 0)
                     .then_some(desc.DedicatedVideoMemory as u64),
                 shared_memory_used_bytes: memory(&shared),
-                message: usage
-                    .is_none()
-                    .then(|| "正在等待有效 WDDM 计数器；旧驱动可能不支持".into()),
+                message: usage.is_none().then(|| texts().gpu_counters_pending.into()),
                 ..Default::default()
             });
         }
@@ -225,7 +228,7 @@ impl NativeGpuCollector {
 }
 
 pub(crate) fn monitor_environment() -> String {
-    "Windows 主机".into()
+    texts().environment_windows.into()
 }
 
 pub(crate) fn configure_usage_probe_command(command: &mut std::process::Command) {
@@ -345,7 +348,7 @@ impl MonitoredProcess {
         if !force {
             return Err(io::Error::new(
                 io::ErrorKind::Unsupported,
-                "Windows 需要单独确认强制结束",
+                texts().process_force_required,
             ));
         }
         if unsafe { TerminateProcess(self.handle.0, 1) } == 0 {
@@ -360,15 +363,19 @@ pub(crate) fn terminate_monitored_process(pid: u32, expected: &str, force: bool)
     if !force {
         return Err(io::Error::new(
             io::ErrorKind::Unsupported,
-            "Windows 需要单独确认强制结束",
+            texts().process_force_required,
         ));
     }
     if pid <= 1 || pid == std::process::id() {
-        return Err(io::Error::other("受保护的进程"));
+        return Err(io::Error::other(
+            crate::i18n::texts().runtime.process_protected,
+        ));
     }
     let handle = process_handle(pid, true)?;
     if creation_time(&handle)? != expected {
-        return Err(io::Error::other("进程身份已经变化"));
+        return Err(io::Error::other(
+            crate::i18n::texts().runtime.process_identity_changed,
+        ));
     }
     if unsafe { TerminateProcess(handle.0, 1) } == 0 {
         Err(io::Error::last_os_error())

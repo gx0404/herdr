@@ -1565,8 +1565,9 @@ pub struct MachineFormTexts {
     pub saved_fmt: &'static str, // args: label
 }
 
-/// 运行期提示与错误里原来只有中文的文案（文档终审 D7）：选区与阅读快照、连接等。
-/// 服务端产出的条目按 server 进程的界面语言给出。
+/// 运行期提示与错误里原来只有中文的文案（文档终审 D7）：选区与阅读快照、连接、进程、
+/// 显卡与监控服务等。服务端产出的条目按 server 进程的界面语言给出（与 toast、通知同一
+/// 口径，随 config.toml 的 `language` 同步）。
 pub struct RuntimeMessageTexts {
     // 选区与阅读快照（客户端）。
     pub selection_history_unreadable: &'static str,
@@ -1582,6 +1583,67 @@ pub struct RuntimeMessageTexts {
     pub terminal_size_not_ready: &'static str,
     pub connection_cancelled: &'static str,
     pub handshake_timed_out: &'static str,
+    // 阅读快照（服务端 `pane.text_snapshot.*` 的错误说明）。
+    pub snapshot_expired: &'static str,
+    pub snapshot_capacity: &'static str,
+    pub snapshot_ids_exhausted: &'static str,
+    pub snapshot_viewport_unreadable: &'static str,
+    pub snapshot_rows_out_of_range: &'static str,
+    pub snapshot_selection_out_of_range: &'static str,
+    pub snapshot_invalid_request: &'static str,
+    pub snapshot_pane_gone: &'static str,
+    pub snapshot_capture_failed: &'static str,
+    pub snapshot_needs_server: &'static str,
+    /// 只有 server 或客户端连接上下文才能处理的 API 方法落到了 App 自身。
+    pub server_context_required: &'static str,
+    // 进程详情与结束进程（服务端 `system.process.*` 的错误说明）。
+    pub process_request_unsupported: &'static str,
+    pub process_busy: &'static str,
+    pub process_host_changed: &'static str,
+    pub process_changed_refresh: &'static str,
+    pub process_changed: &'static str,
+    pub process_gone: &'static str,
+    pub process_pid_reused: &'static str,
+    pub process_identity_changed: &'static str,
+    pub process_confirm_first: &'static str,
+    pub process_confirm_expired: &'static str,
+    pub process_confirm_mismatch: &'static str,
+    pub process_protected: &'static str,
+    // 显卡、主机与监控服务（服务端）。
+    pub gpu_driver_timeout: &'static str,
+    pub gpu_utilization_unavailable: &'static str,
+    /// 系统取不到主机名时概要行的占位。
+    pub hostname_unknown: &'static str,
+    pub monitor_subscription_limit: &'static str,
+    pub monitor_request_unsupported: &'static str,
+    pub monitor_busy: &'static str,
+    pub monitor_unavailable: &'static str,
+    /// 账号用量请求指向的窗格已不存在。
+    pub observation_pane_gone: &'static str,
+    pub observation_start_failed_fmt: &'static str, // args: error
+}
+
+/// 平台层（`src/platform/<os>`）产出、会进入 API 应答或监控快照的文案（文档终审 D7），
+/// 按调用进程（server）的界面语言给出。每条只由对应平台的实现读取。
+// 任一目标编译时，别的平台的条目都没有读者；测试构建里 `tests::platform_messages` 穷尽
+// 读取全部条目。
+#[cfg_attr(not(test), allow(dead_code))]
+pub struct PlatformMessageTexts {
+    // Linux（`/proc` 与 sysfs）。
+    pub process_status_invalid: &'static str,
+    pub process_start_missing: &'static str,
+    pub process_start_invalid: &'static str,
+    pub process_name_missing: &'static str,
+    pub gpu_utilization_unexposed: &'static str,
+    pub environment_wsl: &'static str,
+    pub environment_container: &'static str,
+    pub environment_linux: &'static str,
+    // Windows。
+    pub process_force_required: &'static str,
+    pub gpu_counters_pending: &'static str,
+    pub environment_windows: &'static str,
+    // 其余平台（回退实现）。
+    pub process_handle_unsupported: &'static str,
 }
 
 /// Help/about strings for the clap CLI surface. Option and subcommand
@@ -2352,6 +2414,7 @@ pub struct Texts {
     pub menu: MenuTexts,
     pub machine_form: MachineFormTexts,
     pub runtime: RuntimeMessageTexts,
+    pub platform: PlatformMessageTexts,
     pub cli_help: CliHelpTexts,
     pub cli_output: CliOutputTexts,
     pub cli_errors: CliErrorTexts,
@@ -2629,48 +2692,110 @@ mod tests {
         assert!(note.contains("窗格"), "术语要用「窗格」：{note}");
     }
 
-    /// `RuntimeMessageTexts` 的全部条目（穷尽解构：新增字段不列进来就编译不过）。
+    /// 一张文案表的全部条目：解构不带 `..`，新增字段不列进来就编译不过。
+    macro_rules! all_entries {
+        ($table:expr, $ty:ident { $($field:ident),* $(,)? }) => {{
+            let $ty { $($field),* } = $table;
+            vec![$(*$field),*]
+        }};
+    }
+
+    /// `RuntimeMessageTexts` 的全部条目。
     fn runtime_messages(t: &RuntimeMessageTexts) -> Vec<&'static str> {
-        let RuntimeMessageTexts {
-            selection_history_unreadable,
-            selection_changed_before_copy,
-            selection_resized,
-            selection_capture_failed,
-            selection_copy_mismatch,
-            selection_timed_out,
-            views_update_failed,
-            connection_settings_changed,
-            host_key_review_required,
-            terminal_size_not_ready,
-            connection_cancelled,
-            handshake_timed_out,
-        } = t;
-        vec![
-            selection_history_unreadable,
-            selection_changed_before_copy,
-            selection_resized,
-            selection_capture_failed,
-            selection_copy_mismatch,
-            selection_timed_out,
-            views_update_failed,
-            connection_settings_changed,
-            host_key_review_required,
-            terminal_size_not_ready,
-            connection_cancelled,
-            handshake_timed_out,
-        ]
+        all_entries!(
+            t,
+            RuntimeMessageTexts {
+                selection_history_unreadable,
+                selection_changed_before_copy,
+                selection_resized,
+                selection_capture_failed,
+                selection_copy_mismatch,
+                selection_timed_out,
+                views_update_failed,
+                connection_settings_changed,
+                host_key_review_required,
+                terminal_size_not_ready,
+                connection_cancelled,
+                handshake_timed_out,
+                snapshot_expired,
+                snapshot_capacity,
+                snapshot_ids_exhausted,
+                snapshot_viewport_unreadable,
+                snapshot_rows_out_of_range,
+                snapshot_selection_out_of_range,
+                snapshot_invalid_request,
+                snapshot_pane_gone,
+                snapshot_capture_failed,
+                snapshot_needs_server,
+                server_context_required,
+                process_request_unsupported,
+                process_busy,
+                process_host_changed,
+                process_changed_refresh,
+                process_changed,
+                process_gone,
+                process_pid_reused,
+                process_identity_changed,
+                process_confirm_first,
+                process_confirm_expired,
+                process_confirm_mismatch,
+                process_protected,
+                gpu_driver_timeout,
+                gpu_utilization_unavailable,
+                hostname_unknown,
+                monitor_subscription_limit,
+                monitor_request_unsupported,
+                monitor_busy,
+                monitor_unavailable,
+                observation_pane_gone,
+                observation_start_failed_fmt,
+            }
+        )
+    }
+
+    /// `PlatformMessageTexts` 的全部条目：任一目标编译时只有本平台的条目有读者（见结构体
+    /// 上的 `allow`），测试构建里在这里穷尽读取。
+    fn platform_messages(t: &PlatformMessageTexts) -> Vec<&'static str> {
+        all_entries!(
+            t,
+            PlatformMessageTexts {
+                process_status_invalid,
+                process_start_missing,
+                process_start_invalid,
+                process_name_missing,
+                gpu_utilization_unexposed,
+                environment_wsl,
+                environment_container,
+                environment_linux,
+                process_force_required,
+                gpu_counters_pending,
+                environment_windows,
+                process_handle_unsupported,
+            }
+        )
+    }
+
+    /// 两张表逐条对照：英文表每条都不含 CJK 字符，中文表每条都有译文（不是照抄英文）。
+    fn assert_translated(en: &[&str], zh: &[&str]) {
+        assert_eq!(en.len(), zh.len());
+        for (en, zh) in en.iter().zip(zh) {
+            assert!(!en.is_empty() && !has_cjk(en), "英文表混入中文：{en}");
+            assert!(has_cjk(zh), "中文表缺译文：{zh}");
+        }
     }
 
     /// 文档终审 D7：运行期提示原来只有中文。英文表的每一条都不含 CJK 字符，中文表
     /// 每一条都有译文（不是照抄英文）。
     #[test]
     fn runtime_messages_are_translated_in_both_tables() {
-        let en = runtime_messages(&en::TEXTS.runtime);
-        let zh = runtime_messages(&zh_cn::TEXTS.runtime);
-        for (en, zh) in en.iter().zip(&zh) {
-            assert!(!en.is_empty() && !has_cjk(en), "英文表混入中文：{en}");
-            assert!(has_cjk(zh), "中文表缺译文：{zh}");
-        }
+        assert_translated(
+            &runtime_messages(&en::TEXTS.runtime),
+            &runtime_messages(&zh_cn::TEXTS.runtime),
+        );
+        assert_translated(
+            &platform_messages(&en::TEXTS.platform),
+            &platform_messages(&zh_cn::TEXTS.platform),
+        );
     }
 
     #[test]

@@ -1030,7 +1030,7 @@ impl App {
                 return responses::encode_error(
                     request.id,
                     "server_context_required",
-                    "此操作需要 server 或客户端连接上下文",
+                    crate::i18n::texts().runtime.server_context_required,
                 );
             }
             Method::ServerStop(_) => {
@@ -1253,7 +1253,7 @@ impl App {
                 return responses::encode_error(
                     request.id,
                     "server_unavailable",
-                    "阅读快照需要 server runtime",
+                    crate::i18n::texts().runtime.snapshot_needs_server,
                 );
             }
             Method::PaneSelectionRead(params) => {

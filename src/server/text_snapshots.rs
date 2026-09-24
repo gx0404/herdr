@@ -11,6 +11,11 @@ const MAX_BYTES: usize = 64 * 1024 * 1024;
 const MAX_ENTRIES: usize = 32;
 type Result = std::result::Result<ResponseResult, (&'static str, String)>;
 
+/// 阅读快照的错误说明按 server 的界面语言给出（文档终审 D7）；错误码不变。
+fn texts() -> &'static crate::i18n::RuntimeMessageTexts {
+    &crate::i18n::texts().runtime
+}
+
 struct Entry {
     owner: Option<u64>,
     pane_id: String,
@@ -67,10 +72,7 @@ impl Store {
             .entries
             .get_mut(id)
             .filter(|entry| entry.owner == owner)
-            .ok_or((
-                "snapshot_expired",
-                "阅读快照已释放或过期，请重新选择".into(),
-            ))?;
+            .ok_or_else(|| ("snapshot_expired", texts().snapshot_expired.into()))?;
         entry.touched = Instant::now();
         Ok(entry)
     }
@@ -106,10 +108,7 @@ impl super::headless::HeadlessServer {
                         .count()
                         >= MAX_ENTRIES
                 {
-                    return Err((
-                        "snapshot_capacity",
-                        "阅读快照已达到容量上限，请结束其他阅读后重试".into(),
-                    ));
+                    return Err(("snapshot_capacity", texts().snapshot_capacity.into()));
                 }
                 if let Some(owner) = owner {
                     store.release_owner(owner);
@@ -117,7 +116,7 @@ impl super::headless::HeadlessServer {
                 store.serial = store
                     .serial
                     .checked_add(1)
-                    .ok_or(("snapshot_capacity", "阅读快照编号已耗尽".into()))?;
+                    .ok_or_else(|| ("snapshot_capacity", texts().snapshot_ids_exhausted.into()))?;
                 let id = format!("{}:text:{}", self.client_shell_boot_id, store.serial);
                 let result = ResponseResult::PaneTextSnapshot {
                     snapshot_id: id.clone(),
@@ -128,7 +127,12 @@ impl super::headless::HeadlessServer {
                             text.viewport_start.saturating_sub(16).max(text.range_start),
                             text.viewport_rows.saturating_add(32),
                         )
-                        .ok_or(("snapshot_range", "无法读取快照视口".into()))?,
+                        .ok_or_else(|| {
+                            (
+                                "snapshot_range",
+                                texts().snapshot_viewport_unreadable.into(),
+                            )
+                        })?,
                     ),
                 };
                 store.entries.insert(
@@ -149,7 +153,7 @@ impl super::headless::HeadlessServer {
                     .text
                     .window(params.start_row, params.rows.clamp(1, 2048))
                     .filter(|text| !text.rows.is_empty())
-                    .ok_or(("snapshot_range", "请求行超出阅读快照范围".into()))?;
+                    .ok_or_else(|| ("snapshot_range", texts().snapshot_rows_out_of_range.into()))?;
                 Ok(ResponseResult::PaneTextSnapshot {
                     snapshot_id: params.snapshot_id.clone(),
                     pane_id: entry.pane_id.clone(),
@@ -165,7 +169,12 @@ impl super::headless::HeadlessServer {
                         (params.anchor.row, params.anchor.col),
                         (params.cursor.row, params.cursor.col),
                     )
-                    .ok_or(("snapshot_range", "选区超出阅读快照范围".into()))?;
+                    .ok_or_else(|| {
+                        (
+                            "snapshot_range",
+                            texts().snapshot_selection_out_of_range.into(),
+                        )
+                    })?;
                 Ok(ResponseResult::PaneTextSnapshotSelection {
                     snapshot_id: params.snapshot_id.clone(),
                     text,
@@ -192,7 +201,7 @@ impl super::headless::HeadlessServer {
                     snapshot_id: params.snapshot_id.clone(),
                 })
             }
-            _ => Err(("invalid_request", "不是阅读快照请求".into())),
+            _ => Err(("invalid_request", texts().snapshot_invalid_request.into())),
         }
     }
 }
@@ -235,5 +244,22 @@ mod tests {
         assert!(store.get("reading", Some(8)).is_err());
         store.release_owner(7);
         assert!(store.entries.is_empty());
+    }
+
+    /// 文档终审 D7：阅读快照的错误说明按界面语言给出——英文界面不含 CJK，中文界面是
+    /// 中文；错误码不随语言变化。
+    #[test]
+    fn snapshot_errors_follow_the_interface_language() {
+        use crate::i18n::{has_cjk, lang_guard, Lang};
+        let mut store = Store::default();
+        for (lang, chinese) in [(Lang::En, false), (Lang::ZhCn, true)] {
+            let _guard = lang_guard(lang);
+            let Err((code, message)) = store.get("missing", None) else {
+                panic!("缺失的阅读快照应报错");
+            };
+            assert_eq!(code, "snapshot_expired");
+            assert_eq!(message, texts().snapshot_expired);
+            assert_eq!(has_cjk(&message), chinese, "{lang:?}: {message}");
+        }
     }
 }
