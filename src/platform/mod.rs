@@ -515,6 +515,9 @@ pub(crate) fn ssh_auth_sock_path_is_live(_path: &std::path::Path) -> bool {
 mod client_state;
 pub(crate) use client_state::{create_private_state_file, replace_file, sync_parent_directory};
 
+mod process_lineage;
+pub(crate) use process_lineage::{walk_process_lineage, ProcessLineage, ProcessParentEntry};
+
 #[cfg(not(unix))]
 pub(crate) fn begin_cli_output() {}
 

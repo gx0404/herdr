@@ -8,6 +8,7 @@ mod layouts;
 mod panes;
 pub(crate) mod plugins;
 mod process_redaction;
+mod report_origin;
 pub(super) mod responses;
 mod session;
 mod tabs;

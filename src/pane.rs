@@ -3945,6 +3945,11 @@ impl PaneRuntime {
         self.content_seq.fetch_add(1, Ordering::AcqRel);
     }
 
+    /// 测试用：给测试运行时装上一个窗格根进程 pid（真实运行时在 spawn 后写入）。
+    pub(crate) fn test_set_child_pid(&self, pid: u32) {
+        self.child_pid.store(pid, Ordering::Release);
+    }
+
     pub(crate) fn test_contend_during_dirty_collection(
         &self,
         bytes: Vec<u8>,

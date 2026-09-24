@@ -1,7 +1,9 @@
 use std::path::PathBuf;
 use std::process::Command;
 
-use super::{ClipboardImage, ForegroundJob, ProcessSessionId, Signal};
+use super::{
+    ClipboardImage, ForegroundJob, ProcessLineage, ProcessParentEntry, ProcessSessionId, Signal,
+};
 
 #[cfg(unix)]
 pub(crate) use super::unix_common::set_default_plugin_pane_pwd;
@@ -252,6 +254,15 @@ pub fn process_cwd(_pid: u32) -> Option<PathBuf> {
 
 /// Unsupported platform stub.
 /// Unsupported platform stub.
+/// 没有进程表接口的平台：查不清，上报来源校验按放行处理。
+pub(crate) fn process_lineage(_pid: u32) -> Option<ProcessLineage> {
+    None
+}
+
+pub(crate) fn peer_process_id(_stream: &crate::ipc::LocalStream) -> Option<u32> {
+    None
+}
+
 pub fn process_session_id(_pid: u32) -> Option<ProcessSessionId> {
     None
 }

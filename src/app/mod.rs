@@ -165,6 +165,8 @@ pub struct App {
     /// Parsed `ui.window_title` plus the hostname resolved when it was applied.
     window_title_template: Option<(crate::config::WindowTitleTemplate, String)>,
     pub(crate) persist_pane_history: bool,
+    /// `server.verify_report_process`：集成上报是否按上报进程的来源校验。
+    pub(crate) verify_report_process: bool,
     /// Last render-loop attempt, including a throttled hidden-only PTY skip.
     pub(crate) last_render_at: Option<Instant>,
     /// Last attempt that could update a connected presentation surface.
@@ -681,6 +683,7 @@ impl App {
             next_tab_bar_datetime_refresh: None,
             window_title_template: None,
             persist_pane_history: config.experimental.pane_history,
+            verify_report_process: config.server.verify_report_process,
             last_render_at: None,
             last_presentation_at: None,
             api_rx,
@@ -983,6 +986,7 @@ impl App {
                 diagnostics.push(format!("{diagnostic}; keeping current [server] settings"));
             } else {
                 self.state.headless_size = config.headless_size();
+                self.verify_report_process = config.server.verify_report_process;
             }
         }
 

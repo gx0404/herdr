@@ -1505,6 +1505,14 @@ fn live_handoff_keeps_unmanaged_agent_name_bound_to_saved_session() {
     )
     .unwrap();
     fs::set_permissions(&fake_pi, fs::Permissions::from_mode(0o755)).unwrap();
+    // 测试进程自己扮演 pi 扩展发 `herdr:pi` 上报，它不在窗格进程树里：关掉上报来源校验。
+    // debug 构建读 `herdr-dev/`（`spawn_server` 只写 release 构建读的 `herdr/`）。
+    fs::create_dir_all(config_home.join("herdr-dev")).unwrap();
+    fs::write(
+        config_home.join("herdr-dev/config.toml"),
+        "onboarding = false\n[server]\nverify_report_process = false\n",
+    )
+    .unwrap();
 
     let spawned = spawn_server(&config_home, &runtime_dir, &api_socket);
     wait_for_socket(&api_socket, Duration::from_secs(10));

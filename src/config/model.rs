@@ -1194,6 +1194,12 @@ pub struct ServerConfig {
     pub headless_cols: u16,
     /// Virtual terminal height used when no client is attached. Default: 40.
     pub headless_rows: u16,
+    /// Only accept pane reports from Herdr's bundled integrations (source
+    /// `herdr:*`) when the reporting process runs inside the target pane's
+    /// process tree; reports from processes that merely inherited the pane's
+    /// environment (background agent sessions, daemons) are dropped silently.
+    /// Default: true.
+    pub verify_report_process: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1512,6 +1518,7 @@ impl Default for ServerConfig {
         Self {
             headless_cols: crate::config::DEFAULT_HEADLESS_COLS,
             headless_rows: crate::config::DEFAULT_HEADLESS_ROWS,
+            verify_report_process: true,
         }
     }
 }

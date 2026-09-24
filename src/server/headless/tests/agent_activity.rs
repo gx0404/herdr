@@ -217,6 +217,7 @@ fn api_request(
             respond_to,
             response_write_complete: None,
             observation_events: None,
+            report_origin: None,
             stream_active: None,
         },
         false,

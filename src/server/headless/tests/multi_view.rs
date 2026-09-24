@@ -96,6 +96,7 @@ async fn public_focus_refreshes_a_hidden_tab_even_when_default_target_is_unchang
         respond_to,
         response_write_complete: None,
         observation_events: None,
+        report_origin: None,
         stream_active: None,
     });
     let response: serde_json::Value = serde_json::from_str(&response.recv().unwrap()).unwrap();

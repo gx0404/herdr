@@ -229,6 +229,8 @@ fn handle_connection_with_stop(
     if let Err(err) = stream.set_send_timeout(Some(STREAM_WRITE_TIMEOUT)) {
         debug!(err = %err, "api connection write timeout unavailable");
     }
+    // 对端 pid 在 accept 后立即取：一个连接只承载一个请求，判定结果随连接走。
+    let peer_pid = crate::platform::peer_process_id(&stream);
 
     let Some(line) = read_initial_request_line(&mut stream)? else {
         return Ok(());
@@ -397,6 +399,10 @@ fn handle_connection_with_stop(
             finish_wait_response(&mut stream, response, &request_id, method, changes_ui)
         }
         method_body => {
+            // 集成上报的父链在应答前快照：集成资产都等应答（最多 0.5 s）后才退出，此刻
+            // 对端一定还在。
+            let report_origin = crate::api::report_target(&method_body)
+                .map(|_| crate::api::ReportOrigin::capture(peer_pid));
             let (response_write_tx, response_write_rx) = std::sync::mpsc::channel();
             let response = handle_request(
                 Request {
@@ -407,6 +413,7 @@ fn handle_connection_with_stop(
                 capabilities,
                 server_stop,
                 Some(response_write_rx),
+                report_origin,
             );
             let result = write_text_line_allow_disconnect(&mut stream, &response);
             let _ = response_write_tx.send(());
@@ -470,6 +477,7 @@ fn handle_request(
     capabilities: Option<ServerCapabilities>,
     server_stop: Option<&Arc<AtomicBool>>,
     response_write_complete: Option<std::sync::mpsc::Receiver<()>>,
+    report_origin: Option<crate::api::ReportOrigin>,
 ) -> String {
     if matches!(&request.method, Method::Ping(_)) {
         return serde_json::to_string(&SuccessResponse {
@@ -511,7 +519,14 @@ fn handle_request(
         );
     }
 
-    dispatch_to_app(request, api_tx, None, response_write_complete, None)
+    dispatch_to_app(
+        request,
+        api_tx,
+        None,
+        response_write_complete,
+        None,
+        report_origin,
+    )
 }
 
 pub(crate) fn api_method_name(method: &Method) -> &'static str {
@@ -974,6 +989,7 @@ fn stream_observations(
             response_write_complete: None,
             stream_active: Some(active.0.clone()),
             observation_events: Some(latest.clone()),
+            report_origin: None,
         })
         .map_err(|_| std::io::Error::other("观测服务已停止"))?;
     let mut initial = false;
@@ -1057,7 +1073,7 @@ pub(super) fn dispatch_to_app_with_timeout(
     api_tx: &ApiRequestSender,
     timeout: Option<Duration>,
 ) -> String {
-    dispatch_to_app(request, api_tx, timeout, None, None)
+    dispatch_to_app(request, api_tx, timeout, None, None, None)
 }
 
 pub(super) fn dispatch_to_app_with_caller_timeout(
@@ -1071,6 +1087,7 @@ pub(super) fn dispatch_to_app_with_caller_timeout(
         timeout,
         None,
         Some(("timeout", "timed out waiting for agent status")),
+        None,
     )
 }
 
@@ -1080,6 +1097,7 @@ fn dispatch_to_app(
     timeout: Option<Duration>,
     response_write_complete: Option<std::sync::mpsc::Receiver<()>>,
     timeout_response: Option<(&str, &str)>,
+    report_origin: Option<crate::api::ReportOrigin>,
 ) -> String {
     let request_id = request.id.clone();
     let (respond_to, response_rx) = std::sync::mpsc::channel();
@@ -1091,6 +1109,7 @@ fn dispatch_to_app(
         // c411883e 删掉 graphics stream 后，经 dispatch_to_app 的请求都不带。
         stream_active: None,
         observation_events: None,
+        report_origin,
     }) {
         return error_response_json(
             request_id,
@@ -1532,6 +1551,7 @@ mod tests {
             }),
             None,
             None,
+            None,
         );
 
         let parsed: SuccessResponse = serde_json::from_str(&response).unwrap();
@@ -1552,6 +1572,7 @@ mod tests {
             None,
             Some(&stop),
             None,
+            None,
         );
 
         let response: serde_json::Value = serde_json::from_str(&response).unwrap();
@@ -1568,6 +1589,7 @@ mod tests {
             None,
             Some(&stop),
             None,
+            None,
         );
         let rejected: serde_json::Value = serde_json::from_str(&rejected).unwrap();
         assert_eq!(rejected["error"]["code"], "server_unavailable");
@@ -1583,8 +1605,9 @@ mod tests {
         };
 
         let request_for_thread = request.clone();
-        let thread =
-            std::thread::spawn(move || handle_request(request_for_thread, &tx, None, None, None));
+        let thread = std::thread::spawn(move || {
+            handle_request(request_for_thread, &tx, None, None, None, None)
+        });
 
         let msg = rx.blocking_recv().unwrap();
         assert_eq!(msg.request.id, "req_2");

@@ -11,7 +11,7 @@ pub(super) const REMOTE_BRIDGE_CLOCK: libc::clockid_t = libc::CLOCK_MONOTONIC;
 
 use super::{
     read_limited_reader, ClipboardCommand, ClipboardImage, ForegroundJob, ForegroundProcess,
-    LimitedRead, ProcessSessionId, Signal,
+    LimitedRead, ProcessLineage, ProcessParentEntry, ProcessSessionId, Signal,
 };
 
 pub(crate) use super::unix_common::{
@@ -1091,6 +1091,45 @@ pub fn session_processes_batch(sessions: &[ProcessSessionId]) -> Vec<Vec<u32>> {
         }
     }
     buckets
+}
+
+/// `proc_pidinfo(PROC_PIDTBSDINFO)` 取父 pid（`pbi_ppid`）与可执行文件名（`pbi_comm`）。
+pub(crate) fn process_parent_entry(pid: u32) -> Option<ProcessParentEntry> {
+    if pid == 0 {
+        return None;
+    }
+    let info = process_bsdinfo(pid)?;
+    Some(ProcessParentEntry {
+        pid,
+        parent_pid: info.pbi_ppid,
+        name: comm_from_bsdinfo(&info).unwrap_or_default(),
+    })
+}
+
+/// 沿 `pbi_ppid` 上溯（孤儿进程已被挂到 launchd 下）。
+pub(crate) fn process_lineage(pid: u32) -> Option<ProcessLineage> {
+    super::walk_process_lineage(pid, process_parent_entry)
+}
+
+/// 本地 socket 对端进程的 pid（`getsockopt(SOL_LOCAL, LOCAL_PEERPID)`，`connect` 时的
+/// 发起方）。
+pub(crate) fn peer_process_id(stream: &crate::ipc::LocalStream) -> Option<u32> {
+    use std::os::fd::{AsFd, AsRawFd};
+
+    let crate::ipc::LocalStream::UdSocket(socket) = stream;
+    let fd = socket.as_fd().as_raw_fd();
+    let mut pid: libc::pid_t = 0;
+    let mut length = std::mem::size_of::<libc::pid_t>() as libc::socklen_t;
+    let result = unsafe {
+        libc::getsockopt(
+            fd,
+            libc::SOL_LOCAL,
+            libc::LOCAL_PEERPID,
+            &mut pid as *mut libc::pid_t as *mut libc::c_void,
+            &mut length,
+        )
+    };
+    (result == 0 && pid > 0).then_some(pid as u32)
 }
 
 fn all_pids() -> Vec<u32> {

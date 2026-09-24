@@ -120,6 +120,11 @@ fn spawn_herdr_with_shell(
     spawn_herdr_with_options(config_home, runtime_dir, socket_path, None, shell)
 }
 
+/// 本文件用例的默认配置。多个用例由测试进程自己扮演集成钩子、直接发 `herdr:` 来源的
+/// 上报，而测试进程不在窗格进程树里，所以关掉上报来源校验；校验本身由
+/// `integration_reports_from_outside_the_pane_process_tree_are_ignored` 用默认配置覆盖。
+const TEST_CONFIG: &str = "onboarding = false\n[server]\nverify_report_process = false\n";
+
 fn spawn_herdr_with_options(
     config_home: &Path,
     runtime_dir: &Path,
@@ -127,14 +132,32 @@ fn spawn_herdr_with_options(
     path_override: Option<&Path>,
     shell: &str,
 ) -> SpawnedHerdr {
-    fs::create_dir_all(config_home.join("herdr")).unwrap();
+    spawn_herdr_with_config(
+        config_home,
+        runtime_dir,
+        socket_path,
+        path_override,
+        shell,
+        TEST_CONFIG,
+    )
+}
+
+fn spawn_herdr_with_config(
+    config_home: &Path,
+    runtime_dir: &Path,
+    socket_path: &Path,
+    path_override: Option<&Path>,
+    shell: &str,
+    config: &str,
+) -> SpawnedHerdr {
     fs::create_dir_all(runtime_dir).unwrap();
     register_runtime_dir(runtime_dir);
-    fs::write(
-        config_home.join("herdr/config.toml"),
-        "onboarding = false\n",
-    )
-    .unwrap();
+    // debug 构建读 `herdr-dev/`、release 构建读 `herdr/`（`config::app_dir_name`）：两处都写，
+    // 测试二进制是哪种构建都能读到。
+    for app_dir in ["herdr", "herdr-dev"] {
+        fs::create_dir_all(config_home.join(app_dir)).unwrap();
+        fs::write(config_home.join(app_dir).join("config.toml"), config).unwrap();
+    }
 
     let pair = native_pty_system()
         .openpty(PtySize {

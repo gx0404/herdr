@@ -410,7 +410,9 @@ use windows_sys::{
     },
 };
 
-use super::{ClipboardImage, ForegroundJob, ProcessSessionId, Signal};
+use super::{
+    ClipboardImage, ForegroundJob, ProcessLineage, ProcessParentEntry, ProcessSessionId, Signal,
+};
 
 const STILL_ACTIVE: u32 = 259;
 const FOREGROUND_PROCESS_SNAPSHOT_CACHE_TTL: Duration = Duration::from_millis(250);
@@ -1680,6 +1682,34 @@ fn foreground_process_from_entry(entry: &WindowsProcessEntry) -> super::Foregrou
         argv: command.argv.clone(),
         cmdline: command.cmdline.clone(),
     }
+}
+
+/// 在同一份 Toolhelp 快照里沿 `th32ParentProcessID` 上溯。Windows 不会把孤儿进程重新
+/// 挂到别的父进程下：父进程退出后链在那里断开，结果标为不完整（查不清），不当成「不是
+/// 后代」。
+pub(crate) fn process_lineage(pid: u32) -> Option<ProcessLineage> {
+    let by_pid: HashMap<u32, ProcessParentEntry> = snapshot_processes()
+        .into_iter()
+        .map(|entry| {
+            (
+                entry.pid,
+                ProcessParentEntry {
+                    pid: entry.pid,
+                    parent_pid: entry.parent_pid,
+                    name: entry.name,
+                },
+            )
+        })
+        .collect();
+    super::walk_process_lineage(pid, |pid| by_pid.get(&pid).cloned())
+}
+
+/// 命名管道对端（客户端）进程的 pid（`GetNamedPipeClientProcessId`，经 interprocess 的
+/// `peer_creds`）。
+pub(crate) fn peer_process_id(stream: &crate::ipc::LocalStream) -> Option<u32> {
+    use interprocess::local_socket::traits::StreamCommon as _;
+
+    stream.peer_creds().ok()?.pid().filter(|pid| *pid != 0)
 }
 
 fn snapshot_processes() -> Vec<WindowsProcessEntry> {

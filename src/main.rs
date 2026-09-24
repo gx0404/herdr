@@ -252,6 +252,12 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # headless_cols = 120
 # headless_rows = 40
 
+# Accept pane reports from Herdr's bundled integrations (source "herdr:*") only
+# from processes inside the target pane's process tree. Processes that inherited
+# a pane's environment but run outside it (background agent sessions, daemons)
+# are ignored.
+# verify_report_process = true
+
 # [worktrees]
 # directory = "~/.herdr/worktrees"
 

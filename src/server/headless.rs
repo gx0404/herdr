@@ -3063,6 +3063,14 @@ impl HeadlessServer {
             return false;
         }
 
+        if let Some(response) = msg.report_origin.as_ref().and_then(|origin| {
+            self.app
+                .detached_report_response(&msg.request.id, &msg.request.method, origin)
+        }) {
+            let _ = msg.respond_to.send(response);
+            return false;
+        }
+
         if super::text_snapshots::handles(&msg.request.method) {
             let response = match self.text_snapshot_request(&msg.request.method, None) {
                 Ok(result) => serde_json::to_string(&api::schema::SuccessResponse {

@@ -14,7 +14,7 @@ pub(super) const REMOTE_BRIDGE_CLOCK: libc::clockid_t = libc::CLOCK_BOOTTIME;
 
 use super::{
     read_limited_reader, ClipboardCommand, ClipboardImage, ForegroundJob, ForegroundProcess,
-    LimitedRead, ProcessSessionId, Signal,
+    LimitedRead, ProcessLineage, ProcessParentEntry, ProcessSessionId, Signal,
 };
 
 pub(crate) use super::unix_common::{
@@ -1217,6 +1217,61 @@ fn detach_clipboard_owner(child: std::process::Child) -> bool {
     }
 
     true
+}
+
+/// 读 `/proc/<pid>/stat` 取父 pid 与 `comm`（可执行文件名，内核截到 15 字节；tmux 服务端
+/// 会把它改成 `tmux: server`）。单个小文件读。
+pub(crate) fn process_parent_entry(pid: u32) -> Option<ProcessParentEntry> {
+    if pid == 0 {
+        return None;
+    }
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    process_parent_entry_from_stat(pid, &stat)
+}
+
+/// `/proc/<pid>/stat` 形如 `pid (comm) state ppid ...`；`comm` 可能含空格与括号，取第一个
+/// `(` 到最后一个 `)` 之间。
+fn process_parent_entry_from_stat(pid: u32, stat: &str) -> Option<ProcessParentEntry> {
+    let open = stat.find('(')?;
+    let close = stat.rfind(')')?;
+    let name = stat.get(open + 1..close)?.to_string();
+    let mut fields = stat.get(close + 2..)?.split_whitespace();
+    let _state = fields.next()?;
+    let parent_pid = fields.next()?.parse().ok()?;
+    Some(ProcessParentEntry {
+        pid,
+        parent_pid,
+        name,
+    })
+}
+
+/// 沿 `/proc/<pid>/stat` 的父 pid 上溯（孤儿进程已被内核挂到 subreaper 或 pid 1 下）。
+pub(crate) fn process_lineage(pid: u32) -> Option<ProcessLineage> {
+    super::walk_process_lineage(pid, process_parent_entry)
+}
+
+/// 本地 socket 对端进程的 pid（`SO_PEERCRED`，内核在 `connect` 时记下的发起方）。
+pub(crate) fn peer_process_id(stream: &crate::ipc::LocalStream) -> Option<u32> {
+    use std::os::fd::{AsFd, AsRawFd};
+
+    let crate::ipc::LocalStream::UdSocket(socket) = stream;
+    let fd = socket.as_fd().as_raw_fd();
+    let mut credentials = libc::ucred {
+        pid: 0,
+        uid: 0,
+        gid: 0,
+    };
+    let mut length = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
+    let result = unsafe {
+        libc::getsockopt(
+            fd,
+            libc::SOL_SOCKET,
+            libc::SO_PEERCRED,
+            &mut credentials as *mut libc::ucred as *mut libc::c_void,
+            &mut length,
+        )
+    };
+    (result == 0 && credentials.pid > 0).then_some(credentials.pid as u32)
 }
 
 fn process_session_id_raw(pid: u32) -> Option<i32> {
