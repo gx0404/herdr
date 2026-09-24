@@ -1444,6 +1444,16 @@ fn collapsed_endpoint_sidebar_scrolls_agents_with_the_wheel() {
         state.compose(cols, rows).expect("折叠多机侧栏");
         let order = collapsed_agent_order(&state);
         assert_eq!(order.len(), 30, "{case}: 夹具前提：30 个 agent 都在行序里");
+        assert_eq!(
+            state
+                .federated_agent_rows
+                .as_ref()
+                .expect("行缓存")
+                .view()
+                .flat_agents,
+            order.len(),
+            "{case}: 行缓存构建时记下的 agent 行数与行序一致"
+        );
         let body = state.hits.agent_body;
         assert!(
             body.height > 0,

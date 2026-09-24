@@ -2687,6 +2687,7 @@ fn flat_view_rows_do_not_depend_on_the_first_tree_row() {
             crate::client::shell::agent_tree::AgentRowsView {
                 tree: &tree[1..],
                 flat: cache.flat_rows(),
+                ..Default::default()
             },
             &state.config,
             &mut scroll,
@@ -2838,6 +2839,7 @@ fn render_tree_at(state: &ClientShellState, width: u16) -> (Vec<(String, String,
         crate::client::shell::agent_tree::AgentRowsView {
             tree: cache.rows(),
             flat: cache.flat_rows(),
+            ..Default::default()
         },
         &state.config,
         &mut scroll,

@@ -253,6 +253,9 @@ pub(super) struct AgentTree {
 pub(super) struct AgentRowsView<'a> {
     pub(super) tree: &'a [AgentTreeRow],
     pub(super) flat: &'a [AgentTreeRow],
+    /// 平铺行里 agent 行的个数（多机折叠侧栏的行数），行缓存构建时记下，渲染与
+    /// 输入阶段不再逐帧清点（D10）。
+    pub(super) flat_agents: usize,
 }
 
 /// 构建树时的折叠态只读视图（三个集合都在 `ClientShellState` 上）。

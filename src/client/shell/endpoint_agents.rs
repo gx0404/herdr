@@ -37,11 +37,8 @@ pub(super) fn render_collapsed(
     chrome_hover: Option<&super::feedback::ChromeHover>,
     hits: &mut ShellHitMap,
 ) {
-    let metrics = super::scroll::uniform_scroll_metrics(
-        collapsed_agents(rows).count(),
-        area.height,
-        agent_scroll,
-    );
+    let metrics =
+        super::scroll::uniform_scroll_metrics(rows.flat_agents, area.height, agent_scroll);
     let start = metrics
         .max_offset_from_bottom
         .saturating_sub(metrics.offset_from_bottom);
@@ -142,6 +139,8 @@ pub(super) struct AgentRowsCache {
     rows: Vec<AgentTreeRow>,
     /// 平铺视图的行（见 `agent_tree::AgentTree::flat`）。
     flat_rows: Vec<AgentTreeRow>,
+    /// 平铺行里 agent 行的个数（见 `AgentRowsView::flat_agents`）。
+    flat_agents: usize,
 }
 
 impl AgentRowsCache {
@@ -197,6 +196,7 @@ impl AgentRowsCache {
         AgentRowsView {
             tree: &self.rows,
             flat: &self.flat_rows,
+            flat_agents: self.flat_agents,
         }
     }
 
@@ -212,9 +212,15 @@ impl AgentRowsCache {
         collapse: &CollapseState<'_>,
     ) -> Self {
         let tree = build_agent_tree(endpoints, active, config, collapse);
+        let flat_agents = collapsed_agents(AgentRowsView {
+            flat: &tree.flat,
+            ..AgentRowsView::default()
+        })
+        .count();
         Self {
             rows: tree.rows,
             flat_rows: tree.flat,
+            flat_agents,
             key,
         }
     }
@@ -244,7 +250,7 @@ impl ClientShellState {
             return;
         };
         self.agent_scroll = super::scroll::uniform_scroll_start_to_reveal(
-            collapsed_agents(rows).count(),
+            rows.flat_agents,
             body.height,
             self.agent_scroll,
             target,
