@@ -8,6 +8,7 @@ use crate::api::schema::{
 use crate::terminal::text_snapshot::FrozenText;
 use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
 use std::time::{Duration, Instant};
+use unicode_width::UnicodeWidthStr;
 
 pub(super) struct Capture {
     pub epoch: u64,
@@ -785,10 +786,12 @@ impl ClientShellState {
                         .map(|cell| {
                             (
                                 crate::protocol::CellData {
-                                    // 右半格没有位置的宽字符首格（备用屏缩窄后被截断）按空白画，
-                                    // 不让 2 宽字形越出窗格，与服务端渲染一致。
+                                    // 最后一列放不下 2 宽字形：右半格被截掉的宽字符首格，或窄格里
+                                    // 的 2 宽字素（关闭 2027 后的 ⚠️ 等）按空白画，不越出窗格，与
+                                    // 服务端渲染一致；只在最后一列量符号宽度。
                                     symbol: if cell.width == 0
-                                        || (cell.width == 2 && x.saturating_add(1) >= area.width)
+                                        || (x.saturating_add(1) >= area.width
+                                            && (cell.width == 2 || cell.text.width() > 1))
                                     {
                                         " ".into()
                                     } else {

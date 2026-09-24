@@ -2884,7 +2884,7 @@ impl GhosttyPaneTerminal {
                     let symbol = if ghostty_wide_cell_cut_at_edge(basic.wide, x, drawable_cols) {
                         " "
                     } else {
-                        match ghostty_buffer_symbol_into(
+                        let symbol = match ghostty_buffer_symbol_into(
                             &cells,
                             basic.wide,
                             hide_kitty_placeholders,
@@ -2897,7 +2897,8 @@ impl GhosttyPaneTerminal {
                                 symbol_scratch.push_str(ghostty_blank_symbol_for_width(basic.wide));
                                 symbol_scratch.as_str()
                             }
-                        }
+                        };
+                        ghostty_fit_symbol_at_edge(symbol, x, drawable_cols)
                     };
                     let cell = &mut buf[(area.x + x, area.y + y)];
                     cell.reset();
@@ -3198,7 +3199,7 @@ fn ghostty_collect_dirty_patch(
             let symbol = if ghostty_wide_cell_cut_at_edge(basic.wide, x, drawable_cols) {
                 " "
             } else {
-                match ghostty_buffer_symbol_into(
+                let symbol = match ghostty_buffer_symbol_into(
                     &cells,
                     basic.wide,
                     hide_kitty_placeholders,
@@ -3207,7 +3208,8 @@ fn ghostty_collect_dirty_patch(
                 ) {
                     Ok(symbol) => symbol,
                     Err(_) => ghostty_blank_symbol_for_width(basic.wide),
-                }
+                };
+                ghostty_fit_symbol_at_edge(symbol, x, drawable_cols)
             };
             let mut cell = cell_data_from_style(symbol, style);
             cell.hyperlink = hyperlink;
@@ -3651,6 +3653,16 @@ fn ghostty_wide_cell_cut_at_edge(
     drawable_cols: u16,
 ) -> bool {
     wide == crate::ghostty::CellWide::Wide && x.saturating_add(1) >= drawable_cols
+}
+
+/// 窄格里也可能放着 2 宽字素：应用关闭 2027 后，VS16 只挂在原来的窄格上（如 ⚠️、⌨️）。它落在
+/// 可绘区域最后一列时同样越过右边界，按空白画。只在最后一列量符号宽度，其余格不多算、不分配。
+fn ghostty_fit_symbol_at_edge(symbol: &str, x: u16, drawable_cols: u16) -> &str {
+    if x.saturating_add(1) >= drawable_cols && symbol.width() > 1 {
+        " "
+    } else {
+        symbol
+    }
 }
 
 pub(super) fn ghostty_blank_symbol_for_width(wide: crate::ghostty::CellWide) -> &'static str {

@@ -511,3 +511,37 @@ fn frozen_preview_blanks_a_wide_cell_cut_at_the_pane_edge() {
     // 放不下的首格画成空白，2 宽字形不越出窗格。
     assert_eq!(symbol(3, 1), " ");
 }
+
+#[test]
+fn frozen_preview_blanks_a_two_wide_grapheme_in_a_narrow_last_cell() {
+    let (mut state, mouse) = ready();
+    state.config.copy_on_select = false;
+    let id = capture_id(&state.handle_raw_events(vec![RawInputEvent::Mouse(mouse)]));
+    // 关闭 2027 后 VS16 挂在窄格上：「⚠️」「⌨️」宽度记 1，符号却是 2 宽字素。
+    let cell = |text: &str| FrozenCell {
+        text: text.into(),
+        fg: 0,
+        bg: 0,
+        modifier: 0,
+        width: 1,
+        hyperlink: None,
+    };
+    let mut result = captured();
+    let ResponseResult::PaneTextSnapshot { text, .. } = &mut result else {
+        panic!("captured() 应返回文本快照");
+    };
+    text.rows[0].cells = vec![cell("L"), cell("⌨\u{fe0f}"), cell("V"), cell("⚠\u{fe0f}")];
+    state.handle_endpoint_result("boot-1", &id, Ok(result));
+
+    let frame = state.compose(106, 20).unwrap();
+    let hit = &state.hits.panes[0];
+    let symbol = |x: u16| {
+        frame.cells[usize::from(hit.inner_rect.y) * usize::from(frame.width)
+            + usize::from(hit.inner_rect.x + x)]
+        .symbol
+        .to_string()
+    };
+    // 行中间维持原样，最后一列画空白，不越出窗格。
+    assert_eq!(symbol(1), "⌨\u{fe0f}");
+    assert_eq!(symbol(3), " ");
+}

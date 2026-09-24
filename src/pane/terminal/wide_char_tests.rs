@@ -420,6 +420,24 @@ fn drawable_area_narrower_than_the_grid_blanks_only_a_cut_wide_char() {
 }
 
 #[test]
+fn narrow_cell_holding_a_two_wide_grapheme_is_blanked_only_at_the_last_column() {
+    // 应用关闭 2027（字素簇）后，VS16 只挂在原来的窄格上：「⚠️」「⌨️」是 2 宽字素却只占 1 格。
+    // 落在最后一列时同样越过右边界，两条显示路径都画空白；行中间的维持原样（既有行为）。
+    let mut pane = WidePane::new(5, 2);
+    pane.write("\x1b[?2027l\x1b[1;1Habcd⚠\u{fe0f}\x1b[2;1Hab⌨\u{fe0f}cd".as_bytes());
+
+    // 网格与文本读取保留原字素。
+    assert_eq!(pane.grid(), ["abcd⚠\u{fe0f}", "ab⌨\u{fe0f}cd"]);
+    assert_eq!(pane.render_row(0), cells(&["a", "b", "c", "d", " "]));
+    assert_eq!(pane.patch_row(0).last().map(String::as_str), Some(" "));
+    assert_eq!(
+        pane.render_row(1),
+        cells(&["a", "b", "⌨\u{fe0f}", "c", "d"])
+    );
+    pane.assert_no_wide_glyph_past_right_edge();
+}
+
+#[test]
 fn inline_redraw_of_cjk_lines_that_fill_the_width_leaves_no_residue() {
     // Claude Code 这类 inline 程序（Ink）：自己按显示宽度折行，行与行之间写换行，
     // 重绘时逐行 EL + CUU 擦掉上一帧再整帧重写，从不依赖终端自动换行。
