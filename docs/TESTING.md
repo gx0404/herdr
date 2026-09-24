@@ -28,6 +28,12 @@ conventional-commit 检查独立 job。PR 政策门在 `pr-gate.yml`（无测试
   不执行。`tests/ssh_e2e.rs` 用独立会话的收割进程接管清理，并在下次启动时清扫
   陈旧沙箱；排查残留用 `ls -d /tmp/herdr-ssh-e2e-*` 与
   `pgrep -af herdr-ssh-e2e`，正常应为空，重跑该测试即自愈。
+- `tests/cli` 的临时目录是 `/tmp/hcli-<pid>-<纳秒>`。拉起 server 的用例结尾用
+  `cleanup_spawned_herdr` / `cleanup_test_base` 先收掉 server 再删目录（失败时
+  走不到收尾，目录留作现场）；不拉起 server 的用例用 `harness::TestDirGuard`，
+  离开作用域（含断言失败）即删。要保留后一类的现场，设 `HERDR_TEST_KEEP_DIRS=1`
+  （守卫只在 stderr 报路径、不删）；该开关只对用 `TestDirGuard` 的用例生效。
+  全量跑完应不新增 `/tmp/hcli-*`，有残留先查是哪条用例没收尾。
 - **UI 截图：N/A**——herdr 是 TUI。等效证据 = `herdr-throwaway-repro` 隔离会话
   中真实操作 + `herdr agent read`/`capture_agent_screen.py` 读回；键盘/终端
   行为用 `tests/fixtures` 的实测 TSV 语料。

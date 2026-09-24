@@ -29,7 +29,9 @@ pub(super) fn unique_test_dir() -> PathBuf {
 pub(super) const LOADED_WAIT: Duration = Duration::from_secs(30);
 
 /// 设成非空且不是 `0` 时，[`TestDirGuard`] 不删测试目录、只在 stderr 报路径，
-/// 方便用例失败后进去看现场。
+/// 方便进去看现场。只作用于用 `TestDirGuard` 收尾的用例（目前是不拉起 server 的
+/// 少数用例）；走 `cleanup_spawned_herdr` / `cleanup_test_base` 收尾的用例不认它——
+/// 它们失败时 panic 在收尾之前，目录本来就留着，成功时照删。
 pub(super) const KEEP_TEST_DIRS_ENV: &str = "HERDR_TEST_KEEP_DIRS";
 
 /// 测试目录守卫：离开作用域时（含断言失败的 panic 展开）删掉整个测试目录。
