@@ -120,10 +120,39 @@ const MAX_READ_BYTES: usize = 4 * 1024 * 1024;
 /// 先交这一页，游标停在已扫到的位置，续读接着往后。
 const MAX_PAGE_SCAN_BYTES: u64 = 8 * 1024 * 1024;
 /// 单条记录的读取上限，取页预算的上限 [`MAX_READ_BYTES`]：不超过它的记录整条读入
-/// 并解析；更长的流式跳过——读到换行为止，已读部分随即丢掉、不解析，留一行占位
-/// （见 [`read_record`]）。单条记录因此在内存里至多占这么多原始字节（另加解析出的
-/// JSON 树）；上限与请求的页大小无关，同一条记录在大页小页里渲染结果一致。
+/// 并解析；更长的流式跳过——读到换行为止，只留开头 [`OVERSIZED_HEAD_BYTES`] 认类型，
+/// 其余随即丢掉、不解析（见 [`read_record`]、[`render_oversized`]）。单条记录因此在
+/// 内存里至多占这么多原始字节（另加解析出的 JSON 树）；上限与请求的页大小无关，同一
+/// 条记录在大页小页里渲染结果一致。
 const MAX_RECORD_BYTES: u64 = MAX_READ_BYTES as u64;
+/// 超长记录留下的开头字节数：rollout 记录的键序是 `ordinal`、`timestamp`、`type`、
+/// `payload`，负载的 `type` / `role`（以及完成事件的 `item.type`）也排在正文之前，
+/// 都落在行首几百字节内。
+const OVERSIZED_HEAD_BYTES: usize = 4 * 1024;
+/// 超长记录要展示正文、却读不进来时留的一行占位。
+const OVERSIZED_PLACEHOLDER: &str = "[oversized record]";
+/// 不进转写的顶层记录类型（簿记）：会话元数据、回合上下文、世界状态、用量记录、
+/// 协作元数据。
+const BOOKKEEPING_RECORDS: [&str; 5] = [
+    "session_meta",
+    "turn_context",
+    "world_state",
+    "token_usage_record",
+    "inter_agent_communication_metadata",
+];
+/// 不进转写的 `event_msg`：遥测、回合起始与设置、以及和 response_item 重复的镜像事件。
+const HIDDEN_EVENTS: [&str; 10] = [
+    "token_count",
+    "task_started",
+    "thread_settings_applied",
+    "session_configured",
+    "item_started",
+    "user_message",
+    "agent_message",
+    "agent_reasoning",
+    "agent_reasoning_raw_content",
+    "agent_reasoning_section_break",
+];
 /// 消息正文（user / assistant / 协作消息）的字符上限。
 const MESSAGE_CHARS: usize = 2000;
 /// 工具调用摘要、结束消息等单行摘要的字符上限。
@@ -832,7 +861,7 @@ fn render_page(path: &Path, offset: u64, limits: PageLimits) -> Result<ContentCh
             }
             RecordRead::Oversized(read) => {
                 position += read;
-                Some("[oversized record]".to_string())
+                render_oversized(&raw, history_start)
             }
         };
         let Some(rendered) = rendered else {
@@ -877,14 +906,16 @@ enum RecordRead {
     Unfinished,
     /// 完整的一条，内容在 `raw` 里。
     Line(u64),
-    /// 超过上限的一条：已流式跳到换行之后，内容没有留下。
+    /// 超过上限的一条：已流式跳到换行之后，`raw` 里只留了开头。
     Oversized(u64),
 }
 
-/// 从 `reader` 读一条以换行结尾的记录进 `raw`，最多留 `cap` 字节：超过上限时丢掉
-/// 已读部分（连同缓冲的容量），之后只数字节、不再留存，一直读到换行为止。
+/// 从 `reader` 读一条以换行结尾的记录进 `raw`，最多留 `cap` 字节：超过上限时只留开头
+/// （[`OVERSIZED_HEAD_BYTES`] 与 `cap` 取小，供 [`render_oversized`] 认类型），其余
+/// 已读部分连同缓冲的容量一起丢掉，之后只数字节、不再留存，一直读到换行为止。
 fn read_record(reader: &mut impl BufRead, cap: u64, raw: &mut Vec<u8>) -> io::Result<RecordRead> {
     raw.clear();
+    let head = OVERSIZED_HEAD_BYTES.min(usize::try_from(cap).unwrap_or(usize::MAX));
     let mut total = 0u64;
     let mut oversized = false;
     loop {
@@ -903,7 +934,10 @@ fn read_record(reader: &mut impl BufRead, cap: u64, raw: &mut Vec<u8>) -> io::Re
         if !oversized {
             if total > cap {
                 oversized = true;
-                *raw = Vec::new();
+                let missing = head.saturating_sub(raw.len()).min(length);
+                raw.extend_from_slice(&chunk[..missing]);
+                raw.truncate(head);
+                raw.shrink_to_fit();
             } else {
                 raw.extend_from_slice(chunk);
             }
@@ -944,13 +978,128 @@ fn render_record(line: &str, history_start: Option<u64>) -> Option<String> {
         "response_item" => render_response_item(payload?),
         "event_msg" => render_event(payload?),
         "compacted" => Some("[compacted]".to_string()),
-        // 会话元数据、回合上下文、世界状态、用量记录、协作元数据：簿记，不进转写。
-        "session_meta"
-        | "turn_context"
-        | "world_state"
-        | "token_usage_record"
-        | "inter_agent_communication_metadata" => None,
+        kind if BOOKKEEPING_RECORDS.contains(&kind) => None,
         other => Some(type_line(other)),
+    }
+}
+
+/// 超长记录（超过单条上限，只留了开头）的转写，取舍与 [`render_record`] 一致：继承
+/// 的父历史前缀、簿记、不进转写的事件与 developer / system 消息照样跳过；不看正文
+/// 就能渲染的（`compacted`、`context_compacted`、认不出的顶层类型）照常渲染；只有要
+/// 展示正文的才留一行占位。开头里认不出顶层类型时也留占位。
+fn render_oversized(head: &[u8], history_start: Option<u64>) -> Option<String> {
+    let head = sniff_record_head(head);
+    if let (Some(start), Some(ordinal)) = (history_start, head.ordinal) {
+        if ordinal < start {
+            return None;
+        }
+    }
+    let placeholder = || Some(OVERSIZED_PLACEHOLDER.to_string());
+    let Some(kind) = head.kind.as_deref() else {
+        return placeholder();
+    };
+    match kind {
+        "response_item" => match (head.payload_kind.as_deref(), head.role.as_deref()) {
+            (Some("message"), Some(role)) if !matches!(role, "user" | "assistant") => None,
+            _ => placeholder(),
+        },
+        "event_msg" => match head.payload_kind.as_deref() {
+            Some(event) if HIDDEN_EVENTS.contains(&event) => None,
+            Some("context_compacted") => Some("[context compacted]".to_string()),
+            // 完成条目只有计划进转写，其余是 response_item 的镜像。
+            Some("item_completed")
+                if head.item_kind.as_deref().is_some_and(|item| item != "Plan") =>
+            {
+                None
+            }
+            _ => placeholder(),
+        },
+        "compacted" => Some("[compacted]".to_string()),
+        kind if BOOKKEEPING_RECORDS.contains(&kind) => None,
+        other => Some(type_line(other)),
+    }
+}
+
+/// 超长记录开头里认出的字段（[`sniff_record_head`]）。
+#[derive(Debug, Default, PartialEq, Eq)]
+struct RecordHead {
+    ordinal: Option<u64>,
+    kind: Option<String>,
+    payload_kind: Option<String>,
+    role: Option<String>,
+    item_kind: Option<String>,
+}
+
+/// 从一条记录的开头（可能截在任意字节处）认出顶层的 `ordinal` / `type`，以及
+/// `payload` 的 `type` / `role` 与 `payload.item.type`。按 JSON 结构逐键走，只认这几条
+/// 路径上的键，嵌在正文或更深处的同名键不算；截断处必然报错，报错前认出的字段保留。
+fn sniff_record_head(head: &[u8]) -> RecordHead {
+    let mut found = RecordHead::default();
+    let mut deserializer = serde_json::Deserializer::from_slice(head);
+    let seed = HeadSeed {
+        found: &mut found,
+        level: HeadLevel::Record,
+    };
+    // 截断的开头总会在某处报错（多半是 EOF）；已认出的字段写在 `found` 里。
+    let _ = serde::de::DeserializeSeed::deserialize(seed, &mut deserializer);
+    found
+}
+
+/// [`sniff_record_head`] 走到的层级。
+#[derive(Clone, Copy)]
+enum HeadLevel {
+    Record,
+    Payload,
+    Item,
+}
+
+/// 按层级认键的访问器：认出的值直接写进 `found`，中途报错也不丢。
+struct HeadSeed<'a> {
+    found: &'a mut RecordHead,
+    level: HeadLevel,
+}
+
+impl<'de> serde::de::DeserializeSeed<'de> for HeadSeed<'_> {
+    type Value = ();
+
+    fn deserialize<D: serde::Deserializer<'de>>(self, deserializer: D) -> Result<(), D::Error> {
+        deserializer.deserialize_map(self)
+    }
+}
+
+impl<'de> serde::de::Visitor<'de> for HeadSeed<'_> {
+    type Value = ();
+
+    fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("a rollout record object")
+    }
+
+    fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A) -> Result<(), A::Error> {
+        let HeadSeed { found, level } = self;
+        let text = |value: Value| value.as_str().map(str::to_owned);
+        while let Some(key) = map.next_key::<String>()? {
+            match (level, key.as_str()) {
+                (HeadLevel::Record, "ordinal") => {
+                    found.ordinal = map.next_value::<Value>()?.as_u64()
+                }
+                (HeadLevel::Record, "type") => found.kind = text(map.next_value()?),
+                (HeadLevel::Record, "payload") => map.next_value_seed(HeadSeed {
+                    found: &mut *found,
+                    level: HeadLevel::Payload,
+                })?,
+                (HeadLevel::Payload, "type") => found.payload_kind = text(map.next_value()?),
+                (HeadLevel::Payload, "role") => found.role = text(map.next_value()?),
+                (HeadLevel::Payload, "item") => map.next_value_seed(HeadSeed {
+                    found: &mut *found,
+                    level: HeadLevel::Item,
+                })?,
+                (HeadLevel::Item, "type") => found.item_kind = text(map.next_value()?),
+                _ => {
+                    map.next_value::<serde::de::IgnoredAny>()?;
+                }
+            }
+        }
+        Ok(())
     }
 }
 
@@ -1103,17 +1252,7 @@ fn render_event(payload: &Value) -> Option<String> {
         )),
         "context_compacted" => Some("[context compacted]".to_string()),
         "item_completed" => render_plan(payload.get("item")?),
-        // 遥测、回合起始与设置、以及和 response_item 重复的镜像事件：不进转写。
-        "token_count"
-        | "task_started"
-        | "thread_settings_applied"
-        | "session_configured"
-        | "item_started"
-        | "user_message"
-        | "agent_message"
-        | "agent_reasoning"
-        | "agent_reasoning_raw_content"
-        | "agent_reasoning_section_break" => None,
+        event if HIDDEN_EVENTS.contains(&event) => None,
         other => Some(type_line(other)),
     }
 }
@@ -1937,8 +2076,191 @@ mod tests {
         let _ = fs::remove_dir_all(&home);
     }
 
-    /// 冒烟 N10：读记录时至多留 `cap` 字节；超过就丢掉已读部分、只数字节读到换行，
-    /// 后面的记录照读。缓冲只有 4 字节，逼出跨多次 `fill_buf` 的路径。
+    /// N18：超长记录只留开头认顶层 `type`，与正常长度的记录同一套取舍——簿记、
+    /// 遥测、镜像事件、developer 消息与继承的父历史前缀照常跳过；`compacted`、
+    /// `context_compacted` 与认不出的类型照常渲染（它们不看正文）；只有要展示正文的
+    /// 才留一行占位。单条上限压到 256 字节，夹具各条都远超它。
+    #[test]
+    fn oversized_records_are_placeheld_only_when_their_type_is_shown() {
+        let home = unique_temp_home("oversized-types");
+        let day = home.join(".codex/sessions/2026/09/22");
+        fs::create_dir_all(&day).expect("临时目录可建");
+        let path = day.join(format!("rollout-2026-09-22T10-01-00-{CHILD_A}.jsonl"));
+        let pad = "p".repeat(600);
+        let record = |ordinal: u64, kind: &str, payload: &str| {
+            format!(
+                r#"{{"ordinal":{ordinal},"timestamp":"2026-09-22T10:01:00.000Z","type":"{kind}","payload":{payload}}}"#
+            ) + "\n"
+        };
+        let message = |ordinal: u64, role: &str, text: &str| {
+            record(
+                ordinal,
+                "response_item",
+                &format!(
+                    r#"{{"type":"message","role":"{role}","content":[{{"type":"output_text","text":"{text}"}}]}}"#
+                ),
+            )
+        };
+        let event = |ordinal: u64, body: &str| record(ordinal, "event_msg", body);
+        let lines = [
+            // 第 0 行：子线程自己的 meta，历史从 ordinal 2 开始（本身也超长）。
+            record(
+                0,
+                "session_meta",
+                &format!(
+                    r#"{{"id":"{CHILD_A}","subagent_history_start_ordinal":2,"base_instructions":"{pad}"}}"#
+                ),
+            ),
+            // 继承的父历史前缀：超长也照样跳过。
+            message(1, "user", &pad),
+            message(2, "assistant", "before"),
+            record(
+                3,
+                "turn_context",
+                &format!(r#"{{"cwd":"/tmp","instructions":"{pad}"}}"#),
+            ),
+            record(4, "world_state", &format!(r#"{{"state":"{pad}"}}"#)),
+            record(5, "token_usage_record", &format!(r#"{{"usage":"{pad}"}}"#)),
+            record(
+                6,
+                "inter_agent_communication_metadata",
+                &format!(r#"{{"x":"{pad}"}}"#),
+            ),
+            message(7, "developer", &pad),
+            event(8, &format!(r#"{{"type":"token_count","info":"{pad}"}}"#)),
+            event(
+                9,
+                &format!(
+                    r#"{{"type":"item_completed","item":{{"type":"AgentMessage","text":"{pad}"}}}}"#
+                ),
+            ),
+            record(10, "compacted", &format!(r#"{{"message":"{pad}"}}"#)),
+            event(
+                11,
+                &format!(r#"{{"type":"context_compacted","detail":"{pad}"}}"#),
+            ),
+            record(12, "realtime_item", &format!(r#"{{"data":"{pad}"}}"#)),
+            message(13, "assistant", &pad),
+            event(
+                14,
+                &format!(r#"{{"type":"task_complete","last_agent_message":"{pad}"}}"#),
+            ),
+            // 嵌在正文里的同名键不会被当成顶层 type。
+            message(
+                15,
+                "assistant",
+                &format!(r#"{{\"type\":\"session_meta\"}} {pad}"#),
+            ),
+            message(16, "assistant", "after"),
+        ];
+        let rollout = lines.concat();
+        fs::write(&path, &rollout).expect("写临时 rollout");
+        let cap = 256;
+        for line in &lines {
+            if line.contains("before") || line.contains("after") {
+                assert!(line.len() < cap, "短记录不超限");
+            } else {
+                assert!(line.len() > cap, "夹具记录应超过单条上限: {line:.80}");
+            }
+        }
+        let page = render_page(
+            &path,
+            0,
+            PageLimits {
+                budget: 64 * 1024,
+                scan_bytes: u64::MAX,
+                record_bytes: cap as u64,
+            },
+        )
+        .expect("可读");
+        assert_eq!(
+            page.text,
+            "before\n[compacted]\n[context compacted]\n[realtime_item]\n\
+             [oversized record]\n[oversized record]\n[oversized record]\nafter\n"
+        );
+        assert!(page.eof);
+        assert_eq!(
+            page.next_cursor.as_deref(),
+            Some(rollout.len().to_string().as_str())
+        );
+
+        let _ = fs::remove_dir_all(&home);
+    }
+
+    /// N18：经公开的 `read` 走生产上限（4 MiB）：5 MiB 的 compacted 照常画
+    /// `[compacted]`，5 MiB 的簿记记录不出行，都不画占位。
+    #[test]
+    fn production_sized_bookkeeping_and_compacted_records_are_not_placeheld() {
+        let home = unique_temp_home("oversized-bookkeeping");
+        let day = home.join(".codex/sessions/2026/09/22");
+        fs::create_dir_all(&day).expect("临时目录可建");
+        let path = day.join(format!("rollout-2026-09-22T10-01-00-{CHILD_A}.jsonl"));
+        let huge = "h".repeat(5 * 1024 * 1024);
+        let message = |text: &str| {
+            format!(
+                r#"{{"type":"response_item","payload":{{"type":"message","role":"assistant","content":[{{"type":"output_text","text":"{text}"}}]}}}}"#
+            ) + "\n"
+        };
+        let compacted =
+            format!(r#"{{"type":"compacted","payload":{{"message":"{huge}"}}}}"#) + "\n";
+        let bookkeeping =
+            format!(r#"{{"type":"turn_context","payload":{{"instructions":"{huge}"}}}}"#) + "\n";
+        assert!(compacted.len() as u64 > MAX_RECORD_BYTES);
+        assert!(bookkeeping.len() as u64 > MAX_RECORD_BYTES);
+        let rollout = format!(
+            "{}{compacted}{bookkeeping}{}",
+            message("before"),
+            message("after")
+        );
+        fs::write(&path, &rollout).expect("写临时 rollout");
+
+        let session = AgentSessionRef::id(ROOT).expect("合法 id");
+        let cx = context(&home, Some(&session));
+        // 一页最多扫 8 MiB 原始字节：两条 5 MiB 的记录跨两页，第二页从游标续读。
+        let first = Codex.read(&cx, CHILD_A, None, 0).expect("可读");
+        assert_eq!(first.text, "before\n[compacted]\n");
+        assert!(!first.eof);
+        let rest = Codex
+            .read(&cx, CHILD_A, first.next_cursor.as_deref(), 0)
+            .expect("可读");
+        assert_eq!(rest.text, "after\n");
+        assert!(rest.eof);
+
+        let _ = fs::remove_dir_all(&home);
+    }
+
+    /// 超长记录的开头在任意字节处截断：截断前认出的字段保留，截在键里、值里都不
+    /// panic；嵌在更深处的同名键不算。
+    #[test]
+    fn record_heads_are_sniffed_up_to_the_cut() {
+        let full = r#"{"ordinal":7,"timestamp":"2026-09-22T10:01:00.000Z","type":"event_msg","payload":{"type":"item_completed","turn_id":"t","item":{"type":"Plan","text":"x"}}}"#;
+        let head = sniff_record_head(full.as_bytes());
+        assert_eq!(head.ordinal, Some(7));
+        assert_eq!(head.kind.as_deref(), Some("event_msg"));
+        assert_eq!(head.payload_kind.as_deref(), Some("item_completed"));
+        assert_eq!(head.item_kind.as_deref(), Some("Plan"));
+        for cut in 0..full.len() {
+            let head = sniff_record_head(&full.as_bytes()[..cut]);
+            if head.kind.is_some() {
+                assert_eq!(head.kind.as_deref(), Some("event_msg"), "cut {cut}");
+            }
+        }
+        let payload_first =
+            r#"{"payload":{"type":"message","role":"developer"},"type":"response_item"}"#;
+        let head = sniff_record_head(payload_first.as_bytes());
+        assert_eq!(head.kind.as_deref(), Some("response_item"));
+        assert_eq!(head.payload_kind.as_deref(), Some("message"));
+        assert_eq!(head.role.as_deref(), Some("developer"));
+        let nested = r#"{"payload":{"content":[{"type":"session_meta"}]},"ordinal":"#;
+        let head = sniff_record_head(nested.as_bytes());
+        assert_eq!(head.kind, None, "嵌套的 type 不是顶层 type");
+        assert_eq!(head.payload_kind, None);
+        assert_eq!(sniff_record_head(b"not json").kind, None);
+        assert_eq!(sniff_record_head(b"[1,2]").kind, None);
+    }
+
+    /// 冒烟 N10：读记录时至多留 `cap` 字节；超过就只留开头、丢掉其余已读部分，只数
+    /// 字节读到换行，后面的记录照读。缓冲只有 4 字节，逼出跨多次 `fill_buf` 的路径。
     #[test]
     fn the_record_reader_streams_past_oversized_records_without_keeping_them() {
         let input: &[u8] = b"abc\nabcdefghij\nxy\n0123456\nabcdefghijkl";
@@ -1954,8 +2276,9 @@ mod tests {
             read_record(&mut reader, cap, &mut raw).expect("内存读取"),
             RecordRead::Oversized(11)
         );
-        assert!(raw.is_empty());
-        assert_eq!(raw.capacity(), 0, "超长记录的已读部分不留在内存里");
+        // 超长记录只留开头（至多 `cap` 字节，认类型用），其余连同缓冲容量一起丢掉。
+        assert_eq!(raw, b"abcdefgh");
+        assert!(raw.capacity() <= 8, "超长记录的其余部分不留在内存里");
         assert_eq!(
             read_record(&mut reader, cap, &mut raw).expect("内存读取"),
             RecordRead::Line(3)
