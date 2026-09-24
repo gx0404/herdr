@@ -1,6 +1,8 @@
 //! 解析厂商公开结果。没有确切含义的数字不作为账号额度显示。
 
+use super::metric_texts;
 use crate::api::schema::UsageMetric;
+use crate::i18n::UsageMetricTexts;
 use serde_json::Value;
 use std::collections::HashMap;
 
@@ -67,7 +69,7 @@ fn window(id: String, label: String, value: &Value, scope: &str) -> Option<Usage
             if percent.is_some() && used.is_none() {
                 "%".into()
             } else {
-                "额度单位".into()
+                metric_texts().quota_unit.into()
             }
         });
     let percentage = percent.or_else(|| {
@@ -115,7 +117,11 @@ pub(super) fn codex(value: &Value) -> Vec<UsageMetric> {
             .get("limitName")
             .and_then(Value::as_str)
             .unwrap_or(id);
-        for (key, label) in [("primary", "主要额度"), ("secondary", "次级额度")] {
+        let labels = metric_texts();
+        for (key, label) in [
+            ("primary", labels.quota_primary),
+            ("secondary", labels.quota_secondary),
+        ] {
             if let Some(metric) = window(
                 format!("{id}/{key}"),
                 format!("{name} · {label}"),
@@ -131,7 +137,7 @@ pub(super) fn codex(value: &Value) -> Vec<UsageMetric> {
         {
             metrics.push(UsageMetric {
                 id: clean_field(&format!("{id}/credits")),
-                label: "额外余额".into(),
+                label: labels.credits.into(),
                 unit: "credits".into(),
                 scope: "account".into(),
                 amount_decimal: Some(decimal(balance)),
@@ -142,17 +148,22 @@ pub(super) fn codex(value: &Value) -> Vec<UsageMetric> {
     metrics
 }
 
-/// claude 的账号额度窗口（官方 statusline `rate_limits` 的键）与中文标签。
-pub(super) const CLAUDE_RATE_LIMIT_WINDOWS: [(&str, &str); 3] = [
-    ("five_hour", "5 小时额度"),
-    ("seven_day", "每周额度"),
-    ("spend_limit", "网关消费额度"),
+/// 从指标文案表里取一个标签：表按 server 的界面语言选定，常量表里只存取法。
+pub(super) type MetricLabel = fn(&UsageMetricTexts) -> &'static str;
+
+/// claude 的账号额度窗口（官方 statusline `rate_limits` 的键）与标签（按 server 语言取）。
+pub(super) const CLAUDE_RATE_LIMIT_WINDOWS: [(&str, MetricLabel); 3] = [
+    ("five_hour", |labels| labels.quota_5h),
+    ("seven_day", |labels| labels.quota_weekly),
+    ("spend_limit", |labels| labels.quota_spend),
 ];
 
 /// 沿用的过期窗口在 `text_value` 里的明示：官方 statusline 会在窗口过了 `resets_at` 之后把它
 /// 从 JSON 里去掉，缺席不是归零。指标保留上次的 `used_percent` 与已经过去的 `resets_at`
 /// （客户端也可据「`resets_at` 不晚于当前时间」自行判定）。
-pub(super) const CLAUDE_STALE_WINDOW_TEXT: &str = "已过重置时间，沿用上次值";
+pub(super) fn claude_stale_window_text() -> &'static str {
+    metric_texts().stale_window
+}
 
 /// 沿用窗口的上限（秒）：过了 `resets_at` 的从 `resets_at` 起算，没有 `resets_at` 的从最近
 /// 一次出现在报文里起算。超过最长的窗口周期（7 天）后上次值已无参考意义。
@@ -160,7 +171,9 @@ const CLAUDE_STALE_WINDOW_MAX_AGE_SECS: u64 = 7 * 24 * 60 * 60;
 
 /// `context_window` 的数值为 `null`（会话首次 API 调用之前、`/compact` 之后）时的明示：未知
 /// 不是 0，数值字段保持 `None`。
-pub(super) const CLAUDE_CONTEXT_PENDING_TEXT: &str = "暂无数据（首次请求前或 /compact 后）";
+pub(super) fn claude_context_pending_text() -> &'static str {
+    metric_texts().claude_context_pending
+}
 
 /// 官方 statusline JSON → 指标：账号额度窗口（`rate_limits`，`scope = account`）在前，本会话
 /// 的费用 / 时长 / 上下文（`cost`、`context_window`，`scope = session`）在后。
@@ -173,7 +186,10 @@ pub(super) fn claude(value: &Value) -> Vec<UsageMetric> {
     let limits = value.get("rate_limits").unwrap_or(value);
     let mut metrics = CLAUDE_RATE_LIMIT_WINDOWS
         .into_iter()
-        .filter_map(|(key, label)| window(key.into(), label.into(), &limits[key], "account"))
+        .filter_map(|(key, label)| {
+            let label = label(metric_texts());
+            window(key.into(), label.into(), &limits[key], "account")
+        })
         .collect::<Vec<_>>();
     metrics.extend(claude_session(value));
     metrics
@@ -210,7 +226,7 @@ pub(super) fn claude_retain_missing_windows(
                 if now_secs - resets_at > CLAUDE_STALE_WINDOW_MAX_AGE_SECS {
                     continue;
                 }
-                carried.text_value = Some(CLAUDE_STALE_WINDOW_TEXT.into());
+                carried.text_value = Some(claude_stale_window_text().into());
             }
             Some(_) => {}
             None => {
@@ -259,6 +275,7 @@ fn percent_text(percent: f64) -> String {
 /// `context_window` 在场但数值为 `null` 时照常产出指标、数值留 `None` 并给出明示文案。
 fn claude_session(value: &Value) -> Vec<UsageMetric> {
     let mut metrics = Vec::new();
+    let labels = metric_texts();
     let session = |id: &str, label: &str, unit: &str| UsageMetric {
         id: id.into(),
         label: label.into(),
@@ -273,12 +290,12 @@ fn claude_session(value: &Value) -> Vec<UsageMetric> {
         metrics.push(UsageMetric {
             // 厂商这一项也是逐次调用累加出来的浮点和：按金额规整，不原样透出尾差。
             amount_decimal: Some(money_decimal(cost)),
-            ..session("cost/total_cost_usd", "本会话估算费用", "USD")
+            ..session("cost/total_cost_usd", labels.session_cost_estimate, "USD")
         });
     }
     for (key, label) in [
-        ("total_duration_ms", "本会话时长"),
-        ("total_api_duration_ms", "本会话 API 等待时长"),
+        ("total_duration_ms", labels.session_duration),
+        ("total_api_duration_ms", labels.session_api_duration),
     ] {
         if let Some(ms) = finite(value.pointer(&format!("/cost/{key}"))) {
             metrics.push(UsageMetric {
@@ -300,9 +317,9 @@ fn claude_session(value: &Value) -> Vec<UsageMetric> {
         used: used_percentage,
         remaining: finite(context.get("remaining_percentage")),
         text_value: Some(
-            used_percentage.map_or_else(|| CLAUDE_CONTEXT_PENDING_TEXT.into(), percent_text),
+            used_percentage.map_or_else(|| claude_context_pending_text().into(), percent_text),
         ),
-        ..session("context_window/used_percentage", "上下文占用", "%")
+        ..session("context_window/used_percentage", labels.context_used, "%")
     });
     // `current_usage` 在首次 API 调用前与 `/compact` 后为 null；口径与官方 `used_percentage`
     // 一致，只计输入侧（input + cache 创建 + cache 读取），不含输出。
@@ -323,10 +340,10 @@ fn claude_session(value: &Value) -> Vec<UsageMetric> {
         used: input_tokens,
         text_value: input_tokens
             .is_none()
-            .then(|| CLAUDE_CONTEXT_PENDING_TEXT.into()),
+            .then(|| claude_context_pending_text().into()),
         ..session(
             "context_window/current_usage",
-            "上下文 token（输入口径）",
+            labels.context_tokens_input,
             "tokens",
         )
     });
@@ -335,7 +352,7 @@ fn claude_session(value: &Value) -> Vec<UsageMetric> {
             used: Some(size),
             ..session(
                 "context_window/context_window_size",
-                "上下文窗口大小",
+                labels.context_window,
                 "tokens",
             )
         });
@@ -345,10 +362,11 @@ fn claude_session(value: &Value) -> Vec<UsageMetric> {
 
 pub(super) fn kimi(value: &Value) -> Vec<UsageMetric> {
     let value = value.get("data").unwrap_or(value);
+    let labels = metric_texts();
     let mut metrics = Vec::new();
     if let Some(metric) = window(
         "summary".into(),
-        "套餐额度".into(),
+        labels.quota_plan.into(),
         &value["summary"],
         "account",
     ) {
@@ -359,10 +377,10 @@ pub(super) fn kimi(value: &Value) -> Vec<UsageMetric> {
         for (key, window_value) in usages {
             // 标签与官方 TUI 的用量面板一致：monthCode 是月度额度里 Code 占用的那一部分。
             let label = match key.as_str() {
-                "limit5h" => "5 小时额度",
-                "limit7d" => "7 天额度",
-                "monthTotal" => "月度额度",
-                "monthCode" => "月度额度 · Code 部分",
+                "limit5h" => labels.quota_5h,
+                "limit7d" => labels.quota_7d,
+                "monthTotal" => labels.quota_monthly,
+                "monthCode" => labels.quota_monthly_code,
                 other => other,
             };
             if let Some(metric) = window(key.clone(), label.into(), window_value, "account") {
@@ -377,7 +395,9 @@ pub(super) fn kimi(value: &Value) -> Vec<UsageMetric> {
                 .or_else(|| limit.get("label"))
                 .and_then(Value::as_str)
                 .map(str::to_owned)
-                .unwrap_or_else(|| format!("额度窗口 {}", index + 1));
+                .unwrap_or_else(|| {
+                    crate::i18n::fill(labels.quota_window_fmt, &[("n", &(index + 1).to_string())])
+                });
             let key = limit
                 .get("id")
                 .and_then(Value::as_str)
@@ -389,9 +409,9 @@ pub(super) fn kimi(value: &Value) -> Vec<UsageMetric> {
         }
     }
     for (key, label) in [
-        ("available_balance", "可用余额"),
-        ("voucher_balance", "代金券余额"),
-        ("cash_balance", "现金余额"),
+        ("available_balance", labels.balance_available),
+        ("voucher_balance", labels.balance_voucher),
+        ("cash_balance", labels.balance_cash),
     ] {
         if let Some(amount) = value.get(key).filter(|v| finite(Some(v)).is_some()) {
             metrics.push(UsageMetric {
@@ -408,9 +428,9 @@ pub(super) fn kimi(value: &Value) -> Vec<UsageMetric> {
     if let Some(wallet) = value.get("extra_usage").filter(|wallet| wallet.is_object()) {
         if let Some(currency) = wallet.get("currency").and_then(Value::as_str) {
             for (key, label) in [
-                ("balance_cents", "额外用量余额"),
-                ("monthly_used_cents", "本月额外用量费用"),
-                ("monthly_charge_limit_cents", "每月额外用量上限"),
+                ("balance_cents", labels.extra_balance),
+                ("monthly_used_cents", labels.extra_month_used),
+                ("monthly_charge_limit_cents", labels.extra_month_cap),
             ] {
                 if key == "monthly_charge_limit_cents"
                     && wallet
@@ -465,17 +485,22 @@ fn kimi_extra_usage(wallet: Option<&Value>) -> Vec<UsageMetric> {
         .get("monthlyChargeLimitEnabled")
         .and_then(Value::as_bool)
         == Some(true);
+    let labels = metric_texts();
     [
-        ("extra_usage/balance", "额外用量余额", cents("balanceCents")),
-        ("extra_usage/total", "额外用量总额", cents("totalCents")),
+        (
+            "extra_usage/balance",
+            labels.extra_balance,
+            cents("balanceCents"),
+        ),
+        ("extra_usage/total", labels.extra_total, cents("totalCents")),
         (
             "extra_usage/monthly_used",
-            "本月额外用量费用",
+            labels.extra_month_used,
             cents("monthlyUsedCents"),
         ),
         (
             "extra_usage/monthly_limit",
-            "每月额外用量上限",
+            labels.extra_month_cap,
             cents("monthlyChargeLimitCents").filter(|limit| limit_enabled && *limit > 0),
         ),
     ]
@@ -495,10 +520,11 @@ fn kimi_extra_usage(wallet: Option<&Value>) -> Vec<UsageMetric> {
 
 pub(super) fn moonshot_balance(value: &Value, currency: &str) -> Vec<UsageMetric> {
     let value = value.get("data").unwrap_or(value);
+    let labels = metric_texts();
     [
-        ("available_balance", "可用余额"),
-        ("voucher_balance", "代金券余额"),
-        ("cash_balance", "现金余额"),
+        ("available_balance", labels.balance_available),
+        ("voucher_balance", labels.balance_voucher),
+        ("cash_balance", labels.balance_cash),
     ]
     .into_iter()
     .filter_map(|(id, label)| {
@@ -521,15 +547,16 @@ pub(super) fn moonshot_balance(value: &Value, currency: &str) -> Vec<UsageMetric
 
 pub(super) fn openrouter(value: &Value) -> Vec<UsageMetric> {
     let value = value.get("data").unwrap_or(value);
+    let labels = metric_texts();
     let mut metrics = Vec::new();
     for (key, label) in [
-        ("usage", "此密钥累计费用"),
-        ("usage_daily", "此密钥今日费用"),
-        ("usage_weekly", "此密钥本周费用"),
-        ("usage_monthly", "此密钥本月费用"),
-        ("limit_remaining", "此密钥剩余预算"),
-        ("total_credits", "账号累计充值"),
-        ("total_usage", "账号累计消费"),
+        ("usage", labels.key_usage),
+        ("usage_daily", labels.key_usage_daily),
+        ("usage_weekly", labels.key_usage_weekly),
+        ("usage_monthly", labels.key_usage_monthly),
+        ("limit_remaining", labels.key_limit_remaining),
+        ("total_credits", labels.account_total_credits),
+        ("total_usage", labels.account_total_usage),
     ] {
         if let Some(amount) = value.get(key).filter(|v| finite(Some(v)).is_some()) {
             metrics.push(UsageMetric {
@@ -610,7 +637,7 @@ fn visit_structured(
                     id: clean_field(&format!("{path}/{key}")),
                     label: clean_field(key),
                     unit: if key == "balance" {
-                        "厂商余额单位"
+                        metric_texts().balance_unit
                     } else {
                         "USD"
                     }
@@ -882,8 +909,8 @@ struct StatsRow {
     name: &'static str,
     /// 指标 id。
     id: &'static str,
-    /// 中文标签。
-    label: &'static str,
+    /// 标签（按 server 语言取）。
+    label: MetricLabel,
     /// 单位；`USD` 的行是金额，其余是计数。
     unit: &'static str,
 }
@@ -891,7 +918,7 @@ struct StatsRow {
 const fn stats_row(
     name: &'static str,
     id: &'static str,
-    label: &'static str,
+    label: MetricLabel,
     unit: &'static str,
 ) -> StatsRow {
     StatsRow {
@@ -905,35 +932,40 @@ const fn stats_row(
 /// `opencode stats` 已知行：只认 `OVERVIEW` 与 `COST & TOKENS` 两张表；工具用量表
 /// （`TOOL USAGE`）不是用量指标，不解析。
 const OPENCODE_STATS_ROWS: &[StatsRow] = &[
-    stats_row("Sessions", "sessions", "会话数", "sessions"),
-    stats_row("Messages", "messages", "消息数", "messages"),
-    stats_row("Days", "days", "统计天数", "days"),
-    stats_row("Total Cost", "total_cost", "累计费用", "USD"),
-    stats_row("Avg Cost/Day", "avg_cost_per_day", "日均费用", "USD"),
+    stats_row("Sessions", "sessions", |t| t.sessions, "sessions"),
+    stats_row("Messages", "messages", |t| t.messages, "messages"),
+    stats_row("Days", "days", |t| t.stats_days, "days"),
+    stats_row("Total Cost", "total_cost", |t| t.total_cost, "USD"),
+    stats_row(
+        "Avg Cost/Day",
+        "avg_cost_per_day",
+        |t| t.avg_cost_per_day,
+        "USD",
+    ),
     stats_row(
         "Avg Tokens/Session",
         "avg_tokens_per_session",
-        "每会话平均 token",
+        |t| t.avg_tokens_per_session,
         "tokens",
     ),
     stats_row(
         "Median Tokens/Session",
         "median_tokens_per_session",
-        "每会话中位 token",
+        |t| t.median_tokens_per_session,
         "tokens",
     ),
-    stats_row("Input", "input_tokens", "输入 token", "tokens"),
-    stats_row("Output", "output_tokens", "输出 token", "tokens"),
+    stats_row("Input", "input_tokens", |t| t.tokens_input, "tokens"),
+    stats_row("Output", "output_tokens", |t| t.tokens_output, "tokens"),
     stats_row(
         "Cache Read",
         "cache_read_tokens",
-        "缓存读取 token",
+        |t| t.tokens_cache_read,
         "tokens",
     ),
     stats_row(
         "Cache Write",
         "cache_write_tokens",
-        "缓存写入 token",
+        |t| t.tokens_cache_write,
         "tokens",
     ),
 ];
@@ -988,7 +1020,7 @@ pub(super) fn opencode_stats(text: &str) -> Vec<UsageMetric> {
         }
         let mut metric = UsageMetric {
             id: row.id.into(),
-            label: row.label.into(),
+            label: (row.label)(metric_texts()).into(),
             unit: row.unit.into(),
             scope: "local".into(),
             ..Default::default()
@@ -1028,13 +1060,14 @@ pub(super) fn opencode_sessions(text: &str) -> Vec<UsageMetric> {
         scope: "local".into(),
         ..Default::default()
     };
+    let labels = metric_texts();
     let mut metrics = Vec::new();
     for (column, id, label, unit) in [
-        ("sessions", "sessions", "会话数", "sessions"),
+        ("sessions", "sessions", labels.sessions, "sessions"),
         (
             "child_sessions",
             "child_sessions",
-            "子 agent 会话数",
+            labels.subagent_sessions,
             "sessions",
         ),
     ] {
@@ -1049,15 +1082,27 @@ pub(super) fn opencode_sessions(text: &str) -> Vec<UsageMetric> {
         metrics.push(UsageMetric {
             // SQLite 的 REAL 合计带浮点尾差；费用按 4 位小数展示。
             amount_decimal: Some(format!("{cost:.4}")),
-            ..local("total_cost", "累计费用", "USD")
+            ..local("total_cost", labels.total_cost, "USD")
         });
     }
     for (column, id, label) in [
-        ("tokens_input", "input_tokens", "输入 token"),
-        ("tokens_output", "output_tokens", "输出 token"),
-        ("tokens_reasoning", "reasoning_tokens", "推理 token"),
-        ("tokens_cache_read", "cache_read_tokens", "缓存读取 token"),
-        ("tokens_cache_write", "cache_write_tokens", "缓存写入 token"),
+        ("tokens_input", "input_tokens", labels.tokens_input),
+        ("tokens_output", "output_tokens", labels.tokens_output),
+        (
+            "tokens_reasoning",
+            "reasoning_tokens",
+            labels.tokens_reasoning,
+        ),
+        (
+            "tokens_cache_read",
+            "cache_read_tokens",
+            labels.tokens_cache_read,
+        ),
+        (
+            "tokens_cache_write",
+            "cache_write_tokens",
+            labels.tokens_cache_write,
+        ),
     ] {
         if let Some(count) = finite(row.get(column)) {
             metrics.push(UsageMetric {
@@ -1070,7 +1115,9 @@ pub(super) fn opencode_sessions(text: &str) -> Vec<UsageMetric> {
 }
 
 /// pi 上下文用量未知（压缩之后、下一次响应之前 `tokens` / `percent` 为 null）时的明示。
-pub(super) const PI_CONTEXT_PENDING_TEXT: &str = "暂无数据（压缩后等待下一次响应）";
+pub(super) fn pi_context_pending_text() -> &'static str {
+    metric_texts().pi_context_pending
+}
 
 /// pi 报文里的当前服务商 / 模型（`provider`、`model`，扩展已按 `responseModel` 优先取值）。
 /// 供快照的 `provider` 字段与 `session/model` 指标共用。
@@ -1097,6 +1144,7 @@ pub(super) fn pi_provider_model(value: &Value) -> (Option<String>, Option<String
 ///   旧版已装扩展推上来的浮点尾差不会原样显示。
 /// - 与 claude 的会话级指标同理：不写 `used_percent`、不成对写 `used` + `limit`。
 pub(super) fn pi(value: &Value) -> Vec<UsageMetric> {
+    let labels = metric_texts();
     let session = |id: &str, label: &str, unit: &str| UsageMetric {
         id: id.into(),
         label: label.into(),
@@ -1109,19 +1157,21 @@ pub(super) fn pi(value: &Value) -> Vec<UsageMetric> {
         let percent = finite(context.get("percent"));
         metrics.push(UsageMetric {
             used: percent,
-            text_value: Some(percent.map_or_else(|| PI_CONTEXT_PENDING_TEXT.into(), percent_text)),
-            ..session("context/percent", "上下文占用", "%")
+            text_value: Some(
+                percent.map_or_else(|| pi_context_pending_text().into(), percent_text),
+            ),
+            ..session("context/percent", labels.context_used, "%")
         });
         let tokens = finite(context.get("tokens"));
         metrics.push(UsageMetric {
             used: tokens,
-            text_value: tokens.is_none().then(|| PI_CONTEXT_PENDING_TEXT.into()),
-            ..session("context/tokens", "上下文 token", "tokens")
+            text_value: tokens.is_none().then(|| pi_context_pending_text().into()),
+            ..session("context/tokens", labels.context_tokens, "tokens")
         });
         if let Some(size) = finite(context.get("context_window")) {
             metrics.push(UsageMetric {
                 used: Some(size),
-                ..session("context/context_window", "上下文窗口大小", "tokens")
+                ..session("context/context_window", labels.context_window, "tokens")
             });
         }
     }
@@ -1131,16 +1181,16 @@ pub(super) fn pi(value: &Value) -> Vec<UsageMetric> {
     {
         metrics.push(UsageMetric {
             amount_decimal: Some(money_decimal(cost)),
-            ..session("session/cost_usd", "本会话费用", "USD")
+            ..session("session/cost_usd", labels.session_cost, "USD")
         });
     }
     if let Some(tokens) = value.get("tokens").filter(|tokens| tokens.is_object()) {
         for (key, label) in [
-            ("input", "输入 token"),
-            ("output", "输出 token"),
-            ("cache_read", "缓存读取 token"),
-            ("cache_write", "缓存写入 token"),
-            ("total", "合计 token"),
+            ("input", labels.tokens_input),
+            ("output", labels.tokens_output),
+            ("cache_read", labels.tokens_cache_read),
+            ("cache_write", labels.tokens_cache_write),
+            ("total", labels.tokens_total),
         ] {
             if let Some(count) = finite(tokens.get(key)) {
                 metrics.push(UsageMetric {
@@ -1162,7 +1212,7 @@ pub(super) fn pi(value: &Value) -> Vec<UsageMetric> {
         if let Some(tag) = tag {
             metrics.push(UsageMetric {
                 text_value: Some(tag),
-                ..session("session/model", "当前模型", "")
+                ..session("session/model", labels.current_model, "")
             });
         }
     }
@@ -2014,13 +2064,13 @@ Done.
         assert_eq!(percent.remaining, None);
         assert_eq!(
             percent.text_value.as_deref(),
-            Some(CLAUDE_CONTEXT_PENDING_TEXT)
+            Some(claude_context_pending_text())
         );
         let tokens = by_id(&pending, "context_window/current_usage");
         assert_eq!(tokens.used, None);
         assert_eq!(
             tokens.text_value.as_deref(),
-            Some(CLAUDE_CONTEXT_PENDING_TEXT)
+            Some(claude_context_pending_text())
         );
         assert_eq!(
             by_id(&pending, "context_window/context_window_size").used,
@@ -2096,7 +2146,7 @@ Done.
         assert_eq!(five_hour.resets_at, Some(now - 60));
         assert_eq!(
             five_hour.text_value.as_deref(),
-            Some(CLAUDE_STALE_WINDOW_TEXT)
+            Some(claude_stale_window_text())
         );
         assert_eq!(merged[1].used_percent, Some(42.0), "在场的窗口用本次报文");
         assert_eq!(merged[1].text_value, None);
@@ -2513,7 +2563,7 @@ Done.
             assert_eq!(metric.used, None, "{id}");
             assert_eq!(
                 metric.text_value.as_deref(),
-                Some(PI_CONTEXT_PENDING_TEXT),
+                Some(pi_context_pending_text()),
                 "{id}"
             );
         }
@@ -2609,5 +2659,50 @@ Done.
             .find(|metric| metric.id == "cost/total_cost_usd")
             .and_then(|metric| metric.amount_decimal);
         assert_eq!(claude_cost.as_deref(), Some("0.4"));
+    }
+
+    /// 文档终审 D7：指标名称、默认单位与文字值按 server 的界面语言给出——英文界面不含
+    /// CJK，中文界面是中文；指标 id 不随语言变化（客户端按 id 认槽位）。
+    #[test]
+    fn metric_labels_follow_the_interface_language() {
+        use crate::i18n::{has_cjk, lang_guard, Lang};
+        let statusline = serde_json::json!({
+            "rate_limits": {"five_hour": {"used_percentage": 12}},
+            "cost": {"total_cost_usd": 0.5, "total_duration_ms": 1000},
+            "context_window": {"used_percentage": null, "current_usage": null},
+        });
+        let kimi_usage = serde_json::json!({
+            "limits": [{"used": 3, "limit": 10}],
+            "available_balance": 1,
+        });
+        let stats = "│ Sessions   12 │\n│ Messages  340 │\n│ Avg Cost/Day  $0.25 │";
+        let pi_push =
+            serde_json::json!({"context": {"percent": null, "tokens": null}, "model": "m"});
+        for (lang, chinese) in [(Lang::En, false), (Lang::ZhCn, true)] {
+            let _guard = lang_guard(lang);
+            let mut metrics = claude(&statusline);
+            metrics.extend(kimi(&kimi_usage));
+            metrics.extend(opencode_stats(stats));
+            metrics.extend(pi(&pi_push));
+            metrics.extend(openrouter(&serde_json::json!({"usage": 1.5})));
+            assert!(metrics.len() >= 10, "{metrics:?}");
+            for metric in &metrics {
+                assert_eq!(
+                    has_cjk(&metric.label),
+                    chinese,
+                    "{lang:?}: {}",
+                    metric.label
+                );
+                if let Some(text) = metric.text_value.as_deref().filter(|text| has_cjk(text)) {
+                    assert!(chinese, "{lang:?}: {text}");
+                }
+            }
+            let window = metrics
+                .iter()
+                .find(|metric| metric.id == "window-0")
+                .expect("没有单位的额度窗口");
+            assert_eq!(has_cjk(&window.unit), chinese, "{lang:?}: {}", window.unit);
+            assert!(metrics.iter().any(|metric| metric.id == "five_hour"));
+        }
     }
 }

@@ -830,7 +830,7 @@ mod usage_statusline_tests {
             strip_usage_statusline("claude", &wrapped)
                 .unwrap_err()
                 .to_string(),
-            crate::platform::UNRECOGNIZED_USAGE_STATUSLINE,
+            crate::platform::unrecognized_usage_statusline_message(),
             "别的厂商的回调是可识别错误，不能当成自定义渲染器再包一层"
         );
     }
@@ -882,7 +882,7 @@ mod usage_statusline_tests {
             strip_usage_statusline("claude", windows)
                 .unwrap_err()
                 .to_string(),
-            crate::platform::UNRECOGNIZED_USAGE_STATUSLINE
+            crate::platform::unrecognized_usage_statusline_message()
         );
         let edited = "(if [ \"${HERDR_ENV:-}\" = 1 ]; then \"$HERDR_BIN_PATH\" api usage-report --agent claude --passthrough; else cat; fi) | (\nbash x.sh\n)";
         assert_eq!(

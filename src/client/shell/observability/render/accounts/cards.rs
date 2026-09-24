@@ -512,7 +512,7 @@ fn codex<'a>(lines: &mut Vec<Line<'a>>, picker: &mut Picker<'a>, cx: Cx) {
             picker.take_where(|slot, metric| in_bucket(slot, metric, Slot::QuotaSecondary));
         let credits = picker.take_where(|slot, metric| in_bucket(slot, metric, Slot::Credits));
         if sections {
-            // 桶名取服务端标签 `{limitName} · 主要额度` 的前半，没有就用桶 id。
+            // 桶名取服务端标签 `{limitName} · …` 的前半，没有就用桶 id。
             let name = primary
                 .or(secondary)
                 .and_then(|metric| metric.label.split_once(" · ").map(|(name, _)| name))
@@ -703,10 +703,9 @@ fn quota_label<'a>(slot: Option<Slot>, metric: &'a UsageMetric, cx: Cx) -> Cow<'
 }
 
 /// 表格格式等只要一个指标名的地方（文档终审 D7）：认得的指标写界面语言的槽位名，
-/// 认不出的沿用服务端标签——服务端标签随快照类型进了冻结摘要的线协议，旧客户端照原样
-/// 显示，所以不在服务端改写，映射表就是卡片共用的这张匹配表。codex 的多个限额桶在
-/// 表格里各占一行，桶名（服务端标签 `{limitName} · …` 的前半，没有就用桶 id）要保留，
-/// 否则各桶的行分不开。
+/// 认不出的沿用服务端标签（按 server 的语言生成，远端 server 可能与界面语言不同），映射表
+/// 就是卡片共用的这张匹配表。codex 的多个限额桶在表格里各占一行，桶名（服务端标签
+/// `{limitName} · …` 的前半，没有就用桶 id）要保留，否则各桶的行分不开。
 pub(super) fn metric_label<'a>(agent: &str, metric: &'a UsageMetric) -> Cow<'a, str> {
     let slot = slot_of(agent, metric);
     let label = slot_label(slot, metric, &crate::i18n::texts().monitor);

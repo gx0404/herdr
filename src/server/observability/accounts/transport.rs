@@ -8,6 +8,7 @@ use std::sync::{mpsc, Arc, Condvar, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use super::parse::{self, ProbeBlocker};
+use super::probe_texts;
 use super::registry::{self, Provider};
 use crate::api::schema::{ObservationStatus, UsageMetric};
 use crate::config::UsageAccountConfig;
@@ -81,7 +82,10 @@ impl ChildGuard {
         let guard = crate::platform::UsageProbeGuard::new(&child).map_err(|_| {
             let _ = child.kill();
             let _ = child.wait();
-            (ObservationStatus::Error, "无法隔离官方查询进程".into())
+            (
+                ObservationStatus::Error,
+                probe_texts().probe_isolation_failed.into(),
+            )
         })?;
         Ok(Self {
             child,
@@ -116,8 +120,12 @@ impl ProbeDirectory {
             std::process::id(),
             crate::server::observability::now_ms()
         ));
-        std::fs::create_dir(&path)
-            .map_err(|_| (ObservationStatus::Error, "无法创建隔离查询目录".into()))?;
+        std::fs::create_dir(&path).map_err(|_| {
+            (
+                ObservationStatus::Error,
+                probe_texts().probe_dir_failed.into(),
+            )
+        })?;
         Ok(Self {
             path,
             persistent: false,
@@ -125,8 +133,12 @@ impl ProbeDirectory {
     }
 
     fn stable(path: &Path) -> Result<Self, QueryError> {
-        std::fs::create_dir_all(path)
-            .map_err(|_| (ObservationStatus::Error, "无法创建稳定探测目录".into()))?;
+        std::fs::create_dir_all(path).map_err(|_| {
+            (
+                ObservationStatus::Error,
+                probe_texts().stable_dir_failed.into(),
+            )
+        })?;
         Ok(Self {
             path: path.to_path_buf(),
             persistent: true,
@@ -194,7 +206,7 @@ fn command(
     if account.profile_dir.is_some() && profile_variable(provider.agent).is_none() {
         return Err((
             ObservationStatus::Unsupported,
-            "此 CLI 未配置经过验证的独立 profile 选择方式".into(),
+            probe_texts().profile_unsupported.into(),
         ));
     }
     // Detached servers may not inherit version-manager PATHs; fall back to
@@ -249,10 +261,13 @@ fn spawn_error(error: io::Error) -> QueryError {
     if error.kind() == io::ErrorKind::NotFound {
         (
             ObservationStatus::Unavailable,
-            "此主机未安装对应官方 CLI，或 server 的 PATH 中不可用".into(),
+            probe_texts().cli_missing.into(),
         )
     } else {
-        (ObservationStatus::Error, "无法启动官方 CLI 查询".into())
+        (
+            ObservationStatus::Error,
+            probe_texts().cli_start_failed.into(),
+        )
     }
 }
 
@@ -270,11 +285,12 @@ pub(super) fn capture_raw(
     let mut configured = command(provider, account, &directory)?;
     configured.stderr(Stdio::piped());
     let mut child = ChildGuard::new(configured.args(args).spawn().map_err(spawn_error)?)?;
-    let stdout = child
-        .child
-        .stdout
-        .take()
-        .ok_or_else(|| (ObservationStatus::Error, "查询输出不可用".into()))?;
+    let stdout = child.child.stdout.take().ok_or_else(|| {
+        (
+            ObservationStatus::Error,
+            probe_texts().output_unavailable.into(),
+        )
+    })?;
     let (sender, receiver) = mpsc::sync_channel(1);
     child.readers.push(std::thread::spawn(move || {
         let mut output = Vec::new();
@@ -303,22 +319,33 @@ pub(super) fn capture_raw(
     }
     let stdout = receiver
         .recv_timeout(deadline.saturating_duration_since(Instant::now()))
-        .map_err(|_| (ObservationStatus::Error, "官方 CLI 查询超时".into()))?
-        .map_err(|_| (ObservationStatus::Error, "无法读取官方 CLI 输出".into()))?;
+        .map_err(|_| (ObservationStatus::Error, probe_texts().cli_timed_out.into()))?
+        .map_err(|_| {
+            (
+                ObservationStatus::Error,
+                probe_texts().cli_output_unreadable.into(),
+            )
+        })?;
     if stdout.len() > MAX_OUTPUT {
         return Err((
             ObservationStatus::Error,
-            "官方 CLI 返回内容超过安全上限".into(),
+            probe_texts().cli_output_too_large.into(),
         ));
     }
     let exit = loop {
-        if let Some(exit) = crate::platform::usage_probe_exit(&mut child.child)
-            .map_err(|_| (ObservationStatus::Error, "无法获取查询结果".into()))?
-        {
+        if let Some(exit) = crate::platform::usage_probe_exit(&mut child.child).map_err(|_| {
+            (
+                ObservationStatus::Error,
+                probe_texts().result_unavailable.into(),
+            )
+        })? {
             break exit;
         }
         if Instant::now() >= deadline {
-            return Err((ObservationStatus::Error, "官方 CLI 查询结束超时".into()));
+            return Err((
+                ObservationStatus::Error,
+                probe_texts().cli_exit_timed_out.into(),
+            ));
         }
         std::thread::sleep(Duration::from_millis(10));
     };
@@ -361,7 +388,7 @@ fn settle_help(provider: &Provider, captured: &Captured) -> Result<String, Query
         }
         return Err((
             ObservationStatus::Unsupported,
-            "官方 CLI 没有输出帮助文本，无法确认用量子命令".into(),
+            probe_texts().cli_help_empty.into(),
         ));
     }
     let text = String::from_utf8_lossy(&merged).into_owned();
@@ -399,14 +426,13 @@ pub(super) fn classify_auth_status(
     if parse::cli_usage_error(&stderr_raw) {
         return Err((
             ObservationStatus::Unsupported,
-            "此版本 Claude Code 没有 auth status --json；请升级 CLI 或启用官方 statusline 上报"
-                .into(),
+            probe_texts().claude_auth_status_unsupported.into(),
         ));
     }
     if parse::auth_evidence(&stderr_raw) || parse::auth_evidence(&stdout_raw) {
         return Err((
             ObservationStatus::NotAuthenticated,
-            "官方 CLI 报告未登录，请先在正常会话完成登录".into(),
+            probe_texts().cli_signed_out.into(),
         ));
     }
     Ok(None)
@@ -430,6 +456,15 @@ fn debug_stderr_tail(provider: &Provider, sanitized_tail: &str, message: &str) {
     }
 }
 
+/// 厂商原文摘要接在说明后的形态（`detail_fmt`，空摘要不加）：摘要本身不翻译。
+fn detail(summary: &str) -> String {
+    if summary.is_empty() {
+        String::new()
+    } else {
+        crate::i18n::fill(probe_texts().detail_fmt, &[("summary", summary)])
+    }
+}
+
 /// 失败退出的分类——先看内容再看退出码：被信号终止是运行环境问题（transient）；两路都空白
 /// 是「无机器可读输出」（版本旧）；用法错误 / 帮助文本是「flag 或子命令不受支持」——这条排在
 /// 登录证据之前，与 `classify_auth_status` 一致：帮助文本里列出的 `auth login` 子命令不是
@@ -441,41 +476,40 @@ pub(super) fn classify_failure(provider: &Provider, captured: &Captured) -> Quer
     let stdout_raw = String::from_utf8_lossy(tail_bytes(&captured.stdout, STDERR_TAIL));
     let stderr_tail = sanitize(&stderr_raw);
     debug_stderr_tail(provider, &stderr_tail, "官方 CLI 非零退出");
+    let texts = probe_texts();
     if let Some(signal) = captured.exit.signal {
         return (
             ObservationStatus::Error,
-            format!("官方 CLI 被信号 {signal} 终止（未得到结论），稍后自动重试"),
+            crate::i18n::fill(texts.cli_signaled_fmt, &[("signal", &signal.to_string())]),
         );
     }
-    let code = captured.exit.code.unwrap_or(-1);
+    let code = captured.exit.code.unwrap_or(-1).to_string();
     if captured.stdout_blank() && stderr_tail.is_empty() {
         return (
             ObservationStatus::Unsupported,
-            format!("此版本官方 CLI 未提供机器可读的用量输出（退出码 {code}），请升级 CLI 或查看官方页面"),
+            crate::i18n::fill(texts.cli_no_usage_output_fmt, &[("code", &code)]),
         );
     }
     let summary = summary_line(&stderr_tail);
     if captured.usage_error() {
-        let detail = if summary.is_empty() {
-            String::new()
-        } else {
-            format!("：{summary}")
-        };
         return (
             ObservationStatus::Unsupported,
-            format!("当前版本官方 CLI 不支持此用量查询参数（用法错误{detail}），请升级 CLI 或查看官方页面"),
+            crate::i18n::fill(texts.cli_usage_error_fmt, &[("detail", &detail(&summary))]),
         );
     }
     if parse::auth_evidence(&stderr_raw) || parse::auth_evidence(&stdout_raw) {
         return (
             ObservationStatus::NotAuthenticated,
-            "官方 CLI 报告未登录，请先在正常会话完成登录".into(),
+            texts.cli_signed_out.into(),
         );
     }
     let message = if summary.is_empty() {
-        format!("官方 CLI 查询失败（退出码 {code}），稍后自动重试")
+        crate::i18n::fill(texts.cli_failed_fmt, &[("code", &code)])
     } else {
-        format!("官方 CLI 查询失败（退出码 {code}）：{summary}")
+        crate::i18n::fill(
+            texts.cli_failed_summary_fmt,
+            &[("code", &code), ("summary", &summary)],
+        )
     };
     (ObservationStatus::Error, message)
 }
@@ -749,7 +783,10 @@ fn choose_args(
     fallback_args: Option<&'static [&'static str]>,
 ) -> Result<(&'static [&'static str], Option<&'static [&'static str]>), QueryError> {
     let Some(sub) = args.first().copied() else {
-        return Err((ObservationStatus::Unsupported, "未配置官方子命令".into()));
+        return Err((
+            ObservationStatus::Unsupported,
+            probe_texts().no_subcommand.into(),
+        ));
     };
     if !help_lists_subcommand(top_help, command, sub) {
         let alternative = fallback_args.filter(|alternative| {
@@ -759,7 +796,7 @@ fn choose_args(
         });
         return alternative.map(|alternative| (alternative, None)).ok_or((
             ObservationStatus::Unsupported,
-            "当前 CLI 帮助中没有此官方用量子命令，请更新 CLI 或使用官方页面".into(),
+            probe_texts().subcommand_missing.into(),
         ));
     }
     match (fallback_args, sub_help) {
@@ -810,7 +847,10 @@ fn run_query(
             .max(Duration::from_millis(1))
     };
     let Some(sub) = args.first().copied() else {
-        return Err((ObservationStatus::Unsupported, "未配置官方子命令".into()));
+        return Err((
+            ObservationStatus::Unsupported,
+            probe_texts().no_subcommand.into(),
+        ));
     };
     let top_help = help(None, help_budget(timeout))?;
     let sub_help = fallback_args
@@ -940,12 +980,8 @@ pub(super) fn classify_rpc_error(error: &Value) -> QueryError {
     let code = error.get("code").and_then(Value::as_i64);
     let message = error.get("message").and_then(Value::as_str).unwrap_or("");
     let lower = message.to_lowercase();
-    let summary = summary_line(&sanitize(message));
-    let detail = if summary.is_empty() {
-        String::new()
-    } else {
-        format!("：{summary}")
-    };
+    let detail = detail(&summary_line(&sanitize(message)));
+    let texts = probe_texts();
     if code == Some(-32601)
         || lower.contains("unknown variant")
         || lower.contains("method not found")
@@ -953,18 +989,18 @@ pub(super) fn classify_rpc_error(error: &Value) -> QueryError {
     {
         return (
             ObservationStatus::Unsupported,
-            format!("当前 Codex 版本或登录方式不支持此账号查询{detail}"),
+            crate::i18n::fill(texts.codex_unsupported_fmt, &[("detail", &detail)]),
         );
     }
     if parse::auth_evidence(message) {
         return (
             ObservationStatus::NotAuthenticated,
-            format!("Codex 报告未登录，请先使用官方登录流程{detail}"),
+            crate::i18n::fill(texts.codex_signed_out_fmt, &[("detail", &detail)]),
         );
     }
     (
         ObservationStatus::Error,
-        format!("Codex 账号查询失败{detail}，稍后自动重试"),
+        crate::i18n::fill(texts.codex_failed_fmt, &[("detail", &detail)]),
     )
 }
 
@@ -979,15 +1015,20 @@ struct Rpc<'a> {
 
 impl Rpc<'_> {
     fn send(&mut self, value: &Value) -> Result<(), QueryError> {
-        let input = self
-            .child
-            .child
-            .stdin
-            .as_mut()
-            .ok_or_else(|| (ObservationStatus::Error, "RPC 输入已关闭".into()))?;
+        let input = self.child.child.stdin.as_mut().ok_or_else(|| {
+            (
+                ObservationStatus::Error,
+                probe_texts().rpc_input_closed.into(),
+            )
+        })?;
         writeln!(input, "{value}")
             .and_then(|_| input.flush())
-            .map_err(|_| (ObservationStatus::Error, "RPC 输入失败".into()))
+            .map_err(|_| {
+                (
+                    ObservationStatus::Error,
+                    probe_texts().rpc_input_failed.into(),
+                )
+            })
     }
 
     fn receive(&self, id: u64) -> Result<Value, QueryError> {
@@ -997,7 +1038,7 @@ impl Rpc<'_> {
                 Err(mpsc::RecvTimeoutError::Timeout) => {
                     return Err((
                         ObservationStatus::Error,
-                        "Codex app-server 未在时限内响应，稍后自动重试".into(),
+                        probe_texts().codex_timed_out.into(),
                     ))
                 }
                 Err(mpsc::RecvTimeoutError::Disconnected) => return Err(self.disconnected()),
@@ -1024,9 +1065,9 @@ impl Rpc<'_> {
         (
             ObservationStatus::Error,
             if summary.is_empty() {
-                "Codex app-server 提前退出（未得到响应），稍后自动重试".into()
+                probe_texts().codex_exited.into()
             } else {
-                format!("Codex app-server 提前退出：{summary}")
+                crate::i18n::fill(probe_texts().codex_exited_fmt, &[("summary", &summary)])
             },
         )
     }
@@ -1065,11 +1106,12 @@ pub(super) fn codex(
         .spawn()
         .map_err(spawn_error)?;
     let mut child = ChildGuard::new(child)?;
-    let stdout = child
-        .child
-        .stdout
-        .take()
-        .ok_or_else(|| (ObservationStatus::Error, "RPC 输出不可用".into()))?;
+    let stdout = child.child.stdout.take().ok_or_else(|| {
+        (
+            ObservationStatus::Error,
+            probe_texts().rpc_output_unavailable.into(),
+        )
+    })?;
     let stderr = Arc::new(Mutex::new(Vec::new()));
     if let Some(pipe) = child.child.stderr.take() {
         spawn_tail_reader(pipe, stderr.clone());
@@ -1118,7 +1160,10 @@ pub(super) fn codex(
             rpc.receive(5).map_err(|(_, retry)| {
                 (
                     ObservationStatus::NotAuthenticated,
-                    format!("{message}；刷新令牌后仍失败：{retry}"),
+                    crate::i18n::fill(
+                        probe_texts().token_refresh_failed_fmt,
+                        &[("message", &message), ("retry", &retry)],
+                    ),
                 )
             })?
         }
@@ -1127,7 +1172,7 @@ pub(super) fn codex(
     if identity.get("account").is_none_or(Value::is_null) {
         return Err((
             ObservationStatus::NotAuthenticated,
-            "请先使用 Codex 官方登录流程".into(),
+            probe_texts().codex_sign_in_first.into(),
         ));
     }
     rpc.send(&json!({"id":3,"method":"account/rateLimits/read"}))?;
@@ -1194,8 +1239,12 @@ pub(super) fn interactive(
     }
     // ConPTY 内的 CLI 由提前加入 Windows Job 的辅助进程启动；根进程先退出也不会失去后代。
     let directory = ProbeDirectory::new()?;
-    let executable = std::env::current_exe()
-        .map_err(|_| (ObservationStatus::Error, "无法定位查询辅助进程".into()))?;
+    let executable = std::env::current_exe().map_err(|_| {
+        (
+            ObservationStatus::Error,
+            probe_texts().helper_missing.into(),
+        )
+    })?;
     // 重新建立命令，避免把 CLI 路径当成 herdr 的参数。
     let mut command = std::process::Command::new(executable);
     crate::platform::configure_usage_probe_command(&mut command);
@@ -1229,16 +1278,25 @@ pub(super) fn interactive(
                 probe_dir: stable_dir.map(Path::to_path_buf),
             },
         )
-        .map_err(|_| (ObservationStatus::Error, "无法配置隔离查询".into()))?;
-        input
-            .flush()
-            .map_err(|_| (ObservationStatus::Error, "无法发送隔离查询".into()))?;
+        .map_err(|_| {
+            (
+                ObservationStatus::Error,
+                probe_texts().helper_config_failed.into(),
+            )
+        })?;
+        input.flush().map_err(|_| {
+            (
+                ObservationStatus::Error,
+                probe_texts().helper_send_failed.into(),
+            )
+        })?;
     }
-    let stdout = child
-        .child
-        .stdout
-        .take()
-        .ok_or_else(|| (ObservationStatus::Error, "辅助查询输出不可用".into()))?;
+    let stdout = child.child.stdout.take().ok_or_else(|| {
+        (
+            ObservationStatus::Error,
+            probe_texts().helper_output_unavailable.into(),
+        )
+    })?;
     let (sender, receiver) = mpsc::sync_channel(1);
     child.readers.push(std::thread::spawn(move || {
         let mut bytes = Vec::new();
@@ -1250,13 +1308,31 @@ pub(super) fn interactive(
     }));
     let bytes = receiver
         .recv_timeout(timeout + Duration::from_secs(2))
-        .map_err(|_| (ObservationStatus::Error, "隔离 CLI 查询超时".into()))?
-        .map_err(|_| (ObservationStatus::Error, "无法读取隔离查询".into()))?;
+        .map_err(|_| {
+            (
+                ObservationStatus::Error,
+                probe_texts().isolated_timed_out.into(),
+            )
+        })?
+        .map_err(|_| {
+            (
+                ObservationStatus::Error,
+                probe_texts().isolated_unreadable.into(),
+            )
+        })?;
     if bytes.len() > MAX_OUTPUT {
-        return Err((ObservationStatus::Error, "隔离查询结果过大".into()).into());
+        return Err((
+            ObservationStatus::Error,
+            probe_texts().isolated_too_large.into(),
+        )
+            .into());
     }
-    serde_json::from_slice::<Result<String, InteractiveError>>(&bytes)
-        .map_err(|_| (ObservationStatus::Error, "隔离查询结果无效".into()))?
+    serde_json::from_slice::<Result<String, InteractiveError>>(&bytes).map_err(|_| {
+        (
+            ObservationStatus::Error,
+            probe_texts().isolated_invalid.into(),
+        )
+    })?
 }
 
 /// 阻塞对话的判定 → 探测错误：登录组是终态；信任组是可重试的 transient `Error` 并置
@@ -1360,7 +1436,7 @@ fn interactive_direct(
     if account.profile_dir.is_some() && profile_variable(provider.agent).is_none() {
         return Err((
             ObservationStatus::Unsupported,
-            "尚无此 CLI 的安全 profile 查询方式".into(),
+            probe_texts().interactive_profile_unsupported.into(),
         )
             .into());
     }
@@ -1371,7 +1447,12 @@ fn interactive_direct(
             pixel_width: 0,
             pixel_height: 0,
         })
-        .map_err(|_| (ObservationStatus::Unavailable, "无法创建隔离终端".into()))?;
+        .map_err(|_| {
+            (
+                ObservationStatus::Unavailable,
+                probe_texts().pty_create_failed.into(),
+            )
+        })?;
     let mut builder = portable_pty::CommandBuilder::new(provider.command);
     builder.cwd(&directory.path);
     builder.env("TERM", "xterm-256color");
@@ -1396,21 +1477,25 @@ fn interactive_direct(
     let mut child = pty.slave.spawn_command(builder).map_err(|_| {
         InteractiveError::from((
             ObservationStatus::Unavailable,
-            "无法启动隔离 CLI，请检查安装和平台支持".to_owned(),
+            probe_texts().pty_spawn_failed.to_owned(),
         ))
     })?;
     drop(pty.slave);
     let mut reader_handle = None;
     let result = (|| -> Result<String, InteractiveError> {
-        let writer = pty
-            .master
-            .take_writer()
-            .map_err(|_| (ObservationStatus::Error, "隔离终端输入不可用".into()))?;
+        let writer = pty.master.take_writer().map_err(|_| {
+            (
+                ObservationStatus::Error,
+                probe_texts().pty_input_unavailable.into(),
+            )
+        })?;
         let writer = Arc::new(Mutex::new(writer));
-        let mut reader = pty
-            .master
-            .try_clone_reader()
-            .map_err(|_| (ObservationStatus::Error, "隔离终端输出不可用".into()))?;
+        let mut reader = pty.master.try_clone_reader().map_err(|_| {
+            (
+                ObservationStatus::Error,
+                probe_texts().pty_output_unavailable.into(),
+            )
+        })?;
         let (sender, receiver) = mpsc::sync_channel(32);
         reader_handle = Some(std::thread::spawn(move || {
             let mut total = 0_usize;
@@ -1432,8 +1517,12 @@ fn interactive_direct(
                 }
             }
         }));
-        let mut terminal = crate::ghostty::Terminal::new(180, 80, MAX_OUTPUT)
-            .map_err(|_| (ObservationStatus::Error, "无法读取隔离 CLI 画面".into()))?;
+        let mut terminal = crate::ghostty::Terminal::new(180, 80, MAX_OUTPUT).map_err(|_| {
+            (
+                ObservationStatus::Error,
+                probe_texts().pty_screen_unreadable.into(),
+            )
+        })?;
         let terminal_writer = writer.clone();
         terminal
             .set_write_pty_callback(move |bytes| {
@@ -1442,11 +1531,20 @@ fn interactive_direct(
                     let _ = writer.flush();
                 }
             })
-            .map_err(|_| (ObservationStatus::Error, "隔离终端协议初始化失败".into()))?;
+            .map_err(|_| {
+                (
+                    ObservationStatus::Error,
+                    probe_texts().pty_protocol_failed.into(),
+                )
+            })?;
         let deadline = Instant::now() + timeout;
         let agent = crate::detect::parse_agent_label(provider.agent);
-        let mut render_state = crate::ghostty::RenderState::new()
-            .map_err(|_| (ObservationStatus::Error, "隔离终端游标不可用".into()))?;
+        let mut render_state = crate::ghostty::RenderState::new().map_err(|_| {
+            (
+                ObservationStatus::Error,
+                probe_texts().pty_cursor_unavailable.into(),
+            )
+        })?;
         let mut stage = 0;
         let mut last_output = Instant::now();
         let mut screen = String::new();
@@ -1463,9 +1561,11 @@ fn interactive_direct(
                     last_output = Instant::now();
                 }
                 Err(mpsc::RecvTimeoutError::Disconnected) => {
-                    return Err(
-                        (ObservationStatus::Unavailable, "官方 CLI 已退出查询".into()).into(),
+                    return Err((
+                        ObservationStatus::Unavailable,
+                        probe_texts().pty_cli_exited.into(),
                     )
+                        .into())
                 }
                 Err(mpsc::RecvTimeoutError::Timeout) => {}
             }
@@ -1586,12 +1686,17 @@ fn kimi_start(
         std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).map_err(|_| {
             KimiStartError::Retry((
                 ObservationStatus::Unavailable,
-                "无法分配本地查询端口".into(),
+                probe_texts().kimi_port_failed.into(),
             ))
         })?;
     let port = listener
         .local_addr()
-        .map_err(|_| KimiStartError::Fatal((ObservationStatus::Error, "无法读取本地端口".into())))?
+        .map_err(|_| {
+            KimiStartError::Fatal((
+                ObservationStatus::Error,
+                probe_texts().kimi_port_unreadable.into(),
+            ))
+        })?
         .port();
     drop(listener);
     let child = command(provider, account, &directory)
@@ -1638,7 +1743,10 @@ fn kimi_start(
     }
     drop(sender);
     let pattern = kimi_banner_pattern().ok_or_else(|| {
-        KimiStartError::Fatal((ObservationStatus::Error, "本地服务地址解析失败".into()))
+        KimiStartError::Fatal((
+            ObservationStatus::Error,
+            probe_texts().kimi_address_invalid.into(),
+        ))
     })?;
     // banner 含临时令牌：取出后立即清零。
     let mut banner = Vec::new();
@@ -1649,7 +1757,7 @@ fn kimi_start(
             Err(mpsc::RecvTimeoutError::Timeout) => {
                 break Err(KimiStartError::Retry((
                     ObservationStatus::Unavailable,
-                    "Kimi 本地服务未就绪（等待 banner 超时）；请确认版本支持 kimi web".into(),
+                    probe_texts().kimi_banner_timeout.into(),
                 )));
             }
             Err(mpsc::RecvTimeoutError::Disconnected) => {
@@ -1661,7 +1769,7 @@ fn kimi_start(
         if banner.len() > MAX_OUTPUT {
             break Err(KimiStartError::Fatal((
                 ObservationStatus::Error,
-                "Kimi 启动输出过大".into(),
+                probe_texts().kimi_banner_too_large.into(),
             )));
         }
         let text = String::from_utf8_lossy(&banner);
@@ -1691,22 +1799,22 @@ fn kimi_exit_before_banner(provider: &Provider, text: &str) -> KimiStartError {
     if parse::cli_usage_error(text) || parse::cli_help_output(text) {
         return KimiStartError::Fatal((
             ObservationStatus::Unsupported,
-            "此版本 Kimi CLI 不支持 kimi web；请升级 CLI".into(),
+            probe_texts().kimi_web_unsupported.into(),
         ));
     }
     if parse::auth_evidence(text) {
         return KimiStartError::Fatal((
             ObservationStatus::NotAuthenticated,
-            "Kimi CLI 报告未登录，请先在正常会话完成登录".into(),
+            probe_texts().kimi_signed_out.into(),
         ));
     }
     let summary = summary_line(&sanitized);
     KimiStartError::Retry((
         ObservationStatus::Unavailable,
         if summary.is_empty() {
-            "Kimi 本地服务提前退出（可能是端口竞争）".into()
+            probe_texts().kimi_exited.into()
         } else {
-            format!("Kimi 本地服务提前退出：{summary}")
+            crate::i18n::fill(probe_texts().kimi_exited_fmt, &[("summary", &summary)])
         },
     ))
 }
@@ -1737,26 +1845,24 @@ fn kimi_attempts<T>(
     }
     Err(last_error.unwrap_or((
         ObservationStatus::Unavailable,
-        "Kimi 本地服务未就绪；请确认版本支持 kimi web".into(),
+        probe_texts().kimi_not_ready.into(),
     )))
 }
 
 /// 本地服务的 HTTP 状态 → 文案；状态分类与远程官方接口共用 `http::status_kind`。
 fn kimi_status_error(status: u16) -> QueryError {
     let kind = super::http::status_kind(status);
-    let message = match kind {
-        ObservationStatus::NotAuthenticated => {
-            format!("Kimi 官方查询需要有效登录（HTTP {status}），请先在正常会话完成登录")
-        }
-        ObservationStatus::PermissionDenied => {
-            format!("Kimi 账号无权访问用量接口（HTTP {status}）")
-        }
-        ObservationStatus::Unsupported => {
-            format!("此版本 Kimi CLI 没有该用量接口（HTTP {status}），请升级 CLI")
-        }
-        _ => format!("Kimi 本地服务返回 HTTP {status}，稍后自动重试"),
+    let texts = probe_texts();
+    let template = match kind {
+        ObservationStatus::NotAuthenticated => texts.kimi_http_signed_out_fmt,
+        ObservationStatus::PermissionDenied => texts.kimi_http_forbidden_fmt,
+        ObservationStatus::Unsupported => texts.kimi_http_missing_fmt,
+        _ => texts.kimi_http_error_fmt,
     };
-    (kind, message)
+    (
+        kind,
+        crate::i18n::fill(template, &[("status", &status.to_string())]),
+    )
 }
 
 fn kimi_read(service: &KimiService, deadline: Instant) -> Result<(Value, Value), QueryError> {
@@ -1764,7 +1870,12 @@ fn kimi_read(service: &KimiService, deadline: Instant) -> Result<(Value, Value),
         .no_proxy()
         .redirect(reqwest::redirect::Policy::none())
         .build()
-        .map_err(|_| (ObservationStatus::Error, "无法连接本地官方服务".into()))?;
+        .map_err(|_| {
+            (
+                ObservationStatus::Error,
+                probe_texts().kimi_connect_failed.into(),
+            )
+        })?;
     let read = |path: &str| -> Result<Value, QueryError> {
         let response = client
             .get(format!("{}{path}", service.base))
@@ -1775,7 +1886,12 @@ fn kimi_read(service: &KimiService, deadline: Instant) -> Result<(Value, Value),
                     .max(Duration::from_millis(1)),
             )
             .send()
-            .map_err(|_| (ObservationStatus::Error, "Kimi 官方查询连接失败".into()))?;
+            .map_err(|_| {
+                (
+                    ObservationStatus::Error,
+                    probe_texts().kimi_request_failed.into(),
+                )
+            })?;
         if !response.status().is_success() {
             return Err(kimi_status_error(response.status().as_u16()));
         }
@@ -1783,14 +1899,22 @@ fn kimi_read(service: &KimiService, deadline: Instant) -> Result<(Value, Value),
         response
             .take(MAX_OUTPUT as u64 + 1)
             .read_to_end(&mut bytes)
-            .map_err(|_| (ObservationStatus::Error, "Kimi 官方响应读取失败".into()))?;
+            .map_err(|_| {
+                (
+                    ObservationStatus::Error,
+                    probe_texts().kimi_response_unreadable.into(),
+                )
+            })?;
         if bytes.len() > MAX_OUTPUT {
-            return Err((ObservationStatus::Error, "Kimi 响应过大".into()));
+            return Err((
+                ObservationStatus::Error,
+                probe_texts().kimi_response_too_large.into(),
+            ));
         }
         let value: Value = serde_json::from_slice(&bytes).map_err(|_| {
             (
                 ObservationStatus::Unsupported,
-                "当前 Kimi 接口格式不受支持".into(),
+                probe_texts().kimi_format_unsupported.into(),
             )
         })?;
         if value.get("code").and_then(Value::as_i64) != Some(0)
@@ -1798,7 +1922,7 @@ fn kimi_read(service: &KimiService, deadline: Instant) -> Result<(Value, Value),
         {
             return Err((
                 ObservationStatus::NotAuthenticated,
-                "Kimi 官方账号查询未成功，请检查登录状态".into(),
+                probe_texts().kimi_query_failed.into(),
             ));
         }
         Ok(value)
@@ -2942,5 +3066,29 @@ Options:
                 .and_then(|name| name.to_str()),
             Some("default")
         );
+    }
+
+    /// 文档终审 D7：herdr 自己写的探测说明按 server 的界面语言给出——英文界面不含 CJK，
+    /// 中文界面是中文；拼在后面的厂商原文摘要原样保留。
+    #[test]
+    fn probe_failures_follow_the_interface_language() {
+        use crate::i18n::{has_cjk, lang_guard, Lang};
+        for (lang, chinese) in [(Lang::En, false), (Lang::ZhCn, true)] {
+            let _guard = lang_guard(lang);
+            let failed = classify_failure(claude(), &exited(3, b"{}", b"boom happened")).1;
+            assert!(failed.contains("boom happened"), "{failed}");
+            let messages = [
+                failed,
+                classify_failure(claude(), &exited(1, b"", b"")).1,
+                classify_failure(claude(), &signaled(9, b"", b"")).1,
+                classify_rpc_error(&json!({"code": -32601, "message": "unknown method"})).1,
+                kimi_status_error(401).1,
+                kimi_status_error(500).1,
+                spawn_error(io::Error::from(io::ErrorKind::NotFound)).1,
+            ];
+            for message in &messages {
+                assert_eq!(has_cjk(message), chinese, "{lang:?}: {message}");
+            }
+        }
     }
 }

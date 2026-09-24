@@ -1646,6 +1646,225 @@ pub struct PlatformMessageTexts {
     pub process_handle_unsupported: &'static str,
 }
 
+/// 账号用量里 herdr 自己写的说明（文档终审 D7）：探测失败写进快照 `message` 的文案、详情
+/// 面板的来源（`source`），以及账号请求与官方回调接入被拒时的错误说明。按 server 的界面语言
+/// 生成（与 toast、通知同一口径）；厂商原文（CLI 的 stderr 摘要、接口返回的内容）经
+/// `detail_fmt` 等原样拼在后面，不翻译。`*_fmt` 是 `fill` 模板，占位写在行尾。
+pub struct UsageProbeTexts {
+    // ---- 官方 CLI 进程与输出 ----
+    pub probe_isolation_failed: &'static str,
+    pub probe_dir_failed: &'static str,
+    pub stable_dir_failed: &'static str,
+    pub profile_unsupported: &'static str,
+    pub cli_missing: &'static str,
+    pub cli_start_failed: &'static str,
+    pub output_unavailable: &'static str,
+    pub cli_timed_out: &'static str,
+    pub cli_output_unreadable: &'static str,
+    pub cli_output_too_large: &'static str,
+    pub result_unavailable: &'static str,
+    pub cli_exit_timed_out: &'static str,
+    // ---- 失败分类（厂商原文摘要经 `detail_fmt` 拼在后面） ----
+    pub cli_help_empty: &'static str,
+    pub cli_signed_out: &'static str,
+    pub cli_signaled_fmt: &'static str,        // args: signal
+    pub cli_no_usage_output_fmt: &'static str, // args: code
+    pub cli_usage_error_fmt: &'static str,     // args: detail
+    /// 接在说明后的厂商原文摘要。
+    pub detail_fmt: &'static str, // args: summary
+    pub cli_failed_fmt: &'static str,          // args: code
+    pub cli_failed_summary_fmt: &'static str,  // args: code, summary
+    pub no_subcommand: &'static str,
+    pub subcommand_missing: &'static str,
+    pub claude_auth_status_unsupported: &'static str,
+    // ---- Codex app-server ----
+    pub codex_unsupported_fmt: &'static str, // args: detail
+    pub codex_signed_out_fmt: &'static str,  // args: detail
+    pub codex_failed_fmt: &'static str,      // args: detail
+    pub rpc_input_closed: &'static str,
+    pub rpc_input_failed: &'static str,
+    pub rpc_output_unavailable: &'static str,
+    pub codex_timed_out: &'static str,
+    pub codex_exited: &'static str,
+    pub codex_exited_fmt: &'static str,         // args: summary
+    pub token_refresh_failed_fmt: &'static str, // args: message, retry
+    pub codex_sign_in_first: &'static str,
+    // ---- 交互探测（隔离终端与 Windows 辅助进程） ----
+    pub helper_missing: &'static str,
+    pub helper_config_failed: &'static str,
+    pub helper_send_failed: &'static str,
+    pub helper_output_unavailable: &'static str,
+    pub isolated_timed_out: &'static str,
+    pub isolated_unreadable: &'static str,
+    pub isolated_too_large: &'static str,
+    pub isolated_invalid: &'static str,
+    pub interactive_profile_unsupported: &'static str,
+    pub pty_create_failed: &'static str,
+    pub pty_spawn_failed: &'static str,
+    pub pty_input_unavailable: &'static str,
+    pub pty_output_unavailable: &'static str,
+    pub pty_screen_unreadable: &'static str,
+    pub pty_protocol_failed: &'static str,
+    pub pty_cursor_unavailable: &'static str,
+    pub pty_cli_exited: &'static str,
+    // ---- Kimi 本地服务（kimi web） ----
+    pub kimi_port_failed: &'static str,
+    pub kimi_port_unreadable: &'static str,
+    pub kimi_address_invalid: &'static str,
+    pub kimi_banner_timeout: &'static str,
+    pub kimi_banner_too_large: &'static str,
+    pub kimi_web_unsupported: &'static str,
+    pub kimi_signed_out: &'static str,
+    pub kimi_exited: &'static str,
+    pub kimi_exited_fmt: &'static str, // args: summary
+    pub kimi_not_ready: &'static str,
+    pub kimi_http_signed_out_fmt: &'static str, // args: status
+    pub kimi_http_forbidden_fmt: &'static str,  // args: status
+    pub kimi_http_missing_fmt: &'static str,    // args: status
+    pub kimi_http_error_fmt: &'static str,      // args: status
+    pub kimi_connect_failed: &'static str,
+    pub kimi_request_failed: &'static str,
+    pub kimi_response_unreadable: &'static str,
+    pub kimi_response_too_large: &'static str,
+    pub kimi_format_unsupported: &'static str,
+    pub kimi_query_failed: &'static str,
+    // ---- 官方 HTTP 接口（`auth_mode = "api"`） ----
+    pub api_credential_env_required: &'static str,
+    pub api_credential_missing: &'static str,
+    pub api_client_failed: &'static str,
+    pub api_kimi_base_required: &'static str,
+    pub api_provider_unsupported: &'static str,
+    pub api_query_unsupported: &'static str,
+    pub api_no_verified_fields: &'static str,
+    pub api_deadline: &'static str,
+    pub api_connect_failed: &'static str,
+    pub api_http_status_fmt: &'static str, // args: status, retry
+    pub api_retry_after_fmt: &'static str, // args: seconds
+    pub api_too_large: &'static str,
+    pub api_unreadable: &'static str,
+    pub api_unrecognized: &'static str,
+    pub api_base_invalid: &'static str,
+    pub api_base_has_credentials: &'static str,
+    pub api_base_unregistered: &'static str,
+    // ---- ZCode 本地数据库（只读外部来源） ----
+    pub zcode_no_home: &'static str,
+    pub zcode_no_database: &'static str,
+    pub zcode_non_utf8_path: &'static str,
+    pub zcode_profile_unsupported: &'static str,
+    pub zcode_sqlite_missing: &'static str,
+    pub zcode_query_failed: &'static str,
+    pub zcode_schema_mismatch: &'static str,
+    pub zcode_database_busy: &'static str,
+    pub zcode_database_unreadable: &'static str,
+    pub zcode_no_result: &'static str,
+    pub zcode_unparsable: &'static str,
+    // ---- 快照来源（详情面板的「来源」） ----
+    pub source_official_api: &'static str,
+    pub source_kimi_local_api: &'static str,
+    pub source_cli_fmt: &'static str, // args: command
+    pub source_claude_callback: &'static str,
+    pub source_local_stats_fmt: &'static str, // args: command
+    pub source_extension_push: &'static str,
+    pub source_cli_callback: &'static str,
+    pub source_extension_push_stats: &'static str,
+    pub source_zcode_local: &'static str,
+    // ---- 账号请求与探测方案 ----
+    pub callback_session_stats: &'static str,
+    pub agent_unsupported: &'static str,
+    pub subscription_limit: &'static str,
+    pub unknown_account: &'static str,
+    pub binding_limit: &'static str,
+    pub request_unsupported: &'static str,
+    pub busy: &'static str,
+    // ---- 官方回调（statusline）接入：`account.usage.integration` 的错误说明 ----
+    pub statusline_unsupported_provider: &'static str,
+    pub statusline_unknown_provider: &'static str,
+    pub statusline_retired: &'static str,
+    pub settings_invalid_json: &'static str,
+    pub settings_empty: &'static str,
+    pub settings_not_object: &'static str,
+    pub statusline_not_object: &'static str,
+    pub statusline_create_failed: &'static str,
+    pub statusline_invalid: &'static str,
+    pub statusline_not_command: &'static str,
+    pub statusline_unrecognized: &'static str,
+}
+
+/// 账号用量指标的名称、单位与文字值（快照里的 `label` / `unit` / `text_value`），按 server 的
+/// 界面语言生成（文档终审 D7）。客户端的厂商卡片与表格对认得的指标另用界面语言的槽位名
+/// （`MonitorTexts`），认不出的指标原样显示这里的名称。
+pub struct UsageMetricTexts {
+    // ---- 额度窗口 ----
+    pub quota_primary: &'static str,
+    pub quota_secondary: &'static str,
+    pub credits: &'static str,
+    pub quota_5h: &'static str,
+    pub quota_weekly: &'static str,
+    pub quota_spend: &'static str,
+    pub quota_plan: &'static str,
+    pub quota_7d: &'static str,
+    pub quota_monthly: &'static str,
+    pub quota_monthly_code: &'static str,
+    pub quota_window_fmt: &'static str, // args: n
+    /// 厂商没给单位时的计量单位。
+    pub quota_unit: &'static str,
+    // ---- 余额与费用 ----
+    pub balance_available: &'static str,
+    pub balance_voucher: &'static str,
+    pub balance_cash: &'static str,
+    /// 厂商没给币种的余额单位。
+    pub balance_unit: &'static str,
+    pub extra_balance: &'static str,
+    pub extra_total: &'static str,
+    pub extra_month_used: &'static str,
+    pub extra_month_cap: &'static str,
+    pub key_usage: &'static str,
+    pub key_usage_daily: &'static str,
+    pub key_usage_weekly: &'static str,
+    pub key_usage_monthly: &'static str,
+    pub key_limit_remaining: &'static str,
+    pub account_total_credits: &'static str,
+    pub account_total_usage: &'static str,
+    pub cost_report: &'static str,
+    // ---- 会话统计 ----
+    pub session_cost_estimate: &'static str,
+    pub session_duration: &'static str,
+    pub session_api_duration: &'static str,
+    pub context_used: &'static str,
+    pub context_tokens_input: &'static str,
+    pub context_tokens: &'static str,
+    pub context_window: &'static str,
+    pub session_cost: &'static str,
+    pub current_model: &'static str,
+    // ---- 本地统计（opencode / zcode） ----
+    pub sessions: &'static str,
+    pub subagent_sessions: &'static str,
+    pub messages: &'static str,
+    pub stats_days: &'static str,
+    pub total_cost: &'static str,
+    pub avg_cost_per_day: &'static str,
+    pub avg_tokens_per_session: &'static str,
+    pub median_tokens_per_session: &'static str,
+    pub tokens_input: &'static str,
+    pub tokens_output: &'static str,
+    pub tokens_reasoning: &'static str,
+    pub tokens_cache_read: &'static str,
+    pub tokens_cache_write: &'static str,
+    pub tokens_total: &'static str,
+    pub tokens_main: &'static str,
+    pub tokens_subagents: &'static str,
+    pub tool_uses: &'static str,
+    pub subagents: &'static str,
+    pub stats_window: &'static str,
+    // ---- 文字值（`text_value`） ----
+    /// claude 沿用的过期额度窗口。
+    pub stale_window: &'static str,
+    /// claude 上下文用量未知。
+    pub claude_context_pending: &'static str,
+    /// pi 上下文用量未知。
+    pub pi_context_pending: &'static str,
+}
+
 /// Help/about strings for the clap CLI surface. Option and subcommand
 /// names, value placeholders and parsed values stay untranslated; only
 /// the descriptive text differs per language.
@@ -2395,6 +2614,8 @@ pub struct Texts {
     pub settings: SettingsTexts,
     pub monitor: MonitorTexts,
     pub usage_notice: UsageNoticeTexts,
+    pub usage_probe: UsageProbeTexts,
+    pub usage_metric: UsageMetricTexts,
     pub sidebar: SidebarTexts,
     pub status: StatusTexts,
     pub mode_bar: ModeBarTexts,
@@ -2775,6 +2996,209 @@ mod tests {
         )
     }
 
+    /// `UsageProbeTexts` 的全部条目。
+    fn usage_probe_texts(t: &UsageProbeTexts) -> Vec<&'static str> {
+        all_entries!(
+            t,
+            UsageProbeTexts {
+                probe_isolation_failed,
+                probe_dir_failed,
+                stable_dir_failed,
+                profile_unsupported,
+                cli_missing,
+                cli_start_failed,
+                output_unavailable,
+                cli_timed_out,
+                cli_output_unreadable,
+                cli_output_too_large,
+                result_unavailable,
+                cli_exit_timed_out,
+                cli_help_empty,
+                cli_signed_out,
+                cli_signaled_fmt,
+                cli_no_usage_output_fmt,
+                cli_usage_error_fmt,
+                detail_fmt,
+                cli_failed_fmt,
+                cli_failed_summary_fmt,
+                no_subcommand,
+                subcommand_missing,
+                claude_auth_status_unsupported,
+                codex_unsupported_fmt,
+                codex_signed_out_fmt,
+                codex_failed_fmt,
+                rpc_input_closed,
+                rpc_input_failed,
+                rpc_output_unavailable,
+                codex_timed_out,
+                codex_exited,
+                codex_exited_fmt,
+                token_refresh_failed_fmt,
+                codex_sign_in_first,
+                helper_missing,
+                helper_config_failed,
+                helper_send_failed,
+                helper_output_unavailable,
+                isolated_timed_out,
+                isolated_unreadable,
+                isolated_too_large,
+                isolated_invalid,
+                interactive_profile_unsupported,
+                pty_create_failed,
+                pty_spawn_failed,
+                pty_input_unavailable,
+                pty_output_unavailable,
+                pty_screen_unreadable,
+                pty_protocol_failed,
+                pty_cursor_unavailable,
+                pty_cli_exited,
+                kimi_port_failed,
+                kimi_port_unreadable,
+                kimi_address_invalid,
+                kimi_banner_timeout,
+                kimi_banner_too_large,
+                kimi_web_unsupported,
+                kimi_signed_out,
+                kimi_exited,
+                kimi_exited_fmt,
+                kimi_not_ready,
+                kimi_http_signed_out_fmt,
+                kimi_http_forbidden_fmt,
+                kimi_http_missing_fmt,
+                kimi_http_error_fmt,
+                kimi_connect_failed,
+                kimi_request_failed,
+                kimi_response_unreadable,
+                kimi_response_too_large,
+                kimi_format_unsupported,
+                kimi_query_failed,
+                api_credential_env_required,
+                api_credential_missing,
+                api_client_failed,
+                api_kimi_base_required,
+                api_provider_unsupported,
+                api_query_unsupported,
+                api_no_verified_fields,
+                api_deadline,
+                api_connect_failed,
+                api_http_status_fmt,
+                api_retry_after_fmt,
+                api_too_large,
+                api_unreadable,
+                api_unrecognized,
+                api_base_invalid,
+                api_base_has_credentials,
+                api_base_unregistered,
+                zcode_no_home,
+                zcode_no_database,
+                zcode_non_utf8_path,
+                zcode_profile_unsupported,
+                zcode_sqlite_missing,
+                zcode_query_failed,
+                zcode_schema_mismatch,
+                zcode_database_busy,
+                zcode_database_unreadable,
+                zcode_no_result,
+                zcode_unparsable,
+                source_official_api,
+                source_kimi_local_api,
+                source_cli_fmt,
+                source_claude_callback,
+                source_local_stats_fmt,
+                source_extension_push,
+                source_cli_callback,
+                source_extension_push_stats,
+                source_zcode_local,
+                callback_session_stats,
+                agent_unsupported,
+                subscription_limit,
+                unknown_account,
+                binding_limit,
+                request_unsupported,
+                busy,
+                statusline_unsupported_provider,
+                statusline_unknown_provider,
+                statusline_retired,
+                settings_invalid_json,
+                settings_empty,
+                settings_not_object,
+                statusline_not_object,
+                statusline_create_failed,
+                statusline_invalid,
+                statusline_not_command,
+                statusline_unrecognized,
+            }
+        )
+    }
+
+    /// `UsageMetricTexts` 的全部条目。
+    fn usage_metric_texts(t: &UsageMetricTexts) -> Vec<&'static str> {
+        all_entries!(
+            t,
+            UsageMetricTexts {
+                quota_primary,
+                quota_secondary,
+                credits,
+                quota_5h,
+                quota_weekly,
+                quota_spend,
+                quota_plan,
+                quota_7d,
+                quota_monthly,
+                quota_monthly_code,
+                quota_window_fmt,
+                quota_unit,
+                balance_available,
+                balance_voucher,
+                balance_cash,
+                balance_unit,
+                extra_balance,
+                extra_total,
+                extra_month_used,
+                extra_month_cap,
+                key_usage,
+                key_usage_daily,
+                key_usage_weekly,
+                key_usage_monthly,
+                key_limit_remaining,
+                account_total_credits,
+                account_total_usage,
+                cost_report,
+                session_cost_estimate,
+                session_duration,
+                session_api_duration,
+                context_used,
+                context_tokens_input,
+                context_tokens,
+                context_window,
+                session_cost,
+                current_model,
+                sessions,
+                subagent_sessions,
+                messages,
+                stats_days,
+                total_cost,
+                avg_cost_per_day,
+                avg_tokens_per_session,
+                median_tokens_per_session,
+                tokens_input,
+                tokens_output,
+                tokens_reasoning,
+                tokens_cache_read,
+                tokens_cache_write,
+                tokens_total,
+                tokens_main,
+                tokens_subagents,
+                tool_uses,
+                subagents,
+                stats_window,
+                stale_window,
+                claude_context_pending,
+                pi_context_pending,
+            }
+        )
+    }
+
     /// 两张表逐条对照：英文表每条都不含 CJK 字符，中文表每条都有译文（不是照抄英文）。
     fn assert_translated(en: &[&str], zh: &[&str]) {
         assert_eq!(en.len(), zh.len());
@@ -2795,6 +3219,14 @@ mod tests {
         assert_translated(
             &platform_messages(&en::TEXTS.platform),
             &platform_messages(&zh_cn::TEXTS.platform),
+        );
+        assert_translated(
+            &usage_probe_texts(&en::TEXTS.usage_probe),
+            &usage_probe_texts(&zh_cn::TEXTS.usage_probe),
+        );
+        assert_translated(
+            &usage_metric_texts(&en::TEXTS.usage_metric),
+            &usage_metric_texts(&zh_cn::TEXTS.usage_metric),
         );
     }
 

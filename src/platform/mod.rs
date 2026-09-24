@@ -46,9 +46,11 @@ pub(crate) fn looks_like_usage_wrapper(text: &str) -> bool {
             && (text.contains(crate::HERDR_ENV_VAR) || text.contains("HERDR_BIN_PATH")))
 }
 
-/// `unrecognized_usage_statusline_error` 的固定文案，调用方与测试按它识别这类错误。
-pub(crate) const UNRECOGNIZED_USAGE_STATUSLINE: &str =
-    "statusLine 已含无法识别的 herdr 用量回调（其它平台或版本的形态），请手动清理后重试";
+/// `unrecognized_usage_statusline_error` 的说明（按调用进程的界面语言取，文档终审 D7）；调用方
+/// 与测试按它识别这类错误。
+pub(crate) fn unrecognized_usage_statusline_message() -> &'static str {
+    crate::i18n::texts().usage_probe.statusline_unrecognized
+}
 
 /// 命令含 `api usage-report` 却不是本平台可识别的 herdr 包装（其它平台或更早版本的形态、
 /// 手工改过的包装、别的厂商的回调）时的错误：调用方据此提示手动清理，不再盲目再包一层或
@@ -56,7 +58,7 @@ pub(crate) const UNRECOGNIZED_USAGE_STATUSLINE: &str =
 pub(crate) fn unrecognized_usage_statusline_error() -> std::io::Error {
     std::io::Error::new(
         std::io::ErrorKind::InvalidData,
-        UNRECOGNIZED_USAGE_STATUSLINE,
+        unrecognized_usage_statusline_message(),
     )
 }
 

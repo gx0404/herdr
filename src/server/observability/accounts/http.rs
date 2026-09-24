@@ -1,6 +1,6 @@
 //! 仅调用已登记的官方只读接口；认证只在所属主机内组装。
 
-use super::{parse, transport::QueryError};
+use super::{metric_texts, parse, probe_texts, transport::QueryError};
 use crate::api::schema::{ObservationStatus, UsageMetric};
 use crate::config::UsageAccountConfig;
 use reqwest::blocking::Client;
@@ -19,7 +19,7 @@ pub(super) fn query(
     let env = account.credential_env.as_deref().ok_or_else(|| {
         (
             ObservationStatus::NotAuthenticated,
-            "请配置凭据环境变量引用；不要填写密钥本身".into(),
+            probe_texts().api_credential_env_required.into(),
         )
     })?;
     let credential = std::env::var(env)
@@ -28,7 +28,7 @@ pub(super) fn query(
         .ok_or_else(|| {
             (
                 ObservationStatus::NotAuthenticated,
-                "server 未取得所配置的凭据环境变量".into(),
+                probe_texts().api_credential_missing.into(),
             )
         })?;
     let client = Client::builder()
@@ -36,7 +36,12 @@ pub(super) fn query(
         .connect_timeout(Duration::from_secs(5))
         .redirect(reqwest::redirect::Policy::none())
         .build()
-        .map_err(|_| (ObservationStatus::Error, "无法初始化官方接口连接".into()))?;
+        .map_err(|_| {
+            (
+                ObservationStatus::Error,
+                probe_texts().api_client_failed.into(),
+            )
+        })?;
     let today = time::OffsetDateTime::now_utc().date().to_string();
     let start_time = time::OffsetDateTime::now_utc()
         .replace_time(time::Time::MIDNIGHT)
@@ -49,13 +54,13 @@ pub(super) fn query(
         "kimi" => account.base_url.as_deref().ok_or_else(|| {
             (
                 ObservationStatus::NeedsBinding,
-                "请指定 Kimi 官方本地 server 地址，或选择 CLI 查询".into(),
+                probe_texts().api_kimi_base_required.into(),
             )
         })?,
         _ => {
             return Err((
                 ObservationStatus::Unsupported,
-                "未登记此计费厂商的官方查询接口".into(),
+                probe_texts().api_provider_unsupported.into(),
             ))
         }
     };
@@ -71,7 +76,12 @@ pub(super) fn query(
         "moonshot" | "kimi-api" => "/v1/users/me/balance".into(),
         "kimi" => "/api/v1/oauth/usage".into(),
         "openrouter" => if account.billing_scope.as_deref() == Some("account") { "/api/v1/credits" } else { "/api/v1/key" }.into(),
-        _ => return Err((ObservationStatus::Unsupported, "未登记此查询".into())),
+        _ => {
+            return Err((
+                ObservationStatus::Unsupported,
+                probe_texts().api_query_unsupported.into(),
+            ))
+        }
     };
     let deadline = std::time::Instant::now() + timeout;
     let read = |path: &str| {
@@ -118,7 +128,7 @@ pub(super) fn query(
     if metrics.is_empty() {
         return Err((
             ObservationStatus::Unsupported,
-            "官方响应未包含已验证的用量字段；未推算额度".into(),
+            probe_texts().api_no_verified_fields.into(),
         ));
     }
     Ok(metrics)
@@ -150,12 +160,14 @@ fn read_json(
     }
     let remaining = deadline.saturating_duration_since(std::time::Instant::now());
     if remaining.is_zero() {
-        return Err((ObservationStatus::Error, "官方查询达到总时限".into()));
+        return Err((ObservationStatus::Error, probe_texts().api_deadline.into()));
     }
-    let response = request
-        .timeout(remaining)
-        .send()
-        .map_err(|_| (ObservationStatus::Error, "官方接口连接失败或超时".into()))?;
+    let response = request.timeout(remaining).send().map_err(|_| {
+        (
+            ObservationStatus::Error,
+            probe_texts().api_connect_failed.into(),
+        )
+    })?;
     let status = response.status();
     if !status.is_success() {
         let kind = status_kind(status.as_u16());
@@ -164,13 +176,18 @@ fn read_json(
             .get("retry-after")
             .and_then(|value| value.to_str().ok())
             .and_then(|value| value.parse::<u64>().ok())
-            .map(|seconds| format!("；retry_after={}", seconds.clamp(1, 3600)))
+            .map(|seconds| {
+                crate::i18n::fill(
+                    probe_texts().api_retry_after_fmt,
+                    &[("seconds", &seconds.clamp(1, 3600).to_string())],
+                )
+            })
             .unwrap_or_default();
         return Err((
             kind,
-            format!(
-                "官方查询返回 HTTP {}；请检查账号、地区和报表权限{retry}",
-                status.as_u16()
+            crate::i18n::fill(
+                probe_texts().api_http_status_fmt,
+                &[("status", &status.as_u16().to_string()), ("retry", &retry)],
             ),
         ));
     }
@@ -178,19 +195,24 @@ fn read_json(
         .content_length()
         .is_some_and(|length| length > 2 * 1024 * 1024)
     {
-        return Err((ObservationStatus::Error, "官方查询结果超过大小限制".into()));
+        return Err((ObservationStatus::Error, probe_texts().api_too_large.into()));
     }
     let mut data = Vec::new();
     std::io::Read::take(response, 2 * 1024 * 1024 + 1)
         .read_to_end(&mut data)
-        .map_err(|_| (ObservationStatus::Error, "官方查询返回内容无法读取".into()))?;
+        .map_err(|_| {
+            (
+                ObservationStatus::Error,
+                probe_texts().api_unreadable.into(),
+            )
+        })?;
     if data.len() > 2 * 1024 * 1024 {
-        return Err((ObservationStatus::Error, "官方查询结果超过大小限制".into()));
+        return Err((ObservationStatus::Error, probe_texts().api_too_large.into()));
     }
     let value: Value = serde_json::from_slice(&data).map_err(|_| {
         (
             ObservationStatus::Error,
-            "官方接口返回了无法识别的数据".into(),
+            probe_texts().api_unrecognized.into(),
         )
     })?;
     Ok(value)
@@ -209,8 +231,12 @@ pub(super) fn status_kind(status: u16) -> ObservationStatus {
 }
 
 fn validate_base(provider: &str, base: &str) -> Result<(), QueryError> {
-    let url = reqwest::Url::parse(base)
-        .map_err(|_| (ObservationStatus::NeedsBinding, "查询地址无效".into()))?;
+    let url = reqwest::Url::parse(base).map_err(|_| {
+        (
+            ObservationStatus::NeedsBinding,
+            probe_texts().api_base_invalid.into(),
+        )
+    })?;
     if !url.username().is_empty()
         || url.password().is_some()
         || url.query().is_some()
@@ -218,7 +244,7 @@ fn validate_base(provider: &str, base: &str) -> Result<(), QueryError> {
     {
         return Err((
             ObservationStatus::NeedsBinding,
-            "查询地址不能携带凭据或查询参数".into(),
+            probe_texts().api_base_has_credentials.into(),
         ));
     }
     let host = url.host_str().unwrap_or_default();
@@ -237,7 +263,7 @@ fn validate_base(provider: &str, base: &str) -> Result<(), QueryError> {
     } else {
         Err((
             ObservationStatus::Unsupported,
-            "未登记此官方计费服务地址，未发送凭据".into(),
+            probe_texts().api_base_unregistered.into(),
         ))
     }
 }
@@ -278,7 +304,7 @@ fn cost_report(value: &Value, provider: &str) -> Vec<UsageMetric> {
             }) {
                 metrics.push(UsageMetric {
                     id: format!("cost/{index}/{result_index}"),
-                    label: "当日官方费用报表".into(),
+                    label: metric_texts().cost_report.into(),
                     unit,
                     scope: "organization".into(),
                     amount_decimal: Some(parse::decimal(amount)),
@@ -355,5 +381,32 @@ mod tests {
         assert_eq!(values[0].amount_decimal.as_deref(), Some("140.05"));
         assert_eq!(values[0].unit, "USD cents");
         assert!(cost_report(&serde_json::json!({}), "openai").is_empty());
+    }
+
+    /// 文档终审 D7：官方接口查询被拒的说明按 server 的界面语言给出——英文界面不含 CJK，
+    /// 中文界面是中文。都在发请求之前拒绝，不碰网络。
+    #[test]
+    fn api_rejections_follow_the_interface_language() {
+        use crate::i18n::{has_cjk, lang_guard, Lang};
+        let account = UsageAccountConfig {
+            id: "codex:api".into(),
+            agent: "codex".into(),
+            auth_mode: "api".into(),
+            ..Default::default()
+        };
+        for (lang, chinese) in [(Lang::En, false), (Lang::ZhCn, true)] {
+            let _guard = lang_guard(lang);
+            let mut messages = vec![query(&account, Duration::from_secs(1)).unwrap_err().1];
+            for base in [
+                "not a url",
+                "https://user:secret@api.openai.com",
+                "https://evil.example",
+            ] {
+                messages.push(validate_base("openai", base).unwrap_err().1);
+            }
+            for message in &messages {
+                assert_eq!(has_cjk(message), chinese, "{lang:?}: {message}");
+            }
+        }
     }
 }

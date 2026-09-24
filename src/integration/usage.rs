@@ -2,6 +2,12 @@
 use jsonc_parser::cst::{CstInputValue, CstRootNode};
 use std::{io, path::PathBuf};
 
+/// 官方回调接入的错误说明（经 `account.usage.integration` 的错误应答到达监控页）：按调用
+/// 进程（server）的界面语言取（文档终审 D7）。
+fn texts() -> &'static crate::i18n::UsageProbeTexts {
+    &crate::i18n::texts().usage_probe
+}
+
 /// 支持 herdr 用量 statusline 回调的厂商：名单唯一真源。`configure` / `edit` 按它拒绝其它
 /// 厂商，server 端 registry 也据此宣告 `UsageProviderInfo.supports_callback`；新增厂商只改
 /// 这里（以及 `settings_path` 的目录推导与 `src/platform` 的管道形态）。
@@ -30,7 +36,7 @@ fn retired_statusline_default_dir(agent: &str) -> io::Result<PathBuf> {
         "antigravity" => Ok(super::env::home_dir()?
             .join(".gemini")
             .join("antigravity-cli")),
-        _ => Err(io::Error::other("此厂商未提供受支持的 statusline 配额回调")),
+        _ => Err(io::Error::other(texts().statusline_unsupported_provider)),
     }
 }
 
@@ -59,7 +65,7 @@ pub(crate) fn supports_extension_push(agent: &str) -> bool {
 pub(crate) fn settings_path(account: &crate::config::UsageAccountConfig) -> io::Result<PathBuf> {
     let default_dir = match account.agent.as_str() {
         "claude" => super::env::claude_dir(),
-        _ => return Err(io::Error::other("此厂商未提供受支持的 statusline 配额回调")),
+        _ => return Err(io::Error::other(texts().statusline_unsupported_provider)),
     };
     let dir = match account.profile_dir.as_ref() {
         Some(dir) => PathBuf::from(dir),
@@ -124,30 +130,28 @@ pub(crate) fn statusline_enabled(content: &str, agent: &str) -> Option<bool> {
 fn edit(content: &str, agent: &str, enabled: bool) -> io::Result<String> {
     if !supports_statusline(agent) {
         if !retired_statusline(agent) {
-            return Err(io::Error::other("不支持的 statusline 厂商"));
+            return Err(io::Error::other(texts().statusline_unknown_provider));
         }
         if enabled {
-            return Err(io::Error::other(
-                "该厂商的 statusline 回调已退役：只能解除，不能再启用",
-            ));
+            return Err(io::Error::other(texts().statusline_retired));
         }
     }
     let root = CstRootNode::parse(content, &jsonc_parser::ParseOptions::default())
-        .map_err(|_| io::Error::other("官方设置 JSON 无效"))?;
+        .map_err(|_| io::Error::other(texts().settings_invalid_json))?;
     let value = root
         .value()
-        .ok_or_else(|| io::Error::other("官方设置为空"))?;
+        .ok_or_else(|| io::Error::other(texts().settings_empty))?;
     super::claude_settings::reject_duplicate_keys(
         &value,
         std::path::Path::new("statusline-settings.json"),
     )?;
     let object = value
         .as_object()
-        .ok_or_else(|| io::Error::other("官方设置必须是对象"))?;
+        .ok_or_else(|| io::Error::other(texts().settings_not_object))?;
     let statusline = if let Some(property) = object.get("statusLine") {
         property
             .object_value()
-            .ok_or_else(|| io::Error::other("现有 statusLine 不是命令对象，未修改"))?
+            .ok_or_else(|| io::Error::other(texts().statusline_not_object))?
     } else if enabled {
         object
             .append(
@@ -158,15 +162,15 @@ fn edit(content: &str, agent: &str, enabled: bool) -> io::Result<String> {
                 )]),
             )
             .object_value()
-            .ok_or_else(|| io::Error::other("无法建立 statusline"))?
+            .ok_or_else(|| io::Error::other(texts().statusline_create_failed))?
     } else {
         return Ok(content.into());
     };
     let current = statusline
         .to_serde_value()
-        .ok_or_else(|| io::Error::other("statusline 设置无效"))?;
+        .ok_or_else(|| io::Error::other(texts().statusline_invalid))?;
     if current.get("type").and_then(serde_json::Value::as_str) != Some("command") {
-        return Err(io::Error::other("现有 statusLine 不是命令类型，未修改"));
+        return Err(io::Error::other(texts().statusline_not_command));
     }
     let original = current
         .get("command")
@@ -340,7 +344,7 @@ mod tests {
             assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
             assert_eq!(
                 error.to_string(),
-                crate::platform::UNRECOGNIZED_USAGE_STATUSLINE
+                crate::platform::unrecognized_usage_statusline_message()
             );
         }
         // 别的厂商的回调同理：按另一个 agent 名检测时，claude 的回调是无法识别的包装。
@@ -547,5 +551,27 @@ mod tests {
             command_of(&edit(&enabled, "claude", false).unwrap()),
             renderer
         );
+    }
+
+    /// 文档终审 D7：官方回调接入被拒的说明（经 `account.usage.integration` 的错误应答到达
+    /// 监控页）按调用进程的界面语言给出——英文界面不含 CJK，中文界面是中文。
+    #[test]
+    fn integration_rejections_follow_the_interface_language() {
+        use crate::i18n::{has_cjk, lang_guard, Lang};
+        for (lang, chinese) in [(Lang::En, false), (Lang::ZhCn, true)] {
+            let _guard = lang_guard(lang);
+            let cases = [
+                ("{", "claude", true),
+                ("[]", "claude", true),
+                ("{\"statusLine\": 1}", "claude", true),
+                ("{\"statusLine\": {\"type\": \"static\"}}", "claude", true),
+                ("{}", "codex", true),
+                ("{}", "antigravity", true),
+            ];
+            for (content, agent, enabled) in cases {
+                let message = edit(content, agent, enabled).unwrap_err().to_string();
+                assert_eq!(has_cjk(&message), chinese, "{lang:?} {content}: {message}");
+            }
+        }
     }
 }

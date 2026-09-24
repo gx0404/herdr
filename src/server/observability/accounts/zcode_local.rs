@@ -49,15 +49,14 @@ use std::time::Duration;
 
 use serde_json::Value;
 
+use super::metric_texts;
 use super::registry::Provider;
 use super::transport::{self, QueryError};
 use crate::api::schema::{ObservationStatus, UsageMetric};
 use crate::config::UsageAccountConfig;
 
-/// 快照的 `source`。
-pub(super) const SOURCE: &str = "ZCode local database";
-// Ready 快照的说明（本地统计，非账号额度，远端额度不查询）在
-// `crate::i18n::UsageNoticeTexts::zcode_local`，按 server 语言取。
+// 快照的来源（`UsageProbeTexts::source_zcode_local`）与 Ready 快照的说明（本地统计，非账号
+// 额度，远端额度不查询：`UsageNoticeTexts::zcode_local`）都按 server 语言取。
 
 const WINDOW_HOURS: u64 = 24;
 const WINDOW_MS: u64 = WINDOW_HOURS * 60 * 60 * 1000;
@@ -77,19 +76,11 @@ const SUBAGENT_ROW: &str = "(query_source = 'subagent' or task_type = 'subagent_
 const ROW_TOKENS: &str =
     "coalesce(computed_total_tokens, coalesce(input_tokens, 0) + coalesce(output_tokens, 0))";
 
-const NO_HOME: &str = "取不到 home 目录，无法定位 ZCode 本地数据库";
-const NO_DATABASE: &str = "未找到 ZCode 本地数据库（~/.zcode/cli/db/db.sqlite）";
-const NON_UTF8_PATH: &str = "ZCode 本地数据库路径不是 UTF-8，无法交给 sqlite3";
-const PROFILE_UNSUPPORTED: &str = "ZCode 本地来源只读默认数据目录 ~/.zcode，不支持 profile_dir";
-const SQLITE_MISSING: &str =
-    "读取 ZCode 本地数据库需要系统 sqlite3 命令，但 server 的 PATH 中没有它；装好后自动恢复";
-const QUERY_FAILED: &str = "sqlite3 读取 ZCode 本地数据库超时或失败；稍后自动重试";
-const SCHEMA_MISMATCH: &str =
-    "ZCode 本地数据库缺少 model_usage 表或所需的列（结构与已核实的版本不同）；稍后自动重试";
-const DATABASE_BUSY: &str = "ZCode 本地数据库正被占用；稍后自动重试";
-const DATABASE_UNREADABLE: &str = "ZCode 本地数据库无法打开或已损坏；稍后自动重试";
-const NO_RESULT: &str = "ZCode 本地数据库查询没有返回统计行；稍后自动重试";
-const UNPARSABLE: &str = "ZCode 本地数据库的统计行无法解析；稍后自动重试";
+/// 快照 `message` 里的固定说明（文档终审 D7）：按 server 的界面语言取；sqlite3 的报错原文
+/// 只进 debug 日志，不进文案。
+fn texts() -> &'static crate::i18n::UsageProbeTexts {
+    super::probe_texts()
+}
 
 /// 读取用的 home 目录：先 `HOME` 再 `USERPROFILE`，不依赖平台 cfg。与
 /// `server::agent_activity::home_dir` 同一口径；那边是私有函数，这里复制最小实现，不为一行
@@ -170,26 +161,32 @@ pub(super) fn metrics(totals: &Totals) -> Vec<UsageMetric> {
         .main_tokens
         .zip(totals.subagent_tokens)
         .map(|(main, subagents)| main + subagents);
+    let labels = metric_texts();
     let mut metrics = Vec::new();
     for (value, id, label, unit) in [
         (
             totals.main_tokens,
             "session/tokens/main",
-            "主任务 token",
+            labels.tokens_main,
             "tokens",
         ),
         (
             totals.subagent_tokens,
             "session/tokens/subagents",
-            "子 agent token",
+            labels.tokens_subagents,
             "tokens",
         ),
-        (total, "session/tokens/total", "合计 token", "tokens"),
-        (totals.tool_uses, "session/tool_uses", "工具调用", "count"),
+        (total, "session/tokens/total", labels.tokens_total, "tokens"),
+        (
+            totals.tool_uses,
+            "session/tool_uses",
+            labels.tool_uses,
+            "count",
+        ),
         (
             totals.subagents,
             "session/subagents",
-            "子 agent 数",
+            labels.subagents,
             "count",
         ),
     ] {
@@ -205,7 +202,7 @@ pub(super) fn metrics(totals: &Totals) -> Vec<UsageMetric> {
             used: Some(WINDOW_HOURS as f64),
             text_value: Some(format!("{WINDOW_HOURS}h")),
             window_seconds: Some(WINDOW_HOURS * 60 * 60),
-            ..local("session/window_hours", "统计窗口", "hours")
+            ..local("session/window_hours", labels.stats_window, "hours")
         });
     }
     metrics
@@ -224,16 +221,30 @@ pub(super) fn probe(
     now_ms: u64,
 ) -> Result<Vec<UsageMetric>, QueryError> {
     if account.profile_dir.is_some() {
-        return Err((ObservationStatus::Unsupported, PROFILE_UNSUPPORTED.into()));
+        return Err((
+            ObservationStatus::Unsupported,
+            texts().zcode_profile_unsupported.into(),
+        ));
     }
-    let home = home.ok_or_else(|| (ObservationStatus::Unavailable, NO_HOME.to_owned()))?;
+    let home = home.ok_or_else(|| {
+        (
+            ObservationStatus::Unavailable,
+            texts().zcode_no_home.to_owned(),
+        )
+    })?;
     let database = database_path(home);
     if !database.is_file() {
-        return Err((ObservationStatus::Unavailable, NO_DATABASE.into()));
+        return Err((
+            ObservationStatus::Unavailable,
+            texts().zcode_no_database.into(),
+        ));
     }
-    let database = database
-        .to_str()
-        .ok_or_else(|| (ObservationStatus::Unavailable, NON_UTF8_PATH.to_owned()))?;
+    let database = database.to_str().ok_or_else(|| {
+        (
+            ObservationStatus::Unavailable,
+            texts().zcode_non_utf8_path.to_owned(),
+        )
+    })?;
     let busy = format!(".timeout {SQLITE_BUSY_TIMEOUT_MS}");
     let sql = usage_sql(now_ms);
     let args = [
@@ -258,16 +269,22 @@ pub(super) fn probe(
                 "zcode 本地库查询未完成"
             );
             if status == ObservationStatus::Unavailable {
-                (ObservationStatus::Unavailable, SQLITE_MISSING.to_owned())
+                (
+                    ObservationStatus::Unavailable,
+                    texts().zcode_sqlite_missing.to_owned(),
+                )
             } else {
-                (ObservationStatus::Error, QUERY_FAILED.to_owned())
+                (
+                    ObservationStatus::Error,
+                    texts().zcode_query_failed.to_owned(),
+                )
             }
         })?;
     match parse_output(&String::from_utf8_lossy(&captured.stdout)) {
         Some(totals) => {
             let metrics = metrics(&totals);
             if metrics.is_empty() {
-                Err((ObservationStatus::Error, UNPARSABLE.into()))
+                Err((ObservationStatus::Error, texts().zcode_unparsable.into()))
             } else {
                 Ok(metrics)
             }
@@ -282,16 +299,16 @@ fn classify_failure(stderr: &[u8]) -> QueryError {
     let tail = &stderr[stderr.len().saturating_sub(STDERR_LOG_BYTES)..];
     let text = String::from_utf8_lossy(tail).to_ascii_lowercase();
     let message = if text.contains("no such table") || text.contains("no such column") {
-        SCHEMA_MISMATCH
+        texts().zcode_schema_mismatch
     } else if text.contains("database is locked") || text.contains("database is busy") {
-        DATABASE_BUSY
+        texts().zcode_database_busy
     } else if text.contains("not a database")
         || text.contains("malformed")
         || text.contains("unable to open")
     {
-        DATABASE_UNREADABLE
+        texts().zcode_database_unreadable
     } else {
-        NO_RESULT
+        texts().zcode_no_result
     };
     tracing::debug!(
         event = "account.probe.zcode_local",
@@ -600,11 +617,14 @@ mod tests {
         let timeout = Duration::from_secs(5);
         assert_eq!(
             probe(&missing, &account(), Some(home.path()), timeout, NOW),
-            Err((ObservationStatus::Unavailable, NO_DATABASE.into()))
+            Err((
+                ObservationStatus::Unavailable,
+                texts().zcode_no_database.into()
+            ))
         );
         assert_eq!(
             probe(&missing, &account(), None, timeout, NOW),
-            Err((ObservationStatus::Unavailable, NO_HOME.into()))
+            Err((ObservationStatus::Unavailable, texts().zcode_no_home.into()))
         );
         let with_profile = UsageAccountConfig {
             profile_dir: Some(home.path().to_path_buf()),
@@ -612,7 +632,10 @@ mod tests {
         };
         assert_eq!(
             probe(&missing, &with_profile, Some(home.path()), timeout, NOW),
-            Err((ObservationStatus::Unsupported, PROFILE_UNSUPPORTED.into()))
+            Err((
+                ObservationStatus::Unsupported,
+                texts().zcode_profile_unsupported.into()
+            ))
         );
     }
 
@@ -630,7 +653,10 @@ mod tests {
                 Duration::from_secs(5),
                 NOW,
             ),
-            Err((ObservationStatus::Unavailable, SQLITE_MISSING.into()))
+            Err((
+                ObservationStatus::Unavailable,
+                texts().zcode_sqlite_missing.into()
+            ))
         );
     }
 
@@ -659,7 +685,10 @@ mod tests {
             Duration::from_millis(200),
             NOW,
         );
-        assert_eq!(result, Err((ObservationStatus::Error, QUERY_FAILED.into())));
+        assert_eq!(
+            result,
+            Err((ObservationStatus::Error, texts().zcode_query_failed.into()))
+        );
         assert!(
             started.elapsed() < Duration::from_secs(10),
             "超时后必须立刻收尾：{:?}",
@@ -754,7 +783,10 @@ mod tests {
         no_table.build_db("CREATE TABLE session (id text primary key);");
         assert_eq!(
             run(&no_table),
-            Err((ObservationStatus::Error, SCHEMA_MISMATCH.into()))
+            Err((
+                ObservationStatus::Error,
+                texts().zcode_schema_mismatch.into()
+            ))
         );
 
         let no_column = TempHome::new("no-column");
@@ -765,7 +797,10 @@ mod tests {
         );
         assert_eq!(
             run(&no_column),
-            Err((ObservationStatus::Error, SCHEMA_MISMATCH.into()))
+            Err((
+                ObservationStatus::Error,
+                texts().zcode_schema_mismatch.into()
+            ))
         );
 
         let corrupt = TempHome::new("corrupt");
@@ -774,28 +809,65 @@ mod tests {
         std::fs::write(&db, [0x5a_u8; 8192]).expect("写坏文件");
         assert_eq!(
             run(&corrupt),
-            Err((ObservationStatus::Error, DATABASE_UNREADABLE.into()))
+            Err((
+                ObservationStatus::Error,
+                texts().zcode_database_unreadable.into()
+            ))
         );
     }
 
     #[test]
     fn sqlite_errors_map_to_fixed_messages_without_echoing_stderr() {
         for (stderr, expected) in [
-            ("Error: no such table: model_usage", SCHEMA_MISMATCH),
-            ("Error: no such column: computed_total_tokens", SCHEMA_MISMATCH),
-            ("Error: database is locked", DATABASE_BUSY),
-            ("Error: file is not a database", DATABASE_UNREADABLE),
+            ("Error: no such table: model_usage", texts().zcode_schema_mismatch),
+            ("Error: no such column: computed_total_tokens", texts().zcode_schema_mismatch),
+            ("Error: database is locked", texts().zcode_database_busy),
+            ("Error: file is not a database", texts().zcode_database_unreadable),
             (
                 "Error: unable to open database \"/home/someone/.zcode/cli/db/db.sqlite\": unable to open database file",
-                DATABASE_UNREADABLE,
+                texts().zcode_database_unreadable,
             ),
-            ("", NO_RESULT),
+            ("", texts().zcode_no_result),
         ] {
             assert_eq!(
                 classify_failure(stderr.as_bytes()),
                 (ObservationStatus::Error, expected.to_owned()),
                 "{stderr}"
             );
+        }
+    }
+
+    /// 文档终审 D7：本地库说明与指标名按 server 的界面语言给出——英文界面不含 CJK，中文
+    /// 界面是中文；sqlite3 的报错原文不进文案。
+    #[test]
+    fn local_database_notes_follow_the_interface_language() {
+        use crate::i18n::{has_cjk, lang_guard, Lang};
+        let totals = Totals {
+            main_tokens: Some(10.0),
+            subagent_tokens: Some(5.0),
+            tool_uses: Some(3.0),
+            subagents: Some(1.0),
+        };
+        for (lang, chinese) in [(Lang::En, false), (Lang::ZhCn, true)] {
+            let _guard = lang_guard(lang);
+            for stderr in [
+                "Error: no such table: model_usage",
+                "Error: database is locked",
+                "Error: file is not a database",
+                "",
+            ] {
+                let (_, message) = classify_failure(stderr.as_bytes());
+                assert!(!message.contains("Error:"), "{message}");
+                assert_eq!(has_cjk(&message), chinese, "{lang:?}: {message}");
+            }
+            for metric in metrics(&totals) {
+                assert_eq!(
+                    has_cjk(&metric.label),
+                    chinese,
+                    "{lang:?}: {}",
+                    metric.label
+                );
+            }
         }
     }
 }

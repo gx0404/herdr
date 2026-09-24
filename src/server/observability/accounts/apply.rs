@@ -22,9 +22,7 @@ pub(super) const MAX_PANE_ID_LEN: usize = 256;
 /// 日志字段里未知 agent 别名的最大长度；已知别名记规范化后的厂商名。
 const MAX_AGENT_LOG_LEN: usize = 64;
 
-use super::notices;
-const CALLBACK_SOURCE: &str = "官方 CLI 回调";
-const EXTENSION_PUSH_SOURCE: &str = "herdr 集成扩展推送 · 会话统计，非账号额度";
+use super::{notices, probe_texts};
 
 /// `apply_report` 的只读输入。
 #[derive(Clone, Copy)]
@@ -460,9 +458,9 @@ pub(super) fn apply_report(
         }
     }
     snapshot.source = if provider.is_some_and(registry::supports_extension_push) {
-        EXTENSION_PUSH_SOURCE
+        probe_texts().source_extension_push_stats
     } else {
-        CALLBACK_SOURCE
+        probe_texts().source_cli_callback
     }
     .into();
     snapshot.status = ObservationStatus::Ready;
@@ -526,10 +524,10 @@ pub(super) fn bind_pane(
     rejections: &mut Rejections,
 ) -> Result<(), (&'static str, String)> {
     if !accounts.iter().any(|account| account.id == account_id) {
-        return Err(("unknown_account", "未找到配置的账号".into()));
+        return Err(("unknown_account", probe_texts().unknown_account.into()));
     }
     if bindings.len() >= MAX_BINDINGS || pane_id.len() > MAX_PANE_ID_LEN {
-        return Err(("invalid_binding", "账号绑定超出限制".into()));
+        return Err(("invalid_binding", probe_texts().binding_limit.into()));
     }
     bindings.insert(pane_id.into(), account_id.into());
     rejections.forget_pane(pane_id);
@@ -680,7 +678,7 @@ mod tests {
         assert_eq!(entry.snapshot.metrics.len(), 2);
         assert_eq!(entry.snapshot.metrics[0].used_percent, Some(42.0));
         assert_eq!(entry.snapshot.observed_at_ms, NOW_MS);
-        assert_eq!(entry.snapshot.source, CALLBACK_SOURCE);
+        assert_eq!(entry.snapshot.source, probe_texts().source_cli_callback);
         assert_eq!(entry.snapshot.agent, "claude");
         assert_eq!(entry.snapshot.message, None);
         assert!(fixture.pending_panes().is_empty());
@@ -1116,7 +1114,7 @@ mod tests {
         assert_eq!(five_hour.used_percent, Some(88.0), "保留上次值，不是 0");
         assert_eq!(
             five_hour.text_value.as_deref(),
-            Some(parse::CLAUDE_STALE_WINDOW_TEXT)
+            Some(parse::claude_stale_window_text())
         );
         assert_eq!(metric(entry, "seven_day").used_percent, Some(31.0));
         assert_eq!(metric(entry, "seven_day").text_value, None);
@@ -1272,7 +1270,10 @@ mod tests {
         );
         let entry = &fixture.cache["pi:default"];
         assert_eq!(entry.snapshot.status, ObservationStatus::Ready);
-        assert_eq!(entry.snapshot.source, EXTENSION_PUSH_SOURCE);
+        assert_eq!(
+            entry.snapshot.source,
+            probe_texts().source_extension_push_stats
+        );
         assert!(entry.snapshot.source.contains("非账号额度"));
         assert_eq!(
             entry.snapshot.provider, "anthropic",
@@ -1346,7 +1347,7 @@ mod tests {
         assert_eq!(tokens.used, None, "压缩后未知，不是 0");
         assert_eq!(
             tokens.text_value.as_deref(),
-            Some(parse::PI_CONTEXT_PENDING_TEXT)
+            Some(parse::pi_context_pending_text())
         );
         assert_eq!(metric(entry, "session/tokens/total").used, Some(4240.0));
     }

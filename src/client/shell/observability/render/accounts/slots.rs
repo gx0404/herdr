@@ -23,8 +23,8 @@ impl IdMatch {
     }
 }
 
-/// 一条指标在厂商卡片里的角色。标签由客户端按界面语言给出（服务端 `label` 是
-/// 固定的中文串，只在通用兜底行里原样显示）。
+/// 一条指标在厂商卡片里的角色。标签由客户端按界面语言给出（服务端 `label` 按 server 的
+/// 语言生成，只在通用兜底行里原样显示）。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Slot {
     // ---- 额度窗口（meter：阈值色 + 窗口刻度，可溢出）----

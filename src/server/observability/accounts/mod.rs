@@ -33,6 +33,15 @@ pub(super) const CALLBACK_LATCH_MS: u64 = 15 * 60 * 1000;
 pub(super) fn notices() -> &'static crate::i18n::UsageNoticeTexts {
     &crate::i18n::texts().usage_notice
 }
+/// herdr 自己写的探测说明、快照来源与账号请求的错误说明（文档终审 D7）：同样按 server 的
+/// 界面语言取；拼在后面的厂商原文不翻译。
+pub(super) fn probe_texts() -> &'static crate::i18n::UsageProbeTexts {
+    &crate::i18n::texts().usage_probe
+}
+/// 指标的名称、单位与文字值（文档终审 D7），按 server 的界面语言取。
+pub(super) fn metric_texts() -> &'static crate::i18n::UsageMetricTexts {
+    &crate::i18n::texts().usage_metric
+}
 /// 配置文件戳的复查周期；已安装厂商与终态指纹的复查对齐 `registry::AVAILABILITY_TTL`。
 const RELOAD_INTERVAL: Duration = Duration::from_secs(5);
 /// 隐式默认账号（`<agent>:default`）在官方 CLI 暂时检测不到时的保留时长：PATH 抖动、
@@ -735,7 +744,10 @@ impl Service {
                             if subscribers.len() >= 256 {
                                 reply.response(
                                     &id,
-                                    Err(("subscription_limit", "账号订阅数量超过限制".into())),
+                                    Err((
+                                        "subscription_limit",
+                                        probe_texts().subscription_limit.into(),
+                                    )),
                                 );
                                 continue;
                             }
@@ -785,7 +797,7 @@ impl Service {
                                         ("usage_integration_failed", error.to_string())
                                     })
                             } else {
-                                Err(("unknown_account", "未找到配置的账号".into()))
+                                Err(("unknown_account", probe_texts().unknown_account.into()))
                             }
                         }
                         Method::AccountUsageReport(params) => {
@@ -859,7 +871,10 @@ impl Service {
                                 }
                             }
                         }
-                        _ => Err(("unsupported_method", "不支持的账号请求".into())),
+                        _ => Err((
+                            "unsupported_method",
+                            probe_texts().request_unsupported.into(),
+                        )),
                     };
                     reply.response(&id, result);
                 }
@@ -877,10 +892,7 @@ impl Service {
             })
             .is_err()
         {
-            reply.response(
-                &id,
-                Err(("server_busy", "账号查询服务繁忙，请稍后重试".into())),
-            );
+            reply.response(&id, Err(("server_busy", probe_texts().busy.into())));
         }
     }
 
@@ -1539,19 +1551,21 @@ fn claude_probe(
             let probe_dir = transport.probe_dir(account);
             match transport.interactive(provider, account, command, timeout, &probe_dir) {
                 Ok(text) => {
-                    snapshot.source = format!("官方 CLI {command}");
+                    snapshot.source =
+                        crate::i18n::fill(probe_texts().source_cli_fmt, &[("command", command)]);
                     return Ok(parse::screen(&text, provider.scope));
                 }
                 // 登录对话是终态，与预检结论一致，直接返回。
                 Err(error) if error.status == ObservationStatus::NotAuthenticated => {
-                    snapshot.source = format!("官方 CLI {command}");
+                    snapshot.source =
+                        crate::i18n::fill(probe_texts().source_cli_fmt, &[("command", command)]);
                     return Err((error.status, error.message));
                 }
                 Err(error) => interactive_failure = Some(error),
             }
         }
     }
-    snapshot.source = "官方 statusline 回调；登录态来自 claude auth status".into();
+    snapshot.source = probe_texts().source_claude_callback.into();
     let status = match transport.auth_status(provider, account, timeout) {
         Ok(status) => status,
         // 预检也失败：交互探测的失败原因更具体，优先返回它。
@@ -1604,7 +1618,10 @@ fn json_query_source(provider: &registry::Provider, args: &[&str]) -> String {
         .join(" ");
     let command = format!("{} {shown}", provider.command);
     if provider.scope == "local" {
-        format!("{command} · 本地会话统计，非账号额度")
+        crate::i18n::fill(
+            probe_texts().source_local_stats_fmt,
+            &[("command", &command)],
+        )
     } else {
         command
     }
@@ -1616,7 +1633,7 @@ fn query(account: &UsageAccountConfig, timeout: Duration, options: ProbeOptions)
     // Ready 快照的说明：默认清空；本地统计型来源（zcode）保留「本地统计，非账号额度」声明。
     let mut ready_message: Option<&'static str> = None;
     let result = if account.auth_mode == "api" || account.credential_env.is_some() {
-        snapshot.source = "官方 API".into();
+        snapshot.source = probe_texts().source_official_api.into();
         http::query(account, timeout)
     } else if let Some(provider) = registry::provider(&account.agent) {
         match provider.query {
@@ -1637,7 +1654,7 @@ fn query(account: &UsageAccountConfig, timeout: Duration, options: ProbeOptions)
                 })
             }
             registry::Query::Kimi => {
-                snapshot.source = "Kimi 官方本地 Server API".into();
+                snapshot.source = probe_texts().source_kimi_local_api.into();
                 transport::kimi(provider, account, timeout).map(|(identity, usage)| {
                     snapshot.account_identity = parse::sanitize_identity(
                         identity
@@ -1688,17 +1705,17 @@ fn query(account: &UsageAccountConfig, timeout: Duration, options: ProbeOptions)
             ),
             registry::Query::Callback => Err((
                 ObservationStatus::NeedsBinding,
-                "此工具的会话统计不代表账号额度；请绑定实际计费厂商，或启用官方用量回调".into(),
+                probe_texts().callback_session_stats.into(),
             )),
             registry::Query::ExtensionPush => {
                 // 稳定占位：没有可轮询的接口，样本只来自扩展推送，按慢 TTL 保持即可。
-                snapshot.source = "herdr 集成扩展推送".into();
+                snapshot.source = probe_texts().source_extension_push.into();
                 flags.slow_poll = true;
                 // pi 的占位说明：用量只由 herdr 的 pi 扩展在会话内推送，探测不起任何进程。
                 Err((ObservationStatus::NeedsBinding, notices().pi_waiting.into()))
             }
             registry::Query::ZcodeLocal => {
-                snapshot.source = zcode_local::SOURCE.into();
+                snapshot.source = probe_texts().source_zcode_local.into();
                 ready_message = Some(notices().zcode_local);
                 zcode_local::probe(
                     provider,
@@ -1712,7 +1729,7 @@ fn query(account: &UsageAccountConfig, timeout: Duration, options: ProbeOptions)
     } else {
         Err((
             ObservationStatus::Unsupported,
-            "未登记此 Agent 的官方查询方案".into(),
+            probe_texts().agent_unsupported.into(),
         ))
     };
     settle_result(&mut snapshot, &account.agent, result, ready_message);
@@ -4540,5 +4557,33 @@ mod tests {
                 .map(String::as_str),
             Some("me@example.test")
         );
+    }
+
+    /// 文档终审 D7：详情面板里的来源按 server 的界面语言给出——英文界面不含 CJK，中文界面
+    /// 是中文；命令形态原样保留。
+    #[test]
+    fn probe_sources_follow_the_interface_language() {
+        use crate::i18n::{has_cjk, lang_guard, Lang};
+        let opencode = registry::provider("opencode").expect("opencode 已登记");
+        let registry::Query::Json { args, .. } = opencode.query else {
+            panic!("opencode 是非交互子命令查询");
+        };
+        for (lang, chinese) in [(Lang::En, false), (Lang::ZhCn, true)] {
+            let _guard = lang_guard(lang);
+            let source = json_query_source(opencode, args);
+            assert!(
+                source.starts_with("opencode db <query> --format json"),
+                "{source}"
+            );
+            assert_eq!(has_cjk(&source), chinese, "{lang:?}: {source}");
+            let texts = probe_texts();
+            for source in [
+                texts.source_official_api,
+                texts.source_claude_callback,
+                texts.source_extension_push_stats,
+            ] {
+                assert_eq!(has_cjk(source), chinese, "{lang:?}: {source}");
+            }
+        }
     }
 }
