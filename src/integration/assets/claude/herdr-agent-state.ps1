@@ -11,6 +11,13 @@ param([string]$Action = "")
 if ($Action -ne "session") { exit 0 }
 if ($env:HERDR_ENV -ne "1") { exit 0 }
 if ([string]::IsNullOrWhiteSpace($env:HERDR_PANE_ID)) { exit 0 }
+# Claude Code background sessions (`claude --bg`, or any session the Claude Code
+# daemon hosts) inherit HERDR_PANE_ID from the pane that started the daemon, so
+# reporting from them would pass them off as that pane's agent. The daemon marks
+# them with CLAUDE_CODE_SESSION_KIND=bg and CLAUDE_JOB_DIR; Claude Code strips the
+# former from the environment it gives hooks and keeps the latter, so either one
+# means a background session. HERDR_REPORT_BG_SESSIONS=1 reports them anyway.
+if ($env:HERDR_REPORT_BG_SESSIONS -ne "1" -and ($env:CLAUDE_CODE_SESSION_KIND -ceq "bg" -or -not [string]::IsNullOrEmpty($env:CLAUDE_JOB_DIR))) { exit 0 }
 
 $inputText = [Console]::In.ReadToEnd()
 try {

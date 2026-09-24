@@ -84,6 +84,11 @@ fn run_shell_hook_with_env(
         .env("HERDR_PANE_ID", "p_test")
         .env_remove("CODEX_THREAD_ID")
         .env_remove("CURSOR_VERSION")
+        // 在 Claude Code 后台会话里跑测试时这些变量会从外层继承进来，claude 钩子
+        // 看到它们就不上报；清掉，让用例只看自己显式给的环境。
+        .env_remove("CLAUDE_CODE_SESSION_KIND")
+        .env_remove("CLAUDE_JOB_DIR")
+        .env_remove("HERDR_REPORT_BG_SESSIONS")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -216,6 +221,79 @@ fn claude_hook_keeps_activity_and_session_reports_apart() {
         r#"{"hook_event_name":"SessionStart","session_id":"s1","agent_id":"a1"}"#,
     )
     .is_none());
+}
+
+#[test]
+fn claude_hook_skips_background_sessions_unless_opted_in() {
+    // Claude Code daemon 托管的后台会话从启动 daemon 的窗格继承了 HERDR_PANE_ID /
+    // HERDR_SOCKET_PATH。daemon 给它们设 CLAUDE_CODE_SESSION_KIND=bg 与
+    // CLAUDE_JOB_DIR；Claude Code 2.1.281 交给钩子的环境里只剩后者，两个标记分别
+    // 都要能挡住 session 与 activity 两种上报。
+    let session_input = r#"{"hook_event_name":"SessionStart","session_id":"bg-session"}"#;
+    let activity_input = r#"{"hook_event_name":"SubagentStart","session_id":"bg-session","agent_id":"a1","agent_type":"Explore"}"#;
+    let markers: [(&str, &str); 2] = [
+        ("CLAUDE_CODE_SESSION_KIND", "bg"),
+        ("CLAUDE_JOB_DIR", "/home/user/.claude/jobs/0123abcd"),
+    ];
+
+    for marker in markers {
+        for (action, input) in [("session", session_input), ("activity", activity_input)] {
+            for report_bg in [None, Some("0"), Some("")] {
+                let mut envs = vec![marker];
+                if let Some(value) = report_bg {
+                    envs.push(("HERDR_REPORT_BG_SESSIONS", value));
+                }
+                assert!(
+                    run_shell_hook_with_env(
+                        "src/integration/assets/claude/herdr-agent-state.sh",
+                        &[action],
+                        input,
+                        &envs,
+                    )
+                    .is_none(),
+                    "{marker:?} {action} report_bg={report_bg:?} must not report"
+                );
+            }
+
+            // 逃生开关：HERDR_REPORT_BG_SESSIONS=1 时照常上报。
+            let request = run_shell_hook_with_env(
+                "src/integration/assets/claude/herdr-agent-state.sh",
+                &[action],
+                input,
+                &[marker, ("HERDR_REPORT_BG_SESSIONS", "1")],
+            )
+            .unwrap_or_else(|| panic!("{marker:?} {action} should report when opted in"));
+            assert_eq!(
+                request["params"]["pane_id"], "p_test",
+                "{marker:?} {action}"
+            );
+            match action {
+                "session" => {
+                    assert_eq!(request["method"], "pane.report_agent_session");
+                    assert_eq!(request["params"]["agent_session_id"], "bg-session");
+                }
+                _ => {
+                    assert_eq!(request["method"], "pane.report_agent_activity");
+                    assert_eq!(request["params"]["node_id"], "a1");
+                }
+            }
+        }
+    }
+
+    // 标记之外的值不算后台会话：其它 session kind 与空的 CLAUDE_JOB_DIR 照常上报。
+    for marker in [
+        ("CLAUDE_CODE_SESSION_KIND", "interactive"),
+        ("CLAUDE_JOB_DIR", ""),
+    ] {
+        let request = run_shell_hook_with_env(
+            "src/integration/assets/claude/herdr-agent-state.sh",
+            &["session"],
+            session_input,
+            &[marker],
+        )
+        .unwrap_or_else(|| panic!("{marker:?} is not a background session"));
+        assert_eq!(request["method"], "pane.report_agent_session");
+    }
 }
 
 #[test]

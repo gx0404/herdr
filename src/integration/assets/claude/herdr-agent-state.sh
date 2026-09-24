@@ -38,6 +38,18 @@ hook_input_file = os.environ.get("HERDR_HOOK_INPUT_FILE")
 if not pane_id or not socket_path:
     raise SystemExit(0)
 
+# Claude Code background sessions (`claude --bg`, or any session the Claude Code
+# daemon hosts) inherit HERDR_PANE_ID and HERDR_SOCKET_PATH from the pane that
+# started the daemon, so reporting from them would pass them off as that pane's
+# agent. The daemon marks them with CLAUDE_CODE_SESSION_KIND=bg and
+# CLAUDE_JOB_DIR; Claude Code strips the former from the environment it gives
+# hooks (seen with Claude Code 2.1.281) and keeps the latter, so either one
+# means a background session. HERDR_REPORT_BG_SESSIONS=1 reports them anyway.
+if os.environ.get("HERDR_REPORT_BG_SESSIONS") != "1" and (
+    os.environ.get("CLAUDE_CODE_SESSION_KIND") == "bg" or os.environ.get("CLAUDE_JOB_DIR")
+):
+    raise SystemExit(0)
+
 hook_input = {}
 if hook_input_file:
     try:
