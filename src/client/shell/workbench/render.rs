@@ -372,11 +372,12 @@ impl ClientShellState {
                 unfocused_title
             };
             // 标题前的 `⠿` 是拖动停靠的把手：锁定布局后拖动被拒绝（冒烟 L1）、紧凑
-            // 视图与最大化只投影一个面板没有停靠目标（W2、N20），都不画它，标题文字
-            // 左移占位。
+            // 视图与最大化只投影一个面板没有停靠目标（W2、N20）、不接鼠标时工作台
+            // 不收鼠标事件（N20），都不画它，标题文字左移占位。
             let handle = if self.workbench.dock.locked
                 || self.workbench.geometry.compact
                 || self.workbench.dock.maximized.is_some()
+                || !self.config.mouse_capture
             {
                 ""
             } else {
@@ -618,11 +619,18 @@ impl ClientShellState {
                 )
             } else if self.workbench.dock.locked {
                 // 锁定后拖动停靠 / 调尺寸都被拒绝：不再提示拖动，改为说明怎么解锁
-                // （冒烟 L1）。
-                tr(
-                    "Layout locked · turn off Lock layout in the top bar to rearrange",
-                    "布局已锁定 · 在顶栏取消「锁定布局」后可重新排布",
-                )
+                // （冒烟 L1）；不接鼠标时顶栏点不到，指向主菜单里的同名开关（N20）。
+                if self.config.mouse_capture {
+                    tr(
+                        "Layout locked · turn off Lock layout in the top bar to rearrange",
+                        "布局已锁定 · 在顶栏取消「锁定布局」后可重新排布",
+                    )
+                } else {
+                    tr(
+                        "Layout locked · turn off Lock layout in the main menu to rearrange",
+                        "布局已锁定 · 在主菜单取消「锁定布局」后可重新排布",
+                    )
+                }
             } else if self.workbench.dock.maximized.is_some() {
                 // 最大化只投影一个面板：没有别的面板可停靠、也没有分隔线可拖，页脚
                 // 改说怎么还原（N20）；不接鼠标时 `◫` 点不到，说键盘路径。
@@ -637,6 +645,13 @@ impl ClientShellState {
                         "已最大化 · 在「调整布局」模式按 Enter 还原布局",
                     )
                 }
+            } else if !self.config.mouse_capture {
+                // 不接鼠标时拖不动（W1 同类，N20）：说键盘怎么排布——从主菜单进「调整
+                // 布局」，键位与该模式页脚同名。
+                tr(
+                    "Arrange layout (main menu): Tab focus panel · ←↑↓→ resize · Shift+←↑↓→ move",
+                    "从主菜单进入「调整布局」：Tab 切换面板 · ←↑↓→ 调尺寸 · Shift+←↑↓→ 移动",
+                )
             } else {
                 tr(
                     "Drag ⠿ to dock · drag borders to resize · drag tabs to split or regroup",
@@ -732,9 +747,12 @@ impl ClientShellState {
                 }
             }
         }
+        // 窗格的 `⠿` 把手只在拖得动时画：锁定布局拒绝拖动（冒烟 L1），不接鼠标时
+        // 工作台不收鼠标事件（N20），都不画、也不登记点不到的命中区。
+        let drag_handles = !self.workbench.dock.locked && self.config.mouse_capture;
         // C-12 (b)：把手/预览/错误/占位的合并往返只在确有内容可画时才做；
         // 守卫谓词与下方各绘制分支完全一致，守卫为假时今天也是空跑往返。
-        let has_handles = !self.workbench.dock.locked
+        let has_handles = drag_handles
             && self.hits.panes.iter().any(|hit| {
                 hit.rect.width > 4 && (hit.inner_rect.y > hit.rect.y || self.workbench.arranging)
             });
@@ -760,7 +778,7 @@ impl ClientShellState {
                 }
                 for hit in &self.hits.panes {
                     if hit.rect.width > 4
-                        && !self.workbench.dock.locked
+                        && drag_handles
                         && (hit.inner_rect.y > hit.rect.y || self.workbench.arranging)
                     {
                         // 有上边框：把手压在边框行上。无边框（只在调整布局模式画）：

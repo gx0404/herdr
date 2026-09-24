@@ -2349,6 +2349,119 @@ fn maximized_panel_title_only_focuses_and_never_starts_a_dock_drag() {
     }
 }
 
+/// 带上边框的单窗格终端视图（窗格 40×10、内框下移一行）：带边框的窗格不进调整
+/// 布局模式也画 `⠿` 拖动把手。
+fn ready_with_bordered_pane() -> ClientShellState {
+    let mut state = ready();
+    let mut view = surface();
+    view.panes[0].rect = SurfaceRect {
+        x: 0,
+        y: 0,
+        width: 40,
+        height: 10,
+    };
+    view.panes[0].inner_rect = SurfaceRect {
+        x: 1,
+        y: 1,
+        width: 38,
+        height: 8,
+    };
+    state.workbench.views.insert(
+        "1".into(),
+        crate::client::shell::workbench::View {
+            tab: "tab_1".into(),
+            surface: view,
+            graphics: Default::default(),
+        },
+    );
+    state
+}
+
+/// N20（W1 同类；200×50 / 133×32 / 80×24 非紧凑三档）：`mouse_capture = false` 时
+/// 工作台根本不收鼠标事件，拖不动也点不到。以前非紧凑页脚照旧提示「拖动 ⠿ 停靠」，
+/// 面板标题与带边框的窗格照画 `⠿` 把手，锁定时页脚让人去点不到的顶栏取消锁定。
+/// 现在不接鼠标时不画把手、不登记点不到的窗格把手，页脚改说键盘怎么排布（从主菜单
+/// 进「调整布局」，键位与该模式页脚同名），锁定时指向主菜单里的同名开关。键盘路径
+/// 照页脚做即可：命令搜索进「调整布局」后 Tab 切换面板；接鼠标时拖动提示与把手照旧。
+#[test]
+fn without_mouse_capture_the_footer_teaches_layout_keys_instead_of_drags() {
+    let _guard = crate::i18n::lang_guard(crate::i18n::Lang::ZhCn);
+    let squash = |text: &str| text.split_whitespace().collect::<String>();
+    for (cols, rows) in [(200, 50), (133, 32), (80, 24)] {
+        let size = format!("{cols}×{rows}");
+        let last = usize::from(rows) - 1;
+        let mut state = ready_with_bordered_pane();
+        state.config.mouse_capture = true;
+        let screen = frame_rows(&state.compose(cols, rows).expect("接鼠标"));
+        assert!(
+            !state.workbench.geometry.compact,
+            "{size}：用例前提：不是紧凑视图"
+        );
+        assert!(
+            screen[1].contains('⠿'),
+            "{size}：接鼠标：面板标题带拖动把手"
+        );
+        assert_eq!(
+            pane_handles(&state).len(),
+            1,
+            "{size}：接鼠标：带边框的窗格画拖动把手"
+        );
+        assert!(
+            squash(&screen[last]).starts_with("拖动⠿停靠"),
+            "{size}：接鼠标：页脚提示拖动"
+        );
+
+        state.config.mouse_capture = false;
+        let screen = frame_rows(&state.compose(cols, rows).expect("不接鼠标"));
+        assert!(
+            screen.iter().all(|row| !row.contains('⠿')),
+            "{size}：不接鼠标：不画任何拖动把手：{screen:#?}"
+        );
+        assert!(
+            pane_handles(&state).is_empty(),
+            "{size}：不登记点不到的窗格把手"
+        );
+        assert!(
+            squash(&screen[1]).starts_with("工作区"),
+            "{size}：标题文字左移占位：{}",
+            screen[1]
+        );
+        let footer = squash(&screen[last]);
+        assert!(
+            !footer.contains("拖动"),
+            "{size}：不接鼠标：页脚不提示拖动：{footer}"
+        );
+        assert_eq!(
+            footer, "从主菜单进入「调整布局」：Tab切换面板·←↑↓→调尺寸·Shift+←↑↓→移动",
+            "{size}：页脚说键盘怎么排布"
+        );
+
+        state.workbench.dock.locked = true;
+        let footer = squash(&frame_rows(&state.compose(cols, rows).expect("锁定"))[last]);
+        assert!(
+            footer.contains("在主菜单取消「锁定布局」"),
+            "{size}：锁定时指向主菜单里的开关：{footer}"
+        );
+        assert!(
+            !footer.contains("顶栏"),
+            "{size}：不指向点不到的顶栏：{footer}"
+        );
+        state.workbench.dock.locked = false;
+
+        // 键盘路径：照页脚从命令搜索进「调整布局」，Tab 切换面板。
+        let before = state.workbench.dock.focused.clone();
+        state.open_command_search();
+        palette_select(&mut state, "layout");
+        state.handle_input_bytes(b"\r");
+        assert!(state.workbench.arranging, "{size}：命令搜索进入调整布局");
+        state.handle_input_bytes(b"\t");
+        assert_ne!(
+            state.workbench.dock.focused, before,
+            "{size}：调整布局模式里 Tab 切换面板"
+        );
+    }
+}
+
 /// `tab_1` 里两个窗格（`pane_1`、`pane_2`）的快照，`focused` 是聚焦窗格；`zoomed`
 /// 时标签页缩放，服务端只投影聚焦窗格。
 fn two_pane_snapshot(revision: u64, zoomed: bool, focused: &str) -> ClientShellSnapshot {
