@@ -291,7 +291,8 @@ impl ClientShellState {
     }
 
     /// 表单测试连接报「主机密钥已变化」：打开硬阻断的变更对话框，只提供清掉
-    /// 旧密钥后重试（临时档案未落盘，没有重连可做）。
+    /// 旧密钥（临时档案未落盘，没有重连可做；按钮与页脚不写「重试」，移除后提示
+    /// 关闭对话框重新测试）。
     pub(super) fn open_machine_host_key_changed_review(
         &mut self,
         profile: Box<SavedSshEndpoint>,
@@ -1417,12 +1418,19 @@ fn render_host_key_changed(
         base,
         cx,
     );
+    // 只有已保存的机器移除旧记录后会重连；添加表单（测试连接）没有机器可连，
+    // 按钮与页脚照实只写「移除旧记录」，不写「重试」（T1 审查轻 2，D12 同类）。
+    let (remove_hint, remove_label) = if view.profile_id.is_some() {
+        (t.hint_remove_retry, t.remove_retry_button)
+    } else {
+        (t.hint_remove, t.remove_button)
+    };
     if let Some(footer) = stack.footer {
         render_key_hints(
             b,
             footer,
             &[
-                ("r".to_owned(), t.hint_remove_retry.to_owned()),
+                ("r".to_owned(), remove_hint.to_owned()),
                 ("esc".to_owned(), t.hint_abort.to_owned()),
             ],
             p,
@@ -1436,7 +1444,7 @@ fn render_host_key_changed(
         (vec![t.close_button], vec![MachineAuthButton::Abort])
     } else {
         (
-            vec![t.remove_retry_button, t.abort_button],
+            vec![remove_label, t.abort_button],
             vec![MachineAuthButton::RemoveRetry, MachineAuthButton::Abort],
         )
     };

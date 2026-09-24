@@ -1222,6 +1222,9 @@ pub struct MachineAuthTexts {
     pub changed_reinstall_hint: &'static str,
     pub changed_mitm_hint: &'static str,
     pub remove_retry_button: &'static str,
+    /// 添加表单（测试连接）路径的「移除」按钮：没有已保存的机器，按下只清掉旧
+    /// 记录、并不重试（随后提示关闭对话框重新测试），按钮不写「重试」。
+    pub remove_button: &'static str,
     pub removed: &'static str,
     /// 添加表单（测试连接）路径移除旧记录后的说明：不会重连，需重新测试。
     pub removed_retest: &'static str,
@@ -1275,6 +1278,8 @@ pub struct MachineAuthTexts {
     pub hint_trust_once: &'static str,
     pub hint_abort: &'static str,
     pub hint_remove_retry: &'static str,
+    /// 添加表单路径的页脚提示，同 `remove_button`。
+    pub hint_remove: &'static str,
     pub hint_interactive: &'static str,
     pub hint_precollect: &'static str,
     pub hint_copy_fix: &'static str,

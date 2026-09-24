@@ -533,6 +533,103 @@ fn wizard_host_key_dialogs_do_not_promise_a_reconnect() {
     }
 }
 
+/// 主机密钥变更对话框里「移除」按钮的文字与页脚键位行（都去掉空白）。页脚是含
+/// `esc` 与「中止 / abort」提示的那一行；按钮行里同名的「中止」按钮不带 `esc`。
+fn changed_dialog_rows(state: &mut ClientShellState, cols: u16, rows: u16) -> (String, String) {
+    let frame = state.compose(cols, rows).expect("composed frame");
+    let width = usize::from(frame.width);
+    let compact = |cells: &[crate::protocol::CellData]| {
+        cells
+            .iter()
+            .flat_map(|cell| cell.symbol.chars())
+            .filter(|ch| !ch.is_whitespace())
+            .collect::<String>()
+    };
+    let lines: Vec<String> = frame.cells.chunks(width).map(compact).collect();
+    let (rect, _) = *state
+        .hits
+        .machine_auth_actions
+        .iter()
+        .find(|(_, button)| *button == MachineAuthButton::RemoveRetry)
+        .unwrap_or_else(|| panic!("{cols}x{rows}：移除按钮画出来了：{lines:?}"));
+    let start = usize::from(rect.y) * width + usize::from(rect.x);
+    let button = compact(&frame.cells[start..start + usize::from(rect.width)]);
+    let abort: String = crate::i18n::texts()
+        .machine_auth
+        .hint_abort
+        .chars()
+        .filter(|ch| !ch.is_whitespace())
+        .collect();
+    let footers: Vec<&String> = lines
+        .iter()
+        .filter(|line| line.contains("esc") && line.contains(&abort))
+        .collect();
+    let [footer] = &footers[..] else {
+        panic!("{cols}x{rows}：页脚键位行只有一行：{footers:?}\n{lines:#?}");
+    };
+    (button, (*footer).clone())
+}
+
+/// T1 审查轻 2：添加表单（测试连接）打开的主机密钥变更对话框没有已保存的机器，
+/// 按下「移除」只清掉旧记录、并不重试（随后写明关掉对话框重新测试，D12）；按钮与
+/// 页脚以前仍写「移除旧记录并重试 / remove old key & retry」。现在照实写「移除旧
+/// 记录 / remove old key」；已保存机器移除后照常重连，仍写「并重试」。中英两种界面、
+/// 窄 / 中 / 宽三档逐行读出按钮与页脚。
+#[test]
+fn wizard_changed_host_key_dialog_does_not_promise_a_retry() {
+    use crate::i18n::Lang;
+    let machine = profile("Build", "dev@build.example", "1");
+    let compact = |s: &str| {
+        s.chars()
+            .filter(|ch| !ch.is_whitespace())
+            .collect::<String>()
+    };
+    for lang in [Lang::ZhCn, Lang::En] {
+        let _guard = crate::i18n::lang_guard(lang);
+        let t = &crate::i18n::texts().machine_auth;
+        let retry = match lang {
+            Lang::ZhCn => "重试",
+            Lang::En => "retry",
+        };
+        for (cols, rows) in [(64, 20), (90, 30), (160, 48)] {
+            for saved in [false, true] {
+                let mut state = state_with_profiles(std::slice::from_ref(&machine));
+                let mut outcome = ClientShellInput::default();
+                if saved {
+                    state.set_endpoint_connection_error_kind(
+                        &ClientEndpointId::Ssh(machine.id.clone()),
+                        Some(ConnectionErrorKind::HostKeyChanged),
+                    );
+                    assert!(state.open_machine_auth_for_endpoint(&machine.id, &mut outcome));
+                } else {
+                    state.open_machine_host_key_changed_review(
+                        Box::new(profile("Stage", "stage.example", "3")),
+                        &mut outcome,
+                    );
+                }
+                let (button, footer) = changed_dialog_rows(&mut state, cols, rows);
+                let case = format!("{lang:?} {cols}x{rows} saved={saved}");
+                if saved {
+                    assert_eq!(
+                        button,
+                        compact(t.remove_retry_button),
+                        "{case}：已保存机器照常重连"
+                    );
+                    assert!(
+                        footer.contains(&compact(t.hint_remove_retry)),
+                        "{case}：{footer}"
+                    );
+                } else {
+                    assert_eq!(button, compact(t.remove_button), "{case}");
+                    assert!(!button.contains(retry), "{case}：按钮不写重试：{button}");
+                    assert!(footer.contains(&compact(t.hint_remove)), "{case}：{footer}");
+                    assert!(!footer.contains(retry), "{case}：页脚不写重试：{footer}");
+                }
+            }
+        }
+    }
+}
+
 #[test]
 fn wizard_bootstrap_failure_offers_recovery_entries() {
     let machine = profile("Build", "dev@build.example", "1");

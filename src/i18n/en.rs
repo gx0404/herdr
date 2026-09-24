@@ -999,6 +999,7 @@ pub const TEXTS: Texts = Texts {
         changed_mitm_hint:
             "If not, this may be a man-in-the-middle attack — abort and investigate.",
         remove_retry_button: " remove old key & retry ",
+        remove_button: " remove old key ",
         removed: "old host key record removed; reconnecting",
         removed_retest: "old host key record removed; close this dialog and test the connection again",
         auth_title: "authentication needed",
@@ -1051,6 +1052,7 @@ pub const TEXTS: Texts = Texts {
         hint_trust_once: "this time only",
         hint_abort: "abort",
         hint_remove_retry: "remove old key & retry",
+        hint_remove: "remove old key",
         hint_interactive: "interactive auth",
         hint_precollect: "pre-collect key",
         hint_copy_fix: "copy fix",
