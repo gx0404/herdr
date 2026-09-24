@@ -1144,7 +1144,9 @@ impl ClientShellState {
                 if !self.push_endpoint_method_for(
                     &endpoint_id,
                     method,
-                    PendingEndpointKind::CrossEndpointAction,
+                    PendingEndpointKind::CrossEndpointAction {
+                        endpoint_id: endpoint_id.clone(),
+                    },
                     outcome,
                 ) {
                     let label = self.endpoint_label(&endpoint_id).to_owned();

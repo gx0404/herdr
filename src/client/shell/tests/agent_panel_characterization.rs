@@ -3335,22 +3335,39 @@ fn fire_remote_pane_action(
 /// 不切换当前端点（D9）。应答回来时该端点仍不是当前端点：以前这类请求不在
 /// `pending_request_allows_inactive_endpoint` 白名单里，应答被当作过期请求取消、
 /// 静默丢弃，`pane_not_found` 这类失败用户毫无提示。现在放行，失败与当前端点的
-/// 动作同一个「操作被拒绝」提示并写出服务端的原因；关闭需要确认时（没法替另一台
-/// 机器弹确认框）同样提示；成功不提示。
+/// 动作同一个「操作被拒绝」提示并写出服务端的原因；成功不提示。
+/// T1 复审轻 2：关闭需要确认时没法替另一台机器弹确认框，正文以前是服务端的英文
+/// 原文、也没说怎么办；现在按界面语言写明原因与下一步（切到那台机器上再关闭）。
 #[test]
 fn remote_pane_rename_and_close_failures_show_a_notice() {
-    let texts = &crate::i18n::texts().endpoint;
-    for action in [
-        ClientContextMenuAction::RenameAgent,
-        ClientContextMenuAction::CloseAgentPane,
-    ] {
-        for (code, message) in [
-            ("pane_not_found", "pane pane_1 not found"),
+    for lang in [crate::i18n::Lang::ZhCn, crate::i18n::Lang::En] {
+        let _guard = crate::i18n::lang_guard(lang);
+        let texts = &crate::i18n::texts().endpoint;
+        let needs_confirmation = crate::i18n::fill(
+            texts.notice_remote_close_needs_confirmation_fmt,
+            &[("label", "Build")],
+        );
+        for (action, code, message, expected) in [
             (
+                ClientContextMenuAction::RenameAgent,
+                "pane_not_found",
+                "pane pane_1 not found",
+                "pane pane_1 not found".to_owned(),
+            ),
+            (
+                ClientContextMenuAction::CloseAgentPane,
+                "pane_not_found",
+                "pane pane_1 not found",
+                "pane pane_1 not found".to_owned(),
+            ),
+            (
+                ClientContextMenuAction::CloseAgentPane,
                 "confirmation_required",
                 "closing this pane would close a worktree group",
+                needs_confirmation.clone(),
             ),
         ] {
+            let case = format!("{lang:?} {action:?} {code}");
             let (mut state, remote) = federated_state(AgentPanelSortConfig::Spaces);
             state.compose(106, 40).expect("联邦帧");
             let (boot_id, request) = fire_remote_pane_action(&mut state, &remote, action);
@@ -3360,7 +3377,7 @@ fn remote_pane_rename_and_close_failures_show_a_notice() {
             );
             assert!(
                 state.pending_request_allows_inactive_endpoint(&request.id),
-                "{action:?}：远端不是当前端点也放行应答"
+                "{case}：远端不是当前端点也放行应答"
             );
             let (repaint, actions) = state.handle_endpoint_result(
                 &boot_id,
@@ -3370,39 +3387,44 @@ fn remote_pane_rename_and_close_failures_show_a_notice() {
                     message: message.into(),
                 }),
             );
-            assert!(repaint && actions.is_empty(), "{action:?} {code}");
+            assert!(repaint && actions.is_empty(), "{case}");
             let notice = state
                 .visible_endpoint_notice
                 .as_ref()
-                .unwrap_or_else(|| panic!("{action:?} {code}：失败要提示"));
-            assert_eq!(notice.title, texts.notice_action_rejected);
-            assert_eq!(notice.body, message);
+                .unwrap_or_else(|| panic!("{case}：失败要提示"));
+            assert_eq!(notice.title, texts.notice_action_rejected, "{case}");
+            assert_eq!(notice.body, expected, "{case}");
             assert!(
                 !matches!(state.overlay, Some(ClientShellOverlay::ConfirmClose(_))),
-                "不替另一台机器的工作区弹确认框"
+                "{case}：不替另一台机器的工作区弹确认框"
             );
             let text = compact(&frame_rows(&state.compose(106, 40).expect("提示帧")).join(""));
             assert!(
                 text.contains(&compact(texts.notice_action_rejected))
-                    && text.contains(&compact(message)),
-                "{action:?} {code}：提示画在画面上：{text}"
+                    && text.contains(&compact(&expected)),
+                "{case}：提示画在画面上：{text}"
             );
         }
 
         // 成功：不提示，在途记录清掉。
-        let (mut state, remote) = federated_state(AgentPanelSortConfig::Spaces);
-        state.compose(106, 40).expect("联邦帧");
-        let (boot_id, request) = fire_remote_pane_action(&mut state, &remote, action);
-        let (_, actions) = state.handle_endpoint_result(
-            &boot_id,
-            &request.id,
-            Ok(crate::api::schema::ResponseResult::Ok {}),
-        );
-        assert!(actions.is_empty());
-        assert!(
-            state.visible_endpoint_notice.is_none(),
-            "{action:?}：成功不提示"
-        );
-        assert!(!state.pending_requests.contains_key(&request.id));
+        for action in [
+            ClientContextMenuAction::RenameAgent,
+            ClientContextMenuAction::CloseAgentPane,
+        ] {
+            let (mut state, remote) = federated_state(AgentPanelSortConfig::Spaces);
+            state.compose(106, 40).expect("联邦帧");
+            let (boot_id, request) = fire_remote_pane_action(&mut state, &remote, action);
+            let (_, actions) = state.handle_endpoint_result(
+                &boot_id,
+                &request.id,
+                Ok(crate::api::schema::ResponseResult::Ok {}),
+            );
+            assert!(actions.is_empty());
+            assert!(
+                state.visible_endpoint_notice.is_none(),
+                "{lang:?} {action:?}：成功不提示"
+            );
+            assert!(!state.pending_requests.contains_key(&request.id));
+        }
     }
 }

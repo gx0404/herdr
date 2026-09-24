@@ -768,6 +768,8 @@ pub const TEXTS: Texts = Texts {
         notice_endpoint_unavailable: "Endpoint unavailable",
         notice_cancelled_body:
             "This server action was interrupted. Check its state before retrying.",
+        notice_remote_close_needs_confirmation_fmt:
+            "It would close a worktree group: switch to {label} and close it there.",
         unexpected_selection_result: "endpoint returned an unexpected selection result",
         unexpected_link_result: "endpoint returned an unexpected link result",
         unexpected_copy_motion_result: "endpoint returned an unexpected copy-motion result",

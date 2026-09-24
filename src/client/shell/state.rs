@@ -1202,7 +1202,10 @@ pub(super) enum PendingEndpointKind {
     /// 关闭（`ClientRenameTarget::EndpointPane`、agent 右键「关闭窗格」）。应答
     /// 回来时该端点不是当前端点也放行（`pending_request_allows_inactive_endpoint`），
     /// 失败与 `Generic` 同一个「操作被拒绝」提示，不再被静默丢弃（T1 审查轻 5）。
-    CrossEndpointAction,
+    /// `endpoint_id` 是目标端点，提示里据此写出机器名。
+    CrossEndpointAction {
+        endpoint_id: ClientEndpointId,
+    },
     ProductAnnouncementDismiss {
         version: String,
         id: String,

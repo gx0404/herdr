@@ -571,7 +571,7 @@ impl ClientShellState {
                 | PendingEndpointKind::TextCopy { .. }
                 | PendingEndpointKind::TextRelease
                 | PendingEndpointKind::Generic
-                | PendingEndpointKind::CrossEndpointAction
+                | PendingEndpointKind::CrossEndpointAction { .. }
                 | PendingEndpointKind::ProductAnnouncementDismiss { .. }
                 | PendingEndpointKind::ReleaseNotesDismiss
                 | PendingEndpointKind::PopupCommand

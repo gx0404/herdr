@@ -554,7 +554,7 @@ impl ClientShellState {
                         | PendingEndpointKind::TextRelease
                         | PendingEndpointKind::SnippetRun { .. }
                         | PendingEndpointKind::BroadcastSend { .. }
-                        | PendingEndpointKind::CrossEndpointAction
+                        | PendingEndpointKind::CrossEndpointAction { .. }
                         | PendingEndpointKind::Observation { .. }
                         | PendingEndpointKind::AgentActivityRead { .. }
                 )
@@ -694,7 +694,7 @@ impl ClientShellState {
             pending.kind,
             PendingEndpointKind::SnippetRun { .. }
                 | PendingEndpointKind::BroadcastSend { .. }
-                | PendingEndpointKind::CrossEndpointAction
+                | PendingEndpointKind::CrossEndpointAction { .. }
         );
         if pending.boot_id != boot_id
             || (!cross_endpoint
@@ -753,7 +753,10 @@ impl ClientShellState {
             // `confirmation_required` 平时由确认浮层接手；另一台机器的动作没法替
             // 它的工作区弹确认框，照常提示原因（T1 审查轻 5）。
             let confirmation_handled = code == "confirmation_required"
-                && !matches!(pending.kind, PendingEndpointKind::CrossEndpointAction);
+                && !matches!(
+                    pending.kind,
+                    PendingEndpointKind::CrossEndpointAction { .. }
+                );
             if !confirmation_handled && !matches!(code, "stale_content" | "stale_target") {
                 let endpoint_texts = &crate::i18n::texts().endpoint;
                 let (kind, notice_code, title, body) = match code {
@@ -778,6 +781,26 @@ impl ClientShellState {
                         endpoint_texts.notice_server_unavailable.to_owned(),
                         error.message.clone(),
                     ),
+                    // 另一台机器上的关闭要确认（会连带关闭 worktree 分组）：正文
+                    // 按界面语言写明原因与下一步——切到那台机器上再关闭，不照搬
+                    // 服务端的英文原文（T1 复审轻 2）。
+                    "confirmation_required" if pending.method_name == "pane.close" => {
+                        let label = match &pending.kind {
+                            PendingEndpointKind::CrossEndpointAction { endpoint_id } => {
+                                self.endpoint_label(endpoint_id).to_owned()
+                            }
+                            _ => String::new(),
+                        };
+                        (
+                            ClientEndpointNoticeKind::Rejected,
+                            format!("{}:{code}", pending.method_name),
+                            endpoint_texts.notice_action_rejected.to_owned(),
+                            crate::i18n::fill(
+                                endpoint_texts.notice_remote_close_needs_confirmation_fmt,
+                                &[("label", &label)],
+                            ),
+                        )
+                    }
                     _ => (
                         ClientEndpointNoticeKind::Rejected,
                         format!("{}:{code}", pending.method_name),
@@ -798,7 +821,7 @@ impl ClientShellState {
             | PendingEndpointKind::Views { .. } => {
                 unreachable!("后台响应已提前处理")
             }
-            PendingEndpointKind::Generic | PendingEndpointKind::CrossEndpointAction => {}
+            PendingEndpointKind::Generic | PendingEndpointKind::CrossEndpointAction { .. } => {}
             PendingEndpointKind::PaneLinkResolve { .. }
             | PendingEndpointKind::SnippetRun { .. } => {
                 unreachable!("handled above")

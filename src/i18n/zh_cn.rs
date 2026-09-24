@@ -802,6 +802,7 @@ pub const TEXTS: Texts = Texts {
         notice_paste_rejected: "粘贴被拒绝",
         notice_endpoint_unavailable: "端点不可用",
         notice_cancelled_body: "此服务器操作已中断。重试前请检查其状态。",
+        notice_remote_close_needs_confirmation_fmt: "关闭它会连带关闭 worktree 分组：请切到 {label} 上再关闭。",
         unexpected_selection_result: "端点返回了意外的选择结果",
         unexpected_link_result: "端点返回了意外的链接结果",
         unexpected_copy_motion_result: "端点返回了意外的复制移动结果",

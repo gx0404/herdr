@@ -951,6 +951,9 @@ pub struct EndpointTexts {
     pub notice_paste_rejected: &'static str,
     pub notice_endpoint_unavailable: &'static str,
     pub notice_cancelled_body: &'static str,
+    /// 另一台机器上的窗格关闭需要确认（会连带关闭 worktree 分组）：没法替那台机器
+    /// 的工作区弹确认框，写明下一步——切到那台机器上再关闭。
+    pub notice_remote_close_needs_confirmation_fmt: &'static str, // args: label
     pub unexpected_selection_result: &'static str,
     pub unexpected_link_result: &'static str,
     pub unexpected_copy_motion_result: &'static str,
