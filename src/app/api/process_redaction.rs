@@ -7,7 +7,9 @@
 //!
 //! - 凭据类选项的值：`--token abc`、`--token=abc`、`--api-key abc`、`-password=abc`、
 //!   `--oauth2-bearer abc`；
-//! - 「名:口令」：curl 的 `--user` / `--proxy-user` / `-u` / `-U`，只打冒号后；
+//! - 「名 + 分隔符 + 口令」：curl 的 `--user` / `--proxy-user` / `-u` / `-U`（`:`）、
+//!   Samba 客户端的 `-U`（`%`）、lftp 的 `-u`（`,`），只打分隔符后，且只在这条命令
+//!   里出现过这些程序时才算；
 //! - 敏感请求头：`-H 'Authorization: …'`、`--header Authorization: …`、
 //!   `-HX-Api-Key: …`，以及 httpie / xh 的位置参数 `Authorization:Bearer …`；
 //!   保留 `Bearer` / `Basic` 等认证方案名；
@@ -61,8 +63,35 @@ const CREDENTIAL_TAILS: [&str; 1] = ["pwd"];
 /// 敏感请求头里保留、不打码的认证方案名。
 const AUTH_SCHEMES: [&str; 6] = ["bearer", "basic", "token", "digest", "negotiate", "ntlm"];
 
-/// curl 取「名:口令」的选项：冒号后是口令。
-const USER_PASSWORD_OPTIONS: [&str; 4] = ["--user", "--proxy-user", "-u", "-U"];
+/// 「名 + 分隔符 + 口令」写法：哪些程序的哪些选项取这种值、用什么分隔。`-u` 在别的
+/// 程序里意思各不相同（`docker run -u 1000:1000` 是 uid:gid，`rsync -u` 是开关），
+/// 所以只在这条命令里前面出现过这些程序时才按口令处理。
+struct UserPasswordRule {
+    programs: &'static [&'static str],
+    options: &'static [&'static str],
+    separator: char,
+}
+
+const USER_PASSWORD_RULES: [UserPasswordRule; 3] = [
+    // curl，以及原样转发 curl 选项的 curlie：`-u name:pw`、`-U proxy:pw`。
+    UserPasswordRule {
+        programs: &["curl", "curlie"],
+        options: &["-u", "-U", "--user", "--proxy-user"],
+        separator: ':',
+    },
+    // Samba 客户端：`-U DOMAIN\name%pw`（文档写法，进程表里常见的口令泄漏）。
+    UserPasswordRule {
+        programs: &["smbclient", "rpcclient", "smbcacls", "smbget"],
+        options: &["-U", "--user"],
+        separator: '%',
+    },
+    // lftp：`-u name,pw`。
+    UserPasswordRule {
+        programs: &["lftp"],
+        options: &["-u"],
+        separator: ',',
+    },
+];
 
 /// 前台进程的 argv 与 cmdline 打码。argv[0]（程序本身）原样保留。
 pub(super) fn redact_command(
@@ -95,8 +124,8 @@ enum Pending {
     Value,
     /// 上一个词是 `-H` / `--header`：当前词是 `名字: 值` 形式的请求头。
     Header,
-    /// 上一个词是 `--user` / `-u` 一类：当前词是 `名:口令`。
-    UserPassword,
+    /// 上一个词是 curl 的 `--user` / `-u` 一类：当前词是「名 + 分隔符 + 口令」。
+    UserPassword(char),
     /// 上一个词是 PowerShell 的 `$env:NAME`（NAME 像凭据）：当前词若是 `=`，再下一个
     /// 词就是值（`$env:GH_TOKEN = '…'`）。
     Assignment,
@@ -105,11 +134,20 @@ enum Pending {
     Credential,
 }
 
-/// 从下标 `first` 起逐词打码，原位替换。
+/// 从下标 `first` 起逐词打码，原位替换。`words` 是一条命令。
 fn redact_words(words: &mut [String], first: usize, depth: usize) {
     let mut pending = Pending::None;
-    for word in words.iter_mut().skip(first) {
-        let (redacted, next) = redact_word(word, pending, depth);
+    let mut user_password = None;
+    for (index, word) in words.iter_mut().enumerate() {
+        // 记下这条命令里最近出现的、取「名:口令」写法的程序（含不打码的 argv[0]，
+        // 也含 `sudo curl …`、`docker run curlimages/curl …` 里靠后的程序名）。
+        if let Some(rule) = user_password_rule(word) {
+            user_password = Some(rule);
+        }
+        if index < first {
+            continue;
+        }
+        let (redacted, next) = redact_word(word, pending, depth, user_password);
         if let Some(redacted) = redacted {
             *word = redacted;
         }
@@ -117,18 +155,39 @@ fn redact_words(words: &mut [String], first: usize, depth: usize) {
     }
 }
 
+/// 词是不是取「名:口令」写法的程序：取路径最后一段，去掉 `.exe` 与命令替换的
+/// 前缀（`$(curl`），不分大小写。
+fn user_password_rule(word: &str) -> Option<&'static UserPasswordRule> {
+    let name = word.rsplit(['/', '\\']).next()?;
+    let name = name
+        .trim_start_matches(['$', '(', '`'])
+        .to_ascii_lowercase();
+    let name = name.strip_suffix(".exe").unwrap_or(&name);
+    USER_PASSWORD_RULES
+        .iter()
+        .find(|rule| rule.programs.contains(&name))
+}
+
 /// 打码一个词：返回替换值（不用打码时为 `None`）与它对下一个词的约定。
-fn redact_word(word: &str, pending: Pending, depth: usize) -> (Option<String>, Pending) {
+/// `user_password` 是这条命令里前面出现过的、取「名:口令」写法的程序。
+fn redact_word(
+    word: &str,
+    pending: Pending,
+    depth: usize,
+    user_password: Option<&UserPasswordRule>,
+) -> (Option<String>, Pending) {
     // 值的位置上出现选项，说明前一个词只是开关：约定作废，按选项处理。等着凭据时，
     // 以 `-` 开头的随机串（`--token -Xk9…`）仍是值。
     let awaits_secret = matches!(pending, Pending::Value | Pending::Credential);
     if looks_like_option(word) && !(awaits_secret && looks_like_dash_secret(word)) {
-        return redact_option(word, depth);
+        return redact_option(word, depth, user_password);
     }
     match pending {
         Pending::Value => return (Some(redacted_secret(word)), Pending::None),
         Pending::Header => return redact_header(word, depth),
-        Pending::UserPassword => return (redact_user_password(word), Pending::None),
+        Pending::UserPassword(separator) => {
+            return (redact_user_password(word, separator), Pending::None);
+        }
         Pending::Credential if is_auth_scheme(word) => return (None, Pending::Credential),
         Pending::Credential => return (Some(redacted_secret(word)), Pending::None),
         Pending::Assignment if word == "=" => return (None, Pending::Value),
@@ -142,7 +201,7 @@ fn redact_word(word: &str, pending: Pending, depth: usize) -> (Option<String>, P
     // Windows 风格开关：`/token:…`、`/p:Password=…`。
     if let Some((name, separator, value)) = split_switch(word) {
         return (
-            redact_option_value(name, separator, value, depth),
+            redact_option_value(name, separator, value, depth, None),
             Pending::None,
         );
     }
@@ -181,15 +240,19 @@ fn looks_like_option(word: &str) -> bool {
     word.len() > 1 && word.starts_with('-') && !word[1..].starts_with(|c: char| c.is_ascii_digit())
 }
 
-fn redact_option(word: &str, depth: usize) -> (Option<String>, Pending) {
+fn redact_option(
+    word: &str,
+    depth: usize,
+    user_password: Option<&UserPasswordRule>,
+) -> (Option<String>, Pending) {
     if word == "--" {
         return (None, Pending::None);
     }
     if word == "-H" || word == "--header" {
         return (None, Pending::Header);
     }
-    if USER_PASSWORD_OPTIONS.contains(&word) {
-        return (None, Pending::UserPassword);
+    if let Some(rule) = user_password.filter(|rule| rule.options.contains(&word)) {
+        return (None, Pending::UserPassword(rule.separator));
     }
     if !word.starts_with("--") {
         // curl 允许 `-H` 紧贴值：`-HAuthorization: …`。
@@ -197,15 +260,18 @@ fn redact_option(word: &str, depth: usize) -> (Option<String>, Pending) {
             let (redacted, next) = redact_header(header, depth);
             return (redacted.map(|header| format!("-H{header}")), next);
         }
-        // `-uadmin:pw` / `-Uproxy:pw`；带 `=` 的（Go 风格的 `-url=…`）不是这种写法。
-        for short in ["-u", "-U"] {
-            if let Some(value) = word.strip_prefix(short) {
-                if value.contains(':') && !value.contains('=') {
-                    let redacted = redact_user_password(value);
-                    return (
-                        redacted.map(|value| format!("{short}{value}")),
-                        Pending::None,
-                    );
+        // 短选项紧贴值：`-uadmin:pw`、`-UCORP\name%pw`；带 `=` 的（Go 风格的
+        // `-url=…`）不是这种写法。
+        if let Some(rule) = user_password {
+            for short in rule.options.iter().filter(|option| option.len() == 2) {
+                if let Some(value) = word.strip_prefix(short) {
+                    if value.contains(rule.separator) && !value.contains('=') {
+                        let redacted = redact_user_password(value, rule.separator);
+                        return (
+                            redacted.map(|value| format!("{short}{value}")),
+                            Pending::None,
+                        );
+                    }
                 }
             }
         }
@@ -220,7 +286,7 @@ fn redact_option(word: &str, depth: usize) -> (Option<String>, Pending) {
                 return (redacted.map(|header| format!("--header={header}")), next);
             }
             (
-                redact_option_value(name, separator, value, depth),
+                redact_option_value(name, separator, value, depth, user_password),
                 Pending::None,
             )
         }
@@ -230,10 +296,17 @@ fn redact_option(word: &str, depth: usize) -> (Option<String>, Pending) {
 }
 
 /// 选项或开关与值写在一起（`--token=…`、`-Token:…`、`/p:Password=…`）：凭据类
-/// 名字整个值打码，`--user=` 一类只打冒号后，其余的值再按赋值 / 普通文本看一遍。
-fn redact_option_value(name: &str, separator: &str, value: &str, depth: usize) -> Option<String> {
-    let redacted = if USER_PASSWORD_OPTIONS.contains(&name) {
-        redact_user_password(value)?
+/// 名字整个值打码，curl 的 `--user=` 一类只打分隔符后，其余的值再按赋值 / 普通文本
+/// 看一遍。
+fn redact_option_value(
+    name: &str,
+    separator: &str,
+    value: &str,
+    depth: usize,
+    user_password: Option<&UserPasswordRule>,
+) -> Option<String> {
+    let redacted = if let Some(rule) = user_password.filter(|rule| rule.options.contains(&name)) {
+        redact_user_password(value, rule.separator)?
     } else if is_credential_name(name.trim_start_matches('/')) {
         if value.is_empty() {
             return None;
@@ -299,10 +372,10 @@ fn redacted_secret(value: &str) -> String {
     }
 }
 
-/// `名:口令` 只打冒号后；只有用户名时不动。
-fn redact_user_password(value: &str) -> Option<String> {
-    let (user, password) = value.split_once(':')?;
-    (!password.is_empty()).then(|| format!("{user}:{REDACTED}"))
+/// 「名 + 分隔符 + 口令」只打分隔符后；只有用户名时不动。
+fn redact_user_password(value: &str, separator: char) -> Option<String> {
+    let (user, password) = value.split_once(separator)?;
+    (!password.is_empty()).then(|| format!("{user}{separator}{REDACTED}"))
 }
 
 /// httpie / xh 位置参数形式的敏感请求头：`名字:值`，名字是请求头记号且像凭据。
@@ -854,6 +927,85 @@ mod tests {
         assert_redacted(&user_only, &user_only);
         let sudo = ["sudo", "-u", "root", "ls"];
         assert_redacted(&sudo, &sudo);
+    }
+
+    /// 复审轻级：`-u` / `-U` / `--user` 的「名 + 分隔符 + 口令」只对认这种写法的程序
+    /// 生效（curl 一族用 `:`，Samba 客户端用 `%`，lftp 用 `,`），看这条命令里前面出现过
+    /// 哪个程序；`docker run -u 1000:1000`、`rsync -u host:/src` 不是口令。
+    #[test]
+    fn user_password_options_only_apply_to_programs_that_take_them() {
+        let docker = [
+            "docker",
+            "run",
+            "-u",
+            "1000:1000",
+            "--user",
+            "0:0",
+            "alpine",
+            "id",
+        ];
+        assert_redacted(&docker, &docker);
+        let rsync = ["rsync", "-u", "host:/src", "/dst"];
+        assert_redacted(&rsync, &rsync);
+        assert_redacted(
+            &[
+                "sudo",
+                "-u",
+                "root",
+                "curl",
+                "-u",
+                "admin:s3cr3t-1",
+                "https://example.invalid",
+            ],
+            &[
+                "sudo",
+                "-u",
+                "root",
+                "curl",
+                "-u",
+                "admin:[REDACTED]",
+                "https://example.invalid",
+            ],
+        );
+        assert_redacted(
+            &[
+                "sh",
+                "-c",
+                "docker run -u 1000:1000 img && curl -u admin:s3cr3t-2 https://example.invalid",
+            ],
+            &[
+                "sh",
+                "-c",
+                "docker run -u 1000:1000 img && curl -u admin:[REDACTED] https://example.invalid",
+            ],
+        );
+        assert_redacted(
+            &[r"C:\tools\curl.exe", "-u", "admin:s3cr3t-3"],
+            &[r"C:\tools\curl.exe", "-u", "admin:[REDACTED]"],
+        );
+        assert_redacted(
+            &["smbclient", "//server/share", "-U", r"CORP\admin%s3cr3t-4"],
+            &[
+                "smbclient",
+                "//server/share",
+                "-U",
+                r"CORP\admin%[REDACTED]",
+            ],
+        );
+        assert_redacted(
+            &[
+                "lftp",
+                "-u",
+                "admin,s3cr3t-5",
+                "sftp://files.example.invalid",
+            ],
+            &[
+                "lftp",
+                "-u",
+                "admin,[REDACTED]",
+                "sftp://files.example.invalid",
+            ],
+        );
     }
 
     /// 复审 M2：选项名是 authorization / bearer / auth-header 一类的，值整个是凭据
