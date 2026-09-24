@@ -5,12 +5,16 @@
 //! 把结果交给调用方之前，把疑似凭据的值换成 `[REDACTED]`：程序名、选项名与参数
 //! 位置原样保留，调用方仍看得出跑的是什么。覆盖：
 //!
-//! - 凭据类选项的值：`--token abc`、`--token=abc`、`--api-key abc`、`-password=abc`；
+//! - 凭据类选项的值：`--token abc`、`--token=abc`、`--api-key abc`、`-password=abc`、
+//!   `--oauth2-bearer abc`；
+//! - 「名:口令」：curl 的 `--user` / `--proxy-user` / `-u` / `-U`，只打冒号后；
 //! - 敏感请求头：`-H 'Authorization: …'`、`--header Authorization: …`、
-//!   `-HX-Api-Key: …`，保留 `Bearer` / `Basic` 等认证方案名；
+//!   `-HX-Api-Key: …`，以及 httpie / xh 的位置参数 `Authorization:Bearer …`；
+//!   保留 `Bearer` / `Basic` 等认证方案名；
 //! - 独立出现的 `Bearer <token>`；
 //! - 凭据类环境变量赋值：`OPENAI_API_KEY=…`、`GITHUB_TOKEN=…`；
-//! - URL 里的口令与凭据类查询参数：`https://user:pass@host`、`?api_key=…`；
+//! - URL 里的口令与凭据类查询参数：`https://user:pass@host`、`?api_key=…`；http(s)
+//!   URL 的 userinfo 只有令牌时整段（`https://TOKEN@host`，`ssh://git@` 保留）；
 //! - 整段命令行形态的参数（`sh -c '…'`）按以上规则递归处理。
 //!
 //! 只认形态、不认程序：`-p<口令>` 这类短选项的含义随程序而异，不在覆盖范围内。
@@ -21,8 +25,10 @@ const REDACTED: &str = "[REDACTED]";
 /// 参数里套命令行（`sh -c 'sh -c …'`）最多递归处理的层数。
 const MAX_NESTING: usize = 3;
 
-/// 名字以这些词结尾即视为凭据（不分大小写，`-` 与 `_` 等价）。
-const CREDENTIAL_SUFFIXES: [&str; 10] = [
+/// 名字以这些词结尾即视为凭据（不分大小写，`-` 与 `_` 等价）。请求头名也用这张
+/// 表判断：`Authorization`、`Proxy-Authorization`、`X-Auth-Token`、`Cookie` 命中，
+/// `X-Author` 不命中。
+const CREDENTIAL_SUFFIXES: [&str; 14] = [
     "token",
     "secret",
     "password",
@@ -33,6 +39,10 @@ const CREDENTIAL_SUFFIXES: [&str; 10] = [
     "credentials",
     "cookie",
     "signature",
+    "authorization",
+    "authentication",
+    "bearer",
+    "auth_header",
 ];
 
 /// 这些词要独立成词（整个名字，或前面是 `_`）才算凭据：`--api-key`、`DB_PASS`、
@@ -41,6 +51,9 @@ const CREDENTIAL_WORDS: [&str; 4] = ["key", "pass", "auth", "sig"];
 
 /// 敏感请求头里保留、不打码的认证方案名。
 const AUTH_SCHEMES: [&str; 6] = ["bearer", "basic", "token", "digest", "negotiate", "ntlm"];
+
+/// curl 取「名:口令」的选项：冒号后是口令。
+const USER_PASSWORD_OPTIONS: [&str; 4] = ["--user", "--proxy-user", "-u", "-U"];
 
 /// 前台进程的 argv 与 cmdline 打码。argv[0]（程序本身）原样保留。
 pub(super) fn redact_command(
@@ -73,6 +86,8 @@ enum Pending {
     Value,
     /// 上一个词是 `-H` / `--header`：当前词是 `名字: 值` 形式的请求头。
     Header,
+    /// 上一个词是 `--user` / `-u` 一类：当前词是 `名:口令`。
+    UserPassword,
     /// 上一个词是 `Bearer`，或值被 shell 拆到后面去的敏感头名（`Authorization:`）：
     /// 当前词若是认证方案名就保留、接着等下一个，否则它就是凭据本身。
     Credential,
@@ -97,14 +112,19 @@ fn redact_word(word: &str, pending: Pending, depth: usize) -> (Option<String>, P
         return redact_option(word, depth);
     }
     match pending {
-        Pending::Value => return (Some(REDACTED.to_owned()), Pending::None),
+        Pending::Value => return (Some(redacted_secret(word)), Pending::None),
         Pending::Header => return redact_header(word, depth),
+        Pending::UserPassword => return (redact_user_password(word), Pending::None),
         Pending::Credential if is_auth_scheme(word) => return (None, Pending::Credential),
         Pending::Credential => return (Some(REDACTED.to_owned()), Pending::None),
         Pending::None => {}
     }
     if let Some((name, value)) = split_assignment(word) {
         return (redact_assignment(name, value, depth), Pending::None);
+    }
+    // httpie / xh 的请求头是位置参数：`Authorization:Bearer …`、`x-api-key:…`。
+    if is_positional_header(word) {
+        return redact_header(word, depth);
     }
     if word.eq_ignore_ascii_case("bearer") || ends_with_sensitive_header_name(word) {
         return (None, Pending::Credential);
@@ -124,11 +144,26 @@ fn redact_option(word: &str, depth: usize) -> (Option<String>, Pending) {
     if word == "-H" || word == "--header" {
         return (None, Pending::Header);
     }
-    // curl 允许 `-H` 紧贴值：`-HAuthorization: …`。
+    if USER_PASSWORD_OPTIONS.contains(&word) {
+        return (None, Pending::UserPassword);
+    }
     if !word.starts_with("--") {
+        // curl 允许 `-H` 紧贴值：`-HAuthorization: …`。
         if let Some(header) = word.strip_prefix("-H") {
             let (redacted, next) = redact_header(header, depth);
             return (redacted.map(|header| format!("-H{header}")), next);
+        }
+        // `-uadmin:pw` / `-Uproxy:pw`；带 `=` 的（Go 风格的 `-url=…`）不是这种写法。
+        for short in ["-u", "-U"] {
+            if let Some(value) = word.strip_prefix(short) {
+                if value.contains(':') && !value.contains('=') {
+                    let redacted = redact_user_password(value);
+                    return (
+                        redacted.map(|value| format!("{short}{value}")),
+                        Pending::None,
+                    );
+                }
+            }
         }
     }
     match word.split_once('=') {
@@ -136,8 +171,12 @@ fn redact_option(word: &str, depth: usize) -> (Option<String>, Pending) {
             let (redacted, next) = redact_header(header, depth);
             (redacted.map(|header| format!("--header={header}")), next)
         }
+        Some((name, value)) if USER_PASSWORD_OPTIONS.contains(&name) => (
+            redact_user_password(value).map(|value| format!("{name}={value}")),
+            Pending::None,
+        ),
         Some((name, value)) if is_credential_name(name) => (
-            (!value.is_empty()).then(|| format!("{name}={REDACTED}")),
+            (!value.is_empty()).then(|| format!("{name}={}", redacted_secret(value))),
             Pending::None,
         ),
         Some((name, value)) => (
@@ -154,22 +193,47 @@ fn redact_header(header: &str, depth: usize) -> (Option<String>, Pending) {
     let Some((name, rest)) = header.split_once(':') else {
         return (redact_text(header, depth), Pending::None);
     };
-    if !is_sensitive_header(name.trim()) {
+    if !is_credential_name(name.trim()) {
         return (redact_text(header, depth), Pending::None);
     }
-    let value = rest.trim_start();
+    // httpie 的 `名字:=值`（原样 JSON）连同 `=` 一起保留在值前面。
+    let value = rest.trim_start_matches('=').trim_start();
     // 值被 shell 拆到了后面的词里（`--header Authorization: Bearer x` 没加引号）。
     if value.is_empty() || is_auth_scheme(value) {
         return (None, Pending::Credential);
     }
     let lead = &rest[..rest.len() - value.len()];
-    let redacted = match value.split_once(char::is_whitespace) {
+    (
+        Some(format!("{name}:{lead}{}", redacted_secret(value))),
+        Pending::None,
+    )
+}
+
+/// 凭据值打码：`Bearer xxx` 这类「认证方案 + 凭据」保留方案名。
+fn redacted_secret(value: &str) -> String {
+    match value.split_once(char::is_whitespace) {
         Some((scheme, secret)) if is_auth_scheme(scheme) && !secret.trim().is_empty() => {
-            format!("{name}:{lead}{scheme} {REDACTED}")
+            format!("{scheme} {REDACTED}")
         }
-        _ => format!("{name}:{lead}{REDACTED}"),
-    };
-    (Some(redacted), Pending::None)
+        _ => REDACTED.to_owned(),
+    }
+}
+
+/// `名:口令` 只打冒号后；只有用户名时不动。
+fn redact_user_password(value: &str) -> Option<String> {
+    let (user, password) = value.split_once(':')?;
+    (!password.is_empty()).then(|| format!("{user}:{REDACTED}"))
+}
+
+/// httpie / xh 位置参数形式的敏感请求头：`名字:值`，名字是请求头记号且像凭据。
+fn is_positional_header(word: &str) -> bool {
+    word.split_once(':').is_some_and(|(name, _)| {
+        !name.is_empty()
+            && name
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_'))
+            && is_credential_name(name)
+    })
 }
 
 /// `NAME=value` 形式的环境变量赋值（NAME 是合法的 shell 变量名）。
@@ -184,7 +248,10 @@ fn split_assignment(word: &str) -> Option<(&str, &str)> {
 
 fn redact_assignment(name: &str, value: &str, depth: usize) -> Option<String> {
     if is_credential_name(name) {
-        return (!value.is_empty()).then(|| format!("{name}={REDACTED}"));
+        // httpie 的 `名字==值`（查询参数）保留第二个 `=`。
+        let secret = value.trim_start_matches('=');
+        let eq = &value[..value.len() - secret.len()];
+        return (!secret.is_empty()).then(|| format!("{name}={eq}{}", redacted_secret(secret)));
     }
     redact_text(value, depth).map(|value| format!("{name}={value}"))
 }
@@ -193,7 +260,7 @@ fn redact_assignment(name: &str, value: &str, depth: usize) -> Option<String> {
 fn ends_with_sensitive_header_name(word: &str) -> bool {
     word.strip_suffix(':').is_some_and(|head| {
         let name = head.rsplit('=').next().unwrap_or(head);
-        !name.is_empty() && is_sensitive_header(name)
+        !name.is_empty() && is_credential_name(name)
     })
 }
 
@@ -207,7 +274,8 @@ fn redact_text(text: &str, depth: usize) -> Option<String> {
     redact_urls(text)
 }
 
-/// URL 里的口令（`scheme://user:pass@host` → `user:[REDACTED]@`）与凭据类查询参数。
+/// URL 里的口令（`scheme://user:pass@host` → `user:[REDACTED]@`；http(s) 的 userinfo
+/// 只有令牌时整段打码）与凭据类查询参数。
 fn redact_urls(text: &str) -> Option<String> {
     let userinfo = redact_url_passwords(text);
     let current = userinfo.as_deref().unwrap_or(text);
@@ -219,26 +287,36 @@ fn redact_url_passwords(text: &str) -> Option<String> {
     let mut rest = text;
     let mut changed = false;
     while let Some(index) = rest.find("://") {
+        let scheme_start = rest[..index]
+            .rfind(|c: char| !(c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.')))
+            .map_or(0, |position| position + 1);
+        let http = is_http_scheme(&rest[scheme_start..index]);
         let (head, tail) = rest.split_at(index + 3);
         redacted.push_str(head);
         let authority_len = tail
             .find(|c: char| matches!(c, '/' | '?' | '#') || c.is_whitespace())
             .unwrap_or(tail.len());
         let (authority, remainder) = tail.split_at(authority_len);
-        match authority.rsplit_once('@').and_then(|(userinfo, host)| {
-            userinfo
-                .split_once(':')
-                .map(|(user, password)| (user, password, host))
-        }) {
-            Some((user, password, host)) if !password.is_empty() => {
-                redacted.push_str(user);
-                redacted.push(':');
-                redacted.push_str(REDACTED);
-                redacted.push('@');
-                redacted.push_str(host);
-                changed = true;
-            }
-            _ => redacted.push_str(authority),
+        match authority.rsplit_once('@') {
+            Some((userinfo, host)) => match userinfo.split_once(':') {
+                Some((user, password)) if !password.is_empty() => {
+                    redacted.push_str(user);
+                    redacted.push(':');
+                    redacted.push_str(REDACTED);
+                    redacted.push('@');
+                    redacted.push_str(host);
+                    changed = true;
+                }
+                // http(s) 的 userinfo 只有一段：多半是令牌（`https://TOKEN@github.com`）。
+                None if http && !userinfo.is_empty() => {
+                    redacted.push_str(REDACTED);
+                    redacted.push('@');
+                    redacted.push_str(host);
+                    changed = true;
+                }
+                _ => redacted.push_str(authority),
+            },
+            None => redacted.push_str(authority),
         }
         rest = remainder;
     }
@@ -274,7 +352,7 @@ fn redact_url_query(text: &str) -> Option<String> {
     })
 }
 
-/// 名字像凭据：选项名（去掉前导 `-`）、环境变量名、URL 查询参数名。
+/// 名字像凭据：选项名（去掉前导 `-`）、环境变量名、URL 查询参数名、请求头名。
 fn is_credential_name(name: &str) -> bool {
     let name: String = name
         .trim_start_matches('-')
@@ -298,11 +376,12 @@ fn is_credential_name(name: &str) -> bool {
         })
 }
 
-/// 请求头名是否敏感：认证类（Authorization、Proxy-Authorization、X-Auth-Token …）、
-/// Cookie，以及名字本身像凭据的（X-Api-Key、Private-Token …）。
-fn is_sensitive_header(name: &str) -> bool {
-    let lower = name.to_ascii_lowercase();
-    lower.contains("auth") || lower.contains("cookie") || is_credential_name(&lower)
+/// `http`、`https` 以及 `git+https` 这类套在 http(s) 上的协议。
+fn is_http_scheme(scheme: &str) -> bool {
+    let scheme = scheme.to_ascii_lowercase();
+    ["http", "https"]
+        .iter()
+        .any(|http| scheme == *http || scheme.ends_with(&format!("+{http}")))
 }
 
 fn is_auth_scheme(word: &str) -> bool {
@@ -532,6 +611,140 @@ mod tests {
             "x",
         ];
         assert_redacted(&plain, &plain);
+    }
+
+    /// 复审 M2：curl 的 `--user` / `--proxy-user` / `-u` / `-U` 取「名:口令」，冒号后
+    /// 打码；只给用户名（curl 会再问口令）与 `sudo -u root` 这类不动。
+    #[test]
+    fn user_password_options_keep_the_user_name() {
+        assert_redacted(
+            &[
+                "curl",
+                "--user",
+                "admin:s3cr3t-1",
+                "https://example.invalid",
+            ],
+            &[
+                "curl",
+                "--user",
+                "admin:[REDACTED]",
+                "https://example.invalid",
+            ],
+        );
+        assert_redacted(
+            &["curl", "--user=admin:s3cr3t-2"],
+            &["curl", "--user=admin:[REDACTED]"],
+        );
+        assert_redacted(
+            &[
+                "curl",
+                "--proxy-user",
+                "proxy:s3cr3t-3",
+                "-x",
+                "http://proxy.invalid:3128",
+            ],
+            &[
+                "curl",
+                "--proxy-user",
+                "proxy:[REDACTED]",
+                "-x",
+                "http://proxy.invalid:3128",
+            ],
+        );
+        assert_redacted(
+            &["curl", "-u", "admin:s3cr3t-4"],
+            &["curl", "-u", "admin:[REDACTED]"],
+        );
+        assert_redacted(
+            &["curl", "-uadmin:s3cr3t-5", "-Uproxy:s3cr3t-6"],
+            &["curl", "-uadmin:[REDACTED]", "-Uproxy:[REDACTED]"],
+        );
+        let user_only = ["curl", "--user", "admin", "https://example.invalid"];
+        assert_redacted(&user_only, &user_only);
+        let sudo = ["sudo", "-u", "root", "ls"];
+        assert_redacted(&sudo, &sudo);
+    }
+
+    /// 复审 M2：选项名是 authorization / bearer / auth-header 一类的，值整个是凭据
+    /// （带认证方案名的保留方案名）。
+    #[test]
+    fn bearer_and_authorization_options_are_redacted() {
+        assert_redacted(
+            &["curl", "--oauth2-bearer", "s3cr3t-1"],
+            &["curl", "--oauth2-bearer", "[REDACTED]"],
+        );
+        assert_redacted(
+            &[
+                "tool",
+                "--authorization",
+                "s3cr3t-2",
+                "--auth-header",
+                "Basic s3cr3t-3",
+                "--bearer",
+                "s3cr3t-4",
+            ],
+            &[
+                "tool",
+                "--authorization",
+                "[REDACTED]",
+                "--auth-header",
+                "Basic [REDACTED]",
+                "--bearer",
+                "[REDACTED]",
+            ],
+        );
+    }
+
+    /// 复审 M2：httpie / xh 的请求头是位置参数 `名字:值`，冒号后常不带空格、前面也
+    /// 没有 `-H`。名字只是含 auth 字样的（`X-Author`）与普通头不动。
+    #[test]
+    fn positional_request_headers_are_redacted() {
+        assert_redacted(
+            &[
+                "http",
+                "POST",
+                "api.example.invalid/v1",
+                "Authorization:Bearer s3cr3t-1",
+                "x-api-key:s3cr3t-2",
+                "Content-Type:application/json",
+                "X-Author:Jane",
+                "name=value",
+            ],
+            &[
+                "http",
+                "POST",
+                "api.example.invalid/v1",
+                "Authorization:Bearer [REDACTED]",
+                "x-api-key:[REDACTED]",
+                "Content-Type:application/json",
+                "X-Author:Jane",
+                "name=value",
+            ],
+        );
+    }
+
+    /// 复审 M2：http(s) URL 的 userinfo 只有令牌（没有冒号）时整段打码；`ssh://git@`
+    /// 这类其它协议的用户名保留。
+    #[test]
+    fn token_only_userinfo_in_http_urls_is_redacted() {
+        assert_redacted(
+            &[
+                "git",
+                "clone",
+                "https://s3cr3t-1@github.com/o/r.git",
+                "git+https://s3cr3t-2@example.invalid/x",
+                "ssh://git@github.com/o/r.git",
+                "ftp://anonymous@ftp.example.invalid/pub",
+            ],
+            &[
+                "git",
+                "clone",
+                "https://[REDACTED]@github.com/o/r.git",
+                "git+https://[REDACTED]@example.invalid/x",
+                "ssh://git@github.com/o/r.git",
+                "ftp://anonymous@ftp.example.invalid/pub",
+            ],
+        );
     }
 
     #[test]

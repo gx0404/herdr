@@ -4142,8 +4142,8 @@
       "anchor": "structure",
       "doc": "src/app/api/process_redaction.rs",
       "id": "src-app-api-process-redaction-rs-structure",
-      "source_sha256": "c8f75d5bb89a260e04d028f71aff5a640191d1c4e98d5df4a72fe267f0760e2c",
-      "text": "模块文档：`pane.process_info` 输出层的凭据打码（RL12）。  能连上 socket 的调用方都能查任何窗格的前台进程，而命令行里常带认证头、token、 口令。进程采集（`platform` / `detect`）保持原样——检测要看完整 argv；这里只在 把结果交给调用方之前，把疑似凭据的值换成 `[REDACTED]`：程序名、选项名与参数 位置原样保留，调用方仍看得出跑的是什么。覆盖：  - 凭据类选项的值：`--token abc`、`--token=abc`、`--api-key abc`、`-password=abc`； - 敏感请求头：`-H 'Authorization: …'`、`--header Authorization: …`、   `-HX-Api-Key: …`，保留 `Bearer` / `Basic` 等认证方案名； - 独立出现的 `Bearer <token>`； - 凭据类环境变量赋值：`OPENAI_API_KEY=…`、`GITHUB_TOKEN=…`； - URL 里的口令与凭据类查询参数：`https://user:pass@host`、`?api_key=…`； - 整段命令行形态的参数（`sh -c '…'`）按以上规则递归处理。  只认形态、不认程序：`-p<口令>` 这类短选项的含义随程序而异，不在覆盖范围内。\n公开项：\npub(super) fn redact_command( — 前台进程的 argv 与 cmdline 打码。argv[0]（程序本身）原样保留。\nimpl Quotes {"
+      "source_sha256": "270056519e9ed3da7689d9e335163e6101ef8278b9b1f420cdf6d2f823e3ab13",
+      "text": "模块文档：`pane.process_info` 输出层的凭据打码（RL12）。  能连上 socket 的调用方都能查任何窗格的前台进程，而命令行里常带认证头、token、 口令。进程采集（`platform` / `detect`）保持原样——检测要看完整 argv；这里只在 把结果交给调用方之前，把疑似凭据的值换成 `[REDACTED]`：程序名、选项名与参数 位置原样保留，调用方仍看得出跑的是什么。覆盖：  - 凭据类选项的值：`--token abc`、`--token=abc`、`--api-key abc`、`-password=abc`、   `--oauth2-bearer abc`； - 「名:口令」：curl 的 `--user` / `--proxy-user` / `-u` / `-U`，只打冒号后； - 敏感请求头：`-H 'Authorization: …'`、`--header Authorization: …`、   `-HX-Api-Key: …`，以及 httpie / xh 的位置参数 `Authorization:Bearer …`；   保留 `Bearer` / `Basic` 等认证方案名； - 独立出现的 `Bearer <token>`； - 凭据类环境变量赋值：`OPENAI_API_KEY=…`、`GITHUB_TOKEN=…`； - URL 里的口令与凭据类查询参数：`https://user:pass@host`、`?api_key=…`；http(s)   URL 的 userinfo 只有令牌时整段（`https://TOKEN@host`，`ssh://git@` 保留）； - 整段命令行形态的参数（`sh -c '…'`）按以上规则递归处理。  只认形态、不认程序：`-p<口令>` 这类短选项的含义随程序而异，不在覆盖范围内。\n公开项：\npub(super) fn redact_command( — 前台进程的 argv 与 cmdline 打码。argv[0]（程序本身）原样保留。\nimpl Quotes {"
     },
     {
       "anchor": "structure",
