@@ -458,9 +458,13 @@ impl ClientShellState {
                 }
                 Action::Header(panel) => {
                     self.focus_workbench_panel(panel.clone());
-                    // 紧凑视图只投影一个面板，没有可停靠的目标：标题栏（段间空隙、名字
-                    // 右侧空白、回退标题）同切换条一样只切焦点，不开始停靠拖动（W2）。
-                    if !self.workbench.dock.locked && !self.workbench.geometry.compact {
+                    // 紧凑视图与最大化都只投影一个面板，画面上没有可停靠的目标：标题栏
+                    // （段间空隙、名字右侧空白、回退标题、最大化面板的标题）同切换条一样
+                    // 只切焦点，不开始停靠拖动（W2、N20）。
+                    if !self.workbench.dock.locked
+                        && !self.workbench.geometry.compact
+                        && self.workbench.dock.maximized.is_none()
+                    {
                         self.workbench.drag = Some(Drag::Move {
                             panel,
                             tab: None,

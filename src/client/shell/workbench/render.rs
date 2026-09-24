@@ -372,8 +372,12 @@ impl ClientShellState {
                 unfocused_title
             };
             // 标题前的 `⠿` 是拖动停靠的把手：锁定布局后拖动被拒绝（冒烟 L1）、紧凑
-            // 视图只投影一个面板没有停靠目标（W2），都不画它，标题文字左移占位。
-            let handle = if self.workbench.dock.locked || self.workbench.geometry.compact {
+            // 视图与最大化只投影一个面板没有停靠目标（W2、N20），都不画它，标题文字
+            // 左移占位。
+            let handle = if self.workbench.dock.locked
+                || self.workbench.geometry.compact
+                || self.workbench.dock.maximized.is_some()
+            {
                 ""
             } else {
                 "⠿ "
@@ -619,6 +623,20 @@ impl ClientShellState {
                     "Layout locked · turn off Lock layout in the top bar to rearrange",
                     "布局已锁定 · 在顶栏取消「锁定布局」后可重新排布",
                 )
+            } else if self.workbench.dock.maximized.is_some() {
+                // 最大化只投影一个面板：没有别的面板可停靠、也没有分隔线可拖，页脚
+                // 改说怎么还原（N20）；不接鼠标时 `◫` 点不到，说键盘路径。
+                if self.config.mouse_capture {
+                    tr(
+                        "Maximized · click ◫ to restore the layout",
+                        "已最大化 · 点 ◫ 还原布局",
+                    )
+                } else {
+                    tr(
+                        "Maximized · press Enter in Arrange layout to restore the layout",
+                        "已最大化 · 在「调整布局」模式按 Enter 还原布局",
+                    )
+                }
             } else {
                 tr(
                     "Drag ⠿ to dock · drag borders to resize · drag tabs to split or regroup",

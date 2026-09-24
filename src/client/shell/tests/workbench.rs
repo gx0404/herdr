@@ -2155,11 +2155,16 @@ fn header_only_columns(state: &ClientShellState) -> Vec<u16> {
 }
 
 /// 在标题栏 `x` 列按下、拖进面板中部，返回拖动中那一帧去掉空白的文字；最后松开。
-fn drag_from_title_into_the_panel(state: &mut ClientShellState, x: u16, cols: u16) -> String {
+fn drag_from_title_into_the_panel(
+    state: &mut ClientShellState,
+    x: u16,
+    cols: u16,
+    rows: u16,
+) -> String {
     state.handle_input_bytes(format!("\x1b[<0;{};2M", x + 1).as_bytes());
-    let (to_x, to_y) = (cols / 2, 16);
+    let (to_x, to_y) = (cols / 2, rows / 2);
     state.handle_input_bytes(format!("\x1b[<32;{};{}M", to_x + 1, to_y + 1).as_bytes());
-    let dragged = frame_rows(&state.compose(cols, 32).expect("拖动中"))
+    let dragged = frame_rows(&state.compose(cols, rows).expect("拖动中"))
         .concat()
         .split_whitespace()
         .collect::<String>();
@@ -2192,7 +2197,7 @@ fn compact_title_bar_blank_space_never_starts_a_dock_drag() {
         "用例前提：第一处是名字之间的空隙（{gap}）"
     );
     for x in [gap, blank] {
-        let dragged = drag_from_title_into_the_panel(&mut state, x, 62);
+        let dragged = drag_from_title_into_the_panel(&mut state, x, 62, 32);
         assert!(
             !dragged.contains("放到这里"),
             "第 {x} 列按下拖动：不画停靠预览：{dragged}"
@@ -2221,9 +2226,127 @@ fn compact_fallback_title_has_no_drag_handle() {
     assert!(!rows[1].contains('⠿'), "回退标题不画拖动把手：{}", rows[1]);
     let layout = state.workbench.dock.clone();
     let x = title_x(&state, "A");
-    let dragged = drag_from_title_into_the_panel(&mut state, x, 24);
+    let dragged = drag_from_title_into_the_panel(&mut state, x, 24, 32);
     assert!(!dragged.contains("放到这里"), "不画停靠预览：{dragged}");
     assert_eq!(state.workbench.dock, layout, "布局不变");
+}
+
+/// N20（W2 同根；200×50 / 133×32 / 80×24 三档都不是紧凑视图）：最大化的面板铺满
+/// 内容区，画面上没有别的面板可停靠。以前按住它的标题拖进面板会开始停靠拖动，画出
+/// 无意义的「放到这里」预览，松开还立即写一次偏好；标题照画 `⠿` 把手，页脚照旧
+/// 提示拖动。现在与紧凑视图一致：按下标题只切焦点、不开始拖动，标题不画把手，页脚
+/// 改说怎么还原。鼠标路径（点 `◫`）与不接鼠标时的键盘路径（命令搜索进「调整布局」
+/// 再按 Enter）照页脚做都能还原。
+#[test]
+fn maximized_panel_title_only_focuses_and_never_starts_a_dock_drag() {
+    let _guard = crate::i18n::lang_guard(crate::i18n::Lang::ZhCn);
+    let squash = |text: &str| text.split_whitespace().collect::<String>();
+    for (cols, rows) in [(200, 50), (133, 32), (80, 24)] {
+        let size = format!("{cols}×{rows}");
+        let path = preferences_path(&format!("maximized-title-{cols}"));
+        let mut state = ready();
+        state.config.mouse_capture = true;
+        state.config.preferences_path = Some(path.clone());
+        // 焦点留在终端组：按下最大化面板的标题要把焦点切过去。
+        state.workbench.dock.maximized = Some(PanelId::Agents);
+        state.workbench.dock.focused = PanelId::Terminal(1);
+        let screen = frame_rows(&state.compose(cols, rows).expect("最大化"));
+        assert!(
+            !state.workbench.geometry.compact,
+            "{size}：用例前提：不是紧凑视图"
+        );
+        assert!(
+            matches!(
+                state.workbench.geometry.panels.as_slice(),
+                [(PanelId::Agents, _)]
+            ),
+            "{size}：用例前提：只投影最大化的 Agents 面板"
+        );
+        assert!(
+            squash(&screen[1]).starts_with("Agents"),
+            "{size}：标题文字左移占位：{}",
+            screen[1]
+        );
+        assert!(
+            !screen[1].contains('⠿'),
+            "{size}：最大化的标题不画拖动把手：{}",
+            screen[1]
+        );
+        let footer = squash(&screen[usize::from(rows) - 1]);
+        assert!(
+            !footer.contains("拖动"),
+            "{size}：页脚不再提示拖动：{footer}"
+        );
+        assert!(
+            footer.contains("已最大化·点◫还原布局"),
+            "{size}：页脚说明怎么还原：{footer}"
+        );
+
+        let root = state.workbench.dock.root.clone();
+        let x = title_x(&state, "A");
+        let dragged = drag_from_title_into_the_panel(&mut state, x, cols, rows);
+        assert!(
+            !dragged.contains("放到这里"),
+            "{size}：不画停靠预览：{dragged}"
+        );
+        assert_eq!(
+            state.workbench.dock.focused,
+            PanelId::Agents,
+            "{size}：按下标题只切焦点"
+        );
+        assert_eq!(
+            state.workbench.dock.maximized,
+            Some(PanelId::Agents),
+            "{size}：仍然最大化"
+        );
+        assert_eq!(state.workbench.dock.root, root, "{size}：布局树不变");
+        assert_eq!(
+            state.preferences_writes, 0,
+            "{size}：没有拖动手势，松开时不立即落盘"
+        );
+
+        // 鼠标路径：照页脚点 `◫` 还原，拖动把手与拖动提示随之回来。
+        state.compose(cols, rows).expect("还原前");
+        let toggle = title_x(&state, "◫");
+        sgr_click(&mut state, toggle, 1);
+        assert_eq!(state.workbench.dock.maximized, None, "{size}：点 ◫ 还原");
+        let screen = frame_rows(&state.compose(cols, rows).expect("还原后"));
+        assert!(
+            screen[1].contains('⠿'),
+            "{size}：还原后标题带回拖动把手：{}",
+            screen[1]
+        );
+        assert!(
+            squash(&screen[usize::from(rows) - 1]).contains("拖动"),
+            "{size}：还原后页脚回到拖动提示"
+        );
+        let _ = std::fs::remove_file(&path);
+
+        // 不接鼠标：点 `◫` 做不到，页脚改说键盘还原方式；照做即还原。
+        let mut state = ready();
+        state.config.mouse_capture = false;
+        state.workbench.dock.maximized = Some(PanelId::Agents);
+        state.workbench.dock.focused = PanelId::Agents;
+        let screen = frame_rows(&state.compose(cols, rows).expect("最大化、不接鼠标"));
+        let footer = squash(&screen[usize::from(rows) - 1]);
+        assert!(
+            footer.contains("已最大化·在「调整布局」模式按Enter还原布局"),
+            "{size}：不接鼠标时页脚说键盘还原方式：{footer}"
+        );
+        assert!(
+            !footer.contains('◫'),
+            "{size}：点不到就不提示点击：{footer}"
+        );
+        state.open_command_search();
+        palette_select(&mut state, "layout");
+        state.handle_input_bytes(b"\r");
+        assert!(state.workbench.arranging, "{size}：命令搜索进入调整布局");
+        state.handle_input_bytes(b"\r");
+        assert_eq!(
+            state.workbench.dock.maximized, None,
+            "{size}：调整布局模式按 Enter 还原"
+        );
+    }
 }
 
 /// `tab_1` 里两个窗格（`pane_1`、`pane_2`）的快照，`focused` 是聚焦窗格；`zoomed`
