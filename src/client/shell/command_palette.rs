@@ -1181,11 +1181,13 @@ pub(crate) fn render_command_palette(
         BrowserView::Menu(None) => t.main_menu,
         BrowserView::Menu(Some(group)) => t.categories[group],
     };
+    // 标题、分节标题与空态离边框留 1 列（冒烟 L4），与搜索栏的「/」同列。
+    let header = super::render::text_inset(layout.header);
     put_text(
         b,
-        layout.header.x,
-        layout.header.y,
-        layout.header.width,
+        header.x,
+        header.y,
+        header.width,
         title,
         Style::default().fg(p.accent).add_modifier(Modifier::BOLD),
     );
@@ -1229,11 +1231,12 @@ pub(crate) fn render_command_palette(
     );
     let mut row_hits = Vec::new();
     if rows.is_empty() {
+        let empty = super::render::text_inset(body);
         put_text(
             b,
-            body.x,
-            body.y,
-            body.width,
+            empty.x,
+            empty.y,
+            empty.width,
             t.no_matches,
             Style::default().fg(p.overlay0),
         );
@@ -1249,11 +1252,12 @@ pub(crate) fn render_command_palette(
             1,
         );
         let Some(index) = visual[visual_index] else {
+            let label = super::render::text_inset(rect);
             put_text(
                 b,
-                rect.x,
-                rect.y,
-                rect.width,
+                label.x,
+                label.y,
+                label.width,
                 if visual_index == 0 && has_recent {
                     t.recent
                 } else {

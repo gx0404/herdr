@@ -2765,3 +2765,70 @@ fn views_update_failure_notice_follows_the_interface_language() {
     assert_eq!(error, crate::i18n::texts().runtime.views_update_failed);
     assert!(!crate::i18n::has_cjk(&error), "{error}");
 }
+
+/// 工作台里某个停靠面板的正文矩形（标题栏以下）。
+fn panel_body(state: &ClientShellState, panel: &PanelId) -> Rect {
+    state
+        .workbench
+        .geometry
+        .panels
+        .iter()
+        .find(|(id, _)| id == panel)
+        .map(|(id, area)| crate::client::shell::workbench::body(*area, id))
+        .unwrap_or_else(|| panic!("面板 {panel:?} 不在当前几何里"))
+}
+
+/// 冒烟 L4：工作台里面板之间的分隔线由停靠布局负责，工作区面板不再画经典
+/// 侧栏右缘的「│」：紧凑视图里工作区与 Agents 两个面板右侧一致（都没有），
+/// 宽屏下工作区面板也不再与停靠分隔线叠成「││」；两个面板的正文同用侧栏底色。
+/// 宽屏、紧凑 62 列、紧凑 44 列三档。
+#[test]
+fn workspace_and_agents_panels_share_the_same_edges_and_background() {
+    let sidebar_bg = ratatui::style::Color::Rgb(1, 2, 3);
+    let check = |state: &ClientShellState, panel: PanelId, case: &str| {
+        let body = panel_body(state, &panel);
+        assert!(!body.is_empty(), "{case}: {panel:?} 正文画出来了");
+        let buffer = state.compose_buffer.as_ref().expect("保留帧缓冲");
+        let right = body.right() - 1;
+        for y in body.y..body.bottom() {
+            assert_ne!(
+                buffer[(right, y)].symbol(),
+                "│",
+                "{case}: {panel:?} 正文最右列（第 {right} 列）不画侧栏分隔线，行 {y}"
+            );
+        }
+        for y in [body.y, body.bottom() - 1] {
+            assert_eq!(
+                buffer[(body.x, y)].bg,
+                sidebar_bg,
+                "{case}: {panel:?} 正文用侧栏底色，行 {y}"
+            );
+        }
+    };
+
+    let mut state = ready();
+    state.config.palette.sidebar_bg = sidebar_bg;
+    state.compose(120, 34).expect("宽屏工作台");
+    assert!(
+        !state.workbench.geometry.compact,
+        "用例前提：120 列不是紧凑视图"
+    );
+    check(&state, PanelId::Workspaces, "宽屏");
+    check(&state, PanelId::Agents, "宽屏");
+
+    for cols in [62, 44] {
+        let mut state = ready();
+        state.config.palette.sidebar_bg = sidebar_bg;
+        // 监控面板让布局最小宽度超过 62 列：只投影聚焦面板（截屏 93）。
+        state.workbench_open(PanelId::Monitor);
+        for panel in [PanelId::Workspaces, PanelId::Agents] {
+            state.workbench.dock.focused = panel.clone();
+            state.compose(cols, 32).expect("紧凑视图");
+            assert!(
+                state.workbench.geometry.compact,
+                "用例前提：{cols} 列是紧凑视图"
+            );
+            check(&state, panel, &format!("紧凑 {cols} 列"));
+        }
+    }
+}

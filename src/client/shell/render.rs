@@ -13,8 +13,8 @@ pub(super) use super::context_menu::render_context_menu;
 pub(in crate::client::shell) use overlays::settings_overlay::settings_list_window;
 pub(in crate::client::shell) use overlays::{
     help_geometry, help_max_scroll, modal_button, modal_button_row, modal_panel, panel,
-    panel_inner, render_search_bar, scrollback_overlay_body, scrollback_overlay_layout,
-    titled_panel, OverlayRender, SearchBar,
+    panel_inner, render_search_bar, scrollback_overlay_body, scrollback_overlay_layout, text_inset,
+    titled_panel, OverlayRender, SearchBar, TEXT_INSET,
 };
 pub(super) use overlays::{render_client_overlay, render_minimum_overlay};
 pub(super) use sidebar::{render_collapsed_sidebar, render_sidebar, workspace_entries};

@@ -1398,3 +1398,110 @@ fn assert_hits_on_drawn_rows(
         );
     }
 }
+
+/// 画面里 `needle` 第一次出现的位置（行, 列）；每格一个字符（宽字符的续格是
+/// 空格），列号即字符下标。
+fn find_text(rows: &[String], needle: &str) -> Option<(usize, usize)> {
+    rows.iter().enumerate().find_map(|(y, row)| {
+        row.find(needle)
+            .map(|byte| (y, row[..byte].chars().count()))
+    })
+}
+
+/// `needle` 左侧紧挨着 1 列留白、再往左是浮层左边框。
+fn assert_left_inset(rows: &[String], needle: &str, case: &str) {
+    let (y, x) = find_text(rows, needle)
+        .unwrap_or_else(|| panic!("{case}: 画面里没有 {needle:?}\n{}", rows.join("\n")));
+    let chars = rows[y].chars().collect::<Vec<_>>();
+    assert!(x >= 2, "{case}: {needle:?} 在第 {x} 列");
+    assert_eq!(
+        (chars[x - 2], chars[x - 1]),
+        ('│', ' '),
+        "{case}: {needle:?} 离左边框 1 列：{:?}",
+        rows[y]
+    );
+}
+
+/// 冒烟 L4：浮层正文首列不再紧贴边框——设置页分区标题与说明、集成页说明行与
+/// 安装消息（续行再缩 2 列）、命令搜索的标题与空态、快捷键与通知历史的标题和
+/// 空态都从边框内第 2 列起笔，与本就带前导空格的搜索栏、列表行、页脚同列；
+/// 搜索栏右侧的计数离右边框 1 列。宽 / 中 / 窄三档。
+#[test]
+fn overlay_text_keeps_a_one_column_inset_from_the_border() {
+    let _lang = crate::i18n::lang_guard(crate::i18n::Lang::En);
+    for (cols, rows) in [(120, 32), (64, 32), (44, 32)] {
+        let case = format!("{cols} 列");
+
+        let mut state = settings_integrations_state(&["codex"], &LONG_INSTALL_MESSAGES);
+        let mut outcome = ClientShellInput::default();
+        state.select_settings_section(ClientSettingsSection::Indicators, &mut outcome);
+        let screen = frame_rows(&state.compose(cols, rows).expect("settings indicators"));
+        assert_left_inset(
+            &screen,
+            "agent status indicators",
+            &format!("{case} 指示器标题"),
+        );
+        assert_left_inset(&screen, "choose color", &format!("{case} 指示器说明"));
+
+        state.select_settings_section(ClientSettingsSection::Integrations, &mut outcome);
+        // 切回集成页会重新请求列表并清掉上次的安装消息：夹具直接当作列表与
+        // 安装结果都已到。
+        if let Some(ClientShellOverlay::Settings(settings)) = state.overlay.as_mut() {
+            settings.loading_integrations = false;
+            settings.integration_messages = LONG_INSTALL_MESSAGES
+                .iter()
+                .map(|message| (*message).to_owned())
+                .collect();
+        }
+        let screen = frame_rows(&state.compose(cols, rows).expect("settings integrations"));
+        assert_left_inset(&screen, "agent integrations", &format!("{case} 集成说明行"));
+        assert_left_inset(&screen, "to enable OpenCode", &format!("{case} 安装消息"));
+        let (y, x) = find_text(&screen, "to enable OpenCode").expect("V2 提示");
+        let next = screen[y + 1].chars().collect::<Vec<_>>();
+        assert!(
+            next[x..x + 2].iter().all(|ch| *ch == ' ') && next[x + 2] != ' ',
+            "{case}: 续行在首行文字基础上再缩 2 列：{:?}",
+            screen[y + 1]
+        );
+
+        state.overlay = None;
+        state.open_command_search();
+        state.handle_input_bytes(b"zzqqxxjj");
+        let screen = frame_rows(&state.compose(cols, rows).expect("command search"));
+        let t = &crate::i18n::texts().global_menu;
+        assert_left_inset(&screen, t.command_search, &format!("{case} 命令搜索标题"));
+        assert_left_inset(&screen, t.no_matches, &format!("{case} 命令搜索空态"));
+        let (y, _) = find_text(&screen, "/ zzqqxxjj").expect("搜索栏");
+        let chars = screen[y].chars().collect::<Vec<_>>();
+        let border = chars
+            .iter()
+            .rposition(|ch| *ch == '│')
+            .expect("搜索栏右边框");
+        assert_eq!(
+            (chars[border - 2], chars[border - 1]),
+            ('0', ' '),
+            "{case}: 计数离右边框 1 列：{:?}",
+            screen[y]
+        );
+
+        state.overlay = Some(ClientShellOverlay::Help(ClientHelpOverlay {
+            query: TextEditor::default(),
+            search_focused: false,
+            scroll: 0,
+            max_scroll: 0,
+        }));
+        let screen = frame_rows(&state.compose(cols, rows).expect("help"));
+        assert_left_inset(
+            &screen,
+            crate::i18n::texts().overlays.keybinds_title,
+            &format!("{case} 快捷键标题"),
+        );
+
+        state.overlay = None;
+        state.open_notification_history();
+        let screen = frame_rows(&state.compose(cols, rows).expect("history"));
+        let history = &crate::i18n::texts().history;
+        assert_left_inset(&screen, history.title, &format!("{case} 通知历史标题"));
+        assert_left_inset(&screen, history.empty, &format!("{case} 通知历史空态"));
+    }
+}

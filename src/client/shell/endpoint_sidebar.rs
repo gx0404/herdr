@@ -352,15 +352,24 @@ pub(super) fn render_expanded_regions(
     regions: Option<(Rect, Rect)>,
 ) {
     let palette = &config.palette;
-    super::render::render_sidebar_background(
-        buffer,
-        area,
-        palette,
-        matches!(
-            state.chrome_hover,
-            Some(super::feedback::ChromeHover::SidebarDivider)
-        ),
-    );
+    if let Some((workspace, agents)) = regions {
+        // 工作台：面板之间的分隔线由停靠布局画，两个面板只铺同一种侧栏底色，工作区
+        // 面板不再画经典侧栏右缘的「│」（冒烟 L4：紧凑视图里工作区面板有、Agents
+        // 面板没有，宽屏下又与停靠分隔线叠成「││」）。
+        let background = Style::default().bg(palette.sidebar_bg);
+        buffer.set_style(workspace, background);
+        buffer.set_style(agents, background);
+    } else {
+        super::render::render_sidebar_background(
+            buffer,
+            area,
+            palette,
+            matches!(
+                state.chrome_hover,
+                Some(super::feedback::ChromeHover::SidebarDivider)
+            ),
+        );
+    }
     hits.sidebar_divider = if area.is_empty() {
         Rect::default()
     } else {

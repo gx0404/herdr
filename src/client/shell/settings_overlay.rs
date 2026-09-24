@@ -80,7 +80,7 @@ fn settings_modal_size(area: Rect, settings: &ClientSettingsOverlay) -> crate::u
     let message_rows = crate::ui::modal_rect(area, base)
         .and_then(super::render::panel_inner)
         .map_or(settings.integration_messages.len(), |inner| {
-            integration_lines(settings, integrations_layout(inner).1.width)
+            integration_lines(settings, integrations_layout(inner).1)
                 .iter()
                 .filter(|line| line.entry >= settings.integrations.len())
                 .count()
@@ -145,7 +145,7 @@ pub(in crate::client::shell) fn settings_list_window(
         }),
         ClientSettingsSection::Integrations => {
             let (_, list) = integrations_layout(layout.content);
-            let lines = integration_lines(settings, list.width);
+            let lines = integration_lines(settings, list);
             Some(SettingsListWindow {
                 body: list,
                 rows: lines.len(),
@@ -453,11 +453,13 @@ fn render_choice_section(
     palette: &Palette,
     hits: &mut Vec<(Rect, usize)>,
 ) {
+    // 标题与说明离边框留 1 列（冒烟 L4）；选项行整行高亮，文字自带前导空格。
+    let text = super::text_inset(area);
     put_text(
         buffer,
-        area.x,
-        area.y,
-        area.width,
+        text.x,
+        text.y,
+        text.width,
         title,
         Style::default()
             .fg(palette.text)
@@ -467,9 +469,9 @@ fn render_choice_section(
     if area.height >= 2 {
         put_text(
             buffer,
-            area.x,
-            area.y + 1,
-            area.width,
+            text.x,
+            text.y + 1,
+            text.width,
             description,
             Style::default().fg(palette.overlay1).bg(palette.panel_bg),
         );
@@ -541,12 +543,13 @@ struct IntegrationLine {
 /// 消息续行比首行多缩进的列数：一眼看出它接着上一行，不是新的一条消息。
 const MESSAGE_CONTINUATION_INDENT: u16 = 2;
 
-/// 集成页列表按 `width` 列展开成行。加载中或没有集成时列表区只画一行提示，
-/// 不列行，滚动归零。
-fn integration_lines(settings: &ClientSettingsOverlay, width: u16) -> Vec<IntegrationLine> {
+/// 集成页列表区 `list` 展开成行：消息按离边框留白后的文字宽度折行（冒烟 L4，
+/// 与渲染同一口径）。加载中或没有集成时列表区只画一行提示，不列行，滚动归零。
+fn integration_lines(settings: &ClientSettingsOverlay, list: Rect) -> Vec<IntegrationLine> {
     if settings.loading_integrations || settings.integrations.is_empty() {
         return Vec::new();
     }
+    let width = super::text_inset(list).width;
     let mut lines = (0..settings.integrations.len())
         .map(|entry| IntegrationLine {
             entry,
@@ -641,6 +644,7 @@ fn render_integrations(
     let p = cx.palette;
     let t = &crate::i18n::texts().settings;
     if settings.loading_integrations || settings.integrations.is_empty() {
+        // 这两句文案自带前导空格，已与其余正文同列。
         put_text(
             buffer,
             area.x,
@@ -656,7 +660,7 @@ fn render_integrations(
         return;
     }
     let (header, list) = integrations_layout(area);
-    if let Some(header) = header {
+    if let Some(header) = header.map(super::text_inset) {
         // 一次性提示（「选中的集成无需安装」）占用说明行，不挤掉下方承载
         // 服务端安装结果的消息区。
         let (line, style) = match settings.integration_notice.as_deref() {
@@ -683,7 +687,7 @@ fn render_integrations(
             style,
         );
     }
-    let lines = integration_lines(settings, list.width);
+    let lines = integration_lines(settings, list);
     // Fixed status column: labels longer than the old hard-coded 12 columns
     // (antigravity-cli) otherwise pushed their status out of alignment.
     let label_width = settings
@@ -743,16 +747,18 @@ fn render_integrations(
             .get(line.entry - settings.integrations.len())
             .and_then(|message| message.get(line.start..line.end))
         {
+            // 消息与集成行的标记同列起笔（离边框 1 列），续行再缩进。
+            let area = super::text_inset(rect);
             let indent = if line.continuation {
-                MESSAGE_CONTINUATION_INDENT.min(rect.width)
+                MESSAGE_CONTINUATION_INDENT.min(area.width)
             } else {
                 0
             };
             put_text(
                 buffer,
-                rect.x + indent,
-                rect.y,
-                rect.width - indent,
+                area.x + indent,
+                area.y,
+                area.width - indent,
                 text,
                 Style::default().fg(p.subtext0),
             );

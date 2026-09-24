@@ -147,7 +147,11 @@ pub(super) fn render_agent_panel_header(
         .x
         .saturating_add(crate::ui::display_width_u16(texts.sidebar.agents))
         .saturating_add(2);
-    let room = usize::from(area.right().saturating_sub(min_sort_x));
+    // 右端离分隔线留的列数与树行同一判据（冒烟 L4：原来紧贴分隔线）。
+    let right = area
+        .right()
+        .saturating_sub(super::agent_tree::tree_inset(area.width));
+    let room = usize::from(right.saturating_sub(min_sort_x));
     let fitted = if display_width(sort_label) <= room {
         std::borrow::Cow::Borrowed(sort_label)
     } else if room >= 3 {
@@ -160,12 +164,7 @@ pub(super) fn render_agent_panel_header(
     let sort_rect = if sort_width == 0 {
         Rect::default()
     } else {
-        Rect::new(
-            area.right().saturating_sub(sort_width),
-            area.y + 1,
-            sort_width,
-            1,
-        )
+        Rect::new(right.saturating_sub(sort_width), area.y + 1, sort_width, 1)
     };
     hits.agent_sort_toggle = if config.mouse_capture && agent_view_label.is_none() {
         sort_rect

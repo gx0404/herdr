@@ -236,6 +236,24 @@ pub(in crate::client::shell) fn panel_inner(area: Rect) -> Option<Rect> {
         .then(|| Rect::new(area.x + 1, area.y + 1, area.width - 2, area.height - 2))
 }
 
+/// 浮层与面板里文字离边框 / 分隔线的内边距（冒烟 L4）：标题、说明、纯文本正文
+/// 与右对齐的计数都让出 1 列，和本就带前导空格的搜索栏、列表行、页脚同列起笔。
+pub(in crate::client::shell) const TEXT_INSET: u16 = 1;
+
+/// `area` 左右各让出 [`TEXT_INSET`] 列后的文字区；窄到让不出时原样返回（内容
+/// 优先于留白）。
+pub(in crate::client::shell) fn text_inset(area: Rect) -> Rect {
+    if area.width <= TEXT_INSET * 2 {
+        return area;
+    }
+    Rect::new(
+        area.x + TEXT_INSET,
+        area.y,
+        area.width - TEXT_INSET * 2,
+        area.height,
+    )
+}
+
 pub(in crate::client::shell) fn panel(
     b: &mut Buffer,
     a: Rect,
@@ -412,14 +430,19 @@ pub(in crate::client::shell) fn render_search_bar(
             .bg(p.panel_bg),
     );
     let count_width = bar.count.as_deref().map(display_width).unwrap_or(0);
+    // 计数离右边框留 1 列（冒烟 L4），输入区在计数左边再空 1 列。
+    let count_room = if bar.count.is_some() {
+        count_width + 1 + TEXT_INSET
+    } else {
+        0
+    };
     let cursor = if bar.focused {
         text_editor::render(
             b,
             Rect::new(
                 area.x + 3,
                 area.y,
-                area.width
-                    .saturating_sub(3 + count_width + u16::from(bar.count.is_some())),
+                area.width.saturating_sub(3 + count_room),
                 1,
             ),
             bar.query,
@@ -431,7 +454,7 @@ pub(in crate::client::shell) fn render_search_bar(
     if let Some(count) = bar.count.as_deref() {
         put_right_text(
             b,
-            area,
+            text_inset(area),
             area.y,
             count,
             Style::default().fg(p.overlay0).bg(p.panel_bg),
@@ -690,24 +713,25 @@ fn render_onboarding_overlay(b: &mut Buffer, cx: &ChromeContext<'_>) -> Option<O
     let text = base.fg(p.overlay1);
     let accent = base.fg(p.accent).add_modifier(Modifier::BOLD);
 
+    let header = text_inset(stack.header);
     put_text(
         b,
-        stack.header.x,
-        stack.header.y,
-        stack.header.width,
+        header.x,
+        header.y,
+        header.width,
         crate::ui::ONBOARDING_TITLE,
         title,
     );
     put_text(
         b,
-        stack.header.x,
-        stack.header.y.saturating_add(1),
-        stack.header.width,
+        header.x,
+        header.y.saturating_add(1),
+        header.width,
         crate::i18n::texts().onboarding.subtitle,
         muted,
     );
 
-    let content = stack.content;
+    let content = text_inset(stack.content);
     for (offset, line) in crate::i18n::texts()
         .onboarding
         .description
@@ -780,11 +804,12 @@ fn render_rename_overlay(
     let p = cx.palette;
     let (q, i) = modal_panel(b, crate::ui::ModalSize::Small, p.accent, cx)?;
     let stack = crate::ui::modal_stack_areas(i, 1, 0, 1, 1);
+    let title = text_inset(stack.header);
     put_text(
         b,
-        stack.header.x,
-        stack.header.y,
-        stack.header.width,
+        title.x,
+        title.y,
+        title.width,
         v.title,
         Style::default()
             .fg(p.text)
@@ -1240,11 +1265,12 @@ fn render_help_overlay(
         return None;
     }
     let stack = crate::ui::modal_stack_areas(i, 2, 1, 0, 1);
+    let title = text_inset(stack.header);
     put_text(
         b,
-        stack.header.x,
-        stack.header.y,
-        stack.header.width,
+        title.x,
+        title.y,
+        title.width,
         crate::i18n::texts().overlays.keybinds_title,
         Style::default()
             .fg(p.text)
@@ -1431,11 +1457,12 @@ fn render_notification_history_overlay(
     let base = Style::default()
         .bg(p.panel_bg)
         .remove_modifier(Modifier::DIM);
+    let title = text_inset(stack.header);
     put_text(
         b,
-        stack.header.x,
-        stack.header.y,
-        stack.header.width,
+        title.x,
+        title.y,
+        title.width,
         t.title,
         base.fg(p.text).add_modifier(Modifier::BOLD),
     );
@@ -1444,7 +1471,15 @@ fn render_notification_history_overlay(
     let count = history.len();
     if count == 0 {
         if !body.is_empty() {
-            put_text(b, body.x, body.y, body.width, t.empty, base.fg(p.overlay0));
+            let empty = text_inset(body);
+            put_text(
+                b,
+                empty.x,
+                empty.y,
+                empty.width,
+                t.empty,
+                base.fg(p.overlay0),
+            );
         }
     } else {
         let viewport = usize::from(body.height.max(1));

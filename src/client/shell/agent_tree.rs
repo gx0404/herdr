@@ -257,6 +257,22 @@ fn external_group_key(source: &str) -> String {
 /// 徽标只拿剩下的宽度，窄侧栏里深层 agent 行不会只剩一截徽标。
 const PRIMARY_MIN_WIDTH: u16 = 8;
 
+/// 面板不足这么多列时树行与表头不留内边距（冒烟 L4）：窄侧栏里名称与徽标的
+/// 宽度预算优先，最窄的 18 列侧栏与原来逐格一致。
+const TREE_INSET_MIN_WIDTH: u16 = 22;
+
+/// Agents 面板的内边距列数：树行文字离面板左缘、右对齐的计数 / 徽标 / 排序切换
+/// 离右侧分隔线（或滚动条）各留这么多列。面板够宽时是 1 列（`render::TEXT_INSET`，
+/// 与浮层同一口径），窄面板为 0。左对齐的名称等文字仍可用到行尾：留白不挤名称。
+/// 表头与树行用同一个判据，右缘对得齐。
+pub(super) fn tree_inset(panel_width: u16) -> u16 {
+    if panel_width >= TREE_INSET_MIN_WIDTH {
+        super::render::TEXT_INSET
+    } else {
+        0
+    }
+}
+
 /// 当前图标风格下阻塞是否与工作中同形（圆点风格都是「●」）：同形时阻塞要另加
 /// 「!」这类非颜色记号（冒烟 L3），符号风格的「×」本身就够了。
 fn blocked_shares_icon(style: crate::config::StatusIndicatorStyle) -> bool {
@@ -948,6 +964,7 @@ pub(super) fn render_agent_tree_rows(
         config,
         chrome_hover,
         endpoint_qualified,
+        inset: tree_inset(area.width),
     };
     let flat = area.height.saturating_sub(3) < 3;
     let listed = if flat { rows.flat } else { rows.tree };
@@ -988,6 +1005,8 @@ struct RowContext<'a> {
     config: &'a ClientShellConfig,
     chrome_hover: Option<&'a ChromeHover>,
     endpoint_qualified: bool,
+    /// 行首留白与右对齐元素离右缘的列数（[`tree_inset`]）；高亮与命中区仍是整行。
+    inset: u16,
 }
 
 /// 树前缀里折叠开关的命中区（无子节点或被裁掉时为空），续行据此决定要不要在
@@ -1068,12 +1087,20 @@ fn render_tree_row(
             .map_or(palette.panel_bg, |cell| cell.bg),
     );
 
+    // 文字区：离面板左缘留 `inset` 列（冒烟 L4）；右对齐的计数与徽标各自再离右缘
+    // 留同样的列数。底色、命中区与离线变暗仍按整行 `rect`。
+    let text = Rect::new(
+        rect.x.saturating_add(cx.inset),
+        rect.y,
+        rect.width.saturating_sub(cx.inset),
+        rect.height,
+    );
     let prefix_style = Style::default().fg(palette.overlay0);
     let (used, toggle) = render_tree_prefix(
         buffer,
-        rect.x,
-        rect.y,
-        rect.width,
+        text.x,
+        text.y,
+        text.width,
         depth,
         mask,
         has_children,
@@ -1093,10 +1120,10 @@ fn render_tree_row(
     }
     let prefix = Prefix { toggle };
     let content = Rect::new(
-        rect.x.saturating_add(used),
-        rect.y,
-        rect.width.saturating_sub(used),
-        rect.height,
+        text.x.saturating_add(used),
+        text.y,
+        text.width.saturating_sub(used),
+        text.height,
     );
 
     match &node.kind {
@@ -1105,7 +1132,7 @@ fn render_tree_row(
         } => {
             render_agent_lines(
                 buffer,
-                rect,
+                text,
                 content,
                 row,
                 agent,
@@ -1241,8 +1268,10 @@ fn render_group_line(
         _ => return,
     };
     let count = node.count_label();
-    let count_width = display_width(count).min(usize::from(content.width)) as u16;
-    let count_x = content.right().saturating_sub(count_width);
+    // 计数离右侧分隔线留 `inset` 列（冒烟 L4：原来紧贴分隔线）。
+    let right = content.right().saturating_sub(cx.inset).max(content.x);
+    let count_width = display_width(count).min(usize::from(right - content.x)) as u16;
+    let count_x = right.saturating_sub(count_width);
     put_text(
         buffer,
         count_x,
@@ -1488,25 +1517,23 @@ fn render_agent_lines(
 }
 
 /// 在 `content` 首行右侧画活动徽标（档位见 [`ActivityBadge::fit`]），返回首行
-/// 留给左侧内容（状态图标、名称等）的宽度：已扣掉徽标与它前面的 1 列间隔，
-/// 没画徽标时是整行宽。
+/// 留给左侧内容（状态图标、名称等）的宽度：已扣掉徽标、它前面的 1 列间隔与它
+/// 离右缘的留白，没画徽标时是整行宽。
 fn render_badge(
     buffer: &mut Buffer,
     content: Rect,
     node: &AgentTreeNode,
     cx: &RowContext<'_>,
 ) -> u16 {
-    let Some((text, width)) = node
-        .badge
-        .as_ref()
-        .and_then(|badge| badge.fit(content.width))
-    else {
+    // 徽标与分组计数同一右缘：离右侧分隔线留 `inset` 列（冒烟 L4）。
+    let room = content.width.saturating_sub(cx.inset);
+    let Some((text, width)) = node.badge.as_ref().and_then(|badge| badge.fit(room)) else {
         return content.width;
     };
     let palette = &cx.config.palette;
     put_text(
         buffer,
-        content.right().saturating_sub(width),
+        content.x.saturating_add(room).saturating_sub(width),
         content.y,
         width,
         text,
@@ -1516,7 +1543,7 @@ fn render_badge(
             palette.overlay0
         }),
     );
-    content.width.saturating_sub(width + 1)
+    room.saturating_sub(width + 1)
 }
 
 /// agent 行续行的引导线：祖先各层沿用末子掩码（`│ ` / 空白），本节点展开时在
