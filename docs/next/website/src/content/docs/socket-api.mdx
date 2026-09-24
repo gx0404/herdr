@@ -945,7 +945,12 @@ optional `agent`, `cwd`, `updated_at_ms`, and `activity`. The one external
 source today is `zcode`, the ZCode desktop app: it lists up to 10 unarchived
 root sessions updated in the last 72 hours, read-only from ZCode's local
 database through the system `sqlite3` command, each with its subagent tree and
-todos. Without ZCode's database (ZCode not installed or never started) the call
+todos. Those 10 roots share a single 300-row cap for the whole query, so a large
+early root can leave later roots showing only themselves in this list; reading
+one root's full tree afterwards through `agent.activity.read`'s `external_id`
+runs an independent query scoped to that root alone, with its own 300-row cap
+that is not shared with the list. Without ZCode's database (ZCode not installed
+or never started) the call
 succeeds with an empty list; hide the external section of a client when the list
 comes back empty. When `sqlite3` is missing or the database cannot be read, the
 call fails with `activity_unavailable`. `not_implemented` is returned only when
