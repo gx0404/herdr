@@ -2543,7 +2543,7 @@ mod tests {
         report(&mut app, &public, "s-1", 1);
         app.state
             .agent_activity
-            .note_transcript(pane_id, transcript("s-1"));
+            .note_transcript(pane_id, Some(1), transcript("s-1"));
         assert_eq!(
             session(&app, pane_id),
             Some((AgentSessionRefKind::Path, transcript_path("s-1")))
@@ -2558,7 +2558,7 @@ mod tests {
         let (mut idle, idle_pane, _) = app_with_agent(None);
         idle.state
             .agent_activity
-            .note_transcript(idle_pane, transcript("s-3"));
+            .note_transcript(idle_pane, Some(3), transcript("s-3"));
         idle.state.expire_agent_activity(Instant::now());
         assert!(
             idle.state
@@ -2576,6 +2576,90 @@ mod tests {
                 .is_none(),
             "pane 关掉后清理"
         );
+    }
+
+    /// B 车道审查轻 2：转录路径按上报序号取舍，与会话状态机同口径。先报 S2（序号 2），
+    /// 再迟到一条更早的 S1（序号 1）：状态机丢掉 S1、会话仍是 S2，转录表也不能被 S1 的
+    /// 路径盖掉，否则 S2 退回按 id 查找，pane 里单设的配置目录下又找不到会话。
+    #[test]
+    fn a_late_older_session_report_keeps_the_newer_transcript() {
+        let dir = std::env::temp_dir().join("herdr-transcript-order");
+        let path = |session: &str| {
+            dir.join(format!("{session}.jsonl"))
+                .to_string_lossy()
+                .into_owned()
+        };
+        let (mut app, pane_id, public) = app_with_agent(Some(Agent::Claude));
+        for (session, seq) in [("s-2", 2), ("s-1", 1)] {
+            let response = app.handle_api_request(Request {
+                id: format!("session-{seq}"),
+                method: Method::PaneReportAgentSession(
+                    crate::api::schema::PaneReportAgentSessionParams {
+                        pane_id: public.clone(),
+                        source: "herdr:claude".into(),
+                        agent: "claude".into(),
+                        seq: Some(seq),
+                        agent_session_id: Some(session.into()),
+                        agent_session_path: Some(path(session)),
+                        session_start_source: Some("startup".into()),
+                    },
+                ),
+            });
+            assert!(response.contains("\"ok\""), "{response}");
+        }
+        let session = app
+            .state
+            .agent_activity_subject(pane_id)
+            .and_then(|subject| subject.session)
+            .map(|session| (session.kind, session.value));
+        assert_eq!(
+            session,
+            Some((crate::agent_resume::AgentSessionRefKind::Path, path("s-2"))),
+            "会话仍是 S2，转录路径仍是 P2"
+        );
+    }
+
+    /// 转录表的序号口径与 `TerminalState::accept_hook_report` 相同：带序号的只收更大的；
+    /// 不带序号的只在还没记下过带序号的上报时收。
+    #[test]
+    fn transcript_reports_follow_the_hook_sequence_rules() {
+        let mut store = crate::app::state::AgentActivityStore::default();
+        let agent = pane(1);
+        let transcript = |session: &str| crate::agent_resume::ReportedTranscript {
+            session_id: session.into(),
+            path: crate::agent_resume::AgentSessionRef::path(
+                std::env::temp_dir()
+                    .join(format!("{session}.jsonl"))
+                    .to_string_lossy()
+                    .into_owned(),
+            )
+            .expect("绝对路径"),
+        };
+        assert!(
+            store.note_transcript(agent, None, transcript("a")),
+            "还没有记录"
+        );
+        assert!(
+            store.note_transcript(agent, None, transcript("b")),
+            "都不带序号：后来者覆盖"
+        );
+        assert!(store.note_transcript(agent, Some(5), transcript("c")));
+        assert!(
+            !store.note_transcript(agent, Some(5), transcript("d")),
+            "同号不收"
+        );
+        assert!(
+            !store.note_transcript(agent, Some(4), transcript("e")),
+            "更早的不收"
+        );
+        assert!(
+            !store.note_transcript(agent, None, transcript("f")),
+            "记下过带序号的上报：不带序号的不收"
+        );
+        assert!(store.transcript(agent, "c").is_some());
+        assert!(store.note_transcript(agent, Some(6), transcript("g")));
+        assert!(store.transcript(agent, "c").is_none());
+        assert!(store.transcript(agent, "g").is_some());
     }
 
     #[test]

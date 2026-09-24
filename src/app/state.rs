@@ -1154,10 +1154,11 @@ pub struct AgentActivityStore {
     activity: std::collections::HashMap<PaneId, AgentActivitySnapshot>,
     hinted: std::collections::HashSet<PaneId>,
     latest_hints: std::collections::HashMap<PaneId, std::sync::Arc<str>>,
-    /// 各 pane 钩子随会话上报的转录路径（claude），只给活动树定位会话文件用：与会话
-    /// id 成对存放，用时核对（[`Self::transcript`]）。上报可能早于 agent 被识别，所以
-    /// pane 还在就留着，不随 [`Self::retain_panes`] 清理。
-    transcripts: std::collections::HashMap<PaneId, crate::agent_resume::ReportedTranscript>,
+    /// 各 pane 钩子随会话上报的转录路径（claude）及其上报序号，只给活动树定位会话文件
+    /// 用：与会话 id 成对存放，用时核对（[`Self::transcript`]）。上报可能早于 agent 被
+    /// 识别，所以 pane 还在就留着，不随 [`Self::retain_panes`] 清理。
+    transcripts:
+        std::collections::HashMap<PaneId, (Option<u64>, crate::agent_resume::ReportedTranscript)>,
     external: Vec<ExternalAgentRecord>,
     /// 各外部来源最近一次成功刷新的时刻。
     external_refreshed_at: std::collections::HashMap<String, std::time::Instant>,
@@ -1295,13 +1296,26 @@ impl AgentActivityStore {
         self.latest_hints.get(&pane_id).cloned()
     }
 
-    /// 记下该 pane 钩子随会话上报的转录路径（后来者覆盖）。
+    /// 记下该 pane 钩子随会话上报的转录路径。按上报序号取舍，与会话状态机同口径
+    /// （`TerminalState::accept_hook_report`）：带序号的只收比已记下的更大的，不带序号
+    /// 的只在还没记下过带序号的上报时收——迟到的旧会话上报不能盖掉当前会话的路径。
+    /// 返回是否收下。
     pub fn note_transcript(
         &mut self,
         pane_id: PaneId,
+        seq: Option<u64>,
         transcript: crate::agent_resume::ReportedTranscript,
-    ) {
-        self.transcripts.insert(pane_id, transcript);
+    ) -> bool {
+        let last = self.transcripts.get(&pane_id).and_then(|(seq, _)| *seq);
+        let newer = match (seq, last) {
+            (Some(seq), Some(last)) => seq > last,
+            (None, Some(_)) => false,
+            (_, None) => true,
+        };
+        if newer {
+            self.transcripts.insert(pane_id, (seq, transcript));
+        }
+        newer
     }
 
     /// 该 pane 上报过的、属于会话 `session_id` 的转录路径；会话已换（id 对不上）时为
@@ -1313,6 +1327,7 @@ impl AgentActivityStore {
     ) -> Option<&crate::agent_resume::AgentSessionRef> {
         self.transcripts
             .get(&pane_id)
+            .map(|(_, transcript)| transcript)
             .filter(|transcript| transcript.session_id == session_id)
             .map(|transcript| &transcript.path)
     }

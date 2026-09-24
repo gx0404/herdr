@@ -1604,9 +1604,10 @@ impl AppState {
                 transcript,
             } => {
                 if let Some(transcript) = transcript {
-                    // 只给活动树定位会话文件用，与会话 id 成对存放、用时核对；会话
-                    // 状态机（上报可能被暂缓）不看它。
-                    self.agent_activity.note_transcript(pane_id, transcript);
+                    // 只给活动树定位会话文件用，与会话 id 成对存放、用时核对，按上报
+                    // 序号取舍（与会话状态机同口径）；会话状态机（上报可能被暂缓）不看它。
+                    self.agent_activity
+                        .note_transcript(pane_id, seq, transcript);
                 }
                 self.update_terminal_state(pane_id, |terminal| {
                     terminal.set_agent_session_ref_for_session_start(
