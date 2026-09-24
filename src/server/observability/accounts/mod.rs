@@ -1800,6 +1800,17 @@ fn invalidate_changed_identity(
     true
 }
 
+/// 说明里厂商要求的退避秒数：`retry_after=<秒>` 由 `UsageProbeTexts::api_retry_after_fmt`
+/// 拼进 429 说明，键名在各语言的译文里都原样保留。取最后一处键名后面紧跟的数字，不要求它在
+/// 句末——译文可以把它放在句中；键名后不是数字就不退避。
+fn retry_after_seconds(message: &str) -> Option<u64> {
+    let (_, rest) = message.rsplit_once("retry_after=")?;
+    let end = rest
+        .find(|ch: char| !ch.is_ascii_digit())
+        .unwrap_or(rest.len());
+    rest[..end].parse().ok()
+}
+
 /// 把一次探测结果并入缓存。`observed_at_ms` 只在拿到真实额度（Ready）时更新；
 /// 失败只推进 failures / 终态保持，并保留已有样本或回调快照。返回本次结果是否真正并入了
 /// 可见快照（回调闩锁下被保留的回调快照返回 false，调用方据此不更新旁路标记）。
@@ -1807,7 +1818,7 @@ fn merge_result(entry: &mut CacheEntry, snapshot: AccountUsageSnapshot, now: Ins
     entry.retry_after = snapshot
         .message
         .as_deref()
-        .and_then(|message| message.rsplit_once("retry_after=")?.1.parse::<u64>().ok())
+        .and_then(retry_after_seconds)
         .map(|seconds| now + Duration::from_secs(seconds.min(3600)));
     if snapshot.status == ObservationStatus::Ready {
         entry.failures = 0;
@@ -2218,6 +2229,54 @@ mod tests {
         assert_eq!(entry.snapshot.observed_at_ms, 100);
         assert_eq!(entry.failures, 0);
         assert!(entry.retry_after.is_none());
+    }
+
+    /// T2 审查轻 2：429 退避取说明里 `retry_after=` 后面的秒数，不依赖它在句末。两种语言都用
+    /// `fill` 拼出真实的 429 说明；译文把它挪到句中（后面还有文字）时照样退避，键名后不是
+    /// 数字时不退避。
+    #[test]
+    fn retry_after_backoff_does_not_depend_on_where_the_notice_puts_it() {
+        use crate::i18n::{fill, lang_guard, Lang};
+        let backoff = |message: String| {
+            let mut entry = CacheEntry::new(ready_snapshot(7.0, 12));
+            let now = Instant::now();
+            merge_result(
+                &mut entry,
+                AccountUsageSnapshot {
+                    status: ObservationStatus::Error,
+                    message: Some(message),
+                    ..Default::default()
+                },
+                now,
+            );
+            entry.retry_after.map(|until| until.duration_since(now))
+        };
+        for lang in [Lang::En, Lang::ZhCn] {
+            let _guard = lang_guard(lang);
+            let texts = probe_texts();
+            assert!(
+                texts.api_retry_after_fmt.contains("retry_after={seconds}"),
+                "{lang:?}：译文必须保留键名，退避靠它识别"
+            );
+            let retry = fill(texts.api_retry_after_fmt, &[("seconds", "60")]);
+            let message = fill(
+                texts.api_http_status_fmt,
+                &[("status", "429"), ("retry", &retry)],
+            );
+            assert_eq!(backoff(message), Some(Duration::from_secs(60)), "{lang:?}");
+        }
+        assert_eq!(
+            backoff("HTTP 429 (retry_after=60); try again later".into()),
+            Some(Duration::from_secs(60)),
+            "键名在句中也要认得"
+        );
+        assert_eq!(
+            backoff("retry_after=7200".into()),
+            Some(Duration::from_secs(3600)),
+            "上限一小时"
+        );
+        assert_eq!(backoff("retry_after=soon".into()), None);
+        assert_eq!(backoff("HTTP 500".into()), None);
     }
 
     // ---- B-6：失败不更新 observed_at，派发不改状态 ----
