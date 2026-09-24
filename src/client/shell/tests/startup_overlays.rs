@@ -1587,6 +1587,8 @@ fn projected_release_notes_geometry_matches_the_rendered_hits() {
 /// L4 复审（轻）：欢迎页正文不在词中截断。英文「next: … reliable state」较长，
 /// 正文区放不下时折到下一行；说明各行与键位提示同样整句可见（键位提示放不下
 /// 就在「·」处分成两行）。正文沿用文案自带的 2 列缩进，不再额外让 1 列。
+/// 折行不留只有一两个词的孤立尾行（二次复审：说明按手工断行各自折行时，窄屏
+/// 会剩下 "pane"、"menus." 这样的短行；下一步一句在默认宽度也会单剩 "state"）。
 /// 宽 / 中 / 窄三档。
 #[test]
 fn onboarding_body_wraps_instead_of_cutting_words() {
@@ -1656,5 +1658,22 @@ fn onboarding_body_wraps_instead_of_cutting_words() {
             next.starts_with("  next:"),
             "{case}: 正文沿用文案自带的 2 列缩进：{next:?}"
         );
+        // 正文（标题两行之后、继续按钮之前，除键位提示外）每一行至少 3 个词。
+        let continue_row = inner
+            .iter()
+            .position(|row| row.contains(crate::ui::modal_continue_button_text().trim()))
+            .unwrap_or(inner.len());
+        for row in &inner[2..continue_row] {
+            let words = row.split_whitespace().count();
+            let key_row = row.contains(crate::ui::ONBOARDING_PREFIX_LABEL)
+                || row
+                    .trim_start()
+                    .starts_with(crate::ui::ONBOARDING_HELP_LABEL);
+            assert!(
+                words == 0 || key_row || words >= 3,
+                "{case}: 没有只含一两个词的孤立尾行：{row:?}\n{}",
+                inner.join("\n")
+            );
+        }
     }
 }

@@ -806,8 +806,8 @@ fn render_onboarding_overlay(b: &mut Buffer, cx: &ChromeContext<'_>) -> Option<O
     let content = stack.content;
     let texts = &crate::i18n::texts().onboarding;
     let mut y = content.y;
-    for line in texts.description {
-        y = put_wrapped(b, content, y, line, text);
+    for line in onboarding_description(content.width) {
+        y = put_wrapped(b, content, y, &line, text);
     }
     y = y.saturating_add(1);
     // 键位提示：一行放得下就一行；放不下在「·」处分成两行（两个键各带说明）。
@@ -871,15 +871,74 @@ fn render_onboarding_overlay(b: &mut Buffer, cx: &ChromeContext<'_>) -> Option<O
 }
 
 /// 带前导空格的一段文字按 `width` 列折行：前导空格当作缩进（续行同缩进），逐行
-/// 回调（缩进列数, 这一行的文字）。欢迎页量行数与绘制共用这一份折行。
+/// 回调（缩进列数, 这一行的文字）。折行宽度取折出同样行数的最窄宽度（见
+/// [`balanced_room`]），各行长短均匀，末行不会只剩一两个词。欢迎页量行数与绘制
+/// 共用这一份折行。
 fn wrap_indented<'a>(line: &'a str, width: u16, mut emit: impl FnMut(u16, &'a str)) {
     let body = line.trim_start();
     let indent = display_width(&line[..line.len() - body.len()]).min(width);
-    let room = usize::from(width - indent);
     let body = body.trim_end();
+    let room = balanced_room(body, usize::from(width - indent));
     wrap_text(body, room, room, |start, end| {
         emit(indent, &body[start..end])
     });
+}
+
+/// 与按 `room` 列折行行数相同的最窄宽度（二分查找）：把末行的短尾摊回前面各行。
+/// 一行放得下时就是 `room`；返回值折出的行数不多于按 `room` 折的行数。
+fn balanced_room(text: &str, room: usize) -> usize {
+    let lines = |width: usize| {
+        let mut count = 0usize;
+        wrap_text(text, width, width, |_, _| count += 1);
+        count
+    };
+    let target = lines(room);
+    if target <= 1 {
+        return room;
+    }
+    let (mut low, mut high) = (1usize, room);
+    while low < high {
+        let middle = low + (high - low) / 2;
+        if lines(middle) <= target {
+            high = middle;
+        } else {
+            low = middle + 1;
+        }
+    }
+    high
+}
+
+/// 欢迎页说明的段落：文案的手工断行在 `width` 列里都放得下就原样逐行画；否则拼
+/// 成一段再折行（二次复审：各行各自折行会留下 "pane"、"menus." 这样的短尾行）。
+/// 拼接处两侧都是窄字符才补空格，中文分行处直接相连；缩进取首行的前导空格。
+fn onboarding_description(width: u16) -> Vec<std::borrow::Cow<'static, str>> {
+    let lines = crate::i18n::texts().onboarding.description;
+    if lines
+        .iter()
+        .all(|line| display_width(line.trim_end()) <= width)
+    {
+        return lines
+            .iter()
+            .map(|line| std::borrow::Cow::Borrowed(*line))
+            .collect();
+    }
+    let first = lines.first().copied().unwrap_or_default();
+    let mut joined = first[..first.len() - first.trim_start().len()].to_owned();
+    let mut previous: Option<char> = None;
+    for body in lines
+        .iter()
+        .map(|line| line.trim())
+        .filter(|body| !body.is_empty())
+    {
+        if let (Some(before), Some(after)) = (previous, body.chars().next()) {
+            if char_width(before) == 1 && char_width(after) == 1 {
+                joined.push(' ');
+            }
+        }
+        joined.push_str(body);
+        previous = body.chars().last();
+    }
+    vec![std::borrow::Cow::Owned(joined)]
 }
 
 /// 在 `area` 里从第 `y` 行起画一段带前导空格的文字（见 [`wrap_indented`]），超出
@@ -923,20 +982,18 @@ fn onboarding_key_rows(width: u16) -> u16 {
 /// 欢迎页正文在 `width` 列里排开要占的行数（与绘制同一套折行）：说明各行、空一
 /// 行、键位提示、下一步。
 fn onboarding_body_rows(width: u16) -> u16 {
-    let texts = &crate::i18n::texts().onboarding;
     let rows = |line: &str| {
         let mut rows = 0u16;
         wrap_indented(line, width, |_, _| rows = rows.saturating_add(1));
         rows
     };
-    texts
-        .description
+    onboarding_description(width)
         .iter()
         .map(|line| rows(line))
         .sum::<u16>()
         .saturating_add(1)
         .saturating_add(onboarding_key_rows(width))
-        .saturating_add(rows(texts.next))
+        .saturating_add(rows(crate::i18n::texts().onboarding.next))
 }
 
 /// 欢迎页浮层尺寸：默认中号；正文折行后默认高度放不下时加高（仍受终端高度
