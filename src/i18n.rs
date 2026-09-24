@@ -1437,13 +1437,15 @@ pub struct AgentPanelTexts {
     pub sort_launch: &'static str,
     pub external_group: &'static str,
     pub external_unreadable: &'static str,
-    /// 有运行中的节点时的徽标。
-    pub activity_badge_running_fmt: &'static str, // args: running, total
-    /// 没有运行中的节点、总数为 1 时的徽标。
-    pub activity_badge_one: &'static str,
-    /// 没有运行中的节点时的徽标（总数）。
-    pub activity_badge_total_fmt: &'static str, // args: n
+    /// 属主在运行、有运行中的节点时的徽标。
+    pub activity_badge_running_fmt: &'static str, // args: running
+    /// 属主在运行、没有运行中的节点但有已结束（完成 + 失败）的节点时的徽标。
+    pub activity_badge_finished_fmt: &'static str, // args: n
+    /// 活动摘要里还有没下发的活跃节点（点击打开活动窗口）。
     pub activity_more_fmt: &'static str, // args: n
+    /// 活动摘要末尾「已完成 · 失败」行的两段，为 0 的段不画，两段之间用 ` · `。
+    pub activity_done_fmt: &'static str, // args: n
+    pub activity_failed_fmt: &'static str, // args: n
     pub menu_focus: &'static str,
     pub menu_view_activity: &'static str,
     /// 重命名的是 agent 所在的 pane（`pane.rename`，改 pane 标签），文案照实写

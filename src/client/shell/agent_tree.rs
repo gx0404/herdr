@@ -16,11 +16,15 @@
 //! 一并产出的平铺行（[`AgentTree::flat`]）——忽略面板内的折叠态、保留完整
 //! token、按聚合顺序列出全部 agent，被折叠分组里的 agent 仍可见可点。
 //!
-//! 活动摘要：快照默认只带每个 agent 的 running / total 计数与至多 1 个最新节点
-//! （`truncated` 表示还有更多，整树经 `agent.activity.read` 取，归「Agent 活动」
-//! 窗口）。agent 行右侧画活动徽标；展开后是最新节点一行，被截断时再跟一行
-//! 「还有 N 项」（点击打开活动窗口）。server 若下发多个节点，同一套构建按
-//! `parent_id` 前序展开，深度不设上限。
+//! 活动摘要：快照默认带每个属主（agent / 外部条目）的计数（运行中 / 活跃 / 完成 /
+//! 失败 / 总数）与活跃子集——等待、运行中、受阻的节点连同祖先链（`truncated`
+//! 表示还有活跃节点没下发，整树经 `agent.activity.read` 取，归「Agent 活动」
+//! 窗口）。只有「在运行」的属主（[`owner_running`]）才画徽标、带活动子行：
+//! 徽标在有运行中节点时写「N 运行中」，否则有已结束节点时灰显「N 已完成」；
+//! 展开后活跃子集按 `parent_id` 前序嵌套（workflow → phase → 子 agent，深度不设
+//! 上限，分组节点行首画类型字形并灰显进度），被截断时跟一行「还有 N 项」，有
+//! 已结束节点时末尾再跟一行灰显的「已完成 N · 失败 M」（两行都点击打开活动
+//! 窗口）。旧 server 的摘要只带最新一个节点，同一套构建照样展开。
 //!
 //! 折叠键命名空间（继续存 `collapsed_groups` / `remote_collapsed_groups`）：
 //! - `agent-panel:<ws>`（工作区，既有）、`agent-tab:<tab>`、`agent-external:<source>`：
@@ -95,10 +99,18 @@ pub(super) enum AgentTreeKind {
         label: String,
         kind: AgentActivityKind,
         status: AgentActivityStatus,
+        /// 分组节点（workflow / phase）的类型字形与进度；普通节点为 `None`。
+        group: Option<ActivityGroupMark>,
     },
-    /// 快照里的节点被上限截断：列表末尾的「还有 N 项」行（文本构建期算好），
+    /// 还有活跃节点没下发：活跃子集末尾的「还有 N 项」行（文本构建期算好），
     /// 点击打开活动窗口看全量。
     ActivityMore {
+        owner_key: String,
+        label: String,
+    },
+    /// 活动子行末尾灰显的「已完成 N · 失败 M」行（文本构建期算好）：已结束的
+    /// 节点不进摘要，点击打开活动窗口看全量。不可展开。
+    ActivityDone {
         owner_key: String,
         label: String,
     },
@@ -126,9 +138,9 @@ pub(super) struct AgentTreeNode {
     /// 分组行右侧的计数文本（`· N`：工作区 / 标签页 / 机器 = agent 数，外部组 =
     /// 条目数）；非分组行为空。
     count_label: String,
-    /// 有运行中的活动节点：徽标用工作色。
+    /// 有运行中的活动节点：徽标用工作色（否则是灰显的「已完成」徽标）。
     running: bool,
-    /// 活动徽标（见 [`ActivityBadge`]），没有活动为 `None`。
+    /// 活动徽标（见 [`activity_badge`]），不在运行或没有可报的活动为 `None`。
     badge: Option<ActivityBadge>,
     /// 首行主体完整排开的宽度（见 [`PrimaryWidth`]），徽标据此按名称优先取档。
     primary: PrimaryWidth,
@@ -193,14 +205,7 @@ impl PrimaryWidth {
 }
 
 impl AgentTreeNode {
-    fn new(
-        endpoint: CachedEndpointSnapshot<'_>,
-        count: usize,
-        activity: Option<&ClientShellAgentActivity>,
-        kind: AgentTreeKind,
-    ) -> Self {
-        let (running, total) =
-            activity.map_or((0, 0), |activity| (activity.running, activity.total));
+    fn new(endpoint: CachedEndpointSnapshot<'_>, count: usize, kind: AgentTreeKind) -> Self {
         Self {
             endpoint_id: endpoint.endpoint_id.clone(),
             stale: endpoint.stale(),
@@ -209,8 +214,8 @@ impl AgentTreeNode {
             } else {
                 String::new()
             },
-            running: running > 0,
-            badge: activity_badge(running, total),
+            running: false,
+            badge: None,
             primary: PrimaryWidth::default(),
             kind,
         }
@@ -343,8 +348,8 @@ fn blocked_shares_icon(style: crate::config::StatusIndicatorStyle) -> bool {
 }
 
 /// agent / 外部条目行右侧的活动徽标：构建期算好完整文案与只留数字的紧凑形态
-/// （`2/5`；没有运行中时是总数 `5`）及各自宽度，渲染按可用宽度三档退化——
-/// 完整文案 → 只留数字 → 不画，循环里不再分配。
+/// （`2`）及各自宽度，渲染按可用宽度三档退化——完整文案 → 只留数字 → 不画，
+/// 循环里不再分配。
 #[derive(Debug)]
 struct ActivityBadge {
     full: String,
@@ -385,15 +390,41 @@ impl ActivityBadge {
     }
 }
 
-/// 活动徽标：完整文案见 [`badge_text`]，紧凑形态只留数字；没有活动为 `None`。
-fn activity_badge(running: u32, total: u32) -> Option<ActivityBadge> {
-    let full = badge_text(running, total)?;
-    let total = total.max(running);
-    let compact = if running > 0 {
-        format!("{running}/{total}")
+/// 属主（pane 里的 agent / 外部条目）是否「在运行」：只有在运行的属主才画活动
+/// 徽标、带活动子行——主 agent 空闲时它名下的子 agent 不显示。判据：属主自己在
+/// 工作或受阻；或者摘要里还有活跃的非待办节点（主回合结束后仍在跑的后台子
+/// agent）；或者有运行中的节点却一个也没下发（快照的节点总预算已用尽）。待办
+/// 不算：空闲的 agent 常留着没做完的待办（与 server 的 `has_open_nodes` 同理）。
+fn owner_running(status: AgentStatus, activity: &ClientShellAgentActivity) -> bool {
+    matches!(status, AgentStatus::Working | AgentStatus::Blocked)
+        || activity
+            .nodes
+            .iter()
+            .any(|node| node.kind != AgentActivityKind::Todo && node.status.is_active())
+        || (activity.running > 0 && activity.nodes.is_empty())
+}
+
+/// 活动徽标，只给在运行的属主：有运行中的节点写「N 运行中」（工作色）；没有
+/// 运行中的节点但有已结束（完成 + 失败）的写「N 已完成」（灰显）；都没有为
+/// `None`。紧凑形态只留数字。
+fn activity_badge(
+    owner_running: bool,
+    activity: &ClientShellAgentActivity,
+) -> Option<ActivityBadge> {
+    if !owner_running {
+        return None;
+    }
+    let texts = &crate::i18n::texts().agent_panel;
+    let finished = activity.done.saturating_add(activity.failed);
+    let (template, key, count) = if activity.running > 0 {
+        (texts.activity_badge_running_fmt, "running", activity.running)
+    } else if finished > 0 {
+        (texts.activity_badge_finished_fmt, "n", finished)
     } else {
-        total.to_string()
+        return None;
     };
+    let compact = count.to_string();
+    let full = crate::i18n::fill(template, &[(key, &compact)]);
     Some(ActivityBadge {
         full_width: text_width(&full),
         full,
@@ -406,37 +437,61 @@ fn text_width(text: &str) -> u16 {
     u16::try_from(display_width(text)).unwrap_or(u16::MAX)
 }
 
-/// 活动徽标文案，三种情况：有运行中的节点写「运行中 / 总数」形态（`2/5
-/// running`，运行中等于总数时同样如此）；没有运行中的只写总数（`5 activities`，
-/// 总数为 1 用单数键）；没有活动为 `None`。运行中与否另由徽标颜色区分。
-fn badge_text(running: u32, total: u32) -> Option<String> {
-    let texts = &crate::i18n::texts().agent_panel;
-    let total = total.max(running);
-    if total == 0 {
-        return None;
-    }
-    Some(if running > 0 {
-        crate::i18n::fill(
-            texts.activity_badge_running_fmt,
-            &[
-                ("running", &running.to_string()),
-                ("total", &total.to_string()),
-            ],
-        )
-    } else if total == 1 {
-        texts.activity_badge_one.to_owned()
-    } else {
-        crate::i18n::fill(texts.activity_badge_total_fmt, &[("n", &total.to_string())])
+/// mobile 切换器 agent 行的活动徽标，与桌面树同一口径（[`activity_badge`]）、
+/// 同样三档退化：`room` 是详情行排完其余字段与徽标前间隔后剩下的列数，放得下
+/// 完整文案给完整文案，否则只留数字，再放不下为 `None`；不在运行或没有可报的
+/// 活动也为 `None`。`mobile.rs` 只调这一处，徽标逻辑留在本文件。
+pub(super) fn mobile_activity_badge(agent: &ClientShellAgent, room: u16) -> Option<String> {
+    let running = owner_running(agent.agent_status, &agent.activity);
+    let badge = activity_badge(running, &agent.activity)?;
+    badge.fit_room(room).map(|(text, _)| text.to_owned())
+}
+
+/// 「已完成 N · 失败 M」行在 `hits.agent_activity_rows` 里的节点 id：与「还有
+/// N 项」行（空 id）分开悬浮，点击同样只打开活动窗口、不预选节点。来源的节点
+/// id 不会以 NUL 开头。
+pub(super) const ACTIVITY_DONE_HIT_ID: &str = "\u{0}done";
+
+/// 分组节点（workflow / phase）行的类型字形与进度，构建期算好。
+#[derive(Debug)]
+pub(super) struct ActivityGroupMark {
+    glyph: &'static str,
+    /// 摘要首段的 `<活跃>/<总数>`；来源没给或认不出为 `None`。
+    progress: Option<String>,
+}
+
+/// 分组节点的类型字形：workflow `⧉`、phase `▤`；其余节点为 `None`。
+fn activity_group_mark(node: &ClientShellActivityNode) -> Option<ActivityGroupMark> {
+    let glyph = match node.agent_type.as_deref()? {
+        crate::api::schema::ACTIVITY_GROUP_WORKFLOW => "⧉",
+        crate::api::schema::ACTIVITY_GROUP_PHASE => "▤",
+        _ => return None,
+    };
+    Some(ActivityGroupMark {
+        glyph,
+        progress: node.summary.as_deref().and_then(group_progress),
     })
 }
 
-/// mobile 切换器 agent 行的活动徽标，与桌面树同一口径、同样三档退化：`room`
-/// 是详情行排完其余字段与徽标前间隔后剩下的列数，放得下完整文案给完整文案，
-/// 否则只留数字（`2/5`；没有运行中时是总数 `5`），再放不下为 `None`；没有活动
-/// 也为 `None`。`mobile.rs` 只调这一处，徽标逻辑留在本文件。
-pub(super) fn mobile_activity_badge(agent: &ClientShellAgent, room: u16) -> Option<String> {
-    let badge = activity_badge(agent.activity.running, agent.activity.total)?;
-    badge.fit_room(room).map(|(text, _)| text.to_owned())
+/// 分组摘要首段（`<活跃>/<总数> running …`）里的 `<活跃>/<总数>`。
+fn group_progress(summary: &str) -> Option<String> {
+    let head = summary.split_whitespace().next()?;
+    let (active, total) = head.split_once('/')?;
+    (active.parse::<u32>().is_ok() && total.parse::<u32>().is_ok()).then(|| head.to_owned())
+}
+
+/// 活动子行末尾「已完成 N · 失败 M」的文案，为 0 的段不画；两段都为 0 时 `None`。
+fn finished_label(done: u32, failed: u32) -> Option<String> {
+    let texts = &crate::i18n::texts().agent_panel;
+    let parts = [
+        (done, texts.activity_done_fmt),
+        (failed, texts.activity_failed_fmt),
+    ]
+    .into_iter()
+    .filter(|(count, _)| *count > 0)
+    .map(|(count, template)| crate::i18n::fill(template, &[("n", &count.to_string())]))
+    .collect::<Vec<_>>();
+    (!parts.is_empty()).then(|| parts.join(" · "))
 }
 
 /// 视图计算阶段：按当前排序、折叠态与各端点快照产出展平的行序列，末子掩码已
@@ -737,7 +792,7 @@ impl TreeBuilder<'_> {
         self.rows.push(TreeEntry {
             depth,
             key,
-            kind: AgentTreeNode::new(endpoint, count, None, kind),
+            kind: AgentTreeNode::new(endpoint, count, kind),
             last_child_mask: 0,
             has_children: true,
             collapsed,
@@ -770,6 +825,7 @@ impl TreeBuilder<'_> {
             endpoint,
             owner,
             &agent.activity,
+            owner_running(agent.agent_status, &agent.activity),
             AgentTreeKind::Agent {
                 agent: row,
                 machine_initial,
@@ -846,6 +902,7 @@ impl TreeBuilder<'_> {
             endpoint,
             owner,
             &external.activity,
+            owner_running(external.agent_status, &external.activity),
             AgentTreeKind::ExternalAgent {
                 external_id: external.external_id.clone(),
                 label: if external.label.is_empty() {
@@ -860,27 +917,42 @@ impl TreeBuilder<'_> {
         );
     }
 
-    /// 活动树的属主行（agent 或外部条目）及其展开的活动节点。
+    /// 活动树的属主行（agent 或外部条目）及其展开的活动节点。`running` 是
+    /// [`owner_running`]：不在运行的属主不画徽标、没有活动子行与折叠开关。
     fn push_owner(
         &mut self,
         depth: u8,
         endpoint: CachedEndpointSnapshot<'_>,
         owner: String,
         activity: &ClientShellAgentActivity,
+        running: bool,
         kind: AgentTreeKind,
     ) {
-        let hidden = if activity.truncated {
-            activity
-                .total
-                .saturating_sub(activity.nodes.len().min(u32::MAX as usize) as u32)
-        } else {
+        let clamp = |count: usize| u32::try_from(count).unwrap_or(u32::MAX);
+        let hidden = if !activity.truncated {
             0
+        } else if activity.active > 0 {
+            // 摘要带的是活跃子集：没下发的是其余活跃节点。
+            let shown = activity
+                .nodes
+                .iter()
+                .filter(|node| node.status.is_active())
+                .count();
+            activity.active.saturating_sub(clamp(shown))
+        } else {
+            // 旧 server（不下发活跃计数）：摘要只带最新一个节点，其余都算「还有」。
+            activity.total.saturating_sub(clamp(activity.nodes.len()))
         };
-        let has_children = !self.owners_only && (!activity.nodes.is_empty() || hidden > 0);
+        let finished = finished_label(activity.done, activity.failed);
+        let has_children = !self.owners_only
+            && running
+            && (!activity.nodes.is_empty() || hidden > 0 || finished.is_some());
         let key = activity_list_key(&owner);
         // 活动摘要默认折叠：键在集合里才展开。
         let expanded = has_children && self.collapse.group_key_present(endpoint.endpoint_id, &key);
-        let mut node = AgentTreeNode::new(endpoint, 0, Some(activity), kind);
+        let mut node = AgentTreeNode::new(endpoint, 0, kind);
+        node.running = activity.running > 0;
+        node.badge = activity_badge(running, activity);
         node.primary = PrimaryWidth::of(&node.kind, self.config.status_indicators);
         self.rows.push(TreeEntry {
             depth,
@@ -891,12 +963,21 @@ impl TreeBuilder<'_> {
             collapsed: has_children && !expanded,
         });
         if expanded {
-            self.push_activity(depth + 1, endpoint, &owner, &activity.nodes, hidden);
+            self.push_activity(
+                depth + 1,
+                endpoint,
+                &owner,
+                &activity.nodes,
+                hidden,
+                finished,
+            );
         }
     }
 
     /// 前序展开活动节点：根 = 没有父节点或父节点不在列表里；子节点默认折叠
     /// （键在集合里才展开）。用显式栈而不递归，`visited` 兜住重复 id 造成的环。
+    /// 节点之后依次是「还有 N 项」（`hidden > 0`）与「已完成 N · 失败 M」
+    /// （`finished`）两行。
     fn push_activity(
         &mut self,
         depth: u8,
@@ -904,6 +985,7 @@ impl TreeBuilder<'_> {
         owner: &str,
         nodes: &[ClientShellActivityNode],
         hidden: u32,
+        finished: Option<String>,
     ) {
         let has_node = |id: &str| nodes.iter().any(|node| node.id == id);
         let is_root = |node: &ClientShellActivityNode| {
@@ -935,7 +1017,6 @@ impl TreeBuilder<'_> {
                 kind: AgentTreeNode::new(
                     endpoint,
                     0,
-                    None,
                     AgentTreeKind::Activity {
                         owner_key: owner.to_owned(),
                         node_id: node.id.clone(),
@@ -946,6 +1027,7 @@ impl TreeBuilder<'_> {
                         },
                         kind: node.kind,
                         status: node.status,
+                        group: activity_group_mark(node),
                     },
                 ),
                 last_child_mask: 0,
@@ -961,26 +1043,40 @@ impl TreeBuilder<'_> {
             }
         }
         if hidden > 0 {
-            self.rows.push(TreeEntry {
+            self.push_leaf(
                 depth,
-                key: String::new(),
-                kind: AgentTreeNode::new(
-                    endpoint,
-                    0,
-                    None,
-                    AgentTreeKind::ActivityMore {
-                        owner_key: owner.to_owned(),
-                        label: crate::i18n::fill(
-                            crate::i18n::texts().agent_panel.activity_more_fmt,
-                            &[("n", &hidden.to_string())],
-                        ),
-                    },
-                ),
-                last_child_mask: 0,
-                has_children: false,
-                collapsed: false,
-            });
+                endpoint,
+                AgentTreeKind::ActivityMore {
+                    owner_key: owner.to_owned(),
+                    label: crate::i18n::fill(
+                        crate::i18n::texts().agent_panel.activity_more_fmt,
+                        &[("n", &hidden.to_string())],
+                    ),
+                },
+            );
         }
+        if let Some(label) = finished {
+            self.push_leaf(
+                depth,
+                endpoint,
+                AgentTreeKind::ActivityDone {
+                    owner_key: owner.to_owned(),
+                    label,
+                },
+            );
+        }
+    }
+
+    /// 活动子行末尾不可展开、没有折叠键的一行（「还有 N 项」「已完成 N · 失败 M」）。
+    fn push_leaf(&mut self, depth: u8, endpoint: CachedEndpointSnapshot<'_>, kind: AgentTreeKind) {
+        self.rows.push(TreeEntry {
+            depth,
+            key: String::new(),
+            kind: AgentTreeNode::new(endpoint, 0, kind),
+            last_child_mask: 0,
+            has_children: false,
+            collapsed: false,
+        });
     }
 }
 
@@ -1142,6 +1238,13 @@ fn render_tree_row(
             Some(ChromeHover::AgentActivityRow(endpoint_id, owner, id))
                 if endpoint_id == &node.endpoint_id && owner == owner_key && id.is_empty()
         ),
+        AgentTreeKind::ActivityDone { owner_key, .. } => matches!(
+            cx.chrome_hover,
+            Some(ChromeHover::AgentActivityRow(endpoint_id, owner, id))
+                if endpoint_id == &node.endpoint_id
+                    && owner == owner_key
+                    && id == ACTIVITY_DONE_HIT_ID
+        ),
         AgentTreeKind::ExternalAgent { external_id, .. } => matches!(
             cx.chrome_hover,
             Some(ChromeHover::ExternalAgentRow(endpoint_id, id))
@@ -1238,8 +1341,18 @@ fn render_tree_row(
             label,
             kind,
             status,
+            group,
         } => {
-            render_activity_line(buffer, content, label, *kind, *status, cx, muted);
+            render_activity_line(
+                buffer,
+                content,
+                label,
+                *kind,
+                *status,
+                group.as_ref(),
+                cx,
+                muted,
+            );
             if has_children && !toggle.is_empty() {
                 hits.agent_tree_toggles
                     .push((toggle, node.endpoint_id.clone(), row.key.clone()));
@@ -1251,7 +1364,8 @@ fn render_tree_row(
                 node_id: node_id.clone(),
             });
         }
-        AgentTreeKind::ActivityMore { owner_key, label } => {
+        AgentTreeKind::ActivityMore { owner_key, label }
+        | AgentTreeKind::ActivityDone { owner_key, label } => {
             put_label(
                 buffer,
                 content.x,
@@ -1262,11 +1376,16 @@ fn render_tree_row(
                     .fg(palette.overlay0)
                     .add_modifier(Modifier::DIM),
             );
+            let node_id = if matches!(node.kind, AgentTreeKind::ActivityDone { .. }) {
+                ACTIVITY_DONE_HIT_ID.to_owned()
+            } else {
+                String::new()
+            };
             hits.agent_activity_rows.push(AgentActivityHit {
                 rect,
                 endpoint_id: node.endpoint_id.clone(),
                 owner_key: owner_key.clone(),
-                node_id: String::new(),
+                node_id,
             });
         }
         AgentTreeKind::ExternalAgent {
@@ -1667,27 +1786,35 @@ fn render_continuation_guides(
     }
 }
 
-/// 活动节点行：`状态图标 标签 [种类]`。标签优先于种类（次要信息）。
+/// 活动节点行：`状态图标 标签 [种类]`。标签优先于种类（次要信息）。分组节点
+/// （workflow / phase）行首换成类型字形（颜色仍随状态），标签后灰显的是进度
+/// `<活跃>/<总数>` 而不是种类。
+#[allow(clippy::too_many_arguments)]
 fn render_activity_line(
     buffer: &mut Buffer,
     content: Rect,
     label: &str,
     kind: AgentActivityKind,
     status: AgentActivityStatus,
+    group: Option<&ActivityGroupMark>,
     cx: &RowContext<'_>,
     muted: ratatui::style::Color,
 ) {
     let palette = &cx.config.palette;
     let mapped = activity_status_as_agent(status);
-    let icon = status_icon(mapped, cx.config.status_indicators);
+    let icon = group.map_or_else(
+        || status_icon(mapped, cx.config.status_indicators),
+        |group| group.glyph,
+    );
     let icon_color = status_color(mapped, palette);
     let texts = &crate::i18n::texts().agent_activity;
-    let kind_label = match kind {
-        AgentActivityKind::Subagent => texts.kind_subagent,
-        AgentActivityKind::Task => texts.kind_task,
-        AgentActivityKind::Todo => texts.kind_todo,
-        AgentActivityKind::Background => texts.kind_background,
-        AgentActivityKind::Unknown => texts.kind_unknown,
+    let kind_label = match (group, kind) {
+        (Some(group), _) => group.progress.as_deref().unwrap_or_default(),
+        (None, AgentActivityKind::Subagent) => texts.kind_subagent,
+        (None, AgentActivityKind::Task) => texts.kind_task,
+        (None, AgentActivityKind::Todo) => texts.kind_todo,
+        (None, AgentActivityKind::Background) => texts.kind_background,
+        (None, AgentActivityKind::Unknown) => texts.kind_unknown,
     };
     let mut x = content.x;
     let mut remaining = content.width;
@@ -1860,7 +1987,8 @@ impl ClientShellState {
         {
             if let Some(owner) = parse_owner_key(&owner_key) {
                 self.open_agent_activity(endpoint_id, owner, outcome);
-                if !node_id.is_empty() {
+                // 「还有 N 项」（空 id）与「已完成 N · 失败 M」只打开窗口，不预选节点。
+                if !node_id.is_empty() && node_id != ACTIVITY_DONE_HIT_ID {
                     self.select_agent_activity_node(node_id, outcome);
                 }
                 outcome.repaint = true;
