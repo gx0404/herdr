@@ -3428,3 +3428,63 @@ fn remote_pane_rename_and_close_failures_show_a_notice() {
         }
     }
 }
+
+/// T1 复审轻 3：发出远端重命名或关闭后切换当前端点，`reset_endpoint_projection`
+/// 以前只留 TextCapture / TextRelease，把这类待处理记录一并清掉：应答回来时找不到
+/// 记录，失败静默。应答按目标端点自己的 boot_id 校验，切换后保留是安全的；现在
+/// 切到那台机器、或切过去再切回本机，失败提示都照常出现。
+#[test]
+fn remote_pane_action_failures_survive_an_endpoint_switch() {
+    let texts = &crate::i18n::texts().endpoint;
+    for action in [
+        ClientContextMenuAction::RenameAgent,
+        ClientContextMenuAction::CloseAgentPane,
+    ] {
+        for switch_back in [false, true] {
+            let case = format!("{action:?} switch_back={switch_back}");
+            let (mut state, remote) = federated_state(AgentPanelSortConfig::Spaces);
+            state.compose(106, 40).expect("联邦帧");
+            let (boot_id, request) = fire_remote_pane_action(&mut state, &remote, action);
+            assert!(
+                state.activate_endpoint_projection(&remote),
+                "{case}：切到远端"
+            );
+            assert!(state.endpoint_is_active(&remote), "{case}");
+            if switch_back {
+                assert!(
+                    state.activate_endpoint_projection(&ClientEndpointId::Local),
+                    "{case}：再切回本机"
+                );
+                assert!(
+                    state.pending_request_allows_inactive_endpoint(&request.id),
+                    "{case}：切回本机后远端的应答照样放行"
+                );
+            }
+            assert!(
+                state.pending_requests.contains_key(&request.id),
+                "{case}：切换端点不丢待处理记录"
+            );
+            let (repaint, actions) = state.handle_endpoint_result(
+                &boot_id,
+                &request.id,
+                Err(ClientShellEndpointError {
+                    code: Some("pane_not_found".into()),
+                    message: "pane pane_1 not found".into(),
+                }),
+            );
+            assert!(repaint && actions.is_empty(), "{case}");
+            let notice = state
+                .visible_endpoint_notice
+                .as_ref()
+                .unwrap_or_else(|| panic!("{case}：失败提示照常出现"));
+            assert_eq!(notice.title, texts.notice_action_rejected, "{case}");
+            assert_eq!(notice.body, "pane pane_1 not found", "{case}");
+            let text = compact(&frame_rows(&state.compose(106, 40).expect("提示帧")).join(""));
+            assert!(
+                text.contains(&compact(texts.notice_action_rejected))
+                    && text.contains("panepane_1notfound"),
+                "{case}：提示画在画面上：{text}"
+            );
+        }
+    }
+}

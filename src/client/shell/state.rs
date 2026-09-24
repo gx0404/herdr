@@ -2025,10 +2025,15 @@ impl ClientShellState {
         self.last_composed_size = None;
         self.last_composed_at = None;
         self.selection_repaint_deadline = None;
+        // 发往其它端点的一次性动作（其它机器上窗格的重命名 / 关闭）不属于当前投影：
+        // 应答按目标端点自己的 boot_id 校验，切换当前端点后照样放行并提示失败
+        // （T1 复审轻 3）。
         self.pending_requests.retain(|_, pending| {
             matches!(
                 pending.kind,
-                PendingEndpointKind::TextCapture { .. } | PendingEndpointKind::TextRelease
+                PendingEndpointKind::TextCapture { .. }
+                    | PendingEndpointKind::TextRelease
+                    | PendingEndpointKind::CrossEndpointAction { .. }
             )
         });
         self.pane_scroll_in_flight.clear();
