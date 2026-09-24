@@ -2346,6 +2346,75 @@ fn maximized_panel_title_only_focuses_and_never_starts_a_dock_drag() {
             state.workbench.dock.maximized, None,
             "{size}：调整布局模式按 Enter 还原"
         );
+
+        // 复审轻级 1：锁定不拦还原（点 `◫` 与调整布局的 Enter 都不查锁定）。锁定且
+        // 最大化时页脚仍先说怎么还原、再注明布局已锁定；照做同样还原，锁定不解除。
+        for mouse_capture in [true, false] {
+            let mut state = ready();
+            state.config.mouse_capture = mouse_capture;
+            state.workbench.dock.locked = true;
+            state.workbench.dock.maximized = Some(PanelId::Agents);
+            state.workbench.dock.focused = PanelId::Agents;
+            let screen = frame_rows(&state.compose(cols, rows).expect("锁定且最大化"));
+            let expected = if mouse_capture {
+                "已最大化·点◫还原布局·布局已锁定"
+            } else {
+                "已最大化·在「调整布局」模式按Enter还原布局·布局已锁定"
+            };
+            assert_eq!(
+                squash(&screen[usize::from(rows) - 1]),
+                expected,
+                "{size}：锁定且最大化时页脚说怎么还原（接鼠标：{mouse_capture}）"
+            );
+            if mouse_capture {
+                let toggle = title_x(&state, "◫");
+                sgr_click(&mut state, toggle, 1);
+            } else {
+                state.open_command_search();
+                palette_select(&mut state, "layout");
+                state.handle_input_bytes(b"\r");
+                assert!(state.workbench.arranging, "{size}：锁定时也能进调整布局");
+                state.handle_input_bytes(b"\r");
+            }
+            assert_eq!(
+                state.workbench.dock.maximized, None,
+                "{size}：锁定时照页脚做同样还原（接鼠标：{mouse_capture}）"
+            );
+            assert!(state.workbench.dock.locked, "{size}：还原不解除锁定");
+        }
+    }
+
+    // 复审轻级 3：英文界面 80×24 的最大化页脚整句断言（接不接鼠标 × 锁不锁定）。
+    let _en = crate::i18n::lang_guard(crate::i18n::Lang::En);
+    for (mouse_capture, locked, expected) in [
+        (true, false, "Maximized · click ◫ to restore the layout"),
+        (
+            false,
+            false,
+            "Maximized · press Enter in Arrange layout to restore the layout",
+        ),
+        (
+            true,
+            true,
+            "Maximized · click ◫ to restore the layout · layout locked",
+        ),
+        (
+            false,
+            true,
+            "Maximized · press Enter in Arrange layout to restore the layout · layout locked",
+        ),
+    ] {
+        let mut state = ready();
+        state.config.mouse_capture = mouse_capture;
+        state.workbench.dock.locked = locked;
+        state.workbench.dock.maximized = Some(PanelId::Agents);
+        state.workbench.dock.focused = PanelId::Agents;
+        let screen = frame_rows(&state.compose(80, 24).expect("英文界面、最大化"));
+        assert_eq!(
+            screen[23].trim_end(),
+            expected,
+            "英文 80×24（接鼠标：{mouse_capture}，锁定：{locked}）"
+        );
     }
 }
 
@@ -2460,6 +2529,24 @@ fn without_mouse_capture_the_footer_teaches_layout_keys_instead_of_drags() {
             "{size}：调整布局模式里 Tab 切换面板"
         );
     }
+
+    // 复审轻级 3：英文界面 80×24 的整句断言（不接鼠标的排布提示与锁定提示）。
+    let _en = crate::i18n::lang_guard(crate::i18n::Lang::En);
+    let mut state = ready_with_bordered_pane();
+    state.config.mouse_capture = false;
+    let screen = frame_rows(&state.compose(80, 24).expect("英文界面、不接鼠标"));
+    assert_eq!(
+        screen[23].trim_end(),
+        "Arrange layout (main menu): Tab focus panel · ←↑↓→ resize · Shift+←↑↓→ move",
+        "英文 80×24：不接鼠标时说键盘怎么排布"
+    );
+    state.workbench.dock.locked = true;
+    let screen = frame_rows(&state.compose(80, 24).expect("英文界面、不接鼠标、锁定"));
+    assert_eq!(
+        screen[23].trim_end(),
+        "Layout locked · turn off Lock layout in the main menu to rearrange",
+        "英文 80×24：锁定时指向主菜单里的开关"
+    );
 }
 
 /// `tab_1` 里两个窗格（`pane_1`、`pane_2`）的快照，`focused` 是聚焦窗格；`zoomed`

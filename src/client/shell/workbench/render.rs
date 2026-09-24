@@ -617,6 +617,29 @@ impl ClientShellState {
                     "Compact view · use Arrange layout / Tab to switch panels",
                     "紧凑视图 · 在「调整布局」模式用 Tab 切换面板",
                 )
+            } else if self.workbench.dock.maximized.is_some() {
+                // 最大化只投影一个面板：没有别的面板可停靠、也没有分隔线可拖，页脚
+                // 改说怎么还原（N20）；不接鼠标时 `◫` 点不到，说键盘路径。锁定不拦
+                // 还原（点 `◫` 与调整布局的 Enter 都不查锁定），所以锁定时照样先说
+                // 怎么还原、再注明布局已锁定（复审轻级 1）。
+                match (self.config.mouse_capture, self.workbench.dock.locked) {
+                    (true, false) => tr(
+                        "Maximized · click ◫ to restore the layout",
+                        "已最大化 · 点 ◫ 还原布局",
+                    ),
+                    (true, true) => tr(
+                        "Maximized · click ◫ to restore the layout · layout locked",
+                        "已最大化 · 点 ◫ 还原布局 · 布局已锁定",
+                    ),
+                    (false, false) => tr(
+                        "Maximized · press Enter in Arrange layout to restore the layout",
+                        "已最大化 · 在「调整布局」模式按 Enter 还原布局",
+                    ),
+                    (false, true) => tr(
+                        "Maximized · press Enter in Arrange layout to restore the layout · layout locked",
+                        "已最大化 · 在「调整布局」模式按 Enter 还原布局 · 布局已锁定",
+                    ),
+                }
             } else if self.workbench.dock.locked {
                 // 锁定后拖动停靠 / 调尺寸都被拒绝：不再提示拖动，改为说明怎么解锁
                 // （冒烟 L1）；不接鼠标时顶栏点不到，指向主菜单里的同名开关（N20）。
@@ -629,20 +652,6 @@ impl ClientShellState {
                     tr(
                         "Layout locked · turn off Lock layout in the main menu to rearrange",
                         "布局已锁定 · 在主菜单取消「锁定布局」后可重新排布",
-                    )
-                }
-            } else if self.workbench.dock.maximized.is_some() {
-                // 最大化只投影一个面板：没有别的面板可停靠、也没有分隔线可拖，页脚
-                // 改说怎么还原（N20）；不接鼠标时 `◫` 点不到，说键盘路径。
-                if self.config.mouse_capture {
-                    tr(
-                        "Maximized · click ◫ to restore the layout",
-                        "已最大化 · 点 ◫ 还原布局",
-                    )
-                } else {
-                    tr(
-                        "Maximized · press Enter in Arrange layout to restore the layout",
-                        "已最大化 · 在「调整布局」模式按 Enter 还原布局",
                     )
                 }
             } else if !self.config.mouse_capture {
