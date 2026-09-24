@@ -638,8 +638,12 @@ workspace の get/list 応答は結果の `tokens` マップを公開し、ス�
 設定ディレクトリを Herdr サーバーの環境で解決します。サーバーの環境に
 `CLAUDE_CONFIG_DIR`、`CODEX_HOME`、`KIMI_CODE_HOME` があればそれを使い、なければ
 `~/.claude`、`~/.codex`、`~/.kimi-code` を使います。ペインの中だけで設定した上書き
-(例: `CLAUDE_CONFIG_DIR=/path claude`)はサーバーからは見えず、そのエージェントの
+(例: `CODEX_HOME=/path codex`)はサーバーからは見えず、そのエージェントの
 アクティビティは見つかりません。サーバーを起動する環境でも同じ変数を設定してください。
+Claude Code はセッション開始後は例外です。Herdr の統合がセッション ID と一緒にトランスクリプト
+ファイルのパスを報告し、アダプターはそのパスからセッションを見つけるので、ペインの中だけで
+設定した `CLAUDE_CONFIG_DIR` でも動きます。この報告が届くまで(たとえば Herdr がセッションを
+復元した直後)は、上の設定ディレクトリにフォールバックします。
 
 フックは `pane.report_agent_activity` で合図します:
 

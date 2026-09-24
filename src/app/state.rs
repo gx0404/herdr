@@ -1154,6 +1154,10 @@ pub struct AgentActivityStore {
     activity: std::collections::HashMap<PaneId, AgentActivitySnapshot>,
     hinted: std::collections::HashSet<PaneId>,
     latest_hints: std::collections::HashMap<PaneId, std::sync::Arc<str>>,
+    /// 各 pane 钩子随会话上报的转录路径（claude），只给活动树定位会话文件用：与会话
+    /// id 成对存放，用时核对（[`Self::transcript`]）。上报可能早于 agent 被识别，所以
+    /// pane 还在就留着，不随 [`Self::retain_panes`] 清理。
+    transcripts: std::collections::HashMap<PaneId, crate::agent_resume::ReportedTranscript>,
     external: Vec<ExternalAgentRecord>,
     /// 各外部来源最近一次成功刷新的时刻。
     external_refreshed_at: std::collections::HashMap<String, std::time::Instant>,
@@ -1289,6 +1293,33 @@ impl AgentActivityStore {
     /// 该 pane 最近一份 hint 文本；没报过或已作废为 `None`。
     pub fn latest_hint(&self, pane_id: PaneId) -> Option<std::sync::Arc<str>> {
         self.latest_hints.get(&pane_id).cloned()
+    }
+
+    /// 记下该 pane 钩子随会话上报的转录路径（后来者覆盖）。
+    pub fn note_transcript(
+        &mut self,
+        pane_id: PaneId,
+        transcript: crate::agent_resume::ReportedTranscript,
+    ) {
+        self.transcripts.insert(pane_id, transcript);
+    }
+
+    /// 该 pane 上报过的、属于会话 `session_id` 的转录路径；会话已换（id 对不上）时为
+    /// `None`。
+    pub fn transcript(
+        &self,
+        pane_id: PaneId,
+        session_id: &str,
+    ) -> Option<&crate::agent_resume::AgentSessionRef> {
+        self.transcripts
+            .get(&pane_id)
+            .filter(|transcript| transcript.session_id == session_id)
+            .map(|transcript| &transcript.path)
+    }
+
+    /// 只保留 `exists` 判定为真的 pane 的转录路径（pane 关闭后清理）。
+    pub fn retain_transcripts(&mut self, mut exists: impl FnMut(PaneId) -> bool) {
+        self.transcripts.retain(|pane_id, _| exists(*pane_id));
     }
 
     pub fn has_hints(&self) -> bool {
@@ -1686,6 +1717,12 @@ impl AppState {
         } = self;
         let panes_changed =
             agent_activity.retain_panes(|pane_id| pane_hosts_agent(workspaces, terminals, pane_id));
+        // 转录路径不进投影：只清掉已关闭 pane 的，不递增投影纪元。
+        agent_activity.retain_transcripts(|pane_id| {
+            workspaces
+                .iter()
+                .any(|workspace| workspace.pane_state(pane_id).is_some())
+        });
         let external_changed = agent_activity.expire_external(now, EXTERNAL_AGENT_STALE_AFTER);
         let changed = panes_changed || external_changed;
         if changed {
@@ -1735,6 +1772,18 @@ impl AppState {
                     .persisted_agent_session
                     .as_ref()
                     .map(|session| session.session_ref.clone())
+            })
+            .map(|session| {
+                // 钩子随这个会话上报过转录路径（claude）：按路径定位会话文件，pane 里单独
+                // 设置的配置目录也能跟上（路径是 CLI 自己给的）；会话已换时不用旧路径。
+                match session.kind {
+                    crate::agent_resume::AgentSessionRefKind::Id => self
+                        .agent_activity
+                        .transcript(pane_id, &session.value)
+                        .cloned()
+                        .unwrap_or(session),
+                    crate::agent_resume::AgentSessionRefKind::Path => session,
+                }
             });
         let cwd = (!terminal.cwd.as_os_str().is_empty()).then(|| terminal.cwd.clone());
         Some(AgentActivitySubject {

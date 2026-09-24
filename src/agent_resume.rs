@@ -69,6 +69,38 @@ pub fn session_ref_from_report(
     agent_session_id.and_then(AgentSessionRef::id)
 }
 
+/// 钩子随会话一起上报的转录文件路径（[`transcript_from_report`]）：只给活动树定位会话
+/// 文件用，恢复仍只认 [`session_ref_from_report`] 给出的会话引用。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReportedTranscript {
+    /// 同一次上报的会话 id：活动树只在 pane 的会话 id 仍是它时才用这条路径。
+    pub session_id: String,
+    /// 转录文件的绝对路径（[`AgentSessionRefKind::Path`]）。
+    pub path: AgentSessionRef,
+}
+
+/// 钩子上报的转录路径。目前只收 claude 官方集成的：SessionStart 载荷的
+/// `transcript_path` 与会话 id 一起上报，活动适配器由它推出会话目录。路径是 pane 里的
+/// CLI 自己给的，`CLAUDE_CONFIG_DIR` 只在 pane 里设置时活动树也能找到会话文件。其余
+/// agent 不收：codex 钩子拿到了转录路径但没有转发，kimi 的钩子载荷里没有路径，pi 的
+/// 路径本身就是会话引用。
+pub fn transcript_from_report(
+    source: &str,
+    agent: &str,
+    agent_session_id: Option<&str>,
+    agent_session_path: Option<&str>,
+) -> Option<ReportedTranscript> {
+    if (source, agent) != ("herdr:claude", "claude") {
+        return None;
+    }
+    let session_id = agent_session_id.filter(|id| valid_session_id(id))?;
+    let path = AgentSessionRef::path(agent_session_path?)?;
+    Some(ReportedTranscript {
+        session_id: session_id.to_owned(),
+        path,
+    })
+}
+
 pub fn persisted_session_from_launch_args(
     agent: crate::detect::Agent,
     args: &[String],
@@ -406,6 +438,74 @@ mod tests {
                 session_ref_from_report(source, agent, Some("session-id".into()), None).unwrap();
             assert_eq!(session_ref.kind, AgentSessionRefKind::Id, "{agent}");
             assert_eq!(session_ref.value, "session-id", "{agent}");
+        }
+    }
+
+    /// 交接 T8 G1b：claude 钩子随会话上报的转录路径与会话 id 成对保留，给活动树用；
+    /// 只收 claude 官方来源、合法 id 与绝对路径，恢复用的会话引用不受影响。
+    #[test]
+    fn reported_transcripts_pair_claude_paths_with_their_session_id() {
+        let transcript = absolute_test_path("session-id.jsonl");
+        let reported = transcript_from_report(
+            "herdr:claude",
+            "claude",
+            Some("session-id"),
+            Some(&transcript),
+        )
+        .expect("claude 的转录路径");
+        assert_eq!(reported.session_id, "session-id");
+        assert_eq!(reported.path.kind, AgentSessionRefKind::Path);
+        assert_eq!(reported.path.value, transcript);
+        assert_eq!(
+            session_ref_from_report(
+                "herdr:claude",
+                "claude",
+                Some("session-id".into()),
+                Some(transcript.clone())
+            )
+            .map(|session| session.kind),
+            Some(AgentSessionRefKind::Id),
+            "恢复仍按 id"
+        );
+
+        for (source, agent, id, path) in [
+            ("herdr:claude", "claude", None, Some(transcript.as_str())),
+            (
+                "herdr:claude",
+                "claude",
+                Some("bad\nid"),
+                Some(transcript.as_str()),
+            ),
+            (
+                "herdr:claude",
+                "claude",
+                Some("session-id"),
+                Some("relative.jsonl"),
+            ),
+            ("herdr:claude", "claude", Some("session-id"), None),
+            (
+                "custom:claude",
+                "claude",
+                Some("session-id"),
+                Some(transcript.as_str()),
+            ),
+            (
+                "herdr:codex",
+                "codex",
+                Some("session-id"),
+                Some(transcript.as_str()),
+            ),
+            (
+                "herdr:pi",
+                "pi",
+                Some("session-id"),
+                Some(transcript.as_str()),
+            ),
+        ] {
+            assert!(
+                transcript_from_report(source, agent, id, path).is_none(),
+                "{source} {agent} {id:?} {path:?}"
+            );
         }
     }
 

@@ -236,9 +236,10 @@ enum Located {
 
 /// 由会话引用定位 `<项目 slug>/<session-uuid>/` 目录。
 ///
-/// `agent_resume::session_ref_from_report` 对 claude 只保留 `Id`（`transcript_path`
-/// 被丢弃），所以 `Id` 分支要在 [`projects_root`] 的各项目目录下按会话 id 找目录；
-/// `Path` 分支兼容日后直接给转录路径的情况。
+/// 钩子随会话上报过转录路径时，runtime 给的是 `Path`（`agent_resume::transcript_from_report`；
+/// 路径由 pane 里的 CLI 自己给出，跟随 pane 里的 `CLAUDE_CONFIG_DIR`）。没有路径时
+/// （上报还没到、或恢复出来的会话）是 `Id`，在 [`projects_root`] 的各项目目录下按会话
+/// id 找目录。
 fn locate_session(cx: &SourceContext<'_>) -> Located {
     let Some(session) = cx.session else {
         return Located::NoSession;

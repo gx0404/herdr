@@ -821,9 +821,14 @@ Adapters that read an agent's own session files (Claude Code, Codex, Kimi Code)
 resolve its configuration directory from the Herdr server's environment:
 `CLAUDE_CONFIG_DIR`, `CODEX_HOME`, or `KIMI_CODE_HOME` when the server has it,
 otherwise `~/.claude`, `~/.codex`, or `~/.kimi-code`. An override set only inside
-a pane, such as `CLAUDE_CONFIG_DIR=/path claude`, is not visible to the server,
-so that agent's activity is not found; set the variable in the environment the
-server starts from as well.
+a pane, such as `CODEX_HOME=/path codex`, is not visible to the server, so that
+agent's activity is not found; set the variable in the environment the server
+starts from as well. Claude Code is the exception once its session has started:
+the Herdr integration reports the session's transcript path along with its ID,
+and the adapter locates the session from that path, so a `CLAUDE_CONFIG_DIR` set
+only inside the pane works. Until that report arrives, for example right after
+Herdr restores a session, the adapter falls back to the configuration directory
+above.
 
 Hooks signal with `pane.report_agent_activity`:
 

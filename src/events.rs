@@ -96,6 +96,10 @@ pub enum AppEvent {
         seq: Option<u64>,
         session_ref: Option<crate::agent_resume::AgentSessionRef>,
         session_start_source: Option<String>,
+        /// The transcript path reported with the session id (Claude Code only),
+        /// kept for the activity tree to locate the session's files; resume
+        /// still uses `session_ref`.
+        transcript: Option<crate::agent_resume::ReportedTranscript>,
     },
     /// A hook hinted that a pane's agent activity (subagents, tasks, todos,
     /// background processes) may have changed. The hint carries no tree content.

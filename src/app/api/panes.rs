@@ -1605,8 +1605,15 @@ impl App {
         let Some(agent_label) = normalize_reported_agent_label(&params.agent) else {
             return invalid_agent(id);
         };
+        let transcript = crate::agent_resume::transcript_from_report(
+            &params.source,
+            &agent_label,
+            params.agent_session_id.as_deref(),
+            params.agent_session_path.as_deref(),
+        );
         self.handle_internal_event(crate::events::AppEvent::AgentSessionReported {
             pane_id,
+            transcript,
             session_ref: crate::agent_resume::session_ref_from_report(
                 &params.source,
                 &agent_label,

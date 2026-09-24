@@ -46,8 +46,8 @@ pub(crate) struct SourceContext<'a> {
     /// 该 CLI 的配置目录（见 `agent_config_dir`：环境变量覆盖优先，否则 `home`
     /// 下的默认目录；claude / codex / kimi 借此跟随 `CLAUDE_CONFIG_DIR` /
     /// `CODEX_HOME` / `KIMI_CODE_HOME`）。覆盖变量取自 server 进程的环境，不是
-    /// pane 里 CLI 的环境。没有对应 CLI 时为 `None`，适配器回退 `home` 下的默认
-    /// 目录。
+    /// pane 里 CLI 的环境（claude 的钩子上报过转录路径时，`session` 直接是该路径，
+    /// 不经这里）。没有对应 CLI 时为 `None`，适配器回退 `home` 下的默认目录。
     pub agent_config_dir: Option<&'a Path>,
     /// server 缓存的该 pane 最近一份 `pane.report_agent_activity` hint（pi 的树整份
     /// 装在里面，见 `pi::discover_from_hint`）；外部来源与从未报过提示的 pane 为
@@ -221,11 +221,13 @@ fn read_node(
 ///   应用，环境与 server 无关。
 ///
 /// 覆盖变量读的是 herdr server 进程自己的环境（server 启动时继承的那份），不是
-/// pane 里 CLI 进程的环境：只在某个 pane 里导出的覆盖（如 `CLAUDE_CONFIG_DIR=/x
-/// claude`）这里看不到，会去默认目录找该 agent 的会话文件而找不到。要跟随 pane 的
-/// 实际环境，得读 agent 进程的环境块（平台相关，Windows 没有对等手段），或保留钩子
-/// 上报的转录路径（`agent_resume::session_ref_from_report` 目前只给 pi 留路径），
-/// 都不在这里做；用户文档（socket-api「Agent activity」）写明了这一点。
+/// pane 里 CLI 进程的环境：只在某个 pane 里导出的覆盖（如 `CODEX_HOME=/x codex`）
+/// 这里看不到，会去默认目录找该 agent 的会话文件而找不到。claude 例外：钩子随会话
+/// 上报转录路径（`agent_resume::transcript_from_report`），`AppState::agent_activity_subject`
+/// 把会话引用换成该路径，活动树按路径定位会话，不经这里。codex 钩子拿到了转录路径
+/// 但没有转发，kimi 的钩子载荷里没有路径；要跟随它们在 pane 里的实际环境，得读 agent
+/// 进程的环境块（平台相关，Windows 没有对等手段），不在这里做。用户文档（socket-api
+/// 「Agent activity」）写明了这一点。
 fn agent_config_dir(agent: &str, home: &Path) -> Option<PathBuf> {
     let (env_var, segments): (Option<&str>, &[&str]) = match agent {
         "claude" => (Some("CLAUDE_CONFIG_DIR"), &[".claude"]),
@@ -2432,6 +2434,143 @@ mod tests {
         let scheduler = &service.scheduler;
         let entry = scheduler.panes.get(&pane_id).expect("pane 有调度记录");
         (entry.seen_pass == scheduler.pass, entry.last_started)
+    }
+
+    /// 交接 T8 G1b：`CLAUDE_CONFIG_DIR` 只在 pane 里设置时 server 看不到，按会话 id 在
+    /// server 眼里的配置目录下找不到会话。claude 集成在 SessionStart 随会话 id 一起上报
+    /// 转录路径（CLI 自己给的），活动树按它定位会话。这里 home 是空目录、server 环境里
+    /// 没有覆盖变量：会话只在「pane 里的」配置目录（夹具）下。
+    #[test]
+    fn claude_activity_follows_the_transcript_path_its_hook_reported() {
+        let _lock = crate::integration::integration_env_lock();
+        let _claude = EnvOverride::set("CLAUDE_CONFIG_DIR", None);
+        let home = std::env::temp_dir().join(format!("herdr-g1b-home-{}", std::process::id()));
+        std::fs::create_dir_all(&home).expect("临时 home 可建");
+        let session = "5f000000-0000-4000-8000-000000000001";
+        let transcript = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/agent-activity/claude/home/.claude/projects/-tmp-demo-project")
+            .join(format!("{session}.jsonl"));
+        assert!(transcript.is_file(), "夹具转录存在");
+        let (mut app, pane_id, public) = app_with_agent(Some(Agent::Claude));
+        let response = app.handle_api_request(Request {
+            id: "session".into(),
+            method: Method::PaneReportAgentSession(
+                crate::api::schema::PaneReportAgentSessionParams {
+                    pane_id: public.clone(),
+                    source: "herdr:claude".into(),
+                    agent: "claude".into(),
+                    seq: Some(1),
+                    agent_session_id: Some(session.into()),
+                    agent_session_path: Some(transcript.to_string_lossy().into_owned()),
+                    session_start_source: Some("startup".into()),
+                },
+            ),
+        });
+        assert!(response.contains("\"ok\""), "{response}");
+        let subject = app
+            .state
+            .agent_activity_subject(pane_id)
+            .expect("pane 持有 agent");
+        let session_ref = subject.session.expect("会话已上报");
+        assert_eq!(
+            session_ref.kind,
+            crate::agent_resume::AgentSessionRefKind::Path,
+            "活动树按上报的转录路径定位会话"
+        );
+        assert_eq!(session_ref.value, transcript.to_string_lossy());
+
+        let (events, _received) = tokio::sync::mpsc::channel(32);
+        let mut service = Service::with_sources(events, Sources::REGISTERED, Some(home.clone()));
+        let tree = submit_api(
+            &mut service,
+            &app,
+            read_request(crate::api::schema::AgentActivityReadParams {
+                pane_id: Some(public),
+                ..Default::default()
+            }),
+        )
+        .expect("受理");
+        let found = tree["result"]["nodes"].as_array().map_or(0, Vec::len);
+        let _ = std::fs::remove_dir_all(&home);
+        assert!(found > 0, "按上报的转录路径找到会话：{tree}");
+    }
+
+    /// G1b：转录路径与会话 id 成对存放。会话换了（新 id 没带路径）就退回按 id 找；agent
+    /// 还没识别出来时上报的路径照样留着（过期清理不动它），pane 关掉后才清。
+    #[test]
+    fn reported_transcripts_follow_the_current_session_and_the_pane() {
+        use crate::agent_resume::AgentSessionRefKind;
+        let transcript = |session: &str| crate::agent_resume::ReportedTranscript {
+            session_id: session.into(),
+            path: crate::agent_resume::AgentSessionRef::path(format!(
+                "/cfg/projects/p/{session}.jsonl"
+            ))
+            .expect("绝对路径"),
+        };
+        let report = |app: &mut crate::app::App, public: &str, session: &str, seq: u64| {
+            let response = app.handle_api_request(Request {
+                id: format!("session-{seq}"),
+                method: Method::PaneReportAgentSession(
+                    crate::api::schema::PaneReportAgentSessionParams {
+                        pane_id: public.to_owned(),
+                        source: "herdr:claude".into(),
+                        agent: "claude".into(),
+                        seq: Some(seq),
+                        agent_session_id: Some(session.into()),
+                        agent_session_path: None,
+                        session_start_source: Some("clear".into()),
+                    },
+                ),
+            });
+            assert!(response.contains("\"ok\""), "{response}");
+        };
+        let session = |app: &crate::app::App, pane_id: PaneId| {
+            app.state
+                .agent_activity_subject(pane_id)
+                .and_then(|subject| subject.session)
+                .map(|session| (session.kind, session.value))
+        };
+
+        let (mut app, pane_id, public) = app_with_agent(Some(Agent::Claude));
+        report(&mut app, &public, "s-1", 1);
+        app.state
+            .agent_activity
+            .note_transcript(pane_id, transcript("s-1"));
+        assert_eq!(
+            session(&app, pane_id),
+            Some((
+                AgentSessionRefKind::Path,
+                "/cfg/projects/p/s-1.jsonl".to_owned()
+            ))
+        );
+        report(&mut app, &public, "s-2", 2);
+        assert_eq!(
+            session(&app, pane_id),
+            Some((AgentSessionRefKind::Id, "s-2".to_owned())),
+            "会话已换：不用旧路径"
+        );
+
+        let (mut idle, idle_pane, _) = app_with_agent(None);
+        idle.state
+            .agent_activity
+            .note_transcript(idle_pane, transcript("s-3"));
+        idle.state.expire_agent_activity(Instant::now());
+        assert!(
+            idle.state
+                .agent_activity
+                .transcript(idle_pane, "s-3")
+                .is_some(),
+            "agent 还没识别出来：路径留着"
+        );
+        idle.state.workspaces.clear();
+        idle.state.expire_agent_activity(Instant::now());
+        assert!(
+            idle.state
+                .agent_activity
+                .transcript(idle_pane, "s-3")
+                .is_none(),
+            "pane 关掉后清理"
+        );
     }
 
     #[test]

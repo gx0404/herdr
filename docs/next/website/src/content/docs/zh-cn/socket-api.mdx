@@ -632,8 +632,11 @@ workspace 的 get/list 响应会公开生成的 `tokens` 映射,空间侧边栏�
 读取智能体自身会话文件的适配器(Claude Code、Codex、Kimi Code)按 Herdr 服务器
 进程的环境解析配置目录:服务器环境里有 `CLAUDE_CONFIG_DIR`、`CODEX_HOME` 或
 `KIMI_CODE_HOME` 就用它,否则用 `~/.claude`、`~/.codex` 或 `~/.kimi-code`。只在某个
-窗格里设置的覆盖(例如 `CLAUDE_CONFIG_DIR=/path claude`)服务器看不到,也就找不到
-该智能体的活动;请同时在启动服务器的环境里设置该变量。
+窗格里设置的覆盖(例如 `CODEX_HOME=/path codex`)服务器看不到,也就找不到
+该智能体的活动;请同时在启动服务器的环境里设置该变量。Claude Code 在会话开始后例外:
+Herdr 集成会随会话 ID 一起上报会话转录文件的路径,适配器按这条路径定位会话,所以只在
+窗格里设置的 `CLAUDE_CONFIG_DIR` 也能生效。这次上报到达之前(例如 Herdr 刚恢复会话时),
+适配器仍回退到上面的配置目录。
 
 钩子用 `pane.report_agent_activity` 发信号:
 

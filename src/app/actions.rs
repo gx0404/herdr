@@ -1601,8 +1601,14 @@ impl AppState {
                 seq,
                 session_ref,
                 session_start_source,
-            } => self
-                .update_terminal_state(pane_id, |terminal| {
+                transcript,
+            } => {
+                if let Some(transcript) = transcript {
+                    // 只给活动树定位会话文件用，与会话 id 成对存放、用时核对；会话
+                    // 状态机（上报可能被暂缓）不看它。
+                    self.agent_activity.note_transcript(pane_id, transcript);
+                }
+                self.update_terminal_state(pane_id, |terminal| {
                     terminal.set_agent_session_ref_for_session_start(
                         source,
                         agent_label,
@@ -1612,7 +1618,8 @@ impl AppState {
                     )
                 })
                 .into_iter()
-                .collect(),
+                .collect()
+            }
             AppEvent::AgentActivityHinted {
                 pane_id,
                 source,
