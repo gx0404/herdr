@@ -4008,8 +4008,11 @@ impl ClientShellState {
         key: &crate::input::TerminalKey,
         outcome: &mut ClientShellInput,
     ) -> bool {
-        // 钉住的浮层：Esc 关闭（其它按键照常落到终端 / 页面）。
+        // 钉住的浮层：Esc 关闭（其它按键照常落到终端 / 页面）。进程对话框打开时
+        // 卡片不画（`State::hover_card_drawn`），Esc 先关对话框，卡随后重新出现
+        // （T1 复审轻 1）。
         if key.code == KeyCode::Esc
+            && self.observability.process_dialog.is_none()
             && self
                 .observability
                 .hover

@@ -8344,6 +8344,92 @@ fn hover_usage_requests_follow_exactly_what_is_drawn() {
     }
 }
 
+/// T1 复审轻 1：进程对话框打开时钉住的卡不画（`State::hover_card_drawn`），Esc
+/// 以前却先被这张看不见的卡吃掉：第一次 Esc 清掉卡、对话框不动，第二次才关对话框，
+/// 卡也回不来了。现在 Esc 先关对话框，卡随即重新画出来；再按一次 Esc 才关卡。
+/// 窄 / 中 / 宽三档都读出画面上的卡片标题。
+#[test]
+fn escape_closes_the_process_dialog_before_a_pinned_card() {
+    use crate::client::shell::observability::ProcessDialog;
+    let title: String = crate::i18n::fill(
+        crate::i18n::texts().agent_panel.usage_card_title_fmt,
+        &[("agent", "claude")],
+    )
+    .chars()
+    .filter(|ch| !ch.is_whitespace())
+    .collect();
+    let drawn = |state: &mut ClientShellState, (cols, rows): (u16, u16)| {
+        let frame = state.compose(cols, rows).expect("经典布局帧");
+        frame_rows(&frame)
+            .concat()
+            .chars()
+            .filter(|ch| !ch.is_whitespace())
+            .collect::<String>()
+            .contains(&title)
+    };
+    for size in [(80u16, 24u16), (133, 32), (200, 50)] {
+        let mut snapshot = snapshot();
+        snapshot.agents.push(agent_in_pane("pane_1", "claude"));
+        let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
+        state.set_snapshot(Box::new(snapshot));
+        state.set_pane_surface(surface());
+        tick(&mut state, Instant::now());
+        state.open_observation_page(Page::Monitor, &mut ClientShellInput::default());
+        state.observability.hover = Some(Hover {
+            target: HoverTarget::Agent {
+                endpoint_id: state.active_endpoint_id.clone(),
+                pane: "pane_1".into(),
+                agent: "claude".into(),
+            },
+            anchor: Rect::new(0, size.1.saturating_sub(4), 24, 2),
+            since: Instant::now(),
+            visible: true,
+            leave_at: None,
+            pinned: true,
+        });
+        assert!(
+            drawn(&mut state, size),
+            "{size:?}：用例前提：钉住的卡画在页面之上"
+        );
+        state.observability.process_dialog = Some(ProcessDialog {
+            process: Default::default(),
+            force: false,
+            confirm: false,
+            pending: false,
+        });
+        assert!(!drawn(&mut state, size), "{size:?}：对话框打开时卡不画");
+
+        state.handle_input_bytes(b"\x1b");
+        assert!(
+            state.observability.process_dialog.is_none(),
+            "{size:?}：第一次 Esc 关对话框"
+        );
+        assert!(
+            state
+                .observability
+                .hover
+                .as_ref()
+                .is_some_and(|hover| hover.pinned),
+            "{size:?}：钉住的卡还在"
+        );
+        assert!(
+            drawn(&mut state, size),
+            "{size:?}：对话框关掉后卡重新画出来"
+        );
+
+        state.handle_input_bytes(b"\x1b");
+        assert!(
+            state.observability.hover.is_none(),
+            "{size:?}：再按 Esc 才关卡"
+        );
+        assert_eq!(
+            state.observability.page,
+            Some(Page::Monitor),
+            "{size:?}：页面还开着"
+        );
+    }
+}
+
 /// 文档终审 D4：告警阈值步进器以前固定 ±5、不走档位表，配置里的 30 会被加到
 /// 35（超出文档写的 50–100），52 这类档间值也跳不回档位。改为与其它步进器一样
 /// 走档位表（50–100，步长 5）：档间值先走到相邻档，越过两端回绕，结果永远在
