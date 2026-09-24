@@ -15,7 +15,7 @@ The temporary TUI only keeps the disposable session attached and supplies termin
 - Never stop, restart, delete, or kill the main Herdr server.
 - Never use `pkill`, broad process matching, or guessed PIDs for cleanup.
 - Create a unique session name. Never reuse or delete an unrelated named session.
-- Create a new outer pane and close only that pane during cleanup.
+- Create a dedicated background workspace for the outer pane and close only that workspace during cleanup.
 - Read workspace, tab, pane, terminal, and agent IDs from command output. Never construct them.
 - Use `/var/tmp` for reproduction directories and potentially large artifacts.
 - Do not approve destructive or unnecessary agent actions.
@@ -42,9 +42,11 @@ Record which Herdr binary and version the reproduction tests. If testing a check
 
 ## Create the outer pane
 
-Create a sibling shell pane in the current tab without moving focus. Use an available Herdr layout tool when the harness provides one. Otherwise use the installed pane split command after checking its help.
+Create a dedicated workspace for the reproduction without moving focus, and use its root pane as the outer pane. Check the installed workspace command's help first. For example, `herdr workspace create --no-focus --label repro-<topic>-<timestamp> --cwd <reproduction dir>` returns the new workspace and its root pane.
 
-Use `/var/tmp` or a dedicated reproduction directory as the new pane's cwd. Save the returned outer pane ID. This is the only parent-session pane that cleanup may close.
+Do not split, move, or resize existing panes. A split without an explicit target lands next to whatever pane the user has focused, and `pane move` focuses the moved pane. Do not treat `HERDR_PANE_ID` as proof of which pane you run in: an agent started from a background session can inherit it from an unrelated pane.
+
+Use `/var/tmp` or a dedicated reproduction directory as the workspace cwd. Save the returned workspace ID and outer pane ID. They are the only parent-session objects that cleanup may close.
 
 ## Start the disposable session
 
@@ -181,9 +183,9 @@ Cleanup is part of the reproduction, including after failure.
 4. Delete that same stopped session.
 5. Confirm it no longer appears as running.
 6. Wait for the outer pane to return to its shell.
-7. Close only the outer pane created by this workflow.
+7. Close only the workspace created by this workflow, which also closes its outer pane. Confirm that the user's focused pane and existing tabs are unchanged.
 
-Never delete another named session because it looks stale. Never close the pane running the current agent or any pane not created for the reproduction.
+Never delete another named session because it looks stale. Never close the pane running the current agent or any pane or workspace not created for the reproduction.
 
 ## Report the result
 
