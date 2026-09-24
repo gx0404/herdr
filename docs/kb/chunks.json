@@ -1,5 +1,5 @@
 {
-  "chunk_count": 1063,
+  "chunk_count": 1064,
   "chunks": [
     {
       "anchor": "herdr",
@@ -6188,6 +6188,13 @@
       "id": "src-pane-terminal-rs-structure-part3",
       "source_sha256": "99e23311aa1ea7d7d257bbb7b899c0d1487c6a4a20b4acdcd8d5865049f58750",
       "text": "pub(crate) fn test_backdate_synchronized_output(&self, by: Duration) {\npub(crate) fn test_reject_next_resize(&self) {\npub fn encode_terminal_key(\npub(crate) fn encode_mouse_button(\npub(crate) fn encode_mouse_motion(\npub(crate) fn encode_mouse_wheel(\npub(crate) fn screen_text_snapshot(\npub fn visible_text(&self) -> String {\npub fn visible_ansi(&self) -> String {\npub fn detection_text(&self) -> String {\npub(crate) fn try_compression_activity(&self) -> Result<Option<u64>, crate::ghostty::Error> {\npub(crate) fn try_compress_incremental_if_activity(\npub fn recent_text(&self, lines: usize) -> String {\npub(crate) fn recent_text_snapshot(&self, lines: usize) -> TerminalReadSnapshot {\npub fn recent_ansi(&self, lines: usize) -> String {\npub(crate) fn recent_ansi_snapshot(&self, lines: usize) -> TerminalReadSnapshot {\npub fn recent_unwrapped_text(&self, lines: usize) -> String {\npub(crate) fn recent_unwrapped_text_snapshot(&self, lines: usize) -> TerminalReadSnapshot {\npub fn recent_unwrapped_ansi(&self, lines: usize) -> String {\npub(crate) fn recent_unwrapped_ansi_snapshot(&self, lines: usize) -> TerminalReadSnapshot {\npub(crate) fn link_regions_at(\npub(crate) fn link_target_at(&self, col: u16, row: u16) -> Option<crate::ghostty::LinkTarget> {\npub fn extract_selection(&self, selection: &crate::selection::Selection) -> Option<String> {\npub fn visible_hyperlinks(&self, area: Rect) -> Vec<((u16, u16), String, String)> {\npub fn kitty_image_placements_with_data_filter<F>(\npub fn render(&self, frame: &mut Frame, area: Rect, show_cursor: bool) {\npub fn collect_dirty_patch(\npub(super) fn ghostty_blank_symbol_for_width(wide: crate::ghostty::CellWide) -> &'static str {\npub(super) fn ghostty_normalize_buffer_symbol(\nimpl OrderedColorOrC1Event {\nimpl PaletteOverrides {\npub(super) fn trim_trailing_blank_rows(rows: &mut Vec<String>) {"
+    },
+    {
+      "anchor": "structure",
+      "doc": "src/pane/terminal/wide_char_tests.rs",
+      "id": "src-pane-terminal-wide-char-tests-rs-structure",
+      "source_sha256": "f67633c7a9d5cb09684b763d3991c37ebd0ed07571b4da6c5a3477289eb026b3",
+      "text": "模块文档：宽字符在行尾、折行与 resize 前后的回归：网格、纯文本 / ANSI 快照与渲染单元格必须一致， 且渲染单元格不得把 2 宽字形放进窗格最后一列（会越界盖住边框或相邻窗格）。  字节流全部手写合成：自动换行时宽字符恰好落在最后一列、TUI 用 CUP 逐行写满到最后一列、 覆盖已有宽字符的半边、inline 程序擦行重绘。网格期望按 xterm 语义给出，并用 tmux 3.0a 重放同一批字节核对过；其中「覆盖半边」用例就是 opencode（opentui）折行缺字时实际写出的字节。\n公开项：\nimpl WidePane {"
     },
     {
       "anchor": "structure",

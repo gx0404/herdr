@@ -18,6 +18,8 @@ use crate::protocol::CellData;
 
 #[cfg(test)]
 mod migration_tests;
+#[cfg(test)]
+mod wide_char_tests;
 #[cfg(windows)]
 mod windows_recent_fallback;
 
