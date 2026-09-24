@@ -152,9 +152,13 @@ fn shell_hold_until_released(release: &Path) -> String {
 }
 
 /// `agent start` 的 agent 超时：远大于 CLI 在 shell 初始化期间的 2 s 重试窗口
-/// （`cli::agent::PANE_SHELL_READINESS_RETRY_TIMEOUT`），放弃早于它的一半才说明
-/// CLI 是按重试窗口停手，而不是一直重试到超时。
+/// （`cli::agent::PANE_SHELL_READINESS_RETRY_TIMEOUT`），让「一直重试到超时」与
+/// 「按重试窗口停手」在时间上分得开。
 const BUSY_AGENT_START_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// 放弃必须早于这个时刻：给 2 s 的重试窗口留出 13 s 的负载余量，同时仍能抓住
+/// 窗口涨到 15 s 以上的回归（复审 L5：原先的「超时一半」即 30 s 抓不住 20 s）。
+const BUSY_GIVE_UP_BOUND: Duration = Duration::from_secs(15);
 
 #[test]
 fn agent_start_stops_retrying_when_the_pane_shell_stays_busy() {
@@ -215,8 +219,8 @@ fn agent_start_stops_retrying_when_the_pane_shell_stays_busy() {
         "gave up before the shell readiness retry window: {elapsed:?}"
     );
     assert!(
-        elapsed < BUSY_AGENT_START_TIMEOUT / 2,
-        "kept retrying toward the agent timeout: {elapsed:?}"
+        elapsed < BUSY_GIVE_UP_BOUND,
+        "kept retrying past the shell readiness window: {elapsed:?}"
     );
     assert!(!invocations.exists());
 
