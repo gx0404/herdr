@@ -31,7 +31,7 @@ pub(super) struct ClientChromePreferences {
     /// 监控卡片配置；结构不合法（旧版本 / 手改）时按未设置处理，不让整份偏好失效。
     #[serde(
         default,
-        deserialize_with = "read_lenient",
+        deserialize_with = "lenient::monitor",
         skip_serializing_if = "Option::is_none"
     )]
     pub(super) monitor: Option<crate::config::MonitorConfig>,
@@ -41,13 +41,13 @@ pub(super) struct ClientChromePreferences {
     /// 仍由配置诊断报出）。
     #[serde(
         default,
-        deserialize_with = "read_lenient",
+        deserialize_with = "lenient::usage_format",
         skip_serializing_if = "Option::is_none"
     )]
     pub(super) usage_format: Option<crate::config::UsageDisplayFormat>,
     #[serde(
         default,
-        deserialize_with = "read_lenient",
+        deserialize_with = "lenient::usage_position",
         skip_serializing_if = "Option::is_none"
     )]
     pub(super) usage_position: Option<crate::config::UsageDisplayPosition>,
@@ -60,7 +60,7 @@ pub(super) struct ClientChromePreferences {
     /// 监控面板里用户选中的 tab；未知值按未设置处理，不让整份偏好失效。
     #[serde(
         default,
-        deserialize_with = "read_monitor_tab",
+        deserialize_with = "lenient::monitor_tab",
         skip_serializing_if = "Option::is_none"
     )]
     pub(super) monitor_tab: Option<super::observability::Page>,
@@ -68,7 +68,7 @@ pub(super) struct ClientChromePreferences {
     /// 处理，不让整份偏好失效。
     #[serde(
         default,
-        deserialize_with = "read_lenient",
+        deserialize_with = "lenient::monitor_chart_glyphs",
         skip_serializing_if = "Option::is_none"
     )]
     pub(super) monitor_chart_glyphs: Option<super::observability::ChartGlyphsPreference>,
@@ -80,7 +80,7 @@ pub(super) struct ClientChromePreferences {
     pub(super) sidebar_collapsed: Option<bool>,
     #[serde(
         default,
-        deserialize_with = "read_lenient",
+        deserialize_with = "lenient::agent_panel_sort",
         skip_serializing_if = "Option::is_none"
     )]
     pub(super) agent_panel_sort: Option<crate::config::AgentPanelSortConfig>,
@@ -139,20 +139,69 @@ fn read_pages<'de, D: serde::Deserializer<'de>>(
         .collect())
 }
 
-fn read_monitor_tab<'de, D: serde::Deserializer<'de>>(
-    deserializer: D,
-) -> Result<Option<super::observability::Page>, D::Error> {
-    read_lenient(deserializer)
+/// 单字段容错：值解析失败（未知枚举值、结构不合法）时按未设置处理，只丢这一个
+/// 字段，其余偏好照常生效，并记一条诊断（D6）：键名与原始值的 JSON 类型——不记
+/// 值本身，偏好文件可能被手改进任意内容。`null` 就是未设置，不算丢弃。
+fn read_lenient<'de, D, T>(key: &'static str, deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: serde::de::DeserializeOwned,
+{
+    let value = serde_json::Value::deserialize(deserializer)?;
+    if value.is_null() {
+        return Ok(None);
+    }
+    let value_type = json_type_name(&value);
+    match serde_json::from_value(value) {
+        Ok(parsed) => Ok(Some(parsed)),
+        Err(_) => {
+            tracing::warn!(
+                key,
+                value_type,
+                "ignoring unreadable client shell preference value; treating the setting as unset"
+            );
+            Ok(None)
+        }
+    }
 }
 
-/// 单字段容错：值解析失败（未知枚举值、结构不合法）时按未设置处理，只丢这一个
-/// 字段，其余偏好照常生效。
-fn read_lenient<'de, D: serde::Deserializer<'de>, T: serde::de::DeserializeOwned>(
-    deserializer: D,
-) -> Result<Option<T>, D::Error> {
-    let value = serde_json::Value::deserialize(deserializer)?;
-    Ok(serde_json::from_value(value).ok())
+fn json_type_name(value: &serde_json::Value) -> &'static str {
+    match value {
+        serde_json::Value::Null => "null",
+        serde_json::Value::Bool(_) => "boolean",
+        serde_json::Value::Number(_) => "number",
+        serde_json::Value::String(_) => "string",
+        serde_json::Value::Array(_) => "array",
+        serde_json::Value::Object(_) => "object",
+    }
 }
+
+/// serde 的 `deserialize_with` 拿不到字段名：给每个容错字段生成一个与字段同名的
+/// 读取函数，把键名固化进去，丢弃时的诊断才能指出是哪个键。
+macro_rules! lenient_fields {
+    ($($field:ident),+ $(,)?) => {
+        mod lenient {
+            $(
+                pub(super) fn $field<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+                where
+                    D: serde::Deserializer<'de>,
+                    T: serde::de::DeserializeOwned,
+                {
+                    super::read_lenient(stringify!($field), deserializer)
+                }
+            )+
+        }
+    };
+}
+
+lenient_fields!(
+    monitor,
+    usage_format,
+    usage_position,
+    monitor_tab,
+    monitor_chart_glyphs,
+    agent_panel_sort,
+);
 
 fn read_layouts<'de, D: serde::Deserializer<'de>>(
     deserializer: D,
@@ -208,12 +257,16 @@ pub(super) fn load(path: &Path) -> Option<ClientChromePreferences> {
     for (key, value) in fields {
         let mut probe = serde_json::Map::with_capacity(1);
         probe.insert(key.clone(), value.clone());
-        if serde_json::from_value::<ClientChromePreferences>(serde_json::Value::Object(probe))
-            .is_ok()
-        {
-            kept.insert(key, value);
-        } else {
-            dropped.push(key);
+        match serde_json::from_value::<ClientChromePreferences>(serde_json::Value::Object(probe)) {
+            // 探测结果写回去已不含该键的（容错字段的坏值、未知键、空集合），最终解析
+            // 出来本来也是未设置 / 空值，不再带进最终解析：容错字段的坏值已在这次
+            // 探测里由 `read_lenient` 记过诊断，免得同一个键记两次。
+            Ok(parsed) => {
+                if preference_key_survives(&parsed, &key) {
+                    kept.insert(key, value);
+                }
+            }
+            Err(_) => dropped.push(key),
         }
     }
     if !dropped.is_empty() {
@@ -224,6 +277,15 @@ pub(super) fn load(path: &Path) -> Option<ClientChromePreferences> {
         );
     }
     serde_json::from_value(serde_json::Value::Object(kept)).ok()
+}
+
+/// 单键探测的结果重新序列化后是否还带着这个键。
+fn preference_key_survives(parsed: &ClientChromePreferences, key: &str) -> bool {
+    match serde_json::to_value(parsed) {
+        Ok(serde_json::Value::Object(fields)) => fields.contains_key(key),
+        // 序列化不会失败；万一失败就保守地留下该键，交给最终解析。
+        _ => true,
+    }
 }
 
 pub(super) fn store(path: &Path, preferences: ClientChromePreferences) -> Result<(), String> {
@@ -302,6 +364,112 @@ mod tests {
         assert_eq!(
             preferences.monitor_tab,
             Some(super::super::observability::Page::Accounts)
+        );
+    }
+
+    /// 把当前线程上的 tracing 输出收进内存，断言诊断内容用。
+    fn capture_logs(run: impl FnOnce()) -> String {
+        #[derive(Clone, Default)]
+        struct Buffer(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+        impl std::io::Write for Buffer {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().expect("log buffer").extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Buffer {
+            type Writer = Buffer;
+
+            fn make_writer(&'a self) -> Self::Writer {
+                self.clone()
+            }
+        }
+
+        let buffer = Buffer::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(buffer.clone())
+            .with_ansi(false)
+            .with_max_level(tracing::Level::WARN)
+            .finish();
+        tracing::subscriber::with_default(subscriber, run);
+        let bytes = buffer.0.lock().expect("log buffer").clone();
+        String::from_utf8(bytes).expect("utf-8 logs")
+    }
+
+    /// D6：容错字段丢掉认不出的值时记一条诊断——键名与原始值的 JSON 类型，不含值
+    /// 本身；合法值与 `null`（就是未设置）不记。
+    #[test]
+    fn dropped_lenient_values_are_logged_with_key_and_value_type_only() {
+        let logs = capture_logs(|| {
+            let preferences: ClientChromePreferences = serde_json::from_str(
+                r#"{"usage_format":"sk-looks-secret","agent_panel_sort":42,"monitor":{"interval_ms":"interval-looks-secret"},"monitor_chart_glyphs":["x"],"usage_position":"hover","monitor_tab":null,"sidebar_width":30}"#,
+            )
+            .expect("坏值不应让整份偏好失效");
+            assert_eq!(preferences.usage_format, None);
+            assert_eq!(preferences.agent_panel_sort, None);
+            assert!(preferences.monitor.is_none());
+            assert!(preferences.monitor_chart_glyphs.is_none());
+            assert_eq!(
+                preferences.usage_position,
+                Some(crate::config::UsageDisplayPosition::Hover)
+            );
+            assert_eq!(preferences.monitor_tab, None);
+            assert_eq!(preferences.sidebar_width, Some(30));
+        });
+        for (key, value_type) in [
+            ("usage_format", "string"),
+            ("agent_panel_sort", "number"),
+            ("monitor", "object"),
+            ("monitor_chart_glyphs", "array"),
+        ] {
+            assert!(
+                logs.lines()
+                    .any(|line| line.contains(&format!("key=\"{key}\""))
+                        && line.contains(&format!("value_type=\"{value_type}\""))),
+                "{key} 缺诊断：{logs}"
+            );
+        }
+        assert_eq!(logs.lines().count(), 4, "只有被丢的四个键各记一条：{logs}");
+        assert!(!logs.contains("looks-secret"), "诊断不得带原始值：{logs}");
+    }
+
+    /// `load` 逐键探测时每个字段会被解析两遍（探测 + 最终）：同一个被丢的值只记一次。
+    #[test]
+    fn load_logs_each_dropped_lenient_value_once() {
+        let path = std::env::temp_dir().join(format!(
+            "herdr-shell-lenient-diagnostics-{}.json",
+            std::process::id()
+        ));
+        std::fs::write(
+            &path,
+            r#"{"usage_format":"weird-format","sidebar_width":"wide","sidebar_collapsed":true}"#,
+        )
+        .expect("write preferences");
+        let logs = capture_logs(|| {
+            let loaded = load(&path).expect("坏字段只丢自己");
+            assert_eq!(loaded.usage_format, None);
+            assert_eq!(loaded.sidebar_width, None);
+            assert_eq!(loaded.sidebar_collapsed, Some(true));
+        });
+        std::fs::remove_file(&path).expect("remove preferences");
+        assert_eq!(
+            logs.matches("key=\"usage_format\"").count(),
+            1,
+            "同一个键只记一次：{logs}"
+        );
+        assert!(
+            logs.contains("sidebar_width"),
+            "类型不对的字段仍照报：{logs}"
+        );
+        assert!(
+            !logs.contains("weird-format") && !logs.contains("wide"),
+            "诊断不得带原始值：{logs}"
         );
     }
 
