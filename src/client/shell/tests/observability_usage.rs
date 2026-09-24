@@ -4193,6 +4193,93 @@ fn wheel_scrolls_the_docked_monitor_page_without_focusing_it() {
     }
 }
 
+/// 复审轻级 2（D5 的经典布局一侧；三档 160×48 / 120×40 / 80×24，都宽于移动布局
+/// 阈值）：经典布局下账号页铺在 pane 区，滚轮同样按落点分派。以前只要账号页打开，
+/// 侧栏上的滚轮也滚账号列表，侧栏滚不动；现在侧栏上的滚轮照常滚侧栏、不改
+/// `account_scroll`，页面里的滚轮照常滚账号列表、不动侧栏。
+#[test]
+fn classic_accounts_page_leaves_the_sidebar_wheel_to_the_sidebar() {
+    let _guard = crate::i18n::lang_guard(crate::i18n::Lang::ZhCn);
+    for (cols, rows) in [(160, 48), (120, 40), (80, 24)] {
+        let size = format!("{cols}×{rows}");
+        // 30 个工作区：侧栏的工作区列表放不下，滚得动。
+        let mut snapshot = snapshot();
+        snapshot.agents.push(agent_in_pane("pane_1", "claude"));
+        let first = snapshot.workspaces[0].clone();
+        snapshot.workspaces = (1..=30)
+            .map(|number| {
+                let mut workspace = first.clone();
+                workspace.workspace_id = format!("ws_{number}");
+                workspace.number = number;
+                workspace.focused = number == 1;
+                workspace
+            })
+            .collect();
+        let mut state = classic_usage_ready_with(snapshot);
+        state.open_observation_page(Page::Accounts, &mut ClientShellInput::default());
+        state.observability.now_ms = CARD_NOW_MS;
+        state.observability.accounts = (0..6)
+            .map(|index| AccountUsageSnapshot {
+                account_id: format!("claude:{index}"),
+                account_label: format!("claude:{index}"),
+                ..claude_card_account()
+            })
+            .collect();
+        state.compose(cols, rows).expect("经典布局的账号页");
+        assert!(!state.workbench.enabled, "{size}：用例前提：经典布局");
+        assert!(
+            state.hits.workspace_max_scroll > 0,
+            "{size}：用例前提：侧栏的工作区列表放不下"
+        );
+        assert!(
+            state
+                .observability
+                .account_scroll_limits
+                .page
+                .is_some_and(|limit| limit > 0),
+            "{size}：用例前提：账号卡片多于一屏"
+        );
+        let sidebar = state.hits.workspace_body;
+        let page = state.observability.page_rect;
+        assert!(
+            !contains(page, (sidebar.x, sidebar.y)),
+            "{size}：用例前提：侧栏不在页面矩形里"
+        );
+
+        sgr_mouse(&mut state, SGR_WHEEL_DOWN, sidebar.x + 1, sidebar.y + 1);
+        assert_eq!(
+            state.observability.account_scroll, 0,
+            "{size}：侧栏上的滚轮不滚账号列表"
+        );
+        assert_eq!(
+            state.workspace_scroll, state.config.mouse_scroll_lines,
+            "{size}：侧栏上的滚轮照常滚侧栏"
+        );
+
+        let before = region_text(&state, page);
+        sgr_mouse(
+            &mut state,
+            SGR_WHEEL_DOWN,
+            page.x + page.width / 2,
+            page.y + page.height / 2,
+        );
+        assert_eq!(
+            state.observability.account_scroll, 1,
+            "{size}：页面里的滚轮照常滚账号列表"
+        );
+        assert_eq!(
+            state.workspace_scroll, state.config.mouse_scroll_lines,
+            "{size}：页面里的滚轮不动侧栏"
+        );
+        state.compose(cols, rows).expect("滚一格");
+        assert_ne!(
+            region_text(&state, page),
+            before,
+            "{size}：账号页画面跟着动"
+        );
+    }
+}
+
 /// 每张卡都有数据的主机快照：卡片被页面底边裁掉时，露出的一截能看出真实首行。
 fn populated_system_sample() -> Box<crate::api::schema::SystemMetricsSnapshot> {
     use crate::api::schema::{
