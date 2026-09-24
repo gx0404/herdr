@@ -3,7 +3,7 @@
 //! 在 `accounts/{slots,cards,paint}.rs`。
 
 use super::*;
-use ratatui::layout::{Constraint, Layout};
+use ratatui::layout::{Constraint, Flex, Layout};
 use ratatui::widgets::{Cell, Row, Sparkline, Table, Widget};
 
 mod cards;
@@ -1390,6 +1390,23 @@ pub(super) fn usage_table(
 ) -> usize {
     let texts = &crate::i18n::texts().monitor;
     // 每行：账号 / 指标 / 用量 / 重置 / 新鲜度（着色）/ 状态。
+    let widths = [
+        Constraint::Percentage(16),
+        Constraint::Percentage(22),
+        Constraint::Percentage(18),
+        Constraint::Percentage(14),
+        Constraint::Percentage(14),
+        Constraint::Percentage(16),
+    ];
+    // 状态格承载说明（`状态 · 说明`），是表里最长的一格：按它实际分到的列宽先截断并补 `…`，
+    // 不在列边界处硬切（与卡片里说明的截断一致）。列宽与 `Table` 的布局同一算法：无选择列、
+    // `Flex::Start`、列间距 1。
+    let status_width = Layout::horizontal(widths)
+        .flex(Flex::Start)
+        .spacing(1)
+        .split(Rect::new(0, 0, area.width, 1))
+        .last()
+        .map_or(0, |column| usize::from(column.width));
     let mut entries = Vec::new();
     for account in scope.accounts {
         let status_cell = table_status(account, scope.refresh_of(&account.account_id));
@@ -1473,7 +1490,7 @@ pub(super) fn usage_table(
                     .map(|column| Cell::from(column.as_str()))
                     .chain([
                         Cell::from(age.as_str()).style(Style::default().fg(*age_color)),
-                        Cell::from(status_cell.as_str())
+                        Cell::from(crate::ui::truncate_end(status_cell, status_width))
                             .style(Style::default().fg(status_color(account.status, palette))),
                     ])
                     .collect::<Vec<_>>();
@@ -1485,34 +1502,24 @@ pub(super) fn usage_table(
             },
         )
         .collect::<Vec<_>>();
-    Table::new(
-        rows,
-        [
-            Constraint::Percentage(16),
-            Constraint::Percentage(22),
-            Constraint::Percentage(18),
-            Constraint::Percentage(14),
-            Constraint::Percentage(14),
-            Constraint::Percentage(16),
-        ],
-    )
-    .header(
-        Row::new([
-            tr("Account", "账号"),
-            tr("Metric / scope", "指标 / 范围"),
-            texts.col_usage,
-            texts.col_reset,
-            texts.col_freshness,
-            tr("Status", "状态"),
-        ])
-        .style(
-            Style::default()
-                .fg(palette.accent)
-                .add_modifier(Modifier::BOLD),
-        ),
-    )
-    .column_spacing(1)
-    .render(area, buffer);
+    Table::new(rows, widths)
+        .header(
+            Row::new([
+                tr("Account", "账号"),
+                tr("Metric / scope", "指标 / 范围"),
+                texts.col_usage,
+                texts.col_reset,
+                texts.col_freshness,
+                tr("Status", "状态"),
+            ])
+            .style(
+                Style::default()
+                    .fg(palette.accent)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        )
+        .column_spacing(1)
+        .render(area, buffer);
     limit
 }
 

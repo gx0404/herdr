@@ -1428,9 +1428,63 @@ mod tests {
         assert!(!text.contains("已登录"), "{text}");
     }
 
-    /// T1 服务端审查轻 7：英文说明比中文长 2–3 倍（pi 等待说明约 260 字符），前两档用例只测了
-    /// 宽面板。窄面板下卡片里的说明在边框内截断并带 `…`，不折进下一行、不压住边框；表格的
-    /// 状态列在列边界处截断，状态写在说明之前，截断后仍看得到；极窄时也不越界。
+    /// 表格里无指标账号那一行（指标列是 `—`）在详情栏分隔线之前的部分，去掉尾部空白：它的最后
+    /// 一格就是状态格的结尾。
+    fn table_row_without_metrics(buffer: &Buffer) -> String {
+        let text = buffer_text(buffer);
+        let row = (0..buffer.area.height)
+            .find(|y| row_text(buffer, *y).contains('—'))
+            .unwrap_or_else(|| panic!("无指标账号有一行\n{text}"));
+        let line = row_text(buffer, row);
+        line.split('│')
+            .next()
+            .unwrap_or_default()
+            .trim_end()
+            .to_owned()
+    }
+
+    /// 每行的显示宽度不超过面板宽度，每张卡片的四角与左右边框都完整（说明没有压住边框）。
+    fn assert_rows_fit_and_card_borders_hold(buffer: &Buffer, width: u16) {
+        use unicode_width::UnicodeWidthStr;
+        let text = buffer_text(buffer);
+        let symbol = |x: u16, y: u16| buffer[(x, y)].symbol().to_owned();
+        for y in 0..buffer.area.height {
+            let shown: usize = (0..buffer.area.width)
+                .map(|x| UnicodeWidthStr::width(symbol(x, y).as_str()))
+                .sum();
+            assert!(
+                shown <= usize::from(width),
+                "宽 {width} 第 {y} 行越界：\n{text}"
+            );
+        }
+        let mut cards = 0;
+        for top in 0..buffer.area.height {
+            let Some(left) = (0..buffer.area.width).find(|x| symbol(*x, top) == "┌") else {
+                continue;
+            };
+            let right = (left + 1..buffer.area.width)
+                .find(|x| symbol(*x, top) == "┐")
+                .unwrap_or_else(|| panic!("宽 {width}：卡片顶边缺右上角\n{text}"));
+            let bottom = (top + 1..buffer.area.height)
+                .find(|y| symbol(left, *y) == "└")
+                .unwrap_or_else(|| panic!("宽 {width}：卡片缺底边\n{text}"));
+            assert_eq!(symbol(right, bottom), "┘", "宽 {width}：\n{text}");
+            for y in top + 1..bottom {
+                assert_eq!(symbol(left, y), "│", "宽 {width} 第 {y} 行左边框：\n{text}");
+                assert_eq!(
+                    symbol(right, y),
+                    "│",
+                    "宽 {width} 第 {y} 行右边框：\n{text}"
+                );
+            }
+            cards += 1;
+        }
+        assert!(cards > 0, "宽 {width}：没有画出卡片\n{text}");
+    }
+
+    /// T1 服务端审查轻 7、T2 审查轻 1：英文说明比中文长 2–3 倍（pi 等待说明约 260 字符）。卡片里
+    /// 的说明在边框内截断并带 `…`，不折行、不压住边框；表格的状态格先写状态，说明在列边界处
+    /// 截断并以 `…` 收尾，宽面板上看得到说明开头；极窄面板每行不越界、卡片边框完整。
     #[test]
     fn long_english_notices_truncate_inside_narrow_cards_and_table_cells() {
         let _guard = lang_guard(Lang::En);
@@ -1444,6 +1498,7 @@ mod tests {
             notices.pi_waiting.to_owned(),
         ] {
             let head: String = message.chars().take(12).collect();
+            let word: String = message.chars().take(4).collect();
             let mut state = populated();
             state.accounts[1].status = ObservationStatus::NeedsBinding;
             state.accounts[1].metrics.clear();
@@ -1464,29 +1519,34 @@ mod tests {
                     row_text(&buffer, row + 1).trim_start().starts_with('└'),
                     "宽 {width}：说明不折行，下一行就是卡片底边：\n{text}"
                 );
+                assert_rows_fit_and_card_borders_hold(&buffer, width);
 
                 state.usage.format = UsageDisplayFormat::Table;
                 let (buffer, _) = paint_page(&state, Page::Accounts, width, 30);
-                let text = buffer_text(&buffer);
-                let row = (0..buffer.area.height)
-                    .find(|y| row_text(&buffer, *y).contains('—'))
-                    .unwrap_or_else(|| panic!("宽 {width}：无指标账号有一行\n{text}"));
-                let line = row_text(&buffer, row);
+                let cell = table_row_without_metrics(&buffer);
                 assert!(
-                    line.contains(&status_head),
-                    "宽 {width}：状态列先写状态，截断后仍可见：{line}"
+                    cell.contains(&status_head) && cell.ends_with('…'),
+                    "宽 {width}：状态格先写状态，截断处以 … 收尾：{cell}"
                 );
+            }
+            // 宽面板：状态格放得下「状态 · 说明开头」，长说明仍在列边界截断。
+            for width in [200u16, 240] {
+                state.usage.format = UsageDisplayFormat::Table;
+                let (buffer, _) = paint_page(&state, Page::Accounts, width, 30);
+                let cell = table_row_without_metrics(&buffer);
                 assert!(
-                    row_text(&buffer, row + 1).trim().is_empty(),
-                    "宽 {width}：状态列的说明不折进下一行：\n{text}"
+                    cell.contains(&status_head) && cell.contains(&word) && cell.ends_with('…'),
+                    "宽 {width}：状态格含说明开头并以 … 收尾：{cell}"
                 );
             }
             for width in [16u16, 24] {
-                for format in [UsageDisplayFormat::Dashboard, UsageDisplayFormat::Table] {
-                    state.usage.format = format;
-                    let (buffer, _) = paint_page(&state, Page::Accounts, width, 12);
-                    assert!(!buffer_text(&buffer).contains(&message));
-                }
+                state.usage.format = UsageDisplayFormat::Dashboard;
+                let (buffer, _) = paint_page(&state, Page::Accounts, width, 14);
+                assert_rows_fit_and_card_borders_hold(&buffer, width);
+                state.usage.format = UsageDisplayFormat::Table;
+                let (buffer, _) = paint_page(&state, Page::Accounts, width, 14);
+                let cell = table_row_without_metrics(&buffer);
+                assert!(cell.ends_with('…'), "宽 {width}：{cell}");
             }
         }
     }
