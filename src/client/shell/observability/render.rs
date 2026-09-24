@@ -1384,6 +1384,17 @@ mod tests {
             !text.contains("小时额度") && !text.contains("天额度"),
             "{text}"
         );
+        // T1 服务端审查轻 7：窄面板下指标列在列边界处截断——开头仍是界面语言的槽位名，整行
+        // 不越界，也不回落到服务端的中文标签。
+        for width in [56u16, 72, 96] {
+            let (buffer, _) = paint_page(&state, Page::Accounts, width, 32);
+            let text = buffer_text(&buffer);
+            for name in [texts.quota_5h, texts.quota_weekly] {
+                let head: String = name.chars().take(4).collect();
+                assert!(buffer_has(&buffer, &head), "宽 {width}：{name}\n{text}");
+            }
+            assert!(!crate::i18n::has_cjk(&text), "宽 {width}：\n{text}");
+        }
     }
 
     /// 文档终审 D2：服务端按它自己的语言写说明——远端机器、或 `HERDR_LANG` 与客户端
@@ -1417,6 +1428,69 @@ mod tests {
             "表格状态列的说明同样换语言：{text}"
         );
         assert!(!text.contains("已登录"), "{text}");
+    }
+
+    /// T1 服务端审查轻 7：英文说明比中文长 2–3 倍（pi 等待说明约 260 字符），前两档用例只测了
+    /// 宽面板。窄面板下卡片里的说明在边框内截断并带 `…`，不折进下一行、不压住边框；表格的
+    /// 状态列在列边界处截断，状态写在说明之前，截断后仍看得到；极窄时也不越界。
+    #[test]
+    fn long_english_notices_truncate_inside_narrow_cards_and_table_cells() {
+        let _guard = lang_guard(Lang::En);
+        let notices = &crate::i18n::texts().usage_notice;
+        let status_head: String = status(ObservationStatus::NeedsBinding)
+            .chars()
+            .take(4)
+            .collect();
+        for message in [
+            notices.claude_waiting(true, Some(false)),
+            notices.pi_waiting.to_owned(),
+        ] {
+            let head: String = message.chars().take(12).collect();
+            let mut state = populated();
+            state.accounts[1].status = ObservationStatus::NeedsBinding;
+            state.accounts[1].metrics.clear();
+            state.accounts[1].message = Some(message.clone());
+            for width in [40u16, 56, 72] {
+                state.usage.format = UsageDisplayFormat::Dashboard;
+                let (buffer, _) = paint_page(&state, Page::Accounts, width, 30);
+                let text = buffer_text(&buffer);
+                let row = (0..buffer.area.height)
+                    .find(|y| row_text(&buffer, *y).contains(&head))
+                    .unwrap_or_else(|| panic!("宽 {width}：卡片里没有说明\n{text}"));
+                let line = row_text(&buffer, row);
+                assert!(
+                    line.trim_end().ends_with("…│"),
+                    "宽 {width}：长说明应在卡片边框内截断：\n{text}"
+                );
+                assert!(
+                    row_text(&buffer, row + 1).trim_start().starts_with('└'),
+                    "宽 {width}：说明不折行，下一行就是卡片底边：\n{text}"
+                );
+
+                state.usage.format = UsageDisplayFormat::Table;
+                let (buffer, _) = paint_page(&state, Page::Accounts, width, 30);
+                let text = buffer_text(&buffer);
+                let row = (0..buffer.area.height)
+                    .find(|y| row_text(&buffer, *y).contains('—'))
+                    .unwrap_or_else(|| panic!("宽 {width}：无指标账号有一行\n{text}"));
+                let line = row_text(&buffer, row);
+                assert!(
+                    line.contains(&status_head),
+                    "宽 {width}：状态列先写状态，截断后仍可见：{line}"
+                );
+                assert!(
+                    row_text(&buffer, row + 1).trim().is_empty(),
+                    "宽 {width}：状态列的说明不折进下一行：\n{text}"
+                );
+            }
+            for width in [16u16, 24] {
+                for format in [UsageDisplayFormat::Dashboard, UsageDisplayFormat::Table] {
+                    state.usage.format = format;
+                    let (buffer, _) = paint_page(&state, Page::Accounts, width, 12);
+                    assert!(!buffer_text(&buffer).contains(&message));
+                }
+            }
+        }
     }
 
     #[test]
