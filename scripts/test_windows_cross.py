@@ -58,7 +58,14 @@ class WindowsCrossTests(unittest.TestCase):
             windows_cross.lint()
             self.assertEqual(run.call_count, 2)
             cargo = run.call_args
-            self.assertEqual(cargo.args[0][:2], ["cargo", "clippy"])
+            # 与 CI `windows_check.ps1 -Mode lint` 同口径：连测试目标一起查（I2b）。
+            self.assertEqual(
+                cargo.args[0],
+                [
+                    "cargo", "clippy", "--all-targets", "--locked",
+                    "--target", windows_cross.TARGET, "--", "-D", "warnings",
+                ],
+            )
             self.assertEqual(cargo.kwargs["env"][windows_cross.LIBC_ENV], str(Path("/sdk/libc.txt")))
             self.assertEqual(cargo.kwargs["env"]["KEEP_ME"], "yes")
             self.assertNotIn(windows_cross.LIBC_ENV, os.environ)

@@ -72,8 +72,10 @@ def setup(accept_license: bool) -> None:
 def lint() -> None:
     env = {**os.environ, LIBC_ENV: str(libc_path()), "LIBGHOSTTY_VT_SIMD": "false"}
     subprocess.run(["rustup", "target", "add", TARGET], check=True)
+    # Same scope as CI `windows_check.ps1 -Mode lint`: test targets included, so
+    # cfg(windows) test-only dead code fails here before it fails in CI.
     subprocess.run(
-        ["cargo", "clippy", "--bin", "herdr", "--locked", "--target", TARGET, "--", "-D", "warnings"],
+        ["cargo", "clippy", "--all-targets", "--locked", "--target", TARGET, "--", "-D", "warnings"],
         env=env,
         check=True,
     )
