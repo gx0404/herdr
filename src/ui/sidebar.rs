@@ -103,6 +103,50 @@ pub(crate) fn agent_panel_entries_from(
     entries
 }
 
+/// token 不随可用宽度伸缩的那部分宽度（状态图标、git 状态）。
+fn fixed_token_width(token: &ResolvedToken, state_icon: &str) -> usize {
+    match &token.kind {
+        ResolvedTokenKind::StateIcon => display_width(state_icon),
+        ResolvedTokenKind::GitStatus { ahead, behind } => {
+            usize::from(*ahead > 0) * display_width(&format!("↑{ahead}"))
+                + usize::from(*behind > 0) * display_width(&format!("↓{behind}"))
+                + usize::from(*ahead > 0 && *behind > 0)
+        }
+        _ => 0,
+    }
+}
+
+/// token 里可截短的文字按完整长度排开时的宽度。
+fn flexible_token_width(token: &ResolvedToken) -> usize {
+    match &token.kind {
+        ResolvedTokenKind::StateText(text)
+        | ResolvedTokenKind::Machine(text)
+        | ResolvedTokenKind::Workspace(text)
+        | ResolvedTokenKind::Tab(text)
+        | ResolvedTokenKind::Pane(text)
+        | ResolvedTokenKind::Agent(text)
+        | ResolvedTokenKind::TerminalTitle(text)
+        | ResolvedTokenKind::Branch(text)
+        | ResolvedTokenKind::Custom(text) => display_width(text),
+        _ => 0,
+    }
+}
+
+/// 一行 token 全部按完整文字排开（[`resolved_token_spans`] 不截断任何 token）时的
+/// 显示宽度：各 token 的固定宽度与文字全长，加相邻 token 之间的分隔符。调用方
+/// 据此判断一行在给定宽度下会不会被截短（Agents 树的徽标按「名称优先」取档）。
+pub(crate) fn resolved_tokens_width(resolved: &[ResolvedToken], state_icon: &str) -> usize {
+    let tokens = resolved
+        .iter()
+        .map(|token| fixed_token_width(token, state_icon) + flexible_token_width(token))
+        .sum::<usize>();
+    let separators = resolved
+        .windows(2)
+        .map(|pair| display_width(tokens::separator(&pair[0], &pair[1])))
+        .sum::<usize>();
+    tokens + separators
+}
+
 pub(crate) fn resolved_token_spans(
     resolved: &[ResolvedToken],
     state_icon: (&str, Style),
@@ -115,30 +159,11 @@ pub(crate) fn resolved_token_spans(
 ) -> Vec<Span<'static>> {
     let fixed_widths = resolved
         .iter()
-        .map(|token| match &token.kind {
-            ResolvedTokenKind::StateIcon => display_width(state_icon.0),
-            ResolvedTokenKind::GitStatus { ahead, behind } => {
-                usize::from(*ahead > 0) * display_width(&format!("↑{ahead}"))
-                    + usize::from(*behind > 0) * display_width(&format!("↓{behind}"))
-                    + usize::from(*ahead > 0 && *behind > 0)
-            }
-            _ => 0,
-        })
+        .map(|token| fixed_token_width(token, state_icon.0))
         .collect::<Vec<_>>();
     let flexible_widths = resolved
         .iter()
-        .map(|token| match &token.kind {
-            ResolvedTokenKind::StateText(text)
-            | ResolvedTokenKind::Machine(text)
-            | ResolvedTokenKind::Workspace(text)
-            | ResolvedTokenKind::Tab(text)
-            | ResolvedTokenKind::Pane(text)
-            | ResolvedTokenKind::Agent(text)
-            | ResolvedTokenKind::TerminalTitle(text)
-            | ResolvedTokenKind::Branch(text)
-            | ResolvedTokenKind::Custom(text) => display_width(text),
-            _ => 0,
-        })
+        .map(flexible_token_width)
         .collect::<Vec<_>>();
     let minimum_width = |active: &[bool]| {
         let indices = active

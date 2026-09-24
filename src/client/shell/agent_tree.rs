@@ -130,7 +130,66 @@ pub(super) struct AgentTreeNode {
     running: bool,
     /// 活动徽标（见 [`ActivityBadge`]），没有活动为 `None`。
     badge: Option<ActivityBadge>,
+    /// 首行主体完整排开的宽度（见 [`PrimaryWidth`]），徽标据此按名称优先取档。
+    primary: PrimaryWidth,
     pub(super) kind: AgentTreeKind,
+}
+
+/// agent / 外部条目行首行主体（状态图标 + 名称所在那一行）按完整文字排开时的
+/// 显示宽度，构建期算好（渲染不分配、不重算）：徽标按「名称优先」取档（见
+/// [`ActivityBadge::fit`]）。`first` 是行高够时画在首行的那一行；`name` 是行高
+/// 放不下全部 token 行、名称行被提到首行时的宽度（含补画的状态图标）。其余
+/// 种类的行没有徽标，为 0。
+#[derive(Debug, Clone, Copy, Default)]
+struct PrimaryWidth {
+    first: u16,
+    name: u16,
+}
+
+impl PrimaryWidth {
+    fn of(kind: &AgentTreeKind, style: crate::config::StatusIndicatorStyle) -> Self {
+        let clamp = |width: usize| u16::try_from(width).unwrap_or(u16::MAX);
+        match kind {
+            AgentTreeKind::Agent { agent, .. } => {
+                use crate::ui::ResolvedTokenKind as Kind;
+                let icon = status_icon(agent.status, style);
+                let icon_width = display_width(icon);
+                let has_icon = |line: &Vec<crate::ui::ResolvedToken>| {
+                    line.iter()
+                        .any(|token| matches!(token.kind, Kind::StateIcon))
+                };
+                // 行配置解析后一个 token 都没有时，首行只画状态图标（与渲染的兜底一致）。
+                let first = agent.rows.first().map_or(icon_width, |line| {
+                    crate::ui::resolved_tokens_width(line, icon)
+                });
+                let name = agent
+                    .rows
+                    .iter()
+                    .find(|line| {
+                        line.iter()
+                            .any(|token| matches!(token.kind, Kind::Agent(_)))
+                    })
+                    .map_or(first, |line| {
+                        let lead_icon = !has_icon(line) && agent.rows.iter().any(has_icon);
+                        crate::ui::resolved_tokens_width(line, icon)
+                            + if lead_icon { icon_width + 1 } else { 0 }
+                    });
+                Self {
+                    first: clamp(first),
+                    name: clamp(name),
+                }
+            }
+            AgentTreeKind::ExternalAgent { label, status, .. } => {
+                let width =
+                    clamp(display_width(status_icon(*status, style)) + 1 + display_width(label));
+                Self {
+                    first: width,
+                    name: width,
+                }
+            }
+            _ => Self::default(),
+        }
+    }
 }
 
 impl AgentTreeNode {
@@ -152,6 +211,7 @@ impl AgentTreeNode {
             },
             running: running > 0,
             badge: activity_badge(running, total),
+            primary: PrimaryWidth::default(),
             kind,
         }
     }
@@ -291,10 +351,23 @@ struct ActivityBadge {
 }
 
 impl ActivityBadge {
-    /// 首行宽 `width` 列时要画的档位（文本, 宽度）：先扣 [`PRIMARY_MIN_WIDTH`]
-    /// 与徽标前的 1 列间隔，剩下的放得下哪档画哪档；都放不下为 `None`。
-    fn fit(&self, width: u16) -> Option<(&str, u16)> {
-        self.fit_room(width.saturating_sub(PRIMARY_MIN_WIDTH + 1))
+    /// 首行宽 `width` 列、行首主体（状态图标 + 名称那一行）完整排开要 `primary`
+    /// 列时画哪档（文本, 宽度），名称优先（L4 复审）：主体、1 列间隔与完整文案都
+    /// 放得下才画完整文案；否则只留数字，数字档仍先给图标与名称保
+    /// [`PRIMARY_MIN_WIDTH`] 列（主体更短时保整个主体）；都放不下为 `None`。
+    fn fit(&self, width: u16, primary: u16) -> Option<(&str, u16)> {
+        if primary.saturating_add(1).saturating_add(self.full_width) <= width {
+            Some((self.full.as_str(), self.full_width))
+        } else if primary
+            .min(PRIMARY_MIN_WIDTH)
+            .saturating_add(1)
+            .saturating_add(self.compact_width)
+            <= width
+        {
+            Some((self.compact.as_str(), self.compact_width))
+        } else {
+            None
+        }
     }
 
     /// 徽标自己能占 `room` 列时要画的档位：完整文案 → 只留数字 → `None`。
@@ -804,10 +877,12 @@ impl TreeBuilder<'_> {
         let key = activity_list_key(&owner);
         // 活动摘要默认折叠：键在集合里才展开。
         let expanded = has_children && self.collapse.group_key_present(endpoint.endpoint_id, &key);
+        let mut node = AgentTreeNode::new(endpoint, 0, Some(activity), kind);
+        node.primary = PrimaryWidth::of(&node.kind, self.config.status_indicators);
         self.rows.push(TreeEntry {
             depth,
             key,
-            kind: AgentTreeNode::new(endpoint, 0, Some(activity), kind),
+            kind: node,
             last_child_mask: 0,
             has_children,
             collapsed: has_children && !expanded,
@@ -1440,8 +1515,13 @@ fn render_agent_lines(
         Some(name) if slot <= name => slot - 1,
         _ => slot,
     };
-    // 徽标只在首行右侧，按宽度档位画，剩下的给 token 行。
-    let first_width = render_badge(buffer, content, &row.kind, cx);
+    // 徽标只在首行右侧，按名称优先的宽度档位画，剩下的给 token 行。
+    let primary = if name_line.is_some() {
+        row.kind.primary.name
+    } else {
+        row.kind.primary.first
+    };
+    let first_width = render_badge(buffer, content, &row.kind, primary, cx);
     let continuation_indent = tree_prefix_width(depth).saturating_add(2);
     for slot in 0..usize::from(rect.height) {
         let y = rect.y + slot as u16;
@@ -1516,18 +1596,23 @@ fn render_agent_lines(
     }
 }
 
-/// 在 `content` 首行右侧画活动徽标（档位见 [`ActivityBadge::fit`]），返回首行
-/// 留给左侧内容（状态图标、名称等）的宽度：已扣掉徽标、它前面的 1 列间隔与它
-/// 离右缘的留白，没画徽标时是整行宽。
+/// 在 `content` 首行右侧画活动徽标（档位见 [`ActivityBadge::fit`]，`primary` 是
+/// 首行主体完整排开的宽度），返回首行留给左侧内容（状态图标、名称等）的宽度：
+/// 已扣掉徽标、它前面的 1 列间隔与它离右缘的留白，没画徽标时是整行宽。
 fn render_badge(
     buffer: &mut Buffer,
     content: Rect,
     node: &AgentTreeNode,
+    primary: u16,
     cx: &RowContext<'_>,
 ) -> u16 {
     // 徽标与分组计数同一右缘：离右侧分隔线留 `inset` 列（冒烟 L4）。
     let room = content.width.saturating_sub(cx.inset);
-    let Some((text, width)) = node.badge.as_ref().and_then(|badge| badge.fit(room)) else {
+    let Some((text, width)) = node
+        .badge
+        .as_ref()
+        .and_then(|badge| badge.fit(room, primary))
+    else {
         return content.width;
     };
     let palette = &cx.config.palette;
@@ -1653,7 +1738,7 @@ fn render_external_line(
     muted: ratatui::style::Color,
 ) {
     let palette = &cx.config.palette;
-    let mut remaining = render_badge(buffer, content, node, cx);
+    let mut remaining = render_badge(buffer, content, node, node.primary.first, cx);
     let mut x = content.x;
     let icon = status_icon(status, cx.config.status_indicators);
     let icon_width = display_width(icon) as u16;

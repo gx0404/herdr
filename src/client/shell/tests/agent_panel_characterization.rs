@@ -1859,9 +1859,10 @@ fn assert_badge_tier(
 #[test]
 fn tree_badge_yields_to_the_status_icon_and_name_on_narrow_sidebars() {
     use BadgeTier::{Digits, Full, Hidden};
-    // 冒烟 L4 之后侧栏 26 / 36 列的面板带 1 列行首留白、徽标离右缘 1 列（18 列
-    // 不留）：徽标同样让位给留白，26 列时英文深 1 层、中文深 2 层退到只留数字，
-    // 名称仍保 6 列。
+    // 名称优先（L4 复审）：「图标 + 完整名称 + 1 列间隔 + 完整徽标」放得下才画完整
+    // 文案，否则只留数字，数字档仍先给图标与名称保 8 列。侧栏 26 / 36 列的面板带
+    // 1 列行首留白、徽标离右缘 1 列（18 列不留）：26 列时整名「agent-0」加完整徽标
+    // 放不下，中英文都退到只留数字；表里每一档名称都完整可见。
     for (lang, full_width, tiers) in [
         (
             crate::i18n::Lang::En,
@@ -1885,7 +1886,7 @@ fn tree_badge_yields_to_the_status_icon_and_name_on_narrow_sidebars() {
                 (18, 1, Digits),
                 (18, 2, Hidden),
                 (18, 3, Hidden),
-                (26, 1, Full),
+                (26, 1, Digits),
                 (26, 2, Digits),
                 (26, 3, Digits),
                 (36, 1, Full),
@@ -1993,13 +1994,10 @@ fn assert_narrow_agent_row(
     let content_x = rect.x + inset + 2 * depth + 2;
     assert_eq!(cell(content_x - 2), "▸", "{case}: 活动摘要的折叠开关");
     assert_eq!(cell(content_x), "○", "{case}: 状态图标");
-    // 名称保 6 列：整名放不下时第 6 列是省略号（例如中文侧栏 26、深度 2 恰好
-    // 只剩这 6 列给名称）。
-    let name = (content_x + 2..content_x + 8).map(cell).collect::<String>();
-    assert!(
-        name == "agent-" || name == "agent…",
-        "{case}: 名称至少保 6 列: {name:?}"
-    );
+    // 名称优先：表里每一档都放得下整名「agent-0」，徽标不截名称（L4 复审：此前只
+    // 断言保底 6 列，放过了默认宽度下名称被徽标挤成「agent…」的回归）。
+    let name = (content_x + 2..content_x + 9).map(cell).collect::<String>();
+    assert_eq!(name, "agent-0", "{case}: 名称完整可见");
     assert_badge_tier(&state, rect, full, tier, &case);
     if tier == BadgeTier::Hidden {
         let line = tree_rows(&state, rect)[0].clone();
@@ -2102,9 +2100,7 @@ fn tree_multi_line_agent_rows_draw_continuation_guides() {
     );
     state.compose(106, 30).expect("展开活动的多行帧");
     let agent = tree_rows(&state, classic_agent_rect(&state, "pane_0"));
-    // 默认侧栏宽度下完整徽标与 L4 的留白之后，名称按预算保底 6 列（可能截成
-    // 「agent…」）；这里只关心续行的引导线。
-    assert!(agent[0].starts_with("└─▾ ◐ agent"), "{agent:?}");
+    assert!(agent[0].starts_with("└─▾ ◐ agent-0"), "{agent:?}");
     assert!(
         agent[1].starts_with("  │   "),
         "开关列接到活动行: {agent:?}"
@@ -3588,5 +3584,44 @@ fn tree_rows_and_header_keep_a_one_column_inset_from_both_edges() {
             state.hits.agent_body.right() - inset,
             "{case}: 排序切换离右侧分隔线 {inset} 列"
         );
+    }
+}
+
+/// L4 复审（中）：默认宽度下活动徽标不再挤掉 agent 名称。徽标按「名称优先」取档：
+/// 状态图标 + 完整名称 + 1 列间隔 + 完整徽标都放得下才画完整文案，否则退到只留
+/// 数字（数字档仍先给图标与名称保 8 列）。{中文, 英文} × {classic 侧栏 26 列,
+/// 工作台 120 列} × 深度 1、徽标 2/5、名称 "opencode"：整名可见，徽标至少是数字档。
+#[test]
+fn default_width_badges_leave_the_whole_agent_name_visible() {
+    for lang in [crate::i18n::Lang::ZhCn, crate::i18n::Lang::En] {
+        let _lang = crate::i18n::lang_guard(lang);
+        for layout in ["classic 侧栏 26", "工作台 120"] {
+            let case = format!("{lang:?}、{layout}");
+            let mut projected = badged_snapshot(false);
+            projected.agents[0].name = Some("opencode".into());
+            let mut state = classic_state_with(AgentPanelSortConfig::Spaces, projected);
+            let rect = if layout == "工作台 120" {
+                enable_workbench(&mut state);
+                state.compose(120, 40).expect("工作台帧");
+                state
+                    .hits
+                    .endpoint_agents
+                    .iter()
+                    .find(|(_, _, pane_id)| pane_id == "pane_0")
+                    .unwrap_or_else(|| panic!("{case}: agent 行不在命中表里"))
+                    .0
+            } else {
+                state.sidebar_width = 26;
+                state.sidebar_width_manual = true;
+                state.compose(106, 40).expect("classic 帧");
+                classic_agent_rect(&state, "pane_0")
+            };
+            let line = tree_rows(&state, rect)[0].clone();
+            assert!(
+                line.contains("opencode") && !line.contains('…'),
+                "{case}: 名称完整可见，不被徽标截断：{line:?}"
+            );
+            assert!(line.contains("2/5"), "{case}: 徽标至少保留数字档：{line:?}");
+        }
     }
 }
