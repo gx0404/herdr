@@ -30,9 +30,25 @@ fn percent(value: f32) -> Option<f32> {
     value.is_finite().then(|| value.clamp(0.0, 100.0))
 }
 
+/// 概要行的主机名与主机环境说明（文档终审 D7）：取不到主机名时的占位与环境说明都按 server
+/// 的界面语言给出。构造时与每轮盘点都经这里，改语言后最迟一轮盘点就跟上。
+fn refresh_host_identity(snapshot: &mut SystemMetricsSnapshot, host_name: Option<String>) {
+    snapshot.hostname =
+        host_name.unwrap_or_else(|| crate::i18n::texts().runtime.hostname_unknown.into());
+    snapshot.environment = crate::platform::monitor_environment();
+}
+
 impl Sampler {
     pub fn new(boot_id: String, processes: ProcessWorker) -> Self {
         sysinfo::set_open_files_limit(0);
+        let mut snapshot = SystemMetricsSnapshot {
+            boot_id,
+            operating_system: System::long_os_version()
+                .unwrap_or_else(|| std::env::consts::OS.into()),
+            physical_core_count: System::physical_core_count(),
+            ..Default::default()
+        };
+        refresh_host_identity(&mut snapshot, System::host_name());
         Self {
             system: System::new(),
             last_cpu: None,
@@ -40,16 +56,7 @@ impl Sampler {
             inventory: None,
             peripherals: peripherals::Workers::start(),
             processes,
-            snapshot: SystemMetricsSnapshot {
-                boot_id,
-                hostname: System::host_name()
-                    .unwrap_or_else(|| crate::i18n::texts().runtime.hostname_unknown.into()),
-                operating_system: System::long_os_version()
-                    .unwrap_or_else(|| std::env::consts::OS.into()),
-                environment: crate::platform::monitor_environment(),
-                physical_core_count: System::physical_core_count(),
-                ..Default::default()
-            },
+            snapshot,
         }
     }
 
@@ -83,9 +90,7 @@ impl Sampler {
             self.inventory = inventory;
             self.system.refresh_cpu_frequency();
             self.last_inventory = Some(now);
-            // 主机环境说明随 server 的界面语言（文档终审 D7）：随盘点重算，改语言后最迟一轮
-            // 盘点就跟上。
-            self.snapshot.environment = crate::platform::monitor_environment();
+            refresh_host_identity(&mut self.snapshot, System::host_name());
         }
         self.system.refresh_memory();
         self.snapshot.cpu_brand = self
@@ -203,6 +208,23 @@ pub(super) fn process_page(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// T2 审查轻 4：取不到主机名时的占位与环境说明都按 server 的界面语言给出，并在每轮盘点时
+    /// 重算——改语言后最迟一轮盘点就跟上，而不是停在采样器启动时的语言。
+    #[test]
+    fn host_placeholder_and_environment_follow_the_language_on_each_inventory() {
+        use crate::i18n::{has_cjk, lang_guard, texts, Lang};
+        let mut snapshot = SystemMetricsSnapshot::default();
+        for (lang, chinese) in [(Lang::En, false), (Lang::ZhCn, true), (Lang::En, false)] {
+            let _guard = lang_guard(lang);
+            refresh_host_identity(&mut snapshot, None);
+            assert_eq!(snapshot.hostname, texts().runtime.hostname_unknown);
+            assert_eq!(has_cjk(&snapshot.hostname), chinese, "{lang:?}");
+            assert_eq!(snapshot.environment, crate::platform::monitor_environment());
+        }
+        refresh_host_identity(&mut snapshot, Some("buildbox".into()));
+        assert_eq!(snapshot.hostname, "buildbox");
+    }
 
     #[test]
     fn differential_counters_do_not_invent_initial_or_reset_rates() {
