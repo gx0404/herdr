@@ -413,7 +413,7 @@ Agent 行支持以下内置 token：
 
 - `state_icon` — 智能体语义状态的彩色图标。
 - `state_text` — `idle`、`working`、`blocked`、`done` 或 `unknown`；如果报告中包含显示标签，也会一并显示。
-- `machine` — 客户端连接多台机器时显示机器标签；只有一台本地机器时省略。
+- `machine` — 客户端连接多台机器时显示机器名称；只有一台本地机器时省略。
 - `workspace` — 工作区名称。
 - `tab` — 标签页名称（如有）。
 - `pane` — 窗格名称（如有）。
@@ -456,7 +456,7 @@ rows = [
 ]
 ```
 
-只有第一条匹配的规则生效。指定的样式字段覆盖当前位置的默认值，未指定的字段保持继承。没有规则匹配时保留默认样式。匹配使用显示截断前的完整值。在规则中设置 `hide = true` 可移除匹配的 token 及其分隔符；没有剩余 token 的行也会消失。例如，`{ token = "machine", fg = "#61afef", rules = [{ equals = "Local", hide = true }] }` 会在机器标签恰好为 `Local` 时隐藏机器 token。它比较的是标签，而不是连接类型。设置 `hide = false` 或省略时，token 保持可见。没有覆盖字段的规则一旦匹配，仍会停止后续匹配并保留默认值。
+只有第一条匹配的规则生效。指定的样式字段覆盖当前位置的默认值，未指定的字段保持继承。没有规则匹配时保留默认样式。匹配使用显示截断前的完整值。在规则中设置 `hide = true` 可移除匹配的 token 及其分隔符；没有剩余 token 的行也会消失。例如，`{ token = "machine", fg = "#61afef", rules = [{ equals = "Local", hide = true }] }` 会在机器名称恰好为 `Local` 时隐藏机器 token。它比较的是名称，而不是连接类型。设置 `hide = false` 或省略时，token 保持可见。没有覆盖字段的规则一旦匹配，仍会停止后续匹配并保留默认值。
 
 `equals`、`contains` 和 `starts_with` 接受字符串，默认区分大小写。添加 `ignore_case = true` 可忽略 ASCII 大小写，非 ASCII 字符仍区分大小写。空字符串遵循普通字符串匹配：空的 `equals` 只匹配空值，空的 `contains` 或 `starts_with` 匹配任何已存在的值。
 

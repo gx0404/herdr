@@ -1509,8 +1509,8 @@ pub const TEXTS: Texts = Texts {
         machine_about: "管理已保存的 SSH 机器",
         machine_list_about: "列出已保存的 SSH 机器",
         machine_add_about: "准备远程 Herdr server 并保存一台 SSH 机器",
-        machine_label_help: "设置侧栏中显示的机器标签",
-        machine_add_label_help: "设置侧栏中显示的机器标签（给了 SSH_TARGET 时必填；用 --from-config 时缺省取 HOST）",
+        machine_label_help: "设置侧栏中显示的机器名称",
+        machine_add_label_help: "设置侧栏中显示的机器名称（给了 SSH_TARGET 时必填；用 --from-config 时缺省取 HOST）",
         machine_remote_session_help: "设置远程机器上显式的 Herdr 会话",
         machine_group_help: "设置机器在侧栏中所属的分组",
         machine_tag_help: "添加组织标签（可重复）",
@@ -1753,12 +1753,12 @@ pub const TEXTS: Texts = Texts {
 
         machine_specified_twice: "--machine 只能指定一次",
         machine_requires_value: "--machine 缺少值",
-        machine_requires_saved_label: "--machine 需要已保存的机器标签或 profile ID",
+        machine_requires_saved_label: "--machine 需要已保存的机器名称或 profile ID",
         machine_no_other_launch_options:
             "--machine 不能与其他启动选项组合使用；它会使用已保存机器的会话",
         machine_prefix_usage: "用法：herdr --machine <label-or-id> <command>",
         machine_unknown_fmt: "未知机器 '{selector}'；请使用 `herdr machine list`",
-        machine_label_ambiguous_fmt: "机器标签 '{selector}' 存在歧义；请使用其 profile ID",
+        machine_label_ambiguous_fmt: "机器名称 '{selector}' 存在歧义；请使用其 profile ID",
         machine_disabled_fmt: "机器 '{selector}' 已禁用",
         machine_unsupported_command_fmt:
             "`{command} {subcommand}` 不是受 API 支持的机器命令；--machine 不会运行本地管理命令或挂载 TUI",

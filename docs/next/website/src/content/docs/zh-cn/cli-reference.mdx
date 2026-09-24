@@ -65,7 +65,7 @@ herdr machine exec <profile> -- <command> [args...]
 
 `machine add` 默认使用远程默认会话。只有需要命名会话时才添加 `--remote-session <name>`。`machine list` 支持可选的 `--json` 供脚本使用。`machine add` 的全部标志见 `herdr machine add --help`。完整流程见[连接机器](/zh-cn/docs/connecting-machines/)。也可以在界面里添加和管理机器：从主菜单或按 `prefix+m` 打开机器页面，即可使用机器列表、详情卡、带**测试连接**的单页添加表单、重命名与编辑表单、启用 / 禁用、移除和立即重连。
 
-`machine status` 在一份报告中展示单台机器：profile 字段、经机器 SSH API 桥的实时连接探测（`online`、`disabled`，或 `unreachable` 并附结构化失败类型与信息）、探测成功时的远程 server 版本与协议兼容性、已保存的端口转发规则，以及会话日志偏好。选择器接受标签或 profile id，包括已禁用机器。
+`machine status` 在一份报告中展示单台机器：profile 字段、经机器 SSH API 桥的实时连接探测（`online`、`disabled`，或 `unreachable` 并附结构化失败类型与信息）、探测成功时的远程 server 版本与协议兼容性、已保存的端口转发规则，以及会话日志偏好。选择器接受名称或 profile id，包括已禁用机器。
 
 `machine exec` 通过与 `machine fs` 相同的受管 ssh 通道执行单个远程命令：选择器必须是已启用机器，`--` 之后的内容原样传递，stdin/stdout/stderr 直通你的终端，退出码为远程命令的退出码（传输失败时为 255）。没有超时，也绝不弹出提示。
 
@@ -73,9 +73,9 @@ herdr machine exec <profile> -- <command> [args...]
 
 `machine add --from-config <host>` 在你的 SSH 配置（默认 `~/.ssh/config`）中解析主机别名，按找到的完整指令登记——主机名、用户、端口、身份文件、代理跳转、保活等——然后执行与普通 `machine add` 相同的远程设置。它不能与连接选项标志组合；`--label`（默认取别名）、`--remote-session`、`--group`、`--tag` 和 `--color` 仍然可用。
 
-`machine import` 一次性登记 SSH 配置中的全部 `Host`。不带 `--yes` 时会列出检测到的主机并询问导入哪些，因此需要交互式终端；脚本请传 `--yes` 全量导入。`--host` 将批次限制为匹配的别名或 `*`/`?` 模式，`--group` 为所有导入的机器指定同一分组，`*.internal` 这类通配主机除非传 `--include-wildcards` 否则跳过。引用同批导入主机的 `ProxyJump` 跳点会成为 `profile:<id>` 引用。与已保存机器标签或目标重复的主机会被跳过并逐台报告，因此重复执行是安全的。导入按 OpenSSH 首个值生效的语义读取 SSH 配置（包括 `Include` 引入的文件），绝不修改它；与 `machine add` 不同，导入不安装或更新远程服务器，仍需设置的机器会显示 Attention 并给出独立修复命令。完整语义见[连接机器](/zh-cn/docs/connecting-machines/#从-ssh-配置导入机器)。
+`machine import` 一次性登记 SSH 配置中的全部 `Host`。不带 `--yes` 时会列出检测到的主机并询问导入哪些，因此需要交互式终端；脚本请传 `--yes` 全量导入。`--host` 将批次限制为匹配的别名或 `*`/`?` 模式，`--group` 为所有导入的机器指定同一分组，`*.internal` 这类通配主机除非传 `--include-wildcards` 否则跳过。引用同批导入主机的 `ProxyJump` 跳点会成为 `profile:<id>` 引用。与已保存机器名称或目标重复的主机会被跳过并逐台报告，因此重复执行是安全的。导入按 OpenSSH 首个值生效的语义读取 SSH 配置（包括 `Include` 引入的文件），绝不修改它；与 `machine add` 不同，导入不安装或更新远程服务器，仍需设置的机器会显示 Attention 并给出独立修复命令。完整语义见[连接机器](/zh-cn/docs/connecting-machines/#从-ssh-配置导入机器)。
 
-更改会自动应用到已打开的本地 Herdr 客户端，通常在一秒内生效。新增或启用的机器在后台连接；重命名不会重新连接。移除或禁用只会断开该机器，远程会话仍会继续运行。移除正在查看的机器会返回 Local；如果 Local 不可用，则显示不可用状态，直到重新连接。每份配置在客户端状态文件中保存一个不透明 ID、标签、SSH 目标、明确的远程会话名和启用状态。Herdr 不保存密码、私钥或其他 SSH 凭据。
+更改会自动应用到已打开的本地 Herdr 客户端，通常在一秒内生效。新增或启用的机器在后台连接；重命名不会重新连接。移除或禁用只会断开该机器，远程会话仍会继续运行。移除正在查看的机器会返回 Local；如果 Local 不可用，则显示不可用状态，直到重新连接。每份配置在客户端状态文件中保存一个不透明 ID、名称、SSH 目标、明确的远程会话名和启用状态。Herdr 不保存密码、私钥或其他 SSH 凭据。
 
 自动连接和重连均为非交互式。如果主机密钥、密码、密钥口令、MFA、安装、更新或重启需要批准，机器会显示 Attention，而不会打开隐藏的提示。请运行 Herdr 显示的独立连接命令，例如 `herdr --remote workbox`，在前台完成设置后重启客户端。仅当配置指向命名会话时，才加上 `--session <name>`。
 
@@ -88,7 +88,7 @@ herdr --machine "Build machine" agent prompt w1:p1 "review this change"
 herdr --machine "Build machine" worktree create --cwd /srv/project --branch review
 ```
 
-选择器必须是已启用的配置 ID 或唯一标签（区分大小写），不能是任意 SSH 主机名。命令使用保存的远程会话，不能与 `--session` 或 `--remote` 混用。省略前缀时，本地行为保持不变。
+选择器必须是已启用的配置 ID 或唯一名称（区分大小写），不能是任意 SSH 主机名。命令使用保存的远程会话，不能与 `--session` 或 `--remote` 混用。省略前缀时，本地行为保持不变。
 
 支持 `workspace`、`worktree`、`tab`、`pane`、`notification`、`agent`（不含 `attach` 和本地 `explain --file`）、`api snapshot`、`status server`，以及基于 API 的插件操作（`link`、`unlink`、`enable`、`disable`、`list`、`action`、`log`、`pane`）。服务器操作支持 `stop`、`reload-config`、`agent-manifests`、`reload-agent-manifests`。本地安装和配置、插件安装、会话管理及交互式终端连接不会被转发。
 
@@ -119,7 +119,7 @@ herdr machine fs <profile> mv <from> <to>
 herdr machine fs <profile> rm <path> [--recursive]
 ```
 
-`<profile>` 是保存机器的标签或 profile id，解析规则与 `--machine` 相同。远程路径由 sftp 服务器相对登录目录解析（不展开 `~`），不得以 `-` 开头，且不得包含 `\` 或 `"`。单文件传输上限 1 MiB；`get` 以 `0600` 权限原子写入，`put` 先上传再原子 rename 覆盖目标并恢复原权限位。`rm` 删除目录需 `--recursive`，不跟随符号链接。详见 [连接机器](/docs/connecting-machines/#remote-files)。
+`<profile>` 是保存机器的名称或 profile id，解析规则与 `--machine` 相同。远程路径由 sftp 服务器相对登录目录解析（不展开 `~`），不得以 `-` 开头，且不得包含 `\` 或 `"`。单文件传输上限 1 MiB；`get` 以 `0600` 权限原子写入，`put` 先上传再原子 rename 覆盖目标并恢复原权限位。`rm` 删除目录需 `--recursive`，不跟随符号链接。详见 [连接机器](/docs/connecting-machines/#remote-files)。
 
 会话日志按快照间隔把机器的窗格镜像到本地文件：
 

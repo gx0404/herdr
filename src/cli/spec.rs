@@ -1380,6 +1380,62 @@ mod tests {
         assert!(usage.contains("--from-config <HOST>"), "{usage}");
     }
 
+    /// T1 审查轻 3：中文里机器的 label 字段统一叫「名称」（与添加 / 编辑表单的字段
+    /// 名、重名报错「名称已被使用」同一个词），不再叫「机器标签」——「标签」留给
+    /// `--tag` 的组织标签。`machine add` / `machine rename` 的 `--label` 帮助与
+    /// `--machine` 选择器的两条报错都照此写。
+    #[test]
+    fn zh_machine_label_texts_call_the_label_a_name() {
+        let _guard = crate::i18n::lang_guard(crate::i18n::Lang::ZhCn);
+        let name = crate::i18n::texts().machines.field_label;
+        assert_eq!(name, "名称", "用例前提：表单字段名");
+        for subcommand in ["add", "rename"] {
+            let mut help = Vec::new();
+            super::write_requested_help(
+                &[
+                    "herdr".to_string(),
+                    "machine".to_string(),
+                    subcommand.to_string(),
+                    "--help".to_string(),
+                ],
+                &mut help,
+                || {},
+            )
+            .unwrap();
+            let help = String::from_utf8(help).unwrap();
+            // 选项说明较长时 clap 把它折到下一行：取到下一个选项之前的整段。
+            let option = |flag: &str| {
+                let mut lines = help
+                    .lines()
+                    .skip_while(|line| !line.trim_start().starts_with(flag));
+                let head = lines.next()?;
+                let rest = lines
+                    .take_while(|line| {
+                        let line = line.trim_start();
+                        !line.is_empty() && !line.starts_with('-')
+                    })
+                    .collect::<Vec<_>>();
+                Some(format!("{head} {}", rest.join(" ")))
+            };
+            let label = option("--label")
+                .unwrap_or_else(|| panic!("machine {subcommand} 帮助有 --label：{help}"));
+            assert!(
+                label.contains(name) && !label.contains("标签"),
+                "machine {subcommand} --label：{label}"
+            );
+            if let Some(tag) = option("--tag") {
+                assert!(tag.contains("标签"), "组织标签仍叫标签：{tag}");
+            }
+        }
+        let errors = &crate::i18n::texts().cli_errors;
+        for text in [
+            errors.machine_requires_saved_label,
+            errors.machine_label_ambiguous_fmt,
+        ] {
+            assert!(text.contains(name) && !text.contains("标签"), "{text}");
+        }
+    }
+
     /// 文档终审 D7：`herdr api usage-report --help` 的说明曾是写死的中文。
     #[test]
     fn api_usage_report_help_follows_the_cli_language() {
