@@ -979,15 +979,14 @@ pub const TEXTS: Texts = Texts {
     machine_auth: MachineAuthTexts {
         host_fmt: "host: {host}",
         key_type_fmt: "key type: {type}",
-        fingerprint_fmt: "fingerprint: {fingerprint}",
+        fingerprint_fmt: "key: {fingerprint}",
         fingerprint_unavailable: "fingerprint unavailable (the key scan failed)",
         working: "working…",
         failed_fmt: "failed: {error}",
         close_button: " close ",
         tofu_title: "unknown host key",
         tofu_question: "This machine presented a host key that is not recorded yet.",
-        tofu_verify_hint:
-            "Compare the fingerprint with the machine's own `ssh-keygen -lf` output before trusting it.",
+        tofu_verify_hint: "Compare with `ssh-keygen -lf` on the machine first.",
         trust_remember_button: " trust & remember ",
         trust_once_button: " this time only ",
         abort_button: " abort ",
@@ -995,10 +994,8 @@ pub const TEXTS: Texts = Texts {
         trusted_retest_fmt: "{count} host key(s) recorded; close, then test the connection",
         changed_title: "host key changed",
         changed_warning: "The host key differs from the one recorded for this machine.",
-        changed_reinstall_hint:
-            "If the machine was reinstalled or reimaged, remove the old record and retry.",
-        changed_mitm_hint:
-            "If not, this may be a man-in-the-middle attack — abort and investigate.",
+        changed_reinstall_hint: "Reinstalled or reset? Remove the old record and retry.",
+        changed_mitm_hint: "If not, this may be a man-in-the-middle attack: abort.",
         remove_retry_button: " remove old key & retry ",
         remove_button: " remove old key ",
         removed: "old host key record removed; reconnecting",

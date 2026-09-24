@@ -641,6 +641,104 @@ fn wizard_changed_host_key_dialog_does_not_promise_a_retry() {
     }
 }
 
+/// T1 复审轻 4：主机密钥对话框宽 64 列（内宽 62、每行首格留空），英文的中间人攻击
+/// 警告（72 列）只剩「…abort and inv」，重装提示（77 列）、未知密钥的比对提示
+/// （86 列）也被截断，带真实 SHA256 指纹的指纹行（63 列）丢了指纹末两位。中英两种
+/// 界面、窄 / 中 / 宽三档，逐条读出两个对话框里的说明与主机信息，都要整行画得下。
+#[test]
+fn host_key_dialog_lines_fit_in_both_languages() {
+    use crate::i18n::Lang;
+    // 真实长度的 SHA256 指纹：`SHA256:` + 43 个 base64 字符。
+    let real_fingerprint = format!("SHA256:{}", "Kq2kZ9vN4xT7bR1mW8pL3cF6hJ0dY5sA2eG9uI4oQ7w");
+    assert_eq!(real_fingerprint.len(), 50);
+    let compact = |s: &str| {
+        s.chars()
+            .filter(|ch| !ch.is_whitespace())
+            .collect::<String>()
+    };
+    let machine = profile("Build", "dev@build.example", "1");
+    let endpoint_id = ClientEndpointId::Ssh(machine.id.clone());
+    for lang in [Lang::ZhCn, Lang::En] {
+        let _guard = crate::i18n::lang_guard(lang);
+        let t = &crate::i18n::texts().machine_auth;
+        for (cols, rows) in [(80, 24), (93, 32), (160, 48)] {
+            // 主机密钥已变更：已保存机器与添加表单两条路径。
+            for saved in [true, false] {
+                let case = format!("{lang:?} {cols}x{rows} changed saved={saved}");
+                let mut state = state_with_profiles(std::slice::from_ref(&machine));
+                let mut outcome = ClientShellInput::default();
+                if saved {
+                    state.set_endpoint_connection_error_kind(
+                        &endpoint_id,
+                        Some(ConnectionErrorKind::HostKeyChanged),
+                    );
+                    assert!(state.open_machine_auth_for_endpoint(&machine.id, &mut outcome));
+                } else {
+                    state.open_machine_host_key_changed_review(
+                        Box::new(machine.clone()),
+                        &mut outcome,
+                    );
+                }
+                let text = compact_frame_text(&mut state, cols, rows);
+                for line in [
+                    t.changed_title.to_owned(),
+                    t.changed_warning.to_owned(),
+                    t.changed_reinstall_hint.to_owned(),
+                    t.changed_mitm_hint.to_owned(),
+                    crate::i18n::fill(t.host_fmt, &[("host", "build.example")]),
+                ] {
+                    assert!(
+                        text.contains(&compact(&line)),
+                        "{case}：整行画得下「{line}」：{text}"
+                    );
+                }
+            }
+
+            // 未知主机密钥：带真实长度的指纹。
+            let case = format!("{lang:?} {cols}x{rows} unknown");
+            let mut state = state_with_profiles(std::slice::from_ref(&machine));
+            state.set_endpoint_connection_error_kind(
+                &endpoint_id,
+                Some(ConnectionErrorKind::HostKeyUnknown {
+                    fingerprint: Some(HostKeyFingerprint {
+                        key_type: "ssh-ed25519".into(),
+                        fingerprint: real_fingerprint.clone(),
+                    }),
+                }),
+            );
+            assert!(
+                state.open_machine_auth_for_endpoint(&machine.id, &mut ClientShellInput::default())
+            );
+            state.handle_machine_auth_update(
+                MachineAuthUpdate::HostKeyOpFinished {
+                    ticket: 1,
+                    op: MachineHostKeyOp::Scan,
+                    result: Ok(MachineHostKeyOutcome::Scanned(reviewed_key(
+                        "build.example",
+                        22,
+                        &[("ssh-ed25519", real_fingerprint.as_str())],
+                    ))),
+                },
+                &mut ClientShellInput::default(),
+            );
+            let text = compact_frame_text(&mut state, cols, rows);
+            for line in [
+                t.tofu_title.to_owned(),
+                t.tofu_question.to_owned(),
+                crate::i18n::fill(t.host_fmt, &[("host", "build.example")]),
+                crate::i18n::fill(t.key_type_fmt, &[("type", "ssh-ed25519")]),
+                crate::i18n::fill(t.fingerprint_fmt, &[("fingerprint", &real_fingerprint)]),
+                t.tofu_verify_hint.to_owned(),
+            ] {
+                assert!(
+                    text.contains(&compact(&line)),
+                    "{case}：整行画得下「{line}」：{text}"
+                );
+            }
+        }
+    }
+}
+
 #[test]
 fn wizard_bootstrap_failure_offers_recovery_entries() {
     let machine = profile("Build", "dev@build.example", "1");
