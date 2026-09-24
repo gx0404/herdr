@@ -1538,15 +1538,15 @@
       "anchor": "Workspace > Mouse UI",
       "doc": "docs/next/website/src/content/docs/concepts.mdx",
       "id": "docs-next-website-src-content-docs-concepts-mdx-workspace-mouse-ui-part1",
-      "source_sha256": "a4a539003598596adc9cafba5cc2a12547ac02e4b2a8886a231d5b81dc8faebb",
+      "source_sha256": "0903a77563d37d4c1b1822777fc0bff98884bc8893c703d431ead3ddbdf38b74",
       "text": "## Mouse UI\n\nHerdr is mouse-native. You can click panes, tabs, workspaces, and agents. You can drag split borders, select text, and use right-click menus. Everything below is also reachable by mouse; keyboard bindings are an optional layer.\n\nIf you prefer keyboard-only control, or you want Herdr to stop capturing mouse input, disable mouse capture:\n\n```toml\n[ui]\nmouse_capture = false\n```\n\nIn the docked layout, drag a panel's `⠿` title handle to rearrange panels. While **Lock layout** is on, panel titles drop the `⠿` handle, the footer says the layout is locked instead of suggesting drags, and the resize and move hints of **Arrange layout** are dimmed. In **Arrange layout** mode, a borderless pane's `⠿` handle sits in the row just above the pane, which is the tab bar or the gap between panes, instead of covering the terminal's first line; it stays on the pane's first line only when that row has no room.\n"
     },
     {
       "anchor": "Workspace > Mouse UI",
       "doc": "docs/next/website/src/content/docs/concepts.mdx",
       "id": "docs-next-website-src-content-docs-concepts-mdx-workspace-mouse-ui-part2",
-      "source_sha256": "a4a539003598596adc9cafba5cc2a12547ac02e4b2a8886a231d5b81dc8faebb",
-      "text": "When the terminal is smaller than the docked layout's minimum size, Herdr switches to a compact view that shows only the focused panel. Every panel keeps a minimum width and height, so the default layout needs 37 columns and 13 rows, and 66 columns once the Monitor panel is docked beside the terminal. The compact view's title bar lists every panel in layout order with the current one highlighted: click a name to switch to that panel, or use **Arrange layout** and `Tab`. When the names do not fit, the title bar shows only the focused panel. The docked layout does not use `ui.mobile_width_threshold` or the mobile switcher; they apply only to the classic layout used with older servers."
+      "source_sha256": "0903a77563d37d4c1b1822777fc0bff98884bc8893c703d431ead3ddbdf38b74",
+      "text": "When the terminal is smaller than the docked layout's minimum size, Herdr switches to a compact view that shows only the focused panel. Every panel keeps a minimum width and height, so the default layout needs 37 columns and 13 rows, and 66 columns once the Monitor panel is docked beside the terminal. The compact view's title bar lists every panel in layout order with the current one highlighted: click a name to switch to that panel, or use **Arrange layout** and `Tab`. When the names do not fit, the title bar shows only the focused panel. Compact view has only one panel to dock, so its title bar never draws the `⠿` handle, and pressing anywhere on it only switches focus instead of starting a drag. With `ui.mouse_capture = false` the footer keeps the **Arrange layout** + `Tab` hint instead of suggesting a click, since switching by name needs mouse capture. The docked layout does not use `ui.mobile_width_threshold` or the mobile switcher; they apply only to the classic layout used with older servers."
     },
     {
       "anchor": "Workspace > Pane",
