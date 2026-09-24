@@ -303,6 +303,44 @@ fn closing_pane_terminates_processes_inside_it() {
     cleanup_spawned_herdr(herdr, base);
 }
 
+/// 在新拆出的窗格里起一个忽略 SIGHUP / SIGTERM 的顽固进程，返回（窗格 id，pid）。
+/// 它只能被信号阶梯最后的 SIGKILL 收掉；自己最多活 2 分钟，用例中途失败也不会
+/// 留下常驻进程。
+fn start_stubborn_pane(socket_path: &Path, base: &Path, attempt: usize) -> (String, u32) {
+    let split = run_cli_json(
+        socket_path,
+        &["pane", "split", "1-1", "--direction", "right"],
+    );
+    let pane_id = split["result"]["pane"]["pane_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let pid_file = base.join(format!("pane-close-stubborn-{attempt}.pid"));
+    let command = format!(
+        "python3 -c 'import os,signal,time,pathlib; signal.signal(signal.SIGHUP, signal.SIG_IGN); signal.signal(signal.SIGTERM, signal.SIG_IGN); pathlib.Path(r\"{}\").write_text(str(os.getpid())); time.sleep(120)'",
+        pid_file.display()
+    );
+    let ran = run_cli(socket_path, &["pane", "run", &pane_id, &command]);
+    assert!(
+        ran.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&ran.stderr)
+    );
+    let pid = wait_for_pid_file(&pid_file, LOADED_WAIT).unwrap_or_else(|err| {
+        panic!("failed to read pane child pid: {err}");
+    });
+    (pane_id, pid)
+}
+
+/// 进程还在跑：存在且不是僵尸（被 SIGKILL 后、被回收前是僵尸）。
+fn process_running(pid: u32) -> bool {
+    fs::read_to_string(format!("/proc/{pid}/stat")).is_ok_and(|stat| {
+        stat.rfind(')')
+            .and_then(|end| stat[end + 1..].trim_start().chars().next())
+            .is_some_and(|state| !matches!(state, 'Z' | 'X'))
+    })
+}
+
 #[test]
 fn closing_a_pane_returns_before_the_signal_ladder_finishes() {
     // HSR-01：信号阶梯曾在事件循环内同步执行，关一个赖着不退的 pane 会把整个 server
@@ -314,84 +352,55 @@ fn closing_a_pane_returns_before_the_signal_ladder_finishes() {
     let socket_path = runtime_dir.join("herdr.sock");
 
     let herdr = spawn_herdr(&config_home, &runtime_dir, &socket_path);
-    wait_for_socket(&socket_path, Duration::from_secs(5));
-
+    wait_for_socket(&socket_path, LOADED_WAIT);
     let created = run_cli(
         &socket_path,
         &["workspace", "create", "--cwd", base.to_str().unwrap()],
     );
     assert!(created.status.success());
 
-    let split = run_cli(
-        &socket_path,
-        &["pane", "split", "1-1", "--direction", "right"],
-    );
-    assert!(split.status.success());
-    let split_json: serde_json::Value = serde_json::from_slice(&split.stdout).unwrap();
-    let pane_id = split_json["result"]["pane"]["pane_id"].as_str().unwrap();
+    // N21b：以前拿一次 CLI 往返当基线、要求关窗格不超出基线 250 ms，负载 34–35 时
+    // 光是起 CLI 进程就要 270–565 ms 而误报。现在直接走 socket（不起进程），判据是
+    // 「应答到手时顽固进程还活着」：阶梯在 SIGHUP 之后 500 ms 才发 SIGKILL，同步
+    // 版本要等 SIGKILL 发完才应答，应答时它必然已经没了。进程已经没了只说明这次
+    // 应答被调度拖过了 500 ms，不能下结论：换一个窗格再试，最多三次——同步版本
+    // 三次都会是「已经没了」，照样报红。
+    let mut answered_before_ladder = false;
+    for attempt in 0..3 {
+        let (pane_id, pid) = start_stubborn_pane(&socket_path, &base, attempt);
+        assert!(process_running(pid), "stubborn process was not running");
 
-    let pid_file = base.join("pane-close-stubborn.pid");
-    let command = format!(
-        "python3 -c 'import os,signal,time,pathlib; signal.signal(signal.SIGHUP, signal.SIG_IGN); signal.signal(signal.SIGTERM, signal.SIG_IGN); pathlib.Path(r\"{}\").write_text(str(os.getpid())); time.sleep(1000)'",
-        pid_file.display()
-    );
-    let ran = run_cli(&socket_path, &["pane", "run", pane_id, &command]);
-    assert!(
-        ran.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&ran.stderr)
-    );
-
-    let pid = wait_for_pid_file(&pid_file, Duration::from_secs(5)).unwrap_or_else(|err| {
-        panic!("failed to read pane child pid: {err}");
-    });
-    assert!(process_exists(pid), "child process was not running");
-
-    // 基线：同一条 CLI 链路（起进程 + 连 socket + 请求 + 响应）在本机的往返成本。
-    // 用相对基线而不是绝对毫秒做断言，负载高的机器上基线同样变慢，不会假红。
-    let baseline_started = Instant::now();
-    let listed_before = run_cli(&socket_path, &["workspace", "list"]);
-    let baseline = baseline_started.elapsed();
-    assert!(
-        listed_before.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&listed_before.stderr)
-    );
-
-    let close_started = Instant::now();
-    let closed = run_cli(&socket_path, &["pane", "close", pane_id]);
-    let close_elapsed = close_started.elapsed();
-    assert!(
-        closed.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&closed.stderr)
-    );
-    // 同步阶梯要多花整条阶梯（3×250 ms）；这里只允许比基线多出不到一个首级宽限。
-    let first_grace = Duration::from_millis(250);
-    assert!(
-        close_elapsed < baseline + first_grace,
-        "pane close took {close_elapsed:?} against a {baseline:?} baseline: \
-         it still waits for the signal ladder before answering"
-    );
-    if close_elapsed < first_grace {
-        // 实测落在首级宽限内，SIGKILL 还没来得及发：进程必然还在。
-        assert!(
-            process_exists(pid),
-            "pane close waited for the whole signal ladder before answering"
+        let closed = send_request(
+            &socket_path,
+            &serde_json::json!({
+                "id": format!("close_{attempt}"),
+                "method": "pane.close",
+                "params": {"pane_id": pane_id},
+            })
+            .to_string(),
         );
+        let running_at_answer = process_running(pid);
+        assert_eq!(closed["result"]["type"], "ok", "{closed}");
+
+        // 阶梯还在跑，事件循环必须照常服务其它请求。
+        let listed = send_request(
+            &socket_path,
+            r#"{"id":"list","method":"workspace.list","params":{}}"#,
+        );
+        assert!(listed["result"]["workspaces"].is_array(), "{listed}");
+
+        assert!(
+            wait_for_pid_exit(pid, LOADED_WAIT),
+            "process {pid} survived pane close"
+        );
+        if running_at_answer {
+            answered_before_ladder = true;
+            break;
+        }
     }
-
-    // 阶梯还在跑，事件循环必须照常服务其它请求。
-    let listed = run_cli(&socket_path, &["workspace", "list"]);
     assert!(
-        listed.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&listed.stderr)
-    );
-
-    assert!(
-        wait_for_pid_exit(pid, Duration::from_secs(5)),
-        "process {pid} survived pane close"
+        answered_before_ladder,
+        "pane.close answered only after the signal ladder had killed the stubborn process, three times in a row"
     );
 
     cleanup_spawned_herdr(herdr, base);
