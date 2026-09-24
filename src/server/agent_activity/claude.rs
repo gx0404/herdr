@@ -1,6 +1,10 @@
 //! Claude Code 的活动来源适配器：子 agent 转录树、workflow journal 增强与主
 //! 转录尾部的待办条目。
 //!
+//! workflow 派生的子 agent 挂在两层分组节点下：`wf:<目录>`（`agent_type` =
+//! `workflow`）→ `phase:<目录>:<phase>`（`agent_type` = `phase`）→ 子 agent。分组
+//! 节点种类记 Task，状态与摘要（`<活跃>/<总数> running`）按其下子 agent 统计。
+//!
 //! # 本机取证（claude 2.1.278，只读核对目录结构与键名，未读取任何对话正文）
 //!
 //! 转录布局（`<config>/projects/<项目 slug>/` 下；`<config>` 是 Claude Code 的配置
@@ -129,6 +133,7 @@ use super::{ActivitySource, ContentChunk, SourceContext, SourceError};
 use crate::agent_resume::AgentSessionRefKind;
 use crate::api::schema::{
     AgentActivityContentFormat, AgentActivityKind, AgentActivityNode, AgentActivityStatus,
+    ACTIVITY_GROUP_PHASE, ACTIVITY_GROUP_WORKFLOW,
 };
 
 /// 一次 discover 最多收录的子 agent 数；超出后保留最近修改的那批（分组与待办
@@ -1085,6 +1090,7 @@ fn build_tree(session_dir: &Path, now_ms: u64) -> Vec<AgentActivityNode> {
                     &mut group_tally,
                     &workflow_id,
                     workflow,
+                    ACTIVITY_GROUP_WORKFLOW,
                     None,
                 );
                 let phase = meta
@@ -1101,6 +1107,7 @@ fn build_tree(session_dir: &Path, now_ms: u64) -> Vec<AgentActivityNode> {
                             &mut group_tally,
                             &phase_id,
                             &phase,
+                            ACTIVITY_GROUP_PHASE,
                             Some(workflow_id),
                         );
                         Some(phase_id)
@@ -1227,12 +1234,17 @@ impl Tally {
     }
 }
 
+/// 登记一个分组节点（workflow 或其 phase）：种类记 Task，`agent_type` 标明分组
+/// 层级（[`ACTIVITY_GROUP_WORKFLOW`] / [`ACTIVITY_GROUP_PHASE`]），客户端据此画
+/// 类型字形而不是当作子 agent；状态与摘要（`<活跃>/<总数> running`）事后按
+/// [`Tally`] 回填。
 fn ensure_group(
     nodes: &mut Vec<AgentActivityNode>,
     index: &mut BTreeMap<String, usize>,
     tally: &mut BTreeMap<String, Tally>,
     id: &str,
     label: &str,
+    agent_type: &str,
     parent_id: Option<String>,
 ) {
     if index.contains_key(id) {
@@ -1246,6 +1258,7 @@ fn ensure_group(
         label: clip(label),
         status: AgentActivityStatus::Unknown,
         parent_id,
+        agent_type: Some(agent_type.to_string()),
         ..AgentActivityNode::default()
     });
 }
@@ -2198,10 +2211,32 @@ mod tests {
         let phase = node(&nodes, "phase:wf_demo-0001:Design");
         assert_eq!(phase.kind, AgentActivityKind::Task);
         assert_eq!(phase.parent_id.as_deref(), Some("wf:wf_demo-0001"));
+        assert_eq!(phase.agent_type.as_deref(), Some(ACTIVITY_GROUP_PHASE));
         let workflow = node(&nodes, "wf:wf_demo-0001");
         assert_eq!(workflow.parent_id, None);
         assert_eq!(workflow.status, AgentActivityStatus::Running);
         assert_eq!(workflow.summary.as_deref(), Some("1/2 running"));
+        assert_eq!(
+            workflow.agent_type.as_deref(),
+            Some(ACTIVITY_GROUP_WORKFLOW)
+        );
+        // 分组层级只由这两种 `agent_type` 标明；子 agent 保留自己的类型。
+        let group_type = |node: &AgentActivityNode| {
+            matches!(
+                node.agent_type.as_deref(),
+                Some(ACTIVITY_GROUP_WORKFLOW | ACTIVITY_GROUP_PHASE)
+            )
+        };
+        for grouped in nodes
+            .iter()
+            .filter(|node| node.id.starts_with("wf:") || node.id.starts_with("phase:"))
+        {
+            assert!(group_type(grouped), "{} 应标为分组节点", grouped.id);
+        }
+        assert!(nodes
+            .iter()
+            .filter(|node| node.kind == AgentActivityKind::Subagent)
+            .all(|node| !group_type(node)));
     }
 
     #[test]

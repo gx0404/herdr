@@ -308,6 +308,14 @@ pub enum AgentActivityContentFormat {
     Unknown,
 }
 
+/// 分组节点的 `agent_type`：Claude Code workflow（节点 id `wf:<目录>`）。分组节点
+/// 本身不是子 agent，只把子节点归组；其 `summary` 以 `<活跃>/<总数> running` 开头
+/// （可能再跟 ` · <token 数> tokens`），客户端据此在分组行显示进度。
+pub const ACTIVITY_GROUP_WORKFLOW: &str = "workflow";
+/// 分组节点的 `agent_type`：workflow 下的一个 phase（节点 id
+/// `phase:<目录>:<phase>`），约定同 [`ACTIVITY_GROUP_WORKFLOW`]。
+pub const ACTIVITY_GROUP_PHASE: &str = "phase";
+
 /// agent 活动树的一个节点。`AgentInfo` 派生 `Eq`，这里不得出现浮点；时间一律
 /// 用毫秒时间戳。
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
@@ -322,6 +330,8 @@ pub struct AgentActivityNode {
     pub status: AgentActivityStatus,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent_id: Option<String>,
+    /// 子 agent 的类型（如 `Explore`）；分组节点（Claude Code 的 workflow 与其
+    /// phase）是 `workflow` / `phase`。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_type: Option<String>,
     /// 可经 `agent.activity.read` 读取内容时给出；对调用方不透明。

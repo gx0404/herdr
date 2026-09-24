@@ -9833,6 +9833,7 @@
           "description": "agent 活动树的一个节点。`AgentInfo` 派生 `Eq`，这里不得出现浮点；时间一律\n用毫秒时间戳。",
           "properties": {
             "agent_type": {
+              "description": "子 agent 的类型（如 `Explore`）；分组节点（Claude Code 的 workflow 与其\nphase）是 `workflow` / `phase`。",
               "type": [
                 "string",
                 "null"
