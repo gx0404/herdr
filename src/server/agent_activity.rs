@@ -2500,12 +2500,20 @@ mod tests {
     #[test]
     fn reported_transcripts_follow_the_current_session_and_the_pane() {
         use crate::agent_resume::AgentSessionRefKind;
+        // 路径取自临时目录：写死 `/cfg/...` 在 Windows 上不是绝对路径（缺盘符）。
+        let transcript_path = |session: &str| {
+            std::env::temp_dir()
+                .join("cfg")
+                .join("projects")
+                .join("p")
+                .join(format!("{session}.jsonl"))
+                .to_string_lossy()
+                .into_owned()
+        };
         let transcript = |session: &str| crate::agent_resume::ReportedTranscript {
             session_id: session.into(),
-            path: crate::agent_resume::AgentSessionRef::path(format!(
-                "/cfg/projects/p/{session}.jsonl"
-            ))
-            .expect("绝对路径"),
+            path: crate::agent_resume::AgentSessionRef::path(transcript_path(session))
+                .expect("绝对路径"),
         };
         let report = |app: &mut crate::app::App, public: &str, session: &str, seq: u64| {
             let response = app.handle_api_request(Request {
@@ -2538,10 +2546,7 @@ mod tests {
             .note_transcript(pane_id, transcript("s-1"));
         assert_eq!(
             session(&app, pane_id),
-            Some((
-                AgentSessionRefKind::Path,
-                "/cfg/projects/p/s-1.jsonl".to_owned()
-            ))
+            Some((AgentSessionRefKind::Path, transcript_path("s-1")))
         );
         report(&mut app, &public, "s-2", 2);
         assert_eq!(

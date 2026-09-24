@@ -682,10 +682,15 @@ mod tests {
     fn snapshot_of_another_session_reads_as_an_empty_tree() {
         let hint = fixture("snapshot-extension.json");
         let home = home();
-        let same_path = AgentSessionRef::path(EXTENSION_SESSION_PATH).expect("合法路径");
+        // 夹具里的会话路径是 Unix 形态；`AgentSessionRef::path` 按本平台校验绝对路径
+        // （Windows 要盘符），这里比对的只是字符串，直接构造引用。
+        let path_ref = |value: &str| AgentSessionRef {
+            kind: crate::agent_resume::AgentSessionRefKind::Path,
+            value: value.to_owned(),
+        };
+        let same_path = path_ref(EXTENSION_SESSION_PATH);
         let same_id = AgentSessionRef::id(EXTENSION_SESSION_ID).expect("合法 id");
-        let other_path = AgentSessionRef::path("/home/user/.pi/agent/sessions/--x--/other.jsonl")
-            .expect("合法路径");
+        let other_path = path_ref("/home/user/.pi/agent/sessions/--x--/other.jsonl");
         let other_id =
             AgentSessionRef::id("5f000000-0000-4000-8000-00000000ffff").expect("合法 id");
 
