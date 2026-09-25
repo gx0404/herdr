@@ -1248,7 +1248,7 @@ fn scale_snapshot(agents: usize, activity: usize) -> ClientShellSnapshot {
 /// 四列：classic 稳态、workbench 稳态（行缓存命中）、workbench 每帧翻一次折叠
 /// 态（行缓存每帧重建，量的是构建成本）、workbench 把每个 agent 的活动全部
 /// 展开后的稳态（活动行上屏的渲染成本；8 个节点是整树形态，比生产默认的摘要
-/// ——至多 1 个最新节点——重，按上界看）。
+/// ——活跃节点加祖先链——相同，按上界看）。
 #[test]
 #[ignore = "manual agents panel composition scaling profile"]
 fn agent_panel_render_scale_profile() {
@@ -1409,8 +1409,14 @@ fn activity_badge_shows_running_then_finished_only_for_running_owners() {
     use crate::api::schema::AgentActivityKind::{Subagent, Todo};
     use crate::api::schema::AgentActivityStatus::{Pending, Running};
     for (lang, expected) in [
-        (crate::i18n::Lang::En, ["2 running", "5 finished", "1 finished"]),
-        (crate::i18n::Lang::ZhCn, ["2 运行中", "5 已完成", "1 已完成"]),
+        (
+            crate::i18n::Lang::En,
+            ["2 running", "5 finished", "1 finished"],
+        ),
+        (
+            crate::i18n::Lang::ZhCn,
+            ["2 运行中", "5 已完成", "1 已完成"],
+        ),
     ] {
         let _lang = crate::i18n::lang_guard(lang);
         let working = AgentStatus::Working;
@@ -1446,10 +1452,10 @@ fn activity_badge_shows_running_then_finished_only_for_running_owners() {
         let mut background = counts(1, 3, 0);
         background.nodes = vec![node(Subagent, Pending)];
         assert!(badge(AgentStatus::Idle, background).is_some(), "{lang:?}");
-        // 只剩没做完的待办：不算在运行。
+        // running 计数是共享摘要真源，不按客户端收到的节点子集猜测。
         let mut leftover = counts(1, 3, 0);
         leftover.nodes = vec![node(Todo, Running)];
-        assert_eq!(badge(AgentStatus::Idle, leftover), None, "{lang:?}");
+        assert!(badge(AgentStatus::Idle, leftover).is_some(), "{lang:?}");
         // 有运行中的节点却一个也没下发（快照预算用尽）：算在运行。
         assert_eq!(
             badge(AgentStatus::Idle, counts(2, 0, 0)).as_deref(),
@@ -1784,11 +1790,10 @@ fn tree_agent_rows_show_the_activity_summary_collapsed_by_default() {
     assert!(done[0].starts_with("  └── "), "末行: {done:?}");
     assert!(compact(&done[0]).contains(&compact(&done_text)), "{done:?}");
     let buffer = state.compose_buffer.as_ref().expect("缓冲");
-    let done_x = text_cells(&state, &done_text)
-        .into_iter()
-        .find(|(_, y)| *y == done_rect.y)
-        .expect("已完成行的文字")
-        .0;
+    let first = done_text.chars().next().expect("完成文案").to_string();
+    let done_x = (done_rect.x..done_rect.right())
+        .find(|x| buffer[(*x, done_rect.y)].symbol() == first)
+        .expect("已完成行的文字");
     assert_eq!(
         buffer[(done_x, done_rect.y)].style().fg,
         Some(state.config.palette.overlay0),
@@ -1828,13 +1833,14 @@ fn tree_agent_rows_show_the_activity_summary_collapsed_by_default() {
     // 没有运行中的活动：只写总数，徽标退为次要色。
     let mut projected = summary_snapshot();
     projected.agents[0].activity.running = 0;
+    projected.agents[0].agent_status = AgentStatus::Working;
     let mut state = classic_state_with(AgentPanelSortConfig::Spaces, projected);
     state.sidebar_width = 40;
     state.sidebar_width_manual = true;
     state.compose(106, 30).expect("无运行中活动帧");
     let rect = classic_agent_rect(&state, "pane_0");
     let agent = tree_rows(&state, rect);
-    let badge = total_badge(5);
+    let badge = finished_badge(5);
     assert!(compact(&agent[0]).ends_with(&compact(&badge)), "{agent:?}");
     let buffer = state.compose_buffer.as_ref().expect("缓冲");
     let badge_x = badge_digits_x(&state, rect, &badge, "5");
@@ -1863,7 +1869,7 @@ fn tree_agent_rows_show_the_activity_summary_collapsed_by_default() {
         "agent-activity:pane:pane_0",
     ))]);
     state.compose(106, 30).expect("launch 展开帧");
-    assert_eq!(state.hits.agent_activity_rows.len(), 2);
+    assert_eq!(state.hits.agent_activity_rows.len(), 3);
     let latest = tree_rows(&state, state.hits.agent_activity_rows[0].rect);
     assert!(latest[0].starts_with("├── ◐ explore repo"), "{latest:?}");
 }
@@ -1873,7 +1879,7 @@ fn tree_agent_rows_show_the_activity_summary_collapsed_by_default() {
 enum BadgeTier {
     /// 完整文案。
     Full,
-    /// 只留数字 `2/5`。
+    /// 只留数字 `2`。
     Digits,
     /// 不画。
     Hidden,
@@ -1901,7 +1907,7 @@ fn badged_snapshot(extra_tab: bool) -> ClientShellSnapshot {
 }
 
 /// 断言 `rect` 首行右端按 `tier` 画徽标：`Full` 是完整文案 `full`，`Digits` 只剩
-/// 数字 `2/5`（前一格是间隔），`Hidden` 整行不出现 `2/5`。数字逐格比对。
+/// 数字 `2`（前一格是间隔），`Hidden` 整行不出现 `2`。数字逐格比对。
 fn assert_badge_tier(
     state: &ClientShellState,
     rect: Rect,
@@ -1912,31 +1918,24 @@ fn assert_badge_tier(
     let buffer = state.compose_buffer.as_ref().expect("缓冲");
     let cell = |x: u16| buffer[(x, rect.y)].symbol().to_owned();
     let line = tree_rows(state, rect)[0].clone();
-    let digits_at = |x: u16| [cell(x), cell(x + 1), cell(x + 2)];
     match tier {
         BadgeTier::Full => {
             assert!(
                 compact(&line).ends_with(&compact(full)),
                 "{case}: 完整徽标: {line:?}"
             );
-            assert_eq!(
-                digits_at(badge_digits_x(state, rect, full, "2/5")),
-                ["2", "/", "5"],
-                "{case}"
-            );
+            assert_eq!(cell(badge_digits_x(state, rect, full, "2")), "2", "{case}");
         }
         BadgeTier::Digits => {
-            let x = badge_right(state, rect) - 3;
-            assert_eq!(digits_at(x), ["2", "/", "5"], "{case}: 只留数字: {line:?}");
-            assert_eq!(cell(x - 1), " ", "{case}: 徽标前留 1 列间隔: {line:?}");
+            let x = badge_right(state, rect) - 1;
+            assert_eq!(cell(x), "2", "{case}: 只留数字: {line:?}");
+            assert_eq!(cell(x - 1), " ", "{case}: 数字前间隔");
             assert!(
                 !compact(&line).contains(&compact(full)),
                 "{case}: 完整文案放不下: {line:?}"
             );
         }
-        BadgeTier::Hidden => {
-            assert!(!line.contains("2/5"), "{case}: 徽标让位: {line:?}");
-        }
+        BadgeTier::Hidden => assert!(!line.contains('2'), "{case}: 徽标让位: {line:?}"),
     }
 }
 
@@ -1947,8 +1946,7 @@ fn assert_badge_tier(
 ///
 /// 行宽 = 侧栏宽 − 1（右缘分隔线），内容区再扣树前缀（每层 2 列 + 开关 2 列），
 /// 徽标可用 = 内容区 − 8 − 1 列间隔。例：侧栏 18、深度 2 → 17 − 6 − 9 = 2 列，
-/// 连 `2/5` 都放不下，整个让位。中英文完整徽标差 1 列（`2/5 running` 11 列、
-/// 「运行中 2/5」10 列），侧栏 26、深度 2 恰好落在两档之间，两种语言各钉一遍。
+/// 数字档只有一列；英文完整徽标 9 列、中文 8 列，分别覆盖各档边界。
 #[test]
 fn tree_badge_yields_to_the_status_icon_and_name_on_narrow_sidebars() {
     use BadgeTier::{Digits, Full, Hidden};
@@ -1959,12 +1957,12 @@ fn tree_badge_yields_to_the_status_icon_and_name_on_narrow_sidebars() {
     for (lang, full_width, tiers) in [
         (
             crate::i18n::Lang::En,
-            11,
+            9,
             [
                 (18, 1, Digits),
-                (18, 2, Hidden),
+                (18, 2, Digits),
                 (18, 3, Hidden),
-                (26, 1, Digits),
+                (26, 1, Full),
                 (26, 2, Digits),
                 (26, 3, Digits),
                 (36, 1, Full),
@@ -1974,12 +1972,12 @@ fn tree_badge_yields_to_the_status_icon_and_name_on_narrow_sidebars() {
         ),
         (
             crate::i18n::Lang::ZhCn,
-            10,
+            8,
             [
                 (18, 1, Digits),
-                (18, 2, Hidden),
+                (18, 2, Digits),
                 (18, 3, Hidden),
-                (26, 1, Digits),
+                (26, 1, Full),
                 (26, 2, Digits),
                 (26, 3, Digits),
                 (36, 1, Full),
@@ -1989,7 +1987,7 @@ fn tree_badge_yields_to_the_status_icon_and_name_on_narrow_sidebars() {
         ),
     ] {
         let _lang = crate::i18n::lang_guard(lang);
-        let full = running_badge(2, 5);
+        let full = running_badge(2);
         assert_eq!(
             crate::ui::display_width(&full),
             full_width,
@@ -2150,6 +2148,224 @@ fn tree_activity_with_several_nodes_expands_children_on_demand() {
     );
 }
 
+/// workflow → phase → 子 agent 的类型、层级与进度必须真实画到字符缓冲。
+#[test]
+fn active_workflow_tree_renders_group_types_progress_and_finished_summary() {
+    use crate::api::schema::{AgentActivityKind, AgentActivityStatus};
+    for (width, workflow_mark, phase_mark) in [(48, "⧉", "▤"), (18, "W", "P")] {
+        let mut projected = summary_snapshot();
+        projected.agents[0].activity.truncated = false;
+        projected.agents[0].activity.nodes = vec![
+            ClientShellActivityNode {
+                id: "flow".into(),
+                label: "flow".into(),
+                kind: AgentActivityKind::Task,
+                status: AgentActivityStatus::Running,
+                agent_type: Some("workflow".into()),
+                summary: Some("1/3 running".into()),
+                ..Default::default()
+            },
+            ClientShellActivityNode {
+                id: "phase".into(),
+                parent_id: Some("flow".into()),
+                label: "phase".into(),
+                kind: AgentActivityKind::Task,
+                status: AgentActivityStatus::Running,
+                agent_type: Some("phase".into()),
+                summary: Some("1/2 running".into()),
+                ..Default::default()
+            },
+            ClientShellActivityNode {
+                id: "child".into(),
+                parent_id: Some("phase".into()),
+                label: "child".into(),
+                kind: AgentActivityKind::Subagent,
+                status: AgentActivityStatus::Running,
+                ..Default::default()
+            },
+        ];
+        let mut state = classic_state_with(AgentPanelSortConfig::Spaces, projected);
+        state.sidebar_width = width;
+        state.sidebar_width_manual = true;
+        for key in [
+            "agent-activity:pane:pane_0",
+            "agent-node:pane:pane_0:flow",
+            "agent-node:pane:pane_0:phase",
+        ] {
+            state.toggle_collapsed_group(&ClientEndpointId::Local, key.into());
+        }
+        state.compose(106, 40).expect("workflow 树");
+        let rows = &state.hits.agent_activity_rows;
+        assert_eq!(
+            rows.iter()
+                .map(|hit| hit.node_id.as_str())
+                .collect::<Vec<_>>(),
+            [
+                "flow",
+                "phase",
+                "child",
+                super::super::agent_tree::ACTIVITY_DONE_HIT_ID
+            ]
+        );
+        let flow = tree_rows(&state, rows[0].rect)[0].clone();
+        let phase = tree_rows(&state, rows[1].rect)[0].clone();
+        assert!(flow.contains(workflow_mark), "{width}: {flow:?}");
+        assert!(phase.contains(phase_mark), "{width}: {phase:?}");
+        if width == 48 {
+            assert!(flow.contains("flow 1/3"), "{flow:?}");
+            assert!(phase.contains("phase 1/2"), "{phase:?}");
+            assert!(tree_rows(&state, rows[2].rect)[0].contains("child"));
+        }
+        let finished = rows[3].rect;
+        state.handle_raw_events(vec![click_at(finished.x + 10, finished.y)]);
+        assert!(
+            matches!(state.overlay.as_ref(), Some(ClientShellOverlay::AgentActivity(overlay)) if overlay.selected_node.is_none())
+        );
+    }
+}
+
+#[test]
+fn idle_owner_hides_activity_children_badges_and_expansion_in_tree_and_launch() {
+    for sort in [AgentPanelSortConfig::Spaces, AgentPanelSortConfig::Launch] {
+        let mut projected = summary_snapshot();
+        projected.agents[0].activity.running = 0;
+        projected.agents[0].agent_status = AgentStatus::Idle;
+        let mut state = classic_state_with(sort, projected);
+        state.toggle_collapsed_group(
+            &ClientEndpointId::Local,
+            "agent-activity:pane:pane_0".into(),
+        );
+        state.compose(106, 40).expect("空闲属主");
+        assert!(state.hits.agent_activity_rows.is_empty());
+        assert!(!local_toggle_keys(&state).contains(&"agent-activity:pane:pane_0"));
+        let row = tree_rows(&state, classic_agent_rect(&state, "pane_0"));
+        assert!(!compact(&row[0]).contains(&compact(&finished_badge(5))));
+    }
+}
+
+/// 宽/窄工作台都可用稳定行身份按回车打开更多/完成窗口；上下键会滚到屏外。
+#[test]
+fn agents_panel_keyboard_opens_summary_rows_and_scrolls_to_offscreen_rows() {
+    use super::super::dock::PanelId;
+    for width in [120, 62] {
+        for done in [false, true] {
+            let mut state = classic_state_with(AgentPanelSortConfig::Spaces, summary_snapshot());
+            enable_workbench(&mut state);
+            state.workbench.dock.focused = PanelId::Agents;
+            state.toggle_collapsed_group(
+                &ClientEndpointId::Local,
+                "agent-activity:pane:pane_0".into(),
+            );
+            state.compose(width, 40).expect("键盘树");
+            let index = state
+                .federated_agent_rows
+                .as_ref()
+                .expect("行")
+                .rows()
+                .iter()
+                .position(|row| {
+                    if done {
+                        matches!(row.kind.kind, AgentTreeKind::ActivityDone { .. })
+                    } else {
+                        matches!(row.kind.kind, AgentTreeKind::ActivityMore { .. })
+                    }
+                })
+                .expect("目标行");
+            for _ in 0..=index {
+                state.handle_raw_events(vec![RawInputEvent::Key(crate::input::TerminalKey::new(
+                    KeyCode::Down,
+                    KeyModifiers::empty(),
+                ))]);
+                state.compose(width, 40).expect("移动焦点");
+            }
+            state.handle_raw_events(vec![RawInputEvent::Key(crate::input::TerminalKey::new(
+                KeyCode::Enter,
+                KeyModifiers::empty(),
+            ))]);
+            assert!(
+                matches!(state.overlay.as_ref(), Some(ClientShellOverlay::AgentActivity(overlay)) if overlay.selected_node.is_none()),
+                "{width} done={done}"
+            );
+        }
+    }
+    let mut state = classic_state_with(AgentPanelSortConfig::Spaces, scale_snapshot(30, 0));
+    enable_workbench(&mut state);
+    state.workbench.dock.focused = PanelId::Agents;
+    state.compose(120, 40).expect("长列表");
+    for _ in 0..25 {
+        state.handle_raw_events(vec![RawInputEvent::Key(crate::input::TerminalKey::new(
+            KeyCode::Down,
+            KeyModifiers::empty(),
+        ))]);
+        state.compose(120, 40).expect("键盘滚动");
+    }
+    assert!(state.agent_scroll > 0, "键盘能导航到屏外行");
+    let selection = state.workbench.agent_keyboard_target.clone();
+    // 换成空树，旧目标不再可激活，Enter 只校正焦点。
+    state.set_snapshot(Box::new(scale_snapshot(0, 0)));
+    state.compose(120, 40).expect("目标移除");
+    let outcome = state.handle_raw_events(vec![RawInputEvent::Key(
+        crate::input::TerminalKey::new(KeyCode::Enter, KeyModifiers::empty()),
+    )]);
+    assert!(outcome.actions.is_empty());
+    assert!(selection.is_some() && state.workbench.agent_keyboard_target.is_none());
+}
+
+#[test]
+fn collapsed_activity_keyboard_target_never_opens_the_hidden_node() {
+    use super::super::dock::PanelId;
+    let mut state = classic_state_with(AgentPanelSortConfig::Spaces, summary_snapshot());
+    enable_workbench(&mut state);
+    state.workbench.dock.focused = PanelId::Agents;
+    let key = "agent-activity:pane:pane_0";
+    state.toggle_collapsed_group(&ClientEndpointId::Local, key.into());
+    state.compose(120, 40).expect("展开");
+    let count = state
+        .federated_agent_rows
+        .as_ref()
+        .expect("行")
+        .rows()
+        .len();
+    for _ in 0..count {
+        state.handle_raw_events(vec![RawInputEvent::Key(crate::input::TerminalKey::new(
+            KeyCode::Down,
+            KeyModifiers::empty(),
+        ))]);
+    }
+    state.toggle_collapsed_group(&ClientEndpointId::Local, key.into());
+    state.compose(120, 40).expect("折叠");
+    state.handle_raw_events(vec![RawInputEvent::Key(crate::input::TerminalKey::new(
+        KeyCode::Enter,
+        KeyModifiers::empty(),
+    ))]);
+    assert!(
+        state.overlay.is_none(),
+        "失效目标回退到当前可见分组，不能打开旧完成行"
+    );
+}
+
+#[test]
+fn agents_keyboard_navigation_does_not_intercept_other_panels_or_modes() {
+    use super::super::dock::PanelId;
+    let mut state = classic_state_with(AgentPanelSortConfig::Spaces, summary_snapshot());
+    enable_workbench(&mut state);
+    let key = crate::input::TerminalKey::new(KeyCode::Down, KeyModifiers::empty());
+    for mode in [
+        ClientShellMode::Copy,
+        ClientShellMode::Navigate,
+        ClientShellMode::Prefix,
+        ClientShellMode::Resize,
+    ] {
+        state.mode = mode;
+        state.workbench.dock.focused = PanelId::Agents;
+        assert!(!state.agent_tree_key(&key, &mut ClientShellInput::default()));
+    }
+    state.mode = ClientShellMode::Terminal;
+    state.workbench.dock.focused = PanelId::Workspaces;
+    assert!(!state.agent_tree_key(&key, &mut ClientShellInput::default()));
+    assert!(state.workbench.agent_keyboard_target.is_none());
+}
+
 /// 多行行配置（这里 `[状态图标 agent] / [状态文案]`）：续行画祖先引导线并缩进
 /// 两列对齐名称；agent 行展开活动时，续行在开关列接一条引导线到下面的活动行。
 /// 行配置自带状态文案时不再另补。
@@ -2224,6 +2440,7 @@ fn tree_activity_nodes_tolerate_cycles_and_duplicate_ids() {
         },
     ];
     projected.agents[0].activity.total = 3;
+    projected.agents[0].agent_status = AgentStatus::Working;
     let mut state = classic_state_with(AgentPanelSortConfig::Spaces, projected);
     state.toggle_collapsed_group(
         &ClientEndpointId::Local,
@@ -2323,7 +2540,7 @@ fn tree_external_agents_group_by_source_and_open_the_activity_window() {
         abc[0].starts_with("├─▸ ◐ fix login zcode"),
         "活动摘要默认折叠: {abc:?}"
     );
-    let badge = running_badge(1, 2);
+    let badge = running_badge(1);
     assert!(compact(&abc[0]).ends_with(&compact(&badge)), "{abc:?}");
     assert!(state.hits.agent_activity_rows.is_empty());
     let def = tree_rows(&state, state.hits.external_agents[1].0);
@@ -2465,6 +2682,7 @@ fn tree_rows_follow_the_machine_workspace_tab_agent_activity_hierarchy() {
                 AgentTreeKind::Agent { .. } => "agent",
                 AgentTreeKind::Activity { .. } => "activity",
                 AgentTreeKind::ActivityMore { .. } => "more",
+                AgentTreeKind::ActivityDone { .. } => "done",
                 AgentTreeKind::ExternalGroup { .. } => "external-group",
                 AgentTreeKind::ExternalAgent { .. } => "external",
             };
@@ -3686,7 +3904,7 @@ fn tree_rows_and_header_keep_a_one_column_inset_from_both_edges() {
 /// L4 复审（中）：默认宽度下活动徽标不再挤掉 agent 名称。徽标按「名称优先」取档：
 /// 状态图标 + 完整名称 + 1 列间隔 + 完整徽标都放得下才画完整文案，否则退到只留
 /// 数字（数字档仍先给图标与名称保 8 列）。{中文, 英文} × {classic 侧栏 26 列,
-/// 工作台 120 列} × 深度 1、徽标 2/5、名称 "opencode"：整名可见，徽标至少是数字档。
+/// 工作台 120 列} × 深度 1、徽标 2、名称 "opencode"：整名可见，徽标至少是数字档。
 #[test]
 fn default_width_badges_leave_the_whole_agent_name_visible() {
     for lang in [crate::i18n::Lang::ZhCn, crate::i18n::Lang::En] {
@@ -3717,7 +3935,7 @@ fn default_width_badges_leave_the_whole_agent_name_visible() {
                 line.contains("opencode") && !line.contains('…'),
                 "{case}: 名称完整可见，不被徽标截断：{line:?}"
             );
-            assert!(line.contains("2/5"), "{case}: 徽标至少保留数字档：{line:?}");
+            assert!(line.contains("2"), "{case}: 徽标至少保留数字档：{line:?}");
         }
     }
 }

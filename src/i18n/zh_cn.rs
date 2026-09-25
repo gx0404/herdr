@@ -1246,7 +1246,7 @@ pub const TEXTS: Texts = Texts {
         status_blocked: "受阻",
         status_done: "完成",
         status_failed: "失败",
-        status_unknown: "未知",
+        status_unknown: "已结束（状态未知）",
     },
     menu: MenuTexts {
         arrange_layout: "调整布局",

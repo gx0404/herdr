@@ -1288,7 +1288,7 @@ impl<'a> SummaryNodeView<'a> {
     }
 }
 
-/// 两份存储的客户端摘要是否不同：计数、步的划分或按选入次序的节点下发字段
+/// 两份存储的客户端摘要是否不同：计数、步的划分、选入次序或来源顺序的节点下发字段
 /// 任一不同。两边相同时，任意预算下投影出的节点与截断标记都相同。
 fn summary_differs(
     before: (
@@ -1311,9 +1311,21 @@ fn summary_differs(
             .iter()
             .map(move |index| nodes.get(*index).map(SummaryNodeView::of))
     }
+    fn source_views<'a>(
+        summary: &'a ActivitySummary,
+        nodes: &'a [crate::api::schema::AgentActivityNode],
+    ) -> impl Iterator<Item = SummaryNodeView<'a>> + 'a {
+        // 最多 32 个存储节点、12 个摘要节点；按来源顺序比较且不另分配下标数组。
+        nodes
+            .iter()
+            .enumerate()
+            .filter(move |(index, _)| summary.order.contains(index))
+            .map(|(_, node)| SummaryNodeView::of(node))
+    }
     before.0 != after.0
         || before.1.step_ends != after.1.step_ends
         || !views(before.1, before.2).eq(views(after.1, after.2))
+        || !source_views(before.1, before.2).eq(source_views(after.1, after.2))
 }
 
 /// 一次活动树变化后的计数，随 `pane.agent_activity_changed` 事件下发。

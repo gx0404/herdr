@@ -238,6 +238,43 @@ impl AgentTreeNode {
 /// 统一树展平后的一行：`TreeEntry` 的深度 / 折叠键 / 末子掩码 + 客户端负载。
 pub(super) type AgentTreeRow = TreeEntry<AgentTreeNode>;
 
+/// Agents 面板独立的键盘焦点，用稳定身份定位，绝不从鼠标悬浮推导。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct AgentKeyboardTarget {
+    endpoint: ClientEndpointId,
+    key: String,
+}
+
+impl AgentKeyboardTarget {
+    fn row_key(row: &AgentTreeRow) -> std::borrow::Cow<'_, str> {
+        match &row.kind.kind {
+            AgentTreeKind::ActivityMore { owner_key, .. } => format!("more:{owner_key}").into(),
+            AgentTreeKind::ActivityDone { owner_key, .. } => format!("done:{owner_key}").into(),
+            _ => row.key.as_str().into(),
+        }
+    }
+
+    pub(super) fn from_row(row: &AgentTreeRow) -> Self {
+        Self {
+            endpoint: row.kind.endpoint_id.clone(),
+            key: Self::row_key(row).into_owned(),
+        }
+    }
+
+    pub(super) fn matches(&self, row: &AgentTreeRow) -> bool {
+        self.endpoint == row.kind.endpoint_id
+            && match &row.kind.kind {
+                AgentTreeKind::ActivityMore { owner_key, .. } => {
+                    self.key.strip_prefix("more:") == Some(owner_key.as_str())
+                }
+                AgentTreeKind::ActivityDone { owner_key, .. } => {
+                    self.key.strip_prefix("done:") == Some(owner_key.as_str())
+                }
+                _ => self.key == row.key,
+            }
+    }
+}
+
 /// 视图计算阶段一次构建出的两套行（进 `endpoint_agents::AgentRowsCache`）。
 pub(super) struct AgentTree {
     /// 统一树展平后的行（分组头、agent、活动节点、外部条目）。
@@ -390,18 +427,9 @@ impl ActivityBadge {
     }
 }
 
-/// 属主（pane 里的 agent / 外部条目）是否「在运行」：只有在运行的属主才画活动
-/// 徽标、带活动子行——主 agent 空闲时它名下的子 agent 不显示。判据：属主自己在
-/// 工作或受阻；或者摘要里还有活跃的非待办节点（主回合结束后仍在跑的后台子
-/// agent）；或者有运行中的节点却一个也没下发（快照的节点总预算已用尽）。待办
-/// 不算：空闲的 agent 常留着没做完的待办（与 server 的 `has_open_nodes` 同理）。
+/// pane 属主工作中、受阻或摘要报告运行中节点时才显示活动子树。
 fn owner_running(status: AgentStatus, activity: &ClientShellAgentActivity) -> bool {
-    matches!(status, AgentStatus::Working | AgentStatus::Blocked)
-        || activity
-            .nodes
-            .iter()
-            .any(|node| node.kind != AgentActivityKind::Todo && node.status.is_active())
-        || (activity.running > 0 && activity.nodes.is_empty())
+    matches!(status, AgentStatus::Working | AgentStatus::Blocked) || activity.running > 0
 }
 
 /// 活动徽标，只给在运行的属主：有运行中的节点写「N 运行中」（工作色）；没有
@@ -417,7 +445,11 @@ fn activity_badge(
     let texts = &crate::i18n::texts().agent_panel;
     let finished = activity.done.saturating_add(activity.failed);
     let (template, key, count) = if activity.running > 0 {
-        (texts.activity_badge_running_fmt, "running", activity.running)
+        (
+            texts.activity_badge_running_fmt,
+            "running",
+            activity.running,
+        )
     } else if finished > 0 {
         (texts.activity_badge_finished_fmt, "n", finished)
     } else {
@@ -902,7 +934,7 @@ impl TreeBuilder<'_> {
             endpoint,
             owner,
             &external.activity,
-            owner_running(external.agent_status, &external.activity),
+            external.agent_status == AgentStatus::Working || external.activity.running > 0,
             AgentTreeKind::ExternalAgent {
                 external_id: external.external_id.clone(),
                 label: if external.label.is_empty() {
@@ -1789,6 +1821,7 @@ fn render_continuation_guides(
 /// 活动节点行：`状态图标 标签 [种类]`。标签优先于种类（次要信息）。分组节点
 /// （workflow / phase）行首换成类型字形（颜色仍随状态），标签后灰显的是进度
 /// `<活跃>/<总数>` 而不是种类。
+// 一行的只读呈现参数保持集中，避免为传参构造临时拥有型对象。
 #[allow(clippy::too_many_arguments)]
 fn render_activity_line(
     buffer: &mut Buffer,
@@ -1804,7 +1837,17 @@ fn render_activity_line(
     let mapped = activity_status_as_agent(status);
     let icon = group.map_or_else(
         || status_icon(mapped, cx.config.status_indicators),
-        |group| group.glyph,
+        |group| {
+            if content.width < 12 {
+                match group.glyph {
+                    "⧉" => "W",
+                    "▤" => "P",
+                    other => other,
+                }
+            } else {
+                group.glyph
+            }
+        },
     );
     let icon_color = status_color(mapped, palette);
     let texts = &crate::i18n::texts().agent_activity;
@@ -1948,6 +1991,158 @@ fn put_label(buffer: &mut Buffer, x: u16, y: u16, width: u16, text: &str, style:
 }
 
 impl ClientShellState {
+    /// 仅停靠工作台的 Agents 焦点接管方向键和回车，其他输入模式保持原路由。
+    pub(super) fn agent_tree_key(
+        &mut self,
+        key: &crate::input::TerminalKey,
+        outcome: &mut ClientShellInput,
+    ) -> bool {
+        use crossterm::event::KeyCode;
+        if !self.workbench.enabled
+            || self.workbench.arranging
+            || self.workbench.dock.focused != super::dock::PanelId::Agents
+            || self.mode != ClientShellMode::Terminal
+            || !key.modifiers.is_empty()
+            || !matches!(
+                key.code,
+                KeyCode::Up | KeyCode::Down | KeyCode::Enter | KeyCode::Left | KeyCode::Right
+            )
+        {
+            return false;
+        }
+        self.refresh_federated_agent_rows();
+        let Some(cache) = self.federated_agent_rows.as_ref() else {
+            return true;
+        };
+        let view = cache.view();
+        let rows = if self.hits.agent_body.height < 3 {
+            view.flat
+        } else {
+            view.tree
+        };
+        if rows.is_empty() {
+            self.workbench.agent_keyboard_target = None;
+            return true;
+        }
+        let current = self
+            .workbench
+            .agent_keyboard_target
+            .as_ref()
+            .and_then(|target| rows.iter().position(|row| target.matches(row)));
+        let next = match (key.code, current) {
+            (KeyCode::Down, Some(index)) => (index + 1).min(rows.len() - 1),
+            (KeyCode::Up, Some(index)) => index.saturating_sub(1),
+            (_, Some(index)) => index,
+            _ => 0,
+        };
+        let row = &rows[next];
+        self.workbench.agent_keyboard_target = Some(AgentKeyboardTarget::from_row(row));
+        if next < self.agent_scroll {
+            self.agent_scroll = next;
+        }
+        let visible_height = usize::from(self.hits.agent_body.height).max(1);
+        while self.agent_scroll < next
+            && rows[self.agent_scroll..=next]
+                .iter()
+                .map(|row| row_lines(row) + usize::from(self.config.agents.row_gap))
+                .sum::<usize>()
+                .saturating_sub(usize::from(self.config.agents.row_gap))
+                > visible_height
+        {
+            self.agent_scroll += 1;
+        }
+        let toggle = row.has_children
+            && match key.code {
+                KeyCode::Left => !row.collapsed,
+                KeyCode::Right => row.collapsed,
+                KeyCode::Enter => matches!(
+                    row.kind.kind,
+                    AgentTreeKind::Machine { .. }
+                        | AgentTreeKind::Workspace { .. }
+                        | AgentTreeKind::Tab { .. }
+                        | AgentTreeKind::ExternalGroup { .. }
+                ),
+                _ => false,
+            };
+        let endpoint = row.kind.endpoint_id.clone();
+        let row_key = row.key.clone();
+        let activity = match &row.kind.kind {
+            AgentTreeKind::Activity {
+                owner_key, node_id, ..
+            } => parse_owner_key(owner_key).map(|owner| (owner, Some(node_id.clone()))),
+            AgentTreeKind::ActivityMore { owner_key, .. }
+            | AgentTreeKind::ActivityDone { owner_key, .. } => {
+                parse_owner_key(owner_key).map(|owner| (owner, None))
+            }
+            AgentTreeKind::ExternalAgent { external_id, .. } => Some((
+                AgentActivityOwner::External {
+                    external_id: external_id.clone(),
+                },
+                None,
+            )),
+            _ => None,
+        };
+        let pane = row.kind.agent().map(|agent| agent.pane_id.clone());
+        if toggle {
+            if row_key == MACHINE_TOGGLE_KEY {
+                self.toggle_collapsed_endpoint(&endpoint);
+            } else {
+                self.toggle_collapsed_group(&endpoint, row_key);
+            }
+            self.persist_chrome_preferences(outcome);
+        } else if key.code == KeyCode::Enter {
+            if let Some((owner, node)) = activity {
+                self.open_agent_activity(endpoint, owner, outcome);
+                if let Some(node) = node {
+                    self.select_agent_activity_node(node, outcome);
+                }
+            } else if let Some(pane) = pane {
+                self.focus_agent_pane(endpoint, pane, outcome);
+            }
+        }
+        outcome.repaint = true;
+        true
+    }
+
+    /// 只读标出键盘选中行；行消失时下次输入按当前树回退，不激活旧命中区。
+    pub(super) fn paint_agent_keyboard_focus(&self, buffer: &mut Buffer) {
+        if self.workbench.dock.focused != super::dock::PanelId::Agents {
+            return;
+        }
+        let Some(target) = &self.workbench.agent_keyboard_target else {
+            return;
+        };
+        let Some(cache) = &self.federated_agent_rows else {
+            return;
+        };
+        let view = cache.view();
+        let rows = if self.hits.agent_body.height < 3 {
+            view.flat
+        } else {
+            view.tree
+        };
+        let body = self.hits.agent_body;
+        let mut y = body.y;
+        for row in rows.iter().skip(self.agent_scroll) {
+            let height = u16::try_from(row_lines(row))
+                .unwrap_or(u16::MAX)
+                .min(body.height);
+            if y.saturating_add(height) > body.bottom() {
+                break;
+            }
+            if target.matches(row) {
+                buffer.set_style(
+                    Rect::new(body.x, y, body.width, height),
+                    Style::default().add_modifier(Modifier::UNDERLINED),
+                );
+                break;
+            }
+            y = y
+                .saturating_add(height)
+                .saturating_add(self.config.agents.row_gap);
+        }
+    }
+
     /// 左键落在统一树的非 agent 行上：分组头 / 折叠开关切换折叠态，活动节点行与
     /// 外部条目行打开「Agent 活动」窗口。开关矩形落在行矩形之内，调用方必须先于
     /// agent 行点击调用本函数。

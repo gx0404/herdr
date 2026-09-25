@@ -1368,10 +1368,8 @@ fn federated_client_with_changing_external_agents_keeps_remote_live() {
     let remote_server = spawn_server(&remote_config, &remote_runtime, &remote_api, &remote_client);
     wait_for_socket(&remote_api, Duration::from_secs(10));
     wait_for_socket(&remote_client, Duration::from_secs(10));
-    let expected_external = [
-        "zcode:sess_a0000000-0000-4000-8000-000000000001",
-        "zcode:sess_b0000000-0000-4000-8000-000000000002",
-    ];
+    // 根 B 已结束，活跃列表只保留仍在运行的根 A。
+    let expected_external = ["zcode:sess_a0000000-0000-4000-8000-000000000001"];
     assert_eq!(
         external_agent_ids(&remote_api),
         expected_external,

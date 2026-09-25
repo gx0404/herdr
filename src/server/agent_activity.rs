@@ -132,8 +132,8 @@ pub(crate) trait ActivitySource: Send + Sync {
     }
 
     /// 仅外部来源实现：`agent.activity.read {external_id}` 不带 `node_id` 时该条目的
-    /// 整棵树。runtime 先跑一次 [`Self::discover_external`]（判定条目仍在列表里，并
-    /// 整源刷新落库），`listed` 是该条目在这份列表里的树。列表为限住每轮轮询的工作
+    /// 整棵树。runtime 先跑一次 [`Self::discover_external`] 整源刷新落库，
+    /// `listed` 是该条目在列表里的树，不在活跃列表时为空。列表为限住每轮轮询的工作
     /// 量而让各条目分摊行数上限的来源（ZCode），在这里单独查询该条目，让它独享上限；
     /// 默认直接用 `listed`。`Ok(None)` = 单独查询时条目已不在（两次查询之间被归档
     /// 等），按不在列表处理。
@@ -142,9 +142,9 @@ pub(crate) trait ActivitySource: Send + Sync {
         _home: &Path,
         _now_ms: u64,
         _external_id: &str,
-        listed: Vec<AgentActivityNode>,
+        listed: Option<Vec<AgentActivityNode>>,
     ) -> Result<Option<Vec<AgentActivityNode>>, SourceError> {
-        Ok(Some(listed))
+        Ok(listed)
     }
 }
 
@@ -1044,18 +1044,8 @@ impl Worker {
         alive
     }
 
-    /// 外部条目读整棵树。外部来源的树只经 `discover_external` / `external_tree`
-    /// 给出（ZCode 的 `discover` 恒为 `Unsupported`）：先跑一次与轮询同一口径的发现
-    /// （同一条查询、同样的近期窗口），判定条目仍在列表里——不在（已归档、滑出近期
-    /// 窗口或排不进前几个）回 `agent_not_found`——并把整源列表顺带落库。树本身取
-    /// `external_tree`：列表让各条目分摊行数上限的来源在那里单独查询该条目，排在
-    /// 后面的条目不会只拿到被挤掉一截的树。
-    ///
-    /// 所以快照与本次应答不保证一致（与 pane 读树不同）：落库的是列表里的那份树，
-    /// 被挤掉的条目在快照里仍是残树，应答却是单根整树，两者的活动摘要（running /
-    /// total）对不上并不说明有变化。客户端「有更新」的判定因此对外部条目只看快照
-    /// 与树对上之后的偏离（`client::shell::agent_activity_overlay` 的
-    /// `observe_summary`）。
+    /// 外部条目读整棵树，并顺带刷新活跃来源列表。列表不再作为读取闸门：
+    /// 已结束的近期会话仍可按 ID 查询历史树；是否归档或过期由来源判断。
     fn read_external_tree(
         &self,
         request_id: &str,
@@ -1088,16 +1078,13 @@ impl Worker {
                 format!("external agent {external_id} is not listed by its source"),
             )
         };
-        let result = match listed {
-            None => Err(not_listed()),
-            Some(listed) => match source.external_tree(home, now_ms, external_id, listed) {
-                Ok(Some(nodes)) => Ok(ResponseResult::AgentActivity {
-                    nodes,
-                    content: None,
-                }),
-                Ok(None) => Err(not_listed()),
-                Err(error) => Err(error.code_and_message()),
-            },
+        let result = match source.external_tree(home, now_ms, external_id, listed) {
+            Ok(Some(nodes)) => Ok(ResponseResult::AgentActivity {
+                nodes,
+                content: None,
+            }),
+            Ok(None) => Err(not_listed()),
+            Err(error) => Err(error.code_and_message()),
         };
         reply.send(request_id, result);
         alive
@@ -3381,6 +3368,20 @@ mod tests {
             external_read_ids(&mut received).contains(&root_a),
             "读树顺带落库"
         );
+
+        // 已结束的近期根不在活跃列表中，仍可直接按 ID 读取历史树。
+        let ended = format!("zcode:{}", fixture::ROOT_B);
+        assert!(!list["result"]["agents"]
+            .as_array()
+            .expect("列表")
+            .iter()
+            .any(|agent| agent["external_id"] == ended));
+        let history = external_read(&mut service, &app, &ended, None);
+        assert_eq!(history["result"]["type"], "agent_activity", "{history}");
+        assert!(!history["result"]["nodes"]
+            .as_array()
+            .expect("历史节点")
+            .is_empty());
 
         // 5 天前的根会话不在近期窗口里：agent_not_found，而不是空树或 not_implemented。
         let old = external_read(

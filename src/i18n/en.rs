@@ -1240,7 +1240,7 @@ pub const TEXTS: Texts = Texts {
         status_blocked: "blocked",
         status_done: "done",
         status_failed: "failed",
-        status_unknown: "unknown",
+        status_unknown: "ended (status unknown)",
     },
     menu: MenuTexts {
         arrange_layout: "Arrange layout",

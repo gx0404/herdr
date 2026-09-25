@@ -1610,6 +1610,34 @@ mod agent_activity_tests {
         assert!(applied.summary_changed, "分组进度变化进投影");
     }
 
+    /// 选入优先级相同不代表 wire 顺序相同：来源只重排节点也必须推进投影。
+    #[test]
+    fn summary_epoch_changes_when_active_roots_only_change_source_order() {
+        use crate::api::schema::AgentActivityStatus::Running;
+        let mut app = app_with_panes(&["first"]);
+        let pane = app.state.workspaces[0].tabs[0].root_pane;
+        detect(&mut app, pane, Agent::Claude);
+        let a = timed_node("a", Running, Some(20), None);
+        let b = timed_node("b", Running, Some(10), None);
+        app.state
+            .apply_agent_activity(pane, vec![a.clone(), b.clone()], std::time::Instant::now())
+            .expect("初始树");
+        let before = snapshot(&app, "boot", 1, None, None);
+        let applied = app
+            .state
+            .apply_agent_activity(pane, vec![b, a], std::time::Instant::now())
+            .expect("来源重排");
+        let after = snapshot(&app, "boot", 1, None, None);
+        assert_ne!(
+            before.agents[0].activity.nodes, after.agents[0].activity.nodes,
+            "wire 已经变化"
+        );
+        assert!(
+            applied.summary_changed,
+            "相同选入次序下来源顺序变化也必须更新客户端"
+        );
+    }
+
     /// 生产默认下发摘要，`AppState::apply_agent_activity` 的投影纪元规则（只在
     /// 摘要变化时递增）以此为前提。改回 `Full` 必须同时把那条规则改成「任意节点
     /// 变化即递增」，否则深层节点的变化不会同步给客户端。

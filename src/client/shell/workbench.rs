@@ -16,6 +16,8 @@ pub(super) struct View {
 }
 
 pub(super) struct State {
+    pub(in crate::client::shell) agent_keyboard_target:
+        Option<super::agent_tree::AgentKeyboardTarget>,
     pub enabled: bool,
     pub dock: DockLayout,
     pub saved: HashMap<String, DockLayout>,
@@ -166,6 +168,7 @@ fn surface_panes_match(view: &View, snapshot: &ClientShellSnapshot) -> bool {
 impl State {
     pub fn new(config: &ClientShellConfig) -> Self {
         Self {
+            agent_keyboard_target: None,
             enabled: false,
             dock: DockLayout::default(),
             saved: config

@@ -375,9 +375,82 @@ fn elapsed_is_compact() {
     assert_eq!(format_elapsed(3_900_000), "1h05m");
 }
 
+/// 活跃后代带上祖先排到前面；结束节点按时间倒序，相同时间保持来源顺序。
+#[test]
+fn activity_tree_prioritizes_running_ancestry_and_recently_ended_nodes() {
+    let mut state = state();
+    let outcome = open(&mut state, pane_owner());
+    let (id, _) = single_read(&outcome);
+    let nodes = vec![
+        node(
+            "old",
+            None,
+            AgentActivityKind::Task,
+            AgentActivityStatus::Done,
+            "old",
+            Some((0, 10)),
+        ),
+        node(
+            "workflow",
+            None,
+            AgentActivityKind::Task,
+            AgentActivityStatus::Done,
+            "workflow",
+            Some((0, 5)),
+        ),
+        node(
+            "unknown",
+            None,
+            AgentActivityKind::Task,
+            AgentActivityStatus::Unknown,
+            "unknown end",
+            None,
+        ),
+        node(
+            "recent",
+            None,
+            AgentActivityKind::Task,
+            AgentActivityStatus::Failed,
+            "recent",
+            Some((0, 20)),
+        ),
+        node(
+            "equal",
+            None,
+            AgentActivityKind::Task,
+            AgentActivityStatus::Done,
+            "equal",
+            Some((0, 20)),
+        ),
+        node(
+            "running",
+            Some("workflow"),
+            AgentActivityKind::Subagent,
+            AgentActivityStatus::Running,
+            "running",
+            None,
+        ),
+    ];
+    respond(&mut state, &id, tree_result(nodes));
+    assert_eq!(
+        overlay(&state).visible_node_ids().collect::<Vec<_>>(),
+        ["workflow", "running", "recent", "equal", "old", "unknown"]
+    );
+    state.compose(120, 40).expect("窗口帧");
+    let unknown = state
+        .hits
+        .agent_activity_tree_rows
+        .iter()
+        .find(|(_, id)| id == "unknown")
+        .expect("unknown 行")
+        .0;
+    let at = find_cell(&state, unknown, "unknown end").expect("已结束未知标签");
+    assert_eq!(cell(&state, at).fg, state.config.palette.overlay0);
+}
+
 /// 宽窗口：标题栏（标题 + 三个按钮）、左列树（前缀引导线、状态字形、标签、
 /// 种类、耗时）、右列头行与正文、页脚提示；选中行 accent 反色、运行中强调色、
-/// 失败红、完成灰。
+/// 已结束灰显。
 #[test]
 fn wide_window_renders_title_tree_content_and_footer() {
     for (cols, rows) in [(120, 40), (90, 30)] {
@@ -463,7 +536,7 @@ fn wide_window_renders_title_tree_content_and_footer() {
         let explore = find_cell(&state, tree_rows, "explore repo").expect("选中行");
         assert_eq!(cell(&state, explore).bg, palette.accent, "选中行 accent 底");
         let cargo = find_cell(&state, tree_rows, "cargo test").expect("失败行");
-        assert_eq!(cell(&state, cargo).fg, palette.red, "失败红");
+        assert_eq!(cell(&state, cargo).fg, palette.overlay0, "失败灰");
         let read = find_cell(&state, tree_rows, "read files").expect("完成行");
         assert_eq!(cell(&state, read).fg, palette.overlay0, "完成灰");
         // 右列正文在分隔线右侧。
@@ -1223,6 +1296,57 @@ fn external_updates_badge_ignores_a_listed_tree_cut_short_by_the_list() {
         state.compose(cols, rows).expect("frame");
         assert!(!overlay(&state).has_updates, "{cols}x{rows} 刷新后仍是残树");
     }
+}
+
+/// 外部根退出活跃列表后主动取一次历史树，结束状态不能永远停留在 Running。
+#[test]
+fn an_external_owner_leaving_the_active_list_refreshes_its_final_tree_once() {
+    let mut state = state();
+    state.set_snapshot(Box::new(external_summary_snapshot(1, 4)));
+    let outcome = open(
+        &mut state,
+        AgentActivityOwner::External {
+            external_id: "zcode:s1".into(),
+        },
+    );
+    state.compose(120, 40).expect("活跃外部根");
+    let (id, _) = single_read(&outcome);
+    respond(&mut state, &id, tree_result(sample_nodes()));
+    state.compose(120, 40).expect("运行树");
+    let mut ended = external_summary_snapshot(0, 4);
+    ended.external_agents.clear();
+    state.set_snapshot(Box::new(ended));
+    state.compose(120, 40).expect("根结束退出列表");
+    let mut outcome = ClientShellInput::default();
+    state.tick_agent_activity(Instant::now(), &mut outcome);
+    let (id, params) = single_read(&outcome);
+    assert_eq!(params.external_id.as_deref(), Some("zcode:s1"));
+    assert_eq!(params.node_id, None);
+    // 多次 compose / tick 不追加请求；在途结束后也不变成周期轮询。
+    for _ in 0..3 {
+        state.compose(120, 40).expect("等待最终树");
+        let mut duplicate = ClientShellInput::default();
+        state.tick_agent_activity(Instant::now() + FOLLOW_INTERVAL * 3, &mut duplicate);
+        assert!(reads(&duplicate).is_empty());
+    }
+    let mut final_nodes = sample_nodes();
+    final_nodes[0].status = AgentActivityStatus::Done;
+    final_nodes[0].ended_at_ms = Some(90_000);
+    respond(&mut state, &id, tree_result(final_nodes));
+    state.compose(120, 40).expect("最终树");
+    let rect = state
+        .hits
+        .agent_activity_tree_rows
+        .iter()
+        .find(|(_, id)| id == "a")
+        .expect("完成行")
+        .0;
+    let at = find_cell(&state, rect, "explore repo").expect("完成标签");
+    assert_eq!(cell(&state, at).fg, state.config.palette.overlay0);
+    assert!(!overlay(&state).has_updates);
+    let mut duplicate = ClientShellInput::default();
+    state.tick_agent_activity(Instant::now() + FOLLOW_INTERVAL * 8, &mut duplicate);
+    assert!(reads(&duplicate).is_empty());
 }
 
 /// markdown 只给标题与列表记号着色；jsonl 取 type / role / name 做前缀。

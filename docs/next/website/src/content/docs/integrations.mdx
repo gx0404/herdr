@@ -207,7 +207,7 @@ This fork ships official integrations for Pi, Claude Code, Codex, Kimi Code CLI,
 - The usage status line callback is the one exception. An earlier build could wrap the status line in Antigravity CLI's `~/.gemini/antigravity-cli/settings.json` (or the account's `profile_dir`) to report usage. Herdr still recognizes that wrapper and only removes it: calling `account.usage.integration` with `enabled: false` for an account configured with `agent = "antigravity"` restores the original status line command, while `enabled: true` is rejected.
 - A retired agent running in a pane is an ordinary program: it is not detected automatically, and config keys that named it (such as `[ui.sound.agents]` overrides) are ignored.
 
-Any agent, retired or not, can still report state through the generic interface described in [Integrate your own agent](#integrate-your-own-agent). ZCode is supported as an external agent source rather than as a built-in integration: it is a desktop app that never runs in a pane, so Herdr lists its recent sessions under the agents panel's External group (see [Agent](/docs/concepts/#agent)) and reads its local token usage (see [Monitoring](/docs/monitoring/)), without installing anything into ZCode.
+Any agent, retired or not, can still report state through the generic interface described in [Integrate your own agent](#integrate-your-own-agent). ZCode is supported as an external agent source rather than as a built-in integration: it is a desktop app that never runs in a pane, so Herdr lists its running recent sessions under the agents panel's External group (see [Agent](/docs/concepts/#agent)) and reads its local token usage (see [Monitoring](/docs/monitoring/)), without installing anything into ZCode.
 
 ## Custom status labels
 

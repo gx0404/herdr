@@ -348,6 +348,23 @@ impl ClientShellState {
                     collapsed_endpoints: &self.collapsed_endpoints,
                 },
             ));
+            // 树结构变化后纠正键盘目标，不能保留已经折叠或移除的活动行。
+            if let (Some(target), Some(cache)) = (
+                &self.workbench.agent_keyboard_target,
+                &self.federated_agent_rows,
+            ) {
+                let view = cache.view();
+                let rows = if self.hits.agent_body.height < 3 {
+                    view.flat
+                } else {
+                    view.tree
+                };
+                if !rows.iter().any(|row| target.matches(row)) {
+                    self.workbench.agent_keyboard_target = rows
+                        .first()
+                        .map(super::agent_tree::AgentKeyboardTarget::from_row);
+                }
+            }
         }
     }
 }

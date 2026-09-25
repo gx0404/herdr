@@ -21,6 +21,8 @@ Automatic detection works out of the box for common coding agents. The table sho
 
 These five are the only agents this fork detects and ships integrations for; see [Retired integrations](/docs/integrations/#retired-integrations) for what happened to the others. Unsupported agents still run normally as terminal processes. They just may not get rich state unless you add an integration or report state over the socket API.
 
+ZCode appears as a read-only external source only while a recent root session is running. When no session is running, its External group disappears. A session that has ended can still be read by its external ID while it remains unarchived and within the 72-hour recent window.
+
 ## Status authority
 
 Herdr first detects the foreground process in each pane. After that, each pane has one status authority.

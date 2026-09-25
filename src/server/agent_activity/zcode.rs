@@ -2,8 +2,8 @@
 //! 会话读成不属于任何 pane 的外部条目（`ExternalAgentInfo`）及其活动树，并按节点
 //! 分页读出子 agent 的内容。ZCode 不跑在 pane 里，所以 `discover` 恒为
 //! `Unsupported`，只实现 `discover_external`、`external_tree` 与 `read`；按
-//! `external_id` 读整棵树时，runtime 用 `discover_external` 的结果判定条目仍在列表
-//! 里，树由 `external_tree` 单独查询该根（不与列表里的其它根分摊行数上限）。
+//! `external_id` 读整棵树时，树由 `external_tree` 单独查询该根，已结束的近期会话仍可读取
+//! 历史树（不与列表里的其它根分摊行数上限）。
 //!
 //! # 读取方式
 //!
@@ -35,7 +35,7 @@
 //!
 //! - 外部条目 = 一个近期根会话，`external_id` = `zcode:<会话 id>`。最新一轮
 //!   `turn_usage` 是 running、或有子 agent 在跑，且整棵树 2 h 内有动静 → Working；
-//!   否则 Idle（桌面会话没有「已完成未查看」的概念）。
+//!   否则不列出（桌面会话没有「已完成未查看」的概念）。
 //! - 子会话 → 节点，id 就是会话 id。`subagent_child` → Subagent；其余
 //!   （`selection_side_chat` 与未来的新类型）→ Unknown，`agent_type` 记原始
 //!   `task_type`。状态以 metadata 的 `status` 为准（stopped / cancelled / killed 按
@@ -230,7 +230,7 @@ impl ActivitySource for ZCode {
         home: &Path,
         now_ms: u64,
         external_id: &str,
-        _listed: Vec<AgentActivityNode>,
+        _listed: Option<Vec<AgentActivityNode>>,
     ) -> Result<Option<Vec<AgentActivityNode>>, SourceError> {
         // 列表里的根共用 TREE_ROW_LIMIT、按根先后展开，`_listed` 可能被排在前面的大根
         // 挤掉一截：单独查询这一个根。
@@ -283,7 +283,12 @@ fn discover_sessions(
     sqlite: &str,
     now_ms: u64,
 ) -> Result<Vec<ExternalAgentInfo>, SourceError> {
-    query_sessions(db, agents, sqlite, now_ms, Roots::Recent)
+    query_sessions(db, agents, sqlite, now_ms, Roots::Recent).map(|agents| {
+        agents
+            .into_iter()
+            .filter(|agent| agent.agent_status == AgentStatus::Working)
+            .collect()
+    })
 }
 
 /// 单独展开一个根会话的整棵树（见 [`Roots::One`]）。`Ok(None)` = 没有这个近期、
@@ -2008,7 +2013,7 @@ mod tests {
         std::fs::create_dir_all(fake_db.parent().expect("库路径有父目录")).expect("建库目录");
         std::fs::write(&fake_db, b"not really a database").expect("写假库");
         assert!(matches!(
-            ZCode.external_tree(dir.path(), NOW, &format!("claude:{ROOT_A}"), Vec::new()),
+            ZCode.external_tree(dir.path(), NOW, &format!("claude:{ROOT_A}"), None),
             Ok(None)
         ));
     }
@@ -2049,7 +2054,13 @@ mod tests {
         let db = build_db(dir.path(), &fixture_sql());
         let found =
             discover_sessions(&db, &fixture_agents(), SQLITE_PROGRAM, NOW).expect("夹具库可读");
-        assert_eq!(found, recorded_agents());
+        assert_eq!(
+            found,
+            recorded_agents()
+                .into_iter()
+                .filter(|agent| agent.agent_status == AgentStatus::Working)
+                .collect::<Vec<_>>()
+        );
 
         // 本机没核实过的新迁移：照常解析，不报错。
         let db = build_db(
@@ -2058,7 +2069,46 @@ mod tests {
         );
         let found =
             discover_sessions(&db, &fixture_agents(), SQLITE_PROGRAM, NOW).expect("新迁移只降级");
-        assert_eq!(found, recorded_agents());
+        assert_eq!(
+            found,
+            recorded_agents()
+                .into_iter()
+                .filter(|agent| agent.agent_status == AgentStatus::Working)
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn discovery_only_lists_running_roots_but_finished_roots_remain_readable() {
+        if !sqlite3_available() {
+            return;
+        }
+        let dir = TempDir::new("finished-history");
+        let db = build_db(dir.path(), &fixture_sql());
+        let listed = discover_sessions(&db, &fixture_agents(), SQLITE_PROGRAM, NOW).expect("列表");
+        assert!(!listed.is_empty());
+        assert!(listed
+            .iter()
+            .all(|agent| agent.agent_status == AgentStatus::Working));
+        assert!(!listed
+            .iter()
+            .any(|agent| agent.external_id == format!("zcode:{ROOT_B}")));
+        assert!(
+            session_tree(&db, &fixture_agents(), SQLITE_PROGRAM, NOW, ROOT_B)
+                .expect("历史树")
+                .is_some()
+        );
+        let later = NOW + STALE_RUNNING_MS + 1;
+        assert!(
+            discover_sessions(&db, &fixture_agents(), SQLITE_PROGRAM, later)
+                .expect("结束后列表")
+                .is_empty()
+        );
+        assert!(
+            session_tree(&db, &fixture_agents(), SQLITE_PROGRAM, later, ROOT_A)
+                .expect("结束后历史树")
+                .is_some()
+        );
     }
 
     #[test]
@@ -2083,8 +2133,19 @@ mod tests {
                 NOW - 800,
             ),
         );
-        let found = discover_sessions(&db, &fixture_agents(), SQLITE_PROGRAM, NOW)
-            .expect("缺 todo / turn_usage / schema_migration 只降级");
+        assert!(
+            discover_sessions(&db, &fixture_agents(), SQLITE_PROGRAM, NOW)
+                .expect("空闲不列出")
+                .is_empty()
+        );
+        let found = query_sessions(
+            &db,
+            &fixture_agents(),
+            SQLITE_PROGRAM,
+            NOW,
+            Roots::One(ROOT_A),
+        )
+        .expect("缺 todo / turn_usage / schema_migration 只降级");
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].label, "Only sessions");
         assert_eq!(found[0].agent_status, AgentStatus::Idle);

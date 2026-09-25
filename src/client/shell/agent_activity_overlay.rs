@@ -743,6 +743,13 @@ impl ClientAgentActivityOverlay {
         }
         let first = self.last_snapshot_summary.is_none();
         self.last_snapshot_summary = summary;
+        // 外部列表仅保留运行根。退出列表是一次性终态信号：通过历史 ID 补取
+        // 最终树及所选内容，复用单飞队列，不把只读窗口变成周期轮询。
+        if self.is_external() && !first && summary.is_none() {
+            self.want_tree = true;
+            self.want_content = self.selected_node.is_some();
+            self.has_updates = true;
+        }
         if !self.tree_loaded {
             return;
         }
@@ -808,6 +815,36 @@ fn build_rows(nodes: &[AgentActivityNode], collapsed: &HashSet<String>) -> Vec<T
             Some(parent) => children[*parent].push(position),
             None => roots.push(position),
         }
+    }
+    // 活跃节点的整条祖先链置前，其余兄弟按结束时间倒序；相同键保留来源顺序。
+    let mut active = vec![false; nodes.len()];
+    for (position, node) in nodes.iter().enumerate() {
+        if matches!(
+            node.status,
+            AgentActivityStatus::Running | AgentActivityStatus::Blocked
+        ) {
+            let mut cursor = Some(position);
+            while let Some(index) = cursor {
+                if active[index] {
+                    break;
+                }
+                active[index] = true;
+                cursor = parent_of[index];
+            }
+        }
+    }
+    let compare = |left: &usize, right: &usize| {
+        active[*right].cmp(&active[*left]).then_with(|| {
+            if active[*left] {
+                std::cmp::Ordering::Equal
+            } else {
+                nodes[*right].ended_at_ms.cmp(&nodes[*left].ended_at_ms)
+            }
+        })
+    };
+    roots.sort_by(compare);
+    for siblings in &mut children {
+        siblings.sort_by(compare);
     }
     let mut rows = Vec::new();
     let mut stack: Vec<(usize, u8)> = roots.iter().rev().map(|root| (*root, 0)).collect();
@@ -975,14 +1012,15 @@ fn status_glyph(status: AgentActivityStatus) -> &'static str {
     }
 }
 
-/// 状态色：运行中强调、失败红、完成灰、受阻黄，其余常规文字色。
+/// 状态色：运行中强调、已结束灰显、受阻黄，其余常规文字色。
 fn status_color(status: AgentActivityStatus, palette: &Palette) -> ratatui::style::Color {
     match status {
         AgentActivityStatus::Running => palette.accent,
-        AgentActivityStatus::Failed => palette.red,
-        AgentActivityStatus::Done => palette.overlay0,
+        AgentActivityStatus::Failed | AgentActivityStatus::Done | AgentActivityStatus::Unknown => {
+            palette.overlay0
+        }
         AgentActivityStatus::Blocked => palette.yellow,
-        AgentActivityStatus::Pending | AgentActivityStatus::Unknown => palette.text,
+        AgentActivityStatus::Pending => palette.text,
     }
 }
 
@@ -1423,7 +1461,9 @@ fn render_tree_row(
         .saturating_sub(if show_elapsed { elapsed_width } else { 0 });
     let label_style = match node.status {
         AgentActivityStatus::Running => fg(color).add_modifier(Modifier::BOLD),
-        AgentActivityStatus::Failed | AgentActivityStatus::Done => fg(color),
+        AgentActivityStatus::Failed | AgentActivityStatus::Done | AgentActivityStatus::Unknown => {
+            fg(color)
+        }
         _ => fg(p.text),
     };
     let label = crate::ui::truncate_end(&node.label, usize::from(label_limit));

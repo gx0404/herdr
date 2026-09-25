@@ -650,7 +650,10 @@ impl ClientShellState {
                     outcome.repaint = true;
                     return None;
                 }
-                if self.workbench_key(key, outcome) || self.observation_key(key, outcome) {
+                if self.workbench_key(key, outcome)
+                    || self.agent_tree_key(key, outcome)
+                    || self.observation_key(key, outcome)
+                {
                     return None;
                 }
                 self.focused_pane_id().map(ClientInputTarget::Pane)

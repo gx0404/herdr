@@ -365,6 +365,7 @@ impl ClientShellState {
                 Some((workspace, agents)),
             );
         }
+        self.paint_agent_keyboard_focus(canvas.buffer());
         self.hits.sidebar_divider = Rect::default();
         self.hits.sidebar_section_divider = Rect::default();
         self.hits.sidebar_toggle = Rect::default();
