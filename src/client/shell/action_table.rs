@@ -1504,6 +1504,9 @@ impl ClientShellState {
                 let ActionTarget::Pane { pane_id, .. } = target else {
                     return;
                 };
+                if self.copy_completed_selection(&pane_id, outcome) {
+                    return;
+                }
                 if self.has_copyable_pane_selection(&pane_id) {
                     self.request_selection_copy(outcome, true);
                     if self.selection_capture.is_none() {

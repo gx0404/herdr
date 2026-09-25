@@ -1566,6 +1566,7 @@ pub(crate) struct ClientShellState {
     pub(super) replaying_url_click: bool,
     pub(super) selection: Option<crate::selection::Selection<String>>,
     pub(super) selection_capture: Option<super::frozen_selection::Capture>,
+    pub(super) copied_selection: Option<super::frozen_selection::CopiedSelection>,
     pub(super) selection_epoch: u64,
     pub(super) selection_releases: Vec<super::frozen_selection::Release>,
     pub(super) last_pane_click: Option<ClientPaneClick>,
@@ -1793,6 +1794,7 @@ impl ClientShellState {
             replaying_url_click: false,
             selection: None,
             selection_capture: None,
+            copied_selection: None,
             selection_epoch: 0,
             selection_releases: Vec::new(),
             last_pane_click: None,
@@ -2217,6 +2219,12 @@ impl ClientShellState {
                 .any(|pane| pane.pane_id == capture.hit.pane_id)
                 || (capture.focus_confirmed
                     && focused.is_some_and(|pane| pane != capture.hit.pane_id))
+        } else if let Some(copied) = self.copied_selection.as_ref() {
+            snapshot.focused_pane_id.as_deref() != Some(copied.pane_id.as_str())
+                || !snapshot
+                    .panes
+                    .iter()
+                    .any(|pane| pane.pane_id == copied.pane_id)
         } else if let Some(gesture) = self.word_selection_gesture.as_mut() {
             let focused_pane = snapshot.focused_pane_id.as_deref();
             // Remember confirmed focus across intermediate snapshots with no
@@ -2592,6 +2600,7 @@ impl ClientShellState {
             .set_scene(std::mem::take(&mut surface.graphics));
         self.pane_surface = Some(surface);
         self.pane_surface_generation = self.active_snapshot_generation;
+        self.discard_invalid_copied_selection();
         self.invalidate_link_hover();
         // Hint markers index into the old frame; a fresh surface moves them.
         self.link_hints = None;

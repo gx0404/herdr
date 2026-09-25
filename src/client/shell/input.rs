@@ -605,6 +605,7 @@ impl ClientShellState {
         if matches!(key.code, KeyCode::Modifier(_)) {
             return None;
         }
+        self.copied_selection = None;
         if self.selection_capture.is_some() {
             if is_retained_selection_copy_key(key) {
                 self.copy_frozen_selection(outcome);

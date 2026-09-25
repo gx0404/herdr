@@ -437,8 +437,31 @@ impl ClientShellState {
             boot: self.snapshot.as_ref()?.boot_id.clone(),
             generation: self.active_snapshot_generation,
             epoch: self.selection_epoch,
-            cells: self.selection.as_ref()?.ordered_cells(),
+            cells: self.copyable_pane_selection_cells(pane_id)?,
         })
+    }
+
+    /// 同一次复制应答只替换选区存储；已经打开的菜单继续指向同一份文本。
+    pub(super) fn refresh_copied_selection_menu(&mut self, pane_id: &str, previous_epoch: u64) {
+        let Some(selection) = self.menu_selection(pane_id) else {
+            return;
+        };
+        let Some(ClientShellOverlay::ContextMenu(menu)) = self.overlay.as_mut() else {
+            return;
+        };
+        let ClientContextMenuTarget::Pane {
+            pane_id: target,
+            env,
+            ..
+        } = &mut menu.target
+        else {
+            return;
+        };
+        let mut previous = selection.clone();
+        previous.epoch = previous_epoch;
+        if target == pane_id && env.selection.as_ref() == Some(&previous) {
+            env.selection = Some(selection);
+        }
     }
 
     pub(super) fn context_menu_preserves_selection(&self) -> bool {
@@ -463,10 +486,7 @@ impl ClientShellState {
                 .snapshot
                 .as_ref()
                 .is_some_and(|snapshot| snapshot.boot_id == expected.boot)
-            && self
-                .selection
-                .as_ref()
-                .is_some_and(|selection| selection.ordered_cells() == expected.cells)
+            && self.copyable_pane_selection_cells(pane_id) == Some(expected.cells)
     }
 
     pub(super) fn open_pane_context_menu(&mut self, pane_id: String, x: u16, y: u16) {

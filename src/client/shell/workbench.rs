@@ -607,6 +607,7 @@ impl ClientShellState {
             }
             _ => return false,
         }
+        self.discard_invalid_copied_selection();
         true
     }
 

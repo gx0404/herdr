@@ -41,6 +41,19 @@ pub(super) struct Capture {
     anchor_bounds: Option<(u16, u16)>,
 }
 
+/// 自动复制结束后仅保留文本和归属，释放快照并恢复实时画面。
+pub(super) struct CopiedSelection {
+    pub pane_id: String,
+    endpoint: ClientEndpointId,
+    boot: String,
+    generation: Option<u64>,
+    area: Rect,
+    epoch: u64,
+    alternate_screen: bool,
+    cells: ((u32, u16), (u32, u16)),
+    text: Vec<u8>,
+}
+
 pub(super) struct Release {
     endpoint: ClientEndpointId,
     boot: String,
@@ -49,6 +62,7 @@ pub(super) struct Release {
 
 impl ClientShellState {
     pub(super) fn cancel_frozen_selection(&mut self) {
+        self.copied_selection = None;
         let Some(capture) = self.selection_capture.take() else {
             return;
         };
@@ -302,6 +316,25 @@ impl ClientShellState {
         {
             return false;
         }
+        if self
+            .copied_selection
+            .as_ref()
+            .is_some_and(|copied| match mouse.kind {
+                MouseEventKind::Down(MouseButton::Right) => !self.hits.panes.iter().any(|hit| {
+                    hit.pane_id == copied.pane_id
+                        && contains(hit.rect, (mouse.column, mouse.row))
+                        && self.pane_right_click_modifiers(hit, mouse).is_none()
+                }),
+                MouseEventKind::Down(_)
+                | MouseEventKind::ScrollUp
+                | MouseEventKind::ScrollDown
+                | MouseEventKind::ScrollLeft
+                | MouseEventKind::ScrollRight => true,
+                _ => false,
+            })
+        {
+            self.copied_selection = None;
+        }
         let Some(capture) = self.selection_capture.as_mut() else {
             return false;
         };
@@ -498,7 +531,84 @@ impl ClientShellState {
         true
     }
 
+    pub(super) fn copy_completed_selection(
+        &mut self,
+        pane_id: &str,
+        outcome: &mut ClientShellInput,
+    ) -> bool {
+        let Some(copied) = self.valid_copied_selection(pane_id) else {
+            return false;
+        };
+        let text = copied.text.clone();
+        self.show_copy_feedback(Instant::now());
+        outcome
+            .actions
+            .push(ClientShellAction::ClipboardWrite(text));
+        outcome.repaint = true;
+        true
+    }
+
+    fn valid_copied_selection(&self, pane_id: &str) -> Option<&CopiedSelection> {
+        self.copied_selection.as_ref().filter(|copied| {
+            self.config.mouse_capture
+                && self.selection.is_none()
+                && copied.pane_id == pane_id
+                && copied.endpoint == self.active_endpoint_id
+                && copied.generation == self.active_snapshot_generation
+                && copied.epoch == self.selection_epoch
+                && self.copy_mode.is_none()
+                && self.snapshot.as_ref().is_some_and(|snapshot| {
+                    snapshot.boot_id == copied.boot
+                        && snapshot.focused_pane_id.as_deref() == Some(pane_id)
+                        && snapshot.panes.iter().any(|pane| pane.pane_id == pane_id)
+                })
+                && self
+                    .visible_surface_for_pane(pane_id)
+                    .and_then(|surface| surface.panes.iter().find(|pane| pane.pane_id == pane_id))
+                    .is_some_and(|pane| {
+                        Rect::new(
+                            pane.inner_rect.x,
+                            pane.inner_rect.y,
+                            pane.inner_rect.width,
+                            pane.inner_rect.height,
+                        ) == copied.area
+                            && pane.alternate_screen_active == copied.alternate_screen
+                    })
+        })
+    }
+
+    /// 在每次接纳画面时清理，尺寸或备用屏往返也不能复活旧文本。
+    pub(super) fn discard_invalid_copied_selection(&mut self) {
+        if self
+            .copied_selection
+            .as_ref()
+            .is_some_and(|copied| self.valid_copied_selection(&copied.pane_id).is_none())
+        {
+            self.copied_selection = None;
+        }
+    }
+
+    pub(super) fn copyable_pane_selection_cells(
+        &self,
+        pane_id: &str,
+    ) -> Option<((u32, u16), (u32, u16))> {
+        if let Some(copied) = self.valid_copied_selection(pane_id) {
+            return Some(copied.cells);
+        }
+        self.has_live_copyable_pane_selection(pane_id)
+            .then(|| {
+                self.selection
+                    .as_ref()
+                    .map(crate::selection::Selection::ordered_cells)
+            })
+            .flatten()
+    }
+
     pub(super) fn has_copyable_pane_selection(&self, pane_id: &str) -> bool {
+        self.copyable_pane_selection_cells(pane_id).is_some()
+    }
+
+    fn has_live_copyable_pane_selection(&self, pane_id: &str) -> bool {
         self.selection.as_ref().is_some_and(|selection| {
             selection.pane_id == pane_id && selection.is_visible() && !selection.is_in_progress()
         }) && self.selection_capture.as_ref().is_none_or(|capture| {
@@ -704,6 +814,24 @@ impl ClientShellState {
             .selection_capture
             .as_ref()
             .and_then(|capture| capture.token.clone());
+        let copied_selection = self
+            .selection_capture
+            .as_ref()
+            .zip(self.selection.as_ref())
+            .map(|(capture, selection)| CopiedSelection {
+                pane_id: capture.hit.pane_id.clone(),
+                endpoint: capture.endpoint.clone(),
+                boot: capture.boot.clone(),
+                generation: capture.generation,
+                area: capture.source_area,
+                epoch: 0,
+                alternate_screen: capture
+                    .text
+                    .as_ref()
+                    .is_some_and(|text| text.alternate_screen),
+                cells: selection.ordered_cells(),
+                text: Vec::new(),
+            });
         self.cancel_frozen_selection();
         match result {
             Ok(ResponseResult::PaneTextSnapshotSelection { snapshot_id, text })
@@ -712,11 +840,21 @@ impl ClientShellState {
                 if text.is_empty() {
                     return (true, Vec::new());
                 }
+                let text = text.into_bytes();
+                self.copied_selection = copied_selection.map(|mut copied| {
+                    copied.text = text.clone();
+                    copied.epoch = self.selection_epoch;
+                    copied
+                });
+                if let Some(pane_id) = self
+                    .copied_selection
+                    .as_ref()
+                    .map(|copied| copied.pane_id.clone())
+                {
+                    self.refresh_copied_selection_menu(&pane_id, epoch);
+                }
                 self.show_copy_feedback(Instant::now());
-                (
-                    true,
-                    vec![ClientShellAction::ClipboardWrite(text.into_bytes())],
-                )
+                (true, vec![ClientShellAction::ClipboardWrite(text)])
             }
             other => {
                 self.set_endpoint_error(other.err().map(|error| error.message).unwrap_or_else(
@@ -729,6 +867,11 @@ impl ClientShellState {
 
     pub(super) fn tick_frozen_selection(&mut self, now: Instant, outcome: &mut ClientShellInput) {
         let invalid_overlay = self.overlay.is_some() && !self.context_menu_preserves_selection();
+        if self.copied_selection.as_ref().is_some_and(|copied| {
+            invalid_overlay || self.valid_copied_selection(&copied.pane_id).is_none()
+        }) {
+            self.copied_selection = None;
+        }
         if let Some(capture) = self.selection_capture.as_mut() {
             let invalid = !self.config.mouse_capture
                 || capture.endpoint != self.active_endpoint_id

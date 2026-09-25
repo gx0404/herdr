@@ -258,6 +258,7 @@ impl ClientShellState {
                     }
                 }
             }
+            self.discard_invalid_copied_selection();
             self.invalidate_link_hover();
             self.reconcile_input_source();
         } else {

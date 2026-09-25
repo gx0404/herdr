@@ -2,6 +2,7 @@ use super::*;
 use crate::api::schema::{Method, ResponseResult};
 use crate::terminal::text_snapshot::{FrozenCell, FrozenRow, FrozenText};
 use crossterm::event::KeyEvent;
+use std::time::Instant;
 
 fn ready() -> (ClientShellState, MouseEvent) {
     let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
@@ -1033,4 +1034,259 @@ fn frozen_preview_blanks_a_two_wide_grapheme_in_a_narrow_last_cell() {
     // 行中间维持原样，最后一列画空白，不越出窗格。
     assert_eq!(symbol(1), "⌨\u{fe0f}");
     assert_eq!(symbol(3), " ");
+}
+
+fn auto_copied_codex_selection(
+    width: u16,
+    menu_before_response: bool,
+) -> (ClientShellState, MouseEvent) {
+    let (mut state, mut mouse) = reporting_codex();
+    state.active_snapshot_generation = Some(1);
+    state.pane_surface_generation = Some(1);
+    state.compose(width, 20).unwrap();
+    mouse.column = state.hits.panes[0].inner_rect.x;
+    mouse.row = state.hits.panes[0].inner_rect.y;
+    state.handle_raw_events(vec![RawInputEvent::Mouse(mouse)]);
+    mouse.kind = MouseEventKind::Drag(MouseButton::Left);
+    mouse.column += 2;
+    let drag = state.handle_raw_events(vec![RawInputEvent::Mouse(mouse)]);
+    mouse.kind = MouseEventKind::Up(MouseButton::Left);
+    state.handle_raw_events(vec![RawInputEvent::Mouse(mouse)]);
+    let (_, actions) = state.handle_endpoint_result("boot-1", &capture_id(&drag), Ok(captured()));
+    let copy_id = actions
+        .iter()
+        .find_map(|action| match action {
+            ClientShellAction::Endpoint { request, .. }
+                if matches!(request.method, Method::PaneTextSnapshotSelection(_)) =>
+            {
+                Some(request.id.clone())
+            }
+            _ => None,
+        })
+        .expect("auto copy request");
+    if menu_before_response {
+        mouse.kind = MouseEventKind::Down(MouseButton::Right);
+        state.handle_raw_events(vec![RawInputEvent::Mouse(mouse)]);
+        assert!(matches!(
+            state.overlay,
+            Some(ClientShellOverlay::ContextMenu(_))
+        ));
+    }
+    let (_, copied) = state.handle_endpoint_result(
+        "boot-1",
+        &copy_id,
+        Ok(ResponseResult::PaneTextSnapshotSelection {
+            snapshot_id: "frozen-1".into(),
+            text: "LIV".into(),
+        }),
+    );
+    assert!(matches!(&copied[..], [ClientShellAction::ClipboardWrite(bytes)] if bytes == b"LIV"));
+    assert!(
+        state.selection_capture.is_none(),
+        "auto copy resumes live output"
+    );
+    (state, mouse)
+}
+
+#[test]
+fn codex_copy_menu_remains_usable_after_auto_copy_response() {
+    for width in [106, 72, 40] {
+        for menu_before_response in [false, true] {
+            let (mut state, mut mouse) = auto_copied_codex_selection(width, menu_before_response);
+            state.compose(width, 20).unwrap();
+            if !menu_before_response {
+                mouse.kind = MouseEventKind::Down(MouseButton::Right);
+                state.handle_raw_events(vec![RawInputEvent::Mouse(mouse)]);
+            }
+            mouse.kind = MouseEventKind::Up(MouseButton::Right);
+            state.handle_raw_events(vec![RawInputEvent::Mouse(mouse)]);
+            let mut tick = ClientShellInput::default();
+            state.tick_frozen_selection(Instant::now(), &mut tick);
+            assert!(!tick
+                .actions
+                .iter()
+                .any(|action| matches!(action, ClientShellAction::ClipboardWrite(_))));
+            state.compose(width, 20).unwrap();
+            let Some(ClientShellOverlay::ContextMenu(menu)) = state.overlay.as_ref() else {
+                panic!("right click after auto copy must open menu at width {width}");
+            };
+            let index = menu
+                .items()
+                .iter()
+                .position(|item| item.action == ClientContextMenuAction::CopyPaneSelection)
+                .expect("Copy entry");
+            assert!(menu.items()[index].enabled, "same selection must remain available at width {width}, early menu {menu_before_response}");
+            let row = state
+                .hits
+                .context_menu_rows
+                .iter()
+                .find(|(_, i)| *i == index)
+                .expect("Copy row")
+                .0;
+            mouse.kind = MouseEventKind::Down(MouseButton::Left);
+            mouse.column = row.x;
+            mouse.row = row.y;
+            let copy = state.handle_raw_events(vec![RawInputEvent::Mouse(mouse)]);
+            assert!(
+                copy.requests.is_empty(),
+                "menu copy never sends terminal input"
+            );
+            assert!(copy.actions.iter().any(|action| matches!(action, ClientShellAction::ClipboardWrite(bytes) if bytes == b"LIV")), "width {width}, early menu {menu_before_response}");
+        }
+    }
+}
+
+#[test]
+fn copied_selection_is_invalidated_by_input_identity_and_geometry_changes() {
+    for case in [
+        "key",
+        "text",
+        "paste",
+        "click",
+        "scroll",
+        "generation",
+        "boot",
+        "focus",
+        "resize",
+        "cancel",
+        "alternate",
+        "epoch",
+    ] {
+        let (mut state, mut mouse) = auto_copied_codex_selection(106, false);
+        assert!(state.has_copyable_pane_selection("pane_1"));
+        assert!(!state.has_copyable_pane_selection("other"));
+        match case {
+            "key" => {
+                state.handle_raw_events(vec![RawInputEvent::Key(
+                    KeyEvent::new(KeyCode::Char('x'), KeyModifiers::empty()).into(),
+                )]);
+            }
+            "text" => {
+                state.handle_raw_events(vec![RawInputEvent::Text(crate::input::TextCommit::new(
+                    "x",
+                ))]);
+            }
+            "paste" => {
+                state.handle_raw_events(vec![RawInputEvent::Paste("x".into())]);
+            }
+            "click" | "scroll" => {
+                mouse.kind = if case == "click" {
+                    MouseEventKind::Down(MouseButton::Left)
+                } else {
+                    MouseEventKind::ScrollUp
+                };
+                state.handle_raw_events(vec![RawInputEvent::Mouse(mouse)]);
+            }
+            "generation" => {
+                state.active_snapshot_generation = Some(999);
+            }
+            "boot" | "focus" => {
+                let mut projected = (**state.snapshot.as_ref().unwrap()).clone();
+                if case == "boot" {
+                    projected.boot_id = "new-boot".into();
+                } else {
+                    projected.focused_pane_id = Some("other".into());
+                }
+                state.set_snapshot(Box::new(projected));
+            }
+            "resize" | "alternate" => {
+                let mut resized = surface();
+                if case == "resize" {
+                    resized.panes[0].inner_rect.width -= 1;
+                } else {
+                    resized.panes[0].alternate_screen_active = true;
+                }
+                state.set_pane_surface(resized);
+            }
+            "epoch" => state.selection_epoch += 1,
+            "cancel" => state.cancel_frozen_selection(),
+            _ => unreachable!(),
+        }
+        let mut tick = ClientShellInput::default();
+        state.tick_frozen_selection(Instant::now(), &mut tick);
+        assert!(!state.has_copyable_pane_selection("pane_1"), "{case}");
+        assert!(state.copied_selection.is_none(), "{case}");
+    }
+}
+
+#[test]
+fn copied_selection_survives_live_output_without_freezing_or_recopying() {
+    let (mut state, _) = auto_copied_codex_selection(106, false);
+    let mut updated = surface();
+    updated.panes[0].mouse_reporting = true;
+    updated.panes[0].content_revision += 1;
+    state.set_pane_surface(updated);
+    let mut tick = ClientShellInput::default();
+    state.tick_frozen_selection(Instant::now(), &mut tick);
+    assert!(state.selection_capture.is_none());
+    assert!(state.selection.is_none());
+    assert!(state.has_copyable_pane_selection("pane_1"));
+    assert!(!tick
+        .actions
+        .iter()
+        .any(|action| matches!(action, ClientShellAction::ClipboardWrite(_))));
+    let mut copied = ClientShellInput::default();
+    assert!(state.copy_completed_selection("pane_1", &mut copied));
+    assert!(copied.actions.iter().any(
+        |action| matches!(action, ClientShellAction::ClipboardWrite(bytes) if bytes == b"LIV")
+    ));
+}
+
+#[test]
+fn copied_selection_cannot_revive_after_surface_changes_between_ticks() {
+    for views in [false, true] {
+        for alternate in [false, true] {
+            let (mut state, _) = auto_copied_codex_selection(106, false);
+            if views {
+                state.workbench.enabled = true;
+                state.workbench.boot = "boot-1".into();
+                state.workbench.revision = 1;
+                state.workbench.requested = vec![crate::api::schema::ClientViewSpec {
+                    view_id: "copy-view".into(),
+                    tab_id: "tab_1".into(),
+                    cols: 4,
+                    rows: 2,
+                    focused: true,
+                }];
+            }
+            let install = |state: &mut ClientShellState, frame: PaneSurfaceFrame| {
+                if views {
+                    assert!(state.receive_view(
+                        1,
+                        crate::protocol::views::DecodedView {
+                            boot_id: "boot-1".into(),
+                            views_revision: 1,
+                            view_id: "copy-view".into(),
+                            tab_id: "tab_1".into(),
+                            message: crate::protocol::ServerMessage::PaneSurface(frame),
+                        }
+                    ));
+                } else {
+                    state.set_pane_surface(frame);
+                }
+            };
+            let mut original = surface();
+            original.panes[0].mouse_reporting = true;
+            install(&mut state, original.clone());
+            assert!(
+                state.has_copyable_pane_selection("pane_1"),
+                "setup views={views}"
+            );
+            let mut changed = original.clone();
+            changed.surface_revision += 1;
+            if alternate {
+                changed.panes[0].alternate_screen_active = true;
+            } else {
+                changed.panes[0].inner_rect.width -= 1;
+            }
+            install(&mut state, changed);
+            original.surface_revision += 2;
+            install(&mut state, original);
+            assert!(
+                !state.has_copyable_pane_selection("pane_1"),
+                "views={views}, alternate={alternate}"
+            );
+            assert!(state.copied_selection.is_none());
+        }
+    }
 }
