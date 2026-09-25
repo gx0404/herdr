@@ -1704,6 +1704,7 @@ pub struct UsageProbeTexts {
     pub codex_exited_fmt: &'static str,         // args: summary
     pub token_refresh_failed_fmt: &'static str, // args: message, retry
     pub codex_sign_in_first: &'static str,
+    pub codex_account_usage_unsupported: &'static str,
     // ---- 交互探测（隔离终端与 Windows 辅助进程） ----
     pub helper_missing: &'static str,
     pub helper_config_failed: &'static str,
@@ -1842,6 +1843,7 @@ pub struct UsageMetricTexts {
     pub account_total_usage: &'static str,
     pub cost_report: &'static str,
     // ---- Codex 官方账号使用统计（非额度） ----
+    pub codex_reset_credits_available: &'static str,
     pub codex_lifetime_tokens: &'static str,
     pub codex_peak_daily_tokens: &'static str,
     pub codex_longest_turn: &'static str,
@@ -3111,6 +3113,7 @@ mod tests {
                 codex_exited_fmt,
                 token_refresh_failed_fmt,
                 codex_sign_in_first,
+                codex_account_usage_unsupported,
                 helper_missing,
                 helper_config_failed,
                 helper_send_failed,
@@ -3240,6 +3243,7 @@ mod tests {
                 account_total_credits,
                 account_total_usage,
                 cost_report,
+                codex_reset_credits_available,
                 codex_lifetime_tokens,
                 codex_peak_daily_tokens,
                 codex_longest_turn,

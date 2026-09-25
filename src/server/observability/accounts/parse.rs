@@ -145,6 +145,23 @@ pub(super) fn codex(value: &Value) -> Vec<UsageMetric> {
             });
         }
     }
+    // The backend count is authoritative: details may be omitted, empty, or capped.
+    if let Some(count) = value
+        .pointer("/rateLimitResetCredits/availableCount")
+        .and_then(Value::as_i64)
+        .filter(|count| *count >= 0)
+    {
+        let exact = count <= 1_i64 << 53;
+        metrics.push(UsageMetric {
+            id: "rate_limit_reset/available".into(),
+            label: metric_texts().codex_reset_credits_available.into(),
+            scope: "account".into(),
+            unit: "resets".into(),
+            remaining: exact.then_some(count as f64),
+            text_value: (!exact).then(|| format!("{count} resets")),
+            ..Default::default()
+        });
+    }
     codex_official_usage(&value["officialUsage"], &mut metrics);
     metrics
 }
@@ -2033,6 +2050,65 @@ Done.
         let mut tab = clean.clone();
         tab.label = "Weekly\t20%".into();
         assert!(!validate(&[tab]));
+    }
+
+    #[test]
+    fn codex_reset_credit_count_is_global_and_not_a_balance_or_percentage() {
+        for details in [
+            Value::Null,
+            json!([]),
+            json!([{"id":"one","status":"available"}]),
+        ] {
+            let metrics = codex(
+                &json!({"rateLimitsByLimitId":{"codex":{"credits":{"balance":"12"}},"other":{"primary":{"usedPercent":50}}}, "rateLimitResetCredits":{"availableCount":3,"credits":details}}),
+            );
+            let reset: Vec<_> = metrics
+                .iter()
+                .filter(|metric| metric.id == "rate_limit_reset/available")
+                .collect();
+            assert_eq!(reset.len(), 1);
+            assert_eq!(reset[0].remaining, Some(3.0));
+            assert!(
+                reset[0].limit.is_none()
+                    && reset[0].used_percent.is_none()
+                    && reset[0].used.is_none()
+                    && reset[0].amount_decimal.is_none()
+            );
+            assert!(validate(&metrics));
+        }
+    }
+
+    #[test]
+    fn codex_reset_credit_count_preserves_zero_and_large_integers_and_ignores_invalid_counts() {
+        for count in [json!(0), json!(1_i64 << 53), json!(i64::MAX)] {
+            let metrics = codex(
+                &json!({"ordinaryUsageAllowed":false,"rateLimitResetCredits":{"availableCount":count,"credits":null}}),
+            );
+            assert_eq!(metrics.len(), 1);
+            assert!(validate(&metrics));
+            let value = count.as_i64().unwrap();
+            if value <= 1_i64 << 53 {
+                assert_eq!(metrics[0].remaining, Some(value as f64));
+            } else {
+                assert!(metrics[0].remaining.is_none());
+                assert_eq!(metrics[0].text_value, Some(format!("{value} resets")));
+            }
+            assert!(
+                metrics[0].used.is_none()
+                    && metrics[0].used_percent.is_none()
+                    && metrics[0].limit.is_none()
+            );
+        }
+        for count in [Value::Null, json!(-1), json!(1.5), json!("2"), json!(true)] {
+            assert!(codex(&json!({"rateLimitResetCredits":{"availableCount":count,"credits":[{"status":"available"}]}})).is_empty());
+        }
+        for data in [
+            json!({}),
+            json!({"rateLimitResetCredits":null}),
+            json!({"rateLimitResetCredits":{"credits":[{"status":"available"}]}}),
+        ] {
+            assert!(codex(&data).is_empty());
+        }
     }
 
     #[test]

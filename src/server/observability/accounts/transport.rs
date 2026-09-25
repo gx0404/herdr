@@ -1151,21 +1151,35 @@ pub(super) fn codex(
     rpc.send(&json!({"id":1,"method":"initialize","params":{"clientInfo":{"name":"herdr_usage","version":env!("CARGO_PKG_VERSION")}}}))?;
     rpc.receive(1)?;
     rpc.send(&json!({"method":"initialized","params":{}}))?;
-    rpc.send(&json!({"id":2,"method":"account/read","params":{"refreshToken":false}}))?;
-    let identity = match rpc.receive(2) {
+    codex_account_usage(|id, method, params| {
+        let mut message = json!({"id":id,"method":method});
+        if let Some(params) = params {
+            message["params"] = params;
+        }
+        rpc.send(&message)?;
+        rpc.receive(id)
+    })
+}
+
+/// Keep the account query sequence mockable without spawning or authenticating a real CLI.
+fn codex_account_usage(
+    mut request: impl FnMut(u64, &'static str, Option<Value>) -> Result<Value, QueryError>,
+) -> Result<(Value, Value), QueryError> {
+    let identity = match request(2, "account/read", Some(json!({"refreshToken":false}))) {
         Ok(identity) => identity,
         // 只读探针默认不刷新令牌；令牌可能只是过期，报未登录时带 refreshToken 重试一次。
         Err((ObservationStatus::NotAuthenticated, message)) => {
-            rpc.send(&json!({"id":5,"method":"account/read","params":{"refreshToken":true}}))?;
-            rpc.receive(5).map_err(|(_, retry)| {
-                (
-                    ObservationStatus::NotAuthenticated,
-                    crate::i18n::fill(
-                        probe_texts().token_refresh_failed_fmt,
-                        &[("message", &message), ("retry", &retry)],
-                    ),
-                )
-            })?
+            request(5, "account/read", Some(json!({"refreshToken":true}))).map_err(
+                |(_, retry)| {
+                    (
+                        ObservationStatus::NotAuthenticated,
+                        crate::i18n::fill(
+                            probe_texts().token_refresh_failed_fmt,
+                            &[("message", &message), ("retry", &retry)],
+                        ),
+                    )
+                },
+            )?
         }
         Err(error) => return Err(error),
     };
@@ -1175,11 +1189,18 @@ pub(super) fn codex(
             probe_texts().codex_sign_in_first.into(),
         ));
     }
-    rpc.send(&json!({"id":3,"method":"account/rateLimits/read"}))?;
-    let mut limits = rpc.receive(3)?;
+    if matches!(
+        identity.pointer("/account/type").and_then(Value::as_str),
+        Some("apiKey" | "amazonBedrock")
+    ) {
+        return Err((
+            ObservationStatus::Unsupported,
+            probe_texts().codex_account_usage_unsupported.into(),
+        ));
+    }
+    let mut limits = request(3, "account/rateLimits/read", None)?;
     // 新版支持更细的附加用量；老版本只保留已经取得的窗口数据。
-    rpc.send(&json!({"id":4,"method":"account/usage/read"}))?;
-    if let Ok(usage) = rpc.receive(4) {
+    if let Ok(usage) = request(4, "account/usage/read", None) {
         limits["officialUsage"] = usage;
     }
     Ok((identity, limits))
@@ -1959,6 +1980,122 @@ pub(super) fn kimi(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn codex_known_direct_api_accounts_skip_all_usage_requests() {
+        for account in [
+            json!({"type":"apiKey"}),
+            json!({"type":"amazonBedrock","usesCodexManagedCredentials":true}),
+            json!({"type":"amazonBedrock","usesCodexManagedCredentials":false}),
+        ] {
+            let mut calls = Vec::new();
+            let result = codex_account_usage(|id, method, params| {
+                calls.push((id, method, params));
+                Ok(if method == "account/read" {
+                    json!({"account":account})
+                } else {
+                    json!({})
+                })
+            });
+            assert!(matches!(result, Err((ObservationStatus::Unsupported, _))));
+            assert_eq!(
+                calls,
+                vec![(2, "account/read", Some(json!({"refreshToken":false})))]
+            );
+        }
+    }
+
+    #[test]
+    fn codex_query_preserves_supported_and_unknown_account_types_and_optional_usage() {
+        for kind in ["chatgpt", "futureAccount"] {
+            for usage_supported in [false, true] {
+                let mut calls = Vec::new();
+                let (identity, limits) = codex_account_usage(|id, method, params| {
+                    calls.push((id, method, params));
+                    match id {
+                        2 => Ok(json!({"account":{"type":kind,"email":"synthetic@example.test"}})),
+                        3 => Ok(json!({"rateLimits":{"primary":{"usedPercent":25}}})),
+                        4 if usage_supported => Ok(json!({"summary":{"lifetimeTokens":123}})),
+                        4 => Err((ObservationStatus::Unsupported, "unknown method".into())),
+                        _ => panic!("unexpected request"),
+                    }
+                })
+                .unwrap();
+                assert_eq!(identity["account"]["type"], kind);
+                assert_eq!(limits["rateLimits"]["primary"]["usedPercent"], 25);
+                assert_eq!(limits.get("officialUsage").is_some(), usage_supported);
+                assert_eq!(
+                    calls,
+                    vec![
+                        (2, "account/read", Some(json!({"refreshToken":false}))),
+                        (3, "account/rateLimits/read", None),
+                        (4, "account/usage/read", None)
+                    ]
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn codex_query_refreshes_once_only_for_authentication_failures() {
+        for refresh_succeeds in [false, true] {
+            let mut calls = Vec::new();
+            let result = codex_account_usage(|id, method, params| {
+                calls.push((id, method, params));
+                match id {
+                    2 => Err((ObservationStatus::NotAuthenticated, "expired token".into())),
+                    5 if refresh_succeeds => Ok(json!({"account":{"type":"chatgpt"}})),
+                    5 => Err((ObservationStatus::Error, "refresh rejected".into())),
+                    3 => Ok(json!({"rateLimits":{}})),
+                    4 => Err((ObservationStatus::Unsupported, "unknown method".into())),
+                    _ => panic!("unexpected request"),
+                }
+            });
+            assert_eq!(
+                calls[1],
+                (5, "account/read", Some(json!({"refreshToken":true})))
+            );
+            if refresh_succeeds {
+                assert!(result.is_ok());
+                assert_eq!(calls.len(), 4);
+            } else {
+                assert!(matches!(
+                    result,
+                    Err((ObservationStatus::NotAuthenticated, _))
+                ));
+                assert_eq!(calls.len(), 2);
+            }
+        }
+        for status in [ObservationStatus::Error, ObservationStatus::Unsupported] {
+            let mut calls = 0;
+            let result = codex_account_usage(|_, _, _| {
+                calls += 1;
+                Err((status, "unavailable".into()))
+            });
+            assert!(matches!(result, Err((actual,_)) if actual == status));
+            assert_eq!(calls, 1);
+        }
+    }
+
+    #[test]
+    fn codex_query_keeps_signed_out_accounts_distinct_and_stops_on_primary_failure() {
+        for primary_failure in [false, true] {
+            let mut calls = Vec::new();
+            let result = codex_account_usage(|id, method, _| {
+                calls.push(method);
+                match id {
+                    2 if primary_failure => Ok(json!({"account":{"type":"chatgpt"}})),
+                    2 => Ok(json!({"account":null})),
+                    3 => Err((ObservationStatus::Error, "rate limits unavailable".into())),
+                    _ => panic!("no extra requests permitted"),
+                }
+            });
+            assert!(
+                matches!(result,Err((actual,_)) if actual == if primary_failure { ObservationStatus::Error } else { ObservationStatus::NotAuthenticated })
+            );
+            assert_eq!(calls.len(), if primary_failure { 2 } else { 1 });
+        }
+    }
 
     #[test]
     fn layout_fallback_prefixes_its_bin_dir_onto_the_child_path() {

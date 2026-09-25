@@ -873,6 +873,58 @@ mod tests {
     }
 
     #[test]
+    fn codex_reset_counts_render_as_remaining_statistics_separate_from_credit_balances() {
+        for large in [false, true] {
+            let account = AccountUsageSnapshot {
+                agent: "codex".into(),
+                status: ObservationStatus::Ready,
+                metrics: vec![
+                    UsageMetric {
+                        id: "codex/credits".into(),
+                        label: "Credits".into(),
+                        scope: "account".into(),
+                        unit: "credits".into(),
+                        amount_decimal: Some("12.00".into()),
+                        ..Default::default()
+                    },
+                    UsageMetric {
+                        id: "rate_limit_reset/available".into(),
+                        label: "Available resets".into(),
+                        scope: "account".into(),
+                        unit: "resets".into(),
+                        remaining: (!large).then_some(0.0),
+                        text_value: large.then(|| format!("{} resets", i64::MAX)),
+                        ..Default::default()
+                    },
+                ],
+                ..Default::default()
+            };
+            let card = build_card(&account, None, NOW_MS);
+            assert!(!card
+                .lines
+                .iter()
+                .any(|line| matches!(line, Line::Meter(_) | Line::Section(_))));
+            let stats: Vec<_> = card
+                .lines
+                .iter()
+                .filter_map(|line| match line {
+                    Line::Stats(stats) => Some(stats),
+                    _ => None,
+                })
+                .flatten()
+                .collect();
+            assert_eq!(stats.len(), 2);
+            assert!(stats[0].value.contains("12.00"));
+            assert_eq!(stats[1].label, "Available resets");
+            if large {
+                assert_eq!(stats[1].value, format!("{} resets", i64::MAX));
+            } else {
+                assert!(stats[1].value.starts_with("0 resets"));
+            }
+        }
+    }
+
+    #[test]
     fn codex_official_counts_remain_visible_as_statistics_without_gauges() {
         let account = AccountUsageSnapshot {
             agent: "codex".into(),
