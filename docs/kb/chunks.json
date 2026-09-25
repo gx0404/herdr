@@ -929,8 +929,8 @@
       "anchor": "just 命令手册",
       "doc": "docs/MAKE_COMMANDS.md",
       "id": "docs-make-commands-md-just-命令手册",
-      "source_sha256": "163b0a90eee81b8d0830293cf32d8926f88de0b07f34920c5089f7346fa604c2",
-      "text": "# just 命令手册\n\n入口统一是 `just`（仓库无 Makefile）。列：用途 / 前置 / 副作用 / 通过条件与证据。\n改动 recipe 时同步本表与 CI 调用面。"
+      "source_sha256": "279a7c73f751bb3dad06bf8c2c44cf82964be17c56ad16969162c6f121ad461d",
+      "text": "# just 命令手册\n\n入口统一是 `just`（仓库无 Makefile）。列：用途 / 前置 / 副作用 / 通过条件与证据。\n改动 recipe 时同步本表与 CI 调用面。\n\n`nextest-all`、`test-one` 和 `ci-tests` 使用 `--status-level leak`：运行中显示失败、重试、慢测试及 leaky 用例名称，便于定位测试结束后仍占用输出管道的子进程；测试通过条件与退出码判定不变。"
     },
     {
       "anchor": "just 命令手册 > 发布链（维护者；见 `AGENT_RULES/release-channels.md`）",
@@ -2385,35 +2385,35 @@
       "anchor": "Install integrations > Codex",
       "doc": "docs/next/website/src/content/docs/integrations.mdx",
       "id": "docs-next-website-src-content-docs-integrations-mdx-install-integrations-codex-part1",
-      "source_sha256": "380ff390004396125725235304f4e60e4462b6e05f998d2e8ac303432c1eb323",
-      "text": "## Codex\n\nInstall the Codex hook:\n\n```bash\nherdr integration install codex\n```\n\nThe Codex hook reports session identity through the same local socket API used by other integrations. Codex state comes from Herdr's screen manifest detection.\n\nCodex integration v9 also subscribes to `SubagentStart` and `SubagentStop` on macOS and Linux. These hooks only tell the local Herdr socket that a Codex sub-agent thread started or stopped; they do not report agent state, and Herdr rebuilds the activity tree from Codex's own session files. Codex only runs hooks with `[features] hooks = true`, which the install already writes. The activity hooks are not installed on Windows. Reinstall the Codex integration after upgrading to add them.\n\nA Codex sub-agent is labeled with its nickname and its task name, which is the last part of its agent path, for example `Boyle · herdr_probe`. Its summary shows the full agent path, or the reason when the sub-agent failed or was interrupted. A sub-agent without a nickname shows just the task name.\n"
+      "source_sha256": "8051d0d1e5bcebf43b2ad4b3a7276794a8d3d188ff5d034e965437c43ff307a1",
+      "text": "## Codex\n\nInstall the Codex hook:\n\n```bash\nherdr integration install codex\n```\n\nThe Codex hook reports session identity through the same local socket API used by other integrations. Codex state comes from Herdr's screen manifest detection.\n\nCodex integration v9 also subscribes to `SubagentStart` and `SubagentStop` on macOS and Linux. These hooks only tell the local Herdr socket that a Codex sub-agent thread started or stopped; they do not report agent state, and Herdr rebuilds the activity tree from Codex's own session files. Codex 0.157 enables hooks by default. Herdr still writes `[features] hooks = true` explicitly for older versions; an explicit false value disables hooks. The activity hooks are not installed on Windows. Reinstall the Codex integration after upgrading to add them.\n\nA Codex sub-agent is labeled with its nickname and its task name, which is the last part of its agent path, for example `Boyle · herdr_probe`. Its summary shows the full agent path, or the reason when the sub-agent failed or was interrupted. A sub-agent without a nickname shows just the task name.\n"
     },
     {
       "anchor": "Install integrations > Codex",
       "doc": "docs/next/website/src/content/docs/integrations.mdx",
       "id": "docs-next-website-src-content-docs-integrations-mdx-install-integrations-codex-part2",
-      "source_sha256": "380ff390004396125725235304f4e60e4462b6e05f998d2e8ac303432c1eb323",
+      "source_sha256": "8051d0d1e5bcebf43b2ad4b3a7276794a8d3d188ff5d034e965437c43ff307a1",
       "text": "In the agent activity window, a Codex sub-agent's output is a readable transcript of its own thread: messages from its parent agent, `user:` and assistant messages, `(thinking)` markers, tool calls with their main argument followed by the first five lines of their output, plans, and `[task complete]` with the turn's final message. Developer instructions, the history the sub-agent inherited from its parent, token counts, rate limits, and other bookkeeping records are left out, and a record Herdr does not recognize shows only its type in brackets. Calls to the tools that message or manage other agents (`send_message`, `followup_task`, `send_input`, `interrupt_agent`, `close_agent`, `resume_agent`, `wait_agent`) show the target agent after `→`, followed by the message text; a message that Codex stores encrypted shows as `(encrypted)`.\n"
     },
     {
       "anchor": "Install integrations > Codex",
       "doc": "docs/next/website/src/content/docs/integrations.mdx",
       "id": "docs-next-website-src-content-docs-integrations-mdx-install-integrations-codex-part3",
-      "source_sha256": "380ff390004396125725235304f4e60e4462b6e05f998d2e8ac303432c1eb323",
+      "source_sha256": "8051d0d1e5bcebf43b2ad4b3a7276794a8d3d188ff5d034e965437c43ff307a1",
       "text": "Codex only runs hooks that you have trusted. After the integration is installed, or after an update changes its hooks, Codex shows \"Hooks need review\" the next time it starts. Choose \"Trust all and continue\", or open \"Review hooks\" and trust the Herdr hooks there. If you choose \"Continue without trusting\", the Herdr hooks do not run and Herdr gets no session identity or activity signals from Codex. While Codex has not trusted the current Herdr hooks, `herdr integration install codex` prints this reminder and `herdr integration status` adds a note under the Codex line; both commands also tell you when you have disabled the Herdr hooks in Codex with `/hooks`.\n\nHerdr uses `~/.codex` by default, or `CODEX_HOME` when set. The Codex config directory must already exist. Install writes `herdr-agent-state.sh`, updates `hooks.json`, and ensures `[features] hooks = true` in `config.toml`. It also removes the deprecated top-level `codex_hooks` flag when present. Uninstall removes Herdr entries from `hooks.json` and deletes the hook script, but leaves `config.toml` unchanged.\n\nThe session hook forwards Codex’s transcript path along with the session ID. This lets activity discovery follow a `CODEX_HOME` set only in that pane after the hook reports; install the integration into that same config directory and restart Codex to load the updated hook. Resume still uses the session ID. See [Agent activity](/socket-api/#agent-activity) for archive layouts and bounded compressed-rollout support.\n"
     },
     {
       "anchor": "Install integrations > Codex",
       "doc": "docs/next/website/src/content/docs/integrations.mdx",
       "id": "docs-next-website-src-content-docs-integrations-mdx-install-integrations-codex-part4",
-      "source_sha256": "380ff390004396125725235304f4e60e4462b6e05f998d2e8ac303432c1eb323",
+      "source_sha256": "8051d0d1e5bcebf43b2ad4b3a7276794a8d3d188ff5d034e965437c43ff307a1",
       "text": "Herdr starts managed Codex sessions and restored Codex sessions through a pane-local launcher. For interactive starts, `resume`, and `fork`, it checks the executable selected by the pane's current `PATH` with `--help` and adds `--no-daemon` only when that exact flag is supported. Codex 0.157 normally shares a daemon; foreground mode keeps hooks under the current pane's process tree and avoids reusing another pane's environment. Saved restore commands keep the original `codex resume <id>` form. Herdr does not change Codex configuration or stop existing daemons.\n\nNew panes also prepend a private native `codex` shim to `PATH`. Ordinary `codex` commands found through that path use the same launcher. Login scripts, nvm/mise setup, aliases, shell functions, absolute executable paths, and external wrappers can bypass it; use an explicit `--no-daemon` with supported Codex versions in those cases. Herdr does not edit shell startup files. The launcher removes its own shim directories from the launched process's `PATH` to avoid wrapper recursion; child commands inside Codex use the remaining original path.\n"
     },
     {
       "anchor": "Install integrations > Codex",
       "doc": "docs/next/website/src/content/docs/integrations.mdx",
       "id": "docs-next-website-src-content-docs-integrations-mdx-install-integrations-codex-part5",
-      "source_sha256": "380ff390004396125725235304f4e60e4462b6e05f998d2e8ac303432c1eb323",
+      "source_sha256": "8051d0d1e5bcebf43b2ad4b3a7276794a8d3d188ff5d034e965437c43ff307a1",
       "text": "Noninteractive subcommands (including `exec`, `review`, `app-server`, `mcp-server`, `login`, `agents`, and `queue`), explicit `--remote`, and an existing `--no-daemon` pass through unchanged. Unknown options also pass through conservatively. The command list follows Codex 0.157, including hidden commands and aliases. A future bare command name can be indistinguishable from a one-word prompt; invoke it through the real Codex executable path until Herdr supports that command. Older executables without the flag run unchanged. The capability probe has a two-second timeout and a combined 64 KiB output limit; if it fails, Herdr reports that foreground isolation is unknown and launches the original command once. It never retries a failed Codex launch. Outside a Herdr pane it does not add arguments. Detached or remote Codex hooks do not gain a trusted pane association from this launcher."
     },
     {

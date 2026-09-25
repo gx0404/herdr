@@ -145,7 +145,7 @@ herdr integration install codex
 
 Codex 钩子通过与其他集成相同的本地 socket API 上报会话身份。Codex 的状态来自 Herdr 的屏幕清单检测。
 
-Codex 集成 v9 在 macOS 和 Linux 上还会订阅 `SubagentStart` 和 `SubagentStop`。这些钩子只向本地 Herdr socket 通知 Codex 的子 agent 线程启动或结束,不上报 agent 状态;Herdr 会从 Codex 自己的会话文件重建活动树。Codex 只在 `[features] hooks = true` 时运行钩子,安装时已经写入。Windows 上不安装这些活动钩子。升级后请重新安装 Codex 集成以添加它们。
+Codex 集成 v9 在 macOS 和 Linux 上还会订阅 `SubagentStart` 和 `SubagentStop`。这些钩子只向本地 Herdr socket 通知 Codex 的子 agent 线程启动或结束,不上报 agent 状态;Herdr 会从 Codex 自己的会话文件重建活动树。Codex 0.157 默认启用钩子。Herdr 仍会显式写入 `[features] hooks = true` 以兼容旧版本；显式设为 false 会禁用钩子。Windows 上不安装这些活动钩子。升级后请重新安装 Codex 集成以添加它们。
 
 Codex 子 agent 以「昵称 · 任务名」标注,任务名取 agent 路径的最后一段,例如 `Boyle · herdr_probe`;摘要显示完整的 agent 路径,子 agent 失败或被中断时改为显示原因。没有昵称的子 agent 只显示任务名。
 

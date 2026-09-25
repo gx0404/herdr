@@ -9,7 +9,7 @@ test:
 
 # Full nextest run (command source of the test orchestrator's nextest phase)
 nextest-all:
-    cargo nextest run --locked --status-level fail --final-status-level fail --failure-output final --success-output never
+    cargo nextest run --locked --status-level leak --final-status-level fail --failure-output final --success-output never
 
 # Run repository maintenance contract tests (+ the fork's upstream-sync drop-path gate)
 maintenance-test:
@@ -55,7 +55,7 @@ framework-check: agent-rules-check
 
 # Run one nextest filter, e.g. `just test-one codex_stale_working`
 test-one filter:
-    cargo nextest run --locked "{{filter}}" --status-level fail --final-status-level fail --failure-output final --success-output never
+    cargo nextest run --locked "{{filter}}" --status-level leak --final-status-level fail --failure-output final --success-output never
 
 # Enforce deterministic UI hot-path architecture boundaries
 ui-hot-path-architecture-test:
@@ -78,7 +78,7 @@ ci filter='all()': lint
 
 # Keep the test build independently configurable from clippy in CI.
 ci-tests filter='all()':
-    cargo nextest run --locked -E "{{filter}}" --status-level fail --final-status-level slow --failure-output final --success-output never
+    cargo nextest run --locked -E "{{filter}}" --status-level leak --final-status-level slow --failure-output final --success-output never
     just maintenance-test
     just ui-hot-path-architecture-test
     just integration-assets-test
