@@ -258,7 +258,7 @@ pub(crate) fn process_lineage(_pid: u32) -> Option<ProcessLineage> {
 }
 
 /// Unsupported platforms cannot enumerate multiplexer clients.
-pub(crate) fn process_parent_entries() -> Option<Vec<super::ProcessParentEntry>> {
+pub(crate) fn process_parent_entries() -> Option<Vec<ProcessParentEntry>> {
     None
 }
 

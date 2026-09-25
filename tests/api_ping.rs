@@ -122,7 +122,8 @@ fn spawn_herdr_with_shell(
 
 /// 本文件用例的默认配置。多个用例由测试进程自己扮演集成钩子、直接发 `herdr:` 来源的
 /// 上报，而测试进程不在窗格进程树里，所以关掉上报来源校验；校验本身由
-/// `integration_reports_from_outside_the_pane_process_tree_are_ignored` 用默认配置覆盖。
+/// 默认配置下的来源判定由 `server::headless::tests::report_origin_tests` 覆盖；
+/// 真实 socket 父链另经隔离命名会话验证。
 const TEST_CONFIG: &str = "onboarding = false\n[server]\nverify_report_process = false\n";
 
 fn spawn_herdr_with_options(
