@@ -129,6 +129,7 @@ impl ClientShellState {
     }
 
     fn prepare_committed_text(&mut self, text: &str, outcome: &mut ClientShellInput) -> bool {
+        self.pane_selection_press = None;
         if self.observability.filtering_processes {
             let remaining =
                 256usize.saturating_sub(self.observability.process_filter.chars().count());
@@ -391,6 +392,8 @@ impl ClientShellState {
     }
 
     fn release_input_leases(&mut self, outcome: &mut ClientShellInput) {
+        // 暂存的按下尚未发给应用，不需要伪造一次释放。
+        self.pane_selection_press = None;
         for lease in self.input_leases.remove_source(LOCAL_INPUT_SOURCE) {
             self.push_pane_key(
                 lease.target,
@@ -565,6 +568,9 @@ impl ClientShellState {
         key: &crate::input::TerminalKey,
         outcome: &mut ClientShellInput,
     ) -> Option<ClientInputTarget> {
+        if !matches!(key.code, KeyCode::Modifier(_)) {
+            self.pane_selection_press = None;
+        }
         if self.handle_modal_paste_shortcut_with(key, outcome, crate::platform::read_clipboard_text)
         {
             return None;

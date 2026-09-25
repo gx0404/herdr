@@ -259,6 +259,17 @@ pub(super) struct ClientPaneMouseGesture {
     pub(super) last_position: crate::protocol::ClientMousePosition,
 }
 
+/// Codex 的普通单击仍归应用；只有跨格拖动才升级为 Herdr 选区。
+pub(super) struct ClientPaneSelectionPress {
+    pub(super) endpoint: ClientEndpointId,
+    pub(super) boot: String,
+    pub(super) generation: Option<u64>,
+    pub(super) hit: PaneHit,
+    pub(super) down: crossterm::event::MouseEvent,
+    pub(super) pixels: Option<crate::input::mouse::HostPixels>,
+    pub(super) focus_confirmed: bool,
+}
+
 pub(super) struct ClientWorkspacePress {
     pub(super) endpoint_id: ClientEndpointId,
     pub(super) workspace_id: String,
@@ -903,6 +914,7 @@ pub(super) enum ClientContextMenuAction {
     ToggleGroup,
     NewTab,
     RenamePane,
+    CopyPaneSelection,
     ClearPaneName,
     SwapWithFocusedPane,
     SplitRight,
@@ -1541,6 +1553,7 @@ pub(crate) struct ClientShellState {
     pub(super) page_drag: Option<super::floating_pages::Drag>,
     pub(super) previous_pane_id: Option<String>,
     pub(super) pane_mouse_gesture: Option<ClientPaneMouseGesture>,
+    pub(super) pane_selection_press: Option<ClientPaneSelectionPress>,
     /// 上一次转发给 pane 的裸移动坐标（pane id + 列/行 + 修饰键）：同一格
     /// 重复上报不重复转发（HERDR-PERF-012）。
     pub(super) last_pane_move: Option<(String, u16, u16, crossterm::event::KeyModifiers)>,
@@ -1770,6 +1783,7 @@ impl ClientShellState {
             page_drag: None,
             previous_pane_id: None,
             pane_mouse_gesture: None,
+            pane_selection_press: None,
             last_pane_move: None,
             link_hover: None,
             link_hints: None,
@@ -2011,6 +2025,7 @@ impl ClientShellState {
             .then_some(ClientShellOverlay::Onboarding);
         self.previous_pane_id = None;
         self.pane_mouse_gesture = None;
+        self.pane_selection_press = None;
         self.last_pane_move = None;
         self.link_hover = None;
         self.link_hints = None;
@@ -2175,6 +2190,21 @@ impl ClientShellState {
                 != snapshot.focused_tab_id.as_deref()
         {
             self.reveal_focused_tab = true;
+        }
+        if let Some(press) = self.pane_selection_press.as_mut() {
+            let focused = snapshot.focused_pane_id.as_deref();
+            press.focus_confirmed |= focused == Some(press.hit.pane_id.as_str());
+            if press.endpoint != self.active_endpoint_id
+                || press.boot != snapshot.boot_id
+                || press.generation != generation
+                || !snapshot
+                    .panes
+                    .iter()
+                    .any(|pane| pane.pane_id == press.hit.pane_id)
+                || (press.focus_confirmed && focused.is_some_and(|pane| pane != press.hit.pane_id))
+            {
+                self.pane_selection_press = None;
+            }
         }
         let selection_focus_lost = if let Some(capture) = self.selection_capture.as_mut() {
             let focused = snapshot.focused_pane_id.as_deref();
@@ -2418,6 +2448,7 @@ impl ClientShellState {
             .as_deref()
             .map(|popup| popup.terminal_id.clone());
         if previous_popup != next_popup {
+            self.pane_selection_press = None;
             self.cancel_frozen_selection();
             if next_popup.is_some() && matches!(self.overlay, Some(ClientShellOverlay::Settings(_)))
             {
@@ -2661,6 +2692,7 @@ impl ClientShellState {
     }
 
     pub(crate) fn invalidate_pane_surface(&mut self) {
+        self.pane_selection_press = None;
         self.pane_surface = None;
         self.pending_pane_surface = None;
         self.hits = ShellHitMap::default();

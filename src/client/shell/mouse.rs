@@ -722,6 +722,9 @@ impl ClientShellState {
     }
 
     pub(super) fn handle_mouse(&mut self, mouse: MouseEvent, outcome: &mut ClientShellInput) {
+        if self.pending_selection_mouse(mouse, outcome) {
+            return;
+        }
         if self.frozen_selection_mouse(mouse, outcome) {
             return;
         }
@@ -2225,26 +2228,7 @@ impl ClientShellState {
                     .find(|hit| super::contains(hit.inner_rect, point))
                     .cloned();
                 if let Some(hit) = pane_hit {
-                    let pane_owns_right_click = self
-                        .snapshot
-                        .as_deref()
-                        .and_then(|snapshot| {
-                            snapshot
-                                .panes
-                                .iter()
-                                .find(|pane| pane.pane_id == hit.pane_id)
-                        })
-                        .is_some_and(|pane| pane.right_click_passthrough)
-                        && mouse.modifiers.is_empty();
-                    let configured_modifiers = self
-                        .config
-                        .right_click_passthrough_modifiers
-                        .filter(|modifiers| *modifiers == mouse.modifiers);
-                    if hit.mouse_reporting
-                        && (pane_owns_right_click || configured_modifiers.is_some())
-                    {
-                        let stripped_modifiers =
-                            configured_modifiers.unwrap_or(crossterm::event::KeyModifiers::empty());
+                    if let Some(stripped_modifiers) = self.pane_right_click_modifiers(&hit, mouse) {
                         self.push_pane_mouse_event(
                             &hit,
                             mouse,
@@ -2698,14 +2682,16 @@ impl ClientShellState {
                     .cloned();
                 if let Some(hit) = pane_hit {
                     if hit.mouse_reporting && super::contains(hit.inner_rect, point) {
-                        self.push_pane_mouse_event(&hit, mouse, mouse.modifiers, outcome);
-                        self.pane_mouse_gesture = Some(ClientPaneMouseGesture {
-                            last_position: self.pane_mouse_position(&hit, mouse),
-                            hit: hit.clone(),
-                            button: MouseButton::Left,
-                            stripped_modifiers: crossterm::event::KeyModifiers::empty(),
-                            last_event: mouse,
-                        });
+                        if !self.begin_codex_selection_press(&hit, mouse) {
+                            self.push_pane_mouse_event(&hit, mouse, mouse.modifiers, outcome);
+                            self.pane_mouse_gesture = Some(ClientPaneMouseGesture {
+                                last_position: self.pane_mouse_position(&hit, mouse),
+                                hit: hit.clone(),
+                                button: MouseButton::Left,
+                                stripped_modifiers: crossterm::event::KeyModifiers::empty(),
+                                last_event: mouse,
+                            });
+                        }
                     } else if super::contains(hit.inner_rect, point) {
                         let click = ClientPaneClick {
                             pane_id: hit.pane_id.clone(),
@@ -2831,6 +2817,129 @@ impl ClientShellState {
             }
             _ => {}
         }
+    }
+
+    /// 同一策略供右键转发和冻结选区的菜单保留判定使用。
+    pub(super) fn pane_right_click_modifiers(
+        &self,
+        hit: &PaneHit,
+        mouse: MouseEvent,
+    ) -> Option<crossterm::event::KeyModifiers> {
+        if !hit.mouse_reporting {
+            return None;
+        }
+        let configured = self
+            .config
+            .right_click_passthrough_modifiers
+            .filter(|modifiers| *modifiers == mouse.modifiers);
+        if configured.is_some() {
+            return configured;
+        }
+        self.snapshot
+            .as_ref()
+            .is_some_and(|snapshot| {
+                snapshot
+                    .panes
+                    .iter()
+                    .any(|pane| pane.pane_id == hit.pane_id && pane.right_click_passthrough)
+            })
+            .then_some(crossterm::event::KeyModifiers::empty())
+            .filter(|_| mouse.modifiers.is_empty())
+    }
+
+    fn begin_codex_selection_press(&mut self, hit: &PaneHit, mouse: MouseEvent) -> bool {
+        if !self.config.mouse_capture
+            || !mouse.modifiers.is_empty()
+            || !self.supports_frozen_selection()
+        {
+            return false;
+        }
+        let Some(snapshot) = self.snapshot.as_ref().filter(|snapshot| {
+            snapshot.agents.iter().any(|agent| {
+                agent.pane_id == hit.pane_id && agent.agent.as_deref() == Some("codex")
+            })
+        }) else {
+            return false;
+        };
+        self.pane_selection_press = Some(ClientPaneSelectionPress {
+            endpoint: self.active_endpoint_id.clone(),
+            boot: snapshot.boot_id.clone(),
+            generation: self.active_snapshot_generation,
+            hit: hit.clone(),
+            down: mouse,
+            pixels: self.host_mouse_pixels,
+            focus_confirmed: snapshot.focused_pane_id.as_deref() == Some(&hit.pane_id),
+        });
+        true
+    }
+
+    fn pending_selection_mouse(
+        &mut self,
+        mouse: MouseEvent,
+        outcome: &mut ClientShellInput,
+    ) -> bool {
+        let Some(press) = self.pane_selection_press.take() else {
+            return false;
+        };
+        let is_release = mouse.kind == MouseEventKind::Up(MouseButton::Left);
+        let follows_press = is_release || mouse.kind == MouseEventKind::Drag(MouseButton::Left);
+        let valid = self.config.mouse_capture
+            && self.overlay.is_none()
+            && !self.popup_pending
+            && self.popup_terminal_id.is_none()
+            && press.endpoint == self.active_endpoint_id
+            && press.generation == self.active_snapshot_generation
+            && self.snapshot.as_ref().is_some_and(|snapshot| {
+                snapshot.boot_id == press.boot
+                    && snapshot
+                        .panes
+                        .iter()
+                        .any(|pane| pane.pane_id == press.hit.pane_id)
+            })
+            && self.hits.panes.iter().any(|hit| {
+                hit.pane_id == press.hit.pane_id
+                    && hit.inner_rect == press.hit.inner_rect
+                    && hit.mouse_reporting
+            });
+        if !valid {
+            return follows_press;
+        }
+        if mouse.kind == MouseEventKind::Moved {
+            self.pane_selection_press = Some(press);
+            return true;
+        }
+        if !follows_press {
+            return false;
+        }
+        let moved = (mouse.column, mouse.row) != (press.down.column, press.down.row);
+        if !moved && !is_release {
+            self.pane_selection_press = Some(press);
+            return true;
+        }
+        if moved
+            && mouse.modifiers.is_empty()
+            && self.begin_frozen_selection(&press.hit, press.down, 1, outcome)
+            && self.selection_capture.is_some()
+        {
+            self.frozen_selection_mouse(mouse, outcome);
+            return true;
+        }
+        // 单击或无法取得冻结能力：按原顺序交给应用。像素Down必须使用按下时坐标。
+        let current_pixels = self.host_mouse_pixels;
+        self.host_mouse_pixels = press.pixels;
+        self.push_pane_mouse_event(&press.hit, press.down, press.down.modifiers, outcome);
+        self.host_mouse_pixels = current_pixels;
+        self.push_pane_mouse_event(&press.hit, mouse, mouse.modifiers, outcome);
+        if !is_release {
+            self.pane_mouse_gesture = Some(ClientPaneMouseGesture {
+                last_position: self.pane_mouse_position(&press.hit, mouse),
+                hit: press.hit,
+                button: MouseButton::Left,
+                stripped_modifiers: crossterm::event::KeyModifiers::empty(),
+                last_event: mouse,
+            });
+        }
+        true
     }
 
     fn pane_mouse_position(&self, hit: &PaneHit, mouse: MouseEvent) -> ClientMousePosition {

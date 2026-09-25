@@ -32,6 +32,7 @@ pub(super) const SUBMENU_ROW: usize = usize::MAX;
 pub(super) struct ContextMenuEnv {
     shortcuts: Vec<(ClientContextMenuAction, String)>,
     active_machine: bool,
+    selection: Option<ContextSelection>,
 }
 
 impl ContextMenuEnv {
@@ -48,7 +49,12 @@ impl ContextMenuEnv {
                 })
                 .collect(),
             active_machine: false,
+            selection: None,
         }
+    }
+
+    pub(super) fn can_copy_selection(&self) -> bool {
+        self.selection.is_some()
     }
 
     fn shortcut(&self, action: ClientContextMenuAction) -> Option<&str> {
@@ -62,6 +68,16 @@ impl ContextMenuEnv {
     pub(super) fn active_machine(&self) -> bool {
         self.active_machine
     }
+}
+
+/// 菜单只复制打开时的选区；端点重连或选区替换后旧条目不可执行。
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ContextSelection {
+    endpoint: ClientEndpointId,
+    boot: String,
+    generation: Option<u64>,
+    epoch: u64,
+    cells: ((u32, u16), (u32, u16)),
 }
 
 /// 子菜单：父项标签与子项在平铺条目里的范围。
@@ -334,14 +350,22 @@ fn open_submenu(menu: &mut ClientContextMenuOverlay, model: &ContextMenuModel, k
 
 impl ClientShellState {
     fn open_context_menu(&mut self, target: ClientContextMenuTarget, x: u16, y: u16) {
-        self.overlay = Some(ClientShellOverlay::ContextMenu(ClientContextMenuOverlay {
+        let mut menu = ClientContextMenuOverlay {
             target,
             x,
             y,
             highlighted: 0,
             hovered: None,
             submenu: None,
-        }));
+        };
+        let model = menu.model();
+        menu.highlighted = model
+            .top_rows()
+            .into_iter()
+            .map(|(row, _)| row)
+            .find(|row| *row == SUBMENU_ROW || model.items[*row].enabled)
+            .unwrap_or(usize::MAX);
+        self.overlay = Some(ClientShellOverlay::ContextMenu(menu));
     }
 
     fn context_env(&self, kind: ContextKind) -> ContextMenuEnv {
@@ -404,6 +428,47 @@ impl ClientShellState {
         self.open_context_menu(target, x, y);
     }
 
+    fn menu_selection(&self, pane_id: &str) -> Option<ContextSelection> {
+        if !self.has_copyable_pane_selection(pane_id) {
+            return None;
+        }
+        Some(ContextSelection {
+            endpoint: self.active_endpoint_id.clone(),
+            boot: self.snapshot.as_ref()?.boot_id.clone(),
+            generation: self.active_snapshot_generation,
+            epoch: self.selection_epoch,
+            cells: self.selection.as_ref()?.ordered_cells(),
+        })
+    }
+
+    pub(super) fn context_menu_preserves_selection(&self) -> bool {
+        let Some(ClientShellOverlay::ContextMenu(menu)) = &self.overlay else {
+            return false;
+        };
+        self.menu_target_preserves_selection(&menu.target)
+    }
+
+    fn menu_target_preserves_selection(&self, target: &ClientContextMenuTarget) -> bool {
+        let ClientContextMenuTarget::Pane { pane_id, env, .. } = target else {
+            return false;
+        };
+        let Some(expected) = &env.selection else {
+            return false;
+        };
+        self.has_copyable_pane_selection(pane_id)
+            && expected.endpoint == self.active_endpoint_id
+            && expected.generation == self.active_snapshot_generation
+            && expected.epoch == self.selection_epoch
+            && self
+                .snapshot
+                .as_ref()
+                .is_some_and(|snapshot| snapshot.boot_id == expected.boot)
+            && self
+                .selection
+                .as_ref()
+                .is_some_and(|selection| selection.ordered_cells() == expected.cells)
+    }
+
     pub(super) fn open_pane_context_menu(&mut self, pane_id: String, x: u16, y: u16) {
         let Some(snapshot) = self.snapshot.as_deref() else {
             return;
@@ -415,13 +480,15 @@ impl ClientShellState {
             .focused_pane_id
             .clone()
             .filter(|focused| focused != &pane_id);
+        let mut env = self.context_env(ContextKind::Pane);
+        env.selection = self.menu_selection(&pane_id);
         let target = ClientContextMenuTarget::Pane {
             pane_id,
             workspace_id: pane.workspace_id.clone(),
             source_pane_id,
             has_manual_label: pane.label.is_some(),
             right_click_passthrough: pane.right_click_passthrough,
-            env: self.context_env(ContextKind::Pane),
+            env,
         };
         self.open_context_menu(target, x, y);
     }
@@ -565,6 +632,12 @@ impl ClientShellState {
         if !enabled {
             // 禁用项不可激活：菜单保持打开，高亮不动。
             self.overlay = Some(ClientShellOverlay::ContextMenu(menu));
+            return;
+        }
+        if action == ClientContextMenuAction::CopyPaneSelection
+            && !self.menu_target_preserves_selection(&menu.target)
+        {
+            outcome.repaint = true;
             return;
         }
         let (kind, target) = context_action_target(menu.target);

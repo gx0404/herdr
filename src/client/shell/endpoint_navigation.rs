@@ -35,11 +35,19 @@ impl ClientShellState {
         press: ClientWorkspacePress,
         outcome: &mut ClientShellInput,
     ) {
-        self.focus_or_activate(
+        let current_workspace = press.endpoint_id == self.active_endpoint_id
+            && self.snapshot.as_ref().is_some_and(|snapshot| {
+                snapshot.focused_workspace_id.as_deref() == Some(press.workspace_id.as_str())
+            });
+        if self.focus_or_activate(
             press.endpoint_id,
             ClientEndpointFocusTarget::Workspace(press.workspace_id),
             outcome,
-        );
+        ) && current_workspace
+        {
+            self.refocus_current_workbench_terminal();
+            outcome.repaint = true;
+        }
     }
 
     pub(super) fn handle_endpoint_machine_click(

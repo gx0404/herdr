@@ -16,6 +16,67 @@ fn ready() -> ClientShellState {
 }
 
 #[test]
+fn clicking_current_workspace_keeps_its_terminal_input_target() {
+    let mut state = ready();
+    advance_snapshot(&mut state, 1);
+    assert!(state.receive_view(1, view_frame(&state, 1)));
+    state.compose(120, 40).unwrap();
+    let initial_target = state.focused_pane_id().expect("终端拥有输入焦点");
+    let hit = state
+        .hits
+        .workspaces
+        .iter()
+        .find(|hit| hit.workspace_id == "ws_1")
+        .unwrap();
+    let down = MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: hit.rect.x + 2,
+        row: hit.rect.y,
+        modifiers: KeyModifiers::NONE,
+    };
+    state.handle_raw_events(vec![RawInputEvent::Mouse(down)]);
+    state.handle_raw_events(vec![RawInputEvent::Mouse(MouseEvent {
+        kind: MouseEventKind::Up(MouseButton::Left),
+        ..down
+    })]);
+    // 不等新的快照或下一次 tick，鼠标松开后立即按键也必须到达终端。
+    assert_eq!(state.focused_pane_id(), Some(initial_target.clone()));
+    // workspace.focus 对当前工作区是幂等的，不会产生新的 tab 焦点来补救客户端。
+    state.tick_workbench(std::time::Instant::now(), &mut ClientShellInput::default());
+    assert_eq!(state.focused_pane_id(), Some(initial_target));
+    let typed = state.handle_input_bytes(b"x");
+    assert!(!typed.requests.is_empty(), "点击当前工作区后键盘仍发给终端");
+}
+
+#[test]
+fn workspace_reselection_preserves_layout_focus_and_requires_a_matching_terminal_group() {
+    for case in ["arranging", "missing-group", "different-workspace"] {
+        let mut state = ready();
+        state.workbench.dock.focused = PanelId::Workspaces;
+        match case {
+            "arranging" => state.workbench.arranging = true,
+            "missing-group" => state.workbench.dock.groups[0].active = None,
+            _ => {}
+        }
+        let mut outcome = ClientShellInput::default();
+        state.finish_endpoint_workspace_press(
+            ClientWorkspacePress {
+                endpoint_id: state.active_endpoint_id.clone(),
+                workspace_id: if case == "different-workspace" {
+                    "other"
+                } else {
+                    "ws_1"
+                }
+                .into(),
+                start_row: 0,
+            },
+            &mut outcome,
+        );
+        assert_eq!(state.workbench.dock.focused, PanelId::Workspaces, "{case}");
+    }
+}
+
+#[test]
 fn layout_requires_explicit_server_capability() {
     let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
     state.set_snapshot(Box::new(snapshot()));

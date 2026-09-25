@@ -146,6 +146,7 @@ pub struct OnboardingTexts {
 }
 
 pub struct ContextMenuTexts {
+    pub copy_selection: &'static str,
     pub rename: &'static str,
     pub close: &'static str,
     pub close_group: &'static str,

@@ -29,6 +29,7 @@ pub const TEXTS: Texts = Texts {
         next: "  next: install optional agent integrations for more reliable state",
     },
     context_menu: ContextMenuTexts {
+        copy_selection: "Copy",
         rename: "Rename",
         close: "Close",
         close_group: "Close group",

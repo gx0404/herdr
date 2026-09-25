@@ -139,6 +139,33 @@ impl ClientShellState {
         self.sync_observation_page_with_focus();
     }
 
+    /// 点击当前工作区不会改变服务端 tab 焦点，必须在本地把键盘归还给其终端。
+    pub(in crate::client::shell) fn refocus_current_workbench_terminal(&mut self) {
+        if !self.workbench.enabled
+            || self.workbench.arranging
+            || self.mode != ClientShellMode::Terminal
+        {
+            return;
+        }
+        let Some(tab) = self
+            .snapshot
+            .as_ref()
+            .and_then(|snapshot| snapshot.focused_tab_id.as_ref())
+        else {
+            return;
+        };
+        let Some(group) = self
+            .workbench
+            .dock
+            .groups
+            .iter()
+            .find(|group| group.active.as_ref() == Some(tab))
+        else {
+            return;
+        };
+        self.focus_workbench_panel(PanelId::Terminal(group.id));
+    }
+
     /// 停靠工作台下 `observability.page` 与 `dock.focused` 同步：监控 / 账号面板
     /// 聚焦时页面拥有键盘，否则键盘归终端。所有改写 `dock.focused` 的入口在
     /// 输入 / tick 阶段调用，渲染期不再改写。

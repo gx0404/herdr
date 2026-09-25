@@ -71,6 +71,7 @@ pub(super) enum ActionId {
     MoveTabNext,
     CloseTab,
     RenamePane,
+    CopyPaneSelection,
     ClearPaneName,
     SwapWithFocusedPane,
     EditScrollback,
@@ -596,6 +597,17 @@ pub(super) static ACTIONS: &[ActionSpec] = &[
         )
     },
     ActionSpec {
+        palette: PaletteMode::Hidden,
+        context: Some((Kind::Pane, Ctx::CopyPaneSelection)),
+        ..spec(
+            Id::CopyPaneSelection,
+            "pane:copy-selection",
+            |t| t.context_menu.copy_selection,
+            Cat::TabsPanes,
+            1,
+        )
+    },
+    ActionSpec {
         binding: bind!(RenamePane, rename_pane),
         label: Some(|t| t.context_menu.rename_pane),
         context: Some((Kind::Pane, Ctx::RenamePane)),
@@ -1110,6 +1122,7 @@ static TAB_MENU: &[ContextLayoutEntry] = &[
 ];
 
 static PANE_MENU: &[ContextLayoutEntry] = &[
+    Entry::Item(Id::CopyPaneSelection),
     Entry::Item(Id::RenamePane),
     Entry::Item(Id::ClearPaneName),
     Entry::Separator,
@@ -1185,8 +1198,10 @@ pub(super) fn context_action_state(id: ActionId, target: &ClientContextMenuTarge
             source_pane_id,
             has_manual_label,
             right_click_passthrough,
+            env,
             ..
         } => match id {
+            ActionId::CopyPaneSelection => ActionState::enabled_if(env.can_copy_selection()),
             ActionId::ClearPaneName => ActionState::enabled_if(*has_manual_label),
             ActionId::SwapWithFocusedPane => ActionState::enabled_if(source_pane_id.is_some()),
             ActionId::RightClickPassthrough => ActionState::checked(*right_click_passthrough),
@@ -1485,6 +1500,19 @@ impl ClientShellState {
                     _ => self.request_tab_close(tab_id, outcome),
                 }
             }
+            ActionId::CopyPaneSelection => {
+                let ActionTarget::Pane { pane_id, .. } = target else {
+                    return;
+                };
+                if self.has_copyable_pane_selection(&pane_id) {
+                    self.request_selection_copy(outcome, true);
+                    if self.selection_capture.is_none() {
+                        self.selection = None;
+                        self.stop_selection_autoscroll();
+                        self.selection_highlight_clear_deadline = None;
+                    }
+                }
+            }
             ActionId::RenamePane => {
                 let ActionTarget::Pane { pane_id, .. } = target else {
                     return;
@@ -1764,6 +1792,7 @@ mod tests {
         ActionId::MoveTabNext,
         ActionId::CloseTab,
         ActionId::RenamePane,
+        ActionId::CopyPaneSelection,
         ActionId::ClearPaneName,
         ActionId::SwapWithFocusedPane,
         ActionId::EditScrollback,
@@ -1840,6 +1869,7 @@ mod tests {
             | ActionId::MoveTabNext
             | ActionId::CloseTab
             | ActionId::RenamePane
+            | ActionId::CopyPaneSelection
             | ActionId::ClearPaneName
             | ActionId::SwapWithFocusedPane
             | ActionId::EditScrollback

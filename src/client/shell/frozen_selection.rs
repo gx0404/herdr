@@ -66,15 +66,8 @@ impl ClientShellState {
         self.selection_highlight_clear_deadline = None;
     }
 
-    pub(super) fn begin_frozen_selection(
-        &mut self,
-        hit: &PaneHit,
-        mouse: MouseEvent,
-        streak: u8,
-        outcome: &mut ClientShellInput,
-    ) -> bool {
-        let advertised = self
-            .endpoints
+    pub(super) fn supports_frozen_selection(&self) -> bool {
+        self.endpoints
             .iter()
             .find(|endpoint| endpoint.endpoint_id == self.active_endpoint_id)
             .and_then(|endpoint| endpoint.methods.as_ref())
@@ -90,8 +83,17 @@ impl ClientShellState {
                 ]
                 .iter()
                 .all(|name| methods.contains(*name))
-            });
-        if !advertised || hit.popup {
+            })
+    }
+
+    pub(super) fn begin_frozen_selection(
+        &mut self,
+        hit: &PaneHit,
+        mouse: MouseEvent,
+        streak: u8,
+        outcome: &mut ClientShellInput,
+    ) -> bool {
+        if !self.supports_frozen_selection() || hit.popup {
             return false;
         }
         self.cancel_frozen_selection();
@@ -284,7 +286,20 @@ impl ClientShellState {
         outcome: &mut ClientShellInput,
     ) -> bool {
         if self.overlay.is_some() {
-            self.cancel_frozen_selection();
+            if !self.context_menu_preserves_selection() {
+                self.cancel_frozen_selection();
+            }
+            return false;
+        }
+        if mouse.kind == MouseEventKind::Down(MouseButton::Right)
+            && self.selection_capture.as_ref().is_some_and(|capture| {
+                self.has_copyable_pane_selection(&capture.hit.pane_id)
+                    && contains(capture.hit.inner_rect, (mouse.column, mouse.row))
+                    && self
+                        .pane_right_click_modifiers(&capture.hit, mouse)
+                        .is_none()
+            })
+        {
             return false;
         }
         let Some(capture) = self.selection_capture.as_mut() else {
@@ -481,6 +496,20 @@ impl ClientShellState {
         capture.released = true;
         self.maybe_copy_frozen_selection(outcome);
         true
+    }
+
+    pub(super) fn has_copyable_pane_selection(&self, pane_id: &str) -> bool {
+        self.selection.as_ref().is_some_and(|selection| {
+            selection.pane_id == pane_id && selection.is_visible() && !selection.is_in_progress()
+        }) && self.selection_capture.as_ref().is_none_or(|capture| {
+            capture.released
+                && capture.endpoint == self.active_endpoint_id
+                && capture.generation == self.active_snapshot_generation
+                && self
+                    .snapshot
+                    .as_ref()
+                    .is_some_and(|snapshot| snapshot.boot_id == capture.boot)
+        })
     }
 
     fn maybe_copy_frozen_selection(&mut self, outcome: &mut ClientShellInput) {
@@ -699,6 +728,7 @@ impl ClientShellState {
     }
 
     pub(super) fn tick_frozen_selection(&mut self, now: Instant, outcome: &mut ClientShellInput) {
+        let invalid_overlay = self.overlay.is_some() && !self.context_menu_preserves_selection();
         if let Some(capture) = self.selection_capture.as_mut() {
             let invalid = !self.config.mouse_capture
                 || capture.endpoint != self.active_endpoint_id
@@ -710,7 +740,7 @@ impl ClientShellState {
                             .iter()
                             .any(|pane| pane.pane_id == capture.hit.pane_id)
                 })
-                || self.overlay.is_some()
+                || invalid_overlay
                 || self
                     .copy_mode
                     .as_ref()

@@ -9,6 +9,11 @@ You already know this model. Jump to the [keybinding reference](/docs/configurat
 
 Herdr is mouse-native. You can click panes, tabs, workspaces, and agents, drag split borders, and use right-click menus without learning a single keybinding. Keyboard control is optional. In floating overlays the wheel scrolls the viewport without moving the keyboard selection, and the wheel step is `ui.mouse_scroll_lines` (3 by default) for panes, sidebar lists, and overlays alike.
 
+
+In a detected Codex pane, an unmodified left-button drag uses Herdr’s frozen text selection and copies on release when `ui.copy_on_select` is enabled. A click still goes to Codex; hold Alt throughout a gesture to send it directly to Codex. This requires the connected server’s text snapshot support. With automatic copying disabled, right-click the same pane and choose **Copy** to copy the completed selection. The pane menu disables **Copy** when there is no Herdr selection; it never sends an interrupt key to the application. If right-click passthrough is enabled for that pane, use the selection copy shortcut instead.
+
+Clicking the already selected workspace returns keyboard focus to its terminal immediately; layout adjustment mode keeps its panel focus.
+
 ## What the prefix is
 
 A terminal multiplexer sits between your terminal and the programs running inside it. Those programs already use most key combinations: `ctrl+c` interrupts, `ctrl+r` searches history, editors claim nearly everything else. If Herdr grabbed common keys directly, it would break the programs inside it.

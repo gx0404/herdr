@@ -51,6 +51,7 @@ pub const TEXTS: Texts = Texts {
         next: "  下一步：安装可选的 agent 集成以获得更可靠的状态",
     },
     context_menu: ContextMenuTexts {
+        copy_selection: "复制",
         rename: "重命名",
         close: "关闭",
         close_group: "关闭分组",

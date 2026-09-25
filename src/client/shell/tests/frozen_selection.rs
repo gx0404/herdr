@@ -1,6 +1,7 @@
 use super::*;
 use crate::api::schema::{Method, ResponseResult};
 use crate::terminal::text_snapshot::{FrozenCell, FrozenRow, FrozenText};
+use crossterm::event::KeyEvent;
 
 fn ready() -> (ClientShellState, MouseEvent) {
     let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
@@ -75,6 +76,494 @@ fn capture_id(outcome: &ClientShellInput) -> String {
             _ => None,
         })
         .unwrap()
+}
+
+fn reporting_codex() -> (ClientShellState, MouseEvent) {
+    let (mut state, _) = ready();
+    let mut projected = snapshot();
+    projected.agents.push(ClientShellAgent {
+        pane_id: "pane_1".into(),
+        workspace_id: "ws_1".into(),
+        tab_id: "tab_1".into(),
+        name: None,
+        display_agent: None,
+        agent: Some("codex".into()),
+        title: None,
+        terminal_title: None,
+        terminal_title_stripped: None,
+        agent_status: AgentStatus::Idle,
+        state_change_seq: 0,
+        state_labels: Vec::new(),
+        tokens: Vec::new(),
+        focused: true,
+        launch_seq: 0,
+        activity: Default::default(),
+    });
+    state.set_snapshot(Box::new(projected));
+    let mut pane_surface = surface();
+    pane_surface.panes[0].mouse_reporting = true;
+    state.set_pane_surface(pane_surface);
+    state.compose(106, 20).unwrap();
+    let hit = &state.hits.panes[0];
+    let mouse = MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: hit.inner_rect.x,
+        row: hit.inner_rect.y,
+        modifiers: KeyModifiers::empty(),
+    };
+    (state, mouse)
+}
+
+fn native_mouse_kinds(outcome: &ClientShellInput) -> Vec<crate::protocol::ClientMouseKind> {
+    outcome
+        .requests
+        .iter()
+        .flat_map(|request| match request {
+            ClientMessage::ClientShellPaneInput { events, .. } => events.as_slice(),
+            _ => &[],
+        })
+        .filter_map(|event| match event {
+            ClientPaneInputEvent::Mouse { kind, .. } => Some(*kind),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn codex_native_gestures_cover_alt_unknown_agent_and_missing_capability() {
+    for case in ["alt", "unknown", "other", "missing", "disabled"] {
+        let (mut state, mut mouse) = reporting_codex();
+        match case {
+            "alt" => mouse.modifiers = KeyModifiers::ALT,
+            "unknown" => {
+                let mut projected = (**state.snapshot.as_ref().unwrap()).clone();
+                projected.agents[0].agent = None;
+                projected.agents[0].display_agent = Some("codex".into());
+                state.set_snapshot(Box::new(projected));
+            }
+            "other" => {
+                let mut projected = (**state.snapshot.as_ref().unwrap()).clone();
+                projected.agents[0].agent = Some("claude".into());
+                state.set_snapshot(Box::new(projected));
+            }
+            "missing" => {
+                state.set_endpoint_methods(Some(vec!["pane.text_snapshot.capture".into()]))
+            }
+            "disabled" => state.config.mouse_capture = false,
+            _ => unreachable!(),
+        }
+        let down = state.handle_raw_events(vec![RawInputEvent::Mouse(mouse)]);
+        if case == "disabled" {
+            assert!(state.pane_selection_press.is_none());
+            continue;
+        }
+        assert_eq!(native_mouse_kinds(&down).len(), 1, "{case}");
+        mouse.kind = MouseEventKind::Drag(MouseButton::Left);
+        mouse.column += 2;
+        let drag = state.handle_raw_events(vec![RawInputEvent::Mouse(mouse)]);
+        assert_eq!(native_mouse_kinds(&drag).len(), 1, "{case}");
+        mouse.kind = MouseEventKind::Up(MouseButton::Left);
+        let up = state.handle_raw_events(vec![RawInputEvent::Mouse(mouse)]);
+        assert_eq!(native_mouse_kinds(&up).len(), 1, "{case}");
+        assert!(state.selection_capture.is_none(), "{case}");
+    }
+}
+
+#[test]
+fn codex_same_cell_drag_remains_a_native_click() {
+    let (mut state, mut mouse) = reporting_codex();
+    state.handle_raw_events(vec![RawInputEvent::Mouse(mouse)]);
+    mouse.kind = MouseEventKind::Drag(MouseButton::Left);
+    assert!(state
+        .handle_raw_events(vec![RawInputEvent::Mouse(mouse)])
+        .requests
+        .is_empty());
+    assert!(state.selection_capture.is_none());
+    mouse.kind = MouseEventKind::Up(MouseButton::Left);
+    assert_eq!(
+        native_mouse_kinds(&state.handle_raw_events(vec![RawInputEvent::Mouse(mouse)])).len(),
+        2
+    );
+}
+
+#[test]
+fn codex_release_in_another_cell_starts_selection_without_drag_report() {
+    let (mut state, mut mouse) = reporting_codex();
+    state.handle_raw_events(vec![RawInputEvent::Mouse(mouse)]);
+    mouse.kind = MouseEventKind::Up(MouseButton::Left);
+    mouse.column += 2;
+    let up = state.handle_raw_events(vec![RawInputEvent::Mouse(mouse)]);
+    assert!(up.requests.is_empty());
+    let id = capture_id(&up);
+    let (_, actions) = state.handle_endpoint_result("boot-1", &id, Ok(captured()));
+    assert!(actions.iter().any(
+        |action| matches!(action, ClientShellAction::Endpoint { request, .. }
+        if matches!(request.method, Method::PaneTextSnapshotSelection(_)))
+    ));
+}
+
+#[test]
+fn codex_pending_press_never_replays_into_changed_identity_or_geometry() {
+    for case in [
+        "endpoint",
+        "boot",
+        "generation",
+        "pane",
+        "focus",
+        "geometry",
+        "overlay",
+    ] {
+        let (mut state, mut mouse) = reporting_codex();
+        state.handle_raw_events(vec![RawInputEvent::Mouse(mouse)]);
+        match case {
+            "endpoint" => {
+                state.active_endpoint_id =
+                    ClientEndpointId::Ssh(crate::client::endpoint::ProfileId::generate())
+            }
+            "generation" => state.active_snapshot_generation = Some(999),
+            "geometry" => state.hits.panes[0].inner_rect.x += 1,
+            "overlay" => state.open_pane_context_menu("pane_1".into(), mouse.column, mouse.row),
+            _ => {
+                let mut projected = (**state.snapshot.as_ref().unwrap()).clone();
+                match case {
+                    "boot" => projected.boot_id = "boot-2".into(),
+                    "pane" => projected.panes.clear(),
+                    "focus" => projected.focused_pane_id = Some("pane_2".into()),
+                    _ => unreachable!(),
+                }
+                state.set_snapshot(Box::new(projected));
+            }
+        }
+        mouse.kind = MouseEventKind::Up(MouseButton::Left);
+        let up = state.handle_raw_events(vec![RawInputEvent::Mouse(mouse)]);
+        assert!(up.requests.is_empty(), "{case}");
+        assert!(state.pane_selection_press.is_none(), "{case}");
+        assert!(state.selection_capture.is_none(), "{case}");
+    }
+}
+
+#[test]
+fn codex_pending_press_is_cancelled_by_popup_before_compose() {
+    for pending in [false, true] {
+        let (mut state, mut mouse) = reporting_codex();
+        state.handle_raw_events(vec![RawInputEvent::Mouse(mouse)]);
+        if pending {
+            state.popup_pending = true;
+        } else {
+            let mut popup = surface_with_popup();
+            popup.panes[0].mouse_reporting = true;
+            state.set_pane_surface(popup);
+            assert!(state.pane_selection_press.is_none());
+        }
+        mouse.kind = MouseEventKind::Up(MouseButton::Left);
+        let up = state.handle_raw_events(vec![RawInputEvent::Mouse(mouse)]);
+        assert!(native_mouse_kinds(&up).is_empty(), "pending={pending}");
+        assert!(state.pane_selection_press.is_none());
+    }
+}
+
+#[test]
+fn codex_pending_press_is_cancelled_by_committed_text_and_paste() {
+    for event in [
+        RawInputEvent::Text(crate::input::TextCommit::new("typed")),
+        RawInputEvent::Paste("pasted".into()),
+    ] {
+        let (mut state, mut mouse) = reporting_codex();
+        state.handle_raw_events(vec![RawInputEvent::Mouse(mouse)]);
+        let input = state.handle_raw_events(vec![event]);
+        assert!(!input.requests.is_empty());
+        assert!(state.pane_selection_press.is_none());
+        mouse.kind = MouseEventKind::Up(MouseButton::Left);
+        let up = state.handle_raw_events(vec![RawInputEvent::Mouse(mouse)]);
+        assert!(native_mouse_kinds(&up).is_empty());
+    }
+}
+
+fn released_codex_selection() -> (ClientShellState, MouseEvent) {
+    released_codex_selection_at_width(106)
+}
+
+fn released_codex_selection_at_width(width: u16) -> (ClientShellState, MouseEvent) {
+    let (mut state, mut mouse) = reporting_codex();
+    state.compose(width, 20).unwrap();
+    mouse.column = state.hits.panes[0].inner_rect.x;
+    mouse.row = state.hits.panes[0].inner_rect.y;
+    state.config.copy_on_select = false;
+    state.handle_raw_events(vec![RawInputEvent::Mouse(mouse)]);
+    mouse.kind = MouseEventKind::Drag(MouseButton::Left);
+    mouse.column += 2;
+    let drag = state.handle_raw_events(vec![RawInputEvent::Mouse(mouse)]);
+    state.handle_endpoint_result("boot-1", &capture_id(&drag), Ok(captured()));
+    mouse.kind = MouseEventKind::Up(MouseButton::Left);
+    let up = state.handle_raw_events(vec![RawInputEvent::Mouse(mouse)]);
+    assert!(!up.actions.iter().any(
+        |action| matches!(action, ClientShellAction::Endpoint { request, .. }
+        if matches!(request.method, Method::PaneTextSnapshotSelection(_)))
+    ));
+    (state, mouse)
+}
+
+#[test]
+fn codex_copy_menu_works_with_keyboard_at_wide_and_narrow_widths() {
+    for width in [106, 72, 40] {
+        let (mut state, mut mouse) = released_codex_selection_at_width(width);
+        mouse.kind = MouseEventKind::Down(MouseButton::Right);
+        state.handle_raw_events(vec![RawInputEvent::Mouse(mouse)]);
+        let Some(ClientShellOverlay::ContextMenu(menu)) = state.overlay.as_mut() else {
+            panic!("menu");
+        };
+        let index = menu
+            .items()
+            .iter()
+            .position(|item| item.action == ClientContextMenuAction::CopyPaneSelection)
+            .unwrap();
+        assert!(menu.items()[index].enabled);
+        menu.highlighted = index;
+        state.compose(width, 20).unwrap();
+        let copy = state.handle_raw_events(vec![RawInputEvent::Key(
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()).into(),
+        )]);
+        assert!(copy.requests.is_empty());
+        let request = copy
+            .actions
+            .iter()
+            .find_map(|action| match action {
+                ClientShellAction::Endpoint { request, .. }
+                    if matches!(request.method, Method::PaneTextSnapshotSelection(_)) =>
+                {
+                    Some(request)
+                }
+                _ => None,
+            })
+            .expect("menu copies without terminal keys");
+        let (_, copied) = state.handle_endpoint_result(
+            "boot-1",
+            &request.id,
+            Ok(ResponseResult::PaneTextSnapshotSelection {
+                snapshot_id: "frozen-1".into(),
+                text: "LIV".into(),
+            }),
+        );
+        assert!(copied.iter().any(
+            |action| matches!(action, ClientShellAction::ClipboardWrite(bytes) if bytes == b"LIV")
+        ));
+    }
+}
+
+#[test]
+fn pane_copy_menu_without_selection_is_disabled_and_stale_menu_is_inert() {
+    let (mut state, mouse) = reporting_codex();
+    state.open_pane_context_menu("pane_1".into(), mouse.column, mouse.row);
+    let Some(ClientShellOverlay::ContextMenu(menu)) = state.overlay.as_ref() else {
+        panic!("menu");
+    };
+    let index = menu
+        .items()
+        .iter()
+        .position(|item| item.action == ClientContextMenuAction::CopyPaneSelection)
+        .unwrap();
+    assert!(!menu.items()[index].enabled);
+    let mut outcome = ClientShellInput::default();
+    state.activate_context_menu_item(index, &mut outcome);
+    assert!(outcome.requests.is_empty() && outcome.actions.is_empty());
+
+    let (mut state, mouse) = released_codex_selection();
+    state.open_pane_context_menu("pane_1".into(), mouse.column, mouse.row);
+    state.cancel_frozen_selection();
+    state.activate_context_menu_item(index, &mut outcome);
+    assert!(outcome.requests.is_empty() && outcome.actions.is_empty());
+}
+
+#[test]
+fn codex_copy_menu_mouse_activation_preserves_selection_until_response() {
+    let (mut state, mut mouse) = released_codex_selection();
+    mouse.kind = MouseEventKind::Down(MouseButton::Right);
+    state.handle_raw_events(vec![RawInputEvent::Mouse(mouse)]);
+    state.compose(106, 20).unwrap();
+    let Some(ClientShellOverlay::ContextMenu(menu)) = state.overlay.as_ref() else {
+        panic!("menu");
+    };
+    let index = menu
+        .items()
+        .iter()
+        .position(|item| item.action == ClientContextMenuAction::CopyPaneSelection)
+        .unwrap();
+    let (row, _) = state
+        .hits
+        .context_menu_rows
+        .iter()
+        .find(|(_, row)| *row == index)
+        .unwrap();
+    mouse.kind = MouseEventKind::Down(MouseButton::Left);
+    mouse.column = row.x;
+    mouse.row = row.y;
+    let copy = state.handle_raw_events(vec![RawInputEvent::Mouse(mouse)]);
+    assert!(copy.requests.is_empty());
+    assert!(copy.actions.iter().any(
+        |action| matches!(action, ClientShellAction::Endpoint { request, .. }
+        if matches!(request.method, Method::PaneTextSnapshotSelection(_)))
+    ));
+    assert!(state.selection_capture.is_some());
+}
+
+#[test]
+fn codex_right_click_passthrough_keeps_native_behavior() {
+    let (mut state, mut mouse) = released_codex_selection();
+    let mut projected = (**state.snapshot.as_ref().unwrap()).clone();
+    projected.panes[0].right_click_passthrough = true;
+    state.set_snapshot(Box::new(projected));
+    mouse.kind = MouseEventKind::Down(MouseButton::Right);
+    let down = state.handle_raw_events(vec![RawInputEvent::Mouse(mouse)]);
+    assert_eq!(native_mouse_kinds(&down).len(), 1);
+    assert!(state.overlay.is_none());
+    assert!(state.selection_capture.is_none());
+}
+
+#[test]
+fn stale_copy_menu_cannot_copy_after_endpoint_generation_changes() {
+    let (mut state, mouse) = released_codex_selection();
+    state.open_pane_context_menu("pane_1".into(), mouse.column, mouse.row);
+    let Some(ClientShellOverlay::ContextMenu(menu)) = state.overlay.as_ref() else {
+        panic!("menu");
+    };
+    let index = menu
+        .items()
+        .iter()
+        .position(|item| item.action == ClientContextMenuAction::CopyPaneSelection)
+        .unwrap();
+    state.active_snapshot_generation = Some(999);
+    let mut copy = ClientShellInput::default();
+    state.activate_context_menu_item(index, &mut copy);
+    assert!(copy.requests.is_empty() && copy.actions.is_empty());
+}
+
+#[test]
+fn pane_copy_menu_reads_completed_live_selection_without_terminal_keys() {
+    let (mut state, mouse) = ready();
+    state.set_endpoint_methods(None);
+    let mut selection =
+        crate::selection::Selection::absolute_range("pane_1".into(), (0, 0), (0, 2));
+    selection.finish();
+    state.selection = Some(selection);
+    state.open_pane_context_menu("pane_1".into(), mouse.column, mouse.row);
+    let Some(ClientShellOverlay::ContextMenu(menu)) = state.overlay.as_ref() else {
+        panic!("menu");
+    };
+    let index = menu
+        .items()
+        .iter()
+        .position(|item| item.action == ClientContextMenuAction::CopyPaneSelection)
+        .unwrap();
+    let mut copy = ClientShellInput::default();
+    state.activate_context_menu_item(index, &mut copy);
+    assert!(copy.requests.is_empty());
+    assert!(copy.actions.iter().any(
+        |action| matches!(action, ClientShellAction::Endpoint { request, .. }
+        if matches!(request.method, Method::PaneSelectionRead(_)))
+    ));
+    assert!(state.selection.is_none());
+}
+
+#[test]
+fn codex_click_waits_for_release_then_preserves_native_click() {
+    let (mut state, mut mouse) = reporting_codex();
+    let down = state.handle_raw_events(vec![RawInputEvent::Mouse(mouse)]);
+    assert!(down.requests.is_empty(), "按下先等是否拖动");
+    mouse.kind = MouseEventKind::Up(MouseButton::Left);
+    let up = state.handle_raw_events(vec![RawInputEvent::Mouse(mouse)]);
+    let kinds = up
+        .requests
+        .iter()
+        .flat_map(|request| match request {
+            ClientMessage::ClientShellPaneInput { events, .. } => events.as_slice(),
+            _ => &[],
+        })
+        .filter_map(|event| match event {
+            ClientPaneInputEvent::Mouse { kind, .. } => Some(*kind),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        kinds,
+        vec![
+            crate::protocol::ClientMouseKind::Down(crate::protocol::ClientMouseButton::Left),
+            crate::protocol::ClientMouseKind::Up(crate::protocol::ClientMouseButton::Left),
+        ]
+    );
+    assert!(state.selection_capture.is_none());
+}
+
+#[test]
+fn codex_drag_uses_frozen_selection_and_copies_after_delayed_capture() {
+    let (mut state, mut mouse) = reporting_codex();
+    state.handle_raw_events(vec![RawInputEvent::Mouse(mouse)]);
+    mouse.kind = MouseEventKind::Drag(MouseButton::Left);
+    mouse.column += 2;
+    let drag = state.handle_raw_events(vec![RawInputEvent::Mouse(mouse)]);
+    assert!(drag.requests.is_empty(), "拖选不触发应用鼠标/按键");
+    let id = capture_id(&drag);
+    mouse.kind = MouseEventKind::Up(MouseButton::Left);
+    assert!(state
+        .handle_raw_events(vec![RawInputEvent::Mouse(mouse)])
+        .requests
+        .is_empty());
+    let (_, actions) = state.handle_endpoint_result("boot-1", &id, Ok(captured()));
+    let request = actions
+        .iter()
+        .find_map(|action| match action {
+            ClientShellAction::Endpoint { request, .. }
+                if matches!(&request.method, Method::PaneTextSnapshotSelection(params)
+                if params.anchor.col == 0 && params.cursor.col == 2) =>
+            {
+                Some(request)
+            }
+            _ => None,
+        })
+        .expect("释放后以最初按下坐标复制冻结选区");
+    let (_, copied) = state.handle_endpoint_result(
+        "boot-1",
+        &request.id,
+        Ok(ResponseResult::PaneTextSnapshotSelection {
+            snapshot_id: "frozen-1".into(),
+            text: "LIV".into(),
+        }),
+    );
+    assert!(matches!(&copied[..], [ClientShellAction::ClipboardWrite(bytes)] if bytes == b"LIV"));
+}
+
+#[test]
+fn pane_copy_menu_preserves_a_released_frozen_selection() {
+    let _lang = crate::i18n::lang_guard(crate::i18n::Lang::En);
+    let (mut state, mut mouse) = ready();
+    state.config.copy_on_select = false;
+    let id = capture_id(&state.handle_raw_events(vec![RawInputEvent::Mouse(mouse)]));
+    state.handle_endpoint_result("boot-1", &id, Ok(captured()));
+    mouse.kind = MouseEventKind::Drag(MouseButton::Left);
+    mouse.column += 2;
+    state.handle_raw_events(vec![RawInputEvent::Mouse(mouse)]);
+    mouse.kind = MouseEventKind::Up(MouseButton::Left);
+    state.handle_raw_events(vec![RawInputEvent::Mouse(mouse)]);
+    mouse.kind = MouseEventKind::Down(MouseButton::Right);
+    state.handle_raw_events(vec![RawInputEvent::Mouse(mouse)]);
+    state.tick_frozen_selection(std::time::Instant::now(), &mut ClientShellInput::default());
+    assert!(
+        state.selection_capture.is_some(),
+        "右键菜单不销毁同窗格已完成选区"
+    );
+    let Some(ClientShellOverlay::ContextMenu(menu)) = state.overlay.as_ref() else {
+        panic!("pane context menu");
+    };
+    let index = menu
+        .items()
+        .iter()
+        .position(|item| item.label == "Copy" && item.enabled)
+        .expect("可用复制条目");
+    let mut copy = ClientShellInput::default();
+    state.activate_context_menu_item(index, &mut copy);
+    assert!(copy.actions.iter().any(|action| matches!(action,
+        ClientShellAction::Endpoint { request, .. }
+            if matches!(&request.method, Method::PaneTextSnapshotSelection(params)
+                if params.anchor.col == 0 && params.cursor.col == 2))));
 }
 
 #[test]
