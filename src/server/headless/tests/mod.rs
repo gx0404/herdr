@@ -4181,6 +4181,7 @@ async fn worktree_discovery_does_not_block_client_typing() {
             respond_to,
             response_write_complete: None,
             observation_events: None,
+            report_origin: None,
             stream_active: None,
         });
         entered
@@ -8178,6 +8179,7 @@ fn completion_guard_api_report(server: &mut HeadlessServer, method: api::schema:
         respond_to,
         response_write_complete: None,
         observation_events: None,
+        report_origin: None,
         stream_active: None,
     });
     let response = response_rx
