@@ -8,7 +8,7 @@
 //! - 目录：`sessions/<YYYY>/<MM>/<DD>/rollout-<YYYY-MM-DDTHH-MM-SS>-<thread id>.jsonl`。
 //!   文件名时间与日期目录是**本地时间**（267/267 与 UUIDv7 毫秒之差恰为时区偏移），
 //!   记录内 `timestamp` 才是 UTC RFC3339；压缩变体后缀 `.jsonl.zst`（二进制字符串
-//!   `compressed rollout reader` / `archived_sessions`），本适配器不解压。
+//!   `compressed rollout reader` / `archived_sessions`），压缩与归档读取现在由有界只读缓存提供。
 //! - 每个文件第 0 行必是自己的 `session_meta`（267/267，字节偏移 0，长度 < 64 KiB）；
 //!   子线程第 1 行是父线程 `session_meta` 的副本（138 例），其后跟父历史前缀——
 //!   所以只读第 0 行。
@@ -103,6 +103,10 @@ use super::{ActivitySource, ContentChunk, SourceContext, SourceError};
 use crate::api::schema::{
     AgentActivityContentFormat, AgentActivityKind, AgentActivityNode, AgentActivityStatus,
 };
+
+mod rollout_io;
+use rollout_io::DecodeBudget;
+pub(crate) use rollout_io::RolloutCache;
 
 pub(super) struct Codex;
 
@@ -215,20 +219,20 @@ impl ActivitySource for Codex {
             return Err(SourceError::Unsupported);
         };
         let sessions = sessions_dir(cx)?;
-        if !sessions.is_dir() {
-            return Ok(Vec::new());
-        }
         // 子线程在父线程之后创建；目录按本地日期分桶，UTC 前一天起扫对任何时区都安全。
         let min_day = uuid_v7_millis(&root_id)
             .map(|millis| millis.saturating_sub(86_400_000))
             .and_then(utc_day);
-        let metas = scan_metas(&sessions, min_day).map_err(SourceError::Io)?;
+        let fallback = std::sync::Mutex::new(RolloutCache::default());
+        let cache = cx.codex_cache.unwrap_or(&fallback);
+        let mut budget = DecodeBudget::default();
+        let metas = scan_metas(&sessions, min_day, cache, &mut budget).map_err(SourceError::Io)?;
         let mut nodes = build_tree(&root_id, &metas);
         for node in &mut nodes {
             let Some(meta) = metas.iter().find(|meta| meta.id == node.id) else {
                 continue;
             };
-            let lifecycle = lifecycle_from_tail(&meta.path, STATUS_TAIL_BYTES).unwrap_or_else(|error| {
+            let lifecycle = rollout_io::lifecycle(&meta.path, cache, &mut budget).unwrap_or_else(|error| {
                 tracing::debug!(path = %meta.path.display(), %error, "codex rollout 尾部不可读，状态记未知");
                 Lifecycle::Unreadable
             });
@@ -256,13 +260,15 @@ impl ActivitySource for Codex {
         }
         let sessions = sessions_dir(cx)?;
         let path = find_rollout(&sessions, node_id)?;
-        read_transcript_page(&path, cursor, max_bytes)
+        let fallback = std::sync::Mutex::new(RolloutCache::default());
+        let cache = cx.codex_cache.unwrap_or(&fallback);
+        read_transcript_page_with_cache(&path, cursor, max_bytes, cache)
     }
 }
 
 // ---- 会话定位 ----
 
-/// 已上报转录时只从固定 `sessions/YYYY/MM/DD/rollout-*` 布局定位库根；未知布局
+/// 已上报转录时只从固定 `sessions/YYYY/MM/DD/rollout-*` 或平铺归档布局定位库根；未知布局
 /// 不猜祖先也不回退其他库。没有路径时保留 server `CODEX_HOME` / 默认目录的 ID 查找。
 fn sessions_dir(cx: &SourceContext<'_>) -> Result<PathBuf, SourceError> {
     if let Some(session) = cx
@@ -271,7 +277,7 @@ fn sessions_dir(cx: &SourceContext<'_>) -> Result<PathBuf, SourceError> {
     {
         let path = Path::new(&session.value);
         let root = reported_sessions_dir(path).ok_or(SourceError::Unsupported)?;
-        return Ok(root.to_path_buf());
+        return Ok(root);
     }
     Ok(match cx.agent_config_dir {
         Some(config_dir) => config_dir.join("sessions"),
@@ -279,7 +285,7 @@ fn sessions_dir(cx: &SourceContext<'_>) -> Result<PathBuf, SourceError> {
     })
 }
 
-fn reported_sessions_dir(path: &Path) -> Option<&Path> {
+fn reported_sessions_dir(path: &Path) -> Option<PathBuf> {
     if !path.is_absolute()
         || path
             .components()
@@ -288,6 +294,9 @@ fn reported_sessions_dir(path: &Path) -> Option<&Path> {
         return None;
     }
     crate::agent_resume::codex_rollout_session_id(path.file_name()?.to_str()?)?;
+    if path.parent()?.file_name()?.to_str()? == "archived_sessions" {
+        return Some(path.parent()?.parent()?.join("sessions"));
+    }
     let day = path.parent()?;
     let month = day.parent()?;
     let year = month.parent()?;
@@ -307,7 +316,7 @@ fn reported_sessions_dir(path: &Path) -> Option<&Path> {
         && date_part(year, 4, 1, 9999)
         && date_part(month, 2, 1, 12)
         && date_part(day, 2, 1, 31))
-    .then_some(sessions)
+    .then(|| sessions.to_path_buf())
 }
 
 /// pane 的根线程 id：钩子上报的是 id；给的是路径时从文件名取。
@@ -390,21 +399,34 @@ fn numeric_dir_name(entry: &fs::DirEntry) -> Option<u32> {
 /// `sessions/YYYY/MM/DD` 日期目录，按日期从新到旧；`min_day` 之前的跳过。
 fn day_dirs(sessions: &Path, min_day: Option<(u32, u32, u32)>) -> io::Result<Vec<PathBuf>> {
     let mut days = Vec::new();
-    for year in fs::read_dir(sessions)?.filter_map(Result::ok) {
+    let mut remaining = 8192usize;
+    'years: for year in fs::read_dir(sessions)?.take(8192) {
+        if remaining == 0 {
+            break;
+        }
+        remaining = remaining.saturating_sub(1);
+        let Ok(year) = year else { continue };
         let Some(year_number) = numeric_dir_name(&year) else {
             continue;
         };
         let Ok(months) = fs::read_dir(year.path()) else {
             continue;
         };
-        for month in months.filter_map(Result::ok) {
+        for month in months.take(remaining) {
+            if remaining == 0 {
+                break 'years;
+            }
+            remaining = remaining.saturating_sub(1);
+            let Ok(month) = month else { continue };
             let Some(month_number) = numeric_dir_name(&month) else {
                 continue;
             };
             let Ok(day_entries) = fs::read_dir(month.path()) else {
                 continue;
             };
-            for day in day_entries.filter_map(Result::ok) {
+            for day in day_entries.take(remaining) {
+                remaining = remaining.saturating_sub(1);
+                let Ok(day) = day else { continue };
                 let Some(day_number) = numeric_dir_name(&day) else {
                     continue;
                 };
@@ -413,6 +435,9 @@ fn day_dirs(sessions: &Path, min_day: Option<(u32, u32, u32)>) -> io::Result<Vec
                     continue;
                 }
                 days.push((key, day.path()));
+                if remaining == 0 {
+                    break 'years;
+                }
             }
         }
     }
@@ -452,8 +477,12 @@ struct RolloutMeta {
 /// 只读首行；任何一步失败都只是跳过这个文件。
 fn read_meta(path: &Path) -> Option<RolloutMeta> {
     let file = fs::File::open(path).ok()?;
+    read_meta_from_reader(BufReader::new(file), path)
+}
+
+fn read_meta_from_reader(reader: impl BufRead, path: &Path) -> Option<RolloutMeta> {
     let mut line = Vec::new();
-    let mut reader = BufReader::new(file).take(MAX_META_LINE_BYTES);
+    let mut reader = reader.take(MAX_META_LINE_BYTES);
     let length = reader.read_until(b'\n', &mut line).ok()?;
     if length == 0 || (length as u64 >= MAX_META_LINE_BYTES && !line.ends_with(b"\n")) {
         return None;
@@ -541,52 +570,83 @@ fn rfc3339_millis(text: &str) -> Option<u64> {
     u64::try_from(nanos / 1_000_000).ok()
 }
 
-/// 读 `min_day` 起每个日期目录里 rollout 的首行；从新到旧，超过预算就停。
-fn scan_metas(sessions: &Path, min_day: Option<(u32, u32, u32)>) -> io::Result<Vec<RolloutMeta>> {
-    let mut metas: Vec<RolloutMeta> = Vec::new();
-    let mut budget = MAX_ROLLOUTS_SCANNED;
-    for day in day_dirs(sessions, min_day)? {
-        let Ok(entries) = fs::read_dir(&day) else {
+/// Enumerate a bounded set of regular files; active storage wins over an archived copy.
+/// Selection precedes metadata reads so superseded files cannot create duplicate/stale nodes.
+fn selected_rollouts(
+    sessions: &Path,
+    min_day: Option<(u32, u32, u32)>,
+) -> io::Result<Vec<PathBuf>> {
+    const MAX_CANDIDATES: usize = 8192;
+    let mut dirs: Vec<(bool, PathBuf)> = if sessions.is_dir() {
+        day_dirs(sessions, min_day)?
+            .into_iter()
+            .map(|path| (true, path))
+            .collect()
+    } else {
+        Vec::new()
+    };
+    if let Some(config) = sessions.parent() {
+        let archived = config.join("archived_sessions");
+        if archived.is_dir() {
+            dirs.push((false, archived));
+        }
+    }
+    let mut remaining = MAX_CANDIDATES;
+    let mut selected: HashMap<String, (bool, PathBuf)> = HashMap::new();
+    for (active, day) in dirs {
+        let Ok(entries) = fs::read_dir(day) else {
             continue;
         };
-        let mut files: Vec<PathBuf> = entries
-            .filter_map(Result::ok)
-            .map(|entry| entry.path())
-            .filter(|path| {
-                path.file_name()
-                    .and_then(|name| name.to_str())
-                    .and_then(rollout_file_id)
-                    .is_some_and(|(_, compressed)| !compressed)
-            })
-            .collect();
-        files.sort();
-        for path in files.into_iter().rev() {
-            if budget == 0 {
-                tracing::debug!(
-                    limit = MAX_ROLLOUTS_SCANNED,
-                    "codex rollout 扫描达到预算上限"
-                );
-                return Ok(metas);
+        for entry in entries.take(remaining) {
+            remaining = remaining.saturating_sub(1);
+            let Ok(entry) = entry else { continue };
+            if !entry.file_type().is_ok_and(|kind| kind.is_file()) {
+                continue;
             }
-            budget -= 1;
-            if let Some(meta) = read_meta(&path) {
-                // A filename and its first meta must identify the same thread.
-                if path
-                    .file_name()
-                    .and_then(|name| name.to_str())
-                    .and_then(rollout_file_id)
-                    .map(|(id, _)| id)
-                    != Some(meta.id.as_str())
-                {
-                    continue;
-                }
-                if let Some(previous) = metas.iter_mut().find(|previous| previous.id == meta.id) {
-                    if rollout_rank(&meta.path) > rollout_rank(&previous.path) {
-                        *previous = meta;
-                    }
-                } else {
-                    metas.push(meta);
-                }
+            let path = entry.path();
+            let Some((id, _)) = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .and_then(rollout_file_id)
+            else {
+                continue;
+            };
+            let replace = selected.get(id).is_none_or(|(old_active, old)| {
+                (active, rollout_rank(&path)) > (*old_active, rollout_rank(old))
+            });
+            if replace {
+                selected.insert(id.to_owned(), (active, path));
+            }
+        }
+        if remaining == 0 {
+            break;
+        }
+    }
+    let mut paths: Vec<_> = selected.into_values().map(|(_, path)| path).collect();
+    paths.sort_by(|a, b| rollout_rank(b).cmp(&rollout_rank(a)));
+    Ok(paths)
+}
+
+fn scan_metas(
+    sessions: &Path,
+    min_day: Option<(u32, u32, u32)>,
+    cache: &std::sync::Mutex<RolloutCache>,
+    budget: &mut DecodeBudget,
+) -> io::Result<Vec<RolloutMeta>> {
+    let mut metas = Vec::new();
+    for path in selected_rollouts(sessions, min_day)?
+        .into_iter()
+        .take(MAX_ROLLOUTS_SCANNED)
+    {
+        if let Some(meta) = rollout_io::meta(&path, cache, budget) {
+            if path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .and_then(rollout_file_id)
+                .map(|(id, _)| id)
+                == Some(meta.id.as_str())
+            {
+                metas.push(meta);
             }
         }
     }
@@ -716,6 +776,14 @@ enum Lifecycle {
 fn lifecycle_from_tail(path: &Path, tail_bytes: u64) -> io::Result<Lifecycle> {
     let mut file = fs::File::open(path)?;
     let length = file.metadata()?.len();
+    lifecycle_from_reader(&mut file, length, tail_bytes)
+}
+
+fn lifecycle_from_reader(
+    file: &mut (impl Read + Seek),
+    length: u64,
+    tail_bytes: u64,
+) -> io::Result<Lifecycle> {
     let start = length.saturating_sub(tail_bytes);
     file.seek(SeekFrom::Start(start))?;
     let mut buffer = Vec::with_capacity((length - start) as usize);
@@ -820,46 +888,21 @@ fn apply_lifecycle(node: &mut AgentActivityNode, lifecycle: &Lifecycle) {
 // ---- 内容读取 ----
 
 /// 只列目录、不打开文件；同一 id 同时有明文与 `.zst` 时取明文。会话库或该线程的
-/// rollout 还没生成时报 `Unavailable`（稍后重试），只剩压缩变体时报 `Unsupported`。
+/// rollout 还没生成时报 `Unavailable`（稍后重试），压缩变体由共享只读缓存解析。
 fn find_rollout(sessions: &Path, id: &str) -> Result<PathBuf, SourceError> {
-    if !sessions.is_dir() {
-        return Err(SourceError::Unavailable);
-    }
-    // 线程 id 是 UUIDv7 时只需从它创建那天（UTC 前一天起，见 `discover`）往后找。
     let min_day = uuid_v7_millis(id)
         .map(|millis| millis.saturating_sub(86_400_000))
         .and_then(utc_day);
-    let mut selected: Option<PathBuf> = None;
-    for day in day_dirs(sessions, min_day).map_err(SourceError::Io)? {
-        let Ok(entries) = fs::read_dir(&day) else {
-            continue;
-        };
-        for entry in entries.filter_map(Result::ok) {
-            let name = entry.file_name();
-            let Some((file_id, _)) = name.to_str().and_then(rollout_file_id) else {
-                continue;
-            };
-            if file_id != id {
-                continue;
-            }
-            let candidate = entry.path();
-            if selected
-                .as_ref()
-                .is_none_or(|previous| rollout_rank(&candidate) > rollout_rank(previous))
-            {
-                selected = Some(candidate);
-            }
-        }
-    }
-    if let Some(path) = selected {
-        return if path.to_string_lossy().ends_with(COMPRESSED_SUFFIX) {
-            Err(SourceError::Unsupported)
-        } else {
-            Ok(path)
-        };
-    }
-    tracing::debug!(thread = id, "codex 线程还没有 rollout 文件");
-    Err(SourceError::Unavailable)
+    selected_rollouts(sessions, min_day)
+        .map_err(SourceError::Io)?
+        .into_iter()
+        .find(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .and_then(rollout_file_id)
+                .is_some_and(|(file_id, _)| file_id == id)
+        })
+        .ok_or(SourceError::Unavailable)
 }
 
 /// 一页的上限：渲染文本的字节预算、单页扫描的原始字节、单条记录的原始字节。
@@ -875,25 +918,45 @@ struct PageLimits {
 /// `eof` 只表示这次已读到文件末尾；末尾不以换行结尾的半截记录不消费，游标停在它的
 /// 行首，跟随增长时用同一游标再读。单条渲染结果比整页预算还大时截在字符边界并标记
 /// `truncated`。
-fn read_transcript_page(
+fn read_transcript_page_with_cache(
     path: &Path,
     cursor: Option<&str>,
     max_bytes: usize,
+    cache: &std::sync::Mutex<RolloutCache>,
 ) -> Result<ContentChunk, SourceError> {
+    let identity = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .and_then(|name| {
+            name.strip_suffix(".zst")
+                .unwrap_or(name)
+                .strip_suffix(".jsonl")
+        })
+        .ok_or(SourceError::Unsupported)?;
     let offset = match cursor {
         None => 0,
-        Some(cursor) => cursor.trim().parse::<u64>().map_err(|_| {
-            SourceError::Malformed(format!(
-                "codex content cursor is not a byte offset: {cursor:?}"
-            ))
-        })?,
+        Some(cursor) => {
+            let raw = if let Some(versioned) = cursor.strip_prefix("codex1:") {
+                let (previous, offset) = versioned
+                    .rsplit_once(':')
+                    .ok_or_else(|| SourceError::Malformed("invalid Codex cursor".into()))?;
+                if previous != identity {
+                    return Err(SourceError::StaleCursor);
+                }
+                offset
+            } else {
+                cursor.trim()
+            }; // Legacy numeric input has no replacement identity.
+            raw.parse::<u64>()
+                .map_err(|_| SourceError::Malformed("invalid Codex byte offset".into()))?
+        }
     };
     let budget = if max_bytes == 0 {
         DEFAULT_READ_BYTES
     } else {
         max_bytes.clamp(MIN_READ_BYTES, MAX_READ_BYTES)
     };
-    render_page(
+    let mut page = render_page_with_cache(
         path,
         offset,
         PageLimits {
@@ -901,14 +964,35 @@ fn read_transcript_page(
             scan_bytes: MAX_PAGE_SCAN_BYTES,
             record_bytes: MAX_RECORD_BYTES,
         },
+        cache,
+    )?;
+    page.next_cursor = page
+        .next_cursor
+        .map(|offset| format!("codex1:{identity}:{offset}"));
+    Ok(page)
+}
+
+#[cfg(test)]
+fn render_page(path: &Path, offset: u64, limits: PageLimits) -> Result<ContentChunk, SourceError> {
+    render_page_with_cache(
+        path,
+        offset,
+        limits,
+        &std::sync::Mutex::new(RolloutCache::default()),
     )
 }
 
-fn render_page(path: &Path, offset: u64, limits: PageLimits) -> Result<ContentChunk, SourceError> {
-    // 子线程开头继承的父历史前缀：ordinal 小于它的记录不属于这个子线程。
-    let history_start = read_meta(path).and_then(|meta| meta.history_start);
-    let mut file = fs::File::open(path).map_err(SourceError::Io)?;
-    let length = file.metadata().map_err(SourceError::Io)?.len();
+fn render_page_with_cache(
+    path: &Path,
+    offset: u64,
+    limits: PageLimits,
+    cache: &std::sync::Mutex<RolloutCache>,
+) -> Result<ContentChunk, SourceError> {
+    let mut budget = DecodeBudget::default();
+    let mut file = rollout_io::open(path, cache, &mut budget)?;
+    let history_start =
+        read_meta_from_reader(BufReader::new(&mut file), path).and_then(|meta| meta.history_start);
+    let length = file.len().map_err(SourceError::Io)?;
     let offset = offset.min(length);
     file.seek(SeekFrom::Start(offset))
         .map_err(SourceError::Io)?;
@@ -1750,6 +1834,7 @@ mod tests {
 
     fn context<'a>(home: &'a Path, session: Option<&'a AgentSessionRef>) -> SourceContext<'a> {
         SourceContext {
+            codex_cache: None,
             agent: "codex",
             session,
             cwd: None,
@@ -1928,7 +2013,7 @@ mod tests {
     }
 
     /// 每个测试自己的临时 home（仓库不带 tempfile 依赖）；用完删掉。
-    fn unique_temp_home(name: &str) -> PathBuf {
+    pub(super) fn unique_temp_home(name: &str) -> PathBuf {
         let nanos = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|elapsed| elapsed.as_nanos())
@@ -1965,6 +2050,7 @@ mod tests {
         let session = AgentSessionRef::id(ROOT).expect("合法 id");
 
         let relocated = SourceContext {
+            codex_cache: None,
             agent_config_dir: Some(&codex_home),
             ..context(&empty_home, Some(&session))
         };
@@ -2000,6 +2086,7 @@ mod tests {
         let home = fixture_home();
         let nowhere = temp.join("nowhere");
         let pinned = SourceContext {
+            codex_cache: None,
             agent_config_dir: Some(&nowhere),
             ..context(&home, Some(&session))
         };
@@ -2022,6 +2109,7 @@ mod tests {
                 .join(format!("rollout-2026-09-22T09-00-00-{ROOT}{suffix}"));
             let session = AgentSessionRef::path(path.to_string_lossy()).unwrap();
             let cx = SourceContext {
+                codex_cache: None,
                 agent_config_dir: Some(&wrong_config),
                 ..context(&home, Some(&session))
             };
@@ -2033,7 +2121,7 @@ mod tests {
                 .is_empty());
             assert!(matches!(
                 Codex.read(&cx, COMPRESSED, None, 300),
-                Err(SourceError::Unsupported)
+                Err(SourceError::Malformed(_))
             ));
         }
         for relative in [
@@ -2105,6 +2193,214 @@ mod tests {
     }
 
     #[test]
+    fn archived_compressed_rollouts_discover_and_page_without_writing_the_library() {
+        let temp = unique_temp_home("archived-compressed");
+        let archive = temp.join(".codex/archived_sessions");
+        fs::create_dir_all(&archive).unwrap();
+        let root_path = archive.join(format!("rollout-2026-09-22T10-00-00-{ROOT}.jsonl.zst"));
+        fs::write(&root_path, b"root path only").unwrap();
+        let child_path = archive.join(format!("rollout-2026-09-22T10-01-00-{CHILD_A}.jsonl.zst"));
+        let meta = serde_json::json!({"type":"session_meta","payload":{"id":CHILD_A,"parent_thread_id":ROOT,"source":{"subagent":"review"},"agent_nickname":"archived child","creator_user_id":"synthetic-user","account_id":"synthetic-account"}});
+        let message = serde_json::json!({"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"compressed reply"}]}});
+        let text = format!("{meta}\n{message}\n");
+        let compressed = ruzstd::encoding::compress_to_vec(
+            text.as_bytes(),
+            ruzstd::encoding::CompressionLevel::Fastest,
+        );
+        fs::write(&child_path, &compressed).unwrap();
+        let session = AgentSessionRef::path(root_path.to_string_lossy()).unwrap();
+        let cx = context(&temp, Some(&session));
+        let nodes = Codex.discover(&cx).unwrap();
+        assert_eq!(nodes.len(), 1);
+        assert_eq!(nodes[0].id, CHILD_A);
+        let page = Codex.read(&cx, CHILD_A, None, 256).unwrap();
+        assert!(page.text.contains("compressed reply"));
+        assert!(page.eof);
+        assert!(page
+            .next_cursor
+            .as_deref()
+            .unwrap()
+            .ends_with(&format!(":{}", text.len())));
+        assert_eq!(fs::read(&child_path).unwrap(), compressed);
+        assert!(!child_path.with_extension("").exists());
+        let id = AgentSessionRef::id(ROOT).unwrap();
+        assert_eq!(Codex.discover(&context(&temp, Some(&id))).unwrap(), nodes);
+        let _ = fs::remove_dir_all(temp);
+    }
+
+    #[test]
+    fn rollout_cursor_rejects_shorter_and_longer_replacements() {
+        for size in [8, 4096] {
+            let home = unique_temp_home("rollout-cursor");
+            let day = home.join(".codex/sessions/2026/09/22");
+            fs::create_dir_all(&day).unwrap();
+            let body = |text: String| {
+                format!(
+                    "{}\n{}\n",
+                    serde_json::json!({"type":"session_meta","payload":{"id":CHILD_A,"parent_thread_id":ROOT,"source":{"subagent":"review"}}}),
+                    serde_json::json!({"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":text}]}})
+                )
+            };
+            let old = day.join(format!("rollout-2026-09-22T10-00-00-{CHILD_A}.jsonl"));
+            fs::write(&old, body("OLD".repeat(512))).unwrap();
+            let session = AgentSessionRef::id(ROOT).unwrap();
+            let cx = context(&home, Some(&session));
+            let first = Codex.read(&cx, CHILD_A, None, MAX_READ_BYTES).unwrap();
+            let new = day.join(format!("rollout-2026-09-22T10-01-00-{CHILD_A}.jsonl"));
+            fs::write(&new, body("NEW".repeat(size))).unwrap();
+            let stale = Codex
+                .read(&cx, CHILD_A, first.next_cursor.as_deref(), MAX_READ_BYTES)
+                .err()
+                .expect("replacement must not reuse the old byte offset");
+            assert_eq!(stale.code_and_message().0, "activity_cursor_stale");
+            let fresh = Codex.read(&cx, CHILD_A, None, MAX_READ_BYTES).unwrap();
+            assert!(fresh.text.contains("NEW"));
+            assert!(!fresh.text.contains("OLD"));
+            fs::remove_dir_all(home).unwrap();
+        }
+    }
+
+    #[test]
+    fn active_and_plain_rollouts_win_duplicate_archived_compressed_copies() {
+        let temp = unique_temp_home("rollout-priority");
+        let sessions = temp.join("sessions");
+        let day = sessions.join("2026/09/22");
+        let archive = temp.join("archived_sessions");
+        fs::create_dir_all(&day).unwrap();
+        fs::create_dir_all(&archive).unwrap();
+        let name = format!("rollout-2026-09-22T10-00-00-{CHILD_A}.jsonl");
+        let plain = day.join(&name);
+        let compressed = day.join(format!("{name}.zst"));
+        fs::write(&plain, b"plain").unwrap();
+        fs::write(&compressed, b"compressed").unwrap();
+        fs::write(
+            archive.join(format!("rollout-2026-09-23T10-00-00-{CHILD_A}.jsonl")),
+            b"archive",
+        )
+        .unwrap();
+        assert_eq!(find_rollout(&sessions, CHILD_A).unwrap(), plain);
+        fs::remove_file(&plain).unwrap();
+        assert_eq!(find_rollout(&sessions, CHILD_A).unwrap(), compressed);
+        fs::remove_dir_all(day).unwrap();
+        assert!(find_rollout(&sessions, CHILD_A)
+            .unwrap()
+            .starts_with(archive));
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn compressed_pages_match_plain_and_storage_transition_keeps_offsets() {
+        let temp = unique_temp_home("compressed-pages");
+        fs::create_dir_all(&temp).unwrap();
+        let plain = temp.join(format!("rollout-2026-09-22T10-00-00-{CHILD_A}.jsonl"));
+        let meta =
+            serde_json::json!({"type":"session_meta","payload":{"id":CHILD_A,"source":"cli"}});
+        let mut text = format!("{meta}\n");
+        for index in 0..20 {
+            let record = serde_json::json!({"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":format!("message {index}: {}", "内容".repeat(35))}]}});
+            text.push_str(&format!("{record}\n"));
+        }
+        fs::write(&plain, &text).unwrap();
+        let compressed = plain.with_extension("jsonl.zst");
+        fs::write(
+            &compressed,
+            ruzstd::encoding::compress_to_vec(
+                text.as_bytes(),
+                ruzstd::encoding::CompressionLevel::Fastest,
+            ),
+        )
+        .unwrap();
+        let cache = std::sync::Mutex::new(RolloutCache::default());
+        let mut cursor = None;
+        loop {
+            let a =
+                read_transcript_page_with_cache(&plain, cursor.as_deref(), 300, &cache).unwrap();
+            let b = read_transcript_page_with_cache(&compressed, cursor.as_deref(), 300, &cache)
+                .unwrap();
+            assert_eq!(a.text, b.text);
+            assert_eq!(a.next_cursor, b.next_cursor);
+            assert_eq!(a.eof, b.eof);
+            cursor = a.next_cursor;
+            if a.eof {
+                break;
+            }
+        }
+        fs::remove_file(&plain).unwrap();
+        let a = read_transcript_page_with_cache(&plain, None, 300, &cache).unwrap();
+        let b = read_transcript_page_with_cache(&compressed, None, 300, &cache).unwrap();
+        assert_eq!(a.text, b.text);
+        assert_eq!(a.next_cursor, b.next_cursor);
+        let archive = temp.join("archived_sessions");
+        fs::create_dir_all(&archive).unwrap();
+        let moved = archive.join(compressed.file_name().unwrap());
+        fs::rename(&compressed, &moved).unwrap();
+        let next =
+            read_transcript_page_with_cache(&moved, a.next_cursor.as_deref(), 300, &cache).unwrap();
+        assert!(!next.text.is_empty());
+        assert_ne!(next.next_cursor, a.next_cursor);
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    #[ignore = "manual deterministic 1/15-pane compressed activity profile"]
+    fn profile_compressed_activity_scale() {
+        use std::time::Instant;
+        for compressed in [false, true] {
+            for panes in [1, 15] {
+                let temp = unique_temp_home("compressed-profile");
+                let archive = temp.join(".codex/archived_sessions");
+                fs::create_dir_all(&archive).unwrap();
+                let cache = std::sync::Mutex::new(RolloutCache::default());
+                let sessions: Vec<_> = (0..panes)
+                    .map(|index| {
+                        AgentSessionRef::id(format!("01a0c600-0000-7000-8000-{index:012x}"))
+                            .unwrap()
+                    })
+                    .collect();
+                for (index, root) in sessions.iter().enumerate() {
+                    let child = format!("01a0c600-0000-7000-9000-{index:012x}");
+                    let meta = serde_json::json!({"type":"session_meta","payload":{"id":child,"parent_thread_id":root.value,"source":{"subagent":"review"}}});
+                    let text = format!("{meta}\n{}\n{{\"type\":\"event_msg\",\"payload\":{{\"type\":\"task_complete\"}}}}\n", " ".repeat(65536));
+                    fs::write(
+                        archive.join(format!(
+                            "rollout-2026-09-22T10-00-00-{child}.jsonl{}",
+                            if compressed { ".zst" } else { "" }
+                        )),
+                        if compressed {
+                            ruzstd::encoding::compress_to_vec(
+                                text.as_bytes(),
+                                ruzstd::encoding::CompressionLevel::Fastest,
+                            )
+                        } else {
+                            text.into_bytes()
+                        },
+                    )
+                    .unwrap();
+                }
+                let start = Instant::now();
+                for session in &sessions {
+                    let mut cx = context(&temp, Some(session));
+                    cx.codex_cache = Some(&cache);
+                    assert_eq!(Codex.discover(&cx).unwrap().len(), 1);
+                }
+                let cold = start.elapsed();
+                let decodes = cache.lock().unwrap().decode_count();
+                let start = Instant::now();
+                for _ in 0..100 {
+                    for session in &sessions {
+                        let mut cx = context(&temp, Some(session));
+                        cx.codex_cache = Some(&cache);
+                        assert_eq!(Codex.discover(&cx).unwrap().len(), 1);
+                    }
+                }
+                assert_eq!(cache.lock().unwrap().decode_count(), decodes);
+                eprintln!("codex compressed={compressed} panes={panes} cold_us={} cold_decodes={decodes} warm_100_us={} warm_decodes=0", cold.as_micros(), start.elapsed().as_micros());
+                fs::remove_dir_all(temp).unwrap();
+            }
+        }
+    }
+
+    #[test]
     fn read_pages_through_a_child_transcript_by_byte_cursor() {
         let home = fixture_home();
         let session = AgentSessionRef::id(PROBE_ROOT).expect("合法 id");
@@ -2119,7 +2415,11 @@ mod tests {
             .expect("整页可读");
         assert!(whole.eof);
         assert!(!whole.truncated);
-        assert_eq!(whole.next_cursor.as_deref(), Some(length.as_str()));
+        assert!(whole
+            .next_cursor
+            .as_deref()
+            .unwrap()
+            .ends_with(&format!(":{length}")));
 
         // 按最小页分页：页尾总在记录边界上，一条都不重不漏，拼起来等于整页。
         let mut cursor: Option<String> = None;
@@ -2156,7 +2456,11 @@ mod tests {
             .expect("越界游标不报错");
         assert!(beyond.text.is_empty());
         assert!(beyond.eof);
-        assert_eq!(beyond.next_cursor.as_deref(), Some(length.as_str()));
+        assert!(beyond
+            .next_cursor
+            .as_deref()
+            .unwrap()
+            .ends_with(&format!(":{length}")));
 
         // max_bytes = 0 用默认页。
         let default_page = Codex.read(&cx, PROBE_CHILD, None, 0).expect("默认页可读");
@@ -2253,10 +2557,11 @@ mod tests {
             assert_eq!(page.text, "before\n[oversized record]\nafter\n");
             assert!(page.eof);
             assert!(!page.truncated);
-            assert_eq!(
-                page.next_cursor.as_deref(),
-                Some(rollout.len().to_string().as_str())
-            );
+            assert!(page
+                .next_cursor
+                .as_deref()
+                .unwrap()
+                .ends_with(&format!(":{}", rollout.len())));
         }
 
         let _ = fs::remove_dir_all(&home);
@@ -2677,7 +2982,7 @@ mod tests {
     }
 
     #[test]
-    fn read_rejects_bad_cursors_unknown_nodes_and_compressed_rollouts() {
+    fn read_rejects_bad_cursors_unknown_nodes_and_invalid_compressed_rollouts() {
         let home = fixture_home();
         let session = AgentSessionRef::id(ROOT).expect("合法 id");
         let cx = context(&home, Some(&session));
@@ -2701,7 +3006,7 @@ mod tests {
         ));
         assert!(matches!(
             Codex.read(&cx, COMPRESSED, None, 300),
-            Err(SourceError::Unsupported)
+            Err(SourceError::Malformed(_))
         ));
         // 会话库目录还没生成：同样是稍后重试。
         let missing = home.join("no-such-home");
@@ -2732,10 +3037,11 @@ mod tests {
         assert_eq!(first.text, "user: go\n");
         assert!(first.eof);
         assert!(!first.truncated);
-        assert_eq!(
-            first.next_cursor.as_deref(),
-            Some(head.len().to_string().as_str())
-        );
+        assert!(first
+            .next_cursor
+            .as_deref()
+            .unwrap()
+            .ends_with(&format!(":{}", head.len())));
 
         // 同一游标再读：还是空页、同一游标。
         let waiting = Codex
@@ -2762,14 +3068,11 @@ mod tests {
             .expect("可读");
         assert_eq!(followed.text, "half done\n[task complete]\n");
         assert!(followed.eof);
-        assert_eq!(
-            followed.next_cursor.as_deref(),
-            Some(
-                (head.len() + partial.len() + rest.len())
-                    .to_string()
-                    .as_str()
-            )
-        );
+        assert!(followed
+            .next_cursor
+            .as_deref()
+            .unwrap()
+            .ends_with(&format!(":{}", head.len() + partial.len() + rest.len())));
 
         let _ = fs::remove_dir_all(&home);
     }

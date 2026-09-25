@@ -797,14 +797,28 @@ reports update this association; a new ID without a valid path falls back to the
 server's configuration directory. Agent resume commands still use the session ID.
 Kimi Code still needs its directory override in the server's environment.
 
-Codex paths must name `rollout-<timestamp>-<session-id>.jsonl` or `.jsonl.zst` and
-use the `sessions/YYYY/MM/DD/` layout. An unknown layout is unsupported; Herdr
-does not guess a library from arbitrary parent directories. A compressed root
-path can locate the library and discover children with readable metadata, but
-compressed child rollouts are not decompressed or included in discovery and
-reading their content remains unsupported.
+Codex paths must name `rollout-<timestamp>-<session-id>.jsonl` or `.jsonl.zst` under
+`sessions/YYYY/MM/DD/` or the flat `archived_sessions/` directory. Unknown layouts
+are unsupported; Herdr does not guess a library from arbitrary parent directories.
+Active copies take priority over archived copies; plain files take priority over
+compressed copies of the same rollout. Both discovery and content reading support
+read-only compressed rollouts, preserving the original JSONL byte cursor without
+materializing or changing source files.
+
+Compressed reads are limited to 16 MiB of input, 64 MiB of decoded content, an
+8 MiB decoder window, and 128 frames per file. Each discovery/read call has a
+64 MiB compressed-input and 72 MiB decoded-work budget (including unfinished
+window reservations). The two workers share one cold decoder and a 128 MiB cache
+with at most 2,048 entries; unchanged metadata, terminal status, and failures are
+cached even after content eviction. File changes invalidate the cache. Exceeding
+a file limit is unsupported; exhausted shared/work budgets are retried later, and
+unreadable lifecycle data remains unknown. Discovery examines at most 8,192 date
+directory entries and 8,192 file candidates, then 2,048 selected rollouts.
 
 Codex 0.157 reverted threads may append `_<rollout-id>` after the stable session ID. Reports still match the stable ID; discovery and content reads select the newest filename timestamp, then rollout ID, and show each thread once. The activity reader renders the selected rollout; linked `history_base` prefixes from earlier rollouts are not expanded.
+
+Codex cursors also carry the logical rollout identity. When a revert selects another rollout, `activity_cursor_stale` means discard accumulated content and restart with no cursor; the TUI does this on its next tick. Compression or movement into the archive preserves the identity. Legacy numeric cursor input remains accepted for compatibility, but cannot detect replacement; always return the opaque `next_cursor` from the server. Temporary file access failures are retried and are not cached as malformed data.
+
 
 Hooks signal with `pane.report_agent_activity`:
 

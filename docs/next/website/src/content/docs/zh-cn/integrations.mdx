@@ -155,7 +155,7 @@ Codex 只运行你信任过的钩子。安装集成后,或更新改动了钩子�
 
 Herdr 默认使用 `~/.codex`,设置了 `CODEX_HOME` 时使用后者。Codex 配置目录必须已经存在。安装会写入 `herdr-agent-state.sh`、更新 `hooks.json`,并确保 `config.toml` 中有 `[features] hooks = true`。如果存在已弃用的顶层 `codex_hooks` 标志,它也会一并移除。卸载会从 `hooks.json` 中移除 Herdr 条目并删除钩子脚本,但不改动 `config.toml`。
 
-会话钩子会随会话 ID 转发 Codex 的转录路径,上报后活动发现即可跟随仅在该窗格设置的 `CODEX_HOME`。请在同一配置目录安装集成,并重启 Codex 加载更新后的钩子。恢复仍使用会话 ID。路径布局与压缩转录限制见[智能体活动](/zh-cn/socket-api/#智能体活动)。
+会话钩子会随会话 ID 转发 Codex 的转录路径,上报后活动发现即可跟随仅在该窗格设置的 `CODEX_HOME`。请在同一配置目录安装集成,并重启 Codex 加载更新后的钩子。恢复仍使用会话 ID。归档布局与有界压缩转录支持见[智能体活动](/zh-cn/socket-api/#智能体活动)。
 
 Herdr 通过窗格内的启动器执行受管 Codex 启动和会话恢复。对交互启动、`resume` 和 `fork`，启动器根据窗格当前 `PATH` 选择可执行文件，通过 `--help` 确认完整的 `--no-daemon` 参数后才添加它。Codex 0.157 默认共享 daemon；前台模式让钩子保持在当前窗格的进程树中，避免复用另一窗格的环境。保存的恢复命令仍是原始 `codex resume <id>`。Herdr 不修改 Codex 配置，也不停止已有 daemon。
 

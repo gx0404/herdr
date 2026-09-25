@@ -1683,6 +1683,7 @@ mod tests {
 
     fn context<'a>(home: &'a Path, session: Option<&'a AgentSessionRef>) -> SourceContext<'a> {
         SourceContext {
+            codex_cache: None,
             agent: "zcode",
             session,
             cwd: None,

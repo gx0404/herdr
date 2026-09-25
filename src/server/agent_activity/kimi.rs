@@ -1489,6 +1489,7 @@ mod tests {
         now_ms: u64,
     ) -> SourceContext<'a> {
         SourceContext {
+            codex_cache: None,
             agent: "kimi",
             session,
             cwd,
@@ -2296,6 +2297,7 @@ mod tests {
         let session = AgentSessionRef::id(SESSION_ID).expect("合法会话 id");
 
         let relocated = SourceContext {
+            codex_cache: None,
             agent_config_dir: Some(&root),
             ..context(empty_home.path(), Some(&session), None, FAR_FUTURE_MS)
         };
@@ -2319,6 +2321,7 @@ mod tests {
         let fixture_home = root.parent().expect("夹具数据根有父目录").to_path_buf();
         let nowhere = empty_home.path().join("nowhere");
         let pinned = SourceContext {
+            codex_cache: None,
             agent_config_dir: Some(&nowhere),
             ..context(&fixture_home, Some(&session), None, FAR_FUTURE_MS)
         };

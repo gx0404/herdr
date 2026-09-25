@@ -1724,3 +1724,84 @@ fn long_owner_names_keep_the_title_badges() {
         assert!(title.contains('…'), "{cols}x{rows} 标题截断: {title:?}");
     }
 }
+
+#[test]
+fn stale_rollout_cursor_clears_old_text_and_restarts_on_the_next_tick() {
+    let mut state = state();
+    open_with_tree(&mut state);
+    let mut outcome = ClientShellInput::default();
+    state.select_agent_activity_node("a".into(), &mut outcome);
+    let (id, _) = single_read(&outcome);
+    let (_, next) = respond(
+        &mut state,
+        &id,
+        content_result("a", "OLD\n", false, Some("old-cursor")),
+    );
+    let (id, _) = single_read(&next);
+    let (_, next) = respond(
+        &mut state,
+        &id,
+        Err(ClientShellEndpointError {
+            code: Some("activity_cursor_stale".into()),
+            message: "changed".into(),
+        }),
+    );
+    assert!(
+        reads(&next).is_empty(),
+        "errors must not cause an immediate request loop"
+    );
+    assert!(
+        overlay(&state).content.is_none(),
+        "stale text must be removed"
+    );
+    let mut next = ClientShellInput::default();
+    state.tick_agent_activity(Instant::now(), &mut next);
+    let (id, params) = single_read(&next);
+    assert!(params.cursor.is_none());
+    respond(
+        &mut state,
+        &id,
+        content_result("a", "NEW\n", true, Some("new-cursor")),
+    );
+    assert_eq!(overlay(&state).content.as_ref().unwrap().text(), "NEW\n");
+}
+
+#[test]
+fn stale_cursor_from_an_old_generation_does_not_clear_the_current_view() {
+    for change_node in [false, true] {
+        let mut state = state();
+        open_with_tree(&mut state);
+        let mut outcome = ClientShellInput::default();
+        state.select_agent_activity_node("a".into(), &mut outcome);
+        let (id, _) = single_read(&outcome);
+        let (_, next) = respond(
+            &mut state,
+            &id,
+            content_result("a", "OLD\n", false, Some("old")),
+        );
+        let (old, _) = single_read(&next);
+        if change_node {
+            state.select_agent_activity_node("b".into(), &mut ClientShellInput::default());
+        } else {
+            state.handle_raw_events(vec![key(KeyCode::Char('r'))]);
+        }
+        let (repaint, actions) = respond(
+            &mut state,
+            &old,
+            Err(ClientShellEndpointError {
+                code: Some("activity_cursor_stale".into()),
+                message: "old generation".into(),
+            }),
+        );
+        assert!(!repaint);
+        assert!(reads(&actions).is_empty());
+        assert!(overlay(&state).error.is_none());
+        assert_eq!(
+            overlay(&state).selected_node.as_deref(),
+            Some(if change_node { "b" } else { "a" })
+        );
+        if !change_node {
+            assert_eq!(overlay(&state).content.as_ref().unwrap().text(), "OLD\n");
+        }
+    }
+}

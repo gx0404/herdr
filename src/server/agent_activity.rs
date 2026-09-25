@@ -37,6 +37,8 @@ use crate::server::client_transport::ServerEvent;
 /// 一次发现 / 读取的上下文。`home` 由调用方注入，测试传临时目录；其余路径类字段
 /// 由 runtime 解析，适配器只读。
 pub(crate) struct SourceContext<'a> {
+    /// Shared bounded rollout cache owned by the runtime, never by the renderer.
+    pub codex_cache: Option<&'a std::sync::Mutex<codex::RolloutCache>>,
     /// 规范化的 agent 名：`"claude"`、`"codex"` 等。
     pub agent: &'a str,
     pub session: Option<&'a crate::agent_resume::AgentSessionRef>,
@@ -66,6 +68,8 @@ pub(crate) struct ContentChunk {
 
 #[derive(Debug)]
 pub(crate) enum SourceError {
+    /// The opaque content cursor belongs to a superseded logical rollout. Restart without it.
+    StaleCursor,
     /// 该来源不提供此能力（含尚未实现的适配器）。
     Unsupported,
     /// 来源此刻不可读（文件被占用、数据库被锁、快照尚未上报）；稍后重试。
@@ -80,6 +84,10 @@ impl SourceError {
     /// 对外的错误码与说明（`agent.activity.read` / `agent.external.list` 的应答）。
     fn code_and_message(&self) -> (&'static str, String) {
         match self {
+            Self::StaleCursor => (
+                "activity_cursor_stale",
+                "agent activity rollout changed; restart without a cursor".into(),
+            ),
             Self::Unsupported => (NOT_IMPLEMENTED_CODE, NOT_IMPLEMENTED_MESSAGE.into()),
             Self::Unavailable => (
                 "activity_unavailable",
@@ -97,6 +105,7 @@ impl SourceError {
 impl std::fmt::Display for SourceError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::StaleCursor => f.write_str("stale content cursor"),
             Self::Unsupported => f.write_str("unsupported"),
             Self::Unavailable => f.write_str("unavailable"),
             Self::Malformed(detail) => write!(f, "malformed: {detail}"),
@@ -782,10 +791,13 @@ impl Runtime {
         home: Option<PathBuf>,
     ) -> std::io::Result<Self> {
         let tickets = Tickets::default();
+        let codex_cache =
+            std::sync::Arc::new(std::sync::Mutex::new(codex::RolloutCache::default()));
         let discovery = Self::spawn(
             "herdr-agent-activity",
             DISCOVERY_QUEUE_CAPACITY,
             Worker {
+                codex_cache: codex_cache.clone(),
                 events: events.clone(),
                 home: home.clone(),
                 tickets: tickets.clone(),
@@ -795,6 +807,7 @@ impl Runtime {
             "herdr-agent-activity-read",
             REQUEST_QUEUE_CAPACITY,
             Worker {
+                codex_cache: codex_cache.clone(),
                 events,
                 home,
                 tickets,
@@ -838,6 +851,7 @@ impl Runtime {
 }
 
 struct Worker {
+    codex_cache: std::sync::Arc<std::sync::Mutex<codex::RolloutCache>>,
     events: tokio::sync::mpsc::Sender<AppEvent>,
     /// `None` = 取系统 home；测试注入临时目录。
     home: Option<PathBuf>,
@@ -860,7 +874,13 @@ impl Worker {
                 ..
             } => {
                 let config_dir = agent_config_dir(&subject.agent, &home);
-                let cx = pane_context(&subject, &home, config_dir.as_deref(), now_ms);
+                let cx = pane_context(
+                    &subject,
+                    &home,
+                    config_dir.as_deref(),
+                    now_ms,
+                    &self.codex_cache,
+                );
                 let ticket = self.tickets.take();
                 let result = discover_nodes(source, &cx).map_err(|error| error.to_string());
                 self.send_event(AppEvent::AgentActivityRefreshed {
@@ -992,10 +1012,15 @@ impl Worker {
             ReadTarget::External { .. } => agent_config_dir(external_agent, home),
         };
         let cx = match &target {
-            ReadTarget::Pane { subject, .. } => {
-                pane_context(subject, home, config_dir.as_deref(), now_ms)
-            }
+            ReadTarget::Pane { subject, .. } => pane_context(
+                subject,
+                home,
+                config_dir.as_deref(),
+                now_ms,
+                &self.codex_cache,
+            ),
             ReadTarget::External { session, .. } => SourceContext {
+                codex_cache: None,
                 agent: external_agent,
                 session: Some(session),
                 cwd: None,
@@ -1100,8 +1125,10 @@ fn pane_context<'a>(
     home: &'a Path,
     agent_config_dir: Option<&'a Path>,
     now_ms: u64,
+    codex_cache: &'a std::sync::Mutex<codex::RolloutCache>,
 ) -> SourceContext<'a> {
     SourceContext {
+        codex_cache: Some(codex_cache),
         agent: &subject.agent,
         session: subject.session.as_ref(),
         cwd: subject.cwd.as_deref(),
@@ -1457,6 +1484,7 @@ mod tests {
         for agent in ["claude", "codex", "kimi", "opencode", "pi", "zcode"] {
             let source = source_for(agent).expect("已预注册的来源");
             let cx = SourceContext {
+                codex_cache: None,
                 agent,
                 session: None,
                 cwd: None,
@@ -2069,13 +2097,17 @@ mod tests {
     fn workers_stamp_results_with_a_shared_start_ticket() {
         let (events, mut received) = tokio::sync::mpsc::channel(8);
         let tickets = Tickets::default();
+        let codex_cache =
+            std::sync::Arc::new(std::sync::Mutex::new(codex::RolloutCache::default()));
         let home = std::env::temp_dir();
         let reader = Worker {
+            codex_cache: codex_cache.clone(),
             events: events.clone(),
             home: Some(home.clone()),
             tickets: tickets.clone(),
         };
         let discoverer = Worker {
+            codex_cache: codex_cache.clone(),
             events,
             home: Some(home),
             tickets,

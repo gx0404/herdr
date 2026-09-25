@@ -643,6 +643,16 @@ impl ClientAgentActivityOverlay {
                 }
                 match read.node_id.as_deref() {
                     None => self.tree_error = Some(error.message),
+                    Some(node)
+                        if current(self, node)
+                            && error.code.as_deref() == Some("activity_cursor_stale") =>
+                    {
+                        self.restart_selected_content();
+                        self.content = None;
+                        self.error = None;
+                        self.content_scroll = 0;
+                        self.content_tail = self.follow_active();
+                    }
                     Some(node) if current(self, node) => self.error = Some(error.message),
                     Some(_) => return false,
                 }

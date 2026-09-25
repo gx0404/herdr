@@ -1872,6 +1872,7 @@ mod tests {
         now_ms: u64,
     ) -> SourceContext<'a> {
         SourceContext {
+            codex_cache: None,
             agent: "claude",
             session,
             cwd: None,
@@ -2012,6 +2013,7 @@ mod tests {
         let session = session_ref(SESSION_ID);
 
         let relocated = SourceContext {
+            codex_cache: None,
             agent_config_dir: Some(&config_dir),
             ..context(&empty_home, Some(&session), FIXTURE_LAST_MS)
         };
@@ -2045,6 +2047,7 @@ mod tests {
         // 给了配置目录就只认它：home 下明明有数据也不回头找。
         let nowhere = temp.path().join("nowhere");
         let pinned = SourceContext {
+            codex_cache: None,
             agent_config_dir: Some(&nowhere),
             ..context(&home, Some(&session), FIXTURE_LAST_MS)
         };
