@@ -145,7 +145,131 @@ pub(super) fn codex(value: &Value) -> Vec<UsageMetric> {
             });
         }
     }
+    codex_official_usage(&value["officialUsage"], &mut metrics);
     metrics
+}
+
+/// 官方 0.157 `AccountTokenUsageSummary` 的已知计数；不是额度窗口，也不以每日桶
+/// 之和替代 lifetime。null/非法值缺席，0 则保留。超过 f64 精确整数范围时用文本保真。
+fn codex_count(id: String, label: String, unit: &str, count: i64) -> UsageMetric {
+    let exact_float = count <= 1_i64 << 53;
+    UsageMetric {
+        id,
+        label,
+        scope: "account".into(),
+        unit: unit.into(),
+        used: exact_float.then_some(count as f64),
+        text_value: (!exact_float).then(|| format!("{count} {unit}")),
+        ..Default::default()
+    }
+}
+
+fn codex_official_usage(value: &Value, metrics: &mut Vec<UsageMetric>) {
+    let labels = metric_texts();
+    for (key, id, label, unit) in [
+        (
+            "lifetimeTokens",
+            "lifetime_tokens",
+            labels.codex_lifetime_tokens,
+            "tokens",
+        ),
+        (
+            "peakDailyTokens",
+            "peak_daily_tokens",
+            labels.codex_peak_daily_tokens,
+            "tokens",
+        ),
+        (
+            "longestRunningTurnSec",
+            "longest_running_turn",
+            labels.codex_longest_turn,
+            "seconds",
+        ),
+        (
+            "currentStreakDays",
+            "current_streak",
+            labels.codex_current_streak,
+            "days",
+        ),
+        (
+            "longestStreakDays",
+            "longest_streak",
+            labels.codex_longest_streak,
+            "days",
+        ),
+    ] {
+        if let Some(count) = value["summary"][key].as_i64().filter(|count| *count >= 0) {
+            metrics.push(codex_count(
+                format!("usage/{id}"),
+                label.into(),
+                unit,
+                count,
+            ));
+        }
+    }
+    // 日期去重且只保留最近 90 桶；有界地图避免大量历史占满通用 128 指标预算。
+    // startDate 是官方日期标签，不擅自换算成本机时区或推定为完整计费周期。
+    const MAX_DAILY_BUCKETS: usize = 90;
+    let mut daily = std::collections::BTreeMap::new();
+    if let Some(buckets) = value["dailyUsageBuckets"].as_array() {
+        for bucket in buckets {
+            let Some(date) = bucket["startDate"]
+                .as_str()
+                .filter(|date| codex_usage_date(date))
+            else {
+                continue;
+            };
+            let Some(tokens) = bucket["tokens"].as_i64().filter(|tokens| *tokens >= 0) else {
+                continue;
+            };
+            daily.entry(date).or_insert(tokens);
+            if daily.len() > MAX_DAILY_BUCKETS {
+                daily.pop_first();
+            }
+        }
+    }
+    metrics.extend(daily.into_iter().rev().map(|(date, tokens)| {
+        codex_count(
+            format!("usage/daily/{date}"),
+            format!("{} · {date}", labels.codex_daily_tokens),
+            "tokens",
+            tokens,
+        )
+    }));
+}
+
+fn codex_usage_date(date: &str) -> bool {
+    let bytes = date.as_bytes();
+    if bytes.len() != 10
+        || bytes[4] != b'-'
+        || bytes[7] != b'-'
+        || !bytes
+            .iter()
+            .enumerate()
+            .all(|(index, byte)| index == 4 || index == 7 || byte.is_ascii_digit())
+    {
+        return false;
+    }
+    let valid = || {
+        let year = date[..4].parse::<i32>().ok()?;
+        let month = time::Month::try_from(date[5..7].parse::<u8>().ok()?).ok()?;
+        let day = date[8..].parse::<u8>().ok()?;
+        time::Date::from_calendar_date(year, month, day).ok()
+    };
+    valid().is_some()
+}
+
+/// 普通套餐使用许可是独立的后端事实；百分比与重置时间不能推断该许可。
+/// false 不代表额外 credits / reserve 都不可用，更不改变查询结果的 Ready 状态。
+pub(super) fn codex_usage_notice(value: &Value) -> Option<&'static str> {
+    value["ordinaryUsageAllowed"].as_bool().map(|allowed| {
+        let texts = super::notices();
+        if allowed {
+            texts.codex_ordinary_usage_allowed
+        } else {
+            texts.codex_ordinary_usage_blocked
+        }
+    })
 }
 
 /// 从指标文案表里取一个标签：表按 server 的界面语言选定，常量表里只存取法。
@@ -1920,6 +2044,83 @@ Done.
         assert_eq!(metrics[0].used_percent, Some(25.0));
         assert_eq!(metrics[0].window_seconds, Some(18000));
         assert_eq!(metrics[0].resets_at, Some(1700000000));
+    }
+
+    #[test]
+    fn codex_official_usage_preserves_summary_and_daily_units_without_quota_pressure() {
+        let metrics = codex(&json!({"officialUsage": {
+            "summary": {"lifetimeTokens":123456,"peakDailyTokens":9876,
+                "longestRunningTurnSec":321,"currentStreakDays":0,"longestStreakDays":17,
+                "futureField":999},
+            "dailyUsageBuckets":[{"startDate":"2026-09-24","tokens":42},
+                {"startDate":"2026-09-25","tokens":0}],
+            "threadUsage":{"totalTokens":999999}
+        }}));
+        assert_eq!(metrics.len(), 7);
+        for (id, unit, expected) in [
+            ("usage/lifetime_tokens", "tokens", 123456.0),
+            ("usage/peak_daily_tokens", "tokens", 9876.0),
+            ("usage/longest_running_turn", "seconds", 321.0),
+            ("usage/current_streak", "days", 0.0),
+            ("usage/longest_streak", "days", 17.0),
+            ("usage/daily/2026-09-25", "tokens", 0.0),
+        ] {
+            let metric = metrics.iter().find(|metric| metric.id == id).expect(id);
+            assert_eq!(metric.unit, unit);
+            assert_eq!(metric.used, Some(expected));
+            assert_eq!(metric.scope, "account");
+        }
+        assert!(metrics
+            .iter()
+            .all(|metric| !counts_as_quota_pressure(metric)));
+        assert!(validate(&metrics));
+    }
+
+    #[test]
+    fn codex_official_usage_rejects_unknown_invalid_and_duplicate_daily_values() {
+        assert!(
+            codex(&json!({"officialUsage":{"summary":null,"dailyUsageBuckets":null}})).is_empty()
+        );
+        let metrics = codex(&json!({"officialUsage": {
+            "summary":{"lifetimeTokens":null,"peakDailyTokens":-1,
+                "longestRunningTurnSec":1.5,"currentStreakDays":"7","longestStreakDays":true},
+            "dailyUsageBuckets":[{"startDate":"2026-02-30","tokens":1},
+                {"startDate":"2026-09-24","tokens":-1},
+                {"startDate":"2026-09-25","tokens":4},
+                {"startDate":"2026-09-25","tokens":4},
+                {"startDate":"2026-9-26","tokens":3},
+                {"startDate":"2026-09-27","tokens":null}]
+        }}));
+        assert_eq!(metrics.len(), 1);
+        assert_eq!(metrics[0].used, Some(4.0), "重复日期不累计");
+        assert!(
+            codex(&json!({"ordinaryUsageAllowed":false})).is_empty(),
+            "权限不是额度数值，不能推断或伪造为指标"
+        );
+    }
+
+    #[test]
+    fn codex_official_daily_usage_is_bounded_recent_first_and_large_integers_stay_exact() {
+        let start = time::Date::from_calendar_date(2026, time::Month::January, 1).expect("date");
+        let buckets = (0..100)
+            .map(|day| {
+                json!({
+                    "startDate":(start + time::Duration::days(day)).to_string(),"tokens":day
+                })
+            })
+            .collect::<Vec<_>>();
+        let metrics = codex(&json!({"officialUsage":{
+            "summary":{"lifetimeTokens":i64::MAX}, "dailyUsageBuckets":buckets
+        }}));
+        assert_eq!(metrics.len(), 91);
+        assert_eq!(metrics[0].used, None, "不经f64舍入官方大整数");
+        assert_eq!(
+            metrics[0].text_value.as_deref(),
+            Some("9223372036854775807 tokens")
+        );
+        assert_eq!(metrics[1].id, "usage/daily/2026-04-10");
+        assert_eq!(metrics[90].id, "usage/daily/2026-01-11");
+        assert!(validate(&metrics));
     }
 
     /// 客户端把 `used_percent` 与成对的 `used` + `limit` 都当作账号额度压力：会话级指标不得

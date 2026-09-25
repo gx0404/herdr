@@ -628,6 +628,8 @@ pub struct UsageNoticeTexts {
     pub pi_waiting: &'static str,
     /// 官方输出里没有已验证的用量字段。
     pub no_verified_fields: &'static str,
+    pub codex_ordinary_usage_allowed: &'static str,
+    pub codex_ordinary_usage_blocked: &'static str,
     /// 官方账号身份变化、绑定已撤销。
     pub identity_changed: &'static str,
     /// zcode 本地统计卡的来源声明。
@@ -686,7 +688,7 @@ impl UsageNoticeTexts {
 
     /// 快照 `message` 里没有参数的固定说明，按下标与各语言对齐。只进上报应答的拒绝
     /// 说明（`binding_required` 等）不在其中：客户端不显示它们。
-    fn fixed(&self) -> [&'static str; 18] {
+    fn fixed(&self) -> [&'static str; 20] {
         [
             self.trust_callback_hint,
             self.sign_in_callback_hint,
@@ -701,6 +703,8 @@ impl UsageNoticeTexts {
             self.claude_signed_out,
             self.pi_waiting,
             self.no_verified_fields,
+            self.codex_ordinary_usage_allowed,
+            self.codex_ordinary_usage_blocked,
             self.identity_changed,
             self.zcode_local,
             self.auto_bound,
@@ -1836,6 +1840,13 @@ pub struct UsageMetricTexts {
     pub account_total_credits: &'static str,
     pub account_total_usage: &'static str,
     pub cost_report: &'static str,
+    // ---- Codex 官方账号使用统计（非额度） ----
+    pub codex_lifetime_tokens: &'static str,
+    pub codex_peak_daily_tokens: &'static str,
+    pub codex_longest_turn: &'static str,
+    pub codex_current_streak: &'static str,
+    pub codex_longest_streak: &'static str,
+    pub codex_daily_tokens: &'static str,
     // ---- 会话统计 ----
     pub session_cost_estimate: &'static str,
     pub session_duration: &'static str,
@@ -3228,6 +3239,12 @@ mod tests {
                 account_total_credits,
                 account_total_usage,
                 cost_report,
+                codex_lifetime_tokens,
+                codex_peak_daily_tokens,
+                codex_longest_turn,
+                codex_current_streak,
+                codex_longest_streak,
+                codex_daily_tokens,
                 session_cost_estimate,
                 session_duration,
                 session_api_duration,

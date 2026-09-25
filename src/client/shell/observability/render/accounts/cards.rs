@@ -873,6 +873,52 @@ mod tests {
     }
 
     #[test]
+    fn codex_official_counts_remain_visible_as_statistics_without_gauges() {
+        let account = AccountUsageSnapshot {
+            agent: "codex".into(),
+            status: ObservationStatus::Ready,
+            metrics: vec![
+                UsageMetric {
+                    id: "usage/lifetime_tokens".into(),
+                    label: "Lifetime tokens".into(),
+                    scope: "account".into(),
+                    unit: "tokens".into(),
+                    used: Some(1234.0),
+                    ..Default::default()
+                },
+                UsageMetric {
+                    id: "usage/current_streak".into(),
+                    label: "Current usage streak".into(),
+                    scope: "account".into(),
+                    unit: "days".into(),
+                    used: Some(0.0),
+                    ..Default::default()
+                },
+                UsageMetric {
+                    id: "usage/longest_running_turn".into(),
+                    label: "Longest running turn".into(),
+                    scope: "account".into(),
+                    unit: "seconds".into(),
+                    used: Some(321.0),
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+        let card = build_card(&account, None, NOW_MS);
+        assert!(!card.lines.iter().any(|line| matches!(line, Line::Meter(_))));
+        let values = card
+            .lines
+            .iter()
+            .filter_map(|line| match line {
+                Line::Stats(stats) => Some(stats[0].value.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(values, ["1234 tokens", "0 days", "321 seconds"]);
+    }
+
+    #[test]
     fn number_formats_are_compact_and_never_hide_small_amounts() {
         assert_eq!(percent_text(42.0), "42%");
         assert_eq!(percent_text(162.8), "162.8%");

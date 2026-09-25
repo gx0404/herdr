@@ -136,7 +136,7 @@ Pi 没有 statusline 契约，它的 RPC 模式又是另起的 headless 进程�
 
 ## 厂商能力与官方依据
 
-账号用量覆盖六个 Agent：Codex、Claude Code、Kimi Code、OpenCode、Pi 与 ZCode。官方依据最近一次复核于 2026-09-22（Codex 为 2026-09-16，ZCode 数据库结构为 2026-09-23）。订阅权限与管理员计费权限不同。版本不受支持、没有公开 API 或权限不足时会明确说明不可用；为其它 Agent 配置的账号会提示没有登记官方来源。会话统计与本地统计从不代表账号额度。
+账号用量覆盖六个 Agent：Codex、Claude Code、Kimi Code、OpenCode、Pi 与 ZCode。官方依据最近一次复核于 2026-09-22（Codex 为 2026-09-25，ZCode 数据库结构为 2026-09-23）。订阅权限与管理员计费权限不同。版本不受支持、没有公开 API 或权限不足时会明确说明不可用；为其它 Agent 配置的账号会提示没有登记官方来源。会话统计与本地统计从不代表账号额度。
 
 | Agent | 官方查询与范围 |
 | --- | --- |
@@ -146,6 +146,8 @@ Pi 没有 statusline 契约，它的 RPC 模式又是另起的 headless 进程�
 | OpenCode | [`opencode db <query> --format json`](https://opencode.ai/docs/cli/)：对 `session` 表的只读聚合——会话数、子 agent 会话数、费用，以及输入 / 输出 / 推理 / 缓存 token。本地统计，非账号额度。 |
 | Pi | Herdr 的 Pi 扩展，基于官方[扩展 API](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/extensions.md)：上下文用量、本会话 token 与费用、当前服务商 / 模型。会话统计，非账号额度。 |
 | ZCode | [ZCode 桌面应用](https://github.com/zai-org/ZCode)的本地数据库 `~/.zcode/cli/db/db.sqlite`，用系统 `sqlite3 -readonly` 只读查询 `model_usage` 表最近 24 小时的数据：按主任务与子 agent 拆分的 token 及合计、工具调用次数、子 agent 会话数。不需要也不读取任何凭据。只有本地统计，非账号额度；远端额度不查询。 |
+
+Codex 还会显示官方 `account/usage/read` 返回的账号统计：累计与单日峰值 token、最长回合时长（秒）、当前与最长连续使用天数。每日 token 行保留厂商给出的日期，同一天只计一次，最多显示最近 90 个有效日期（同时受通用 128 项指标上限约束）。缺失或非法值保持未知，真实的零保留为零。这些都是普通计数，不代表额度百分比、计费金额，也不从本地转写推算；不会把每日桶求和当成累计总量。旧版 CLI 不支持该查询时仍显示已取得的额度窗口。后端提供 `ordinaryUsageAllowed` 时，账号说明会标明普通套餐用量当前是否允许；缺失时不作判断，百分比与重置时间不能证明许可，普通用量被阻止也不代表额外余额或储备用量不可用。卡片“就绪”只表示查询成功，不表示所有使用途径都获准。
 
 OpenCode 没有任何账号额度接口，所以它的两种形态都在指标范围与来源说明里标明是本地会话统计。`db` 查询只读计数与合计，不读会话标题或路径。没有 `db` 子命令或其 `--format` 选项的 CLI 版本，以及查询失败的情况（例如旧版数据库结构），回退到解析 `opencode stats` 的表格。OpenRouter 的密钥预算与账号总额是两回事。Kimi 的 Server API 被官方标为 experimental，缺失或形状不符的字段只跳过该项，不会让整份样本失败。
 

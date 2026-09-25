@@ -1640,6 +1640,7 @@ fn query(account: &UsageAccountConfig, timeout: Duration, options: ProbeOptions)
             registry::Query::Codex => {
                 snapshot.source = "Codex App Server".into();
                 transport::codex(provider, account, timeout).map(|(identity, value)| {
+                    ready_message = parse::codex_usage_notice(&value);
                     snapshot.account_identity = parse::sanitize_identity(
                         identity
                             .pointer("/account/id")
@@ -2520,6 +2521,37 @@ mod tests {
         let snapshot = &cache[&zcode.id].snapshot;
         assert_eq!(snapshot.status, ObservationStatus::Unavailable);
         assert_eq!(snapshot.message.as_deref(), Some("已在设置中关闭此厂商"));
+    }
+
+    #[test]
+    fn codex_official_usage_permission_is_independent_of_windows_and_credit_balance() {
+        for allowed in [Some(false), Some(true), None] {
+            for percent in [0, 100] {
+                let response = serde_json::json!({
+                    "ordinaryUsageAllowed":allowed,
+                    "rateLimits":{"primary":{"usedPercent":percent},
+                        "credits":{"hasCredits":true,"balance":"20.00"}}
+                });
+                let mut snapshot = AccountUsageSnapshot::default();
+                settle_result(
+                    &mut snapshot,
+                    "codex",
+                    Ok(parse::codex(&response)),
+                    parse::codex_usage_notice(&response),
+                );
+                assert_eq!(snapshot.status, ObservationStatus::Ready);
+                assert_eq!(
+                    snapshot.message.as_deref(),
+                    allowed.map(|allowed| if allowed {
+                        notices().codex_ordinary_usage_allowed
+                    } else {
+                        notices().codex_ordinary_usage_blocked
+                    })
+                );
+                assert_eq!(snapshot.metrics.len(), 2);
+                assert_eq!(snapshot.metrics[1].amount_decimal.as_deref(), Some("20.00"));
+            }
+        }
     }
 
     /// zcode 的探测结果落进缓存：Ready 带「本地统计、远端额度不查询」声明；之后库查询失败
