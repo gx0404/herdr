@@ -2120,28 +2120,157 @@ mod tests {
     /// 探针把查询包成聚合时用的行上限：聚合后只有计数进 stdout，不受管道截断影响。
     const PROBE_ROW_LIMIT: usize = 1_000_000;
 
-    /// 取一行的键集合（排序）；行值当场丢弃，正文不外泄。
-    fn alias_set(db: &dyn DbQuery, sql: &str) -> Option<Vec<String>> {
+    const TREE_PROBE_COLUMNS: &[&str] = &[
+        "agent",
+        "cost",
+        "depth",
+        "id",
+        "last_completed",
+        "last_error",
+        "last_error_message",
+        "last_error_message_len",
+        "last_error_name",
+        "last_role",
+        "model_id",
+        "parent_id",
+        "time_archived",
+        "time_created",
+        "time_updated",
+        "title",
+        "title_len",
+        "tokens_input",
+        "tokens_output",
+        "tokens_reasoning",
+    ];
+
+    const TODO_PROBE_COLUMNS: &[&str] = &[
+        "content",
+        "content_len",
+        "position",
+        "priority",
+        "session_id",
+        "status",
+        "time_created",
+        "time_updated",
+    ];
+
+    const PART_PROBE_COLUMNS: &[&str] = &[
+        "filename",
+        "id",
+        "message_completed",
+        "part_end",
+        "role",
+        "text",
+        "text_len",
+        "tool",
+        "tool_output",
+        "tool_output_len",
+        "tool_status",
+        "tool_title",
+        "type",
+    ];
+
+    /// 校验真实列名全集；只返回常量零与计数，源行值不离开数据库。
+    fn alias_set(db: &dyn DbQuery, sql: &str, columns: &[&str]) -> Option<Vec<String>> {
+        // 左侧不返回数据，只提供真实列名（含大小写）；右侧仅返回常量零，
+        // 同时由 UNION 校验列数。不能用 AS 固定期望名：SQLite 列引用忽略
+        // 大小写，而生产 JSON 解码按精确键名取值。
+        let zeros = vec!["0"; columns.len()].join(", ");
         let output = db
-            .query(&format!("SELECT * FROM ({sql}) LIMIT 1"))
-            .expect("包装查询可执行");
-        let rows = parse_rows(&output).expect("包装查询返回 JSON 数组");
-        rows.first().map(|row| {
-            let mut keys: Vec<String> = row.keys().cloned().collect();
-            keys.sort();
-            keys
-        })
+            .query(&format!(
+                "SELECT * FROM ({sql}) WHERE 0 UNION ALL SELECT {zeros}"
+            ))
+            .expect("零值元数据查询可执行");
+        let rows = parse_rows(&output).expect("零值元数据返回 JSON 数组");
+        let mut keys: Vec<String> = rows
+            .first()
+            .expect("元数据恰好一行")
+            .keys()
+            .cloned()
+            .collect();
+        keys.sort();
+        assert_eq!(keys, columns, "查询的精确列别名漂移了");
+        let counts = non_null_counts(db, sql, columns);
+        (count_of(&counts, "row_total") > 0).then_some(keys)
+    }
+
+    /// Runs actual SQLite queries through the official CLI using synthetic rows only.
+    #[test]
+    #[ignore = "requires opencode and an isolated HOME/XDG sandbox"]
+    fn synthetic_schema_probe_does_not_return_row_values() {
+        let sandbox = std::env::var_os("HERDR_OPENCODE_SCHEMA_SANDBOX")
+            .expect("set an isolated probe sandbox");
+        assert_eq!(std::env::var_os("HOME"), Some(sandbox.clone()));
+        for key in [
+            "XDG_CONFIG_HOME",
+            "XDG_DATA_HOME",
+            "XDG_CACHE_HOME",
+            "XDG_STATE_HOME",
+        ] {
+            assert!(
+                PathBuf::from(std::env::var_os(key).expect("isolated XDG directory"))
+                    .starts_with(Path::new(&sandbox))
+            );
+        }
+        struct MetadataOnlyCli;
+        impl DbQuery for MetadataOnlyCli {
+            fn query(&self, sql: &str) -> Result<String, SourceError> {
+                let output = OfficialCli.query(sql)?;
+                let rows = parse_rows(&output).expect("query JSON");
+                assert!(
+                    rows.iter()
+                        .all(|row| row.values().all(|value| value.is_number())),
+                    "schema probe must return counts only, never source row values"
+                );
+                Ok(output)
+            }
+        }
+        let db = MetadataOnlyCli;
+        assert_eq!(
+            alias_set(
+                &db,
+                "SELECT 'SYNTHETIC_PROBE_BODY' AS body, 1 AS id",
+                &["body", "id"]
+            ),
+            Some(vec!["body".into(), "id".into()])
+        );
+        assert_eq!(
+            alias_set(
+                &db,
+                "SELECT 'SYNTHETIC_PROBE_BODY' AS body, 1 AS id WHERE 0",
+                &["body", "id"]
+            ),
+            None
+        );
+        for sql in [
+            "SELECT 'SYNTHETIC_PROBE_BODY' AS renamed, 1 AS id",
+            "SELECT 'SYNTHETIC_PROBE_BODY' AS BODY, 1 AS id",
+            "SELECT 'SYNTHETIC_PROBE_BODY' AS BODY, 1 AS id WHERE 0",
+            "SELECT 'SYNTHETIC_PROBE_BODY' AS body, 1 AS id, 2 AS extra",
+            "SELECT 'SYNTHETIC_PROBE_BODY' AS body",
+            "SELECT 'SYNTHETIC_PROBE_BODY' AS renamed, 1 AS id WHERE 0",
+        ] {
+            assert!(
+                std::panic::catch_unwind(|| alias_set(&db, sql, &["body", "id"])).is_err(),
+                "SQL shape drift must be rejected even for empty results"
+            );
+        }
+        assert!(
+            std::panic::catch_unwind(|| non_null_counts(&db, "SELECT 1 AS actual", &["missing"]))
+                .is_err(),
+            "a missing column must not be counted as a quoted string literal"
+        );
     }
 
     /// 把查询包成聚合，只取 `row_total` 与各列的非空计数；行值永远不进 stdout。
     fn non_null_counts(db: &dyn DbQuery, sql: &str, columns: &[&str]) -> BTreeMap<String, u64> {
         let projection: Vec<String> = columns
             .iter()
-            .map(|column| format!("COUNT(\"{column}\") AS \"{column}\""))
+            .map(|column| format!("COUNT(probe.\"{column}\") AS \"{column}\""))
             .collect();
         let output = db
             .query(&format!(
-                "SELECT COUNT(*) AS row_total, {} FROM ({sql})",
+                "SELECT COUNT(*) AS row_total, {} FROM ({sql}) AS probe",
                 projection.join(", ")
             ))
             .expect("聚合查询可执行");
@@ -2193,29 +2322,8 @@ mod tests {
         .expect("库里要有带 model 与消息的会话");
         let tree = tree_sql(&root, 0);
         assert_eq!(
-            alias_set(&db, &tree).expect("根会话至少有自己一行"),
-            [
-                "agent",
-                "cost",
-                "depth",
-                "id",
-                "last_completed",
-                "last_error",
-                "last_error_message",
-                "last_error_message_len",
-                "last_error_name",
-                "last_role",
-                "model_id",
-                "parent_id",
-                "time_archived",
-                "time_created",
-                "time_updated",
-                "title",
-                "title_len",
-                "tokens_input",
-                "tokens_output",
-                "tokens_reasoning",
-            ],
+            alias_set(&db, &tree, TREE_PROBE_COLUMNS).expect("根会话至少有自己一行"),
+            TREE_PROBE_COLUMNS,
             "session 查询的列别名漂移了"
         );
         let counts = non_null_counts(&db, &tree, &["model_id", "last_role", "title"]);
@@ -2284,21 +2392,8 @@ mod tests {
             "'{}'",
             todo_owner.as_deref().unwrap_or(root.as_str())
         ));
-        match alias_set(&db, &todo) {
-            Some(keys) => assert_eq!(
-                keys,
-                [
-                    "content",
-                    "content_len",
-                    "position",
-                    "priority",
-                    "session_id",
-                    "status",
-                    "time_created",
-                    "time_updated",
-                ],
-                "todo 查询的列别名漂移了"
-            ),
+        match alias_set(&db, &todo, TODO_PROBE_COLUMNS) {
+            Some(keys) => assert_eq!(keys, TODO_PROBE_COLUMNS, "todo 查询的列别名漂移了"),
             None => assert!(
                 todo_owner.is_none(),
                 "选中的会话有待办却查不到行：todo 查询的过滤条件漂移了"
@@ -2313,22 +2408,13 @@ mod tests {
         )
         .expect("库里要有部件");
         assert_eq!(
-            alias_set(&db, &parts_sql(&chatty, 0, MAX_PARTS_PER_PAGE)).expect("该会话有部件"),
-            [
-                "filename",
-                "id",
-                "message_completed",
-                "part_end",
-                "role",
-                "text",
-                "text_len",
-                "tool",
-                "tool_output",
-                "tool_output_len",
-                "tool_status",
-                "tool_title",
-                "type",
-            ],
+            alias_set(
+                &db,
+                &parts_sql(&chatty, 0, MAX_PARTS_PER_PAGE),
+                PART_PROBE_COLUMNS
+            )
+            .expect("该会话有部件"),
+            PART_PROBE_COLUMNS,
             "part 查询的列别名漂移了"
         );
         let columns = [
