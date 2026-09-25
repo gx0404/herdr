@@ -1198,7 +1198,9 @@ pub struct ServerConfig {
     /// `herdr:*`) when the reporting process runs inside the target pane's
     /// process tree; reports from processes that merely inherited the pane's
     /// environment (background agent sessions, daemons) are dropped silently.
-    /// Default: true.
+    /// Pane-bound usage reports are checked too; account-only reports are unchanged.
+    /// A same-kind tmux/screen client in the pane is accepted heuristically.
+    /// Unknown origins are accepted. Default: true.
     pub verify_report_process: bool,
 }
 

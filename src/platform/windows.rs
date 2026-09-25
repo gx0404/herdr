@@ -1684,6 +1684,19 @@ fn foreground_process_from_entry(entry: &WindowsProcessEntry) -> super::Foregrou
     }
 }
 
+/// Enumerate process identities for the tmux/screen compatibility heuristic.
+pub(crate) fn process_parent_entries() -> Option<Vec<ProcessParentEntry>> {
+    let entries: Vec<_> = snapshot_processes()
+        .into_iter()
+        .map(|entry| ProcessParentEntry {
+            pid: entry.pid,
+            parent_pid: entry.parent_pid,
+            name: entry.name,
+        })
+        .collect();
+    (!entries.is_empty()).then_some(entries)
+}
+
 /// 在同一份 Toolhelp 快照里沿 `th32ParentProcessID` 上溯。Windows 不会把孤儿进程重新
 /// 挂到别的父进程下：父进程退出后链在那里断开，结果标为不完整（查不清），不当成「不是
 /// 后代」。

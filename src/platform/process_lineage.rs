@@ -1,8 +1,8 @@
 //! 进程父链快照：共用的类型与上溯逻辑。
 //!
-//! 各平台只提供两个原语（`src/platform/<os>.rs`）：`process_lineage`（上溯一个进程的
-//! 父链）与 `peer_process_id`（本地 socket / 命名管道对端的 pid）。上溯、成环与深度上限、「是否某进程的后代」的
-//! 判定都在这里，平台无关、可直接单测。
+//! 平台层提供父链、进程表和本地 socket / 命名管道对端 PID 的读取。
+//! 共用的上溯、成环与深度上限、后代判定及 tmux/screen 客户端启发式在这里实现，
+//! 平台无关、可直接单测。
 
 use std::collections::HashSet;
 
@@ -75,6 +75,69 @@ pub(crate) fn walk_process_lineage(
             None => return Some(lineage),
         }
     }
+}
+
+/// Names are exact matches: a custom `tmux-wrapper` is not a multiplexer.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Multiplexer {
+    Tmux,
+    Screen,
+}
+
+fn multiplexer_server(name: &str) -> Option<Multiplexer> {
+    match name {
+        "tmux" | "tmux: server" => Some(Multiplexer::Tmux),
+        "screen" | "SCREEN" => Some(Multiplexer::Screen),
+        _ => None,
+    }
+}
+
+fn multiplexer_client(name: &str) -> Option<Multiplexer> {
+    match name {
+        "tmux" | "tmux: client" => Some(Multiplexer::Tmux),
+        "screen" => Some(Multiplexer::Screen),
+        _ => None,
+    }
+}
+
+/// Snapshot client ancestors only when the peer has a tmux/screen server ancestor.
+/// The pane PID is resolved later on the event loop, which performs no process I/O.
+/// This intentionally only proves a same-kind client, not the exact server/session.
+pub(crate) fn multiplexer_client_lineages(peer: &ProcessLineage) -> Option<Vec<ProcessLineage>> {
+    multiplexer_client_lineages_with(peer, super::process_parent_entries)
+}
+
+fn multiplexer_client_lineages_with(
+    peer: &ProcessLineage,
+    snapshot: impl FnOnce() -> Option<Vec<ProcessParentEntry>>,
+) -> Option<Vec<ProcessLineage>> {
+    let servers: Vec<_> = peer
+        .processes
+        .iter()
+        .skip(1)
+        .filter_map(|process| multiplexer_server(&process.name))
+        .collect();
+    if servers.is_empty() {
+        return Some(Vec::new());
+    }
+    let entries = snapshot()?;
+    let by_pid: std::collections::HashMap<_, _> =
+        entries.iter().map(|entry| (entry.pid, entry)).collect();
+    Some(
+        entries
+            .iter()
+            .filter(|entry| {
+                // Do not mistake the peer's own server for an attached pane client.
+                !peer.contains(entry.pid)
+                    && multiplexer_client(&entry.name).is_some_and(|kind| servers.contains(&kind))
+            })
+            .filter_map(|entry| {
+                walk_process_lineage(entry.pid, |pid| {
+                    by_pid.get(&pid).map(|entry| (*entry).clone())
+                })
+            })
+            .collect(),
+    )
 }
 
 /// `pid` 是否在 `ancestor_pid` 的进程树里（`pid == ancestor_pid` 也算）。
@@ -171,6 +234,53 @@ mod tests {
     }
 
     #[test]
+    fn ordinary_reports_do_not_enumerate_the_process_table() {
+        let peer =
+            walk_process_lineage(2, table_lookup(&[entry(2, 1, "hook"), entry(1, 0, "init")]))
+                .unwrap();
+        assert_eq!(
+            multiplexer_client_lineages_with(&peer, || panic!("no table scan")),
+            Some(Vec::new())
+        );
+    }
+
+    #[test]
+    fn multiplexer_clients_match_exact_kind_and_exclude_server_ancestors() {
+        for (server, client, other) in [
+            ("tmux: server", "tmux: client", "screen"),
+            ("SCREEN", "screen", "tmux"),
+        ] {
+            let table = [
+                entry(1, 0, "init"),
+                entry(10, 1, "pane-shell"),
+                entry(20, 10, client),
+                entry(30, 1, server),
+                entry(40, 30, "hook"),
+                entry(50, 10, other),
+                entry(60, 10, "tmux-wrapper"),
+            ];
+            let peer = walk_process_lineage(40, table_lookup(&table)).unwrap();
+            let clients = multiplexer_client_lineages_with(&peer, || Some(table.to_vec())).unwrap();
+            assert_eq!(clients.len(), 1);
+            assert_eq!(clients[0].processes[0].pid, 20);
+            assert_eq!(clients[0].descends_from(10), Some(true));
+            assert_eq!(clients[0].descends_from(99), Some(false));
+            assert_eq!(multiplexer_client_lineages_with(&peer, || None), None);
+        }
+        // On macOS a server may be named plain tmux; it must not count as a client.
+        let table = [
+            entry(1, 0, "init"),
+            entry(30, 1, "tmux"),
+            entry(40, 30, "hook"),
+        ];
+        let peer = walk_process_lineage(40, table_lookup(&table)).unwrap();
+        assert_eq!(
+            multiplexer_client_lineages_with(&peer, || Some(table.to_vec())),
+            Some(Vec::new())
+        );
+    }
+
+    #[test]
     fn cycles_and_depth_limit_stop_as_incomplete() {
         let cycle = [entry(5, 6, "a"), entry(6, 5, "b")];
         let lineage = walk_process_lineage(5, table_lookup(&cycle)).expect("起点可读");
@@ -251,24 +361,33 @@ mod live_tests {
 
     #[test]
     fn orphaned_process_leaves_the_tree_it_was_started_from() {
-        // sh 把 sleep 放到后台后立即退出：sleep 成了孤儿，被挂到 subreaper 或 pid 1 下，
-        // 与后台会话、`nohup` 进程的处境一样。
+        // The orphan reads a pipe held only by this test. Closing it (including SIGKILL
+        // of the test process) makes the orphan exit; cleanup does not rely on Drop.
+        // No detached server, filesystem sandbox or persistent process is created.
         let mut child = Command::new("/bin/sh")
-            .args(["-c", "sleep 30 >/dev/null 2>&1 & echo $!"])
+            .args(["-c", "exec 3<&0; cat <&3 3<&- >/dev/null & echo $!"])
+            .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .spawn()
-            .expect("拉起 sh");
+            .expect("start disposable pipe reader");
         let orphan = read_pid_line(&mut child);
+        let root = child.id();
+        let owner_pipe = child.stdin.take().expect("test owns pipe writer");
         let _ = child.wait();
-        let own = std::process::id();
         let deadline = Instant::now() + Duration::from_secs(10);
-        let mut verdict = is_descendant_of(orphan, own);
+        let mut verdict = is_descendant_of(orphan, root);
         while verdict != Some(false) && Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(20));
-            verdict = is_descendant_of(orphan, own);
+            verdict = is_descendant_of(orphan, root);
         }
+        drop(owner_pipe);
+        // Also remove the exact known process immediately on ordinary completion.
         kill(orphan);
-        assert_eq!(verdict, Some(false), "孤儿进程不再是测试进程的后代");
+        assert_eq!(
+            verdict,
+            Some(false),
+            "orphan no longer descends from its departed parent"
+        );
     }
 
     #[test]

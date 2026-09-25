@@ -399,8 +399,8 @@ fn handle_connection_with_stop(
             finish_wait_response(&mut stream, response, &request_id, method, changes_ui)
         }
         method_body => {
-            // 集成上报的父链在应答前快照：集成资产都等应答（最多 0.5 s）后才退出，此刻
-            // 对端一定还在。
+            // Snapshot before dispatch: bundled reporters wait for a response or timeout.
+            // A timeout/exit racing this lookup produces an unverifiable origin (fail open).
             let report_origin = crate::api::report_target(&method_body)
                 .map(|_| crate::api::ReportOrigin::capture(peer_pid));
             let (response_write_tx, response_write_rx) = std::sync::mpsc::channel();

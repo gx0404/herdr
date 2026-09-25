@@ -252,10 +252,13 @@ pub fn process_cwd(_pid: u32) -> Option<PathBuf> {
     None
 }
 
-/// Unsupported platform stub.
-/// Unsupported platform stub.
 /// 没有进程表接口的平台：查不清，上报来源校验按放行处理。
 pub(crate) fn process_lineage(_pid: u32) -> Option<ProcessLineage> {
+    None
+}
+
+/// Unsupported platforms cannot enumerate multiplexer clients.
+pub(crate) fn process_parent_entries() -> Option<Vec<super::ProcessParentEntry>> {
     None
 }
 

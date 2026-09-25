@@ -516,7 +516,9 @@ mod client_state;
 pub(crate) use client_state::{create_private_state_file, replace_file, sync_parent_directory};
 
 mod process_lineage;
-pub(crate) use process_lineage::{walk_process_lineage, ProcessLineage, ProcessParentEntry};
+pub(crate) use process_lineage::{
+    multiplexer_client_lineages, walk_process_lineage, ProcessLineage, ProcessParentEntry,
+};
 
 #[cfg(not(unix))]
 pub(crate) fn begin_cli_output() {}

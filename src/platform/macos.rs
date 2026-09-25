@@ -1106,6 +1106,15 @@ pub(crate) fn process_parent_entry(pid: u32) -> Option<ProcessParentEntry> {
     })
 }
 
+/// Enumerate process identities for the tmux/screen compatibility heuristic.
+pub(crate) fn process_parent_entries() -> Option<Vec<ProcessParentEntry>> {
+    let entries: Vec<_> = all_pids()
+        .into_iter()
+        .filter_map(process_parent_entry)
+        .collect();
+    (!entries.is_empty()).then_some(entries)
+}
+
 /// 沿 `pbi_ppid` 上溯（孤儿进程已被挂到 launchd 下）。
 pub(crate) fn process_lineage(pid: u32) -> Option<ProcessLineage> {
     super::walk_process_lineage(pid, process_parent_entry)

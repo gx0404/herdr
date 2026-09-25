@@ -109,6 +109,8 @@ Unsupported, missing, invalid, duplicated, or stale session references restore a
 
 If native agent session restore applies to a pane, Herdr resumes the agent session instead of replaying saved pane history for that pane.
 
+Only reports accepted by the [pane report origin checks](/docs/integrations/#pane-report-origin) update a pane's native session reference. A detached process that inherited the pane environment does not replace that reference when its origin is verifiable. The checks include a tmux/screen heuristic, accept unverifiable origins, and can be disabled with `server.verify_report_process = false`.
+
 ## Live handoff
 
 Live handoff is for update and remote attach flows that need to replace a running Herdr server. It asks the old server to transfer live panes to the new server, so pane processes can keep running across the server replacement.

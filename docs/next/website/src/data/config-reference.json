@@ -39,7 +39,7 @@
           "key": "server.verify_report_process",
           "type": "boolean",
           "default": "true",
-          "description": "Accept pane reports from Herdr's bundled integrations (sources starting with herdr:) only from processes inside the target pane's process tree. Reports from processes that inherited a pane's environment but run outside it, such as an agent's background sessions or daemons, are answered as successful and ignored. Reports whose origin cannot be determined are accepted. Set false to accept all reports. Config reloads apply changes."
+          "description": "Check process origins for bundled pane reports (source starts with herdr:) and all pane-bound account.usage.report requests. Accept the target pane's process tree, or a tmux/screen server ancestor paired heuristically with a same-kind client in that tree. Account-level usage without pane_id is unchanged. Reports from processes that inherited a pane's environment but run outside it, such as an agent's background sessions or daemons, are answered as successful and ignored. Reports whose origin cannot be determined are accepted. Set false to accept all reports. Config reloads apply changes."
         }
       ]
     },

@@ -22,6 +22,23 @@ herdr integration install opencode
 
 After an install, the tab lists what each integration wrote, plus any warnings, below the rows. Long messages wrap to the width of the panel instead of being cut off, and the list scrolls with the mouse wheel or `↑`/`↓`. Clicking a row selects it.
 
+## Pane report origin
+
+Herdr checks the process origin of bundled integration reports (`source` starts with `herdr:`) and all `account.usage.report` requests with a `pane_id`. A report from the pane's process tree is accepted. A background session or daemon that only inherited `HERDR_PANE_ID`, but no longer belongs to that tree, receives a successful response without changing pane state, session identity, activity, metadata, or usage. Account-level usage reports without a pane and third-party pane report sources keep their existing behavior.
+
+For tmux and screen, Herdr also accepts a report whose ancestors include the multiplexer server when a client of the same multiplexer is in the target pane's process tree. This is a process-name heuristic: it does not prove that the client and server belong to the same multiplexer session. If peer PID or process ancestry cannot be read, Herdr accepts the report. This includes some orphaned-process cases on Windows, where the departed parent's PID remains in the process record.
+
+Origin checks are enabled by default. To disable them, set the following and reload the configuration:
+
+```toml
+[server]
+verify_report_process = false
+```
+
+`HERDR_REPORT_BG_SESSIONS=1` only bypasses Claude's hook-side background-session filter. Server-side origin checks still apply; allowing detached reports also requires `server.verify_report_process = false`.
+
+This prevents accidental reports from inherited pane environments; it is not an authentication boundary. Custom integrations should use their own stable source name.
+
 ## Uninstall integrations
 
 ```bash

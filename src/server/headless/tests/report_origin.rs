@@ -92,23 +92,30 @@ impl ReportFixture {
     /// 而不是 `herdr:pi`，避开官方来源的完整生命周期状态机，让「状态变没变」直接反映
     /// 上报是否被处理。
     fn report(&mut self, source: &str, origin: Option<api::ReportOrigin>) -> serde_json::Value {
+        let method = api::schema::Method::PaneReportAgent(api::schema::PaneReportAgentParams {
+            pane_id: self.public_pane_id.clone(),
+            source: source.into(),
+            agent: "pi".into(),
+            state: api::schema::PaneAgentState::Working,
+            message: None,
+            seq: None,
+            agent_session_id: None,
+            agent_session_path: None,
+        });
+        self.request(method, origin)
+    }
+
+    fn request(
+        &mut self,
+        method: api::schema::Method,
+        origin: Option<api::ReportOrigin>,
+    ) -> serde_json::Value {
         let (respond_to, response_rx) = std::sync::mpsc::channel();
         self.server
             .handle_api_request_with_shutdown_check(api::ApiRequestMessage {
                 request: api::schema::Request {
                     id: "report".into(),
-                    method: api::schema::Method::PaneReportAgent(
-                        api::schema::PaneReportAgentParams {
-                            pane_id: self.public_pane_id.clone(),
-                            source: source.into(),
-                            agent: "pi".into(),
-                            state: api::schema::PaneAgentState::Working,
-                            message: None,
-                            seq: None,
-                            agent_session_id: None,
-                            agent_session_path: None,
-                        },
-                    ),
+                    method,
                 },
                 respond_to,
                 response_write_complete: None,
@@ -193,4 +200,28 @@ async fn verification_switch_off_accepts_detached_reports() {
     fixture.server.app.verify_report_process = false;
     fixture.report("herdr:test", Some(origin(Some(detached()))));
     assert_eq!(fixture.state(), crate::detect::AgentState::Working);
+}
+
+#[tokio::test]
+async fn detached_usage_is_acknowledged_before_observation_runtime_is_started() {
+    let mut fixture = ReportFixture::new(Some(PANE_ROOT));
+    let method = api::schema::Method::AccountUsageReport(api::schema::UsageReportParams {
+        pane_id: Some(fixture.public_pane_id.clone()),
+        ..Default::default()
+    });
+    assert!(fixture.server.observability.is_none());
+    let response = fixture.request(method, Some(origin(Some(detached()))));
+    assert_eq!(response["result"]["type"], "ok", "{response}");
+    assert!(
+        fixture.server.observability.is_none(),
+        "detached usage must not reach storage or start the observation worker"
+    );
+}
+
+#[tokio::test]
+async fn unknown_pane_keeps_its_error_instead_of_being_silently_dropped() {
+    let mut fixture = ReportFixture::new(Some(PANE_ROOT));
+    fixture.public_pane_id = "missing:p1".into();
+    let response = fixture.report("herdr:test", Some(origin(Some(detached()))));
+    assert_eq!(response["error"]["code"], "pane_not_found", "{response}");
 }

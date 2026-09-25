@@ -1245,6 +1245,19 @@ fn process_parent_entry_from_stat(pid: u32, stat: &str) -> Option<ProcessParentE
     })
 }
 
+/// Enumerate process identities for the tmux/screen compatibility heuristic.
+/// Only API connection threads call this, and only for a multiplexer ancestry.
+pub(crate) fn process_parent_entries() -> Option<Vec<ProcessParentEntry>> {
+    Some(
+        std::fs::read_dir("/proc")
+            .ok()?
+            .filter_map(Result::ok)
+            .filter_map(|entry| entry.file_name().to_str()?.parse::<u32>().ok())
+            .filter_map(process_parent_entry)
+            .collect(),
+    )
+}
+
 /// 沿 `/proc/<pid>/stat` 的父 pid 上溯（孤儿进程已被内核挂到 subreaper 或 pid 1 下）。
 pub(crate) fn process_lineage(pid: u32) -> Option<ProcessLineage> {
     super::walk_process_lineage(pid, process_parent_entry)

@@ -3,10 +3,11 @@
 //! herdr 自带的集成资产（source 以 `herdr:` 开头）总是靠继承来的 `HERDR_PANE_ID`
 //! 定位窗格。脱离窗格运行、却继承了窗格环境的进程（agent 的后台会话、daemon、
 //! `nohup` / `systemd-run` 拉起的进程）也带着同一个编号，它们的上报会冒充那个窗格。
-//! 这里在 API 连接线程上取对端 pid、把它的父链快照下来（连接存活期间对端一定在等
-//! 应答，所有集成资产都等应答后才退出），事件循环再拿窗格根进程判定：
+//! API 连接线程在读完请求后快照对端父链；集成资产等应答或超时才退出，查询竞态造成
+//! 的断链按不可验证处理。事件循环再拿窗格根进程判定：
 //!
 //! - 对端是窗格根进程的后代（或就是它）→ 接受；
+//! - 对端由 tmux/screen 服务端托管，窗格树里有同类客户端 → 启发式接受；
 //! - 父链完整走到根也没有窗格根进程 → 静默丢弃（照常回成功，不改状态）；
 //! - 拿不到对端 pid、父链读不全、窗格没有根进程 → 查不清，放行（fail open）。
 //!
@@ -15,17 +16,17 @@
 use crate::api::schema::Method;
 use crate::platform::ProcessLineage;
 
-/// herdr 自带集成资产的 source 前缀；只有这类上报走来源校验。
+/// herdr 自带集成资产的 source 前缀；窗格上报只有这类 source 走校验。
 const BUNDLED_INTEGRATION_SOURCE_PREFIX: &str = "herdr:";
 
-/// 需要来源校验的上报：方法按 `pane_id` 隐式定位窗格，且来自 herdr 自带集成。
+/// 需要来源校验的上报：herdr 集成的窗格上报，或任何绑定窗格的用量上报。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct ReportTarget<'a> {
     pub(crate) pane_id: &'a str,
     pub(crate) source: &'a str,
 }
 
-/// 取出需要校验的上报目标；其它方法、第三方 source 与不带 source 的请求返回 `None`。
+/// 第三方窗格上报与账号级用量上报不校验；用量方法没有 source 字段。
 pub(crate) fn report_target(method: &Method) -> Option<ReportTarget<'_>> {
     let (pane_id, source) = match method {
         Method::PaneReportAgent(params) => (&params.pane_id, Some(&params.source)),
@@ -34,6 +35,12 @@ pub(crate) fn report_target(method: &Method) -> Option<ReportTarget<'_>> {
         Method::PaneReportMetadata(params) => (&params.pane_id, Some(&params.source)),
         Method::PaneClearAgentAuthority(params) => (&params.pane_id, params.source.as_ref()),
         Method::PaneReleaseAgent(params) => (&params.pane_id, Some(&params.source)),
+        Method::AccountUsageReport(params) => {
+            return params.pane_id.as_deref().map(|pane_id| ReportTarget {
+                pane_id,
+                source: "account.usage.report",
+            })
+        }
         _ => return None,
     };
     let source = source?;
@@ -48,6 +55,9 @@ pub struct ReportOrigin {
     pub(crate) peer_pid: Option<u32>,
     /// 对端的父链快照；拿不到对端 pid 或起点读不到时为 `None`。
     pub(crate) lineage: Option<ProcessLineage>,
+    /// Same-kind multiplexer client ancestors, captured on the connection thread.
+    /// None means a needed process-table lookup failed, so the bridge is unverifiable.
+    multiplexer_clients: Option<Vec<ProcessLineage>>,
 }
 
 /// 来源判定结果。
@@ -70,7 +80,11 @@ impl ReportVerdict {
 impl ReportOrigin {
     /// 采下对端的父链。
     pub(crate) fn capture(peer_pid: Option<u32>) -> Self {
-        Self::capture_with(peer_pid, crate::platform::process_lineage)
+        let mut origin = Self::capture_with(peer_pid, crate::platform::process_lineage);
+        if let Some(lineage) = &origin.lineage {
+            origin.multiplexer_clients = crate::platform::multiplexer_client_lineages(lineage);
+        }
+        origin
     }
 
     /// 可注入进程查询的采集：测试用假父链驱动。
@@ -81,6 +95,7 @@ impl ReportOrigin {
         Self {
             peer_pid,
             lineage: peer_pid.and_then(lineage_of),
+            multiplexer_clients: Some(Vec::new()),
         }
     }
 
@@ -89,10 +104,30 @@ impl ReportOrigin {
         let (Some(lineage), Some(root)) = (self.lineage.as_ref(), pane_root_pid) else {
             return ReportVerdict::Unverifiable;
         };
+        if root == 0 {
+            return ReportVerdict::Unverifiable;
+        }
         match lineage.descends_from(root) {
             Some(true) => ReportVerdict::InsidePane,
             None => ReportVerdict::Unverifiable,
-            Some(false) => ReportVerdict::Detached,
+            Some(false) => {
+                let Some(clients) = &self.multiplexer_clients else {
+                    return ReportVerdict::Unverifiable;
+                };
+                if clients
+                    .iter()
+                    .any(|client| client.descends_from(root) == Some(true))
+                {
+                    ReportVerdict::InsidePane
+                } else if clients
+                    .iter()
+                    .any(|client| client.descends_from(root).is_none())
+                {
+                    ReportVerdict::Unverifiable
+                } else {
+                    ReportVerdict::Detached
+                }
+            }
         }
     }
 }
@@ -212,6 +247,50 @@ mod tests {
     }
 
     #[test]
+    fn all_six_pane_report_methods_are_checked() {
+        for method in [
+            "pane.report_agent",
+            "pane.report_agent_session",
+            "pane.report_metadata",
+            "pane.clear_agent_authority",
+            "pane.release_agent",
+            "pane.report_agent_activity",
+        ] {
+            for source in ["herdr:claude", "herdr:pi", "custom:wrapper"] {
+                let request: crate::api::schema::Request =
+                    serde_json::from_value(serde_json::json!({
+                        "id": "test", "method": method, "params": {
+                            "pane_id": "w1:p1", "source": source, "agent": "pi", "state": "working"
+                        }
+                    }))
+                    .unwrap();
+                assert_eq!(
+                    report_target(&request.method).is_some(),
+                    source.starts_with("herdr:"),
+                    "{method}/{source}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn pane_usage_is_verified_but_account_usage_is_not() {
+        use crate::api::schema::UsageReportParams;
+        let report = |pane: Option<&str>| {
+            Method::AccountUsageReport(UsageReportParams {
+                pane_id: pane.map(Into::into),
+                ..Default::default()
+            })
+        };
+        let bound = report(Some("w1:p1"));
+        assert_eq!(
+            report_target(&bound).map(|target| target.pane_id),
+            Some("w1:p1")
+        );
+        assert!(report_target(&report(None)).is_none());
+    }
+
+    #[test]
     fn verdict_accepts_descendants_and_drops_detached_processes() {
         assert_eq!(
             origin(Some(inside_pane())).verdict(Some(20)),
@@ -225,6 +304,22 @@ mod tests {
         let verdict = origin(Some(detached())).verdict(Some(20));
         assert_eq!(verdict, ReportVerdict::Detached);
         assert!(!verdict.accepts());
+    }
+
+    #[test]
+    fn multiplexer_bridge_requires_a_client_in_the_target_pane() {
+        let mut origin = origin(Some(detached()));
+        origin.multiplexer_clients = Some(vec![lineage(
+            &[(22, "tmux: client"), (20, "zsh"), (1, "init")],
+            true,
+        )]);
+        assert_eq!(origin.verdict(Some(20)), ReportVerdict::InsidePane);
+        assert_eq!(origin.verdict(Some(200)), ReportVerdict::Detached);
+        origin.multiplexer_clients = None;
+        assert_eq!(origin.verdict(Some(20)), ReportVerdict::Unverifiable);
+        origin.multiplexer_clients = Some(vec![lineage(&[(22, "tmux: client")], false)]);
+        assert_eq!(origin.verdict(Some(20)), ReportVerdict::Unverifiable);
+        assert_eq!(origin.verdict(Some(0)), ReportVerdict::Unverifiable);
     }
 
     #[test]
