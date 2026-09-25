@@ -12,6 +12,10 @@ herdr status
 
 Also record your operating system, outer terminal name and version, whether the session is local or remote, and whether tmux is involved.
 
+## Text beside a wide character disappears after resizing
+
+After narrowing and widening a pane, newly printed text beside a clipped CJK character or emoji should remain visible. Writing into the wide character's former second column clears the old character, just like overwriting the second half of an intact wide character. Widening the pane without overwriting still restores the clipped character. If replacement text disappears on an older build, update Herdr and restart the affected server.
+
 ## The CJK IME window is misplaced or the cursor flickers on Windows
 
 Herdr defaults to a cell-drawn cursor on native Windows and WSL because native cursors can flicker, jump, or show stale positions while ConPTY-based multiplexers repaint the screen. A cell-drawn cursor cannot provide the native cursor anchor used by Korean, Japanese, and Chinese IME composition UI.

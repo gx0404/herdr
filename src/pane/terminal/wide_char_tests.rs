@@ -375,9 +375,9 @@ fn alt_screen_shrink_that_cuts_a_wide_char_draws_a_blank_at_the_edge() {
     pane.assert_no_wide_glyph_past_right_edge();
 
     // vendored libghostty-vt 的既有行为（0 基列）：缩窄截掉第 7 列的尾格后，变宽时不补回尾格，
-    // 第 6 列仍是没有尾格的宽字符首格、第 7 列是普通空格，所以这里钉住第 7 列为空格。另据
-    // `Terminal.zig::printCell` 推断：之后若只往第 7 列写窄字符，它不回看左侧首格，该字会被
-    // 第 6 列的 2 宽字形盖住，直到应用重写第 6 列。
+    // 第 6 列仍是没有尾格的宽字符首格、第 7 列是普通空格，所以这里钉住第 7 列为空格。
+    // 仅缩放仍保留这个孤立首格；后续向原第二格写入时的清理行为由
+    // `narrow_write_after_regrowth_clears_the_orphan_wide_head` 独立回归验证。
     pane.resize(8, 3);
     assert_eq!(pane.grid()[0], "ab中文字");
     assert_eq!(
@@ -505,4 +505,41 @@ fn halfwidth_katakana_voiced_grapheme_is_blank_only_when_cut() {
         assert_eq!(first_patch_in_area(4, 1, bytes, width)[0], expected);
     }
     assert_eq!(pane.grid(), ["ｶﾞZ"]);
+}
+
+#[test]
+fn narrow_write_after_regrowth_clears_the_orphan_wide_head() {
+    for slow in [false, true] {
+        let mut pane = WidePane::new(8, 2);
+        pane.write("\x1b[?1049h\x1b[1;1Hab中文字".as_bytes());
+        pane.resize(7, 2);
+        pane.resize(8, 2);
+        // 禁用自动换行使 printSlice 退到逐字符路径；默认模式覆盖批量路径。
+        pane.write(if slow {
+            b"\x1b[?7l\x1b[1;8HX"
+        } else {
+            b"\x1b[1;8HX"
+        });
+        assert_eq!(pane.grid(), ["ab中文 X", ""], "slow={slow}");
+        assert_eq!(
+            pane.render_row(0),
+            cells(&["a", "b", "中", "", "文", "", " ", "X"])
+        );
+        assert_eq!(pane.patch_row(0), pane.render_row(0).as_slice());
+        assert_eq!(pane.ansi(), ["ab中文 X"]);
+
+        // 验证真实编码再应用 VT，不能只看 draw 前 Buffer / 补丁里含 X。
+        let mut buffer = ratatui::buffer::Buffer::empty(Rect::new(0, 0, 8, 2));
+        for (y, row) in pane.render().iter().enumerate() {
+            for (x, symbol) in row.iter().enumerate() {
+                buffer[(x as u16, y as u16)].set_symbol(symbol);
+            }
+        }
+        let frame = crate::protocol::FrameData::from_ratatui_buffer(&buffer, None);
+        let encoder = crate::protocol::render_ansi::BlitEncoder::with_ime_anchor_repeat(false);
+        let encoded = encoder.encode(&frame, true);
+        let mut host = WidePane::new(8, 2);
+        host.write(&encoded.bytes);
+        assert_eq!(host.grid(), ["ab中文 X", ""], "host VT slow={slow}");
+    }
 }

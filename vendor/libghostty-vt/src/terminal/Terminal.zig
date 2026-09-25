@@ -915,6 +915,10 @@ fn printSliceFill(
         // is in the row/column that will receive the next codepoint.
         if (screen.cursor.pending_wrap) try self.printWrap();
 
+        // A non-reflow shrink/grow can leave a wide head to our left
+        // without a spacer tail. Batched stores bypass printCell.
+        self.clearOrphanWideLeft();
+
         // Our right margin depends on where our cursor is now,
         // matching the logic in print().
         const right_limit: usize = if (screen.cursor.x > self.scrolling_region.right)
@@ -1583,6 +1587,21 @@ pub fn print(self: *Terminal, c: u21) !void {
     self.screens.active.cursorRight(1);
 }
 
+/// Preserve cropped wide heads across resize, but clear one when its
+/// missing tail is overwritten. Normal paired cells use printCell's
+/// existing cleanup. This check is allocation-free in the normal case.
+inline fn clearOrphanWideLeft(self: *Terminal) void {
+    const screen = self.screens.active;
+    if (screen.cursor.x == 0 or screen.cursor.page_cell.wide != .narrow) return;
+    const left = screen.cursorCellLeft(1);
+    if (left.wide != .wide) return;
+    screen.clearCells(
+        screen.cursor.page_pin.node.page(),
+        screen.cursor.page_row,
+        left[0..1],
+    );
+}
+
 fn printCell(
     self: *Terminal,
     unmapped_c: u21,
@@ -1619,6 +1638,9 @@ fn printCell(
     };
 
     const cell = self.screens.active.cursor.page_cell;
+
+    // Writing a new spacer tail must retain the head just written.
+    if (wide != .spacer_tail) self.clearOrphanWideLeft();
 
     // If the wide property of this cell is the same, then we don't
     // need to do the special handling here because the structure will
@@ -16503,4 +16525,27 @@ test "Terminal: eraseDisplay complete ignores stale prompt on recycled row" {
     t.eraseDisplay(.complete, false);
 
     try testing.expectEqual(t.screens.active.pages.rows, t.screens.active.pages.total_rows);
+}
+
+test "Terminal: orphan wide head after regrowth is cleared before narrow print" {
+    for ([_]bool{ false, true }) |batch| {
+        var t = try init(testing.io, testing.allocator, .{ .cols = 8, .rows = 2 });
+        defer t.deinit(testing.allocator);
+        _ = try t.switchScreen(.alternate);
+        try t.printString("ab中文字");
+        try t.resize(testing.allocator, .{ .cols = 7, .rows = 2 });
+        try t.resize(testing.allocator, .{ .cols = 8, .rows = 2 });
+        t.setCursorPos(1, 8);
+        if (batch) {
+            try t.printSlice(&.{'X'});
+        } else {
+            try t.print('X');
+        }
+        const head = t.screens.active.pages.getCell(.{ .screen = .{ .x = 6, .y = 0 } }).?;
+        const tail = t.screens.active.pages.getCell(.{ .screen = .{ .x = 7, .y = 0 } }).?;
+        try testing.expectEqual(Cell.Wide.narrow, head.cell.wide);
+        try testing.expectEqual(@as(u21, 0), head.cell.codepoint());
+        try testing.expectEqual(Cell.Wide.narrow, tail.cell.wide);
+        try testing.expectEqual(@as(u21, 'X'), tail.cell.codepoint());
+    }
 }

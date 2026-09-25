@@ -1,5 +1,5 @@
 {
-  "chunk_count": 1117,
+  "chunk_count": 1118,
   "chunks": [
     {
       "anchor": "herdr",
@@ -3663,72 +3663,79 @@
       "text": "---\ntitle: Socket API\ndescription: Control a running Herdr server from scripts, tools, and coding agents.\n---\n\nSee [Monitoring, account usage and docking](/docs/monitoring/) for host metrics, provider account bindings, and movable terminal groups.\n\n\nHerdr exposes a local socket API for scripts and agents that need to inspect or control a running session.\n\nMost automation should start with the CLI wrappers. Use the raw socket API only when you need direct request/response control or long-lived event subscriptions."
     },
     {
-      "anchor": "The CJK IME window is misplaced or the cursor flickers on Windows",
+      "anchor": "Text beside a wide character disappears after resizing",
       "doc": "docs/next/website/src/content/docs/troubleshooting.mdx",
-      "id": "docs-next-website-src-content-docs-troubleshooting-mdx-the-cjk-ime-window-is-misplaced-or-the-cursor-flickers-on-windows",
-      "source_sha256": "2fc8fc50d01f723c39a3540b5826e703e3f003f2ad65a31e2151e85bd1ec80a7",
-      "text": "## The CJK IME window is misplaced or the cursor flickers on Windows\n\nHerdr defaults to a cell-drawn cursor on native Windows and WSL because native cursors can flicker, jump, or show stale positions while ConPTY-based multiplexers repaint the screen. A cell-drawn cursor cannot provide the native cursor anchor used by Korean, Japanese, and Chinese IME composition UI.\n\nIf the IME composition or candidate window appears at the wrong location, enable the native cursor:\n\n```toml\n[ui]\nhost_cursor = \"native\"\n```\n\nNative mode restores the IME anchor but may reintroduce occasional cursor movement artifacts during active output. Return to the visually stable cursor with `host_cursor = \"drawn\"`, or remove the setting to use the Windows default. See [Windows support](/docs/windows-beta/) for the current limitation."
+      "id": "docs-next-website-src-content-docs-troubleshooting-mdx-text-beside-a-wide-character-disappears-after-resizing",
+      "source_sha256": "1a140d254b90ac34c73a7f3c44c58ba45b310e22813a2ef412ffd0eebb66b864",
+      "text": "## Text beside a wide character disappears after resizing\n\nAfter narrowing and widening a pane, newly printed text beside a clipped CJK character or emoji should remain visible. Writing into the wide character's former second column clears the old character, just like overwriting the second half of an intact wide character. Widening the pane without overwriting still restores the clipped character. If replacement text disappears on an older build, update Herdr and restart the affected server."
     },
     {
-      "anchor": "The CJK IME window is misplaced or the cursor flickers on Windows > A direct keybinding does nothing",
+      "anchor": "Text beside a wide character disappears after resizing > A direct keybinding does nothing",
       "doc": "docs/next/website/src/content/docs/troubleshooting.mdx",
-      "id": "docs-next-website-src-content-docs-troubleshooting-mdx-the-cjk-ime-window-is-misplaced-or-the-cursor-flickers-on-windows-a-direct-keybinding-does-nothing",
+      "id": "docs-next-website-src-content-docs-troubleshooting-mdx-text-beside-a-wide-character-disappears-after-resizing-a-direct-keybinding-does-nothing",
       "source_sha256": "83baf787e8e2a7efd69d437d6caebe5b8a19a4ccfdc5ddac8f1977f1f055cf7f",
       "text": "## A direct keybinding does nothing\n\nThe operating system or outer terminal may consume the chord before Herdr receives it. Free the chord in that layer or choose another binding. See [Keyboard](/docs/keyboard/#going-prefix-free) for known conflicts and safe defaults."
     },
     {
-      "anchor": "The CJK IME window is misplaced or the cursor flickers on Windows > Enter, Tab, or Backspace fires twice",
+      "anchor": "Text beside a wide character disappears after resizing > Enter, Tab, or Backspace fires twice",
       "doc": "docs/next/website/src/content/docs/troubleshooting.mdx",
-      "id": "docs-next-website-src-content-docs-troubleshooting-mdx-the-cjk-ime-window-is-misplaced-or-the-cursor-flickers-on-windows-enter-tab-or-backspace-fires-twice",
+      "id": "docs-next-website-src-content-docs-troubleshooting-mdx-text-beside-a-wide-character-disappears-after-resizing-enter-tab-or-backspace-fires-twice",
       "source_sha256": "3cb63b0d15d154cd2422f9943be73d9abafcd87b353bb817191ee96f8f57b7e3",
       "text": "## Enter, Tab, or Backspace fires twice\n\nOlder versions of some terminals can emit the release of Enter, Tab, and Backspace as the same bytes as the press when an application enables Kitty keyboard event reporting. Herdr cannot distinguish those duplicate bytes after the terminal sends them.\n\nUpdate the outer terminal to a version that contains its upstream fix:\n\n| Terminal | Minimum fixed version |\n| --- | --- |\n| kitty | 0.33.0 |\n| foot | 1.20.0 |\n| Alacritty | 0.15.0 |\n\nThis is especially common with older terminal packages from long-term-support Linux distributions. See [Herdr issue #1116](https://github.com/herdrdev/herdr/issues/1116) for the confirmed boundary captures and upstream references. If the problem remains on a current terminal version, report the exact terminal version and whether it also happens outside Herdr."
     },
     {
-      "anchor": "The CJK IME window is misplaced or the cursor flickers on Windows > Find diagnostic logs",
+      "anchor": "Text beside a wide character disappears after resizing > Find diagnostic logs",
       "doc": "docs/next/website/src/content/docs/troubleshooting.mdx",
-      "id": "docs-next-website-src-content-docs-troubleshooting-mdx-the-cjk-ime-window-is-misplaced-or-the-cursor-flickers-on-windows-find-diagnostic-logs",
+      "id": "docs-next-website-src-content-docs-troubleshooting-mdx-text-beside-a-wide-character-disappears-after-resizing-find-diagnostic-logs",
       "source_sha256": "f0c350b32f4c25aab8aade6b1c5eb591f64d643c99e8237941702477988d8211",
       "text": "## Find diagnostic logs\n\nHerdr logs live in `~/.config/herdr/` by default:\n\n```text\nherdr.log\nherdr-client.log\nherdr-server.log\n```\n\nSet `HERDR_LOG=herdr=debug` for more detail. Include the current log and rotated siblings when reporting a problem. See [Configuration](/docs/configuration/#logs)."
     },
     {
-      "anchor": "The CJK IME window is misplaced or the cursor flickers on Windows > Herdr updated, but the running session is still old",
+      "anchor": "Text beside a wide character disappears after resizing > Herdr updated, but the running session is still old",
       "doc": "docs/next/website/src/content/docs/troubleshooting.mdx",
-      "id": "docs-next-website-src-content-docs-troubleshooting-mdx-the-cjk-ime-window-is-misplaced-or-the-cursor-flickers-on-windows-herdr-updated-but-the-running-session-i",
+      "id": "docs-next-website-src-content-docs-troubleshooting-mdx-text-beside-a-wide-character-disappears-after-resizing-herdr-updated-but-the-running-session-is-still-old",
       "source_sha256": "a3d48d334cc4525f9081dfca6cc0931cf73fc8f29212daf16ca77b649073718c",
       "text": "## Herdr updated, but the running session is still old\n\nUpdating the binary does not replace a compatible server that is already running. Start Herdr again to use the updated client. If you also need server-side changes from the release, check `herdr status`, then stop the session and launch Herdr again:\n\n```bash\nherdr server stop\nherdr\n```\n\nStopping a server exits its pane processes. Named sessions use `herdr session stop <name>`. See [Install Herdr](/docs/install/#update) for updater, package-manager, and live-handoff behavior."
     },
     {
-      "anchor": "The CJK IME window is misplaced or the cursor flickers on Windows > Keychain-backed tools fail inside Herdr on macOS",
+      "anchor": "Text beside a wide character disappears after resizing > Keychain-backed tools fail inside Herdr on macOS",
       "doc": "docs/next/website/src/content/docs/troubleshooting.mdx",
-      "id": "docs-next-website-src-content-docs-troubleshooting-mdx-the-cjk-ime-window-is-misplaced-or-the-cursor-flickers-on-windows-keychain-backed-tools-fail-inside-herdr",
+      "id": "docs-next-website-src-content-docs-troubleshooting-mdx-text-beside-a-wide-character-disappears-after-resizing-keychain-backed-tools-fail-inside-herdr-on-macos",
       "source_sha256": "90abade4cf6bb474e2e9f9dcafd9ea388c3e17eedda683b0303990a229e1fa48",
       "text": "## Keychain-backed tools fail inside Herdr on macOS\n\nCheck the server launch context from a Herdr pane:\n\n```bash\nlaunchctl managername\n```\n\n`Background` is normal for automatically started macOS servers and does not by itself indicate a Keychain problem. If Keychain access fails and the server was started through SSH or a background job, stop it and start Herdr again from a normal GUI terminal:\n\n```bash\nherdr server stop\nherdr\n```\n\nStopping the server exits its pane processes. Herdr panes inherit the long-lived server's macOS launch context, so a server started through SSH or a background job may not have access to interactive Keychain services. See [Herdr issue #966](https://github.com/herdrdev/herdr/issues/966) for details."
     },
     {
-      "anchor": "The CJK IME window is misplaced or the cursor flickers on Windows > Option+Left or Option+Right inserts `;3D` or `;3C`",
+      "anchor": "Text beside a wide character disappears after resizing > Option+Left or Option+Right inserts `;3D` or `;3C`",
       "doc": "docs/next/website/src/content/docs/troubleshooting.mdx",
-      "id": "docs-next-website-src-content-docs-troubleshooting-mdx-the-cjk-ime-window-is-misplaced-or-the-cursor-flickers-on-windows-option-left-or-option-right-inserts-3d",
+      "id": "docs-next-website-src-content-docs-troubleshooting-mdx-text-beside-a-wide-character-disappears-after-resizing-option-left-or-option-right-inserts-3d-or-3c",
       "source_sha256": "0954037d1bc9a8a2d75606ce17e848fb94499c3b3152697752e92f84a6e3bd45",
       "text": "## Option+Left or Option+Right inserts `;3D` or `;3C`\n\nTerminals commonly send Alt+Left and Alt+Right as the standard modified-arrow sequences `ESC[1;3D` and `ESC[1;3C`. On macOS, the outer terminal must first be configured to treat Option as Alt. If the shell does not bind these sequences, zsh may display their remaining characters as `;3D` or `;3C`. This can happen with kitty, Alacritty, and other terminals; Herdr and tmux both preserve the original modified-arrow input.\n\nAdd explicit zsh bindings if you want modified arrows to perform word navigation in every terminal and nested shell:\n\n```zsh\nbindkey $'\\e[1;3D' backward-word\nbindkey $'\\e[1;3C' forward-word\n```\n\nKitty can appear to work differently outside Herdr because its automatic zsh integration adds these bindings only to shells started directly by kitty, not shells created by terminal multiplexers. Follow kitty's [manual shell integration instructions](https://sw.kovidgoyal.net/kitty/shell-integration/#manual-shell-integration), or map the keys in `kitty.conf` before they reach the shell:\n\n```text\nmap alt+left send_text all \\x1bb\nmap alt+right send_text all \\x1bf\n```\n\nHerdr deliberately does not rewrite modified arrows because terminal applications may use Alt+Left and Alt+Right directly. See [Herdr issue #1370](https://github.com/herdrdev/herdr/issues/1370) for the investigation."
     },
     {
-      "anchor": "The CJK IME window is misplaced or the cursor flickers on Windows > Remote attach cannot authenticate",
+      "anchor": "Text beside a wide character disappears after resizing > Remote attach cannot authenticate",
       "doc": "docs/next/website/src/content/docs/troubleshooting.mdx",
-      "id": "docs-next-website-src-content-docs-troubleshooting-mdx-the-cjk-ime-window-is-misplaced-or-the-cursor-flickers-on-windows-remote-attach-cannot-authenticate",
+      "id": "docs-next-website-src-content-docs-troubleshooting-mdx-text-beside-a-wide-character-disappears-after-resizing-remote-attach-cannot-authenticate",
       "source_sha256": "186a55780963f2e827fb398171efb30f7e920b60f02281798d0de78cdcc7ba02",
       "text": "## Remote attach cannot authenticate\n\nFirst confirm that normal OpenSSH works with `ssh <host>`. For a passphrase-protected key in a non-interactive shell, CI job, or mobile terminal, load the key into `ssh-agent` before starting remote attach. See [Persistence and remote access](/docs/persistence-remote/#remote-attach-over-ssh)."
     },
     {
-      "anchor": "The CJK IME window is misplaced or the cursor flickers on Windows > SSH or DNS fails after macOS logout",
+      "anchor": "Text beside a wide character disappears after resizing > SSH or DNS fails after macOS logout",
       "doc": "docs/next/website/src/content/docs/troubleshooting.mdx",
-      "id": "docs-next-website-src-content-docs-troubleshooting-mdx-the-cjk-ime-window-is-misplaced-or-the-cursor-flickers-on-windows-ssh-or-dns-fails-after-macos-logout",
+      "id": "docs-next-website-src-content-docs-troubleshooting-mdx-text-beside-a-wide-character-disappears-after-resizing-ssh-or-dns-fails-after-macos-logout",
       "source_sha256": "c6d82b9746a7b0bbbe6a7b9b0e13d237f344c155dd96c7077f7f5247458c42df",
       "text": "## SSH or DNS fails after macOS logout\n\nAutomatically started macOS servers use a per-user service context so logging out does not leave their panes with a dead connection to macOS services. Explicit `herdr server` launches retain their caller's context.\n\nAn older server can survive logout while losing user lookup and DNS. Symptoms include `No user exists for uid 501`, `Could not get manager name.`, and `curl: (6) Could not resolve host`. Logging back in does not repair that server. Stop the affected session and start Herdr from a GUI terminal in the new login. This ends live pane processes but restores the saved session layout. Live handoff preserves the source server's service context and existing pane processes. Older servers therefore need a full session restart to adopt this fix; handoff cannot repair their inherited context.\n\nIf a newly started server still has this problem, check `herdr-server.log` for `could not select persistent user service context`. Herdr keeps the inherited context if the required macOS APIs are unavailable. See [Herdr issue #4100](https://github.com/herdrdev/herdr/issues/4100)."
     },
     {
-      "anchor": "The CJK IME window is misplaced or the cursor flickers on Windows > The `herdr` command is not found",
+      "anchor": "Text beside a wide character disappears after resizing > The CJK IME window is misplaced or the cursor flickers on Windows",
       "doc": "docs/next/website/src/content/docs/troubleshooting.mdx",
-      "id": "docs-next-website-src-content-docs-troubleshooting-mdx-the-cjk-ime-window-is-misplaced-or-the-cursor-flickers-on-windows-the-herdr-command-is-not-found",
+      "id": "docs-next-website-src-content-docs-troubleshooting-mdx-text-beside-a-wide-character-disappears-after-resizing-the-cjk-ime-window-is-misplaced-or-the-cursor-flic",
+      "source_sha256": "2fc8fc50d01f723c39a3540b5826e703e3f003f2ad65a31e2151e85bd1ec80a7",
+      "text": "## The CJK IME window is misplaced or the cursor flickers on Windows\n\nHerdr defaults to a cell-drawn cursor on native Windows and WSL because native cursors can flicker, jump, or show stale positions while ConPTY-based multiplexers repaint the screen. A cell-drawn cursor cannot provide the native cursor anchor used by Korean, Japanese, and Chinese IME composition UI.\n\nIf the IME composition or candidate window appears at the wrong location, enable the native cursor:\n\n```toml\n[ui]\nhost_cursor = \"native\"\n```\n\nNative mode restores the IME anchor but may reintroduce occasional cursor movement artifacts during active output. Return to the visually stable cursor with `host_cursor = \"drawn\"`, or remove the setting to use the Windows default. See [Windows support](/docs/windows-beta/) for the current limitation."
+    },
+    {
+      "anchor": "Text beside a wide character disappears after resizing > The `herdr` command is not found",
+      "doc": "docs/next/website/src/content/docs/troubleshooting.mdx",
+      "id": "docs-next-website-src-content-docs-troubleshooting-mdx-text-beside-a-wide-character-disappears-after-resizing-the-herdr-command-is-not-found",
       "source_sha256": "4762405a2b28f607888b245ec1c104e3c585ec94f9079974b3417728ac112be5",
       "text": "## The `herdr` command is not found\n\nRestart the terminal so it reloads its environment, then confirm the Herdr install directory is on `PATH`. For package-manager installs, use that package manager to update Herdr and expose it on `PATH`. See [Install Herdr](/docs/install/#verify)."
     },

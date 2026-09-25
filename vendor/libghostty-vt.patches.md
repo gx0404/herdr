@@ -228,3 +228,51 @@ just test-one kitty_file_image_survives
 (cd vendor/libghostty-vt && zig build test-lib-vt -Dtest-filter='experimental PNG')
 just check
 ```
+
+
+## 0008 clear orphan wide heads before writing
+
+status: active
+
+patch: `vendor/patches/libghostty-vt/0008-clear-orphan-wide-before-writing.patch`
+
+herdr issue: none; synthetic shrink/grow and narrow-write regression
+
+upstream discussion: not opened
+
+upstream pr: not opened
+
+vendored base: `44f2a44df7e8c4a0c6df3f7d872ef3d7ead88e51`
+
+local files:
+
+- `vendor/libghostty-vt/src/terminal/Terminal.zig`
+
+reason: non-reflow shrinking keeps a cropped wide head for later restoration,
+but regrowth leaves its lost spacer tail as an ordinary narrow cell. A narrow
+write into that cell previously left the old head intact, so Herdr's ANSI
+encoder skipped the new character as though it were still a wide tail.
+Clear that orphan head at the write boundary, in both batched and scalar
+printing. Existing resize-only restoration behavior remains unchanged.
+The normal path uses only cursor and neighboring-cell metadata, without
+allocation or an additional cell scan.
+
+Upstream [`Terminal.printCell`](https://github.com/ghostty-org/ghostty/blob/main/src/terminal/Terminal.zig)
+and [`PageList.resizeWithoutReflowGrowCols`](https://github.com/ghostty-org/ghostty/blob/main/src/terminal/PageList.zig)
+were checked on 2026-09-26; their current implementations still have this boundary.
+The earlier [spacer-tail integrity fix](https://github.com/ghostty-org/ghostty/discussions/12850)
+concerns printing over an existing spacer tail, not regrowth into a narrow cell.
+
+remove when: the vendored upstream clears this orphan head on both scalar and
+batched writes, and the shrink/grow, real ANSI-to-VT roundtrip, and existing
+resize-only restoration tests all pass without this patch.
+
+verification:
+
+```sh
+(cd vendor/libghostty-vt && zig build test-lib-vt -Dtest-filter='orphan wide head' -Dtest-filter='printSlice' -Dtest-filter='wide')
+just test-one narrow_write_after_regrowth
+just test-one wide_char_tests
+just maintenance-test
+just check
+```
