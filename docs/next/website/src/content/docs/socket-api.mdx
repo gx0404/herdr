@@ -783,17 +783,22 @@ server-owned fact. The server reads it from a per-agent source adapter on a
 background thread; hooks only signal that something may have changed.
 
 Adapters that read an agent's own session files (Claude Code, Codex, Kimi Code)
-resolve its configuration directory from the Herdr server's environment:
-`CLAUDE_CONFIG_DIR`, `CODEX_HOME`, or `KIMI_CODE_HOME` when the server has it,
-otherwise `~/.claude`, `~/.codex`, or `~/.kimi-code`. An override set only inside
-a pane, such as `CODEX_HOME=/path codex`, is not visible to the server, so that
-agent's activity is not found; set the variable in the environment the server
-starts from as well. Claude Code is the exception once its session has started:
-the Herdr integration reports the session's transcript path along with its ID,
-and the adapter locates the session from that path, so a `CLAUDE_CONFIG_DIR` set
-only inside the pane works. Until that report arrives, for example right after
-Herdr restores a session, the adapter falls back to the configuration directory
-above.
+initially resolve the configuration directory from the Herdr server's environment:
+`CLAUDE_CONFIG_DIR`, `CODEX_HOME`, or `KIMI_CODE_HOME`, falling back to `~/.claude`,
+`~/.codex`, or `~/.kimi-code`. Claude Code and Codex session hooks also report the
+absolute transcript path with the session ID. Once received, that path takes
+priority only while the pane still has the same agent and session ID, so a
+`CLAUDE_CONFIG_DIR` or `CODEX_HOME` set only inside a pane works. Resume and fork
+reports update this association; a new ID without a valid path falls back to the
+server's configuration directory. Agent resume commands still use the session ID.
+Kimi Code still needs its directory override in the server's environment.
+
+Codex paths must name `rollout-<timestamp>-<session-id>.jsonl` or `.jsonl.zst` and
+use the `sessions/YYYY/MM/DD/` layout. An unknown layout is unsupported; Herdr
+does not guess a library from arbitrary parent directories. A compressed root
+path can locate the library and discover children with readable metadata, but
+compressed child rollouts are not decompressed or included in discovery and
+reading their content remains unsupported.
 
 Hooks signal with `pane.report_agent_activity`:
 

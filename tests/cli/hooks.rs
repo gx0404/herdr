@@ -331,6 +331,10 @@ fn codex_hook_reports_persisted_root_session_and_ignores_ephemeral_or_nested_ses
 
     assert_eq!(request["method"], "pane.report_agent_session");
     assert_eq!(request["params"]["agent_session_id"], "codex-session");
+    assert_eq!(
+        request["params"]["agent_session_path"],
+        "/tmp/codex-session.jsonl"
+    );
     assert!(request["params"].get("state").is_none());
 
     let matching_request = run_shell_hook_with_env(
@@ -358,6 +362,29 @@ fn codex_hook_reports_persisted_root_session_and_ignores_ephemeral_or_nested_ses
         &[("CODEX_THREAD_ID", "parent-session")],
     )
     .is_none());
+}
+
+#[test]
+fn codex_hook_forwards_pane_home_paths_on_resume_and_fork() {
+    for (source, id, suffix) in [
+        ("resume", "root", ".jsonl"),
+        ("fork", "forked", ".jsonl.zst"),
+    ] {
+        let path = format!(
+            "/pane codex home/sessions/2026/09/25/rollout-2026-09-25T11-22-33-{id}{suffix}"
+        );
+        let payload = serde_json::json!({ "hook_event_name": "SessionStart", "session_id": id, "source": source, "transcript_path": path });
+        let request = run_shell_hook_with_env(
+            "src/integration/assets/codex/herdr-agent-state.sh",
+            &["session"],
+            &payload.to_string(),
+            &[("CODEX_HOME", "/pane codex home")],
+        )
+        .expect("session report");
+        assert_eq!(request["params"]["agent_session_id"], id);
+        assert_eq!(request["params"]["agent_session_path"], path);
+        assert_eq!(request["params"]["session_start_source"], source);
+    }
 }
 
 #[test]

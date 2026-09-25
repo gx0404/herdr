@@ -46,7 +46,7 @@ pub(crate) struct SourceContext<'a> {
     /// 该 CLI 的配置目录（见 `agent_config_dir`：环境变量覆盖优先，否则 `home`
     /// 下的默认目录；claude / codex / kimi 借此跟随 `CLAUDE_CONFIG_DIR` /
     /// `CODEX_HOME` / `KIMI_CODE_HOME`）。覆盖变量取自 server 进程的环境，不是
-    /// pane 里 CLI 的环境（claude 的钩子上报过转录路径时，`session` 直接是该路径，
+    /// pane 里 CLI 的环境（claude/codex 的钩子上报过转录路径时，`session` 直接是该路径，
     /// 不经这里）。没有对应 CLI 时为 `None`，适配器回退 `home` 下的默认目录。
     pub agent_config_dir: Option<&'a Path>,
     /// server 缓存的该 pane 最近一份 `pane.report_agent_activity` hint（pi 的树整份
@@ -222,12 +222,9 @@ fn read_node(
 ///
 /// 覆盖变量读的是 herdr server 进程自己的环境（server 启动时继承的那份），不是
 /// pane 里 CLI 进程的环境：只在某个 pane 里导出的覆盖（如 `CODEX_HOME=/x codex`）
-/// 这里看不到，会去默认目录找该 agent 的会话文件而找不到。claude 例外：钩子随会话
-/// 上报转录路径（`agent_resume::transcript_from_report`），`AppState::agent_activity_subject`
-/// 把会话引用换成该路径，活动树按路径定位会话，不经这里。codex 钩子拿到了转录路径
-/// 但没有转发，kimi 的钩子载荷里没有路径；要跟随它们在 pane 里的实际环境，得读 agent
-/// 进程的环境块（平台相关，Windows 没有对等手段），不在这里做。用户文档（socket-api
-/// 「Agent activity」）写明了这一点。
+/// 这里看不到。claude/codex 的钩子随会话上报转录路径后，
+/// `AppState::agent_activity_subject` 把活动会话引用换成匹配 agent 和 id 的路径，
+/// 适配器按已知布局定位会话库。kimi 的钩子载荷没有路径，仍需要 server 侧目录设置。
 fn agent_config_dir(agent: &str, home: &Path) -> Option<PathBuf> {
     let (env_var, segments): (Option<&str>, &[&str]) = match agent {
         "claude" => (Some("CLAUDE_CONFIG_DIR"), &[".claude"]),
@@ -2495,6 +2492,102 @@ mod tests {
         assert!(found > 0, "按上报的转录路径找到会话：{tree}");
     }
 
+    #[test]
+    fn codex_reported_transcripts_follow_resume_fork_and_id_fallback() {
+        use crate::agent_resume::AgentSessionRefKind;
+        let (mut app, pane_id, public) = app_with_agent(Some(Agent::Codex));
+        let path = |home: &str, id: &str| {
+            std::env::temp_dir()
+                .join(home)
+                .join("sessions/2026/09/25")
+                .join(format!("rollout-2026-09-25T11-22-33-{id}.jsonl"))
+                .to_string_lossy()
+                .into_owned()
+        };
+        let report =
+            |app: &mut crate::app::App, id: &str, raw: Option<String>, seq: u64, source: &str| {
+                let response = app.handle_api_request(Request {
+                    id: format!("session-{seq}"),
+                    method: Method::PaneReportAgentSession(
+                        crate::api::schema::PaneReportAgentSessionParams {
+                            pane_id: public.clone(),
+                            source: "herdr:codex".into(),
+                            agent: "codex".into(),
+                            seq: Some(seq),
+                            agent_session_id: Some(id.into()),
+                            agent_session_path: raw,
+                            session_start_source: Some(source.into()),
+                        },
+                    ),
+                });
+                assert!(response.contains("\"ok\""), "{response}");
+            };
+        let current = |app: &crate::app::App| {
+            app.state
+                .agent_activity_subject(pane_id)
+                .unwrap()
+                .session
+                .unwrap()
+        };
+        report(
+            &mut app,
+            "root",
+            Some(path("first-home", "root")),
+            1,
+            "startup",
+        );
+        assert_eq!(current(&app).value, path("first-home", "root"));
+        report(
+            &mut app,
+            "root",
+            Some(path("second-home", "root")),
+            2,
+            "resume",
+        );
+        assert_eq!(current(&app).value, path("second-home", "root"));
+        report(&mut app, "forked", None, 3, "fork");
+        assert_eq!(current(&app).kind, AgentSessionRefKind::Id);
+        assert_eq!(current(&app).value, "forked");
+        report(
+            &mut app,
+            "forked",
+            Some(path("fork-home", "forked")),
+            4,
+            "resume",
+        );
+        assert_eq!(current(&app).value, path("fork-home", "forked"));
+        report(
+            &mut app,
+            "root",
+            Some(path("first-home", "root")),
+            2,
+            "resume",
+        );
+        assert_eq!(
+            current(&app).value,
+            path("fork-home", "forked"),
+            "late old report cannot replace the current path"
+        );
+        assert!(app
+            .state
+            .agent_activity
+            .transcript(pane_id, "claude", "forked")
+            .is_none());
+        report(
+            &mut app,
+            "next",
+            Some(path("fork-home", "wrong-id")),
+            5,
+            "fork",
+        );
+        assert_eq!(current(&app).kind, AgentSessionRefKind::Id);
+        assert_eq!(
+            current(&app).value,
+            "next",
+            "bad path preserves the valid session ID"
+        );
+    }
+
     /// G1b：转录路径与会话 id 成对存放。会话换了（新 id 没带路径）就退回按 id 找；agent
     /// 还没识别出来时上报的路径照样留着（过期清理不动它），pane 关掉后才清。
     #[test]
@@ -2511,6 +2604,7 @@ mod tests {
                 .into_owned()
         };
         let transcript = |session: &str| crate::agent_resume::ReportedTranscript {
+            agent: "claude".into(),
             session_id: session.into(),
             path: crate::agent_resume::AgentSessionRef::path(transcript_path(session))
                 .expect("绝对路径"),
@@ -2626,6 +2720,7 @@ mod tests {
         let mut store = crate::app::state::AgentActivityStore::default();
         let agent = pane(1);
         let transcript = |session: &str| crate::agent_resume::ReportedTranscript {
+            agent: "claude".into(),
             session_id: session.into(),
             path: crate::agent_resume::AgentSessionRef::path(
                 std::env::temp_dir()
@@ -2659,7 +2754,7 @@ mod tests {
         assert!(store.transcript(agent, "claude", "c").is_some());
         assert!(
             store.transcript(agent, "codex", "c").is_none(),
-            "只给 claude 的活动树用"
+            "其他 agent 不得复用 claude 路径"
         );
         assert!(store.note_transcript(agent, Some(6), transcript("g")));
         assert!(store.transcript(agent, "claude", "c").is_none());

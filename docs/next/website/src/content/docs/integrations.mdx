@@ -153,6 +153,8 @@ Codex only runs hooks that you have trusted. After the integration is installed,
 
 Herdr uses `~/.codex` by default, or `CODEX_HOME` when set. The Codex config directory must already exist. Install writes `herdr-agent-state.sh`, updates `hooks.json`, and ensures `[features] hooks = true` in `config.toml`. It also removes the deprecated top-level `codex_hooks` flag when present. Uninstall removes Herdr entries from `hooks.json` and deletes the hook script, but leaves `config.toml` unchanged.
 
+The session hook forwards Codex’s transcript path along with the session ID. This lets activity discovery follow a `CODEX_HOME` set only in that pane after the hook reports; install the integration into that same config directory and restart Codex to load the updated hook. Resume still uses the session ID. See [Agent activity](/socket-api/#agent-activity) for path layout and compressed-rollout limits.
+
 ## Kimi Code CLI
 
 Install the Kimi Code CLI hook:

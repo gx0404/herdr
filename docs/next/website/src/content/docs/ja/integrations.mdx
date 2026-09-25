@@ -155,6 +155,8 @@ Codex は信頼済みのフックだけを実行します。インテグレー�
 
 Herdr はデフォルトで `~/.codex` を使い、`CODEX_HOME` が設定されていればそちらを使います。Codex の設定ディレクトリはあらかじめ存在している必要があります。インストールは `herdr-agent-state.sh` を書き込み、`hooks.json` を更新し、`config.toml` に `[features] hooks = true` があることを保証します。非推奨のトップレベル `codex_hooks` フラグが存在すれば削除もします。アンインストールは `hooks.json` から Herdr のエントリを削除してフックスクリプトを削除しますが、`config.toml` は変更しません。
 
+セッションフックはセッション ID と Codex のトランスクリプトパスを転送し、報告後はペイン内だけの `CODEX_HOME` にもアクティビティ検出が追従します。同じ設定ディレクトリに統合をインストールし、Codex を再起動して更新済みフックを読み込んでください。再開は引き続きセッション ID を使います。パス配置と圧縮ログの制限は[Agent activity](/ja/socket-api/#エージェントアクティビティ)を参照してください。
+
 ## Kimi Code CLI
 
 Kimi Code CLI フックをインストールします:

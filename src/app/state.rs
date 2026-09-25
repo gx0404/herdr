@@ -1154,8 +1154,8 @@ pub struct AgentActivityStore {
     activity: std::collections::HashMap<PaneId, AgentActivitySnapshot>,
     hinted: std::collections::HashSet<PaneId>,
     latest_hints: std::collections::HashMap<PaneId, std::sync::Arc<str>>,
-    /// 各 pane 钩子随会话上报的转录路径（claude）及其上报序号，只给活动树定位会话文件
-    /// 用：与会话 id 成对存放，用时核对（[`Self::transcript`]）。上报可能早于 agent 被
+    /// 各 pane 钩子随会话上报的转录路径（claude/codex）及其上报序号，只给活动树定位会话文件
+    /// 用：与 agent 和会话 id 成对存放，用时核对（[`Self::transcript`]）。上报可能早于 agent 被
     /// 识别，所以 pane 还在就留着，不随 [`Self::retain_panes`] 清理。
     transcripts:
         std::collections::HashMap<PaneId, (Option<u64>, crate::agent_resume::ReportedTranscript)>,
@@ -1319,20 +1319,17 @@ impl AgentActivityStore {
     }
 
     /// 该 pane 上报过的、属于会话 `session_id` 的转录路径；会话已换（id 对不上）或
-    /// agent 不是 claude（只有它的钩子上报转录路径、适配器按转录布局解读）时为 `None`。
+    /// agent 不匹配时为 `None`。
     pub fn transcript(
         &self,
         pane_id: PaneId,
         agent: &str,
         session_id: &str,
     ) -> Option<&crate::agent_resume::AgentSessionRef> {
-        if agent != "claude" {
-            return None;
-        }
         self.transcripts
             .get(&pane_id)
             .map(|(_, transcript)| transcript)
-            .filter(|transcript| transcript.session_id == session_id)
+            .filter(|transcript| transcript.agent == agent && transcript.session_id == session_id)
             .map(|transcript| &transcript.path)
     }
 
@@ -1793,7 +1790,7 @@ impl AppState {
                     .map(|session| session.session_ref.clone())
             })
             .map(|session| {
-                // 钩子随这个会话上报过转录路径（claude）：按路径定位会话文件，pane 里单独
+                // 钩子随这个会话上报过转录路径（claude/codex）：按路径定位会话文件，pane 里单独
                 // 设置的配置目录也能跟上（路径是 CLI 自己给的）；会话已换时不用旧路径。
                 match session.kind {
                     crate::agent_resume::AgentSessionRefKind::Id => self

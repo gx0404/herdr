@@ -73,41 +73,77 @@ pub fn session_ref_from_report(
 /// 文件用，恢复仍只认 [`session_ref_from_report`] 给出的会话引用。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReportedTranscript {
+    /// 上报转录的 agent，防止同 pane 切换 agent 后复用另一家的路径。
+    pub agent: String,
     /// 同一次上报的会话 id：活动树只在 pane 的会话 id 仍是它时才用这条路径。
     pub session_id: String,
     /// 转录文件的绝对路径（[`AgentSessionRefKind::Path`]）。
     pub path: AgentSessionRef,
 }
 
-/// 钩子上报的转录路径。目前只收 claude 官方集成的：SessionStart 载荷的
-/// `transcript_path` 与会话 id 一起上报，活动适配器由它推出会话目录。路径是 pane 里的
-/// CLI 自己给的，`CLAUDE_CONFIG_DIR` 只在 pane 里设置时活动树也能找到会话文件。其余
-/// agent 不收：codex 钩子拿到了转录路径但没有转发，kimi 的钩子载荷里没有路径，pi 的
-/// 路径本身就是会话引用。
-///
-/// 来源名是上报方自报的，所以路径也要像 claude 的主转录：绝对路径、文件名恰是
-/// `<会话 id>.jsonl`，不以分隔符结尾（目录写法）；指向目录的在适配器里再拒一次。
+/// Claude/Codex 官方钩子随会话 id 上报的绝对转录路径；仅给活动树定位，恢复仍用 id。
+/// 文件名必须对应同次上报的 id；Codex 允许 rollout 的 `.jsonl.zst` 压缩后缀。
+/// 路径只做词法校验，不在上报处理或状态投影中访问文件系统。
 pub fn transcript_from_report(
     source: &str,
     agent: &str,
     agent_session_id: Option<&str>,
     agent_session_path: Option<&str>,
 ) -> Option<ReportedTranscript> {
-    if (source, agent) != ("herdr:claude", "claude") {
+    if !matches!(
+        (source, agent),
+        ("herdr:claude", "claude") | ("herdr:codex", "codex")
+    ) {
         return None;
     }
     let session_id = agent_session_id.filter(|id| valid_session_id(id))?;
     let raw = agent_session_path?;
-    let named = Path::new(raw).file_name().and_then(|name| name.to_str())
-        == Some(format!("{session_id}.jsonl").as_str());
+    let file = Path::new(raw).file_name()?.to_str()?;
+    let named = match agent {
+        "claude" => file == format!("{session_id}.jsonl"),
+        "codex" => {
+            codex_rollout_session_id(file) == Some(session_id)
+                && !Path::new(raw)
+                    .components()
+                    .any(|part| matches!(part, std::path::Component::ParentDir))
+        }
+        _ => false,
+    };
     if !named || raw.ends_with(['/', '\\']) {
         return None;
     }
     let path = AgentSessionRef::path(raw)?;
     Some(ReportedTranscript {
+        agent: agent.to_owned(),
         session_id: session_id.to_owned(),
         path,
     })
+}
+
+/// Codex rollout 文件名中的线程 id；与活动适配器共享，避免路径校验和定位口径分叉。
+pub(crate) fn codex_rollout_session_id(name: &str) -> Option<&str> {
+    let rest = name.strip_prefix("rollout-")?;
+    let stem = rest
+        .strip_suffix(".jsonl.zst")
+        .or_else(|| rest.strip_suffix(".jsonl"))?;
+    let stamp = stem.get(..20)?;
+    for (index, byte) in stamp.bytes().enumerate() {
+        let separator = match index {
+            4 | 7 | 13 | 16 | 19 => Some(b'-'),
+            10 => Some(b'T'),
+            _ => None,
+        };
+        if separator.map_or_else(|| !byte.is_ascii_digit(), |expected| byte != expected) {
+            return None;
+        }
+    }
+    let id = stem.get(20..)?;
+    (!id.is_empty()
+        && id.len() <= 128
+        && id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_')))
+    .then_some(id)
 }
 
 pub fn persisted_session_from_launch_args(
@@ -537,6 +573,57 @@ mod tests {
                 transcript_from_report(source, agent, id, path).is_none(),
                 "{source} {agent} {id:?} {path:?}"
             );
+        }
+    }
+
+    #[test]
+    fn codex_reported_transcripts_keep_resume_ids_and_reject_unpaired_paths() {
+        for suffix in [".jsonl", ".jsonl.zst"] {
+            let raw =
+                absolute_test_path(&format!("rollout-2026-09-25T11-22-33-session-id{suffix}"));
+            let transcript =
+                transcript_from_report("herdr:codex", "codex", Some("session-id"), Some(&raw))
+                    .expect("Codex reports its own rollout path");
+            assert_eq!(transcript.session_id, "session-id");
+            assert_eq!(transcript.path.value, raw);
+            let session = session_ref_from_report(
+                "herdr:codex",
+                "codex",
+                Some("session-id".into()),
+                Some(raw.clone()),
+            )
+            .unwrap();
+            assert_eq!(session.kind, AgentSessionRefKind::Id);
+            for (source, id, path) in [
+                ("custom:codex", "session-id", raw.clone()),
+                ("herdr:codex", "other-id", raw.clone()),
+                ("herdr:codex", "session-id", format!("{raw}/")),
+                (
+                    "herdr:codex",
+                    "session-id",
+                    "rollout-2026-09-25T11-22-33-session-id.jsonl".into(),
+                ),
+                (
+                    "herdr:codex",
+                    "session-id",
+                    absolute_test_path("rollout-garbage-session-id.jsonl"),
+                ),
+                (
+                    "herdr:codex",
+                    "session-id",
+                    absolute_test_path("rollout-2026-09-25T11-22-33-wrong-session-id.jsonl"),
+                ),
+                (
+                    "herdr:codex",
+                    "session-id",
+                    absolute_test_path("../rollout-2026-09-25T11-22-33-session-id.jsonl"),
+                ),
+            ] {
+                assert!(
+                    transcript_from_report(source, "codex", Some(id), Some(&path)).is_none(),
+                    "{source} {id} {path}"
+                );
+            }
         }
     }
 

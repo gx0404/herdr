@@ -618,14 +618,18 @@ workspace 的 get/list 响应会公开生成的 `tokens` 映射,空间侧边栏�
 后台线程里通过每种智能体各自的来源适配器读取它;钩子只负责发出「可能变了」的
 信号。
 
-读取智能体自身会话文件的适配器(Claude Code、Codex、Kimi Code)按 Herdr 服务器
-进程的环境解析配置目录:服务器环境里有 `CLAUDE_CONFIG_DIR`、`CODEX_HOME` 或
-`KIMI_CODE_HOME` 就用它,否则用 `~/.claude`、`~/.codex` 或 `~/.kimi-code`。只在某个
-窗格里设置的覆盖(例如 `CODEX_HOME=/path codex`)服务器看不到,也就找不到
-该智能体的活动;请同时在启动服务器的环境里设置该变量。Claude Code 在会话开始后例外:
-Herdr 集成会随会话 ID 一起上报会话转录文件的路径,适配器按这条路径定位会话,所以只在
-窗格里设置的 `CLAUDE_CONFIG_DIR` 也能生效。这次上报到达之前(例如 Herdr 刚恢复会话时),
-适配器仍回退到上面的配置目录。
+读取智能体自身会话文件的适配器(Claude Code、Codex、Kimi Code)起初按 Herdr
+服务器环境中的 `CLAUDE_CONFIG_DIR`、`CODEX_HOME` 或 `KIMI_CODE_HOME` 定位配置目录,
+没有覆盖时使用 `~/.claude`、`~/.codex` 或 `~/.kimi-code`。Claude Code 和 Codex
+会话钩子还会随会话 ID 上报绝对转录路径。只要窗格当前的智能体和会话 ID 仍匹配,
+适配器就优先使用该路径,因此仅在窗格里设置 `CLAUDE_CONFIG_DIR` 或 `CODEX_HOME`
+也能生效。resume、fork 上报会更新此关联;新 ID 未带有效路径时回退到服务器配置目录。
+恢复命令仍使用会话 ID。Kimi Code 仍需在服务器环境中设置目录覆盖。
+
+Codex 路径的文件名必须为 `rollout-<时间戳>-<会话 ID>.jsonl` 或 `.jsonl.zst`,
+并使用 `sessions/YYYY/MM/DD/` 布局。未知布局不受支持,Herdr 不会从任意父目录猜测
+会话库。压缩的根转录路径可以定位库并发现元数据可读的子线程,但压缩子线程不会被
+解压或纳入发现,其内容读取仍不受支持。
 
 钩子用 `pane.report_agent_activity` 发信号:
 

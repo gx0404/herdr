@@ -120,6 +120,7 @@ if agent_session_id:
         "agent": "codex",
         "seq": report_seq,
         "agent_session_id": agent_session_id,
+        "agent_session_path": transcript_path,
     }
     if session_start_source:
         params["session_start_source"] = session_start_source

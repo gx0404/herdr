@@ -202,10 +202,6 @@ const ENCRYPTED_PREFIX: &str = "gAAAA";
 const MIN_ENCRYPTED_CHARS: usize = 24;
 /// 树深度上限，只用来防父链成环。
 const MAX_TREE_DEPTH: usize = 32;
-const ROLLOUT_PREFIX: &str = "rollout-";
-/// 文件名里 `YYYY-MM-DDTHH-MM-SS-` 的长度。
-const ROLLOUT_STAMP_LEN: usize = 20;
-const ROLLOUT_SUFFIX: &str = ".jsonl";
 const COMPRESSED_SUFFIX: &str = ".jsonl.zst";
 
 impl ActivitySource for Codex {
@@ -218,7 +214,7 @@ impl ActivitySource for Codex {
         let Some(root_id) = root_thread_id(cx) else {
             return Err(SourceError::Unsupported);
         };
-        let sessions = sessions_dir(cx);
+        let sessions = sessions_dir(cx)?;
         if !sessions.is_dir() {
             return Ok(Vec::new());
         }
@@ -258,7 +254,7 @@ impl ActivitySource for Codex {
                 "codex node id is not a thread id: {node_id:?}"
             )));
         }
-        let sessions = sessions_dir(cx);
+        let sessions = sessions_dir(cx)?;
         let path = find_rollout(&sessions, node_id)?;
         read_transcript_page(&path, cursor, max_bytes)
     }
@@ -266,15 +262,52 @@ impl ActivitySource for Codex {
 
 // ---- 会话定位 ----
 
-/// 会话库根目录，本适配器所有「按配置目录拼路径」的唯一出口：runtime 解析好的
-/// 配置目录（`SourceContext::agent_config_dir`，跟随 `CODEX_HOME`，口径同
-/// `integration::env::codex_dir`）优先，缺省才回退 `<home>/.codex`。给了配置目录
-/// 就只认它、不再回头找 home。
-fn sessions_dir(cx: &SourceContext<'_>) -> PathBuf {
-    match cx.agent_config_dir {
+/// 已上报转录时只从固定 `sessions/YYYY/MM/DD/rollout-*` 布局定位库根；未知布局
+/// 不猜祖先也不回退其他库。没有路径时保留 server `CODEX_HOME` / 默认目录的 ID 查找。
+fn sessions_dir(cx: &SourceContext<'_>) -> Result<PathBuf, SourceError> {
+    if let Some(session) = cx
+        .session
+        .filter(|session| session.kind == crate::agent_resume::AgentSessionRefKind::Path)
+    {
+        let path = Path::new(&session.value);
+        let root = reported_sessions_dir(path).ok_or(SourceError::Unsupported)?;
+        return Ok(root.to_path_buf());
+    }
+    Ok(match cx.agent_config_dir {
         Some(config_dir) => config_dir.join("sessions"),
         None => cx.home.join(".codex").join("sessions"),
+    })
+}
+
+fn reported_sessions_dir(path: &Path) -> Option<&Path> {
+    if !path.is_absolute()
+        || path
+            .components()
+            .any(|part| matches!(part, std::path::Component::ParentDir))
+    {
+        return None;
     }
+    crate::agent_resume::codex_rollout_session_id(path.file_name()?.to_str()?)?;
+    let day = path.parent()?;
+    let month = day.parent()?;
+    let year = month.parent()?;
+    let sessions = year.parent()?;
+    let date_part = |path: &Path, digits: usize, min: u32, max: u32| {
+        path.file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| {
+                name.len() == digits
+                    && name.bytes().all(|byte| byte.is_ascii_digit())
+                    && name
+                        .parse::<u32>()
+                        .is_ok_and(|number| (min..=max).contains(&number))
+            })
+    };
+    (sessions.file_name()?.to_str()? == "sessions"
+        && date_part(year, 4, 1, 9999)
+        && date_part(month, 2, 1, 12)
+        && date_part(day, 2, 1, 31))
+    .then_some(sessions)
 }
 
 /// pane 的根线程 id：钩子上报的是 id；给的是路径时从文件名取。
@@ -304,20 +337,8 @@ fn is_plausible_thread_id(id: &str) -> bool {
 
 /// 从 `rollout-<stamp>-<id>.jsonl[.zst]` 取 id；返回 `(id, 是否压缩)`。
 fn rollout_file_id(name: &str) -> Option<(&str, bool)> {
-    let rest = name.strip_prefix(ROLLOUT_PREFIX)?;
-    let (stem, compressed) = if let Some(stem) = rest.strip_suffix(COMPRESSED_SUFFIX) {
-        (stem, true)
-    } else {
-        (rest.strip_suffix(ROLLOUT_SUFFIX)?, false)
-    };
-    if stem.len() <= ROLLOUT_STAMP_LEN || !stem.is_char_boundary(ROLLOUT_STAMP_LEN) {
-        return None;
-    }
-    let (stamp, id) = stem.split_at(ROLLOUT_STAMP_LEN);
-    if !stamp.ends_with('-') || !is_plausible_thread_id(id) {
-        return None;
-    }
-    Some((id, compressed))
+    let id = crate::agent_resume::codex_rollout_session_id(name)?;
+    Some((id, name.ends_with(COMPRESSED_SUFFIX)))
 }
 
 /// UUIDv7 的高 48 位是 unix 毫秒；不是 v7 时返回 `None`。
@@ -1948,6 +1969,61 @@ mod tests {
         assert!(Codex.discover(&pinned).expect("缺目录不报错").is_empty());
 
         let _ = fs::remove_dir_all(&temp);
+    }
+
+    #[test]
+    fn codex_reported_transcripts_locate_a_pane_specific_session_library() {
+        let temp = unique_temp_home("reported-home");
+        let config = temp.join("pane-codex-home");
+        copy_tree(&fixture_home().join(".codex"), &config);
+        let wrong_config = temp.join("server-home");
+        let home = temp.join("empty-home");
+        let expected = discover(&fixture_home(), AgentSessionRef::id(ROOT).as_ref());
+        for suffix in [".jsonl", ".jsonl.zst"] {
+            let path = config
+                .join("sessions/2026/09/22")
+                .join(format!("rollout-2026-09-22T09-00-00-{ROOT}{suffix}"));
+            let session = AgentSessionRef::path(path.to_string_lossy()).unwrap();
+            let cx = SourceContext {
+                agent_config_dir: Some(&wrong_config),
+                ..context(&home, Some(&session))
+            };
+            assert_eq!(Codex.discover(&cx).unwrap(), expected);
+            assert!(!Codex
+                .read(&cx, CHILD_A, None, MAX_READ_BYTES)
+                .unwrap()
+                .text
+                .is_empty());
+            assert!(matches!(
+                Codex.read(&cx, COMPRESSED, None, 300),
+                Err(SourceError::Unsupported)
+            ));
+        }
+        for relative in [
+            "other/2026/09/22",
+            "sessions/2026/99/22",
+            "sessions/2026/09",
+            "sessions/arbitrary/a/b",
+        ] {
+            let path = config
+                .join(relative)
+                .join(format!("rollout-2026-09-22T09-00-00-{ROOT}.jsonl"));
+            let session = AgentSessionRef::path(path.to_string_lossy()).unwrap();
+            let fallback_home = fixture_home();
+            let cx = context(&fallback_home, Some(&session));
+            assert!(
+                matches!(Codex.discover(&cx), Err(SourceError::Unsupported)),
+                "{relative}"
+            );
+            assert!(
+                matches!(
+                    Codex.read(&cx, CHILD_A, None, 300),
+                    Err(SourceError::Unsupported)
+                ),
+                "{relative}"
+            );
+        }
+        let _ = fs::remove_dir_all(temp);
     }
 
     #[test]

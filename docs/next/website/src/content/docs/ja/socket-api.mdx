@@ -624,15 +624,20 @@ workspace の get/list 応答は結果の `tokens` マップを公開し、ス�
 合図を送るだけです。
 
 エージェント自身のセッションファイルを読むアダプター(Claude Code、Codex、Kimi Code)は、
-設定ディレクトリを Herdr サーバーの環境で解決します。サーバーの環境に
-`CLAUDE_CONFIG_DIR`、`CODEX_HOME`、`KIMI_CODE_HOME` があればそれを使い、なければ
-`~/.claude`、`~/.codex`、`~/.kimi-code` を使います。ペインの中だけで設定した上書き
-(例: `CODEX_HOME=/path codex`)はサーバーからは見えず、そのエージェントの
-アクティビティは見つかりません。サーバーを起動する環境でも同じ変数を設定してください。
-Claude Code はセッション開始後は例外です。Herdr の統合がセッション ID と一緒にトランスクリプト
-ファイルのパスを報告し、アダプターはそのパスからセッションを見つけるので、ペインの中だけで
-設定した `CLAUDE_CONFIG_DIR` でも動きます。この報告が届くまで(たとえば Herdr がセッションを
-復元した直後)は、上の設定ディレクトリにフォールバックします。
+最初に Herdr サーバーの環境にある `CLAUDE_CONFIG_DIR`、`CODEX_HOME`、
+`KIMI_CODE_HOME` を使い、なければ `~/.claude`、`~/.codex`、`~/.kimi-code` を使います。
+Claude Code と Codex のセッションフックは、セッション ID と絶対トランスクリプトパスも
+報告します。ペインの現在のエージェントとセッション ID が一致する間はそのパスが優先され、
+ペイン内だけの `CLAUDE_CONFIG_DIR` や `CODEX_HOME` でも動作します。resume・fork の
+報告で対応関係を更新し、新しい ID に有効なパスがなければサーバーの設定ディレクトリに
+フォールバックします。再開コマンドは引き続きセッション ID を使います。Kimi Code は
+引き続きサーバー側の環境にディレクトリの上書きが必要です。
+
+Codex のファイル名は `rollout-<timestamp>-<session-id>.jsonl` または `.jsonl.zst`、
+配置は `sessions/YYYY/MM/DD/` である必要があります。未知の配置は非対応で、Herdr は
+任意の親ディレクトリからライブラリを推測しません。圧縮されたルートのパスでもライブラリを
+特定し、メタデータを読める子スレッドを検出できますが、圧縮された子スレッドの展開・検出・
+内容の読み取りは未対応です。
 
 フックは `pane.report_agent_activity` で合図します:
 

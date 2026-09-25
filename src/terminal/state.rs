@@ -1355,7 +1355,7 @@ impl TerminalState {
             ) | (
                 "herdr:codex",
                 "codex",
-                Some("startup" | "clear" | "resume" | "compact")
+                Some("startup" | "clear" | "resume" | "compact" | "fork")
             ) | ("herdr:opencode", "opencode", Some("select"))
                 | ("herdr:pi", "pi", Some("new" | "resume" | "fork"))
         )
@@ -4493,7 +4493,7 @@ mod tests {
 
     #[test]
     fn codex_lifecycle_session_ref_replaces_existing_session_ref() {
-        for session_start_source in ["startup", "clear", "resume", "compact"] {
+        for session_start_source in ["startup", "clear", "resume", "compact", "fork"] {
             let mut terminal = test_terminal();
             terminal
                 .set_agent_session_ref(
