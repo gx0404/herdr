@@ -60,16 +60,16 @@ pub(super) const PROVIDERS: &[Provider] = &[
     Provider { agent: "codex", label: "Codex", command: "codex", source: "https://learn.chatgpt.com/docs/app-server", method: "account/rateLimits/read; account/usage/read", scope: "account", query: Query::Codex },
     // claude 主路径是官方 statusline 回调；`/usage` 交互探测只在 `interactive_probe` 开启且
     // 显式刷新时作为兜底（见 `interactive_fallback`），登录态由非交互 `auth status` 预检。
-    Provider { agent: "claude", label: "Claude Code", command: "claude", source: "https://code.claude.com/docs/en/statusline", method: "statusline JSON rate_limits / cost / context_window；/usage", scope: "account", query: Query::Callback },
-    Provider { agent: "kimi", label: "Kimi Code", command: "kimi", source: "https://www.kimi.com/code/docs/en/kimi-code-cli/reference/server-api.html", method: "GET /api/v1/oauth/usage；/usage", scope: "account", query: Query::Kimi },
+    Provider { agent: "claude", label: "Claude Code", command: "claude", source: "https://code.claude.com/docs/en/statusline", method: "statusline JSON rate_limits / cost / context_window; /usage", scope: "account", query: Query::Callback },
+    Provider { agent: "kimi", label: "Kimi Code", command: "kimi", source: "https://www.kimi.com/code/docs/en/kimi-code-cli/reference/server-api.html", method: "GET /api/v1/oauth/usage; /usage", scope: "account", query: Query::Kimi },
     // opencode 没有任何账号额度接口：两种形态给出的都是本地会话统计（`scope = local`）。
     Provider { agent: "opencode", label: "OpenCode", command: "opencode", source: "https://opencode.ai/docs/cli/", method: "opencode db <query> --format json", scope: "local", query: Query::Json { args: &["db", OPENCODE_SESSION_TOTALS_SQL, "--format", "json"], fallback_args: Some(&["stats"]) } },
     // pi 是多服务商 CLI：RPC 模式是另起的 headless 进程，连不进正在跑的 TUI，所以用量由 herdr
     // 的 pi 扩展在会话内取数后推送；条目是会话级统计，不是账号额度。
-    Provider { agent: "pi", label: "Pi", command: "pi", source: "https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/extensions.md", method: "herdr pi 扩展：ctx.getContextUsage() + 会话用量合计", scope: "session", query: Query::ExtensionPush },
+    Provider { agent: "pi", label: "Pi", command: "pi", source: "https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/extensions.md", method: "Herdr Pi extension: ctx.getContextUsage() + session usage totals", scope: "session", query: Query::ExtensionPush },
     // zcode 零凭据：只读 `~/.zcode/cli/db/db.sqlite` 的 `model_usage`，按主任务 / 子 agent
     // 拆分最近 24 h 的 token；远端额度档（要读 ZCode 存的凭据）不实现。
-    Provider { agent: "zcode", label: "ZCode", command: "sqlite3", source: "https://github.com/zai-org/ZCode", method: "sqlite3 -readonly ~/.zcode/cli/db/db.sqlite：model_usage 最近 24 h 聚合", scope: "local", query: Query::ZcodeLocal },
+    Provider { agent: "zcode", label: "ZCode", command: "sqlite3", source: "https://github.com/zai-org/ZCode", method: "sqlite3 -readonly ~/.zcode/cli/db/db.sqlite: model_usage totals for the last 24 hours", scope: "local", query: Query::ZcodeLocal },
 ];
 
 pub(super) fn provider(agent: &str) -> Option<&'static Provider> {

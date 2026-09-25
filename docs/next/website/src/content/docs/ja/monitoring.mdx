@@ -155,7 +155,7 @@ ZCode はペインで動かないデスクトップアプリで、Herdr がそ�
 
 ## API
 
-公開している JSON メソッドには `system.metrics.get/subscribe/unsubscribe`、`system.process.list/get/terminate`、`account.usage.providers/get/refresh/subscribe/unsubscribe/report/integration`、`account.binding.set` があります。遅い購読者には最新のサンプルだけが残ります。
+公開している JSON メソッドには `system.metrics.get/subscribe/unsubscribe`、`system.process.list/get/terminate`、`account.usage.providers/get/refresh/subscribe/unsubscribe/report/integration`、`account.binding.set` があります。遅い購読者には最新のサンプルだけが残ります。 使用量プロバイダーの `method` 説明は、サーバーやクライアントの表示言語に関係なく英語で統一されます。
 
 `account.usage.get` / `account.usage.refresh` の応答と `account.usage.updated` イベントは、スナップショットと並べて `refresh` リスト（`UsageRefreshState`。`account_id` で `accounts` と対応し、古い server では省略）を返します。プローブの進行（`in_flight`、`queued`、`attempted_at_ms`）、明示的な更新のデバウンス（`requested_at_ms`、`next_allowed_at_ms`）、ベンダーのバックオフ（`retry_after_ms`）、`binding_inferred`、`trust_required`、`callback_only`、`pending_binding`、`callback_enabled` を含みます。`account.usage.refreshing` はプローブの開始時にこのリストだけをプッシュします。フィールドの意味とイベントのエンベロープは[イベント購読](/ja/docs/socket-api/#イベント購読)を参照してください。
 

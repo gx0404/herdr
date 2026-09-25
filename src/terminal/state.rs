@@ -5215,7 +5215,15 @@ mod tests {
             "pi".into(),
             AgentState::Working,
             None,
-            crate::agent_resume::AgentSessionRef::path("/tmp/pi-session.jsonl"),
+            Some(
+                crate::agent_resume::AgentSessionRef::path(
+                    std::env::temp_dir()
+                        .join("pi-session.jsonl")
+                        .to_string_lossy()
+                        .into_owned(),
+                )
+                .expect("the foreign owner reports a valid absolute session path"),
+            ),
             Some(21),
         );
 

@@ -157,7 +157,7 @@ ZCode 是桌面应用，从不在窗格里运行，Herdr 也从不启动它（�
 
 ## API
 
-公开 JSON 方法包括 `system.metrics.get/subscribe/unsubscribe`、`system.process.list/get/terminate`、`account.usage.providers/get/refresh/subscribe/unsubscribe/report/integration` 和 `account.binding.set`。慢速订阅者只保留最新样本。
+公开 JSON 方法包括 `system.metrics.get/subscribe/unsubscribe`、`system.process.list/get/terminate`、`account.usage.providers/get/refresh/subscribe/unsubscribe/report/integration` 和 `account.binding.set`。慢速订阅者只保留最新样本。 用量来源的 `method` 描述统一使用英文，不随服务端或客户端界面语言变化。
 
 `account.usage.get` / `account.usage.refresh` 的响应与 `account.usage.updated` 事件在快照旁带一份 `refresh` 列表（`UsageRefreshState`，按 `account_id` 与 `accounts` 对齐；旧版 server 省略）：探测进度（`in_flight`、`queued`、`attempted_at_ms`）、显式刷新防抖（`requested_at_ms`、`next_allowed_at_ms`）、厂商退避（`retry_after_ms`）、`binding_inferred`、`trust_required`、`callback_only`、`pending_binding` 与 `callback_enabled`。`account.usage.refreshing` 在探测派发时只推送这份列表。字段含义与事件信封见 [事件订阅](/zh-cn/docs/socket-api/#事件订阅)。
 

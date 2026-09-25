@@ -155,7 +155,7 @@ ZCode is a desktop app that never runs in a pane, and Herdr never launches it (i
 
 ## API
 
-Public JSON methods include `system.metrics.get/subscribe/unsubscribe`, `system.process.list/get/terminate`, `account.usage.providers/get/refresh/subscribe/unsubscribe/report/integration`, and `account.binding.set`. Slow subscribers retain the newest sample.
+Public JSON methods include `system.metrics.get/subscribe/unsubscribe`, `system.process.list/get/terminate`, `account.usage.providers/get/refresh/subscribe/unsubscribe/report/integration`, and `account.binding.set`. Slow subscribers retain the newest sample. Provider `method` descriptions use English consistently, independently of the server or client interface language.
 
 `account.usage.get` / `account.usage.refresh` responses and `account.usage.updated` events carry a `refresh` list (`UsageRefreshState`, aligned to `accounts` by `account_id`; older servers omit it) next to the snapshots: probe progress (`in_flight`, `queued`, `attempted_at_ms`), the explicit-refresh debounce (`requested_at_ms`, `next_allowed_at_ms`), vendor backoff (`retry_after_ms`), `binding_inferred`, `trust_required`, `callback_only`, `pending_binding` and `callback_enabled`. `account.usage.refreshing` pushes only that list as a probe starts. Field meanings and the event envelope are documented under [event subscriptions](/docs/socket-api/#event-subscriptions).
 
