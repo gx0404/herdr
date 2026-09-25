@@ -68,7 +68,7 @@ Workspaces and session:
 | Goto picker | `prefix+g` |
 | Toggle sidebar | `prefix+b` |
 
-The Goto picker (`prefix+g`) is the session navigator. Its search box splits your query on whitespace and keeps a row only when every word appears somewhere in it, so `server web` finds `web server` and word order no longer matters. While a search or status filter is active the selection starts on the first row that matched, instead of on the workspace row that was only pulled in to hold it, so Enter opens what you searched for. Home still returns to the top of the list. (`prefix+w` is a different key: it moves the sidebar into workspace-navigation mode and has no search box.)
+The Goto picker (`prefix+g`) is the session navigator. Its search box splits your query on whitespace and keeps a row only when every word appears somewhere in it, so `server web` finds `web server` and word order no longer matters. While a search or status filter is active the selection starts on the first row that matched, instead of on the workspace row that was only pulled in to hold it, so Enter opens what you searched for. Outside the search field, Home returns to the first row and End or `Shift+G` jumps to the last row. `Shift+G` also jumps to the end in SSH import discovery and selection lists, including terminals using the kitty keyboard protocol. (`prefix+w` is a different key: it moves the sidebar into workspace-navigation mode and has no search box.)
 
 The full keymap and the binding syntax live in the [keybinding reference](/docs/configuration/#keybindings).
 

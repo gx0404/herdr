@@ -777,7 +777,7 @@ fn render_onboarding_overlay(b: &mut Buffer, cx: &ChromeContext<'_>) -> Option<O
             ..OverlayRender::default()
         });
     }
-    let stack = crate::ui::modal_stack_areas(inner, 2, 0, 1, 1);
+    let stack = crate::ui::modal_stack_areas(inner, onboarding_header_rows(inner.width), 0, 1, 1);
     let base = Style::default()
         .bg(p.panel_bg)
         .remove_modifier(Modifier::DIM);
@@ -795,11 +795,10 @@ fn render_onboarding_overlay(b: &mut Buffer, cx: &ChromeContext<'_>) -> Option<O
         crate::ui::ONBOARDING_TITLE,
         title,
     );
-    put_text(
+    put_wrapped(
         b,
-        stack.header.x,
+        stack.header,
         stack.header.y.saturating_add(1),
-        stack.header.width,
         crate::i18n::texts().onboarding.subtitle,
         muted,
     );
@@ -998,6 +997,14 @@ fn onboarding_body_rows(width: u16) -> u16 {
         .saturating_add(rows(crate::i18n::texts().onboarding.next))
 }
 
+fn onboarding_header_rows(width: u16) -> u16 {
+    let mut rows = 1u16; // 标题占一行，副标题和实际绘制使用同一折行规则。
+    wrap_indented(crate::i18n::texts().onboarding.subtitle, width, |_, _| {
+        rows = rows.saturating_add(1);
+    });
+    rows
+}
+
 /// 欢迎页浮层尺寸：默认中号；正文折行后默认高度放不下时加高（仍受终端高度
 /// 限制）。宽度与高度无关，先按默认高度取宽度，再按这个宽度量正文。
 fn onboarding_modal_size(area: Rect) -> crate::ui::ModalSize {
@@ -1005,8 +1012,10 @@ fn onboarding_modal_size(area: Rect) -> crate::ui::ModalSize {
     let Some(inner) = crate::ui::modal_rect(area, base).and_then(panel_inner) else {
         return base;
     };
-    // 标题 2 行 + 间隔 1 行 + 正文 + 间隔 1 行 + 按钮 1 行 + 上下边框 2 行。
-    let needed = onboarding_body_rows(inner.width).saturating_add(7);
+    // 标题 / 副标题按宽度计行，再加两处间隔、按钮和上下边框。
+    let needed = onboarding_body_rows(inner.width)
+        .saturating_add(onboarding_header_rows(inner.width))
+        .saturating_add(5);
     base.with_height(needed.max(base.cells().1))
 }
 

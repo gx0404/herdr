@@ -4324,3 +4324,24 @@ fn import_header_reserves_room_for_the_path_next_to_the_step_indicator() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn import_kitty_capital_g_uses_the_shifted_alternate() {
+    let dir = with_temp_home("import-kitty-g");
+    std::fs::write(dir.join(".ssh").join("config"), many_hosts_config(30)).unwrap();
+    let mut state = state_with_profiles(&[]);
+    state.open_machine_import_wizard();
+    let _ = frame_compact(&mut state, 93, 32);
+    let key = crate::input::TerminalKey::new(KeyCode::Char('g'), KeyModifiers::SHIFT)
+        .with_shifted_codepoint('G' as u32);
+    let max = import_probe(&state).max_scroll;
+    assert!(max > 0);
+    state.handle_raw_events(vec![crate::raw_input::RawInputEvent::Key(key.clone())]);
+    assert_eq!(import_probe(&state).scroll, max);
+    raw_key(&mut state, KeyCode::Enter);
+    let _ = frame_compact(&mut state, 93, 32);
+    state.handle_raw_events(vec![crate::raw_input::RawInputEvent::Key(key)]);
+    let probe = import_probe(&state);
+    assert_eq!(probe.focus_row, probe.candidates + 1);
+    let _ = std::fs::remove_dir_all(&dir);
+}

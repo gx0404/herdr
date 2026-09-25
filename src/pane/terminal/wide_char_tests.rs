@@ -494,3 +494,15 @@ fn inline_redraw_of_cjk_lines_that_fill_the_width_leaves_no_residue() {
         pane.assert_no_wide_glyph_past_right_edge();
     }
 }
+
+#[test]
+fn halfwidth_katakana_voiced_grapheme_is_blank_only_when_cut() {
+    let bytes = "ｶﾞZ".as_bytes();
+    let mut pane = WidePane::new(4, 1);
+    pane.write(bytes);
+    for (width, expected) in [(1, cells(&[" "])), (2, cells(&["ｶﾞ", ""]))] {
+        assert_eq!(pane.render_area(width)[0], expected);
+        assert_eq!(first_patch_in_area(4, 1, bytes, width)[0], expected);
+    }
+    assert_eq!(pane.grid(), ["ｶﾞZ"]);
+}

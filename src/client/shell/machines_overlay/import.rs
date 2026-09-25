@@ -364,9 +364,11 @@ impl ClientShellState {
         outcome: &mut ClientShellInput,
     ) {
         let plain = modifiers.is_empty();
-        // 大写字母由终端带 SHIFT 报上来（`normalize_key_combo` 不去掉它）：`G` 只看
-        // SHIFT 以外的修饰键，否则只认无修饰键的分支永远不命中（T1 审查轻 4）。
-        let shifted_letter = modifiers.difference(KeyModifiers::SHIFT).is_empty();
+        // 兼容旧式 G 与 kitty 的小写基键 + Shift/alternate，保留 Ctrl/Alt 区别。
+        let capital_g = crate::config::terminal_key_matches_combo(
+            key,
+            (KeyCode::Char('g'), KeyModifiers::SHIFT),
+        );
         let step = match self.overlay.as_ref() {
             Some(ClientShellOverlay::Machines(overlay)) => match &overlay.view {
                 ClientMachinesView::Import(view) => view.step,
@@ -406,7 +408,7 @@ impl ClientShellState {
                         self.scroll_import_view(isize::MIN)
                     }
                     KeyCode::End if plain => self.scroll_import_view(isize::MAX),
-                    KeyCode::Char('G') if shifted_letter => self.scroll_import_view(isize::MAX),
+                    _ if capital_g => self.scroll_import_view(isize::MAX),
                     _ => {}
                 }
                 outcome.repaint = true;
@@ -454,7 +456,7 @@ impl ClientShellState {
                     KeyCode::PageDown if plain => self.move_import_focus(10),
                     KeyCode::Home | KeyCode::Char('g') if plain => self.move_import_focus(-1000),
                     KeyCode::End if plain => self.move_import_focus(1000),
-                    KeyCode::Char('G') if shifted_letter => self.move_import_focus(1000),
+                    _ if capital_g => self.move_import_focus(1000),
                     KeyCode::Tab if plain => self.move_import_focus(1),
                     KeyCode::BackTab if modifiers.difference(KeyModifiers::SHIFT).is_empty() => {
                         self.move_import_focus(-1)

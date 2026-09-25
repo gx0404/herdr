@@ -834,7 +834,12 @@ impl ClientShellState {
                 outcome.repaint = true;
                 return;
             }
-            if matches!(code, KeyCode::End | KeyCode::Char('G')) && modifiers.is_empty() {
+            if code == KeyCode::End && modifiers.is_empty()
+                || crate::config::terminal_key_matches_combo(
+                    key,
+                    (KeyCode::Char('g'), KeyModifiers::SHIFT),
+                )
+            {
                 let last = self.overlay.as_ref().and_then(|overlay| match overlay {
                     ClientShellOverlay::Navigator(navigator) => render::client_navigator_rows(
                         &self.endpoints,

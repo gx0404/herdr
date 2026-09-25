@@ -96,6 +96,17 @@ pub(super) fn render_collapsed(
         ),
     );
     let (workspace_area, divider_y, detail_area) = super::sidebar::collapsed_sidebar_sections(area);
+    // 矮侧栏没有 agent 区：工作区同样为末行的折叠开关让位，几何、滚动和命中共用。
+    let workspace_area = if detail_area.is_empty() {
+        Rect::new(
+            workspace_area.x,
+            workspace_area.y,
+            workspace_area.width,
+            workspace_area.height.saturating_sub(1),
+        )
+    } else {
+        workspace_area
+    };
     let mut total_rows = 0usize;
     let mut selected_row = None;
     let reveal = std::mem::take(state.reveal_navigation_workspace);

@@ -1677,3 +1677,28 @@ fn onboarding_body_wraps_instead_of_cutting_words() {
         }
     }
 }
+
+#[test]
+fn onboarding_subtitle_and_body_fit_at_44_columns() {
+    let _lang = crate::i18n::lang_guard(crate::i18n::Lang::En);
+    let config = ClientShellConfig::from_config(&Config::default()).with_startup_onboarding(true);
+    let mut state = ClientShellState::new(config);
+    state.set_snapshot(Box::new(snapshot()));
+    state.set_pane_surface(surface());
+    let frame = state.compose(44, 32).unwrap();
+    let squeeze = |text: &str| text.split_whitespace().collect::<String>();
+    let screen = squeeze(
+        &frame_rows(&frame)
+            .join("\n")
+            .replace(['│', '─', '┌', '┐', '└', '┘'], ""),
+    );
+    let texts = &crate::i18n::texts().onboarding;
+    for text in texts
+        .description
+        .iter()
+        .chain([&texts.subtitle, &texts.next])
+    {
+        assert!(screen.contains(&squeeze(text)), "missing {text:?}");
+    }
+    assert!(!state.hits.overlay_primary.is_empty());
+}

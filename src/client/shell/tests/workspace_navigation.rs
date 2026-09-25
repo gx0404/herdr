@@ -2112,3 +2112,58 @@ fn navigation_highlight_ends_for_noop_focus_and_focused_creation() {
         }
     }
 }
+
+#[test]
+fn navigator_capital_g_accepts_legacy_and_kitty_keys() {
+    for key in [
+        TerminalKey::new(KeyCode::Char('G'), KeyModifiers::SHIFT),
+        TerminalKey::new(KeyCode::Char('g'), KeyModifiers::SHIFT)
+            .with_shifted_codepoint('G' as u32),
+    ] {
+        let mut state = navigator_state_with_two_workspaces();
+        state.compose(120, 28).unwrap();
+        open_navigator_and_type(&mut state, "");
+        preview_key(&mut state, b"\x1b");
+        let rows = navigator_rows_now(&state);
+        let first = navigator_target_now(&state);
+        for extra in [KeyModifiers::CONTROL, KeyModifiers::ALT] {
+            let mut modified = key.clone();
+            modified.modifiers |= extra;
+            state.handle_raw_events(vec![RawInputEvent::Key(modified)]);
+            assert_eq!(
+                navigator_target_now(&state),
+                first,
+                "modified G must not jump"
+            );
+        }
+        state.handle_raw_events(vec![RawInputEvent::Key(key)]);
+        assert_eq!(
+            navigator_target_now(&state),
+            rows.last().map(|row| row.target.clone())
+        );
+    }
+}
+
+#[test]
+fn short_multimachine_sidebar_reserves_the_toggle_row() {
+    let (mut state, remote) = navigation_state(workspaces(20));
+    state.sidebar_collapsed = true;
+    state.compose(100, 6).unwrap();
+    let toggle = state.hits.sidebar_toggle;
+    assert!(!contains(state.hits.workspace_body, (toggle.x, toggle.y)));
+    assert!(state
+        .hits
+        .workspaces
+        .iter()
+        .all(|hit| hit.rect.y != toggle.y));
+    state.mode = ClientShellMode::Navigate;
+    state.navigate_workspace_id = state.navigation_target(&remote, "ws_20");
+    state.reveal_navigation_workspace = true;
+    state.compose(100, 6).unwrap();
+    let selected = workspace_rect(&state, &remote, "ws_20");
+    assert!(selected.bottom() <= state.hits.sidebar_toggle.y);
+    assert!(contains(
+        state.hits.workspace_body,
+        (selected.x, selected.y)
+    ));
+}

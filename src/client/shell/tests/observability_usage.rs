@@ -27,7 +27,11 @@ fn docked() -> ClientShellState {
 fn docked_with(snapshot: ClientShellSnapshot) -> ClientShellState {
     let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
     state.set_snapshot(Box::new(snapshot));
-    state.set_endpoint_methods(Some(vec!["client.views.set".into(), "tab.focus".into()]));
+    state.set_endpoint_methods(Some(vec![
+        "client.views.set".into(),
+        "tab.focus".into(),
+        "pane.focus".into(),
+    ]));
     state.set_pane_surface(surface());
     state.compose(120, 40).expect("初始画面");
     state.tick_workbench(std::time::Instant::now(), &mut ClientShellInput::default());
@@ -8495,4 +8499,15 @@ fn alert_threshold_stepper_follows_its_ladder() {
     let plus = find_plus(&state).expect("告警阈值的「+」画在偏好页上");
     click(&mut state, plus.x, plus.y);
     assert_eq!(state.observability.monitor.alerts[0].threshold, 50.0);
+}
+
+#[test]
+fn docked_fixture_can_focus_its_terminal_through_the_endpoint() {
+    let mut state = docked();
+    state.open_observation_page(Page::Monitor, &mut ClientShellInput::default());
+    state.compose(120, 40).unwrap();
+    let area = terminal_body(&state);
+    let outcome = click(&mut state, area.x + 1, area.y + 1);
+    assert!(outcome.actions.iter().any(|action| matches!(action,
+        ClientShellAction::Endpoint { request, .. } if matches!(request.method, Method::PaneFocus(_)))));
 }
