@@ -2167,3 +2167,60 @@ fn short_multimachine_sidebar_reserves_the_toggle_row() {
         (selected.x, selected.y)
     ));
 }
+
+#[test]
+fn single_endpoint_indexed_agent_navigation_reveals_the_target() {
+    for collapsed in [false, true] {
+        let mut state = agent_sidebar_state(30);
+        state.sidebar_collapsed = collapsed;
+        state.compose(100, 28).unwrap();
+        let mut outcome = ClientShellInput::default();
+        state.record_binding(
+            crate::input::KeybindMatch::Action(crate::input::KeybindAction::FocusAgent(29)),
+            &mut outcome,
+        );
+        state.compose(100, 28).unwrap();
+        assert!(
+            state.hits.agents.iter().any(|(_, id)| id == "pane_30"),
+            "collapsed={collapsed}"
+        );
+        let revealed_scroll = state.agent_scroll;
+        let mut outcome = ClientShellInput::default();
+        state.record_binding(
+            crate::input::KeybindMatch::Action(crate::input::KeybindAction::FocusAgent(29)),
+            &mut outcome,
+        );
+        assert_eq!(
+            state.agent_scroll, revealed_scroll,
+            "visible target must not move"
+        );
+    }
+}
+
+#[test]
+fn single_endpoint_next_agent_scrolls_only_enough_to_reveal() {
+    let mut state = agent_sidebar_state(30);
+    state.sidebar_collapsed = true;
+    state.compose(100, 28).unwrap();
+    let visible = state.hits.agents.len();
+    assert!(visible > 2 && visible < 30);
+    let mut projected = (**state.snapshot.as_ref().unwrap()).clone();
+    projected.focused_pane_id = Some(format!("pane_{visible}"));
+    state.set_snapshot(Box::new(projected));
+    state.compose(100, 28).unwrap();
+    let mut outcome = ClientShellInput::default();
+    state.record_binding(
+        crate::input::KeybindMatch::Action(crate::input::KeybindAction::NextAgent),
+        &mut outcome,
+    );
+    assert_eq!(
+        state.agent_scroll, 1,
+        "target immediately below viewport needs one row"
+    );
+    state.compose(100, 28).unwrap();
+    assert!(state
+        .hits
+        .agents
+        .iter()
+        .any(|(_, id)| id == &format!("pane_{}", visible + 1)));
+}

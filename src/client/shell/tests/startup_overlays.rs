@@ -598,6 +598,7 @@ fn endpoint_reload_result_does_not_override_snapshot_diagnostic_authority() {
     state.pending_requests.insert(
         "reload-1".into(),
         PendingEndpointRequest {
+            endpoint_id: crate::client::endpoint::ClientEndpointId::Local,
             boot_id: "boot-1".into(),
             method_name: "server.reload_config".into(),
             confirmation_workspace_id: None,

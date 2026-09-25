@@ -1247,6 +1247,7 @@ pub(super) enum PendingEndpointKind {
 }
 
 pub(super) struct PendingEndpointRequest {
+    pub(super) endpoint_id: ClientEndpointId,
     pub(super) boot_id: String,
     pub(super) method_name: String,
     pub(super) confirmation_workspace_id: Option<String>,
@@ -1265,6 +1266,7 @@ pub(super) enum ClientEndpointNoticeKind {
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub(super) struct ClientEndpointNoticeKey {
+    pub(super) endpoint_id: ClientEndpointId,
     pub(super) boot_id: String,
     pub(super) kind: ClientEndpointNoticeKind,
     pub(super) code: String,

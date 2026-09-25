@@ -677,12 +677,14 @@ impl ClientShellState {
     /// clears the dedupe so a later failure is reported again.
     pub(super) fn complete_broadcast_send(
         &mut self,
+        endpoint_id: &ClientEndpointId,
         boot_id: &str,
         machine: &str,
         error: Option<ClientShellEndpointError>,
     ) -> bool {
         let code = format!("broadcast:{machine}");
         let key = ClientEndpointNoticeKey {
+            endpoint_id: endpoint_id.clone(),
             boot_id: boot_id.to_owned(),
             kind: ClientEndpointNoticeKind::Unavailable,
             code: code.clone(),
@@ -692,9 +694,8 @@ impl ClientShellState {
                 self.endpoint_notice_seen.remove(&key);
                 false
             }
-            Some(error) => self.push_endpoint_notice(
-                ClientEndpointNoticeKind::Unavailable,
-                code,
+            Some(error) => self.push_endpoint_notice_with_key(
+                key,
                 crate::i18n::texts().broadcast.title.to_owned(),
                 crate::i18n::fill(
                     crate::i18n::texts().broadcast.notice_failed_fmt,

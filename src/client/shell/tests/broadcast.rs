@@ -390,11 +390,11 @@ fn broadcast_send_failures_dedupe_per_endpoint_and_success_rearms() {
             message: "pane is gone".into(),
         })
     };
-    assert!(state.complete_broadcast_send("boot-1", "Build", error()));
+    assert!(state.complete_broadcast_send(&ClientEndpointId::Local, "boot-1", "Build", error()));
     assert!(state.visible_endpoint_notice.is_some());
     // Same endpoint, same failure: deduped while the notice set holds it.
-    assert!(!state.complete_broadcast_send("boot-1", "Build", error()));
+    assert!(!state.complete_broadcast_send(&ClientEndpointId::Local, "boot-1", "Build", error()));
     // A success re-arms reporting for that endpoint.
-    assert!(!state.complete_broadcast_send("boot-1", "Build", None));
-    assert!(state.complete_broadcast_send("boot-1", "Build", error()));
+    assert!(!state.complete_broadcast_send(&ClientEndpointId::Local, "boot-1", "Build", None));
+    assert!(state.complete_broadcast_send(&ClientEndpointId::Local, "boot-1", "Build", error()));
 }

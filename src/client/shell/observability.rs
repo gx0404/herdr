@@ -2002,6 +2002,7 @@ impl ClientShellState {
         self.pending_requests.insert(
             request_id.clone(),
             PendingEndpointRequest {
+                endpoint_id: endpoint_id.clone(),
                 boot_id: boot_id.clone(),
                 method_name: crate::api::api_method_name(&method).into(),
                 confirmation_workspace_id: None,

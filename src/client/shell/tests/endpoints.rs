@@ -2870,3 +2870,115 @@ fn focusing_local_agent_cancels_a_pending_remote_switch() {
         ));
     }
 }
+
+fn isolated_request(state: &mut ClientShellState, endpoint_id: &ClientEndpointId) -> String {
+    let mut outcome = ClientShellInput::default();
+    assert!(state.push_endpoint_method_for(
+        endpoint_id,
+        crate::api::schema::Method::PaneFocus(crate::api::schema::PaneTarget {
+            pane_id: "pane_1".into(),
+        }),
+        PendingEndpointKind::CrossEndpointAction {
+            endpoint_id: endpoint_id.clone()
+        },
+        &mut outcome,
+    ));
+    let [ClientShellAction::EndpointRequest { request, .. }] = &outcome.actions[..] else {
+        panic!("expected request");
+    };
+    request.id.clone()
+}
+
+#[test]
+fn disconnect_cancels_only_requests_from_that_endpoint() {
+    for disconnect_active in [false, true] {
+        let (mut state, remote) = state_with_remote();
+        // Even two endpoints reporting the same boot id are different owners.
+        state.set_endpoint_snapshot(&remote, Box::new(snapshot()));
+        let local_id = isolated_request(&mut state, &ClientEndpointId::Local);
+        let remote_id = isolated_request(&mut state, &remote);
+        let (disconnected, cancelled, retained) = if disconnect_active {
+            (ClientEndpointId::Local, local_id, remote_id)
+        } else {
+            (remote, remote_id, local_id)
+        };
+        state.mark_endpoint_disconnected(&disconnected);
+        assert!(!state.pending_requests.contains_key(&cancelled));
+        assert!(state.pending_requests.contains_key(&retained));
+        let (_, actions) = state.handle_endpoint_result(
+            "boot-1",
+            &retained,
+            Ok(crate::api::schema::ResponseResult::Ok {}),
+        );
+        assert!(actions.is_empty());
+        assert!(state.pending_requests.is_empty());
+    }
+}
+
+#[test]
+fn remote_timeout_notice_uses_its_source_boot_and_success_rearms() {
+    let (mut state, remote) = state_with_remote();
+    let timeout = || {
+        Err(ClientShellEndpointError {
+            code: Some("endpoint_timeout".into()),
+            message: "timed out".into(),
+        })
+    };
+    let id = isolated_request(&mut state, &remote);
+    state.handle_endpoint_result("remote-boot", &id, timeout());
+    assert_eq!(
+        state.visible_endpoint_notice.as_ref().unwrap().key.boot_id,
+        "remote-boot"
+    );
+    state.visible_endpoint_notice = None;
+    let id = isolated_request(&mut state, &remote);
+    state.handle_endpoint_result("remote-boot", &id, timeout());
+    assert!(state.visible_endpoint_notice.is_none());
+    let id = isolated_request(&mut state, &remote);
+    state.handle_endpoint_result(
+        "remote-boot",
+        &id,
+        Ok(crate::api::schema::ResponseResult::Ok {}),
+    );
+    let id = isolated_request(&mut state, &remote);
+    state.handle_endpoint_result("remote-boot", &id, timeout());
+    assert!(state.visible_endpoint_notice.is_some());
+}
+
+#[test]
+fn timeout_dedupe_is_independent_for_endpoints_with_the_same_boot() {
+    let (mut state, remote) = state_with_remote();
+    state.set_endpoint_snapshot(&remote, Box::new(snapshot()));
+    for endpoint in [ClientEndpointId::Local, remote] {
+        let id = isolated_request(&mut state, &endpoint);
+        state.visible_endpoint_notice = None;
+        state.handle_endpoint_result(
+            "boot-1",
+            &id,
+            Err(ClientShellEndpointError {
+                code: Some("endpoint_timeout".into()),
+                message: "timed out".into(),
+            }),
+        );
+        assert!(state.visible_endpoint_notice.is_some());
+    }
+}
+
+#[test]
+fn remote_broadcast_failure_rearms_without_changing_the_active_machine() {
+    let (mut state, remote) = state_with_remote();
+    let error = || {
+        Some(ClientShellEndpointError {
+            code: Some("pane_send_failed".into()),
+            message: "pane gone".into(),
+        })
+    };
+    assert!(state.complete_broadcast_send(&remote, "remote-boot", "Build", error()));
+    let key = &state.visible_endpoint_notice.as_ref().unwrap().key;
+    assert_eq!(key.endpoint_id, remote);
+    assert_eq!(key.boot_id, "remote-boot");
+    assert!(!state.complete_broadcast_send(&remote, "remote-boot", "Build", error()));
+    assert!(!state.complete_broadcast_send(&remote, "remote-boot", "Build", None));
+    assert!(state.complete_broadcast_send(&remote, "remote-boot", "Build", error()));
+    assert_eq!(state.active_endpoint_id, ClientEndpointId::Local);
+}

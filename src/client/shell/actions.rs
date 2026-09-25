@@ -385,6 +385,7 @@ impl ClientShellState {
         body: impl Into<String>,
     ) -> bool {
         let key = ClientEndpointNoticeKey {
+            endpoint_id: self.active_endpoint_id.clone(),
             boot_id: self
                 .snapshot
                 .as_deref()
@@ -393,6 +394,16 @@ impl ClientShellState {
             kind,
             code: code.into(),
         };
+        self.push_endpoint_notice_with_key(key, title, body)
+    }
+
+    pub(super) fn push_endpoint_notice_with_key(
+        &mut self,
+        key: ClientEndpointNoticeKey,
+        title: impl Into<String>,
+        body: impl Into<String>,
+    ) -> bool {
+        let kind = key.kind;
         let body = body.into();
         // Rejected and Success are direct answers to a user action: they
         // re-present on every occurrence instead of deduping into the seen
@@ -506,6 +517,7 @@ impl ClientShellState {
         self.pending_requests.insert(
             request_id.clone(),
             PendingEndpointRequest {
+                endpoint_id: self.active_endpoint_id.clone(),
                 boot_id: snapshot.boot_id.clone(),
                 method_name,
                 confirmation_workspace_id,
@@ -549,6 +561,7 @@ impl ClientShellState {
         self.pending_requests.insert(
             request_id.clone(),
             PendingEndpointRequest {
+                endpoint_id: endpoint_id.clone(),
                 boot_id: boot_id.clone(),
                 method_name: crate::api::api_method_name(&method).to_owned(),
                 confirmation_workspace_id: None,
@@ -746,7 +759,7 @@ impl ClientShellState {
         if let PendingEndpointKind::BroadcastSend { machine, .. } = &pending.kind {
             let machine = machine.clone();
             return (
-                self.complete_broadcast_send(boot_id, &machine, result.err()),
+                self.complete_broadcast_send(&pending.endpoint_id, boot_id, &machine, result.err()),
                 Vec::new(),
             );
         }
@@ -767,6 +780,7 @@ impl ClientShellState {
         }
         if result.is_ok() {
             let timeout_key = ClientEndpointNoticeKey {
+                endpoint_id: pending.endpoint_id.clone(),
                 boot_id: boot_id.to_owned(),
                 kind: ClientEndpointNoticeKind::Timeout,
                 code: pending.method_name.clone(),
@@ -840,7 +854,16 @@ impl ClientShellState {
                         error.message.clone(),
                     ),
                 };
-                self.push_endpoint_notice(kind, notice_code, title, body);
+                self.push_endpoint_notice_with_key(
+                    ClientEndpointNoticeKey {
+                        endpoint_id: pending.endpoint_id.clone(),
+                        boot_id: pending.boot_id.clone(),
+                        kind,
+                        code: notice_code,
+                    },
+                    title,
+                    body,
+                );
             }
         }
         match pending.kind {
@@ -1188,9 +1211,13 @@ impl ClientShellState {
                     snapshot,
                     self.config.agent_panel_sort,
                 );
-                Some(Method::PaneFocus(PaneTarget {
-                    pane_id: agents.get(index)?.clone(),
-                }))
+                let pane_id = agents.get(index)?.clone();
+                self.reveal_endpoint_agent(
+                    &self.active_endpoint_id.clone(),
+                    &pane_id,
+                    self.hits.agent_body.height,
+                );
+                Some(Method::PaneFocus(PaneTarget { pane_id }))
             }
             KeybindAction::PreviousAgent | KeybindAction::NextAgent => {
                 let agents = super::agent_sidebar::ordered_agent_pane_ids(
@@ -1213,14 +1240,11 @@ impl ClientShellState {
                     _ => unreachable!("relative agent action"),
                 };
                 let pane_id = agents[next].clone();
-                if !self
-                    .hits
-                    .agents
-                    .iter()
-                    .any(|(_, visible_pane_id)| visible_pane_id == &pane_id)
-                {
-                    self.agent_scroll = next.min(self.hits.agent_max_scroll);
-                }
+                self.reveal_endpoint_agent(
+                    &self.active_endpoint_id.clone(),
+                    &pane_id,
+                    self.hits.agent_body.height,
+                );
                 Some(Method::PaneFocus(PaneTarget { pane_id }))
             }
             KeybindAction::SwitchWorkspace(index) => {
