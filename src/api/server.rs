@@ -674,12 +674,6 @@ fn api_response_details(response: &str) -> ApiResponseOutcome {
     }
 }
 
-// 生产调用方随上游 #4561 删除的 graphics stream 一起消失，只剩测试钉住判定口径。
-#[cfg(test)]
-fn api_response_outcome(response: &str) -> &'static str {
-    api_response_details(response).outcome
-}
-
 fn read_initial_request_line(stream: &mut LocalStream) -> std::io::Result<Option<String>> {
     read_initial_request_line_with_timeout(stream, INITIAL_REQUEST_TIMEOUT)
 }
@@ -1414,9 +1408,9 @@ mod tests {
         assert_eq!(outcome.outcome, "error");
         assert_eq!(outcome.error_code, None);
 
-        assert_eq!(api_response_outcome(ok_with_error_text), "ok");
-        assert_eq!(api_response_outcome(timeout), "timeout");
-        assert_eq!(api_response_outcome(generic_error), "error");
+        assert_eq!(api_response_details(ok_with_error_text).outcome, "ok");
+        assert_eq!(api_response_details(timeout).outcome, "timeout");
+        assert_eq!(api_response_details(generic_error).outcome, "error");
     }
 
     #[test]
@@ -2151,10 +2145,10 @@ mod tests {
         let _ = std::fs::remove_file(path);
     }
 
-    /// 未开启 `notices` 的订阅方（所有既有客户端）拿到的仍然只有事件行：
-    /// `events.lost` 这个 `EventKind` 之外的 `event` 名不会凭空出现在流上。
+    /// 未开启 `notices` 时，断层按上游契约回错误并关闭本订阅连接，
+    /// 不发送通知帧或本轮残缺事件，使客户端可以重新订阅并同步状态。
     #[test]
-    fn subscription_stream_omits_gap_notices_unless_requested() {
+    fn subscription_stream_reports_gap_error_without_notices() {
         use interprocess::local_socket::traits::Stream as _;
 
         const CAPACITY: usize = 4;
@@ -2193,14 +2187,12 @@ mod tests {
                 .collect(),
         );
 
-        for index in (PUSHED - CAPACITY)..PUSHED {
-            let event = read_json_line_from(&mut reader);
-            assert_eq!(
-                event["event"], "workspace_focused",
-                "未请求通知帧时第一行就应该是幸存事件"
-            );
-            assert_eq!(event["data"]["workspace_id"], format!("ws_{index}"));
-        }
+        let error = read_json_line_from(&mut reader);
+        assert_eq!(error["id"], "sub_no_notice");
+        assert_eq!(error["error"]["code"], "events_lost");
+        assert!(error.get("event").is_none());
+        let mut remaining = String::new();
+        assert_eq!(reader.read_line(&mut remaining).unwrap(), 0);
 
         drop(reader);
         let result = done_rx.recv_timeout(Duration::from_secs(2)).unwrap();

@@ -921,7 +921,6 @@ pub struct MobileTexts {
     pub new_tab: &'static str,
     pub close: &'static str,
     pub not_ready_fmt: &'static str,
-    pub reconnecting_fmt: &'static str,
 }
 
 pub struct UpdateTexts {

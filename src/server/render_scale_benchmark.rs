@@ -747,3 +747,95 @@ async fn render_scale_profile() {
 async fn projection_restamp_scale_profile() {
     print_projection_restamp_profiles();
 }
+
+/// Transport cost for one newly linked cell in each populated pane, at fixed geometry.
+/// The ordinary patch is a same-build control; URI additions use negotiated delta/full.
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "manual retained hyperlink transport scaling profile"]
+async fn render_scale_profile_hyperlink_transport() {
+    for count in [1, 15] {
+        let mut pipeline = RenderPipeline::new(active_panes(count));
+        pipeline.render_once();
+        let rendered = super::client_shell::render_pane_surface(
+            &mut pipeline.app,
+            Some(crate::ui::TabSurfaceTarget {
+                workspace_index: 0,
+                tab_index: 0,
+            }),
+            Rect::new(0, 0, COLS, ROWS),
+            true,
+            false,
+            HostCellSize::default(),
+            &pipeline.graphics_delivery,
+            1,
+        )
+        .expect("benchmark surface");
+        let surface = PaneSurfaceFrame {
+            boot_id: "bench-boot".into(),
+            projection_revision: 1,
+            surface_revision: 0,
+            frame: rendered.frame,
+            panes: rendered.panes,
+            splits: rendered.splits,
+            popup: rendered.popup,
+            graphics: rendered.graphics,
+        };
+        assert_eq!(surface.panes.len(), count);
+        for mode in ["patch", "legacy", "delta"] {
+            let mut client = surface_encoding_client(mode, &surface);
+            let baseline = client.state.last_pane_surface().unwrap();
+            let linked = mode != "patch";
+            let patch = crate::protocol::PaneSurfacePatch {
+                boot_id: baseline.boot_id.clone(),
+                projection_revision: baseline.projection_revision,
+                base_surface_revision: baseline.surface_revision,
+                surface_revision: 0,
+                rows: baseline
+                    .panes
+                    .iter()
+                    .enumerate()
+                    .map(|(index, pane)| {
+                        let area = pane.inner_rect;
+                        assert!(area.width > 0 && area.height > 0);
+                        let offset = usize::from(area.y) * usize::from(baseline.frame.width)
+                            + usize::from(area.x);
+                        let mut cell = baseline.frame.cells[offset].clone();
+                        cell.symbol = "!".into();
+                        cell.hyperlink = linked.then_some(index as u32);
+                        crate::protocol::PaneSurfacePatchRow {
+                            x: area.x,
+                            y: area.y,
+                            cells: vec![cell],
+                        }
+                    })
+                    .collect(),
+                panes: Vec::new(),
+                cursor: baseline.frame.cursor.clone(),
+                hyperlink_uris: if linked {
+                    (0..count)
+                        .map(|index| format!("https://example.test/{index}"))
+                        .collect()
+                } else {
+                    Vec::new()
+                },
+            };
+            let mut samples = Vec::new();
+            let mut bytes = Vec::new();
+            for sample in 0..WARMUP_COUNT + SAMPLE_COUNT {
+                bytes.clear();
+                let started = Instant::now();
+                let prepared = client
+                    .state
+                    .prepare_pane_surface_patch(patch.clone())
+                    .unwrap();
+                crate::protocol::write_message(&mut bytes, prepared.message()).unwrap();
+                if sample >= WARMUP_COUNT {
+                    samples.push(started.elapsed());
+                }
+                black_box(&bytes);
+            }
+            let stats = summarize(samples);
+            println!("hyperlink transport panes={count} mode={mode} geometry={COLS}x{ROWS} median_us={} p95_us={} bytes={}", stats.median_us, stats.p95_us, bytes.len());
+        }
+    }
+}

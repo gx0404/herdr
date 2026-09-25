@@ -374,3 +374,57 @@ fn lagging_subscription_closes_without_interrupting_other_clients() {
     assert_eq!(response["id"], "ordinary");
     assert_eq!(response["result"]["type"], "workspace_list");
 }
+
+#[test]
+fn poisoned_event_history_ends_subscriptions_with_server_unavailable() {
+    for notices in [false, true] {
+        for agent_status in [false, true] {
+            let mut test = SocketTest::new();
+            let mut client = test.connect();
+            let subscription = if agent_status {
+                json!({"type": "pane.agent_status_changed", "pane_id": "pane_1", "agent_status": "working"})
+            } else {
+                json!({"type": "workspace.renamed"})
+            };
+            client.send(json!({
+                "id": "poison-sub", "method": "events.subscribe",
+                "params": {"subscriptions": [subscription], "notices": notices}
+            }));
+            if agent_status {
+                // Poison before releasing the setup probe: no initial snapshot may mask it.
+                let probe = test.app_request();
+                test.hub.poison_for_test();
+                reply_to_probe(probe);
+            }
+            client.assert_started("poison-sub");
+            if !agent_status {
+                test.hub.poison_for_test();
+            }
+            let response = client.response();
+            assert_eq!(response["id"], "poison-sub");
+            assert_eq!(response["error"]["code"], "server_unavailable");
+            assert_eq!(client.next_line(Instant::now() + RESPONSE_TIMEOUT), None);
+            assert!(test.api_rx.try_recv().is_err());
+        }
+    }
+}
+
+#[test]
+fn poisoned_event_history_ends_event_wait_with_server_unavailable() {
+    let mut test = SocketTest::new();
+    test.hub.poison_for_test();
+    let mut client = test.connect();
+    client.send(json!({
+        "id": "poison-wait", "method": "events.wait",
+        "params": {"match_event": {"event": "pane_agent_status_changed", "pane_id": "pane_1", "agent_status": "blocked"}, "timeout_ms": 1}
+    }));
+    reply_to_probe(test.app_request());
+    let response = client.response();
+    assert_eq!(response["id"], "poison-wait");
+    assert_eq!(
+        response["error"]["code"], "server_unavailable",
+        "{response}"
+    );
+    assert_eq!(client.next_line(Instant::now() + RESPONSE_TIMEOUT), None);
+    assert!(test.api_rx.try_recv().is_err());
+}

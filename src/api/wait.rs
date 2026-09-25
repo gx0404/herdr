@@ -399,7 +399,18 @@ fn wait_for_resolved_agent(
         // （identity 不匹配 → `agent_not_running`，匹配 → 按快照判定）。
         // 判据用 `None`（任意种别）：本循环关心的是多个种别，多探一次廉价，
         // 漏探一次是永久挂起。
-        let retained = event_hub.retained_after(last_event_sequence, None);
+        let retained = match event_hub.retained_after(last_event_sequence, None) {
+            Ok(retained) => retained,
+            Err(error) => {
+                return serde_json::to_string(&ErrorResponse {
+                    id: request_id,
+                    error: error.response_error(),
+                })
+                .map(AgentWaitOutcome::Response)
+                .map(Some)
+                .map_err(std::io::Error::other);
+            }
+        };
         if let Some(gap) = retained.gap {
             tracing::warn!(
                 pane_id = %pane_id,
@@ -749,7 +760,12 @@ pub(super) fn wait_for_event(
         match active.poll_for_wait(api_tx, event_hub) {
             Ok(Some(event)) => return Ok(Some(wait_matched_response(&request_id, event))),
             Ok(None) => {}
-            Err(mut response) if response.error.code == "pane_not_found" => {
+            Err(mut response)
+                if matches!(
+                    response.error.code.as_str(),
+                    "pane_not_found" | "server_unavailable"
+                ) =>
+            {
                 response.id = request_id;
                 return serde_json::to_string(&response)
                     .map(Some)
@@ -969,6 +985,49 @@ mod tests {
         drop(api_tx);
         responder.join().expect("join responder");
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn poisoned_event_history_ends_agent_wait_without_a_deadline() {
+        let (_client, mut server, path) = wait_test_stream_pair("agent-wait-poison");
+        let (api_tx, mut api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let hub = EventHub::default();
+        hub.poison_for_test();
+        let running = Arc::new(AtomicBool::new(true));
+        let stop_running = running.clone();
+        let (stop_tx, stop_rx) = std::sync::mpsc::channel();
+        let stopper = std::thread::spawn(move || {
+            let _ = stop_rx.recv_timeout(std::time::Duration::from_secs(1));
+            stop_running.store(false, std::sync::atomic::Ordering::Relaxed);
+        });
+        let outcome = wait_for_resolved_agent(
+            "poison-agent-wait".into(),
+            ResolvedAgentWait {
+                target: "pi".into(),
+                until: vec![crate::api::schema::AgentStatus::Idle],
+                timeout_ms: None,
+                initial: agent_wait_test_agent(),
+                last_event_sequence: 0,
+                after_state_change_seq: None,
+                accept_transient_status: false,
+                timeout_kind: AgentWaitTimeoutKind::Status,
+            },
+            &mut server,
+            &api_tx,
+            &hub,
+            &running,
+        )
+        .expect("wait with poisoned history");
+        let _ = stop_tx.send(());
+        stopper.join().expect("join stop guard");
+        let _ = std::fs::remove_file(path);
+        let Some(AgentWaitOutcome::Response(response)) = outcome else {
+            panic!("poisoned history must end the wait before the stop guard");
+        };
+        let response: ErrorResponse = serde_json::from_str(&response).unwrap();
+        assert_eq!(response.id, "poison-agent-wait");
+        assert_eq!(response.error.code, "server_unavailable");
+        assert!(api_rx.try_recv().is_err());
     }
 
     #[test]

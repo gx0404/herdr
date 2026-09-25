@@ -67,6 +67,8 @@ fn assert_tab_close(outcome: &ClientShellInput) {
 
 #[test]
 fn last_tab_close_waits_for_keyboard_or_mouse_confirmation() {
+    // frame_rows includes padding cells for wide glyphs; keep this interaction fixture ASCII.
+    let _lang = crate::i18n::lang_guard(crate::i18n::Lang::En);
     for menu in [false, true] {
         let mut state = close_state(true, 1);
         let requested = request_close(&mut state, menu);
@@ -78,8 +80,8 @@ fn last_tab_close_waits_for_keyboard_or_mouse_confirmation() {
         ));
         let frame = state.compose(106, 24).unwrap();
         let text = frame_rows(&frame).join("\n");
-        assert!(text.contains("Close workspace?"));
-        assert!(text.contains("1 pane"));
+        assert!(text.contains(crate::i18n::texts().dialogs.close_workspace_q));
+        assert!(text.contains(crate::i18n::texts().dialogs.one_pane));
         let accepted = if menu {
             let primary = state.hits.overlay_primary;
             click(&mut state, primary)
@@ -230,7 +232,7 @@ fn last_tab_close_preserves_parent_group_and_linked_workspace_scope() {
                 }),
             );
             assert!(matches!(state.overlay.as_ref(),
-                Some(ClientShellOverlay::ConfirmClose(confirm)) if confirm.title == "Close worktree group?"));
+                Some(ClientShellOverlay::ConfirmClose(confirm)) if confirm.title == crate::i18n::texts().dialogs.close_worktree_group_q));
             let accepted = state.handle_input_bytes(b"\r");
             assert!(matches!(accepted.actions.as_slice(),
                 [ClientShellAction::Endpoint { request, .. }]

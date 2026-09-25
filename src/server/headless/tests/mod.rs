@@ -1504,7 +1504,10 @@ async fn unrelated_render_keeps_synchronized_pane_frame_committed() {
     // fork：没有可打补丁基线的接收者按 RS-01/RS-05 逐接收者延期（返回值可为真），
     // 不变量是补丁路径不发布任何画面，完整帧由随后的完整渲染送出。
     server.render_retained_pane_surface_and_stream(&HashSet::from([pane_id]));
-    assert!(render.try_recv().is_err(), "retained path published a frame");
+    assert!(
+        render.try_recv().is_err(),
+        "retained path published a frame"
+    );
     server.render_and_stream();
     let after = recv_pane_surface(&render, "completed frame");
     assert!(frame_text(&after.frame).contains("COMPLETE"));
@@ -1546,7 +1549,10 @@ async fn sibling_retained_output_waits_for_synchronized_pane_to_finish() {
     write_shared_test_pane(&mut server, first, b"\rCOMPLETE\x1b[?2026l");
     // fork：见上一用例——补丁路径不发布画面即可，完整帧由完整渲染送出。
     server.render_retained_pane_surface_and_stream(&HashSet::from([first]));
-    assert!(render.try_recv().is_err(), "retained path published a frame");
+    assert!(
+        render.try_recv().is_err(),
+        "retained path published a frame"
+    );
     server.render_and_stream();
     let after = recv_pane_surface(&render, "completed split");
     let text = frame_text(&after.frame);
@@ -2012,9 +2018,19 @@ async fn retained_hyperlink_patches_align_each_recipient_baseline_table() {
     let pane_id = install_shared_view_test_runtime(&mut server);
     let (_first_control, first_render) = connect_matching_test_shell(&mut server, 7);
     let (_second_control, second_render) = connect_matching_test_shell(&mut server, 8);
+    server
+        .clients
+        .get_mut(&7)
+        .unwrap()
+        .render_state
+        .enable_surface_delta(true);
     server.render_and_stream();
     let first_baseline = recv_pane_surface(&first_render, "first baseline");
     let mut second_baseline = recv_pane_surface(&second_render, "second baseline");
+    let mut decoder = protocol::surface_reuse::Decoder::new(true);
+    decoder
+        .decode(ServerMessage::PaneSurface(first_baseline.clone()))
+        .unwrap();
     assert!(first_baseline.frame.hyperlinks.is_empty());
     assert!(second_baseline.frame.hyperlinks.is_empty());
 
@@ -2044,21 +2060,20 @@ async fn retained_hyperlink_patches_align_each_recipient_baseline_table() {
     );
     assert!(server.render_retained_pane_surface_and_stream(&HashSet::from([pane_id])));
 
-    // 两个接收者都收到同一个新 URI 的增量表；索引在应用时按各自基线表长重算。
-    let first_patch = recv_pane_surface_patch(&first_render, "first hyperlink patch");
-    let second_patch = recv_pane_surface_patch(&second_render, "second hyperlink patch");
-    for patch in [&first_patch, &second_patch] {
-        assert_eq!(
-            patch.hyperlink_uris,
-            vec!["https://example.com/live".to_owned()]
-        );
-        assert!(patch.panes[0].mouse_reporting);
+    // 支持 delta 的接收者用协商扩展，旧接收者拿冻结完整帧；两者链接索引
+    // 都基于各自的历史表，不向旧补丁格式追加字段。
+    let first_message = read_server_message(first_render.recv().expect("delta"));
+    assert!(
+        matches!(&first_message, ServerMessage::EndpointControl { kind, .. }
+        if kind == protocol::surface_delta::MESSAGE_KIND)
+    );
+    let ServerMessage::PaneSurface(first_client) = decoder.decode(first_message).unwrap() else {
+        panic!("decoded delta surface");
+    };
+    let second_client = recv_pane_surface(&second_render, "legacy hyperlink surface");
+    for surface in [&first_client, &second_client] {
+        assert!(surface.panes[0].mouse_reporting);
     }
-
-    let mut first_client = first_baseline;
-    crate::server::render_stream::apply_pane_surface_patch(&mut first_client, &first_patch);
-    let mut second_client = second_baseline;
-    crate::server::render_stream::apply_pane_surface_patch(&mut second_client, &second_patch);
     assert_eq!(
         first_client.frame.hyperlinks,
         vec!["https://example.com/live".to_owned()]
@@ -2099,7 +2114,7 @@ async fn retained_hyperlink_patches_align_each_recipient_baseline_table() {
     shutdown_test_runtimes(&mut server);
 }
 
-/// 超链接单元格走补丁路径：增量表在基线表尾追加，旧索引不变；重连（全新基线）
+/// 超链接 retained 更新走协商 delta：链接表在基线表尾追加，旧索引不变；重连（全新基线）
 /// 的全量渲染必须与增量结果对每个单元格给出同一个 URI。
 #[tokio::test]
 async fn retained_hyperlink_patches_grow_the_table_and_match_a_rebuilt_baseline() {
@@ -2107,9 +2122,19 @@ async fn retained_hyperlink_patches_grow_the_table_and_match_a_rebuilt_baseline(
     let pane_id = install_shared_view_test_runtime(&mut server);
     let (_control, render) = connect_matching_test_shell(&mut server, 7);
     let _ = _control.recv().expect("snapshot");
+    server
+        .clients
+        .get_mut(&7)
+        .unwrap()
+        .render_state
+        .enable_surface_delta(true);
     server.render_and_stream();
     let baseline = recv_pane_surface(&render, "baseline");
     assert!(baseline.frame.hyperlinks.is_empty());
+    let mut decoder = protocol::surface_reuse::Decoder::new(true);
+    decoder
+        .decode(ServerMessage::PaneSurface(baseline))
+        .unwrap();
 
     // OSC 8 行不再让收集回退：该 pane 照常出补丁，链接随增量表下发。
     write_shared_test_pane(
@@ -2118,14 +2143,11 @@ async fn retained_hyperlink_patches_grow_the_table_and_match_a_rebuilt_baseline(
         b"\r\x1b]8;;https://example.com/first\x1b\\LINK\x1b]8;;\x1b\\",
     );
     assert!(server.render_retained_pane_surface_and_stream(&HashSet::from([pane_id])));
-    let patch = recv_pane_surface_patch(&render, "first hyperlink patch");
-    assert_eq!(
-        patch.hyperlink_uris,
-        vec!["https://example.com/first".to_owned()]
-    );
+    let message = read_server_message(render.recv().expect("first hyperlink delta"));
+    let ServerMessage::PaneSurface(client) = decoder.decode(message).unwrap() else {
+        panic!("decoded hyperlink surface");
+    };
     assert_eq!(server.clients[&7].deferred_render(), DeferredRender::None);
-    let mut client = baseline;
-    crate::server::render_stream::apply_pane_surface_patch(&mut client, &patch);
     assert_eq!(
         client.frame.hyperlinks,
         vec!["https://example.com/first".to_owned()]
@@ -2138,12 +2160,10 @@ async fn retained_hyperlink_patches_grow_the_table_and_match_a_rebuilt_baseline(
         b"\r\n\x1b]8;;https://example.com/second\x1b\\MORE\x1b]8;;\x1b\\",
     );
     assert!(server.render_retained_pane_surface_and_stream(&HashSet::from([pane_id])));
-    let patch = recv_pane_surface_patch(&render, "second hyperlink patch");
-    assert_eq!(
-        patch.hyperlink_uris,
-        vec!["https://example.com/second".to_owned()]
-    );
-    crate::server::render_stream::apply_pane_surface_patch(&mut client, &patch);
+    let message = read_server_message(render.recv().expect("second hyperlink delta"));
+    let ServerMessage::PaneSurface(client) = decoder.decode(message).unwrap() else {
+        panic!("decoded second hyperlink surface");
+    };
     assert_eq!(
         client.frame.hyperlinks,
         vec![

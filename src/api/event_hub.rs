@@ -74,6 +74,20 @@ pub struct RetainedEvents {
     pub gap: Option<EventGap>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EventHistoryError {
+    Unavailable,
+}
+
+impl EventHistoryError {
+    pub(super) fn response_error(self) -> crate::api::schema::ErrorBody {
+        crate::api::schema::ErrorBody {
+            code: "server_unavailable".into(),
+            message: "event history is unavailable".into(),
+        }
+    }
+}
+
 impl EventHub {
     const MAX_EVENTS: usize = 512;
 
@@ -93,6 +107,16 @@ impl EventHub {
     #[cfg(test)]
     pub fn with_test_capacity(capacity: usize) -> Self {
         Self::with_capacity(capacity)
+    }
+
+    #[cfg(test)]
+    pub(super) fn poison_for_test(&self) {
+        let inner = self.inner.clone();
+        let poisoned = std::thread::spawn(move || {
+            let _guard = inner.lock().expect("lock test event history");
+            panic!("poison test event history");
+        });
+        assert!(poisoned.join().is_err());
     }
 
     pub fn push(&self, event: EventEnvelope) {
@@ -132,19 +156,24 @@ impl EventHub {
     /// `kind` 给出调用方真正关心的事件种别：只有该种别真被挤掉才算断层；
     /// `None` 表示「任意种别被挤掉都算」（`agent.wait` 这类跨多种别的等待方
     /// 用它，多探测一次是廉价且自愈的，漏探测则会永久挂起）。
-    pub fn retained_after(&self, sequence: u64, kind: Option<EventKind>) -> RetainedEvents {
-        let Ok(state) = self.inner.lock() else {
-            return RetainedEvents::default();
-        };
+    pub fn retained_after(
+        &self,
+        sequence: u64,
+        kind: Option<EventKind>,
+    ) -> Result<RetainedEvents, EventHistoryError> {
+        let state = self
+            .inner
+            .lock()
+            .map_err(|_| EventHistoryError::Unavailable)?;
         let evicted_through = state.evicted_through(kind);
         let gap = (evicted_through > sequence).then(|| EventGap {
             from: sequence.saturating_add(1),
             to: evicted_through,
         });
-        RetainedEvents {
+        Ok(RetainedEvents {
             events: state.collect_after(sequence),
             gap,
-        }
+        })
     }
 
     pub fn current_sequence(&self) -> u64 {
@@ -217,7 +246,7 @@ mod tests {
             hub.push(workspace_focused_event(&format!("workspace_{index}")));
         }
 
-        let retained = hub.retained_after(0, None);
+        let retained = hub.retained_after(0, None).unwrap();
         assert_eq!(
             retained.gap,
             Some(EventGap { from: 1, to: 88 }),
@@ -227,10 +256,10 @@ mod tests {
         assert_eq!(hub.oldest_retained_sequence(), 89);
 
         // 游标正好落在断层边界上：89 号仍在窗口里，89 之后无断层。
-        assert!(hub.retained_after(88, None).gap.is_none());
+        assert!(hub.retained_after(88, None).unwrap().gap.is_none());
         // 游标落在断层中间：只报还没送达的那一段。
         assert_eq!(
-            hub.retained_after(40, None).gap,
+            hub.retained_after(40, None).unwrap().gap,
             Some(EventGap { from: 41, to: 88 })
         );
     }
@@ -239,16 +268,17 @@ mod tests {
     fn retained_after_reports_no_gap_while_everything_is_still_retained() {
         let hub = EventHub::default();
         assert_eq!(hub.oldest_retained_sequence(), 1);
-        assert!(hub.retained_after(0, None).gap.is_none());
+        assert!(hub.retained_after(0, None).unwrap().gap.is_none());
 
         for index in 0..EventHub::MAX_EVENTS {
             hub.push(workspace_focused_event(&format!("workspace_{index}")));
         }
 
         assert_eq!(hub.oldest_retained_sequence(), 1);
-        assert!(hub.retained_after(0, None).gap.is_none());
+        assert!(hub.retained_after(0, None).unwrap().gap.is_none());
         assert!(hub
             .retained_after(hub.current_sequence(), None)
+            .unwrap()
             .gap
             .is_none());
     }
@@ -267,6 +297,7 @@ mod tests {
         }
         assert!(
             hub.retained_after(0, Some(EventKind::WorkspaceClosed))
+                .unwrap()
                 .gap
                 .is_none(),
             "还没挤掉任何事件"
@@ -277,12 +308,16 @@ mod tests {
             hub.push(workspace_focused_event(&format!("noise_{index}")));
         }
         assert_eq!(
-            hub.retained_after(0, Some(EventKind::WorkspaceFocused)).gap,
+            hub.retained_after(0, Some(EventKind::WorkspaceFocused))
+                .unwrap()
+                .gap,
             Some(EventGap { from: 1, to: 6 }),
             "focused 确实被挤掉了"
         );
         assert_eq!(
-            hub.retained_after(0, Some(EventKind::WorkspaceClosed)).gap,
+            hub.retained_after(0, Some(EventKind::WorkspaceClosed))
+                .unwrap()
+                .gap,
             Some(EventGap { from: 1, to: 1 }),
             "1 号 closed 也被挤掉，区间收敛到它自己而不是整个全局区间"
         );
@@ -290,13 +325,14 @@ mod tests {
         // 游标越过那条 closed 之后，再多的 focused 噪声也不该报断层。
         assert!(
             hub.retained_after(1, Some(EventKind::WorkspaceClosed))
+                .unwrap()
                 .gap
                 .is_none(),
             "被挤掉的全是订阅方不关心的种别时不得报断层"
         );
         // 但全局判据（`None`）仍然看得见：`agent.wait` 靠它兜底探测。
         assert_eq!(
-            hub.retained_after(1, None).gap,
+            hub.retained_after(1, None).unwrap().gap,
             Some(EventGap { from: 2, to: 6 })
         );
     }

@@ -1188,7 +1188,6 @@ pub const TEXTS: Texts = Texts {
         new_tab: "  + new tab",
         close: "close",
         not_ready_fmt: "{label} is not ready",
-        reconnecting_fmt: "{label} is reconnecting",
     },
     agent_panel: AgentPanelTexts {
         sort_launch: "launch order",

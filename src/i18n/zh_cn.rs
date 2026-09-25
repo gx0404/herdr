@@ -772,7 +772,6 @@ pub const TEXTS: Texts = Texts {
         new_tab: "  + 新建标签页",
         close: "关闭",
         not_ready_fmt: "{label} 尚未就绪",
-        reconnecting_fmt: "{label} 正在重连",
     },
     update: UpdateTexts {
         install_run_fmt: "分离后执行 `{command}`，再重新运行 Herdr 以重连",

@@ -109,7 +109,7 @@ pub(super) fn poll_subscriptions_round(
     let mut gaps: Vec<EventGap> = Vec::new();
     let mut events = Vec::new();
     for subscription in subscriptions.iter_mut() {
-        let round = subscription.poll(api_tx, event_hub);
+        let round = subscription.poll(api_tx, event_hub)?;
         if let Some(gap) = round.gap {
             // 没开 notices 的订阅方（含所有既有客户端）不能从保留窗口最旧处静默
             // 续传（上游 65927cef，#4178）：回 `events_lost` 错误并关闭本订阅，不先
@@ -334,16 +334,16 @@ impl ActiveSubscription {
         &mut self,
         api_tx: &ApiRequestSender,
         event_hub: &EventHub,
-    ) -> SubscriptionRound {
-        match self {
-            Self::Event(subscription) => subscription.poll(event_hub),
+    ) -> Result<SubscriptionRound, ErrorBody> {
+        Ok(match self {
+            Self::Event(subscription) => subscription.poll(event_hub)?,
             Self::OutputMatched(subscription) => SubscriptionRound::snapshot(
                 subscription
                     .poll(api_tx)
                     .and_then(|event| serde_json::to_value(event).ok()),
             ),
             Self::AgentStatusChanged(subscription) => {
-                let (events, gap) = subscription.poll_batch(api_tx, event_hub);
+                let (events, gap) = subscription.poll_batch(api_tx, event_hub)?;
                 SubscriptionRound {
                     gap,
                     events: events
@@ -357,7 +357,7 @@ impl ActiveSubscription {
                     .poll(api_tx)
                     .and_then(|event| serde_json::to_value(event).ok()),
             ),
-        }
+        })
     }
 
     /// 单条语义（`*.wait`）：命中第一条即返回。这里**不得**写成
@@ -371,7 +371,14 @@ impl ActiveSubscription {
         event_hub: &EventHub,
     ) -> Result<Option<serde_json::Value>, ErrorResponse> {
         match self {
-            Self::Event(subscription) => Ok(subscription.poll_next(event_hub)),
+            Self::Event(subscription) => {
+                subscription
+                    .poll_next(event_hub)
+                    .map_err(|error| ErrorResponse {
+                        id: String::new(),
+                        error,
+                    })
+            }
             Self::AgentStatusChanged(subscription) => Ok(subscription
                 .poll_result(api_tx, event_hub)?
                 .and_then(|event| serde_json::to_value(event).ok())),
@@ -388,21 +395,21 @@ impl ActiveSubscription {
 impl ActiveEventSubscription {
     /// 一轮取走全部匹配事件。此前命中第一条就 return，投递速率被钉死在
     /// 1 条/订阅/轮（HSR-03）。断层交给调用方按连接去重后排在事件之前。
-    fn poll(&mut self, event_hub: &EventHub) -> SubscriptionRound {
-        let gap = self.refill(event_hub);
-        SubscriptionRound {
+    fn poll(&mut self, event_hub: &EventHub) -> Result<SubscriptionRound, ErrorBody> {
+        let gap = self.refill(event_hub)?;
+        Ok(SubscriptionRound {
             gap,
             events: self.pending.drain(..).collect(),
-        }
+        })
     }
 
     /// 单条语义：只取一条，余量留在 `pending` 里等下次取。
     /// `*.wait` 路径**不保留也不下发**断层：调用方在等某一条具体事件，通知帧
     /// 混进返回值会被当成命中结果，而 `*.wait` 的响应形状里没有地方表达
     /// 「流断过」。断层在这里只记日志后丢弃——下发断层的唯一出口是订阅流。
-    fn poll_next(&mut self, event_hub: &EventHub) -> Option<serde_json::Value> {
+    fn poll_next(&mut self, event_hub: &EventHub) -> Result<Option<serde_json::Value>, ErrorBody> {
         if self.pending.is_empty() {
-            if let Some(gap) = self.refill(event_hub) {
+            if let Some(gap) = self.refill(event_hub)? {
                 tracing::warn!(
                     event_kind = self.event_kind.dot_name(),
                     gap_from = gap.from,
@@ -411,14 +418,16 @@ impl ActiveEventSubscription {
                 );
             }
         }
-        self.pending.pop_front()
+        Ok(self.pending.pop_front())
     }
 
     /// 取本轮事件并返回（可能的）断层。断层判据按本订阅的 `event_kind` 给：
     /// 被挤掉的全是别的种别时不算断层，否则每次事件突发都会让低频订阅方做一次
     /// 无谓的全量快照重拉。
-    fn refill(&mut self, event_hub: &EventHub) -> Option<EventGap> {
-        let retained = event_hub.retained_after(self.last_sequence, Some(self.event_kind));
+    fn refill(&mut self, event_hub: &EventHub) -> Result<Option<EventGap>, ErrorBody> {
+        let retained = event_hub
+            .retained_after(self.last_sequence, Some(self.event_kind))
+            .map_err(|error| error.response_error())?;
         if let Some(gap) = retained.gap {
             tracing::debug!(
                 event_kind = self.event_kind.dot_name(),
@@ -436,7 +445,7 @@ impl ActiveEventSubscription {
                 self.pending.push_back(value);
             }
         }
-        retained.gap
+        Ok(retained.gap)
     }
 }
 
@@ -497,17 +506,17 @@ impl ActiveAgentStatusChangedSubscription {
         &mut self,
         api_tx: &ApiRequestSender,
         event_hub: &EventHub,
-    ) -> (Vec<SubscriptionEventEnvelope>, Option<EventGap>) {
-        let refill = self.refill_from_event_hub(event_hub);
+    ) -> Result<(Vec<SubscriptionEventEnvelope>, Option<EventGap>), ErrorBody> {
+        let refill = self.refill_from_event_hub(event_hub)?;
         if !self.pending.is_empty() {
-            return (self.pending.drain(..).collect(), refill.gap);
+            return Ok((self.pending.drain(..).collect(), refill.gap));
         }
         let events = self
             .poll_snapshot_fallback(api_tx, event_hub, refill.saw_status_event)
             .unwrap_or_default()
             .into_iter()
             .collect();
-        (events, refill.gap)
+        Ok((events, refill.gap))
     }
 
     /// 单条语义（`*.wait` 路径）：本轮余量留在 `pending` 里，下次调用继续取。
@@ -519,7 +528,12 @@ impl ActiveAgentStatusChangedSubscription {
         if let Some(event) = self.pending.pop_front() {
             return Ok(Some(event));
         }
-        let refill = self.refill_from_event_hub(event_hub);
+        let refill = self
+            .refill_from_event_hub(event_hub)
+            .map_err(|error| ErrorResponse {
+                id: self.request_prefix.clone(),
+                error,
+            })?;
         if let Some(gap) = refill.gap {
             // 同 `ActiveEventSubscription::poll_next`：单条语义无处下发通知帧。
             // 这条路径靠 `poll_snapshot_fallback` 的 `pane_get` 从快照补回终态，
@@ -541,12 +555,14 @@ impl ActiveAgentStatusChangedSubscription {
     /// 本 pane 的状态事件（含被 `status_filter` 过滤掉的）以及（可能的）断层。
     /// 只读 event hub，不做任何 app 往返。断层判据按 `pane.agent_status_changed`
     /// 这一个种别给：别的种别被挤掉不影响本订阅。
-    fn refill_from_event_hub(&mut self, event_hub: &EventHub) -> HubRefill {
+    fn refill_from_event_hub(&mut self, event_hub: &EventHub) -> Result<HubRefill, ErrorBody> {
         let mut saw_status_event = false;
-        let retained = event_hub.retained_after(
-            self.last_sequence,
-            Some(crate::api::schema::EventKind::PaneAgentStatusChanged),
-        );
+        let retained = event_hub
+            .retained_after(
+                self.last_sequence,
+                Some(crate::api::schema::EventKind::PaneAgentStatusChanged),
+            )
+            .map_err(|error| error.response_error())?;
         if let Some(gap) = retained.gap {
             tracing::debug!(
                 pane_id = %self.pane_id,
@@ -605,10 +621,10 @@ impl ActiveAgentStatusChangedSubscription {
         if saw_status_event {
             self.initial_event = None;
         }
-        HubRefill {
+        Ok(HubRefill {
             saw_status_event,
             gap: retained.gap,
-        }
+        })
     }
 
     /// event hub 本轮没有可投递事件时的快照兜底：一次 `pane_get`。
@@ -888,6 +904,7 @@ mod tests {
 
         let setup_event = subscription
             .poll(&api_tx, &event_hub)
+            .unwrap()
             .events
             .into_iter()
             .next()
@@ -895,6 +912,7 @@ mod tests {
         assert_eq!(setup_event["data"]["workspace_id"], "during_setup");
         assert!(subscription
             .poll(&api_tx, &event_hub)
+            .unwrap()
             .events
             .into_iter()
             .next()
@@ -903,6 +921,7 @@ mod tests {
         event_hub.push(workspace_focused_event("after_setup"));
         let live_event = subscription
             .poll(&api_tx, &event_hub)
+            .unwrap()
             .events
             .into_iter()
             .next()
@@ -933,7 +952,7 @@ mod tests {
             event_hub.push(workspace_focused_event(&format!("workspace_{index}")));
         }
 
-        let delivered: Vec<_> = subscription.poll(&api_tx, &event_hub).events;
+        let delivered: Vec<_> = subscription.poll(&api_tx, &event_hub).unwrap().events;
         assert_eq!(delivered.len(), 50, "一轮 poll 必须投递全部匹配事件");
         for (index, event) in delivered.iter().enumerate() {
             assert_eq!(event["data"]["workspace_id"], format!("workspace_{index}"));
@@ -941,6 +960,7 @@ mod tests {
         assert!(
             subscription
                 .poll(&api_tx, &event_hub)
+                .unwrap()
                 .events
                 .into_iter()
                 .next()
@@ -1105,7 +1125,7 @@ mod tests {
         event_hub.push(workspace_focused_event("first"));
         event_hub.push(workspace_focused_event("second"));
 
-        let delivered = subscription.poll(&api_tx, &event_hub).events;
+        let delivered = subscription.poll(&api_tx, &event_hub).unwrap().events;
         assert_eq!(delivered.len(), 2);
         assert_eq!(delivered[0]["sequence"], 2);
         assert_eq!(delivered[1]["sequence"], 3);
@@ -1377,7 +1397,7 @@ mod tests {
         }
 
         let started = std::time::Instant::now();
-        let delivered = subscription.poll(&api_tx, &event_hub).events;
+        let delivered = subscription.poll(&api_tx, &event_hub).unwrap().events;
         assert!(
             started.elapsed() < std::time::Duration::from_secs(1),
             "hub 有事件时不得回落到 pane_get 快照兜底"
@@ -1532,11 +1552,15 @@ mod tests {
         .unwrap();
         event_hub.push(presentation_event(None));
         event_hub.push(workspace_focused_event("live"));
-        let events = subscription.poll(&api_tx, &event_hub).events;
+        let events = subscription.poll(&api_tx, &event_hub).unwrap().events;
         assert_eq!(events.len(), 2);
         assert_eq!(events[0]["data"]["workspace_id"], "setup");
         assert_eq!(events[1]["data"]["workspace_id"], "live");
-        assert!(subscription.poll(&api_tx, &event_hub).events.is_empty());
+        assert!(subscription
+            .poll(&api_tx, &event_hub)
+            .unwrap()
+            .events
+            .is_empty());
         let ActiveSubscription::Event(subscription) = subscription else {
             panic!("expected lifecycle subscription");
         };
@@ -1582,7 +1606,7 @@ mod tests {
                 event_hub.push(event);
             }
             let (api_tx, _api_rx) = tokio::sync::mpsc::unbounded_channel();
-            let events = subscription.poll(&api_tx, &event_hub).events;
+            let events = subscription.poll(&api_tx, &event_hub).unwrap().events;
             let titles = events
                 .iter()
                 .map(|event| event["data"]["title"].as_str().unwrap())

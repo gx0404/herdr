@@ -269,6 +269,8 @@ Herdr separately remembers each machine's remote OS and resolved executable path
 
 The client and server negotiate compatibility rather than requiring identical versions. Saved-machine connections additionally need the server's `surface_interest` and `health_check` capabilities. Older servers without those capabilities show Attention until explicitly updated, even if a standalone attach works. Other missing server methods disable only their corresponding actions.
 
+SSH endpoints also work with compatible upstream Herdr servers. Hyperlinks use the negotiated screen-update format; servers or clients without incremental-update support receive a complete frame instead. Fork-only actions remain unavailable when the remote server does not advertise them.
+
 Updating a compatible client does not replace the running remote server or stop its agents. When you need new server-side behavior, update that server explicitly. Normal replacement asks before stopping the server and its pane processes.
 
 Live handoff is experimental and opt-in. For a supported server that needs replacement during standalone setup, you can explicitly add `--handoff` to `herdr --remote`; it is not needed for normal connections or authentication fixes. See [Update](/docs/install/#update) for restart and handoff choices, and [Session state and restore](/docs/session-state/) for what survives each operation.

@@ -280,9 +280,12 @@ impl ClientRenderState {
     }
 
     pub(crate) fn prepare_pane_surface_patch(
-        &self,
+        &mut self,
         mut patch: PaneSurfacePatch,
     ) -> Option<PreparedRender> {
+        if self.requires_recompute() {
+            return None;
+        }
         let Self::Semantic {
             last_surface,
             surface_revision,
@@ -291,9 +294,6 @@ impl ClientRenderState {
         else {
             return None;
         };
-        if self.requires_recompute() {
-            return None;
-        }
         let last = last_surface.as_deref()?;
         if last.boot_id != patch.boot_id
             || last.projection_revision != patch.projection_revision
@@ -303,6 +303,13 @@ impl ClientRenderState {
         }
         let next_revision = surface_revision.saturating_add(1);
         patch.surface_revision = next_revision;
+        if !patch.hyperlink_uris.is_empty() {
+            // 冻结的 v1 补丁不能追加链接表。沿用 retained 文本/布局，无须重绘
+            // pane；协商了 delta 时只发送增量，否则发送兼容的完整 surface。
+            let mut surface = last.clone();
+            apply_pane_surface_patch(&mut surface, &patch);
+            return self.prepare_pane_surface(surface);
+        }
         Some(PreparedRender::SemanticPatch {
             message: ServerMessage::PaneSurfacePatch(patch),
         })
@@ -697,6 +704,70 @@ mod tests {
         let after = after.expect("批次结束后有光标");
         assert!(after.visible);
         assert_eq!((after.x, after.y), (2, 2));
+    }
+
+    #[test]
+    fn hyperlink_patch_uses_negotiated_delta_or_frozen_full_surface() {
+        for enabled in [false, true] {
+            let mut state = ClientRenderState::new(RenderEncoding::SemanticFrame);
+            state.enable_surface_delta(enabled);
+            let mut decoder = crate::protocol::surface_reuse::Decoder::new(enabled);
+            let mut surface = popup_surface("popup");
+            surface.popup = None;
+            surface.frame = FrameData::from_ratatui_buffer(
+                &ratatui::buffer::Buffer::empty(Rect::new(0, 0, 120, 40)),
+                None,
+            );
+            let initial = state.prepare_pane_surface(surface.clone()).unwrap();
+            decoder.decode(initial.message().clone()).unwrap();
+            state.commit_sent_frame(initial);
+            let mut cell = surface.frame.cells[0].clone();
+            cell.symbol = "link".into();
+            cell.hyperlink = Some(0);
+            let prepared = state
+                .prepare_pane_surface_patch(PaneSurfacePatch {
+                    boot_id: surface.boot_id.clone(),
+                    projection_revision: surface.projection_revision,
+                    base_surface_revision: 1,
+                    surface_revision: 0,
+                    rows: vec![crate::protocol::PaneSurfacePatchRow {
+                        x: 0,
+                        y: 0,
+                        cells: vec![cell.clone()],
+                    }],
+                    panes: Vec::new(),
+                    cursor: None,
+                    hyperlink_uris: vec!["https://example.test/new".into()],
+                })
+                .unwrap();
+            assert_eq!(state.last_pane_surface().unwrap().surface_revision, 1);
+            assert!(state
+                .last_pane_surface()
+                .unwrap()
+                .frame
+                .hyperlinks
+                .is_empty());
+            assert_eq!(
+                matches!(prepared.message(), ServerMessage::EndpointControl { kind, .. }
+                if kind == crate::protocol::surface_delta::MESSAGE_KIND),
+                enabled
+            );
+            let mut bytes = Vec::new();
+            crate::protocol::write_message(&mut bytes, prepared.message()).unwrap();
+            let message = crate::protocol::read_message(
+                &mut bytes.as_slice(),
+                crate::protocol::MAX_FRAME_SIZE,
+            )
+            .unwrap();
+            let ServerMessage::PaneSurface(decoded) = decoder.decode(message).unwrap() else {
+                panic!("new hyperlinks require a complete table, never an extended legacy patch");
+            };
+            assert_eq!(decoded.frame.cells[0], cell);
+            assert_eq!(decoded.frame.hyperlinks, ["https://example.test/new"]);
+            assert_eq!(decoded.surface_revision, 2);
+            state.commit_sent_frame(prepared);
+            assert_eq!(state.last_pane_surface().unwrap(), &decoded);
+        }
     }
 
     #[test]

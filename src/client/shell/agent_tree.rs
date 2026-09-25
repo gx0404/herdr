@@ -1893,32 +1893,18 @@ impl ClientShellState {
         self.bump_tree_collapse_epoch();
     }
 
-    /// 聚焦某端点上的 agent pane：当前端点直接发 `pane.focus`，其它在线端点先
-    /// 切过去；不在线则提示。
+    /// 聚焦 agent pane，并将本机回选交给 runtime 取消尚未完成的远端切换。
     pub(super) fn focus_agent_pane(
         &mut self,
         endpoint_id: ClientEndpointId,
         pane_id: String,
         outcome: &mut ClientShellInput,
     ) {
-        if !self.endpoint_is_online(&endpoint_id) {
-            let label = self.endpoint_label(&endpoint_id).to_owned();
-            self.receive_endpoint_unavailable(crate::i18n::fill(
-                crate::i18n::texts().mobile.reconnecting_fmt,
-                &[("label", &label)],
-            ));
-            outcome.repaint = true;
-        } else if endpoint_id == self.active_endpoint_id {
-            self.push_endpoint_method(
-                crate::api::schema::Method::PaneFocus(crate::api::schema::PaneTarget { pane_id }),
-                outcome,
-            );
-        } else {
-            outcome.actions.push(ClientShellAction::ActivateEndpoint {
-                endpoint_id,
-                target: Some(ClientEndpointFocusTarget::Pane(pane_id)),
-            });
-        }
+        self.focus_or_activate(
+            endpoint_id,
+            ClientEndpointFocusTarget::Pane(pane_id),
+            outcome,
+        );
     }
 
     /// 右键落在 agent 行（本机面板、联邦面板）或外部条目上：打开对应菜单。

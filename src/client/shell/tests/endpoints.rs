@@ -1650,24 +1650,18 @@ fn aggregate_launch_orders_agents_within_each_machine_not_across() {
             < text.find("Build · remote agent").expect("remote agent"),
         "端点序应压过跨机器的 launch_seq 比较：{text}"
     );
-    // 端点序把 row 0 排到本机：客户端已在 Local 上，聚焦第 0 个 agent 因此走
-    // 「同端点内聚焦」的 `PaneFocus` 方法，而不是切端点的 `ActivateEndpoint`。
+    // 端点序把 row 0 排到本机。多端点模式下本机选择也交给 runtime，
+    // 使尚未完成的远端 handoff 可以被这次显式选择取消。
     let mut outcome = ClientShellInput::default();
     assert!(
         state.handle_endpoint_navigation(crate::input::KeybindAction::FocusAgent(0), &mut outcome,)
     );
-    let [ClientShellAction::Endpoint {
-        endpoint_id: focused,
-        request,
-        ..
-    }] = outcome.actions.as_slice()
-    else {
-        panic!("聚焦本机 agent 应走 Endpoint 方法：{:?}", outcome.actions);
-    };
-    assert_eq!(focused, &ClientEndpointId::Local);
     assert!(matches!(
-        &request.method,
-        crate::api::schema::Method::PaneFocus(params) if params.pane_id == "pane_1"
+        outcome.actions.as_slice(),
+        [ClientShellAction::ActivateEndpoint {
+            endpoint_id: ClientEndpointId::Local,
+            target: Some(ClientEndpointFocusTarget::Pane(pane_id)),
+        }] if pane_id == "pane_1"
     ));
 
     // launch_seq 仍在同一端点内部生效：给 Build 加一个 launch_seq 更小的第二个
@@ -2812,7 +2806,10 @@ fn federated_agent_rows_are_cached_between_frames_and_refresh_on_data_change() {
 #[test]
 fn acknowledging_a_surface_refreshes_cached_federated_agent_rows() {
     let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
-    state.set_snapshot(Box::new(snapshot()));
+    // Completion is client-local: observe work before the matching idle transition.
+    let mut working = snapshot();
+    working.agents = vec![agent("done agent", AgentStatus::Working, 6)];
+    state.set_snapshot(Box::new(working));
     state.set_pane_surface(surface());
     state.compose(100, 28).expect("first frame");
 
@@ -2826,10 +2823,10 @@ fn acknowledging_a_surface_refreshes_cached_federated_agent_rows() {
         })
     };
 
-    // 新快照：agent 变 Done（seq 7）。此刻还没有匹配的表面帧，确认不会发生。
+    // 新快照：Working → Idle（seq 7）投影为 Done，匹配表面帧到达前不确认。
     let mut projected = snapshot();
     projected.revision = 2;
-    projected.agents = vec![agent("done agent", AgentStatus::Done, 7)];
+    projected.agents = vec![agent("done agent", AgentStatus::Idle, 7)];
     state.set_endpoint_snapshot(&ClientEndpointId::Local, Box::new(projected));
     state.refresh_federated_agent_rows();
     assert_eq!(status(&state), Some(AgentStatus::Done), "未确认前显示 Done");
@@ -2850,4 +2847,26 @@ fn acknowledging_a_surface_refreshes_cached_federated_agent_rows() {
         Some(AgentStatus::Idle),
         "确认之后缓存的行必须重建为 Idle"
     );
+}
+
+#[test]
+fn focusing_local_agent_cancels_a_pending_remote_switch() {
+    for disconnected in [false, true] {
+        let (mut state, remote) = state_with_remote();
+        let mut pending = ClientShellInput::default();
+        assert!(state.activate_endpoint(remote, &mut pending));
+        assert_eq!(state.active_endpoint_id, ClientEndpointId::Local);
+        if disconnected {
+            state.mark_endpoint_disconnected(&ClientEndpointId::Local);
+        }
+        let mut outcome = ClientShellInput::default();
+        state.focus_agent_pane(ClientEndpointId::Local, "pane_1".into(), &mut outcome);
+        assert!(matches!(
+            outcome.actions.as_slice(),
+            [ClientShellAction::ActivateEndpoint {
+                endpoint_id: ClientEndpointId::Local,
+                target: Some(ClientEndpointFocusTarget::Pane(pane_id)),
+            }] if pane_id == "pane_1"
+        ));
+    }
 }
