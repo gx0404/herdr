@@ -14,6 +14,10 @@ Herdr uses several state paths for different situations.
 | Update without `--handoff` | Compatible servers keep running; restart-required servers may need stop/restart | Yes after restart | Only with pane screen history | Only with native agent session restore |
 | Update with `--handoff` | Best effort for supported running servers | Yes | Yes, from the live terminal if handoff succeeds | Yes, because the process keeps running if handoff succeeds |
 
+### Switching workspaces and tabs
+
+When switching to a terminal that is updating its screen in a batch, Herdr waits for the complete frame before displaying it. The view resumes automatically when the batch ends; other visible tabs continue updating.
+
 ## Live persistence
 
 Normal detach keeps the Herdr server running. Panes, shells, agents, servers, tests, and command processes keep running inside that server.

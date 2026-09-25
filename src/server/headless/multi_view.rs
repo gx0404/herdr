@@ -227,17 +227,19 @@ impl HeadlessServer {
                 client_id,
             );
             // 上游 #4508：同步输出批次未完成（或渲染期间内容变化）时该 view 推迟，
-            // 整客户端延期到下一次完整渲染。
+            // 仅使该 view 基线失效，等 PTY / 同步超时唤醒后完整重算。
+            // 这里没有帧入队，不能等待 ClientWriterDrained，否则后续 PTY
+            // 会被 writer 延期状态跳过，首次订阅可能永远收不到画面。
             let mut rendered = match rendered {
                 Ok(rendered) => rendered,
                 Err(reason) => {
+                    view.render_state.request_recompute();
                     if matches!(
                         reason,
                         crate::server::client_shell::SurfaceRenderDeferred::Changed
                     ) {
                         self.app.render_dirty.request_generic();
                     }
-                    pending = true;
                     continue;
                 }
             };

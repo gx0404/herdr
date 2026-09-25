@@ -476,3 +476,188 @@ async fn projection_restamp_covers_every_view_in_one_batch() {
         assert_eq!(surface.frame, original.frame);
     }
 }
+
+// Drive only work that the real dispatcher schedules; an unconditional full
+// render here would hide a lost wakeup after synchronized output completes.
+fn dispatch_view_pty(server: &mut HeadlessServer, pane: crate::layout::PaneId) {
+    server.dispatch_render_tick(false, false, &HashSet::from([pane]), false);
+    for _ in 0..3 {
+        let request = server.app.render_dirty.take();
+        if !request.generic && request.pty_sources.is_empty() {
+            return;
+        }
+        server.dispatch_render_tick(false, request.generic, &request.pty_sources, false);
+    }
+    assert!(
+        !server.app.render_dirty.is_pending(),
+        "render recovery must settle"
+    );
+}
+
+#[tokio::test]
+async fn synchronized_view_recovers_on_pty_completion_without_writer_notification() {
+    for baseline in [false, true] {
+        let (mut server, _control, output, pane) = retained_test_server_with_control(b"BASE");
+        let tab = server.app.public_tab_id(0, 0).unwrap();
+        set_views(&mut server, 1, &[tab]);
+        let mut decoder = protocol::views::Decoder::default();
+        if baseline {
+            server.render_and_stream();
+            assert_eq!(
+                decode_batch(output.try_recv().unwrap(), &mut decoder).len(),
+                1
+            );
+        }
+        write_shared_test_pane(&mut server, pane, b"\x1b[?2026h\rPARTIAL");
+        // A subscription or unrelated UI render can arrive mid-batch.
+        let _ = server.app.render_dirty.take();
+        server.dispatch_render_tick(false, true, &HashSet::new(), false);
+        assert!(output.try_recv().is_err(), "partial frame escaped");
+        let _ = server.app.render_dirty.take();
+        write_shared_test_pane(&mut server, pane, b"\rCOMPLETE\x1b[?2026l");
+        dispatch_view_pty(&mut server, pane);
+        let recovered = decode_batch(
+            output
+                .try_recv()
+                .expect("completed view must wake without writer drain"),
+            &mut decoder,
+        );
+        let ServerMessage::PaneSurface(surface) = &recovered[0].message else {
+            panic!("recovery requires a complete surface");
+        };
+        assert!(frame_text(&surface.frame).contains("COMPLETE"));
+        assert!(!frame_text(&surface.frame).contains("PARTIAL"));
+        shutdown_test_runtimes(&mut server);
+    }
+}
+
+#[tokio::test]
+async fn synchronized_view_does_not_block_sibling_view_updates() {
+    let (mut server, _control, output, first) = retained_test_server_with_control(b"FIRST");
+    let mut second = crate::workspace::Workspace::test_new("second");
+    let second_id = second.tabs[0].root_pane;
+    second.insert_test_runtime(
+        second_id,
+        crate::terminal::TerminalRuntime::test_with_screen_bytes(50, 12, b"SECOND"),
+    );
+    server.app.state.workspaces.push(second);
+    let tabs = vec![
+        server.app.public_tab_id(0, 0).unwrap(),
+        server.app.public_tab_id(1, 0).unwrap(),
+    ];
+    set_views(&mut server, 1, &tabs);
+    let mut decoder = protocol::views::Decoder::default();
+    server.render_and_stream();
+    assert_eq!(
+        decode_batch(output.try_recv().unwrap(), &mut decoder).len(),
+        2
+    );
+    write_shared_test_pane(&mut server, first, b"\x1b[?2026h\rPARTIAL");
+    let _ = server.app.render_dirty.take();
+    server.dispatch_render_tick(false, true, &HashSet::new(), false);
+    assert!(output.try_recv().is_err());
+    let _ = server.app.render_dirty.take();
+    server
+        .app
+        .state
+        .runtime_for_pane_in_workspace(&server.app.terminal_runtimes, 1, second_id)
+        .unwrap()
+        .test_process_pty_bytes(b"\rUPDATED");
+    dispatch_view_pty(&mut server, second_id);
+    let sibling = decode_batch(
+        output.try_recv().expect("sibling must still update"),
+        &mut decoder,
+    );
+    assert!(sibling.iter().all(|view| view.tab_id == tabs[1]));
+    assert!(!sibling.is_empty());
+    let text = sibling
+        .iter()
+        .map(|view| match &view.message {
+            ServerMessage::PaneSurface(surface) => frame_text(&surface.frame),
+            ServerMessage::PaneSurfacePatch(patch) => patch
+                .rows
+                .iter()
+                .flat_map(|row| row.cells.iter())
+                .map(|cell| cell.symbol.as_str())
+                .collect(),
+            _ => panic!("expected surface or patch"),
+        })
+        .collect::<String>();
+    assert!(text.contains("UPDATED"), "{text}");
+    let _ = server.app.render_dirty.take();
+    write_shared_test_pane(&mut server, first, b"\rCOMPLETE\x1b[?2026l");
+    dispatch_view_pty(&mut server, first);
+    let recovered = decode_batch(
+        output.try_recv().expect("synchronized view recovers"),
+        &mut decoder,
+    );
+    assert!(recovered.iter().any(|view| view.tab_id == tabs[0]
+        && matches!(&view.message, ServerMessage::PaneSurface(surface) if frame_text(&surface.frame).contains("COMPLETE"))));
+    shutdown_test_runtimes(&mut server);
+}
+
+#[tokio::test]
+async fn synchronized_view_recovers_after_batch_timeout() {
+    let (mut server, _control, output, pane) = retained_test_server_with_control(b"BASE");
+    let tab = server.app.public_tab_id(0, 0).unwrap();
+    set_views(&mut server, 1, &[tab]);
+    write_shared_test_pane(&mut server, pane, b"\x1b[?2026h\rTIMEDOUT");
+    let _ = server.app.render_dirty.take();
+    server.dispatch_render_tick(false, true, &HashSet::new(), false);
+    assert!(output.try_recv().is_err());
+    let runtime = server
+        .app
+        .state
+        .runtime_for_pane_in_workspace(&server.app.terminal_runtimes, 0, pane)
+        .unwrap();
+    runtime.test_backdate_synchronized_output(Duration::from_secs(5));
+    assert!(!runtime.synchronized_output_active());
+    // The existing backstop wakes rendering with a PTY source, not a generic request.
+    dispatch_view_pty(&mut server, pane);
+    let mut decoder = protocol::views::Decoder::default();
+    let recovered = decode_batch(
+        output.try_recv().expect("timeout must release the view"),
+        &mut decoder,
+    );
+    assert!(
+        matches!(&recovered[0].message, ServerMessage::PaneSurface(surface)
+        if frame_text(&surface.frame).contains("TIMEDOUT"))
+    );
+    shutdown_test_runtimes(&mut server);
+}
+
+#[tokio::test]
+async fn synchronized_view_preserves_writer_backpressure_recovery() {
+    let (mut server, _control, output, pane) = retained_test_server_with_control(b"BASE");
+    let tab = server.app.public_tab_id(0, 0).unwrap();
+    set_views(&mut server, 1, &[tab]);
+    server.render_and_stream();
+    // Keep the baseline in the bounded writer queue through the batch.
+    write_shared_test_pane(&mut server, pane, b"\x1b[?2026h\rPARTIAL");
+    let _ = server.app.render_dirty.take();
+    server.dispatch_render_tick(false, true, &HashSet::new(), false);
+    let _ = server.app.render_dirty.take();
+    write_shared_test_pane(&mut server, pane, b"\rCOMPLETE\x1b[?2026l");
+    dispatch_view_pty(&mut server, pane);
+    assert_eq!(server.clients[&1].deferred_render(), DeferredRender::Full);
+    let mut decoder = protocol::views::Decoder::default();
+    let baseline = decode_batch(output.try_recv().unwrap(), &mut decoder);
+    assert!(
+        matches!(&baseline[0].message, ServerMessage::PaneSurface(surface)
+        if frame_text(&surface.frame).contains("BASE"))
+    );
+    let full = server.handle_server_event(ServerEvent::ClientWriterDrained { client_id: 1 });
+    assert!(full, "writer drain must schedule deferred full rendering");
+    server.dispatch_render_tick(false, full, &HashSet::new(), false);
+    let recovered = decode_batch(
+        output.try_recv().expect("queue drain must recover view"),
+        &mut decoder,
+    );
+    assert!(
+        matches!(&recovered[0].message, ServerMessage::PaneSurface(surface)
+        if frame_text(&surface.frame).contains("COMPLETE"))
+    );
+    assert_eq!(server.clients[&1].deferred_render(), DeferredRender::None);
+    assert!(!server.app.render_dirty.is_pending());
+    shutdown_test_runtimes(&mut server);
+}

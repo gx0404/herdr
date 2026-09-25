@@ -1,5 +1,5 @@
 {
-  "chunk_count": 1119,
+  "chunk_count": 1120,
   "chunks": [
     {
       "anchor": "herdr",
@@ -3276,6 +3276,13 @@
       "id": "docs-next-website-src-content-docs-session-state-mdx-what-survives-snapshot-restore-when-the-saved-session-is-cleared",
       "source_sha256": "f06919952c49b071c80f50bc928544dbb659d64a1d6edd978b49dbec95c88ac5",
       "text": "### When the saved session is cleared\n\nHerdr clears `session.json` only when you explicitly close the last workspace. If the workspace set empties for any other reason, such as a host restart that hangs up every shell or the last pane process exiting on its own, Herdr keeps the saved snapshot instead of deleting it, so the next start can still restore the session. What comes back is the most recent snapshot on disk, which can be a few seconds older than the moment the panes died.\n\nHerdr also guards that snapshot while panes are exiting in a cascade. When several panes exit within a couple of seconds, or a shell reports an exit status that a host shutdown typically produces, Herdr writes a checkpoint before removing the pane and stops replacing the saved snapshot with a smaller workspace set. The guard lifts about 90 seconds after the last such exit, so an ordinary round of closing shells is still saved, just a little later."
+    },
+    {
+      "anchor": "What survives > Switching workspaces and tabs",
+      "doc": "docs/next/website/src/content/docs/session-state.mdx",
+      "id": "docs-next-website-src-content-docs-session-state-mdx-what-survives-switching-workspaces-and-tabs",
+      "source_sha256": "960e10f7ad74856760004d768d6f55aa62644d8274070d3e3161155fbb7f874a",
+      "text": "### Switching workspaces and tabs\n\nWhen switching to a terminal that is updating its screen in a batch, Herdr waits for the complete frame before displaying it. The view resumes automatically when the batch ends; other visible tabs continue updating."
     },
     {
       "anchor": "Choose an integration layer",
