@@ -341,6 +341,21 @@ fn rollout_file_id(name: &str) -> Option<(&str, bool)> {
     Some((id, name.ends_with(COMPRESSED_SUFFIX)))
 }
 
+/// 同线程按文件名时间、rollout UUID 选最新；同一逻辑文件的明文优先于压缩副本。
+fn rollout_rank(path: &Path) -> Option<(&str, &str, bool)> {
+    let name = path.file_name()?.to_str()?;
+    let (thread, compressed) = rollout_file_id(name)?;
+    let stem = name
+        .strip_prefix("rollout-")?
+        .strip_suffix(".jsonl.zst")
+        .or_else(|| name.strip_prefix("rollout-")?.strip_suffix(".jsonl"))?;
+    let rollout = stem
+        .get(20..)?
+        .split_once('_')
+        .map_or(thread, |(_, rollout)| rollout);
+    Some((stem.get(..19)?, rollout, !compressed))
+}
+
 /// UUIDv7 的高 48 位是 unix 毫秒；不是 v7 时返回 `None`。
 fn uuid_v7_millis(id: &str) -> Option<u64> {
     let hex: String = id.chars().filter(|ch| *ch != '-').collect();
@@ -528,7 +543,7 @@ fn rfc3339_millis(text: &str) -> Option<u64> {
 
 /// 读 `min_day` 起每个日期目录里 rollout 的首行；从新到旧，超过预算就停。
 fn scan_metas(sessions: &Path, min_day: Option<(u32, u32, u32)>) -> io::Result<Vec<RolloutMeta>> {
-    let mut metas = Vec::new();
+    let mut metas: Vec<RolloutMeta> = Vec::new();
     let mut budget = MAX_ROLLOUTS_SCANNED;
     for day in day_dirs(sessions, min_day)? {
         let Ok(entries) = fs::read_dir(&day) else {
@@ -555,7 +570,23 @@ fn scan_metas(sessions: &Path, min_day: Option<(u32, u32, u32)>) -> io::Result<V
             }
             budget -= 1;
             if let Some(meta) = read_meta(&path) {
-                metas.push(meta);
+                // A filename and its first meta must identify the same thread.
+                if path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .and_then(rollout_file_id)
+                    .map(|(id, _)| id)
+                    != Some(meta.id.as_str())
+                {
+                    continue;
+                }
+                if let Some(previous) = metas.iter_mut().find(|previous| previous.id == meta.id) {
+                    if rollout_rank(&meta.path) > rollout_rank(&previous.path) {
+                        *previous = meta;
+                    }
+                } else {
+                    metas.push(meta);
+                }
             }
         }
     }
@@ -798,28 +829,34 @@ fn find_rollout(sessions: &Path, id: &str) -> Result<PathBuf, SourceError> {
     let min_day = uuid_v7_millis(id)
         .map(|millis| millis.saturating_sub(86_400_000))
         .and_then(utc_day);
-    let mut compressed = None;
+    let mut selected: Option<PathBuf> = None;
     for day in day_dirs(sessions, min_day).map_err(SourceError::Io)? {
         let Ok(entries) = fs::read_dir(&day) else {
             continue;
         };
         for entry in entries.filter_map(Result::ok) {
             let name = entry.file_name();
-            let Some((file_id, is_compressed)) = name.to_str().and_then(rollout_file_id) else {
+            let Some((file_id, _)) = name.to_str().and_then(rollout_file_id) else {
                 continue;
             };
             if file_id != id {
                 continue;
             }
-            if is_compressed {
-                compressed = Some(entry.path());
-            } else {
-                return Ok(entry.path());
+            let candidate = entry.path();
+            if selected
+                .as_ref()
+                .is_none_or(|previous| rollout_rank(&candidate) > rollout_rank(previous))
+            {
+                selected = Some(candidate);
             }
         }
     }
-    if compressed.is_some() {
-        return Err(SourceError::Unsupported);
+    if let Some(path) = selected {
+        return if path.to_string_lossy().ends_with(COMPRESSED_SUFFIX) {
+            Err(SourceError::Unsupported)
+        } else {
+            Ok(path)
+        };
     }
     tracing::debug!(thread = id, "codex 线程还没有 rollout 文件");
     Err(SourceError::Unavailable)
@@ -2023,6 +2060,47 @@ mod tests {
                 "{relative}"
             );
         }
+        let _ = fs::remove_dir_all(temp);
+    }
+
+    #[test]
+    fn reverted_rollouts_select_one_latest_tree_node_and_content() {
+        let temp = unique_temp_home("reverted");
+        let day = temp.join(".codex/sessions/2026/09/22");
+        fs::create_dir_all(&day).unwrap();
+        let root = AgentSessionRef::id(ROOT).unwrap();
+        let write = |stamp: &str, suffix: &str, label: &str| {
+            let path = day.join(format!("rollout-{stamp}-{CHILD_A}{suffix}.jsonl"));
+            let meta = serde_json::json!({"type":"session_meta","payload":{"id":CHILD_A,"parent_thread_id":ROOT,"source":{"subagent":"review"},"agent_nickname":label}});
+            let text = serde_json::json!({"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":label}]}});
+            fs::write(&path, format!("{meta}\n{text}\n")).unwrap();
+            path
+        };
+        write("2026-09-22T10-01-00", "", "old");
+        write("2026-09-22T10-01-00", &format!("_{CHILD_B}"), "reverted");
+        let selected = write("2026-09-22T10-01-00", &format!("_{CHILD_C}"), "latest");
+        let nodes = discover(&temp, Some(&root));
+        assert_eq!(nodes.len(), 1);
+        assert_eq!(nodes[0].id, CHILD_A);
+        assert!(nodes[0].label.contains("latest"));
+        assert_eq!(
+            find_rollout(&temp.join(".codex/sessions"), CHILD_A).unwrap(),
+            selected
+        );
+        let page = Codex
+            .read(&context(&temp, Some(&root)), CHILD_A, None, 4096)
+            .unwrap();
+        assert!(page.text.contains("latest"));
+        assert!(!page.text.contains("old"));
+        // A newer timestamp wins even when its rollout ID sorts before the older suffix.
+        let newest = write("2026-09-22T10-02-00", "", "newest time");
+        assert_eq!(
+            find_rollout(&temp.join(".codex/sessions"), CHILD_A).unwrap(),
+            newest
+        );
+        assert!(discover(&temp, Some(&root))[0]
+            .label
+            .contains("newest time"));
         let _ = fs::remove_dir_all(temp);
     }
 

@@ -804,6 +804,8 @@ path can locate the library and discover children with readable metadata, but
 compressed child rollouts are not decompressed or included in discovery and
 reading their content remains unsupported.
 
+Codex 0.157 reverted threads may append `_<rollout-id>` after the stable session ID. Reports still match the stable ID; discovery and content reads select the newest filename timestamp, then rollout ID, and show each thread once. The activity reader renders the selected rollout; linked `history_base` prefixes from earlier rollouts are not expanded.
+
 Hooks signal with `pane.report_agent_activity`:
 
 ```json

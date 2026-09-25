@@ -643,6 +643,8 @@ Codex のファイル名は `rollout-<timestamp>-<session-id>.jsonl` または `
 特定し、メタデータを読める子スレッドを検出できますが、圧縮された子スレッドの展開・検出・
 内容の読み取りは未対応です。
 
+Codex 0.157 の revert 後のスレッドでは、安定したセッション ID の後に `_<rollout-id>` が付く場合があります。報告は安定 ID と照合し、検出と読み取りはファイル名の時刻、rollout ID の順で最新版を選び、各スレッドを一度だけ表示します。選択された rollout を表示し、以前の rollout を参照する `history_base` の履歴プレフィックスは展開しません。
+
 フックは `pane.report_agent_activity` で合図します:
 
 ```json

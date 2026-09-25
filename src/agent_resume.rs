@@ -137,7 +137,26 @@ pub(crate) fn codex_rollout_session_id(name: &str) -> Option<&str> {
             return None;
         }
     }
-    let id = stem.get(20..)?;
+    let ids = stem.get(20..)?;
+    let id = if let Some((thread, rollout)) = ids.split_once('_') {
+        // Codex 0.157 revert creates a distinct UUID rollout under the stable thread UUID.
+        let uuid = |id: &str| {
+            id.len() == 36
+                && id.bytes().enumerate().all(|(index, byte)| {
+                    if matches!(index, 8 | 13 | 18 | 23) {
+                        byte == b'-'
+                    } else {
+                        byte.is_ascii_hexdigit()
+                    }
+                })
+        };
+        if !uuid(thread) || !uuid(rollout) {
+            return None;
+        }
+        thread
+    } else {
+        ids
+    };
     (!id.is_empty()
         && id.len() <= 128
         && id
@@ -624,6 +643,31 @@ mod tests {
                     "{source} {id} {path}"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn codex_reverted_rollout_paths_keep_the_stable_thread_id() {
+        let thread = "01a0c6d8-4f60-7000-8000-0000000000a2";
+        let rollout = "01a0c6f0-2710-7000-8000-0000000000c2";
+        for extension in ["jsonl", "jsonl.zst"] {
+            let raw = absolute_test_path(&format!(
+                "rollout-2026-09-25T11-22-33-{thread}_{rollout}.{extension}"
+            ));
+            let reported = transcript_from_report("herdr:codex", "codex", Some(thread), Some(&raw))
+                .expect("stable thread ID matches a reverted rollout");
+            assert_eq!(reported.session_id, thread);
+            assert!(
+                transcript_from_report("herdr:codex", "codex", Some(rollout), Some(&raw)).is_none()
+            );
+        }
+        for suffix in [
+            "",
+            "not-a-uuid",
+            "01a0c6f0-2710-7000-8000-0000000000c2_more",
+        ] {
+            let name = format!("rollout-2026-09-25T11-22-33-{thread}_{suffix}.jsonl");
+            assert!(codex_rollout_session_id(&name).is_none());
         }
     }
 

@@ -635,6 +635,8 @@ Codex 路径的文件名必须为 `rollout-<时间戳>-<会话 ID>.jsonl` 或 `.
 会话库。压缩的根转录路径可以定位库并发现元数据可读的子线程,但压缩子线程不会被
 解压或纳入发现,其内容读取仍不受支持。
 
+Codex 0.157 回退后的线程可在稳定会话 ID 后追加 `_<rollout-id>`。上报仍匹配稳定 ID;发现和内容读取先按文件名时间、再按 rollout ID 选最新版本,每个线程仅显示一次。活动读取展示所选 rollout,暂不展开指向早期 rollout 的 `history_base` 历史前缀。
+
 钩子用 `pane.report_agent_activity` 发信号:
 
 ```json
