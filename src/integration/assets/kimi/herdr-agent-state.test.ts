@@ -1,5 +1,5 @@
 import { afterEach, expect, test } from "bun:test";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { createServer, type Server } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -229,4 +229,131 @@ test("the POSIX and PowerShell assets declare the same integration version", asy
   const powershell = (await readFile(join(import.meta.dir, "herdr-agent-state.ps1"), "utf8")).match(marker)?.[1];
   expect(posix).toBeDefined();
   expect(powershell).toBe(posix);
+});
+
+const sessionId = "session_0f0f0f0f-1111-4222-8333-444455556666";
+async function sessionDirectory(root: string, bucket = "wd_demo_hash", id = sessionId) {
+  const directory = join(root, "sessions", bucket, sessionId);
+  await mkdir(directory, { recursive: true });
+  await writeFile(join(directory, "state.json"), JSON.stringify({ version: 2, id, cwd: "/synthetic/project", agents: {} }));
+  return directory;
+}
+
+test("pane-specific Kimi home reports an ID-bound session directory", async () => {
+  const { socketPath, requests } = await listen();
+  for (const pane of ["one", "two"]) {
+    const root = join(tempDir!, pane);
+    const directory = await sessionDirectory(root);
+    await runHook("session", JSON.stringify({ session_id: sessionId }), { ...herdrEnv(socketPath), HERDR_PANE_ID: pane, KIMI_CODE_HOME: root });
+    expect(requests.at(-1)!.params.agent_session_path).toBe(directory);
+    expect(requests.at(-1)!.params.pane_id).toBe(pane);
+  }
+});
+
+test("late directory discovery supplements the session before the lifecycle with a fresh sequence", async () => {
+  const { socketPath, requests } = await listen();
+  const root = join(tempDir!, "home");
+  const env = { ...herdrEnv(socketPath), KIMI_CODE_HOME: root };
+  await runHook("session", JSON.stringify({ session_id: sessionId }), env);
+  expect(requests[0].params.agent_session_path).toBeUndefined();
+  const directory = await sessionDirectory(root);
+  for (const action of ["working", "idle", "activity"]) {
+    const before = requests.length;
+    await runHook(action, JSON.stringify({ session_id: sessionId, hook_event_name: "SubagentStart" }), env);
+    const [session, event] = requests.slice(before);
+    expect(session.method).toBe("pane.report_agent_session");
+    expect(session.params.agent_session_path).toBe(directory);
+    expect(session.params.session_start_source).toBeUndefined();
+    expect(event.method).toBe(action === "activity" ? "pane.report_agent_activity" : "pane.report_agent");
+    expect(BigInt(event.id.split(":").at(-1)!) - BigInt(session.id.split(":").at(-1)!)).toBe(1n);
+  }
+});
+
+test("ambiguous directories, mismatched metadata and escaping symlinks never become paths", async () => {
+  const { socketPath, requests } = await listen();
+  const ambiguous = join(tempDir!, "ambiguous");
+  await sessionDirectory(ambiguous, "first");
+  await sessionDirectory(ambiguous, "second");
+  const mismatch = join(tempDir!, "mismatch");
+  await sessionDirectory(mismatch, "bucket", "session_other");
+  const outside = join(tempDir!, "outside");
+  const escaped = await sessionDirectory(outside);
+  const linked = join(tempDir!, "linked");
+  await mkdir(join(linked, "sessions", "bucket"), { recursive: true });
+  await symlink(escaped, join(linked, "sessions", "bucket", sessionId));
+  for (const root of [ambiguous, mismatch, linked]) {
+    await runHook("session", JSON.stringify({ session_id: sessionId }), { ...herdrEnv(socketPath), KIMI_CODE_HOME: root });
+    expect(requests.at(-1)!.params.agent_session_path).toBeUndefined();
+  }
+});
+
+test("unset home uses absolute HOME but empty and relative overrides never fall back", async () => {
+  const { socketPath, requests } = await listen();
+  const directory = await sessionDirectory(join(tempDir!, ".kimi-code"));
+  const env = { ...herdrEnv(socketPath), HOME: tempDir! };
+  await runHook("session", JSON.stringify({ session_id: sessionId }), env);
+  expect(requests.at(-1)!.params.agent_session_path).toBe(directory);
+  for (const root of ["", "relative", "~/.kimi-code"]) {
+    await runHook("session", JSON.stringify({ session_id: sessionId }), { ...env, KIMI_CODE_HOME: root });
+    expect(requests.at(-1)!.params.agent_session_path).toBeUndefined();
+  }
+});
+
+test("directory lookup is bounded and legacy metadata remains supported", async () => {
+  const { socketPath, requests } = await listen();
+  const root = join(tempDir!, "bounded");
+  const directory = await sessionDirectory(root);
+  const env = { ...herdrEnv(socketPath), KIMI_CODE_HOME: root };
+  await writeFile(join(directory, "state.json"), JSON.stringify({ workDir: "/synthetic/project", agents: {} }));
+  await runHook("session", JSON.stringify({ session_id: sessionId }), env);
+  expect(requests.at(-1)!.params.agent_session_path).toBe(directory);
+  await writeFile(join(directory, "state.json"), JSON.stringify({ version: 2, agents: {} }));
+  await runHook("session", JSON.stringify({ session_id: sessionId }), env);
+  expect(requests.at(-1)!.params.agent_session_path).toBeUndefined();
+  await writeFile(join(directory, "state.json"), JSON.stringify({ version: 2, id: sessionId }));
+  for (let index = 0; index < 256; index++) await mkdir(join(root, "sessions", `bucket-${index}`));
+  await runHook("session", JSON.stringify({ session_id: sessionId }), env);
+  expect(requests.at(-1)!.params.agent_session_path).toBeUndefined();
+  expect(requests.at(-1)!.params.agent_session_id).toBe(sessionId);
+});
+
+test("oversized metadata and symlinked metadata omit the path without losing state", async () => {
+  const { socketPath, requests } = await listen();
+  const root = join(tempDir!, "metadata");
+  const directory = await sessionDirectory(root);
+  const metadata = join(directory, "state.json");
+  const env = { ...herdrEnv(socketPath), KIMI_CODE_HOME: root };
+  await writeFile(metadata, JSON.stringify({ version: 2, id: sessionId, padding: "x".repeat(8 * 1024 * 1024) }));
+  await runHook("working", JSON.stringify({ session_id: sessionId }), env);
+  expect(requests).toHaveLength(1);
+  expect(requests[0].params.state).toBe("working");
+  await rm(metadata);
+  const outside = join(tempDir!, "outside-state.json");
+  await writeFile(outside, JSON.stringify({ version: 2, id: sessionId }));
+  await symlink(outside, metadata);
+  await runHook("idle", JSON.stringify({ session_id: sessionId }), env);
+  expect(requests).toHaveLength(2);
+  expect(requests[1].params.state).toBe("idle");
+});
+
+test("PowerShell supplements paths before lifecycle with independent sequence numbers", async () => {
+  const source = await readFile(join(import.meta.dir, "herdr-agent-state.ps1"), "utf8");
+  expect(source).toContain('[Environment]::GetEnvironmentVariable("KIMI_CODE_HOME")');
+  expect(source).toContain('"--agent-session-path", $sessionPath');
+  expect(source).toContain('$count -gt 256');
+  expect(source).toContain('$length -gt 8 * 1024 * 1024');
+  expect(source.indexOf('& $herdr @sessionArgs')).toBeLessThan(source.indexOf('$seq++'));
+  expect(source.indexOf('$seq++')).toBeLessThan(source.indexOf('& $herdr pane report-agent '));
+});
+
+test("deeply nested malformed metadata cannot suppress lifecycle reports", async () => {
+  const { socketPath, requests } = await listen();
+  const root = join(tempDir!, "nested");
+  const directory = await sessionDirectory(root);
+  await writeFile(join(directory, "state.json"), "[".repeat(2000) + "0" + "]".repeat(2000));
+  for (const action of ["working", "idle"]) {
+    await runHook(action, JSON.stringify({ session_id: sessionId }), { ...herdrEnv(socketPath), KIMI_CODE_HOME: root });
+    expect(requests.at(-1)?.params.state).toBe(action);
+  }
+  expect(requests).toHaveLength(2);
 });

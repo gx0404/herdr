@@ -3295,6 +3295,78 @@ mod tests {
     }
 
     #[test]
+    fn kimi_path_supplement_preserves_following_lifecycle_and_pane_isolation() {
+        let mut app = app_with_workspaces(&["one", "two"]);
+        for index in 0..2 {
+            let pane_id = app.workspaces[index].tabs[0].root_pane;
+            let terminal_id = app.workspaces[index].panes[&pane_id]
+                .attached_terminal_id
+                .clone();
+            app.handle_app_event(AppEvent::AgentProcessDetected {
+                pane_id,
+                agent: Agent::Kimi,
+                observed_at: Instant::now(),
+            });
+            app.handle_app_event(AppEvent::AgentSessionReported {
+                pane_id,
+                source: "herdr:kimi".into(),
+                agent_label: "kimi".into(),
+                seq: Some(1),
+                session_ref: crate::agent_resume::AgentSessionRef::id("session_shared"),
+                session_start_source: Some("startup".into()),
+                transcript: None,
+            });
+            let path = std::env::temp_dir().join(format!("synthetic-kimi-{index}/session_shared"));
+            let path = path.to_str().unwrap();
+            let transcript = crate::agent_resume::transcript_from_report(
+                "herdr:kimi",
+                "kimi",
+                Some("session_shared"),
+                Some(path),
+            )
+            .unwrap();
+            for (seq, state) in [(2, AgentState::Working), (4, AgentState::Idle)] {
+                app.handle_app_event(AppEvent::AgentSessionReported {
+                    pane_id,
+                    source: "herdr:kimi".into(),
+                    agent_label: "kimi".into(),
+                    seq: Some(seq),
+                    session_ref: crate::agent_resume::AgentSessionRef::id("session_shared"),
+                    session_start_source: None,
+                    transcript: Some(transcript.clone()),
+                });
+                app.handle_app_event(AppEvent::HookStateReported {
+                    pane_id,
+                    source: "herdr:kimi".into(),
+                    agent_label: "kimi".into(),
+                    state,
+                    message: None,
+                    seq: Some(seq + 1),
+                    session_ref: crate::agent_resume::AgentSessionRef::id("session_shared"),
+                });
+                assert_eq!(app.terminals[&terminal_id].state, state);
+                assert_eq!(
+                    app.agent_activity
+                        .transcript(pane_id, "kimi", "session_shared")
+                        .unwrap()
+                        .value,
+                    path
+                );
+                assert!(app
+                    .agent_activity
+                    .transcript(pane_id, "kimi", "other")
+                    .is_none());
+            }
+        }
+        let one = app.workspaces[0].tabs[0].root_pane;
+        let two = app.workspaces[1].tabs[0].root_pane;
+        assert_ne!(
+            app.agent_activity.transcript(one, "kimi", "session_shared"),
+            app.agent_activity.transcript(two, "kimi", "session_shared")
+        );
+    }
+
+    #[test]
     fn completion_guard_same_state_agent_replacement_clears_old_work() {
         let mut app = app_with_workspaces(&["active", "background"]);
         app.active = Some(0);

@@ -193,7 +193,12 @@ fn discover_in(root: &Path, cx: &SourceContext<'_>) -> Result<Vec<AgentActivityN
     let Some(session_dir) = locate_session(root, cx)? else {
         return Ok(Vec::new());
     };
-    Ok(build_tree(&session_dir, cx.now_ms))
+    Ok(build_tree(
+        &session_dir,
+        cx.now_ms,
+        cx.session
+            .is_some_and(|session| session.kind == AgentSessionRefKind::Path),
+    ))
 }
 
 fn read_in(
@@ -216,6 +221,16 @@ fn read_in(
     let Some(session_dir) = locate_session(root, cx)? else {
         return Err(SourceError::Unavailable);
     };
+    if cx
+        .session
+        .is_some_and(|session| session.kind == AgentSessionRefKind::Path)
+        && !session_metadata_matches(
+            &session_dir,
+            read_json_file(&session_dir.join("state.json"), MAX_STATE_BYTES).as_ref(),
+        )
+    {
+        return Err(SourceError::Unavailable);
+    }
     match node {
         NodeRef::Agent(agent_id) => {
             let path = session_dir.join("agents").join(agent_id).join("wire.jsonl");
@@ -291,15 +306,7 @@ fn locate_session(root: &Path, cx: &SourceContext<'_>) -> Result<Option<PathBuf>
 
 /// 会话 id 规范成目录名：`session_<uuid>` 原样，裸 uuid 补前缀；非法字符一律拒绝。
 fn session_dir_name(id: &str) -> Option<String> {
-    let id = id.trim();
-    if !valid_id(id) {
-        return None;
-    }
-    Some(if id.starts_with("session_") {
-        id.to_string()
-    } else {
-        format!("session_{id}")
-    })
+    crate::agent_resume::kimi_session_dir_name(id.trim())
 }
 
 fn session_dir_by_id(root: &Path, id: &str) -> Option<PathBuf> {
@@ -515,9 +522,13 @@ struct Placed {
     index: usize,
 }
 
-fn build_tree(session_dir: &Path, now_ms: u64) -> Vec<AgentActivityNode> {
+fn build_tree(session_dir: &Path, now_ms: u64, reported_path: bool) -> Vec<AgentActivityNode> {
     let agents_dir = session_dir.join("agents");
-    let state = read_state_agents(session_dir);
+    let metadata = read_json_file(&session_dir.join("state.json"), MAX_STATE_BYTES);
+    if reported_path && !session_metadata_matches(session_dir, metadata.as_ref()) {
+        return Vec::new();
+    }
+    let state = read_state_agents(metadata.as_ref());
     let root = root_agent_id(&state);
 
     let agent_dirs: BTreeMap<String, PathBuf> = list_dirs(&agents_dir)
@@ -608,9 +619,23 @@ fn build_tree(session_dir: &Path, now_ms: u64) -> Vec<AgentActivityNode> {
     emit_preorder(children)
 }
 
-fn read_state_agents(session_dir: &Path) -> BTreeMap<String, AgentMeta> {
+// Reported directories must retain their session identity when read later.
+// The legacy state schema has workDir but no version/id; v2 always has id.
+fn session_metadata_matches(session_dir: &Path, state: Option<&Value>) -> bool {
+    let Some(state) = state.and_then(Value::as_object) else {
+        return false;
+    };
+    if let Some(id) = state.get("id") {
+        id.as_str()
+            .is_some_and(|id| Some(id) == session_dir.file_name().and_then(|name| name.to_str()))
+    } else {
+        !state.contains_key("version") && state.get("workDir").is_some_and(Value::is_string)
+    }
+}
+
+fn read_state_agents(state: Option<&Value>) -> BTreeMap<String, AgentMeta> {
     let mut agents = BTreeMap::new();
-    let Some(state) = read_json_file(&session_dir.join("state.json"), MAX_STATE_BYTES) else {
+    let Some(state) = state else {
         return agents;
     };
     let Some(entries) = state.get("agents").and_then(Value::as_object) else {
@@ -1578,6 +1603,50 @@ mod tests {
     }
 
     #[test]
+    fn explicit_kimi_path_rejects_foreign_metadata_and_never_falls_back() {
+        let tmp = TempDir::new("path-identity");
+        let directory = tmp.path().join(SESSION_ID);
+        let wire = directory.join("agents/agent-1/wire.jsonl");
+        write_file(&wire, "{\"type\":\"fixture\"}\n");
+        let session = AgentSessionRef::path(directory.to_string_lossy()).unwrap();
+        let root = fixture_root();
+        let cx = context(
+            &root,
+            Some(&session),
+            Some(Path::new("/synthetic/project")),
+            FAR_FUTURE_MS,
+        );
+        for metadata in [
+            serde_json::json!({"version": 2, "id": "session_other", "agents": {}}),
+            serde_json::json!({"version": 2, "agents": {}}),
+        ] {
+            write_file(&directory.join("state.json"), &metadata.to_string());
+            assert!(discover_in(&root, &cx).unwrap().is_empty());
+            assert!(matches!(
+                read_in(&root, &cx, "agent:agent-1", None, 1024),
+                Err(SourceError::Unavailable)
+            ));
+        }
+        for metadata in [
+            serde_json::json!({"version": 2, "id": SESSION_ID, "agents": {}}),
+            serde_json::json!({"workDir": "/synthetic/project", "agents": {}}),
+        ] {
+            write_file(&directory.join("state.json"), &metadata.to_string());
+            assert!(!discover_in(&root, &cx).unwrap().is_empty());
+            assert!(!read_in(&root, &cx, "agent:agent-1", None, 1024)
+                .unwrap()
+                .text
+                .is_empty());
+        }
+        fs::remove_dir_all(&directory).unwrap();
+        assert!(discover_in(&root, &cx).unwrap().is_empty());
+        assert!(matches!(
+            read_in(&root, &cx, "agent:agent-1", None, 1024),
+            Err(SourceError::Unavailable)
+        ));
+    }
+
+    #[test]
     fn discovers_the_fixture_tree_in_parent_first_order() {
         let nodes = discover_by_id(&fixture_root(), SESSION_ID, FAR_FUTURE_MS);
         assert_eq!(
@@ -1962,7 +2031,8 @@ mod tests {
         );
         write_file(
             &session_dir.join("state.json"),
-            &serde_json::json!({ "agents": agents }).to_string(),
+            &serde_json::json!({ "version": 2, "id": "session_deep", "agents": agents })
+                .to_string(),
         );
 
         let session =

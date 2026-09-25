@@ -77,11 +77,11 @@ pub struct ReportedTranscript {
     pub agent: String,
     /// 同一次上报的会话 id：活动树只在 pane 的会话 id 仍是它时才用这条路径。
     pub session_id: String,
-    /// 转录文件的绝对路径（[`AgentSessionRefKind::Path`]）。
+    /// 转录文件或会话目录的绝对路径（[`AgentSessionRefKind::Path`]）。
     pub path: AgentSessionRef,
 }
 
-/// Claude/Codex 官方钩子随会话 id 上报的绝对转录路径；仅给活动树定位，恢复仍用 id。
+/// Claude/Codex 转录文件与 Kimi 会话目录的绝对路径；仅给活动树定位，恢复仍用 id。
 /// 文件名必须对应同次上报的 id；Codex 允许 rollout 的 `.jsonl.zst` 压缩后缀。
 /// 路径只做词法校验，不在上报处理或状态投影中访问文件系统。
 pub fn transcript_from_report(
@@ -92,7 +92,7 @@ pub fn transcript_from_report(
 ) -> Option<ReportedTranscript> {
     if !matches!(
         (source, agent),
-        ("herdr:claude", "claude") | ("herdr:codex", "codex")
+        ("herdr:claude", "claude") | ("herdr:codex", "codex") | ("herdr:kimi", "kimi")
     ) {
         return None;
     }
@@ -103,6 +103,12 @@ pub fn transcript_from_report(
         "claude" => file == format!("{session_id}.jsonl"),
         "codex" => {
             codex_rollout_session_id(file) == Some(session_id)
+                && !Path::new(raw)
+                    .components()
+                    .any(|part| matches!(part, std::path::Component::ParentDir))
+        }
+        "kimi" => {
+            kimi_session_dir_name(session_id).as_deref() == Some(file)
                 && !Path::new(raw)
                     .components()
                     .any(|part| matches!(part, std::path::Component::ParentDir))
@@ -118,6 +124,17 @@ pub fn transcript_from_report(
         session_id: session_id.to_owned(),
         path,
     })
+}
+
+/// Kimi 会话目录名；官方 hook 上报的 id 与目录必须对应同一会话。
+pub(crate) fn kimi_session_dir_name(id: &str) -> Option<String> {
+    let bare = id.strip_prefix("session_").unwrap_or(id);
+    (!bare.is_empty()
+        && id.len() <= 128
+        && id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_')))
+    .then(|| format!("session_{bare}"))
 }
 
 /// Codex rollout 文件名中的线程 id；与活动适配器共享，避免路径校验和定位口径分叉。
@@ -502,6 +519,40 @@ mod tests {
                 session_ref_from_report(source, agent, Some("session-id".into()), None).unwrap();
             assert_eq!(session_ref.kind, AgentSessionRefKind::Id, "{agent}");
             assert_eq!(session_ref.value, "session-id", "{agent}");
+        }
+    }
+
+    #[test]
+    fn reported_kimi_directory_is_bound_to_id_without_changing_resume() {
+        let path = absolute_test_path("session_test-id");
+        let reported =
+            transcript_from_report("herdr:kimi", "kimi", Some("session_test-id"), Some(&path))
+                .expect("Kimi path");
+        assert_eq!(reported.path.value, path);
+        assert_eq!(reported.session_id, "session_test-id");
+        assert_eq!(
+            session_ref_from_report(
+                "herdr:kimi",
+                "kimi",
+                Some("session_test-id".into()),
+                Some(path.clone())
+            )
+            .unwrap()
+            .kind,
+            AgentSessionRefKind::Id
+        );
+        for (source, id, raw) in [
+            ("custom:kimi", "session_test-id", path.clone()),
+            ("herdr:kimi", "other-id", path.clone()),
+            ("herdr:kimi", "session_test-id", "session_test-id".into()),
+            (
+                "herdr:kimi",
+                "session_test-id",
+                absolute_test_path("other/../session_test-id"),
+            ),
+            ("herdr:kimi", "session_", absolute_test_path("session_")),
+        ] {
+            assert!(transcript_from_report(source, "kimi", Some(id), Some(&raw)).is_none());
         }
     }
 

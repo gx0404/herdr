@@ -175,6 +175,8 @@ From integration version `8` the hook also subscribes to `SubagentStart`, `Subag
 
 Integration version `8` also maps every way a Kimi turn can end to `idle`: `Stop` when the turn completes, `Interrupt` when you interrupt it, and `StopFailure` when the turn fails, for example on a provider or authentication error. A failed turn therefore no longer leaves the pane `working` until Kimi exits. Every Kimi Code CLI version Herdr supports has `StopFailure`; reinstall the Kimi integration after upgrading to add it.
 
+Integration version `8` also reports the session directory from the hook's own absolute `KIMI_CODE_HOME` (or the hook's home when unset), so activity follows each pane even when its configuration directory differs from the server's. If `SessionStart` runs before the session is written, later lifecycle and activity events retry the lookup. Only an unambiguous directory matching the session ID is accepted; resume still uses the ID. Empty or relative overrides, literal `~`, duplicate directories, and scans exceeding 256 workspace entries omit the path and retain normal state reporting. Windows supplements the path too; activity updates still use polling. Reinstall the Kimi integration to update these scripts.
+
 Herdr uses `~/.kimi-code` by default, or `KIMI_CODE_HOME` when set. The Kimi Code config directory must already exist. Install writes `hooks/herdr-agent-state.sh` and appends Herdr-managed `[[hooks]]` entries to `config.toml`. Uninstall removes the Herdr-managed config block and deletes the hook script.
 
 Herdr resumes stored Kimi sessions with `kimi --session <id>`.

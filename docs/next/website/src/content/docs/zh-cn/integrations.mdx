@@ -177,6 +177,8 @@ herdr integration install kimi
 
 集成版本 `8` 还把 Kimi 回合的每种结束方式都映射为 `idle`:回合完成时的 `Stop`、被打断时的 `Interrupt`,以及回合出错(例如 provider 报错或鉴权失败)时的 `StopFailure`。因此出错的回合不会再让窗格一直停在 `working`,直到 Kimi 退出。Herdr 支持的所有 Kimi Code CLI 版本都有 `StopFailure`;升级后请重新安装 Kimi 集成以添加它。
 
+集成版本 `8` 还会从钩子自身的绝对 `KIMI_CODE_HOME`（未设置时用钩子的用户目录）补报会话目录,因此每个窗格的活动树都能跟随自己的配置目录,即使它与服务器不同。若 `SessionStart` 早于会话落盘,后续生命周期和活动事件会重新查找。只有唯一且与会话 ID 匹配的目录才会被接受;恢复仍使用 ID。空值、相对路径、字面量 `~`、重复目录,或超过 256 个工作目录条目的查找会省略路径,保留正常状态上报。Windows 同样补报目录,活动更新仍依靠轮询。请重新安装 Kimi 集成以更新脚本。
+
 Herdr 默认使用 `~/.kimi-code`,设置了 `KIMI_CODE_HOME` 时使用后者。Kimi Code 配置目录必须已经存在。安装会写入 `hooks/herdr-agent-state.sh`,并在 `config.toml` 中追加 Herdr 管理的 `[[hooks]]` 条目。卸载会移除 Herdr 管理的配置块并删除钩子脚本。
 
 Herdr 用 `kimi --session <id>` 恢复保存的 Kimi 会话。
