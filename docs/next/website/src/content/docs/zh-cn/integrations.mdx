@@ -157,6 +157,12 @@ Herdr 默认使用 `~/.codex`,设置了 `CODEX_HOME` 时使用后者。Codex 配
 
 会话钩子会随会话 ID 转发 Codex 的转录路径,上报后活动发现即可跟随仅在该窗格设置的 `CODEX_HOME`。请在同一配置目录安装集成,并重启 Codex 加载更新后的钩子。恢复仍使用会话 ID。路径布局与压缩转录限制见[智能体活动](/zh-cn/socket-api/#智能体活动)。
 
+Herdr 通过窗格内的启动器执行受管 Codex 启动和会话恢复。对交互启动、`resume` 和 `fork`，启动器根据窗格当前 `PATH` 选择可执行文件，通过 `--help` 确认完整的 `--no-daemon` 参数后才添加它。Codex 0.157 默认共享 daemon；前台模式让钩子保持在当前窗格的进程树中，避免复用另一窗格的环境。保存的恢复命令仍是原始 `codex resume <id>`。Herdr 不修改 Codex 配置，也不停止已有 daemon。
+
+新窗格还会在 `PATH` 最前面加入私有的原生 `codex` shim；通过该路径找到的普通 `codex` 命令使用同一启动器。登录脚本、nvm/mise 初始化、alias、shell 函数、绝对可执行路径以及外部包装器可能绕过它；这些场景请对支持该参数的 Codex 显式使用 `--no-daemon`。Herdr 不编辑 shell 启动文件。为避免包装器递归，启动器会从实际启动进程的 `PATH` 中移除自己的 shim 目录；Codex 内的子命令使用剩余的原始路径。
+
+非交互子命令（包括 `exec`、`review`、`app-server`、`mcp-server`、`login`、`agents`、`queue`）、显式 `--remote` 和已有的 `--no-daemon` 都原样传递。未知选项也保守地原样传递。子命令清单以 Codex 0.157 为准，包含隐藏命令和别名。未来新增的裸命令名可能无法与单词提示词区分；Herdr 尚未适配该命令时，请通过真实 Codex 可执行文件路径调用。不支持该参数的旧版程序保持原样。能力探测最多两秒，标准输出与错误输出合计上限 64 KiB；探测失败时，Herdr 提示前台隔离能力未知，并且只启动一次原始命令。Codex 启动失败后不会自动重试。在 Herdr 窗格外不会添加参数。此启动器不会为脱离窗格或远端 Codex 的钩子赋予可信的窗格归属。
+
 ## Kimi Code CLI
 
 安装 Kimi Code CLI 钩子:

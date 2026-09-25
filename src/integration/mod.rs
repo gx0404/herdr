@@ -1,5 +1,6 @@
 mod actions;
 mod claude_settings;
+pub(crate) mod codex_launch;
 mod codex_trust;
 mod command;
 mod config_edit;

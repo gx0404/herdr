@@ -211,7 +211,9 @@ impl App {
 
         let mut argv = vec![crate::detect::interactive_agent_executable(kind).to_string()];
         argv.extend(params.args);
-        let command = crate::platform::interactive_shell_command(&argv, &shell_name)
+        let execution_argv = crate::integration::codex_launch::managed_argv(&argv)
+            .map_err(|_| AgentStartError::InvalidArgument)?;
+        let command = crate::platform::interactive_shell_command(&execution_argv, &shell_name)
             .ok_or(AgentStartError::InvalidArgument)?;
         let bytes = crate::app::api_helpers::encode_api_submission(runtime, &command);
         let timeout = Duration::from_millis(

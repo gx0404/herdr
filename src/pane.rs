@@ -308,6 +308,7 @@ fn apply_pane_launch_env(cmd: &mut CommandBuilder, launch_env: &PaneLaunchEnv) {
             cmd.env_remove(crate::integration::HERDR_PANE_ID_ENV_VAR);
         }
     }
+    crate::integration::codex_launch::apply_pane_env(cmd);
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1684,7 +1685,7 @@ fn truncate_handoff_history(history: String, max_bytes: usize) -> String {
     history[start..].to_owned()
 }
 
-fn pane_shell(configured_shell: &str) -> String {
+pub(crate) fn pane_shell(configured_shell: &str) -> String {
     pane_shell_from(configured_shell, std::env::var("SHELL").ok())
 }
 

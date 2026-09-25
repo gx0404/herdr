@@ -101,7 +101,10 @@ pub(crate) fn command_available(command: &str) -> bool {
     std::env::split_paths(&paths).any(|dir| {
         command_path_candidates(&dir, command)
             .into_iter()
-            .any(|path| executable_file_exists(&path))
+            .any(|path| {
+                executable_file_exists(&path)
+                    && (command != "codex" || !crate::platform::codex_launch::is_shim(&path))
+            })
     })
 }
 

@@ -640,6 +640,11 @@ fn ssh_askpass_prompt_args(args: impl IntoIterator<Item = std::ffi::OsString>) -
 }
 
 fn main() -> io::Result<()> {
+    if let Some(result) =
+        integration::codex_launch::dispatch(&std::env::args_os().collect::<Vec<_>>())
+    {
+        return result;
+    }
     // ssh re-executes this binary as its SSH_ASKPASS helper for approved
     // interactive machine authentication; route to the helper before any
     // ordinary CLI parsing.

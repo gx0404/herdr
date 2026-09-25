@@ -155,6 +155,12 @@ Herdr uses `~/.codex` by default, or `CODEX_HOME` when set. The Codex config dir
 
 The session hook forwards Codex’s transcript path along with the session ID. This lets activity discovery follow a `CODEX_HOME` set only in that pane after the hook reports; install the integration into that same config directory and restart Codex to load the updated hook. Resume still uses the session ID. See [Agent activity](/socket-api/#agent-activity) for path layout and compressed-rollout limits.
 
+Herdr starts managed Codex sessions and restored Codex sessions through a pane-local launcher. For interactive starts, `resume`, and `fork`, it checks the executable selected by the pane's current `PATH` with `--help` and adds `--no-daemon` only when that exact flag is supported. Codex 0.157 normally shares a daemon; foreground mode keeps hooks under the current pane's process tree and avoids reusing another pane's environment. Saved restore commands keep the original `codex resume <id>` form. Herdr does not change Codex configuration or stop existing daemons.
+
+New panes also prepend a private native `codex` shim to `PATH`. Ordinary `codex` commands found through that path use the same launcher. Login scripts, nvm/mise setup, aliases, shell functions, absolute executable paths, and external wrappers can bypass it; use an explicit `--no-daemon` with supported Codex versions in those cases. Herdr does not edit shell startup files. The launcher removes its own shim directories from the launched process's `PATH` to avoid wrapper recursion; child commands inside Codex use the remaining original path.
+
+Noninteractive subcommands (including `exec`, `review`, `app-server`, `mcp-server`, `login`, `agents`, and `queue`), explicit `--remote`, and an existing `--no-daemon` pass through unchanged. Unknown options also pass through conservatively. The command list follows Codex 0.157, including hidden commands and aliases. A future bare command name can be indistinguishable from a one-word prompt; invoke it through the real Codex executable path until Herdr supports that command. Older executables without the flag run unchanged. The capability probe has a two-second timeout and a combined 64 KiB output limit; if it fails, Herdr reports that foreground isolation is unknown and launches the original command once. It never retries a failed Codex launch. Outside a Herdr pane it does not add arguments. Detached or remote Codex hooks do not gain a trusted pane association from this launcher.
+
 ## Kimi Code CLI
 
 Install the Kimi Code CLI hook:

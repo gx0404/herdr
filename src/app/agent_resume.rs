@@ -238,7 +238,8 @@ impl App {
             return false;
         }
 
-        let Some(resume_command) = shell_command_from_argv(&plan.argv) else {
+        let Some(resume_command) = resume_shell_command(&plan.argv, &self.state.default_shell)
+        else {
             tracing::warn!(
                 pane = pane_id.raw(),
                 terminal = %terminal_id,
@@ -351,6 +352,17 @@ fn stable_terminal_inner_rect(pane_inner: Rect) -> Rect {
         pane_inner.width.saturating_sub(1),
         pane_inner.height,
     )
+}
+
+fn resume_shell_command(argv: &[String], configured_shell: &str) -> Option<String> {
+    if argv.first().is_some_and(|program| program == "codex") {
+        let execution = crate::integration::codex_launch::managed_argv(argv).ok()?;
+        return crate::platform::interactive_shell_command(
+            &execution,
+            &crate::pane::pane_shell(configured_shell),
+        );
+    }
+    shell_command_from_argv(argv)
 }
 
 fn shell_command_from_argv(argv: &[String]) -> Option<String> {
@@ -951,6 +963,22 @@ mod tests {
         for (_, runtime) in app.terminal_runtimes.drain() {
             runtime.shutdown();
         }
+    }
+
+    #[test]
+    fn codex_resume_shell_command_uses_launcher_without_changing_plan() {
+        let argv = vec![
+            "codex".into(),
+            "resume".into(),
+            "session with ' quote".into(),
+        ];
+        let command = resume_shell_command(&argv, "bash").unwrap();
+        assert!(command.contains(crate::integration::codex_launch::ENTRY));
+        assert_eq!(argv, ["codex", "resume", "session with ' quote"]);
+        assert!(
+            !command.contains("--no-daemon"),
+            "capability probe happens in the pane"
+        );
     }
 
     #[test]
