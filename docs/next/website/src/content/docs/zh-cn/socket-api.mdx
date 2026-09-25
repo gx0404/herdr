@@ -161,6 +161,10 @@ CLI 的 `herdr api snapshot` 会把当前 `session.snapshot` 响应输出为 JSO
 
 `pane.process_info` 返回窗格的 shell pid、可用时的前台进程组 id,以及平台暴露时带有 pid、名称、argv/cmdline 和 cwd 的前台进程。argv/cmdline 里疑似凭据的值会替换成 `[REDACTED]`:`--token`、`--api-key` 等选项的值,`Authorization:` 等敏感请求头(保留 `Bearer`/`Basic` 等认证方案名),`Bearer` 令牌,`*_KEY=`、`*_TOKEN=` 这类赋值,以及 URL 里的口令与凭据类查询参数。http(s) URL 里不带口令的用户信息通常就是令牌,会整段打码(`https://user@bitbucket.org/…` 显示为 `https://[REDACTED]@bitbucket.org/…`);`ssh://git@…` 等其它协议保留用户名。curl 的 `-u 名:口令` 这类写法只打口令部分。程序名与参数结构保持原样,调用方仍能看出在运行什么。
 
+同一过滤还覆盖 `--creds`、shell 请求头中的转义空格、PowerShell 请求头带空格的赋值，以及 Git `http.extraHeader` 中的认证值。进程把程序名改写成整条命令行时，`argv0`、`argv` 与 `cmdline` 中符合凭据形态的参数都会打码；普通可执行文件路径（包括带空格的路径）保持不变。
+
+对于 curl 与 curlie，明确的数据和 JSON 选项还会过滤表单及嵌套 JSON 中的凭据字段，保留非敏感字段。正文超过 64 KiB、JSON 深度超过 16 层或格式不完整时整体遮蔽；绝不读取 `@file` 引用。`--data-raw` 与 `--form-string` 中字面的 `@` 值仍会过滤；multipart 表单和 URL 编码选项按单个 `name=value` 处理，不把值内的 `&` 拆成其它字段。绝对与相对 URL 的查询及 fragment 参数都会处理，包括 OAuth 的 `code`；普通 `--code` 命令选项保持不变。这是诊断输出过滤，不保证任意终端原文都不含秘密；窗格原文读取、布局导出与会话恢复数据保持已有行为。
+
 `layout.export` 返回可移植的标签页布局树。省略 `tab_id` 和 `pane_id` 导出活动标签页,传 `tab_id` 导出该标签页,或传 `pane_id` 导出包含该窗格的标签页。
 
 ```json

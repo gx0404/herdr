@@ -218,6 +218,10 @@ keep the user name. For curl-style `-u name:password` options only the
 password part is redacted. The program name and argument layout are kept, so
 callers can still tell what is running.
 
+The same filtering covers `--creds`, escaped spaces in shell headers, spaced PowerShell header assignments, and Git `http.extraHeader` authorization values. If a process rewrites its program name into a full command line, credential-shaped arguments are filtered in `argv0`, `argv`, and `cmdline`; ordinary executable paths, including paths with spaces, stay unchanged.
+
+For curl and curlie, explicit data and JSON options also filter credential-named form fields and nested JSON fields. Non-sensitive fields remain visible. Bodies larger than 64 KiB, JSON deeper than 16 levels, or malformed JSON are hidden as a whole; `@file` references are never read. Literal `@` values in `--data-raw` and `--form-string` are still filtered; multipart form and URL-encoded options keep each `name=value` intact rather than splitting `&` inside the value. Query and fragment parameters are filtered in absolute and relative URLs, including OAuth `code`; ordinary command options named `--code` are unchanged. This is diagnostic-output filtering, not a guarantee that arbitrary terminal text contains no secrets. Raw pane reads, layout exports and session restore data keep their existing behavior.
+
 `layout.export` returns a portable tab layout tree. Omit `tab_id` and `pane_id`
 to export the active tab, pass `tab_id` to export that tab, or pass `pane_id` to
 export the tab containing that pane.

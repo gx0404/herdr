@@ -21,8 +21,10 @@
 //!   URL 的 userinfo 只有令牌时整段（`https://TOKEN@host`，`ssh://git@` 保留）；
 //! - 整段命令行形态的参数（`sh -c '…'`）按以上规则递归处理，`;`、`&&`、`|` 两侧
 //!   不带空格也分得开。
+//! - curl/curlie 的明确请求体选项：表单凭据字段与嵌套 JSON；URL 查询与 fragment
+//!   也接受相对 URL，OAuth `code` 只在这些 URL 参数里视为凭据。
 //!
-//! 只认形态、不认程序：`-p<口令>` 这类短选项的含义随程序而异，不在覆盖范围内。
+//! 按凭据形态与已知程序选项判断；`-p<口令>` 这类语义不明的短选项不在覆盖范围内。
 
 /// 打码后的占位值。
 const REDACTED: &str = "[REDACTED]";
@@ -53,8 +55,8 @@ const CREDENTIAL_SUFFIXES: [&str; 15] = [
 
 /// 这些词要独立成词（整个名字，或前面是 `_`）才算凭据：`--api-key`、`DB_PASS`、
 /// `--auth` 算，`MONKEY`、`--bypass` 不算。
-const CREDENTIAL_WORDS: [&str; 8] = [
-    "key", "pass", "auth", "sig", "pw", "jwt", "passin", "passout",
+const CREDENTIAL_WORDS: [&str; 9] = [
+    "key", "pass", "auth", "sig", "pw", "jwt", "passin", "passout", "creds",
 ];
 
 /// 这些词只在前面是 `_` 时才算：`MYSQL_PWD` 算，当前目录 `PWD`、`OLDPWD` 不算。
@@ -93,13 +95,25 @@ const USER_PASSWORD_RULES: [UserPasswordRule; 3] = [
     },
 ];
 
-/// 前台进程的 argv 与 cmdline 打码。argv[0]（程序本身）原样保留。
+/// 通常的程序路径原样保留；setproctitle 等把整条命令写入 argv[0] 时，处理其中参数。
+pub(super) fn redact_program(program: &str) -> String {
+    if program.contains(char::is_whitespace) {
+        redact_line(program, 1, 0, Quotes::Windows)
+    } else {
+        program.to_owned()
+    }
+}
+
+/// 前台进程的 argv 与 cmdline 打码，包括被改写成整条命令的 argv[0]。
 pub(super) fn redact_command(
     argv: Option<Vec<String>>,
     cmdline: Option<String>,
 ) -> (Option<Vec<String>>, Option<String>) {
     let redacted_argv = argv.as_deref().map(|argv| {
         let mut words = argv.to_vec();
+        if let Some(program) = words.first_mut() {
+            *program = redact_program(program);
+        }
         redact_words(&mut words, 1, 0);
         words
     });
@@ -132,6 +146,16 @@ enum Pending {
     /// 上一个词是 `Bearer`，或值被 shell 拆到后面去的敏感头名（`Authorization:`）：
     /// 当前词若是认证方案名就保留、接着等下一个，否则它就是凭据本身。
     Credential,
+    /// curl 明确指定的请求体参数；不读取 `@file` 引用。
+    Body(BodyKind),
+}
+
+#[derive(Clone, Copy)]
+enum BodyKind {
+    Data { raw: bool },
+    UrlEncoded,
+    Form { literal: bool },
+    Json,
 }
 
 /// 从下标 `first` 起逐词打码，原位替换。`words` 是一条命令。
@@ -176,6 +200,9 @@ fn redact_word(
     depth: usize,
     user_password: Option<&UserPasswordRule>,
 ) -> (Option<String>, Pending) {
+    if let Pending::Body(kind) = pending {
+        return (redact_body(word, kind), Pending::None);
+    }
     // 值的位置上出现选项，说明前一个词只是开关：约定作废，按选项处理。等着凭据时，
     // 以 `-` 开头的随机串（`--token -Xk9…`）仍是值。
     let awaits_secret = matches!(pending, Pending::Value | Pending::Credential);
@@ -191,7 +218,7 @@ fn redact_word(
         Pending::Credential if is_auth_scheme(word) => return (None, Pending::Credential),
         Pending::Credential => return (redacted_secret_word(word), Pending::None),
         Pending::Assignment if word == "=" => return (None, Pending::Value),
-        Pending::Assignment | Pending::None => {}
+        Pending::Assignment | Pending::None | Pending::Body(_) => {}
     }
     // 带空白的参数是一段命令行（`sh -c 'TOKEN=… codex'`、`pwsh -Command '…'`），不能
     // 整个当成一个赋值或请求头：逐词再过一遍。
@@ -208,20 +235,16 @@ fn redact_word(
     if let Some((name, key, value)) = split_assignment(word) {
         return redact_assignment(name, key, value, depth);
     }
-    // PowerShell 带空格的赋值：`$env:GH_TOKEN = '…'`。
-    if word
-        .get(..5)
-        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("$env:"))
-        && is_credential_name(&word[5..])
-    {
-        return (None, Pending::Assignment);
-    }
     // httpie / xh 的请求头是位置参数：`Authorization:Bearer …`、`x-api-key:…`。
     if is_positional_header(word) {
         return redact_header(word, depth);
     }
     if word.eq_ignore_ascii_case("bearer") || ends_with_sensitive_header_name(word) {
         return (None, Pending::Credential);
+    }
+    // PowerShell 环境或哈希表带空格的赋值；只有后续真出现 `=` 才消费值。
+    if assignment_name(word).is_some_and(is_credential_name) {
+        return (None, Pending::Assignment);
     }
     (redact_text(word, depth), Pending::None)
 }
@@ -247,6 +270,28 @@ fn redact_option(
 ) -> (Option<String>, Pending) {
     if word == "--" {
         return (None, Pending::None);
+    }
+    let curl = user_password.is_some_and(|rule| rule.programs.contains(&"curl"));
+    if curl {
+        if let Some(kind) = body_option(word) {
+            return (None, Pending::Body(kind));
+        }
+        for prefix in ["-d", "-F"] {
+            if let Some(body) = word.strip_prefix(prefix) {
+                return (
+                    redact_body(
+                        body,
+                        if prefix == "-F" {
+                            BodyKind::Form { literal: false }
+                        } else {
+                            BodyKind::Data { raw: false }
+                        },
+                    )
+                    .map(|body| format!("{prefix}{body}")),
+                    Pending::None,
+                );
+            }
+        }
     }
     if word == "-H" || word == "--header" {
         return (None, Pending::Header);
@@ -281,6 +326,14 @@ fn redact_option(
         Some(index) => {
             let (name, rest) = word.split_at(index);
             let (separator, value) = rest.split_at(1);
+            if curl && separator == "=" {
+                if let Some(kind) = body_option(name) {
+                    return (
+                        redact_body(value, kind).map(|body| format!("{name}={body}")),
+                        Pending::None,
+                    );
+                }
+            }
             if name == "--header" && separator == "=" {
                 let (redacted, next) = redact_header(value, depth);
                 return (redacted.map(|header| format!("--header={header}")), next);
@@ -293,6 +346,119 @@ fn redact_option(
         None if is_credential_name(word) => (None, Pending::Value),
         None => (None, Pending::None),
     }
+}
+
+fn body_option(option: &str) -> Option<BodyKind> {
+    match option {
+        "--json" => Some(BodyKind::Json),
+        "--data" | "--data-ascii" | "--data-binary" | "-d" => Some(BodyKind::Data { raw: false }),
+        "--data-raw" => Some(BodyKind::Data { raw: true }),
+        "--data-urlencode" => Some(BodyKind::UrlEncoded),
+        "--form" | "-F" => Some(BodyKind::Form { literal: false }),
+        "--form-string" => Some(BodyKind::Form { literal: true }),
+        _ => None,
+    }
+}
+
+/// 只解析 curl 的明确请求体；超过 64 KiB、JSON 深度超过 16 或 JSON 不完整时
+/// 整体遮蔽。文件引用只保留路径，绝不读取文件或尝试展开 shell。
+fn redact_body(body: &str, kind: BodyKind) -> Option<String> {
+    if body.is_empty() {
+        return None;
+    }
+    // curl 官方语义：data-raw/form-string 的 @ 是字面；form 的 name=@file/<file
+    // 与 urlencode 的 name@file 才是文件。单字段内容里的 & 不是字段分隔符。
+    let single_field = match kind {
+        BodyKind::Json | BodyKind::Data { raw: false } if body.starts_with('@') => return None,
+        BodyKind::Form { literal } => {
+            let (name, value) = body.split_once('=')?;
+            if !literal && value.starts_with(['@', '<']) {
+                return None;
+            }
+            Some((name, value))
+        }
+        BodyKind::UrlEncoded => {
+            // 无 = 时是 name@file/@file 或无字段名内容；不打开文件，也不猜字段名。
+            let (name, value) = body.split_once('=')?;
+            Some((name, value))
+        }
+        _ => None,
+    };
+    if body.len() > 65_536 {
+        return Some(REDACTED.into());
+    }
+    if let Some((name, value)) = single_field {
+        return if is_credential_name(name) && !value.is_empty() {
+            Some(format!("{name}={REDACTED}"))
+        } else {
+            // 非凭据字段仍可能携带重定向 URL；保留单字段的 & 语义。
+            redact_urls(value).map(|value| format!("{name}={value}"))
+        };
+    }
+    if matches!(kind, BodyKind::Json) || body.trim_start().starts_with(['{', '[']) {
+        let Ok(mut value) = serde_json::from_str::<serde_json::Value>(body) else {
+            return Some(REDACTED.into());
+        };
+        return match redact_json_value(&mut value, 0) {
+            Ok(false) => None,
+            Ok(true) => Some(serde_json::to_string(&value).unwrap_or_else(|_| REDACTED.into())),
+            Err(()) => Some(REDACTED.into()),
+        };
+    }
+    let params = redact_params(body, false);
+    redact_urls(params.as_deref().unwrap_or(body)).or(params)
+}
+
+fn redact_json_value(value: &mut serde_json::Value, depth: usize) -> Result<bool, ()> {
+    if depth > 16 {
+        return Err(());
+    }
+    let mut changed = false;
+    match value {
+        serde_json::Value::Object(fields) => {
+            for (key, value) in fields {
+                if is_credential_name(key) && !value.is_null() {
+                    *value = serde_json::Value::String(REDACTED.into());
+                    changed = true;
+                } else {
+                    changed |= redact_json_value(value, depth + 1)?;
+                }
+            }
+        }
+        serde_json::Value::Array(values) => {
+            for value in values {
+                changed |= redact_json_value(value, depth + 1)?;
+            }
+        }
+        serde_json::Value::String(text) => {
+            if let Some(redacted) = redact_urls(text) {
+                *text = redacted;
+                changed = true;
+            }
+        }
+        _ => {}
+    }
+    Ok(changed)
+}
+
+/// 表单与 URL 参数共用凭据键规则；OAuth code 仅在 URL 参数中视为凭据。
+fn redact_params(params: &str, url: bool) -> Option<String> {
+    let mut changed = false;
+    let params = params
+        .split('&')
+        .map(|param| match param.split_once('=') {
+            Some((name, value))
+                if !value.is_empty()
+                    && (is_credential_name(name) || (url && name.eq_ignore_ascii_case("code"))) =>
+            {
+                changed = true;
+                let (_, tail) = split_closing(value);
+                format!("{name}={REDACTED}{tail}")
+            }
+            _ => param.to_owned(),
+        })
+        .collect::<Vec<_>>();
+    changed.then(|| params.join("&"))
 }
 
 /// 选项或开关与值写在一起（`--token=…`、`-Token:…`、`/p:Password=…`）：凭据类
@@ -404,12 +570,16 @@ fn is_positional_header(word: &str) -> bool {
 /// 返回（用来判断的名字，原样的键，值）；URL 查询串这类键尾不是名字的不算。
 fn split_assignment(word: &str) -> Option<(&str, &str, &str)> {
     let (key, value) = word.split_once('=')?;
+    Some((assignment_name(key)?, key, value))
+}
+
+fn assignment_name(key: &str) -> Option<&str> {
     let name = key.rsplit([':', '/', '.', '{', '$', '@']).next()?;
     let mut chars = name.chars();
     let first = chars.next()?;
     ((first.is_ascii_alphabetic() || first == '_')
         && chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-')))
-    .then_some((name, key, value))
+    .then_some(name)
 }
 
 fn redact_assignment(
@@ -419,6 +589,10 @@ fn redact_assignment(
     depth: usize,
 ) -> (Option<String>, Pending) {
     if !is_credential_name(name) {
+        if is_positional_header(value) {
+            let (redacted, pending) = redact_header(value, depth);
+            return (redacted.map(|value| format!("{key}={value}")), pending);
+        }
         return (
             redact_text(value, depth).map(|value| format!("{key}={value}")),
             Pending::None,
@@ -509,32 +683,30 @@ fn redact_url_passwords(text: &str) -> Option<String> {
     changed.then_some(redacted)
 }
 
-/// 第一个 URL 的查询串里，名字像凭据的参数值打码（`?api_key=…&page=2`）。
+/// 查询与 fragment 参数均可能携带 OAuth 凭据；相对 URL 也处理，不要求 scheme。
 fn redact_url_query(text: &str) -> Option<String> {
-    let scheme = text.find("://")?;
-    let query_start = scheme + text[scheme..].find('?')? + 1;
-    let query_end = text[query_start..]
-        .find(|c: char| c == '#' || c.is_whitespace())
-        .map_or(text.len(), |len| query_start + len);
+    let mut output = String::with_capacity(text.len());
+    let mut rest = text;
     let mut changed = false;
-    let params: Vec<String> = text[query_start..query_end]
-        .split('&')
-        .map(|param| match param.split_once('=') {
-            Some((name, value)) if !value.is_empty() && is_credential_name(name) => {
-                changed = true;
-                format!("{name}={REDACTED}")
-            }
-            _ => param.to_owned(),
-        })
-        .collect();
-    changed.then(|| {
-        format!(
-            "{}{}{}",
-            &text[..query_start],
-            params.join("&"),
-            &text[query_end..]
-        )
-    })
+    while let Some(marker) = rest.find(['?', '#']) {
+        let fragment = rest.as_bytes()[marker] == b'#';
+        output.push_str(&rest[..=marker]);
+        rest = &rest[marker + 1..];
+        // 只有首个 ? 引入 query；其后的 ? 属于值。fragment 里的 ?/# 也属于值。
+        let end = rest
+            .find(|ch: char| (!fragment && ch == '#') || ch.is_whitespace())
+            .unwrap_or(rest.len());
+        let params = &rest[..end];
+        if let Some(redacted) = redact_params(params, true) {
+            output.push_str(&redacted);
+            changed = true;
+        } else {
+            output.push_str(params);
+        }
+        rest = &rest[end..];
+    }
+    output.push_str(rest);
+    changed.then_some(output)
 }
 
 /// 名字像凭据：选项名（去掉前导 `-`）、环境变量名、URL 查询参数名、请求头名。
@@ -617,14 +789,15 @@ struct Word {
     starts_command: bool,
 }
 
-/// 按空白切词：引号里的空白不切、引号本身去掉；反斜杠按字面处理（Windows 路径里
-/// 到处是反斜杠）。只用来找出要打码的词，不求还原 shell 语义。
+/// 按空白切词：引号里的空白不切。Shell 模式识别引号外的反斜杠转义空白，Windows
+/// 原始行仍保留反斜杠（路径里到处都有）。只寻找打码词，不执行或展开 shell。
 fn split_words(line: &str, quotes: Quotes) -> Vec<Word> {
     let mut words = Vec::new();
     let mut current: Option<Word> = None;
     let mut open_quote: Option<char> = None;
     let mut next_starts_command = true;
-    for (index, ch) in line.char_indices() {
+    let mut chars = line.char_indices().peekable();
+    while let Some((index, ch)) = chars.next() {
         if open_quote.is_none() {
             // 命令分隔符不进任何词：原文里留在词与词之间，打码时原样保留。
             if quotes.separates_commands(ch) {
@@ -645,6 +818,16 @@ fn split_words(line: &str, quotes: Quotes) -> Vec<Word> {
             starts_command: std::mem::take(&mut next_starts_command),
         });
         word.span.end = index + ch.len_utf8();
+        if ch == '\\' && matches!(quotes, Quotes::Shell) && open_quote.is_none() {
+            if let Some(&(escaped_at, escaped)) = chars.peek().filter(|(_, ch)| ch.is_whitespace())
+            {
+                chars.next();
+                word.offsets.push((word.text.len(), escaped_at));
+                word.text.push(escaped);
+                word.span.end = escaped_at + escaped.len_utf8();
+                continue;
+            }
+        }
         match open_quote {
             Some(quote) if ch == quote => open_quote = None,
             None if quotes.opens(ch) => {
@@ -774,6 +957,244 @@ mod tests {
             !expected.join(" ").contains("s3cr3t"),
             "expected output itself leaks a sample secret"
         );
+    }
+
+    #[test]
+    fn rl12_body_fields_keep_url_redaction() {
+        for option in [
+            "--data",
+            "--data-raw",
+            "--data-urlencode",
+            "--form",
+            "--form-string",
+        ] {
+            for (body, expected) in [
+                (
+                    "redirect=https://example.test/?access_token=s3cr3t-url",
+                    "redirect=https://example.test/?access_token=[REDACTED]",
+                ),
+                (
+                    "redirect=https://user:s3cr3t-pass@example.test/",
+                    "redirect=https://user:[REDACTED]@example.test/",
+                ),
+            ] {
+                assert_redacted(&["curl", option, body], &["curl", option, expected]);
+            }
+        }
+    }
+
+    #[test]
+    fn rl12_question_marks_inside_url_secrets_remain_secret() {
+        for (url, expected) in [
+            (
+                "https://example.test/?token=first?s3cr3t-tail&keep=yes",
+                "https://example.test/?token=[REDACTED]&keep=yes",
+            ),
+            (
+                "https://example.test/#token=first?s3cr3t-tail&keep=yes",
+                "https://example.test/#token=[REDACTED]&keep=yes",
+            ),
+            (
+                "https://example.test/?token=first?s3cr3t-tail#access_token=next?s3cr3t-other",
+                "https://example.test/?token=[REDACTED]#access_token=[REDACTED]",
+            ),
+        ] {
+            assert_redacted(&["curl", url], &["curl", expected]);
+        }
+    }
+
+    #[test]
+    fn rl12_curl_literal_bodies_and_file_references_are_distinct() {
+        assert_redacted(
+            &[
+                "curl",
+                "--data-raw",
+                "@prefix=x&password=s3cr3t-raw&name=keep",
+            ],
+            &[
+                "curl",
+                "--data-raw",
+                "@prefix=x&password=[REDACTED]&name=keep",
+            ],
+        );
+        assert_redacted(
+            &[
+                "curl",
+                "--form-string",
+                "password=@s3cr3t-literal&still-secret",
+            ],
+            &["curl", "--form-string", "password=[REDACTED]"],
+        );
+        assert_redacted(
+            &[
+                "curl",
+                "--data-urlencode",
+                "password=s3cr3t-encoded&still-secret",
+            ],
+            &["curl", "--data-urlencode", "password=[REDACTED]"],
+        );
+        for input in [
+            words(&["curl", "--form", "token=@/not-a-real-file/body"]),
+            words(&["curl", "-F", "token=</not-a-real-file/body"]),
+            words(&["curl", "--data-urlencode", "token@/not-a-real-file/body"]),
+            words(&["curl", "--json", "@/not-a-real-file/body"]),
+            words(&["curl", "--data", "@/not-a-real-file/body"]),
+        ] {
+            assert_eq!(
+                redact_command(Some(input.clone()), None),
+                (Some(input), None)
+            );
+        }
+    }
+
+    #[test]
+    fn rl12_single_field_options_do_not_split_literal_ampersands() {
+        for option in ["--form-string", "--data-urlencode"] {
+            let input = words(&["curl", option, "message=keep&password=is-part-of-message"]);
+            assert_eq!(
+                redact_command(Some(input.clone()), None),
+                (Some(input), None)
+            );
+        }
+    }
+
+    #[test]
+    fn rl12_url_query_and_fragment_forms_do_not_leak() {
+        for url in [
+            "example.test/path?api_key=s3cr3t-url&page=2",
+            "https://example.test/#access_token=s3cr3t-fragment&state=keep",
+            "https://example.test/callback?code=s3cr3t-oauth&state=keep",
+            "https://example.test/?api_key=s3cr3t-one#access_token=s3cr3t-two",
+        ] {
+            let (argv, line) = redact_command(Some(words(&["curl", url])), None);
+            let argv = argv.expect("argv");
+            assert!(!argv[1].contains("s3cr3t"), "{argv:?}");
+            assert!(argv[1].contains(REDACTED));
+            assert!(line.is_none());
+        }
+        assert_redacted(
+            &[
+                "build",
+                "--code",
+                "ordinary",
+                "https://example.test/#heading",
+            ],
+            &[
+                "build",
+                "--code",
+                "ordinary",
+                "https://example.test/#heading",
+            ],
+        );
+    }
+
+    #[test]
+    fn rl12_explicit_form_and_json_bodies_do_not_leak() {
+        for input in [
+            words(&["curl", "--data", "user=keep&password=s3cr3t-form"]),
+            words(&["curl", "-dpassword=s3cr3t-form&name=keep"]),
+            words(&["curl", "--data=user=keep&password=s3cr3t-form"]),
+            words(&[
+                "curl",
+                "--json",
+                r#"{"nested":[{"api_key":"s3cr3t-json"}],"name":"keep"}"#,
+            ]),
+            words(&["curl", r#"--json={"password":"s3cr3t-json","name":"keep"}"#]),
+            words(&[
+                "sh",
+                "-c",
+                r#"curl --json '{"api_key":"s3cr3t-json","name":"keep"}'"#,
+            ]),
+        ] {
+            let (argv, line) = redact_command(Some(input.clone()), Some(input.join(" ")));
+            assert!(
+                !argv.expect("argv").join(" ").contains("s3cr3t"),
+                "{input:?}"
+            );
+            let line = line.expect("cmdline");
+            assert!(!line.contains("s3cr3t"), "{input:?}");
+            assert!(line.contains("keep"), "非敏感字段仍可诊断：{line}");
+        }
+    }
+
+    #[test]
+    fn rl12_body_limits_fail_closed_without_reading_files_or_rewriting_other_options() {
+        for body in [
+            r#"{"api_key":"s3cr3t-incomplete"#.to_owned(),
+            format!("{{\"padding\":\"{}s3cr3t-large\"}}", "x".repeat(65_536)),
+            format!("{}\"s3cr3t-deep\"{}", "[".repeat(100), "]".repeat(100)),
+        ] {
+            let (argv, _) = redact_command(Some(words(&["curl", "--json", &body])), None);
+            assert_eq!(argv.expect("argv")[2], REDACTED);
+        }
+        let input = words(&[
+            "curl",
+            "--data",
+            "@/not-a-real-file/body.json",
+            "--output",
+            "ordinary",
+        ]);
+        assert_eq!(
+            redact_command(Some(input.clone()), None),
+            (Some(input), None)
+        );
+    }
+
+    #[test]
+    fn rl12_common_argument_forms_do_not_leak() {
+        for input in [
+            words(&["client", "--creds", "s3cr3t-basic"]),
+            words(&["sh", "-c", r"curl -H Authorization:\ Basic\ s3cr3t-header"]),
+            words(&[
+                "pwsh",
+                "-Command",
+                "Invoke-WebRequest -Headers @{Authorization = 'Basic s3cr3t-ps'}",
+            ]),
+            words(&[
+                "git",
+                "-c",
+                "http.extraHeader=AUTHORIZATION:basic s3cr3t-git",
+                "fetch",
+            ]),
+            words(&["worker --token s3cr3t-title"]),
+        ] {
+            let (argv, cmdline) = redact_command(Some(input.clone()), Some(input.join(" ")));
+            assert!(
+                !argv.expect("argv").join(" ").contains("s3cr3t"),
+                "argv leak: {input:?}"
+            );
+            assert!(
+                !cmdline.expect("cmdline").contains("s3cr3t"),
+                "cmdline leak: {input:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn rl12_argument_fixes_preserve_non_secret_values_and_scheme() {
+        assert_redacted(
+            &[
+                "git",
+                "-c",
+                "http.extraHeader=AUTHORIZATION:basic s3cr3t-git",
+                "fetch",
+            ],
+            &[
+                "git",
+                "-c",
+                "http.extraHeader=AUTHORIZATION:basic [REDACTED]",
+                "fetch",
+            ],
+        );
+        for input in [
+            words(&[r"C:\Program Files\O'Brien\client.exe", "--name", "ordinary"]),
+            words(&["pwsh", "-Command", "Write-Output Authorization ordinary"]),
+        ] {
+            assert_eq!(
+                redact_command(Some(input.clone()), Some(input.join(" "))),
+                (Some(input.clone()), Some(input.join(" ")))
+            );
+        }
     }
 
     #[test]

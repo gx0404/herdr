@@ -572,7 +572,9 @@ impl App {
                         PaneProcessInfoProcess {
                             pid: process.pid,
                             name: process.name,
-                            argv0: process.argv0,
+                            argv0: process
+                                .argv0
+                                .map(|program| super::process_redaction::redact_program(&program)),
                             argv,
                             cmdline,
                             cwd: crate::platform::process_cwd(process.pid)
