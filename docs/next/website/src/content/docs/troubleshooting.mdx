@@ -29,6 +29,10 @@ host_cursor = "native"
 
 Native mode restores the IME anchor but may reintroduce occasional cursor movement artifacts during active output. Return to the visually stable cursor with `host_cursor = "drawn"`, or remove the setting to use the Windows default. See [Windows support](/docs/windows-beta/) for the current limitation.
 
+## TUI attach fails on Windows with os error 231
+
+On older Windows builds, attaching the TUI always failed with `failed to connect to server: 所有的管道范例都在使用中 (os error 231)`. After writing its handshake, the client switched the named pipe to nonblocking mode, which Windows rejects with `ERROR_PIPE_BUSY` before the server's welcome message arrives. Current builds poll the pipe instead, so attach succeeds. Update Herdr and start it again to pick up the fix.
+
 ## Enter, Tab, or Backspace fires twice
 
 Older versions of some terminals can emit the release of Enter, Tab, and Backspace as the same bytes as the press when an application enables Kitty keyboard event reporting. Herdr cannot distinguish those duplicate bytes after the terminal sends them.

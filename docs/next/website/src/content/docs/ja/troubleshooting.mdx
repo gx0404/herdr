@@ -29,6 +29,10 @@ host_cursor = "native"
 
 ネイティブモードでは IME の基準位置が正しくなりますが、出力中にカーソル表示が乱れることがあります。視覚的に安定したカーソルへ戻すには `host_cursor = "drawn"` を設定するか、設定を削除して Windows のデフォルトを使ってください。現在の制限については [Windows サポート](/ja/docs/windows-beta/) を参照してください。
 
+## Windows で TUI アタッチが os error 231 で失敗する
+
+古い Windows ビルドでは、TUI アタッチが常に `failed to connect to server: 所有的管道范例都在使用中 (os error 231)` で失敗していました。クライアントがハンドシェイクの書き込み直後に名前付きパイプをノンブロッキングへ切り替えますが、サーバーの welcome メッセージが届く前に Windows が `ERROR_PIPE_BUSY` でこの操作を拒否していました。現在のビルドはパイプをポーリングするため、アタッチは正常に成功します。Herdr を更新して起動し直すと修正が適用されます。
+
 ## Enter、Tab、Backspace が 2 回入力される
 
 古いターミナルでは、アプリケーションが Kitty キーボードイベント報告を有効にすると、Enter、Tab、Backspace のリリースをプレスと同じバイトとして送ることがあります。送信後は Herdr から重複したバイトを区別できません。

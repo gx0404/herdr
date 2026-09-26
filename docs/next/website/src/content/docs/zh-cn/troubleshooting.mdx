@@ -29,6 +29,10 @@ host_cursor = "native"
 
 原生模式会恢复输入法定位,但在持续输出期间可能再次出现偶发的光标移动异常。要恢复视觉稳定的光标,请设置 `host_cursor = "drawn"`,或删除该设置以使用 Windows 默认值。当前限制详见 [Windows 支持](/zh-cn/docs/windows-beta/)。
 
+## Windows 上 TUI attach 报 os error 231 失败
+
+旧版 Windows 构建中，attach TUI 必败并报 `failed to connect to server: 所有的管道范例都在使用中 (os error 231)`。客户端写完握手后把命名管道切为非阻塞模式，而 Windows 在 server 的欢迎消息到达前会以 `ERROR_PIPE_BUSY` 拒绝该操作。当前构建改为轮询管道，attach 可正常成功。请更新 Herdr 并重新启动以获得修复。
+
 ## Enter、Tab 或 Backspace 触发两次
 
 旧版终端在应用启用 Kitty 键盘事件报告后，可能把 Enter、Tab 和 Backspace 的释放事件发送为与按下事件相同的字节。终端发送后，Herdr 无法区分这些重复字节。
