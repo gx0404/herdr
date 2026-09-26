@@ -294,6 +294,10 @@ pub(super) fn do_handshake(
 }
 
 // 逐段轮询同时保留 framing 的读取进度；Windows 同步 pipe 不支持接收超时。
+// Windows 上不能对 client 端管道句柄直接 set_nonblocking(true)：刚写过 hello 后
+// SetNamedPipeHandleState(PIPE_NOWAIT) 会失败并返回 ERROR_PIPE_BUSY (231)。轮询读取
+// 已经由 `poll_local_stream_read_count` 的 PeekNamedPipe 语义保证不阻塞，所以这里走
+// `set_local_stream_polling`（Windows 上是 no-op），与 API/remote 客户端同款。
 fn read_handshake_welcome(
     stream: &mut LocalStream,
     timeout: Duration,
@@ -332,9 +336,7 @@ fn read_handshake_welcome(
             }
         }
     }
-    stream
-        .set_nonblocking(true)
-        .map_err(ClientError::ConnectionFailed)?;
+    crate::ipc::set_local_stream_polling(stream, true).map_err(ClientError::ConnectionFailed)?;
     let welcome = protocol::read_message(
         &mut Reader {
             stream,
@@ -343,7 +345,7 @@ fn read_handshake_welcome(
         },
         MAX_FRAME_SIZE,
     );
-    let restored = stream.set_nonblocking(false);
+    let restored = crate::ipc::set_local_stream_polling(stream, false);
     let welcome = welcome?;
     restored.map_err(ClientError::ConnectionFailed)?;
     Ok(welcome)
@@ -400,6 +402,53 @@ mod tests {
             matches!(read_handshake_welcome(&mut client, Duration::from_millis(10), None), Err(ClientError::ConnectionLost(error)) if error.kind() == io::ErrorKind::TimedOut)
         );
         drop((client, server));
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// 回归：client 先写 hello 再轮询读 welcome。Windows 上写过数据后立刻对管道句柄
+    /// `SetNamedPipeHandleState(PIPE_NOWAIT)` 会失败（ERROR_PIPE_BUSY，os error 231），
+    /// 这正是之前 TUI attach 100% 报「所有的管道范例都在使用中」的触发顺序。
+    #[test]
+    fn welcome_read_works_after_client_writes_hello() {
+        let (mut client, mut server, path) = pair();
+        protocol::write_message(
+            &mut client,
+            &ClientMessage::TerminalHello {
+                version: PROTOCOL_VERSION,
+                cols: 80,
+                rows: 24,
+                cell_width_px: 0,
+                cell_height_px: 0,
+                pixel_mouse: false,
+            },
+        )
+        .unwrap();
+        let responder = std::thread::spawn(move || {
+            let _: ClientMessage =
+                protocol::read_message(&mut server, MAX_FRAME_SIZE).expect("read hello");
+            protocol::write_message(
+                &mut server,
+                &ServerMessage::Welcome {
+                    version: PROTOCOL_VERSION,
+                    encoding: RenderEncoding::TerminalAnsi,
+                    error: None,
+                },
+            )
+            .expect("write welcome");
+            server
+        });
+
+        let welcome = read_handshake_welcome(&mut client, Duration::from_secs(5), None)
+            .expect("welcome must be read after the client wrote its hello");
+        assert!(matches!(
+            welcome,
+            ServerMessage::Welcome {
+                version: PROTOCOL_VERSION,
+                encoding: RenderEncoding::TerminalAnsi,
+                error: None,
+            }
+        ));
+        drop((client, responder.join().unwrap()));
         let _ = std::fs::remove_file(path);
     }
 
