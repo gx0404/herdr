@@ -76,8 +76,6 @@ class PreToolUseGateTests(unittest.TestCase):
     ]
     ASK_COMMANDS = [
         "git push origin feature/x --force-with-lease",
-        "git add -A",
-        "git add --all",
         "pkill -9 herdr",
         "cargo build && pkill herdr",
         "sudo killall herdr",
@@ -85,7 +83,6 @@ class PreToolUseGateTests(unittest.TestCase):
         "bash <<'EOF'\npkill herdr\nEOF",
         "bash -c 'pkill herdr'",
         "HERDR_SESSION=x pkill herdr",
-        "cd /tmp && git add -A",
         "if true; then git push origin x --force-with-lease; fi",
     ]
     ALLOW_COMMANDS = [
@@ -94,6 +91,10 @@ class PreToolUseGateTests(unittest.TestCase):
         "python3 scripts/resolve_agent_rules.py --check",
         "git push origin feature/gx_herdr",
         "git commit -m 'fix: pane focus'",
+        # 常规暂存已按 2026-09 用户基线放行（原 ask 规则已删）。
+        "git add -A",
+        "git add --all",
+        "cd /tmp && git add -A",
         "python3 -m unittest scripts.test_changelog",
         "rg 'fn main' src/",
         # 文本提及不是执行：ask 级模式只在命令位置命中。
