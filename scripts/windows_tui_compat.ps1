@@ -1,4 +1,4 @@
-# PowerShell 5.1/7 的隔离回放；GUI 模式仅打开本脚本创建的命名会话。
+# Isolated replay under PowerShell 5.1/7; GUI mode only opens the named session created by this script.
 param(
     [Parameter(Mandatory = $true)][string]$ExePath,
     [ValidateSet('powershell', 'pwsh')][string]$Shell = 'powershell',
@@ -13,7 +13,10 @@ $root = Join-Path ([IO.Path]::GetTempPath()) $session
 $keys = @('HERDR_SESSION', 'HERDR_SOCKET_PATH', 'HERDR_CLIENT_SOCKET_PATH', 'HERDR_CONFIG_PATH',
     'HERDR_WORKSPACE_ID', 'HERDR_TAB_ID', 'HERDR_PANE_ID', 'XDG_CONFIG_HOME', 'XDG_STATE_HOME')
 $saved = @{}
-foreach ($key in $keys) { $saved[$key] = [Environment]::GetEnvironmentVariable($key); [Environment]::SetEnvironmentVariable($key, $null) }
+foreach ($key in $keys) {
+    $saved[$key] = [Environment]::GetEnvironmentVariable($key)
+    if (Test-Path "Env:$key") { Remove-Item "Env:$key" }
+}
 $env:HERDR_SESSION = $session
 $env:XDG_CONFIG_HOME = Join-Path $root 'config'
 $env:XDG_STATE_HOME = Join-Path $root 'state'
@@ -40,26 +43,26 @@ $result = [ordered]@{ shell = $Shell; session = $session; runtime = 'PENDING'; g
 try {
     Invoke-Herdr @('config', 'check') | Out-Null
     if ($Interactive) {
-        Write-Host '请在测试会话内检查：Ctrl+B Space 主菜单；Ctrl+B / 搜索；设置页；拖动窗口边框。'
-        Write-Host '持续输出时按住左键选择；后台应继续，松开后复制所见。Shift 拖选由 WezTerm 处理。'
-        Write-Host '依次缩放到 60x16、80x24、120x40、160x50；中文、输入法、滚动、右键菜单均须检查。'
-        Write-Host '使用 Ctrl+B d 分离返回；此脚本随后仅清理自己的会话。'
+        Write-Host 'In the test session, check: Ctrl+B Space main menu; Ctrl+B / search; the settings page; dragging the window border.'
+        Write-Host 'During continuous output, hold the left button to select; output should continue in the background, and releasing copies what you saw. Shift drag-select is handled by WezTerm.'
+        Write-Host 'Resize to 60x16, 80x24, 120x40, and 160x50 in turn; check CJK text, IME, scrolling, and the right-click menu.'
+        Write-Host 'Detach with Ctrl+B d to return; this script then cleans up only its own session.'
         & $exe --session $session
-        if ($LASTEXITCODE -ne 0) { throw '测试 TUI 异常退出' }
+        if ($LASTEXITCODE -ne 0) { throw 'test TUI exited abnormally' }
         $result.runtime = 'PASS'
-        $result.gui = 'PENDING: 请将人工观察结果附到此报告'
+        $result.gui = 'PENDING: attach manual observations to this report'
     } else {
         $server = Start-Process -FilePath $exe -ArgumentList 'server' -PassThru -WindowStyle Hidden
         $ready = $false
         for ($attempt = 0; $attempt -lt 40; $attempt++) {
-            $null = & $exe pane list 2>$null
+            try { $null = & $exe pane list 2>$null } catch { }
             if ($LASTEXITCODE -eq 0) { $ready = $true; break }
             Start-Sleep -Milliseconds 250
         }
-        if (-not $ready) { throw '测试 server 未就绪' }
+        if (-not $ready) { throw 'test server not ready' }
         $created = (Invoke-Herdr @('workspace', 'create', '--cwd', $root) | Out-String | ConvertFrom-Json)
         $pane = $created.result.root_pane.pane_id
-        if (-not $pane) { throw '未返回 pane_id' }
+        if (-not $pane) { throw 'no pane_id returned' }
         $marker = 'HERDR_TUI_' + [guid]::NewGuid().ToString('N')
         $first = $marker.Substring(0, 10)
         $last = $marker.Substring(10)
@@ -72,7 +75,7 @@ try {
             if (($lines -contains $marker) -and ($lines -contains "PS_MAJOR=$expectedMajor")) { $matched = $true; break }
             Start-Sleep -Milliseconds 250
         }
-        if (-not $matched) { throw 'PowerShell ConPTY 未返回标记' }
+        if (-not $matched) { throw 'PowerShell ConPTY did not return the marker' }
         [IO.File]::WriteAllText((Join-Path $root 'pane.txt'), $text)
         $result.runtime = 'PASS'
     }
@@ -86,6 +89,12 @@ try {
         $result.cleanup = if ($LASTEXITCODE -eq 0) { 'PASS' } else { 'FAIL' }
     } catch { $result.cleanup = 'FAIL: ' + $_.Exception.Message }
     $result | ConvertTo-Json | Set-Content -Encoding utf8 (Join-Path $root 'result.json')
-    foreach ($key in $keys) { [Environment]::SetEnvironmentVariable($key, $saved[$key]) }
-    Write-Host "回放报告：$root"
+    foreach ($key in $keys) {
+        if ($null -eq $saved[$key]) {
+            if (Test-Path "Env:$key") { Remove-Item "Env:$key" }
+        } else {
+            Set-Item "Env:$key" $saved[$key]
+        }
+    }
+    Write-Host "replay report: $root"
 }
