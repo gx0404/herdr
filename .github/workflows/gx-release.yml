@@ -1,0 +1,341 @@
+name: GX release
+run-name: "GX ${{ inputs.publish && 'publish' || 'build only' }} · ${{ inputs.ref }}"
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Source branch, tag or commit (resolved once to a full SHA)
+        type: string
+        required: true
+        default: master
+      previous_tag:
+        description: Optional older gx-vX.Y.Z upgrade baseline; empty selects the greatest older published GX version
+        type: string
+        required: false
+        default: ''
+      publish:
+        description: Publish to gx0404/herdr after all checks (otherwise build and verify only)
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: gx-release
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    if: github.repository == 'gx0404/herdr' && github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    outputs:
+      sha: ${{ steps.prepare.outputs.sha }}
+      version: ${{ steps.prepare.outputs.version }}
+      rust: ${{ steps.prepare.outputs.rust }}
+      zig: ${{ steps.prepare.outputs.zig }}
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          ref: ${{ inputs.ref }}
+          persist-credentials: false
+      - name: Resolve clean source, Cargo version and toolchain pins
+        id: prepare
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GX_PUBLISH_REQUESTED: ${{ inputs.publish }}
+        run: |
+          args=()
+          if [ "$GX_PUBLISH_REQUESTED" = true ]; then args+=(--publish --repository gx0404/herdr); fi
+          python3 scripts/gx_release.py prepare "${args[@]}"
+
+  previous:
+    needs: prepare
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    outputs:
+      available: ${{ steps.previous.outputs.available }}
+      tag: ${{ steps.previous.outputs.tag }}
+      sha: ${{ steps.previous.outputs.sha }}
+      version: ${{ steps.previous.outputs.version }}
+      windows: ${{ steps.previous.outputs.windows }}
+      linux: ${{ steps.previous.outputs.linux }}
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          ref: ${{ needs.prepare.outputs.sha }}
+          persist-credentials: false
+      - name: Run previous-release contracts before any downloads
+        run: python3 -m unittest scripts.test_gx_release
+      - name: Resolve and verify an immutable published upgrade baseline
+        id: previous
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GX_PREVIOUS_TAG: ${{ inputs.previous_tag }}
+          GX_VERSION: ${{ needs.prepare.outputs.version }}
+          GX_SHA: ${{ needs.prepare.outputs.sha }}
+        run: python3 scripts/gx_release.py previous --repository gx0404/herdr --previous-tag "$GX_PREVIOUS_TAG" --version "$GX_VERSION" --sha "$GX_SHA" --artifacts target/gx-previous
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        if: steps.previous.outputs.available == 'true'
+        with:
+          name: previous-packages
+          path: target/gx-previous/*
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14
+
+  checks:
+    needs: prepare
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          ref: ${{ needs.prepare.outputs.sha }}
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # v1
+        with:
+          toolchain: ${{ needs.prepare.outputs.rust }}
+          components: rustfmt,clippy
+      - uses: vercel-labs/setup-zig@83c1594f26b86da8a9a8ddd9b5ee5f3af0f96943 # v1.0.2
+        with:
+          version: ${{ needs.prepare.outputs.zig }}
+      - uses: taiki-e/install-action@fd2f5e3d644b484055ebf4268f474c565f148f25 # v2.81.9
+        with:
+          tool: just,cargo-nextest
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: 1.3.14
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          cache-bin: false
+          key: gx-checks
+      - name: Install maintenance test dependency
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends python3-tomli
+      - name: Run repository gates before building installers
+        run: |
+          just ci
+          just docs-contract-test
+          python3 scripts/resolve_agent_rules.py --check
+
+  windows:
+    needs: [prepare, checks, previous]
+    runs-on: windows-2025
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          ref: ${{ needs.prepare.outputs.sha }}
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # v1
+        with:
+          toolchain: ${{ needs.prepare.outputs.rust }}
+          targets: x86_64-pc-windows-msvc
+      - uses: vercel-labs/setup-zig@83c1594f26b86da8a9a8ddd9b5ee5f3af0f96943 # v1.0.2
+        with:
+          version: ${{ needs.prepare.outputs.zig }}
+      - name: Select the hosted Python 3.12 toolchain
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $versions = @(Get-ChildItem (Join-Path $env:RUNNER_TOOL_CACHE 'Python') -Directory | Where-Object Name -Like '3.12.*' | Sort-Object { [version]$_.Name } -Descending)
+          if ($versions.Count -eq 0) { throw 'The hosted runner must provide Python 3.12' }
+          $pythonDir = Join-Path $versions[0].FullName 'x64'
+          if (-not (Test-Path (Join-Path $pythonDir 'python.exe'))) { throw 'Python 3.12 x64 is missing' }
+          $pythonDir >> $env:GITHUB_PATH
+          (Join-Path $pythonDir 'Scripts') >> $env:GITHUB_PATH
+      - name: Install pinned Inno Setup only on the disposable hosted runner
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ($env:GITHUB_ACTIONS -ne 'true' -or $env:RUNNER_ENVIRONMENT -ne 'github-hosted') { throw 'CI-only tool installation' }
+          $installer = Join-Path $env:RUNNER_TEMP 'innosetup-7.1.0-x64.exe'
+          $destination = Join-Path $env:RUNNER_TEMP 'gx-inno'
+          Invoke-WebRequest 'https://github.com/jrsoftware/issrc/releases/download/is-7_1_0/innosetup-7.1.0-x64.exe' -OutFile $installer
+          $expected = '0362a383ed217d4c4239b5933866dd96d3eb2102737da92f80f6057a4b40df2f'
+          if ((Get-FileHash -LiteralPath $installer -Algorithm SHA256).Hash.ToLowerInvariant() -ne $expected) { throw 'Inno Setup checksum mismatch' }
+          $process = Start-Process -FilePath $installer -ArgumentList '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/CURRENTUSER', "/DIR=`"$destination`"" -Wait -PassThru
+          if ($process.ExitCode -ne 0) { throw "Inno Setup installation failed: $($process.ExitCode)" }
+          $compiler = Join-Path $destination 'ISCC.exe'
+          if (-not (Test-Path -LiteralPath $compiler)) { throw 'Inno Setup compiler missing' }
+          $version = (& $compiler --version | Out-String).Trim()
+          if ($LASTEXITCODE -ne 0 -or $version -ne '7.1.0') { throw "Unexpected Inno Setup version: $version" }
+          "ISCC=$compiler" >> $env:GITHUB_ENV
+      - name: Run Windows packaging contracts
+        shell: pwsh
+        env:
+          PYTHONUTF8: '1'
+        run: |
+          python -m unittest scripts.test_gx_package scripts.test_gx_release scripts.test_package_windows_conpty scripts.test_gx_smoke
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Build Windows installer with the shared local entrypoint
+        shell: pwsh
+        run: |
+          python scripts/gx_package.py --platform windows --output-dir target/gx-windows
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        if: needs.previous.outputs.available == 'true'
+        with:
+          name: previous-packages
+          path: target/gx-previous
+      - name: Install, upgrade, exercise and uninstall only in disposable Windows CI
+        shell: pwsh
+        env:
+          GX_VERSION: ${{ needs.prepare.outputs.version }}
+          GX_PREVIOUS_EXE: ${{ needs.previous.outputs.windows }}
+          GX_PREVIOUS_TAG: ${{ needs.previous.outputs.tag }}
+          GX_PREVIOUS_SHA: ${{ needs.previous.outputs.sha }}
+          HERDR_GX_DISPOSABLE: '1'
+        run: |
+          $previous = @{}
+          if ($env:GX_PREVIOUS_EXE) { $previous.PreviousInstallerPath = Join-Path 'target/gx-previous' $env:GX_PREVIOUS_EXE }
+          ./scripts/gx_smoke_windows.ps1 -InstallerPath "target/gx-windows/herdr-gx-$env:GX_VERSION-windows-x86_64-setup.exe" -ExpectedVersion $env:GX_VERSION @previous
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if ($env:GX_PREVIOUS_EXE) { "Windows upgrade PASS: $env:GX_PREVIOUS_TAG ($env:GX_PREVIOUS_SHA) -> $env:GX_VERSION" >> $env:GITHUB_STEP_SUMMARY }
+          else { 'Windows old-to-new upgrade: N/A (no older published GX release exists).' >> $env:GITHUB_STEP_SUMMARY }
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: gx-windows-installer
+          path: |
+            target/gx-windows/*.exe
+            target/gx-windows/*.manifest.json
+            target/gx-windows/*.sha256
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14
+
+  linux:
+    needs: [prepare, checks]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          ref: ${{ needs.prepare.outputs.sha }}
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # v1
+        with:
+          toolchain: ${{ needs.prepare.outputs.rust }}
+          targets: x86_64-unknown-linux-musl
+      - uses: vercel-labs/setup-zig@83c1594f26b86da8a9a8ddd9b5ee5f3af0f96943 # v1.0.2
+        with:
+          version: ${{ needs.prepare.outputs.zig }}
+      - name: Install musl build and package inspection tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends musl-tools cmake ninja-build binutils file
+      - name: Build one portable deb with the shared local entrypoint
+        run: python3 scripts/gx_package.py --platform linux --output-dir target/gx-linux
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: gx-linux-deb
+          path: |
+            target/gx-linux/*.deb
+            target/gx-linux/*.manifest.json
+            target/gx-linux/*.sha256
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14
+
+  linux-smoke:
+    needs: [prepare, linux, previous]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        ubuntu: ['22.04', '24.04']
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          ref: ${{ needs.prepare.outputs.sha }}
+          persist-credentials: false
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: gx-linux-deb
+          path: target/gx-linux
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        if: needs.previous.outputs.available == 'true'
+        with:
+          name: previous-packages
+          path: target/gx-previous
+      - name: Install and upgrade the same deb inside a disposable Ubuntu container, never the host
+        env:
+          GX_UBUNTU: ${{ matrix.ubuntu }}
+          GX_VERSION: ${{ needs.prepare.outputs.version }}
+          GX_PREVIOUS_DEB: ${{ needs.previous.outputs.linux }}
+          GX_PREVIOUS_TAG: ${{ needs.previous.outputs.tag }}
+          GX_PREVIOUS_SHA: ${{ needs.previous.outputs.sha }}
+        run: |
+          (cd target/gx-linux && sha256sum -c ./*.sha256)
+          docker run --rm --init --volume "$PWD:/workspace:ro" --workdir /workspace \
+            --env GX_VERSION --env GX_PREVIOUS_DEB --env HERDR_GX_DISPOSABLE=1 "ubuntu:$GX_UBUNTU" bash -eu -c '
+              export DEBIAN_FRONTEND=noninteractive
+              apt-get update
+              apt-get install -y --no-install-recommends python3 bash ca-certificates procps util-linux passwd coreutils
+              previous=()
+              if [ -n "$GX_PREVIOUS_DEB" ]; then previous+=("/workspace/target/gx-previous/$GX_PREVIOUS_DEB"); fi
+              bash scripts/gx_smoke_linux.sh "/workspace/target/gx-linux/herdr-gx_${GX_VERSION}_amd64.deb" "${previous[@]}"
+            '
+          if [ -n "$GX_PREVIOUS_DEB" ]; then
+            printf 'Ubuntu %s upgrade PASS: %s (%s) -> %s.\n' "$GX_UBUNTU" "$GX_PREVIOUS_TAG" "$GX_PREVIOUS_SHA" "$GX_VERSION" >> "$GITHUB_STEP_SUMMARY"
+          else
+            printf 'Ubuntu %s old-to-new upgrade: N/A (no older published GX release exists).\n' "$GX_UBUNTU" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+  verify:
+    needs: [prepare, checks, previous, windows, linux, linux-smoke]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          ref: ${{ needs.prepare.outputs.sha }}
+          persist-credentials: false
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          pattern: gx-*
+          merge-multiple: true
+          path: target/gx-release
+      - name: Recheck release contracts and assemble four assets even for build-only runs
+        env:
+          GX_VERSION: ${{ needs.prepare.outputs.version }}
+          GX_SHA: ${{ needs.prepare.outputs.sha }}
+        run: |
+          python3 -m unittest scripts.test_gx_release
+          python3 scripts/gx_release.py verify --version "$GX_VERSION" --sha "$GX_SHA" --artifacts target/gx-release
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: verified-release
+          path: target/gx-release/*
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14
+
+  publish:
+    needs: [prepare, verify]
+    if: inputs.publish && github.repository == 'gx0404/herdr' && github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          ref: ${{ needs.prepare.outputs.sha }}
+          persist-credentials: false
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: verified-release
+          path: target/gx-release
+      - name: Verify, resume only an identical draft, then publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GX_PUBLISH_REQUESTED: ${{ inputs.publish }}
+          GX_VERSION: ${{ needs.prepare.outputs.version }}
+          GX_SHA: ${{ needs.prepare.outputs.sha }}
+        run: python3 scripts/gx_release.py publish --repository gx0404/herdr --version "$GX_VERSION" --sha "$GX_SHA" --artifacts target/gx-release

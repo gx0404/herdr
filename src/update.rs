@@ -2068,8 +2068,23 @@ fn print_running_session_update_outcomes(
 // Installation manager detection
 // ---------------------------------------------------------------------------
 
+pub(crate) fn package_update_rejection(
+    package_manager: Option<crate::build_info::PackageManager>,
+) -> Option<&'static str> {
+    use crate::build_info::PackageManager;
+    match package_manager {
+        Some(PackageManager::WindowsInstaller) => {
+            Some(errors().self_update_disabled_windows_installer)
+        }
+        Some(PackageManager::Deb) => Some(errors().self_update_disabled_deb),
+        None => None,
+    }
+}
+
 pub(crate) fn update_install_command() -> &'static str {
-    if is_homebrew_managed_install() {
+    if let Some(manager) = crate::build_info::package_manager() {
+        manager.id()
+    } else if is_homebrew_managed_install() {
         HOMEBREW_UPDATE_COMMAND
     } else if is_mise_managed_install() {
         MISE_UPDATE_COMMAND
@@ -2083,6 +2098,8 @@ pub(crate) fn update_install_command() -> &'static str {
 pub(crate) fn update_install_instruction(install_command: &str) -> String {
     let update = &crate::i18n::texts().update;
     match install_command {
+        "windows-installer" => errors().self_update_disabled_windows_installer.to_string(),
+        "deb" => errors().self_update_disabled_deb.to_string(),
         NIX_UPDATE_COMMAND => update.install_nix.to_string(),
         command => crate::i18n::fill(update.install_run_fmt, &[("command", command)]),
     }
@@ -2280,6 +2297,22 @@ fn homebrew_cellar_keg_root(path: &Path) -> Option<PathBuf> {
 
 /// Manual self-update command (`herdr update`).
 pub fn self_update(options: SelfUpdateOptions) -> Result<Version, String> {
+    with_package_updates_allowed(crate::build_info::package_manager(), || {
+        self_update_unmanaged(options)
+    })
+}
+
+fn with_package_updates_allowed<T>(
+    package_manager: Option<crate::build_info::PackageManager>,
+    update: impl FnOnce() -> Result<T, String>,
+) -> Result<T, String> {
+    if let Some(reason) = package_update_rejection(package_manager) {
+        return Err(reason.to_string());
+    }
+    update()
+}
+
+fn self_update_unmanaged(options: SelfUpdateOptions) -> Result<Version, String> {
     let channel = UpdateChannel::configured();
 
     if is_homebrew_managed_install() {
@@ -2400,6 +2433,16 @@ fn print_outdated_integration_notice_with_updated_binary(updated_exe: &Path) {
 /// Background update check: only surface availability and release notes.
 /// Runs in a background thread at startup.
 pub fn auto_update(events: tokio::sync::mpsc::Sender<crate::events::AppEvent>) {
+    auto_update_for_package(events, crate::build_info::package_manager());
+}
+
+fn auto_update_for_package(
+    events: tokio::sync::mpsc::Sender<crate::events::AppEvent>,
+    package_manager: Option<crate::build_info::PackageManager>,
+) {
+    if package_manager.is_some() {
+        return;
+    }
     crate::logging::update_check_started();
     if let Ok(version) = env::var(FAKE_UPDATE_VERSION_ENV) {
         let version = version.trim();
@@ -2553,6 +2596,90 @@ fn platform_target() -> (&'static str, &'static str) {
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod package_tests {
+    use super::*;
+    use crate::build_info::PackageManager;
+
+    #[test]
+    fn package_self_update_refuses_before_any_unmanaged_work() {
+        for manager in [PackageManager::WindowsInstaller, PackageManager::Deb] {
+            for live_handoff in [false, true] {
+                let options = SelfUpdateOptions { live_handoff };
+                let result: Result<Version, String> =
+                    with_package_updates_allowed(Some(manager), || {
+                        panic!("must not read config, fetch updates or plan sessions: {options:?}");
+                    });
+                assert_eq!(
+                    result.unwrap_err(),
+                    package_update_rejection(Some(manager)).unwrap()
+                );
+            }
+        }
+        assert_eq!(with_package_updates_allowed(None, || Ok(42)), Ok(42));
+        assert_eq!(
+            with_package_updates_allowed::<()>(None, || Err("ordinary failure".into())),
+            Err("ordinary failure".into())
+        );
+    }
+
+    #[test]
+    fn package_guidance_is_not_formatted_as_a_shell_command() {
+        for lang in [crate::i18n::Lang::En, crate::i18n::Lang::ZhCn] {
+            let _language = crate::i18n::lang_guard(lang);
+            for manager in [PackageManager::WindowsInstaller, PackageManager::Deb] {
+                assert_eq!(
+                    update_install_instruction(manager.id()),
+                    package_update_rejection(Some(manager)).unwrap()
+                );
+            }
+            assert_eq!(
+                update_install_instruction(HERDR_UPDATE_COMMAND),
+                crate::i18n::fill(
+                    crate::i18n::texts().update.install_run_fmt,
+                    &[("command", HERDR_UPDATE_COMMAND)]
+                )
+            );
+            assert_eq!(package_update_rejection(None), None);
+        }
+    }
+
+    #[test]
+    fn package_auto_update_ignores_fake_updates_and_preserves_cache() {
+        let _lock = crate::config::test_config_env_lock().lock().unwrap();
+        struct RestoreFakeVersion(Option<std::ffi::OsString>);
+        impl Drop for RestoreFakeVersion {
+            fn drop(&mut self) {
+                match &self.0 {
+                    Some(value) => env::set_var(FAKE_UPDATE_VERSION_ENV, value),
+                    None => env::remove_var(FAKE_UPDATE_VERSION_ENV),
+                }
+            }
+        }
+        let _restore = RestoreFakeVersion(env::var_os(FAKE_UPDATE_VERSION_ENV));
+        env::set_var(FAKE_UPDATE_VERSION_ENV, "99.0.0");
+        let root =
+            env::temp_dir().join(format!("herdr-package-auto-update-{}", std::process::id()));
+        fs::create_dir_all(&root).unwrap();
+        crate::config::test_dirs::set_config_path(root.join("config.toml"));
+        let cache = root.join("release-notes.json");
+        fs::write(&cache, "old updater cache").unwrap();
+        for manager in [PackageManager::WindowsInstaller, PackageManager::Deb] {
+            let (sender, mut receiver) = tokio::sync::mpsc::channel(2);
+            auto_update_for_package(sender, Some(manager));
+            assert!(receiver.try_recv().is_err());
+            assert_eq!(fs::read_to_string(&cache).unwrap(), "old updater cache");
+        }
+        let (sender, mut receiver) = tokio::sync::mpsc::channel(2);
+        auto_update_for_package(sender, None);
+        assert!(
+            matches!(receiver.try_recv(), Ok(crate::events::AppEvent::UpdateReady { version, .. }) if version == "99.0.0")
+        );
+        assert!(fs::read_to_string(&cache).unwrap().contains("99.0.0"));
+        fs::remove_dir_all(root).unwrap();
+    }
+}
 
 #[cfg(all(test, unix))]
 mod tests {

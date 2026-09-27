@@ -5,9 +5,52 @@ description: Linux、macOS、Windows での Herdr のインストール、アッ
 
 Herdr は Linux、macOS、Windows 向けに安定版チャンネルのバイナリを提供しています。Windows 対応は正式提供されており、プラットフォーム固有の既知の制限と継続的な修正があります。
 
+## GX fork のインストーラー
+
+`gx0404/herdr` fork は、Windows x64 と Ubuntu 22.04 / 24.04 amd64 を対象に独立したパッケージング経路を持ちます。公開後は [fork の GitHub Releases](https://github.com/gx0404/herdr/releases) の `gx-v<version>` タグからダウンロードできます。以下の upstream 向けインストール方法とは別です。
+
+| プラットフォーム | パッケージ |
+| --- | --- |
+| Windows x64 | `herdr-gx-<version>-windows-x86_64-setup.exe` |
+| Ubuntu amd64 | `herdr-gx_<version>_amd64.deb` |
+
+Windows では Setup EXE を実行します。現在のユーザー向けに `%LOCALAPPDATA%\Programs\Herdr GX` へインストールされ、アプリローカルの ConPTY とユーザー PATH の登録を含みます。ターミナルを開き直して確認します:
+
+```powershell
+where.exe herdr
+Get-Command herdr
+herdr --version
+herdr
+```
+
+別のインストールや shell エイリアスが優先される場合は、表示されたパスを確認し、他のインストールを無条件に削除しないでください。既存のターミナルには古い環境が残ることがあります。未署名のインストーラーでは SmartScreen 警告が出る場合があります。保護機能を無効にせず、リリース元とチェックサムを確認してください。
+
+Ubuntu では `<version>` をダウンロードしたパッケージのバージョンに置き換えます:
+
+```bash
+sudo apt install ./herdr-gx_<version>_amd64.deb
+command -v herdr
+herdr --version
+herdr
+```
+
+プログラムは `/usr/bin/herdr` に配置され、shell 設定や PATH の編集は不要です。APT はパッケージ名の競合を報告し、upstream の `herdr` パッケージの削除を提案する場合があります。確定前にトランザクションを確認してください。他のパッケージが所有するファイルを強制上書きすることはありません。既存の `~/.local/bin` や `/usr/local/bin` のコマンドが優先される場合があるため、`command -v herdr` を確認してください。
+
+GX パッケージのバージョン出力には `-gx.windows-installer.` または `-gx.deb.` とソースコミットが含まれます。更新には新しいインストーラーまたは deb をダウンロードしてください。更新前に作業を終え、古いローカル Herdr セッションを明示的に停止します。Windows インストーラーは使用中のファイルを拒否し、pane プロセスを終了しません。ファイルの置換だけでは実行中のサーバーは更新されません。インストール後にターミナルを開き直して新しいバージョンを起動してください。
+
+これらのパッケージは、設定変更や upstream バイナリのインストールより前に `herdr update`、`herdr update --handoff`、`herdr channel set stable`、`herdr channel set preview` を拒否します。`channel show` は読み取り専用で、チャンネルがパッケージ更新を管理しないことを説明します。新しいパッケージ runtime は upstream バイナリ更新を確認せず、古い updater 通知も復元しません。agent 検出 manifest の更新は独立して継続します。このローカル保護は、既存の古いサーバーやリモートサーバーからの通知を除外しません。GX の APT リポジトリはないため、通常の `apt upgrade` では GitHub の新リリースを取得できません。
+
+Windows の「インストールされているアプリ」から **Herdr GX** をアンインストールするか、Ubuntu で次を実行します:
+
+```bash
+sudo apt remove herdr-gx
+```
+
+ユーザー設定とセッションデータは保持されます。Windows ではこのインストーラーが追加した PATH 項目だけを削除します。Release には検証用の `manifest.json` と `SHA256SUMS` も含まれます。
+
 ## インストール
 
-Linux または macOS では次を実行します:
+以下の方法は GX fork ではなく upstream Herdr をインストールします。Linux または macOS では次を実行します:
 
 ```bash
 curl -fsSL https://herdr.dev/install.sh | sh

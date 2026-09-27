@@ -13,7 +13,7 @@ nextest-all:
 
 # Run repository maintenance contract tests (+ the fork's upstream-sync drop-path gate)
 maintenance-test:
-    {{python}} -m unittest scripts.test_agent_detection_manifest_check scripts.test_agent_kb scripts.test_ai_tool_hooks scripts.test_changelog scripts.test_config_reference_check scripts.test_docs_translation_parity scripts.test_package_windows_conpty scripts.test_preview scripts.test_release scripts.test_resolve_agent_rules scripts.test_run_test_suite scripts.test_setup_zig scripts.test_unix_installer scripts.test_upstream_sync_drop_check scripts.test_vendor_libghostty_vt scripts.test_vendor_portable_pty scripts.test_windows_cross scripts.test_windows_input
+    {{python}} -m unittest scripts.test_agent_detection_manifest_check scripts.test_agent_kb scripts.test_ai_tool_hooks scripts.test_changelog scripts.test_config_reference_check scripts.test_docs_translation_parity scripts.test_gx_package scripts.test_gx_release scripts.test_gx_smoke scripts.test_package_windows_conpty scripts.test_preview scripts.test_release scripts.test_resolve_agent_rules scripts.test_run_test_suite scripts.test_setup_zig scripts.test_unix_installer scripts.test_upstream_sync_drop_check scripts.test_vendor_libghostty_vt scripts.test_vendor_portable_pty scripts.test_windows_cross scripts.test_windows_input
     bun test scripts/release-workflows.test.ts
     {{python}} scripts/upstream_sync_drop_check.py
 
@@ -123,6 +123,14 @@ install-hooks:
 # Build release binary
 build:
     cargo build --release --locked
+
+[windows]
+package-windows *args:
+    {{python}} scripts/gx_package.py --platform windows {{args}}
+
+[linux]
+package-deb *args:
+    {{python}} scripts/gx_package.py --platform linux {{args}}
 
 # Non-gating full-render scaling profile for background workspaces and active panes
 bench-render-scale:

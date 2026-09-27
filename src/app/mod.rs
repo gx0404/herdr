@@ -191,6 +191,11 @@ fn background_update_check_enabled(background_updates: bool, check_enabled: bool
     auto_updates_enabled(background_updates) && check_enabled
 }
 
+fn background_version_check_enabled(background_updates: bool, check_enabled: bool) -> bool {
+    crate::build_info::package_manager().is_none()
+        && background_update_check_enabled(background_updates, check_enabled)
+}
+
 fn load_plugin_registry(
     persist_plugin_registry: bool,
 ) -> crate::app::state::InstalledPluginRegistry {
@@ -600,11 +605,11 @@ impl App {
                 cwd.as_deref().and_then(crate::workspace::git_branch);
         }
 
-        // Background auto-update is disabled for non-persistent test apps
-        // and in debug/test builds so local development never mutates the
-        // running binary out from under spawned test processes.
-        let version_check_enabled =
-            background_update_check_enabled(policy.background_updates, config.update.version_check);
+        // Package builds skip binary checks, not agent detection manifest checks.
+        let version_check_enabled = background_version_check_enabled(
+            policy.background_updates,
+            config.update.version_check,
+        );
         let manifest_check_enabled = background_update_check_enabled(
             policy.background_updates,
             config.update.manifest_check,
@@ -1001,10 +1006,11 @@ impl App {
             self.update_version_check_enabled = config.update.version_check;
             self.update_manifest_check_enabled = config.update.manifest_check;
 
-            if !self.update_version_check_enabled {
+            if !self.update_version_check_enabled || crate::build_info::package_manager().is_some()
+            {
                 self.next_auto_update_check = None;
             } else if !previous_version_check_enabled
-                && background_update_check_enabled(
+                && background_version_check_enabled(
                     self.policy.background_updates,
                     self.update_version_check_enabled,
                 )
@@ -1132,6 +1138,20 @@ mod tests {
         } else {
             std::env::remove_var("XDG_STATE_HOME");
         }
+    }
+
+    #[test]
+    fn package_binary_check_policy_does_not_disable_manifest_checks() {
+        assert_eq!(
+            background_update_check_enabled(true, true),
+            !cfg!(debug_assertions)
+        );
+        assert_eq!(
+            background_version_check_enabled(true, true),
+            !cfg!(debug_assertions) && crate::build_info::package_manager().is_none()
+        );
+        assert!(!background_version_check_enabled(false, true));
+        assert!(!background_version_check_enabled(true, false));
     }
 
     #[test]

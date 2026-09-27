@@ -2103,6 +2103,12 @@ pub const TEXTS: Texts = Texts {
             "self-update is disabled for Nix installs; preview is only available for direct Herdr installs",
         self_update_disabled_nix:
             "self-update is disabled for Nix installs; update with `nix profile upgrade` or update the flake input that provides Herdr",
+        self_update_disabled_windows_installer:
+            "self-update and channel changes are disabled for Herdr GX Windows installer builds; close local Herdr sessions, then download and run the new Herdr GX setup EXE from https://github.com/gx0404/herdr/releases",
+        self_update_disabled_deb:
+            "self-update and channel changes are disabled for Herdr GX deb builds; close local Herdr sessions, download the new deb from https://github.com/gx0404/herdr/releases, then install it with `sudo apt install ./herdr-gx_<version>_amd64.deb` (replace <version> with the downloaded version)",
+        package_channel_ignored:
+            "The configured stable/preview channel does not control updates for this package build.",
         update_run_outside: "run `herdr update` outside herdr after detaching from the session",
         update_usage: "usage: herdr update [--handoff]",
         unknown_update_option_fmt: "unknown update option: {option}",

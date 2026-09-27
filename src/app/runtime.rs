@@ -4,7 +4,8 @@ use std::time::Instant;
 use std::time::Duration;
 
 use super::{
-    background_update_check_enabled, App, AUTO_UPDATE_CHECK_INTERVAL, MIN_RENDER_INTERVAL,
+    background_update_check_enabled, background_version_check_enabled, App,
+    AUTO_UPDATE_CHECK_INTERVAL, MIN_RENDER_INTERVAL,
 };
 fn retain_detached_process_after_wait(
     pid: u32,
@@ -110,7 +111,7 @@ impl App {
     }
 
     pub(crate) fn run_auto_update_check(&mut self) {
-        if !background_update_check_enabled(
+        if !background_version_check_enabled(
             self.policy.background_updates,
             self.update_version_check_enabled,
         ) {

@@ -4,7 +4,26 @@
 release/preview 工作流与脚本、`scripts/changelog.py`、`scripts/preview.py`、
 `scripts/release.py`（含 `release-workflows.test.ts` 契约）、perf smoke 脚本。
 **本域维护者动作（发布、推资产、改渠道文件）仅限核实过的维护者**
-（`governance.md`）；日常 feature/fix 工作只读本域。
+（`governance.md`）；日常 feature/fix 工作只读上游渠道与已发布资产。
+
+## fork 例外：GX 安装包
+
+- `scripts/gx_package.py`、`scripts/gx_release.py`、`packaging/windows/herdr-gx.iss`、
+  `packaging/linux/` 与 `.github/workflows/gx-release.yml` 是 fork 自有链，可按用户
+  授权维护；不修改下述上游发布流程或 `distribution/*.json`。
+- 安装包版本只读 `Cargo.toml`，tag 为 `gx-v<version>`。Windows x64 EXE 用户级安装
+  与 Ubuntu amd64 deb 保留 `herdr` 命令名；发布两个包、统一 manifest 与 SHA256SUMS。
+- 手动 workflow 默认只构建；发布必须显式开启、限定 `gx0404/herdr` 且通过 admin
+  守门，两个平台固定同一源码 SHA。禁止发布 dirty 包、覆盖正式 Release 或移动 tag；
+  中断只能续传同源同摘要草稿。仅发布 job 有写权限，不借用上游凭据或绕过 tag 保护。
+- 包构建写入 `HERDR_PACKAGE_MANAGER` 与完整 `HERDR_BUILD_COMMIT`，不走上游自更新；
+  升级由安装器/deb 管理。不得把包身份混入通用路径归属函数以改变 SSH 引导行为。
+- Windows PATH 记录归属并保留原值类型，卸载只撤销自有条目，不删除配置/会话；
+  文件占用时阻止操作，不自动终止用户进程。deb 由 dpkg 管理 `/usr/bin/herdr`，
+  不强制覆盖其他包。实际安装 smoke 仅在显式一次性 runner/容器执行，不能在用户
+  宿主无授权修改安装/PATH。无旧安装包时升级验收记 N/A，重装不等于旧版升级。
+- `just package-windows` / `just package-deb` 是本地入口；`--check` 只读预检，
+  `--allow-dirty` 仅供本地验证且产物不可发布。受控产物写 `target/`，不提交进 Git。
 
 ## 渠道模型（上游全文语义）
 

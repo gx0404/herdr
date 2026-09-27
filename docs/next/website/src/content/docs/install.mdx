@@ -5,9 +5,52 @@ description: Install, update, and verify Herdr on Linux, macOS, and Windows.
 
 Herdr publishes stable-channel binaries for Linux, macOS, and Windows. Windows is generally available, with documented platform-specific limitations and ongoing fixes.
 
+## GX fork installers
+
+The `gx0404/herdr` fork has an independent packaging pipeline for Windows x64 and Ubuntu 22.04 / 24.04 amd64. Once published, GX packages are available from [the fork's GitHub Releases](https://github.com/gx0404/herdr/releases), under `gx-v<version>` tags. They are separate from the upstream installation methods below.
+
+| Platform | Package |
+| --- | --- |
+| Windows x64 | `herdr-gx-<version>-windows-x86_64-setup.exe` |
+| Ubuntu amd64 | `herdr-gx_<version>_amd64.deb` |
+
+On Windows, run the Setup EXE. It installs for the current user in `%LOCALAPPDATA%\Programs\Herdr GX`, includes the app-local ConPTY runtime, and adds its directory to the user PATH. Reopen the terminal, then check:
+
+```powershell
+where.exe herdr
+Get-Command herdr
+herdr --version
+herdr
+```
+
+If another installation or shell alias wins command resolution, inspect the reported paths instead of deleting another installation blindly. Existing terminals can retain their old environment. Unsigned installers may show a SmartScreen warning; verify the release origin and checksums rather than disabling security controls.
+
+On Ubuntu, replace `<version>` with the downloaded package version:
+
+```bash
+sudo apt install ./herdr-gx_<version>_amd64.deb
+command -v herdr
+herdr --version
+herdr
+```
+
+The deb installs `/usr/bin/herdr`; no shell profile or PATH edit is needed. APT reports package-name conflicts and may propose removing an upstream `herdr` package; review that transaction before confirming. Files owned by unrelated packages are not force-overwritten. An existing command in `~/.local/bin` or `/usr/local/bin` can still take precedence; check `command -v herdr`.
+
+GX package builds report a version containing `-gx.windows-installer.` or `-gx.deb.` and the source commit. Download the new installer/deb to upgrade. Before upgrading, finish work and explicitly stop the old local Herdr sessions; the Windows installer refuses occupied files and does not kill pane processes. Installing new files does not update an already running server. Reopen the terminal and start the new version after installation.
+
+These packages reject `herdr update`, `herdr update --handoff`, and both `herdr channel set stable` and `herdr channel set preview` before changing configuration or installing upstream binaries. `channel show` is read-only and explains that the channel does not manage this package. New package runtimes do not check for upstream binary updates or restore old updater notifications; agent detection manifest updates remain independent. Notifications from an already running old or remote server are not filtered by this local protection. There is no GX APT repository, so ordinary `apt upgrade` does not discover GitHub releases.
+
+Uninstall **Herdr GX** through Windows Installed Apps, or on Ubuntu run:
+
+```bash
+sudo apt remove herdr-gx
+```
+
+Uninstallation preserves user configuration and session data. On Windows, only the PATH entry added by this installer is removed. Releases include `manifest.json` and `SHA256SUMS` for artifact verification.
+
 ## Install
 
-On Linux or macOS, run:
+The following methods install upstream Herdr, not the GX fork. On Linux or macOS, run:
 
 ```bash
 curl -fsSL https://herdr.dev/install.sh | sh

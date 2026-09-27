@@ -152,6 +152,15 @@ fn run_channel_command(args: &[String]) -> std::io::Result<i32> {
         Some("show") if args.len() == 1 => {
             let config = crate::config::Config::load().config;
             println!("{}", config.update.channel.as_str());
+            if let Some(reason) =
+                crate::update::package_update_rejection(crate::build_info::package_manager())
+            {
+                println!(
+                    "{}",
+                    crate::i18n::texts().cli_errors.package_channel_ignored
+                );
+                println!("{reason}");
+            }
             Ok(0)
         }
         Some("help" | "--help" | "-h") => {
@@ -166,10 +175,21 @@ fn run_channel_command(args: &[String]) -> std::io::Result<i32> {
 }
 
 fn channel_set(args: &[String]) -> std::io::Result<i32> {
+    channel_set_for_package(args, crate::build_info::package_manager())
+}
+
+fn channel_set_for_package(
+    args: &[String],
+    package_manager: Option<crate::build_info::PackageManager>,
+) -> std::io::Result<i32> {
     let Some(channel) = parse_channel_set_arg(args) else {
         eprintln!("{}", crate::i18n::texts().cli_errors.channel_set_usage);
         return Ok(2);
     };
+    if let Some(reason) = crate::update::package_update_rejection(package_manager) {
+        eprintln!("{reason}");
+        return Ok(1);
+    }
 
     if let Some(reason) = channel_set_rejection(
         channel,
@@ -1206,6 +1226,35 @@ fn _print_json<T: Serialize>(value: &T) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn package_channels_are_rejected_before_config_writes() {
+        use crate::build_info::PackageManager;
+        let root =
+            std::env::temp_dir().join(format!("herdr-package-channel-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("config.toml");
+        let content = "# preserve this file\n[update]\nchannel = \"preview\"\n";
+        std::fs::write(&path, content).unwrap();
+        for config_path in [&root, &path] {
+            crate::config::test_dirs::set_config_path(config_path.clone());
+            for manager in [PackageManager::WindowsInstaller, PackageManager::Deb] {
+                for args in [vec!["stable".into()], vec!["preview".into()]] {
+                    assert_eq!(
+                        super::channel_set_for_package(&args, Some(manager)).unwrap(),
+                        1
+                    );
+                    assert_eq!(std::fs::read_to_string(&path).unwrap(), content);
+                }
+                assert_eq!(
+                    super::channel_set_for_package(&[], Some(manager)).unwrap(),
+                    2
+                );
+            }
+        }
+        assert_eq!(super::channel_set_for_package(&[], None).unwrap(), 2);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn parses_channel_set_argument() {
         assert_eq!(

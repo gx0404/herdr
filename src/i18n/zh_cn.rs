@@ -2071,6 +2071,11 @@ pub const TEXTS: Texts = Texts {
             "Nix 安装不支持自更新；preview 渠道仅适用于直接安装的 Herdr",
         self_update_disabled_nix:
             "Nix 安装不支持自更新；请使用 `nix profile upgrade` 更新，或更新提供 Herdr 的 flake input",
+        self_update_disabled_windows_installer:
+            "Herdr GX Windows 安装包构建不支持自更新或切换渠道；请自行结束本地 Herdr 会话，然后从 https://github.com/gx0404/herdr/releases 下载并运行新版 Herdr GX EXE 安装器",
+        self_update_disabled_deb:
+            "Herdr GX deb 安装包构建不支持自更新或切换渠道；请自行结束本地 Herdr 会话，从 https://github.com/gx0404/herdr/releases 下载新版 deb，再运行 `sudo apt install ./herdr-gx_<version>_amd64.deb`（将 <version> 替换为下载的版本）",
+        package_channel_ignored: "配置中的 stable/preview 渠道不控制此安装包构建的更新。",
         update_run_outside: "请先脱离会话，然后在 herdr 外部运行 `herdr update`",
         update_usage: "用法：herdr update [--handoff]",
         unknown_update_option_fmt: "未知的 update 选项：{option}",

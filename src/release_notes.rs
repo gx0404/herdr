@@ -71,7 +71,22 @@ fn load_stored_from_path(path: &Path) -> Option<StoredReleaseNotes> {
 }
 
 pub fn load_latest() -> Option<ReleaseNotes> {
-    load_latest_from_path(&pending_path(), crate::build_info::version())
+    load_latest_for_package(
+        crate::build_info::package_manager(),
+        pending_path,
+        crate::build_info::version(),
+    )
+}
+
+fn load_latest_for_package(
+    package_manager: Option<crate::build_info::PackageManager>,
+    path: impl FnOnce() -> PathBuf,
+    current_version: &str,
+) -> Option<ReleaseNotes> {
+    if package_manager.is_some() {
+        return None;
+    }
+    load_latest_from_path(&path(), current_version)
 }
 
 fn load_latest_from_path(path: &Path, current_version: &str) -> Option<ReleaseNotes> {
@@ -173,6 +188,29 @@ pub fn normalize_body(body: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn package_builds_ignore_old_update_cache_without_deleting_it() {
+        use crate::build_info::PackageManager;
+        let path =
+            std::env::temp_dir().join(format!("herdr-package-notes-{}.json", std::process::id()));
+        save_pending_to_path(&path, "99.0.0", "### Changed\n- Upstream update").unwrap();
+        let before = fs::read(&path).unwrap();
+        for manager in [PackageManager::WindowsInstaller, PackageManager::Deb] {
+            assert!(load_latest_for_package(
+                Some(manager),
+                || panic!("package cache path must not be read"),
+                "0.9.1"
+            )
+            .is_none());
+            assert_eq!(fs::read(&path).unwrap(), before);
+        }
+        let notes = load_latest_for_package(None, || path.clone(), "0.9.1").unwrap();
+        assert_eq!(notes.version, "99.0.0");
+        assert!(notes.preview);
+        assert_eq!(fs::read(&path).unwrap(), before);
+        clear_pending_at(&path).unwrap();
+    }
 
     #[test]
     fn extracts_version_section() {

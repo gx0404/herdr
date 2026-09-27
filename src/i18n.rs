@@ -2637,6 +2637,9 @@ pub struct CliErrorTexts {
     pub self_update_disabled_mise: &'static str,
     pub self_update_disabled_nix_preview: &'static str,
     pub self_update_disabled_nix: &'static str,
+    pub self_update_disabled_windows_installer: &'static str,
+    pub self_update_disabled_deb: &'static str,
+    pub package_channel_ignored: &'static str,
     pub update_run_outside: &'static str,
     pub update_usage: &'static str,
     pub unknown_update_option_fmt: &'static str, // args: option

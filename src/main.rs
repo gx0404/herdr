@@ -966,12 +966,7 @@ fn main() -> io::Result<()> {
     Ok(())
 }
 
-/// Classifies a `update::self_update` error as "self-update is disabled for this
-/// install" so the generic failure wrapper is skipped. Compares against the
-/// stable template prefixes in BOTH languages: `update::self_update` may return
-/// either a localized message or a legacy English string, and every disabled
-/// variant (Homebrew/mise/Nix, stable and preview) shares the same leading
-/// phrase within a language.
+/// Recognizes localized install-manager refusals without a generic failure wrapper.
 fn self_update_is_disabled(e: &str) -> bool {
     for lang in [i18n::Lang::En, i18n::Lang::ZhCn] {
         let t = &i18n::texts_for(lang).cli_errors;
@@ -982,6 +977,8 @@ fn self_update_is_disabled(e: &str) -> bool {
             t.self_update_disabled_mise_preview,
             t.self_update_disabled_nix,
             t.self_update_disabled_nix_preview,
+            t.self_update_disabled_windows_installer,
+            t.self_update_disabled_deb,
         ] {
             if e.starts_with(template) {
                 return true;
@@ -994,6 +991,18 @@ fn self_update_is_disabled(e: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn package_update_refusals_are_not_download_failures() {
+        for lang in [i18n::Lang::En, i18n::Lang::ZhCn] {
+            let errors = &i18n::texts_for(lang).cli_errors;
+            assert!(self_update_is_disabled(
+                errors.self_update_disabled_windows_installer
+            ));
+            assert!(self_update_is_disabled(errors.self_update_disabled_deb));
+            assert!(!self_update_is_disabled(errors.manifest_fetch_failed));
+        }
+    }
 
     #[test]
     fn default_config_lists_ui_accent_before_nested_tables() {

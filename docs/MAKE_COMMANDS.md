@@ -63,6 +63,39 @@
 | `just release-publish <ver> <preview-tag>` | 校验 preview→release 差异后打带 `Preview` / `Previous-Stable` trailer 的 tag 并只推 tag（不移动 master） | tag `v<ver>` 触发 release.yml |
 | `just release <ver> <preview-tag>` | prepare + publish（晋升已发布的 preview，不取最新 master） | 同上 |
 
+## GX fork 安装包
+
+| 命令 | 用途 | 前置与副作用 |
+|---|---|---|
+| `just package-windows --check` | Windows 只读预检 | 已安装钉版 Rust/Zig、MSVC target、Inno Setup（可用 `ISCC` 指定）；不自动装工具 |
+| `just package-deb --check` | Linux 只读预检 | 钉版 Rust/Zig、musl target、musl-gcc、dpkg-deb、readelf/nm 等 |
+| `just package-windows` | 构建 Windows x64 Setup EXE | 每次运行 Cargo；完整 ConPTY payload；输出包、manifest、sha256 |
+| `just package-deb` | 构建 Ubuntu amd64 deb | musl 静态程序；root-owned `/usr/bin/herdr` 和许可；不在宿主安装 |
+
+版本只读 `Cargo.toml`。默认要求工作树干净；本地测试可以加 `--allow-dirty`，但这类包不能发布。
+Cargo 编译目录隔离在 `target/gx/<platform>`，最终默认输出 `target/packages`；
+`--output-dir <目录>` 可选择其他产物目录。同名产物禁止覆盖，重跑应使用新的空目录。
+Windows 与 WSL 同一检出的 vendored Zig 输出仍共享，不要并发运行双平台构建。
+WSL 在 `/mnt/` 共享盘遇到 Zig 缓存 rename `AccessDenied` 时，将 `ZIG_LOCAL_CACHE_DIR`
+指向自己新建的 Linux 原生临时目录（如 `mktemp -d /tmp/herdr-gx-zig.XXXXXX`），完成后仅清理
+该临时目录；不要删除或复用正在使用的 Windows 缓存。非默认目录的 Linux Zig 用 `ZIG` 指定。
+
+发布使用默认分支上的 GitHub Actions **GX release**：选择源码 `ref`，默认 `publish=false`
+完整构建、安装 smoke 和汇总验证；显式 `publish=true` 才以 `gx-v<版本>` 发布到
+`gx0404/herdr`。仅发布两包、`manifest.json`、`SHA256SUMS`，不写上游渠道文件。
+已发布版本不可覆盖；同源同摘要的中断草稿可恢复。工具链、源码和平台必须一致，发布者及
+重跑者须有仓库 admin 权限；tag rules 拒绝时停止，不修改保护规则。
+`previous_tag` 留空时自动选择低于当前 Cargo 版本的最大已公开 GX 版本做真实升级测试；
+也可指定更旧的 `gx-v<版本>`。只读下载器验证来源、完整四资产及摘要，再恢复 smoke 所需
+sidecar。显式标签错误或旧资产异常会失败；只有确实没有旧版本时升级才记 N/A。
+
+维护脚本测试包含 `scripts.test_gx_package`、`scripts.test_gx_release`、`scripts.test_gx_smoke`，
+由 `just maintenance-test` 收集。安装 smoke 不属于本地常规测试：Windows 必须同时设置
+`HERDR_GX_DISPOSABLE=1` 且处于 GitHub-hosted runner；Linux 必须在显式一次性 Ubuntu
+容器中以 root 运行。手动调用 smoke 时，旧版升级需要传入更旧版本包及对应 manifest；
+未提供时该次升级验证报告 N/A，不将同版重装计为升级通过。发布 workflow 会按上述规则
+自动准备旧包。禁止为了测试在用户宿主安装或卸载 Herdr。
+
 ## 构建辅助
 
 | 命令 | 用途 |

@@ -1,0 +1,13 @@
+Package: herdr-gx
+Version: @VERSION@
+Architecture: amd64
+Section: utils
+Priority: optional
+Maintainer: gx0404 <gx0404@users.noreply.github.com>
+Installed-Size: @INSTALLED_SIZE@
+Provides: herdr
+Conflicts: herdr
+Homepage: https://github.com/gx0404/herdr
+Description: Herdr GX terminal workspace manager for coding agents
+ Terminal-based agent runtime with a statically linked musl executable.
+ Independent GX package; upgrade by installing a newer Herdr GX package.

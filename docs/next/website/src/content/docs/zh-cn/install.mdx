@@ -5,9 +5,52 @@ description: 在 Linux、macOS 和 Windows 上安装、更新和验证 Herdr。
 
 Herdr 为 Linux、macOS 和 Windows 提供稳定通道二进制文件。Windows 支持已正式发布,并记录了平台专用的已知限制和持续修复。
 
+## GX fork 安装包
+
+`gx0404/herdr` fork 有独立的安装包链路，目标平台是 Windows x64 与 Ubuntu 22.04 / 24.04 amd64。发布后可从 [fork 的 GitHub Releases](https://github.com/gx0404/herdr/releases) 下载 `gx-v<version>` 标签下的产物；它们与下文的上游安装方式相互独立。
+
+| 系统 | 安装包 |
+| --- | --- |
+| Windows x64 | `herdr-gx-<version>-windows-x86_64-setup.exe` |
+| Ubuntu amd64 | `herdr-gx_<version>_amd64.deb` |
+
+Windows 双击运行 Setup EXE，按当前用户安装到 `%LOCALAPPDATA%\Programs\Herdr GX`，包含应用本地 ConPTY 运行时，并将安装目录加入用户 PATH。重新打开终端后检查：
+
+```powershell
+where.exe herdr
+Get-Command herdr
+herdr --version
+herdr
+```
+
+如果命中了其他安装或 shell 别名，先检查显示的路径，不要盲目删除其他安装。已经打开的终端可能仍保留旧环境。未签名安装器可能触发 SmartScreen 提示，请核对发布来源和校验值，不要关闭安全防护。
+
+Ubuntu 将 `<version>` 替换为下载的包版本后运行：
+
+```bash
+sudo apt install ./herdr-gx_<version>_amd64.deb
+command -v herdr
+herdr --version
+herdr
+```
+
+程序安装到 `/usr/bin/herdr`，无需修改 shell 配置或 PATH。APT 会报告包名冲突，并可能建议移除上游 `herdr` 包，请在确认前检查事务内容；不强制覆盖其他包拥有的文件。原有 `~/.local/bin` 或 `/usr/local/bin` 中的命令仍可能优先，请检查 `command -v herdr`。
+
+GX 安装包的版本输出包含 `-gx.windows-installer.` 或 `-gx.deb.` 及源码提交号。升级时下载并运行新版安装器，或安装新版 deb。升级前先完成工作并自行停止旧的本地 Herdr 会话；Windows 安装器遇到文件占用会拒绝操作，不会杀掉 pane 进程。替换磁盘文件不代表运行中的服务器已经升级，安装后请重新打开终端并启动新版本。
+
+这些安装包会在修改配置或安装上游程序前，拒绝 `herdr update`、`herdr update --handoff` 以及 `herdr channel set stable` / `herdr channel set preview`。`channel show` 只读，并说明渠道不管理此安装包。新启动的包 runtime 不检查上游二进制更新，也不恢复旧自更新通知；agent 检测清单更新仍独立运行。这项本地保护不屏蔽仍在运行的旧服务器或远程服务器发来的通知。当前没有 GX APT 软件源，因此普通 `apt upgrade` 不会发现 GitHub 上的新版本。
+
+Windows 从“已安装的应用”卸载 **Herdr GX**；Ubuntu 运行：
+
+```bash
+sudo apt remove herdr-gx
+```
+
+卸载保留用户配置和会话数据；Windows 只移除本安装器添加的 PATH 条目。Release 同时提供 `manifest.json` 和 `SHA256SUMS`，用于核对产物来源与摘要。
+
 ## 安装
 
-在 Linux 或 macOS 上运行:
+以下方式安装的是上游 Herdr，不是 GX fork。在 Linux 或 macOS 上运行:
 
 ```bash
 curl -fsSL https://herdr.dev/install.sh | sh

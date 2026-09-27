@@ -3,6 +3,11 @@ use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
 
+#[path = "src/build_info.rs"]
+#[allow(dead_code)]
+// The build script shares validation; identity accessors are used by the binary.
+mod build_info;
+
 fn zig_target(target: &str) -> &str {
     match target {
         "x86_64-unknown-linux-gnu" => "x86_64-linux-gnu",
@@ -57,6 +62,17 @@ fn resolve_zig(manifest_dir: &std::path::Path) -> String {
 
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
+    println!("cargo:rerun-if-changed=src/build_info.rs");
+    println!("cargo:rerun-if-env-changed=HERDR_PACKAGE_MANAGER");
+    let package_manager = env::var("HERDR_PACKAGE_MANAGER");
+    let source_commit = env::var("HERDR_BUILD_COMMIT");
+    let package_manager = match &package_manager {
+        Ok(value) => Some(value.as_str()),
+        Err(env::VarError::NotPresent) => None,
+        Err(err) => panic!("failed to read HERDR_PACKAGE_MANAGER: {err}"),
+    };
+    build_info::validate_package_identity(package_manager, source_commit.as_deref().ok())
+        .unwrap_or_else(|err| panic!("{err}"));
     println!("cargo:rerun-if-changed=vendor/libghostty-vt.vendor.json");
     println!("cargo:rerun-if-changed=vendor/libghostty-vt/build.zig");
     println!("cargo:rerun-if-changed=vendor/libghostty-vt/build.zig.zon");
