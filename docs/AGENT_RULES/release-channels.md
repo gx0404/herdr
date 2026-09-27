@@ -8,6 +8,12 @@ release/preview 工作流与脚本、`scripts/changelog.py`、`scripts/preview.p
 
 ## fork 例外：GX 安装包
 
+- fork 的 `.github/workflows/` 只保留 `ci.yml` 与 `gx-release.yml`。CI 监听默认
+  分支 `feature/gx_herdr` 的 push 及 PR，GX 的源码 ref 默认选择同一分支。
+- 上游/冗余的九份 workflow 原样归档于 `.github/workflows-archive/`，不被 Actions
+  调度。同步上游时保持这一活动集合，不把归档重新启用；下方 preview/stable 章节
+  保留上游流程语义，不代表 fork 仍运行这些流程。历史提交校验继续检查该提交当时的
+  `.github/workflows/` 路径，不能用 archive 文件冒充当时可运行的发布门禁。
 - `scripts/gx_package.py`、`scripts/gx_release.py`、`packaging/windows/herdr-gx.iss`、
   `packaging/linux/` 与 `.github/workflows/gx-release.yml` 是 fork 自有链，可按用户
   授权维护；不修改下述上游发布流程或 `distribution/*.json`。

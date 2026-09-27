@@ -29,7 +29,7 @@
 | `src/ghostty/bindings.rs` | vendored C API | `just libghostty-bindings`（bindgen-cli 0.72.1） | `src/ghostty` | 编译本身 + `test_vendor_libghostty_vt` |
 | `docs/kb/chunks.json` | 上述文档、manifest、config 契约、`src/**/*.rs` 结构 | `scripts/build_agent_kb.py` | `scripts/agent_kb.py` 检索 | `just kb-check` + `scripts/test_agent_kb.py` golden |
 | `graphify-out/GRAPH_REPORT.md`（镜像 `docs/graphify/`）、标签+sig、指纹 | `src/**`（Rust） | `scripts/graphify.sh rebuild` | 图查询、overview | `just graph-check` |
-| `CHANGELOG.md` / `docs/versions/<v>/` / `distribution/latest.json` | `docs/next` + tag | release 流程（`just release*`、release.yml） | 用户/更新器/网站 | `just release-docs-check`、distribution.yml |
+| `CHANGELOG.md` / `docs/versions/<v>/` / `distribution/latest.json` | `docs/next` + tag | 上游 release 流程（`just release*`；release.yml 在本 fork 已归档） | 用户/更新器/网站 | `just release-docs-check`；上游 distribution.yml 在本 fork 已归档 |
 
 约定：新增生成物时在本表登记输入→生成器→产物→消费者→检查，并默认提供只读
 check 与显式写入两个入口（详见 `AGENT_RULES/testing.md`、`ai-tooling.md`）。

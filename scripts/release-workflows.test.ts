@@ -1,15 +1,50 @@
 import { describe, expect, test } from "bun:test";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { join } from "node:path";
 
-const load = (name: string): any =>
-  Bun.YAML.parse(readFileSync(new URL(`../.github/workflows/${name}.yml`, import.meta.url), "utf8"));
-const preview = load("preview");
-const release = load("release");
+type WorkflowDirectory = "workflows" | "workflows-archive";
+const load = (name: string, directory: WorkflowDirectory = "workflows"): any =>
+  Bun.YAML.parse(readFileSync(new URL(`../.github/${directory}/${name}.yml`, import.meta.url), "utf8"));
+const workflowNames = (directory: WorkflowDirectory): string[] =>
+  readdirSync(new URL(`../.github/${directory}/`, import.meta.url))
+    .filter((name) => /\.ya?ml$/i.test(name))
+    .sort();
+const preview = load("preview", "workflows-archive");
+const release = load("release", "workflows-archive");
 const adminGate = release.jobs["validate-release-source"].steps[0];
 
-describe("official publishing workflow boundaries", () => {
+describe("fork workflow layout", () => {
+  test("only CI and GX release remain active", () => {
+    expect(workflowNames("workflows")).toEqual(["ci.yml", "gx-release.yml"]);
+  });
+
+  test("upstream and redundant workflows remain available only in the archive", () => {
+    expect(workflowNames("workflows-archive")).toEqual([
+      "build-artifacts-manual.yml",
+      "distribution.yml",
+      "label-next-release-issues.yml",
+      "nix.yml",
+      "pr-gate.yml",
+      "preview.yml",
+      "release.yml",
+      "website-deploy.yml",
+      "windows-arm64.yml",
+    ]);
+  });
+
+  test("retained workflows target the fork default branch without removing PR checks", () => {
+    const ci = load("ci");
+    expect(ci.on.push.branches).toEqual(["feature/gx_herdr"]);
+    expect(ci.on.pull_request.types).toEqual(["opened", "synchronize", "reopened"]);
+    expect(ci.jobs["conventional-commits"].if).toBe(
+      "github.event_name != 'push' || github.ref_name == github.event.repository.default_branch",
+    );
+    expect(load("gx-release").on.workflow_dispatch.inputs.ref.default).toBe("feature/gx_herdr");
+  });
+});
+
+describe("archived official publishing workflow boundaries", () => {
   test("publishing is tag-only while normal PR CI remains enabled", () => {
     expect(preview.on).toEqual({ push: { tags: ["preview-*"] } });
     expect(release.on).toEqual({ push: { tags: ["v*"] } });

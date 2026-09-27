@@ -52,7 +52,10 @@
 | `just bench-render-scale` | 非门禁全渲染扩展画像（1/15 pane、后台 workspace） | release 构建 | 控制台画像（记录到任务说明） |
 | `just bench-release-smoke` | 发布前 CPU 对比（~3–5 分钟；未设 `HERDR_PERF_BASELINE_BIN` 下载 stable） | 网络或本地基线 | 对比结论；显著回归须调查 |
 
-## 发布链（维护者；见 `AGENT_RULES/release-channels.md`）
+## 发布链（上游保留入口；见 `AGENT_RULES/release-channels.md`）
+
+下表描述上游维护者流程。本 fork 的对应 workflow 已原样移至
+`.github/workflows-archive/`，不会因推送这些 tag 自动发布；fork 发包使用后面的 GX 入口。
 
 | 命令 | 用途 | 关键守门 |
 |---|---|---|
@@ -80,7 +83,9 @@ WSL 在 `/mnt/` 共享盘遇到 Zig 缓存 rename `AccessDenied` 时，将 `ZIG_
 指向自己新建的 Linux 原生临时目录（如 `mktemp -d /tmp/herdr-gx-zig.XXXXXX`），完成后仅清理
 该临时目录；不要删除或复用正在使用的 Windows 缓存。非默认目录的 Linux Zig 用 `ZIG` 指定。
 
-发布使用默认分支上的 GitHub Actions **GX release**：选择源码 `ref`，默认 `publish=false`
+本 fork 的活动 Actions 只有 **CI** 和 **GX release**；CI 检查默认分支
+`feature/gx_herdr` 的 push 及 PR，其余九份定义在 `.github/workflows-archive/` 原样归档。
+发布使用 **GX release**：源码 `ref` 默认 `feature/gx_herdr`，默认 `publish=false`
 完整构建、安装 smoke 和汇总验证；显式 `publish=true` 才以 `gx-v<版本>` 发布到
 `gx0404/herdr`。仅发布两包、`manifest.json`、`SHA256SUMS`，不写上游渠道文件。
 已发布版本不可覆盖；同源同摘要的中断草稿可恢复。工具链、源码和平台必须一致，发布者及

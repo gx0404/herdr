@@ -239,15 +239,15 @@ tasks = []
 id = "release-channels"
 doc = "docs/AGENT_RULES/release-channels.md"
 paths = [
-  ".github/workflows/build-artifacts-manual.yml",
-  ".github/workflows/distribution.yml",
+  ".github/workflows-archive/build-artifacts-manual.yml",
+  ".github/workflows-archive/distribution.yml",
+  ".github/workflows-archive/label-next-release-issues.yml",
+  ".github/workflows-archive/nix.yml",
+  ".github/workflows-archive/preview.yml",
+  ".github/workflows-archive/release.yml",
+  ".github/workflows-archive/website-deploy.yml",
+  ".github/workflows-archive/windows-arm64.yml",
   ".github/workflows/gx-release.yml",
-  ".github/workflows/label-next-release-issues.yml",
-  ".github/workflows/nix.yml",
-  ".github/workflows/preview.yml",
-  ".github/workflows/release.yml",
-  ".github/workflows/website-deploy.yml",
-  ".github/workflows/windows-arm64.yml",
   "CHANGELOG.md",
   "distribution/**",
   "flake.lock",
