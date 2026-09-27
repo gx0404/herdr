@@ -53,6 +53,14 @@ impl Lang {
 
 static LANG: AtomicU8 = AtomicU8::new(Lang::ZhCn as u8);
 
+// 测试专用：单进程并发跑测试（`cargo test`，区别于 nextest 的进程隔离）
+// 时，语言选择走线程本地覆盖，guard/设置切换互不串扰，全局默认值保持
+// zh-CN 不变。每个测试跑在自己的线程上，线程结束时覆盖随之消失。
+#[cfg(test)]
+thread_local! {
+    static TEST_LANG: std::cell::Cell<Option<Lang>> = const { std::cell::Cell::new(None) };
+}
+
 /// Apply a config-file language change. An explicit `HERDR_LANG` pin wins so
 /// reloading the config (e.g. saving an unrelated setting) cannot flip the
 /// language away from what the operator forced for this run.
@@ -64,31 +72,42 @@ pub fn apply_config_language(lang: Lang) {
 }
 
 pub fn set_lang(lang: Lang) {
+    #[cfg(test)]
+    if TEST_LANG.with(|slot| slot.get()).is_some() {
+        TEST_LANG.with(|slot| slot.set(Some(lang)));
+        return;
+    }
     LANG.store(lang as u8, Ordering::Relaxed);
 }
 
 pub fn lang() -> Lang {
+    #[cfg(test)]
+    if let Some(lang) = TEST_LANG.with(|slot| slot.get()) {
+        return lang;
+    }
     match LANG.load(Ordering::Relaxed) {
         1 => Lang::En,
         _ => Lang::ZhCn,
     }
 }
 
-/// Test helper: switch the language for the guard's lifetime.
+/// Test helper: switch the language for the guard's lifetime. The override is
+/// thread-local so concurrent tests in the same process keep their own
+/// language; production `set_lang` calls made while the guard is held are
+/// redirected to the same thread-local slot.
 #[cfg(test)]
 pub fn lang_guard(lang: Lang) -> LangGuard {
-    let previous = self::lang();
-    set_lang(lang);
+    let previous = TEST_LANG.with(|slot| slot.replace(Some(lang)));
     LangGuard(previous)
 }
 
 #[cfg(test)]
-pub struct LangGuard(Lang);
+pub struct LangGuard(Option<Lang>);
 
 #[cfg(test)]
 impl Drop for LangGuard {
     fn drop(&mut self) {
-        set_lang(self.0);
+        TEST_LANG.with(|slot| slot.set(self.0));
     }
 }
 

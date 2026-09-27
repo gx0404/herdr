@@ -159,33 +159,37 @@ pub(crate) fn replace_file(
     source: &std::path::Path,
     destination: &std::path::Path,
 ) -> std::io::Result<()> {
-    use std::os::windows::ffi::OsStrExt;
-    use windows_sys::Win32::Storage::FileSystem::{
-        MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
-    };
+    // std::fs::rename on Windows renames through an open handle
+    // (SetFileInformationByHandle / FileRenameInfoEx with POSIX replace
+    // semantics): concurrent writers replacing the same destination serialize
+    // correctly. Raw MoveFileExW(MOVEFILE_REPLACE_EXISTING) instead fails
+    // transiently with ERROR_ACCESS_DENIED in that scenario, which made
+    // concurrent client-state stores (e.g. chrome preferences) lose writers.
+    std::fs::rename(source, destination)?;
+    // Durability previously came from MOVEFILE_WRITE_THROUGH; flush the parent
+    // directory so the rename itself is durable before returning.
+    flush_parent_directory(destination)
+}
 
-    let source = source
-        .as_os_str()
-        .encode_wide()
-        .chain(std::iter::once(0))
-        .collect::<Vec<_>>();
-    let destination = destination
-        .as_os_str()
-        .encode_wide()
-        .chain(std::iter::once(0))
-        .collect::<Vec<_>>();
-    let moved = unsafe {
-        MoveFileExW(
-            source.as_ptr(),
-            destination.as_ptr(),
-            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
-        )
+fn flush_parent_directory(path: &std::path::Path) -> std::io::Result<()> {
+    use std::os::windows::fs::OpenOptionsExt;
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Storage::FileSystem::{FlushFileBuffers, FILE_FLAG_BACKUP_SEMANTICS};
+
+    let Some(parent) = path.parent() else {
+        return Ok(());
     };
-    if moved == 0 {
-        Err(std::io::Error::last_os_error())
-    } else {
-        Ok(())
+    // FlushFileBuffers requires a handle with write access; a read-only
+    // directory handle fails with ERROR_ACCESS_DENIED.
+    let directory = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+        .open(parent)?;
+    if unsafe { FlushFileBuffers(directory.as_raw_handle() as _) } == 0 {
+        return Err(std::io::Error::last_os_error());
     }
+    Ok(())
 }
 
 pub(crate) fn config_file_link_count(path: &std::path::Path) -> std::io::Result<u64> {
@@ -578,9 +582,7 @@ static GIT_BASH_PROCESS_CACHE: LazyLock<Mutex<HashMap<u32, CachedGitBashProcess>
 
 pub(crate) fn remote_ssh_config_paths() -> super::RemoteSshConfigPaths {
     super::RemoteSshConfigPaths {
-        user_config: std::env::var_os("USERPROFILE")
-            .map(PathBuf::from)
-            .map(|home| home.join(".ssh").join("config")),
+        user_config: super::remote_ssh_user_config_path(),
         system_config: std::env::var_os("PROGRAMDATA")
             .map(PathBuf::from)
             .map(|dir| dir.join("ssh").join("ssh_config")),

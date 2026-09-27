@@ -386,9 +386,9 @@ fn with_temp_state_home(name: &str) -> std::path::PathBuf {
         std::env::temp_dir().join(format!("herdr-machines-test-{name}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("temp state home");
-    // Safety: nextest isolates every test in its own process, so mutating the
-    // process environment here cannot race other tests.
-    unsafe { std::env::set_var("XDG_STATE_HOME", &dir) };
+    // 线程本地覆盖而不是改进程环境变量：`cargo test` 单进程并发时环境
+    // 变量是全局的，会串到同进程的其它测试（nextest 才是进程隔离）。
+    crate::config::test_dirs::set_state_dir(dir.clone());
     dir
 }
 
@@ -853,12 +853,11 @@ fn with_temp_home(name: &str) -> std::path::PathBuf {
     let dir = std::env::temp_dir().join(format!("herdr-machines-c1-{name}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(dir.join(".ssh")).expect("temp home");
-    // Safety: nextest isolates every test in its own process, so mutating the
-    // process environment here cannot race other tests.
-    unsafe {
-        std::env::set_var("HOME", &dir);
-        std::env::set_var("XDG_STATE_HOME", dir.join("state"));
-    }
+    // 线程本地覆盖而不是改进程环境变量（HOME/USERPROFILE/XDG_STATE_HOME
+    // 都是进程全局的，cargo test 单进程并发时会串测试；Windows 上 SSH
+    // 配置发现走 USERPROFILE，HOME 根本不会被读）。
+    crate::config::test_dirs::set_home_dir(dir.clone());
+    crate::config::test_dirs::set_state_dir(dir.join("state"));
     dir
 }
 

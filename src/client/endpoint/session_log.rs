@@ -761,14 +761,19 @@ mod tests {
     #[test]
     fn render_log_path_keeps_absolute_templates_and_rejects_traversal() {
         let profile = profile_with_log(SessionLogProfile::default());
-        let path = render_log_path(
-            Some("/tmp/herdr-test/{pane}.log"),
-            &profile,
-            "w1:p1",
-            date(),
-        )
-        .expect("absolute template");
-        assert_eq!(path, PathBuf::from("/tmp/herdr-test/w1-p1.log"));
+        // A rooted template without a drive prefix is not absolute on
+        // Windows, so the platform-absolute fixture differs per OS.
+        #[cfg(windows)]
+        let template = "C:/tmp/herdr-test/{pane}.log";
+        #[cfg(not(windows))]
+        let template = "/tmp/herdr-test/{pane}.log";
+        let path =
+            render_log_path(Some(template), &profile, "w1:p1", date()).expect("absolute template");
+        #[cfg(windows)]
+        let expected = PathBuf::from("C:/tmp/herdr-test/w1-p1.log");
+        #[cfg(not(windows))]
+        let expected = PathBuf::from("/tmp/herdr-test/w1-p1.log");
+        assert_eq!(path, expected);
         assert!(
             render_log_path(Some("../{pane}.log"), &profile, "w1:p1", date()).is_err(),
             "parent traversal must be rejected"
@@ -780,10 +785,10 @@ mod tests {
     fn render_log_path_defaults_to_the_machine_date_pane_shape() {
         let profile = profile_with_log(SessionLogProfile::default());
         let path = render_log_path(None, &profile, "w3:p1", date()).expect("default template");
-        assert!(path.to_string_lossy().ends_with(&format!(
-            "Build-Machine{}2026-09-17-w3-p1.log",
-            std::path::MAIN_SEPARATOR
-        )));
+        // Component-wise comparison: the template's `/` separators stay
+        // verbatim inside the rendered path on every platform.
+        let suffix = std::path::Path::new("Build-Machine").join("2026-09-17-w3-p1.log");
+        assert!(path.ends_with(&suffix), "{}", path.display());
     }
 
     #[test]

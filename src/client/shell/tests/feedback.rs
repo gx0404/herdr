@@ -526,9 +526,12 @@ fn disabled_spinner_shows_a_static_glyph_and_stops_the_clock() {
 #[test]
 fn relative_time_labels_cover_just_now_minutes_hours_and_days() {
     let _lang = crate::i18n::lang_guard(crate::i18n::Lang::En);
-    let now = std::time::Instant::now();
+    // `Instant - Duration` underflows when the system uptime is shorter than
+    // the duration (Windows Instant starts at boot), so anchor the past at a
+    // fresh instant and move `now` forward instead.
+    let at = std::time::Instant::now();
     let ago = |duration: std::time::Duration| {
-        super::super::feedback::relative_time_ago(now - duration, now)
+        super::super::feedback::relative_time_ago(at, at + duration)
     };
     assert_eq!(ago(std::time::Duration::from_secs(5)), "just now");
     assert_eq!(ago(std::time::Duration::from_secs(5 * 60)), "5m ago");

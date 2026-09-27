@@ -38,10 +38,58 @@ pub fn config_dir() -> PathBuf {
 }
 
 pub fn state_dir() -> PathBuf {
+    #[cfg(test)]
+    if let Some(dir) = test_dirs::state_dir() {
+        return dir;
+    }
     if let Ok(dir) = std::env::var("XDG_STATE_HOME") {
         return PathBuf::from(dir).join(app_dir_name());
     }
     platform_state_dir()
+}
+
+// 测试专用的线程本地目录覆盖：`cargo test` 在同一进程里并发跑测试，
+// 经环境变量（XDG_STATE_HOME 等）改路径会串到别的测试；各测试线程改
+// 自己的覆盖即可互不干扰。每个测试跑在自己的线程上，覆盖随线程结束。
+#[cfg(test)]
+pub(crate) mod test_dirs {
+    use std::path::PathBuf;
+
+    thread_local! {
+        static STATE_DIR: std::cell::RefCell<Option<PathBuf>> =
+            const { std::cell::RefCell::new(None) };
+        static HOME_DIR: std::cell::RefCell<Option<PathBuf>> =
+            const { std::cell::RefCell::new(None) };
+        static CONFIG_PATH: std::cell::RefCell<Option<PathBuf>> =
+            const { std::cell::RefCell::new(None) };
+    }
+
+    pub(crate) fn state_dir() -> Option<PathBuf> {
+        STATE_DIR.with(|slot| slot.borrow().clone())
+    }
+
+    pub(crate) fn home_dir() -> Option<PathBuf> {
+        HOME_DIR.with(|slot| slot.borrow().clone())
+    }
+
+    pub(crate) fn config_path() -> Option<PathBuf> {
+        CONFIG_PATH.with(|slot| slot.borrow().clone())
+    }
+
+    /// 覆盖 `state_dir()` 的解析结果（测试线程本地，不需还原）。
+    pub(crate) fn set_state_dir(dir: PathBuf) {
+        STATE_DIR.with(|slot| *slot.borrow_mut() = Some(dir));
+    }
+
+    /// 覆盖测试里「用户主目录」的解析结果（SSH 配置发现等读取处）。
+    pub(crate) fn set_home_dir(dir: PathBuf) {
+        HOME_DIR.with(|slot| *slot.borrow_mut() = Some(dir));
+    }
+
+    /// 覆盖 `config_path()` 的解析结果（测试线程本地，不需还原）。
+    pub(crate) fn set_config_path(path: PathBuf) {
+        CONFIG_PATH.with(|slot| *slot.borrow_mut() = Some(path));
+    }
 }
 
 #[cfg(windows)]
@@ -196,6 +244,10 @@ pub(super) fn resolve_config_relative_path(path: &Path) -> PathBuf {
 }
 
 pub fn config_path() -> PathBuf {
+    #[cfg(test)]
+    if let Some(path) = test_dirs::config_path() {
+        return path;
+    }
     if let Ok(path) = std::env::var(CONFIG_PATH_ENV_VAR) {
         return PathBuf::from(path);
     }

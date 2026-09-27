@@ -44,21 +44,43 @@ pub(super) fn watch_broadcast_set(
     should_quit: Arc<AtomicBool>,
 ) {
     std::thread::spawn(move || {
-        let mut previous = None;
-        while !should_quit.load(Ordering::Acquire) {
-            let path = endpoint::broadcast_path();
-            let current = std::fs::read(&path).unwrap_or_default();
-            if previous.as_ref() != Some(&current) {
-                previous = Some(current);
-                if event_tx
-                    .blocking_send(ClientLoopEvent::BroadcastSetChanged)
-                    .is_err()
-                {
-                    break;
-                }
+        watch_broadcast_set_loop(endpoint::broadcast_path, event_tx, should_quit)
+    });
+}
+
+fn watch_broadcast_set_loop(
+    path: impl Fn() -> std::path::PathBuf,
+    event_tx: tokio::sync::mpsc::Sender<ClientLoopEvent>,
+    should_quit: Arc<AtomicBool>,
+) {
+    let mut previous = None;
+    while !should_quit.load(Ordering::Acquire) {
+        let path = path();
+        let current = std::fs::read(&path).unwrap_or_default();
+        if previous.as_ref() != Some(&current) {
+            previous = Some(current);
+            if event_tx
+                .blocking_send(ClientLoopEvent::BroadcastSetChanged)
+                .is_err()
+            {
+                break;
             }
-            std::thread::sleep(catalog_poll_interval(&path));
         }
+        std::thread::sleep(catalog_poll_interval(&path));
+    }
+}
+
+/// Test variant watching a fixed path: the poll loop runs on its own thread,
+/// where the thread-local `state_dir` override of the test thread is not
+/// visible.
+#[cfg(test)]
+fn watch_broadcast_set_at(
+    path: std::path::PathBuf,
+    event_tx: tokio::sync::mpsc::Sender<ClientLoopEvent>,
+    should_quit: Arc<AtomicBool>,
+) {
+    std::thread::spawn(move || {
+        watch_broadcast_set_loop(move || path.clone(), event_tx, should_quit)
     });
 }
 
@@ -143,12 +165,13 @@ mod tests {
             std::env::temp_dir().join(format!("herdr-broadcast-watch-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("temp state home");
-        // Safety: nextest isolates every test in its own process, so mutating
-        // the process environment here cannot race other tests.
-        unsafe { std::env::set_var("XDG_STATE_HOME", &dir) };
+        // The poll loop runs on its own thread, where a thread-local
+        // `state_dir` override is not visible, so the test watches a fixed
+        // path instead of redirecting the process environment.
+        let path = dir.join("client").join("broadcast.json");
         let (tx, mut rx) = tokio::sync::mpsc::channel(8);
         let quit = Arc::new(AtomicBool::new(false));
-        watch_broadcast_set(tx, quit.clone());
+        watch_broadcast_set_at(path.clone(), tx, quit.clone());
 
         // `catalog_poll_interval` 在被观察文件不存在时退到 5 s；第二次通知
         // 必然要跨过这次退避才能触发。满载下（如并行 `cargo build
@@ -179,7 +202,6 @@ mod tests {
         assert!(rx.try_recv().is_err());
 
         // An external write notifies again.
-        let path = endpoint::broadcast_path();
         std::fs::create_dir_all(path.parent().expect("client dir")).expect("mkdir");
         std::fs::write(&path, br#"{"version":1,"enabled":true}"#).expect("write");
         assert!(matches!(

@@ -41,9 +41,7 @@ pub(super) fn read_terminal_grid_size() -> std::io::Result<(u16, u16)> {
 
 pub(crate) fn remote_ssh_config_paths() -> super::RemoteSshConfigPaths {
     super::RemoteSshConfigPaths {
-        user_config: std::env::var_os("HOME")
-            .map(PathBuf::from)
-            .map(|home| home.join(".ssh").join("config")),
+        user_config: super::remote_ssh_user_config_path(),
         system_config: None,
         multiplexing: false,
     }

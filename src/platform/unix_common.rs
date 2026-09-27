@@ -327,9 +327,7 @@ pub(crate) fn detach_stdout() -> std::io::Result<()> {
 
 pub(crate) fn remote_ssh_config_paths() -> super::RemoteSshConfigPaths {
     super::RemoteSshConfigPaths {
-        user_config: std::env::var_os("HOME")
-            .map(PathBuf::from)
-            .map(|home| home.join(".ssh").join("config")),
+        user_config: super::remote_ssh_user_config_path(),
         system_config: Some(PathBuf::from("/etc/ssh/ssh_config")),
         multiplexing: true,
     }

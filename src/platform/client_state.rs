@@ -27,6 +27,6 @@ pub(crate) fn sync_parent_directory(path: &Path) -> std::io::Result<()> {
 
 #[cfg(windows)]
 pub(crate) fn sync_parent_directory(_path: &Path) -> std::io::Result<()> {
-    // replace_file uses MOVEFILE_WRITE_THROUGH on Windows.
+    // replace_file flushes the parent directory itself on Windows.
     Ok(())
 }

@@ -467,6 +467,22 @@ pub(crate) struct RemoteSshConfigPaths {
     pub(crate) multiplexing: bool,
 }
 
+/// User-level SSH client config path shared by the per-OS
+/// `remote_ssh_config_paths`; only the variable selection is OS-specific
+/// (`USERPROFILE` vs `HOME`). Tests pin a thread-local home
+/// (`config::test_dirs::set_home_dir`) instead of mutating the process
+/// environment, which would race sibling tests under `cargo test`.
+pub(crate) fn remote_ssh_user_config_path() -> Option<std::path::PathBuf> {
+    #[cfg(test)]
+    if let Some(home) = crate::config::test_dirs::home_dir() {
+        return Some(home.join(".ssh").join("config"));
+    }
+    let key = if cfg!(windows) { "USERPROFILE" } else { "HOME" };
+    std::env::var_os(key)
+        .map(std::path::PathBuf::from)
+        .map(|home| home.join(".ssh").join("config"))
+}
+
 /// Home directory used to expand a leading `~` in SSH client config paths
 /// (`Include`, `IdentityFile`). Matches the per-OS home source already used by
 /// `remote_ssh_config_paths`; only the variable selection is OS-specific, so a

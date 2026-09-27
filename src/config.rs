@@ -44,6 +44,8 @@ pub use self::{
     window_title::{WindowTitlePart, WindowTitleTemplate, WindowTitleToken},
 };
 
+#[cfg(test)]
+pub(crate) use self::io::test_dirs;
 pub(crate) use self::keybinds::parse_key_combo;
 pub(crate) use self::write::{update_file_at, write_edit, ConfigEdit};
 pub(crate) use self::{

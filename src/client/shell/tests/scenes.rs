@@ -20,9 +20,9 @@ fn with_temp_state_home(name: &str) -> std::path::PathBuf {
     let dir = std::env::temp_dir().join(format!("herdr-scenes-test-{name}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("temp state home");
-    // Safety: nextest isolates every test in its own process, so mutating the
-    // process environment here cannot race other tests.
-    unsafe { std::env::set_var("XDG_STATE_HOME", &dir) };
+    // 线程本地覆盖而不是改进程环境变量：`cargo test` 单进程并发时环境
+    // 变量是全局的，会串到同进程的其它测试（nextest 才是进程隔离）。
+    crate::config::test_dirs::set_state_dir(dir.clone());
     dir
 }
 
@@ -83,8 +83,8 @@ fn scene_machine(profile: &SavedSshEndpoint) -> super::super::scenes_overlay::Cl
 }
 
 fn scenes_path(_dir: &std::path::Path) -> std::path::PathBuf {
-    // The env override set by `with_temp_state_home` resolves through the
-    // same helper the overlay uses (the app dir name differs in debug).
+    // The thread-local override set by `with_temp_state_home` resolves through
+    // the same helper the overlay uses (the app dir name differs in debug).
     super::super::scenes_overlay::scene_snapshots_path()
 }
 

@@ -1184,8 +1184,9 @@ fn settings_language_choice_switches_live_and_persists_to_config() {
     std::fs::create_dir_all(&base).expect("temp dir");
     let config_path = base.join("config.toml");
     std::fs::write(&config_path, "[theme]\nname = \"catppuccin\"\n").expect("seed config");
-    let original_config_path = std::env::var_os(crate::config::CONFIG_PATH_ENV_VAR);
-    std::env::set_var(crate::config::CONFIG_PATH_ENV_VAR, &config_path);
+    // 线程本地覆盖而不是改进程环境变量：`cargo test` 单进程并发时
+    // CONFIG_PATH_ENV_VAR 是全局的，会串到同进程的其它测试。
+    crate::config::test_dirs::set_config_path(config_path.clone());
 
     let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
     state.open_settings_overlay();
@@ -1214,10 +1215,6 @@ fn settings_language_choice_switches_live_and_persists_to_config() {
         "language apply keeps the settings overlay open"
     );
 
-    match original_config_path {
-        Some(value) => std::env::set_var(crate::config::CONFIG_PATH_ENV_VAR, value),
-        None => std::env::remove_var(crate::config::CONFIG_PATH_ENV_VAR),
-    }
     let _ = std::fs::remove_dir_all(&base);
 }
 
