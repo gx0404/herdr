@@ -2479,6 +2479,7 @@ mod tests {
                     agent_session_id: Some(session.into()),
                     agent_session_path: Some(transcript.to_string_lossy().into_owned()),
                     session_start_source: Some("startup".into()),
+                    resume_argv: None,
                 },
             ),
         });
@@ -2536,6 +2537,7 @@ mod tests {
                             agent_session_id: Some(id.into()),
                             agent_session_path: raw,
                             session_start_source: Some(source.into()),
+                            resume_argv: None,
                         },
                     ),
                 });
@@ -2640,6 +2642,7 @@ mod tests {
                         agent_session_id: Some(session.into()),
                         agent_session_path: None,
                         session_start_source: Some("clear".into()),
+                        resume_argv: None,
                     },
                 ),
             });
@@ -2715,6 +2718,7 @@ mod tests {
                         agent_session_id: Some(session.into()),
                         agent_session_path: Some(path(session)),
                         session_start_source: Some("startup".into()),
+                        resume_argv: None,
                     },
                 ),
             });

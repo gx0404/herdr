@@ -16,8 +16,9 @@ config-reference 校验脚本。框架自身文档（AGENT_RULES、AI_TOOLS、kb
   `distribution/preview.json` 原子提交，**严禁手改**；用
   `node scripts/docs/preview.mjs check` 校验。
 - 已发布 stable 文档在 `docs/versions/`：release CI 从打 tag 的 `docs/next` 树
-  播种每个版本；维护者事后可修正已发布版本中的事实性文档错误，同时把修正套用
-  到 `docs/next`（若适用于未来版本）；不得用当前草稿替换已发布树。私有网站从
+  播种每个版本；维护者事后可对该版本本身适用的内容做修正与改进，无需再发一次
+  herdr 发布，但不得在已发布版本里记录未发布行为，同时把修正套用到
+  `docs/next`（若适用于未来版本）；不得用当前草稿替换已发布树。私有网站从
   `docs/versions/manifest.json` 选版本渲染；herdr 仓库是公开快照的真源。
 
 ## 硬性禁改项

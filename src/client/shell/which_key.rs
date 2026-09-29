@@ -12,10 +12,10 @@ pub(super) type WhichKeyGroup = (&'static str, Vec<(String, Cow<'static, str>)>)
 /// Navigate-mode entries and unbound ("unset") actions are omitted; prefix
 /// entries keep only the right-hand side you actually type next.
 pub(super) fn which_key_groups(keybinds: &LiveKeybindConfig) -> Vec<WhichKeyGroup> {
-    let prefix_label = crate::config::format_key_combo(keybinds.prefix);
+    let prefix_label = keybinds.primary_prefix_label();
     let navigation_group = crate::i18n::texts().keybinds.group_navigation;
     let unset = crate::i18n::texts().keybinds.unset;
-    crate::input::keybind_help_groups(&keybinds.keybinds, keybinds.prefix)
+    crate::input::keybind_help_groups(&keybinds.keybinds, &keybinds.prefix)
         .into_iter()
         .filter(|(group, _)| *group != navigation_group)
         .filter_map(|(group, entries)| {

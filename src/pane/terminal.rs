@@ -260,6 +260,10 @@ pub(crate) struct GhosttyPaneCore {
     pub force_fallback_after_collection_for_test: bool,
     pub terminal: crate::ghostty::Terminal,
     synchronized_output_epoch: u64,
+    /// 上次脏行收集时 DECSCNM（?5，全屏反相）的状态：内核只为单元格变更标脏，
+    /// 模式翻转不改任何单元格，但渲染层会物化反相后的默认色——翻转必须视为
+    /// 全量脏，否则增量补丁保留翻转前的颜色。
+    decscnm_seen: bool,
     #[cfg(windows)]
     recent_fallback: windows_recent_fallback::Cache,
     pub render_state: crate::ghostty::RenderState,
@@ -885,6 +889,10 @@ impl PaneTerminal {
     {
         self.ghostty
             .kitty_image_placements_with_data_filter(needs_data)
+    }
+
+    pub(crate) fn kitty_image_fingerprints(&self, image_ids: &[u32]) -> Vec<Option<u64>> {
+        self.ghostty.kitty_image_fingerprints(image_ids)
     }
 
     pub fn apply_host_terminal_theme(&self, theme: crate::terminal_theme::TerminalTheme) {
@@ -1513,6 +1521,7 @@ impl GhosttyPaneTerminal {
                 force_fallback_after_collection_for_test: false,
                 terminal,
                 synchronized_output_epoch: 0,
+                decscnm_seen: false,
                 #[cfg(windows)]
                 recent_fallback: windows_recent_fallback::Cache::default(),
                 render_state,
@@ -2778,6 +2787,13 @@ impl GhosttyPaneTerminal {
                     .ok()
             })
             .unwrap_or_default()
+            .into_iter()
+            .map(|region| crate::api::schema::PaneLinkRegion {
+                row: region.row,
+                start_col: region.start_col,
+                end_col: region.end_col,
+            })
+            .collect()
     }
 
     pub(crate) fn link_target_at(&self, col: u16, row: u16) -> Option<crate::ghostty::LinkTarget> {
@@ -2821,6 +2837,14 @@ impl GhosttyPaneTerminal {
                     .ok()
             })
             .unwrap_or_default()
+    }
+
+    pub(crate) fn kitty_image_fingerprints(&self, image_ids: &[u32]) -> Vec<Option<u64>> {
+        self.core
+            .lock()
+            .ok()
+            .and_then(|core| core.terminal.kitty_image_fingerprints(image_ids).ok())
+            .unwrap_or_else(|| vec![None; image_ids.len()])
     }
 
     pub fn render(&self, frame: &mut Frame, area: Rect, show_cursor: bool) {
@@ -3119,14 +3143,24 @@ fn ghostty_collect_dirty_patch(
     let GhosttyPaneCore {
         terminal,
         render_state,
+        decscnm_seen,
         ..
     } = core;
     if render_state.update(terminal).is_err() {
         fallback!("render_state_update_error");
     }
+    // DECSCNM（private mode 5）翻转不改单元格，内核不标脏；渲染层物化反相默认
+    // 色，因此翻转等价于全量脏，靠人工检测触发全行扫描。
+    const DECSCNM_MODE: u16 = 5;
+    let decscnm_active = terminal.mode_get(DECSCNM_MODE).unwrap_or(false);
+    let decscnm_flipped = decscnm_active != *decscnm_seen;
+    *decscnm_seen = decscnm_active;
     match render_state.dirty() {
-        Ok(crate::ghostty::Dirty::Clean) => finish!(TerminalDirtyPatchOutcome::Clean),
+        Ok(crate::ghostty::Dirty::Clean) if !decscnm_flipped => {
+            finish!(TerminalDirtyPatchOutcome::Clean)
+        }
         Ok(crate::ghostty::Dirty::Partial | crate::ghostty::Dirty::Full) => {}
+        Ok(crate::ghostty::Dirty::Clean) => {}
         Err(_) => fallback!("dirty_read_error"),
     }
 
@@ -3158,7 +3192,24 @@ fn ghostty_collect_dirty_patch(
     let mut symbol_scratch = String::new();
     let mut patch_rows = Vec::new();
     let mut patch_hyperlinks: Vec<String> = Vec::new();
-    while let Some(y) = rows.next_dirty() {
+    let blank = blank_cell_data(default_fg, default_bg);
+    // DECSCNM 翻转时内核没有任何脏行可迭代，改为顺序全扫（`RowIter::next`
+    // 从视口首行开始按序前进，y 由本侧计数提供）。
+    let mut forced_row = 0u16;
+    loop {
+        let y = if decscnm_flipped {
+            if !rows.next() {
+                break;
+            }
+            let y = forced_row;
+            forced_row += 1;
+            y
+        } else {
+            let Some(y) = rows.next_dirty() else {
+                break;
+            };
+            y
+        };
         if y >= area_height {
             break;
         }
@@ -3173,6 +3224,15 @@ fn ghostty_collect_dirty_patch(
         let mut patch_cells = Vec::with_capacity(usize::from(area_width));
         let mut x = 0u16;
         while x < area_width && cells.next() {
+            match cells.is_default_blank() {
+                Ok(true) => {
+                    patch_cells.push(blank.clone());
+                    x += 1;
+                    continue;
+                }
+                Ok(false) => {}
+                Err(_) => fallback!("raw_cell_error"),
+            }
             let Ok(basic) = cells.basic_data() else {
                 fallback!("basic_data_error");
             };
@@ -3230,10 +3290,7 @@ fn ghostty_collect_dirty_patch(
             patch_cells.push(cell);
             x += 1;
         }
-        while x < area_width {
-            patch_cells.push(blank_cell_data(default_fg, default_bg));
-            x += 1;
-        }
+        patch_cells.resize(usize::from(area_width), blank.clone());
         patch_rows.push((y, patch_cells));
     }
 
@@ -5703,7 +5760,7 @@ mod tests {
         let encoded = pane.encode_terminal_key(
             crate::input::TerminalKey::new(
                 crossterm::event::KeyCode::Char('a'),
-                crossterm::event::KeyModifiers::CONTROL | crossterm::event::KeyModifiers::SHIFT,
+                crossterm::event::KeyModifiers::CONTROL,
             ),
             crate::input::KeyboardProtocol::Legacy,
         );

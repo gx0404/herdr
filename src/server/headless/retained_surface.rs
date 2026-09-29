@@ -717,12 +717,10 @@ impl HeadlessServer {
                     continue 'recipient;
                 };
                 let client = &self.clients[&client_id];
-                let mut next_surface = surface.clone();
-                crate::server::render_stream::apply_pane_surface_patch(&mut next_surface, &patch);
                 let Some((graphics, delivery, sources)) =
                     crate::server::client_shell_graphics::collect_retained(
                         &self.app,
-                        &next_surface,
+                        &panes,
                         target,
                         client.cell_size,
                         recipient
@@ -739,14 +737,19 @@ impl HeadlessServer {
                     continue 'recipient;
                 };
                 graphics_changed = graphics != surface.graphics;
-                next_surface.graphics = graphics;
-                Some((next_surface, delivery, sources))
+                Some((graphics, delivery, sources))
             } else {
                 None
             };
             if patch.rows.is_empty() && !cursor_changed && !metadata_changed && !graphics_changed {
                 continue;
             }
+            let graphics = graphics.map(|(graphics, delivery, sources)| {
+                let mut next_surface = surface.clone();
+                crate::server::render_stream::apply_pane_surface_patch(&mut next_surface, &patch);
+                next_surface.graphics = graphics;
+                (next_surface, delivery, sources)
+            });
             updates.push(RetainedRecipientUpdate {
                 client_id,
                 view: recipient.view.clone(),

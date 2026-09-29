@@ -101,6 +101,7 @@ impl ReportFixture {
             seq: None,
             agent_session_id: None,
             agent_session_path: None,
+            resume_argv: None,
         });
         self.request(method, origin)
     }

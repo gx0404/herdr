@@ -16,7 +16,7 @@ from scripts import gx_package as package
 
 
 SHA = "1234567890abcdef1234567890abcdef12345678"
-VERSION = "0.9.1"
+VERSION = "0.9.2"
 TOOLS = {name: Path(name) for name in ("rustup", "zig", "iscc", "dpkg-deb", "readelf", "nm", "musl-gcc")}
 
 
@@ -46,7 +46,7 @@ class GXPackageTests(unittest.TestCase):
         self.temporary = tempfile.TemporaryDirectory(prefix="herdr-gx-test-")
         self.addCleanup(self.temporary.cleanup)
         self.root = Path(self.temporary.name)
-        (self.root / "Cargo.toml").write_text('[package]\nname = "herdr"\nversion = "0.9.1"\n', encoding="utf-8")
+        (self.root / "Cargo.toml").write_text('[package]\nname = "herdr"\nversion = "0.9.2"\n', encoding="utf-8")
         (self.root / "rust-toolchain.toml").write_text('[toolchain]\nchannel = "1.96.1"\n', encoding="utf-8")
         (self.root / "LICENSE").write_text("Herdr license\n", encoding="utf-8")
         (self.root / "packaging/linux").mkdir(parents=True)
@@ -135,7 +135,7 @@ class GXPackageTests(unittest.TestCase):
             f"herdr {VERSION}", f"herdr {VERSION}-gx.deb.{SHA}",
             f"herdr {VERSION}-gx.windows-installer.{SHA[:8]}",
             f"herdr {VERSION}-gx.windows-installer.{'f' * 40}",
-            f"herdr 0.9.2-gx.windows-installer.{SHA}",
+            f"herdr 0.9.1-gx.windows-installer.{SHA}",
         ):
             with self.subTest(version=version), mock.patch.object(package, "output", return_value=version):
                 with self.assertRaisesRegex(ValueError, "identity mismatch"):
@@ -203,7 +203,7 @@ class GXPackageTests(unittest.TestCase):
         with mock.patch.object(package.conpty, "stage_bundle", side_effect=stage_bundle), mock.patch.object(package.conpty, "validate_stage", side_effect=validate_stage), mock.patch.object(package, "run", side_effect=compile_installer):
             artifact, files = package.package_windows(self.root, self.root, VERSION, self.binary, TOOLS, self.root)
         self.assertEqual(events, ["stage", "validate", "compile"])
-        self.assertEqual(artifact.name, "herdr-gx-0.9.1-windows-x86_64-setup.exe")
+        self.assertEqual(artifact.name, "herdr-gx-0.9.2-windows-x86_64-setup.exe")
         self.assertEqual(files["herdr.exe"], package.digest(self.binary))
         self.assertIn("conpty/herdr-conpty.json", files)
         self.assertIn("LICENSE", files)
@@ -225,14 +225,14 @@ class GXPackageTests(unittest.TestCase):
     def test_deb_stages_minimal_payload_and_root_owned_archive(self) -> None:
         with mock.patch.object(package, "run") as run, mock.patch.object(package, "verify_deb") as verify:
             artifact, files = package.package_deb(self.root, self.root, VERSION, self.binary, TOOLS, self.root)
-        self.assertEqual(artifact.name, "herdr-gx_0.9.1_amd64.deb")
+        self.assertEqual(artifact.name, "herdr-gx_0.9.2_amd64.deb")
         self.assertEqual(set(files), {"usr/bin/herdr", "usr/share/doc/herdr-gx/copyright"})
         argv = run.call_args.args[0]
         self.assertIn("--root-owner-group", argv)
         self.assertIn("--build", argv)
         self.assertNotIn("--force-overwrite", argv)
         text = (self.root / "payload/DEBIAN/control").read_text(encoding="utf-8")
-        self.assertIn("Version: 0.9.1\n", text)
+        self.assertIn("Version: 0.9.2\n", text)
         self.assertIn("Provides: herdr\nConflicts: herdr\n", text)
         self.assertNotIn("Replaces:", text)
         self.assertNotIn("Depends:", text)

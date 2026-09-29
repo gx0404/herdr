@@ -2537,7 +2537,6 @@ pub struct CliErrorTexts {
     // src/cli/plugin.rs
     pub plugin_link_usage: &'static str,
     pub plugin_install_usage: &'static str,
-    pub plugin_install_usage_short: &'static str,
     pub plugin_install_v1_shorthand_only: &'static str,
     pub plugin_install_requires_yes: &'static str,
     pub plugin_install_cancelled: &'static str,

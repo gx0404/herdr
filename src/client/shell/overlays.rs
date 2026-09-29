@@ -111,7 +111,7 @@ pub(crate) fn render_client_overlay(
         }
     }
     match o {
-        ClientShellOverlay::Onboarding => render_onboarding_overlay(b, cx),
+        ClientShellOverlay::Onboarding => render_onboarding_overlay(b, k, cx),
         ClientShellOverlay::ProductAnnouncement(v) => render_product_announcement_overlay(b, v, cx),
         ClientShellOverlay::ReleaseNotes(v) => render_release_notes_overlay(
             b,
@@ -767,9 +767,15 @@ fn render_product_announcement_overlay(
     })
 }
 
-fn render_onboarding_overlay(b: &mut Buffer, cx: &ChromeContext<'_>) -> Option<OverlayRender> {
+fn render_onboarding_overlay(
+    b: &mut Buffer,
+    k: &LiveKeybindConfig,
+    cx: &ChromeContext<'_>,
+) -> Option<OverlayRender> {
     let p = cx.palette;
-    let size = onboarding_modal_size(b.area);
+    // 上游 dbdb8dc8：欢迎页展示「配置的」前缀而不是静态默认键。
+    let prefix_label = k.primary_prefix_label();
+    let size = onboarding_modal_size(b.area, &prefix_label);
     let (outer, inner) = modal_panel(b, size, p.accent, cx)?;
     if inner.height < 11 {
         return Some(OverlayRender {
@@ -812,11 +818,17 @@ fn render_onboarding_overlay(b: &mut Buffer, cx: &ChromeContext<'_>) -> Option<O
     }
     y = y.saturating_add(1);
     // 键位提示：一行放得下就一行；放不下在「·」处分成两行（两个键各带说明）。
-    let pairs = onboarding_key_pairs();
-    let rows: &[&[(&str, &str)]] = if onboarding_key_rows(content.width) == 1 {
-        &[&pairs]
+    let pairs = onboarding_key_pairs(&prefix_label);
+    let rows: [&[(String, &'static str)]; 2] =
+        if onboarding_key_rows(content.width, &prefix_label) == 1 {
+            [&pairs, &pairs[..0]]
+        } else {
+            [&pairs[..1], &pairs[1..]]
+        };
+    let rows: &[&[(String, &'static str)]] = if rows[0].len() == pairs.len() {
+        &rows[..1]
     } else {
-        &[&pairs[..1], &pairs[1..]]
+        &rows[..2]
     };
     for row in rows {
         if y >= content.bottom() {
@@ -833,7 +845,7 @@ fn render_onboarding_overlay(b: &mut Buffer, cx: &ChromeContext<'_>) -> Option<O
             };
             for (value, style) in [
                 (if index == 0 { ONBOARDING_KEY_LEAD } else { "" }, base),
-                (*key, accent),
+                (key.as_str(), accent),
                 (suffix, text),
             ] {
                 let width = display_width(value);
@@ -958,18 +970,21 @@ fn put_wrapped(b: &mut Buffer, area: Rect, y: u16, line: &str, style: Style) -> 
 /// 欢迎页键位提示的两对（键, 说明）与行首缩进。
 const ONBOARDING_KEY_LEAD: &str = "  ";
 
-fn onboarding_key_pairs() -> [(&'static str, &'static str); 2] {
+fn onboarding_key_pairs(prefix_label: &str) -> [(String, &'static str); 2] {
     let texts = &crate::i18n::texts().onboarding;
     [
-        (crate::ui::ONBOARDING_PREFIX_LABEL, texts.prefix_suffix),
-        (crate::ui::ONBOARDING_HELP_LABEL, texts.help_suffix),
+        (prefix_label.to_owned(), texts.prefix_suffix),
+        (
+            crate::ui::ONBOARDING_HELP_LABEL.to_owned(),
+            texts.help_suffix,
+        ),
     ]
 }
 
 /// 键位提示在 `width` 列里要几行：一行放得下就一行，否则在「·」处分成两行。
-fn onboarding_key_rows(width: u16) -> u16 {
+fn onboarding_key_rows(width: u16, prefix_label: &str) -> u16 {
     let one_line = display_width(ONBOARDING_KEY_LEAD)
-        + onboarding_key_pairs()
+        + onboarding_key_pairs(prefix_label)
             .iter()
             .map(|(key, suffix)| display_width(key) + display_width(suffix))
             .sum::<u16>();
@@ -982,7 +997,7 @@ fn onboarding_key_rows(width: u16) -> u16 {
 
 /// 欢迎页正文在 `width` 列里排开要占的行数（与绘制同一套折行）：说明各行、空一
 /// 行、键位提示、下一步。
-fn onboarding_body_rows(width: u16) -> u16 {
+fn onboarding_body_rows(width: u16, prefix_label: &str) -> u16 {
     let rows = |line: &str| {
         let mut rows = 0u16;
         wrap_indented(line, width, |_, _| rows = rows.saturating_add(1));
@@ -993,7 +1008,7 @@ fn onboarding_body_rows(width: u16) -> u16 {
         .map(|line| rows(line))
         .sum::<u16>()
         .saturating_add(1)
-        .saturating_add(onboarding_key_rows(width))
+        .saturating_add(onboarding_key_rows(width, prefix_label))
         .saturating_add(rows(crate::i18n::texts().onboarding.next))
 }
 
@@ -1007,13 +1022,13 @@ fn onboarding_header_rows(width: u16) -> u16 {
 
 /// 欢迎页浮层尺寸：默认中号；正文折行后默认高度放不下时加高（仍受终端高度
 /// 限制）。宽度与高度无关，先按默认高度取宽度，再按这个宽度量正文。
-fn onboarding_modal_size(area: Rect) -> crate::ui::ModalSize {
+fn onboarding_modal_size(area: Rect, prefix_label: &str) -> crate::ui::ModalSize {
     let base = crate::ui::ModalSize::Medium;
     let Some(inner) = crate::ui::modal_rect(area, base).and_then(panel_inner) else {
         return base;
     };
     // 标题 / 副标题按宽度计行，再加两处间隔、按钮和上下边框。
-    let needed = onboarding_body_rows(inner.width)
+    let needed = onboarding_body_rows(inner.width, prefix_label)
         .saturating_add(onboarding_header_rows(inner.width))
         .saturating_add(5);
     base.with_height(needed.max(base.cells().1))
@@ -1436,7 +1451,7 @@ fn help_lines(
     use ratatui::text::{Line, Span};
 
     let groups = crate::input::filter_keybind_help_groups(
-        crate::input::keybind_help_groups(&keybinds.keybinds, keybinds.prefix),
+        crate::input::keybind_help_groups(&keybinds.keybinds, &keybinds.prefix),
         query,
     );
     let key_width = groups

@@ -226,7 +226,6 @@ paths = [
   "src/ipc.rs",
   "src/main.rs",
   "src/noninteractive_process.rs",
-  "src/pane_graphics_files.rs",
   "src/protocol/**",
   "src/remote.rs",
   "src/remote/**",
@@ -278,8 +277,8 @@ doc = "docs/AGENT_RULES/terminal-core.md"
 paths = [
   # Windows VT 输入与 kitty keyboard 是输入域的 Windows/宿主特化，与 platform、
   # protocol-api/app-render 域并集（见各域文档交叉引用）。
+  "crates/ghostty-vt/src/**",
   "src/client/input/windows_vti.rs",
-  "src/ghostty/**",
   "src/input/**",
   "src/kitty_graphics.rs",
   "src/kitty_graphics/**",
@@ -310,6 +309,8 @@ tasks = []
 id = "vendored-libghostty-vt"
 doc = "docs/AGENT_RULES/vendored-libghostty-vt.md"
 paths = [
+  "crates/ghostty-vt/Cargo.toml",
+  "crates/ghostty-vt/build.rs",
   "scripts/build_vendored_libghostty_vt.sh",
   "scripts/generate_libghostty_bindings.sh",
   "scripts/test_vendor_libghostty_vt.py",

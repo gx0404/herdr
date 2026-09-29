@@ -166,6 +166,7 @@ mod tests {
             agent_session_id: Some("s".into()),
             agent_session_path: None,
             session_start_source: None,
+            resume_argv: None,
         })
     }
 
@@ -219,6 +220,7 @@ mod tests {
                 seq: None,
                 agent_session_id: None,
                 agent_session_path: None,
+                resume_argv: None,
             }))
             .map(|target| target.source),
             Some("herdr:pi")

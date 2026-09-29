@@ -94,6 +94,7 @@ struct ClientShellHelloOptions {
     surface_reuse: bool,
     surface_delta: bool,
     ssh_auth_sock: Option<String>,
+    surface_scroll: bool,
 }
 
 #[derive(serde::Deserialize)]
@@ -469,6 +470,7 @@ pub(crate) enum ServerEvent {
         surface_delta: bool,
         /// 前台 client 宿主环境上报的 `SSH_AUTH_SOCK`（WEZ-INT-01 自愈链兜底源）。
         ssh_auth_sock: Option<String>,
+        surface_scroll: bool,
         writer: ClientWriter,
     },
     /// A client sent an input message.
@@ -864,6 +866,7 @@ pub(crate) fn handle_client_handshake(
                     surface_reuse: hello.surface_reuse,
                     surface_delta: hello.surface_delta,
                     ssh_auth_sock: hello.ssh_auth_sock,
+                    surface_scroll: hello.surface_scroll,
                 }),
             )
         }
@@ -971,6 +974,7 @@ pub(crate) fn handle_client_handshake(
             surface_reuse: shell_options.surface_reuse,
             surface_delta: shell_options.surface_delta,
             ssh_auth_sock: shell_options.ssh_auth_sock,
+            surface_scroll: shell_options.surface_scroll,
             writer,
         }
     } else {
@@ -1564,6 +1568,7 @@ mod tests {
             surface_active: true,
             surface_reuse: false,
             surface_delta: false,
+            surface_scroll: false,
             snapshot_codecs: vec![crate::protocol::endpoint::SNAPSHOT_CODEC_V1.into()],
             surface_codecs: vec![crate::protocol::endpoint::SURFACE_CODEC_V1.into()],
             input_codecs: vec![crate::protocol::endpoint::INPUT_CODEC_V1.into()],
@@ -2194,11 +2199,13 @@ mod tests {
                 surface_reuse,
                 surface_delta,
                 ssh_auth_sock,
+                surface_scroll,
                 writer,
             } => {
                 assert!(!surface_reuse);
                 assert!(!surface_delta);
                 assert_eq!(ssh_auth_sock, None);
+                assert!(!surface_scroll);
                 assert_eq!(client_id, 43);
                 assert_eq!((surface_cols, surface_rows), (80, 29));
                 assert_eq!((cell_width_px, cell_height_px), (8, 16));

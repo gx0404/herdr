@@ -201,7 +201,7 @@ pub(super) fn render_mode_bar(
     if let Some(badge) = broadcast_badge.as_deref() {
         buffer.set_stringn(bar.x, bar.y, badge, usize::from(bar.width), broadcast_style);
     }
-    let prefix = crate::config::format_key_combo(keybinds.prefix);
+    let prefix = keybinds.primary_prefix_label();
     let prefix_rhs = |bindings: &crate::config::ActionKeybinds| {
         bindings
             .prefix_rhs_label()

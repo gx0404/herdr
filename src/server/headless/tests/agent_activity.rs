@@ -47,6 +47,7 @@ fn connect_shell(
         surface_active: true,
         ssh_auth_sock: None,
         surface_delta: false,
+        surface_scroll: false,
         writer,
     });
     (control_rx, render_rx)
@@ -721,6 +722,7 @@ async fn projection_restamp_rides_the_surface_reuse_codec() {
         surface_active: true,
         ssh_auth_sock: None,
         surface_delta: false,
+        surface_scroll: false,
         writer,
     });
     let _ = next_snapshot(&control_rx);

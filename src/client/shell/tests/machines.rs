@@ -303,7 +303,7 @@ command = "echo hi"
     let (live, _) = config
         .live_keybinds_with_diagnostics()
         .expect("live keybinds");
-    let groups = crate::input::keybind_help_groups(&live.keybinds, live.prefix);
+    let groups = crate::input::keybind_help_groups(&live.keybinds, &live.prefix);
     let global = groups
         .iter()
         .flat_map(|(_, entries)| entries.iter())

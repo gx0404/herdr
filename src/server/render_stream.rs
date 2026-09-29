@@ -19,6 +19,7 @@ pub(crate) enum ClientRenderState {
         surface_revision: u64,
         surface_reuse: bool,
         surface_delta: bool,
+        surface_scroll: bool,
         recompute_pending: bool,
     },
     /// Terminal-ANSI clients keep a terminal diff encoder and sequence number.
@@ -37,6 +38,7 @@ impl ClientRenderState {
                 surface_revision: 0,
                 surface_reuse: false,
                 surface_delta: false,
+                surface_scroll: false,
                 recompute_pending: false,
             },
             RenderEncoding::TerminalAnsi => Self::TerminalAnsi {
@@ -56,6 +58,12 @@ impl ClientRenderState {
     pub(crate) fn enable_surface_delta(&mut self, enabled: bool) {
         if let Self::Semantic { surface_delta, .. } = self {
             *surface_delta = enabled;
+        }
+    }
+
+    pub(crate) fn enable_surface_scroll(&mut self, enabled: bool) {
+        if let Self::Semantic { surface_scroll, .. } = self {
+            *surface_scroll = enabled;
         }
     }
 
@@ -171,6 +179,7 @@ impl ClientRenderState {
             surface_reuse,
             surface_delta,
             recompute_pending,
+            ..
         } = self
         else {
             return None;
@@ -289,6 +298,7 @@ impl ClientRenderState {
         let Self::Semantic {
             last_surface,
             surface_revision,
+            surface_scroll,
             ..
         } = self
         else {
@@ -310,8 +320,18 @@ impl ClientRenderState {
             apply_pane_surface_patch(&mut surface, &patch);
             return self.prepare_pane_surface(surface);
         }
-        Some(PreparedRender::SemanticPatch {
-            message: ServerMessage::PaneSurfacePatch(patch),
+        let scrolled = (*surface_scroll)
+            .then(|| crate::protocol::surface_scroll::message(last, &patch))
+            .flatten();
+        Some(match scrolled {
+            Some(message) => PreparedRender::SemanticPatch {
+                message,
+                encoded: Some(Box::new(patch)),
+            },
+            None => PreparedRender::SemanticPatch {
+                message: ServerMessage::PaneSurfacePatch(patch),
+                encoded: None,
+            },
         })
     }
 
@@ -338,10 +358,13 @@ impl ClientRenderState {
                     surface_revision,
                     ..
                 },
-                PreparedRender::SemanticPatch {
-                    message: ServerMessage::PaneSurfacePatch(patch),
-                },
+                PreparedRender::SemanticPatch { message, encoded },
             ) => {
+                let patch = match (encoded, message) {
+                    (Some(patch), _) => *patch,
+                    (None, ServerMessage::PaneSurfacePatch(patch)) => patch,
+                    (None, _) => unreachable!("a plain semantic patch carries its pane patch"),
+                };
                 // RS-15：补丁提交只在基线存在时发生（规划阶段已保证）；缺失时
                 // 不 panic，也不推进修订号，等待下一次全量帧重建基线。
                 let Some(surface) = last_surface.as_deref_mut() else {
@@ -430,6 +453,8 @@ pub(crate) enum PreparedRender {
     },
     SemanticPatch {
         message: ServerMessage,
+        /// The pane patch a compact `message` encodes; `None` when `message` is that patch.
+        encoded: Option<Box<PaneSurfacePatch>>,
     },
     TerminalAnsi {
         message: ServerMessage,
@@ -442,7 +467,7 @@ impl PreparedRender {
     pub(crate) fn message(&self) -> &ServerMessage {
         match self {
             Self::Semantic { message, .. }
-            | Self::SemanticPatch { message }
+            | Self::SemanticPatch { message, .. }
             | Self::TerminalAnsi { message, .. } => message,
         }
     }
@@ -711,7 +736,7 @@ mod tests {
         for enabled in [false, true] {
             let mut state = ClientRenderState::new(RenderEncoding::SemanticFrame);
             state.enable_surface_delta(enabled);
-            let mut decoder = crate::protocol::surface_reuse::Decoder::new(enabled);
+            let mut decoder = crate::protocol::surface_reuse::Decoder::new(enabled, false);
             let mut surface = popup_surface("popup");
             surface.popup = None;
             surface.frame = FrameData::from_ratatui_buffer(

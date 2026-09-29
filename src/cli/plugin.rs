@@ -15,7 +15,6 @@ use crate::api::schema::{
 use crate::popup_size::PopupSize;
 
 const PLUGIN_BUILD_OUTPUT_MAX_BYTES: usize = 64 * 1024;
-
 /// Localized CLI error templates for this subcommand surface.
 fn errors() -> &'static crate::i18n::CliErrorTexts {
     &crate::i18n::texts().cli_errors
@@ -162,42 +161,65 @@ fn plugin_unlink(args: &[String]) -> std::io::Result<i32> {
     }))
 }
 
-fn plugin_install(args: &[String]) -> std::io::Result<i32> {
-    let Some(source_arg) = args.first() else {
-        eprintln!("{}", errors().plugin_install_usage);
-        return Ok(2);
-    };
-    let source = match GithubPluginSource::parse(source_arg) {
-        Ok(source) => source,
-        Err(err) => {
-            eprintln!("{err}");
-            return Ok(2);
-        }
-    };
+#[derive(Debug)]
+struct PluginInstallArgs {
+    source: GithubPluginSource,
+    requested_ref: Option<String>,
+    yes: bool,
+}
+
+fn parse_plugin_install_args(args: &[String]) -> Result<PluginInstallArgs, String> {
+    let mut source_arg = None;
     let mut requested_ref = None;
     let mut yes = false;
-    let mut index = 1;
+    let mut index = 0;
     while index < args.len() {
         match args[index].as_str() {
             "--ref" => {
-                let Some(value) = required_value(args, &mut index, "--ref") else {
-                    return Ok(2);
-                };
-                requested_ref = Some(value);
+                let value = args.get(index + 1).ok_or_else(|| {
+                    crate::i18n::fill(errors().missing_value_for_fmt, &[("flag", "--ref")])
+                })?;
+                requested_ref = Some(value.clone());
+                index += 2;
             }
             "--yes" | "-y" => {
                 yes = true;
                 index += 1;
             }
+            other if other.starts_with('-') || source_arg.is_some() => {
+                return Err(crate::i18n::fill(
+                    errors().unknown_option_fmt,
+                    &[("option", other)],
+                ));
+            }
             other => {
-                eprintln!(
-                    "{}",
-                    crate::i18n::fill(errors().unknown_option_fmt, &[("option", other)])
-                );
-                return Ok(2);
+                source_arg = Some(other);
+                index += 1;
             }
         }
     }
+    let source = GithubPluginSource::parse(
+        source_arg.ok_or_else(|| errors().plugin_install_usage.to_owned())?,
+    )?;
+    Ok(PluginInstallArgs {
+        source,
+        requested_ref,
+        yes,
+    })
+}
+
+fn plugin_install(args: &[String]) -> std::io::Result<i32> {
+    let PluginInstallArgs {
+        source,
+        requested_ref,
+        yes,
+    } = match parse_plugin_install_args(args) {
+        Ok(args) => args,
+        Err(err) => {
+            eprintln!("{err}");
+            return Ok(2);
+        }
+    };
 
     if !yes && !io::stdin().is_terminal() {
         eprintln!("{}", errors().plugin_install_requires_yes);
@@ -813,7 +835,7 @@ impl GithubPluginSource {
         }
         let parts = value.split('/').collect::<Vec<_>>();
         if parts.len() < 2 {
-            return Err(errors().plugin_install_usage_short.into());
+            return Err(errors().plugin_install_usage.into());
         }
         let owner = parts[0];
         let repo = parts[1];
@@ -1881,6 +1903,72 @@ mod tests {
                 installed_unix_ms: Some(42),
             },
             warnings: vec![],
+        }
+    }
+
+    #[test]
+    fn plugin_install_args_accept_options_around_source() {
+        for (args, expected_ref, expected_yes) in [
+            (vec!["owner/repo"], None, false),
+            (vec!["--yes", "owner/repo"], None, true),
+            (vec!["-y", "owner/repo"], None, true),
+            (
+                vec!["owner/repo", "--ref", "main", "-y"],
+                Some("main"),
+                true,
+            ),
+            (
+                vec!["--ref", "main", "owner/repo", "--yes"],
+                Some("main"),
+                true,
+            ),
+            (
+                vec![
+                    "--yes",
+                    "--ref",
+                    "old",
+                    "owner/repo",
+                    "--ref",
+                    "main",
+                    "--yes",
+                ],
+                Some("main"),
+                true,
+            ),
+            // Preserve ref-value consumption: a value named --yes is not consent.
+            (vec!["owner/repo", "--ref", "--yes"], Some("--yes"), false),
+        ] {
+            let args = args.into_iter().map(String::from).collect::<Vec<_>>();
+            let parsed = parse_plugin_install_args(&args).unwrap();
+            assert_eq!(parsed.source.display(), "owner/repo", "{args:?}");
+            assert_eq!(parsed.requested_ref.as_deref(), expected_ref, "{args:?}");
+            assert_eq!(parsed.yes, expected_yes, "{args:?}");
+        }
+    }
+
+    #[test]
+    fn plugin_install_args_reject_invalid_syntax() {
+        let errors = &crate::i18n::texts().cli_errors;
+        let usage = errors.plugin_install_usage;
+        let missing_ref = crate::i18n::fill(errors.missing_value_for_fmt, &[("flag", "--ref")]);
+        let unknown_unknown =
+            crate::i18n::fill(errors.unknown_option_fmt, &[("option", "--unknown")]);
+        let unknown_extra =
+            crate::i18n::fill(errors.unknown_option_fmt, &[("option", "extra/repo")]);
+        for (args, expected_error) in [
+            (vec![], usage),
+            (vec!["--yes"], usage),
+            (vec!["owner/repo", "--ref"], missing_ref.as_str()),
+            (vec!["--unknown", "owner/repo"], unknown_unknown.as_str()),
+            (vec!["owner/repo", "extra/repo"], unknown_extra.as_str()),
+            (vec!["owner"], usage),
+        ] {
+            let args = args.into_iter().map(String::from).collect::<Vec<_>>();
+            assert_eq!(
+                parse_plugin_install_args(&args).unwrap_err(),
+                expected_error,
+                "{args:?}"
+            );
         }
     }
 

@@ -1938,7 +1938,7 @@ pub const TEXTS: Texts = Texts {
         pane_report_agent_usage:
             "用法：herdr pane report-agent <pane_id> --source ID --agent LABEL --state idle|working|blocked|unknown [--message TEXT] [--seq N] [--agent-session-id ID] [--agent-session-path PATH]",
         pane_report_agent_session_usage:
-            "用法：herdr pane report-agent-session <pane_id> --source ID --agent LABEL [--seq N] [--agent-session-id ID] [--agent-session-path PATH] [--session-start-source SOURCE]",
+            "用法：herdr pane report-agent-session <pane_id> --source ID --agent LABEL [--seq N] [--agent-session-id ID] [--agent-session-path PATH] [--session-start-source SOURCE] [-- <恢复命令...>]",
         pane_release_agent_usage:
             "用法：herdr pane release-agent <pane_id> --source ID --agent LABEL [--seq N]",
         pane_report_metadata_usage:
@@ -1964,7 +1964,6 @@ pub const TEXTS: Texts = Texts {
         plugin_link_usage: "用法：herdr plugin link <path> [--disabled]",
         plugin_install_usage:
             "用法：herdr plugin install <owner>/<repo>[/subdir...] [--ref REF] [--yes]",
-        plugin_install_usage_short: "用法：herdr plugin install <owner>/<repo>[/subdir...]",
         plugin_install_v1_shorthand_only:
             "plugin install v1 只接受 owner/repo[/subdir] 简写形式",
         plugin_install_requires_yes: "stdin 非交互时，远程插件安装需要 --yes",

@@ -355,6 +355,25 @@ fn startup_onboarding_is_client_rendered_and_modal() {
 }
 
 #[test]
+fn startup_onboarding_shows_configured_prefix() {
+    let mut config = Config::default();
+    config.keys.prefix = crate::config::BindingConfig::one("ctrl+shift+b");
+    let config = ClientShellConfig::from_config(&config).with_startup_onboarding(true);
+    let mut state = ClientShellState::new(config);
+    state.set_snapshot(Box::new(snapshot()));
+    state.set_pane_surface(surface());
+
+    let frame = state.compose(70, 20).expect("onboarding frame");
+    let text = frame
+        .cells
+        .iter()
+        .map(|cell| cell.symbol.as_str())
+        .collect::<String>();
+    assert!(text.contains("ctrl+shift+b"));
+    assert!(!text.contains("ctrl+b "));
+}
+
+#[test]
 fn onboarding_completion_persists_and_opens_endpoint_integrations() {
     let path = std::env::temp_dir().join(format!(
         "herdr-client-onboarding-{}-{}.toml",
@@ -1637,7 +1656,7 @@ fn onboarding_body_wraps_instead_of_cutting_words() {
             );
         }
         for part in [
-            crate::ui::ONBOARDING_PREFIX_LABEL,
+            "ctrl+b",
             texts.prefix_suffix.trim_end_matches([' ', '·']),
             crate::ui::ONBOARDING_HELP_LABEL,
             texts.help_suffix,
@@ -1663,7 +1682,7 @@ fn onboarding_body_wraps_instead_of_cutting_words() {
             .unwrap_or(inner.len());
         for row in &inner[2..continue_row] {
             let words = row.split_whitespace().count();
-            let key_row = row.contains(crate::ui::ONBOARDING_PREFIX_LABEL)
+            let key_row = row.contains("ctrl+b")
                 || row
                     .trim_start()
                     .starts_with(crate::ui::ONBOARDING_HELP_LABEL);

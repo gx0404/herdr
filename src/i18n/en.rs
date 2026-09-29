@@ -1959,9 +1959,9 @@ pub const TEXTS: Texts = Texts {
         pane_wait_output_usage:
             "usage: herdr pane wait-output <pane_id> (--match TEXT | --regex PATTERN) [--source visible|recent|recent-unwrapped] [--lines N] [--timeout MS] [--raw]",
         pane_report_agent_usage:
-            "usage: herdr pane report-agent <pane_id> --source ID --agent LABEL --state idle|working|blocked|unknown [--message TEXT] [--seq N] [--agent-session-id ID] [--agent-session-path PATH]",
+            "usage: herdr pane report-agent <pane_id> --source ID --agent LABEL --state idle|working|blocked|unknown [--message TEXT] [--seq N] [--agent-session-id ID] [--agent-session-path PATH] [-- <resume-command...>]",
         pane_report_agent_session_usage:
-            "usage: herdr pane report-agent-session <pane_id> --source ID --agent LABEL [--seq N] [--agent-session-id ID] [--agent-session-path PATH] [--session-start-source SOURCE]",
+            "usage: herdr pane report-agent-session <pane_id> --source ID --agent LABEL [--seq N] [--agent-session-id ID] [--agent-session-path PATH] [--session-start-source SOURCE] [-- <resume-command...>]",
         pane_release_agent_usage:
             "usage: herdr pane release-agent <pane_id> --source ID --agent LABEL [--seq N]",
         pane_report_metadata_usage:
@@ -1989,7 +1989,6 @@ pub const TEXTS: Texts = Texts {
         plugin_link_usage: "usage: herdr plugin link <path> [--disabled]",
         plugin_install_usage:
             "usage: herdr plugin install <owner>/<repo>[/subdir...] [--ref REF] [--yes]",
-        plugin_install_usage_short: "usage: herdr plugin install <owner>/<repo>[/subdir...]",
         plugin_install_v1_shorthand_only:
             "plugin install v1 accepts only owner/repo[/subdir] shorthand",
         plugin_install_requires_yes:

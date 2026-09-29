@@ -93,7 +93,7 @@ pane_history = true
 resume_agents_on_restore = false
 ```
 
-Herdr 只会恢复那些通过当前官方 Herdr 集成上报了原生会话引用的窗格。
+Herdr 会恢复通过当前官方 Herdr 集成上报了原生会话引用的窗格,以及智能体自己上报了恢复命令的窗格。参阅[为你的智能体添加 Herdr 支持](/zh-cn/docs/add-herdr-support/)。
 
 默认情况下,Claude Code 后台会话不上报会话引用,所以 Herdr 不会恢复它们。见 [Claude Code](/zh-cn/docs/integrations/#claude-code)。
 
