@@ -109,6 +109,11 @@ def print_recap(name: str) -> None:
 
 
 def main() -> int:
+    # Windows CI 的 Python 默认 stdout 是 cp1252，打印中文摘要会
+    # UnicodeEncodeError；统一重配为 UTF-8（不可重配的流保持原样）。
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8", errors="replace")
     print(
         f"并行运行 {len(PHASES)} 个测试阶段，日志目录: {LOG_DIR}",
         flush=True,

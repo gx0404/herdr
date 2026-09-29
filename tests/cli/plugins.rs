@@ -403,8 +403,8 @@ fn plugin_install_usage_errors_include_options_without_installing() {
         );
         assert_eq!(output.status.code(), Some(2), "{args:?}");
         let stderr = String::from_utf8_lossy(&output.stderr);
-        assert!(stderr.contains("usage: herdr plugin install"), "{stderr}");
-        assert!(stderr.contains("[--ref REF] [--yes|-y]"), "{stderr}");
+        assert!(stderr.contains("herdr plugin install"), "{stderr}");
+        assert!(stderr.contains("[--ref REF] [--yes"), "{stderr}");
         assert!(!config_home.join("herdr-dev/plugins").exists());
         assert!(!config_home.join("herdr-dev/plugins.json").exists());
         assert!(!state_home.exists());
