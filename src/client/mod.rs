@@ -564,9 +564,10 @@ async fn run_client_loop(
             stdin_escape_disambiguation_active,
             stdin_initial_host_input,
             #[cfg(unix)]
-            stdin_direct_response,
-            #[cfg(unix)]
-            stdin_direct_response_active,
+            input::UnixDirectResponseState {
+                matcher: stdin_direct_response,
+                active: stdin_direct_response_active,
+            },
         );
     });
 

@@ -78,6 +78,14 @@ const MOUSE_REPORT_EVIDENCE_WINDOW: std::time::Duration = std::time::Duration::f
 // Stdin reader thread
 // ---------------------------------------------------------------------------
 
+/// Unix 直连图形响应匹配器的共享状态：`stdin_reader_loop` 的 cfg(unix) 追加参数
+/// 成组传递，避免参数数超过 clippy `too_many_arguments` 上限。
+#[cfg(unix)]
+pub(super) struct UnixDirectResponseState {
+    pub(super) matcher: Arc<std::sync::Mutex<super::direct_graphics::ResponseMatcher>>,
+    pub(super) active: Arc<AtomicBool>,
+}
+
 /// Reads raw bytes from stdin and sends them to the main event loop.
 ///
 /// This runs on a dedicated thread because stdin reading is blocking.
@@ -94,8 +102,7 @@ pub fn stdin_reader_loop(
     flush_timeouts: StdinFlushTimeouts,
     host_escape_disambiguation_active: bool,
     initial_host_input: Vec<u8>,
-    #[cfg(unix)] direct_response: Arc<std::sync::Mutex<super::direct_graphics::ResponseMatcher>>,
-    #[cfg(unix)] direct_response_active: Arc<AtomicBool>,
+    #[cfg(unix)] direct_response: UnixDirectResponseState,
 ) {
     #[cfg(windows)]
     {
@@ -123,7 +130,6 @@ pub fn stdin_reader_loop(
         host_escape_disambiguation_active,
         initial_host_input,
         direct_response,
-        direct_response_active,
     );
 }
 
@@ -139,12 +145,15 @@ fn unix_stdin_reader_loop(
     flush_timeouts: StdinFlushTimeouts,
     host_escape_disambiguation_active: bool,
     initial_host_input: Vec<u8>,
-    direct_response: Arc<std::sync::Mutex<super::direct_graphics::ResponseMatcher>>,
-    direct_response_active: Arc<AtomicBool>,
+    direct_response: UnixDirectResponseState,
 ) {
     let stdin = io::stdin();
     let mut reader = stdin.lock();
     let mut scratch = [0u8; 4096];
+    let UnixDirectResponseState {
+        matcher: direct_response,
+        active: direct_response_active,
+    } = direct_response;
     let mut framer = crate::raw_input::RawInputByteFramer::for_host_input();
     framer.set_host_escape_disambiguation_active(host_escape_disambiguation_active);
     if host_color_query_sent {
