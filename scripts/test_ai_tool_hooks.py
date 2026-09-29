@@ -248,9 +248,14 @@ class CodexConfigShapeTests(unittest.TestCase):
     """
 
     def _load(self) -> dict:
-        import tomli
+        # Python 3.11+ 自带 tomllib；旧解释器与未装 tomli 的环境（CI 容器）
+        # 都能解析：优先标准库，再退 tomli，都没有时跳过并明示原因。
+        try:
+            import tomllib as _toml  # type: ignore[no-redef]
+        except ModuleNotFoundError:
+            import tomli as _toml  # type: ignore[no-redef]
 
-        payload = tomli.loads((PROJECT_ROOT / ".codex" / "config.toml").read_text(encoding="utf-8"))
+        payload = _toml.loads((PROJECT_ROOT / ".codex" / "config.toml").read_text(encoding="utf-8"))
         return payload
 
     def test_hook_events_are_arrays_with_nested_command_arrays(self) -> None:

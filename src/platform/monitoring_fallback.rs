@@ -71,17 +71,6 @@ impl MonitoredProcess {
     }
 }
 
-pub(crate) fn terminate_monitored_process(
-    _pid: u32,
-    _expected: &str,
-    _force: bool,
-) -> std::io::Result<()> {
-    Err(std::io::Error::new(
-        std::io::ErrorKind::Unsupported,
-        "本平台尚未提供安全进程终止接口",
-    ))
-}
-
 pub(crate) fn usage_probe_needs_job_helper() -> bool {
     false
 }

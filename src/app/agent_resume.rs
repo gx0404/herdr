@@ -973,6 +973,24 @@ mod tests {
             "session with ' quote".into(),
         ];
         let command = resume_shell_command(&argv, "bash").unwrap();
+        // Windows 下 bash 配置也走 cmd → powershell -EncodedCommand（UTF-16LE
+        // base64）：明文断言在解码后的脚本上做，Unix 直接对命令文本断言。
+        #[cfg(windows)]
+        let command = {
+            use base64::Engine as _;
+            let encoded = command
+                .split("-EncodedCommand ")
+                .nth(1)
+                .expect("encoded powershell payload");
+            let utf16 = base64::engine::general_purpose::STANDARD
+                .decode(encoded)
+                .expect("base64 payload");
+            let units: Vec<u16> = utf16
+                .chunks_exact(2)
+                .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+                .collect();
+            String::from_utf16(&units).expect("utf-16 script")
+        };
         assert!(command.contains(crate::integration::codex_launch::ENTRY));
         assert_eq!(argv, ["codex", "resume", "session with ' quote"]);
         assert!(
