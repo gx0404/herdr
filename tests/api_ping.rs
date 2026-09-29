@@ -59,6 +59,7 @@ fn cleanup_spawned_herdr(spawned: SpawnedHerdr, base: PathBuf) {
 /// 等「终会成立」的条件用的与负载无关的宽上限（T1）：负载 25–35 时起 server、起
 /// shell 与假 agent、检测 tick（300 ms 一轮）都可能被拖慢好几秒，固定 1–3 s 的等待
 /// 会误报。条件一满足立即往下走，只在真的失败时才等满。
+#[cfg(not(target_os = "macos"))]
 const LOADED_WAIT: Duration = Duration::from_secs(30);
 
 fn test_lock() -> MutexGuard<'static, ()> {
