@@ -8,6 +8,11 @@ release/preview 工作流与脚本、`scripts/changelog.py`、`scripts/preview.p
 
 ## fork 例外：GX 安装包
 
+- 本目录已并入 `gx0404/gx_shell` 单仓（`herdr/`），本目录的 `.github/workflows/`
+  不会被 Actions 执行。herdr 由 `ohmyzsh/scripts/gx_build_herdr.py` 以同一单仓提交的
+  源码、包身份（`HERDR_PACKAGE_MANAGER` + 完整 `HERDR_BUILD_COMMIT`）编译进 GX Shell
+  合并安装包，经单仓根 `.github/workflows/release.yml` 发布（tag `gx-shell-v<版本>`）；
+  下列独立 GX 安装包链保留为本地参考与契约测试，不再单独发版。
 - fork 的 `.github/workflows/` 只保留 `ci.yml` 与 `gx-release.yml`。CI 监听默认
   分支 `feature/gx_herdr` 的 push 及 PR，GX 的源码 ref 默认选择同一分支。
 - 上游/冗余的九份 workflow 原样归档于 `.github/workflows-archive/`，不被 Actions

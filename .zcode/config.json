@@ -10,7 +10,7 @@
           "hooks": [
             {
               "type": "command",
-              "command": "bash \"$(git rev-parse --show-toplevel)/.claude/hooks/block_dangerous.sh\"",
+              "command": "bash \"$(git rev-parse --show-toplevel)/herdr/.claude/hooks/block_dangerous.sh\"",
               "timeoutMs": 30000
             }
           ]
@@ -22,7 +22,7 @@
           "hooks": [
             {
               "type": "command",
-              "command": "bash \"$(git rev-parse --show-toplevel)/.claude/hooks/record_edit.sh\"",
+              "command": "bash \"$(git rev-parse --show-toplevel)/herdr/.claude/hooks/record_edit.sh\"",
               "timeoutMs": 15000
             }
           ]
@@ -33,7 +33,7 @@
           "hooks": [
             {
               "type": "command",
-              "command": "bash \"$(git rev-parse --show-toplevel)/.claude/hooks/notify_review.sh\"",
+              "command": "bash \"$(git rev-parse --show-toplevel)/herdr/.claude/hooks/notify_review.sh\"",
               "timeoutMs": 15000
             }
           ]

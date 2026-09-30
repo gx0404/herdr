@@ -275,6 +275,101 @@ pub(crate) fn configure_background_command(command: &mut std::process::Command) 
     configure_background_command_platform(command);
 }
 
+/// Ordered directories that may hold the agent CLI `command` (integration and account usage
+/// availability, usage probes). Every platform searches the process `PATH` first; Windows adds
+/// the current registry `PATH` and known per-user install locations, because a long-running
+/// server keeps the `PATH` it started with (`windows/command_search.rs`).
+pub(crate) fn command_search_dirs(command: &str) -> Vec<std::path::PathBuf> {
+    command_search_dirs_platform(command)
+}
+
+/// Files to try for `command` inside one search directory, in lookup order (Windows: `PATHEXT`
+/// order with `.ps1` last; elsewhere the bare name).
+pub(crate) fn command_file_candidates(
+    dir: &std::path::Path,
+    command: &str,
+) -> Vec<std::path::PathBuf> {
+    command_file_candidates_platform(dir, command)
+}
+
+/// First candidate across [`command_search_dirs`] that `accept` takes, in search order: the
+/// executable to start for `command`.
+pub(crate) fn find_command(
+    command: &str,
+    accept: impl Fn(&std::path::Path) -> bool,
+) -> Option<std::path::PathBuf> {
+    command_search_dirs(command).into_iter().find_map(|dir| {
+        command_file_candidates(&dir, command)
+            .into_iter()
+            .find(|path| accept(path))
+    })
+}
+
+/// Whether `command` is installed: a candidate [`find_command`] would start, or, as the last
+/// resort and for availability only, a platform fallback name that cannot be started directly
+/// (Windows: an extensionless shell shim).
+pub(crate) fn command_installed(command: &str, accept: impl Fn(&std::path::Path) -> bool) -> bool {
+    let dirs = command_search_dirs(command);
+    dirs.iter().any(|dir| {
+        command_file_candidates(dir, command)
+            .iter()
+            .any(|path| accept(path))
+    }) || dirs
+        .iter()
+        .filter_map(|dir| command_availability_fallback_platform(dir, command))
+        .any(|path| accept(&path))
+}
+
+/// Program and leading arguments that start a resolved CLI executable (Windows runs PowerShell
+/// shims through `powershell.exe -File`).
+pub(crate) fn cli_invocation(
+    executable: &std::path::Path,
+) -> (std::ffi::OsString, Vec<std::ffi::OsString>) {
+    cli_invocation_platform(executable)
+}
+
+/// `PATH` for CLIs the server starts on the user's behalf (usage probes): Windows adds the
+/// current registry `PATH` entries the long-running server lacks, so interpreters installed
+/// after it started resolve; `None` keeps the inherited `PATH`.
+pub(crate) fn cli_child_path() -> Option<std::ffi::OsString> {
+    cli_child_path_platform()
+}
+
+#[cfg(not(windows))]
+fn command_search_dirs_platform(_command: &str) -> Vec<std::path::PathBuf> {
+    std::env::var_os("PATH")
+        .map(|paths| std::env::split_paths(&paths).collect())
+        .unwrap_or_default()
+}
+
+#[cfg(not(windows))]
+fn command_file_candidates_platform(
+    dir: &std::path::Path,
+    command: &str,
+) -> Vec<std::path::PathBuf> {
+    vec![dir.join(command)]
+}
+
+#[cfg(not(windows))]
+fn command_availability_fallback_platform(
+    _dir: &std::path::Path,
+    _command: &str,
+) -> Option<std::path::PathBuf> {
+    None
+}
+
+#[cfg(not(windows))]
+fn cli_invocation_platform(
+    executable: &std::path::Path,
+) -> (std::ffi::OsString, Vec<std::ffi::OsString>) {
+    (executable.as_os_str().to_os_string(), Vec::new())
+}
+
+#[cfg(not(windows))]
+fn cli_child_path_platform() -> Option<std::ffi::OsString> {
+    None
+}
+
 #[cfg(not(windows))]
 fn configure_background_command_platform(_command: &mut std::process::Command) {}
 
@@ -569,6 +664,18 @@ pub use windows::*;
 mod fallback;
 #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
 pub use fallback::*;
+
+/// Detection-loop process queries block long enough on this platform (Windows: Toolhelp
+/// snapshots and per-process handle queries) to run on the blocking pool instead of the async
+/// workers; elsewhere they are cheap procfs/sysctl reads and stay inline.
+pub(crate) const PROCESS_QUERIES_BLOCK: bool = cfg!(windows);
+
+/// Whether a pane shell sits at its prompt with nothing running, for periodic detection checks
+/// (Windows answers "busy" from a snapshot shared across panes and confirms "idle" live).
+#[cfg(not(windows))]
+pub(crate) fn pane_shell_is_idle(child_pid: u32) -> bool {
+    available_pane_shell(child_pid).is_some()
+}
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(crate) fn available_pane_shell_from_job(child_pid: u32, job: ForegroundJob) -> Option<String> {

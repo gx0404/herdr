@@ -8,18 +8,11 @@ from __future__ import annotations
 
 import datetime
 import json
-import subprocess
 import sys
 from pathlib import Path
 
-
-def _repo_root() -> Path | None:
-    result = subprocess.run(
-        ["git", "rev-parse", "--show-toplevel"], capture_output=True, text=True, check=False
-    )
-    if result.returncode == 0 and result.stdout.strip():
-        return Path(result.stdout.strip())
-    return None
+# 组件根按本文件位置（<组件>/.claude/hooks/）推导：单仓内 git 顶层是单仓根，不是本组件。
+COMPONENT_ROOT = Path(__file__).resolve().parents[2]
 
 
 def main() -> int:
@@ -29,9 +22,7 @@ def main() -> int:
         return 0
     if not isinstance(payload, dict):
         return 0
-    root = _repo_root()
-    if root is None:
-        return 0
+    root = COMPONENT_ROOT
     tool = str(payload.get("tool_name", ""))
     tool_input = payload.get("tool_input")
     target = ""

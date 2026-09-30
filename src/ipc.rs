@@ -65,16 +65,126 @@ pub(crate) fn bind_local_listener(path: &Path) -> io::Result<LocalListener> {
 
     #[cfg(windows)]
     {
-        use interprocess::local_socket::{prelude::*, GenericNamespaced, ListenerOptions};
-
-        let name = path.to_string_lossy().to_string();
-        let name = name.to_ns_name::<GenericNamespaced>()?;
-        let listener = ListenerOptions::new()
-            .name(name)
-            .reclaim_name(false)
-            .create_sync()?;
+        let listener = bind_windows_pipe_listener(path, None)?;
         fs::write(path, windows_socket_marker())?;
         Ok(listener)
+    }
+}
+
+/// Buffer size of every named-pipe instance a Windows local listener creates.
+///
+/// A nonblocking pipe write that neither fits the free buffer nor meets a pending read
+/// writes nothing, and the polling readers peek before reading instead of posting one.
+/// interprocess's 512-byte default therefore limited nonblocking writers to 512-byte
+/// writes, and blocking writers waited for every read; larger buffers let whole frames
+/// through while the peer is between polls.
+#[cfg(windows)]
+pub(crate) const WINDOWS_PIPE_BUFFER_BYTES: u32 = 1024 * 1024;
+
+#[cfg(windows)]
+fn windows_pipe_path(path: &Path) -> io::Result<widestring::U16CString> {
+    // Same `\\.\pipe\` + name mapping as interprocess's `GenericNamespaced`.
+    widestring::U16CString::from_str(format!(r"\\.\pipe\{}", path.to_string_lossy()))
+        .map_err(|err| io::Error::new(io::ErrorKind::InvalidInput, err))
+}
+
+/// Creates the local listener for `path` with [`WINDOWS_PIPE_BUFFER_BYTES`] buffers.
+///
+/// interprocess exposes pipe buffer sizes only on its raw named-pipe listener, so the
+/// raw listener is built first (claiming the name as the first instance) and then moved
+/// into a local-socket listener created under a unique placeholder name, whose own pipe
+/// instance is closed right away. Every later instance comes from the moved listener's
+/// options and gets the same buffers.
+#[cfg(windows)]
+fn bind_windows_pipe_listener(
+    path: &Path,
+    security_descriptor: Option<interprocess::os::windows::security_descriptor::SecurityDescriptor>,
+) -> io::Result<LocalListener> {
+    use interprocess::local_socket::{prelude::*, GenericNamespaced, ListenerOptions};
+    use interprocess::os::windows::named_pipe::{pipe_mode, PipeListenerOptions};
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static NEXT_PLACEHOLDER: AtomicU64 = AtomicU64::new(0);
+
+    let mut options = PipeListenerOptions::new();
+    options.path = std::borrow::Cow::Owned(windows_pipe_path(path)?);
+    options.input_buffer_size_hint = WINDOWS_PIPE_BUFFER_BYTES;
+    options.output_buffer_size_hint = WINDOWS_PIPE_BUFFER_BYTES;
+    options.security_descriptor = security_descriptor;
+    let pipe_listener = options.create_duplex::<pipe_mode::Bytes>()?;
+
+    let placeholder = format!(
+        "herdr-listener-{}-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| duration.as_nanos())
+            .unwrap_or(0),
+        NEXT_PLACEHOLDER.fetch_add(1, Ordering::Relaxed)
+    );
+    let mut listener = ListenerOptions::new()
+        .name(placeholder.to_ns_name::<GenericNamespaced>()?)
+        .reclaim_name(false)
+        .create_sync()?;
+    let LocalListener::NamedPipe(named_pipe) = &mut listener;
+    drop(std::mem::replace(named_pipe.inner_mut(), pipe_listener));
+    Ok(listener)
+}
+
+/// The pipe name for `path` as `CreateNamedPipeW` and `CreateFileW` register and look it
+/// up: they canonicalise `.`/`..` segments, repeated separators and trailing dots, while
+/// `WaitNamedPipeW` compares the name as given.
+#[cfg(windows)]
+fn windows_canonical_pipe_path(path: &Path) -> io::Result<widestring::U16CString> {
+    use windows_sys::Win32::Storage::FileSystem::GetFullPathNameW;
+
+    let name = windows_pipe_path(path)?;
+    let mut capacity = name.len() + 1;
+    loop {
+        let mut buffer = vec![0_u16; capacity];
+        let size = u32::try_from(buffer.len())
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "pipe name is too long"))?;
+        let written = unsafe {
+            GetFullPathNameW(
+                name.as_ptr(),
+                size,
+                buffer.as_mut_ptr(),
+                std::ptr::null_mut(),
+            )
+        } as usize;
+        if written == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        if written < buffer.len() {
+            buffer.truncate(written);
+            return widestring::U16CString::from_vec(buffer)
+                .map_err(|err| io::Error::new(io::ErrorKind::InvalidInput, err));
+        }
+        // Too small: `written` is the required size including the terminator.
+        capacity = written;
+    }
+}
+
+/// Reports whether a Windows local listener at `path` has a pipe instance waiting for a
+/// client, without connecting to it: a probe connection would reach the server as a
+/// client that hangs up right after connecting. Unix sockets offer no equivalent;
+/// callers connect instead.
+#[cfg(windows)]
+pub(crate) fn local_listener_accepting(path: &Path) -> io::Result<bool> {
+    // The marker is written after the pipe exists, so its absence means not bound yet.
+    if !path.exists() {
+        return Ok(false);
+    }
+    let name = windows_canonical_pipe_path(path)?;
+    // WaitNamedPipeW reports a listening instance without opening it. It times out while
+    // every instance is busy; callers poll again rather than queue behind a dead server.
+    if unsafe { windows_sys::Win32::System::Pipes::WaitNamedPipeW(name.as_ptr(), 1) } != 0 {
+        return Ok(true);
+    }
+    let err = io::Error::last_os_error();
+    match err.kind() {
+        io::ErrorKind::NotFound | io::ErrorKind::TimedOut => Ok(false),
+        _ => Err(err),
     }
 }
 
@@ -141,21 +251,13 @@ pub(crate) fn bind_private_local_listener(path: &Path) -> io::Result<LocalListen
 
     #[cfg(windows)]
     {
-        use interprocess::local_socket::{prelude::*, GenericNamespaced, ListenerOptions};
-        use interprocess::os::windows::local_socket::ListenerOptionsExt as _;
         use interprocess::os::windows::security_descriptor::SecurityDescriptor;
         use widestring::U16CString;
 
         let sddl = U16CString::from_str("D:P(A;;GA;;;SY)(A;;GA;;;OW)")
             .map_err(|err| io::Error::new(io::ErrorKind::InvalidInput, err))?;
         let security_descriptor = SecurityDescriptor::deserialize(&sddl)?;
-        let name = path.to_string_lossy().to_string();
-        let name = name.to_ns_name::<GenericNamespaced>()?;
-        let listener = ListenerOptions::new()
-            .name(name)
-            .reclaim_name(false)
-            .security_descriptor(security_descriptor)
-            .create_sync()?;
+        let listener = bind_windows_pipe_listener(path, Some(security_descriptor))?;
         fs::write(path, windows_socket_marker())?;
         Ok(listener)
     }
@@ -484,6 +586,282 @@ mod tests {
 
         assert!(local_stream_peer_closed(&mut server).unwrap());
 
+        let _ = fs::remove_file(path);
+    }
+
+    #[cfg(windows)]
+    fn named_pipe_buffer_sizes(stream: &LocalStream) -> (u32, u32) {
+        use std::os::windows::io::{AsHandle, AsRawHandle};
+
+        let LocalStream::NamedPipe(pipe) = stream;
+        let (mut out_size, mut in_size) = (0, 0);
+        let ok = unsafe {
+            windows_sys::Win32::System::Pipes::GetNamedPipeInfo(
+                pipe.as_handle().as_raw_handle(),
+                std::ptr::null_mut(),
+                &mut out_size,
+                &mut in_size,
+                std::ptr::null_mut(),
+            )
+        };
+        assert_ne!(ok, 0, "GetNamedPipeInfo: {}", io::Error::last_os_error());
+        (out_size, in_size)
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn named_pipe_listeners_give_every_instance_large_buffers() {
+        for (name, private) in [("buffers-public", false), ("buffers-private", true)] {
+            let path = temp_socket_marker_path(name);
+            let _ = fs::remove_file(&path);
+            let listener = if private {
+                bind_private_local_listener(&path)
+            } else {
+                bind_local_listener(&path)
+            }
+            .unwrap();
+            // The first instance is created with the listener; later ones by each accept.
+            for _ in 0..2 {
+                let client = connect_local_stream(&path).unwrap();
+                let server = listener.accept().unwrap();
+                for stream in [&client, &server] {
+                    let (out_size, in_size) = named_pipe_buffer_sizes(stream);
+                    assert!(
+                        out_size >= WINDOWS_PIPE_BUFFER_BYTES
+                            && in_size >= WINDOWS_PIPE_BUFFER_BYTES,
+                        "{name}: pipe buffers are {out_size}/{in_size} bytes"
+                    );
+                }
+            }
+            drop(listener);
+            let _ = fs::remove_file(path);
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn nonblocking_write_is_buffered_while_the_peer_has_no_read_pending() {
+        use interprocess::local_socket::traits::Stream as _;
+        use std::io::Write as _;
+
+        let path = temp_socket_marker_path("nonblocking-buffered-write");
+        let _ = fs::remove_file(&path);
+        let listener = bind_private_local_listener(&path).unwrap();
+        let mut client = connect_local_stream(&path).unwrap();
+        let mut server = listener.accept().unwrap();
+        client.set_nonblocking(true).unwrap();
+
+        // With 512-byte pipe buffers this write reports 0 bytes until the peer reads.
+        let chunk = vec![0x5a_u8; 64 * 1024];
+        assert_eq!(client.write(&chunk).unwrap(), chunk.len());
+
+        let mut received = vec![0_u8; chunk.len()];
+        server.read_exact(&mut received).unwrap();
+        assert_eq!(received, chunk);
+        drop(client);
+        drop(server);
+        drop(listener);
+        let _ = fs::remove_file(path);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn megabyte_frames_round_trip_between_blocking_and_polling_ends() {
+        use interprocess::local_socket::traits::Stream as _;
+        use std::io::Write as _;
+        use std::time::{Duration, Instant};
+
+        let path = temp_socket_marker_path("megabyte-frames");
+        let _ = fs::remove_file(&path);
+        let listener = bind_local_listener(&path).unwrap();
+        let mut client = connect_local_stream(&path).unwrap();
+        let server = listener.accept().unwrap();
+        let frame: Vec<u8> = (0..3 * 1024 * 1024)
+            .map(|index| (index % 251) as u8)
+            .collect();
+        let deadline = Instant::now() + Duration::from_secs(30);
+
+        // Server to client: a blocking writer and a reader that peeks before reading.
+        let outgoing = frame.clone();
+        let writer = std::thread::spawn(move || {
+            let mut server = server;
+            server.write_all(&outgoing).unwrap();
+            server
+        });
+        let mut received = vec![0_u8; frame.len()];
+        let mut filled = 0;
+        while filled < received.len() {
+            assert!(
+                Instant::now() < deadline,
+                "polling reader stalled at {filled} bytes"
+            );
+            match poll_local_stream_read_count(&mut client, &mut received[filled..]).unwrap() {
+                LocalStreamReadCount::Data(read) => filled += read,
+                LocalStreamReadCount::Pending => std::thread::sleep(Duration::from_millis(2)),
+                LocalStreamReadCount::Closed => panic!("server closed the pipe"),
+            }
+        }
+        assert!(received == frame, "server-to-client frame corrupted");
+        let mut server = writer.join().unwrap();
+
+        // Client to server: nonblocking 64 KiB writes into a blocking reader.
+        client.set_nonblocking(true).unwrap();
+        let expected = frame.len();
+        let reader = std::thread::spawn(move || {
+            let mut incoming = vec![0_u8; expected];
+            server.read_exact(&mut incoming).unwrap();
+            incoming
+        });
+        let mut remaining = frame.as_slice();
+        while !remaining.is_empty() {
+            assert!(Instant::now() < deadline, "nonblocking writer stalled");
+            let chunk = &remaining[..remaining.len().min(64 * 1024)];
+            match client.write(chunk) {
+                Ok(0) => std::thread::sleep(Duration::from_millis(2)),
+                Ok(written) => remaining = &remaining[written..],
+                Err(err) if err.kind() == io::ErrorKind::WouldBlock => {
+                    std::thread::sleep(Duration::from_millis(2))
+                }
+                Err(err) => panic!("nonblocking write failed: {err}"),
+            }
+        }
+        assert!(
+            reader.join().unwrap() == frame,
+            "client-to-server frame corrupted"
+        );
+        drop(client);
+        drop(listener);
+        let _ = fs::remove_file(path);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn polling_reader_on_an_idle_pipe_notices_stop_promptly() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
+        use std::time::{Duration, Instant};
+
+        let path = temp_socket_marker_path("reader-stop");
+        let _ = fs::remove_file(&path);
+        let listener = bind_private_local_listener(&path).unwrap();
+        let client = connect_local_stream(&path).unwrap();
+        let _server = listener.accept().unwrap();
+        let stop = Arc::new(AtomicBool::new(false));
+        let reader_stop = stop.clone();
+        let (stopped_tx, stopped_rx) = std::sync::mpsc::channel();
+        let reader = std::thread::spawn(move || {
+            let mut client = client;
+            let mut buffer = [0_u8; 64];
+            while !reader_stop.load(Ordering::Acquire) {
+                let read = poll_local_stream_read_count(&mut client, &mut buffer).unwrap();
+                assert!(matches!(read, LocalStreamReadCount::Pending));
+                crate::platform::wait_client_stream_readable(&client).unwrap();
+            }
+            stopped_tx.send(Instant::now()).unwrap();
+        });
+
+        std::thread::sleep(Duration::from_millis(50));
+        assert!(
+            stopped_rx.try_recv().is_err(),
+            "an idle pipe keeps the reader polling"
+        );
+        let requested = Instant::now();
+        stop.store(true, Ordering::Release);
+        let stopped = stopped_rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the reader never blocks in the kernel, so it sees the stop flag");
+        assert!(stopped.duration_since(requested) < Duration::from_secs(5));
+        reader.join().unwrap();
+        drop(listener);
+        let _ = fs::remove_file(path);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn listener_probe_finds_listeners_bound_at_non_canonical_paths() {
+        let dir = std::env::temp_dir();
+        let tag = format!("herdr-probe-names-{}", std::process::id());
+        for (label, path) in [
+            ("dot", dir.join(".").join(format!("{tag}-dot.sock"))),
+            (
+                "dotdot",
+                dir.join("missing-dir")
+                    .join("..")
+                    .join(format!("{tag}-dotdot.sock")),
+            ),
+            (
+                "doubled separator",
+                PathBuf::from(format!(
+                    "{}\\\\{tag}-doubled.sock",
+                    dir.to_string_lossy().trim_end_matches('\\')
+                )),
+            ),
+        ] {
+            let _ = fs::remove_file(&path);
+            let listener = bind_local_listener(&path).unwrap();
+            assert!(
+                local_listener_accepting(&path).unwrap(),
+                "{label}: the probe must find a listener bound at {}",
+                path.display()
+            );
+            let client = connect_local_stream(&path).unwrap();
+            let server = listener.accept().unwrap();
+            drop(server);
+            drop(client);
+            drop(listener);
+            let _ = fs::remove_file(path);
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn listener_probe_waits_while_every_pipe_instance_is_busy() {
+        let path = temp_socket_marker_path("listener-busy");
+        let _ = fs::remove_file(&path);
+        let listener = bind_local_listener(&path).unwrap();
+        assert!(local_listener_accepting(&path).unwrap());
+
+        // A connected client occupies the only instance until the server accepts it.
+        let client = connect_local_stream(&path).unwrap();
+        assert!(!local_listener_accepting(&path).unwrap());
+
+        let server = listener.accept().unwrap();
+        assert!(local_listener_accepting(&path).unwrap());
+
+        drop(server);
+        drop(client);
+        drop(listener);
+        let _ = fs::remove_file(path);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn listener_probe_does_not_consume_a_pipe_instance() {
+        use interprocess::local_socket::ListenerNonblockingMode;
+
+        let path = temp_socket_marker_path("listener-probe");
+        let _ = fs::remove_file(&path);
+        assert!(!local_listener_accepting(&path).unwrap());
+
+        let listener = bind_local_listener(&path).unwrap();
+        listener
+            .set_nonblocking(ListenerNonblockingMode::Accept)
+            .unwrap();
+        assert!(local_listener_accepting(&path).unwrap());
+        assert!(local_listener_accepting(&path).unwrap());
+        let pending = listener.accept();
+        assert!(
+            matches!(&pending, Err(err) if err.kind() == io::ErrorKind::WouldBlock),
+            "the probe must not leave a connection behind"
+        );
+
+        let client = connect_local_stream(&path).unwrap();
+        let server = listener.accept().unwrap();
+
+        drop(server);
+        drop(client);
+        drop(listener);
+        assert!(!local_listener_accepting(&path).unwrap());
         let _ = fs::remove_file(path);
     }
 

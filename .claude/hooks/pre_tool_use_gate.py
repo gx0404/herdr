@@ -15,22 +15,13 @@ import sys
 from pathlib import Path
 
 CONF_PATH = Path(__file__).resolve().parent / "dangerous_patterns.conf"
+# 组件根按本文件位置（<组件>/.claude/hooks/）推导，不取 git 顶层：并入 gx_shell 单仓后
+# 顶层是单仓根，按它相对化会让组件相对的 FILE 模式全部失配。
+COMPONENT_ROOT = Path(__file__).resolve().parents[2]
 VALID_SECTIONS = {"SHELL", "FILE"}
 VALID_LEVELS = {"deny", "ask"}
 FILE_TOOL_KEYS = ("file_path", "notebook_path")
 WRITE_TOOLS = {"Edit", "Write", "NotebookEdit"}
-
-
-def _repo_root() -> Path | None:
-    """定位仓库根，用于把工具传入的绝对 file_path 相对化后再匹配。"""
-    import subprocess
-
-    result = subprocess.run(
-        ["git", "rev-parse", "--show-toplevel"], capture_output=True, text=True, check=False
-    )
-    if result.returncode == 0 and result.stdout.strip():
-        return Path(result.stdout.strip())
-    return None
 
 
 class PatternError(ValueError):
@@ -76,8 +67,8 @@ def evaluate(
         for key in FILE_TOOL_KEYS:
             if isinstance(tool_input.get(key), str):
                 files.append(tool_input[key])
-    # 真实工具常传绝对路径；FILE 模式以仓库相对路径锚定，先相对化再匹配，
-    # 否则整段 FILE 门对绝对路径失效。仓库外路径按原样匹配（不会命中 ^ 锚定模式）。
+    # 真实工具常传绝对路径；FILE 模式以组件根相对路径锚定，先相对化再匹配，
+    # 否则整段 FILE 门对绝对路径失效。组件根外路径按原样匹配（不会命中 ^ 锚定模式）。
     normalized_files: list[str] = []
     for subject in files:
         candidate = Path(subject)
@@ -134,7 +125,7 @@ def main(argv: list[str] | None = None) -> int:
         # 安全门自身损坏时对写面 fail-closed，对其余工具不拦截。
         print(f"error: dangerous_patterns.conf: {exc}", file=sys.stderr)
         return 2 if tool_name in {"Bash", "Edit", "Write"} else 0
-    level, reason = evaluate(str(tool_name), tool_input, patterns, repo_root=_repo_root())
+    level, reason = evaluate(str(tool_name), tool_input, patterns, repo_root=COMPONENT_ROOT)
     if level is not None:
         print(json.dumps(_decision_payload(level, reason or "命中危险模式", args.protocol), ensure_ascii=False))
     return 0

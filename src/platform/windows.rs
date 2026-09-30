@@ -14,7 +14,15 @@ use std::{
 };
 
 mod clipboard_image;
+mod command_search;
 mod config_backup;
+
+pub(crate) use command_search::{
+    cli_child_path_platform, cli_invocation_platform, command_availability_fallback_platform,
+    command_file_candidates_platform, command_search_dirs_platform,
+};
+#[cfg(test)]
+pub(crate) use command_search::{set_test_command_search_environment, CommandSearchEnvironment};
 
 /// 让出 stdout：把标准输出句柄换成 `NUL` 并关闭原句柄（管道写端）。statusline 回调回放完
 /// stdin 后调用，之后本进程再等上报也不会拖住管道另一端读 EOF。Rust 的 `std::io::stdout()`
@@ -422,7 +430,19 @@ use super::{
 };
 
 const STILL_ACTIVE: u32 = 259;
-const FOREGROUND_PROCESS_SNAPSHOT_CACHE_TTL: Duration = Duration::from_millis(250);
+/// At least one unidentified detection tick (500 ms): every pane observing within the same tick
+/// window shares one Toolhelp snapshot instead of taking its own.
+const FOREGROUND_PROCESS_SNAPSHOT_CACHE_TTL: Duration = Duration::from_millis(500);
+/// Safety recheck for a quiet agent-less pane: output (and the acquisition window after it)
+/// triggers the next observation at once; without output the process tree is re-read at this
+/// pace instead of on every detection tick.
+const QUIET_PANE_PROCESS_RECHECK: Duration = Duration::from_secs(2);
+const AGENT_CLASSIFICATION_CACHE_CAPACITY: usize = 4_096;
+const AGENT_CLASSIFICATION_CACHE_RETENTION: Duration = Duration::from_secs(60);
+/// How long a "not an agent" verdict made without the command line (access denied, or a process
+/// still starting) is reused: an agent started through a runtime (`node.exe`, `bun.exe`) is only
+/// recognisable from its command line, so the read is retried soon.
+const AGENT_CLASSIFICATION_UNREAD_TTL: Duration = Duration::from_secs(1);
 const FOREGROUND_SELECTION_RECHECK: Duration = Duration::from_secs(5);
 const FOREGROUND_SELECTION_CACHE_CAPACITY: usize = 1_024;
 const FOREGROUND_SELECTION_CACHE_RETENTION: Duration = Duration::from_secs(60);
@@ -737,6 +757,7 @@ pub(crate) fn encode_windows_conpty_fallback(key: &crate::input::TerminalKey) ->
         } else {
             return None;
         };
+    let unicode = ctrl_letter_control_character(virtual_key_code, unicode, control_key_state);
     let key_down = key.kind != KeyEventKind::Release;
     let repeat_count = if key_down { key.repeat_count.max(1) } else { 1 };
 
@@ -747,6 +768,32 @@ pub(crate) fn encode_windows_conpty_fallback(key: &crate::input::TerminalKey) ->
         )
         .into_bytes(),
     )
+}
+
+/// Ctrl+A..Z records must carry their C0 control character (`vk - 0x40`, e.g. `0x03` for
+/// Ctrl+C) like conhost produces: MSYS2/Cygwin programs only raise SIGINT (and other
+/// termios specials) from the record's character field, while ConPTY raises the native
+/// Ctrl+C event from the key code alone. A host, key remapper or IME that reports the plain
+/// letter or no character would otherwise leave MSYS programs uninterruptible. AltGr
+/// (Ctrl+Alt) and existing control characters are left untouched.
+fn ctrl_letter_control_character(
+    virtual_key_code: u16,
+    unicode: u16,
+    control_key_state: u32,
+) -> u16 {
+    use windows_sys::Win32::System::Console::{
+        LEFT_ALT_PRESSED, LEFT_CTRL_PRESSED, RIGHT_ALT_PRESSED, RIGHT_CTRL_PRESSED,
+    };
+
+    let letter = (u16::from(b'A')..=u16::from(b'Z')).contains(&virtual_key_code);
+    let ctrl_only = control_key_state & (LEFT_CTRL_PRESSED | RIGHT_CTRL_PRESSED) != 0
+        && control_key_state & (LEFT_ALT_PRESSED | RIGHT_ALT_PRESSED) == 0;
+    let control_character = (0x01..=0x1f).contains(&unicode);
+    if letter && ctrl_only && !control_character {
+        virtual_key_code - 0x40
+    } else {
+        unicode
+    }
 }
 
 #[derive(Debug)]
@@ -859,10 +906,110 @@ struct CachedGitBashProcess {
     last_used: Instant,
 }
 
+/// Whether one process instance (pid + creation time) looks like an agent. Most descendants of
+/// a pane shell (subshells, prompt helpers such as gitstatusd) live across many snapshots; their
+/// command lines are read and classified once instead of on every snapshot.
+#[derive(Debug)]
+struct CachedAgentClassification {
+    creation_time: u64,
+    identifies_agent: bool,
+    /// The verdict is final: an agent was found, or the command line was read. A "not an agent"
+    /// verdict without a command line expires after `AGENT_CLASSIFICATION_UNREAD_TTL`.
+    settled: bool,
+    cached_at: Instant,
+    last_used: Instant,
+}
+
+type AgentClassificationCache = HashMap<u32, CachedAgentClassification>;
+
 static FOREGROUND_PROCESS_SNAPSHOT_CACHE: Mutex<ProcessSnapshotCache> =
     Mutex::new(ProcessSnapshotCache { cached: None });
 static FOREGROUND_SELECTION_CACHE: LazyLock<Mutex<ForegroundSelectionCache>> =
     LazyLock::new(|| Mutex::new(ForegroundSelectionCache::default()));
+#[cfg(not(test))]
+static AGENT_CLASSIFICATION_CACHE: LazyLock<Mutex<AgentClassificationCache>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+// Tests reuse fake pids and creation times across cases; each test thread gets its own cache.
+#[cfg(test)]
+thread_local! {
+    static AGENT_CLASSIFICATION_CACHE: std::cell::RefCell<AgentClassificationCache> =
+        std::cell::RefCell::new(HashMap::new());
+}
+
+fn with_agent_classification_cache<T>(
+    action: impl FnOnce(&mut AgentClassificationCache) -> T,
+) -> T {
+    #[cfg(not(test))]
+    {
+        let mut cache = AGENT_CLASSIFICATION_CACHE
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
+        action(&mut cache)
+    }
+    #[cfg(test)]
+    {
+        AGENT_CLASSIFICATION_CACHE.with(|cache| action(&mut cache.borrow_mut()))
+    }
+}
+
+fn cached_agent_classification(pid: u32, creation_time: u64) -> Option<bool> {
+    with_agent_classification_cache(|cache| {
+        let cached = cache.get_mut(&pid)?;
+        if cached.creation_time != creation_time
+            || (!cached.settled && cached.cached_at.elapsed() >= AGENT_CLASSIFICATION_UNREAD_TTL)
+        {
+            return None;
+        }
+        cached.last_used = Instant::now();
+        Some(cached.identifies_agent)
+    })
+}
+
+fn remember_agent_classification(
+    pid: u32,
+    creation_time: u64,
+    identifies_agent: bool,
+    command_line_read: bool,
+) {
+    with_agent_classification_cache(|cache| {
+        if cache.len() >= AGENT_CLASSIFICATION_CACHE_CAPACITY {
+            cache.retain(|_, cached| {
+                cached.last_used.elapsed() < AGENT_CLASSIFICATION_CACHE_RETENTION
+            });
+            if cache.len() >= AGENT_CLASSIFICATION_CACHE_CAPACITY {
+                cache.clear();
+            }
+        }
+        let now = Instant::now();
+        cache.insert(
+            pid,
+            CachedAgentClassification {
+                creation_time,
+                identifies_agent,
+                settled: identifies_agent || command_line_read,
+                cached_at: now,
+                last_used: now,
+            },
+        );
+    });
+}
+
+/// Whether a quiet agent-less pane last observed at `last_observation` re-reads the process tree
+/// at `now`. Rechecks happen once per process-wide slot of `QUIET_PANE_PROCESS_RECHECK` rather
+/// than that long after each pane's own last observation: every such pane then observes in the
+/// first detection tick of the slot, inside one lifetime of the shared process snapshot
+/// (`FOREGROUND_PROCESS_SNAPSHOT_CACHE_TTL`), so they all reuse a single Toolhelp snapshot.
+pub(crate) fn quiet_pane_process_recheck_due(last_observation: Instant, now: Instant) -> bool {
+    static ORIGIN: OnceLock<Instant> = OnceLock::new();
+    process_recheck_slot_changed(*ORIGIN.get_or_init(Instant::now), last_observation, now)
+}
+
+fn process_recheck_slot_changed(origin: Instant, last_observation: Instant, now: Instant) -> bool {
+    let slot = |at: Instant| {
+        at.saturating_duration_since(origin).as_millis() / QUIET_PANE_PROCESS_RECHECK.as_millis()
+    };
+    slot(now) != slot(last_observation)
+}
 
 pub(crate) fn should_draw_host_cursor_by_default() -> bool {
     true
@@ -918,12 +1065,34 @@ struct WindowsProcessEntry {
     parent_pid: u32,
     name: String,
     command: OnceLock<WindowsProcessCommand>,
+    creation_time: OnceLock<Option<u64>>,
 }
 
 impl WindowsProcessEntry {
+    fn new(pid: u32, parent_pid: u32, name: String) -> Self {
+        Self {
+            pid,
+            parent_pid,
+            name,
+            command: OnceLock::new(),
+            creation_time: OnceLock::new(),
+        }
+    }
+
     fn command(&self) -> &WindowsProcessCommand {
         self.command
             .get_or_init(|| read_process_command(self.pid, &self.name))
+    }
+
+    /// The instance identity without reading the command line (one handle query).
+    fn creation_time(&self) -> Option<u64> {
+        if let Some(command) = self.command.get() {
+            return command.creation_time;
+        }
+        *self.creation_time.get_or_init(|| {
+            ProcessHandle::open(self.pid, PROCESS_QUERY_LIMITED_INFORMATION)
+                .and_then(|process| process_creation_time(process.0))
+        })
     }
 }
 
@@ -1472,6 +1641,34 @@ pub(crate) fn available_pane_shell(child_pid: u32) -> Option<String> {
     available_pane_shell_from_snapshot(child_pid, &snapshot)
 }
 
+/// Periodic detection-loop check: the snapshot shared with other panes may show the shell still
+/// busy, but an apparently idle shell is confirmed against a fresh snapshot, so a command that
+/// started after the shared snapshot is never missed. The confirming snapshot replaces the
+/// shared one, so the other panes of the same round reuse it.
+pub(crate) fn pane_shell_is_idle(child_pid: u32) -> bool {
+    pane_shell_is_idle_in(
+        child_pid,
+        &FOREGROUND_PROCESS_SNAPSHOT_CACHE,
+        snapshot_processes,
+    )
+}
+
+fn pane_shell_is_idle_in(
+    child_pid: u32,
+    cache: &Mutex<ProcessSnapshotCache>,
+    build: impl Fn() -> Vec<WindowsProcessEntry>,
+) -> bool {
+    let snapshot = |max_age| {
+        cache
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .snapshot(max_age, &build)
+    };
+    available_pane_shell_from_snapshot(child_pid, &snapshot(FOREGROUND_PROCESS_SNAPSHOT_CACHE_TTL))
+        .is_some()
+        && available_pane_shell_from_snapshot(child_pid, &snapshot(Duration::ZERO)).is_some()
+}
+
 fn available_pane_shell_from_snapshot(
     child_pid: u32,
     snapshot: &ProcessSnapshot,
@@ -1606,8 +1803,32 @@ fn select_pane_foreground_job(
 }
 
 fn process_entry_identifies_agent(entry: &WindowsProcessEntry) -> bool {
-    crate::detect::identify_agent(&entry.name).is_some()
-        || crate::detect::identify_agent_in_job(&foreground_job_from_entry(entry)).is_some()
+    if crate::detect::identify_agent(&entry.name).is_some() {
+        return true;
+    }
+    let Some(creation_time) = entry.creation_time() else {
+        return process_command_identifies_agent(entry);
+    };
+    if let Some(identifies_agent) = cached_agent_classification(entry.pid, creation_time) {
+        return identifies_agent;
+    }
+    let identifies_agent = process_command_identifies_agent(entry);
+    // Only cache a verdict read from the same process instance: the pid may have been reused
+    // between the identity query and the command-line read.
+    let command = entry.command();
+    if command.creation_time == Some(creation_time) {
+        remember_agent_classification(
+            entry.pid,
+            creation_time,
+            identifies_agent,
+            command.cmdline.is_some(),
+        );
+    }
+    identifies_agent
+}
+
+fn process_command_identifies_agent(entry: &WindowsProcessEntry) -> bool {
+    crate::detect::identify_agent_in_job(&foreground_job_from_entry(entry)).is_some()
 }
 
 fn foreground_job_from_entry(entry: &WindowsProcessEntry) -> ForegroundJob {
@@ -1744,14 +1965,11 @@ fn snapshot_processes() -> Vec<WindowsProcessEntry> {
     let mut output = Vec::new();
     let mut ok = unsafe { Process32FirstW(snapshot, &mut entry) } != 0;
     while ok {
-        let pid = entry.th32ProcessID;
-        let name = nul_terminated_utf16_to_string(&entry.szExeFile);
-        output.push(WindowsProcessEntry {
-            pid,
-            parent_pid: entry.th32ParentProcessID,
-            name,
-            command: OnceLock::new(),
-        });
+        output.push(WindowsProcessEntry::new(
+            entry.th32ProcessID,
+            entry.th32ParentProcessID,
+            nul_terminated_utf16_to_string(&entry.szExeFile),
+        ));
         ok = unsafe { Process32NextW(snapshot, &mut entry) } != 0;
     }
     output
@@ -3476,6 +3694,86 @@ mod tests {
         );
     }
 
+    fn native_key(
+        virtual_key_code: u16,
+        virtual_scan_code: u16,
+        unicode: u16,
+        control_key_state: u32,
+    ) -> crate::input::TerminalKey {
+        crate::input::TerminalKey::new(
+            crossterm::event::KeyCode::Char('c'),
+            crossterm::event::KeyModifiers::CONTROL,
+        )
+        .with_windows_record(crate::input::WindowsKeyRecord {
+            key_down: true,
+            repeat_count: 1,
+            virtual_key_code,
+            virtual_scan_code,
+            unicode,
+            control_key_state,
+        })
+    }
+
+    #[test]
+    fn windows_conpty_native_encoder_gives_ctrl_letters_their_control_character() {
+        // A host that reports the plain letter (or no character) for Ctrl+C would leave
+        // MSYS programs, which read SIGINT from the character field, uninterruptible.
+        for unicode in [0x63, 0x43, 0] {
+            let key = native_key(0x43, 46, unicode, 0x0008);
+            assert_eq!(
+                super::encode_windows_conpty_fallback(&key),
+                Some(b"\x1b[67;46;3;1;8;1_".to_vec()),
+                "unicode {unicode:#x}"
+            );
+            assert_eq!(
+                super::encode_windows_conpty_fallback(
+                    &key.with_kind(crossterm::event::KeyEventKind::Release)
+                ),
+                Some(b"\x1b[67;46;3;0;8;1_".to_vec()),
+                "release, unicode {unicode:#x}"
+            );
+        }
+        assert_eq!(
+            super::encode_windows_conpty_fallback(&native_key(0x5A, 44, 0x7A, 0x0004 | 0x0010)),
+            Some(b"\x1b[90;44;26;1;20;1_".to_vec()),
+            "right Ctrl with Shift maps Z to 0x1a"
+        );
+        assert_eq!(
+            super::encode_windows_conpty_fallback(&native_key(0x41, 30, 0x61, 0x0008 | 0x0020)),
+            Some(b"\x1b[65;30;1;1;40;1_".to_vec()),
+            "lock-key flags do not block the rewrite"
+        );
+    }
+
+    #[test]
+    fn windows_conpty_native_encoder_keeps_control_characters_and_non_ctrl_letters() {
+        assert_eq!(
+            super::encode_windows_conpty_fallback(&native_key(0x43, 46, 3, 0x0008)),
+            Some(b"\x1b[67;46;3;1;8;1_".to_vec()),
+            "an existing control character is forwarded unchanged"
+        );
+        assert_eq!(
+            super::encode_windows_conpty_fallback(&native_key(0x51, 16, 0x40, 0x0009)),
+            Some(b"\x1b[81;16;64;1;9;1_".to_vec()),
+            "AltGr (Right Alt + Left Ctrl) keeps the layout character"
+        );
+        assert_eq!(
+            super::encode_windows_conpty_fallback(&native_key(0x43, 46, 0x63, 0x0002 | 0x0008)),
+            Some(b"\x1b[67;46;99;1;10;1_".to_vec()),
+            "Ctrl+Alt keeps the character"
+        );
+        assert_eq!(
+            super::encode_windows_conpty_fallback(&native_key(0x43, 46, 0x43, 0x0010)),
+            Some(b"\x1b[67;46;67;1;16;1_".to_vec()),
+            "Shift without Ctrl keeps the character"
+        );
+        assert_eq!(
+            super::encode_windows_conpty_fallback(&native_key(0xBA, 39, 0x3B, 0x0008)),
+            Some(b"\x1b[186;39;59;1;8;1_".to_vec()),
+            "non-letter keys are not rewritten"
+        );
+    }
+
     #[test]
     fn windows_notification_text_is_null_terminated_and_unicode_safe() {
         let mut destination = [u16::MAX; 6];
@@ -4252,6 +4550,221 @@ mod tests {
         assert_eq!(job.processes[0].name, "bash.exe");
     }
 
+    /// Long-lived shell descendants are classified once per process instance: the verdict is
+    /// keyed by pid + creation time, so a reused pid is classified afresh.
+    #[test]
+    fn windows_agent_classification_is_cached_per_process_instance() {
+        let worker =
+            test_entry_with_creation_time(30, 10, "node.exe", &["node.exe", "worker.js"], Some(7));
+        assert!(!super::process_entry_identifies_agent(&worker));
+        assert_eq!(super::cached_agent_classification(30, 7), Some(false));
+
+        let reused = test_entry_with_creation_time(
+            30,
+            10,
+            "node.exe",
+            &[
+                r"C:\Program Files\nodejs\node.exe",
+                r"C:\Users\user\AppData\Roaming\npm\node_modules\@openai\codex\bin\codex.js",
+            ],
+            Some(8),
+        );
+        assert!(super::process_entry_identifies_agent(&reused));
+        assert_eq!(super::cached_agent_classification(30, 8), Some(true));
+        assert_eq!(super::cached_agent_classification(30, 7), None);
+
+        let unidentified = test_entry(31, 10, "node.exe", &["node.exe", "worker.js"]);
+        assert!(!super::process_entry_identifies_agent(&unidentified));
+        assert!(
+            !super::with_agent_classification_cache(|cache| cache.contains_key(&31)),
+            "an instance without a creation time is never cached"
+        );
+        assert!(super::process_entry_identifies_agent(&test_entry(
+            32,
+            10,
+            "claude.exe",
+            &["claude.exe"]
+        )));
+    }
+
+    /// A "not an agent" verdict made without the command line is only reused briefly: the next
+    /// read after `AGENT_CLASSIFICATION_UNREAD_TTL` may show a runtime-launched agent. Verdicts
+    /// from a readable command line stay cached.
+    #[test]
+    fn windows_agent_classification_retries_unreadable_command_lines() {
+        let age = |pid: u32| {
+            super::with_agent_classification_cache(|cache| {
+                let cached = cache.get_mut(&pid).expect("verdict cached");
+                cached.cached_at = cached
+                    .cached_at
+                    .checked_sub(super::AGENT_CLASSIFICATION_UNREAD_TTL)
+                    .expect("instant before the TTL");
+            });
+        };
+
+        let unreadable = test_entry_without_cmdline(40, 10, "node.exe", 9);
+        assert!(!super::process_entry_identifies_agent(&unreadable));
+        assert_eq!(
+            super::cached_agent_classification(40, 9),
+            Some(false),
+            "reused within the TTL"
+        );
+        age(40);
+        assert_eq!(
+            super::cached_agent_classification(40, 9),
+            None,
+            "an unreadable verdict expires"
+        );
+        let readable = test_entry_with_creation_time(
+            40,
+            10,
+            "node.exe",
+            &[
+                r"C:\Program Files\nodejs\node.exe",
+                r"C:\Users\user\AppData\Roaming\npm\node_modules\@openai\codex\bin\codex.js",
+            ],
+            Some(9),
+        );
+        assert!(super::process_entry_identifies_agent(&readable));
+        age(40);
+        assert_eq!(super::cached_agent_classification(40, 9), Some(true));
+
+        let worker =
+            test_entry_with_creation_time(41, 10, "node.exe", &["node.exe", "worker.js"], Some(3));
+        assert!(!super::process_entry_identifies_agent(&worker));
+        age(41);
+        assert_eq!(
+            super::cached_agent_classification(41, 3),
+            Some(false),
+            "a verdict from a readable command line is settled"
+        );
+    }
+
+    /// The periodic idle check answers "busy" from the shared snapshot without taking another,
+    /// and confirms "idle" against a fresh snapshot that then replaces the shared one.
+    #[test]
+    fn pane_shell_idle_check_confirms_idle_with_a_fresh_shared_snapshot() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let idle = || vec![test_entry(10, 1, "zsh.exe", &["zsh.exe"])];
+        let busy = || {
+            vec![
+                test_entry(10, 1, "zsh.exe", &["zsh.exe"]),
+                test_entry(20, 10, "sleep.exe", &["sleep.exe", "30"]),
+            ]
+        };
+        let shared = |entries: Vec<super::WindowsProcessEntry>| {
+            std::sync::Mutex::new(super::ProcessSnapshotCache {
+                cached: Some(super::CachedProcessSnapshot {
+                    // Inside the shared TTL however slowly the test runs.
+                    built_at: Instant::now() + Duration::from_secs(60),
+                    snapshot: Arc::new(super::ProcessSnapshot::new(entries)),
+                }),
+            })
+        };
+        let cached_shell_is_idle = |cache: &std::sync::Mutex<super::ProcessSnapshotCache>| {
+            let cache = cache.lock().expect("cache lock");
+            let cached = cache.cached.as_ref().expect("snapshot cached");
+            super::available_pane_shell_from_snapshot(10, &cached.snapshot).is_some()
+        };
+
+        let builds = AtomicUsize::new(0);
+        let counted = |entries: fn() -> Vec<super::WindowsProcessEntry>| {
+            let builds = &builds;
+            move || {
+                builds.fetch_add(1, Ordering::SeqCst);
+                entries()
+            }
+        };
+
+        let cache = shared(busy());
+        assert!(!super::pane_shell_is_idle_in(10, &cache, counted(idle)));
+        assert_eq!(
+            builds.load(Ordering::SeqCst),
+            0,
+            "busy in the shared snapshot"
+        );
+
+        let cache = shared(idle());
+        assert!(!super::pane_shell_is_idle_in(10, &cache, counted(busy)));
+        assert_eq!(builds.load(Ordering::SeqCst), 1, "idle is confirmed live");
+        assert!(
+            !cached_shell_is_idle(&cache),
+            "the confirming snapshot is shared"
+        );
+
+        let cache = shared(idle());
+        assert!(super::pane_shell_is_idle_in(10, &cache, counted(idle)));
+        assert_eq!(builds.load(Ordering::SeqCst), 2);
+        assert!(cached_shell_is_idle(&cache));
+    }
+
+    /// Quiet panes recheck at the first tick of each shared slot, whatever their own phase, so
+    /// all of them fall inside one snapshot lifetime.
+    #[test]
+    fn quiet_agentless_rechecks_line_up_on_shared_slots() {
+        let origin = Instant::now();
+        let at = |millis| origin + Duration::from_millis(millis);
+        let slot = super::QUIET_PANE_PROCESS_RECHECK.as_millis() as u64;
+        let due = super::process_recheck_slot_changed;
+
+        // Two panes whose last observations sit early and late in the same slot.
+        for last in [at(100), at(slot - 100)] {
+            assert!(!due(origin, last, at(slot - 1)));
+            assert!(due(origin, last, at(slot)));
+            assert!(due(origin, last, at(slot + 499)));
+        }
+        // Once observed in the new slot, the next recheck waits for the following one.
+        assert!(!due(origin, at(slot + 200), at(2 * slot - 1)));
+        assert!(due(origin, at(slot + 200), at(2 * slot)));
+        // An observation time before the origin counts as slot zero.
+        assert!(!due(at(500), origin, at(600)));
+    }
+
+    /// Detection scale profile: `cargo test --release --locked --bin herdr
+    /// detection_scale_profile -- --ignored --nocapture --test-threads=1`. Spawns `count` idle
+    /// pane-like trees (a `cmd.exe` shell with a long-running child) and times one detection
+    /// round, every pane observing its foreground group, with the shared snapshot expired
+    /// between rounds as it is between 500 ms ticks.
+    #[test]
+    #[ignore = "profiling; spawns real process trees"]
+    fn detection_scale_profile_windows_foreground_observation() {
+        for count in [1_usize, 15, 30] {
+            let mut trees = Vec::new();
+            for _ in 0..count {
+                let mut command = Command::new("cmd.exe");
+                command
+                    .args(["/d", "/c", "ping -n 120 127.0.0.1 >nul"])
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null());
+                super::configure_status_command(&mut command);
+                let child = command.spawn().expect("spawn pane-like process tree");
+                let guard = super::StatusCommandGuard::from_std_child(&child)
+                    .expect("kill-on-close job for the tree");
+                trees.push((child.id(), guard, child));
+            }
+            thread::sleep(Duration::from_millis(1500));
+            let mut samples = Vec::new();
+            for round in 0..12 {
+                thread::sleep(Duration::from_millis(600));
+                let started = Instant::now();
+                for (pid, _, _) in &trees {
+                    std::hint::black_box(super::foreground_process_group_id(*pid));
+                }
+                if round >= 2 {
+                    samples.push(started.elapsed().as_micros());
+                }
+            }
+            samples.sort_unstable();
+            eprintln!(
+                "detection_scale panes={count} round_median_us={} round_max_us={}",
+                samples[samples.len() / 2],
+                samples[samples.len() - 1]
+            );
+        }
+    }
+
     #[test]
     fn windows_foreground_process_snapshot_is_shared_within_ttl() {
         let mut cache = super::ProcessSnapshotCache { cached: None };
@@ -4756,20 +5269,16 @@ mod tests {
         name: &str,
         creation_time: u64,
     ) -> super::WindowsProcessEntry {
-        let command = super::OnceLock::new();
-        command
+        let entry = super::WindowsProcessEntry::new(pid, parent_pid, name.to_string());
+        entry
+            .command
             .set(super::WindowsProcessCommand::from_cmdline(
                 name,
                 Some(creation_time),
                 None,
             ))
             .unwrap();
-        super::WindowsProcessEntry {
-            pid,
-            parent_pid,
-            name: name.to_string(),
-            command,
-        }
+        entry
     }
 
     fn test_entry_with_creation_time(
@@ -4779,8 +5288,9 @@ mod tests {
         argv: &[&str],
         creation_time: Option<u64>,
     ) -> super::WindowsProcessEntry {
-        let command = super::OnceLock::new();
-        command
+        let entry = super::WindowsProcessEntry::new(pid, parent_pid, name.to_string());
+        entry
+            .command
             .set(super::WindowsProcessCommand {
                 creation_time,
                 argv0: argv.first().map(|value| (*value).to_string()),
@@ -4788,12 +5298,7 @@ mod tests {
                 cmdline: Some(argv.join(" ")),
             })
             .unwrap();
-        super::WindowsProcessEntry {
-            pid,
-            parent_pid,
-            name: name.to_string(),
-            command,
-        }
+        entry
     }
 
     #[test]

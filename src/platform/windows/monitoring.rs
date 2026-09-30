@@ -2,6 +2,7 @@
 
 use std::collections::HashMap;
 use std::io;
+use std::time::{Duration, Instant};
 use windows::Win32::Graphics::Dxgi::{CreateDXGIFactory1, IDXGIFactory1};
 use windows_sys::Win32::Foundation::{CloseHandle, FILETIME, HANDLE};
 use windows_sys::Win32::System::Performance::*;
@@ -18,27 +19,54 @@ fn texts() -> &'static crate::i18n::PlatformMessageTexts {
     &crate::i18n::texts().platform
 }
 
+/// The DXGI adapter list only changes with driver or hardware events.
+const ADAPTER_LIST_TTL: Duration = Duration::from_secs(60);
+
+#[derive(Debug, Clone, PartialEq)]
+struct AdapterDescription {
+    name: String,
+    luid: String,
+    vendor: &'static str,
+    dedicated_total_bytes: Option<u64>,
+}
+
+/// `\GPU Engine(*)` has one instance per process and engine, which makes its collection the
+/// expensive part of a sample; it lives in its own query so it can be skipped while NVML
+/// reports utilisation for every adapter. Memory counters are cheap and always collected.
 pub(crate) struct NativeGpuCollector {
-    query: PDH_HQUERY,
+    engine_query: PDH_HQUERY,
     engines: PDH_HCOUNTER,
+    memory_query: PDH_HQUERY,
     dedicated: PDH_HCOUNTER,
     shared: PDH_HCOUNTER,
-    sampled: bool,
+    /// The previous sample collected the engine query, so its rate counters have a baseline.
+    engines_primed: bool,
+    adapters: Option<(Instant, Vec<AdapterDescription>)>,
 }
 
 impl Default for NativeGpuCollector {
     fn default() -> Self {
         let mut value = Self {
-            query: std::ptr::null_mut(),
+            engine_query: std::ptr::null_mut(),
             engines: std::ptr::null_mut(),
+            memory_query: std::ptr::null_mut(),
             dedicated: std::ptr::null_mut(),
             shared: std::ptr::null_mut(),
-            sampled: false,
+            engines_primed: false,
+            adapters: None,
         };
-        if unsafe { PdhOpenQueryW(std::ptr::null(), 0, &mut value.query) } == 0 {
-            value.engines = add_counter(value.query, "\\GPU Engine(*)\\Utilization Percentage");
-            value.dedicated = add_counter(value.query, "\\GPU Adapter Memory(*)\\Dedicated Usage");
-            value.shared = add_counter(value.query, "\\GPU Adapter Memory(*)\\Shared Usage");
+        if unsafe { PdhOpenQueryW(std::ptr::null(), 0, &mut value.engine_query) } == 0 {
+            value.engines = add_counter(
+                value.engine_query,
+                "\\GPU Engine(*)\\Utilization Percentage",
+            );
+        }
+        if unsafe { PdhOpenQueryW(std::ptr::null(), 0, &mut value.memory_query) } == 0 {
+            value.dedicated = add_counter(
+                value.memory_query,
+                "\\GPU Adapter Memory(*)\\Dedicated Usage",
+            );
+            value.shared = add_counter(value.memory_query, "\\GPU Adapter Memory(*)\\Shared Usage");
         }
         value
     }
@@ -46,9 +74,11 @@ impl Default for NativeGpuCollector {
 
 impl Drop for NativeGpuCollector {
     fn drop(&mut self) {
-        if !self.query.is_null() {
-            unsafe {
-                PdhCloseQuery(self.query);
+        for query in [self.engine_query, self.memory_query] {
+            if !query.is_null() {
+                unsafe {
+                    PdhCloseQuery(query);
+                }
             }
         }
     }
@@ -139,91 +169,176 @@ fn adapter_usage(values: &[(String, f64)], luid: &str) -> Option<f32> {
 
 impl NativeGpuCollector {
     pub(crate) fn sample(&mut self, nvidia: Vec<GpuMetric>) -> Vec<GpuMetric> {
-        let sampled = !self.query.is_null() && unsafe { PdhCollectQueryData(self.query) } == 0;
-        let engines = if sampled && self.sampled {
-            counters(self.engines)
-        } else {
-            Vec::new()
-        };
-        let dedicated = counters(self.dedicated);
-        let shared = counters(self.shared);
-        self.sampled = sampled;
-        let Ok(factory): Result<IDXGIFactory1, _> = (unsafe { CreateDXGIFactory1() }) else {
+        let adapters = self.adapters(Instant::now());
+        if adapters.is_empty() {
             return nvidia;
+        }
+        let matched = nvml_matches(&adapters, &nvidia);
+        let nvml_usage = nvml_reports_every_adapter(&matched);
+        let engines = if nvml_usage {
+            // Resume from a fresh baseline if NVML stops covering an adapter later.
+            self.engines_primed = false;
+            Vec::new()
+        } else {
+            let collected = !self.engine_query.is_null()
+                && unsafe { PdhCollectQueryData(self.engine_query) } == 0;
+            let values = if collected && self.engines_primed {
+                counters(self.engines)
+            } else {
+                Vec::new()
+            };
+            self.engines_primed = collected;
+            values
         };
-        let mut result = Vec::new();
-        for index in 0..64 {
-            let Ok(adapter) = (unsafe { factory.EnumAdapters1(index) }) else {
-                break;
-            };
-            let Ok(desc) = (unsafe { adapter.GetDesc1() }) else {
-                continue;
-            };
-            if desc.Flags & 2 != 0 {
-                continue;
+        let memory_collected =
+            !self.memory_query.is_null() && unsafe { PdhCollectQueryData(self.memory_query) } == 0;
+        let (dedicated, shared) = if memory_collected {
+            (counters(self.dedicated), counters(self.shared))
+        } else {
+            (Vec::new(), Vec::new())
+        };
+        adapters
+            .iter()
+            .zip(&matched)
+            .map(|(adapter, device)| {
+                let usage = if nvml_usage {
+                    device.and_then(|device| device.usage_percent)
+                } else {
+                    adapter_usage(&engines, &adapter.luid)
+                };
+                adapter_metric(adapter, *device, usage, nvml_usage, &dedicated, &shared)
+            })
+            .collect()
+    }
+
+    fn adapters(&mut self, now: Instant) -> Vec<AdapterDescription> {
+        if let Some((at, adapters)) = &self.adapters {
+            if now.saturating_duration_since(*at) < ADAPTER_LIST_TTL {
+                return adapters.clone();
             }
-            let length = desc
-                .Description
-                .iter()
-                .position(|c| *c == 0)
-                .unwrap_or(desc.Description.len());
-            let name = String::from_utf16_lossy(&desc.Description[..length]);
-            let luid = format!(
+        }
+        let Some(adapters) = enumerate_adapters() else {
+            self.adapters = None;
+            return Vec::new();
+        };
+        self.adapters = Some((now, adapters.clone()));
+        adapters
+    }
+}
+
+/// Hardware adapters in DXGI order (software adapters skipped); `None` when DXGI is unusable.
+fn enumerate_adapters() -> Option<Vec<AdapterDescription>> {
+    let factory: IDXGIFactory1 = unsafe { CreateDXGIFactory1() }.ok()?;
+    let mut adapters = Vec::new();
+    for index in 0..64 {
+        let Ok(adapter) = (unsafe { factory.EnumAdapters1(index) }) else {
+            break;
+        };
+        let Ok(desc) = (unsafe { adapter.GetDesc1() }) else {
+            continue;
+        };
+        if desc.Flags & 2 != 0 {
+            continue;
+        }
+        let length = desc
+            .Description
+            .iter()
+            .position(|c| *c == 0)
+            .unwrap_or(desc.Description.len());
+        adapters.push(AdapterDescription {
+            name: String::from_utf16_lossy(&desc.Description[..length]),
+            luid: format!(
                 "luid_0x{:08x}_0x{:08x}",
                 desc.AdapterLuid.HighPart as u32, desc.AdapterLuid.LowPart
-            );
-            let usage = adapter_usage(&engines, &luid);
-            let memory = |values: &[(String, f64)]| {
-                values
-                    .iter()
-                    .find(|(id, _)| id.contains(&luid))
-                    .map(|(_, value)| *value as u64)
-            };
-            result.push(GpuMetric {
-                id: luid.clone(),
-                name,
-                vendor: match desc.VendorId {
-                    0x10de => "NVIDIA",
-                    0x1002 => "AMD",
-                    0x8086 => "Intel",
-                    _ => "GPU",
-                }
-                .into(),
-                status: if usage.is_some() {
-                    ObservationStatus::Ready
-                } else {
-                    ObservationStatus::Unsupported
-                },
-                source: "Windows PDH/DXGI".into(),
-                usage_percent: usage,
-                memory_used_bytes: memory(&dedicated),
-                memory_total_bytes: (desc.DedicatedVideoMemory > 0)
-                    .then_some(desc.DedicatedVideoMemory as u64),
-                shared_memory_used_bytes: memory(&shared),
-                message: usage.is_none().then(|| texts().gpu_counters_pending.into()),
-                ..Default::default()
-            });
-        }
-        // 仅在名称可唯一关联时补充 NVML 传感器，避免两张同名显卡串号。
-        let names = result.iter().map(|g| g.name.clone()).collect::<Vec<_>>();
-        for gpu in &mut result {
-            if names.iter().filter(|name| **name == gpu.name).count() != 1 {
-                continue;
-            }
-            let candidates = nvidia
+            ),
+            vendor: match desc.VendorId {
+                0x10de => "NVIDIA",
+                0x1002 => "AMD",
+                0x8086 => "Intel",
+                _ => "GPU",
+            },
+            dedicated_total_bytes: (desc.DedicatedVideoMemory > 0)
+                .then_some(desc.DedicatedVideoMemory as u64),
+        });
+    }
+    Some(adapters)
+}
+
+/// The NVML device for each adapter, only when the name links them uniquely (two same-name
+/// cards would otherwise swap sensors).
+fn nvml_matches<'a>(
+    adapters: &[AdapterDescription],
+    nvidia: &'a [GpuMetric],
+) -> Vec<Option<&'a GpuMetric>> {
+    adapters
+        .iter()
+        .map(|adapter| {
+            if adapters
                 .iter()
-                .filter(|g| g.name == gpu.name)
-                .collect::<Vec<_>>();
-            if let [device] = candidates.as_slice() {
-                gpu.temperature_celsius = device.temperature_celsius;
-                gpu.power_watts = device.power_watts;
+                .filter(|other| other.name == adapter.name)
+                .count()
+                != 1
+            {
+                return None;
             }
-        }
-        if result.is_empty() {
-            nvidia
+            match nvidia
+                .iter()
+                .filter(|device| device.name == adapter.name)
+                .collect::<Vec<_>>()
+                .as_slice()
+            {
+                [device] => Some(*device),
+                _ => None,
+            }
+        })
+        .collect()
+}
+
+fn nvml_reports_every_adapter(matched: &[Option<&GpuMetric>]) -> bool {
+    !matched.is_empty()
+        && matched
+            .iter()
+            .all(|device| device.is_some_and(|device| device.usage_percent.is_some()))
+}
+
+/// One adapter's metric: utilisation from PDH engines or, while NVML covers every adapter,
+/// from NVML; memory from PDH; temperature and power from the uniquely matched NVML device.
+fn adapter_metric(
+    adapter: &AdapterDescription,
+    device: Option<&GpuMetric>,
+    usage: Option<f32>,
+    nvml_usage: bool,
+    dedicated: &[(String, f64)],
+    shared: &[(String, f64)],
+) -> GpuMetric {
+    let memory = |values: &[(String, f64)]| {
+        values
+            .iter()
+            .find(|(id, _)| id.contains(&adapter.luid))
+            .map(|(_, value)| *value as u64)
+    };
+    GpuMetric {
+        id: adapter.luid.clone(),
+        name: adapter.name.clone(),
+        vendor: adapter.vendor.into(),
+        status: if usage.is_some() {
+            ObservationStatus::Ready
         } else {
-            result
+            ObservationStatus::Unsupported
+        },
+        source: if nvml_usage {
+            "NVML + Windows DXGI"
+        } else {
+            "Windows PDH/DXGI"
         }
+        .into(),
+        usage_percent: usage,
+        memory_used_bytes: memory(dedicated),
+        memory_total_bytes: adapter.dedicated_total_bytes,
+        shared_memory_used_bytes: memory(shared),
+        temperature_celsius: device.and_then(|device| device.temperature_celsius),
+        power_watts: device.and_then(|device| device.power_watts),
+        message: usage.is_none().then(|| texts().gpu_counters_pending.into()),
     }
 }
 
@@ -512,6 +627,80 @@ mod tests {
         ];
         assert_eq!(adapter_usage(&data, "luid_0x1_0x2"), Some(70.0));
         assert_eq!(adapter_usage(&data, "luid_0x9_0x9"), None);
+    }
+
+    fn adapter(name: &str, luid: &str) -> AdapterDescription {
+        AdapterDescription {
+            name: name.into(),
+            luid: luid.into(),
+            vendor: "NVIDIA",
+            dedicated_total_bytes: Some(8 << 30),
+        }
+    }
+
+    fn nvml(name: &str, usage: Option<f32>) -> GpuMetric {
+        GpuMetric {
+            name: name.into(),
+            usage_percent: usage,
+            temperature_celsius: Some(50.0),
+            power_watts: Some(30.0),
+            ..Default::default()
+        }
+    }
+
+    /// The expensive `GPU Engine` query is skipped only while NVML reports utilisation for
+    /// every adapter, matched by a unique name.
+    #[test]
+    fn nvml_covers_adapters_only_through_unique_name_matches_with_utilisation() {
+        let rtx = adapter("NVIDIA GeForce RTX 4070 Laptop GPU", "luid_0x0_0x1");
+        let igpu = adapter("AMD Radeon(TM) Graphics", "luid_0x0_0x2");
+        let devices = [nvml("NVIDIA GeForce RTX 4070 Laptop GPU", Some(12.0))];
+
+        let matched = nvml_matches(std::slice::from_ref(&rtx), &devices);
+        assert!(nvml_reports_every_adapter(&matched));
+
+        let hybrid = [rtx.clone(), igpu];
+        let matched = nvml_matches(&hybrid, &devices);
+        assert_eq!(matched[1], None);
+        assert!(
+            !nvml_reports_every_adapter(&matched),
+            "an adapter NVML does not know keeps the PDH engine query"
+        );
+
+        let twins = [rtx.clone(), adapter(&rtx.name, "luid_0x0_0x3")];
+        let two_devices = [devices[0].clone(), devices[0].clone()];
+        assert!(nvml_matches(&twins, &two_devices)
+            .iter()
+            .all(Option::is_none));
+
+        let no_usage = [nvml(&rtx.name, None)];
+        assert!(!nvml_reports_every_adapter(&nvml_matches(
+            std::slice::from_ref(&rtx),
+            &no_usage
+        )));
+        assert!(!nvml_reports_every_adapter(&[]));
+    }
+
+    #[test]
+    fn adapter_metric_labels_the_utilisation_source_and_keeps_nvml_sensors() {
+        let rtx = adapter("NVIDIA GeForce RTX 4070 Laptop GPU", "luid_0x0_0x1");
+        let device = nvml(&rtx.name, Some(12.0));
+        let dedicated = vec![("luid_0x0_0x1_phys_0".to_string(), 1024.0)];
+
+        let from_nvml = adapter_metric(&rtx, Some(&device), Some(12.0), true, &dedicated, &[]);
+        assert_eq!(from_nvml.source, "NVML + Windows DXGI");
+        assert_eq!(from_nvml.usage_percent, Some(12.0));
+        assert_eq!(from_nvml.status, ObservationStatus::Ready);
+        assert_eq!(from_nvml.memory_used_bytes, Some(1024));
+        assert_eq!(from_nvml.memory_total_bytes, Some(8 << 30));
+        assert_eq!(from_nvml.temperature_celsius, Some(50.0));
+        assert_eq!(from_nvml.power_watts, Some(30.0));
+
+        let pending = adapter_metric(&rtx, None, None, false, &[], &[]);
+        assert_eq!(pending.source, "Windows PDH/DXGI");
+        assert_eq!(pending.status, ObservationStatus::Unsupported);
+        assert!(pending.message.is_some());
+        assert_eq!(pending.temperature_celsius, None);
     }
 
     #[test]

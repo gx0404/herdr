@@ -43,8 +43,10 @@ python3 scripts/resolve_agent_rules.py --check                   # 闭集/体积
   表移植 AGENTS.md 变更。官方集成只保留六家：同步时不合入上游对其余集成商的
   新增与修改，口径见同一 README 的「fork 已删除的集成」。
 - fork 只启用 `ci.yml` 与 `gx-release.yml`；其余 workflow 原样保存在
-  `.github/workflows-archive/`，同步上游时不要重新启用。安装包入口为
-  `scripts/gx_package.py`，仅发布到 `gx0404/herdr`，边界见 `release-channels.md`。
+  `.github/workflows-archive/`，同步上游时不要重新启用。本目录已并入
+  `gx0404/gx_shell` 单仓（`herdr/`），这些 workflow 在单仓中不执行：herdr 随
+  GX Shell 合并安装包由单仓根 `release.yml` 发布，`scripts/gx_package.py` 独立包
+  不再单独发版，边界见 `release-channels.md`。
 
 ## 项目模型
 

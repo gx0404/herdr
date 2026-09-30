@@ -493,7 +493,7 @@ async fn report_self_reported_agent_shell_return(
         return;
     }
     *last_check = Some(now);
-    if crate::detect::pane_shell_is_idle(pid) {
+    if pane_shell_is_idle(pid).await {
         let _ = state_events
             .send(AppEvent::ReportedAgentShellReturned {
                 pane_id,
@@ -676,16 +676,22 @@ fn should_observe_foreground_process_group(
     lifecycle_authority: bool,
     content_changed: bool,
     elapsed: std::time::Duration,
+    unidentified_recheck_due: bool,
     input: ProcessProbeInput,
 ) -> bool {
+    let acquiring = input
+        .acquisition_age
+        .is_some_and(|age| age <= PROCESS_ACQUISITION_WINDOW);
     !input.has_process_probe
-        || input.current_agent.is_none()
         || input.suppressed_agent.is_some()
         || input.pending_foreground_shell_clear
         || input.pending_restore_probe
         || content_changed
-        || (lifecycle_authority && elapsed >= PROCESS_RECHECK_IDENTIFIED)
-        || (!lifecycle_authority && input.elapsed_since_process_check >= PROCESS_RECHECK_IDENTIFIED)
+        || match input.current_agent {
+            None => acquiring || unidentified_recheck_due,
+            Some(_) if lifecycle_authority => elapsed >= PROCESS_RECHECK_IDENTIFIED,
+            Some(_) => input.elapsed_since_process_check >= PROCESS_RECHECK_IDENTIFIED,
+        }
 }
 
 fn should_probe_foreground_job(input: ProcessProbeInput) -> bool {
@@ -906,6 +912,85 @@ fn probe_foreground_process(pid: u32, foreground_pgid: Option<u32>) -> ProcessPr
         || crate::detect::foreground_job(pid),
         crate::platform::process_agent_hint,
     )
+}
+
+/// One detection tick's process-table work: the foreground group observation and, when due,
+/// the full foreground probe.
+#[derive(Debug, Clone, Copy)]
+struct ProcessObservationRequest {
+    pid: u32,
+    observe_foreground: bool,
+    last_foreground_pgid: Option<u32>,
+    lifecycle_authority: bool,
+    probe_input: ProcessProbeInput,
+}
+
+#[derive(Debug, Clone)]
+struct ProcessObservation {
+    foreground_pgid: Option<u32>,
+    probe: Option<ProcessProbeResult>,
+}
+
+impl ProcessObservationRequest {
+    fn probe_due(&self, foreground_pgid: Option<u32>) -> bool {
+        let input = ProcessProbeInput {
+            foreground_pgid,
+            ..self.probe_input
+        };
+        self.pid > 0
+            && !should_skip_process_probe_for_lifecycle_authority(self.lifecycle_authority, input)
+            && should_probe_foreground_job(input)
+    }
+
+    /// Whether this tick queries the platform at all (otherwise it only reuses the last
+    /// observed foreground group).
+    fn queries_platform(&self) -> bool {
+        self.pid > 0 && (self.observe_foreground || self.probe_due(self.last_foreground_pgid))
+    }
+
+    fn run(self) -> ProcessObservation {
+        let foreground_pgid = match (self.pid, self.observe_foreground) {
+            (0, _) => None,
+            (pid, true) => crate::detect::foreground_process_group_id(pid),
+            _ => self.last_foreground_pgid,
+        };
+        let probe = self
+            .probe_due(foreground_pgid)
+            .then(|| probe_foreground_process(self.pid, foreground_pgid));
+        ProcessObservation {
+            foreground_pgid,
+            probe,
+        }
+    }
+}
+
+/// Runs the tick's process queries on the blocking pool where they block (Windows snapshots)
+/// so a pane's detection never stalls the async workers shared with the rest of the server;
+/// ticks without a platform query and cheap platforms stay inline.
+async fn observe_processes(request: ProcessObservationRequest) -> ProcessObservation {
+    if !crate::platform::PROCESS_QUERIES_BLOCK || !request.queries_platform() {
+        return request.run();
+    }
+    match tokio::task::spawn_blocking(move || request.run()).await {
+        Ok(observation) => observation,
+        Err(error) => {
+            warn!(pid = request.pid, %error, "process observation task failed");
+            ProcessObservation {
+                foreground_pgid: request.last_foreground_pgid,
+                probe: None,
+            }
+        }
+    }
+}
+
+/// `detect::pane_shell_is_idle` off the async workers where process queries block.
+async fn pane_shell_is_idle(pid: u32) -> bool {
+    if !crate::platform::PROCESS_QUERIES_BLOCK {
+        return crate::detect::pane_shell_is_idle(pid);
+    }
+    tokio::task::spawn_blocking(move || crate::detect::pane_shell_is_idle(pid))
+        .await
+        .unwrap_or(false)
 }
 
 #[cfg(unix)]
@@ -2813,7 +2898,6 @@ impl PaneRuntime {
         let (detect_handle, detect_reset_notify, pending_release) = if agent_detection
             == AgentDetection::Enabled
         {
-            use crate::detect;
             use std::time::{Duration, Instant};
 
             const TICK_UNIDENTIFIED: Duration = Duration::from_millis(500);
@@ -2947,15 +3031,20 @@ impl PaneRuntime {
                             && (last_content_seq.is_some()
                                 || now.duration_since(last_observation.0) >= TICK_IDENTIFIED),
                         now.duration_since(last_observation.0),
+                        crate::platform::quiet_pane_process_recheck_due(last_observation.0, now),
                         process_probe_input,
                     );
                     #[cfg(not(windows))]
                     let foreground_observation_due = true;
-                    let foreground_pgid = match (pid, foreground_observation_due) {
-                        (0, _) => None,
-                        (_, true) => detect::foreground_process_group_id(pid),
-                        _ => last_foreground_pgid,
-                    };
+                    let observation = observe_processes(ProcessObservationRequest {
+                        pid,
+                        observe_foreground: foreground_observation_due,
+                        last_foreground_pgid,
+                        lifecycle_authority: lifecycle_authority_active,
+                        probe_input: process_probe_input,
+                    })
+                    .await;
+                    let foreground_pgid = observation.foreground_pgid;
                     #[cfg(windows)]
                     if pid > 0 && foreground_observation_due {
                         let retry =
@@ -2964,24 +3053,13 @@ impl PaneRuntime {
                     }
                     let process_group_changed =
                         foreground_group_changed(foreground_pgid, last_foreground_pgid);
-                    let should_check_process = pid > 0 && {
-                        let process_probe_input = ProcessProbeInput {
-                            foreground_pgid,
-                            ..process_probe_input
-                        };
-                        !should_skip_process_probe_for_lifecycle_authority(
-                            lifecycle_authority_active,
-                            process_probe_input,
-                        ) && should_probe_foreground_job(process_probe_input)
-                    };
 
                     let mut agent_changed = false;
-                    if should_check_process {
+                    if let Some(probe) = observation.probe {
                         last_process_check = now;
                         let had_process_probe = has_process_probe;
                         has_process_probe = true;
                         if pid > 0 {
-                            let probe = probe_foreground_process(pid, foreground_pgid);
                             let process_name = probe.process_name;
                             let process_group_id = probe.process_group_id;
                             let tracked_process_group_id = process_group_for_change_tracking(
@@ -5919,7 +5997,13 @@ mod tests {
         let before_safety_bound = PROCESS_RECHECK_IDENTIFIED - std::time::Duration::from_millis(1);
         let content_retry = std::time::Duration::from_millis(300);
         let observe = |lifecycle, content_changed, elapsed, input| {
-            should_observe_foreground_process_group(lifecycle, content_changed, elapsed, input)
+            should_observe_foreground_process_group(
+                lifecycle,
+                content_changed,
+                elapsed,
+                false,
+                input,
+            )
         };
         let content_due = |last: Option<u64>, current, elapsed| {
             last != Some(current) && (last.is_some() || elapsed >= content_retry)
@@ -5971,6 +6055,108 @@ mod tests {
         ] {
             assert!(observe(false, false, std::time::Duration::ZERO, immediate));
         }
+    }
+
+    /// Agent-less panes no longer re-read the process tree on every tick: output (and the
+    /// acquisition window that follows it) is the fast path, a quiet pane waits for its slot
+    /// recheck, and neither the observation age nor the identified-agent probe age forces an
+    /// agent-less observation.
+    #[test]
+    fn windows_agentless_foreground_observation_waits_for_output_or_slot_recheck() {
+        let idle_shell = process_probe_input();
+        let long_ago = PROCESS_RECHECK_IDENTIFIED * 10;
+        let observe = |lifecycle, content_changed, recheck_due, input| {
+            should_observe_foreground_process_group(
+                lifecycle,
+                content_changed,
+                long_ago,
+                recheck_due,
+                input,
+            )
+        };
+
+        for lifecycle in [false, true] {
+            assert!(!observe(lifecycle, false, false, idle_shell));
+            assert!(observe(lifecycle, false, true, idle_shell));
+            assert!(observe(lifecycle, true, false, idle_shell));
+        }
+        assert!(observe(
+            false,
+            false,
+            false,
+            ProcessProbeInput {
+                acquisition_age: Some(PROCESS_ACQUISITION_WINDOW),
+                ..idle_shell
+            }
+        ));
+        assert!(!observe(
+            false,
+            false,
+            false,
+            ProcessProbeInput {
+                acquisition_age: Some(
+                    PROCESS_ACQUISITION_WINDOW + std::time::Duration::from_millis(1)
+                ),
+                elapsed_since_process_check: long_ago,
+                ..idle_shell
+            }
+        ));
+    }
+
+    #[test]
+    fn process_observation_queries_the_platform_only_when_something_is_due() {
+        let quiet = ProcessObservationRequest {
+            pid: 42,
+            observe_foreground: false,
+            last_foreground_pgid: Some(42),
+            lifecycle_authority: false,
+            probe_input: process_probe_input(),
+        };
+        assert!(!quiet.queries_platform());
+        let observation = quiet.run();
+        assert_eq!(observation.foreground_pgid, Some(42));
+        assert!(observation.probe.is_none());
+
+        assert!(ProcessObservationRequest {
+            observe_foreground: true,
+            ..quiet
+        }
+        .queries_platform());
+        assert!(ProcessObservationRequest {
+            probe_input: ProcessProbeInput {
+                has_process_probe: false,
+                ..process_probe_input()
+            },
+            ..quiet
+        }
+        .queries_platform());
+        assert!(!ProcessObservationRequest {
+            pid: 0,
+            observe_foreground: true,
+            ..quiet
+        }
+        .queries_platform());
+    }
+
+    /// Where process queries block (Windows) the observation runs on the blocking pool and
+    /// still returns the probe the tick asked for.
+    #[tokio::test]
+    async fn process_observation_returns_the_due_probe_from_the_platform() {
+        let pid = std::process::id();
+        let observation = observe_processes(ProcessObservationRequest {
+            pid,
+            observe_foreground: true,
+            last_foreground_pgid: None,
+            lifecycle_authority: false,
+            probe_input: ProcessProbeInput {
+                has_process_probe: false,
+                foreground_pgid: None,
+                last_foreground_pgid: None,
+                ..process_probe_input()
+            },
+        })
+        .await;
+        assert!(observation.probe.is_some(), "the first probe is always due");
     }
 
     #[test]

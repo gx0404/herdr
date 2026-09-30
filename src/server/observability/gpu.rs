@@ -7,6 +7,14 @@ use crate::api::schema::{GpuMetric, ObservationStatus};
 
 /// RS-20：最后一次指标请求之后多久释放 NVML（见 worker 循环）。
 const GPU_NVML_IDLE_TIMEOUT: Duration = Duration::from_secs(5);
+/// GPU 利用率的最小采样间隔：驱动查询（Windows 的 `GPU Engine` 计数器、NVML）不便宜，
+/// 监控页最快 500 ms 一拍的请求在间隔内直接复用上一份结果。
+const GPU_MIN_SAMPLE_INTERVAL: Duration = Duration::from_secs(2);
+
+/// 距上次采样不足最小间隔时跳过这次请求。
+fn gpu_sample_due(last_sampled: Option<Instant>, now: Instant) -> bool {
+    last_sampled.is_none_or(|at| now.saturating_duration_since(at) >= GPU_MIN_SAMPLE_INTERVAL)
+}
 
 pub(super) struct GpuWorker {
     request: mpsc::SyncSender<()>,
@@ -24,10 +32,19 @@ impl GpuWorker {
                 let mut nvml = None;
                 let mut retry_at = Instant::now();
                 let mut native: Option<crate::platform::NativeGpuCollector> = None;
+                let mut last_sampled = None;
                 loop {
                     // RS-20：空闲就释放 NVML——初始化后它常驻 7 个设备 fd 与上百 MB
                     // 驱动映射，而指标只有打开监控页时才会被请求。下一次请求重新 init。
-                    match requests.recv_timeout(GPU_NVML_IDLE_TIMEOUT) {
+                    // NVML 已释放时没有要计时的事，直接阻塞等下一次请求。
+                    let request = if nvml.is_some() {
+                        requests.recv_timeout(GPU_NVML_IDLE_TIMEOUT)
+                    } else {
+                        requests
+                            .recv()
+                            .map_err(|_| mpsc::RecvTimeoutError::Disconnected)
+                    };
+                    match request {
                         Ok(()) => {}
                         Err(mpsc::RecvTimeoutError::Timeout) => {
                             let released = nvml.take().is_some();
@@ -41,6 +58,9 @@ impl GpuWorker {
                         }
                         Err(mpsc::RecvTimeoutError::Disconnected) => break,
                     }
+                    if !gpu_sample_due(last_sampled, Instant::now()) {
+                        continue;
+                    }
                     if nvml.is_none() && Instant::now() >= retry_at {
                         nvml = nvml_wrapper::Nvml::init().ok();
                         retry_at = Instant::now() + Duration::from_secs(30);
@@ -48,8 +68,10 @@ impl GpuWorker {
                     let devices = native
                         .get_or_insert_with(Default::default)
                         .sample(nvml.as_ref().map(nvidia_metrics).unwrap_or_default());
+                    let sampled_at = Instant::now();
+                    last_sampled = Some(sampled_at);
                     if let Ok(mut state) = output.lock() {
-                        *state = (Some(Instant::now()), devices);
+                        *state = (Some(sampled_at), devices);
                     }
                 }
             })?;
@@ -132,6 +154,19 @@ fn nvidia_metrics(nvml: &nvml_wrapper::Nvml) -> Vec<GpuMetric> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 监控页最快 500 ms 一拍：GPU 驱动查询最多每 2 秒一次，其间复用上一份结果。
+    #[test]
+    fn gpu_sampling_is_limited_to_the_minimum_interval() {
+        let now = Instant::now();
+        assert!(gpu_sample_due(None, now));
+        assert!(!gpu_sample_due(Some(now), now + Duration::from_millis(500)));
+        assert!(!gpu_sample_due(
+            Some(now),
+            now + GPU_MIN_SAMPLE_INTERVAL - Duration::from_millis(1)
+        ));
+        assert!(gpu_sample_due(Some(now), now + GPU_MIN_SAMPLE_INTERVAL));
+    }
 
     /// 文档终审 D7：驱动超过 15 秒没有应答时的说明按界面语言给出：英文界面不含 CJK，
     /// 中文界面是中文。

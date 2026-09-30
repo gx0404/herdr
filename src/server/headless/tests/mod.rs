@@ -920,6 +920,67 @@ async fn client_shell_attach_seeds_workspace() {
 }
 
 #[tokio::test]
+async fn startup_workspace_keeps_its_cwd_when_a_client_connected_before_it_was_seeded() {
+    let mut server = test_headless_server();
+    server.app.state.workspaces.clear();
+    server.app.state.active = None;
+    server.app.state.mode = crate::app::Mode::Navigate;
+    // An existing directory other than the default workspace cwd (home or the current
+    // directory). The spawned pane keeps it busy, so the test cannot delete one of its own.
+    let startup_cwd = std::env::temp_dir();
+    // The client socket is open while the first pane spawns: a client can finish its
+    // handshake and queue its connection before the startup workspace exists.
+    let (writer, _control_rx, _render_rx) = test_client_writer();
+    server
+        .server_event_tx
+        .try_send(ServerEvent::ClientShellConnected {
+            surface_reuse: false,
+            surface_delta: false,
+            surface_scroll: false,
+            client_id: 7,
+            surface_cols: 80,
+            surface_rows: 23,
+            cell_width_px: 0,
+            cell_height_px: 0,
+            pixel_mouse: false,
+            direct_graphics: false,
+            endpoint_keybindings: false,
+            mouse_capture: false,
+            surface_active: true,
+            ssh_auth_sock: None,
+            writer,
+        })
+        .unwrap();
+
+    bootstrap::seed_startup_workspace_if_empty(&mut server.app, Some(startup_cwd.clone()));
+    assert!(server.drain_server_events());
+
+    assert_eq!(server.app.state.workspaces.len(), 1);
+    assert_eq!(server.app.state.workspaces[0].identity_cwd, startup_cwd);
+    assert_eq!(server.app.state.active, Some(0));
+    assert!(server.clients.contains_key(&7));
+    shutdown_test_runtimes(&mut server);
+}
+
+#[tokio::test]
+async fn startup_cwd_is_ignored_when_the_restored_session_has_workspaces() {
+    let mut server = test_headless_server();
+    let workspace = crate::workspace::Workspace::test_new("restored");
+    let restored_cwd = workspace.identity_cwd.clone();
+    server.app.state.workspaces = vec![workspace];
+    server.app.state.active = Some(0);
+
+    bootstrap::seed_startup_workspace_if_empty(
+        &mut server.app,
+        Some(std::env::temp_dir().join("hh-startup-cwd-ignored")),
+    );
+
+    assert_eq!(server.app.state.workspaces.len(), 1);
+    assert_eq!(server.app.state.workspaces[0].identity_cwd, restored_cwd);
+    shutdown_test_runtimes(&mut server);
+}
+
+#[tokio::test]
 async fn client_shell_attach_records_reported_ssh_auth_sock() {
     let _guard = crate::pane::pane_env_test_lock();
     crate::pane::clear_client_reported_ssh_auth_sock();

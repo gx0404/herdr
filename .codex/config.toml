@@ -36,7 +36,7 @@ matcher = "^Bash$"
 
 [[hooks.PreToolUse.hooks]]
 type = "command"
-command = 'python3 "$(git rev-parse --show-toplevel)/.codex/hooks/pre_tool_use_policy.py"'
+command = 'python3 "$(git rev-parse --show-toplevel)/herdr/.codex/hooks/pre_tool_use_policy.py"'
 timeout = 30
 
 [[hooks.PostToolUse]]
@@ -44,12 +44,12 @@ matcher = "^Bash$|^apply_patch$|^Edit$|^Write$"
 
 [[hooks.PostToolUse.hooks]]
 type = "command"
-command = 'bash "$(git rev-parse --show-toplevel)/.claude/hooks/record_edit.sh"'
+command = 'bash "$(git rev-parse --show-toplevel)/herdr/.claude/hooks/record_edit.sh"'
 timeout = 15
 
 [[hooks.Stop]]
 
 [[hooks.Stop.hooks]]
 type = "command"
-command = 'bash "$(git rev-parse --show-toplevel)/.claude/hooks/notify_review.sh"'
+command = 'bash "$(git rev-parse --show-toplevel)/herdr/.claude/hooks/notify_review.sh"'
 timeout = 15
