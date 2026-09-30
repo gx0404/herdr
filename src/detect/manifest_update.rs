@@ -481,6 +481,11 @@ fn parse_catalog(content: &str) -> Result<Vec<CatalogAgent>, String> {
 }
 
 pub(crate) fn load_status() -> ManifestUpdateStatus {
+    // 没隔离状态目录的测试（构造 App、explain 等）不读开发机上真实的更新状态。
+    #[cfg(test)]
+    if crate::config::test_dirs::isolated_state_dir().is_none() {
+        return ManifestUpdateStatus::default();
+    }
     let path = status_path();
     let Ok(content) = fs::read_to_string(&path) else {
         return ManifestUpdateStatus::default();
@@ -589,7 +594,14 @@ fn directory_sync_unsupported(err: &std::io::Error) -> bool {
 }
 
 fn state_root() -> PathBuf {
-    crate::config::state_dir().join("agent-detection")
+    // 测试构建只解析到隔离的临时状态目录：远端缓存与更新状态一旦写进开发机真实的
+    // herdr-dev 目录，之后每次跑测试都会读到。隔离失效时直接失败，不读也不写那里。
+    #[cfg(test)]
+    let dir = crate::config::test_dirs::isolated_state_dir()
+        .expect("agent detection state dir must be isolated to a temp dir in tests");
+    #[cfg(not(test))]
+    let dir = crate::config::state_dir();
+    dir.join("agent-detection")
 }
 
 fn catalog_url() -> String {

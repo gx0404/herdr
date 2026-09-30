@@ -784,6 +784,9 @@ fn read_override_manifest(path: &Path) -> Result<AgentManifest, String> {
 }
 
 fn read_remote_manifest(agent: Agent, bundled: &AgentManifest) -> Option<LoadedManifest> {
+    // 测试构建不读开发机状态目录里的远端缓存（口径同 override_path）。
+    #[cfg(test)]
+    crate::config::test_dirs::isolated_state_dir()?;
     let path = super::manifest_update::remote_manifest_path(agent);
     if !path.exists() {
         return None;
@@ -1159,9 +1162,14 @@ fn validate_region_name(spec: &str) -> Result<(), String> {
 }
 
 fn override_path(agent: Agent) -> Option<PathBuf> {
+    // 测试构建只认隔离到临时目录的配置目录：本地覆盖整份替换捆绑 manifest，开发机上
+    // 的覆盖文件（包括测试泄漏出去的）会让检测测试随机器状态漂移。
+    #[cfg(test)]
+    let dir = crate::config::test_dirs::isolated_config_dir()?;
+    #[cfg(not(test))]
+    let dir = crate::config::config_dir();
     Some(
-        crate::config::config_dir()
-            .join("agent-detection")
+        dir.join("agent-detection")
             .join(format!("{}.toml", agent_label(agent))),
     )
 }

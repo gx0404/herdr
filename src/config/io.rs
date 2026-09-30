@@ -90,6 +90,28 @@ pub(crate) mod test_dirs {
     pub(crate) fn set_config_path(path: PathBuf) {
         CONFIG_PATH.with(|slot| *slot.borrow_mut() = Some(path));
     }
+
+    /// 测试已隔离到临时目录的 `config_dir()`，否则 None。没设 `XDG_CONFIG_HOME` 时
+    /// 它落在开发机真实的 herdr-dev 配置目录；CI 与部分开发机全局设了
+    /// `XDG_CONFIG_HOME`，所以还要求在临时目录下。返回校验过的路径本身，调用方不再
+    /// 二次解析（并发测试可能在两次解析之间改掉环境变量）。
+    pub(crate) fn isolated_config_dir() -> Option<PathBuf> {
+        std::env::var_os("XDG_CONFIG_HOME")?;
+        under_temp_dir(super::config_dir())
+    }
+
+    /// 测试已隔离到临时目录的 `state_dir()`（线程本地覆盖或 `XDG_STATE_HOME`），
+    /// 否则 None；口径同 `isolated_config_dir`。
+    pub(crate) fn isolated_state_dir() -> Option<PathBuf> {
+        if state_dir().is_none() {
+            std::env::var_os("XDG_STATE_HOME")?;
+        }
+        under_temp_dir(super::state_dir())
+    }
+
+    fn under_temp_dir(dir: PathBuf) -> Option<PathBuf> {
+        dir.starts_with(std::env::temp_dir()).then_some(dir)
+    }
 }
 
 #[cfg(windows)]

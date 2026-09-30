@@ -663,8 +663,12 @@ mod tests {
         app
     }
 
+    /// 与负载无关的宽上限：负载高时后台 git 进程要十几秒才完成，杀毒扫描也会晚些放开文件；
+    /// 条件一成立即返回，只在真失败时才等满。
+    const LOADED_WAIT: std::time::Duration = std::time::Duration::from_secs(30);
+
     fn wait_for_app_event(app: &mut App) -> AppEvent {
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let deadline = std::time::Instant::now() + LOADED_WAIT;
         loop {
             if let Ok(event) = app.event_rx.try_recv() {
                 return event;
@@ -675,6 +679,42 @@ mod tests {
             );
             std::thread::sleep(std::time::Duration::from_millis(20));
         }
+    }
+
+    /// 删掉测试建的 worktree。Windows 上杀毒扫描等会在 git 删目录的瞬间留下条目，git 报
+    /// `Directory not empty`，但 worktree 已注销（删检出失败也会接着删管理目录）：只对这个
+    /// 报错等残留检出目录删掉、补一次 prune 并确认已不在列表里；其它失败照常 panic。
+    fn remove_test_worktree(repo: &Path, checkout: &Path) {
+        let remove = crate::worktree::build_worktree_remove_command(repo, checkout, false, false);
+        let Err(err) = crate::worktree::run_worktree_command(&remove) else {
+            return;
+        };
+        assert!(
+            err.contains("Directory not empty"),
+            "git worktree remove failed: {err}"
+        );
+        let deadline = std::time::Instant::now() + LOADED_WAIT;
+        while checkout.exists() && std::fs::remove_dir_all(checkout).is_err() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "leftover checkout {} is still held: {err}",
+                checkout.display()
+            );
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        let _ = std::process::Command::new("git")
+            .arg("-C")
+            .arg(repo)
+            .args(["worktree", "prune"])
+            .output();
+        let worktrees = crate::worktree::list_existing_worktrees(repo, false).unwrap();
+        assert!(
+            worktrees
+                .iter()
+                .all(|entry| entry.path.file_name() != checkout.file_name()),
+            "worktree {} is still registered: {err}",
+            checkout.display()
+        );
     }
 
     fn install_event_plugin(app: &mut App, name: &str, event: &str) -> PathBuf {
@@ -825,13 +865,7 @@ mod tests {
         for (_, runtime) in app.terminal_runtimes.drain() {
             runtime.shutdown();
         }
-        let remove = crate::worktree::build_worktree_remove_command(
-            &repo,
-            Path::new(&worktree.path),
-            false,
-            false,
-        );
-        crate::worktree::run_worktree_command(&remove).unwrap();
+        remove_test_worktree(&repo, Path::new(&worktree.path));
         let _ = std::fs::remove_dir_all(worktree_root);
         let _ = std::fs::remove_dir_all(repo);
     }
@@ -1144,13 +1178,7 @@ mod tests {
         for (_, runtime) in app.terminal_runtimes.drain() {
             runtime.shutdown();
         }
-        let remove = crate::worktree::build_worktree_remove_command(
-            &repo,
-            Path::new(&worktree.path),
-            false,
-            false,
-        );
-        crate::worktree::run_worktree_command(&remove).unwrap();
+        remove_test_worktree(&repo, Path::new(&worktree.path));
         let _ = std::fs::remove_dir_all(worktree_root);
         let _ = std::fs::remove_dir_all(repo);
     }
@@ -1324,8 +1352,7 @@ mod tests {
             )
         }));
 
-        let remove = crate::worktree::build_worktree_remove_command(&repo, &checkout, false, false);
-        crate::worktree::run_worktree_command(&remove).unwrap();
+        remove_test_worktree(&repo, &checkout);
         let _ = std::fs::remove_dir_all(repo);
     }
 
@@ -1530,8 +1557,7 @@ mod tests {
         );
         app.state.assert_invariants_for_test();
 
-        let remove = crate::worktree::build_worktree_remove_command(&repo, &checkout, false, false);
-        crate::worktree::run_worktree_command(&remove).unwrap();
+        remove_test_worktree(&repo, &checkout);
         let _ = std::fs::remove_dir_all(repo);
     }
 
@@ -1612,8 +1638,7 @@ mod tests {
             )
         }));
 
-        let remove = crate::worktree::build_worktree_remove_command(&repo, &checkout, false, false);
-        crate::worktree::run_worktree_command(&remove).unwrap();
+        remove_test_worktree(&repo, &checkout);
         let _ = std::fs::remove_dir_all(repo);
     }
 
@@ -1651,7 +1676,7 @@ mod tests {
                 false,
             );
             let completion = wait_for_app_event(&mut app);
-            run_git(&repo, &["worktree", "remove", checkout.to_str().unwrap()]);
+            remove_test_worktree(&repo, &checkout);
             match replacement {
                 "directory" => std::fs::create_dir_all(&checkout).unwrap(),
                 "repository" => {
@@ -1709,9 +1734,7 @@ mod tests {
         let (entered, release) = crate::worktree::test_list_gate::block(&repo);
         let (respond_to, response_rx) = response_channel();
         app.handle_deferred_worktree_api_request(request(false), respond_to, false);
-        entered
-            .recv_timeout(std::time::Duration::from_secs(5))
-            .unwrap();
+        entered.recv_timeout(LOADED_WAIT).unwrap();
         let assert_busy = |app: &mut App| {
             for open in [false, true] {
                 let (respond_to, response_rx) = response_channel();
@@ -1838,8 +1861,7 @@ mod tests {
             );
             app.state.assert_invariants_for_test();
         }
-        let remove = crate::worktree::build_worktree_remove_command(&repo, &checkout, false, false);
-        crate::worktree::run_worktree_command(&remove).unwrap();
+        remove_test_worktree(&repo, &checkout);
         let _ = std::fs::remove_dir_all(repo);
         let _ = std::fs::remove_dir_all(other_repo);
     }
@@ -1949,8 +1971,7 @@ mod tests {
         );
         assert!(entry.is_linked_worktree);
 
-        let remove = crate::worktree::build_worktree_remove_command(&repo, &checkout, false, false);
-        crate::worktree::run_worktree_command(&remove).unwrap();
+        remove_test_worktree(&repo, &checkout);
         let _ = std::fs::remove_dir_all(repo);
     }
 
@@ -2015,8 +2036,7 @@ mod tests {
             }));
         }
 
-        let remove = crate::worktree::build_worktree_remove_command(&repo, &checkout, false, false);
-        crate::worktree::run_worktree_command(&remove).unwrap();
+        remove_test_worktree(&repo, &checkout);
         let _ = std::fs::remove_dir_all(repo);
     }
 

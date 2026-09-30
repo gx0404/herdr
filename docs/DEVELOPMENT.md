@@ -7,6 +7,11 @@
 - Python 3：维护脚本与其 unittest（建议 ≥3.11；3.10 需 `tomli`，仓库脚本已带
   回退）。
 - Bun：docs 契约与集成资产测试（`just docs-contract-test`、`integration-assets-test`）。
+- Node.js（LTS，`node` 须在 PATH）：`scripts/docs/*.mjs` 的运行时。docs 契约的集成
+  用例以 `node` 子进程执行这些脚本（与发布链同一运行时，不改用 bun），因此
+  `just docs-contract-test`（及包含它的 `just test`、`just check`）和
+  `just release-docs-check` 都需要。CI 用 GitHub-hosted runner 自带的 Node；Windows
+  无管理员权限时可将官方 win-x64 zip 解压到用户目录并追加进用户 PATH。
 - 一键环境：`scripts/setup_env.sh`（`just setup-env`）——检查 cargo/just/python3/bun，
   并把 sha256 钉版 Zig 0.16.0 安装到**仓库内** `.local/toolchains/zig/`
   （gitignored，不写用户全局状态）。安装后裸 `cargo build` 与 `just` 直接可用：

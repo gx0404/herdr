@@ -57,5 +57,10 @@ ID、workspace/tab/pane 身份、restore/handoff、agent 检测权威或 UI/输�
   命令行包含路径判定，避免误杀 `tail -f` 沙箱日志的旁观进程。参考实现
   `tests/ssh_e2e.rs::spawn_orphan_reaper`、`::sweep_stale_roots`、
   `::belongs_to_root`；新增此类测试须演练「运行中途 SIGKILL 进程组」后零残留。
+- 单测不得读写开发机真实的 herdr 配置/状态目录：用临时目录隔离（`XDG_CONFIG_HOME`/
+  `XDG_STATE_HOME` 或 `config::test_dirs` 线程本地覆盖）。agent 检测的本地覆盖、远端
+  缓存与更新状态在测试构建里只解析到临时目录（`config::io::test_dirs::isolated_config_dir`
+  / `isolated_state_dir`）：未隔离时读按不存在处理，写直接 panic。环境变量隔离依赖
+  nextest 每测一进程；`cargo test` 线程模式下各模块用不同的锁改 `XDG_*`，会互相踩。
 - fixture 是契约（`tests/fixtures/`：endpoint 形状、键盘 TSV、插件 smoke）：
   不得为过门改 fixture；生成物登记与 freshness 纪律见 `docs/README.md`。

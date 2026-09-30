@@ -2,6 +2,7 @@ use super::super::{config_security_descriptor, config_security_sddl};
 use super::*;
 use std::process::Command;
 use windows_sys::Win32::{
+    Foundation::ERROR_NOT_SUPPORTED,
     Security::{
         SetFileSecurityW, SetSecurityDescriptorControl, DACL_SECURITY_INFORMATION,
         GROUP_SECURITY_INFORMATION, LABEL_SECURITY_INFORMATION, OWNER_SECURITY_INFORMATION,
@@ -389,12 +390,18 @@ fn encrypted_config_is_rejected_without_plaintext_backup() {
     let path = dir.0.join("config");
     fs::write(&path, b"encrypted original").unwrap();
     let wide = super::super::extended_length_path(&path).unwrap();
-    assert_ne!(
-        unsafe { EncryptFileW(wide.as_ptr()) },
-        0,
-        "cannot establish EFS fixture: {}",
-        io::Error::last_os_error()
-    );
+    if unsafe { EncryptFileW(wide.as_ptr()) } == 0 {
+        let error = io::Error::last_os_error();
+        // Home editions lack EFS (ERROR_NOT_SUPPORTED). CI runs Windows Server,
+        // where a skip would silently drop the only coverage of this guard.
+        if error.raw_os_error().map(|code| code as u32) == Some(ERROR_NOT_SUPPORTED)
+            && std::env::var_os("CI").is_none()
+        {
+            eprintln!("skipping encrypted config test: Windows reports EFS unsupported: {error}");
+            return;
+        }
+        panic!("cannot establish EFS fixture: {error}");
+    }
     assert_ne!(
         fs::metadata(&path).unwrap().file_attributes() & FILE_ATTRIBUTE_ENCRYPTED,
         0

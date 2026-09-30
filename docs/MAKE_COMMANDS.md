@@ -9,7 +9,7 @@
 
 | 命令 | 用途 | 前置 | 副作用 | 证据 |
 |---|---|---|---|---|
-| `just test` | 全量验证：编排器并行跑 nextest + maintenance + 热路径架构 + 资产 + docs 契约（阶段日志在 `target/test-suite-logs/`） | Rust/Python/Bun 工具链 | 编译产物、临时目录 | 退出码 0；阶段汇总各子命令状态 |
+| `just test` | 全量验证：编排器并行跑 nextest + maintenance + 热路径架构 + 资产 + docs 契约（阶段日志在 `target/test-suite-logs/`） | Rust/Python/Bun/Node 工具链 | 编译产物、临时目录 | 退出码 0；阶段汇总各子命令状态 |
 | `just nextest-all` | 单独跑全量 nextest（编排器 nextest 阶段的命令真源） | Rust | 编译产物 | 退出码 0 |
 | `just test-one <filter>` | 单个 nextest 过滤器 | 同上 | 同上 | 退出码 0 |
 | `just maintenance-test` | 维护脚本 unittest 清单（新脚本测试须登记进清单）+ 发布工作流契约（`bun test scripts/release-workflows.test.ts`）+ fork 上游同步丢弃路径门禁（`scripts/upstream_sync_drop_check.py`，清单命中的路径重新出现即失败）。清单由 `scripts/run_parallel_unittest.py` 按类拆成子进程、以 CPU 数并发执行；上一轮耗时记在 `target/test-suite-logs/unittest-durations.json`，据此把慢类拆块、从长到短派发 | Python3（3.10 需 tomli）、Bun | 写 `target/test-suite-logs/unittest-durations.json` | 执行器末行 `OK` + bun test OK + 丢弃检查 `OK: … 均无命中`；失败单元回放完整输出 |
@@ -17,7 +17,7 @@
 | `just ui-hot-path-architecture-test` | UI 热路径架构边界（确定性） | Python3 | 无 | `unittest` OK |
 | `just lint` | fmt --check + clippy -D warnings | Rust | 无 | 退出码 0 |
 | `just ci [filter]` / `just ci-tests [filter]` | PR CI 等效链（ci 含 lint） | 同上 | 编译产物 | 退出码 0 |
-| `just check` | ci + windows-lint + docs 契约 + 提醒（unix）；Windows 走 `windows_check.ps1 -Mode check` | 同上 + Windows SDK（交叉） | 编译产物 | 退出码 0 |
+| `just check` | ci + windows-lint + docs 契约 + 提醒（unix）；Windows 走 `windows_check.ps1 -Mode check` | 同 `just test`（含 Node）+ Windows SDK（交叉） | 编译产物 | 退出码 0 |
 | `just windows-lint` | Windows 目标 clippy（Unix 交叉，`--all-targets` 连测试目标一起查，与 CI `windows_check.ps1 -Mode lint` 同口径；热缓存比只查 bin 多约 20 s） | `just setup-windows-cross` 一次 | 下载 SDK 到 `~/.local/share/herdr/windows-cross/` | 退出码 0 |
 | `just setup-env [-- --check/--force]` | 一键环境安装（幂等，已装且有效则跳过）/诊断/覆盖重装钉版 Zig | `--force` 联网重下 | 写仓库内 `.local/toolchains/`（gitignored） | sha256 校验 + `zig version` 0.16.0 |
 | `just setup-zig [-- --install/--force]` | 钉版 Zig 0.16.0 工具链安装/诊断（vendored libghostty-vt 构建必需） | 无（--install 联网下载） | 写仓库内 `.local/toolchains/zig/`；build.rs 自动探测 | sha256 校验通过 + `zig version` 输出 0.16.0 |
@@ -43,7 +43,7 @@
 
 | 命令 | 用途 | 证据 |
 |---|---|---|
-| `just docs-contract-test` | docs 快照/版本生命周期工具（bun） | bun test OK |
+| `just docs-contract-test` | docs 快照/版本生命周期工具（bun；集成用例以 `node` 子进程执行 `scripts/docs/*.mjs`，需 Node 在 PATH） | bun test OK |
 | `just integration-assets-test` | 捆绑 agent 集成资产（bun） | bun test OK |
 
 ## 性能

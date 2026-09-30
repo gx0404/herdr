@@ -68,23 +68,33 @@ fn with_manifest_dirs<T>(name: &str, f: impl FnOnce() -> T) -> T {
     result
 }
 
-fn write_remote_codex(content: &str) {
-    let path = crate::detect::manifest_update::remote_manifest_path(Agent::Codex);
+/// 测试 manifest 只能写进隔离的临时目录。override_path / remote_manifest_path 在测试
+/// 构建里本就只解析到临时目录，这里再断言一次：写进开发机真实的 herdr-dev 目录后，
+/// 那份合成规则会整份替换捆绑 manifest，之后每次跑检测测试都会读到它。
+fn write_isolated_manifest(path: PathBuf, content: &str) {
+    assert!(
+        path.starts_with(std::env::temp_dir()),
+        "refusing to write a test manifest outside the temp dir: {}",
+        path.display()
+    );
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
     std::fs::write(path, content).unwrap();
+}
+
+fn write_remote_codex(content: &str) {
+    write_remote_codex_without_reload(content);
     reload_manifests();
 }
 
 fn write_remote_codex_without_reload(content: &str) {
     let path = crate::detect::manifest_update::remote_manifest_path(Agent::Codex);
-    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-    std::fs::write(path, content).unwrap();
+    write_isolated_manifest(path, content);
 }
 
 fn write_local_codex(content: &str) {
-    let path = override_path(Agent::Codex).unwrap();
-    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-    std::fs::write(path, content).unwrap();
+    let path = override_path(Agent::Codex)
+        .expect("local override dir must be isolated to a temp dir (XDG_CONFIG_HOME)");
+    write_isolated_manifest(path, content);
     reload_manifests();
 }
 
@@ -988,8 +998,7 @@ contains = ["upstream-only-marker"]
 
 fn write_remote_manifest(agent: Agent, content: &str) {
     let path = crate::detect::manifest_update::remote_manifest_path(agent);
-    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-    std::fs::write(path, content).unwrap();
+    write_isolated_manifest(path, content);
     reload_manifests();
 }
 
