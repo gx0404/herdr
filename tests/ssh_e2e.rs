@@ -46,6 +46,10 @@ use portable_pty::{native_pty_system, CommandBuilder, PtySize};
 const HERDR: &str = env!("CARGO_BIN_EXE_herdr");
 const SSHD_CANDIDATES: &[&str] = &["/usr/sbin/sshd", "/usr/bin/sshd", "/sbin/sshd"];
 const SERVICE_BODY: &[u8] = b"E2E-SVC-OK";
+/// Parent of every sandbox root: a fixed `/tmp`, like the other integration
+/// tests' `unique_test_dir`. macOS `$TMPDIR` (`/var/folders/…/T/`) is long
+/// enough that the sandbox session sockets overflow `sun_path` (104 bytes).
+const SANDBOX_BASE: &str = "/tmp";
 const ROOT_PREFIX: &str = "herdr-ssh-e2e-";
 const E2E_TEST_NAME: &str = "sshd_real_machine_end_to_end";
 /// Set on the re-executed test binary that acts as the orphan reaper.
@@ -342,14 +346,25 @@ fn kill_process_group(child: &mut Child) {
     let _ = child.wait();
 }
 
-/// `/proc/<pid>/stat` start time (field 22), used as a pid-reuse fence when
-/// killing recorded pids later.
-fn process_starttime(pid: u32) -> Option<u64> {
-    let stat = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
-    let after = stat.rfind(')')?;
-    // Fields after `comm`: index 0 is state (field 3), so starttime (field
-    // 22) lands at index 19.
-    stat[after + 1..].split_whitespace().nth(19)?.parse().ok()
+/// Process start time, used as a pid-reuse fence when killing recorded pids
+/// later: `/proc/<pid>/stat` field 22 where procfs exists, `ps -o lstart=`
+/// otherwise (macOS).
+fn process_starttime(pid: u32) -> Option<String> {
+    if let Ok(stat) = fs::read_to_string(format!("/proc/{pid}/stat")) {
+        let after = stat.rfind(')')?;
+        // Fields after `comm`: index 0 is state (field 3), so starttime (field
+        // 22) lands at index 19.
+        return stat[after + 1..]
+            .split_whitespace()
+            .nth(19)
+            .map(str::to_owned);
+    }
+    let output = Command::new("ps")
+        .args(["-o", "lstart=", "-p", &pid.to_string()])
+        .output()
+        .ok()?;
+    let started = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+    (!started.is_empty()).then_some(started)
 }
 
 fn process_ppid(pid: u32) -> Option<u32> {
@@ -358,18 +373,36 @@ fn process_ppid(pid: u32) -> Option<u32> {
     stat[after + 1..].split_whitespace().nth(1)?.parse().ok()
 }
 
-fn descendants_of(root_pid: u32) -> Vec<u32> {
-    let mut links = Vec::new();
+/// Every `(pid, ppid)` pair: procfs where it exists, `ps` otherwise. macOS has
+/// no procfs, and its per-connection `sshd-session` children must still be
+/// found for the outage simulation.
+fn process_links() -> Vec<(u32, u32)> {
     if let Ok(entries) = fs::read_dir("/proc") {
-        for entry in entries.flatten() {
-            let Ok(pid) = entry.file_name().to_string_lossy().parse::<u32>() else {
-                continue;
-            };
-            if let Some(ppid) = process_ppid(pid) {
-                links.push((pid, ppid));
-            }
-        }
+        return entries
+            .flatten()
+            .filter_map(|entry| {
+                let pid = entry.file_name().to_string_lossy().parse::<u32>().ok()?;
+                Some((pid, process_ppid(pid)?))
+            })
+            .collect();
     }
+    let Ok(output) = Command::new("ps")
+        .args(["-A", "-o", "pid=", "-o", "ppid="])
+        .output()
+    else {
+        return Vec::new();
+    };
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| {
+            let mut fields = line.split_whitespace();
+            Some((fields.next()?.parse().ok()?, fields.next()?.parse().ok()?))
+        })
+        .collect()
+}
+
+fn descendants_of(root_pid: u32) -> Vec<u32> {
+    let links = process_links();
     let mut descendants = Vec::new();
     let mut frontier = vec![root_pid];
     while let Some(parent) = frontier.pop() {
@@ -389,15 +422,15 @@ fn descendants_of(root_pid: u32) -> Vec<u32> {
 /// the master's descendants first, kill the master's group, then kill each
 /// recorded connection process with a pid-reuse fence.
 fn kill_sshd_tree(child: &mut Child) {
-    let victims: Vec<(u32, Option<u64>)> = descendants_of(child.id())
+    let victims: Vec<(u32, Option<String>)> = descendants_of(child.id())
         .into_iter()
         .map(|pid| (pid, process_starttime(pid)))
         .collect();
     kill_process_group(child);
     for (pid, starttime) in victims {
         if process_starttime(pid) == starttime {
-            // SAFETY: the pid was recorded from /proc moments ago and its
-            // start time still matches, so it is the same process.
+            // SAFETY: the pid was recorded moments ago and its start time
+            // still matches, so it is the same process.
             unsafe { libc::kill(pid as libc::pid_t, libc::SIGKILL) };
         }
     }
@@ -619,16 +652,23 @@ impl Drop for Rig {
     }
 }
 
-/// Removes `/tmp/herdr-ssh-<pid>-*` managed-config leftovers of the test's
-/// own processes and any whose config references the test root. A SIGKILLed
+/// Removes `herdr-ssh-<pid>-*` managed-config leftovers of the test's own
+/// processes and any whose config references the test root. A SIGKILLed
 /// client cannot run the `ManagedSshConfigDir` destructors, so the rig
-/// sweeps them here instead of leaving ssh configs behind.
+/// sweeps them here instead of leaving ssh configs behind. Herdr creates
+/// them under the temp dir, or under `/tmp` when the control socket would not
+/// fit there (macOS), so both are swept.
 fn sweep_managed_ssh_configs(root: &Path, tui_pid: Option<u32>) {
     let needle = root.as_os_str().as_bytes();
     let tui_prefix = tui_pid.map(|pid| format!("herdr-ssh-{pid}-"));
-    let Ok(entries) = fs::read_dir(std::env::temp_dir()) else {
-        return;
-    };
+    let mut bases = vec![std::env::temp_dir()];
+    if bases[0] != Path::new(SANDBOX_BASE) {
+        bases.push(PathBuf::from(SANDBOX_BASE));
+    }
+    let entries = bases
+        .iter()
+        .filter_map(|base| fs::read_dir(base).ok())
+        .flatten();
     for entry in entries.flatten() {
         let name = entry.file_name().to_string_lossy().into_owned();
         if !name.starts_with("herdr-ssh-") {
@@ -649,10 +689,10 @@ fn sweep_managed_ssh_configs(root: &Path, tui_pid: Option<u32>) {
     }
 }
 
-/// Guards every out-of-band removal: only `<tmp>/herdr-ssh-e2e-*` qualifies,
+/// Guards every out-of-band removal: only `/tmp/herdr-ssh-e2e-*` qualifies,
 /// so a stray `HERDR_SSH_E2E_REAPER_ROOT` can never aim the sweep elsewhere.
 fn is_e2e_root(path: &Path) -> bool {
-    path.parent() == Some(std::env::temp_dir().as_path())
+    path.parent() == Some(Path::new(SANDBOX_BASE))
         && path
             .file_name()
             .is_some_and(|name| name.to_string_lossy().starts_with(ROOT_PREFIX))
@@ -742,7 +782,7 @@ fn owner_is_live(pid: u32) -> bool {
 /// Backstop for runs whose reaper died with them (tree-kill, OOM, reboot):
 /// a root named after a pid that is no longer a live ssh_e2e binary is stale.
 fn sweep_stale_roots() {
-    let Ok(entries) = fs::read_dir(std::env::temp_dir()) else {
+    let Ok(entries) = fs::read_dir(SANDBOX_BASE) else {
         return;
     };
     for entry in entries.flatten() {
@@ -797,7 +837,7 @@ fn sshd_real_machine_end_to_end() {
 
     let phase = "setup";
     sweep_stale_roots();
-    let root = std::env::temp_dir().join(format!("{ROOT_PREFIX}{}", std::process::id()));
+    let root = Path::new(SANDBOX_BASE).join(format!("{ROOT_PREFIX}{}", std::process::id()));
     let _ = fs::remove_dir_all(&root);
     fs::create_dir_all(&root).expect("create e2e root");
     let reaper = spawn_orphan_reaper(&root);
@@ -1545,7 +1585,7 @@ fn sshd_real_machine_end_to_end() {
 #[test]
 fn ssh_config_import_wildcards_multihop_and_multi_identity() {
     let phase = "import";
-    let root = std::env::temp_dir().join(format!("herdr-ssh-import-{}", std::process::id()));
+    let root = Path::new(SANDBOX_BASE).join(format!("herdr-ssh-import-{}", std::process::id()));
     let _ = fs::remove_dir_all(&root);
     let client = Side::new(&root, "client", None);
 

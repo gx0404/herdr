@@ -170,6 +170,10 @@ def _parser() -> argparse.ArgumentParser:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
+    # Windows CI 的 cp1252 管道打印中文结论会 UnicodeEncodeError。
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8", errors="replace")
     args = _parser().parse_args(argv)
     try:
         patterns = load_drop_patterns(args.paths_file)

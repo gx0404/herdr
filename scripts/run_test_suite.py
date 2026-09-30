@@ -48,12 +48,15 @@ def run_phase(
     started = time.monotonic()
     prefix = f"[{name}] "
     try:
+        # 子进程（cargo、bun、git、已重配 UTF-8 的脚本）输出 UTF-8；按 locale 解码在
+        # Windows CI（cp1252）遇到 0x90 等未定义字节会让转发线程崩溃、阶段结果丢失。
         process = subprocess.Popen(
             command,
             cwd=PROJECT_ROOT,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
-            text=True,
+            encoding="utf-8",
+            errors="replace",
         )
     except OSError as error:
         print(f"{prefix}阶段启动失败: {error}", flush=True)
@@ -127,7 +130,8 @@ def main() -> int:
     results = run_all()
     print("\n===== 测试阶段汇总 =====")
     for name, _ in PHASES:
-        code, seconds = results[name]
+        # 转发线程异常退出时该阶段没有结果：按失败计入汇总，而不是 KeyError 掩盖其余阶段。
+        code, seconds = results.setdefault(name, (None, 0.0))
         status = "OK" if code == 0 else f"FAIL(exit={code})"
         print(f"{name:<20} {seconds:6.1f}s  {status}")
     exit_code, failures = summarize(results)

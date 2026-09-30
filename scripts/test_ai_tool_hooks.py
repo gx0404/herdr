@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -182,11 +183,15 @@ class PreToolUseGateTests(unittest.TestCase):
         self.assertEqual("allow", decision)
 
     def test_bash_wrapper_matches_python_gate(self) -> None:
+        # 按 PATH 解析 bash：Windows 上裸 "bash" 经 CreateProcess 先命中
+        # System32\bash.exe（WSL 启动器，CI runner 无发行版），而不是 Git Bash。
+        bash = shutil.which("bash")
+        self.assertIsNotNone(bash, "bash is required to exercise the hook wrapper")
         stdin = json.dumps({"tool_name": "Bash", "tool_input": {"command": "gh pr merge 1"}})
         result = subprocess.run(
-            ["bash", str(GATE_SH)], input=stdin.encode("utf-8"), capture_output=True, check=False
+            [bash, str(GATE_SH)], input=stdin.encode("utf-8"), capture_output=True, check=False
         )
-        self.assertEqual(0, result.returncode)
+        self.assertEqual(0, result.returncode, result.stderr.decode("utf-8", "replace"))
         payload = json.loads(result.stdout.decode("utf-8"))
         self.assertEqual(
             "deny", payload["hookSpecificOutput"]["permissionDecision"]

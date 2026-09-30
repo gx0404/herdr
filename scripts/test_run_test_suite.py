@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -70,6 +71,23 @@ class RunPhaseTests(unittest.TestCase):
             self.assertEqual(code, 3)
             self.assertGreaterEqual(seconds, 0.0)
             self.assertIn("suite-probe", log_path.read_text(encoding="utf-8"))
+
+    def test_run_phase_forwards_utf8_output_regardless_of_locale(self) -> None:
+        # “吐”的 UTF-8 编码含 0x90，cp1252 下未定义：按 locale 解码会让转发崩溃。
+        with tempfile.TemporaryDirectory() as temporary:
+            log_path = Path(temporary) / "phase.log"
+            code, _ = run_test_suite.run_phase(
+                "probe",
+                "nonexistent-recipe-for-probe",
+                log_path,
+                command=[
+                    sys.executable,
+                    "-c",
+                    "import sys; sys.stdout.buffer.write('吐 suite-probe\\n'.encode('utf-8'))",
+                ],
+            )
+            self.assertEqual(code, 0)
+            self.assertIn("吐 suite-probe", log_path.read_text(encoding="utf-8"))
 
     def test_run_phase_reports_missing_command_as_none(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
