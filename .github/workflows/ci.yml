@@ -57,13 +57,19 @@ jobs:
           - os: ubuntu-latest
             kind: unix
             nextest_filter: all()
+            timeout_minutes: 15
+          # Caches are saved only by a green push, so macOS and Windows run their
+          # full checks cold until one succeeds; Windows also adds the ConPTY
+          # smoke and cache uploads. Neither fits in 15 minutes cold.
           - os: macos-latest
             kind: unix
             nextest_filter: not binary(live_handoff)
+            timeout_minutes: 25
           - os: windows-latest
             kind: windows
+            timeout_minutes: 25
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 15
+    timeout-minutes: ${{ matrix.timeout_minutes }}
     steps:
       - name: Checkout
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
