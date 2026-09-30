@@ -1471,9 +1471,12 @@ mod tests {
             first_str.starts_with("\x1b[?2026h\x1b[?25l"),
             "首帧可见性未知，必须先隐藏再画"
         );
+        // 同步块之后可能跟平台相关的 IME 锚点补发（BlitEncoder::new：非 Windows
+        // 补发），只断言同步块内部的光标收尾。
+        let first_sync_end = first_str.rfind("\x1b[?2026l").expect("同步块收尾");
         assert!(
-            first_str.trim_end().ends_with("\x1b[?25l\x1b[?2026l"),
-            "无光标帧以隐藏光标收尾（同步块在光标态之后关闭）: 尾部 {:?}",
+            first_str[..first_sync_end].ends_with("\x1b[?25l"),
+            "无光标帧在同步块内以隐藏光标收尾: 尾部 {:?}",
             &first_str[first_str.len().saturating_sub(40)..]
         );
         encoder.commit(frame.clone(), first);
@@ -1516,9 +1519,13 @@ mod tests {
         });
         let mut encoder = BlitEncoder::new();
         let first = encoder.encode(&visible, true);
-        assert!(String::from_utf8(first.bytes.clone())
-            .unwrap()
-            .ends_with("\x1b[?25h\x1b[?2026l"));
+        let first_str = String::from_utf8(first.bytes.clone()).unwrap();
+        let first_sync_end = first_str.rfind("\x1b[?2026l").expect("同步块收尾");
+        assert!(
+            first_str[..first_sync_end].ends_with("\x1b[?25h"),
+            "可见光标帧在同步块内以显示光标收尾: 尾部 {:?}",
+            &first_str[first_str.len().saturating_sub(40)..]
+        );
         encoder.commit(visible.clone(), first);
 
         let mut changed = visible.clone();

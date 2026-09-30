@@ -40,7 +40,7 @@ fn decode_batch(
 
 #[tokio::test]
 async fn secondary_tab_dirty_rows_are_routed_through_the_retained_view() {
-    let (mut server, _, output, _) = retained_test_server_with_control(b"first");
+    let (mut server, _control, output, _) = retained_test_server_with_control(b"first");
     let mut second = crate::workspace::Workspace::test_new("second");
     let second_id = second.tabs[0].root_pane;
     second.insert_test_runtime(
@@ -71,7 +71,7 @@ async fn secondary_tab_dirty_rows_are_routed_through_the_retained_view() {
 
 #[tokio::test]
 async fn public_focus_refreshes_a_hidden_tab_even_when_default_target_is_unchanged() {
-    let (mut server, _, _, _) = retained_test_server_with_control(b"first");
+    let (mut server, _control, _output, _) = retained_test_server_with_control(b"first");
     server
         .app
         .state
@@ -123,7 +123,7 @@ async fn public_focus_refreshes_a_hidden_tab_even_when_default_target_is_unchang
 
 #[tokio::test]
 async fn duplicate_tabs_and_stale_layouts_do_not_change_live_geometry() {
-    let (mut server, _, _, _) = retained_test_server_with_control(b"");
+    let (mut server, _control, _output, _) = retained_test_server_with_control(b"");
     let tab = server.app.public_tab_id(0, 0).unwrap();
     set_views(&mut server, 2, std::slice::from_ref(&tab));
     assert!(server
@@ -161,7 +161,7 @@ async fn duplicate_tabs_and_stale_layouts_do_not_change_live_geometry() {
 /// 连接（`Disconnected` 才是 writer 线程消失）。
 #[tokio::test]
 async fn multi_view_without_a_writer_defers_instead_of_disconnecting() {
-    let (mut server, _, _, _) = retained_test_server_with_control(b"BASE");
+    let (mut server, _control, _output, _) = retained_test_server_with_control(b"BASE");
     let tab = server.app.public_tab_id(0, 0).unwrap();
     set_views(&mut server, 1, std::slice::from_ref(&tab));
     server.clients.get_mut(&1).unwrap().writer = None;
@@ -179,7 +179,7 @@ async fn multi_view_without_a_writer_defers_instead_of_disconnecting() {
 
 #[tokio::test]
 async fn resize_retires_held_keys_before_opening_the_new_view_generation() {
-    let (mut server, _, _, pane) = retained_test_server_with_control(b"");
+    let (mut server, _control, _output, pane) = retained_test_server_with_control(b"");
     let tab = server.app.public_tab_id(0, 0).unwrap();
     set_views(&mut server, 1, std::slice::from_ref(&tab));
     let pane = server.app.public_pane_id(0, pane).unwrap();
@@ -210,7 +210,7 @@ async fn resize_retires_held_keys_before_opening_the_new_view_generation() {
 
 #[tokio::test]
 async fn popup_pty_tracks_its_owning_view_after_resize() {
-    let (mut server, _, output, _) = retained_test_server_with_control(b"parent");
+    let (mut server, _control, output, _) = retained_test_server_with_control(b"parent");
     let popup = crate::terminal::TerminalRuntime::test_with_screen_bytes(80, 24, b"popup");
     let (_, terminal) = server.app.install_test_popup_runtime(popup);
     let tab = server.app.public_tab_id(0, 0).unwrap();
@@ -250,7 +250,7 @@ async fn popup_pty_tracks_its_owning_view_after_resize() {
 #[ignore = "手动记录 1 与 15 个可见视图的扩展成本"]
 async fn multi_view_render_scaling_profile() {
     for count in [1usize, 15] {
-        let (mut server, _, output, first) = retained_test_server_with_control(b"first");
+        let (mut server, _control, output, first) = retained_test_server_with_control(b"first");
         let mut tabs = vec![server.app.public_tab_id(0, 0).unwrap()];
         for index in 1..count {
             let mut workspace = crate::workspace::Workspace::test_new("scaling");
@@ -295,7 +295,7 @@ async fn render_scale_profile_text_snapshot() {
     };
     for count in [1usize, 15] {
         let text = "snapshot payload 01234567890123456789\r\n".repeat(1900);
-        let (mut server, _, output, first) = retained_test_server_with_control(b"first");
+        let (mut server, _control, output, first) = retained_test_server_with_control(b"first");
         let runtime = crate::terminal::TerminalRuntime::test_with_channel_and_scrollback_bytes(
             40,
             12,
@@ -397,7 +397,7 @@ async fn render_scale_profile_text_snapshot() {
 
 #[tokio::test]
 async fn retained_patch_keeps_a_visible_ime_anchor_when_the_pane_hides_its_cursor() {
-    let (mut server, _, output, pane) = retained_test_server_with_control(b"first");
+    let (mut server, _control, output, pane) = retained_test_server_with_control(b"first");
     let tabs = vec![server.app.public_tab_id(0, 0).unwrap()];
     set_views(&mut server, 1, &tabs);
     server.render_and_stream();

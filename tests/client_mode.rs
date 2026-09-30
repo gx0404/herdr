@@ -1245,11 +1245,17 @@ fn federated_client_starts_without_local_and_survives_its_restart() {
     // 桥刚从 SIGSTOP 恢复：停顿期间侧栏可能显示过 `Endpoint unavailable` 提示框
     // （见 sidebar_row_click_ignores_notice_borders），恢复后提示框收起会让下方行
     // 平移，停顿前算出的一次性坐标可能落在别的行上。按最新画面重算行号重发点击，
-    // 直到远端画面回来；重复选中同一工作区是幂等的。
+    // 直到远端成为选中工作区（窗格标题出现 remote-ready）；重复选中是幂等的。
+    let remote_selected = |screen: &str| {
+        screen.lines().any(|line| {
+            line.split_once('│')
+                .is_some_and(|(_, pane)| pane.contains("remote-ready"))
+        })
+    };
     assert!(
         wait_until(Duration::from_secs(15), Duration::from_millis(250), || {
             let screen = screen_text();
-            if screen.contains("REMOTE_STILL_SELECTED") {
+            if remote_selected(&screen) {
                 return true;
             }
             let sidebar_has_row = screen.lines().any(|line| {
@@ -1264,7 +1270,22 @@ fn federated_client_starts_without_local_and_survives_its_restart() {
             }
             false
         }),
-        "selecting the remote after its bridge resumes must show its screen again: {}",
+        "selecting the remote after its bridge resumes must select it again: {}",
+        screen_text()
+    );
+    // 重新选中会改变远端窗格几何、触发 SIGWINCH；bash readline 重绘折行的多行
+    // 提示符时会向上覆盖此前的输出行（macOS runner 的 UUID 主机名让提示符在窄窗格
+    // 里折成三行），因此不再断言旧输出仍在，而是打印新标记证明远端画面是活的。
+    // 尚未落定的几何变化同样可能盖掉新标记，没看到就重发。
+    assert!(
+        wait_until(Duration::from_secs(10), Duration::from_millis(500), || {
+            if screen_text().contains("REMOTE_RESELECTED") {
+                return true;
+            }
+            send_pane_shell_command(&remote_api, remote_pane, "printf 'REMOTE_%s\\n' RESELECTED");
+            false
+        }),
+        "the reselected remote must render fresh output: {}",
         screen_text()
     );
 
