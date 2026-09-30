@@ -1274,12 +1274,14 @@ mod tests {
     use std::os::unix::net::UnixListener;
     use tokio::sync::mpsc;
 
+    /// 放短的 /tmp：socket 直接建在这个路径（或其下），macOS 的 $TMPDIR 本身就近 50 字节，
+    /// 再加名字、pid、时间戳与序号会超出 sun_path（104 字节）。
     fn unique_test_path(name: &str) -> PathBuf {
         let nanos = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        std::env::temp_dir().join(format!(
+        PathBuf::from("/tmp").join(format!(
             "herdr-{name}-{}-{nanos}-{}",
             std::process::id(),
             crate::config::test_dirs::unique_id()

@@ -359,7 +359,7 @@ mod tests {
     use std::io::Write as _;
 
     fn pair() -> (LocalStream, LocalStream, std::path::PathBuf) {
-        let name = std::env::temp_dir().join(format!(
+        let filename = format!(
             "herdr-handshake-{}-{}-{}.sock",
             std::process::id(),
             std::time::SystemTime::now()
@@ -367,7 +367,13 @@ mod tests {
                 .unwrap()
                 .as_nanos(),
             crate::config::test_dirs::unique_id()
-        ));
+        );
+        // unix 用短的 /tmp：macOS 的 $TMPDIR 本身就近 50 字节，会让 socket 路径逼近 sun_path
+        // 上限（104 字节）。
+        #[cfg(unix)]
+        let name = std::path::PathBuf::from("/tmp").join(filename);
+        #[cfg(not(unix))]
+        let name = std::env::temp_dir().join(filename);
         let listener = crate::ipc::bind_local_listener(&name).unwrap();
         let connecting = name.clone();
         let client =

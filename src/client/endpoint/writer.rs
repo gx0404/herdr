@@ -260,7 +260,7 @@ mod tests {
 
     fn streams() -> (LocalStream, LocalStream, std::path::PathBuf) {
         use interprocess::local_socket::traits::Listener as _;
-        let path = std::env::temp_dir().join(format!(
+        let filename = format!(
             "herdr-writer-{}-{}-{}.sock",
             std::process::id(),
             std::time::SystemTime::now()
@@ -268,7 +268,13 @@ mod tests {
                 .unwrap()
                 .as_nanos(),
             crate::config::test_dirs::unique_id()
-        ));
+        );
+        // unix 用短的 /tmp：macOS 的 $TMPDIR 本身就近 50 字节，会让 socket 路径逼近 sun_path
+        // 上限（104 字节）。
+        #[cfg(unix)]
+        let path = std::path::PathBuf::from("/tmp").join(filename);
+        #[cfg(not(unix))]
+        let path = std::env::temp_dir().join(filename);
         let listener = crate::ipc::bind_private_local_listener(&path).unwrap();
         let accepting = std::thread::spawn(move || listener.accept().unwrap());
         let client = crate::ipc::connect_local_stream(&path).unwrap();

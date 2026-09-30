@@ -508,9 +508,11 @@ mod tests {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        // 时间戳在并发的测试线程间会撞，再带进程内序号。
+        // 时间戳在并发的测试线程间会撞，再带进程内序号。socket 直接建在这个路径：放短的
+        // /tmp，macOS 的 $TMPDIR 本身就近 50 字节，加上名字会超出 sun_path（104 字节）。
         let id = crate::config::test_dirs::unique_id();
-        std::env::temp_dir().join(format!("herdr-{name}-{}-{nanos}-{id}", std::process::id()))
+        std::path::PathBuf::from("/tmp")
+            .join(format!("herdr-{name}-{}-{nanos}-{id}", std::process::id()))
     }
 
     #[cfg(unix)]
