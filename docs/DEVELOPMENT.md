@@ -16,6 +16,24 @@
   （一次性，详见 `AGENT_RULES/platform.md`）。
 - `just install-hooks` 安装 conventional-commit 守门钩子。
 
+## 本机构建与测试提速
+
+- `just local-build-config --enable` 生成只属于本机的 `.cargo/config.local.toml`
+  （gitignored，经仓库 `.cargo/config.toml` 的可选 include 引入；CI 与发布构建读不到）：
+  Windows 改用 rust-lld 链接、依赖不带调试信息。追加 `--parallel-frontend` 可开启
+  rustc 并行前端（不稳定选项，冷构建明显变快、增量构建不变，出问题即 `--disable`）。
+  开关变化后第一次构建会全量重编；打包前必须 `--disable`。
+- herdr 是单个约 45 万行的 crate：小改动的增量构建主要耗在整 crate 的宏展开、名称
+  解析与增量缓存读写，这部分单线程、与 CPU 核数无关；只有拆分 crate 才能继续压缩。
+- Windows 上杀毒软件的实时扫描是本机测试最大的瓶颈：nextest 每个用例一个进程，测试
+  还会大量拉起 git/PowerShell/控制台进程，进程创建被逐个扫描后会限流（实测每秒只能
+  创建十几个进程，全量 nextest 比 4 核 CI 慢数倍）。在杀软里把仓库 `target\`、
+  `%USERPROFILE%\.cargo`、`%LOCALAPPDATA%\zig` 与 `vendor\libghostty-vt\.zig-cache` 加入
+  排除，并把 rustc/cargo/cargo-nextest/link/zig 设为受信任程序；Microsoft Defender 可改用
+  Dev Drive（ReFS + 性能模式）。这些是本机安全设置，按个人风险偏好决定。
+- `just maintenance-test` 按类并行执行维护脚本测试，并据上一轮耗时把慢类拆块；日常改动
+  用 `just test-one <filter>` 缩小范围，比全量 `just test` 快得多。
+
 ## 每个任务的闭环
 
 1. **定 scope**：列出本轮会读/改/审的路径；运行

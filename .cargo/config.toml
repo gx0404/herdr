@@ -1,2 +1,6 @@
+# 本机专用构建加速（gitignored），由 `just local-build-config --enable` 生成；文件不存在时
+# 忽略。CI 与 GX 发布构建都是干净检出，读不到它。
+include = [{ path = "config.local.toml", optional = true }]
+
 [target.x86_64-pc-windows-msvc]
 rustflags = ["-C", "target-feature=+crt-static"]

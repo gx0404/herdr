@@ -30,6 +30,7 @@ release/preview 工作流与脚本、`scripts/changelog.py`、`scripts/preview.p
   宿主无授权修改安装/PATH。无旧安装包时升级验收记 N/A，重装不等于旧版升级。
 - `just package-windows` / `just package-deb` 是本地入口；`--check` 只读预检，
   `--allow-dirty` 仅供本地验证且产物不可发布。受控产物写 `target/`，不提交进 Git。
+  存在本机加速配置 `.cargo/config.local.toml` 时预检拒绝打包（见 `project-infra.md`）。
 
 ## 渠道模型（上游全文语义）
 

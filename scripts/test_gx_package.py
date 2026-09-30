@@ -380,6 +380,16 @@ class GXPackageTests(unittest.TestCase):
             self.assertNotIn("install", call.args[0])
         self.assertIn("--installed", calls[2].args[0])
 
+    def test_preflight_refuses_local_build_settings_before_touching_tools(self) -> None:
+        kind = self.native_package_kind()
+        local = self.root / ".cargo" / "config.local.toml"
+        local.parent.mkdir(parents=True, exist_ok=True)
+        local.write_text('[target.x86_64-pc-windows-msvc]\nlinker = "rust-lld"\n', encoding="utf-8")
+        with mock.patch.object(package.platform, "machine", return_value="x86_64"), mock.patch.object(package, "tool") as tool:
+            with self.assertRaisesRegex(ValueError, "local-build-config --disable"):
+                package.preflight(kind, self.root)
+        tool.assert_not_called()
+
     def test_preflight_missing_target_fails_without_installing(self) -> None:
         kind = self.native_package_kind()
         results = ["rustc 1.96.1 (hash date)", "cargo 1.96.1 (hash date)", "unrelated-target"]

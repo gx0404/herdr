@@ -7,7 +7,7 @@
 | 格式与静态 | `just lint`（fmt + clippy -D warnings）、`just windows-lint` | 格式与静态契约 / 真实行为 |
 | Rust 单测（贴代码） | `cargo nextest`（`just test` 并行编排、`just nextest-all`、`just test-one <filter>`） | 边界与纯状态逻辑（`AppState::test_new()` 等）/ 真实装配 |
 | 集成（`tests/`） | `just test`（api_ping、client_mode、live_handoff、detach_reattach、cross_area、multi_client、remote_attach、machine_api…） | 入口、生命周期、多客户端交接 / 真实外部机器 |
-| 维护脚本契约 | `just maintenance-test`（`python3 -m unittest scripts.test_*` 清单） | changelog/preview/manifest/翻译/打包脚本行为 |
+| 维护脚本契约 | `just maintenance-test`（`scripts.test_*` 清单经 `scripts/run_parallel_unittest.py` 按类并行） | changelog/preview/manifest/翻译/打包脚本行为 |
 | UI 热路径架构 | `just ui-hot-path-architecture-test` | 渲染热路径边界（确定性）/ 运行时性能 |
 | bun 契约 | `just docs-contract-test`、`just integration-assets-test` | docs 生命周期与集成资产 / Rust 行为 |
 | 框架守门 | `just agent-rules-check`、`just framework-check`、`just graph-check`、`just kb-check` | 规则闭集、hook 探针、图谱/KB 新鲜度 |
@@ -19,7 +19,8 @@ conventional-commit 检查独立 job。PR 政策门在 `pr-gate.yml`（无测试
 
 ## 纪律要点（规则全文见 `AGENT_RULES/testing.md`）
 
-- 新脚本测试必须加入 justfile `maintenance-test` 的模块清单，否则不会被收集。
+- 新脚本测试必须加入 justfile `maintenance-test` 的模块清单，否则不会被收集；清单按类
+  拆成子进程并发执行，测试不得写仓库工作树或共用固定的临时路径、端口、管道名。
 - 失败路径优先：超时、断线、取消、旧响应、代际变化、重复操作；拒绝门也要测
   合法输入（本仓库实践：resolver/hooks/KB 的每个拒绝项都有独立注入测试）。
 - 必要工具链缺失不得整族 skip 后报绿；跑不了就明确 PENDING。

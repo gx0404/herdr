@@ -114,6 +114,12 @@ def preflight(kind: str, root: Path = ROOT) -> dict[str, Path]:
         raise ValueError("GX packaging requires an x86_64 build host")
     if (kind == "windows" and os.name != "nt") or (kind == "linux" and sys.platform != "linux"):
         raise ValueError(f"{kind} packaging requires a native {kind} host; Linux may run in WSL or a disposable container")
+    local_config = root / ".cargo" / "config.local.toml"
+    if local_config.exists():
+        # 本机加速配置会改链接器、开不稳定选项（RUSTC_BOOTSTRAP），不能带进安装包。
+        raise ValueError(
+            f"{local_config} holds local-only build settings; run `just local-build-config --disable` before packaging"
+        )
     channel = rust_toolchain(root)
     names = ["git", "rustup", "zig"]
     names += ["iscc"] if kind == "windows" else ["dpkg-deb", "readelf", "nm", "musl-gcc", "cc", "ar"]

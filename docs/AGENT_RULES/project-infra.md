@@ -2,7 +2,8 @@
 
 范围：Cargo/just/clippy/toolchain/flake 等构建文件、`.cargo/**`、`assets/**`、
 `justfile`、`src/config*`（配置模型）、根级杂项模块（build_info/logging/sound/
-update/release_notes/product_announcements/plugins/render_prof 等）与采集脚本。
+update/release_notes/product_announcements/plugins/render_prof 等）、采集脚本与本机
+构建加速脚本 `scripts/local_build_config.py`。
 
 ## 代码约定（上游 Code Conventions 全文语义，适用全仓库）
 
@@ -29,6 +30,10 @@ update/release_notes/product_announcements/plugins/render_prof 等）与采集�
   `cargoLock.outputHashes`。
 - `build.rs` 与 vendored 绑定生成（bindgen/libghostty）流程见
   `vendored-libghostty-vt.md`；改构建脚本后跑 `just build` 验证两种平台路径。
+- `.cargo/config.toml` 只放所有构建都成立的设置；本机专属加速（rust-lld、依赖无调试信息、
+  可选的不稳定并行前端）放 gitignored 的 `.cargo/config.local.toml`，经可选 include 引入，
+  由 `scripts/local_build_config.py`（`just local-build-config`）生成。不得把这些设置提交进
+  仓库配置；`scripts/gx_package.py` 在该文件存在时拒绝打包。
 
 ## 配置模型（src/config）
 

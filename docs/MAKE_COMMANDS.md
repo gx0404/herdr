@@ -12,7 +12,7 @@
 | `just test` | 全量验证：编排器并行跑 nextest + maintenance + 热路径架构 + 资产 + docs 契约（阶段日志在 `target/test-suite-logs/`） | Rust/Python/Bun 工具链 | 编译产物、临时目录 | 退出码 0；阶段汇总各子命令状态 |
 | `just nextest-all` | 单独跑全量 nextest（编排器 nextest 阶段的命令真源） | Rust | 编译产物 | 退出码 0 |
 | `just test-one <filter>` | 单个 nextest 过滤器 | 同上 | 同上 | 退出码 0 |
-| `just maintenance-test` | 维护脚本 unittest 清单（新脚本测试须登记进清单）+ 发布工作流契约（`bun test scripts/release-workflows.test.ts`）+ fork 上游同步丢弃路径门禁（`scripts/upstream_sync_drop_check.py`，清单命中的路径重新出现即失败） | Python3（3.10 需 tomli）、Bun | 无 | `unittest` OK + bun test OK + 丢弃检查 `OK: … 均无命中` |
+| `just maintenance-test` | 维护脚本 unittest 清单（新脚本测试须登记进清单）+ 发布工作流契约（`bun test scripts/release-workflows.test.ts`）+ fork 上游同步丢弃路径门禁（`scripts/upstream_sync_drop_check.py`，清单命中的路径重新出现即失败）。清单由 `scripts/run_parallel_unittest.py` 按类拆成子进程、以 CPU 数并发执行；上一轮耗时记在 `target/test-suite-logs/unittest-durations.json`，据此把慢类拆块、从长到短派发 | Python3（3.10 需 tomli）、Bun | 写 `target/test-suite-logs/unittest-durations.json` | 执行器末行 `OK` + bun test OK + 丢弃检查 `OK: … 均无命中`；失败单元回放完整输出 |
 | `just test-windows-input [args..]` | 仅 Windows：本机交互式 Windows Terminal 输入资格测试（`scripts/test_windows_input.ps1`，注入输入并清空剪贴板；普通 CI 不跑） | Windows、pwsh | 注入键鼠输入、清空剪贴板 | 报告中各输入路径的覆盖结论 |
 | `just ui-hot-path-architecture-test` | UI 热路径架构边界（确定性） | Python3 | 无 | `unittest` OK |
 | `just lint` | fmt --check + clippy -D warnings | Rust | 无 | 退出码 0 |
@@ -22,6 +22,7 @@
 | `just setup-env [-- --check/--force]` | 一键环境安装（幂等，已装且有效则跳过）/诊断/覆盖重装钉版 Zig | `--force` 联网重下 | 写仓库内 `.local/toolchains/`（gitignored） | sha256 校验 + `zig version` 0.16.0 |
 | `just setup-zig [-- --install/--force]` | 钉版 Zig 0.16.0 工具链安装/诊断（vendored libghostty-vt 构建必需） | 无（--install 联网下载） | 写仓库内 `.local/toolchains/zig/`；build.rs 自动探测 | sha256 校验通过 + `zig version` 输出 0.16.0 |
 | `just setup-windows-cross [-- --accept-license]` | 下载 Windows SDK（xwin） | `cargo install xwin --locked` | 下载（仅显式运行） | 脚本成功输出 |
+| `just local-build-config [--enable [--parallel-frontend[=N]] \| --disable \| --status]` | 本机构建加速（只作用于本机）：生成 gitignored 的 `.cargo/config.local.toml`，由仓库 `.cargo/config.toml` 可选 include 引入。默认 Windows MSVC 用 rust-lld 链接、依赖不生成调试信息（本机实测小改动后增量 dev 构建约快 12%）；`--parallel-frontend` 另借 `RUSTC_BOOTSTRAP=1` 开启不稳定的 `-Zthreads=N`（默认 8，冷构建约快 44%，增量无收益，可能 ICE） | Python3、rustc | 写/删 `.cargo/config.local.toml`；开关变化后下一次构建全量重编；存在时 `gx_package.py` 拒绝打包 | 打印生成内容 / 当前状态 |
 | `just install-hooks` | 安装 `.githooks`（conventional commits） | git | `core.hooksPath` 配置 | 提示安装完成 |
 | `just build` | release 构建 | Rust（vendored vt 需 Zig 或用预生成） | `target/` | 构建成功 |
 | `just default-config` | 打印默认配置 | 同上 | 无 | stdout |
@@ -76,6 +77,7 @@
 | `just package-deb` | 构建 Ubuntu amd64 deb | musl 静态程序；root-owned `/usr/bin/herdr` 和许可；不在宿主安装 |
 
 版本只读 `Cargo.toml`。默认要求工作树干净；本地测试可以加 `--allow-dirty`，但这类包不能发布。
+本机启用了 `just local-build-config` 时预检会拒绝打包（链接器与不稳定选项不得带进安装包），先 `--disable`。
 Cargo 编译目录隔离在 `target/gx/<platform>`，最终默认输出 `target/packages`；
 `--output-dir <目录>` 可选择其他产物目录。同名产物禁止覆盖，重跑应使用新的空目录。
 Windows 与 WSL 同一检出的 vendored Zig 输出仍共享，不要并发运行双平台构建。

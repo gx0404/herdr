@@ -1,8 +1,8 @@
 # testing（测试分层与验证纪律）
 
 范围：`tests/**`、`scripts/test_*.py`（与各领域并集）、`scripts/
-run_test_suite.py`、`.config/nextest.toml`、`scripts/
-smoke_live_handoff_sessions.sh`。
+run_test_suite.py`、`scripts/run_parallel_unittest.py`、`.config/nextest.toml`、
+`scripts/smoke_live_handoff_sessions.sh`。
 
 ## 命令入口（上游 Testing 全文语义）
 
@@ -19,8 +19,10 @@ just check    # 格式检查 + nextest + maintenance + Windows 目标 lint
 - 单测贴代码放 `#[cfg(test)] mod tests`；新 `AppState`/`Workspace` 行为必须可用
   `AppState::test_new()` / `Workspace::test_new()` 无 PTY 测试（不变量武器见
   `persistence-session.md`）。
-- 维护脚本测试是 `python3 -m unittest scripts.test_<name>` 模块清单（见
-  justfile `maintenance-test`），新增脚本测试必须加入清单，否则不会被收集。
+- 维护脚本测试是 `scripts.test_<name>` 模块清单（见 justfile `maintenance-test`），
+  新增脚本测试必须加入清单，否则不会被收集。清单由 `scripts/run_parallel_unittest.py`
+  按类（慢类按历史耗时再拆块）放进子进程并发跑，所以脚本测试必须跨进程并发安全：
+  不写仓库工作树（git 写操作只在唯一临时仓库）、不共用固定临时路径/端口/管道/锁文件。
 - 在既有 herdr 会话内测试新构建时，用 `cargo run -- ...` 并清除继承的 socket
   覆盖，让 debug 二进制连 debug `herdr-dev` server：
   `env -u HERDR_SOCKET_PATH -u HERDR_CLIENT_SOCKET_PATH cargo run -- <command>`。

@@ -190,6 +190,7 @@ paths = [
   "scripts/__init__.py",
   "scripts/capture_key_matrix.py",
   "scripts/capture_keys.py",
+  "scripts/local_build_config.py",
   "scripts/seed_navigator_demo.sh",
   "scripts/setup_env.sh",
   "scripts/setup_zig.py",
@@ -297,6 +298,7 @@ id = "testing"
 doc = "docs/AGENT_RULES/testing.md"
 paths = [
   ".config/nextest.toml",
+  "scripts/run_parallel_unittest.py",
   "scripts/run_test_suite.py",
   "scripts/smoke_live_handoff_sessions.sh",
   # 所有脚本自测与领域规则取并集：新增 scripts/test_*.py 自动被测试纪律覆盖。

@@ -25,6 +25,9 @@ __pycache__/
 /.local/
 /backlog
 
+# 本机构建加速配置（just local-build-config 生成）
+/.cargo/config.local.toml
+
 # AI 工具面：共享配置入库，个人状态本机维护
 /.claude/settings.local.json
 /.claude/review/
