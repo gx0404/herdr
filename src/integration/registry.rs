@@ -94,40 +94,22 @@ pub(crate) fn integration_target_install_layout_available(
     }
 }
 
+/// Whether `command` is installed in the platform search directories (the process `PATH`, plus
+/// the registry `PATH` and known install locations on Windows; see
+/// `platform::command_search_dirs`). On Windows an extensionless shell shim also counts, as the
+/// last resort: it marks the CLI as installed but is never started (`platform::command_installed`).
 pub(crate) fn command_available(command: &str) -> bool {
-    let Some(paths) = std::env::var_os("PATH") else {
-        return false;
-    };
-    std::env::split_paths(&paths).any(|dir| {
-        command_path_candidates(&dir, command)
-            .into_iter()
-            .any(|path| {
-                executable_file_exists(&path)
-                    && (command != "codex" || !crate::platform::codex_launch::is_shim(&path))
-            })
-    })
+    crate::platform::command_installed(command, |path| usable_command_file(command, path))
+}
+
+/// An executable candidate that is not Herdr's own private Codex launch shim.
+fn usable_command_file(command: &str, path: &Path) -> bool {
+    executable_file_exists(path)
+        && (command != "codex" || !crate::platform::codex_launch::is_shim(path))
 }
 
 pub(crate) fn command_path_candidates(dir: &Path, command: &str) -> Vec<PathBuf> {
-    let base = dir.join(command);
-
-    #[cfg(not(windows))]
-    {
-        vec![base]
-    }
-
-    #[cfg(windows)]
-    {
-        if Path::new(command).extension().is_some() {
-            return vec![base];
-        }
-
-        let mut candidates = vec![base];
-        for extension in [".exe", ".cmd", ".bat", ".ps1"] {
-            candidates.push(dir.join(format!("{command}{extension}")));
-        }
-        candidates
-    }
+    crate::platform::command_file_candidates(dir, command)
 }
 
 pub(crate) fn executable_file_exists(path: &Path) -> bool {

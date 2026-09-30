@@ -217,7 +217,10 @@ impl Runtime {
                 let mut recent = HashMap::<String, (SystemMetricsParams, Instant)>::new();
                 let mut subscription_sequence = 0_u64;
                 loop {
-                    let job = match jobs.recv_timeout(Duration::from_millis(100)) {
+                    // 没有订阅也没有近期轮询需求时不采样：阻塞等下一个请求，而不是每
+                    // 100 ms 空转一次。
+                    let idle = recent.is_empty() && subscribers.is_empty();
+                    let job = match wait_for_job(&jobs, idle) {
                         Ok(job) => Some(job),
                         Err(mpsc::RecvTimeoutError::Timeout) => None,
                         Err(mpsc::RecvTimeoutError::Disconnected) => break,
@@ -413,6 +416,18 @@ impl Runtime {
     }
 }
 
+/// 采样节拍：有需求时 100 ms 一拍（采样本身按请求的间隔节流），空闲时一直阻塞到下一个请求。
+const SAMPLING_TICK: Duration = Duration::from_millis(100);
+
+fn wait_for_job<T>(jobs: &mpsc::Receiver<T>, idle: bool) -> Result<T, mpsc::RecvTimeoutError> {
+    if idle {
+        jobs.recv()
+            .map_err(|_| mpsc::RecvTimeoutError::Disconnected)
+    } else {
+        jobs.recv_timeout(SAMPLING_TICK)
+    }
+}
+
 fn remember_demand(
     recent: &mut HashMap<String, (SystemMetricsParams, Instant)>,
     key: String,
@@ -462,6 +477,30 @@ fn aggregate_demand<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 无订阅、无近期需求时阻塞到下一个请求，不再每 100 ms 醒一次；有需求时按采样节拍返回。
+    #[test]
+    fn idle_monitor_loop_blocks_until_the_next_request_instead_of_ticking() {
+        let (sender, jobs) = mpsc::channel::<u32>();
+        let started = Instant::now();
+        assert_eq!(
+            wait_for_job(&jobs, false),
+            Err(mpsc::RecvTimeoutError::Timeout)
+        );
+        assert!(started.elapsed() >= SAMPLING_TICK);
+
+        let delayed = std::thread::spawn(move || {
+            std::thread::sleep(SAMPLING_TICK * 3);
+            let _ = sender.send(7);
+            sender
+        });
+        assert_eq!(wait_for_job(&jobs, true), Ok(7), "空闲时不因节拍超时返回");
+        drop(delayed.join());
+        assert_eq!(
+            wait_for_job(&jobs, true),
+            Err(mpsc::RecvTimeoutError::Disconnected)
+        );
+    }
 
     #[test]
     fn polling_clients_keep_independent_groups_until_their_demand_expires() {

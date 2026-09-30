@@ -7,19 +7,13 @@
 from __future__ import annotations
 
 import importlib.util
-import subprocess
 import sys
 from pathlib import Path
 
 
 def _locate_gate() -> Path | None:
-    result = subprocess.run(
-        ["git", "rev-parse", "--show-toplevel"], capture_output=True, text=True, check=False
-    )
-    root = result.stdout.strip() if result.returncode == 0 else ""
-    if not root:
-        return None
-    gate = Path(root) / ".claude" / "hooks" / "pre_tool_use_gate.py"
+    # 按本文件位置（<组件>/.codex/hooks/）定位组件根：单仓内 git 顶层是单仓根，不是本组件。
+    gate = Path(__file__).resolve().parents[2] / ".claude" / "hooks" / "pre_tool_use_gate.py"
     return gate if gate.is_file() else None
 
 

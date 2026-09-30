@@ -73,16 +73,43 @@ class GXPackageTests(unittest.TestCase):
             package.rust_toolchain(self.root)
 
     def test_source_identity_includes_untracked_and_uses_full_sha(self) -> None:
-        with mock.patch.object(package, "output", side_effect=[SHA, "?? new-source.rs"]) as output:
+        with mock.patch.object(package, "output", side_effect=[str(self.root), SHA, "?? new-source.rs"]) as output:
             self.assertEqual(package.source_info(self.root), (SHA, True))
         status = output.call_args_list[-1].args[0]
         self.assertIn("--untracked-files=all", status)
         self.assertNotIn("--ignored", status)
         self.assertIn("--no-optional-locks", status)
         for invalid in (SHA[:8], SHA.upper(), "not-a-sha"):
-            with mock.patch.object(package, "output", return_value=invalid):
+            with mock.patch.object(package, "output", side_effect=[str(self.root), invalid]):
                 with self.assertRaisesRegex(ValueError, "40-character"):
                     package.source_info(self.root)
+
+    def test_source_identity_rejects_parent_repository_before_reading_commit(self) -> None:
+        with mock.patch.object(package, "output", return_value=str(self.root.parent)) as output:
+            with self.assertRaisesRegex(ValueError, "standalone herdr checkout"):
+                package.source_info(self.root)
+        self.assertEqual(output.call_count, 1)
+
+    @unittest.skipUnless(shutil.which("git"), "requires Git")
+    def test_real_checkout_and_worktree_use_their_own_revision(self) -> None:
+        def git(*args: str) -> str:
+            return package.output(["git", "-C", self.root, *args])
+
+        git("init", "--quiet")
+        git("add", "Cargo.toml", "rust-toolchain.toml", "LICENSE")
+        git("-c", "user.name=Test", "-c", "user.email=test@example.invalid",
+            "commit", "--quiet", "-m", "test: source identity fixture")
+        revision = git("rev-parse", "HEAD")
+        self.assertEqual(package.source_info(self.root)[0], revision)
+        worktree = self.root / "worktree"
+        git("worktree", "add", "--detach", str(worktree), revision)
+        self.assertTrue((worktree / ".git").is_file())
+        self.assertEqual(package.source_info(worktree), (revision, False))
+        archive = self.root / "archive"
+        archive.mkdir()
+        shutil.copyfile(self.root / "Cargo.toml", archive / "Cargo.toml")
+        with self.assertRaisesRegex(ValueError, "external builder"):
+            package.source_info(archive)
 
     def test_dirty_requires_explicit_local_opt_in(self) -> None:
         package.require_clean(False, False)

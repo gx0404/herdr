@@ -238,10 +238,51 @@ pub(super) fn provider_installed(provider: &Provider) -> bool {
         (_, Some(target)) => crate::integration::integration_target_available(target),
         (_, None) => crate::integration::command_available(provider.command),
     };
+    if detection_changed(provider.agent, value) {
+        log_installed_change(provider, value);
+    }
     if let Ok(mut cache) = availability_cache().lock() {
         cache.insert(provider.agent, (now, value));
     }
     value
+}
+
+/// 记下 `agent` 本次的已安装判定，返回它是否与上次记下的不同（首次判定也算）。这份记录与
+/// 查找缓存分开，`clear_cached_lookups` 不清它：显式刷新后重扫出同样的结论不再记日志。
+fn detection_changed(agent: &'static str, installed: bool) -> bool {
+    static LAST: OnceLock<Mutex<HashMap<&'static str, bool>>> = OnceLock::new();
+    match LAST.get_or_init(|| Mutex::new(HashMap::new())).lock() {
+        Ok(mut last) => last.insert(agent, installed) != Some(installed),
+        Err(_) => true,
+    }
+}
+
+/// 已安装判定变化时记一条：找不到时列出搜索过的目录，便于排查「未检测到已安装的 agent CLI」。
+fn log_installed_change(provider: &Provider, installed: bool) {
+    if installed || matches!(provider.query, Query::ZcodeLocal) {
+        tracing::info!(
+            event = "account.provider.detect",
+            subsystem = "account_usage",
+            agent = provider.agent,
+            installed,
+            "官方 CLI 检测结果"
+        );
+        return;
+    }
+    let searched = crate::platform::command_search_dirs(provider.command)
+        .iter()
+        .map(|dir| dir.display().to_string())
+        .collect::<Vec<_>>()
+        .join(";");
+    tracing::info!(
+        event = "account.provider.detect",
+        subsystem = "account_usage",
+        agent = provider.agent,
+        installed,
+        command = provider.command,
+        searched = %searched,
+        "未找到官方 CLI"
+    );
 }
 
 /// 一个文件的身份戳：路径 + 修改时间 + 大小。文件不存在时整体为 `None`，
@@ -288,21 +329,51 @@ pub(super) fn command_stamp(command: &str) -> Option<FileStamp> {
     command_path(command).as_deref().and_then(file_stamp)
 }
 
+/// 搜索目录与 `integration::command_available` 同源（`platform::command_search_dirs`：进程
+/// PATH 在前，Windows 再补注册表 PATH 与已知安装位置），同样跳过 herdr 自己的 codex 启动垫片。
 fn command_path_uncached(command: &str) -> Option<PathBuf> {
-    let from_path = std::env::var_os("PATH").and_then(|paths| {
-        std::env::split_paths(&paths).find_map(|dir| {
-            crate::integration::command_path_candidates(&dir, command)
-                .into_iter()
-                .find(|path| crate::integration::executable_file_exists(path))
-        })
+    let found = crate::platform::find_command(command, |path| {
+        crate::integration::executable_file_exists(path)
+            && (command != "codex" || !crate::platform::codex_launch::is_shim(path))
     });
-    from_path.or_else(|| {
+    found.or_else(|| {
         if command == "codex" {
             crate::integration::codex_layout_binary_path()
         } else {
             None
         }
     })
+}
+
+/// 显式刷新（及其限速）丢弃已安装判定与命令路径的缓存：刚装好的 CLI 不必等满
+/// `AVAILABILITY_TTL`。返回是否真的清了缓存。
+pub(super) fn forget_cached_lookups(now: Instant) -> bool {
+    static LAST: Mutex<Option<Instant>> = Mutex::new(None);
+    let Ok(mut last) = LAST.lock() else {
+        return false;
+    };
+    if !forced_lookup_due(*last, now) {
+        return false;
+    }
+    *last = Some(now);
+    clear_cached_lookups();
+    true
+}
+
+/// 强制重扫的最小间隔：显式刷新与厂商列表请求都会触发，限速后连续点击也只扫一次。
+const FORCED_LOOKUP_MIN_INTERVAL: Duration = Duration::from_secs(2);
+
+fn forced_lookup_due(last: Option<Instant>, now: Instant) -> bool {
+    last.is_none_or(|at| now.saturating_duration_since(at) >= FORCED_LOOKUP_MIN_INTERVAL)
+}
+
+fn clear_cached_lookups() {
+    if let Ok(mut cache) = availability_cache().lock() {
+        cache.clear();
+    }
+    if let Ok(mut cache) = command_path_cache().lock() {
+        cache.clear();
+    }
 }
 
 /// 各厂商登录状态落在哪些文件：只列本仓库已核实的路径，未知厂商只看 CLI 指纹。
@@ -820,6 +891,134 @@ mod tests {
             .map(|cache| cache.contains_key("herdr-no-such-command-for-tests"))
             .unwrap_or(false);
         assert!(cached, "结果进入缓存");
+    }
+
+    /// 显式刷新丢弃缓存（不等 `AVAILABILITY_TTL`），但连续触发按最小间隔限速。
+    #[test]
+    fn manual_refresh_forgets_cached_lookups_with_a_rate_limit() {
+        let command = "herdr-forget-lookups-test-command";
+        assert_eq!(command_path(command), None);
+        let cached = |command: &str| {
+            command_path_cache()
+                .lock()
+                .map(|cache| cache.contains_key(command))
+                .unwrap_or(false)
+        };
+        assert!(cached(command));
+        clear_cached_lookups();
+        assert!(!cached(command), "刷新后重新解析");
+
+        let now = Instant::now();
+        assert!(forced_lookup_due(None, now));
+        assert!(!forced_lookup_due(
+            Some(now),
+            now + Duration::from_millis(500)
+        ));
+        assert!(forced_lookup_due(
+            Some(now),
+            now + FORCED_LOOKUP_MIN_INTERVAL
+        ));
+    }
+
+    /// `account.provider.detect` 只在判定真的变化时记：显式刷新清掉查找缓存后，重扫出同样
+    /// 的结论不再重复记一条。
+    #[test]
+    fn detection_log_fires_only_when_the_verdict_changes() {
+        let agent = "herdr-detection-log-test-agent";
+        assert!(detection_changed(agent, false), "首次判定要记");
+        assert!(!detection_changed(agent, false), "结论未变不记");
+        clear_cached_lookups();
+        assert!(!detection_changed(agent, false), "清缓存不丢上次结论");
+        assert!(detection_changed(agent, true), "装上后要记");
+        assert!(!detection_changed(agent, true));
+        assert!(detection_changed(agent, false), "卸载后要记");
+    }
+
+    /// Windows 的命令路径解析：`PATHEXT` 顺序（`.ps1` 最后）、进程 PATH 先于注册表 PATH；
+    /// 启动探测直接起解析出的路径，`.cmd` 垫片也能起。
+    #[cfg(windows)]
+    #[test]
+    fn command_path_follows_pathext_order_and_search_precedence() {
+        struct Pinned;
+        impl Drop for Pinned {
+            fn drop(&mut self) {
+                crate::platform::set_test_command_search_environment(None);
+            }
+        }
+        let base = std::env::temp_dir().join(format!(
+            "herdr-command-path-{}-{}",
+            std::process::id(),
+            crate::server::observability::now_ms()
+        ));
+        let process_bin = base.join("process-bin");
+        let registry_bin = base.join("registry-bin");
+        std::fs::create_dir_all(&process_bin).unwrap();
+        std::fs::create_dir_all(&registry_bin).unwrap();
+        std::fs::write(registry_bin.join("claude.ps1"), "").unwrap();
+        std::fs::write(registry_bin.join("claude.cmd"), "").unwrap();
+        crate::platform::set_test_command_search_environment(Some(
+            crate::platform::CommandSearchEnvironment {
+                process_path: Some(process_bin.clone().into_os_string()),
+                registry_path: vec![registry_bin.clone().into_os_string()],
+                path_ext: Some(".COM;.EXE;.BAT;.CMD".into()),
+                ..Default::default()
+            },
+        ));
+        let _pinned = Pinned;
+
+        assert_eq!(
+            command_path_uncached("claude"),
+            Some(registry_bin.join("claude.cmd")),
+            "PATHEXT 类型先于 .ps1"
+        );
+        std::fs::write(process_bin.join("claude.exe"), "").unwrap();
+        assert_eq!(
+            command_path_uncached("claude"),
+            Some(process_bin.join("claude.exe")),
+            "进程 PATH 在前"
+        );
+        std::fs::remove_file(registry_bin.join("claude.cmd")).unwrap();
+        std::fs::remove_file(process_bin.join("claude.exe")).unwrap();
+        assert_eq!(
+            command_path_uncached("claude"),
+            Some(registry_bin.join("claude.ps1")),
+            ".ps1 只在别无选择时使用"
+        );
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    /// 无扩展名的 shell 垫片（npm 与类 Unix 安装器会写）只说明 CLI 已安装：可用性判定认它，
+    /// 探测永远不会起它（`CreateProcess` 起不了），有 `.cmd` 时起 `.cmd`。
+    #[cfg(windows)]
+    #[test]
+    fn extensionless_shims_mark_the_cli_installed_but_are_never_started() {
+        struct Pinned;
+        impl Drop for Pinned {
+            fn drop(&mut self) {
+                crate::platform::set_test_command_search_environment(None);
+            }
+        }
+        let base = std::env::temp_dir().join(format!(
+            "herdr-extensionless-shim-{}-{}",
+            std::process::id(),
+            crate::server::observability::now_ms()
+        ));
+        let bin = base.join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        std::fs::write(bin.join("pi"), "#!/bin/sh\n").unwrap();
+        crate::platform::set_test_command_search_environment(Some(
+            crate::platform::CommandSearchEnvironment {
+                process_path: Some(bin.clone().into_os_string()),
+                ..Default::default()
+            },
+        ));
+        let _pinned = Pinned;
+
+        assert!(crate::integration::command_available("pi"));
+        assert_eq!(command_path_uncached("pi"), None, "垫片本身不可执行");
+        std::fs::write(bin.join("pi.cmd"), "@echo off\r\n").unwrap();
+        assert_eq!(command_path_uncached("pi"), Some(bin.join("pi.cmd")));
+        let _ = std::fs::remove_dir_all(base);
     }
 
     #[test]

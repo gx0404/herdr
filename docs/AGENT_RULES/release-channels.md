@@ -8,8 +8,17 @@ release/preview 工作流与脚本、`scripts/changelog.py`、`scripts/preview.p
 
 ## fork 例外：GX 安装包
 
-- fork 的 `.github/workflows/` 只保留 `ci.yml` 与 `gx-release.yml`。CI 监听默认
-  分支 `feature/gx_herdr` 的 push 及 PR，GX 的源码 ref 默认选择同一分支。
+- 源码在独立仓库 `gx0404/herdr` 的 `gx` 分支维护；`gx0404/gx_shell` 仅编排
+  外部组件，不保留 herdr 源码。Oh My Zsh 的 `scripts/gx_build_herdr.py` 消费完整
+  herdr commit 对应的干净 checkout 或校验过摘要的源码归档，不依赖父目录、旧单仓
+  Git 对象或 GX Shell CHANGELOG。消费者必须先锁定 revision 与归档 SHA256/size，
+  再注入 `HERDR_PACKAGE_MANAGER` 和 `HERDR_BUILD_COMMIT`；后者始终是 herdr
+  revision，不能换成 GX Shell/Oh My Zsh 的 SHA。契约见 `docs/DEVELOPMENT.md`。
+- GX Shell 合并包仍由 `gx0404/gx_shell` 的 `release.yml` 发布（tag
+  `gx-shell-v<版本>`）；下列独立手动 GX 打包链保留，默认只构建，不自动发版。
+- fork 的 `.github/workflows/` 只保留 `ci.yml` 与 `gx-release.yml`。CI 监听
+  `gx` 的 push 及 PR，手动 GX 源码 ref 默认选择 `gx`；分支仅作来源说明，
+  下游构建始终消费不可变的完整 SHA。
 - 上游/冗余的九份 workflow 原样归档于 `.github/workflows-archive/`，不被 Actions
   调度。同步上游时保持这一活动集合，不把归档重新启用；下方 preview/stable 章节
   保留上游流程语义，不代表 fork 仍运行这些流程。历史提交校验继续检查该提交当时的

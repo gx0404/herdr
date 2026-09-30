@@ -69,16 +69,21 @@ pub fn run_server() -> io::Result<()> {
 
     let result = rt.block_on(async {
         // Create the App (with AppState, event channels, etc.).
-        let mut app = app::App::new(
+        let app = app::App::new(
             &loaded_config.config,
             app::AppPolicy::PRODUCTION,
             config::config_diagnostic_summary(&loaded_config.diagnostics),
             api_rx,
             event_hub,
         );
-        seed_startup_workspace_if_empty(&mut app);
+        let startup_cwd = take_startup_cwd();
 
-        // Create the headless server.
+        // Open the client socket before the startup workspace spawns its first pane, so an
+        // auto-started client can connect meanwhile (on Windows the accept thread also
+        // completes its handshake). The event loop has not run yet, so that client cannot
+        // seed a default workspace first. On Unix the event loop accepts connections, so
+        // the client's 5 s wait for the Welcome (`LOCAL_HANDSHAKE_READ_TIMEOUT`) now also
+        // covers seeding the startup workspace.
         let mut server = match HeadlessServer::new(
             app,
             &loaded_config.diagnostics,
@@ -94,6 +99,7 @@ pub fn run_server() -> io::Result<()> {
             }
             Err(err) => return Err(err),
         };
+        seed_startup_workspace_if_empty(&mut server.app, startup_cwd);
 
         info!(
             api_socket = %api::socket_path().display(),
@@ -113,8 +119,10 @@ pub fn run_server() -> io::Result<()> {
     result
 }
 
-fn seed_startup_workspace_if_empty(app: &mut app::App) {
-    let Some(cwd) = take_startup_cwd() else {
+/// Must run before `HeadlessServer::run`: clients handled by the event loop seed a default
+/// workspace (`App::ensure_default_workspace`) that would win over the startup directory.
+pub(super) fn seed_startup_workspace_if_empty(app: &mut app::App, cwd: Option<PathBuf>) {
+    let Some(cwd) = cwd else {
         return;
     };
 

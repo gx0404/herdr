@@ -178,6 +178,58 @@ pub(super) fn write_to_server(
     stream.send_client_message(msg)
 }
 
+#[cfg(all(test, windows))]
+mod windows_tests {
+    use super::*;
+    use interprocess::local_socket::traits::Listener as _;
+    use std::io::Read as _;
+    use std::time::Instant;
+
+    #[test]
+    fn endpoint_reader_on_an_idle_pipe_returns_promptly_when_stopped() {
+        let path = std::env::temp_dir().join(format!(
+            "herdr-reader-stop-{}-{}.sock",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let listener = crate::ipc::bind_private_local_listener(&path).unwrap();
+        let mut client = crate::ipc::connect_local_stream(&path).unwrap();
+        let _server = listener.accept().unwrap();
+        let stopped = Arc::new(AtomicBool::new(false));
+        let reader_stopped = stopped.clone();
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let reader = std::thread::spawn(move || {
+            let mut buffer = [0_u8; 64];
+            let read = EndpointReader {
+                stream: &mut client,
+                stopped: &reader_stopped,
+            }
+            .read(&mut buffer)
+            .map_err(|error| error.kind());
+            done_tx.send((read, Instant::now())).unwrap();
+        });
+
+        std::thread::sleep(Duration::from_millis(50));
+        assert!(
+            done_rx.try_recv().is_err(),
+            "an idle pipe keeps the reader waiting"
+        );
+        let requested = Instant::now();
+        stopped.store(true, Ordering::Release);
+        let (read, returned) = done_rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("a stopped reader returns without peer data");
+        assert_eq!(read, Ok(0));
+        assert!(returned.duration_since(requested) < Duration::from_secs(5));
+        reader.join().unwrap();
+        drop(listener);
+        let _ = std::fs::remove_file(path);
+    }
+}
+
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;

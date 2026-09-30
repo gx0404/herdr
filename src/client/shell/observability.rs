@@ -894,6 +894,9 @@ pub(super) struct State {
     /// 厂商列表请求最近一次发出的时刻：总览只在列表刚发出（`PROVIDERS_WAIT`
     /// 内）时等它，超时即回落整体请求。
     providers_sent_at: Option<Instant>,
+    /// 没有已列出厂商时按了「刷新」：已改为重拉厂商列表（服务端收到即重扫本机
+    /// CLI，不等 30 秒缓存）；列表到达后据此把页脚改成扫描结果。
+    providers_rescan: bool,
     /// 账号页打开时尚无厂商列表：列表到达后按聚焦 pane 的 agent / 首个已安装
     /// 厂商补选一次。
     auto_select_provider: bool,
@@ -1505,6 +1508,7 @@ impl State {
             refresh_usage: false,
             manual_sent: Vec::new(),
             providers_sent_at: None,
+            providers_rescan: false,
             auto_select_provider: false,
             accounts_page_seen: false,
             fallback_noted: None,
@@ -1891,6 +1895,7 @@ impl ClientShellState {
         self.observability.next_usage = Instant::now();
         self.observability.next_providers = Instant::now();
         self.observability.message = None;
+        self.observability.providers_rescan = false;
         if page == Page::Accounts && self.observability.selected_provider.is_none() {
             self.observability.auto_select_provider = true;
             self.auto_select_usage_provider();
@@ -2418,11 +2423,19 @@ impl ClientShellState {
                         // 关闭才指向设置页，没有已列出厂商时说明此主机没装 agent CLI。
                         if std::mem::take(&mut self.observability.refresh_usage) {
                             self.observability.manual_sent.clear();
+                            if targets == UsageTargets::NoProviders {
+                                // 服务端收到厂商列表请求会立即重扫本机 CLI（不等 30 秒
+                                // 缓存）：空集时的「刷新」改为 200 ms 后重拉列表，刚装好的
+                                // CLI 按一次刷新就能列出；列表到达后页脚改成扫描结果。
+                                self.observability.next_providers = now;
+                                self.observability.providers_rescan = true;
+                                retry_soon = true;
+                            }
                             self.observability.message = Some(
                                 if targets == UsageTargets::NoProviders {
                                     tr(
-                                        "No installed agent CLI or configured account detected on this host.",
-                                        "此主机未检测到已安装的 agent CLI，也没有配置账号。",
+                                        "Scanning this host again for agent CLIs…",
+                                        "正在重新检测此主机上的 agent CLI…",
                                     )
                                 } else if self.observability.selected_provider.is_some() {
                                     tr(
@@ -2563,6 +2576,18 @@ impl ClientShellState {
             }
             Ok(ResponseResult::AccountUsageProviders { providers }) => {
                 self.observability.providers = providers;
+                if std::mem::take(&mut self.observability.providers_rescan) {
+                    // 空集时「刷新」触发的重扫：找到厂商就撤掉「正在重新检测…」，
+                    // 仍然没有就照实说明（正文空态列出搜索过的位置）。
+                    let listed = self.observability.providers.iter().any(provider_listed);
+                    self.observability.message = (!listed).then(|| {
+                        tr(
+                            "Scan finished: still no installed agent CLI on this host.",
+                            "重新检测完成：此主机仍未检测到已安装的 agent CLI。",
+                        )
+                        .into()
+                    });
+                }
                 self.auto_select_usage_provider();
                 // 总览态等着这份列表才能逐厂商发请求：立刻唤醒两个作用域的轮询。
                 let now = Instant::now();
@@ -2801,6 +2826,7 @@ impl ClientShellState {
                     // 列表拿不到（旧 server 的 server_context_required 等）：退避后再
                     // 拉，期间总览回落整体请求；立刻唤醒两个作用域，不等下一轮。
                     let now = Instant::now();
+                    self.observability.providers_rescan = false;
                     self.observability.next_providers = now + PROVIDERS_RETRY;
                     self.observability.next_usage = self.observability.next_usage.min(now);
                     self.observability.hover_scope.next_usage =

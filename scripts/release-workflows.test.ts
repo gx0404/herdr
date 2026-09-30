@@ -35,12 +35,12 @@ describe("fork workflow layout", () => {
 
   test("retained workflows target the fork default branch without removing PR checks", () => {
     const ci = load("ci");
-    expect(ci.on.push.branches).toEqual(["feature/gx_herdr"]);
+    expect(ci.on.push.branches).toEqual(["gx"]);
     expect(ci.on.pull_request.types).toEqual(["opened", "synchronize", "reopened"]);
     expect(ci.jobs["conventional-commits"].if).toBe(
       "github.event_name != 'push' || github.ref_name == github.event.repository.default_branch",
     );
-    expect(load("gx-release").on.workflow_dispatch.inputs.ref.default).toBe("feature/gx_herdr");
+    expect(load("gx-release").on.workflow_dispatch.inputs.ref.default).toBe("gx");
   });
 });
 

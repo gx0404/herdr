@@ -8,7 +8,7 @@ on:
         description: Source branch, tag or commit (resolved once to a full SHA)
         type: string
         required: true
-        default: feature/gx_herdr
+        default: gx
       previous_tag:
         description: Optional older gx-vX.Y.Z upgrade baseline; empty selects the greatest older published GX version
         type: string
